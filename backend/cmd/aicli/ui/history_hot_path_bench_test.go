@@ -256,3 +256,83 @@ func BenchmarkUIControllerBurstBatching(b *testing.B) {
 		b.Fatalf("controller still has %d pending actions after drain", after.Pending)
 	}
 }
+
+// BenchmarkLayoutAppScreenResumedSession 复现逐帧布局路径（FramePump 每帧调用）。
+// 生产恢复会话实测 3951 个 cell / 146535 个布局行：修复前这一条路径每帧都要遍历
+// 全部 146k 行并重新分配十几 MB AppScreenRow，即使视口只显示最后 24 行 —— 这是
+// UI 锁被长时间持有、FramePump 停止出帧的直接来源。尾部窗口把每帧的工作量降为
+// 「输出区行数」量级。
+func BenchmarkLayoutAppScreenResumedSession(b *testing.B) {
+	state := AppState{
+		Revision:         1,
+		LayoutGeneration: 1,
+		Geometry:         GeometryState{Width: 100, Height: 40, Generation: 1},
+		Transcript:       NewTranscriptState(benchResumedSnapshot(3000)),
+	}
+	rows := state.Transcript.LayoutRows(state.LayoutGeneration)
+	b.ReportMetric(float64(len(rows)), "layout_rows")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		layout := LayoutAppScreen(state)
+		if len(layout.Rows) != state.Geometry.Height {
+			b.Fatalf("frame rows = %d, want %d", len(layout.Rows), state.Geometry.Height)
+		}
+	}
+}
+
+// BenchmarkLayoutTranscriptTailVsFull 把尾部窗口与全量布局放在同一份输入上对比，
+// 量化每一帧省下的行遍历与分配量。两者的输出在 TestLayoutTranscriptTailScreenRows
+// MatchesFullLayout 下逐行相等。
+func BenchmarkLayoutTranscriptTailVsFull(b *testing.B) {
+	state := AppState{
+		Revision:         1,
+		LayoutGeneration: 1,
+		Geometry:         GeometryState{Width: 100, Height: 40, Generation: 1},
+		Transcript:       NewTranscriptState(benchResumedSnapshot(3000)),
+	}
+	rows := state.Transcript.LayoutRows(state.LayoutGeneration)
+	byID := transcriptCellsByID(state.Transcript)
+	mutable := transcriptSuffixCellIDsFromFirstMutable(state.Transcript)
+	const maxRows = 40
+
+	// 预热共享缓存，只比较遍历与分配成本，不掺入首帧渲染。
+	_ = layoutTranscriptScreenRows(rows, byID, mutable, 100, state.Theme)
+
+	b.Run("full", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if got := layoutTranscriptScreenRows(rows, byID, mutable, 100, state.Theme); len(got) == 0 {
+				b.Fatal("full layout produced no rows")
+			}
+		}
+	})
+	b.Run("tail", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if got := layoutTranscriptTailScreenRows(rows, byID, mutable, 100, maxRows, state.Theme); len(got) == 0 {
+				b.Fatal("tail layout produced no rows")
+			}
+		}
+	})
+}
+
+// BenchmarkTranscriptLayoutRowsResumedSession 隔离 LayoutRows 本身的成本。尾部窗口
+// 把逐帧布局降到微秒级之后，这一项成为 LayoutAppScreen 剩余成本的主要来源：它没有
+// 记忆化，每次调用都要为整个历史重建 []scene.LayoutRow。
+func BenchmarkTranscriptLayoutRowsResumedSession(b *testing.B) {
+	state := AppState{
+		Revision:         1,
+		LayoutGeneration: 1,
+		Geometry:         GeometryState{Width: 100, Height: 40, Generation: 1},
+		Transcript:       NewTranscriptState(benchResumedSnapshot(3000)),
+	}
+	b.ReportMetric(float64(len(state.Transcript.Cells)), "cells")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if rows := state.Transcript.LayoutRows(state.LayoutGeneration); len(rows) == 0 {
+			b.Fatal("LayoutRows produced no rows")
+		}
+	}
+}

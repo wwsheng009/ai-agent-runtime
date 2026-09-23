@@ -24,9 +24,22 @@ const historyCommitPlanningBudget = 250 * time.Millisecond
 // rows use a renderer fragment identity. A still-mutable active cell contributes
 // its own overflow prefix so early rows cross the physical writer before the
 // final event arrives.
+//
+// 这是无预算形式：不截断布局，供只读调用方与测试使用。生产热路径用
+// planEligibleHistoryCommitsWithin，让 historyCommitPlanningBudget 覆盖布局本身。
 func planEligibleHistoryCommits(state AppState) []HistoryCommit {
+	commits, _ := planEligibleHistoryCommitsWithin(state, time.Time{})
+	return commits
+}
+
+// planEligibleHistoryCommitsWithin 是带预算的规划实现。complete 为 false 表示
+// 布局在预算耗尽时被截断：commits 仍然是合法的（它是完整规划的前缀，不会提交
+// 错误内容），但它**不是**全量规划，调用方不得据此记录 memo —— 否则被截断的
+// cell 会永远失去被提交的机会。下一次 reduce 会重试，而重试时布局缓存已经装
+// 着这一轮算出来的 cell，因此每一轮都在推进而不是重复烧同样的 CPU。
+func planEligibleHistoryCommitsWithin(state AppState, deadline time.Time) ([]HistoryCommit, bool) {
 	if state.Geometry.Width < 1 || state.Geometry.Height < 1 {
-		return nil
+		return nil, true
 	}
 	frontierCells, frontierActive := canonicalHistoryCommitFrontier(state)
 	var activeCommits []HistoryCommit
@@ -41,9 +54,9 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 	// lines here would hand off a CJK/wrapped/tab-expanded cell while some of
 	// its physical rows are still visible in the primary viewport.
 	byID := transcriptCellsByID(state.Transcript)
-	rows := layoutTranscriptScreenRows(state.Transcript.LayoutRows(state.LayoutGeneration), byID, mutableTranscriptCellIDs(state.Transcript), width, state.Theme)
+	rows, complete := layoutTranscriptScreenRowsWithin(state.Transcript.LayoutRows(state.LayoutGeneration), byID, mutableTranscriptCellIDs(state.Transcript), width, deadline, state.Theme)
 	if len(rows) == 0 {
-		return activeCommits
+		return activeCommits, complete
 	}
 	ackedActive := indexAckedActiveHistoryCommits(state.HistoryEffects)
 	// The primary frame now owns only the mutable/bottom inline viewport.
@@ -72,7 +85,7 @@ func planEligibleHistoryCommits(state AppState) []HistoryCommit {
 		}
 		start = end
 	}
-	return append(commits, activeCommits...)
+	return append(commits, activeCommits...), complete
 }
 
 // ackedActiveHistoryCommitIndex is a planner-local, read-only view of the
@@ -697,8 +710,22 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 		syncHistoryEffectsForActiveCell(state)
 		return
 	}
-	syncHistoryEffectCandidates(state, planEligibleHistoryCommits(state.AppState), 0)
-	recordTranscriptPlanMemo(state)
+	// 预算必须在布局之前建立：布局本身（遍历全部 cell 并对未命中的结构化
+	// cell 重跑 markdown/chroma）就是这一轮 pass 里最贵的部分，旧实现把
+	// deadline 建在 commit 循环里，等布局跑完才生效，等于没有预算。
+	deadline := time.Now().Add(historyCommitPlanningBudget)
+	commits, complete := planEligibleHistoryCommitsWithin(state.AppState, deadline)
+	if complete {
+		syncHistoryEffectCandidates(state, commits, 0)
+		recordTranscriptPlanMemo(state)
+		return
+	}
+	// 截断的规划结果只能当**前缀**用：它缺少的只是「还没走到」的尾部 cell，
+	// 不代表那些 cell 的候选失效。交给 syncHistoryEffectCandidates 会把尾部
+	// 已经排队、甚至已经在写的提交全部 invalidate（token 抖动会回退 Enqueued
+	// 前沿）。这里只入队不逐出，逐出留给下一次完整规划；memo 同样不记录，
+	// 下一次 reduce 会带着已经预热的布局缓存重跑，直到走完整个历史。
+	syncHistoryEffectCandidatesPrefix(state, commits)
 }
 
 // transcriptFinalizedPrefixFence fingerprints every finalized transcript cell
@@ -904,6 +931,24 @@ func syncHistoryEffectCandidates(state *UIControllerState, candidates []HistoryC
 			}
 		}
 	}
+	enqueueHistoryCandidates(state, candidates)
+}
+
+// syncHistoryEffectCandidatesPrefix 用于**被预算截断**的规划结果：candidates 是
+// 完整规划的前缀，它缺少的只是「尚未走到」的尾部 cell，不代表那些 cell 的候选
+// 失效。因此只入队、不逐出 —— 逐出留给下一次完整规划。
+//
+// 区分这两条路径是必需的，不是优化：syncHistoryEffectCandidates 把 candidates
+// 当作**完整**有效集合，凡是 ledger 里存在、却不在集合中的 pending/in-flight
+// 条目都会被 invalidate。把截断前缀直接交给它，会在每一次布局超预算时把尾部
+// 已排队（甚至已交给 terminal）的提交取消掉。
+func syncHistoryEffectCandidatesPrefix(state *UIControllerState, candidates []HistoryCommit) {
+	enqueueHistoryCandidates(state, candidates)
+}
+
+// enqueueHistoryCandidates 把候选入队到 reducer 自有 ledger。入队本身是幂等的：
+// 已经有 terminal 记录的来源直接跳过，重复区间由 ErrDuplicateCommitRange 吸收。
+func enqueueHistoryCandidates(state *UIControllerState, candidates []HistoryCommit) {
 	for _, candidate := range candidates {
 		if state.HistoryEffects.hasTerminalRecordForSource(candidate) {
 			continue

@@ -253,6 +253,10 @@ type chatDebugDisplayAppStateInfo struct {
 	// FlushCount/Processed 的比值反映批处理收益，PostWait* 反映生产者被
 	// mailbox 背压的真实时长。采样只读取一次 actor 快照，不参与调度。
 	UIActor *chatDebugDisplayUIActorInfo `json:"ui_actor,omitempty"`
+	// LayoutCache 是布局缓存的计数快照（与 ui_actor 同源的成本指标）。它把
+	// 「UI 在算」与「UI 在重复算同样的东西」区分开：命中率低 + 逐出数高是
+	// 缓存容量跟不上会话规模的直接证据。
+	LayoutCache *chatDebugDisplayLayoutCacheInfo `json:"layout_cache,omitempty"`
 }
 
 type chatDebugDisplayUIActorInfo struct {
@@ -270,6 +274,37 @@ type chatDebugDisplayUIActorInfo struct {
 	Pending          int    `json:"pending"`
 	Dropped          uint64 `json:"dropped,omitempty"`
 	DeferredMerged   uint64 `json:"deferred_merged,omitempty"`
+}
+
+// chatDebugDisplayLayoutCacheInfo 是 transcript 布局缓存的计数快照（见
+// ui.TranscriptLayoutCacheStatsSnapshot）。它是「UI 为什么慢」的第一手指标：
+// 布局缓存按内容寻址缓存每个 cell 的物理行（含 markdown/chroma 渲染结果），
+// 命中率长期接近 0 说明容量已经跟不上会话规模，每次布局都会对每个 diff/代码
+// 单元格重跑一遍语法高亮 —— 这是 UI 锁被按秒级持有、FramePump 停止出帧的前置
+// 信号。逐出数在稳态不为 0 同样说明容量不足。
+type chatDebugDisplayLayoutCacheInfo struct {
+	CellRowsHits      uint64  `json:"cell_rows_hits"`
+	CellRowsMisses    uint64  `json:"cell_rows_misses"`
+	CellRowsEvictions uint64  `json:"cell_rows_evictions"`
+	CellRowsEntries   int     `json:"cell_rows_entries"`
+	CellRowsBytes     int     `json:"cell_rows_bytes"`
+	CellRowsHitRate   float64 `json:"cell_rows_hit_rate"`
+	PlanHits          uint64  `json:"plan_hits"`
+	PlanMisses        uint64  `json:"plan_misses"`
+	PlanEvictions     uint64  `json:"plan_evictions"`
+	PlanEntries       int     `json:"plan_entries"`
+	PlanBytes         int     `json:"plan_bytes"`
+	PlanHitRate       float64 `json:"plan_hit_rate"`
+}
+
+// chatDebugCacheHitRate 返回 hits/(hits+misses)；没有查询时返回 0（而不是
+// NaN），让 JSON 消费方不必处理非数。
+func chatDebugCacheHitRate(hits, misses uint64) float64 {
+	total := hits + misses
+	if total == 0 {
+		return 0
+	}
+	return float64(hits) / float64(total)
 }
 
 type chatDebugDisplayHistoryGateInfo struct {
@@ -642,6 +677,23 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 				Pending:          actorStats.Pending,
 				Dropped:          actorStats.Dropped,
 				DeferredMerged:   actorStats.DeferredMerged,
+			}
+		}
+		// 布局缓存成本快照：只要发生过查询就输出，命中率是核心字段。
+		if cacheStats := ui.TranscriptLayoutCacheStatsSnapshot(); cacheStats.CellRowsHits+cacheStats.CellRowsMisses > 0 {
+			app.LayoutCache = &chatDebugDisplayLayoutCacheInfo{
+				CellRowsHits:      cacheStats.CellRowsHits,
+				CellRowsMisses:    cacheStats.CellRowsMisses,
+				CellRowsEvictions: cacheStats.CellRowsEvictions,
+				CellRowsEntries:   cacheStats.CellRowsEntries,
+				CellRowsBytes:     cacheStats.CellRowsBytes,
+				CellRowsHitRate:   chatDebugCacheHitRate(cacheStats.CellRowsHits, cacheStats.CellRowsMisses),
+				PlanHits:          cacheStats.PlanHits,
+				PlanMisses:        cacheStats.PlanMisses,
+				PlanEvictions:     cacheStats.PlanEvictions,
+				PlanEntries:       cacheStats.PlanEntries,
+				PlanBytes:         cacheStats.PlanBytes,
+				PlanHitRate:       chatDebugCacheHitRate(cacheStats.PlanHits, cacheStats.PlanMisses),
 			}
 		}
 		if state.Active.Phase != ui.ActiveCellInactive {

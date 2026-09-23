@@ -8,7 +8,7 @@ import (
 )
 
 func TestHistoryPlanCacheHitAndInvalidation(t *testing.T) {
-	c := &historyPlanCache{entries: make(map[cellLayoutKey]cachedPlanRows), max: 4}
+	c := &historyPlanCache{lru: newCellLayoutLRU[[]planPhysicalRow](4, historyPlanCacheMaxBytes)}
 	fp := "dark|1|github|{0}|false"
 	cell := testCell("hello\nworld", scene.PresentationPlain)
 	key := planCacheKeyFor(cell, 40, fp)
@@ -36,7 +36,7 @@ func TestHistoryPlanCacheHitAndInvalidation(t *testing.T) {
 }
 
 func TestHistoryPlanCacheEviction(t *testing.T) {
-	c := &historyPlanCache{entries: make(map[cellLayoutKey]cachedPlanRows), max: 2}
+	c := &historyPlanCache{lru: newCellLayoutLRU[[]planPhysicalRow](2, historyPlanCacheMaxBytes)}
 	fp := "fp"
 	for i := 0; i < 3; i++ {
 		source := string(rune('a' + i))

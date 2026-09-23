@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -20,7 +21,7 @@ func testCell(source string, kind scene.PresentationKind) scene.TranscriptCell {
 }
 
 func TestCellRowsCacheHitAndInvalidation(t *testing.T) {
-	c := &cellRowsCache{entries: make(map[cellLayoutKey]cachedCellRows), max: 4, maxBytes: cellRowsCacheMaxBytes}
+	c := &cellRowsCache{lru: newCellLayoutLRU[[]AppScreenRow](4, cellRowsCacheMaxBytes)}
 	fp := "dark|1|github|{0}|false"
 	cell := testCell("hello\nworld", scene.PresentationPlain)
 	key := cellLayoutKeyFor(cell, 40, fp)
@@ -69,15 +70,15 @@ func TestCellRowsCacheKeyIncludesPresentationDocument(t *testing.T) {
 }
 
 func TestCellRowsCacheEviction(t *testing.T) {
-	c := &cellRowsCache{entries: make(map[cellLayoutKey]cachedCellRows), max: 2, maxBytes: cellRowsCacheMaxBytes}
+	c := &cellRowsCache{lru: newCellLayoutLRU[[]AppScreenRow](2, cellRowsCacheMaxBytes)}
 	fp := "dark|1|github|{0}|false"
 	for i := 0; i < 3; i++ {
 		source := "cell-" + string(rune('a'+i))
 		c.put(cellLayoutKeyFor(testCell(source, scene.PresentationPlain), 40, fp),
 			[]AppScreenRow{{Owner: 1, Text: source}})
 	}
-	if len(c.entries) != 2 {
-		t.Fatalf("expected 2 entries after eviction, got %d", len(c.entries))
+	if _, _, _, entries, _ := c.stats(); entries != 2 {
+		t.Fatalf("expected 2 entries after eviction, got %d", entries)
 	}
 	// 最早的 cell-a 被逐出，cell-b/c 仍在
 	if got := c.get(cellLayoutKeyFor(testCell("cell-a", scene.PresentationPlain), 40, fp)); got != nil {
@@ -85,6 +86,78 @@ func TestCellRowsCacheEviction(t *testing.T) {
 	}
 	if got := c.get(cellLayoutKeyFor(testCell("cell-c", scene.PresentationPlain), 40, fp)); got == nil {
 		t.Fatal("expected newest entry retained")
+	}
+}
+
+// TestCellRowsCacheCoversWorkingSet 是「容量必须覆盖工作集」这一不变量的回归
+// 测试。生产故障的形状是：LayoutAppScreen 与 planEligibleHistoryCommits 每次都
+// 按稳定的 transcript 顺序遍历全部 cell，而容量 1024 低于真实会话的 3951 个
+// cell —— 每个条目都在被再次复用之前就遭逐出，稳态命中率退化为 0，于是每次
+// 布局都对每个 diff/代码单元格重跑一遍语法高亮。
+//
+// 这里断言修好之后必须成立的性质：工作集装得下时，预热后的重复扫描 100% 命中、
+// 零逐出（缓存不再参与成本，布局真正变成 O(Δ)）。
+func TestCellRowsCacheCoversWorkingSet(t *testing.T) {
+	const workingSet = 64
+	c := &cellRowsCache{lru: newCellLayoutLRU[[]AppScreenRow](workingSet, cellRowsCacheMaxBytes)}
+	fp := "dark|1|github|{0}|false"
+	keys := make([]cellLayoutKey, 0, workingSet)
+	for i := 0; i < workingSet; i++ {
+		source := "cell-" + strconv.Itoa(i)
+		key := cellLayoutKeyFor(testCell(source, scene.PresentationPlain), 40, fp)
+		keys = append(keys, key)
+		c.put(key, []AppScreenRow{{Owner: 1, Text: source}})
+	}
+	// 预热阶段不应发生任何逐出：容量等于工作集。
+	if _, _, evictions, entries, _ := c.stats(); entries != workingSet || evictions != 0 {
+		t.Fatalf("warm-up: entries=%d evictions=%d, want %d/0", entries, evictions, workingSet)
+	}
+	hitsBefore, missesBefore, _, _, _ := c.stats()
+	const rounds = 4
+	for round := 0; round < rounds; round++ {
+		for index, key := range keys {
+			if got := c.get(key); got == nil {
+				t.Fatalf("round %d: cell %d unexpectedly missed", round, index)
+			}
+		}
+	}
+	hits, misses, evictions, _, _ := c.stats()
+	if misses != missesBefore {
+		t.Fatalf("repeated scan over a resident working set must not miss, got %d new misses", misses-missesBefore)
+	}
+	if hits != hitsBefore+rounds*workingSet {
+		t.Fatalf("hits = %d, want %d", hits, hitsBefore+rounds*workingSet)
+	}
+	if evictions != 0 {
+		t.Fatalf("evictions = %d, want 0 once the working set is resident", evictions)
+	}
+}
+
+// TestCellRowsCacheThrashesBelowWorkingSet 把「容量小于工作集」的退化固定成
+// 可执行的文档：纯循环扫描下命中率精确为 0，无论逐出策略是 FIFO 还是 LRU ——
+// LRU 只能利用时间局部性，救不了真正超过容量的工作集。这就是为什么修复必须
+// 落在容量上（cellRowsCacheMax >= 会话 cell 数），而不是落在逐出策略上。
+func TestCellRowsCacheThrashesBelowWorkingSet(t *testing.T) {
+	c := &cellRowsCache{lru: newCellLayoutLRU[[]AppScreenRow](2, cellRowsCacheMaxBytes)}
+	fp := "dark|1|github|{0}|false"
+	sources := []string{"scan-a", "scan-b", "scan-c"}
+	keys := make([]cellLayoutKey, 0, len(sources))
+	for _, source := range sources {
+		key := cellLayoutKeyFor(testCell(source, scene.PresentationPlain), 40, fp)
+		keys = append(keys, key)
+		c.put(key, []AppScreenRow{{Owner: 1, Text: source}})
+	}
+	for round := 0; round < 2; round++ {
+		for _, key := range keys {
+			if c.get(key) == nil {
+				// 真实调用方在这里会重新布局并 put，模拟同一步。
+				c.put(key, []AppScreenRow{{Owner: 1, Text: key.source}})
+			}
+		}
+	}
+	hits, _, _, _, _ := c.stats()
+	if hits != 0 {
+		t.Fatalf("working set above capacity must thrash, got %d hits", hits)
 	}
 }
 

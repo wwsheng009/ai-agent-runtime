@@ -1036,3 +1036,63 @@ func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *test
 		t.Fatalf("expected 1 ledger entry, got %d: %#v", len(entries), entries)
 	}
 }
+// TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail 锁定截断规划的语义：被
+// historyCommitPlanningBudget 截断的规划结果只是完整规划的前缀，它缺少的尾部
+// cell 并不代表那些候选失效。若把前缀交给 syncHistoryEffectCandidates（它把输入
+// 当作**完整**有效集合），尾部已经排队、甚至已经交给 terminal 的提交会被
+// invalidate —— 内容不会错（下一次完整规划会重新入队），但 token 抖动会回退
+// Enqueued 前沿，代价是 scrollback 的重复写或漏写。
+func TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail(t *testing.T) {
+	state := &UIControllerState{AppState: AppState{LayoutGeneration: 1}}
+	state.HistoryEffects.ledger = NewHistoryCommitLedger()
+
+	tail := HistoryCommit{
+		Origin:           HistoryCommitTranscript,
+		CellID:           42,
+		Revision:         1,
+		SourceRange:      SourceRange{Start: 0, End: 10},
+		DisplayRange:     DisplayRange{Start: 1, End: 2},
+		LayoutGeneration: 1,
+		Lines:            []render.Line{{Spans: []render.Span{{Text: "tail-cell"}}}},
+	}
+	if err := state.HistoryEffects.enqueue(tail); err != nil {
+		t.Fatalf("enqueue tail: %v", err)
+	}
+	tailEntry, ok := state.HistoryEffects.ledger.Entry(1)
+	if !ok || tailEntry.State != HistoryCommitPending {
+		t.Fatalf("尾部提交没有以 pending 进入 ledger: ok=%t state=%s", ok, tailEntry.State)
+	}
+
+	// 截断前缀：只包含更早的一个 cell，尾部 cell 不在集合里。
+	prefix := HistoryCommit{
+		Origin:           HistoryCommitTranscript,
+		CellID:           7,
+		Revision:         1,
+		SourceRange:      SourceRange{Start: 0, End: 5},
+		DisplayRange:     DisplayRange{Start: 0, End: 1},
+		LayoutGeneration: 1,
+		Lines:            []render.Line{{Spans: []render.Span{{Text: "head-cell"}}}},
+	}
+	syncHistoryEffectCandidatesPrefix(state, []HistoryCommit{prefix})
+
+	// Invalidate 把条目置为 HistoryCommitInvalidated 而不是从 ledger 删除，所以
+	// 契约要断言 state，不能只断言存在性。
+	tailEntry, ok = state.HistoryEffects.ledger.Entry(1)
+	if !ok {
+		t.Fatal("尾部提交从 ledger 消失了")
+	}
+	if tailEntry.State != HistoryCommitPending {
+		t.Fatalf("截断前缀把尾部已排队的提交置为 %s：这会让 Enqueued 前沿回退", tailEntry.State)
+	}
+	if entries := state.HistoryEffects.Entries(); len(entries) != 2 {
+		t.Fatalf("ledger entries = %d, want 2（前缀必须入队，尾部必须保留）", len(entries))
+	}
+
+	// 对照：完整集合语义下，不在有效集合里的 pending 条目确实会被逐出 —— 这
+	// 正是两条路径必须分开的原因，也说明上面的断言不是恒真。
+	syncHistoryEffectCandidates(state, []HistoryCommit{prefix}, 0)
+	tailEntry, ok = state.HistoryEffects.ledger.Entry(1)
+	if !ok || tailEntry.State != HistoryCommitInvalidated {
+		t.Fatalf("完整规划语义下，不在有效集合里的 pending 条目应当被置为 invalidated: ok=%t state=%s", ok, tailEntry.State)
+	}
+}

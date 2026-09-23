@@ -16,16 +16,17 @@ import (
 // 的全量重新 wrap + clone 从 O(N) 降为 O(Δ)。内容变化/换宽/换主题自动失效；
 // 测试隔离天然成立（不同场景即使复用 cellID 也不互相污染）。
 //
+// 与 cellRowsCache 共用 cellLayoutLRU：两者扫描的是同一份 cell 工作集，容量
+// 小于工作集时 FIFO 逐出会让命中率退化为 0，规划因此每次都重新 wrap 并物化
+// 全部历史行。
+//
 // 共享安全：缓存的 render.Line 为一次性物化的独立副本，HistoryCommit.Lines
 // 消费方（historyRenderLineEquivalent → render.LinesEqual）只读，不原地修改。
 // 动态字段（DisplayRange / LayoutGeneration / skipRows 前缀）不参与缓存，组装
 // 时按当前状态填充。
 type historyPlanCache struct {
-	mu      sync.Mutex
-	entries map[cellLayoutKey]cachedPlanRows
-	order   []cellLayoutKey // FIFO 逐出（尾部为最近写入）
-	max     int
-	bytes   int
+	mu  sync.Mutex
+	lru *cellLayoutLRU[[]planPhysicalRow]
 }
 
 // planPhysicalRow 是 plain cell 一个物理行的完整来源映射 + 物化行。
@@ -36,19 +37,15 @@ type planPhysicalRow struct {
 	line     render.Line // 物化 Lines（共享引用，只读）
 }
 
-type cachedPlanRows struct {
-	rows  []planPhysicalRow
-	bytes int
-}
-
 const (
-	historyPlanCacheMax      = 1024
+	// historyPlanCacheMax 与 cellRowsCacheMax 同步：工作集是 transcript 的
+	// cell 数，不是并发查询数。见 cellLayoutLRU 注释。
+	historyPlanCacheMax      = 8192
 	historyPlanCacheMaxBytes = 64 * 1024 * 1024
 )
 
 var sharedHistoryPlan = &historyPlanCache{
-	entries: make(map[cellLayoutKey]cachedPlanRows),
-	max:     historyPlanCacheMax,
+	lru: newCellLayoutLRU[[]planPhysicalRow](historyPlanCacheMax, historyPlanCacheMaxBytes),
 }
 
 // planCacheKeyFor 派生 history-plan 缓存键（与布局缓存同一套内容寻址键）。
@@ -59,11 +56,8 @@ func planCacheKeyFor(cell scene.TranscriptCell, width int, themeFp string) cellL
 func (c *historyPlanCache) get(key cellLayoutKey) []planPhysicalRow {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	entry, ok := c.entries[key]
-	if !ok {
-		return nil
-	}
-	return entry.rows
+	rows, _ := c.lru.get(key)
+	return rows
 }
 
 func (c *historyPlanCache) put(key cellLayoutKey, rows []planPhysicalRow) {
@@ -72,27 +66,17 @@ func (c *historyPlanCache) put(key cellLayoutKey, rows []planPhysicalRow) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if prev, ok := c.entries[key]; ok {
-		c.bytes -= prev.bytes
-		for i, k := range c.order {
-			if k == key {
-				c.order = append(c.order[:i], c.order[i+1:]...)
-				break
-			}
-		}
+	c.lru.put(key, rows, estimatePlanRowsBytes(key, rows))
+}
+
+// stats 返回该缓存的计数快照（诊断用）。
+func (c *historyPlanCache) stats() (hits, misses, evictions uint64, entries, bytes int) {
+	if c == nil {
+		return 0, 0, 0, 0, 0
 	}
-	entry := cachedPlanRows{rows: rows, bytes: estimatePlanRowsBytes(key, rows)}
-	c.entries[key] = entry
-	c.order = append(c.order, key)
-	c.bytes += entry.bytes
-	for len(c.order) > c.max || (c.bytes > historyPlanCacheMaxBytes && len(c.order) > 1) {
-		oldest := c.order[0]
-		c.order = c.order[1:]
-		if e, ok := c.entries[oldest]; ok {
-			c.bytes -= e.bytes
-			delete(c.entries, oldest)
-		}
-	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lru.stats()
 }
 
 // estimatePlanRowsBytes 粗略估算物理行产物占用（逐出预算）。

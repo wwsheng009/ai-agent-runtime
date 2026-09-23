@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
 	uidiff "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/diff"
@@ -109,7 +110,9 @@ func LayoutAppScreen(state AppState) AppScreenLayout {
 	}
 
 	excluded := transcriptSuffixCellIDsFromFirstMutable(state.Transcript)
-	transcript := layoutTranscriptScreenRows(layout.Transcript, transcriptCellsByID(state.Transcript), excluded, width, state.Theme)
+	// 逐帧路径只需要视口装得下的最后若干行：只布局尾部窗口，见
+	// layoutTranscriptTailScreenRows。
+	transcript := layoutTranscriptTailScreenRows(layout.Transcript, transcriptCellsByID(state.Transcript), excluded, width, result.OutputBottomRow, state.Theme)
 	if len(transcript) > result.OutputBottomRow {
 		transcript = transcript[len(transcript)-result.OutputBottomRow:]
 	}
@@ -180,20 +183,41 @@ func transcriptCellsByID(transcript TranscriptState) map[scene.CellID]scene.Tran
 }
 
 func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, themes ...style.ThemeContext) []AppScreenRow {
-	if len(rows) == 0 {
-		return nil
-	}
-	result := make([]AppScreenRow, 0, len(rows))
-	renderedStructured := make(map[scene.CellID]struct{})
 	theme := style.ThemeContext{}
 	if len(themes) > 0 {
 		theme = themes[0]
 	}
+	result, _ := layoutTranscriptScreenRowsWithin(rows, cells, mutable, width, time.Time{}, theme)
+	return result
+}
+
+// layoutBudgetCheckRows 是预算检查的采样间隔。逐行调用 time.Now() 会给
+// 146k 行的遍历加上毫秒级固定开销；每 N 行采样一次把开销压到可忽略，同时
+// 仍让预算以远小于单帧的粒度生效。
+const layoutBudgetCheckRows = 4096
+
+// layoutTranscriptScreenRowsWithin 是带预算的布局实现。deadline 为零值表示
+// 不设预算（逐帧渲染路径：帧必须完整，截断会画错屏）。
+//
+// 预算耗尽时返回**已经布局好的前缀**并把 complete 置为 false。前缀是安全的
+// 部分结果：消费方只有在 complete 为真时才把它当作完整布局（例如
+// syncHistoryEffectsForTranscript 只在完整规划后才记录 memo），否则下一次
+// reduce 会重试。这条路径让 historyCommitPlanningBudget 真正覆盖布局本身 ——
+// 此前预算只在 commit 循环里建立，昂贵的布局在预算建立之前就已经跑完了。
+func layoutTranscriptScreenRowsWithin(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, deadline time.Time, theme style.ThemeContext) ([]AppScreenRow, bool) {
+	if len(rows) == 0 {
+		return nil, true
+	}
+	result := make([]AppScreenRow, 0, len(rows))
+	renderedStructured := make(map[scene.CellID]struct{})
 	fp := themeFingerprint(theme)
 	cache := sharedCellRows
 	// 最近一次折叠：首屏只有它带 Ctrl+T 提示，pager 初始帧也只有它展开。
 	foldTarget := toolFoldTargetRows(rows, cells, mutable)
 	for index := 0; index < len(rows); index++ {
+		if !deadline.IsZero() && index%layoutBudgetCheckRows == 0 && time.Now().After(deadline) {
+			return result, false
+		}
 		row := rows[index]
 		if _, excluded := mutable[row.CellID]; excluded {
 			continue
@@ -264,7 +288,98 @@ func layoutTranscriptScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]s
 		result = appendCachedCellRows(result, row.CellID, cellRows)
 		index-- // 补偿 for 步进：index 已指向下一个不同 cell 或末尾
 	}
-	return result
+	return result, true
+}
+
+// layoutTranscriptTailScreenRows 只布局 transcript 的尾部，返回结果与「全量布局
+// 后截取末 maxRows 行」逐行一致。
+//
+// 逐帧路径只需要视口装得下的最后若干行。全量布局再截断会让每一帧的分配量与
+// 历史长度成正比：生产恢复会话实测 3951 个 cell / 146535 个布局行，每帧光
+// AppScreenRow 就要重新分配十几 MB，外加 146k 次循环。这是 UI 锁被长时间持有、
+// FramePump 停止出帧的直接来源。
+//
+// 与全量布局的等价性依赖两个事实：
+//   - scene.LayoutTranscript 让每个 cell 的布局行连续（gap row 归属后继 cell），
+//     因此窗口只要对齐到 cell 边界，每个 cell 的 wrap / 结构化投影就与全量布局
+//     逐字节相同；
+//   - foldTarget 取的是「最后一次折叠」。若它在窗口内，窗口自身的扫描会得到
+//     同一个 ID；若它在窗口之前，全量布局也只是把提示挂在会被截掉的那些行上，
+//     可见输出同样没有提示。
+func layoutTranscriptTailScreenRows(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width, maxRows int, theme style.ThemeContext) []AppScreenRow {
+	if maxRows <= 0 || len(rows) == 0 {
+		return nil
+	}
+	start := transcriptTailStartIndex(rows, mutable, maxRows)
+	var laid []AppScreenRow
+	for {
+		laid = layoutTranscriptScreenRows(rows[start:], cells, mutable, width, theme)
+		if len(laid) >= maxRows || start == 0 {
+			break
+		}
+		// 初始窗口按「每个非 gap 行至少产出一行」估计，对 wrap 与结构化投影
+		// （markdown/chroma 渲染）都偏小。按几何增长扩大窗口重试；重试时窗口内
+		// 的 cell 全部命中布局缓存，代价只有缓存查询。
+		next := start - (len(rows) - start)
+		if next <= 0 {
+			next = 0
+		} else {
+			// 扩张后的起点同样必须对齐到 cell 边界。布局缓存按 cell 内容寻址，
+			// 从 cell 中间开始的窗口会把「残缺行集合」写进该 cell 的缓存条目，
+			// 之后的全量布局命中同一条目就会拿到不完整的行。
+			next = alignTranscriptCellStart(rows, next)
+		}
+		start = next
+	}
+	if len(laid) > maxRows {
+		laid = laid[len(laid)-maxRows:]
+	}
+	return laid
+}
+
+// transcriptTailStartIndex 返回尾部窗口的起始下标，使得从该下标开始布局得到的
+// 输出行数不少于 maxRows。
+//
+// 返回值保证对齐到 cell 边界：从某个 cell 的非 gap 连续段中间开始，会让 plain
+// 路径只拿到该 cell 的残缺行集合，wrap 结果与全量布局不一致（而结构化路径读的
+// 是整 cell 的缓存条目，两者会互相矛盾）。
+func transcriptTailStartIndex(rows []scene.LayoutRow, mutable map[scene.CellID]struct{}, maxRows int) int {
+	if maxRows <= 0 {
+		return len(rows)
+	}
+	lowerBound := 0
+	start := len(rows)
+	for start > 0 {
+		start--
+		row := rows[start]
+		if _, excluded := mutable[row.CellID]; excluded {
+			// 未提交 cell 由 active band 渲染，布局阶段整块跳过（产出 0 行）。
+			continue
+		}
+		if row.Gap > 0 {
+			lowerBound += int(row.Gap)
+		} else {
+			lowerBound++
+		}
+		if lowerBound >= maxRows {
+			break
+		}
+	}
+	return alignTranscriptCellStart(rows, start)
+}
+
+// alignTranscriptCellStart 把下标回退到所在 cell 非 gap 连续段的起点。gap row
+// 归属后继 cell，因此这个循环不会跨到前一个 cell。
+//
+// 为什么必须对齐：布局缓存按 cell 内容寻址（cellLayoutKeyFor），值却是「这个
+// cell 在某个窗口里被 wrap 出来的行」。从 cell 中间开始，缓存里就会存下残缺行
+// 集合，而结构化投影读的是整 cell 的条目 —— 两条路径会互相矛盾，后续全量布局
+// 命中同一条目时也会拿到不完整的行。
+func alignTranscriptCellStart(rows []scene.LayoutRow, start int) int {
+	for start > 0 && rows[start-1].CellID == rows[start].CellID && rows[start-1].Gap == 0 {
+		start--
+	}
+	return start
 }
 
 func appendCachedCellRows(result []AppScreenRow, cellID scene.CellID, rows []AppScreenRow) []AppScreenRow {
