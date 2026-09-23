@@ -441,3 +441,99 @@ func TestConcurrentConfigSectionWritersPreserveEverySection(t *testing.T) {
 func configLockTestStr(value string) *string {
 	return &value
 }
+
+// TestLockConfigFileWriteAllDedupesRepeatedTargets：同一目标文件以不同写法重复出现时
+// 只取一次锁。若没去重，同一 goroutine 会在同一把锁上二次等待 → 自锁（用例会超时）。
+func TestLockConfigFileWriteAllDedupesRepeatedTargets(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.yaml")
+
+	done := make(chan func(), 1)
+	go func() {
+		done <- LockConfigFileWriteAll(target, target, filepath.Join(dir, ".", "config.yaml"))
+	}()
+
+	select {
+	case unlock := <-done:
+		unlock()
+	case <-time.After(5 * time.Second):
+		t.Fatal("重复目标未去重：LockConfigFileWriteAll 对同一文件二次取锁导致自锁")
+	}
+}
+
+// TestLockConfigFileWriteAllHoldsEveryTarget：一次事务里的每个目标文件都必须真的被占住
+// （读 A → 写 B 的跨文件事务两侧都要互斥），统一释放后逐个恢复可取。
+func TestLockConfigFileWriteAllHoldsEveryTarget(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "a.yaml")
+	second := filepath.Join(dir, "b.yaml")
+
+	// 探测者拿到锁后不自己归还，而是交给 main 放行——否则统一释放的瞬间等待者会
+	// 抢到锁并一直持有，后面「释放后应可再取」的断言就会永久阻塞（自锁）。
+	type lockProbe struct {
+		acquired chan func()
+		release  chan struct{}
+		finished chan struct{}
+	}
+	// 先占住两个目标，再起探测者；顺序反过来会让探测者先拿到锁，main 反而卡在
+	// LockConfigFileWriteAll 上（用例自身死锁，与实现无关）。
+	unlockAll := LockConfigFileWriteAll(first, second)
+
+	probes := make([]*lockProbe, 0, 2)
+	for _, target := range []string{first, second} {
+		probe := &lockProbe{
+			acquired: make(chan func(), 1),
+			release:  make(chan struct{}),
+			finished: make(chan struct{}),
+		}
+		probes = append(probes, probe)
+		go func(path string, p *lockProbe) {
+			defer close(p.finished)
+			unlock := LockConfigFileWrite(path)
+			p.acquired <- unlock
+			<-p.release
+			unlock()
+		}(target, probe)
+	}
+
+	// 占锁期间：两个探测者都必须被挡在锁外。
+	for i, probe := range probes {
+		select {
+		case <-probe.acquired:
+			// 不该发生：目标没被占住。先恢复现场（放行全部探测者并等它们退出），再报告。
+			unlockAll()
+			for _, p := range probes {
+				close(p.release)
+			}
+			for _, p := range probes {
+				<-p.finished
+			}
+			t.Fatalf("LockConfigFileWriteAll 未占住第 %d 个目标", i+1)
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+
+	// 统一释放后，探测者应逐个拿到锁并交还。
+	unlockAll()
+	for i, probe := range probes {
+		select {
+		case <-probe.acquired:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("统一释放后第 %d 个目标仍取不到锁（可能被统一释放函数漏放）", i+1)
+		}
+		close(probe.release)
+	}
+	for _, probe := range probes {
+		select {
+		case <-probe.finished:
+		case <-time.After(10 * time.Second):
+			t.Fatal("探测者未能在放行后归还锁")
+		}
+	}
+
+	// 探测者全部退出后，锁应当再次可取（说明引用计数/表回收没有把条目留成孤儿）。
+	unlockFirst := LockConfigFileWrite(first)
+	unlockSecond := LockConfigFileWrite(second)
+	unlockSecond()
+	unlockFirst()
+}

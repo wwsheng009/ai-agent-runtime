@@ -3,6 +3,7 @@ package agentconfig
 import (
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -27,7 +28,8 @@ import (
 //   - 落盘的原子写（`writeFileAtomic`）仍负责单次写入不撕裂。
 //
 // 约定（避免同一路径重入自锁）：**导出的写入入口自己取锁**，内部 `...Locked` 变体假定
-// 调用方已持有该路径的锁；批量写入多个文件时按文件逐把串行取锁，不嵌套不同文件的锁。
+// 调用方已持有该路径的锁；一次事务涉及多个文件时用 `LockConfigFileWriteAll`（按归一化
+// 锁键去重 + 字典序取锁，防 ABBA），不要手写多把锁的取放顺序。
 type configFileWriteLockEntry struct {
 	mu   sync.Mutex
 	refs int
@@ -111,6 +113,46 @@ func LockConfigFileWrite(path string) func() {
 				delete(configFileWriteLocks, key)
 			}
 			configFileWriteLocksMu.Unlock()
+		})
+	}
+}
+
+// LockConfigFileWriteAll 为一次事务涉及的多个目标文件取共享配置写锁，返回统一释放
+// 函数（按取锁逆序释放，可重复调用）。
+//
+// 用途：读 A 文件 → 合并 → 写 B 文件这类跨文件读-改-写（例如 runtime-server 的
+// skills_runtime 策略落盘可能是「读有效来源文件 → 写快照/基础文件」），只锁写入端会
+// 让另一端在读取窗口里丢更新，两侧都必须锁住。
+//
+// 顺序：先按归一化锁键去重，再按字典序取锁。两个调用方若以相反顺序请求同一对文件，
+// 定序是避免 ABBA 死锁的唯一保证——因此**凡是取多把锁都必须走本函数**。
+func LockConfigFileWriteAll(paths ...string) func() {
+	keys := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		key := normalizeConfigWriteLockKey(path)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	unlocks := make([]func(), 0, len(keys))
+	for _, key := range keys {
+		unlocks = append(unlocks, LockConfigFileWrite(key))
+	}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for i := len(unlocks) - 1; i >= 0; i-- {
+				unlocks[i]()
+			}
 		})
 	}
 }

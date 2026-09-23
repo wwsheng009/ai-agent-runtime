@@ -126,6 +126,14 @@ func persistSkillsRuntimeConfigSection(sourcePath string, targetPath string, ski
 		return fmt.Errorf("config path is required")
 	}
 
+	// 这是跨文件读-改-写：从**有效来源**文件（sourcePath）读整份文档，改 skills_runtime
+	// 节后写回**目标**文件（targetPath）。两侧都取共享配置写锁——只锁写入端时，另一个
+	// 写者可在读取窗口里改掉 sourcePath，本次写入就会带着旧快照覆盖它的字段。
+	// sourcePath 与 targetPath 常常是同一个文件；去重（按归一化锁键）由该助手完成，
+	// 避免对同一文件二次取锁自锁。
+	unlock := config.LockConfigFileWriteAll(sourcePath, targetPath)
+	defer unlock()
+
 	ext := strings.ToLower(filepath.Ext(targetPath))
 	switch ext {
 	case ".yaml", ".yml", "":

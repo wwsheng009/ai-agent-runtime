@@ -165,6 +165,21 @@ func (s *LocalConfigDocumentService) SaveDocument(req skillsapi.ConfigDocumentSa
 	}
 
 	format := detectConfigDocumentFormat(documentPath)
+
+	// 非分层保存是「读当前文档 → 合并本次提交 → 写回同一文件」的读-改-写，必须与包外其它
+	// 配置写者（aicli 的 chat/theme/provider/routing 等）共用同一把写锁。分层保存的落盘由
+	// ApplyMergedDocumentChanges 按层文件各自取同一把锁，因此那里会先释放本文档锁，
+	// 避免对同一文件二次取锁自锁。
+	unlockDocument := agentconfig.LockConfigFileWrite(documentPath)
+	documentLockHeld := true
+	releaseDocumentLock := func() {
+		if documentLockHeld {
+			documentLockHeld = false
+			unlockDocument()
+		}
+	}
+	defer releaseDocumentLock()
+
 	currentDocument, err := s.loadEffectiveDocument(format)
 	if err != nil {
 		return nil, err
@@ -198,6 +213,10 @@ func (s *LocalConfigDocumentService) SaveDocument(req skillsapi.ConfigDocumentSa
 		// Writing the merged result to one file would pin lower-layer values
 		// into the highest layer and flatten the stack (design §7 R-1).
 		// New keys fall back to the highest present layer, never to the snapshot.
+		//
+		// 先释放本文档锁：ApplyMergedDocumentChanges 会对每个层文件取同一把锁，
+		// 目标层可能就是 documentPath 本身，持锁进入即自锁。
+		releaseDocumentLock()
 		fallback := strings.TrimSpace(layered.SourcePath)
 		if fallback == "" {
 			fallback = documentPath
@@ -206,9 +225,15 @@ func (s *LocalConfigDocumentService) SaveDocument(req skillsapi.ConfigDocumentSa
 			return nil, err
 		}
 	} else {
-		if err := writeFilePreserveMode(documentPath, content); err != nil {
-			return nil, err
+		writeErr := writeFilePreserveMode(documentPath, content)
+		releaseDocumentLock()
+		if writeErr != nil {
+			return nil, writeErr
 		}
+	}
+	if documentLockHeld {
+		// 兜底：分支若被后续修改绕过释放（新增分层判断等），到此处也必须归还锁。
+		releaseDocumentLock()
 	}
 
 	doc, err := s.LoadDocument()

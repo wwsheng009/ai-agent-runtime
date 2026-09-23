@@ -148,6 +148,12 @@ func PersistRuntimeAgentMaxSteps(configPath string, maxSteps int) error {
 		return fmt.Errorf("runtime agent maxSteps must be >= 0, got %d", maxSteps)
 	}
 
+	// 与 aicli TUI / API 的其它配置写者共用同一把写锁（agentconfig.LockConfigFileWrite）：
+	// 本函数是「读整份文件 → 只改 agent.maxSteps → 写回」，只锁写入端会让并发写者在读取
+	// 窗口里丢更新，因此锁必须覆盖整个读-改-写。
+	unlock := config.LockConfigFileWrite(path)
+	defer unlock()
+
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) {
