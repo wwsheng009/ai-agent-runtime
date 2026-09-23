@@ -114,7 +114,7 @@ func registerChatFlags(cmd *cobra.Command) {
 	cmd.Flags().String("session-model", "", "按模型名称筛选会话")
 	cmd.Flags().Bool("cwd", true, "仅显示并恢复当前工作目录的历史会话（默认启用；使用 --cwd=false 查看全部目录）")
 	cmd.Flags().String("session-query", "", "按会话 ID/标题/摘要/provider/model/工作目录模糊筛选")
-	cmd.Flags().Int("session-limit", 20, "会话列表和启动选择器的最大展示数量")
+	cmd.Flags().Int("session-limit", 20, "文本会话列表（/sessions、启动选择器）的最大展示数量；/resume 交互选择器按需分页，不受此限制")
 	cmd.Flags().Bool("disable-tools", false, "禁用 aicli chat 的 tools/skills 暴露，避免上游 function calling 兼容性问题")
 	cmd.Flags().Bool("debug-http", false, "记录 chat 请求的 HTTP 调试信息（重试尝试、状态码、最后响应预览）")
 	cmd.Flags().Bool("fail-fast", false, "调试模式：禁用自动重试，首次失败立即返回")

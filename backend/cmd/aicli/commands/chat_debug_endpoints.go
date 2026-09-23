@@ -309,15 +309,18 @@ func BuildChatDebugEndpointsText() string {
 	}
 	// 非回环模式下：显示局域网 IP 列表（0.0.0.0 不可直接浏览器访问）。
 	if snap.ListenMode == "non-loopback" && snap.WebBaseURL != "" {
-		// ChatWebTokenQueryParam 返回 "?token=xxx"，在已有查询参数后用 & 拼接。
-		tqParam := strings.Replace(ChatWebTokenQueryParam(), "?", "&", 1)
 		port := chatDebugListenPort()
 		lanAddrs := ChatWebLocalAddresses()
 		if len(lanAddrs) > 0 {
-			fmt.Fprintf(&sb, "  LAN access (paste in browser):\n")
+			// 安全红线（E2E-DEBUG-02 实测发现）：本函数同时是 HTTP
+			// /debug/endpoints?format=text 的响应体，会被脚本转发、写进日志、
+			// 贴进 issue，因此**绝不回显令牌原文**（与 JSON 侧 WriteAuthToken
+			// json:"-" 的既有约定一致）。这里只给 <token> 占位符，真实令牌走
+			// aicli 启动行或回环 GET /web/api/token。
+			fmt.Fprintf(&sb, "  LAN access (paste in browser; 用启动行令牌替换 <token>):\n")
 			for _, ip := range lanAddrs {
-				// 构造局域网 IP:port + /debug/endpoints?format=text&token=xxx
-				fmt.Fprintf(&sb, "    http://%s:%s/debug/endpoints?format=text%s\n", ip, port, tqParam)
+				// 构造局域网 IP:port + /debug/endpoints?format=text&token=<token>
+				fmt.Fprintf(&sb, "    http://%s:%s/debug/endpoints?format=text&token=<token>\n", ip, port)
 			}
 		}
 	}

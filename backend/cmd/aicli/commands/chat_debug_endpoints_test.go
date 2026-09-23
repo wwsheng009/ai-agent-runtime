@@ -379,3 +379,45 @@ func TestChatDebugEndpointsTextUsageGuideWithoutSession(t *testing.T) {
 		t.Fatalf("无会话时也应附使用说明:\n%s", text)
 	}
 }
+
+// TestChatDebugEndpointsTextNonLoopbackDoesNotLeakToken 是 E2E-DEBUG-02 实测发现的
+// 安全回归锁：?format=text 的响应体（本函数）会被脚本转发/写进日志/贴进 issue，
+// 非回环模式下的 LAN 访问地址只允许出现 <token> 占位符，不得回显令牌原文。
+// JSON 侧另有 WriteAuthToken(json:"-") 契约，这里一并锁定。
+func TestChatDebugEndpointsTextNonLoopbackDoesNotLeakToken(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	const token = "e2e-leak-check-token-0123456789"
+	withTestWebToken(t, token)
+	withTestWebLoopbackMode(t, false)
+
+	prevPprof := chatDebugPprofProvider
+	defer func() { chatDebugPprofProvider = prevPprof }()
+	RegisterChatDebugPprofProvider(func() string { return "http://127.0.0.1:43210/debug/pprof/" })
+
+	prevDisplay := chatDebugDisplaySessionProvider
+	defer func() { chatDebugDisplaySessionProvider = prevDisplay }()
+	session := &ChatSession{
+		ProviderName:     "test",
+		Model:            "test-model",
+		LocalRuntimeHost: &localChatRuntimeHost{RuntimeConfig: config.DefaultRuntimeConfig()},
+	}
+	RegisterChatDebugDisplayProvider(func() *ChatSession { return session })
+
+	text := BuildChatDebugEndpointsText()
+	if strings.Contains(text, token) {
+		t.Fatalf("endpoints 文本泄露了令牌原文:\n%s", text)
+	}
+	if strings.Contains(text, "LAN access") && !strings.Contains(text, "token=<token>") {
+		t.Fatalf("LAN 访问地址必须使用 <token> 占位符:\n%s", text)
+	}
+
+	body, err := MarshalChatDebugEndpointsJSON()
+	if err != nil {
+		t.Fatalf("MarshalChatDebugEndpointsJSON: %v", err)
+	}
+	if strings.Contains(string(body), token) {
+		t.Fatalf("endpoints JSON 泄露了令牌原文:\n%s", string(body))
+	}
+}

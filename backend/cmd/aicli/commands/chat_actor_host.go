@@ -466,6 +466,39 @@ func localSubagentBatchRecoveryLifecycleProjector(host *localChatRuntimeHost) ag
 	return localSubagentBatchLifecycleProjectorWithWakeDrain(host, drainWake)
 }
 
+// localSubagentBatchStartupReplay 是启动期唯一的终态重放入口（实时装配路径与后台
+// 恢复路径都走它）。
+//
+// 它刻意使用「无 worker + interactive 感知」的 coordinator：ReplayTerminalDeliveries
+// 会对每个遗留终态 background batch 重新投影一次 lifecycle，而实时 coordinator 的
+// 投影器（localSubagentBatchLifecycleProjector）drainWake 恒为 true ——
+// ProjectLifecycle 刚 schedule 出来的 critical wake 会在同一次重放里被立刻 drain 成
+// 一个真实父 turn。
+//
+// 2026-09-23 现场回归：交互式 `aicli resume` 启动期先落一行
+// supervision_wake_delivered，紧接着 session_start 带着 supervision.AutoWakePrompt
+// 直接开了一个隐藏 turn。用户看到的是没有 `>` 输入区的 "Analyzing"（actor Busy 抑制
+// composer）和在 5 万 token 恢复上下文上白烧的一个 LLM turn（"恢复非常慢"）。
+//
+// 换成恢复态投影器后：lifecycle 投影与 mailbox 幂等补投逐字节不变，只有 wake drain
+// 被推迟到下一次自然 turn 的 preflight digest 或显式 `/supervision wake --deliver`；
+// headless（NoInteractive）场景仍然立即投递，行为不变。
+func localSubagentBatchStartupReplay(ctx context.Context, host *localChatRuntimeHost, store subagentbatch.BatchStore, parentSessionID string, limit int) {
+	if host == nil || store == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	replayer := agent.NewSubagentBatchCoordinator(agent.SubagentBatchCoordinatorConfig{
+		Store:              store,
+		Emitter:            localSubagentBatchEmitter(host),
+		TerminalSink:       localSubagentBatchTerminalSink(host),
+		LifecycleProjector: localSubagentBatchRecoveryLifecycleProjector(host),
+	})
+	_, _ = replayer.SetTerminalSinkAndReplay(ctx, localSubagentBatchTerminalSink(host), parentSessionID, limit)
+}
+
 func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHost, drainWake bool) agent.BatchLifecycleProjector {
 	return func(ctx context.Context, terminal agent.BatchTerminalLifecycle) error {
 		if host == nil || host.Supervision == nil || host.Supervision.Store == nil {
@@ -1223,7 +1256,10 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 					LifecycleProjector: localSubagentBatchRecoveryLifecycleProjector(host),
 				})
 				_, _ = coordinator.RecoverStaleBatches(recoveryCtx, localSubagentBatchRestartGrace, "", 512)
-				_, _ = coordinator.ReplayTerminalDeliveries(recoveryCtx, "", 512)
+				// 终态重放统一走 localSubagentBatchStartupReplay：两条启动重放路径
+				// 必须共用同一道 interactive 闸门，否则其中一条会重新变成
+				// "启动期 drain wake → 隐藏 auto-wake turn" 的入口。
+				localSubagentBatchStartupReplay(recoveryCtx, host, batchStore, "", 512)
 				// C4-3：run 账本的"恢复 or orphaned"决策与 batch 恢复同批执行。
 				// 宽限期内仍有心跳的 run 保留（可恢复：归属者还在，或等 resume）；
 				// 宽限期外无心跳的 run 判 orphaned + 提升 fencing token + 投影
@@ -1946,7 +1982,13 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 					}
 				}
 				replayCtx, replayCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				_, _ = coordinator.SetTerminalSinkAndReplay(replayCtx, localSubagentBatchTerminalSink(host), parentSessionID, 512)
+				// 2026-09-23：这里过去直接用实时 coordinator 重放，而它的投影器
+				// drainWake 恒为 true —— 重放时重新投影出来的 critical wake 被当场
+				// drain 成真实父 turn，交互式 resume 因此在第一个 composer 渲染之前
+				// 就变成 Busy（没有 `>` 输入区）并白烧一个 turn。实时 coordinator 的
+				// TerminalSink 已在构造时装配（下方 SetTerminalSink 再兜一次），
+				// 所以这里只把「重放」交给统一的 interactive 感知入口。
+				localSubagentBatchStartupReplay(replayCtx, host, host.SubagentBatches, parentSessionID, 512)
 				replayCancel()
 			}
 			release()

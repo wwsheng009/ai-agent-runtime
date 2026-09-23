@@ -448,6 +448,7 @@ func chatWebInvokeTimeout(ms int) time.Duration {
 type chatWebInvokeWatch struct {
 	mu           sync.Mutex
 	sessionID    string // 绑定的会话 ID；非空时忽略其他会话的事件
+	turnID       string // 最近一次 session_start/session_end 事件携带的 turn 身份（供终态回填）
 	lastActivity time.Time
 	starts       int
 	finishes     int
@@ -478,6 +479,12 @@ func (w *chatWebInvokeWatch) observe(event runtimeevents.Event) {
 		w.starts++
 	case runtimechat.EventLLMRequestFinished, "llm.request.finished":
 		w.finishes++
+	case runtimechat.EventSessionStart, runtimechat.EventSessionEnd:
+		// turn 身份来自生命周期事件载荷：actor 在 turn 收尾后清空
+		// state.CurrentTurnID，终态响应的 turn_id 只能靠这里回填。
+		if id := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"])); id != "" {
+			w.turnID = id
+		}
 	case runtimechat.EventSessionInterrupted:
 		w.interrupted = true
 	case runtimechat.EventAssistantMessage, "assistant.message":
@@ -516,6 +523,7 @@ func (w *chatWebInvokeWatch) observe(event runtimeevents.Event) {
 // chatWebInvokeWatchState 是观察器的并发安全快照。
 type chatWebInvokeWatchState struct {
 	LastActivity time.Time
+	TurnID       string
 	Starts       int
 	Finishes     int
 	Interrupted  bool
@@ -530,6 +538,7 @@ func (w *chatWebInvokeWatch) snapshot() chatWebInvokeWatchState {
 	defer w.mu.Unlock()
 	return chatWebInvokeWatchState{
 		LastActivity: w.lastActivity,
+		TurnID:       w.turnID,
 		Starts:       w.starts,
 		Finishes:     w.finishes,
 		Interrupted:  w.interrupted,
@@ -756,6 +765,12 @@ func chatWebInvokeFinalize(resp *chatWebInvokeResponse, session *ChatSession, wa
 		}
 	}
 	ws := watch.snapshot()
+	// 终态回填：turn 结束后 actor 已清空 CurrentTurnID（state 探测拿不到），
+	// 用观察器从生命周期事件记录的 turn 身份补齐，让调用方直接凭响应里的
+	// turn_id 走 /web/api/turn 后验（见 docs/e2e/debug-guide.md §7.2）。
+	if resp.TurnID == "" {
+		resp.TurnID = ws.TurnID
+	}
 	resp.LLMObserved = ws.Starts > 0 || ws.Finishes > 0
 	assistant := strings.TrimSpace(ws.Assistant)
 	if assistant == "" && session != nil {

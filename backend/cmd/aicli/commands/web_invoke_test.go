@@ -383,6 +383,52 @@ func TestSubscribeChatWebInvokeWatch_FiltersOtherSessions(t *testing.T) {
 	}
 }
 
+// TestChatWebInvokeWatch_TurnIDBackfilledOnFinalize 锁定终态 turn 身份回填：
+// actor 在 turn 收尾后清空 state.CurrentTurnID，invoke 响应必须改用观察器从
+// session_start/session_end 事件记录的 turn 身份，调用方才能直接凭响应里的
+// turn_id 走 /web/api/turn 后验（而不必扫描 recent 列表交叉核对）。
+func TestChatWebInvokeWatch_TurnIDBackfilledOnFinalize(t *testing.T) {
+	bus := runtimeevents.NewBus()
+	session := &ChatSession{
+		RuntimeSession:   &runtimechat.Session{ID: "session_a"},
+		LocalRuntimeHost: &localChatRuntimeHost{EventBus: bus},
+	}
+	watch := newChatWebInvokeWatch()
+	unsubscribe := subscribeChatWebInvokeWatch(session, watch)
+	defer unsubscribe()
+
+	// 其他会话的生命周期事件不得污染 turn 身份。
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionStart, SessionID: "session_b",
+		Payload: map[string]interface{}{"turn_id": "turn_foreign"},
+	})
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionStart, SessionID: "session_a",
+		Payload: map[string]interface{}{"turn_id": "turn_e2e_1"},
+	})
+	if got := watch.snapshot().TurnID; got != "turn_e2e_1" {
+		t.Fatalf("watch turn id = %q, want turn_e2e_1", got)
+	}
+
+	// 终态探测拿不到 turn（模拟 turn 结束后 CurrentTurnID 已清空）。
+	withStubbedInvokeProbe(t, func(*ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{}) {
+		return "session_a", "", false, nil, nil
+	})
+	resp := chatWebInvokeFinalize(&chatWebInvokeResponse{}, session, watch, "", "completed", "")
+	if resp.TurnID != "turn_e2e_1" {
+		t.Fatalf("resp turn id = %q, want turn_e2e_1 (backfilled from watch)", resp.TurnID)
+	}
+
+	// state 探测仍能给出 turn（运行中）时以 state 为准，不被回填覆盖。
+	withStubbedInvokeProbe(t, func(*ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{}) {
+		return "session_a", "turn_live_2", true, nil, nil
+	})
+	respLive := chatWebInvokeFinalize(&chatWebInvokeResponse{}, session, watch, "", "timeout", "")
+	if respLive.TurnID != "turn_live_2" {
+		t.Fatalf("resp turn id = %q, want turn_live_2 (state probe wins)", respLive.TurnID)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handler 级：wait_only / 幂等 / 会话校验 / 流式（P1b + P2）
 // ---------------------------------------------------------------------------
