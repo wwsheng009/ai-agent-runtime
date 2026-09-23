@@ -1103,12 +1103,27 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		GlobalSkillDirs:   allConfiguredSkillDirs(skillsCfg),
 	})
 	configDocumentService := runtimeserver.NewLocalConfigDocumentService(configPath)
+	configHotReloader := runtimeserver.NewRuntimeConfigHotReloader(handler, cfg, bootstrapManager)
 	if configDocumentService != nil {
-		configDocumentService.SetHotReloader(
-			runtimeserver.NewRuntimeConfigHotReloader(handler, cfg, bootstrapManager),
-		)
+		configDocumentService.SetHotReloader(configHotReloader)
 	}
 	handler.SetConfigDocumentService(configDocumentService)
+	// 外部改动感知（§9.1 登记的「快照刷新边界」）：config document API 之外的写入
+	// （另一个 aicli 进程、外部工具、手工编辑配置文件）不会经过 SetHotReloader，
+	// 这里轮询来源文件签名——显式 --config 路径 + 分层搜索栈 + 预设层，即
+	// LoadRuntimeAgentConfig 的全部输入——并用**同一个**热重载器应用变更（同一套
+	// 热/冷路径判据与 warning），免得必须重启 runtime-server 才生效；ctx 取消时轮询退出。
+	if external := runtimeserver.NewConfigExternalReloader(
+		configHotReloader,
+		func() (*config.Config, error) {
+			next, _, err := runtimeserver.LoadRuntimeAgentConfig(configPath)
+			return next, err
+		},
+		func() string { return runtimeserver.ConfigSourceSignatureFor(configPath) },
+		0,
+	); external != nil {
+		go external.Run(ctx)
+	}
 	if persister := runtimeserver.NewSkillsRuntimePolicyPersister(configPath, cfg); persister != nil {
 		handler.SetAuthPolicyPersister(persister.PersistAuthPolicy)
 		handler.SetUsagePolicyPersister(persister.PersistUsagePolicy)
