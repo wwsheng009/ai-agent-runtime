@@ -1189,6 +1189,10 @@ func chatSlashCommandQueueSafe(text string) bool {
 		// 2026-09-22 手动核查：status/audit/list 等只读核查可排队；
 		// wake/ack/defer/resolve/control 是动作（投递或 CAS 写入），忙时拒绝。
 		return chatSupervisionSubcommandQueueSafe(fields[1:])
+	case "routing":
+		// 会话级路由（方案 §5.2）：show/doctor 是只读投影可排队；写入类
+		// 子命令忙时拒绝，避免与进行中 turn 的路由快照交错（§4.5）。
+		return chatRoutingSubcommandQueueSafe(fields[1:])
 	default:
 		return false
 	}

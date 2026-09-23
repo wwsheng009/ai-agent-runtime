@@ -21,6 +21,11 @@ const (
 	// such as the git branch. Incremental status updates use this semantic
 	// anchor to preserve the canonical model → provider → balance order.
 	StatusSegProvider
+	// StatusSegRouting carries the session-scoped difficulty routing projection
+	// (方案 §6.2: route:<level> · <model> · <effort> · <来源后缀>). It sits
+	// between provider and balance so the canonical order stays
+	// model → provider → routing → balance → context.
+	StatusSegRouting
 )
 
 // RunState is the primary chat/runtime state shown in the status line.

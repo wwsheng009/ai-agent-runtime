@@ -1079,6 +1079,14 @@ func refreshChatAccountBalanceStatusModel(model style.StatusLineModel, balance c
 }
 
 func chatAccountBalanceStatusInsertIndex(segments []style.StatusSegment) int {
+	// B6 索引修订：balance 的 canonical 落点是 routing 段之后（provider →
+	// routing → balance）；没有 routing 段时退化为原来的 provider/model 锚点，
+	// 保证旧路径（无路由段的模型）行为不变。
+	for index, segment := range segments {
+		if segment.Kind == style.StatusSegRouting {
+			return index + 1
+		}
+	}
 	for index, segment := range segments {
 		if segment.Kind == style.StatusSegProvider {
 			return index + 1
@@ -2538,6 +2546,12 @@ func buildChatSurfaceStatusSegments(session *ChatSession, s chatSurfaceStatus, i
 	}
 	if providerSeg := chatSurfaceProviderStatusSegment(session); providerSeg.full != "" {
 		segments = append(segments, presentChatStatusSegment(providerSeg, style.StatusSegProvider, style.RoleTextSecondary))
+	}
+	// 路由段（方案 §6.2/B6）：插在 provider 之后、balance 之前，与
+	// chatAccountBalanceStatusInsertIndex 的「provider → routing → balance」
+	// 顺序一致；关闭态显示 route:off，不隐藏（用户要能看出路由被关掉）。
+	if routingSeg := chatSurfaceRoutingStatusSegment(session); routingSeg.full != "" {
+		segments = append(segments, presentChatStatusSegment(routingSeg, style.StatusSegRouting, style.RoleAccent))
 	}
 	if balanceSeg := chatSurfaceAccountBalanceStatusSegment(session); balanceSeg.full != "" {
 		segments = append(segments, presentChatStatusSegment(balanceSeg, style.StatusSegBalance, style.RoleSuccess))

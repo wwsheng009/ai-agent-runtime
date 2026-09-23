@@ -33,6 +33,7 @@ type AppState struct {
 	ResumePicker                 ResumePickerState
 	BacktrackPicker              BacktrackPickerState
 	ModelPicker                  ModelPickerState
+	RoutingPanel                 RoutingPanelState
 	LoginPicker                  LoginPickerState
 	ThemePicker                  ThemePickerState
 	SkillPicker                  SkillPickerState
@@ -213,6 +214,14 @@ type BacktrackPickerState struct {
 // Navigation, search and the selected row remain local to the fullscreen list;
 // the provider→model→reasoning mutation is committed only after lease release.
 type ModelPickerState struct {
+	Active  bool
+	LeaseID uint64
+}
+
+// RoutingPanelState intentionally holds only alternate-screen ownership.
+// Navigation and the level → field → value selection remain local to the
+// fullscreen list; the routing write is committed only after lease release.
+type RoutingPanelState struct {
 	Active  bool
 	LeaseID uint64
 }

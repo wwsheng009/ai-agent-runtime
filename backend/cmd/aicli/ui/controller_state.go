@@ -113,6 +113,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			if state.ModelPicker.Active && state.ModelPicker.LeaseID == a.LeaseID {
 				state.ModelPicker = ModelPickerState{}
 			}
+			if state.RoutingPanel.Active && state.RoutingPanel.LeaseID == a.LeaseID {
+				state.RoutingPanel = RoutingPanelState{}
+			}
 			if state.LoginPicker.Active && state.LoginPicker.LeaseID == a.LeaseID {
 				state.LoginPicker = LoginPickerState{}
 			}
@@ -160,6 +163,14 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case CloseModelPicker:
 		if a.LeaseID != 0 && state.ModelPicker.Active && state.ModelPicker.LeaseID == a.LeaseID {
 			state.ModelPicker = ModelPickerState{}
+		}
+	case OpenRoutingPanel:
+		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
+			state.RoutingPanel = RoutingPanelState{Active: true, LeaseID: a.LeaseID}
+		}
+	case CloseRoutingPanel:
+		if a.LeaseID != 0 && state.RoutingPanel.Active && state.RoutingPanel.LeaseID == a.LeaseID {
+			state.RoutingPanel = RoutingPanelState{}
 		}
 	case OpenLoginPicker:
 		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {

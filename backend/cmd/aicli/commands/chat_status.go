@@ -102,6 +102,7 @@ func buildChatStatusBoxLines(session *ChatSession, contentWidth int) []string {
 		{Label: "Agents.md", Value: buildChatStatusAgentsMarkdownValue(session)},
 		{Label: "Collaboration mode", Value: buildChatStatusCollaborationModeValue(session)},
 		{Label: "Reasoning output", Value: buildChatStatusReasoningOutputValue(session)},
+		{Label: "Routing", Value: buildChatStatusRoutingValue(session)},
 	}
 	if chatSessionSupportsFastMode(session) {
 		rows = append(rows, struct {
@@ -142,6 +143,31 @@ func buildChatStatusBoxLines(session *ChatSession, contentWidth int) []string {
 	}
 	lines = append(lines, "╰"+strings.Repeat("─", contentWidth)+"╯")
 	return lines
+}
+
+// buildChatStatusRoutingValue 渲染 /status 的 Routing 行（§6.3）：
+// `on · <level> · <model> · <effort> (<source>)`；关闭态 `off (<source>)`。
+// 与状态栏 routing 段、`/routing show` 同源（§6.1 单一投影）。
+func buildChatStatusRoutingValue(session *ChatSession) string {
+	projection := chatRoutingStatusProjection(session)
+	source := strings.TrimSpace(projection.Source)
+	if source == "" {
+		source = "default"
+	}
+	if !projection.Enabled {
+		return fmt.Sprintf("off (%s)", source)
+	}
+	parts := []string{"on"}
+	if level := strings.TrimSpace(projection.Level); level != "" {
+		parts = append(parts, level)
+	}
+	if model := strings.TrimSpace(projection.Model); model != "" {
+		parts = append(parts, model)
+	}
+	if effort := strings.TrimSpace(projection.Reasoning); effort != "" {
+		parts = append(parts, effort)
+	}
+	return strings.Join(parts, " · ") + fmt.Sprintf(" (%s)", source)
 }
 
 func buildChatStatusHeaderText() string {

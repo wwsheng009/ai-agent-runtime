@@ -2314,10 +2314,42 @@ func resolveLocalAgentdefCompletionRequirement(agentName, profileRoot, projectRo
 }
 
 func localChatSubagentRoutingConfig(session *ChatSession) *config.AICLISubagentRoutingConfig {
-	if session == nil || session.Config == nil || session.Config.AICLI == nil || session.Config.AICLI.Subagents == nil {
+	if session == nil || session.Config == nil || session.Config.AICLI == nil {
 		return nil
 	}
-	return session.Config.AICLI.Subagents.Routing
+	override := chatSessionRoutingOverride(session)
+	// 无配置节且无会话覆盖时保持历史快路径（不读工作区偏好）。
+	if session.Config.AICLI.Subagents == nil && !(override != nil && override.HasSubAgentFields()) {
+		return nil
+	}
+	// §4.2：读取链固定为 session > workspace > config（经统一解析器）。
+	// 零覆盖时解析器返回配置层同一指针，行为与历史完全一致。
+	res := config.ResolveSubagentRouting(session.Config, override, chatRoutingWorkspacePreferences(session), nil)
+	return res.EffectiveSub
+}
+
+// localChatWorkspaceRoutingPreferences 读取当前工作区偏好文件的 routing 子树
+// （方案 §3.3）。会话层覆盖（§3.4）在 P1/P2 接入 TUI 写入路径后进入解析器；
+// 在此之前工作区层与配置层已按 §4.1 阶梯生效。
+func localChatWorkspaceRoutingPreferences() *config.AICLIWorkspaceRoutingPreferences {
+	prefs, err := config.LoadWorkspaceRoutingPreferences()
+	if err != nil || prefs == nil || !prefs.HasRoutingFields() {
+		return nil
+	}
+	return prefs
+}
+
+// resolveLocalChatMainAgentRouting 走统一解析器（§4.1/§4.2）：配置 → 工作区
+// → 会话 → 请求逐字段合并；零覆盖时返回配置层同一指针（M8/REG 前提）。
+func resolveLocalChatMainAgentRouting(session *ChatSession) *config.AICLIMainAgentRoutingConfig {
+	if session == nil || session.Config == nil {
+		return nil
+	}
+	res := config.ResolveMainAgentRouting(session.Config, chatSessionRoutingOverride(session), chatRoutingWorkspacePreferences(session), nil)
+	if res.Effective == nil || !res.Effective.Enabled {
+		return nil
+	}
+	return res.Effective
 }
 
 // localChatMainAgentRoutingConfig 返回主 Agent 动态路由配置
@@ -2341,7 +2373,7 @@ func applyLocalChatMainAgentRouting(loopConfig *agent.LoopReActConfig, session *
 	if loopConfig == nil || !isBaseSession {
 		return
 	}
-	loopConfig.MainAgentRouting = localChatMainAgentRoutingConfig(session)
+	loopConfig.MainAgentRouting = resolveLocalChatMainAgentRouting(session)
 }
 
 func localChatTeamRoutingConfig(session *ChatSession) *config.AICLISubagentRoutingConfig {

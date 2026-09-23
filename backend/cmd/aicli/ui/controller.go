@@ -1002,6 +1002,10 @@ func actionClassString(action UIAction) string {
 		return "OpenModelPicker"
 	case CloseModelPicker:
 		return "CloseModelPicker"
+	case OpenRoutingPanel:
+		return "OpenRoutingPanel"
+	case CloseRoutingPanel:
+		return "CloseRoutingPanel"
 	case OpenLoginPicker:
 		return "OpenLoginPicker"
 	case CloseLoginPicker:

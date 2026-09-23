@@ -229,6 +229,27 @@ func (CloseModelPicker) isUIAction()         {}
 func (CloseModelPicker) Class() ActionClass  { return ClassBarrier }
 func (CloseModelPicker) CoalesceKey() string { return "" }
 
+// OpenRoutingPanel and CloseRoutingPanel bind the /routing session-scoped
+// difficulty routing panel (level → field → value) to its ScreenLease. Like the
+// model picker, the panel owns only transient list state; the actor retains the
+// lease identity so stale lifecycle actions cannot clear a newer modal or
+// resume the primary presenter early.
+type OpenRoutingPanel struct {
+	LeaseID uint64
+}
+
+func (OpenRoutingPanel) isUIAction()         {}
+func (OpenRoutingPanel) Class() ActionClass  { return ClassBarrier }
+func (OpenRoutingPanel) CoalesceKey() string { return "" }
+
+type CloseRoutingPanel struct {
+	LeaseID uint64
+}
+
+func (CloseRoutingPanel) isUIAction()         {}
+func (CloseRoutingPanel) Class() ActionClass  { return ClassBarrier }
+func (CloseRoutingPanel) CoalesceKey() string { return "" }
+
 // OpenLoginPicker and CloseLoginPicker bind the /login provider/protocol
 // selector to its ScreenLease. Like the model picker, the login picker owns
 // only transient list state; the actor retains the lease identity so stale

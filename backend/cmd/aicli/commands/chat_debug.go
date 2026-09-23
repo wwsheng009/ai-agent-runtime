@@ -751,6 +751,8 @@ func chatAgentRoutingSummaryText(session *ChatSession) string {
 		teamSource = "team_independent"
 	}
 	b.WriteString(chatRoutingConfigSummaryText("Team Routing", localChatTeamRoutingConfig(session), teamSource))
+	// I-10：本视图语义不变，仅追加会话级路由的迁移提示。
+	b.WriteString("Migration: 会话级难度路由见 /routing（show|doctor|main|sub）；本视图语义不变\n")
 	return b.String()
 }
 

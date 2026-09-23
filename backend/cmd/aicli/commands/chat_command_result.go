@@ -387,6 +387,13 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		result, handled := tryExecuteStructuredSupervisionCommand(session, command)
 		return result, handled, nil
 	}
+	// 会话级 Agent 路由管理（方案 §5.2）：/routing 是新增命名空间，没有 legacy
+	// 实现，因此在宽围栏之前无条件接管。show/doctor 是只读行内文本，写入类
+	// 子命令只改会话层覆盖（下一 turn 生效），忙时由队列策略拒绝（§5.4）。
+	if commandMatches(cmdLower, "/routing") {
+		result, handled := tryExecuteStructuredRoutingCommand(session, command)
+		return result, handled, nil
+	}
 	if !commandMatches(cmdLower, "/debug") && !commandMatches(cmdLower, "/status") && !commandMatches(cmdLower, "/usage") && !commandMatches(cmdLower, "/load") &&
 		!commandMatches(cmdLower, "/account") && !commandMatches(cmdLower, "/accounts") &&
 		!commandMatches(cmdLower, "/goal") && !commandMatches(cmdLower, "/memory") && !commandMatches(cmdLower, "/stream") &&
@@ -400,7 +407,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		!commandMatches(cmdLower, "/permission-mode") && !commandMatches(cmdLower, "/mode") &&
 		!commandMatches(cmdLower, "/approval-reuse") && !commandMatches(cmdLower, "/plan") &&
 		!commandMatches(cmdLower, "/timeline") && !commandMatches(cmdLower, "/collab") &&
-		!commandMatches(cmdLower, "/mcp") && !commandMatches(cmdLower, "/web") {
+		!commandMatches(cmdLower, "/mcp") && !commandMatches(cmdLower, "/web") && !commandMatches(cmdLower, "/routing") {
 		return CommandResult{}, false, nil
 	}
 

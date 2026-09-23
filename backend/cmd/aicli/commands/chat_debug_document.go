@@ -91,6 +91,8 @@ func appendChatDebugRoutingSummary(builder *chatDebugDocumentBuilder, session *C
 		teamSource = "team_independent"
 	}
 	appendChatDebugRoutingConfig(builder, "Team Routing:", localChatTeamRoutingConfig(session), teamSource)
+	// I-10：本视图语义不变，仅追加会话级路由的迁移提示。
+	builder.meta("Migration:", "会话级难度路由见 /routing（show|doctor|main|sub）；本视图语义不变")
 }
 
 func appendChatDebugRoutingConfig(builder *chatDebugDocumentBuilder, title string, routing *config.AICLISubagentRoutingConfig, source string) {

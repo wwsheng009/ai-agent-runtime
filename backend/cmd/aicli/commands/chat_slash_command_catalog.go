@@ -36,7 +36,7 @@ type chatSlashCommandArgSpec struct {
 }
 
 func chatSlashCommandCatalog() []chatSlashCommandSpec {
-	return []chatSlashCommandSpec{
+	specs := []chatSlashCommandSpec{
 		{
 			Name:        "/help",
 			Aliases:     []string{"/?"},
@@ -139,6 +139,26 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "resolve", Summary: "委托 /debug supervision resolve"},
 				{Token: "control", Summary: "委托 /debug supervision control"},
 				{Token: "help", Summary: "显示 /supervision 用法"},
+			},
+		},
+		{
+			Name:        "/routing",
+			Usage:       "/routing [show|doctor [main|sub] [--json]|on|off|main|sub|reset|save] [--to session|workspace|config] [--yes]",
+			Summary:     "查看与调整会话级难度路由（provider / model / reasoning_effort）",
+			Group:       string(chatSlashCommandGroupSession),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "show", Summary: "只读摘要（可跟 main|sub；--json 输出投影 JSON）"},
+				{Token: "doctor", Summary: "逐字段来源与回退阶梯诊断"},
+				{Token: "on", Summary: "开启路由（可跟 main|sub）"},
+				{Token: "off", Summary: "关闭路由（可跟 main|sub）"},
+				{Token: "main", Summary: "主 Agent：main <key> <value> 或 main level <level> <field> <value>"},
+				{Token: "sub", Summary: "子 Agent：sub <key> <value> 或 sub level <level> <field> <value>"},
+				{Token: "reset", Summary: "清除覆盖（[main|sub] [<level>] [--to session|workspace|config]）"},
+				{Token: "save", Summary: "保存到目标层（[session|workspace|config]；session 层随会话持久化）"},
+				{Token: "--to", Summary: "写入层选择（session|workspace|config）"},
+				{Token: "--yes", Summary: "config 层写入/清除的二次确认"},
+				{Token: "--json", Summary: "show 的 JSON 输出"},
 			},
 		},
 		{
@@ -711,6 +731,23 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			RequiresArgs: true,
 		},
 	}
+	if chatRoutingUIDisabled() {
+		specs = chatSlashCommandCatalogHideRouting(specs)
+	}
+	return specs
+}
+
+// chatSlashCommandCatalogHideRouting 在 §8.3 紧急开关（U-6）开启时从目录中移除
+// `/routing` 入口：帮助与 Tab 补全不再提示；直接输入仍由命令入口给出关闭说明。
+func chatSlashCommandCatalogHideRouting(specs []chatSlashCommandSpec) []chatSlashCommandSpec {
+	out := make([]chatSlashCommandSpec, 0, len(specs))
+	for _, spec := range specs {
+		if spec.Name == "/routing" {
+			continue
+		}
+		out = append(out, spec)
+	}
+	return out
 }
 
 func chatSlashCommandCatalogMap() map[string]chatSlashCommandSpec {

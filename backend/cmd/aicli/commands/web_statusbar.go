@@ -45,6 +45,7 @@ type chatWebStatusBarSegmentKind string
 
 const (
 	chatWebStatusBarSegBalance      chatWebStatusBarSegmentKind = "balance"
+	chatWebStatusBarSegRouting      chatWebStatusBarSegmentKind = "routing"
 	chatWebStatusBarSegContextUsed  chatWebStatusBarSegmentKind = "context_used"
 	chatWebStatusBarSegDirectory    chatWebStatusBarSegmentKind = "directory"
 	chatWebStatusBarSegProject      chatWebStatusBarSegmentKind = "project"
@@ -62,22 +63,23 @@ type chatWebStatusBarSegment struct {
 
 // chatWebStatusBarSnapshot 是 GET /web/api/statusbar 的 JSON 响应体。
 type chatWebStatusBarSnapshot struct {
-	Available     bool                        `json:"available"`
-	Reason        string                      `json:"reason,omitempty"`
-	SessionID     string                      `json:"session_id,omitempty"`
-	Balance       string                      `json:"balance,omitempty"`
-	ContextUsed   string                      `json:"context_used,omitempty"`
-	ContextPercent int                        `json:"context_percent,omitempty"`
-	UsedTokens    int                         `json:"used_tokens,omitempty"`
-	WindowTokens  int                         `json:"window_tokens,omitempty"`
-	Directory     string                      `json:"directory,omitempty"`
-	Project       string                      `json:"project,omitempty"`
-	GitBranch     string                      `json:"git_branch,omitempty"`
-	Window        string                      `json:"window,omitempty"`
-	InputTokens   string                      `json:"input_tokens,omitempty"`
-	OutputTokens  string                      `json:"output_tokens,omitempty"`
-	Segments      []chatWebStatusBarSegment   `json:"segments"`
-	FullLine      string                      `json:"full_line"`
+	Available      bool                      `json:"available"`
+	Reason         string                    `json:"reason,omitempty"`
+	SessionID      string                    `json:"session_id,omitempty"`
+	Balance        string                    `json:"balance,omitempty"`
+	Routing        string                    `json:"routing,omitempty"`
+	ContextUsed    string                    `json:"context_used,omitempty"`
+	ContextPercent int                       `json:"context_percent,omitempty"`
+	UsedTokens     int                       `json:"used_tokens,omitempty"`
+	WindowTokens   int                       `json:"window_tokens,omitempty"`
+	Directory      string                    `json:"directory,omitempty"`
+	Project        string                    `json:"project,omitempty"`
+	GitBranch      string                    `json:"git_branch,omitempty"`
+	Window         string                    `json:"window,omitempty"`
+	InputTokens    string                    `json:"input_tokens,omitempty"`
+	OutputTokens   string                    `json:"output_tokens,omitempty"`
+	Segments       []chatWebStatusBarSegment `json:"segments"`
+	FullLine       string                    `json:"full_line"`
 }
 
 // HandleChatWebAPIStatusLine 返回当前会话的底部状态栏快照（§4.2.6）。
@@ -97,7 +99,12 @@ func HandleChatWebAPIStatusLine(w http.ResponseWriter, r *http.Request) {
 // buildChatWebStatusBarSnapshot 从当前活跃会话构建状态栏快照。
 // 复用 TUI 的 chatSurface*StatusSegment 函数，保证与 aicli chat 底部状态行一致。
 func buildChatWebStatusBarSnapshot() *chatWebStatusBarSnapshot {
-	session := chatWebSession()
+	return buildChatWebStatusBarSnapshotForSession(chatWebSession())
+}
+
+// buildChatWebStatusBarSnapshotForSession 是快照构建的会话入口（可测）。
+// 无会话时返回 available=false 的轻量响应。
+func buildChatWebStatusBarSnapshotForSession(session *ChatSession) *chatWebStatusBarSnapshot {
 	if session == nil {
 		return &chatWebStatusBarSnapshot{
 			Available: false,
@@ -112,6 +119,15 @@ func buildChatWebStatusBarSnapshot() *chatWebStatusBarSnapshot {
 
 	// provider  / model / reasoning_effort 已在 cfg-bar 实时展示，
 	// 此处状态栏仅显示运行时状态：balance / context / directory / git / window / tokens。
+
+	// routing（§6.4：与 TUI 状态栏段同源；零配置时不显示，§6.2 可见性）
+	if seg := chatSurfaceRoutingStatusSegment(session); seg.full != "" {
+		snap.Routing = seg.full
+		snap.Segments = append(snap.Segments, chatWebStatusBarSegment{
+			Kind: string(chatWebStatusBarSegRouting),
+			Text: seg.full,
+		})
+	}
 
 	// balance
 	if seg := chatSurfaceAccountBalanceStatusSegment(session); seg.full != "" {

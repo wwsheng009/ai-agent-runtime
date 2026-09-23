@@ -466,6 +466,11 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	case "/debug":
 		return handleDebugCommand(session, command)
 
+	case "/routing":
+		// 统一渲染会话在 tryExecuteStructuredChatCommand 已接管；这里是
+		// JSON 输出等 legacy 会话的入口（方案 §5.2）。
+		handleChatRoutingCommand(session, command)
+
 	case "/export":
 		return handleExportCommand(session, command)
 
