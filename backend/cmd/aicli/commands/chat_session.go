@@ -192,6 +192,11 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	restoreChatTokenCount(session, session.RuntimeSession)
 	refreshChatTitleMetadata(session)
 	syncChatLoggerSessionMetadata(session)
+	// 恢复会话时把当前 loopback 端口记到该会话名下，使后续
+	// `aicli resume <id> --pprof/--debug` 能复用同一端口（见 chat_web_port_store.go）。
+	if !session.Ephemeral {
+		persistChatWebPortForSession(restoredRuntimeSession.ID)
+	}
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
@@ -272,6 +277,11 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	}
 	clearChatTurnRecovery(session)
 	resetStableSharedToolSurface(session)
+	// 新会话也记录当前 loopback 端口：后续 `aicli resume <id> --pprof/--debug`
+	// 能回到同一端口（见 chat_web_port_store.go）。
+	if !session.Ephemeral {
+		persistChatWebPortForSession(runtimeSession.ID)
+	}
 	if rotateDiagnostics {
 		if err := rotateChatSessionDiagnostics(session); err != nil {
 			return err

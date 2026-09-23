@@ -233,8 +233,8 @@ request → accept → execute 落 durable action 行（`action_id` 可在输出
 | `--theme <name>` | 主题配色/明暗：`classic`、`focus`、`contrast`、`mono` 或 `auto`/`dark`/`light` |
 | `--syntax-theme <name>` | 代码语法高亮主题（`auto` 或 Chroma 主题名） |
 | `--envelope` | JSON 输出时使用统一 envelope 结构（ok/command/data） |
-| `--pprof` | 启用 pprof 诊断端点（127.0.0.1 随机空闲端口） |
-| `--web-port <port>` | 指定 loopback 服务器（Web 客户端 / `/debug` 端点共用）监听端口（1-65535）；等价 `AICLI_PPROF=127.0.0.1:<port>` 且优先级更高，越界直接报错退出 |
+| `--pprof` | 启用 pprof 诊断端点（127.0.0.1；新会话随机空闲端口，`resume <session-id>` 复用该会话上次的端口） |
+| `--web-port <port>` | 指定 loopback 服务器（Web 客户端 / `/debug` 端点共用）监听端口（1-65535）；等价 `AICLI_PPROF=127.0.0.1:<port>` 且优先级更高，越界直接报错退出；显式指定会覆盖该会话已保存的粘性端口 |
 | `--web-token <token>` | 预设 Web 写令牌（默认每进程随机；未指定时也可用 `AICLI_WEB_TOKEN`；详见 [aicli-tui-remote.md](aicli-tui-remote.md) 第 2.2 节） |
 | `--console-host` | Windows：stdin/stdout 为 PTY/pipe 时在新 Console 窗口重启（MobaXterm/mintty 场景） |
 
@@ -248,6 +248,7 @@ request → accept → execute 落 durable action 行（`action_id` 可在输出
 | `AICLI_THEME_MODE` | 明暗模式（auto/dark/light） |
 | `AICLI_THEME_SYNTAX` | 语法主题 |
 | `AICLI_PPROF` | loopback 服务器监听地址（Web 客户端 / `/debug` 端点）；非空即启用、无需 `--pprof`，可带自定义 host；`--web-port` 优先于它 |
+| `AICLI_WEB_PORTS_DIR` | 会话粘性端口档案目录（默认 `$HOME/.aicli/web-ports/`）；设空/未设用默认值，测试或多环境隔离时可覆盖 |
 | `AICLI_WEB_TOKEN` | 预设 Web 写令牌（等价 `--web-token`，flag 优先；≥16 位 URL 安全字符） |
 | `AICLI_EXECUTION_SUPERVISOR_MODE` | 本地子 Agent 看门狗模式：`observe`（默认，仅提醒）或 `enforce`（interrupt + cancel grace，见 §4.8） |
 | `AICLI_RUN_STALL_TIMEOUT` | run 无进展看门狗阈值：**默认关闭**（`0`），长任务/自动化自然执行到结束；显式设为 Go duration（如 `30m`）才启用，触发会以 `context.Canceled` 中止整个 run（`off`/`0`/`disable` 关闭） |

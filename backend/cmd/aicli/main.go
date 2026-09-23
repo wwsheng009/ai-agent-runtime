@@ -123,11 +123,40 @@ func main() {
 			return addrErr
 		}
 		if pprofAddr != "" && pprofHandle == nil {
-			handle, err := startPprofServer(pprofAddr)
-			if err != nil {
-				return fmt.Errorf("failed to start pprof server: %w", err)
+			// 会话粘性端口：resume 同一会话且未显式指定端口（--web-port /
+			// AICLI_PPROF）时，复用该会话上次实际监听的端口，避免每次 resume
+			// 都换一个随机端口导致 /debug/chat/*、/web/ 等调试 URL 失效。
+			webPortExplicit := webPortSet || strings.TrimSpace(pprofEnv) != ""
+			targetSessionID := resolveChatWebPortTargetSessionID(cmd, args)
+			if !webPortExplicit {
+				if stickyAddr, reused := stickyLoopbackServerAddr(webHost, pprofAddr, targetSessionID); reused {
+					if stickyHandle, err := startPprofServer(stickyAddr); err == nil {
+						pprofHandle = stickyHandle
+						fmt.Fprintf(os.Stderr, "Info: reusing stored web port for session %s: %s (override with --web-port)\n", targetSessionID, stickyHandle.URL())
+					} else {
+						fmt.Fprintf(os.Stderr, "Warning: stored web port for session %s is unavailable (%v); falling back to a random port\n", targetSessionID, err)
+					}
+				}
 			}
-			pprofHandle = handle
+			if pprofHandle == nil {
+				startedHandle, err := startPprofServer(pprofAddr)
+				if err != nil {
+					return fmt.Errorf("failed to start pprof server: %w", err)
+				}
+				pprofHandle = startedHandle
+			}
+			// 记录实际监听端口：该会话下次 resume（不带 --web-port）即可复用。
+			// 会话加载路径（新建/恢复）也会为当前活动会话补写同一档案。
+			listenHost, listenPort := loopbackServerHostPort(pprofHandle)
+			if listenPort > 0 {
+				commands.SetChatWebPortRuntimeInfo(listenPort, listenHost)
+				if targetSessionID != "" {
+					if err := commands.SaveChatWebPortRecord(targetSessionID, listenPort, listenHost); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to persist web port for session %s: %v\n", targetSessionID, err)
+					}
+				}
+			}
+			handle := pprofHandle
 			tq := handle.TokenQueryParam()
 			nonLoopback := tq != ""
 			if nonLoopback {

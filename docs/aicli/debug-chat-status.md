@@ -50,6 +50,17 @@ aicli 在 **`--debug`** 或 **`--pprof`** 模式下自动启动 loopback HTTP �
 | `--web-port` 固定端口 | `aicli resume session_<id> --web-port 64562` |
 | 环境变量 | `AICLI_PPROF=127.0.0.1:0 aicli resume session_<id>` |
 
+> **会话粘性端口（默认行为）**：`--pprof` / `--debug` 未配合 `--web-port`（或
+> `AICLI_PPROF`）时，resume 指定会话会**复用该会话上次实际监听的端口**，而不是每次
+> 重新申请随机端口，因此 `/debug/chat/*`、`/web/` 等 URL 在 resume 前后保持不变。
+> 端口档案写在 `~/.aicli/web-ports/<session-id>.json`；`--web-port` / `AICLI_PPROF`
+> 显式指定时以显式值为准，并把该端口写入档案；档案端口被占用（例如会话已在另一个
+> 进程中运行）时回退随机端口并打印 Warning。
+>
+> 注意：只有能**在启动时确定会话 ID** 的形式（`resume <session-id>`、`exec resume
+> <session-id>`、`--session <id>`）才能复用端口；不带 ID 的 `aicli resume`（最近会话
+> /交互选择）当次仍用随机端口，但该端口会在会话载入后写入档案，供下次显式 resume 复用。
+
 启动后 stderr 会打印：
 
 ```
@@ -889,4 +900,4 @@ curl http://127.0.0.1:50679/debug/pprof/goroutine
 - 无活动会话时两者均返回 `available=false`（HTTP 200），便于轮询探测；
 - 不依赖 Observe API（`service.go:126-130` 写死 `renderer_observation_not_implemented`），直接读取内存中的 Presenter / Executor / TerminalSession 内部状态；
 - 快照在 HTTP 请求处理函数中同步构建，**不是定期缓存**，确保每次请求都是当前时刻的最新状态；
-- 使用 `--pprof` 或 `--debug` 启动的 HTTP 服务器默认监听 `127.0.0.1:0`（随机空闲端口），仅本机可访问；用 `--web-port <端口>` 可固定端口（仍绑定 `127.0.0.1`，端口占用时启动失败）。
+- 使用 `--pprof` 或 `--debug` 启动的 HTTP 服务器默认监听 `127.0.0.1`：首次为新会话申请随机空闲端口，此后 resume 该会话（未显式指定 `--web-port`/`AICLI_PPROF`）时复用同一端口（见上文「会话粘性端口」）；用 `--web-port <端口>` 可显式固定端口（仍绑定 `127.0.0.1`，端口占用时启动失败）。
