@@ -64,7 +64,8 @@ web  (aicli 微型 Web 客户端 / 远程调用 API)
      每进程随机生成、重启即轮换。
    - **`GET /web/api/token`**（推荐给脚本）：返回 `header` / `token` / `query_param` / `source` / `hint`，
      只读 GET 无需令牌自举，但同样受 Host（回环）+ Origin（同源）校验，响应 `no-store`；
-   - **终端启动行**：`Info: web write token (X-AICLI-Token): <token>`（显式指定时行尾标注
+   - **启动行（stderr）**：`Info: web write token (X-AICLI-Token): <token>`——写在 **stderr**，
+     独立进程 / stdout、stderr 重定向到日志（**无 TTY**）时同样可见，不要求真实终端（显式指定时行尾标注
      来源，如 `来自 --web-token（固定令牌，重启不轮换，注意保管）`；也可在 TUI 用
      `/debug display` 查看，其 `Token:` 行即当前令牌）；令牌原文**不会**出现在
      `/debug/endpoints` 的 JSON/text 里（避免清单被转发时泄露）；
@@ -220,6 +221,12 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
   }
 }
 ```
+
+> `turn_id` 由 turn 生命周期事件（`session_start` / `session_end`）回填：turn 结束后
+> actor 已清空 `CurrentTurnID`，但响应仍会带上本轮的 turn 身份（turn 运行中以实时探测
+> 为准；`wait_only` 空闲短路等"无 turn 可归属"时缺省）。可直接用它走 `?id=<turn_id>`
+> 后验；需要交叉核对时用 `GET /web/api/turn` 的 `recent` 中 `status=completed` 记录的
+> `assistant_preview`（实测见 [../e2e/debug-guide.md §7.2](../e2e/debug-guide.md)）。
 
 `screen` 与 `/debug/chat/screen`、`/web/api/screen?view=tui` 同源，是"用户当前实际看到的 TUI 界面渲染"（合成帧文本），不是 web 页的完整 transcript。
 
