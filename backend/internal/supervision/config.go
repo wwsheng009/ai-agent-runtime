@@ -96,11 +96,49 @@ type Config struct {
 	// busy followup/send_input 只投递 mailbox、不自动起 turn。仅在
 	// MessageSemanticsV2 为 true 时生效（见 TriggerTurnDrainEnabled）。
 	TriggerTurnAuto *bool `json:"trigger_turn_auto,omitempty" yaml:"trigger_turn_auto,omitempty"`
+
+	// --- 托管 turn / escalate-first（C1-4 = 改动 #8；方案 §6.2/§6.3、I5、Q2–Q5） ---
+
+	// EscalateFirst 是 escalate-first 阶梯的开关（方案 §6.3；§10 回滚项）。
+	// nil/true（默认）时软阈值只走"上报 → 决策 → 兜底"，不再直接 cancel；
+	// 显式 false 恢复引入该机制前的强制分支（软阈值 ⇒ cancel_requested），
+	// 用于灰度回退，无需回滚二进制。
+	EscalateFirst *bool `json:"escalate_first,omitempty" yaml:"escalate_first,omitempty"`
+	// SuspensionEnabled 是 turn 挂起（suspend + 同 turn resume）的开关
+	// （I9 / §10 回滚项）。nil/true（默认）且 durability 探测通过时允许挂起；
+	// 显式 false 时一律走 legacy 同步路径（"结束再唤醒"），不占用 turn。
+	SuspensionEnabled *bool `json:"suspension_enabled,omitempty" yaml:"suspension_enabled,omitempty"`
+	// StallEscalationMultiplier 是 stall 升级阈值倍率（Q3）：progress_age ≥
+	// 倍率 × ProgressDeadlineAt 时进入"上报"档（ActionTaken=escalated），
+	// 而不是直接取消。0 取默认 2。
+	StallEscalationMultiplier float64 `json:"stall_escalation_multiplier,omitempty" yaml:"stall_escalation_multiplier,omitempty"`
+	// DecisionWindow 是决策宽限期 W（Q2）：上报后留给主 Agent 决策的时间窗，
+	// 到期仍无决策即执行兜底强制分支（CancelSource=decision_window_expired）。
+	// 0 取默认 2 × 生效的 HeartbeatTimeout（默认配置下 10m）。
+	DecisionWindow time.Duration `json:"decision_window,omitempty" yaml:"decision_window,omitempty"`
+	// DecisionWindowMax 是决策宽限期的墙钟上限（Q2：上限 2W），用于防止
+	// "可运行时钟"把兜底无限推迟。0 取默认 2 × DecisionWindow。
+	DecisionWindowMax time.Duration `json:"decision_window_max,omitempty" yaml:"decision_window_max,omitempty"`
+	// MaxExtensions 是单个 obligation 的延长次数上限（I5/Q4，默认 3）。
+	MaxExtensions int `json:"max_extensions,omitempty" yaml:"max_extensions,omitempty"`
+	// MaxExtensionPerCall 是单次延长的上限倍率（I5/Q4：单次 ≤ 1× 原始预算，
+	// 默认 1）。
+	MaxExtensionPerCall float64 `json:"max_extension_per_call,omitempty" yaml:"max_extension_per_call,omitempty"`
+	// MaxExtensionTotal 是累计延长的上限倍率（I5/Q4：总量 ≤ 4× 原始预算，
+	// 默认 4）。
+	MaxExtensionTotal float64 `json:"max_extension_total,omitempty" yaml:"max_extension_total,omitempty"`
+	// TurnHardCap 是 turn 级 hard cap（Q5/EC-E1/EC-H12，默认 24h）：挂起 turn
+	// 的最长存活时间；到期前必须产生一次 critical 决策上报，禁止静默结束。
+	TurnHardCap time.Duration `json:"turn_hard_cap,omitempty" yaml:"turn_hard_cap,omitempty"`
+	// PatrolInterval 是 obligation 巡检预约（check_in_after，改动 #9/C3-2）的
+	// 默认粒度：到点触发一次巡检或搭车下一次 progress resume。0 取默认
+	// HeartbeatTimeout（默认配置下 5m）。
+	PatrolInterval time.Duration `json:"patrol_interval,omitempty" yaml:"patrol_interval,omitempty"`
 }
 
 // DefaultConfig 返回默认调参。
 func DefaultConfig() Config {
-	return Config{
+	d := Config{
 		ExecutionDeadline: 30 * time.Minute,
 		HeartbeatTimeout:  5 * time.Minute,
 		DigestMaxItems:    20,
@@ -110,8 +148,26 @@ func DefaultConfig() Config {
 		WakeRateWindow:    time.Hour,
 		WakeMaxAutoWake:   5,
 		WakeBudgetMode:    string(WakeBudgetModeMemory),
+		// C1-4（#8）：托管 turn / escalate-first 默认值（Q2–Q5、I5）。
+		EscalateFirst:             boolPtr(true),
+		SuspensionEnabled:         boolPtr(true),
+		StallEscalationMultiplier: 2,
+		MaxExtensions:             3,
+		MaxExtensionPerCall:       1,
+		MaxExtensionTotal:         4,
+		TurnHardCap:               24 * time.Hour,
 	}
+	// Q2：决策宽限期默认 2×HeartbeatTimeout，墙钟上限默认 2W。
+	d.DecisionWindow = 2 * d.HeartbeatTimeout
+	d.DecisionWindowMax = 2 * d.DecisionWindow
+	// 巡检预约默认取心跳粒度（改动 #9）。
+	d.PatrolInterval = d.HeartbeatTimeout
+	return d
 }
+
+// boolPtr returns a pointer to v for the gray-release switches whose default is
+// "on" (nil and true both mean enabled; only an explicit false turns them off).
+func boolPtr(v bool) *bool { return &v }
 
 // WithDefaults 返回补齐默认值后的配置副本，调用方字段保持原值。
 func (c Config) WithDefaults() Config {
@@ -176,6 +232,45 @@ func (c Config) WithDefaults() Config {
 	if c.TriggerTurnAuto != nil {
 		d.TriggerTurnAuto = c.TriggerTurnAuto
 	}
+	// C1-4（#8）托管 turn / escalate-first：nil/0 取默认，显式值透传。
+	if c.EscalateFirst != nil {
+		d.EscalateFirst = c.EscalateFirst
+	}
+	if c.SuspensionEnabled != nil {
+		d.SuspensionEnabled = c.SuspensionEnabled
+	}
+	if c.StallEscalationMultiplier > 0 {
+		d.StallEscalationMultiplier = c.StallEscalationMultiplier
+	}
+	// Q2 的派生默认必须基于"生效的" HeartbeatTimeout，否则显式心跳覆盖
+	// 会让 W 与实际心跳粒度脱钩。
+	if c.DecisionWindow > 0 {
+		d.DecisionWindow = c.DecisionWindow
+	} else {
+		d.DecisionWindow = 2 * d.HeartbeatTimeout
+	}
+	if c.DecisionWindowMax > 0 {
+		d.DecisionWindowMax = c.DecisionWindowMax
+	} else {
+		d.DecisionWindowMax = 2 * d.DecisionWindow
+	}
+	if c.MaxExtensions > 0 {
+		d.MaxExtensions = c.MaxExtensions
+	}
+	if c.MaxExtensionPerCall > 0 {
+		d.MaxExtensionPerCall = c.MaxExtensionPerCall
+	}
+	if c.MaxExtensionTotal > 0 {
+		d.MaxExtensionTotal = c.MaxExtensionTotal
+	}
+	if c.TurnHardCap > 0 {
+		d.TurnHardCap = c.TurnHardCap
+	}
+	if c.PatrolInterval > 0 {
+		d.PatrolInterval = c.PatrolInterval
+	} else {
+		d.PatrolInterval = d.HeartbeatTimeout
+	}
 	return d
 }
 
@@ -184,6 +279,29 @@ func (c Config) WithDefaults() Config {
 // zero-valued config keeps the historical behavior.
 func (c Config) ProgressCheckEnabled() bool {
 	return c.WithDefaults().ProgressCheckInterval > 0
+}
+
+// EscalateFirstEnabled reports whether the escalate-first ladder (方案 §6.3) is
+// active. Unset means enabled: a soft-threshold stall escalates to the parent
+// and waits for a decision (or the decision window fallback) instead of being
+// cancelled immediately. Only an explicit false restores the legacy forced
+// branch, which is the documented gray-release rollback (§10).
+func (c Config) EscalateFirstEnabled() bool {
+	if c.EscalateFirst == nil {
+		return true
+	}
+	return *c.EscalateFirst
+}
+
+// SuspensionAllowed reports whether turn suspension (park a turn and resume it
+// with the same turn id) may be used once the durability probe passes
+// (I9 / §10). Unset means enabled; an explicit false pins every dispatch to the
+// legacy synchronous path ("finish, then wake"), so no turn is ever parked.
+func (c Config) SuspensionAllowed() bool {
+	if c.SuspensionEnabled == nil {
+		return true
+	}
+	return *c.SuspensionEnabled
 }
 
 // TurnEndCheckEnabled reports whether the turn-end automatic technical check
