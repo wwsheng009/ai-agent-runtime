@@ -69,6 +69,15 @@ type SessionStorageHistoryAppender interface {
 	AddMessageWithLimit(ctx context.Context, sessionID string, message types.Message, maxHistory int) error
 }
 
+// SessionStorageMetadataReader 可选接口：只读会话元数据（不含消息历史）。
+// 只需要「存在性 + 状态」的调用方（诊断审计、P2-9 对账）必须优先走这条路径：
+// SQLite 实现只读 sessions 单行，而 Load 还会把整段 prompt 历史反序列化到内存。
+// 会话库连接池恒为单连接（SetMaxOpenConns(1)），大会话上的一次 Load 足以让并发
+// 读取（启动期历史分页、/web/api/status 快照）排队数秒直至相互饿死。
+type SessionStorageMetadataReader interface {
+	LoadMetadata(ctx context.Context, sessionID string) (*Session, error)
+}
+
 // SessionStatistics 会话统计信息
 type SessionStatistics struct {
 	Total         int            `json:"total" yaml:"total"`

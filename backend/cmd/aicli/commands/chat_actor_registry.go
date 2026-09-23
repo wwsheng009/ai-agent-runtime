@@ -1805,7 +1805,16 @@ func (r *localActorRegistry) localAgentSessionBindingLookup() agentcontrol.Sessi
 		if r == nil || r.Host == nil || r.Host.SessionStore == nil {
 			return result, nil
 		}
-		session, loadErr := r.Host.SessionStore.Load(ctx, result.SessionID)
+		// 只需要「存在性 + 状态」：优先走元数据读取。完整 Load 会反序列化整段
+		// prompt 历史，而会话库连接池恒为单连接——审计/对账每轮都要为每个 agent
+		// 记录调用一次，用 Load 会把启动期历史分页和 /web/api/status 快照一起拖住。
+		var session *runtimechat.Session
+		var loadErr error
+		if reader, ok := r.Host.SessionStore.(runtimechat.SessionStorageMetadataReader); ok {
+			session, loadErr = reader.LoadMetadata(ctx, result.SessionID)
+		} else {
+			session, loadErr = r.Host.SessionStore.Load(ctx, result.SessionID)
+		}
 		if loadErr == runtimechat.ErrSessionNotFound || session == nil {
 			return result, nil
 		}

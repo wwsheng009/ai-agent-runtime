@@ -374,6 +374,21 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 		builder.meta("Primary Lease:", "inactive")
 	}
 	builder.meta("History Effects:", chatDebugHistoryEffectSummary(state.HistoryEffects))
+	// next=0 with a populated Scene is the blank-screen signature: the reducer
+	// never planned a single history commit. The queue counters cannot say why,
+	// so report the planner's cheap inputs beside them (cells the planner
+	// reads, the finalized frontier, and the barrier cell).
+	plan := ui.DiagnoseHistoryPlan(state)
+	builder.meta("History Plan Inputs:", fmt.Sprintf(
+		"transcriptCells=%d appStateCells=%d frontier=%d frontierActive=%t mutable=%d activePhase=%v activeCell=%d firstCell=%d firstPhase=%v firstFinalized=%t firstSourceLen=%d",
+		plan.TranscriptCells, plan.AppStateCells, plan.FrontierCells, plan.FrontierActive, plan.MutableCells,
+		plan.ActivePhase, plan.ActiveCellID, plan.FirstCellID, plan.FirstCellPhase, plan.FirstCellFinalized,
+		plan.FirstCellSourceLen))
+	if plan.LayoutRowsTotal > 0 || plan.LayoutRowsScreened > 0 || plan.LayoutRowsBudgeted > 0 {
+		builder.meta("History Plan Layout:", fmt.Sprintf(
+			"rows=%d screened=%d budgeted=%d budgetComplete=%t",
+			plan.LayoutRowsTotal, plan.LayoutRowsScreened, plan.LayoutRowsBudgeted, plan.LayoutBudgetComplete))
+	}
 	if state.HistoryEffects.ProjectionUnknown {
 		builder.meta("History Projection:", "unknown (recovery required)")
 	} else {
@@ -424,8 +439,16 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectQueueState) string {
 	// that lets the executor replace native scrollback and replay history. It is
 	// the state that explains why a history obligation will (or will not) reset
 	// the physical projection, so it belongs next to the commit gates.
-	return fmt.Sprintf("pending=%d in-flight=%d acked=%d failed=%d invalidated=%d frozen=%t scrollback-replay-armed=%t",
-		pending, inFlight, acked, failed, invalidated, effects.Frozen, effects.ScrollbackReplayArmed)
+	// next is the monotonic token counter. With every entry state at zero it is
+	// the only way to distinguish "the reducer never planned this transcript"
+	// (next=0: nothing can ever be delivered, so an armed destructive replay
+	// clears scrollback and writes nothing back — a blank screen) from "a plan
+	// exists but is not deliverable yet" (next>0: the gate is the
+	// projection/freeze barrier, not planning). epoch is the terminal epoch the
+	// ledger was last reconciled into.
+	return fmt.Sprintf("pending=%d in-flight=%d acked=%d failed=%d invalidated=%d frozen=%t scrollback-replay-armed=%t next=%d epoch=%d",
+		pending, inFlight, acked, failed, invalidated, effects.Frozen, effects.ScrollbackReplayArmed,
+		effects.NextToken, effects.TerminalEpoch)
 }
 
 // appendChatDebugUIActorLines 输出消费端成本快照（docs/plan/ui-event-bridge-drop-hardening.md

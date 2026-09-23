@@ -1386,16 +1386,9 @@ func (s *SQLiteSessionStorage) Load(ctx context.Context, sessionID string) (*Ses
 	if sessionID == "" {
 		return nil, ErrInvalidSession
 	}
-	session, err := scanSQLiteSession(s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, state, title, title_source, summary, message_count,
-		       head_offset, tags_json, metadata_json, created_at, updated_at, expires_at
-		FROM sessions WHERE id = ?
-	`, sessionID))
-	if err == sql.ErrNoRows {
-		return nil, ErrSessionNotFound
-	}
+	session, err := s.LoadMetadata(ctx, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("load sqlite session: %w", err)
+		return nil, err
 	}
 	history, err := s.loadPromptMessages(ctx, sessionID)
 	if err != nil {
@@ -1412,6 +1405,31 @@ func (s *SQLiteSessionStorage) Load(ctx context.Context, sessionID string) (*Ses
 	// the next Update (the same lazy-migration model used elsewhere).
 	if needsLegacyTitleRepair(session.Metadata.TitleSource, session.Metadata.Title) {
 		session.refreshDerivedTitle()
+	}
+	return session, nil
+}
+
+// LoadMetadata 只读 sessions 单行（含 state 与计数），不触碰 session_prompt_messages。
+// 只需要「存在性 + 状态」的调用方（诊断审计、P2-9 对账）走这里，避免为一次判定
+// 反序列化整段历史：会话库连接池恒为单连接，大会话上的一次 Load 会让启动期历史
+// 分页与 /web/api/status 快照相互饿死。存在性/状态语义与 Load 完全一致。
+func (s *SQLiteSessionStorage) LoadMetadata(ctx context.Context, sessionID string) (*Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if sessionID == "" {
+		return nil, ErrInvalidSession
+	}
+	session, err := scanSQLiteSession(s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, state, title, title_source, summary, message_count,
+		       head_offset, tags_json, metadata_json, created_at, updated_at, expires_at
+		FROM sessions WHERE id = ?
+	`, sessionID))
+	if err == sql.ErrNoRows {
+		return nil, ErrSessionNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load sqlite session: %w", err)
 	}
 	return session, nil
 }

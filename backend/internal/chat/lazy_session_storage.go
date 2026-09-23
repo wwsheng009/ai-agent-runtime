@@ -166,6 +166,20 @@ func (s *lazySessionStorage) Load(ctx context.Context, sessionID string) (*Sessi
 	return store.Load(ctx, sessionID)
 }
 
+// LoadMetadata 只读会话元数据（不含历史）：内层存储支持元数据读取时走单行路径，
+// 否则回退到完整 Load。诊断/对账等只需「存在性 + 状态」的调用方用它，避免在
+// 单连接池上为一次判定反序列化整段历史。
+func (s *lazySessionStorage) LoadMetadata(ctx context.Context, sessionID string) (*Session, error) {
+	store, err := s.ensure(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if reader, ok := store.(SessionStorageMetadataReader); ok {
+		return reader.LoadMetadata(ctx, sessionID)
+	}
+	return store.Load(ctx, sessionID)
+}
+
 func (s *lazySessionStorage) Delete(ctx context.Context, sessionID string) error {
 	store, err := s.ensure(ctx)
 	if err != nil {

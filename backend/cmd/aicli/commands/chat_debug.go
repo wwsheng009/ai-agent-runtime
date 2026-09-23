@@ -1334,11 +1334,27 @@ func printChatDebugAgentControl(session *ChatSession) {
 	}
 }
 
+// chatAgentRegistryAuditTimeout 限定诊断审计的等待上限。审计是只读诊断：会话库
+// 连接池恒为单连接，启动期历史分页会长时间占用它。诊断必须降级（<error> /
+// consistency=error）而不是把 /web/api/status 快照挂死到客户端超时。
+const chatAgentRegistryAuditTimeout = 2 * time.Second
+
+// auditLocalAgentRegistryForDebug 以有界超时执行注册表一致性审计，供 /debug 与
+// 状态快照共用；超时后调用方按既有路径降级展示。
+func auditLocalAgentRegistryForDebug(registry *localActorRegistry) (agentcontrol.ConsistencyAuditReport, error) {
+	if registry == nil {
+		return agentcontrol.ConsistencyAuditReport{}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), chatAgentRegistryAuditTimeout)
+	defer cancel()
+	return registry.auditLocalAgentRegistry(ctx)
+}
+
 func chatAgentControlConsistencyLines(session *ChatSession) []string {
 	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.ActorRegistry == nil {
 		return []string{"  consistency=<unavailable>"}
 	}
-	report, err := session.LocalRuntimeHost.ActorRegistry.auditLocalAgentRegistry(context.Background())
+	report, err := auditLocalAgentRegistryForDebug(session.LocalRuntimeHost.ActorRegistry)
 	if err != nil {
 		return []string{"  consistency=<error: " + err.Error() + ">"}
 	}
@@ -2194,7 +2210,7 @@ func chatAgentPanelRegistryLine(session *ChatSession) string {
 		parts = append(parts, "tasks=durable")
 	}
 	if session.LocalRuntimeHost.ActorRegistry != nil {
-		if report, err := session.LocalRuntimeHost.ActorRegistry.auditLocalAgentRegistry(context.Background()); err != nil {
+		if report, err := auditLocalAgentRegistryForDebug(session.LocalRuntimeHost.ActorRegistry); err != nil {
 			parts = append(parts, "consistency=error")
 		} else {
 			parts = append(parts, fmt.Sprintf("consistency_issues=%d", report.IssueCount))
