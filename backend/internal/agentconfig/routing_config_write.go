@@ -1,9 +1,7 @@
 package agentconfig
 
 import (
-	"bytes"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -75,57 +73,19 @@ func UpdateAICLIRoutingSection(configPath string, main *AICLIMainAgentRoutingCon
 	if configPath == "" {
 		return fmt.Errorf("config path is required")
 	}
-	// §3.4/M11：整份「读-改-写」在同一把文件锁内完成——TUI 与 API handler 调的是
-	// 本函数，两个写入端并发时会各自基于旧文件落盘并互相覆盖（丢更新）。
-	unlock := LockRoutingFileWrite(configPath)
-	defer unlock()
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			if _, _, starterErr := EnsureStarterConfigAtPath(configPath); starterErr != nil {
-				return starterErr
-			}
-			raw, err = os.ReadFile(configPath)
-			if err != nil {
-				return fmt.Errorf("read starter config file %s: %w", configPath, err)
-			}
-		} else {
-			return fmt.Errorf("read config file %s: %w", configPath, err)
+	// §3.4/M11：整份「读-改-写」在同一把文件写锁内完成——TUI 与 API handler 调的是
+	// 本函数，且与 chat / theme / provider 写者共用同一把锁（config_file_write.go）。
+	return updateConfigFileDocument(configPath, configDocumentWriteOptions{createStarterWhenMissing: true}, func(_ *yaml.Node, root *yaml.Node) error {
+		aicliNode := mappingValue(root, "aicli")
+		if aicliNode == nil || aicliNode.Kind != yaml.MappingNode {
+			aicliNode = &yaml.Node{Kind: yaml.MappingNode}
+			upsertYAMLMappingValue(root, "aicli", aicliNode)
 		}
-	}
-
-	document, err := parseYAMLDocument(raw)
-	if err != nil {
-		return err
-	}
-	root, err := ensureYAMLRootMapping(document)
-	if err != nil {
-		return err
-	}
-	aicliNode := mappingValue(root, "aicli")
-	if aicliNode == nil || aicliNode.Kind != yaml.MappingNode {
-		aicliNode = &yaml.Node{Kind: yaml.MappingNode}
-		upsertYAMLMappingValue(root, "aicli", aicliNode)
-	}
-
-	if err := upsertRoutingSection(aicliNode, "main_agent", main, mainSet); err != nil {
-		return err
-	}
-	if err := upsertRoutingSection(aicliNode, "subagents", sub, subSet); err != nil {
-		return err
-	}
-
-	var output bytes.Buffer
-	encoder := yaml.NewEncoder(&output)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(document); err != nil {
-		_ = encoder.Close()
-		return fmt.Errorf("encode config yaml: %w", err)
-	}
-	if err := encoder.Close(); err != nil {
-		return fmt.Errorf("finalize config yaml: %w", err)
-	}
-	return writeFileAtomic(configPath, output.Bytes())
+		if err := upsertRoutingSection(aicliNode, "main_agent", main, mainSet); err != nil {
+			return err
+		}
+		return upsertRoutingSection(aicliNode, "subagents", sub, subSet)
+	})
 }
 
 func upsertRoutingSection(parent *yaml.Node, section string, value interface{}, set bool) error {
@@ -184,8 +144,9 @@ func UpdateWorkspaceRoutingSection(workspacePath string, patch *SessionRoutingPa
 		return fmt.Errorf("workspace routing preferences unavailable: cannot resolve path %q", strings.TrimSpace(workspacePath))
 	}
 	// §3.4/M11：同一份 chat-prefs.yaml 的「读-改-写」必须串行化——TUI 与 API
-	// handler 共享本函数，两个不同会话绑定同一工作区时也会落到同一份文件。
-	unlock := LockRoutingFileWrite(path)
+	// handler 共享本函数，两个不同会话绑定同一工作区时也会落到同一份文件；此处
+	// 先读后合并，整段必须在锁内，落盘走 ...Locked 变体（不能再取锁）。
+	unlock := LockConfigFileWrite(path)
 	defer unlock()
 	current, err := loadWorkspaceChatPreferencesAt(path)
 	if err != nil {
@@ -210,7 +171,7 @@ func UpdateWorkspaceRoutingSection(workspacePath string, patch *SessionRoutingPa
 	if prefs.MainAgent == nil && prefs.SubAgent == nil {
 		prefs = &AICLIWorkspaceRoutingPreferences{}
 	}
-	return saveWorkspaceChatPreferencesAt(path, AICLIChatPreferenceUpdate{Routing: prefs})
+	return saveWorkspaceChatPreferencesAtLocked(path, AICLIChatPreferenceUpdate{Routing: prefs})
 }
 
 // WorkspaceRoutingTargetPath 返回 workspace 层的目标文件路径（响应回显用，N9）。

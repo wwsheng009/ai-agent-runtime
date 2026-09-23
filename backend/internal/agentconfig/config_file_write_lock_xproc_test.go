@@ -18,9 +18,9 @@ import (
 
 // 跨进程文件写锁（§3.4 M11 / §12 R4 闭环）用例。
 //
-// 进程内串行化由 routing_file_write_lock_test.go 覆盖；本文件用 Go 标准
+// 进程内串行化由 config_file_write_lock_test.go 覆盖；本文件用 Go 标准
 // helper-process 模式（exec.Command(os.Args[0], "-test.run=...") + 环境变量传参）证明
-// **跨进程**互斥：进程 A 持锁期间，进程 B 的 LockRoutingFileWrite 必须阻塞不返回；
+// **跨进程**互斥：进程 A 持锁期间，进程 B 的 LockConfigFileWrite 必须阻塞不返回；
 // A 释放后 B 才拿到锁。另覆盖降级容错（锁文件目录不存在 → 静默退化为仅进程内锁）
 // 与「锁落在旁路文件、不锁目标文件」的落盘事实。
 
@@ -39,9 +39,9 @@ const (
 	routingLockCrossBlockWindow = 750 * time.Millisecond
 )
 
-// routingFileOSLockPath 返回跨进程旁路锁文件路径（与生产实现同源：归一化路径 + 后缀）。
-func routingFileOSLockPath(target string) string {
-	return normalizeRoutingWriteLockKey(target) + routingFileOSLockSuffix
+// configFileOSLockPath 返回跨进程旁路锁文件路径（与生产实现同源：归一化路径 + 后缀）。
+func configFileOSLockPath(target string) string {
+	return normalizeConfigWriteLockKey(target) + configFileOSLockSuffix
 }
 
 // TestHelperProcessRoutingFileLock 是跨进程用例的 helper 进程入口：只有带
@@ -61,7 +61,7 @@ func TestHelperProcessRoutingFileLock(t *testing.T) {
 
 	switch mode {
 	case routingLockHelperModeHold:
-		unlock := LockRoutingFileWrite(target)
+		unlock := LockConfigFileWrite(target)
 		fmt.Fprintln(out, "LOCKED")
 		_ = out.Flush()
 		// 父进程关闭 stdin（或写入一行）即视为释放信号。
@@ -70,7 +70,7 @@ func TestHelperProcessRoutingFileLock(t *testing.T) {
 		fmt.Fprintln(out, "RELEASED")
 		_ = out.Flush()
 	case routingLockHelperModeWait:
-		unlock := LockRoutingFileWrite(target)
+		unlock := LockConfigFileWrite(target)
 		fmt.Fprintln(out, "ACQUIRED")
 		_ = out.Flush()
 		unlock()
@@ -81,9 +81,9 @@ func TestHelperProcessRoutingFileLock(t *testing.T) {
 	os.Exit(0)
 }
 
-// TestLockRoutingFileWriteBlocksAcrossProcesses 证明跨进程互斥成立。
-func TestLockRoutingFileWriteBlocksAcrossProcesses(t *testing.T) {
-	if !routingFileOSLockSupported {
+// TestLockConfigFileWriteBlocksAcrossProcesses 证明跨进程互斥成立。
+func TestLockConfigFileWriteBlocksAcrossProcesses(t *testing.T) {
+	if !configFileOSLockSupported {
 		t.Skip("当前平台没有跨进程锁实现（按设计降级为仅进程内锁）")
 	}
 	target := filepath.Join(t.TempDir(), "chat-prefs.yaml")
@@ -107,23 +107,66 @@ func TestLockRoutingFileWriteBlocksAcrossProcesses(t *testing.T) {
 	require.NoError(t, waiter.waitExit(t, routingLockHelperExitWait))
 
 	// 锁落在旁路文件上：它存在且为 0 字节；目标文件本身从未被创建（锁不在目标文件上）。
-	lockInfo, err := os.Stat(routingFileOSLockPath(target))
+	lockInfo, err := os.Stat(configFileOSLockPath(target))
 	require.NoError(t, err, "跨进程旁路锁文件应存在")
 	require.Equal(t, int64(0), lockInfo.Size(), "锁文件只做锁载体，不写入内容")
 	_, err = os.Stat(target)
 	require.True(t, os.IsNotExist(err), "不得在目标文件上落锁（目标文件此时不应存在）")
 }
 
-// TestLockRoutingFileWriteUsesSidecarLockFile 固定「锁旁路文件、不锁目标文件」这条设计，
+// TestConfigSectionWriterBlocksAcrossProcesses 把「配置写事务」接到跨进程锁上：另一个
+// 进程持锁期间，UpdateAICLIThemePreferences（routing 之外的写点）必须等待。这条用例把
+// 「统一锁范围」的承诺钉死在进程边界上——写者与锁的直接调用者用的是同一把锁。
+func TestConfigSectionWriterBlocksAcrossProcesses(t *testing.T) {
+	if !configFileOSLockSupported {
+		t.Skip("当前平台没有跨进程锁实现（按设计降级为仅进程内锁）")
+	}
+	target := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, writeFileAtomic(target, []byte("aicli:\n  chat:\n    default_model: keep-me\n")))
+
+	// 进程 A：持锁不放。
+	holder := startRoutingLockHelper(t, target, routingLockHelperModeHold)
+	holder.expectLine(t, "LOCKED", routingLockHelperStartWait)
+
+	// 本进程：配置写事务必须阻塞到 A 释放。
+	done := make(chan error, 1)
+	go func() {
+		_, err := UpdateAICLIThemePreferences(target, AICLIThemePreferenceUpdate{Name: configLockTestStr("solarized")})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		_ = holder.stdin.Close()
+		t.Fatalf("跨进程互斥未覆盖配置写事务：持锁进程未释放，theme 写入已完成（err=%v）", err)
+	case <-time.After(routingLockCrossBlockWindow):
+	}
+
+	require.NoError(t, holder.stdin.Close())
+	holder.expectLine(t, "RELEASED", routingLockHelperExitWait)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(routingLockHelperExitWait):
+		t.Fatal("持锁进程释放后，配置写事务仍未完成")
+	}
+	require.NoError(t, holder.waitExit(t, routingLockHelperExitWait))
+
+	raw, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), "keep-me", "并发写不得丢掉配置文件中的无关节")
+	require.Contains(t, string(raw), "solarized")
+}
+
+// TestLockConfigFileWriteUsesSidecarLockFile 固定「锁旁路文件、不锁目标文件」这条设计，
 // 以及「释放后不删除锁文件」的残留策略（删除会引入 unlink 竞态）。
-func TestLockRoutingFileWriteUsesSidecarLockFile(t *testing.T) {
-	if !routingFileOSLockSupported {
+func TestLockConfigFileWriteUsesSidecarLockFile(t *testing.T) {
+	if !configFileOSLockSupported {
 		t.Skip("当前平台没有跨进程锁实现（按设计降级为仅进程内锁）")
 	}
 	target := filepath.Join(t.TempDir(), "chat-prefs.yaml")
-	lockPath := routingFileOSLockPath(target)
+	lockPath := configFileOSLockPath(target)
 
-	unlock := LockRoutingFileWrite(target)
+	unlock := LockConfigFileWrite(target)
 	info, err := os.Stat(lockPath)
 	require.NoError(t, err, "应创建旁路锁文件 %s", lockPath)
 	require.Equal(t, int64(0), info.Size(), "锁文件只做锁载体，不写入内容")
@@ -137,36 +180,36 @@ func TestLockRoutingFileWriteUsesSidecarLockFile(t *testing.T) {
 	require.NoError(t, err, "释放后锁文件必须保留（删除会引入 unlink 竞态）")
 
 	// 复用同一个锁文件再次加锁/释放。
-	LockRoutingFileWrite(target)()
+	LockConfigFileWrite(target)()
 }
 
-// TestLockRoutingFileWriteDegradesWhenLockDirectoryMissing 覆盖降级容错：锁文件所在目录
-// 不存在（创建锁文件必然失败）时，LockRoutingFileWrite 必须静默降级为仅进程内锁——
+// TestLockConfigFileWriteDegradesWhenLockDirectoryMissing 覆盖降级容错：锁文件所在目录
+// 不存在（创建锁文件必然失败）时，LockConfigFileWrite 必须静默降级为仅进程内锁——
 // 返回可用的释放函数、不 panic、释放幂等可重复调用，且不凭空创建目录/文件；
 // 降级只影响跨进程，进程内串行化必须照旧生效。
-func TestLockRoutingFileWriteDegradesWhenLockDirectoryMissing(t *testing.T) {
+func TestLockConfigFileWriteDegradesWhenLockDirectoryMissing(t *testing.T) {
 	base := t.TempDir()
 	missingDir := filepath.Join(base, "missing-dir")
 	target := filepath.Join(missingDir, "chat-prefs.yaml")
 
-	unlock := LockRoutingFileWrite(target)
+	unlock := LockConfigFileWrite(target)
 	require.NotNil(t, unlock)
 	unlock()
 	unlock() // 幂等
 
 	// 降级后仍可重复加锁/释放。
-	LockRoutingFileWrite(target)()
+	LockConfigFileWrite(target)()
 
 	_, err := os.Stat(missingDir)
 	require.True(t, os.IsNotExist(err), "降级路径不得创建目录")
-	_, err = os.Stat(routingFileOSLockPath(target))
+	_, err = os.Stat(configFileOSLockPath(target))
 	require.True(t, os.IsNotExist(err), "降级路径不得创建锁文件")
 
 	// 降级只丢跨进程互斥；进程内串行化必须保持。
-	first := LockRoutingFileWrite(target)
+	first := LockConfigFileWrite(target)
 	acquired := make(chan struct{})
 	go func() {
-		release := LockRoutingFileWrite(target)
+		release := LockConfigFileWrite(target)
 		close(acquired)
 		release()
 	}()

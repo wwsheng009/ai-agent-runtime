@@ -29,6 +29,9 @@ type AICLIChatPreferenceUpdate struct {
 
 // UpdateAICLIChatPreferences updates the aicli.chat section inside a config file
 // without rewriting unrelated top-level sections.
+//
+// 整份「读-改-写」在 config_file_write.go 的写事务内完成：与 routing / theme /
+// provider 等写者共用同一把配置文件写锁（§3.4 M11 / §12 R4）。
 func UpdateAICLIChatPreferences(configPath string, update AICLIChatPreferenceUpdate) (*AICLIChatConfig, error) {
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
@@ -38,64 +41,30 @@ func UpdateAICLIChatPreferences(configPath string, update AICLIChatPreferenceUpd
 	// section instead of always landing in the highest layer (design §7).
 	configPath = routeConfigWritePath(configPath, chatUpdateWriteKeys(update)...)
 
-	raw, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			if _, _, starterErr := EnsureStarterConfigAtPath(configPath); starterErr != nil {
-				return nil, starterErr
-			}
-			raw, err = os.ReadFile(configPath)
-			if err != nil {
-				return nil, fmt.Errorf("read starter config file %s: %w", configPath, err)
-			}
-		} else {
-			return nil, fmt.Errorf("read config file %s: %w", configPath, err)
+	var current *AICLIChatConfig
+	err := updateConfigFileDocument(configPath, configDocumentWriteOptions{createStarterWhenMissing: true}, func(_ *yaml.Node, root *yaml.Node) error {
+		loaded, err := currentAICLIChatConfig(root)
+		if err != nil {
+			return err
 		}
-	}
+		applyAICLIChatPreferenceUpdate(loaded, update)
 
-	document, err := parseYAMLDocument(raw)
+		sectionNode, err := marshalYAMLNode(loaded)
+		if err != nil {
+			return err
+		}
+		aicliNode := mappingValue(root, "aicli")
+		if aicliNode == nil || aicliNode.Kind != yaml.MappingNode {
+			aicliNode = &yaml.Node{Kind: yaml.MappingNode}
+			upsertYAMLMappingValue(root, "aicli", aicliNode)
+		}
+		upsertYAMLMappingValue(aicliNode, "chat", sectionNode)
+		current = loaded
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	root, err := ensureYAMLRootMapping(document)
-	if err != nil {
-		return nil, err
-	}
-
-	current, err := currentAICLIChatConfig(root)
-	if err != nil {
-		return nil, err
-	}
-	applyAICLIChatPreferenceUpdate(current, update)
-
-	sectionNode, err := marshalYAMLNode(current)
-	if err != nil {
-		return nil, err
-	}
-
-	aicliNode := mappingValue(root, "aicli")
-	if aicliNode == nil || aicliNode.Kind != yaml.MappingNode {
-		aicliNode = &yaml.Node{Kind: yaml.MappingNode}
-		upsertYAMLMappingValue(root, "aicli", aicliNode)
-	}
-	upsertYAMLMappingValue(aicliNode, "chat", sectionNode)
-
-	var output bytes.Buffer
-	encoder := yaml.NewEncoder(&output)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(document); err != nil {
-		_ = encoder.Close()
-		return nil, fmt.Errorf("encode config yaml: %w", err)
-	}
-	if err := encoder.Close(); err != nil {
-		return nil, fmt.Errorf("finalize config yaml: %w", err)
-	}
-
-	if err := writeFileAtomic(configPath, output.Bytes()); err != nil {
-		return nil, err
-	}
-
 	return current, nil
 }
 

@@ -1,9 +1,7 @@
 package agentconfig
 
 import (
-	"bytes"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,6 +58,9 @@ type ProviderConfigUpdate struct {
 }
 
 // UpdateProviderConfig updates one provider node without rewriting unrelated config sections.
+//
+// 整份「读-改-写」在 config_file_write.go 的写事务内完成：与 routing / chat /
+// theme / provider 管理写入共用同一把配置文件写锁（§3.4 M11 / §12 R4）。
 func UpdateProviderConfig(configPath string, update ProviderConfigUpdate) (*Provider, error) {
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
@@ -73,62 +74,34 @@ func UpdateProviderConfig(configPath string, update ProviderConfigUpdate) (*Prov
 	// project-level file cannot silently pin a user-level value (design §7).
 	configPath = routeConfigWritePath(configPath, providerUpdateWriteKeys(update.Name, update)...)
 
-	raw, err := os.ReadFile(configPath)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read config file %s: %w", configPath, err)
-	}
-	if os.IsNotExist(err) {
-		if _, _, starterErr := EnsureStarterConfigAtPath(configPath); starterErr != nil {
-			return nil, starterErr
+	var updated *Provider
+	err := updateConfigFileDocument(configPath, configDocumentWriteOptions{createStarterWhenMissing: true}, func(_ *yaml.Node, root *yaml.Node) error {
+		providersNode := ensureChildMapping(root, "providers")
+		itemsNode := ensureChildMapping(providersNode, "items")
+		providersNode.Style = 0
+		itemsNode.Style = 0
+		providerNode := mappingValue(itemsNode, update.Name)
+		if providerNode == nil || providerNode.Kind != yaml.MappingNode {
+			providerNode = &yaml.Node{Kind: yaml.MappingNode}
+			upsertYAMLMappingValue(itemsNode, update.Name, providerNode)
 		}
-		raw, err = os.ReadFile(configPath)
-		if err != nil {
-			return nil, fmt.Errorf("read starter config file %s: %w", configPath, err)
-		}
-	}
+		providerNode.Style = 0
 
-	document, err := parseYAMLDocument(raw)
+		applyProviderConfigYAMLUpdate(providerNode, update)
+		if update.SetDefaultProvider {
+			upsertYAMLMappingValue(providersNode, "default_provider", stringYAMLNode(update.Name))
+		}
+
+		// 解码放回写前：变更无效时直接失败，不落盘（旧实现先落盘再解码）。
+		decoded := &Provider{}
+		if err := decodeYAMLNode(providerNode, decoded); err != nil {
+			return fmt.Errorf("decode updated provider %s: %w", update.Name, err)
+		}
+		updated = decoded
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	root, err := ensureYAMLRootMapping(document)
-	if err != nil {
-		return nil, err
-	}
-
-	providersNode := ensureChildMapping(root, "providers")
-	itemsNode := ensureChildMapping(providersNode, "items")
-	providersNode.Style = 0
-	itemsNode.Style = 0
-	providerNode := mappingValue(itemsNode, update.Name)
-	if providerNode == nil || providerNode.Kind != yaml.MappingNode {
-		providerNode = &yaml.Node{Kind: yaml.MappingNode}
-		upsertYAMLMappingValue(itemsNode, update.Name, providerNode)
-	}
-	providerNode.Style = 0
-
-	applyProviderConfigYAMLUpdate(providerNode, update)
-	if update.SetDefaultProvider {
-		upsertYAMLMappingValue(providersNode, "default_provider", stringYAMLNode(update.Name))
-	}
-
-	var output bytes.Buffer
-	encoder := yaml.NewEncoder(&output)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(document); err != nil {
-		_ = encoder.Close()
-		return nil, fmt.Errorf("encode config yaml: %w", err)
-	}
-	if err := encoder.Close(); err != nil {
-		return nil, fmt.Errorf("finalize config yaml: %w", err)
-	}
-	if err := writeFileAtomic(configPath, output.Bytes()); err != nil {
-		return nil, err
-	}
-
-	updated := &Provider{}
-	if err := decodeYAMLNode(providerNode, updated); err != nil {
-		return nil, fmt.Errorf("decode updated provider %s: %w", update.Name, err)
 	}
 	return updated, nil
 }

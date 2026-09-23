@@ -152,6 +152,15 @@ func SaveWorkspaceChatPreferencesForPath(workspacePath string, update AICLIChatP
 }
 
 func saveWorkspaceChatPreferencesAt(path string, update AICLIChatPreferenceUpdate) error {
+	unlock := LockConfigFileWrite(path)
+	defer unlock()
+	return saveWorkspaceChatPreferencesAtLocked(path, update)
+}
+
+// saveWorkspaceChatPreferencesAtLocked 假定调用方已持有 path 的写锁：工作区偏好
+// 的写入是「读-改-写」，UpdateWorkspaceRoutingSection 需要先读旧值再合并补丁，
+// 整段在同一把锁内完成，落盘因此不能再次取锁（Go 互斥锁不重入）。
+func saveWorkspaceChatPreferencesAtLocked(path string, update AICLIChatPreferenceUpdate) error {
 	current := &AICLIChatConfig{}
 	if raw, err := os.ReadFile(path); err == nil {
 		loaded, parseErr := currentAICLIChatConfigFromYAML(raw)
@@ -183,6 +192,10 @@ func ClearWorkspaceChatPreferences() error {
 	if path == "" {
 		return nil
 	}
+	// 删除也是同一份文件的变更：与写者共用同一把锁，避免「删除」与「读-改-写」
+	// 交错（写者基于已删除的旧文件落盘，或刚写入的内容被删除命令吃掉）。
+	unlock := LockConfigFileWrite(path)
+	defer unlock()
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove workspace chat preferences %s: %w", path, err)
 	}

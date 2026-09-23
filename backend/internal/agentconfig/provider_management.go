@@ -141,6 +141,10 @@ func DeleteProvidersConfig(configPath string, req ProviderDeleteRequest) (*Provi
 	// Layered configs: delete in the layer that owns the providers. Writing the
 	// deletion into another file would leave the providers visible from below.
 	configPath = routeConfigWritePath(configPath, providerNamesWriteKeys(req.Names)...)
+	// 与其它配置写者共用同一把文件写锁：provider 删除的「读-改-写」整段在锁内，
+	// 否则并发的 chat/theme/routing 写入会各自带旧快照落盘（config_file_write.go）。
+	unlock := LockConfigFileWrite(configPath)
+	defer unlock()
 	document, root, err := readProviderConfigDocument(configPath)
 	if err != nil {
 		return nil, err
@@ -305,6 +309,9 @@ func SetProvidersEnabledConfig(configPath string, names []string, enabled bool) 
 	// Layered configs: enabling/disabling edits providers.items.<name>, so the
 	// write belongs to the layer that owns those entries.
 	configPath = routeConfigWritePath(configPath, providerNamesWriteKeys(names)...)
+	// 同一把配置文件写锁覆盖整段「读-改-写」（config_file_write.go）。
+	unlock := LockConfigFileWrite(configPath)
+	defer unlock()
 	document, root, err := readProviderConfigDocument(configPath)
 	if err != nil {
 		return nil, err
@@ -344,6 +351,9 @@ func SetDefaultProviderConfig(configPath, name string) (*ProviderDefaultResult, 
 		return nil, fmt.Errorf("provider name is required")
 	}
 	configPath = routeConfigWritePath(configPath, "providers.default_provider", "providers.items."+name)
+	// 同一把配置文件写锁覆盖整段「读-改-写」（config_file_write.go）。
+	unlock := LockConfigFileWrite(configPath)
+	defer unlock()
 	document, root, err := readProviderConfigDocument(configPath)
 	if err != nil {
 		return nil, err

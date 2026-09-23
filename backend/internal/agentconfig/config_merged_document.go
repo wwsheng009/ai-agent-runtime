@@ -335,7 +335,13 @@ func appendPath(prefix []string, key string) []string {
 
 // applyDocumentChanges applies edits to one layer file. The file is parsed
 // without environment expansion so untouched `${VAR}` placeholders survive.
+//
+// 整个「读层文件 → 应用变更 → 写回」在同一把配置文件写锁内完成：每个目标文件
+// 各取一次锁（不同文件之间不嵌套），并发写入落到不同键时不再互相覆盖
+// （config_file_write.go）。
 func applyDocumentChanges(file string, changes []DocumentChange) error {
+	unlock := LockConfigFileWrite(file)
+	defer unlock()
 	// The writable target may not exist yet (fresh installation: the first edit
 	// creates $HOME/.aicli/runtime.yaml), so make sure its directory exists.
 	if dir := filepath.Dir(file); dir != "" && dir != "." {

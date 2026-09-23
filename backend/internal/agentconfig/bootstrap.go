@@ -231,12 +231,26 @@ func EnsureStarterConfigFile(configPath string) (string, bool, error) {
 
 // EnsureStarterConfigAtPath creates a starter config at the specified path when
 // the file is absent. Existing files are preserved as-is.
+//
+// starter 创建也走同一把配置文件写锁（方案 §12 R4）：它是「检查是否存在 → 写入」，
+// 与其它读-改-写并发时，后写者可能用 starter 覆盖刚写入的用户内容。配置写事务在
+// 锁内改用 ensureStarterConfigAtPathLocked，避免同一路径重入自锁。
 func EnsureStarterConfigAtPath(configPath string) (string, bool, error) {
 	configPath = normalizeConfigPath(configPath)
 	if configPath == "" {
 		return "", false, fmt.Errorf("starter config path is required")
 	}
+	unlock := LockConfigFileWrite(configPath)
+	defer unlock()
+	return ensureStarterConfigAtPathLocked(configPath)
+}
 
+// ensureStarterConfigAtPathLocked 假定调用方已持有 configPath 的写锁。
+func ensureStarterConfigAtPathLocked(configPath string) (string, bool, error) {
+	configPath = normalizeConfigPath(configPath)
+	if configPath == "" {
+		return "", false, fmt.Errorf("starter config path is required")
+	}
 	if info, err := os.Stat(configPath); err == nil {
 		if info.IsDir() {
 			return "", false, fmt.Errorf("starter config path exists as a directory: %s", configPath)

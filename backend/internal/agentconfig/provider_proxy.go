@@ -108,6 +108,10 @@ func (f proxyUpdateFields) apply(merged *ProxyConfig) (bool, error) {
 // Fields in update that are nil keep their current values; a non-nil pointer
 // with an empty string clears that field. Enabled keeps its current value when
 // update.Enabled is nil; a provider that never had a proxy defaults to enabled.
+//
+// 本函数**不自行取锁**：它在锁外读旧值只为合并出字段补丁，真正的落盘交给
+// UpdateProviderConfig（已持锁的写事务）。若这里再取一次同一路径的锁，会与
+// 写事务自锁（Go 互斥锁不重入）。
 func SetProviderProxyConfig(configPath, name string, update ProviderProxyUpdate) (*ProviderProxyResult, error) {
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
@@ -192,6 +196,9 @@ func SetGlobalProxyConfig(configPath string, update GlobalProxyUpdate) (*GlobalP
 		return nil, fmt.Errorf("config path is required")
 	}
 
+	// 同一把配置文件写锁覆盖整段「读-改-写」（config_file_write.go）。
+	unlock := LockConfigFileWrite(configPath)
+	defer unlock()
 	document, root, err := readProviderConfigDocument(configPath)
 	if err != nil {
 		return nil, err
@@ -248,6 +255,9 @@ func RemoveGlobalProxyConfig(configPath string) (*GlobalProxyResult, error) {
 		return nil, fmt.Errorf("config path is required")
 	}
 
+	// 同一把配置文件写锁覆盖整段「读-改-写」（config_file_write.go）。
+	unlock := LockConfigFileWrite(configPath)
+	defer unlock()
 	document, root, err := readProviderConfigDocument(configPath)
 	if err != nil {
 		return nil, err
@@ -265,6 +275,9 @@ func RemoveGlobalProxyConfig(configPath string) (*GlobalProxyResult, error) {
 
 // RemoveProviderProxyConfig deletes providers.items.<name>.proxy entirely.
 // The global providers.proxy (if any) keeps working for the provider.
+//
+// 与 SetProviderProxyConfig 同理：本函数不取锁，落盘走 UpdateProviderConfig 的
+// 写事务（同一路径重入自锁）。
 func RemoveProviderProxyConfig(configPath, name string) (*ProviderProxyResult, error) {
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
