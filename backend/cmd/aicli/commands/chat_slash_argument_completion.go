@@ -657,6 +657,8 @@ func (p *chatSlashArgumentCompletionProvider) completeExportArgs(session *ChatSe
 		{Command: "current", Summary: "导出当前会话", Group: string(chatSlashCommandGroupSession)},
 		{Command: "--full", Summary: "完整 JSON", Group: string(chatSlashCommandGroupSession)},
 		{Command: "--body", Summary: "正文 Markdown", Group: string(chatSlashCommandGroupSession)},
+		{Command: "--tools", Summary: "Markdown + 工具调用名称与输入参数", Group: string(chatSlashCommandGroupSession)},
+		{Command: "--trace", Summary: "Markdown + 工具调用输入/输出", Group: string(chatSlashCommandGroupSession)},
 		{Command: "--output", Summary: "指定输出文件", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 		{Command: "--dir", Summary: "指定输出目录", Group: string(chatSlashCommandGroupSession), AcceptsArgs: true},
 	}

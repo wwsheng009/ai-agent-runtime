@@ -115,15 +115,22 @@ func openChatExportPicker(session *ChatSession, _ ExportPickerRequest) {
 	pickedSession := sessionPicks[sessionResult.Index]
 
 	// Stage 2: pick the export format (same lease, mirroring backtrack mode).
+	// 格式列表与 legacy 编号菜单共用 chatExportFormatOptions，顺序即索引。
+	formatOptions := chatExportFormatOptions()
+	formatItems := make([]ui.FullScreenListItem, 0, len(formatOptions))
+	for _, option := range formatOptions {
+		formatItems = append(formatItems, ui.FullScreenListItem{
+			Title:      string(option.Format),
+			Detail:     option.PickerDetail,
+			SearchText: option.SearchText,
+		})
+	}
 	formatResult, formatErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
 		Title:        "选择导出格式",
 		Subtitle:     "Enter 确认 · Esc 取消",
 		EmptyMessage: "没有可用的格式",
 		ConfirmLabel: "使用选中格式",
-		Items: []ui.FullScreenListItem{
-			{Title: "full", Detail: "完整 JSON（含消息、工具调用与结果）", SearchText: "full json 完整"},
-			{Title: "body", Detail: "纯文本正文（不含工具链）", SearchText: "body text markdown 正文"},
-		},
+		Items:        formatItems,
 	}, lease)
 	_ = session.Interaction.postUIAction(ui.CloseExportPicker{LeaseID: lease.ID()})
 	releaseErr := lease.Release(context.Background())
@@ -147,8 +154,8 @@ func openChatExportPicker(session *ChatSession, _ ExportPickerRequest) {
 		return
 	}
 	format := chatExportFormatFull
-	if formatResult.Index == 1 {
-		format = chatExportFormatBody
+	if formatResult.Index >= 0 && formatResult.Index < len(formatOptions) {
+		format = formatOptions[formatResult.Index].Format
 	}
 
 	opts := chatExportOptions{
@@ -219,7 +226,7 @@ func buildExportSessionFullScreenItems(sessions []*runtimechat.Session, current 
 func executeStructuredExportCommand(session *ChatSession, command string) (CommandResult, bool) {
 	opts, err := parseChatExportOptions(extractCommandArgument(command))
 	if err != nil {
-		return commandTextResult("错误: " + err.Error() + "\n用法: /export [current|latest|<session-id>] [--full|--body] [--output <path>|--dir <dir>]"), true
+		return commandTextResult("错误: " + err.Error() + "\n用法: " + chatExportUsage), true
 	}
 	if !opts.ExplicitTarget && canOpenChatExportPicker(session) {
 		return CommandResult{
@@ -249,7 +256,7 @@ func buildChatExportResultDocument(result *chatExportResult) CommandResult {
 	lines = append(lines, formatChatSessionMetaRow("Format:", string(result.Format)))
 	lines = append(lines, formatChatSessionMetaRow("Output File:", chatDebugValueOrNone(result.Path)))
 	lines = append(lines, formatChatSessionMetaRow("Messages:", fmt.Sprintf("%d", result.Stats.MessageCount)))
-	if result.Format == chatExportFormatFull {
+	if chatExportFormatReportsToolStats(result.Format) {
 		lines = append(lines, formatChatSessionMetaRow("Tool Calls:", fmt.Sprintf("%d", result.Stats.ToolCallCount)))
 		lines = append(lines, formatChatSessionMetaRow("Tool Results:", fmt.Sprintf("%d", result.Stats.ToolResultCount)))
 	}

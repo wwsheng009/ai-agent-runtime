@@ -9,8 +9,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -399,5 +401,202 @@ func TestUniqueChatArtifactPathAvoidsSameSecondOverwrite(t *testing.T) {
 	}
 	if got := uniqueChatArtifactPath(""); got != "" {
 		t.Fatalf("empty path = %q", got)
+	}
+}
+
+func TestParseChatExportOptionsMarkdownToolFormats(t *testing.T) {
+	cases := []struct {
+		argument string
+		format   chatExportFormat
+	}{
+		{"current --tools", chatExportFormatMarkdownTools},
+		{"current md-tools", chatExportFormatMarkdownTools},
+		{"current --format tool-calls", chatExportFormatMarkdownTools},
+		{"current --trace", chatExportFormatMarkdownTrace},
+		{"current --mode=md-trace", chatExportFormatMarkdownTrace},
+		{"current --format=full-md", chatExportFormatMarkdownTrace},
+	}
+	for _, tc := range cases {
+		opts, err := parseChatExportOptions(tc.argument)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.argument, err)
+		}
+		if opts.Format != tc.format {
+			t.Fatalf("parse %q format = %q, want %q", tc.argument, opts.Format, tc.format)
+		}
+		if !opts.ExplicitFormat {
+			t.Fatalf("parse %q must mark the format explicit", tc.argument)
+		}
+		if !opts.ExplicitTarget || opts.Target != "current" {
+			t.Fatalf("parse %q target = %q explicit=%v", tc.argument, opts.Target, opts.ExplicitTarget)
+		}
+	}
+	if _, err := parseChatExportOptions("current --format bogus"); err == nil {
+		t.Fatal("expected unknown format error")
+	}
+	if _, err := parseChatExportOptions("current --bogus"); err == nil {
+		t.Fatal("expected unknown option error")
+	}
+}
+
+func TestChatExportFormatOptionsMenuOrder(t *testing.T) {
+	options := chatExportFormatOptions()
+	want := []chatExportFormat{
+		chatExportFormatFull,
+		chatExportFormatBody,
+		chatExportFormatMarkdownTools,
+		chatExportFormatMarkdownTrace,
+	}
+	if len(options) != len(want) {
+		t.Fatalf("format options = %d, want %d", len(options), len(want))
+	}
+	for index, format := range want {
+		if options[index].Format != format {
+			t.Fatalf("options[%d] = %q, want %q", index, options[index].Format, format)
+		}
+		if strings.TrimSpace(options[index].MenuLabel) == "" || strings.TrimSpace(options[index].PickerDetail) == "" {
+			t.Fatalf("options[%d] must have both a menu label and a picker detail", index)
+		}
+		if mapped, ok := chatExportFormatByMenuChoice(strconv.Itoa(index+1), options); !ok || mapped != format {
+			t.Fatalf("menu choice %d mapped to %q ok=%v", index+1, mapped, ok)
+		}
+	}
+	if _, ok := chatExportFormatByMenuChoice(strconv.Itoa(len(options)+1), options); ok {
+		t.Fatal("the cancel number must not map to a format")
+	}
+	if chatExportFormatReportsToolStats(chatExportFormatBody) {
+		t.Fatal("body export must keep the compact result summary")
+	}
+	for _, format := range []chatExportFormat{chatExportFormatFull, chatExportFormatMarkdownTools, chatExportFormatMarkdownTrace} {
+		if !chatExportFormatReportsToolStats(format) {
+			t.Fatalf("%q must report tool stats", format)
+		}
+	}
+}
+
+func TestHandleExportCommandMarkdownToolFormats(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.ID = "session-export-md"
+	messages := []runtimetypes.Message{
+		{Role: "user", Content: "please run status", Metadata: runtimetypes.NewMetadata()},
+		{
+			Role:    "assistant",
+			Content: "I will check.",
+			ToolCalls: []runtimetypes.ToolCall{{
+				ID:   "call-1",
+				Name: "execute_shell_command",
+				Args: map[string]interface{}{"command": "git status --short"},
+			}},
+			Metadata: runtimetypes.NewMetadata(),
+		},
+		{Role: "tool", ToolCallID: "call-1", Content: " M file.go", Metadata: runtimetypes.NewMetadata()},
+		{Role: "assistant", Content: "Done.", Metadata: runtimetypes.NewMetadata()},
+	}
+	runtimeSession.ReplaceHistory(messages)
+	session := &ChatSession{
+		RuntimeSession: runtimeSession,
+		Messages:       messages,
+		SessionUserID:  "tester",
+		NoInteractive:  true,
+	}
+
+	toolsDir := t.TempDir()
+	if quit := handleCommand(session, `/export current --tools --dir "`+toolsDir+`"`, false); quit {
+		t.Fatal("expected /export --tools not to exit")
+	}
+	toolsPath := onlyFileWithExt(t, toolsDir, ".md")
+	if !strings.HasSuffix(toolsPath, "_md-tools.md") {
+		t.Fatalf("expected md-tools filename token, got %s", toolsPath)
+	}
+	toolsData, err := os.ReadFile(toolsPath)
+	if err != nil {
+		t.Fatalf("read md-tools export: %v", err)
+	}
+	toolsDoc := string(toolsData)
+	for _, want := range []string{
+		"please run status", "Done.", "#### Tool Calls", "**execute_shell_command**", "(`call-1`)",
+		"Input:", `"command": "git status --short"`,
+	} {
+		if !strings.Contains(toolsDoc, want) {
+			t.Fatalf("md-tools export missing %q, got:\n%s", want, toolsDoc)
+		}
+	}
+	if strings.Contains(toolsDoc, " M file.go") {
+		t.Fatalf("md-tools export must not include tool output, got:\n%s", toolsDoc)
+	}
+
+	traceDir := t.TempDir()
+	if quit := handleCommand(session, `/export current --format=md-trace --dir "`+traceDir+`"`, false); quit {
+		t.Fatal("expected /export --format=md-trace not to exit")
+	}
+	tracePath := onlyFileWithExt(t, traceDir, ".md")
+	traceData, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read md-trace export: %v", err)
+	}
+	traceDoc := string(traceData)
+	for _, want := range []string{
+		"#### Tool Calls", "**execute_shell_command**", "Input:", "Output:", " M file.go",
+		`"command": "git status --short"`,
+	} {
+		if !strings.Contains(traceDoc, want) {
+			t.Fatalf("md-trace export missing %q, got:\n%s", want, traceDoc)
+		}
+	}
+	if strings.Contains(traceDoc, "## Unmatched Tool Results") {
+		t.Fatalf("a matched tool result must not fall back to the unmatched section, got:\n%s", traceDoc)
+	}
+}
+
+func TestExportChatSessionMarkdownTraceUnmatchedToolResults(t *testing.T) {
+	runtimeSession := runtimechat.NewSession("tester")
+	runtimeSession.ID = "session-export-orphan"
+	messages := []runtimetypes.Message{
+		{Role: "user", Content: "hello", Metadata: runtimetypes.NewMetadata()},
+		{Role: "tool", ToolCallID: "call-orphan", Content: "orphan output", Metadata: runtimetypes.NewMetadata()},
+	}
+	runtimeSession.ReplaceHistory(messages)
+	outputPath := filepath.Join(t.TempDir(), "orphan.md")
+	result, err := exportChatSession(&ChatSession{
+		RuntimeSession: runtimeSession,
+		Messages:       messages,
+	}, chatExportOptions{Target: "current", Format: chatExportFormatMarkdownTrace, OutputPath: outputPath})
+	if err != nil {
+		t.Fatalf("export md-trace with orphan result: %v", err)
+	}
+	if result.Stats.ToolResultCount != 1 {
+		t.Fatalf("expected orphan tool result to stay in stats, got %+v", result.Stats)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read md-trace export: %v", err)
+	}
+	doc := string(data)
+	for _, want := range []string{"## Unmatched Tool Results", "call-orphan", "orphan output"} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("orphan tool result export missing %q, got:\n%s", want, doc)
+		}
+	}
+}
+
+func TestChatExportCodeFenceAndToolOutputTruncation(t *testing.T) {
+	if got := chatExportCodeFence("plain"); got != "```" {
+		t.Fatalf("plain fence = %q", got)
+	}
+	if got := chatExportCodeFence("a```b"); got != "````" {
+		t.Fatalf("nested fence = %q", got)
+	}
+	long := strings.Repeat("x", chatExportMarkdownMaxToolOutput+10)
+	truncated := truncateChatExportToolOutput(long)
+	if !strings.Contains(truncated, "truncated: 10 bytes omitted") {
+		t.Fatalf("expected truncation marker, got tail: %q", truncated[len(truncated)-64:])
+	}
+	multibyte := strings.Repeat("测", chatExportMarkdownMaxToolOutput)
+	cut := truncateChatExportToolOutput(multibyte)
+	if !utf8.ValidString(cut) {
+		t.Fatal("truncated tool output must stay valid UTF-8")
+	}
+	if !strings.Contains(cut, "bytes omitted") {
+		t.Fatalf("expected multibyte truncation marker, got tail: %q", cut[len(cut)-64:])
 	}
 }

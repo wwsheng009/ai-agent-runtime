@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -22,7 +24,17 @@ type chatExportFormat string
 const (
 	chatExportFormatFull chatExportFormat = "full"
 	chatExportFormatBody chatExportFormat = "body"
+	// chatExportFormatMarkdownTools 在正文 Markdown 之外附带每个工具调用的
+	// 名称与输入参数（不含输出）。
+	chatExportFormatMarkdownTools chatExportFormat = "md-tools"
+	// chatExportFormatMarkdownTrace 在正文 Markdown 之外附带每个工具调用的
+	// 输入参数与输出结果（按 tool_call_id 配对）。
+	chatExportFormatMarkdownTrace chatExportFormat = "md-trace"
 )
+
+// chatExportUsage 是 /export 的规范用法行：legacy stdout 路径与统一命令通道
+// 共用同一份文案，避免两处用法漂移。
+const chatExportUsage = "/export [current|latest|<session-id>] [--full|--body|--tools|--trace] [--output <path>|--dir <dir>]"
 
 type chatExportOptions struct {
 	Target         string
@@ -85,7 +97,7 @@ func handleExportCommand(session *ChatSession, command string) bool {
 	opts, err := parseChatExportOptions(extractCommandArgument(command))
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)
-		fmt.Println("用法: /export [current|latest|<session-id>] [--full|--body] [--output <path>|--dir <dir>]")
+		fmt.Println("用法: " + chatExportUsage)
 		return false
 	}
 	if !opts.ExplicitTarget && !session.NoInteractive && !session.JSONOutput {
@@ -114,15 +126,9 @@ func parseChatExportOptions(argument string) (chatExportOptions, error) {
 		}
 		lower := strings.ToLower(token)
 		switch {
-		case lower == "--full" || lower == "full" || lower == "json":
-			opts.Format = chatExportFormatFull
-			opts.ExplicitFormat = true
-		case lower == "--body" || lower == "body" || lower == "text" || lower == "markdown" || lower == "md":
-			opts.Format = chatExportFormatBody
-			opts.ExplicitFormat = true
 		case lower == "--format" || lower == "--mode":
 			if i+1 >= len(fields) {
-				return opts, fmt.Errorf("%s 需要指定 full 或 body", token)
+				return opts, fmt.Errorf("%s 需要指定 full、body、tools 或 trace", token)
 			}
 			i++
 			if err := applyChatExportFormat(&opts, fields[i]); err != nil {
@@ -152,9 +158,17 @@ func parseChatExportOptions(argument string) (chatExportOptions, error) {
 			opts.OutputDir = strings.TrimSpace(fields[i])
 		case strings.HasPrefix(lower, "--dir="):
 			opts.OutputDir = strings.TrimSpace(token[len("--dir="):])
-		case strings.HasPrefix(lower, "-"):
-			return opts, fmt.Errorf("未知 /export 选项: %s", token)
 		default:
+			// 裸格式词（full/body/md-tools/...）与 --full/--body/--tools/--trace
+			// 共用同一张映射表；其余裸词才是会话目标。
+			if format, ok := matchChatExportFormatToken(lower); ok {
+				opts.Format = format
+				opts.ExplicitFormat = true
+				continue
+			}
+			if strings.HasPrefix(lower, "-") {
+				return opts, fmt.Errorf("未知 /export 选项: %s", token)
+			}
 			if opts.ExplicitTarget {
 				return opts, fmt.Errorf("只能指定一个导出会话目标")
 			}
@@ -169,16 +183,79 @@ func applyChatExportFormat(opts *chatExportOptions, value string) error {
 	if opts == nil {
 		return nil
 	}
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "full", "json":
-		opts.Format = chatExportFormatFull
-	case "body", "text", "markdown", "md":
-		opts.Format = chatExportFormatBody
-	default:
+	format, ok := matchChatExportFormatToken(value)
+	if !ok {
 		return fmt.Errorf("未知导出格式: %s", strings.TrimSpace(value))
 	}
+	opts.Format = format
 	opts.ExplicitFormat = true
 	return nil
+}
+
+// matchChatExportFormatToken 归一化 /export 的格式词：--format/--mode 的值、
+// 裸格式词与 --full/--body/--tools/--trace 共用同一张映射表。full 是完整 JSON；
+// body 只导出用户/助手正文；md-tools 额外导出工具调用名称与输入参数；
+// md-trace 再额外按 tool_call_id 配对导出输出结果。
+func matchChatExportFormatToken(token string) (chatExportFormat, bool) {
+	switch strings.ToLower(strings.TrimSpace(token)) {
+	case "full", "json", "--full":
+		return chatExportFormatFull, true
+	case "body", "text", "markdown", "md", "--body":
+		return chatExportFormatBody, true
+	case "tools", "tool", "tool-calls", "toolcalls", "md-tools", "--tools":
+		return chatExportFormatMarkdownTools, true
+	case "trace", "tool-trace", "tool-results", "md-trace", "full-md", "--trace":
+		return chatExportFormatMarkdownTrace, true
+	default:
+		return "", false
+	}
+}
+
+// chatExportFormatOption 描述一种导出格式在交互菜单里的呈现。编号菜单与
+// fullscreen 选择器共用同一顺序（1-based 编号 == 切片索引+1），避免两处漂移。
+type chatExportFormatOption struct {
+	Format       chatExportFormat
+	MenuLabel    string
+	PickerDetail string
+	SearchText   string
+}
+
+func chatExportFormatOptions() []chatExportFormatOption {
+	return []chatExportFormatOption{
+		{
+			Format:       chatExportFormatFull,
+			MenuLabel:    "完整 JSON（包含 metadata、tool_calls、tool 结果等）",
+			PickerDetail: "完整 JSON（含消息、工具调用与结果）",
+			SearchText:   "full json 完整",
+		},
+		{
+			Format:       chatExportFormatBody,
+			MenuLabel:    "正文 Markdown（仅用户/助手正文）",
+			PickerDetail: "纯文本正文（不含工具链）",
+			SearchText:   "body text markdown 正文",
+		},
+		{
+			Format:       chatExportFormatMarkdownTools,
+			MenuLabel:    "Markdown + 工具调用（工具名与输入参数）",
+			PickerDetail: "Markdown 正文 + 工具调用名称与输入参数",
+			SearchText:   "tools md-tools markdown 工具 调用 参数 输入",
+		},
+		{
+			Format:       chatExportFormatMarkdownTrace,
+			MenuLabel:    "Markdown + 工具调用与结果（输入/输出）",
+			PickerDetail: "Markdown 正文 + 工具调用输入与输出结果",
+			SearchText:   "trace md-trace markdown 工具 调用 结果 输入 输出",
+		},
+	}
+}
+
+// chatExportFormatByMenuChoice 把 1-based 菜单编号映射回格式；越界返回 false。
+func chatExportFormatByMenuChoice(choice string, options []chatExportFormatOption) (chatExportFormat, bool) {
+	index, err := strconv.Atoi(strings.TrimSpace(choice))
+	if err != nil || index < 1 || index > len(options) {
+		return "", false
+	}
+	return options[index-1].Format, true
 }
 
 type exportMenuChoice int
@@ -352,13 +429,14 @@ func readExportFormatChoice(session *ChatSession, optionWidth int) (chatExportFo
 	if usePopup {
 		defer clearRuntimeSelectionPopup(session)
 	}
+	options := chatExportFormatOptions()
 	warning := ""
 	for {
-		lines := []string{
-			fmt.Sprintf("  %-*s %s", optionWidth, "[1]", "完整 JSON（包含 metadata、tool_calls、tool 结果等）"),
-			fmt.Sprintf("  %-*s %s", optionWidth, "[2]", "正文 Markdown（仅用户/助手正文）"),
-			fmt.Sprintf("  %-*s %s", optionWidth, "[3]", "取消"),
+		lines := make([]string, 0, len(options)+1)
+		for index, option := range options {
+			lines = append(lines, fmt.Sprintf("  %-*s %s", optionWidth, fmt.Sprintf("[%d]", index+1), option.MenuLabel))
 		}
+		lines = append(lines, fmt.Sprintf("  %-*s %s", optionWidth, fmt.Sprintf("[%d]", len(options)+1), "取消"))
 		if usePopup {
 			popupLines := append([]string(nil), lines...)
 			if warning != "" {
@@ -380,13 +458,15 @@ func readExportFormatChoice(session *ChatSession, optionWidth int) (chatExportFo
 		}
 		choice := strings.TrimSpace(normalizeQueuedInputLine(text))
 		warning = ""
+		if choice == "" {
+			return options[0].Format, true, nil
+		}
+		if format, ok := chatExportFormatByMenuChoice(choice, options); ok {
+			return format, true, nil
+		}
 		switch choice {
-		case "", "1":
-			return chatExportFormatFull, true, nil
-		case "2":
-			return chatExportFormatBody, true, nil
-		case "3", "q", "quit", "cancel", "exit":
-			return chatExportFormatFull, false, nil
+		case "q", "quit", "cancel", "exit":
+			return options[0].Format, false, nil
 		default:
 			if usePopup {
 				warning = "  无效的选择，请重新输入"
@@ -428,10 +508,9 @@ func exportChatSession(session *ChatSession, opts chatExportOptions) (*chatExpor
 	}
 	defer os.Remove(temporaryPath)
 	var stats chatSessionExportStats
-	switch opts.Format {
-	case chatExportFormatBody:
-		stats, err = writeChatSessionBodyExport(temporaryPath, session, runtimeSession)
-	default:
+	if mode, ok := chatExportMarkdownModeForFormat(opts.Format); ok {
+		stats, err = writeChatSessionMarkdownExport(temporaryPath, session, runtimeSession, mode)
+	} else {
 		opts.Format = chatExportFormatFull
 		stats, err = writeChatSessionFullExport(temporaryPath, session, runtimeSession, source)
 	}
@@ -678,7 +757,56 @@ func writeStreamedRuntimeSessionJSON(writer io.Writer, session *ChatSession, run
 	return stats, nil
 }
 
-func writeChatSessionBodyExport(path string, session *ChatSession, runtimeSession *runtimechat.Session) (chatSessionExportStats, error) {
+// chatExportMarkdownMode 区分三种 Markdown 变体：body 只输出正文；tools 附带
+// 工具调用名称与输入参数；trace 再附带按 tool_call_id 配对的输出结果。
+type chatExportMarkdownMode int
+
+const (
+	chatExportMarkdownBody chatExportMarkdownMode = iota
+	chatExportMarkdownTools
+	chatExportMarkdownTrace
+)
+
+// chatExportMarkdownModeForFormat 把导出格式映射为 Markdown 渲染模式；第二个
+// 返回值表示该格式是否输出 Markdown（false 走完整 JSON 路径）。
+func chatExportMarkdownModeForFormat(format chatExportFormat) (chatExportMarkdownMode, bool) {
+	switch format {
+	case chatExportFormatBody:
+		return chatExportMarkdownBody, true
+	case chatExportFormatMarkdownTools:
+		return chatExportMarkdownTools, true
+	case chatExportFormatMarkdownTrace:
+		return chatExportMarkdownTrace, true
+	default:
+		return chatExportMarkdownBody, false
+	}
+}
+
+func (m chatExportMarkdownMode) includesToolCalls() bool {
+	return m == chatExportMarkdownTools || m == chatExportMarkdownTrace
+}
+
+func (m chatExportMarkdownMode) includesToolResults() bool {
+	return m == chatExportMarkdownTrace
+}
+
+// chatExportFormatReportsToolStats 工具调用统计只对包含工具信息的格式有意义
+// （full 与两种 Markdown 变体）；纯正文导出保持原有精简输出。
+func chatExportFormatReportsToolStats(format chatExportFormat) bool {
+	return format != chatExportFormatBody
+}
+
+// chatExportMarkdownMaxToolOutput 限制单个工具结果进入 Markdown 的体积：trace
+// 模式面向阅读，数百 KB 的 artifact 会把文件撑到难以打开；截断处保留显式标记，
+// 完整内容仍可用 --full JSON 导出获取。
+const chatExportMarkdownMaxToolOutput = 32 * 1024
+
+// chatExportToolOutputIndex 按 tool_call_id 索引工具结果输出，供 md-trace 在
+// 助手消息的工具调用块里内联渲染（结果消息位于调用消息之后）。同一 call id
+// 的多次结果按出现顺序全部保留。
+type chatExportToolOutputIndex map[string][]string
+
+func writeChatSessionMarkdownExport(path string, session *ChatSession, runtimeSession *runtimechat.Session, mode chatExportMarkdownMode) (chatSessionExportStats, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return chatSessionExportStats{}, fmt.Errorf("创建会话正文导出文件失败: %w", err)
@@ -691,6 +819,16 @@ func writeChatSessionBodyExport(path string, session *ChatSession, runtimeSessio
 	fmt.Fprintf(file, "# %s\n\n- Session: %s\n- State: %s\n- Created: %s\n- Updated: %s\n\n## Conversation\n",
 		markdownPlainLine(title), strings.TrimSpace(runtimeSession.ID), runtimeSession.State,
 		formatChatExportTime(runtimeSession.CreatedAt), formatChatExportTime(runtimeSession.UpdatedAt))
+	// trace 模式需要先按 tool_call_id 索引工具结果，才能在助手消息的工具调用块
+	// 里内联输出（结果消息在调用消息之后到达，单遍流式无法回填）。
+	toolOutputs := chatExportToolOutputIndex{}
+	if mode.includesToolResults() {
+		toolOutputs, err = collectChatExportToolOutputs(session, runtimeSession)
+		if err != nil {
+			return chatSessionExportStats{}, err
+		}
+	}
+	consumedToolOutputs := map[string]bool{}
 	stats := chatSessionExportStats{}
 	wrote := false
 	err = streamChatExportMessageJSON(session, runtimeSession, func(_ int, info runtimechat.CanonicalMessageInfo, payload io.Reader) error {
@@ -721,30 +859,248 @@ func writeChatSessionBodyExport(path string, session *ChatSession, runtimeSessio
 			return nil
 		}
 		content := strings.TrimSpace(chatExportMessageBodyText(message))
+		if role == "assistant" {
+			toolBlocks := mode.includesToolCalls() && len(message.ToolCalls) > 0
+			if content == "" && !toolBlocks {
+				return nil
+			}
+			if _, err := io.WriteString(file, "\n### Assistant\n"); err != nil {
+				return err
+			}
+			if content != "" {
+				if _, err := fmt.Fprintf(file, "\n%s\n", content); err != nil {
+					return err
+				}
+			}
+			if toolBlocks {
+				if err := writeChatExportToolCallBlocks(file, message.ToolCalls, mode, toolOutputs, consumedToolOutputs); err != nil {
+					return err
+				}
+			}
+			wrote = true
+			return nil
+		}
 		if content == "" {
 			return nil
 		}
-		label := "User"
-		if role == "assistant" {
-			label = "Assistant"
+		if _, err := fmt.Fprintf(file, "\n### User\n\n%s\n", content); err != nil {
+			return err
 		}
-		_, err := fmt.Fprintf(file, "\n### %s\n\n%s\n", label, content)
 		wrote = true
-		return err
+		return nil
 	})
 	if err != nil {
 		return chatSessionExportStats{}, fmt.Errorf("流式读取 canonical 会话历史失败: %w", err)
 	}
-	if !wrote {
-		_, err = io.WriteString(file, "\n<empty>\n")
+	if mode.includesToolResults() {
+		extra, err := writeChatExportUnmatchedToolResults(file, toolOutputs, consumedToolOutputs)
+		if err != nil {
+			return chatSessionExportStats{}, err
+		}
+		wrote = wrote || extra
 	}
-	if err != nil {
-		return chatSessionExportStats{}, err
+	if !wrote {
+		if _, err := io.WriteString(file, "\n<empty>\n"); err != nil {
+			return chatSessionExportStats{}, err
+		}
 	}
 	if err := file.Close(); err != nil {
 		return chatSessionExportStats{}, err
 	}
 	return stats, nil
+}
+
+// collectChatExportToolOutputs 单遍扫描 canonical 历史，按 tool_call_id 收集
+// 工具结果正文（md-trace 的第二遍渲染据此内联输出）。
+func collectChatExportToolOutputs(session *ChatSession, runtimeSession *runtimechat.Session) (chatExportToolOutputIndex, error) {
+	index := chatExportToolOutputIndex{}
+	err := streamChatExportMessageJSON(session, runtimeSession, func(_ int, info runtimechat.CanonicalMessageInfo, payload io.Reader) error {
+		role := strings.ToLower(strings.TrimSpace(info.Role))
+		if info.RoleKnown && role != "tool" && !info.ToolResult {
+			return nil
+		}
+		var message runtimetypes.Message
+		if err := json.NewDecoder(payload).Decode(&message); err != nil {
+			return err
+		}
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "tool") {
+			return nil
+		}
+		callID := strings.TrimSpace(message.ToolCallID)
+		if callID == "" {
+			return nil
+		}
+		text := chatExportToolResultText(message)
+		if text == "" {
+			return nil
+		}
+		index[callID] = append(index[callID], text)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("流式读取 canonical 会话历史失败: %w", err)
+	}
+	return index, nil
+}
+
+// chatExportToolResultText 提取工具结果正文：与正文导出不同，工具输出里的
+// 前导空格常承载语义（缩进、`git status --short` 的状态列），因此只规整换行
+// 并去掉首尾空行，不做 TrimSpace。
+func chatExportToolResultText(message runtimetypes.Message) string {
+	if strings.TrimSpace(message.Content) != "" {
+		return normalizeChatExportToolOutputText(message.Content)
+	}
+	parts := make([]string, 0, len(message.ContentParts))
+	for _, part := range message.ContentParts {
+		if part.Type != runtimetypes.ContentPartText {
+			continue
+		}
+		text := normalizeChatExportToolOutputText(part.Text)
+		if strings.TrimSpace(text) != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func normalizeChatExportToolOutputText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return strings.Trim(text, "\n")
+}
+
+// writeChatExportToolCallBlocks 在助手段落里渲染工具调用块：名称 + call id、
+// 输入参数（Input），trace 模式再内联每个调用的输出（Output）。
+func writeChatExportToolCallBlocks(writer io.Writer, calls []runtimetypes.ToolCall, mode chatExportMarkdownMode, outputs chatExportToolOutputIndex, consumed map[string]bool) error {
+	if _, err := io.WriteString(writer, "\n#### Tool Calls\n"); err != nil {
+		return err
+	}
+	for _, call := range calls {
+		name := strings.TrimSpace(call.Name)
+		if name == "" {
+			name = "(unnamed)"
+		}
+		header := "\n**" + name + "**"
+		callID := strings.TrimSpace(call.ID)
+		if callID != "" {
+			header += " (`" + callID + "`)"
+		}
+		if _, err := io.WriteString(writer, header+"\n"); err != nil {
+			return err
+		}
+		if input, ok := chatExportToolCallInput(call); ok {
+			if err := writeChatExportFencedBlock(writer, "Input", input); err != nil {
+				return err
+			}
+		} else if _, err := io.WriteString(writer, "\nInput: (none)\n"); err != nil {
+			return err
+		}
+		if !mode.includesToolResults() || callID == "" {
+			continue
+		}
+		results := outputs[callID]
+		if len(results) == 0 {
+			continue
+		}
+		consumed[callID] = true
+		for _, result := range results {
+			if err := writeChatExportFencedBlock(writer, "Output", truncateChatExportToolOutput(result)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// writeChatExportUnmatchedToolResults 兜底渲染没有对应工具调用消息的结果
+// （历史被裁剪、call id 缺失等），避免 trace 导出静默丢内容。
+func writeChatExportUnmatchedToolResults(writer io.Writer, outputs chatExportToolOutputIndex, consumed map[string]bool) (bool, error) {
+	var ids []string
+	for id, results := range outputs {
+		if consumed[id] || len(results) == 0 {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return false, nil
+	}
+	sort.Strings(ids)
+	if _, err := io.WriteString(writer, "\n## Unmatched Tool Results\n"); err != nil {
+		return false, err
+	}
+	for _, id := range ids {
+		if _, err := fmt.Fprintf(writer, "\n### Tool Result (`%s`)\n", id); err != nil {
+			return false, err
+		}
+		for _, result := range outputs[id] {
+			if err := writeChatExportFencedBlock(writer, "Output", truncateChatExportToolOutput(result)); err != nil {
+				return false, err
+			}
+		}
+	}
+	return true, nil
+}
+
+// chatExportToolCallInput 返回工具调用的输入展示文本：Args（结构化 map）优先，
+// 否则回退 RawInput（freeform/custom tool 的原始输入）。第二个返回值表示是否
+// 存在可渲染的输入。
+func chatExportToolCallInput(call runtimetypes.ToolCall) (string, bool) {
+	if len(call.Args) > 0 {
+		if payload, err := json.MarshalIndent(call.Args, "", "  "); err == nil {
+			return string(payload), true
+		}
+	}
+	raw := strings.TrimSpace(call.RawInput)
+	if raw == "" {
+		return "", false
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, []byte(raw), "", "  "); err == nil {
+		return pretty.String(), true
+	}
+	return raw, true
+}
+
+// writeChatExportFencedBlock 写 "Label:" + 围栏代码块；围栏长度随内容自适应，
+// 工具输出里的 ``` 不会提前闭合代码块。
+func writeChatExportFencedBlock(writer io.Writer, label, content string) error {
+	fence := chatExportCodeFence(content)
+	_, err := fmt.Fprintf(writer, "\n%s:\n\n%s\n%s\n%s\n", label, fence, content, fence)
+	return err
+}
+
+// chatExportCodeFence 生成不短于 3、且比内容中最长反引号串更长的围栏。
+func chatExportCodeFence(content string) string {
+	longest, current := 0, 0
+	for _, r := range content {
+		if r == '`' {
+			current++
+			if current > longest {
+				longest = current
+			}
+			continue
+		}
+		current = 0
+	}
+	size := longest + 1
+	if size < 3 {
+		size = 3
+	}
+	return strings.Repeat("`", size)
+}
+
+// truncateChatExportToolOutput 按 chatExportMarkdownMaxToolOutput 截断工具输出，
+// 回退到最近的 UTF-8 边界并留下显式标记。
+func truncateChatExportToolOutput(text string) string {
+	if len(text) <= chatExportMarkdownMaxToolOutput {
+		return text
+	}
+	head := text[:chatExportMarkdownMaxToolOutput]
+	for len(head) > 0 && !utf8.ValidString(head) {
+		head = head[:len(head)-1]
+	}
+	return head + fmt.Sprintf("\n... <truncated: %d bytes omitted>", len(text)-len(head))
 }
 
 func resolveChatExportRuntimeSession(session *ChatSession, opts chatExportOptions) (*runtimechat.Session, string, error) {
@@ -820,7 +1176,7 @@ func resolveChatExportOutputPath(session *ChatSession, runtimeSession *runtimech
 		return "", fmt.Errorf("无法确定导出目录")
 	}
 	extension := ".json"
-	if opts.Format == chatExportFormatBody {
+	if _, isMarkdown := chatExportMarkdownModeForFormat(opts.Format); isMarkdown {
 		extension = ".md"
 	}
 	sessionID := "session"
@@ -1003,7 +1359,7 @@ func printChatExportResult(result *chatExportResult) {
 	printChatSessionMetaRow("Format:", string(result.Format))
 	printChatSessionMetaRow("Output File:", chatDebugValueOrNone(result.Path))
 	printChatSessionMetaRow("Messages:", fmt.Sprintf("%d", result.Stats.MessageCount))
-	if result.Format == chatExportFormatFull {
+	if chatExportFormatReportsToolStats(result.Format) {
 		printChatSessionMetaRow("Tool Calls:", fmt.Sprintf("%d", result.Stats.ToolCallCount))
 		printChatSessionMetaRow("Tool Results:", fmt.Sprintf("%d", result.Stats.ToolResultCount))
 	}

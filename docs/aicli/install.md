@@ -634,7 +634,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | `/sessions` | 列出或筛选可恢复会话 |
 | `/load <session-id>` | 加载指定会话 |
 | `/resume [latest|<session-id>]` | 恢复最近会话或指定会话；无参数时显示可恢复会话选择器 |
-| `/export [current|latest|<session-id>] [--full|--body]` | 导出当前或历史会话；完整 JSON 保留 tool_calls、tool 结果和 metadata，正文模式输出 Markdown |
+| `/export [current|latest|<session-id>] [--full|--body|--tools|--trace]` | 导出当前或历史会话；完整 JSON 保留 tool_calls、tool 结果和 metadata，正文模式输出 Markdown，`--tools`/`--trace` 在 Markdown 中附带工具调用（名称+输入参数 / 输入+输出结果） |
 | `/agents [panel|pick|target|send|followup|routing]` | 查看 agent tree、选择默认 agent target、向 child agent 投递消息或 follow-up；`/agents routing test` 可 dry-run 子 agent 路由 |
 | `/timeline [team|active] [limit] [filter=<text>]` | 查看 active team 或指定 team 的持久事件时间线 |
 | `/collab [follow] [target|selected|parent|all] [limit] [filter=<text>] [timeout=10s]` | 查看 parent/child/team teammate 的 mailbox/collab 时间线 |
@@ -662,7 +662,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - chat 内的 `/sessions` 不显示当前会话和启动占位会话；`aicli chat --list-sessions` / `aicli resume --list-sessions` 的独立完整列表显示最后更新时间、轮次和消息数，并保留 session id、状态、protocol、provider、model 等诊断信息。会话列表和最近会话恢复默认按当前工作目录过滤，传入 `--cwd=false` 才会查看全部目录。CLI 入口上，`aicli resume` 默认恢复当前工作目录最近的可恢复会话，`aicli resume <session-id>` 仍可直接加载指定会话；`aicli --resume` 会经默认 chat 参数改写为 `aicli chat --resume`。
 - 退出交互式 TUI 后，终端会显示 `aicli resume <session-id>`，便于下次继续当前会话；临时会话以及尚未落盘的空会话不会显示无效的恢复命令。
 - 交互式 `aicli resume` / `aicli chat --resume` / 会话内 `/resume` 恢复后**停在等待输入状态**：上一进程遗留的团队执行会被停放为 `paused`（保留可恢复的团队壳，任务标记 cancelled），不会在启动阶段重新拉起 team lifecycle loop 继续执行，也不会在首屏渲染前 drain supervision auto-wake；启动信息行会提示 `Resume:` 停放说明。headless / `--output json` 语义不变，遗留团队仍跑到终态。
-- `/export` 无参数时会弹出选择器；`--full` 生成完整 JSON，`--body` 只导出用户/助手正文；可用 `--output <path>` 或 `--dir <dir>` 指定输出位置。
+- `/export` 无参数时会弹出选择器；`--full` 生成完整 JSON，`--body` 只导出用户/助手正文，`--tools` 在 Markdown 中附带工具调用名称与输入参数，`--trace` 再附带按 `tool_call_id` 配对的输出结果（单个输出超过 32 KB 时截断并标记，完整内容用 `--full`）；可用 `--output <path>` 或 `--dir <dir>` 指定输出位置。
 - `/debug export` / `/debug zip` 会把 `/debug display` 中“会话文件与目录”部分的 session file、chat/debug log、http/shell/images artifacts（兼容旧目录名 runtime-http/local-shell/generated-images）打包为 zip，并附带 `manifest.json`。SQLite 模式在同一读事务中生成只含当前 session 的一致性快照，包含已提交 WAL 内容但不会泄露其他会话，并同时打包当前会话引用的 canonical artifacts。
 - `spawn_team auto_start=true` 之后应使用 `wait_team` 等待持久 `team.completed` / `team.summary`；`wait_agent` / `read_agent_events` 面向 `spawn_agent` child session，不应拿 team member id 当 child session id。
 - `/shell` / `/cmd` 支持 `--output-bytes-cap <bytes>` 与 `--disable-output-cap`；默认使用检测到的用户 shell。危险命令仍会进入确认/权限流程。

@@ -281,7 +281,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/export",
-			Usage:       "/export [current|latest|<session-id>] [--full|--body] [--output <path>|--dir <dir>]",
+			Usage:       chatExportUsage,
 			Summary:     "导出当前或历史会话",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
@@ -291,6 +291,8 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "<session-id>", Summary: "导出指定会话"},
 				{Token: "--full", Summary: "导出完整 JSON，包含 tool_calls、tool 结果和 metadata"},
 				{Token: "--body", Summary: "仅导出用户/助手正文 Markdown"},
+				{Token: "--tools", Summary: "导出 Markdown，并附带工具调用名称与输入参数"},
+				{Token: "--trace", Summary: "导出 Markdown，并附带工具调用输入与输出结果"},
 				{Token: "--output", Summary: "指定输出文件"},
 				{Token: "--dir", Summary: "指定输出目录"},
 			},
