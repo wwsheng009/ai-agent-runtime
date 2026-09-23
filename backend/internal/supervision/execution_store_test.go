@@ -3,6 +3,7 @@ package supervision
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -274,4 +275,88 @@ func TestExecutionRunStore_CancelThenConflictOnStaleTerminal(t *testing.T) {
 	_, err = store.MarkExecutionRunTerminal(ctx, "run_missing", RunStatusFailed, "", "", time.Now().UTC())
 	require.ErrorIs(t, err, ErrRunConflict)
 	require.False(t, errors.Is(err, ErrRunNotFound))
+}
+
+// C1-3 / AC-P0-3a + AC-P0-3b: the turn/extension ledger fields round-trip
+// through the store and the additive migration is safe to re-run.
+func TestExecutionRunStore_TurnLedgerFieldsRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "supervision.db")
+	ctx := context.Background()
+	store, err := NewSQLiteSupervisionStore(&StoreConfig{Path: path})
+	require.NoError(t, err)
+
+	run := sampleExecutionRun("run_turn_ledger")
+	window := time.Now().UTC().Add(10 * time.Minute).Truncate(time.Second)
+	run.TurnID = "turn-42"
+	run.DeclaredBudget = 20 * time.Minute
+	run.DecisionWindowUntil = &window
+	created, err := store.CreateExecutionRun(ctx, run)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	got, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, "turn-42", got.TurnID)
+	require.Equal(t, 20*time.Minute, got.DeclaredBudget)
+	require.Zero(t, got.ExtensionCount)
+	require.Zero(t, got.ExtendedTotal)
+	require.NotNil(t, got.DecisionWindowUntil)
+	require.WithinDuration(t, window, *got.DecisionWindowUntil, time.Second)
+
+	// Extension accounting is written through the CAS path (I5 counters).
+	extendedDeadline := got.ExecutionDeadlineAt.Add(15 * time.Minute)
+	updated := *got
+	updated.ExtensionCount = 2
+	updated.ExtendedTotal = 15 * time.Minute
+	updated.ExecutionDeadlineAt = &extendedDeadline
+	ok, err := store.UpdateExecutionRunCAS(ctx, updated, got.Version)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	after, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, 2, after.ExtensionCount)
+	require.Equal(t, 15*time.Minute, after.ExtendedTotal)
+	require.WithinDuration(t, extendedDeadline, *after.ExecutionDeadlineAt, time.Second)
+
+	// Reopening re-applies the migration chain; it must be idempotent
+	// (AC-P0-3a) and the new columns must read back unchanged.
+	require.NoError(t, store.Close())
+	reopened, err := NewSQLiteSupervisionStore(&StoreConfig{Path: path})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	again, err := reopened.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, "turn-42", again.TurnID)
+	require.Equal(t, 20*time.Minute, again.DeclaredBudget)
+	require.Equal(t, 2, again.ExtensionCount)
+	require.Equal(t, 15*time.Minute, again.ExtendedTotal)
+
+	// A row written before the migration (only the legacy columns are set) must
+	// scan back with zero values for the new fields instead of failing.
+	db, err := reopened.dbOrErr()
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	_, err = db.ExecContext(ctx, `INSERT INTO supervision_execution_runs (
+		run_id, kind, workflow, root_session_id, parent_session_id, parent_run_id,
+		session_id, agent_id, attempt, status, owner_id, started_at,
+		last_heartbeat_at, last_progress_at, progress_seq, cancel_source,
+		max_attempts, fencing_token, result_ref, error_code, version,
+		created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"run_legacy", RunKindAgentRun, RunWorkflowSpawnAgent, "root-session",
+		"parent-session", "", "child-legacy", "child-legacy", 1, RunStatusRunning,
+		"host-1", formatRunTime(now), formatRunTime(now), formatRunTime(now), 3,
+		"", 1, 1, "", "", 1,
+		formatRunTime(now), formatRunTime(now))
+	require.NoError(t, err)
+
+	legacy, err := reopened.GetExecutionRun(ctx, "run_legacy")
+	require.NoError(t, err)
+	require.Empty(t, legacy.TurnID)
+	require.Zero(t, legacy.DeclaredBudget)
+	require.Zero(t, legacy.ExtensionCount)
+	require.Zero(t, legacy.ExtendedTotal)
+	require.Nil(t, legacy.DecisionWindowUntil)
 }

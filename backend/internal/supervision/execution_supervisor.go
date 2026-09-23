@@ -76,19 +76,26 @@ func DefaultExecutionSupervisorConfig() ExecutionSupervisorConfig {
 // 7.1). Zero durations fall back to the supervisor defaults; explicit zero
 // means unbounded only when AllowUnbounded is configured.
 type RunSpec struct {
-	Kind             string
-	Workflow         string
-	RootSessionID    string
-	ParentSessionID  string
-	ParentRunID      string
-	SessionID        string
-	AgentID          string
-	OwnerID          string
-	ExecutionTimeout time.Duration
-	ProgressTimeout  time.Duration
-	ApprovalTimeout  time.Duration
-	CancelGrace      time.Duration
-	MaxAttempts      int
+	Kind            string
+	Workflow        string
+	RootSessionID   string
+	ParentSessionID string
+	ParentRunID     string
+	SessionID       string
+	AgentID         string
+	OwnerID         string
+	// TurnID is the dispatching turn (AC-P0-3c). Resume keys on it, so hosts
+	// must pass the turn that spawned this obligation.
+	TurnID string
+	// DeclaredBudget / DecisionWindowUntil are the per-obligation declarative
+	// budget and the escalate-first decision window (§6.2 / I8).
+	DeclaredBudget      time.Duration
+	DecisionWindowUntil *time.Time
+	ExecutionTimeout    time.Duration
+	ProgressTimeout     time.Duration
+	ApprovalTimeout     time.Duration
+	CancelGrace         time.Duration
+	MaxAttempts         int
 }
 
 // RunInterrupter is implemented by the host to interrupt a live child run
@@ -189,26 +196,29 @@ func (s *ExecutionSupervisor) StartRun(ctx context.Context, spec RunSpec) (*Exec
 		return nil, fmt.Errorf("session id is required")
 	}
 	run := ExecutionRun{
-		RunID:           generateRunID(),
-		Kind:            strings.TrimSpace(spec.Kind),
-		Workflow:        strings.TrimSpace(spec.Workflow),
-		RootSessionID:   strings.TrimSpace(spec.RootSessionID),
-		ParentSessionID: strings.TrimSpace(spec.ParentSessionID),
-		ParentRunID:     strings.TrimSpace(spec.ParentRunID),
-		SessionID:       spec.SessionID,
-		AgentID:         firstNonEmpty(spec.AgentID, spec.SessionID),
-		Attempt:         1,
-		Status:          RunStatusQueued,
-		OwnerID:         strings.TrimSpace(spec.OwnerID),
-		StartedAt:       now,
-		LastHeartbeatAt: now,
-		LastProgressAt:  now,
-		ProgressSeq:     0,
-		MaxAttempts:     spec.MaxAttempts,
-		FencingToken:    1,
-		Version:         1,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		RunID:               generateRunID(),
+		Kind:                strings.TrimSpace(spec.Kind),
+		Workflow:            strings.TrimSpace(spec.Workflow),
+		RootSessionID:       strings.TrimSpace(spec.RootSessionID),
+		ParentSessionID:     strings.TrimSpace(spec.ParentSessionID),
+		ParentRunID:         strings.TrimSpace(spec.ParentRunID),
+		SessionID:           spec.SessionID,
+		AgentID:             firstNonEmpty(spec.AgentID, spec.SessionID),
+		Attempt:             1,
+		Status:              RunStatusQueued,
+		OwnerID:             strings.TrimSpace(spec.OwnerID),
+		TurnID:              strings.TrimSpace(spec.TurnID),
+		DeclaredBudget:      spec.DeclaredBudget,
+		DecisionWindowUntil: spec.DecisionWindowUntil,
+		StartedAt:           now,
+		LastHeartbeatAt:     now,
+		LastProgressAt:      now,
+		ProgressSeq:         0,
+		MaxAttempts:         spec.MaxAttempts,
+		FencingToken:        1,
+		Version:             1,
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}
 	if run.Kind == "" {
 		run.Kind = RunKindAgentRun

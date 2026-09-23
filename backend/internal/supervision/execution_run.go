@@ -115,17 +115,20 @@ const RunStatusInvalid = "invalid"
 // storage-neutral: the supervision store persists it, while the host keeps
 // session/actor state as the execution container.
 type ExecutionRun struct {
-	RunID               string
-	Kind                string
-	Workflow            string
-	RootSessionID       string
-	ParentSessionID     string
-	ParentRunID         string
-	SessionID           string
-	AgentID             string
-	Attempt             int
-	Status              string
-	OwnerID             string
+	RunID           string
+	Kind            string
+	Workflow        string
+	RootSessionID   string
+	ParentSessionID string
+	ParentRunID     string
+	SessionID       string
+	AgentID         string
+	Attempt         int
+	Status          string
+	OwnerID         string
+	// TurnID is the dispatching turn this obligation belongs to (AC-P0-3c).
+	// Resume reuses the same turn id (I3), so join/resume accounting keys on it.
+	TurnID              string
 	OwnerLeaseUntil     *time.Time
 	StartedAt           time.Time
 	LastHeartbeatAt     time.Time
@@ -139,6 +142,17 @@ type ExecutionRun struct {
 	CancelSource        string
 	FinishedAt          *time.Time
 	MaxAttempts         int
+	// DeclaredBudget is the budget declared at dispatch time (the per-obligation
+	// declarative deadline source, §6.2). Zero means "not declared".
+	DeclaredBudget time.Duration
+	// ExtensionCount / ExtendedTotal record extend_deadline usage: how many
+	// times this obligation was extended and by how much in total (I5 bounds).
+	ExtensionCount int
+	ExtendedTotal  time.Duration
+	// DecisionWindowUntil is the escalate-first decision window (I8): until this
+	// instant the parent may still decide extend/cancel before the runtime
+	// fallback fires.
+	DecisionWindowUntil *time.Time
 	FencingToken        int64
 	Version             int64
 	ResultRef           string
@@ -161,6 +175,7 @@ func (r ExecutionRun) Normalize() ExecutionRun {
 	r.SessionID = strings.TrimSpace(r.SessionID)
 	r.AgentID = strings.TrimSpace(r.AgentID)
 	r.OwnerID = strings.TrimSpace(r.OwnerID)
+	r.TurnID = strings.TrimSpace(r.TurnID)
 	r.Status = strings.TrimSpace(r.Status)
 	if r.Status == "" {
 		r.Status = RunStatusQueued

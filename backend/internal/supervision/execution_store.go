@@ -89,7 +89,9 @@ const (
 		progress_seq, execution_deadline_at, progress_deadline_at,
 		approval_deadline_at, cancel_requested_at, cancel_deadline_at,
 		cancel_source, finished_at, max_attempts, fencing_token, result_ref,
-		error_code, version, created_at, updated_at`
+		error_code, version, created_at, updated_at,
+		turn_id, declared_budget, extension_count, extended_total,
+		decision_window_until`
 )
 
 // CreateExecutionRun inserts a new run; false when run_id already exists.
@@ -107,7 +109,7 @@ func (s *SQLiteSupervisionStore) CreateExecutionRun(ctx context.Context, run Exe
 		run.UpdatedAt = now
 	}
 	query := `INSERT INTO supervision_execution_runs (` + executionRunColumns + `)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 	_, err = db.ExecContext(ctx, query,
 		run.RunID, run.Kind, run.Workflow, run.RootSessionID, run.ParentSessionID,
 		run.ParentRunID, run.SessionID, run.AgentID, run.Attempt, run.Status, run.OwnerID,
@@ -118,7 +120,9 @@ func (s *SQLiteSupervisionStore) CreateExecutionRun(ctx context.Context, run Exe
 		runTimeSQL(run.CancelRequestedAt), runTimeSQL(run.CancelDeadlineAt),
 		run.CancelSource, runTimeSQL(run.FinishedAt), run.MaxAttempts,
 		run.FencingToken, run.ResultRef, run.ErrorCode, run.Version,
-		formatRunTime(run.CreatedAt), formatRunTime(run.UpdatedAt))
+		formatRunTime(run.CreatedAt), formatRunTime(run.UpdatedAt),
+		run.TurnID, int64(run.DeclaredBudget), run.ExtensionCount,
+		int64(run.ExtendedTotal), runTimeSQL(run.DecisionWindowUntil))
 	if err != nil {
 		if isSQLiteConstraint(err) {
 			return false, nil
@@ -145,7 +149,9 @@ func (s *SQLiteSupervisionStore) UpdateExecutionRunCAS(ctx context.Context, run 
 		progress_seq=?, execution_deadline_at=?, progress_deadline_at=?,
 		approval_deadline_at=?, cancel_requested_at=?, cancel_deadline_at=?,
 		cancel_source=?, finished_at=?, max_attempts=?, fencing_token=?,
-		result_ref=?, error_code=?, version=?, updated_at=?
+		result_ref=?, error_code=?, version=?, updated_at=?,
+		turn_id=?, declared_budget=?, extension_count=?, extended_total=?,
+		decision_window_until=?
 		WHERE run_id=? AND version=?`
 	result, err := db.ExecContext(ctx, query,
 		run.Kind, run.Workflow, run.RootSessionID, run.ParentSessionID, run.ParentRunID,
@@ -157,7 +163,9 @@ func (s *SQLiteSupervisionStore) UpdateExecutionRunCAS(ctx context.Context, run 
 		runTimeSQL(run.CancelRequestedAt), runTimeSQL(run.CancelDeadlineAt),
 		run.CancelSource, runTimeSQL(run.FinishedAt), run.MaxAttempts,
 		run.FencingToken, run.ResultRef, run.ErrorCode, run.Version,
-		formatRunTime(run.UpdatedAt), run.RunID, expectedVersion)
+		formatRunTime(run.UpdatedAt), run.TurnID, int64(run.DeclaredBudget),
+		run.ExtensionCount, int64(run.ExtendedTotal),
+		runTimeSQL(run.DecisionWindowUntil), run.RunID, expectedVersion)
 	if err != nil {
 		return false, fmt.Errorf("update execution run: %w", err)
 	}
@@ -512,14 +520,18 @@ func scanExecutionRun(row rowScanner) (ExecutionRun, error) {
 	var run ExecutionRun
 	var ownerLeaseUntil, executionDeadlineAt, progressDeadlineAt, approvalDeadlineAt sql.NullString
 	var cancelRequestedAt, cancelDeadlineAt, finishedAt sql.NullString
+	var decisionWindowUntil sql.NullString
 	var startedAt, lastHeartbeatAt, lastProgressAt, createdAt, updatedAt string
+	var declaredBudget, extendedTotal int64
 	err := row.Scan(&run.RunID, &run.Kind, &run.Workflow, &run.RootSessionID, &run.ParentSessionID,
 		&run.ParentRunID, &run.SessionID, &run.AgentID, &run.Attempt, &run.Status, &run.OwnerID,
 		&ownerLeaseUntil, &startedAt, &lastHeartbeatAt, &lastProgressAt,
 		&run.ProgressSeq, &executionDeadlineAt, &progressDeadlineAt,
 		&approvalDeadlineAt, &cancelRequestedAt, &cancelDeadlineAt,
 		&run.CancelSource, &finishedAt, &run.MaxAttempts, &run.FencingToken, &run.ResultRef,
-		&run.ErrorCode, &run.Version, &createdAt, &updatedAt)
+		&run.ErrorCode, &run.Version, &createdAt, &updatedAt,
+		&run.TurnID, &declaredBudget, &run.ExtensionCount, &extendedTotal,
+		&decisionWindowUntil)
 	if err != nil {
 		return ExecutionRun{}, err
 	}
@@ -533,6 +545,9 @@ func scanExecutionRun(row rowScanner) (ExecutionRun, error) {
 	run.CancelRequestedAt = parseRunTimePtr(cancelRequestedAt.String)
 	run.CancelDeadlineAt = parseRunTimePtr(cancelDeadlineAt.String)
 	run.FinishedAt = parseRunTimePtr(finishedAt.String)
+	run.DecisionWindowUntil = parseRunTimePtr(decisionWindowUntil.String)
+	run.DeclaredBudget = time.Duration(declaredBudget)
+	run.ExtendedTotal = time.Duration(extendedTotal)
 	run.CreatedAt = parseRunTime(createdAt)
 	run.UpdatedAt = parseRunTime(updatedAt)
 	return run, nil

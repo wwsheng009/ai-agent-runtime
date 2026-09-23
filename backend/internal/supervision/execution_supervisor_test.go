@@ -649,3 +649,46 @@ func TestExecutionSupervisor_RequireExecutionDeadlineRejectsDispatch(t *testing.
 	require.NoError(t, err)
 	require.NotNil(t, allowed.ExecutionDeadlineAt)
 }
+
+// AC-P0-3c: the dispatching turn, declared budget and decision window are
+// persisted with the run record so same-turn resume and extend_deadline can key
+// on them, while runs that never declare them stay zero-value compatible.
+func TestExecutionSupervisor_StartRunPersistsTurnLedgerFields(t *testing.T) {
+	supervisor, store := newTestExecutionSupervisor(t, "sup-turn-ledger", ExecutionSupervisorConfig{
+		Mode:                    "enforce",
+		DefaultExecutionTimeout: 30 * time.Minute,
+		DefaultProgressTimeout:  5 * time.Minute,
+		DefaultApprovalTimeout:  1 * time.Hour,
+		DefaultCancelGrace:      15 * time.Second,
+	}, nil, nil)
+	now := time.Now().UTC().Truncate(time.Second)
+	supervisor.Now = func() time.Time { return now }
+	ctx := context.Background()
+
+	window := now.Add(10 * time.Minute)
+	run, err := supervisor.StartRun(ctx, RunSpec{
+		RootSessionID:       "root-session",
+		ParentSessionID:     "parent-session",
+		SessionID:           "child-turn",
+		TurnID:              "  turn-9  ",
+		DeclaredBudget:      20 * time.Minute,
+		DecisionWindowUntil: &window,
+	})
+	require.NoError(t, err)
+
+	stored, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, "turn-9", stored.TurnID, "turn id is trimmed before persisting")
+	require.Equal(t, 20*time.Minute, stored.DeclaredBudget)
+	require.NotNil(t, stored.DecisionWindowUntil)
+	require.WithinDuration(t, window, *stored.DecisionWindowUntil, time.Second)
+	require.Zero(t, stored.ExtensionCount)
+	require.Zero(t, stored.ExtendedTotal)
+
+	// Runs that do not declare turn-scoped fields keep the legacy zero values.
+	plain, err := supervisor.StartRun(ctx, RunSpec{SessionID: "child-plain"})
+	require.NoError(t, err)
+	require.Empty(t, plain.TurnID)
+	require.Zero(t, plain.DeclaredBudget)
+	require.Nil(t, plain.DecisionWindowUntil)
+}

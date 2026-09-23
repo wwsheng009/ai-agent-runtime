@@ -343,6 +343,23 @@ func (s *SQLiteSupervisionStore) init(ctx context.Context) error {
 					ON supervision_completion_outbox(delivered_at, created_at);
 			`,
 		},
+		{
+			// P0 / C1-3: ledger fields for turn-scoped join and extend_deadline.
+			// Additive with zero-value defaults so pre-existing rows read back as
+			// "not declared" instead of erroring, and the migration is applied
+			// exactly once through schema_migrations (AC-P0-3a).
+			Version: 3,
+			Name:    "execution_run_turn_and_extension_fields",
+			UpSQL: `
+				ALTER TABLE supervision_execution_runs ADD COLUMN turn_id TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_execution_runs ADD COLUMN declared_budget INTEGER NOT NULL DEFAULT 0;
+				ALTER TABLE supervision_execution_runs ADD COLUMN extension_count INTEGER NOT NULL DEFAULT 0;
+				ALTER TABLE supervision_execution_runs ADD COLUMN extended_total INTEGER NOT NULL DEFAULT 0;
+				ALTER TABLE supervision_execution_runs ADD COLUMN decision_window_until TEXT;
+				CREATE INDEX IF NOT EXISTS idx_supervision_runs_turn
+					ON supervision_execution_runs(turn_id, status);
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }
