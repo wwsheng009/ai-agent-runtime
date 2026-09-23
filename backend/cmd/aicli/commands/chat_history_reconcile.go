@@ -40,6 +40,12 @@ type persistedHistorySeedUnit struct {
 	// 头部：既用于与实时/日志重放建立的 item 匹配（避免 resume 后又追加
 	// 一个原文单元格），也用于把历史种子渲染成与 live 相同的摘要形态。
 	toolDisplay string
+
+	// resolvedToolHead 缓存 toolHead() 的结果。匹配是「unit × item」的二次方
+	// 扫描，而 toolHead() 要拼接整段工具输出：若每个候选 item 都重建一次，
+	// 巨型恢复会话会退化成分配风暴（生产 pprof：4056 个 unit × ~4000 个
+	// item，goroutine 长时间卡在 toolHead 的字符串分配上，会话永远不渲染）。
+	resolvedToolHead string
 }
 
 // seedPersistedHistory reconciles canonical persisted history with the Scene
@@ -415,6 +421,11 @@ func persistedHistoryUnitMatch(snapshot *encoding.RenderModel, unit persistedHis
 	if snapshot == nil {
 		return nil
 	}
+	// tool 单元的原文头部在一次扫描内是常量：先算一次，供下面的每个候选
+	// item 复用（见 resolvedToolHead 字段说明）。
+	if unit.kind == persistedHistorySeedTool {
+		unit.resolvedToolHead = unit.toolHead()
+	}
 	for _, item := range snapshot.Items {
 		if item == nil || item.ID == "" {
 			continue
@@ -451,6 +462,9 @@ func (u persistedHistorySeedUnit) matches(item *encoding.Item) bool {
 		if u.toolDisplay != "" && item.Head == u.toolDisplay {
 			return true
 		}
+		if u.resolvedToolHead != "" {
+			return item.Head == u.resolvedToolHead
+		}
 		return item.Head == u.toolHead()
 	default:
 		return false
@@ -476,7 +490,11 @@ func persistedReasoningContentBody(content string) string {
 // （"…… reasoning ……"）与尾部 "end reasoning" 分隔线。重放建立的单元格头部
 // 可能带展示分隔线，canonical 块不带。
 func persistedReasoningBody(head string) string {
-	head = strings.ReplaceAll(head, "\r\n", "\n")
+	// 只在确有 CR 时才复制整段头部：该函数在「unit × item」扫描里被逐 item
+	// 调用，无条件 ReplaceAll 会为每个候选复制一份（可能很大的）正文。
+	if strings.IndexByte(head, '\r') >= 0 {
+		head = strings.ReplaceAll(head, "\r\n", "\n")
+	}
 	firstLF := strings.IndexByte(head, '\n')
 	if firstLF < 0 {
 		return ""
@@ -502,7 +520,11 @@ func persistedReasoningBodyContains(head, content string) bool {
 	if len(needle) < persistedHistoryReasoningContainmentMinBytes {
 		return false
 	}
-	if strings.Contains(strings.ReplaceAll(head, "\r\n", "\n"), needle) {
+	normalized := head
+	if strings.IndexByte(head, '\r') >= 0 {
+		normalized = strings.ReplaceAll(head, "\r\n", "\n")
+	}
+	if strings.Contains(normalized, needle) {
 		return true
 	}
 	body := persistedReasoningBody(head)

@@ -125,31 +125,53 @@ func TestLayoutTranscriptScreenRowsWarmPassIsCacheOnly(t *testing.T) {
 	}
 }
 
-// TestLayoutTranscriptScreenRowsWithinHonoursBudget 验证布局本身真的受预算约束。
+// TestLayoutTranscriptScreenRowsWithinHonoursBudget 验证布局本身真的受预算约束，
+// 并且约束只能是**截断**，绝不能是「返回空前缀」。
+//
 // 旧实现把 historyCommitPlanningBudget 的 deadline 建在 commit 循环内部，昂贵的
 // 布局在预算建立之前就已经跑完 —— 预算是装饰性的。现在 deadline 由调用方在布局
 // 之前建立，并且布局会在采样点检查它。
+//
+// 同时锁定一个更关键的不变量：resume 会话上 LayoutTranscript + fold target 这两段
+// 前置工作本身就可能吃掉整个预算，于是采样点 index=0 就会命中。若此时返回空前缀，
+// 调用方（planEligibleHistoryCommitsWithin）会把「行集为空」当成「没有可交付历史」
+// 直接返回 0 候选，next 永远是 0；授权过的销毁式 scrollback 重放清空屏幕之后无内容
+// 可写 —— 永久空屏（live 实测 budgeted=0 / complete=false / next=0）。截断必须保留
+// 已完成的非空前缀，同时仍然报告 complete=false，调用方才不会把截断结果记入 memo
+// （被截断的 cell 将永远不再被规划）。
 func TestLayoutTranscriptScreenRowsWithinHonoursBudget(t *testing.T) {
 	snapshot := benchResumedSnapshot(400)
 	transcript := NewTranscriptState(snapshot)
 	rows := transcript.LayoutRows(1)
 	byID := transcriptCellsByID(transcript)
 
-	// 已经过期的 deadline 必须在第一个采样点就截断，并报告 complete=false。
-	prefix, complete := layoutTranscriptScreenRowsWithin(rows, byID, nil, 100, time.Now().Add(-time.Second), style.ThemeContext{})
-	if complete {
-		t.Fatal("过期的 deadline 必须让布局报告 complete=false（否则调用方会把截断结果记入 memo，被截断的 cell 将永远不再被规划）")
-	}
-	if len(prefix) != 0 {
-		t.Fatalf("过期 deadline 下应返回空前缀，got %d 行", len(prefix))
-	}
-
-	// 无预算形式必须完整且非空，并且截断形式返回的必然是它的真前缀。
+	// 无预算形式必须完整且非空，截断形式返回的必然是它的真前缀。
 	full, fullComplete := layoutTranscriptScreenRowsWithin(rows, byID, nil, 100, time.Time{}, style.ThemeContext{})
 	if !fullComplete {
 		t.Fatal("零值 deadline 表示无预算，不应报告截断")
 	}
 	if len(full) == 0 {
 		t.Fatal("完整布局不应为空")
+	}
+
+	// 已经过期的 deadline：可以截断，但绝不能返回空前缀。
+	prefix, complete := layoutTranscriptScreenRowsWithin(rows, byID, nil, 100, time.Now().Add(-time.Second), style.ThemeContext{})
+	if len(prefix) == 0 {
+		t.Fatal("过期的 deadline 返回了空前缀：调用方无法区分「被截断」与「没有可交付历史」，" +
+			"规划会永远 0 候选，resume 会话将永久空屏")
+	}
+	if complete {
+		// 采样点还没到就做完了：这不是截断，允许报告完整，但必须真的完整。
+		if len(prefix) != len(full) {
+			t.Fatalf("complete=true 但只产出 %d 行（完整 %d 行）：截断结果会被记入 memo", len(prefix), len(full))
+		}
+	} else if len(prefix) >= len(full) {
+		t.Fatalf("complete=false 必须返回真前缀，got %d 行（完整 %d 行）", len(prefix), len(full))
+	}
+	for index := range prefix {
+		if prefix[index].Text != full[index].Text || prefix[index].CellID != full[index].CellID {
+			t.Fatalf("前缀第 %d 行与完整布局不一致：%q/%d vs %q/%d",
+				index, prefix[index].Text, prefix[index].CellID, full[index].Text, full[index].CellID)
+		}
 	}
 }

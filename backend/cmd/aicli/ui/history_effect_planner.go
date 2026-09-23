@@ -54,7 +54,19 @@ func planEligibleHistoryCommitsWithin(state AppState, deadline time.Time) ([]His
 	// lines here would hand off a CJK/wrapped/tab-expanded cell while some of
 	// its physical rows are still visible in the primary viewport.
 	byID := transcriptCellsByID(state.Transcript)
-	rows, complete := layoutTranscriptScreenRowsWithin(state.Transcript.LayoutRows(state.LayoutGeneration), byID, mutableTranscriptCellIDs(state.Transcript), width, deadline, state.Theme)
+	// 场景语义布局（LayoutTranscript）没有部分结果，是这一轮的前置工作：在 resume
+	// 会话上它单独就可能超过 historyCommitPlanningBudget（4497 cell → 159k 行，
+	// live 实测 screening 拿到的 deadline 早已过期）。把它算进 screening 预算，
+	// screening 循环就只能返回空前缀，规划永远 0 候选（next=0 / pending=0），
+	// 授权过的销毁式重放清空 scrollback 后无内容可写 —— 永久空屏。因此预算从
+	// screening 自身开始计时：仍然限制最贵的那部分工作，但每一轮都真的前进。
+	screenDeadline := deadline
+	if !deadline.IsZero() {
+		screenDeadline = time.Now().Add(historyCommitPlanningBudget)
+	}
+	rows, complete := layoutTranscriptScreenRowsWithin(
+		state.Transcript.LayoutRows(state.LayoutGeneration), byID,
+		mutableTranscriptCellIDs(state.Transcript), width, screenDeadline, state.Theme)
 	if len(rows) == 0 {
 		return activeCommits, complete
 	}
@@ -717,7 +729,7 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 	commits, complete := planEligibleHistoryCommitsWithin(state.AppState, deadline)
 	if complete {
 		syncHistoryEffectCandidates(state, commits, 0)
-		recordTranscriptPlanMemo(state)
+		recordTranscriptPlanMemo(state, len(commits))
 		return
 	}
 	// 截断的规划结果只能当**前缀**用：它缺少的只是「还没走到」的尾部 cell，
@@ -818,10 +830,23 @@ func transcriptPlanMemoHit(state *UIControllerState) bool {
 		effects.lastPlannedTerminalEpoch != effects.TerminalEpoch {
 		return false
 	}
+	// Every input above is unchanged, but the memo only fingerprints plan
+	// *inputs*: it cannot see that the ledger the plan was reconciled into no
+	// longer holds it. That state is reachable (reconcileScrollback replaces
+	// the ledger wholesale, and an armed replacement can be reduced before any
+	// plan was minted), and memoizing it is destructive: the executor is then
+	// authorized to clear native scrollback while the queue has nothing to
+	// replay. A plan that produced candidates must still be present in the
+	// ledger to be memoizable; a plan that produced none stays memoizable, so
+	// a legitimately empty queue (fresh session, everything already delivered)
+	// never pays for the O(entire history) re-layout this memo exists to avoid.
+	if effects.lastPlannedCandidateCount > 0 && !effects.ledger.holdsPlan() {
+		return false
+	}
 	return true
 }
 
-func recordTranscriptPlanMemo(state *UIControllerState) {
+func recordTranscriptPlanMemo(state *UIControllerState, candidates int) {
 	effects := &state.HistoryEffects
 	effects.lastPlannedTranscriptValid = true
 	effects.lastPlannedTranscriptSceneID = state.Transcript.SceneID
@@ -833,6 +858,7 @@ func recordTranscriptPlanMemo(state *UIControllerState) {
 	effects.lastPlannedProjection = state.SemanticActiveCellProjection
 	effects.lastPlannedThemeKey = themeFingerprint(state.Theme)
 	effects.lastPlannedTerminalEpoch = effects.TerminalEpoch
+	effects.lastPlannedCandidateCount = candidates
 }
 
 // syncHistoryEffectsForActiveCell is the hot path for append-only stream

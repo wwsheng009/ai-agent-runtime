@@ -534,6 +534,15 @@ func (l *HistoryCommitLedger) HasPending() bool {
 	return l != nil && l.pendingCount > 0
 }
 
+// holdsPlan reports whether the ledger still records any delivery lifecycle.
+// Planning memoizes its *inputs*, never the ledger itself, so this is what lets
+// a memo hit prove that the plan it claims to have reconciled still exists: a
+// plan that produced candidates and was reconciled into a ledger that no longer
+// holds any entry is a state the memo alone can never repair.
+func (l *HistoryCommitLedger) holdsPlan() bool {
+	return l != nil && len(l.byToken) > 0
+}
+
 func (l *HistoryCommitLedger) hasTerminalRecordForSource(key historyCommitSourceKey) bool {
 	if l == nil {
 		return false

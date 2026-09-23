@@ -86,6 +86,17 @@ type HistoryEffectQueueState struct {
 	lastPlannedProjection          bool
 	lastPlannedThemeKey            string
 	lastPlannedTerminalEpoch       uint64
+	// lastPlannedCandidateCount is how many commits the last COMPLETE plan
+	// produced. It exists because the memo fingerprints only plan *inputs*: a
+	// ledger that lost the plan it was reconciled into (reconcileScrollback
+	// replaces the ledger wholesale, and a reduction can arm a destructive
+	// replay whose plan was never minted) leaves every input unchanged, so the
+	// memo would keep claiming "already planned" over an empty ledger and the
+	// authorized replay would clear native scrollback with nothing to write
+	// back — a permanently blank transcript. A memo hit now additionally
+	// requires the ledger to still hold a lifecycle whenever the last plan
+	// produced candidates.
+	lastPlannedCandidateCount int
 }
 
 func (s HistoryEffectQueueState) Clone() HistoryEffectQueueState {
@@ -378,6 +389,25 @@ func (s *HistoryEffectQueueState) markProjectionKnown() {
 func (s *HistoryEffectQueueState) armScrollbackReplay() {
 	if s != nil {
 		s.ScrollbackReplayArmed = true
+	}
+}
+
+// invalidateTranscriptPlanMemo drops the fingerprint memo that lets
+// syncHistoryEffectsForTranscript skip a full plan while every plan input is
+// unchanged. The memo covers transcript/layout/theme/epoch inputs, so it cannot
+// observe that the *ledger* a plan was reconciled into has since been replaced
+// wholesale (reconcileScrollback) or never received that plan at all (a
+// replacement snapshot an earlier reduction installed while the geometry was
+// still zero, which records the memo against an empty candidate set). Both are
+// reachable from the one-shot replay authorization, and an armed replacement is
+// destructive: the executor clears native scrollback first, so a memo that
+// suppresses the replan leaves the reset with nothing to write back (live:
+// pending=0 / history_rows=0 after three resets — a permanently blank
+// transcript). Callers that arm a replay therefore re-prove the plan from
+// source instead of trusting the fingerprint.
+func (s *HistoryEffectQueueState) invalidateTranscriptPlanMemo() {
+	if s != nil {
+		s.lastPlannedTranscriptValid = false
 	}
 }
 

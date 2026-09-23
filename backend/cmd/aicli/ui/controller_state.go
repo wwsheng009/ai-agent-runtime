@@ -409,12 +409,33 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		if a.ArmScrollbackReplay {
 			state.HistoryEffects.armScrollbackReplay()
 			state.HistoryEffects.ReconciliationRequired = true
+			// The grant authorizes a destructive physical replacement, so the
+			// plan that follows must be re-proved from source rather than
+			// trusted to a memo: the install below is a no-op whenever the
+			// Scene was already published (RuntimeEvent republishes the
+			// authoritative snapshot even with an empty ChangeSet), and a
+			// no-op leaves every memoized plan input unchanged — the replay
+			// would then clear native scrollback with nothing to write back.
+			state.HistoryEffects.invalidateTranscriptPlanMemo()
 		}
 		// RuntimeEvent currently publishes the authoritative Scene snapshot even
 		// when its ChangeSet is empty. Trust the Scene's exact provenance/version
 		// fence before cloning cells or replanning native history. SceneID prevents
 		// replay/backtrack rebuilds with coincident revisions from being skipped.
 		if transcriptSnapshotAlreadyInstalled(state.Transcript, a.Snapshot) {
+			// The install is a no-op, but an armed replacement must never be
+			// observable with an empty queue: this authorization is destructive
+			// (the executor clears native scrollback before replaying), so a
+			// ledger that never held this plan — the snapshot was installed by
+			// an earlier reduction while the geometry was still zero, which
+			// records the plan memo against an empty candidate set — would
+			// clear the screen and write nothing back. Re-prove the plan from
+			// source under the memo barrier; a ledger that already holds it is
+			// reconciled in place (identity-keyed, no duplicate tokens).
+			if a.ArmScrollbackReplay {
+				state.HistoryEffects.invalidateTranscriptPlanMemo()
+				syncHistoryEffectsForTranscript(&state)
+			}
 			break
 		}
 		var nextTranscript TranscriptState

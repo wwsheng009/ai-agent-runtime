@@ -215,7 +215,15 @@ func layoutTranscriptScreenRowsWithin(rows []scene.LayoutRow, cells map[scene.Ce
 	// 最近一次折叠：首屏只有它带 Ctrl+T 提示，pager 初始帧也只有它展开。
 	foldTarget := toolFoldTargetRows(rows, cells, mutable)
 	for index := 0; index < len(rows); index++ {
-		if !deadline.IsZero() && index%layoutBudgetCheckRows == 0 && time.Now().After(deadline) {
+		// 预算绝不能把结果截断成**空前缀**：规划器把「行集为空」当作「没有可交付
+		// 历史」（planEligibleHistoryCommits 在 len(rows)==0 时直接返回），而 resume
+		// 会话里 LayoutTranscript + fold target 这两段前置工作本身就可能吃掉整个
+		// 预算，于是 index=0 的第一次检查就命中并返回空结果 —— 每一轮重试都如此，
+		// 规划永远是 0 候选（live: next=0 / pending=0），armed 的销毁式重放清空
+		// scrollback 之后无内容可写，屏幕永久空白。至少产出一行才能让「截断前缀」
+		// 与「没有历史」可区分，也才能让重试严格前进。
+		if !deadline.IsZero() && len(result) > 0 &&
+			index%layoutBudgetCheckRows == 0 && time.Now().After(deadline) {
 			return result, false
 		}
 		row := rows[index]

@@ -74,6 +74,47 @@ func TestReplaceTranscriptActionGrantsReplayForAlreadyInstalledSnapshot(t *testi
 	}
 }
 
+// 需求：一次性授权是**销毁式**的（执行器先清空原生 scrollback 再重放），所以 reducer
+// 绝不能让它在「ledger 里没有任何计划」的状态下被观察到 —— 那会清掉屏幕且什么都写不
+// 回来（live: pending=0 / acked=0 / history_rows=0，三次 reset 后永久空屏）。
+//
+// 计划 memo 只看 transcript/layout/theme/epoch 这些**输入**指纹，看不到 ledger 本身：
+// reconcileScrollback 会整体换掉 ledger（s.ledger = NewHistoryCommitLedger()），而 memo
+// 里的 epoch 字段只在 epoch 真的推进时才失配。因此「memo 声称已规划 + ledger 已空」
+// 是可达状态，armed 的 no-op 安装必须重新从源证明计划，而不是信任指纹。
+func TestArmedReplayOnNoOpInstallReProvesThePlan(t *testing.T) {
+	state := reduceUIControllerState(UIControllerState{}, Resize{Width: 72, Height: 12, Generation: 1}, 1)
+	snapshot := scrollbackGrantSnapshot(1, "loaded session")
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: snapshot}, 2)
+	if state.HistoryEffects.NextToken == 0 {
+		t.Fatal("fixture did not plan the loaded transcript")
+	}
+	planned := state.HistoryEffects.NextToken
+
+	// 构造 memo 仍然有效、ledger 却已被换掉的形状：这正是 reconcileScrollback
+	// 对下一次 armed 安装留下的状态（白盒构造，与 reducer 的行为逐字一致）。
+	state.HistoryEffects.ledger = NewHistoryCommitLedger()
+	recordTranscriptPlanMemo(&state, 1)
+
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{
+		Snapshot:            snapshot,
+		ArmScrollbackReplay: true,
+	}, 3)
+
+	if !state.HistoryEffects.ScrollbackReplayArmed {
+		t.Fatal("fixture consumed the authorization instead of reducing the no-op install")
+	}
+	if state.HistoryEffects.NextToken <= planned {
+		t.Fatalf("armed replacement minted no fresh token over an empty ledger: next=%d planned=%d",
+			state.HistoryEffects.NextToken, planned)
+	}
+	if pending := historyPendingCount(state); pending == 0 {
+		t.Fatalf("armed replacement trusted a memo that no longer matches the ledger: "+
+			"the destructive replay would clear scrollback and write nothing back: %#v",
+			state.HistoryEffects)
+	}
+}
+
 func TestScrollbackReplayGrantSurvivesRegularUpdatesUntilConsumed(t *testing.T) {
 	state := reduceUIControllerState(UIControllerState{}, ReplaceTranscriptAction{
 		Snapshot:            scrollbackGrantSnapshot(1, "loaded session"),
