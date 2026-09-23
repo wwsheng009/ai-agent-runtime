@@ -230,9 +230,30 @@ func (a *rootScopeAuthorizer) Authorize(ctx context.Context, rootScopeID, reques
 		if err != nil {
 			return fmt.Errorf("supervision: read agent graph authorization: %w", err)
 		}
+		// A run subject names a durable execution run, not an agent: production
+		// projects run lifecycle rows with SubjectID = run_id
+		// (execution_supervisor.go / action_service.go projectExtension), and the
+		// local-control path forwards that subject id as the action target
+		// (supervision/local_control.go). Resolve it to the agent/session identity
+		// the run was started for before the graph check, so run-targeted actions
+		// are authorized by the same root-scope rule as session-targeted ones
+		// instead of failing closed on an id the graph never carries. Unknown runs
+		// keep failing closed.
+		candidates := map[string]struct{}{strings.ToLower(targetID): {}}
+		if runStore, ok := a.store.(supervision.ExecutionRunStore); ok && runStore != nil {
+			if run, err := runStore.GetExecutionRun(ctx, targetID); err == nil && run != nil {
+				for _, id := range []string{run.AgentID, run.SessionID} {
+					if trimmed := strings.ToLower(strings.TrimSpace(id)); trimmed != "" {
+						candidates[trimmed] = struct{}{}
+					}
+				}
+			}
+		}
 		for _, record := range records {
-			if strings.EqualFold(strings.TrimSpace(record.AgentID), targetID) ||
-				strings.EqualFold(strings.TrimSpace(record.SessionID), targetID) {
+			if _, ok := candidates[strings.ToLower(strings.TrimSpace(record.AgentID))]; ok {
+				return nil
+			}
+			if _, ok := candidates[strings.ToLower(strings.TrimSpace(record.SessionID))]; ok {
 				return nil
 			}
 		}

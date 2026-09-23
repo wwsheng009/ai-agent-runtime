@@ -402,3 +402,90 @@ func TestSupervisionControlPlane_GraphAuthorizerRejectsForeignAgent(t *testing.T
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not authorized")
 }
+
+// TestSupervisionControlPlane_GraphAuthorizerResolvesRunSubjects covers the
+// run-subject form of the same boundary: production projects run lifecycle rows
+// with SubjectID = run_id (execution_supervisor.go projectRestartOrphan /
+// action_service.go projectExtension), and the local-control path forwards that
+// subject id as the action target. The graph check must therefore resolve the run
+// to the agent/session identity it was started for, while still rejecting runs
+// whose identity lives in another root scope (and unknown run ids).
+func TestSupervisionControlPlane_GraphAuthorizerResolvesRunSubjects(t *testing.T) {
+	ctx := context.Background()
+	agents, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: t.TempDir() + "/agents.db",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = agents.Close() })
+	_, err = agents.UpsertAgentControlAgent(ctx, agentcontrol.AgentRecord{
+		AgentID:         "child-session",
+		RootSessionID:   "root-session",
+		ParentSessionID: "root-session",
+		SessionID:       "child-session",
+		AgentPath:       "/root/child-session",
+		AgentType:       agentcontrol.AgentTypeChild,
+	})
+	require.NoError(t, err)
+	_, err = agents.UpsertAgentControlAgent(ctx, agentcontrol.AgentRecord{
+		AgentID:       "foreign-child",
+		RootSessionID: "foreign-root",
+		SessionID:     "foreign-child",
+		AgentPath:     "/root/foreign-child",
+		AgentType:     agentcontrol.AgentTypeChild,
+	})
+	require.NoError(t, err)
+
+	plane, err := BuildSupervisionControlPlane(t.TempDir(), supervision.Config{}, SupervisionRuntimeHooks{
+		AgentRegistry: agents,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = plane.Close() })
+
+	runStore, ok := plane.Store.(supervision.ExecutionRunStore)
+	require.True(t, ok, "the durable control plane must expose execution runs")
+
+	now := time.Now().UTC()
+	for _, run := range []supervision.ExecutionRun{
+		{
+			RunID: "run-in-scope", Kind: supervision.RunKindAgentRun, Workflow: supervision.RunWorkflowSpawnAgent,
+			RootSessionID: "root-session", ParentSessionID: "root-session",
+			SessionID: "child-session", AgentID: "child-session",
+			Status: supervision.RunStatusRunning, OwnerID: "root-session", StartedAt: now,
+			Version: 1, CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			RunID: "run-foreign", Kind: supervision.RunKindAgentRun, Workflow: supervision.RunWorkflowSpawnAgent,
+			RootSessionID: "foreign-root", ParentSessionID: "foreign-root",
+			SessionID: "foreign-child", AgentID: "foreign-child",
+			Status: supervision.RunStatusRunning, OwnerID: "foreign-root", StartedAt: now,
+			Version: 1, CreatedAt: now, UpdatedAt: now,
+		},
+	} {
+		created, err := runStore.CreateExecutionRun(ctx, run)
+		require.NoError(t, err)
+		require.True(t, created)
+	}
+
+	// inspect keeps the allowed-actions gate out of the way: this test is about
+	// the root-scope authorization boundary, not the evaluator.
+	authorize := func(t *testing.T, targetID string) error {
+		t.Helper()
+		_, err := plane.Actions.RequestAction(ctx, supervision.ActionRequest{
+			RootScopeID:     "root-session",
+			RequestedByKind: "parent_session",
+			RequestedByID:   "parent-session",
+			TargetKind:      supervision.SubjectAgentRun,
+			TargetID:        targetID,
+			Action:          supervision.ActionInspect,
+			Reason:          "authorization probe",
+		})
+		return err
+	}
+
+	require.NoError(t, authorize(t, "run-in-scope"),
+		"a run subject must be authorized through the agent/session it was started for")
+	require.Error(t, authorize(t, "run-foreign"))
+	require.Contains(t, authorize(t, "run-foreign").Error(), "not authorized")
+	require.Error(t, authorize(t, "run-unknown"),
+		"an unknown run id keeps failing closed like an unknown agent id")
+}

@@ -1234,3 +1234,92 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 - AC-P3-3a 的"真实进程重启"（跨进程文件锁、真实宿主启动）仍是 **L2 留白**：本轮取证到"新句柄 + 冷缓存 actor"这一等价形态。
 
 **下一步**：P3 第四项 **C4-4（端到端验收）** —— AC-P3-4a（全量回归绿）/ AC-P3-4b（≥2h 声明预算 + 一次延长的真实长任务，L4）/ AC-P3-4c（五项度量相对基线改善，L4）。
+
+### 13.12 补丁登记：P3 第四项 C4-4（端到端验收），2026-09-23
+
+> 进入条件（§5 顺序：C4-1 → C4-2 → C4-3 → **C4-4**）已由 §13.11 满足。本轮把 §5 的三条 AC 落到**可复算的证据**上（AC-P3-4b / AC-P3-4c 各新增一条端到端用例），并顺带闭环一处**由端到端用例暴露的生产缺陷**：run 形态的监督动作（延长 / 接管 / inspect run …）在生产宿主上被 root scope 授权器**全量拒绝**（fail-closed）。
+
+**落地形态（对照 §5 C4-4 表）**
+
+| AC | 落地 |
+| --- | --- |
+| AC-P3-4a 全量回归绿（backend 全包 + 前端相关单测） | backend：`go build ./...` + `go test ./... -count=1`（隔离沙箱，须带 `backend/internal/webui/dist` 嵌入夹具）；前端：`npm test`（`frontend/`）。逐项读数见「验证证据」 |
+| AC-P3-4b ≥2h 声明预算 + 一次延长，全程 turn 不中断、终局报告完整 | `TestSupervisionE2E_LongTaskDeclaredBudgetWithOneExtension`（`cmd/aicli/commands/supervision_e2e_long_task_budget_test.go:29`）：把「等两小时」换成**声明值 + durable 状态推进**，其余四段全走生产路径 —— 派发 + 挂起（`SubagentBatches.ParkTurnSuspension`，§6.12）→ 停摆上报（`supervision.ProjectLifecycle`，与生产 `projectDecision` 同一投影入口）→ 中途一次延长（`Actions.RequestAction` → `AcceptAction` → `ExecuteAction` 的 `extend_deadline`）→ 终局 rollup（`injectLocalSupervisionPreflight`，`chat_actor_host.go:2991`） |
+| AC-P3-4c 五项度量相对基线改善 + 兜底占比低且稳定 | `TestSupervisionMetricsReadout_RuntimeCancelSources`（`:274`）：用**宿主装配的 watchdog**在 `enforce` 下判出一条真实兜底行（`CancelSource=decision_window_expired`），再补 11 条样本凑出 12 条窗口，按 §7.3 指标 1–2 的口径复算（`readRuntimeCancelMetrics`，`:432`：`ListExecutionRunsBySession` + `CancelSource` 分组，线上可直接复用同一读法） |
+
+**语义决策**
+
+| 面 | 决策 |
+| --- | --- |
+| 「真实长任务」如何在没有两小时墙钟的情况下取证 | 三处一致声明 ≥2h（`batch.BatchDeadline` / `task.TaskDeadline` / `run.DeclaredBudget` + `ExecutionDeadlineAt`），时间推进只落在 durable 账本上。除「模型选择工具」与「真实墙钟」外没有替身；断言的都是**账本事实**（`ExtensionCount=1` / `ExtendedTotal=30m` / 两个 deadline 各 +30m / `CancelSource` 为空）与**父会话可见面**（`obligation.deadline.extended` 事件、digest 文本、rollup `2/2 completed (terminal …)`） |
+| 「全程 turn 不中断」的判据 | 不靠 UI 观测，靠账本：`GetTurnSuspension(parent, turnID)` 全程有记录、`turn_id` 不变、`ObligationIDs` 不变、`ResumeQueue` 只排一次（预算内，无唤醒风暴）—— 与 AC-P3-3c 的「假空闲」修复同一真源 |
+| 延长的**逐义务**语义 | 延长只作用于目标 run：同 scope 的另一条 run 的 `ExtensionCount` / `ExecutionDeadlineAt` 逐字段不动（避免「延长一个 = 全批延期」） |
+| 兜底占比的分母 | 分母 = 窗口内的 **run 行**（按子会话枚举），不是通知行或 turn 行：这样 operator / parent 的主动取消（`operator_cancel` 等）落在分母、不落分子；「被 runtime 强制取消」只认白名单来源（`decision_window_expired` / `progress_stalled` / `execution_deadline` / `execution_timed_out`，`:402`） |
+| 兜底行必须由**生产** watchdog 产生 | 用例不手工写 `CancelSource`：`decision_window_expired` 行由 `host.getLocalExecutionSupervisor()`（宿主同一装配，`chat_actor_execution_supervisor.go:26`）在 `enforce` 下 `ScanOnce` 判定；样本里的 `progress_stalled` / `operator_cancel` 行也按生产两步（`RequestExecutionCancel` → `MarkExecutionRunTerminal`）落终态，因为 `CancelSource` **只有取消请求会写**（`execution_store.go:390` 的 `MarkExecutionRunTerminal` 只写 `error_code`） |
+
+**改动清单**
+
+| 位置 | 改动 |
+| --- | --- |
+| `backend/internal/runtimeserver/supervision.go` | `rootScopeAuthorizer.Authorize` 的 agent 分支（`:233-255`）：先把 target 解析成**候选身份集** —— `targetID` 本身，加上（当 target 是 run id 时）`ExecutionRunStore.GetExecutionRun` 读回的 `run.AgentID` / `run.SessionID`，再与 `ListAgentControlAgents` 的记录比对；未知 run_id 与跨 root scope 的 run 仍 fail-closed |
+| `backend/internal/runtimeserver/supervision_test.go` | 新增 `TestSupervisionControlPlane_GraphAuthorizerResolvesRunSubjects`（`:413`）：run-in-scope 放行 / run-foreign 拒绝 / run-unknown 仍拒绝；既有 `…RejectsForeignAgent`（`:357`）保留为反例护栏 |
+| `backend/cmd/aicli/commands/supervision_e2e_long_task_budget_test.go`（新增，453 行） | 两条端到端用例 + 读数口径（`runtimeForcedCancelSources` `:402` / `readRuntimeCancelMetrics` `:432`） |
+
+**缺陷登记：run 形态的监督动作被 root scope 授权器全量拒绝（fail-closed）**
+
+- **现象**：新写的 AC-P3-4b 用例在 `RequestAction(ActionExtendDeadline, TargetID=run-long-1)` 上直接失败：`supervision: action not allowed for current state: supervision: target agent is outside the requested root scope; not authorized`（由 `ActionService.RequestAction` 包裹的 `ErrActionNotAllowed`）。
+- **根因**：生产把 run 生命周期行投影为 `SubjectKind = SubjectAgentRun` 且 **`SubjectID = run_id`**（`execution_supervisor.go:1141/1149` 重启 orphan、`action_service.go:959/968` takeover、`action_service.go:1076/1085` 延长），`local_control.go:277` 又把 `record.SubjectID` 原样当 `TargetID` 转发；而 `rootScopeAuthorizer.Authorize` 只用 `targetID` 直接匹配 `AgentRecord.AgentID` / `SessionID` —— 图里从来没有 run_id 这个身份，于是**所有 run 形态的动作**在生产宿主上都被拒。这是 fail-closed 的真缺陷（不是测试问题）：CLI 宿主注入 `AgentRegistry`（`chat_actor_host.go:1160-1167`）走的就是这条分支。
+- **修复**：把 run 解析进候选身份集再比对（见上表），**不放宽** scope 规则本身：跨 root scope 的 run、未知 run_id 仍拒绝；`hooks.Authorize` 显式注入时仍优先（`:203-205` 未改）。
+- **反例护栏**：`run-foreign` / `run-unknown` 两条断言锁住「解析 ≠ 放行」。
+
+**测试落点（L1 / L2）**
+
+| 用例 | 断言 |
+| --- | --- |
+| `TestSupervisionE2E_LongTaskDeclaredBudgetWithOneExtension` | 挂起期巡检文本带 `0/2 completed, 2 running`；延长链路 requested → accepted → completed，结果含「已延长 ×1」「+30m0s」；账本 `ExtensionCount=1`、两个 deadline 各 +30m、`DecisionWindowUntil` 被花掉（escalate-first 窗口用尽）、`CancelSource` 为空；同 scope 另一 run 逐字段不动；`obligation.deadline.extended` 事件与 digest 文本对父会话可见；终局 `2/2 completed (terminal …)` 且 `CancelRequestedAt` 为空；全程 `turn_id` / 义务清单不变、`ResumeQueue` 只排一次 |
+| `TestSupervisionMetricsReadout_RuntimeCancelSources` | 真实兜底行：宿主 watchdog 在 `enforce` 下把停摆 run 判成 `cancel_requested` + `CancelSource=decision_window_expired`；12 条窗口读数 `Total=12` / `ForcedCancel=2` / `DecisionWindowExpired=1`，`ForcedCancelRatio=2/12`，兜底占比 < 10% |
+| `TestSupervisionControlPlane_GraphAuthorizerResolvesRunSubjects` | run-in-scope 放行（经 run → agent 解析）、run-foreign 与 run-unknown 均 `not authorized` |
+
+**验证证据（2026-09-23 实测）**
+
+- **全量回归（隔离沙箱 `%TEMP%\c44-baseline\backend`，job `job_ref_1a6fadf0a51d`，5.4 分钟）**：`go build ./...` **exit 0**；`go test ./... -count=1` **exit 0** —— 133 个包 `ok` + 20 个 `[no test files]`，**零 FAIL**。关键包读数：`cmd/aicli/commands` 266.9s（含本轮两条端到端用例）、`internal/api/skills` 141.9s、`internal/chat` 130.0s、`internal/usageledger` 80.1s、`internal/runtimeserver` 54.0s（含新增授权用例）、`internal/toolbroker` 32.3s、`internal/supervision` 9.1s、`internal/subagentbatch` 6.6s、`internal/webui` 2.2s、`cmd/contractgen` 1.1s。
+- **前端**：`npm test --silent`（`frontend/`，job `job_6d50d6e971df40ecb3bf6520b1e636e3`）**exit 0**：**320 个测试文件 / 2664 个用例全通过**（412.5s）。
+- **定向复跑**（沙箱，job `job_ref_7c46f1bd8681`，exit 0）：`go test ./internal/runtimeserver ./cmd/aicli/commands -run 'TestSupervisionControlPlane_GraphAuthorizer|TestSupervisionE2E_LongTaskDeclaredBudgetWithOneExtension|TestSupervisionMetricsReadout_RuntimeCancelSources' -v` → **4/4 PASS**（`…RejectsForeignAgent` 0.95s / `…ResolvesRunSubjects` 0.12s / `…LongTaskDeclaredBudgetWithOneExtension` 0.86s / `…RuntimeCancelSources` 0.13s）。
+- **gofmt**：本轮 3 个改动文件 `gofmt -l` 无输出。
+- **三个非代码性失败已排除**（登记以备复现口径一致；均未改动被测代码、未放宽断言）：
+  - `internal/webui [setup failed]`（`assets.go:12` 的 `//go:embed dist` 找不到目录）：沙箱漏拷 `backend/internal/webui/dist`（121 文件 / 2.5 MB）；补拷后 `go test ./internal/webui/` → `ok 1.803s`。
+  - `cmd/contractgen` `TestGeneratedFileIsUpToDate`：沙箱的 `frontend/src/types/runtime/event-contract.ts` 与 `backend/internal/events` 注册表版本不一致（沙箱是**局部拷贝**，前端那份停在拷贝时点）；主仓同一用例 `--- PASS`，补拷该文件后沙箱也 `--- PASS`（0.788s）。
+  - `internal/background` `TestManagerPersistsTimeoutBudgetAndStructuredTimeoutOutcome`：满负载并行下 20s 预算超时（`last status=failed, message="context deadline exceeded"`），单包复跑 `ok 49.863s`。同类载荷敏感抖动还有 `internal/toolbroker` 的 `TestReliabilityEvalBrokerTimeoutRetryUsesNewInvocationWithoutDuplicateSideEffect`（21:55 那次主仓全量中 16s 超时，其后两轮全量均 `ok`）。
+
+**AC 判定**
+
+| AC | 判定 | 证据 |
+| --- | --- | --- |
+| AC-P3-4a（全量回归绿：backend 全包 + 前端相关单测） | ✅ L2 | 后端全量 **exit 0**（133 包 ok，零 FAIL）+ 前端 **exit 0**（320 文件 / 2664 用例）；两个夹具问题按「补齐沙箱夹具 / 单包复跑」排除，未放宽任何断言 |
+| AC-P3-4b（≥2h 声明预算 + 中途一次延长：turn 不中断、终局报告完整） | ✅ 语义闭环（L2 形态）；⏳ 真实墙钟留白 | `TestSupervisionE2E_LongTaskDeclaredBudgetWithOneExtension`：三处声明 2h、延长 ×1（+30m）、账本与父会话可见面双证据、`turn_id` 与义务清单全程不变、终局 `2/2 completed (terminal …)`、`CancelSource` 空 |
+| AC-P3-4c（五项度量相对基线改善；`decision_window_expired` 兜底占比低且稳定） | ⏳ 部分：**口径与读数链路 ✅**；基线与稳定性**不可判定**（C0-E 未采集） | `TestSupervisionMetricsReadout_RuntimeCancelSources`：兜底行由生产 watchdog 产生，12 条窗口复算 `ForcedCancel=2/12`、兜底占比 < 10%；但「相对基线改善」缺基线数字，见留白 |
+
+**P3 门禁的场景表（§6.3 P3 行）初步登记**
+
+§6.3 的 P3 行还要求 **EC-F 组 3 条 + EC-G 组 4 条**必测（此前 §13.9–§13.11 未登记过）。按用例名匹配的初步登记如下（**未逐条复核断言强度**，仅确认落点存在）：
+
+| 场景 | 落点（已存在用例） | 状态 |
+| --- | --- | --- |
+| EC-F1 resume 风暴（终态合并为一次 resume） | `cmd/aicli/commands/chat_actor_batch_converge_test.go:137/158`、`supervision_autoclose_convergence_test.go:142/176/205`（终态批量收敛 + 策略矩阵 + 未接线惰性） | ✅ 落点存在 |
+| EC-F2 巡检轮 token 成本（digest 上限 / 巡检预算） | `internal/supervision/digest_test.go:159`（`…Truncation`）、`wake_budget_test.go`（唤醒预算与审批不被饿死） | ✅ 落点存在 |
+| EC-F3 模型滥用 extend（I5 上限 + 延长可见） | `internal/supervision/extend_deadline_test.go`（`ExtensionCount` / 上限断言 9 处）、`config_test.go`（上限配置 4 处） | ✅ 落点存在 |
+| EC-G1 依赖 `wait` 内联报告的调用方（兼容期） | `internal/toolbroker/broker_agent_test.go:1075`（`wait_agent` 接 batch id）、`broker_wait_schema_guard_test.go:108`（无 legacy wait 文案）、`broker_team_test.go:279/332/359/414/467` | ✅ 落点存在 |
+| EC-G2 非交互宿主无「用户」参与（队列驱动 resume） | `internal/supervision/resume_queue_digest_test.go:14/77/91`、`wake_consumer` 系列 + §13.9 的 durable resume 队列 | ✅ 落点存在 |
+| EC-G3 审批等待与挂起叠加 | `internal/supervision/approval_projection_test.go`（7 例）、`execution_supervisor_test.go:181`（等审批不被进度超时杀）、`:829`（`ApprovalDeadlineAt` 缺失时兜底终态） | ✅ 落点存在 |
+| EC-G4 历史生命周期行无 `turn_id`（走独立 run 语义） | **未见专用用例**；空 `turn_id` 语义散在 `internal/supervision/resume_context.go`（5 处判定） | ⏳ 缺口 |
+
+**留白 / 语义边界**
+
+- **C0-E 基线仍未采集**：§1.1 C0-E 的通过标准是「有基线数字」，§7.3 三个阈值都写着「建议值，需与基线一并确认」，§7.3 待办项（`:719`）未勾。因此 AC-P3-4c 的「相对基线改善」**当前不可判定**，本轮只把它收敛到「口径可复算 + 一条真实兜底行」。落地方式已备好：`readRuntimeCancelMetrics` 的读法线上可直接复用（按子会话枚举 run 行 + `CancelSource` 分组），采集脚本一落地基线即为一次性采样。
+- **§7.3 指标 3–5 缺真实运行期数据**：成功汇报延迟 P95、单 turn resume 次数 / token 成本、误杀率（需人工抽样复核）三项都依赖真实运行期采样，本轮未取证。
+- **AC-P3-4b 的「≥2h 墙钟」是 L4 留白**：用例证明语义与宿主接线成立；真实两小时里的观测量（进度心跳抖动、watchdog 判定时点、resume 延迟）仍待真实长任务。
+- **§13.11 留白的收口**：C4-3 留出的 `Recoverable` 谓词接入点，按「真实读数」判断的结果是**暂不启用** —— 当前生产形态下挂起 turn 本身没有在途 run（§6.7 `awaiting_obligations`），这条组合路径无实际触发面；接入点（策略字段）保留，待真实长任务出现「挂起 turn + 陈旧心跳」的组合读数再决定。
+- **EC-G4 是 P3 门禁里唯一没有专用用例的场景**（见上表）：迁移期「历史行 `turn_id` 为空 ⇒ 独立 run 语义、不参与账本清空判定」目前只有代码内判定、无用例锁住。
+- **run 授权修复的边界**：解析只发生在 agent 分支内，且只在 target 能读回 run 行时生效；`hooks.Authorize` 注入优先、跨 scope 拒绝、未知 id 拒绝三条边界都有测试锁住。`cmd/runtime-server/main.go` 未注入 `AgentRegistry`（走 legacy 放行分支），因此该修复对 CLI 宿主是实际生效面，对 runtime-server 宿主是未来接线的前提。
+
+**下一步**：P3 的 AC 面（AC-P3-1…4）已全部收口；P3 门禁还剩两块账 —— ① **C0-E 度量基线采集**（AC-P3-4c 的判定前提，上线后 L4）；② **EC-G4 专用用例**（P3 场景表唯一缺口）。建议优先补 ②（L1 即可闭环），基线采集按上线节奏走。
