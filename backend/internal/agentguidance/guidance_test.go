@@ -42,7 +42,7 @@ func TestEventsWaitArgTextKeepsNonBlockingSemantics(t *testing.T) {
 
 func TestWaitDisciplineTextJoinsBothRules(t *testing.T) {
 	got := WaitDisciplineText()
-	for _, rule := range []string{WaitBudgetRule, WaitEscalationRule} {
+	for _, rule := range []string{WaitBudgetRule, WaitEscalationRule, WaitLedgerBoundaryRule} {
 		if !strings.Contains(got, rule) {
 			t.Fatalf("discipline text must contain %q, got: %s", rule, got)
 		}

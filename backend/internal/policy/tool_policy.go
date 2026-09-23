@@ -138,7 +138,7 @@ func IsRuntimeOwnedEssentialTool(toolName string) bool {
 		"wait_team", "send_team_message",
 		"read_mailbox_digest", "read_task_spec", "read_task_context",
 		"report_task_outcome", "block_current_task",
-		"supervision_snapshot", "supervision_descendants", "ack_lifecycle", "control_descendant":
+		"supervision_snapshot", "supervision_descendants", "read_agent_result", "subagent_status", "subagent_inspect_task", "subagent_ack_lifecycle", "subagent_control", "ack_lifecycle", "control_descendant":
 		return true
 	default:
 		return false

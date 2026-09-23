@@ -90,40 +90,47 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 	broker := &Broker{Supervision: &fakeSupervisionController{}}
 	defs := broker.Definitions()
 	names := toolDefinitionNames(defs)
-	require.Contains(t, names, ToolSupervisionSnapshot)
-	require.Contains(t, names, ToolSupervisionDescendants)
-	require.Contains(t, names, ToolReadAgentResult)
+	require.Contains(t, names, ToolSubagentStatus)
+	require.Contains(t, names, ToolSubagentInspectTask)
 	require.Contains(t, names, ToolAckLifecycle)
 	require.Contains(t, names, ToolControlDescendant)
+	// 合并后的可见面每个能力只留一个名字：旧入口不再广播（仍可调用，见
+	// supervision_tool_registry_test.go 的兼容性用例）。
+	require.NotContains(t, names, ToolSupervisionSnapshot)
+	require.NotContains(t, names, ToolSupervisionDescendants)
+	require.NotContains(t, names, ToolReadAgentResult)
 
-	snapshot := supervisionDefinition(t, defs, ToolSupervisionSnapshot)
-	require.NotNil(t, snapshot.Metadata)
-	require.Equal(t, false, snapshot.Metadata[types.ToolMetadataEmptyReplayCacheKey],
-		"snapshot is a polling tool: an empty result must not be cached as a negative answer")
-	require.Contains(t, snapshot.Description, "use supervision_descendants",
-		"the digest description must point routine matrix inspection at supervision_descendants")
+	status := supervisionDefinition(t, defs, ToolSubagentStatus)
+	require.NotNil(t, status.Metadata)
+	require.Equal(t, false, status.Metadata[types.ToolMetadataEmptyReplayCacheKey],
+		"subagent_status is a polling tool: an empty ledger must not be cached as a negative answer")
+	require.Contains(t, status.Description, "include_digest",
+		"the surviving read model must document the folded lifecycle digest")
+	require.Contains(t, status.Description, "critical_unresolved",
+		"the digest fields must stay discoverable on the surviving tool")
 
-	descendants := supervisionDefinition(t, defs, ToolSupervisionDescendants)
-	require.Equal(t, false, descendants.Metadata[types.ToolMetadataEmptyReplayCacheKey],
-		"descendants is an inspection tool: an empty matrix must not be cached as a negative answer")
-	require.Contains(t, descendants.Description, "anti-polling",
+	require.Contains(t, status.Description, "anti-polling",
 		"the description must tell the model that repeated inspection is the intended primitive")
-	require.Contains(t, descendants.Description, "do not poll wait_agent",
+	require.Contains(t, status.Description, "instead of polling wait_agent",
 		"the description must steer routine supervision away from repeated wait_agent polling")
 	for _, field := range []string{"recommended_action", "allowed_actions", "next_action"} {
-		require.Contains(t, descendants.Description, field,
+		require.Contains(t, status.Description, field,
 			"the description must explain the decision field %q returned per row", field)
 	}
-	descendantParams, ok := descendants.Parameters["properties"].(map[string]interface{})
+	descendantParams, ok := status.Parameters["properties"].(map[string]interface{})
 	require.True(t, ok)
-	for _, key := range []string{"mode", "health", "include_terminal", "limit", "after_seq"} {
+	for _, key := range []string{"mode", "health", "include_terminal", "include_digest", "include_resolved", "limit", "after_seq"} {
 		require.Contains(t, descendantParams, key)
 	}
+	digestParam, ok := descendantParams["include_digest"].(map[string]interface{})
+	require.True(t, ok, "include_digest must be part of the surviving read contract")
+	require.Contains(t, digestParam["description"], "critical_unresolved",
+		"include_digest must document the digest fields it folds in")
 	resultsParam, ok := descendantParams["include_results"].(map[string]interface{})
 	require.True(t, ok, "include_results must be part of the descendants contract")
 	require.Contains(t, resultsParam["description"], "Significantly increases the output",
 		"include_results must warn about the output cost")
-	require.Contains(t, resultsParam["description"], "Default false")
+	require.Contains(t, resultsParam["description"], "default false")
 	healthParam, ok := descendantParams["health"].(map[string]interface{})
 	require.True(t, ok)
 	require.Contains(t, healthParam["description"], "action_required",
@@ -147,35 +154,35 @@ func TestBroker_Definitions_GateSupervisionToolsOnHostCapability(t *testing.T) {
 	ackNotification, ok := params["notification_id"].(map[string]interface{})
 	require.True(t, ok)
 	require.Contains(t, ackNotification["description"], "verbatim",
-		"ack_lifecycle must require a notification_id copied from the read models")
+		"subagent_ack_lifecycle must require a notification_id copied from the read models")
 	controlParams, ok := supervisionDefinition(t, defs, ToolControlDescendant).Parameters["properties"].(map[string]interface{})
 	require.True(t, ok)
 	require.Contains(t, controlParams, "cascade")
 	controlNotification, ok := controlParams["notification_id"].(map[string]interface{})
 	require.True(t, ok)
 	require.Contains(t, controlNotification["description"], "verbatim",
-		"control_descendant must require a notification_id copied from the read models")
+		"subagent_control must require a notification_id copied from the read models")
 
-	readResult := supervisionDefinition(t, defs, ToolReadAgentResult)
-	require.Equal(t, false, readResult.Metadata[types.ToolMetadataEmptyReplayCacheKey],
-		"read_agent_result is a polling tool: an empty answer must not be cached as a negative one")
-	require.Contains(t, readResult.Description, "no_result_recorded")
-	require.Contains(t, readResult.Description, "read_agent_events")
-	require.Contains(t, readResult.Description, "max_chars")
-	readResultParams, ok := readResult.Parameters["properties"].(map[string]interface{})
+	inspect := supervisionDefinition(t, defs, ToolSubagentInspectTask)
+	require.Equal(t, false, inspect.Metadata[types.ToolMetadataEmptyReplayCacheKey],
+		"subagent_inspect_task is a polling tool: an empty answer must not be cached as a negative one")
+	require.Contains(t, inspect.Description, "no_result_recorded")
+	require.Contains(t, inspect.Description, "read_agent_events")
+	require.Contains(t, inspect.Description, "max_chars")
+	inspectParams, ok := inspect.Parameters["properties"].(map[string]interface{})
 	require.True(t, ok)
 	for _, key := range []string{"id", "task_id", "sections", "max_chars"} {
-		require.Contains(t, readResultParams, key)
+		require.Contains(t, inspectParams, key)
 	}
-	idParam, ok := readResultParams["id"].(map[string]interface{})
+	idParam, ok := inspectParams["id"].(map[string]interface{})
 	require.True(t, ok)
 	require.Contains(t, idParam["description"], "required")
-	require.Equal(t, []string{"id"}, readResult.Parameters["required"])
+	require.Equal(t, []string{"id"}, inspect.Parameters["required"])
 }
 
 func TestBroker_IsBrokerTool_RecognizesSupervisionTools(t *testing.T) {
 	broker := &Broker{}
-	for _, name := range []string{ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant, "supervisionSnapshot", "supervisionDescendants", "readAgentResult", "ackLifecycle", "controlDescendant"} {
+	for _, name := range []string{ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant, ToolSubagentStatus, ToolSubagentInspectTask, "supervisionSnapshot", "supervisionDescendants", "readAgentResult", "ackLifecycle", "controlDescendant", "subagentStatus", "subagentInspectTask", "subagentAckLifecycle", "subagentControl"} {
 		require.Truef(t, broker.IsBrokerTool(name), "%s must be recognized as a broker tool", name)
 	}
 }
@@ -259,7 +266,7 @@ func TestBroker_Execute_SupervisionDescendants(t *testing.T) {
 	require.Equal(t, 1, meta["action_required"])
 	require.Equal(t, true, meta["truncated"])
 	require.Equal(t, int64(9), meta["next_seq"])
-	require.Contains(t, meta["next_action"], "control_descendant")
+	require.Contains(t, meta["next_action"], "subagent_control")
 
 	// Unknown modes/health values are rejected before the host is called: a typo
 	// must not silently widen the read to the whole scope.
@@ -459,7 +466,7 @@ func TestBroker_Execute_ControlDescendant(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "act-1", payload["action_id"])
 	require.Equal(t, "completed", payload["status"])
-	require.Contains(t, meta[cacheSafeSummaryMetadataKey], "supervision_snapshot")
+	require.Contains(t, meta[cacheSafeSummaryMetadataKey], "subagent_status")
 }
 
 func TestBroker_Execute_SupervisionWithoutHostCapability(t *testing.T) {

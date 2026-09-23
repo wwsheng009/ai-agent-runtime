@@ -59,8 +59,19 @@ const (
 	ToolSupervisionSnapshot    = "supervision_snapshot"
 	ToolSupervisionDescendants = "supervision_descendants"
 	ToolReadAgentResult        = "read_agent_result"
-	ToolAckLifecycle           = "ack_lifecycle"
-	ToolControlDescendant      = "control_descendant"
+	// Control verbs renamed into the subagent_* family: the wire name now says
+	// what the verb does. The legacy spellings stay callable (normalizeToolName
+	// maps them onto these constants) so existing prompts, hosts and pointers
+	// keep working without a second advertised name.
+	ToolAckLifecycle      = "subagent_ack_lifecycle"
+	ToolControlDescendant = "subagent_control"
+	// P2 C3-1 inspection primitive names (plan §C3-1, change #7):
+	// subagent_status is the ledger overview and subagent_inspect_task the
+	// bounded deep look at one subject. Both are façades over the same
+	// AgentSupervisionController data plane as supervision_descendants /
+	// read_agent_result - no new storage is created.
+	ToolSubagentStatus      = "subagent_status"
+	ToolSubagentInspectTask = "subagent_inspect_task"
 )
 
 // Broker provides synthetic tools backed by runtime services.
@@ -152,7 +163,7 @@ func withBrokerSourceDefinitions(definitions []types.ToolDefinition) []types.Too
 
 func isVolatileEmptyReplayTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolTaskOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult:
+	case ToolTaskOutput, ToolListAgents, ToolWaitAgent, ToolReadAgentEvents, ToolWaitTeam, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult:
 		return true
 	default:
 		return false
@@ -162,7 +173,7 @@ func isVolatileEmptyReplayTool(name string) bool {
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
+	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return true
 	default:
 		return false
@@ -1918,7 +1929,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		}
 		return aliasedResult, attachCacheSafeSummary(summary, agentStatusCacheSafeSummary(aliasedResult)), nil
 
-	case ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
+	case ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return b.executeSupervisionTool(ctx, toolName, sessionID, args)
 
 	case ToolResolveAgentApproval:
@@ -2799,6 +2810,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"execution_continues":       result.ExecutionContinues,
 			"next_action":               result.NextAction,
 			"latest_seq":                result.LatestSeq,
+			// Same ledger echo as wait_agent: pending_count is the number of
+			// non-terminal task rows in the team view (plan §C3-4 / AC-P2-4g).
+			"pending_count":  result.PendingCount,
+			"terminal_count": result.TerminalCount,
+			"waited_ms":      result.WaitedMs,
 		}, waitTeamCacheSafeSummary(result)), nil
 
 	case ToolSendTeamMessage:
@@ -3476,11 +3492,21 @@ func normalizeToolName(name string) string {
 		return ToolSupervisionSnapshot
 	case "supervisiondescendants":
 		return ToolSupervisionDescendants
+	case "subagentstatus", "agentstatus", "agent_status":
+		return ToolSubagentStatus
+	case "subagentinspecttask", "subagentinspect", "subagent_inspect", "inspecttask":
+		return ToolSubagentInspectTask
 	case "readagentresult", "read_agent_result", "agentresult":
 		return ToolReadAgentResult
-	case "acklifecycle":
+	// Legacy spellings (pre-rename prompts, hosts, plan text) plus the camel
+	// spellings of the new wire names.
+	case "acklifecycle", "ack_lifecycle":
 		return ToolAckLifecycle
-	case "controldescendant":
+	case "subagentacklifecycle":
+		return ToolAckLifecycle
+	case "controldescendant", "control_descendant":
+		return ToolControlDescendant
+	case "subagentcontrol":
 		return ToolControlDescendant
 	default:
 		return name
@@ -3766,6 +3792,35 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 	if request.Limit > 100 {
 		request.Limit = 100
 	}
+	// Team-task obligation ledger (plan §C3-4 统一返回契约 / AC-P2-4g): the
+	// baseline is read before the observation window starts, so terminal_delta
+	// reports exactly the tasks that finished during this wait segment. Both
+	// ledger reads are fail-open (plan §13.8): a task-store failure must not turn
+	// a successful observation into an error, it only leaves the ledger view off.
+	baselineRows, baselineErr := b.readWaitTeamTaskLedger(ctx, teamID)
+	var baselineTerminal []string
+	if baselineErr == nil {
+		for _, row := range baselineRows {
+			if row.Terminal {
+				baselineTerminal = append(baselineTerminal, row.ObligationID)
+			}
+		}
+	}
+	attachLedger := func(result WaitTeamResult) WaitTeamResult {
+		rows, ledgerErr := b.readWaitTeamTaskLedger(ctx, teamID)
+		if ledgerErr != nil {
+			return result
+		}
+		return *ApplyWaitTeamLedger(&result, rows, baselineTerminal)
+	}
+	// waited_ms is measured from the start of the observation loop, not from the
+	// call entry, so it reports the window actually spent waiting (AC-P2-4b) and
+	// stays comparable with wait_agent's waited_ms.
+	started := time.Now()
+	stampWaited := func(result WaitTeamResult) WaitTeamResult {
+		result.WaitedMs = time.Since(started).Milliseconds()
+		return result
+	}
 	// request.TimeoutMs is already the effective window (see ResolveWaitTimeout
 	// above): a zero/negative request became agents.defaultWaitTimeoutMs and an
 	// out-of-range one was clamped or rejected there.
@@ -3804,7 +3859,7 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 			if snapshotErr != nil {
 				result = WaitTeamResult{TeamID: teamID}
 			}
-			return finalizeWaitTeamTimeout(result, resolution), nil
+			return stampWaited(attachLedger(finalizeWaitTeamTimeout(result, resolution))), nil
 		default:
 		}
 		result, err := b.readWaitTeamSnapshot(ctx, teamID, request)
@@ -3813,14 +3868,14 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 		}
 		if result.Terminal && (!b.waitTeamRequiresSummary(request) || result.SummaryReady) {
 			result = *ApplyWaitTeamTimeout(&result, resolution.RequestedMs, request.TimeoutMs, resolution.Clamped)
-			return result, nil
+			return stampWaited(attachLedger(result)), nil
 		}
 		select {
 		case <-waitCtx.Done():
 			if ctx.Err() != nil {
 				return WaitTeamResult{}, ctx.Err()
 			}
-			return finalizeWaitTeamTimeout(result, resolution), nil
+			return stampWaited(attachLedger(finalizeWaitTeamTimeout(result, resolution))), nil
 		case wake, ok := <-wakeCh:
 			if !ok {
 				wakeCh = nil
@@ -3833,6 +3888,37 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 		case <-ticker.C:
 		}
 	}
+}
+
+// readWaitTeamTaskLedger reads the awaited team's tasks as obligation-ledger
+// rows (plan §C3-4 统一返回契约 / AC-P2-4g): subject_kind "team_task" with the
+// task id as the obligation id, so the team view carries the same row shape the
+// wait_agent batch rows use. DeadlineAt stays empty until per-task deadlines
+// exist on the dispatch side (plan C3-4 派发接口) — an invented deadline would be
+// worse than a missing one. Callers treat every error as fail-open (plan §13.8).
+func (b *Broker) readWaitTeamTaskLedger(ctx context.Context, teamID string) ([]AgentWaitObligation, error) {
+	if b == nil || b.TeamStore == nil {
+		return nil, nil
+	}
+	tasks, err := b.TeamStore.ListTasks(ctx, team.TaskFilter{TeamID: strings.TrimSpace(teamID)})
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]AgentWaitObligation, 0, len(tasks))
+	for _, task := range tasks {
+		id := strings.TrimSpace(task.ID)
+		if id == "" {
+			continue
+		}
+		rows = append(rows, AgentWaitObligation{
+			ObligationID: id,
+			SubjectKind:  "team_task",
+			SubjectID:    id,
+			State:        string(task.Status),
+			Terminal:     team.IsTerminalTaskStatus(task.Status),
+		})
+	}
+	return rows, nil
 }
 
 func finalizeWaitTeamTimeout(result WaitTeamResult, resolution agentcontrol.WaitTimeoutResolution) WaitTeamResult {

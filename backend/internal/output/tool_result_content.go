@@ -428,7 +428,9 @@ func isCollaborationResult(envelope *Envelope) bool {
 	}
 	switch strings.ToLower(strings.TrimSpace(envelope.ToolName)) {
 	case "wait_agent", "read_agent_events", "read_agent_result", "list_agents", "spawn_agent", "send_message", "followup_task",
-		"send_input", "resolve_agent_approval", "close_agent", "resume_agent":
+		"send_input", "resolve_agent_approval", "close_agent", "resume_agent",
+		"supervision_snapshot", "supervision_descendants", "subagent_status", "subagent_inspect_task",
+		"ack_lifecycle", "control_descendant", "subagent_ack_lifecycle", "subagent_control":
 		return true
 	default:
 		return false

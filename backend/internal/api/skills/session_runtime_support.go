@@ -27,9 +27,11 @@ import (
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
@@ -2064,10 +2066,97 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 	}, nil
 }
 
+// Wait 是 wait_agent 的账本外壳（plan §C3-4 统一返回契约，AC-P2-4d/e）：等待前先读
+// 一次**调用方自己**（父会话）本 turn 的 obligation 账本，账本非空且已无待办时立即
+// 返回 finalize（不空等）；否则按旧语义等待，并在返回结果上附账本视图与
+// terminal_delta。mailbox-only 与状态快照两条分支共用这一外壳，返回契约一致。
+//
+// 调用方会话取自 toolctx（internal/agent/loop.go 在每次工具执行前注入调用方会话），
+// 不能用等待参数里的 id——那是被等待的子会话。取不到会话、宿主未装配运行态库或
+// 批次库、或任一步判读失败，一律退化为旧语义（plan §13.8：判读失败 fail-open，
+// 绝不丢输入也绝不谎报账本）。
 func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
-	if args.MailboxOnly {
-		return c.waitForMailboxEvent(ctx, args)
+	obligations, baseline, pending := c.waitLedger(ctx)
+	if len(obligations) > 0 && !pending {
+		return toolbroker.ApplyAgentWaitLedger(
+			toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{}, time.Now()),
+			obligations, baseline,
+		), nil
 	}
+	var result *toolbroker.AgentWaitResult
+	var err error
+	if args.MailboxOnly {
+		result, err = c.waitForMailboxEvent(ctx, args)
+	} else {
+		result, err = c.waitForAgentStatus(ctx, args)
+	}
+	if err != nil || result == nil {
+		return result, err
+	}
+	return toolbroker.ApplyAgentWaitLedger(result, obligations, baseline), nil
+}
+
+// waitLedger 读回调用方（父会话）本 turn 的 obligation 账本视图（plan §C3-4）：
+// 模型可见的行、等待段开始时的终态基线（terminal_delta 只报等待期间完成的
+// obligation）、以及账本是否仍有非终态行。数据面与 CLI 宿主同源——运行态库里的
+// SuspendedTurnID 加批次库里的挂起记录，不新增存储。
+func (c *sessionAgentController) waitLedger(ctx context.Context) ([]toolbroker.AgentWaitObligation, []string, bool) {
+	if c == nil || c.handler == nil {
+		return nil, nil, false
+	}
+	sessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+	if sessionID == "" {
+		return nil, nil, false
+	}
+	store := c.handler.getSessionRuntimeStore()
+	if store == nil {
+		return nil, nil, false
+	}
+	state, err := store.LoadState(ctx, sessionID)
+	if err != nil || state == nil {
+		return nil, nil, false
+	}
+	turnID := strings.TrimSpace(state.SuspendedTurnID)
+	if turnID == "" {
+		return nil, nil, false
+	}
+	batches := c.handler.peekSubagentBatchStore()
+	if batches == nil {
+		return nil, nil, false
+	}
+	record, ok, err := batches.GetTurnSuspension(ctx, sessionID, turnID)
+	if err != nil || !ok || record == nil {
+		return nil, nil, false
+	}
+	rows, err := subagentbatch.BuildWaitLedger(ctx, batches, record)
+	if err != nil || len(rows) == 0 {
+		return nil, nil, false
+	}
+	obligations := make([]toolbroker.AgentWaitObligation, 0, len(rows))
+	baseline := make([]string, 0, len(rows))
+	pending := false
+	for _, row := range rows {
+		obligation := toolbroker.AgentWaitObligation{
+			ObligationID: row.ObligationID,
+			SubjectKind:  row.SubjectKind,
+			SubjectID:    row.SubjectID,
+			State:        row.State,
+			Terminal:     row.Terminal,
+		}
+		if !row.DeadlineAt.IsZero() {
+			obligation.DeadlineAt = row.DeadlineAt.UTC().Format(time.RFC3339)
+		}
+		obligations = append(obligations, obligation)
+		if row.Terminal {
+			baseline = append(baseline, row.ObligationID)
+		} else {
+			pending = true
+		}
+	}
+	return obligations, baseline, pending
+}
+
+func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
 	startedAt := time.Now()
 	sessionIDs := normalizeAgentWaitIDs(args)
 	if len(sessionIDs) == 0 {

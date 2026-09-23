@@ -96,11 +96,11 @@ func controlPlaneToolCapabilities(normalizedToolName string) ([]Capability, bool
 		return []Capability{CapReadOnly, CapAgentManagement}, true
 	case "list_agents", "wait_agent", "read_agent_events", "wait_team", "read_mailbox_digest", "read_task_spec", "read_task_context", "report_task_outcome", "block_current_task":
 		return []Capability{CapReadOnly}, true
-	case "supervision_snapshot", "supervision_descendants":
+	case "supervision_snapshot", "supervision_descendants", "read_agent_result", "subagent_status", "subagent_inspect_task":
 		// Observation-only supervision reads: no durable write, so read_only is
 		// enough and a read-only session may still inspect its own scope.
 		return []Capability{CapReadOnly}, true
-	case "ack_lifecycle", "control_descendant":
+	case "subagent_ack_lifecycle", "subagent_control", "ack_lifecycle", "control_descendant":
 		// Writes to the durable supervision control plane: audit + CAS still
 		// apply, and they are never satisfied by a read-only session.
 		return []Capability{CapReadOnly, CapAgentManagement}, true
@@ -175,14 +175,24 @@ func normalizeToolName(name string) string {
 		return "report_task_outcome"
 	case "blockcurrenttask":
 		return "block_current_task"
+	case "readagentresult", "read_agent_result", "agentresult":
+		return "read_agent_result"
 	case "supervisionsnapshot":
 		return "supervision_snapshot"
 	case "supervisiondescendants":
 		return "supervision_descendants"
-	case "acklifecycle":
-		return "ack_lifecycle"
-	case "controldescendant":
-		return "control_descendant"
+	case "subagentstatus", "agentstatus", "agent_status":
+		return "subagent_status"
+	case "subagentinspecttask", "subagentinspect", "subagent_inspect", "inspecttask":
+		return "subagent_inspect_task"
+	case "acklifecycle", "ack_lifecycle":
+		return "subagent_ack_lifecycle"
+	case "subagentacklifecycle":
+		return "subagent_ack_lifecycle"
+	case "controldescendant", "control_descendant":
+		return "subagent_control"
+	case "subagentcontrol":
+		return "subagent_control"
 	default:
 		return name
 	}

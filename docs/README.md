@@ -24,6 +24,7 @@ Main sections:
 
 - `aicli/` - CLI behavior, default `aicli` -> `chat` startup, headless exec, session export/import, portable agents, image generation, tool output rendering, metadata propagation, and provider integration notes
 - `user-guide/` - 操作手册：安装部署、配置、启动、日常操作、构建、故障排查与升级
+- `e2e/` - 端到端场景指南（独立进程启动 aicli + `/debug/endpoints` 端点发现 + 屏幕回读 / `invoke` 的验收场景，见 `e2e/debug-guide.md`）
 - `codex/` - Codex provider behavior, native tool exposure, and image generation diagnostics
 - `mcp/` - MCP 服务器集成手册（chrome-devtools：连接已打开浏览器、配置模板、使用与排查）
 - `skill_runtime/` - runtime APIs, governance, contracts, search, persistence, and design notes

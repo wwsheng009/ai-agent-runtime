@@ -141,11 +141,13 @@ func TestRenderMultiAgentCollaborationGuidance_KeepsParentWorkingAndReadsIncreme
 		"close_agent",
 		"wait_team lifecycle",
 		"Business supervision flow:",
-		"inspect with supervision_descendants",
+		"inspect with subagent_status",
+		"add include_digest=true to fold the lifecycle digest",
+		"subagent_inspect_task is the byte-bounded deep look",
 		"instead of polling wait_agent repeatedly",
 		"batch progress block",
 		"converge finished children with close_agent once the batch reaches terminal",
-		"control_descendant close only while the row is still unresolved",
+		"subagent_control close only while the row is still unresolved",
 	} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("expected %q in guidance, got:\n%s", expected, got)

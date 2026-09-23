@@ -117,9 +117,55 @@ type ControlDescendantArgs struct {
 	HasExpectedVersion bool
 }
 
-// supervisionToolDefinitions returns the five control-plane tool definitions.
-// Callers gate on the host capability before appending them.
+// supervisionToolDefinitions returns the advertised control-plane tools: one
+// name per capability. Callers gate on the host capability before appending
+// them.
+//
+// The legacy names stay callable through executeSupervisionTool (they live in
+// allSupervisionToolDefinitions) so prompts, hosts and stored pointers keep
+// working, but they are no longer advertised to the model: each of them is
+// fully covered by an advertised sibling, and two names for one capability is
+// exactly the drift this consolidation removes.
 func supervisionToolDefinitions() []types.ToolDefinition {
+	return advertisedSupervisionToolDefinitions(allSupervisionToolDefinitions())
+}
+
+// retiredSupervisionToolNames are the pre-consolidation definition names: they
+// stay dispatchable and each maps onto an advertised sibling, but they are no
+// longer advertised — two names for one capability is exactly the drift this
+// consolidation removes.
+//
+//	supervision_snapshot    -> subagent_status(include_digest=true)
+//	supervision_descendants -> subagent_status
+//	read_agent_result       -> subagent_inspect_task(include_status=false)
+//
+// The verb spellings ack_lifecycle / control_descendant are alias-only inputs to
+// normalizeToolName (never definition names) and resolve to
+// subagent_ack_lifecycle / subagent_control.
+var retiredSupervisionToolNames = map[string]bool{
+	ToolSupervisionSnapshot:    true,
+	ToolSupervisionDescendants: true,
+	ToolReadAgentResult:        true,
+}
+
+// advertisedSupervisionToolDefinitions drops the legacy names from the
+// model-facing list. The filter is data-driven (a name set, not a slice index)
+// so adding or removing a legacy name cannot silently shift the advertised
+// surface.
+func advertisedSupervisionToolDefinitions(all []types.ToolDefinition) []types.ToolDefinition {
+	advertised := make([]types.ToolDefinition, 0, len(all))
+	for _, definition := range all {
+		if retiredSupervisionToolNames[definition.Name] {
+			continue
+		}
+		advertised = append(advertised, definition)
+	}
+	return advertised
+}
+
+// allSupervisionToolDefinitions holds every control-plane definition the
+// dispatcher accepts, advertised or not.
+func allSupervisionToolDefinitions() []types.ToolDefinition {
 	return []types.ToolDefinition{
 		{
 			Name: ToolSupervisionSnapshot,
@@ -222,13 +268,13 @@ func supervisionToolDefinitions() []types.ToolDefinition {
 		{
 			Name: ToolAckLifecycle,
 			Description: "Decide one supervision notification so it stops being re-injected: decision=acknowledge (accept the handled risk; note required), decision=defer (postpone until an RFC3339 deadline or Go duration such as 30m; reason required), decision=resolve (set the terminal resolution state closed|recovered|failed). Only notifications inside this session's own scope can be decided. " +
-				"notification_id must be copied verbatim from supervision_snapshot or supervision_descendants output - never invented or synthesized. Pass expected_version from the snapshot; on a version conflict re-read the snapshot instead of retrying blindly.",
+				"notification_id must be copied verbatim from subagent_status(include_digest=true) output - never invented or synthesized. Pass expected_version from the same read; on a version conflict re-read subagent_status(include_digest=true) instead of retrying blindly.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"notification_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Notification id copied verbatim from supervision_snapshot or supervision_descendants; do not invent or synthesize ids.",
+						"description": "Notification id copied verbatim from subagent_status(include_digest=true); do not invent or synthesize ids.",
 					},
 					"decision": map[string]interface{}{
 						"type":        "string",
@@ -254,7 +300,7 @@ func supervisionToolDefinitions() []types.ToolDefinition {
 					},
 					"expected_version": map[string]interface{}{
 						"type":        "integer",
-						"description": "Optional optimistic-concurrency guard taken from the snapshot.",
+						"description": "Optional optimistic-concurrency guard taken from the subagent_status digest read.",
 					},
 				},
 				"required": []string{"notification_id", "decision"},
@@ -269,7 +315,7 @@ func supervisionToolDefinitions() []types.ToolDefinition {
 				"properties": map[string]interface{}{
 					"notification_id": map[string]interface{}{
 						"type":        "string",
-						"description": "Notification id whose subject should be controlled; copy it verbatim from supervision_snapshot or supervision_descendants (never invent it).",
+						"description": "Notification id whose subject should be controlled; copy it verbatim from subagent_status (never invent it).",
 					},
 					"action": map[string]interface{}{
 						"type":        "string",
@@ -287,13 +333,110 @@ func supervisionToolDefinitions() []types.ToolDefinition {
 					},
 					"expected_version": map[string]interface{}{
 						"type":        "integer",
-						"description": "Optional optimistic-concurrency guard taken from the snapshot.",
+						"description": "Optional optimistic-concurrency guard taken from the subagent_status digest read.",
 					},
 				},
 				"required": []string{"notification_id", "action", "reason"},
 			},
 		},
+		{
+			Name: ToolSubagentStatus,
+			Description: "Read the scoped subagent ledger overview (read-only): one call returns every child/descendant row of this session's own scope with execution_status, supervision_state (running/blocked/stalled/timed_out/orphaned/terminal), heartbeat_age_ms / progress_age_ms, attempt/max_attempts, deadlines, action_required, recommended_action, allowed_actions[] and notification_id, plus the ledger rollup pending_count / terminal_count / terminal_delta[]. " +
+				"terminal_delta[] lists the rows that finished since your after_seq cursor, so pass the next_seq of your previous read to see only what changed. Use this as the inspection primitive instead of polling wait_agent row by row; repeat calls are legitimate observation and are exempt from the anti-polling advisory. " +
+				"An empty ledger returns next_action=finalize immediately (no empty wait); while any row may still be pending, next_action never claims you may finalize. allowed_actions[] is per row: a control action must be one of that row's values and is re-validated by subagent_control. include_results=true attaches the bounded per-row result projection (result_status/result_summary/artifact_refs/error_class/finished_at). " +
+				"Set include_digest=true to fold the scoped lifecycle digest into the same answer (critical_unresolved / action_required counts, the notification rows with their notification_id + version, the rendered text and next_seq for incremental reads); include_resolved=true additionally lists items resolved after your after_seq cursor. A digest read failure is reported as digest_error and never hides the matrix. Use the digest for lifecycle decisions with subagent_ack_lifecycle. The scope is derived from the caller's own session and cannot be widened by the model.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"mode": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"children", "descendants"},
+						"description": "children = direct children only; descendants = whole subtree (default).",
+					},
+					"health": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"any", "abnormal", "action_required"},
+						"description": "any (default) = full matrix; abnormal = only stalled/timed_out/orphaned/invalid/terminating rows; action_required = only rows asking the parent to decide. Unknown values are rejected instead of silently widening the read.",
+					},
+					"include_terminal": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Keep terminal (closed/terminated) rows in the matrix (default false). Turn it on when converging a finished batch.",
+					},
+					"include_results": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Attach the bounded per-row result projection (default false). Significantly increases the output; use it only when converging finished rows.",
+					},
+					"include_digest": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Fold the scoped lifecycle digest into this answer (default false). Same payload as the legacy supervision_snapshot read: critical_unresolved / action_required counts, items[] with notification_id + version, rendered text and next_seq. A digest failure degrades to digest_error instead of failing the ledger read.",
+					},
+					"include_resolved": map[string]interface{}{
+						"type":        "boolean",
+						"description": "With include_digest=true, also list items resolved after after_seq (default false).",
+					},
+					"after_seq": map[string]interface{}{
+						"type":        "integer",
+						"description": "Your last seen sequence (use the previous next_seq): terminal rows newer than it are reported in terminal_delta[] and counted as terminal_unacknowledged; with include_digest=true it is also the digest cursor.",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Cap the returned rows; unresolved/abnormal rows stay prioritized and truncated=true reports the cut.",
+					},
+				},
+			},
+		},
+		{
+			Name: ToolSubagentInspectTask,
+			Description: "Inspect one subagent or durable task inside this session's own scope (read-only): returns the bounded durable result (source/status/findings/changes/artifacts/errors/usage/truncated) and, unless include_status=false, the subject's current supervision row (execution_status, supervision_state, heartbeat/progress ages, allowed_actions, action_required). " +
+				"Output is byte-bounded by max_chars (default 4000, clamped to 256..20000); page a long summary with offset/limit instead of losing the tail. " +
+				"A subject outside your scope, or a missing durable record, is reported as an observation (status_source / source=none + error_code=no_result_recorded + next_action), never as a tool failure; follow that next_action (read_agent_events / wait_agent) instead of retrying the same read. If the status read fails the result is still returned with status_source=matrix_unavailable. " +
+				"Prefer this over re-reading the whole matrix when you need one subject's deliverable.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "string",
+						"description": "Child session id or agent path (required). Aliases: session_id, target, agent, child_session_id.",
+					},
+					"task_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional batch task id; narrows the read to that durable task record.",
+					},
+					"sections": map[string]interface{}{
+						"description": "Optional subset of summary | findings | changes | artifacts | errors | usage (default: all). An unknown section is rejected instead of widening the read.",
+						"oneOf": []map[string]interface{}{
+							{"type": "string"},
+							{"type": "array", "items": map[string]interface{}{"type": "string"}},
+						},
+					},
+					"offset": map[string]interface{}{
+						"type":        "integer",
+						"description": "Rune offset into the summary; use the previous next_offset to continue instead of re-reading the head.",
+					},
+					"limit": map[string]interface{}{
+						"type":        "integer",
+						"description": "Cap the summary runes returned by this read; zero uses the max_chars budget.",
+					},
+					"max_chars": map[string]interface{}{
+						"type":        "integer",
+						"description": "Output budget in characters (default 4000, clamped to 256..20000).",
+					},
+					"include_status": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Attach the subject's supervision row (default true). Set false when you only need the durable result.",
+					},
+				},
+				"required": []string{"id"},
+			},
+		},
 	}
+}
+
+// legacySupervisionToolNames exposes the retired-name set to the registry tests
+// so the advertised and dispatchable surfaces are asserted against one source
+// instead of a test-local copy that can go stale.
+func legacySupervisionToolNames() map[string]bool {
+	return retiredSupervisionToolNames
 }
 
 // parseSupervisionSnapshotArgs converts raw tool args into the typed input.
@@ -389,6 +532,83 @@ func parseReadAgentResultArgs(args map[string]interface{}) (ReadAgentResultArgs,
 	} else if ok && value > 0 {
 		parsed.MaxChars = value
 	}
+	return parsed, nil
+}
+
+// SubagentStatusArgs is the parsed input of subagent_status: the ledger matrix
+// (same argument vocabulary as supervision_descendants, so the two names cannot
+// drift apart into different filters) plus the optional lifecycle digest fold.
+type SubagentStatusArgs struct {
+	SupervisionDescendantsArgs
+	// IncludeDigest folds the scoped lifecycle digest into the same answer
+	// (the legacy supervision_snapshot payload). Default false: the matrix
+	// payload stays byte-identical to before.
+	IncludeDigest bool
+	// IncludeResolved extends the folded digest with items resolved after
+	// AfterSeq. Ignored when IncludeDigest is false.
+	IncludeResolved bool
+}
+
+// parseSubagentStatusArgs converts raw tool args into the ledger-overview
+// input. subagent_status shares supervision_descendants' argument vocabulary
+// (same data plane, same closed vocabularies) so the two names cannot drift
+// apart into different filters.
+func parseSubagentStatusArgs(args map[string]interface{}) (SubagentStatusArgs, error) {
+	matrix, err := parseSupervisionDescendantsArgs(args)
+	if err != nil {
+		return SubagentStatusArgs{}, err
+	}
+	parsed := SubagentStatusArgs{SupervisionDescendantsArgs: matrix}
+	if value, ok := args["include_digest"].(bool); ok {
+		parsed.IncludeDigest = value
+	}
+	if value, ok := args["include_resolved"].(bool); ok {
+		parsed.IncludeResolved = value
+	}
+	return parsed, nil
+}
+
+// SubagentInspectTaskArgs is the parsed input of subagent_inspect_task: the
+// bounded result read (same budget as read_agent_result) plus an optional
+// subject-state attachment from the descendant matrix.
+type SubagentInspectTaskArgs struct {
+	ReadAgentResultArgs
+	// IncludeStatus attaches the subject's supervision row (execution status,
+	// supervision state, heartbeat/progress ages, allowed_actions). Default
+	// true: the point of the deep look is "what is it doing now, and what did
+	// it produce". A matrix read failure degrades to
+	// status_source=matrix_unavailable instead of failing the observation.
+	IncludeStatus bool
+}
+
+// parseSubagentInspectTaskArgs converts raw tool args into the typed input.
+// It accepts the read_agent_result keys plus the session-handle aliases a
+// caller may carry over from the sibling tools (session_id/target/agent).
+func parseSubagentInspectTaskArgs(args map[string]interface{}) (SubagentInspectTaskArgs, error) {
+	parsed := SubagentInspectTaskArgs{IncludeStatus: true}
+	if value, ok := args["include_status"].(bool); ok {
+		parsed.IncludeStatus = value
+	}
+	readArgs := args
+	if supervisionArgValue(args, "id") == "" {
+		for _, key := range []string{"session_id", "target", "agent", "child_session_id"} {
+			value := supervisionArgValue(args, key)
+			if value == "" {
+				continue
+			}
+			readArgs = make(map[string]interface{}, len(args)+1)
+			for existingKey, existingValue := range args {
+				readArgs[existingKey] = existingValue
+			}
+			readArgs["id"] = value
+			break
+		}
+	}
+	read, err := parseReadAgentResultArgs(readArgs)
+	if err != nil {
+		return parsed, err
+	}
+	parsed.ReadAgentResultArgs = read
 	return parsed, nil
 }
 
@@ -596,10 +816,10 @@ func supervisionDescendantsNextAction(snapshot *supervision.Snapshot) string {
 		return ""
 	}
 	if snapshot.Summary.ActionRequired > 0 {
-		return "decide the action_required rows (notification_id + allowed_actions) with control_descendant or ack_lifecycle"
+		return "decide the action_required rows (notification_id + allowed_actions) with " + ToolControlDescendant + " or " + ToolAckLifecycle
 	}
 	if snapshot.Summary.TerminalUnacknowledged > 0 {
-		return "report the finished rows to the user, then ack_lifecycle or close them to converge the lifecycle"
+		return "report the finished rows to the user, then " + ToolAckLifecycle + " or close_agent them to converge the lifecycle"
 	}
 	if snapshot.Summary.Running+snapshot.Summary.Blocked > 0 {
 		return "children still running: continue independent work; re-read this matrix instead of polling wait_agent"
@@ -648,7 +868,231 @@ func readAgentResultSummary(payload supervision.ReadResultPayload) string {
 	return strings.Join(parts, "; ")
 }
 
-// executeSupervisionTool handles the four control-plane tools. The dispatcher
+// subagentStatusPayload shapes the ledger overview (plan §C3-1): the
+// descendant matrix plus the rollup a parent needs to decide whether it may
+// finalize. It is a read model over the existing snapshot - no new storage.
+//
+// Contract notes (plan AC-P2-1e):
+//   - rows keep the SnapshotItem shape, so allowed_actions[] stays per row; no
+//     top-level union is invented, because a union would hide which row may do
+//     what and control_descendant re-validates per row anyway.
+//   - terminal_delta[] lists the rows that reached terminal *since the
+//     caller's after_seq cursor* - the same cursor interpretation the data
+//     plane already uses for terminal_unacknowledged.
+//   - digest_ref is not emitted: this layer has no artifact archiver, and a
+//     fabricated reference would be worse than its absence (the caller pages
+//     the same read with limit/after_seq instead).
+func subagentStatusPayload(snapshot *supervision.Snapshot, afterSeq int64) map[string]interface{} {
+	if snapshot == nil {
+		return map[string]interface{}{"next_action": "finalize"}
+	}
+	rows := snapshot.Descendants
+	if rows == nil {
+		rows = []supervision.SnapshotItem{}
+	}
+	terminalDelta := make([]string, 0, 4)
+	terminalCount := 0
+	pendingCount := 0
+	for _, row := range rows {
+		if !isTerminalSupervisionState(row.SupervisionState) {
+			pendingCount++
+			continue
+		}
+		terminalCount++
+		if row.LastChangeSeq > afterSeq {
+			terminalDelta = append(terminalDelta, firstNonEmptyToolValue(row.ID, row.NotificationID))
+		}
+	}
+	payload := map[string]interface{}{
+		"scope":          snapshot.Scope,
+		"generated_at":   snapshot.GeneratedAt,
+		"snapshot_seq":   snapshot.SnapshotSeq,
+		"next_seq":       snapshot.NextSeq,
+		"summary":        snapshot.Summary,
+		"rows":           rows,
+		"pending_count":  pendingCount,
+		"terminal_count": terminalCount,
+		"terminal_delta": terminalDelta,
+		"truncated":      snapshot.Truncated,
+	}
+	payload["next_action"] = subagentStatusNextAction(snapshot, pendingCount)
+	return payload
+}
+
+// attachSubagentStatusDigest folds the scoped lifecycle digest into the ledger
+// payload - the same read the legacy supervision_snapshot name returns. It is
+// deliberately fail-open: a digest read failure is reported as digest_error
+// next to the intact matrix, so a supervision-store hiccup can never hide the
+// rows or fake a finalize (§13.8 - the matrix half stays authoritative for
+// pending work, the digest half only adds attention items).
+func attachSubagentStatusDigest(ctx context.Context, controller AgentSupervisionController, sessionID string, request SubagentStatusArgs, payload map[string]interface{}) {
+	digest, err := controller.SupervisionSnapshot(ctx, sessionID, SupervisionSnapshotArgs{
+		AfterSeq:        request.AfterSeq,
+		IncludeResolved: request.IncludeResolved,
+		Limit:           request.Limit,
+	})
+	if err != nil {
+		payload["digest_error"] = err.Error()
+		return
+	}
+	if digest == nil {
+		digest = &supervision.Digest{}
+	}
+	payload["digest"] = digest
+	payload["digest_next_action"] = digestNextAction(digest)
+}
+
+// digestNextAction mirrors the guidance the standalone digest tool used to
+// render, so a caller that folded the digest still learns what to do with it.
+func digestNextAction(digest *supervision.Digest) string {
+	if digest != nil && (digest.CriticalUnresolved > 0 || digest.ActionRequired > 0) {
+		return "decide the listed notification_id rows with " + ToolAckLifecycle + " (acknowledge/defer/resolve), then continue the task"
+	}
+	return "no unresolved supervision items for this session"
+}
+
+// subagentStatusNextAction is the ledger-driven next step. An empty ledger
+// (nothing pending, nothing to decide) returns finalize immediately so the
+// caller does not wait on work that does not exist (AC-P2-1c). Every other
+// state reuses the shared matrix guidance; finalize is withheld whenever any
+// row may still be in flight, which is the conservative direction of the
+// fail-open rule (§13.8): never claim a parent may finalize while work may be
+// pending.
+func subagentStatusNextAction(snapshot *supervision.Snapshot, pendingCount int) string {
+	if action := supervisionDescendantsNextAction(snapshot); action != "" {
+		return action
+	}
+	if snapshot == nil {
+		return "finalize"
+	}
+	summary := snapshot.Summary
+	if pendingCount == 0 &&
+		summary.Stalled == 0 && summary.TimedOut == 0 && summary.Orphaned == 0 &&
+		summary.Invalid == 0 && summary.Canceling == 0 &&
+		summary.ActionRequired == 0 && summary.TerminalUnacknowledged == 0 {
+		return "finalize"
+	}
+	return ""
+}
+
+// isTerminalSupervisionState reports whether a matrix row reached the terminal
+// supervision state. The vocabulary is the data plane's own: the only state
+// internal/supervision/snapshot.go treats as end-of-lifecycle (and counts as
+// terminal_unacknowledged) is SupervisionTerminated - there is no "terminal"
+// literal in the state set. Every other state, including one this build does
+// not know, is read as pending: that is the conservative direction for the
+// finalize gate, which must never claim the parent may finalize while work may
+// still be in flight (§13.8).
+func isTerminalSupervisionState(state supervision.SupervisionState) bool {
+	return state == supervision.SupervisionTerminated
+}
+
+// subagentStatusSummary renders the one-line cache-safe summary of the ledger
+// overview: row/count rollup plus the next step, so a cached or compacted
+// result cannot hide pending work.
+func subagentStatusSummary(snapshot *supervision.Snapshot, payload map[string]interface{}) string {
+	if snapshot == nil {
+		return "subagent status: empty ledger; next_action=finalize"
+	}
+	pending, _ := payload["pending_count"].(int)
+	terminal, _ := payload["terminal_count"].(int)
+	summary := fmt.Sprintf("subagent status: %d row(s), %d pending, %d terminal", len(snapshot.Descendants), pending, terminal)
+	if delta, ok := payload["terminal_delta"].([]string); ok && len(delta) > 0 {
+		shown := delta
+		suffix := ""
+		if len(shown) > 8 {
+			shown = shown[:8]
+			suffix = fmt.Sprintf(" (+%d more)", len(delta)-8)
+		}
+		summary += "; finished since cursor: " + strings.Join(shown, ", ") + suffix
+	}
+	if snapshot.Truncated {
+		summary += fmt.Sprintf(" (truncated; next_seq=%d)", snapshot.NextSeq)
+	}
+	if digest, ok := payload["digest"].(*supervision.Digest); ok && digest != nil {
+		summary += fmt.Sprintf("; digest: %d critical_unresolved, %d action_required", digest.CriticalUnresolved, digest.ActionRequired)
+	} else if _, failed := payload["digest_error"]; failed {
+		summary += "; digest unavailable"
+	}
+	if action, _ := payload["next_action"].(string); action != "" {
+		summary += "; next_action=" + action
+	}
+	return summary
+}
+
+// subagentInspectTaskPayload composes the bounded deep look (plan §C3-1): the
+// subject's matrix row (what it is doing now) plus the durable bounded result
+// (what it produced). Both halves are bounded by existing budgets - the result
+// by read_agent_result's max_chars, the row by the snapshot row contract - so
+// this composition cannot produce an unbounded payload.
+//
+// The matrix half is fail-open: a failed status read degrades to
+// status_source=matrix_unavailable with the reason, because an observation
+// failure must never turn a readable result into a tool failure (AC-P2-1d).
+func subagentInspectTaskPayload(payload supervision.ReadResultPayload, row *supervision.SnapshotItem, statusErr error) map[string]interface{} {
+	out := map[string]interface{}{
+		"result": payload,
+	}
+	switch {
+	case statusErr != nil:
+		out["status_source"] = "matrix_unavailable"
+		out["status_error"] = statusErr.Error()
+	case row != nil:
+		out["subject"] = *row
+		out["status_source"] = "matrix"
+	default:
+		out["status_source"] = "matrix_no_row"
+	}
+	if action := strings.TrimSpace(payload.NextAction); action != "" {
+		out["next_action"] = action
+	}
+	return out
+}
+
+// subagentInspectTaskSummary renders the one-line cache-safe summary of a deep
+// look: the bounded result plus the subject-state source.
+func subagentInspectTaskSummary(payload map[string]interface{}, read supervision.ReadResultPayload) string {
+	summary := "inspect task: " + readAgentResultSummary(read)
+	if source, ok := payload["status_source"].(string); ok && source != "matrix" {
+		summary += "; subject state " + source
+	}
+	return summary
+}
+
+// subagentInspectTaskRow reads the subject's row from the same scoped matrix
+// the status tool uses (terminal rows included, so a finished subject still
+// reports its last state). A matrix failure is returned so the caller can
+// degrade to an observation note instead of failing the deep look (AC-P2-1d).
+func (b *Broker) subagentInspectTaskRow(ctx context.Context, sessionID string, read ReadAgentResultArgs) (*supervision.SnapshotItem, error) {
+	if b.Supervision == nil {
+		return nil, nil
+	}
+	snapshot, err := b.Supervision.SupervisionDescendants(ctx, sessionID, SupervisionDescendantsArgs{
+		Mode:            "descendants",
+		IncludeTerminal: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if snapshot == nil {
+		return nil, nil
+	}
+	targets := []string{strings.TrimSpace(read.SessionID), strings.TrimSpace(read.TaskID)}
+	for index := range snapshot.Descendants {
+		row := snapshot.Descendants[index]
+		for _, target := range targets {
+			if target == "" {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(row.ID), target) {
+				return &row, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+// executeSupervisionTool handles the control-plane tool family. The dispatcher
 // stays thin on purpose: scoping, allowed_actions re-validation and CAS all
 // live in the host implementation (LocalControlService), so the model can never
 // talk the broker into a different policy.
@@ -671,7 +1115,7 @@ func (b *Broker) executeSupervisionTool(ctx context.Context, toolName, sessionID
 		}
 		nextAction := "no unresolved supervision items for this session"
 		if digest.CriticalUnresolved > 0 || digest.ActionRequired > 0 {
-			nextAction = "decide the listed notification_id rows with ack_lifecycle (acknowledge/defer/resolve), then continue the task"
+			nextAction = "decide the listed notification_id rows with " + ToolAckLifecycle + " (acknowledge/defer/resolve), then continue the task"
 		}
 		return digest, attachCacheSafeSummary(map[string]interface{}{
 			"critical_unresolved": digest.CriticalUnresolved,
@@ -711,6 +1155,21 @@ func (b *Broker) executeSupervisionTool(ctx context.Context, toolName, sessionID
 			"next_action":      supervisionDescendantsNextAction(snapshot),
 		}, supervisionDescendantsSummary(snapshot)), nil
 
+	case ToolSubagentStatus:
+		request, err := parseSubagentStatusArgs(args)
+		if err != nil {
+			return nil, nil, err
+		}
+		snapshot, err := b.Supervision.SupervisionDescendants(ctx, sessionID, request.SupervisionDescendantsArgs)
+		if err != nil {
+			return nil, nil, err
+		}
+		payload := subagentStatusPayload(snapshot, request.AfterSeq)
+		if request.IncludeDigest {
+			attachSubagentStatusDigest(ctx, b.Supervision, sessionID, request, payload)
+		}
+		return payload, attachCacheSafeSummary(payload, subagentStatusSummary(snapshot, payload)), nil
+
 	case ToolReadAgentResult:
 		request, err := parseReadAgentResultArgs(args)
 		if err != nil {
@@ -727,6 +1186,23 @@ func (b *Broker) executeSupervisionTool(ctx context.Context, toolName, sessionID
 			"error_code":  payload.ErrorCode,
 			"next_action": payload.NextAction,
 		}, readAgentResultSummary(payload)), nil
+
+	case ToolSubagentInspectTask:
+		request, err := parseSubagentInspectTaskArgs(args)
+		if err != nil {
+			return nil, nil, err
+		}
+		read, err := b.Supervision.ReadAgentResult(ctx, sessionID, request.ReadAgentResultArgs)
+		if err != nil {
+			return nil, nil, err
+		}
+		var row *supervision.SnapshotItem
+		var statusErr error
+		if request.IncludeStatus {
+			row, statusErr = b.subagentInspectTaskRow(ctx, sessionID, request.ReadAgentResultArgs)
+		}
+		payload := subagentInspectTaskPayload(read, row, statusErr)
+		return payload, attachCacheSafeSummary(payload, subagentInspectTaskSummary(payload, read)), nil
 
 	case ToolAckLifecycle:
 		request, err := parseAckLifecycleArgs(args)
@@ -766,7 +1242,7 @@ func (b *Broker) executeSupervisionTool(ctx context.Context, toolName, sessionID
 			payload["result"] = result
 		}
 		return payload, attachCacheSafeSummary(payload, fmt.Sprintf(
-			"action %s on %s/%s status=%s; re-read supervision_snapshot to confirm the row converged",
+			"action %s on %s/%s status=%s; re-read subagent_status(include_digest=true) to confirm the row converged",
 			record.ActionID, record.TargetKind, record.TargetID, record.Status)), nil
 	}
 	return nil, nil, fmt.Errorf("unsupported supervision tool %q", toolName)

@@ -26,7 +26,7 @@ var ErrAgentSessionClosed = errors.New("agent session is closed")
 // delivery, so the caller must converge instead of retrying the same send.
 func AgentSessionClosedError(toolName, sessionID string) error {
 	return fmt.Errorf(
-		"%s target %s: %w; next_action=inspect|finalize — the target is terminal so this instruction was not delivered; read its durable result (read_agent_result) or converge the parent instead of retrying",
+		"%s target %s: %w; next_action=inspect|finalize — the target is terminal so this instruction was not delivered; read its durable result (subagent_inspect_task) or converge the parent instead of retrying",
 		strings.TrimSpace(toolName), strings.TrimSpace(sessionID), ErrAgentSessionClosed,
 	)
 }
@@ -178,18 +178,32 @@ type WaitTeamResult struct {
 	// WaitTimeoutRequestedMs / WaitTimeoutClamped echo how the requested team
 	// observation window was normalized against agents.minWaitTimeoutMs /
 	// agents.maxWaitTimeoutMs so a clamped wait is never silent.
-	WaitTimeoutRequestedMs int                    `json:"wait_timeout_requested_ms,omitempty"`
-	WaitTimeoutClamped     bool                   `json:"wait_timeout_clamped,omitempty"`
-	ExecutionContinues     bool                   `json:"execution_continues,omitempty"`
-	NextAction             string                 `json:"next_action,omitempty"`
-	SummaryReady           bool                   `json:"summary_ready"`
-	Summary                string                 `json:"summary,omitempty"`
-	SummarySource          string                 `json:"summary_source,omitempty"`
-	SummaryPayload         map[string]interface{} `json:"summary_payload,omitempty"`
-	SummaryEventSeq        int64                  `json:"summary_event_seq,omitempty"`
-	Events                 []WaitTeamEventResult  `json:"events,omitempty"`
-	EventCount             int                    `json:"event_count"`
-	LatestSeq              int64                  `json:"latest_seq,omitempty"`
+	WaitTimeoutRequestedMs int  `json:"wait_timeout_requested_ms,omitempty"`
+	WaitTimeoutClamped     bool `json:"wait_timeout_clamped,omitempty"`
+	// WaitedMs is the observation window actually spent waiting, in
+	// milliseconds (plan §C3-4 统一返回契约 waited_ms), measured from the start
+	// of the wait loop so it stays comparable with wait_agent's waited_ms.
+	WaitedMs           int64                  `json:"waited_ms,omitempty"`
+	ExecutionContinues bool                   `json:"execution_continues,omitempty"`
+	NextAction         string                 `json:"next_action,omitempty"`
+	SummaryReady       bool                   `json:"summary_ready"`
+	Summary            string                 `json:"summary,omitempty"`
+	SummarySource      string                 `json:"summary_source,omitempty"`
+	SummaryPayload     map[string]interface{} `json:"summary_payload,omitempty"`
+	SummaryEventSeq    int64                  `json:"summary_event_seq,omitempty"`
+	Events             []WaitTeamEventResult  `json:"events,omitempty"`
+	EventCount         int                    `json:"event_count"`
+	LatestSeq          int64                  `json:"latest_seq,omitempty"`
+	// Obligations / TerminalCount / TerminalDelta / PendingCount carry the same
+	// wait-ledger view wait_agent returns (plan §C3-4 统一返回契约 / AC-P2-4g
+	// 共享实现), scoped to the awaited team's tasks: subject_kind "team_task",
+	// obligation id = task id. PendingCount counts the non-terminal task rows —
+	// the rows that forbid the parent turn from finalizing (I1). TerminalDelta
+	// lists the tasks that reached terminal state during this wait segment.
+	Obligations   []AgentWaitObligation `json:"obligations,omitempty"`
+	TerminalCount int                   `json:"terminal_count,omitempty"`
+	TerminalDelta []string              `json:"terminal_delta,omitempty"`
+	PendingCount  int                   `json:"pending_count,omitempty"`
 }
 
 // TeamMailboxDispatcher delivers mailbox events to active team sessions.
@@ -585,6 +599,37 @@ type AgentWaitResult struct {
 	// AC-P2-4c: such a wait must end immediately and say so, never masquerade as
 	// a timeout.
 	Interrupted bool `json:"interrupted,omitempty"`
+	// Obligations is the wait-time view of the current turn's obligation ledger
+	// (plan §C3-4 统一返回契约). It is read back from the durable §6.12
+	// parked-turn record plus the batch control plane, so a parent sees exactly
+	// the obligations that gate its turn instead of a caller-supplied summary.
+	// TerminalCount counts the rows that are already terminal; TerminalDelta
+	// lists the obligation ids that reached terminal during this wait segment.
+	// PendingCount keeps its session-view meaning (ready/pending agent
+	// sessions) — the ledger's pending rows are the non-terminal entries of
+	// Obligations.
+	Obligations   []AgentWaitObligation `json:"obligations,omitempty"`
+	TerminalCount int                   `json:"terminal_count,omitempty"`
+	TerminalDelta []string              `json:"terminal_delta,omitempty"`
+}
+
+// AgentWaitObligation is one row of the wait-time obligation ledger view
+// (plan §C3-4 统一返回契约 obligations[]). Today every obligation is a
+// dispatched batch, so SubjectKind is "batch" and the obligation id is the
+// batch id; the row is shaped so agent_run / team_task subjects can be added
+// later without changing the wait contract.
+type AgentWaitObligation struct {
+	ObligationID string `json:"obligation_id"`
+	SubjectKind  string `json:"subject_kind,omitempty"`
+	SubjectID    string `json:"subject_id,omitempty"`
+	State        string `json:"state,omitempty"`
+	// Terminal reports whether this obligation can no longer transition. A row
+	// that is not terminal is exactly what forbids the parent turn from
+	// finalizing (I1).
+	Terminal bool `json:"terminal,omitempty"`
+	// DeadlineAt is the obligation's declared deadline (the batch deadline,
+	// falling back to the parked turn's decision window) in RFC3339.
+	DeadlineAt string `json:"deadline_at,omitempty"`
 }
 
 // MarshalJSON keeps the legacy matched-agent view without serializing the same
@@ -675,6 +720,108 @@ func ApplyAgentWaitTimeout(result *AgentWaitResult, requestedMs, effectiveMs int
 		result.WaitTimeoutMs = effectiveMs
 	}
 	result.WaitTimeoutClamped = clamped
+	return result
+}
+
+// ApplyAgentWaitLedger attaches the current turn's obligation ledger view to a
+// wait result and derives next_action from it (plan §C3-4 统一返回契约,
+// AC-P2-4d/AC-P2-4e). baselineTerminal holds the obligation ids that were
+// already terminal before this wait segment started, so terminal_delta reports
+// exactly what finished during the wait.
+//
+// The ledger is decisive in one direction only: when no row is pending, there
+// is nothing left to wait for, so next_action becomes "finalize" (the
+// empty-ledger rule). When rows are pending the parent must not finalize (I1),
+// so an existing guidance string is preserved and only an empty one is filled
+// with the conservative continue_wait/inspect hint. Call this after
+// FinalizeAgentWaitResult so the ledger rule is the last word on next_action.
+func ApplyAgentWaitLedger(result *AgentWaitResult, obligations []AgentWaitObligation, baselineTerminal []string) *AgentWaitResult {
+	if result == nil || len(obligations) == 0 {
+		return result
+	}
+	view := SummarizeAgentWaitLedger(obligations, baselineTerminal)
+	result.Obligations = view.Obligations
+	// Counts are derived from the rows, so re-applying the ledger to the same
+	// result stays idempotent instead of double-counting.
+	result.TerminalCount = view.TerminalCount
+	if len(view.TerminalDelta) > 0 {
+		result.TerminalDelta = view.TerminalDelta
+	}
+	switch {
+	case view.PendingCount == 0:
+		result.NextAction = "finalize"
+	case strings.TrimSpace(result.NextAction) == "":
+		if result.TimedOut {
+			result.NextAction = "continue_wait"
+		} else {
+			result.NextAction = "inspect"
+		}
+	}
+	return result
+}
+
+// AgentWaitLedgerView is the shared obligation-ledger computation behind both
+// wait_agent (ApplyAgentWaitLedger) and wait_team (ApplyWaitTeamLedger), so the
+// two wait paths cannot drift in how rows, counts and the terminal delta are
+// derived (plan §C3-4 统一返回契约 / AC-P2-4g 共享实现).
+type AgentWaitLedgerView struct {
+	Obligations   []AgentWaitObligation
+	TerminalCount int
+	PendingCount  int
+	TerminalDelta []string
+}
+
+// SummarizeAgentWaitLedger derives the ledger view from the rows and the
+// pre-segment terminal baseline. A non-terminal row is exactly what forbids the
+// parent turn from finalizing (I1); TerminalDelta reports only the rows that
+// reached terminal state after the baseline.
+func SummarizeAgentWaitLedger(obligations []AgentWaitObligation, baselineTerminal []string) AgentWaitLedgerView {
+	view := AgentWaitLedgerView{Obligations: obligations}
+	baseline := make(map[string]struct{}, len(baselineTerminal))
+	for _, id := range baselineTerminal {
+		if trimmed := strings.TrimSpace(id); trimmed != "" {
+			baseline[trimmed] = struct{}{}
+		}
+	}
+	for _, row := range obligations {
+		if !row.Terminal {
+			view.PendingCount++
+			continue
+		}
+		view.TerminalCount++
+		if _, seen := baseline[strings.TrimSpace(row.ObligationID)]; !seen {
+			view.TerminalDelta = append(view.TerminalDelta, row.ObligationID)
+		}
+	}
+	return view
+}
+
+// ApplyWaitTeamLedger attaches the team-task obligation ledger to a wait_team
+// result using the same row computation as wait_agent (AC-P2-4g 共享实现). Rows
+// are the awaited team's tasks with subject_kind "team_task".
+//
+// It is decisive in one direction only, and deliberately narrower than the
+// wait_agent rule: "finalize" is only stamped when the team itself is terminal
+// and no task row is pending. A non-terminal team (e.g. one that has not
+// planned its tasks yet, so the ledger is empty) must never produce "finalize",
+// and more specific guidance already on the result — such as "team is terminal
+// but summary is not ready" — is preserved instead of being flattened. This is
+// the fail-open direction of plan §13.8: never claim the parent may stop while
+// the awaited team is still running.
+func ApplyWaitTeamLedger(result *WaitTeamResult, obligations []AgentWaitObligation, baselineTerminal []string) *WaitTeamResult {
+	if result == nil || len(obligations) == 0 {
+		return result
+	}
+	view := SummarizeAgentWaitLedger(obligations, baselineTerminal)
+	result.Obligations = view.Obligations
+	result.TerminalCount = view.TerminalCount
+	result.PendingCount = view.PendingCount
+	if len(view.TerminalDelta) > 0 {
+		result.TerminalDelta = view.TerminalDelta
+	}
+	if result.Terminal && view.PendingCount == 0 && strings.TrimSpace(result.NextAction) == "" {
+		result.NextAction = "finalize"
+	}
 	return result
 }
 

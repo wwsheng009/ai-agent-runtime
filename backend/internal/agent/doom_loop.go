@@ -202,7 +202,7 @@ func semanticToolCallRepeatExempt(name string) bool {
 // soft-brake streak is decided separately by pollingSoftBrakeTool.
 func supervisionInspectTool(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "supervision_snapshot", "supervision_descendants":
+	case "supervision_snapshot", "supervision_descendants", "subagent_status", "subagent_inspect_task":
 		return true
 	default:
 		return false

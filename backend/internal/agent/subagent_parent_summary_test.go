@@ -86,7 +86,7 @@ func TestSummarizeSubagentReportsForParentOmitsEntriesBeyondBatchBudget(t *testi
 	require.NotEmpty(t, summary.OmittedRefs)
 	require.LessOrEqual(t, len(summary.OmittedRefs), maxSubagentParentOmittedRefs)
 	for _, ref := range summary.OmittedRefs {
-		require.Contains(t, ref, "read_agent_result(id=")
+		require.Contains(t, ref, "subagent_inspect_task(id=")
 	}
 }
 
@@ -188,7 +188,7 @@ func TestSummarizeSubagentReportsForParentTruncatedSummaryKeepsDereferencePointe
 	require.True(t, summary.Truncated)
 	require.Len(t, summary.Reports, 1)
 	projection := summary.Reports[0]
-	require.Contains(t, projection["summary_next_action"], "read_agent_result(id=child-session-1")
+	require.Contains(t, projection["summary_next_action"], "subagent_inspect_task(id=child-session-1")
 	require.Greater(t, projection["summary_runes"], 0)
 }
 

@@ -48,6 +48,19 @@ func (h *Handler) getSubagentBatchStore() subagentbatch.BatchStore {
 	return h.subagentBatchStore
 }
 
+// peekSubagentBatchStore 只读探测已建好的 batch store，**不触发懒加载**：账本判读
+// （wait_agent 的 obligation 视图）是纯读路径，没有 store 就等价于"没有挂起记录"，
+// 不该为一次等待在宿主上凭空建库（与 peekSessionHub / peekDurableSessionRuntimeStore
+// 同形）。挂起记录一旦写入就必然已经建过 store，因此探测为 nil 时返回空账本是安全的。
+func (h *Handler) peekSubagentBatchStore() subagentbatch.BatchStore {
+	if h == nil {
+		return nil
+	}
+	h.subagentBatchMu.Lock()
+	defer h.subagentBatchMu.Unlock()
+	return h.subagentBatchStore
+}
+
 // subagentBatchCoordinator 在共享 store 上为单个 agent 组装 coordinator。
 //
 // 与 CLI 宿主（chat_actor_host.go 的 NewSubagentBatchCoordinator）同形：store 共享、

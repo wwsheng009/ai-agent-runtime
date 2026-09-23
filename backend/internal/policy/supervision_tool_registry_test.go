@@ -18,11 +18,18 @@ import (
 //  3. normalizeToolName 别名表 + 能力表 —— 模型少写下划线时的归一化。
 //
 // 下面用字面量而不是 toolbroker 常量：toolbroker 依赖 policy，反向 import 会成环。
+// 可见面（每个能力只留一个名字）+ 退役但仍可调用的旧名字：两张表都必须继续
+// 注册，否则旧名字会在窄 allowlist 下被静默摘掉定义，或丢掉 taxonomy / 能力行。
 var supervisionToolFamily = []string{
 	"supervision_snapshot",
 	"supervision_descendants",
+	"read_agent_result",
 	"ack_lifecycle",
 	"control_descendant",
+	"subagent_status",
+	"subagent_inspect_task",
+	"subagent_ack_lifecycle",
+	"subagent_control",
 }
 
 func TestSupervisionToolsAreRuntimeOwnedEssentials(t *testing.T) {
@@ -51,8 +58,25 @@ func TestSupervisionToolAliasesNormalize(t *testing.T) {
 		"supervisionSnapshot":    "supervision_snapshot",
 		"supervisiondescendants": "supervision_descendants",
 		"supervisionDescendants": "supervision_descendants",
-		"acklifecycle":           "ack_lifecycle",
-		"controldescendant":      "control_descendant",
+		"readagentresult":        "read_agent_result",
+		"readAgentResult":        "read_agent_result",
+		"acklifecycle":           "subagent_ack_lifecycle",
+		"ackLifecycle":           "subagent_ack_lifecycle",
+		"ack_lifecycle":          "subagent_ack_lifecycle",
+		"subagentacklifecycle":   "subagent_ack_lifecycle",
+		"subagentAckLifecycle":   "subagent_ack_lifecycle",
+		"controldescendant":      "subagent_control",
+		"controlDescendant":      "subagent_control",
+		"control_descendant":     "subagent_control",
+		"subagentcontrol":        "subagent_control",
+		"subagentControl":        "subagent_control",
+		"subagentstatus":         "subagent_status",
+		"subagentStatus":         "subagent_status",
+		"agent_status":           "subagent_status",
+		"subagentinspecttask":    "subagent_inspect_task",
+		"subagentInspectTask":    "subagent_inspect_task",
+		"subagent_inspect":       "subagent_inspect_task",
+		"inspecttask":            "subagent_inspect_task",
 	} {
 		if got := normalizeToolName(alias); got != want {
 			t.Errorf("normalizeToolName(%q) = %q, want %q", alias, got, want)
@@ -70,11 +94,15 @@ func TestSupervisionToolsHaveTaxonomy(t *testing.T) {
 
 func TestSupervisionCapabilityScope(t *testing.T) {
 	resolver := DefaultCapabilityResolver{}
-	for _, name := range []string{"supervision_snapshot", "supervision_descendants"} {
+	for _, name := range []string{"supervision_snapshot", "supervision_descendants", "read_agent_result"} {
 		require.Equal(t, []Capability{CapReadOnly}, resolver.Resolve(EvalRequest{ToolName: name}),
 			"%s is an observation-only read", name)
 	}
-	for _, name := range []string{"ack_lifecycle", "control_descendant"} {
+	for _, name := range []string{"subagent_status", "subagent_inspect_task"} {
+		require.Equal(t, []Capability{CapReadOnly}, resolver.Resolve(EvalRequest{ToolName: name}),
+			"%s is an observation-only read: the ledger view and the deep look never mutate the control plane", name)
+	}
+	for _, name := range []string{"ack_lifecycle", "control_descendant", "subagent_ack_lifecycle", "subagent_control"} {
 		require.Equal(t, []Capability{CapReadOnly, CapAgentManagement}, resolver.Resolve(EvalRequest{ToolName: name}),
 			"%s mutates the durable supervision control plane", name)
 	}
@@ -83,12 +111,12 @@ func TestSupervisionCapabilityScope(t *testing.T) {
 	// writes to read-only: a session scoped to read_only alone must not be able
 	// to acknowledge or control anything.
 	readOnlyOnly := NewCapabilityScopedToolExecutionPolicy(nil, []Capability{CapReadOnly})
-	for _, name := range []string{"ack_lifecycle", "control_descendant"} {
+	for _, name := range []string{"ack_lifecycle", "control_descendant", "subagent_ack_lifecycle", "subagent_control"} {
 		if err := readOnlyOnly.AllowTool(name); err == nil {
 			t.Errorf("expected %s to require agent_management, not just read_only", name)
 		}
 	}
-	for _, name := range []string{"supervision_snapshot", "supervision_descendants"} {
+	for _, name := range []string{"supervision_snapshot", "supervision_descendants", "read_agent_result"} {
 		if err := readOnlyOnly.AllowTool(name); err != nil {
 			t.Errorf("expected %s to be allowed under read_only scope, got %v", name, err)
 		}
@@ -107,7 +135,7 @@ func TestSupervisionCapabilitiesAreNotDowngradedByTaxonomyPath(t *testing.T) {
 			"%s: taxonomy-first resolution and capabilitiesFromTaxonomy disagree", name)
 	}
 
-	for _, name := range []string{"ack_lifecycle", "control_descendant"} {
+	for _, name := range []string{"ack_lifecycle", "control_descendant", "subagent_ack_lifecycle", "subagent_control"} {
 		require.Equal(t, []Capability{CapReadOnly, CapAgentManagement},
 			capabilitiesFromTaxonomy(ToolTaxonomy{Name: name, Kind: types.ToolKindControl}),
 			"%s must keep agent_management when resolved through the taxonomy table", name)

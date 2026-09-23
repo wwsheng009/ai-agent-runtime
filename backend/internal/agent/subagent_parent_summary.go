@@ -142,8 +142,8 @@ func subagentReportStubForParent(report SubagentResult) map[string]interface{} {
 }
 
 // subagentReportDereferenceAction renders the single tool call that retrieves
-// this child's full deliverable, matching read_agent_result's accepted id forms
-// (session id, agent id or agent path).
+// this child's full deliverable, matching subagent_inspect_task's accepted id
+// forms (session id, agent id or agent path).
 func subagentReportDereferenceAction(report SubagentResult) string {
 	target := strings.TrimSpace(report.SessionID)
 	if target == "" {
@@ -152,7 +152,7 @@ func subagentReportDereferenceAction(report SubagentResult) string {
 	if target == "" {
 		return ""
 	}
-	return "read_agent_result(id=" + target + ", sections=[\"summary\"], offset=0, limit=8000)"
+	return "subagent_inspect_task(id=" + target + ", sections=[\"summary\"], offset=0, limit=8000)"
 }
 
 // ---------------------------------------------------------------------------

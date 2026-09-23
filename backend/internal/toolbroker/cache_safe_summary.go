@@ -49,6 +49,26 @@ func waitTeamCacheSafeSummary(result WaitTeamResult) string {
 	} else {
 		lines = append(lines, "Team is still running.")
 	}
+	// Team-task ledger echo (plan §C3-4 统一返回契约 / AC-P2-4g): the compact
+	// summary must carry the same pending/terminal view the structured payload
+	// returns, so a cached or compacted result cannot hide pending tasks.
+	if len(result.Obligations) > 0 {
+		lines = append(lines, fmt.Sprintf(
+			"Task ledger: %d rows, %d pending, %d terminal.",
+			len(result.Obligations), result.PendingCount, result.TerminalCount,
+		))
+		if delta := result.TerminalDelta; len(delta) > 0 {
+			shown := delta
+			if len(shown) > 8 {
+				shown = shown[:8]
+			}
+			line := "Finished during wait: " + strings.Join(shown, ", ")
+			if remaining := len(delta) - len(shown); remaining > 0 {
+				line += fmt.Sprintf(" (+%d more)", remaining)
+			}
+			lines = append(lines, line+".")
+		}
+	}
 	if nextAction := strings.TrimSpace(result.NextAction); nextAction != "" {
 		lines = append(lines, "Next action: "+nextAction+".")
 	}

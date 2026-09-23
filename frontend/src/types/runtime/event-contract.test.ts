@@ -34,7 +34,18 @@ const sorted = (values: readonly string[]) => [...values].sort();
 // 双通道白名单：生产者自行落盘、同时靠尾巴帧补发的类型（后端 contract.go 里
 // ChannelSessionStore | ChannelTailOnly，写侧由 ProducerPersistedEvent 去重）。
 // 除此之外，落盘类型与 live-only / tail-only 仍互斥。
-const DUAL_CHANNEL_TAIL_TYPES = new Set<string>(["subagent.completed"]);
+//
+// 口径 = 生成物里同时含 session_store 与 tail_only 的类型（当前 7 个）。注册表
+// 扩容新增双通道类型时本清单需同步，否则下面的互斥断言先失败（它正是这么用的）。
+const DUAL_CHANNEL_TAIL_TYPES = new Set<string>([
+  "subagent.batch.canceled",
+  "subagent.batch.failed",
+  "subagent.batch.orphaned",
+  "subagent.batch.timed_out",
+  "subagent.completed",
+  "subagent.route.resolved",
+  "subagent.suspension.unavailable",
+]);
 
 describe("runtime 事件契约（前端消费路径覆盖）", () => {
   it("每个落盘类型都有且只有一条前端消费路径（不静默丢弃）", () => {
@@ -127,13 +138,27 @@ describe("runtime 事件契约（前端消费路径覆盖）", () => {
     }
   });
 
-  it("前端派生名单与收敛前的字面量等价（Batch 2 行为保持）", () => {
+  it("前端派生名单回归锁（Batch 2 派生口径 + 注册表扩容同步）", () => {
+    // 落盘生命周期行 = PERSISTED − 助手增量 − 工具帧桥 − provenance（派生口径见
+    // lib/trajectory/recovery.ts）。注册表扩容后需同步本清单：2026-09-22 `071f128e`
+    // 补齐 46 个已登记类型（main_agent.route_* / llm.* / subagent.batch.* 等）后，
+    // 本名单由 13 → 28 条——锁的语义是「每次扩容都被显式复核」，不是「永远等于
+    // Batch 2 当天的字面量」。
     expect(sorted([...RUNTIME_EVENT_TYPES])).toEqual([
       "agent.reclaimed",
       "approval_requested",
       "approval_resolved",
       "checkpoint_created",
       "context_reconciled",
+      "llm.prompt_cache.breaker_tripped",
+      "llm.provider.health_opened",
+      "main_agent.route_applied",
+      "main_agent.route_cleared",
+      "main_agent.route_cost_guard_tripped",
+      "main_agent.route_disabled_for_turn",
+      "main_agent.route_prediction_invalid",
+      "main_agent.route_prediction_unresolvable",
+      "session.routing_changed",
       "session_compact_completed",
       "session_compact_failed",
       "session_compact_skipped",
@@ -141,7 +166,13 @@ describe("runtime 事件契约（前端消费路径覆盖）", () => {
       "session_end",
       "session_interrupted",
       "session_start",
+      "subagent.batch.canceled",
+      "subagent.batch.failed",
+      "subagent.batch.orphaned",
+      "subagent.batch.timed_out",
       "subagent.completed",
+      "subagent.route.resolved",
+      "subagent.suspension.unavailable",
     ]);
     expect(sorted([...ASSISTANT_RUNTIME_EVENT_TYPES])).toEqual([
       "assistant.image_progress",

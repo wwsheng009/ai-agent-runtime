@@ -53,6 +53,19 @@ const (
 	TaskStatusReclaimPending TaskStatus = "reclaim_pending"
 )
 
+// IsTerminalTaskStatus reports whether a task can no longer transition. It is
+// the task-level counterpart of IsTerminalTeamStatus and is shared by the
+// terminal-team reconciliation (terminal_state.go) and the wait_team
+// obligation ledger view (plan §C3-4 / AC-P2-4g).
+func IsTerminalTaskStatus(status TaskStatus) bool {
+	switch status {
+	case TaskStatusDone, TaskStatusFailed, TaskStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 const (
 	TaskDifficultyEasy   = "easy"
 	TaskDifficultyNormal = "normal"

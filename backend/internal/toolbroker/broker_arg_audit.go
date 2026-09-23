@@ -58,6 +58,8 @@ var brokerToolArgKeys = map[string][]string{
 	},
 	ToolSupervisionSnapshot:    {"after_seq", "include_resolved", "limit"},
 	ToolSupervisionDescendants: {"after_seq", "health", "include_results", "include_terminal", "limit", "mode"},
+	ToolSubagentStatus:         {"after_seq", "health", "include_digest", "include_resolved", "include_results", "include_terminal", "limit", "mode"},
+	ToolSubagentInspectTask:    {"agent", "child_session_id", "id", "include_status", "limit", "max_chars", "offset", "sections", "session_id", "target", "task_id"},
 	ToolReadAgentResult:        {"id", "limit", "max_chars", "offset", "sections", "task_id"},
 	ToolAckLifecycle:           {"notification_id", "decision", "note", "reason", "state", "until", "expected_version"},
 	ToolControlDescendant:      {"notification_id", "action", "reason", "cascade", "expected_version"},
@@ -84,7 +86,7 @@ func brokerIgnoredArgHint(toolName, key string) string {
 	case "team_id", "to_agent":
 		return "team-scoped tools are spawn_team, wait_team, send_team_message, read_mailbox_digest, read_task_spec and read_task_context"
 	case "notification_id":
-		return "supervision notifications belong to supervision_snapshot, ack_lifecycle and control_descendant"
+		return "supervision notifications belong to subagent_status(include_digest=true), subagent_ack_lifecycle and subagent_control"
 	case "agent_id":
 		return "read_mailbox_digest addresses a mailbox by agent_id; child sessions use id/session_id"
 	case "target":

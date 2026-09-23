@@ -298,7 +298,7 @@ func (e *UnknownReadResultSectionError) Error() string {
 // model can recover in one turn instead of retrying the same call (main plan
 // P1-7 collaboration guidance).
 func (e *UnknownReadResultSectionError) NextAction() string {
-	return "retry read_agent_result with sections=[\"summary\"] (alias: \"output\") for the deliverable body, " +
+	return "retry subagent_inspect_task with sections=[\"summary\"] (alias: \"output\") for the deliverable body, " +
 		"or sections=[\"artifacts\"] then artifact_read(id=<ref>, offset, limit) to page a large artifact"
 }
 
@@ -328,7 +328,7 @@ func NoResultRecordedPayload(sessionID, taskID string) ReadResultPayload {
 		Source:    ResultSourceNone,
 		ErrorCode: "no_result_recorded",
 		NextAction: "no durable result is recorded for this target yet: call read_agent_events " +
-			"(or wait_agent) to observe the child, then retry read_agent_result once it reaches a terminal state",
+			"(or wait_agent) to observe the child, then retry subagent_inspect_task once it reaches a terminal state",
 	}
 }
 
@@ -364,7 +364,7 @@ func BuildReadResultPayload(record AgentResultRecord, args ReadResultArgs) ReadR
 	if status == ReadResultStatusPendingBinding {
 		payload.ErrorCode = ReadResultStatusPendingBinding
 		payload.NextAction = "the task is still in flight and no durable result exists yet: " +
-			"call wait_agent (or read_agent_events) to observe it, then retry read_agent_result after it settles; " +
+			"call wait_agent (or read_agent_events) to observe it, then retry subagent_inspect_task after it settles; " +
 			"do not re-dispatch the same task"
 	}
 

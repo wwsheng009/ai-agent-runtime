@@ -214,11 +214,19 @@ aicli image "一只在月球上散步的猫"  # 图片生成
                                                 # （cancel|close|cancel_subtree|retry|reassign）
 ```
 
-`control` 与模型侧 `control_descendant`、HTTP 宿主共用同一实现：动作按
+`control` 与模型侧 `subagent_control`、HTTP 宿主共用同一实现：动作按
 request → accept → execute 落 durable action 行（`action_id` 可在输出中复核），
 并受 `--expected-version` CAS 保护。每个动作会为同一标的写入解析通知并推进版本，
 连续操作前请先重新 `list` 并使用最新的 `<id>` / `--expected-version`；沿用旧行会被
 拒绝（`action conflict: state changed`），不会静默重放。
+
+模型侧同一能力由四个 `subagent_*` 工具承载：`subagent_status`（台账汇总，
+`include_digest=true` 时输出原 `supervision_snapshot` 的摘要）、
+`subagent_inspect_task`（单标的深查，`include_status=false` 时即原 `read_agent_result`）、
+`subagent_ack_lifecycle`（决定通知：acknowledge / defer / resolve）与
+`subagent_control`（控制动作）。旧名 `supervision_snapshot` / `supervision_descendants` /
+`read_agent_result` / `ack_lifecycle` / `control_descendant` 仍可调用（已存提示词与历史
+指针不会断），但不再出现在工具列表中。
 
 ---
 

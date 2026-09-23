@@ -31,12 +31,17 @@ func (p *recordingAPIDescendantProvider) ListDescendants(_ context.Context, scop
 }
 
 // TestApplyAgentRuntimeServicesGatesSupervisionToolController is the P0-A parity
-// gate for the HTTP host (plan §7 conclusion 2 / §8 item 3): the four
-// model-facing supervision tools must exist exactly when the host owns the
-// durable control plane, mirroring the CLI host. The original gap was that the
-// controller could be constructed while every API-path broker kept
-// Supervision nil, so the model never saw the tools even though the
-// /supervision/* HTTP routes worked.
+// gate for the HTTP host (plan §7 conclusion 2 / §8 item 3): the model-facing
+// supervision tools must exist exactly when the host owns the durable control
+// plane, mirroring the CLI host. The original gap was that the controller could
+// be constructed while every API-path broker kept Supervision nil, so the model
+// never saw the tools even though the /supervision/* HTTP routes worked.
+//
+// 断言口径是**合并后的可见面**（C3-1 收口）：每个能力只广播一个名字
+// （subagent_status / subagent_inspect_task / subagent_ack_lifecycle /
+// subagent_control），退役的 supervision_* / read_agent_result 名字仍然可调用
+// 但不再出现在 Definitions() 里。与 internal/toolbroker/supervision_tools_test.go
+// 的同名断言保持同一事实源，避免只改一处就"看起来接好了"。
 func TestApplyAgentRuntimeServicesGatesSupervisionToolController(t *testing.T) {
 	unwired := &Handler{}
 	unwiredAgent := runtimeagent.NewAgent(&runtimeagent.Config{Name: "supervision-gate-off", Model: "test-model"}, nil)
@@ -44,8 +49,8 @@ func TestApplyAgentRuntimeServicesGatesSupervisionToolController(t *testing.T) {
 	if broker := unwiredAgent.GetToolBroker(); broker != nil {
 		require.Nil(t, broker.Supervision, "a host without a durable store must not expose supervision tools")
 		for _, def := range broker.Definitions() {
-			require.NotEqual(t, toolbroker.ToolSupervisionDescendants, def.Name,
-				"a dangling supervision tool must never reach Definitions()")
+			require.False(t, supervisionToolFamilyNames[def.Name],
+				"a dangling supervision tool must never reach Definitions(): %s", def.Name)
 		}
 	}
 
@@ -60,15 +65,41 @@ func TestApplyAgentRuntimeServicesGatesSupervisionToolController(t *testing.T) {
 	for _, def := range broker.Definitions() {
 		names[def.Name] = true
 	}
+	// 可见面：每个能力一个名字。
 	for _, want := range []string{
-		toolbroker.ToolSupervisionDescendants,
-		toolbroker.ToolSupervisionSnapshot,
-		toolbroker.ToolReadAgentResult,
+		toolbroker.ToolSubagentStatus,
+		toolbroker.ToolSubagentInspectTask,
 		toolbroker.ToolAckLifecycle,
 		toolbroker.ToolControlDescendant,
 	} {
 		require.True(t, names[want], "expected %s in Definitions()", want)
 	}
+	// 兼容面：退役名字仍可 dispatch（executeSupervisionTool 的别名表未动），
+	// 但不再广播 —— 两个名字描述一个能力正是本次合并要消除的漂移。
+	for _, gone := range []string{
+		toolbroker.ToolSupervisionSnapshot,
+		toolbroker.ToolSupervisionDescendants,
+		toolbroker.ToolReadAgentResult,
+		"ack_lifecycle",
+		"control_descendant",
+	} {
+		require.False(t, names[gone], "legacy supervision name %s must not be advertised", gone)
+	}
+}
+
+// supervisionToolFamilyNames 是 supervision 控制面**可调用名字**的全集（可见面 +
+// 兼容面）。没有控制面的宿主一个都不许广播，所以反向断言按名字集合而不是按单点
+// 名字判断：新增/退役一个名字时不会漏掉这处守卫。
+var supervisionToolFamilyNames = map[string]bool{
+	toolbroker.ToolSupervisionSnapshot:    true,
+	toolbroker.ToolSupervisionDescendants: true,
+	toolbroker.ToolReadAgentResult:        true,
+	"ack_lifecycle":                       true,
+	"control_descendant":                  true,
+	toolbroker.ToolSubagentStatus:         true,
+	toolbroker.ToolSubagentInspectTask:    true,
+	toolbroker.ToolAckLifecycle:           true,
+	toolbroker.ToolControlDescendant:      true,
 }
 
 func newAPISupervisionToolTestHandler(t *testing.T, name string) (*Handler, *supervision.SQLiteSupervisionStore) {
