@@ -122,6 +122,27 @@ func importTestMetadataContext(t *testing.T, session *runtimechat.Session, key s
 	return strings.TrimSpace(fmt.Sprintf("%v", value))
 }
 
+// importTestWriteEnvelope 把会话封进 v1 full envelope 写成文件，供「文件内容本身就是
+// 测试输入」的用例使用：结构与真实导出产物一致，但不经过导出链路。
+func importTestWriteEnvelope(t *testing.T, session *runtimechat.Session) string {
+	t.Helper()
+	envelope := chatSessionExportEnvelope{
+		Version:    1,
+		ExportedAt: time.Now().UTC(),
+		Format:     "full",
+		Session:    session,
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("编码测试导出文件失败: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "session.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("写入测试导出文件失败: %v", err)
+	}
+	return path
+}
+
 func TestImportChatSessionRoundTripPreservesIDUserAndHistory(t *testing.T) {
 	ctx := context.Background()
 	sourceDir := t.TempDir()
@@ -520,5 +541,108 @@ func TestImportChatSessionPreservesNonActiveState(t *testing.T) {
 	}
 	if !hasStateWarning {
 		t.Fatalf("非 active 状态应在摘要里提示，实际 %v", result.Warnings)
+	}
+}
+
+func TestImportChatSessionRejectsUnaddressableSessionID(t *testing.T) {
+	ctx := context.Background()
+	// 存储层读取时会 sanitizeSessionID（去首尾空白、去尾部分隔符、取路径最后一段），
+	// 这些 ID 写得进去却读不回来，落库后就是列表里点开必然 404 的孤儿。
+	for _, sessionID := range []string{"dir/nested-session", "trailing-session/", " padded-session "} {
+		session := runtimechat.NewSession("tester")
+		session.ID = sessionID
+		session.History = importTestConversation(3)
+		path := importTestWriteEnvelope(t, session)
+
+		target := importTestTarget(t, t.TempDir())
+		if _, err := importChatSessionFromExportFile(ctx, target, importRequest{Path: path}); !errors.Is(err, errImportUsage) {
+			t.Fatalf("ID %q 不可寻址时应按参数错误拒绝，实际 %v", sessionID, err)
+		}
+		// 拒绝必须发生在落库之前：不能留下任何记录。
+		previews, err := target.SessionManager.ListPreviews(ctx, target.SessionUserID, 50, 0)
+		if err != nil {
+			t.Fatalf("列出会话失败: %v", err)
+		}
+		if len(previews) != 0 {
+			t.Fatalf("ID %q 被拒后不应留下会话，实际 %d 条", sessionID, len(previews))
+		}
+
+		// --new-id 是不沿用原 ID 的明确授权：应改用可寻址的新 ID 导入。
+		result, err := importChatSessionFromExportFile(ctx, target, importRequest{Path: path, NewID: true})
+		if err != nil {
+			t.Fatalf("ID %q 加 --new-id 应可导入: %v", sessionID, err)
+		}
+		if !result.Renamed || !runtimechat.IsAddressableSessionID(result.SessionID) {
+			t.Fatalf("--new-id 应生成可寻址的新 ID，实际 %+v", result)
+		}
+		if history := importTestHistory(t, target.SessionManager, result.SessionID); len(history) != 3 {
+			t.Fatalf("应导入 3 条消息，实际 %d 条", len(history))
+		}
+	}
+}
+
+func TestImportChatSessionRemintsDuplicateMessageIdentities(t *testing.T) {
+	ctx := context.Background()
+	first := *runtimetypes.NewUserMessage("ping")
+	first.Metadata.Set(runtimetypes.MetadataKeyMessageID, "msg-duplicate")
+	second := *runtimetypes.NewUserMessage("ping")
+	second.Metadata.Set(runtimetypes.MetadataKeyMessageID, "msg-duplicate")
+
+	// 相邻 + 同 role/内容 + 同 message_id 正是读取路径会折叠的组合（substance 键只看
+	// role/内容/工具签名）：不重新铸造，导入后读出来就静默少一条。
+	session := runtimechat.NewSession("tester")
+	session.ID = "session-duplicate-identity"
+	session.History = []runtimetypes.Message{first, second}
+	path := importTestWriteEnvelope(t, session)
+
+	target := importTestTarget(t, t.TempDir())
+	result, err := importChatSessionFromExportFile(ctx, target, importRequest{Path: path})
+	if err != nil {
+		t.Fatalf("重复 message_id 应被修复而不是拒绝导入: %v", err)
+	}
+	history := importTestHistory(t, target.SessionManager, session.ID)
+	if len(history) != 2 {
+		t.Fatalf("两条消息都应保留，实际 %d 条", len(history))
+	}
+	ids := importTestHistoryMessageIDs(history)
+	if ids[0] == "" || ids[1] == "" || ids[0] == ids[1] {
+		t.Fatalf("重复身份应重新铸造为不同 ID，实际 %v", ids)
+	}
+	hasWarning := false
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "重复") {
+			hasWarning = true
+		}
+	}
+	if !hasWarning {
+		t.Fatalf("重复身份应在摘要里提示，实际 %v", result.Warnings)
+	}
+}
+
+func TestImportChatSessionWarnsAboutIncompleteToolIdentity(t *testing.T) {
+	ctx := context.Background()
+	assistant := runtimetypes.NewAssistantMessage("calling")
+	assistant.ToolCalls = []runtimetypes.ToolCall{{Name: "execute_shell_command"}} // 缺 ID
+	session := runtimechat.NewSession("tester")
+	session.ID = "session-incomplete-tool-identity"
+	session.History = []runtimetypes.Message{
+		*assistant,
+		*runtimetypes.NewToolMessage("", "tool-output"), // 缺 tool_call_id
+	}
+	path := importTestWriteEnvelope(t, session)
+
+	target := importTestTarget(t, t.TempDir())
+	result, err := importChatSessionFromExportFile(ctx, target, importRequest{Path: path})
+	if err != nil {
+		t.Fatalf("工具身份不完整只应告警，不应拒绝导入: %v", err)
+	}
+	hasWarning := false
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "tool_call_id") {
+			hasWarning = true
+		}
+	}
+	if !hasWarning {
+		t.Fatalf("工具身份不完整应在摘要里提示，实际 %v", result.Warnings)
 	}
 }

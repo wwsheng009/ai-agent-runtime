@@ -230,19 +230,40 @@ func importChatSessionFromExportFile(ctx context.Context, session *ChatSession, 
 	sourceSessionID := strings.TrimSpace(imported.ID)
 	targetSessionID := sourceSessionID
 	renamed := false
+	// adoptGeneratedID 在「不能沿用原 ID」时生成新 ID 并记录原因。
+	adoptGeneratedID := func(reason string) error {
+		generatedID, idErr := newImportSessionID(ctx, storage, userID)
+		if idErr != nil {
+			return idErr
+		}
+		targetSessionID = generatedID
+		renamed = true
+		warnings = append(warnings, fmt.Sprintf("%s，已改用新 ID %s", reason, targetSessionID))
+		return nil
+	}
+
+	// 沿用原 ID 的前提是它存在且可寻址；两条都不满足时必须显式 --new-id 授权，
+	// 否则会落进「写得进读不回」的孤儿记录。
 	switch {
 	case targetSessionID == "":
 		// 没有 ID 的导出文件无法寻址（resume/export 都按 ID 定位），必须显式授权生成。
 		if !req.NewID {
 			return nil, fmt.Errorf("%w: 导出文件缺少 session.id，无法沿用原 ID 导入；加 --new-id 可生成新 ID 导入", errImportUsage)
 		}
-		generatedID, idErr := newImportSessionID(ctx, storage, userID)
-		if idErr != nil {
-			return nil, idErr
+		if err := adoptGeneratedID("导出文件缺少 session.id"); err != nil {
+			return nil, err
 		}
-		targetSessionID = generatedID
-		renamed = true
-		warnings = append(warnings, fmt.Sprintf("导出文件缺少 session.id，已生成新 ID %s", targetSessionID))
+	case !runtimechat.IsAddressableSessionID(imported.ID):
+		// 存储层读写两侧都会 sanitizeSessionID（去首尾空白、去尾部分隔符、取路径最后
+		// 一段），"dir/abc"、"abc/"、" abc " 这类 ID 写得进去却永远读不回来 —— 会变成
+		// 列表里点开必然 404 的孤儿。必须在落库前挡住；--new-id 是不沿用原 ID 的明确
+		// 授权，因此允许它改用新 ID 导入。
+		if !req.NewID {
+			return nil, fmt.Errorf("%w: 导出文件里的 session.id %q 不可寻址（含路径分隔符、首尾空白或占位值，落库后无法按原样读回）；请修正文件里的 ID，或加 --new-id 生成新 ID 导入", errImportUsage, imported.ID)
+		}
+		if err := adoptGeneratedID(fmt.Sprintf("导出文件里的 session.id %q 不可寻址（无法按原样读回）", sourceSessionID)); err != nil {
+			return nil, err
+		}
 	default:
 		exists, existsErr := importTargetSessionExists(ctx, storage, targetSessionID)
 		if existsErr != nil {
@@ -252,20 +273,23 @@ func importChatSessionFromExportFile(ctx context.Context, session *ChatSession, 
 			if !req.NewID {
 				return nil, fmt.Errorf("%w: %s（导入不会覆盖已有会话）", errImportSessionExists, targetSessionID)
 			}
-			generatedID, idErr := newImportSessionID(ctx, storage, userID)
-			if idErr != nil {
-				return nil, idErr
+			if err := adoptGeneratedID(fmt.Sprintf("目标存储已存在会话 %s（未覆盖）", sourceSessionID)); err != nil {
+				return nil, err
 			}
-			targetSessionID = generatedID
-			renamed = true
-			warnings = append(warnings, fmt.Sprintf("目标存储已存在会话 %s（未覆盖），已改用新 ID %s", sourceSessionID, targetSessionID))
 		}
 	}
 
 	history := make([]runtimetypes.Message, len(imported.History))
 	copy(history, imported.History)
-	if runtimetypes.EnsureHistoryMessageIdentities(history) {
+	filledIdentities, remintedIdentities := ensureImportMessageIdentities(history)
+	if filledIdentities {
 		warnings = append(warnings, "已为缺失 message_id/turn_id 的消息补齐身份")
+	}
+	if remintedIdentities > 0 {
+		warnings = append(warnings, fmt.Sprintf("导出文件里有 %d 条消息复用了重复的 message_id，已重新铸造（读取时相邻同内容消息会被折叠，重复身份会导致静默少消息）", remintedIdentities))
+	}
+	if incomplete := countImportMessagesMissingToolIdentity(history); incomplete > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d 条消息缺少工具调用 ID 或 tool_call_id，存储不会拒绝，但渲染与回放时可能对不上工具结果", incomplete))
 	}
 
 	now := time.Now()
@@ -431,6 +455,59 @@ func verifyImportedChatSession(ctx context.Context, manager *runtimechat.Session
 		return fmt.Errorf("导入后读回校验失败: 期望 %d 条消息，实际 %d 条", wantMessages, count)
 	}
 	return nil
+}
+
+// ensureImportMessageIdentities 补齐历史里缺失的 message_id/turn_id，并保证身份唯一。
+//
+// 补齐用现成的 types.EnsureHistoryMessageIdentities（与 chat 落库前同一套规则）；
+// 唯一性则必须自己保证：读取/分页路径会折叠「相邻 + 同 message_id + 同 substance」
+// 的行（collapseDuplicateTranscriptRows，见 sqlite_storage.go 的读取路径），
+// 重复身份不会报错，只会让读出来的消息静默少几条。因此重复出现的身份在这里
+// 清空后重新铸造 —— 内容一条不动，只换掉重复的 ID。
+//
+// 返回 (是否补齐过, 重新铸造的条数)。
+func ensureImportMessageIdentities(history []runtimetypes.Message) (bool, int) {
+	seen := make(map[string]struct{}, len(history))
+	reminted := 0
+	for index := range history {
+		messageID := strings.TrimSpace(runtimetypes.MessageID(history[index]))
+		if messageID == "" {
+			continue
+		}
+		if _, ok := seen[messageID]; ok {
+			if history[index].Metadata == nil {
+				history[index].Metadata = runtimetypes.NewMetadata()
+			}
+			history[index].Metadata.Set(runtimetypes.MetadataKeyMessageID, "")
+			reminted++
+			continue
+		}
+		seen[messageID] = struct{}{}
+	}
+	return runtimetypes.EnsureHistoryMessageIdentities(history), reminted
+}
+
+// countImportMessagesMissingToolIdentity 统计工具链身份不完整的消息：assistant 的
+// tool_calls 缺 ID，或 tool 消息缺 tool_call_id。存储层不校验这类坏数据，但后续
+// 渲染/回放会配不上工具结果，所以在摘要里给出提示而不是默默放过。
+func countImportMessagesMissingToolIdentity(history []runtimetypes.Message) int {
+	incomplete := 0
+	for index := range history {
+		message := history[index]
+		if strings.EqualFold(strings.TrimSpace(message.Role), "tool") {
+			if strings.TrimSpace(message.ToolCallID) == "" {
+				incomplete++
+			}
+			continue
+		}
+		for callIndex := range message.ToolCalls {
+			if strings.TrimSpace(message.ToolCalls[callIndex].ID) == "" {
+				incomplete++
+				break
+			}
+		}
+	}
+	return incomplete
 }
 
 func chatImportHistoryStats(history []runtimetypes.Message) (toolCalls, contentParts int) {
