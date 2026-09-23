@@ -782,6 +782,17 @@ func (c *chatInteractionCoordinator) PrintPrompt() {
 	}
 	c.promptRenderedOnSurface = false
 	c.preparePromptGapLocked(true)
+	// Unified production content is owned by the Scene/AppState pipeline and
+	// writeTextLocked fails closed for it, so this legacy write is a no-op there.
+	// Marking promptVisible after a no-op paint permanently suppresses every
+	// later PrintPrompt attempt (the guard above returns while promptVisible
+	// stays true): the composer never appears again for that session. That is
+	// how a startup resume can end up with no prompt row at all when the
+	// fixed-bottom surface is not attached yet. Leave the flag untouched so the
+	// next attempt (or the actor surface path) can still render the prompt.
+	if c.unifiedRenderer {
+		return
+	}
 	c.writeTextLocked(prompt)
 	if draft.text != "" {
 		c.writeTextLocked(draft.text)

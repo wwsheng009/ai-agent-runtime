@@ -73,7 +73,18 @@ type ChatSession struct {
 	// （append-only session_messages 全量回放）。它与 Messages 严格分离：
 	// 模型上下文始终使用 Messages，ResumeHistory 只供用户可见的历史回放
 	// （/resume、启动恢复等），避免把完整长对话塞进模型上下文。
-	ResumeHistory             []runtimetypes.Message
+	ResumeHistory []runtimetypes.Message
+	// resumeHistoryMu 保护 ResumeHistory 的并发读写：启动恢复的「首屏窗口化」
+	// 会在首帧之后由后台 goroutine 前插更早的页，而主循环与 live 回合仍会
+	// 读取/追加同一字段。
+	resumeHistoryMu sync.RWMutex
+	// resumeHistoryDeferredSessionID/BeforeSeq 记录启动恢复待补齐的较早页游标；
+	// BeforeSeq > 0 表示最新页已同步装载、更早的页仍待后台补齐。
+	resumeHistoryDeferredSessionID string
+	resumeHistoryDeferredBeforeSeq int
+	// resumeHistoryGeneration 在展示历史被整体替换/清空时递增，使在途的
+	// 后台补齐任务放弃写入已经失效的旧快照。
+	resumeHistoryGeneration   uint64
 	HTTPClient                *http.Client
 	cancelCtx                 context.Context                      // 可取消的上下文
 	cancelFunc                context.CancelFunc                   // 取消函数
@@ -629,6 +640,10 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	// replay so `aicli resume <id>` / `aicli chat --session` match in-chat
 	// `/resume` visibility even when interactive TUI is enabled.
 	presentChatStartupSession(session, opts, persistenceState.loadedRuntimeSession)
+	// 首帧（最新页历史已 seed）之后才补齐较早的页：composer 不再被全量翻页
+	// 挡在启动关键路径之外，同时保持 canonical 历史的第一帧始终先于任何 live
+	// 内容（较早 unit 由 reconcile 锚点插入，不需要重排已经绘制的行）。
+	startDeferredResumeHistoryLoad(session)
 	startupTiming.mark("ready")
 	startupTiming.flush(opts)
 

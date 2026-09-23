@@ -364,11 +364,13 @@ func restoreChatPersistenceState(session *ChatSession, persistenceState *chatPer
 			session.RuntimeSession.UpdateTitle(opts.SessionTitleFlag)
 		}
 		warnIfChatSessionSyncFails(session, "restore session", syncRuntimeSessionFromChat(session))
+		markChatStartup("resume_metadata")
 		// The bootstrap resume path must use the same canonical transcript as
 		// /load. restoreChatStateFromRuntimeSession restores the compact prompt
 		// projection only; the full history is needed for replay in the owned
 		// viewport and must be loaded before the first frame is painted.
-		loadResumeCanonicalHistory(session, persistenceState.loadedRuntimeSession.ID)
+		loadResumeCanonicalHistoryForStartup(session, persistenceState.loadedRuntimeSession.ID)
+		markChatStartup("resume_history")
 		return nil
 	}
 

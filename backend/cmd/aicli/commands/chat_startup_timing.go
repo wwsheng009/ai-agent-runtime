@@ -68,6 +68,25 @@ func chatStartupTimingEnabled() bool {
 	}
 }
 
+// chatWindowedResumeHistoryEnabled 报告启动恢复是否启用「首屏窗口化」：
+// 同步只装载最新一页，更早的页在首帧之后由后台补齐，使 composer 不被大
+// 会话的全量翻页挡在启动关键路径之外。只对 unified 交互会话启用（内容经
+// Scene/AppState 幂等 seed 重放）；AICLI_RESUME_WINDOWED_HISTORY=0/false/no/off
+// 可回退为一次性同步装载。
+func chatWindowedResumeHistoryEnabled(session *ChatSession) bool {
+	if session == nil || session.NoInteractive || session.JSONOutput {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AICLI_RESUME_WINDOWED_HISTORY"))) {
+	case "0", "false", "no", "off":
+		return false
+	}
+	if session.Interaction == nil || !session.Interaction.UnifiedRendererEnabled() {
+		return false
+	}
+	return true
+}
+
 func markChatStartup(name string) {
 	if t := activeChatStartupTiming.Load(); t != nil {
 		t.mark(name)

@@ -1304,6 +1304,15 @@ func (c *chatInteractionCoordinator) paintScheduledPromptFrame(seq uint64) {
 		aicliDiagln("[aicli-diag] prompt NOT painted: surface prompt path unavailable -> physical prompt write")
 	}
 	c.preparePromptGapLocked(true)
+	// Same fail-closed contract as PrintPrompt: unified production content is
+	// owned by the Scene/AppState pipeline and writeTextLocked is a no-op there,
+	// so marking promptVisible after that no-op would permanently suppress every
+	// later prompt paint for the rest of the session (the guard above returns
+	// while it stays true). That is how a command-started turn can leave the
+	// session without any composer row.
+	if c.unifiedRenderer {
+		return
+	}
 	c.writeTextLocked(prompt)
 	if draft.text != "" {
 		c.writeTextLocked(draft.text)

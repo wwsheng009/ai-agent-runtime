@@ -495,46 +495,201 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 // session.ResumeHistory（仅用于展示，不参与模型上下文）。
 // SQLite 等分页后端（SessionStorageHistoryPager）从最新页往前翻页取回全量；
 // 文件/内存等无分页后端保持投影历史不变。
+//
+// 这是同步入口：会话内 /resume、/load 等用户显式动作一次性装载全量，保持
+// 「先加载、后绘制」的既有顺序（用户已经在看另一个会话，回放必须是一帧完整内容）。
 func loadResumeCanonicalHistory(session *ChatSession, sessionID string) {
-	if session == nil || session.SessionManager == nil {
+	first, ok := loadNewestResumeHistoryPage(session, sessionID)
+	if !ok || !first.HasMore {
 		return
 	}
-	manager := session.SessionManager
-	if _, ok := manager.GetStorage().(runtimechat.SessionStorageHistoryPager); !ok {
+	pages := fetchOlderResumeHistoryPages(context.Background(), session.SessionManager, sessionID, first.NextBeforeSeq)
+	if len(pages) == 0 {
 		return
 	}
-	ctx := context.Background()
+	session.prependResumeHistoryPages(session.resumeHistoryGenerationValue(), pages)
+}
 
-	var pages [][]runtimetypes.Message
-	beforeSeq := 0
-	for {
-		page, err := manager.GetHistoryPage(ctx, sessionID, beforeSeq, 0)
-		if err != nil {
-			return
+// loadResumeCanonicalHistoryForStartup 是启动恢复（aicli resume / chat --resume /
+// --session）专用入口。启动关键路径的目标是让 composer 尽早出现在屏幕上：
+// 同步只装载最新一页（多数会话一页即全量，行为与一次性装载完全一致），
+// 更早的页交给首帧之后的 startDeferredResumeHistoryLoad 补齐。
+// 窗口化被 env 关闭时退化为一次性同步装载。
+func loadResumeCanonicalHistoryForStartup(session *ChatSession, sessionID string) {
+	first, ok := loadNewestResumeHistoryPage(session, sessionID)
+	if !ok || !first.HasMore {
+		return
+	}
+	if !chatWindowedResumeHistoryEnabled(session) {
+		pages := fetchOlderResumeHistoryPages(context.Background(), session.SessionManager, sessionID, first.NextBeforeSeq)
+		if len(pages) > 0 {
+			session.prependResumeHistoryPages(session.resumeHistoryGenerationValue(), pages)
 		}
-		if len(page.Messages) == 0 {
+		return
+	}
+	session.deferResumeHistoryCompletion(sessionID, first.NextBeforeSeq)
+}
+
+// loadNewestResumeHistoryPage 同步装载最新一页 canonical 转录（页内按 seq
+// 升序，即展示历史的尾部）。无分页后端、空会话或读取失败返回 false，
+// 保持投影历史不变（best-effort，与旧实现一致）。
+func loadNewestResumeHistoryPage(session *ChatSession, sessionID string) (*runtimechat.SessionHistoryPage, bool) {
+	if session == nil || session.SessionManager == nil {
+		return nil, false
+	}
+	if _, ok := session.SessionManager.GetStorage().(runtimechat.SessionStorageHistoryPager); !ok {
+		return nil, false
+	}
+	page, err := session.SessionManager.GetHistoryPage(context.Background(), sessionID, 0, 0)
+	if err != nil || page == nil || len(page.Messages) == 0 {
+		return nil, false
+	}
+	session.setResumeHistory(page.Messages)
+	return page, true
+}
+
+// fetchOlderResumeHistoryPages 从 beforeSeq 起继续往前翻页，返回
+// 「较新页 → 较早页」的页集合（与 GetHistoryPage 的翻页方向一致）。
+// best-effort：中途失败时返回已经取到的页。
+func fetchOlderResumeHistoryPages(ctx context.Context, manager *runtimechat.SessionManager, sessionID string, beforeSeq int) [][]runtimetypes.Message {
+	if manager == nil {
+		return nil
+	}
+	var pages [][]runtimetypes.Message
+	for beforeSeq > 0 {
+		page, err := manager.GetHistoryPage(ctx, sessionID, beforeSeq, 0)
+		if err != nil || page == nil || len(page.Messages) == 0 {
 			break
 		}
 		pages = append(pages, page.Messages)
-		if !page.HasMore {
+		if !page.HasMore || page.NextBeforeSeq <= 0 || page.NextBeforeSeq >= beforeSeq {
 			break
 		}
 		beforeSeq = page.NextBeforeSeq
 	}
-	if len(pages) == 0 {
+	return pages
+}
+
+// resumeHistorySnapshot 返回展示历史的一致切片快照（元素按 canonical
+// 只读约定共享）。首屏窗口化后较早的页由后台 goroutine 前插，读取方
+// 必须经它取快照，避免与补齐写入竞争。
+func (s *ChatSession) resumeHistorySnapshot() []runtimetypes.Message {
+	if s == nil {
+		return nil
+	}
+	s.resumeHistoryMu.RLock()
+	defer s.resumeHistoryMu.RUnlock()
+	return s.ResumeHistory
+}
+
+// resumeHistoryGenerationValue 读取当前展示历史 generation（整体替换即递增）。
+func (s *ChatSession) resumeHistoryGenerationValue() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.resumeHistoryMu.RLock()
+	defer s.resumeHistoryMu.RUnlock()
+	return s.resumeHistoryGeneration
+}
+
+// setResumeHistory 整体替换展示历史；generation 递增使在途的后台补齐任务放弃写入。
+func (s *ChatSession) setResumeHistory(messages []runtimetypes.Message) {
+	if s == nil {
 		return
 	}
-	// pages 从最新页到最早页，页内按 seq 升序；反转页序后展平为
-	// 按时间升序的完整转录。
+	s.resumeHistoryMu.Lock()
+	defer s.resumeHistoryMu.Unlock()
+	s.ResumeHistory = messages
+	s.resumeHistoryGeneration++
+}
+
+// clearResumeHistory 丢弃展示历史（压缩/整体替换投影后旧快照不再可信）。
+func (s *ChatSession) clearResumeHistory() {
+	s.setResumeHistory(nil)
+}
+
+// appendResumeHistoryMessage 跟随 live 消息追加展示历史；只有已经装载过
+// canonical 展示历史时才追加（保持与旧实现的 nil 语义一致）。
+func (s *ChatSession) appendResumeHistoryMessage(message runtimetypes.Message) {
+	if s == nil {
+		return
+	}
+	s.resumeHistoryMu.Lock()
+	defer s.resumeHistoryMu.Unlock()
+	if s.ResumeHistory == nil {
+		return
+	}
+	s.ResumeHistory = append(s.ResumeHistory, *message.Clone())
+}
+
+// prependResumeHistoryPages 把「较新页 → 较早页」的页集合展平为时间升序后
+// 前插到展示历史（较早的页在时间上更靠前）。generation 不匹配说明快照已被
+// 整体替换，返回 false 让调用方放弃这次补齐。
+func (s *ChatSession) prependResumeHistoryPages(generation uint64, pages [][]runtimetypes.Message) bool {
+	if s == nil || len(pages) == 0 {
+		return false
+	}
 	total := 0
 	for _, page := range pages {
 		total += len(page)
 	}
-	messages := make([]runtimetypes.Message, 0, total)
-	for index := len(pages) - 1; index >= 0; index-- {
-		messages = append(messages, pages[index]...)
+	if total == 0 {
+		return false
 	}
-	session.ResumeHistory = messages
+	s.resumeHistoryMu.Lock()
+	defer s.resumeHistoryMu.Unlock()
+	if s.resumeHistoryGeneration != generation || s.ResumeHistory == nil {
+		return false
+	}
+	older := make([]runtimetypes.Message, 0, total+len(s.ResumeHistory))
+	for index := len(pages) - 1; index >= 0; index-- {
+		older = append(older, pages[index]...)
+	}
+	s.ResumeHistory = append(older, s.ResumeHistory...)
+	return true
+}
+
+// deferResumeHistoryCompletion 登记「较早页待补齐」游标，供首帧之后启动后台任务。
+func (s *ChatSession) deferResumeHistoryCompletion(sessionID string, beforeSeq int) {
+	if s == nil || beforeSeq <= 0 {
+		return
+	}
+	s.resumeHistoryMu.Lock()
+	defer s.resumeHistoryMu.Unlock()
+	s.resumeHistoryDeferredSessionID = sessionID
+	s.resumeHistoryDeferredBeforeSeq = beforeSeq
+}
+
+// startDeferredResumeHistoryLoad 在启动首帧（最新页已 seed）之后补齐较早页：
+// 取回 → 前插展示历史 → 复用幂等 seed 重放（锚点插入 + 请求统一帧）。
+// 未登记补齐任务时是 no-op，因此可以无条件在首帧之后调用。
+func startDeferredResumeHistoryLoad(session *ChatSession) {
+	if session == nil || session.SessionManager == nil {
+		return
+	}
+	session.resumeHistoryMu.Lock()
+	sessionID := session.resumeHistoryDeferredSessionID
+	beforeSeq := session.resumeHistoryDeferredBeforeSeq
+	generation := session.resumeHistoryGeneration
+	session.resumeHistoryDeferredSessionID = ""
+	session.resumeHistoryDeferredBeforeSeq = 0
+	session.resumeHistoryMu.Unlock()
+	if sessionID == "" || beforeSeq <= 0 {
+		return
+	}
+	go func() {
+		pages := fetchOlderResumeHistoryPages(context.Background(), session.SessionManager, sessionID, beforeSeq)
+		if len(pages) == 0 {
+			return
+		}
+		if !session.prependResumeHistoryPages(generation, pages) {
+			return
+		}
+		markChatStartup("resume_history_deferred")
+		// 幂等重放：较早 unit 由 reconcile 的锚点插入 Scene，再请求统一帧；
+		// bridge 持有稳定身份，已经 seed 过的最新页不会重复渲染。
+		printVisibleChatHistory(session, "")
+	}()
 }
 
 func resumeLatestRuntimeConversation(session *ChatSession) error {
