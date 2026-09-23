@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -82,9 +81,10 @@ func TestSuspensionProbeRequiresDurableStore(t *testing.T) {
 }
 
 // assertDegradedSuspensionDispatch drives the dispatch gate of a degraded host
-// and pins the three observable consequences from §6.13: the legacy path is
-// taken, exactly one SeverityWarning-family projection is produced (never per
-// call), and no suspension is recorded or announced.
+// and pins the observable consequences from §6.13 after P3 / C4-1: the dispatch
+// is still asynchronous (no blocking fallback is left), exactly one
+// SeverityWarning-family projection is produced (never per call), and no
+// suspension is recorded or announced.
 func assertDegradedSuspensionDispatch(t *testing.T, apiAgent *Agent, wantReason string, store subagentbatch.BatchStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -106,9 +106,10 @@ func assertDegradedSuspensionDispatch(t *testing.T, apiAgent *Agent, wantReason 
 
 	loop := NewReActLoop(apiAgent, llm.NewLLMRuntime(nil), &LoopReActConfig{})
 	loop.turnID = "turn-1"
-	args := map[string]interface{}{"execution_mode": "background"}
-	require.False(t, loop.useBackgroundSubagents(args), "non-durable hosts must not route into background dispatch")
-	require.Equal(t, wantReason, loop.backgroundDegradationReason(args))
+	// P3 / C4-1: the blocking fallback is gone, so a degraded host still
+	// dispatches asynchronously and only loses the resumable parked turn.
+	require.True(t, loop.dispatchSubagentsAsync(), "degraded hosts must still dispatch asynchronously")
+	require.Equal(t, wantReason, loop.backgroundDegradationReason())
 
 	// Two dispatches in the same session project one warning, not two.
 	apiAgent.reportSuspensionDegraded(ctx, "sess-1", wantReason)
@@ -142,7 +143,9 @@ func assertDegradedSuspensionDispatch(t *testing.T, apiAgent *Agent, wantReason 
 // one warning and never emit turn.suspended.
 func TestBackgroundDispatchDegradesWithoutDurableStore(t *testing.T) {
 	t.Run("store nil", func(t *testing.T) {
-		assertDegradedSuspensionDispatch(t, newSuspensionGateAgent(t, nil), SuspensionReasonNoCoordinator, nil)
+		// The dispatch gate materialises the lazy in-memory coordinator, so the
+		// reason reported at dispatch time is the store one, not "no coordinator".
+		assertDegradedSuspensionDispatch(t, newSuspensionGateAgent(t, nil), SuspensionReasonNotDurable, nil)
 	})
 
 	t.Run("in-memory store", func(t *testing.T) {
@@ -152,15 +155,15 @@ func TestBackgroundDispatchDegradesWithoutDurableStore(t *testing.T) {
 		assertDegradedSuspensionDispatch(t, newSuspensionGateAgent(t, store), SuspensionReasonNotDurable, store)
 	})
 
-	t.Run("explicit rollback switch stays silent", func(t *testing.T) {
+	t.Run("explicit rollback switch refuses dispatch", func(t *testing.T) {
 		// Disabling the feature on purpose (SubagentBackgroundEnabled=false) is
-		// not a degradation: it must not raise a warning for every dispatch.
+		// not a degradation: with the blocking path deleted there is nothing to
+		// fall back to, so the dispatch must fail loudly instead of blocking.
 		apiAgent := newSuspensionGateAgent(t, nil)
 		apiAgent.SetSubagentBackgroundEnabled(false)
 		loop := NewReActLoop(apiAgent, llm.NewLLMRuntime(nil), &LoopReActConfig{})
-		args := map[string]interface{}{"execution_mode": "background"}
-		require.False(t, loop.useBackgroundSubagents(args))
-		require.Empty(t, loop.backgroundDegradationReason(args))
+		require.False(t, loop.dispatchSubagentsAsync())
+		require.Empty(t, loop.backgroundDegradationReason())
 	})
 }
 
@@ -191,7 +194,7 @@ func TestDurableSuspensionParksTurnAndSurvivesReopen(t *testing.T) {
 	loop := NewReActLoop(apiAgent, llm.NewLLMRuntime(nil), &LoopReActConfig{})
 	loop.turnID = "turn-9"
 	args := map[string]interface{}{"execution_mode": "background"}
-	require.True(t, loop.useBackgroundSubagents(args))
+	require.True(t, loop.dispatchSubagentsAsync())
 
 	tc := types.ToolCall{ID: "call-1", Name: "spawn_subagents", Args: args}
 	batch, err := loop.startBackgroundSubagentBatch(context.Background(),
@@ -253,9 +256,80 @@ func TestSpawnSubagentsDescriptionStatesSuspensionAvailability(t *testing.T) {
 
 	durable := spawnSubagentsToolDefinition(true)
 	require.NotContains(t, durable.Description, "当前会话不支持托管挂起")
+	require.Contains(t, durable.Description, "Dispatch is asynchronous")
 	durableProperties, ok := durable.Parameters["properties"].(map[string]interface{})
 	require.True(t, ok)
 	durableMode, ok := durableProperties["execution_mode"].(map[string]interface{})
 	require.True(t, ok)
-	require.True(t, strings.Contains(durableMode["description"].(string), "background persists the batch durably"))
+	// P3 / C4-1: the parameter is deprecated and no longer offers a choice.
+	require.Contains(t, durableMode["description"], "Deprecated")
+	require.NotContains(t, durableMode, "enum")
+}
+
+// TestExecutionModeLegacyValuesStayReadableAndWarn pins AC-P3-1a/b (P3 / C4-1):
+// the deprecated execution_mode values stay readable (old callers keep working)
+// and are answered with a deprecation notice instead of a silent
+// reinterpretation, while typos are still rejected.
+func TestExecutionModeLegacyValuesStayReadableAndWarn(t *testing.T) {
+	for _, value := range []string{"", "wait", "sync", "background", "async"} {
+		mode, err := subagentbatch.ParseExecutionMode(value)
+		require.NoError(t, err, "value %q must stay readable", value)
+		require.NotEmpty(t, mode)
+	}
+	for _, value := range []string{"wait", "sync", " WAIT "} {
+		notice := subagentbatch.LegacyExecutionModeNotice(value)
+		require.Contains(t, notice, "deprecated", "value %q must warn", value)
+		require.Contains(t, notice, "no longer blocks")
+	}
+	require.Empty(t, subagentbatch.LegacyExecutionModeNotice("background"))
+	require.Empty(t, subagentbatch.LegacyExecutionModeNotice(""))
+
+	_, err := subagentbatch.ParseExecutionMode("backgroud")
+	require.Error(t, err, "typos must still be rejected")
+}
+
+// TestSpawnSubagentsLedgerAlwaysRecordsBackground pins the P3 / C4-1 dispatch
+// contract: even a legacy execution_mode=wait call lands in the durable ledger as
+// background, because the supervision queries filter on that value and the
+// blocking semantics no longer exists.
+func TestSpawnSubagentsLedgerAlwaysRecordsBackground(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "batches.db")
+	store, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{Path: path})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	exec := &fakeExecutor{
+		results: []SubagentResult{{ID: "t1", Success: true, Summary: "ok"}},
+		done:    make(chan struct{}),
+	}
+	coordinator := &SubagentBatchCoordinator{
+		store:    store,
+		executor: exec,
+		emitter:  func(string, map[string]interface{}) {},
+		deadline: time.Minute,
+		cancels:  make(map[string]context.CancelFunc),
+	}
+	apiAgent := newSuspensionGateAgent(t, nil)
+	apiAgent.SetSubagentBatchCoordinator(coordinator)
+
+	loop := NewReActLoop(apiAgent, llm.NewLLMRuntime(nil), &LoopReActConfig{})
+	loop.turnID = "turn-wait"
+	args := map[string]interface{}{"execution_mode": "wait"}
+	tc := types.ToolCall{ID: "call-wait", Name: "spawn_subagents", Args: args}
+	batch, err := loop.startBackgroundSubagentBatch(context.Background(),
+		[]SubagentTask{{ID: "t1", Goal: "investigate"}}, "sess-wait", tc, 1, "trace-wait", 1)
+	require.NoError(t, err)
+	require.Equal(t, subagentbatch.ExecutionModeBackground, batch.ExecutionMode)
+
+	ctx := context.Background()
+	stored, err := store.GetBatch(ctx, batch.BatchID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, subagentbatch.ExecutionModeBackground, stored.ExecutionMode)
+
+	select {
+	case <-exec.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background worker did not finish in time")
+	}
 }

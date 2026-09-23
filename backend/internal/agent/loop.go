@@ -2826,20 +2826,37 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 				if scheduler == nil {
 					result.Error = "subagent scheduler is not configured"
 					loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_scheduler", result.Error, nil)
-				} else if loop.useBackgroundSubagents(tc.Args) {
+				} else if !loop.dispatchSubagentsAsync() {
+					// P3 / C4-1：内联阻塞分支已删除 —— 无法异步派发的宿主必须显式
+					// 失败（模型可见错误），不得静默退回阻塞父 turn 的旧路径。
+					result.Error = "spawn_subagents requires asynchronous background dispatch, but this host has background subagent batches disabled or no batch coordinator"
+					loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_batch", result.Error, nil)
+				} else {
+					// P3 / C4-1：内联阻塞分支已删除，spawn_subagents 只有异步语义。
+					// I9 降级（§6.13）下仍异步派发（不再退回阻塞），但投影恰好一条
+					// 降级告警（不刷屏）；旧 execution_mode 取值保持可读并带
+					// deprecation 提示（AC-P3-1b）。
+					if reason := loop.backgroundDegradationReason(); reason != "" {
+						loop.agent.reportSuspensionDegraded(ctx, sessionID, reason)
+					}
+					deprecationNotice := subagentbatch.LegacyExecutionModeNotice(stringValue(tc.Args["execution_mode"]))
 					batch, bgErr := loop.startBackgroundSubagentBatch(ctx, subtasks, sessionID, tc, step, traceID, depth)
 					if bgErr != nil {
 						result.Error = bgErr.Error()
 						loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_batch", result.Error, nil)
 					} else {
-						handleOutput, marshalErr := json.Marshal(map[string]interface{}{
+						handlePayload := map[string]interface{}{
 							"ok":             true,
 							"execution_mode": "background",
 							"batch_id":       batch.BatchID,
 							"status":         string(batch.Status),
 							"task_count":     batch.TaskCount,
 							"parent_action":  "continue_parent_turn; lifecycle_updates_will_be_delivered_by_supervision",
-						})
+						}
+						if deprecationNotice != "" {
+							handlePayload["execution_mode_deprecated"] = deprecationNotice
+						}
+						handleOutput, marshalErr := json.Marshal(handlePayload)
 						if marshalErr != nil {
 							result.Error = marshalErr.Error()
 							loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_batch", result.Error, nil)
@@ -2847,7 +2864,13 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 							result.Output = string(handleOutput)
 							metadata["execution_mode"] = "background"
 							metadata["batch_id"] = batch.BatchID
+							// C4-1：把批次句柄以 subagent_batch_id 指标暴露给宿主摘要，
+							// 让异步派发 turn 仍能报告"已派发批次/任务数"。
+							metadata["subagent_batch_id"] = batch.BatchID
 							metadata["subagent_count"] = len(subtasks)
+							if deprecationNotice != "" {
+								metadata["execution_mode_deprecated"] = deprecationNotice
+							}
 							loop.emitRuntimeEvent("subagent.batch.created", sessionID, tc.Name, map[string]interface{}{
 								"tool_call_id":      tc.ID,
 								"step":              step,
@@ -2859,87 +2882,6 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 							})
 						}
 					}
-				} else {
-					// I9 降级（§6.13）：模型显式要了 background，但本会话的 batch
-					// 控制面不跨重启 ⇒ 不返回 batch handle、不写 awaiting_obligations，
-					// 按 legacy 同步路径执行，并投影恰好一条降级告警（不刷屏）。
-					if reason := loop.backgroundDegradationReason(tc.Args); reason != "" {
-						loop.agent.reportSuspensionDegraded(ctx, sessionID, reason)
-					}
-					syncBatchID := subagentbatch.NewID("batch")
-					syncStart := time.Now()
-					loop.emitRuntimeEvent("subagent.batch.started", sessionID, tc.Name, map[string]interface{}{
-						"tool_call_id":      tc.ID,
-						"step":              step,
-						"trace_id":          traceID,
-						"batch_id":          syncBatchID,
-						"execution_mode":    "wait",
-						"task_count":        len(subtasks),
-						"parent_session_id": sessionID,
-					})
-					reports, runErr := scheduler.RunChildren(ctx, SubagentRunOptions{
-						TraceID:          traceID,
-						ParentSessionID:  sessionID,
-						ParentToolCallID: tc.ID,
-						Depth:            depth + 1,
-						BatchID:          syncBatchID,
-					}, subtasks)
-					completedCount, failedCount := subagentResultCounts(reports)
-					terminalLifecycle := waitBatchTerminalLifecycle(syncBatchID, sessionID, tc.ID, traceID, len(subtasks), reports, runErr, ctx)
-					projectionCtx, projectionCancel := context.WithTimeout(agentWithoutCancel(ctx), 5*time.Second)
-					terminalProjectionErr := loop.agent.projectBatchLifecycle(projectionCtx, terminalLifecycle)
-					projectionCancel()
-					terminalPayload := map[string]interface{}{
-						"tool_call_id":      tc.ID,
-						"step":              step,
-						"trace_id":          traceID,
-						"batch_id":          syncBatchID,
-						"execution_mode":    "wait",
-						"success":           runErr == nil,
-						"subagent_count":    len(reports),
-						"completed_count":   completedCount,
-						"failed_count":      failedCount,
-						"elapsed_ms":        int(time.Since(syncStart).Milliseconds()),
-						"error":             errorString(runErr),
-						"parent_session_id": sessionID,
-					}
-					if terminalProjectionErr != nil {
-						terminalPayload["supervision_projection_error"] = terminalProjectionErr.Error()
-					}
-					loop.emitRuntimeEvent("subagent.batch.completed", sessionID, tc.Name, terminalPayload)
-					if runErr != nil {
-						result.Error = runErr.Error()
-						loop.emitToolDenied(sessionID, tc, step, traceID, "subagent_scheduler", result.Error, nil)
-					} else {
-						result.Output = renderSubagentResults(reports)
-						parentReports := summarizeSubagentReportsForParent(reports, defaultSubagentParentMetadataBudgetBytes)
-						metadata["subagent_count"] = len(reports)
-						metadata["subagent_reports"] = parentReports.Reports
-						metadata["subagent_reports_byte_count"] = parentReports.ByteCount
-						metadata["subagent_reports_sha256"] = parentReports.SHA256
-						metadata["subagent_reports_budget_bytes"] = parentReports.Budget
-						metadata["subagent_reports_truncated"] = parentReports.Truncated
-						if parentReports.Omitted > 0 {
-							metadata["subagent_reports_omitted"] = parentReports.Omitted
-						}
-						// Omitted children stay retrievable: the pointers let the
-						// parent fetch each stubbed report's body instead of
-						// re-dispatching it (H4).
-						if len(parentReports.OmittedRefs) > 0 {
-							metadata["subagent_reports_omitted_refs"] = parentReports.OmittedRefs
-						}
-						// P2-1 / H5: identical conclusions are folded and
-						// same-claim disagreements are flagged; the counts stay
-						// visible so the parent can tell what was merged.
-						if parentReports.Deduplicated > 0 {
-							metadata["subagent_reports_deduplicated"] = parentReports.Deduplicated
-						}
-						if parentReports.Conflicts > 0 {
-							metadata["subagent_reports_conflicts"] = parentReports.Conflicts
-						}
-					}
-					metadata["execution_mode"] = "wait"
-					metadata["batch_id"] = syncBatchID
 				}
 			}
 
@@ -3573,6 +3515,9 @@ func (loop *ReActLoop) observe(ctx context.Context, toolResults []toolExecutionR
 			}
 			if subagentCount, ok := result.Envelope.Metadata["subagent_count"]; ok {
 				obs.WithMetric("subagent_count", subagentCount)
+			}
+			if subagentBatchID, ok := result.Envelope.Metadata["subagent_batch_id"]; ok {
+				obs.WithMetric("subagent_batch_id", subagentBatchID)
 			}
 			if subagentReports, ok := result.Envelope.Metadata["subagent_reports"]; ok {
 				obs.WithMetric("subagent_reports", subagentReports)
@@ -6306,11 +6251,10 @@ const (
 )
 
 // decodedSubagentTopLevelArgTypes lists the JSON kinds the spawn_subagents
-// top-level options must use. execution_mode used to fall back to the
-// synchronous default on a wrong kind or a typo such as "backgroud", which
-// turned an explicit background request into a blocking wait with no
-// diagnostic; wait_timeout_sec and batch_idempotency_key were dropped the same
-// silent way.
+// top-level options must use. execution_mode used to fall back to a silent
+// default on a wrong kind or a typo such as "backgroud", which turned an
+// explicit request into an unintended dispatch mode with no diagnostic;
+// wait_timeout_sec and batch_idempotency_key were dropped the same silent way.
 var decodedSubagentTopLevelArgTypes = []struct {
 	key  string
 	want string
@@ -6336,13 +6280,13 @@ func validateDecodedSubagentTopLevelArgs(args map[string]interface{}) error {
 		mode, ok := raw.(string)
 		if !ok {
 			return fmt.Errorf(
-				"spawn_subagents field %q must be a JSON string, got %T (%v); omit it to keep the synchronous default",
+				"spawn_subagents field %q must be a JSON string, got %T (%v); omit it — dispatch is always asynchronous",
 				"execution_mode", raw, raw)
 		}
 		if trimmed := strings.TrimSpace(mode); trimmed != "" {
 			if _, err := subagentbatch.ParseExecutionMode(trimmed); err != nil {
 				return fmt.Errorf(
-					"spawn_subagents execution_mode %q is not supported (want wait|background); omit it to keep the synchronous default",
+					"spawn_subagents execution_mode %q is not supported (want background; the deprecated wait|sync stay accepted); omit it — dispatch is always asynchronous",
 					trimmed)
 			}
 		}
@@ -6576,53 +6520,28 @@ func validateDecodedSubagentDependencies(tasks []SubagentTask) error {
 	return nil
 }
 
-// subagentToolExecutionMode parses execution_mode from the tool request,
-// defaulting to wait for compatibility when omitted or invalid.
-func subagentToolExecutionMode(args map[string]interface{}) subagentbatch.ExecutionMode {
-	if args == nil {
-		return subagentbatch.ExecutionModeWait
-	}
-	raw, ok := args["execution_mode"].(string)
-	if !ok || strings.TrimSpace(raw) == "" {
-		return subagentbatch.ExecutionModeWait
-	}
-	if parsed, err := subagentbatch.ParseExecutionMode(raw); err == nil {
-		return parsed
-	}
-	return subagentbatch.ExecutionModeWait
-}
-
-// useBackgroundSubagents decides whether a spawn_subagents request should be
-// routed through the durable background coordinator. It requires an explicit
-// execution_mode=background, the feature flag, a working coordinator/store and
-// — I9 (design §6.13) — a store that survives a restart. Without the durability
-// probe the runtime would hand the model a batch handle whose parked state dies
-// with the process, so such hosts take the legacy synchronous path instead.
-func (loop *ReActLoop) useBackgroundSubagents(args map[string]interface{}) bool {
+// dispatchSubagentsAsync reports whether spawn_subagents can dispatch through the
+// batch coordinator. P3 / C4-1 deleted the inline blocking fallback, so a host
+// that cannot run background batches fails loudly (a model-visible error) instead
+// of silently blocking the parent turn.
+func (loop *ReActLoop) dispatchSubagentsAsync() bool {
 	if loop == nil || loop.agent == nil {
-		return false
-	}
-	if subagentToolExecutionMode(args) != subagentbatch.ExecutionModeBackground {
 		return false
 	}
 	if !loop.agent.SubagentBackgroundEnabled() {
 		return false
 	}
-	_, durable := loop.agent.SuspensionProbe()
-	return durable
+	return loop.agent.GetSubagentBatchCoordinator() != nil
 }
 
-// backgroundDegradationReason returns the I9 reason when the model explicitly
-// asked for execution_mode=background and the host has the feature enabled but
-// cannot park the turn durably. Empty means there is nothing to report: either
-// background was not requested, the rollback switch disabled it on purpose, or
-// the durability probe passed. Reporting is deliberately separated from the
-// predicate so a probe never has side effects.
-func (loop *ReActLoop) backgroundDegradationReason(args map[string]interface{}) string {
+// backgroundDegradationReason returns the I9 reason when this host can dispatch
+// asynchronously but cannot park the turn durably (design §6.13). Empty means
+// there is nothing to report: the feature flag disabled the dispatch on purpose
+// (that is a hard dispatch error, not a degradation) or the durability probe
+// passed. Reporting is deliberately separated from the predicate so a probe never
+// has side effects.
+func (loop *ReActLoop) backgroundDegradationReason() string {
 	if loop == nil || loop.agent == nil {
-		return ""
-	}
-	if subagentToolExecutionMode(args) != subagentbatch.ExecutionModeBackground {
 		return ""
 	}
 	if !loop.agent.SubagentBackgroundEnabled() {
@@ -6697,125 +6616,22 @@ func (loop *ReActLoop) startBackgroundSubagentBatch(ctx context.Context, subtask
 		ParentToolCallID: tc.ID,
 		RootScopeID:      sessionID,
 		Depth:            depth + 1,
-		ExecutionMode:    subagentToolExecutionMode(tc.Args),
-		IdempotencyKey:   stringValue(tc.Args["batch_idempotency_key"]),
-		BatchDeadline:    deadline,
+		// P3 / C4-1：派发只有异步语义，落账一律 background。旧调用方传的
+		// wait/sync 不再进入账本：supervision 的 batch 查询按 background 过滤
+		// （batch_progress.go / 协调器），记旧值会让这些批次对巡检不可见。
+		ExecutionMode:  subagentbatch.ExecutionModeBackground,
+		IdempotencyKey: stringValue(tc.Args["batch_idempotency_key"]),
+		BatchDeadline:  deadline,
 	}, subtasks)
 	if err != nil {
 		return nil, err
 	}
-	// §6.12 挂起态：探测已在 useBackgroundSubagents 通过，这里落盘 turn_id /
+	// §6.12 挂起态：可异步派发已由 dispatchSubagentsAsync 通过；落盘 turn_id /
 	// obligation_ids / parked_at / resume_queue，让重启后的 resume 路径有据可依。
+	// 非 durable 宿主由 backgroundDegradationReason 投影告警，parkBackgroundTurn
+	// 自身也要求 store.IsDurable()。
 	loop.parkBackgroundTurn(ctx, batch, sessionID)
 	return batch, nil
-}
-
-// subagentResultCounts tallies succeeded vs failed reports for observability.
-func subagentResultCounts(reports []SubagentResult) (completed, failed int) {
-	for _, r := range reports {
-		if r.Error != "" || !r.Success {
-			failed++
-		} else {
-			completed++
-		}
-	}
-	return
-}
-
-func waitBatchTerminalLifecycle(batchID, parentSessionID, parentToolCallID, traceID string, taskCount int, reports []SubagentResult, runErr error, ctx context.Context) BatchTerminalLifecycle {
-	completed, failed, canceled, timedOut := 0, 0, 0, 0
-	firstError := ""
-	for _, report := range reports {
-		if report.Success && strings.TrimSpace(report.Error) == "" {
-			completed++
-			continue
-		}
-		errText := strings.TrimSpace(report.Error)
-		if errText == "" {
-			errText = strings.TrimSpace(report.Summary)
-		}
-		if firstError == "" && errText != "" {
-			firstError = errText
-		}
-		switch {
-		case isSubagentTimeoutText(errText):
-			timedOut++
-		case isSubagentCanceledText(errText):
-			canceled++
-		default:
-			failed++
-		}
-	}
-	if taskCount < 0 {
-		taskCount = len(reports)
-	}
-	accounted := completed + failed + canceled + timedOut
-	if runErr == nil && accounted < taskCount {
-		failed += taskCount - accounted
-		if firstError == "" {
-			firstError = "subagent batch returned incomplete reports"
-		}
-	}
-
-	status := subagentbatch.BatchCompleted
-	errorClass := ""
-	errorDetail := firstError
-	switch {
-	case ctx != nil && ctx.Err() == context.DeadlineExceeded:
-		status, errorClass = subagentbatch.BatchTimedOut, "timeout"
-	case ctx != nil && ctx.Err() == context.Canceled:
-		status, errorClass = subagentbatch.BatchCanceled, "canceled"
-	case isSubagentTimeoutError(runErr):
-		status, errorClass = subagentbatch.BatchTimedOut, "timeout"
-	case isSubagentCanceledError(runErr):
-		status, errorClass = subagentbatch.BatchCanceled, "canceled"
-	case runErr != nil:
-		status, errorClass = subagentbatch.BatchFailed, subagentbatch.CanonicalErrorClass(runErr)
-	case canceled > 0:
-		status, errorClass = subagentbatch.BatchCanceled, "canceled"
-	case timedOut > 0:
-		status, errorClass = subagentbatch.BatchTimedOut, "timeout"
-	case failed > 0:
-		status, errorClass = subagentbatch.BatchFailed, "task_failure"
-	}
-	if runErr != nil {
-		errorDetail = runErr.Error()
-	}
-	return BatchTerminalLifecycle{
-		BatchID:          batchID,
-		RootScopeID:      parentSessionID,
-		ParentSessionID:  parentSessionID,
-		ParentToolCallID: parentToolCallID,
-		TraceID:          traceID,
-		ExecutionMode:    subagentbatch.ExecutionModeWait,
-		Status:           status,
-		EventType:        batchTerminalEventType(status),
-		SubjectVersion:   1,
-		TaskCount:        taskCount,
-		CompletedCount:   completed,
-		FailedCount:      failed,
-		CanceledCount:    canceled,
-		TimedOutCount:    timedOut,
-		ErrorClass:       errorClass,
-		Error:            errorDetail,
-	}
-}
-
-func isSubagentTimeoutError(err error) bool {
-	return err != nil && (stderrors.Is(err, context.DeadlineExceeded) || isSubagentTimeoutText(err.Error()))
-}
-
-func isSubagentCanceledError(err error) bool {
-	return err != nil && (stderrors.Is(err, context.Canceled) || isSubagentCanceledText(err.Error()))
-}
-
-func isSubagentTimeoutText(value string) bool {
-	value = strings.ToLower(strings.TrimSpace(value))
-	return strings.Contains(value, "timeout") || strings.Contains(value, "timed out") || strings.Contains(value, "deadline")
-}
-
-func isSubagentCanceledText(value string) bool {
-	return strings.Contains(strings.ToLower(strings.TrimSpace(value)), "cancel")
 }
 
 func renderSubagentResults(results []SubagentResult) string {
@@ -7024,14 +6840,15 @@ func cloneOptionValue(value interface{}) interface{} {
 // spawnSubagentsToolDefinition builds the model-visible spawn_subagents
 // definition. suspensionAvailable is the I9 durability probe (SupportsSuspension,
 // design §6.13): when the batch control plane cannot survive a restart the
-// description must say so, because execution_mode=background then degrades to
-// the legacy synchronous path and the model must not wait for a batch handle.
+// description must say so, because a parked turn then cannot be resumed after a
+// crash. The dispatch itself stays asynchronous — P3 / C4-1 deleted the inline
+// blocking path, so nothing falls back to a synchronous wait any more.
 func spawnSubagentsToolDefinition(suspensionAvailable bool) types.ToolDefinition {
-	description := "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration."
-	executionModeDescription := "wait (default) preserves the legacy synchronous semantics and returns full reports; background persists the batch durably and returns a batch handle immediately while a supervisor delivers lifecycle updates."
+	description := "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration. Dispatch is asynchronous: the call returns a batch handle immediately and lifecycle updates arrive later through supervision resume."
+	executionModeDescription := "Deprecated and optional — omit it. Dispatch is always asynchronous; the legacy values wait|sync stay accepted for compatibility but no longer block the parent turn."
 	if !suspensionAvailable {
-		description += " This session does not support supervised suspension (当前会话不支持托管挂起): the batch control plane does not survive a restart, so execution_mode=background degrades to the synchronous wait path and every request returns full reports."
-		executionModeDescription = "wait (default) preserves the legacy synchronous semantics and returns full reports; background is unavailable in this session (当前会话不支持托管挂起) because the batch control plane does not survive a restart — requesting it runs synchronously instead of returning a batch handle."
+		description += " This session does not support supervised suspension (当前会话不支持托管挂起): the batch control plane does not survive a restart, so a parked turn cannot be resumed after a crash. The dispatch still returns a batch handle and the host projects one degradation warning."
+		executionModeDescription = "Deprecated and optional — omit it. Dispatch is always asynchronous, but this session does not support supervised suspension (当前会话不支持托管挂起): the parked turn cannot be resumed after a restart. Legacy wait|sync stay accepted and no longer block the parent turn."
 	}
 	return types.ToolDefinition{
 		Name:        "spawn_subagents",
@@ -7041,7 +6858,6 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool) types.ToolDefinition
 			"properties": map[string]interface{}{
 				"execution_mode": map[string]interface{}{
 					"type":        "string",
-					"enum":        []string{"wait", "background"},
 					"description": executionModeDescription,
 				},
 				"wait_timeout_sec": map[string]interface{}{

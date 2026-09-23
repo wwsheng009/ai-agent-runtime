@@ -32,8 +32,9 @@ const (
 
 	// SuspensionSeverityWarning is the severity every I9 degradation carries.
 	// The design (§6.13) requires a single non-alarming warning rather than a
-	// critical alert, because the dispatch still succeeds - it only falls back
-	// to the legacy synchronous path. The literal matches
+	// critical alert, because the dispatch still succeeds - since P3 / C4-1 it
+	// only means the parked turn cannot be resumed after a restart (there is no
+	// synchronous fallback left to fall back to). The literal matches
 	// supervision.SeverityWarning; the agent package keeps it as a string so the
 	// tool layer does not depend on the supervision plane.
 	SuspensionSeverityWarning = "warning"
@@ -41,8 +42,8 @@ const (
 
 // SuspensionDegradation is the host-neutral payload of the one-shot I9
 // degradation projection: the session asked for supervised suspension but the
-// batch control plane cannot remember it, so the runtime fell back to the
-// legacy synchronous dispatch.
+// batch control plane cannot remember it, so a crash would lose the parked
+// turn even though the asynchronous dispatch itself succeeded.
 type SuspensionDegradation struct {
 	// ParentSessionID is the session whose dispatch degraded.
 	ParentSessionID string
@@ -105,8 +106,9 @@ func (a *Agent) SuspensionProbe() (string, bool) {
 }
 
 // SupportsSuspension reports whether a parked turn would survive a restart
-// (§6.13 I9). False means every background request must take the legacy
-// synchronous path: no batch handle, no awaiting_obligations, no parked state.
+// (§6.13 I9). False means no parked state may be written: the dispatch is still
+// asynchronous (P3 / C4-1 deleted the blocking path) but the host must project
+// the degradation warning instead of promising a resumable turn.
 func (a *Agent) SupportsSuspension() bool {
 	_, ok := a.SuspensionProbe()
 	return ok

@@ -1015,3 +1015,59 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 
 - §5 进入条件＝**P2 DoD + 兼容期结束**：P2 登记项由 §13.6 / §13.7 / 本节共同闭环（C3-1 能力等价不补别名；C3-7 七项全闭环）；兼容期约束已由用户解除。
 - ⇒ **P3 可进入**，首项 C4-1（删除阻塞分支与 `wait` 取值，`execution_mode` 标记 deprecated）。
+
+### 13.9 补丁登记：P3 首项 C4-1（删除阻塞分支与 `wait` 取值），2026-09-23
+
+> 进入条件（§5：P2 DoD + 兼容期结束）已由 §13.6 / §13.7 / §13.8 满足，本轮实施 **C4-1：删除内联阻塞分支与 `wait` 取值残留**，`execution_mode` 标记 **deprecated（旧值仍可用）**。
+
+**落地形态：派发只有异步语义，旧值只读不选路**
+
+| 语义 | 落地 |
+| --- | --- |
+| 内联阻塞分支 | 删除。`spawn_subagents` 一律走 `startBackgroundSubagentBatch` ⇒ 回执是 batch 句柄（`batch_id` / `execution_mode=background` / `parent_action=continue_parent_turn…` / `task_count`），父 turn 不再等待子任务 |
+| 旧 `execution_mode` 取值 | 空值、`wait`、`sync` 仍解析为 `ExecutionModeWait`（旧持久化行与旧调用方继续可读），但**不再选择执行路径**；显式传 `wait` / `sync` 时回执追加 `execution_mode_deprecated` 提示（AC-P3-1b） |
+| 宿主不支持异步 | 不再静默退回阻塞：返回模型可见错误 `spawn_subagents requires asynchronous background dispatch, but this host has background subagent batches disabled or no batch coordinator` |
+| 账本口径 | 即便调用方传 `wait`，durable 账本仍落 `background`（监督查询按该值过滤，语义已无阻塞） |
+| 父上下文预算 | 父 turn 只拿到句柄；子任务输出不再进入父上下文（原"截断 + artifact 引用"路径随阻塞分支一并删除） |
+
+**改动清单**
+
+| 位置 | 改动 |
+| --- | --- |
+| `backend/internal/agent/loop.go` | 删除 `spawn_subagents` 内联阻塞分支及其等待 / 聚合路径；派发统一异步；句柄额外以 `subagent_batch_id` 观测指标暴露（供宿主摘要统计"已派发"） |
+| `backend/internal/agent/agent.go` | `SetSubagentBackgroundEnabled` 注释更新：禁用 ⇒ 显式失败，不再回退同步路径 |
+| `backend/internal/agent/suspension_gate.go` | I9 降级语义改为"派发仍异步成功、但 parked turn 无法跨重启恢复"；`SupportsSuspension` 注释同步 |
+| `backend/internal/subagentbatch/types.go` | `ExecutionModeWait` 标 deprecated（常量保留供旧行解析）；`ParseExecutionMode` 兼容映射不变；新增 `LegacyExecutionModeNotice`（一次性提示，`background` / 空值不提示） |
+| `backend/internal/api/skills/handler.go` | 观测摘要新增 `subagent_dispatched`（按 `subagent_batch_id` + `subagent_count` 统计已派发批次与任务数）；`summarizeSubagents` 在"只有派发、没有报告"时不再返回 nil |
+
+**测试落点（L1）**
+
+| 用例 | 断言 |
+| --- | --- |
+| `TestReActLoop_Run_SpawnSubagentsDispatchesAsyncBatchHandle`（`internal/agent/loop_test.go`） | 父 turn 只发 2 次模型调用（派发 + 收尾）；回执含 `batch_id=batch_` / `execution_mode` / `parent_action` / `task_count`；lifecycle 投影 `ExecutionModeBackground` + `BatchCompleted`；子任务请求由 detached worker 单独消费 |
+| `TestSpawnSubagentsLargeResultStaysOutOfParentContext`（`internal/agent/subagent_parent_summary_test.go`） | 父工具消息 ≤ 12KiB、含 `batch_id` / `continue_parent_turn`、不含子输出；父 metadata 无 `subagent_reports` |
+| `TestReActLoop_Run_EmitsRuntimeEvents` / `TestSpawnSubagentsInjectsPromptBuilderIntoChild` | 事件与子提示词注入在异步语义下仍成立（trace 断言收窄到父 turn 自己的里程碑，detached worker 事件不纳入） |
+| `TestExecutionModeLegacyValuesStayReadableAndWarn` / `TestSpawnSubagentsLedgerAlwaysRecordsBackground` / spawn_subagents 工具定义用例（`internal/agent/suspension_gate_test.go`） | 旧值可解析 + deprecation 提示 + 错拼仍拒绝；账本恒为 `background`；`execution_mode` 参数描述标 Deprecated 且不再提供 enum（AC-P3-1a/b） |
+| `TestAgentChat_EnableReAct_ExposesSubagentSummary`（`internal/api/skills/handler_test.go`） | 异步口径：`subagent_summary.batches=1` / `dispatched=1` / `count=0` / `successful=0` / `roles=[]`；`testSequenceLLMProvider` 加锁（detached 子任务与父 turn 可能并发调用同一 provider 实例） |
+
+**语义边界 / 留白**
+
+- 父 turn 结束时的摘要只反映"**已派发**"；`successful` / `roles` / patch 计数等终态字段由批次终态投递（resume / 监督通道）在**后续 turn** 的观测里补齐 —— AC-P3-1c（兼容期双写：batch handle + resume 聚合报告）的端到端取证仍是 L2 留白。
+- `subagent_reports` 指标未删除：orchestrator / planner 路径（`agent_planned_subagents`）与 resume 侧聚合继续使用；`summarizeSubagentReportsForParent`（有界父投影）保留给 resume 聚合，其内联调用方已随阻塞分支删除。
+- 旧客户端兼容：句柄字段（`batch_id` / `status` / `task_count` / `parent_action`）不变；新增 `subagent_batch_id` 观测指标与 `subagent_summary.dispatched` 属附加字段。
+- 不再有"宿主不支持异步 ⇒ 退回阻塞"的降级：I9 降级现在只影响"能否跨重启恢复挂起 turn"。
+
+**验证证据（2026-09-23 实测）**
+
+- `gofmt -l internal/agent internal/subagentbatch` 无输出；`internal/api/skills` 的 `gofmt -l` 输出均为改动前既有偏差（本次改动的 `handler.go` / `handler_test.go` 不在其中）。
+- `go test ./internal/agent/ -count=1` ok（14.8s）；`go test ./internal/api/skills/ -run TestAgentChat_EnableReAct_ExposesSubagentSummary -count=1` PASS（0.8s）。
+- `go test ./... -count=1`（backend 全量，285s）：除 `internal/toolbroker` 的 `TestReliabilityEvalBrokerTimeoutRetryUsesNewInvocationWithoutDuplicateSideEffect` 在全量并发负载下超时外全绿；该用例单包复跑（`-run` 单用例，26s）通过 ⇒ 负载相关既有 flake，与本次改动无调用关系（改动不涉及 `internal/toolbroker`）。
+- 残留断言（AC-P3-1a）：`grep -E 'runSubagentsInline|executeSubagentsSync|awaitSubagentBatch|waitForBatch|blockingDispatch|syncDispatch'`（`internal/agent`，`*.go`）无匹配；`go build ./...` 通过。
+
+**AC 判定**
+
+| AC | 判定 | 证据 |
+| --- | --- | --- |
+| AC-P3-1a（无残留调用） | ✅ L1 | 编译通过 + 上述 grep 空结果 + 阻塞路径测试改为异步句柄断言 |
+| AC-P3-1b（旧值可用 + 提示） | ✅ L1 | `TestExecutionModeLegacyValuesStayReadableAndWarn` / `TestSpawnSubagentsLedgerAlwaysRecordsBackground` / spawn_subagents 工具定义用例 |
+| AC-P3-1c（双写不破坏旧客户端） | ⏳ L2 | 句柄侧 L1 已覆盖；resume 聚合报告的端到端取证待真实运行（留白如上） |

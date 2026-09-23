@@ -305,6 +305,55 @@ func (s *SequenceLLMProvider) CheckHealth(ctx context.Context) error {
 	return nil
 }
 
+// roleRoutingLLMProvider keeps async-dispatch tests deterministic. Since P3 /
+// C4-1 the parent turn no longer waits for its children, so the child's model
+// call races the parent's next step and a single ordered queue
+// (SequenceLLMProvider) would hand the child the parent's next response. Child
+// requests are routed to their own queue by the child system prompt
+// ("Assigned goal:" only ever appears in a child prompt).
+type roleRoutingLLMProvider struct {
+	*SequenceLLMProvider
+	childResponses []*llm.LLMResponse
+	mu             sync.Mutex
+	childCount     int
+	childRequests  []*llm.LLMRequest
+}
+
+func (p *roleRoutingLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !isSubagentChildRequest(req) {
+		return p.SequenceLLMProvider.Call(ctx, req)
+	}
+	p.childRequests = append(p.childRequests, cloneLLMRequest(req))
+	if p.childCount >= len(p.childResponses) {
+		return &llm.LLMResponse{Content: "No more child responses configured.", Model: "test-model"}, nil
+	}
+	response := p.childResponses[p.childCount]
+	p.childCount++
+	return response, nil
+}
+
+// childRequestSnapshot reads the recorded child requests under the provider
+// mutex so a test can poll while the detached batch worker is still running.
+func (p *roleRoutingLLMProvider) childRequestSnapshot() []*llm.LLMRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]*llm.LLMRequest(nil), p.childRequests...)
+}
+
+func isSubagentChildRequest(req *llm.LLMRequest) bool {
+	if req == nil {
+		return false
+	}
+	for _, message := range req.Messages {
+		if message.Role == "system" && strings.Contains(message.Content, "Assigned goal:") {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *BlockingLLMProvider) Name() string {
 	return p.name
 }
@@ -3431,7 +3480,11 @@ func TestReActLoop_RunWithSession_PersistsHistoryAcrossRuns(t *testing.T) {
 	}
 }
 
-func TestReActLoop_Run_SpawnSubagentsUsesStructuredReports(t *testing.T) {
+// C4-1: spawn_subagents 只有异步语义。本用例固定循环侧契约：工具回执是 batch
+// 句柄（父 turn 不阻塞），子任务经 scheduler 真跑，终态经 lifecycle 投影异步到达
+// 且 ExecutionMode 恒为 background。子报告回到父会话由 resume 路径负责，不在本
+// 用例范围。
+func TestReActLoop_Run_SpawnSubagentsDispatchesAsyncBatchHandle(t *testing.T) {
 	agent := &Agent{
 		config: &Config{
 			Name:         "test-agent",
@@ -3447,6 +3500,17 @@ func TestReActLoop_Run_SpawnSubagentsUsesStructuredReports(t *testing.T) {
 		MaxConcurrent: 2,
 		MaxDepth:      1,
 	}))
+	// 派发只有异步语义后，循环必须真的挂上 batch 控制面（durable store + 以
+	// scheduler 为执行内核的协调器），否则派发会显式失败。
+	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "batches.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = batchStore.Close() })
+	agent.SetSubagentBatchCoordinator(NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
+		Store:     batchStore,
+		Scheduler: agent.GetSubagentScheduler(),
+	}))
 	projected := make(chan BatchTerminalLifecycle, 1)
 	agent.SetBatchLifecycleProjector(func(_ context.Context, event BatchTerminalLifecycle) error {
 		projected <- event
@@ -3454,7 +3518,7 @@ func TestReActLoop_Run_SpawnSubagentsUsesStructuredReports(t *testing.T) {
 	})
 
 	llmRuntime := llm.NewLLMRuntime(nil)
-	provider := &SequenceLLMProvider{
+	baseProvider := &SequenceLLMProvider{
 		name: "test-provider",
 		responses: []*llm.LLMResponse{
 			{
@@ -3477,13 +3541,15 @@ func TestReActLoop_Run_SpawnSubagentsUsesStructuredReports(t *testing.T) {
 				},
 			},
 			{
-				Content: "The logs point to a parser panic in the request path.",
-				Model:   "test-model",
-			},
-			{
 				Content: "I combined the child report into the final answer.",
 				Model:   "test-model",
 			},
+		},
+	}
+	provider := &roleRoutingLLMProvider{
+		SequenceLLMProvider: baseProvider,
+		childResponses: []*llm.LLMResponse{
+			{Content: "The logs point to a parser panic in the request path.", Model: "test-model"},
 		},
 	}
 	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
@@ -3501,42 +3567,38 @@ func TestReActLoop_Run_SpawnSubagentsUsesStructuredReports(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("expected success, got %+v", result)
 	}
-	if len(provider.requests) != 3 {
-		t.Fatalf("expected 3 model requests (parent, child, parent), got %d", len(provider.requests))
-	}
-	if result.Output != "I combined the child report into the final answer." {
-		for index, request := range provider.requests {
-			t.Logf("request[%d] messages=%d", index, len(request.Messages))
-			for msgIndex, message := range request.Messages {
-				t.Logf("request[%d].messages[%d]=role=%s content=%q", index, msgIndex, message.Role, message.Content)
-			}
-		}
-		t.Fatalf("unexpected final output: %q", result.Output)
-	}
+	// 父 turn 不再等待子任务：两次父请求（派发 + 收尾），子请求走自己的队列
+	// （异步并发，顺序不定）。
+	require.Len(t, provider.requests, 2)
+	require.Equal(t, "I combined the child report into the final answer.", result.Output)
 
-	parentAfterChild := provider.requests[2]
-	var sawStructuredReport bool
-	for _, message := range parentAfterChild.Messages {
-		if message.Role == "tool" &&
-			strings.Contains(message.Content, "Subagent reports:") &&
-			strings.Contains(message.Content, "parser panic") {
-			sawStructuredReport = true
-			break
-		}
-	}
-	if !sawStructuredReport {
-		t.Fatal("expected parent to receive structured subagent report in tool_result history")
-	}
+	// 工具回执是 batch 句柄：父 turn 继续，结果由 supervision 异步投递。
+	require.Len(t, result.Observations, 1)
+	handleOutput := result.Observations[0].Output
+	require.Contains(t, handleOutput, "batch_id=batch_")
+	require.Contains(t, handleOutput, "execution_mode")
+	require.Contains(t, handleOutput, "parent_action")
+	require.Contains(t, handleOutput, "task_count")
+	require.NotContains(t, handleOutput, "parser panic", "the child report must not block the parent turn")
+
 	select {
 	case event := <-projected:
-		require.Equal(t, subagentbatch.ExecutionModeWait, event.ExecutionMode)
+		require.Equal(t, subagentbatch.ExecutionModeBackground, event.ExecutionMode)
 		require.Equal(t, subagentbatch.BatchCompleted, event.Status)
 		require.NotEmpty(t, event.ParentSessionID)
 		require.Equal(t, event.ParentSessionID, event.RootScopeID)
 		require.Equal(t, 1, event.CompletedCount)
 	case <-time.After(5 * time.Second):
-		t.Fatal("expected synchronous subagent terminal lifecycle projection")
+		t.Fatal("expected asynchronous subagent terminal lifecycle projection")
 	}
+
+	// 子任务真的经 scheduler 执行过：子提示词来自 prompt builder，报告留在账本
+	// 控制面上（父会话通过 resume 路径取回）。
+	require.Len(t, provider.childRequests, 1)
+	childRequest := provider.childRequests[0]
+	require.NotEmpty(t, childRequest.Messages)
+	require.Equal(t, "system", childRequest.Messages[0].Role)
+	require.Contains(t, childRequest.Messages[0].Content, "Assigned goal: Inspect the latest logs and report the root cause.")
 }
 
 func TestDecodeSubagentTasksReadsRoutingFields(t *testing.T) {
@@ -3598,9 +3660,18 @@ func TestReActLoop_Run_SpawnSubagentsChildUsesPromptBuilder(t *testing.T) {
 		MaxConcurrent: 2,
 		MaxDepth:      1,
 	}))
+	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "batches.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = batchStore.Close() })
+	agent.SetSubagentBatchCoordinator(NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
+		Store:     batchStore,
+		Scheduler: agent.GetSubagentScheduler(),
+	}))
 
 	llmRuntime := llm.NewLLMRuntime(nil)
-	provider := &SequenceLLMProvider{
+	baseProvider := &SequenceLLMProvider{
 		name: "test-provider",
 		responses: []*llm.LLMResponse{
 			{
@@ -3624,8 +3695,13 @@ func TestReActLoop_Run_SpawnSubagentsChildUsesPromptBuilder(t *testing.T) {
 					},
 				},
 			},
-			{Content: "Child summary.", Model: "test-model"},
 			{Content: "Parent final.", Model: "test-model"},
+		},
+	}
+	provider := &roleRoutingLLMProvider{
+		SequenceLLMProvider: baseProvider,
+		childResponses: []*llm.LLMResponse{
+			{Content: "Child summary.", Model: "test-model"},
 		},
 	}
 	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
@@ -3635,11 +3711,19 @@ func TestReActLoop_Run_SpawnSubagentsChildUsesPromptBuilder(t *testing.T) {
 		EnableThought:   true,
 		EnableToolCalls: true,
 	})
-	_, err := loop.Run(context.Background(), "Find the root cause.")
+	result, err := loop.Run(context.Background(), "Find the root cause.")
 	require.NoError(t, err)
-	require.Len(t, provider.requests, 3)
+	require.True(t, result.Success)
+	// 父 turn 不等子任务：两次父请求（派发 + 收尾）；子请求异步落到自己的队列。
+	require.Len(t, provider.requests, 2)
 
-	childRequest := provider.requests[1]
+	deadline := time.Now().Add(5 * time.Second)
+	for len(provider.childRequestSnapshot()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	childRequests := provider.childRequestSnapshot()
+	require.Len(t, childRequests, 1)
+	childRequest := childRequests[0]
 	require.NotEmpty(t, childRequest.Messages)
 	assert.Equal(t, "system", childRequest.Messages[0].Role)
 	assert.Contains(t, childRequest.Messages[0].Content, "read-only subagent")
@@ -5047,17 +5131,37 @@ func TestReActLoop_Run_EmitsRuntimeEvents(t *testing.T) {
 		mcpManager:  &MockMCPManager{},
 	}
 	bus := runtimeevents.NewBus()
-	var eventTypes []string
-	var traceIDs []string
+	// 异步派发后子任务在 detached worker 里发事件，订阅端必须自带同步。
+	var eventsMu sync.Mutex
+	type recordedEvent struct {
+		eventType string
+		traceID   string
+	}
+	var recorded []recordedEvent
 	bus.Subscribe("", func(event runtimeevents.Event) {
-		eventTypes = append(eventTypes, event.Type)
-		traceIDs = append(traceIDs, event.TraceID)
+		eventsMu.Lock()
+		recorded = append(recorded, recordedEvent{eventType: event.Type, traceID: event.TraceID})
+		eventsMu.Unlock()
 	})
 	agent.SetEventBus(bus)
 	agent.SetSubagentScheduler(NewSubagentScheduler(agent, SubagentSchedulerConfig{MaxConcurrent: 2, MaxDepth: 1}))
+	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "batches.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = batchStore.Close() })
+	terminal := make(chan BatchTerminalLifecycle, 1)
+	agent.SetSubagentBatchCoordinator(NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
+		Store:     batchStore,
+		Scheduler: agent.GetSubagentScheduler(),
+	}))
+	agent.SetBatchLifecycleProjector(func(_ context.Context, event BatchTerminalLifecycle) error {
+		terminal <- event
+		return nil
+	})
 
 	llmRuntime := llm.NewLLMRuntime(nil)
-	provider := &SequenceLLMProvider{
+	baseProvider := &SequenceLLMProvider{
 		name: "test-provider",
 		responses: []*llm.LLMResponse{
 			{
@@ -5078,8 +5182,13 @@ func TestReActLoop_Run_EmitsRuntimeEvents(t *testing.T) {
 					},
 				},
 			},
-			{Content: "The logs show a parser panic.", Model: "test-model"},
 			{Content: "Final answer from parent.", Model: "test-model"},
+		},
+	}
+	provider := &roleRoutingLLMProvider{
+		SequenceLLMProvider: baseProvider,
+		childResponses: []*llm.LLMResponse{
+			{Content: "The logs show a parser panic.", Model: "test-model"},
 		},
 	}
 	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
@@ -5089,18 +5198,45 @@ func TestReActLoop_Run_EmitsRuntimeEvents(t *testing.T) {
 		EnableThought:   true,
 		EnableToolCalls: true,
 	})
-	_, err := loop.Run(context.Background(), "Find the root cause.")
+	result, err := loop.Run(context.Background(), "Find the root cause.")
 	require.NoError(t, err)
+	require.True(t, result.Success)
 
-	assert.Contains(t, eventTypes, "tool.requested")
-	assert.Contains(t, eventTypes, "subagent.batch.started")
-	assert.Contains(t, eventTypes, "subagent.started")
-	assert.Contains(t, eventTypes, "subagent.completed")
-	assert.Contains(t, eventTypes, "tool.reduced")
-	for _, traceID := range traceIDs {
+	// 派发立即返回，批次在 detached worker 里跑完并投影终态：先等终态再断言，
+	// 否则事件仍在并发写入。
+	select {
+	case event := <-terminal:
+		require.Equal(t, subagentbatch.ExecutionModeBackground, event.ExecutionMode)
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected the detached batch to reach a terminal projection")
+	}
+
+	eventsMu.Lock()
+	collected := append([]recordedEvent(nil), recorded...)
+	eventsMu.Unlock()
+
+	var collectedTypes []string
+	var parentTurnTraceIDs []string
+	for _, event := range collected {
+		collectedTypes = append(collectedTypes, event.eventType)
+		// 只对父 turn 自己发的里程碑断言 trace 关联：detached worker 里的子任务
+		// 事件属于批次自己的 trace 上下文，不由本用例约束。
+		switch event.eventType {
+		case "tool.requested", "tool.completed", "tool.reduced", "subagent.batch.created":
+			parentTurnTraceIDs = append(parentTurnTraceIDs, event.traceID)
+		}
+	}
+	assert.Contains(t, collectedTypes, "tool.requested")
+	assert.Contains(t, collectedTypes, "subagent.batch.created")
+	assert.Contains(t, collectedTypes, "subagent.batch.started")
+	assert.Contains(t, collectedTypes, "subagent.started")
+	assert.Contains(t, collectedTypes, "subagent.completed")
+	assert.Contains(t, collectedTypes, "tool.reduced")
+	require.NotEmpty(t, parentTurnTraceIDs)
+	for _, traceID := range parentTurnTraceIDs {
 		assert.NotEmpty(t, traceID)
 	}
-	assert.True(t, allEqualStrings(traceIDs))
+	assert.True(t, allEqualStrings(parentTurnTraceIDs))
 }
 
 func TestReActLoop_Run_ReadOnlyPolicyBlocksWriteLikeTools(t *testing.T) {

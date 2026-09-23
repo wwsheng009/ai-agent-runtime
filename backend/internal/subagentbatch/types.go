@@ -28,17 +28,22 @@ const SchemaVersion = "subagent.batch.v1"
 type ExecutionMode string
 
 const (
-	// ExecutionModeWait preserves the legacy synchronous semantics: the parent
-	// tool call blocks until the whole batch returns full reports.
+	// ExecutionModeWait is deprecated (P3 / C4-1). The constant is kept so
+	// legacy persisted rows and old callers still parse, but it no longer
+	// selects an execution path: spawn_subagents never blocks the parent turn
+	// inline, so every dispatch is asynchronous.
+	//
+	// Deprecated: the parent tool call no longer waits for the batch.
 	ExecutionModeWait ExecutionMode = "wait"
 	// ExecutionModeBackground returns a batch handle immediately; child
 	// lifecycle is delivered later through durable records and supervision
-	// wake-up.
+	// wake-up. Since P3 / C4-1 this is the only execution semantics.
 	ExecutionModeBackground ExecutionMode = "background"
 )
 
-// ParseExecutionMode validates and normalizes a mode string; empty defaults to
-// wait (compatibility).
+// ParseExecutionMode validates and normalizes a mode string; empty still maps to
+// the deprecated wait value so legacy callers parse unchanged (AC-P3-1b). The
+// parsed value is no longer consulted for dispatch.
 func ParseExecutionMode(value string) (ExecutionMode, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", "wait", "sync":
@@ -46,7 +51,24 @@ func ParseExecutionMode(value string) (ExecutionMode, error) {
 	case "background", "async":
 		return ExecutionModeBackground, nil
 	default:
-		return "", fmt.Errorf("subagentbatch: invalid execution_mode %q (expected wait|background)", value)
+		return "", fmt.Errorf("subagentbatch: invalid execution_mode %q (expected background; the deprecated wait|sync stay accepted)", value)
+	}
+}
+
+// LegacyExecutionModeNotice returns the deprecation notice for an explicitly
+// supplied legacy execution_mode value ("wait"/"sync"), or "" when the caller
+// omitted the field or already uses the single asynchronous semantics.
+//
+// P3 / C4-1 removed the inline blocking dispatch: the legacy values stay
+// readable (AC-P3-1b) but no longer change behaviour, so a caller must be told
+// once per call instead of being silently reinterpreted.
+func LegacyExecutionModeNotice(value string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	switch trimmed {
+	case "wait", "sync":
+		return fmt.Sprintf("execution_mode=%q is deprecated and no longer blocks: spawn_subagents always dispatches a background batch and returns a handle, and lifecycle updates arrive through supervision resume", trimmed)
+	default:
+		return ""
 	}
 }
 

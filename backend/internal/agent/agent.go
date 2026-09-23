@@ -308,8 +308,9 @@ func (a *Agent) SetSubagentScheduler(scheduler *SubagentScheduler) {
 }
 
 // SetSubagentBackgroundEnabled toggles the durable background batch feature
-// flag. When disabled, spawn_subagents requests with execution_mode=background
-// fall back to the synchronous wait path (compatibility/rollback).
+// flag. Since P3 / C4-1 the blocking path no longer exists, so disabling it
+// makes spawn_subagents fail with a model-visible error instead of silently
+// blocking the parent turn.
 func (a *Agent) SetSubagentBackgroundEnabled(enabled bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

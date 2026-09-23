@@ -10,36 +10,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 )
 
-func TestWaitBatchTerminalLifecycleClassifiesTerminalStates(t *testing.T) {
-	lifecycle := waitBatchTerminalLifecycle(
-		"batch-wait-1",
-		"parent-1",
-		"tool-1",
-		"trace-1",
-		2,
-		[]SubagentResult{
-			{ID: "ok", Success: true},
-			{ID: "bad", Success: false, Error: "provider returned 500"},
-		},
-		nil,
-		context.Background(),
-	)
-	if lifecycle.Status != subagentbatch.BatchFailed {
-		t.Fatalf("status = %s, want failed", lifecycle.Status)
-	}
-	if lifecycle.CompletedCount != 1 || lifecycle.FailedCount != 1 {
-		t.Fatalf("counts = completed:%d failed:%d, want 1/1", lifecycle.CompletedCount, lifecycle.FailedCount)
-	}
-	if lifecycle.EventType != "subagent.batch.failed" {
-		t.Fatalf("event type = %q, want subagent.batch.failed", lifecycle.EventType)
-	}
-
-	timedOut := waitBatchTerminalLifecycle("batch-wait-2", "parent-1", "tool-1", "trace-1", 1, nil, context.DeadlineExceeded, context.Background())
-	if timedOut.Status != subagentbatch.BatchTimedOut || timedOut.ErrorClass != "timeout" {
-		t.Fatalf("deadline lifecycle = %+v, want timed_out/timeout", timedOut)
-	}
-}
-
 func TestSubagentBatchCoordinatorLifecycleProjectionIsBestEffort(t *testing.T) {
 	store := testStore(t)
 	exec := &fakeExecutor{

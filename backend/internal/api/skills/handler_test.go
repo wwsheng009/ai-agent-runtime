@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -305,6 +306,9 @@ type testLLMProvider struct {
 type testSequenceLLMProvider struct {
 	name      string
 	responses []*llm.LLMResponse
+	// mu 保护 callCount：spawn_subagents 异步派发后，detached 子任务与父 turn
+	// 可能并发调用同一个 provider 实例（C4-1）。
+	mu        sync.Mutex
 	callCount int
 }
 
@@ -354,6 +358,8 @@ func (p *testLLMProvider) ResolveModelCapability(requestedModel string) (string,
 func (p *testSequenceLLMProvider) Name() string { return p.name }
 
 func (p *testSequenceLLMProvider) Call(ctx context.Context, req *llm.LLMRequest) (*llm.LLMResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.callCount >= len(p.responses) {
 		return &llm.LLMResponse{Content: "done", Model: p.name}, nil
 	}
@@ -1336,17 +1342,22 @@ func TestAgentChat_EnableReAct_ExposesSubagentSummary(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 	result := payload["result"].(map[string]interface{})
 	subagentSummary := result["subagent_summary"].(map[string]interface{})
+	// C4-1：spawn_subagents 异步派发后立即返回 batch 句柄，本 turn 拿不到子任务报告，
+	// 摘要只报告"已派发批次/任务数"；successful/roles 等终态字段由批次终态投递
+	// （resume / 监督通道）在后续 turn 的观测里补齐。
 	assert.Equal(t, float64(1), subagentSummary["batches"])
-	assert.Equal(t, float64(1), subagentSummary["count"])
-	assert.Equal(t, float64(1), subagentSummary["successful"])
-	assert.Contains(t, subagentSummary["roles"].([]interface{}), "researcher")
+	assert.Equal(t, float64(1), subagentSummary["dispatched"])
+	assert.Equal(t, float64(0), subagentSummary["count"])
+	assert.Equal(t, float64(0), subagentSummary["successful"])
+	assert.Empty(t, subagentSummary["roles"])
 
 	orchestration := result["orchestration"].(map[string]interface{})
 	observationSummary := orchestration["observation_summary"].(map[string]interface{})
 	assert.Equal(t, float64(1), observationSummary["subagent_batches"])
-	assert.Equal(t, float64(1), observationSummary["subagent_count"])
-	assert.Equal(t, float64(1), observationSummary["subagent_successful"])
-	assert.Contains(t, observationSummary["subagent_roles"].([]interface{}), "researcher")
+	assert.Equal(t, float64(1), observationSummary["subagent_dispatched"])
+	assert.Equal(t, float64(0), observationSummary["subagent_count"])
+	assert.Equal(t, float64(0), observationSummary["subagent_successful"])
+	assert.Empty(t, observationSummary["subagent_roles"])
 }
 
 func TestObservationSubagentReportsAcceptsCompactParentProjection(t *testing.T) {

@@ -5819,6 +5819,7 @@ func summarizeObservations(observations []types.Observation) map[string]interfac
 		"average_duration_ms":               int64(0),
 		"subagent_batches":                  0,
 		"subagent_count":                    0,
+		"subagent_dispatched":               0,
 		"subagent_successful":               0,
 		"subagent_failed":                   0,
 		"subagent_roles":                    []string{},
@@ -5901,6 +5902,22 @@ func summarizeObservations(observations []types.Observation) map[string]interfac
 		if _, ok := observation.GetMetric("subagent_reports"); ok {
 			summary["subagent_batches"] = summary["subagent_batches"].(int) + 1
 		}
+		// C4-1：异步派发 turn 只带回 batch 句柄（没有子任务报告），这里统计"已派发"，
+		// 让父会话在 turn 结束时仍能看到派发事实；successful/roles 等终态字段由
+		// 批次终态投递（resume / 监督通道）在后续 turn 的观测里补齐。
+		if batchID, ok := observation.GetMetric("subagent_batch_id"); ok {
+			if id, _ := batchID.(string); id != "" {
+				summary["subagent_batches"] = summary["subagent_batches"].(int) + 1
+				if dispatched, ok := observation.GetMetric("subagent_count"); ok {
+					switch n := dispatched.(type) {
+					case int:
+						summary["subagent_dispatched"] = summary["subagent_dispatched"].(int) + n
+					case float64:
+						summary["subagent_dispatched"] = summary["subagent_dispatched"].(int) + int(n)
+					}
+				}
+			}
+		}
 	}
 	summary["tools"] = tools
 	summary["failed_tools"] = failedTools
@@ -5917,12 +5934,14 @@ func summarizeObservations(observations []types.Observation) map[string]interfac
 func summarizeSubagents(observations []types.Observation) map[string]interface{} {
 	observationSummary := summarizeObservations(observations)
 	count, _ := observationSummary["subagent_count"].(int)
-	if count == 0 {
+	dispatched, _ := observationSummary["subagent_dispatched"].(int)
+	if count == 0 && dispatched == 0 {
 		return nil
 	}
 	return map[string]interface{}{
 		"batches":                  observationSummary["subagent_batches"],
 		"count":                    observationSummary["subagent_count"],
+		"dispatched":               observationSummary["subagent_dispatched"],
 		"successful":               observationSummary["subagent_successful"],
 		"failed":                   observationSummary["subagent_failed"],
 		"roles":                    observationSummary["subagent_roles"],

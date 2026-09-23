@@ -7,11 +7,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentresult"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -190,7 +192,11 @@ func TestSummarizeSubagentReportsForParentTruncatedSummaryKeepsDereferencePointe
 	require.Greater(t, projection["summary_runes"], 0)
 }
 
-func TestSpawnSubagentsLargeResultUsesBoundedParentMetadataAndArtifact(t *testing.T) {
+// C4-1: spawn_subagents 只有异步语义后，父会话拿到的是 batch 句柄，子任务的大段
+// 输出不再经父工具消息回流（旧断言"父工具消息被截断 + artifact 归档"随内联阻塞
+// 分支一起删除）。子报告回到父会话时的预算裁剪由
+// summarizeSubagentReportsForParent 负责，见本文件上半部分的单元用例。
+func TestSpawnSubagentsLargeResultStaysOutOfParentContext(t *testing.T) {
 	artifactPath := filepath.Join(t.TempDir(), "artifacts.db")
 	agent := &Agent{
 		config: &Config{
@@ -211,10 +217,24 @@ func TestSpawnSubagentsLargeResultUsesBoundedParentMetadataAndArtifact(t *testin
 	t.Cleanup(func() {
 		require.NoError(t, agent.Close())
 	})
+	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
+		Path: filepath.Join(t.TempDir(), "batches.db"),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = batchStore.Close() })
+	terminal := make(chan BatchTerminalLifecycle, 1)
+	agent.SetSubagentBatchCoordinator(NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
+		Store:     batchStore,
+		Scheduler: agent.GetSubagentScheduler(),
+	}))
+	agent.SetBatchLifecycleProjector(func(_ context.Context, event BatchTerminalLifecycle) error {
+		terminal <- event
+		return nil
+	})
 
 	largeChildOutput := "CHILD_OUTPUT_START\n" + strings.Repeat("evidence line with detailed context\n", 900) + "CHILD_OUTPUT_END"
 	runtime := llm.NewLLMRuntime(nil)
-	provider := &SequenceLLMProvider{
+	baseProvider := &SequenceLLMProvider{
 		name: "test-provider",
 		responses: []*llm.LLMResponse{
 			{
@@ -236,8 +256,13 @@ func TestSpawnSubagentsLargeResultUsesBoundedParentMetadataAndArtifact(t *testin
 					},
 				},
 			},
-			{Content: largeChildOutput, Model: "test-model"},
 			{Content: "Parent final.", Model: "test-model"},
+		},
+	}
+	provider := &roleRoutingLLMProvider{
+		SequenceLLMProvider: baseProvider,
+		childResponses: []*llm.LLMResponse{
+			{Content: largeChildOutput, Model: "test-model"},
 		},
 	}
 	require.NoError(t, runtime.RegisterProvider("test-provider", provider))
@@ -250,31 +275,33 @@ func TestSpawnSubagentsLargeResultUsesBoundedParentMetadataAndArtifact(t *testin
 	result, err := loop.Run(context.Background(), "Inspect the large child result.")
 	require.NoError(t, err)
 	require.True(t, result.Success)
-	require.Len(t, provider.requests, 3)
+	// 父 turn 不等子任务：派发 + 收尾两次父请求。
+	require.Len(t, provider.requests, 2)
 
 	var toolMessage *types.Message
-	for index := range provider.requests[2].Messages {
-		message := &provider.requests[2].Messages[index]
+	for index := range provider.requests[1].Messages {
+		message := &provider.requests[1].Messages[index]
 		if message.Role == "tool" {
 			toolMessage = message
 			break
 		}
 	}
 	require.NotNil(t, toolMessage)
-	require.Contains(t, toolMessage.Content, "output truncated for history safety")
+	// 父上下文只留句柄：大输出既不进父消息，也不进父 metadata。
 	require.LessOrEqual(t, len(toolMessage.Content), 12*1024)
-	require.Contains(t, toolMessage.Content, "Full raw output artifact_id: art_")
+	require.Contains(t, toolMessage.Content, `"batch_id"`)
+	require.Contains(t, toolMessage.Content, "continue_parent_turn")
+	require.NotContains(t, toolMessage.Content, "CHILD_OUTPUT_END")
+	require.NotContains(t, toolMessage.Content, "evidence line with detailed context")
+	require.NotContains(t, toolMessage.Metadata, "subagent_reports")
 
-	compactReports, err := json.Marshal(toolMessage.Metadata["subagent_reports"])
-	require.NoError(t, err)
-	require.LessOrEqual(t, len(compactReports), defaultSubagentParentMetadataBudgetBytes)
-	require.NotContains(t, string(compactReports), "CHILD_OUTPUT_END")
-	require.Equal(t, true, toolMessage.Metadata["subagent_reports_truncated"])
-
-	artifactID, _ := toolMessage.Metadata["subagent_reports_artifact_id"].(string)
-	require.NotEmpty(t, artifactID)
-	record, err := agent.GetArtifactStore().Get(context.Background(), artifactID)
-	require.NoError(t, err)
-	require.NotNil(t, record)
-	require.Contains(t, record.Content, "CHILD_OUTPUT_END")
+	// 子任务照常跑完：大输出由子会话自己的输出通道处理，父侧只留句柄。
+	select {
+	case event := <-terminal:
+		require.Equal(t, subagentbatch.BatchCompleted, event.Status)
+		require.Equal(t, 1, event.CompletedCount)
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected the detached batch to reach a terminal projection")
+	}
+	require.Len(t, provider.childRequestSnapshot(), 1)
 }
