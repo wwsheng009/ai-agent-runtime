@@ -214,37 +214,51 @@ func matchChatExportFormatToken(token string) (chatExportFormat, bool) {
 // chatExportFormatOption 描述一种导出格式在交互菜单里的呈现。编号菜单与
 // fullscreen 选择器共用同一顺序（1-based 编号 == 切片索引+1），避免两处漂移。
 type chatExportFormatOption struct {
-	Format       chatExportFormat
-	MenuLabel    string
+	Format    chatExportFormat
+	MenuLabel string
+	// PickerDetail 是选择器列表行右侧的一行简述。列表行的 detail 列宽是
+	// min(32, width/3)（见 ui.renderFullScreenListItem），超出即被 "…" 截断，
+	// 因此这里必须控制在 chatExportPickerDetailMaxWidth 以内。
 	PickerDetail string
-	SearchText   string
+	// PickerPreview 是选中行下方预览区的完整说明：预览区按终端宽度折行渲染，
+	// 承载 PickerDetail 放不下的信息，保证选择界面不会丢掉格式语义。
+	PickerPreview string
+	SearchText    string
 }
+
+// chatExportPickerDetailMaxWidth 是 PickerDetail 的显示宽度上限。80 列终端下
+// detail 列只有 width/3 = 26 格，超过就会在行内出现 "…" 截断。
+const chatExportPickerDetailMaxWidth = 26
 
 func chatExportFormatOptions() []chatExportFormatOption {
 	return []chatExportFormatOption{
 		{
-			Format:       chatExportFormatFull,
-			MenuLabel:    "完整 JSON（包含 metadata、tool_calls、tool 结果等）",
-			PickerDetail: "完整 JSON（含消息、工具调用与结果）",
-			SearchText:   "full json 完整",
+			Format:        chatExportFormatFull,
+			MenuLabel:     "完整 JSON（包含 metadata、tool_calls、tool 结果等）",
+			PickerDetail:  "完整 JSON（全字段）",
+			PickerPreview: "完整 JSON：messages + metadata + tool_calls + tool 结果全量导出，适合归档或程序处理",
+			SearchText:    "full json 完整",
 		},
 		{
-			Format:       chatExportFormatBody,
-			MenuLabel:    "正文 Markdown（仅用户/助手正文）",
-			PickerDetail: "纯文本正文（不含工具链）",
-			SearchText:   "body text markdown 正文",
+			Format:        chatExportFormatBody,
+			MenuLabel:     "正文 Markdown（仅用户/助手正文）",
+			PickerDetail:  "纯正文（无工具链）",
+			PickerPreview: "纯正文 Markdown：仅导出用户/助手正文，不含工具调用与结果",
+			SearchText:    "body text markdown 正文",
 		},
 		{
-			Format:       chatExportFormatMarkdownTools,
-			MenuLabel:    "Markdown + 工具调用（工具名与输入参数）",
-			PickerDetail: "Markdown 正文 + 工具调用名称与输入参数",
-			SearchText:   "tools md-tools markdown 工具 调用 参数 输入",
+			Format:        chatExportFormatMarkdownTools,
+			MenuLabel:     "Markdown + 工具调用（工具名与输入参数）",
+			PickerDetail:  "正文 + 工具调用",
+			PickerPreview: "Markdown 正文 + 工具调用：正文后追加 #### Tool Calls，含工具名、call id 与输入参数 JSON",
+			SearchText:    "tools md-tools markdown 工具 调用 参数 输入",
 		},
 		{
-			Format:       chatExportFormatMarkdownTrace,
-			MenuLabel:    "Markdown + 工具调用与结果（输入/输出）",
-			PickerDetail: "Markdown 正文 + 工具调用输入与输出结果",
-			SearchText:   "trace md-trace markdown 工具 调用 结果 输入 输出",
+			Format:        chatExportFormatMarkdownTrace,
+			MenuLabel:     "Markdown + 工具调用与结果（输入/输出）",
+			PickerDetail:  "正文 + 工具调用与结果",
+			PickerPreview: "Markdown 正文 + 工具调用与结果：在 md-tools 基础上按 tool_call_id 内联输出，单条输出超过 32KB 自动截断",
+			SearchText:    "trace md-trace markdown 工具 调用 结果 输入 输出",
 		},
 	}
 }

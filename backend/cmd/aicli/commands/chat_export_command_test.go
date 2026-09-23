@@ -14,6 +14,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -457,6 +458,18 @@ func TestChatExportFormatOptionsMenuOrder(t *testing.T) {
 		if strings.TrimSpace(options[index].MenuLabel) == "" || strings.TrimSpace(options[index].PickerDetail) == "" {
 			t.Fatalf("options[%d] must have both a menu label and a picker detail", index)
 		}
+		// 行内 detail 列宽上限（min(32, width/3)）：超出就会在选择器行里被 "…" 截断。
+		if got := ui.DisplayWidth(options[index].PickerDetail); got > chatExportPickerDetailMaxWidth {
+			t.Fatalf("options[%d] picker detail width = %d, want <= %d (%q)", index, got, chatExportPickerDetailMaxWidth, options[index].PickerDetail)
+		}
+		// 行内放不下的完整说明必须落在预览区，且比行内简述更有信息量。
+		preview := strings.TrimSpace(options[index].PickerPreview)
+		if preview == "" {
+			t.Fatalf("options[%d] must carry a full picker preview", index)
+		}
+		if ui.DisplayWidth(preview) <= ui.DisplayWidth(options[index].PickerDetail) {
+			t.Fatalf("options[%d] preview %q must be more specific than detail %q", index, preview, options[index].PickerDetail)
+		}
 		if mapped, ok := chatExportFormatByMenuChoice(strconv.Itoa(index+1), options); !ok || mapped != format {
 			t.Fatalf("menu choice %d mapped to %q ok=%v", index+1, mapped, ok)
 		}
@@ -470,6 +483,36 @@ func TestChatExportFormatOptionsMenuOrder(t *testing.T) {
 	for _, format := range []chatExportFormat{chatExportFormatFull, chatExportFormatMarkdownTools, chatExportFormatMarkdownTrace} {
 		if !chatExportFormatReportsToolStats(format) {
 			t.Fatalf("%q must report tool stats", format)
+		}
+	}
+}
+
+func TestBuildExportFormatFullScreenItemsKeepsFullPreview(t *testing.T) {
+	options := chatExportFormatOptions()
+	items := buildExportFormatFullScreenItems(options)
+	if len(items) != len(options) {
+		t.Fatalf("picker items = %d, want %d", len(items), len(options))
+	}
+	for index, item := range items {
+		option := options[index]
+		if item.Title != string(option.Format) {
+			t.Fatalf("items[%d].Title = %q, want %q", index, item.Title, option.Format)
+		}
+		// 行内简述不截断，完整语义在预览区（选中行下方按宽度折行显示）。
+		if item.Detail != option.PickerDetail {
+			t.Fatalf("items[%d].Detail = %q, want %q", index, item.Detail, option.PickerDetail)
+		}
+		if got := ui.DisplayWidth(item.Detail); got > chatExportPickerDetailMaxWidth {
+			t.Fatalf("items[%d].Detail width = %d, want <= %d", index, got, chatExportPickerDetailMaxWidth)
+		}
+		if item.Preview != option.PickerPreview {
+			t.Fatalf("items[%d].Preview = %q, want %q", index, item.Preview, option.PickerPreview)
+		}
+		if strings.TrimSpace(item.Preview) == "" {
+			t.Fatalf("items[%d] must keep the full picker preview", index)
+		}
+		if strings.TrimSpace(item.SearchText) == "" {
+			t.Fatalf("items[%d] must stay searchable", index)
 		}
 	}
 }

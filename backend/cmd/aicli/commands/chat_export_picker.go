@@ -117,14 +117,7 @@ func openChatExportPicker(session *ChatSession, _ ExportPickerRequest) {
 	// Stage 2: pick the export format (same lease, mirroring backtrack mode).
 	// 格式列表与 legacy 编号菜单共用 chatExportFormatOptions，顺序即索引。
 	formatOptions := chatExportFormatOptions()
-	formatItems := make([]ui.FullScreenListItem, 0, len(formatOptions))
-	for _, option := range formatOptions {
-		formatItems = append(formatItems, ui.FullScreenListItem{
-			Title:      string(option.Format),
-			Detail:     option.PickerDetail,
-			SearchText: option.SearchText,
-		})
-	}
+	formatItems := buildExportFormatFullScreenItems(formatOptions)
 	formatResult, formatErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
 		Title:        "选择导出格式",
 		Subtitle:     "Enter 确认 · Esc 取消",
@@ -176,6 +169,25 @@ func closeExportPickerLease(session *ChatSession, lease ui.ScreenLease) {
 	_ = session.Interaction.postUIAction(ui.CloseExportPicker{LeaseID: lease.ID()})
 	_ = lease.Release(context.Background())
 	session.Interaction.waitUIActorIdleBounded("close export picker")
+}
+
+// buildExportFormatFullScreenItems projects the shared format options into
+// picker rows, index-aligned with options (chatExportFormatOptions order).
+//
+// 列表行右侧的 detail 列宽被 ui 限制为 min(32, width/3)，因此行内只放一行
+// 简述；完整说明放 Preview：预览区按终端宽度折行渲染，选中任意格式都能读到
+// 未被 "…" 截断的语义（含产物形式与 32KB 截断等约束）。
+func buildExportFormatFullScreenItems(options []chatExportFormatOption) []ui.FullScreenListItem {
+	items := make([]ui.FullScreenListItem, 0, len(options))
+	for _, option := range options {
+		items = append(items, ui.FullScreenListItem{
+			Title:      string(option.Format),
+			Detail:     option.PickerDetail,
+			Preview:    option.PickerPreview,
+			SearchText: option.SearchText,
+		})
+	}
+	return items
 }
 
 // buildExportSessionFullScreenItems builds export rows for the session picker.
