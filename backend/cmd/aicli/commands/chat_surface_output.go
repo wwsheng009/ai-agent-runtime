@@ -368,6 +368,39 @@ func beginDirectInteractiveOutput(session *ChatSession) {
 	newChatPromptOverlay(session).beginDirectOutput()
 }
 
+// presentStartupInteractiveComposer paints the composer (the `>` input row of
+// the main UI) *before* startup history delivery begins.
+//
+// Startup UX contract: the main UI — status bar, session row and composer —
+// must be on screen before history restore starts, so the user can type
+// immediately and a resumed session never looks stuck behind a chrome-only
+// screen. History is then delivered as content-plane/AppState input above the
+// pinned bottom pane, exactly like live streaming.
+//
+// This is safe by construction:
+//   - PrintPrompt is a no-op when the fixed-bottom surface is not attached yet;
+//     it deliberately leaves promptVisible untouched so a later attempt (the
+//     main loop's prepareInteractiveRead -> PrintPrompt) can still paint the
+//     composer instead of permanently suppressing it.
+//   - Once the composer is visible, PrintPrompt returns early, so the extra
+//     attempt cannot double-paint or move the cursor.
+//
+// Only unified interactive sessions are eligible: the legacy/plain path keeps
+// its documented "replay first, re-show the prompt after replay completes"
+// ordering because its replay renderer bills layout into the transcript.
+func presentStartupInteractiveComposer(session *ChatSession) {
+	if session == nil || session.Interaction == nil {
+		return
+	}
+	if session.NoInteractive || session.JSONOutput {
+		return
+	}
+	if !session.Interaction.UnifiedRendererEnabled() {
+		return
+	}
+	session.Interaction.PrintPrompt()
+}
+
 // unifiedDirectInteractiveOutput reports whether this session has crossed the
 // one-way TerminalSession ownership boundary. TerminalSession fields make the
 // failure mode explicit during teardown: losing Interaction must never revive

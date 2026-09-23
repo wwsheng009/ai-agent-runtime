@@ -1293,7 +1293,12 @@ func presentChatStartupSession(session *ChatSession, opts *chatCommandOptions, l
 		// a blank here (bypasses surface); printVisibleChatHistory settles debt
 		// then owns all content-plane spacing via RenderSupplement / gaps.
 		beginDirectInteractiveOutput(session)
+		// 主界面优先：composer 先于历史回放落地，用户立即可输入。
+		presentStartupInteractiveComposer(session)
 		printVisibleChatHistory(session, "已加载历史会话")
+		// 历史投递走 ReplaceTranscriptAction（整帧替换 Scene），会重置底部面板
+		// 状态；回放结束后重新钉住 composer，保证输入行不被历史帧挤掉。
+		presentStartupInteractiveComposer(session)
 		return
 	}
 
@@ -1306,12 +1311,21 @@ func presentChatStartupSession(session *ChatSession, opts *chatCommandOptions, l
 		// TUI path: skip welcome/meta preamble, but still surface resume status +
 		// history so CLI resume matches in-chat `/resume` visibility.
 		beginDirectInteractiveOutput(session)
+		// 主界面优先：composer 先于 resume 历史/状态投递落地。
+		presentStartupInteractiveComposer(session)
 		printResumeSuccess(session)
+		// printResumeSuccess 内部会 seed 历史（同一次 ReplaceTranscript 投递），
+		// 因此这里同样需要重新钉住 composer。
+		presentStartupInteractiveComposer(session)
 		return
 	}
 	if hasHistory {
 		beginDirectInteractiveOutput(session)
+		// 主界面优先：composer 先于历史回放落地。
+		presentStartupInteractiveComposer(session)
 		printVisibleChatHistory(session, "已加载历史会话")
+		// 历史替换帧之后重新钉住 composer（同上）。
+		presentStartupInteractiveComposer(session)
 	}
 }
 

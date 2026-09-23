@@ -689,6 +689,9 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 		// 幂等重放：较早 unit 由 reconcile 的锚点插入 Scene，再请求统一帧；
 		// bridge 持有稳定身份，已经 seed 过的最新页不会重复渲染。
 		printVisibleChatHistory(session, "")
+		// 后台补页同样经 ReplaceTranscriptAction 投递，且发生在启动关键路径
+		// 之外；补帧后重新钉住 composer，避免补页把主界面输入行挤掉。
+		presentStartupInteractiveComposer(session)
 	}()
 }
 
