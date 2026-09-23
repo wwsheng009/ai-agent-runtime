@@ -117,8 +117,14 @@ func handleExportCommand(session *ChatSession, command string) bool {
 }
 
 func parseChatExportOptions(argument string) (chatExportOptions, error) {
+	return parseChatExportOptionFields(splitChatCommandFields(argument))
+}
+
+// parseChatExportOptionFields 是 /export 与顶层 `aicli export` 共用的选项解析：
+// 前者按空白/引号把命令参数切成 token，后者把 cobra flag 与位置参数拼成同一组
+// token。两条入口共用同一份格式映射、目标判定与报错文案，避免语义漂移。
+func parseChatExportOptionFields(fields []string) (chatExportOptions, error) {
 	opts := chatExportOptions{Format: chatExportFormatFull}
-	fields := splitChatCommandFields(argument)
 	for i := 0; i < len(fields); i++ {
 		token := strings.TrimSpace(fields[i])
 		if token == "" {

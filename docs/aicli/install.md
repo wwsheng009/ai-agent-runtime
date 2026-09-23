@@ -419,6 +419,12 @@ aicli chat --session session_xxx          # 兼容写法：加载指定会话
 aicli chat --list-sessions --session-state active --session-provider CODEX_04 --session-query runtime --session-limit 20
 aicli chat --image ./screenshot.png --prompt "describe this screenshot"
 
+# 会话导出（chat 内 /export 的顶层等价入口；失败返回非零退出码）
+aicli export                                    # 最近一次会话 → 完整 JSON
+aicli export latest --trace                     # Markdown + 工具调用与结果
+aicli export latest --body --output ./session.md
+aicli export session_xxx --full --dir ./exports
+
 # chat 中查看当前请求会暴露哪些 functions / skills
 /functions 帮我生成一张图片
 
@@ -663,6 +669,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - 退出交互式 TUI 后，终端会显示 `aicli resume <session-id>`，便于下次继续当前会话；临时会话以及尚未落盘的空会话不会显示无效的恢复命令。
 - 交互式 `aicli resume` / `aicli chat --resume` / 会话内 `/resume` 恢复后**停在等待输入状态**：上一进程遗留的团队执行会被停放为 `paused`（保留可恢复的团队壳，任务标记 cancelled），不会在启动阶段重新拉起 team lifecycle loop 继续执行，也不会在首屏渲染前 drain supervision auto-wake；启动信息行会提示 `Resume:` 停放说明。headless / `--output json` 语义不变，遗留团队仍跑到终态。
 - `/export` 无参数时会弹出选择器；`--full` 生成完整 JSON，`--body` 只导出用户/助手正文，`--tools` 在 Markdown 中附带工具调用名称与输入参数，`--trace` 再附带按 `tool_call_id` 配对的输出结果（单个输出超过 32 KB 时截断并标记，完整内容用 `--full`）；可用 `--output <path>` 或 `--dir <dir>` 指定输出位置。
+- `aicli export [current|latest|<session-id>] [--full|--body|--tools|--trace] [--format <fmt>] [--output <path>|--dir <dir>] [--session-dir <dir>] [--user <id>]` 是 `/export` 的顶层等价入口，复用同一套导出实现与格式语义，适合脚本与 CI：目标缺省为 `latest`（顶层命令没有「当前会话」上下文，`current` 也落到 `latest`，实际导出的会话 ID 会打印在摘要里）；格式来源（`--full`/`--body`/`--tools`/`--trace`/`--format`/裸格式词）互相冲突时直接报参数错误，不会静默取最后一个。退出码：`0` 成功、`1` 参数错误、`2` 确定性错误（会话不存在、会话存储不可读、输出发布失败）——chat 内的 `/export` 出错仍返回 `0`，脚本请改用顶层命令判断成败。
 - `/debug export` / `/debug zip` 会把 `/debug display` 中“会话文件与目录”部分的 session file、chat/debug log、http/shell/images artifacts（兼容旧目录名 runtime-http/local-shell/generated-images）打包为 zip，并附带 `manifest.json`。SQLite 模式在同一读事务中生成只含当前 session 的一致性快照，包含已提交 WAL 内容但不会泄露其他会话，并同时打包当前会话引用的 canonical artifacts。
 - `spawn_team auto_start=true` 之后应使用 `wait_team` 等待持久 `team.completed` / `team.summary`；`wait_agent` / `read_agent_events` 面向 `spawn_agent` child session，不应拿 team member id 当 child session id。
 - `/shell` / `/cmd` 支持 `--output-bytes-cap <bytes>` 与 `--disable-output-cap`；默认使用检测到的用户 shell。危险命令仍会进入确认/权限流程。

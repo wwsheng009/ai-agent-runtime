@@ -395,6 +395,11 @@ func main() {
 		return cfg
 	}))
 
+	// export 子命令 — chat 内 /export 的顶层等价入口（完整 JSON / Markdown 导出）
+	rootCmd.AddCommand(commands.NewExportCommand(func() *config.Config {
+		return cfg
+	}))
+
 	// context 子命令
 	contextCmd := &cobra.Command{
 		Use:     "context",
