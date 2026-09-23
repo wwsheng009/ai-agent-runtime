@@ -2,6 +2,7 @@
 
 更新时间：2026-09-23
 状态：proposed（仅方案，未修改任何代码）
+实施进度：见执行方案 `docs/plan/supervised-turn-suspension-and-agent-task-control-implementation-plan-20260923.md` §13 实施注记（P0-前置–P3 已全部实施并验收闭环；本文件为冻结的设计稿 v5，不随实施过程更新）
 适用仓库：`E:\projects\ai\ai-agent-runtime`
 证据基线：2026-09-23 工作树只读走查（grep/view）+ 一次真实托管会话的 supervision 事件观察 + 参照实现走查（`E:\projects\ai\codex`，见 §13）
 审查方法：只读代码走查（按符号名定位）+ 与 `docs/plan/` 既有 128 份方案做覆盖比对，凡已有方案覆盖的条目只做差异标注，不重开方案
