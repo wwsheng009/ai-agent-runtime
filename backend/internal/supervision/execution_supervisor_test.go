@@ -376,14 +376,20 @@ func TestExecutionSupervisor_OutboxRedeliveryAfterCrashWindow(t *testing.T) {
 	require.Len(t, pending, 0)
 }
 
-func TestExecutionSupervisor_ProgressStalledDecision(t *testing.T) {
+// Change #1 / AC-P0-1a + AC-P0-1c: crossing the soft threshold must report to
+// the parent (critical + action_required) instead of cancelling the child, and
+// only an exhausted decision window may fire the fallback cancel.
+func TestExecutionSupervisor_ProgressStallEscalatesBeforeCancelling(t *testing.T) {
 	interrupter := &fakeInterrupter{}
-	supervisor, store := newTestExecutionSupervisor(t, "sup-stalled", ExecutionSupervisorConfig{
-		Mode:                    "enforce",
-		DefaultExecutionTimeout: 1 * time.Hour,
-		DefaultProgressTimeout:  5 * time.Second,
-		DefaultApprovalTimeout:  1 * time.Hour,
-		DefaultCancelGrace:      15 * time.Second,
+	supervisor, store := newTestExecutionSupervisor(t, "sup-escalate-first", ExecutionSupervisorConfig{
+		Mode:                      "enforce",
+		DefaultExecutionTimeout:   1 * time.Hour,
+		DefaultProgressTimeout:    5 * time.Second,
+		DefaultApprovalTimeout:    1 * time.Hour,
+		DefaultCancelGrace:        15 * time.Second,
+		StallEscalationMultiplier: 2,
+		DecisionWindow:            10 * time.Second,
+		DecisionWindowMax:         20 * time.Second,
 	}, interrupter, nil)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
@@ -392,30 +398,305 @@ func TestExecutionSupervisor_ProgressStalledDecision(t *testing.T) {
 	run, err := supervisor.StartRun(ctx, RunSpec{
 		RootSessionID:   "root-session",
 		ParentSessionID: "parent-session",
-		SessionID:       "child-1",
+		SessionID:       "child-escalate",
 	})
 	require.NoError(t, err)
 
-	// Activity keeps the run healthy past the progress deadline.
-	supervisor.Now = func() time.Time { return now.Add(4 * time.Second) }
-	_, err = supervisor.RecordProgress(ctx, RunProgressEvent{RunID: run.RunID, Kind: "tool_call_end"})
-	require.NoError(t, err)
+	// Soft threshold crossed (progress deadline at +5s) but still inside the
+	// piggyback band (+5s..+10s): nothing happens, the run keeps running.
+	supervisor.Now = func() time.Time { return now.Add(6 * time.Second) }
 	decisions, err := supervisor.ScanOnce(ctx)
 	require.NoError(t, err)
 	require.Empty(t, decisions)
+	got, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusQueued, got.Status)
+	require.Nil(t, got.DecisionWindowUntil)
 
-	// No progress for > 5s -> stalled -> interrupt.
+	// Escalation instant (deadline + 1x soft = +10s): report, never cancel.
 	supervisor.Now = func() time.Time { return now.Add(10 * time.Second) }
 	decisions, err = supervisor.ScanOnce(ctx)
 	require.NoError(t, err)
 	require.Len(t, decisions, 1)
 	require.Equal(t, "progress_stalled", decisions[0].Decision)
+	require.Equal(t, "escalated", decisions[0].ActionTaken)
+	require.Zero(t, interrupter.count(), "escalate-first never interrupts on report")
+
+	got, err = store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusQueued, got.Status, "the run keeps running while the parent decides")
+	require.NotNil(t, got.DecisionWindowUntil)
+	require.WithinDuration(t, now.Add(20*time.Second), *got.DecisionWindowUntil, time.Second)
+
+	notifications, err := store.ListNotifications(ctx, NotificationFilter{RootScopeID: "root-session"})
+	require.NoError(t, err)
+	require.Len(t, notifications, 1)
+	require.Equal(t, SeverityCritical, notifications[0].Severity)
+	require.Equal(t, "progress_stalled", notifications[0].EventType)
+	require.True(t, notifications[0].ActionRequired())
+
+	// Inside the decision window the ladder stays quiet: no re-report, no cancel.
+	supervisor.Now = func() time.Time { return now.Add(15 * time.Second) }
+	decisions, err = supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Empty(t, decisions)
+	require.Zero(t, interrupter.count())
+
+	// Window exhausted without a decision -> the fallback fires.
+	supervisor.Now = func() time.Time { return now.Add(21 * time.Second) }
+	decisions, err = supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, "progress_stalled", decisions[0].Decision)
+	require.Equal(t, "interrupted", decisions[0].ActionTaken)
+	require.Equal(t, 1, interrupter.count())
+
+	got, err = store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusCancelRequested, got.Status)
+	require.Equal(t, "decision_window_expired", got.CancelSource)
+}
+
+// Change #1 / AC-P0-1d: the hard execution deadline keeps its own branch above
+// the escalation ladder - it fires immediately, never waits for a decision, and
+// still projects the critical notification.
+func TestExecutionSupervisor_HardDeadlineBeatsEscalation(t *testing.T) {
+	interrupter := &fakeInterrupter{}
+	supervisor, store := newTestExecutionSupervisor(t, "sup-hard-deadline-first", ExecutionSupervisorConfig{
+		Mode:                      "enforce",
+		DefaultExecutionTimeout:   6 * time.Second,
+		DefaultProgressTimeout:    5 * time.Second,
+		DefaultApprovalTimeout:    1 * time.Hour,
+		DefaultCancelGrace:        15 * time.Second,
+		StallEscalationMultiplier: 2,
+		DecisionWindow:            10 * time.Second,
+		DecisionWindowMax:         20 * time.Second,
+	}, interrupter, nil)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	supervisor.Now = func() time.Time { return now }
+
+	run, err := supervisor.StartRun(ctx, RunSpec{
+		RootSessionID:   "root-session",
+		ParentSessionID: "parent-session",
+		SessionID:       "child-hard-deadline",
+	})
+	require.NoError(t, err)
+
+	// Past the hard deadline (and therefore also past the soft one): the hard
+	// branch wins and the run is cancelled in this very scan.
+	supervisor.Now = func() time.Time { return now.Add(7 * time.Second) }
+	decisions, err := supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, "execution_timed_out", decisions[0].Decision)
+	require.Equal(t, "interrupted", decisions[0].ActionTaken)
 	require.Equal(t, 1, interrupter.count())
 
 	got, err := store.GetExecutionRun(ctx, run.RunID)
 	require.NoError(t, err)
 	require.Equal(t, RunStatusCancelRequested, got.Status)
+	require.Equal(t, "execution_timed_out", got.CancelSource)
+	require.Nil(t, got.DecisionWindowUntil, "the hard branch never opens a decision window")
+
+	notifications, err := store.ListNotifications(ctx, NotificationFilter{RootScopeID: "root-session"})
+	require.NoError(t, err)
+	require.Len(t, notifications, 1)
+	require.Equal(t, SeverityCritical, notifications[0].Severity)
+	require.Equal(t, "execution_timed_out", notifications[0].EventType)
+}
+
+// Change #1 / AC-P0-1e (I8, design doc EC-A3): the decision window is measured
+// on the runnable clock. While the parent cannot be woken the window does not
+// burn down, but the wall-clock cap (progress deadline + DecisionWindowMax)
+// still bounds the deferral so the fallback stays decidable.
+func TestExecutionSupervisor_DecisionWindowUsesRunnableClock(t *testing.T) {
+	interrupter := &fakeInterrupter{}
+	supervisor, store := newTestExecutionSupervisor(t, "sup-runnable-clock", ExecutionSupervisorConfig{
+		Mode:                      "enforce",
+		DefaultExecutionTimeout:   1 * time.Hour,
+		DefaultProgressTimeout:    5 * time.Second,
+		DefaultApprovalTimeout:    1 * time.Hour,
+		DefaultCancelGrace:        15 * time.Second,
+		StallEscalationMultiplier: 2,
+		DecisionWindow:            10 * time.Second,
+		DecisionWindowMax:         20 * time.Second,
+	}, interrupter, nil)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	supervisor.Now = func() time.Time { return now }
+
+	// The parent is busy (user input / approval / compacting) for the whole test.
+	checks := 0
+	supervisor.ParentRunnable = func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool {
+		checks++
+		require.Equal(t, "root-session", rootScopeID)
+		require.Equal(t, "parent-session", parentSessionID)
+		return false
+	}
+
+	run, err := supervisor.StartRun(ctx, RunSpec{
+		RootSessionID:   "root-session",
+		ParentSessionID: "parent-session",
+		SessionID:       "child-runnable-clock",
+	})
+	require.NoError(t, err)
+
+	// Escalate at +10s -> window until +20s.
+	supervisor.Now = func() time.Time { return now.Add(10 * time.Second) }
+	decisions, err := supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, "escalated", decisions[0].ActionTaken)
+
+	// The window expired, but the parent could never be woken: no fallback yet,
+	// the window is pushed forward instead (bounded by the cap at +25s).
+	supervisor.Now = func() time.Time { return now.Add(21 * time.Second) }
+	decisions, err = supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Empty(t, decisions)
+	require.Zero(t, interrupter.count())
+
+	got, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusQueued, got.Status)
+	require.NotNil(t, got.DecisionWindowUntil)
+	require.WithinDuration(t, now.Add(25*time.Second), *got.DecisionWindowUntil, time.Second)
+	require.Positive(t, checks, "the ladder must consult the runnable clock")
+
+	// Past the wall-clock cap the deferral ends and the fallback fires, even
+	// though the parent is still not runnable.
+	supervisor.Now = func() time.Time { return now.Add(26 * time.Second) }
+	decisions, err = supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, "interrupted", decisions[0].ActionTaken)
+
+	got, err = store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusCancelRequested, got.Status)
+	require.Equal(t, "decision_window_expired", got.CancelSource)
+}
+
+// Change #1 ladder x change #2 hand-off (AC-P0-1b / EC-A5): once extend_deadline
+// moves the progress deadline the old window must not be allowed to cancel the
+// run - it is retired, and a second stall escalates afresh instead of firing a
+// fallback for a stall that was never reported.
+func TestExecutionSupervisor_ExtendedDeadlineRetiresStaleDecisionWindow(t *testing.T) {
+	interrupter := &fakeInterrupter{}
+	supervisor, store := newTestExecutionSupervisor(t, "sup-extend-retires-window", ExecutionSupervisorConfig{
+		Mode:                      "enforce",
+		DefaultExecutionTimeout:   1 * time.Hour,
+		DefaultProgressTimeout:    5 * time.Second,
+		DefaultApprovalTimeout:    1 * time.Hour,
+		DefaultCancelGrace:        15 * time.Second,
+		StallEscalationMultiplier: 2,
+		DecisionWindow:            10 * time.Second,
+		DecisionWindowMax:         20 * time.Second,
+	}, interrupter, nil)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	supervisor.Now = func() time.Time { return now }
+
+	run, err := supervisor.StartRun(ctx, RunSpec{
+		RootSessionID:   "root-session",
+		ParentSessionID: "parent-session",
+		SessionID:       "child-extend",
+	})
+	require.NoError(t, err)
+
+	supervisor.Now = func() time.Time { return now.Add(10 * time.Second) }
+	decisions, err := supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, "escalated", decisions[0].ActionTaken)
+
+	// The parent decides "keep waiting" and extends the progress deadline (the
+	// change #2 write path): the window outlives its stall.
+	extended, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	newDeadline := now.Add(1 * time.Hour)
+	updated := *extended
+	updated.ProgressDeadlineAt = &newDeadline
+	updated.ExtensionCount++
+	ok, err := store.UpdateExecutionRunCAS(ctx, updated, extended.Version)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// Past the old window: the run is no longer stalled, so the stale window is
+	// retired instead of cancelling a run the parent just re-armed.
+	supervisor.Now = func() time.Time { return now.Add(21 * time.Second) }
+	decisions, err = supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Empty(t, decisions)
+	require.Zero(t, interrupter.count())
+
+	got, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusQueued, got.Status)
+	require.Nil(t, got.DecisionWindowUntil)
+
+	// Second stall: it escalates afresh (report + fresh window), never a silent
+	// cancel inherited from the first episode.
+	secondDeadline := now.Add(30 * time.Second)
+	updated = *got
+	updated.ProgressDeadlineAt = &secondDeadline
+	ok, err = store.UpdateExecutionRunCAS(ctx, updated, got.Version)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// The second budget is 30s, so its own escalation instant is deadline + 1x
+	// soft = +60s.
+	supervisor.Now = func() time.Time { return now.Add(61 * time.Second) }
+	decisions, err = supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, "escalated", decisions[0].ActionTaken)
+	require.Zero(t, interrupter.count())
+
+	got, err = store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusQueued, got.Status)
+	require.NotNil(t, got.DecisionWindowUntil)
+	require.WithinDuration(t, now.Add(71*time.Second), *got.DecisionWindowUntil, time.Second)
+}
+
+// Change #1 rollback switch (#8 EscalateFirst=false): the pre-#1 forced branch
+// is restored without rolling back the binary.
+func TestExecutionSupervisor_EscalateFirstRollbackSwitchKeepsLegacyCancel(t *testing.T) {
+	interrupter := &fakeInterrupter{}
+	supervisor, store := newTestExecutionSupervisor(t, "sup-escalate-first-off", ExecutionSupervisorConfig{
+		Mode:                    "enforce",
+		DefaultExecutionTimeout: 1 * time.Hour,
+		DefaultProgressTimeout:  5 * time.Second,
+		DefaultApprovalTimeout:  1 * time.Hour,
+		DefaultCancelGrace:      15 * time.Second,
+		EscalateFirst:           boolPtr(false),
+	}, interrupter, nil)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	supervisor.Now = func() time.Time { return now }
+
+	run, err := supervisor.StartRun(ctx, RunSpec{
+		RootSessionID:   "root-session",
+		ParentSessionID: "parent-session",
+		SessionID:       "child-legacy-cancel",
+	})
+	require.NoError(t, err)
+
+	// Just past the soft threshold: the legacy branch cancels right away.
+	supervisor.Now = func() time.Time { return now.Add(6 * time.Second) }
+	decisions, err := supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, "progress_stalled", decisions[0].Decision)
+	require.Equal(t, "interrupted", decisions[0].ActionTaken)
+
+	got, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusCancelRequested, got.Status)
 	require.Equal(t, "progress_stalled", got.CancelSource)
+	require.Nil(t, got.DecisionWindowUntil)
 }
 
 func TestExecutionSupervisor_ResolveDeadlineUnboundedDisabled(t *testing.T) {

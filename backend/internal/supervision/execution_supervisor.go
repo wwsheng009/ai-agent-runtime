@@ -53,12 +53,35 @@ type ExecutionSupervisorConfig struct {
 	// StoreOutageGrace is the tolerated store failure window before the
 	// scanner backs off (doc 10 retention/grace).
 	StoreOutageGrace time.Duration
+
+	// --- escalate-first soft threshold (change #1; plan §6.3, Q2/Q3, I8) ---
+
+	// EscalateFirst switches the soft-threshold branch from "judge -> enforce"
+	// to "judge -> report -> decide -> fallback" (plan §6.3). nil/true (the
+	// default) escalates first; an explicit false restores the pre-#1 forced
+	// branch, so a host can roll back without rolling back the binary.
+	EscalateFirst *bool
+	// StallEscalationMultiplier is the escalation threshold as a multiple of
+	// the soft threshold (Q3): progress_age >= multiplier x soft escalates
+	// instead of cancelling. Zero uses the documented default (2).
+	StallEscalationMultiplier float64
+	// DecisionWindow is the decision window W the parent gets after an
+	// escalation (Q2). Zero derives 2 x DefaultProgressTimeout so a host that
+	// only overrides the progress timeout keeps the documented ratio.
+	DecisionWindow time.Duration
+	// DecisionWindowMax is the wall-clock cap on the decision window (Q2: 2W).
+	// Zero derives 2 x DecisionWindow. It bounds the runnable-clock deferral of
+	// I8/EC-A3, so the fallback can never be postponed indefinitely.
+	DecisionWindowMax time.Duration
 }
 
 // DefaultExecutionSupervisorConfig returns the documented defaults (doc 10):
 // enforce mode, 30m execution timeout, 5m progress timeout, 1h approval
 // timeout, 15s cancel grace, 5s scan interval.
 func DefaultExecutionSupervisorConfig() ExecutionSupervisorConfig {
+	// The suspension/escalate-first knobs come from the shared operator config
+	// (change #8) so both surfaces report one set of defaults (AC-P0-4a).
+	suspension := DefaultConfig()
 	return ExecutionSupervisorConfig{
 		Enabled:                 true,
 		Mode:                    "enforce",
@@ -69,6 +92,11 @@ func DefaultExecutionSupervisorConfig() ExecutionSupervisorConfig {
 		DefaultCancelGrace:      15 * time.Second,
 		AllowUnbounded:          false,
 		StoreOutageGrace:        2 * time.Minute,
+
+		EscalateFirst:             suspension.EscalateFirst,
+		StallEscalationMultiplier: suspension.StallEscalationMultiplier,
+		DecisionWindow:            suspension.DecisionWindow,
+		DecisionWindowMax:         suspension.DecisionWindowMax,
 	}
 }
 
@@ -117,7 +145,7 @@ type RunDecision struct {
 	SessionID   string
 	Status      string
 	Decision    string // execution_timed_out | progress_stalled | approval_timeout | cancel_grace_expired | orphan_suspected
-	ActionTaken string // none_observe | cancel_requested | interrupted | orphaned
+	ActionTaken string // none_observe | escalated | cancel_requested | interrupted | orphaned | forced_terminal
 	Reason      string
 }
 
@@ -175,6 +203,15 @@ type ExecutionSupervisor struct {
 	Config      ExecutionSupervisorConfig
 	Interrupter RunInterrupter
 	Dispatcher  CompletionDispatcher
+	// ParentRunnable reports whether the parent that owns a run can be woken
+	// right now (I8, design doc EC-A3). The decision window does not burn down
+	// while it returns false, bounded by the wall-clock cap
+	// (ProgressDeadlineAt + DecisionWindowMax). It is the same predicate the
+	// wake consumer uses (see ParentRunnable), so hosts hand both surfaces the
+	// same closure; execution runs carry no team id, so the team argument is
+	// empty. Nil means "always runnable", which degrades to plain wall-clock
+	// measurement.
+	ParentRunnable ParentRunnable
 	// Now is injectable for tests. Nil uses time.Now().UTC().
 	Now func() time.Time
 
@@ -491,14 +528,20 @@ func (s *ExecutionSupervisor) setLoopRunning(running bool) {
 // evaluateRun applies the health matrix to a single active run and, for states
 // the matrix cannot decide, the I10 watchdog fallback (design doc §16.4).
 func (s *ExecutionSupervisor) evaluateRun(ctx context.Context, run *ExecutionRun, now time.Time) *RunDecision {
-	if decision := s.evaluateRunLadder(ctx, run, now); decision != nil {
+	decision, handled := s.evaluateRunLadder(ctx, run, now)
+	if handled {
 		return decision
 	}
 	return s.watchdogForceTerminal(ctx, run, now)
 }
 
-// evaluateRunLadder applies the health matrix to a single active run.
-func (s *ExecutionSupervisor) evaluateRunLadder(ctx context.Context, run *ExecutionRun, now time.Time) *RunDecision {
+// evaluateRunLadder applies the health matrix to a single active run. The
+// second return value reports whether the ladder judged this run: a handled run
+// whose tier intentionally does nothing (the escalate-first silent/piggyback
+// bands and the open decision window) must not fall through to the I10
+// watchdog, otherwise the watchdog would force-terminal exactly the runs the
+// escalation ladder is still watching.
+func (s *ExecutionSupervisor) evaluateRunLadder(ctx context.Context, run *ExecutionRun, now time.Time) (*RunDecision, bool) {
 	status := strings.TrimSpace(run.Status)
 	decision := &RunDecision{
 		RunID:     run.RunID,
@@ -522,9 +565,9 @@ func (s *ExecutionSupervisor) evaluateRunLadder(ctx context.Context, run *Execut
 				decision.ActionTaken = "none_observe"
 			}
 			s.projectDecision(ctx, run, decision)
-			return decision
+			return decision, true
 		}
-		return nil
+		return nil, false
 	}
 
 	// waiting_approval / waiting_input use their own deadline and must never
@@ -534,7 +577,7 @@ func (s *ExecutionSupervisor) evaluateRunLadder(ctx context.Context, run *Execut
 			decision.Decision = "approval_timeout"
 			decision.Reason = "approval/input deadline expired"
 		} else {
-			return nil
+			return nil, false
 		}
 	} else {
 		switch {
@@ -542,9 +585,20 @@ func (s *ExecutionSupervisor) evaluateRunLadder(ctx context.Context, run *Execut
 			decision.Decision = "execution_timed_out"
 			decision.Reason = "execution deadline expired"
 		case run.ProgressDeadlineAt != nil && !run.ProgressDeadlineAt.IsZero() && !now.Before(*run.ProgressDeadlineAt):
+			if s.escalateFirstEnabled() {
+				// Change #1: the soft threshold no longer cancels. It reports to
+				// the parent and gives it a decision window before the fallback
+				// fires (plan §6.3 judge -> report -> decide -> fallback).
+				return s.evaluateProgressStall(ctx, run, now)
+			}
 			decision.Decision = "progress_stalled"
 			decision.Reason = "no meaningful progress since progress deadline"
 		default:
+			// A window that expired while the run is no longer stalled can only
+			// come from a concurrent extend_deadline (change #2): retire it so
+			// the next stall escalates afresh instead of firing the fallback
+			// without a report.
+			s.retireExpiredDecisionWindow(ctx, run, now)
 			// Orphan suspicion: owner lease expired (heartbeat stale). P3 only
 			// observes and projects; enforcement requires host lease/session
 			// confirmation and lands with the reclaim work in P4.
@@ -553,41 +607,297 @@ func (s *ExecutionSupervisor) evaluateRunLadder(ctx context.Context, run *Execut
 				decision.Reason = "owner lease expired"
 				decision.ActionTaken = "none_observe"
 				s.projectDecision(ctx, run, decision)
-				return decision
+				return decision, true
 			}
-			return nil
+			return nil, false
 		}
 	}
 
 	if s.enforce() {
-		grace := s.effectiveConfig().DefaultCancelGrace
-		if grace <= 0 {
-			grace = 15 * time.Second
-		}
-		requested, err := s.Store.RequestExecutionCancel(ctx, run.RunID, decision.Decision, grace, now)
-		if err != nil {
-			decision.Reason = decision.Reason + "; cancel request failed: " + err.Error()
-			return decision
-		}
-		if !requested {
-			// Another scanner/host already requested cancel; hand off.
-			decision.ActionTaken = "cancel_requested"
-			s.projectDecision(ctx, run, decision)
-			return decision
-		}
+		return s.enforceRunCancel(ctx, run, decision, decision.Decision, now), true
+	}
+	decision.ActionTaken = "none_observe"
+	s.projectDecision(ctx, run, decision)
+	return decision, true
+}
+
+// enforceRunCancel applies the forced branch shared by the hard deadline and
+// the escalate-first fallback: request cancel (CAS), interrupt the live actor
+// and project the decision. source is the cancel source persisted on the run;
+// it differs from decision.Decision for the fallback, where the condition is a
+// stall but the cause of the forced cancel is the expired decision window.
+func (s *ExecutionSupervisor) enforceRunCancel(ctx context.Context, run *ExecutionRun, decision *RunDecision, source string, now time.Time) *RunDecision {
+	grace := s.effectiveConfig().DefaultCancelGrace
+	if grace <= 0 {
+		grace = 15 * time.Second
+	}
+	requested, err := s.Store.RequestExecutionCancel(ctx, run.RunID, source, grace, now)
+	if err != nil {
+		decision.Reason = decision.Reason + "; cancel request failed: " + err.Error()
+		return decision
+	}
+	if !requested {
+		// Another scanner/host already requested cancel; hand off.
 		decision.ActionTaken = "cancel_requested"
-		run.Status = RunStatusCancelRequested
-		run.CancelSource = decision.Decision
-		if s.Interrupter != nil {
-			if err := s.Interrupter.InterruptRun(ctx, *run); err == nil {
-				decision.ActionTaken = "interrupted"
-			}
+		s.projectDecision(ctx, run, decision)
+		return decision
+	}
+	decision.ActionTaken = "cancel_requested"
+	run.Status = RunStatusCancelRequested
+	run.CancelSource = source
+	if s.Interrupter != nil {
+		if err := s.Interrupter.InterruptRun(ctx, *run); err == nil {
+			decision.ActionTaken = "interrupted"
 		}
-	} else {
-		decision.ActionTaken = "none_observe"
 	}
 	s.projectDecision(ctx, run, decision)
 	return decision
+}
+
+// progressStalled reports whether the run is past its progress deadline, i.e.
+// the soft threshold of the escalation ladder has fired.
+func progressStalled(run *ExecutionRun, now time.Time) bool {
+	return run != nil && run.ProgressDeadlineAt != nil && !run.ProgressDeadlineAt.IsZero() && !now.Before(*run.ProgressDeadlineAt)
+}
+
+// evaluateProgressStall implements the escalate-first soft-threshold ladder
+// (change #1; plan §6.3, Q2/Q3, I8). The soft threshold (the progress deadline)
+// is already crossed when this is called, so only the tiers above it are
+// decided here, with soft = the run's progress-timeout duration:
+//
+//	piggyback  now < deadline + (multiplier-1) x soft -> nothing (the parent
+//	              picks the stall up on its next natural turn; no wake is spent)
+//	report     now >= that escalation instant -> escalated: critical +
+//	              action_required, never a cancel
+//	decide     decision window still open     -> nothing (no re-report/cancel)
+//	fallback   window expired, no decision    -> forced cancel with
+//	              CancelSource=decision_window_expired
+//
+// The hard execution deadline keeps its own branch above this one, so a run
+// that is both stalled and past its hard deadline is still cut immediately
+// (AC-P0-1d).
+func (s *ExecutionSupervisor) evaluateProgressStall(ctx context.Context, run *ExecutionRun, now time.Time) (*RunDecision, bool) {
+	cfg := s.effectiveConfig()
+	soft := progressSoftThreshold(run, cfg)
+	// The soft threshold itself is the progress deadline; the multiplier buys
+	// one more soft window of piggybacking before the parent is bothered.
+	escalateAt := run.ProgressDeadlineAt.Add(time.Duration((cfg.StallEscalationMultiplier - 1) * float64(soft)))
+	if now.Before(escalateAt) {
+		// Piggyback band: the stall is visible to the operator (alerts) and to
+		// the parent's next turn, but it does not justify a wake or a cancel.
+		return nil, true
+	}
+	if run.DecisionWindowUntil != nil && !run.DecisionWindowUntil.IsZero() {
+		return s.evaluateDecisionWindow(ctx, run, now)
+	}
+	return s.escalateProgressStall(ctx, run, now)
+}
+
+// escalateProgressStall opens the decision window for a newly detected stall
+// (the "report" tier). It never cancels: the parent owns the decision for the
+// length of the window and the fallback only fires once the window is exhausted.
+func (s *ExecutionSupervisor) escalateProgressStall(ctx context.Context, run *ExecutionRun, now time.Time) (*RunDecision, bool) {
+	decision := &RunDecision{
+		RunID:     run.RunID,
+		SessionID: run.SessionID,
+		Status:    run.Status,
+		Decision:  "progress_stalled",
+		Reason:    "progress stalled past the escalation threshold; waiting for an extend/cancel decision",
+	}
+	// Re-read before mutating: RecordExecutionProgress does not bump the row
+	// version, so a full-row CAS from the scan snapshot could revert progress
+	// that arrived after the scan listed this run. The fresh copy also decides
+	// whether the stall is still current (AC-P0-1b).
+	current, err := s.Store.GetExecutionRun(ctx, run.RunID)
+	if err != nil {
+		decision.Reason = "escalation deferred: " + err.Error()
+		return decision, true
+	}
+	if current == nil || current.Terminal() {
+		return nil, true
+	}
+	*run = *current
+	if !progressStalled(run, now) {
+		return nil, true
+	}
+	if run.DecisionWindowUntil != nil && !run.DecisionWindowUntil.IsZero() {
+		// Another scanner/host opened the window between the scan snapshot and
+		// the re-read: it owns the report, so stay quiet.
+		return nil, true
+	}
+	if !s.enforce() {
+		// Observe mode never mutates: the escalation is projected (and would
+		// open the window in enforce mode) but no window is written.
+		decision.ActionTaken = "none_observe"
+		s.projectDecision(ctx, run, decision)
+		return decision, true
+	}
+	until := now.Add(effectiveDecisionWindow(s.effectiveConfig()))
+	updated := *run
+	updated.DecisionWindowUntil = &until
+	ok, err := s.Store.UpdateExecutionRunCAS(ctx, updated, run.Version)
+	if err != nil {
+		decision.Reason = "escalation deferred: " + err.Error()
+		return decision, true
+	}
+	if !ok {
+		// Lost the CAS: another scanner/host already escalated this run (or
+		// moved it on). Adopt the winner's state instead of reporting twice.
+		if latest, err := s.Store.GetExecutionRun(ctx, run.RunID); err == nil && latest != nil {
+			*run = *latest
+		}
+		return nil, true
+	}
+	run.DecisionWindowUntil = &until
+	run.Version = updated.Version
+	decision.ActionTaken = "escalated"
+	s.projectDecision(ctx, run, decision)
+	return decision, true
+}
+
+// evaluateDecisionWindow handles the decide/fallback tiers of a run whose
+// escalation window is already open.
+func (s *ExecutionSupervisor) evaluateDecisionWindow(ctx context.Context, run *ExecutionRun, now time.Time) (*RunDecision, bool) {
+	until := *run.DecisionWindowUntil
+	if now.Before(until) {
+		// Decide tier: the parent still owns the decision. Re-projecting every
+		// scan would spam the inbox and burn the wake budget, so stay quiet.
+		return nil, true
+	}
+	if !progressStalled(run, now) {
+		// The window outlived its stall (a concurrent extend_deadline moved the
+		// deadline, change #2): retire it so the next stall escalates afresh
+		// instead of firing the fallback without a report.
+		s.retireDecisionWindow(ctx, run)
+		return nil, true
+	}
+	cfg := s.effectiveConfig()
+	if !decisionWindowForEpisode(run, cfg) {
+		// The window predates the current progress deadline, so it belongs to an
+		// earlier stall episode: an extend_deadline moved the deadline since it
+		// was opened (change #2, EC-A5). Retire it and let the next scan escalate
+		// afresh instead of cancelling without a report.
+		s.retireDecisionWindow(ctx, run)
+		return nil, true
+	}
+	if s.deferDecisionWindow(ctx, run, now, cfg) {
+		return nil, true
+	}
+	decision := &RunDecision{
+		RunID:     run.RunID,
+		SessionID: run.SessionID,
+		Status:    run.Status,
+		Decision:  "progress_stalled",
+		Reason:    "decision window expired without an extend/cancel decision",
+	}
+	if s.enforce() {
+		return s.enforceRunCancel(ctx, run, decision, "decision_window_expired", now), true
+	}
+	decision.ActionTaken = "none_observe"
+	s.projectDecision(ctx, run, decision)
+	return decision, true
+}
+
+// deferDecisionWindow implements the runnable-clock rule (I8, design doc
+// EC-A3): while the parent cannot be woken (user input in flight, waiting
+// approval, compacting) the decision window must not burn down, otherwise the
+// fallback would fire exactly because nobody was able to look at the
+// escalation. The window is pushed to now+W but never past the wall-clock cap
+// ProgressDeadlineAt + DecisionWindowMax (Q2), so the fallback stays decidable
+// even when the parent never becomes runnable again.
+//
+// It reports whether the window was (or would be, in observe mode) deferred.
+// A nil ParentRunnable means "always runnable", which degrades to plain
+// wall-clock measurement.
+func (s *ExecutionSupervisor) deferDecisionWindow(ctx context.Context, run *ExecutionRun, now time.Time, cfg ExecutionSupervisorConfig) bool {
+	if s == nil || run == nil || s.ParentRunnable == nil {
+		return false
+	}
+	if s.ParentRunnable(ctx, run.RootSessionID, run.ParentSessionID, "") {
+		return false
+	}
+	anchor := run.ProgressDeadlineAt
+	if anchor == nil || anchor.IsZero() {
+		return false
+	}
+	cap := anchor.Add(cfg.DecisionWindowMax)
+	if !now.Before(cap) {
+		return false
+	}
+	until := now.Add(effectiveDecisionWindow(cfg))
+	if until.After(cap) {
+		until = cap
+	}
+	if !until.After(*run.DecisionWindowUntil) {
+		return true
+	}
+	if !s.enforce() {
+		// Observe mode never mutates; staying silent keeps the dry run honest.
+		return true
+	}
+	updated := *run
+	updated.DecisionWindowUntil = &until
+	ok, err := s.Store.UpdateExecutionRunCAS(ctx, updated, run.Version)
+	if err != nil || !ok {
+		// Losing the CAS is not a reason to fire the fallback: stay silent for
+		// this scan and retry. The cap check above still bounds the deferral, so
+		// a persistently failing store cannot postpone the fallback forever.
+		return true
+	}
+	run.DecisionWindowUntil = &until
+	run.Version = updated.Version
+	return true
+}
+
+// decisionWindowForEpisode reports whether the open window was created for the
+// run's current stall episode. The supervisor stamps a window at or after the
+// progress deadline it escalated on, so an extend_deadline that moved the
+// deadline (change #2) is detectable afterwards: the window start (until - W)
+// then predates the current deadline, and the window must not be allowed to
+// fire the fallback for a stall it never reported (EC-A5).
+func decisionWindowForEpisode(run *ExecutionRun, cfg ExecutionSupervisorConfig) bool {
+	if run == nil || run.DecisionWindowUntil == nil || run.DecisionWindowUntil.IsZero() {
+		return false
+	}
+	if run.ProgressDeadlineAt == nil || run.ProgressDeadlineAt.IsZero() {
+		return true
+	}
+	start := run.DecisionWindowUntil.Add(-effectiveDecisionWindow(cfg))
+	return !start.Before(*run.ProgressDeadlineAt)
+}
+
+// retireDecisionWindow clears an escalation window that outlived its stall so
+// the next stall escalates afresh instead of firing the fallback without a
+// report. Callers only retire windows that already expired (or that provably
+// belong to an earlier episode), so a window a dispatcher declared for a
+// healthy run (RunSpec.DecisionWindowUntil) is left alone.
+func (s *ExecutionSupervisor) retireDecisionWindow(ctx context.Context, run *ExecutionRun) {
+	if s == nil || s.Store == nil || run == nil || !s.enforce() {
+		return
+	}
+	if run.DecisionWindowUntil == nil || run.DecisionWindowUntil.IsZero() {
+		return
+	}
+	updated := *run
+	updated.DecisionWindowUntil = nil
+	ok, err := s.Store.UpdateExecutionRunCAS(ctx, updated, run.Version)
+	if err != nil || !ok {
+		return
+	}
+	run.DecisionWindowUntil = nil
+	run.Version = updated.Version
+}
+
+// retireExpiredDecisionWindow retires a window that has already expired while
+// the run is no longer stalled (extend_deadline moved the deadline).
+func (s *ExecutionSupervisor) retireExpiredDecisionWindow(ctx context.Context, run *ExecutionRun, now time.Time) {
+	if run == nil || run.DecisionWindowUntil == nil || run.DecisionWindowUntil.IsZero() {
+		return
+	}
+	if now.Before(*run.DecisionWindowUntil) {
+		return
+	}
+	s.retireDecisionWindow(ctx, run)
 }
 
 // fenceOrphaned bumps the fencing token and marks the run orphaned so late
@@ -848,7 +1158,69 @@ func (s *ExecutionSupervisor) effectiveConfig() ExecutionSupervisorConfig {
 	if cfg.StoreOutageGrace <= 0 {
 		cfg.StoreOutageGrace = defaults.StoreOutageGrace
 	}
+	// escalate-first (change #1): zero values take the documented defaults, and
+	// the decision window is derived from the *effective* progress timeout so a
+	// host that only overrides that timeout keeps the documented 2x ratio (Q2).
+	if cfg.StallEscalationMultiplier <= 0 {
+		cfg.StallEscalationMultiplier = defaults.StallEscalationMultiplier
+	}
+	if cfg.DecisionWindow <= 0 {
+		if cfg.DefaultProgressTimeout > 0 {
+			cfg.DecisionWindow = 2 * cfg.DefaultProgressTimeout
+		} else {
+			cfg.DecisionWindow = defaults.DecisionWindow
+		}
+	}
+	if cfg.DecisionWindowMax <= 0 {
+		cfg.DecisionWindowMax = 2 * cfg.DecisionWindow
+	}
 	return cfg
+}
+
+// escalateFirstEnabled reports whether the soft-threshold branch escalates
+// before it enforces (change #1; plan §6.3). nil means on: the gray-release
+// default is the new ladder, and only an explicit false restores the pre-#1
+// forced cancel.
+func (s *ExecutionSupervisor) escalateFirstEnabled() bool {
+	if s == nil {
+		return false
+	}
+	cfg := s.effectiveConfig()
+	return cfg.EscalateFirst == nil || *cfg.EscalateFirst
+}
+
+// effectiveDecisionWindow returns the decision window actually used by the
+// escalation ladder: W, capped by DecisionWindowMax so a stale configuration
+// can never open a window longer than the documented wall-clock bound (Q2).
+func effectiveDecisionWindow(cfg ExecutionSupervisorConfig) time.Duration {
+	window := cfg.DecisionWindow
+	if window <= 0 {
+		window = DefaultConfig().DecisionWindow
+	}
+	if cfg.DecisionWindowMax > 0 && window > cfg.DecisionWindowMax {
+		return cfg.DecisionWindowMax
+	}
+	return window
+}
+
+// progressSoftThreshold returns the run's progress-timeout duration, i.e. the
+// soft threshold the escalation multiplier scales (Q3). It is derived from the
+// persisted deadline minus StartedAt so it reflects the timeout the run was
+// actually admitted with (a per-run ProgressTimeout wins over the operator
+// default) and survives progress events, which move LastProgressAt but never
+// the deadline. An extend_deadline (change #2) moves the deadline, so the soft
+// threshold grows with the granted extension - the multiplier then buys that
+// much more piggybacking before the parent is bothered again.
+func progressSoftThreshold(run *ExecutionRun, cfg ExecutionSupervisorConfig) time.Duration {
+	if run != nil && run.ProgressDeadlineAt != nil && !run.ProgressDeadlineAt.IsZero() && !run.StartedAt.IsZero() {
+		if declared := run.ProgressDeadlineAt.Sub(run.StartedAt); declared > 0 {
+			return declared
+		}
+	}
+	if cfg.DefaultProgressTimeout > 0 {
+		return cfg.DefaultProgressTimeout
+	}
+	return DefaultConfig().HeartbeatTimeout
 }
 
 func (s *ExecutionSupervisor) now() time.Time {

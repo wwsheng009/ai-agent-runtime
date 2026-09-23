@@ -112,9 +112,21 @@ func TestExecutionSupervisor_StatsCountsEnforcementAndCapsDecisions(t *testing.T
 
 	stats := supervisor.Stats()
 	require.EqualValues(t, runs, stats.Decisions)
-	require.EqualValues(t, runs, stats.Enforced, "every stalled run was interrupted")
+	require.EqualValues(t, runs, stats.Enforced, "reporting is an action taken")
 	require.Len(t, stats.LastScanDecisions, maxSupervisorStatsDecisions)
+	require.Zero(t, interrupter.count(), "change #1: the report tier must not cancel")
+
+	// The decision window expires without a parent decision: now the fallback
+	// interrupts every run and the enforcement counter doubles.
+	now = now.Add(13 * time.Minute)
+	decisions, err = supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Len(t, decisions, runs)
 	require.Equal(t, runs, interrupter.count())
+
+	stats = supervisor.Stats()
+	require.EqualValues(t, 2*runs, stats.Decisions)
+	require.EqualValues(t, 2*runs, stats.Enforced)
 }
 
 // TestExecutionSupervisor_StatsLoopLifecycle guards the RunLoop half of the
