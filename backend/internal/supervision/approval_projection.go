@@ -152,6 +152,12 @@ func ProjectApprovalRequest(ctx context.Context, store Store, wakes *WakeSchedul
 			TargetParentTeamID:    notification.TargetParentTeamID,
 			WakeReason:            notification.EventType,
 			NotificationSeq:       notification.EventSeq,
+			// C2-4 (#15) / B4: the approval family has its own notify key, so
+			// re-projecting the same request cannot start a second resume while
+			// a later request for the same child still can.
+			ObligationID: notification.SubjectID,
+			EventKind:    WakeEventApproval,
+			EventSeq:     notification.EventSeq,
 		})
 		if err != nil {
 			return notification, fmt.Errorf("supervision: schedule approval wake: %w", err)

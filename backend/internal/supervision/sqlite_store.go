@@ -373,6 +373,48 @@ func (s *SQLiteSupervisionStore) init(ctx context.Context) error {
 				ALTER TABLE supervision_actions ADD COLUMN extend_which TEXT NOT NULL DEFAULT '';
 			`,
 		},
+		{
+			// P1 / C2-1: wake 升级为 resume。wake 行携带挂起 turn 的 id（提示
+			// 值；权威 turn_id 在投递时由 obligation 账本再校准），使一次唤醒
+			// 可以续跑同一 turn 而不是新开一轮（I3）。Additive + 零值默认，旧
+			// 行读回为空 ⇒ 保持 legacy "新 turn" 投递语义。
+			Version: 5,
+			Name:    "wake_pending_turn_id",
+			UpSQL: `
+				ALTER TABLE supervision_wake_pending ADD COLUMN turn_id TEXT NOT NULL DEFAULT '';
+			`,
+		},
+		{
+			// P1 / C2-4 (#15): notification idempotency key (B4 / doc 6.6).
+			// The wake row carries the structured identity of the event it
+			// delivers, and supervision_wake_delivered keeps the delivered keys
+			// so "same terminal state ⇒ one resume" outlives the pending row.
+			// Additive + zero-value defaults: legacy rows read back with an
+			// empty key and keep the coalescing-only behavior.
+			Version: 6,
+			Name:    "wake_notify_key_idempotency",
+			UpSQL: `
+				ALTER TABLE supervision_wake_pending ADD COLUMN notify_key TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_wake_pending ADD COLUMN event_kind TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_wake_pending ADD COLUMN obligation_id TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_wake_pending ADD COLUMN event_seq INTEGER NOT NULL DEFAULT 0;
+				CREATE TABLE IF NOT EXISTS supervision_wake_delivered (
+					notify_key TEXT PRIMARY KEY,
+					root_scope_id TEXT NOT NULL DEFAULT '',
+					target_parent_session_id TEXT,
+					target_parent_team_id TEXT,
+					wake_id TEXT NOT NULL DEFAULT '',
+					turn_id TEXT NOT NULL DEFAULT '',
+					event_kind TEXT NOT NULL DEFAULT '',
+					obligation_id TEXT NOT NULL DEFAULT '',
+					event_seq INTEGER NOT NULL DEFAULT 0,
+					delivered_at TEXT NOT NULL,
+					delivered_by TEXT NOT NULL DEFAULT ''
+				);
+				CREATE INDEX IF NOT EXISTS idx_supervision_wake_delivered_scope
+					ON supervision_wake_delivered(root_scope_id, delivered_at);
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }
@@ -1156,14 +1198,26 @@ func (s *SQLiteSupervisionStore) InsertWakePending(ctx context.Context, w WakePe
 		}, "|")
 	}
 	w.CreatedAt = time.Now().UTC()
+	notifyKey := strings.TrimSpace(w.NotifyKey)
 	// Coalescing is keyed by dedup_key only. Targeting the conflict explicitly
 	// (instead of a blanket OR IGNORE) keeps a duplicate primary key loud: a
 	// dropped wake would silently starve the parent session.
+	//
+	// The delivery ledger guard (C2-4 #15) is the second, permanent gate: a
+	// non-empty notify_key that was already delivered never becomes a pending
+	// wake again, so a replayed terminal event cannot start a second resume
+	// (AC-P1-4a). The predicate is evaluated inside the insert so two
+	// processes cannot both win the race.
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO supervision_wake_pending (
 			wake_id, root_scope_id, target_parent_session_id, target_parent_team_id,
-			wake_reason, notification_seq, dedup_key, created_at, claimed_at, claimed_by
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			wake_reason, notification_seq, turn_id, dedup_key, created_at, claimed_at, claimed_by,
+			notify_key, event_kind, obligation_id, event_seq
+		)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE ? = '' OR NOT EXISTS (
+			SELECT 1 FROM supervision_wake_delivered WHERE notify_key = ?
+		)
 		ON CONFLICT(dedup_key) DO NOTHING
 	`,
 		w.WakeID,
@@ -1172,10 +1226,17 @@ func (s *SQLiteSupervisionStore) InsertWakePending(ctx context.Context, w WakePe
 		nullSupervisionString(w.TargetParentTeamID),
 		w.WakeReason,
 		w.NotificationSeq,
+		strings.TrimSpace(w.TurnID),
 		w.DedupKey,
 		formatSupervisionTime(w.CreatedAt),
 		formatNullableSupervisionTime(w.ClaimedAt),
 		w.ClaimedBy,
+		notifyKey,
+		strings.TrimSpace(w.EventKind),
+		strings.TrimSpace(w.ObligationID),
+		w.EventSeq,
+		notifyKey,
+		notifyKey,
 	)
 	if err != nil {
 		return fmt.Errorf("insert wake pending: %w", err)
@@ -1205,7 +1266,7 @@ func (s *SQLiteSupervisionStore) ListWakePending(ctx context.Context, filter Wak
 	if filter.UnclaimedOnly {
 		clauses = append(clauses, "claimed_at IS NULL")
 	}
-	query := "SELECT wake_id, root_scope_id, target_parent_session_id, target_parent_team_id, wake_reason, notification_seq, dedup_key, created_at, claimed_at, claimed_by FROM supervision_wake_pending WHERE " + strings.Join(clauses, " AND ") + " ORDER BY created_at ASC"
+	query := "SELECT wake_id, root_scope_id, target_parent_session_id, target_parent_team_id, wake_reason, notification_seq, turn_id, dedup_key, created_at, claimed_at, claimed_by, notify_key, event_kind, obligation_id, event_seq FROM supervision_wake_pending WHERE " + strings.Join(clauses, " AND ") + " ORDER BY created_at ASC"
 	if filter.Limit > 0 {
 		query += " LIMIT " + fmt.Sprintf("%d", filter.Limit)
 	}
@@ -1219,7 +1280,7 @@ func (s *SQLiteSupervisionStore) ListWakePending(ctx context.Context, filter Wak
 		var w WakePending
 		var createdAt, claimedAt sql.NullString
 		var targetParentSession, targetParentTeam sql.NullString
-		if err := rows.Scan(&w.WakeID, &w.RootScopeID, &targetParentSession, &targetParentTeam, &w.WakeReason, &w.NotificationSeq, &w.DedupKey, &createdAt, &claimedAt, &w.ClaimedBy); err != nil {
+		if err := rows.Scan(&w.WakeID, &w.RootScopeID, &targetParentSession, &targetParentTeam, &w.WakeReason, &w.NotificationSeq, &w.TurnID, &w.DedupKey, &createdAt, &claimedAt, &w.ClaimedBy, &w.NotifyKey, &w.EventKind, &w.ObligationID, &w.EventSeq); err != nil {
 			return nil, err
 		}
 		w.TargetParentSessionID = targetParentSession.String
@@ -1243,6 +1304,30 @@ func (s *SQLiteSupervisionStore) ClaimWakePending(ctx context.Context, wakeID, c
 	`, formatSupervisionTime(at), claimedBy, wakeID)
 	if err != nil {
 		return false, fmt.Errorf("claim wake pending: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+// ReleaseWakePending returns a claim to the pending queue without deleting the
+// row (plan C2-5 / A6 deferral). The claimed_by guard keeps a concurrent
+// drainer's claim intact: only the owner can un-claim, so a late release can
+// never resurrect a row another drainer is about to deliver.
+func (s *SQLiteSupervisionStore) ReleaseWakePending(ctx context.Context, wakeID, claimedBy string) (bool, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return false, err
+	}
+	result, err := db.ExecContext(ctx, `
+		UPDATE supervision_wake_pending
+		SET claimed_at = NULL, claimed_by = ''
+		WHERE wake_id = ? AND claimed_at IS NOT NULL AND claimed_by = ?
+	`, wakeID, claimedBy)
+	if err != nil {
+		return false, fmt.Errorf("release wake pending: %w", err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
@@ -1323,6 +1408,86 @@ func (s *SQLiteSupervisionStore) PruneWakeClaims(ctx context.Context, before tim
 	result, err := db.ExecContext(ctx, `DELETE FROM supervision_wake_claims WHERE claimed_at < ?`, formatSupervisionTime(before))
 	if err != nil {
 		return 0, fmt.Errorf("prune wake claims: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return affected, nil
+}
+
+// --- Wake delivery ledger (C2-4 #15 / B4) ---
+
+func (s *SQLiteSupervisionStore) IsWakeDelivered(ctx context.Context, notifyKey string) (bool, error) {
+	key := strings.TrimSpace(notifyKey)
+	if key == "" {
+		return false, nil
+	}
+	db, err := s.dbOrErr()
+	if err != nil {
+		return false, err
+	}
+	var one int
+	err = db.QueryRowContext(ctx, `SELECT 1 FROM supervision_wake_delivered WHERE notify_key = ?`, key).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("is wake delivered: %w", err)
+	}
+	return true, nil
+}
+
+func (s *SQLiteSupervisionStore) MarkWakeDelivered(ctx context.Context, d WakeDelivered) error {
+	key := strings.TrimSpace(d.NotifyKey)
+	if key == "" {
+		// Legacy wakes carry no idempotency key; they keep the coalescing-only
+		// behavior and are deliberately not recorded.
+		return nil
+	}
+	db, err := s.dbOrErr()
+	if err != nil {
+		return err
+	}
+	if d.DeliveredAt.IsZero() {
+		d.DeliveredAt = time.Now().UTC()
+	}
+	// The first delivery wins: a concurrent duplicate (or a replay) must not
+	// fail the caller, because the entire point of the ledger is that the
+	// second delivery is a no-op (AC-P1-4b).
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO supervision_wake_delivered (
+			notify_key, root_scope_id, target_parent_session_id, target_parent_team_id,
+			wake_id, turn_id, event_kind, obligation_id, event_seq, delivered_at, delivered_by
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(notify_key) DO NOTHING
+	`,
+		key,
+		strings.TrimSpace(d.RootScopeID),
+		nullSupervisionString(d.TargetParentSessionID),
+		nullSupervisionString(d.TargetParentTeamID),
+		d.WakeID,
+		strings.TrimSpace(d.TurnID),
+		strings.TrimSpace(d.EventKind),
+		strings.TrimSpace(d.ObligationID),
+		d.EventSeq,
+		formatSupervisionTime(d.DeliveredAt),
+		d.DeliveredBy,
+	)
+	if err != nil {
+		return fmt.Errorf("mark wake delivered: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteSupervisionStore) PruneWakeDelivered(ctx context.Context, before time.Time) (int64, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return 0, err
+	}
+	result, err := db.ExecContext(ctx, `DELETE FROM supervision_wake_delivered WHERE delivered_at < ?`, formatSupervisionTime(before))
+	if err != nil {
+		return 0, fmt.Errorf("prune wake delivered: %w", err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {

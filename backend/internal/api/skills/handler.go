@@ -4103,6 +4103,25 @@ func (h *Handler) subagentGlobalLimiter(maxThreads int) *agent.SubagentConcurren
 	return h.subagentLimiter
 }
 
+// subagentCapacityView 返回 A6 resume 门控需要的进程级子代理准入瞬时视图。
+// 与 CLI 宿主同口径：只读缓存字段，不创建 limiter、不解析配置（未配置
+// agents.maxThreads 时视图 Limit=0 ⇒ 门控放行，保持旧行为）。
+func (h *Handler) subagentCapacityView() supervision.SubagentCapacityView {
+	if h == nil {
+		return supervision.SubagentCapacityView{}
+	}
+	h.subagentLimiterMu.Lock()
+	limiter := h.subagentLimiter
+	h.subagentLimiterMu.Unlock()
+	if limiter == nil {
+		return supervision.SubagentCapacityView{}
+	}
+	return supervision.SubagentCapacityView{
+		Limit:    limiter.Limit(),
+		InFlight: limiter.InFlight(),
+	}
+}
+
 type agentRuntimeComponents struct {
 	registry        *skill.Registry
 	embeddingRouter *skill.SemanticEmbeddingRouter

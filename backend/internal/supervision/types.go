@@ -265,10 +265,49 @@ type WakePending struct {
 	TargetParentTeamID   string     `json:"target_parent_team_id,omitempty"`
 	WakeReason           string     `json:"wake_reason,omitempty"`
 	NotificationSeq      int64      `json:"notification_seq,omitempty"`
+	// TurnID names the parked turn this wake resumes (C2-1 #4 / I3). It is a
+	// hint: the authoritative identity is re-derived from the obligation
+	// ledger at delivery time, so a coalesced row can never resume a turn that
+	// already ended. Empty keeps the legacy "new turn" delivery.
+	TurnID               string     `json:"turn_id,omitempty"`
+	// NotifyKey is the stable notification idempotency key (C2-4 #15 / B4,
+	// doc 6.6): notify_key = hash(turn_id, obligation_id, event_kind,
+	// terminal_epoch|progress_seq). It survives the wake row being resolved, so
+	// the same terminal state is delivered once and the same progress seq never
+	// wakes twice. Empty keeps the legacy coalescing-only behavior.
+	NotifyKey            string     `json:"notify_key,omitempty"`
+	// EventKind classifies the notification family (terminal / progress /
+	// approval / lifecycle); it is part of the notify key.
+	EventKind            string     `json:"event_kind,omitempty"`
+	// ObligationID names the ledger row this notification belongs to.
+	ObligationID         string     `json:"obligation_id,omitempty"`
+	// EventSeq is the dedup counter behind the notify key: terminal_epoch for
+	// terminal notifications, progress_seq for progress notifications (doc 6.6).
+	EventSeq             int64      `json:"event_seq,omitempty"`
 	DedupKey             string     `json:"dedup_key,omitempty"`
 	CreatedAt            time.Time  `json:"created_at,omitempty"`
 	ClaimedAt            *time.Time `json:"claimed_at,omitempty"`
 	ClaimedBy            string     `json:"claimed_by,omitempty"`
+}
+
+// WakeDelivered is the durable notification delivery ledger (C2-4 #15 / B4,
+// doc 6.6). It records that one notify_key was delivered, which makes the
+// idempotency key outlive the wake row: a replayed terminal event finds the
+// key here and is suppressed instead of starting a second resume
+// (AC-P1-4a), while a failed delivery is never recorded and can be retried
+// with the same key (AC-P1-4b).
+type WakeDelivered struct {
+	NotifyKey             string    `json:"notify_key,omitempty"`
+	RootScopeID           string    `json:"root_scope_id,omitempty"`
+	TargetParentSessionID string    `json:"target_parent_session_id,omitempty"`
+	TargetParentTeamID    string    `json:"target_parent_team_id,omitempty"`
+	WakeID                string    `json:"wake_id,omitempty"`
+	TurnID                string    `json:"turn_id,omitempty"`
+	EventKind             string    `json:"event_kind,omitempty"`
+	ObligationID          string    `json:"obligation_id,omitempty"`
+	EventSeq              int64     `json:"event_seq,omitempty"`
+	DeliveredAt           time.Time `json:"delivered_at,omitempty"`
+	DeliveredBy           string    `json:"delivered_by,omitempty"`
 }
 
 // WakeFilter selects wake pending rows.

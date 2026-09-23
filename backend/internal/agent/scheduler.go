@@ -272,6 +272,19 @@ func (l *SubagentConcurrencyLimiter) Limit() int {
 	return cap(l.slots)
 }
 
+// InFlight reports how many slots are currently held. It is a point-in-time
+// read for admission probes (e.g. supervision resume gating, A6): the buffered
+// count of the channel is safe to read without a lock and never blocks.
+//
+// A nil receiver reports 0, which callers must read together with Limit()==0
+// ("no ceiling configured"), not as "no capacity left".
+func (l *SubagentConcurrencyLimiter) InFlight() int {
+	if l == nil {
+		return 0
+	}
+	return len(l.slots)
+}
+
 // Acquire blocks until a slot is free or ctx is done. It returns nil when a
 // slot was taken (the caller must Release exactly once, normally via defer) and
 // ctx.Err() when the caller gave up; no slot is held in the error case.

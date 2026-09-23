@@ -43,6 +43,11 @@ func (f *fakeBatchStore) ListBatches(_ context.Context, filter subagentbatch.Bat
 		}
 		out = append(out, batch)
 	}
+	// The real stores page on Limit; mirroring it here keeps bound assertions
+	// meaningful (the projections must never rely on getting everything back).
+	if filter.Limit > 0 && len(out) > filter.Limit {
+		out = out[:filter.Limit]
+	}
 	return out, nil
 }
 

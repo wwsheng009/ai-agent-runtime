@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"strings"
+
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
 // Supervised-suspension durability gate (design §6.13, I9: 探测即降级).
@@ -146,7 +148,10 @@ func (a *Agent) reportSuspensionDegraded(ctx context.Context, sessionID, reason 
 		"reason":            reason,
 		"severity":          "warning",
 	}
-	a.emitRuntimeEvent("subagent.suspension.unavailable", sessionID, SpawnSubagentsToolName, payload)
+	// 发射点只引用常量：事件名散落成裸字面量时，注册表与发射点之间没有机械
+	// 约束，漏登记的症状只是"前端没反应"（见 internal/events/contract_test.go
+	// 的扫描门禁）。
+	a.emitRuntimeEvent(runtimeevents.EventSubagentSuspensionUnavailable, sessionID, SpawnSubagentsToolName, payload)
 
 	if projector == nil {
 		return

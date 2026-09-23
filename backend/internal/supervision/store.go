@@ -55,7 +55,24 @@ type Store interface {
 	InsertWakePending(ctx context.Context, w WakePending) error
 	ListWakePending(ctx context.Context, filter WakeFilter) ([]WakePending, error)
 	ClaimWakePending(ctx context.Context, wakeID, claimedBy string, at time.Time) (bool, error)
+	// ReleaseWakePending returns a claimed-but-not-delivered wake to the
+	// pending queue (plan C2-5 / A6): a resume deferred by the capacity gate
+	// must stay durable and keep its FIFO position instead of being dropped.
+	// Only the claim owner may release; a concurrent drainer's claim is left
+	// untouched. Reports whether a row was actually returned to pending.
+	ReleaseWakePending(ctx context.Context, wakeID, claimedBy string) (bool, error)
 	ResolveWakePending(ctx context.Context, wakeID string) error
+	// IsWakeDelivered reports whether a notify_key was already delivered
+	// (C2-4 #15 / B4). An empty key reports false: legacy wakes without an
+	// idempotency key keep the coalescing-only behavior.
+	IsWakeDelivered(ctx context.Context, notifyKey string) (bool, error)
+	// MarkWakeDelivered records a successful delivery. Recording the same key
+	// twice must not error (the first delivery wins).
+	MarkWakeDelivered(ctx context.Context, d WakeDelivered) error
+	// PruneWakeDelivered deletes delivery-ledger rows older than the cutoff
+	// and reports how many were removed (retention, plan C4-2). A no-op is
+	// acceptable for stores without retention pressure.
+	PruneWakeDelivered(ctx context.Context, before time.Time) (int64, error)
 
 	// --- Wake budget claims (doc 6.5 rule 4, plan P1-6) ---
 

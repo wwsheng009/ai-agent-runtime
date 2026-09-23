@@ -245,6 +245,7 @@ func TestSubagentAuditEventChannelRegistrations(t *testing.T) {
 		{"batch_canceled", events.EventSubagentBatchCanceled, dualChannel},
 		{"batch_timed_out", events.EventSubagentBatchTimedOut, dualChannel},
 		{"batch_orphaned", events.EventSubagentBatchOrphaned, dualChannel},
+		{"suspension_unavailable", events.EventSubagentSuspensionUnavailable, dualChannel},
 	}
 	for _, tc := range cases {
 		if strings.TrimSpace(tc.eventType) == "" || tc.eventType != strings.TrimSpace(tc.eventType) {

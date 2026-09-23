@@ -7563,6 +7563,20 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			Tag:    "[subagent]",
 			Title:  fmt.Sprintf("denied %s", payloadStringValue(event.Payload["reason"])),
 		}, "")
+	case runtimeevents.EventSubagentSuspensionUnavailable:
+		// I9 降级告警（方案 §6.13）：探测不到 durable store 时禁止挂起、回退
+		// legacy 同步路径。回退是安全动作，但必须让用户在时间线上看见——否则
+		// "本次没有挂起"与"挂起能力坏了"在对话流里无法区分。
+		title := "suspension unavailable"
+		if reason := strings.TrimSpace(payloadStringValue(event.Payload["reason"])); reason != "" {
+			title += ": " + reason
+		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind:   cell.TimelineTeam,
+			Status: cell.StatusInfo,
+			Tag:    "[subagents]",
+			Title:  title,
+		}, "")
 	case agentcontrol.EventAgentReclaimed:
 		// P2-8 方案 4 的人读面：配额驱逐在时间线上留一行中文说明，操作者不必自己
 		// 翻译 `session_terminal` 之类的契约值；机器可读计数仍在 payload 的

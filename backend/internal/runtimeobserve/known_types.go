@@ -221,6 +221,7 @@ func buildKnownEventTypes() map[string]bool {
 		"subagent.batch.canceled",              // events.EventSubagentBatchCanceled
 		"subagent.batch.timed_out",             // events.EventSubagentBatchTimedOut
 		"subagent.batch.orphaned",              // events.EventSubagentBatchOrphaned
+		"subagent.suspension.unavailable",      // events.EventSubagentSuspensionUnavailable（agent/suspension_gate.go，I9 降级告警）
 		"completion.requirement_recovery",      // agent/loop.go
 		"context.preflight.started",            // agent/loop.go
 		"context.preflight.compacted",          // agent/loop.go

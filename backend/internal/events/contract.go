@@ -155,6 +155,13 @@ var runtimeEventContracts = []Contract{
 	{Type: EventSubagentBatchTimedOut, Channels: ChannelSessionStore | ChannelTailOnly},
 	{Type: EventSubagentBatchOrphaned, Channels: ChannelSessionStore | ChannelTailOnly},
 
+	// 挂起不可用的降级告警（方案 §6.13 / I9；常量见 subagent_audit_events.go）。
+	// 走 A+D 与批次失败态同理：它是"能力降级"的边沿信号，既要落盘供事后解释
+	// "这个会话为什么不再挂起"，也要在回合末尾巴帧里让用户看到——降级本身是
+	// 安全动作，但**静默降级**会让"没有挂起事件"与"挂起功能坏了"无法区分。
+	// 每次 (session, reason) 只发一次，落盘量有上界。
+	{Type: EventSubagentSuspensionUnavailable, Channels: ChannelSessionStore | ChannelTailOnly},
+
 	// ---- 已登记、当前无 chat 侧通道 ----
 	// chat/events.go 常量（其中 tool_started/tool_finished 是 tool.requested/
 	// tool.completed 落库时的映射结果，作为「入站类型」没有自己的通道）。

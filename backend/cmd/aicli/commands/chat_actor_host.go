@@ -791,6 +791,14 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 	}
 	h.supervisionWake = &supervision.WakeConsumer{
 		Wakes: h.Supervision.Wakes,
+		// A6：resume = 起 turn，先过同一套门控（MaxConcurrent / MaxDepth）。
+		// 瞬时容量（agents.maxThreads 槽位占满）⇒ 排队 + 位次，边界见
+		// supervision.ResumeQueuePolicy；静态策略（深度越界）不可恢复，禁止
+		// 排队，改为放行 + digest 的 resume_gate 行显式告知本回合不得再派发。
+		ResumeCapacity: supervision.CombineResumeProbes(
+			supervision.NewSubagentCapacityProbe(h.subagentCapacityView),
+			supervision.NewResumePolicyGate(h.resumePolicyView),
+		),
 		Runnable: func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool {
 			if h == nil || h.RuntimeStore == nil {
 				return false
@@ -1732,6 +1740,59 @@ func (h *localChatRuntimeHost) subagentGlobalLimiter(maxThreads int) *agent.Suba
 		h.subagentLimiter = agent.NewSubagentConcurrencyLimiter(maxThreads)
 	}
 	return h.subagentLimiter
+}
+
+// subagentCapacityView 返回 A6 resume 门控需要的进程级子代理准入瞬时视图。
+// 只读缓存字段：探测不得创建 limiter（未配置 agents.maxThreads 时 limiter 为
+// nil ⇒ 视图 Limit=0 ⇒ 放行），也不得触发配置解析——它跑在父会话 runnable
+// 转换路径上，必须是纯内存读取。
+func (h *localChatRuntimeHost) subagentCapacityView() supervision.SubagentCapacityView {
+	if h == nil {
+		return supervision.SubagentCapacityView{}
+	}
+	h.subagentLimiterMu.Lock()
+	limiter := h.subagentLimiter
+	h.subagentLimiterMu.Unlock()
+	if limiter == nil {
+		return supervision.SubagentCapacityView{}
+	}
+	return supervision.SubagentCapacityView{
+		Limit:    limiter.Limit(),
+		InFlight: limiter.InFlight(),
+	}
+}
+
+// resumePolicyView 返回 A6 的**静态**派发门控视图（深度）。口径与
+// applyLocalChildDepthPolicy 完全一致：depth >= ceiling 的子会话在重建时会被
+// 禁掉 spawn_*，因此这类会话 resume 出来的回合同样不能再派发。
+//
+// 命中时**不拒绝 resume**（纯汇报型回合不需要 spawn，拒绝会让它永久排队并不断
+// 升级）：放行并由 digest 的 resume_gate 行显式告知本回合不得再派发。查询失败
+// 一律 fail-open——门控不可读不得卡住 supervision。
+func (h *localChatRuntimeHost) resumePolicyView(ctx context.Context, req supervision.ResumeCapacityRequest) supervision.ResumePolicyView {
+	if h == nil || h.SessionStore == nil {
+		return supervision.ResumePolicyView{}
+	}
+	parentSessionID := strings.TrimSpace(req.TargetParentSessionID)
+	if parentSessionID == "" {
+		return supervision.ResumePolicyView{}
+	}
+	ceiling := localAgentDepthCeiling(h.RuntimeConfig, h)
+	if ceiling <= 0 {
+		return supervision.ResumePolicyView{}
+	}
+	session, err := h.SessionStore.Load(ctx, parentSessionID)
+	if err != nil || session == nil {
+		return supervision.ResumePolicyView{}
+	}
+	if depth := localAgentSessionDepth(session); depth >= ceiling {
+		return supervision.ResumePolicyView{
+			Restricted: true,
+			Reason:     supervision.ResumeGateDepth,
+			Detail:     fmt.Sprintf("depth=%d max=%d", depth, ceiling),
+		}
+	}
+	return supervision.ResumePolicyView{}
 }
 
 func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runtimeConfig *runtimecfg.RuntimeConfig, workspaceRoot string, childAgentType string, requestedModel string, requestedRoute ...string) *agent.Agent {

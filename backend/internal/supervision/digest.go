@@ -89,6 +89,14 @@ type Digest struct {
 	Progress []ProgressSummary `json:"progress,omitempty"`
 	// ProgressTruncated marks that the rollup itself was bounded (budget).
 	ProgressTruncated bool `json:"progress_truncated,omitempty"`
+	// ResumeQueue is the durable resume FIFO waiting for this parent (plan
+	// C2-5 / A6: 撞容量门控 ⇒ 排队而非丢弃，digest 显示排队位次). Nil when
+	// nothing is queued, which keeps unwired hosts byte-identical.
+	ResumeQueue *ResumeQueueSummary `json:"resume_queue,omitempty"`
+	// ResumeGate is the A6 static dispatch restriction carried by this resume
+	// (深度 / 可见性：本回合不得再派发). Nil for ordinary digests, which keeps
+	// unwired hosts byte-identical.
+	ResumeGate *ResumeGateNotice `json:"resume_gate,omitempty"`
 	// Full text block injected into the parent turn.
 	Text string `json:"text,omitempty"`
 }
@@ -209,6 +217,7 @@ func BuildDigest(ctx context.Context, store Store, req DigestRequest) (*Digest, 
 	}
 	digest.Items = items
 	digest.Progress, digest.ProgressTruncated = buildDigestProgress(ctx, req, limit, now)
+	digest.ResumeQueue = buildResumeQueueSummary(ctx, store, req, now)
 	digest.Text = formatDigestText(digest)
 	return digest, nil
 }
@@ -259,6 +268,25 @@ func formatDigestText(digest *Digest) string {
 	if digest.Truncated {
 		fmt.Fprintf(&b, "truncated: true (use supervision_snapshot(after_seq=%d) for full details)\n", digest.NextSeq)
 	}
+	if q := digest.ResumeQueue; q != nil && q.Pending > 0 {
+		line := fmt.Sprintf("resume_queue: 排队中 %d 条，位次 %d/%d", q.Pending, q.HeadPosition, q.Pending)
+		if q.OldestWaitedSeconds > 0 {
+			line += fmt.Sprintf("，最早已等待 %s", (time.Duration(q.OldestWaitedSeconds) * time.Second).String())
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	if gate := digest.ResumeGate; gate != nil {
+		line := "resume_gate: " + strings.TrimSpace(gate.Reason)
+		if detail := strings.TrimSpace(gate.Detail); detail != "" {
+			line += "（" + detail + "）"
+		}
+		// 静态策略不可恢复：这里不排队、不升级，只把"本回合不得再派发"讲清楚；
+		// 派发面（深度校验 / spawn 工具面）仍是硬拒绝点。
+		line += "：本回合不得再派发子任务，请就地收尾或直接汇报"
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
 	if len(digest.Items) > 0 {
 		b.WriteString("\n")
 	}
@@ -308,4 +336,69 @@ func formatDigestText(digest *Digest) string {
 		b.WriteString(block)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// ResumeQueueSummary is the parent-facing view of the durable resume FIFO
+// (plan C2-5 / A6). It answers "am I queued, and for how long" from the same
+// rows the resume dispatcher will claim.
+type ResumeQueueSummary struct {
+	// Pending is how many unclaimed wakes are waiting for this parent.
+	Pending int `json:"pending"`
+	// HeadPosition is the FIFO position of the next resume to be claimed. The
+	// queue is ordered by created_at ASC, so the head is position 1 of Pending.
+	HeadPosition int `json:"head_position"`
+	// OldestWaitedSeconds is how long the oldest queued wake has been waiting.
+	OldestWaitedSeconds int64 `json:"oldest_waited_seconds,omitempty"`
+}
+
+// ResumeGateNotice is the A6 static dispatch restriction attached to a resume
+// (depth / visibility). It is deliberately a notice, not a queue entry: the
+// restriction cannot be waited out, and hard enforcement stays at the dispatch
+// point, so the resume must still be delivered.
+type ResumeGateNotice struct {
+	// Reason uses the ResumeGate* vocabulary (depth / visibility).
+	Reason string `json:"reason,omitempty"`
+	// Detail is the host's explanation (e.g. depth=1 max=1 / read_only).
+	Detail string `json:"detail,omitempty"`
+}
+
+// SetResumeGate attaches the restriction and re-renders Text so the notice
+// reaches every consumer (the resume prompt inlines Digest.Text, and the JSON
+// form carries the structured fields). Callers must set it before delivery.
+func (d *Digest) SetResumeGate(reason, detail string) {
+	if d == nil {
+		return
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = ResumeGateVisibility
+	}
+	d.ResumeGate = &ResumeGateNotice{Reason: reason, Detail: detail}
+	d.Text = formatDigestText(d)
+}
+
+// buildResumeQueueSummary projects the pending resume FIFO for the digest's
+// target parent. It is computed live from the unclaimed wake rows at build
+// time on purpose: the position can never go stale (a delivered resume leaves
+// the queue and the line disappears with it) and no extra durable state has to
+// be reconciled across restarts. Best-effort by design: a store read failure
+// must not cost the parent its lifecycle digest, and an empty queue renders
+// nothing.
+func buildResumeQueueSummary(ctx context.Context, store Store, req DigestRequest, now time.Time) *ResumeQueueSummary {
+	if store == nil || strings.TrimSpace(req.TargetParentSessionID) == "" {
+		return nil
+	}
+	pending, err := store.ListWakePending(ctx, WakeFilter{
+		RootScopeID:           strings.TrimSpace(req.RootScopeID),
+		TargetParentSessionID: strings.TrimSpace(req.TargetParentSessionID),
+		TargetParentTeamID:    strings.TrimSpace(req.TargetParentTeamID),
+		UnclaimedOnly:         true,
+	})
+	if err != nil || len(pending) == 0 {
+		return nil
+	}
+	summary := &ResumeQueueSummary{Pending: len(pending), HeadPosition: 1}
+	if oldest := earliestWakeCreatedAt(pending); !oldest.IsZero() && now.After(oldest) {
+		summary.OldestWaitedSeconds = int64(now.Sub(oldest) / time.Second)
+	}
+	return summary
 }

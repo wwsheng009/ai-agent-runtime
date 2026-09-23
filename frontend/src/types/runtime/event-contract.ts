@@ -100,6 +100,7 @@ export type RuntimeEventType =
   | "subagent.requires_write"
   | "subagent.route.resolved"
   | "subagent.started"
+  | "subagent.suspension.unavailable"
   | "subagent.task.completed"
   | "subagent.task.started"
   | "tool.completed"
@@ -198,6 +199,7 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "subagent.requires_write": [],
   "subagent.route.resolved": ["session_store", "tail_only"],
   "subagent.started": ["tail_only"],
+  "subagent.suspension.unavailable": ["session_store", "tail_only"],
   "subagent.task.completed": ["tail_only"],
   "subagent.task.started": ["tail_only"],
   "tool.completed": ["session_store", "chat_bridge"],
@@ -249,6 +251,7 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
   "subagent.batch.timed_out",
   "subagent.completed",
   "subagent.route.resolved",
+  "subagent.suspension.unavailable",
   "tool.completed",
   "tool.requested",
 ];
@@ -274,6 +277,7 @@ export const RUNTIME_EVENT_TAIL_ONLY_TYPES: readonly RuntimeEventType[] = [
   "subagent.completed",
   "subagent.route.resolved",
   "subagent.started",
+  "subagent.suspension.unavailable",
   "subagent.task.completed",
   "subagent.task.started",
 ];

@@ -285,3 +285,25 @@ func TestSubagentConcurrencyLimiterNilMeansUnlimited(t *testing.T) {
 	require.Nil(t, NewSubagentConcurrencyLimiter(-1))
 	require.Equal(t, 2, NewSubagentConcurrencyLimiter(2).Limit())
 }
+
+// TestSubagentConcurrencyLimiterInFlightIsObservable pins the read-only view the
+// A6 resume gate depends on: the count must move with acquire/release, and a nil
+// (unlimited) limiter must never look "saturated" — unlimited is Limit()==0, and
+// a probe that read only InFlight would otherwise deny every resume.
+func TestSubagentConcurrencyLimiterInFlightIsObservable(t *testing.T) {
+	limiter := NewSubagentConcurrencyLimiter(2)
+	require.Equal(t, 0, limiter.InFlight())
+
+	require.NoError(t, limiter.Acquire(context.Background()))
+	require.Equal(t, 1, limiter.InFlight())
+	require.NoError(t, limiter.Acquire(context.Background()))
+	require.Equal(t, 2, limiter.InFlight(), "saturated: InFlight == Limit")
+	require.Equal(t, limiter.Limit(), limiter.InFlight())
+
+	limiter.Release()
+	require.Equal(t, 1, limiter.InFlight(), "release must free exactly one slot")
+
+	var nilLimiter *SubagentConcurrencyLimiter
+	require.Equal(t, 0, nilLimiter.InFlight())
+	require.Equal(t, 0, nilLimiter.Limit(), "unlimited is Limit()==0, not InFlight>=Limit")
+}

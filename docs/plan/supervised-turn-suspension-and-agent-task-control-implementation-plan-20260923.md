@@ -807,3 +807,84 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 ### 12.4 测试落点核验
 
 §7.1 列出的测试文件均在仓库中**实际存在**（按目录枚举确认），因此施工以"**扩展既有测试文件**"为默认策略，避免新增孤立测试。
+
+---
+
+## 13. 实施注记（A6 口径与偏差登记，2026-09-23）
+
+> 本节只登记**已落地事实**与**显式偏差**，不改写 §3 的 AC 文本；C2-5 第 295 行与 AC-P1-5a 的口径以本节为准。
+
+### 13.1 A6 已落地事实（含锚点）
+
+| 事实 | 锚点 |
+| --- | --- |
+| 门控位置＝resume dispatcher 的认领路径（claim → 门控 → deliver），未走旁路 | `backend/internal/supervision/wake_consumer.go:79`（`MaybeWakeParent`）；生产调用点 5 处：CLI `chat_actor_host.go:1062`、`chat_supervision.go:381`；API `session_runtime_support.go:1263`、`supervision_batch_projector.go:137`、`supervision_handlers.go:844`。`DrainRunnable` 直调仅存在于测试 |
+| 并发门控（`MaxConcurrent`）＝宿主注入的非阻塞 probe；读数取**子代理 in-flight 槽位**（挂起态不占额度，AC-P1-5c） | `backend/internal/supervision/resume_capacity.go:126`（`NewSubagentCapacityProbe`）；宿主侧 `agent.SubagentConcurrencyLimiter.InFlight()` |
+| 探测错误 ⇒ **fail-open**（放行），限流器不可读不得卡死 supervision | 同上（`NewSubagentCapacityProbe` / `CombineResumeProbes`：探测 error ⇒ 跳过/放行） |
+| 超限 ⇒ 有界 FIFO 排队：**不丢 wake**、保留 FIFO 位次（只归还 claim，绝不 Resolve 未投递行） | `wake_consumer.go:196`（`deferResume`）；`store.go:58-63` / `sqlite_store.go:1319`（`ReleaseWakePending`，仅 claim owner 可归还） |
+| digest 显示**排队位次**（AC-P1-5a 后半句） | `backend/internal/supervision/digest.go`：`Digest.ResumeQueue` + `resume_queue: 排队中 N 条，位次 1/N，最早已等待 …`；实时读未认领行（drain 后自动消失，跨重启一致） |
+| 排队超时 / 队列越界 ⇒ escalate（critical + action_required，幂等单行，不静默） | `resume_capacity.go`（`ResumeQueuePolicy` / `ResumeQueueEscalation` / `resumeQueueNotification`） |
+
+### 13.2 深度 / 可见性门控（补丁前口径：显式偏差）
+
+> **2026-09-23 更新**：下列条目记录的是**补丁前**的实施口径。深度门控现已实现（受限放行 + digest `resume_gate` 行），可见性仍为显式偏差。**当前口径以 §13.5 为准。**
+
+- **文档字面**（设计稿 §6.1 步骤 5、G12、A6；本文件 C2-5 第 295 行、AC-P1-5a）：resume 视为"起 turn"，先过并发 / 深度（`MaxDepth=1(+1 hard/expert)`）/ 可见性（`shouldExposeSpawnSubagents`）门控。
+- **实施口径**：准入面只对**并发**拒绝；深度 / 可见性**不在 resume 投递前拒绝**。
+- **理由**：`delegationPolicy` / `shouldExposeSpawnSubagents` 是**静态策略、不可恢复**；据此拒绝会让**纯汇报型 resume**（子任务已终态、父只需收尾汇报）永久排队并持续升级 —— 即 G12 自述的第二种失败模式（"永久排队变相死锁"）。
+- **实际保护未缺失**：resume 回合若要继续派发，仍受同一套门控 —— 深度在**派发面**校验（`backend/internal/agent/scheduler.go:434-450`，hard/expert +1），可见性在**工具面**校验（`backend/internal/agent/agent.go:564-594`），超限返回 `complete_locally_or_use_spawn_team` 语义。
+- **代码注释**：`backend/internal/supervision/resume_capacity.go:113-115` 已写明该边界。
+- **待拍板（不阻塞）**：若要严格对齐字面，可选等效实现"resume 回合内禁止派发 + digest 显式告知"，需 per-turn 派发禁令注入点（当前 spawn 工具面在 actor 构建期计算）。
+
+### 13.3 口径外边界（非 A6 范围）
+
+| 边界 | 事实 | 判定 |
+| --- | --- | --- |
+| 父 turn 结束自检（`MaybeSelfCheckParent`） | 只过 `Runnable`（busy）门禁，**不过并发门控**；digest-only、不 claim wake（`wake_self_check.go:149-189`；生产调用点 CLI `chat_actor_host.go:1074`、API `session_runtime_support.go:1293`） | 按 A6 字面（门控点＝认领路径）**不属 A6**；按"起 turn 先过并发门控"的意图属灰区，需拍板 |
+
+### 13.4 验证证据（2026-09-23 实测）
+
+- `go build ./...` exit 0；`go vet ./internal/supervision/` exit 0。
+- `go test ./internal/supervision/ -count=1` ok（含 `resume_capacity_test.go`、`resume_queue_digest_test.go` 三个 A6 用例）。
+- `go test ./internal/api/skills/ -count=1`、`go test ./cmd/aicli/commands/ -count=1` 均 ok（两宿主接线未回归）。
+
+### 13.5 补丁登记：静态策略门控（受限放行）与验证证据，2026-09-23
+
+> 本节为**当前口径**；§13.2 的“显式偏差”条目保留为补丁前历史。
+
+**口径：三类门控都进 resume 准入面，结果按“可恢复性”分档**
+
+| 门控 | 可恢复性 | 准入面结果 | wake 去向 |
+| --- | --- | --- | --- |
+| 瞬时容量 `MaxConcurrent`（子代理槽位占满） | 可恢复（等额度释放） | **defer** | 保持 pending + FIFO 位次，额度释放后同一条 wake 重新投递，绝不丢 |
+| 静态策略 `MaxDepth`（`depth >= ceiling` ⇒ 该会话重建时 spawn_* 被禁） | 不可恢复 | **受限放行（restricted）** | 照常投递并消费；digest 带 `resume_gate:` 行告知“本回合不得再派发子任务” |
+| 静态策略 可见性（`shouldExposeSpawnSubagents` / `delegationPolicy`） | 不可恢复 | **仍未进准入面（显式偏差）** | 仍由工具面硬拒绝（`backend/internal/agent/agent.go:564-594`） |
+
+- 优先级：`defer > restrict > allow`；探测报错一律 fail-open（`CombineResumeProbes`）；`nil` 探测 = 未接线 = 旧行为（回滚开关不变）。
+- 静态策略**不得转成 defer**：静态策略等不到，排队即 G12 的“永久排队变相死锁”；受限放行不产生升级通知、不占 FIFO 位次。
+
+**变更清单**
+
+| 文件 | 变更 |
+| --- | --- |
+| `backend/internal/supervision/resume_capacity.go` | `ResumeCapacityVerdict.Restricted`；`ResumePolicyView` + `NewResumePolicyGate`（永不 defer）；`CombineResumeProbes`（defer > restrict > allow，error fail-open） |
+| `backend/internal/supervision/digest.go` | `Digest.ResumeGate` / `ResumeGateNotice` / `SetResumeGate`（重渲染 `Text`）；渲染 `resume_gate: <reason>（<detail>）：本回合不得再派发子任务，请就地收尾或直接汇报` |
+| `backend/internal/supervision/wake_consumer.go` | 投递路径：`!Allowed ⇒ deferResume`；`Restricted ⇒ digest.SetResumeGate(...)` 后照常投递 |
+| `backend/internal/supervision/resume_gate_test.go`（新增） | 4 用例：永不 defer / 合并优先级与 fail-open / digest 渲染与未接线字节不变 / 端到端（受限 resume 仍投递、wake 被消费、不排队） |
+| `backend/cmd/aicli/commands/chat_actor_host.go` | `ResumeCapacity: CombineResumeProbes(容量探测, 深度策略)`；新增 `resumePolicyView`（`depth >= localAgentDepthCeiling` ⇒ restricted；查询失败 fail-open） |
+| `backend/internal/api/skills/supervision_batch_projector.go` | 同上（API 唯一 consumer 构造点，batch 终态桥与 `sessionAgentController` 共用）；新增 `resumePolicyView`（`depth >= apiAgentDepthCeiling` ⇒ restricted） |
+
+**验证证据（2026-09-23 实测）**
+
+- `gofmt -l`（4 个改动文件）无输出。
+- `go build ./...` exit 0。
+- `go test ./internal/supervision/ -count=1` ok（含新增 `resume_gate_test.go`）。
+- `go test ./internal/api/skills/ -count=1` ok（38.3s）；`go test ./cmd/aicli/commands/ -count=1` ok（136.1s）。
+- 宿主侧**深度半支**已覆盖（2026-09-23 二轮）：`TestLocalHostWiresResumePolicyDepthGate`（`cmd/aicli/commands`）/ `TestAPIHostWiresResumePolicyDepthGate`（`internal/api/skills`）各断言三组——`depth < ceiling` 不受限、`depth == ceiling` 受限放行 + `reason/detail`、会话不可读 fail-open；实测 ok（18.6s / 36.5s 含整包编译）。
+
+**可见性维度为什么不接准入面（2026-09-23 结论：不实施，维持显式偏差）**
+
+- `shouldExposeSpawnSubagents`（`backend/internal/agent/agent.go:564-594`）是 **actor 运行时谓词**：依赖 `scheduler.AllowsDelegation()` + 本轮 callWhitelist + `ToolExecutionPolicy`（`BlockDelegation` / `DeniedTools` / `AllowlistEnabled`），只有 actor 构建后才可知。宿主侧只能近似复刻（如仅看 agentdef 的 delegationPolicy），而**假受限比不告知更糟**：digest 会让本可派发的回合自我禁足。
+- 实质判定点就在工具面（`loop.go:3668` / `tool_list.go:193` / `tool_surface_binding.go:129`）：resume 会重建 actor，工具面按当时策略计算；不允许派发时 `spawn_subagents` 根本不在模型可见工具面，wake 照常投递并消费——无丢 wake / 排队 / 升级风险。
+- 验收面也不要求：AC-P1-5a（§5 表）只列并发 / 深度。
+- 若将来出现「resumed 回合误试派发」的实证，唯一健全形态是**单侧蕴含**：仅当宿主零成本确证 `delegationPolicy == disabled`（该条件下工具面必然隐藏，见 `internal/agent/spawn_subagents_policy_test.go:63-68`）才置 `Restricted=true` + `Reason=ResumeGateVisibility`（词表已预置：`resume_capacity.go:29-31`）。

@@ -156,6 +156,14 @@ func (h *Handler) supervisionWakeConsumer(scheduler *supervision.WakeScheduler) 
 	}
 	h.supervisionWake = &supervision.WakeConsumer{
 		Wakes: scheduler,
+		// A6：与 CLI 宿主同口径——resume 先过同一套门控（MaxConcurrent /
+		// MaxDepth）。瞬时容量（槽位占满）⇒ 排队 + 位次，不丢 wake；静态策略
+		//（深度越界）不可恢复，禁止排队，改为放行 + digest 的 resume_gate 行
+		// 显式告知本回合不得再派发。
+		ResumeCapacity: supervision.CombineResumeProbes(
+			supervision.NewSubagentCapacityProbe(h.subagentCapacityView),
+			supervision.NewResumePolicyGate(h.resumePolicyView),
+		),
 		Runnable: func(_ context.Context, _, parentSessionID, _ string) bool {
 			actor := h.apiSessionActor(parentSessionID)
 			if actor == nil {
@@ -173,6 +181,39 @@ func (h *Handler) supervisionWakeConsumer(scheduler *supervision.WakeScheduler) 
 		},
 	}
 	return h.supervisionWake
+}
+
+// resumePolicyView 返回 A6 的**静态**派发门控视图（深度）。口径与
+// applyAPIAgentChildDepthPolicy 完全一致：depth >= ceiling 的会话在重建时会被
+// 禁掉 spawn_*，因此这类会话 resume 出来的回合同样不能再派发。
+//
+// 命中时**不拒绝 resume**（纯汇报型回合不需要 spawn，拒绝会让它永久排队并不断
+// 升级）：放行并由 digest 的 resume_gate 行显式告知本回合不得再派发。查询失败
+// 一律 fail-open——门控不可读不得卡住 supervision。
+func (h *Handler) resumePolicyView(ctx context.Context, req supervision.ResumeCapacityRequest) supervision.ResumePolicyView {
+	if h == nil || h.sessionManager == nil {
+		return supervision.ResumePolicyView{}
+	}
+	parentSessionID := strings.TrimSpace(req.TargetParentSessionID)
+	if parentSessionID == "" {
+		return supervision.ResumePolicyView{}
+	}
+	ceiling := apiAgentDepthCeiling(h.runtimeConfig)
+	if ceiling <= 0 {
+		return supervision.ResumePolicyView{}
+	}
+	session, err := h.sessionManager.Get(ctx, parentSessionID)
+	if err != nil || session == nil {
+		return supervision.ResumePolicyView{}
+	}
+	if depth := apiAgentSessionDepth(session); depth >= ceiling {
+		return supervision.ResumePolicyView{
+			Restricted: true,
+			Reason:     supervision.ResumeGateDepth,
+			Detail:     fmt.Sprintf("depth=%d max=%d", depth, ceiling),
+		}
+	}
+	return supervision.ResumePolicyView{}
 }
 
 // apiSessionActor 解析/按需创建会话 actor（沿用 hub.Get 命中优先的口径：已存在

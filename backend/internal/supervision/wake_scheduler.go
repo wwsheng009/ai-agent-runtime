@@ -2,8 +2,11 @@ package supervision
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +41,49 @@ const (
 // WakeBudgetMode selects where auto-wake budget claims are counted (P1-6 方案 2).
 type WakeBudgetMode string
 
+// Notification families behind the idempotency key (plan C2-4 #15 / B4,
+// doc 6.6). The kind is part of notify_key, so the same obligation can be
+// reported once per family without one family suppressing another.
+const (
+	// WakeEventTerminal marks a terminal obligation transition. Terminal
+	// notifications dedup by terminal_epoch (WakeRequest.EventSeq) and are
+	// delivered exactly once per epoch.
+	WakeEventTerminal = "terminal"
+	// WakeEventProgress marks a progress rollup. Progress notifications dedup
+	// by progress_seq (WakeRequest.EventSeq): the same seq never wakes twice.
+	WakeEventProgress = "progress"
+	// WakeEventApproval marks an approval request that gates a child; it is
+	// not bounded by the progress budget (doc 6.14 / EC-A4).
+	WakeEventApproval = "approval"
+	// WakeEventLifecycle is the legacy lifecycle family (coalesced by dedup
+	// key). Wakes that carry no structured identity keep this classification
+	// implicitly by leaving EventKind empty.
+	WakeEventLifecycle = "lifecycle"
+)
+
+// DeriveNotifyKey computes the stable notification idempotency key
+// notify_key = hash(turn_id, obligation_id, event_kind, terminal_epoch|
+// progress_seq) (doc 6.6 / plan C2-4). It is a pure function of the event
+// identity, so a retried delivery (requeueSupervisionWake) reuses the same key
+// and the consumer can dedup by it. An event with neither a turn nor an
+// obligation id yields an empty key: those wakes keep the legacy
+// coalescing-only behavior.
+func DeriveNotifyKey(turnID, obligationID, eventKind string, eventSeq int64) string {
+	turnID = strings.TrimSpace(turnID)
+	obligationID = strings.TrimSpace(obligationID)
+	eventKind = strings.TrimSpace(eventKind)
+	if turnID == "" && obligationID == "" {
+		return ""
+	}
+	if eventKind == "" {
+		eventKind = WakeEventLifecycle
+	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		turnID, obligationID, eventKind, strconv.FormatInt(eventSeq, 10),
+	}, "|")))
+	return "nk-" + hex.EncodeToString(sum[:12])
+}
+
 const (
 	// WakeBudgetModeMemory keeps the rolling window in process memory: the
 	// historical behavior where every process gets its own budget and a
@@ -57,6 +103,23 @@ type WakeRequest struct {
 	TargetParentTeamID    string
 	WakeReason            string
 	NotificationSeq       int64
+	// TurnID optionally names the parked turn this wake resumes (plan C2-1).
+	// Empty falls back to the scheduler's TurnHint resolver; when both are
+	// empty the wake keeps the legacy "new turn" delivery semantics.
+	TurnID string
+	// ObligationID / EventKind / EventSeq describe the ledger event behind the
+	// wake and feed the stable notify key (plan C2-4 #15 / B4). EventSeq is
+	// the terminal_epoch for terminal notifications and the progress_seq for
+	// progress notifications (doc 6.6); a retry/reassignment of the same
+	// obligation must increment it so a *new* terminal state is delivered
+	// while a replay of the old one stays deduplicated.
+	ObligationID string
+	EventKind    string
+	EventSeq     int64
+	// NotifyKey optionally overrides the derived idempotency key. Hosts that
+	// already published a key (for example across a retry) pass it verbatim so
+	// the duplicate is recognised.
+	NotifyKey string
 }
 
 // WakeResult reports how ScheduleWake coalesced the event.
@@ -64,6 +127,13 @@ type WakeResult struct {
 	WakeID   string `json:"wake_id,omitempty"`
 	DedupKey string `json:"dedup_key,omitempty"`
 	Seq      int64  `json:"seq,omitempty"`
+	// NotifyKey is the stable idempotency key of the scheduled event
+	// (plan C2-4 #15). Empty for legacy wakes without a structured identity.
+	NotifyKey string `json:"notify_key,omitempty"`
+	// Suppressed is true when the same notify key was already delivered: the
+	// event must not start a second resume (AC-P1-4a). Callers treat it as
+	// success; nothing was persisted.
+	Suppressed bool `json:"suppressed,omitempty"`
 	// Coalesced is true when an unclaimed wake for the same root+parent+
 	// reason already existed (multiple child exceptions => one parent turn,
 	// doc 6.5 rule 1).
@@ -113,6 +183,18 @@ type WakeSchedulerConfig struct {
 	// notification, so this rollup is the only content its wake can deliver;
 	// nil keeps the wake digest byte-identical to the pre-P0-B output.
 	Progress ProgressSource
+	// TurnHint optionally resolves the parked turn id of a parent session when
+	// a wake is scheduled, so the wake can resume that same turn (plan C2-1,
+	// I3). nil keeps the legacy "new turn" wake.
+	TurnHint TurnHintFunc
+	// Obligations optionally supplies the ledger projection used to assemble
+	// the same-turn resume context (plan C2-1 终局综合 / AC-P1-1d). nil keeps
+	// the legacy wake prompt. Hosts normally wire it later via
+	// SetObligationSource, once their durable batch control plane exists.
+	Obligations ObligationSource
+	// ResumeBudget bounds that projection. Zero values fall back to
+	// DefaultConfig() (DigestMaxItems=20 / DigestMaxChars=4000).
+	ResumeBudget ResumeBudget
 }
 
 // WakeScheduler subscribes the lifecycle inbox to the parent turn start
@@ -142,6 +224,14 @@ type WakeScheduler struct {
 	// (see SetProgressSource), and drains may already run concurrently.
 	progressMu sync.Mutex
 	progress   ProgressSource
+	// obligationsMu guards the lazily wired resume projection (plan C2-1).
+	obligationsMu sync.Mutex
+	obligations   ObligationSource
+	// turnHint resolves the parked turn id at scheduling time (see
+	// WakeSchedulerConfig.TurnHint).
+	turnHint TurnHintFunc
+	// resumeBudget bounds the assembled resume context (AC-P1-1d).
+	resumeBudget ResumeBudget
 }
 
 // NewWakeScheduler creates a wake scheduler over a durable store.
@@ -188,6 +278,9 @@ func NewWakeScheduler(store Store, config WakeSchedulerConfig) *WakeScheduler {
 		now:              timeNow,
 		hostCapabilities: config.HostCapabilities,
 		progress:         config.Progress,
+		obligations:      config.Obligations,
+		turnHint:         config.TurnHint,
+		resumeBudget:     config.ResumeBudget,
 	}
 }
 
@@ -212,6 +305,86 @@ func (s *WakeScheduler) progressSource() ProgressSource {
 	s.progressMu.Lock()
 	defer s.progressMu.Unlock()
 	return s.progress
+}
+
+// SetObligationSource wires (or clears) the ledger projection used to assemble
+// the same-turn resume context (plan C2-1). Hosts call it once their durable
+// batch control plane exists; a nil source keeps the legacy wake prompt.
+func (s *WakeScheduler) SetObligationSource(source ObligationSource) {
+	if s == nil {
+		return
+	}
+	s.obligationsMu.Lock()
+	s.obligations = source
+	s.obligationsMu.Unlock()
+}
+
+// obligationSource reads the wired ledger projection; nil means unwired, which
+// keeps the wake on the legacy "new turn" path.
+func (s *WakeScheduler) obligationSource() ObligationSource {
+	if s == nil {
+		return nil
+	}
+	s.obligationsMu.Lock()
+	defer s.obligationsMu.Unlock()
+	return s.obligations
+}
+
+// SetTurnHint wires (or clears) the parked-turn resolver used when a wake is
+// scheduled (plan C2-1: 通知携带 turn_id).
+func (s *WakeScheduler) SetTurnHint(hint TurnHintFunc) {
+	if s == nil {
+		return
+	}
+	s.obligationsMu.Lock()
+	s.turnHint = hint
+	s.obligationsMu.Unlock()
+}
+
+// turnHintFor evaluates the parked-turn resolver defensively: a resolver panic
+// or empty answer must never break wake scheduling (the wake itself is the
+// durable guarantee that the event is not lost).
+func (s *WakeScheduler) turnHintFor(ctx context.Context, parentSessionID string) (turnID string) {
+	if s == nil {
+		return ""
+	}
+	s.obligationsMu.Lock()
+	hint := s.turnHint
+	s.obligationsMu.Unlock()
+	if hint == nil || strings.TrimSpace(parentSessionID) == "" {
+		return ""
+	}
+	defer func() {
+		if recover() != nil {
+			turnID = ""
+		}
+	}()
+	return strings.TrimSpace(hint(ctx, parentSessionID))
+}
+
+// ResumeBudgetValue reports the effective resume-context budget
+// (AC-P1-1d numbers when unset).
+func (s *WakeScheduler) ResumeBudgetValue() ResumeBudget {
+	if s == nil {
+		return ResumeBudget{}.withDefaults()
+	}
+	return s.resumeBudget.withDefaults()
+}
+
+// BuildResumeContext assembles the same-turn resume payload for a claimed
+// wake, using the scheduler's wired progress + obligation sources and the
+// configured budget (plan C2-1: AutoWakePrompt 改为携带 rollup digest 的 resume
+// 上下文). It never returns nil and never fails: a missing projection degrades
+// to the legacy prompt instead of dropping the wake.
+func (s *WakeScheduler) BuildResumeContext(ctx context.Context, req ResumeContextRequest) *ResumeContext {
+	if s == nil {
+		return nil
+	}
+	req.Budget = s.resumeBudget
+	if strings.TrimSpace(req.TurnID) == "" {
+		req.TurnID = s.turnHintFor(ctx, req.ParentSessionID)
+	}
+	return BuildResumeContext(ctx, s.obligationSource(), s.progressSource(), req)
 }
 
 // hostCapabilitySnapshot evaluates the declared capabilities at digest build
@@ -242,6 +415,37 @@ func (s *WakeScheduler) ScheduleWake(ctx context.Context, req WakeRequest) (Wake
 		strings.TrimSpace(req.TargetParentTeamID),
 		strings.TrimSpace(req.WakeReason),
 	}, "|")
+	// The parked turn is carried as a hint only (plan C2-1). It is resolved
+	// here, at scheduling time, and deliberately kept out of the dedup key so
+	// coalescing still collapses repeated events for the same parent + reason
+	// into one wake (doc 6.5 rule 1); the delivery path re-derives the
+	// authoritative turn id from the obligation ledger (I3 保底).
+	turnID := strings.TrimSpace(req.TurnID)
+	if turnID == "" {
+		turnID = s.turnHintFor(ctx, req.TargetParentSessionID)
+	}
+	// The notification idempotency key is derived from the event identity
+	// (plan C2-4 #15 / B4). A replay of an event that was already delivered
+	// must not produce a second resume, so the check happens before the row is
+	// persisted; the durable insert repeats the predicate so concurrent
+	// schedulers cannot both win (sqlite_store.InsertWakePending).
+	notifyKey := strings.TrimSpace(req.NotifyKey)
+	if notifyKey == "" {
+		notifyKey = DeriveNotifyKey(turnID, req.ObligationID, req.EventKind, req.EventSeq)
+	}
+	if notifyKey != "" {
+		// Fail open on a read error: a store hiccup must not silence the
+		// parent. The delivery-time check (WakeConsumer) re-applies the same
+		// idempotency rule before a turn is actually started.
+		if delivered, err := s.store.IsWakeDelivered(ctx, notifyKey); err == nil && delivered {
+			return WakeResult{
+				DedupKey:   dedupKey,
+				Seq:        req.NotificationSeq,
+				NotifyKey:  notifyKey,
+				Suppressed: true,
+			}, nil
+		}
+	}
 	w := WakePending{
 		WakeID:                newWakeID(),
 		RootScopeID:           strings.TrimSpace(req.RootScopeID),
@@ -249,6 +453,11 @@ func (s *WakeScheduler) ScheduleWake(ctx context.Context, req WakeRequest) (Wake
 		TargetParentTeamID:    strings.TrimSpace(req.TargetParentTeamID),
 		WakeReason:            strings.TrimSpace(req.WakeReason),
 		NotificationSeq:       req.NotificationSeq,
+		TurnID:                turnID,
+		NotifyKey:             notifyKey,
+		EventKind:             strings.TrimSpace(req.EventKind),
+		ObligationID:          strings.TrimSpace(req.ObligationID),
+		EventSeq:              req.EventSeq,
 		DedupKey:              dedupKey,
 		CreatedAt:             s.now().UTC(),
 	}
@@ -257,7 +466,12 @@ func (s *WakeScheduler) ScheduleWake(ctx context.Context, req WakeRequest) (Wake
 	}
 
 	// Detect coalescing by listing the parent's pending wakes.
-	result := WakeResult{WakeID: w.WakeID, DedupKey: dedupKey, Seq: req.NotificationSeq}
+	result := WakeResult{
+		WakeID:    w.WakeID,
+		DedupKey:  dedupKey,
+		Seq:       req.NotificationSeq,
+		NotifyKey: notifyKey,
+	}
 	pending, err := s.store.ListWakePending(ctx, WakeFilter{
 		RootScopeID:           w.RootScopeID,
 		TargetParentSessionID: w.TargetParentSessionID,
@@ -275,6 +489,16 @@ func (s *WakeScheduler) ScheduleWake(ctx context.Context, req WakeRequest) (Wake
 			}
 			result.Coalesced = true
 			break
+		}
+	}
+	if !result.Coalesced && notifyKey != "" {
+		// The row is missing either because the insert predicate refused it
+		// (the key was delivered concurrently) or because another process
+		// already resolved it. Both mean one thing: this event must not start
+		// a resume, and the caller must not keep a wake id to release.
+		if delivered, err := s.store.IsWakeDelivered(ctx, notifyKey); err == nil && delivered {
+			result.Suppressed = true
+			result.WakeID = ""
 		}
 	}
 	return result, nil
@@ -347,7 +571,7 @@ func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, pare
 		if !allowed[class] {
 			continue // budget consumed by a higher-priority class this drain
 		}
-		ok, err := s.store.ClaimWakePending(ctx, w.WakeID, "wake_scheduler", now)
+		ok, err := s.store.ClaimWakePending(ctx, w.WakeID, WakeClaimOwner, now)
 		if err != nil {
 			return claimed, nil, err
 		}
@@ -445,6 +669,142 @@ func digestDeliverable(claimed []WakePending, digest *Digest) bool {
 // ResolveWake releases a claimed wake after the turn consumed it.
 func (s *WakeScheduler) ResolveWake(ctx context.Context, wakeID string) error {
 	return s.store.ResolveWakePending(ctx, strings.TrimSpace(wakeID))
+}
+
+// WakeClaimOwner is the claim owner recorded by the scheduler's own drain path.
+// A release must present the same owner so a concurrent drainer's claim is
+// never un-claimed (plan C2-5 / A6).
+const WakeClaimOwner = "wake_scheduler"
+
+// ReleaseWake returns a claimed wake to the pending queue without consuming it
+// (plan C2-5 / A6): when the resume capacity gate defers a resume, the wake
+// must stay durable and keep its FIFO slot for the next runnable window
+// instead of being dropped or marked delivered.
+func (s *WakeScheduler) ReleaseWake(ctx context.Context, wakeID, claimedBy string) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	_, err := s.store.ReleaseWakePending(ctx, strings.TrimSpace(wakeID), strings.TrimSpace(claimedBy))
+	return err
+}
+
+// WakeQueuePosition is the bounded-FIFO readout for a deferred resume
+// (plan C2-5 / A6): the 1-based FIFO position of a wake among its parent's
+// unclaimed pending wakes plus the queue length. Position 0 means the wake is
+// no longer queued (claimed by a concurrent drainer or already resolved), which
+// lets a caller distinguish "still waiting" from "gone".
+type WakeQueuePosition struct {
+	Position int
+	Total    int
+}
+
+// QueuePosition reports where a wake sits in its parent's pending queue. The
+// store orders pending rows by created_at ASC, so the index of the deferred row
+// is exactly the FIFO position the digest must show the parent.
+func (s *WakeScheduler) QueuePosition(ctx context.Context, rootScopeID, parentSessionID, parentTeamID, wakeID string) (WakeQueuePosition, error) {
+	if s == nil || s.store == nil {
+		return WakeQueuePosition{}, nil
+	}
+	wakeID = strings.TrimSpace(wakeID)
+	if wakeID == "" {
+		return WakeQueuePosition{}, nil
+	}
+	pending, err := s.store.ListWakePending(ctx, WakeFilter{
+		RootScopeID:           rootScopeID,
+		TargetParentSessionID: parentSessionID,
+		TargetParentTeamID:    parentTeamID,
+		UnclaimedOnly:         true,
+	})
+	if err != nil {
+		return WakeQueuePosition{}, err
+	}
+	for i, w := range pending {
+		if w.WakeID == wakeID {
+			return WakeQueuePosition{Position: i + 1, Total: len(pending)}, nil
+		}
+	}
+	return WakeQueuePosition{Total: len(pending)}, nil
+}
+
+// PendingDepth counts the unclaimed wakes already waiting for a parent. It is
+// the queue the resume would join when the capacity gate denies it (A6).
+func (s *WakeScheduler) PendingDepth(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) (int, error) {
+	if s == nil || s.store == nil {
+		return 0, nil
+	}
+	pending, err := s.store.ListWakePending(ctx, WakeFilter{
+		RootScopeID:           rootScopeID,
+		TargetParentSessionID: parentSessionID,
+		TargetParentTeamID:    parentTeamID,
+		UnclaimedOnly:         true,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(pending), nil
+}
+
+// FilterDeliveredWakes drops claimed wakes whose notify key was already
+// delivered (plan C2-4 #15 / B4). It is the delivery-time half of the
+// idempotency rule: ScheduleWake stops a replayed event from becoming a
+// pending row, and this call stops a row that was already persisted (for
+// example before a crash) from starting a second resume (AC-P1-4a). Wakes
+// without a key, and reads that fail, are kept — the wake must not be lost
+// because the ledger is temporarily unreadable.
+func (s *WakeScheduler) FilterDeliveredWakes(ctx context.Context, wakes []WakePending) []WakePending {
+	if s == nil || s.store == nil || len(wakes) == 0 {
+		return wakes
+	}
+	kept := make([]WakePending, 0, len(wakes))
+	for _, w := range wakes {
+		key := strings.TrimSpace(w.NotifyKey)
+		if key == "" {
+			kept = append(kept, w)
+			continue
+		}
+		delivered, err := s.store.IsWakeDelivered(ctx, key)
+		if err != nil || !delivered {
+			kept = append(kept, w)
+		}
+	}
+	return kept
+}
+
+// RecordWakeDelivery marks the given wakes as delivered, which is what makes
+// the idempotency key outlive the pending row (plan C2-4 #15 / B4). It must be
+// called only after a delivery actually happened: a failed delivery is never
+// recorded, so the retry reuses the same key and still reaches the parent
+// (AC-P1-4b). Recording is best-effort per wake; the first error is returned
+// so callers can log it without losing the remaining keys.
+func (s *WakeScheduler) RecordWakeDelivery(ctx context.Context, wakes []WakePending) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	now := s.now().UTC()
+	var firstErr error
+	for _, w := range wakes {
+		key := strings.TrimSpace(w.NotifyKey)
+		if key == "" {
+			continue
+		}
+		err := s.store.MarkWakeDelivered(ctx, WakeDelivered{
+			NotifyKey:             key,
+			RootScopeID:           strings.TrimSpace(w.RootScopeID),
+			TargetParentSessionID: strings.TrimSpace(w.TargetParentSessionID),
+			TargetParentTeamID:    strings.TrimSpace(w.TargetParentTeamID),
+			WakeID:                w.WakeID,
+			TurnID:                strings.TrimSpace(w.TurnID),
+			EventKind:             strings.TrimSpace(w.EventKind),
+			ObligationID:          strings.TrimSpace(w.ObligationID),
+			EventSeq:              w.EventSeq,
+			DeliveredAt:           now,
+			DeliveredBy:           "wake_consumer",
+		})
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // AllowAutoWake reports whether the root scope may deliver another auto turn

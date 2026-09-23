@@ -25,6 +25,12 @@ type LifecycleProjection struct {
 	RecommendedAction     string
 	AllowedActions        []string
 	ResolutionState       ResolutionState
+	// TurnID names the parent turn that must be resumed when this projection
+	// schedules an auto-wake (plan C2-1 / I3: 通知携带 turn_id，恢复同一
+	// turn). It is only a hint — delivery re-derives the authoritative turn id
+	// from the obligation ledger — so an empty value keeps the legacy
+	// "new turn" wake.
+	TurnID string
 }
 
 // ProjectLifecycle stores a durable parent/lead notification for an abnormal
@@ -96,12 +102,35 @@ func ProjectLifecycle(ctx context.Context, store Store, wakes *WakeScheduler, ev
 			TargetParentTeamID:    notification.TargetParentTeamID,
 			WakeReason:            notification.EventType,
 			NotificationSeq:       notification.EventSeq,
+			TurnID:                strings.TrimSpace(event.TurnID),
+			// C2-4 (#15) / B4: the notification identity feeds the notify key.
+			// notification.EventSeq is the store-allocated cursor of this
+			// subject+version+event-type, so an idempotent replay of the same
+			// projection keeps the same key and is delivered only once
+			// (AC-P1-4a), while a genuinely new event for the same subject
+			// advances the seq and wakes again.
+			ObligationID: notification.SubjectID,
+			EventKind:    lifecycleWakeEventKind(notification.SupervisionState),
+			EventSeq:     notification.EventSeq,
 		})
 		if err != nil {
 			return notification, fmt.Errorf("supervision: schedule lifecycle wake: %w", err)
 		}
 	}
 	return notification, nil
+}
+
+// lifecycleWakeEventKind maps a projected supervision state to the notify-key
+// family (plan C2-4 #15 / B4, doc 6.6). A terminal state dedups by
+// terminal_epoch — its notification seq, which the store only advances on a
+// new event — while everything else stays in the coalescing lifecycle family.
+func lifecycleWakeEventKind(state SupervisionState) string {
+	switch state {
+	case SupervisionTimedOut, SupervisionOrphaned:
+		return WakeEventTerminal
+	default:
+		return WakeEventLifecycle
+	}
 }
 
 // ProjectAgentCompletion translates a child terminal runtime event into the

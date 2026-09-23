@@ -38,4 +38,16 @@ const (
 	EventSubagentBatchCanceled = "subagent.batch.canceled"
 	EventSubagentBatchTimedOut = "subagent.batch.timed_out"
 	EventSubagentBatchOrphaned = "subagent.batch.orphaned"
+
+	// EventSubagentSuspensionUnavailable：挂起不可用的降级告警（方案 §6.13 / I9）。
+	//
+	// 派发 background 子任务时若探测不到 durable store（进程内 store / nil），
+	// 方案要求**禁止挂起**并回退 legacy 同步路径；回退本身是安全动作，但它是
+	// 能力降级——若没有任何对外信号，"这个会话为什么不再挂起" 事后无从解释，
+	// 用户也看不到"本次没有挂起、父回合将同步等待"这一事实。该事件即 I9 要求的
+	// 显式告警：投影为 SeverityWarning 落盘，供事后审计。
+	//
+	// 每次 (session, reason) 只发一次（见 agent.reportSuspensionDegraded 的去重），
+	// 落盘量有天然上界。
+	EventSubagentSuspensionUnavailable = "subagent.suspension.unavailable"
 )
