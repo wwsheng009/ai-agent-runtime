@@ -166,10 +166,11 @@ func TestResumeContext_TurnAnchorPrecedence(t *testing.T) {
 
 // TestResumeContext_AggregateStatusSeverity pins the §16.4 aggregate
 // enunciation: the worst terminal family of the turn wins, so a canceled or
-// failed item is never reported as a clean completion.
+// failed item is never reported as a clean completion. Rows are attributed to
+// one turn because only turn-attributed rows gate the join (EC-G4).
 func TestResumeContext_AggregateStatusSeverity(t *testing.T) {
 	ctx := context.Background()
-	completed := ObligationRef{ID: "batch-ok", Kind: "batch", State: ObligationStateCompleted, Terminal: true, Total: 1, Completed: 1}
+	completed := ObligationRef{ID: "batch-ok", Kind: "batch", ParentTurnID: "turn-1", State: ObligationStateCompleted, Terminal: true, Total: 1, Completed: 1}
 	build := func(rows ...ObligationRef) *ResumeContext {
 		return BuildResumeContext(ctx, &staticObligationSource{obligations: rows}, nil, ResumeContextRequest{ParentSessionID: "root-session-1"})
 	}
@@ -202,12 +203,12 @@ func TestResumeContext_AggregateStatusSeverity(t *testing.T) {
 		},
 		{
 			name: "live rows keep the join open",
-			rows: []ObligationRef{completed, {ID: "batch-running", State: ObligationStateRunning, Total: 3, Completed: 1}},
+			rows: []ObligationRef{completed, {ID: "batch-running", ParentTurnID: "turn-1", State: ObligationStateRunning, Total: 3, Completed: 1}},
 			want: ObligationStateRunning,
 		},
 		{
 			name: "only queued rows are pending",
-			rows: []ObligationRef{{ID: "batch-queued", State: "queued", Total: 1}},
+			rows: []ObligationRef{{ID: "batch-queued", ParentTurnID: "turn-1", State: "queued", Total: 1}},
 			want: ObligationStatePending,
 		},
 	}

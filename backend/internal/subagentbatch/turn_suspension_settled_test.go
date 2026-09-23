@@ -83,6 +83,43 @@ func TestTurnObligationsSettled(t *testing.T) {
 	}
 }
 
+// TestTurnObligationsSettled_IgnoresUnreferencedLegacyRows pins EC-G4 on the
+// clear side: the settle predicate reads only the record's own obligation ids,
+// so an unattributed historical row (no turn_id, still running) in the same
+// store neither blocks nor triggers the clear. The reverse direction stays
+// intact — a record that does reference such a row still waits for it.
+func TestTurnObligationsSettled_IgnoresUnreferencedLegacyRows(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteBatchStore(&StoreConfig{Path: filepath.Join(t.TempDir(), "batches.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteBatchStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	seedSettledBatch(t, store, "batch-done", BatchCompleted)
+	seedSettledBatch(t, store, "batch-legacy", BatchRunning)
+
+	parked := &TurnSuspension{TurnID: "t1", SessionID: "s1", ResumeQueue: []string{"batch-done"}}
+	settled, err := TurnObligationsSettled(ctx, store, parked)
+	if err != nil {
+		t.Fatalf("TurnObligationsSettled: %v", err)
+	}
+	if !settled {
+		t.Fatalf("an unreferenced legacy row must not keep the turn parked (EC-G4)")
+	}
+
+	// The same row, when the record does reference it, still gates the clear:
+	// the predicate keys on the record, never on the row's turn attribution.
+	referencing := &TurnSuspension{TurnID: "t1", SessionID: "s1", ResumeQueue: []string{"batch-legacy"}}
+	settled, err = TurnObligationsSettled(ctx, store, referencing)
+	if err != nil {
+		t.Fatalf("TurnObligationsSettled: %v", err)
+	}
+	if settled {
+		t.Fatalf("a referenced non-terminal row must keep the turn parked")
+	}
+}
+
 // seedSettledBatch creates one batch row with the wanted status. CreateBatch
 // honours a caller-set status, so terminal fixtures need no transition dance.
 func seedSettledBatch(t *testing.T, store BatchStore, batchID string, status BatchStatus) {

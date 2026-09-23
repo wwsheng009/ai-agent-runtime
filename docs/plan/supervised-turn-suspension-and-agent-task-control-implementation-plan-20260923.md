@@ -1323,3 +1323,58 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 - **run 授权修复的边界**：解析只发生在 agent 分支内，且只在 target 能读回 run 行时生效；`hooks.Authorize` 注入优先、跨 scope 拒绝、未知 id 拒绝三条边界都有测试锁住。`cmd/runtime-server/main.go` 未注入 `AgentRegistry`（走 legacy 放行分支），因此该修复对 CLI 宿主是实际生效面，对 runtime-server 宿主是未来接线的前提。
 
 **下一步**：P3 的 AC 面（AC-P3-1…4）已全部收口；P3 门禁还剩两块账 —— ① **C0-E 度量基线采集**（AC-P3-4c 的判定前提，上线后 L4）；② **EC-G4 专用用例**（P3 场景表唯一缺口）。建议优先补 ②（L1 即可闭环），基线采集按上线节奏走。
+
+---
+
+### 13.13 补丁登记：P3 场景表 EC-G4（历史生命周期行无 `turn_id` 走独立 run 语义），2026-09-23
+
+> 进入条件：§13.12 已把 P3 的 AC 面收口，并在场景表与留白里登记「EC-G4 是 P3 门禁唯一没有专用用例的场景」。本轮把这条场景从「只有代码内判定」补成「有专用用例 + 反证用例锁住的判定」。
+
+**场景口径（design §6.2 + EC-G4）**
+
+| 面 | 口径 |
+| --- | --- |
+| I1 判据是 **turn 作用域** | `count(obligations where turn_id=? and status not terminal) == 0`（design `:271`）——「账本清空」问的是**这个 turn** 还有没有在途义务，不是「整个父会话还有没有在途行」 |
+| 迁移期历史行 | 旧版本没有 `turn_id` 列，历史生命周期行读回时 `ParentTurnID == ""`；EC-G4 明确此类行走**原有「独立 run」语义**、**不参与账本清空判定**（design `:699`） |
+| 两侧都不许偏差 | ① 计入 pending ⇒ 迁移期的陈旧行把 `can_finalize` 永久压成 false（turn 收不了尾）；② 当作某 turn 的义务 ⇒ 编造 turn 身份、把 resume 拉进一个不存在的 turn（违反 I3） |
+
+**改动清单**
+
+| 位置 | 改动 |
+| --- | --- |
+| `backend/internal/supervision/resume_context.go` | `applyObligations`（`:255`）：非终态行按 `ParentTurnID` 分流 —— 有归因 → `PendingCount++`（继续压住 I1），无归因 → 新增 `StandaloneCount++`（**只报告、不判据**）；`ResumeContext` 新增 `StandaloneCount` 字段（`:150`）；`formatResumeText` 新增汇总行 `standalone_obligations: N (no turn_id; legacy standalone runs, not gating can_finalize)`（`:405`）与逐行 `standalone=true` 标记（`:449`），使模型能看到「有一个不归因的活体 run」而不会被它误判 I1；三处工具名文案同步为合并后的可见面（`subagent_status(include_digest=true)` / `subagent_inspect_task`） |
+| `backend/internal/supervision/resume_context_test.go` | `TestResumeContext_AggregateStatusSeverity` 的样本行补 `ParentTurnID: "turn-1"`：口径变化后只有**归因行**才压住收尾，而该用例测的是终态族优先级（canceled/failed 不被报成 clean completion），必须显式归因 |
+| `backend/internal/supervision/resume_context_legacy_turn_test.go`（新增） | EC-G4 专用用例 ×3（见下表） |
+| `backend/internal/subagentbatch/turn_suspension_settled_test.go` | 新增 `TestTurnObligationsSettled_IgnoresUnreferencedLegacyRows`：**清空侧**的同一条不变量 —— 挂起记录的清空谓词只读**记录自己引用的**义务 id，同库里未被引用的无归因活体行既不阻塞也不触发清空；反证方向（记录**引用**了该行时仍必须等待）同时锁住 |
+
+**测试落点（L1）**
+
+| 用例 | 断言 |
+| --- | --- |
+| `TestBatchObligationSource_LegacyRowsWithoutTurnIDDoNotGateFinalize` | 同一父会话里既有本 turn 的终态批次、又有一行迁移期遗留的无归因活体批次：`PendingCount == 0`（I1 可收尾）、`StandaloneCount == 1`（如实报告）、resume 文本含 `standalone_obligations: 1` 且该行带 `standalone=true` |
+| `TestBatchObligationSource_LegacyRowsAloneKeepLegacyNewTurnFallback` | 账本里**只剩**历史行：没有可归因的 turn 时不编造 turn 身份，宿主按原有「新开 turn」路径保底（I3 的降级分支） |
+| `TestResumeContext_AttributedLiveRowsStillGateFinalize` | **反证**：真正归因于某 turn 的非终态行继续压住收尾（`PendingCount > 0`、`can_finalize=false`），且其 turn 优先于调度提示（I1/I3 未被放宽） |
+| `TestTurnObligationsSettled_IgnoresUnreferencedLegacyRows` | 未被记录引用的无归因活体行 ⇒ `settled=true`（可清空）；被记录引用 ⇒ `settled=false`（仍等待）。判据键在**记录**上，不在行的归因上 |
+
+**验证证据（2026-09-23 实测）**
+
+- **全量回归（主仓，日志 `logs/p3-full-20260923-b.log`，命令 `cd backend; go test ./internal/... ./cmd/... -count=1`）**：**EXIT=1**；读数 `ok=131` / `[no test files]=18` / **`FAIL` 包 = 1**。
+  - 唯一失败包 `internal/background`（`FAIL … 158.598s`，用例 `TestManagerRecoversPendingAndMarksInterruptedRunningJobsOrphaned` 43.60s）—— §13.12 已登记为**满负载载荷敏感抖动**；本轮反证：单用例复跑 `--- PASS (5.05s)`（包 `ok 5.320s`）、整包复跑 `ok 41.590s`。与本轮改动无因果关系。
+  - 关键包读数（全绿）：`internal/api/skills 183.074s`（含本轮 stale 断言修复）/ `internal/chat 163.369s` / `internal/policy 19.265s` / `internal/runtimeserver 66.743s` / `internal/subagentbatch 12.865s` / `internal/supervision 11.757s` / `internal/toolbroker 43.562s` / `cmd/aicli/commands 171.537s` / `cmd/aicli/ui 12.433s`。
+- **EC-G4 定向复跑（fresh，`-count=1 -v`）**：`internal/supervision` 三例 **全 PASS**（各 0.00s；包 `ok 0.236s`）；`internal/subagentbatch` 的 `TestTurnObligationsSettled`（7 子例）+ `TestTurnObligationsSettled_IgnoresUnreferencedLegacyRows` **全 PASS**（包 `ok 2.241s`）。
+- **顺带闭环（门禁红项）**：`internal/api/skills/supervision_tool_controller_test.go` 的 stale 断言（仍在断言旧 `supervision_*` 名字必须出现在 `Definitions()`）改为**合并后可见面 + 兼容面**两层契约（`:31` 注释说明事实源 + `supervisionToolFamilyNames` 全集守卫，新增/退役名字不会漏掉这处反向断言）；定向 `go test ./internal/api/skills -run 'TestApplyAgentRuntimeServicesGatesSupervisionToolController' -count=1` → **ok 24.09s**。
+- **gofmt**：本轮改动文件 `gofmt -l` 无输出。
+
+**AC 判定**
+
+| AC | 判定 | 证据 |
+| --- | --- | --- |
+| P3 场景表 EC-G4（P3 门禁唯一缺口，§13.12 登记） | ✅ L1 闭环 | 专用用例 ×3（无归因行不压收尾 / 只剩历史行退回「新 turn」保底 / **反证**：归因行继续压住收尾）+ 清空侧 ×1（未被引用不阻塞、被引用仍等待）；`StandaloneCount` 只报告、不判据 |
+| 既有 AC 不放宽（I1 / I3） | ✅ | 反证用例锁住「归因行仍压住 `can_finalize`」；`TestResumeContext_AggregateStatusSeverity` 的口径随迁（只有归因行压收尾）；全量回归除已登记抖动外全绿 |
+
+**留白 / 语义边界**
+
+- **「真·迁移库」形态未抽样**：用例构造的是「同一父会话 + 无 `turn_id` 的活体批次」，等价于迁移期读回形态（`ParentTurnID == ""`）。真实旧库的 `NULL` 与空串两种读回尚未在真库快照上抽样复核（代码侧 `strings.TrimSpace` 同时覆盖两者）。
+- **`StandaloneCount` 尚无独立观测面**：目前只出现在 resume 文本（`standalone_obligations: N` / 逐行 `standalone=true`）与 `ResumeContext` JSON 里，没有事件与指标行；若要把「迁移期残留行数」做成可观测指标，需在 §7.3 口径表加一行。
+
+**下一步**：提交本轮（生产改动 + 用例 + 本登记）。P3 门禁只剩 **C0-E 度量基线采集**（AC-P3-4c 的判定前提，L4，按上线节奏走）；落地方式已在 §13.12 留白里备好（按子会话枚举 run 行 + `CancelSource` 分组）。

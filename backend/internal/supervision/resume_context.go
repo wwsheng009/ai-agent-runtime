@@ -79,12 +79,12 @@ type ObligationRef struct {
 	// The resume projection uses it to re-anchor a wake whose own turn hint
 	// was lost (I3: resume 复用同一 turn_id).
 	ParentTurnID string `json:"parent_turn_id,omitempty"`
-	State    string `json:"state,omitempty"`
-	Terminal bool   `json:"terminal,omitempty"`
-	Total    int    `json:"total,omitempty"`
-	Completed int   `json:"completed,omitempty"`
-	Failed   int    `json:"failed,omitempty"`
-	Skipped  int    `json:"skipped,omitempty"`
+	State        string `json:"state,omitempty"`
+	Terminal     bool   `json:"terminal,omitempty"`
+	Total        int    `json:"total,omitempty"`
+	Completed    int    `json:"completed,omitempty"`
+	Failed       int    `json:"failed,omitempty"`
+	Skipped      int    `json:"skipped,omitempty"`
 	// Failures lists the failed items of this obligation (already flattened
 	// from task rows by the source).
 	Failures []FailureItem `json:"failures,omitempty"`
@@ -142,9 +142,15 @@ type ResumeContext struct {
 	// TotalCount / PendingCount are the join inputs (pending_count == 0 ⇒
 	// finalize). PendingCount is -1 when no obligation source was wired and the
 	// verdict is therefore unknown ("assume not final" is the safe reading).
-	TotalCount   int  `json:"total,omitempty"`
-	PendingCount int  `json:"pending_count,omitempty"`
-	Terminal     bool `json:"terminal,omitempty"`
+	TotalCount   int `json:"total,omitempty"`
+	PendingCount int `json:"pending_count,omitempty"`
+	// StandaloneCount counts the non-terminal rows without a turn_id (EC-G4:
+	// migration-period lifecycle rows keep the legacy "standalone run"
+	// semantics). They are reported, never gated: the I1 verdict stays
+	// turn-scoped (design §6.2), so a stale unattributed row cannot block a
+	// turn's finalize forever.
+	StandaloneCount int  `json:"standalone_count,omitempty"`
+	Terminal        bool `json:"terminal,omitempty"`
 	// Rollup is the P0-B progress projection (bounded by MaxItems).
 	Rollup []ProgressSummary `json:"rollup,omitempty"`
 	// Obligations carries the terminal rollup rows with counts and failure
@@ -160,7 +166,7 @@ type ResumeContext struct {
 	// orphaned | running | pending | unknown.
 	Status string `json:"status,omitempty"`
 	// Truncated marks that the budget cut content; the full detail stays
-	// reachable through supervision_snapshot / read_agent_result.
+	// reachable through subagent_status(include_digest=true) / subagent_inspect_task.
 	Truncated bool `json:"truncated,omitempty"`
 	// SourceError is a best-effort diagnostic: the resume context must never
 	// fail the wake, so a broken source degrades to the digest-only form.
@@ -249,6 +255,7 @@ func (rc *ResumeContext) applyObligations(obligations []ObligationRef) {
 	failures := 0
 	pendingTurnID := ""
 	ledgerTurnID := ""
+	standalone := 0
 	for _, ob := range obligations {
 		ob.State = strings.TrimSpace(ob.State)
 		if ob.State == "" {
@@ -256,7 +263,16 @@ func (rc *ResumeContext) applyObligations(obligations []ObligationRef) {
 		}
 		ob.Terminal = ob.Terminal || obligationTerminal(ob.State)
 		if !ob.Terminal {
-			rc.PendingCount++
+			// EC-G4（迁移兼容）：没有 turn_id 的历史行走"独立 run"语义。
+			// design §6.2 的 I1 判据是 count(obligations where turn_id=? and
+			// not terminal) == 0：无归因的行不属于任何 turn，因此不参与账本
+			// 清空判定 —— 它们仍进入 rollup/失败清单供模型参考，但不会把
+			// can_finalize 压成 false（否则迁移期的陈旧行会永久堵死收尾）。
+			if strings.TrimSpace(ob.ParentTurnID) == "" {
+				standalone++
+			} else {
+				rc.PendingCount++
+			}
 		}
 		if turnID := strings.TrimSpace(ob.ParentTurnID); turnID != "" {
 			if ledgerTurnID == "" {
@@ -304,6 +320,7 @@ func (rc *ResumeContext) applyObligations(obligations []ObligationRef) {
 		kept = append(kept, ob)
 	}
 	rc.Obligations = kept
+	rc.StandaloneCount = standalone
 	// I3（resume 复用同一 turn_id）的锚定优先级：仍有非终态 obligation 时，它们
 	// 所属的 turn 就是必须被 resume 的 turn（ledger 优先于调度时的提示值，避免
 	// 用陈旧提示去续跑另一个 turn）；没有非终态项时才退回提示值，最后才用账本里
@@ -385,6 +402,9 @@ func formatResumeText(rc *ResumeContext, budget ResumeBudget) string {
 	if rc.PendingCount >= 0 {
 		fmt.Fprintf(&b, "obligations: total=%d pending=%d can_finalize=%t\n",
 			rc.TotalCount, rc.PendingCount, rc.PendingCount == 0)
+		if rc.StandaloneCount > 0 {
+			fmt.Fprintf(&b, "standalone_obligations: %d (no turn_id; legacy standalone runs, not gating can_finalize)\n", rc.StandaloneCount)
+		}
 	} else {
 		b.WriteString("obligations: unknown (no ledger projection wired); can_finalize=unknown\n")
 	}
@@ -426,6 +446,9 @@ func formatResumeText(rc *ResumeContext, budget ResumeBudget) string {
 			if !ob.Terminal {
 				b.WriteString(" (not terminal)")
 			}
+			if strings.TrimSpace(ob.ParentTurnID) == "" {
+				b.WriteString(" standalone=true")
+			}
 			if summary := strings.TrimSpace(ob.ResultSummary); summary != "" && ob.Terminal {
 				fmt.Fprintf(&b, "; result: %s", summary)
 			}
@@ -460,7 +483,7 @@ func formatResumeText(rc *ResumeContext, budget ResumeBudget) string {
 		fmt.Fprintf(&b, "\nartifact_refs: %s\n", strings.Join(rc.ArtifactRefs, ", "))
 	}
 	if rc.Truncated {
-		b.WriteString("\ntruncated: true (budget reached; full detail via supervision_snapshot / read_agent_result)\n")
+		b.WriteString("\ntruncated: true (budget reached; full detail via subagent_status(include_digest=true) / subagent_inspect_task)\n")
 	}
 	if rc.SourceError != "" {
 		fmt.Fprintf(&b, "ledger_projection_error: %s\n", rc.SourceError)
@@ -485,7 +508,7 @@ func truncateResumeText(text string, maxChars int) string {
 	if len(runes) <= maxChars {
 		return text
 	}
-	const marker = "\n[truncated: resume context exceeds budget; use supervision_snapshot / read_agent_result for full detail]"
+	const marker = "\n[truncated: resume context exceeds budget; use subagent_status(include_digest=true) / subagent_inspect_task for full detail]"
 	markerRunes := []rune(marker)
 	keep := maxChars - len(markerRunes)
 	if keep < 0 {
