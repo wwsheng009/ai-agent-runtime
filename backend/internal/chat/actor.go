@@ -1230,6 +1230,10 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 		return
 	}
 	run := a.interruptActiveSessionRun()
+	// EC-E7 / EC-C5：用户 ESC / interrupt 到达时，挂起 turn（§6.12）必须被放弃：
+	// 级联取消账本 + 清挂起记录。只取消 run 不够 —— 挂起态本身没有 run，记录会
+	// 跨中断存活，下一次提交继续复用旧 turn_id（EC-E1"turn 永不结束"）。
+	abandonedTurnID, abandonErr := a.abandonSuspendedTurnOnInterrupt(context.Background(), run)
 	_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
 		state.Status = SessionStopped
 		state.CurrentTurnID = ""
@@ -1246,6 +1250,13 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 	}
 	if run != nil && strings.TrimSpace(run.turnID) != "" {
 		payload["turn_id"] = run.turnID
+	}
+	if abandonedTurnID != "" {
+		payload["abandoned_turn_id"] = abandonedTurnID
+	}
+	if abandonErr != nil {
+		// 放弃失败必须可见（I9 降级），但不得把 interrupt 本身变成失败。
+		payload["abandon_error"] = abandonErr.Error()
 	}
 	a.publish(runtimeevents.Event{
 		Type:      EventSessionInterrupted,

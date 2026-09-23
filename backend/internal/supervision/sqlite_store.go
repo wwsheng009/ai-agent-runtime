@@ -415,6 +415,18 @@ func (s *SQLiteSupervisionStore) init(ctx context.Context) error {
 					ON supervision_wake_delivered(root_scope_id, delivered_at);
 			`,
 		},
+		{
+			// P3 / C4-2 (§6.12): retention GC scans terminal rows by
+			// (status, finished_at). The existing active index is keyed on
+			// execution_deadline_at, so without this the prune pass would
+			// table-scan the whole ledger on every supervisor tick.
+			Version: 7,
+			Name:    "execution_runs_terminal_retention_index",
+			UpSQL: `
+				CREATE INDEX IF NOT EXISTS idx_supervision_runs_terminal
+					ON supervision_execution_runs(status, finished_at);
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }

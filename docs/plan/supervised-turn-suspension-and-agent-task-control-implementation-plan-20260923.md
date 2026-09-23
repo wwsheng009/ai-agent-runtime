@@ -1071,3 +1071,96 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 | AC-P3-1a（无残留调用） | ✅ L1 | 编译通过 + 上述 grep 空结果 + 阻塞路径测试改为异步句柄断言 |
 | AC-P3-1b（旧值可用 + 提示） | ✅ L1 | `TestExecutionModeLegacyValuesStayReadableAndWarn` / `TestSpawnSubagentsLedgerAlwaysRecordsBackground` / spawn_subagents 工具定义用例 |
 | AC-P3-1c（双写不破坏旧客户端） | ⏳ L2 | 句柄侧 L1 已覆盖；resume 聚合报告的端到端取证待真实运行（留白如上） |
+
+---
+
+### 13.10 补丁登记：P3 第二项 C4-2（保留窗口 / GC / 驱逐后重建 / takeover），2026-09-23
+
+> 进入条件（§5 顺序：C4-1 → **C4-2** → C4-3 → C4-4）已由 §13.9 满足。本轮实施 C4-2 四块：**保留窗口**、**GC 三条件**、**驱逐后由 store 重建**、**`takeover` 授权动作**；并顺带闭环挂起 turn 生命周期上两个既有缺口（**EC-E1「turn 永不结束」**、**EC-E7 / EC-C5「中断不放弃挂起记录」**）——GC 的保留锚点是"turn 终局 + N 天"，turn 不终局则终态行永不到期、GC 永不触发，故属同一交付。
+
+**落地形态（对照 §5 C4-2 表）**
+
+| 需求字面 | 落地 |
+| --- | --- |
+| 保留窗口：终态 obligation 保留至 **turn 终局 + N 天**（默认 7，可配）；窗口内 `subagent_status` 可见 | `ExecutionRunPrunePolicy{Now, Retention, Limit}`；默认 `DefaultExecutionRunRetention = 7d`、`DefaultExecutionRunPruneLimit = 200`、硬上限 `MaxExecutionRunPruneLimit = 1000`（`backend/internal/supervision/execution_store.go:105-129`）。可配面：`Config.ExecutionRunRetention` / `ExecutionRunPruneLimit`（`config.go:137-143`，**0 取默认，不是"关 GC"**；`config.go:284-290` 透传）→ `ExecutionSupervisorConfig`（`execution_supervisor.go:76-82`，零值兜底 `:1253-1259`）。窗口内行照常可读（读路径与 GC 同源同 store） |
+| GC 条件：仅清"已 resolved **且** 无 artifact 引用 **且** 无 pending resume" | 三条**内联在同一条 DELETE 的子查询**里（不是 read-then-delete，两步之间的状态变化不会误删）：① `status IN (终态) AND finished_at` 非空且 ≤ cutoff；② `result_ref = ''`（无 artifact 引用）；③ `NOT EXISTS` 未投递 wake（`supervision_wake_pending`）**且** `NOT EXISTS` 未投递 outbox（`supervision_completion_outbox.delivered_at IS NULL`）——`execution_store.go:568`（SQL 主体 `:601-634`） |
+| 批量删除、单次有界 | `ORDER BY finished_at ASC LIMIT ?`：**最旧优先**，单次 ≤ `Limit`（超 1000 收敛到硬上限）；巡检每次最多一批（`execution_supervisor.go:563`），由 `executionRunPruneInterval = 1h` 节流（`:549`）；GC 失败只记 `Stats.LastPruneError`，**不替换扫描结果**（`:395-398`） |
+| **不得影响**：当前 turn 的账本视图 / 决策窗口内的行 / `orphan_suspected` 待处置行 | 同一语句内排除：决策窗口未过期（`decision_window_until` 空或 ≤ now）；`turn_id` 仍有"未终态**或**未过 cutoff"的同行 ⇒ **整条 turn 一起留**（`:626-633`）；`orphan_suspected` 属 supervision 状态、不在 `runTerminalStatuses` 中 ⇒ 被状态过滤天然排除 |
+| 驱逐后可重建：账本是持久真源 | 运行时**不持有 run 的内存副本**：读路径全部经 `ExecutionRunStore` 能力断言直读 store（`alerts.go:81`、`snapshot.go:179`、`projection.go:200`、`api/skills/handler.go:5290`、`api/skills/supervision_handlers.go:258`、CLI `chat_actor_host.go:2900`）。行被 GC 后读回 `ErrRunNotFound`（`execution_store_test.go:92`），调用方按"缺失"重建视图；未实现该能力的宿主自动跳过 run 视图（降级不报错，`projection_run_finalize_test.go:11` 的 `notificationOnlyStore` 即该形态） |
+| 授权动作：`takeover`（新增动作，带 `reason`，写审计） | `ActionTakeover`（`types.go:207-212`）；`Evaluator` 对 `SubjectAgentRun` announce（宿主中立，`evaluator.go:64-69`）；`isMutationAction` 收录（`action_service.go:541-543`）；`validateActionRequest` 收录且 `reason` 必填（`:564-571`，I4）；**控制面自执行**、不走宿主 executor（`:331-335`） |
+
+**`takeover` 语义（§6.11）**
+
+| 面 | 落地 |
+| --- | --- |
+| 前置拒绝 | 目标非 agent run ⇒ `HintTakeoverTargetMissing`；终态 run ⇒ `HintTakeoverTerminal`；**已是 owner** ⇒ `HintTakeoverNotNeeded`（`action_service.go:855-866`，判定 `:914` / `:919`） |
+| 非 owner 变更 | 有 live owner lease 时 mutation 被拒，next_action = `owner_lease_held_use_takeover`（`HintOwnerLeaseHeld`，`:897`）⇒ 显式 takeover 是唯一授权路径（不得静默越权写） |
+| 持久化 | `TakeoverExecutionRun`（`execution_store.go:646`）：`UPDATE … WHERE run_id = ? AND fencing_token = ? AND status NOT IN (终态)` ⇒ **fencing token 上的 CAS**（两个并发 takeover 只有一个能赢，EC-B9）；成功后 `owner_id` 改写、`fencing_token + 1`、`version + 1`、发新 lease |
+| 审计 | 生命周期事件 `obligation.ownership.taken_over`（SeverityWarning，`reason` 记 previous → new owner，`ActorID` = 发起会话），投影到父 digest（`:945-977`） |
+| 边界 | 空 owner / 空 run_id ⇒ 报错（非静默 no-op，`:654`）；行在 takeover 期间消失 ⇒ `ErrActionConflict`（`:939`） |
+
+**改动清单**
+
+| 位置 | 改动 |
+| --- | --- |
+| `backend/internal/supervision/execution_store.go` | `ExecutionRunStore` 新增 `PruneExecutionRuns` / `TakeoverExecutionRun`（`:84` / `:88`）；`ExecutionRunPrunePolicy` 与默认/上限常量；两个 SQL 实现（GC 单语句三条件 + 最旧优先有界；takeover CAS） |
+| `backend/internal/supervision/config.go` | `ExecutionRunRetention` / `ExecutionRunPruneLimit` 配置项（0 取默认，显式值透传） |
+| `backend/internal/supervision/execution_supervisor.go` | `ScanOnce` 搭车 GC（`pruneRetention`，1h 节流，失败只记 Stats）；`Stats` 新增 `Retention` / `PrunedTotal` / `LastPruneAt` / `LastPruneRemoved` / `LastPruneError`（`:188-196`） |
+| `backend/internal/supervision/sqlite_store.go` | 迁移 **v7**：`idx_supervision_runs_terminal(status, finished_at)`（否则每次巡检全表扫描，`:418-427`） |
+| `backend/internal/supervision/types.go` / `evaluator.go` / `action_service.go` | `ActionTakeover` + announce + `executeTakeover` + 四个稳定 next_action 提示 + 审计事件 |
+| `backend/internal/subagentbatch/turn_suspension.go` | `TurnObligationsSettled`（`:96`）+ `ObligationBatchIDs`（`:128`）——settle / abandon 共用同一份 obligation 解析规则 |
+| `backend/internal/agent/loop.go` | 回合边界收尾清账 `settleParkedTurnOnRunEnd`（`:6619`，`defer` 注册于 `:625`） |
+| `backend/internal/chat/actor_abandon.go`（新）/ `chat/actor.go` | `AbandonSuspendedTurn`（`:39`）+ interrupt 钩子（`actor.go:1236`）与事件载荷 `abandoned_turn_id` / `abandon_error` |
+
+**配套闭环：挂起 turn 的"结束"与"放弃"**
+
+| 缺口 | 落地 |
+| --- | --- |
+| EC-E1「turn 永不结束」 | 派发方（loop）在回合边界清账：`subagentbatch.TurnObligationsSettled` 判定账本内 obligation **是否全部终态**，是则清挂起记录（否则 `nextTurnID` 永久复用挂起 `turn_id`）。**行缺失不算完成**（无证据 ⇒ 保持挂起，绝不静默丢 obligation）；run ctx 常已取消 ⇒ 用 detached ctx + 5s 超时；清账失败只报 I9 降级、绝不失败本回合 |
+| EC-E7 / EC-C5「中断不放弃挂起记录」 | 用户 ESC / interrupt ⇒ 放弃挂起 turn：**先级联取消账本内全部 obligation（`canceled`），全部成功之后才清记录**；任一失败即中止并保留记录（可重试）。解析顺序＝内存缓存 → durable 读回（冷缓存 / 重启）→ 被中断 run 的 `turn_id`——挂起态本身没有 run，`run` 为 nil 时仍要能找到记录 |
+| 共用解析规则 | `ObligationBatchIDs`：`ResumeQueue` 优先、`ObligationIDs[0]` 兜底 ⇒ settle 读的与 abandon 取消的是**同一份** obligation，不存在"清记录时漏取消"的窗口 |
+
+**测试落点（L1）**
+
+| 用例 | 断言 |
+| --- | --- |
+| `TestPruneExecutionRuns_RemovesOnlyEligibleRows`（`execution_gc_test.go:57`） | 六类行中**只有**全条件满足的一行被删：窗口内 / artifact 引用 / pending wake / pending outbox / 决策窗口内 / `orphan_suspected` **全部保留**（AC-P3-2a 正反例） |
+| `TestPruneExecutionRuns_AnchorsRetentionOnTurnFinalization`（`:113`） | 锚点是 **turn 终局**：同 turn 一行过期一行未过期 ⇒ 都不删；两行都过期 ⇒ 才删 |
+| `TestPruneExecutionRuns_BoundedBatchesDrainOldestFirst`（`:147`） | `Limit=2` 时单次只删**最旧**两行，多轮 drain 至空 |
+| `TestPruneExecutionRuns_ZeroPolicyUsesDefaults`（`:176`） | 零值策略取默认窗口（读回 `DefaultExecutionRunRetention`）与默认批量 |
+| `TestExecutionSupervisor_ScanOncePrunesExpiredRuns`（`:194`） | GC 搭车 `ScanOnce`，`Stats.PrunedTotal` / `LastPruneAt` / `Retention` 有读数 |
+| `TestTakeover_ClaimsOwnershipWithAuditTrail`（`takeover_test.go:50`） | takeover 改写 owner + 审计事件落库（含 reason）；**不需要宿主 executor** |
+| `TestTakeover_UnblocksCrossOwnerMutation`（`:106`） | 非 owner + live lease ⇒ mutation 被拒（`owner_lease_held_use_takeover`）；显式 takeover 后**同一 mutation 放行** |
+| `TestTakeover_Rejections`（`:168`） | 终态 ⇒ `takeover_requires_live_run`；已是 owner ⇒ `already_owner_issue_action_directly`；目标缺失 ⇒ `takeover_requires_agent_run_subject` |
+| `TestTakeoverExecutionRun_CASAndTerminalGuard`（`:237`） | store 侧 CAS：token 不匹配 / 终态行都不生效（AC-P3-2c 的 durable half） |
+| `TestTurnObligationsSettled`（`subagentbatch/turn_suspension_settled_test.go:14`） | 全终态 ⇒ settled；含非终态 ⇒ 不 settled；**行缺失 ⇒ 不算完成** |
+| `TestSettleParkedTurnOnRunEnd`（`agent/turn_settlement_test.go:19`） | 回合边界清账：obligation 全终态 ⇒ 记录被清；未终态 ⇒ 记录保留 |
+| `TestAbandonSuspendedTurnCancelsObligationsAndClearsRecord` / `…SkipsTerminalAndMissingObligations` / `TestInterruptAbandonsSuspendedTurn`（`chat/actor_abandon_test.go:18/61/97`） | 放弃＝级联取消 + 清记录；终态行与缺失行分别归类；interrupt 钩子生效（EC-E7） |
+| `capabilities_test.go` 四处 allowed 集合断言 | `takeover` 进入 announce 集合；`extend_deadline` 与 `takeover` 都**不需要**宿主 executor（快照注释同步） |
+
+**语义边界 / 留白**
+
+- **AC-P3-2b 仍是 L2 留白**：本轮取证到 **store 侧**（删除条件、缺失行读回 `ErrRunNotFound`、能力缺失宿主降级），未跑"真实宿主 + 真实驱逐 + `subagent_status` 读数比对"的端到端。
+- 保留窗口按"**turn 终局**"锚定（同 turn 全部行终态、且最旧一行过 cutoff 才整条删），比字面"每行 `finished_at` + N 天"更保守 —— 为满足"当前 turn 的账本视图不得受影响"。
+- GC 是**机会性**的（搭车巡检 + 1h 节流 + 单次有界）：不承诺"到点即删"，只承诺有界、最旧优先、不误删；驱逐后读数由 store 决定。
+- `takeover` 目前只对 `SubjectAgentRun` announce；团队 / 子代理主体仍走既有 cancel / close 路径。
+- 决策行消耗与再动作的既有语义不变：每个 mutation 终态会折叠出 `action_<action>_resolution` 行并把 subject 收敛为 `inspect` ⇒ **连续两次 mutation 之间必须等下一轮决策行**（这是生产语义，不是测试特例）。
+
+**验证证据（2026-09-23 实测）**
+
+- `go build ./...` exit 0；`gofmt -l internal/subagentbatch` 无输出（其余包为改动前既有偏差）。
+- `go test ./internal/supervision/ -count=1` **ok**（5.997s，含 `execution_gc_test.go` 五个 GC 用例与 `takeover_test.go` 四个 takeover 用例）。
+- `go test ./internal/subagentbatch/ ./internal/agent/ -count=1` 均 ok；`go test ./internal/chat/ ./internal/agent/ ./internal/api/skills/ -count=1` 均 ok（39.6s / 15.8s / 40.9s，三宿主接线未回归）。
+- `go test ./... -count=1`（backend 全量，约 5 分钟）：除 `internal/toolbroker` 的 `TestReliabilityEvalBrokerTimeoutRetryUsesNewInvocationWithoutDuplicateSideEffect` 在全量并发负载下超时外**全绿**；该用例即 §13.9 记录的同一负载相关既有 flake（本次改动不涉及 `internal/toolbroker`，单包复跑通过）。
+- `grep -E 'extend_deadline'`（`backend`，排除 `internal/supervision`）无匹配 ⇒ 无其他包硬编码 announce 集合需要同步。
+
+**AC 判定**
+
+| AC | 判定 | 证据 |
+| --- | --- | --- |
+| AC-P3-2a（GC 三条件正反例；"不得影响"三类必须保留） | ✅ L1 | `TestPruneExecutionRuns_RemovesOnlyEligibleRows`（六类保留行全在场）+ `…_AnchorsRetentionOnTurnFinalization` + `…_BoundedBatchesDrainOldestFirst` |
+| AC-P3-2b（驱逐内存态后账本由 store 重建，`subagent_status` 读数一致） | ⏳ L2 | store 侧已覆盖（缺失行 ⇒ `ErrRunNotFound`；读路径无内存副本，全经 `ExecutionRunStore` 能力断言）；端到端读数比对留白如上 |
+| AC-P3-2c（非 owner 变更 ⇒ 需 `takeover` 且写审计，I4） | ✅ L1 | `TestTakeover_UnblocksCrossOwnerMutation`（拒绝 → takeover → 放行）+ `TestTakeover_ClaimsOwnershipWithAuditTrail`（ActorID + reason）+ `TestTakeoverExecutionRun_CASAndTerminalGuard` |
+| EC-E1 / EC-E7 / EC-C5（挂起 turn 的结束与放弃） | ✅ L1 | `TestSettleParkedTurnOnRunEnd` / `TestTurnObligationsSettled` / `TestAbandonSuspendedTurn*` / `TestInterruptAbandonsSuspendedTurn` |
+
+**下一步**：P3 第三项 **C4-3（重启恢复与围栏，§6.11 / §6.12）** —— AC-P3-3a–c。

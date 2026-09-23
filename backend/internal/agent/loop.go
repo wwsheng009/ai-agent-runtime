@@ -465,6 +465,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		return nil, errors.New(errors.ErrValidationFailed, "LLM runtime is nil")
 	}
 	loop.turnID = TurnIDFromContext(ctx)
+	// §6.12 收尾（EC-E1"turn 永不结束"防线）：turn_id 在此固定；session_id 必须取
+	// 下面解析后的值（与派发方 parkBackgroundTurn 写账本的键同源），因此 settle 的
+	// defer 注册在 sessionID 解析之后。记录由派发方（本 loop）维护，chat actor 只读。
+	settleTurnID := strings.TrimSpace(loop.turnID)
 
 	loop.agent.SetRunning(true)
 	loop.agent.ClearErrors()
@@ -615,6 +619,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	if sessionID == "" {
 		sessionID = "react_" + uuid.NewString()
 	}
+	// §6.12 收尾（EC-E1"turn 永不结束"防线）：本回合的 obligation 批次全部终态时，
+	// 挂起记录必须被清掉，turn 才算真正结束；否则 nextTurnID 会永久复用挂起的 turn_id。
+	// session_id 取解析后的值，与 parkBackgroundTurn 写账本的键完全一致。
+	defer loop.settleParkedTurnOnRunEnd(ctx, sessionID, settleTurnID)
 	traceID := options.TraceID
 	if traceID == "" {
 		traceID = "trace_" + uuid.NewString()
@@ -6594,6 +6602,56 @@ func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentba
 	}
 	if err := store.ParkTurnSuspension(ctx, record); err != nil {
 		loop.agent.reportSuspensionDegraded(ctx, sessionID, "parked-state write failed: "+err.Error())
+	}
+}
+
+// settleParkedTurnOnRunEnd is the clear half of the §6.12 parked-turn lifecycle:
+// once every obligation batch of the parked turn reached a terminal state, the
+// turn is over and the durable record must go — otherwise nextTurnID keeps
+// reusing the parked turn_id forever (EC-E1 "turn 永不结束"). Ownership stays
+// with the dispatcher (the chat actor deliberately never clears the record), so
+// the check runs at the run boundary, where this loop still knows both the
+// session and the turn id.
+//
+// A failure here must never fail the run: this is a bookkeeping clear, so a read
+// error or an unsettled record simply keeps the record for the next turn
+// boundary, and only a failed clear is projected as an I9 degradation.
+func (loop *ReActLoop) settleParkedTurnOnRunEnd(ctx context.Context, sessionID, turnID string) {
+	if loop == nil || loop.agent == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	turnID = strings.TrimSpace(turnID)
+	if sessionID == "" || turnID == "" {
+		return
+	}
+	coordinator := loop.agent.GetSubagentBatchCoordinator()
+	if coordinator == nil {
+		return
+	}
+	store := coordinator.Store()
+	if store == nil || !store.IsDurable() {
+		return
+	}
+	// The run ctx is canceled on this path all the time (ESC / deadline / step
+	// limit), so fall back to a detached context: the settle check must still
+	// observe the durable control plane. The timeout bounds the store round trip.
+	baseCtx := ctx
+	if baseCtx == nil || baseCtx.Err() != nil {
+		baseCtx = context.Background()
+	}
+	settleCtx, cancel := context.WithTimeout(baseCtx, 5*time.Second)
+	defer cancel()
+	record, ok, err := store.GetTurnSuspension(settleCtx, sessionID, turnID)
+	if err != nil || !ok || record == nil {
+		return
+	}
+	settled, err := subagentbatch.TurnObligationsSettled(settleCtx, store, record)
+	if err != nil || !settled {
+		return
+	}
+	if err := store.ClearTurnSuspension(settleCtx, sessionID, turnID); err != nil {
+		loop.agent.reportSuspensionDegraded(settleCtx, sessionID, "parked-state clear failed: "+err.Error())
 	}
 }
 

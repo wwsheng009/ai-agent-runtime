@@ -61,6 +61,12 @@ func (e Evaluator) evaluateAllowedActions(n Notification) []string {
 			// extension instead of an ending. The I5/I6 bounds are re-validated
 			// when the action executes.
 			allowed = append(allowed, string(ActionExtendDeadline))
+			// takeover is the explicit ownership override (§6.11): it is
+			// announced for runs so a non-owner session has a named, audited
+			// path instead of a silent cross-owner mutation. Whether the
+			// override is actually needed (owner mismatch + live lease) is
+			// re-validated at execute time against the ledger row.
+			allowed = append(allowed, string(ActionTakeover))
 		}
 	default:
 		allowed = append(allowed, string(ActionAcknowledge), string(ActionDefer))

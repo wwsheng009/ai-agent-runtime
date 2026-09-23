@@ -134,6 +134,13 @@ type Config struct {
 	// 默认粒度：到点触发一次巡检或搭车下一次 progress resume。0 取默认
 	// HeartbeatTimeout（默认配置下 5m）。
 	PatrolInterval time.Duration `json:"patrol_interval,omitempty" yaml:"patrol_interval,omitempty"`
+	// ExecutionRunRetention 是终态 obligation 的保留窗口（C4-2/§6.12）：终态
+	// run 至少保留到"turn 终局 + N 天"，窗口内 subagent_status 仍能读到该行
+	// （含异常终态原因）。0 取默认 7 天（DefaultExecutionRunRetention）。
+	ExecutionRunRetention time.Duration `json:"execution_run_retention,omitempty" yaml:"execution_run_retention,omitempty"`
+	// ExecutionRunPruneLimit 是单次 GC 批删的行数上限（§6.12"批量删除、单次
+	// 有界"）。0 取默认 200，超过 MaxExecutionRunPruneLimit 按硬上限收敛。
+	ExecutionRunPruneLimit int `json:"execution_run_prune_limit,omitempty" yaml:"execution_run_prune_limit,omitempty"`
 }
 
 // DefaultConfig 返回默认调参。
@@ -156,6 +163,9 @@ func DefaultConfig() Config {
 		MaxExtensionPerCall:       1,
 		MaxExtensionTotal:         4,
 		TurnHardCap:               24 * time.Hour,
+		// C4-2（§6.12）：终态保留窗口与单次 GC 批量。
+		ExecutionRunRetention:  DefaultExecutionRunRetention,
+		ExecutionRunPruneLimit: DefaultExecutionRunPruneLimit,
 	}
 	// Q2：决策宽限期默认 2×HeartbeatTimeout，墙钟上限默认 2W。
 	d.DecisionWindow = 2 * d.HeartbeatTimeout
@@ -270,6 +280,13 @@ func (c Config) WithDefaults() Config {
 		d.PatrolInterval = c.PatrolInterval
 	} else {
 		d.PatrolInterval = d.HeartbeatTimeout
+	}
+	// C4-2（§6.12）：保留窗口/批量显式配置透传；0 保持默认（不是"关 GC"）。
+	if c.ExecutionRunRetention > 0 {
+		d.ExecutionRunRetention = c.ExecutionRunRetention
+	}
+	if c.ExecutionRunPruneLimit > 0 {
+		d.ExecutionRunPruneLimit = c.ExecutionRunPruneLimit
 	}
 	return d
 }

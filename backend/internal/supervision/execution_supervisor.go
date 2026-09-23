@@ -73,6 +73,12 @@ type ExecutionSupervisorConfig struct {
 	// Zero derives 2 x DecisionWindow. It bounds the runnable-clock deferral of
 	// I8/EC-A3, so the fallback can never be postponed indefinitely.
 	DecisionWindowMax time.Duration
+	// ExecutionRunRetention / ExecutionRunPruneLimit bound the retention GC
+	// (plan C4-2 / §6.12). Zero takes the shared operator defaults (7 days,
+	// 200 rows per pass) so an unwired host still prunes instead of growing the
+	// ledger without bound.
+	ExecutionRunRetention  time.Duration
+	ExecutionRunPruneLimit int
 }
 
 // DefaultExecutionSupervisorConfig returns the documented defaults (doc 10):
@@ -97,6 +103,8 @@ func DefaultExecutionSupervisorConfig() ExecutionSupervisorConfig {
 		StallEscalationMultiplier: suspension.StallEscalationMultiplier,
 		DecisionWindow:            suspension.DecisionWindow,
 		DecisionWindowMax:         suspension.DecisionWindowMax,
+		ExecutionRunRetention:     suspension.ExecutionRunRetention,
+		ExecutionRunPruneLimit:    suspension.ExecutionRunPruneLimit,
 	}
 }
 
@@ -177,6 +185,13 @@ type ExecutionSupervisorStats struct {
 	LastDispatchAt        time.Time
 	LastDispatchDelivered int
 	LastDispatchFailed    int
+	// Retention is the effective terminal-run retention window and
+	// LastPrune* describe the most recent retention GC pass (plan C4-2).
+	Retention        time.Duration
+	PrunedTotal      int64
+	LastPruneAt      time.Time
+	LastPruneRemoved int64
+	LastPruneError   string
 }
 
 // executionSupervisorState is the mutex-guarded counter block behind Stats.
@@ -191,6 +206,10 @@ type executionSupervisorState struct {
 	lastDispatchAt time.Time
 	delivered      int
 	failed         int
+	lastPruneAt    time.Time
+	prunedTotal    int64
+	lastPruned     int64
+	lastPruneError string
 }
 
 // ExecutionSupervisor is the P3 child run watchdog: durable run records,
@@ -373,6 +392,10 @@ func (s *ExecutionSupervisor) ScanOnce(ctx context.Context) ([]RunDecision, erro
 		}
 	}
 	s.recordScan(now, decisions, dispatchErr)
+	// Retention GC rides the scan (plan C4-2 / §6.12): it is opportunistic and
+	// bounded, and a prune failure must not mask a healthy decision pass, so it
+	// is recorded in Stats instead of replacing the scan result.
+	s.pruneRetention(ctx, now)
 	return decisions, dispatchErr
 }
 
@@ -473,6 +496,11 @@ func (s *ExecutionSupervisor) Stats() ExecutionSupervisorStats {
 		LastDispatchAt:        state.lastDispatchAt,
 		LastDispatchDelivered: state.delivered,
 		LastDispatchFailed:    state.failed,
+		Retention:             cfg.ExecutionRunRetention,
+		PrunedTotal:           state.prunedTotal,
+		LastPruneAt:           state.lastPruneAt,
+		LastPruneRemoved:      state.lastPruned,
+		LastPruneError:        state.lastPruneError,
 	}
 }
 
@@ -514,6 +542,54 @@ func (s *ExecutionSupervisor) recordDispatch(at time.Time, delivered, failed int
 	s.stats.lastDispatchAt = at
 	s.stats.delivered = delivered
 	s.stats.failed = failed
+}
+
+// executionRunPruneInterval throttles the retention GC. The retention window
+// is measured in days, so running the bounded DELETE on every scan tick would
+// be pure overhead; GC stays opportunistic and rides the first scan after the
+// interval elapses.
+const executionRunPruneInterval = time.Hour
+
+// pruneRetention removes one bounded batch of retention-expired terminal runs
+// (plan C4-2 / design §6.12). It never touches the rows the "must not affect"
+// list protects — the store enforces those guards inside the DELETE — and it
+// deliberately does not fail the scan: GC is opportunistic bookkeeping, while
+// the scan's return value is the decision result the caller acts on.
+func (s *ExecutionSupervisor) pruneRetention(ctx context.Context, now time.Time) {
+	if s == nil || s.Store == nil || !s.pruneDue(now) {
+		return
+	}
+	cfg := s.effectiveConfig()
+	removed, err := s.Store.PruneExecutionRuns(ctx, ExecutionRunPrunePolicy{
+		Now:       now,
+		Retention: cfg.ExecutionRunRetention,
+		Limit:     cfg.ExecutionRunPruneLimit,
+	})
+	s.recordPrune(now, removed, err)
+}
+
+func (s *ExecutionSupervisor) pruneDue(now time.Time) bool {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	if s.stats.lastPruneAt.IsZero() {
+		return true
+	}
+	return now.Sub(s.stats.lastPruneAt) >= executionRunPruneInterval
+}
+
+func (s *ExecutionSupervisor) recordPrune(at time.Time, removed int64, err error) {
+	if s == nil {
+		return
+	}
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	s.stats.lastPruneAt = at
+	s.stats.lastPruned = removed
+	s.stats.prunedTotal += removed
+	s.stats.lastPruneError = ""
+	if err != nil {
+		s.stats.lastPruneError = err.Error()
+	}
 }
 
 func (s *ExecutionSupervisor) setLoopRunning(running bool) {
@@ -1173,6 +1249,14 @@ func (s *ExecutionSupervisor) effectiveConfig() ExecutionSupervisorConfig {
 	}
 	if cfg.DecisionWindowMax <= 0 {
 		cfg.DecisionWindowMax = 2 * cfg.DecisionWindow
+	}
+	// C4-2 retention GC: zero keeps the documented defaults so a host that
+	// never configures the knobs still prunes terminal rows.
+	if cfg.ExecutionRunRetention <= 0 {
+		cfg.ExecutionRunRetention = defaults.ExecutionRunRetention
+	}
+	if cfg.ExecutionRunPruneLimit <= 0 {
+		cfg.ExecutionRunPruneLimit = defaults.ExecutionRunPruneLimit
 	}
 	return cfg
 }

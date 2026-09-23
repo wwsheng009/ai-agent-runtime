@@ -325,9 +325,15 @@ func (s *ActionService) ExecuteAction(ctx context.Context, actionID string) (Act
 	// executor. Every other action keeps the host executor path.
 	var result ActionResult
 	var execErr error
-	if executing.Action == ActionExtendDeadline {
+	switch executing.Action {
+	case ActionExtendDeadline:
 		result, execErr = s.executeExtendDeadline(ctx, executing)
-	} else {
+	case ActionTakeover:
+		// takeover is a control-plane mutation too: it rewrites the ledger's
+		// own ownership/fencing columns (§6.11), which no host executor can
+		// reach.
+		result, execErr = s.executeTakeover(ctx, executing)
+	default:
 		result, execErr = s.executor.Execute(ctx, executing)
 	}
 
@@ -534,7 +540,7 @@ func (s *ActionService) emitResolutionNotification(ctx context.Context, record A
 
 func isMutationAction(action ActionKind) bool {
 	switch action {
-	case ActionCancel, ActionClose, ActionCancelSubtree, ActionRetry, ActionReassign, ActionExtendDeadline:
+	case ActionCancel, ActionClose, ActionCancelSubtree, ActionRetry, ActionReassign, ActionExtendDeadline, ActionTakeover:
 		return true
 	default:
 		return false
@@ -556,7 +562,7 @@ func validateActionRequest(req ActionRequest) error {
 		return fmt.Errorf("%w: target_kind and target_id are required", ErrActionInvalid)
 	}
 	switch req.Action {
-	case ActionInspect, ActionAcknowledge, ActionDefer, ActionCancel, ActionClose, ActionCancelSubtree, ActionRetry, ActionReassign, ActionExtendDeadline:
+	case ActionInspect, ActionAcknowledge, ActionDefer, ActionCancel, ActionClose, ActionCancelSubtree, ActionRetry, ActionReassign, ActionExtendDeadline, ActionTakeover:
 	default:
 		return fmt.Errorf("%w: unsupported action %q", ErrActionInvalid, req.Action)
 	}
@@ -722,6 +728,12 @@ func (s *ActionService) executeExtendDeadline(ctx context.Context, record Action
 	if err := ensureExtendable(*run); err != nil {
 		return ActionResult{}, err
 	}
+	// §6.11 ownership boundary: while another session holds a live owner lease
+	// on this run, extending it is a cross-owner mutation and must go through
+	// the explicit, audited takeover action first.
+	if err := ensureRunMutationAuthorized(run, record.RequestedByID, string(ActionExtendDeadline), now); err != nil {
+		return ActionResult{}, err
+	}
 	which, err := normalizeExtendWhich(record.ExtendWhich)
 	if err != nil {
 		return ActionResult{}, err
@@ -796,14 +808,25 @@ func (s *ActionService) executeExtendDeadline(ctx context.Context, record Action
 }
 
 // loadExtensionRun resolves the action's target to the execution-run row the
-// extension mutates. Only agent_run subjects own a run ledger, so a session or
-// team target is rejected with the actionable hint instead of silently
-// extending nothing.
+// extension mutates (see loadSubjectRun).
 func (s *ActionService) loadExtensionRun(ctx context.Context, record ActionRecord) (*ExecutionRun, error) {
+	return s.loadSubjectRun(ctx, record, string(ActionExtendDeadline), HintExtensionTargetMissing)
+}
+
+// loadTakeoverRun resolves the action's target to the run row takeover claims.
+func (s *ActionService) loadTakeoverRun(ctx context.Context, record ActionRecord) (*ExecutionRun, error) {
+	return s.loadSubjectRun(ctx, record, string(ActionTakeover), HintTakeoverTargetMissing)
+}
+
+// loadSubjectRun resolves an action's target to the execution-run row it
+// mutates. Only agent_run subjects own a run ledger, so a session or team
+// target is rejected with the actionable hint instead of silently mutating
+// nothing.
+func (s *ActionService) loadSubjectRun(ctx context.Context, record ActionRecord, action, hint string) (*ExecutionRun, error) {
 	kind := SubjectKind(strings.TrimSpace(string(record.TargetKind)))
 	if kind != SubjectAgentRun {
-		return nil, fmt.Errorf("%w: extend_deadline targets agent_run, got %q; next_action=%s",
-			ErrActionInvalid, record.TargetKind, HintExtensionTargetMissing)
+		return nil, fmt.Errorf("%w: %s targets agent_run, got %q; next_action=%s",
+			ErrActionInvalid, action, record.TargetKind, hint)
 	}
 	runs, err := s.executionRunStore()
 	if err != nil {
@@ -812,14 +835,148 @@ func (s *ActionService) loadExtensionRun(ctx context.Context, record ActionRecor
 	run, err := runs.GetExecutionRun(ctx, strings.TrimSpace(record.TargetID))
 	if err != nil {
 		if errors.Is(err, ErrRunNotFound) {
-			return nil, fmt.Errorf("%w: run %s not found; next_action=%s", ErrActionInvalid, record.TargetID, HintExtensionTargetMissing)
+			return nil, fmt.Errorf("%w: run %s not found; next_action=%s", ErrActionInvalid, record.TargetID, hint)
 		}
 		return nil, fmt.Errorf("load run %s: %w", record.TargetID, err)
 	}
 	if run == nil {
-		return nil, fmt.Errorf("%w: run %s not found; next_action=%s", ErrActionInvalid, record.TargetID, HintExtensionTargetMissing)
+		return nil, fmt.Errorf("%w: run %s not found; next_action=%s", ErrActionInvalid, record.TargetID, hint)
 	}
 	return run, nil
+}
+
+// --- takeover: the §6.11 ownership override (change #16) ---
+
+const (
+	// HintOwnerLeaseHeld is the stable next_action hint for a mutation rejected
+	// because another session holds the run's live owner lease: the caller must
+	// take ownership explicitly (takeover) instead of writing behind the
+	// owner's back.
+	HintOwnerLeaseHeld = "owner_lease_held_use_takeover"
+	// HintTakeoverTargetMissing is the takeover counterpart of
+	// HintExtensionTargetMissing.
+	HintTakeoverTargetMissing = "takeover_requires_agent_run_subject"
+	// HintTakeoverTerminal is the stable next_action hint for a takeover on a
+	// run that already reached a terminal state: there is no live obligation
+	// left to own.
+	HintTakeoverTerminal = "takeover_requires_live_run"
+	// HintTakeoverNotNeeded is the stable next_action hint when the acting
+	// session already owns the run with a live lease, so the mutation can be
+	// issued directly.
+	HintTakeoverNotNeeded = "already_owner_issue_action_directly"
+)
+
+// takeoverLease is the lease a takeover establishes (§6.11: ownership is
+// renewed while the parent turn runs). It reuses the heartbeat granularity so a
+// taken-over run is re-checked at the same cadence as any other live run.
+func takeoverLease() time.Duration {
+	return DefaultConfig().HeartbeatTimeout
+}
+
+// ensureRunMutationAuthorized enforces the §6.11 ownership boundary for a
+// mutation on a ledger row: while another session holds a live owner lease,
+// this session must take ownership explicitly (takeover) instead of mutating
+// the row behind the owner's back — the double write the fencing token exists
+// to stop (EC-B9). An absent or expired lease is not a live competing owner:
+// §6.11 deliberately stops renewing the lease while a turn is suspended, so a
+// stale owner must not block the surviving session forever.
+func ensureRunMutationAuthorized(run *ExecutionRun, actorID, action string, now time.Time) error {
+	if run == nil {
+		return nil
+	}
+	owner := strings.TrimSpace(run.OwnerID)
+	actor := strings.TrimSpace(actorID)
+	if owner == "" || owner == actor {
+		return nil
+	}
+	if run.OwnerLeaseUntil == nil || !run.OwnerLeaseUntil.After(now) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s requires ownership of run %s (owner=%s lease_until=%s, actor=%s); next_action=%s",
+		ErrActionNotAllowed, action, run.RunID, owner,
+		run.OwnerLeaseUntil.UTC().Format(time.RFC3339), actor, HintOwnerLeaseHeld)
+}
+
+// executeTakeover performs the explicit ownership override: it claims the run
+// for the acting session, advances the fencing token (so a write the previous
+// owner still has in flight is rejected by its own CAS) and writes the audit
+// trail — ActorID is the action's requested_by_id and the reason is the
+// request's reason (I4), both persisted on the durable action record and
+// projected onto the parent-visible lifecycle event.
+func (s *ActionService) executeTakeover(ctx context.Context, record ActionRecord) (ActionResult, error) {
+	run, err := s.loadTakeoverRun(ctx, record)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	now := s.now().UTC()
+	if run.Terminal() {
+		return ActionResult{}, fmt.Errorf("%w: run %s is %s, not a live obligation; next_action=%s",
+			ErrActionInvalid, run.RunID, run.Status, HintTakeoverTerminal)
+	}
+	actor := strings.TrimSpace(record.RequestedByID)
+	if strings.TrimSpace(run.OwnerID) == actor && run.OwnerLeaseUntil != nil && run.OwnerLeaseUntil.After(now) {
+		return ActionResult{}, fmt.Errorf("%w: run %s is already owned by %s with a live lease; next_action=%s",
+			ErrActionInvalid, run.RunID, actor, HintTakeoverNotNeeded)
+	}
+	runs, err := s.executionRunStore()
+	if err != nil {
+		return ActionResult{}, err
+	}
+	// CAS on the token observed here: if another takeover won the row in
+	// between, this one loses instead of silently overwriting its result.
+	ok, err := runs.TakeoverExecutionRun(ctx, run.RunID, actor, run.FencingToken, takeoverLease(), now)
+	if err != nil {
+		return ActionResult{}, fmt.Errorf("takeover run %s: %w", run.RunID, err)
+	}
+	if !ok {
+		return ActionResult{}, fmt.Errorf("%w: run %s changed while taking over; re-read and retry", ErrActionConflict, run.RunID)
+	}
+	claimed, err := runs.GetExecutionRun(ctx, run.RunID)
+	if err != nil {
+		return ActionResult{}, fmt.Errorf("reload run %s after takeover: %w", run.RunID, err)
+	}
+	if claimed == nil {
+		return ActionResult{}, fmt.Errorf("%w: run %s vanished during takeover", ErrActionConflict, run.RunID)
+	}
+	previous := strings.TrimSpace(run.OwnerID)
+	if previous == "" {
+		previous = "(none)"
+	}
+	result := "takeover: owner " + previous + " -> " + actor +
+		" (fencing_token=" + formatInt(claimed.FencingToken) + ")"
+	if err := s.projectTakeover(ctx, *claimed, previous, actor, record); err != nil {
+		return ActionResult{}, err
+	}
+	return ActionResult{
+		Status:       ActionCompleted,
+		Result:       result,
+		ResultDetail: "owner_id=" + actor + " fencing_token=" + formatInt(claimed.FencingToken),
+	}, nil
+}
+
+// projectTakeover writes the durable, parent-visible ownership event so the
+// digest shows that the obligation changed hands and by whose decision.
+func (s *ActionService) projectTakeover(ctx context.Context, run ExecutionRun, previousOwner, actor string, record ActionRecord) error {
+	reason := "takeover: owner " + previousOwner + " -> " + actor + " (actor=" + actor + ")"
+	if trimmed := strings.TrimSpace(record.Reason); trimmed != "" {
+		reason += "; reason=" + trimmed
+	}
+	_, err := ProjectLifecycle(ctx, s.store, nil, LifecycleProjection{
+		RootScopeID:           run.RootSessionID,
+		TargetParentSessionID: run.ParentSessionID,
+		SubjectKind:           SubjectAgentRun,
+		SubjectID:             run.RunID,
+		SubjectVersion:        run.Version,
+		EventType:             "obligation.ownership.taken_over",
+		Severity:              SeverityWarning,
+		SupervisionState:      SupervisionRunning,
+		Reason:                reason,
+		RecommendedAction:     string(ActionInspect),
+	})
+	if err != nil {
+		return fmt.Errorf("project takeover event for run %s: %w", run.RunID, err)
+	}
+	return nil
 }
 
 // executionRunStore exposes the execution-run ledger behind the action store.

@@ -78,6 +78,15 @@ type ExecutionRunStore interface {
 	MarkOutboxDelivered(ctx context.Context, outboxID string, parentMailboxSeq int64, now time.Time) (bool, error)
 	// MarkOutboxFailed records a delivery failure and increments attempts.
 	MarkOutboxFailed(ctx context.Context, outboxID, errText string, now time.Time) (bool, error)
+	// PruneExecutionRuns deletes one bounded batch of retention-expired
+	// terminal runs and reports how many rows were removed (retention/GC,
+	// plan C4-2 / design §6.12).
+	PruneExecutionRuns(ctx context.Context, policy ExecutionRunPrunePolicy) (int64, error)
+	// TakeoverExecutionRun transfers ownership of a live run to newOwnerID
+	// (the explicit, audited override of §6.11) and reports whether the row
+	// was claimed. It is CAS-guarded on the fencing token so two concurrent
+	// takeovers cannot both win.
+	TakeoverExecutionRun(ctx context.Context, runID, newOwnerID string, expectedFencingToken int64, lease time.Duration, now time.Time) (bool, error)
 }
 
 var _ ExecutionRunStore = (*SQLiteSupervisionStore)(nil)
@@ -92,7 +101,33 @@ const (
 		error_code, version, created_at, updated_at,
 		turn_id, declared_budget, extension_count, extended_total,
 		decision_window_until`
+
+	// DefaultExecutionRunRetention is the documented retention window (§6.12):
+	// a terminal obligation stays readable until turn finalization + 7 days.
+	// Operators override it through Config.ExecutionRunRetention.
+	DefaultExecutionRunRetention = 7 * 24 * time.Hour
+	// DefaultExecutionRunPruneLimit bounds one GC pass. GC is opportunistic (it
+	// rides the supervisor scan), so a small batch keeps the scan tick flat
+	// even on a huge ledger; the next pass removes the next batch.
+	DefaultExecutionRunPruneLimit = 200
+	// MaxExecutionRunPruneLimit is the hard cap a caller-supplied limit is
+	// clamped to, so a misconfigured host cannot turn one scan into an
+	// unbounded delete.
+	MaxExecutionRunPruneLimit = 1000
 )
+
+// ExecutionRunPrunePolicy bounds one execution-run GC pass (plan C4-2).
+type ExecutionRunPrunePolicy struct {
+	// Now is the clock the retention cutoff is computed from; zero means the
+	// current UTC time.
+	Now time.Time
+	// Retention is the window applied to a terminal run's finished_at; zero
+	// means DefaultExecutionRunRetention.
+	Retention time.Duration
+	// Limit bounds this pass; zero means DefaultExecutionRunPruneLimit and
+	// values above MaxExecutionRunPruneLimit are clamped.
+	Limit int
+}
 
 // CreateExecutionRun inserts a new run; false when run_id already exists.
 func (s *SQLiteSupervisionStore) CreateExecutionRun(ctx context.Context, run ExecutionRun) (bool, error) {
@@ -504,6 +539,139 @@ func (s *SQLiteSupervisionStore) MarkOutboxFailed(ctx context.Context, outboxID,
 		WHERE outbox_id=? AND delivered_at IS NULL`, strings.TrimSpace(errText), strings.TrimSpace(outboxID))
 	if err != nil {
 		return false, fmt.Errorf("mark outbox failed: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// PruneExecutionRuns removes one bounded batch of retention-expired terminal
+// runs (plan C4-2 / design §6.12). Every eligibility rule is enforced inside
+// the DELETE rather than by a read-then-delete, so a row that becomes
+// ineligible between the two steps (a wake lands, a decision window opens, the
+// turn gains a live obligation) survives:
+//
+//   - resolved: terminal status and outside the retention window, measured from
+//     turn finalization (§6.12: "turn 终局 + N 天") — a row is only old enough
+//     once every sibling of its turn is past the cutoff too;
+//   - no artifact reference: result_ref is empty (a row whose payload can only
+//     be fetched through the ledger is never dropped);
+//   - no pending resume: no undelivered wake for the obligation and no
+//     undelivered completion-outbox entry.
+//
+// "Must not affect" rows are protected by the same statement: rows inside a
+// decision window are excluded, rows of a turn that still has a live
+// obligation are excluded, and orphan_suspected rows are non-terminal so the
+// status filter already excludes them.
+func (s *SQLiteSupervisionStore) PruneExecutionRuns(ctx context.Context, policy ExecutionRunPrunePolicy) (int64, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return 0, err
+	}
+	now := policy.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	retention := policy.Retention
+	if retention <= 0 {
+		retention = DefaultExecutionRunRetention
+	}
+	limit := policy.Limit
+	if limit <= 0 {
+		limit = DefaultExecutionRunPruneLimit
+	}
+	if limit > MaxExecutionRunPruneLimit {
+		limit = MaxExecutionRunPruneLimit
+	}
+
+	terminal := strings.Join(repeatQuestionMarks(len(runTerminalStatuses)), ",")
+	args := make([]interface{}, 0, 2*len(runTerminalStatuses)+4)
+	for status := range runTerminalStatuses {
+		args = append(args, status)
+	}
+	cutoff := formatRunTime(now.Add(-retention))
+	args = append(args, cutoff)
+	args = append(args, formatRunTime(now))
+	for status := range runTerminalStatuses {
+		args = append(args, status)
+	}
+	args = append(args, cutoff)
+	args = append(args, limit)
+
+	query := `DELETE FROM supervision_execution_runs WHERE rowid IN (
+		SELECT candidate.rowid FROM supervision_execution_runs candidate
+		WHERE candidate.status IN (` + terminal + `)
+		  AND candidate.finished_at IS NOT NULL
+		  AND candidate.finished_at != ''
+		  AND candidate.finished_at <= ?
+		  AND candidate.result_ref = ''
+		  AND (candidate.decision_window_until IS NULL
+		       OR candidate.decision_window_until = ''
+		       OR candidate.decision_window_until <= ?)
+		  AND NOT EXISTS (
+			SELECT 1 FROM supervision_wake_pending wake
+			WHERE wake.obligation_id = candidate.run_id)
+		  AND NOT EXISTS (
+			SELECT 1 FROM supervision_completion_outbox outbox
+			WHERE outbox.run_id = candidate.run_id AND outbox.delivered_at IS NULL)
+		  AND (candidate.turn_id = '' OR NOT EXISTS (
+			SELECT 1 FROM supervision_execution_runs peer
+			WHERE peer.turn_id = candidate.turn_id
+			  AND (peer.status NOT IN (` + terminal + `)
+			       OR peer.finished_at IS NULL
+			       OR peer.finished_at = ''
+			       OR peer.finished_at > ?)))
+		ORDER BY candidate.finished_at ASC
+		LIMIT ?)`
+	result, err := db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("prune execution runs: %w", err)
+	}
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune execution runs: %w", err)
+	}
+	return removed, nil
+}
+
+// TakeoverExecutionRun transfers ownership of a live run to newOwnerID. It is
+// the durable half of the audited `takeover` action (§6.11): a mutation
+// requires OwnerID == the acting session with a valid lease, and this call is
+// the explicit override that moves that ownership. The fencing token is
+// incremented so a write the previous owner still has in flight is rejected by
+// its own CAS (EC-B9), and the predicate compares the token the caller
+// observed, so two concurrent takeovers cannot both win.
+func (s *SQLiteSupervisionStore) TakeoverExecutionRun(ctx context.Context, runID, newOwnerID string, expectedFencingToken int64, lease time.Duration, now time.Time) (bool, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return false, err
+	}
+	runID = strings.TrimSpace(runID)
+	newOwnerID = strings.TrimSpace(newOwnerID)
+	if runID == "" || newOwnerID == "" {
+		return false, fmt.Errorf("takeover execution run: run_id and new owner are required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	var leaseUntil interface{}
+	if lease > 0 {
+		leaseUntil = formatRunTime(now.Add(lease))
+	}
+	terminal := strings.Join(repeatQuestionMarks(len(runTerminalStatuses)), ",")
+	args := []interface{}{newOwnerID, leaseUntil, formatRunTime(now), runID, expectedFencingToken}
+	for status := range runTerminalStatuses {
+		args = append(args, status)
+	}
+	result, err := db.ExecContext(ctx, `UPDATE supervision_execution_runs
+		SET owner_id = ?, owner_lease_until = ?,
+		    fencing_token = fencing_token + 1, version = version + 1, updated_at = ?
+		WHERE run_id = ? AND fencing_token = ?
+		  AND status NOT IN (`+terminal+`)`, args...)
+	if err != nil {
+		return false, fmt.Errorf("takeover execution run: %w", err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {

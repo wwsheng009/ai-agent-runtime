@@ -204,6 +204,12 @@ const (
 	// exists for, so it is a mutation action with its own payload
 	// (extend_by | new_deadline + extend_which).
 	ActionExtendDeadline ActionKind = "extend_deadline"
+	// ActionTakeover is the explicit, audited ownership override (§6.11): a
+	// mutation on a run whose OwnerID/lease does not belong to the acting
+	// session must first take ownership through this action (reason required,
+	// ActorID + reason recorded, fencing token advanced so the previous
+	// owner's in-flight writes are rejected).
+	ActionTakeover ActionKind = "takeover"
 )
 
 // CascadeMode controls how far a control action propagates.

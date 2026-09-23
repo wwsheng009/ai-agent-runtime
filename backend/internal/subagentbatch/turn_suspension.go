@@ -1,6 +1,7 @@
 package subagentbatch
 
 import (
+	"context"
 	"strings"
 	"time"
 )
@@ -77,4 +78,67 @@ func normalizeIDList(values []string) []string {
 		return nil
 	}
 	return out
+}
+
+// TurnObligationsSettled reports whether every obligation referenced by the
+// parked-turn record reached a terminal state, i.e. whether the parked turn may
+// end (design §6.12 / EC-E1 "turn 永不结束"). The batch control plane is the
+// record's own source of truth — the dispatcher writes the batch/task ids from
+// the same store — so the settle check reads it back instead of trusting a
+// caller-supplied summary.
+//
+// Only *resolved* batches count as evidence: a batch id with no row (never
+// created, or already GC'd) cannot prove the work finished and is skipped. A
+// record whose batches are all unresolved is reported as not settled, so the
+// suspension is kept and re-evaluated at the next turn boundary. The safe
+// direction is keeping the turn parked (obligations are never silently dropped),
+// never clearing the record on a guess.
+func TurnObligationsSettled(ctx context.Context, store BatchStore, record *TurnSuspension) (bool, error) {
+	if store == nil || record == nil {
+		return false, nil
+	}
+	batchIDs := record.obligationBatchIDs()
+	if len(batchIDs) == 0 {
+		return false, nil
+	}
+	resolved := 0
+	for _, batchID := range batchIDs {
+		batch, err := store.GetBatch(ctx, batchID)
+		if err != nil {
+			return false, err
+		}
+		if batch == nil {
+			continue
+		}
+		resolved++
+		if !batch.Status.Terminal() {
+			return false, nil
+		}
+	}
+	return resolved > 0, nil
+}
+
+// obligationBatchIDs returns the batch ids that gate this parked turn.
+// ResumeQueue carries the batch wake keys written by the dispatcher
+// (parkBackgroundTurn writes exactly [batch_id]); ObligationIDs[0] is the same
+// batch id and only serves as a fallback for records written without a queue.
+// ObligationBatchIDs exposes the same list to the abandon executor (EC-E7 /
+// EC-C5): abandoning a parked turn must cascade-cancel exactly the obligations
+// the settle check reads, so both paths share one resolution rule.
+func (t *TurnSuspension) ObligationBatchIDs() []string {
+	if t == nil {
+		return nil
+	}
+	if ids := normalizeIDList(t.ResumeQueue); len(ids) > 0 {
+		return ids
+	}
+	obligations := normalizeIDList(t.ObligationIDs)
+	if len(obligations) == 0 {
+		return nil
+	}
+	return obligations[:1]
+}
+
+func (t *TurnSuspension) obligationBatchIDs() []string {
+	return t.ObligationBatchIDs()
 }

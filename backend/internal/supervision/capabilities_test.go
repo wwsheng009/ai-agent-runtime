@@ -18,7 +18,7 @@ func TestEvaluateAllowedActionsForHostNarrowsToWiredChannels(t *testing.T) {
 
 	neutral := evaluator.EvaluateAllowedActions(n)
 	require.Equal(t,
-		[]string{"inspect", "acknowledge", "defer", "cancel", "close", "extend_deadline"},
+		[]string{"inspect", "acknowledge", "defer", "cancel", "close", "extend_deadline", "takeover"},
 		neutral,
 		"host-neutral set is the enforcement policy and must not shrink")
 
@@ -43,19 +43,19 @@ func TestEvaluateAllowedActionsForHostNarrowsToWiredChannels(t *testing.T) {
 		{
 			name:    "decision channel only",
 			caps:    &HostCapabilities{DecisionActions: true},
-			allowed: []string{"inspect", "acknowledge", "defer", "extend_deadline"},
+			allowed: []string{"inspect", "acknowledge", "defer", "extend_deadline", "takeover"},
 			hint:    HintControlRequiresActionExecutor,
 		},
 		{
 			name:    "control channel only",
 			caps:    &HostCapabilities{ControlActions: true},
-			allowed: []string{"inspect", "cancel", "close", "extend_deadline"},
+			allowed: []string{"inspect", "cancel", "close", "extend_deadline", "takeover"},
 			hint:    HintAcknowledgeRequiresLocalCommand,
 		},
 		{
 			name:    "no action channel wired",
 			caps:    &HostCapabilities{},
-			allowed: []string{"inspect", "extend_deadline"},
+			allowed: []string{"inspect", "extend_deadline", "takeover"},
 			hint:    HintAcknowledgeRequiresLocalCommand + "; " + HintControlRequiresActionExecutor,
 		},
 	}
@@ -120,9 +120,9 @@ func TestBuildDigestFiltersAnnouncedActionsByHostCapabilities(t *testing.T) {
 	digest, err := BuildDigest(ctx, store, req)
 	require.NoError(t, err)
 	require.Len(t, digest.Items, 1)
-	require.Equal(t, []string{"inspect", "acknowledge", "defer", "extend_deadline"}, digest.Items[0].AllowedActions)
+	require.Equal(t, []string{"inspect", "acknowledge", "defer", "extend_deadline", "takeover"}, digest.Items[0].AllowedActions)
 	require.Equal(t, HintControlRequiresActionExecutor, digest.Items[0].NextAction)
-	require.Contains(t, digest.Text, "allowed=[inspect,acknowledge,defer,extend_deadline]")
+	require.Contains(t, digest.Text, "allowed=[inspect,acknowledge,defer,extend_deadline,takeover]")
 	require.Contains(t, digest.Text, "next_action="+HintControlRequiresActionExecutor)
 
 	// Undeclared capabilities keep the pre-P2-12 wording: a host that has not
@@ -131,9 +131,9 @@ func TestBuildDigestFiltersAnnouncedActionsByHostCapabilities(t *testing.T) {
 	digest, err = BuildDigest(ctx, store, req)
 	require.NoError(t, err)
 	require.Len(t, digest.Items, 1)
-	require.Equal(t, []string{"inspect", "acknowledge", "defer", "cancel", "close", "extend_deadline"}, digest.Items[0].AllowedActions)
+	require.Equal(t, []string{"inspect", "acknowledge", "defer", "cancel", "close", "extend_deadline", "takeover"}, digest.Items[0].AllowedActions)
 	require.Empty(t, digest.Items[0].NextAction)
-	require.Contains(t, digest.Text, "allowed=[inspect,acknowledge,defer,cancel,close,extend_deadline]")
+	require.Contains(t, digest.Text, "allowed=[inspect,acknowledge,defer,cancel,close,extend_deadline,takeover]")
 	require.NotContains(t, digest.Text, "next_action=")
 }
 
@@ -153,9 +153,10 @@ func TestBuildSnapshotFiltersAnnouncedActionsByHostCapabilities(t *testing.T) {
 	require.Len(t, snapshot.Descendants, 1)
 	item := snapshot.Descendants[0]
 	require.Equal(t, "agent-cap-snapshot", item.ID)
-	// extend_deadline needs no host executor (the runtime extends its own run
-	// deadlines), so it survives capability filtering while cancel/close do not.
-	require.Equal(t, []string{"inspect", "cancel", "close", "extend_deadline"}, item.AllowedActions)
+	// extend_deadline and takeover need no host executor (the runtime moves its
+	// own run deadlines and ownership columns), so they survive capability
+	// filtering while cancel/close do not.
+	require.Equal(t, []string{"inspect", "cancel", "close", "extend_deadline", "takeover"}, item.AllowedActions)
 	require.Equal(t, HintAcknowledgeRequiresLocalCommand, item.NextAction)
 
 	snapshot, err = BuildSnapshot(ctx, store, SnapshotRequest{
@@ -278,7 +279,7 @@ func TestWakeDigestFiltersAnnouncedActionsByHostCapabilities(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, claimed, 1)
 	require.Len(t, digest.Items, 1)
-	require.Equal(t, []string{"inspect", "acknowledge", "defer", "extend_deadline"}, digest.Items[0].AllowedActions)
+	require.Equal(t, []string{"inspect", "acknowledge", "defer", "extend_deadline", "takeover"}, digest.Items[0].AllowedActions)
 	require.Contains(t, digest.Text, "next_action="+HintControlRequiresActionExecutor)
 
 	// Executor wired later (the CLI/HTTP hosts call SetActionExecutor after the
@@ -287,7 +288,7 @@ func TestWakeDigestFiltersAnnouncedActionsByHostCapabilities(t *testing.T) {
 	digest, err = scheduler.RootDigest(ctx, "root-session-1", "root-session-1", "")
 	require.NoError(t, err)
 	require.Len(t, digest.Items, 1)
-	require.Equal(t, []string{"inspect", "acknowledge", "defer", "cancel", "close", "extend_deadline"}, digest.Items[0].AllowedActions)
+	require.Equal(t, []string{"inspect", "acknowledge", "defer", "cancel", "close", "extend_deadline", "takeover"}, digest.Items[0].AllowedActions)
 	require.Empty(t, digest.Items[0].NextAction)
 
 	// A scheduler without the resolver stays host-neutral (nil = undeclared).
