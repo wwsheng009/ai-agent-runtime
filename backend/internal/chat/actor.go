@@ -915,7 +915,8 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		return
 	}
 	a.noteRunTriggerOrigin(cmd.TriggerTurnAuto)
-	turnID := "turn_" + uuid.NewString()
+	// 挂起态（§6.12）收到 steer/新输入 ⇒ 起"同一 turn 的新 episode"（AC-P2-7a）。
+	turnID := a.nextTurnID(ctx)
 	run := a.claimSessionRun(turnID, nil, reply)
 	runCtx := withSessionRunControl(ctx, run)
 	session, err := a.loadSession(runCtx)
@@ -992,7 +993,8 @@ func (a *SessionActor) handleContinueSession(cmd ContinueSession) {
 		return
 	}
 	a.noteRunTriggerOrigin(false)
-	turnID := "turn_" + uuid.NewString()
+	// 挂起态（§6.12）的 continue/steer 同样落在"同一 turn 的新 episode"上（AC-P2-7a）。
+	turnID := a.nextTurnID(ctx)
 	run := a.claimSessionRun(turnID, cmd.StripMetadataKeys, reply)
 	runCtx := withSessionRunControl(ctx, run)
 	session, err := a.loadSession(runCtx)
@@ -2791,6 +2793,13 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 			// still publish its assistant_message/session_end pair.
 			publishTerminal = a.sessionRunOwned(run)
 			terminalApproval = terminalApproval && publishTerminal
+			// 本回合收尾时是否仍处于挂起态（§6.12）：是则把 turn_id 留在状态里，
+			// 后续 steer / 新输入 / wake resume 以**同一 turn_id** 起新 episode
+			// （AC-P2-7a、AC-P1-1a）；记录已被清则写空，不再复用。
+			suspendedTurnID := ""
+			if publishTerminal {
+				suspendedTurnID = a.syncSuspendedTurn(finalizeCtx, turnID)
+			}
 			if publishTerminal && (!approvalDetached || terminalApproval) {
 				approvalSnapshot := a.stateWithoutToolSurfaces()
 				applied := false
@@ -2801,6 +2810,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 					applied = true
 					state.Status = status
 					state.CurrentTurnID = ""
+					state.SuspendedTurnID = suspendedTurnID
 					state.CurrentRunMeta = nil
 					resetFrozenTurnTools(state)
 					state.PendingTool = nil
@@ -3801,7 +3811,9 @@ func (a *SessionActor) resumePendingBatchAfterCurrentResult(ctx context.Context,
 		return fmt.Errorf("%w: %s", errSessionRunTerminal, reason)
 	}
 	if turnID == "" {
-		turnID = "turn_" + uuid.NewString()
+		// 审批/问答恢复也是一次 resume：挂起态（§6.12）下必须落回同一 turn，
+		// 其余情况由 nextTurnID 新开 turn（与 submit/continue 同一口径，AC-P2-7a）。
+		turnID = a.nextTurnID(ctx)
 	}
 	run := a.claimSessionRun(turnID, nil, nil)
 	runCtx := withSessionRunControl(ctx, run)

@@ -82,9 +82,19 @@ type UserQuestionRequest = toolbroker.UserQuestionRequest
 
 // RuntimeState tracks the session actor state across turns.
 type RuntimeState struct {
-	SessionID                    string                 `json:"session_id"`
-	Status                       SessionStatus          `json:"status"`
-	CurrentTurnID                string                 `json:"current_turn_id,omitempty"`
+	SessionID     string        `json:"session_id"`
+	Status        SessionStatus `json:"status"`
+	CurrentTurnID string        `json:"current_turn_id,omitempty"`
+	// SuspendedTurnID 记录本会话处于**挂起态**（§6.12 parked turn）的托管 turn：
+	// 父 turn 派发 durable background obligations 后收尾、账本未终态时，该 turn
+	// 并未结束，只是没有正在执行的 run。此后到达的 steer（用户输入 / send_input
+	// / continue）以**同一 turn_id** 起新 episode，而不是新开 turn（C3-7 /
+	// AC-P2-7a）。空串表示没有挂起 turn，普通输入照常新开 turn。
+	//
+	// 该字段是**派生缓存**：每次使用前都会回查 durable batch 控制面上的 §6.12
+	// 记录，记录被清（resume 收尾 / 放弃）后立即失效，因此不会把 turn_id 永久
+	// 粘住（EC-E1 的防线之一）。
+	SuspendedTurnID              string                 `json:"suspended_turn_id,omitempty"`
 	CurrentCheckpointID          string                 `json:"current_checkpoint_id,omitempty"`
 	CurrentRunMeta               *team.RunMeta          `json:"current_run_meta,omitempty"`
 	AmbientRunMeta               *team.RunMeta          `json:"ambient_run_meta,omitempty"`
