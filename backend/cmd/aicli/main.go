@@ -400,6 +400,11 @@ func main() {
 		return cfg
 	}))
 
+	// import 子命令 — export --full 的反向入口（把完整 JSON 会话导入回会话库）
+	rootCmd.AddCommand(commands.NewImportCommand(func() *config.Config {
+		return cfg
+	}))
+
 	// context 子命令
 	contextCmd := &cobra.Command{
 		Use:     "context",
