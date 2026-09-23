@@ -1295,7 +1295,9 @@ func presentChatStartupSession(session *ChatSession, opts *chatCommandOptions, l
 		beginDirectInteractiveOutput(session)
 		// 主界面优先：composer 先于历史回放落地，用户立即可输入。
 		presentStartupInteractiveComposer(session)
-		printVisibleChatHistory(session, "已加载历史会话")
+		// 会话加载：即使 Scene 已由事件日志重放重建（本次 seed 无新增 unit），
+		// 也必须授权一次原生 scrollback 替换，否则历史只停留在视口尾部。
+		printVisibleSessionLoadHistory(session, "已加载历史会话")
 		// 历史投递走 ReplaceTranscriptAction（整帧替换 Scene），会重置底部面板
 		// 状态；回放结束后重新钉住 composer，保证输入行不被历史帧挤掉。
 		presentStartupInteractiveComposer(session)
@@ -1323,7 +1325,7 @@ func presentChatStartupSession(session *ChatSession, opts *chatCommandOptions, l
 		beginDirectInteractiveOutput(session)
 		// 主界面优先：composer 先于历史回放落地。
 		presentStartupInteractiveComposer(session)
-		printVisibleChatHistory(session, "已加载历史会话")
+		printVisibleSessionLoadHistory(session, "已加载历史会话")
 		// 历史替换帧之后重新钉住 composer（同上）。
 		presentStartupInteractiveComposer(session)
 	}

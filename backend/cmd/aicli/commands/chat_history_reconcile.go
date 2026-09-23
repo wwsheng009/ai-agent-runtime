@@ -48,6 +48,31 @@ type persistedHistorySeedUnit struct {
 // canonical conversation. Every unit therefore has a deterministic identity
 // and is either matched to an existing semantic item or imported once.
 func (b *chatRuntimeEventBridge) seedPersistedHistory(messages []runtimetypes.Message, header string) {
+	b.seedPersistedHistoryWithLoadGrant(messages, header, false)
+}
+
+// seedPersistedHistoryForSessionLoad is the session-load variant of
+// seedPersistedHistory (/resume, /load, startup restore). It differs in exactly
+// one way: the armed replacement is published even when this call imported no
+// new unit, because the one-shot replay authorization belongs to the load, not
+// to the delta.
+//
+// Startup replays the runtime event log into the Scene before canonical history
+// is seeded, so a session whose log already covers the conversation reconciles
+// with seeded=false while native scrollback still belongs to the previous
+// process (usually nothing but the shell line that launched aicli). Skipping the
+// replacement there leaves the terminal owner without the loaded generation:
+// the Scene is correct, the resident native scrollback is not, and the user can
+// only see the viewport tail — the session looks unrecoverable even though every
+// message was loaded. Regular Scene updates must keep using seedPersistedHistory
+// so resize/stream/theme traffic can never mint a destructive replay.
+func (b *chatRuntimeEventBridge) seedPersistedHistoryForSessionLoad(messages []runtimetypes.Message, header string) {
+	b.seedPersistedHistoryWithLoadGrant(messages, header, true)
+}
+
+func (b *chatRuntimeEventBridge) seedPersistedHistoryWithLoadGrant(
+	messages []runtimetypes.Message, header string, sessionLoad bool,
+) {
 	if b == nil || b.renderEncoder == nil || len(messages) == 0 {
 		return
 	}
@@ -60,18 +85,21 @@ func (b *chatRuntimeEventBridge) seedPersistedHistory(messages []runtimetypes.Me
 	b.renderMu.Lock()
 	seeded := b.seedPersistedHistoryLocked(units, header)
 	b.renderMu.Unlock()
-	if seeded {
-		// 仅在本次实际新增了 header/unit 时发布 snapshot；否则 Scene 未变，
-		// 全量 ReplaceTranscriptAction 会触发历史重放动画且无任何内容更新。
-		//
-		// 会话加载（/resume、/load、启动恢复，以及首次装配 canonical 历史的
-		// /history）也只有在这里才请求一次 scrollback 替换：canonical 历史刚
-		// 装配进 Scene，这个 replacement snapshot 本身就是授权的携带者
-		// （ArmScrollbackReplay 字段），与它授权的 Scene 在同一 action 内原子
-		// 进入 reducer。正常交互（resize/流式增量/主题切换/写入恢复）不会进入
-		// “实际新增 unit” 分支，因此永远拿不到重放授权。
-		b.sessionInteractionReplacementSnapshot()
+	if !seeded && !sessionLoad {
+		// 非会话加载路径：仅在本次实际新增了 header/unit 时发布 snapshot；
+		// 否则 Scene 未变，全量 ReplaceTranscriptAction 会触发历史重放动画且
+		// 无任何内容更新。
+		return
 	}
+	// 会话加载（/resume、/load、启动恢复，以及首次装配 canonical 历史的
+	// /history）在这里请求一次 scrollback 替换：canonical 历史刚装配进 Scene，
+	// 这个 replacement snapshot 本身就是授权的携带者（ArmScrollbackReplay
+	// 字段），与它授权的 Scene 在同一 action 内原子进入 reducer。reducer 对
+	// “快照已安装”的替换同样会授予授权（见 controller_state.go 的
+	// ReplaceTranscriptAction 分支），因此即使本次没有新增 unit，装载好的
+	// 生成仍然会替换原生 scrollback。正常交互（resize/流式增量/主题切换/写入
+	// 恢复）走上面的提前返回，永远拿不到重放授权。
+	b.sessionInteractionReplacementSnapshot()
 }
 
 // seedPersistedHistoryLocked is the render-transaction half of history seed.

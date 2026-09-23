@@ -124,6 +124,19 @@ func countChatStatusMessages(messages []runtimetypes.Message) int {
 }
 
 func printVisibleChatHistory(session *ChatSession, header string) int {
+	return printVisibleChatHistoryWithLoadGrant(session, header, false)
+}
+
+// printVisibleSessionLoadHistory is the session-load entry point (/resume,
+// /load, startup restore). Unlike /history and truncation replays it also
+// authorizes the one-shot native-scrollback replacement, because a loaded
+// generation must reach the terminal owner even when the Scene already
+// reconciled with the replayed runtime event log (seeded=false).
+func printVisibleSessionLoadHistory(session *ChatSession, header string) int {
+	return printVisibleChatHistoryWithLoadGrant(session, header, true)
+}
+
+func printVisibleChatHistoryWithLoadGrant(session *ChatSession, header string, sessionLoad bool) int {
 	messages := collectVisibleChatHistory(session)
 	if len(messages) == 0 {
 		return 0
@@ -142,7 +155,11 @@ func printVisibleChatHistory(session *ChatSession, header string) int {
 			// suffix/subset of a persisted conversation. Reconcile every time
 			// against canonical visible history; the bridge owns stable identities
 			// so this remains idempotent and never falls back to surface replay.
-			bridge.seedPersistedHistory(messages, seedHeader)
+			if sessionLoad {
+				bridge.seedPersistedHistoryForSessionLoad(messages, seedHeader)
+			} else {
+				bridge.seedPersistedHistory(messages, seedHeader)
+			}
 			session.Interaction.RequestUnifiedFrame()
 		}
 		return len(messages)

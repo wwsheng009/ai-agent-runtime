@@ -678,8 +678,11 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 		return
 	}
 	go func() {
-		pages := fetchOlderResumeHistoryPages(context.Background(), session.SessionManager, sessionID, beforeSeq)
+		pages := fetchOlderResumeHistoryPagesWithRetry(context.Background(), session.SessionManager, sessionID, beforeSeq)
 		if len(pages) == 0 {
+			// 游标表明仍有较早页，因此「一页都没取到」只可能是存储读取失败。
+			// 静默放弃会让用户以为会话只恢复了最新一页，必须显式提示。
+			notifyDeferredResumeHistoryFailure(session)
 			return
 		}
 		if !session.prependResumeHistoryPages(generation, pages) {
@@ -688,11 +691,45 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 		markChatStartup("resume_history_deferred")
 		// 幂等重放：较早 unit 由 reconcile 的锚点插入 Scene，再请求统一帧；
 		// bridge 持有稳定身份，已经 seed 过的最新页不会重复渲染。
-		printVisibleChatHistory(session, "")
+		// 补齐同样属于「会话装载」：较早页即便全部命中已重放的事件日志
+		// （seeded=false），装载好的生成也必须替换原生 scrollback，否则补回的
+		// 历史只停留在 Scene 里，用户滚不到。
+		printVisibleSessionLoadHistory(session, "")
 		// 后台补页同样经 ReplaceTranscriptAction 投递，且发生在启动关键路径
 		// 之外；补帧后重新钉住 composer，避免补页把主界面输入行挤掉。
 		presentStartupInteractiveComposer(session)
 	}()
+}
+
+// fetchOlderResumeHistoryPagesWithRetry 是后台补齐较早页的有界重试版本。
+// 调用方只会在分页游标表明「还有更早的页」时登记补齐任务，因此空结果意味着
+// 存储读取失败（分页查询错误、写事务争用等），而不是历史真的到头了。重试全部
+// 失败时返回 nil，由调用方提示用户。
+func fetchOlderResumeHistoryPagesWithRetry(
+	ctx context.Context, manager *runtimechat.SessionManager, sessionID string, beforeSeq int,
+) [][]runtimetypes.Message {
+	delays := [...]time.Duration{200 * time.Millisecond, 600 * time.Millisecond, 1500 * time.Millisecond}
+	for attempt := 0; ; attempt++ {
+		pages := fetchOlderResumeHistoryPages(ctx, manager, sessionID, beforeSeq)
+		if len(pages) > 0 || attempt >= len(delays) {
+			return pages
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(delays[attempt]):
+		}
+	}
+}
+
+// notifyDeferredResumeHistoryFailure 在较早页补齐失败时给出一行可见提示：
+// 会话已经可用，但原生 scrollback 里只有最新一页历史，用户可用 /history 重试。
+func notifyDeferredResumeHistoryFailure(session *ChatSession) {
+	if session == nil || session.Interaction == nil || !session.Interaction.UnifiedRendererEnabled() {
+		return
+	}
+	printfDirectInteractiveOutput(session,
+		"较早的历史分页加载失败，当前仅恢复最新一页；可稍后用 /history 重试。\n")
 }
 
 func resumeLatestRuntimeConversation(session *ChatSession) error {

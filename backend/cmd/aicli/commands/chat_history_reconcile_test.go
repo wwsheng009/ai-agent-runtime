@@ -1163,3 +1163,73 @@ func TestSeedPersistedHistorySkipsReasoningAccumulatedByReplay(t *testing.T) {
 		t.Fatalf("missing assistant unit = %q, want final answer", answer.Source)
 	}
 }
+
+// 启动恢复会先把 runtime 事件日志重放进 Scene，再 seed canonical 历史。当日志
+// 已经覆盖整场会话时，第二次 reconcile 不会再新增任何 unit（seeded=false），但
+// 原生 scrollback 仍然属于上一个进程（通常只剩启动 aicli 的那条 shell 命令）。
+// 会话装载因此必须无条件发布 armed replacement：Scene 是权威的，终端里的
+// scrollback 不是。缺少这次授权时用户只能看到视口尾部，会话看起来「无法恢复」。
+func TestSessionLoadHistoryArmsScrollbackReplayWhenSceneAlreadyReconciled(t *testing.T) {
+	oldInteractive := chatIsInteractiveTerminal
+	chatIsInteractiveTerminal = func() bool { return true }
+	t.Cleanup(func() { chatIsInteractiveTerminal = oldInteractive })
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(72, 20)
+	surface.SetPhysicalWritesEnabled(false)
+	coordinator.SetSurface(surface)
+	var terminal bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&terminal) {
+		t.Fatal("unified renderer did not attach")
+	}
+	if err := replaceRuntimeMessages(session, []runtimetypes.Message{
+		*runtimetypes.NewUserMessage("恢复后的用户提问"),
+		*runtimetypes.NewAssistantMessage("恢复后的助手回复"),
+	}); err != nil {
+		t.Fatalf("restore canonical history: %v", err)
+	}
+
+	// 首次装载：canonical unit 真正新增进 Scene，并且装载好的生成必须替换原生
+	// scrollback（物理事务 = \x1b[3J + 全量重放）。
+	if got := printVisibleSessionLoadHistory(session, "已加载历史会话"); got != 2 {
+		t.Fatalf("首次装载 visible history=%d want 2", got)
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if resets := strings.Count(terminal.String(), "\x1b[3J"); resets != 1 {
+		t.Fatalf("首次会话装载写了 %d 次原生 scrollback 替换事务，want 1", resets)
+	}
+
+	// 非装载路径重复 reconcile（例如 /history）：Scene 未变，不得凭空铸造重放。
+	if got := printVisibleChatHistory(session, ""); got != 2 {
+		t.Fatalf("非装载 reconcile visible history=%d want 2", got)
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if resets := strings.Count(terminal.String(), "\x1b[3J"); resets != 1 {
+		t.Fatalf("非装载 reconcile 重放了历史：替换事务 %d 次，want 1", resets)
+	}
+
+	// 再次会话装载：等价于事件日志重放已把 canonical 历史完整重建进 Scene，
+	// 本次 seed 不再新增 unit（seeded=false）。装载好的生成仍必须替换原生
+	// scrollback，否则用户只能看到视口尾部——这正是「会话无法恢复」。
+	if got := printVisibleSessionLoadHistory(session, ""); got != 2 {
+		t.Fatalf("再次装载 visible history=%d want 2", got)
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if resets := strings.Count(terminal.String(), "\x1b[3J"); resets != 2 {
+		t.Fatalf("会话装载在 Scene 已完整重放时没有替换原生 scrollback：替换事务 %d 次，want 2（用户只能看到视口尾部）", resets)
+	}
+	if terminal.Len() == 0 {
+		t.Fatal("TerminalSession did not render loaded history")
+	}
+}
