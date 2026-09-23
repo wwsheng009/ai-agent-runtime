@@ -61,7 +61,7 @@ func TestFilterPolicyBlockedToolDefinitionsKeepsSurfaceWithoutPolicy(t *testing.
 
 // spawn_agent and spawn_subagents must serve the same read_only contract text.
 func TestSpawnSubagentsReadOnlyDescriptionMatchesPolicyConstant(t *testing.T) {
-	definition := spawnSubagentsToolDefinition()
+	definition := spawnSubagentsToolDefinition(true)
 	properties, ok := definition.Parameters["properties"].(map[string]interface{})
 	require.True(t, ok, "spawn_subagents properties missing")
 	agents, ok := properties["agents"].(map[string]interface{})

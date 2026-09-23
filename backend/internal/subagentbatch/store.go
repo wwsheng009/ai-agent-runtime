@@ -71,6 +71,23 @@ type BatchStore interface {
 	// orphan classification after process restart.
 	Recoverable(ctx context.Context, limit int) ([]SubagentBatch, error)
 
+	// IsDurable reports whether the store survives a process restart. An
+	// in-memory store answers false, and the I9 durability gate (design §6.13)
+	// must then degrade supervised suspension to the legacy synchronous path
+	// instead of returning a batch handle whose state dies with the process.
+	IsDurable() bool
+
+	// ParkTurnSuspension upserts the §6.12 parked-turn record for one parent
+	// turn. Callers must check IsDurable first: on a non-durable store the
+	// record cannot outlive the process and must not be written at all.
+	ParkTurnSuspension(ctx context.Context, record *TurnSuspension) error
+
+	// GetTurnSuspension returns one parked-turn record; ok=false when absent.
+	GetTurnSuspension(ctx context.Context, sessionID, turnID string) (*TurnSuspension, bool, error)
+
+	// ClearTurnSuspension removes a parked-turn record (resume or abort).
+	ClearTurnSuspension(ctx context.Context, sessionID, turnID string) error
+
 	Close() error
 }
 

@@ -62,19 +62,24 @@ type Agent struct {
 	subagents               *SubagentScheduler
 	batchCoordinator        *SubagentBatchCoordinator
 	batchLifecycleProjector BatchLifecycleProjector
-	backgroundBatches       bool
-	toolCatalog             *mcpcatalog.Catalog
-	eventBus                *runtimeevents.Bus
-	skillObserver           skillInvocationObserver
-	skillIndexGen           uint64
-	promptBuild             *PromptBuilder
-	toolPolicy              *ToolExecutionPolicy
-	toolHooks               ToolHooks
-	permEngine              *PermissionEngine
-	toolBroker              *ToolBroker
-	hookManager             *HookManager
-	checkpointMgr           *CheckpointManager
-	checkpointDisabled      bool
+	// I9 durability gate (design §6.13): the host-neutral projector for the
+	// one-shot degradation warning, plus the per-(session, reason) dedup that
+	// keeps a chatty model from flooding the supervision control plane.
+	suspensionDegradationProjector SuspensionDegradationProjector
+	suspensionDegraded             map[string]bool
+	backgroundBatches              bool
+	toolCatalog                    *mcpcatalog.Catalog
+	eventBus                       *runtimeevents.Bus
+	skillObserver                  skillInvocationObserver
+	skillIndexGen                  uint64
+	promptBuild                    *PromptBuilder
+	toolPolicy                     *ToolExecutionPolicy
+	toolHooks                      ToolHooks
+	permEngine                     *PermissionEngine
+	toolBroker                     *ToolBroker
+	hookManager                    *HookManager
+	checkpointMgr                  *CheckpointManager
+	checkpointDisabled             bool
 
 	mu      sync.RWMutex
 	running bool
@@ -329,6 +334,11 @@ func (a *Agent) SubagentBackgroundEnabled() bool {
 // supervision should inject a file-backed coordinator via
 // SetSubagentBatchCoordinator. A nil result (store construction failure)
 // disables background mode; callers must fall back to the synchronous wait path.
+//
+// I9 (design §6.13): because the lazy default is process-local, it never
+// satisfies SuspensionProbe. Callers that would park a turn must gate on
+// SupportsSuspension and degrade to the legacy synchronous path instead of
+// returning a batch handle whose parked state dies with the process.
 func (a *Agent) GetSubagentBatchCoordinator() *SubagentBatchCoordinator {
 	a.mu.RLock()
 	if a.batchCoordinator != nil {

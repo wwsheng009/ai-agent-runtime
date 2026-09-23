@@ -115,6 +115,27 @@ ALTER TABLE subagent_tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT '';
 ALTER TABLE subagent_tasks ADD COLUMN task_subject TEXT NOT NULL DEFAULT '';
 `,
 	},
+	{
+		Version: 3,
+		Name:    "turn_suspensions",
+		// §6.12 挂起态账本：只有 durable store 才允许写入（I9），但表结构对所有
+		// store 一致，探测失败的宿主根本不会走到这里。主键 (session_id, turn_id)
+		// 让同一 turn 的重复 park 幂等覆盖，不产生第二行。
+		UpSQL: `
+CREATE TABLE IF NOT EXISTS turn_suspensions (
+	session_id            TEXT NOT NULL,
+	turn_id               TEXT NOT NULL,
+	root_scope_id         TEXT NOT NULL DEFAULT '',
+	obligation_ids_json   TEXT NOT NULL DEFAULT '[]',
+	parked_at             TEXT NOT NULL,
+	decision_window_until TEXT NULL,
+	resume_queue_json     TEXT NOT NULL DEFAULT '[]',
+	updated_at            TEXT NOT NULL,
+	PRIMARY KEY (session_id, turn_id)
+);
+CREATE INDEX IF NOT EXISTS idx_turn_suspensions_root_scope ON turn_suspensions(root_scope_id);
+`,
+	},
 }
 
 // NewSQLiteBatchStore creates a SQLite-backed batch store.

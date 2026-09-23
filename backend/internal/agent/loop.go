@@ -2860,6 +2860,12 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 						}
 					}
 				} else {
+					// I9 降级（§6.13）：模型显式要了 background，但本会话的 batch
+					// 控制面不跨重启 ⇒ 不返回 batch handle、不写 awaiting_obligations，
+					// 按 legacy 同步路径执行，并投影恰好一条降级告警（不刷屏）。
+					if reason := loop.backgroundDegradationReason(tc.Args); reason != "" {
+						loop.agent.reportSuspensionDegraded(ctx, sessionID, reason)
+					}
 					syncBatchID := subagentbatch.NewID("batch")
 					syncStart := time.Now()
 					loop.emitRuntimeEvent("subagent.batch.started", sessionID, tc.Name, map[string]interface{}{
@@ -3660,7 +3666,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 
 	if scheduler := loop.agent.GetSubagentScheduler(); scheduler != nil {
 		if shouldExposeSpawnSubagents(loop.agent, allowed) {
-			definition := spawnSubagentsToolDefinition()
+			definition := spawnSubagentsToolDefinition(loop.agent.SupportsSuspension())
 			if !seen[definition.Name] {
 				seen[definition.Name] = true
 				tools = append(tools, definition)
@@ -6588,7 +6594,10 @@ func subagentToolExecutionMode(args map[string]interface{}) subagentbatch.Execut
 
 // useBackgroundSubagents decides whether a spawn_subagents request should be
 // routed through the durable background coordinator. It requires an explicit
-// execution_mode=background, the feature flag and a working coordinator/store.
+// execution_mode=background, the feature flag, a working coordinator/store and
+// — I9 (design §6.13) — a store that survives a restart. Without the durability
+// probe the runtime would hand the model a batch handle whose parked state dies
+// with the process, so such hosts take the legacy synchronous path instead.
 func (loop *ReActLoop) useBackgroundSubagents(args map[string]interface{}) bool {
 	if loop == nil || loop.agent == nil {
 		return false
@@ -6599,7 +6608,74 @@ func (loop *ReActLoop) useBackgroundSubagents(args map[string]interface{}) bool 
 	if !loop.agent.SubagentBackgroundEnabled() {
 		return false
 	}
-	return loop.agent.GetSubagentBatchCoordinator() != nil
+	_, durable := loop.agent.SuspensionProbe()
+	return durable
+}
+
+// backgroundDegradationReason returns the I9 reason when the model explicitly
+// asked for execution_mode=background and the host has the feature enabled but
+// cannot park the turn durably. Empty means there is nothing to report: either
+// background was not requested, the rollback switch disabled it on purpose, or
+// the durability probe passed. Reporting is deliberately separated from the
+// predicate so a probe never has side effects.
+func (loop *ReActLoop) backgroundDegradationReason(args map[string]interface{}) string {
+	if loop == nil || loop.agent == nil {
+		return ""
+	}
+	if subagentToolExecutionMode(args) != subagentbatch.ExecutionModeBackground {
+		return ""
+	}
+	if !loop.agent.SubagentBackgroundEnabled() {
+		return ""
+	}
+	reason, durable := loop.agent.SuspensionProbe()
+	if durable {
+		return ""
+	}
+	return reason
+}
+
+// parkBackgroundTurn persists the §6.12 parked-turn record for a durable
+// background dispatch. Only the durable path reaches here (useBackgroundSubagents
+// already gated on the probe); a write failure must not roll back the batch that
+// is already running, but it does break the suspension promise, so it is
+// projected as a degradation instead of being swallowed.
+func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentbatch.SubagentBatch, sessionID string) {
+	if loop == nil || loop.agent == nil || batch == nil {
+		return
+	}
+	coordinator := loop.agent.GetSubagentBatchCoordinator()
+	if coordinator == nil {
+		return
+	}
+	store := coordinator.Store()
+	if store == nil || !store.IsDurable() {
+		return
+	}
+	obligations := []string{batch.BatchID}
+	if tasks, err := store.ListTasks(ctx, batch.BatchID); err == nil {
+		for _, task := range tasks {
+			if id := strings.TrimSpace(task.TaskID); id != "" {
+				obligations = append(obligations, id)
+			}
+		}
+	}
+	record := &subagentbatch.TurnSuspension{
+		TurnID:        strings.TrimSpace(loop.turnID),
+		SessionID:     sessionID,
+		RootScopeID:   sessionID,
+		ObligationIDs: obligations,
+		ParkedAt:      time.Now().UTC(),
+		ResumeQueue:   []string{batch.BatchID},
+	}
+	if record.TurnID == "" {
+		// A turn without an id cannot be resumed by anyone; do not write a
+		// record that the resume path could never match.
+		return
+	}
+	if err := store.ParkTurnSuspension(ctx, record); err != nil {
+		loop.agent.reportSuspensionDegraded(ctx, sessionID, "parked-state write failed: "+err.Error())
+	}
 }
 
 // startBackgroundSubagentBatch persists a background batch and launches its
@@ -6614,7 +6690,7 @@ func (loop *ReActLoop) startBackgroundSubagentBatch(ctx context.Context, subtask
 	if secs := intValue(tc.Args["wait_timeout_sec"]); secs > 0 {
 		deadline = time.Now().UTC().Add(time.Duration(secs) * time.Second)
 	}
-	return coordinator.StartBackground(ctx, BatchStartOptions{
+	batch, err := coordinator.StartBackground(ctx, BatchStartOptions{
 		TraceID:          traceID,
 		ParentSessionID:  sessionID,
 		ParentTurnID:     strings.TrimSpace(loop.turnID),
@@ -6625,6 +6701,13 @@ func (loop *ReActLoop) startBackgroundSubagentBatch(ctx context.Context, subtask
 		IdempotencyKey:   stringValue(tc.Args["batch_idempotency_key"]),
 		BatchDeadline:    deadline,
 	}, subtasks)
+	if err != nil {
+		return nil, err
+	}
+	// §6.12 挂起态：探测已在 useBackgroundSubagents 通过，这里落盘 turn_id /
+	// obligation_ids / parked_at / resume_queue，让重启后的 resume 路径有据可依。
+	loop.parkBackgroundTurn(ctx, batch, sessionID)
+	return batch, nil
 }
 
 // subagentResultCounts tallies succeeded vs failed reports for observability.
@@ -6938,17 +7021,28 @@ func cloneOptionValue(value interface{}) interface{} {
 	}
 }
 
-func spawnSubagentsToolDefinition() types.ToolDefinition {
+// spawnSubagentsToolDefinition builds the model-visible spawn_subagents
+// definition. suspensionAvailable is the I9 durability probe (SupportsSuspension,
+// design §6.13): when the batch control plane cannot survive a restart the
+// description must say so, because execution_mode=background then degrades to
+// the legacy synchronous path and the model must not wait for a batch handle.
+func spawnSubagentsToolDefinition(suspensionAvailable bool) types.ToolDefinition {
+	description := "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration."
+	executionModeDescription := "wait (default) preserves the legacy synchronous semantics and returns full reports; background persists the batch durably and returns a batch handle immediately while a supervisor delivers lifecycle updates."
+	if !suspensionAvailable {
+		description += " This session does not support supervised suspension (当前会话不支持托管挂起): the batch control plane does not survive a restart, so execution_mode=background degrades to the synchronous wait path and every request returns full reports."
+		executionModeDescription = "wait (default) preserves the legacy synchronous semantics and returns full reports; background is unavailable in this session (当前会话不支持托管挂起) because the batch control plane does not survive a restart — requesting it runs synchronously instead of returning a batch handle."
+	}
 	return types.ToolDefinition{
 		Name:        "spawn_subagents",
-		Description: "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration.",
+		Description: description,
 		Parameters: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"execution_mode": map[string]interface{}{
 					"type":        "string",
 					"enum":        []string{"wait", "background"},
-					"description": "wait (default) preserves the legacy synchronous semantics and returns full reports; background persists the batch durably and returns a batch handle immediately while a supervisor delivers lifecycle updates.",
+					"description": executionModeDescription,
 				},
 				"wait_timeout_sec": map[string]interface{}{
 					"type":        "integer",
