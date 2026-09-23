@@ -19,6 +19,18 @@ import (
 // instruction is never silently dropped (P0-3a, plan §3.3).
 var ErrAgentSessionClosed = errors.New("agent session is closed")
 
+// AgentSessionClosedError builds the terminal-target rejection shared by both
+// hosts. It keeps the P0-3a contract (the wrapped ErrAgentSessionClosed stays
+// errors.Is-visible, so the instruction is never silently dropped) and carries
+// the C3-7 / AC-P2-7d receipt hint: a terminal target can never accept the
+// delivery, so the caller must converge instead of retrying the same send.
+func AgentSessionClosedError(toolName, sessionID string) error {
+	return fmt.Errorf(
+		"%s target %s: %w; next_action=inspect|finalize — the target is terminal so this instruction was not delivered; read its durable result (read_agent_result) or converge the parent instead of retrying",
+		strings.TrimSpace(toolName), strings.TrimSpace(sessionID), ErrAgentSessionClosed,
+	)
+}
+
 // UserQuestionRequest captures a prompt that needs user input.
 type UserQuestionRequest struct {
 	ID          string     `json:"id"`

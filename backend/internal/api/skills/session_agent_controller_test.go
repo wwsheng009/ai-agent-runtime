@@ -1557,6 +1557,7 @@ func TestSessionAgentControllerV2TerminalTargetReturnsSessionClosed(t *testing.T
 		Message: "late input",
 	})
 	require.ErrorIs(t, err, toolbroker.ErrAgentSessionClosed)
+	assert.Contains(t, err.Error(), "next_action=inspect|finalize", "AC-P2-7d: 终态回执必须带 next_action")
 
 	// The rejected delivery is observable in the audit trail.
 	parentEvents, err := handler.getSessionEventStore().ListEvents(ctx, rootSession.ID, 0, 20)

@@ -888,3 +888,39 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 - 实质判定点就在工具面（`loop.go:3668` / `tool_list.go:193` / `tool_surface_binding.go:129`）：resume 会重建 actor，工具面按当时策略计算；不允许派发时 `spawn_subagents` 根本不在模型可见工具面，wake 照常投递并消费——无丢 wake / 排队 / 升级风险。
 - 验收面也不要求：AC-P1-5a（§5 表）只列并发 / 深度。
 - 若将来出现「resumed 回合误试派发」的实证，唯一健全形态是**单侧蕴含**：仅当宿主零成本确证 `delegationPolicy == disabled`（该条件下工具面必然隐藏，见 `internal/agent/spawn_subagents_policy_test.go:63-68`）才置 `Restricted=true` + `Reason=ResumeGateVisibility`（词表已预置：`resume_capacity.go:29-31`）。
+
+### 13.6 补丁登记：P2 收尾（C3-1 命名映射 / C3-7 steer 状态），2026-09-23
+
+> 本节为**当前口径**：登记 P2 剩余两项的字面偏差与落地状态，并据此维持 **P3 不进入**（§5 进入条件：P2 DoD + 兼容期结束）。
+
+**C3-1（改动 #7）工具命名映射（能力等价，字面偏差）**
+
+| 方案字面 | 实际落地 | 能力 |
+| --- | --- | --- |
+| `subagent_status` | `supervision_snapshot` | 账本总览（summary / items / next_action / next_seq） |
+| `subagent_inspect_task` | `supervision_descendants` + `read_agent_result` | 深看（N 行状态矩阵）与有界结果读取（artifact_refs / error_class / truncated） |
+
+- 影响面：AC-P2-1a..1e 与 C3-5 的豁免集合（`wait_agent` / `read_agent_events` / 巡检工具）按**实际工具名**复述；`subagent_status` / `subagent_inspect_task` 全仓零命中（仅存在于本方案文档）。
+- 判定：**能力等价，不补建别名**（别名会引入第二套命名与额外的工具面面积）。
+
+**C3-7（改动 #18）steer 状态：L1 已落地，L2 未闭环**
+
+| AC | 状态 | 证据 |
+| --- | --- | --- |
+| AC-P2-7c（steer 不改 `progress_seq`、不计入 stall / 延长计数） | **已落地（L1）** | 新增 `backend/internal/supervision/steer_resume_no_count_test.go`：wake 被投递并消费后，目标 obligation 的 `ProgressSeq` / `ExtensionCount` / `ExtendedTotal` / `LastProgressAt` / `DecisionWindowUntil` 逐字段不变 |
+| AC-P2-7d（目标已终态 ⇒ 回执带 `next_action`；投递审计 `Queued→Delivered` / `Failed`） | **已落地（L1）** | 新增 `toolbroker.AgentSessionClosedError`（`backend/internal/toolbroker/types.go`）统一两个宿主 4 个调用点的终态回执：保留 `errors.Is(ErrAgentSessionClosed)`（P0-3a 不静默丢弃）并追加 `next_action=inspect\|finalize`；审计状态沿用既有三态矩阵断言（`chat_actor_message_semantics_test.go` / `session_agent_controller_test.go`） |
+| AC-P2-7a（挂起态收到 steer ⇒ 起新 episode、同 `turn_id`、账本不变） | **未闭环（L2）** | 方案自述 "steer 全仓不存在，属待建概念"；现有载体只有恢复回合（`WakeConsumer` → resume）与 mailbox 投递，尚无"挂起 turn 内联注入"语义 |
+| AC-P2-7b（steer 与审批同时到达 ⇒ 审批优先） | **未闭环（L2）** | 审批闸门与 `next_action` 引导已就位（`agentWaitPendingApprovalNextAction`），但无 steer 侧排队序 |
+| AC-P2-7e（active wait 中 steer ⇒ 等待段立即结束并返回） | **未闭环（L2）** | 属宿主侧等待段改造（同 AC-P2-4c），未做 |
+
+- 结论：**P2 DoD 未满**（C3-7 的 7a / 7b / 7e 未闭环），叠加兼容期（Q6：一个发布周期）未走完 ⇒ **P3（§5，含改动 #5 / C4-1）不进入**。
+- 下一步顺序：① C3-7 L2（挂起态内联注入 + 审批优先 + active wait 返回）→ ② 一个发布周期 → ③ P3（C4-1..C4-4）。
+
+**验证证据（2026-09-23 实测）**
+
+- `gofmt -l`（6 个改动 / 新增文件）无输出（含顺带修正的 `chat_actor_registry.go:937` 对齐）。
+- `go build ./...` exit 0。
+- `go test ./internal/toolbroker/ -count=1` ok（18.2s）。
+- `go test ./internal/supervision/ -count=1` ok（含新增 `steer_resume_no_count_test.go`）。
+- `go test ./cmd/aicli/commands/ -run 'TestLocalActorRegistry' -count=1` ok（14.7s）。
+- `go test ./internal/api/skills/ -run 'TestSessionAgentControllerV2TerminalTargetReturnsSessionClosed' -count=1` ok（1.1s）。

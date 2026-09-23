@@ -1698,7 +1698,7 @@ func (c *sessionAgentController) deliverAgentMessage(ctx context.Context, fromSe
 		toolName = toolbroker.ToolFollowupTask
 	}
 	if v2 && c.apiAgentSessionTerminal(ctx, sessionID) {
-		closedErr := fmt.Errorf("%s target %s: %w", toolName, sessionID, toolbroker.ErrAgentSessionClosed)
+		closedErr := toolbroker.AgentSessionClosedError(toolName, sessionID)
 		c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
 			FromSessionID:   fromSessionID,
 			TargetSessionID: sessionID,
@@ -1908,7 +1908,7 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 	// P0-3a/M5: v2 语义（默认关）。关闭时保持灰度前的 busy 报错行为。
 	v2 := c.handler.supervisionConfig.MessageSemanticsV2Enabled()
 	if v2 && c.apiAgentSessionTerminal(ctx, sessionID) {
-		closedErr := fmt.Errorf("send_input target %s: %w", sessionID, toolbroker.ErrAgentSessionClosed)
+		closedErr := toolbroker.AgentSessionClosedError(toolbroker.ToolSendInput, sessionID)
 		c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
 			TargetSessionID: sessionID,
 			Tool:            toolbroker.ToolSendInput,

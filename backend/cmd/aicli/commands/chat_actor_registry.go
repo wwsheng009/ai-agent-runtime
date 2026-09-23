@@ -934,7 +934,7 @@ func (r *localActorRegistry) ApplyWorktree(ctx context.Context, args toolbroker.
 		Paths:          append([]string(nil), args.Paths...),
 		Applied:        true,
 		Kept:           args.Keep,
-		SkippedPaths: append([]string(nil), report.SkippedPaths...),
+		SkippedPaths:   append([]string(nil), report.SkippedPaths...),
 	}
 	if len(report.SkippedPaths) > 0 {
 		result.NextAction = fmt.Sprintf(
@@ -2350,7 +2350,7 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 		toolName = toolbroker.ToolFollowupTask
 	}
 	if v2 && r.localAgentSessionTerminal(ctx, sessionID) {
-		closedErr := fmt.Errorf("%s target %s: %w", toolName, sessionID, toolbroker.ErrAgentSessionClosed)
+		closedErr := toolbroker.AgentSessionClosedError(toolName, sessionID)
 		r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
 			FromSessionID:   fromSessionID,
 			TargetSessionID: sessionID,
@@ -2593,7 +2593,7 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 	// P0-3a/M5: v2 语义（默认关）。关闭时保持灰度前的 busy 报错与立即提交行为。
 	v2 := r.Host.supervisionConfig.MessageSemanticsV2Enabled()
 	if v2 && r.localAgentSessionTerminal(ctx, sessionID) {
-		closedErr := fmt.Errorf("send_input target %s: %w", sessionID, toolbroker.ErrAgentSessionClosed)
+		closedErr := toolbroker.AgentSessionClosedError(toolbroker.ToolSendInput, sessionID)
 		r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
 			TargetSessionID: sessionID,
 			Tool:            toolbroker.ToolSendInput,

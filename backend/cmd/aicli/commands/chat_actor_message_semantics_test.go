@@ -139,6 +139,7 @@ func TestLocalActorRegistryV2TerminalTargetReturnsSessionClosed(t *testing.T) {
 		Message: "late input",
 	})
 	require.ErrorIs(t, err, toolbroker.ErrAgentSessionClosed)
+	assert.Contains(t, err.Error(), "next_action=inspect|finalize", "AC-P2-7d: 终态回执必须带 next_action")
 
 	events, err := host.EventStore.ListEvents(ctx, "cli-v2-terminal-child", 0, 20)
 	require.NoError(t, err)
