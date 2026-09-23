@@ -192,9 +192,21 @@ func TestBuildResumeFullScreenItemsIncludesHistoryDetailsAndSearchMetadata(t *te
 	if item.Disabled {
 		t.Fatalf("did not expect history row to be disabled")
 	}
-	for _, expected := range []string{"5分钟前", "1轮/2条", "compact #1", workspace} {
-		if !strings.Contains(item.Detail, expected) {
-			t.Fatalf("expected detail to contain %q, got %q", expected, item.Detail)
+	// 行内顺序固定为 时间 → 【轮次/消息数】 → 标题，目录等元数据下沉到底部详情区。
+	for _, expected := range []string{"5分钟前", "【1轮/2条】"} {
+		if !strings.Contains(item.Leading, expected) {
+			t.Fatalf("expected row leading to contain %q, got %q", expected, item.Leading)
+		}
+	}
+	if strings.Contains(item.Leading, workspace) {
+		t.Fatalf("did not expect the workspace path in the row, got %q", item.Leading)
+	}
+	if strings.TrimSpace(item.Detail) != "" {
+		t.Fatalf("expected no trailing detail on the row, got %q", item.Detail)
+	}
+	for _, expected := range []string{workspace, "model-a", "provider-a", "协议 anthropic", "1轮/2条消息", "compact #1", "2026-07-17 15:55"} {
+		if !strings.Contains(item.Preview, expected) {
+			t.Fatalf("expected the detail block to contain %q, got %q", expected, item.Preview)
 		}
 	}
 	for _, expected := range []string{"resume-fullscreen", "anthropic", "provider-a", "model-a", "Resume full-screen picker", workspace} {
@@ -232,8 +244,11 @@ func TestBuildResumeFullScreenItemsIncludesCurrentAsDisabled(t *testing.T) {
 	if items[0].Title != "当前 · Renamed live title（不可选）" {
 		t.Fatalf("unexpected current title: %q", items[0].Title)
 	}
-	if !strings.Contains(items[0].Detail, "当前 · 不可选") {
-		t.Fatalf("expected current detail badge, got %q", items[0].Detail)
+	if !strings.Contains(items[0].Leading, "1分钟前") {
+		t.Fatalf("expected relative age in the row leading, got %q", items[0].Leading)
+	}
+	if !strings.Contains(items[0].Preview, "当前会话（不可选）") {
+		t.Fatalf("expected the current-session hint in the detail block, got %q", items[0].Preview)
 	}
 	if items[1].Disabled || selectable[1] != history || items[1].Title != "History session" {
 		t.Fatalf("expected second row to remain selectable history, got item=%#v selectable=%#v", items[1], selectable[1])
@@ -388,11 +403,15 @@ func TestBuildResumeFullScreenItemUsesRelativeTimeOnly(t *testing.T) {
 	session.UpdatedAt = now.Add(-8 * time.Minute)
 
 	item := buildResumeFullScreenItem(session, now, false)
-	if !strings.Contains(item.Detail, "8分钟前") {
-		t.Fatalf("expected relative update time in full-screen detail, got %q", item.Detail)
+	if !strings.Contains(item.Leading, "8分钟前") {
+		t.Fatalf("expected relative update time in the row leading, got %q", item.Leading)
 	}
-	if strings.Contains(item.Detail, "2026-07-17") || strings.Contains(item.Detail, "(") {
-		t.Fatalf("did not expect absolute update timestamp in full-screen detail, got %q", item.Detail)
+	if strings.Contains(item.Leading, "2026-07-17") || strings.Contains(item.Leading, "(") {
+		t.Fatalf("did not expect absolute update timestamp in the row, got %q", item.Leading)
+	}
+	// 绝对时间只出现在底部详情区，行内保持相对时间。
+	if !strings.Contains(item.Preview, "2026-07-17 15:52") {
+		t.Fatalf("expected the detail block to carry the absolute timestamp, got %q", item.Preview)
 	}
 }
 

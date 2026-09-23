@@ -184,14 +184,16 @@ func openChatResumePicker(session *ChatSession, request ResumePickerRequest) {
 		return
 	}
 
-	currentID := currentRuntimeSessionID(session)
 	current := currentRuntimeSessionForResumeList(session)
-	sessions, err := listResumeCandidateChatSessions(session.SessionManager, session.SessionUserID, request.Filter, currentID)
+	// The picker owns its window: it pages through session metadata instead of
+	// materializing (and truncating at --session-limit) the whole candidate list
+	// before the first frame.
+	window, err := newResumePickerWindow(session, request.Filter, nil, current)
 	if err != nil {
 		_ = renderChatCommandResult(session, commandErrorResult(err), false)
 		return
 	}
-	if len(sessions) == 0 {
+	if !window.HasCandidates() {
 		_ = renderChatCommandResult(session, commandTextResult("当前没有其他可恢复的历史会话"), false)
 		return
 	}
@@ -217,13 +219,13 @@ func openChatResumePicker(session *ChatSession, request ResumePickerRequest) {
 		return
 	}
 
-	items, selectable := buildResumeFullScreenItems(sessions, current, time.Now())
 	picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
 		Title:        "恢复历史会话",
-		Subtitle:     formatResumePickerSubtitle(len(sessions), current != nil),
+		Subtitle:     window.subtitle(),
 		EmptyMessage: "没有匹配的历史会话",
 		ConfirmLabel: "恢复选中会话",
-		Items:        items,
+		Items:        window.items,
+		PageLoader:   window.pageLoader(),
 	}, lease)
 
 	_ = session.Interaction.postUIAction(ui.CloseResumePicker{LeaseID: lease.ID()})
@@ -243,11 +245,12 @@ func openChatResumePicker(session *ChatSession, request ResumePickerRequest) {
 		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("会话选择器失败: %w", pickErr)), false)
 		return
 	}
-	if picked.Cancelled || picked.Index < 0 || picked.Index >= len(selectable) || selectable[picked.Index] == nil {
+	pickedSession := window.SessionAt(picked.Index)
+	if picked.Cancelled || pickedSession == nil {
 		_ = renderChatCommandResult(session, commandTextResult("已取消恢复，当前会话保持不变"), false)
 		return
 	}
-	if err := loadRuntimeConversation(session, selectable[picked.Index].ID); err != nil {
+	if err := loadRuntimeConversation(session, pickedSession.ID); err != nil {
 		_ = renderChatCommandResult(session, commandErrorResult(err), false)
 		return
 	}
@@ -374,8 +377,14 @@ func resumeFullScreenTerminal(session *ChatSession) *ui.Terminal {
 }
 
 func readResumeSessionPickFullScreen(session *ChatSession, terminal *ui.Terminal, sessions []*runtimechat.Session, current *runtimechat.Session) (*runtimechat.Session, error) {
-	items, selectable := buildResumeFullScreenItems(sessions, current, time.Now())
-	if len(items) == 0 {
+	// Same paged window as the structured /resume path when storage is
+	// available; the prebuilt list remains the contract for callers without a
+	// session manager.
+	window, err := newResumePickerWindow(session, chatResumePickerFilter(session), sessions, current)
+	if err != nil {
+		return nil, err
+	}
+	if len(window.items) == 0 {
 		// Still allow opening the picker when only the current session is present so
 		// users can verify the live title after /rename or /title without restarting.
 		return nil, nil
@@ -405,29 +414,28 @@ func readResumeSessionPickFullScreen(session *ChatSession, terminal *ui.Terminal
 		}
 	}()
 
-	selectableCount := 0
-	for _, item := range items {
-		if !item.Disabled {
-			selectableCount++
-		}
-	}
 	result, err := ui.SelectFullScreenListWithLease(context.Background(), terminal, ui.FullScreenListOptions{
 		Title:        "恢复历史会话",
-		Subtitle:     formatResumePickerSubtitle(selectableCount, current != nil),
+		Subtitle:     window.subtitle(),
 		EmptyMessage: "没有匹配的历史会话",
 		ConfirmLabel: "恢复选中会话",
-		Items:        items,
+		Items:        window.items,
+		PageLoader:   window.pageLoader(),
 	}, lease)
 	if err != nil {
 		return nil, err
 	}
-	if result.Cancelled || result.Index < 0 || result.Index >= len(selectable) {
+	if result.Cancelled {
 		return nil, nil
 	}
-	if selectable[result.Index] == nil {
-		return nil, nil
+	return window.SessionAt(result.Index), nil
+}
+
+func chatResumePickerFilter(session *ChatSession) ChatSessionListFilter {
+	if session == nil {
+		return ChatSessionListFilter{}
 	}
-	return selectable[result.Index], nil
+	return session.SessionFilter
 }
 
 func formatResumePickerSubtitle(selectableCount int, includesCurrent bool) string {
@@ -462,9 +470,25 @@ func buildResumeFullScreenItems(sessions []*runtimechat.Session, current *runtim
 
 func buildResumeFullScreenItem(session *runtimechat.Session, now time.Time, current bool) ui.FullScreenListItem {
 	turnCount, messageCount := runtimeSessionConversationCounts(session)
+	return buildResumeFullScreenItemWithCounts(session, now, current, turnCount, messageCount, true)
+}
+
+// buildResumeFullScreenItemWithCounts builds one picker row from caller-supplied
+// counts. turnsKnown=false is the paged path: the list only reads session
+// metadata, so the user-turn count is not loaded and the row reports messages
+// instead of a misleading "0轮/N条".
+func buildResumeFullScreenItemWithCounts(session *runtimechat.Session, now time.Time, current bool, turnCount, messageCount int, turnsKnown bool) ui.FullScreenListItem {
 	title := runtimeResumeSessionTitle(session)
 	if current {
 		title = formatCurrentResumeSessionTitle(title)
+	}
+	summaryCounts := fmt.Sprintf("%d 轮对话，%d 条消息", turnCount, messageCount)
+	rowCounts := fmt.Sprintf("%d轮/%d条", turnCount, messageCount)
+	detailCounts := fmt.Sprintf("%d轮/%d条消息", turnCount, messageCount)
+	if !turnsKnown {
+		summaryCounts = fmt.Sprintf("%d 条消息", messageCount)
+		rowCounts = fmt.Sprintf("%d条", messageCount)
+		detailCounts = fmt.Sprintf("%d条消息", messageCount)
 	}
 	preview := session.BuildPreview()
 	summary := ""
@@ -472,28 +496,12 @@ func buildResumeFullScreenItem(session *runtimechat.Session, now time.Time, curr
 		summary = strings.TrimSpace(preview.Summary)
 	}
 	if summary == "" || strings.EqualFold(summary, runtimeResumeSessionTitle(session)) {
-		summary = fmt.Sprintf("%d 轮对话，%d 条消息", turnCount, messageCount)
+		summary = summaryCounts
 	}
 	if current {
 		summary = "当前会话（不可选） · " + summary
 	}
-	generation := runtimeSessionCompactGeneration(session)
-	detailParts := []string{
-		// Resume picker shows relative age only; absolute timestamps clutter the list.
-		formatSessionRelativeTime(session.UpdatedAt, now),
-		fmt.Sprintf("%d轮/%d条", turnCount, messageCount),
-	}
 	workspacePath := runtimeSessionWorkspacePath(session)
-	if workspacePath != "" {
-		detailParts = append(detailParts, workspacePath)
-	}
-	if generation > 0 {
-		detailParts = append(detailParts, fmt.Sprintf("compact #%d", generation))
-	}
-	if current {
-		detailParts = append(detailParts, "当前 · 不可选")
-	}
-	detail := strings.Join(detailParts, "  ")
 	searchText := strings.Join([]string{
 		session.ID,
 		title,
@@ -506,12 +514,62 @@ func buildResumeFullScreenItem(session *runtimechat.Session, now time.Time, curr
 		"当前",
 	}, " ")
 	return ui.FullScreenListItem{
+		// Row order: relative time, conversation size, title. The workspace path
+		// and the remaining metadata moved to the detail block under the list so a
+		// long path can no longer push the title out of the row.
+		Leading:    fmt.Sprintf("%s 【%s】", formatSessionRelativeTime(session.UpdatedAt, now), rowCounts),
 		Title:      title,
-		Detail:     detail,
-		Preview:    summary,
+		Preview:    buildResumePickerDetailPreview(session, now, summary, detailCounts),
 		SearchText: searchText,
 		Disabled:   current,
 	}
+}
+
+// buildResumePickerDetailPreview renders the detail block below the list. The
+// row keeps only time/counts/title, so workspace, model routing, session
+// identity and the conversation summary are reported here instead.
+func buildResumePickerDetailPreview(session *runtimechat.Session, now time.Time, summary, countsLabel string) string {
+	if session == nil {
+		return strings.TrimSpace(summary)
+	}
+	lines := make([]string, 0, 4)
+	if workspace := runtimeSessionWorkspacePath(session); workspace != "" {
+		lines = append(lines, "目录  "+workspace)
+	}
+	modelParts := make([]string, 0, 3)
+	if model := runtimeSessionContextString(session, chatRuntimeContextModel); model != "" {
+		modelParts = append(modelParts, "模型 "+model)
+	}
+	if provider := runtimeSessionContextString(session, chatRuntimeContextProviderName); provider != "" {
+		modelParts = append(modelParts, "provider "+provider)
+	}
+	if protocol := runtimeSessionContextString(session, chatRuntimeContextProtocol); protocol != "" {
+		modelParts = append(modelParts, "协议 "+protocol)
+	}
+	if len(modelParts) > 0 {
+		lines = append(lines, strings.Join(modelParts, " · "))
+	}
+	identity := make([]string, 0, 4)
+	if id := strings.TrimSpace(session.ID); id != "" {
+		identity = append(identity, "会话 "+id)
+	}
+	if !session.UpdatedAt.IsZero() {
+		// Absolute timestamp belongs here, not in the row: the list stays scannable.
+		identity = append(identity, "更新 "+formatSessionUpdatedAt(session.UpdatedAt, now))
+	}
+	if strings.TrimSpace(countsLabel) != "" {
+		identity = append(identity, countsLabel)
+	}
+	if generation := runtimeSessionCompactGeneration(session); generation > 0 {
+		identity = append(identity, fmt.Sprintf("compact #%d", generation))
+	}
+	if len(identity) > 0 {
+		lines = append(lines, strings.Join(identity, " · "))
+	}
+	if trimmed := strings.TrimSpace(summary); trimmed != "" {
+		lines = append(lines, "摘要  "+trimmed)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func formatCurrentResumeSessionTitle(title string) string {

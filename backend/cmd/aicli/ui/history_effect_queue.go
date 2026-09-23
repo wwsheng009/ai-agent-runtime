@@ -29,6 +29,16 @@ type HistoryEffectQueueState struct {
 	// the destructive reconciliation plan while this authorization is set; the
 	// reducer clears it after the replay or when the load reconciled cleanly.
 	ScrollbackReplayArmed bool
+	// ProvenScrollbackEpoch records a scrollback replacement the terminal owner
+	// already performed but that could not be reconciled in the reduction that
+	// reported it, because the reducer had no current source-backed frame to
+	// anchor the new epoch (ProjectionUnknown). The physical act is durable:
+	// dropping it would leave the ledger claiming ranges are delivered that the
+	// reset removed from the screen, and hasTerminalRecordForSource would block
+	// re-minting them forever — a permanently blank transcript. The recorded
+	// epoch is consumed by the next reconcile, which the reducer performs as
+	// soon as the frame proof exists (HistoryProjectionRecovered).
+	ProvenScrollbackEpoch uint64
 	ledger                *HistoryCommitLedger
 	// lastPlanned* memoize the active-cell inputs from the most recent
 	// syncHistoryEffectsForActiveCell pass. Append-only stream updates that
@@ -411,9 +421,24 @@ func (s *HistoryEffectQueueState) reconcileScrollback(epoch uint64) bool {
 		return false
 	}
 	s.TerminalEpoch = epoch
+	s.ProvenScrollbackEpoch = 0
 	s.ledger = NewHistoryCommitLedger()
 	s.ReconciliationRequired = false
 	return true
+}
+
+// recordProvenScrollbackReplacement remembers a replacement the terminal owner
+// proved but this reduction could not reconcile. It deliberately touches no
+// ledger record and does not advance TerminalEpoch: an unrecovered claim is not
+// a substitute for a current source-backed frame, so the epoch barrier stays
+// fail-closed until HistoryProjectionRecovered supplies that proof. Keeping the
+// fact here is what makes the later recovery converge instead of leaving the
+// replacement unrecorded.
+func (s *HistoryEffectQueueState) recordProvenScrollbackReplacement(epoch uint64) {
+	if s == nil || epoch == 0 || epoch <= s.ProvenScrollbackEpoch {
+		return
+	}
+	s.ProvenScrollbackEpoch = epoch
 }
 
 // hasTerminalRecordForSource reports whether this semantic range already has

@@ -19,6 +19,9 @@ var ErrFullScreenUnavailable = errors.New("full-screen terminal UI is unavailabl
 
 // FullScreenListItem describes one searchable row and its selected-item preview.
 type FullScreenListItem struct {
+	// Leading renders before the title in its own aligned column, for example
+	// "1天前 【2轮/10条】". Empty keeps the historical title-first layout.
+	Leading    string
 	Title      string
 	Detail     string
 	Preview    string
@@ -67,6 +70,18 @@ type FullScreenListOptions struct {
 	// OnConfirmText validates/consumes the submitted text. It runs only in
 	// FreeTextMode; nil accepts any text.
 	OnConfirmText func(text string) error
+
+	// PageLoader, when set, turns Items into a lazily extended window: the list
+	// keeps the caller's first page and asks the loader for the next page only
+	// when the user reaches the end of what is loaded, and for a fresh first
+	// page when the debounced search query changes. Large catalogs therefore
+	// never need to be materialized up front, and the result index always names
+	// a row the loader has already produced (index-aligned with the loaded
+	// window, exactly like a pre-built Items slice).
+	PageLoader FullScreenListPageLoader
+	// SearchDebounce overrides the quiet period before a changed query reloads
+	// the first page (default 180ms). Zero keeps the default.
+	SearchDebounce time.Duration
 }
 
 // FullScreenListResult identifies the selected original item index.
@@ -87,6 +102,12 @@ type fullScreenListState struct {
 	offset    int
 	query     string
 	searching bool
+	// Paging status, filled by the loop for the renderer when PageLoader is
+	// active. Read-only for navigation and filtering.
+	paging  bool
+	loaded  int
+	hasMore bool
+	loadErr string
 }
 
 type fullScreenFrameLine struct {
@@ -105,6 +126,8 @@ type fullScreenListLoopHooks struct {
 	writeFrame   func(string) error
 	readKey      func(context.Context) (editorKey, bool, error)
 	colorProfile render.ColorProfile
+	// now is the clock used for the search debounce; nil means time.Now.
+	now func() time.Time
 }
 
 type fullScreenListLifecycle struct {
@@ -152,7 +175,9 @@ func selectFullScreenListWithLeaseState(ctx context.Context, terminal *Terminal,
 	if terminal == nil || !terminal.SupportsANSI() || reader == nil || writer == nil {
 		return FullScreenListResult{}, ErrFullScreenUnavailable
 	}
-	if len(options.Items) == 0 && !options.FreeTextMode {
+	// A paged list starts empty on purpose: its first page arrives inside the
+	// loop, so an empty Items slice must not be mistaken for "nothing to pick".
+	if len(options.Items) == 0 && !options.FreeTextMode && options.PageLoader == nil {
 		return FullScreenListResult{Index: -1, Cancelled: true}, nil
 	}
 	stdinFile, _ := reader.(*os.File)
@@ -229,6 +254,23 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 		// item list and its filtering are bypassed entirely.
 		state.query = options.FreeTextValue
 	}
+	now := hooks.now
+	if now == nil {
+		now = time.Now
+	}
+	// A paged list owns its window: page 0 is either adopted from the caller's
+	// preload (so opening the list does not repeat the query) or fetched here
+	// before the first frame.
+	var pager *fullScreenListPager
+	if !options.FreeTextMode && options.PageLoader != nil {
+		pager = newFullScreenListPager(options.PageLoader, options.SearchDebounce, now)
+		pager.noteQuery(state.query)
+		if pager.seed() {
+			options.Items = pager.itemsSnapshot()
+		} else if loadErr := pager.load(ctx, 0, state.query); loadErr == nil {
+			options.Items = pager.itemsSnapshot()
+		}
+	}
 	dirty := true
 	lastWidth, lastHeight := -1, -1
 	lastNotifiedIndex := -2 // force initial OnSelectionChanged
@@ -240,10 +282,31 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 		if height < minFullScreenListHeight {
 			return FullScreenListResult{}, editorKey{}, fullScreenUnavailable("terminal height is too small", nil)
 		}
+		if pager != nil {
+			// Debounced search: the query the user typed is reloaded from the
+			// loader (page 0) once the quiet window closes, so filtering stays
+			// instant on the loaded window and complete once it settles.
+			if query, ok := pager.dueQuery(); ok {
+				if loadErr := pager.load(ctx, 0, query); loadErr == nil {
+					options.Items = pager.itemsSnapshot()
+					state.selected, state.offset = 0, 0
+				}
+				dirty = true
+			}
+		}
 		var matches []int
 		if !options.FreeTextMode {
 			matches = fullScreenListMatches(options.Items, state.query)
 			state.clampToEnabled(options.Items, matches, fullScreenListPageSize(height))
+		}
+		if pager != nil {
+			state.paging = true
+			state.loaded = len(options.Items)
+			state.hasMore = pager.hasMore
+			state.loadErr = ""
+			if pager.lastErr != nil {
+				state.loadErr = pager.lastErr.Error()
+			}
 		}
 		if len(matches) > 0 {
 			curIdx := matches[state.selected]
@@ -322,6 +385,19 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 				}
 			}
 			return result, key, nil
+		}
+		if pager != nil {
+			pager.noteQuery(state.query)
+			if pager.shouldPrefetch(state, len(matches)) {
+				// Lazy next page: only when the user reached the end of the
+				// loaded window, and always bounded by the loader.
+				if loadErr := pager.load(ctx, len(options.Items), pager.loadedQuery); loadErr == nil {
+					pager.countAutoLoad(len(matches))
+					options.Items = pager.itemsSnapshot()
+				}
+				dirty = true
+				continue
+			}
 		}
 		dirty = true
 	}
@@ -682,6 +758,18 @@ func renderFullScreenListFrameWithProfile(
 		}
 		subtitle += fmt.Sprintf("  |  搜索: %s  |  %d 个结果", query, len(matches))
 	}
+	if state.paging {
+		// Paged catalogs report how much of the result set is materialized
+		// instead of a total that would require scanning everything.
+		status := fmt.Sprintf("已加载 %d 项", state.loaded)
+		if state.hasMore {
+			status += "（滚动到底自动加载更多）"
+		}
+		subtitle += "  |  " + status
+	}
+	if state.loadErr != "" {
+		subtitle += "  |  加载失败: " + state.loadErr
+	}
 	lines[1].text = "  " + subtitle
 	lines[2].text = strings.Repeat("─", width)
 
@@ -690,12 +778,13 @@ func renderFullScreenListFrameWithProfile(
 		lines[listStart].text = "  " + fullScreenListEmptyMessage(options)
 	} else {
 		end := min(state.offset+pageSize, len(matches))
+		leadingWidth := fullScreenListLeadingWidth(options.Items, matches, state.offset, end)
 		for visibleIndex := state.offset; visibleIndex < end; visibleIndex++ {
 			itemIndex := matches[visibleIndex]
 			selected := visibleIndex == state.selected
 			row := listStart + visibleIndex - state.offset
 			lines[row] = fullScreenFrameLine{
-				text:         renderFullScreenListItem(options.Items[itemIndex], fullScreenListItemNumber(options.Items, matches, visibleIndex), selected, width),
+				text:         renderFullScreenListItem(options.Items[itemIndex], fullScreenListItemNumber(options.Items, matches, visibleIndex), selected, width, leadingWidth),
 				selected:     selected,
 				preformatted: true,
 			}
@@ -717,21 +806,22 @@ func renderFullScreenListFrameWithProfile(
 			preview = strings.TrimSpace(item.Title)
 		}
 		previewLines := wrapFullScreenText(preview, max(1, width-2), previewRows)
-		// Preserve app-rendered SGR previews and explicit line boundaries.
+		// Preserve app-rendered SGR previews and explicit line boundaries. Plain
+		// multi-line previews (metadata blocks) wrap into the remaining rows so a
+		// narrow terminal shows the whole line instead of truncating it.
 		if strings.Contains(preview, "\n") || strings.ContainsRune(preview, '\x1b') {
-			raw := strings.Split(preview, "\n")
-			previewLines = raw
-			if len(previewLines) > previewRows {
-				previewLines = previewLines[:previewRows]
-			}
-			for i, pl := range previewLines {
-				if strings.ContainsRune(pl, '\x1b') {
-					previewLines[i] = fitFullScreenPreformattedTextWithProfile(
-						pl, max(1, width-2), profile,
-					)
-				} else {
-					previewLines[i] = fitFullScreenText(pl, max(1, width-2))
+			previewLines = nil
+			for _, raw := range strings.Split(preview, "\n") {
+				if len(previewLines) >= previewRows {
+					break
 				}
+				if strings.ContainsRune(raw, '\x1b') {
+					previewLines = append(previewLines, fitFullScreenPreformattedTextWithProfile(
+						raw, max(1, width-2), profile,
+					))
+					continue
+				}
+				previewLines = append(previewLines, wrapFullScreenText(raw, max(1, width-2), previewRows-len(previewLines))...)
 			}
 		}
 		for index, previewLine := range previewLines {
@@ -908,7 +998,35 @@ func fullScreenListItemNumber(items []FullScreenListItem, matches []int, visible
 	return fmt.Sprintf("[%d]", rank)
 }
 
-func renderFullScreenListItem(item FullScreenListItem, indexLabel string, selected bool, width int) string {
+// fullScreenListLeadingMaxWidth caps the aligned leading column so a long
+// metadata prefix can never crowd the title out of the row.
+const fullScreenListLeadingMaxWidth = 24
+
+// fullScreenListLeadingWidth returns the aligned width of the leading metadata
+// column for the rows currently on screen, so titles line up within a frame
+// without rows outside the visible window shifting the column while scrolling.
+func fullScreenListLeadingWidth(items []FullScreenListItem, matches []int, start, end int) int {
+	width := 0
+	for visibleIndex := start; visibleIndex < end && visibleIndex < len(matches); visibleIndex++ {
+		itemIndex := matches[visibleIndex]
+		if itemIndex < 0 || itemIndex >= len(items) {
+			continue
+		}
+		leading := strings.TrimSpace(items[itemIndex].Leading)
+		if leading == "" {
+			continue
+		}
+		if itemWidth := DisplayWidth(leading); itemWidth > width {
+			width = itemWidth
+		}
+	}
+	if width > fullScreenListLeadingMaxWidth {
+		return fullScreenListLeadingMaxWidth
+	}
+	return width
+}
+
+func renderFullScreenListItem(item FullScreenListItem, indexLabel string, selected bool, width, leadingWidth int) string {
 	marker := "  "
 	if selected {
 		marker = "> "
@@ -924,14 +1042,23 @@ func renderFullScreenListItem(item FullScreenListItem, indexLabel string, select
 	detail := strings.TrimSpace(item.Detail)
 	detailWidth := min(32, max(12, width/3))
 	detail = fitFullScreenText(detail, detailWidth)
-	titleWidth := width - DisplayWidth(marker) - DisplayWidth(number) - DisplayWidth(detail) - 3
+	leading := ""
+	if leadingWidth > 0 {
+		leading = padFullScreenText(fitFullScreenText(strings.TrimSpace(item.Leading), leadingWidth), leadingWidth) + " "
+	}
+	titleWidth := width - DisplayWidth(marker) - DisplayWidth(number) - DisplayWidth(leading) - DisplayWidth(detail) - 3
 	if titleWidth < 1 {
 		titleWidth = 1
 	}
 	title := fitFullScreenText(strings.TrimSpace(item.Title), titleWidth)
-	line := marker + number + padFullScreenText(title, titleWidth) + "   " + detail
-	line = padFullScreenText(fitFullScreenText(line, width), width)
-	return line
+	line := marker + number + leading + padFullScreenText(title, titleWidth) + "   " + detail
+	if leadingWidth > 0 {
+		// A leading column exists to keep titles aligned, so the historical
+		// whitespace normalization (which collapses the row into a plain
+		// suffix chain) is skipped; every part is sanitized above already.
+		return padFullScreenText(truncateFullScreenText(SanitizeTerminalText(line), width), width)
+	}
+	return padFullScreenText(fitFullScreenText(line, width), width)
 }
 
 func fitFullScreenText(value string, width int) string {

@@ -90,6 +90,19 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		}
 		if geometryChanged || generationChanged {
 			rebasePendingHistoryEffects(&state)
+			// Planning is geometry-gated, so a session load (/resume, /load,
+			// startup restore) that installs its replacement Scene before the
+			// first applied resize reaches the reducer mints no candidate at
+			// all: the ledger stays empty and the transcript body blank no
+			// matter how often the user resizes, because rebasing pending
+			// payloads cannot recreate a plan that was never made. NextToken
+			// still reads zero in exactly that case, so re-derive the plan
+			// from the installed Scene once. Every resize after the first
+			// planned delivery keeps the established rule that a geometry
+			// change only rebases existing payloads and never mints a token.
+			if state.HistoryEffects.NextToken == 0 {
+				syncHistoryEffectsForTranscript(&state)
+			}
 			refreshTranscriptOverlayPager(&state)
 		}
 	case LeaseAcquired:
@@ -305,6 +318,17 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case HistoryProjectionRecovered:
 		if !state.Lease.Active && !state.HistoryEffects.Frozen && a.LayoutGeneration == state.LayoutGeneration {
 			state.HistoryEffects.markProjectionKnown()
+			// A scrollback replacement the terminal owner already proved must be
+			// reconciled as soon as this frame proof exists. Consuming the recorded
+			// epoch here is what converges a reset whose own barrier arrived while
+			// the projection was still unknown; leaving it recorded would strand
+			// the ledger on ranges the reset removed, and nothing could re-emit
+			// them because hasTerminalRecordForSource keeps them un-mintable.
+			if state.HistoryEffects.reconcileScrollback(state.HistoryEffects.ProvenScrollbackEpoch) {
+				state.HistoryEffects.clearScrollbackReplayAuthorization()
+				resetActiveHistoryProgressForTerminalEpoch(&state)
+				syncHistoryEffectsForTranscript(&state)
+			}
 		}
 	case HistoryProjectionInvalidated:
 		if a.LayoutGeneration == state.LayoutGeneration {
@@ -316,13 +340,44 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// this stronger epoch barrier after reset/replacement and a confirmed
 		// source-backed recovery frame. Replan every eligible semantic range
 		// under fresh tokens; never reinterpret old delivery as Acked.
-		if !state.Lease.Active && !state.HistoryEffects.Frozen && !state.HistoryEffects.ProjectionUnknown &&
-			a.LayoutGeneration == state.LayoutGeneration && state.HistoryEffects.reconcileScrollback(a.TerminalEpoch) {
-			// The authorization is one-shot: the replay it allowed just
-			// happened, so no later interaction may repeat it.
-			state.HistoryEffects.clearScrollbackReplayAuthorization()
-			resetActiveHistoryProgressForTerminalEpoch(&state)
-			syncHistoryEffectsForTranscript(&state)
+		//
+		// This barrier reports an irreversible physical act: the executor only
+		// posts it for a transaction that actually replaced native scrollback
+		// (result.ScrollbackReset with a fresh terminal epoch). Two consequences
+		// follow. First, the layout generation is not part of the fence: a resize
+		// or theme change that landed while the replacement crossed the writer
+		// does not undo the replacement, and the replan below always runs against
+		// the current state. Second, a replacement this reduction cannot anchor
+		// yet (no current source-backed frame, or an alternate-screen lease) is
+		// recorded rather than dropped, and HistoryProjectionRecovered consumes it
+		// as soon as that proof exists. Dropping it would be a state no later
+		// interaction can repair: the one-shot authorization stays armed (the
+		// executor selects the destructive plan again and clears scrollback
+		// repeatedly), the ledger keeps claiming those ranges are delivered
+		// (hasTerminalRecordForSource blocks re-minting, so nothing is ever
+		// re-emitted), and the projection still reads as Known over an empty
+		// resident region — a permanently blank transcript. The monotonic epoch
+		// fence inside reconcileScrollback keeps a duplicate or stale barrier
+		// idempotent, so ordering is still guaranteed.
+		if a.TerminalEpoch != 0 {
+			if !state.Lease.Active && !state.HistoryEffects.Frozen && !state.HistoryEffects.ProjectionUnknown &&
+				state.HistoryEffects.reconcileScrollback(a.TerminalEpoch) {
+				// The authorization is one-shot: the replay it allowed just
+				// happened, so no later interaction may repeat it.
+				state.HistoryEffects.clearScrollbackReplayAuthorization()
+				resetActiveHistoryProgressForTerminalEpoch(&state)
+				syncHistoryEffectsForTranscript(&state)
+			} else {
+				// The replacement is physically done and irreversible even when
+				// this reduction cannot anchor the new epoch yet. Remember the
+				// proven epoch instead of dropping the fact: the recovery that
+				// supplies the frame proof consumes it, so a reset can never be
+				// left unrecorded. The layout generation is deliberately not part
+				// of this fence — a resize or theme change that landed while the
+				// replacement crossed the writer does not undo the replacement,
+				// and the replan below always runs against the current state.
+				state.HistoryEffects.recordProvenScrollbackReplacement(a.TerminalEpoch)
+			}
 		}
 	case DrawRequested:
 		state.LastDraw = a

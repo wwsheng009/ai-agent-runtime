@@ -196,6 +196,39 @@ func TestRenderFullScreenListFrameWrapsPreviewAcrossRows(t *testing.T) {
 	}
 }
 
+// /resume 行内顺序固定为 时间 → 【轮次/消息数】 → 标题，目录等元数据不再占用行尾。
+func TestRenderFullScreenListItemRendersLeadingMetadataBeforeTitle(t *testing.T) {
+	items := []FullScreenListItem{
+		{Leading: "刚刚 【2轮/10条】", Title: "ls files", SearchText: "ls files"},
+		{Leading: "3周前 【12轮/340条】", Title: "检查登录流程", SearchText: "检查登录流程"},
+	}
+	leadingWidth := fullScreenListLeadingWidth(items, []int{0, 1}, 0, 2)
+	if leadingWidth != DisplayWidth(items[1].Leading) {
+		t.Fatalf("expected the leading column to fit the widest visible row, got %d", leadingWidth)
+	}
+
+	first := renderFullScreenListItem(items[0], "[1]", false, 80, leadingWidth)
+	second := renderFullScreenListItem(items[1], "[2]", false, 80, leadingWidth)
+	timeIndex := strings.Index(first, "刚刚")
+	countsIndex := strings.Index(first, "【2轮/10条】")
+	titleIndex := strings.Index(first, "ls files")
+	if timeIndex < 0 || countsIndex < 0 || titleIndex < 0 || !(timeIndex < countsIndex && countsIndex < titleIndex) {
+		t.Fatalf("expected time → counts → title order, got %q", first)
+	}
+	if strings.Index(first, "ls files") != strings.Index(second, "检查登录流程") {
+		t.Fatalf("expected titles to share one column, got %q and %q", first, second)
+	}
+	if frame := renderTestFullScreenListFrame(FullScreenListOptions{Items: items}, fullScreenListState{}, []int{0, 1}, 80, 14); !strings.Contains(frame, "【2轮/10条】") {
+		t.Fatalf("expected the frame to render the leading metadata column, got %q", frame)
+	}
+
+	// 无 Leading 的列表（回溯/模型选择器等）保持原有标题优先布局。
+	legacy := renderFullScreenListItem(FullScreenListItem{Title: "First session", Detail: "3分钟前  2轮/4条"}, "[1]", false, 80, 0)
+	if !strings.Contains(legacy, "[1] First session 3分钟前 2轮/4条") {
+		t.Fatalf("expected the legacy title-first layout to stay intact, got %q", legacy)
+	}
+}
+
 func TestRunFullScreenListLoopRedrawsOnResizeWithoutKey(t *testing.T) {
 	sizes := [][2]int{{80, 12}, {96, 16}}
 	sizeIndex := 0
