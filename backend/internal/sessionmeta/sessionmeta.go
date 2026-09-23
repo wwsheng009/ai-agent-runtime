@@ -93,6 +93,9 @@ const (
 	LegacyAICLIActiveTeamTaskID   = "aicli_active_task_id"
 	LegacyAICLISelectedAgent      = "aicli_selected_agent_target"
 	LegacyAICLIConfigFile         = "aicli_config_file"
+	// LegacyAICLIRoutingOverride 是会话级 Agent 路由覆盖（方案 §3.4）：
+	// JSON 字符串形式的 AICLISessionRoutingOverride，随会话 metadata 持久化。
+	LegacyAICLIRoutingOverride = "aicli_routing_override"
 
 	LegacyAPIProfileReference = "profile_reference"
 )

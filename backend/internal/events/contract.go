@@ -109,6 +109,12 @@ var runtimeEventContracts = []Contract{
 	{Type: EventMainAgentRouteCostGuardTripped, Channels: ChannelSessionStore, PersistCritical: true},
 	{Type: EventMainAgentRouteCleared, Channels: ChannelSessionStore},
 
+	// ---- A 通道：会话级路由管理（方案 §7.1）----
+	// 会话级覆盖的写入/清除是治理动作：三层（session/workspace/config）落点与
+	// revision 必须在会话事件流里可反查，否则「为什么这个会话换了模型」在事后
+	// 无从追责。事件本身只是失效信号 + 摘要，权威投影仍是 GET /routing（防漂移）。
+	{Type: EventSessionRoutingChanged, Channels: ChannelSessionStore},
+
 	// ---- A 通道：在途健康门禁已泄漏的信号（方案 §6.2 第 4 步补登记）----
 	// 两者此前以裸字面量发射且未登记 ⇒ ChannelsFor 返回 0 ⇒ 不落盘、不下帧、
 	// 不进尾巴帧，「唯一对外信号完全不可见」。登记后它们是主 Agent 健康维度
