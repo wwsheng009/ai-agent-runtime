@@ -4,11 +4,18 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 )
+
+// ErrExecutionDeadlineRequired is returned by StartRun when the supervisor is
+// configured to require an execution deadline (I2) and the run would be
+// admitted without one. An obligation without a decidable deadline can never be
+// joined, so such a dispatch must be rejected instead of parked.
+var ErrExecutionDeadlineRequired = errors.New("supervision: execution deadline is required (I2)")
 
 // ExecutionSupervisorConfig controls the child run watchdog (doc 10 config
 // design). Mode observe only records decisions; enforce also sends interrupt
@@ -36,6 +43,13 @@ type ExecutionSupervisorConfig struct {
 	// AllowUnbounded permits explicit timeout=0 to mean "no execution
 	// deadline". When false, timeout=0 resolves to DefaultExecutionTimeout.
 	AllowUnbounded bool
+	// RequireExecutionDeadline enforces I2 at admission: a dispatch whose
+	// execution deadline resolves to nil (only reachable with AllowUnbounded)
+	// is rejected instead of admitted, because the run could never be judged
+	// terminal by the watchdog ladder. The zero value keeps legacy behavior, so
+	// hosts only opt in when their runs participate in the suspension/join
+	// protocol (AC-C0-2e).
+	RequireExecutionDeadline bool
 	// StoreOutageGrace is the tolerated store failure window before the
 	// scanner backs off (doc 10 retention/grace).
 	StoreOutageGrace time.Duration
@@ -208,6 +222,9 @@ func (s *ExecutionSupervisor) StartRun(ctx context.Context, spec RunSpec) (*Exec
 	run.ExecutionDeadlineAt = resolveDeadline(spec.ExecutionTimeout, cfg.DefaultExecutionTimeout, cfg.AllowUnbounded, now)
 	run.ProgressDeadlineAt = resolveDeadline(spec.ProgressTimeout, cfg.DefaultProgressTimeout, cfg.AllowUnbounded, now)
 	run.ApprovalDeadlineAt = resolveDeadline(spec.ApprovalTimeout, cfg.DefaultApprovalTimeout, cfg.AllowUnbounded, now)
+	if cfg.RequireExecutionDeadline && run.ExecutionDeadlineAt == nil {
+		return nil, fmt.Errorf("%w: session=%s", ErrExecutionDeadlineRequired, run.SessionID)
+	}
 	created, err := s.Store.CreateExecutionRun(ctx, run)
 	if err != nil {
 		return nil, err
@@ -461,8 +478,17 @@ func (s *ExecutionSupervisor) setLoopRunning(running bool) {
 	s.stats.loopRunning = running
 }
 
-// evaluateRun applies the health matrix to a single active run.
+// evaluateRun applies the health matrix to a single active run and, for states
+// the matrix cannot decide, the I10 watchdog fallback (design doc §16.4).
 func (s *ExecutionSupervisor) evaluateRun(ctx context.Context, run *ExecutionRun, now time.Time) *RunDecision {
+	if decision := s.evaluateRunLadder(ctx, run, now); decision != nil {
+		return decision
+	}
+	return s.watchdogForceTerminal(ctx, run, now)
+}
+
+// evaluateRunLadder applies the health matrix to a single active run.
+func (s *ExecutionSupervisor) evaluateRunLadder(ctx context.Context, run *ExecutionRun, now time.Time) *RunDecision {
 	status := strings.TrimSpace(run.Status)
 	decision := &RunDecision{
 		RunID:     run.RunID,
@@ -584,6 +610,120 @@ func (s *ExecutionSupervisor) fenceOrphaned(ctx context.Context, run *ExecutionR
 	// The run is terminal through fencing, so its live-condition alerts are
 	// stale exactly as in projectTerminal (plan §4.3).
 	s.convergeRunAlerts(ctx, &fenced, RunStatusOrphaned)
+	return true
+}
+
+// watchdogForceTerminal is the I10 fallback (design doc §16.4): a run that is
+// still active but whose decidable deadline is missing can never be judged
+// terminal by the ordinary ladder, which would leave the parent turn parked
+// forever. The watchdog judges it terminal in the same scan cycle and records
+// the cancel source.
+//
+// It only runs for states evaluateRunLadder could not decide, so every path the
+// ladder already handles (hard deadline -> interrupt -> cancel grace ->
+// orphaned, approval timeout, healthy runs) keeps its exact behavior and is
+// never double-judged (AC-C0-2d).
+func (s *ExecutionSupervisor) watchdogForceTerminal(ctx context.Context, run *ExecutionRun, now time.Time) *RunDecision {
+	status, source, reason := watchdogForcedTerminal(run)
+	if status == "" {
+		return nil
+	}
+	decision := &RunDecision{
+		RunID:     run.RunID,
+		SessionID: run.SessionID,
+		Status:    run.Status,
+		Decision:  source,
+		Reason:    reason,
+	}
+	if s.enforce() {
+		if s.forceTerminalRun(ctx, run, status, source, now) {
+			decision.ActionTaken = "forced_terminal"
+		} else {
+			decision.ActionTaken = "cancel_requested"
+		}
+	} else {
+		// Observe mode never mutates, but the forced judgment is still
+		// projected so the operator sees what enforcement would have done.
+		decision.ActionTaken = "none_observe"
+	}
+	// A forced judgment must never be silent: critical + unresolved makes the
+	// parent treat it as action_required (design doc §16.4 rule 3).
+	s.projectDecision(ctx, run, decision)
+	return decision
+}
+
+// watchdogForcedTerminal maps an undecidable active run to the terminal status,
+// cancel source and reason the watchdog must write. It returns empty values for
+// every state that still has a usable deadline.
+func watchdogForcedTerminal(run *ExecutionRun) (status, source, reason string) {
+	if run == nil || run.Terminal() {
+		return "", "", ""
+	}
+	switch strings.TrimSpace(run.Status) {
+	case RunStatusCancelRequested, RunStatusCanceling:
+		// Cancel was requested but no cancel deadline was persisted, so the
+		// ladder's cancel_grace_expired branch can never fire.
+		if run.CancelDeadlineAt == nil || run.CancelDeadlineAt.IsZero() {
+			return RunStatusOrphaned, "cancel_deadline_missing",
+				"cancel requested without a cancel deadline; forced terminal to keep join decidable"
+		}
+	case RunStatusWaitingApproval, RunStatusWaitingInput:
+		// Blocked states are governed by their own deadline; without it the run
+		// can wait forever.
+		if run.ApprovalDeadlineAt == nil || run.ApprovalDeadlineAt.IsZero() {
+			return RunStatusAbandoned, "approval_deadline_missing",
+				"waiting state without an approval deadline; forced terminal to keep join decidable"
+		}
+	default:
+		if run.ExecutionDeadlineAt == nil || run.ExecutionDeadlineAt.IsZero() {
+			return RunStatusAbandoned, "deadline_missing",
+				"run has no execution deadline; forced terminal to keep join decidable"
+		}
+	}
+	return "", "", ""
+}
+
+// forceTerminalRun writes the watchdog's terminal judgment with the same CAS +
+// fencing discipline as every other ledger write. It is idempotent: a run that
+// is already terminal (for example because the hard threshold judged it first)
+// is reported as written without a second transition.
+func (s *ExecutionSupervisor) forceTerminalRun(ctx context.Context, run *ExecutionRun, status, source string, now time.Time) bool {
+	if s == nil || s.Store == nil || run == nil {
+		return false
+	}
+	current, err := s.Store.GetExecutionRun(ctx, run.RunID)
+	if err != nil {
+		return false
+	}
+	if current.Terminal() {
+		return true
+	}
+	fenced := *current
+	fenced.Status = status
+	// The forced judgment's own source is recorded (instead of preserving an
+	// earlier cancel source) so the ledger answers "why did this run become
+	// terminal" with the watchdog verdict that actually decided it.
+	fenced.CancelSource = firstNonEmpty(strings.TrimSpace(source), strings.TrimSpace(current.CancelSource))
+	finished := now
+	fenced.FinishedAt = &finished
+	fenced.FencingToken = current.FencingToken + 1
+	ok, err := s.Store.UpdateExecutionRunCAS(ctx, fenced, current.Version)
+	if err != nil {
+		return false
+	}
+	if !ok {
+		// CAS lost: report success only when a concurrent writer already made
+		// the run terminal, otherwise the decision stays an observation.
+		again, err := s.Store.GetExecutionRun(ctx, run.RunID)
+		return err == nil && again.Terminal()
+	}
+	run.Status = fenced.Status
+	run.CancelSource = fenced.CancelSource
+	run.FinishedAt = fenced.FinishedAt
+	run.FencingToken = fenced.FencingToken
+	// The forced judgment is a terminal transition, so the run's live-condition
+	// alerts are stale by definition (same contract as projectTerminal).
+	s.convergeRunAlerts(ctx, &fenced, status)
 	return true
 }
 

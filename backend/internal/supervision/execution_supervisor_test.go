@@ -431,3 +431,221 @@ func TestExecutionSupervisor_ResolveDeadlineUnboundedDisabled(t *testing.T) {
 	require.NotNil(t, d)
 	require.WithinDuration(t, now.Add(5*time.Minute), *d, time.Second)
 }
+
+// C0-2 / AC-C0-2a + AC-C0-2b + AC-C0-2d: a run that is still active without a
+// decidable deadline can never be judged terminal by the ordinary ladder, so
+// the watchdog must judge it terminal in a single scan cycle, record the cancel
+// source and project exactly one critical + action_required row.
+func TestExecutionSupervisor_WatchdogForcesTerminalWhenDeadlineMissing(t *testing.T) {
+	supervisor, store := newTestExecutionSupervisor(t, "sup-watchdog-missing-deadline", ExecutionSupervisorConfig{
+		Mode:                    "enforce",
+		AllowUnbounded:          true,
+		DefaultExecutionTimeout: 30 * time.Minute,
+		DefaultProgressTimeout:  5 * time.Minute,
+		DefaultApprovalTimeout:  1 * time.Hour,
+		DefaultCancelGrace:      15 * time.Second,
+	}, nil, nil)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	supervisor.Now = func() time.Time { return now }
+
+	// Legacy admission path (RequireExecutionDeadline unset) can still persist a
+	// run without an execution deadline; the watchdog is the safety net for it.
+	run, err := supervisor.StartRun(ctx, RunSpec{
+		RootSessionID:   "root-session",
+		ParentSessionID: "parent-session",
+		SessionID:       "child-1",
+	})
+	require.NoError(t, err)
+	require.Nil(t, run.ExecutionDeadlineAt)
+
+	decisions, err := supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, "deadline_missing", decisions[0].Decision)
+	require.Equal(t, "forced_terminal", decisions[0].ActionTaken)
+
+	got, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusAbandoned, got.Status)
+	require.True(t, got.Terminal())
+	require.Equal(t, "deadline_missing", got.CancelSource)
+	require.NotNil(t, got.FinishedAt)
+	// Fencing token bumps so late writes from the lost run can no longer win.
+	require.Equal(t, int64(2), got.FencingToken)
+
+	notifications, err := store.ListNotifications(ctx, NotificationFilter{RootScopeID: "root-session"})
+	require.NoError(t, err)
+	require.Len(t, notifications, 1)
+	require.Equal(t, SeverityCritical, notifications[0].Severity)
+	require.True(t, notifications[0].ActionRequired())
+	require.Equal(t, "deadline_missing", notifications[0].EventType)
+
+	// AC-C0-2d: the judgment is idempotent. Re-running the force path neither
+	// writes a second transition nor bumps the fencing token/version again.
+	before := *got
+	require.True(t, supervisor.forceTerminalRun(ctx, &before, RunStatusAbandoned, "deadline_missing", now.Add(time.Minute)))
+	after, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, got.FencingToken, after.FencingToken)
+	require.Equal(t, got.Version, after.Version)
+	require.Equal(t, got.FinishedAt.UTC(), after.FinishedAt.UTC())
+
+	// A terminal run is no longer scanned as active, so no second decision.
+	decisions, err = supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Empty(t, decisions)
+}
+
+// C0-2 / AC-C0-2a: a cancel_requested run whose cancel deadline was never
+// persisted can never reach the ladder's cancel_grace_expired branch; the
+// watchdog judges it terminal within one scan cycle.
+func TestExecutionSupervisor_WatchdogForcesTerminalWhenCancelDeadlineMissing(t *testing.T) {
+	supervisor, store := newTestExecutionSupervisor(t, "sup-watchdog-missing-cancel-deadline", ExecutionSupervisorConfig{
+		Mode:                    "enforce",
+		DefaultExecutionTimeout: 10 * time.Second,
+		DefaultProgressTimeout:  5 * time.Minute,
+		DefaultApprovalTimeout:  1 * time.Hour,
+		DefaultCancelGrace:      15 * time.Second,
+	}, nil, nil)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	supervisor.Now = func() time.Time { return now }
+
+	run, err := supervisor.StartRun(ctx, RunSpec{
+		RootSessionID:   "root-session",
+		ParentSessionID: "parent-session",
+		SessionID:       "child-1",
+	})
+	require.NoError(t, err)
+
+	requested, err := store.RequestExecutionCancel(ctx, run.RunID, "operator_cancel", 15*time.Second, now)
+	require.NoError(t, err)
+	require.True(t, requested)
+	current, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusCancelRequested, current.Status)
+	current.CancelDeadlineAt = nil
+	ok, err := store.UpdateExecutionRunCAS(ctx, *current, current.Version)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	decisions, err := supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, "cancel_deadline_missing", decisions[0].Decision)
+	require.Equal(t, "forced_terminal", decisions[0].ActionTaken)
+
+	got, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusOrphaned, got.Status)
+	require.Equal(t, "cancel_deadline_missing", got.CancelSource)
+	require.True(t, got.Terminal())
+}
+
+// C0-2 / AC-C0-2a: a waiting state governed by an approval deadline that was
+// never persisted is equally undecidable and must be judged terminal.
+func TestExecutionSupervisor_WatchdogForcesTerminalWhenApprovalDeadlineMissing(t *testing.T) {
+	supervisor, store := newTestExecutionRunStoreForApprovalWatchdog(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	supervisor.Now = func() time.Time { return now }
+
+	run, err := supervisor.StartRun(ctx, RunSpec{
+		RootSessionID:   "root-session",
+		ParentSessionID: "parent-session",
+		SessionID:       "child-1",
+	})
+	require.NoError(t, err)
+	run.Status = RunStatusWaitingApproval
+	run.ApprovalDeadlineAt = nil
+	ok, err := store.UpdateExecutionRunCAS(ctx, *run, run.Version)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	decisions, err := supervisor.ScanOnce(ctx)
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, "approval_deadline_missing", decisions[0].Decision)
+
+	got, err := store.GetExecutionRun(ctx, run.RunID)
+	require.NoError(t, err)
+	require.Equal(t, RunStatusAbandoned, got.Status)
+	require.Equal(t, "approval_deadline_missing", got.CancelSource)
+}
+
+func newTestExecutionRunStoreForApprovalWatchdog(t *testing.T) (*ExecutionSupervisor, *SQLiteSupervisionStore) {
+	t.Helper()
+	return newTestExecutionSupervisor(t, "sup-watchdog-missing-approval-deadline", ExecutionSupervisorConfig{
+		Mode:                    "enforce",
+		DefaultExecutionTimeout: 10 * time.Second,
+		DefaultProgressTimeout:  5 * time.Minute,
+		DefaultApprovalTimeout:  1 * time.Hour,
+		DefaultCancelGrace:      15 * time.Second,
+	}, nil, nil)
+}
+
+// C0-2 / AC-C0-2c: every status of the §16.4 terminal enumeration must be
+// judged terminal by join, and no live status may be mistaken for terminal.
+func TestJoinTerminalStatusesCoverDesignDocEnumeration(t *testing.T) {
+	docEnumeration := []string{
+		"completed",
+		"completed_with_failures",
+		"succeeded", // legacy spelling, must stay terminal
+		"failed",
+		"canceled",
+		"timed_out",
+		"orphaned",
+		"rejected",
+		"superseded",
+		"abandoned",
+	}
+	for _, status := range docEnumeration {
+		require.Truef(t, IsJoinTerminalStatus(status), "status %q must be terminal for join", status)
+		require.Truef(t, RunStatusTerminal(status), "status %q must be terminal", status)
+		require.Contains(t, JoinTerminalStatuses(), status)
+	}
+	for _, status := range JoinTerminalStatuses() {
+		require.Truef(t, RunStatusTerminal(status), "enumerated status %q must be terminal", status)
+		require.Falsef(t, RunStatusActive(status), "enumerated status %q must not be active", status)
+	}
+	for _, status := range []string{
+		RunStatusQueued, RunStatusRunning, RunStatusWaitingApproval,
+		RunStatusWaitingInput, RunStatusCancelRequested, RunStatusCanceling,
+	} {
+		require.Falsef(t, IsJoinTerminalStatus(status), "live status %q must not be terminal", status)
+	}
+}
+
+// C0-2 / AC-C0-2e: I2 admission validation rejects a dispatch that would be
+// persisted without an execution deadline.
+func TestExecutionSupervisor_RequireExecutionDeadlineRejectsDispatch(t *testing.T) {
+	supervisor, store := newTestExecutionSupervisor(t, "sup-require-deadline", ExecutionSupervisorConfig{
+		Mode:                     "enforce",
+		AllowUnbounded:           true,
+		RequireExecutionDeadline: true,
+		DefaultCancelGrace:       15 * time.Second,
+	}, nil, nil)
+	ctx := context.Background()
+
+	_, err := supervisor.StartRun(ctx, RunSpec{
+		RootSessionID:    "root-session",
+		ParentSessionID:  "parent-session",
+		SessionID:        "child-1",
+		ExecutionTimeout: 0,
+	})
+	require.ErrorIs(t, err, ErrExecutionDeadlineRequired)
+
+	runs, err := store.ListExecutionRunsBySession(ctx, "child-1", 10)
+	require.NoError(t, err)
+	require.Empty(t, runs, "a rejected dispatch must not leave a run row behind")
+
+	allowed, err := supervisor.StartRun(ctx, RunSpec{
+		RootSessionID:    "root-session",
+		ParentSessionID:  "parent-session",
+		SessionID:        "child-2",
+		ExecutionTimeout: 90 * time.Second,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, allowed.ExecutionDeadlineAt)
+}

@@ -28,11 +28,22 @@ const (
 	RunStatusCancelRequested = "cancel_requested"
 	RunStatusCanceling       = "canceling"
 	RunStatusSucceeded       = "succeeded"
-	RunStatusFailed          = "failed"
-	RunStatusCanceled        = "canceled"
-	RunStatusTimedOut        = "timed_out"
-	RunStatusOrphaned        = "orphaned"
-	RunStatusSuperseded      = "superseded"
+	// RunStatusCompleted / RunStatusCompletedWithFailures are the §16.4 normal
+	// terminal outcomes (whole run succeeded / a batch finished with partial
+	// failures). RunStatusSucceeded is kept as the legacy spelling of a normal
+	// completion so existing hosts and rows keep working.
+	RunStatusCompleted             = "completed"
+	RunStatusCompletedWithFailures = "completed_with_failures"
+	RunStatusFailed                = "failed"
+	RunStatusCanceled              = "canceled"
+	RunStatusTimedOut              = "timed_out"
+	RunStatusOrphaned              = "orphaned"
+	RunStatusSuperseded            = "superseded"
+	// RunStatusRejected / RunStatusAbandoned are the §16.4 abnormal terminal
+	// outcomes for work that never really started or that the parent gave up
+	// on (close / reassign).
+	RunStatusRejected  = "rejected"
+	RunStatusAbandoned = "abandoned"
 )
 
 // SupervisionPolicy is the default child run policy reported with the
@@ -42,12 +53,41 @@ const SupervisionPolicyDefault = "interrupt_then_fail"
 // runTerminalStatuses lists statuses that no longer accept progress or
 // deadline transitions. Terminal writes are idempotent (doc 5.3 rule 5).
 var runTerminalStatuses = map[string]struct{}{
-	RunStatusSucceeded:  {},
-	RunStatusFailed:     {},
-	RunStatusCanceled:   {},
-	RunStatusTimedOut:   {},
-	RunStatusOrphaned:   {},
-	RunStatusSuperseded: {},
+	RunStatusSucceeded:             {},
+	RunStatusCompleted:             {},
+	RunStatusCompletedWithFailures: {},
+	RunStatusFailed:                {},
+	RunStatusCanceled:              {},
+	RunStatusTimedOut:              {},
+	RunStatusOrphaned:              {},
+	RunStatusSuperseded:            {},
+	RunStatusRejected:              {},
+	RunStatusAbandoned:             {},
+}
+
+// JoinTerminalStatuses returns the exhaustive §16.4 terminal enumeration join
+// and pending-count accounting must recognize (AC-C0-2c). Callers iterate this
+// table instead of hand-listing statuses so a newly added terminal state cannot
+// be silently missed and leave a parent turn parked forever.
+func JoinTerminalStatuses() []string {
+	return []string{
+		RunStatusCompleted,
+		RunStatusCompletedWithFailures,
+		RunStatusSucceeded,
+		RunStatusFailed,
+		RunStatusCanceled,
+		RunStatusTimedOut,
+		RunStatusOrphaned,
+		RunStatusSuperseded,
+		RunStatusRejected,
+		RunStatusAbandoned,
+	}
+}
+
+// IsJoinTerminalStatus reports whether one obligation in this status is
+// terminal for join purposes (quorum=all).
+func IsJoinTerminalStatus(status string) bool {
+	return RunStatusTerminal(status)
 }
 
 // RunStatusTerminal reports whether the status is a terminal supervision
