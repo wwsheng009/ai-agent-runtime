@@ -31,6 +31,34 @@ func AgentSessionClosedError(toolName, sessionID string) error {
 	)
 }
 
+// AgentSteerApprovalFirstNextAction is the C3-7 / AC-P2-7b receipt hint: a steer
+// aimed at a child blocked on tool approval must not jump the approval gate. The
+// message stays queued and is injected only after the current run ends — that is,
+// after the approval is resolved — so the caller is told to resolve the approval
+// first instead of steering around it.
+func AgentSteerApprovalFirstNextAction(approvalID, reason string) string {
+	detail := strings.TrimSpace(reason)
+	if id := strings.TrimSpace(approvalID); id != "" {
+		if detail != "" {
+			detail = id + " " + detail
+		} else {
+			detail = id
+		}
+	}
+	if detail == "" {
+		detail = "pending tool approval"
+	}
+	return "approval_first: the target is blocked on a pending approval (" + detail +
+		"); call resolve_agent_approval with allow=true|false before steering — this message stays queued and is injected only after the approval resolves; do not bypass the approval gate"
+}
+
+// AgentWaitSteerInterruptNextAction explains an early wait exit caused by the
+// caller being steered or interrupted (ESC, new input, or a turn cancel) instead
+// of the observation window elapsing (C3-4 constraint ③, AC-P2-7e / AC-P2-4c).
+func AgentWaitSteerInterruptNextAction() string {
+	return "steer_pending: the wait segment ended early because the caller was interrupted or received new input (steer/ESC); handle the pending input now instead of re-waiting — the observed children keep running"
+}
+
 // UserQuestionRequest captures a prompt that needs user input.
 type UserQuestionRequest struct {
 	ID          string     `json:"id"`
@@ -490,6 +518,11 @@ type AgentStatusResult struct {
 	Triggered bool `json:"triggered,omitempty"`
 	Duplicate bool `json:"duplicate,omitempty"`
 	TimedOut  bool `json:"timed_out,omitempty"`
+	// NextAction carries the actionable guidance for a steer receipt, e.g. the
+	// AC-P2-7b approval-first hint when the target is blocked on tool approval
+	// (see AgentSteerApprovalFirstNextAction). Omitted when empty so hosts that
+	// do not set it serialize the same fields as before.
+	NextAction string `json:"next_action,omitempty"`
 	// RunID is the durable execution run identity assigned by the execution
 	// supervisor at spawn time (doc 7.1). Empty when supervision is disabled.
 	RunID               string `json:"run_id,omitempty"`
@@ -547,6 +580,11 @@ type AgentWaitResult struct {
 	PendingIDs             []string `json:"pending_ids,omitempty"`
 	WaitedMs               int64    `json:"waited_ms,omitempty"`
 	NextAction             string   `json:"next_action,omitempty"`
+	// Interrupted reports that the wait segment ended because the caller was
+	// steered/interrupted instead of the observation window elapsing. AC-P2-7e /
+	// AC-P2-4c: such a wait must end immediately and say so, never masquerade as
+	// a timeout.
+	Interrupted bool `json:"interrupted,omitempty"`
 }
 
 // MarshalJSON keeps the legacy matched-agent view without serializing the same
@@ -669,6 +707,14 @@ func FinalizeAgentWaitResult(result *AgentWaitResult, startedAt time.Time) *Agen
 		if result.WaitedMs == 0 {
 			result.WaitedMs = 1
 		}
+	}
+	if result.Interrupted {
+		// AC-P2-7e / AC-P2-4c：被 steer/打断而提前结束的等待段优先于其它调度引导，
+		// 且不得谎报为观测窗口超时。
+		result.TimedOut = false
+		result.ExecutionContinues = true
+		result.NextAction = AgentWaitSteerInterruptNextAction()
+		return result
 	}
 	if result.Event != nil || len(result.Events) > 0 {
 		result.NextAction = "consume_mailbox_events"

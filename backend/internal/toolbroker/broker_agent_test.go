@@ -1173,6 +1173,21 @@ func TestFinalizeAgentWaitResultProvidesSchedulingGuidance(t *testing.T) {
 	if !strings.Contains(result.NextAction, `request_id="approval-42"`) || !strings.Contains(result.NextAction, `id="child-3"`) {
 		t.Fatalf("approval next_action should include id and request_id: %#v", result)
 	}
+
+	// AC-P2-7e / AC-P2-4c：被 steer/打断结束的等待段必须压过超时口径。
+	result = FinalizeAgentWaitResult(&AgentWaitResult{
+		Agents:       []AgentStatusResult{{ID: "child-4", Status: "running"}},
+		TimedOut:     true,
+		Interrupted:  true,
+		PendingCount: 1,
+		PendingIDs:   []string{"child-4"},
+	}, time.Now())
+	if !result.Interrupted || result.TimedOut {
+		t.Fatalf("interrupted wait must not masquerade as a timeout: %#v", result)
+	}
+	if !strings.HasPrefix(result.NextAction, "steer_pending") || !result.ExecutionContinues {
+		t.Fatalf("interrupted wait must steer the caller to the pending input: %#v", result)
+	}
 }
 
 func TestBroker_Execute_WaitAgentWithoutTargetWaitsParentMailbox(t *testing.T) {

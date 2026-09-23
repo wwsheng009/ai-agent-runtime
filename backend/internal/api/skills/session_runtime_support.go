@@ -1958,6 +1958,11 @@ func (c *sessionAgentController) SendInput(ctx context.Context, args toolbroker.
 					result.Queued = true
 					result.Delivered = true
 					result.Duplicate = delivery.Duplicate
+					// C3-7/AC-P2-7b：目标卡在审批上时 steer 不得绕过审批闸门——
+					// 消息保持排队（审批解决、当前 run 结束后才注入），回执指向审批。
+					if state, ok := actor.StateSummary(); ok && state.PendingApproval {
+						result.NextAction = toolbroker.AgentSteerApprovalFirstNextAction(state.PendingApprovalID, state.PendingApprovalReason)
+					}
 				}
 				c.recordAPIAgentMailboxDeliveryAudit(ctx, chat.MailboxDeliveryAudit{
 					TargetSessionID: sessionID,
@@ -2128,6 +2133,12 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 		}
 		select {
 		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				// AC-P2-7e / AC-P2-4c：调用方被 steer/ESC/interrupt 打断 ⇒ 等待段立即
+				// 结束并返回，且不得谎报为观测窗口超时。
+				waitResult.Interrupted = true
+				return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
+			}
 			waitResult.TimedOut = true
 			return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
 		case <-wakeCh:

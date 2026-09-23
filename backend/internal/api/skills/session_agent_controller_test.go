@@ -1503,6 +1503,80 @@ func TestSessionAgentControllerV2SendInputBusyQueuesWithAudit(t *testing.T) {
 	assert.True(t, foundAudit, "target session must keep a readable delivery audit record")
 }
 
+func TestSessionAgentControllerV2SendInputApprovalFirstNextAction(t *testing.T) {
+	ctx := context.Background()
+	handler, sessionManager := newSessionAgentSemanticsV2Host(t, true)
+	rootSession, err := sessionManager.Create(ctx, "user-v2-sendinput-approval")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-v2-approval-child"})
+	require.NoError(t, err)
+	markSessionAgentBusy(t, handler, "api-v2-approval-child")
+	actor, err := handler.getSessionHub().GetOrCreate("api-v2-approval-child")
+	require.NoError(t, err)
+	require.NoError(t, actor.UpdateStateForTest(ctx, func(state *chat.RuntimeState) error {
+		state.Status = chat.SessionWaitingApproval
+		state.PendingApproval = &chat.ApprovalRequest{ID: "apr-api-1", Reason: "rm -rf ./tmp"}
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	}))
+
+	result, err := controller.SendInput(ctx, toolbroker.SendAgentInputArgs{
+		ID:      "api-v2-approval-child",
+		Message: "steer while blocked on approval",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Queued, "AC-P2-7b: 审批阻塞时 steer 必须保持排队，不得绕过闸门")
+	assert.Contains(t, result.NextAction, "approval_first", "AC-P2-7b: 回执必须给出审批优先引导")
+	assert.Contains(t, result.NextAction, "apr-api-1", "引导必须点名待批的 approval id")
+	assert.Contains(t, result.NextAction, "resolve_agent_approval", "引导必须指向审批解决工具")
+}
+
+func TestSessionAgentControllerWaitEndsOnCallerSteerInterrupt(t *testing.T) {
+	ctx := context.Background()
+	handler, sessionManager := newSessionAgentSemanticsV2Host(t, true)
+	rootSession, err := sessionManager.Create(ctx, "user-v2-steer-wait")
+	require.NoError(t, err)
+	controller := handler.getAgentSessionController()
+	require.NotNil(t, controller)
+
+	_, err = controller.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{ID: "api-steer-wait-child"})
+	require.NoError(t, err)
+	markSessionAgentBusy(t, handler, "api-steer-wait-child")
+
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	resultCh := make(chan *toolbroker.AgentWaitResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, waitErr := controller.Wait(waitCtx, toolbroker.WaitAgentArgs{ID: "api-steer-wait-child", TimeoutMs: 30000})
+		if waitErr != nil {
+			errCh <- waitErr
+			return
+		}
+		resultCh <- result
+	}()
+
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+
+	select {
+	case waitErr := <-errCh:
+		t.Fatalf("AC-P2-7e: steer 打断后等待段应返回可读结果而不是硬失败: %v", waitErr)
+	case result := <-resultCh:
+		require.NotNil(t, result)
+		assert.True(t, result.Interrupted, "AC-P2-7e: 调用方被 steer/打断 ⇒ 等待段立即结束")
+		assert.False(t, result.TimedOut, "被打断的等待不得谎报为观测窗口超时")
+		assert.True(t, result.ExecutionContinues, "子代理继续运行，不被取消")
+		assert.Contains(t, result.NextAction, "steer_pending")
+	case <-time.After(10 * time.Second):
+		t.Fatal("AC-P2-7e: steer 打断后等待段必须立即返回")
+	}
+}
+
 func TestSessionAgentControllerV1SendInputBusyKeepsLegacyError(t *testing.T) {
 	ctx := context.Background()
 	handler, sessionManager := newSessionAgentSemanticsV2Host(t, false)

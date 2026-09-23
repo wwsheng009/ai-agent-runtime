@@ -2645,6 +2645,11 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 					result.Queued = true
 					result.Delivered = true
 					result.Duplicate = delivery.Duplicate
+					// C3-7/AC-P2-7b：目标卡在审批上时 steer 不得绕过审批闸门——
+					// 消息保持排队（审批解决、当前 run 结束后才注入），回执指向审批。
+					if state, ok := actor.StateSummary(); ok && state.PendingApproval {
+						result.NextAction = toolbroker.AgentSteerApprovalFirstNextAction(state.PendingApprovalID, state.PendingApprovalReason)
+					}
 				}
 				r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
 					TargetSessionID: sessionID,
@@ -2819,14 +2824,36 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 			waitResult.MatchedSessionID = matched.SessionID
 			return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
 		}
+		if r.localAgentSteerPendingInput() {
+			// AC-P2-7e / AC-P2-4c：用户 steer/新输入到达 ⇒ 等待段立即结束并返回，
+			// 交由父回合处理新输入；观测中的子代理继续运行（不取消、不谎报超时）。
+			waitResult.Interrupted = true
+			return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
+		}
 		select {
 		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				// AC-P2-7e / AC-P2-4c：调用方被 steer/ESC/interrupt 打断 ⇒ 立即返回，
+				// 且不得谎报为观测窗口超时。
+				waitResult.Interrupted = true
+				return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
+			}
 			waitResult.TimedOut = true
 			return toolbroker.FinalizeAgentWaitResult(waitResult, startedAt), nil
 		case <-wakeCh:
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+// localAgentSteerPendingInput reports whether the interactive caller has queued
+// new input (a steer) while a wait segment is active. C3-4 constraint ③ /
+// AC-P2-7e: new user input ends the wait segment instead of blocking on it.
+func (r *localActorRegistry) localAgentSteerPendingInput() bool {
+	if r == nil || r.Host == nil || r.Host.BaseSession == nil {
+		return false
+	}
+	return chatInputQueueHasQueuedLines(r.Host.BaseSession)
 }
 
 // waitForLocalAgentMailbox bounds the mailbox observation window, then delegates

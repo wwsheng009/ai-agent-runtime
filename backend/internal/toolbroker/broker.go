@@ -1912,6 +1912,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if result != nil && result.Duplicate {
 			summary["duplicate"] = true
 		}
+		if result != nil && strings.TrimSpace(result.NextAction) != "" {
+			// AC-P2-7b：审批优先等引导必须模型可见（steer 回执）。
+			summary["next_action"] = strings.TrimSpace(result.NextAction)
+		}
 		return aliasedResult, attachCacheSafeSummary(summary, agentStatusCacheSafeSummary(aliasedResult)), nil
 
 	case ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
