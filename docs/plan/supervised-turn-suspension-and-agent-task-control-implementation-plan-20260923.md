@@ -63,6 +63,8 @@
 | C0-D | 现有开关盘点 | grep `execution_mode` / `AutoWake` / `wake` / `suspension` | 记录现有开关名，供回滚使用 |
 | C0-E | 度量基线采集 | 设计稿 §8 五项指标取当前值 | 有基线数字，否则收益不可验证 |
 
+> C0-E 落地与首次采样见 §13.14（2026-09-23）：五项指标的口径已提升为生产代码单一来源，采样入口 `GET /supervision/metrics` 与 `go run ./cmd/supervision-metrics -store <supervision.db>` 同源。
+
 ### 1.2 施工项
 
 #### C0-1（= 改动 #11）耐久性探测与降级路径（I9 / §6.13）
@@ -638,6 +640,8 @@
 | 成功完成到父 Agent 汇报的延迟 | 收敛到一次 resume 周期内 | P95 ≤ 1 个 resume 周期（含 rollup digest 组装） |
 | 单托管 turn 的 resume 次数 / token 成本 | 受预算约束、无风暴 | 不超过 `WakeMaxAutoWake`=5 / `WakeMaxProgressWake`=6 / 1h 窗口 |
 | 误杀率（取消后 5 分钟内子任务本可完成） | 趋近 0 | 抽样人工复核 + 端到端 runbook |
+
+> **基线**（2026-09-23 首次采样，读数与采样命令见 §13.14）：指标 1 = 26/144（18.06%）；指标 2 = 0/144（0%）；指标 3 在 dev 库无样本（0 条出件行）；指标 4 = 宿主账本读数；指标 5 = 26 条候选（其中 25 条为重启清扫批次）。生产基线在部署实例上按同一命令一次采样即为基线。
 
 ---
 
@@ -1378,3 +1382,74 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 - **`StandaloneCount` 尚无独立观测面**：目前只出现在 resume 文本（`standalone_obligations: N` / 逐行 `standalone=true`）与 `ResumeContext` JSON 里，没有事件与指标行；若要把「迁移期残留行数」做成可观测指标，需在 §7.3 口径表加一行。
 
 **下一步**：提交本轮（生产改动 + 用例 + 本登记）。P3 门禁只剩 **C0-E 度量基线采集**（AC-P3-4c 的判定前提，L4，按上线节奏走）；落地方式已在 §13.12 留白里备好（按子会话枚举 run 行 + `CancelSource` 分组）。
+
+### 13.14 C0-E 度量基线采集（§7.3 五项指标：口径落地 + 首次真实采样）
+
+**进入条件**：§13.13 已闭环 P3 场景表 EC-G4；P3 门禁仅剩 **C0-E**。§1.1 的通过标准是「**有基线数字**」，而 §13.12 的留白把当时的状态记成「口径可复算，但没有采集入口」。本轮把口径提升为生产代码的单一来源，并给出可复算的采集入口与**首次真实采样**。
+
+**口径表（§7.3 五项指标 → 读数来源 → 入口）**
+
+| 指标 | 读数来源 | 入口 |
+| --- | --- | --- |
+| 1 被 runtime 强制取消的 run 占比 | `supervision.ComputeRuntimeCancelMetricsFromRuns`：分母 = 窗口内 run 行（终态按 `finished_at`、活体按 `created_at` 记账，即 `RunAccountingInstant`）；分子只认 runtime 自己判的取消来源（`decision_window_expired` / `progress_stalled` / `execution_deadline` / `execution_timed_out`），操作者取消只进分母 | `GET /supervision/metrics`、`go run ./cmd/supervision-metrics` |
+| 2 `decision_window_expired` 兜底占比 | 同上（`Cancel.DecisionWindowExpired` / `DecisionWindowExpiredRatio`） | 同上 |
+| 3 成功完成 → 父 Agent 汇报延迟 P95 | `supervision.ComputeReportLatencyMetrics`：`supervision_completion_outbox.delivered_at` − run `finished_at`，只 join **成功终态**（取消类 run 的出件会被 `run_canceled:` 标失败，天然不进样本）；无样本时报「无样本」而不是 0ms | 同上（`report_latency`） |
+| 4 单托管 turn 的 resume 次数 / token | 宿主预算账本（`/supervision/snapshot` 的 `wake_budget`）；memory 预算模式下 durable claim 行不存在，**无法离线复算** | 快照 `notes` 显式指向，不报假数 |
+| 5 误杀率 | `MisKillCandidate` 候选清单（窗口内 runtime 强制取消的 run，按完成时刻倒序、限流），**判定仍由人工复核**（取消后 5 分钟内本可完成） | 同上（`mis_kill_candidates`） |
+
+**改动清单**
+
+1. `internal/supervision/metrics_readout.go`（新）：上面五项口径 + `CollectMetricsSnapshot`。窗口过滤在 Go 里按 `RunAccountingInstant` 做 —— 时间列是 RFC3339Nano TEXT，SQL 字符串序在小数秒不同的行上不再是时间序（§13.12 已登记该坑）。`ExecutionRunWindowLister` 不可用时降级为按 session 分页走 `ListExecutionRunsBySession`，并把「页满且最旧行仍在窗口内」的 session 记进 `TruncatedSessions`（报告可能少算，而不是静默少算）。
+2. `internal/supervision/execution_store.go`：新增 `ExecutionRunWindowFilter` + `ExecutionRunWindowLister`（`ListExecutionRunsInWindow`：全库或单 root scope、按记账时刻倒序、窗口在 Go 里过滤）与 `ListDeliveredOutboxSince`（指标 3 的样本来源，只取已投递、按投递时刻倒序）。两者都是**可选接口**：老 store 不实现也不破坏既有调用。
+3. `internal/api/skills/supervision_metrics.go`（新）+ `handler.go` 一行注册：`GET /supervision/metrics`，参数 `root_session_id` / `since` / `until`（RFC3339 或 `24h` / `7d`）/ `window_limit` / `max_candidates`；参数非法报 400，未接线宿主报 503（不回全 0 载荷）。
+4. `cmd/supervision-metrics/main.go`（新）：离线一次性采集，读路径全 `SELECT`；用于「上线后对比记录」对**任意一份** `supervision.db`（含已下线实例）复算同一份数字。
+5. `supervision.ParseMetricsWindowValue`：HTTP 端点与离线命令共用一份窗口解析，避免「最近一周」在两个入口含义不同。
+
+**测试落点**
+
+- `internal/supervision/metrics_readout_test.go`（新）：口径（分子/分母、`0/0` 不产 NaN、操作者取消不进分子）、store 读路（窗口 / root scope / 限流 / 只取已投递出件）、纯投影（延迟 join 跳过非成功终态与未投递、候选清单倒序限流）、端到端快照（真实 store 上同时给出指标 1–3 与候选清单）、窗口解析。
+- `internal/api/skills/supervision_metrics_test.go`（新）：载荷字段与 scope（`root_session_id` 只读一个 root）、参数错误 400、未接线 503。
+- `cmd/supervision-metrics/main_test.go`（新）：命令接线（含 `-root` 缩小分母、`-store` 必填、非法 `since`、多余位置参数）。
+
+**首次采样（2026-09-23，真实库，非合成数据）**
+
+命令与读数（`backend/` 下执行）：
+
+```
+go run ./cmd/supervision-metrics -store "C:\Users\vince\.aicli\sessions\runtime\supervision\supervision.db" -since 7d
+go run ./cmd/supervision-metrics -store "C:\Users\vince\.aicli\sessions\runtime\supervision\supervision.db"   # 无界
+go run ./cmd/supervision-metrics -store "%TEMP%\ai-agent-runtime\supervision\supervision.db" -since 7d
+```
+
+| 指标 | 基线读数（`.aicli/sessions/runtime` 库，全库 = 7d 窗口，144 行） |
+| --- | --- |
+| 1 强制取消占比 | `forced_cancel = 26 / 144 = 18.06%`（`by_source` 只有 `execution_timed_out: 26`） |
+| 2 兜底占比 | `decision_window_expired = 0 / 144 = 0%` —— 兜底分支在真实库上**从未触发**，26 条强制取消全部来自硬路径（执行超时） |
+| 3 汇报延迟 | **无样本**：该库 `supervision_completion_outbox` 0 行（`outbox_total=0`），故 `report_latency.samples=0` 且带 note |
+| 4 resume 次数 | 宿主账本读数（`notes` 已指向 `/supervision/snapshot` 的 `wake_budget`） |
+| 5 误杀候选 | 26 条：25 条是 `2026-09-22T01:00:01Z` 的**重启清扫批次**（`orphaned`），1 条 `failed` —— 说明「候选清单 ≠ 误杀」，复核必须人工过一遍 |
+
+- **独立 SQL 反证**（`python -c` + `sqlite3` 直读同一库）：`count(*)=144`、`execution_timed_out = 25 orphaned + 1 failed = 26`、`decision_window_expired` 分组缺失（=0）、`outbox` 0 行、`finished_at` 区间 `2026-09-16T23:49` → `2026-09-23T13:45`（全部落在 7d 窗口内，与「全库 = 7d」一致）—— 与读数**逐项一致**。
+- **空库行为**：runtime-server 默认库（`%TEMP%\ai-agent-runtime\supervision\supervision.db`）读数全 0 且 `read_path=window` —— 该实例尚无 run 行，读数不报假数。
+
+**验证证据**
+
+- `go test ./internal/supervision/ -count=1` → **ok**（4.992s，全包）；`go test ./internal/api/skills/ -count=1` → **ok**（35.559s，全包，日志 `logs/c0e_skills_pkg_test.log`）；`go test ./cmd/supervision-metrics/` → **ok**。
+- 既有验收用例未放宽：`go test ./cmd/aicli/commands/ -run 'TestSupervisionMetricsReadout_RuntimeCancelSources' -count=1 -v` → **PASS**（该用例仍是「宿主 watchdog 判出的真实兜底行 + 12 条窗口复算」；共享函数与它的局部实现口径一致）。
+- `gofmt -l` 对本轮改动文件无输出。
+
+**AC 判定**
+
+| AC | 判定 | 证据 |
+| --- | --- | --- |
+| C0-E（§1.1「有基线数字」） | ✅ 口径 + 采集入口 + 首次真实采样；生产基线按同一命令一次采样即得 | 上表读数 + SQL 反证；两个入口（HTTP / 离线命令）共用 `CollectMetricsSnapshot` |
+| AC-P3-4c（五项度量相对基线改善） | 判定前提已具备（基线 ✅、口径 ✅）；「改善」仍需上线后对比 | 指标 1 基线 18.06%、指标 2 基线 0%；指标 3 在 dev 库无样本；指标 4/5 明确为宿主读数 + 人工复核 |
+
+**留白 / 语义边界**
+
+- **基线取自本机 dev/CLI 库**（行由开发期 e2e / 探针产生），不是生产流量：它足以作为「口径可用 + 量级参考」，但生产基线要在部署实例上重采（一次采样即基线）。
+- **指标 3 在 dev 库无样本**：P95 阈值「≤ 1 个 resume 周期」仍需有出件流量的实例确认；读数链路本身已由用例（含未投递/非成功终态跳过）覆盖。
+- **指标 5 的复核规则未细化**：候选清单以重启清扫批次为主，runbook 需要写明抽样规则（例如只看「5 分钟窗口内有产物产出」的行）才谈得上「误杀率」。
+- **`sessions` 字段在窗口读路上恒为 0**（该计数只在按 session 分页的降级读路上有意义）；字段注释已写明，但跨读路比较快照时不要把它当「参与统计的会话数」。
+
+**下一步**：提交本轮（读数模块 + 端点 + 采集命令 + 用例 + 本登记）。P3 门禁到此**全部闭环**（四项 AC + 场景表 + C0-E）；后续按发布节奏做「上线后对比记录」（§7.3 待办项的后半段）。

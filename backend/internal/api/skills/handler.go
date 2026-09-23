@@ -1018,6 +1018,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	// Supervision control plane (P2: doc 6.2-6.9)
 	runtimeRouter.HandleFunc("/supervision/digest", h.GetSupervisionDigest).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/supervision/snapshot", h.GetSupervisionSnapshot).Methods(http.MethodGet)
+	// C0-E（§7.3）度量基线读数：口径与验收用例同源。
+	runtimeRouter.HandleFunc("/supervision/metrics", h.GetSupervisionMetrics).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/supervision/actions", h.RequestSupervisionAction).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/supervision/actions", h.ListSupervisionActions).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/supervision/actions/{id}", h.GetSupervisionAction).Methods(http.MethodGet)

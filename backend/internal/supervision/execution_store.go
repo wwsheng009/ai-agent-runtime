@@ -91,6 +91,33 @@ type ExecutionRunStore interface {
 
 var _ ExecutionRunStore = (*SQLiteSupervisionStore)(nil)
 
+// ExecutionRunWindowFilter scopes a store-wide execution-run window read. The
+// window is applied on the accounting instant (finished_at when the run is
+// terminal, created_at otherwise — see RunAccountingInstant), so a baseline
+// samples "what the runtime terminated in this window".
+type ExecutionRunWindowFilter struct {
+	// RootSessionID narrows the read to one root scope; empty reads the whole
+	// store (deployment baseline).
+	RootSessionID string
+	// Since/Until bound the window (inclusive). Zero means unbounded.
+	Since time.Time
+	Until time.Time
+	// Limit caps the page (default 200).
+	Limit int
+}
+
+// ExecutionRunWindowLister is the optional store-wide read used by the C0-E
+// metrics snapshot (§7.3): a host that cannot enumerate every session still
+// gets a deployment baseline. Window filtering happens in Go against
+// RunAccountingInstant — the SQL only narrows the root scope and orders by the
+// same instant, because the TEXT columns are RFC3339Nano and lexicographic
+// order stops being temporal order once fractional seconds differ.
+type ExecutionRunWindowLister interface {
+	ListExecutionRunsInWindow(ctx context.Context, filter ExecutionRunWindowFilter) ([]ExecutionRun, error)
+}
+
+var _ ExecutionRunWindowLister = (*SQLiteSupervisionStore)(nil)
+
 const (
 	executionRunColumns = `run_id, kind, workflow, root_session_id, parent_session_id,
 		parent_run_id, session_id, agent_id, attempt, status, owner_id,
@@ -291,6 +318,46 @@ func (s *SQLiteSupervisionStore) ListExecutionRunsBySession(ctx context.Context,
 		run, err := scanExecutionRun(rows)
 		if err != nil {
 			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+// ListExecutionRunsInWindow lists runs across sessions, newest accounting
+// instant first, optionally narrowed to one root scope. Rows outside the window
+// are dropped in Go (see ExecutionRunWindowLister for why).
+func (s *SQLiteSupervisionStore) ListExecutionRunsInWindow(ctx context.Context, filter ExecutionRunWindowFilter) ([]ExecutionRun, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return nil, err
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = executionRunWindowDefaultLimit
+	}
+	query := `SELECT ` + executionRunColumns + ` FROM supervision_execution_runs`
+	args := make([]interface{}, 0, 2)
+	if root := strings.TrimSpace(filter.RootSessionID); root != "" {
+		query += ` WHERE root_session_id=?`
+		args = append(args, root)
+	}
+	query += ` ORDER BY COALESCE(finished_at, created_at) DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list execution runs in window: %w", err)
+	}
+	defer rows.Close()
+	window := RuntimeCancelMetricsOptions{Since: filter.Since, Until: filter.Until}
+	var runs []ExecutionRun
+	for rows.Next() {
+		run, err := scanExecutionRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		if !runInWindow(run, window) {
+			continue
 		}
 		runs = append(runs, run)
 	}
@@ -502,6 +569,58 @@ func (s *SQLiteSupervisionStore) ListUndeliveredOutbox(ctx context.Context, limi
 	}
 	return entries, rows.Err()
 }
+
+// ListDeliveredOutboxSince lists delivered completion-outbox entries, newest
+// delivery first, dropping deliveries older than since (in Go, for the same
+// RFC3339Nano ordering reason as ListExecutionRunsInWindow). It backs §7.3
+// metric 3 (成功完成 → 父 Agent 汇报的延迟).
+func (s *SQLiteSupervisionStore) ListDeliveredOutboxSince(ctx context.Context, since time.Time, limit int) ([]CompletionOutboxEntry, error) {
+	db, err := s.dbOrErr()
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = executionRunWindowDefaultLimit
+	}
+	rows, err := db.QueryContext(ctx, `SELECT
+		outbox_id, run_id, session_id, parent_session_id, root_session_id, status,
+		idempotency_key, payload_json, attempts, last_error, delivered_at,
+		parent_mailbox_seq, created_at
+		FROM supervision_completion_outbox
+		WHERE delivered_at IS NOT NULL
+		ORDER BY delivered_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list delivered outbox: %w", err)
+	}
+	defer rows.Close()
+	cutoff := time.Time{}
+	if !since.IsZero() {
+		cutoff = since.UTC()
+	}
+	var entries []CompletionOutboxEntry
+	for rows.Next() {
+		var entry CompletionOutboxEntry
+		var deliveredAt sql.NullString
+		var createdAt string
+		if err := rows.Scan(&entry.OutboxID, &entry.RunID, &entry.SessionID, &entry.ParentSessionID,
+			&entry.RootSessionID, &entry.Status, &entry.IdempotencyKey, &entry.PayloadJSON,
+			&entry.Attempts, &entry.LastError, &deliveredAt, &entry.ParentMailboxSeq, &createdAt); err != nil {
+			return nil, err
+		}
+		entry.DeliveredAt = parseRunTimePtr(deliveredAt.String)
+		entry.CreatedAt = parseRunTime(createdAt)
+		if entry.DeliveredAt == nil || entry.DeliveredAt.IsZero() {
+			continue
+		}
+		if !cutoff.IsZero() && entry.DeliveredAt.UTC().Before(cutoff) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+var _ DeliveredOutboxLister = (*SQLiteSupervisionStore)(nil)
 
 // MarkOutboxDelivered records the parent mailbox sequence.
 func (s *SQLiteSupervisionStore) MarkOutboxDelivered(ctx context.Context, outboxID string, parentMailboxSeq int64, now time.Time) (bool, error) {
