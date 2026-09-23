@@ -30,6 +30,11 @@ type resumeEpisodeHarness struct {
 	storage *InMemoryStorage
 	session *Session
 	batches subagentbatch.BatchStore
+	// C4-3 重启用例需要重建 actor 与新账本句柄：暴露 agent / runtime 与账本文件
+	// 路径，让用例能在"上一个进程退出"后用新句柄打开同一份账本。
+	apiAgent    *agent.Agent
+	llmRuntime  *llm.LLMRuntime
+	batchesPath string
 	// preparedTurnIDs 记录每次 run 实际使用的 turn_id：PrepareRun 在 run 启动后
 	// 立刻执行，此时 RuntimeState.CurrentTurnID 已是本回合的 turn_id。
 	preparedTurnIDs []string
@@ -58,8 +63,9 @@ func newResumeEpisodeHarness(t *testing.T) *resumeEpisodeHarness {
 		MaxSteps: 3,
 	}, nil, runtime)
 
+	batchesPath := filepath.Join(t.TempDir(), "batches.db")
 	batches, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
-		Path: filepath.Join(t.TempDir(), "batches.db"),
+		Path: batchesPath,
 	})
 	require.NoError(t, err)
 	require.True(t, batches.IsDurable())
@@ -69,7 +75,15 @@ func newResumeEpisodeHarness(t *testing.T) *resumeEpisodeHarness {
 	}))
 	require.True(t, apiAgent.SupportsSuspension(), "durable store must pass the I9 probe")
 
-	h := &resumeEpisodeHarness{store: store, storage: storage, session: session, batches: batches}
+	h := &resumeEpisodeHarness{
+		store:       store,
+		storage:     storage,
+		session:     session,
+		batches:     batches,
+		apiAgent:    apiAgent,
+		llmRuntime:  runtime,
+		batchesPath: batchesPath,
+	}
 	// actor 先声明再赋值：PrepareRun 回调在闭包内引用它（短变量声明的作用域
 	// 从语句结束才开始，写在字面量里会编译失败）。
 	var actor *SessionActor

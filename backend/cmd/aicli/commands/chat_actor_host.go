@@ -809,7 +809,11 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 				// the wake pending until the parent reaches a known state.
 				return false
 			}
-			return !state.Summary().Busy()
+			// C4-3 / AC-P3-3c：挂起 turn（`awaiting_obligations`）算 busy——
+			// 它不接受**新** turn——但 resume/steer 是同一 turn 的新 episode，
+			// 必须放行；否则重启后挂起 turn 的 wake 永远投不出去（假空闲的反面
+			// 是死锁）。AcceptsResume 就是这条口径。
+			return state.Summary().AcceptsResume()
 		},
 		Deliver: func(ctx context.Context, parentSessionID, rootScopeID string, digest *supervision.Digest, wakeIDs []string) error {
 			if h == nil || h.ActorRegistry == nil {
@@ -1220,6 +1224,15 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 				})
 				_, _ = coordinator.RecoverStaleBatches(recoveryCtx, localSubagentBatchRestartGrace, "", 512)
 				_, _ = coordinator.ReplayTerminalDeliveries(recoveryCtx, "", 512)
+				// C4-3：run 账本的"恢复 or orphaned"决策与 batch 恢复同批执行。
+				// 宽限期内仍有心跳的 run 保留（可恢复：归属者还在，或等 resume）；
+				// 宽限期外无心跳的 run 判 orphaned + 提升 fencing token + 投影
+				// critical 告警，晚到写入被 CAS 拒绝（AC-P3-3b）。
+				if reconciler := host.newLocalExecutionSupervisor(); reconciler != nil {
+					_, _ = reconciler.ReconcileRestart(recoveryCtx, supervision.RestartReconcilePolicy{
+						StaleAfter: localSubagentBatchRestartGrace,
+					})
+				}
 			},
 		)
 	}(batchStore, host.lifecycleCtx)

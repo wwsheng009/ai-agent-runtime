@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -122,10 +123,14 @@ type RuntimeState struct {
 // RuntimeStateSummary is the allocation-free projection used by status polls.
 // Large tool schemas and replay receipts intentionally stay out of this view.
 type RuntimeStateSummary struct {
-	SessionID                string
-	Status                   SessionStatus
-	CurrentTurnID            string
-	CurrentCheckpointID      string
+	SessionID           string
+	Status              SessionStatus
+	CurrentTurnID       string
+	CurrentCheckpointID string
+	// SuspendedTurnID 是 §6.12 挂起记录在状态里的派生标记：非空表示本会话持有一个
+	// `awaiting_obligations` 的托管 turn（账本未空，只是没有正在执行的 run）。它来自
+	// durable 状态，因此重启后的宿主看到与挂起进程一致的答案（C4-3 / AC-P3-3c）。
+	SuspendedTurnID          string
 	PendingTool              bool
 	PendingToolCallID        string
 	PendingToolName          string
@@ -137,14 +142,39 @@ type RuntimeStateSummary struct {
 	ActiveJobCount           int
 }
 
-// Busy reports whether the summary represents a state that cannot accept a new turn.
-func (s RuntimeStateSummary) Busy() bool {
+// statusBusy reports whether a turn is executing (or blocked) in this process
+// right now. It is the pre-C4-3 Busy() definition, kept separate because
+// resume / steer admission must not be blocked by a parked turn.
+func (s RuntimeStateSummary) statusBusy() bool {
 	switch s.Status {
 	case SessionRunning, SessionWaitingApproval, SessionWaitingInput, SessionRewinding:
 		return true
 	default:
 		return false
 	}
+}
+
+// AwaitingObligations reports whether the session owns a parked managed turn
+// (design §6.7 state `awaiting_obligations`): the turn has not finished, it is
+// only waiting for its durable obligations, so it has no run of its own.
+func (s RuntimeStateSummary) AwaitingObligations() bool {
+	return strings.TrimSpace(s.SuspendedTurnID) != ""
+}
+
+// Busy reports whether the summary represents a state that cannot accept a new
+// turn. A parked managed turn counts as busy (Q10：托管 turn 期间不允许并发新
+// turn)。重启正是这条断言的现场：挂起 turn 跨进程存活，忽略它的 summary 会把
+// 会话报成空闲（"假空闲"），让第二个 turn 与 resume 抢跑。
+func (s RuntimeStateSummary) Busy() bool {
+	return s.statusBusy() || s.AwaitingObligations()
+}
+
+// AcceptsResume reports whether the session can take a resume episode right
+// now (wake / steer / progress-check delivery). Resume is not a new turn: it
+// reuses the parked `turn_id`（§6.15），so a parked session accepts it even
+// though Busy() is true, while an executing turn still does not.
+func (s RuntimeStateSummary) AcceptsResume() bool {
+	return !s.statusBusy()
 }
 
 // Summary returns a small immutable projection suitable for frequent polling.
@@ -157,6 +187,7 @@ func (s *RuntimeState) Summary() RuntimeStateSummary {
 		Status:              s.Status,
 		CurrentTurnID:       s.CurrentTurnID,
 		CurrentCheckpointID: s.CurrentCheckpointID,
+		SuspendedTurnID:     s.SuspendedTurnID,
 		PendingTool:         s.PendingTool != nil,
 		PendingApproval:     s.PendingApproval != nil,
 		PendingQuestion:     s.PendingQuestion != nil,

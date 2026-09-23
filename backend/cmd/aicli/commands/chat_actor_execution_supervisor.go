@@ -81,6 +81,28 @@ func (h *localChatRuntimeHost) getLocalExecutionSupervisor() *supervision.Execut
 // built. The /debug surface uses it so that rendering state never starts a
 // background scan loop as a side effect; callers that need a working watchdog
 // keep using getLocalExecutionSupervisor.
+//
+// newLocalExecutionSupervisor builds the same durable wiring the watchdog uses
+// (store + lifecycle projection + wakes + config) **without** installing it on
+// the host and without starting a scan loop. The startup recovery pass uses it
+// for the one-shot restart reconciliation (C4-3 / AC-P3-3b), so a restarted
+// host can decide "恢复 or orphaned" before the first scan interval elapses.
+func (h *localChatRuntimeHost) newLocalExecutionSupervisor() *supervision.ExecutionSupervisor {
+	if h == nil || h.Supervision == nil || h.Supervision.Store == nil {
+		return nil
+	}
+	runStore, ok := h.Supervision.Store.(supervision.ExecutionRunStore)
+	if !ok || runStore == nil {
+		return nil
+	}
+	return &supervision.ExecutionSupervisor{
+		Store:     runStore,
+		StoreFull: h.Supervision.Store,
+		Wakes:     h.Supervision.Wakes,
+		Config:    localExecutionSupervisorConfig(h.supervisionConfig),
+	}
+}
+
 func (h *localChatRuntimeHost) peekLocalExecutionSupervisor() *supervision.ExecutionSupervisor {
 	if h == nil {
 		return nil

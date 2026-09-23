@@ -1164,3 +1164,73 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 | EC-E1 / EC-E7 / EC-C5（挂起 turn 的结束与放弃） | ✅ L1 | `TestSettleParkedTurnOnRunEnd` / `TestTurnObligationsSettled` / `TestAbandonSuspendedTurn*` / `TestInterruptAbandonsSuspendedTurn` |
 
 **下一步**：P3 第三项 **C4-3（重启恢复与围栏，§6.11 / §6.12）** —— AC-P3-3a–c。
+
+---
+
+### 13.11 补丁登记：P3 第三项 C4-3（重启恢复与围栏），2026-09-23
+
+> 进入条件（§5 顺序：C4-1 → C4-2 → **C4-3** → C4-4）已由 §13.10 满足。本轮实施 C4-3 两块：**宿主重启时的"恢复 or orphaned"决策（含围栏）** 与 **挂起 turn 的重启读回**；并顺带闭环一处语义缺口：挂起 turn（§6.7 `awaiting_obligations`）在状态投影里被读成"空闲"（**假空闲**），会让重启后的第二个 turn 与 resume 抢跑（AC-P3-3c）。
+
+**落地形态（对照 §5 C4-3 表）**
+
+| 需求字面 | 落地 |
+| --- | --- |
+| 宿主重启路径：交互式宿主的"**恢复 or orphaned**"决策；不可恢复 ⇒ `orphaned`（终态）+ 告警 | `ExecutionSupervisor.ReconcileRestart(ctx, RestartReconcilePolicy)`（`execution_supervisor.go:1075`）：启动时一次对账，读 `ListActiveExecutionRuns`（非终态、最旧优先、`Limit` 有界）后逐条判定，不可恢复 ⇒ `fenceRun` 置 `orphaned` + critical 投影。宿主接线在启动恢复批次内（`chat_actor_host.go:1227-1235`），与 `RecoverStaleBatches` / `ReplayTerminalDeliveries` 同批、共用宽限期 `localSubagentBatchRestartGrace = 5m`（`:50`）；构造器 `newLocalExecutionSupervisor`（`chat_actor_execution_supervisor.go:90`）复用同一份 durable 接线与配置，**不安装、不起 loop**（一次性对账不引入第二个 watchdog） |
+| `fenceOrphaned`（`execution_supervisor.go`）：提升 fencing token，阻断晚到写入 | `fenceOrphaned` 收敛为薄封装（`:981`），共享围栏原语 `fenceRun(ctx, run, source, keepExistingSource, now)`（`:990`）：`Get` 最新行 → 已终态即成功（**幂等**）→ `FencingToken + 1` / `Status = orphaned` / `FinishedAt` / `CancelSource` → `UpdateExecutionRunCAS(fenced, current.Version)`；CAS 输掉时回查终态再定性。晚到写入因 version 已前进被拒（`ErrRunConflict`，EC-B9） |
+
+**语义决策**
+
+| 面 | 决策 |
+| --- | --- |
+| 判据 = **worker 存活**，不是"进程里有没有内存态" | `last = max(last_heartbeat_at, updated_at)`；`last + StaleAfter > now` ⇒ 宽限期内 ⇒ **保留**（另一个宿主可能还活着，或本进程刚接手 —— 这就是恢复分支）；否则不可恢复 ⇒ 围栏。`StaleAfter` 零值取 `DefaultRestartReconcileGrace = 5m`，`Limit` 零值取 `512`，两者与宿主既有 batch 恢复同口径 |
+| 宿主挂钩（`Recoverable` 谓词） | `RestartReconcilePolicy.Recoverable func(*ExecutionRun) bool`：宿主已知这条 run 可恢复（例如该 run 的挂起 turn 仍有 durable §6.12 记录）⇒ **一律保留**，不看心跳。这让"重启恢复"由账本事实决定，而不是靠时间猜 |
+| 非 enforce 只观察 | `Mode != "enforce"` 时记 `Report.Observed` 并**不写账本**（dry-run 与生产走同一代码路径，便于先观察后放行） |
+| 幂等 / 有界 | 已终态行不再出现在 `ListActiveExecutionRuns`；第二次 pass 的 `Scanned` 不含它，`FencingToken` / `Version` 各只 +1（不会因重复启动反复围栏） |
+| 告警契约 | `projectRestartOrphan`（`:1141`）投影 `run_orphaned` + `SeverityCritical` + `SupervisionOrphaned` + `next_action = inspect run and decide cancel/retry`：重启判决不只在账本里，父会话的决策面看得到（与其它非健康判定同契约） |
+| 挂起 turn 的重启读回（AC-P3-3a） | 账本（`turn_suspensions` 表）与 resume 队列是 durable 真源：新进程用**新句柄**打开同一份文件即可读回 `ObligationIDs` / `ResumeQueue`；actor 的解析顺序＝内存缓存 → durable 状态 → **账本验证记录仍在**（`actor_resume_episode.go:40-64`），因此重启后仍复用挂起 `turn_id`（与 AC-P1-1a 同口径），episode 不触碰账本 |
+| `awaiting_obligations` 与 `Busy()`（AC-P3-3c） | `RuntimeStateSummary` 增加 `SuspendedTurnID`（来自 durable 状态，`runtime_state.go:130-133`）；`Busy() = statusBusy() 或 AwaitingObligations()`（`:168`，Q10「托管 turn 期间不允许并发新 turn」），`AcceptsResume() = 非 statusBusy()`（`:176`）—— 挂起 turn **不是空闲**，但同一 turn 的 resume episode（steer / wake resume / 巡检投递）仍放行。三个宿主调用点按语义分流：`chat_actor_host.go:816`、`chat_actor_progress_check.go:262` 用 `AcceptsResume()`，其余 Busy 语义点不变 |
+
+**改动清单**
+
+| 位置 | 改动 |
+| --- | --- |
+| `backend/internal/supervision/execution_supervisor.go` | `ReconcileRestart`（`:1075`）+ `RestartReconcilePolicy`（`:1045`）/ `RestartReconcileReport`（`:1061`）+ 常量（`:1033-1042`：`DefaultRestartReconcileGrace` / `DefaultRestartReconcileLimit` / `RunCancelSourceRestartUnrecoverable`）；共享围栏原语 `fenceRun`（`:990`，`fenceOrphaned` 收敛为薄封装 `:981`）；`projectRestartOrphan`（`:1141`） |
+| `backend/cmd/aicli/commands/chat_actor_execution_supervisor.go` | `newLocalExecutionSupervisor()`（`:90`）：不安装到宿主、不起扫描 loop 的一次性构造器，复用 `localExecutionSupervisorConfig` 的 durable 接线 |
+| `backend/cmd/aicli/commands/chat_actor_host.go` | 启动恢复批次内调用 `ReconcileRestart`（`:1227-1235`，宽限期复用 `localSubagentBatchRestartGrace`）；wake consumer 的 `Runnable` 判定改为 `AcceptsResume()`（`:816`） |
+| `backend/cmd/aicli/commands/chat_actor_progress_check.go` | 巡检投递的父会话空闲判定改为 `AcceptsResume()`（`:262`） |
+| `backend/internal/chat/runtime_state.go` | `RuntimeStateSummary.SuspendedTurnID` + `AwaitingObligations()` + `Busy()` 纳入挂起 turn + `AcceptsResume()`；原 `Busy()` 更名 `statusBusy()`（`:145-178`） |
+| `backend/internal/chat/actor_resume_episode_test.go` | 测试夹具暴露 `apiAgent` / `llmRuntime` / `batchesPath`：重启用例需要"新进程用新句柄打开同一份账本" |
+
+**测试落点（L1）**
+
+| 用例 | 断言 |
+| --- | --- |
+| `TestReconcileRestartFencesUnrecoverableRunsAndBlocksLateWrites`（`supervision/restart_reconcile_test.go:37`） | 两条遗留 run：宽限期外无心跳 ⇒ `orphaned` + `FencingToken + 1` + critical 通知落库（`run_orphaned` / `SeverityCritical` / SubjectID = run_id）；旧持有者拿着围栏前的 version 回写 ⇒ `ErrRunConflict` 且终态判决不被改写；宽限期内的一行逐字段未动（AC-P3-3b 正反例） |
+| `TestReconcileRestartKeepsRecoverableRunsAndRepeatsIdempotently`（`:111`） | `Recoverable` 命中 ⇒ 保留且 `Version` / `FencingToken` 不动；去掉谓词后围栏；第二次 pass `Scanned = 0`、token / version 各只 +1 |
+| `TestReconcileRestartObserveModeRecordsWithoutWriting`（`:167`） | `Mode = observe` ⇒ `Observed = 1`、账本零写入 |
+| `TestRestartedActorResumesParkedTurnFromDurableLedger`（`chat/actor_restart_recovery_test.go:22`） | 重启现场（actor 停掉 + 账本句柄关闭 → 新句柄打开同一文件）：§6.12 记录逐字段读回（`obligation_ids` / `resume_queue` / `parked_at`）；重建 actor 冷缓存解析出挂起 `turn_id`、`Busy()` 与 `AcceptsResume()` 同时成立、提交复用同一 `turn_id`，episode 收尾后账本与挂起标记不变（AC-P3-3a + AC-P3-3c 的宿主面） |
+| `TestRuntimeStateSummaryBusyCoversParkedTurn`（`chat/runtime_state_test.go:144`） | 挂起 turn ⇒ `AwaitingObligations()` / `Busy()` 为真且 `AcceptsResume()` 为真；纯空闲、执行中两态语义不变；状态 JSON 往返（durable 读回的等价物）后语义还原（AC-P3-3c） |
+
+**验证证据（2026-09-23 实测）**
+
+- `go build ./...` exit 0（backend 全量编译）。
+- `go test ./internal/supervision/ -count=1` **ok**（6.689s，含新增三个重启对账用例）。
+- `go test ./internal/chat/ -count=1` **ok**（37.907s）；`go test ./cmd/aicli/commands/ -count=1` **ok**（154.788s）—— 三处宿主接线（Busy 语义分流 + 启动对账）未回归。
+- 定向复跑：`go test ./internal/supervision/ -run TestReconcileRestart -v` 3/3 PASS（1.040s）；`go test ./internal/chat/ -run 'TestRestartedActor…|TestSubmitPromptOnSuspendedTurn…|TestSubmitPromptClearsStale…|TestRunEndStamps…' -v` 4/4 PASS（1.264s）。
+- `gofmt -l`（本轮 9 个改动文件）无输出。
+
+**AC 判定**
+
+| AC | 判定 | 证据 |
+| --- | --- | --- |
+| AC-P3-3a（重启后挂起 turn 的恢复路径有测试，账本 + resume 队列可读回） | ✅ L1 | `TestRestartedActorResumesParkedTurnFromDurableLedger`（新句柄读回 §6.12 记录 + 冷缓存复用 `turn_id`）；账本真源（`turn_suspensions`）不变 |
+| AC-P3-3b（不可恢复 ⇒ `orphaned` + fencing token 提升，晚到写入被拒） | ✅ L1 | `TestReconcileRestartFencesUnrecoverableRunsAndBlocksLateWrites`（正反例 + `ErrRunConflict` + critical 通知）+ `…KeepsRecoverableRunsAndRepeatsIdempotently` + `…ObserveModeRecordsWithoutWriting` |
+| AC-P3-3c（重启后 `awaiting_obligations` 与 `Busy()` 语义一致，不出现"假空闲"） | ✅ L1 | `TestRuntimeStateSummaryBusyCoversParkedTurn`（含 JSON 往返）+ `TestRestartedActorResumesParkedTurnFromDurableLedger` 的状态断言 |
+
+**留白 / 语义边界**
+
+- 重启对账是**启动时一次**（其余时间由巡检的常规 deadline 路径负责）：它不取代 watchdog，也不承诺"另一个宿主还活着时立刻接管"——宽限期内一律按可恢复保留，正是为了不误伤活着的 worker。
+- `Recoverable` 谓词目前只有 supervision 包内的契约与测试：CLI 宿主**尚未注入**"该 run 的挂起 turn 记录仍在"的谓词（宿主侧现成判据是 `subagentbatch.GetTurnSuspension`）。当前生产形态下，挂起 turn 的 run 若心跳陈旧仍会被判 `orphaned`；由于挂起态本身**没有在途 run**（§6.7 `awaiting_obligations`），这条组合路径暂无实际触发面——接入点已留出（策略字段），待 C4-4 端到端按真实读数决定是否启用。
+- AC-P3-3a 的"真实进程重启"（跨进程文件锁、真实宿主启动）仍是 **L2 留白**：本轮取证到"新句柄 + 冷缓存 actor"这一等价形态。
+
+**下一步**：P3 第四项 **C4-4（端到端验收）** —— AC-P3-4a（全量回归绿）/ AC-P3-4b（≥2h 声明预算 + 一次延长的真实长任务，L4）/ AC-P3-4c（五项度量相对基线改善，L4）。

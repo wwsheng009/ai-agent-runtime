@@ -247,8 +247,10 @@ func (h *localChatRuntimeHost) localSupervisionHasActiveProgress(ctx context.Con
 	return false, nil
 }
 
-// localSupervisionParentIdle 与 wake consumer 的 Runnable 判定同口径：父会话
-// 没有 running/approval/input turn 时才允许注入汇报 turn。
+// localSupervisionParentIdle 与 wake consumer 的 Runnable 判定同口径（C4-3 /
+// AC-P3-3c）：父会话没有正在执行的 running/approval/input turn 时才允许注入汇报
+// turn。挂起 turn（`awaiting_obligations`）拒绝的是**新** turn，resume episode
+// 照常放行——巡检汇报正是同一 turn 的续跑。
 func (h *localChatRuntimeHost) localSupervisionParentIdle(ctx context.Context, parentSessionID string) bool {
 	if h == nil || h.RuntimeStore == nil {
 		return false
@@ -257,5 +259,5 @@ func (h *localChatRuntimeHost) localSupervisionParentIdle(ctx context.Context, p
 	if err != nil || state == nil {
 		return false
 	}
-	return !state.Summary().Busy()
+	return state.Summary().AcceptsResume()
 }

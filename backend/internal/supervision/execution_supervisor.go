@@ -979,6 +979,15 @@ func (s *ExecutionSupervisor) retireExpiredDecisionWindow(ctx context.Context, r
 // fenceOrphaned bumps the fencing token and marks the run orphaned so late
 // writes can no longer win (doc 5.4 fencing rules).
 func (s *ExecutionSupervisor) fenceOrphaned(ctx context.Context, run *ExecutionRun, now time.Time) bool {
+	return s.fenceRun(ctx, run, "cancel_grace_expired", true, now)
+}
+
+// fenceRun is the shared fencing primitive (doc 5.4): it bumps the run's
+// fencing token, writes the terminal verdict through the version CAS and
+// converges the run's live-condition alerts. keepExistingSource preserves an
+// earlier cancel source (the cancel-grace path reports the cancel that was
+// already in flight); the restart path records its own verdict instead.
+func (s *ExecutionSupervisor) fenceRun(ctx context.Context, run *ExecutionRun, source string, keepExistingSource bool, now time.Time) bool {
 	current, err := s.Store.GetExecutionRun(ctx, run.RunID)
 	if err != nil {
 		return false
@@ -990,7 +999,11 @@ func (s *ExecutionSupervisor) fenceOrphaned(ctx context.Context, run *ExecutionR
 	fenced.FencingToken = current.FencingToken + 1
 	fenced.Status = RunStatusOrphaned
 	fenced.FinishedAt = &now
-	fenced.CancelSource = firstNonEmpty(current.CancelSource, "cancel_grace_expired")
+	if keepExistingSource {
+		fenced.CancelSource = firstNonEmpty(current.CancelSource, strings.TrimSpace(source))
+	} else {
+		fenced.CancelSource = firstNonEmpty(strings.TrimSpace(source), current.CancelSource)
+	}
 	ok, err := s.Store.UpdateExecutionRunCAS(ctx, fenced, current.Version)
 	if err != nil {
 		return false
@@ -1003,10 +1016,143 @@ func (s *ExecutionSupervisor) fenceOrphaned(ctx context.Context, run *ExecutionR
 	run.FencingToken = fenced.FencingToken
 	run.Status = fenced.Status
 	run.FinishedAt = fenced.FinishedAt
+	run.CancelSource = fenced.CancelSource
 	// The run is terminal through fencing, so its live-condition alerts are
 	// stale exactly as in projectTerminal (plan §4.3).
 	s.convergeRunAlerts(ctx, &fenced, RunStatusOrphaned)
 	return true
+}
+
+// C4-3 / AC-P3-3b：宿主重启时的"恢复 or orphaned"决策。
+//
+// 重启后账本里可能留着上一个进程的非终态 run。判据是 **worker 存活**：心跳 /
+// 更新时间仍在宽限期内的行按"可恢复"保留（另一个宿主可能还活着，或本进程刚接手，
+// 这就是恢复分支）；宽限期外仍无心跳的行不可恢复 —— 记 `orphaned`（终态）+ 提升
+// fencing token + 投影 critical 告警，晚到写入因 version / token 已前进而被 CAS
+// 拒绝（EC-B9）。
+const (
+	// DefaultRestartReconcileGrace mirrors the host startup recovery grace: a
+	// run quieter than this cannot belong to a live worker.
+	DefaultRestartReconcileGrace = 5 * time.Minute
+	// DefaultRestartReconcileLimit bounds one restart pass.
+	DefaultRestartReconcileLimit = 512
+	// RunCancelSourceRestartUnrecoverable records why a restarted host fenced a
+	// run: no live worker after the restart grace.
+	RunCancelSourceRestartUnrecoverable = "restart_unrecoverable"
+)
+
+// RestartReconcilePolicy configures one restart pass.
+type RestartReconcilePolicy struct {
+	// Now is the decision clock. Zero uses the supervisor clock.
+	Now time.Time
+	// StaleAfter is the liveness grace. Zero uses DefaultRestartReconcileGrace.
+	StaleAfter time.Duration
+	// Limit bounds the pass. Zero uses DefaultRestartReconcileLimit.
+	Limit int
+	// Reason overrides the recorded CancelSource.
+	Reason string
+	// Recoverable is an optional host predicate: true means the host already
+	// knows how to resume this run (for example its turn still has a durable
+	// parked record), so the pass must keep it even with a stale heartbeat.
+	Recoverable func(run *ExecutionRun) bool
+}
+
+// RestartReconcileReport summarizes one restart pass.
+type RestartReconcileReport struct {
+	Scanned        int
+	Recovered      int
+	Orphaned       int
+	Failed         int
+	Observed       int
+	OrphanedRunIDs []string
+}
+
+// ReconcileRestart decides, once per host startup, which non-terminal runs the
+// previous incarnation left behind can be recovered and which must be fenced as
+// orphaned. It is bounded, CAS-guarded and idempotent: a second pass finds the
+// fenced rows terminal and reports them as recovered without a second
+// transition.
+func (s *ExecutionSupervisor) ReconcileRestart(ctx context.Context, policy RestartReconcilePolicy) (RestartReconcileReport, error) {
+	var report RestartReconcileReport
+	if s == nil || s.Store == nil {
+		return report, fmt.Errorf("execution supervisor store is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	now := policy.Now
+	if now.IsZero() {
+		now = s.now()
+	}
+	grace := policy.StaleAfter
+	if grace <= 0 {
+		grace = DefaultRestartReconcileGrace
+	}
+	limit := policy.Limit
+	if limit <= 0 {
+		limit = DefaultRestartReconcileLimit
+	}
+	reason := strings.TrimSpace(policy.Reason)
+	if reason == "" {
+		reason = RunCancelSourceRestartUnrecoverable
+	}
+	runs, err := s.Store.ListActiveExecutionRuns(ctx, limit)
+	if err != nil {
+		return report, err
+	}
+	enforce := s.enforce()
+	for i := range runs {
+		run := runs[i]
+		report.Scanned++
+		if policy.Recoverable != nil && policy.Recoverable(&run) {
+			// The host can resume this run (its parked turn record is still
+			// there): keep the ledger row and let the resume path drive it.
+			report.Recovered++
+			continue
+		}
+		last := run.LastHeartbeatAt
+		if run.UpdatedAt.After(last) {
+			last = run.UpdatedAt
+		}
+		if last.Add(grace).After(now) {
+			// Inside the grace window: another host may still own this run, or
+			// this process just took over. Recovery keeps it untouched.
+			report.Recovered++
+			continue
+		}
+		if !enforce {
+			report.Observed++
+			continue
+		}
+		if !s.fenceRun(ctx, &run, reason, false, now) {
+			report.Failed++
+			continue
+		}
+		report.Orphaned++
+		report.OrphanedRunIDs = append(report.OrphanedRunIDs, run.RunID)
+		s.projectRestartOrphan(ctx, &run, reason)
+	}
+	return report, nil
+}
+
+// projectRestartOrphan makes a restart verdict visible instead of ledger-only:
+// an unrecoverable run fenced by a restarted host is critical + action_required
+// for the parent that owns it (same contract as every non-healthy decision).
+func (s *ExecutionSupervisor) projectRestartOrphan(ctx context.Context, run *ExecutionRun, reason string) {
+	if s == nil || s.StoreFull == nil || run == nil {
+		return
+	}
+	_, _ = ProjectLifecycle(ctx, s.StoreFull, s.Wakes, LifecycleProjection{
+		RootScopeID:           run.RootSessionID,
+		TargetParentSessionID: run.ParentSessionID,
+		SubjectKind:           SubjectAgentRun,
+		SubjectID:             run.RunID,
+		EventType:             "run_orphaned",
+		Severity:              SeverityCritical,
+		SupervisionState:      SupervisionOrphaned,
+		Reason:                reason,
+		RecommendedAction:     "inspect run and decide cancel/retry",
+	})
 }
 
 // watchdogForceTerminal is the I10 fallback (design doc §16.4): a run that is
