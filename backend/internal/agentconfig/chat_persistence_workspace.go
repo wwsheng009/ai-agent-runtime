@@ -81,11 +81,22 @@ func WorkspacePrefsIDForCleanedPath(cleanedPath string) string {
 // WorkspacePrefsPath returns the preference file path for the current working
 // directory, or "" when the cwd/home cannot be resolved.
 func WorkspacePrefsPath() string {
+	cwd, err := workspaceCwd()
+	if err != nil || strings.TrimSpace(cwd) == "" {
+		return ""
+	}
+	return WorkspacePrefsPathForPath(cwd)
+}
+
+// WorkspacePrefsPathForPath derives the preference file path for an explicit
+// workspace path. 方案 §3.3/N9：读写以会话绑定 workspace 路径为准，而不是
+// 当前 cwd——否则 /resume 到其他目录的会话会静默改错文件。
+func WorkspacePrefsPathForPath(path string) string {
 	home, err := userHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
 		return ""
 	}
-	id := WorkspacePrefsID()
+	id := WorkspacePrefsIDForPath(path)
 	if id == "" {
 		return ""
 	}
@@ -125,6 +136,17 @@ func SaveWorkspaceChatPreferences(update AICLIChatPreferenceUpdate) error {
 	path := WorkspacePrefsPath()
 	if path == "" {
 		return fmt.Errorf("workspace chat preferences unavailable: cannot resolve cwd or home")
+	}
+	return saveWorkspaceChatPreferencesAt(path, update)
+}
+
+// SaveWorkspaceChatPreferencesForPath 是 SaveWorkspaceChatPreferences 的显式路径
+// 版本（方案 §5.4/N9）：路由面板与 runtime API 以**会话绑定 workspace 路径**写入，
+// 不随当前 shell 的 cwd 漂移。
+func SaveWorkspaceChatPreferencesForPath(workspacePath string, update AICLIChatPreferenceUpdate) error {
+	path := WorkspacePrefsPathForPath(workspacePath)
+	if path == "" {
+		return fmt.Errorf("workspace chat preferences unavailable: cannot resolve path %q", strings.TrimSpace(workspacePath))
 	}
 	return saveWorkspaceChatPreferencesAt(path, update)
 }

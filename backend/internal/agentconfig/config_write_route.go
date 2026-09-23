@@ -188,6 +188,9 @@ func chatUpdateWriteKeys(update AICLIChatPreferenceUpdate) []string {
 	if update.DefaultProvider != nil {
 		keys = append(keys, "providers.default_provider")
 	}
+	if update.Routing != nil {
+		keys = append(keys, "aicli.chat.routing.main_agent", "aicli.chat.routing.sub_agent")
+	}
 	return keys
 }
 

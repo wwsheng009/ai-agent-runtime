@@ -21,6 +21,10 @@ type AICLIChatPreferenceUpdate struct {
 	Stream **bool
 	// FastMode 与 Stream 相同的三态语义；仅对 Codex 协议的 Fast service tier 偏好生效。
 	FastMode **bool
+	// Routing 三态语义（方案 §3.3）：nil=不修改；非 nil 时写入/替换
+	// aicli.chat.routing 子树（内层 nil 表示清除该节）。仅在工作区偏好文件
+	// （chat-prefs.yaml）中有意义，全局配置不参与解析。
+	Routing *AICLIWorkspaceRoutingPreferences
 }
 
 // UpdateAICLIChatPreferences updates the aicli.chat section inside a config file
@@ -123,6 +127,9 @@ func applyAICLIChatPreferenceUpdate(current *AICLIChatConfig, update AICLIChatPr
 			value := **update.FastMode
 			current.FastMode = &value
 		}
+	}
+	if update.Routing != nil {
+		current.Routing = update.Routing
 	}
 }
 

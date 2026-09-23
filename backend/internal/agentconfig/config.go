@@ -605,6 +605,10 @@ type AICLIChatConfig struct {
 	FastMode      *bool                     `yaml:"fast_mode,omitempty" mapstructure:"fast_mode"`
 	TerminalTitle *AICLITerminalTitleConfig `yaml:"terminal_title,omitempty" mapstructure:"terminal_title"`
 	Notifications *AICLIChatNotifications   `yaml:"notifications,omitempty" mapstructure:"notifications"`
+	// Routing 仅在工作区偏好文件（chat-prefs.yaml）中有意义（方案 §3.3）。
+	// 全局配置中的 aicli.chat.routing 不参与解析——解析器只读
+	// aicli.main_agent.routing / aicli.subagents.routing（见 routing_resolution.go）。
+	Routing *AICLIWorkspaceRoutingPreferences `yaml:"routing,omitempty" mapstructure:"routing"`
 }
 
 // AICLITerminalTitleConfig controls the interactive chat window/tab title.
