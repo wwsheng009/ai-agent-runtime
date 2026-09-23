@@ -152,4 +152,93 @@ export const enWorkspacePanelsSessionDetail = {
       },
     },
   },
+  // Routing block (plan §7.2/§7.3/§7.4): read-only projection of session agent
+  // routing plus the three writable layers. Every displayed value comes from the
+  // backend projection (I-6); this module only holds copy.
+  routing: {
+    title: "Routing",
+    loading: "Loading routing…",
+    scope: {
+      main: "Main agent",
+      sub: "Sub-agent",
+    },
+    state: {
+      enabled: "Enabled",
+      disabled: "Disabled",
+    },
+    summary: {
+      level: "Effective level",
+      provider: "provider",
+      model: "model",
+      effort: "effort",
+      source: "Source",
+      revision: "Revision",
+      effectiveFrom: "Takes effect",
+      none: "—",
+      effectiveFromNextTurn: "next turn",
+    },
+    source: {
+      session: "Session",
+      workspace: "Workspace",
+      config: "Config",
+      default: "Default",
+      derived: "Derived",
+    },
+    layers: {
+      label: "Write layer",
+      session: "Session",
+      workspace: "Workspace",
+      config: "Config",
+      locked: "Read-only",
+      lockedHint: "This layer is not writable right now (not exposed by the backend); it is greyed out.",
+      childSessionHint: "Child sessions do not write routing overrides: the parent session and config layers decide.",
+    },
+    target: {
+      label: "Write target",
+      session: "Session record (persisted with the session)",
+      none: "—",
+    },
+    levels: {
+      level: "Level",
+      enabled: "On",
+      disabled: "Off",
+      expensive: "Expensive level",
+      provider: "provider",
+      model: "model",
+      effort: "effort",
+      source: "Source",
+      empty: "No editable levels right now (routing is disabled or has no configured levels).",
+      inheritedHint:
+        "This value comes from the \"{{source}}\" layer: clearing it here changes nothing — use Reset to drop this layer's override.",
+    },
+    enableToggle: {
+      label: "Enable routing",
+      hint: "Maps to main_agent.enabled; writes take effect next turn.",
+    },
+    warnings: {
+      title: "Warnings",
+    },
+    actions: {
+      save: "Save",
+      reset: "Reset",
+      confirm: "Confirm write",
+      cancel: "Cancel",
+      reload: "Refresh routing",
+    },
+    confirm: {
+      title: "Write to the global config?",
+      body: "This write modifies {{path}} and applies to every workspace and session.",
+      bodyNoPath: "This write modifies the global config and applies to every workspace and session.",
+    },
+    notice: {
+      saved: "Saved to the \"{{layer}}\" layer; takes effect next turn.",
+      unchanged: "Nothing to write.",
+      reset: "Cleared the \"{{layer}}\" layer's routing override.",
+      actorInvalidated: "The running actor was invalidated and will re-resolve routing on the next turn.",
+    },
+    errors: {
+      load: "Failed to load routing",
+      save: "Failed to write routing",
+    },
+  },
 } as const;

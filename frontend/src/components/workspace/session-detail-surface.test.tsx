@@ -24,6 +24,13 @@ vi.mock("@/lib/runtime-api", async (importOriginal) => {
   return { ...actual, getRuntimeSession: getRuntimeSessionMock };
 });
 
+// 面内新增的「路由」区块会自行拉取 `/routing`：这里固定为挂起状态，
+// 让面级断言只关注会话快照本身（不产生真实网络请求，也不引入额外文案）。
+vi.mock("@/api/runtime/session-routing", () => ({
+  getSessionRouting: vi.fn(() => new Promise(() => {})),
+  updateSessionRouting: vi.fn(),
+}));
+
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
 };

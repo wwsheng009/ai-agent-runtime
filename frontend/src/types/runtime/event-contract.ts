@@ -77,6 +77,7 @@ export type RuntimeEventType =
   | "rewind_finished"
   | "rewind_started"
   | "session.checkpoint_persist_error"
+  | "session.routing_changed"
   | "session_compact_completed"
   | "session_compact_failed"
   | "session_compact_skipped"
@@ -174,6 +175,7 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "rewind_finished": [],
   "rewind_started": [],
   "session.checkpoint_persist_error": [],
+  "session.routing_changed": ["session_store"],
   "session_compact_completed": ["session_store"],
   "session_compact_failed": ["session_store"],
   "session_compact_skipped": ["session_store"],
@@ -233,6 +235,7 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
   "main_agent.route_prediction_invalid",
   "main_agent.route_prediction_unresolvable",
   "recall.performed",
+  "session.routing_changed",
   "session_compact_completed",
   "session_compact_failed",
   "session_compact_skipped",

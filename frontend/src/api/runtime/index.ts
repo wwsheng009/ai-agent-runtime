@@ -138,6 +138,15 @@ export {
   type SessionCompactStatus,
 } from "./session-compact";
 export {
+  getSessionRouting,
+  normalizeRoutingLevelSummary,
+  normalizeRoutingPanelMetadata,
+  normalizeRoutingStatusProjection,
+  normalizeSessionRoutingResponse,
+  updateSessionRouting,
+  type SessionRoutingRequestOptions,
+} from "./session-routing";
+export {
   createWorkspaceDirectory,
   deleteWorkspaceDirectory,
   listWorkspaceDirectories,

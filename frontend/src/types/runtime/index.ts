@@ -9,6 +9,7 @@ export * from "./events";
 export * from "./logs";
 export * from "./analytics";
 export * from "./routing-analytics";
+export * from "./session-routing";
 export * from "./teams";
 export * from "./jobs";
 export * from "./usage";

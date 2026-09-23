@@ -13,6 +13,7 @@
 //   * 状态卡：加载中 / 空态 / 读取失败（互斥，且只在没有字段可看时出现）；
 //   * 字段卡：会话元数据按「基本信息 / 时间 / 运行 / 内容」分段的标签-值两列；
 //   * 网络详情卡：SSE 观测块（默认收起，摘要行常驻判读徽标，见 session-detail-network）。
+//   * 路由卡：会话级 agent 路由的投影 + 三层写入（见 session-detail-routing/）。
 // 顺序刻意把「这是个什么会话」放在「链路为什么不动」之前：先看事实，再看诊断。
 
 import {
@@ -42,6 +43,7 @@ import {
 } from "@/components/workspace/session-detail-panel-shared";
 import { type WorkspacePanelThreadRelation } from "@/components/workspace/panel-registry";
 import { SessionDetailNetworkSection } from "@/components/workspace/session-detail-network";
+import { SessionDetailRoutingSection } from "@/components/workspace/session-detail-routing/session-detail-routing-section";
 import { SessionUsagePanel } from "@/components/workspace/session-usage-panel";
 import {
   type WorkspaceThreadRelationKind,
@@ -457,6 +459,9 @@ export function SessionDetailSurface({
 
       {/* 观测块常驻（不依赖会话快照加载状态）：它要回答的正是「快照/渲染没动静」时的归因问题。 */}
       <SessionDetailNetworkSection sessionId={sessionId} />
+
+      {/* 「路由」区块（§7.2/§7.3/§7.4）：与网络/用量并列，非全屏、无独立状态条。 */}
+      <SessionDetailRoutingSection sessionId={sessionId} />
 
       {/* 「会话用量」子面板：原先挂在 artifact 面板的 usage tab 上，现移入会话详情，标签由面板自身呈现。 */}
       <SessionUsagePanel sessionId={sessionId} />

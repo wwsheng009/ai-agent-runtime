@@ -155,4 +155,93 @@ export const zhWorkspacePanelsSessionDetail = {
       },
     },
   },
+  // 「路由」区块（方案 §7.2/§7.3/§7.4）：会话级 agent 路由的只读投影 + 三层写入。
+  // 所有展示值都来自后端投影（I-6），这里只放文案，不放任何阈值/映射表。
+  routing: {
+    title: "路由",
+    loading: "正在加载路由…",
+    scope: {
+      main: "主 Agent",
+      sub: "子 Agent",
+    },
+    state: {
+      enabled: "已启用",
+      disabled: "未启用",
+    },
+    summary: {
+      level: "生效档位",
+      provider: "provider",
+      model: "model",
+      effort: "effort",
+      source: "来源",
+      revision: "修订",
+      effectiveFrom: "生效时机",
+      none: "—",
+      effectiveFromNextTurn: "下一回合",
+    },
+    // 投影里的 source 枚举（session|workspace|config|default|derived）。
+    source: {
+      session: "会话",
+      workspace: "工作区",
+      config: "配置",
+      default: "默认",
+      derived: "派生",
+    },
+    layers: {
+      label: "写入层",
+      session: "会话",
+      workspace: "工作区",
+      config: "配置",
+      locked: "不可写",
+      lockedHint: "该层当前不可写（后端未开放），已置灰。",
+      childSessionHint: "子会话不写路由覆盖：路由由父会话与配置层决定。",
+    },
+    target: {
+      label: "写入目标",
+      session: "会话记录（随会话持久化）",
+      none: "—",
+    },
+    levels: {
+      level: "档位",
+      enabled: "启用",
+      disabled: "关闭",
+      expensive: "高价档位",
+      provider: "provider",
+      model: "model",
+      effort: "effort",
+      source: "来源",
+      empty: "当前没有可编辑的档位（路由未启用或未配置档位）。",
+      inheritedHint:
+        "该值来自「{{source}}」层：在本层清空不会改变它，请用「重置」清除本层覆盖。",
+    },
+    enableToggle: {
+      label: "启用路由",
+      hint: "对应 main_agent.enabled；写入在下一回合生效。",
+    },
+    warnings: {
+      title: "警告",
+    },
+    actions: {
+      save: "保存",
+      reset: "重置",
+      confirm: "确认写入",
+      cancel: "取消",
+      reload: "刷新路由",
+    },
+    confirm: {
+      title: "写入全局配置？",
+      body: "该写入会修改 {{path}}，对所有工作区与会话生效。",
+      bodyNoPath: "该写入会修改全局配置，对所有工作区与会话生效。",
+    },
+    notice: {
+      saved: "已写入「{{layer}}」层，下一回合生效。",
+      unchanged: "没有需要写入的改动。",
+      reset: "已清除「{{layer}}」层的路由覆盖。",
+      actorInvalidated: "运行中的 actor 已失效，将在下一回合按新路由重新解析。",
+    },
+    errors: {
+      load: "路由读取失败",
+      save: "路由写入失败",
+    },
+  },
 } as const;
