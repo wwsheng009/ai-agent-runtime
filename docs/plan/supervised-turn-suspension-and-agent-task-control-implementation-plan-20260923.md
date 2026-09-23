@@ -1437,12 +1437,15 @@ go run ./cmd/supervision-metrics -store "%TEMP%\ai-agent-runtime\supervision\sup
 - `go test ./internal/supervision/ -count=1` → **ok**（4.992s，全包）；`go test ./internal/api/skills/ -count=1` → **ok**（35.559s，全包，日志 `logs/c0e_skills_pkg_test.log`）；`go test ./cmd/supervision-metrics/` → **ok**。
 - 既有验收用例未放宽：`go test ./cmd/aicli/commands/ -run 'TestSupervisionMetricsReadout_RuntimeCancelSources' -count=1 -v` → **PASS**（该用例仍是「宿主 watchdog 判出的真实兜底行 + 12 条窗口复算」；共享函数与它的局部实现口径一致）。
 - `gofmt -l` 对本轮改动文件无输出。
+- **全量回归（提交后冻结态，日志 `logs/p3-full-c0e-20260923.log`，命令 `cd backend; go test ./internal/... ./cmd/... -count=1`）**：读数 `ok=132` / `[no test files]=18` / **`FAIL` 包 = 1**（`internal/background`：`TestReliabilityEvalBackgroundTimeoutRetrySucceeds` 20.01s —— 与 §13.13 登记的 `internal/background` 属**同一族满负载时序抖动**，不是本轮改动）；反证：单用例复跑 **PASS 1.53s**、整包复跑 **ok 47.264s**。
+  - 关键包读数（全绿）：`internal/supervision 9.490s`（含本轮新增用例）/ `internal/api/skills 67.763s` / `cmd/supervision-metrics 1.110s` / `cmd/aicli/commands 153.013s` / `internal/chat 54.295s` / `internal/toolbroker 22.960s` / `internal/runtimeserver 17.030s` / `internal/policy 2.534s`。
 
 **AC 判定**
 
 | AC | 判定 | 证据 |
 | --- | --- | --- |
 | C0-E（§1.1「有基线数字」） | ✅ 口径 + 采集入口 + 首次真实采样；生产基线按同一命令一次采样即得 | 上表读数 + SQL 反证；两个入口（HTTP / 离线命令）共用 `CollectMetricsSnapshot` |
+| AC-P3-4a（全量回归绿） | ✅ 在 C0-E 提交后的冻结态复验 | 132 包 ok、唯一失败为已登记满负载时序抖动（单例 + 整包复跑均绿）——见「验证证据」 |
 | AC-P3-4c（五项度量相对基线改善） | 判定前提已具备（基线 ✅、口径 ✅）；「改善」仍需上线后对比 | 指标 1 基线 18.06%、指标 2 基线 0%；指标 3 在 dev 库无样本；指标 4/5 明确为宿主读数 + 人工复核 |
 
 **留白 / 语义边界**
