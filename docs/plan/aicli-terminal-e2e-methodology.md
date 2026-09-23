@@ -184,5 +184,15 @@ Manifest: output\aicli-terminal-e2e\opencode-wt-<runID>\manifest.json
 1. 日常/提交前：L3（`go test ./cmd/aicli/... -count=1`，必要时加 `-race`）。
 2. 渲染改动后：L2（fixture，30–60 秒，不耗 API）。
 3. 发布/验收前：L1（真实 provider，3–5 分钟），把 `manifest.json` 路径写进验收记录。
+4. 改动 Web 控制面 / 调试端点 / 鉴权后：E2E-DEBUG-01 + 02（见 [../e2e/debug-guide.md](../e2e/debug-guide.md)
+   与 [../e2e/nonloopback-auth-e2e.md](../e2e/nonloopback-auth-e2e.md)）；一键回归入口
+   `pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1`（断言基线门禁 + 01 + 02 + 聚合结论），
+   聚合逻辑自身的自测是 `scripts/test-aicli-e2e-all-selftest.ps1`。
 
 三者不是替代关系：L3 证明渲染逻辑正确，L2 证明 native scrollback 在真实宿主上的语义，L1 证明真实事件流 + 真实终端的端到端行为。
+
+> **是否启用真实 TTY**：上表 L1 / L2 **是**（真实 Windows Terminal 窗口 + UI Automation 读回），
+> L3 **否**（`os.Pipe` + VT 重建）；上表之外的 **HTTP 控制面族**（E2E-DEBUG-01/02）也**不启用真实 TTY**——
+> 被测进程以 `Start-Process` 独立启动、stdout/stderr 重定向，`term.IsTerminal(stdout)=false`
+> （`backend/cmd/aicli/ui/terminal.go`）→ 走非交互路径，观测全部来自 HTTP 控制面
+> （详见 [../e2e/debug-guide.md](../e2e/debug-guide.md) §1.1）。

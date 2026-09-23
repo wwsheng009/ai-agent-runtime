@@ -16,6 +16,8 @@ pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1
 
 # 复跑（复用 E2E-DEBUG-01 的构建产物，省一次 go build）
 pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1 -SkipBuild
+
+# 一键回归（01 + 02 + 断言基线）：pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1
 ```
 
 被测命令就是用户开放到局域网时的那条：
@@ -97,8 +99,9 @@ aicli chat --yolo --web-host 0.0.0.0 --web-port 9999 --web-token <至少 16 位�
 | S1 | 启动并轮询 `/debug/endpoints` 就绪 | `startup/endpoints-ready` |
 | S2 | 清单：监听模式与鉴权提示 | `discovery/listen-mode`、`discovery/write-auth-hint-all`、`discovery/web-base-url` |
 | S3 | 令牌不外泄（反证 + 占位符正向锁定）+ 启动行回显 | `discovery/token-not-leaked`、`discovery/lan-url-placeholder`、`discovery/startup-line-token` |
-| S4 | 从清单取路径（不硬编码） | `discovery/paths-from-catalog` |
+| S4 | 从清单取路径（不硬编码；含 `/web/api/token`） | `discovery/paths-from-catalog` |
 | S5 | LAN 令牌矩阵（11 条：读/写/页面/调试端点/SSE） | `auth/lan-get-no-token`、`auth/lan-get-token-header`、`auth/lan-get-token-query`、`auth/lan-get-wrong-token`、`auth/lan-page-no-token`、`auth/lan-page-token-meta`、`auth/lan-debug-no-token`、`auth/lan-debug-token`、`auth/lan-sse-no-token`、`auth/lan-post-no-token`、`auth/lan-post-token` |
+| S5b | 令牌发现端点 `/web/api/token` 同权（3 条） | `auth/lan-token-no-token`、`auth/lan-token-echo`、`auth/loopback-token-exempt` |
 | S6 | 豁免红线（3 条） | `auth/loopback-exempt`、`auth/loopback-write-exempt`、`auth/static-asset-exempt` |
 | S7 | 收尾 | `exit/queued`、`exit/graceful`、`exit/port-released`（`-KeepAlive` 时为 `exit/keep-alive` FAIL） |
 
@@ -125,6 +128,12 @@ aicli chat --yolo --web-host 0.0.0.0 --web-port 9999 --web-token <至少 16 位�
    断言链：`status=queued` → 进程退出码 0 → 端口可再绑定。前面的 `interrupt` 探针会让
    会话短暂进入清理态，此时命令门返回 `{"status":"rejected","reason":"input rejected by command gate"}`
    （不是鉴权问题），因此 `/exit` 在 `-ExitTimeoutSec` 内有界重试，`exit.attempts` 写进证据。
+8. **S5b**：`GET /web/api/token`（读本进程写令牌的端点）与其它 `/web/api/*` **同权**：
+   非回环模式下从 LAN 无令牌 → 403（否则鉴权模型漏了一个"能读出令牌"的洞）；
+   带令牌 → 200 且 `token` 与 `-WebToken` 一致、`source` 非空；
+   从**回环**无令牌 → 200（豁免红线对该端点同样成立）。
+   证据里只记录比对结论（`evidence.lanTokenEcho`：`status` / `header` / `query_param` / `source` /
+   `token_match` 布尔值），**不写令牌原文**。
 
 ### 3.1 SKIP 语义
 
@@ -232,7 +241,24 @@ pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1 -Sk
 
 `evidence` 当前保留：`endpoints`（`/debug/endpoints` 原文快照）、`lanGetNoToken`（403 响应体原文）、
 `lanUrlPlaceholder`（文本清单 LAN 区块的占位符行）、`pageTokenMeta`（页面 meta 注入片段）、
-`exit`（`attempts` 与最终响应体）。
+`lanTokenEcho`（`/web/api/token` 回显比对结论：`status` / `header` / `query_param` / `source` /
+`token_match`，**不含令牌原文**）、`exit`（`attempts` 与最终响应体）。
+
+### 5.4 一键回归（聚合入口 + 断言基线）
+
+```powershell
+# 基线门禁 → 01 → 02（02 恒 -SkipBuild 复用 01 的二进制）→ 聚合结论
+pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1
+```
+
+- 入口 `scripts/test-aicli-e2e-all.ps1`，断言基线 `scripts/e2e-assertion-baseline.json`：
+  **删除/改名断言 = FAIL**（防"悄悄删断言换绿"），新增 = 提示（`-UpdateBaseline` 固化）；
+  `-BaselineOnly` 是秒级门禁（不跑 E2E；无 provider / 无非回环 IPv4 的 CI 上跑这条）。
+- 聚合脚本统一归一化两个 harness 的 summary 字段名（01 = `passed`/`failed`，02 = `pass`/`fail`/`skip`），
+  并把 `results` 条数与 `PASS+FAIL` 交叉校验；schema 漂移或计数不符 → 直接 FAIL。
+- 聚合逻辑自身的负例自测：`scripts/test-aicli-e2e-all-selftest.ps1`（桩 harness 在 `%TEMP%` 沙箱内跑，
+  不碰端口 / provider / 终端）。
+- 参数、退出码与证据目录明细见 [debug-guide.md](./debug-guide.md) §5.1。
 
 ## 6. 失败模式与排查
 
@@ -284,6 +310,20 @@ pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1 -Sk
 5. **`interrupt` 会短暂关闭命令门**：收尾的 `/exit` 需有界重试（`exit.attempts` 留痕），
    否则会把正常清理态误判成失败。
 
+### 7.2 复验（2026-09-24，+3 条 `/web/api/token` 断言）
+
+> 命令：`pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1 -SkipBuild`
+> （复用 E2E-DEBUG-01 的二进制）。证据目录：`artifacts/aicli-debug-auth-e2e/20260924-002917/`（首跑）
+> 与 `artifacts/verify-02-tokenecho/`（补 `evidence.lanTokenEcho` 后复跑，结论一致）。
+
+| 项 | 结果 |
+|----|------|
+| 汇总 | **PASS=28 / FAIL=0 / SKIP=0**，退出码 0（§7 的 25 条 + §3 S5b 的 3 条） |
+| LAN `/web/api/token` 无令牌 | 403（拒绝体与其它 `/web/api/*` 同形） |
+| LAN `/web/api/token` 带令牌 | 200，`token` 与 `-WebToken` 一致、`header`/`query_param`/`source` 符合契约 |
+| 回环 `/web/api/token` 无令牌 | 200（豁免红线成立） |
+| 一键回归（聚合） | `pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -SkipBuild` → 基线 28 / 31 条一致、01 PASS=29（`-SkipBuild` 时无 `build/go-build` 条）、02 PASS=28，聚合 **PASS=4 / FAIL=0**、退出码 0；证据目录 `artifacts/aicli-e2e-all/20260924-004003/` |
+
 ## 8. 与 E2E-DEBUG-01 的分工
 
 | 维度 | E2E-DEBUG-01 | E2E-DEBUG-02（本文） |
@@ -300,10 +340,15 @@ pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1 -Sk
 > 覆盖面是**互补**的：01 负责"控制面能可靠驱动一次真实 turn"（需要 provider），
 > 02 负责"开放到局域网时鉴权边界正确"（不需要 provider）。两条链都过了，才谈得上
 > Web 控制面端到端可用。
+>
+> 两条链的**一键回归**（断言基线门禁 + 顺序执行 + 聚合结论）由 `scripts/test-aicli-e2e-all.ps1` 承担，见 §5.4。
 
 ## 9. 相关文档
 
 - [../aicli/web-remote-api.md](../aicli/web-remote-api.md) — `/web/api/*` 契约与鉴权模型（§1 鉴权）。
 - [../aicli/debug-chat-status.md](../aicli/debug-chat-status.md) — `/debug/endpoints` 字段（`listen_mode` / `write_auth_hint`）。
 - [debug-guide.md](./debug-guide.md) — E2E-DEBUG-01（回环 HTTP 控制面）指南。
+- `scripts/test-aicli-e2e-all.ps1` — 一键回归聚合入口（断言基线 + 01 + 02 + 聚合结论，本文 §5.4）。
+- `scripts/e2e-assertion-baseline.json` — 断言基线（"断言只增不减"的机器化检查）。
+- `scripts/test-aicli-e2e-all-selftest.ps1` — 聚合脚本自测（桩 harness、负例驱动）。
 - `scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1` — 本场景 harness（本文 §5 参数说明）。

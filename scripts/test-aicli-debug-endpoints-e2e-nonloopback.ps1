@@ -474,6 +474,14 @@ try {
         }
         Add-Result 'auth/lan-token-echo' (($lanTokenProbe.StatusCode -eq 200) -and $tokenEchoOk) `
             "HTTP $($lanTokenProbe.StatusCode) header=$($lanTokenProbe.Json.header) query_param=$($lanTokenProbe.Json.query_param) source=$($lanTokenProbe.Json.source) token_match=$tokenEchoOk"
+        # 证据只留比对结论（含 token_match 布尔值），不写令牌原文。
+        $evidence['lanTokenEcho'] = [ordered]@{
+            status      = $lanTokenProbe.StatusCode
+            header      = [string]$lanTokenProbe.Json.header
+            query_param = [string]$lanTokenProbe.Json.query_param
+            source      = [string]$lanTokenProbe.Json.source
+            token_match = $tokenEchoOk
+        }
     }
 
     # 豁免 1：回环 IP 发起的请求始终免令牌（本地浏览器访问场景）。

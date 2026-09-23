@@ -18,6 +18,14 @@ pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e.ps1
 pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1
 ```
 
+```powershell
+# 一键回归（提交前推荐）：断言基线校验 → 01 → 02 → 聚合结论（artifacts/aicli-e2e-all/<stamp>/summary.json）
+pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1
+
+# 只做断言基线门禁（秒级，不跑 E2E；CI 上跑这条）：断言被删/改名立刻变红
+pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -BaselineOnly
+```
+
 被测命令就是用户视角的那条（根命令自动分发到默认 `chat` 子命令，两种写法等价）：
 
 ```powershell
@@ -193,6 +201,33 @@ pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e.ps1 -Port 9999 -Ski
 pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e.ps1 -Headless -ArtifactDir artifacts/ci-debug-e2e
 ```
 
+### 5.1 一键回归：聚合入口 + 断言基线（提交前 / 发布前推荐）
+
+```powershell
+# 基线门禁 → 顺序跑 01 → 02（02 恒 -SkipBuild 复用 01 的二进制）→ 聚合 summary.json
+pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1
+
+# 复用已有二进制（两场景都不 go build）
+pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -SkipBuild
+
+# 只做基线门禁（秒级；断言被删/改名就红，不跑 E2E）
+pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -BaselineOnly
+
+# 确实新增了断言，用它固化基线（新增名会写进本次日志）
+pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -UpdateBaseline
+```
+
+| 项 | 说明 |
+|----|------|
+| 入口 | `scripts/test-aicli-e2e-all.ps1`；聚合证据在 `artifacts/aicli-e2e-all/<yyyyMMdd-HHmmss>/`（`run.log` + `summary.json` + 两个子场景目录 + 各自 stdout/stderr） |
+| 断言基线 | `scripts/e2e-assertion-baseline.json`：静态抽取两个 harness 的 `Add-Result` / `Add-Skip` 调用点。**缺失 = FAIL**（防"悄悄删断言换绿"），**新增 = 提示**（用 `-UpdateBaseline` 固化） |
+| 字段归一化 | 01 的 `summary.json` 用 `passed` / `failed`，02 用 `pass` / `fail` / `skip`；聚合脚本统一归一化。两套字段都读不到 = schema 漂移 → **直接 FAIL**（不是"读不到就记 0"）；`results` 条数还会与 `PASS+FAIL` 交叉校验 |
+| 聚合退出码 | `0` = 无 FAIL；`1` = 有 FAIL（基线缺失断言 / 场景 FAIL / 缺 `summary.json` / 计数对不上） |
+| 自测 | `scripts/test-aicli-e2e-all-selftest.ps1`：在 `%TEMP%` 沙箱里用**桩 harness** 跑真聚合脚本，验证 4 个分支（ok / schema 漂移 / 计数不符 / 子场景 FAIL）；不碰 provider、终端、端口 |
+
+> 全量回归需要真实 provider（01 要注入 prompt）与一块非回环 IPv4（02），因此无 provider 的 CI
+> 上建议只跑 `-BaselineOnly` 这条秒级门禁；有 provider 的环境（本机 / 发布前）再跑全量。
+
 ## 6. 失败模式与排查
 
 | 现象 | 判读 | 处置 |
@@ -340,6 +375,8 @@ pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1 -Sk
 |------|---------|------|------|
 | **E2E-DEBUG-01**（本文） | `scripts/test-aicli-debug-endpoints-e2e.ps1` | 独立进程启动、`/debug/endpoints` 入口发现、读屏、同步 invoke、幂等回放、turn 后验、`/exit` 优雅退出（HTTP 控制面） | 真实 provider（第 4 步）；无交互桌面要求 |
 | **E2E-DEBUG-02**（§7.3） | `scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1` | 非回环（`--web-host 0.0.0.0` + `--web-token`）鉴权契约：LAN 令牌必需、`?token=`、错误令牌、页面/SSE/`/debug/*` 同权、回环与静态资产豁免、清单不泄露令牌、`/exit` 收尾 | 真实 provider（只走 interrupt 与 `/exit`，不注入 prompt）；需非回环 IPv4（无则相关断言 SKIP） |
+| **一键回归**（§5.1） | `scripts/test-aicli-e2e-all.ps1` | 断言基线门禁 + 顺序跑 01 → 02 + 聚合结论（`artifacts/aicli-e2e-all/<stamp>/summary.json`） | 01 与 02 依赖的并集（真实 provider；02 需非回环 IPv4） |
+| 聚合逻辑自测（§5.1） | `scripts/test-aicli-e2e-all-selftest.ps1` | 桩 harness 验证聚合脚本的 4 个分支（字段归一化 / 计数交叉校验 / schema 漂移 / 子场景 FAIL） | 无（不碰 provider、终端、端口） |
 | 统一渲染 + marker exactly-once | `scripts/test-aicli-opencode-windows-terminal-e2e.ps1` | 真实 provider + Windows Terminal（UI Automation）下的渲染/历史/退出 | 交互桌面 |
 | 终端渲染基线 | `scripts/test-aicli-windows-terminal-e2e.ps1` | 合成数据在真实宿主终端中的渲染 | 交互桌面 |
 | turn 预算 / 生命周期 | `scripts/test-aicli-turn-budget-e2e.ps1` | 受控注入（无网络）的 turn 生命周期、预算熔断 | 无 |
@@ -359,3 +396,6 @@ pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1 -Sk
 - [../plan/aicli-terminal-e2e-methodology.md](../plan/aicli-terminal-e2e-methodology.md) — 终端 E2E 方法论。
 - `scripts/test-aicli-debug-endpoints-e2e.ps1` — 本场景 harness（本文 §5 参数说明）。
 - `scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1` — 姊妹场景 E2E-DEBUG-02 harness（本文 §7.3）。
+- `scripts/test-aicli-e2e-all.ps1` — 一键回归聚合入口（断言基线 + 01 + 02 + 聚合结论，本文 §5.1）。
+- `scripts/e2e-assertion-baseline.json` — 断言基线（"断言只增不减"的机器化检查）。
+- `scripts/test-aicli-e2e-all-selftest.ps1` — 聚合脚本自测（桩 harness、负例驱动，本文 §5.1）。
