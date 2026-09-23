@@ -12,6 +12,8 @@ Recommended entry points:
   - Common troubleshooting: empty providers, login models validation, `/model` switch failures, HTTP 401, Windows PATH, config overrides, logs, and doctor usage.
 - [exec.md](./exec.md)
   - Headless `aicli exec` usage, JSON/JSONL output contracts, session resume, code review, schema validation, config overrides, exit codes, and CI examples.
+- [session-export-import.md](./session-export-import.md)
+  - Session export/import manual: `aicli export` formats (`--full` JSON vs `--body` / `--tools` / `--trace` Markdown), the full-JSON envelope (`version` / `stats` / `session`), and `aicli import` semantics — original ID and user by default, never-overwrite on ID conflict (`--new-id` keeps both), unaddressable-ID rejection, write normalization (createdAt kept, updatedAt refreshed, expiresAt dropped, duplicate message identities reminted), read-back verification, exit codes, JSON summary contract, and troubleshooting.
 - [agents.md](./agents.md)
   - Portable AgentDefinition, `aicli chat --agent` (with or without profile), `spawn_agent.agent_type` defaults, `aicli agent stdio` ACP host, agents three-layer meanings, and difference from skill `openai.yaml`.
 - [tool_image_generate.md](./tool_image_generate.md)
@@ -33,6 +35,8 @@ Recommended entry points:
 
 Related runtime docs:
 
+- [tui-render-architecture.md](./tui-render-architecture.md)
+  - aicli TUI render architecture and legacy-layer assessment: event-driven convergence (SSE / user input / control plane → single action mailbox → single reducer → FramePump → single physical writer), the `FixedBottomSurface` semantic facade with its one-way physical-write fence, and the keep / migrate-then-delete / clean-up classification for the legacy compatibility layer.
 - [../skill_runtime/aicli_skills_usage.md](../skill_runtime/aicli_skills_usage.md)
   - How `aicli` / `aicli chat` exposes and routes skills (default-enabled, top-k, exec disable-tools false negatives).
 - [../plan/grok-harness-productization-implementation-plan.md](../plan/grok-harness-productization-implementation-plan.md)
