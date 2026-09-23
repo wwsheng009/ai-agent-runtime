@@ -502,8 +502,16 @@ func (h *Handler) defaultReasoningEffort() string {
 }
 
 func cloneAICLIRoutingConfig(config *agentconfig.Config) *agentconfig.Config {
-	if config == nil || config.AICLI == nil {
+	if config == nil {
 		return nil
+	}
+	if config.AICLI == nil {
+		// 保留「配置已接线、但没有 aicli 节」这一状态（而不是塌缩成 nil 快照）：
+		// 否则 config 层首次写入 routing（S1 主用例：无全局配置时开启）后，
+		// syncAICLIRoutingSnapshot 无法区分「快照未接线」与「文件里本来没有
+		// aicli 节」，只能放弃刷新——文件已是新值而快照仍为旧态，主 Agent
+		// 接线要等重启。读取方一律先判 `AICLI == nil`，因此行为不变。
+		return &agentconfig.Config{}
 	}
 	cloned := &agentconfig.Config{AICLI: &agentconfig.AICLIConfig{}}
 	if config.AICLI.Chat != nil {
@@ -925,6 +933,11 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	// 会话权限模式（composer 权限选择器）：运行中切换同样生效。
 	runtimeRouter.HandleFunc("/sessions/{id}/permission-mode", h.GetSessionPermissionMode).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/permission-mode", h.UpdateSessionPermissionMode).Methods(http.MethodPost)
+	// 会话级 Agent 路由（难度 → provider/model/reasoning_effort，§4.4/§6.5）。
+	// GET 只读投影（与 TUI 状态栏 / frontend 会话详情区块同一投影函数）；
+	// PATCH 写入/清除目标层（session|workspace|config），写后失效 actor（下一 turn 生效）。
+	runtimeRouter.HandleFunc("/sessions/{id}/routing", h.GetSessionRouting).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/routing", h.UpdateSessionRouting).Methods(http.MethodPatch)
 	// 用量分析 + 缓存分析：server 启动（路由注册）即挂载（§3.2），
 	// 二者写/读同一个 usage_analytics.sqlite；避免启动初期到首个请求
 	// 之间的 LLM 事件丢失。
@@ -3097,6 +3110,14 @@ func (h *Handler) UpdateSession(w http.ResponseWriter, r *http.Request) {
 		session.RemoveTag(tag)
 	}
 	for key, value := range req.Context {
+		// §4.5/N4（U-11）：路由覆盖必须走专用端点 PATCH /sessions/{id}/routing。
+		// 裸 SetContext 会绕过 §3.5 校验与 actor 失效，产生「配置已改但路由没变」
+		// 的幽灵态，因此首版直接拒绝并提示专用端点。
+		if key == agentconfig.SessionRoutingOverrideContextKey || key == sessionmeta.LegacyAICLIRoutingOverride {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+				"context key "+key+" must be written via PATCH /api/runtime/sessions/{id}/routing"))
+			return
+		}
 		session.SetContext(key, value)
 	}
 	if req.State != nil {

@@ -48,6 +48,22 @@ func TestCloneAICLIRoutingConfigKeepsMainAgentRouting(t *testing.T) {
 	}
 }
 
+// TestCloneAICLIRoutingConfigKeepsWiredStateWithoutAICLISection 钉住「已接线但
+// 没有 aicli 节」不被塌缩成 nil 快照：config 层首次写入 routing（S1 主用例）后
+// 要能刷新快照，否则文件与生效状态漂移、等重启才生效。
+func TestCloneAICLIRoutingConfigKeepsWiredStateWithoutAICLISection(t *testing.T) {
+	cloned := cloneAICLIRoutingConfig(&agentconfig.Config{})
+	if cloned == nil {
+		t.Fatal("wired config without aicli section must not collapse to nil snapshot")
+	}
+	if cloned.AICLI != nil {
+		t.Fatalf("clone must not fabricate an aicli section, got %#v", cloned.AICLI)
+	}
+	if got := cloneAICLIRoutingConfig(nil); got != nil {
+		t.Fatalf("nil config must stay nil, got %#v", got)
+	}
+}
+
 // TestHandlerMainAgentRoutingConfigReadsSnapshot 钉住 handler → 配置快照这一跳。
 func TestHandlerMainAgentRoutingConfigReadsSnapshot(t *testing.T) {
 	handler := &Handler{}

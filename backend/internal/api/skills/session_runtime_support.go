@@ -3758,6 +3758,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 
 	runtimeConfig := h.resolveRuntimeConfig(UsageScope{})
 	workspacePath := ""
+	sessionRoutingOverrideRaw := ""
 
 	var profileState *profileRuntimeState
 	childAgentType := ""
@@ -3789,6 +3790,9 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 				profileState = resolved
 			}
 		}
+		// §3.4：会话级路由覆盖以 JSON 字符串存在 session.Metadata.Context；
+		// 读取时机 = actor 构建期（§4.3），这是「下一 turn 生效」的唯一读取点。
+		sessionRoutingOverrideRaw = getContextString(agentconfig.SessionRoutingOverrideContextKey)
 		childAgentType = getContextString(toolbroker.AgentSessionContextAgentType)
 		childCompletionRequirement = getContextString(toolbroker.AgentSessionContextCompletionRequirement)
 		requestedProvider = getContextString(sessionmeta.ProviderName)
@@ -3934,7 +3938,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	// §6.1 宿主接线：主 Agent 路由只接主会话。child 标记（agent_type / depth /
 	// read_only）与上面的子会话策略同口径——带任一标记的会话是子 Agent，走
 	// aicli.subagents.routing，主 Agent 的开关不得改变其行为（§6.3 配置隔离）。
-	applyAPISessionMainAgentRouting(loopConfig, h.mainAgentRoutingConfig(),
+	applyAPISessionMainAgentRouting(loopConfig, h.resolveMainAgentRoutingForSession(sessionRoutingOverrideRaw, workspacePath),
 		strings.TrimSpace(childAgentType) == "" && childDepth == 0 && !childReadOnly)
 	applyAPISessionCompletionRequirement(loopConfig, profileState, childAgentType, childCompletionRequirement, workspacePath)
 
@@ -4135,6 +4139,33 @@ func buildSessionLoopConfig(selectedConfig *runtimecfg.RuntimeConfig, requestedR
 		}
 	}
 	return config
+}
+
+// resolveMainAgentRoutingForSession 按 §4.3 的读取顺序解析主 Agent 路由：
+// 会话覆盖（§3.4 键）→ 工作区偏好（按会话绑定 workspace 路径）→ 配置快照，
+// 五层合并与阶梯回退由 agentconfig.ResolveMainAgentRouting 统一完成（§4.1）。
+//
+// 快路径保证：零覆盖时返回的指针与 h.mainAgentRoutingConfig() 完全一致（M8），
+// 既有指针同一断言与 gate 测试无需改动。覆盖层读取失败（非法 JSON / 偏好文件
+// 解析失败）按「忽略该层」处理：解析恒非 nil，不因覆盖损坏而失败（B5）。
+func (h *Handler) resolveMainAgentRoutingForSession(sessionOverrideRaw, workspacePath string) *agentconfig.AICLIMainAgentRoutingConfig {
+	cfg := h.aicliConfigSnapshot()
+	if cfg == nil {
+		return nil
+	}
+	var override *agentconfig.AICLISessionRoutingOverride
+	if decoded, err := agentconfig.DecodeSessionRoutingOverride(sessionOverrideRaw); err == nil {
+		override = decoded
+	}
+	var workspacePrefs *agentconfig.AICLIWorkspaceRoutingPreferences
+	if prefs, err := agentconfig.LoadWorkspaceRoutingPreferencesForPath(workspacePath); err == nil && prefs != nil {
+		workspacePrefs = prefs
+	}
+	res := agentconfig.ResolveMainAgentRouting(cfg, override, workspacePrefs, nil)
+	if res.Effective == nil || !res.Effective.Enabled {
+		return nil
+	}
+	return res.Effective
 }
 
 // applyAPISessionMainAgentRouting 把主 Agent 动态路由接到**主会话**的 loop 配置上
