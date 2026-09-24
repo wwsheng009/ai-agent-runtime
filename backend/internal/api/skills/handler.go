@@ -402,6 +402,11 @@ type UsageScope struct {
 	ProjectID string `json:"project_id"`
 	UserID    string `json:"user_id"`
 	ScopeKey  string `json:"scope_key"`
+	// Profile 是 FR-13 的 profile 维度：请求期解析出的 profile 身份
+	// （声明名 ProfileName 优先，回退 ref）。它只由实际解析 profile 的入口
+	// （AgentChat）填充，不参与配额身份（ScopeKey 仍是唯一配额键）；
+	// 空值不序列化，旧 API 响应逐字节不变。
+	Profile string `json:"profile,omitempty"`
 }
 
 type UsageSnapshot struct {
@@ -1773,6 +1778,11 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	if profileCleanup != nil {
 		defer profileCleanup()
 	}
+	// FR-13：profile 是 usage ledger 的聚合维度之一——此处是 AgentChat 全部
+	// recordUsage 调用点（含 streamLLMChat 的传值路径）共享的 usageScope，
+	// 赋值一次即覆盖整条请求链；execute 等未解析 profile 的入口保持缺省
+	// （ledger 不写 profile 键，不猜）。
+	usageScope.Profile = ledgerProfileName(profileState)
 	if session != nil {
 		leaseScope := requestID
 		if leaseScope == "" {
@@ -7783,6 +7793,11 @@ func (h *Handler) appendUsageLedger(scope UsageScope, entrypoint, skillName stri
 			"resolved_from": quota.ResolvedFrom,
 		},
 	}
+	// FR-13：profile 维度（AgentChat 请求期解析出的身份）；未解析该维度的
+	// 入口（如 execute）不写键，保持"未归属"可观察。
+	if profile := strings.TrimSpace(scope.Profile); profile != "" {
+		record.Metadata["profile"] = profile
+	}
 	if !success {
 		record.StatusCode = http.StatusInternalServerError
 	}
@@ -12398,6 +12413,14 @@ func (h *Handler) GetUsageLedger(w http.ResponseWriter, r *http.Request) {
 		successFilter = &parsed
 	}
 
+	// FR-13：group_by=profile 打开按 profile 维度的聚合并返回 groups；
+	// 未指定时响应与聚合前逐字节一致（records/count/filters 三键不变）。
+	groupBy := strings.TrimSpace(r.URL.Query().Get("group_by"))
+	if groupBy != "" && groupBy != usageLedgerGroupByProfile {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "unsupported group_by value"))
+		return
+	}
+
 	fetchLimit := limit * 5
 	if fetchLimit < limit {
 		fetchLimit = limit
@@ -12412,7 +12435,9 @@ func (h *Handler) GetUsageLedger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	filtered := make([]*entity.TokenUsageHistory, 0, limit)
+	// 过滤后的集合全量保留：records 仍按 limit 截断（旧行为不变），但
+	// group_by 聚合必须基于"过滤后、截断前"的集合，否则分组会随 limit 漂移。
+	matched := make([]*entity.TokenUsageHistory, 0, limit)
 	for _, record := range records {
 		if record == nil {
 			continue
@@ -12431,13 +12456,14 @@ func (h *Handler) GetUsageLedger(w http.ResponseWriter, r *http.Request) {
 		if successFilter != nil && record.Success != *successFilter {
 			continue
 		}
-		filtered = append(filtered, record)
-		if len(filtered) >= limit {
-			break
-		}
+		matched = append(matched, record)
+	}
+	filtered := matched
+	if len(filtered) > limit {
+		filtered = filtered[:limit]
 	}
 
-	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+	response := map[string]interface{}{
 		"records": filtered,
 		"count":   len(filtered),
 		"filters": map[string]interface{}{
@@ -12453,7 +12479,13 @@ func (h *Handler) GetUsageLedger(w http.ResponseWriter, r *http.Request) {
 			"since":      since,
 			"limit":      limit,
 		},
-	})
+	}
+	if groupBy == usageLedgerGroupByProfile {
+		response["group_by"] = groupBy
+		response["groups"] = aggregateUsageLedgerByProfile(matched)
+		response["grouped_total"] = len(matched)
+	}
+	h.writeJSON(w, http.StatusOK, response)
 }
 
 // ResetUsageStats 重置 usage 统计

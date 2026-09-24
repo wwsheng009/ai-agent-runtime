@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -23,15 +24,39 @@ type Service struct {
 	store  *SQLiteStore
 	unsubs []func()
 	now    func() time.Time
+	// profileLookup 是 FR-13 的 profile 维度解析回调：在事件时刻按 session_id
+	// 反查会话身份（声明名 ProfileName 优先，回退绑定 ref）。未注入或解析为空
+	// 时记录不写 profile 键——宁可"未归属"，不猜。
+	profileLookup func(sessionID string) string
+}
+
+// Option 配置 Service 的可选能力（变参形式保持 NewService(store) 旧调用点不变）。
+type Option func(*Service)
+
+// WithProfileLookup 注入 profile 维度解析回调（FR-13）。回调在事件回调线程
+// 同步执行，实现方需自行保证廉价（如一次本地会话元数据读取）。
+func WithProfileLookup(lookup func(sessionID string) string) Option {
+	return func(s *Service) {
+		if s == nil || lookup == nil {
+			return
+		}
+		s.profileLookup = lookup
+	}
 }
 
 // NewService constructs a ledger Service bound to the given SQLiteStore.
 // Returns nil if the store is nil.
-func NewService(store *SQLiteStore) *Service {
+func NewService(store *SQLiteStore, opts ...Option) *Service {
 	if store == nil {
 		return nil
 	}
-	return &Service{store: store, now: time.Now}
+	service := &Service{store: store, now: time.Now}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(service)
+		}
+	}
+	return service
 }
 
 // Attach subscribes the Service to the runtime EventBus so that
@@ -99,10 +124,27 @@ func (s *Service) onRequestFinished(event runtimeevents.Event) {
 		},
 		CreatedAt: entity.Time(s.now().UTC()),
 	}
+	// FR-13：profile 维度按"写时单一权威"落库——事件时刻从会话解析，
+	// 解析不到就不写键（历史行不带 profile 的语义完全不变）。
+	if profile := s.lookupProfile(sessionID); profile != "" {
+		record.Metadata["profile"] = profile
+	}
 	if err := s.store.Create(record); err != nil {
 		// Ledger writes are best-effort: never block the event bus.
 		log.Printf("usageledger: failed to persist llm.request.finished record (request_id=%s): %v", llmRequestID, err)
 	}
+}
+
+// lookupProfile 调用注入的 profile 解析回调；未注入 / 空答案一律返回 ""。
+func (s *Service) lookupProfile(sessionID string) string {
+	if s == nil || s.profileLookup == nil {
+		return ""
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	return strings.TrimSpace(s.profileLookup(sessionID))
 }
 
 // statusCodeFor maps a success flag to an HTTP-style status code, mirroring

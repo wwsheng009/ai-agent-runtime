@@ -8,6 +8,7 @@ import (
 
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/wwsheng009/ai-agent-runtime/internal/usageanalytics"
 	"github.com/wwsheng009/ai-agent-runtime/internal/usageledger"
@@ -163,7 +164,9 @@ func buildLocalCacheService(host *localChatRuntimeHost) *cacheanalytics.Service 
 			Driver: host.ledgerDriver,
 			DSN:    host.ledgerDSN,
 		}); lerr == nil {
-			ledgerSvc := usageledger.NewService(ledgerStore)
+			// FR-13：profile 维度在事件时刻从会话元数据解析（声明名优先，
+			// 回退绑定 ref），与 TUI/会话内持久化的身份同源。
+			ledgerSvc := usageledger.NewService(ledgerStore, usageledger.WithProfileLookup(localSessionProfileLookup(host.SessionStore)))
 			if ledgerSvc != nil {
 				ledgerSvc.Attach(host.EventBus)
 				host.ledgerSvc = ledgerSvc
@@ -224,6 +227,28 @@ func (l *localSessionMetaLookup) SessionMeta(sessionID string) (usageanalytics.S
 		meta.Status = string(session.State)
 	}
 	return meta, true
+}
+
+// localSessionProfileLookup 把 host.SessionStore 适配为 usageledger 的 profile
+// 维度解析回调（FR-13）：读会话元数据中的声明名（sessionmeta.ProfileName），
+// 缺失时回退绑定 ref（sessionmeta.ProfileRef）。与 localSessionMetaLookup
+// 同一模式——事件回调里的 best-effort 读，任何失败都返回 ""（ledger 不写键）。
+func localSessionProfileLookup(store runtimechat.SessionStorage) func(string) string {
+	return func(sessionID string) string {
+		sessionID = strings.TrimSpace(sessionID)
+		if store == nil || sessionID == "" {
+			return ""
+		}
+		session, err := store.Load(context.Background(), sessionID)
+		if err != nil || session == nil {
+			return ""
+		}
+		contextValues := session.Metadata.Context
+		if name := strings.TrimSpace(sessionmeta.String(contextValues, sessionmeta.ProfileName)); name != "" {
+			return name
+		}
+		return strings.TrimSpace(sessionmeta.String(contextValues, sessionmeta.ProfileRef))
+	}
 }
 
 func localContextString(values map[string]interface{}, keys ...string) string {
