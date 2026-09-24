@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -19,6 +20,7 @@ const defaultDialTimeout = 30 * time.Second
 
 // Client 封装一个已建立的 SSH 连接。
 type Client struct {
+	mu        sync.Mutex
 	sshClient *ssh.Client
 	opts      *Options
 	stopCh    chan struct{} // 非 nil 时用于停止 keepAlive goroutine
@@ -132,22 +134,42 @@ func NewClient(opts *Options, stderr io.Writer) (*Client, error) {
 
 // SSHSession 返回底层 ssh.Client（供子命令使用）。
 func (c *Client) SSHSession() *ssh.Client {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.sshClient
 }
 
-// Close 关闭 SSH 连接。
+// Close 关闭 SSH 连接（并发安全、幂等）。
 func (c *Client) Close() error {
 	// 先停保活 goroutine，避免其持有已关闭的连接或重复 Close。
-	if c.stopCh != nil {
-		close(c.stopCh)
-		c.stopCh = nil
+	c.mu.Lock()
+	stopCh := c.stopCh
+	c.stopCh = nil
+	client := c.sshClient
+	c.sshClient = nil // 幂等：重复 Close 返回 nil
+	c.mu.Unlock()
+
+	if stopCh != nil {
+		close(stopCh)
 	}
-	if c.sshClient != nil {
-		err := c.sshClient.Close()
-		c.sshClient = nil // 幂等：重复 Close 返回 nil
-		return err
+	if client != nil {
+		return client.Close()
 	}
 	return nil
+}
+
+// Wait 阻塞直到 SSH 传输层结束（对端断开、网络故障或本地 Close），并返回导致
+// 结束的错误。隧道/转发进程用它感知链路死亡，从而重连或退出，避免进程虽然
+// 存活、监听端口仍在，但转发已经失效的「僵尸隧道」。
+// 连接尚未建立或已关闭时立即返回 nil。
+func (c *Client) Wait() error {
+	c.mu.Lock()
+	client := c.sshClient
+	c.mu.Unlock()
+	if client == nil {
+		return nil
+	}
+	return client.Wait()
 }
 
 // Options 返回连接使用的选项。

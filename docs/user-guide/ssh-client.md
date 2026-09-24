@@ -61,6 +61,7 @@ Usage: ssh-client [options] [user@]host [command]
 | `--verbose` | `-v` | 调试输出 |
 | `--config-file <path>` | `-F` | ssh_config 路径（默认 `~/.ssh/config`） |
 | `--no-session` | `-N` | 不执行远程命令（仅转发） |
+| `--no-reconnect` | — | `-N` 模式下链路中断即退出（255），不自动重连 |
 | `--local-forward <spec>` | `-L` | 本地转发 `[bind:]port:host:hostport`（bind 默认 localhost） |
 | `--remote-forward <spec>` | `-R` | 远程转发 `[bind:]port:host:hostport` |
 | `--no-tty` | `-T` | 禁止分配伪终端 |
@@ -114,12 +115,25 @@ ssh-client -N -R 2222:localhost:22 user@host
 
 `-N`（`--no-session`）表示不建立交互会话，仅保持转发。
 
+**隧道自愈（僵尸隧道修复）**：`-N` 模式下客户端持续监督 SSH 传输层。链路中断
+（网络切换、NAT/防火墙回收空闲连接、服务器重启）后：
+
+- 立即释放本地监听端口——新连接快速失败（connection refused），而不是被接受后静默断开；
+- 按指数退避（1s→30s）自动重连，并重建全部 `-L`/`-R` 转发；
+- 未显式配置时自动启用保活 `ServerAliveInterval=15`、`ServerAliveCountMax=3`（约 45s 判定死链）；
+- 认证失败 / 主机密钥不匹配等「重试也不会好转」的错误直接以退出码 255 结束，不做无效重试。
+
+若希望由外部进程管理器（systemd、Windows 服务、批处理 `:reconnect` 循环等）负责重启，
+使用 `--no-reconnect`：链路中断时进程立即以退出码 255 结束。
+
 ---
 
 ## 7. 超时与防卡死
 
 - **连接建立**受 `ConnectTimeout` 约束（默认 30s；`--timeout N` 或 `-o ConnectTimeout=N` 修改）
-- **死链检测**：`-o ServerAliveInterval=15 -o ServerAliveCountMax=3`
+- **死链检测**：`-o ServerAliveInterval=15 -o ServerAliveCountMax=3`（`-N` 隧道模式默认启用）
+- **链路自愈**：`-N` 模式下自动重连并重建转发；`--no-reconnect` 改为立即退出（255）由外部重启
+- **转发失败策略**：`-o ExitOnForwardFailure=yes|no`（默认 yes：任一转发建立失败即退出）
 - **ProxyCommand** 支持（通过配置文件）；`ProxyJump` 仅解析未实现
 
 ---
