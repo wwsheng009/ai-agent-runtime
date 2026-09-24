@@ -162,8 +162,9 @@ export async function setDefaultRuntimeProfile(ref: string, options?: { register
 }
 
 /**
- * 应用到会话（Batch 12 的 set_profile 与这里共用同一端点）。
- * Batch 8 后端尚未落地时返回 501 not_implemented，调用方需按码降级为提示。
+ * 应用到会话：`sessionId` 必填——服务端只影响显式给出的那一个会话（A12），
+ * 不推断「当前会话」。设置页没有会话上下文，因此不调用本端点；会话内切换走
+ * composer `/profile`（Batch 12 的 set_profile 命令，同一执行核心）。
  */
 export async function applyRuntimeProfile(ref: string, sessionId?: string) {
   const payload = await fetchRuntimeJson<RuntimeProfileApplyResponse>(

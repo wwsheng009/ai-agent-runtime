@@ -2,7 +2,7 @@
 //
 // 纪律：
 //   * 所有「能不能点」的判断都在这里按 entry 自身字段（writable/valid）收敛，
-//     宿主只负责 busy / applyUnavailable / 是否命中默认 profile 这三件外部状态；
+//     宿主只负责 busy / applyDisabled / 是否命中默认 profile 这三件外部状态；
 //   * 写操作（编辑/设默认/复制/改名/迁移/删除）仅对 writable 条目开放，
 //     只读条目（builtin/config）按钮禁用而不是隐藏，用户能看到「为什么不能改」。
 
@@ -29,13 +29,17 @@ export type ProfileListRowProps = {
   entry: RuntimeProfileListEntry;
   /** 任一生命周期操作进行中：整行按钮禁用，避免并发写。 */
   busy: boolean;
-  /** apply 端点返回 501 后置位（Batch 12 未落地）。 */
-  applyUnavailable: boolean;
+  /**
+   * 本页是否无法直接切换（设置页没有会话上下文，而 apply 必须显式给 session_id）：
+   * 置位时按钮禁用，label 换成「会话内用 /profile」的指引，而不是让点击报错。
+   */
+  applyDisabled: boolean;
   /** 该行对应的编辑器已展开。 */
   selected: boolean;
   /** 该行就是当前默认 profile（按 name 或 ref 命中）。 */
   isDefaultTarget: boolean;
-  onApply: (entry: RuntimeProfileListEntry) => void;
+  /** 仅在宿主有会话上下文（能给出 session_id）时才提供。 */
+  onApply?: (entry: RuntimeProfileListEntry) => void;
   onDelete: (entry: RuntimeProfileListEntry) => void;
   onDuplicate: (entry: RuntimeProfileListEntry) => void;
   onMove: (entry: RuntimeProfileListEntry) => void;
@@ -46,7 +50,7 @@ export type ProfileListRowProps = {
 };
 
 export function ProfileListRow({
-  applyUnavailable,
+  applyDisabled,
   busy,
   entry,
   isDefaultTarget,
@@ -105,12 +109,12 @@ export function ProfileListRow({
           </SettingsIconActionButton>
           <SettingsIconActionButton
             data-testid={`profiles-action-apply-${entry.ref}`}
-            disabled={busy || applyUnavailable}
+            disabled={busy || applyDisabled || !onApply}
             label={
-              applyUnavailable ? t("profiles.list.applyDisabled") : t("profiles.list.apply")
+              applyDisabled || !onApply ? t("profiles.list.applyDisabled") : t("profiles.list.apply")
             }
             onClick={() => {
-              onApply(entry);
+              onApply?.(entry);
             }}
           >
             <ZapIcon size={13} />

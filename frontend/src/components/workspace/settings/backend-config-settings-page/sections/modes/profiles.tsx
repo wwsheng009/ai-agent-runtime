@@ -13,7 +13,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
-  applyRuntimeProfile,
   createRuntimeProfile,
   deleteRuntimeProfile,
   duplicateRuntimeProfile,
@@ -34,7 +33,7 @@ import type {
 import { SettingsEmptyState } from "../../../settings-empty-state";
 import { SettingsNoticeCard } from "../../../settings-notice-card";
 import { ProfileEditor } from "../../profiles/profile-editor";
-import { formatProfileError, isProfileApplyNotImplemented } from "../../profiles/profile-i18n";
+import { formatProfileError } from "../../profiles/profile-i18n";
 import { ProfileListHeader } from "./profile-list-header";
 import { ProfileListRow } from "./profile-list-row";
 import {
@@ -59,8 +58,6 @@ export function ProfilesModeSection() {
   const [filter, setFilter] = useState("");
   const [view, setView] = useState<RuntimeProfileView | null>(null);
   const [isViewLoading, setIsViewLoading] = useState(false);
-  /** apply 端点返回 501 后置位：按钮降级为「后端未落地」并禁用。 */
-  const [applyUnavailable, setApplyUnavailable] = useState(false);
   const [dialog, setDialog] = useState<ProfilesDialogState | null>(null);
 
   const refresh = useCallback(async () => {
@@ -105,27 +102,10 @@ export function ProfilesModeSection() {
     );
   }, []);
 
-  const runApply = useCallback(
-    async (entry: RuntimeProfileListEntry) => {
-      setPending(`apply:${entry.ref}`);
-      setError(null);
-      setStatusMessage(null);
-      try {
-        await applyRuntimeProfile(entry.ref);
-        setStatusMessage(t("profiles.list.applySucceeded", { name: entry.name }));
-      } catch (applyError) {
-        if (isProfileApplyNotImplemented(applyError)) {
-          setApplyUnavailable(true);
-          setStatusMessage(t("profiles.list.applyNotImplemented"));
-        } else {
-          setError(formatProfileError(applyError, t("profiles.list.applyFailed")));
-        }
-      } finally {
-        setPending(null);
-      }
-    },
-    [t],
-  );
+  // 本页（/runtime-config）没有会话上下文，而 `/apply` 必须显式给出 session_id
+  // （服务端不推断「当前会话」，A12）——所以这里不提供直接切换：行上的 apply 按钮
+  // 保持可见但禁用，并把用户指向会话内的 composer `/profile`（Batch 12，同一执行
+  // 核心，下一轮生效）。「设为默认」仍在页内可用（只影响新会话，D26）。
 
   const runSetDefault = useCallback(
     async (entry: RuntimeProfileListEntry) => {
@@ -373,14 +353,11 @@ export function ProfilesModeSection() {
           {filtered.map((entry) => (
             <ProfileListRow
               key={entry.ref}
-              applyUnavailable={applyUnavailable}
+              applyDisabled
               busy={busy}
               entry={entry}
               isDefaultTarget={entry.name === defaultProfile || entry.ref === defaultProfile}
               selected={view?.ref === entry.ref}
-              onApply={(item) => {
-                void runApply(item);
-              }}
               onDelete={(item) => {
                 setDialog({ kind: "delete", entry: item, referenceCount: 0 });
               }}

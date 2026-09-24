@@ -9,7 +9,7 @@
 //   * rename 响应是 new_ref/root（不是 ref/name/path）：列表必须换成新句柄（回归）；
 //   * move 只换层级与根目录：层级徽标要跟着响应更新（回归）；
 //   * delete 被引用 409：回填阻断数并禁用确认，勾选强制后才允许，且第二次带 ?force=true；
-//   * apply 501 not_implemented：降级为提示并把按钮置为禁用，不报红错。
+//   * apply 在本页只做引导：按钮禁用且不发请求（真实切换在会话内用 /profile）。
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -47,8 +47,6 @@ let defaultProfile = "";
 let calls: RecordedCall[] = [];
 /** 下一次 DELETE 返回 409 引用阻断（模拟 profiles_lifecycle_handlers 的语义）。 */
 let deleteBlocked = false;
-/** apply 端点返回 501 not_implemented（Batch 12 尚未落地）。 */
-let applyNotImplemented = false;
 
 /**
  * 与组件同源取词：固定 runtimeConfig 命名空间；键来自测试用的动态拼装，
@@ -88,7 +86,6 @@ function installFetchMock(seed: ListEntry[]) {
   defaultProfile = entries.find((item) => item.is_default)?.name ?? "";
   calls = [];
   deleteBlocked = false;
-  applyNotImplemented = false;
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -191,13 +188,6 @@ function installFetchMock(seed: ListEntry[]) {
         error: "",
         references: null,
       });
-    }
-
-    if (method === "POST" && action === "apply") {
-      if (applyNotImplemented) {
-        return jsonResponse({ error: "apply is not implemented", code: "not_implemented" }, 501);
-      }
-      return jsonResponse({ applied: true });
     }
 
     if (method === "POST" && action === "default") {
@@ -455,16 +445,17 @@ describe("ProfilesModeSection", () => {
     expect(rowFor(REF_BUILTIN)).not.toBeNull();
   });
 
-  it("apply 501 not_implemented：降级为提示并禁用按钮，不报红错", async () => {
+  it("apply 在本页只做引导：按钮禁用、不发请求（切换在会话内用 /profile）", async () => {
     installFetchMock([entry(REF_SPACED)]);
-    applyNotImplemented = true;
 
     await renderSection();
-    await click(actionButton("apply", REF_SPACED));
 
-    const status = document.body.querySelector('[data-testid="profiles-status"]');
-    expect(status?.textContent?.trim()).toBe(t("profiles.list.applyNotImplemented"));
-    expect(document.body.querySelector('[data-testid="profiles-error"]')).toBeNull();
-    expect(actionButton("apply", REF_SPACED)?.disabled).toBe(true);
+    // 设置页没有会话上下文，apply 必须显式给 session_id（服务端不推断「当前会话」）：
+    // 因此按钮可见但禁用，label 直接指向会话内的 composer `/profile`。
+    const applyButton = actionButton("apply", REF_SPACED);
+    expect(applyButton?.disabled).toBe(true);
+    expect(applyButton?.getAttribute("aria-label")).toBe(t("profiles.list.applyDisabled"));
+    expect(applyButton?.getAttribute("aria-label")).toContain("/profile");
+    expect(calls.some((call) => call.url.includes("/apply"))).toBe(false);
   });
 });

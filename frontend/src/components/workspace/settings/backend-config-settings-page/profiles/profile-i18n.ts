@@ -93,14 +93,6 @@ export function profileOriginLabel(t: Translate, origin: string) {
   }
 }
 
-/**
- * apply 端点在 Batch 8 后端尚未落地时返回 501 not_implemented；
- * 调用方据此把「失败」降级成「当前构建不支持」的提示，而不是报一条红错。
- */
-export function isProfileApplyNotImplemented(error: unknown) {
-  return isRuntimeApiErrorCode(error, "not_implemented");
-}
-
 /** 保存冲突：后端用 mtime/etag 判冲突，前端只按码提示重新加载。 */
 export function isProfileWriteConflict(error: unknown) {
   return (
