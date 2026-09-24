@@ -8,224 +8,34 @@
 // 空库返回空数组 → 渲染「暂无数据」；403/网络错误 → role="alert" 降级。
 
 import { getAnalyticsRoutingStats, listAnalyticsRoutingEvents } from "@/api/runtime/analytics";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import type {
-  AnalyticsRouteBucket,
   AnalyticsRouteEvent,
   AnalyticsRouteStatsResponse,
   AnalyticsRouteTotals,
 } from "@/types/runtime";
-import type { TFunction } from "i18next";
 import { RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { formatNumber, formatTimestamp, shortID } from "./format";
+import { formatNumber } from "./format";
 import { Metric } from "./primitives";
+import { DistributionList } from "./routing-distribution-list";
+import {
+  bucketsToEntries,
+  difficultySourceLabel,
+  kindLabel,
+  rawOrNotRecorded,
+  reasonLabel,
+  scopeLabel,
+  sourceLabel,
+  taskTypeLabel,
+  warningLabel,
+} from "./routing-labels";
+import { RouteRow } from "./routing-route-row";
 
 const PAGE_SIZE = 50;
-
-// 归一表：后端取值 → i18n key（本文件导出 React 组件，helper 不导出）。
-const scopeKeys = {
-  main_agent: "observability.routing.scopeMain",
-  subagent: "observability.routing.scopeSubagent",
-} as const;
-
-const kindKeys = {
-  applied: "observability.routing.kindApplied",
-  cleared: "observability.routing.kindCleared",
-  warning: "observability.routing.kindWarning",
-} as const;
-
-const sourceKeys = {
-  explicit: "observability.routing.difficultySources.explicit",
-  explicit_promoted: "observability.routing.difficultySources.explicitPromoted",
-  heuristic: "observability.routing.difficultySources.heuristic",
-  role: "observability.routing.difficultySources.role",
-  // P4：profile source 新值 task_type_override；历史值 role_override 继续映射。
-  role_override: "observability.routing.difficultySources.role",
-  task_type_override: "observability.routing.difficultySources.taskTypeOverride",
-  read_only: "observability.routing.difficultySources.readOnly",
-  default: "observability.routing.difficultySources.default",
-} as const;
-
-// 难度来源（difficulty_source）归一表：后端 resolver.go 产出的取值 + P4 新增的
-// task_type_floor / task_type_downgrade，与 route_source 的 sourceKeys 是两套
-// 词表，勿混用（后者含 parent_inherit 等）。
-const difficultySourceKeys = {
-  explicit: "observability.routing.difficultySources.explicit",
-  explicit_promoted: "observability.routing.difficultySources.explicitPromoted",
-  inferred: "observability.routing.difficultySources.inferred",
-  default: "observability.routing.difficultySources.default",
-  task_type_floor: "observability.routing.difficultySources.taskTypeFloor",
-  task_type_downgrade: "observability.routing.difficultySources.taskTypeDowngrade",
-} as const;
-
-// 任务类型（12 类封闭枚举）归一表：与配置编辑器 task_types 键集一致。
-const taskTypeKeys = {
-  config: "observability.routing.taskTypes.config",
-  explore: "observability.routing.taskTypes.explore",
-  generate: "observability.routing.taskTypes.generate",
-  implement: "observability.routing.taskTypes.implement",
-  integration: "observability.routing.taskTypes.integration",
-  migrate: "observability.routing.taskTypes.migrate",
-  modify: "observability.routing.taskTypes.modify",
-  refactor: "observability.routing.taskTypes.refactor",
-  security: "observability.routing.taskTypes.security",
-  test: "observability.routing.taskTypes.test",
-  understand: "observability.routing.taskTypes.understand",
-  verify: "observability.routing.taskTypes.verify",
-} as const;
-
-// 护栏告警 token 归一表：精确 token + 「prefix:value」前缀 token（用 {{value}} 插值）。
-// 未收录 token 原样回显，后端扩词表时页面不空白。
-const warningKeys = {
-  difficulty_missing_defaulted: "observability.routing.warningLabels.difficulty_missing_defaulted",
-  difficulty_invalid_defaulted: "observability.routing.warningLabels.difficulty_invalid_defaulted",
-  difficulty_promoted_by_heuristic: "observability.routing.warningLabels.difficulty_promoted_by_heuristic",
-  difficulty_promoted_over_explicit: "observability.routing.warningLabels.difficulty_promoted_over_explicit",
-  difficulty_promotion_warn_only: "observability.routing.warningLabels.difficulty_promotion_warn_only",
-  max_expert_concurrency_zero_means_unlimited:
-    "observability.routing.warningLabels.max_expert_concurrency_zero_means_unlimited",
-} as const;
-
-const warningPrefixKeys = {
-  difficulty_promoted_by_keyword: "observability.routing.warningLabels.difficulty_promoted_by_keyword",
-  difficulty_promoted_by_role: "observability.routing.warningLabels.difficulty_promoted_by_role",
-  difficulty_floor_by_task_type: "observability.routing.warningLabels.difficulty_floor_by_task_type",
-  difficulty_downgraded_by_task_type: "observability.routing.warningLabels.difficulty_downgraded_by_task_type",
-  task_type_unknown: "observability.routing.warningLabels.task_type_unknown",
-} as const;
-
-const reasonKeys = {
-  resolved: "observability.routing.reasons.resolved",
-} as const;
-
-const routeFlagKeys = {
-  routeChanged: "observability.routing.flags.routeChanged",
-  routeUnchanged: "observability.routing.flags.routeUnchanged",
-  fallbackUsed: "observability.routing.flags.fallbackUsed",
-  fallbackUnused: "observability.routing.flags.fallbackUnused",
-} as const;
-
-type ScopeKey = (typeof scopeKeys)[keyof typeof scopeKeys];
-type KindKey = (typeof kindKeys)[keyof typeof kindKeys];
-type SourceKey = (typeof sourceKeys)[keyof typeof sourceKeys];
-type DifficultySourceKey = (typeof difficultySourceKeys)[keyof typeof difficultySourceKeys];
-type TaskTypeKey = (typeof taskTypeKeys)[keyof typeof taskTypeKeys];
-type WarningKey = (typeof warningKeys)[keyof typeof warningKeys];
-type WarningPrefixKey = (typeof warningPrefixKeys)[keyof typeof warningPrefixKeys];
-type ReasonKey = (typeof reasonKeys)[keyof typeof reasonKeys];
-type RouteFlagKey = (typeof routeFlagKeys)[keyof typeof routeFlagKeys];
-
-function scopeLabel(t: TFunction<"usageAnalytics">, raw?: string): string {
-  const normalized = (raw ?? "").trim().toLowerCase();
-  const key = scopeKeys[normalized as keyof typeof scopeKeys] as ScopeKey | undefined;
-  if (key) return t(key);
-  return (raw ?? "").trim() || t("observability.routing.scopeUnknown");
-}
-
-function kindLabel(t: TFunction<"usageAnalytics">, raw?: string): string {
-  const normalized = (raw ?? "").trim().toLowerCase();
-  const key = kindKeys[normalized as keyof typeof kindKeys] as KindKey | undefined;
-  if (key) return t(key);
-  return (raw ?? "").trim() || t("observability.routing.kindUnknown");
-}
-
-function sourceLabel(t: TFunction<"usageAnalytics">, raw?: string): string {
-  const normalized = (raw ?? "").trim().toLowerCase();
-  const key = sourceKeys[normalized as keyof typeof sourceKeys] as SourceKey | undefined;
-  if (key) return t(key);
-  return (raw ?? "").trim() || t("observability.routing.difficultySources.unknown");
-}
-
-// 难度来源标签（词表见 difficultySourceKeys）：未记录的取值回显原值。
-function difficultySourceLabel(t: TFunction<"usageAnalytics">, raw?: string): string {
-  const normalized = (raw ?? "").trim().toLowerCase();
-  const key = difficultySourceKeys[normalized as keyof typeof difficultySourceKeys] as DifficultySourceKey | undefined;
-  if (key) return t(key);
-  return (raw ?? "").trim() || t("observability.routing.difficultySources.unknown");
-}
-
-// 任务类型标签（词表见 taskTypeKeys）：12 类封闭枚举走 i18n，未知取值原样回显。
-function taskTypeLabel(t: TFunction<"usageAnalytics">, raw?: string): string {
-  const normalized = (raw ?? "").trim().toLowerCase();
-  const key = taskTypeKeys[normalized as keyof typeof taskTypeKeys] as TaskTypeKey | undefined;
-  if (key) return t(key);
-  return (raw ?? "").trim() || t("observability.routing.flags.notRecorded");
-}
-
-// 护栏告警 token → 标签：精确 token 优先；否则按 ":" 拆前缀做 {{value}} 插值；
-// 两者都不命中时回显原始 token（保留排障可读性）。
-function warningLabel(t: TFunction<"usageAnalytics">, raw?: string): string {
-  const token = (raw ?? "").trim();
-  if (!token) return t("observability.routing.flags.notRecorded");
-  const exact = warningKeys[token as keyof typeof warningKeys] as WarningKey | undefined;
-  if (exact) return t(exact);
-  const separator = token.indexOf(":");
-  if (separator > 0) {
-    const prefix = token.slice(0, separator).trim().toLowerCase();
-    const key = warningPrefixKeys[prefix as keyof typeof warningPrefixKeys] as WarningPrefixKey | undefined;
-    if (key) return t(key, { value: token.slice(separator + 1).trim() });
-  }
-  return token;
-}
-
-function reasonLabel(t: TFunction<"usageAnalytics">, raw?: string): string {
-  const normalized = (raw ?? "").trim().toLowerCase();
-  const key = reasonKeys[normalized as keyof typeof reasonKeys] as ReasonKey | undefined;
-  if (key) return t(key);
-  return (raw ?? "").trim() || t("observability.routing.kindUnknown");
-}
-
-// 维度桶里没有归一表可用的取值（provider / model / difficulty / role / 告警词）直接回显；
-// 空值统一显示「未记录」，避免图上出现无名桶。
-function rawOrNotRecorded(t: TFunction<"usageAnalytics">, raw?: string): string {
-  return (raw ?? "").trim() || t("observability.routing.flags.notRecorded");
-}
-
-function kindTone(kind: string): string {
-  switch ((kind ?? "").trim().toLowerCase()) {
-    case "applied":
-      return "border-analytics-success-border bg-analytics-success-soft text-analytics-success";
-    case "warning":
-      return "border-analytics-warning-border bg-analytics-warning-soft text-analytics-warning";
-    default:
-      return "";
-  }
-}
-
-// 三态布尔 → 文本：undefined 表示事件未携带该字段，显示「未记录」。
-function triStateLabel(
-  t: TFunction<"usageAnalytics">,
-  value: boolean | undefined,
-  trueKey: RouteFlagKey,
-  falseKey: RouteFlagKey,
-): string {
-  if (value === true) return t(trueKey);
-  if (value === false) return t(falseKey);
-  return t("observability.routing.flags.notRecorded");
-}
-
-function bucketsToEntries(
-  t: TFunction<"usageAnalytics">,
-  buckets: AnalyticsRouteBucket[] | undefined,
-  label: (t: TFunction<"usageAnalytics">, raw?: string) => string,
-) {
-  return (buckets ?? []).map((bucket) => ({
-    key: bucket.key,
-    count: bucket.count,
-    label: label(t, bucket.key),
-    detail: bucket.route_changed > 0 || bucket.fallback_used > 0
-      ? t("observability.routing.metricDetail.appliedCleared", {
-          applied: String(bucket.route_changed),
-          cleared: String(bucket.fallback_used),
-        })
-      : undefined,
-  }));
-}
 
 export function RoutingObservabilityPanel({
   sessionId,
@@ -470,137 +280,5 @@ export function RoutingObservabilityPanel({
         </div>
       ) : null}
     </section>
-  );
-}
-
-function RouteRow({ event }: { event: AnalyticsRouteEvent }) {
-  const { t } = useTranslation("usageAnalytics");
-  const routeText = [event.provider, event.model].filter(Boolean).join(" / ") || t("observability.routing.flags.notRecorded");
-  const warnings = event.warnings ?? [];
-  return (
-    <tr className="border-b border-border/70 last:border-b-0 hover:bg-surface-soft-hover">
-      <td className="px-3 py-2.5 text-xs text-muted-foreground">{formatTimestamp(event.recorded_at)}</td>
-      <td className="px-3 py-2.5">{scopeLabel(t, event.scope)}</td>
-      <td className="px-3 py-2.5">
-        <Badge className={kindTone(event.kind)}>{kindLabel(t, event.kind)}</Badge>
-      </td>
-      <td className="px-3 py-2.5">
-        <div className="font-mono text-xs" title={event.agent_id}>
-          {event.agent_id ? shortID(event.agent_id) : "-"}
-        </div>
-        <div className="mt-0.5 text-xs text-muted-foreground">
-          {event.role || sourceLabel(t, event.source)}
-        </div>
-        {event.child_session_id ? (
-          <div className="mt-0.5 font-mono text-xs text-muted-foreground" title={event.child_session_id}>
-            {shortID(event.child_session_id)}
-          </div>
-        ) : null}
-      </td>
-      <td className="px-3 py-2.5">
-        <div>{event.task_type ? taskTypeLabel(t, event.task_type) : "-"}</div>
-        {event.task_subject ? (
-          <div
-            className="mt-0.5 max-w-[16rem] truncate text-xs text-muted-foreground"
-            title={event.task_subject}
-          >
-            {event.task_subject}
-          </div>
-        ) : null}
-      </td>
-      <td className="px-3 py-2.5">
-        <div className="max-w-[16rem] truncate text-xs" title={event.goal || undefined}>
-          {event.goal || "-"}
-        </div>
-      </td>
-      <td className="px-3 py-2.5">
-        <div>{reasonLabel(t, event.reason)}</div>
-        <div className="mt-0.5 text-xs text-muted-foreground">{sourceLabel(t, event.source)}</div>
-      </td>
-      <td className="px-3 py-2.5">
-        <div>{(event.difficulty ?? "").trim() || t("observability.routing.flags.notRecorded")}</div>
-        {event.difficulty_source ? (
-          <div className="mt-0.5 text-xs text-muted-foreground">{difficultySourceLabel(t, event.difficulty_source)}</div>
-        ) : null}
-        {event.reasoning_effort ? (
-          <div className="mt-0.5 text-xs text-muted-foreground">{`effort=${event.reasoning_effort}`}</div>
-        ) : null}
-      </td>
-      <td className="px-3 py-2.5">
-        <div className="text-xs">{routeText}</div>
-        {typeof event.candidate_count === "number" && event.candidate_count > 0 ? (
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            {t("observability.routing.metricDetail.candidateTotal", { count: event.candidate_count })}
-          </div>
-        ) : null}
-      </td>
-      <td className="px-3 py-2.5 text-xs">
-        <div>{triStateLabel(t, event.route_changed, routeFlagKeys.routeChanged, routeFlagKeys.routeUnchanged)}</div>
-        <div className="mt-0.5 text-muted-foreground">
-          {triStateLabel(t, event.fallback_used, routeFlagKeys.fallbackUsed, routeFlagKeys.fallbackUnused)}
-          {event.fallback_reason ? ` · ${event.fallback_reason}` : ""}
-        </div>
-      </td>
-      <td className="px-3 py-2.5 text-xs">
-        {warnings.length > 0 ? (
-          <div title={warnings.join("\n")} className="text-analytics-warning">
-            {t("observability.routing.warningCount", { count: warnings.length })}
-            <div className="mt-0.5 font-mono text-[0.7rem] break-all text-muted-foreground">
-              {warningLabel(t, warnings[0])}
-            </div>
-          </div>
-        ) : (
-          "-"
-        )}
-      </td>
-      <td className="px-3 py-2.5 tabular-nums text-xs">
-        {event.max_attempts && event.max_attempts > 1
-          ? t("observability.routing.attemptBadge", {
-              attempt: String(event.attempt ?? 0),
-              max: String(event.max_attempts),
-            })
-          : formatNumber(event.attempt ?? 0)}
-      </td>
-    </tr>
-  );
-}
-
-function DistributionList({
-  title,
-  empty,
-  entries,
-}: {
-  title: string;
-  empty: string;
-  entries: { key: string; count: number; label: string; detail?: string }[];
-}) {
-  const max = entries.reduce((current, entry) => Math.max(current, entry.count), 0);
-  return (
-    <div className="rounded-card border border-border bg-surface-softer p-3">
-      <div className="mb-2 text-xs font-medium text-muted-foreground">{title}</div>
-      {entries.length === 0 ? (
-        <div className="py-2 text-xs text-muted-foreground">{empty}</div>
-      ) : (
-        <ul className="space-y-1.5">
-          {entries.map((entry) => (
-            <li key={entry.key} className="min-w-0">
-              <div className="flex items-baseline justify-between gap-2 text-xs">
-                <span className="min-w-0 truncate" title={entry.label}>{entry.label}</span>
-                <span className="shrink-0 tabular-nums text-muted-foreground">{formatNumber(entry.count)}</span>
-              </div>
-              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-surface-soft">
-                <div
-                  className="h-full rounded-full bg-accent-primary"
-                  style={{ width: max > 0 ? `${Math.max(4, Math.round((entry.count / max) * 100))}%` : "0%" }}
-                />
-              </div>
-              {entry.detail ? (
-                <div className="mt-0.5 text-[0.7rem] text-muted-foreground">{entry.detail}</div>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
   );
 }

@@ -18,10 +18,29 @@ import {
 
 import { TRAJECTORY_ITEM_ID_KEY, type TrajectoryEventKind } from "./types";
 import { subagentItemId } from "./entity-identity";
+import {
+  chatSseEventSeq,
+  readFiniteNumber,
+  readTrimmedString,
+} from "./recovery-event-readers";
+import { runtimeToolEventToTrajectoryPush } from "./recovery-runtime-tools";
+import type {
+  TrajectoryEventAction,
+  TrajectoryRecoveryPush,
+} from "./recovery-types";
 
 // 帧名前缀来自事件契约生成物（与后端 api/skills 的常量同源）；此处再导出以保持
 // 既有 import 面（export.ts 等模块从本模块取用）。
 export { CHAT_SSE_EVENT_PREFIX };
+
+// P0-2 拆分（recovery.ts 超 500 非空行门禁）：读取器 / 类型 / ACP 工具映射下沉到
+// 独立模块；以下再导出保持既有 import 面（11 处消费者无需改动）。
+export { chatSseEventSeq } from "./recovery-event-readers";
+export { runtimeToolEventToTrajectoryPush } from "./recovery-runtime-tools";
+export type {
+  TrajectoryEventAction,
+  TrajectoryRecoveryPush,
+} from "./recovery-types";
 
 export const TRAJECTORY_RECOVERY_PAGE_SIZE = 500;
 
@@ -61,21 +80,6 @@ export const TOOL_PROGRESS_EVENT_TYPE = "tool.progress";
  */
 export const SUBAGENT_PROGRESS_EVENT_TYPE = "subagent.progress";
 
-function readTrimmedString(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed === "" ? undefined : trimmed;
-}
-
-function readFiniteNumber(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  return undefined;
-}
-
 /**
  * Assistant streaming events are emitted directly by the ReAct runtime rather
  * than through the HTTP chat SSE envelope.  They still belong to the same
@@ -99,11 +103,6 @@ export const ASSISTANT_RUNTIME_EVENT_TYPES: ReadonlySet<string> = new Set([
   ),
   ...LEGACY_ASSISTANT_RUNTIME_EVENT_TYPES,
 ]);
-
-export type TrajectoryRecoveryPush = {
-  kind: TrajectoryEventKind;
-  payload: Record<string, unknown>;
-};
 
 /**
  * 可映射进轨迹的 runtime 生命周期事件白名单（Q4）。
@@ -147,21 +146,6 @@ export function isAssistantRuntimeEvent(event: SessionRuntimeEvent): boolean {
  */
 export function isTrajectoryContentEvent(event: SessionRuntimeEvent): boolean {
   return isChatSseEvent(event) || isAssistantRuntimeEvent(event);
-}
-
-/** 读取事件持久化 seq（后端 ListEvents 注入 payload.seq）。 */
-export function chatSseEventSeq(event: SessionRuntimeEvent): number {
-  const rawSeq = event.payload?.seq;
-  if (typeof rawSeq === "number" && Number.isFinite(rawSeq) && rawSeq > 0) {
-    return Math.floor(rawSeq);
-  }
-  if (typeof rawSeq === "string") {
-    const parsed = Number(rawSeq.trim());
-    if (Number.isFinite(parsed) && parsed > 0) {
-      return Math.floor(parsed);
-    }
-  }
-  return 0;
 }
 
 /**
@@ -321,19 +305,6 @@ export function assistantRuntimeEventToTrajectoryPush(
 }
 
 /**
- * 单条事件的轨迹动作（恢复与轮询共用）：
- * - push：可渲染事件（chat.sse 或白名单 runtime 生命周期），由调用方推入 reducer；
- * - skip：被过滤但已持久化的事件（tool_started/tool_finished/context.profile.
- *   injected/recall.performed 等，与 chat.sse 共享同一 EventStore 全局 seq）——
- *   记录其 seq，调用方 advanceCursor 跳过空洞，避免后续事件永久卡 pending；
- * - ignore：无持久化 seq 的暂态事件，无需处理。
- */
-export type TrajectoryEventAction =
-  | { kind: "push"; push: TrajectoryRecoveryPush }
-  | { kind: "skip"; seq: number }
-  | { kind: "ignore" };
-
-/**
  * live-only `tool.progress` → 轨迹 push（P1-5 子会话下钻）。
  *
  * 语义：作为**既有工具行的进行中更新**（kind="tool_call"，会与
@@ -426,112 +397,6 @@ export function subagentProgressEventToTrajectoryPush(
   }
   delete payload.seq;
   return { kind: "runtime", payload };
-}
-
-/**
- * ACP 协议宿主会话（及旧版存档）的工具生命周期以 runtime 事件
- * `tool_started` / `tool_finished` / `tool_receipt_recorded` /
- * `tool_receipt_replayed` 的形式落库，而非 `chat.sse.tool_start/tool_end`
- * 桥接帧。恢复/实时链路原先把它们判为 `skip(seq)`（不在
- * RUNTIME_EVENT_TYPES 白名单），导致轨迹视图在恢复后丢失全部工具行。
- *
- * 这里把它们映射为轨迹工具 push（按 `tool_call_id` 折叠进同一
- * `tool:<call_id>` 行），补全工具信息：
- * - tool_started → kind="tool_start"（phase=started）；
- * - tool_finished → kind="tool_end"（phase=finished/error）；
- * - tool_receipt_recorded / tool_receipt_replayed → kind="tool_end"
- *   （回执承载完成证据：ok / message_bytes / sha256）；作为 tool_end
- *   的补充，折叠进既有行（upsertItem 幂等）。
- *
- * 载荷以 `tool_call: { id, name }` + `tool: { name, arguments?, output_summary?,
- * error?, duration_ms? }` 形态透传，event-readers 的
- * toolCallIdOf/toolNameOf/toolArgsSummaryOf/toolResultSummaryOf/
- * toolErrorOf/toolDurationMsOf 能直接读取。
- *
- * 后端补齐 chat.sse.tool_* 框架（ACP bridge）后，二者 tool_call_id
- * 一致 → upsertItem 折叠为一行：richer chat.sse 数据优先、runtime
- * 事件作为兜底/补充（reducer 在已有字段非空时不覆写）。
- *
- * seq 顺序前提：ACP 运行时按调用顺序落库（tool_started 早于
- * tool_finished/tool_receipt_recorded），因此 tool_start 建行时该调用
- * 尚无已完成行，无相位回退风险。纯回执（无 tool_started）直接建
- * 已完成行——既是该调用的全部可观测证据。
- */
-export function runtimeToolEventToTrajectoryPush(
-  event: SessionRuntimeEvent,
-): TrajectoryRecoveryPush | null {
-  const runtimeType = event.type;
-  if (
-    runtimeType !== "tool_started" &&
-    runtimeType !== "tool_finished" &&
-    runtimeType !== "tool_receipt_recorded" &&
-    runtimeType !== "tool_receipt_replayed"
-  ) {
-    return null;
-  }
-  const payload = event.payload ?? {};
-  const receipt =
-    payload["receipt"] && typeof payload["receipt"] === "object"
-      ? (payload["receipt"] as Record<string, unknown>)
-      : undefined;
-  const callId =
-    readTrimmedString(payload["tool_call_id"]) ??
-    readTrimmedString(receipt?.["tool_call_id"]) ??
-    "";
-  const name =
-    readTrimmedString(event.tool_name) ??
-    readTrimmedString(payload["tool_name"]) ??
-    readTrimmedString(receipt?.["tool_name"]) ??
-    "tool";
-  const seq = chatSseEventSeq(event);
-  const envelope: Record<string, unknown> = { sequence: seq };
-  if (event.timestamp) {
-    envelope.timestamp = event.timestamp;
-  }
-
-  // tool_started → tool_start（开始阶段）；其余 → tool_end（终态）。
-  const kind: TrajectoryEventKind =
-    runtimeType === "tool_started" ? "tool_start" : "tool_end";
-
-  const tool: Record<string, unknown> = { name };
-  // 入参：ACP runtime 载荷把参数放在 input/params/args/arguments。
-  const args =
-    payload["input"] ??
-    payload["params"] ??
-    payload["args"] ??
-    payload["arguments"];
-  if (args !== undefined) {
-    tool["arguments"] = args;
-  }
-
-  if (kind === "tool_end") {
-    // 完成/回执：输出、错误、耗时。
-    const output = payload["output"] ?? receipt?.["output"];
-    if (output !== undefined) {
-      tool["output_summary"] = output;
-    }
-    const ok = payload["ok"] !== undefined ? payload["ok"] : receipt?.["ok"];
-    if (ok === false) {
-      const err =
-        readTrimmedString(payload["error"]) ??
-        readTrimmedString(receipt?.["error"]) ??
-        readTrimmedString(payload["failure_category"]);
-      tool["error"] = err || "tool failed";
-    }
-    const duration = payload["duration_ms"] ?? receipt?.["duration_ms"];
-    if (typeof duration === "number" && duration > 0) {
-      tool["duration_ms"] = duration;
-    }
-  }
-
-  return {
-    kind,
-    payload: {
-      tool_call: { id: callId, name },
-      tool,
-      _event: envelope,
-    },
-  };
 }
 
 export function trajectoryEventAction(
