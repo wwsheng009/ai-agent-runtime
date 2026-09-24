@@ -415,3 +415,47 @@ export function ensureDir(path: string): string {
   mkdirSync(dirname(path), { recursive: true });
   return path;
 }
+
+/**
+ * seed profile（Batch 13 slice 9）：`POST /api/_test/profiles` 的注入契约。
+ *
+ * mock 的 profiles 域初始为空（与真实工作区同口径：没有 `profile.yaml` 就没有条目），
+ * 用例必须先注入再断言，否则「列表为空」会把契约回归伪装成绿。
+ *
+ * `ref` 缺省时由 mock 按 `${layer}:${name}` 生成（与后端 ref 口径一致）；
+ * `defaultProfile` / `sessionProfiles` 分别是 `default_profile` 与「会话绑定」的事实来源，
+ * 供 E2E-5（删除保护）与切换报告 `from` 使用。
+ */
+export async function seedProfiles(
+  request: APIRequestContext,
+  input: {
+    profiles: Array<{
+      name: string;
+      layer?: string;
+      description?: string;
+      spec?: Record<string, unknown>;
+      valid?: boolean;
+      writable?: boolean;
+      ref?: string;
+    }>;
+    defaultProfile?: string;
+    sessionProfiles?: Record<string, string>;
+  },
+): Promise<void> {
+  const response = await request.post("/api/_test/profiles", {
+    data: {
+      profiles: input.profiles,
+      ...(input.defaultProfile !== undefined ? { default_profile: input.defaultProfile } : {}),
+      ...(input.sessionProfiles !== undefined ? { session_profiles: input.sessionProfiles } : {}),
+    },
+  });
+  if (!response.ok()) {
+    throw new Error(`seedProfiles failed: ${response.status()} ${await response.text()}`);
+  }
+  // 与 seedRuntimeModels 同纪律：mock 对未知 API 回 200 `{}`，缺 `ok` 即说明注入端点缺失，
+  // 必须报错而不是让用例退化成「列表为空」的假绿。
+  const body = (await response.json()) as { ok?: unknown };
+  if (body?.ok !== true) {
+    throw new Error(`seedProfiles endpoint missing: ${JSON.stringify(body)}`);
+  }
+}
