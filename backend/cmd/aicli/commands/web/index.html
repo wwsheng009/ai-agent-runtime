@@ -8,21 +8,58 @@
 </head>
 <body>
 <header>
-  <!-- 左侧：会话列表折叠 / 主题切换图标 + 连接、轮次、发送状态 -->
-  <div class="header-left">
+  <!-- 左侧：顶部菜单栏（会话列表折叠图标 + 文件/视图/帮助 下拉菜单）。
+       菜单项不另起一套实现，统一复用既有按钮与页签的点击行为
+       （新建/刷新会话、主题切换、快捷键帮助、页签切换，见 js/menu.js），
+       导出项走 /web/api/export 下载（与 TUI /export、`aicli export` 同源）。 -->
+  <nav id="menu-bar" class="header-left" aria-label="主菜单">
     <button id="sidebar-toggle" type="button" title="折叠/展开会话列表">☰</button>
-    <button id="theme-toggle" type="button" title="切换深色/浅色主题（Ctrl+L）">☾</button>
-    <span id="connection-status">connecting</span>
-    <span id="turn-status">-</span>
-    <span id="send-status"></span>
-  </div>
+    <div class="menu-root">
+      <button class="menu-btn" id="menu-file-btn" type="button" aria-haspopup="true" aria-expanded="false">文件</button>
+      <div class="menu-dropdown" id="menu-file-dropdown" role="menu" aria-labelledby="menu-file-btn">
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="session-new">新建会话</button>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="session-refresh">刷新会话列表</button>
+        <div class="menu-sep" role="separator"></div>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="export-full">导出会话（完整 JSON）</button>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="export-body">导出正文（Markdown）</button>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="export-tools">导出正文 + 工具调用</button>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="export-trace">导出正文 + 工具轨迹</button>
+      </div>
+    </div>
+    <div class="menu-root">
+      <button class="menu-btn" id="menu-view-btn" type="button" aria-haspopup="true" aria-expanded="false">视图</button>
+      <div class="menu-dropdown" id="menu-view-dropdown" role="menu" aria-labelledby="menu-view-btn">
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="sidebar-toggle">折叠/展开会话列表</button>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="theme-toggle">切换主题（Ctrl+L）</button>
+        <div class="menu-sep" role="separator"></div>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-main">对话页签</button>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-log">日志页签</button>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-debug">调试页签</button>
+      </div>
+    </div>
+    <div class="menu-root">
+      <button class="menu-btn" id="menu-help-btn" type="button" aria-haspopup="true" aria-expanded="false">帮助</button>
+      <div class="menu-dropdown" id="menu-help-dropdown" role="menu" aria-labelledby="menu-help-btn">
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="shortcut-help">快捷键帮助</button>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-about">关于本客户端</button>
+        <div class="menu-sep" role="separator"></div>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-cache">缓存分析</button>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-analysis">用量分析</button>
+      </div>
+    </div>
+  </nav>
   <!-- 居中：当前会话标题（sessions.js updateSessionIdentity 更新）；
        会话 ID 不占顶栏，改在「关于」页签展示 -->
   <div id="header-session">
     <span id="header-session-title">未选择会话</span>
   </div>
-  <!-- 右侧占位：与左侧同宽，保证会话信息在整栏中精确居中 -->
-  <span class="header-right" aria-hidden="true"></span>
+  <!-- 右侧状态簇：连接 / 轮次 / 发送状态 + 主题切换图标，全部靠最右排列 -->
+  <div id="header-status" class="header-status">
+    <span id="connection-status">connecting</span>
+    <span id="turn-status">-</span>
+    <span id="send-status"></span>
+    <button id="theme-toggle" type="button" title="切换深色/浅色主题（Ctrl+L）">☾</button>
+  </div>
 </header>
 
 <div class="layout">
@@ -112,35 +149,45 @@
       <span id="scroll-bottom-btn" class="scroll-bottom-btn" style="display:none">↓ 最新</span>
       <div id="dynamic-status" class="dynamic-status" style="display:none" aria-live="polite"></div>
       <div id="input-row">
-        <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off"></textarea>
+        <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off" enterkeyhint="send"></textarea>
         <button id="send-btn">发送</button>
       </div>
       <div id="cfg-bar">
-        <label class="cfg-item">
-          <span class="cfg-label">Provider</span>
-          <select id="cfg-provider" title="切换 provider（/model --provider）"></select>
-        </label>
-        <label class="cfg-item cfg-model">
-          <span class="cfg-label">Model</span>
-          <span class="cfg-model-wrap">
-            <input id="cfg-model" placeholder="当前模型" title="切换模型（/model --model）：可直接输入自定义模型名，或点 ▼ 弹出列表选择" autocomplete="off">
-            <datalist id="cfg-model-options" hidden></datalist>
-            <button id="cfg-model-toggle" type="button" title="弹出模型列表">▼</button>
-            <span id="cfg-model-count" class="cfg-model-count" title="该 provider 可选模型数"></span>
-            <div id="cfg-model-popup" class="cfg-model-popup" style="display:none"></div>
-          </span>
-        </label>
-        <label class="cfg-item">
-          <span class="cfg-label">Reasoning</span>
-          <select id="cfg-reasoning" title="切换 reasoning_effort（/model -r）">
-            <option value="">(默认)</option>
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-            <option value="max">max</option>
-          </select>
-        </label>
-        <span id="cfg-current" class="cfg-current" title="当前生效配置"></span>
+        <!-- 窄屏折叠触发器（桌面 display:none）：小屏不把三个选择器平铺占三行，
+             改为单行按钮 + 向上弹出的面板；当前生效配置也由本按钮承载。 -->
+        <button id="cfg-toggle" type="button" aria-expanded="false" title="展开 provider / model / reasoning 选择器">
+          <span class="cfg-toggle-icon" aria-hidden="true">⚙</span>
+          <span id="cfg-toggle-value" class="cfg-toggle-value">配置</span>
+          <span class="cfg-toggle-caret" aria-hidden="true">▾</span>
+        </button>
+        <!-- 桌面 display:contents：包裹层不生成盒子，三个选择器仍是 #cfg-bar 的平铺 flex 子项 -->
+        <div class="cfg-controls">
+          <label class="cfg-item">
+            <span class="cfg-label">Provider</span>
+            <select id="cfg-provider" title="切换 provider（/model --provider）"></select>
+          </label>
+          <label class="cfg-item cfg-model">
+            <span class="cfg-label">Model</span>
+            <span class="cfg-model-wrap">
+              <input id="cfg-model" placeholder="当前模型" title="切换模型（/model --model）：可直接输入自定义模型名，或点 ▼ 弹出列表选择" autocomplete="off">
+              <datalist id="cfg-model-options" hidden></datalist>
+              <button id="cfg-model-toggle" type="button" title="弹出模型列表">▼</button>
+              <span id="cfg-model-count" class="cfg-model-count" title="该 provider 可选模型数"></span>
+              <div id="cfg-model-popup" class="cfg-model-popup" style="display:none"></div>
+            </span>
+          </label>
+          <label class="cfg-item">
+            <span class="cfg-label">Reasoning</span>
+            <select id="cfg-reasoning" title="切换 reasoning_effort（/model -r）">
+              <option value="">(默认)</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="max">max</option>
+            </select>
+          </label>
+          <span id="cfg-current" class="cfg-current" title="当前生效配置"></span>
+        </div>
         <span id="cfg-status" class="cfg-status"></span>
       </div>
     </div>

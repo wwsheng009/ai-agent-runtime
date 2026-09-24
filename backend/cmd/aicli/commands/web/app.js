@@ -12,6 +12,7 @@ import { initRuntimeBar, loadRuntimeMeta } from "./js/runtime.js";
 import { initSessions, loadSessions } from "./js/sessions.js";
 import { initSkills } from "./js/skills.js";
 import { initMCP } from "./js/mcp.js";
+import { initMenu } from "./js/menu.js";
 import { initSSE } from "./js/sse.js";
 import { initStream } from "./js/stream.js";
 import { initAboutSessionCopy, initAboutToken, initShortcutHelp, initTabs, initTheme } from "./js/ui.js";
@@ -23,6 +24,7 @@ initTheme();
 initAboutToken(); // 关于页签的写令牌显示（读页面注入 meta，回退 /web/api/token）
 initAboutSessionCopy(); // 关于页签的当前会话 ID 复制（值由 sessions.js 同步写入）
 initShortcutHelp();
+initMenu(); // 顶部菜单栏（文件/视图/帮助 下拉 + 会话导出下载，见 js/menu.js）
 initStatusBar();
 initStream();
 initChat();

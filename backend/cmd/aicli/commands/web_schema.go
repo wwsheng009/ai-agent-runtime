@@ -49,6 +49,11 @@ const (
 	// 写操作由 ChatWebAuthGuard 统一要求写令牌；配置与 CLI、runtime-server 共用
 	// internal/mcp/admin 同一套读写实现。
 	ChatWebAPIMCPsPath = "/web/api/mcps"
+	// ChatWebAPIExportPath 会话导出下载端点（顶部菜单栏「文件 → 导出会话」）：
+	// GET /web/api/export?format=full|body|tools|trace[&session_id=<id>]，
+	// 与 TUI /export、顶层 `aicli export` 共用同一套写出实现；只读端点，
+	// 回环模式免写令牌（非回环模式由页面注入的 fetch 包装附 X-AICLI-Token）。
+	ChatWebAPIExportPath = "/web/api/export"
 )
 
 // chatWebSchemaVersion 是 SSE 事件 data 中 _event.schema_version 字段的值。

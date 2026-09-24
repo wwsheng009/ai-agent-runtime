@@ -378,6 +378,9 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	mux.HandleFunc(commands.ChatWebAPIConfigProvidersProbeModelsPath, commands.HandleChatWebAPIConfigProvidersProbeModels)
 	mux.HandleFunc(commands.ChatWebAPIConfigProvidersAutoImportPath, commands.HandleChatWebAPIConfigProvidersAutoImport)
 	mux.HandleFunc(commands.ChatWebAPIConfigChatPath, commands.HandleChatWebAPIConfigChat)
+	// /web/api/export 会话导出下载：内容与 /export、`aicli export` 同源
+	//（同一份格式归一化与写出实现），供顶部菜单栏「文件 → 导出会话」直接下载。
+	mux.HandleFunc(commands.ChatWebAPIExportPath, commands.HandleChatWebAPIExport)
 	// /web/api/cache/* LLM 缓存分析端点族（cache.analytics.v1）：
 	// overview / requests / messages/{id}/trace，数据源为当前会话的本地
 	// cacheanalytics.Service（复用 host.EventBus，与 TUI /usage 共用）。

@@ -112,6 +112,7 @@ var webDebugEndpoints = []struct {
 	{Method: "POST", Path: "/web/api/config/providers/probe-models", Note: "探测 provider 模型可用性"},
 	{Method: "POST", Path: "/web/api/config/providers/auto-import", Note: "从本地客户端配置自动导入 provider"},
 	{Method: "POST", Path: "/web/api/config/chat", Note: "保存 chat 配置（默认 provider/model 等）"},
+	{Method: "GET", Path: "/web/api/export", Note: "会话导出下载（?format=full|body|tools|trace，缺省 full；?session_id=<id> 缺省当前会话）。内容与 /export、`aicli export` 同源，响应为 attachment（Content-Disposition 带文件名，X-AICLI-Export-Messages 给出消息条数）"},
 	{Method: "GET", Path: "/web/api/skills", Note: "技能目录（/{name} 拉取单个技能详情）"},
 	{Method: "GET/POST", Path: "/web/api/mcps", Note: "MCP 列表（config+status）/ 新增（写 mcp.yaml 并热重载）"},
 	{Method: "GET/PUT/DELETE", Path: "/web/api/mcps/{name}", Note: "查看 / 更新 / 删除单个 MCP"},

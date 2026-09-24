@@ -127,21 +127,51 @@ body {
   font-size: 13px; line-height: 1.5;
   display: flex; flex-direction: column; height: 100vh;
 }
-/* ---- 顶栏：三列栅格（左工具/状态 + 居中会话信息 + 右侧占位）。
-   左右两列同为 1fr，保证第 2 列（会话标题 + ID）在整栏中精确居中。 ---- */
+/* ---- 顶栏：三列栅格（左菜单栏 + 居中会话信息 + 右侧状态簇）。
+   左右两列同为 1fr，保证第 2 列（会话标题）在整栏中精确居中。 ---- */
 header {
   display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) minmax(0, 1fr);
   align-items: center; gap: 12px;
   padding-bottom: 8px; border-bottom: 1px solid var(--border);
 }
 h1 { font-size: 14px; margin: 0; font-weight: 600; }
-/* 左侧：折叠会话列表图标、主题切换图标、连接/轮次/发送状态，全部靠最左排列 */
+/* 左侧：菜单栏（折叠会话列表图标 + 文件/视图/帮助 下拉菜单），全部靠最左排列。
+   overflow 保持 visible：下拉面板要溢出顶栏高度显示，不能被裁掉。 */
 .header-left {
   grid-column: 1; justify-self: start;
   display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px;
+  min-width: 0;
+}
+/* ---- 菜单栏下拉面板（交互见 js/menu.js：点击开合、点击外部/Esc 关闭） ---- */
+.menu-root { position: relative; flex: 0 0 auto; }
+.menu-btn {
+  cursor: pointer; font-family: inherit; font-size: 12px; padding: 3px 10px;
+  background: var(--bg3); color: var(--fg2);
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.menu-btn:hover { background: var(--hoverBg); color: var(--fg); }
+.menu-root.open > .menu-btn { background: var(--hoverBg2); color: var(--fg); border-color: var(--border2); }
+.menu-dropdown {
+  display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 60;
+  min-width: 208px; padding: 4px;
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: 6px;
+  box-shadow: 0 6px 20px var(--shadow);
+}
+.menu-root.open > .menu-dropdown { display: block; }
+.menu-item {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  font-family: inherit; font-size: 12px; padding: 5px 10px; white-space: nowrap;
+  background: transparent; color: var(--fg2); border: 0; border-radius: 4px;
+}
+.menu-item:hover, .menu-item:focus-visible { background: var(--hoverBg2); color: var(--fg); outline: none; }
+.menu-item:disabled { opacity: 0.5; cursor: default; }
+.menu-sep { height: 1px; margin: 4px 6px; background: var(--border); }
+/* 右侧状态簇：连接 / 轮次 / 发送状态 + 主题切换图标，全部靠最右排列 */
+.header-status {
+  grid-column: 3; justify-self: end;
+  display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px 8px;
   min-width: 0; overflow: hidden;
 }
-.header-right { grid-column: 3; }
 #connection-status {
   flex: 0 1 auto; max-width: 100%;
   font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #333;
@@ -501,8 +531,10 @@ button {
   font-family: inherit; font-size: 13px;
 }
 button:hover { background: var(--hoverBg2); }
-/* 发送/排队/失败等瞬态提示：与 #turn-status 同处顶栏左侧状态簇（见 index.html header） */
+/* 发送/排队/失败等瞬态提示：与 #turn-status 同处顶栏左侧状态簇（见 index.html header）。
+   空态（无提示文案）整体隐藏：窄屏状态簇宽度有限，不让空元素继续占一份 flex gap。 */
 #send-status { font-size: 12px; color: var(--fg3); max-width: 32%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#send-status:empty { display: none; }
 /* ---- provider / model / reasoning 配置选择器 ---- */
 #cfg-bar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
@@ -511,6 +543,10 @@ button:hover { background: var(--hoverBg2); }
   font-size: 12px;
 }
 #cfg-bar .cfg-item { display: flex; align-items: center; gap: 5px; }
+/* 桌面：包裹层不生成盒子（display:contents），三个选择器仍平铺在 #cfg-bar 里；
+   窄屏则改为弹出面板（见移动端媒体查询）。触发按钮桌面不出现。 */
+#cfg-bar .cfg-controls { display: contents; }
+#cfg-toggle { display: none; }
 #cfg-bar .cfg-label { color: var(--fg3); font-size: 11px; }
 #cfg-bar select, #cfg-bar input {
   padding: 3px 6px; font-family: inherit; font-size: 12px;
@@ -724,12 +760,12 @@ body.sidebar-collapsed #sidebar {
   background: var(--bg3); color: var(--fg3);
   border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
 }
-.session-item .session-action:hover { background: var(--hoverBg); color: var(--fg1); border-color: var(--border2); }
+.session-item .session-action:hover { background: var(--hoverBg); color: var(--fg); border-color: var(--border2); }
 .session-item .session-delete-btn:hover { color: #e5484d; border-color: #e5484d; }
 .session-rename-input {
   display: block; width: 100%; box-sizing: border-box;
   padding: 2px 4px; font-size: 12px;
-  background: var(--bg1); color: var(--fg1);
+  background: var(--bg2); color: var(--fg);
   border: 1px solid var(--border2); border-radius: 3px; outline: none;
 }
 #main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -896,7 +932,7 @@ body.sidebar-collapsed #sidebar {
 #shortcut-help .shortcut-panel {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
   width: min(420px, 92vw); padding: 20px 24px;
-  background: var(--bg1); border: 1px solid var(--border2);
+  background: var(--modalBg); border: 1px solid var(--border2);
   border-radius: 10px; box-shadow: 0 8px 32px var(--shadow);
 }
 #shortcut-help h3 { margin: 0 0 12px; font-size: 15px; }
@@ -911,30 +947,131 @@ body.sidebar-collapsed #sidebar {
 }
 #shortcut-help .shortcut-close:hover { background: var(--hoverBg2); }
 
-/* ---- 移动端响应式（<768px） ---- */
+/* ---- 移动端响应式（<768px） ----
+   顶栏重排为两行：第一行「菜单栏（左）+ 状态簇（右）」，第二行整行居中会话标题。
+   状态簇不再独占一行（此前三行版把主题图标与状态挤到第三行、左侧堆叠），
+   会话标题也不再与状态争抢同一行。 */
 @media (max-width: 767px) {
-  body { padding: 8px; }
-  /* 窄屏改为两行：第一行左侧工具/状态，第二行整行居中会话标题 */
-  header { grid-template-columns: minmax(0, 1fr); row-gap: 6px; }
-  .header-left { grid-column: 1; grid-row: 1; flex-wrap: wrap; }
-  #header-session { grid-column: 1; grid-row: 2; max-width: 100%; }
-  .header-right { display: none; }
+  /* 100dvh：移动浏览器地址栏收放时不至于把输入区顶出可视范围（不支持的浏览器保留 100vh）。
+     底部再叠加 iPhone 手势条安全区：env() 不被支持时该声明整条失效，回退到上面的 8px。 */
+  body { padding: 8px; height: 100dvh; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+  header {
+    /* 下拉面板的定位基准：窄屏统一按顶栏宽度展开，彻底消除右侧溢出 */
+    position: relative;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px; row-gap: 4px;
+  }
+  .header-left { grid-column: 1; grid-row: 1; flex-wrap: wrap; gap: 4px 6px; }
+  #header-session { grid-column: 1 / -1; grid-row: 2; max-width: 100%; }
+  .header-status {
+    grid-column: 2; grid-row: 1; justify-self: end;
+    flex-wrap: nowrap; justify-content: flex-end;
+    gap: 2px 6px; max-width: 58vw;
+  }
+  /* 状态簇在窄屏收紧为单行（超长省略号）；可点按控件（主题/侧栏按钮）高度约 28px */
+  #connection-status { font-size: 11px; padding: 1px 6px; }
+  #turn-status, #send-status { font-size: 11px; }
+  #send-status { max-width: 45%; }
+  #theme-toggle, #sidebar-toggle { padding: 6px 10px; }
+  /* 下拉面板：以顶栏宽度展开；菜单项加大点按区域，长文案折行 */
+  .menu-root { position: static; }
+  .menu-dropdown { left: 0; right: 0; min-width: 0; max-width: none; padding: 6px; }
+  .menu-btn { padding: 5px 10px; }
+  .menu-item { white-space: normal; padding: 9px 12px; }
+  /* 会话列表抽屉：整高覆盖在内容之上（此前上下留白 48px/40px，与内容区错位） */
+  .layout { position: relative; }
   #sidebar {
-    width: 200px;
-    position: absolute; left: 0; top: 48px; bottom: 40px; z-index: 20;
+    position: absolute; left: 0; top: 0; bottom: 0; z-index: 30;
+    width: min(240px, 78vw); margin: 0;
+    border-radius: 0 6px 6px 0;
     box-shadow: 0 4px 16px var(--shadow);
   }
   body.sidebar-collapsed #sidebar { width: 0; }
-  .layout { position: relative; }
-  #input-row { flex-wrap: wrap; }
-  #prompt { flex: 1 1 100%; }
-  #send-btn { flex: 0 0 auto; }
-  #send-status { flex-basis: 100%; text-align: left; }
+  /* ---- 底部 composer（输入区 + cfg-bar）----
+     触屏三条硬规则：① 输入控件字号 ≥16px（低于 16px 时 iOS 聚焦会自动放大整页）；
+     ② 可点按控件高度 ≥44px；③ 输入区与发送键同排右对齐，别让 composer 吃掉正文高度。 */
+  #input-row { flex-wrap: nowrap; gap: 6px; }
+  #prompt {
+    min-width: 0; min-height: 44px; padding: 10px 12px;
+    font-size: 16px; line-height: 1.45;
+    max-height: min(160px, 38vh);
+  }
+  #send-btn {
+    flex: 0 0 auto; align-self: flex-end;
+    min-width: 76px; min-height: 44px; max-width: 42%;
+    padding: 9px 14px; font-size: 15px;
+  }
+  /* ---- 配置栏：小屏折叠成弹出面板 ----
+     三个选择器平铺在窄屏要占 3 行 99px；改为单行触发按钮 + 向上弹出的面板。
+     面板绝对定位覆盖在正文之上（不挤压正文，也不触发 ResizeObserver 重排），
+     当前生效配置（#cfg-current）小屏不再单独占行，改由触发按钮承载。 */
+  #cfg-bar {
+    position: relative; display: flex; align-items: center; gap: 8px;
+    margin: 4px 0 0; padding: 4px 6px;
+  }
+  #cfg-toggle {
+    display: flex; align-items: center; gap: 6px;
+    flex: 1 1 auto; min-width: 0; min-height: 36px; padding: 6px 10px;
+    font-size: 13px; text-align: left;
+  }
+  #cfg-toggle .cfg-toggle-value {
+    flex: 1 1 auto; min-width: 0; color: var(--fg3);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #cfg-toggle .cfg-toggle-caret { flex: 0 0 auto; color: var(--fg3); transition: transform .15s ease; }
+  #cfg-bar.cfg-open #cfg-toggle { border-color: var(--accent); }
+  #cfg-bar.cfg-open .cfg-toggle-caret { transform: rotate(180deg); }
+  #cfg-bar .cfg-controls { display: none; }
+  #cfg-bar.cfg-open .cfg-controls {
+    display: flex; flex-direction: column; gap: 6px;
+    position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 40;
+    padding: 8px; background: var(--bg2); border: 1px solid var(--border2);
+    border-radius: 8px; box-shadow: 0 10px 28px var(--shadow);
+  }
+  /* 输入框受 iOS 字号规则约束（<16px 聚焦会放大整页）；选择器在面板内各占一行 */
+  #cfg-bar .cfg-item { min-width: 0; }
+  #cfg-bar .cfg-label { font-size: 11px; }
+  #cfg-bar select, #cfg-bar input { font-size: 16px; padding: 5px 8px; }
+  #cfg-bar select { max-width: none; width: 100%; }
+  #cfg-bar .cfg-model-wrap { flex: 1 1 auto; min-width: 0; }
+  /* 面板里模型名最需要宽度：解除桌面 150px 上限，输入框吃满该行剩余空间 */
+  #cfg-bar .cfg-model input { flex: 1 1 auto; min-width: 0; width: auto; max-width: none; }
+  #cfg-bar .cfg-current { display: none; }
+  #cfg-bar .cfg-status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #cfg-bar .cfg-status:empty { display: none; }
+  #cfg-model-toggle { padding: 8px 12px; font-size: 13px; }
+  /* 面板里向上展开的模型列表：矮视口限高，避免顶部越出视口 */
+  #cfg-bar.cfg-open .cfg-model-popup { max-height: min(240px, 40vh); }
   /* 六个页签（对话/日志/配置/缓存/调试/关于）在窄屏等分会被压得过窄，允许换行 */
   .tabs { flex-wrap: wrap; }
-  .tab-btn { flex: 1 1 auto; min-width: 64px; }
+  .tab-btn { flex: 1 1 auto; min-width: 64px; padding: 7px 10px; }
+  /* 底部状态栏：单行横向滚动，不再折成多行吃掉正文高度；上下留白一并收紧 */
+  #footer { gap: 8px; margin-top: 4px; padding-top: 4px; }
+  #status-bar-container { min-width: 0; max-width: 100%; }
+  .status-bar {
+    flex-wrap: nowrap; min-width: 0; max-width: 100%;
+    overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+  }
+  .status-bar::-webkit-scrollbar { display: none; }
+  .status-bar .seg { flex: 0 0 auto; max-width: 62vw; }
   #approval-modal { max-width: 96%; max-height: 90vh; }
   #session-switch-modal { max-width: 96%; }
+}
+
+/* ---- 小屏手机（≤420px）：菜单栏独占一行，标题与状态簇同行 ----
+   覆盖绝大多数竖屏手机（360/375/390/414），避免状态簇把「帮助」挤到第二行。 */
+@media (max-width: 420px) {
+  .header-left { grid-column: 1 / -1; grid-row: 1; }
+  #header-session { grid-column: 1; grid-row: 2; justify-self: start; text-align: left; }
+  .header-status { grid-column: 2; grid-row: 2; max-width: 52vw; }
+}
+
+/* ---- 横屏矮视口（高 ≤480px，如 640×360 / 740×360）：底部栈不能吃掉正文区 ----
+   竖屏手机（≥600px 高）不受影响。配置栏此时已是单行折叠按钮（弹出面板覆盖在正文上，
+   不占布局高度），这里只需收紧输入框上限与页脚留白。 */
+@media (max-width: 767px) and (max-height: 480px) {
+  #prompt { min-height: 40px; max-height: min(120px, 30vh); }
+  #footer { margin-top: 2px; padding-top: 2px; }
 }
 
 /* ---- 配置页签：provider / model / reasoning effort 管理 ---- */

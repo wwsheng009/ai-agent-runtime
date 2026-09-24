@@ -113,8 +113,9 @@ func TestHandleChatWebPage(t *testing.T) {
 	}
 }
 
-// TestHandleChatWebPage_HeaderLayout 锁定顶栏重排：左侧工具/状态簇（折叠会话列表、
-// 主题切换、连接/轮次/发送状态）在前，会话标题 + ID 居中块在后，右侧留等宽占位。
+// TestHandleChatWebPage_HeaderLayout 锁定顶栏重排：左侧是顶部菜单栏（折叠会话列表图标 +
+// 文件/视图/帮助 下拉），会话标题居中，右侧是状态簇（连接 / 轮次 / 发送状态 + 主题切换图标）。
+// 连接/轮次/发送状态与主题图标必须落在右侧状态簇内，且不再出现在左栏菜单栏里。
 func TestHandleChatWebPage_HeaderLayout(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, ChatWebPath, nil)
 	rec := httptest.NewRecorder()
@@ -122,18 +123,38 @@ func TestHandleChatWebPage_HeaderLayout(t *testing.T) {
 	HandleChatWebPage(rec, req)
 
 	body := rec.Body.String()
-	leftIdx := strings.Index(body, `class="header-left"`)
+	menuIdx := strings.Index(body, `id="menu-bar"`)
 	sessionIdx := strings.Index(body, `id="header-session"`)
-	rightIdx := strings.Index(body, `class="header-right"`)
-	if leftIdx < 0 || sessionIdx < 0 || rightIdx < 0 {
-		t.Fatalf("header layout elements missing: left=%d session=%d right=%d", leftIdx, sessionIdx, rightIdx)
+	statusIdx := strings.Index(body, `id="header-status"`)
+	if menuIdx < 0 || sessionIdx < 0 || statusIdx < 0 {
+		t.Fatalf("header layout elements missing: menu=%d session=%d status=%d", menuIdx, sessionIdx, statusIdx)
 	}
-	if !(leftIdx < sessionIdx && sessionIdx < rightIdx) {
-		t.Fatalf("header order = left:%d session:%d right:%d, want left < session < right", leftIdx, sessionIdx, rightIdx)
+	if !(menuIdx < sessionIdx && sessionIdx < statusIdx) {
+		t.Fatalf("header order = menu:%d session:%d status:%d, want menu < session < status", menuIdx, sessionIdx, statusIdx)
 	}
-	for _, id := range []string{"sidebar-toggle", "theme-toggle", "connection-status", "turn-status", "send-status"} {
-		if !strings.Contains(body, `id="`+id+`"`) {
-			t.Fatalf("page body missing header element %q", id)
+	for _, class := range []string{`class="header-left"`, `class="header-status"`} {
+		if !strings.Contains(body, class) {
+			t.Fatalf("page body missing header hook %s", class)
+		}
+	}
+	headerEnd := strings.Index(body[statusIdx:], "</header>")
+	if headerEnd < 0 {
+		t.Fatal("header-status block not closed before </header>")
+	}
+	leftBlock := body[menuIdx:sessionIdx]
+	rightBlock := body[statusIdx : statusIdx+headerEnd]
+	// 状态簇必须整体右移：既在右侧块内出现，也不再残留在左栏菜单栏里。
+	for _, id := range []string{"connection-status", "turn-status", "send-status", "theme-toggle"} {
+		if !strings.Contains(rightBlock, `id="`+id+`"`) {
+			t.Fatalf("right status cluster missing element %q", id)
+		}
+		if strings.Contains(leftBlock, `id="`+id+`"`) {
+			t.Fatalf("element %q must move out of the left menu bar", id)
+		}
+	}
+	for _, id := range []string{"sidebar-toggle", "menu-file-btn", "menu-view-btn", "menu-help-btn"} {
+		if !strings.Contains(leftBlock, `id="`+id+`"`) {
+			t.Fatalf("left menu bar missing element %q", id)
 		}
 	}
 }

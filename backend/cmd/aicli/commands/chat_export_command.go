@@ -527,16 +527,11 @@ func exportChatSession(session *ChatSession, opts chatExportOptions) (*chatExpor
 		return nil, fmt.Errorf("关闭导出临时文件失败: %w", err)
 	}
 	defer os.Remove(temporaryPath)
-	var stats chatSessionExportStats
-	if mode, ok := chatExportMarkdownModeForFormat(opts.Format); ok {
-		stats, err = writeChatSessionMarkdownExport(temporaryPath, session, runtimeSession, mode)
-	} else {
-		opts.Format = chatExportFormatFull
-		stats, err = writeChatSessionFullExport(temporaryPath, session, runtimeSession, source)
-	}
+	format, stats, err := writeChatSessionExportToPath(temporaryPath, session, runtimeSession, source, opts.Format)
 	if err != nil {
 		return nil, err
 	}
+	opts.Format = format
 	if err := publishChatExportFile(temporaryPath, outputPath); err != nil {
 		return nil, err
 	}
@@ -546,6 +541,21 @@ func exportChatSession(session *ChatSession, opts chatExportOptions) (*chatExpor
 		SessionID: strings.TrimSpace(runtimeSession.ID),
 		Stats:     stats,
 	}, nil
+}
+
+// writeChatSessionExportToPath 按格式把会话导出内容写到指定路径，返回实际生效
+// 的格式与统计：markdown 家族（body/md-tools/md-trace）走 Markdown 写出，其余
+// （含未知/空格式）回退为完整 JSON 导出。
+//
+// /export、顶层 `aicli export` 与 web 端 /web/api/export 三处共用这一份分发逻辑，
+// 避免"哪个格式用哪个写出函数"的判定在多个入口之间漂移。
+func writeChatSessionExportToPath(path string, session *ChatSession, runtimeSession *runtimechat.Session, source string, format chatExportFormat) (chatExportFormat, chatSessionExportStats, error) {
+	if mode, ok := chatExportMarkdownModeForFormat(format); ok {
+		stats, err := writeChatSessionMarkdownExport(path, session, runtimeSession, mode)
+		return format, stats, err
+	}
+	stats, err := writeChatSessionFullExport(path, session, runtimeSession, source)
+	return chatExportFormatFull, stats, err
 }
 
 func publishChatExportFile(temporaryPath, outputPath string) error {

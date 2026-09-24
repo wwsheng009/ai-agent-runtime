@@ -100,6 +100,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | GET | `/web/api/events` | SSE 实时事件流（turn/工具/审批/提问…） |
 | GET | `/web/api/events/schema` | SSE 事件类型定义 |
 | GET/POST | `/web/api/sessions[...]` | 会话列表 / 新建 / 恢复 / 重命名 / 删除 |
+| GET | `/web/api/export` | 会话导出（下载）：`?format=full\|body\|tools\|trace`（格式词同 TUI `/export`、`aicli export`），`?session_id=<id>` 指定会话（缺省当前会话）；响应为 attachment（`Content-Disposition` 同时给 ASCII 回退名与 RFC 5987 `filename*`），附 `X-AICLI-Export-Format` / `-Messages` / `-Session` 头；无活动会话 503、未知格式 400、非 GET/HEAD 405 |
 | GET/POST | `/web/api/config[...]` | 配置快照 / provider 增删改与模型拉取探测 / chat 配置保存 |
 | GET | `/web/api/skills[/{name}]` | 技能目录与详情 |
 | GET | `/web/api/analysis[/status\|tools\|subagents\|errors]` | 用量分析 |
@@ -122,6 +123,30 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 > `Invoke-RestMethod`，或 `curl.exe -o <file>` + `[IO.File]::ReadAllText($f, UTF8)`。
 > 可复制脚本见
 > [../user-guide/aicli-tui-remote.md](../user-guide/aicli-tui-remote.md) 的 §3.3。
+
+### 会话导出（`/web/api/export`）
+
+与 TUI `/export`、顶层 `aicli export` 共用同一套会话解析、格式归一化与写出实现
+（`chat_export_command.go`），导出内容与 CLI 同源，不产生第二条实现路径。
+
+- `format`：`full`（完整 JSON，缺省）/ `body`（正文 Markdown）/ `tools`（正文 + 工具调用）/
+  `trace`（正文 + 工具轨迹）；未知取值 → `400 {"error":{"code":"invalid_format",...}}`。
+- `session_id`：目标会话 ID，语义同 `/export <session-id>`；缺省导出当前活动会话。
+- 响应头：`Content-Disposition: attachment; filename="<ASCII 回退名>"; filename*=UTF-8''<...>`
+  （文件名与 CLI 默认命名同规则 `{session}_{ts}_{format}.json|md`，非 ASCII 会话 ID 由
+  RFC 5987 编码承载）、`Content-Type`（JSON 或 `text/markdown`）、
+  `X-AICLI-Export-Format` / `X-AICLI-Export-Messages` / `X-AICLI-Export-Session`
+  （供前端提示文件名与消息条数）。
+- 无活动会话 → `503 {"error":{"code":"chat_session_not_ready",...}}`；只读 GET，回环模式免令牌，
+  非回环模式由页面注入的 fetch 包装附 `X-AICLI-Token`（见上一节）。
+- 页面入口：「文件」菜单 → 导出会话（完整 JSON）/ 导出正文（Markdown）/ 导出正文 + 工具调用 /
+  导出正文 + 工具轨迹；前端按 `Content-Disposition` 命名并以 `Blob` + `<a download>` 落地文件
+  （`backend/cmd/aicli/commands/web/js/menu.js`）。
+
+```powershell
+# -OJ 让 curl 按 Content-Disposition 命名落盘（当前会话导出为工具轨迹 Markdown）
+curl.exe -s -OJ 'http://127.0.0.1:61772/web/api/export?format=trace'
+```
 
 ### MCP 管理（`/web/api/mcps`）
 

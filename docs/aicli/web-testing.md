@@ -87,7 +87,13 @@ aicli chat --pprof
       后正常完成切换（顶栏与列表同步）。当前会话高亮项点击不弹窗（直接走
       already_current 刷新）。当前会话有任务进行中（发送中/执行中/正在停止）时，
       弹窗内出现"切换将在当前任务与排队输入完成后生效"提示。
-- [ ] `Esc` 打开/关闭快捷键帮助。
+- [ ] `Esc` 打开/关闭快捷键帮助；面板为不透明卡片（深色 `#1a222c` / 浅色 `#ffffff`，
+      取自 `--modalBg`），不得透出底层页面内容。
+- [ ] **窄屏（≤767px）布局**：顶栏两行——第一行「菜单栏（左）+ 状态簇（右，右对齐）」、
+      第二行居中会话标题（≤420px 时菜单栏独占第一行，标题靠左、状态簇靠右）；`文件/视图/帮助`
+      下拉面板按顶栏宽度展开且不越出视口，菜单项可折行、点按高度 ≥33px；会话列表抽屉整高
+      覆盖内容区（不再上下留白）；底部状态栏单行横向滚动（不折成多行、滚动条隐藏）；
+      整页无横向滚动条（`document.documentElement.scrollWidth === innerWidth`）。
 
 ### 2.2 对话页 + 底部配置栏（cfg-bar）
 
@@ -103,6 +109,18 @@ aicli chat --pprof
       会话复制（⧉ 复制）在只加载了部分消息时仍复制**完整**会话（服务端全量 transcript）。
 
 - [ ] Provider / Reasoning 原生 `<select>` 可切换，当前生效配置（`openai · gpt-4o`）随之更新。
+- [ ] **窄屏 composer（≤767px）**：输入框与发送键同排，发送键右对齐且贴底（`#prompt` 多行增高时
+      按钮不跟着拉高）；`#prompt` 与 `#cfg-model` 字号 ≥16px（低于 16px 时 iOS 聚焦会放大整页）；
+      可点按控件高度 ≥44px；输入框空态回到 CSS 最小高度（占位提示折行不再把空输入框撑成两行，
+      `autoGrow()` 在空值时清掉内联高度）；占位提示在窄屏切短文案（`enterkeyhint="send"`，
+      手机键盘回车键显示「发送」）；底部按 `env(safe-area-inset-bottom)` 让出手势条；
+      配置栏窄屏折叠为单行按钮 + 向上弹出的面板（面板绝对定位覆盖在正文之上，不挤压正文、
+      不触发 ResizeObserver 重排；三个选择器在面板内各占一行，模型输入框解除桌面 150px 上限）；
+      当前生效配置 `#cfg-current` 窄屏不再显示，同一份文案由折叠按钮承载（超长省略号）；
+      点面板外或按 Esc 收起，`aria-expanded` 同步；面板内模型列表限高 `min(240px, 40vh)`
+      避免顶部越出视口；横屏矮视口（高 ≤480px）只收紧输入框上限与页脚留白。
+- [ ] **桌面（>767px）不受上述折叠影响**：`.cfg-controls{display:contents}`、`#cfg-toggle{display:none}`，
+      三个选择器仍平铺在 `#cfg-bar` 一行内，`#cfg-current` 照常显示，cfg-bar 高度保持约 36px。
 - [ ] Model 字段：直接输入自定义模型名可生效；点 ▼ 弹出全量模型列表，**向上展开**（`bottom: calc(100% + 4px)`），当前模型高亮 + "当前"徽标、默认模型带"默认"徽标；徽标显示"共 N 个"。
 - [ ] Model 输入框聚焦/输入时**不应**出现原生 datalist 下拉（`list` 属性已移除，避免与自定义 popup 叠成双层）。
 - [ ] 点击 popup 外部或按 `Esc` 关闭 popup；点选后立即应用并关闭。
@@ -201,6 +219,7 @@ node --check backend/cmd/aicli/commands/web/app.js
 node scripts/verify-micro-web-skills-tab.mjs   # 技能页签：列表/会话感知/详情分组页签与键盘导航/错误/竞态/页签接线
 node scripts/verify-micro-web-tool-output.mjs  # 工具输出折叠/展开：抬头控件（文字 + ▼/▲ 图标）在「工具」行内、默认折叠（≤5 行）、溢出判定、点击/键盘切换、控件隐藏时不响应、复制不含控件文字
 node scripts/verify-micro-web-msg-window.mjs   # 长会话窗口化：首屏只渲染最新一页、尾部增量替换与窗口右移保留历史、上滚以 msg_before 前插并补偿 scrollTop、到顶停止、pending 气泡确认、游标异常守卫
+node scripts/verify-micro-web-menu.mjs         # 顶部菜单栏 + 会话导出：菜单栏/右侧状态簇结构、data-menu-action 均指向真实控件、开合与 Esc 回焦、导出请求与 Content-Disposition 命名下载、失败不下载；CSS 侧校验「无 fallback 的 var(--token) 必须已定义」与快捷键面板背景为不透明语义变量
 ```
 
 模块化后另有一层静态检查：用带 DOM stub 的 Node 脚本对 `app.js` 入口做动态 `import()`，可在不启浏览器的情况下抓出语法错误、缺失导出、模块求值期错误（拆分落地时即靠它在浏览器回归前拦截了两处问题）。检查思路：stub `document/window/localStorage/fetch/EventSource` 后 `await import("./app.js")`，任何模块图断裂都会在这里抛错。
@@ -210,6 +229,12 @@ node scripts/verify-micro-web-msg-window.mjs   # 长会话窗口化：首屏只�
 `scripts/verify-micro-web-skills-tab.mjs` 即按此思路写成：它 stub `document`（含 `documentElement` / `body` / 元素 `classList` / `querySelector(All)`）与 `fetch`，先单测 `js/skills.js` 的行为（含详情分组页签：只生成非空分组、只渲染当前页签、点击与 `← → Home End` 导航、打开聚焦选中页签、关闭把焦点还给列表条目、缺字段不补默认值），最后 `import` `js/ui.js` 并点一次 `#tab-skills-btn`，验证按钮 → 激活面板 → 拉取目录的接线。缓存页签有同思路的本地沙盒脚本（`web/tmp/cache-session-aware.verify.cjs`，该目录已 gitignore、不随仓库发布）。
 
 `scripts/verify-micro-web-msg-window.mjs` 自带一套迷你 DOM（含 `className` ↔ `class` 映射、`scrollHeight` / `clientHeight` 与插入后撑高容器的高度记账），用来验证 `js/chat.js` 的消息窗口状态机：行索引与 `serverMessagesHtml` 的绝对索引、`parseMessageWindow` / `shouldRebuildForWindow` 的分支判定、首屏只渲染最新一页（不随会话总 turn 数增长）、尾部增量替换不重建既有节点（以节点身份断言）、窗口右移时保留已加载的早期节点、上滚以 `msg_before` 前插且按插入高度补偿 `scrollTop`、到达最早一条后停止、实时刷新不与已加载历史重复、pending 气泡随服务端窗口确认释放、服务端返回重叠/断开一页时的游标守卫（不重复插入且停止继续上滚），以及会话复制的取材：窗口不完整时取服务端全量 transcript，窗口已覆盖全部消息时不发额外请求、仍按 DOM 顺序收集（保留 `[推理]` 前缀等既有格式）。`fetch` 在该沙盒里是同步消费预置队列的，因此任何会触发请求的操作前必须先 `screenQueue.push(...)`。
+
+`scripts/verify-micro-web-menu.mjs` 解析真实的 `index.html` 建迷你 DOM（`#id` 选择器、`classList`、事件冒泡与 `stopPropagation`），把 `js/menu.js` 挂上去跑：断言菜单栏含「文件/视图/帮助」三个下拉、右侧状态簇含连接/轮次/发送状态与主题图标、每个 `data-menu-action` 都能点到真实存在的目标控件（转发既有控件点击，不另起实现）、点击开合与切换菜单/点外部关闭/Esc 关闭并回焦、导出项请求 `/web/api/export?format=…` 并按 `Content-Disposition`（`filename*` 优先，回退 `filename=`）命名下载、HTTP 非 2xx 时只提示不产生下载；最后用 DOM stub 动态 `import("./app.js")` 检查入口模块图与 `initMenu` 接线。场景 6 对 `style.css` 做静态不变量检查：所有不带 fallback 的 `var(--token)` 都必须在主题块里有定义（未定义的自定义属性会让整条声明在 computed-value 阶段失效，快捷键面板正是因 `--bg1` 未定义而渲染成透明卡片），并断言 `#shortcut-help .shortcut-panel` 的背景取自 `--modalBg`、该变量在深色 / 浅色 / 跟随系统三种主题下都已定义且不是 `transparent`。
+
+窄屏布局同理在真实 Chromium 里量（沙盒量不出 `scrollWidth` 与断点行为）：视口切到 360×640 / 390×844 / 414×896 / 640×360（横屏）/ 768×1024 / 1280×800，断言 `document.documentElement.scrollWidth === innerWidth`（无横向滚动条）、顶栏在 ≤767px 折成两行（约 62px；>767px 保持单行约 31px）、状态簇右缘贴合顶栏内容右缘、`文件/视图/帮助` 三个下拉面板的 `getBoundingClientRect()` 完全落在视口内、底部 `.status-bar` 单行（`scrollHeight === clientHeight`）且内容超宽时横向滚动（`scrollWidth > clientWidth`）；另用长文案（"连接已断开 / 轮次 12/99 / 发送中…排队 3 条"）复测，确认状态簇不会把菜单栏挤到第二行。
+
+底部 composer 按同一组视口量：`#prompt` 与 `#send-btn` 底边对齐（多行增高时按钮贴底不拉高）、输入框空态高度 = CSS 最小高度（45px，清空后内联高度被移除）、`#cfg-bar` 折叠行高度（竖屏 360×640 / 414×896 与横屏 640×360 均为单行 45px；展开面板 122–128px 且完全落在视口内、正文区高度不变）、正文区高度（竖屏 ≥345px、横屏 ≥112px）与整页 `verticalFit`。压测：发送键瞬态文案「正在停止…」不得把输入框压到 200px 以下；输入 12 行时输入框被 `max-height: min(160px, 38vh)` 截住（横屏 30vh）且正文区不被挤到 0；面板内点 ▼ 弹出的模型列表（≤240px，矮视口 40vh）不得越出视口顶部。
 
 ## 5. 已知问题（拆分时保持原行为，未修）
 

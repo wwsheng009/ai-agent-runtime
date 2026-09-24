@@ -558,6 +558,13 @@ function scrollToBottom(force) {
 // ---- textarea 自动增高 ----
 export function autoGrow() {
   if (!promptEl) { return; }
+  // 空输入不留内联高度，交回 CSS 的 min-height：占位提示在窄屏会折行，
+  // 照 scrollHeight 记账会把空输入框撑成两行（发送后清空输入同样走这里）。
+  if (!promptEl.value) {
+    promptEl.style.height = "";
+    updateScrollBtn();
+    return;
+  }
   promptEl.style.height = "auto";
   promptEl.style.height = Math.min(promptEl.scrollHeight, 160) + "px";
   updateScrollBtn();
@@ -613,6 +620,18 @@ export function clearPendingPrompts() { localPendingPrompts = []; }
 export function getUserScrolledAway() { return userScrolledAway; }
 
 export function initChat() {
+  // 窄屏换短占位提示：桌面文案（含 Shift+Enter）在手机上既无意义，又会在 16px 字号下
+  // 折成两行把输入框挤高。跟随视口宽度（旋屏）切换，桌面文案取自 HTML，避免两处漂移。
+  if (promptEl && window.matchMedia) {
+    var narrowScreen = window.matchMedia("(max-width: 767px)");
+    var desktopHint = promptEl.placeholder;
+    var syncPromptHint = function () {
+      promptEl.placeholder = narrowScreen.matches ? "输入消息，回车发送…" : desktopHint;
+    };
+    syncPromptHint();
+    if (narrowScreen.addEventListener) { narrowScreen.addEventListener("change", syncPromptHint); }
+  }
+
   sendBtn.addEventListener("click", function () {
     // 状态机 dispatch
     if (uiState === "busy") {

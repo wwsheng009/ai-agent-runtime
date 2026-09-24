@@ -21,6 +21,7 @@ function cfgEls() {
     modelCount: document.getElementById("cfg-model-count"),
     reasoning: document.getElementById("cfg-reasoning"),
     current: document.getElementById("cfg-current"),
+    toggleValue: document.getElementById("cfg-toggle-value"),
     status: document.getElementById("cfg-status")
   };
 }
@@ -254,7 +255,10 @@ export function loadRuntimeMeta() {
         els.model.value = selModelVal;
         els.reasoning.value = keepReasoning;
       }
-      els.current.textContent = (cfg.provider || "?") + " · " + (cfg.model || "?") + (cfg.reasoning ? " · " + cfg.reasoning : "");
+      var currentText = (cfg.provider || "?") + " · " + (cfg.model || "?") + (cfg.reasoning ? " · " + cfg.reasoning : "");
+      els.current.textContent = currentText;
+      // 窄屏 #cfg-current 不占行，同一份「当前生效配置」改由折叠按钮承载。
+      if (els.toggleValue) { els.toggleValue.textContent = currentText; }
     })
     .catch(function (err) { console.error("runtime meta fetch failed:", err); });
 }
@@ -469,5 +473,29 @@ export function initRuntimeBar() {
     if (els.modelToggle && (e.target === els.modelToggle || (els.modelToggle.contains && els.modelToggle.contains(e.target)))) { return; }
     closeModelPopup();
   });
+  // 窄屏折叠面板：触发按钮切换 .cfg-open（桌面该按钮 display:none，这段逻辑空转）。
+  var cfgToggleEl = document.getElementById("cfg-toggle");
+  function closeCfgPanel() {
+    if (!cfgBarEl) { return; }
+    cfgBarEl.classList.remove("cfg-open");
+    if (cfgToggleEl) { cfgToggleEl.setAttribute("aria-expanded", "false"); }
+  }
+  if (cfgToggleEl && cfgBarEl) {
+    cfgToggleEl.addEventListener("click", function (e) {
+      e.preventDefault();
+      var open = cfgBarEl.classList.toggle("cfg-open");
+      cfgToggleEl.setAttribute("aria-expanded", open ? "true" : "false");
+      if (!open) { closeModelPopup(); }
+    });
+    // 点面板外部或按 Esc 收起（与 model popup 一致的轻量模式）。
+    document.addEventListener("click", function (e) {
+      if (!cfgBarEl.classList.contains("cfg-open")) { return; }
+      if (cfgBarEl.contains(e.target)) { return; }
+      closeCfgPanel();
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && cfgBarEl.classList.contains("cfg-open")) { closeCfgPanel(); }
+    });
+  }
   initGlobalModelPopupDismiss();
 }
