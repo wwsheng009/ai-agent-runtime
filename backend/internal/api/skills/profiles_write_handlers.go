@@ -385,23 +385,10 @@ func (h *Handler) ApplyRuntimeProfile(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 // runtimeProfileLayerRoot 返回层根目录（G1/G2 只允许 user 与 project 两层）。
+// 规则本体在 internal/profile（CLI 的 create/import/move 共用同一份），这里只是
+// 包内别名，避免 API 与 CLI 对"层根在哪"各写一套。
 func runtimeProfileLayerRoot(layer string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(layer)) {
-	case "user":
-		home, err := os.UserHomeDir()
-		if err != nil || strings.TrimSpace(home) == "" {
-			return "", fmt.Errorf("无法定位用户配置目录：%v", err)
-		}
-		return filepath.Join(home, ".aicli", "profiles"), nil
-	case "project":
-		cwd, err := os.Getwd()
-		if err != nil || strings.TrimSpace(cwd) == "" {
-			return "", fmt.Errorf("无法定位当前工作目录：%v", err)
-		}
-		return filepath.Join(cwd, ".aicli", "profiles"), nil
-	default:
-		return "", fmt.Errorf("layer 只支持 user / project：%q", layer)
-	}
+	return profilesys.LayerRoot(layer)
 }
 
 // resolveRuntimeProfileCreateRoot 解析新建 profile 的落盘目录与层名。

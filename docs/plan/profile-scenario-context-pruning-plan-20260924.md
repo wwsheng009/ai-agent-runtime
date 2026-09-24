@@ -524,7 +524,7 @@ Settings（现有设置入口）
 | POST | `/api/runtime/profiles/{ref}/default` | 设为默认（写 config `profiles.default_profile`，只影响**新会话**，§23 G3/D26） |
 | POST | `/api/runtime/profiles/{ref}/apply` | 应用到当前会话（= 第三部分 `set_profile`，下一 turn 生效，§23 G3/D26） |
 | POST | `/api/runtime/profiles/{ref}/export` | 导出（目录/zip；不支持单文件内联格式，§23 G5/D28）——**Batch 13 slice 2 已落地（D32/D33）** |
-| POST | `/api/runtime/profiles/import` | 导入（先 validate、绝不自动激活、显示路径清单，§23 G5/D28）——**Batch 13 slice 2 已落地（D32/D33）**；CLI/TUI/前端入口待接线 |
+| POST | `/api/runtime/profiles/import` | 导入（先 validate、绝不自动激活、显示路径清单，§23 G5/D28）——**Batch 13 slice 2 已落地（D32/D33）**；**CLI 入口已接线（slice 3）**，TUI/前端入口待接线 |
 
 - 写操作沿用 admin token 鉴权与原子写工具；错误码风格对齐现有 handler。
 - 复用优先：`{ref}` 解析直接调 `internal/profile` 的 registry/resolver，**不新建解析逻辑**。
@@ -1201,7 +1201,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 ## 附录 D32/D33：Batch 13 slice 2 回填（2026-09-24）——export/import 落地契约
 
-**落地范围**：执行核心 `internal/profile/transfer.go`（收集/打包/读包/物化，API 与未来 CLI 共用）+ 两个端点（`POST /api/runtime/profiles/{ref}/export`、`POST /api/runtime/profiles/import`）。CLI `aicli profile export/import`、TUI `/profile export`、前端按钮**尚未接线**（下一 slice；TUI 的 `export` 子命令当前是"声明但未接线"状态）。
+**落地范围**：执行核心 `internal/profile/transfer.go`（收集/打包/读包/物化，API 与 CLI 共用）+ 两个端点（`POST /api/runtime/profiles/{ref}/export`、`POST /api/runtime/profiles/import`）+ CLI 子命令 `aicli profile export/import`（slice 3）。TUI `/profile export`、前端按钮**尚未接线**（TUI 的 `export` 子命令当前是"声明但未接线"状态）。
 
 **包格式（Q21 落地）**：zip 条目名 = profile 根相对路径（`profile.yaml`、`agents/...`、`skills/...`），导入原样物化、不重排、不改写内容。**不支持单文件内联**（会引入第二套 profile 方言）。
 
@@ -1213,4 +1213,6 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 **测试锚点**：`internal/profile/transfer_test.go`（路径清洗表、读包安全、收集/打包往返、临时文件与符号链接排除、物化逃逸拒绝）；`internal/api/skills/profiles_transfer_handlers_test.go`（导出→导入往返 + 列表可见 + 不激活 + 冲突不覆盖 + dry_run + 命名契约 + 五类恶意包拒绝且磁盘不留痕 + 解压成功但 validate 失败拒绝）。测试通过 `HOME/USERPROFILE` 重定向把 `layer=user` 的层根指到临时目录，避免污染真实用户目录。
 
-**遗留（Batch 14 及后续）**：① G6/D29 信任门控——未信任工作区里导入的 profile 与本地创建同标准（本项目 profile 解析仍未接 foldertrust，Batch 14 处理）；② 导出/导入的 CLI/TUI/前端入口；③ `from_session`（G1/D24）仍是显式 501。
+**slice 3（CLI）补充**：`aicli profile export <profile> [--out <path>] [--dry-run]`、`aicli profile import <path> [--to user|project] [--name <name>] [--dry-run]`。两处实现细节：① 设计表的 `--output <dir|zip>` 与既有 `--output`（输出格式 text|json）重名，CLI 用 `--out`（缺省 `./<profile>.zip`，指向已存在目录则写 `<目录>/<profile>.zip`）；② `--dry-run` 的临时目录放系统临时区、**不创建层根**（预演不该在用户仓库里留下 `.aicli/` 空目录），真实导入仍在层根内建临时目录以保证 `os.Rename` 同盘原子落位。另外把「层根在哪」的规则收敛到 `internal/profile.LayerRoot`（API 与 CLI 共用一份，API 侧只留包内别名），导入命名契约也收敛为 `internal/profile.ResolveBundleProfileName`。
+
+**遗留（Batch 14 及后续）**：① G6/D29 信任门控——未信任工作区里导入的 profile 与本地创建同标准（本项目 profile 解析仍未接 foldertrust，Batch 14 处理）；② 导出/导入的 TUI/前端入口（CLI 与 API 已接线）；③ `from_session`（G1/D24）仍是显式 501。

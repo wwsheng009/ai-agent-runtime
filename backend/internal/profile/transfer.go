@@ -285,3 +285,21 @@ func bundlePathWithin(parent, target string) bool {
 	}
 	return !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".."
 }
+
+// ResolveBundleProfileName 定夺导入目标名（D32 命名契约，API 与 CLI 共用）：
+// 包内 profile.yaml 声明的 name 是权威；显式 requested 必须与之一致（导入**不**
+// 静默改写 profile.yaml，改名请导入后走 rename）；包内无 name 时必须显式给名。
+func ResolveBundleProfileName(requested, declared string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	declared = strings.TrimSpace(declared)
+	if requested != "" && declared != "" && !strings.EqualFold(requested, declared) {
+		return "", fmt.Errorf("导入包声明的 name 是 %q：导入不改写 profile.yaml，改名请导入后用 rename", declared)
+	}
+	if declared != "" {
+		return declared, nil
+	}
+	if requested != "" {
+		return requested, nil
+	}
+	return "", fmt.Errorf("导入包未声明 profile name：请在 profile.yaml 里补 name，或显式传 name")
+}

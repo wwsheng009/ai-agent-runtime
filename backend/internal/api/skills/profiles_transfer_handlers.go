@@ -109,11 +109,18 @@ func (h *Handler) ImportRuntimeProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := os.MkdirAll(layerRoot, 0o755); err != nil {
-		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "prepare profiles root failed", err))
-		return
+	// dry_run 不落盘：临时目录放系统临时区，连层根都不创建（预演不该在用户仓库
+	// 里留下 .aicli/ 空目录）；真实导入必须在层根内建临时目录，最后一步
+	// os.Rename 才是同盘原子落位。
+	tempBase := ""
+	if !dryRun {
+		if err := os.MkdirAll(layerRoot, 0o755); err != nil {
+			h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "prepare profiles root failed", err))
+			return
+		}
+		tempBase = layerRoot
 	}
-	tempDir, err := os.MkdirTemp(layerRoot, ".import-*")
+	tempDir, err := os.MkdirTemp(tempBase, ".import-*")
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "create import workspace failed", err))
 		return
@@ -154,7 +161,7 @@ func (h *Handler) ImportRuntimeProfile(w http.ResponseWriter, r *http.Request) {
 	if validation.Spec != nil {
 		declared = strings.TrimSpace(validation.Spec.Profile.Name)
 	}
-	name, nameErr := resolveImportedProfileName(query.Get("name"), declared)
+	name, nameErr := profilesys.ResolveBundleProfileName(query.Get("name"), declared)
 	if nameErr != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, nameErr.Error()))
 		return
@@ -205,22 +212,4 @@ func (h *Handler) ImportRuntimeProfile(w http.ResponseWriter, r *http.Request) {
 	response["imported"] = true
 	response["hint"] = "已导入并落在列表（source: root）：使用前请显式 default/apply（D28：导入绝不自动激活）"
 	h.writeJSON(w, http.StatusCreated, response)
-}
-
-// resolveImportedProfileName 定夺导入目标名：包内 profile.yaml 声明的 name 是
-// 权威；显式 name 必须与之一致（导入不静默改写 profile.yaml，改名请导入后走
-// rename）；两者都缺则报错（profile 必须有名字）。
-func resolveImportedProfileName(requested, declared string) (string, error) {
-	requested = strings.TrimSpace(requested)
-	declared = strings.TrimSpace(declared)
-	if requested != "" && declared != "" && !strings.EqualFold(requested, declared) {
-		return "", fmt.Errorf("导入包声明的 name 是 %q：导入不改写 profile.yaml，改名请导入后用 rename", declared)
-	}
-	if declared != "" {
-		return declared, nil
-	}
-	if requested != "" {
-		return requested, nil
-	}
-	return "", fmt.Errorf("导入包未声明 profile name：请在 profile.yaml 里补 name，或显式传 name 参数")
 }

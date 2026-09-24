@@ -26,7 +26,7 @@ func TestNewProfileCommandRegistersSubcommands(t *testing.T) {
 	for _, sub := range cmd.Commands() {
 		names[sub.Name()] = true
 	}
-	for _, want := range []string{"list", "show", "validate", "create"} {
+	for _, want := range []string{"list", "show", "validate", "create", "export", "import"} {
 		if !names[want] {
 			t.Fatalf("profile 子命令缺少 %q（现有：%v）", want, names)
 		}

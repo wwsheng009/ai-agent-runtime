@@ -21,7 +21,7 @@ import (
 func NewProfileCommand(getConfig func() *config.Config) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "profile",
-		Short: "管理场景化 profile（list/show/validate/create）",
+		Short: "管理场景化 profile（list/show/validate/create/export/import）",
 		Long: `管理运行 profile：profile.yaml + agents/<id>/ 的场景化裁剪声明。
 
 子命令：
@@ -29,6 +29,8 @@ func NewProfileCommand(getConfig func() *config.Config) *cobra.Command {
   show      解析并展示一个 profile 的最终生效面（工具/skills/mcp/prompt/paths）
   validate  校验 profile 声明（语法/必填/工具名/skill/mcp 引用/prompt 可读性）
   create    从内置模板（coding|review|minimal|docs）生成 profile 目录
+  export    导出 profile 为 zip 包（分享/分发；只读，不写 profile/配置/会话）
+  import    导入目录或 zip 包为新 profile（先 validate、绝不自动激活、不覆盖同名）
 
 优先级：--profile flag > config profiles.default_profile（可经 DEFAULT_PROFILE
 env 提供）> 无 profile（全量，零变化）。`,
@@ -37,6 +39,8 @@ env 提供）> 无 profile（全量，零变化）。`,
 	cmd.AddCommand(newProfileShowCommand(getConfig))
 	cmd.AddCommand(newProfileValidateCommand(getConfig))
 	cmd.AddCommand(newProfileCreateCommand(getConfig))
+	cmd.AddCommand(newProfileExportCommand(getConfig))
+	cmd.AddCommand(newProfileImportCommand(getConfig))
 	return cmd
 }
 
