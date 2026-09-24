@@ -234,6 +234,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		}
 		if !bridge.WaitForCurrentEvents(chatRuntimeEventDrainTimeout(session, waitTimeout)) {
 			writeSessionDebugInfo(session, "[runtime-event] actor executor drain timeout before prompt result", false)
+			writeSessionDebugInfo(session, fmt.Sprintf("[runtime-event] drain snapshot before prompt result: %s", bridge.drainSnapshot().describe()), false)
 		}
 		if runErr := bridge.RunError(); runErr != nil {
 			logActorExecutorFailureIfUnrecorded(session, prompt, runErr)
@@ -336,6 +337,7 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 		}
 		if !bridge.WaitForCurrentEvents(chatRuntimeEventDrainTimeout(session, waitTimeout)) {
 			writeSessionDebugInfo(session, "[runtime-event] actor executor drain timeout before goal continuation result", false)
+			writeSessionDebugInfo(session, fmt.Sprintf("[runtime-event] drain snapshot before goal continuation result: %s", bridge.drainSnapshot().describe()), false)
 		}
 		if runErr := bridge.RunError(); runErr != nil {
 			warnIfChatSessionSyncFails(session, "actor goal continuation runtime error sync", syncRuntimeSessionBackIntoCLIAfterFailure(session))

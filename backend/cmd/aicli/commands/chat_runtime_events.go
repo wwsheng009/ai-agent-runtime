@@ -157,6 +157,11 @@ type chatRuntimeEventBridge struct {
 	criticalPeakPending uint64
 	criticalAtShutdown  uint64
 	eventBridgeDegraded bool
+	// resumeTurnID 由 renderMu 保护：提问回答发生在已终结的 run 之后时，
+	// 记录「运行时即将继续」的那个挂起轮 id，供
+	// maybeAdoptResumedPrimaryTurn 在续跑事件到达时复活该轮的渲染上下文
+	// （见 expectResumedTurnAfterAnswer）。空值表示当前没有待恢复轮。
+	resumeTurnID string
 	// degradation 是给 TUI 状态行读取的无锁降级摘要（§6.2 第 3 条">降级对用户
 	// 可见"）：写者持 deferredMu 发布，读者（动态状态行）只做 atomic.Load，
 	// 绝不触碰桥的互斥量，因此不会引入新的阻塞点或锁序反转。
@@ -959,6 +964,43 @@ func (b *chatRuntimeEventBridge) BeginRunKind(kind chatRunKind) {
 	}
 }
 
+// chatRuntimeEventDrainSnapshot 描述一次 drain 结算失败时仍在途的工作量。
+// 它的用途是把两种完全不同的「没结算完」分开：
+//   - 事件真的还没交付（还有未处理入队、critical 在途、deferred 积压）；
+//   - 事件已经全部交付，只是渲染侧（UI actor / 视口）还在追赶。
+//
+// 只有前者才配得上「本轮失败」。
+type chatRuntimeEventDrainSnapshot struct {
+	Enqueued        uint64
+	Processed       uint64
+	CriticalPending uint64
+	DeferredBacklog int
+}
+
+func (b *chatRuntimeEventBridge) drainSnapshot() chatRuntimeEventDrainSnapshot {
+	snapshot := chatRuntimeEventDrainSnapshot{}
+	if b == nil {
+		return snapshot
+	}
+	b.progressMu.Lock()
+	snapshot.Enqueued = b.enqueuedEvents
+	snapshot.Processed = b.processedEvents
+	snapshot.CriticalPending = b.criticalPending
+	b.progressMu.Unlock()
+	snapshot.DeferredBacklog = b.deferredBacklogSize()
+	return snapshot
+}
+
+// undeliveredData 报告本次 drain 超时是否意味着有事件尚未交付。
+func (s chatRuntimeEventDrainSnapshot) undeliveredData() bool {
+	return s.Enqueued > s.Processed || s.CriticalPending > 0 || s.DeferredBacklog > 0
+}
+
+func (s chatRuntimeEventDrainSnapshot) describe() string {
+	return fmt.Sprintf("enqueued=%d processed=%d critical_pending=%d deferred_backlog=%d",
+		s.Enqueued, s.Processed, s.CriticalPending, s.DeferredBacklog)
+}
+
 func (b *chatRuntimeEventBridge) EndRun() {
 	if b == nil {
 		return
@@ -976,11 +1018,28 @@ func (b *chatRuntimeEventBridge) EndRun() {
 		)
 	}
 	if !b.WaitForCurrentEvents(b.endRunDrainTimeout()) {
-		b.markEndRunDrainTimeout()
-		// The settle predicate above already waits for criticalPending to reach
-		// zero; if it timed out, account for the in-flight critical events
-		// instead of leaving the degradation invisible (§6.1.5).
-		b.recordCriticalShutdownIfPending()
+		snapshot := b.drainSnapshot()
+		// 只有「确实还有事件没交付」才判本轮失败。渲染侧滞后（UI actor 仍在追赶）
+		// 曾经也被判失败：真实会话 session_20260924161011_sSHP4F7o 在
+		// 2026-09-24 16:11 / 16:32 / 16:40 每一轮都因此 session_end success=false，
+		// 连带把随后到达的提问回答落在「已失败的本轮」上（回答被接受、续跑事件
+		// 却被 turn-ownership 守卫丢弃），页面表现为「回答没有提交到服务器」。
+		if snapshot.undeliveredData() {
+			b.markEndRunDrainTimeout()
+			// The settle predicate above already waits for criticalPending to reach
+			// zero; if it timed out, account for the in-flight critical events
+			// instead of leaving the degradation invisible (§6.1.5).
+			b.recordCriticalShutdownIfPending()
+		}
+		verdict := "no undelivered events; finalizing run as success"
+		if snapshot.undeliveredData() {
+			verdict = "finalizing run as failed"
+		}
+		writeSessionDebugInfo(
+			b.session,
+			fmt.Sprintf("[runtime-event] EndRun drain timeout %s (%s)", snapshot.describe(), verdict),
+			false,
+		)
 	}
 	// Stop the run-active log window before finalization so the run-end
 	// render/log work is not double-counted. The render epoch itself stays
@@ -1153,6 +1212,12 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 		return
 	}
 	b.maybeAdoptPrimaryRunTurn(event)
+	// 已被 EndRun 终结、随后又被提问回答继续的挂起轮：它的事件带的是已
+	// retire 的 turn id，若不在这里复活 run 上下文，整段续跑
+	// （tool.completed、LLM 续写、assistant_message）都会被
+	// turn-ownership 守卫丢弃 —— 模型其实继续跑了，页面却毫无反应，用户
+	// 只能读成「回答没有提交到服务器」。见 expectResumedTurnAfterAnswer。
+	b.maybeAdoptResumedPrimaryTurn(event)
 	size := runtimeevents.ApproximateEventBytes(event)
 	if size < 1 {
 		size = 1
@@ -2568,6 +2633,26 @@ func runtimeEventRequiresLegacyInteraction(event runtimeevents.Event) bool {
 	default:
 		return false
 	}
+}
+
+// externalInputCaptureOwnsInput 报告当前会话的输入面是否已由外部入口
+// （微 Web / 远程面板的输入捕获）接管。
+//
+// 接管期间控制台没有读者：askQuestion/askApproval 会一直等 stdin。它们跑在
+// 事件处理 worker 上（交互事件为了保住 mailbox 顺序必须同步执行，见
+// handleQueuedEvent），于是整条事件流水线被钉死 —— 真实会话
+// session_20260924161011_sSHP4F7o（2026-09-24 17:05）实测 processed 恒为 20、
+// enqueued 涨到 42：提问（seq=1273/1297，恰好是第 20/21 条）之后的事件，
+// 含同一轮的 session_end 与回答后的续跑，永远送不出去 —— EndRun 结算超时，
+// 每一轮都被判失败，用户在 Web 里回答后也看不到续跑。
+//
+// 接管时提问/审批只走 Web 回流：pending_question/pending_approval 由 actor
+// 状态投影到屏幕与 SSE，回答经 /web/api/input 回到协调器，不需要控制台提示。
+func (b *chatRuntimeEventBridge) externalInputCaptureOwnsInput() bool {
+	if b == nil || b.session == nil || b.session.InputQueue == nil {
+		return false
+	}
+	return b.session.InputQueue.hasExternalInputCaptureActive()
 }
 
 func (b *chatRuntimeEventBridge) postRuntimeEventToUIActor(event runtimeevents.Event) bool {
@@ -4788,6 +4873,13 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		if hint := b.approvalPromptHint(event.SessionID, approval); hint != "" {
 			b.renderLocalApprovalSupplement(hint)
 		}
+		if b.externalInputCaptureOwnsInput() {
+			// 外部输入捕获接管输入面：控制台没有读者，askApproval 会死等 stdin
+			// 并把事件处理 worker 钉死（见 externalInputCaptureOwnsInput 注释）。
+			// 审批已由 actor 状态投影到 Web 的 pending_approval，决议经
+			// /web/api/input 回流，这里不阻塞、也不代替 Web 决策。
+			return
+		}
 		if !b.approvalStillPending(event.SessionID, requestID) {
 			// 双入口一致性：审批已被其它入口（如 web client）处理，无需在 console 询问。
 			return
@@ -4839,6 +4931,13 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 			}
 			b.setRunError(b.nonInteractiveQuestionError(prompt))
 			_ = b.resolveQuestion(context.Background(), event.SessionID, questionID, "")
+			return
+		}
+		if b.externalInputCaptureOwnsInput() {
+			// 外部输入捕获接管输入面：控制台没有读者，askQuestion 会死等 stdin
+			// 并把事件处理 worker 钉死（见 externalInputCaptureOwnsInput 注释）。
+			// 提问已由 actor 状态投影到 Web 的 pending_question，回答经
+			// /web/api/input 回流，这里不阻塞、也不代替 Web 作答。
 			return
 		}
 		if !b.questionStillPending(event.SessionID, questionID) {
@@ -4931,6 +5030,77 @@ func (b *chatRuntimeEventBridge) maybeAdoptPrimaryRunTurn(event runtimeevents.Ev
 	b.activeTurnID = turnID
 	b.adoptedTurnID = turnID
 	b.adoptedRunEpoch = b.runEpoch
+}
+
+// expectResumedTurnAfterAnswer 标记「提问回答即将继续的那个轮」。
+//
+// 背景（真实会话 session_20260924161011_sSHP4F7o，2026-09-24 16:34:32）：
+// 提问弹出后该轮会被事件 drain 超时终结（EndRun 把 turn 记入
+// retiredTurnIDs 并清掉 runActive）。此后运行时仍会继续被挂起的工具调用：
+// 日志里 tool.completed / question_answered / llm.request.started /
+// assistant_message / session_end 全部带着同一个已退役 turn id，被
+// shouldSuppressMismatchedPrimaryTurnEvent 整段丢弃 —— 模型真的续跑了，
+// 页面与终端却毫无反应，用户的结论只能是「回答没有提交到服务器」。
+//
+// 这里只记录待恢复轮；真正的复活发生在该轮第一条事件到达时
+// （maybeAdoptResumedPrimaryTurn），因此与 EndRun 的先后顺序无关。
+func (b *chatRuntimeEventBridge) expectResumedTurnAfterAnswer(questionID string) {
+	if b == nil {
+		return
+	}
+	b.renderMu.Lock()
+	turnID := strings.TrimSpace(b.activeTurnID)
+	if turnID == "" && len(b.retiredTurnOrder) > 0 {
+		turnID = strings.TrimSpace(b.retiredTurnOrder[len(b.retiredTurnOrder)-1])
+	}
+	b.resumeTurnID = turnID
+	b.renderMu.Unlock()
+	if turnID == "" {
+		return
+	}
+	writeSessionDebugInfo(
+		b.session,
+		fmt.Sprintf("[runtime-event] question answer resumes turn question_id=%q turn_id=%q run_active=%t",
+			questionID, turnID, b.isRunActive()),
+		false,
+	)
+}
+
+// maybeAdoptResumedPrimaryTurn 为 expectResumedTurnAfterAnswer 标记的轮重新
+// 打开 run epoch：与 maybeAdoptPrimaryRunTurn 的 adopted-run 机制一致，run 由
+// 事件流自身驱动（这里以该轮的首条事件开，以该轮的 session_end 关）。
+//
+// 幂等：run 仍活着（前台 executor 尚未 EndRun）、已有 adopted run，或事件不
+// 属于被标记的轮时均为 no-op。
+func (b *chatRuntimeEventBridge) maybeAdoptResumedPrimaryTurn(event runtimeevents.Event) {
+	if b == nil || !b.isPrimarySessionEvent(event) {
+		return
+	}
+	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
+	if turnID == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.runActive || b.adoptedTurnID != "" || b.resumeTurnID == "" || turnID != b.resumeTurnID {
+		return
+	}
+	// 该轮先前已被 EndRun 退役，复活它必须同时撤销退役标记，否则
+	// shouldSuppressMismatchedPrimaryTurnEvent 的 retiredTurnIDs 分支仍会丢弃。
+	delete(b.retiredTurnIDs, turnID)
+	for i, id := range b.retiredTurnOrder {
+		if id == turnID {
+			b.retiredTurnOrder = append(b.retiredTurnOrder[:i:i], b.retiredTurnOrder[i+1:]...)
+			break
+		}
+	}
+	b.runStarted = true
+	b.runActive = true
+	b.runEpoch++
+	b.activeTurnID = turnID
+	b.adoptedTurnID = turnID
+	b.adoptedRunEpoch = b.runEpoch
+	b.resumeTurnID = ""
 }
 
 // shouldEndAdoptedRun reports whether event is the session_end of the
