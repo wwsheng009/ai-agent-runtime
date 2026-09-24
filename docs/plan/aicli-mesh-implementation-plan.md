@@ -48,7 +48,8 @@
 > 其中 M10 的收敛开关断言在 S10 场景内先落地（E2E 需要它验证「默认放行」的反面）。
 > **S11（Web 侧收口一：sessions 便捷视图 + 前端徽标/分组/开关 + resume 冲突）定义见 §19**，
 > About 页网格小节并入该切片；实时收口（`mesh/events` 前端订阅）为 S12。
-> 之后的治理项切片：S15 接管二次确认（§23）、**S16 `stop`（§24）**、**S17 `watch`（§25）**。
+> 之后的治理项切片：S15 接管二次确认（§23）、**S16 `stop`（§24）**、**S17 `watch`（§25）**、
+> **S18 `aicli mesh` 别名（§26）**。
 
 ### 0.3 硬顺序约束（不可交换）
 
@@ -1075,6 +1076,40 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 | 空结果语义 | 过滤目标在磁盘上完全不存在 → 2（含一次全量探测）；目标存在但窗口内没有事件 → 0 + stderr 提示（长跑进程上很常见，不该当失败） |
 | 单测 | `internal/mesh/watch_test.go`（新建，13 例：合并 + since / 节点与会话过滤 / 轮转代只读一次 / limit 取最新 / follow 追加与半行 / `--once` 不尾随 / 路径不可用 fail-closed / CLI JSON 信封 / 人读前缀 / 用法错误 / 目标不存在 / 空窗口成功 / help） |
 | 施工期发现 | 实时 + `--json` 若坚持套信封，就必须把事件全缓在内存里等一个永不到来的收尾 → 改为逐行 NDJSON，并在 §6.7 显式标注为信封约定的唯一例外 |
+
+---
+
+## 26. S18 · `aicli mesh` 别名（P2 治理项）：与独立二进制共用一套 CLI
+
+> 来源：§0.2 注里的 P2 治理项「`aicli mesh` 别名」+ 架构 §7.5 / Q10 的结论：**做**——
+> 但复用 `internal/mesh.CLI`，不写第二套实现（否则用法文本、退出码、JSON 契约会分叉）。
+
+### 26.1 范围与落点
+
+| 面 | 落点 |
+| --- | --- |
+| 别名 | `backend/cmd/aicli/commands/mesh_command.go`（新建）：`NewMeshCommand` 只做两件事——**参数透传**、**退出码透传** |
+| 注册 | `backend/cmd/aicli/main.go`（`rootCmd.AddCommand(commands.NewMeshCommand())`，与 `replay` 相邻） |
+| 透传机制 | `DisableFlagParsing: true`：网格旗标（`--since` / `--limit` / `--once` / `--no-color` …）的语义与 cobra 无关，在这里再声明一遍等于维护第二份真相 |
+| 退出码 | 非 0 先 `runExitCleanup()` 再 `os.Exit`（与 `export.go` 的 `exportExitHook` 同惯例）：2 / 3 / 4 / 6 原样返回，cobra 的「一切皆 1」兜底路径被完全绕开 |
+| 版本 | `mesh.CLI{Version: chatStatusVersion}`：`aicli mesh version` 报宿主 aicli 的构建版本（main 注入），不是 `mesh.CLIVersion` 的 `dev` 兜底 |
+| 文档 | `docs/aicli/mesh-cli.md`（§1 / §2 / §12）、`docs/aicli/README.md`（条目补别名） |
+
+### 26.2 验证
+
+`go build ./cmd/...`、`go vet ./cmd/aicli/commands/` 通过；
+`go test ./cmd/aicli/commands/ -run 'TestMeshAlias' -count=1 -v` → 6/6 PASS（2026-09-24，本地）。
+
+### 26.3 落地记录（2026-09-24）
+
+| 项 | 实际 |
+| --- | --- |
+| 不做第二套 | 别名里没有任何网格逻辑：旗标解析、渲染、JSON 信封、退出码全部来自 `internal/mesh.CLI` |
+| 帮助文本 | 仍以 `aicli-mesh` 为名（同一份用法）：别名不复制、不改写用法文本；`aicli mesh --help` 打印的就是 `aicli-mesh --help` 那份（退出码 0） |
+| 不是节点 | `meshNodeCommands` 只含 `chat` / `resume`，所以 `aicli mesh ...` 不写档案、不占租约、不出现在 `ls` 里 |
+| 单测 | `commands/mesh_command_test.go`（新建，6 例）：`ls --json` 信封与 `schema_version` / `watch --once --since 1h --json` 旗标原样透传 / `show` 目标不存在 → 2 / 未知子命令 → 1 且 stderr 说明 / `--help` → 0 且列出子命令 / `version --json` 带宿主版本 |
+| 退出码的测试手法 | 注入 `meshAliasExitHook`（生产为 `os.Exit`），与 `exportExitHook` 同一惯例——测试能断言 1 / 2 这类非 0 码而不真的结束测试进程 |
+| 未做（按计划） | 别名不提供独立二进制的安装 / 出包路径（`build.ps1 -Tools aicli-mesh` 不变）；帮助文本不按调用名改写（避免第二份用法） |
 
 ---
 

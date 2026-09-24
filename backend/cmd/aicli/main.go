@@ -529,6 +529,9 @@ func main() {
 	// replay 子命令 — 离线回放录屏到虚拟终端（B2 场景）
 	rootCmd.AddCommand(commands.NewReplayCommand())
 
+	// mesh 子命令 — 与独立二进制 aicli-mesh 同一套实现（internal/mesh.CLI）
+	rootCmd.AddCommand(commands.NewMeshCommand())
+
 	// mcp 子命令
 	mcpCmd := commands.MCPCommand()
 	rootCmd.AddCommand(mcpCmd)

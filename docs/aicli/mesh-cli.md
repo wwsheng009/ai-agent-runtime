@@ -14,9 +14,17 @@
 | 某个节点的端点、令牌提示、绑定、租约、日志尾部 | `show` |
 | 拿一个可直接打开/调用的 URL（需要令牌时显式披露） | `url` |
 | 让某个节点退场（默认投 `/exit` 等它收尾；`--force` 直接终止进程） | `stop`（治理动作，目标需 `--mesh-allow-stop=true`） |
+| 复用活节点或拉起新节点，并给出可直接打开的窗口 URL | `open` |
 | 观察事件流（谁起停、谁切会话、谁调用了谁）——进程全退也能复盘 | `watch` |
 | 清理已退出进程留下的档案 / 租约 / 日志 / 旧目录 | `gc`（默认 dry-run） |
 | 一次性体检：目录、权限、陈旧节点、双占用、令牌可读性、日志完整性 | `doctor` |
+
+两种等价的调用方式（**同一份实现**，参数、输出、退出码完全一致）：
+
+- `aicli-mesh <子命令> ...` —— 独立二进制（`build.ps1 -Tools aicli-mesh` 产出，§11）；
+- `aicli mesh <子命令> ...` —— `aicli` 的内置别名（§12），只部署单个二进制的场景也能用。
+
+本文正文一律写 `aicli-mesh`；别名只是转发，把前缀换成 `aicli mesh` 同样成立。
 
 前置条件与边界：
 
@@ -48,6 +56,9 @@ aicli-mesh version [--json]
 `ls` 与 `ps` 等价（`ps` 是别名）。所有子命令都接受 `--help`（打印用法后退出码 0），
 参数与位置参数可任意穿插（`show <目标> --json` 与 `show --json <目标>` 等价），
 `--` 之后一律按位置参数处理。
+
+以上命令都可用 `aicli mesh` 前缀调用（`aicli mesh watch --since 1h --once --json` ≡
+`aicli-mesh watch --since 1h --once --json`，§12）——旗标与位置参数原样透传，不做二次解析。
 
 ## 3. 目标解析（`show` / `url`）
 
@@ -573,3 +584,28 @@ aicli-mesh doctor --json
   读取方对未知主版本标记为 `unknown` 且**从不改写**；
 - **构建登记**：`scripts/build.ps1`（`LdflagsKind = main-version`）与 `Makefile` 的 `aicli-mesh` 目标
   负责出包；CI 门禁为 `go test ./internal/mesh/...` 加 `--help` 冒烟。
+
+## 12. 别名：`aicli mesh`（与独立二进制同源）
+
+架构 §7.5 / Q10 的落地：**做别名，但不写第二套实现**。`aicli mesh` 与 `aicli-mesh`
+共用 `internal/mesh.CLI`——参数解析、渲染、`--json` 信封、退出码都只有一份代码；
+想改行为就改 `internal/mesh/cli.go`，两边同时生效（避免「文档说 A、命令做 B」）。
+
+```text
+aicli mesh ls --json
+aicli mesh show session_20260924093535
+aicli mesh watch --since 5m
+aicli mesh gc --apply
+```
+
+| 方面 | 行为 |
+|------|------|
+| 参数 | 原样透传（cobra 不解析网格旗标）：`aicli mesh watch --once --since 1h --json` 与独立二进制逐字同义 |
+| 退出码 | 原样返回 0–6（§5），含 2 / 3 / 4 / 6 —— 别名**绕开** cobra 的错误路径，不会把「目标不存在」压成 1 |
+| 帮助 | `aicli mesh --help` 打印的就是 `aicli-mesh --help` 那份用法（文本仍以 `aicli-mesh` 为名：两边共用一份，不复制、不改写） |
+| 版本 | `aicli mesh version` 报**宿主 aicli 的构建版本**（与 `aicli` 自身版本同源，由 main 注入），不是 `aicli-mesh` 二进制的版本 |
+| 节点身份 | **不是节点**：`aicli mesh ...` 不写节点档案、不占租约、不出现在 `ls` 里（唯一写盘路径仍是 `gc --apply`，以及 `open` 拉起的子进程） |
+| 无参数 | `aicli mesh` 把用法打印到 stderr 并退出码 1（与 `aicli-mesh` 无参数一致） |
+
+什么时候用哪个：装了独立二进制就两者皆可（脚本里写 `aicli-mesh` 更明确）；
+只部署了单个 `aicli` 二进制（改名部署、容器镜像）时用 `aicli mesh`。
