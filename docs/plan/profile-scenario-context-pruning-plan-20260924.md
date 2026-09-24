@@ -1318,7 +1318,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 **测试锚点**：`chat_profile_lifecycle_import_test.go`——① 模板渲染 → 打 zip → `--dry-run`（零落盘）→ 真实导入（物化 `profile.yaml` + `校验: 通过` + `未激活` + 会话绑定零变化）→ 同名再导入被拒且不覆盖；② 坏源（不存在 / 缺 `profile.yaml`）被拒且层根零条目 + 未知层不落盘；③ 子会话真实导入被写守卫挡住、`--dry-run` 正常预演。测试内 `writeProfileImportTestBundle` 复用 `RenderTemplate`/`CollectBundleFiles`/`WriteBundleZip`（不另造包格式）；经 `useTemporaryHome` 重定向 `HOME/USERPROFILE`，不污染真实用户目录。
 
-**遗留**：① ~~前端生命周期入口（含导出/导入按钮）~~ **导出/导入已随 slice 8 接线（D38）**；"从当前会话创建"按钮仍缺（`from_session` 有 API、前端零引用）；② D29 信任门控（Batch 14）；③ ~~前端 E2E-1 / E2E-3 / E2E-4 未跑~~ **已随 slice 9b 跑通（D38）**。
+**遗留**：① ~~前端生命周期入口（含导出/导入按钮）~~ **导出/导入已随 slice 8 接线（D38）**；~~"从当前会话创建"按钮缺（`from_session` 有 API、前端零引用）~~ **已随 slice 10 接线（D39）**；② ~~D29 信任门控（Batch 14）~~ **已随 Batch 14 落地**；③ ~~前端 E2E-1 / E2E-3 / E2E-4 未跑~~ **已随 slice 9b 跑通（D38）**。
 
 ## 附录 D38：Batch 13 slice 8/9 回填（2026-09-24）——前端分享入口 + E2E 前端半程验收
 
@@ -1337,4 +1337,22 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 **Batch 13 出口核对**：E2E-1/2/3/4/5 **全绿**（E2E-2 = slice 5/6 server 半程，D35/D36；E2E-1/3/4/5 = slice 9b 前端半程）+ A9-A12 断言已在各自 slice 的测试锚点内（D32-D36）→ **Batch 13 出口条件达成**。下一批次 = Batch 14（P0 安全：D29 信任门控 + E2E-6/7 + A13/A14），前置核实 V20/V21 按 §3 纪律先回填。
 
-**遗留**：① 前端"从当前会话创建"按钮（`from_session` 已有 API（D36）但前端零引用）；② D29 信任门控与未信任警告面（Batch 14）；③ E2E-6/7（Batch 14）。
+**遗留**：① ~~前端"从当前会话创建"按钮（`from_session` 已有 API（D36）但前端零引用）~~ **已随 slice 10 接线（D39）**；② ~~D29 信任门控与未信任警告面（Batch 14）~~ **已随 Batch 14 落地**；③ ~~E2E-6/7（Batch 14）~~ **已随 Batch 14 slice 4 跑通**。
+
+## 附录 D39：Batch 13 slice 10 回填（2026-09-24）——前端「从当前会话创建」（`/profile save-as`）
+
+**背景（G1/D24 的最后一处缺口）**：后端 `mode=save_as` 差分固化（D36）与 `createRuntimeProfile` 的 `from_session` 入参早已落地，但前端**零引用**——Web 端用户无法从当前会话固化 profile，只能走 TUI/CLI；D38 遗留①即此。
+
+**命令形态（不新增按钮面）**：入口落在 composer 内置命令的 `/profile` 子命令，形态 `/profile save-as <名称> [--to user|project]`：
+- **为什么用子命令而不是设置页按钮**：`from_session` 的语义是"以**当前会话**为差分基线"，而设置页（`/runtime-config`）**没有会话上下文**（D31 同一结论：服务端不推断"当前会话"）——放设置页会重演 Batch 13 slice 1 修掉的"假报警"。composer 是唯一天然带 `sessionId` 的前端入口。
+- **能力门控沿用 R20**：`/profile` 命令本身只在宿主确认后端广告 `session_switch` 后注册，`save-as` 是它的子命令，旧后端不会看到半截入口。
+
+**参数解析纪律（"解析不了就报错"）**：`parseProfileSaveAsCommandArgs` 四态显式失败，绝不降级：缺名 → `need-name`；未知开关 → `unknown-flag`（附原文）；`--to` 非 `user|project`（含 `--to` 后无值）→ `bad-layer`（附原文，**不静默落到默认层**）；多余位置参数 → `unexpected-argument`。缺省层用空串表达"由后端按默认层落盘"，前端不猜层。
+
+**执行纪律（三条）**：① **不伪装成功**——后端失败（如"无差分不产空 profile"的 400）走 `saveAs.failed` + logger，回执带原因；② **不并发写盘**——`savingAsRef` 守卫，进行中再发被拒（`inProgress`）；③ **不串台**——子命令分流在 `runProfile` 最前，`save-as` 不会落到"切换 profile"分支（回执与 `applyProfile` 互不干扰，测试钉住 `applyProfile` 零调用）。
+
+**回执口径（与 D36 报告面同源）**：成功回执给 `{profile: ref || name, fields, omitted}`——`fields` 由 `saveAsSurfaceFieldCount` 按后端 `runtimeProfileSaveAsSurfaceSummary` 的**扁平计数摘要**（`"tools.allowlist": 2`、`"tools.read_only": true` 这类键）统计"本次固化了多少项差分"；`omitted` 给"未固化项"条数（prompts 不固化，D24），并在文案里指向"未激活"——固化 ≠ 激活，用户需另用 `/profile use` 或设默认（D5/D26 的注册/激活分离语义）。
+
+**测试锚点**：`use-composer-command-executor.profile-save-as.test.tsx` 6 例（成功路径请求体含 `fromSession: "session-1"` 且 `layer` 缺省为 `undefined` / `--to project` 透传 / 四态参数错且零请求 / 无会话前置失败 / 并发保护 / 失败不伪装成功）+ `composer-builtin-commands.test.ts` 的 `parseProfileSaveAsCommandArgs` 4 例。
+
+**结论**：D38 遗留①关闭；Batch 13（M5）与 Batch 14（M6）全部落地，`from_session` 从"有 API、前端零引用"变为**三入口齐备**（TUI `/profile save-as`、API、Web composer）。

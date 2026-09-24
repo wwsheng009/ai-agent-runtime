@@ -170,3 +170,59 @@ export function parseFeedbackCommandArgs(raw: string): FeedbackArgsParseResult {
   }
   return { ok: true, message };
 }
+
+export type ProfileSaveAsArgs = {
+  /** 新 profile 名称（必填，非空）。 */
+  name: string;
+  /** 目标层；空串 = 不指定，由后端按默认层（user）落盘。 */
+  layer: "" | "user" | "project";
+};
+
+export type ProfileSaveAsArgsParseError =
+  | { kind: "need-name" }
+  | { kind: "unknown-flag"; flag: string }
+  | { kind: "bad-layer"; value: string }
+  | { kind: "unexpected-argument"; value: string };
+
+export type ProfileSaveAsArgsParseResult =
+  | { ok: true; args: ProfileSaveAsArgs }
+  | { ok: false; error: ProfileSaveAsArgsParseError };
+
+/**
+ * `/profile save-as <name> [--to user|project]` 参数解析（G1/D24，前端「从当前会话创建」）。
+ *
+ * 与 TUI `/profile save-as <name> [--to user|project]` 同一书写形态：名称是**单个**
+ * 位置参数（不做引号脱壳拼接——profile 名是句柄，含空白时宁可报错也不猜）；
+ * `--to` 只接受 user / project（其它值如实报错，不静默落到默认层）；
+ * 未知开关与多余位置参数一律失败。
+ */
+export function parseProfileSaveAsCommandArgs(
+  raw: string,
+): ProfileSaveAsArgsParseResult {
+  const tokens = raw.split(/\s+/).filter((token) => token.length > 0);
+  let name = "";
+  let layer: ProfileSaveAsArgs["layer"] = "";
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--to") {
+      const value = tokens[index + 1] ?? "";
+      if (value !== "user" && value !== "project") {
+        return { ok: false, error: { kind: "bad-layer", value } };
+      }
+      layer = value;
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-")) {
+      return { ok: false, error: { kind: "unknown-flag", flag: token } };
+    }
+    if (name.length > 0) {
+      return { ok: false, error: { kind: "unexpected-argument", value: token } };
+    }
+    name = normalizeArgumentText(token);
+  }
+  if (name.length === 0) {
+    return { ok: false, error: { kind: "need-name" } };
+  }
+  return { ok: true, args: { name, layer } };
+}

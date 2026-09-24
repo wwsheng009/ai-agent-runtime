@@ -205,6 +205,8 @@ describe("runtime profiles 客户端", () => {
       root: "",
       template: "minimal",
       from_ref: "",
+      // D24/D36：会话固化（save-as）与创建/复制共用同一端点，字段常驻、空串 = 未指定。
+      from_session: "",
       agent: "",
       force: false,
       use: false,
@@ -228,6 +230,7 @@ describe("runtime profiles 客户端", () => {
       root: "",
       template: "",
       from_ref: REF,
+      from_session: "",
       agent: "",
       force: false,
       use: false,

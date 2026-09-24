@@ -369,6 +369,9 @@ describe("ProfilesModeSection", () => {
       root: "",
       template: "minimal",
       from_ref: "",
+      // D24/D36：save-as 的会话固化走同一创建端点（三模式合一入口），
+      // 契约字段与 from_ref/template 一样常驻，空串 = 未指定（后端 TrimSpace 后忽略）。
+      from_session: "",
       agent: "",
       force: false,
       use: false,

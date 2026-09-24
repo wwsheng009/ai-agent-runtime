@@ -8,7 +8,6 @@
 // - 结果通知只持 i18n key 与插值（模型层不持文案），渲染层本地化。
 import { useCallback, useRef, useState } from "react";
 
-import type { SessionProfileSwitchReport } from "@/api/runtime/profiles";
 import { executeSkill } from "@/api/runtime/skills";
 import { createLogger } from "@/core/logger";
 import {
@@ -18,23 +17,25 @@ import {
 } from "@/lib/composer-builtin-commands";
 import type { ComposerCommand } from "@/lib/composer-commands";
 import {
-  resolveComposerProfileRef,
-  type ComposerProfileCandidate,
-} from "@/lib/composer-profile-options";
-import {
   exportSessionTrajectoryJsonl,
   type SessionTrajectoryExportResult,
 } from "@/lib/trajectory/export-session";
 
-const logger = createLogger("use-composer-command-executor");
+import {
+  describeError,
+  useComposerProfileCommand,
+  type ComposerCommandResultNotice,
+  type ComposerProfileSelectionBridge,
+} from "./use-composer-profile-command";
 
-export type ComposerCommandResultNotice = {
-  /** 语气：错误用 role="alert"，成功用 role="status"。 */
-  tone: "success" | "error";
-  /** i18n key（workspace 命名空间）。 */
-  messageKey: string;
-  values?: Record<string, string | number>;
-};
+// `/profile` 的类型与错误取文已随命令分支拆到 `use-composer-profile-command.ts`
+// （P0-2 行数门禁：单文件非空行 ≤ 500）；这里原样再导出，保持既有 import 面不变。
+export type {
+  ComposerCommandResultNotice,
+  ComposerProfileSelectionBridge,
+} from "./use-composer-profile-command";
+
+const logger = createLogger("use-composer-command-executor");
 
 export type ComposerCommandExecutor = {
   run: (command: ComposerCommand, args: string) => boolean;
@@ -75,24 +76,6 @@ export type ComposerModelSelectionBridge = {
   /** 打开 `/model` 弹窗（无参数提交时使用）。 */
   openDialog: () => void;
 };
-
-export type ComposerProfileSelectionBridge = {
-  /**
-   * 目录候选全集（含不可解析项）：回执要能区分「不存在」与「存在但不可用」，
-   * 菜单候选只用其中的 `valid` 项（见 `lib/composer-profile-options.ts`）。
-   */
-  candidates: readonly ComposerProfileCandidate[];
-  /** 切换当前会话 profile；返回后端 Switch Report（下一轮生效语义由回执呈现）。 */
-  applyProfile: (profileRef: string) => Promise<SessionProfileSwitchReport>;
-  /** 打开 `/profile` 弹窗（无参数提交时使用）。 */
-  openDialog: () => void;
-};
-
-function describeError(error: unknown): string {
-  return error instanceof Error && error.message.trim().length > 0
-    ? error.message
-    : String(error);
-}
 
 // log-only：本仓无反馈后端路由与外部渠道，反馈只写本地结构化日志，不上报。
 const feedbackLog = createLogger("composer.feedback");
@@ -135,6 +118,12 @@ export function useComposerCommandExecutor({
 }: UseComposerCommandExecutorOptions): ComposerCommandExecutor {
   const [notice, setNotice] = useState<ComposerCommandResultNotice | null>(null);
   const exportingRef = useRef(false);
+  // `/profile` 的切换与 save-as 分支在独立 hook 内（回执仍走同一 setNotice 出口）。
+  const { runProfile } = useComposerProfileCommand({
+    sessionId,
+    profileSelection,
+    setNotice,
+  });
 
   const runExport = useCallback(
     (args: string) => {
@@ -301,97 +290,6 @@ export function useComposerCommandExecutor({
       });
     },
     [modelSelection],
-  );
-
-  const runProfile = useCallback(
-    (args: string) => {
-      const requested = args.trim();
-      if (requested.length === 0) {
-        // 无参数：打开 `/profile` 弹窗（候选由宿主持有，执行走同一处理器）。
-        if (!profileSelection) {
-          setNotice({
-            tone: "error",
-            messageKey: "composer.builtin.profile.unavailable",
-          });
-          return;
-        }
-        profileSelection.openDialog();
-        return;
-      }
-      if (!profileSelection || profileSelection.candidates.length === 0) {
-        // 目录未就绪（拉取中 / 失败 / 后端未声明能力）：不按「profile 不存在」报。
-        setNotice({
-          tone: "error",
-          messageKey: "composer.builtin.profile.unavailable",
-        });
-        return;
-      }
-      const candidate = resolveComposerProfileRef(
-        profileSelection.candidates,
-        requested,
-      );
-      if (!candidate) {
-        setNotice({
-          tone: "error",
-          messageKey: "composer.builtin.profile.notFound",
-          values: { profile: requested },
-        });
-        return;
-      }
-      if (!candidate.valid) {
-        // 存在但解析失败：如实报「不可用 + 原因」，不伪装成「不存在」。
-        setNotice({
-          tone: "error",
-          messageKey: "composer.builtin.profile.invalid",
-          values: {
-            profile: candidate.label,
-            reason: candidate.invalidReason || candidate.ref,
-          },
-        });
-        return;
-      }
-      if (!sessionId) {
-        setNotice({
-          tone: "error",
-          messageKey: "composer.builtin.profile.noSession",
-        });
-        return;
-      }
-      void (async () => {
-        try {
-          const report = await profileSelection.applyProfile(candidate.ref);
-          const warnings = report.warnings ?? [];
-          // 回执口径（D23/D30）：切换是「下一轮生效」；在途回合存在时显式说明
-          // 本回合仍走旧面；provider/model/permission 差异以 warnings 呈现
-          // （只报告不隐式应用），这里把首条告警一并回显，不吞掉。
-          setNotice({
-            tone: "success",
-            messageKey:
-              warnings.length > 0
-                ? "composer.builtin.profile.appliedWithWarnings"
-                : report.inFlightTurn
-                  ? "composer.builtin.profile.appliedAfterTurn"
-                  : "composer.builtin.profile.applied",
-            values: {
-              profile: candidate.label,
-              count: warnings.length,
-              warning: warnings[0] ?? "",
-            },
-          });
-        } catch (error) {
-          logger.error("profile switch failed", {
-            profileRef: candidate.ref,
-            error,
-          });
-          setNotice({
-            tone: "error",
-            messageKey: "composer.builtin.profile.failed",
-            values: { message: describeError(error) },
-          });
-        }
-      })();
-    },
-    [profileSelection, sessionId],
   );
 
   const runSkill = useCallback(

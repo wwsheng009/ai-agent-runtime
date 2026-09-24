@@ -305,6 +305,7 @@ export function buildCreateBody(request: RuntimeProfileCreateRequest) {
     root: request.root ?? "",
     template: request.template ?? "",
     from_ref: request.fromRef ?? "",
+    from_session: request.fromSession ?? "",
     agent: request.agent ?? "",
     force: request.force === true,
     use: request.use === true,
@@ -336,6 +337,13 @@ export function normalizeCreateResponse(payload: unknown, fallbackName: string) 
     defaultProfileSet: readBoolean(record.default_profile_set ?? record.defaultProfileSet),
     affects: readAliasedString(record, "affects"),
     configPath: readAliasedString(record, "configPath"),
+    // save-as（D36）报告面：模板/复制/普通新建时后端不返回这些字段，读成空值即可
+    // （回执按 `mode` 分流，不会把空 surface 说成「零差分」）。
+    mode: readAliasedString(record, "mode"),
+    fromSession: readAliasedString(record, "fromSession"),
+    baseline: readAliasedString(record, "baseline"),
+    surface: asRecord(record.surface) ?? {},
+    omitted: readStringArray(record.omitted),
   } satisfies RuntimeProfileCreateResponse;
 }
 

@@ -510,7 +510,7 @@ export const zhWorkspaceBase = {
       },
       profile: {
         description: "切换当前会话的 profile（下一轮生效）",
-        argumentHint: "[profile]",
+        argumentHint: "[profile | save-as <名称> [--to user|project]]",
         applied: "已切换 profile：{{profile}}（下一轮生效）",
         appliedAfterTurn: "已切换 profile：{{profile}}（当前回合仍在途，下一轮生效）",
         appliedWithWarnings:
@@ -520,6 +520,16 @@ export const zhWorkspaceBase = {
         unavailable: "运行时 profile 目录未就绪，暂不能切换 profile",
         noSession: "当前没有可切换 profile 的会话",
         failed: "切换 profile 失败：{{message}}",
+        saveAs: {
+          needName: "请提供新 profile 名称：/profile save-as <名称> [--to user|project]",
+          unknownFlag: "未知开关：{{flag}}",
+          badLayer: "层级只支持 user 或 project：{{value}}",
+          unexpectedArgument: "多余的参数：{{value}}",
+          noSession: "当前没有可固化的会话",
+          inProgress: "上一次固化还在进行中，请稍候",
+          done: "已从当前会话创建 profile：{{profile}}（{{fields}} 项差分声明；{{omitted}} 项未包含，如 prompt；未激活——用 /profile {{profile}} 切换）",
+          failed: "从当前会话创建 profile 失败：{{message}}",
+        },
         dialog: {
           title: "选择 Profile",
           searchPlaceholder: "搜索 profile…",

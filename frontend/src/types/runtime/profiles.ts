@@ -333,6 +333,11 @@ export type RuntimeProfileCreateRequest = {
   template?: string;
   /** 以既有 profile 为模板复制。 */
   fromRef?: string;
+  /**
+   * 从会话固化（save-as；D24/D36）：把该会话的生效面与基线差分固化为新 profile。
+   * 与 template / fromRef 互斥——后端 400，不静默挑一个。
+   */
+  fromSession?: string;
   /** 模板 profile 的 default_agent。 */
   agent?: string;
   /** 目标目录非空时覆盖。 */
@@ -356,6 +361,19 @@ export type RuntimeProfileCreateResponse = {
   /** new_sessions_only 等影响面说明。 */
   affects: string;
   configPath: string;
+  /**
+   * 本次创建的模式：`save_as` = 从会话固化（D36）；模板 / 复制 / 普通新建为空串。
+   * 回执据此说「从当前会话创建」，而不是从名称猜来源。
+   */
+  mode: string;
+  /** 固化来源会话（仅 `mode=save_as`）。 */
+  fromSession: string;
+  /** 会话绑定的 profile（仅报告用；产物基线恒为内置默认面，D35）。 */
+  baseline: string;
+  /** 逐字段差分计数摘要（仅 `mode=save_as`）。 */
+  surface: Record<string, unknown>;
+  /** 不可声明项逐项说明（prompt / 非默认权限模式 / skills 目录）。 */
+  omitted: string[];
 };
 
 export type RuntimeProfileDuplicateRequest = RuntimeProfileCreateRequest;

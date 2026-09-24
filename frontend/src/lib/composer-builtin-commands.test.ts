@@ -12,6 +12,7 @@ import {
   COMPOSER_BUILTIN_COMMANDS,
   parseExportCommandArgs,
   parseFeedbackCommandArgs,
+  parseProfileSaveAsCommandArgs,
   parseRenameCommandArgs,
 } from "./composer-builtin-commands";
 import { createComposerCommandRegistry } from "./composer-commands";
@@ -136,6 +137,58 @@ describe("parseFeedbackCommandArgs", () => {
     expect(parseFeedbackCommandArgs('""')).toEqual({
       ok: false,
       reason: "empty",
+    });
+  });
+});
+
+describe("parseProfileSaveAsCommandArgs", () => {
+  it("名称 + 可选 --to：缺省层为空串（由后端按默认层落盘）", () => {
+    expect(parseProfileSaveAsCommandArgs(" my-review ")).toEqual({
+      ok: true,
+      args: { name: "my-review", layer: "" },
+    });
+    expect(parseProfileSaveAsCommandArgs("my-review --to project")).toEqual({
+      ok: true,
+      args: { name: "my-review", layer: "project" },
+    });
+    // 开关在前也认（不依赖书写顺序），但位置参数仍只允许一个。
+    expect(parseProfileSaveAsCommandArgs("--to user my-review")).toEqual({
+      ok: true,
+      args: { name: "my-review", layer: "user" },
+    });
+  });
+
+  it("缺名失败：不生成无名 profile", () => {
+    expect(parseProfileSaveAsCommandArgs("")).toEqual({
+      ok: false,
+      error: { kind: "need-name" },
+    });
+    expect(parseProfileSaveAsCommandArgs("   --to project")).toEqual({
+      ok: false,
+      error: { kind: "need-name" },
+    });
+  });
+
+  it("非法层如实报错（不静默落到默认层）", () => {
+    expect(parseProfileSaveAsCommandArgs("my-review --to team")).toEqual({
+      ok: false,
+      error: { kind: "bad-layer", value: "team" },
+    });
+    // `--to` 后没有值：同样是层非法，而不是「按缺省处理」。
+    expect(parseProfileSaveAsCommandArgs("my-review --to")).toEqual({
+      ok: false,
+      error: { kind: "bad-layer", value: "" },
+    });
+  });
+
+  it("未知开关与多余位置参数一律失败（附原文）", () => {
+    expect(parseProfileSaveAsCommandArgs("my-review --force")).toEqual({
+      ok: false,
+      error: { kind: "unknown-flag", flag: "--force" },
+    });
+    expect(parseProfileSaveAsCommandArgs("my-review other")).toEqual({
+      ok: false,
+      error: { kind: "unexpected-argument", value: "other" },
     });
   });
 });

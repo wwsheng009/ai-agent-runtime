@@ -535,7 +535,7 @@ export const enWorkspaceBase = {
       },
       profile: {
         description: "switch the profile for the current session (takes effect next turn)",
-        argumentHint: "[profile]",
+        argumentHint: "[profile | save-as <name> [--to user|project]]",
         applied: "profile switched to {{profile}} (takes effect next turn)",
         appliedAfterTurn:
           "profile switched to {{profile}} (a turn is in flight; takes effect next turn)",
@@ -546,6 +546,16 @@ export const enWorkspaceBase = {
         unavailable: "the runtime profile catalog is not ready — cannot switch profiles",
         noSession: "there is no session to switch profiles for",
         failed: "profile switch failed: {{message}}",
+        saveAs: {
+          needName: "provide a new profile name: /profile save-as <name> [--to user|project]",
+          unknownFlag: "unknown flag: {{flag}}",
+          badLayer: "layer must be user or project: {{value}}",
+          unexpectedArgument: "unexpected argument: {{value}}",
+          noSession: "there is no session to save as a profile",
+          inProgress: "a previous save-as is still running — please wait",
+          done: "profile created from the current session: {{profile}} ({{fields}} diff field(s); {{omitted}} item(s) not included, e.g. prompts; not activated — switch with /profile {{profile}})",
+          failed: "creating a profile from the current session failed: {{message}}",
+        },
         dialog: {
           title: "Select Profile",
           searchPlaceholder: "Search profiles…",
