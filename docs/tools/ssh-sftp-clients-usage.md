@@ -61,6 +61,7 @@ ssh-client [options] [user@]host [command]
 | `--verbose` | `-v` | false | 调试输出 |
 | `--config-file` | `-F` | `~/.ssh/config` | ssh_config 文件路径 |
 | `--no-session` | `-N` | false | 仅端口转发，不执行远程命令 |
+| `--no-reconnect` | — | false | `-N` 模式下链路中断即退出（255），不自动重连 |
 | `--local-forward` | `-L` | — | 本地端口转发 `bind:port:host:hostport` |
 | `--remote-forward` | `-R` | — | 远程端口转发 `bind:port:host:hostport` |
 | `--no-tty` | `-T` | false | 禁止分配伪终端 |
@@ -82,6 +83,7 @@ ssh-client [options] [user@]host [command]
 | `ConnectTimeout` | `-o ConnectTimeout=10` | 连接超时（秒） |
 | `ServerAliveInterval` | `-o ServerAliveInterval=15` | 保活间隔（秒） |
 | `ServerAliveCountMax` | `-o ServerAliveCountMax=3` | 保活失败最大次数 |
+| `ExitOnForwardFailure` | `-o ExitOnForwardFailure=yes` | 转发建立失败时是否退出（yes/no，默认 yes） |
 | `StrictHostKeyChecking` | `-o StrictHostKeyChecking=no` | 主机密钥校验模式：yes / accept-new / no |
 | `UserKnownHostsFile` | `-o UserKnownHostsFile=NUL` | known_hosts 文件路径 |
 | `HostKeyAlgorithms` | `-o HostKeyAlgorithms=ssh-ed25519` | 主机密钥算法白名单（逗号分隔） |
@@ -382,6 +384,21 @@ ssh-client -o StrictHostKeyChecking=no user@host
 - 默认关闭（`ServerAliveInterval=0`）
 - 启用后，客户端定期发送 keepalive 请求；若连续 `ServerAliveCountMax` 次无响应，自动断开连接
 - 推荐设置：`-o ServerAliveInterval=15 -o ServerAliveCountMax=3`（约 45 秒检测到死链）
+- `-N` 隧道模式默认启用（`ServerAliveInterval=15`、`ServerAliveCountMax=3`），无需手工配置
+
+### 隧道自愈（`-N` 模式）
+
+`-N` 模式会监督 SSH 传输层：链路死亡后按指数退避（1s→30s）自动重连并重建全部
+`-L`/`-R` 转发；重连期间本地监听端口先释放，客户端连接快速失败而不是悬挂在半开状态。
+
+```
+ssh-client: connection lost: ssh: disconnect, reason 2: ... (reconnect attempt 1 in 1s)
+ssh-client: reconnected, forwarding restored (attempt 1)
+```
+
+- 认证失败、主机密钥不匹配等错误不重试，直接以 255 退出；
+- `--no-reconnect` 关闭自动重连：中断即以 255 退出，交由外部监督进程（systemd、
+  Windows 服务、批处理 `:reconnect` 循环）重启。
 
 ### 命令行超时
 
@@ -426,7 +443,23 @@ ssh-client: host key mismatch for "hostname": ... If you trust this host, remove
 
 SFTP 传输受限于底层 SSH 加密通道和网络延迟，没有加速选项。若需高速传输，考虑使用 `rsync` 或 `scp` 配合压缩选项。
 
-### 7.5 Windows 上的注意事项
+### 7.5 端口转发「假死」：本地端口仍可连接，但转发立即断开
+
+**症状**：`ssh-client -N -L ...` 进程仍在、本地端口仍在监听，但所有经隧道的连接被立即
+重置；依赖隧道的后端（数据库 / Redis）报连接被拒绝或 EOF。外部重启脚本因为进程没有退出
+而永远不会触发重启。
+
+**原因**：SSH 传输层已死亡（网络切换、NAT/防火墙回收空闲连接、服务器重启），而旧版本
+在传输层结束后既不退出也不重连，进程带着失效的转发监听变成「僵尸隧道」。
+
+**解决**：
+
+- 升级到含隧道监督的版本：`-N` 模式在链路死亡后自动重连并重建转发；
+- 未显式配置时 `-N` 模式默认启用保活（`ServerAliveInterval=15`、`ServerAliveCountMax=3`）；
+- 认证失败、主机密钥不匹配等不可恢复错误会直接以 255 退出，便于外部脚本感知；
+- 需要外部进程管理器统一重启时，加 `--no-reconnect`（中断即退出 255）。
+
+### 7.6 Windows 上的注意事项
 
 - 密钥文件路径使用正斜杠或双反斜杠：`-i C:/Users/name/.ssh/id_ed25519` 或 `-i C:\\Users\\name\\.ssh\\id_ed25519`
 - `known_hosts` 文件默认位于 `%USERPROFILE%\.ssh\known_hosts`

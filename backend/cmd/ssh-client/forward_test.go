@@ -162,9 +162,11 @@ func TestStartLocalForwardShorthand(t *testing.T) {
 	localPort := freeTCPPort(t)
 	// 3 段简写：port:host:hostport（bind 默认 localhost）
 	spec := fmt.Sprintf("%d:127.0.0.1:%s", localPort, echoPortStr)
-	if err := startLocalForward(client.SSHSession(), spec); err != nil {
+	handle, err := startLocalForward(client.SSHSession(), spec, nil, io.Discard)
+	if err != nil {
 		t.Fatalf("startLocalForward(%q): %v", spec, err)
 	}
+	defer handle.Close()
 
 	// 连接到本地转发端口，验证回显
 	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", localPort))

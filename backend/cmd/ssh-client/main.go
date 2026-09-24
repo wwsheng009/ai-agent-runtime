@@ -2,12 +2,11 @@ package main
 
 import (
 	"fmt"
-	"io"
-	"net"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,27 +23,28 @@ var version = "0.1.0"
 
 // CLI 参数
 type cliFlags struct {
-	port          int
-	user          string
-	identityFiles []string
-	password      string
-	passwordSet   bool
-	options       []string
-	quiet         bool
-	verbose       bool
-	configFile    string
-	noSession     bool
-	localForwards []string
+	port           int
+	user           string
+	identityFiles  []string
+	password       string
+	passwordSet    bool
+	options        []string
+	quiet          bool
+	verbose        bool
+	configFile     string
+	noSession      bool
+	localForwards  []string
 	remoteForwards []string
-	noTty         bool
-	forceTty      bool
-	showVersion   bool
-	ipv4          bool
-	ipv6          bool
-	compress      bool
-	timeout       int
+	noReconnect    bool
+	noTty          bool
+	forceTty       bool
+	showVersion    bool
+	ipv4           bool
+	ipv6           bool
+	compress       bool
+	timeout        int
 	knownHostsFile string
-	showHelp      bool
+	showHelp       bool
 	// 目标
 	host    string
 	command []string
@@ -109,7 +109,11 @@ Notes:
   - Connection setup (TCP dial + SSH handshake) is bounded by ConnectTimeout
     (default 30s; use --timeout N or -o ConnectTimeout=N to change). A server that
     accepts TCP but never completes the handshake will time out instead of hanging.
-  - Dead-link detection: -o ServerAliveInterval=15 -o ServerAliveCountMax=3.
+  - Dead-link detection: -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+    (enabled by default in -N mode: 15s x 3).
+  - -N tunnel supervision: when the link dies the client reconnects with
+    exponential backoff (1s..30s) and restores every -L/-R forward; use
+    --no-reconnect to exit with code 255 instead and let a supervisor restart it.
   - Host key verification: -o StrictHostKeyChecking=yes|accept-new|no (default accept-new).
   - ProxyCommand (via config file) is supported; ProxyJump is parsed but not implemented.
 `)
@@ -126,6 +130,7 @@ Notes:
 	fs.BoolVarP(&flags.noSession, "no-session", "N", false, "Do not execute remote command (forwarding only)")
 	fs.StringArrayVarP(&flags.localForwards, "local-forward", "L", nil, "Local port forwarding ([bind:]port:host:hostport; bind defaults to localhost)")
 	fs.StringArrayVarP(&flags.remoteForwards, "remote-forward", "R", nil, "Remote port forwarding ([bind:]port:host:hostport; bind defaults to localhost)")
+	fs.BoolVar(&flags.noReconnect, "no-reconnect", false, "In -N mode, exit (255) on link loss instead of reconnecting")
 	fs.BoolVarP(&flags.noTty, "no-tty", "T", false, "Disable pseudo-terminal allocation")
 	fs.BoolVarP(&flags.forceTty, "tty", "t", false, "Force pseudo-terminal allocation")
 	fs.BoolVarP(&flags.showVersion, "version", "V", false, "Show version")
@@ -282,7 +287,15 @@ func run(flags *cliFlags) int {
 		fmt.Fprintf(os.Stderr, "ssh-client: connecting to %s (port %d)...\n", opts.Host, opts.Port)
 	}
 
-	// 4. 建立连接
+	// 4. -N（仅转发）模式：建链、转发与断线重连全部交由 runForwardOnly 监督，
+	// 避免留下「端口仍在监听、转发已失效」的僵尸进程（见 forward.go）。
+	if flags.noSession {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		return runForwardOnly(opts, flags.localForwards, flags.remoteForwards, os.Stderr, sigCh, !flags.noReconnect, defaultConnect)
+	}
+
+	// 5. 建立连接
 	client, err := sshclient.NewClient(opts, os.Stderr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ssh-client: connection failed: %v\n", err)
@@ -292,30 +305,15 @@ func run(flags *cliFlags) int {
 
 	sshConn := client.SSHSession()
 
-	// 5. 端口转发
-	for _, lf := range flags.localForwards {
-		if err := startLocalForward(sshConn, lf); err != nil {
-			fmt.Fprintf(os.Stderr, "ssh-client: local forward: %v\n", err)
-			return 255
-		}
+	// 6. 端口转发（交互/命令模式只建立一次；监听器意外失效仅告警，不断开会话）
+	handles, err := startForwards(sshConn, flags.localForwards, flags.remoteForwards, nil, opts.ExitOnForwardFailure, os.Stderr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ssh-client: %v\n", err)
+		return 255
 	}
-	for _, rf := range flags.remoteForwards {
-		if err := startRemoteForward(sshConn, rf); err != nil {
-			fmt.Fprintf(os.Stderr, "ssh-client: remote forward: %v\n", err)
-			return 255
-		}
-	}
+	defer closeForwards(handles)
 
-	// 6. 会话模式
-	if flags.noSession {
-		// -N: 仅端口转发，等待信号
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-		<-sig
-		fmt.Fprintln(os.Stderr, "ssh-client: forwarding closed")
-		return 0
-	}
-
+	// 7. 会话模式
 	if len(flags.command) > 0 {
 		// 远程命令执行
 		cmdStr := strings.Join(flags.command, " ")
@@ -349,14 +347,7 @@ func interactiveShell(client *ssh.Client, opts *sshclient.Options, noTty, forceT
 			fmt.Fprintf(os.Stderr, "ssh-client: shell: %v\n", err)
 			return 255
 		}
-		if err := session.Wait(); err != nil {
-			var exitErr *ssh.ExitError
-			if sshclient.IsExitError(err, &exitErr) {
-				return exitErr.ExitStatus()
-			}
-			return 130
-		}
-		return 0
+		return sessionExitCode(session.Wait(), false)
 	}
 
 	// 设置终端模式
@@ -393,11 +384,13 @@ func interactiveShell(client *ssh.Client, opts *sshclient.Options, noTty, forceT
 	stopWinCh := watchWindowSize(session, fd)
 	defer stopWinCh()
 
-	// 信号转发
+	// 信号转发：Ctrl+C 关闭会话并按 130 退出（与链路掉线的 255 区分开）
+	var interrupted atomic.Bool
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
+		interrupted.Store(true)
 		session.Close()
 	}()
 
@@ -406,32 +399,42 @@ func interactiveShell(client *ssh.Client, opts *sshclient.Options, noTty, forceT
 		return 255
 	}
 
-	if err := session.Wait(); err != nil {
-		var exitErr *ssh.ExitError
-		if sshclient.IsExitError(err, &exitErr) {
-			return exitErr.ExitStatus()
-		}
-		// Ctrl+C 等中断
+	return sessionExitCode(session.Wait(), interrupted.Load())
+}
+
+// sessionExitCode 把会话结束错误映射为退出码：
+// 远程退出码优先；用户中断 → 130；其余（链路掉线、协议错误）→ 255 并给出原因。
+func sessionExitCode(err error, interrupted bool) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *ssh.ExitError
+	if sshclient.IsExitError(err, &exitErr) {
+		return exitErr.ExitStatus()
+	}
+	if interrupted {
 		return 130
 	}
-	return 0
+	fmt.Fprintf(os.Stderr, "ssh-client: connection lost: %v\n", err)
+	return 255
 }
 
 // applyOptions 解析 -o key=value 并设置 Options。
 func applyOptions(opts *sshclient.Options, options []string) error {
 	whitelist := map[string]bool{
-		"StrictHostKeyChecking":   true,
-		"UserKnownHostsFile":      true,
-		"ConnectTimeout":          true,
-		"ServerAliveInterval":     true,
-		"ServerAliveCountMax":     true,
-		"HostKeyAlgorithms":       true,
+		"StrictHostKeyChecking":    true,
+		"UserKnownHostsFile":       true,
+		"ConnectTimeout":           true,
+		"ServerAliveInterval":      true,
+		"ServerAliveCountMax":      true,
+		"HostKeyAlgorithms":        true,
 		"PreferredAuthentications": true,
-		"LogLevel":                true,
-		"Compression":             true,
-		"ProxyJump":               true, // 只警告，不实现
-		"ProxyCommand":            true,
-		"CertificateFile":         true,
+		"LogLevel":                 true,
+		"Compression":              true,
+		"ExitOnForwardFailure":     true,
+		"ProxyJump":                true, // 只警告，不实现
+		"ProxyCommand":             true,
+		"CertificateFile":          true,
 	}
 
 	for _, o := range options {
@@ -477,6 +480,8 @@ func applyOptions(opts *sshclient.Options, options []string) error {
 			opts.LogLevel = strings.ToUpper(val)
 		case "Compression":
 			opts.Compression = val == "yes" || val == "true"
+		case "ExitOnForwardFailure":
+			opts.ExitOnForwardFailure = val == "yes" || val == "true"
 		case "ProxyJump":
 			fmt.Fprintf(os.Stderr, "ssh-client: warning: ProxyJump not implemented, ignoring %q\n", val)
 		case "ProxyCommand":
@@ -485,145 +490,5 @@ func applyOptions(opts *sshclient.Options, options []string) error {
 			opts.CertificateFiles = append(opts.CertificateFiles, val)
 		}
 	}
-	return nil
-}
-
-// parseForwardSpec 解析 OpenSSH 兼容的转发规格：
-//
-//	[bind_address:]port:host:hostport
-//
-// bind_address 可省略（默认 localhost），可为 IPv4（如 192.168.1.1）、
-// 带方括号的 IPv6（如 [::1]）或 "*"（所有接口）。host 也可以是带方括号的
-// IPv6（如 [::1]）。解析从右向左进行，方括号内的冒号不会被当作分隔符。
-func parseForwardSpec(spec string) (bind, port, host, hostport string, err error) {
-	bind = "localhost" // OpenSSH 默认绑定回环地址
-	invalid := func() error {
-		return fmt.Errorf("invalid forward spec %q (expected [bind:]port:host:hostport)", spec)
-	}
-
-	// 1. 末尾 hostport 必须紧跟最后一段，且为数字
-	lastColon := strings.LastIndex(spec, ":")
-	if lastColon < 0 {
-		return "", "", "", "", invalid()
-	}
-	hostport = spec[lastColon+1:]
-	if _, err := strconv.Atoi(hostport); err != nil {
-		return "", "", "", "", invalid()
-	}
-	rest := spec[:lastColon]
-
-	// 2. 提取 host：若 rest 以 "]" 结尾则 host 是带方括号的 IPv6
-	var head string
-	if strings.HasSuffix(rest, "]") {
-		open := strings.LastIndex(rest, "[")
-		if open < 0 {
-			return "", "", "", "", invalid()
-		}
-		host = rest[open:]
-		head = strings.TrimSuffix(rest[:open], ":")
-	} else {
-		hc := strings.LastIndex(rest, ":")
-		if hc < 0 {
-			return "", "", "", "", invalid()
-		}
-		host = rest[hc+1:]
-		head = rest[:hc]
-	}
-	if host == "" {
-		return "", "", "", "", invalid()
-	}
-
-	// 3. head 为 "port" 或 "bind:port"
-	if pc := strings.LastIndex(head, ":"); pc >= 0 {
-		bind = head[:pc]
-		port = head[pc+1:]
-	} else {
-		port = head
-	}
-	if port == "" {
-		return "", "", "", "", invalid()
-	}
-
-	// 4. 规范化 bind：去掉 IPv6 方括号；"*"/"" 表示所有接口
-	bind = strings.Trim(bind, "[]")
-	if bind == "*" {
-		bind = ""
-	}
-	return bind, port, host, hostport, nil
-}
-
-// startLocalForward 启动本地端口转发（-L）。
-func startLocalForward(client *ssh.Client, spec string) error {
-	bind, portStr, remoteHost, remotePortStr, err := parseForwardSpec(spec)
-	if err != nil {
-		return err
-	}
-
-	localAddr := net.JoinHostPort(bind, portStr)
-	remoteAddr := net.JoinHostPort(remoteHost, remotePortStr)
-
-	listener, err := net.Listen("tcp", localAddr)
-	if err != nil {
-		return fmt.Errorf("listen on %s: %w", localAddr, err)
-	}
-
-	go func() {
-		defer listener.Close()
-		for {
-			localConn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				remoteConn, err := client.Dial("tcp", remoteAddr)
-				if err != nil {
-					localConn.Close()
-					return
-				}
-				go io.Copy(remoteConn, localConn)
-				go io.Copy(localConn, remoteConn)
-			}()
-		}
-	}()
-
-	fmt.Fprintf(os.Stderr, "ssh-client: local forward %s -> %s\n", localAddr, remoteAddr)
-	return nil
-}
-
-// startRemoteForward 启动远程端口转发（-R）。
-func startRemoteForward(client *ssh.Client, spec string) error {
-	bind, portStr, localHost, localPortStr, err := parseForwardSpec(spec)
-	if err != nil {
-		return err
-	}
-
-	remoteAddr := net.JoinHostPort(bind, portStr)
-	localAddr := net.JoinHostPort(localHost, localPortStr)
-
-	listener, err := client.Listen("tcp", remoteAddr)
-	if err != nil {
-		return fmt.Errorf("remote listen on %s: %w", remoteAddr, err)
-	}
-
-	go func() {
-		defer listener.Close()
-		for {
-			remoteConn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				localConn, err := net.Dial("tcp", localAddr)
-				if err != nil {
-					remoteConn.Close()
-					return
-				}
-				go io.Copy(remoteConn, localConn)
-				go io.Copy(localConn, remoteConn)
-			}()
-		}
-	}()
-
-	fmt.Fprintf(os.Stderr, "ssh-client: remote forward %s -> %s\n", remoteAddr, localAddr)
 	return nil
 }

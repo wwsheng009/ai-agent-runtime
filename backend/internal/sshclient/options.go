@@ -68,6 +68,11 @@ type Options struct {
 	// ProxyCommand 代理命令（OpenSSH ProxyCommand 指令），非空时通过子进程建立连接。
 	ProxyCommand string
 
+	// ExitOnForwardFailure 转发无法建立时是否退出（OpenSSH ExitOnForwardFailure）。
+	// 本实现默认 true（保持 CLI 既有行为：转发失败即报错退出）；
+	// 设为 false 时仅告警并继续运行，对应 -o ExitOnForwardFailure=no。
+	ExitOnForwardFailure bool
+
 	// OriginalHost 是命令行传入的原始主机名（或别名），用于 ProxyCommand 令牌 %n 展开。
 	// 在 ApplyConfig 之前由 main 设置。
 	OriginalHost string
@@ -81,12 +86,13 @@ type Options struct {
 // Defaults 返回一个填充了合理默认值的 Options。
 func Defaults() *Options {
 	return &Options{
-		Port:                    22,
-		StrictHostKeyChecking:   StrictModeAcceptNew,
-		ConnectTimeout:          30 * time.Second,
-		ServerAliveCountMax:     3,
-		LogLevel:                "INFO",
-		UserKnownHostsFile:      "~/.ssh/known_hosts",
+		Port:                  22,
+		StrictHostKeyChecking: StrictModeAcceptNew,
+		ConnectTimeout:        30 * time.Second,
+		ServerAliveCountMax:   3,
+		ExitOnForwardFailure:  true,
+		LogLevel:              "INFO",
+		UserKnownHostsFile:    "~/.ssh/known_hosts",
 	}
 }
 
