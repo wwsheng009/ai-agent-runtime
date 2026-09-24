@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
   aicli 多进程网格 E2E（E2E-DEBUG-03）：发现 → CLI/API 同源 → 会话租约互斥 →
-  跨进程调用 → 实时扇入 → 崩溃对账 → 无令牌泄漏 → 旧目录清理 → 自包含 → 跨工作区语义。
+  跨进程调用 → 实时扇入 → 崩溃对账 → 无令牌泄漏 → 旧目录清理 → 自包含 → 跨工作区语义 →
+  非回环默认拒绝 → 审计降级。
 
 .DESCRIPTION
   验收目标（全部通过才退出码 0；断言名与 docs/e2e/mesh-e2e.md §5 的 M 表一致）：
@@ -30,13 +31,25 @@
     M10 mesh/cross-workspace-ops：默认允许跨工作区调用（M4 的写调用即跨工作区成功）；
         目标进程带 --mesh-restrict-workspace 启动后，同一写调用 → refused +
         mesh_cross_workspace_denied，只读调用不受影响。
+    M11 mesh/nonloopback-default-deny + mesh/nonloopback-cli-parity：目标进程带
+        --web-host 0.0.0.0 启动后，网格写路径**默认整机拒绝**——连回环客户端、带
+        正确令牌也拿 403 + refused + mesh_nonloopback_denied（call 与 stop 两个端点
+        各探一次；CLI 侧同口径：exit 6 + 同一原因码）；同一节点的非 mesh 端点
+        （/web/api/status）照常 200。脚本不传 --mesh-allow-nonloopback（逃生门默认
+        关闭是红线，放行路径由 Go 单测覆盖）；B3 的 --mesh-allow-stop=true 只为让
+        stop 越过开关检查、走到非回环判定（探针 target 指向 B3 自己，判定若被绕过
+        也只会 self_refused，不会真停节点）。
+    M12 mesh/journal-disabled：目标进程带 --mesh-journal=false 启动后，self 如实回显
+        mesh.journal_enabled=false（A 默认 true 作对照）、该节点不落 journal 文件、
+        watch --once 退化（回放里没有它的事件）但不崩，call/gc 照常。
 
   安全红线（§8.8，脚本不得放宽）：
     - 网格根隔离：AICLI_MESH_DIR 指向 artifacts 子目录，绝不碰真实 ~/.aicli/mesh；
-    - 跨机/非回环写路径一律不打开（不传 --mesh-allow-nonloopback）；
+    - 跨机/非回环写路径一律不打开（不传 --mesh-allow-nonloopback）：M11 只用
+      --web-host 0.0.0.0 复现「默认拒绝」，逃生门的放行路径不在本脚本里验证；
     - 写 op（invoke/input/cancel/sessions.resume）逐次显式 --allow-write；
     - 证据落盘前脱敏：令牌原文替换为 <REDACTED-TOKEN>，只保留 token_hint；
-    - 只杀本脚本自己启动的进程（A/B/B2 与自家 curl 采集器）。
+    - 只杀本脚本自己启动的进程（A/B/B2/B3/B4 与自家 curl 采集器）。
 
   前置条件：本机已配置可用 provider/model（否则 M4 如实 FAIL，绝不伪造通过）。
   本脚本无人值守：chat 进程都以 `chat --yolo --headless --pprof` 启动（--pprof 展开为
@@ -315,22 +328,29 @@ function Get-RecordByPid {
 }
 
 function Wait-RecordByPid {
-    param([string]$MeshDir, [int]$ProcessId, [int]$TimeoutSec = 90)
+    param([string]$MeshDir, [int]$ProcessId, [int]$TimeoutSec = 90, [switch]$RequireEndpoint)
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $entry = $null
     do {
         $entry = Get-RecordByPid -MeshDir $MeshDir -ProcessId $ProcessId
-        if ($null -ne $entry) { return $entry }
+        if ($null -ne $entry) {
+            if (-not $RequireEndpoint) { return $entry }
+            # 首版档案可能还没有 endpoint 段（回环地址解析/落盘晚于档案首写；
+            # 非回环监听下实测更明显）：等到 endpoint.port 就绪再交还调用方，
+            # 端口仍然只从档案读（文件头的前置约定），不另拼地址。
+            if ([int](Get-Prop $entry.record 'endpoint.port') -gt 0) { return $entry }
+        }
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
-    return $null
+    return $entry
 }
 
 function Wait-ManifestReady {
-    param([string]$BaseUrl, [int]$TimeoutSec = 90)
+    param([string]$BaseUrl, [int]$TimeoutSec = 90, [hashtable]$Headers = @{})
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $last = $null
     do {
-        $last = Invoke-JsonHttp -Url "$BaseUrl/debug/endpoints" -TimeoutSec 10
+        $last = Invoke-JsonHttp -Url "$BaseUrl/debug/endpoints" -TimeoutSec 10 -Headers $Headers
         if ($last.ok -and [bool](Get-Prop $last.json 'available')) { return $last }
         Start-Sleep -Milliseconds 700
     } while ((Get-Date) -lt $deadline)
@@ -483,8 +503,8 @@ if (-not $script:abort) {
     $procB = Start-AicliChat -Name 'B' -WorkDir $workspaceB `
         -StdoutPath (Join-Path $ArtifactDir 'B.stdout.log') -StderrPath (Join-Path $ArtifactDir 'B.stderr.log')
 
-    $recordA = Wait-RecordByPid -MeshDir $meshDir -ProcessId $procA.Id -TimeoutSec $StartupTimeoutSec
-    $recordB = Wait-RecordByPid -MeshDir $meshDir -ProcessId $procB.Id -TimeoutSec $StartupTimeoutSec
+    $recordA = Wait-RecordByPid -MeshDir $meshDir -ProcessId $procA.Id -TimeoutSec $StartupTimeoutSec -RequireEndpoint
+    $recordB = Wait-RecordByPid -MeshDir $meshDir -ProcessId $procB.Id -TimeoutSec $StartupTimeoutSec -RequireEndpoint
 
     if ($null -eq $recordA -or $null -eq $recordB) {
         Save-ProcessLogTail -Path (Join-Path $ArtifactDir 'A.stderr.log') -Target (Join-Path $evidenceDir 'A.stderr.tail.txt')
@@ -613,13 +633,16 @@ if ($manifestA -and $manifestA.ok) {
         $p = [string](Get-Prop $_ 'path')
         $p -like '/web/api/mesh/*' -or $p -eq '/web/api/health' -or $p -eq '/debug/endpoints'
     })
+    # M11 已在非回环模式下探过 stop（403 + mesh_nonloopback_denied），
+    # 所以它进 $asserted 而不是 $exempt——新端点不许悄悄漏在门禁外。
     $asserted = @(
         '/debug/endpoints',
         '/web/api/health',
         '/web/api/mesh/self',
         '/web/api/mesh/peers',
         '/web/api/mesh/events',
-        '/web/api/mesh/call'
+        '/web/api/mesh/call',
+        '/web/api/mesh/stop'
     )
     # 豁免必须给出理由：spawn 是「拉起新窗口」的单进程前端场景（S9 覆盖），
     # 03 关注多进程网格语义，不重复拉起第三个浏览器窗口。
@@ -1063,7 +1086,7 @@ $restrictedDetail = '未执行'
 if ($baseA -ne '' -and -not $script:abort) {
     $procB2 = Start-AicliChat -Name 'B2' -WorkDir $workspaceB -ExtraArgs @('--mesh-restrict-workspace') `
         -StdoutPath (Join-Path $ArtifactDir 'B2.stdout.log') -StderrPath (Join-Path $ArtifactDir 'B2.stderr.log')
-    $recordB2 = Wait-RecordByPid -MeshDir $meshDir -ProcessId $procB2.Id -TimeoutSec $StartupTimeoutSec
+    $recordB2 = Wait-RecordByPid -MeshDir $meshDir -ProcessId $procB2.Id -TimeoutSec $StartupTimeoutSec -RequireEndpoint
     if ($null -eq $recordB2) {
         $restrictedDetail = ("B2 未登记节点档案（{0}s 超时）" -f $StartupTimeoutSec)
         Save-ProcessLogTail -Path (Join-Path $ArtifactDir 'B2.stderr.log') -Target (Join-Path $evidenceDir 'B2.stderr.tail.txt')
@@ -1099,6 +1122,146 @@ $m10Ok = $crossWorkspaceAllowed -and $restrictedRefused -and $restrictedReadOk
 Add-Result 'mesh/cross-workspace-ops' -Passed $m10Ok -Detail (
     "默认放行（跨工作区写调用成功）={0}（wsA={1} wsB={2}）；收敛后写调用被拒={3}；收敛后只读放行={4}；{5}" -f `
         $crossWorkspaceAllowed, (Get-LeafSafe $wsA), (Get-LeafSafe $wsB), $restrictedRefused, $restrictedReadOk, $restrictedDetail)
+
+# ---------------------------------------------------------------------------
+# M11 mesh/nonloopback-default-deny：--web-host 0.0.0.0（非回环监听）下，网格写
+#   路径默认整机拒绝——拒绝依据是「本进程处于非回环模式」，与客户端来源无关：
+#   连回环客户端、带正确令牌也照拒（§5.8/§9.4 默认关闭）。
+#   探针带 X-AICLI-Token（从档案读）：测的是「有令牌也拒」，而不是被 401 挡在门外。
+#   call 与 stop 两个端点各探一次——stop 的开关检查在非回环判定之前，所以 B3 额外
+#   带 --mesh-allow-stop=true 让它走到非回环这一层；探针 target 指向 B3 自己，
+#   万一判定被绕过也只会拿到 mesh_stop_self_refused，不会真停任何节点。
+#   脚本**不传** --mesh-allow-nonloopback：这里只锁「默认拒绝」这条红线，
+#   逃生门的放行路径由 Go 单测（web_handlers_mesh_nonloopback_test.go）覆盖。
+# ---------------------------------------------------------------------------
+$nonloopbackDenied = $false
+$nonloopbackStopDenied = $false
+$nonloopbackServed = $false
+$nonloopbackDetail = '未执行'
+if ($baseA -ne '' -and -not $script:abort) {
+    $procB3 = Start-AicliChat -Name 'B3' -WorkDir $workspaceB -ExtraArgs @('--web-host', '0.0.0.0', '--mesh-allow-stop=true') `
+        -StdoutPath (Join-Path $ArtifactDir 'B3.stdout.log') -StderrPath (Join-Path $ArtifactDir 'B3.stderr.log')
+    $recordB3 = Wait-RecordByPid -MeshDir $meshDir -ProcessId $procB3.Id -TimeoutSec $StartupTimeoutSec -RequireEndpoint
+    if ($null -eq $recordB3) {
+        $nonloopbackDetail = ("B3 未登记节点档案（{0}s 超时）" -f $StartupTimeoutSec)
+        Save-ProcessLogTail -Path (Join-Path $ArtifactDir 'B3.stderr.log') -Target (Join-Path $evidenceDir 'B3.stderr.tail.txt')
+    } else {
+        $nodeIdB3 = [string](Get-Prop $recordB3.record 'node_id')
+        $portB3 = [int](Get-Prop $recordB3.record 'endpoint.port')
+        $tokenB3 = [string](Get-Prop $recordB3.record 'auth.token')
+        $headersB3 = @{}
+        if (-not [string]::IsNullOrWhiteSpace($tokenB3)) { $headersB3['X-AICLI-Token'] = $tokenB3 }
+        # 直连回环地址的同一端口：0.0.0.0 模式下整机退出网格写路径，客户端来源
+        # 与判定无关，所以这是最严格的一条探针（等价于手工验证 P10a）。
+        $loopbackB3 = 'http://127.0.0.1:{0}' -f $portB3
+        [void](Wait-ManifestReady -BaseUrl $loopbackB3 -TimeoutSec $StartupTimeoutSec -Headers $headersB3)
+
+        $callB3 = Invoke-JsonHttp -Method 'POST' -Url "$loopbackB3/web/api/mesh/call" -Body '{"op":"node.info"}' -Headers $headersB3 -TimeoutSec 20
+        # 注意：PowerShell 的 -f 把 { } 当格式项，JSON 字面量里的花括号要写成 {{ }}。
+        $stopB3 = Invoke-JsonHttp -Method 'POST' -Url "$loopbackB3/web/api/mesh/stop" -Body ('{{"target":"pid:{0}","mode":"graceful"}}' -f $procB3.Id) -Headers $headersB3 -TimeoutSec 20
+        $statusB3 = Invoke-JsonHttp -Url "$loopbackB3/web/api/status" -Headers $headersB3 -TimeoutSec 15
+        Save-RedactedText -Path (Join-Path $evidenceDir 'm11-nonloopback-call.json') -Text $callB3.text -Secrets @($script:secrets)
+        Save-RedactedText -Path (Join-Path $evidenceDir 'm11-nonloopback-stop.json') -Text $stopB3.text -Secrets @($script:secrets)
+
+        $callStatus = [string](Get-Prop $callB3.json 'status')
+        $callCode = [string](Get-Prop $callB3.json 'code')
+        $nonloopbackDenied = ($callB3.status -eq 403) -and ($callStatus -eq 'refused') -and ($callCode -eq 'mesh_nonloopback_denied')
+        $stopStatus = [string](Get-Prop $stopB3.json 'status')
+        $stopCode = [string](Get-Prop $stopB3.json 'code')
+        $nonloopbackStopDenied = ($stopB3.status -eq 403) -and ($stopStatus -eq 'refused') -and ($stopCode -eq 'mesh_nonloopback_denied')
+        $nonloopbackServed = ($statusB3.status -eq 200)
+
+        # CLI 侧同口径（手工验证 P10b）：CLI 照档案 advertise 的地址直连，没有
+        # 客户端侧回环豁免，因此同样拿到 6 + mesh_nonloopback_denied。
+        $cliB3 = Invoke-MeshCli -Arguments @('call', "pid:$($procB3.Id)", 'node.info', '--json')
+        $cliCode = [string](Get-Prop $cliB3.json 'code')
+        $cliStatus = [string](Get-Prop $cliB3.json 'status')
+        if (($cliB3.exit_code -eq 6) -and ($cliCode -eq 'mesh_nonloopback_denied')) {
+            Add-Result 'mesh/nonloopback-cli-parity' -Passed $true -Detail (
+                "aicli-mesh call exit={0} code={1}（advertise={2}）" -f $cliB3.exit_code, $cliCode, (Get-Prop $recordB3.record 'endpoint.base_url'))
+        } elseif ($cliStatus -in @('unreachable', 'timeout')) {
+            # 环境限制：档案 advertise 的局域网地址在本机不可达（如接口过滤）。
+            # 规则本体已由上面 HTTP 探针锁死，这里如实记 SKIP 而不是伪造绿。
+            Add-Skip 'mesh/nonloopback-cli-parity' -Detail (
+                "档案 advertise 的地址在本机不可达（status={0}）；HTTP 侧已覆盖规则本体" -f $cliStatus)
+        } else {
+            Add-Result 'mesh/nonloopback-cli-parity' -Passed $false -Detail (
+                "aicli-mesh call exit={0} status={1} code={2}（期望 6 + mesh_nonloopback_denied）" -f $cliB3.exit_code, $cliStatus, $cliCode)
+        }
+
+        $nonloopbackDetail = ("B3(node={0}, listen=0.0.0.0, port={1}, advertise={2}, 探针带令牌={3})；HTTP call={4}/{5}/{6}；HTTP stop={7}/{8}/{9}（两者都期望 403+refused+mesh_nonloopback_denied）；非 mesh 端点 /web/api/status={10}（期望 200）" -f `
+            (Get-ShortId $nodeIdB3), $portB3, (Get-Prop $recordB3.record 'endpoint.base_url'), ($headersB3.Count -gt 0), $callB3.status, $callStatus, $callCode, $stopB3.status, $stopStatus, $stopCode, $statusB3.status)
+        Stop-ScriptProcess -Name 'B3' -Force $true
+        Write-Log ("killed B3 (pid={0})" -f $procB3.Id)
+    }
+} else {
+    $nonloopbackDetail = '进程未就绪'
+}
+Add-Result 'mesh/nonloopback-default-deny' -Passed ($nonloopbackDenied -and $nonloopbackStopDenied -and $nonloopbackServed) -Detail $nonloopbackDetail
+
+# ---------------------------------------------------------------------------
+# M12 mesh/journal-disabled：--mesh-journal=false 时审计面退化、网格本体不受影响
+#   （§9.5）——self 如实回显 journal_enabled=false；该节点不落任何 journal 行
+#   （seq 仍分配）；watch --once 退化为只看别人的日志、不崩；call/gc 照常。
+# ---------------------------------------------------------------------------
+$journalDisabled = $false
+$journalDetail = '未执行'
+if ($baseA -ne '' -and -not $script:abort) {
+    $procB4 = Start-AicliChat -Name 'B4' -WorkDir $workspaceB -ExtraArgs @('--mesh-journal=false') `
+        -StdoutPath (Join-Path $ArtifactDir 'B4.stdout.log') -StderrPath (Join-Path $ArtifactDir 'B4.stderr.log')
+    $recordB4 = Wait-RecordByPid -MeshDir $meshDir -ProcessId $procB4.Id -TimeoutSec $StartupTimeoutSec -RequireEndpoint
+    if ($null -eq $recordB4) {
+        $journalDetail = ("B4 未登记节点档案（{0}s 超时）" -f $StartupTimeoutSec)
+        Save-ProcessLogTail -Path (Join-Path $ArtifactDir 'B4.stderr.log') -Target (Join-Path $evidenceDir 'B4.stderr.tail.txt')
+    } else {
+        $nodeIdB4 = [string](Get-Prop $recordB4.record 'node_id')
+        $urlB4 = [string](Get-Prop $recordB4.record 'endpoint.base_url')
+        if ([string]::IsNullOrWhiteSpace($urlB4)) { $urlB4 = 'http://127.0.0.1:{0}' -f (Get-Prop $recordB4.record 'endpoint.port') }
+        $baseB4 = $urlB4.TrimEnd('/')
+        $manifestB4 = Wait-ManifestReady -BaseUrl $baseB4 -TimeoutSec $StartupTimeoutSec
+
+        # 1) 开关回显：B4 必须如实自述 false，且 A（默认）仍是 true——
+        #    后者是对照，证明这个字段不是写死的。
+        $selfB4 = Invoke-JsonHttp -Url "$baseB4/web/api/mesh/self" -TimeoutSec 15
+        $selfAJournal = Invoke-JsonHttp -Url "$baseA/web/api/mesh/self" -TimeoutSec 15
+        Save-RedactedText -Path (Join-Path $evidenceDir 'm12-self-B4.json') -Text $selfB4.text -Secrets @($script:secrets)
+        $journalFlagB4 = Get-Prop $selfB4.json 'mesh.journal_enabled'
+        $journalFlagA = Get-Prop $selfAJournal.json 'mesh.journal_enabled'
+        $selfEchoOk = ($journalFlagB4 -eq $false) -and ($journalFlagA -eq $true)
+
+        # 2) 写侧：B4 的 journal 文件不得出现；A 的文件必须已有内容（对照）。
+        $journalDir = Join-Path $meshDir 'journal'
+        $b4JournalExists = Test-Path -LiteralPath (Join-Path $journalDir ("{0}.ndjson" -f $nodeIdB4))
+        $aJournalPath = Join-Path $journalDir ("{0}.ndjson" -f $nodeIdA)
+        $aJournalLines = 0
+        if (Test-Path -LiteralPath $aJournalPath) {
+            $aJournalLines = @(Get-Content -LiteralPath $aJournalPath -ErrorAction SilentlyContinue).Count
+        }
+        $writeSideOk = (-not $b4JournalExists) -and ($aJournalLines -ge 1)
+
+        # 3) 读侧：watch 退化但不崩——回放里不含 B4 的事件，别人的日志照常可见。
+        $watchB4 = Invoke-MeshCli -Arguments @('watch', '--once', '--json')
+        $watchEvents = @()
+        $rawEvents = Get-Prop $watchB4.json 'events'
+        if ($null -ne $rawEvents) { $watchEvents = @($rawEvents) }
+        $b4Events = @($watchEvents | Where-Object { [string](Get-Prop $_ 'node_id') -eq $nodeIdB4 }).Count
+        $watchOk = ($watchB4.exit_code -eq 0) -and ($b4Events -eq 0) -and ($watchEvents.Count -ge 1)
+
+        $callB4 = Invoke-MeshCli -Arguments @('call', "pid:$($procB4.Id)", 'node.info', '--json')
+        $gcB4 = Invoke-MeshCli -Arguments @('gc', '--json')
+        $readSideOk = ($callB4.exit_code -eq 0) -and ([string](Get-Prop $callB4.json 'status') -eq 'ok') -and ($gcB4.exit_code -eq 0)
+
+        $journalDisabled = $manifestB4.ok -and $selfEchoOk -and $writeSideOk -and $readSideOk
+        $journalDetail = ("B4(node={0}) manifest={1}；self.mesh.journal_enabled B4={2}/A={3}（期望 false/true）；B4 journal 文件存在={4}（期望 False）；A journal 行数={5}（对照 ≥1）；watch --once exit={6} B4 事件={7} 总事件={8}；call node.info exit={9} status={10}；gc exit={11}" -f `
+            (Get-ShortId $nodeIdB4), $manifestB4.ok, $journalFlagB4, $journalFlagA, $b4JournalExists, $aJournalLines, `
+            $watchB4.exit_code, $b4Events, $watchEvents.Count, $callB4.exit_code, [string](Get-Prop $callB4.json 'status'), $gcB4.exit_code)
+        Stop-ScriptProcess -Name 'B4' -Force $true
+        Write-Log ("killed B4 (pid={0})" -f $procB4.Id)
+    }
+} else {
+    $journalDetail = '进程未就绪'
+}
+Add-Result 'mesh/journal-disabled' -Passed $journalDisabled -Detail $journalDetail
 
 # ---------------------------------------------------------------------------
 # M9 mesh/self-containment：全部进程退出后，aicli-mesh 仍能独立工作并如实对账
@@ -1138,7 +1301,7 @@ Add-Result 'mesh/self-containment' -Passed $m9Ok -Detail $m9Detail
 # ---------------------------------------------------------------------------
 # 收尾：清理自启进程 / 还原环境（正常结束与异常终止都必须执行）
 # ---------------------------------------------------------------------------
-foreach ($name in @('A', 'B', 'B2')) { Stop-ScriptProcess -Name $name -Force $true }
+foreach ($name in @('A', 'B', 'B2', 'B3', 'B4')) { Stop-ScriptProcess -Name $name -Force $true }
 $leftover = New-Object System.Collections.Generic.List[string]
 foreach ($entry in $script:procs) {
     try {

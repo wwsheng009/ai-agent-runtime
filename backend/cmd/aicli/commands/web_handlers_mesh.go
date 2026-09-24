@@ -96,6 +96,9 @@ type ChatWebAPIMeshSelfMesh struct {
 	Enabled bool   `json:"enabled"`
 	Root    string `json:"root,omitempty"`
 	Journal string `json:"journal,omitempty"`
+	// JournalEnabled 如实回显审计开关（§9.5）：--mesh-journal=false 时该文件
+	// 不会增长（watch 相应退化），消费方不必靠猜。
+	JournalEnabled bool `json:"journal_enabled"`
 }
 
 // HandleChatWebAPIMeshSelf 处理 GET /web/api/mesh/self（架构 §5.3）。
@@ -247,7 +250,11 @@ func chatWebMeshLeaseLabel(host *mesh.Host, ownership mesh.Ownership) string {
 // chatWebMeshSelfMesh 自描述网格根（§5.3）：脚本不必猜 ~/.aicli/mesh。
 func chatWebMeshSelfMesh(host *mesh.Host) ChatWebAPIMeshSelfMesh {
 	paths := host.Paths()
-	section := ChatWebAPIMeshSelfMesh{Enabled: paths.Enabled(), Root: paths.Root}
+	section := ChatWebAPIMeshSelfMesh{
+		Enabled:        paths.Enabled(),
+		Root:           paths.Root,
+		JournalEnabled: ChatWebMeshJournalEnabled(),
+	}
 	if nodeID := strings.TrimSpace(host.NodeID()); nodeID != "" {
 		section.Journal = paths.JournalPath(nodeID)
 	}
@@ -287,6 +294,65 @@ func chatWebRequestIsLoopback(r *http.Request) bool {
 		host = h
 	}
 	return ChatWebHostIsLoopback(host)
+}
+
+// chatWebMeshWritePathAllowed 判断请求是否允许进入网格写路径（call / spawn /
+// stop，§5.8 / §9.4）：回环一律放行；非回环**默认拒绝**，只有显式
+// `--mesh-allow-nonloopback=true` 才放行（跨机逃生门）。
+//
+// 只放宽「跨机拒绝」这一层：非回环模式下鉴权中间件仍强制令牌、写 op 仍要逐次
+// allow_write、停止仍要 --mesh-allow-stop。开关不是把默认值变虚，而是把「非回环」
+// 从硬拒绝降级为「带令牌 + 逐次显式」的常规治理路径（§9.4）。
+func chatWebMeshWritePathAllowed(r *http.Request) bool {
+	if chatWebRequestIsLoopback(r) {
+		return true
+	}
+	return ChatWebMeshAllowNonLoopback()
+}
+
+// chatWebMeshNonLoopbackSwitch 是 §9.4 的跨机开关：默认**关闭**（非回环一律
+// 拒绝网格写路径）。打开它是一次有意的风险接受，因此回一行 Info 留痕
+// （见 mesh_flags.go），与 --mesh-allow-stop 的日志口径一致。
+var chatWebMeshNonLoopbackSwitch = struct {
+	mu      sync.RWMutex
+	allowed bool
+}{}
+
+// SetChatWebMeshAllowNonLoopback 设置跨机开关（默认 false）。
+func SetChatWebMeshAllowNonLoopback(enabled bool) {
+	chatWebMeshNonLoopbackSwitch.mu.Lock()
+	defer chatWebMeshNonLoopbackSwitch.mu.Unlock()
+	chatWebMeshNonLoopbackSwitch.allowed = enabled
+}
+
+// ChatWebMeshAllowNonLoopback 读取跨机开关的当前值。
+func ChatWebMeshAllowNonLoopback() bool {
+	chatWebMeshNonLoopbackSwitch.mu.RLock()
+	defer chatWebMeshNonLoopbackSwitch.mu.RUnlock()
+	return chatWebMeshNonLoopbackSwitch.allowed
+}
+
+// chatWebMeshJournalSwitch 镜像进程级 `--mesh-journal`（§9.5）：默认**开启**。
+// journal 本体在 internal/mesh（HostConfig.JournalDisabled，Append 时静默丢弃、
+// 只保留 seq）；这里保存开关值，供 /web/api/mesh/self 如实回显、供
+// mesh_bootstrap 接线读取。
+var chatWebMeshJournalSwitch = struct {
+	mu      sync.RWMutex
+	enabled bool
+}{enabled: true}
+
+// SetChatWebMeshJournalEnabled 设置审计开关（默认 true）。
+func SetChatWebMeshJournalEnabled(enabled bool) {
+	chatWebMeshJournalSwitch.mu.Lock()
+	defer chatWebMeshJournalSwitch.mu.Unlock()
+	chatWebMeshJournalSwitch.enabled = enabled
+}
+
+// ChatWebMeshJournalEnabled 读取审计开关的当前值。
+func ChatWebMeshJournalEnabled() bool {
+	chatWebMeshJournalSwitch.mu.RLock()
+	defer chatWebMeshJournalSwitch.mu.RUnlock()
+	return chatWebMeshJournalSwitch.enabled
 }
 
 // chatWebQueryTruthy 解析 1/true/yes/on 形式的布尔查询参数（缺省 false）。
@@ -450,10 +516,11 @@ func HandleChatWebAPIMeshSpawn(w http.ResponseWriter, r *http.Request) {
 			"spawning is disabled (--mesh-allow-spawn=false)", started)
 		return
 	}
-	// 拉起进程属于写路径：默认拒绝跨机（§5.8）。
-	if !chatWebRequestIsLoopback(r) {
+	// 拉起进程属于写路径：默认拒绝跨机，显式 --mesh-allow-nonloopback=true 才
+	// 放宽（§5.8 / §9.4）；--mesh-allow-spawn 与令牌要求都不受影响。
+	if !chatWebMeshWritePathAllowed(r) {
 		writeChatWebMeshSpawnError(w, http.StatusForbidden, "refused", mesh.CallCodeNonLoopback,
-			"mesh spawn is loopback-only", started)
+			"mesh spawn is loopback-only (--mesh-allow-nonloopback=true relaxes this)", started)
 		return
 	}
 	payload, err := io.ReadAll(io.LimitReader(r.Body, mesh.CallMaxBodyBytes+1))

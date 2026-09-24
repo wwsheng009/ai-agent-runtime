@@ -30,8 +30,8 @@
 | [../aicli/mesh-cli.md](../aicli/mesh-cli.md) | **权威 CLI 参考**：全部子命令、参数、JSON 契约、退出码 |
 | [../aicli/web-remote-api.md](../aicli/web-remote-api.md) §9 | 每节点 HTTP 控制面：`/web/api/mesh/*` + `/web/api/health` |
 | [../plan/aicli-mesh-architecture.md](../plan/aicli-mesh-architecture.md) | 设计期方案：命名、目录、数据模型、API、实时性（§7 草稿以 mesh-cli.md 为准） |
-| [../plan/aicli-mesh-implementation-plan.md](../plan/aicli-mesh-implementation-plan.md) | 落地计划与偏差记录（D5–D12） |
-| [../e2e/mesh-e2e.md](../e2e/mesh-e2e.md) | E2E-DEBUG-03：多进程控制面验收（M1–M10 断言） |
+| [../plan/aicli-mesh-implementation-plan.md](../plan/aicli-mesh-implementation-plan.md) | 落地计划与偏差记录（D5–D13） |
+| [../e2e/mesh-e2e.md](../e2e/mesh-e2e.md) | E2E-DEBUG-03：多进程控制面验收（M1–M12 断言） |
 
 ## 3. 快速开始
 

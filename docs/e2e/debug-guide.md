@@ -341,9 +341,9 @@ pwsh -File scripts/read-terminal-buffer.ps1 -WindowTitle 'ai-agent-runtime' -Pat
 ## 8. 多进程网格控制面（E2E-DEBUG-03）
 
 已独立成文：[mesh-e2e.md](./mesh-e2e.md)（原 §8 全文：升级动机、拓扑、发现与调用契约、
-手工复现、M1–M10 断言表、harness 落地要点、失败排查、安全红线）。
+手工复现、M1–M12 断言表、harness 落地要点、失败排查、安全红线）。
 
-> 章节号沿用原 `§8.x` 的 x：原 §8.5 断言表（M1–M10）→ [mesh-e2e.md](./mesh-e2e.md) §5；
+> 章节号沿用原 `§8.x` 的 x：原 §8.5 断言表（M1–M10）→ [mesh-e2e.md](./mesh-e2e.md) §5（现为 M1–M12）；
 > 原 §8.8 安全红线 → 其 §8。
 > harness：`scripts/test-aicli-debug-endpoints-e2e-mesh.ps1`；单进程只读契约
 > （`health` / `self` / `peers` 形状、令牌脱敏与回环 reveal）仍由本文 §3 的 S4f/S4g 断言。
@@ -383,7 +383,7 @@ pwsh -File scripts/read-terminal-buffer.ps1 -WindowTitle 'ai-agent-runtime' -Pat
   （命名与目录、节点档案 / 绑定 / 租约 / journal、`/web/api/mesh/*` 契约、`aicli-mesh` 工具、路线图）。
 - [../plan/aicli-micro-web-client-session-window-plan.md](../plan/aicli-micro-web-client-session-window-plan.md)
   — 网格的 Web 客户端子方案（v2）：会话切换「新窗口打开」前端交互、`sessions`/`resume` Web 侧契约、
-  E1–E8 → M1–M10 验收映射。
+  E1–E8 → M1–M12 验收映射。
 - `scripts/test-aicli-debug-endpoints-e2e.ps1` — 本场景 harness（本文 §5 参数说明）。
 - `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1` — E2E-DEBUG-03 harness（[mesh-e2e.md](./mesh-e2e.md) §5 断言表）。
 - `scripts/aicli-e2e-harness.ps1` — 观测工具集（A1 时序采样 / A2 诊断包 / A3 稳态判据 /

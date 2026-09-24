@@ -75,6 +75,10 @@ type HostConfig struct {
 	// when true the record advertises CapabilityStop so callers can refuse
 	// before acting. Default false — stopping is a governance action.
 	StopAllowed bool
+	// JournalDisabled mirrors the process-level --mesh-journal=false switch
+	// (§9.5): audit off. The zero value keeps the documented default (audit
+	// on), so only an explicit --mesh-journal=false turns writing off.
+	JournalDisabled bool
 	// ParentPID defaults to os.Getppid().
 	ParentPID int
 
@@ -254,7 +258,10 @@ func (h *Host) Start() error {
 	if h.cfg.WorkspacePath != "" {
 		h.record.Workspace = &WorkspaceInfo{Path: h.cfg.WorkspacePath, Name: h.cfg.WorkspaceName}
 	}
-	h.journal = OpenJournal(h.paths, h.nodeID, h.cfg.Now)
+	h.journal = OpenJournalWithOptions(h.paths, h.nodeID, JournalOptions{
+		Disabled: h.cfg.JournalDisabled,
+		Now:      h.cfg.Now,
+	})
 	// 扇入与 journal 共用 seq 计数器（§6.3「seq 与 journal seq 同源」）。
 	h.fanin = NewFanin(FaninConfig{NodeID: h.nodeID, Journal: h.journal, Now: h.cfg.Now})
 	h.stopCh = make(chan struct{})

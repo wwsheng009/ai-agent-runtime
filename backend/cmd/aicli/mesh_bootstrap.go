@@ -57,6 +57,9 @@ func startMeshHost(cmd *cobra.Command) *mesh.Host {
 		// closed 地判定「谁能停我」。main.go 在 startMeshHost 之前已 apply 过
 		// 治理开关，此处读到的一定是本次启动的取值。
 		StopAllowed: commands.ChatWebMeshAllowStop(),
+		// 审计开关（§9.5）：--mesh-journal=false 时 journal 仍分配 seq（扇入与
+		// SSE 的 seq 同源，§6.3），但不写任何审计行。
+		JournalDisabled: !commands.ChatWebMeshJournalEnabled(),
 		Warn:        meshWarn,
 	})
 	mesh.SetCurrent(host)

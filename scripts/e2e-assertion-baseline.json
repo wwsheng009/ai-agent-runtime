@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_at": "2026-09-24T04:58:15Z",
+  "generated_at": "2026-09-24T12:37:54Z",
   "note": "断言只增不减：删除或改名断言会让 scripts/test-aicli-e2e-all.ps1 失败；新增用 -UpdateBaseline 固化。",
   "scenarios": [
     {
@@ -96,8 +96,11 @@
         "mesh/cross-call-invoke",
         "mesh/cross-workspace-ops",
         "mesh/discovery-both-nodes",
+        "mesh/journal-disabled",
         "mesh/legacy-purge",
         "mesh/no-token-leak",
+        "mesh/nonloopback-cli-parity",
+        "mesh/nonloopback-default-deny",
         "mesh/realtime-fanin",
         "mesh/self-containment",
         "mesh/session-lease-exclusive",

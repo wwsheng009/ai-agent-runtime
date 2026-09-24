@@ -677,6 +677,9 @@ A 崩溃 -> 锁残留
 
 **默认拒绝跨机**：`mesh/*` 的写路径与非回环一律拒绝，除非显式 `--mesh-allow-nonloopback`
 （与 `--web-host 0.0.0.0` 的既有安全叙事保持一致：非回环必须带令牌，且写操作要额外开关）。
+判定按**进程回环模式 ∧ 客户端回环**（不是「只拦非回环来源」）：目标以非回环地址监听时，
+`call` / `spawn` / `stop` **整机**拒绝——连回环客户端打同一端口、`call` 只读 op 也被拒
+（`mesh_nonloopback_denied`）。逃生门默认关；开启后令牌、逐次 `allow_write`、进程级开关的要求全部照旧。
 
 ### 5.9 通用契约（所有 mesh 端点）
 
@@ -984,6 +987,7 @@ POST /web/api/mesh/spawn {session_id, port:0, wait_ms:8000}
 - journal 记录：`op`、调用者/被调用者节点 ID、耗时、结果码、时间戳。
 - journal **不记录**：prompt 正文、模型回复、令牌、屏幕内容（避免把用户数据复制到第二份文件）。
 - 审计可关闭（`--mesh-journal=false`），关闭后 `watch`/`gc --keep-days` 相应退化，其余功能不受影响。
+- 开关状态在 `mesh/self` 里如实回显为 `mesh.journal_enabled`（默认 `true`，消费方不必靠猜）。
 
 ### 9.6 Windows 权限说明
 
@@ -1103,17 +1107,20 @@ Windows 没有 POSIX 权限位：`0600` 语义退化为「依赖用户目录 ACL
 ### 11.6 改动面清单（落地 checklist）
 
 > **落地状态：已完成（S1–S10，2026-09-24）。** 下表是设计期的改动面预估；实际落地与偏差见
-> [aicli-mesh-implementation-plan.md](./aicli-mesh-implementation-plan.md) §15.3 的 D1–D12：
+> [aicli-mesh-implementation-plan.md](./aicli-mesh-implementation-plan.md) §15.3 的 D1–D13：
 > 新增 `host.go` / `fanin.go` / `spawn.go`（D1–D3）、`cli.go` 未拆分（D4）、
 > 前端不新增 `js/mesh.js`（D5）、`web_page.go` 深链自举（D6）、
 > **Windows 判活必须读退出码**（D7）、`call`/`send` 目标解析与 CLI 合并为唯一实现（D8）、
-> E2E M3/M5 的断言口径与前置（D9/D10）。
+> E2E M3/M5 的断言口径与前置（D9/D10）、两个治理开关「文档已列、代码缺失」（D13，
+> 由 S19 补齐并机器化为 M11/M12，见该计划 §27）。
 > Web 侧 `sessions.endpoint/ownership` 与 `resume running_elsewhere` **已落地（S11）**，D11/D12 收敛：
 > 见 [aicli-mesh-implementation-plan.md](./aicli-mesh-implementation-plan.md) §19.4 与
 > [web-remote-api.md](../aicli/web-remote-api.md) §9.7（前端手工清单见 web-testing.md §2.7.1）；
 > `mesh/events` 前端订阅（P1 ②）仍留给 S12。
-> 固化验证：E2E-DEBUG-03 单跑 13/13 绿（`artifacts/aicli-debug-endpoints-e2e-mesh/run5/`），
+> 固化验证（S1–S10）：E2E-DEBUG-03 单跑 13/13 绿（`artifacts/aicli-debug-endpoints-e2e-mesh/run5/`），
 > 聚合 01 → 02 → 03 全绿（`PASS=6 FAIL=0`，`artifacts/aicli-e2e-all/20260924-131132/`）。
+> **S19 收口后基线 13 → 16**：单跑 16/16 绿（`artifacts/mesh-e2e-m11m12-r3/`），
+> 聚合 01 → 02 → 03 全绿（`PASS=6 FAIL=0`，`artifacts/aicli-e2e-all/20260924-205713/`）。
 
 **代码：删除 / 改造 / 新增**
 
@@ -1133,9 +1140,10 @@ Windows 没有 POSIX 权限位：`0600` 语义退化为「依赖用户目录 ACL
 | `docs/user-guide/aicli.md:259` | `AICLI_WEB_PORTS_DIR` → `AICLI_MESH_DIR`；「粘性端口档案」改为「会话绑定」 |
 | `docs/aicli/debug-chat-status.md:53-62` | 端口档案路径 `~/.aicli/web-ports/` → `mesh/bindings/` |
 | `docs/aicli/web-remote-api.md` | `sessions` 新增字段（`endpoint` / `ownership` / …）与 `resume` 新错误码 |
-| `docs/e2e/mesh-e2e.md` | **已同步**（场景 + M1–M10 + 故障排查；2026-09-24 由 debug-guide §8 独立成文） |
+| `docs/e2e/mesh-e2e.md` | **已同步**（场景 + M1–M12 + 故障排查；2026-09-24 由 debug-guide §8 独立成文，同日追加 M11/M12） |
 | `docs/aicli/mesh-cli.md` | 新增（§7.5）；本方案 §7 是设计草稿，落地后以该文档为准 |
 | 本方案 + Web 子方案 | 实现完成后回填「已落地 / 偏差」标注，保持设计文档与代码一致 |
+| 本方案 §9.4 / §9.5 的两个治理开关 | **已落地**（`--mesh-allow-nonloopback` 默认关、`--mesh-journal` 默认开；2026-09-24，实现与单测见 §9.7 同名 flag 行） |
 
 **脚本 / 构建 / CI**
 
@@ -1281,7 +1289,7 @@ v2 新增 §0「本文与网格方案的分工」与附录 C「v1 → v2 变更�
 | §9 spawn 路径 | **被取代** | 见本方案 §5.7/§8.2 | v2 §7（前端消费视角） |
 | §10 风险 | **保留并扩充** | 本方案 §10 | v2 §8（加归口列，R10 已消除） |
 | §11 路线图 | **被取代** | 见本方案 §11 | v2 §9（对齐 S1–S10） |
-| §12 测试 | **保留并扩充** | 本方案 §12 增加多进程 E2E | v2 §10（E1–E8 → M1–M10 映射） |
+| §12 测试 | **保留并扩充** | 本方案 §12 增加多进程 E2E | v2 §10（E1–E8 → M1–M12 映射） |
 | §13 开放问题 | **被取代** | 见本方案 §13 | v2 §11（收敛为 Web 专属） |
 
 ## 附录 C：目录与文件权限矩阵

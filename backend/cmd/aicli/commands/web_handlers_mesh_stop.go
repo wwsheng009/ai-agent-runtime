@@ -83,10 +83,11 @@ func HandleChatWebAPIMeshStop(w http.ResponseWriter, r *http.Request) {
 			mesh.StopCodeNotAllowed, "stopping is disabled (--mesh-allow-stop=false)", started)
 		return
 	}
-	// 调用者必须来自回环：跨机默认拒绝（§5.8）。
-	if !chatWebRequestIsLoopback(r) {
+	// 调用者必须来自回环：跨机默认拒绝，显式 --mesh-allow-nonloopback=true 才
+	// 放宽（§5.8 / §9.4）；--mesh-allow-stop 与令牌要求都不受影响。
+	if !chatWebMeshWritePathAllowed(r) {
 		writeChatWebMeshStopError(w, http.StatusForbidden, mesh.StopStatusRefused,
-			mesh.CallCodeNonLoopback, "mesh stop is loopback-only", started)
+			mesh.CallCodeNonLoopback, "mesh stop is loopback-only (--mesh-allow-nonloopback=true relaxes this)", started)
 		return
 	}
 	payload, err := io.ReadAll(io.LimitReader(r.Body, mesh.CallMaxBodyBytes+1))

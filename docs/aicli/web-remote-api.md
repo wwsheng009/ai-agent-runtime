@@ -541,12 +541,14 @@ aicli 进程、各自在哪个工作区、哪个会话归谁」变成可发现�
     "peer_count": 1,           // 除自己以外的 live 节点数（跨工作区全量）
     "lease": "owner"           // owner | conflict | peer | none（§4.4）
   },
-  "mesh": { "enabled": true, "root": "C:\\Users\\me\\.aicli\\mesh", "journal": "…\\journal\\n-1a2b3c4d.ndjson" }
+  "mesh": { "enabled": true, "root": "C:\\Users\\me\\.aicli\\mesh", "journal": "…\\journal\\n-1a2b3c4d.ndjson", "journal_enabled": true }
 }
 ```
 
 - **令牌脱敏（默认）**：`auth.token` 只给 `0f3a…` 形式的前缀提示；只有**回环同源**请求加
   `?reveal_token=1` 才返回原文（与 `GET /web/api/token` 同一信任模型）。
+- **审计开关回显**：`mesh.journal_enabled` 如实反映进程级 `--mesh-journal`（默认 `true`）：
+  `false` 时该节点不落 journal 行（`watch` / `gc --keep-days` 相应退化，调用本身不受影响，架构 §9.5）。
 - **降级**：网格未启用 → `200 {"available":false,"reason":"mesh disabled"}`；档案尚未
   可用 → `"mesh record unavailable"`。**绝不 5xx**。
 - 其它方法 → `405` + `Allow: GET`。
@@ -732,12 +734,16 @@ op 白名单（9 项，硬编码于 `internal/mesh`；args 与转发目标都是
 **硬契约**：
 
 - **鉴权**：与其它写端点同一层（`X-AICLI-Token`；回环 + 开发模式免令牌），**额外要求调用者来自回环**——
-  跨机一律拒绝。`X-AICLI-Mesh-Caller: <caller node_id>` 只用于审计与跨工作区判定，不参与鉴权。
+  跨机一律拒绝。判定按**进程回环模式 ∧ 客户端回环**：目标以非回环地址监听（如 `--web-host 0.0.0.0`）时
+  **整机**退出网格写路径，连回环客户端也拒（`mesh_nonloopback_denied`）；确认要跨机时由目标进程显式开
+  `--mesh-allow-nonloopback=true`（默认关，架构 §9.4）。`X-AICLI-Mesh-Caller: <caller node_id>` 只用于
+  审计与跨工作区判定，不参与鉴权。
 - **写操作逐次显式允许**：`allow_write=true` 必须每次给出；没有「网格级 yolo」开关（架构 §9.2）。
 - **跨工作区默认放行**：工作区是筛选维度、不是权限边界；仅当目标进程以 `--mesh-restrict-workspace`
   启动时，跨工作区的**写调用**被拒（只读调用不受影响，架构 §9.3）。
 - **审计**：目标进程写 `mesh.call.received` / `mesh.call.completed`（只记 op / 状态 / 耗时与调用者，
-  **不记 args 正文**——args 可能含用户 prompt）；令牌绝不出现在响应、journal 与视图里。
+  **不记 args 正文**——args 可能含用户 prompt）；令牌绝不出现在响应、journal 与视图里。审计可被目标
+  整体关闭（`--mesh-journal=false`，默认开）：调用本身不受影响，`watch` / `gc --keep-days` 相应退化（架构 §9.5）。
 - **请求体上限** 1 MiB → `413` + `mesh_body_too_large`；其它方法 → `405` + `Allow: POST`。
 - **降级**：`--mesh=false` 时路由**不注册**（404，进程不在网格里）；真被调用到也只回
   `403` + `mesh_disabled`，不 panic、不 5xx。

@@ -65,22 +65,51 @@ type Journal struct {
 	maxBytes int64
 	failed   bool
 	dirReady bool
+	// disabled mirrors the process-level --mesh-journal=false switch (§9.5):
+	// the journal still owns the node's seq counter (the SSE fan-in shares it,
+	// §6.3) but writes no audit lines.
+	disabled bool
 	// secrets are literal strings scrubbed from every logged value (the write
 	// token must never reach the journal — assertion M7).
 	secrets []string
 }
 
+// JournalOptions is the explicit configuration of a journal writer (§9.5).
+type JournalOptions struct {
+	// Disabled mirrors the process-level --mesh-journal=false switch: the
+	// journal still allocates sequence numbers (the SSE fan-in shares this
+	// counter, §6.3) but never writes a line — "关闭后 watch / gc --keep-days
+	// 相应退化，其余功能不受影响" (§9.5).
+	Disabled bool
+	// Now overrides the clock (tests); nil means NowUTC.
+	Now func() time.Time
+}
+
 // OpenJournal returns the journal writer for nodeID (nil when the mesh root is
 // unavailable: journaling degrades to a no-op).
 func OpenJournal(paths Paths, nodeID string, now func() time.Time) *Journal {
+	return OpenJournalWithOptions(paths, nodeID, JournalOptions{Now: now})
+}
+
+// OpenJournalWithOptions is OpenJournal with explicit options
+// (--mesh-journal=false). An unresolvable mesh root still yields nil: "audit
+// off" only stops writing, while "no mesh root" must not hand out a seq
+// counter either (the fan-in stays fail-closed, §4.7).
+func OpenJournalWithOptions(paths Paths, nodeID string, opts JournalOptions) *Journal {
 	path := paths.JournalPath(nodeID)
 	if path == "" {
 		return nil
 	}
-	if now == nil {
-		now = NowUTC
+	if opts.Now == nil {
+		opts.Now = NowUTC
 	}
-	return &Journal{path: path, nodeID: nodeID, now: now, maxBytes: JournalMaxBytes}
+	return &Journal{
+		path:     path,
+		nodeID:   nodeID,
+		now:      opts.Now,
+		maxBytes: JournalMaxBytes,
+		disabled: opts.Disabled,
+	}
 }
 
 // Path returns the journal file path ("" for a nil journal).
@@ -140,6 +169,11 @@ func (j *Journal) Append(kind, sessionID string, detail map[string]any) uint64 {
 	if j.failed {
 		return 0
 	}
+	if j.disabled {
+		// 审计关闭（--mesh-journal=false，§9.5）：与 nil journal 同语义——
+		// 静默丢弃、不占序号；seq 由 NextSeq 单独分配，扇入不受影响。
+		return 0
+	}
 	j.seq++
 	entry := JournalEntry{
 		TS:        j.now(),
@@ -187,6 +221,17 @@ func (j *Journal) Failed() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return j.failed
+}
+
+// Disabled reports whether audit logging is switched off
+// (--mesh-journal=false, §9.5). Diagnostics only.
+func (j *Journal) Disabled() bool {
+	if j == nil {
+		return false
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.disabled
 }
 
 func (j *Journal) rotateIfNeededLocked() error {

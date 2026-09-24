@@ -89,10 +89,11 @@ func HandleChatWebAPIMeshCall(w http.ResponseWriter, r *http.Request) {
 			mesh.CallCodeUnknownOp, fmt.Sprintf("unknown op %q", op), started)
 		return
 	}
-	// 调用者必须来自回环：跨机默认拒绝（§5.8；--mesh-allow-nonloopback 属 P2）。
-	if !chatWebRequestIsLoopback(r) {
+	// 调用者必须来自回环：跨机默认拒绝，显式 --mesh-allow-nonloopback=true 才
+	// 放宽（§5.8 / §9.4）；写操作与逐次 allow_write 的要求都不受影响。
+	if !chatWebMeshWritePathAllowed(r) {
 		writeChatWebMeshCallError(w, http.StatusForbidden, mesh.CallStatusRefused,
-			mesh.CallCodeNonLoopback, "mesh calls are loopback-only", started)
+			mesh.CallCodeNonLoopback, "mesh calls are loopback-only (--mesh-allow-nonloopback=true relaxes this)", started)
 		return
 	}
 	// 写操作每次都要显式允许，无隐式放行（§5.6 要点 2）。

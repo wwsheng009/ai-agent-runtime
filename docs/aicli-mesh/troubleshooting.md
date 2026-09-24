@@ -59,7 +59,7 @@ aicli-mesh watch --since 10m   # 4) 时间线：谁起停、谁接管、谁调�
 | 码 | 退出码 | 含义与处置 |
 |----|--------|------------|
 | `mesh_write_not_allowed` | 6 | 写 op 缺 `--allow-write`：确认意图后显式加上（CLI 本地拒绝，不发请求） |
-| `mesh_nonloopback_denied` | 6 | 非回环调用：跨机一律拒绝（本机 127.0.0.1 才行） |
+| `mesh_nonloopback_denied` | 6 | 非回环调用：跨机一律拒绝（本机 127.0.0.1 才行）。目标以非回环地址监听时**整机**退出网格写路径（连回环客户端也拒）；逃生门 `--mesh-allow-nonloopback=true` 开在**目标进程**上、默认关 |
 | `mesh_cross_workspace_denied` | 6 | 目标开了 `--mesh-restrict-workspace` 且这是**跨工作区写调用**：改用同工作区节点，或让目标关掉该开关（只读不受影响） |
 | `mesh_token_stale` | 6 | 目标重启导致写令牌轮换：CLI 已自动重读档案重试一次仍失败——`show` 确认目标心跳，必要时重取 `url --with-token` |
 | `mesh_no_endpoint` | 2 | 目标没开回环控制面（纯 TUI）：让目标带 `--pprof` / `--web-port` 启动 |
@@ -112,6 +112,7 @@ aicli-mesh watch --since 10m   # 4) 时间线：谁起停、谁接管、谁调�
 | `open` 退出码 5 + `mesh_spawn_bin_unavailable` | 找不到可拉起的 aicli：设 `AICLI_BIN` / `--bin`，或与 `aicli-mesh.exe` 同目录放 `aicli.exe` |
 | `open` 的 `reused` 不是我想要的（想强制换新进程） | 用 `--takeover`：回收租约后拉起新节点；旧节点继续运行并把自己标 `orphaned`（不会被杀） |
 | `stop` 一律 `refused` | 目标没开 `--mesh-allow-stop=true`（默认关闭）：开关在被停进程上，CLI 不能绕过 |
+| `watch` 回放为空 / journal 文件不增长 | 目标进程开了 `--mesh-journal=false`（默认开）：启动 stderr 有 Info 行、`GET /web/api/mesh/self` 回显 `mesh.journal_enabled=false`；需要审计就让目标去掉该开关（其余功能照常） |
 | `watch` 提示「目标不存在」 | `--node`/`--session` 指定的目标在 journal 里**完全没有**出现过（退出码 2）；改成存在的前缀或先 `ls` |
 | `doctor` 报 `spawn-executable` 为 problem | `AICLI_BIN` 指到了不存在/是目录的位置：修好或清空它（**不会**退回其它候选） |
 | Web 端「在新窗口打开」失败且提示诊断命令 | spawn 失败：按返回的 `code` 查 §4.2，并跑一次 `aicli-mesh doctor` |
@@ -130,5 +131,6 @@ aicli-mesh doctor --json       # 起步基线：只有 paths 等基础检查
 ```
 
 需要真实多进程复现时，按 [../e2e/mesh-e2e.md](../e2e/mesh-e2e.md) §4 的两进程步骤与
-`scripts/test-aicli-debug-endpoints-e2e-mesh.ps1`（E2E-DEBUG-03，M1–M10 断言）走一遍——
-它覆盖了发现、CLI/HTTP 同源、租约互斥、跨进程 invoke、扇入实时性、崩溃对账与令牌不泄露。
+`scripts/test-aicli-debug-endpoints-e2e-mesh.ps1`（E2E-DEBUG-03，M1–M12 断言）走一遍——
+它覆盖了发现、CLI/HTTP 同源、租约互斥、跨进程 invoke、扇入实时性、崩溃对账、令牌不泄露、
+非回环默认拒绝（M11）与 journal 降级（M12）。

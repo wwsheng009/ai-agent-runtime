@@ -3,7 +3,7 @@
 > **定位**：`aicli-mesh-architecture.md`（下称「网格方案」）的**施工执行文档**。
 > 设计契约（数据模型 / API / 开关 / 验收编号）以网格方案为准；Web 侧交互以
 > `aicli-micro-web-client-session-window-plan.md`（下称「Web 子方案」）为准；多进程 E2E 断言以
-> `docs/e2e/mesh-e2e.md` §5（M1–M10）为准。**本文不重复设计，只回答四件事**：
+> `docs/e2e/mesh-e2e.md` §5（M1–M12）为准。**本文不重复设计，只回答四件事**：
 > 按什么顺序做（切片 S1–S10）、改哪些文件（改动面）、怎么证明做对了（验证与证据）、出问题怎么退（回滚）。
 >
 > 施工范围：`backend/internal/mesh`（新建）、`backend/cmd/aicli-mesh`（新建）、
@@ -23,7 +23,7 @@
 完成定义（全部满足才算「已落地」）：
 
 1. S1–S10 全部完成，每片的「验证」证据留档（命令 + 输出，§12）。
-2. E2E-DEBUG-01 / 02 基线**全绿**（MN5 硬门禁）；E2E-DEBUG-03（M1–M10）全绿且基线已固化。
+2. E2E-DEBUG-01 / 02 基线**全绿**（MN5 硬门禁）；E2E-DEBUG-03（M1–M12）全绿且基线已固化。
 3. `go test ./internal/mesh/...` 与 `aicli-mesh --help` 冒烟进 CI（§15）。
 4. 文档同步清单（§15）全部完成，无「文档说 A、代码做 B」。
 5. 一键回退可用：`--mesh=false` 下行为 = 今天（§14）。
@@ -41,7 +41,7 @@
 | S7 | P1 | `mesh/events` SSE 扇入 | S5 | 两进程互见实时状态 |
 | S8 | P1 | `mesh/call` + CLI `call/send/screen` | S5 S7 | A 调用 B 完成一轮 prompt |
 | S9 | P1 | `mesh/spawn` + `open` + 前端新窗口 | S6 S8 | 浏览器点一下开新窗口 |
-| S10 | P1 | E2E-DEBUG-03（M1–M10）+ 基线固化 | S6 S7 S8 S9 | 聚合回归绿 + 基线固化 |
+| S10 | P1 | E2E-DEBUG-03（M1–M10；S19 起扩为 M1–M12）+ 基线固化 | S6 S7 S8 S9 | 聚合回归绿 + 基线固化 |
 
 > **P2 治理项**（接管 `--takeover`、`--mesh-restrict-workspace`、`stop`、journal 查询、
 > `aicli mesh` 别名）作为 S10 之后的 **S11+** 追加切片，沿用本文同一模板；
@@ -50,6 +50,8 @@
 > About 页网格小节并入该切片；实时收口（`mesh/events` 前端订阅）为 S12。
 > 之后的治理项切片：S15 接管二次确认（§23）、**S16 `stop`（§24）**、**S17 `watch`（§25）**、
 > **S18 `aicli mesh` 别名（§26）**。
+> **S19 治理开关收口（§27）**：补 `--mesh-allow-nonloopback` / `--mesh-journal` 两个
+> 开关的实现，并把 P9/P10/P11 三条手工治理语义机器化为 M11/M12（03 断言 13 → 16）。
 
 ### 0.3 硬顺序约束（不可交换）
 
@@ -505,10 +507,11 @@ go test ./backend/cmd/aicli/commands/... -run 'MeshSpawn|Sessions' -v
 | S7 | §5.5 §6.1–§6.6 | M5；§12.1 防环与 seq | 单测 + E2E |
 | S8 | §5.6 §5.9 §9.2 §9.3 | M4 / M10；§12.2 call 用例 | 单测 + E2E |
 | S9 | §5.7 §8.2 §8.3 | M3；Web 子方案 §10.2 | 单测 + 手工 + E2E |
-| S10 | §12.3 | M1–M10 全量 | E2E |
+| S10 | §12.3 | M1–M10 全量（S19 起扩为 M1–M12） | E2E |
 | S11 | Web 子方案 §5.x §6.2 §6.3 | Web 子方案 §10.1 单测 + asset 契约；D11/D12 落地 | 单测 + 手工 + E2E 门禁 |
+| S19 | 架构 §9.4 §9.5 §9.7 | M11 / M12；两个治理开关的默认值与降级语义 | 单测 + E2E |
 
-**M1–M10 归属**（断言表见 mesh-e2e.md §5）：
+**M1–M12 归属**（断言表见 mesh-e2e.md §5）：
 
 | 断言 | 主覆盖切片 |
 |------|-----------|
@@ -522,6 +525,8 @@ go test ./backend/cmd/aicli/commands/... -run 'MeshSpawn|Sessions' -v
 | M8 `mesh/legacy-purge` | S6 |
 | M9 `mesh/self-containment` | S6 |
 | M10 `mesh/cross-workspace-ops` | S8 + S11（收敛开关） |
+| M11 `mesh/nonloopback-default-deny` + `mesh/nonloopback-cli-parity` | S19 |
+| M12 `mesh/journal-disabled` | S19 |
 
 ---
 
@@ -570,7 +575,7 @@ go test ./backend/cmd/aicli/...
 
 ```powershell
 .\scripts\test-aicli-e2e-all.ps1 -UpdateBaseline
-git diff -- scripts/e2e-assertion-baseline.json    # 人工核对：只新增 E2E-DEBUG-03 的 M1–M10
+git diff -- scripts/e2e-assertion-baseline.json    # 人工核对：只新增 E2E-DEBUG-03 的 M1–M12
 ```
 
 ### 12.4 手工验收清单（对齐网格方案 §12.5，逐条打勾）
@@ -652,8 +657,8 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | 2 | `docs/aicli/debug-chat-status.md:53-62` | 端口档案路径 `~/.aicli/web-ports/` → `mesh/bindings/` | S3 |
 | 3 | `docs/aicli/web-remote-api.md` | `mesh/*` 端点族已同步；`sessions` 便捷视图与 `resume` 归属检查（D11/D12）**已落地并写入 §9.7**（S11） | S5 / S9 / S11 |
 | 4 | `docs/aicli/mesh-cli.md` | **新增**；网格方案 §7 是草稿，落地后以该文档为准 | S6 |
-| 5 | `docs/e2e/mesh-e2e.md` | 已同步（场景 + M1–M10 + 故障排查）；2026-09-24 由 debug-guide §8 独立成文 | S10 |
-| 6 | `docs/plan/aicli-mesh-architecture.md` + Web 子方案 | 回填「已落地 / 偏差」标注（含 D1–D12） | S10 |
+| 5 | `docs/e2e/mesh-e2e.md` | 已同步（场景 + M1–M12 + 故障排查）；2026-09-24 由 debug-guide §8 独立成文 | S10 / S19 |
+| 6 | `docs/plan/aicli-mesh-architecture.md` + Web 子方案 | 回填「已落地 / 偏差」标注（含 D1–D13） | S10 / S19 |
 
 ### 15.2 构建与 CI
 
@@ -662,7 +667,7 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | 1 | `scripts/build.ps1:83-90` | `toolRegistry` 追加 `aicli-mesh` | S6 |
 | 2 | `Makefile` | 追加 `aicli-mesh:` 目标 | S6 |
 | 3 | `scripts/test-aicli-e2e-all.ps1` | 追加 E2E-DEBUG-03 场景与参数分支 | S10 |
-| 4 | `scripts/e2e-assertion-baseline.json` | `-UpdateBaseline` 固化 M1–M10 | S10 |
+| 4 | `scripts/e2e-assertion-baseline.json` | `-UpdateBaseline` 固化 M1–M12（S10 首固 03=13；S19 追加 3 条后重固 03=16） | S10 / S19 |
 | 5 | CI | 新增 `go test ./internal/mesh/...` + `aicli-mesh --help` 冒烟；保留 01/02 基线门禁（MN5） | S6 / S10 |
 
 ### 15.3 偏差登记（落地后回填网格方案 §11.6）
@@ -681,6 +686,7 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | D10 | M5 前置「扇入就绪门」：先等 A 的流里出现 B 的帧（订阅接通时 A 合成的 `mesh.peer.joined`，上限 `-FaninReadySec`，缺省 20s）再发 invoke | 订阅由 `Subscriber.Sync` 按 tick 建立；订阅接通前的窗口里 B 的 `busy=true` 不会被扇入（流不重放历史）→ 断言会随 tick 时机抖动。实测：A 05:05:53 才接上 B，而 invoke 05:05:51.7 已开始，`busy=true` 永久丢失 | mesh-e2e.md §5/§6 记录该前置与失败排查路径 |
 | D11 | Web `GET /web/api/sessions` 的 `endpoint` / `ownership` 字段**未落地**（`chatWebSessionListItem` 仍只有 id/title/summary/message_count/created_at/updated_at/current），前端侧栏徽标 / 端点行 / 跨工作区分组随之未落地 | S9 只做了「⧉ 新窗口打开 + 深链 + spawn/open 端点」；子方案 P0 ① 与其后端字段是纯展示项，被挤出 S9 范围且未单列切片 | Web 子方案新增 §0.1「落地状态」标注未落地；后续 Web 侧收口切片按子方案 §5.1/§6.1 落地；**S11 已收敛**（见 §19.4） |
 | D12 | `resume` 的 `running_elsewhere` 前置检查**未落地**（`/web/api/sessions/resume` 无归属判定，全仓 Go 代码无该标识） | 同 D11：归属/互斥已由网格租约（`session-<sid>`）与 `spawn` 锁内二次检查覆盖；Web 端冲突弹窗属体验项 | Web 子方案 §0.1 / FR11 标注未落地；租约语义由 `lease_test.go` 覆盖（见 D9）；**S11 已收敛**（见 §19.4） |
+| D13 | 架构 §9.4 / §9.5 承诺的 `--mesh-allow-nonloopback` 与 `--mesh-journal` 两个进程级开关**未落地**（§9.7 的 flag 表却已按存在列出），`mesh/self` 也无审计开关回显 | 「文档说 A、代码做 B」：收口切片 S19 补实现而**不改文档承诺**；同时把 P9/P10/P11 三条只跑过临时脚本的治理语义机器化 | 网格方案 §11 登记「两开关已落地」；mesh-e2e.md §5 追加 M11/M12；基线 03=16（见 §27.3） |
 
 ---
 
@@ -759,7 +765,7 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | S7 | `internal/mesh/{client,fanin}.go` + 测试 | `web_handlers_mesh.go`、`web_schema.go`、`pprof.go` | 单测 + M5 预演 | 事件流抓取 |
 | S8 | `web_handlers_mesh_call_test.go` | `internal/mesh/client.go`、`web_handlers_mesh.go`、`cli.go` | 单测 + M4 | 调用信封 JSON |
 | S9 | `internal/mesh/spawn.go`、`web/js/mesh.js`、`web_handlers_mesh_spawn_test.go` | `web/js/sessions.js`、`index.html`、`style.css`、`web_handlers.go` | 单测 + Web §10.2 | 新窗口截图 |
-| S10 | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1` | `scripts/test-aicli-e2e-all.ps1`、`e2e-assertion-baseline.json` | M1–M10 | `summary.json` + 基线 diff |
+| S10 | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1` | `scripts/test-aicli-e2e-all.ps1`、`e2e-assertion-baseline.json` | M1–M10（S19 追加 M11/M12） | `summary.json` + 基线 diff |
 | S11 | `web_handlers_mesh_sessions.go`、`web_handlers_mesh_sessions_test.go` | `web_handlers.go`、`web/js/sessions.js`、`web/js/ui.js`、`index.html`、`style.css` | Web §10.1 + 基线门禁 | 单测输出 + 手工验收 |
 | S12 | `web_handlers_mesh_realtime_test.go` | `web/js/sessions.js`、`web/js/util.js`、`web/js/sse.js` | Web §10.2「实时徽标」+ 基线门禁 | 单测输出 + 手工验收 |
 | S13 | `web_handlers_mesh_polish_test.go` | `web/js/sessions.js`、`web/js/chat.js` | Web §10.2（标题后缀 / refused 文案）+ 基线门禁 | 单测输出 + 手工验收 |
@@ -1111,6 +1117,55 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 | 单测 | `commands/mesh_command_test.go`（新建，6 例）：`ls --json` 信封与 `schema_version` / `watch --once --since 1h --json` 旗标原样透传 / `show` 目标不存在 → 2 / 未知子命令 → 1 且 stderr 说明 / `--help` → 0 且列出子命令 / `version --json` 带宿主版本 |
 | 退出码的测试手法 | 注入 `meshAliasExitHook`（生产为 `os.Exit`），与 `exportExitHook` 同一惯例——测试能断言 1 / 2 这类非 0 码而不真的结束测试进程 |
 | 未做（按计划） | 别名不提供独立二进制的安装 / 出包路径（`build.ps1 -Tools aicli-mesh` 不变）；帮助文本不按调用名改写（避免第二份用法） |
+
+---
+
+## 27. S19 · 治理开关收口（P9/P10/P11）：`--mesh-allow-nonloopback` / `--mesh-journal` + E2E M11/M12
+
+> 来源：架构 §9.4 / §9.5 承诺的两个进程级开关，在 §9.7 的 flag 表里已按存在列出，
+> 但源码里没有（D13）；手工验证 P9/P10/P11 又表明这三条治理语义只在临时脚本里被
+> 摸过、没进回归。本切片一次收口：**补实现**（保留文档承诺）+ **机器化**
+> （进 E2E-DEBUG-03，断言只增不减）。
+
+### 27.1 范围与落点
+
+| 面 | 落点 |
+| --- | --- |
+| 开关 | `cmd/aicli/mesh_flags.go`：`--mesh-allow-nonloopback`（默认**关**）、`--mesh-journal`（默认**开**），与 `--mesh-restrict-workspace` / `--mesh-allow-spawn` / `--mesh-allow-stop` 同族，统一由 `applyMeshGovernanceFlags` 落状态 |
+| 非回环判定 | `commands/web_handlers_mesh.go::chatWebMeshWritePathAllowed`：`chatWebRequestIsLoopback`（= 进程处于回环模式 **且** 客户端回环）不成立时只有显式开关才放行；`call` / `spawn` / `stop` 三个 handler 共用同一判定（一处口径，不各写一套） |
+| 审计降级 | `internal/mesh/host.go`（`HostConfig.JournalDisabled`）→ `internal/mesh/journal.go`（`JournalOptions.Disabled`）：`Append` 静默丢弃、**seq 照常分配**（扇入与 SSE 的 seq 同源，不受影响） |
+| 回显 | `mesh/self` 新增 `mesh.journal_enabled`：如实自述审计开关，消费方不必靠猜 |
+| E2E | M11（`mesh/nonloopback-default-deny` + `mesh/nonloopback-cli-parity`；HTTP 侧 call 与 stop 两个端点各探一次）、M12（`mesh/journal-disabled`）——03 断言 13 → 16 |
+| 文档 | mesh-e2e.md（§5/§6/§7/§8）、网格方案 §11 登记、本表 |
+
+### 27.2 验证
+
+- 单测：`web_handlers_mesh_nonloopback_test.go`（默认拒绝 / 逃生门放行两条路径）、
+  `mesh_flags_governance_p2_test.go`（五个开关的注册、默认值与落状态）、
+  `journal_disabled_test.go`（seq 仍分配、不落盘）。
+- E2E：`pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-mesh.ps1`
+  （M11/M12 与 M1–M10 同跑，退出码 0 才算过）。
+- 基线：`pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -BaselineOnly -UpdateBaseline`
+  （只校验断言名、不跑场景）→ 03 由 13 固化为 16。
+- 固化验证（2026-09-24）：E2E-DEBUG-03 单跑 16/16 绿（`artifacts/mesh-e2e-m11m12-r3/`）——
+  `mesh/nonloopback-default-deny`：HTTP call 与 stop 均 `403 + refused + mesh_nonloopback_denied`、
+  同一节点 `/web/api/status` 仍 200；`mesh/nonloopback-cli-parity`：exit 6 + 同一原因码；
+  `mesh/journal-disabled`：B4 回显 false / A true、B4 无 journal 文件、`watch --once` 无其事件、call/gc 照常。
+  聚合 01 → 02 → 03 全绿（`PASS=6 FAIL=0`，`artifacts/aicli-e2e-all/20260924-205713/`，01=41 / 02=28 / 03=16）。
+
+### 27.3 落地记录（2026-09-24）
+
+| 项 | 实际 |
+| --- | --- |
+| 偏差性质 | 两个开关属「文档已承诺、代码缺失」（D13）；修法是补实现而不是改文档承诺——flag 名与默认值照 §9.7 / §10 的表 |
+| 默认拒绝不是「只拦非回环客户端」 | `chatWebRequestIsLoopback` 先看**进程是否回环模式**：`--web-host 0.0.0.0` 下整机退出网格写路径，连回环客户端也拒（M11 的探针正是打这一点）；逃生门打开后令牌、逐次 `allow_write`、`--mesh-allow-stop` 的要求全部照旧 |
+| 逃生门不进 E2E | M11 只锁「默认拒绝」这条红线；`--mesh-allow-nonloopback=true` 的放行路径由 Go 单测覆盖（E2E 不为图方便打开跨机开关，与 mesh-e2e.md §8 安全红线一致） |
+| journal 关闭的语义边界 | 只丢审计：不写 `journal/<node>.ndjson`，`seq` 仍分配（否则扇入与 SSE 的序号会断档）；`watch --once` 退化为「只看别人的日志」且不报错；`call` / `gc` 照常（M12 逐条断言） |
+| 对照断言 | M12 用 A（默认节点）的 `journal_enabled=true` 与 A 的 journal 行数 ≥1 作对照，防止「回显写死 false」也能蒙混过关 |
+| 清单门禁顺带收口 | 03 的端点覆盖门禁此前把 `/web/api/mesh/stop` 留在「清单有、断言无」：M11 现在也在非回环模式下探 stop（B3 带 `--mesh-allow-stop=true` 只为越过开关检查，探针 target 指向 B3 自己，判定若被绕过也只会 `mesh_stop_self_refused`），该端点随之进 `$asserted` 而不再需要豁免 |
+| 档案读取时序 | 节点档案**首写可能还没有 `endpoint` 段**（回环地址解析/落盘晚于首写，非回环监听下实测更明显）：`Wait-RecordByPid -RequireEndpoint` 等到 `endpoint.port > 0` 再交还调用方（端口仍只从档案读）；M11 探针同时带档案里的 `X-AICLI-Token`，测的是「有令牌也拒」而不是被 401 挡在门外 |
+| 基线 | `scripts/e2e-assertion-baseline.json` 03：13 → 16（新增 `mesh/journal-disabled`、`mesh/nonloopback-cli-parity`、`mesh/nonloopback-default-deny`），01=40 / 02=31 未动 |
+| 未做 | 非回环**放行**的端到端场景：E2E-DEBUG-02 已覆盖非回环鉴权，网格写路径的放行留给单测；将来确有需要再开场景 |
 
 ---
 
