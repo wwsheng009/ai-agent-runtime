@@ -763,6 +763,25 @@ type ProfilesConfig struct {
 	Root           string                   `yaml:"root" mapstructure:"root" env:"PROFILES_ROOT"`
 	DefaultProfile string                   `yaml:"default_profile" mapstructure:"default_profile" env:"DEFAULT_PROFILE"`
 	Items          map[string]ProfileConfig `yaml:"items" mapstructure:"items"`
+	// Auto 配置 `--profile auto` 的提示词路由（FR-11）：未设置时使用内置启发式
+	// （write→executor / plan→planner / search→explore，未命中→executor），
+	// 因此不启用 auto 的部署零变化。
+	Auto *ProfilesAutoConfig `yaml:"auto,omitempty" mapstructure:"auto"`
+}
+
+// ProfilesAutoConfig configures prompt-based profile auto routing (FR-11).
+// CLI 与 runtime-server 共用同一份语义（internal/profile.RouteProfileForPrompt）。
+type ProfilesAutoConfig struct {
+	// Fallback 是规则未命中时的兜底 profile；空表示内置兜底 executor。
+	Fallback string `yaml:"fallback,omitempty" mapstructure:"fallback"`
+	// Rules 覆盖内置映射（非空即整体替换）；规则按声明顺序短路，首个命中胜出。
+	Rules []ProfilesAutoRouteRule `yaml:"rules,omitempty" mapstructure:"rules"`
+}
+
+// ProfilesAutoRouteRule maps prompt keywords to one profile reference.
+type ProfilesAutoRouteRule struct {
+	Profile  string   `yaml:"profile" mapstructure:"profile"`
+	Keywords []string `yaml:"keywords,omitempty" mapstructure:"keywords"`
 }
 
 // ProfileConfig defines a named profile root override.

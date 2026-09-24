@@ -29,6 +29,8 @@ type ProfileSupportConfig struct {
 	GlobalRuntimePath string
 	GlobalMCPPath     string
 	GlobalSkillDirs   []string
+	// AutoRoute 是 FR-11 的提示词路由表（`profiles.auto` 解析结果；零值 = 内置默认）。
+	AutoRoute profilesys.AutoRouteConfig
 }
 
 type profileRuntimeState struct {
@@ -65,6 +67,10 @@ func (h *Handler) SetProfileSupport(cfg ProfileSupportConfig) {
 	h.profileGlobalRuntimePath = strings.TrimSpace(cfg.GlobalRuntimePath)
 	h.profileGlobalMCPPath = strings.TrimSpace(cfg.GlobalMCPPath)
 	h.profileGlobalSkillDirs = append([]string(nil), cfg.GlobalSkillDirs...)
+	h.profileAutoRoute = profilesys.AutoRouteConfig{
+		Rules:    append([]profilesys.AutoRouteRule(nil), cfg.AutoRoute.Rules...),
+		Fallback: strings.TrimSpace(cfg.AutoRoute.Fallback),
+	}
 }
 
 // workspaceFolderTrust 解析 server 侧 workspacePath 的 D29 信任结论。

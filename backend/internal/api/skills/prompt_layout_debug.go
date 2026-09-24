@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 )
 
@@ -51,11 +52,11 @@ func (h *Handler) PreviewPromptLayout(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	usageScope := h.resolveUsageScope(r, req.TenantID, req.ProjectID, req.UserID)
 	effectiveProfile := strings.TrimSpace(req.Profile)
-	if effectiveProfile == "" && isAutoProfileRef(h.profileDefaultRef) {
+	if effectiveProfile == "" && profilesys.IsAutoProfileRef(h.profileDefaultRef) {
 		effectiveProfile = h.profileDefaultRef
 	}
-	if isAutoProfileRef(effectiveProfile) {
-		effectiveProfile = routeProfileForPrompt(extractLastUserPrompt(req.Messages))
+	if profilesys.IsAutoProfileRef(effectiveProfile) {
+		effectiveProfile = h.routeAutoProfileForPrompt(extractLastUserPrompt(req.Messages))
 	}
 
 	workspacePath := strings.TrimSpace(req.WorkspacePath)

@@ -1101,6 +1101,9 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		GlobalRuntimePath: strings.TrimSpace(runtimeManager.GetFilePath()),
 		GlobalMCPPath:     configuredMCPConfigPath(cfg),
 		GlobalSkillDirs:   allConfiguredSkillDirs(skillsCfg),
+		// FR-11：`--profile auto` 的路由表（`profiles.auto`）；与 registry 同一快照
+		// 生命周期（配置热重载时一起重建），未配置时为内置启发式。
+		AutoRoute: profilesys.NewAutoRouteConfig(cfg.Profiles),
 	})
 	configDocumentService := runtimeserver.NewLocalConfigDocumentService(configPath)
 	configHotReloader := runtimeserver.NewRuntimeConfigHotReloader(handler, cfg, bootstrapManager)

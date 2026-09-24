@@ -177,6 +177,8 @@ type Handler struct {
 	profileGlobalRuntimePath    string
 	profileGlobalMCPPath        string
 	profileGlobalSkillDirs      []string
+	// profileAutoRoute 是 FR-11 的提示词路由表（`profiles.auto`；零值 = 内置默认）。
+	profileAutoRoute profilesys.AutoRouteConfig
 
 	teamStoreMu               sync.RWMutex
 	teamStoreConfigKey        string
@@ -1736,11 +1738,13 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 
 	resolveProfile := func(ref string) (*profileRuntimeState, func(), error) {
 		ref = strings.TrimSpace(ref)
-		if ref == "" && isAutoProfileRef(h.profileDefaultRef) {
+		if ref == "" && profilesys.IsAutoProfileRef(h.profileDefaultRef) {
 			ref = h.profileDefaultRef
 		}
-		if isAutoProfileRef(ref) {
-			ref = routeProfileForPrompt(extractLastUserPrompt(req.Messages))
+		if profilesys.IsAutoProfileRef(ref) {
+			// FR-11：auto 按**最后一条 user 消息**路由（与历史启发式一致）；空提示词
+			// 返回 ""，即回落该请求的默认/无 profile 语义（不猜、不静默换挡）。
+			ref = h.routeAutoProfileForPrompt(extractLastUserPrompt(req.Messages))
 		}
 		return h.resolveProfileRuntimeState(ctx, ref, req.Agent, usageScope, workspacePath)
 	}
@@ -13170,8 +13174,15 @@ func (h *Handler) deletePersistedSkillFile(skillItem *skill.Skill) error {
 	return nil
 }
 
-func isAutoProfileRef(value string) bool {
-	return strings.EqualFold(strings.TrimSpace(value), "auto")
+// routeAutoProfileForPrompt 把提示词路由为 profile 引用（FR-11）。路由表来自配置
+// `profiles.auto`（未配置 → 内置启发式）；空提示词返回 ""，调用方保留自身默认语义。
+// 匹配实现是 internal/profile 的单一权威（profilesys.RouteProfileForPrompt），
+// server 与 CLI 共用同一份规则，禁止在本包内再写第二套关键词表。
+func (h *Handler) routeAutoProfileForPrompt(prompt string) string {
+	if h == nil {
+		return ""
+	}
+	return profilesys.RouteProfileForPrompt(prompt, h.profileAutoRoute)
 }
 
 func extractLastUserPrompt(messages []map[string]string) string {
@@ -13184,36 +13195,4 @@ func extractLastUserPrompt(messages []map[string]string) string {
 		}
 	}
 	return ""
-}
-
-func routeProfileForPrompt(prompt string) string {
-	lower := strings.ToLower(strings.TrimSpace(prompt))
-	if lower == "" {
-		return ""
-	}
-	if containsAny(lower, []string{"write", "implement", "fix", "add", "edit", "refactor", "patch", "update", "change"}) {
-		return "executor"
-	}
-	if containsAny(lower, []string{"plan", "break down", "design", "compare", "proposal", "approach"}) {
-		return "planner"
-	}
-	if containsAny(lower, []string{"search", "inspect", "understand", "locate", "find", "investigate", "look up"}) {
-		return "explore"
-	}
-	return "executor"
-}
-
-func containsAny(text string, needles []string) bool {
-	if text == "" || len(needles) == 0 {
-		return false
-	}
-	for _, needle := range needles {
-		if needle == "" {
-			continue
-		}
-		if strings.Contains(text, needle) {
-			return true
-		}
-	}
-	return false
 }
