@@ -278,6 +278,79 @@ func TestHandleChatWebAPIMeshCall_JournalRecordsOpOnly(t *testing.T) {
 	}
 }
 
+// nextFaninPayload 从一条扇入客户端连接上取下一帧指定类型的数据体。
+func nextFaninPayload(t *testing.T, client *mesh.FaninClient, frameType string, timeout time.Duration) map[string]any {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case message, ok := <-client.Payloads():
+			if !ok {
+				t.Fatalf("扇入连接已关闭，未等到 %s", frameType)
+			}
+			if message.Type != frameType {
+				continue
+			}
+			var frame struct {
+				Seq  uint64         `json:"seq"`
+				Type string         `json:"type"`
+				Data map[string]any `json:"data"`
+			}
+			if err := json.Unmarshal(message.Payload, &frame); err != nil {
+				t.Fatalf("%s 帧不是合法 JSON: %v (%s)", frameType, err, string(message.Payload))
+			}
+			if frame.Seq == 0 {
+				t.Fatalf("%s 是广播帧，必须带序号: %s", frameType, string(message.Payload))
+			}
+			return frame.Data
+		case <-deadline:
+			t.Fatalf("等待 %s 帧超时", frameType)
+			return nil
+		}
+	}
+}
+
+// 架构 §5.5：被调方自身发布 mesh.call.invoked / mesh.call.completed 两帧；
+// 帧里只带 op / 状态 / 耗时，绝不含 args（args 可能含用户 prompt）。
+func TestHandleChatWebAPIMeshCall_PublishesInvokedAndCompletedFrames(t *testing.T) {
+	host := meshTestHost(t)
+	fanin := meshFanin(t, host)
+	client, err := fanin.Subscribe()
+	if err != nil {
+		t.Fatalf("fanin.Subscribe: %v", err)
+	}
+	t.Cleanup(client.Close)
+
+	const secret = "这段文字不得进帧"
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIMeshCall(rec, meshCallRequest(t, map[string]any{
+		"op":   "screen",
+		"args": map[string]any{"prompt": secret},
+	}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+
+	invoked := nextFaninPayload(t, client, mesh.FrameCallInvoked, 3*time.Second)
+	if op, _ := invoked["op"].(string); op != "screen" {
+		t.Fatalf("invoked.op = %v, want screen", invoked["op"])
+	}
+	if body, err := json.Marshal(invoked); err != nil || strings.Contains(string(body), secret) {
+		t.Fatalf("mesh.call.invoked 泄露了 args: %s", string(body))
+	}
+
+	completed := nextFaninPayload(t, client, mesh.FrameCallCompleted, 3*time.Second)
+	if status, _ := completed["status"].(string); status != mesh.CallStatusOK {
+		t.Fatalf("completed.status = %v, want %q", completed["status"], mesh.CallStatusOK)
+	}
+	if _, ok := completed["elapsed_ms"].(float64); !ok {
+		t.Fatalf("completed 必须带 elapsed_ms: %v", completed)
+	}
+	if body, err := json.Marshal(completed); err != nil || strings.Contains(string(body), secret) {
+		t.Fatalf("mesh.call.completed 泄露了 args: %s", string(body))
+	}
+}
+
 func TestHandleChatWebAPIMeshCall_CrossWorkspaceSwitch(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "ws-self")
 	host := meshCallTestHostWithWorkspace(t, workspace)

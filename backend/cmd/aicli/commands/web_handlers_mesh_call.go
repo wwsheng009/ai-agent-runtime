@@ -117,14 +117,30 @@ func HandleChatWebAPIMeshCall(w http.ResponseWriter, r *http.Request) {
 		"op":     op,
 		"caller": callerNodeID,
 	})
+	// 实时帧（§5.5）：本节点被调用开始。只带 op 与调用者——args 可能含用户
+	// prompt，绝不进帧；扇入禁用/关闭时静默丢弃，绝不阻塞调用路径。
+	invoked := map[string]any{"op": op}
+	if callerNodeID != "" {
+		invoked["caller"] = callerNodeID
+	}
+	host.Fanin().PublishLocal(mesh.FrameCallInvoked, invoked)
 
 	status, code, body := chatWebMeshCallDispatch(op, req.Args, strings.TrimSpace(req.ClientRequestID))
 	elapsed := time.Since(started).Milliseconds()
+	duplicate := chatWebMeshCallDuplicate(body)
 	detail := map[string]any{"op": op, "status": status, "elapsed_ms": elapsed}
 	if code != "" {
 		detail["code"] = code
 	}
 	host.Journal().Append(mesh.JournalCallCompleted, "", detail)
+	completed := map[string]any{"op": op, "status": status, "elapsed_ms": elapsed}
+	if code != "" {
+		completed["code"] = code
+	}
+	if duplicate {
+		completed["duplicate"] = true
+	}
+	host.Fanin().PublishLocal(mesh.FrameCallCompleted, completed)
 
 	envelope := mesh.CallEnvelope{
 		SchemaVersion: mesh.SchemaVersion,
@@ -133,7 +149,7 @@ func HandleChatWebAPIMeshCall(w http.ResponseWriter, r *http.Request) {
 		NodeID:        host.NodeID(),
 		Op:            op,
 		ElapsedMs:     elapsed,
-		Duplicate:     chatWebMeshCallDuplicate(body),
+		Duplicate:     duplicate,
 		Result:        chatWebMeshCallResultBody(body),
 	}
 	if status != mesh.CallStatusOK {
