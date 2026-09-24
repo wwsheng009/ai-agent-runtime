@@ -1155,6 +1155,8 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 | E2E-6 | 未信任仓库：untrusted 工作区加载项目 profile | 安全门控 | 裁剪生效、prompts 未应用、警告出现（D29） |
 | E2E-7 | resume 漂移：会话绑定 X，X 被删除后 resume | 使用→容错 | 警告 + 会话可用（不崩、不静默降级，R18） |
 
+> **E2E-1~5 验收状态（Batch 13，2026-09-24）**：**全部通过**——E2E-2 由 server 半程锚定（slice 5 固化 + slice 6 API 入口，见 D35/D36）；E2E-1/3/4/5 由前端半程 Playwright 跑通（slice 9a mock + slice 9b 剧本，见 D38）。
+
 ## 24. 补遗实施批次（Batch 13-14）
 
 | Batch | 内容 | 优先级 | 依赖 | 出口条件 |
@@ -1301,7 +1303,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 **测试锚点**：`profiles_saveas_handlers_test.go`——① deny 形态 + `read_only: true` + skills 收窄的源 profile 固化：断言 `mode`/`baseline`/`surface` 计数/`omitted` 非空/`profile.valid=true`，产物**含 `denylist:` 与 `read_only: true`、不含 `allowlist:` 与 `prompt:`**（形态保持 + prompt 不落盘），并用 `resolveProfileSessionState(<新 profile>, "default", "")` 读回验证**重开复现同一生效面**（E2E-2 的 server 半程）；② 无差分 400 + 无目录（A9）、混用/`force` 400、既有目录 409 + 内容零改写。`profiles_handlers_test.go` 的边界用例（原 501）改为"未知会话 404 + 零落盘"——该用例原先没有 session manager，改造后显式装一个（否则走的是"未配置"的 500 分支，测试实锤过一次）。
 
-**遗留**：① ~~TUI `import` 入口（CLI/API 已接线）~~ **已随 slice 7 接线（D37）**；② 前端生命周期入口（含"从当前会话创建"按钮）；③ D29 信任门控（Batch 14）；④ 前端 E2E-1 / E2E-3 / E2E-4 未跑。
+**遗留**：① ~~TUI `import` 入口（CLI/API 已接线）~~ **已随 slice 7 接线（D37）**；② 前端生命周期入口——导出/导入已随 slice 8 接线，"从当前会话创建"按钮未接；③ D29 信任门控（Batch 14）；④ ~~前端 E2E-1 / E2E-3 / E2E-4 未跑~~ **已随 slice 9b 跑通（D38）**。
 
 ## 附录 D37：Batch 13 slice 7 回填（2026-09-24）——TUI `import` 闭环落地契约
 
@@ -1316,4 +1318,23 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 **测试锚点**：`chat_profile_lifecycle_import_test.go`——① 模板渲染 → 打 zip → `--dry-run`（零落盘）→ 真实导入（物化 `profile.yaml` + `校验: 通过` + `未激活` + 会话绑定零变化）→ 同名再导入被拒且不覆盖；② 坏源（不存在 / 缺 `profile.yaml`）被拒且层根零条目 + 未知层不落盘；③ 子会话真实导入被写守卫挡住、`--dry-run` 正常预演。测试内 `writeProfileImportTestBundle` 复用 `RenderTemplate`/`CollectBundleFiles`/`WriteBundleZip`（不另造包格式）；经 `useTemporaryHome` 重定向 `HOME/USERPROFILE`，不污染真实用户目录。
 
-**遗留**：① 前端生命周期入口（含导出/导入按钮）；② D29 信任门控（Batch 14）；③ 前端 E2E-1 / E2E-3 / E2E-4 未跑。
+**遗留**：① ~~前端生命周期入口（含导出/导入按钮）~~ **导出/导入已随 slice 8 接线（D38）**；"从当前会话创建"按钮仍缺（`from_session` 有 API、前端零引用）；② D29 信任门控（Batch 14）；③ ~~前端 E2E-1 / E2E-3 / E2E-4 未跑~~ **已随 slice 9b 跑通（D38）**。
+
+## 附录 D38：Batch 13 slice 8/9 回填（2026-09-24）——前端分享入口 + E2E 前端半程验收
+
+**slice 8（前端 export/import 入口，G5/D28/D32/D33）**：`frontend/src/api/runtime/profiles/transfer.ts`（导出取 zip、导入两段式）+ `.../sections/modes/profile-import-dialog.tsx`（预演 → 落盘）+ `profile-list-header.tsx` / `profile-list-row.tsx` 入口按钮 + `profiles.tsx` 接线；i18n zh/en 对称（`runtime-config/profiles.ts` 的 transfer 块）。契约要点：① 导出走 `POST /profiles/{ref}/export`，响应 zip 经 `createObjectURL` + `<a download>` 交给浏览器（文件名/文件数从响应头归一化，缺失时回填 ref 兜底）；② 导入**先预演后落盘**（`dry_run=true`）——`400 + 报告体` 是领域结果（`valid=false` 返回报告、展示 issues 清单），409 同名冲突等仍抛 `RuntimeApiError`；③ **绝不自动激活**——成功文案明确指向 default / apply 两个独立动作（D28-2）。单测 11 例（API 8 + UI 3：`profiles-transfer.test.ts` / `profiles-transfer.test.tsx`）。
+
+**slice 9a（e2e mock 补 profiles 域）**：`frontend/e2e/mock-profiles.mjs` 增 profiles 域（列表/详情/校验/保存/删除/引用/导出/导入/default/apply）；`support.ts` 增 `seedProfiles()` 夹具注入（缺 `ok` 即抛错，防假绿）。
+
+**slice 9b（E2E-1/3/4/5 前端半程）**：`profiles-editor.spec.ts`（E2E-1 新建向导→校验→"立即切换"；E2E-3 改 deny→Preview impact→保存→切换）、`profiles-lifecycle.spec.ts`（E2E-5 删除保护：409 阻断→强制删除→default 清空；E2E-4 导出→导入（先预演、不自动激活）→会话内使用）。
+
+**三处纠偏（防假绿的关键）**：
+1. `mock-profiles.mjs` 的 `references.blocking` 由对象数组改**字符串数组**——前端 `readStringArray` 只收字符串，对象条目被静默丢弃 → 409 报"仍有引用"而前端显示 0 条，删除保护形同虚设；真实后端同为文本数组，mock 对齐。
+2. 命令回执选择器纠正：`data-composer-command-notice` 是"未知命令"菜单提示，builtin 命令回执是 **`data-composer-command-result`**（属性值即 tone），并断言 `toHaveAttribute(..., "success")`。
+3. 校验/预演面纠正：`data-profile-report` / `data-profile-changes` 挂在 validation 卡片**内部**（仅 report 非空才渲染），断言改为 `[data-profile-report="valid"]` 可见性 + `data-profile-changes` 正则 `^[1-9]\d*$` + 文案含 `tools`。
+
+**验证（slice 9b 出口）**：`npx playwright test profiles-editor profiles-lifecycle` → 4 passed；`npm run lint` 0 error（2 条既有 react-hooks 告警）；`npm run build` 通过；`npm test`（vitest）全绿；mock 探针 27/27（含 `references :: blocking=2`、`delete-blocked :: status=409 blocking=2`、`delete-forced :: default_cleared=true`）。
+
+**Batch 13 出口核对**：E2E-1/2/3/4/5 **全绿**（E2E-2 = slice 5/6 server 半程，D35/D36；E2E-1/3/4/5 = slice 9b 前端半程）+ A9-A12 断言已在各自 slice 的测试锚点内（D32-D36）→ **Batch 13 出口条件达成**。下一批次 = Batch 14（P0 安全：D29 信任门控 + E2E-6/7 + A13/A14），前置核实 V20/V21 按 §3 纪律先回填。
+
+**遗留**：① 前端"从当前会话创建"按钮（`from_session` 已有 API（D36）但前端零引用）；② D29 信任门控与未信任警告面（Batch 14）；③ E2E-6/7（Batch 14）。
