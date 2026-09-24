@@ -49,7 +49,7 @@ aicli chat --yolo --web-host 0.0.0.0 --web-port 9999 --web-token <至少 16 位�
   （见 §2.1 拓扑与脚本启动段），因此 `term.IsTerminal(stdout)=false`
   （`backend/cmd/aicli/ui/terminal.go`）——进程走**非交互路径**，不 attach 交互式 TUI /
   统一渲染器，也没有键盘输入面；本场景的观测全部来自 HTTP 控制面。
-- **不覆盖 TUI 渲染 / 键盘路径**：见 E2E-DEBUG-01 §8 的分工表。
+- **不覆盖 TUI 渲染 / 键盘路径**：见 E2E-DEBUG-01 §9 的分工表。
 - **不覆盖真实 turn 的 provider 行为**：本场景只发 `interrupt` 与 `/exit` 这类**无害控制动作**，
   避免为验鉴权引入 provider 依赖——因此本场景**不需要**配置 provider。
 - **不覆盖 TLS / 反向代理 / 多用户**：`aicli` 的 Web 控制面是明文 HTTP + 单令牌模型。

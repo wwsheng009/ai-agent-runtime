@@ -3,7 +3,7 @@
 > **定位**：`aicli-mesh-architecture.md`（下称「网格方案」）的**施工执行文档**。
 > 设计契约（数据模型 / API / 开关 / 验收编号）以网格方案为准；Web 侧交互以
 > `aicli-micro-web-client-session-window-plan.md`（下称「Web 子方案」）为准；多进程 E2E 断言以
-> `docs/e2e/debug-guide.md` §8（M1–M10）为准。**本文不重复设计，只回答四件事**：
+> `docs/e2e/mesh-e2e.md` §5（M1–M10）为准。**本文不重复设计，只回答四件事**：
 > 按什么顺序做（切片 S1–S10）、改哪些文件（改动面）、怎么证明做对了（验证与证据）、出问题怎么退（回滚）。
 >
 > 施工范围：`backend/internal/mesh`（新建）、`backend/cmd/aicli-mesh`（新建）、
@@ -456,7 +456,7 @@ go test ./backend/cmd/aicli/commands/... -run 'MeshSpawn|Sessions' -v
 | 新增 | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1` | 场景脚本：A/B 两真实进程（`--pprof`，端口由节点档案 `endpoint.port` 提供），dot-source `aicli-e2e-harness.ps1` 复用 `Invoke-HarnessRequest` / `Wait-AicliScreenStable` / `Test-AicliEndpointCoverage` |
 | 改造 | `scripts/test-aicli-e2e-all.ps1`（实测 108–131 行 `$script:scenarios`；236–245 行参数分支；138 行基线正则） | 追加第三场景 + 参数分支 |
 | 改造 | `scripts/e2e-assertion-baseline.json` | 跑 `-UpdateBaseline` 固化 M1–M10 |
-| 改造 | `docs/e2e/debug-guide.md` | **已同步**（§8 + M1–M10）；跑通后回填「已落地」标注 |
+| 改造 | `docs/e2e/debug-guide.md` | **已同步**（§8 + M1–M10）；跑通后回填「已落地」标注；2026-09-24 该场景独立成文为 `docs/e2e/mesh-e2e.md` |
 
 **实现要点**
 
@@ -508,7 +508,7 @@ go test ./backend/cmd/aicli/commands/... -run 'MeshSpawn|Sessions' -v
 | S10 | §12.3 | M1–M10 全量 | E2E |
 | S11 | Web 子方案 §5.x §6.2 §6.3 | Web 子方案 §10.1 单测 + asset 契约；D11/D12 落地 | 单测 + 手工 + E2E 门禁 |
 
-**M1–M10 归属**（断言表见 debug-guide §8.5）：
+**M1–M10 归属**（断言表见 mesh-e2e.md §5）：
 
 | 断言 | 主覆盖切片 |
 |------|-----------|
@@ -652,7 +652,7 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | 2 | `docs/aicli/debug-chat-status.md:53-62` | 端口档案路径 `~/.aicli/web-ports/` → `mesh/bindings/` | S3 |
 | 3 | `docs/aicli/web-remote-api.md` | `mesh/*` 端点族已同步；`sessions` 便捷视图与 `resume` 归属检查（D11/D12）**已落地并写入 §9.7**（S11） | S5 / S9 / S11 |
 | 4 | `docs/aicli/mesh-cli.md` | **新增**；网格方案 §7 是草稿，落地后以该文档为准 | S6 |
-| 5 | `docs/e2e/debug-guide.md` | 已同步（§8 + M1–M10）；S10 后回填「已落地」 | S10 |
+| 5 | `docs/e2e/mesh-e2e.md` | 已同步（场景 + M1–M10 + 故障排查）；2026-09-24 由 debug-guide §8 独立成文 | S10 |
 | 6 | `docs/plan/aicli-mesh-architecture.md` + Web 子方案 | 回填「已落地 / 偏差」标注（含 D1–D12） | S10 |
 
 ### 15.2 构建与 CI
@@ -677,8 +677,8 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | D6 | `web_page.go` 注入的 head 内联脚本做深链自举（`?token=` → `sessionStorage` + `history.replaceState` 抹除地址栏；`?session=` → `window.__aicli_deep_link_session`） | 计划未列该文件，但令牌必须在 ES 模块首个 `fetch` 之前落位，否则首个请求无令牌 | 同上（S9 落地时已在 §9 表内标注） |
 | D7 | `process_alive_windows.go` 判活必须读退出码（`GetExitCodeProcess` == `STILL_ACTIVE`），不能只看 `OpenProcess` 成功 | Windows 只要还有句柄指向进程对象，PID 就不回收：`OpenProcess` 对**已退出**进程照样成功。E2E-DEBUG-03 实测到「被强杀的 B 永久 `live`」→ 视图不转 `stale`、`gc` 回收不掉 | §11.6 记录「判活口径」：Windows 以退出码为准（新增 `process_alive_windows_test.go` 两个方向对照） |
 | D8 | `call.go::ResolveCallTarget` 与 CLI `resolveTarget` 合并为共享 `matchTargetNodes`（pid → node 精确 → node 前缀 → session 精确 → session 前缀；歧义时 node id 精确优先，大小写不敏感） | 两处各写一套匹配规则 → 口径分叉（CLI 能定位、`mesh call` 报 `target_not_found`） | §11.6 记录「目标解析唯一实现」（回归测试 `TestResolveCallTargetSharesCLITargetRules`） |
-| D9 | M3 断言口径：拒绝语义以「目标返回的 store 查找结果」为准（`session not found` / `busy` / `running_elsewhere` 都可能），E2E 断的是**归属不变**（owner 仍为 A、`counts.conflict=0`） | `sessions.resume` 是转发到目标 `/web/api/sessions/resume` 的写 op；目标本地存储没有该会话时返回 404，压根到不了租约判定。文档原写「返回 busy / running_elsewhere」属过度指定 | debug-guide §8.5 该行改写；租约「不抢活租约」由 `lease_test.go`（默认不抢 / `--takeover` 才抢 / host 感知被抢）覆盖 |
-| D10 | M5 前置「扇入就绪门」：先等 A 的流里出现 B 的帧（订阅接通时 A 合成的 `mesh.peer.joined`，上限 `-FaninReadySec`，缺省 20s）再发 invoke | 订阅由 `Subscriber.Sync` 按 tick 建立；订阅接通前的窗口里 B 的 `busy=true` 不会被扇入（流不重放历史）→ 断言会随 tick 时机抖动。实测：A 05:05:53 才接上 B，而 invoke 05:05:51.7 已开始，`busy=true` 永久丢失 | debug-guide §8.5/§8.6 记录该前置与失败排查路径 |
+| D9 | M3 断言口径：拒绝语义以「目标返回的 store 查找结果」为准（`session not found` / `busy` / `running_elsewhere` 都可能），E2E 断的是**归属不变**（owner 仍为 A、`counts.conflict=0`） | `sessions.resume` 是转发到目标 `/web/api/sessions/resume` 的写 op；目标本地存储没有该会话时返回 404，压根到不了租约判定。文档原写「返回 busy / running_elsewhere」属过度指定 | mesh-e2e.md §5 该行改写；租约「不抢活租约」由 `lease_test.go`（默认不抢 / `--takeover` 才抢 / host 感知被抢）覆盖 |
+| D10 | M5 前置「扇入就绪门」：先等 A 的流里出现 B 的帧（订阅接通时 A 合成的 `mesh.peer.joined`，上限 `-FaninReadySec`，缺省 20s）再发 invoke | 订阅由 `Subscriber.Sync` 按 tick 建立；订阅接通前的窗口里 B 的 `busy=true` 不会被扇入（流不重放历史）→ 断言会随 tick 时机抖动。实测：A 05:05:53 才接上 B，而 invoke 05:05:51.7 已开始，`busy=true` 永久丢失 | mesh-e2e.md §5/§6 记录该前置与失败排查路径 |
 | D11 | Web `GET /web/api/sessions` 的 `endpoint` / `ownership` 字段**未落地**（`chatWebSessionListItem` 仍只有 id/title/summary/message_count/created_at/updated_at/current），前端侧栏徽标 / 端点行 / 跨工作区分组随之未落地 | S9 只做了「⧉ 新窗口打开 + 深链 + spawn/open 端点」；子方案 P0 ① 与其后端字段是纯展示项，被挤出 S9 范围且未单列切片 | Web 子方案新增 §0.1「落地状态」标注未落地；后续 Web 侧收口切片按子方案 §5.1/§6.1 落地；**S11 已收敛**（见 §19.4） |
 | D12 | `resume` 的 `running_elsewhere` 前置检查**未落地**（`/web/api/sessions/resume` 无归属判定，全仓 Go 代码无该标识） | 同 D11：归属/互斥已由网格租约（`session-<sid>`）与 `spawn` 锁内二次检查覆盖；Web 端冲突弹窗属体验项 | Web 子方案 §0.1 / FR11 标注未落地；租约语义由 `lease_test.go` 覆盖（见 D9）；**S11 已收敛**（见 §19.4） |
 
@@ -721,8 +721,8 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | 调试端点清单（列表 / 构建 / 文本 / JSON 四个入口） | `commands/chat_debug_endpoints.go:70 / 140 / 295 / 380` | grep |
 | `$script:toolRegistry`（6 个工具行） | `scripts/build.ps1:83-90` | view |
 | Makefile 目标（含 `aicli:` / `aicli-console:` / `test:` 等） | `Makefile`（`.PHONY` + 目标区） | shell |
-| E2E 场景表 / 参数分支 / 基线正则 | `scripts/test-aicli-e2e-all.ps1:108-131 / 236-245 / 138` | 既有核验（debug-guide §12.3 记录） |
-| E2E harness 可复用函数（`Invoke-HarnessRequest` 等） | `scripts/aicli-e2e-harness.ps1` | 既有核验（debug-guide §12.3 第 5 条） |
+| E2E 场景表 / 参数分支 / 基线正则 | `scripts/test-aicli-e2e-all.ps1:108-131 / 236-245 / 138` | 既有核验（聚合入口与基线见 `docs/e2e/debug-guide.md` §5.1） |
+| E2E harness 可复用函数（`Invoke-HarnessRequest` 等） | `scripts/aicli-e2e-harness.ps1` | 既有核验（见 `docs/e2e/harness-observability.md`） |
 | 构建默认输出目录（`-OutputDir` 缺省） | `scripts/build.ps1:467-468` → `backend\dist\`（实测存在 `aicli.exe` 等产物） | grep + shell |
 | Web 前端资源实测布局 | `commands/web/{index.html,style.css,app.js}` + `commands/web/js/*.js`（`sessions.js` 在列） | shell |
 
@@ -1120,7 +1120,7 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 | `aicli-mesh-architecture.md` | 为什么这样设计 / 契约是什么 | 施工前通读；争议时以它为准 |
 | **本文** | 按什么顺序做 / 改哪些文件 / 怎么验证 / 怎么回滚 | 施工全程 |
 | `aicli-micro-web-client-session-window-plan.md` | Web 侧交互与前端落点 | S5 / S9 前 |
-| `docs/e2e/debug-guide.md` §8 | 多进程 E2E 怎么断言 | S10 前 |
+| `docs/e2e/mesh-e2e.md` §5 | 多进程 E2E 怎么断言 | S10 前 |
 
 > 变更记录：2026-09-24 初版（S1–S10 + 验收 / 回滚 / 锚点核验）；
 > 2026-09-24 追加 §19（S11 · Web 侧收口一）与 §19.4 落地记录（sessions 便捷视图 + 前端徽标/分组/开关 + resume 冲突）。

@@ -5,7 +5,7 @@
 > 取代：`aicli-micro-web-client-session-window-plan.md` 的架构章节（§5 数据模型 / §6 生命周期 /
 > §7 接口 / §9 spawn / §11 路线图）。该文档**已按本方案重写为 v2**（Web 客户端子方案）：
 > 只保留问题定义、需求、前端交互与 Web 侧契约，架构内容全部归口本文。
-> 关联：[docs/e2e/debug-guide.md](../e2e/debug-guide.md)（多进程 E2E 演进）、
+> 关联：[docs/e2e/mesh-e2e.md](../e2e/mesh-e2e.md)（多进程 E2E 场景，原 debug-guide §8）、
 > [docs/aicli/web-remote-api.md](../aicli/web-remote-api.md)（单进程远程 API 契约）。
 > 命名与目录**不向后兼容**：`~/.aicli/web-ports/`、`~/.aicli/session-endpoints/` 全部作废。
 
@@ -877,7 +877,7 @@ aicli-mesh gc --apply --purge-legacy
 | 既有 | 关系 |
 |------|------|
 | `scripts/test-aicli-debug-endpoints-e2e.ps1` | 继续用 `/debug/endpoints` 驱动单进程；多进程场景（§12）改用 `aicli-mesh` 做发现与调用 |
-| `docs/e2e/debug-guide.md` | **已落地**：新增 §8「多进程网格控制面（E2E-DEBUG-03）」，把「各进程 web endpoint 各自为战」升级为「网格统一发现 + 定向调用」；分工表（§9）与相关文档（§10）同步更新 |
+| `docs/e2e/mesh-e2e.md` | **已落地**：多进程网格控制面场景（E2E-DEBUG-03，2026-09-24 由 debug-guide §8 独立成文），把「各进程 web endpoint 各自为战」升级为「网格统一发现 + 定向调用」；分工表（debug-guide §9）与相关文档同步更新 |
 | `aicli resume` / `--web-port` | 不变；网格只是让「谁在跑」可见，并让 resume 能提示冲突 |
 
 ---
@@ -1133,7 +1133,7 @@ Windows 没有 POSIX 权限位：`0600` 语义退化为「依赖用户目录 ACL
 | `docs/user-guide/aicli.md:259` | `AICLI_WEB_PORTS_DIR` → `AICLI_MESH_DIR`；「粘性端口档案」改为「会话绑定」 |
 | `docs/aicli/debug-chat-status.md:53-62` | 端口档案路径 `~/.aicli/web-ports/` → `mesh/bindings/` |
 | `docs/aicli/web-remote-api.md` | `sessions` 新增字段（`endpoint` / `ownership` / …）与 `resume` 新错误码 |
-| `docs/e2e/debug-guide.md` | **已同步**（§8 场景 + M1–M10 + 故障排查） |
+| `docs/e2e/mesh-e2e.md` | **已同步**（场景 + M1–M10 + 故障排查；2026-09-24 由 debug-guide §8 独立成文） |
 | `docs/aicli/mesh-cli.md` | 新增（§7.5）；本方案 §7 是设计草稿，落地后以该文档为准 |
 | 本方案 + Web 子方案 | 实现完成后回填「已落地 / 偏差」标注，保持设计文档与代码一致 |
 
@@ -1179,7 +1179,7 @@ Windows 没有 POSIX 权限位：`0600` 语义退化为「依赖用户目录 ACL
 - `--mesh=false`：不写档案、不注册 `mesh/*` 端点；`aicli-mesh ls` 仍能读历史（stale / 绑定）。
 - 令牌轮换：目标重启换 token → 调用方重读档案重试一次成功；二次失败 → `refused`（`mesh_token_stale`）。
 
-### 12.3 多进程 E2E（`E2E-DEBUG-03`，已落到 debug-guide §8）
+### 12.3 多进程 E2E（`E2E-DEBUG-03`，已落到 [mesh-e2e.md](../e2e/mesh-e2e.md)）
 
 新增第三个场景，harness 启动 **A/B 两个真实进程**（`--pprof`，端口从节点档案 `endpoint.port` 读取），全部交互走网格：
 

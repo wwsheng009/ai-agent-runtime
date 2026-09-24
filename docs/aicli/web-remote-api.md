@@ -258,7 +258,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 > actor 已清空 `CurrentTurnID`，但响应仍会带上本轮的 turn 身份（turn 运行中以实时探测
 > 为准；`wait_only` 空闲短路等"无 turn 可归属"时缺省）。可直接用它走 `?id=<turn_id>`
 > 后验；需要交叉核对时用 `GET /web/api/turn` 的 `recent` 中 `status=completed` 记录的
-> `assistant_preview`（实测见 [../e2e/debug-guide.md §7.2](../e2e/debug-guide.md)）。
+> `assistant_preview`（实测见 [../e2e/debug-guide.md §7](../e2e/debug-guide.md)）。
 
 `screen` 与 `/debug/chat/screen`、`/web/api/screen?view=tui` 同源，是"用户当前实际看到的 TUI 界面渲染"（合成帧文本），不是 web 页的完整 transcript。
 
@@ -565,7 +565,7 @@ Invoke-RestMethod 'http://127.0.0.1:51234/web/api/mesh/peers?scope=self&state=li
 
 > 与 CLI 同源：`aicli-mesh ls --json` 输出同一份 `BuildView` 结果（S6 起可用）；
 > 多进程验收（互发现 / 定向调用 / 崩溃对账 / GC）见
-> [../e2e/debug-guide.md](../e2e/debug-guide.md) §8（E2E-DEBUG-03）。
+> [../e2e/mesh-e2e.md](../e2e/mesh-e2e.md)（E2E-DEBUG-03）。
 
 ### 9.4 实时事件流：`GET /web/api/mesh/events`（SSE 扇入）
 

@@ -582,7 +582,7 @@ try {
         "screen.available=$($invoke.Json.screen.available) screen.lines=$(@($invoke.Json.screen.lines).Count)"
     # P0 改进后：invoke 终态响应的 turn_id 由观察器从 session_start/session_end
     # 事件回填（actor 收尾后会清空 state.CurrentTurnID），应与 /web/api/turn 的
-    # 最近一条 completed 记录一致（见 docs/e2e/debug-guide.md §7.2）。
+    # 最近一条 completed 记录一致（见 docs/e2e/debug-guide.md §7）。
     $turnProbe = Invoke-JsonHttp -Method GET -Url $turnUrl -TimeoutSec 15
     $latest = @($turnProbe.Json.recent) | Where-Object { $_.status -eq 'completed' } | Select-Object -Last 1
     $preview = ''

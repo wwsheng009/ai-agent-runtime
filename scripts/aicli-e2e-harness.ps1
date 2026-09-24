@@ -3,7 +3,7 @@
 # 用法：
 #   . (Join-Path $PSScriptRoot 'aicli-e2e-harness.ps1')
 #
-# 提供四类能力（对应 docs/e2e/debug-guide.md 的"数据采集/接口/E2E 流程"三项优化）：
+# 提供四类能力（对应 docs/e2e/harness-observability.md 的"数据采集/接口/E2E 流程"三项优化）：
 #   A1  Get-AicliTimelineSample / Start-AicliTimeline   时序采样（timeline.jsonl）
 #   A2  Save-AicliDiagnostics                           失败自动诊断包
 #   A3  Wait-AicliScreenStable                          稳态判据（连续 N 次不变）

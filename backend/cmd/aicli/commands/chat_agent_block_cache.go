@@ -11,7 +11,7 @@ import (
 //
 // 该区块的三项数据都要读会话库（连接池恒为单连接，且与后台 reconciler 争用）：
 // registry 行 + 一致性审计、agent graph、mailbox。实测争用时单次采集阻塞数秒
-// （见 docs/e2e/debug-guide.md §7.5），所以轮询型 HTTP 快照一律走「缓存 + 后台
+// （见 docs/e2e/debug-guide-evidence.md §4），所以轮询型 HTTP 快照一律走「缓存 + 后台
 // 刷新」：读取方永远立即拿到上一份样本及其年龄，冷启动显式呈现 collecting，
 // 而不是把诊断变成一次同步排队。交互面板（/debug display，零值选项）保留同步
 // 直读——人工排查要的正是当场那一份。

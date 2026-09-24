@@ -767,7 +767,7 @@ func chatWebInvokeFinalize(resp *chatWebInvokeResponse, session *ChatSession, wa
 	ws := watch.snapshot()
 	// 终态回填：turn 结束后 actor 已清空 CurrentTurnID（state 探测拿不到），
 	// 用观察器从生命周期事件记录的 turn 身份补齐，让调用方直接凭响应里的
-	// turn_id 走 /web/api/turn 后验（见 docs/e2e/debug-guide.md §7.2）。
+	// turn_id 走 /web/api/turn 后验（见 docs/e2e/debug-guide.md §7）。
 	if resp.TurnID == "" {
 		resp.TurnID = ws.TurnID
 	}

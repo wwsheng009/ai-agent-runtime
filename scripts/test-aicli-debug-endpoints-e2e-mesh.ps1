@@ -4,7 +4,7 @@
   跨进程调用 → 实时扇入 → 崩溃对账 → 无令牌泄漏 → 旧目录清理 → 自包含 → 跨工作区语义。
 
 .DESCRIPTION
-  验收目标（全部通过才退出码 0；断言名与 docs/e2e/debug-guide.md §8.5 的 M 表一致）：
+  验收目标（全部通过才退出码 0；断言名与 docs/e2e/mesh-e2e.md §5 的 M 表一致）：
 
     M1  mesh/discovery-both-nodes：两个独立进程（A=本仓库、B=临时工作区）各自写节点
         档案；`aicli-mesh ls --json` 与 `GET /web/api/mesh/peers?probe=1` 都能看到
