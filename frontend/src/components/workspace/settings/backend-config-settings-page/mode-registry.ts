@@ -1,6 +1,6 @@
 // 由 components/workspace/settings/backend-config-settings-page.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
-import { ActivityIcon, BotIcon, FileTextIcon, GaugeIcon, type LucideIcon, RefreshCcwIcon, RouteIcon, ServerIcon, Settings2Icon, UsersIcon, WifiIcon } from "lucide-react";
+import { ActivityIcon, BotIcon, FileTextIcon, GaugeIcon, type LucideIcon, RefreshCcwIcon, RouteIcon, ServerIcon, Settings2Icon, UserCogIcon, UsersIcon, WifiIcon } from "lucide-react";
 import { type EditorMode } from "./types";
 
 
@@ -105,6 +105,12 @@ export const modeMenuEntries: Array<{
     labelKey: "editor.modes.mcp.label",
     descriptionKey: "editor.modes.mcp.description",
     icon: ServerIcon,
+  },
+  {
+    mode: "profiles",
+    labelKey: "editor.modes.profiles.label",
+    descriptionKey: "editor.modes.profiles.description",
+    icon: UserCogIcon,
   },
   {
     mode: "source",

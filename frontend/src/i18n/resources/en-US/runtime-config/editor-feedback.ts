@@ -251,6 +251,7 @@ export const enRuntimeConfigEditorFeedback = {
     circuitBreaker: "Breaker",
     transformer: "Transformer",
     mcp: "MCP",
+    profiles: "Profiles",
     preview: "Preview",
   },
   loadingCard: {

@@ -77,6 +77,11 @@ export const enRuntimeConfigEditorModes = {
       description:
         "Maintain HTTPTransformer switches and request/response body modifiers.",
     },
+    profiles: {
+      label: "Profiles",
+      description:
+        "Maintain profile.yaml per scenario: tools, skills, MCP, prompts and agents, with validation, preview and lifecycle actions.",
+    },
     source: {
       label: "Raw YAML",
       description:

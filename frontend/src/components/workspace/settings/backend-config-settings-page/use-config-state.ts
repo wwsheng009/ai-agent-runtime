@@ -252,6 +252,9 @@ export function useConfigEditorState() {
       case "mcp":
         // MCP 面板数据独立于 config document，模式徽标由面板内部自行展示统计。
         return "";
+      case "profiles":
+        // Profiles 面板数据同样独立于 config document，徽标由面板内部展示。
+        return "";
       case "source":
       default:
         return t("editor.counts.lines", { count: draftLineCount });
@@ -310,6 +313,8 @@ export function useConfigEditorState() {
         return t("editor.modes.auth.description");
       case "mcp":
         return t("editor.summary.mcp");
+      case "profiles":
+        return t("editor.summary.profiles");
       case "source":
       default:
         return t("editor.modes.source.label");

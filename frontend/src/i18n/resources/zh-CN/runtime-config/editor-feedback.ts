@@ -248,6 +248,7 @@ export const zhRuntimeConfigEditorFeedback = {
     circuitBreaker: "熔断",
     transformer: "转换",
     mcp: "MCP",
+    profiles: "Profiles",
     preview: "预览",
   },
   loadingCard: {

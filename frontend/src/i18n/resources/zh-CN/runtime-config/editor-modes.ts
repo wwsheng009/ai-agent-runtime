@@ -67,6 +67,11 @@ export const zhRuntimeConfigEditorModes = {
       label: "Transformer",
       description: "维护 HTTPTransformer 开关和 request/response body modifier。",
     },
+    profiles: {
+      label: "Profiles",
+      description:
+        "按场景维护 profile.yaml：工具/技能/MCP/提示词/Agent/偏好，并支持校验、预览与生命周期操作。",
+    },
     source: {
       label: "原始 YAML",
       description: "保留注释、空行和原始排版，作为兜底编辑模式。",

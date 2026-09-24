@@ -2,9 +2,11 @@
 import { zhRuntimeConfigEditor } from "./editor";
 import { zhRuntimeConfigMcp } from "./mcp";
 import { zhRuntimeConfigPage } from "./page";
+import { zhRuntimeConfigProfiles } from "./profiles";
 
 export const zhRuntimeConfig = {
   page: zhRuntimeConfigPage,
   editor: zhRuntimeConfigEditor,
   mcp: zhRuntimeConfigMcp,
+  profiles: zhRuntimeConfigProfiles,
 } as const;

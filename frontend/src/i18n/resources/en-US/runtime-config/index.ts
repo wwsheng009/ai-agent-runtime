@@ -4,9 +4,11 @@ import type { zhRuntimeConfig } from "../../zh-CN/runtime-config";
 import { enRuntimeConfigEditor } from "./editor";
 import { enRuntimeConfigMcp } from "./mcp";
 import { enRuntimeConfigPage } from "./page";
+import { enRuntimeConfigProfiles } from "./profiles";
 
 export const enRuntimeConfig = {
   page: enRuntimeConfigPage,
   editor: enRuntimeConfigEditor,
   mcp: enRuntimeConfigMcp,
+  profiles: enRuntimeConfigProfiles,
 } satisfies DeepStringShape<typeof zhRuntimeConfig>;

@@ -23,3 +23,4 @@ export * from "./harness";
 export * from "./siteaccount";
 export * from "./provider-ops";
 export * from "./cache";
+export * from "./profiles";

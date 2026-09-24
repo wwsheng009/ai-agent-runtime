@@ -22,4 +22,5 @@ export type EditorMode =
   | "auth"
   | "agentRouting"
   | "mcp"
+  | "profiles"
   | "source";
