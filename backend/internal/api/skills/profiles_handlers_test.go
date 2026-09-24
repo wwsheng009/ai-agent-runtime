@@ -2,6 +2,7 @@ package skills
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -16,7 +17,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
@@ -24,7 +27,8 @@ import (
 //   - 创建（模板/复制）→ 列表 → 详情 → 更新（含 mtime 冲突与校验失败零副作用）
 //   - 删除的 default 引用门控（A10：被 default 引用时默认拒绝，force 才清理）
 //   - rename 的目录 + 配置同改
-//   - 未落地能力必须显式 501（from_session / apply，指向 Batch 13），不允许假成功
+//   - 未落地能力必须显式 501（from_session，指向 Batch 13），不允许假成功；
+//     apply 已由 Batch 13 接线，见 TestRuntimeProfilesAPI_ApplyWiresSessionSwitchCore
 
 type profilesAPIHarness struct {
 	router    http.Handler
@@ -109,6 +113,67 @@ func TestSetAICLIConfigKeepsHostConfigFilePathAndProfiles(t *testing.T) {
 	snapshot.Profiles.DefaultProfile = "mutated"
 	assert.Equal(t, "/tmp/from-config", source.Profiles.Items["from-config"].Root)
 	assert.Equal(t, "from-config", source.Profiles.DefaultProfile)
+}
+
+// TestRuntimeProfilesAPI_ApplyWiresSessionSwitchCore 钉住 Batch 13 的第一块接线：
+// `/apply` 从 501 转为真实执行（D26/D21：与 Batch 12 会话内切换共用同一执行核心），
+// 并守住 A12 的作用域——只动显式给出的那个会话，default 与其它会话都不变。
+func TestRuntimeProfilesAPI_ApplyWiresSessionSwitchCore(t *testing.T) {
+	ctx := context.Background()
+	h := newProfilesAPIHarness(t)
+	rec, _ := h.do(t, http.MethodPost, "/api/runtime/profiles", map[string]interface{}{
+		"name":     "batch13-apply",
+		"template": "coding",
+		"root":     h.profileRoot("batch13-apply"),
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(sessionManager.Stop)
+	h.handler.SetSessionManager(sessionManager)
+	target, err := sessionManager.Create(ctx, "user-apply-target")
+	require.NoError(t, err)
+	target.Metadata.Context = map[string]interface{}{sessionmeta.SystemPromptFrozen: "frozen-anchor"}
+	require.NoError(t, sessionManager.Update(ctx, target))
+	other, err := sessionManager.Create(ctx, "user-apply-other")
+	require.NoError(t, err)
+	require.NoError(t, sessionManager.Update(ctx, other))
+
+	// 缺 session_id：400 + 可执行提示——服务端不推断「当前会话」（设置页无会话上下文）
+	rec, payload := h.do(t, http.MethodPost, "/api/runtime/profiles/batch13-apply/apply", nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, payload["error"], "session_id 必填")
+
+	// 显式会话：真实切换，报告与 composer `/profile` 同构（同一核心，无第二套语义）
+	rec, payload = h.do(t, http.MethodPost, "/api/runtime/profiles/batch13-apply/apply", map[string]interface{}{
+		"session_id": target.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, true, payload["ok"])
+	assert.Equal(t, target.ID, payload["session_id"])
+	report, ok := payload["switch_report"].(map[string]interface{})
+	require.True(t, ok, "apply 必须回传 switch_report：%v", payload)
+	assert.Equal(t, "next_turn", report["effective_at"])
+	assert.Equal(t, true, report["anchor_cleared"])
+
+	stored, err := sessionManager.GetStorage().Load(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "batch13-apply", sessionmeta.String(stored.Metadata.Context, sessionmeta.ProfileRef))
+	_, anchorOK := stored.Metadata.Context[sessionmeta.SystemPromptFrozen]
+	assert.False(t, anchorOK, "切换必须清掉冻结锚点，否则下一轮复用旧 head")
+
+	// A12：其它会话与 default 都不受影响（default 只归 /default 端点管，D26）
+	untouched, err := sessionManager.GetStorage().Load(ctx, other.ID)
+	require.NoError(t, err)
+	assert.Empty(t, sessionmeta.String(untouched.Metadata.Context, sessionmeta.ProfileRef))
+	_, listPayload := h.do(t, http.MethodGet, "/api/runtime/profiles", nil)
+	assert.Empty(t, listPayload["default_profile"], "apply 不得改动 default")
+
+	// 未知会话：404 客户端语义（与 handler.go 的会话读取一致），不是 500
+	rec, _ = h.do(t, http.MethodPost, "/api/runtime/profiles/batch13-apply/apply", map[string]interface{}{
+		"session_id": "user-does-not-exist",
+	})
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 }
 
 func TestRuntimeProfilesAPI_CreateTemplateListGetUpdateDelete(t *testing.T) {
@@ -322,10 +387,10 @@ func TestRuntimeProfilesAPI_SetDefaultAndNotImplementedBoundaries(t *testing.T) 
 	assert.Contains(t, payload["error"], "Batch 13")
 	assert.NoDirExists(t, h.profileRoot("batch8-from-session"))
 
-	// apply 属 Batch 13：同样显式 501
+	// apply 已接线（Batch 13）：缺 session_id 时 400，既不是假成功也不是 501
 	rec, payload = h.do(t, http.MethodPost, "/api/runtime/profiles/batch8-default/apply", nil)
-	require.Equal(t, http.StatusNotImplemented, rec.Code, rec.Body.String())
-	assert.Contains(t, payload["error"], "Batch 13")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, payload["error"], "session_id 必填")
 
 	// template 与 from_ref 互斥
 	rec, _ = h.do(t, http.MethodPost, "/api/runtime/profiles", map[string]interface{}{

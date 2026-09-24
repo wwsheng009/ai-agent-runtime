@@ -2,7 +2,9 @@ package skills
 
 import (
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,12 +14,13 @@ import (
 	"github.com/gorilla/mux"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 )
 
 // ---------------------------------------------------------------------------
-// 写端点：创建 / 复制 / 更新 / 应用（apply 本批 501）
+// 写端点：创建 / 复制 / 更新 / 应用
 // ---------------------------------------------------------------------------
 
 // profileCreateRequest 是创建/复制端点的请求体（§23 G1：三模式合一入口）。
@@ -53,6 +56,15 @@ type profileUpdateRequest struct {
 	// ExpectedMtime 是客户端读到的 mtime（R24/V25 冲突检测）：不一致即 409，
 	// 不合并、不静默覆盖。
 	ExpectedMtime string `json:"expected_mtime,omitempty"`
+}
+
+// profileApplyRequest 是 POST /profiles/{ref}/apply 的请求体（D26：应用到当前会话）。
+type profileApplyRequest struct {
+	// SessionID 是目标会话，**必填**。apply 只影响显式给出的这一个会话（A12：
+	// default 不变、别的会话不变），服务端不推断「当前会话」——设置页（/runtime-config）
+	// 没有会话上下文，推断必然要在多个会话里挑一个，那是把别人的会话切走。
+	// 会话内立即切换走 composer `/profile`（Batch 12 的 set_profile 命令，同一执行核心）。
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // CreateRuntimeProfile 创建 profile：模板 / 复制两模式（from_session 属 Batch 13）。
@@ -318,20 +330,54 @@ func (h *Handler) UpdateRuntimeProfile(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, result)
 }
 
-// ApplyRuntimeProfile 应用到当前会话（第三部分 `set_profile`，D21 同一执行核心）。
+// ApplyRuntimeProfile 把 profile 应用到指定会话（D26/D21：与 Batch 12 的会话内切换
+// 共用 `applySessionProfileSwitch` 同一执行核心，五阶段与失效动作完全一致）。
 func (h *Handler) ApplyRuntimeProfile(w http.ResponseWriter, r *http.Request) {
 	if err := h.authorizeProfileWrite(r); err != nil {
 		h.writeError(w, http.StatusForbidden, err)
 		return
 	}
 	ref := mux.Vars(r)["ref"]
-	if _, err := h.resolveRuntimeProfileTarget(ref); err != nil {
+	target, err := h.resolveRuntimeProfileTarget(ref)
+	if err != nil {
 		h.writeProfileTargetError(w, err)
 		return
 	}
-	h.writeError(w, http.StatusNotImplemented, errors.New(errors.ErrValidationFailed,
-		"apply（应用到当前会话，D26/D21）属 Batch 13：执行核心（Batch 12 会话内切换）落地后由 501 转真实实现；"+
-			"本批请用 CLI `aicli chat` 内 `/profile use`"))
+	var req profileApplyRequest
+	if r.Body != nil {
+		// 空体是合法输入（下面 session_id 校验会给出可执行提示），只有真正的
+		// 解析失败才算请求体损坏。
+		if decodeErr := json.NewDecoder(r.Body).Decode(&req); decodeErr != nil && !stderrors.Is(decodeErr, io.EOF) {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid apply request body"))
+			return
+		}
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"session_id 必填：apply 只作用于显式指定的会话（A12），服务端不推断「当前会话」；"+
+				"会话内立即切换请用 composer `/profile`（同一执行核心）"))
+		return
+	}
+	report, switchErr := h.applySessionProfileSwitch(r.Context(), sessionID, target.Ref)
+	switch {
+	case switchErr == nil:
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok":            true,
+			"session_id":    sessionID,
+			"profile":       target.Ref,
+			"switch_report": report,
+		})
+	case isSessionProfileSwitchValidationError(switchErr):
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, switchErr.Error()))
+	case h.writeSessionLeaseConflict(w, switchErr):
+	case stderrors.Is(switchErr, chat.ErrSessionNotFound):
+		// 未知会话是客户端语义（404），与 handler.go 的会话读取口径一致——不落 500，
+		// 否则前端会把「会话 id 传错」当成可重试的服务故障。
+		h.writeError(w, http.StatusNotFound, switchErr)
+	default:
+		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "apply profile failed", switchErr))
+	}
 }
 
 // ---------------------------------------------------------------------------
