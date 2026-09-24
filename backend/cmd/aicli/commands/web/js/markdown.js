@@ -70,9 +70,11 @@ export function renderMarkdown(text) {
   var codeBlocks = [];
   html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, function (_, lang, code) {
     var label = lang ? '<span class="lang-label">' + lang + '</span>' : '';
+    // code 取自上面已整体 esc() 过的 html，这里不能再 esc（否则 &quot;/&lt; 等二次
+    // 转义后原样显示，如 " 会变成 &amp;quot;）。
     var block = '<pre><button class="copy-code-btn" type="button" title="复制代码">复制</button>'
       + label + '<code class="lang-' + (lang || 'text') + '">'
-      + esc(code.trim()) + '</code></pre>';
+      + code.trim() + '</code></pre>';
     codeBlocks.push(block);
     return "\u0001MDC" + (codeBlocks.length - 1) + "\u0001";
   });
@@ -107,7 +109,9 @@ export function renderMarkdown(text) {
   });
   // 引用块（> 开头，连续行合并）
   html = html.replace(/(^|\n)&gt;(?:[^\n]*)(?:\n&gt;[^\n]*)*/g, function (m) {
-    var lines = m.split("\n").map(function (l) {
+    // 去掉正则 (^|\n) 捕获到的前导换行，否则 split("\n") 会多出一个空首行，
+    // 渲染成 <blockquote><br>…（引用块顶部多一个空行）。
+    var lines = m.replace(/^\n/, "").split("\n").map(function (l) {
       return l.replace(/^&gt;/, "").replace(/^ /, "");
     });
     return "\n<blockquote>" + lines.join("<br>") + "</blockquote>";
