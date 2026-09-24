@@ -24,9 +24,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -104,6 +106,8 @@ func (c *CLI) Run(args []string) int {
 		return c.runOpen(rest)
 	case "stop":
 		return c.runStop(rest)
+	case "watch":
+		return c.runWatch(rest)
 	case "gc":
 		return c.runGC(rest)
 	case "doctor":
@@ -176,6 +180,7 @@ func (c *CLI) printUsage(w io.Writer) {
   aicli-mesh screen <节点|会话> [--view tui] [--tail N] [--format json|text] [--json]
   aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--json]
   aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
+  aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]
   aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
   aicli-mesh doctor [--json]
   aicli-mesh version [--json]
@@ -197,6 +202,13 @@ func (c *CLI) printUsage(w io.Writer) {
   （不做收尾，残留档案由 gc 按「可证已死」回收）。停止是治理动作：**目标
   进程**必须显式开启 --mesh-allow-stop，否则一律 refused（CLI 无法绕过）。
   「目标已不在运行」按成功处理（幂等）；等不到进程消失时退出码 3。
+
+观察（watch）: 直接 tail mesh/journal/*.ndjson，**不依赖任何节点存活**——进程全退
+  之后仍可复盘（这是它与 /web/api/mesh/events 的分工）。默认先回放 --since 窗口
+  （10m；0 表示全部），再实时尾随；--once 只回放（脚本/Agent 用）。--node/--session
+  按节点/会话 ID（前缀即可）过滤。--json 在回放模式给
+  {"schema_version":2,"events":[...],"counts":{...}}；实时模式改为逐行 NDJSON
+  （流式，无法等收尾）。Ctrl-C 结束（退出码 0）。
 
 退出码:
   0 成功            1 用法/参数错误      2 目标不存在或无法唯一确定
@@ -2481,4 +2493,167 @@ func stopExitCode(status string) int {
 	default:
 		return ExitFailure
 	}
+}
+
+// ---------------------------------------------------------------------------
+// watch（journal 事件流）
+// ---------------------------------------------------------------------------
+
+// watchResult is the `watch --once --json` envelope (§7.3 stable schema).
+// Follow mode cannot use an envelope (the stream never ends), so it switches to
+// one JournalEntry per line — the only documented exception to the envelope.
+type watchResult struct {
+	SchemaVersion int            `json:"schema_version"`
+	Events        []JournalEntry `json:"events"`
+	Counts        watchCounts    `json:"counts"`
+}
+
+type watchCounts struct {
+	Events int `json:"events"`
+	Nodes  int `json:"nodes"`
+}
+
+// runWatch implements `aicli-mesh watch`: replay the journal window and, unless
+// --once, keep tailing. It never talks to a node, so it works when every
+// process has already exited (architecture §6.6 / §7.2).
+func (c *CLI) runWatch(args []string) int {
+	// --no-color 目前是兼容开关：watch 的人读输出本来就不带颜色（与 ls/gc 的
+	// 纯文本表格同一口径），保留它是为了脚本与文档里的命令行稳定。
+	parsed, err := parseArgs(args, flagSpec{
+		"since":    flagValue,
+		"node":     flagValue,
+		"session":  flagValue,
+		"once":     flagBool,
+		"limit":    flagValue,
+		"interval": flagValue,
+		"json":     flagBool,
+		"no-color": flagBool,
+		"help":     flagBool,
+	})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh watch: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) > 0 {
+		return c.fail(ExitUsage, "aicli-mesh watch: 不接受位置参数（收到 %q）；过滤用 --node / --session", parsed.pos[0])
+	}
+	paths := c.paths()
+	if !paths.Enabled() {
+		return c.fail(ExitFailure, "aicli-mesh watch: 网格根目录不可用（设置 AICLI_MESH_DIR 或 AICLI_HOME）")
+	}
+	since, err := parsed.durationValue("since", WatchDefaultSince)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh watch: --since: %v", err)
+	}
+	interval, err := parsed.durationValue("interval", WatchDefaultInterval)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh watch: --interval: %v", err)
+	}
+	if interval < 50*time.Millisecond {
+		return c.fail(ExitUsage, "aicli-mesh watch: --interval 最小 50ms（避免忙等）")
+	}
+	limit, err := parsed.intValue("limit", 0)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh watch: --limit: %v", err)
+	}
+	if limit < 0 {
+		return c.fail(ExitUsage, "aicli-mesh watch: --limit 不能为负")
+	}
+	opts := WatchOptions{
+		Since:     since,
+		NodeID:    strings.TrimSpace(parsed.str("node", "")),
+		SessionID: strings.TrimSpace(parsed.str("session", "")),
+		Follow:    !parsed.boolean("once"),
+		Interval:  interval,
+		Limit:     limit,
+		Now:       c.now,
+	}
+
+	events, err := CollectJournalEvents(paths, opts)
+	if err != nil {
+		return c.fail(ExitFailure, "aicli-mesh watch: 读取 journal 失败: %v", err)
+	}
+	if filtered := opts.NodeID != "" || opts.SessionID != ""; filtered && len(events) == 0 {
+		// 区分「目标根本不存在」（退出码 2）与「目标存在、但窗口内没有事件」
+		// （正常空结果，退出码 0）：长跑进程上后者很常见，不该当失败。
+		all, err := CollectJournalEvents(paths, WatchOptions{NodeID: opts.NodeID, SessionID: opts.SessionID, Now: c.now})
+		if err != nil {
+			return c.fail(ExitFailure, "aicli-mesh watch: 读取 journal 失败: %v", err)
+		}
+		if len(all) == 0 {
+			return c.fail(ExitNotFound, "aicli-mesh watch: 没有匹配的事件（--node %q / --session %q）", opts.NodeID, opts.SessionID)
+		}
+	}
+
+	jsonMode := parsed.boolean("json")
+	if !opts.Follow {
+		if jsonMode {
+			payload := watchResult{
+				SchemaVersion: SchemaVersion,
+				Events:        watchEntries(events),
+				Counts:        watchCounts{Events: len(events), Nodes: watchNodeCount(events)},
+			}
+			if err := c.printJSON(payload); err != nil {
+				return c.fail(ExitFailure, "aicli-mesh watch: 输出 JSON 失败: %v", err)
+			}
+			return ExitOK
+		}
+		for _, event := range events {
+			fmt.Fprintln(c.out(), formatWatchEvent(event))
+		}
+		if len(events) == 0 {
+			fmt.Fprintln(c.errOut(), "（窗口内没有事件；--since 0 可回放全部）")
+		}
+		return ExitOK
+	}
+
+	// 实时模式：Ctrl-C 是正常收尾（退出码 0），不是失败。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	emit := func(event WatchEvent) error {
+		if jsonMode {
+			data, err := json.Marshal(event.Entry)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(c.out(), "%s\n", data)
+			return err
+		}
+		_, err := fmt.Fprintln(c.out(), formatWatchEvent(event))
+		return err
+	}
+	switch err := WatchJournal(ctx, paths, opts, emit); {
+	case errors.Is(err, context.Canceled):
+		return ExitOK
+	case err != nil:
+		return c.fail(ExitFailure, "aicli-mesh watch: %v", err)
+	default:
+		return ExitOK
+	}
+}
+
+// formatWatchEvent renders one event for humans. The node id is always shown:
+// watch merges every node on the machine, and `show` already covers the
+// single-node view.
+func formatWatchEvent(event WatchEvent) string {
+	return fmt.Sprintf("[%s] %s", event.Entry.NodeID, FormatJournalEntry(event.Entry))
+}
+
+func watchEntries(events []WatchEvent) []JournalEntry {
+	out := make([]JournalEntry, 0, len(events))
+	for _, event := range events {
+		out = append(out, event.Entry)
+	}
+	return out
+}
+
+func watchNodeCount(events []WatchEvent) int {
+	seen := make(map[string]struct{}, len(events))
+	for _, event := range events {
+		seen[event.Entry.NodeID] = struct{}{}
+	}
+	return len(seen)
 }

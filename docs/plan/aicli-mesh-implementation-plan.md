@@ -48,6 +48,7 @@
 > 其中 M10 的收敛开关断言在 S10 场景内先落地（E2E 需要它验证「默认放行」的反面）。
 > **S11（Web 侧收口一：sessions 便捷视图 + 前端徽标/分组/开关 + resume 冲突）定义见 §19**，
 > About 页网格小节并入该切片；实时收口（`mesh/events` 前端订阅）为 S12。
+> 之后的治理项切片：S15 接管二次确认（§23）、**S16 `stop`（§24）**、**S17 `watch`（§25）**。
 
 ### 0.3 硬顺序约束（不可交换）
 
@@ -1014,6 +1015,66 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 | 单测 | `internal/mesh/takeover_test.go`（新建）、`cli_open_test.go`（+1）、`commands/mesh_takeover_test.go`（新建）、`web_handlers_mesh_sessions_test.go`（+1 与契约扩容） |
 | 施工期发现（写测试时暴露，已修） | ① `waitForLiveNode` 会把「正被顶替的旧节点」当成结果返回 → 用户拿到的是旧窗口 URL；改为排除旧节点 id。② 接管标记只清环境变量、不清内存位 → 同一进程后续每次会话切换都会再抢一次租约；改为读到即清零 |
 | 未做（按计划） | `conflict` 自动接管、`orphaned` 节点自动退出——见 §23.1「不做」 |
+
+---
+
+## 24. S16 · `stop` 治理动作（默认关闭）：CLI `stop` + `POST /web/api/mesh/stop`
+
+> 来源：§0.2 注里的 P2 治理项「`stop`」。与 `gc` 同一口径：**默认关闭**——是否允许被
+> 停由**目标进程**用 `--mesh-allow-stop` 显式开启，CLI / Web 都绕不过。
+
+### 24.1 范围与落点
+
+| 面 | 落点 |
+| --- | --- |
+| 服务端 | `internal/mesh/stop.go`（`StopNode` / `Stop`）、`call.go` 拆出 `ResolveTargetNode`（stop 只需可定位，不要求有端点）、`process_alive_{windows,unix}.go` 增 `terminateProcess(pid)` |
+| 开关 | 节点侧 `--mesh-allow-stop`（默认 false）：`mesh_flags.go` / `mesh_flags_test.go` |
+| CLI | `aicli-mesh stop <节点/会话> [--force] [--wait 30s] [--json]`；退出码 stopped=0 / not_found=2 / timeout=3 / refused=6 / 其它=5 |
+| Web | `POST /web/api/mesh/stop`（回环 + `X-AICLI-Token` + 目标开关），端点清单与门户 schema 同步 |
+| 文档 | `docs/aicli/mesh-cli.md`（速查 / §4.11 / §5 / §6.6 / §9）、`docs/aicli/web-remote-api.md`（§7.1 / §9.8） |
+
+### 24.2 落地记录（2026-09-24）
+
+| 项 | 实际 |
+| --- | --- |
+| 两种模式 | 默认优雅——把 `/exit` 投给目标的 `/web/api/input`，让目标自己收尾（保存会话、注销档案、释放租约）并等进程消失；`--force` 才直接终止进程（不做收尾，残留档案交给 `gc` 的「可证已死」） |
+| 幂等 | 「目标已不在运行」按成功处理（`mesh_stop_already_stopped`）；等不到进程消失才是退出码 3（`mesh_stop_timeout`） |
+| 自停保护 | 目标就是自己 → `mesh_stop_self_refused`；跨工作区仍受 `--mesh-restrict-workspace` 收敛 |
+| 审计 | journal `mesh.stop.requested` / `mesh.stop.completed`（不记令牌） |
+| 单测 | `internal/mesh/stop_test.go`（新建）、`commands/web_handlers_mesh_stop_test.go`（新建）、`mesh_flags_test.go`（+1）、`call.go` 目标解析回归 |
+
+---
+
+## 25. S17 · `watch` 事件流（P2 治理项）：CLI `watch`（journal tail）
+
+> 来源：§0.2 注里的 P2 治理项「journal 查询」。与 `GET /web/api/mesh/events` 的分工：
+> SSE 扇入要求双方都活着，`watch` 只读 `journal/*.ndjson`——**进程全退也能复盘**。
+
+### 25.1 范围与落点
+
+| 面 | 落点 |
+| --- | --- |
+| 服务端 | `internal/mesh/watch.go`（`JournalFiles` / `CollectJournalEvents` / `WatchJournal`）——`internal/mesh` 仍只用标准库，不新增节点侧依赖 |
+| CLI | `aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]` |
+| 契约 | 回放（`--once`）给 §7.3 稳定信封 `{schema_version, events[], counts}`；实时模式逐行 NDJSON（`--json` 的唯一例外，已在文档声明）；退出码：过滤目标完全不存在 = 2、窗口内为空 = 0、Ctrl-C = 0、读 journal / 写 stdout 失败 = 5 |
+| 文档 | `docs/aicli/mesh-cli.md`（§1 / §2 / §4.12 / §5 / §6.7 / §9） |
+
+### 25.2 验证
+
+`go test ./internal/mesh/ -run 'Watch|CollectJournal' -count=1 -v` → 13/13 PASS；
+全量 `go test ./internal/mesh/ -count=1` 绿（切片提交前在「仅 watch 变更」的工作区上复跑）。
+
+### 25.3 落地记录（2026-09-24）
+
+| 项 | 实际 |
+| --- | --- |
+| 窗口与过滤 | `--since` 默认 `10m`、`0` = 磁盘上的全部（含轮转代 `<node>.ndjson.1`）；`--node` / `--session` 前缀匹配（大小写不敏感），同时给出取交集 |
+| 去重与合并 | 按 `(node_id, seq)` 去重（seq 进程内单调，进程重启即新 node_id，所以「轮转代 + 活动文件」一起回放不重复）；回放按 `ts, node_id, seq` 稳定排序，人读输出每行带 `[节点 ID]` 前缀 |
+| 半行与轮转 | writer 正在追加、还没有换行符的尾行**留到下一次轮询**（不消费，否则那条事件永久丢失）；轮转 / 截断按新文件从 0 重新读 |
+| `--limit` | 只作用于回放，保留**最新** N 条；尾随阶段不截断 |
+| 空结果语义 | 过滤目标在磁盘上完全不存在 → 2（含一次全量探测）；目标存在但窗口内没有事件 → 0 + stderr 提示（长跑进程上很常见，不该当失败） |
+| 单测 | `internal/mesh/watch_test.go`（新建，13 例：合并 + since / 节点与会话过滤 / 轮转代只读一次 / limit 取最新 / follow 追加与半行 / `--once` 不尾随 / 路径不可用 fail-closed / CLI JSON 信封 / 人读前缀 / 用法错误 / 目标不存在 / 空窗口成功 / help） |
+| 施工期发现 | 实时 + `--json` 若坚持套信封，就必须把事件全缓在内存里等一个永不到来的收尾 → 改为逐行 NDJSON，并在 §6.7 显式标注为信封约定的唯一例外 |
 
 ---
 

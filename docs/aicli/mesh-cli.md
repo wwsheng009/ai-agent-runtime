@@ -14,6 +14,7 @@
 | 某个节点的端点、令牌提示、绑定、租约、日志尾部 | `show` |
 | 拿一个可直接打开/调用的 URL（需要令牌时显式披露） | `url` |
 | 让某个节点退场（默认投 `/exit` 等它收尾；`--force` 直接终止进程） | `stop`（治理动作，目标需 `--mesh-allow-stop=true`） |
+| 观察事件流（谁起停、谁切会话、谁调用了谁）——进程全退也能复盘 | `watch` |
 | 清理已退出进程留下的档案 / 租约 / 日志 / 旧目录 | `gc`（默认 dry-run） |
 | 一次性体检：目录、权限、陈旧节点、双占用、令牌可读性、日志完整性 | `doctor` |
 
@@ -38,6 +39,7 @@ aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--a
 aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--client-request-id ID] [--json]
 aicli-mesh screen <节点|会话> [--view tui|web] [--tail N] [--format json|text] [--timeout 130s] [--json]
 aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
+aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]
 aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
 aicli-mesh doctor [--json]
 aicli-mesh version [--json]
@@ -284,16 +286,57 @@ aicli-mesh stop session_20260924093535
 aicli-mesh stop node-22024 --force
 ```
 
+### 4.12 `watch` — 事件流（journal tail，不依赖节点存活）
+
+```text
+aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]
+```
+
+直接 tail `mesh/journal/*.ndjson`（每个进程只写自己那一个文件，§3.4），**不需要任何节点在线**：
+进程全退之后仍然能复盘——这是它与 `GET /web/api/mesh/events`（SSE 扇入，需要双方都活着）的分工。
+
+两种模式：
+
+| 模式 | 行为 | 适用 |
+|------|------|------|
+| 默认（回放 + 尾随） | 先按 `--since` 回放窗口，再每 `--interval` 轮询一次新行，直到 Ctrl-C（退出码 0） | 人盯着看 / 边跑边看 |
+| `--once` | 只回放窗口后退出 | 脚本、Agent、CI（不会挂住） |
+
+- **窗口**：`--since` 默认 `10m`；`--since 0` 表示**磁盘上的全部**（含轮转代 `<node>.ndjson.1`）；
+  `--limit N` 在回放时只保留**最新 N 条**（尾随阶段不截断）；
+- **过滤**：`--node` / `--session` 接受 ID 或**前缀**（大小写不敏感），两者同时给出取交集。
+  指定的目标在磁盘上**完全不存在** → 退出码 2；目标存在但窗口内没有事件 → 退出码 0（正常空结果，
+  stderr 提示「窗口内没有事件；--since 0 可回放全部」）；
+- **不消费半行**：writer 正在追加的那一行（还没有换行符）留到下一次轮询——否则那条事件会永久丢失。
+  轮转（`<node>.ndjson` → `.1`）或截断会按新文件重新开始读；
+- **去重**：按 `(node_id, seq)` 去重（seq 在**一个进程**内单调；进程重启 = 新 node_id），
+  所以「轮转代 + 活动文件」一起回放不会出现重复行；
+- **合并顺序**：回放按时间戳合并全部节点（同刻按 node_id、seq 稳定排序），人读输出每行带 `[节点 ID]`
+  前缀；
+- `--no-color` 是兼容开关：watch 的人读输出本来就不带颜色（与 `ls`/`gc` 的纯文本表格同一口径）；
+- `--interval` 最小 `50ms`（避免忙等）；默认 `500ms`，与架构 §6.6 的 tail 轮询区间一致。
+
+```bash
+# 最近 5 分钟谁在动（回放后继续尾随，Ctrl-C 结束）
+aicli-mesh watch --since 5m
+
+# 只看某个节点的历史 + 实时
+aicli-mesh watch --node node-22024 --since 0
+
+# 只回放某个会话的事件（脚本友好：跑完就退）
+aicli-mesh watch --session session_20260924093535 --once --json
+```
+
 ## 5. 退出码契约
 
 | 码 | 含义 | 触发示例 |
 |----|------|----------|
 | 0 | 成功 | 任何命令正常完成（空网格也算成功） |
-| 1 | 用法/参数错误 | 未知子命令、未知参数、`--sort` 取值非法、缺少目标、`gc --stale-ttl` 非时长 |
-| 2 | 目标不存在或无法唯一确定 | `show nope`、`show node-100`（歧义，候选会列出）；`call` 的 `not_found`（含 `mesh_no_endpoint` / `mesh_target_stopped`）；`stop` 的 `not_found` |
+| 1 | 用法/参数错误 | 未知子命令、未知参数、`--sort` 取值非法、缺少目标、`gc --stale-ttl` 非时长；`watch` 的位置参数、非法 `--since` / `--limit` / `--interval`（< 50ms） |
+| 2 | 目标不存在或无法唯一确定 | `show nope`、`show node-100`（歧义，候选会列出）；`call` 的 `not_found`（含 `mesh_no_endpoint` / `mesh_target_stopped`）；`stop` 的 `not_found`；`watch --node/--session` 指定的目标在 journal 里完全不存在 |
 | 3 | 目标不可达 | `url` 的目标没有端点（纯 TUI 节点）；`call` 的 `unreachable` / `timeout`；`stop` 的 `timeout`（进程在 `--wait` 内没消失） |
 | 4 | 冲突或忙碌 | `call` 的 `busy`（目标已有 invoke 在等，HTTP 409） |
-| 5 | 操作失败 | `gc --apply` 有删除失败项、`doctor` 发现问题、JSON 输出失败、`call` 的 `error`（含未知 op） |
+| 5 | 操作失败 | `gc --apply` 有删除失败项、`doctor` 发现问题、JSON 输出失败、`call` 的 `error`（含未知 op）；`watch` 读 journal / 写 stdout 失败、网格根目录不可用 |
 | 6 | 被策略拒绝 | `call` 的 `refused`：写操作缺 `--allow-write`（`mesh_write_not_allowed`）、令牌失效（`mesh_token_stale`）、跨工作区收敛拒绝（`mesh_cross_workspace_denied`）；`stop` 的 `refused`（`mesh_stop_not_allowed` / `mesh_stop_self_refused` / `mesh_nonloopback_denied`） |
 
 错误信息写 **stderr**，数据写 **stdout**——`aicli-mesh ls --json > x.json` 不会混入任何提示文本。
@@ -411,6 +454,34 @@ aicli-mesh stop node-22024 --force
 - 幂等成功带 `code=mesh_stop_already_stopped` 与 `message`；失败带 `code` 与 `message`；
 - `graceful=true` 只说明这次**投递**了 `/exit`，不代表对方已完成收尾——进程消失才是判据。
 
+### 6.7 `watch --json`
+
+回放模式（`--once`）给稳定信封（§7.3），`events` 里的每一项与 journal 文件**同构**
+（`ts` / `node_id` / `seq` / `kind` / `session_id` / `detail`）：
+
+```json
+{
+  "schema_version": 2,
+  "events": [
+    {
+      "ts": "2026-09-24T09:41:12Z",
+      "node_id": "node-22024-20260924T073012Z",
+      "seq": 7,
+      "kind": "session.activated",
+      "session_id": "session_20260924093535",
+      "detail": {"port": 55124}
+    }
+  ],
+  "counts": {"events": 1, "nodes": 1}
+}
+```
+
+- **实时模式（默认）不是信封，而是逐行 NDJSON**：每行一个 `JournalEntry`，来一条写一条——
+  流式输出没有「收尾」，强行套信封只会把事件全缓在内存里。这是 `--json` 唯一一处
+  与 §6 三条约定不同的地方（脚本请按行 `ConvertFrom-Json`）；
+- `counts.nodes` 是回放窗口里出现过的节点数（`events` 为条数）；
+- 窗口内为空时是 `"events": []`（不是 `null`），退出码 0。
+
 ## 7. 令牌与安全（M7）
 
 - `ls` / `show` 只输出 `token_hint`（前 4 位 + `…`），**任何** `--json` 都不会带原文；
@@ -461,6 +532,15 @@ aicli-mesh gc --apply --purge-legacy --prune-bindings
 
 # 让目标自己收尾退出（目标需 --mesh-allow-stop=true；卡死时改 --force）
 aicli-mesh stop session_20260924093535
+
+# 复盘：最近 10 分钟这台机器上发生了什么（进程全退也能看）
+aicli-mesh watch
+
+# 脚本消费：把窗口内的事件喂给 jq / ConvertFrom-Json（跑完就退）
+aicli-mesh watch --since 1h --once --json
+
+# 只盯一个节点（含历史），Ctrl-C 结束
+aicli-mesh watch --node node-22024 --since 0
 
 # 体检并让 CI 感知问题（problems > 0 → 退出码 5）
 aicli-mesh doctor --json
