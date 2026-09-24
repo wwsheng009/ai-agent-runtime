@@ -616,6 +616,15 @@ curl -N 'http://127.0.0.1:51234/web/api/mesh/events?since_seq=42&peers=none'
 > 流**不重放历史**（与 `/web/api/events` 同语义）：连接建立前发布的帧不会补发；需要全量
 > 现状先拉一次 `/web/api/mesh/peers`，之后靠本流增量维持。
 
+**前端消费口径（S12，Web 子方案 §5.6）**：内置 Web 客户端把本流当**刷新信号**用——
+`mesh.peer.joined/left/updated`、`mesh.session.changed`、`mesh.peer.event`（turn/session 白名单）
+任一到达即重拉一次 `GET /web/api/sessions?scope=all`（200ms 合并刷新），不做客户端增量合并
+（分组计数 / 忙碌翻转 / 归属变化全部回到同源视图重算）；`mesh.lagged` 视为跳号，直接全量兜底；
+断线按 1s→2s→4s…（≤30s）重连并回填 `?since_seq=<最后收到的 seq>`；SSE 不可用（旧节点 /
+非回环无令牌 / 代理阻断）时降级为 10s 轮询同源视图，徽标仍可用（只是不实时）。
+回环模式下本流无需令牌（Host/Origin 校验已足够）；非回环模式与其它端点一致，`EventSource`
+只能经 `?token=` 携带**本进程**令牌（peer 令牌永不进入前端，§9.6 红线）。
+
 ### 9.5 跨进程调用：`POST /web/api/mesh/call`
 
 **一句话**：把一次调用送到**另一个进程**，由目标端点执行后原样返回结果——网格层只做

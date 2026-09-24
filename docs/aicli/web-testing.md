@@ -194,8 +194,8 @@ aicli chat --pprof
 
 > 状态（2026-09-24 回填）：`⧉` 流程、深链与 spawn 端点**已落地**（S9）；侧栏徽标 / 端点行 /
 > 跨工作区分组 / 打开方式开关 / resume 冲突弹窗**已落地**（S11，见 §2.7.1）；
-> 「实时徽标」一条依赖前端 `mesh/events` 订阅（Web 子方案 P1 ②，**未落地**，S12）→ 暂不可执行，
-> 其余各条可执行。权威状态表见 `docs/plan/aicli-micro-web-client-session-window-plan.md` §0.1。
+> 「实时徽标」**已落地**（S12：前端订阅 `mesh/events`，退避重连 + 轮询兜底，见 §2.7.2）→
+> 本节各条均可执行。权威状态表见 `docs/plan/aicli-micro-web-client-session-window-plan.md` §0.1。
 
 - [ ] **弹窗资格**：悬停会话 → 点 `⧉` → 新窗口**必须**打开（不是被拦截的提示条）。
       实现要点：占位窗口在点击手势内同步 `window.open('', '_blank')`，spawn 返回后才 `location.replace`；
@@ -212,9 +212,10 @@ aicli chat --pprof
       页面正常加载（首个 `/web/api/sessions` 请求已带 `X-AICLI-Token`），列表高亮该会话；
       若把 `session` 改成另一个存在的会话 → 自动走 `/web/api/sessions/resume` 切换；
       不存在的会话 id → Toast「深链会话不存在」，页面不白屏。
-- [ ] **实时徽标（暂不可执行：P1 ② / S12 未落地）**：新窗口连上后，原窗口会话列表的「当前 / 活节点」状态与
-      `mesh/peers` 在 ≤2s 内反映新进程（SSE 扇入，见 §9.4）。**当前实现**是轮询 + 打开页签时刷新，
-      因此该断言现在只能靠「手动刷新后一致」验证，延迟与自动性不属于本切片。
+- [ ] **实时徽标**：新窗口连上后，原窗口会话列表的「当前 / 活节点」状态与
+      `mesh/peers` 在 ≤2s 内反映新进程（SSE 扇入，见 [web-remote-api.md](web-remote-api.md) §9.4）；
+      在另一个窗口发一轮 prompt → 原窗口徽标翻成 `◐ 忙碌 @host:port`，回合结束后回落
+      `● 运行中`。全程**无需手动刷新页面**（S12；细化清单见 §2.7.2）。
 
 #### 2.7.1 侧栏网格视图与 resume 冲突（S11）
 
@@ -245,6 +246,34 @@ aicli chat --pprof
       resume 不做归属检查（`queued`）；页面不报错、不出现空分组。
 - [ ] **关于页网格小节**：切到「关于」→ 只读展示 `node_id` / `mesh.root` / `counts` / 建议命令；
       **没有** gc / stop / spawn 按钮；网格关闭时显示降级文案而不是报错。
+
+#### 2.7.2 网格实时刷新与降级（S12）
+
+前置：两个 `aicli chat --pprof --mesh` 进程（不同工作区）；在 A 的 web 页操作，DevTools 打开
+Network（筛 `mesh/events`）与 Console。数据源：`GET /web/api/mesh/events`（SSE 扇入，契约见
+[web-remote-api.md](web-remote-api.md) §9.4）；前端行为 = Web 子方案 §5.6。
+
+- [ ] **订阅建立**：页面加载后 Network 出现一条 `mesh/events` 请求（`type=eventsource`，**pending** 不结束），
+      EventStream 面板首帧为 `mesh.ready`（回显 `since_seq` / `peers=auto` / `clients`）；
+      网格关闭（`--mesh=false`）时**没有**这条请求（前端不订阅、不轮询）。
+- [ ] **实时翻转（≤2s）**：在 B 的窗口发一轮 prompt → A 的侧栏在 ≤2s 内把 B 的会话徽标翻成
+      `◐ 忙碌 @host:port`，回合结束后回落 `● 运行中`；A 自己的条目不变（定向投递，不是全量抖动）。
+- [ ] **节点上下线**：再起一个 C 进程 → A 的列表与「其他工作区（N）」计数自动出现 C 的会话；
+      退出 C（或 `aicli-mesh stop`）→ 条目回落 `idle` / `last_known`（「上次 @host:port」），计数减一。
+      全程不手动刷新。
+- [ ] **节流**：B 连续跑多个工具调用 → A 的 `sessions?scope=all` 请求被合并（200ms 窗口内多帧只拉一次），
+      侧栏不出现逐帧重排的闪烁。
+- [ ] **退避重连 + 续传**：DevTools 勾 Offline 再取消（或临时断网）→ `mesh/events` 断开后按
+      1s→2s→4s…（≤30s）重连，重连 URL 带 `?since_seq=<最后收到的 seq>`；恢复后徽标继续实时。
+- [ ] **轮询兜底（降级）**：断开期间 `sessions?scope=all` 每 10s 出现一次（Network 可见）；
+      订阅恢复（`mesh.ready`）后该轮询停止；SSE 完全不可用时徽标仍随轮询更新（不实时但不失能）。
+- [ ] **`mesh.lagged` 全量兜底**：EventStream 面板出现 `mesh.lagged`（缓冲溢出跳号）→
+      立刻看到一次 `sessions?scope=all` 全量拉取，列表与 `mesh/peers` 重新一致。
+- [ ] **双流独立（R11）**：`/web/api/events`（本进程）与 `mesh/events`（扇入）各自独立连接与退避；
+      断开其中一条不影响另一条（本窗口的流式输出照常）。
+- [ ] **无令牌残留（红线）**：回环模式下 `mesh/events` 的 URL **不带** `token=`；非回环模式
+      （`--web-host 0.0.0.0`）下只带**本进程**令牌；`sessions.js` 源码与 `localStorage` /
+      `sessionStorage` 中都没有 peer 令牌（M7）。
 
 ## 3. 协议下拉框专项用例（combo popup）
 

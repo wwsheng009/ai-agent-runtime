@@ -4,7 +4,7 @@
 import { autoGrow, clearPendingPrompts, dropPendingUserPrompt, getUiState, promptEl, refreshScreen, sendStatusEl, setUI } from "./chat.js";
 import { refreshCacheAnalyticsIfActive, syncCacheSession } from "./cache.js";
 import { syncSkillsSession } from "./skills.js";
-import { esc, showToast } from "./util.js";
+import { esc, showToast, webAuthToken } from "./util.js";
 
 var sidebarEl = document.getElementById("sidebar");
 var sidebarToggleBtn = document.getElementById("sidebar-toggle");
@@ -53,6 +53,25 @@ var otherWorkspacesCollapsed = false;    // 「其他工作区」分组折叠态
 var meshViewAvailable = false;           // self 段非空 = 网格可用（降级时 false）
 var meshSelf = null;                     // {node_id, mesh_root, workspace_path, workspace_name, counts}
 var meshWorkspaces = [];                 // [{path,name,nodes,session_count,running_count}]
+
+// ---- 网格实时订阅（S12 / Web 子方案 §5.6）----
+// 第二条 SSE（与 /web/api/events 并列、语义互不干扰，R11）：只连本进程的
+// /web/api/mesh/events，服务端把全网格事件扇入这一条流（web-remote-api.md §9.4）。
+// 帧只当「有变化」的信号，刷新统一回到 /web/api/sessions?scope=all 的同源数据——
+// 前端不自行合并 peer 帧，避免与 mesh/peers 出现第二套聚合口径（§6.2 同源）。
+var MESH_RECONNECT_MIN_MS = 1000;   // 断线退避 1s→2s→4s…（§5.6）
+var MESH_RECONNECT_MAX_MS = 30000;  // 退避上限 30s
+var MESH_POLL_INTERVAL_MS = 10000;  // SSE 不可用时的轮询兜底周期（§5.6 降级）
+var MESH_REFRESH_THROTTLE_MS = 200; // 事件驱动 + 200ms 合并刷新（§5.6 节流 / Q11）
+
+var meshStream = null;                  // EventSource（本进程 mesh/events）
+var meshStreamStarted = false;          // 是否已进入订阅生命周期（网格可用才启动）
+var meshStreamReady = false;            // 收到 mesh.ready = 订阅生效（据此停轮询）
+var meshLastSeq = 0;                    // 续传游标（帧 id / data.seq，重连带 ?since_seq=）
+var meshReconnectDelay = MESH_RECONNECT_MIN_MS;
+var meshReconnectTimer = null;
+var meshRefreshTimer = null;            // 合并刷新定时器
+var meshPollTimer = null;               // 轮询兜底定时器
 
 // 输入历史（localStorage 记忆，最近 50 条）
 var inputHistory = [];
@@ -716,6 +735,129 @@ function applyMeshView(data) {
   meshSelf = data && data.self ? data.self : null;
   meshWorkspaces = data && Array.isArray(data.workspaces) ? data.workspaces : [];
   meshViewAvailable = !!meshSelf;
+  maybeStartMeshStream();
+}
+
+// ---- 网格实时订阅：连接 / 退避 / 降级 / 节流（S12 / §5.6）----
+
+// meshEventsURL：续传游标 + 非回环模式的令牌（EventSource 不能设请求头，
+// 取值顺序见 util.js::webAuthToken；回环模式 GET/SSE 本就不需要令牌）。
+function meshEventsURL() {
+  var url = "/web/api/mesh/events";
+  if (meshLastSeq > 0) { url += "?since_seq=" + meshLastSeq; }
+  var token = webAuthToken();
+  if (token) { url += (url.indexOf("?") >= 0 ? "&" : "?") + "token=" + encodeURIComponent(token); }
+  return url;
+}
+
+// maybeStartMeshStream：只在网格可用（sessions 响应 self 非空）时订阅。
+// --mesh=false 时路由不注册（§9.7），订阅只会制造无意义的错误重试；降级视图
+// 本来也没有徽标要刷新（§4.7：不报错、不提示）。
+function maybeStartMeshStream() {
+  if (meshStreamStarted || !meshViewAvailable) { return; }
+  meshStreamStarted = true;
+  openMeshStream();
+}
+
+function closeMeshStream() {
+  if (meshStream) {
+    try { meshStream.close(); } catch (e) { /* ignore */ }
+    meshStream = null;
+  }
+}
+
+// openMeshStream：建立订阅。EventSource 自带重连既不能带 since_seq、也不能
+// 自定义退避，因此一律自行接管（onerror → 关连接 + 退避重连）。
+function openMeshStream() {
+  if (!meshStreamStarted) { return; }
+  closeMeshStream();
+  meshStreamReady = false;
+  var es;
+  try { es = new EventSource(meshEventsURL()); } catch (e) { scheduleMeshReconnect(); return; }
+  meshStream = es;
+  es.onerror = function () {
+    closeMeshStream();
+    meshStreamReady = false;
+    startMeshPolling();      // 降级：SSE 不可用期间仍有 10s 全量兜底
+    scheduleMeshReconnect(); // 退避重连（连上后由 mesh.ready 停掉轮询）
+  };
+  ["mesh.ready", "mesh.peer.joined", "mesh.peer.left", "mesh.peer.updated",
+   "mesh.session.changed", "mesh.peer.event", "mesh.lagged"].forEach(function (name) {
+    es.addEventListener(name, function (e) {
+      var data = {};
+      try { data = JSON.parse(e.data); } catch (err) { /* 非 JSON 帧忽略 */ }
+      if (e.lastEventId) {
+        var id = Number(e.lastEventId);
+        if (id > meshLastSeq) { meshLastSeq = id; }
+      }
+      handleMeshFrame(name, data);
+    });
+  });
+}
+
+function scheduleMeshReconnect() {
+  if (!meshStreamStarted || meshReconnectTimer) { return; }
+  var delay = meshReconnectDelay;
+  meshReconnectDelay = Math.min(meshReconnectDelay * 2, MESH_RECONNECT_MAX_MS);
+  meshReconnectTimer = setTimeout(function () {
+    meshReconnectTimer = null;
+    openMeshStream();
+  }, delay);
+}
+
+function stopMeshPolling() {
+  if (meshPollTimer) { clearInterval(meshPollTimer); meshPollTimer = null; }
+}
+
+// startMeshPolling：SSE 不可用（旧节点 / 非回环无令牌 / 代理阻断）时的降级
+// 轮询：10s 拉一次同源视图，徽标仍可用，只是不实时（§5.6）。
+function startMeshPolling() {
+  if (meshPollTimer) { return; }
+  meshPollTimer = setInterval(function () {
+    if (meshStreamReady) { stopMeshPolling(); return; }
+    scheduleMeshRefresh();
+  }, MESH_POLL_INTERVAL_MS);
+}
+
+// scheduleMeshRefresh：事件驱动的合并刷新（§5.6 节流）：200ms 内的多帧只拉一次，
+// 避免高频 turn 事件把侧栏重排打成幻灯片（Q11）。
+function scheduleMeshRefresh() {
+  if (meshRefreshTimer) { return; }
+  meshRefreshTimer = setTimeout(function () {
+    meshRefreshTimer = null;
+    // 内联重命名进行中不重建列表（否则输入框被连根拔掉）；下一次事件或轮询补上。
+    if (sessionListEl && sessionListEl.querySelector(".session-rename-input")) { return; }
+    loadSessions();
+  }, MESH_REFRESH_THROTTLE_MS);
+}
+
+// handleMeshFrame：§5.6 帧表的落点。joined / left / updated / session.changed 与
+// peer 白名单事件（turn.* / session.*）都只标记「需要刷新」——增删、计数、忙碌
+// 翻转、归属变化统一由同源全量视图重算（分组计数因此天然一致，不另存增量）。
+function handleMeshFrame(name, data) {
+  var seq = Number(data && data.seq) || 0;
+  if (seq > meshLastSeq) { meshLastSeq = seq; }
+  switch (name) {
+    case "mesh.ready":
+      // 订阅生效：重置退避、停掉降级轮询（首帧只回显订阅参数，无需刷新）。
+      meshStreamReady = true;
+      meshReconnectDelay = MESH_RECONNECT_MIN_MS;
+      stopMeshPolling();
+      return;
+    case "mesh.lagged":
+      // 缓冲溢出跳号：丢弃增量语义，立刻做一次全量兜底（§6.4）。
+      scheduleMeshRefresh();
+      return;
+    case "mesh.peer.joined":
+    case "mesh.peer.left":
+    case "mesh.peer.updated":
+    case "mesh.session.changed":
+    case "mesh.peer.event":
+      scheduleMeshRefresh();
+      return;
+    default:
+      return;
+  }
 }
 
 // 拉取会话列表（GET /web/api/sessions）。

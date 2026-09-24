@@ -84,7 +84,7 @@ v1 把「问题定义 + 数据模型 + 接口 + spawn + 路线图」全写在一
 | P0 ② 「仅复用 + `auth_required=false`」限制 | ⤳ 被取代 | S9 起主点击恒走 `mesh/spawn`（服务端复用活节点、必要时拉起），该 P0 阶段限制不再适用 |
 | P0 ③ 打开方式开关 | ✅ 已落地（S11，默认取 `new_window`） | 侧栏 `#sessions-open-mode` + `localStorage: webSessionOpenMode`（`web/js/sessions.js`）；Q13 口径：只在用户未显式设置过时按新默认，显式选过 `in_place` 的老用户保持原选择 |
 | P0 ④ 「关于」页网格小节 | ✅ 已落地（S11） | `web/js/ui.js::loadAboutMesh` 只读渲染 `GET /web/api/mesh/self` + `peers` 的 `counts`；**不提供** gc / stop / spawn 按钮（§5.8） |
-| P1 ② `mesh/events` 实时徽标 + 退避重连 + 轮询兜底 | ❌ 未落地（S12） | 前端未订阅 `mesh/events`（端点本身 S7 已就绪）；`js/mesh.js` 未新增（**D5**）→ §10.2「实时徽标」断言当前不可执行；S11 只做到「刷新/轮询时一致」 |
+| P1 ② `mesh/events` 实时徽标 + 退避重连 + 轮询兜底 | ✅ 已落地（S12） | `web/js/sessions.js` 订阅 `GET /web/api/mesh/events`（**D5**：不新增 `js/mesh.js`）：帧只作刷新信号 → `sessions?scope=all` 同源重算（200ms 合并）、`mesh.lagged` 全量兜底、1s→2s→4s…≤30s 退避 + `?since_seq=` 续传、SSE 不可用降级 10s 轮询；本进程令牌经 `util.js::webAuthToken` 单源。§10.2「实时徽标」断言**可执行**（手工清单见 `docs/aicli/web-testing.md` §2.7.2） |
 | P1 ③ `resume` 的 `running_elsewhere` 三段式弹窗 | ✅ 已落地（S11） | `POST /web/api/sessions/resume` 未带 `force` 时先做归属检查（`running_elsewhere` / `conflict`，`web_handlers_mesh_sessions.go::chatWebResumeMeshGuard`）；前端三段式弹窗见 `web/js/sessions.js`。偏差 **D12** 已收敛 |
 | P1 ④ 跨工作区分组 | ✅ 已落地（S11） | 「其他工作区（N）」可折叠分组（`?scope=all` 合并 peer 会话 + `workspaces[]` 汇总） |
 | P1 ⑥ 开关默认切 `new_window` | ✅ 已落地（S11） | 同 P0 ③（`new_window` 为缺省；`in_place` 可选） |
@@ -94,7 +94,8 @@ v1 把「问题定义 + 数据模型 + 接口 + spawn + 路线图」全写在一
 > **已验证部分**：`web_handlers_mesh_spawn_test.go`（参数透传 / 四态 / 单飞 / 失败带日志尾部）、
 > `internal/mesh/spawn_test.go`、`cli_open_test.go`；E2E-DEBUG-03 的 M1–M10 覆盖**网格行为**
 > （归属不变、令牌不泄漏等），**不覆盖**前端 JS。§10.2 手工断言见 `docs/aicli/web-testing.md` §2.7
-> （其中「实时徽标」依赖 P1 ②，当前不可执行）。
+> （S12 起含「实时徽标」，见同文 §2.7.2）；前端 asset 契约由
+> `web_handlers_mesh_sessions_test.go` / `web_handlers_mesh_realtime_test.go` 锁定。
 
 ---
 
@@ -706,7 +707,7 @@ v1 的 R1–R10 保留，逐条标注**归口**（网格承担 / Web 侧承担 /
 | --- | --- |
 | 弹窗资格 | 点击「在新窗口打开」后，`window.open` 在用户手势同步阶段被调用（DevTools 无「拦截弹窗」警告） |
 | 失败关窗 | `not_running` / `failed` 时占位窗口被关闭，且 Toast 可见、诊断信息可复制 |
-| 实时徽标 | peer 忙碌翻转在 ≤2s 内反映到徽标；断网后 10s 轮询兜底仍能刷新 |
+| 实时徽标（S12 起可执行，细化见 `web-testing.md` §2.7.2） | peer 忙碌翻转在 ≤2s 内反映到徽标；断网后 10s 轮询兜底仍能刷新 |
 | 无令牌残留 | 打开新窗口后，`localStorage` / `sessionStorage` / 当前页面 DOM 中无 peer 令牌 |
 
 > 若仓库后续引入前端自动化（如 Playwright），上表应转为脚本断言；当前保持手工 + DevTools 检查。

@@ -8,6 +8,7 @@ import { loadRuntimeMeta } from "./runtime.js";
 import { loadStatusBar } from "./statusbar.js";
 import { loadSessions } from "./sessions.js";
 import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, endStream, isStreamActive, renderStream, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
+import { webAuthToken } from "./util.js";
 
 export var statusEl = document.getElementById("connection-status");
 var turnEl = document.getElementById("turn-status");
@@ -246,15 +247,9 @@ function onSSEEvent(eventName, data) {
 
 function openEventSource() {
   setStatus("连接中…", false);
-  // EventSource 无法设置请求头：在非回环模式下，将写令牌追加到 URL 查询参数。
-  // 优先从 sessionStorage 读取浏览器缓存的 Token（避免每次需要 ?token=），
-  // 回退到 meta 标签注入的 Token。
-  var token = sessionStorage.getItem('aicli-web-token');
-  if (!token) {
-    var meta = document.querySelector('meta[name="aicli-web-token"]');
-    token = meta && meta.content ? String(meta.content).trim() : "";
-    if (token) { sessionStorage.setItem('aicli-web-token', token); }
-  }
+  // EventSource 无法设置请求头：在非回环模式下，将写令牌追加到 URL 查询参数
+  // （回环模式 GET/SSE 无需令牌；取值顺序见 util.js::webAuthToken）。
+  var token = webAuthToken();
   var eventsUrl = "/web/api/events";
   if (token) { eventsUrl += "?token=" + encodeURIComponent(token); }
   var es = new EventSource(eventsUrl);

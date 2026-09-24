@@ -813,6 +813,60 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 
 ---
 
+## 20. S12 · Web 侧收口（二）：`mesh/events` 实时徽标（退避重连 + 轮询兜底）
+
+> 来源：Web 子方案 §0.1 未落地清单（**P1 ②**）；契约 = 子方案 §5.6 实时刷新表 +
+> §10.2「实时徽标」断言。前端无构建步骤，落点全在 `web/js/*`
+> （**D5**：不新增 `js/mesh.js`，网格前端逻辑并入 `sessions.js`）。
+> 端点本身 S7 已就绪（`web-remote-api.md` §9.4），本切片只补**消费侧**。
+
+### 20.1 范围与落点
+
+| 项 | 落点 | 说明 |
+| --- | --- | --- |
+| P1 ② 实时订阅（§5.6） | `web/js/sessions.js` | 订阅 `GET /web/api/mesh/events`：与既有 `/web/api/events` **并列的第二条 SSE**（R11：独立连接、独立退避，互不拖累） |
+| 退避重连 + 续传 | `web/js/sessions.js` | 1s→2s→4s…上限 30s；重连带 `?since_seq=<last_seq>`（游标取帧首 `id:` 行 / `data.seq`） |
+| 轮询兜底（降级） | `web/js/sessions.js` | SSE 不可用（旧节点 / 非回环无令牌 / 代理阻断）→ 10s 轮询同源视图；`mesh.ready` 到达即停 |
+| 节流 | `web/js/sessions.js` | 事件驱动 + 200ms 合并刷新，避免高频事件把侧栏重排打成幻灯片（Q11） |
+| 令牌（非回环模式） | `web/js/util.js`、`web/js/sse.js` | 共享 `webAuthToken()`：回环模式 GET/SSE 无需令牌，非回环模式 EventSource 只能带 `?token=` |
+| **不做**（留给 P2） | — | 冲突详情横幅 / 接管二次确认 / resume 的 SSE 事件化 / 窗口标题节点后缀 |
+
+### 20.2 契约增量（三点明确）
+
+1. **帧只作刷新信号**：`joined` / `left` / `updated` / `session.changed` / `peer.event`
+   一律触发一次 `GET /web/api/sessions?scope=all` 全量重算——节点增删、分组计数、忙碌翻转、
+   归属变化都由同源视图派生（§6.2），前端不保存增量、不自行合并 peer 帧，不产生第二套聚合口径。
+2. **`mesh.lagged` = 立即全量兜底**：跳号即丢弃增量语义（§6.4），与「流不重放历史」的既有
+   语义一致；不尝试按 seq 补洞。
+3. **订阅门槛与降级**：仅当 `sessions` 响应 `self` 非空（网格可用）才订阅；`--mesh=false`
+   不订阅、不轮询（路由本就不注册，订阅只会制造无意义重试）；SSE 不可用期间徽标仍可用
+   （10s 轮询，只是不实时），页面不报错、不提示（§4.7 降级契约）。
+
+**红线（继承 §5.5 / M7）**：网格前端逻辑不得出现令牌原文（统一经 `util.js::webAuthToken`），
+peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内联。
+
+### 20.3 验证
+
+| 层 | 断言 |
+| --- | --- |
+| 前端契约 | `web_handlers_mesh_realtime_test.go`：订阅端点 / §5.6 帧类型全覆盖 / 退避与轮询常量 / 节流常量 / 订阅门槛 / 令牌红线；助手单源（`sse.js` 与 `sessions.js` 都复用 `webAuthToken`） |
+| 门禁 | `go build ./...`、`go vet ./cmd/aicli/commands/ ./internal/mesh/`、`go test ./cmd/aicli/commands/ ./internal/mesh/`、`node --check`（ES 模块语法） |
+| E2E | 01/02/03 聚合回归（**流本身**由 M5 `mesh/realtime-fanin` 覆盖；浏览器行为按 §10.2 保持手工 + DevTools） |
+| 手工 | `web-testing.md` §2.7「实时徽标」转正 + 新增 §2.7.2（实时 / 降级 / 双流独立） |
+
+### 20.4 落地记录（2026-09-24）
+
+| 项 | 实际 |
+| --- | --- |
+| 前端 | `web/js/sessions.js`：`meshEventsURL` / `maybeStartMeshStream` / `openMeshStream` / `scheduleMeshReconnect` / `startMeshPolling` + `stopMeshPolling` / `scheduleMeshRefresh` / `handleMeshFrame`；`applyMeshView` 末尾接订阅门槛（网格可用才启动） |
+| 令牌单源 | `web/js/util.js` 新增 `webAuthToken()`（sessionStorage → 页面 meta，与骨架注入的 fetch 包装同序）；`web/js/sse.js` 改为复用之（行为不变，删掉重复的取值代码） |
+| 单测 | `web_handlers_mesh_realtime_test.go`：`TestChatWebSessionsAssetHasMeshRealtimeView`、`TestChatWebAssetsShareSingleWebAuthToken` |
+| 门禁 | `go build ./...`、`go vet ./cmd/aicli/commands/ ./internal/mesh/`、`go test ./cmd/aicli/commands/ ./internal/mesh/` 全绿；E2E-DEBUG-01/02/03 聚合回归全绿（本地，2026-09-24） |
+| 文档 | 本节 + `web-remote-api.md` §9.4 补「前端消费口径」 + `web-testing.md` §2.7/§2.7.2 + Web 子方案 §0.1 状态表回填 |
+| 未做（按计划） | P2 治理项：冲突详情横幅、接管二次确认、收敛开关文案、resume 的 SSE 事件化、窗口标题节点后缀 |
+
+---
+
 ## 附录：本文与三份基准文档的分工
 
 | 文档 | 回答的问题 | 何时看 |
