@@ -691,7 +691,8 @@ var SPAWN_CODE_TEXT = {
   mesh_workspace_missing: "会话的工作区目录不存在或不可读",
   mesh_cross_workspace_denied: "目标开启了 --mesh-restrict-workspace：跨工作区写调用被拒",
   mesh_spawn_timeout: "等待节点就绪超时",
-  mesh_spawn_failed: "拉起节点进程失败"
+  mesh_spawn_failed: "拉起节点进程失败",
+  mesh_spawn_bin_unavailable: "本机找不到可用的 aicli 可执行文件（AICLI_BIN 指错或未完整安装）"
 };
 
 // spawnFailureText 把 §5.9 信封（status/code/reason/message）压成一行提示；
@@ -706,6 +707,9 @@ function spawnFailureText(json, sessionID) {
   if (json.status === "refused") {
     // §5.2 回退路径：策略拒绝不在前端重试，改用 CLI 面拿 URL。
     text += "；改用 CLI：aicli-mesh open " + target + " --print-url";
+  } else if (code === "mesh_spawn_bin_unavailable") {
+    // 二进制问题不是会话问题：诊断入口是 doctor（它打印解析到的路径与来源）。
+    text += "；诊断：aicli-mesh doctor";
   } else if (code === "mesh_spawn_timeout" || code === "mesh_spawn_failed" || code === "mesh_workspace_missing") {
     // 失败态给出诊断命令（§5.2「复制诊断命令」）：节点档案与最近心跳。
     text += "；诊断：aicli-mesh show " + target;

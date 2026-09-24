@@ -178,7 +178,7 @@ func (c *CLI) printUsage(w io.Writer) {
   aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--allow-write] [--timeout 130s] [--json]
   aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--json]
   aicli-mesh screen <节点|会话> [--view tui] [--tail N] [--format json|text] [--json]
-  aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--json]
+  aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--bin PATH] [--json]
   aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
   aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]
   aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
@@ -197,6 +197,10 @@ func (c *CLI) printUsage(w io.Writer) {
   节点，单飞租约的 owner 记作 cli-<pid>。--no-wait 只报告已启动，不等就绪。
   --takeover 跳过复用并显式回收该会话的租约（§4.4）：旧节点继续运行，但会在
   下次心跳后把自己的档案标记为 orphaned（不会被杀；用 aicli-mesh show 查看）。
+  --bin PATH 指定拉起的 aicli 二进制（必须存在；优先于 AICLI_BIN）。默认解析顺序：
+  AICLI_BIN → 自身（仅当就叫 aicli）→ 同目录 aicli.exe → PATH；AICLI_BIN 指错时
+  直接失败，绝不退回其它候选（改名部署见 docs/aicli/mesh-cli.md）。
+
 停止（stop）: 默认优雅——把 /exit 投给目标的 /web/api/input，让目标自己收尾
   （保存会话、注销档案、释放租约），并等进程消失；--force 才直接终止进程
   （不做收尾，残留档案由 gc 按「可证已死」回收）。停止是治理动作：**目标
@@ -1839,6 +1843,21 @@ func (c *CLI) buildDoctorReport(paths Paths, now time.Time) doctorReport {
 		}
 	}
 
+	// 9. Spawn executable: which aicli binary `open` / POST /web/api/mesh/spawn
+	//    would launch, and which rule picked it. With several installs on one
+	//    machine this is the first thing to check when the wrong version comes
+	//    up; a broken AICLI_BIN is a problem (explicit misconfiguration), a
+	//    missing binary only a warning (spawn is optional for read-only use).
+	switch resolution, resolveErr := ResolveSpawnExecutable(); {
+	case resolveErr != nil:
+		add("spawn-executable", "problem", fmt.Sprintf("拉起节点的可执行文件不可用：%v", resolveErr), nil)
+	case resolution.Path == "":
+		add("spawn-executable", "warn",
+			"无法定位 aicli 可执行文件（设置 AICLI_BIN 或从完整安装运行）：`open` 与 POST /web/api/mesh/spawn 都会 failed", nil)
+	default:
+		add("spawn-executable", "ok",
+			fmt.Sprintf("拉起节点使用 %s（来源 %s）", resolution.Path, resolution.Source), nil)
+	}
 	return report
 }
 
@@ -2254,6 +2273,7 @@ func (c *CLI) runOpen(args []string) int {
 		"wait":     flagValue,
 		"no-wait":  flagBool,
 		"takeover": flagBool,
+		"bin":      flagValue,
 		"json":     flagBool,
 		"help":     flagBool,
 	})
@@ -2283,6 +2303,16 @@ func (c *CLI) runOpen(args []string) int {
 		}
 		port = value
 	}
+	bin := strings.TrimSpace(parsed.str("bin", ""))
+	if bin != "" {
+		// --bin 是「就用这一个二进制」：指错必须当场失败（与 AICLI_BIN 同一条
+		// 规则），绝不悄悄换成旁边的 aicli.exe。
+		if info, statErr := os.Stat(bin); statErr != nil {
+			return c.fail(ExitUsage, "aicli-mesh open: --bin %s 不可用：%v", bin, statErr)
+		} else if info.IsDir() {
+			return c.fail(ExitUsage, "aicli-mesh open: --bin %s 是目录，不是可执行文件", bin)
+		}
+	}
 	sessionID, source := openSessionTarget(paths, c.now(), parsed.pos[0])
 	if sessionID == "" {
 		return c.fail(ExitNotFound, "aicli-mesh open: 无法从 %q 解析出会话（节点没有会话，或目标为空）", parsed.pos[0])
@@ -2305,6 +2335,7 @@ func (c *CLI) runOpen(args []string) int {
 			SelfNodeID:    fmt.Sprintf("cli-%d", os.Getpid()),
 			PID:           os.Getpid(),
 			Wait:          wait,
+			Executable:    bin,
 			FireAndForget: parsed.boolean("no-wait"),
 		})
 	if parsed.boolean("json") {

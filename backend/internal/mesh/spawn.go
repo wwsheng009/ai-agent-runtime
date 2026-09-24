@@ -42,9 +42,13 @@ const (
 
 // Spawn codes reported by the HTTP layer (§5.9 reason vocabulary).
 const (
-	SpawnCodeNotAllowed       = "mesh_spawn_not_allowed"
-	SpawnCodeTimeout          = "mesh_spawn_timeout"
-	SpawnCodeFailed           = "mesh_spawn_failed"
+	SpawnCodeNotAllowed = "mesh_spawn_not_allowed"
+	SpawnCodeTimeout    = "mesh_spawn_timeout"
+	SpawnCodeFailed     = "mesh_spawn_failed"
+	// SpawnCodeBinUnavailable is the "no usable aicli binary" failure: nothing
+	// was found, or AICLI_BIN points somewhere unusable (see
+	// ResolveSpawnExecutable — a broken override never falls back silently).
+	SpawnCodeBinUnavailable   = "mesh_spawn_bin_unavailable"
 	SpawnCodeWorkspaceMissing = "mesh_workspace_missing"
 	SpawnCodeMeshDisabled     = "mesh_disabled"
 )
@@ -108,8 +112,9 @@ type SpawnResult struct {
 	SchemaVersion int    `json:"schema_version"`
 	Status        string `json:"status"`
 	// Code is the §5.9 reason code (mesh_spawn_timeout / mesh_spawn_failed /
-	// mesh_workspace_missing / mesh_disabled). Status alone is not enough for
-	// callers: the frontend switches on the code, never on the prose Reason.
+	// mesh_spawn_bin_unavailable / mesh_workspace_missing / mesh_disabled).
+	// Status alone is not enough for callers: the frontend switches on the
+	// code, never on the prose Reason.
 	Code      string `json:"code,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
 	NodeID    string `json:"node_id,omitempty"`
@@ -140,8 +145,10 @@ type SpawnOptions struct {
 	// SelfNodeID / PID identify the lease owner.
 	SelfNodeID string
 	PID        int
-	// Executable overrides the aicli binary (default: sibling of the current
-	// executable, then PATH).
+	// Executable overrides the aicli binary verbatim (tests, embedding
+	// callers). When it is empty the binary is resolved by
+	// ResolveSpawnExecutable: AICLI_BIN, else self, else sibling `aicli`, else
+	// PATH.
 	Executable string
 	// WorkspaceFor resolves the working directory of a session. When it is nil
 	// (or reports nothing) the session binding's last workspace is used.
@@ -268,10 +275,19 @@ func Spawn(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
 			return result
 		}
 	}
-	executable := opts.executable()
+	executable, execErr := opts.executable()
+	if execErr != nil {
+		// A broken AICLI_BIN fails loudly: silently falling through to another
+		// candidate would launch a different build than the operator asked for.
+		result.Status = SpawnStatusFailed
+		result.Code = SpawnCodeBinUnavailable
+		result.Reason = execErr.Error()
+		opts.appendSpawnAudit(JournalSpawnCompleted, result, "")
+		return result
+	}
 	if executable == "" {
 		result.Status = SpawnStatusFailed
-		result.Code = SpawnCodeFailed
+		result.Code = SpawnCodeBinUnavailable
 		result.Reason = "cannot locate the aicli executable (set AICLI_BIN or run from a full install)"
 		opts.appendSpawnAudit(JournalSpawnCompleted, result, "")
 		return result
@@ -554,29 +570,95 @@ func defaultSpawnLogDir() string {
 	return ""
 }
 
-// defaultSpawnExecutable finds the aicli binary to launch: the current
-// executable when it *is* aicli, else the sibling `aicli` binary (the
-// aicli-mesh CLI case), else PATH, else AICLI_BIN.
-func defaultSpawnExecutable() string {
-	if override := strings.TrimSpace(os.Getenv("AICLI_BIN")); override != "" {
-		if info, err := os.Stat(override); err == nil && !info.IsDir() {
-			return override
+// SpawnExecutableEnv is the environment override for the aicli binary a spawn
+// launches. It is honoured by the CLI, by the Web host and by every node they
+// start (the child inherits our environment verbatim).
+const SpawnExecutableEnv = "AICLI_BIN"
+
+// Spawn executable resolution sources (`doctor` spawn-executable check): the
+// rule that picked the binary, so a multi-install machine can tell which
+// aicli gets spawned.
+const (
+	SpawnExecutableSourceEnv     = "AICLI_BIN"
+	SpawnExecutableSourceSelf    = "self"
+	SpawnExecutableSourceSibling = "sibling"
+	SpawnExecutableSourcePath    = "PATH"
+)
+
+// Test seams: os.Executable and PATH belong to the running process, so the
+// resolution rules can only be exercised by substituting them.
+var (
+	spawnExecutablePath = os.Executable
+	spawnStatFile       = os.Stat
+	spawnLookPath       = exec.LookPath
+)
+
+// SpawnExecutableResolution is the aicli binary a spawn would launch plus the
+// rule that picked it. Path is "" when nothing was found.
+type SpawnExecutableResolution struct {
+	Path   string
+	Source string
+}
+
+// ResolveSpawnExecutable reports which aicli binary `aicli-mesh open` and
+// POST /web/api/mesh/spawn would launch, and which rule picked it. `doctor`
+// prints it: with several aicli installs on one machine, "which binary gets
+// spawned" is the first thing to check.
+//
+// Order: AICLI_BIN, else self (only when the current executable *is* aicli),
+// else the sibling aicli<ext> (the aicli-mesh CLI case), else PATH.
+//
+// AICLI_BIN is authoritative: when it is set but unusable (missing, a
+// directory, unreadable) resolution fails instead of quietly falling through.
+// The override means "launch this exact binary", so a silent fallback would
+// run a different build than the operator asked for.
+//
+// The name match is exact (basename `aicli`, case-insensitive, extension
+// stripped) and the sibling lookup is hard-coded to aicli<ext>: a renamed
+// binary (aicli-2x.exe) is neither "self" nor the sibling it looks for, so a
+// rename needs AICLI_BIN (prefer an absolute path) or a co-located aicli.exe.
+func ResolveSpawnExecutable() (SpawnExecutableResolution, error) {
+	if override := strings.TrimSpace(os.Getenv(SpawnExecutableEnv)); override != "" {
+		info, err := spawnStatFile(override)
+		if err != nil || info.IsDir() {
+			return SpawnExecutableResolution{}, fmt.Errorf(
+				"%s=%s is not a usable aicli binary (%s); fix or unset it — the override never falls back to self/sibling/PATH",
+				SpawnExecutableEnv, override, spawnStatReason(err, info))
 		}
+		return SpawnExecutableResolution{Path: override, Source: SpawnExecutableSourceEnv}, nil
 	}
-	if exe, err := os.Executable(); err == nil && strings.TrimSpace(exe) != "" {
-		base := strings.ToLower(strings.TrimSuffix(filepath.Base(exe), filepath.Ext(exe)))
-		if base == "aicli" {
-			return exe
+	if exe, err := spawnExecutablePath(); err == nil && strings.TrimSpace(exe) != "" {
+		if spawnSelfIsAICLI(exe) {
+			return SpawnExecutableResolution{Path: exe, Source: SpawnExecutableSourceSelf}, nil
 		}
 		sibling := filepath.Join(filepath.Dir(exe), "aicli"+filepath.Ext(exe))
-		if info, err := os.Stat(sibling); err == nil && !info.IsDir() {
-			return sibling
+		if info, statErr := spawnStatFile(sibling); statErr == nil && !info.IsDir() {
+			return SpawnExecutableResolution{Path: sibling, Source: SpawnExecutableSourceSibling}, nil
 		}
 	}
-	if path, err := exec.LookPath("aicli"); err == nil {
-		return path
+	if path, err := spawnLookPath("aicli"); err == nil && strings.TrimSpace(path) != "" {
+		return SpawnExecutableResolution{Path: path, Source: SpawnExecutableSourcePath}, nil
 	}
-	return ""
+	return SpawnExecutableResolution{}, nil
+}
+
+// spawnSelfIsAICLI reports whether exe is an aicli binary itself: basename
+// `aicli`, case-insensitive, extension stripped.
+func spawnSelfIsAICLI(exe string) bool {
+	return strings.ToLower(strings.TrimSuffix(filepath.Base(exe), filepath.Ext(exe))) == "aicli"
+}
+
+// spawnStatReason turns a stat result into a short reason for the AICLI_BIN
+// error text (the operator needs to know *why* the override is unusable).
+func spawnStatReason(err error, info os.FileInfo) string {
+	switch {
+	case err != nil:
+		return err.Error()
+	case info != nil && info.IsDir():
+		return "is a directory"
+	default:
+		return "unusable"
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -638,11 +720,18 @@ func (o SpawnOptions) owner() LeaseOwner {
 	return LeaseOwner{NodeID: strings.TrimSpace(o.SelfNodeID), PID: pid}
 }
 
-func (o SpawnOptions) executable() string {
+// executable returns the binary to launch: an explicit override verbatim
+// (tests, embedding callers), otherwise the resolved aicli binary. A broken
+// AICLI_BIN is an error, never a silent fallback.
+func (o SpawnOptions) executable() (string, error) {
 	if exe := strings.TrimSpace(o.Executable); exe != "" {
-		return exe
+		return exe, nil
 	}
-	return defaultSpawnExecutable()
+	resolution, err := ResolveSpawnExecutable()
+	if err != nil {
+		return "", err
+	}
+	return resolution.Path, nil
 }
 
 func (o SpawnOptions) launch() func(SpawnLaunchSpec) (int, error) {

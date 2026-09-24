@@ -49,6 +49,12 @@ func launchDetached(spec SpawnLaunchSpec) (int, error) {
 	}
 	// nil stdin = the null device: a detached node must never read from the
 	// terminal that spawned it (it would steal keystrokes from the TUI).
+	//
+	// 契约（勿改）：子进程因此会在 stdin 上立刻读到 EOF。chat 侧必须把
+	// 「AICLI_MESH_SPAWNED_BY 非空 + stdin 是空设备」的 EOF 当作"没有终端
+	// 输入"而不是"输入结束"，否则节点会在拉起后立刻退出，spawn 却已经上报
+	// started（见 cmd/aicli/commands/chat_mesh.go 的
+	// chatDetachedNodeStdinExhausted 与 chat_input_queue.go 的 pump）。
 	cmd.Stdin = nil
 	cmd.Stdout = stdout
 	cmd.Stderr = stdout

@@ -1,6 +1,8 @@
 package mesh
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -150,6 +152,7 @@ func TestCLIOpenArgumentErrors(t *testing.T) {
 		{"bad port", []string{"open", "s1", "--port", "70000"}, ExitUsage},
 		{"non numeric port", []string{"open", "s1", "--port", "abc"}, ExitUsage},
 		{"bad wait", []string{"open", "s1", "--wait", "soon"}, ExitUsage},
+		{"missing bin", []string{"open", "s1", "--bin", filepath.Join(t.TempDir(), "absent.exe")}, ExitUsage},
 		{"path-like target", []string{"open", `..\evil`}, ExitNotFound},
 	}
 	for _, tc := range cases {
@@ -225,5 +228,35 @@ func TestCLIOpenTakeoverFlag(t *testing.T) {
 
 	if _, usage, _ := runCLI(t, cli, "open", "--help"); !strings.Contains(usage, "--takeover") {
 		t.Fatalf("用法里应列出 --takeover:\n%s", usage)
+	}
+}
+
+// TestCLIOpenBinFlag：--bin 指定要拉起的 aicli 二进制（改名部署的入口），落点是
+// SpawnOptions.Executable（Spawn 原样使用，优先于 AICLI_BIN）；指错的 --bin 当场
+// 按用法错误拒绝，不触达 Spawn（与 AICLI_BIN 同一条「指错就报错」的规则）。
+func TestCLIOpenBinFlag(t *testing.T) {
+	paths := testCLIPaths(t)
+	cli := testCLI(paths, newFakeClock())
+	fake := filepath.Join(t.TempDir(), "aicli-2x.exe")
+	if err := os.WriteFile(fake, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+
+	var gotOpts SpawnOptions
+	cli.Spawn = func(req SpawnRequest, opts SpawnOptions) SpawnResult {
+		gotOpts = opts
+		return SpawnResult{Status: SpawnStatusStarted, SessionID: req.SessionID, NodeID: "node-bin"}
+	}
+
+	code, _, stderr := runCLI(t, cli, "open", "session_bin", "--bin", fake)
+	if code != ExitOK {
+		t.Fatalf("open --bin exit = %d (stderr %q)", code, stderr)
+	}
+	if gotOpts.Executable != fake {
+		t.Fatalf("executable = %q, want --bin 的值 %q", gotOpts.Executable, fake)
+	}
+
+	if _, usage, _ := runCLI(t, cli, "open", "--help"); !strings.Contains(usage, "--bin") {
+		t.Fatalf("用法里应列出 --bin:\n%s", usage)
 	}
 }

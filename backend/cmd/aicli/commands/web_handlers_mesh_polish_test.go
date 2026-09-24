@@ -41,6 +41,10 @@ func TestChatWebSessionsAssetHasSpawnRefusalText(t *testing.T) {
 		"mesh_cross_workspace_denied",
 		"mesh_spawn_timeout",
 		"mesh_spawn_failed",
+		// 二进制解析失败（AICLI_BIN 指错 / 找不到 aicli）：诊断入口是 doctor
+		// （它会打印解析到的路径与来源），不是会话档案。
+		"mesh_spawn_bin_unavailable",
+		"aicli-mesh doctor",
 		// §5.2 回退路径：refused 不在前端重试，改用 CLI 面。
 		"aicli-mesh open ",
 		"--print-url",

@@ -433,10 +433,22 @@ func (q *chatInputQueue) stdinPump() {
 }
 
 func (q *chatInputQueue) stdinReadLoop(events chan<- stdinLineEvent) {
-	defer close(events)
+	// 网格拉起的脱离节点（stdin 是空设备，见 chatDetachedNodeStdinExhausted）
+	// 读到 EOF 时不能上报终态错误：节点还要靠 Web 队列继续服务浏览器窗口。
+	// events 保持打开、pump 停在等待队列上，readLine 于是只阻塞不报错。
+	parked := false
+	defer func() {
+		if !parked {
+			close(events)
+		}
+	}()
 	for {
 		line, err := readChatSessionLine(context.Background(), q.reader)
 		if line == "" && err != nil {
+			if errors.Is(err, io.EOF) && chatDetachedNodeStdinExhausted() {
+				parked = true
+				return
+			}
 			events <- stdinLineEvent{Err: err}
 			return
 		}

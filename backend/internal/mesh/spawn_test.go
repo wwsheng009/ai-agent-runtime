@@ -557,19 +557,173 @@ func TestNewSpawnTokenIsHexAndLongEnough(t *testing.T) {
 	}
 }
 
-func TestDefaultSpawnExecutablePrefersExplicitOverride(t *testing.T) {
-	dir := t.TempDir()
-	fake := filepath.Join(dir, "aicli-fake.exe")
-	if err := os.WriteFile(fake, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write fake binary: %v", err)
+// ---------------------------------------------------------------------------
+// spawn executable resolution (AICLI_BIN / self / sibling / PATH)
+// ---------------------------------------------------------------------------
+
+// spawnTestFileInfo is the minimal os.FileInfo the stat seam hands back.
+type spawnTestFileInfo struct {
+	name string
+	dir  bool
+}
+
+func (f spawnTestFileInfo) Name() string       { return f.name }
+func (f spawnTestFileInfo) Size() int64        { return 1 }
+func (f spawnTestFileInfo) Mode() os.FileMode  { return 0o755 }
+func (f spawnTestFileInfo) ModTime() time.Time { return time.Time{} }
+func (f spawnTestFileInfo) IsDir() bool        { return f.dir }
+func (f spawnTestFileInfo) Sys() any           { return nil }
+
+// stubSpawnExecutableSeams replaces the process-level inputs of the resolution
+// (our own path, stat, PATH); without this the four rules are untestable.
+func stubSpawnExecutableSeams(t *testing.T, exe string, files, dirs []string, pathHit string) {
+	t.Helper()
+	oldExe, oldStat, oldLook := spawnExecutablePath, spawnStatFile, spawnLookPath
+	t.Cleanup(func() { spawnExecutablePath, spawnStatFile, spawnLookPath = oldExe, oldStat, oldLook })
+
+	fs := make(map[string]bool, len(files)+len(dirs))
+	for _, name := range files {
+		fs[name] = false
 	}
-	t.Setenv("AICLI_BIN", fake)
-	if got := defaultSpawnExecutable(); got != fake {
-		t.Fatalf("defaultSpawnExecutable = %q, want the AICLI_BIN override %q", got, fake)
+	for _, name := range dirs {
+		fs[name] = true
 	}
-	t.Setenv("AICLI_BIN", filepath.Join(dir, "absent.exe"))
-	if got := defaultSpawnExecutable(); got == filepath.Join(dir, "absent.exe") {
-		t.Fatalf("defaultSpawnExecutable trusted a missing override: %q", got)
+	spawnExecutablePath = func() (string, error) { return exe, nil }
+	spawnStatFile = func(name string) (os.FileInfo, error) {
+		isDir, ok := fs[name]
+		if !ok {
+			return nil, os.ErrNotExist
+		}
+		return spawnTestFileInfo{name: filepath.Base(name), dir: isDir}, nil
+	}
+	spawnLookPath = func(string) (string, error) {
+		if pathHit == "" {
+			return "", os.ErrNotExist
+		}
+		return pathHit, nil
+	}
+}
+
+// TestResolveSpawnExecutableRules 锁定四条规则的顺序与来源标签：
+// AICLI_BIN → 自身（仅当就叫 aicli）→ 同目录 aicli<ext> → PATH。
+func TestResolveSpawnExecutableRules(t *testing.T) {
+	root := t.TempDir()
+	override := filepath.Join(root, "other", "aicli-2x.exe")
+	selfAICLI := filepath.Join(root, "tools", "aicli", "aicli.exe")
+	selfRenamed := filepath.Join(root, "tools", "aicli-2x", "aicli-2x.exe")
+	sibling := filepath.Join(root, "tools", "aicli-2x", "aicli.exe")
+	pathHit := filepath.Join(root, "path", "aicli.exe")
+
+	cases := []struct {
+		name     string
+		override string
+		self     string
+		files    []string
+		dirs     []string
+		pathHit  string
+		wantPath string
+		wantSrc  string
+		wantErr  bool
+	}{
+		{
+			name:     "AICLI_BIN wins over self/sibling/PATH",
+			override: override,
+			self:     selfRenamed,
+			files:    []string{override, sibling},
+			pathHit:  pathHit,
+			wantPath: override,
+			wantSrc:  SpawnExecutableSourceEnv,
+		},
+		{
+			name:     "a broken AICLI_BIN never falls back to self/sibling/PATH",
+			override: filepath.Join(root, "other", "absent.exe"),
+			self:     selfRenamed,
+			files:    []string{sibling},
+			pathHit:  pathHit,
+			wantErr:  true,
+		},
+		{
+			name:     "an AICLI_BIN pointing at a directory is refused",
+			override: filepath.Join(root, "other"),
+			self:     selfRenamed,
+			dirs:     []string{filepath.Join(root, "other")},
+			files:    []string{sibling},
+			pathHit:  pathHit,
+			wantErr:  true,
+		},
+		{
+			name:     "self when the executable already is aicli",
+			self:     selfAICLI,
+			wantPath: selfAICLI,
+			wantSrc:  SpawnExecutableSourceSelf,
+		},
+		{
+			name:     "a renamed binary (aicli-2x.exe) uses the co-located aicli.exe",
+			self:     selfRenamed,
+			files:    []string{sibling},
+			pathHit:  pathHit,
+			wantPath: sibling,
+			wantSrc:  SpawnExecutableSourceSibling,
+		},
+		{
+			name:     "a renamed binary without a sibling falls back to PATH",
+			self:     selfRenamed,
+			pathHit:  pathHit,
+			wantPath: pathHit,
+			wantSrc:  SpawnExecutableSourcePath,
+		},
+		{
+			name: "nothing found is not an error, just an empty resolution",
+			self: selfRenamed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stubSpawnExecutableSeams(t, tc.self, tc.files, tc.dirs, tc.pathHit)
+			t.Setenv(SpawnExecutableEnv, tc.override)
+			got, err := ResolveSpawnExecutable()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("resolution = %+v, want an error for the broken override", got)
+				}
+				if !strings.Contains(err.Error(), SpawnExecutableEnv) {
+					t.Fatalf("error %q should name %s", err, SpawnExecutableEnv)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveSpawnExecutable: %v", err)
+			}
+			if got.Path != tc.wantPath || got.Source != tc.wantSrc {
+				t.Fatalf("resolution = %+v, want path %q source %q", got, tc.wantPath, tc.wantSrc)
+			}
+		})
+	}
+}
+
+// TestSpawnFailsLoudlyOnBrokenBinOverride：AICLI_BIN 指错时 Spawn 必须失败并报
+// mesh_spawn_bin_unavailable，且**不启动任何进程**（绝不悄悄换一个二进制）。
+func TestSpawnFailsLoudlyOnBrokenBinOverride(t *testing.T) {
+	paths := testCLIPaths(t)
+	clock := newFakeClock()
+	t.Setenv(SpawnExecutableEnv, filepath.Join(t.TempDir(), "absent.exe"))
+
+	launched := false
+	opts := spawnTestOptions(t, paths, clock, func(SpawnLaunchSpec) (int, error) {
+		launched = true
+		return 4242, nil
+	})
+	opts.Executable = "" // 走解析路径（helper 默认注入假二进制）
+
+	result := Spawn(SpawnRequest{SessionID: "session_bin"}, opts)
+	if launched {
+		t.Fatal("a broken AICLI_BIN must not launch anything")
+	}
+	if result.Status != SpawnStatusFailed || result.Code != SpawnCodeBinUnavailable {
+		t.Fatalf("result = %+v, want failed/%s", result, SpawnCodeBinUnavailable)
+	}
+	if !strings.Contains(result.Reason, SpawnExecutableEnv) {
+		t.Fatalf("reason %q should name %s", result.Reason, SpawnExecutableEnv)
 	}
 }
 

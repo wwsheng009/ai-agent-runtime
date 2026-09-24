@@ -753,6 +753,10 @@ aicli-mesh open sess-20260924-abc --json
   （`log_tail` 已过 `redactSpawnTail`）。调用方拿到 `url` 后**立即**交给窗口，不得落
   `localStorage`/`sessionStorage`/DOM。
 - **单飞**：先抢 `spawn-<session>` 租约；抢不到 → 直接按对方档案返回 `reused`，并发点击不会起第二个进程。
+- **可执行文件**：拉起用的 aicli 二进制按 `AICLI_BIN` → 自身（仅当文件名就叫 `aicli`）→
+  同目录 `aicli.exe` → `PATH` 解析；`aicli-mesh doctor` 的 `spawn-executable` 会打印结果与
+  来源。`AICLI_BIN` 指错时**不退回**其它候选，直接 `failed` + `mesh_spawn_bin_unavailable`
+  （CLI 侧的等价入口是 `aicli-mesh open --bin <路径>`，见 mesh-cli.md §4.10）。
 - **仅回环**：与 `/web/api/mesh/call` 同层（`X-AICLI-Token` + 回环），跨机一律拒绝。
 - **降级**：网格关闭 → `refused`（不是 5xx），前端据此提示而不是白屏。
 

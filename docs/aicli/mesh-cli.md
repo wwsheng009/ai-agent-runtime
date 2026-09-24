@@ -46,6 +46,7 @@ aicli-mesh url <节点|会话> [--with-token] [--path PATH] [--json]
 aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--allow-write] [--timeout 130s] [--json]
 aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--client-request-id ID] [--json]
 aicli-mesh screen <节点|会话> [--view tui|web] [--tail N] [--format json|text] [--timeout 130s] [--json]
+aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--bin PATH] [--json]
 aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
 aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]
 aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
@@ -181,9 +182,12 @@ stale  node-22268-20260924T013300Z  22268  session_20260924093301_xK8JBDbV  E:\p
 | `journal` | 日志行是否完整（截断行计数） | ok / problem |
 | `journal-orphans` | 没有节点档案的孤儿日志 | warn |
 | `legacy` | 旧 `web-ports/` 目录残留与新鲜度（§2.4） | warn |
+| `spawn-executable` | 拉起节点会用哪个 aicli 二进制、由哪条规则选中（`AICLI_BIN` / `self` / `sibling` / `PATH`，§4.10） | ok / warn / problem |
 
 `problems > 0` 时退出码 5（**问题**=需要人工处理；**告警**=可用 `gc` 自愈，不影响退出码）。
 人类可读输出用 `[ok]` / `[告警]` / `[问题]` 前缀区分。
+其中 `spawn-executable` 的 **problem** 专指 `AICLI_BIN` 指错（显式配置错误）；一台机器上
+没有 aicli 二进制只是 **warn**（只读用法不受影响）。
 
 ### 4.6 `version`
 
@@ -263,6 +267,45 @@ aicli-mesh screen <节点|会话> [--view tui|web] [--tail N] [--format json|tex
 
 只读（无需 `--allow-write`）。默认 `view=tui` + `format=json`（终端视口真实合成帧），
 人读输出打印快照里的 `text` 段；`--tail N` 只取末尾 N 行。
+
+### 4.10 `open` — 复用或拉起节点，拿窗口 URL
+
+```text
+aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--bin PATH] [--json]
+```
+
+与 Web 端 `POST /web/api/mesh/spawn` 共用同一套实现（`mesh.Spawn`）。CLI 本身**不是节点**：
+单飞租约的 owner 记作 `cli-<pid>`，不冒充节点身份。
+
+| 开关 | 作用 |
+|------|------|
+| `--port N` | 首选回环端口（1-65535）；缺省先用会话绑定里的端口，再随机挑一个空闲端口 |
+| `--wait 8s` | 就绪等待预算（默认 8s） |
+| `--no-wait` | 只报告「已启动」，不等节点就绪 |
+| `--takeover` | 跳过复用，显式回收该会话的租约（§4.4）：旧节点继续运行，下次心跳后把自己标 `orphaned`（**不会被杀**） |
+| `--bin PATH` | 指定要拉起的 aicli 二进制；必须存在，且**优先于 `AICLI_BIN`** |
+
+四态与退出码：`reused` / `started` → 0，`not_running` → 3，`failed` → 5（§5）。
+
+**可执行文件解析顺序**（`doctor` 的 `spawn-executable` 打印实际结果与来源）：
+
+| 顺序 | 规则 | 来源标签 |
+|------|------|----------|
+| 1 | `AICLI_BIN` 指向的文件（存在且不是目录） | `AICLI_BIN` |
+| 2 | 当前进程自己（仅当文件名就叫 `aicli`：大小写不敏感、去掉扩展名） | `self` |
+| 3 | 当前进程**同目录**下的 `aicli<扩展名>`（即 `aicli.exe`） | `sibling` |
+| 4 | `PATH` 里的 `aicli` | `PATH` |
+| — | 都没有 → `failed`（`mesh_spawn_bin_unavailable`） | — |
+
+两点容易踩：
+
+- **改名部署**：`aicli-2x.exe` 既不是 `self`（名字不叫 aicli），也不会把自己的名字当兄弟名
+  ——兄弟名**硬编码**为 `aicli.exe`。要么设 `AICLI_BIN`，要么 `open --bin <路径>`，要么把
+  `aicli.exe` 放在旁边。两者都**建议绝对路径**：相对路径按调用方 cwd 检查，而子进程是在
+  会话工作区里启动的。
+- **指错就报错**：`AICLI_BIN` 不可用（不存在 / 是目录）时**不退回** `self`/`sibling`/`PATH`，
+  而是直接 `failed`（`mesh_spawn_bin_unavailable`）——「我指定了哪个二进制」不该变成猜谜，
+  悄悄拉起另一个版本比报错更难排查。`--bin` 同规则：指错按用法错误（退出码 1）当场拒绝。
 
 ### 4.11 `stop` — 停止节点（治理动作，默认关闭）
 
@@ -445,6 +488,30 @@ aicli-mesh watch --session session_20260924093535 --once --json
 - `attempts` > 1 只在「目标 401 → 重读档案重试一次」时出现；
 - **`result` 里不会有令牌原文**：`node.info` 等端点默认脱敏（M7）。
 
+### 6.5 `open --json`
+
+返回 §5.7 的 `SpawnResult` 信封（与 `POST /web/api/mesh/spawn` 同一份文档）：
+
+```json
+{
+  "schema_version": 2,
+  "status": "started",
+  "session_id": "session_20260924093535",
+  "node_id": "node-22024-20260924T073012Z",
+  "pid": 22024,
+  "port": 55130,
+  "url": "http://127.0.0.1:55130/web?token=…&session=session_20260924093535",
+  "lease": "acquired",
+  "origin": "cli",
+  "elapsed_ms": 812
+}
+```
+
+- `status` ∈ `reused` / `started` / `not_running` / `failed`（§4.10 的退出码映射）；
+- 失败时带 `code`（如 `mesh_spawn_bin_unavailable`）与 `reason`；`not_running` / `failed`
+  还会带脱敏后的 `log_tail`（末尾 20 行）；
+- `url` 是**唯一**携带令牌原文的字段（M7：它直接交给浏览器自举）。
+
 ### 6.6 `stop --json`
 
 返回 §5.7 的 `StopResult` 信封（与 `POST /web/api/mesh/stop` 同一份文档）：
@@ -507,6 +574,7 @@ aicli-mesh watch --session session_20260924093535 --once --json
 |------|------|
 | `AICLI_MESH_DIR` | 直接指定网格根目录（测试、多套网格隔离）；优先级最高 |
 | `AICLI_HOME` | 共享 AICLI 主目录；网格根为 `$AICLI_HOME/mesh`，`gc --purge-legacy` 也在该目录下找 `web-ports/` |
+| `AICLI_BIN` | 指定 `open` / Web 端拉起的 aicli 二进制（**建议绝对路径**）；指错时拉起直接失败（§4.10）。子节点原样继承该变量 |
 
 ## 9. 常见用法
 
@@ -525,6 +593,12 @@ aicli-mesh url session_20260924093535
 
 # 需要带令牌调用写接口时（注意：URL 含密钥，别贴到会被转发的地方）
 $a = aicli-mesh url session_20260924093535 --with-token
+
+# 复用活节点或拉起新节点，并打印可直接打开的窗口 URL（含令牌）
+aicli-mesh open session_20260924093535
+
+# 改名部署：指定要拉起的二进制（优先于 AICLI_BIN；也可 $env:AICLI_BIN = '...'）
+aicli-mesh open session_20260924093535 --bin 'E:\tools\aicli-2x\aicli-2x.exe'
 
 # 跨进程调用：先只读探一眼（无需 --allow-write）
 aicli-mesh call session_20260924093535 node.info --json
@@ -574,6 +648,9 @@ aicli-mesh doctor --json
 | `call` 退出码 3 + `unreachable` | 目标档案还在但端口已关：目标进程已退出或未监听；`ls` 看状态、`doctor` 看 `permissions`/`stale-nodes` |
 | `call` 退出码 4 + `busy` | 目标已有 invoke 在等待（单飞锁）：稍后重试，或先用 `screen` 观察它在忙什么 |
 | `call` 退出码 6 + `mesh_cross_workspace_denied` | 目标开了 `--mesh-restrict-workspace`，而这是**跨工作区的写调用**：改用同工作区的节点，或让目标关掉该开关（默认关闭；只读调用不受影响） |
+| `open` 拉起的是另一个版本（或旁边的 `aicli.exe`） | 改名后的二进制既不是 `self`（名字不叫 aicli）也不是 `sibling`（兄弟名硬编码 `aicli.exe`）：用 `--bin` / `AICLI_BIN` 显式指定，或先 `doctor` 看 `spawn-executable` 的实际解析结果（§4.10） |
+| `doctor` 报 `spawn-executable` 为 problem | `AICLI_BIN` 指到了不存在/是目录的位置：修好或清空它。该覆盖**不会**退回 `self`/`sibling`/`PATH`（否则等于悄悄换版本） |
+| `open` 退出码 5 + `mesh_spawn_bin_unavailable` | 找不到可拉起的 aicli 二进制：设 `AICLI_BIN` / `open --bin`，或从完整安装运行（与 `aicli-mesh.exe` 同目录放一个 `aicli.exe`） |
 
 ## 11. 与其它组件的关系
 

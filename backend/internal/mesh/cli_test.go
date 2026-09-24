@@ -574,6 +574,56 @@ func TestCLIDoctorHealthyAndConflict(t *testing.T) {
 	}
 }
 
+// TestCLIDoctorReportsSpawnExecutable：doctor 必须说明「拉起会用哪个 aicli」及其
+// 来源（多版本共存时的第一诊断项）；AICLI_BIN 指错是 problem（退出码 5），
+// 绝不悄悄退回其它候选。
+func TestCLIDoctorReportsSpawnExecutable(t *testing.T) {
+	paths := testCLIPaths(t)
+	cli := testCLI(paths, newFakeClock())
+	t.Setenv(EnvHome, t.TempDir())
+
+	fake := filepath.Join(t.TempDir(), "aicli-2x.exe")
+	if err := os.WriteFile(fake, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+	t.Setenv(SpawnExecutableEnv, fake)
+
+	code, stdout, stderr := runCLI(t, cli, "doctor", "--json")
+	if code != ExitOK {
+		t.Fatalf("doctor exit = %d (stderr %q, stdout %s)", code, stderr, stdout)
+	}
+	check := doctorCheckByID(t, decodeJSON[doctorReport](t, stdout), "spawn-executable")
+	if check.Status != "ok" {
+		t.Fatalf("spawn-executable status = %q, want ok（%s）", check.Status, check.Detail)
+	}
+	if !strings.Contains(check.Detail, fake) || !strings.Contains(check.Detail, SpawnExecutableSourceEnv) {
+		t.Fatalf("detail 应给出二进制与来源: %q", check.Detail)
+	}
+
+	// 指错的 AICLI_BIN：problem + 退出码 5，并说清是 AICLI_BIN 的问题。
+	t.Setenv(SpawnExecutableEnv, filepath.Join(t.TempDir(), "absent.exe"))
+	code, stdout, _ = runCLI(t, cli, "doctor", "--json")
+	if code != ExitFailure {
+		t.Fatalf("doctor with a broken AICLI_BIN exit = %d, want %d", code, ExitFailure)
+	}
+	check = doctorCheckByID(t, decodeJSON[doctorReport](t, stdout), "spawn-executable")
+	if check.Status != "problem" || !strings.Contains(check.Detail, SpawnExecutableEnv) {
+		t.Fatalf("check = %+v, want problem 且 detail 提到 %s", check, SpawnExecutableEnv)
+	}
+}
+
+// doctorCheckByID 取出一条检查项（缺失即失败）。
+func doctorCheckByID(t *testing.T, report doctorReport, id string) doctorCheck {
+	t.Helper()
+	for _, check := range report.Checks {
+		if check.ID == id {
+			return check
+		}
+	}
+	t.Fatalf("doctor 缺少检查项 %q：%+v", id, report.Checks)
+	return doctorCheck{}
+}
+
 func TestCLIVersionUsageAndExitCodes(t *testing.T) {
 	paths := testCLIPaths(t)
 	clock := newFakeClock()

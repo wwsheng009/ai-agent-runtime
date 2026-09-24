@@ -2,10 +2,12 @@ package commands
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
+	"golang.org/x/term"
 )
 
 // 本文件是 chat 进程与 mesh（多进程网格）的接入点，对应实施方案 S2：
@@ -26,6 +28,41 @@ var (
 	meshTurnMu    sync.Mutex
 	meshTurnDepth int
 )
+
+// meshEnvSpawnedBy mirrors internal/mesh's spawnEnvSpawnedBy: a node started by
+// mesh.Spawn (`aicli-mesh open`、Web 客户端「在新窗口打开」) carries the id of
+// the node that spawned it.
+const meshEnvSpawnedBy = "AICLI_MESH_SPAWNED_BY"
+
+// chatDetachedNodeStdinExhausted reports whether stdin EOF must not end this
+// chat process: a mesh-spawned node is launched detached with the null device as
+// stdin (internal/mesh/spawn_exec.go 的 cmd.Stdin = nil)，所以第一次读就返回
+// EOF —— 而节点本该继续用 Web 队列服务浏览器窗口。把这种 EOF 当成"用户关闭
+// 了输入"会让节点在拉起后约 1 秒自行退出：spawn 已上报 started 与端口，窗口
+// 却打不开（进程不存在、端口未监听）。
+//
+// 判定刻意收紧成"字符设备但不是终端"（Windows NUL / /dev/null）：管道与重定向
+// 文件仍然可以投递输入，保持原有 EOF 语义（`echo x | aicli chat` 照旧）。
+func chatDetachedNodeStdinExhausted() bool {
+	if strings.TrimSpace(os.Getenv(meshEnvSpawnedBy)) == "" {
+		return false
+	}
+	return chatStdinIsNullDevice()
+}
+
+// chatStdinIsNullDevice reports whether stdin is the null device: a character
+// device that is not a terminal. Pipes, redirected files and real terminals all
+// return false, so only the detached-spawn shape matches.
+func chatStdinIsNullDevice() bool {
+	if os.Stdin == nil {
+		return true
+	}
+	info, err := os.Stdin.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	return !term.IsTerminal(int(os.Stdin.Fd()))
+}
 
 // meshTurnIDForSession derives the stable turn id published in the node record
 // ("turn-0007"), mirroring the chat log scope naming.
