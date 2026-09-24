@@ -117,6 +117,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | GET | `/web/api/mesh/self` | 网格：本节点自述（档案同形字段 + `derived` 内存实时值 + `mesh` 根目录；`auth.token` 默认脱敏，见 §9） |
 | GET | `/web/api/mesh/peers` | 网格：全量视图（`counts` 恒全量口径；`scope` / `workspace` / `state` 只过滤 `nodes[]`；`probe=0` 默认不发网络请求，见 §9） |
 | GET | `/web/api/mesh/events` | 网格：实时事件流（SSE 扇入；`?since_seq=<n>` 续传游标、`?peers=auto\|none` 订阅拓扑；只连本进程即可看到全网格，见 §9.4） |
+| POST | `/web/api/mesh/call` | 网格：跨进程调用（op 白名单 9 项；写操作逐次 `allow_write=true`；仅回环，见 §9.5） |
 | GET | `/web/` | 浏览器微型客户端页面（同一后端） |
 | GET | `/debug/chat/screen` | 与 `/web/api/screen?view=tui` 同源的调试入口（保留） |
 
@@ -460,12 +461,13 @@ curl -N -X POST http://127.0.0.1:61772/web/api/invoke \
 
 多进程网格（`~/.aicli/mesh/`，设计见
 [../plan/aicli-mesh-architecture.md](../plan/aicli-mesh-architecture.md)）把「本机有哪些
-aicli 进程、各自在哪个工作区、哪个会话归谁」变成可发现的事实。本节三条端点是**只读控制面**：
-与 `aicli-mesh ls` / `show` 消费同一份聚合（`internal/mesh` 的 `BuildView`），不另写口径。
+aicli 进程、各自在哪个工作区、哪个会话归谁」变成可发现的事实。§9.1–§9.4 是**只读控制面**：
+与 `aicli-mesh ls` / `show` 消费同一份聚合（`internal/mesh` 的 `BuildView`），不另写口径；
+§9.5 是本节唯一的写路径（跨进程调用，逐次显式 `allow_write`）。
 
 发现方式与其它端点一致：`GET /debug/endpoints` 的清单新增 `scheme: "mesh"` 分组。
 **URL 只从清单取**——端口由进程自选（网格负责发现），不要再假设「粘性端口 = 会话」。
-`--mesh=false` 时三条路由**不注册**（404），清单里也不出现。
+`--mesh=false` 时这些路由**不注册**（404），清单里也不出现。
 
 ### 9.1 存活探针：`GET /web/api/health`
 
@@ -612,3 +614,84 @@ curl -N 'http://127.0.0.1:51234/web/api/mesh/events?since_seq=42&peers=none'
 
 > 流**不重放历史**（与 `/web/api/events` 同语义）：连接建立前发布的帧不会补发；需要全量
 > 现状先拉一次 `/web/api/mesh/peers`，之后靠本流增量维持。
+
+### 9.5 跨进程调用：`POST /web/api/mesh/call`
+
+**一句话**：把一次调用送到**另一个进程**，由目标端点执行后原样返回结果——网格层只做
+「解析目标 → 带令牌转发 → 折叠状态」，不产生第二套语义（架构 §5.6 / §5.9）。
+
+```bash
+# 只读：问目标节点「你是谁」（目标 node_id 从 /web/api/mesh/peers 或 aicli-mesh ls 取）
+curl -s -X POST http://127.0.0.1:51234/web/api/mesh/call \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"node-9001-20260924T073500Z","op":"node.info"}'
+
+# 写操作：逐次显式 allow_write=true（无隐式放行）
+curl -s -X POST http://127.0.0.1:51234/web/api/mesh/call \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"node-9001-20260924T073500Z","op":"invoke","args":{"prompt":"只回复两个字：收到"},"client_request_id":"mesh-42-1","allow_write":true}'
+```
+
+请求体：
+
+| 字段 | 必需 | 语义 |
+|------|------|------|
+| `op` | 是 | 白名单 op（见下表）；未知 op → `400` + `mesh_unknown_op` |
+| `target` | 否 | 节点引用（node_id / node_id 前缀 / 会话 id）。被调方只用它做**防串线自检**：形如 `node-*` 且不等于本进程 `node_id` → `404` + `mesh_target_mismatch` |
+| `args` | 否 | 端点参数；**按白名单逐项搬运**，未列出的键被丢弃——网格层不是「任意端点参数」的旁路 |
+| `client_request_id` | 否 | 幂等键，原样透传给目标端点（网格层不重复实现幂等） |
+| `timeout_ms` | 否 | 调用方等待上限（默认 `130000`）；与 `args.timeout_ms`（`invoke` 的服务端等待）不是同一层 |
+| `allow_write` | 写操作必需 | 缺省即拒绝：`403` + `mesh_write_not_allowed` |
+
+op 白名单（9 项，硬编码于 `internal/mesh`；args 与转发目标都是契约的一部分）：
+
+| op | args（透传） | 转发到 | 写操作 |
+|----|--------------|--------|--------|
+| `node.info` | — | `GET /web/api/mesh/self` | 否 |
+| `status` | — | `GET /web/api/status` | 否 |
+| `screen` | `view`,`tail`,`format` | `GET /web/api/screen` | 否 |
+| `turn` | `id` | `GET /web/api/turn` | 否 |
+| `sessions.list` | — | `GET /web/api/sessions` | 否 |
+| `invoke` | `prompt`,`wait_only`,`timeout_ms`,`session_id` | `POST /web/api/invoke` | **是** |
+| `input` | `type`,`prompt`,`request_id`,`allow`,`question_id`,`answer`,`discard_pending` | `POST /web/api/input` | **是** |
+| `cancel` | `discard_pending` | `POST /web/api/input`（`type=interrupt`） | **是** |
+| `sessions.resume` | `session_id` | `POST /web/api/sessions/resume` | **是** |
+
+响应 = 统一信封（`schema_version` / `status` / `code` / `message` / `node_id` / `op` /
+`elapsed_ms` / `duplicate` / `result`）：
+
+```json
+{ "schema_version": 1, "status": "ok", "node_id": "node-9001-20260924T073500Z",
+  "op": "invoke", "elapsed_ms": 3211, "result": { "...": "目标端点的原始响应" } }
+```
+
+`result` 是目标端点的**原始响应体**（`invoke` 的 `turn_id`/`assistant`、`screen` 的快照…）：
+网格层不重写语义，直接调端点与经网格调用拿到的结构一致；`duplicate` 只在目标端点报出幂等命中时出现。
+
+状态与 HTTP 映射（§5.9）：
+
+| `status` | HTTP | 何时 |
+|----------|------|------|
+| `ok` | 200 | 目标端点正常返回 |
+| `busy` | 409 | 目标会话正忙（单飞锁；与 `/web/api/invoke` 的 busy 同源，可重试） |
+| `not_found` | 404 | 目标不存在/已死，或 `target` 与本次接收方不符（`mesh_target_mismatch`） |
+| `refused` | 403 | 策略拒绝：非回环（`mesh_nonloopback_denied`）、写操作未显式允许（`mesh_write_not_allowed`）、收敛开关下的跨工作区**写**调用（`mesh_cross_workspace_denied`）、令牌轮换后仍失败（`mesh_token_stale`）、网格关闭（`mesh_disabled`） |
+| `unreachable` / `timeout` | 504 | 目标不可达 / 超过调用方等待上限 |
+| `error` | 400 / 413 / 500 | 参数与形状错误（`mesh_unknown_op` → 400、`mesh_body_too_large` → 413）/ 分发或目标端点内部错误（`mesh_upstream_error` → 500） |
+
+**硬契约**：
+
+- **鉴权**：与其它写端点同一层（`X-AICLI-Token`；回环 + 开发模式免令牌），**额外要求调用者来自回环**——
+  跨机一律拒绝。`X-AICLI-Mesh-Caller: <caller node_id>` 只用于审计与跨工作区判定，不参与鉴权。
+- **写操作逐次显式允许**：`allow_write=true` 必须每次给出；没有「网格级 yolo」开关（架构 §9.2）。
+- **跨工作区默认放行**：工作区是筛选维度、不是权限边界；仅当目标进程以 `--mesh-restrict-workspace`
+  启动时，跨工作区的**写调用**被拒（只读调用不受影响，架构 §9.3）。
+- **审计**：目标进程写 `mesh.call.received` / `mesh.call.completed`（只记 op / 状态 / 耗时与调用者，
+  **不记 args 正文**——args 可能含用户 prompt）；令牌绝不出现在响应、journal 与视图里。
+- **请求体上限** 1 MiB → `413` + `mesh_body_too_large`；其它方法 → `405` + `Allow: POST`。
+- **降级**：`--mesh=false` 时路由**不注册**（404，进程不在网格里）；真被调用到也只回
+  `403` + `mesh_disabled`，不 panic、不 5xx。
+
+> CLI 侧等价物：`aicli-mesh call <target> <op> [--args JSON] [--allow-write]`；`send` 与 `screen`
+> 是它的两个高频封装（见 [mesh-cli.md](mesh-cli.md) §4.7–§4.9）。CLI 在目标返回 401 时
+> 会重读目标档案并重试一次（令牌轮换，架构 §5.6 要点 5）。

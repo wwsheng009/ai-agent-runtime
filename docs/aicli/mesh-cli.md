@@ -33,6 +33,9 @@
 aicli-mesh ls [--json] [--probe] [--live] [--workspace PATH]... [--sort age|session|workspace]
 aicli-mesh show <节点|会话> [--json] [--events N]
 aicli-mesh url <节点|会话> [--with-token] [--path PATH] [--json]
+aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--allow-write] [--timeout 130s] [--json]
+aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--client-request-id ID] [--json]
+aicli-mesh screen <节点|会话> [--view tui|web] [--tail N] [--format json|text] [--timeout 130s] [--json]
 aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
 aicli-mesh doctor [--json]
 aicli-mesh version [--json]
@@ -186,19 +189,80 @@ stale  node-22268-20260924T013300Z  22268  session_20260924093301_xK8JBDbV  E:\p
 `record_schema_version` 是**档案结构版本**（当前 2），与 `--json` 文档的 `schema_version` 分开演进：
 前者描述磁盘上的节点/租约档案，后者描述本工具的输出契约。
 
+### 4.7 `call` — 跨进程调用（op 白名单）
+
+```text
+aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--allow-write] [--timeout 130s] [--json]
+```
+
+把 `<op>` 连同 `--args` 发给目标进程的 `POST /web/api/mesh/call`（§5.6）。op 白名单
+**固定 9 项**，不存在「任意端点转发」：
+
+| 类别 | op | 目标端点 | 说明 |
+|------|----|----------|------|
+| 只读 | `node.info` | `/web/api/mesh/self` | 目标自述（默认脱敏） |
+| 只读 | `status` | `/web/api/status` | 渲染器/显示状态快照 |
+| 只读 | `screen` | `/web/api/screen` | 屏幕/transcript 快照（`--args '{"view":"tui","tail":40}'`） |
+| 只读 | `turn` | `/web/api/turn` | turn 后验（`--args '{"id":"turn_..."}'`） |
+| 只读 | `sessions.list` | `/web/api/sessions` | 会话列表 |
+| 写 | `invoke` | `/web/api/invoke` | 注入 prompt 并等待 turn 结束 |
+| 写 | `input` | `/web/api/input` | 异步注入 / 审批 / 提问回答 |
+| 写 | `cancel` | `/web/api/input` | 折成 `{"type":"interrupt"}`（可带 `discard_pending`） |
+| 写 | `sessions.resume` | `/web/api/sessions/resume` | 切到指定会话（`--args '{"session_id":"..."}'`） |
+
+**硬规则**
+
+1. **写操作必须显式 `--allow-write`**：没有它时 `invoke` / `input` / `cancel` /
+   `sessions.resume` 一律在本地拒绝（退出码 6，`mesh_write_not_allowed`），**不发请求**；
+2. `--args` 必须是**合法 JSON 对象**（按 op 白名单逐项搬运，未列出的键被丢弃）；
+3. 幂等：`--client-request-id` 透传给目标端点的幂等键（仅 `invoke` 使用），
+   **网格层不重复实现幂等**——重复提交同 id 时目标回放首次结果（`duplicate: true`）；
+4. `--timeout` 是**等待上限**（默认 130s），超时按 `timeout` 记账而不是「目标挂了」；
+5. 目标必须**开着回环控制面**（`--pprof` / `--web-port`）：纯 TUI 节点没有端点，
+   返回 `not_found` + `mesh_no_endpoint`；
+6. **跨工作区默认放行**（工作区是筛选维度、不是权限边界）：只有目标进程以
+   `--mesh-restrict-workspace` 启动时，跨工作区的**写**调用才被拒（`refused` +
+   `mesh_cross_workspace_denied`）；只读调用不受该开关影响。
+
+### 4.8 `send` — 给目标发一轮 prompt
+
+```text
+aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--client-request-id ID] [--json]
+```
+
+`call <目标> invoke --allow-write` 的固定写法：注入 prompt 并**等待该 turn 结束**，
+人读输出直接打印助手正文（`assistant.content`），拿不到正文时回退打印 pretty JSON。
+prompt 支持多词（`parsed.pos[1:]` 以空格拼接）。
+
+```powershell
+# A 让 B 跑一轮（B 需要 --pprof 与写令牌；令牌由 CLI 自动从档案读取）
+aicli-mesh send session_20260924093535 "只回复两个字：收到" --allow-write
+# → 收到
+```
+
+### 4.9 `screen` — 读目标屏幕
+
+```text
+aicli-mesh screen <节点|会话> [--view tui|web] [--tail N] [--format json|text] [--json]
+```
+
+只读（无需 `--allow-write`）。默认 `view=tui` + `format=json`（终端视口真实合成帧），
+人读输出打印快照里的 `text` 段；`--tail N` 只取末尾 N 行。
+
 ## 5. 退出码契约
 
 | 码 | 含义 | 触发示例 |
 |----|------|----------|
 | 0 | 成功 | 任何命令正常完成（空网格也算成功） |
 | 1 | 用法/参数错误 | 未知子命令、未知参数、`--sort` 取值非法、缺少目标、`gc --stale-ttl` 非时长 |
-| 2 | 目标不存在或无法唯一确定 | `show nope`、`show node-100`（歧义，候选会列出） |
-| 3 | 目标不可达 | `url` 的目标没有端点（纯 TUI 节点） |
-| 4 | 冲突或忙碌 | 预留：调用类命令（P1 `open` / P2 `stop`）的冲突语义 |
-| 5 | 操作失败 | `gc --apply` 有删除失败项、`doctor` 发现问题、JSON 输出失败 |
-| 6 | 被策略拒绝 | 预留：令牌/权限策略拒绝 |
+| 2 | 目标不存在或无法唯一确定 | `show nope`、`show node-100`（歧义，候选会列出）；`call` 的 `not_found`（含 `mesh_no_endpoint` / `mesh_target_stopped`） |
+| 3 | 目标不可达 | `url` 的目标没有端点（纯 TUI 节点）；`call` 的 `unreachable` / `timeout` |
+| 4 | 冲突或忙碌 | `call` 的 `busy`（目标已有 invoke 在等，HTTP 409） |
+| 5 | 操作失败 | `gc --apply` 有删除失败项、`doctor` 发现问题、JSON 输出失败、`call` 的 `error`（含未知 op） |
+| 6 | 被策略拒绝 | `call` 的 `refused`：写操作缺 `--allow-write`（`mesh_write_not_allowed`）、令牌失效（`mesh_token_stale`）、跨工作区收敛拒绝（`mesh_cross_workspace_denied`） |
 
 错误信息写 **stderr**，数据写 **stdout**——`aicli-mesh ls --json > x.json` 不会混入任何提示文本。
+`call` 失败时 stderr 形如 `调用失败: refused（mesh_write_not_allowed）: …`，便于脚本 grep 原因码。
 
 ## 6. JSON 契约
 
@@ -268,6 +332,30 @@ stale  node-22268-20260924T013300Z  22268  session_20260924093301_xK8JBDbV  E:\p
 
 `status` ∈ `ok` / `warn` / `problem`；`items` 只在需要列举证据时出现。
 
+### 6.4 `call` / `send` / `screen --json`
+
+三者共用同一份调用结果文档（`schema_version` + 调用方结果视图）：
+
+```json
+{
+  "schema_version": 2,
+  "status": "ok",
+  "node_id": "node-22024-20260924T073012Z",
+  "op": "node.info",
+  "elapsed_ms": 12,
+  "http_status": 200,
+  "attempts": 1,
+  "result": { "node_id": "node-22024-20260924T073012Z", "state": "live", "...": "被调方端点的原始响应" }
+}
+```
+
+- `status` ∈ `ok` / `busy` / `refused` / `not_found` / `timeout` / `unreachable` / `error`（与
+  `/web/api/mesh/call` 同一套词汇，§5.6）；
+- `code` 只在能给出机器可判原因时出现（`mesh_*` 前缀，见 §5 退出码表）；
+- `result` 是**被调方端点的原始响应**（网格层不重写语义）；非 JSON 体折成 JSON 字符串；
+- `attempts` > 1 只在「目标 401 → 重读档案重试一次」时出现；
+- **`result` 里不会有令牌原文**：`node.info` 等端点默认脱敏（M7）。
+
 ## 7. 令牌与安全（M7）
 
 - `ls` / `show` 只输出 `token_hint`（前 4 位 + `…`），**任何** `--json` 都不会带原文；
@@ -301,6 +389,17 @@ aicli-mesh url session_20260924093535
 # 需要带令牌调用写接口时（注意：URL 含密钥，别贴到会被转发的地方）
 $a = aicli-mesh url session_20260924093535 --with-token
 
+# 跨进程调用：先只读探一眼（无需 --allow-write）
+aicli-mesh call session_20260924093535 node.info --json
+aicli-mesh screen session_20260924093535 --tail 40
+
+# 让另一个进程跑一轮 prompt（写操作必须显式允许；幂等键便于安全重试）
+aicli-mesh send session_20260924093535 "只回复两个字：收到" --allow-write --client-request-id mesh-1-1
+
+# 通用 op 形式：审批决议（写）+ 中断（写）
+aicli-mesh call session_20260924093535 input --args '{"type":"approval","request_id":"req_1","allow":true}' --allow-write
+aicli-mesh call session_20260924093535 cancel --allow-write
+
 # 清理前先看计划，再执行
 aicli-mesh gc
 aicli-mesh gc --apply --purge-legacy --prune-bindings
@@ -320,6 +419,12 @@ aicli-mesh doctor --json
 | `doctor` 报 `permissions` 告警 | `AICLI_MESH_DIR` 指向了用户 Profile 之外的位置；确认该目录的访问控制，或改回默认位置 |
 | `gc --apply` 退出码 5 | 个别文件被占用/无权限：`errors[]` 给出具体路径与原因，其余项已删除，可直接重跑 |
 | 两个进程都显示同一会话 | `doctor` 的 `ownership` 会报 problem（双占用）；先 `show` 看两边的心跳与租约，再停掉过期的一方 |
+| `call` 退出码 2 + `mesh_no_endpoint` | 目标没开回环控制面（纯 TUI 节点）：让目标带 `--pprof` / `--web-port` 启动 |
+| `call` 退出码 6 + `mesh_write_not_allowed` | 写 op（`invoke`/`input`/`cancel`/`sessions.resume`）缺 `--allow-write`：确认意图后显式加上 |
+| `call` 退出码 6 + `mesh_token_stale` | 目标重启导致写令牌轮换：CLI 已自动重读档案重试一次，仍失败说明档案里的令牌已过期——`aicli-mesh show` 确认目标心跳，必要时重取 `url --with-token` |
+| `call` 退出码 3 + `unreachable` | 目标档案还在但端口已关：目标进程已退出或未监听；`ls` 看状态、`doctor` 看 `permissions`/`stale-nodes` |
+| `call` 退出码 4 + `busy` | 目标已有 invoke 在等待（单飞锁）：稍后重试，或先用 `screen` 观察它在忙什么 |
+| `call` 退出码 6 + `mesh_cross_workspace_denied` | 目标开了 `--mesh-restrict-workspace`，而这是**跨工作区的写调用**：改用同工作区的节点，或让目标关掉该开关（默认关闭；只读调用不受影响） |
 
 ## 11. 与其它组件的关系
 
