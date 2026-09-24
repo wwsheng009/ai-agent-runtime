@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 )
 
 // 本文件实现"会话粘性 loopback 端口"的启动期解析：
@@ -17,7 +17,7 @@ import (
 // 而不是每次都申请一个新的随机端口。这样 /debug/chat/*、/web/ 等 URL 在 resume
 // 后保持不变，外部脚本与浏览器书签无需重新发现端口。
 //
-// 端口档案由 commands 包维护（~/.aicli/web-ports/<session-id>.json）；
+// 会话绑定由 internal/mesh 维护（mesh/bindings/<session-id>.json，S3）；
 // 这里只负责"从命令行解析出本次要恢复的会话"并把它接到监听地址上。
 
 // resolveChatWebPortTargetSessionID 解析本次启动将要恢复的会话 ID。
@@ -61,17 +61,17 @@ func resolveChatWebPortTargetSessionID(cmd *cobra.Command, args []string) string
 }
 
 // stickyLoopbackServerAddr 在 baseAddr（通常是 <host>:0，随机端口）之上叠加
-// 会话粘性端口：命中档案时返回 <webHost>:<stored-port>，未命中时原样返回。
+// 会话粘性端口：命中绑定时返回 <webHost>:<preferred-port>，未命中时原样返回。
 func stickyLoopbackServerAddr(webHost, baseAddr, sessionID string) (string, bool) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return baseAddr, false
 	}
-	record, ok := commands.LoadChatWebPortRecord(sessionID)
+	binding, ok := mesh.LoadBinding(mesh.ResolvePaths(), sessionID)
 	if !ok {
 		return baseAddr, false
 	}
-	return net.JoinHostPort(webHost, strconv.Itoa(record.Port)), true
+	return net.JoinHostPort(webHost, strconv.Itoa(binding.Preferred.Port)), true
 }
 
 // loopbackServerHostPort 拆分已启动服务器的监听地址，返回 host 与端口号。

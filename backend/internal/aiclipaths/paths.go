@@ -22,16 +22,6 @@ func DefaultLogsDir() string {
 	return defaultAICLIDir("logs")
 }
 
-// DefaultWebPortsDir returns the directory that stores per-session sticky
-// loopback (pprof / debug / web) port records (~/.aicli/web-ports).
-// The records live outside the session store on purpose: they are a local
-// machine cache keyed by session ID, so `resume <id>` can reuse the same port
-// even when the session directory is resolved from config (or is not readable
-// yet at flag-parse time).
-func DefaultWebPortsDir() string {
-	return defaultAICLIDir("web-ports")
-}
-
 // DefaultMeshDir returns the mesh root directory (~/.aicli/mesh) that holds
 // node records, session bindings, leases and the journal.
 //

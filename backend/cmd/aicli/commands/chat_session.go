@@ -192,10 +192,10 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	restoreChatTokenCount(session, session.RuntimeSession)
 	refreshChatTitleMetadata(session)
 	syncChatLoggerSessionMetadata(session)
-	// 恢复会话时把当前 loopback 端口记到该会话名下，使后续
-	// `aicli resume <id> --pprof/--debug` 能复用同一端口（见 chat_web_port_store.go）。
+	// 恢复会话时把当前 loopback 地址写成该会话的绑定，使后续
+	// `aicli resume <id> --pprof/--debug` 能复用同一端口（mesh/bindings/，S3）。
 	if !session.Ephemeral {
-		persistChatWebPortForSession(restoredRuntimeSession.ID)
+		persistChatMeshBindingForSession(session)
 	}
 	// mesh：会话恢复/切换后把活动会话写进本进程节点档案（S2）。
 	syncChatMeshSession(session)
@@ -279,10 +279,10 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	}
 	clearChatTurnRecovery(session)
 	resetStableSharedToolSurface(session)
-	// 新会话也记录当前 loopback 端口：后续 `aicli resume <id> --pprof/--debug`
-	// 能回到同一端口（见 chat_web_port_store.go）。
+	// 新会话也记录当前 loopback 地址：后续 `aicli resume <id> --pprof/--debug`
+	// 能回到同一端口（mesh/bindings/，S3）。
 	if !session.Ephemeral {
-		persistChatWebPortForSession(runtimeSession.ID)
+		persistChatMeshBindingForSession(session)
 	}
 	if rotateDiagnostics {
 		if err := rotateChatSessionDiagnostics(session); err != nil {

@@ -120,3 +120,43 @@ func beginChatMeshTurn(session *ChatSession) func() {
 		})
 	}
 }
+
+// persistChatMeshBinding publishes this process's loopback address as the
+// preferred address of sessionID (mesh/bindings/<session-id>.json). It is the
+// S3 replacement for persistChatWebPortForSession: the sticky-port behaviour is
+// unchanged, only the storage moved from ~/.aicli/web-ports/ to the mesh.
+//
+// best-effort：没有 loopback 服务器、网格根目录不可用或写盘失败都只是静默
+// 跳过，绝不影响会话流程（MN1 / 降级矩阵 §4.7）。
+func persistChatMeshBinding(sessionID, workspacePath string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	host, port, ok := mesh.ProcessEndpoint()
+	if !ok {
+		return
+	}
+	update := mesh.BindingUpdate{
+		SessionID:     sessionID,
+		Host:          host,
+		Port:          port,
+		WorkspacePath: strings.TrimSpace(workspacePath),
+	}
+	if current := mesh.Current(); current != nil {
+		update.NodeID = current.NodeID()
+	}
+	_ = mesh.TouchBinding(mesh.ResolvePaths(), update)
+}
+
+// persistChatMeshBindingForSession is the session-funnel wrapper: it derives the
+// session id and workspace from the active runtime session.
+func persistChatMeshBindingForSession(session *ChatSession) {
+	if session == nil || session.RuntimeSession == nil {
+		return
+	}
+	persistChatMeshBinding(
+		session.RuntimeSession.ID,
+		runtimeSessionWorkspacePath(session.RuntimeSession),
+	)
+}

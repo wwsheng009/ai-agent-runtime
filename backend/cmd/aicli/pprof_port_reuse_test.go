@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 )
 
 // newStickyPortTestRoot 复刻 chat/resume/exec resume 的最小命令树，
@@ -100,9 +100,8 @@ func TestResolveChatWebPortTargetSessionID(t *testing.T) {
 }
 
 func TestStickyLoopbackServerAddrWithoutRecordKeepsBase(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	// 绑定目录隔离：粘性端口只读 mesh/bindings/（AICLI_MESH_DIR 覆盖网格根）。
+	t.Setenv("AICLI_MESH_DIR", t.TempDir())
 
 	addr, reused := stickyLoopbackServerAddr("127.0.0.1", "127.0.0.1:0", "session_unknown")
 	if reused {
@@ -121,9 +120,7 @@ func TestStickyLoopbackServerAddrWithoutRecordKeepsBase(t *testing.T) {
 // TestStickyLoopbackServerAddrBindsStoredPort 覆盖核心诉求：
 // resume 同一会话（未指定 --web-port）时，服务器回到上次使用的端口。
 func TestStickyLoopbackServerAddrBindsStoredPort(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	t.Setenv("AICLI_MESH_DIR", t.TempDir())
 
 	// 取一个刚释放的空闲端口，模拟"该会话上次监听的端口"。
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
@@ -136,8 +133,10 @@ func TestStickyLoopbackServerAddrBindsStoredPort(t *testing.T) {
 	}
 
 	const sessionID = "session_20260922173838_lsirc1la"
-	if err := commands.SaveChatWebPortRecord(sessionID, storedPort, "127.0.0.1"); err != nil {
-		t.Fatalf("SaveChatWebPortRecord() error = %v", err)
+	if err := mesh.TouchBinding(mesh.ResolvePaths(), mesh.BindingUpdate{
+		SessionID: sessionID, Host: "127.0.0.1", Port: storedPort,
+	}); err != nil {
+		t.Fatalf("TouchBinding() error = %v", err)
 	}
 
 	addr, reused := stickyLoopbackServerAddr("127.0.0.1", "127.0.0.1:0", sessionID)
@@ -167,9 +166,7 @@ func TestStickyLoopbackServerAddrBindsStoredPort(t *testing.T) {
 // TestStickyPortUnavailableFallsBackToRandomPort 验证端口被占用时不会让
 // resume 失败：监听冲突由 main 捕获后回退随机端口（此处验证冲突确实可检出）。
 func TestStickyPortUnavailableFallsBackToRandomPort(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	t.Setenv("AICLI_MESH_DIR", t.TempDir())
 
 	occupied, err := startPprofServer("127.0.0.1:0")
 	if err != nil {
@@ -183,8 +180,10 @@ func TestStickyPortUnavailableFallsBackToRandomPort(t *testing.T) {
 	}
 
 	const sessionID = "session_occupied"
-	if err := commands.SaveChatWebPortRecord(sessionID, port, host); err != nil {
-		t.Fatalf("SaveChatWebPortRecord() error = %v", err)
+	if err := mesh.TouchBinding(mesh.ResolvePaths(), mesh.BindingUpdate{
+		SessionID: sessionID, Host: host, Port: port,
+	}); err != nil {
+		t.Fatalf("TouchBinding() error = %v", err)
 	}
 	stickyAddr, reused := stickyLoopbackServerAddr("127.0.0.1", "127.0.0.1:0", sessionID)
 	if !reused {

@@ -163,10 +163,10 @@ func main() {
 				pprofHandle = startedHandle
 			}
 			// 记录实际监听端口：该会话下次 resume（不带 --web-port）即可复用。
-			// 会话加载路径（新建/恢复）也会为当前活动会话补写同一档案。
+			// 会话加载路径（新建/恢复）也会为当前活动会话补写同一绑定（S3）。
 			listenHost, listenPort := loopbackServerHostPort(pprofHandle)
 			if listenPort > 0 {
-				commands.SetChatWebPortRuntimeInfo(listenPort, listenHost)
+				mesh.SetProcessEndpoint(listenHost, listenPort)
 				// mesh：节点档案补上 endpoint/auth/capabilities，本节点从此可被
 				// 其他节点调用（architecture §3.1 / §4.1）。
 				if meshHost != nil {
@@ -176,8 +176,19 @@ func main() {
 					)
 				}
 				if targetSessionID != "" {
-					if err := commands.SaveChatWebPortRecord(targetSessionID, listenPort, listenHost); err != nil {
-						fmt.Fprintf(os.Stderr, "Warning: failed to persist web port for session %s: %v\n", targetSessionID, err)
+					// 会话绑定：resume 复用端口 + ls/peers 展示「上次服务者」（§3.2）。
+					nodeID := ""
+					if meshHost != nil {
+						nodeID = meshHost.NodeID()
+					}
+					if err := mesh.TouchBinding(mesh.ResolvePaths(), mesh.BindingUpdate{
+						SessionID:     targetSessionID,
+						Host:          listenHost,
+						Port:          listenPort,
+						NodeID:        nodeID,
+						WorkspacePath: meshWorkspacePath(),
+					}); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to persist session binding for %s: %v\n", targetSessionID, err)
 					}
 				}
 			}

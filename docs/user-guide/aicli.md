@@ -256,7 +256,7 @@ request → accept → execute 落 durable action 行（`action_id` 可在输出
 | `AICLI_THEME_MODE` | 明暗模式（auto/dark/light） |
 | `AICLI_THEME_SYNTAX` | 语法主题 |
 | `AICLI_PPROF` | loopback 服务器监听地址（Web 客户端 / `/debug` 端点）；非空即启用、无需 `--pprof`，可带自定义 host；`--web-port` 优先于它 |
-| `AICLI_WEB_PORTS_DIR` | 会话粘性端口档案目录（默认 `$HOME/.aicli/web-ports/`）；设空/未设用默认值，测试或多环境隔离时可覆盖 |
+| `AICLI_MESH_DIR` | 网格根目录（节点档案 `nodes/`、会话绑定 `bindings/`、租约 `leases/`、网格日志 `journal/`；默认 `$HOME/.aicli/mesh/`）；设空/未设用默认值，测试或多环境隔离时可覆盖。会话粘性端口存于 `mesh/bindings/<session-id>.json`，旧的 `AICLI_WEB_PORTS_DIR` 不再被读取 |
 | `AICLI_WEB_TOKEN` | 预设 Web 写令牌（等价 `--web-token`，flag 优先；≥16 位 URL 安全字符） |
 | `AICLI_EXECUTION_SUPERVISOR_MODE` | 本地子 Agent 看门狗模式：`observe`（默认，仅提醒）或 `enforce`（interrupt + cancel grace，见 §4.8） |
 | `AICLI_RUN_STALL_TIMEOUT` | run 无进展看门狗阈值：**默认关闭**（`0`），长任务/自动化自然执行到结束；显式设为 Go duration（如 `30m`）才启用，触发会以 `context.Canceled` 中止整个 run（`off`/`0`/`disable` 关闭） |
