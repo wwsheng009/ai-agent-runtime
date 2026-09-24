@@ -262,6 +262,12 @@ type Handler struct {
 	sessionEventStore      chat.EventStore
 	sessionRuntimeStoreKey string
 
+	// Batch 12（V15/V19 延迟收敛）：切换撞上在途 turn 时的会话级重建标记。
+	// 只记进程内状态——actor 是进程内对象，重启后不存在旧 actor，下一次构建
+	// 本就会读到已落地的 sessionmeta（见 session_profile_switch.go）。
+	profileSwitchMu      sync.Mutex
+	profileSwitchPending map[string]string
+
 	backgroundMu        sync.Mutex
 	backgroundManager   *background.Manager
 	backgroundConfigKey string
@@ -1726,15 +1732,34 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	// 绑定的目录。会话上下文已有值时不覆盖（目录一经绑定不随单轮请求漂移）。
 	workspacePath := agentChatEffectiveWorkspacePath(session, req.WorkspacePath)
 
+	resolveProfile := func(ref string) (*profileRuntimeState, func(), error) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" && isAutoProfileRef(h.profileDefaultRef) {
+			ref = h.profileDefaultRef
+		}
+		if isAutoProfileRef(ref) {
+			ref = routeProfileForPrompt(extractLastUserPrompt(req.Messages))
+		}
+		return h.resolveProfileRuntimeState(ctx, ref, req.Agent, usageScope, workspacePath)
+	}
 	effectiveProfile := strings.TrimSpace(req.Profile)
-	if effectiveProfile == "" && isAutoProfileRef(h.profileDefaultRef) {
-		effectiveProfile = h.profileDefaultRef
+	// Batch 12（V15 结论的 Web 直连半程）：请求未显式指定 profile 时回落到
+	// **会话绑定**（`set_profile` / 首轮落地写下的 sessionmeta 身份），使 Web 端
+	// `/profile` 切换在下一轮请求生效——Web 回合走 `/api/agent/chat`，不经过 actor。
+	sessionBoundProfile := ""
+	if effectiveProfile == "" && session != nil {
+		sessionBoundProfile = sessionmeta.String(session.Metadata.Context, sessionmeta.ProfileRef)
+		effectiveProfile = sessionBoundProfile
 	}
-	if isAutoProfileRef(effectiveProfile) {
-		prompt := extractLastUserPrompt(req.Messages)
-		effectiveProfile = routeProfileForPrompt(prompt)
+	profileState, profileCleanup, err := resolveProfile(effectiveProfile)
+	bindingResolveFailed := false
+	if err != nil && sessionBoundProfile != "" {
+		// 会话绑定的 profile 解析失败（被删除 / 不可读）：不 brick 会话、也不
+		// 静默改写绑定——记警告、回落默认/自动路由，并保留原绑定（E2E-7/R18）。
+		logger.Warnf("agent chat: session-bound profile %q resolve failed: %s", sessionBoundProfile, err)
+		bindingResolveFailed = true
+		profileState, profileCleanup, err = resolveProfile("")
 	}
-	profileState, profileCleanup, err := h.resolveProfileRuntimeState(ctx, effectiveProfile, req.Agent, usageScope, workspacePath)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 		return
@@ -1778,7 +1803,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		if ensureSessionInstructionMessages(session, instructionMessages) {
 			sessionUpdated = true
 		}
-		if h.applyProfileSessionContext(session, profileState) {
+		if !bindingResolveFailed && h.applyProfileSessionContext(session, profileState) {
 			sessionUpdated = true
 		}
 		if sessionUpdated && h.sessionManager != nil {

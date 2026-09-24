@@ -54,6 +54,12 @@ type runtimeProfileListResult struct {
 	DefaultProfile string                `json:"default_profile,omitempty"`
 	DefaultRoot    string                `json:"default_root,omitempty"`
 	Source         string                `json:"source"`
+	// SessionSwitch 是**能力广告**（R20）：true 表示本后端支持会话级
+	// profile 切换（`POST /runtime/sessions/{id}/runtime/commands` 的
+	// `set_profile` 命令）。前端 composer 只在为 true 时注册 `/profile`
+	// 命令——旧后端（无 Batch 12 执行核心）不返回该字段，命令不注册，
+	// 而不是注册后执行时报错。字段随清单端点一并返回，避免前端多一次探测。
+	SessionSwitch bool `json:"session_switch"`
 }
 
 // runtimeProfileTarget 是一次 ref → root 的解析结果。
@@ -125,6 +131,11 @@ func (h *Handler) listRuntimeProfileEntries() (*runtimeProfileListResult, error)
 		DefaultProfile: view.DefaultProfile,
 		DefaultRoot:    view.Root,
 		Source:         "runtime",
+		// R20 能力广告：本二进制编译进了 Batch 12 的 `set_profile` 执行核心
+		// （session_profile_switch.go），因此清单端点声明会话级切换可用。这是
+		// **构建级能力**而非本次请求级状态——旧后端没有该执行核心，也不返回
+		// 该字段（前端 readBoolean 缺省 false ⇒ 不注册 `/profile`）。
+		SessionSwitch: true,
 	}
 	seen := make(map[string]struct{})
 

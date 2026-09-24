@@ -53,6 +53,8 @@ type sessionRuntimeCommandRequest struct {
 	Answer       string `json:"answer,omitempty"`
 	CheckpointID string `json:"checkpoint_id,omitempty"`
 	Mode         string `json:"mode,omitempty"`
+	// Profile 可选：`set_profile` 命令的目标 profile 引用（名称 / 路径 / auto）。
+	Profile string `json:"profile,omitempty"`
 }
 
 func (h *Handler) SpawnSessionAgent(w http.ResponseWriter, r *http.Request) {
@@ -870,6 +872,30 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 		}
 		// no_active_turn / not_cancelable → 落回下面的 durable actor 路径。
 	}
+
+	// Batch 12：`set_profile` 不经过 actor —— 它写会话身份并驱逐空闲 actor，由
+	// 下一次 GetOrCreate 按新 profile 重建（V15/V19 结论）。因此先于 hub 解析
+	// 处理：既不为一次切换凭空建出 actor，也不受「会话租约被别的宿主持有」影响。
+	if commandType == "set_profile" || commandType == "profile" {
+		report, switchErr := h.applySessionProfileSwitch(r.Context(), sessionID, req.Profile)
+		switch {
+		case switchErr == nil:
+			h.writeJSON(w, http.StatusOK, map[string]interface{}{
+				"ok":            true,
+				"switch_report": report,
+			})
+		case isSessionProfileSwitchValidationError(switchErr):
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, switchErr.Error()))
+		case h.writeSessionLeaseConflict(w, switchErr):
+		default:
+			h.writeError(w, http.StatusInternalServerError, switchErr)
+		}
+		return
+	}
+
+	// 延迟重建兑现（Batch 12）：上一次切换撞上在途 turn 时留下的标记，在 actor
+	// 空闲的命令入口驱逐旧 actor，使紧随其后的 GetOrCreate 取新 profile。
+	h.reconcilePendingProfileSwitch(sessionID)
 
 	hub := h.getSessionHub()
 	if hub == nil {

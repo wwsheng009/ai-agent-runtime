@@ -147,6 +147,9 @@ func TestRuntimeProfilesAPI_CreateTemplateListGetUpdateDelete(t *testing.T) {
 	assert.Equal(t, true, found["valid"], "条目应可解析：%v", found)
 	assert.Equal(t, true, found["is_default"])
 	assert.Equal(t, "batch8-life", payload["default_profile"])
+	// R20 能力广告：清单端点同时声明「本后端支持会话级切换（set_profile）」，
+	// 前端 composer 据此注册 `/profile` 命令（缺字段的旧后端不注册）。
+	assert.Equal(t, true, payload["session_switch"], "session_switch 能力广告缺失：%v", payload)
 
 	// 详情
 	rec, view := h.do(t, http.MethodGet, "/api/runtime/profiles/batch8-life", nil)
