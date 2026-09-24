@@ -119,6 +119,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | GET | `/web/api/mesh/events` | 网格：实时事件流（SSE 扇入；`?since_seq=<n>` 续传游标、`?peers=auto\|none` 订阅拓扑；只连本进程即可看到全网格，见 §9.4） |
 | POST | `/web/api/mesh/call` | 网格：跨进程调用（op 白名单 9 项；写操作逐次 `allow_write=true`；仅回环，见 §9.5） |
 | POST | `/web/api/mesh/spawn` | 网格：拉起（在会话工作区复用活节点或拉起新进程，返回含令牌的窗口 URL；仅回环，见 §9.6） |
+| POST | `/web/api/mesh/stop` | 网格：停止节点（`graceful` 投 `/exit` 等目标收尾、`force` 终止进程；仅回环，治理动作**默认关闭**：`--mesh-allow-stop=true` 才生效，见 §9.8） |
 | GET | `/web/` | 浏览器微型客户端页面（同一后端；`/web?session=<id>&token=<t>` 深链自举，见 §9.6） |
 | GET | `/debug/chat/screen` | 与 `/web/api/screen?view=tui` 同源的调试入口（保留） |
 
@@ -841,3 +842,56 @@ curl -s -X POST http://127.0.0.1:51234/web/api/sessions/resume \
 
 > 前端落点：`web/js/sessions.js`（徽标 / 端点行 / 跨工作区分组 / 打开方式开关 / 冲突弹窗）与
 > `web/js/ui.js`（关于页只读网格小节）；手工验证步骤见 [web-testing.md](web-testing.md) §2.7。
+
+### 9.8 停止节点：`POST /web/api/mesh/stop`（治理动作，默认关闭）
+
+**一句话**：把「让那个进程退场」做成一次可审计的网格调用——`graceful` 投 `/exit` 让目标自己
+收尾，`force` 直接终止进程（架构 §5.7 / §9.2）。CLI 侧等价物是 `aicli-mesh stop <节点|会话>`
+（见 [mesh-cli.md](mesh-cli.md) §4.11），两者共用 `mesh.StopNode`，Web 层不产生第二套语义。
+
+```bash
+# 优雅停止：把 /exit 投给目标的 /web/api/input，等它保存会话、注销档案、释放租约
+curl -s -X POST http://127.0.0.1:51234/web/api/mesh/stop \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"node-9001-20260924T073500Z"}'
+
+# 强制停止：目标卡死 / 没有回环控制面（没带 --pprof）时用
+curl -s -X POST http://127.0.0.1:51234/web/api/mesh/stop \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"node-9001-20260924T073500Z","mode":"force","wait_ms":5000}'
+```
+
+请求体（1 MiB 上限，超限 `413` + `mesh_body_too_large`）：
+
+| 字段 | 必填 | 语义 |
+|------|------|------|
+| `target` | 是 | 节点引用：`node_id` / 前缀 / 会话 id / 前缀 / `pid:<PID>`（与 §9.5 同一解析口径） |
+| `mode` | 否 | `graceful`（默认）/ `force`；其它取值 → `400` + `mesh_stop_bad_mode` |
+| `wait_ms` | 否 | 等待预算（默认 30s，上限 5 分钟） |
+
+状态映射（与 §9.5 同构）：
+
+| `status` | HTTP | 说明 |
+|----------|------|------|
+| `stopped` | 200 | 目标已不在运行；幂等（重试安全，`code=mesh_stop_already_stopped`） |
+| `not_found` | 404 | 目标不存在或已从档案消失 |
+| `refused` | 403 | 策略拒绝：网格关闭（`mesh_disabled`）、**开关未开**（`mesh_stop_not_allowed`）、非回环（`mesh_nonloopback_denied`）、自停（`mesh_stop_self_refused`） |
+| `timeout` | 504 | `/exit` 已投递 / 信号已发，但进程在 `wait_ms` 内没消失 |
+| `error` | 400 / 413 / 500 | 参数形状错误 / 请求体超限 / 终止进程的系统调用失败 |
+
+**硬契约**：
+
+- **默认关闭**：停止是治理动作，目标进程必须显式 `--mesh-allow-stop=true` 才放行，否则一律
+  `refused` + `mesh_stop_not_allowed`——「谁能停我」由被停者决定。端点始终注册（未开启也回
+  `refused` 而不是 404），调用方读得到原因码；
+- **不自杀**：`target` 是本进程，或等于 `X-AICLI-Mesh-Caller` 指名的调用方 → `refused` +
+  `mesh_stop_self_refused`（停自己用 `/exit`，不是网格调用）；CLI 不是节点，`caller` 为空；
+- **graceful 的真实语义**：借目标档案里的令牌向目标的 `/web/api/input` 投一行 `/exit`
+  （`allow_write=true`），随后轮询等进程消失——**判据是进程消失，不是请求成功**；
+- **force 无收尾**：`TerminateProcess`（Windows）/ `SIGKILL`（Unix）；残留档案由 `aicli-mesh gc`
+  按「可证已死」回收（§4.5）。目标已消失不算错误（幂等）；
+- **审计**：调用方与被调方各写一行 journal（`mesh.stop.requested` / `mesh.stop.completed`，
+  只记 target / mode / 状态 / 耗时与调用者，**不记令牌**）；
+- **仅回环**：与 §9.5 / §9.6 同层（`X-AICLI-Token` + 回环），跨机一律拒绝。
+
+> 前端**不提供**停止按钮：治理动作留在 CLI / 运维面，避免误点（Web 子方案 §5.8 / §8 R13）。

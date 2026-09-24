@@ -13,6 +13,7 @@
 | 有哪些节点、谁活着、各自在哪个会话/工作区 | `ls` |
 | 某个节点的端点、令牌提示、绑定、租约、日志尾部 | `show` |
 | 拿一个可直接打开/调用的 URL（需要令牌时显式披露） | `url` |
+| 让某个节点退场（默认投 `/exit` 等它收尾；`--force` 直接终止进程） | `stop`（治理动作，目标需 `--mesh-allow-stop=true`） |
 | 清理已退出进程留下的档案 / 租约 / 日志 / 旧目录 | `gc`（默认 dry-run） |
 | 一次性体检：目录、权限、陈旧节点、双占用、令牌可读性、日志完整性 | `doctor` |
 
@@ -36,6 +37,7 @@ aicli-mesh url <节点|会话> [--with-token] [--path PATH] [--json]
 aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--allow-write] [--timeout 130s] [--json]
 aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--client-request-id ID] [--json]
 aicli-mesh screen <节点|会话> [--view tui|web] [--tail N] [--format json|text] [--timeout 130s] [--json]
+aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
 aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
 aicli-mesh doctor [--json]
 aicli-mesh version [--json]
@@ -249,17 +251,50 @@ aicli-mesh screen <节点|会话> [--view tui|web] [--tail N] [--format json|tex
 只读（无需 `--allow-write`）。默认 `view=tui` + `format=json`（终端视口真实合成帧），
 人读输出打印快照里的 `text` 段；`--tail N` 只取末尾 N 行。
 
+### 4.11 `stop` — 停止节点（治理动作，默认关闭）
+
+```text
+aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
+```
+
+两种模式（§5.7）：
+
+| 模式 | 做法 | 收尾 |
+|------|------|------|
+| 默认（graceful） | 把 `/exit` 投给目标的 `/web/api/input`，等进程自己消失 | 目标自己保存会话、注销档案、释放租约 |
+| `--force` | 直接终止进程 | **无**——残留档案由 `gc` 按「可证已死」回收 |
+
+- **开关在被停的进程上**：目标必须显式 `--mesh-allow-stop=true`（默认**关闭**），否则一律
+  `refused` + `mesh_stop_not_allowed`（退出码 6）。CLI 无法绕过——「谁能停我」由被停者决定，
+  而不是由一台可能被入侵的调用方机器决定；
+- **不自杀**：目标就是本进程（或调用方自己）→ `refused` + `mesh_stop_self_refused`；
+  停自己用 `/exit`（会话内命令），不是网格调用；
+- **幂等**：目标已不在运行（档案 `stopped`、pid 已消失）→ `status=stopped` +
+  `code=mesh_stop_already_stopped`，退出码 0，重试安全；
+- **等待预算**：`--wait` 默认 30s；graceful 投递成功但进程在预算内没消失 → `timeout`
+  （退出码 3），提示加大 `--wait` 或改用 `--force`；
+- **没有回环控制面**（目标没带 `--pprof`）时 graceful 不可用（`mesh_no_endpoint`），
+  用 `--force` 直接终止进程。
+
+```bash
+# 优雅停掉某个会话所在的节点（先看它是不是真的该退）
+aicli-mesh stop session_20260924093535
+
+# 目标卡死 / 没有 --pprof：直接终止进程
+aicli-mesh stop node-22024 --force
+```
+
 ## 5. 退出码契约
 
 | 码 | 含义 | 触发示例 |
 |----|------|----------|
 | 0 | 成功 | 任何命令正常完成（空网格也算成功） |
 | 1 | 用法/参数错误 | 未知子命令、未知参数、`--sort` 取值非法、缺少目标、`gc --stale-ttl` 非时长 |
-| 2 | 目标不存在或无法唯一确定 | `show nope`、`show node-100`（歧义，候选会列出）；`call` 的 `not_found`（含 `mesh_no_endpoint` / `mesh_target_stopped`） |
-| 3 | 目标不可达 | `url` 的目标没有端点（纯 TUI 节点）；`call` 的 `unreachable` / `timeout` |
+| 2 | 目标不存在或无法唯一确定 | `show nope`、`show node-100`（歧义，候选会列出）；`call` 的 `not_found`（含 `mesh_no_endpoint` / `mesh_target_stopped`）；`stop` 的 `not_found` |
+| 3 | 目标不可达 | `url` 的目标没有端点（纯 TUI 节点）；`call` 的 `unreachable` / `timeout`；`stop` 的 `timeout`（进程在 `--wait` 内没消失） |
 | 4 | 冲突或忙碌 | `call` 的 `busy`（目标已有 invoke 在等，HTTP 409） |
 | 5 | 操作失败 | `gc --apply` 有删除失败项、`doctor` 发现问题、JSON 输出失败、`call` 的 `error`（含未知 op） |
-| 6 | 被策略拒绝 | `call` 的 `refused`：写操作缺 `--allow-write`（`mesh_write_not_allowed`）、令牌失效（`mesh_token_stale`）、跨工作区收敛拒绝（`mesh_cross_workspace_denied`） |
+| 6 | 被策略拒绝 | `call` 的 `refused`：写操作缺 `--allow-write`（`mesh_write_not_allowed`）、令牌失效（`mesh_token_stale`）、跨工作区收敛拒绝（`mesh_cross_workspace_denied`）；`stop` 的 `refused`（`mesh_stop_not_allowed` / `mesh_stop_self_refused` / `mesh_nonloopback_denied`） |
 
 错误信息写 **stderr**，数据写 **stdout**——`aicli-mesh ls --json > x.json` 不会混入任何提示文本。
 `call` 失败时 stderr 形如 `调用失败: refused（mesh_write_not_allowed）: …`，便于脚本 grep 原因码。
@@ -356,6 +391,26 @@ aicli-mesh screen <节点|会话> [--view tui|web] [--tail N] [--format json|tex
 - `attempts` > 1 只在「目标 401 → 重读档案重试一次」时出现；
 - **`result` 里不会有令牌原文**：`node.info` 等端点默认脱敏（M7）。
 
+### 6.6 `stop --json`
+
+返回 §5.7 的 `StopResult` 信封（与 `POST /web/api/mesh/stop` 同一份文档）：
+
+```json
+{
+  "schema_version": 2,
+  "status": "stopped",
+  "node_id": "node-22024-20260924T073012Z",
+  "pid": 22024,
+  "mode": "graceful",
+  "graceful": true,
+  "elapsed_ms": 1382
+}
+```
+
+- `status` ∈ `stopped` / `not_found` / `refused` / `timeout` / `error`（§4.11 的退出码映射）；
+- 幂等成功带 `code=mesh_stop_already_stopped` 与 `message`；失败带 `code` 与 `message`；
+- `graceful=true` 只说明这次**投递**了 `/exit`，不代表对方已完成收尾——进程消失才是判据。
+
 ## 7. 令牌与安全（M7）
 
 - `ls` / `show` 只输出 `token_hint`（前 4 位 + `…`），**任何** `--json` 都不会带原文；
@@ -403,6 +458,9 @@ aicli-mesh call session_20260924093535 cancel --allow-write
 # 清理前先看计划，再执行
 aicli-mesh gc
 aicli-mesh gc --apply --purge-legacy --prune-bindings
+
+# 让目标自己收尾退出（目标需 --mesh-allow-stop=true；卡死时改 --force）
+aicli-mesh stop session_20260924093535
 
 # 体检并让 CI 感知问题（problems > 0 → 退出码 5）
 aicli-mesh doctor --json

@@ -37,6 +37,10 @@ const (
 	// ChatWebAPIMeshSpawnPath 是网格拉起端点（架构 §5.7）：四态
 	// reused/started/not_running/failed，令牌只出现在返回的 url 里（M7）。
 	ChatWebAPIMeshSpawnPath = mesh.ChatWebMeshSpawnPath
+	// ChatWebAPIMeshStopPath 是网格停止端点（架构 §5.7）：graceful 投 /exit
+	// 等目标自己收尾、force 终止进程；治理动作默认关（--mesh-allow-stop）。
+	// 与 internal/mesh 的调用方共用同一常量。
+	ChatWebAPIMeshStopPath  = mesh.ChatWebMeshStopPath
 	ChatWebAPIScreenPath    = "/web/api/screen"
 	ChatWebAPIStatusPath    = "/web/api/status"
 	ChatWebAPIStatusBarPath = "/web/api/statusbar"

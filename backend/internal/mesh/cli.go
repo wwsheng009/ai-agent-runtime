@@ -102,6 +102,8 @@ func (c *CLI) Run(args []string) int {
 		return c.runScreen(rest)
 	case "open":
 		return c.runOpen(rest)
+	case "stop":
+		return c.runStop(rest)
 	case "gc":
 		return c.runGC(rest)
 	case "doctor":
@@ -173,6 +175,7 @@ func (c *CLI) printUsage(w io.Writer) {
   aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--json]
   aicli-mesh screen <节点|会话> [--view tui] [--tail N] [--format json|text] [--json]
   aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--json]
+  aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
   aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
   aicli-mesh doctor [--json]
   aicli-mesh version [--json]
@@ -189,6 +192,11 @@ func (c *CLI) printUsage(w io.Writer) {
   节点，单飞租约的 owner 记作 cli-<pid>。--no-wait 只报告已启动，不等就绪。
   --takeover 跳过复用并显式回收该会话的租约（§4.4）：旧节点继续运行，但会在
   下次心跳后把自己的档案标记为 orphaned（不会被杀；用 aicli-mesh show 查看）。
+停止（stop）: 默认优雅——把 /exit 投给目标的 /web/api/input，让目标自己收尾
+  （保存会话、注销档案、释放租约），并等进程消失；--force 才直接终止进程
+  （不做收尾，残留档案由 gc 按「可证已死」回收）。停止是治理动作：**目标
+  进程**必须显式开启 --mesh-allow-stop，否则一律 refused（CLI 无法绕过）。
+  「目标已不在运行」按成功处理（幂等）；等不到进程消失时退出码 3。
 
 退出码:
   0 成功            1 用法/参数错误      2 目标不存在或无法唯一确定
@@ -1818,6 +1826,7 @@ func (c *CLI) buildDoctorReport(paths Paths, now time.Time) doctorReport {
 				fmt.Sprintf("旧目录残留 %s（%d 个文件）：`aicli-mesh gc --purge-legacy` 可清理", legacy, count), nil)
 		}
 	}
+
 	return report
 }
 
@@ -2360,6 +2369,115 @@ func openExitCode(status string) int {
 		return ExitOK
 	case SpawnStatusNotRunning:
 		return ExitUnreachable
+	default:
+		return ExitFailure
+	}
+}
+
+// ---------------------------------------------------------------------------
+// stop —— §5.7 的本地写法（优雅退出或强制终止目标节点）
+// ---------------------------------------------------------------------------
+
+// stopResult 是 `stop --json` 的输出：与 HTTP 端点同一形状（§5.7），外层加
+// schema_version 以与其它子命令一致。
+type stopResult struct {
+	SchemaVersion int `json:"schema_version"`
+	*StopResult
+}
+
+// runStop 停止目标节点（§7.2 / §5.7）。默认优雅：把 /exit 投给目标的
+// /web/api/input，等它自己收尾；--force 才终止进程。
+//
+// 治理开关在**目标**进程（--mesh-allow-stop），CLI 只负责发请求——这样
+// 「谁能停我」由被停者决定，而不是由一台可能被入侵的调用方机器决定。
+// CLI 不是节点：callerID 为空，自停检查天然不适用（CLI 没有可被停的档案）。
+func (c *CLI) runStop(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{
+		"force": flagBool,
+		"wait":  flagValue,
+		"json":  flagBool,
+		"help":  flagBool,
+	})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh stop: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) != 1 {
+		return c.fail(ExitUsage, "aicli-mesh stop: 需要 <目标>（节点 ID / 会话 ID / pid:<PID>）")
+	}
+	paths := c.paths()
+	if !paths.Enabled() {
+		return c.fail(ExitFailure, "aicli-mesh stop: 网格根目录不可用（设置 AICLI_MESH_DIR 或 AICLI_HOME）")
+	}
+	wait, err := parsed.durationValue("wait", StopDefaultWait)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh stop: --wait: %v", err)
+	}
+	mode := StopModeGraceful
+	if parsed.boolean("force") {
+		mode = StopModeForce
+	}
+	result := Stop(context.Background(), paths, "", StopRequest{
+		Target: parsed.pos[0],
+		Mode:   mode,
+		Wait:   wait,
+	})
+	if parsed.boolean("json") {
+		if err := c.printJSON(stopResult{SchemaVersion: SchemaVersion, StopResult: result}); err != nil {
+			return c.fail(ExitFailure, "aicli-mesh stop: 输出 JSON 失败: %v", err)
+		}
+	} else {
+		c.printStopHuman(result)
+	}
+	return stopExitCode(result.Status)
+}
+
+// printStopHuman 是停止结果的人读输出：成功一行，失败给原因与下一步。
+func (c *CLI) printStopHuman(result *StopResult) {
+	if result == nil {
+		return
+	}
+	switch result.Status {
+	case StopStatusStopped:
+		verb := "已终止"
+		if result.Graceful {
+			verb = "已优雅退出"
+		}
+		fmt.Fprintf(c.out(), "%s节点 %s（pid %d，模式 %s）\n", verb, result.NodeID, result.PID, result.Mode)
+		if result.Code == StopCodeAlreadyStopped {
+			fmt.Fprintln(c.errOut(), "提示："+result.Message)
+		}
+	default:
+		fmt.Fprintf(c.errOut(), "停止未成功（%s）：%s\n", result.Status, result.Message)
+		if result.Code != "" {
+			fmt.Fprintf(c.errOut(), "原因码：%s\n", result.Code)
+		}
+		switch result.Code {
+		case CallCodeNoEndpoint:
+			fmt.Fprintln(c.errOut(), "提示：该节点没有回环控制面，用 --force 直接终止进程。")
+		case StopCodeTimeout:
+			fmt.Fprintln(c.errOut(), "提示：加大 --wait，或用 --force 直接终止进程。")
+		case StopCodeNotAllowed:
+			fmt.Fprintln(c.errOut(), "提示：目标进程未开启停止开关（--mesh-allow-stop）。")
+		}
+	}
+}
+
+// stopExitCode 把 §5.7 的停止状态映射到 §7.3 的退出码：stopped = 0，
+// 目标不存在 = 2，等待超时 = 3（不可达/没等到），策略拒绝 = 6，其余 = 5。
+func stopExitCode(status string) int {
+	switch status {
+	case StopStatusStopped:
+		return ExitOK
+	case StopStatusNotFound:
+		return ExitNotFound
+	case StopStatusTimeout:
+		return ExitUnreachable
+	case StopStatusRefused:
+		return ExitRefused
 	default:
 		return ExitFailure
 	}

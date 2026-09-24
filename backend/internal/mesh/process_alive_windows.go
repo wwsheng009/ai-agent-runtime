@@ -53,3 +53,34 @@ func processAlive(pid int) bool {
 // stillActive 是 STILL_ACTIVE（STATUS_PENDING，259）：GetExitCodeProcess 对
 // 「尚未退出」的进程返回该值；其余值（含 0）都说明进程已经结束。
 const stillActive = 259
+
+// processTerminate is PROCESS_TERMINATE (0x0001): the right to call
+// TerminateProcess on the handle (same reason as processQueryLimitedInformation,
+// the value is written out instead of pulled from x/sys/windows).
+const processTerminate = 0x0001
+
+// terminateProcess 强制结束 pid（Stop --force 的唯一系统调用）。
+//
+// 「进程已经不在」不是错误：OpenProcess/TerminateProcess 回
+// ERROR_INVALID_PARAMETER 时按成功处理——目标是幂等的，调用方只关心它最终
+// 不在运行。其余错误（访问被拒等）如实返回，由调用方决定是否回 error。
+func terminateProcess(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	handle, err := syscall.OpenProcess(processTerminate, false, uint32(pid))
+	if err != nil {
+		if errors.Is(err, errInvalidParameter) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = syscall.CloseHandle(handle) }()
+	if err := syscall.TerminateProcess(handle, 1); err != nil {
+		if errors.Is(err, errInvalidParameter) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}

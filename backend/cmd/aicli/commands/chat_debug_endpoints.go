@@ -138,6 +138,7 @@ var meshDebugEndpoints = []struct {
 	{Method: "GET", Path: "/web/api/mesh/events", Note: "网格实时事件流（SSE 扇入；?since_seq=<n> 续传游标、?peers=auto|none 订阅拓扑；只连本进程即可见全网格）"},
 	{Method: "POST", Path: "/web/api/mesh/call", Note: "网格调用（op 白名单：node.info/status/screen/turn/sessions.list 只读；invoke/input/cancel/sessions.resume 写操作需 allow_write=true；仅回环）"},
 	{Method: "POST", Path: "/web/api/mesh/spawn", Note: "网格拉起（在会话工作区复用活节点或拉起新进程，返回含令牌的窗口 URL；仅回环，--mesh-allow-spawn=false 时 refused）"},
+	{Method: "POST", Path: "/web/api/mesh/stop", Note: "网格停止（graceful 投 /exit 等目标自己收尾；force 终止进程；仅回环，治理动作默认关闭：--mesh-allow-stop=true 才生效，否则 refused + mesh_stop_not_allowed）"},
 }
 
 // observeDebugEndpoints 列出 Runtime Observation Plane 的版本化端点

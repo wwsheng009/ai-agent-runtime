@@ -27,6 +27,8 @@ const (
 	JournalCallSent           = "mesh.call.sent"
 	JournalSpawnRequested     = "mesh.spawn.requested"
 	JournalSpawnCompleted     = "mesh.spawn.completed"
+	JournalStopRequested      = "mesh.stop.requested"
+	JournalStopCompleted      = "mesh.stop.completed"
 	JournalPeerObserved       = "mesh.peer.observed"
 )
 

@@ -367,6 +367,11 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 		// 拉起新进程，并返回 §7.3 的窗口 URL（含令牌）。仅回环；
 		// --mesh-allow-spawn=false 时回 refused + mesh_spawn_not_allowed。
 		mux.HandleFunc(commands.ChatWebAPIMeshSpawnPath, commands.HandleChatWebAPIMeshSpawn)
+		// 网格停止（S16，架构 §5.7）：graceful = 投 /exit 让目标自己收尾，
+		// force = 终止进程。治理动作，**默认关闭**：--mesh-allow-stop=false
+		// 时回 refused + mesh_stop_not_allowed（端点仍注册，让调用方读得到
+		// 原因码，而不是 404）。
+		mux.HandleFunc(commands.ChatWebAPIMeshStopPath, commands.HandleChatWebAPIMeshStop)
 	}
 	mux.HandleFunc(commands.ChatWebAPIScreenPath, commands.HandleChatWebAPIScreen)
 	mux.HandleFunc(commands.ChatWebAPIStatusPath, commands.HandleChatWebAPIStatus)

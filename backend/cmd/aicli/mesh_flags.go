@@ -18,10 +18,16 @@ const meshRestrictWorkspaceFlag = "mesh-restrict-workspace"
 // （CI / 共享机器）留一个总闸，而不是常态配置——默认关会让功能名存实亡。
 const meshAllowSpawnFlag = "mesh-allow-spawn"
 
+// meshAllowStopFlag 是网格停止开关（架构 §5.7 / §9.2，P2）：默认**关闭**。
+// 与拉起相反：停止会中断别人的会话（force 还不给收尾机会），默认开等于把
+// 「谁都能杀谁」变成常态；要停就得在被停的进程上显式打开。
+const meshAllowStopFlag = "mesh-allow-stop"
+
 // registerMeshGovernanceFlags 注册网格治理开关。默认值必须与架构 §10 的
 // 表格一致：`--mesh-restrict-workspace` 默认**关闭**——工作区是筛选维度，
 // 不是权限边界（§9.3），默认收敛会让跨项目协作变成「先改配置才能用」；
-// `--mesh-allow-spawn` 默认**开启**（§5.7）。
+// `--mesh-allow-spawn` 默认**开启**（§5.7）；`--mesh-allow-stop` 默认
+// **关闭**（§5.7 / §9.2：停止是治理动作，不是日常操作）。
 func registerMeshGovernanceFlags(fs *pflag.FlagSet) {
 	if fs == nil {
 		return
@@ -30,6 +36,8 @@ func registerMeshGovernanceFlags(fs *pflag.FlagSet) {
 		"收敛：拒绝跨工作区的写调用（refused + mesh_cross_workspace_denied；只读调用不受影响；默认关闭）")
 	fs.Bool(meshAllowSpawnFlag, true,
 		"允许 /web/api/mesh/spawn 在会话工作区复用或拉起节点（默认开启；关闭后该端点一律 refused + mesh_spawn_not_allowed）")
+	fs.Bool(meshAllowStopFlag, false,
+		"允许 /web/api/mesh/stop 停止节点（默认关闭；graceful 投 /exit、force 终止进程；关闭后该端点一律 refused + mesh_stop_not_allowed）")
 }
 
 // applyMeshGovernanceFlags 把治理开关落到进程级状态（commands 包）。
@@ -54,6 +62,14 @@ func applyMeshGovernanceFlags(fs *pflag.FlagSet) {
 		commands.SetChatWebMeshAllowSpawn(allowSpawn)
 		if !allowSpawn {
 			fmt.Fprintln(os.Stderr, "Info: mesh spawn disabled (--mesh-allow-spawn=false): /web/api/mesh/spawn will refuse (mesh_spawn_not_allowed)")
+		}
+	}
+	// 停止开关（§5.7 / §9.2）：默认 false，显式 --mesh-allow-stop=true 才开启。
+	// 开启是一次有意的风险接受，因此回一行 Info，让日志里留下痕迹。
+	if allowStop, stopErr := fs.GetBool(meshAllowStopFlag); stopErr == nil {
+		commands.SetChatWebMeshAllowStop(allowStop)
+		if allowStop {
+			fmt.Fprintln(os.Stderr, "Info: mesh stop enabled (--mesh-allow-stop=true): /web/api/mesh/stop can stop nodes (graceful=/exit, force=terminate)")
 		}
 	}
 }

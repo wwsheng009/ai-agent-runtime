@@ -254,11 +254,12 @@ type CallTarget struct {
 	MatchedBy string
 }
 
-// ResolveCallTarget 解析节点引用（pid:<PID> / node_id / 前缀 / 会话 id / 会话前缀）
-// 到一条可调用的节点档案。与 `aicli-mesh ls|show` 共用 BuildView 与
-// matchTargetNodes 的口径（目标解析、状态、归属全部同源），但令牌从档案原文读取
-// （视图永远脱敏，§9.1）。
-func ResolveCallTarget(paths Paths, ref string) (*CallTarget, error) {
+// ResolveTargetNode 解析节点引用（pid:<PID> / node_id / 前缀 / 会话 id / 会话前缀）
+// 到一条**可定位**的节点档案，但不要求它有回环控制面：调用（Call）必须能连上
+// 目标，停止（Stop --force）只需要 PID，两者共用同一套解析口径。与
+// `aicli-mesh ls|show` 共用 BuildView 与 matchTargetNodes 的口径（目标解析、
+// 状态、归属全部同源），但令牌从档案原文读取（视图永远脱敏，§9.1）。
+func ResolveTargetNode(paths Paths, ref string) (*CallTarget, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return nil, &CallTargetError{Code: CallCodeTargetNotFound, Message: "target is required"}
@@ -319,20 +320,30 @@ func ResolveCallTarget(paths Paths, ref string) (*CallTarget, error) {
 			Message: fmt.Sprintf("node %s is stopped", chosen.NodeID),
 		}
 	}
-	record := *chosen.Record
-	if record.Endpoint == nil || strings.TrimSpace(record.Endpoint.BaseURL) == "" || record.Endpoint.Port <= 0 {
-		return nil, &CallTargetError{
-			Code:    CallCodeNoEndpoint,
-			Message: fmt.Sprintf("node %s has no loopback control plane (start it with --pprof)", chosen.NodeID),
-		}
-	}
 	return &CallTarget{
 		NodeID:    chosen.NodeID,
-		Record:    record,
+		Record:    *chosen.Record,
 		Path:      chosen.Path,
 		State:     chosen.State,
 		MatchedBy: rule,
 	}, nil
+}
+
+// ResolveCallTarget 在 ResolveTargetNode 之上再加「必须能调用」的约束：
+// 没有回环控制面的节点（启动时没带 --pprof）不可调用，早失败早提示。
+func ResolveCallTarget(paths Paths, ref string) (*CallTarget, error) {
+	target, err := ResolveTargetNode(paths, ref)
+	if err != nil {
+		return nil, err
+	}
+	record := target.Record
+	if record.Endpoint == nil || strings.TrimSpace(record.Endpoint.BaseURL) == "" || record.Endpoint.Port <= 0 {
+		return nil, &CallTargetError{
+			Code:    CallCodeNoEndpoint,
+			Message: fmt.Sprintf("node %s has no loopback control plane (start it with --pprof)", target.NodeID),
+		}
+	}
+	return target, nil
 }
 
 // Call 是节点侧的调用入口：编排一次网格调用（§5.6），并写调用方一侧的
