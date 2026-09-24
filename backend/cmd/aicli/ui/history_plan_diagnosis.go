@@ -63,11 +63,18 @@ type HistoryPlanDiagnosis struct {
 	LayoutRowsScreened   int
 	LayoutRowsBudgeted   int
 	LayoutBudgetComplete bool
+	// LayoutProbed reports whether the layout probe ran at all. False means
+	// "this session is not in the pathological shape" (or the caller used the
+	// cheap inputs-only variant) — it must never be read as "the layout was
+	// empty".
+	LayoutProbed bool
 }
 
-// DiagnoseHistoryPlan derives the planner's cheap inputs from a controller
-// state. It never mutates state and never lays out cells.
-func DiagnoseHistoryPlan(state UIControllerState) HistoryPlanDiagnosis {
+// DiagnoseHistoryPlanInputs derives only the planner's cheap inputs from a
+// controller state: cell walks, no layout, no markdown. It never mutates
+// state. This is the variant the bounded HTTP status path uses, because the
+// layout probe below is the one part that can cost an O(entire history) pass.
+func DiagnoseHistoryPlanInputs(state UIControllerState) HistoryPlanDiagnosis {
 	diag := HistoryPlanDiagnosis{
 		TranscriptCells: len(state.Transcript.Cells),
 		AppStateCells:   len(state.AppState.Transcript.Cells),
@@ -85,11 +92,19 @@ func DiagnoseHistoryPlan(state UIControllerState) HistoryPlanDiagnosis {
 		diag.FirstCellFinalized = cellIsFinalizedForHistory(first)
 		diag.FirstCellSourceLen = len(first.Source)
 	}
+	return diag
+}
+
+// DiagnoseHistoryPlan derives the planner's cheap inputs from a controller
+// state and, only in the pathological shape it exists for, probes the layout.
+func DiagnoseHistoryPlan(state UIControllerState) HistoryPlanDiagnosis {
+	diag := DiagnoseHistoryPlanInputs(state)
 	// Only probe the layout in the pathological case this diagnosis exists for —
 	// a populated transcript with a live frontier that still planned nothing —
 	// so a healthy session never pays for a second O(entire history) layout in a
 	// debug endpoint.
 	if diag.TranscriptCells > 0 && diag.FrontierCells > 0 && state.HistoryEffects.NextToken == 0 {
+		diag.LayoutProbed = true
 		appState := state.AppState
 		byID := transcriptCellsByID(appState.Transcript)
 		mutable := mutableTranscriptCellIDs(appState.Transcript)

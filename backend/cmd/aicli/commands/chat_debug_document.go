@@ -169,6 +169,13 @@ func appendChatDebugRoutingRoles(builder *chatDebugDocumentBuilder, roles map[st
 }
 
 func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
+	return buildChatDebugDisplayDocumentWithOptions(session, ChatDebugDisplayOptions{})
+}
+
+// buildChatDebugDisplayDocumentWithOptions 是带预算的文本变体（HTTP 路径）。
+// 零值选项 = 全量输出（面板路径行为不变）；fast/超预算时跳过与 JSON 侧
+// 同名的重区块并显式登记，避免读者把「没打印」当成「值为空」。
+func buildChatDebugDisplayDocumentWithOptions(session *ChatSession, opts ChatDebugDisplayOptions) render.Document {
 	if session == nil {
 		return render.SingleLineDoc(render.RoleSpan("错误: 当前没有活动会话", string(style.RoleError)))
 	}
@@ -177,6 +184,9 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	var builder chatDebugDocumentBuilder
 	builder.appendDocument(ui.SessionInfoDocument(buildChatSessionInfo(session), chatDebugDocumentWidth(session)))
 	builder.meta("HTTP Snapshot:", "/debug/chat/status#session (JSON) / ?format=text (文本)")
+	if opts.Fast {
+		builder.meta("Fast Mode:", "on (heavy sections abbreviated: files/storage/scene_layout/plan_layout/agents)")
+	}
 	builder.blank()
 	appendChatDebugSessionDetails(&builder, session)
 
@@ -264,14 +274,28 @@ func buildChatDebugDisplayDocument(session *ChatSession) render.Document {
 	appendChatDebugScreenLines(&builder, session)
 	appendChatDebugEndpointListLines(&builder, session)
 	appendChatDebugComponentLines(&builder, session)
-	appendChatDebugStorageLines(&builder, session)
-	builder.heading("AgentControl Registry: (GET /debug/chat/status#agents)")
-	builder.plain(chatAgentPanelRegistryLine(session))
-	builder.plainLines(chatAgentControlConsistencyLines(session))
-	builder.heading("Agent Graph: (GET /debug/chat/status#agents)")
-	builder.plainLines(chatAgentGraphLines(session))
-	builder.heading("Mailbox Pending: (GET /debug/chat/status#agents)")
-	builder.plainLines(chatDebugMailboxLines(session))
+	if opts.heavySectionSkipped() {
+		// 存储统计走单连接 SQLite：风暴期该连接正是被争用的资源。
+		builder.heading("存储与持久化: (GET /debug/chat/status#storage)")
+		builder.meta("Storage:", "skipped (fast/deadline)")
+	} else {
+		appendChatDebugStorageLines(&builder, session)
+	}
+	// agents 区块与 JSON 侧同名区块同源：registry 行 + 一致性审计都要读
+	// agent registry（会话库单连接，与后台 reconciler 争用），实测能让单个
+	// status 请求阻塞数秒。fast/超预算时不排队，显式标注跳过。
+	if opts.heavySectionSkipped() {
+		builder.heading("AgentControl Registry: (GET /debug/chat/status#agents)")
+		builder.meta("Agents:", "skipped (fast/deadline)")
+	} else {
+		builder.heading("AgentControl Registry: (GET /debug/chat/status#agents)")
+		builder.plain(chatAgentPanelRegistryLine(session))
+		builder.plainLines(chatAgentControlConsistencyLines(session))
+		builder.heading("Agent Graph: (GET /debug/chat/status#agents)")
+		builder.plainLines(chatAgentGraphLines(session))
+		builder.heading("Mailbox Pending: (GET /debug/chat/status#agents)")
+		builder.plainLines(chatDebugMailboxLines(session))
+	}
 	appendChatDebugUIActorLines(&builder, session)
 	appendChatDebugRenderEncoderLines(&builder, session)
 	appendChatDebugRenderOutputLines(&builder, session)
@@ -360,7 +384,15 @@ func chatDebugDeliveryRecordSummary(i int, r output.DeliveryRecord) string {
 // derives AppState layout and compares it in memory with the legacy surface's
 // last composed frame; it never emits terminal bytes.
 func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, session *ChatSession) {
-	if builder == nil || session == nil || session.Interaction == nil || session.Interaction.uiActor == nil {
+	if builder == nil || session == nil {
+		return
+	}
+	if session.Interaction == nil || session.Interaction.uiActor == nil {
+		// B1：没有交互渲染器（headless/CI 进程模型的常态）时必须显式输出。
+		// 旧行为在这里直接 return，面板与 ?format=text 上整个 AppState 区块
+		// 静默消失，读屏断言无法区分「没有渲染器」与「渲染器正常」。
+		builder.heading("AppState / Presenter Migration: (GET /debug/chat/status#app_state)")
+		builder.meta("AppState:", "unavailable ("+chatDebugAppStateUnavailableReason(session)+")")
 		return
 	}
 	state := session.Interaction.uiActor.State()
@@ -409,12 +441,14 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 		builder.meta("Scrollback Resets:", fmt.Sprintf("count=%d last=%s", projection.ScrollbackResetCount, resetReason))
 	}
 	if session.Surface == nil {
+		builder.heading("AppState Frame Parity: (GET /debug/chat/status#app_state)")
+		builder.meta("Frame Parity:", "unavailable ("+chatDebugAppStateUnavailableReason(session)+")")
 		return
 	}
 	builder.heading("AppState Frame Parity: (GET /debug/chat/status#app_state)")
 	parity := strings.TrimSuffix(session.Surface.FrameParityWithAppLayout(state.AppState), "\n")
 	if parity == "" {
-		parity = "parity: unavailable"
+		parity = "parity: unavailable (no composed frame yet)"
 	}
 	builder.plainLines(strings.Split(parity, "\n"))
 }

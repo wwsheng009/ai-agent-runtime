@@ -198,13 +198,21 @@ func chatWebTailTextLines(text string, n int) string {
 // HandleChatWebAPIStatus 返回当前渲染器状态快照（§4.2.6）。
 //   - ?format=json（默认）：结构化 JSON 快照
 //   - ?format=text：纯文本摘要
+//   - ?fast=1：有界降级（跳过重区块，见 skipped_sections）
+//
+// B5：该端点与 /debug/chat/status 同源，因此同样受跨区块预算约束——
+// 风暴期它必须能返回「部分 + 明确登记」而不是把 web 客户端挂住。
 func HandleChatWebAPIStatus(w http.ResponseWriter, r *http.Request) {
+	opts := ChatDebugDisplayBoundedOptions()
+	if r.URL.Query().Get("fast") == "1" {
+		opts = ChatDebugDisplayFastOptions()
+	}
 	if r.URL.Query().Get("format") == "text" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte(BuildChatDebugDisplayText()))
+		_, _ = w.Write([]byte(BuildChatDebugDisplayTextWithOptions(opts)))
 		return
 	}
-	body, err := MarshalChatDebugDisplayJSON()
+	body, err := MarshalChatDebugDisplayJSONWithOptions(opts)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusInternalServerError)

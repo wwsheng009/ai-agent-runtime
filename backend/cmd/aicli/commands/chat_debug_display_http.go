@@ -63,6 +63,12 @@ type chatDebugDisplaySnapshot struct {
 	// 与 /debug display 的"存储与持久化:"区块同源，字段契约沿用
 	// internal/chat 的 JSON tag（runtime-server health 的 persist/store_pools 同构）。
 	Storage *chatDebugStorageInfo `json:"storage,omitempty"`
+	// Fast / SkippedSections 是 HTTP 快照路径的有界降级契约（B3）：
+	// 超过预算或显式 ?fast=1 时按区块跳过，并在此登记被跳过的区块名。
+	// 消费者必须把 skipped 区块当作「未知」而不是「健康」——降级响应里
+	// 缺席字段的零值没有证据力。面板路径（/debug display）不受影响。
+	Fast            bool     `json:"fast,omitempty"`
+	SkippedSections []string `json:"skipped_sections,omitempty"`
 }
 
 type chatDebugDisplaySessionInfo struct {
@@ -232,6 +238,13 @@ type chatDebugDisplayOutputInfo struct {
 }
 
 type chatDebugDisplayAppStateInfo struct {
+	// Available=false 表示本进程没有交互渲染器（Interaction.uiActor 为
+	// nil），下列字段全部是零值。headless / CI 进程模型（01/02 E2E）下
+	// 这是常态而非异常：没有 uiActor 就没有 AppState 帧，也没有历史规划。
+	// 必须显式输出，否则读屏断言会把「没有渲染器」误读成「渲染器正常」。
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+
 	Revision         uint64 `json:"revision"`
 	LayoutGeneration uint64 `json:"layout_generation"`
 	Width            int    `json:"width"`
@@ -257,6 +270,39 @@ type chatDebugDisplayAppStateInfo struct {
 	// 「UI 在算」与「UI 在重复算同样的东西」区分开：命中率低 + 逐出数高是
 	// 缓存容量跟不上会话规模的直接证据。
 	LayoutCache *chatDebugDisplayLayoutCacheInfo `json:"layout_cache,omitempty"`
+	// Plan 是历史规划输入/布局的结构化诊断（与面板的 History Plan
+	// Inputs / History Plan Layout 区块同源）。plan 的 cell 走查部分恒定
+	// 输出（便宜，无布局）；plan_layout 部分只在病态场景探测，见
+	// ui.DiagnoseHistoryPlan 的门控说明。
+	Plan *chatDebugDisplayHistoryPlanInfo `json:"plan,omitempty"`
+}
+
+// chatDebugDisplayHistoryPlanInfo 是 HistoryPlanDiagnosis 的 JSON 投影。
+// 它回答 ledger 计数器回答不了的问题：为什么 reducer 什么都没规划？
+//   - plan_inputs（恒定输出）：规划器读到的 transcript / AppState / 前沿
+//     规模，以及第一格是否 finalize。AppStateCells=0 而 TranscriptCells>0
+//     即「规划器在规划一个空 transcript」。
+//   - plan_layout（仅在 TranscriptCells>0 && FrontierCells>0 && NextToken==0
+//     时探测）：布局是否为已 finalize 的格子产出行。
+//
+// LayoutProbed=false 表示当前不是病态场景、没有探测布局（不是「布局为空」）。
+type chatDebugDisplayHistoryPlanInfo struct {
+	TranscriptCells      int    `json:"transcript_cells"`
+	AppStateCells        int    `json:"app_state_cells"`
+	FrontierCells        int    `json:"frontier_cells"`
+	FrontierActive       bool   `json:"frontier_active"`
+	MutableCells         int    `json:"mutable_cells"`
+	ActivePhase          string `json:"active_phase,omitempty"`
+	ActiveCellID         uint64 `json:"active_cell_id,omitempty"`
+	FirstCellID          uint64 `json:"first_cell_id,omitempty"`
+	FirstCellPhase       string `json:"first_cell_phase,omitempty"`
+	FirstCellFinalized   bool   `json:"first_cell_finalized,omitempty"`
+	FirstCellSourceLen   int    `json:"first_cell_source_len,omitempty"`
+	LayoutProbed         bool   `json:"layout_probed"`
+	LayoutRowsTotal      int    `json:"layout_rows_total,omitempty"`
+	LayoutRowsScreened   int    `json:"layout_rows_screened,omitempty"`
+	LayoutRowsBudgeted   int    `json:"layout_rows_budgeted,omitempty"`
+	LayoutBudgetComplete bool   `json:"layout_budget_complete,omitempty"`
 }
 
 type chatDebugDisplayUIActorInfo struct {
@@ -416,8 +462,60 @@ type chatDebugDisplayProjectionInfo struct {
 // BuildChatDebugDisplaySnapshot 返回当前会话的渲染/显示状态 JSON 快照。
 // 无会话时返回 available=false 的轻量响应。
 func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
+	return BuildChatDebugDisplaySnapshotWithOptions(ChatDebugDisplayOptions{})
+}
+
+// ChatDebugDisplayOptions 是快照构建的有界化开关（B3）。
+//   - Fast：跳过已知的重区块（文件系统 / 存储统计 / 场景布局），只保留
+//     渲染器与规划器的核心计数器。
+//   - Deadline：跨区块预算；一旦超时，后续重区块按区块跳过并登记。
+//
+// 面板路径（/debug display）使用零值 = 不设预算、全量输出，行为不变；
+// 只有 HTTP 快照路径传预算，避免风暴期 /debug/chat/status 拖住调用方。
+type ChatDebugDisplayOptions struct {
+	Fast     bool
+	Deadline time.Time
+}
+
+// heavySectionSkipped 判断一个重区块是否应当跳过。
+func (o ChatDebugDisplayOptions) heavySectionSkipped() bool {
+	if o.Fast {
+		return true
+	}
+	return !o.Deadline.IsZero() && time.Now().After(o.Deadline)
+}
+
+// chatDebugDisplayHTTPBudget 是 HTTP 快照路径的跨区块预算。风暴期实测
+// /debug/chat/status 会超过 3s（拖住轮询方与 CI 断言），预算把「慢」限制在
+// 可预期范围内：超预算的重区块被跳过并登记在 skipped_sections。
+const chatDebugDisplayHTTPBudget = 2500 * time.Millisecond
+
+// ChatDebugDisplayBoundedOptions 返回默认的有界选项（全量区块 + 预算）。
+func ChatDebugDisplayBoundedOptions() ChatDebugDisplayOptions {
+	return ChatDebugDisplayOptions{Deadline: time.Now().Add(chatDebugDisplayHTTPBudget)}
+}
+
+// ChatDebugDisplayFastOptions 返回 ?fast=1 的选项（跳过重区块 + 预算）。
+func ChatDebugDisplayFastOptions() ChatDebugDisplayOptions {
+	return ChatDebugDisplayOptions{Fast: true, Deadline: time.Now().Add(chatDebugDisplayHTTPBudget)}
+}
+
+// noteSkipped 登记被跳过的区块名（去重，保持插入顺序）。消费者必须把
+// 这些区块当作「未知」：降级响应里缺席字段的零值没有证据力。
+func noteSkipped(snap *chatDebugDisplaySnapshot, name string) {
+	for _, s := range snap.SkippedSections {
+		if s == name {
+			return
+		}
+	}
+	snap.SkippedSections = append(snap.SkippedSections, name)
+}
+
+// BuildChatDebugDisplaySnapshotWithOptions 是带预算的快照变体（HTTP 路径）。
+func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *chatDebugDisplaySnapshot {
 	snap := &chatDebugDisplaySnapshot{
 		CapturedAt: time.Now(),
+		Fast:       opts.Fast,
 	}
 	session := chatDebugDisplaySession()
 	if session == nil {
@@ -433,11 +531,24 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 
 	// ====== 面板信息区块的 HTTP 结构化投影 ======
 	// 每个区块对应 /debug display 面板上的一个信息区块；只读快照，不做变更。
-	snap.Files = buildChatDebugDisplayFilesInfo(session)
+	if opts.heavySectionSkipped() {
+		noteSkipped(snap, "files")
+	} else {
+		snap.Files = buildChatDebugDisplayFilesInfo(session)
+	}
 	snap.Runtime = buildChatDebugDisplayRuntimeInfo(session)
 	snap.Routing = buildChatDebugDisplayRoutingInfo(session)
 	snap.Components = buildChatDebugDisplayComponentsInfo(session)
-	snap.Agents = buildChatDebugDisplayAgentsInfo(session)
+	// agents 区块要读 agent registry（会话库单连接，且与后台 reconciler 争用）：
+	// 实测饱和时单个 status 请求会阻塞数秒（goroutine 现场：请求卡在
+	// buildChatDebugDisplayAgentsInfo → chatAgentPanelRegistryLine /
+	// chatAgentControlConsistencyLines，与 materializeLocalAgentRegistry 抢连接）。
+	// 有界路径不在这里排队，跳过时登记以便消费者区分「健康」与「未采集」。
+	if opts.heavySectionSkipped() {
+		noteSkipped(snap, "agents")
+	} else {
+		snap.Agents = buildChatDebugDisplayAgentsInfo(session)
+	}
 
 	// ====== Unified Render Encoder ======
 	if bridge := session.RuntimeEventBridge; bridge != nil {
@@ -540,7 +651,11 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 			}
 		}
 		if scn := bridge.sceneSnapshot(); scn != nil {
-			if len(scn.Cells) > 0 {
+			if len(scn.Cells) > 0 && opts.heavySectionSkipped() {
+				// 场景布局是 O(transcript) 的一遍走查 + 文本渲染，是
+				// 大会话下 status 变慢的主要来源之一；降级时登记跳过。
+				noteSkipped(snap, "scene_layout")
+			} else if len(scn.Cells) > 0 {
 				rows := scene.LayoutTranscript(scn.Cells, scn.Revision)
 				gaps := 0
 				for _, r := range rows {
@@ -627,6 +742,7 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 			lease = "active"
 		}
 		app := &chatDebugDisplayAppStateInfo{
+			Available:        true,
 			Revision:         state.Revision,
 			LayoutGeneration: state.LayoutGeneration,
 			Width:            state.Geometry.Width,
@@ -710,7 +826,43 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 				AckedEnd:      state.Active.Acked.End,
 			}
 		}
+		// B2：规划输入/布局的结构化投影。cell 走查恒定执行（便宜）；
+		// 布局探测复用 ui.DiagnoseHistoryPlan 的病态门控，健康会话不付费，
+		// fast 模式退化为 inputs-only 并在 skipped_sections 登记。
+		var planDiag ui.HistoryPlanDiagnosis
+		if opts.Fast {
+			planDiag = ui.DiagnoseHistoryPlanInputs(state)
+			noteSkipped(snap, "plan_layout")
+		} else {
+			planDiag = ui.DiagnoseHistoryPlan(state)
+		}
+		app.Plan = &chatDebugDisplayHistoryPlanInfo{
+			TranscriptCells:      planDiag.TranscriptCells,
+			AppStateCells:        planDiag.AppStateCells,
+			FrontierCells:        planDiag.FrontierCells,
+			FrontierActive:       planDiag.FrontierActive,
+			MutableCells:         planDiag.MutableCells,
+			ActivePhase:          planDiag.ActivePhase,
+			ActiveCellID:         uint64(planDiag.ActiveCellID),
+			FirstCellID:          uint64(planDiag.FirstCellID),
+			FirstCellPhase:       planDiag.FirstCellPhase,
+			FirstCellFinalized:   planDiag.FirstCellFinalized,
+			FirstCellSourceLen:   planDiag.FirstCellSourceLen,
+			LayoutProbed:         planDiag.LayoutProbed,
+			LayoutRowsTotal:      planDiag.LayoutRowsTotal,
+			LayoutRowsScreened:   planDiag.LayoutRowsScreened,
+			LayoutRowsBudgeted:   planDiag.LayoutRowsBudgeted,
+			LayoutBudgetComplete: planDiag.LayoutBudgetComplete,
+		}
 		snap.AppState = app
+	} else {
+		// B1：没有交互渲染器时必须显式输出，而不是让 app_state 整个消失。
+		// headless / CI 进程模型（01/02 E2E）下这是常态：uiActor 只在真
+		// TTY 上挂载。旧行为让读屏断言把「没有渲染器」误读为「渲染器正常」。
+		snap.AppState = &chatDebugDisplayAppStateInfo{
+			Available: false,
+			Reason:    chatDebugAppStateUnavailableReason(session),
+		}
 	}
 
 	// ====== Executor Recovery Diagnostics ======
@@ -780,23 +932,39 @@ func BuildChatDebugDisplaySnapshot() *chatDebugDisplaySnapshot {
 	}
 
 	// ====== Storage / Persistence (P1.5/P1.6/P1.7) ======
-	snap.Storage = chatDebugStorageSnapshot(session)
+	if opts.heavySectionSkipped() {
+		// 存储统计走单连接 SQLite：风暴期该连接正是被争用的资源，
+		// 有界路径不在这里排队。
+		noteSkipped(snap, "storage")
+	} else {
+		snap.Storage = chatDebugStorageSnapshot(session)
+	}
 
 	return snap
 }
 
 // BuildChatDebugDisplayText 返回 /debug display 的纯文本摘要（用于 ?format=text）。
 func BuildChatDebugDisplayText() string {
+	return BuildChatDebugDisplayTextWithOptions(ChatDebugDisplayOptions{})
+}
+
+// BuildChatDebugDisplayTextWithOptions 是带预算的纯文本变体（HTTP 路径）。
+func BuildChatDebugDisplayTextWithOptions(opts ChatDebugDisplayOptions) string {
 	session := chatDebugDisplaySession()
 	if session == nil {
 		return "Debug Display: no active chat session\n"
 	}
-	return buildChatDebugDisplayDocument(session).PlainText()
+	return buildChatDebugDisplayDocumentWithOptions(session, opts).PlainText()
 }
 
 // MarshalChatDebugDisplayJSON 返回缩进 JSON 字节，供 HTTP 端点直接写入。
 func MarshalChatDebugDisplayJSON() ([]byte, error) {
-	return json.MarshalIndent(BuildChatDebugDisplaySnapshot(), "", "  ")
+	return MarshalChatDebugDisplayJSONWithOptions(ChatDebugDisplayOptions{})
+}
+
+// MarshalChatDebugDisplayJSONWithOptions 是带预算的 JSON 变体（HTTP 路径）。
+func MarshalChatDebugDisplayJSONWithOptions(opts ChatDebugDisplayOptions) ([]byte, error) {
+	return json.MarshalIndent(BuildChatDebugDisplaySnapshotWithOptions(opts), "", "  ")
 }
 
 // ============================================================================
@@ -817,6 +985,24 @@ func chatDebugInteractionSummary(session *ChatSession) string {
 		return "<none>"
 	}
 	return session.Interaction.DebugSummary()
+}
+
+// chatDebugAppStateUnavailableReason 解释 app_state 为什么不可用（B1）。
+// 读屏断言需要区分「进程模型没有渲染器」与「渲染器存在但状态异常」：
+// 前者是 headless/CI 的常态（uiActor 只在真 TTY 挂载），后者才是缺陷。
+func chatDebugAppStateUnavailableReason(session *ChatSession) string {
+	switch {
+	case session == nil:
+		return "no active chat session"
+	case session.Interaction == nil:
+		return "no interactive renderer: session.Interaction is nil (headless/CI process model)"
+	case session.Interaction.uiActor == nil:
+		return "no interactive renderer: uiActor not attached (requires a real interactive terminal)"
+	case session.Surface == nil:
+		return "renderer attached but Surface is nil"
+	default:
+		return "app state unavailable"
+	}
 }
 
 // chatDebugTruncate 截断字符串到指定宽度（按 rune，避免切断 UTF-8）。

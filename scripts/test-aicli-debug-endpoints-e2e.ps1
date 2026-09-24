@@ -45,6 +45,17 @@
   启动参数追加 --headless（无人值守；不改变端点与调用契约）。
 .PARAMETER KeepAlive
   不发送 /exit（人工排查用）；脚本收尾强制结束进程并记为 FAIL，避免误当通过。
+.PARAMETER KeepAliveOnFailSec
+  失败时保留进程的秒数（缺省 0 = 立即清理）。>0 时失败现场保持存活，便于
+  人工连上端口复现；同时自动抓取诊断包（diag/）与双通道屏幕取证。
+.PARAMETER NoTimeline
+  关闭后台时序采样（缺省开启：timeline.jsonl 每 500ms 一帧）。
+.PARAMETER TimelineIntervalMs
+  时序采样间隔（毫秒），缺省 500。
+.PARAMETER LatencyBudgetMs
+  `/debug/chat/status` 全量响应的延迟预算（毫秒），缺省 5000。
+  饱和主机上排队延迟会整体抬高（实测空载 3~7ms、满载 2.9~11.9s），
+  阈值用于区分「端点回归」与「机器正在跑别的重负载」。
 .PARAMETER ArtifactDir
   证据目录；缺省 artifacts/aicli-debug-endpoints-e2e/<yyyyMMdd-HHmmss>。
 
@@ -65,6 +76,10 @@ param(
     [switch]$SkipBuild,
     [switch]$Headless,
     [switch]$KeepAlive,
+    [ValidateRange(0, 3600)][int]$KeepAliveOnFailSec = 0,
+    [switch]$NoTimeline,
+    [ValidateRange(100, 60000)][int]$TimelineIntervalMs = 500,
+    [ValidateRange(50, 600000)][int]$LatencyBudgetMs = 5000,
     [string]$ArtifactDir
 )
 
@@ -85,6 +100,16 @@ $runLogPath = Join-Path $ArtifactDir 'run.log'
 $stdoutPath = Join-Path $ArtifactDir 'aicli.stdout.log'
 $stderrPath = Join-Path $ArtifactDir 'aicli.stderr.log'
 $summaryPath = Join-Path $ArtifactDir 'summary.json'
+$timelinePath = Join-Path $ArtifactDir 'timeline.jsonl'
+$diagDir = Join-Path $ArtifactDir 'diag'
+
+# E2E 观测工具集（A1 时序采样 / A2 诊断包 / A3 稳态判据 / B4 清单覆盖 / C4 UIA）。
+. (Join-Path $PSScriptRoot 'aicli-e2e-harness.ps1')
+
+$script:baseUrl = $null
+$script:timelineJob = $null
+$script:consoleTitle = ''
+$script:diagCaptured = $false
 
 function Write-Log {
     param([string]$Message)
@@ -101,6 +126,29 @@ function Add-Result {
     $tag = 'FAIL'
     if ($Passed) { $tag = 'PASS' }
     Write-Log ("[{0}] {1} :: {2}" -f $tag, $Name, $Detail)
+    if (-not $Passed) { Invoke-FailureForensics -Reason "$Name failed: $Detail" }
+}
+
+# Invoke-FailureForensics：A2/C4 取证，幂等（只抓一次）。
+# 首个 FAIL 就**就地**抓取，而不是等到 finally：失败若发生在 /exit 之后，
+# 进程已经退出，迟到的取证只会得到一串 connection refused
+# （20260924-074517 实测：diag/ 全量采集失败，只剩 diag/reason.txt 有信息）。
+function Invoke-FailureForensics {
+    param([string]$Reason)
+    if ($script:diagCaptured) { return }
+    if ([string]::IsNullOrWhiteSpace($script:baseUrl)) { return }
+    $script:diagCaptured = $true
+    try {
+        Save-AicliDiagnostics -BaseUrl $script:baseUrl -DiagDir $diagDir `
+            -Reason $Reason -TimelinePath $timelinePath | Out-Null
+        # C4：双通道取证——HTTP 的 screen 只是"应然帧"，UIA 读到的才是
+        # 用户实际看到的物理帧。两者同时落盘才能定位"谁没显示"。
+        Save-AicliDualChannelForensics -BaseUrl $script:baseUrl -DiagDir $diagDir `
+            -WindowTitle $script:consoleTitle -Label 'screen-fail' | Out-Null
+        Write-Log "diag: 首个 FAIL 就地取证已写入 $diagDir"
+    } catch {
+        Write-Log ("diag: 采集失败: " + $_.Exception.Message)
+    }
 }
 
 # Invoke-JsonHttp：统一走 UTF-8 字节收发，避免 Windows PowerShell 控制台代码页
@@ -219,7 +267,9 @@ try {
     # 1. 独立进程启动（--web-port 显式端口）
     # ------------------------------------------------------------------
     if ($port -eq 0) { $port = Get-FreeTcpPort }
-    $launchArgs = @('chat', '--yolo', '--web-port', "$port")
+    # --pprof：显式开启 pprof 端点族，使 /debug/pprof/executor 进入断言范围
+    # （B4：清单里的端点要么被断言，要么被显式豁免）。
+    $launchArgs = @('chat', '--yolo', '--pprof', '--web-port', "$port")
     if ($Headless) { $launchArgs += '--headless' }
     Write-Log "launch: $ExePath $($launchArgs -join ' ') (cwd=$repoRoot)"
 
@@ -252,6 +302,17 @@ try {
     $ready = $true
     $jsonText = $snapshot.Text
     Add-Result 'startup/endpoints-ready' $true "available=true port=$port uptime_sec=$($snapshot.Json.uptime_sec) version=$($snapshot.Json.version)"
+
+    $script:baseUrl = "http://127.0.0.1:$port"
+    if (-not $NoTimeline) {
+        # A1：后台时序采样（只读 ?fast=1 与屏幕文本，不参与会话调度）。
+        # 时间线是"空屏/卡死"类缺陷的现场：固定 sleep 断言失败时，它给出
+        # 失败前后的连续帧，而不是一个孤立的终态。
+        $script:timelineJob = Start-AicliTimeline -BaseUrl $script:baseUrl -TimelinePath $timelinePath `
+            -IntervalMs $TimelineIntervalMs -Tag 'debug-endpoints-01' `
+            -HarnessPath (Join-Path $PSScriptRoot 'aicli-e2e-harness.ps1')
+        Write-Log "timeline: 后台采样已启动 interval=${TimelineIntervalMs}ms -> $timelinePath"
+    }
 
     # ------------------------------------------------------------------
     # 2. 清单自描述 + 令牌不外泄
@@ -292,6 +353,102 @@ try {
         $leaked = ($jsonText -like "*$tokenPlain*") -or ($textCatalog.Text -like "*$tokenPlain*")
         Add-Result 'discovery/token-not-leaked' (-not $leaked) 'JSON 与 ?format=text 均不含令牌原文'
     }
+
+    # ------------------------------------------------------------------
+    # 3. 读屏（URL 取自清单）
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # 2b. 状态端点契约（B1 显式 app_state / B3 有界降级 / B4 清单覆盖）
+    # ------------------------------------------------------------------
+    $statusUrl = Get-DiscoveredEndpointUrl -Snapshot $snapshot.Json -Method 'GET' -Path '/debug/chat/status'
+    if ([string]::IsNullOrWhiteSpace($statusUrl)) { $statusUrl = "$script:baseUrl/debug/chat/status" }
+    $statusProbe = Invoke-HarnessRequest -Url $statusUrl -TimeoutSec 30 -AsJson
+    $statusDoc = $statusProbe.json
+    Add-Result 'debug/status-available' ([bool]$statusDoc.available) `
+        ("HTTP {0} ms={1} available={2}" -f $statusProbe.status_code, $statusProbe.ms, $statusDoc.available)
+
+    # B1：app_state 必须显式存在（headless 下 available=false + 非空 reason），
+    # 不允许整个区块消失——否则读屏断言无法区分「没有渲染器」与「正常」。
+    $appStateExplicit = ($null -ne $statusDoc.app_state) -and ($null -ne $statusDoc.app_state.available)
+    $appStateReasonOk = $true
+    if ($appStateExplicit -and (-not [bool]$statusDoc.app_state.available)) {
+        $appStateReasonOk = -not [string]::IsNullOrWhiteSpace([string]$statusDoc.app_state.reason)
+    }
+    Add-Result 'debug/status-app-state-explicit' ($appStateExplicit -and $appStateReasonOk) `
+        ("app_state.available={0} reason='{1}'" -f $statusDoc.app_state.available, $statusDoc.app_state.reason)
+
+    # B3：?fast=1 必须登记被跳过的重区块，否则「降级」不可观测；默认路径
+    # 也要在预算内返回（风暴期实测曾 >3s 拖住轮询方）。agents 与 files/storage
+    # 同属重区块：registry 一致性审计要走会话库单连接，实测饱和时单请求阻塞
+    # 数秒（2026-09-23 goroutine 现场：请求卡在 buildChatDebugDisplayAgentsInfo）。
+    $fastProbe = Invoke-HarnessRequest -Url "${statusUrl}?fast=1" -TimeoutSec 30 -AsJson
+    $fastSkipped = @()
+    if ($null -ne $fastProbe.json.skipped_sections) { $fastSkipped = @($fastProbe.json.skipped_sections) }
+    $fastOk = ([bool]$fastProbe.json.fast) -and ($fastSkipped -contains 'files') -and `
+        ($fastSkipped -contains 'storage') -and ($fastSkipped -contains 'agents')
+    $planLayoutExpectation = 'n/a(no-renderer)'
+    if ([bool]$statusDoc.app_state.available) {
+        # plan_layout 只在存在 AppState 时才可能被跳过：没有渲染器时该区块
+        # 根本不存在，理由由 app_state.reason 承担，不重复登记。
+        $planLayoutExpectation = 'required'
+        $fastOk = $fastOk -and ($fastSkipped -contains 'plan_layout')
+    }
+    Add-Result 'debug/status-fast-bounded' $fastOk `
+        ("fast={0} skipped=[{1}] plan_layout={2} ms={3}" -f $fastProbe.json.fast, ($fastSkipped -join ','), $planLayoutExpectation, $fastProbe.ms)
+    # 预算可调：饱和主机上排队延迟会整体抬高（实测空载 3~7ms / 满载 2.9~11.9s），
+    # 阈值要能区分「端点回归」与「机器在跑别的东西」。
+    Add-Result 'debug/status-latency' ([int]$statusProbe.ms -lt $LatencyBudgetMs) `
+        ("full={0}ms fast={1}ms" -f $statusProbe.ms, $fastProbe.ms)
+
+    # B4：/debug/pprof/executor 入断言（此前清单里有、断言里没有）。
+    $execUrl = Get-DiscoveredEndpointUrl -Snapshot $snapshot.Json -Method 'GET' -Path '/debug/pprof/executor'
+    if ([string]::IsNullOrWhiteSpace($execUrl)) { $execUrl = "$script:baseUrl/debug/pprof/executor" }
+    $execProbe = Invoke-HarnessRequest -Url $execUrl -TimeoutSec 20 -AsJson
+    Add-Result 'debug/pprof-executor' (($execProbe.status_code -eq 200) -and ($null -ne $execProbe.json)) `
+        ("HTTP {0} diagnosis='{1}' total_recoveries={2}" -f $execProbe.status_code, $execProbe.json.diagnosis, $execProbe.json.total_recoveries)
+
+    # B4 门禁：清单里的每个端点都必须被断言覆盖，或被显式豁免（附理由）。
+    # 新端点悄悄进入清单而无人断言，就是这道门禁要拦的情况。
+    $assertedPaths = @(
+        '/debug/endpoints', '/debug/chat/status', '/debug/chat/screen',
+        '/web/api/screen', '/web/api/invoke', '/web/api/turn', '/web/api/input',
+        '/debug/pprof/executor'
+    )
+    $exemptPrefixes = @(
+        @{ prefix = '/web/api/config';   reason = '配置面：由 Web 客户端 UI 承担，非本脚本范围' },
+        @{ prefix = '/web/api/sessions'; reason = '会话管理面：由 resume 屏幕 E2E（03）承担' },
+        @{ prefix = '/web/api/mcps';     reason = 'MCP 管理面：需要外部 MCP 进程' },
+        @{ prefix = '/web/api/skills';   reason = '技能目录：静态读取' },
+        @{ prefix = '/web/api/analysis'; reason = '用量分析：静态读取' },
+        @{ prefix = '/web/api/cache';    reason = 'LLM 缓存分析：静态读取' },
+        @{ prefix = '/web/api/events';   reason = 'SSE 事件流：需要持续消费方' },
+        @{ prefix = '/web/api/statusbar'; reason = '状态栏快照：非本脚本范围' },
+        @{ prefix = '/web/api/runtime';  reason = '运行时元数据：非本脚本范围' },
+        @{ prefix = '/web/api/status';   reason = '状态快照：与 /debug/chat/status 同源，已由 debug/status-* 断言覆盖' },
+        @{ prefix = '/web/api/token';    reason = '写令牌读取：本脚本以启动行反证令牌不外泄' },
+        @{ prefix = '/web/';             reason = 'Web 客户端页面：非本脚本范围' },
+        @{ prefix = '/debug/pprof/';     reason = 'pprof 家族：仅 /debug/pprof/executor 入断言，其余按需人工使用' },
+        @{ prefix = '/api/runtime/observe'; reason = '观察平面：默认关闭（Observe.Enabled=false）' }
+    )
+    $exempt = @{}
+    $allEndpoints = @()
+    if ($null -ne $snapshot.Json.endpoints) { $allEndpoints = @($snapshot.Json.endpoints) }
+    foreach ($e in $allEndpoints) {
+        $p = [string]$e.path
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        foreach ($f in $exemptPrefixes) {
+            if ($p.StartsWith($f.prefix)) {
+                if (-not $exempt.ContainsKey($p)) { $exempt[$p] = $f.reason }
+                break
+            }
+        }
+    }
+    # executor 走断言而不是豁免（上面 $assertedPaths 必须同时收录，否则
+    # 它两边都不占，门禁会把「已断言」误报成「无人断言」——20260924-074517 实测）。
+    if ($exempt.ContainsKey('/debug/pprof/executor')) { $exempt.Remove('/debug/pprof/executor') }
+    $coverage = Test-AicliEndpointCoverage -EndpointsJson $snapshot.Json -Asserted $assertedPaths -Exempt $exempt
+    Add-Result 'coverage/endpoints-asserted' $coverage.ok `
+        ("checked={0} asserted={1} exempt={2} uncovered=[{3}]" -f $coverage.checked, $assertedPaths.Count, @($coverage.exempt).Count, (@($coverage.missing) -join ','))
 
     # ------------------------------------------------------------------
     # 3. 读屏（URL 取自清单）
@@ -440,7 +597,17 @@ try {
 } catch {
     Add-Result 'harness/aborted' $false $_.Exception.Message
 } finally {
+    Stop-AicliTimeline -Job $script:timelineJob
+    $failedNow = @($script:results | Where-Object { -not $_.passed }).Count -gt 0
+    # A2/C4：兜底取证（若首个 FAIL 已经抓过则直接返回）。中断/超时类失败
+    # 不会经过 Add-Result，需要在这里补一次——此时进程通常仍然存活。
+    if ($failedNow) { Invoke-FailureForensics -Reason 'debug-endpoints-01 failed' }
     if ($null -ne $proc -and -not $proc.HasExited) {
+        if ($failedNow -and $KeepAliveOnFailSec -gt 0) {
+            # C3：失败现场保留，便于人工连上端口复现（期间端口与端点仍可用）。
+            Write-Log "keepalive: 失败保留进程 pid=$($proc.Id) ${KeepAliveOnFailSec}s（base=$($script:baseUrl)）"
+            Start-Sleep -Seconds $KeepAliveOnFailSec
+        }
         Write-Log "cleanup: 强制结束 pid=$($proc.Id)"
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 500
@@ -452,6 +619,8 @@ try {
 # ----------------------------------------------------------------------
 $failed = @($script:results | Where-Object { -not $_.passed })
 $passedCount = @($script:results | Where-Object { $_.passed }).Count
+$timelineSamples = 0
+if (Test-Path -LiteralPath $timelinePath) { $timelineSamples = @(Get-Content -LiteralPath $timelinePath).Count }
 $summary = [pscustomobject]@{
     finished_at = (Get-Date).ToUniversalTime().ToString('o')
     repo_root   = $repoRoot
@@ -466,6 +635,8 @@ $summary = [pscustomobject]@{
         invoke = $invokeResult
         replay = $replayResult
         turns  = [pscustomobject]@{ before = $turnBeforeCount; after = $turnAfterCount }
+        timeline = [pscustomobject]@{ path = $timelinePath; samples = $timelineSamples }
+        diagnostics = [pscustomobject]@{ dir = $diagDir; captured = (Test-Path -LiteralPath $diagDir) }
     }
 }
 [System.IO.File]::WriteAllText($summaryPath, ($summary | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding($false)))

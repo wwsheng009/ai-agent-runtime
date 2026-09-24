@@ -262,13 +262,20 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// 定位"统一渲染器只更新 active band 而不提交"。
 	//   - 默认返回 JSON；?format=text 返回 /debug display 纯文本摘要。
 	//   - 无活动会话时返回 available=false（HTTP 200），便于轮询探测。
+	//   - 默认受跨区块预算约束（超预算的重区块跳过并登记在 skipped_sections）；
+	//     ?fast=1 直接跳过重区块（files/storage/scene_layout/plan_layout），
+	//     供风暴期高频采样使用。
 	mux.HandleFunc(chatDisplayPath, func(w http.ResponseWriter, r *http.Request) {
+		opts := commands.ChatDebugDisplayBoundedOptions()
+		if r.URL.Query().Get("fast") == "1" {
+			opts = commands.ChatDebugDisplayFastOptions()
+		}
 		if r.URL.Query().Get("format") == "text" {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			_, _ = w.Write([]byte(commands.BuildChatDebugDisplayText()))
+			_, _ = w.Write([]byte(commands.BuildChatDebugDisplayTextWithOptions(opts)))
 			return
 		}
-		body, err := commands.MarshalChatDebugDisplayJSON()
+		body, err := commands.MarshalChatDebugDisplayJSONWithOptions(opts)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusInternalServerError)
