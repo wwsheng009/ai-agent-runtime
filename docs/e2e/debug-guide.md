@@ -269,6 +269,18 @@ pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -UpdateBaseline
 提供的 HTTP 原语 / A1 时序采样 / A2 失败诊断包 / A3 稳态判据 / B4 清单覆盖门禁 / C4 双通道取证，
 三个 harness 共同 dot-source。
 
+独立取证入口（C4 的单文件形态，用于 **aicli 进程已退出、只剩终端窗口** 的现场）：
+
+```powershell
+# 只读：把某个已打开终端窗口的物理缓冲区整段落盘，并按模式计数
+pwsh -File scripts/read-terminal-buffer.ps1 -WindowTitle 'ai-agent-runtime' -Pattern 'AICLI-E2E-HISTORY-\d{3}'
+# → artifacts/terminal-buffer-<stamp>.txt（完整文档）+ 命中计数 + 尾部若干行
+```
+
+判读口径不变：`/debug/chat/screen` 是"应然帧"，UIA 读到的才是"物理帧"；两者不一致
+才说明渲染/终端链路丢了内容。**该脚本不向窗口发送任何输入**（不写 console input、
+不 PostMessage），因此可以对用户正在使用的会话做只读取证。
+
 ## 6. 失败模式与排查
 
 | 现象 | 判读 | 处置 |
@@ -291,6 +303,14 @@ pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -UpdateBaseline
 | `debug/status-fast-bounded` FAIL | `?fast=1` 未登记 `skipped_sections`（消费者会把缺席区块当「健康」） | 检查 `noteSkipped` 调用点；`agents` 与 `files/storage` 同属必登记重区块（registry 审计走会话库单连接，见 [debug-guide-evidence.md](./debug-guide-evidence.md) §4.1）；无渲染器时 `plan_layout` 本就不该出现（该条按 `app_state.available` 条件判定） |
 | `debug/status-latency` FAIL | 可能是端点回归，也可能是机器在跑重负载（本机实测满载时 2.9~11.9s） | 先空载复测一次；确认是回归再查 `storage/files/scene_layout/agents` 是否漏进 fast 路径，必要时用 `-LatencyBudgetMs` 显式放宽并在结论里注明 |
 | `diag/*` 全是 `connection refused` | 取证发生在进程**退出之后**（例如失败点在 S10 `/exit` 之后），端点已消失 | 已修：首个 FAIL 就**就地**取证（`Invoke-FailureForensics`，幂等）；若仍为空，看 `diag/reason.txt` 与 `aicli.stderr.log` |
+| live 终端 E2E 的 marker 计数恒为 0（`marker 1..40 count=0`） | 先看证据里 `http/*_response_provider_wrapper.json` 的 `response_status_code`：**429 + `GoUsageLimitError` = 模型额度耗尽**（2026-09-24 实测）。此时 `assistant_message.content=""`，模型零产出，终端里本来就没有 marker | **不是渲染缺陷**；换可用模型复跑同一套断言（harness 已参数化）：`-Model deepseek-v4.1-flash`，或恢复额度后重跑默认模型 |
+| 同一个 provider/model，交互式客户端能正常对话、E2E 却 429/401（窗口停在「模型列表（逗号分隔）」提示、`aicli.log` 只有启动行 + 一次 DNS 解析） | **凭据来源错位**（2026-09-24 实测）：E2E 原先读 `~/.local/share/opencode/auth.json` 的 `opencode-go`，该 workspace 月度额度已耗尽（429 `wrk_01M12VKS57YGE9RHKE1VV57E2M`）；而交互式客户端用的是 `~/.aicli/auth.json` → `providers.<provider>.api_key`，同一时刻实测 chat **HTTP 200** | 凭据解析顺序已对齐为 `OPENCODE_API_KEY` → `~/.aicli/auth.json` → opencode `auth.json`（`Get-AicliStoreApiKey`，与 `-Provider` 同名条目优先）。判定口径：**只有同源凭据下仍失败**才算产品缺陷；下结论前先用同源 key 打一次 `/v1/models` 与最小 chat |
+| 需要判定"内容到底有没有写进终端"，但 aicli 进程已退出 | 窗口仍在时，物理缓冲区是唯一还能读到的现场（HTTP 端点已 `connection refused`，`/debug/chat/status` 的历史效果计数也不再推进） | `pwsh -File scripts/read-terminal-buffer.ps1 -WindowTitle <title>`（只读、不发输入）；与 `*-http-expected.txt`（应然帧）逐行比对 |
+| `uia_capture.document_characters=0` / `captured=false`，于是 `marker 1..40 count=0`，但 `http/*_response_provider_wrapper.json` 是 200 且 `assistant_message.content` 非空 | **抓取锚点被合法擦除**（2026-09-24 实测）：harness 原先用启动哨兵行做 UI Automation 锚点，而 TUI 重绘/回滚会把哨兵行挤出可见区 → 找不到锚点 → 整屏读取返回空。此时 `agent.turn.finished`（`elapsed_ms` 只有几秒）与 `chat.json` 已证明答案早就渲染完，**不是渲染缺陷** | 抓取在锚点失败时**回退为无锚点整屏读取**（`CaptureCore.Capture(windowHandle, needle)`，空 `needle` 即整屏）。判读口径：先看 `uia_capture.capture_attempts` 与 `*-http-expected.txt`，再用 `pwsh -File scripts/read-terminal-buffer.ps1 -WindowTitle <title>` 独立复核窗口物理缓冲区 |
+| `marker N count=2`（多出的那一次出现在 `──── reasoning ────` 与 `──── end reasoning ────` 之间） | 模型会在思考里复述行格式、试写首尾行；断言原先在**未屏蔽的整屏文档**上计数 → 把"思考里的草稿"误判成"重复渲染" | marker exactly-once 与顺序断言限定在**答案区**：`Remove-ReasoningBlock` 先把 reasoning 分隔线之间的内容替换为**等长空格**（文档索引不变）再计数；`$document` 仍保留给其他断言 |
+| `reasoning sentinel was not projected before marker 01`（而 sentinel 行本身 `count=1` 且在文档里） | 判据是"**整行独立**的 sentinel 行且其 index < `firstMarkerIndex`"；若 `firstMarkerIndex` 取自未屏蔽文档，会落在 reasoning 里的试写行上 → 必然早于答案区真正的 sentinel | `firstMarkerIndex` 与 marker 计数同源，都取自答案区文档；不要改 sentinel 判据去迁就污染值 |
+| `provider reasoning summary artifact was not projected exactly once before marker 01`，且 manifest 里 `reasoning_projection.artifact_found=false` | **供应商/模型差异**（2026-09-24 实测：同一份代码 run3/run4 有签名摘要、run5 没有）：本次响应不带**签名的 reasoning summary**，终端自然无从投影它；reasoning 正文照常渲染，`raw assistant.reasoning` 泄露另有独立断言覆盖 | harness 记为**显式跳过**（manifest 新字段 `reasoning_projection_skipped`）而不是失败，避免门禁随机变红；**摘要存在但没被恰好投影一次 / 投影晚于 marker 01 仍是硬失败**——不要为了"变绿"放宽这一半 |
+| live 终端 E2E 跑了 >4 分钟仍没有 `manifest.json`，`runner-exit-code.txt` 不存在，`aicli-live-e2e.exe` 与 `run-chat.ps1` 仍在 | harness 在等 marker 40，上限是 `-TimeoutSeconds`（默认 300s）；若**父进程被外部杀掉**（例如前台 shell 命令自身超时），runner 与 TUI 会变成孤儿继续跑，这一轮永远不 finalize | 跑 live E2E 用后台任务或足够长的超时；被中断后先 `Stop-Process -Name aicli-live-e2e` 并结束 `run-chat.ps1` 孤儿，再复跑，避免残留窗口干扰下一轮的窗口查找 |
 
 ## 7. 已知观察（写/改 E2E 前必读）
 
@@ -337,7 +357,7 @@ pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -UpdateBaseline
 | **E2E-DEBUG-03**（[手册](./mesh-e2e.md)，已落地） | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1` | 多进程网格控制面：两节点互发现、CLI/HTTP 视图同源、会话租约互斥、跨进程定向调用、实时扇入、崩溃对账与 GC、令牌不泄露、旧目录清理、无进程时仍可读、跨工作区默认可显示可操作 | 真实 provider（跨进程 invoke）；无交互桌面要求；需 `aicli-mesh` 工具已构建 |
 | **一键回归**（§5.1） | `scripts/test-aicli-e2e-all.ps1` | 断言基线门禁 + 顺序跑 01 → 02 → 03 + 聚合结论（`artifacts/aicli-e2e-all/<stamp>/summary.json`） | 01/02/03 依赖的并集（真实 provider；02 需非回环 IPv4；03 需 `aicli-mesh`） |
 | 聚合逻辑自测（§5.1） | `scripts/test-aicli-e2e-all-selftest.ps1` | 桩 harness 验证聚合脚本的 4 个分支（字段归一化 / 计数交叉校验 / schema 漂移 / 子场景 FAIL） | 无（不碰 provider、终端、端口） |
-| 统一渲染 + marker exactly-once | `scripts/test-aicli-opencode-windows-terminal-e2e.ps1` | 真实 provider + Windows Terminal（UI Automation）下的渲染/历史/退出 | 交互桌面 |
+| 统一渲染 + marker exactly-once | `scripts/test-aicli-opencode-windows-terminal-e2e.ps1` | 真实 provider + Windows Terminal（UI Automation）下的渲染/历史/退出；`-Provider` / `-Model` / `-ReasoningEffort` 可覆盖（默认 `opencode.ai` / `deepseek-v4-flash` / `max`），某个模型额度耗尽时可用本机可用模型复跑**同一套**断言。**2026-09-24 已转全绿**（`opencode-wt-3c82e753…`、`opencode-wt-7f825835…` 两轮 `status=passed`、`failures=[]`、marker exactly-once 违例 0）；`manifest.json` 的 `reasoning_projection_skipped` 非空 = 该 provider 本次没返回带签名的 reasoning summary，投影断言按 §6 显式跳过（记录见 [debug-guide-evidence.md](./debug-guide-evidence.md)） | 交互桌面 |
 | 终端渲染基线 | `scripts/test-aicli-windows-terminal-e2e.ps1` | 合成数据在真实宿主终端中的渲染 | 交互桌面 |
 | turn 预算 / 生命周期 | `scripts/test-aicli-turn-budget-e2e.ps1` | 受控注入（无网络）的 turn 生命周期、预算熔断 | 无 |
 

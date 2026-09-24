@@ -199,3 +199,64 @@ reconciler 争用，实测单请求 924~3467ms。
 **回归守护**（`chat_debug_bounded_contract_test.go` 三条契约测试）：冷启动读取不得等待采集
 （注入阻塞采集器，读仍 <250ms 且报 `collecting`）、TTL 内复用同一样本且年龄单调、JSON 与
 文本在采集未完成时显式标注且不输出零值 `registry`。
+
+## 5. live 终端 E2E（opencode + Windows Terminal）转全绿记录（2026-09-24）
+
+**背景**：用户反馈"交互问答时答案无声无息消失"。排查结论：**不在后端**（HTTP 200、`chat.json` 内容完整、
+`agent.turn.finished` 秒级收尾），而在 **aicli TUI 的渲染/输出链路**。因此把
+[debug-guide.md](./debug-guide.md) §9 的「统一渲染 + marker exactly-once」live 场景从"恒红"
+推到可复现的全绿门禁。
+
+**复跑命令**（约 25~60 秒一轮；二进制已在，无需重建）：
+
+```pwsh
+pwsh -NoProfile -File scripts/test-aicli-opencode-windows-terminal-e2e.ps1 `
+  -Provider opencode.ai -Model deepseek-v4.1-flash -ReasoningEffort max
+```
+
+**固化结果**（同一份代码连续两轮，run 目录在 `output/aicli-terminal-e2e/`）：
+
+| 运行 | 结果 | marker exactly-once | UIA 抓取 | reasoning 投影 |
+|------|------|--------------------|----------|----------------|
+| `opencode-wt-3c82e753cde04b57a6cbf2cbdad5ee82` | `status=passed`、`failures=[]` | 违例 0（40 行各一次、顺序递增） | `stable=true`、`capture_attempts=3`、11422 字符 | `artifact_found=true`、`valid=true` |
+| `opencode-wt-7f825835e857482ba9037b8a3d192a11` | `status=passed`、`failures=[]` | 违例 0 | `stable=true`、12034 字符 | `artifact_found=true`、`valid=true` |
+
+两轮 `runner-exit-code.txt` 均为 `0`，`completion` 四项（`marker_40_observed` / `request_completed` /
+`ready_prompt_restored` / `status_identity_validated`）全 `true`。
+
+**证据链**（判定"渲染到底有没有问题"必须按这个顺序看，否则极易把环境问题误判成产品缺陷）：
+
+| 层 | 证据 | 说明 |
+|----|------|------|
+| 模型是否产出 | `chat-logs/<date>/<session>/http/001_response_provider_wrapper.json` | 看 `response_status_code` 与 `assistant_message.content`；429 + `GoUsageLimitError` = 额度耗尽、模型零产出，终端本来就没有 marker |
+| 客户端是否渲染 | `agent.turn.finished`（`elapsed_ms`）、`chat.json` | 答案在秒级完成，远早于 harness 的 300s 等待窗口 |
+| 终端里到底有什么 | `uia-document-full.txt`（harness 抓的整屏文档）+ `scripts/read-terminal-buffer.ps1`（独立只读复核物理缓冲区） | 两者都空才算"没渲染"；只有 harness 抓的为空 = 抓取问题，不是渲染问题 |
+
+**本轮定位并修掉的 4 个真实缺陷**（全部在 harness 侧，产品代码未改）：
+
+| # | 现象 | 根因 | 修复 |
+|---|------|------|------|
+| 1 | E2E 429/401，而同一时刻交互式客户端能正常对话 | harness 读的是 opencode `auth.json` 的 `opencode-go`（该 workspace 月度额度已耗尽），不是交互式客户端实际使用的 `~/.aicli/auth.json` | 凭据解析顺序对齐为 `OPENCODE_API_KEY` → `~/.aicli/auth.json` → opencode `auth.json`（`Get-AicliStoreApiKey`，与 `-Provider` 同名条目优先） |
+| 2 | `uia_capture.capture_attempts=9`、9 次 `captured=false`、`document_characters=0`（于是 marker 全 0） | 抓取以**启动哨兵行**为 UI Automation 锚点，而 TUI 重绘/回滚会合法擦除该行 → 找不到锚点 → 整屏读取为空 | `CaptureCore.Capture(windowHandle, needle)` 支持空 `needle`（无锚点整屏读取）；锚点失败即回退 |
+| 3 | `marker N count=2`、`reasoning sentinel was not projected before marker 01` | 模型会在 **reasoning 块**里复述行格式、试写首尾行；断言在未屏蔽的整屏文档上计数，`firstMarkerIndex` 也取自未屏蔽文档 | 新增 `Remove-ReasoningBlock`：把 `reasoning` / `end reasoning` 分隔线之间的内容替换为**等长空格**（文档索引不变）；marker exactly-once / 顺序断言与 `firstMarkerIndex` 均改用答案区文档 |
+| 4 | `provider reasoning summary artifact was not projected exactly once…`，且 `reasoning_projection.artifact_found=false` | **供应商/模型差异**：有些响应不带签名的 reasoning summary（同一份代码 run3/run4 有、run5 没有），终端无从投影它 | 记为**显式跳过**（manifest 新字段 `reasoning_projection_skipped`）而非失败；**摘要存在但没被恰好投影一次 / 投影晚于 marker 01 仍是硬失败** |
+
+**已知边界**：live 场景需要交互桌面；harness 等 marker 40 的上限是 `-TimeoutSeconds`（默认 300s）。
+若父进程被外部杀掉（例如前台 shell 命令自身超时），`run-chat.ps1` 与 `aicli-live-e2e.exe` 会变成孤儿
+继续跑，且该轮永远不 finalize —— 复跑前先清理孤儿（`Stop-Process -Name aicli-live-e2e`），
+或直接用后台任务跑。
+
+## 6. 三层复验汇总（2026-09-24 20:00 前后，同一工作树）
+
+| 层 | 命令 | 结果 |
+|----|------|------|
+| 控制面（E2E-DEBUG-01） | `pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e.ps1 -SkipBuild` | **PASS=41 / FAIL=0**、exit 0；证据 `artifacts/aicli-debug-endpoints-e2e/20260924-200055/`（`-SkipBuild` 不参与 `build/go-build` 断言，故比 §1 的 42 少 1 条） |
+| 终端渲染基线（合成数据） | `pwsh -NoProfile -File scripts/test-aicli-windows-terminal-e2e.ps1` | 5/5 PASS、exit 0：72 行 history exactly-once、最旧/最新行经宿主文本缓冲区可达、增量历史把最旧行推进 scrollback、prompt/status 各一次、Markdown 渲染一次且无原始语法 |
+| live 统一渲染 + marker exactly-once | `pwsh -NoProfile -File scripts/test-aicli-opencode-windows-terminal-e2e.ps1 -Provider opencode.ai -Model deepseek-v4.1-flash -ReasoningEffort max` | 两轮 `status=passed`、`failures=[]`（详见 §5） |
+
+**结论与边界**：三层门禁下，live 场景的"渲染 / 历史 / 退出"可复现全绿，期间修掉的 4 个问题
+（凭据来源、抓取锚点、断言作用域、供应商差异判定）**全部在 harness 侧**，产品渲染链路未发现缺陷。
+需要注意：这只覆盖"**本场景**能构造出来的现场"（40 行长输出 + reasoning 块 + 滚动回读 + 退出）。
+若用户报的某一次"答案消失"发生在别的会话/窗口状态下，按 §5 的证据链顺序再取一次现场
+（`chat.json` 看内容 → `agent.turn.finished` 看时序 → `read-terminal-buffer.ps1` 看物理缓冲区），
+不要用"E2E 绿了"直接反推那一次没问题。
