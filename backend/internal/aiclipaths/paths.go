@@ -32,6 +32,18 @@ func DefaultWebPortsDir() string {
 	return defaultAICLIDir("web-ports")
 }
 
+// DefaultMeshDir returns the mesh root directory (~/.aicli/mesh) that holds
+// node records, session bindings, leases and the journal.
+//
+// Note: this is only the user-home layout. internal/mesh.ResolvePaths is the
+// authoritative resolver — it also honours AICLI_MESH_DIR / AICLI_HOME and is
+// fail-closed when no home resolves, whereas defaultAICLIDir falls back to a
+// CWD-relative "./.aicli/<name>" path. Callers that need the real mesh root
+// must use internal/mesh.ResolvePaths, not this helper.
+func DefaultMeshDir() string {
+	return defaultAICLIDir("mesh")
+}
+
 // ResolveConfigFilePath resolves a config file path with the following priority
 // (highest first):
 //  1. explicitPath, when it is a real override (see below)
