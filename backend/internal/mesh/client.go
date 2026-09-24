@@ -332,7 +332,9 @@ func (s *Subscriber) run(sub *peerSub) {
 		}
 		sub.noteError(err, s.cfg.Fanin)
 		if err != nil {
-			s.warn("mesh: peer %s stream lost: %v", sub.nodeID, err)
+			// 前缀由调用方的 warning 出口统一添加（main 的 meshWarn），这里
+			// 再写一次 "mesh: " 会渲染成 "mesh: mesh: peer ..."。
+			s.warn("peer %s stream lost: %v", sub.nodeID, err)
 		}
 		if !sleepOrStop(sub.stop, backoff) {
 			return

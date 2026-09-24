@@ -150,6 +150,10 @@ gofmt -l backend/internal/mesh
    **不依赖会话与渲染器**，无会话时同样 200（`session_active=false`）。
 6. 档案写失败 → 停止后续网格写入（降级矩阵 §4.7），chat 不受影响。
 7. `--mesh=false`：不写档案、不订阅、不注册 `mesh/*` 端点（§9.7）。
+8. warning 出口单一化：`HostConfig.Warn` / `PeerSyncConfig.Warn` / 启动失败都走 main 的 `meshWarn`；
+   交互式会话期间经 `commands.NotifyChatDiagnostic` 投递为语义补充 cell（TerminalSession 是唯一物理写者），
+   其余情况回退 stderr。**禁止在会话期间直接写 stderr**：那会落在 FixedBottomSurface 的底部保留区上，
+   把 TUI 状态栏覆盖成半截文本。
 
 **验证与证据**（手工，双终端 + 观察终端）
 

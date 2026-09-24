@@ -499,6 +499,10 @@ func newChatInteractionCoordinator(session *ChatSession) *chatInteractionCoordin
 		// Scene 投影为权威；flag 关闭时 sceneBlockSource 返回 nil，行为不变。
 		coord.blockSourceFn = session.RuntimeEventBridge.sceneBlockSource()
 	}
+	// 交互式会话登记为进程级诊断出口：mesh 等后台 goroutine 的 warning
+	// 必须走语义补充 cell，直接写 stderr 会盖住底部状态栏。非交互 / JSON
+	// 模式由 registerChatDiagnosticSink 自行忽略（见 chat_diagnostic.go）。
+	registerChatDiagnosticSink(coord)
 	return coord
 }
 
@@ -5012,6 +5016,8 @@ func (c *chatInteractionCoordinator) Shutdown() {
 	}
 	c.shutdownPublished.Store(true)
 	c.shutdown = true
+	// 先摘掉诊断出口：收尾阶段终端所有权正在释放，后续诊断回退 stderr。
+	unregisterChatDiagnosticSink(c)
 	// primaryTerminalGeometry is intentionally lock-free because it runs from
 	// the actor's effect path. Publish shutdown before draining the actor so a
 	// concurrent probe cannot acquire a stale compatibility surface.

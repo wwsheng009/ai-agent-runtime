@@ -52,10 +52,11 @@ func startMeshHost(cmd *cobra.Command) *mesh.Host {
 		Exe:           meshExecutablePath(),
 		WorkspacePath: meshWorkspacePath(),
 		WorkspaceName: meshWorkspaceName(),
+		Warn:          meshWarn,
 	})
 	mesh.SetCurrent(host)
 	if err := host.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: mesh node record not written: %v\n", err)
+		meshWarn("node record not written: %v", err)
 	}
 	// S7：控制面就绪即启动 peer 订阅循环与本进程事件的扇入转发（§6.2 / §6.3）。
 	// 两者都只增强实时性：mesh 不可用（--mesh=false / 无网格根目录）时静默跳过，
@@ -67,9 +68,17 @@ func startMeshHost(cmd *cobra.Command) *mesh.Host {
 	return host
 }
 
-// meshWarn 是网格降级路径的统一 warning 出口（stderr）。
+// meshWarn 是网格降级路径的统一 warning 出口。
+//
+// 交互式会话期间投递给 TUI（语义补充 cell，由 TerminalSession 渲染）；
+// 其余情况（启动阶段 / 非交互 / JSON 模式）回退 stderr。直接写 stderr 会
+// 落在 FixedBottomSurface 的底部保留区上，把状态栏覆盖成半截文本。
 func meshWarn(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "Warning: mesh: "+format+"\n", args...)
+	line := "Warning: mesh: " + fmt.Sprintf(format, args...)
+	if commands.NotifyChatDiagnostic(line) {
+		return
+	}
+	fmt.Fprintln(os.Stderr, line)
 }
 
 // meshOriginForCommand answers "who started this process" (cli / resume / mesh).
