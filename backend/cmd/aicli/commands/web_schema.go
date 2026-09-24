@@ -17,6 +17,9 @@ import (
 
 const (
 	ChatWebPath          = "/web/"
+	// ChatWebAPIHealthPath 是网格存活探针（架构 §5.2）：极轻量、不依赖会话与
+	// 渲染器，无会话时同样 200；供网格探活、外部脚本就绪等待与 doctor 复用。
+	ChatWebAPIHealthPath = "/web/api/health"
 	ChatWebAPIScreenPath = "/web/api/screen"
 	ChatWebAPIStatusPath = "/web/api/status"
 	ChatWebAPIStatusBarPath = "/web/api/statusbar"

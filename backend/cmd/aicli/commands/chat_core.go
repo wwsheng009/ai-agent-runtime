@@ -156,6 +156,9 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
+	// mesh：一个 turn 的边界（S2）——翻转节点档案的 session.busy。
+	releaseMeshTurn := beginChatMeshTurn(session)
+	defer releaseMeshTurn()
 	if ctx == nil {
 		ctx = context.Background()
 	}

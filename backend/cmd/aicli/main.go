@@ -12,6 +12,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/consolehost"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 )
 
@@ -21,6 +22,7 @@ var (
 	cfg         *config.Config
 	logFilePath string // AICLI 日志文件路径（命令行覆盖）
 	pprofHandle *pprofServerHandle
+	meshHost    *mesh.Host // 本进程的网格接入点（--mesh=false 时为 nil）
 )
 
 func main() {
@@ -80,6 +82,21 @@ func main() {
 		webTokenSource, tokenErr := commands.ApplyChatWebAuthToken(webTokenFlag)
 		if tokenErr != nil {
 			return fmt.Errorf("failed to configure web write token: %w", tokenErr)
+		}
+
+		// mesh（多进程网格）接入：先于 loopback 服务器启动，进程一启动就写
+		// 节点档案，endpoint 在监听成功后补写（见下方 SetEndpoint）。
+		// --mesh=false 完全短路；网格故障只降级为 warning，绝不影响 chat。
+		meshEnabled, meshFlagErr := rootCmd.Flags().GetBool("mesh")
+		if meshFlagErr != nil {
+			meshEnabled = true
+		}
+		if !meshEnabled {
+			meshHost = nil
+			mesh.SetCurrent(nil)
+			fmt.Fprintln(os.Stderr, "Info: mesh disabled (--mesh=false); this process stays invisible on the mesh")
+		} else if meshHost == nil && shouldJoinMesh(cmd) {
+			meshHost = startMeshHost(cmd)
 		}
 
 		// loopback 服务器（Web 客户端 + /debug 端点）按需启动：
@@ -150,6 +167,14 @@ func main() {
 			listenHost, listenPort := loopbackServerHostPort(pprofHandle)
 			if listenPort > 0 {
 				commands.SetChatWebPortRuntimeInfo(listenPort, listenHost)
+				// mesh：节点档案补上 endpoint/auth/capabilities，本节点从此可被
+				// 其他节点调用（architecture §3.1 / §4.1）。
+				if meshHost != nil {
+					meshHost.SetEndpoint(
+						meshEndpointForListenAddr(listenHost, listenPort),
+						meshAuthForListenAddr(listenHost),
+					)
+				}
 				if targetSessionID != "" {
 					if err := commands.SaveChatWebPortRecord(targetSessionID, listenPort, listenHost); err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to persist web port for session %s: %v\n", targetSessionID, err)
@@ -307,6 +332,7 @@ func main() {
 	rootCmd.PersistentFlags().String("web-host", "", "指定 loopback 服务器监听地址（默认 127.0.0.1；设为 0.0.0.0 在 IPv4 局域网访问，设为 :: 在 IPv6；0.0.0.0 时回环 IP 始终免令牌，本地网络 IP 与远程 IP 需令牌；也可用 AICLI_WEB_HOST 环境变量指定）")
 	rootCmd.PersistentFlags().String("web-token", "", "预设 Web 写令牌（默认每进程随机；也可用 AICLI_WEB_TOKEN；至少 16 位，字符集 A-Za-z0-9-._~）")
 	rootCmd.PersistentFlags().Bool("web-dev", false, "开发模式：在回环模式下跳过写令牌校验（POST/PUT/DELETE 无需 token）；默认在 127.0.0.1/localhost 自动开启。非回环模式下（0.0.0.0）回环 IP 始终免令牌，此旗仅影响回环模式 POST 校验")
+	rootCmd.PersistentFlags().Bool("mesh", true, "启用 mesh 多进程网格接入（默认开启；--mesh=false 完全不写网格节点档案、不注册 mesh 端点、不订阅网格事件）")
 	rootCmd.PersistentFlags().Bool("console-host", false, "Windows：当前 stdin/stdout 为 PTY/pipe 时，在新的原生 Console 窗口中重启 aicli")
 
 	// config 子命令
@@ -494,11 +520,14 @@ func main() {
 
 	// 执行
 	if err := rootCmd.Execute(); err != nil {
+		mesh.CloseCurrent()
 		os.Exit(1)
 	}
 	if pprofHandle != nil {
 		_ = pprofHandle.Close()
 	}
+	// 正常退出路径：档案置 stopped 后删除、释放租约（S4 起）、写 node.stopped。
+	mesh.CloseCurrent()
 }
 
 // prependACPFlag rewrites the root `--acp` / `-a` convenience flag into the

@@ -347,6 +347,9 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// 页面由本机 loopback 服务器直接提供；EventSource 事件流 / 屏幕快照 /
 	// 状态快照 / 输入注入全部复用 commands 包内现有会话与 EventBus。
 	mux.HandleFunc(commands.ChatWebPath, commands.HandleChatWebPage)
+	// /web/api/health 网格存活探针（架构 §5.2）：极轻量，无会话也返回 200，
+	// 供网格探活 / 外部脚本就绪等待 / aicli-mesh doctor 使用。
+	mux.HandleFunc(commands.ChatWebAPIHealthPath, commands.HandleChatWebAPIHealth)
 	mux.HandleFunc(commands.ChatWebAPIScreenPath, commands.HandleChatWebAPIScreen)
 	mux.HandleFunc(commands.ChatWebAPIStatusPath, commands.HandleChatWebAPIStatus)
 	mux.HandleFunc(commands.ChatWebAPIStatusBarPath, commands.HandleChatWebAPIStatusLine)

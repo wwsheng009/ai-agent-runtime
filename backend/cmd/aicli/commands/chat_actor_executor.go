@@ -157,6 +157,9 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
+	// mesh：一个 turn 的边界（S2）——翻转节点档案的 session.busy。
+	releaseMeshTurn := beginChatMeshTurn(session)
+	defer releaseMeshTurn()
 	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
 		return "", fmt.Errorf("local runtime host is not configured")
 	}
@@ -269,6 +272,9 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
+	// mesh：goal 续写同样是一个 turn（S2）。
+	releaseMeshTurn := beginChatMeshTurn(session)
+	defer releaseMeshTurn()
 	if session.RuntimeSession == nil {
 		return "", fmt.Errorf("runtime session is not configured")
 	}

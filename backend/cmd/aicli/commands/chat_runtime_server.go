@@ -512,6 +512,9 @@ func (e *aicliRuntimeServerChatExecutor) Execute(ctx context.Context, session *C
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// mesh：一个 turn 的边界（S2）——翻转节点档案的 session.busy。
+	releaseMeshTurn := beginChatMeshTurn(session)
+	defer releaseMeshTurn()
 	if len(session.ImagePaths) > 0 {
 		return "", fmt.Errorf("aicli runtime-server 模式暂不支持本地图片附件，请改用本地模式或移除 --image")
 	}
@@ -536,6 +539,9 @@ func (e *aicliRuntimeServerChatExecutor) ContinueGoal(ctx context.Context, sessi
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// mesh：goal 续写同样是一个 turn（S2）。
+	releaseMeshTurn := beginChatMeshTurn(session)
+	defer releaseMeshTurn()
 	output, result, err := e.executeRuntimeContinuation(ctx, session)
 	if err != nil {
 		return "", err

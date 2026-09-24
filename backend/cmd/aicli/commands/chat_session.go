@@ -197,6 +197,8 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	if !session.Ephemeral {
 		persistChatWebPortForSession(restoredRuntimeSession.ID)
 	}
+	// mesh：会话恢复/切换后把活动会话写进本进程节点档案（S2）。
+	syncChatMeshSession(session)
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
@@ -304,6 +306,8 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	// uiActor 语义 transcript（micro web client screen snapshot 的第一数据源）
 	// 或 bridge Scene 快照中，否则 "已创建新会话" 信息块会与旧消息混排。
 	resetChatConversationRenderPlane(session)
+	// mesh：新会话成为本进程的活动会话（S2）。
+	syncChatMeshSession(session)
 	return nil
 }
 
