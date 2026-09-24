@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -426,5 +427,52 @@ func TestChatDebugEndpointList_MeshGroup(t *testing.T) {
 		if info.Scheme == "mesh" && info.Enabled {
 			t.Fatalf("网格关闭时 %s 不应为 enabled", info.Path)
 		}
+	}
+}
+
+// S7（§6.4）：扇入丢弃计数是进程内状态，必须出现在 peers 视图的 dropped_events 里——
+// 否则「限流静默丢帧」就成了不可观测的降级，消费方无从知道实时覆盖打了折扣。
+func TestHandleChatWebAPIMeshPeers_ReportsFaninDroppedEvents(t *testing.T) {
+	host := meshTestHost(t)
+	seedMeshPeerNode(t, host.Paths(), "node-peer-two", `E:\ws\two`, "")
+	fanin := meshFanin(t, host)
+
+	// 每 peer 令牌桶突发 = DefaultFaninPeerBurst；多发几帧必然触发丢弃并计数。
+	over := 5
+	for i := 0; i < mesh.DefaultFaninPeerBurst+over; i++ {
+		fanin.PublishPeerFrame("node-peer-two", mesh.Frame{
+			Type:         mesh.FramePeerUpdated,
+			SourceNodeID: "node-peer-two",
+			Seq:          uint64(i + 1),
+			Data:         map[string]any{"state": "busy"},
+		})
+	}
+
+	rec := httptest.NewRecorder()
+	HandleChatWebAPIMeshPeers(rec, loopbackRequest(ChatWebAPIMeshPeersPath))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	_, view := decodeMeshView(t, rec.Body.Bytes())
+
+	found := false
+	for _, node := range view.Nodes {
+		if node.NodeID != "node-peer-two" {
+			continue
+		}
+		found = true
+		if node.DroppedEvents != uint64(over) {
+			t.Fatalf("dropped_events = %d, want %d（超限帧必须计入该 peer）", node.DroppedEvents, over)
+		}
+	}
+	if !found {
+		t.Fatal("视图缺少 peer 节点 node-peer-two")
+	}
+	// 未丢弃的节点不出现该字段（omitempty：它是降级信号，不是常规指标）。
+	if !strings.Contains(rec.Body.String(), `"dropped_events":`+strconv.Itoa(over)) {
+		t.Fatalf("视图缺少 dropped_events 字段: %s", rec.Body.String())
+	}
+	if strings.Count(rec.Body.String(), `"dropped_events"`) != 1 {
+		t.Fatalf("dropped_events 只应出现在被丢弃的 peer 上: %s", rec.Body.String())
 	}
 }

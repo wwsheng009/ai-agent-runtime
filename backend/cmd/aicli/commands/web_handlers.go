@@ -252,6 +252,11 @@ type chatWebSSEFrame struct {
 	data        map[string]interface{} // 事件数据；keepalive 帧为 nil
 	sourceEvent string
 	keepalive   bool
+	// id 非空时在帧首写 `id: <id>` 行（SSE 断点续传游标，§6.3 的 mesh 流用）。
+	id string
+	// payload 非空时直接作为 data 行写出（帧由发布方预先渲染，扇入共享同一份
+	// 只读字节；此时忽略 data，也不追加 _event 信封）。
+	payload []byte
 	// ack 非空时，writer goroutine 在成功写出该帧后关闭它（flush 同步用）；
 	// 帧被丢弃或流判死时不会关闭，由调用方超时兜底。
 	ack chan struct{}
@@ -323,6 +328,15 @@ func (s *chatWebSSEStream) Closed() bool {
 // _event 信封（sequence/timestamp）由 writer goroutine 写时按 FIFO 分配。
 func (s *chatWebSSEStream) writeEvent(event string, data map[string]interface{}, sourceEvent string) {
 	s.enqueue(chatWebSSEFrame{event: event, data: data, sourceEvent: sourceEvent})
+}
+
+// writeRawEvent 入队一个预渲染帧（mesh 扇入）：payload 是 data 行的原始 JSON
+// 字节，id 是 SSE 续传游标。非阻塞，payload 由发布方共享（只读，不再复制）。
+func (s *chatWebSSEStream) writeRawEvent(event, id string, payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	s.enqueue(chatWebSSEFrame{event: event, id: id, payload: payload})
 }
 
 // keepalive 入队一行 SSE 注释帧（`: keepalive`），维持连接存活。非阻塞。
@@ -441,10 +455,20 @@ func (s *chatWebSSEStream) renderFrame(f chatWebSSEFrame) []byte {
 		sb.WriteString(": keepalive\n\n")
 		return []byte(sb.String())
 	}
+	if f.id != "" {
+		sb.WriteString("id: ")
+		sb.WriteString(f.id)
+		sb.WriteString("\n")
+	}
 	sb.WriteString("event: ")
 	sb.WriteString(f.event)
 	sb.WriteString("\ndata: ")
-	if f.data != nil {
+	switch {
+	case f.payload != nil:
+		// 预渲染载荷（mesh 扇入帧）：字节由发布方生成且只读，不再追加 _event
+		// 信封——seq / ts / source_node_id 已在载荷内（§6.3）。
+		sb.Write(f.payload)
+	case f.data != nil:
 		f.data["_event"] = map[string]interface{}{
 			"sequence":       s.seq.Add(1),
 			"schema_version": chatWebSchemaVersion,

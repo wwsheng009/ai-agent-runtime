@@ -91,6 +91,10 @@ type ViewOptions struct {
 	// Filter narrows the *listed* nodes only (§5.4). Nil means "no filter and
 	// no filter echo"; counts, workspaces and ownership are always full-scope.
 	Filter *ViewFilter
+	// DroppedEvents injects the local fan-in drop counters (S7, §6.4): the
+	// frame drops caused by the per-peer token bucket are process-local, so the
+	// view cannot read them from disk. Keyed by node id; nil omits the field.
+	DroppedEvents map[string]uint64
 }
 
 // AuthView is the redacted auth section of a node (§5.4 / §9.1): the token
@@ -134,6 +138,10 @@ type NodeView struct {
 	// reported one.
 	AgeSec      int      `json:"age_sec"`
 	JournalTail []string `json:"journal_tail,omitempty"`
+	// DroppedEvents is how many frames from this peer the local fan-in dropped
+	// (rate limit or a stalled client, §6.4). Zero is omitted: the field is a
+	// degradation signal, not a metric to poll.
+	DroppedEvents uint64 `json:"dropped_events,omitempty"`
 	// Path / Err describe the record file itself (diagnostics for unreadable
 	// or unknown-schema files).
 	Path string `json:"path,omitempty"`
@@ -223,6 +231,15 @@ func BuildView(paths Paths, opts ViewOptions) MeshView {
 	nodes := make([]NodeView, 0, len(files))
 	for _, file := range files {
 		nodes = append(nodes, buildNodeView(paths, file, now, heartbeatTTL, opts))
+	}
+	// S7 降级信号（§6.4）：扇入丢弃计数是进程内状态，由调用方注入；它只描述
+	// 「实时覆盖打了折扣」，不参与归属/冲突判定，也不受 filter 影响。
+	if len(opts.DroppedEvents) > 0 {
+		for i := range nodes {
+			if dropped := opts.DroppedEvents[nodes[i].NodeID]; dropped > 0 {
+				nodes[i].DroppedEvents = dropped
+			}
+		}
 	}
 	selfID := strings.TrimSpace(opts.SelfNodeID)
 	applyOwnership(nodes, selfID)

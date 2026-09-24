@@ -358,6 +358,8 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	if mesh.Current() != nil {
 		mux.HandleFunc(commands.ChatWebAPIMeshSelfPath, commands.HandleChatWebAPIMeshSelf)
 		mux.HandleFunc(commands.ChatWebAPIMeshPeersPath, commands.HandleChatWebAPIMeshPeers)
+		// SSE 扇入（S7）：路由走统一鉴权（§5.8），写路径不存在——这条端点只读。
+		mux.HandleFunc(commands.ChatWebAPIMeshEventsPath, commands.HandleChatWebAPIMeshEvents)
 	}
 	mux.HandleFunc(commands.ChatWebAPIScreenPath, commands.HandleChatWebAPIScreen)
 	mux.HandleFunc(commands.ChatWebAPIStatusPath, commands.HandleChatWebAPIStatus)

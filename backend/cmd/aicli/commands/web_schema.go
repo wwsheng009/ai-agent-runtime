@@ -9,6 +9,7 @@ import (
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 )
 
 // ---------------------------------------------------------------------------
@@ -25,11 +26,15 @@ const (
 	// `aicli-mesh ls` 的同一数据源（§7.5）。--mesh=false 时两条路由不注册（§9.7）。
 	ChatWebAPIMeshSelfPath  = "/web/api/mesh/self"
 	ChatWebAPIMeshPeersPath = "/web/api/mesh/peers"
-	ChatWebAPIScreenPath    = "/web/api/screen"
-	ChatWebAPIStatusPath    = "/web/api/status"
-	ChatWebAPIStatusBarPath = "/web/api/statusbar"
-	ChatWebAPIEventsPath    = "/web/api/events"
-	ChatWebAPIInputPath     = "/web/api/input"
+	// ChatWebAPIMeshEventsPath 是网格实时事件流（SSE，架构 §5.5 / §6）：本节点
+	// 作为扇入点，把 peer 事件并入本进程的流，浏览器只连自己的进程（§6.5）。
+	// 路径与 internal/mesh 的订阅端共用同一常量，避免两侧漂移。
+	ChatWebAPIMeshEventsPath = mesh.ChatWebMeshEventsPath
+	ChatWebAPIScreenPath     = "/web/api/screen"
+	ChatWebAPIStatusPath     = "/web/api/status"
+	ChatWebAPIStatusBarPath  = "/web/api/statusbar"
+	ChatWebAPIEventsPath     = "/web/api/events"
+	ChatWebAPIInputPath      = "/web/api/input"
 	// ChatWebAPIInvokePath 是同步远程调用端点：一次请求内完成
 	// "注入 prompt → 等待 turn 结束 → 返回状态与渲染"，供脚本/外部 Agent
 	// 直接远程调用 aicli chat TUI（与异步的 /web/api/input 互补）。

@@ -57,7 +57,19 @@ func startMeshHost(cmd *cobra.Command) *mesh.Host {
 	if err := host.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: mesh node record not written: %v\n", err)
 	}
+	// S7：控制面就绪即启动 peer 订阅循环与本进程事件的扇入转发（§6.2 / §6.3）。
+	// 两者都只增强实时性：mesh 不可用（--mesh=false / 无网格根目录）时静默跳过，
+	// 任何 peer 故障都只降级为 warning（MN1 / §4.7）。
+	if fanin := host.Fanin(); fanin != nil && fanin.Enabled() {
+		host.StartPeerSync(mesh.PeerSyncConfig{Warn: meshWarn})
+		commands.StartChatWebMeshLocalRelay(host)
+	}
 	return host
+}
+
+// meshWarn 是网格降级路径的统一 warning 出口（stderr）。
+func meshWarn(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "Warning: mesh: "+format+"\n", args...)
 }
 
 // meshOriginForCommand answers "who started this process" (cli / resume / mesh).

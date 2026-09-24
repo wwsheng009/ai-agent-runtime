@@ -76,6 +76,12 @@ type Host struct {
 	record NodeRecord
 	// journal is the node's event log; nil when the mesh root is unavailable.
 	journal *Journal
+	// fanin is the local SSE broadcast hub (S7, architecture §6.1 第 3 层).
+	// nil while the mesh root is unavailable (fail-closed).
+	fanin *Fanin
+	// subscriber is the peer SSE subscription loop (S7, §6.2). nil until
+	// StartPeerSync is called.
+	subscriber *Subscriber
 
 	started  bool
 	closed   bool
@@ -147,6 +153,29 @@ func (h *Host) Journal() *Journal {
 	return h.journal
 }
 
+// Fanin returns the local SSE broadcast hub (S7). A nil or disabled hub means
+// "this process cannot stream mesh frames" — callers degrade silently (§4.7).
+func (h *Host) Fanin() *Fanin {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.fanin
+}
+
+// Subscriber returns the peer SSE subscription loop (nil when peer sync was
+// never started — a process without a loopback control plane still reads the
+// mesh, it just does not stream it).
+func (h *Host) Subscriber() *Subscriber {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.subscriber
+}
+
 // Start writes the initial node record, opens the journal and launches the
 // heartbeat. The returned error is informational only: callers log it as a
 // warning and continue running the chat.
@@ -197,6 +226,8 @@ func (h *Host) Start() error {
 		h.record.Workspace = &WorkspaceInfo{Path: h.cfg.WorkspacePath, Name: h.cfg.WorkspaceName}
 	}
 	h.journal = OpenJournal(h.paths, h.nodeID, h.cfg.Now)
+	// 扇入与 journal 共用 seq 计数器（§6.3「seq 与 journal seq 同源」）。
+	h.fanin = NewFanin(FaninConfig{NodeID: h.nodeID, Journal: h.journal, Now: h.cfg.Now})
 	h.stopCh = make(chan struct{})
 	h.doneCh = make(chan struct{})
 	writeErr := h.writeRecordLocked()
@@ -248,6 +279,13 @@ func (h *Host) SetEndpoint(endpoint EndpointInfo, auth AuthInfo) {
 	h.journal.SetSecrets(auth.Token)
 	h.record.Capabilities = withLoopbackCapabilities(h.record.Capabilities)
 	h.touchLocked()
+	// S7：控制面就绪后本节点才「可被实时订阅」，广播一帧 updated 让已订阅的
+	// 节点立刻把 callable / base_url 翻新，而不必等下一次心跳。
+	h.publishPeerUpdatedLocked(map[string]any{
+		"endpoint_base_url": endpoint.BaseURL,
+		"callable":          true,
+		"capabilities":      append([]string(nil), h.record.Capabilities...),
+	})
 	if err := h.writeRecordLocked(); err != nil {
 		h.warn("cannot update node endpoint: %v", err)
 	}
@@ -276,6 +314,8 @@ func (h *Host) SetSession(session *SessionInfo) {
 		h.touchLocked()
 		_ = h.writeRecordLocked()
 		h.journal.Append(JournalSessionDeactivated, previousID, nil)
+		h.publishSessionChangedLocked("deactivated", previousID, nil)
+		h.publishPeerUpdatedLocked(map[string]any{"state": "idle", "session_id": ""})
 		h.releaseSessionLeaseLocked()
 		return
 	}
@@ -305,7 +345,19 @@ func (h *Host) SetSession(session *SessionInfo) {
 	}
 	if !sameSession {
 		h.journal.Append(JournalSessionActivated, copied.ID, map[string]any{"title": copied.Title})
+		h.publishSessionChangedLocked("activated", copied.ID, map[string]any{
+			"title":          copied.Title,
+			"previous_id":    previousSessionID(previous),
+			"workspace_path": h.workspacePathLocked(),
+		})
+		h.publishPeerUpdatedLocked(h.sessionStateLocked())
 		h.acquireSessionLeaseLocked(copied.ID)
+		// 归属变化（owner / conflict）是 §5.5 的 session.changed 语义之一：
+		// 抢到或让出租约后补一帧，消费方无需等下一次心跳。
+		h.publishSessionChangedLocked("ownership", copied.ID, map[string]any{
+			"lease_state": h.leaseLabelLocked(),
+			"lease_held":  h.leaseHeld,
+		})
 	}
 }
 
@@ -334,6 +386,7 @@ func (h *Host) SetBusy(busy bool, turnID string) {
 		"busy":    busy,
 		"turn_id": turnID,
 	})
+	h.publishPeerUpdatedLocked(h.sessionStateLocked())
 }
 
 // SessionLeaseStatus reports the session lease this host holds.
@@ -466,8 +519,8 @@ func (h *Host) Close() {
 	}
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if !h.paths.Enabled() || h.nodeID == "" {
+		h.mu.Unlock()
 		return
 	}
 	sessionID := ""
@@ -482,6 +535,18 @@ func (h *Host) Close() {
 		h.warn("cannot remove node record: %v", err)
 	}
 	h.journal.Append(JournalNodeStopped, sessionID, nil)
+	fanin, subscriber, nodeID := h.fanin, h.subscriber, h.nodeID
+	h.mu.Unlock()
+
+	// S7 退出路径：先停 peer 订阅（不再拨号），再广播本节点离开，最后关扇入。
+	// 全部在 host 锁外完成——订阅循环会回调 fanin，且 Close 可能等待 goroutine。
+	if subscriber != nil {
+		subscriber.Close()
+	}
+	if fanin != nil {
+		fanin.PublishLocal(FramePeerLeft, map[string]any{"node_id": nodeID, "reason": "stopped"})
+		fanin.Close()
+	}
 }
 
 // WriteDisabled reports whether the host gave up writing (diagnostics/tests).
@@ -616,6 +681,87 @@ func withLoopbackCapabilities(existing []string) []string {
 		}
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// S7：本节点实时帧（扇入的本地来源）
+// ---------------------------------------------------------------------------
+
+// publishPeerUpdatedLocked broadcasts a `mesh.peer.updated` frame about *this*
+// node (§5.5 / §6.3). Publishing happens while the host lock is held on
+// purpose: the fan-in only does non-blocking enqueues and never calls back into
+// the host, so there is no lock-order hazard, and every state flip that reaches
+// the disk record also reaches the stream (one funnel, no drift).
+func (h *Host) publishPeerUpdatedLocked(data map[string]any) {
+	if h == nil || h.fanin == nil {
+		return
+	}
+	h.fanin.PublishLocal(FramePeerUpdated, data)
+}
+
+// publishSessionChangedLocked broadcasts a `mesh.session.changed` frame (§5.5):
+// session activation / deactivation / ownership (lease) transitions.
+func (h *Host) publishSessionChangedLocked(event, sessionID string, extra map[string]any) {
+	if h == nil || h.fanin == nil {
+		return
+	}
+	data := map[string]any{"event": strings.TrimSpace(event), "node_id": h.nodeID}
+	if sid := strings.TrimSpace(sessionID); sid != "" {
+		data["session_id"] = sid
+	}
+	for key, value := range extra {
+		data[key] = value
+	}
+	h.fanin.PublishLocal(FrameSessionChanged, data)
+}
+
+// sessionStateLocked renders the §3.5 state vocabulary plus the session段 of
+// this node: `idle` without a running turn, `busy` during one.
+func (h *Host) sessionStateLocked() map[string]any {
+	data := map[string]any{"state": "idle", "busy": false, "session_id": ""}
+	if h.record.Session == nil {
+		return data
+	}
+	data["session_id"] = h.record.Session.ID
+	data["busy"] = h.record.Session.Busy
+	data["title"] = h.record.Session.Title
+	if h.record.Session.Busy {
+		data["state"] = "busy"
+	}
+	if turnID := strings.TrimSpace(h.record.Session.TurnID); turnID != "" {
+		data["turn_id"] = turnID
+	}
+	return data
+}
+
+// leaseLabelLocked renders this host's own lease state (§4.4). It answers "do
+// we own the session?" — the aggregate owner/conflict label of a whole view is
+// computed by the aggregation layer, not here.
+func (h *Host) leaseLabelLocked() string {
+	switch {
+	case h.leaseLost:
+		return "peer"
+	case h.leaseHeld:
+		return "owner"
+	default:
+		return "none"
+	}
+}
+
+// workspacePathLocked returns the workspace path recorded for this node.
+func (h *Host) workspacePathLocked() string {
+	if h.record.Workspace == nil {
+		return ""
+	}
+	return h.record.Workspace.Path
+}
+
+// previousSessionID reads the id of a session snapshot ("" for nil).
+func previousSessionID(session *SessionInfo) string {
+	if session == nil {
+		return ""
+	}
+	return strings.TrimSpace(session.ID)
 }
 
 func (h *Host) warn(format string, args ...any) {

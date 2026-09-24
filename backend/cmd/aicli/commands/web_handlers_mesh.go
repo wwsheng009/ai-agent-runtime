@@ -157,6 +157,11 @@ func HandleChatWebAPIMeshPeers(w http.ResponseWriter, r *http.Request) {
 	if host := mesh.Current(); host != nil {
 		opts.SelfNodeID = host.NodeID()
 		paths = host.Paths()
+		// S7 降级信号（§6.4）：扇入丢弃计数是进程内状态（限流/缓冲溢出），
+		// 磁盘档案里没有，只能由本进程注入；无丢弃时 DroppedCounts 返回 nil。
+		if fanin := host.Fanin(); fanin != nil {
+			opts.DroppedEvents = fanin.DroppedCounts()
+		}
 	}
 	view := mesh.BuildView(paths, opts)
 	// redact_token=1 是默认值（M7）；只有显式 redact_token=0 / reveal_token=1
