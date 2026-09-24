@@ -254,28 +254,23 @@ type CallTarget struct {
 	MatchedBy string
 }
 
-// ResolveCallTarget 解析节点引用（node_id / 前缀 / 会话 id）到一条可调用的
-// 节点档案。与 `aicli-mesh ls|show` 共用 BuildView 的口径（状态、归属同源），
-// 但令牌从档案原文读取（视图永远脱敏，§9.1）。
+// ResolveCallTarget 解析节点引用（pid:<PID> / node_id / 前缀 / 会话 id / 会话前缀）
+// 到一条可调用的节点档案。与 `aicli-mesh ls|show` 共用 BuildView 与
+// matchTargetNodes 的口径（目标解析、状态、归属全部同源），但令牌从档案原文读取
+// （视图永远脱敏，§9.1）。
 func ResolveCallTarget(paths Paths, ref string) (*CallTarget, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return nil, &CallTargetError{Code: CallCodeTargetNotFound, Message: "target is required"}
 	}
 	view := BuildView(paths, ViewOptions{})
-	type candidate struct {
-		node      NodeView
-		matchedBy string
-	}
-	var matches []candidate
-	for _, node := range view.Nodes {
-		switch {
-		case node.NodeID == ref:
-			matches = append(matches, candidate{node: node, matchedBy: "node"})
-		case hasFoldPrefix(node.NodeID, ref):
-			matches = append(matches, candidate{node: node, matchedBy: "node-prefix"})
-		case sessionIDOfNodeView(node) == ref:
-			matches = append(matches, candidate{node: node, matchedBy: "session"})
+	// 与 CLI（show/url/screen）共用同一解析口径：call/send 曾漏掉 `pid:<PID>`，
+	// 同一个引用在 `show` 下可用、在 `call` 下报 not_found（E2E-DEBUG-03 M4 抓到）。
+	matches, rule, badRef := matchTargetNodes(view, ref)
+	if badRef {
+		return nil, &CallTargetError{
+			Code:    CallCodeTargetNotFound,
+			Message: fmt.Sprintf("target %q is not a valid reference (use <node id>, <session id> or pid:<PID>)", ref),
 		}
 	}
 	if len(matches) == 0 {
@@ -285,11 +280,11 @@ func ResolveCallTarget(paths Paths, ref string) (*CallTarget, error) {
 		}
 	}
 	if len(matches) > 1 {
-		// 精确 node_id 命中优先；否则视为歧义（不猜）。
-		var exact []candidate
-		for _, m := range matches {
-			if m.node.NodeID == ref {
-				exact = append(exact, m)
+		// 精确 node_id 命中优先；否则视为歧义（不猜）——与 CLI 的 pickTarget 同口径。
+		exact := make([]NodeView, 0, 1)
+		for _, node := range matches {
+			if strings.EqualFold(node.NodeID, ref) {
+				exact = append(exact, node)
 			}
 		}
 		if len(exact) == 1 {
@@ -302,50 +297,42 @@ func ResolveCallTarget(paths Paths, ref string) (*CallTarget, error) {
 		}
 	}
 	chosen := matches[0]
-	if chosen.node.Err != "" {
+	if chosen.Err != "" {
 		code := CallCodeTargetNotFound
-		if strings.Contains(chosen.node.Err, "schema") {
+		if strings.Contains(chosen.Err, "schema") {
 			code = CallCodeSchemaTooNew
 		}
 		return nil, &CallTargetError{
 			Code:    code,
-			Message: fmt.Sprintf("node %s record unusable: %s", chosen.node.NodeID, chosen.node.Err),
+			Message: fmt.Sprintf("node %s record unusable: %s", chosen.NodeID, chosen.Err),
 		}
 	}
-	if chosen.node.Record == nil {
+	if chosen.Record == nil {
 		return nil, &CallTargetError{
 			Code:    CallCodeTargetNotFound,
-			Message: fmt.Sprintf("node %s record unavailable", chosen.node.NodeID),
+			Message: fmt.Sprintf("node %s record unavailable", chosen.NodeID),
 		}
 	}
-	if chosen.node.State == NodeStateStopped {
+	if chosen.State == NodeStateStopped {
 		return nil, &CallTargetError{
 			Code:    CallCodeTargetStopped,
-			Message: fmt.Sprintf("node %s is stopped", chosen.node.NodeID),
+			Message: fmt.Sprintf("node %s is stopped", chosen.NodeID),
 		}
 	}
-	record := *chosen.node.Record
+	record := *chosen.Record
 	if record.Endpoint == nil || strings.TrimSpace(record.Endpoint.BaseURL) == "" || record.Endpoint.Port <= 0 {
 		return nil, &CallTargetError{
 			Code:    CallCodeNoEndpoint,
-			Message: fmt.Sprintf("node %s has no loopback control plane (start it with --pprof)", chosen.node.NodeID),
+			Message: fmt.Sprintf("node %s has no loopback control plane (start it with --pprof)", chosen.NodeID),
 		}
 	}
 	return &CallTarget{
-		NodeID:    chosen.node.NodeID,
+		NodeID:    chosen.NodeID,
 		Record:    record,
-		Path:      chosen.node.Path,
-		State:     chosen.node.State,
-		MatchedBy: chosen.matchedBy,
+		Path:      chosen.Path,
+		State:     chosen.State,
+		MatchedBy: rule,
 	}, nil
-}
-
-// sessionIDOfNodeView 读取节点视图里的会话 id（无会话返回空串）。
-func sessionIDOfNodeView(node NodeView) string {
-	if node.Session == nil {
-		return ""
-	}
-	return strings.TrimSpace(node.Session.ID)
 }
 
 // Call 是节点侧的调用入口：编排一次网格调用（§5.6），并写调用方一侧的

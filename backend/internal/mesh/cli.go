@@ -349,29 +349,28 @@ func newTargetError(code int, format string, args ...any) *targetError {
 	return &targetError{code: code, msg: fmt.Sprintf(format, args...)}
 }
 
-// resolveTarget maps a user-supplied reference onto exactly one node. Rules are
-// tried in order and the first rule with at least one match wins, so an exact
-// node id never loses to somebody else's prefix:
-//
-//  1. `pid:<PID>`           exact pid
-//  2. node id               exact
+// matchTargetNodes 是**所有** `<节点|会话>` 参数共用的解析口径（§3 目标解析：
+// show / url / call / send / screen 同源）。规则按优先级求值，第一个非空结果胜出：
+//  1. `pid:<PID>`           exact pid（正整数）
+//  2. node id               exact（大小写不敏感）
 //  3. node id prefix
 //  4. session id            exact
 //  5. session id prefix
 //
-// Zero matches is exit 2 ("目标不存在"); several matches is exit 2 as well
-// ("无法唯一确定") but lists the candidates — the CLI never guesses.
-func resolveTarget(view MeshView, ref string) (NodeView, error) {
+// 规则按顺序求值、第一个有命中的规则胜出，所以精确 node id 永远不会输给别人的前缀。
+// 命中多条时由调用方决定「精确优先 / 歧义报错」（口径见 pickTarget 与
+// ResolveCallTarget）。badRef=true 表示引用本身语法非法（空串或 `pid:` 非正整数），
+// 调用方据此给出各自的用法错误；未命中时 nodes 为空且 badRef=false。
+func matchTargetNodes(view MeshView, ref string) (nodes []NodeView, rule string, badRef bool) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return NodeView{}, newTargetError(ExitUsage, "缺少目标：需要节点 ID、会话 ID 或 pid:<PID>")
+		return nil, "", true
 	}
-	lower := strings.ToLower(ref)
-	if strings.HasPrefix(lower, "pid:") {
+	if strings.HasPrefix(strings.ToLower(ref), "pid:") {
 		raw := strings.TrimSpace(ref[len("pid:"):])
 		pid, err := strconv.Atoi(raw)
 		if err != nil || pid <= 0 {
-			return NodeView{}, newTargetError(ExitUsage, "pid: 目标需要正整数（收到 %q）", ref)
+			return nil, "", true
 		}
 		matches := make([]NodeView, 0, 1)
 		for _, node := range view.Nodes {
@@ -379,30 +378,51 @@ func resolveTarget(view MeshView, ref string) (NodeView, error) {
 				matches = append(matches, node)
 			}
 		}
-		return pickTarget(matches, ref)
+		return matches, "pid", false
 	}
-	rules := []func(NodeView) bool{
-		func(node NodeView) bool { return strings.EqualFold(node.NodeID, ref) },
-		func(node NodeView) bool { return hasFoldPrefix(node.NodeID, ref) },
-		func(node NodeView) bool {
+	rules := []struct {
+		rule  string
+		match func(NodeView) bool
+	}{
+		{"node", func(node NodeView) bool { return strings.EqualFold(node.NodeID, ref) }},
+		{"node-prefix", func(node NodeView) bool { return hasFoldPrefix(node.NodeID, ref) }},
+		{"session", func(node NodeView) bool {
 			return node.Session != nil && strings.EqualFold(node.Session.ID, ref)
-		},
-		func(node NodeView) bool {
+		}},
+		{"session-prefix", func(node NodeView) bool {
 			return node.Session != nil && hasFoldPrefix(node.Session.ID, ref)
-		},
+		}},
 	}
-	for _, rule := range rules {
+	for _, r := range rules {
 		matches := make([]NodeView, 0, 2)
 		for _, node := range view.Nodes {
-			if rule(node) {
+			if r.match(node) {
 				matches = append(matches, node)
 			}
 		}
 		if len(matches) > 0 {
-			return pickTarget(matches, ref)
+			return matches, r.rule, false
 		}
 	}
-	return NodeView{}, newTargetError(ExitNotFound, "找不到目标 %q（本机网格 %d 个节点）", ref, len(view.Nodes))
+	return nil, "", false
+}
+
+// resolveTarget maps a user-supplied reference onto exactly one node.
+// Zero matches is exit 2 ("目标不存在"); several matches is exit 2 as well
+// ("无法唯一确定") but lists the candidates — the CLI never guesses.
+func resolveTarget(view MeshView, ref string) (NodeView, error) {
+	ref = strings.TrimSpace(ref)
+	matches, _, badRef := matchTargetNodes(view, ref)
+	if badRef {
+		if ref == "" {
+			return NodeView{}, newTargetError(ExitUsage, "缺少目标：需要节点 ID、会话 ID 或 pid:<PID>")
+		}
+		return NodeView{}, newTargetError(ExitUsage, "pid: 目标需要正整数（收到 %q）", ref)
+	}
+	if len(matches) == 0 {
+		return NodeView{}, newTargetError(ExitNotFound, "找不到目标 %q（本机网格 %d 个节点）", ref, len(view.Nodes))
+	}
+	return pickTarget(matches, ref)
 }
 
 func hasFoldPrefix(value, prefix string) bool {

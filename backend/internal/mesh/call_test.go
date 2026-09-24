@@ -208,6 +208,52 @@ func TestCallTargetResolutionFailures(t *testing.T) {
 	}
 }
 
+// 目标解析必须与 CLI（show/url/screen）同源：pid:<PID> / node id（含前缀）/
+// session id（含前缀）。回归点：call/send 曾漏掉 `pid:<PID>`——同一个引用在
+// `show` 下可用，在 `call` 下却报 mesh_target_not_found（E2E-DEBUG-03 M4 抓到）。
+func TestResolveCallTargetSharesCLITargetRules(t *testing.T) {
+	paths := testCLIPaths(t)
+	clock := newFakeClock()
+	now := clock.Now()
+	nodeID := "node-1000-20260924T100000Z"
+	sessionID := "session_20260924072950_ltYRU9tG"
+	seedLiveNode(t, paths, now, nodeID, sessionID, `E:\ws\a`)
+
+	cases := []struct {
+		name string
+		ref  string
+		rule string
+	}{
+		{"pid", "pid:" + strconv.Itoa(os.Getpid()), "pid"},
+		{"node id 精确", nodeID, "node"},
+		{"node id 前缀", "node-1000", "node-prefix"},
+		{"session id 精确", sessionID, "session"},
+		{"session id 前缀", "session_20260924072950", "session-prefix"},
+		{"大小写不敏感", strings.ToUpper(nodeID), "node"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			target, err := ResolveCallTarget(paths, tc.ref)
+			if err != nil {
+				t.Fatalf("ResolveCallTarget(%q) 失败：%v", tc.ref, err)
+			}
+			if target.NodeID != nodeID || target.MatchedBy != tc.rule {
+				t.Fatalf("ResolveCallTarget(%q) → node=%s matchedBy=%s，期望 %s / %s",
+					tc.ref, target.NodeID, target.MatchedBy, nodeID, tc.rule)
+			}
+		})
+	}
+
+	// 语法非法（空 / pid 非正整数）与未知 pid 都必须是 not_found：不 panic、不猜。
+	for _, ref := range []string{"", "pid:abc", "pid:0", "pid:99999999"} {
+		_, err := ResolveCallTarget(paths, ref)
+		targetErr, ok := err.(*CallTargetError)
+		if !ok || targetErr.Code != CallCodeTargetNotFound {
+			t.Fatalf("ResolveCallTarget(%q) = %v，期望 %s", ref, err, CallCodeTargetNotFound)
+		}
+	}
+}
+
 func TestCallHappyPathEnvelopeAndRequestShape(t *testing.T) {
 	paths := testCLIPaths(t)
 	clock := newFakeClock()
