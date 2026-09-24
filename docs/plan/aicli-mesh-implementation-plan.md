@@ -757,6 +757,7 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | S11 | `web_handlers_mesh_sessions.go`、`web_handlers_mesh_sessions_test.go` | `web_handlers.go`、`web/js/sessions.js`、`web/js/ui.js`、`index.html`、`style.css` | Web §10.1 + 基线门禁 | 单测输出 + 手工验收 |
 | S12 | `web_handlers_mesh_realtime_test.go` | `web/js/sessions.js`、`web/js/util.js`、`web/js/sse.js` | Web §10.2「实时徽标」+ 基线门禁 | 单测输出 + 手工验收 |
 | S13 | `web_handlers_mesh_polish_test.go` | `web/js/sessions.js`、`web/js/chat.js` | Web §10.2（标题后缀 / refused 文案）+ 基线门禁 | 单测输出 + 手工验收 |
+| S14 | `web_handlers_session_switch_test.go` | `web_handlers.go`、`web/js/sse.js`、`web/js/sessions.js` | Web §10.2（切换事件化）+ 基线门禁 | 单测输出 + 手工验收 |
 
 ---
 
@@ -911,6 +912,57 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 | 单测 | `web_handlers_mesh_polish_test.go`：`TestChatWebSessionsAssetHasSpawnRefusalText`、`TestChatWebTitleHasMeshNodeSuffix` |
 | 文档 | 本节 + Web 子方案 §0.1（P2 五行逐项对账）+ §5.2 / §7.3 / §9 状态标注 + `web-testing.md` §2.7.3 |
 | 未做（按计划） | P2 ②（接管）/ ④（resume SSE 事件化）——留 S14+ |
+
+---
+
+## 22. S14 · resume/new 事件化（P2 ④）：去 8×300ms 轮询
+
+> 来源：Web 子方案 §0.1 P2 ④「resume 的 SSE 事件化」。S13 特意留下一次**实测判定**
+> 才敢动：`web_handlers.go` 的 resume 注释称「注入成功后 SSE 会继续投递
+> session_end/session_start/screen_refresh」，而 `sessions.js` 的注释称「CLI 侧
+> resume 不发布 session_end/session_start」。两者只能有一个对。
+
+### 22.1 实测结论（2026-09-24，代码级判定）
+
+| 断言 | 证据 | 结论 |
+| --- | --- | --- |
+| `session_start`/`session_end` 是 **turn 边界事件** | 唯一发布点 `internal/chat/actor.go:2707`（run 开始）/`:2951`（run 终态）；`/resume`、`/new`、`/load` 只切换当前会话、不产生 turn | 前端注释**正确**，resume 注释**stale** |
+| `/resume` 后 SSE 流里没有可订阅的完成信号 | `chatWebSSEMappings`（`web_schema.go`）无会话切换类映射；`screen_refresh` 只在 `turn_end/session_end/session_interrupted/error` 后附带（`web_handlers.go:599`） | 「订阅既有事件」方案**不成立** |
+| `current_session_id` 与看门狗同源 | `web_handlers.go:984` 与看门狗都读 `currentRuntimeSessionID(session)` | 合成事件到达时列表口径已就绪，无先后竞态 |
+
+→ 采用**服务端补发**：SSE handler 自己盯会话身份变化，合成 `session_switched`。
+
+### 22.2 范围与落点
+
+| 项 | 落点 | 说明 |
+| --- | --- | --- |
+| 合成事件 | `web_handlers.go` | `chatWebSessionWatchInterval = 250ms` 看门狗 + 纯函数 `chatWebSessionSwitchNotice(previous, current)`（同一身份 / 当前会话缺失时不通知）；载荷 `{session_id, previous_session_id}` |
+| 事件文档 | `web_handlers.go::chatWebSSESchema()` | `session_switched`（SourceEvent 为空 = 服务端合成），与 `connected/heartbeat/screen_refresh` 同类 |
+| 前端订阅 | `web/js/sse.js` | 监听列表 + 与 `session_start/session_end` 共用刷新分支（`loadSessions` 覆盖网格视图/缓存与技能页签/会话身份），`session_switched` 额外调 `notifySessionSwitchedCompleted()` |
+| 去轮询 | `web/js/sessions.js` | `proceedResumeSession` / `createNewSession` 删除 8×300ms 轮询；改为 `armSessionSwitchFallback(...)` 单次 4s 兜底（仅覆盖 SSE 断连）+ `notifySessionSwitchedCompleted()`（解禁新建按钮、终态提示、清兜底） |
+| 注释纠偏 | `web_handlers.go`（resume handler doc） | 明确「注入只是排队、切换由主循环执行、不产生 turn」，与前端注释同源 |
+
+**不做**（留 S15）：P2 ② 接管二次确认（CLI `--takeover` + Web 入口 + 租约回收 + `orphaned` 提示）。
+
+### 22.3 验证
+
+| 层 | 断言 |
+| --- | --- |
+| 服务端单测 | `web_handlers_session_switch_test.go`：`TestChatWebSessionSwitchNotice`（纯函数口径）、`TestHandleChatWebAPIEvents_EmitsSessionSwitchedOnSwitch`（真 SSE 流：身份变化 → 事件 + 前后 id）、`TestChatWebSSESchemaDocumentsSessionSwitched` |
+| 前端契约 | 同文件 `TestChatWebSessionsAssetUsesSessionSwitchedEvent`：sse.js 订阅 + 分支 + 调用点；sessions.js 兜底存在且 `pollResumed`/`pollNew`/`setTimeout(..., 300)` 残留为零 |
+| 门禁 | `go build ./...`、`go vet ./cmd/aicli/commands/ ./internal/mesh/`、`go test ./cmd/aicli/commands/ ./internal/mesh/`、`node --check`（ES 模块语法） |
+| E2E | 01/02/03 聚合回归（本切片不动端点与流，回归只作基线保护） |
+| 手工 | `web-testing.md` §2.7.4（切换即时刷新 / 终端发起的切换也刷新 / SSE 断连兜底 / 新建按钮恢复） |
+
+### 22.4 落地记录（2026-09-24）
+
+| 项 | 实际 |
+| --- | --- |
+| 服务端 | `web_handlers.go`：`chatWebSessionWatchInterval` + `chatWebSessionSwitchNotice` + SSE handler 看门狗分支 + schema 收录 + resume 注释纠偏 |
+| 前端 | `web/js/sse.js`：监听 `session_switched` + 分支复用 + `notifySessionSwitchedCompleted` 调用；`web/js/sessions.js`：删两处轮询、加 `armSessionSwitchFallback` / `notifySessionSwitchedCompleted` |
+| 单测 | `web_handlers_session_switch_test.go`（4 个） |
+| 文档 | 本节 + §18 索引 + Web 子方案 §0.1 / §8.3 / §10.2 回填 + `web-testing.md` §2.7.4 |
+| 未做（按计划） | P2 ②（接管）——留 S15 |
 
 ---
 

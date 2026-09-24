@@ -6,7 +6,7 @@ import { clearPendingPrompts, getUiState, refreshScreen, setUI, updateTitle } fr
 import { handleCacheSSEEvent } from "./cache.js";
 import { loadRuntimeMeta } from "./runtime.js";
 import { loadStatusBar } from "./statusbar.js";
-import { loadSessions } from "./sessions.js";
+import { loadSessions, notifySessionSwitchedCompleted } from "./sessions.js";
 import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, endStream, isStreamActive, renderStream, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
 import { webAuthToken } from "./util.js";
 
@@ -200,6 +200,7 @@ function onSSEEvent(eventName, data) {
       break;
     case "session_start":
     case "session_end":
+    case "session_switched":
       // 会话切换/结束：复位按钮、刷新会话列表与屏幕
       setUI("idle", "");
       dynamicStatus = null;
@@ -209,6 +210,10 @@ function onSSEEvent(eventName, data) {
       loadStatusBar(); // 会话切换后刷新状态栏
       endStream();
       refreshScreen(true);
+      // session_switched 由服务端按会话身份变化合成（P2 ④：/resume、/new、/load
+      // 不产生 turn，运行时不会发布 session_start/end）：额外恢复切换期间禁用的
+      // 入口，并清掉 sessions.js 的断连兜底定时器。
+      if (eventName === "session_switched") { notifySessionSwitchedCompleted(); }
       break;
     case "dynamic_status":
       // 动态状态栏：active=false 或空文本时清除；active=true 时显示并
@@ -265,7 +270,7 @@ function openEventSource() {
     onSSEEvent("message", data);
   };
   ["connected", "heartbeat", "screen_refresh", "turn_start", "turn_delta", "turn_end",
-   "session_start", "session_end", "session_interrupted", "reasoning_delta",
+   "session_start", "session_end", "session_switched", "session_interrupted", "reasoning_delta",
    "assistant_delta", "assistant_image_progress", "tool_start", "tool_end", "approval_requested",
    "approval_resolved", "question_asked", "question_answered", "dynamic_status", "model_changed",
    "cache_request_finished"].forEach(function (name) {

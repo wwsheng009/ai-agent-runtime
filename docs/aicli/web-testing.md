@@ -295,6 +295,25 @@ Network（筛 `mesh/events`）与 Console。数据源：`GET /web/api/mesh/event
       上触发（前端不用 `call`，Web 子方案 §6.1），浏览器侧无需复现；只确认
       `sessions.js::SPAWN_CODE_TEXT` 含该 code（由 `web_handlers_mesh_polish_test.go` 锁定）。
 
+#### 2.7.4 会话切换事件化与断连兜底（S14）
+
+前置：一个 `aicli chat --pprof --mesh` 进程；DevTools 打开 Network（筛 `web/api/events`）与 Console。
+数据源：SSE `session_switched`（服务端合成：handler 每 250ms 看 `current_session_id` 变化，
+契约见 `web_handlers.go::chatWebSSESchema()`；实施计划 §22）。
+
+- [ ] **切换即时刷新**：在侧栏点另一个会话 → 输入区状态先显示「已切换，刷新中…」，随后
+      `session_switched` 到达（Network 里该帧 `data` 含 `session_id` / `previous_session_id`），
+      侧栏、屏幕与顶栏标题一次性对齐到目标会话；状态行显示「会话已切换」。旧实现要等最多
+      2.4s（8×300ms 轮询），现在应在 ~250ms 内完成。
+- [ ] **终端发起的切换也会刷新**：在**终端**里输入 `/resume <id>`（或 `/new`）→ 网页窗口同样
+      收到 `session_switched` 并刷新（旧实现完全看不到终端发起的切换）。
+- [ ] **无轮询残留**：切换后 Network 里**没有**连续的 `/web/api/sessions?...&scope=all` 轮询
+      （只剩事件到达后的一次重拉）。
+- [ ] **断连兜底**：DevTools 里断开 SSE（Network 面板右键 `web/api/events` → Block request URL）
+      后再点切换 → 4s 后仍会重拉列表并显示「已切换(状态未同步)」，页面不卡死。
+- [ ] **新建按钮恢复**：点「新建会话」→ 切换完成后按钮恢复可用（S14 起由 `session_switched`
+      分支调用 `notifySessionSwitchedCompleted()`；SSE 断连时由兜底定时器恢复）。
+
 ## 3. 协议下拉框专项用例（combo popup）
 
 Provider 编辑弹窗的协议字段曾用原生 `<input list=datalist>`，存在**有值与无值显示不一致**的缺陷：浏览器会按 input 当前值过滤 datalist 选项，编辑 `openai` 协议的 provider 时下拉只剩匹配项，新增（空值）时才显示全部。已改为 ▼ 按钮 + 自定义 popup（与底部 Model 字段同方案）。以下用例为该组件的回归重点：

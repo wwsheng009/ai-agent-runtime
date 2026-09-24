@@ -1046,6 +1046,37 @@ function showSessionConflict(ctx) {
   }
 }
 
+// armSessionSwitchFallback(targetID, timeoutStatus)：会话切换的断连兜底（P2 ④）。
+//
+// 正常路径：主循环执行 /resume、/new、/load 后，服务端 SSE handler 合成
+// session_switched，sse.js 的事件分支完成刷新（loadSessions 覆盖网格视图、
+// 缓存/技能页签、会话身份与列表重绘）。只有 SSE 断连时本定时器才生效，语义
+// 与旧的 8×300ms 轮询超时收尾一致：重拉列表、清本地回显、按目标 id 回退身份。
+var sessionSwitchFallbackTimer = null;
+function armSessionSwitchFallback(targetID, timeoutStatus) {
+  if (sessionSwitchFallbackTimer) { clearTimeout(sessionSwitchFallbackTimer); }
+  sessionSwitchFallbackTimer = setTimeout(function () {
+    sessionSwitchFallbackTimer = null;
+    loadSessions();
+    clearPendingPrompts(); // 旧会话的本地回显不带到被切换会话
+    refreshScreen(true);
+    if (targetID) { updateSessionIdentity(targetID); } // 与旧轮询超时同口径：回退目标会话 id
+    if (timeoutStatus) { sendStatusEl.textContent = timeoutStatus; }
+  }, 4000);
+}
+
+// notifySessionSwitchedCompleted：由 sse.js 的 session_switched 分支调用（P2 ④）。
+// 切换完成即恢复切换期间禁用的入口（新建按钮），清掉断连兜底定时器，并给出
+// 终态提示（旧实现由 8×300ms 轮询的收尾分支承担同一职责）。
+export function notifySessionSwitchedCompleted() {
+  if (sessionsNewBtn) { sessionsNewBtn.disabled = false; }
+  if (sessionSwitchFallbackTimer) {
+    clearTimeout(sessionSwitchFallbackTimer);
+    sessionSwitchFallbackTimer = null;
+  }
+  sendStatusEl.textContent = "会话已切换";
+}
+
 // 确认后的实际切换逻辑（POST /web/api/sessions/resume → 注入 /resume <id>）。
 // force=true 跳过网格归属检查（§6.3）：只在用户于冲突弹窗里显式确认
 // 「仍在本进程切换」时使用。
@@ -1080,34 +1111,10 @@ function proceedResumeSession(id, force) {
           refreshCacheAnalyticsIfActive();
         } else {
           // /resume 是异步注入输入队列的（主循环稍后才执行），立即刷新拿到的是旧列表。
-          // 且 CLI 侧 resume 不发布 session_end/session_start SSE 事件，无法靠 SSE 感知完成时机。
-          // 因此轮询 /web/api/sessions，直到 current_session_id 变成目标会话（带次数上限）。
-          var attempts = 0;
-          (function pollResumed() {
-            fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort) + "&scope=all", { cache: "no-store" })
-              .then(function (r) { return r.ok ? r.json() : null; })
-              .then(function (data) {
-                if (!data) { return; }
-                var cur = data.current_session_id || "";
-                if (cur === id || ++attempts >= 8) {
-                  sessions = data.sessions || [];
-                  applyMeshView(data);
-                  clearPendingPrompts(); // 旧会话的本地回显不带到被恢复会话
-                  renderSessionList();
-                  refreshScreen(true);
-                  // 当前会话已切换：同步会话 id，缓存页签可见则立即重拉，
-                  // 不可见则下次进入页签时按会话不一致强制刷新。
-                  syncCacheSession(cur);
-                  syncSkillsSession(cur);
-                  // 会话身份同步（轮询超时兜底：回退目标会话 id）
-                  updateSessionIdentity(cur || id);
-                  sendStatusEl.textContent = cur === id ? "已切换" : "已切换(状态未同步)";
-                } else {
-                  setTimeout(pollResumed, 300);
-                }
-              })
-              .catch(function (err) { console.error("resume poll failed:", err); });
-          })();
+          // 切换不产生 turn，运行时不会发布 session_end/session_start；服务端 SSE
+          // handler 以会话身份变化为准合成 session_switched（P2 ④），sse.js 的事件
+          // 分支负责刷新。这里不再轮询 /web/api/sessions，只留断连兜底定时器。
+          armSessionSwitchFallback(id, "已切换(状态未同步)");
         }
       } else if (json.status === "running_elsewhere") {
         // §5.7 / §6.3：目标会话正被另一个活节点服务，未注入队列 → 三段式弹窗。
@@ -1138,42 +1145,16 @@ function proceedResumeSession(id, force) {
 function createNewSession() {
   if (sessionsNewBtn) { sessionsNewBtn.disabled = true; }
   sendStatusEl.textContent = "新建会话中…";
-  var oldID = "";
-  fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort), { cache: "no-store" })
-    .then(function (r) { return r.ok ? r.json() : null; })
-    .then(function (data) {
-      if (data) { oldID = data.current_session_id || ""; }
-      return fetch("/web/api/sessions/new", { method: "POST" });
-    })
+  fetch("/web/api/sessions/new", { method: "POST" })
     .then(function (res) {
       return res.json().catch(function () { return { status: "error", reason: "bad response" }; });
     })
     .then(function (json) {
       if (json.status === "queued") {
-        var attempts = 0;
-        (function pollNew() {
-          fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort) + "&scope=all", { cache: "no-store" })
-            .then(function (r) { return r.ok ? r.json() : null; })
-            .then(function (data) {
-              if (!data) { return; }
-              var cur = data.current_session_id || "";
-              if ((cur !== "" && cur !== oldID) || ++attempts >= 8) {
-                sessions = data.sessions || [];
-                applyMeshView(data);
-                clearPendingPrompts(); // 旧会话的本地回显不带到新会话
-                renderSessionList();
-                refreshScreen(true);
-                // 新会话就绪：同步会话 id，缓存页签按需重拉（同上）。
-                if (cur) { syncCacheSession(cur); updateSessionIdentity(cur); }
-                syncSkillsSession(cur);
-                if (sessionsNewBtn) { sessionsNewBtn.disabled = false; }
-                sendStatusEl.textContent = (cur !== "" && cur !== oldID) ? "已新建会话" : "已新建(状态未同步)";
-              } else {
-                setTimeout(pollNew, 300);
-              }
-            })
-            .catch(function () { if (sessionsNewBtn) { sessionsNewBtn.disabled = false; } });
-        })();
+        // /new 同样由主循环异步执行：切换完成由 SSE session_switched 驱动（P2 ④），
+        // 届时 notifySessionSwitchedCompleted 解禁按钮。这里不再轮询
+        // /web/api/sessions，只留断连兜底定时器。
+        armSessionSwitchFallback("", "已新建(状态未同步)");
       } else {
         if (sessionsNewBtn) { sessionsNewBtn.disabled = false; }
         sendStatusEl.textContent = "新建失败: " + (json.reason || json.status);

@@ -528,6 +528,31 @@ const chatWebEventHeartbeatInterval = 30 * time.Second
 // chatWebEventResubscribeInterval 是重新解析当前会话 EventBus 的周期（§8.5）。
 const chatWebEventResubscribeInterval = 2 * time.Second
 
+// chatWebSessionWatchInterval 是检测「当前会话已切换」的周期（P2 ④）。
+//
+// 动机：/resume、/new、/load 只切换当前会话，不产生任何 turn，运行时 actor
+// 因此不会发布 session_start/session_end（二者是 turn 边界事件，见
+// internal/chat/actor.go 的 publish 点）。Web 前端过去只能靠 8×300ms 轮询
+// /web/api/sessions 感知切换完成。这里由 SSE handler 自己盯住会话身份变化，
+// 合成 session_switched 事件，前端改为事件驱动（保留一个断连兜底定时器）。
+const chatWebSessionWatchInterval = 250 * time.Millisecond
+
+// chatWebSessionSwitchNotice 构造 session_switched 事件的载荷（P2 ④）。
+//
+// 返回 ok=false 表示无需通知：当前会话身份与上次一致，或当前会话缺失
+// （会话拆卸/重建的中间态不通知，避免前端在无会话时刷新出空列表）。
+func chatWebSessionSwitchNotice(previous, current string) (map[string]any, bool) {
+	previous = strings.TrimSpace(previous)
+	current = strings.TrimSpace(current)
+	if current == "" || current == previous {
+		return nil, false
+	}
+	return map[string]any{
+		"session_id":          current,
+		"previous_session_id": previous,
+	}, true
+}
+
 // HandleChatWebAPIEvents 提供 SSE 事件流。
 //
 // 实现要点（§4.2.3 + §8.5）：
@@ -536,8 +561,10 @@ const chatWebEventResubscribeInterval = 2 * time.Second
 //  2. 订阅 session.LocalRuntimeHost.EventBus（host 级总线），事件经 §5.1 映射后转发；
 //  3. 每次事件处理时重新解析 chatDebugDisplaySession()，若 EventBus 实例变化
 //     （会话切换/重建）则重新订阅并取消旧订阅；
-//  4. 定期发送 `: keepalive` 注释；无事件超过 30s 时发送 heartbeat 事件；
-//  5. 连接断开（r.Context() 取消）时 Unsubscribe 并停止定时器，避免泄漏。
+//  4. 每 250ms 检查当前会话身份是否变化（/resume、/new、/load 不产生 turn），
+//     变化时合成 session_switched 事件（P2 ④）；
+//  5. 定期发送 `: keepalive` 注释；无事件超过 30s 时发送 heartbeat 事件；
+//  6. 连接断开（r.Context() 取消）时 Unsubscribe 并停止定时器，避免泄漏。
 func HandleChatWebAPIEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -632,6 +659,11 @@ func HandleChatWebAPIEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// 会话切换看门狗（P2 ④）：lastSessionID 只在本 goroutine 读写。
+	lastSessionID := currentRuntimeSessionID(chatWebSession())
+	sessionWatch := time.NewTicker(chatWebSessionWatchInterval)
+	defer sessionWatch.Stop()
+
 	// 主循环：keepalive 注释 + heartbeat。
 	ticker := time.NewTicker(chatWebEventKeepaliveInterval)
 	defer ticker.Stop()
@@ -648,6 +680,16 @@ func HandleChatWebAPIEvents(w http.ResponseWriter, r *http.Request) {
 			unsub()
 			subMu.Unlock()
 			return
+		case <-sessionWatch.C:
+			// 会话身份变化即通知（P2 ④）：/resume、/new、/load 不产生 turn，
+			// 没有这条合成事件，前端只能靠轮询 /web/api/sessions 感知完成。
+			current := currentRuntimeSessionID(chatWebSession())
+			if notice, ok := chatWebSessionSwitchNotice(lastSessionID, current); ok {
+				stream.writeEvent("session_switched", notice, "session_switched")
+			}
+			if current != "" {
+				lastSessionID = current
+			}
 		case <-ticker.C:
 			if stream.lastEventAge() >= chatWebEventHeartbeatInterval {
 				stream.writeEvent("heartbeat", map[string]interface{}{
@@ -1089,8 +1131,10 @@ type chatWebSessionsResumeRequest struct {
 //
 // 与 POST /web/api/input 的 prompt 注入共用同一机制（输入队列 +
 // wakeComposerRead），保证会话状态只被主循环单写者修改，避免 HTTP
-// goroutine 与正在运行的 turn 竞态。注入成功后 SSE 会继续投递
-// session_end/session_start/screen_refresh，前端据此刷新屏幕。
+// goroutine 与正在运行的 turn 竞态。注入只是排队，切换由主循环稍后执行：
+// 该过程不产生 turn，运行时不会发布 session_end/session_start，前端感知
+// 「切换完成」依赖 SSE handler 合成的 session_switched（P2 ④，见
+// chatWebSessionWatchInterval）；事件到达前不要依赖任何“已切换”状态。
 //
 // 网格归属（Web 子方案 §6.3，S11）：请求体可带 force=true 跳过检查。
 // 未带 force 且目标会话正被另一个活节点服务时返回 status=running_elsewhere
@@ -1492,6 +1536,16 @@ func chatWebSSESchema() []webSSEEventSpec {
 				{Name: "reason", Type: "string", Description: "触发原因（turn_end/session_end 等）"},
 			},
 			Example: `{"reason":"turn_end"}`,
+		},
+		{
+			Event:       "session_switched",
+			Description: "当前会话已切换（/resume、/new、/load）：服务端按会话身份变化合成，前端据此重拉会话列表与屏幕",
+			SourceEvent: "",
+			Fields: []webSSEFieldSpec{
+				{Name: "session_id", Type: "string", Description: "切换后的会话 ID"},
+				{Name: "previous_session_id", Type: "string", Description: "切换前的会话 ID（进程内首次切换时可能为空）"},
+			},
+			Example: `{"session_id":"sess_new","previous_session_id":"sess_old"}`,
 		},
 		{
 			Event:       "error",
