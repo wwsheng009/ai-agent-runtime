@@ -454,7 +454,11 @@ function rowIndices() {
 function rowBodyText(index) {
   var el = screenEl.querySelector('[data-msg-index="' + index + '"]');
   if (!el) { return null; }
-  var body = el.querySelector(".msg-body");
+  // assistant 行默认 md：.msg-body 同时含 .msg-text（原文）与 .msg-md（渲染），
+  // 直接读 .msg-body.textContent 会双算原文；取 .msg-text（原文）作为规范内容；
+  // 其它角色正文只在 .msg-body，查不到 .msg-text 时回退 .msg-body。
+  // （与 chat.js domMessageText/messageBodyEl 同源）
+  var body = el.querySelector(".msg-text") || el.querySelector(".msg-body");
   return body ? body.textContent : null;
 }
 

@@ -109,11 +109,12 @@ aicli chat --pprof
       会话复制（⧉ 复制）在只加载了部分消息时仍复制**完整**会话（服务端全量 transcript）。
 
 - [ ] **assistant 消息 md|txt 渲染**：每条 assistant 气泡右上角有 `md` / `txt` 二选一控件，
-      默认 `txt`（纯文本，Markdown 标记原样显示）；点 `md` 后按 Markdown 渲染（标题 / 粗体 /
-      删除线 / 列表 / 任务列表 / 引用 / 表格 / 代码块），代码块悬停出现「复制」按钮且可复制；
-      再点 `txt` 立即切回原文，反复切换不丢内容、不叠加、不重解析。切换只作用于该条消息
-      （`data-render-mode` 属性驱动 CSS 显隐，无内联样式）；生成中的流式气泡固定按 Markdown
-      渲染，不参与切换。会话复制（⧉ 复制）仍取原文，不含代码块「复制」按钮文字。
+      默认 `md`（Markdown 渲染）；点 `txt` 切回纯文本（Markdown 标记原样显示）；再切 `md`
+      立即恢复渲染；反复切换不丢内容、不叠加、不重解析。Markdown 渲染支持标题 / 粗体 /
+      删除线 / 列表 / 任务列表 / 引用 / 表格 / 代码块，代码块悬停出现「复制」按钮且可复制；
+      切换只作用于该条消息（`data-render-mode` 属性驱动 CSS 显隐，无内联样式）；
+      实时流式气泡固定按 Markdown 渲染，不参与切换。会话复制（⧉ 复制）仍取 `.msg-text`
+      原文，不含代码块「复制」按钮文字。
 
 - [ ] **单条消息复制（所有角色）**：每条消息（你 / aicli / 推理 / 工具 / 系统 / 命令 / 诊断 /
       事件）抬头行最右都有 `⧉` 复制图标，点击**只复制该条消息的正文**：不含角色标签、控件文字
@@ -386,7 +387,7 @@ node scripts/verify-micro-web-tool-output.mjs  # 工具输出折叠/展开：抬
 node scripts/verify-micro-web-msg-window.mjs   # 长会话窗口化：首屏只渲染最新一页、尾部增量替换与窗口右移保留历史、上滚以 msg_before 前插并补偿 scrollTop、到顶停止、pending 气泡确认、游标异常守卫
 node scripts/verify-micro-web-msg-filter.mjs   # 对话页签过滤面板：面板结构（sticky 居中吸附）与样式不变量、角色多选（aria-pressed/查询串顺序）、搜索图标展开与 300ms 去抖/回车立即提交/Esc 先清词再收起、服务端过滤接线（roles/q + msg_limit 组合 = 搜索结果分页）、匹配计数与 0 命中空态、条件变化作废在途分页请求、复制带过滤条件
 node scripts/verify-micro-web-menu.mjs         # 顶部菜单栏 + 会话导出：菜单栏/右侧状态簇结构、data-menu-action 均指向真实控件、开合与 Esc 回焦、导出请求与 Content-Disposition 命名下载、失败不下载；CSS 侧校验「无 fallback 的 var(--token) 必须已定义」与快捷键面板背景为不透明语义变量
-node scripts/verify-micro-web-render-mode.mjs  # assistant 消息 md|txt 渲染：默认 text、切换控件在气泡右上角（正文之前）、惰性 md 渲染与按钮 active/aria-pressed 同步、点击委托、复制取原文、代码块复制委托（流式气泡 + md 气泡）
+node scripts/verify-micro-web-render-mode.mjs  # assistant 消息 md|txt 渲染：默认 md（行生成时同步渲染）、切换控件在气泡右上角（正文之前）、按钮 active/aria-pressed 同步、点击委托、复制取 .msg-text 原文、代码块复制委托（流式气泡 + md 气泡）
 node scripts/verify-micro-web-copy-msg.mjs     # 单条消息复制：所有角色（含 error 回退）抬头行 ⧉ 图标、只取本行正文（标签/控件/相邻消息/md 产物均不入内）、行间隔离与 ✓ 反馈、整会话复制不受影响、工具行展开收起仍可用、流式气泡复制不重复响应
 node scripts/verify-micro-web-question-answer.mjs # 提问回答写入：建议项 / 自由回答（Enter、提交按钮、Shift+Enter、IME、空答案）→ question_answer payload、收起对话框保留 composer 答案路由、服务端回执分支（stale 未送达告警 / resolved 不误报）、审批语义不变、index.html/style.css 静态不变量
 ```

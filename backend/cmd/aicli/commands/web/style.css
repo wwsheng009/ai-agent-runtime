@@ -302,8 +302,8 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 }
 
 /* ---- 助手消息渲染方式切换（md | txt，气泡右上角） ----
-   data-render-mode 是唯一事实来源：txt（默认）显示 .msg-text 原文，
-   md 显示 .msg-md（惰性 Markdown 渲染结果），另一侧由 CSS 隐藏。 */
+   data-render-mode 是唯一事实来源：md（默认）显示 .msg-md Markdown 渲染结果，
+   txt 显示 .msg-text 原文，另一侧由 CSS 隐藏。 */
 #screen .msg-row.msg-assistant .msg-head {
   display: flex; align-items: center; gap: 8px;
   margin: 0 2px 2px 2px; min-height: 17px;

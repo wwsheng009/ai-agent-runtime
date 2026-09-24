@@ -111,13 +111,24 @@ var MSG_LABELS = {
 // domMessageText 从该行自己的正文容器提取，控件文字不会混入。
 // assistant 行额外带 md|txt 渲染切换（抬头行）与两种正文容器：
 //   .msg-text 始终保存转义后的原文（复制/切回 txt 的权威来源）；
-//   .msg-md   仅在用户切到 md 时由 applyMessageRenderMode 惰性渲染。
+//   .msg-md   默认渲染为 Markdown（DEFAULT_RENDER_MODE=md）并于行生成时同步渲染
+//            （默认即显状态不可留空），切回 txt/再切 md 时由 applyMessageRenderMode
+//             重新渲染（innerHTML 覆盖，反复切换不叠加）。
+
+// assistant 消息的默认渲染方式：Markdown。
+//   - 实时流式渲染（stream.js renderStream/renderMarkdown）已默认走 Markdown；
+//   - 回放路径（finishStream 追加行 / 服务端 screen 快照 → serverMessagesHtml）
+//     也通过 chatMsgRowHtml 走此默认，保证「打字机期间 = 停止后 = 快照回放」三者一致。
+//   用户仍可逐条切回纯文本 txt；切换只影响该条消息（data-render-mode 驱动 CSS）。
+export var DEFAULT_RENDER_MODE = "md";
+
 function messageRenderToggleHtml() {
+  var mdActive = DEFAULT_RENDER_MODE === "md";
   return '<div class="msg-render-toggle" role="group" aria-label="渲染方式">' +
-    '<button class="render-mode-btn" type="button" data-render-mode-set="md"' +
-    ' aria-pressed="false" title="Markdown 渲染">md</button>' +
-    '<button class="render-mode-btn active" type="button" data-render-mode-set="txt"' +
-    ' aria-pressed="true" title="纯文本渲染（默认）">txt</button>' +
+    '<button class="render-mode-btn' + (mdActive ? " active" : "") + '" type="button" data-render-mode-set="md"' +
+    ' aria-pressed="' + (mdActive ? "true" : "false") + '" title="Markdown 渲染">md</button>' +
+    '<button class="render-mode-btn' + (mdActive ? "" : " active") + '" type="button" data-render-mode-set="txt"' +
+    ' aria-pressed="' + (mdActive ? "false" : "true") + '" title="纯文本渲染">txt</button>' +
     '</div>';
 }
 
@@ -141,9 +152,13 @@ export function chatMsgRowHtml(role, content, pending, index) {
   var cls = "msg-row msg-" + role + (pending ? " msg-pending" : "");
   var idxAttr = (typeof index === "number" && index >= 0) ? ' data-msg-index="' + index + '"' : "";
   if (role === "assistant") {
-    // 默认 txt（纯文本）：data-render-mode 是渲染方式的唯一事实来源，CSS 按它
-    // 在 .msg-text / .msg-md 之间切换显示，不靠内联样式或 hidden 属性。
-    return '<div class="' + cls + '"' + idxAttr + ' data-render-mode="text">' +
+    // 默认 Markdown（DEFAULT_RENDER_MODE=md）：data-render-mode 是渲染方式的唯一
+    // 事实来源，CSS 按它在 .msg-text / .msg-md 之间切换显示，不靠内联样式或
+    // hidden 属性。.msg-md 于行生成时同步渲染（默认即显，不可留空）；
+    // .msg-text 始终保存转义原文，作为切回 txt / 复制的权威来源。
+    var asstMode = DEFAULT_RENDER_MODE;
+    var mdBody = asstMode === "md" ? renderMessageBody(content, "md") : "";
+    return '<div class="' + cls + '"' + idxAttr + ' data-render-mode="' + asstMode + '">' +
       '<div class="msg-head">' +
       '<div class="msg-label">' + esc(label) + '</div>' +
       messageRenderToggleHtml() +
@@ -151,7 +166,7 @@ export function chatMsgRowHtml(role, content, pending, index) {
       '</div>' +
       '<div class="msg-body">' +
       '<div class="msg-text">' + esc(content) + '</div>' +
-      '<div class="msg-md"></div>' +
+      '<div class="msg-md">' + mdBody + '</div>' +
       '</div>' +
       '</div>';
   }
@@ -193,7 +208,8 @@ export function chatMsgRowHtml(role, content, pending, index) {
 
 // ---- assistant 消息渲染方式切换（md | txt）----
 
-// 读取行的当前渲染方式；非 assistant 行 / 缺省一律按默认 text。
+// 读取行的当前渲染方式：读 data-render-mode 属性（assistant 行默认为
+// DEFAULT_RENDER_MODE=md）；非 assistant 行 / 缺属性一律归一为 text。
 export function getMessageRenderMode(rowEl) {
   if (!rowEl || !rowEl.getAttribute) { return "text"; }
   return normalizeRenderMode(rowEl.getAttribute("data-render-mode"));
@@ -202,7 +218,9 @@ export function getMessageRenderMode(rowEl) {
 // 把渲染方式应用到单条 assistant 行：
 //   - data-render-mode 驱动 CSS 在 .msg-text / .msg-md 间切换；
 //   - 两个按钮同步 active / aria-pressed；
-//   - 切到 md 时才渲染 Markdown 正文（惰性，避免每行都跑解析器）。
+//   - 切到 md 时（re）渲染 Markdown 正文（innerHTML 覆盖，反复切换不叠加）；
+//     默认 md 已于 chatMsgRowHtml 同步渲染，此处多次切回切入均以 .msg-text 原文
+//     为输入、保证可复切换、不丢内容。
 // 正文原文只从 .msg-text 取（渲染后的 .msg-md 不再作为输入，保证可反复切换）。
 export function applyMessageRenderMode(rowEl, mode) {
   var next = normalizeRenderMode(mode);

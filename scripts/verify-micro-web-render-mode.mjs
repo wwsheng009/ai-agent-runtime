@@ -1,16 +1,16 @@
-// 行为验证：aicli micro web client assistant 消息 md|txt 渲染方式切换（默认 txt）。
+// 行为验证：aicli micro web client assistant 消息 md|txt 渲染方式切换（默认 md）。
 // 运行：node scripts/verify-micro-web-render-mode.mjs（无需浏览器；见 docs/aicli/web-testing.md）
 // 覆盖：
 //   1. normalizeRenderMode / renderMessageBody：仅 "md" 走 Markdown，其余（含缺省/非法）一律 text
-//   2. chatMsgRowHtml("assistant")：右上角 md|txt 控件、默认 data-render-mode="text"、
-//      .msg-text 保存转义原文、.msg-md 初始为空（惰性渲染，不预跑解析器）
+//   2. chatMsgRowHtml("assistant")：右上角 md|txt 控件、默认 data-render-mode="md"、
+//      .msg-text 保存转义原文、.msg-md 默认即同步渲染 Markdown（默认即显，不留空）
 //   3. 非 assistant 行不带切换控件（user / reasoning / tool 等回归）
 //   4. getMessageRenderMode / applyMessageRenderMode：属性 + 按钮 active/aria-pressed 同步、
-//      切到 md 才惰性渲染、切回 txt 保留原文与已渲染结果（可反复切换、重复切换不叠加）
+//      切到 md 同步渲染（re），切回 txt 保留原文与已渲染结果（可反复切换、重复切到 md 不叠加）
 //   5. toggleMessageRenderMode + initChat 点击委托：点 md / txt 按钮切到对应渲染方式
 //   6. 会话复制（domConversationText）：assistant 行取 .msg-text 原文，不含 md 渲染产物
 //      （代码块「复制」按钮文字）
-//   7. style.css：显隐由 data-render-mode 驱动（不靠内联样式）；流式气泡不参与切换
+//   7. style.css：显隐由 data-render-mode 驱动（不靠内联样式）；流式气泡固定走 renderMarkdown
 import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
@@ -308,10 +308,10 @@ const conversationEl = getElement("conversation");
 const screenEl = getElement("screen");
 const screenCopyBtn = getElement("screen-copy-btn");
 
-// ---- 1. 渲染方式归一化 + 正文渲染（默认 text）----
+// ---- 1. 渲染方式归一化 + 正文渲染（normalizeRenderMode 不承担默认，仅 "md"→md）----
 assert.strictEqual(md.normalizeRenderMode("md"), "md", '显式 "md" 应归一为 md');
 assert.strictEqual(md.normalizeRenderMode("text"), "text", '显式 "text" 应归一为 text');
-assert.strictEqual(md.normalizeRenderMode(undefined), "text", "缺省应归一为 text（默认纯文本）");
+assert.strictEqual(md.normalizeRenderMode(undefined), "text", "缺省应归一为 text（归一器不视为默认，仅 'md'→md）");
 assert.strictEqual(md.normalizeRenderMode(null), "text", "null 应归一为 text");
 assert.strictEqual(md.normalizeRenderMode(""), "text", "空串应归一为 text");
 assert.strictEqual(md.normalizeRenderMode("MD"), "text", "大小写变体不应被当作 md（只认小写 md）");
@@ -330,10 +330,10 @@ assert.ok(mdHtml.indexOf("<script>") < 0, "md 渲染同样不应输出未转义�
 assert.strictEqual(md.renderMessageBody(undefined, "text"), "", "undefined 正文按空串处理（不抛错）");
 assert.strictEqual(typeof md.renderMessageBody("", "md"), "string", "空正文 md 渲染应返回字符串");
 
-// ---- 2. assistant 行结构：右上角 md|txt 控件 + 默认 text + 惰性 md 容器 ----
+// ---- 2. assistant 行结构：右上角 md|txt 控件 + 默认 md + 同步渲染 md 容器 ----
 var assistantHtml = chat.chatMsgRowHtml("assistant", rawText, false);
 assert.ok(assistantHtml.indexOf('class="msg-row msg-assistant"') >= 0, "assistant 行应带 msg-assistant 类");
-assert.ok(assistantHtml.indexOf('data-render-mode="text"') >= 0, 'assistant 行默认应为 data-render-mode="text"');
+assert.ok(assistantHtml.indexOf('data-render-mode="md"') >= 0, 'assistant 行默认应为 data-render-mode="md"');
 assert.ok(assistantHtml.indexOf('class="msg-render-toggle"') >= 0, "assistant 行应带 md|txt 切换控件");
 assert.ok(assistantHtml.indexOf('data-render-mode-set="md"') >= 0, "切换控件应有 md 按钮");
 assert.ok(assistantHtml.indexOf('data-render-mode-set="txt"') >= 0, "切换控件应有 txt 按钮");
@@ -357,15 +357,16 @@ var buttonsA = rowA.querySelectorAll(".render-mode-btn");
 assert.strictEqual(buttonsA.length, 2, "切换控件应恰好两个按钮");
 var mdBtnA = rowA.querySelector('[data-render-mode-set="md"]');
 var txtBtnA = rowA.querySelector('[data-render-mode-set="txt"]');
-assert.ok(txtBtnA.classList.contains("active"), "默认激活 txt 按钮");
-assert.ok(!mdBtnA.classList.contains("active"), "默认不激活 md 按钮");
-assert.strictEqual(txtBtnA.getAttribute("aria-pressed"), "true", "txt 按钮 aria-pressed 应为 true");
-assert.strictEqual(mdBtnA.getAttribute("aria-pressed"), "false", "md 按钮 aria-pressed 应为 false");
+assert.ok(mdBtnA.classList.contains("active"), "默认激活 md 按钮");
+assert.ok(!txtBtnA.classList.contains("active"), "默认不激活 txt 按钮");
+assert.strictEqual(mdBtnA.getAttribute("aria-pressed"), "true", "md 按钮 aria-pressed 应为 true");
+assert.strictEqual(txtBtnA.getAttribute("aria-pressed"), "false", "txt 按钮 aria-pressed 应为 false");
 assert.strictEqual(mdBtnA.textContent, "md", "按钮文字应为 md");
 assert.strictEqual(txtBtnA.textContent, "txt", "按钮文字应为 txt");
-assert.strictEqual(chat.getMessageRenderMode(rowA), "text", "新建 assistant 行渲染方式应为 text");
+assert.strictEqual(chat.getMessageRenderMode(rowA), "md", "新建 assistant 行渲染方式应为 md");
 assert.strictEqual(rowA.querySelector(".msg-text").textContent, rawText, ".msg-text 应保存原文（实体解码后等值）");
-assert.strictEqual(rowA.querySelector(".msg-md").children.length, 0, "默认 text 时不应预渲染 Markdown（惰性）");
+assert.ok(rowA.querySelector(".msg-md").children.length > 0, "默认 md 应同步预渲染 Markdown（默认即显，不留空）");
+assert.ok(rowA.querySelector(".msg-md").querySelector("h1") !== null, "默认 md 的 Markdown 应渲染标题结构");
 
 // XSS 回归：原文与切换控件都不带未转义标签
 var evilHtml = chat.chatMsgRowHtml("assistant", '<img src=x onerror="alert(1)">', false);

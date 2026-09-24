@@ -145,8 +145,10 @@ export function renderMarkdown(text) {
 }
 
 // ---- 消息正文渲染方式（md | txt）----
-// 对话区 assistant 气泡右上角的 md|txt 切换用：txt = 原样转义（默认），
-// md = 走上面的精简 Markdown 解析器。流式气泡（#stream-msg）固定走
+// 对话区 assistant 气泡右上角的 md|txt 切换用：md = 走上面的精简 Markdown 解析器；
+// txt = 原样转义（逐条切换回退用）。assistant 行的默认渲染方式由 chat.js 中的
+// DEFAULT_RENDER_MODE 决定（现为 md）——normalizeRenderMode 本身不承担“默认”义务，
+// 仅把 "md" 归一为 md、其它一切归一为 text。流式气泡（#stream-msg）固定走
 // renderMarkdown，不经这里，避免两处默认值互相漂移。
 
 // 归一化渲染方式：仅 "md" 视为 Markdown，其余（含缺省/非法值）一律 text。
