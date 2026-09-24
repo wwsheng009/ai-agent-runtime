@@ -58,6 +58,59 @@ type chatWebMessageWindow struct {
 // active 报告窗口参数是否由调用方显式指定（用于决定是否重建 lines/text）。
 func (w chatWebMessageWindow) active() bool { return w.Before > 0 || w.Limit > 0 }
 
+// chatWebMessageFilter 是 /web/api/screen 的结构化消息过滤条件：
+//   - Roles：角色多选白名单（user / assistant / tool / ...），空集 = 不过滤角色；
+//   - Query：正文子串搜索（已在解析层小写化，匹配时对正文做同样的小写化）。
+//
+// 过滤在服务端完成：web 前端只持有最新一页窗口，客户端过滤会漏掉未加载的
+// 更早消息，也无法给出「匹配 N / 共 M 条」的准确计数。服务端先过滤再按
+// msg_limit/msg_before 分页，等价于「搜索结果分页」（见 buildChatWebScreenSnapshotForFilter）。
+type chatWebMessageFilter struct {
+	Roles map[string]bool
+	Query string
+}
+
+// chatWebMessageFilterRoleKnown 报告 role 是否为可过滤的已知角色。
+// 未知角色（拼写错误/新角色未登记）在解析层忽略：宁可按剩余条件过滤，
+// 也不要因一个未知值把结果集变成空。
+func chatWebMessageFilterRoleKnown(role string) bool {
+	switch role {
+	case "user", "assistant", "reasoning", "tool", "system", "command", "diagnostic", "runtime":
+		return true
+	default:
+		return false
+	}
+}
+
+// active 报告过滤条件是否生效。
+func (f chatWebMessageFilter) active() bool { return len(f.Roles) > 0 || f.Query != "" }
+
+// match 报告单条消息是否命中过滤条件。
+func (f chatWebMessageFilter) match(msg chatWebScreenMessage) bool {
+	if len(f.Roles) > 0 && !f.Roles[msg.Role] {
+		return false
+	}
+	if f.Query != "" && !strings.Contains(strings.ToLower(msg.Content), f.Query) {
+		return false
+	}
+	return true
+}
+
+// apply 返回命中过滤条件的消息子序列。调用方传入的是本次请求刚构建的
+// 快照切片（独占），因此可以原地压缩复用底层数组。
+func (f chatWebMessageFilter) apply(messages []chatWebScreenMessage) []chatWebScreenMessage {
+	if !f.active() {
+		return messages
+	}
+	out := messages[:0]
+	for i := range messages {
+		if f.match(messages[i]) {
+			out = append(out, messages[i])
+		}
+	}
+	return out
+}
+
 // chatWebMessageWindowInfo 是 JSON 响应中的分页元信息：
 // Start 为本次返回的第一条消息的绝对索引（>0 表示还有更早消息，上滚加载时
 // 以 msg_before=Start 作为游标）；End 为排他右边界；Total 为消息总数。
@@ -67,6 +120,10 @@ type chatWebMessageWindowInfo struct {
 	End     int  `json:"end"`
 	Limit   int  `json:"limit,omitempty"`
 	HasMore bool `json:"has_more"`
+	// UnfilteredTotal 是过滤前的消息总数（仅 roles/q 过滤激活时填充）：
+	// 前端据此显示「匹配 N / 共 M 条」，Total 始终是过滤后的匹配总数，
+	// 与 msg_limit/msg_before 的分页口径一致（窗口在过滤后的序列上滑动）。
+	UnfilteredTotal int `json:"unfiltered_total,omitempty"`
 }
 
 // BuildChatDebugScreenSnapshot 返回当前屏幕合成帧的结构化快照。
@@ -307,6 +364,42 @@ func buildChatWebScreenSnapshotFor(window chatWebMessageWindow) *chatDebugScreen
 	return buildChatWebScreenSnapshotFull()
 }
 
+// buildChatWebScreenSnapshotForFilter 按过滤条件 + 窗口参数返回快照：
+//   - 过滤未激活 → 走既有路径（窗口化提取保持 O(窗口)，历史行为逐字节兼容）；
+//   - 过滤激活 → 先取完整 transcript 再过滤，然后在过滤后的序列上应用
+//     msg_limit/msg_before 窗口（搜索分页语义），响应元信息里的 Total 是
+//     匹配总数、UnfilteredTotal 是过滤前总数。
+//
+// 过滤路径是 O(总量) 的（计数与提取都要扫全量消息）：这是用户显式发起的
+// 检索操作，且响应体积仍由 msg_limit 约束（单次搬运 O(窗口)），可以接受；
+// 未过滤的实时刷新路径不受影响。
+func buildChatWebScreenSnapshotForFilter(window chatWebMessageWindow, filter chatWebMessageFilter) *chatDebugScreenSnapshot {
+	if !filter.active() {
+		return buildChatWebScreenSnapshotFor(window)
+	}
+	snap := buildChatWebScreenSnapshotFull()
+	if !snap.Available || len(snap.Messages) == 0 {
+		// 无会话 / 无结构化消息：保持原响应形状（前端按 available 处理）。
+		return snap
+	}
+	unfilteredTotal := len(snap.Messages)
+	snap.Messages = filter.apply(snap.Messages)
+	matchedTotal := len(snap.Messages)
+	// 在过滤后的序列上做窗口裁剪（0 命中时 windowChatWebMessages 会早退，
+	// 需要下面补齐分页元信息，前端才能显示「匹配 0 / 共 M 条」）。
+	windowChatWebMessages(snap, window)
+	if snap.MessageWindow == nil {
+		snap.MessageWindow = &chatWebMessageWindowInfo{}
+	}
+	snap.MessageWindow.Total = matchedTotal
+	snap.MessageWindow.UnfilteredTotal = unfilteredTotal
+	// 过滤改变了消息集合：lines/text 必须按过滤后的消息重建（无论窗口是否激活）。
+	lines := chatWebLinesForMessages(snap.Messages)
+	snap.Lines = lines
+	snap.Text = strings.Join(lines, "\n")
+	return snap
+}
+
 // buildChatWebScreenSnapshotFull 返回完整 transcript 快照（历史行为）。
 func buildChatWebScreenSnapshotFull() *chatDebugScreenSnapshot {
 	snap := &chatDebugScreenSnapshot{}
@@ -418,10 +511,18 @@ func marshalChatWebScreenJSON() ([]byte, error) {
 
 // marshalChatWebScreenJSONWindow 返回按窗口裁剪后的 web 屏幕快照 JSON 字节。
 func marshalChatWebScreenJSONWindow(window chatWebMessageWindow) ([]byte, error) {
-	snap := buildChatWebScreenSnapshotFor(window)
-	if !window.active() {
+	return marshalChatWebScreenJSONWindowFiltered(window, chatWebMessageFilter{})
+}
+
+// marshalChatWebScreenJSONWindowFiltered 返回按过滤 + 窗口裁剪后的快照 JSON 字节。
+// 过滤未激活时与 marshalChatWebScreenJSONWindow 完全一致。
+func marshalChatWebScreenJSONWindowFiltered(window chatWebMessageWindow, filter chatWebMessageFilter) ([]byte, error) {
+	snap := buildChatWebScreenSnapshotForFilter(window, filter)
+	if !window.active() && !filter.active() {
 		// 未指定窗口：仍写入分页元信息（Total/Start/End/HasMore），
 		// 便于调用方统一处理响应形状；messages 保持全量。
+		// 过滤激活时分页元信息已由 buildChatWebScreenSnapshotForFilter 写入
+		//（含 UnfilteredTotal），这里不得重算覆盖。
 		windowChatWebMessages(snap, window)
 	}
 	return json.MarshalIndent(snap, "", "  ")

@@ -69,6 +69,9 @@ func writeWebAPIJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 //   - ?tail=N：只返回末尾 N 行（长会话下避免整屏搬运；N 钳制到 [1, 2000]）
 //   - ?msg_limit=N / ?msg_before=M：只物化窗口内的结构化消息（分页拉取历史，
 //     O(窗口) 而非 O(总量)；响应含 message_window 元信息）
+//   - ?roles=a,b / ?q=text：结构化消息过滤（角色多选 + 正文子串搜索，服务端
+//     过滤后仍按 msg_limit/msg_before 分页 = 搜索结果分页；响应 message_window
+//     的 total 为匹配总数、unfiltered_total 为过滤前总数）
 //
 // web 客户端展示的是完整聊天历史，而非终端视口帧：使用
 // buildChatWebScreenSnapshotFor（完整语义 transcript 派生，窗口激活时只提取
@@ -77,6 +80,7 @@ func writeWebAPIJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 	tail := chatWebScreenTailParam(r)
 	window := chatWebMessageWindowParam(r)
+	filter := chatWebMessageFilterParam(r)
 	// view=tui：返回终端视口的真实合成帧（与 /debug/chat/screen 同源），
 	// 供远程调用方获取"用户当前实际看到的 TUI 界面渲染"，而不是 web 客户端
 	// 使用的完整语义 transcript（默认视图，见下方注释）。
@@ -104,7 +108,7 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("format") == "json" {
-		body, err := marshalChatWebScreenJSONWindow(window)
+		body, err := marshalChatWebScreenJSONWindowFiltered(window, filter)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusInternalServerError)
@@ -116,7 +120,7 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	snap := buildChatWebScreenSnapshotFor(window)
+	snap := buildChatWebScreenSnapshotForFilter(window, filter)
 	if !snap.Available {
 		_, _ = w.Write([]byte("Debug Screen: " + snap.Reason + "\n"))
 		return
@@ -181,6 +185,41 @@ func chatWebMessageWindowParam(r *http.Request) chatWebMessageWindow {
 		}
 	}
 	return window
+}
+
+// chatWebMessageFilterMaxQueryRunes 限制 ?q= 的长度：搜索是子串匹配，超长
+// 查询没有检索价值，还会让每个请求都对全部消息做长串比较；按 rune 截断
+// 避免切断 UTF-8 多字节字符。
+const chatWebMessageFilterMaxQueryRunes = 200
+
+// chatWebMessageFilterParam 解析 ?roles=a,b&q=text（结构化消息过滤：角色多选 +
+// 正文子串搜索）。缺省/空值 = 不过滤；roles 只接受已知角色（未知项忽略，
+// 避免拼写错误把结果集变成空）；q 去首尾空白、按 rune 截断并小写化。
+func chatWebMessageFilterParam(r *http.Request) chatWebMessageFilter {
+	var filter chatWebMessageFilter
+	if r == nil {
+		return filter
+	}
+	query := r.URL.Query()
+	if raw := strings.TrimSpace(query.Get("roles")); raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			role := strings.ToLower(strings.TrimSpace(part))
+			if !chatWebMessageFilterRoleKnown(role) {
+				continue
+			}
+			if filter.Roles == nil {
+				filter.Roles = make(map[string]bool)
+			}
+			filter.Roles[role] = true
+		}
+	}
+	if raw := strings.TrimSpace(query.Get("q")); raw != "" {
+		if utf8.RuneCountInString(raw) > chatWebMessageFilterMaxQueryRunes {
+			raw = string([]rune(raw)[:chatWebMessageFilterMaxQueryRunes])
+		}
+		filter.Query = strings.ToLower(raw)
+	}
+	return filter
 }
 
 // chatWebTailTextLines 返回文本末尾 n 行（n<=0 或行数不足时原样返回）。

@@ -13,6 +13,7 @@ import { initSessions, loadSessions } from "./js/sessions.js";
 import { initSkills } from "./js/skills.js";
 import { initMCP } from "./js/mcp.js";
 import { initMenu } from "./js/menu.js";
+import { initMsgFilter } from "./js/msg-filter.js";
 import { initSSE } from "./js/sse.js";
 import { initStream } from "./js/stream.js";
 import { initAboutSessionCopy, initAboutToken, initShortcutHelp, initTabs, initTheme } from "./js/ui.js";
@@ -28,6 +29,7 @@ initMenu(); // 顶部菜单栏（文件/视图/帮助 下拉 + 会话导出下�
 initStatusBar();
 initStream();
 initChat();
+initMsgFilter(); // 对话区消息过滤面板（角色多选 + 正文搜索，服务端过滤）
 initRuntimeBar();
 initSessions();
 initApprovals();

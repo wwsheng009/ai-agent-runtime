@@ -35,7 +35,7 @@ web  (aicli 微型 Web 客户端 / 远程调用 API)
   Base: http://127.0.0.1:61772/web
   Auth: POST 请求需携带 X-AICLI-Token（或 ?token=）；令牌可由 GET /web/api/token 读取（或见 aicli 启动行 web write token），内置页面自动注入
   GET http://127.0.0.1:61772/web/  [enabled]  微型 Web 客户端页面（浏览器交互入口）
-  GET  .../web/api/screen          [enabled]  当前渲染快照（默认完整 transcript；?view=tui TUI 合成帧；?format=json 结构化；?msg_limit=N&msg_before=M 只取窗口）
+  GET  .../web/api/screen          [enabled]  当前渲染快照（默认完整 transcript；?view=tui TUI 合成帧；?format=json 结构化；?msg_limit=N&msg_before=M 只取窗口；?roles=a,b&q=text 结构化消息过滤）
   POST .../web/api/invoke          [enabled]  同步远程调用（wait_only/timeout_ms/client_request_id）
   GET  .../web/api/turn            [enabled]  turn 后验查询（?id={turn_id}，含 started/finished/usage）
   GET  .../web/api/sessions        [enabled]  会话列表（current_session_id + 候选会话）
@@ -93,7 +93,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | POST | `/web/api/invoke` | **同步远程调用**：注入 prompt（或 `wait_only`），等待 turn 结束，一次响应返回最终状态 + assistant 回复 + TUI 渲染 + token 用量；`Accept: text/event-stream` 时改为流式 delta + 最终 result |
 | POST | `/web/api/input` | 异步注入：prompt / 审批决议 / 提问回答 / 中断，立即返回 `queued` |
 | GET | `/web/api/turn` | turn 后验查询：`?id={turn_id}` 取单条（含耗时/步数/`assistant_preview`/`usage`+`usage_scope`/`usage_source`），无参数返回当前 turn + 最近 20 条 |
-| GET | `/web/api/screen` | 当前渲染：默认完整 transcript（`messages` 结构化）；`?view=tui` 返回 TUI 合成帧；`?format=json` 结构化；`?tail=N` 只取末尾 N 行（≤2000）；`?msg_limit=N&msg_before=M` 只取结构化消息的一段窗口（附 `message_window` 分页元信息，见 §5.1） |
+| GET | `/web/api/screen` | 当前渲染：默认完整 transcript（`messages` 结构化）；`?view=tui` 返回 TUI 合成帧；`?format=json` 结构化；`?tail=N` 只取末尾 N 行（≤2000）；`?msg_limit=N&msg_before=M` 只取结构化消息的一段窗口（附 `message_window` 分页元信息，见 §5.1）；`?roles=a,b&q=text` 服务端过滤（角色多选 + 正文搜索，与窗口参数组合 = 搜索结果分页，见 §5.2） |
 | GET | `/web/api/status` | 渲染器/显示状态快照（等价 `/debug/chat/status`） |
 | GET | `/web/api/statusbar` | 底部状态栏快照（balance / context used / directory / git branch / window 等段，与 TUI 底部状态行同源；provider/model 见底部 cfg-bar，不在此重复） |
 | GET | `/web/api/runtime` | 运行时元数据（provider/model/reasoning 权威值） |
@@ -391,6 +391,43 @@ curl -s 'http://127.0.0.1:61772/web/api/screen?format=json&msg_limit=40&msg_befo
 > 微型 Web 客户端页面已默认使用该窗口：首屏只拉 `msg_limit=40`（最新一页），
 > 用户向上滚动到顶部时自动以 `msg_before` 前插更早的消息。因此浏览器侧的内存 / DOM
 > 规模只与「已加载的页数」相关，不再随会话总 turn 数增长。
+
+### 5.2 结构化消息过滤：`?roles=a,b&q=text`
+
+对话页签顶部的「过滤面板」（角色多选 + 搜索）走的就是这两个参数：
+
+| 参数 | 含义 |
+|------|------|
+| `roles=a,b` | 角色多选白名单（`user` / `assistant` / `reasoning` / `tool` / `system` / `command` / `diagnostic` / `runtime`）；逗号分隔，忽略空白与大小写；**未知角色忽略**（拼写错误不会把结果集变成空） |
+| `q=text` | 正文子串搜索（大小写不敏感；按 rune 截断到 200 字符） |
+
+过滤在服务端执行：先按条件过滤，再在**过滤后的序列**上应用 `msg_limit` / `msg_before`，
+语义等同于「搜索结果分页」——`start` / `end` 是过滤后序列的绝对索引，`has_more` 与
+`msg_before={start}` 的用法与 §5.1 完全一致。响应元信息多两个字段：
+
+```json
+{ "message_window": { "total": 12, "start": 0, "end": 12, "has_more": false, "unfiltered_total": 4210 } }
+```
+
+- `total` 是**匹配**条数，`unfiltered_total` 是过滤前的总数（未过滤时不出现），
+  客户端据此显示「匹配 12 / 共 4210 条」；
+- 两个参数都缺省 / 为空时行为与历史完全一致（不写 `unfiltered_total`）；
+- 过滤路径需要扫描全量消息（计数 + 提取），是 O(总量) 的；只有调用方显式传参时才走，
+  实时刷新路径不受影响。
+
+```bash
+# 只看工具消息（最新一页 40 条）
+curl -s 'http://127.0.0.1:61772/web/api/screen?format=json&roles=tool&msg_limit=40' \
+  | jq '.messages[].role, .message_window'
+
+# 在全部消息里搜 "timeout"（结果同样分页）
+curl -s 'http://127.0.0.1:61772/web/api/screen?format=json&q=timeout&msg_limit=40' | jq .message_window
+```
+
+> 客户端侧（`web/js/msg-filter.js`）只维护过滤条件与面板外观，**不做本地过滤**：浏览器
+> 只持有最新一页窗口，本地过滤既会漏掉尚未加载的更早消息，也拿不到准确的匹配计数。
+> 条件变化时整块重建对话区（过滤改变了索引语义，增量尾部替换会错位），并按代次作废
+> 在途的更早消息分页请求。
 
 ## 6. 实时事件：`GET /web/api/events`（SSE）
 

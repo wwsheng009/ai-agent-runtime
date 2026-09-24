@@ -3,6 +3,7 @@
 
 import { chatMsgRowHtml, copyTextToClipboard, getUserScrolledAway, refreshScreen, screenEl } from "./chat.js";
 import { renderMarkdown } from "./markdown.js";
+import { filterAllowsRole, isFilterActive } from "./msg-filter.js";
 import { esc, showToast } from "./util.js";
 
 // ---- 打字机状态（实时逐字揭示） ----
@@ -18,6 +19,13 @@ var typeTimer = null;              // 打字机定时器句柄
 var streamMsgEl = null;            // 流式消息容器（screen 下方追加，信息流模式）
 var TYPE_SPEED = 20;               // 每字符间隔（毫秒），越小越快
 var TYPE_CHARS_PER_TICK = 1;       // 每 tick 揭示字符数
+
+// 流式气泡是否该显示：过滤把「助手 / 推理 / 工具」全排除时（例如只看用户消息），
+// 实时气泡不属于任何可见类别，直接不显示——它是混合文本，无法按角色拆分过滤。
+function streamVisibleUnderFilter() {
+  if (!isFilterActive()) { return true; }
+  return filterAllowsRole("assistant") || filterAllowsRole("reasoning") || filterAllowsRole("tool");
+}
 
 export function startTypeTimer() {
   if (typeTimer) return;
@@ -98,7 +106,8 @@ export function renderStream() {
     parts.unshift('<div class="stream-head">' + streamCopyBtnHtml() + '</div>');
   }
   streamMsgEl.innerHTML = parts.length ? parts.join("\n") : '思考中…<span class="tw-cursor"></span>';
-  if (!getUserScrolledAway()) {
+  // 过滤下气泡可能被隐藏（streamVisibleUnderFilter）：隐藏时不再跟随滚动。
+  if (streamMsgEl.style.display !== "none" && !getUserScrolledAway()) {
     streamMsgEl.scrollIntoView(false);
   }
 }
@@ -116,9 +125,12 @@ export function beginStream() {
   if (!streamMsgEl) {
     streamMsgEl = document.getElementById("stream-msg");
   }
-  streamMsgEl.style.display = "block";
+  // 过滤把流式内容所属角色全排除时不显示实时气泡（回合结束后的权威快照仍按
+  // 过滤条件渲染）。
+  var visible = streamVisibleUnderFilter();
+  streamMsgEl.style.display = visible ? "block" : "none";
   streamMsgEl.innerHTML = '思考中…<span class="tw-cursor"></span>';
-  if (!getUserScrolledAway()) {
+  if (visible && !getUserScrolledAway()) {
     streamMsgEl.scrollIntoView(false);
   }
   // 并行加载对话历史（异步，不影响流式消息渲染）
@@ -140,7 +152,9 @@ function finishStream() {
   if (streamText) {
     persisted += streamText;
   }
-  if (persisted) {
+  // 过滤激活时不把流式累积文本落到对话区：这些行不带索引、也不经过服务端过滤，
+  // 会与过滤后的权威快照重复或矛盾（下面的 refreshScreen 按条件渲染）。
+  if (persisted && !isFilterActive()) {
     // 结构化模式（服务端 messages 气泡）：以角色行追加，保留现场；
     // 纯文本回退模式（无 surface 快照）：沿用旧拼接逻辑。
     if (screenEl.querySelector(".msg-row")) {

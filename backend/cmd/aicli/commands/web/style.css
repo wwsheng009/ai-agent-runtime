@@ -207,6 +207,59 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
 }
 
+/* ---- 消息过滤面板（吸附在消息区顶部居中） ----
+   面板是 #conversation（滚动容器）的第一个子节点：sticky 相对滚动容器吸附，
+   滚动时始终停在可视区顶部居中。外层 wrapper 只做定位与居中，pointer-events:none
+   让两侧空白不拦截消息上的点击；面板本体恢复 pointer-events:auto。 */
+#conversation .msg-filter {
+  position: sticky; top: 0; z-index: 25;
+  display: flex; justify-content: center;
+  margin: 0 0 8px 0;
+  pointer-events: none;
+}
+#conversation .msg-filter-panel {
+  pointer-events: auto;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  max-width: 100%; padding: 4px 8px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 999px;
+  box-shadow: 0 2px 8px var(--shadow);
+  font-size: 11px;
+}
+#conversation .msg-filter-roles { display: flex; flex-wrap: wrap; gap: 4px; }
+#conversation .msg-filter-chip {
+  padding: 1px 8px; font-size: 11px; font-family: inherit; line-height: 1.6;
+  background: transparent; color: var(--fg3);
+  border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
+}
+#conversation .msg-filter-chip:hover { background: var(--hoverBg); color: var(--fg); }
+#conversation .msg-filter-chip[aria-pressed="true"] {
+  background: var(--activeBg); color: var(--fg); border-color: var(--accent);
+}
+#conversation .msg-filter-icon-btn,
+#conversation .msg-filter-clear {
+  padding: 1px 6px; font-size: 11px; font-family: inherit; line-height: 1.6;
+  background: transparent; color: var(--fg3);
+  border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
+}
+#conversation .msg-filter-icon-btn:hover,
+#conversation .msg-filter-clear:hover { background: var(--hoverBg); color: var(--fg); }
+#conversation .msg-filter-icon-btn.active {
+  background: var(--activeBg); color: var(--fg); border-color: var(--accent);
+}
+#conversation .msg-filter-clear:disabled { opacity: 0.4; cursor: default; }
+#conversation .msg-filter-clear:disabled:hover { background: transparent; color: var(--fg3); }
+#conversation .msg-filter-search {
+  width: 160px; padding: 1px 8px; font-size: 11px; font-family: inherit; line-height: 1.6;
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border2); border-radius: 999px;
+}
+#conversation .msg-filter-count { color: var(--fg4); white-space: nowrap; }
+/* 窄屏：会话复制按钮固定在信息流右上角（top:10px），面板下移一行避让。 */
+@media (max-width: 767px) {
+  #conversation .msg-filter { padding-top: 34px; }
+  #conversation .msg-filter-panel { border-radius: 10px; }
+}
+
 /* ---- 长会话窗口化：顶部「更早消息」提示行 ---- */
 /* 上滚懒加载的提示/加载态；已到达最早一条时由 JS 移除。 */
 #screen .conv-load-older {

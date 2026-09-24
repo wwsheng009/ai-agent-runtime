@@ -3,6 +3,7 @@
 
 import { hasPendingApproval, hasPendingQuestion, sendQuestionAnswer } from "./approvals.js";
 import { normalizeRenderMode, renderMessageBody } from "./markdown.js";
+import { filterAllowsRole, filterQueryString, isFilterActive, setFilterChangeHandler, updateFilterMatchInfo } from "./msg-filter.js";
 import { loadRuntimeMeta } from "./runtime.js";
 import { getInputHistory, getInputHistoryIdx, meshNodeSuffix, sendInput, setInputHistoryIdx } from "./sessions.js";
 import { statusEl } from "./sse.js";
@@ -39,6 +40,7 @@ var serverMessageTotal = 0;       // 服务端最近一次返回的消息总数
 var loadingOlder = false;         // 更早消息请求进行中（防重入）
 var olderExhausted = true;        // 已到达最早一条（loadedStart == 0）
 var screenReqSeq = 0;             // refreshScreen 请求序号：丢弃过期响应
+var filterGen = 0;                // 过滤条件代次：变化后作废在途的更早消息分页请求
 var convLoadOlderEl = null;       // 顶部「加载更早消息…」指示行（懒创建）
 
 // ---- 发送/停止按钮状态机 ----
@@ -355,6 +357,9 @@ function renderPendingPrompts(seenUser) {
   var stale = screenEl.querySelectorAll(".msg-row.msg-pending");
   stale.forEach(function (el) { el.remove(); });
   if (!localPendingPrompts.length) { return; }
+  // 过滤把「用户消息」排除在外时不渲染本地乐观回显：它下一轮就会被服务端
+  // 过滤掉，先显示再消失比不显示更突兀（pendingPrompts 仍保留，清过滤后重现）。
+  if (!filterAllowsRole("user")) { return; }
   // 首条消息时先清除占位符 "(empty)"，避免气泡混在占位文本后。
   if (screenEl.textContent === "(empty)" && !screenEl.querySelector(".msg-row")) {
     screenEl.innerHTML = "";
@@ -374,6 +379,23 @@ function resetConversationWindow() {
   syncOlderHint();
 }
 
+// 空对话区占位文案：过滤激活时说清是「没有匹配」而不是「没有消息」。
+function emptyScreenText() {
+  return isFilterActive() ? "没有匹配的消息（已过滤）" : "(empty)";
+}
+
+// 过滤条件变化（msg-filter.js 回调）：必须整块重建对话区 —— 过滤改变了索引
+// 语义（同一 index 指向不同消息），走增量尾部替换会把未过滤的旧行留在列表里；
+// 同时作废在途的更早消息分页请求（游标属于旧条件），并按新条件重取最新一页。
+function onFilterChange() {
+  filterGen++;
+  screenReqSeq++;
+  resetConversationWindow();
+  userScrolledAway = false; // 新结果集从最新处开始
+  // keepStream：过滤切换不该掐掉正在显示的流式气泡（它由流式路径自行维护）。
+  refreshScreen(false, { keepStream: isStreamActive() });
+}
+
 // 应用服务端窗口：需要时整体重建，否则只替换尾部新增/变更部分。
 function applyServerWindow(messages, win) {
   if (!screenEl) { return; }
@@ -384,8 +406,12 @@ function applyServerWindow(messages, win) {
     }
   });
   var w = parseMessageWindow(win, (messages || []).length);
+  // 过滤激活时 message_window.total 是「匹配条数」，unfiltered_total 是过滤前
+  // 总数（见后端 buildChatWebScreenSnapshotForFilter）；未过滤时两者一致。
+  var unfilteredTotal = (win && typeof win.unfiltered_total === "number") ? win.unfiltered_total : w.total;
+  updateFilterMatchInfo(w.total, unfilteredTotal);
   if (shouldRebuildForWindow(loadedStart, loadedEnd, w.start, w.end)) {
-    screenEl.innerHTML = serverMessagesHtml(messages, w.start) || "(empty)";
+    screenEl.innerHTML = serverMessagesHtml(messages, w.start) || emptyScreenText();
     loadedStart = w.start;
     loadedEnd = w.end;
   } else {
@@ -402,6 +428,16 @@ function applyServerWindow(messages, win) {
   syncOlderHint();
   renderPendingPrompts(seenUser);
   refreshToolOutputToggles();
+}
+
+// 过滤下 0 命中：服务端返回空 messages（text 随之为空），显式给出「没有匹配」
+// 并同步计数，而不是把对话区清成空白。
+function applyFilterEmptyResult(win) {
+  var w = parseMessageWindow(win, 0);
+  var unfilteredTotal = (win && typeof win.unfiltered_total === "number") ? win.unfiltered_total : w.total;
+  updateFilterMatchInfo(w.total, unfilteredTotal);
+  if (screenEl) { screenEl.textContent = emptyScreenText(); }
+  resetConversationWindow();
 }
 
 // 顶部提示行：请求进行中显示「加载更早消息…」；空闲但仍存在更早消息时提示
@@ -449,11 +485,13 @@ export function loadOlderMessages() {
   loadingOlder = true;
   syncOlderHint();
   var cursor = loadedStart;
+  var gen = filterGen; // 过滤条件代次：返回时若已变化，本页作废（游标属于旧条件）
   var url = "/web/api/screen?format=json&msg_limit=" + MSG_OLDER_PAGE_LIMIT +
-    "&msg_before=" + cursor;
+    "&msg_before=" + cursor + filterQueryString();
   fetch(url, { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
+      if (gen !== filterGen) { loadingOlder = false; return; }
       loadingOlder = false;
       if (!data || !data.available || !Array.isArray(data.messages) || !data.messages.length) {
         olderExhausted = true; // 无更早内容（会话被压缩/清空）：停止继续请求
@@ -557,7 +595,8 @@ function isWindowPartial() {
 // 否则「复制」在长会话下只会复制到已加载的一页。取回前仍以 DOM 文本兜底。
 function copyConversationText(done) {
   if (!isWindowPartial()) { done(domConversationText()); return; }
-  fetch("/web/api/screen?format=json", { cache: "no-store" })
+  // 过滤激活时同样带上条件：复制的是「当前看到的消息集合」，不是未过滤全量。
+  fetch("/web/api/screen?format=json" + filterQueryString(), { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
       var full = (data && typeof data.text === "string") ? data.text : "";
@@ -602,7 +641,8 @@ function copyRowMessage(btnEl) {
 function appendPendingUserPrompt(text) {
   if (!text) { return; }
   localPendingPrompts.push(text);
-  if (screenEl) {
+  // 过滤排除用户消息时不追加乐观回显（与 renderPendingPrompts 同口径）。
+  if (screenEl && filterAllowsRole("user")) {
     // 首个消息时先清除占位符 "(empty)"，避免气泡混在占位文本后。
     if (screenEl.textContent === "(empty)" && !screenEl.querySelector(".msg-row")) {
       screenEl.innerHTML = "";
@@ -634,7 +674,9 @@ export function refreshScreen(forceClear, options) {
   var keepStream = !!(options && options.keepStream);
   var seq = ++screenReqSeq;
   // 只取最新一页（msg_limit）；更早的消息由上滚懒加载（loadOlderMessages）。
-  fetch("/web/api/screen?format=json&msg_limit=" + MSG_WINDOW_LIMIT, { cache: "no-store" })
+  // 过滤条件（roles/q）交给服务端：前端只持有最新一页，客户端过滤会漏掉未加载
+  // 的更早消息，也拿不到「匹配 N / 共 M 条」的准确计数（= 搜索结果分页语义）。
+  fetch("/web/api/screen?format=json&msg_limit=" + MSG_WINDOW_LIMIT + filterQueryString(), { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
       if (seq !== screenReqSeq) { return; } // 过期响应（会话已切换/已有更新请求）丢弃
@@ -656,6 +698,8 @@ export function refreshScreen(forceClear, options) {
       // 结构化消息可用（推荐路径）：角色气泡渲染；否则回退纯文本快照。
       if (Array.isArray(data.messages) && data.messages.length > 0) {
         applyServerWindow(data.messages, data.message_window);
+      } else if (isFilterActive()) {
+        applyFilterEmptyResult(data.message_window);
       } else {
         screenEl.textContent = data.text || "";
         resetConversationWindow();
@@ -749,6 +793,9 @@ export function clearPendingPrompts() { localPendingPrompts = []; }
 export function getUserScrolledAway() { return userScrolledAway; }
 
 export function initChat() {
+  // 过滤条件变化 → 整块重建对话区（msg-filter.js 只维护面板状态与条件）
+  setFilterChangeHandler(onFilterChange);
+
   // 窄屏换短占位提示：桌面文案（含 Shift+Enter）在手机上既无意义，又会在 16px 字号下
   // 折成两行把输入框挤高。跟随视口宽度（旋屏）切换，桌面文案取自 HTML，避免两处漂移。
   if (promptEl && window.matchMedia) {
