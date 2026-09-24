@@ -46,13 +46,14 @@ export type McpValidationError =
   | "maxParallelCalls"
   | "duplicateKey";
 
-// 行工厂供草稿构造与测试复用；react-refresh 禁止组件文件导出函数，
-// 按 ui/button.tsx 的既有先例做行级豁免（id 不进请求体）。
+// 草稿行工厂/常量/构建器供 mcp.tsx 与测试复用；react-refresh 禁止组件文件
+// 导出非组件值，按 ui/button.tsx 的既有先例逐个做行级豁免（id 不进请求体）。
 // eslint-disable-next-line react-refresh/only-export-components
 export function createMcpKeyValueRow(key = "", value = ""): McpKeyValueRow {
   return createKeyValueRow(key, value);
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const MCP_TRANSPORT_TYPES: RuntimeMcpTransportType[] = [
   "stdio",
   "sse",
@@ -80,6 +81,7 @@ const MCP_TRUST_LEVEL_LABEL_KEYS = {
   untrusted_remote: "mcp.trustLevels.untrusted_remote",
 } as const;
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function createMcpDraft(config?: RuntimeMcpConfig): McpDraft {
   const type = normalizeTransportType(config?.type);
   const { envRows, headerRows } = splitMcpEnvRows(config?.env, type);
@@ -178,6 +180,7 @@ function normalizeTrustLevel(
     : "";
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function parseLineList(value: string): string[] {
   return value
     .split(/\r?\n/)
@@ -204,6 +207,7 @@ export type McpUpsertBuildResult =
   | { validationError: McpValidationError };
 
 /** 草稿 → UpsertRequest；先做本地校验，避免把明显无效的请求发给后端。 */
+// eslint-disable-next-line react-refresh/only-export-components
 export function buildMcpUpsertRequest(draft: McpDraft): McpUpsertBuildResult {
   const name = draft.name.trim();
   if (!name) {

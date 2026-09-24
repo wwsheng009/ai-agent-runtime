@@ -139,7 +139,10 @@ export function useWorkspaceLive({
     locallyFinalizedTurns,
     normalizedSessionId,
   );
+  // 快照回合变化时收敛本会话的抑制集：key（会话 + 回合）变化才触发一次性修剪，
+  // 不写回 props，不产生级联（同 message-list / use-reasoning-effort 的既有先例）。
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLocallyFinalizedTurns((current) =>
       withSnapshotTurn(current, normalizedSessionId, sessionActiveTurn?.turnId),
     );
