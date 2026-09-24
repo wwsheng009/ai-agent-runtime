@@ -31,7 +31,7 @@
 | 目录约定 | root 下 `profile.yaml` / `runtime.yaml` / `mcp.yaml` / `skills/` / `agents/<id>/{agent.yaml, prompts/{system,role,tools}.md, tools/policy.yaml, skills/, workspace/}` | `backend/internal/profile/paths.go:41-80` |
 | 解析与四层 merge | profile inline → agent inline → agent.yaml → workspace.yaml → tools/policy.yaml；输出 `ResolvedAgent` | `backend/internal/profile/resolver.go:45-120` |
 | 引用解析规则 | 注册名 → config root；像路径 → 直接规范化；否则 `<defaultRoot>/<name>` | `backend/internal/profile/registry.go:45-69` |
-| 全局配置 | `ProfilesConfig{root, default_profile, items{name:{root}}}`（`DEFAULT_PROFILE`/`PROFILES_ROOT` 可被 env 覆盖） | `backend/internal/agentconfig/config.go:762-771`；`registry_config.go:6-18` |
+| 全局配置 | `ProfilesConfig{root, default_profile, items{name:{root}}, auto{fallback, rules[{profile,keywords}]}}`（`DEFAULT_PROFILE`/`PROFILES_ROOT` 可被 env 覆盖；`auto` 为 FR-11 路由表，未配置 → 内置启发式） | `backend/internal/agentconfig/config.go:761-786`；`registry_config.go:6-18`；`autoroute.go` |
 
 ### 1.2 消费链路（已完成，但缺粒度）
 
@@ -80,6 +80,10 @@
 ### P2（可选）
 
 - **FR-11 CLI 场景自动路由**：`--profile auto`，复用 server 端 `routeProfileForPrompt` 思路并允许配置映射规则。
+  - **落地状态（2026-09-24）**：已实施——CLI 与 runtime-server 共用单一权威 `internal/profile/autoroute.go`
+    （server 侧重复实现已删除），规则配置化于 `profiles.auto`；CLI 在启动期（`--prompt`/`--message`/exec stdin）
+    解析，`/profile status` 与启动摘要可见路由归因；无首轮提示词的交互式会话显式报错（首轮延迟路由登记为后续增强）。
+    详见实施方案 Batch 6 落地状态。
 - **FR-12 Web 集成**：runtime-server 暴露 profile 只读列表/详情 API；frontend 设置页展示（需产品确认；注意与"subagent 路由难度档位 profile"命名区分）。
 - **FR-13 统计聚合**：usage ledger 按 profile 维度聚合 token 消耗对比。
 - **FR-14 项目级绑定**：workspace `.aicli/profile` 文件声明项目默认 profile。

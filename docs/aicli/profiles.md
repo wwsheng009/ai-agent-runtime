@@ -28,6 +28,26 @@
 选择优先级：`--profile` flag > `config profiles.default_profile`（可经 `DEFAULT_PROFILE`
 环境变量提供）> 无 profile（全量，行为与未引入 profile 时逐字节一致）。
 
+`--profile auto`（保留引用，不区分大小写）：按**首轮提示词**自动路由到具体 profile，
+路由结果即会话绑定（`/profile status` 显示 `路由: auto → <profile>`）。路由表来自
+`config profiles.auto`，未配置时为内置启发式（write/implement/fix/add/edit/refactor/
+patch/update/change → `executor`；plan/design/compare/proposal/approach → `planner`；
+search/inspect/understand/locate/find/investigate → `explore`；未命中 → `executor`）：
+
+```yaml
+profiles:
+  auto:
+    fallback: minimal          # 可选；未命中规则的兜底（默认 executor）
+    rules:                     # 可选；非空即整体替换内置映射，首个命中胜出
+      - profile: reviewer
+        keywords: [review, audit]
+```
+
+约束（不猜、不静默降级）：`auto` 只在**启动期**解析——`chat --prompt`/`--message`、
+`exec`（含 stdin 管道）可用；纯交互式 `chat` 与 `agent stdio` 无首轮提示词，启动即显式
+报错并给出替代（会话内用 `/profile use <name>`）。路由命中不存在的 profile 时按既有
+"未知 profile" 报错，不会回落到全量。
+
 profile 引用（`<profile>`）支持三种写法：注册名、`profiles.root` 下的目录名、profile 目录路径。
 
 ---

@@ -255,6 +255,30 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 - usage ledger 按 profile 聚合；
 - workspace `.aicli/profile` 项目级绑定（依赖 V10 结论）。
 
+**落地状态（2026-09-24，slice 1 = FR-11）**：`--profile auto` 已实施并验证，其余三项仍待排期。
+- 单一权威：新增 `internal/profile/autoroute.go`（`AutoProfileRef` / `AutoRouteRule` /
+  `AutoRouteConfig` / `DefaultAutoRouteRules` / `IsAutoProfileRef` / `NormalizeAutoRouteRules` /
+  `RouteProfileForPrompt` / `ResolveAutoProfileRef`）。匹配语义与历史 server 实现逐字一致
+  （小写 + 子串包含；空提示词 → `""` 表示"不路由"），CLI 与 server 共用同一份规则，
+  **删除** `internal/api/skills/handler.go` 内的重复实现（原 `routeProfileForPrompt`/`containsAny`）。
+- 配置化：`agentconfig.ProfilesConfig` 新增 `auto{fallback, rules[{profile,keywords}]}`
+  （`internal/agentconfig/config.go`）；未配置 → 内置启发式，开 auto 的既有部署行为不变（NFR-1）。
+- 接线：server 侧 `(*Handler).routeAutoProfileForPrompt`（路由表经
+  `SetProfileSupport(ProfileSupportConfig{AutoRoute})` 注入，`cmd/runtime-server/main.go` 传
+  `profilesys.NewAutoRouteConfig(cfg.Profiles)`，与 registry 同一快照生命周期）；
+  `prompt_layout_debug.go` 同一入口。CLI 侧 `resolveChatProfileState` 启动期解析
+  `--profile auto` / `profiles.default_profile: auto`，**Reference 落地为具体 profile**
+  （`/profile reload`/`/profile save` 无需提示词即可复用），`AutoRoutedFrom` 记录归因，
+  启动摘要（`Profile Route:` 行）与 `/profile status`（`路由:` 行）两处可见。
+- 失败语义（不猜、不静默降级）：启动期无提示词（纯交互式 `chat` / `agent stdio`）→ 显式报错
+  并给出替代（`--prompt`/`--message`/exec stdin/`/profile use`）；**首轮延迟路由未做**，登记为
+  后续可选增强（需要 turn 边界 hook + 切换报告，见 `chat_actor_executor.go:156-217` 单一咽喉）。
+- 测试：`internal/profile/autoroute_test.go`（历史启发式逐字对齐 / 规则覆盖与兜底 / 归一化 /
+  agentconfig 映射 / ref 判定）、`internal/api/skills/profile_auto_route_test.go`（默认 + 配置
+  规则 + 设置期快照）、`cmd/aicli/commands/chat_profile_auto_route_test.go`（路由表驱动 /
+  无提示词报错 / 配置默认 auto / 显式 ref 优先 / 归因可见面）。反证已执行：临时令
+  `RouteProfileForPrompt` 恒返回兜底 → 三层用例同时失败（core / server / CLI）。
+
 ### Batch 7 — 配置覆盖接线（P0/P1，≈1.5 人日）
 
 **目标**：`runtime.overrides` 从 dormant 字段变为可用的会话级覆盖（D12 模式 B / D13 会话级 overlay）。
@@ -576,7 +600,7 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 | 12 | M4 | ✅ 已完成 | composer 可切换 + Switch Report 可见 + R20 能力门控（旧后端不注册命令） | V15/V16/V19 已回填；证据见变更记录（Batch 12） |
 | 13 | M5 | ✅ 已完成（slice 1-10：`apply` 执行核心 / export·import（API+CLI）/ TUI 生命周期子命令（含 import 闭环，D37）/ save-as 差分固化（TUI+API）/ 前端分享入口（D38）/ E2E-1·3·4·5 前端半程 / **slice 10 = 前端「从当前会话创建」入口（`/profile save-as`，G1/D24 的最后一处缺口）**） | E2E-1~5 + A9-A12 | V22、**V24、V25** 已回填；V17 部分回填；Q19/Q20/Q21 已闭环（差分口径=声明式字段逐个差分 / 硬删+二次确认 / 目录·zip 不做单文件内联，均落在各 slice 的测试锚点内） |
 | 14 | M6 | ✅ 已完成（V20/V21 已回填、D29 接入设计已冻结；slice 2 落地：foldertrust 检测面扩展 + 分级门控核心 + CLI/server 接线；slice 3 落地：三处警告面（`/profile status` / 启动摘要 / Switch Report，CLI+server）；slice 4 落地：E2E-6/7 自动化剧本（真实判定链 + `/trust grant` 恢复 + resume 漂移容错）；slice 5 落地：Q22 前端闭环（列表可选 `workspace` 参数 + "部分内容未应用"徽标 + 两步确认一键信任 + `/api/runtime/harness/trust` 只读/授予端点）） | E2E-6/7 + A13/A14 | V20、V21 已回填；Q22 已闭环（撤销信任仍走 CLI `/trust`） |
-| 6 | P2 | 不承诺 | — | 按需排期 |
+| 6 | P2 | 🚧 部分完成（slice 1 = FR-11 `--profile auto` 落地并验证；其余三项待排期） | FR-11 用例全绿 + 零变化（未配置 auto 时行为不变）+ 反证 | 单一权威 `internal/profile/autoroute.go`；配置 `profiles.auto`；证据见 Batch 6 落地状态与变更记录 |
 
 ---
 
@@ -679,3 +703,13 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 > ③ 测试：新增 `use-composer-command-executor.profile-save-as.test.tsx` 6 例（成功路径请求体 `{name, layer: undefined, fromSession}` + 回执 values / `--to project` 透传 / 四态参数错且不发请求 / 无会话 / 并发保护（deferred promise）/ 后端失败不伪装成功）；`composer-builtin-commands.test.ts` 追加 `parseProfileSaveAsCommandArgs` 4 例（含"开关在前也认"与"`--to` 后无值 = 层非法而非按缺省"）。回归：`npx vitest run`（3 文件 31 例）全绿。
 > ④ 核实回填：V24（server 侧会话绑定唯一写入点 `applyProfileSessionContext`；引用检查三类键全覆盖）、V25（原子写工具 `writeProfileYAMLAtomic` 的适用面 + rename 声明名改写非原子但带目录回滚 + R24 冲突 409 拒绝）→ 见 §3.1。
 > ⑤ 结论：设计文档 D38 遗留①「前端"从当前会话创建"按钮缺（`from_session` 有 API、前端零引用）」**关闭**；Batch 13（M5）出口条件（E2E-1~5 + A9-A12）达成，M5 收口。
+
+> 变更记录：2026-09-24 实施（Batch 6 **slice 1** 完成并验证——FR-11 `--profile auto` 自动路由：单一权威 + 规则配置化；P2 提前落地）：
+> ① 交付物（单一权威）：新增 `internal/profile/autoroute.go`（`AutoProfileRef`/`AutoRouteRule`/`AutoRouteConfig`/`DefaultAutoRouteRules`/`IsAutoProfileRef`/`NormalizeAutoRouteRules`/`RouteProfileForPrompt`/`ResolveAutoProfileRef`），匹配语义（小写 + 子串包含；空提示词 → `""` 表示"不路由"，由调用方保留默认语义）与历史 server 实现逐字一致；删除 `internal/api/skills/handler.go` 内的重复实现（`routeProfileForPrompt`/`containsAny`/`isAutoProfileRef`），CLI 与 server 共用同一份规则。
+> ② 交付物（配置面）：`agentconfig.ProfilesConfig` 新增 `auto{fallback, rules[{profile,keywords}]}` + 映射函数 `profilesys.NewAutoRouteConfig`（放 internal/profile，避免 agentconfig 反向依赖）；`rules` 非空 = 整体替换内置启发式、按声明顺序首个命中胜出，`fallback` 空 → `executor`；未启用 `auto` 的部署逐字零变化（NFR-1）。
+> ③ 交付物（server 接线）：`ProfileSupportConfig` 新增 `AutoRoute`（`SetProfileSupport` 设置期快照，复制 Rules 防调用方后续改切片）；`(*Handler).routeAutoProfileForPrompt`（nil-safe）替换内联启发式，`prompt_layout_debug.go` 同一入口；`cmd/runtime-server/main.go` 传 `profilesys.NewAutoRouteConfig(cfg.Profiles)`（与 registry 同一快照生命周期，热重载一起重建）。
+> ④ 交付物（CLI 接线）：`resolveChatProfileState` 启动期解析 `--profile auto` / `profiles.default_profile: auto`——先路由再进注册表，**Reference 落地为具体 profile**（`/profile reload`、`/profile save` 无需提示词即可复用同一引用）；`AutoRoutedFrom` 归因贯穿 `chatProfileState` → `ChatSession.ProfileAutoRoutedFrom` → `applyProfileStateToChatSession`；两处可见面：启动摘要 `Profile Route:` 行、`/profile status` `路由:` 行（非 auto → 零变化）；启动期无提示词（纯交互式 chat / agent stdio）→ 显式报错并给出替代（`--prompt`/`--message`/exec stdin/`/profile use`），不猜、不静默降级；`profile` 命令 Long 同步说明。
+> ⑤ 测试与反证：3 个新测试文件——`internal/profile/autoroute_test.go`（历史启发式逐字对齐 / 规则替换 / 脏规则丢弃 / 归一化 / `NewAutoRouteConfig` 映射 / ref 判定 / `ResolveAutoProfileRef`）、`internal/api/skills/profile_auto_route_test.go`（默认启发式 / 配置规则 / 设置期快照）、`cmd/aicli/commands/chat_profile_auto_route_test.go`（路由落地 / 无提示词报错 / 配置默认 auto / 显式 ref 优先 / 归因可见面）。反证已执行：临时令 `RouteProfileForPrompt` 恒返回兜底 → 三层用例同时失败（core / server / CLI），随后还原并复绿。
+> ⑥ 回归：`go build ./...` 退出 0；`go test -count=1 ./internal/agentconfig/ ./internal/profile/`（9.5s / 2.0s）、`go test -count=1 -run Profile ./internal/api/skills/`（2.8s）、`go test -count=1 -run Profile ./cmd/aicli/commands/`（6.3s）全绿；`gofmt -l` 对本次改动文件零输出。
+> ⑦ 文档：`docs/aicli/profiles.md` 新增 `--profile auto` 小节（含 `profiles.auto` YAML 示例与失败语义）；设计文档 §1.1 全局配置行与 FR-11 条、本文件 Batch 6 段与附录 P 跟踪表同步回填。
+> ⑧ 余项（Batch 6 其余三项，仍 P2 按需）：FR-12 runtime-server 只读 API + frontend 展示、FR-13 usage ledger 按 profile 聚合、FR-14 workspace `.aicli/profile` 项目级绑定；另登记可选增强：交互式会话"首轮延迟路由"（需 turn 边界 hook + 切换报告，咽喉点见 `chat_actor_executor.go:156-217`）。
