@@ -604,7 +604,7 @@ aicli agent stdio --yolo --enable-tools
 aicli agent stdio --session-dir ~/.aicli/sessions
 ```
 
-角色 / permission / profile 概念见 [agents.md](./agents.md#9-acp-宿主-aicli-agent-stdio)；headless 输出契约见 [exec.md](./exec.md)。
+角色 / permission / profile 概念见 [agents.md](./agents.md#9-acp-宿主-aicli-agent-stdio)（运行 profile 见 [profiles.md](./profiles.md)）；headless 输出契约见 [exec.md](./exec.md)。
 
 ### chat 内置斜杠命令补充
 
@@ -884,6 +884,7 @@ Remove-Item "$env:LOCALAPPDATA\Programs\aicli\aicli.exe"
 - [faq.md](./faq.md)
 - [exec.md](./exec.md)
 - [agents.md](./agents.md)（含 `aicli chat --agent` 与 `aicli agent stdio`）
+- [profiles.md](./profiles.md)（运行 profile：`profile.yaml` + `agents/`、四模板、优先级、validate 语义）
 - [tool_image_generate.md](./tool_image_generate.md)
 - [skill_runtime/aicli_skills_usage.md](../skill_runtime/aicli_skills_usage.md)
 - [GitHub Releases](https://github.com/wwsheng009/ai-agent-runtime/releases)

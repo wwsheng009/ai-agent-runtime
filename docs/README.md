@@ -17,12 +17,13 @@ Migration notes:
 - Many historical design and analysis documents still mention old paths such as `internal/runtime/*` or `internal/api/skills/*`.
 - In this repository, read those old paths as the corresponding locations under `backend/internal/*` unless a document explicitly says it is describing a historical state.
 - For current `aicli` behavior, start with `docs/aicli/quickstart.md`, then `docs/aicli/install.md` / `docs/aicli/faq.md`; these cover first-use setup, starter config bootstrap, `aicli login`, chat preferences, session/resume, slash commands, shell/background, MCP, and troubleshooting.
-- For headless `aicli exec`, portable agents, and image generation, see `docs/aicli/exec.md`, `docs/aicli/agents.md`, and `docs/aicli/tool_image_generate.md`.
+- For headless `aicli exec`, portable agents, runtime profiles, and image generation, see `docs/aicli/exec.md`, `docs/aicli/agents.md`, `docs/aicli/profiles.md`, and `docs/aicli/tool_image_generate.md`.
 - For current background jobs HTTP operations, see `docs/skill_runtime/runtime_operations_api.md`.
 
 Main sections:
 
-- `aicli/` - CLI behavior, default `aicli` -> `chat` startup, headless exec, session export/import, portable agents, image generation, tool output rendering, metadata propagation, and provider integration notes
+- `aicli/` - CLI behavior, default `aicli` -> `chat` startup, headless exec, session export/import, portable agents, runtime profiles, image generation, tool output rendering, metadata propagation, and provider integration notes
+- `aicli-mesh/` - 多进程网格运维专题（aicli-mesh）：快速上手、拉起与可执行文件解析、生命周期与租约、排障手册
 - `user-guide/` - 操作手册：安装部署、配置、启动、日常操作、构建、故障排查与升级
 - `e2e/` - 端到端场景指南（独立进程启动 aicli + `/debug/endpoints` 端点发现 + 屏幕回读 / `invoke` 的验收场景，见 `e2e/debug-guide.md`）
 - `codex/` - Codex provider behavior, native tool exposure, and image generation diagnostics
@@ -44,6 +45,7 @@ Recommended starting points:
 - `aicli/exec.md`
 - `aicli/session-export-import.md`
 - `aicli/agents.md`
+- `aicli/profiles.md`
 - `user-guide/README.md`
 - `aicli/tool_image_generate.md`
 - `skill_runtime/README.md`
