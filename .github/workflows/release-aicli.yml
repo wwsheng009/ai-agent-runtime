@@ -37,6 +37,7 @@ env:
   RIPGREP_VERSION: '15.2.0'
   CMD_PATH: ./cmd/aicli
   CONSOLE_CMD_PATH: ./cmd/aicli-console
+  MESH_CMD_PATH: ./cmd/aicli-mesh
   RUNTIME_SERVER_CMD_PATH: ./cmd/runtime-server
   BIN_NAME: aicli
   WORKDIR: backend
@@ -215,6 +216,20 @@ jobs:
           set -euo pipefail
           go build -trimpath -o /tmp/aicli-cgo0-check ${CMD_PATH}
           /tmp/aicli-cgo0-check version
+
+      # Mesh CLI gate (docs/aicli/mesh-cli.md): the operations tool must keep
+      # its unit tests green, must build, and must answer --help / version / an
+      # empty-mesh ls without a mesh root present (fail-closed, exit 0).
+      - name: Verify aicli-mesh CLI
+        working-directory: ${{ env.WORKDIR }}
+        run: |
+          set -euo pipefail
+          go test ./internal/mesh/... -count=1
+          go build -trimpath -o /tmp/aicli-mesh-check ${MESH_CMD_PATH}
+          /tmp/aicli-mesh-check --help > /dev/null
+          /tmp/aicli-mesh-check version --json > /dev/null
+          AICLI_MESH_DIR="$(mktemp -d)" /tmp/aicli-mesh-check ls --json > /dev/null
+          AICLI_MESH_DIR="$(mktemp -d)" /tmp/aicli-mesh-check gc --json > /dev/null
 
       # E4 hard gate: render packages must be green before any release.
       # NOTE: as of the semantic red baseline (Phase 0/C0), 4 band-scrollback
