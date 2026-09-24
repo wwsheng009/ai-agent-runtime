@@ -403,19 +403,23 @@ func TestProfileCommandPickWithoutProfilesExplainsHow(t *testing.T) {
 	}
 }
 
-// §23 G4：生命周期子命令在 Batch 13 就绪前必须显式拒绝，而不是静默降级。
-func TestProfileCommandLifecycleSubcommandsAreExplicitlyDisabled(t *testing.T) {
-	t.Parallel()
-	session, cleanup := newProfileSwitchTestSession(t, t.TempDir())
+// §23 G4：生命周期子命令已接线（Batch 13 slice 4）；缺参数时给用法或"缺少引用"，
+// 而不是报"未启用"，也不静默挑一个 profile 下手。save-as（D24 差分固化）仍显式
+// 拒绝，专测见 chat_profile_lifecycle_test.go。
+func TestProfileCommandLifecycleSubcommandsRequireArguments(t *testing.T) {
+	session, _, cleanup := newProfileLifecycleTestSession(t)
 	defer cleanup()
 
-	for _, sub := range []string{"create", "duplicate", "save-as", "edit", "rename", "move", "delete", "export"} {
-		text, handled := chatProfileCommandText(session, "/profile "+sub+" x")
+	for _, sub := range []string{"create", "duplicate", "rename", "move", "delete", "export", "edit"} {
+		text, handled := chatProfileCommandText(session, "/profile "+sub)
 		if !handled {
 			t.Fatalf("/profile %s 必须被命令面接管", sub)
 		}
-		if !strings.Contains(text, "尚未启用") {
-			t.Fatalf("/profile %s 应显式说明未启用，got: %s", sub, text)
+		if strings.Contains(text, "尚未启用") {
+			t.Fatalf("/profile %s 已接线，不应再报未启用，got: %s", sub, text)
+		}
+		if !strings.Contains(text, "用法") && !strings.Contains(text, "缺少") {
+			t.Fatalf("/profile %s 缺参数应给出用法或缺失说明，got: %s", sub, text)
 		}
 	}
 }

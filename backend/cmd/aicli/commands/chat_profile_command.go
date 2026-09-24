@@ -32,8 +32,17 @@ func chatProfileUsageText() string {
 		"  /profile reload                                    重新解析当前 profile（磁盘编辑后）",
 		"  /profile off                                       回到无 profile 基线（完整失效）",
 		"  /profile save [--to session|workspace|config] [--yes]   持久化默认 profile",
+		"  /profile create <name> [--template coding|review|minimal|docs] [--to user|project] [--force]",
+		"  /profile duplicate <ref> <name> [--to user|project]     复制（不覆盖同名）",
+		"  /profile save-as <name> [--to user|project]        从当前会话固化差分（待启用，见下）",
+		"  /profile edit [<ref>] [--open]                     打印 profile.yaml 路径；--open 拉起 $EDITOR",
+		"  /profile rename <ref> <new-name>                   重命名（同层；含配置引用改写）",
+		"  /profile move <ref> --to user|project              层级移动（跨层；同层拒绝）",
+		"  /profile delete <ref> [--force]                    删除（引用检查 + 文件清单；--force 清空 default）",
+		"  /profile export [<ref>] [--out <file|dir>]         导出 zip（默认 ./<name>.zip）",
 		"  /profile help                                      显示本用法",
 		"说明: 切换在下一个 turn 边界生效；profile 只能收窄安全基线，不会放宽权限",
+		"      save-as（D24 差分固化）随 Batch 13 后续 slice 启用；复杂编辑仍在前端 Profiles 页",
 	}, "\n")
 }
 
@@ -44,7 +53,7 @@ func tryExecuteStructuredProfileCommand(session *ChatSession, command string) (C
 		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
 	}
 	args := splitChatProfileArgs(extractCommandArgument(command))
-	layer, confirm, positional := chatProfileParseFlags(args)
+	flags, positional := chatProfileParseFlags(args)
 
 	sub := "status"
 	if len(positional) > 0 {
@@ -86,20 +95,86 @@ func tryExecuteStructuredProfileCommand(session *ChatSession, command string) (C
 	case "off":
 		return chatProfileOffResult(session), true
 	case "save":
-		text, err := chatProfileSaveText(session, layer, confirm)
+		text, err := chatProfileSaveText(session, flags.Layer, flags.Confirm)
 		if err != nil {
 			return commandErrorResult(err), true
 		}
 		return commandTextResult(text), true
 	case "pick":
 		return chatProfilePickResult(session), true
+	case "create":
+		if len(positional) == 0 {
+			return commandErrorResult(fmt.Errorf(
+				"用法: /profile create <name> [--template coding|review|minimal|docs] [--to user|project] [--force]")), true
+		}
+		text, err := chatProfileCreateLifecycleText(session, positional[0], flags.Template, flags.Layer, flags.Force)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		return commandTextResult(text), true
+	case "duplicate":
+		if len(positional) < 2 {
+			return commandErrorResult(fmt.Errorf("用法: /profile duplicate <ref> <name> [--to user|project]")), true
+		}
+		text, err := chatProfileDuplicateLifecycleText(session, positional[0], positional[1], flags.Layer)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		return commandTextResult(text), true
+	case "rename":
+		if len(positional) < 2 {
+			return commandErrorResult(fmt.Errorf("用法: /profile rename <ref> <new-name>")), true
+		}
+		text, err := chatProfileRenameLifecycleText(session, positional[0], positional[1])
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		return commandTextResult(text), true
+	case "move":
+		if len(positional) == 0 {
+			return commandErrorResult(fmt.Errorf("用法: /profile move <ref> --to user|project")), true
+		}
+		text, err := chatProfileMoveLifecycleText(session, positional[0], flags.Layer)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		return commandTextResult(text), true
+	case "delete":
+		if len(positional) == 0 {
+			return commandErrorResult(fmt.Errorf("用法: /profile delete <ref> [--force]")), true
+		}
+		text, err := chatProfileDeleteLifecycleText(session, positional[0], flags.Force)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		return commandTextResult(text), true
+	case "export":
+		ref := ""
+		if len(positional) > 0 {
+			ref = positional[0]
+		}
+		text, err := chatProfileExportLifecycleText(session, ref, flags.Out)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		return commandTextResult(text), true
+	case "edit":
+		ref := ""
+		if len(positional) > 0 {
+			ref = positional[0]
+		}
+		text, err := chatProfileEditLifecycleText(session, ref, flags.Open)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		return commandTextResult(text), true
 	case "help", "--help", "-h":
 		return commandTextResult(chatProfileUsageText()), true
-	case "create", "duplicate", "save-as", "edit", "rename", "move", "delete", "export":
-		// 生命周期子命令在 Batch 11b/Batch 13 启用（§23 G4）；此处显式拒绝而不是
-		// 静默降级，避免"看起来可用但什么都没发生"。
+	case "save-as":
+		// save-as（D24 差分固化）需要"会话实际生效面 vs 基线"的差分核心，随 Batch 13
+		// 后续 slice 落地；此处显式拒绝而不是静默降级，避免"看起来可用但什么都没发生"。
 		return commandErrorResult(fmt.Errorf(
-			"/profile %s 尚未启用（生命周期子命令随 Batch 13 落地）；当前可用: status|list|show|diff|use|pick|reload|off|save", sub)), true
+			"/profile save-as 尚未启用（D24 差分固化随 Batch 13 后续 slice 落地）；当前可用: status|list|show|diff|use|pick|reload|off|save|create|duplicate|edit|rename|move|delete|export")), true
 	default:
 		return commandErrorResult(fmt.Errorf("未知子命令 /profile %s\n\n%s", sub, chatProfileUsageText())), true
 	}
@@ -143,30 +218,65 @@ func splitChatProfileArgs(args string) []string {
 	return result
 }
 
-// chatProfileParseFlags 解析 `/profile` 的层选择与二次确认开关，返回剩余位置参数。
+// chatProfileCommandFlags 是 `/profile` 的旗标解析结果（Batch 13 G4：create/duplicate/
+// rename/move/delete/export/edit 的选项并入同一解析器，避免每子命令各写一套）。
+//
+// 说明: 导出路径用 `--out` 而不是 `--output`——CLI 侧 `--output` 已是"输出格式
+// text|json"，同名会让用户在两条命令间混淆（与 `aicli profile export --out` 对齐）。
+type chatProfileCommandFlags struct {
+	Layer    string
+	Template string
+	Out      string
+	Confirm  bool
+	Force    bool
+	Open     bool
+}
+
+// chatProfileParseFlags 解析 `/profile` 的旗标，返回旗标集合与剩余位置参数。
 // 与 `/routing` 同一守卫语义：层只接受 session|workspace|config；未知层由调用方
 // 报错（不静默回退默认层）。
-func chatProfileParseFlags(args []string) (layer string, confirm bool, positional []string) {
-	positional = make([]string, 0, len(args))
+func chatProfileParseFlags(args []string) (chatProfileCommandFlags, []string) {
+	flags := chatProfileCommandFlags{}
+	positional := make([]string, 0, len(args))
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
-		switch strings.ToLower(arg) {
+		lower := strings.ToLower(arg)
+		switch lower {
 		case "--to":
 			if index+1 < len(args) {
-				layer = strings.ToLower(strings.TrimSpace(args[index+1]))
+				flags.Layer = strings.ToLower(strings.TrimSpace(args[index+1]))
+				index++
+			}
+		case "--template":
+			if index+1 < len(args) {
+				flags.Template = strings.TrimSpace(args[index+1])
+				index++
+			}
+		case "--out":
+			if index+1 < len(args) {
+				flags.Out = strings.TrimSpace(args[index+1])
 				index++
 			}
 		case "--yes":
-			confirm = true
+			flags.Confirm = true
+		case "--force", "-f":
+			flags.Force = true
+		case "--open":
+			flags.Open = true
 		default:
-			if strings.HasPrefix(strings.ToLower(arg), "--to=") {
-				layer = strings.ToLower(strings.TrimSpace(arg[len("--to="):]))
-				continue
+			switch {
+			case strings.HasPrefix(lower, "--to="):
+				flags.Layer = strings.ToLower(strings.TrimSpace(arg[len("--to="):]))
+			case strings.HasPrefix(lower, "--template="):
+				flags.Template = strings.TrimSpace(arg[len("--template="):])
+			case strings.HasPrefix(lower, "--out="):
+				flags.Out = strings.TrimSpace(arg[len("--out="):])
+			default:
+				positional = append(positional, arg)
 			}
-			positional = append(positional, arg)
 		}
 	}
-	return layer, confirm, positional
+	return flags, positional
 }
 
 // chatProfileStatusText 渲染当前会话的 profile 绑定与生效摘要（只读）。

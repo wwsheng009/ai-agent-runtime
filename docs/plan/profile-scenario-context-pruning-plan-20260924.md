@@ -796,6 +796,8 @@ TUI `/profile use <name>` 与 Web `POST /runtime/commands {type:"set_profile", p
 
 > `create` / `duplicate` / `save-as` / `edit` / `rename` / `move` / `delete` / `export` 的行为细则见 §23 G4（同一"解析不了就报错"纪律，本节不重复；例如 `save-as` 无差分时明确提示且不生成空 profile）。
 
+> **接线状态（2026-09-24，Batch 13 slice 4）**：除 `save-as` 外均已在 TUI 落地（D34）；`save-as` 仍显式拒绝，不提供半成品。
+
 ### 17.3 Web / 前端命令面
 
 **后端**：`SubmitSessionRuntimeCommand` 的 dispatch switch（`session_runtime_handlers.go:889`）新增分支：
@@ -1013,7 +1015,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 | 13 | **分享**：导出 / 导入 / 项目级随仓库分发 | §9 D16 提到"项目级 profile 可随仓库分发"，但无导出/导入设计 | ❌ → **已补** §23 G5/D28 |
 | 14 | **安全**：项目级 profile 的信任门控 | **无**（见 G6：`internal/profile` 零 trust 引用） | ❌ **安全缺口** → **已补** §23 G6/D29 |
 | 15 | **验收**：端到端剧本（创建→用→改→分享） | 各批次有出口条件，但无跨阶段 E2E 剧本 | ❌ → **已补** §23 G7（E2E-1~7） |
-| 16 | **TUI 可达性**：在 TUI 内完成创建/保存 | §17.1 仅查看+切换（status/list/show/diff/use/pick/reload/off/save） | ◐ 缺 create/duplicate/save-as/edit → **已补** §23 G4/D27 |
+| 16 | **TUI 可达性**：在 TUI 内完成创建/保存 | §17.1 仅查看+切换（status/list/show/diff/use/pick/reload/off/save） | ✓ create/duplicate/rename/move/delete/export/edit 已落地（Batch 13 slice 4 / D34）；◐ `save-as` 待差分核心（A9/R21） |
 
 **结论**：**"使用/切换"闭环已完整（第三部分）；"创建/修改/分享/安全"存在 5 个实质缺口**（第 3、4、6/7、13、14 行），第 2、11、16 行为部分缺口。以下 G1-G7 逐项补遗，并**已回填正文**（§10.2 列表操作、§10.5 API 清单、§17.1/§17.2 命令面、§10.6 对照表、§11/§19 批次范围），本文档内部一致性已修复。
 
@@ -1098,6 +1100,8 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 - `save-as` 无差分（当前会话与基线完全一致）→ 明确提示"当前无差异，无需固化"，**不生成空 profile**；
 - `edit` 在无 `$EDITOR` 环境（如纯 ACP）→ 只打印路径，不报错；
 - `delete` 命中 default 引用 → 阻止并提示 `--force`（`--force` 同时清空 default 并在报告中明示）。
+
+> **Batch 13 slice 4 已落地（2026-09-24）**：上表除 `save-as` 外全部接线（执行核心 `cmd/aicli/commands/chat_profile_lifecycle{,_create,_ops}.go`，TUI 内闭环），改名/复制/报告口径见附录 D34；`save-as` 保持显式拒绝（缺"会话实际生效面 vs 基线"的差分核心，见 A9/R21），前端生命周期入口未动。
 
 ### G5 — 分享闭环：导出 / 导入 / 项目级分发（D28）
 
@@ -1216,3 +1220,19 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 **slice 3（CLI）补充**：`aicli profile export <profile> [--out <path>] [--dry-run]`、`aicli profile import <path> [--to user|project] [--name <name>] [--dry-run]`。两处实现细节：① 设计表的 `--output <dir|zip>` 与既有 `--output`（输出格式 text|json）重名，CLI 用 `--out`（缺省 `./<profile>.zip`，指向已存在目录则写 `<目录>/<profile>.zip`）；② `--dry-run` 的临时目录放系统临时区、**不创建层根**（预演不该在用户仓库里留下 `.aicli/` 空目录），真实导入仍在层根内建临时目录以保证 `os.Rename` 同盘原子落位。另外把「层根在哪」的规则收敛到 `internal/profile.LayerRoot`（API 与 CLI 共用一份，API 侧只留包内别名），导入命名契约也收敛为 `internal/profile.ResolveBundleProfileName`。
 
 **遗留（Batch 14 及后续）**：① G6/D29 信任门控——未信任工作区里导入的 profile 与本地创建同标准（本项目 profile 解析仍未接 foldertrust，Batch 14 处理）；② 导出/导入的 TUI/前端入口（CLI 与 API 已接线）；③ `from_session`（G1/D24）仍是显式 501。
+
+## 附录 D34：Batch 13 slice 4 回填（2026-09-24）——TUI 生命周期落地契约
+
+**落地范围**：`backend/cmd/aicli/commands/chat_profile_lifecycle.go`（公共设施 + 配置引用改写）、`chat_profile_lifecycle_create.go`（create/duplicate）、`chat_profile_lifecycle_ops.go`（rename/move/delete/export/edit）三个文件按行数门禁拆分 + `chat_profile_command.go`（dispatch/usage/旗标解析）+ 测试 `chat_profile_lifecycle_test.go`、`internal/profile/rewrite_test.go`。TUI `/profile` 现可完成 create / duplicate / rename / move / delete / export / edit；`save-as` 仍显式拒绝（缺差分核心，见 A9/R21）。
+
+**D34（改名与声明名的唯一性）**：`profile.yaml` 的 `profile.name` 是**声明名**（D32 的权威口径），目录名是**解析名**（registry 按目录名解析）。rename 是唯一的"改名"操作，**必须同时改写声明名**——否则"目录名 vs 声明名"永久分叉（`/profile show`、导出包、前端列表会同时显示两个名字，用户无法判断哪个是身份）。实现收敛在 `internal/profile.RewriteProfileName`：用 yaml.v3 的节点行列号定位 `profile.name` 的值区间，**只替换该区间**（注释/字段顺序/缩进/引号风格/换行符逐字节保留），区间与解析结果不自洽时报错而不写盘；文件未声明 `name` 时返回 `changed=false`，由调用方给提示（不猜）。写盘失败即回滚目录改名（延续"失败路径状态零改动"）。
+
+**duplicate 保持逐字节深拷贝**：副本的声明名仍是源名（不静默改写内容，与 D32 同一条纪律），报告显式提示"副本 profile.yaml 仍声明 name: X；如需改名用 `/profile rename <副本> <new-name>`"。
+
+**报告口径（声明名 vs ref）**：export / delete 报告以**声明名**为主（导出包按声明名校验、删除的引用检查也按声明名），当用户给的 ref 与声明名不同且是名字形态时补 `（ref: X）`——避免用户以为操作了另一个 profile。
+
+**层与路径纪律**：create 先解析层根再校验名字（`internal/profile.LayerRoot` 是唯一来源），非法名/未知层不落盘、不回落默认层；move 同层拒绝、跨层用 `os.Rename`（跨卷回退"收集→物化→删源"，回退失败即回滚目标）；duplicate 复用 `CollectBundleFiles`/`ExtractBundle`（与导入同一份路径清洗与符号链接纪律），失败即清理新建目录。
+
+**测试锚点**：`chat_profile_lifecycle_test.go`（create 模板/重名/未知模板/非法名/未知层；duplicate→export 往返，zip 可被 `ReadBundleZip` 读回；rename 声明名同步 + 目标冲突；move 同层/未知层；delete 清单 + default 引用保护（A10）；edit 路径与 `$EDITOR` 缺失；无 ref 且无绑定报错；save-as 显式拒绝；help 文本覆盖全部子命令）。测试通过 `HOME/USERPROFILE` 重定向（`useTemporaryHome`）把 `layer=user` 指到临时目录，**不污染真实用户目录**；旧的"生命周期子命令未启用"测试曾因此在 `~/.aicli/profiles/x` 留残留，本次改写为"缺参数给用法"并清理该残留。
+
+**遗留**：① `save-as`（G1/D24 + A9）待差分核心；② TUI `import` 入口（CLI/API 已接线）；③ 前端生命周期入口（Batch 12 只做了 apply/switch）；④ D29 信任门控（Batch 14）。
