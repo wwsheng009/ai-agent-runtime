@@ -108,6 +108,9 @@ function profileCatalog(
     defaultProfile: "review",
     defaultRoot: "/root",
     sessionSwitch: true,
+    workspacePath: "",
+    workspaceTrusted: true,
+    workspaceTrustFeatureEnabled: false,
     profiles: [
       {
         ref: "review",
@@ -120,6 +123,8 @@ function profileCatalog(
         isDefault: true,
         defaultAgent: "",
         writable: true,
+        promptSuppressed: false,
+        promptSuppressionReason: "",
       },
       {
         ref: "broken",
@@ -132,6 +137,8 @@ function profileCatalog(
         isDefault: false,
         defaultAgent: "",
         writable: true,
+        promptSuppressed: false,
+        promptSuppressionReason: "",
       },
     ],
     ...overrides,

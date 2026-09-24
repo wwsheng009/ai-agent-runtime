@@ -11,6 +11,7 @@ export const enRuntimeConfigProfiles = {
     count: "{{count}} profiles",
     default: "Default",
     readOnly: "Read-only",
+    promptSuppressed: "Partially not applied",
     empty: "No profiles yet. Start from a template, then narrow tools and prompts per scenario.",
     emptyFiltered: "No profile matches the filter.",
     filter: "Filter",
@@ -41,6 +42,21 @@ export const enRuntimeConfigProfiles = {
     statusError: "Parse failed",
     layerUnknown: "Unknown layer",
     selectedHint: "{{name}} selected; the actions below target it.",
+  },
+  trust: {
+    title: "Workspace not trusted: project prompts are not applied",
+    description:
+      "This workspace is not marked as trusted, so project-level profile prompts (including agent prompts) are not injected; narrowing declarations such as tools, skills and MCP still apply.",
+    workspace: "Workspace: {{path}}",
+    action: "Trust and reload",
+    confirm: "Confirm trust",
+    cancel: "Cancel",
+    confirmHint:
+      "Trusting allows project-level configuration (including prompt injection) in this workspace; the decision is stored in the local trust list, revoke it via the CLI /trust.",
+    granting: "Trusting…",
+    granted:
+      "Workspace trusted and the list reloaded. Running sessions need /profile reload to apply fully.",
+    failed: "Failed to trust the workspace",
   },
   layers: {
     user: "User",

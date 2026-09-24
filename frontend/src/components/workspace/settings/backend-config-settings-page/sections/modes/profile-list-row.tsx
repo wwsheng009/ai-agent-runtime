@@ -101,6 +101,19 @@ export function ProfileListRow({
           {!entry.writable ? (
             <Badge className="normal-case">{t("profiles.list.readOnly")}</Badge>
           ) : null}
+          {entry.promptSuppressed ? (
+            // D29（Batch 14）：工作区未信任 → 该条目的 prompts 被扣留（收窄类声明仍生效）。
+            // Badge 不透传 title/data-*（见 components/ui/badge.tsx），故 tooltip 与
+            // testid 挂在包裹层，而不是为展示细节去改公共组件。
+            <span
+              data-testid={`profiles-suppressed-${entry.ref}`}
+              title={entry.promptSuppressionReason || undefined}
+            >
+              <Badge className="normal-case text-accent-orange">
+                {t("profiles.list.promptSuppressed")}
+              </Badge>
+            </span>
+          ) : null}
         </div>
 
         <div className="flex flex-nowrap items-center gap-1">

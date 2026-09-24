@@ -12,6 +12,7 @@ export const zhRuntimeConfigProfiles = {
     count: "{{count}} 个 profile",
     default: "默认",
     readOnly: "只读",
+    promptSuppressed: "部分内容未应用",
     empty: "还没有 profile。可以先从模板新建一个，再按场景逐步收敛工具与提示词。",
     emptyFiltered: "没有符合筛选条件的 profile。",
     filter: "筛选",
@@ -42,6 +43,20 @@ export const zhRuntimeConfigProfiles = {
     statusError: "解析失败",
     layerUnknown: "未知层级",
     selectedHint: "已选中 {{name}}，下方操作针对该 profile。",
+  },
+  trust: {
+    title: "工作区未信任：项目级提示词未应用",
+    description:
+      "当前工作区未被标记为可信，因此项目级 profile 的提示词（含 agents 提示词）不会注入；工具/技能/MCP 等收窄类声明仍然生效。",
+    workspace: "工作区：{{path}}",
+    action: "信任并重载",
+    confirm: "确认信任",
+    cancel: "取消",
+    confirmHint:
+      "信任后本工作区可执行项目级配置（含提示词注入）；该决定写入本机信任清单，撤销需走 CLI /trust。",
+    granting: "信任中…",
+    granted: "已信任该工作区，列表已重载。已在运行的会话需执行 /profile reload 后完整应用。",
+    failed: "信任工作区失败",
   },
   layers: {
     user: "用户级",

@@ -26,6 +26,8 @@ import {
   renameRuntimeProfile,
   setDefaultRuntimeProfile,
 } from "@/api/runtime/profiles";
+import { grantHarnessTrust } from "@/api/runtime/harness";
+import { useRuntimeClientIdentity } from "@/lib/runtime-client";
 import type {
   RuntimeProfileCreateRequest,
   RuntimeProfileListEntry,
@@ -38,6 +40,7 @@ import { ProfileEditor } from "../../profiles/profile-editor";
 import { formatProfileError } from "../../profiles/profile-i18n";
 import { ProfileListHeader } from "./profile-list-header";
 import { ProfileListRow } from "./profile-list-row";
+import { ProfilesTrustNotice } from "./profiles-trust-notice";
 import {
   downloadProfileBundle,
   entryFromMutation,
@@ -52,6 +55,11 @@ import { ProfilesDialogHost, type ProfilesDialogState } from "./profiles-dialog-
 
 export function ProfilesModeSection() {
   const { t } = useTranslation("runtimeConfig");
+  // D29 工作区信任上下文（Batch 14 slice 5）：本页没有会话上下文，工作区路径
+  // 与 HarnessSettingsPage 同源（runtimeClient.workspacePath）。为空时列表请求
+  // 不带 workspace 参数，后端也不回信任上下文 → 不渲染信任提示（旧行为零变化）。
+  const runtimeClient = useRuntimeClientIdentity();
+  const workspacePath = runtimeClient.workspacePath.trim();
   const [entries, setEntries] = useState<RuntimeProfileListEntry[]>([]);
   const [defaultProfile, setDefaultProfile] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -62,24 +70,58 @@ export function ProfilesModeSection() {
   const [view, setView] = useState<RuntimeProfileView | null>(null);
   const [isViewLoading, setIsViewLoading] = useState(false);
   const [dialog, setDialog] = useState<ProfilesDialogState | null>(null);
+  /** 列表响应回显的信任上下文；null = 尚未拿到响应。 */
+  const [trust, setTrust] = useState<{
+    workspacePath: string;
+    trusted: boolean;
+    featureEnabled: boolean;
+  } | null>(null);
+  const [isGrantingTrust, setIsGrantingTrust] = useState(false);
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const result = await listRuntimeProfiles();
+      const result = await listRuntimeProfiles({ workspace: workspacePath });
       setEntries(result.profiles);
       setDefaultProfile(result.defaultProfile);
+      setTrust({
+        workspacePath: result.workspacePath,
+        trusted: result.workspaceTrusted,
+        featureEnabled: result.workspaceTrustFeatureEnabled,
+      });
     } catch (loadError) {
       setError(formatProfileError(loadError, t("profiles.list.loadFailed")));
     } finally {
       setIsLoading(false);
     }
-  }, [t]);
+  }, [t, workspacePath]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  /**
+   * Q22 一键信任：显式确认（ProfilesTrustNotice 内的两步）之后才发请求。
+   * 成功后立即刷新列表——徽标与提示条都来自这次响应，不靠本地状态猜。
+   */
+  const runGrantTrust = useCallback(async () => {
+    if (!workspacePath) {
+      return;
+    }
+    setIsGrantingTrust(true);
+    setError(null);
+    setStatusMessage(null);
+    try {
+      await grantHarnessTrust(workspacePath);
+      await refresh();
+      setStatusMessage(t("profiles.trust.granted"));
+    } catch (grantError) {
+      setError(formatProfileError(grantError, t("profiles.trust.failed")));
+    } finally {
+      setIsGrantingTrust(false);
+    }
+  }, [refresh, t, workspacePath]);
 
   const openEditor = useCallback(
     async (entry: RuntimeProfileListEntry) => {
@@ -390,6 +432,16 @@ export function ProfilesModeSection() {
           void refresh();
         }}
       />
+
+      {trust && trust.workspacePath && trust.featureEnabled && !trust.trusted ? (
+        <ProfilesTrustNotice
+          granting={isGrantingTrust}
+          workspacePath={trust.workspacePath}
+          onGrant={() => {
+            void runGrantTrust();
+          }}
+        />
+      ) : null}
 
       {statusMessage ? (
         <SettingsNoticeCard className="mt-0" tone="neutral">

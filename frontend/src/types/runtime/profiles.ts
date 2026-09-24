@@ -30,6 +30,14 @@ export type RuntimeProfileListEntry = {
   defaultAgent: string;
   /** API 能否写回（当前有 profile.yaml 即可写）。 */
   writable: boolean;
+  /**
+   * D29（Batch 14）：工作区未信任时，项目层 profile 的 prompts 被扣留
+   * （tools/skills/MCP 等收窄声明仍生效）。仅在请求带 workspace 参数且确有
+   * 可扣留内容时为 true——没有 prompt 的 profile 不会误报。
+   */
+  promptSuppressed: boolean;
+  /** 扣留原因（promptSuppressed=true 时由后端给出，可直接展示）。 */
+  promptSuppressionReason: string;
 };
 
 export type RuntimeProfileListResponse = {
@@ -45,6 +53,13 @@ export type RuntimeProfileListResponse = {
    * `/profile` 命令（而不是注册后执行时报错）。
    */
   sessionSwitch: boolean;
+  /**
+   * D29 工作区信任上下文（Batch 14）：仅在请求带 workspace 参数时由后端填充。
+   * workspacePath 为空表示"本次请求未声明工作区"，UI 据此不渲染信任提示。
+   */
+  workspacePath: string;
+  workspaceTrusted: boolean;
+  workspaceTrustFeatureEnabled: boolean;
 };
 
 /** 工具面：allowlist/denylist 为 profile 声明（可写），其余为后端推导（只读）。 */

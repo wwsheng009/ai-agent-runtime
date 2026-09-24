@@ -120,6 +120,10 @@ export function entryFromMutationResult(
     isDefault: false,
     defaultAgent: "",
     writable: true,
+    // 新建/复制响应不携带 D29 信任上下文：新写出的 profile 尚未经过列表投影，
+    // 置为"未扣留"，下一次列表刷新会以服务端结论为准。
+    promptSuppressed: false,
+    promptSuppressionReason: "",
   };
 }
 

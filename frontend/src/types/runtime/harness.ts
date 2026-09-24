@@ -22,6 +22,33 @@ export type RuntimeHarnessGrant = {
   scope?: string;
 };
 
+/**
+ * D29 工作区信任结论（Batch 14，Q22 UI 闭环）。
+ *
+ * `feature_enabled=false` 时门控关闭、`trusted` 恒为 true；只有
+ * `feature_enabled=true && trusted=false` 才意味着项目级 profile 的 prompts
+ * 正在被扣留（清单里对应条目 prompt_suppressed=true）。
+ */
+export type RuntimeHarnessTrustResponse = {
+  workspace_path: string;
+  feature_enabled: boolean;
+  trusted: boolean;
+  source?: string;
+  workspace_key?: string;
+  project_root?: string;
+  store_path?: string;
+  project_configs?: string[];
+  action?: string;
+};
+
+/** 只支持 grant：撤销信任是破坏性操作，不在 UI 闭环内（走 CLI `/trust`）。 */
+export type RuntimeHarnessTrustAction = "grant";
+
+export type RuntimeHarnessTrustRequest = {
+  workspace_path?: string;
+  action?: RuntimeHarnessTrustAction;
+};
+
 export type RuntimeHarnessGrantsResponse = {
   workspace_path: string;
   store_path?: string;

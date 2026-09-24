@@ -33,6 +33,8 @@ function entry(
     isDefault: false,
     defaultAgent: "",
     writable: true,
+    promptSuppressed: false,
+    promptSuppressionReason: "",
     ...overrides,
   };
 }
@@ -47,6 +49,9 @@ function catalog(
     defaultRoot: "/root",
     sessionSwitch: true,
     profiles,
+    workspacePath: "",
+    workspaceTrusted: true,
+    workspaceTrustFeatureEnabled: false,
     ...overrides,
   };
 }

@@ -18,6 +18,8 @@ export {
   getHarnessMemory,
   getHarnessPermissions,
   getHarnessPlugins,
+  getHarnessTrust,
+  grantHarnessTrust,
   updateHarnessGrants,
   updateHarnessPlugin,
 } from "./harness";

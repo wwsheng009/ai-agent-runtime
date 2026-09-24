@@ -22,14 +22,23 @@ import {
 } from "./normalize";
 import {
   buildRuntimeProfilePreviewUrl,
+  buildRuntimeProfilesListUrl,
   buildRuntimeProfileReferencesUrl,
   buildRuntimeProfileUrl,
   buildRuntimeProfileValidateUrl,
   jsonRequestInit,
   runtimeProfilesUrl,
 } from "./url";
-export async function listRuntimeProfiles() {
-  const payload = await fetchRuntimeJson<RuntimeProfileListResponse>(runtimeProfilesUrl);
+/**
+ * 列表查询。`workspace` 可选（Batch 14）：给出时后端附带 D29 工作区信任上下文
+ * 与逐条 prompts 扣留标记（Q22 徽标/一键信任的数据面）；不给出时请求与响应
+ * 都与既有完全一致（旧调用零变化）。
+ */
+export async function listRuntimeProfiles(options: { workspace?: string } = {}) {
+  const workspace = options.workspace?.trim() || "";
+  const payload = await fetchRuntimeJson<RuntimeProfileListResponse>(
+    workspace ? buildRuntimeProfilesListUrl({ workspace }) : runtimeProfilesUrl,
+  );
   return normalizeProfileListResponse(payload);
 }
 

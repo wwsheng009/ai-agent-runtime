@@ -98,6 +98,9 @@ export function normalizeProfileListEntry(value: unknown, index: number): Runtim
     isDefault: readBoolean(record.is_default ?? record.isDefault),
     defaultAgent: readAliasedString(record, "defaultAgent"),
     writable: record.writable !== false,
+    // Batch 14 / D29：旧后端不返回这两个字段 → 归一化为 false/空（不显示徽标）。
+    promptSuppressed: readBoolean(record.prompt_suppressed ?? record.promptSuppressed),
+    promptSuppressionReason: readAliasedString(record, "promptSuppressionReason"),
   };
 }
 
@@ -116,6 +119,12 @@ export function normalizeProfileListResponse(
     profiles,
     // R20：缺字段（旧后端）按「不支持会话级切换」处理，命令不注册。
     sessionSwitch: readBoolean(record.session_switch ?? record.sessionSwitch),
+    // Batch 14：workspace 上下文仅在请求带 workspace 参数时出现，缺省即"未声明"。
+    workspacePath: readAliasedString(record, "workspacePath"),
+    workspaceTrusted: readBoolean(record.workspace_trusted ?? record.workspaceTrusted),
+    workspaceTrustFeatureEnabled: readBoolean(
+      record.workspace_trust_feature_enabled ?? record.workspaceTrustFeatureEnabled,
+    ),
   };
 }
 

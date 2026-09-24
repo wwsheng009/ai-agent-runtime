@@ -6,6 +6,8 @@ import type {
   RuntimeHarnessPermissionsResponse,
   RuntimeHarnessPluginsResponse,
   RuntimeHarnessPluginUpdateRequest,
+  RuntimeHarnessTrustRequest,
+  RuntimeHarnessTrustResponse,
 } from "@/types/runtime";
 
 import {
@@ -46,6 +48,50 @@ export async function getHarnessGrants(
       headers: {
         Accept: "application/json",
       },
+    },
+  );
+}
+
+/**
+ * D29 工作区信任结论（Batch 14）：读侧与 CLI `/trust`、启动摘要同源。
+ * `feature_enabled && !trusted` 才意味着项目级 profile 的 prompts 被扣留。
+ */
+export async function getHarnessTrust(
+  workspacePath?: string,
+): Promise<RuntimeHarnessTrustResponse> {
+  return fetchRuntimeJson<RuntimeHarnessTrustResponse>(
+    withWorkspacePath("/api/runtime/harness/trust", workspacePath),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+}
+
+/**
+ * 一键信任（Q22）：显式确认后调用；后端持久化到 ~/.aicli/trusted_folders.yaml。
+ * 只支持 grant——撤销信任是破坏性操作，走 CLI `/trust` 面，避免 UI 误触。
+ */
+export async function grantHarnessTrust(
+  workspacePath?: string,
+  request: RuntimeHarnessTrustRequest = {},
+): Promise<RuntimeHarnessTrustResponse> {
+  const resolvedWorkspace =
+    request.workspace_path?.trim() || workspacePath?.trim() || undefined;
+  return fetchRuntimeJson<RuntimeHarnessTrustResponse>(
+    withWorkspacePath("/api/runtime/harness/trust", resolvedWorkspace),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...request,
+        action: request.action ?? "grant",
+        workspace_path: resolvedWorkspace,
+      }),
     },
   );
 }

@@ -8,6 +8,16 @@
 import { buildRuntimeUrl, buildRuntimeUrlWithQuery } from "../shared";
 export const runtimeProfilesUrl = buildRuntimeUrl("/api/runtime/profiles");
 
+/**
+ * 列表端点带 workspace 时（Batch 14），后端附带 D29 工作区信任上下文与逐条
+ * prompts 扣留标记；不带 workspace 时响应与既有完全一致（旧行为零变化）。
+ */
+export function buildRuntimeProfilesListUrl(query: { workspace?: string } = {}) {
+  return buildRuntimeUrlWithQuery("/api/runtime/profiles", {
+    workspace: query.workspace?.trim() || undefined,
+  });
+}
+
 /** 单个 profile 的资源 URL；ref 可能含 `:` `/`，必须整段编码。 */
 export function buildRuntimeProfileUrl(ref: string) {
   return `${runtimeProfilesUrl}/${encodeURIComponent(ref)}`;
