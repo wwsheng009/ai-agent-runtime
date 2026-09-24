@@ -153,12 +153,13 @@ gofmt -l backend/internal/mesh
 
 ```powershell
 $env:AICLI_MESH_DIR = "$env:TEMP\mesh-s2"
-# 终端 1 / 2：两个真实进程
-.\backend\dist\aicli.exe chat --pprof --web-port 0
-.\backend\dist\aicli.exe chat --pprof --web-port 0 --mesh=false
+# 终端 1 / 2：两个真实进程（--pprof 每次分配随机空闲端口；真实端口见节点档案 endpoint.port）
+.\backend\dist\aicli.exe chat --pprof
+.\backend\dist\aicli.exe chat --pprof --mesh=false
 # 终端 3：
 (Get-ChildItem "$env:AICLI_MESH_DIR\nodes").Count          # 期望 1（--mesh=false 不写）
-(Invoke-RestMethod http://127.0.0.1:<port>/web/api/health) # 期望 200 且字段齐全
+$node = Get-ChildItem "$env:AICLI_MESH_DIR\nodes" | Get-Content -Raw | ConvertFrom-Json
+(Invoke-RestMethod "http://127.0.0.1:$($node.endpoint.port)/web/api/health") # 期望 200 且字段齐全
 ```
 
 **门禁**：手工证据 + `host_test.go` 绿 + E2E-DEBUG-01/02 `-BaselineOnly` 仍绿。
@@ -443,7 +444,7 @@ go test ./backend/cmd/aicli/commands/... -run 'MeshSpawn|Sessions' -v
 
 | 动作 | 路径 | 说明 |
 |------|------|------|
-| 新增 | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1` | 场景脚本：A/B 两真实进程（`--pprof --web-port 0`），dot-source `aicli-e2e-harness.ps1` 复用 `Invoke-HarnessRequest` / `Wait-AicliScreenStable` / `Test-AicliEndpointCoverage` |
+| 新增 | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1` | 场景脚本：A/B 两真实进程（`--pprof`，端口由节点档案 `endpoint.port` 提供），dot-source `aicli-e2e-harness.ps1` 复用 `Invoke-HarnessRequest` / `Wait-AicliScreenStable` / `Test-AicliEndpointCoverage` |
 | 改造 | `scripts/test-aicli-e2e-all.ps1`（实测 108–131 行 `$script:scenarios`；236–245 行参数分支；138 行基线正则） | 追加第三场景 + 参数分支 |
 | 改造 | `scripts/e2e-assertion-baseline.json` | 跑 `-UpdateBaseline` 固化 M1–M10 |
 | 改造 | `docs/e2e/debug-guide.md` | **已同步**（§8 + M1–M10）；跑通后回填「已落地」标注 |
@@ -661,7 +662,7 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | C1 | S3 迁移遗漏引用 → 编译失败或运行期空指针 | 删除 `chat_web_port_store.go` | 删除与替换同一提交；合并前 `go build ./...` + 全仓 `grep` 旧符号清零 |
 | C2 | sticky 端口行为被悄悄改变 | S3 重构 | 迁移前后跑同一组用例（命中 / 未命中 / 占用回退）；**只换存储，不换语义** |
 | C3 | 心跳线程与主循环争用导致卡顿（R2） | S2 / S4 | 心跳只做「快照 + 一次 rename」；30s 一次；失败退避不重试风暴 |
-| C4 | E2E 新场景不稳定（端口 / 时序抖动） | S10 | 用 `--web-port 0` + 就绪等待；断言用 `Wait-AicliScreenStable`；TTL 相关断言留足余量 |
+| C4 | E2E 新场景不稳定（端口 / 时序抖动） | S10 | 用 `--pprof`（随机空闲端口，端口从档案 `endpoint.port` 读取）+ 就绪等待；断言用 `Wait-AicliScreenStable`；TTL 相关断言留足余量 |
 | C5 | 基线漂移：01/02 断言被无意改动 | 全程 | 每切片收尾跑 `-BaselineOnly`；基线 diff 必须「只增不改」 |
 | C6 | 测试污染真实网格目录 | 手工测试 | A6 强制 `AICLI_MESH_DIR=$env:TEMP\...`；测试后清理 |
 | C7 | Windows 权限位不生效导致安全断言误判 | S1 / S6 | 断言口径：POSIX 校验 0600；Windows 校验「位于用户 Profile 内」而非 chmod（§9.6） |

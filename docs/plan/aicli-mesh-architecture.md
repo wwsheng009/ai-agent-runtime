@@ -1168,7 +1168,7 @@ Windows 没有 POSIX 权限位：`0600` 语义退化为「依赖用户目录 ACL
 
 ### 12.3 多进程 E2E（`E2E-DEBUG-03`，已落到 debug-guide §8）
 
-新增第三个场景，harness 启动 **A/B 两个真实进程**（`--pprof --web-port 0`），全部交互走网格：
+新增第三个场景，harness 启动 **A/B 两个真实进程**（`--pprof`，端口从节点档案 `endpoint.port` 读取），全部交互走网格：
 
 | 断言 | 内容 |
 |------|------|
