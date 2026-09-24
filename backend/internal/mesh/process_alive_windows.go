@@ -25,14 +25,31 @@ const processQueryLimitedInformation = 0x1000
 // not exist" counts as dead. Access-denied and every other error are treated as
 // alive, because a false "alive" merely makes the reader wait for the TTL,
 // while a false "dead" would let two processes believe they own one session.
+//
+// Windows keeps the process object — and therefore the PID — alive as long as
+// any handle to it is open, so OpenProcess keeps succeeding for a process that
+// has already exited. Parents that start a child and hold on to it (PowerShell
+// Start-Process, os.Process, the S9 spawn path, supervising scripts) are the
+// normal case, not an edge case: without the exit-code check below a killed
+// chat process stayed `live` forever, so the view never flipped to `stale` and
+// gc could not reclaim it (E2E-DEBUG-03 M6/M9 caught exactly that).
 func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
 	handle, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
-	if err == nil {
-		_ = syscall.CloseHandle(handle)
+	if err != nil {
+		return !errors.Is(err, errInvalidParameter)
+	}
+	defer func() { _ = syscall.CloseHandle(handle) }()
+	var code uint32
+	if err := syscall.GetExitCodeProcess(handle, &code); err != nil {
+		// 退出码都问不到：按保守口径当活（宁可让读者等 TTL）。
 		return true
 	}
-	return !errors.Is(err, errInvalidParameter)
+	return code == stillActive
 }
+
+// stillActive 是 STILL_ACTIVE（STATUS_PENDING，259）：GetExitCodeProcess 对
+// 「尚未退出」的进程返回该值；其余值（含 0）都说明进程已经结束。
+const stillActive = 259
