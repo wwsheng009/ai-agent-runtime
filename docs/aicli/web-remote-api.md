@@ -116,6 +116,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | GET | `/web/api/health` | 网格存活探针：不依赖会话与渲染器，恒 200（`available` / `node_id` / `pid` / `uptime_sec` / `session_active` / `busy` / `mesh_ready`）；供网格探活、脚本就绪等待与 `aicli-mesh doctor` 复用 |
 | GET | `/web/api/mesh/self` | 网格：本节点自述（档案同形字段 + `derived` 内存实时值 + `mesh` 根目录；`auth.token` 默认脱敏，见 §9） |
 | GET | `/web/api/mesh/peers` | 网格：全量视图（`counts` 恒全量口径；`scope` / `workspace` / `state` 只过滤 `nodes[]`；`probe=0` 默认不发网络请求，见 §9） |
+| GET | `/web/api/mesh/events` | 网格：实时事件流（SSE 扇入；`?since_seq=<n>` 续传游标、`?peers=auto\|none` 订阅拓扑；只连本进程即可看到全网格，见 §9.4） |
 | GET | `/web/` | 浏览器微型客户端页面（同一后端） |
 | GET | `/debug/chat/screen` | 与 `/web/api/screen?view=tui` 同源的调试入口（保留） |
 
@@ -561,3 +562,53 @@ Invoke-RestMethod 'http://127.0.0.1:51234/web/api/mesh/peers?scope=self&state=li
 > 与 CLI 同源：`aicli-mesh ls --json` 输出同一份 `BuildView` 结果（S6 起可用）；
 > 多进程验收（互发现 / 定向调用 / 崩溃对账 / GC）见
 > [../e2e/debug-guide.md](../e2e/debug-guide.md) §8（E2E-DEBUG-03）。
+
+### 9.4 实时事件流：`GET /web/api/mesh/events`（SSE 扇入）
+
+**一句话**：浏览器/脚本只连**自己进程**的这一条流，就能看到整个网格的实时状态——本节点作为
+扇入点，把各 peer 的 SSE 订阅结果并入本进程的事件流（架构 §6.1 第 3 层 / §6.5）。
+
+```bash
+# 实时打印网格事件（Ctrl+C 结束）
+curl -N http://127.0.0.1:51234/web/api/mesh/events
+
+# 带续传游标（只收 seq > 42 的帧）与「只看本节点自产帧」的拓扑
+curl -N 'http://127.0.0.1:51234/web/api/mesh/events?since_seq=42&peers=none'
+```
+
+查询参数（非法取值按默认处理，不 400——诊断面容错优先）：
+
+| 参数 | 默认 | 语义 |
+|------|------|------|
+| `since_seq` | `0` | 跳过 `seq <= n` 的帧；每帧帧首带 `id: <seq>` 行，断线重连时回填最后收到的 seq |
+| `peers` | `auto` | `auto`=本节点作为扇入点（本节点自产帧 + peer 事件）；`none`=只收本节点自产帧 |
+
+**帧类型**（`event:` 行；每条 data 为 `schema_version` / `seq` / `ts` / `source_node_id` /
+`type` / `data` 的 JSON 信封，`seq` 即帧首 `id:` 行）：
+
+| 帧 | 触发 |
+|----|------|
+| `mesh.ready` | 订阅成功后的首帧：回显 `since_seq` / `peers` / 当前客户端数，并给出 `resume_hint` |
+| `mesh.peer.joined` / `mesh.peer.left` | peer 进程上线 / 退出 |
+| `mesh.peer.updated` | peer 心跳、端点就绪（`callable` 翻新）、忙碌翻转、会话切换 |
+| `mesh.session.changed` | 会话 `activated` / `deactivated` / `ownership`（租约得失） |
+| `mesh.call.invoked` / `mesh.call.completed` | 跨进程调用开始 / 结束（S8 起） |
+| `mesh.peer.event` | peer 进程内的白名单事件（turn / 工具 / 审批），内层帧原样放在 `data.frame`，来源见 `data.peer_node_id` |
+| `mesh.lagged` | 本连接缓冲溢出：`data.skipped` 是跳号数，**消费方应重新拉一次 `/web/api/mesh/peers` 做全量兜底** |
+
+**硬契约**：
+
+- **防环**：`mesh.peer.event` 绝不二次转发（§6.3）。节点间订阅固定用 `peers=none`，因此
+  A↔B 互订也不会出现回声；`source_node_id` 记录事件**来源节点**，`seq` 恒为**本节点**计数器。
+- **seq 与 journal 同源**：扇入帧与本节点 journal 共用同一计数器，单调递增、无重复。
+- **限流**：每 peer 20 帧/秒（突发 40），超限丢弃并计数；丢弃数出现在
+  `/web/api/mesh/peers` 的 `nodes[].dropped_events`（§6.4）。
+- **客户端上限**：单节点 32 条 SSE 连接，超限 `429`（**不影响既有连接**）。
+- **降级**：网格未启用（`--mesh=false`，路由通常不注册）→ `200 {"available":false,
+  "reason":"mesh disabled"}`；扇入已关闭或订阅被拒 → `503`（客户端上限为 `429`），
+  错误信封为 `{"status":"error","code":"mesh_stream_unavailable","message":…,"node_id":…,
+  "schema_version":1}`；**不阻塞 chat**（MN1 / §4.7）。
+- 其它方法 → `405` + `Allow: GET`。
+
+> 流**不重放历史**（与 `/web/api/events` 同语义）：连接建立前发布的帧不会补发；需要全量
+> 现状先拉一次 `/web/api/mesh/peers`，之后靠本流增量维持。
