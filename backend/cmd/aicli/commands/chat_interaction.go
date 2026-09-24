@@ -204,6 +204,12 @@ type chatInteractionCoordinator struct {
 	dynamicStatusCompletedElapsed time.Duration
 	dynamicStatusCompleted        bool
 	dynamicStatusTimerSeq         uint64
+	// diagnosticNotice 是后台子系统（mesh peer 断连等）warning 在动态栏上的
+	// 单行展示文本：整行临时覆盖活动行、到期自动清除，绝不写入 transcript
+	// 历史。历史信息流只承载会话语义，后台告警噪声不得淹没正文。
+	diagnosticNotice      string
+	diagnosticNoticeUntil time.Time
+	diagnosticNoticeSeq   uint64
 	// internalRunSeq 记录内部轮次（supervision auto-wake 等不经过
 	// sendMessage/StartWaiting 协议的 run）的启动次数；waitingInternalRunSeq
 	// 在 StartWaiting 时快照。CompleteWaiting 只有在两者相等时才允许冻结
@@ -500,8 +506,9 @@ func newChatInteractionCoordinator(session *ChatSession) *chatInteractionCoordin
 		coord.blockSourceFn = session.RuntimeEventBridge.sceneBlockSource()
 	}
 	// 交互式会话登记为进程级诊断出口：mesh 等后台 goroutine 的 warning
-	// 必须走语义补充 cell，直接写 stderr 会盖住底部状态栏。非交互 / JSON
-	// 模式由 registerChatDiagnosticSink 自行忽略（见 chat_diagnostic.go）。
+	// 在动态栏上以单行临时提示显示（不进 transcript 历史）；直接写 stderr
+	// 会盖住底部状态栏。非交互 / JSON 模式由 registerChatDiagnosticSink
+	// 自行忽略（见 chat_diagnostic.go）。
 	registerChatDiagnosticSink(coord)
 	return coord
 }
@@ -864,28 +871,142 @@ func (c *chatInteractionCoordinator) updateSurfaceStatusLocked(s chatSurfaceStat
 	}
 	now := time.Now()
 	c.updateDynamicStatusClockLocked(s, now)
-	if c.surface != nil {
-		persistentModel := buildChatPersistentStatusModelForWidth(c.session, ui.GetTerminalWidth())
-		dynamicModel := c.appendStatusHintsLocked(buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(
-			s,
-			ui.GetTerminalWidth(),
-			c.inputMode,
-			c.dynamicStatusElapsedLocked(now),
-			c.dynamicStatusCompleted,
-			chatEscapeInterruptAvailable(c.session),
-		))
-		c.persistentStatusModel = cloneChatStatusLineModel(persistentModel)
-		c.dynamicStatusModel = cloneChatStatusLineModelPointer(dynamicModel)
-		c.statusModelsCached = true
-		c.surface.SetStatusModels(
-			persistentModel,
-			dynamicModel,
-		)
-		c.surface.SetPromptNoticeLine(buildChatPromptNoticeLineForWidth(c.session, s, ui.GetTerminalWidth()))
-		c.surface.SetSessionIDLine(buildChatSessionIDLine(c.session))
-		c.scheduleDynamicStatusTickLocked(now)
-	}
+	c.repaintStatusModelsLocked()
 	c.enqueueWebDynamicStatusLocked(s, now)
+}
+
+// repaintStatusModelsLocked 用缓存的 surfaceStatus 重建两条状态行模型并重绘。
+// 状态迁移（updateSurfaceStatusLocked）与诊断提示到期（状态未变、只有动态栏
+// 内容过期）共用同一条构建/重绘路径，避免两处渲染规则漂移。
+func (c *chatInteractionCoordinator) repaintStatusModelsLocked() {
+	if c == nil || c.shutdown {
+		return
+	}
+	now := time.Now()
+	width := ui.GetTerminalWidth()
+	persistentModel := buildChatPersistentStatusModelForWidth(c.session, width)
+	dynamicModel := c.appendStatusHintsLocked(buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(
+		c.surfaceStatus,
+		width,
+		c.inputMode,
+		c.dynamicStatusElapsedLocked(now),
+		c.dynamicStatusCompleted,
+		chatEscapeInterruptAvailable(c.session),
+	))
+	c.persistentStatusModel = cloneChatStatusLineModel(persistentModel)
+	c.dynamicStatusModel = cloneChatStatusLineModelPointer(dynamicModel)
+	c.statusModelsCached = true
+	if c.surface == nil {
+		return
+	}
+	c.surface.SetStatusModels(persistentModel, dynamicModel)
+	c.surface.SetPromptNoticeLine(buildChatPromptNoticeLineForWidth(c.session, c.surfaceStatus, width))
+	c.surface.SetSessionIDLine(buildChatSessionIDLine(c.session))
+	c.scheduleDynamicStatusTickLocked(now)
+}
+
+// diagnosticNoticeTTL 是动态栏诊断提示的驻留时长。后台 warning 是瞬时事件、
+// 不是会话语义：到期必须自动让位给活动行/空闲态，否则告警会永久占据动态栏。
+var diagnosticNoticeTTL = 6 * time.Second
+
+// ShowDiagnosticNotice 把一条后台诊断（mesh peer 降级 warning 等）投递到
+// 动态栏：单行、临时、整行覆盖活动行，绝不进入 transcript 历史。返回 false
+// 表示当前没有可接收的交互式会话，调用方应回退 stderr。
+//
+// 可被后台 goroutine 调用：内部只持 c.mu 更新缓存模型并投递 surface action，
+// 不产生裸终端字节；连续告警在同一个动态栏上 latest-wins，不会堆叠。
+func (c *chatInteractionCoordinator) ShowDiagnosticNotice(line string) bool {
+	if c == nil {
+		return false
+	}
+	text := formatChatDiagnosticNoticeLine(line, ui.GetTerminalWidth())
+	if text == "" {
+		return false
+	}
+	c.mu.Lock()
+	if c.shutdown || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
+		c.mu.Unlock()
+		return false
+	}
+	c.diagnosticNotice = text
+	c.diagnosticNoticeUntil = time.Now().Add(diagnosticNoticeTTL)
+	c.repaintStatusModelsLocked()
+	c.scheduleDiagnosticNoticeExpiryLocked()
+	c.mu.Unlock()
+	return true
+}
+
+// scheduleDiagnosticNoticeExpiryLocked 为当前诊断提示安排一次到期清除。重复
+// 告警只替换同一 render intent（latest-wins），不会堆叠定时器。
+func (c *chatInteractionCoordinator) scheduleDiagnosticNoticeExpiryLocked() {
+	if c == nil || c.shutdown || c.diagnosticNotice == "" {
+		return
+	}
+	delay := time.Until(c.diagnosticNoticeUntil)
+	if delay < 10*time.Millisecond {
+		delay = 10 * time.Millisecond
+	}
+	c.diagnosticNoticeSeq++
+	sequence := c.diagnosticNoticeSeq
+	c.scheduleRenderIntent(renderengine.FrameKeyDiagnosticNotice, "diagnostic-notice", delay, func() {
+		// Phase 1（IR-11）：回调只投递 action，业务在 reducer 内执行。
+		c.postScheduledUIAction(ui.Timer{Key: renderengine.FrameKeyDiagnosticNotice, Generation: sequence})
+	})
+}
+
+// refreshDiagnosticNoticeTick 是到期清除的 reducer 端实现（chat_ui_actor.go
+// 的 FrameKeyDiagnosticNotice 分支）。清除后走同一条状态行构建路径恢复正常
+// 活动行；sequence 过期或会话关闭时静默跳过。
+func (c *chatInteractionCoordinator) refreshDiagnosticNoticeTick(sequence uint64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if sequence != c.diagnosticNoticeSeq || c.shutdown {
+		return
+	}
+	if time.Now().Before(c.diagnosticNoticeUntil) {
+		return
+	}
+	c.diagnosticNotice = ""
+	c.diagnosticNoticeUntil = time.Time{}
+	c.repaintStatusModelsLocked()
+}
+
+// formatChatDiagnosticNoticeLine 把一条后台诊断压成动态栏可用的单行文本：
+// 换行/制表符折叠为空格（多行告警会把单行动态栏挤成多行），去掉冗余的
+// "Warning:" 前缀，并按终端宽度紧凑截断。返回空串表示没有可展示内容。
+func formatChatDiagnosticNoticeLine(line string, width int) string {
+	flat := strings.Join(strings.Fields(line), " ")
+	if flat == "" {
+		return ""
+	}
+	if trimmed, ok := trimDiagnosticNoticePrefix(flat); ok {
+		flat = trimmed
+	}
+	if flat == "" {
+		return ""
+	}
+	if width <= 0 {
+		width = 80
+	}
+	const prefix = "⚠ "
+	budget := width - ui.DisplayWidth(prefix)
+	if budget < 8 {
+		budget = 8
+	}
+	return prefix + compactStatusValue(flat, budget)
+}
+
+// trimDiagnosticNoticePrefix 去掉告警文本自带的 "Warning:" 前缀：动态栏已经
+// 用 ⚠ + warning 角色表达告警语义，前缀只浪费一行宽度。
+func trimDiagnosticNoticePrefix(text string) (string, bool) {
+	const prefix = "Warning:"
+	if len(text) < len(prefix) || !strings.EqualFold(text[:len(prefix)], prefix) {
+		return text, false
+	}
+	return strings.TrimSpace(text[len(prefix):]), true
 }
 
 // webDynamicStatusLaneCapacity 是 web 动态状态发布通道容量。状态发布频率低
@@ -1216,7 +1337,23 @@ func (c *chatInteractionCoordinator) appendEventDegradationHintLocked(model *sty
 // 它们都只读桥发布的原子快照，不获取桥的互斥量，也不改变状态行业务语义。
 func (c *chatInteractionCoordinator) appendStatusHintsLocked(model *style.StatusLineModel) *style.StatusLineModel {
 	model = c.appendEventDegradationHintLocked(model)
-	return c.appendTurnBudgetHintLocked(model)
+	model = c.appendTurnBudgetHintLocked(model)
+	return c.applyDiagnosticNoticeLocked(model)
+}
+
+// applyDiagnosticNoticeLocked 让后台诊断（mesh 降级 warning）在有效期内独占
+// 动态栏：整行替换为单行告警文本，而不是拼进活动行或写进 transcript 历史。
+// 后台告警是瞬时噪声（peer 断连/重连），历史信息流只承载会话语义；到期后
+// refreshDiagnosticNoticeTick 用同一条构建路径恢复正常活动行。
+func (c *chatInteractionCoordinator) applyDiagnosticNoticeLocked(model *style.StatusLineModel) *style.StatusLineModel {
+	if c == nil || strings.TrimSpace(c.diagnosticNotice) == "" {
+		return model
+	}
+	return &style.StatusLineModel{
+		State:     style.RunWaiting,
+		StateText: c.diagnosticNotice,
+		StateRole: style.RoleWarning,
+	}
 }
 
 // appendTurnBudgetHintLocked 在动态状态行尾部追加 agent 循环的 turn 预算水位

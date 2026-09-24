@@ -33,6 +33,9 @@ const (
 	FrameKeyActiveFrame = "activeFrame"
 	// FrameKeyPrompt is the debounced interactive prompt redraw.
 	FrameKeyPrompt = "prompt"
+	// FrameKeyDiagnosticNotice is the one-shot expiry of a background
+	// diagnostic notice on the dynamic status row (mesh peer warnings).
+	FrameKeyDiagnosticNotice = "diagnosticNotice"
 )
 
 // DirtyForReason maps the coordinator's diagnostic reason to a stable dirty
@@ -45,6 +48,8 @@ func DirtyForReason(reason string) DirtyFlags {
 	case "band", "active-frame":
 		return DirtyBand | DirtyContent
 	case "status", "dynamic-status":
+		return DirtyStatus
+	case "diagnostic-notice":
 		return DirtyStatus
 	case "prompt":
 		return DirtyPrompt

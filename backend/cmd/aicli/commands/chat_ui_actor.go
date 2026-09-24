@@ -1253,6 +1253,8 @@ func (c *chatInteractionCoordinator) applyTimerAction(t ui.Timer) {
 	switch t.Key {
 	case renderengine.FrameKeyDynamicStatus:
 		c.refreshDynamicStatusTick(t.Generation)
+	case renderengine.FrameKeyDiagnosticNotice:
+		c.refreshDiagnosticNoticeTick(t.Generation)
 	case renderengine.FrameKeyStableCommit:
 		c.runActiveStableCommitTick(t.Generation)
 	case renderengine.FrameKeyActiveFrame:

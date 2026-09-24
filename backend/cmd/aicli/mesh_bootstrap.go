@@ -78,7 +78,8 @@ func startMeshHost(cmd *cobra.Command) *mesh.Host {
 
 // meshWarn 是网格降级路径的统一 warning 出口。
 //
-// 交互式会话期间投递给 TUI（语义补充 cell，由 TerminalSession 渲染）；
+// 交互式会话期间投递给 TUI 动态栏（单行、临时、到期自动清除），既不进
+// transcript 历史（peer 断连/重连告警会刷屏淹没正文），也不直接写 stderr；
 // 其余情况（启动阶段 / 非交互 / JSON 模式）回退 stderr。直接写 stderr 会
 // 落在 FixedBottomSurface 的底部保留区上，把状态栏覆盖成半截文本。
 func meshWarn(format string, args ...any) {
