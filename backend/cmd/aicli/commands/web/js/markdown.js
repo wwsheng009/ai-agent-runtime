@@ -1,161 +1,283 @@
 // 精简 Markdown 解析器(粗体/代码块/表格/列表/引用/链接),输出已转义的安全 HTML。
 // aicli micro web client 前端模块(拆分自 app.js,无构建步骤,由 app.js 入口聚合)。
+//
+// 实现：先按行切「块」，再在块内套行内规则。
+//   - 每个块渲染成真正的块级元素（h1~h6 / ul / ol / pre / blockquote / table / p）。
+//     块级元素自身即换行，所以顶层块之间用一个 <br> 表示「恰好一个空行」；
+//     文档首尾不再额外插 <br>，保证不以空行开头/结尾。
+//   - 列表项之间、引用块内的续行之间保持紧凑（不插空行）。
+//   - 段落内的软换行保留为 <br>（web 侧既有行为，避免吞掉模型输出的换行）。
+//   - 代码块内容只 esc() 一次，内部换行原样保留，交给 CSS white-space: pre-wrap。
+// 以上与 TUI 侧 cmd/aicli/ui/markdown 的 SpacingDefault 语义一致：块间一个空行、
+// 列表/引用内紧凑、文档首尾无空行。
+//
+// 为什么不再用「整体把 \n 转 <br>，再用正则回头删多余 <br>」：那种后处理无法区分
+// 「块边界上冗余的空行」与「作者确实写下的空行」，会把后者一并删掉（表现为额外的
+// 换行被吃掉）；因此改为在解析阶段直接产出正确的块结构，从根上不产生多余空行。
 
 import { esc } from "./util.js";
 
-// ---- 精简 Markdown 解析器 ----
-// 将 Markdown 文本转换为安全的 HTML。
-// 支持：**粗体**、~~删除线~~、`行内代码`、```代码块```、# 标题、
-//       - 无序列表、1. 有序列表、- [x] 任务列表、> 引用块、
-//       | 表格 |、[链接](url)、裸 URL 自动链接
-// 注意：所有输入先经 esc() 转义，因此这里匹配的是转义后的实体
-// （如 > 为 &gt;），保证输出安全。
+// ---- 行内规则 ----
 
-// 解析表格行（| a | b |），返回 <table> HTML；无表头分隔行时按普通行渲染。
-function renderTableBlock(blockLines) {
-  function cells(row) {
-    var s = row.trim();
-    if (s.charAt(0) === "|") { s = s.slice(1); }
-    if (s.charAt(s.length - 1) === "|") { s = s.slice(0, -1); }
-    return s.split("|").map(function (c) { return c.trim(); });
+// 行内代码先摘成占位符，避免代码里的 ** / ~~ / [ ] 被后续行内规则误处理
+// （旧实现先替换 <code>，导致 `**x**` 中的星号仍被当成粗体）。\u0001 是正文里
+// 不会出现的控制字符，renderMarkdown 入口会先把它从输入中剔除。
+function renderInline(raw) {
+  var s = esc(raw);
+  var codes = [];
+  s = s.replace(/`([^`]+)`/g, function (_, code) {
+    codes.push("<code>" + code + "</code>");
+    return "\u0001IC" + (codes.length - 1) + "\u0001";
+  });
+  s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  // 裸 URL 自动链接（排除已生成的 <a href="..."> 属性；剥离尾部标点）
+  s = s.replace(/(^|[^"'>])(https?:\/\/[^\s<]+)/g, function (m, pre, url) {
+    var clean = url.replace(/[),.;:!?'"，。；：！？」』】》]+$/, "");
+    var rest = url.slice(clean.length);
+    return pre + '<a href="' + clean + '" target="_blank" rel="noopener">' + clean + "</a>" + rest;
+  });
+  return s.replace(/\u0001IC(\d+)\u0001/g, function (_, i) { return codes[+i] || ""; });
+}
+
+function inlineLine(line) { return renderInline(line); }
+
+// ---- 块级识别规则 ----
+
+var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})[ \t]*([^\s`]*)/;
+var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+var HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*))?$/;
+var QUOTE_PREFIX = /^ {0,3}> ?/;
+var LIST_ITEM = /^ {0,3}([-*+]|\d{1,9}[.)])[ \t]+(.*)$/;
+var TABLE_ROW = /^ {0,3}\|.*\|[ \t]*$/;
+var BLANK = /^[ \t]*$/;
+// 引用块嵌套上限：超过后按纯文本渲染，避免异常输入把递归打穿。
+var MAX_QUOTE_DEPTH = 8;
+
+// 行首空白宽度（列表续行按条目内容列对齐用）。
+function indentWidth(line) {
+  return /^[ \t]*/.exec(line)[0].length;
+}
+
+// 去掉代码块内容首尾的空行，但保留行首缩进
+// （旧实现用 trim() 会把首行的缩进一起吃掉）。
+function trimBlankEdges(lines) {
+  var a = 0;
+  var b = lines.length;
+  while (a < b && BLANK.test(lines[a])) { a++; }
+  while (b > a && BLANK.test(lines[b - 1])) { b--; }
+  return lines.slice(a, b).join("\n");
+}
+
+// ---- 块级渲染 ----
+
+// 代码块：<pre> + 复制按钮 + 语言标签 + <code>。
+// 内容取自原文（此处未经 esc），这里只转义一次；换行原样保留，不参与
+// 「\n → <br>」转换，由 CSS white-space: pre-wrap 呈现。
+// 复制行为由 #conversation 上的事件委托处理（见 app.js）。
+function codeBlockHtml(lang, code) {
+  var label = lang ? '<span class="lang-label">' + esc(lang) + "</span>" : "";
+  return '<pre><button class="copy-code-btn" type="button" title="复制代码">复制</button>'
+    + label + '<code class="lang-' + esc(lang || "text") + '">' + esc(code) + "</code></pre>";
+}
+
+// 标题：# ～ ######；结尾的闭合 # 串按 CommonMark 去掉（需前置空白）。
+function headingHtml(level, title) {
+  var text = (title || "").replace(/[ \t]+#+[ \t]*$/, "").replace(/[ \t]+$/, "");
+  return "<h" + level + ">" + inlineLine(text) + "</h" + level + ">";
+}
+
+// 列表项：条目内的续行用 <br> 紧凑连接（不额外空行）。
+// 任务列表（- [x] / - [ ]）仅对无序列表生效，且只看首行。
+function listItemHtml(rawText, ordered) {
+  var lines = rawText.split("\n");
+  var task = ordered ? null : /^\[([ xX])\][ \t]+(.*)$/.exec(lines[0]);
+  var head = task ? task[2] : lines[0];
+  var body = [head].concat(lines.slice(1)).map(inlineLine).join("<br>");
+  if (task) {
+    var done = task[1] !== " ";
+    return '<li class="task' + (done ? " done" : "") + '">'
+      + '<input type="checkbox" disabled' + (done ? " checked" : "") + "> " + body + "</li>";
   }
-  function isSepRow(cs) {
-    return cs.length > 0 && cs.every(function (c) {
-      return /^:?-{3,}:?$/.test(c);
-    });
-  }
-  var rows = blockLines.map(cells);
-  var header = null;
-  var body = rows;
-  if (rows.length >= 2 && isSepRow(rows[1])) {
-    header = rows[0];
-    body = rows.slice(2);
-  }
-  function cellHtml(c, align) {
-    var style = align && align !== "" ? ' style="text-align:' + align + '"' : "";
-    return "<td" + style + ">" + c + "</td>";
-  }
-  function alignOf(c) {
-    if (/^:.*:$/.test(c)) { return "center"; }
-    if (/^:/.test(c)) { return "left"; }
-    if (/:$/.test(c)) { return "right"; }
-    return "";
-  }
+  return "<li" + (ordered ? ' class="li-num"' : "") + ">" + body + "</li>";
+}
+
+// 表格：连续 | 行；第二行是 |---| 分隔行时渲染表头，否则整块按数据行渲染
+// （与旧实现一致，避免退化成纯文本）。
+function splitCells(row) {
+  var s = row.trim();
+  if (s.charAt(0) === "|") { s = s.slice(1); }
+  if (s.charAt(s.length - 1) === "|") { s = s.slice(0, -1); }
+  return s.split("|").map(function (c) { return c.trim(); });
+}
+
+function isSeparatorRow(cells) {
+  return cells.length > 0 && cells.every(function (c) { return /^:?-{3,}:?$/.test(c); });
+}
+
+function alignOf(cell) {
+  if (/^:.*:$/.test(cell)) { return "center"; }
+  if (/^:/.test(cell)) { return "left"; }
+  if (/:$/.test(cell)) { return "right"; }
+  return "";
+}
+
+function tableHtml(rows) {
+  var hasHeader = isSeparatorRow(splitCells(rows[1]));
+  var header = hasHeader ? splitCells(rows[0]) : null;
+  var aligns = hasHeader ? splitCells(rows[1]).map(alignOf) : [];
+  var body = (hasHeader ? rows.slice(2) : rows).map(splitCells);
+  var styleAt = function (i) {
+    return aligns[i] ? ' style="text-align:' + aligns[i] + '"' : "";
+  };
   var h = "";
   if (header) {
-    var aligns = rows[1].map(alignOf);
     h += "<thead><tr>";
-    header.forEach(function (c, i) {
-      var style = aligns[i] ? ' style="text-align:' + aligns[i] + '"' : "";
-      h += "<th" + style + ">" + c + "</th>";
-    });
+    header.forEach(function (c, i) { h += "<th" + styleAt(i) + ">" + inlineLine(c) + "</th>"; });
     h += "</tr></thead>";
   }
   if (body.length) {
     h += "<tbody>";
     body.forEach(function (r) {
-      h += "<tr>" + r.map(function (c) { return cellHtml(c); }).join("") + "</tr>";
+      h += "<tr>" + r.map(function (c, i) {
+        return "<td" + styleAt(i) + ">" + inlineLine(c) + "</td>";
+      }).join("") + "</tr>";
     });
     h += "</tbody>";
   }
   return "<table>" + h + "</table>";
 }
 
+// ---- 块级扫描 ----
+
+// 把行数组切成块并渲染；depth 仅用于引用块递归。
+function renderBlocks(lines, depth) {
+  var blocks = [];
+  var para = [];
+  var i = 0;
+  var n = lines.length;
+
+  function flushParagraph() {
+    if (!para.length) { return; }
+    // 段内软换行保留为 <br>：与旧行为一致，不吞模型的换行。
+    blocks.push("<p>" + para.map(inlineLine).join("<br>") + "</p>");
+    para = [];
+  }
+
+  while (i < n) {
+    var line = lines[i];
+
+    // 围栏代码块（``` 或 ~~~，可带语言）；未闭合时延续到文末（CommonMark 行为）
+    var fence = FENCE_OPEN.exec(line);
+    if (fence) {
+      flushParagraph();
+      var marker = fence[1].charAt(0);
+      var fenceLen = fence[1].length;
+      var code = [];
+      i++;
+      while (i < n) {
+        var close = FENCE_CLOSE.exec(lines[i]);
+        if (close && close[1].charAt(0) === marker && close[1].length >= fenceLen) { i++; break; }
+        code.push(lines[i]);
+        i++;
+      }
+      blocks.push(codeBlockHtml(fence[2], trimBlankEdges(code)));
+      continue;
+    }
+
+    // 空行只是块分隔符，不产出内容：块间空行统一由最后的 join("<br>") 给出，
+    // 这样「作者写了几个空行」都收敛为恰好一个空行，也不会重复叠加。
+    if (BLANK.test(line)) { flushParagraph(); i++; continue; }
+
+    // 标题
+    var heading = HEADING.exec(line);
+    if (heading) {
+      flushParagraph();
+      blocks.push(headingHtml(heading[1].length, heading[2]));
+      i++;
+      continue;
+    }
+
+    // 引用块：连续 > 行（中间空行后仍是 > 则并入同一块），块内再按块解析，
+    // 因此多行引用是紧凑的 <br>，而引用内的列表/代码块仍各自成块。
+    if (QUOTE_PREFIX.test(line)) {
+      flushParagraph();
+      var quoted = [];
+      while (i < n) {
+        if (QUOTE_PREFIX.test(lines[i])) {
+          quoted.push(lines[i].replace(QUOTE_PREFIX, ""));
+          i++;
+        } else if (BLANK.test(lines[i]) && i + 1 < n && QUOTE_PREFIX.test(lines[i + 1])) {
+          quoted.push("");
+          i++;
+        } else {
+          break;
+        }
+      }
+      blocks.push("<blockquote>" + (depth < MAX_QUOTE_DEPTH
+        ? renderBlocks(quoted, depth + 1)
+        : "<p>" + quoted.map(inlineLine).join("<br>") + "</p>") + "</blockquote>");
+      continue;
+    }
+
+    // 表格：连续 | 行（至少两行）
+    if (TABLE_ROW.test(line)) {
+      var rows = [];
+      var j = i;
+      while (j < n && TABLE_ROW.test(lines[j])) { rows.push(lines[j]); j++; }
+      if (rows.length >= 2) {
+        flushParagraph();
+        blocks.push(tableHtml(rows));
+        i = j;
+        continue;
+      }
+    }
+
+    // 列表：连续同类型条目（无序 / 有序）。空行结束当前列表（松列表会渲染成
+    // 两个列表，中间仍是一个空行，视觉一致且不会多出空行）。
+    var item = LIST_ITEM.exec(line);
+    if (item) {
+      flushParagraph();
+      var ordered = /\d/.test(item[1]);
+      var items = [];
+      while (i < n) {
+        var m = LIST_ITEM.exec(lines[i]);
+        if (!m || /\d/.test(m[1]) !== ordered) { break; }
+        var contentIndent = m[0].length - m[2].length;
+        var texts = [m[2]];
+        i++;
+        // 条目续行：缩进且非空、且不是新的列表项 → 并入当前条目
+        while (i < n && !BLANK.test(lines[i]) && !LIST_ITEM.test(lines[i])
+          && indentWidth(lines[i]) > 0) {
+          texts.push(lines[i].slice(Math.min(indentWidth(lines[i]), contentIndent)));
+          i++;
+        }
+        items.push(listItemHtml(texts.join("\n"), ordered));
+      }
+      blocks.push((ordered ? "<ol>" : "<ul>") + items.join("") + (ordered ? "</ol>" : "</ul>"));
+      continue;
+    }
+
+    // 普通段落行
+    para.push(line);
+    i++;
+  }
+  flushParagraph();
+
+  // 块级元素自身即换行，故一个 <br> 恰好表示块间那一行空行；
+  // 首尾不插 <br>，保证文档不以空行开头/结尾（与 TUI SpacingDefault 一致）。
+  return blocks.join("<br>");
+}
+
 export function renderMarkdown(text) {
-  if (!text) return "";
-  var html = esc(text);
-  // 代码块（```...```）→ <pre> + 复制按钮 + 语言标签 + <code>，
-  // 先用占位符暂存，避免后续行级规则（表格/引用/列表/URL）误处理代码内容，
-  // 全部处理完成后恢复。复制行为由 #stream-msg 上的事件委托处理。
-  var codeBlocks = [];
-  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, function (_, lang, code) {
-    var label = lang ? '<span class="lang-label">' + lang + '</span>' : '';
-    // code 取自上面已整体 esc() 过的 html，这里不能再 esc（否则 &quot;/&lt; 等二次
-    // 转义后原样显示，如 " 会变成 &amp;quot;）。
-    var block = '<pre><button class="copy-code-btn" type="button" title="复制代码">复制</button>'
-      + label + '<code class="lang-' + (lang || 'text') + '">'
-      + code.trim() + '</code></pre>';
-    codeBlocks.push(block);
-    return "\u0001MDC" + (codeBlocks.length - 1) + "\u0001";
-  });
-  // 行内代码（`...`）
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // 删除线（~~text~~）
-  html = html.replace(/~~([^~]+)~~/g, '<del>$1</del>');
-  // 标题（# ～ ######）
-  html = html.replace(/^###### (.+)$/gm, '<h6>$1</h6>');
-  html = html.replace(/^##### (.+)$/gm, '<h5>$1</h5>');
-  html = html.replace(/^#### (.+)$/gm, '<h4>$1</h4>');
-  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  // 粗体（**...**）
-  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  // 任务列表（- [x] / - [ ]），需在无序列表之前
-  html = html.replace(/^[-*] \[([ xX])\] (.+)$/gm, function (_, checked, item) {
-    return '<li class="task' + (checked !== " " ? " done" : "") + '">'
-      + '<input type="checkbox" disabled' + (checked !== " " ? " checked" : "") + '> '
-      + item + '</li>';
-  });
-  // 无序列表（- 或 * 开头）
-  html = html.replace(/^[*-] (.+)$/gm, '<li>$1</li>');
-  // 有序列表（1. text）
-  html = html.replace(/^(\d+)\. (.+)$/gm, '<li class="li-num">$2</li>');
-  // 将连续 <li> 包裹为 <ul> / <ol>（非贪婪，空行中断）
-  html = html.replace(/((?:<li[^>]*>.*?<\/li>\n?)+)/g, function (m) {
-    if (m.indexOf("<ul>") !== -1 || m.indexOf("<ol>") !== -1) { return m; }
-    var isOrdered = m.indexOf('class="li-num"') !== -1;
-    return isOrdered ? "<ol>" + m + "</ol>" : "<ul>" + m + "</ul>";
-  });
-  // 引用块（> 开头，连续行合并）
-  html = html.replace(/(^|\n)&gt;(?:[^\n]*)(?:\n&gt;[^\n]*)*/g, function (m) {
-    // 去掉正则 (^|\n) 捕获到的前导换行，否则 split("\n") 会多出一个空首行，
-    // 渲染成 <blockquote><br>…（引用块顶部多一个空行）。
-    var lines = m.replace(/^\n/, "").split("\n").map(function (l) {
-      return l.replace(/^&gt;/, "").replace(/^ /, "");
-    });
-    return "\n<blockquote>" + lines.join("<br>") + "</blockquote>";
-  });
-  // 表格（连续 | 行块；含 |---| 分隔行则渲染表头）
-  html = html.replace(/(?:^|\n)(?:\|[^\n]+\|\n?){2,}/g, function (m) {
-    var lines = m.split("\n").filter(function (l) { return l.trim() !== ""; });
-    // 至少两行且每行都是表格行
-    var allRows = lines.every(function (l) {
-      var t = l.trim();
-      return t.charAt(0) === "|" && t.charAt(t.length - 1) === "|";
-    });
-    if (!allRows) { return m; }
-    return "\n" + renderTableBlock(lines) + "\n";
-  });
-  // 链接 [text](url)
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-  // 裸 URL 自动链接（排除已生成的 <a href="..."> 属性；剥离尾部标点）
-  html = html.replace(/(^|[^"'>])(https?:\/\/[^\s<]+)/g, function (m, pre, url) {
-    var clean = url.replace(/[),.;:!?'"，。；：！？」』】》]+$/, "");
-    var rest = url.slice(clean.length);
-    return pre + '<a href="' + clean + '" target="_blank" rel="noopener">' + clean + '</a>' + rest;
-  });
-  // 换行转 <br>
-  html = html.replace(/\n/g, '<br>');
-  // 修复 <li>/<blockquote> 内尾随 <br>
-  html = html.replace(/<li><br>/g, '<li>');
-  html = html.replace(/<\/li><br>/g, '</li>');
-  html = html.replace(/<\/blockquote><br>/g, '</blockquote>');
-  // 恢复代码块
-  html = html.replace(/\u0001MDC(\d+)\u0001/g, function (_, i) {
-    return codeBlocks[+i] || "";
-  });
-  // 去除块级元素间/周围以及首行/行末的多余 <br>（避免额外渲染空行）。
-  // 换行统一转 <br> 后，块级元素（h1~h6/ul/ol/li/p/blockquote/pre/table/…）
-  // 自身已换行并带外边距，邻接的 <br> 会额外空一行；<br><br> 在块间则更易
-  // 堆出多行空隙，故在块级标签边界与首尾统一清理。代码块 <pre> 已恢复后处理，
-  // 其内部换行由 CSS white-space: pre-wrap 承载，不受影响。
-  // 注：<br>+ 在正则里表示 <b + 多个 r + >（仅一对 <br>），须写为 (?:<br>)+ 才是
-  //     “重复的 <br>”。
-  html = html.replace(/(<br>)+((?:<(?:h[1-6]|ul|ol|li|p|blockquote|pre|table|thead|tbody|tr|td|th)\b[^>]*>))/g, "$2");
-  html = html.replace(/((?:<\/(?:h[1-6]|ul|ol|li|p|blockquote|pre|table|thead|tbody|tr|td|th)\b[^>]*>))(?:<br>)+/g, "$1");
-  html = html.replace(/^(?:<br>)+/, "").replace(/(?:<br>)+$/, "");
-  return html;
+  if (!text) { return ""; }
+  var src = String(text)
+    .replace(/\r\n?/g, "\n")
+    // 去掉控制字符：既是输入清洗，也保证行内代码占位符 \u0001 不会与正文冲突。
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
+  if (!src.trim()) { return ""; }
+  return renderBlocks(src.split("\n"), 0);
 }
 
 // ---- 消息正文渲染方式（md | txt）----
@@ -175,4 +297,3 @@ export function renderMessageBody(text, mode) {
   if (normalizeRenderMode(mode) === "md") { return renderMarkdown(text); }
   return esc(text || "");
 }
-

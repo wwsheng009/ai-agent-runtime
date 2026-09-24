@@ -330,6 +330,55 @@ assert.ok(mdHtml.indexOf("<script>") < 0, "md 渲染同样不应输出未转义�
 assert.strictEqual(md.renderMessageBody(undefined, "text"), "", "undefined 正文按空串处理（不抛错）");
 assert.strictEqual(typeof md.renderMessageBody("", "md"), "string", "空正文 md 渲染应返回字符串");
 
+// ---- 1b. 块级排版契约：块间恰好一个空行、首尾无空行、列表/引用内紧凑 ----
+// 渲染器改为块级解析（先切块、再套行内规则），不再用「整体把 \n 转 <br>，再用
+// 正则回头删多余 <br>」的后处理——那种做法分不清「块边界上的冗余空行」与
+// 「作者确实写下的空行」，会把后者一起删掉。这里把排版契约固定成断言。
+var blockCases = [
+  ["两段之间", "a\n\nb", "<p>a</p><br><p>b</p>"],
+  ["作者多写的空行收敛为一个", "a\n\n\n\nb", "<p>a</p><br><p>b</p>"],
+  ["标题与正文之间", "# H\n\ntext", "<h1>H</h1><br><p>text</p>"],
+  ["段落/列表/段落之间", "para\n\n- a\n- b\n\npara2",
+    "<p>para</p><br><ul><li>a</li><li>b</li></ul><br><p>para2</p>"],
+  ["列表项之间紧凑", "- a\n- b", "<ul><li>a</li><li>b</li></ul>"],
+  ["有序列表项之间紧凑", "1. a\n2. b",
+    '<ol><li class="li-num">a</li><li class="li-num">b</li></ol>'],
+  ["引用块内多行紧凑", "> a\n> b", "<blockquote><p>a<br>b</p></blockquote>"],
+  ["段内软换行保留", "a\nb", "<p>a<br>b</p>"],
+  ["文档首尾空行被忽略", "\n\na\n\n", "<p>a</p>"],
+  ["列表续行并入条目", "- item\n  continued\n- next",
+    "<ul><li>item<br>continued</li><li>next</li></ul>"],
+];
+blockCases.forEach(function (c) {
+  assert.strictEqual(md.renderMarkdown(c[1]), c[2], c[0] + " 应渲染成固定的块级结构");
+});
+
+// 「不多渲染空行」的核心不变量：块级元素自身即换行，块间那一行空行只由单个
+// <br> 承载，因此输出里不允许出现连续 <br>，也不允许以 <br> 开头/结尾。
+var spacingCorpus = [
+  "a\n\nb", "# H\n\ntext", "- a\n- b", "1. a\n2. b", "> a\n> b", "> 提示\n>\n> - a\n> - b",
+  "para\n\n- a\n\npara2", "a\nb\nc", "\n\na\n\n", "| a | b |\n|---|---|\n| 1 | 2 |",
+  "```go\ncode\n```", "text\n\n```\ncode\n```\n\nmore", "- [x] done\n- [ ] todo",
+  "### 标题\n\n1. 一\n2. 二\n\n> 引用\n\n结尾", "a\n\n\n\n\nb",
+];
+spacingCorpus.forEach(function (src) {
+  var html = md.renderMarkdown(src);
+  assert.ok(html.indexOf("<br><br>") < 0, "输出不应出现连续 <br>（多渲染空行）: " + JSON.stringify(src));
+  assert.ok(!/^<br>/.test(html), "输出不应以 <br> 开头（文档首行空行）: " + JSON.stringify(src));
+  assert.ok(!/<br>$/.test(html), "输出不应以 <br> 结尾（文档末行空行）: " + JSON.stringify(src));
+});
+
+// 代码块内容只转义一次，且保留行首缩进（旧实现 trim() 会吃掉缩进）。
+var codeHtml = md.renderMarkdown('```go\n"x" <y> &z\n```');
+assert.ok(codeHtml.indexOf("&quot;x&quot; &lt;y&gt; &amp;z") >= 0,
+  "代码块内容应只转义一次（&quot; 不应变成 &amp;quot;）");
+assert.ok(codeHtml.indexOf("&amp;quot;") < 0, "代码块内容不应被二次转义");
+assert.ok(md.renderMarkdown("```\n    indented\n```").indexOf("    indented") >= 0,
+  "代码块应保留行首缩进");
+// 行内代码先摘占位符：代码里的 ** 不应再被当成粗体。
+assert.ok(md.renderMarkdown("**b** 与 `**x**`").indexOf("<code>**x**</code>") >= 0,
+  "行内代码内的 ** 不应被当成粗体");
+
 // ---- 2. assistant 行结构：右上角 md|txt 控件 + 默认 md + 同步渲染 md 容器 ----
 var assistantHtml = chat.chatMsgRowHtml("assistant", rawText, false);
 assert.ok(assistantHtml.indexOf('class="msg-row msg-assistant"') >= 0, "assistant 行应带 msg-assistant 类");
@@ -454,6 +503,21 @@ assert.ok(hasRule('#screen .msg-row:not([data-render-mode="md"]) .msg-md', "disp
   "style.css 应在非 md（默认 txt）时隐藏 .msg-md");
 assert.ok(css.indexOf("#screen .msg-render-toggle") >= 0, "style.css 应有切换控件样式");
 assert.ok(css.indexOf("#screen .msg-row.msg-assistant .msg-md") >= 0, "style.css 应有 .msg-md 排版样式");
+// 块级元素纵向外边距清零：块间那一行空行由 renderMarkdown 输出的 <br> 承载，
+// margin 不为 0 时会与空行叠加成两行空隙（= 多渲染空间）。
+assert.ok(hasRule("#screen .msg-row.msg-assistant .msg-md p", "margin: 0"),
+  ".msg-md 段落纵向外边距应清零");
+assert.ok(hasRule("#screen .msg-row.msg-assistant .msg-md pre", "margin: 0"),
+  ".msg-md 代码块纵向外边距应清零");
+assert.ok(hasRule("#screen .msg-row.msg-assistant .msg-md ol", "margin: 0"),
+  ".msg-md 列表纵向外边距应清零");
+assert.ok(hasRule("#screen .msg-row.msg-assistant .msg-md blockquote", "margin: 0"),
+  ".msg-md 引用块纵向外边距应清零");
+assert.ok(/#screen \.msg-row\.msg-assistant \.msg-md h6 \{\s*margin: 0;/.test(css),
+  ".msg-md 标题纵向外边距应清零");
+// 审批/问答弹窗同样吃 renderMarkdown 的块级输出，需要同一套清零规则。
+assert.ok(/#approval-prompt p,[\s\S]{0,400}?\{[^}]*margin-top: 0; margin-bottom: 0;/.test(css),
+  "审批/问答弹窗内 renderMarkdown 块级元素同样应清零纵向外边距");
 
 var streamSrc = fs.readFileSync(path.join(WEB_DIR, "stream.js"), "utf8");
 assert.ok(streamSrc.indexOf("renderMarkdown") >= 0, "流式气泡应继续走 renderMarkdown");

@@ -333,7 +333,10 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 #screen .msg-row[data-render-mode="md"] .msg-text { display: none; }
 #screen .msg-row:not([data-render-mode="md"]) .msg-md { display: none; }
 
-/* Markdown 正文（.msg-md）：换行交给块级元素与 <br>，不吃气泡的 pre-wrap */
+/* Markdown 正文（.msg-md）：换行交给块级元素与 <br>，不吃气泡的 pre-wrap。
+   块级元素自身不带纵向外边距：块间那一行空行由 renderMarkdown 输出的 <br> 承载
+   （与 TUI 侧 SpacingDefault「块间一个空行」一致），否则 margin 会与空行叠加成
+   两行空隙；列表项之间、引用块内保持紧凑，同样不留 margin。 */
 #screen .msg-row.msg-assistant .msg-md { white-space: normal; }
 #screen .msg-row.msg-assistant .msg-md h1,
 #screen .msg-row.msg-assistant .msg-md h2,
@@ -341,7 +344,7 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 #screen .msg-row.msg-assistant .msg-md h4,
 #screen .msg-row.msg-assistant .msg-md h5,
 #screen .msg-row.msg-assistant .msg-md h6 {
-  margin: 6px 0 4px; font-weight: 600; line-height: 1.3;
+  margin: 0; font-weight: 600; line-height: 1.3;
 }
 #screen .msg-row.msg-assistant .msg-md h1 { font-size: 16px; }
 #screen .msg-row.msg-assistant .msg-md h2 { font-size: 15px; }
@@ -349,17 +352,17 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 #screen .msg-row.msg-assistant .msg-md h4 { font-size: 13px; }
 #screen .msg-row.msg-assistant .msg-md h5,
 #screen .msg-row.msg-assistant .msg-md h6 { font-size: 12px; }
-#screen .msg-row.msg-assistant .msg-md p { margin: 4px 0; }
+#screen .msg-row.msg-assistant .msg-md p { margin: 0; }
 #screen .msg-row.msg-assistant .msg-md ul,
-#screen .msg-row.msg-assistant .msg-md ol { margin: 4px 0; padding-left: 20px; }
-#screen .msg-row.msg-assistant .msg-md li { margin: 2px 0; }
+#screen .msg-row.msg-assistant .msg-md ol { margin: 0; padding-left: 20px; }
+#screen .msg-row.msg-assistant .msg-md li { margin: 0; }
 #screen .msg-row.msg-assistant .msg-md li.task { list-style: none; margin-left: -18px; }
 #screen .msg-row.msg-assistant .msg-md li.task.done { color: var(--fg3); }
 #screen .msg-row.msg-assistant .msg-md a { color: var(--accent); }
 #screen .msg-row.msg-assistant .msg-md strong { color: var(--fg); }
 #screen .msg-row.msg-assistant .msg-md del { color: var(--fg3); }
 #screen .msg-row.msg-assistant .msg-md blockquote {
-  margin: 4px 0; padding: 2px 0 2px 8px;
+  margin: 0; padding: 2px 0 2px 8px;
   border-left: 3px solid var(--border2); color: var(--fg2);
 }
 #screen .msg-row.msg-assistant .msg-md code {
@@ -368,7 +371,7 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   font-family: inherit; font-size: 12px;
 }
 #screen .msg-row.msg-assistant .msg-md table {
-  border-collapse: collapse; margin: 6px 0; font-size: 12px;
+  border-collapse: collapse; margin: 0; font-size: 12px;
 }
 #screen .msg-row.msg-assistant .msg-md th,
 #screen .msg-row.msg-assistant .msg-md td {
@@ -376,7 +379,7 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 }
 #screen .msg-row.msg-assistant .msg-md th { background: var(--bg2); font-weight: 600; }
 #screen .msg-row.msg-assistant .msg-md pre {
-  margin: 6px 0; padding: 8px 10px;
+  margin: 0; padding: 8px 10px;
   background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
   overflow-x: auto; white-space: pre-wrap; word-break: break-word;
   position: relative;
@@ -617,6 +620,22 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   font-size: 13px; line-height: 1.5;
 }
 #approval-modal-body .approval-prompt { margin-bottom: 12px; }
+/* 审批/问答提示同样由 renderMarkdown 输出块级元素（h1~h6/ul/ol/li/pre/
+   blockquote/table/p）：块间空行同样由渲染输出的 <br> 承载，故这里清零纵向
+   外边距，避免浏览器默认 margin 把弹窗正文撑开（与 .msg-md 同一排版契约）。 */
+#approval-prompt h1,
+#approval-prompt h2,
+#approval-prompt h3,
+#approval-prompt h4,
+#approval-prompt h5,
+#approval-prompt h6,
+#approval-prompt p,
+#approval-prompt ul,
+#approval-prompt ol,
+#approval-prompt li,
+#approval-prompt pre,
+#approval-prompt blockquote,
+#approval-prompt table { margin-top: 0; margin-bottom: 0; }
 #approval-modal-body .approval-detail {
   margin: 8px 0 0; padding: 8px 10px;
   background: var(--bg2); border: 1px solid var(--border);
