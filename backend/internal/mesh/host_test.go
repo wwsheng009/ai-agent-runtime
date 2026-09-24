@@ -164,6 +164,32 @@ func TestHostStartPublishesRecordAndJournal(t *testing.T) {
 	host.Close()
 }
 
+// TestHostRecordAdvertisesStopCapability 锁死治理开关的档案投影（§5.7 / §9.2）：
+// --mesh-allow-stop=true 必须在档案里声明 CapabilityStop，否则不经目标 HTTP 层
+// 的调用方（aicli-mesh stop 本地编排）无从判定「谁能停我」；默认（false）不得
+// 声明——那等于默认放行停止。
+func TestHostRecordAdvertisesStopCapability(t *testing.T) {
+	onPaths := testMeshPaths(t)
+	on := NewHost(HostConfig{Now: newFakeClock().Now, HeartbeatInterval: time.Hour, StopAllowed: true})
+	if err := on.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer on.Close()
+	if record := readRecord(t, onPaths, on.NodeID()); !HasCapability(record.Capabilities, CapabilityStop) {
+		t.Fatalf("capabilities = %v, want to contain %q", record.Capabilities, CapabilityStop)
+	}
+
+	offPaths := testMeshPaths(t)
+	off := NewHost(HostConfig{Now: newFakeClock().Now, HeartbeatInterval: time.Hour})
+	if err := off.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer off.Close()
+	if record := readRecord(t, offPaths, off.NodeID()); HasCapability(record.Capabilities, CapabilityStop) {
+		t.Fatalf("capabilities = %v, want no %q（默认关闭）", record.Capabilities, CapabilityStop)
+	}
+}
+
 func TestHostEndpointPromotesCapabilities(t *testing.T) {
 	paths := testMeshPaths(t)
 	host := NewHost(HostConfig{Now: newFakeClock().Now})

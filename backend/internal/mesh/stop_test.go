@@ -58,10 +58,26 @@ func startStopTarget(t *testing.T) *stopTarget {
 }
 
 // seedStopTarget 写一条「可停止」档案：活节点（pid = 靶进程）+ 可选的回环
-// 控制面（baseURL 为空表示没有控制面，只能 --force）。
+// 控制面（baseURL 为空表示没有控制面，只能 --force）。档案声明
+// CapabilityStop，等价于目标进程开了 --mesh-allow-stop=true（§5.7）。
 func seedStopTarget(t *testing.T, paths Paths, now time.Time, nodeID, sessionID string, pid int, baseURL, token string) NodeRecord {
 	t.Helper()
+	return seedStopTargetWithStopSwitch(t, paths, now, nodeID, sessionID, pid, baseURL, token, true)
+}
+
+// seedStopTargetWithoutStopSwitch 与 seedStopTarget 相同，但档案**不**声明
+// CapabilityStop：等价于目标进程没开 --mesh-allow-stop（默认关闭）。
+func seedStopTargetWithoutStopSwitch(t *testing.T, paths Paths, now time.Time, nodeID, sessionID string, pid int, baseURL, token string) NodeRecord {
+	t.Helper()
+	return seedStopTargetWithStopSwitch(t, paths, now, nodeID, sessionID, pid, baseURL, token, false)
+}
+
+func seedStopTargetWithStopSwitch(t *testing.T, paths Paths, now time.Time, nodeID, sessionID string, pid int, baseURL, token string, allowStop bool) NodeRecord {
+	t.Helper()
 	record := viewNodeRecord(nodeID, pid, now.Add(-5*time.Second), sessionID, "")
+	if allowStop {
+		record.Capabilities = append(record.Capabilities, CapabilityStop)
+	}
 	if strings.TrimSpace(baseURL) != "" {
 		parsed, err := url.Parse(baseURL)
 		if err != nil {
@@ -213,6 +229,40 @@ func TestStopSelfRefused(t *testing.T) {
 	result := Stop(context.Background(), paths, nodeID, StopRequest{Target: nodeID, Mode: StopModeForce})
 	if result.Status != StopStatusRefused || result.Code != StopCodeSelfRefused {
 		t.Fatalf("result = %+v, want refused/%s", result, StopCodeSelfRefused)
+	}
+}
+
+// TestStopRefusedWithoutStopSwitch 锁死「本地编排也绕不过开关」（§5.7 / §9.2，
+// 实施计划 §24「CLI / Web 都绕不过」）：目标档案没有 CapabilityStop（= 目标进程
+// 没开 --mesh-allow-stop=true）时，force 与 graceful 都必须 refused +
+// mesh_stop_not_allowed，且**不碰进程、不发请求**。
+func TestStopRefusedWithoutStopSwitch(t *testing.T) {
+	for _, mode := range []string{StopModeGraceful, StopModeForce} {
+		t.Run(mode, func(t *testing.T) {
+			paths := testCLIPaths(t)
+			target := startStopTarget(t)
+			now := NowUTC()
+			nodeID := "node-stop-no-switch-" + mode
+			sessionID := "session_stop_no_switch_" + mode
+			capture := &stopCallCapture{}
+			baseURL := ""
+			if mode == StopModeGraceful {
+				// 有回环控制面也不许投递：门禁先于模式/端点判定。
+				baseURL = stopTargetServer(t, capture, target, nodeID).URL
+			}
+			seedStopTargetWithoutStopSwitch(t, paths, now, nodeID, sessionID, target.pid, baseURL, "")
+
+			result := Stop(context.Background(), paths, "", StopRequest{Target: nodeID, Mode: mode, Wait: time.Second})
+			if result.Status != StopStatusRefused || result.Code != StopCodeNotAllowed {
+				t.Fatalf("result = %+v, want refused/%s", result, StopCodeNotAllowed)
+			}
+			if !processAlive(target.pid) {
+				t.Fatal("门禁拒绝时不得碰目标进程")
+			}
+			if _, _, _, count := capture.snapshot(); count != 0 {
+				t.Fatalf("门禁拒绝时不得发任何请求，实际 %d 次", count)
+			}
+		})
 	}
 }
 

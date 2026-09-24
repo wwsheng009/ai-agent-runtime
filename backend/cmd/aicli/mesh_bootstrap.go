@@ -52,7 +52,12 @@ func startMeshHost(cmd *cobra.Command) *mesh.Host {
 		Exe:           meshExecutablePath(),
 		WorkspacePath: meshWorkspacePath(),
 		WorkspaceName: meshWorkspaceName(),
-		Warn:          meshWarn,
+		// 治理开关（§5.7）：--mesh-allow-stop=true 时档案声明 CapabilityStop，
+		// 让不经本进程 HTTP 层的调用方（aicli-mesh stop 本地编排）也能 fail
+		// closed 地判定「谁能停我」。main.go 在 startMeshHost 之前已 apply 过
+		// 治理开关，此处读到的一定是本次启动的取值。
+		StopAllowed: commands.ChatWebMeshAllowStop(),
+		Warn:        meshWarn,
 	})
 	mesh.SetCurrent(host)
 	if err := host.Start(); err != nil {

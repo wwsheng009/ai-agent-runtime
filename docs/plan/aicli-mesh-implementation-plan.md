@@ -1043,6 +1043,7 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 | 自停保护 | 目标就是自己 → `mesh_stop_self_refused`；跨工作区仍受 `--mesh-restrict-workspace` 收敛 |
 | 审计 | journal `mesh.stop.requested` / `mesh.stop.completed`（不记令牌） |
 | 单测 | `internal/mesh/stop_test.go`（新建）、`commands/web_handlers_mesh_stop_test.go`（新建）、`mesh_flags_test.go`（+1）、`call.go` 目标解析回归 |
+| 门禁补记 | 「CLI / Web 都绕不过」落到**两条路**上：目标 HTTP 层在进程内按 `--mesh-allow-stop` 判（403 + `mesh_stop_not_allowed`）；不经目标 HTTP 层的本地编排（`aicli-mesh stop` / `Host.Stop` / `StopNode`）按档案能力位 `CapabilityStop` 判（`refused` + `mesh_stop_not_allowed`，退出码 6）。能力位由目标进程在 `--mesh-allow-stop=true` 时写入档案（开放集，架构 §3.1；`withLoopbackCapabilities` 之后去重）。`--force` 与 graceful **同权**——force 不是绕开关的后门，只是免掉收尾；开关关闭时唯一手段是进程外 kill（`taskkill`）。单测：`TestStopRefusedWithoutStopSwitch`（两模式 + 零请求 + 不碰进程）/ `TestHostRecordAdvertisesStopCapability`（开关 → 档案投影） |
 
 ---
 

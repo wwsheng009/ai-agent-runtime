@@ -30,6 +30,28 @@ var ChatNodeCapabilities = []string{
 // loopback server: it is discoverable, but cannot be called.
 var BaseCapabilities = []string{"mesh"}
 
+// CapabilityStop is the "this process accepts a mesh stop" capability bit
+// (--mesh-allow-stop=true, architecture §5.7 / §9.2).
+//
+// The stop switch is a decision of the *target* process, and callers that do
+// not go through the target's HTTP layer (aicli-mesh stop orchestrates locally)
+// must honour it just the same. Advertising the switch as a capability bit
+// keeps "who may stop me" readable from the record alone (file system is truth;
+// §3.1: unknown capability bits only affect capability probing), so those
+// callers can fail closed *before* they act — without it, "CLI 无法绕过开关"
+// would only hold for HTTP callers.
+const CapabilityStop = "stop"
+
+// HasCapability reports whether capabilities contains want.
+func HasCapability(capabilities []string, want string) bool {
+	for _, capability := range capabilities {
+		if capability == want {
+			return true
+		}
+	}
+	return false
+}
+
 // HostConfig describes the process that owns the node record. Every field is
 // optional; the zero value produces a `chat` node started from the CLI.
 type HostConfig struct {
@@ -49,6 +71,10 @@ type HostConfig struct {
 	WorkspaceName string
 	// Capabilities defaults to BaseCapabilities.
 	Capabilities []string
+	// StopAllowed mirrors the process-level --mesh-allow-stop switch (§5.7):
+	// when true the record advertises CapabilityStop so callers can refuse
+	// before acting. Default false — stopping is a governance action.
+	StopAllowed bool
 	// ParentPID defaults to os.Getppid().
 	ParentPID int
 
@@ -221,6 +247,9 @@ func (h *Host) Start() error {
 			HeartbeatTTLSec: int(h.cfg.HeartbeatTTL / time.Second),
 			State:           string(NodeStateLive),
 		},
+	}
+	if h.cfg.StopAllowed {
+		h.record.Capabilities = append(h.record.Capabilities, CapabilityStop)
 	}
 	if h.cfg.WorkspacePath != "" {
 		h.record.Workspace = &WorkspaceInfo{Path: h.cfg.WorkspacePath, Name: h.cfg.WorkspaceName}

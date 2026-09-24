@@ -22,9 +22,11 @@ import (
 //     目标来得及写 node.stopped——残留档案由 gc 按「可证已死」规则回收
 //     （§4.7 降级：审计可以少，用户数据不能丢）。
 //
-// 拒绝矩阵（§5.8 / §9.2）：停止是**治理动作**，默认关闭（--mesh-allow-stop），
-// HTTP 层在开关关闭时直接 refused，走不到这里；调用方 == 目标时一律拒绝
-// （进程不该通过网格杀自己——那是 /exit 的语义）。
+// 拒绝矩阵（§5.8 / §9.2）：停止是**治理动作**，默认关闭（--mesh-allow-stop）。
+// HTTP 调用方由目标自己的处理器在进程内判定开关；不经目标 HTTP 层的调用方
+// （CLI 走本地编排）由档案的能力位 CapabilityStop 判定——两条路同一个开关，
+// 谁都不能绕过；调用方 == 目标时一律拒绝（进程不该通过网格杀自己——那是
+// /exit 的语义）。
 // ============================================================================
 
 // ChatWebMeshStopPath 是网格停止端点（架构 §5.7）。HTTP 层与调用方共用同一
@@ -210,6 +212,18 @@ func Stop(ctx context.Context, paths Paths, callerNodeID string, req StopRequest
 		// 已经不在运行：成功且幂等（重试安全），但不谎称是我们停的。
 		result.Status = StopStatusStopped
 		result.Message = "process is not running"
+		result.ElapsedMs = elapsedMs(started)
+		return result
+	}
+
+	// 治理门禁（§5.7 / §9.2）：开关在**被停的进程**上，档案的能力位就是它的
+	// 投影。放在「已不在运行」之后：幂等重试是无副作用的成功，治理门禁不该把
+	// 它变成失败；放在模式/端点判定之前：没开开关的节点不该因为「有没有控制面」
+	// 而得到不同的答案。
+	if !HasCapability(target.Record.Capabilities, CapabilityStop) {
+		result.Status = StopStatusRefused
+		result.Code = StopCodeNotAllowed
+		result.Message = "stopping is disabled on the target (--mesh-allow-stop=false)"
 		result.ElapsedMs = elapsedMs(started)
 		return result
 	}

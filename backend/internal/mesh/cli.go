@@ -2431,8 +2431,10 @@ type stopResult struct {
 // runStop 停止目标节点（§7.2 / §5.7）。默认优雅：把 /exit 投给目标的
 // /web/api/input，等它自己收尾；--force 才终止进程。
 //
-// 治理开关在**目标**进程（--mesh-allow-stop），CLI 只负责发请求——这样
-// 「谁能停我」由被停者决定，而不是由一台可能被入侵的调用方机器决定。
+// 治理开关在**目标**进程（--mesh-allow-stop），且两层都拦：目标自己的 HTTP
+// 处理器在进程内拦（403），本地编排（CLI / Web）在投递前按档案的
+// CapabilityStop 拦（refused）——这样「谁能停我」由被停者决定，而不是由一台
+// 可能被入侵的调用方机器决定（§9.2：CLI / Web 都绕不过开关）。
 // CLI 不是节点：callerID 为空，自停检查天然不适用（CLI 没有可被停的档案）。
 func (c *CLI) runStop(args []string) int {
 	parsed, err := parseArgs(args, flagSpec{

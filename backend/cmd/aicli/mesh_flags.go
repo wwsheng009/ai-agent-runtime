@@ -37,7 +37,7 @@ func registerMeshGovernanceFlags(fs *pflag.FlagSet) {
 	fs.Bool(meshAllowSpawnFlag, true,
 		"允许 /web/api/mesh/spawn 在会话工作区复用或拉起节点（默认开启；关闭后该端点一律 refused + mesh_spawn_not_allowed）")
 	fs.Bool(meshAllowStopFlag, false,
-		"允许 /web/api/mesh/stop 停止节点（默认关闭；graceful 投 /exit、force 终止进程；关闭后该端点一律 refused + mesh_stop_not_allowed）")
+		"允许停止节点（默认关闭；graceful 投 /exit、force 终止进程；关闭后 /web/api/mesh/stop 该端点一律 refused + mesh_stop_not_allowed，档案也不声明 stop 能力——aicli-mesh stop 的本地编排同样拒绝）")
 }
 
 // applyMeshGovernanceFlags 把治理开关落到进程级状态（commands 包）。

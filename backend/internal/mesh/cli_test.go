@@ -496,6 +496,13 @@ func TestCLIGcHonoursStaleTTLAndKeepDays(t *testing.T) {
 	if err := os.WriteFile(orphan, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("write orphan journal: %v", err)
 	}
+	// mtime 来自真实文件系统时钟，而测试时钟固定在 2026-09-24T10:00:00Z：
+	// 不显式钉住 mtime，`--keep-days 0`（age < 0 视为「还没到回收时刻」）就会
+	// 随真实 UTC 时刻漂移——真实时间过了 10:00 时该断言必然失败。
+	orphanTime := now.Add(-time.Hour)
+	if err := os.Chtimes(orphan, orphanTime, orphanTime); err != nil {
+		t.Fatalf("chtimes orphan journal: %v", err)
+	}
 	code, stdout, _ = runCLI(t, cli, "gc", "--json")
 	if code != ExitOK {
 		t.Fatalf("gc exit = %d", code)
