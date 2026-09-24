@@ -141,6 +141,16 @@ export function renderMarkdown(text) {
   html = html.replace(/\u0001MDC(\d+)\u0001/g, function (_, i) {
     return codeBlocks[+i] || "";
   });
+  // 去除块级元素间/周围以及首行/行末的多余 <br>（避免额外渲染空行）。
+  // 换行统一转 <br> 后，块级元素（h1~h6/ul/ol/li/p/blockquote/pre/table/…）
+  // 自身已换行并带外边距，邻接的 <br> 会额外空一行；<br><br> 在块间则更易
+  // 堆出多行空隙，故在块级标签边界与首尾统一清理。代码块 <pre> 已恢复后处理，
+  // 其内部换行由 CSS white-space: pre-wrap 承载，不受影响。
+  // 注：<br>+ 在正则里表示 <b + 多个 r + >（仅一对 <br>），须写为 (?:<br>)+ 才是
+  //     “重复的 <br>”。
+  html = html.replace(/(<br>)+((?:<(?:h[1-6]|ul|ol|li|p|blockquote|pre|table|thead|tbody|tr|td|th)\b[^>]*>))/g, "$2");
+  html = html.replace(/((?:<\/(?:h[1-6]|ul|ol|li|p|blockquote|pre|table|thead|tbody|tr|td|th)\b[^>]*>))(?:<br>)+/g, "$1");
+  html = html.replace(/^(?:<br>)+/, "").replace(/(?:<br>)+$/, "");
   return html;
 }
 
