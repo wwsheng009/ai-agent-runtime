@@ -54,6 +54,9 @@ func TestResolveProfileSessionStateProjectPromptGate(t *testing.T) {
 	if len(state.Resolved.ToolPolicy.Allowlist) == 0 {
 		t.Fatal("graded gate must keep tool policy declarations")
 	}
+	if notice := sessionProfilePromptSuppressionWarning(state); !strings.Contains(notice, "未应用") {
+		t.Fatalf("switch report must warn about withheld prompts, got %q", notice)
+	}
 
 	t.Setenv(foldertrust.EnvFolderTrust, "")
 	state, err = handler.resolveProfileSessionState("dev", "coder", workspace)
@@ -65,5 +68,8 @@ func TestResolveProfileSessionStateProjectPromptGate(t *testing.T) {
 	}
 	if state.Resolved.PromptSuppressed {
 		t.Fatal("feature-off resolution must not be marked suppressed")
+	}
+	if notice := sessionProfilePromptSuppressionWarning(state); notice != "" {
+		t.Fatalf("feature-off resolution must not warn, got %q", notice)
 	}
 }

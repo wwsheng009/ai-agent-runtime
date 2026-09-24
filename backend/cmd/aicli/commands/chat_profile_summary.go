@@ -43,7 +43,11 @@ func chatProfileSurfaceRows(session *ChatSession) []chatProfileSummaryRow {
 			value: fmt.Sprintf("use %d / exclude %d", len(mcpSelection.UseServers), len(mcpSelection.ExcludeServers)),
 		})
 	}
-	if text := strings.TrimSpace(session.SystemPromptText); text != "" {
+	// D29（Batch 14）：扣留时 SystemPromptText 为空，必须显式呈现"未应用"，
+	// 否则启动摘要会静默少掉提示词层（假开关）。
+	if notice := profilePromptSuppressionNotice(session); notice != "" {
+		rows = append(rows, chatProfileSummaryRow{label: "Profile Prompt:", value: "⚠ " + notice})
+	} else if text := strings.TrimSpace(session.SystemPromptText); text != "" {
 		mode := strings.TrimSpace(session.ProfilePromptMode)
 		if mode == "" {
 			mode = "replace"

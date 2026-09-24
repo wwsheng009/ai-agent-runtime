@@ -86,6 +86,9 @@ func applyProfileStateToChatSession(session *ChatSession, state *chatProfileStat
 		ExcludeServers: append([]string(nil), state.Resolved.MCPSelection.ExcludeServers...),
 	}
 	session.ProfilePromptMode = state.Resolved.PromptMode
+	// D29（Batch 14）：prompts 扣留标记随生效面投影（三处警告面消费）。
+	session.ProfilePromptSuppressed = state.Resolved.PromptSuppressed
+	session.ProfilePromptSuppressionReason = strings.TrimSpace(state.Resolved.PromptSuppressionReason)
 	session.ProfileContext = cloneSkillContextMap(state.ContextValues)
 	session.ToolPolicy = state.ToolPolicy
 	if session.ToolPolicy != nil {
@@ -104,6 +107,20 @@ func applyProfileStateToChatSession(session *ChatSession, state *chatProfileStat
 		emitProfileConfigOverlayWarning(err)
 	}
 	return true
+}
+
+// profilePromptSuppressionNotice 返回"内容因工作区未信任而未应用"的统一提示
+// （D29 / Batch 14）。三处警告面（/profile status、启动摘要、Switch Report）共用
+// 同一文案，避免漂移；未扣留时返回空串。
+func profilePromptSuppressionNotice(session *ChatSession) string {
+	if session == nil || !session.ProfilePromptSuppressed {
+		return ""
+	}
+	reason := strings.TrimSpace(session.ProfilePromptSuppressionReason)
+	if reason == "" {
+		reason = "项目级 profile 的 prompts 未应用（工作区未信任）"
+	}
+	return reason + "；/trust grant 后可 /profile reload 恢复"
 }
 
 func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*chatProfileState, error) {
@@ -126,6 +143,11 @@ func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*cha
 	if cfg != nil {
 		registry = profilesys.NewRegistryFromProfilesConfig(cfg.Profiles)
 	}
+	// 层兜底（写点与解析点的合流）：create/duplicate/import/move 的写目标是标准层根
+	// （profilesys.LayerRoot），而 registry 只认 config 注册项与 profiles.root；
+	// 不补这一层就会出现"创建成功 → /profile use 报未知 profile"的写读分叉。
+	// 优先级不变：config 注册项 > profiles.root > project 层 > user 层（G4/D5）。
+	profilesys.RegisterLayerFallbacks(registry)
 	resolved, err := profilesys.ResolveRef(registry, profileRef, profilesys.ResolveOptions{
 		Agent:             strings.TrimSpace(opts.AgentFlag),
 		GlobalRuntimePath: resolveGlobalRuntimeConfigPath(cfg),

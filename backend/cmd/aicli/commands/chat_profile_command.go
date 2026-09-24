@@ -339,6 +339,10 @@ func chatProfileStatusText(session *ChatSession) string {
 	if prompt := strings.TrimSpace(session.SystemPromptText); prompt != "" {
 		lines = append(lines, fmt.Sprintf("  prompt 字节数: %d", len(prompt)))
 	}
+	// D29（Batch 14）：prompts 被扣留时显式提示，不能静默少一层生效面。
+	if notice := profilePromptSuppressionNotice(session); notice != "" {
+		lines = append(lines, fmt.Sprintf("  ⚠ %s", notice))
+	}
 	lines = append(lines, chatProfileToolPolicySummary(session)...)
 	lines = append(lines, chatProfileSelectionSummary(session)...)
 	if session.Config != nil && session.Config.Profiles != nil {
@@ -404,7 +408,8 @@ func chatProfileSelectionSummary(session *ChatSession) []string {
 	return lines
 }
 
-// chatProfileListText 列出可用 profile（复用 Batch 2 的三来源发现逻辑）。
+// chatProfileListText 列出可用 profile（复用 Batch 2 的四来源发现逻辑：
+// config 注册项 / profiles.root / 标准层根 / 显式路径）。
 func chatProfileListText(session *ChatSession) (string, error) {
 	if session == nil {
 		return "", fmt.Errorf("当前没有活动会话")

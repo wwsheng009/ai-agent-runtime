@@ -169,8 +169,14 @@ type ChatSession struct {
 	ProfileSkillSelection runtimeprofileinput.ResolvedSkillSelection
 	ProfileMCPSelection   runtimeprofileinput.ResolvedMCPSelection
 	ProfilePromptMode     string
-	ProfileContext        map[string]interface{}             // profile 提供的只读运行时上下文
-	ToolPolicy            *runtimepolicy.ToolExecutionPolicy // profile 解析后的工具策略
+	// ProfilePromptSuppressed / ProfilePromptSuppressionReason（D29 / Batch 14）：
+	// 项目级 profile 在未信任工作区被扣留 prompts 时的会话标记与统一原因，供三处
+	// 警告面（/profile status、启动摘要、Switch Report）显式提示"内容因工作区
+	// 未信任而未应用"，禁止静默少一层生效面（假开关）。
+	ProfilePromptSuppressed        bool
+	ProfilePromptSuppressionReason string
+	ProfileContext                 map[string]interface{}             // profile 提供的只读运行时上下文
+	ToolPolicy                     *runtimepolicy.ToolExecutionPolicy // profile 解析后的工具策略
 	// Profile 配置覆盖（D13，Batch 7）：profile runtime.overrides 的会话级视图。
 	// ProfileConfigBase 是未叠加覆盖的基线配置（首次应用时捕获）；
 	// ProfileConfigOverlayApplied 是当前生效的叠加视图指针（nil 表示未叠加）。

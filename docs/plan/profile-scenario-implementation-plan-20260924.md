@@ -575,7 +575,7 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 | 11 | M2/M5 | 11a ✅ 已完成；11b 待 Batch 13 | 11a：命令面可用 + A4 resume 半程/A7/A8 全绿；11b：TUI 生命周期子命令（随 Batch 13 后端启用） | V17 部分回填（命令面可用；写回实现细节随 Batch 13 E7 复核）；证据见变更记录（Batch 11a） |
 | 12 | M4 | ✅ 已完成 | composer 可切换 + Switch Report 可见 + R20 能力门控（旧后端不注册命令） | V15/V16/V19 已回填；证据见变更记录（Batch 12） |
 | 13 | M5 | 🚧 进行中（slice 1-7 已落地：`apply` 执行核心 / export·import（API+CLI）/ TUI 生命周期子命令（含 import 闭环，D37）/ save-as 差分固化（TUI+API）；余：前端生命周期入口与 E2E-1~5 前端半程） | E2E-1~5 + A9-A12 | V22 已回填；V17 部分回填；V24、V25 待回填；Q19/Q20/Q21 |
-| 14 | M6 | 🚧 进行中（V20/V21 已回填、D29 接入设计已冻结；slice 2 落地：foldertrust 检测面扩展 + 分级门控核心 + CLI/server 接线；余：三处警告面、前端徽标/一键信任、E2E-6/7 剧本） | E2E-6/7 + A13/A14 | V20、V21 已回填；Q22 |
+| 14 | M6 | 🚧 进行中（V20/V21 已回填、D29 接入设计已冻结；slice 2 落地：foldertrust 检测面扩展 + 分级门控核心 + CLI/server 接线；slice 3 落地：三处警告面（`/profile status` / 启动摘要 / Switch Report，CLI+server）；余：前端徽标/一键信任、E2E-6/7 剧本） | E2E-6/7 + A13/A14 | V20、V21 已回填；Q22 |
 | 6 | P2 | 不承诺 | — | 按需排期 |
 
 ---
@@ -653,3 +653,9 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 > ④ 测试（A13/A14 核心半程）：`internal/profile/prompts_gate_test.go`（判定矩阵：trusted / 未信任项目层 / 未信任外部层 / 未知根失败关闭 / user-home 层豁免 / 无内容不告警 + 落地断言含"分级不误伤"）；`internal/foldertrust/foldertrust_test.go` 增补 `.aicli/profiles` 检出与点文件空壳反例；`cmd/aicli/commands/chat_profile_prompt_gate_test.go`（CLI：未信任 `state.PromptText` 为空且 tools 声明保留；信任翻转后恢复注入）；`internal/api/skills/profile_prompt_gate_test.go`（server 半程：未信任 `PromptText` 为空 + 特性关闭恢复）。
 > ⑤ 回归：`go build ./...` 退出 0；`go test ./internal/foldertrust/... ./internal/profile/... ./internal/profileinput/... ./internal/api/skills/... ./cmd/aicli/commands/... -count=1` 全绿；`gofmt -l` 对本次改动文件零输出。
 > ⑥ 余项（slice 3/4）：三处警告面（TUI `/profile status`、启动摘要、Switch Report）、前端 Profiles 页"部分内容未应用"徽标 + 一键信任入口（Q22）、E2E-6/7 手工剧本（未信任目录含 `.aicli/profiles/`）。
+> 变更记录：2026-09-24 实施（Batch 14 **slice 3** 完成并验证——三处警告面（CLI + server）；P0 安全线）：
+> ① 交付物（CLI 警告面）：`ChatSession` 新增 `ProfilePromptSuppressed`/`ProfilePromptSuppressionReason`（`chat.go:172-179`，注释说明"禁止静默少一层生效面"），由 `applyProfileStateToChatSession`（`chat_profile.go`）投影；新增单点文案函数 `profilePromptSuppressionNotice`（reason + `；/trust grant 后可 /profile reload 恢复`），三处复用：TUI `/profile status`（`chat_profile_command.go`，`SystemPromptText` 行后追加 `⚠`）、启动摘要（`chat_profile_summary.go`，此前被扣留时该行整体消失 → 现在显式 `⚠` 提示）、Switch Report（`chat_profile_switch.go`，`report.Warnings` 追加；detach profile 路径同步清空两个标记，避免残留假警告）。
+> ② 交付物（server 警告面）：`internal/api/skills/session_profile_switch.go` 新增 `sessionProfilePromptSuppressionWarning(state)`，`applySessionProfileSwitch` 阶段 2 追加到 `report.Warnings`（Web 端不再出现"已切换成功却少一层提示词"的假开关）。
+> ③ 测试：`cmd/aicli/commands/chat_profile_prompt_gate_test.go` 新增 `TestProfilePromptSuppressionWarnings`（`setProcessFolderTrust` 构造进程级未信任态 → 断言统一文案 / status `⚠` / 摘要 `⚠` / switch 警告四断言）；`internal/api/skills/profile_prompt_gate_test.go` 补两条（未信任→有警告；特性关闭→无警告）。
+> ④ 回归：`go build ./...` 退出 0；`go test ./internal/api/skills/... -count=1` 33.4s 全绿；`go test ./cmd/aicli/commands/... -count=1` 135.2s 全绿（首轮一次 flake = `TestResumePickerSessionLoaderPinsCurrentSession` 撞 sqlite 并发栈，单独重跑与全包复跑均绿，判定为并行跑两个 go test 进程的环境抖动，非本次改动）；`gofmt -l` 对本 slice 改动文件零输出（`session_profile_switch.go` 存在**本次改动区域之外**的历史格式漂移：结构体字段对齐 + 一处注释空格，未顺手 reformat 以免污染 diff）。
+> ⑤ 余项（slice 4）：前端 Profiles 页"部分内容未应用"徽标 + 一键信任入口（Q22）、E2E-6/7 剧本（未信任目录含 `.aicli/profiles/`）。

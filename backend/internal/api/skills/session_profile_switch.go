@@ -303,6 +303,11 @@ func (h *Handler) applySessionProfileSwitch(ctx context.Context, sessionID, prof
 	h.applyProfileSessionContext(session, state)
 	report.Warnings = append(report.Warnings, sessionProfileSwitchDeferredWarnings(session, state)...)
 	report.Warnings = append(report.Warnings, sessionProfileSwitchPolicyWarnings(before, state)...)
+	// D29（Batch 14）：未信任工作区的项目级 profile 被扣留 prompts 时，报告必须显式
+	// 呈现（否则 Web 端看到"已切换"却少了提示词层 = 假开关）。
+	if notice := sessionProfilePromptSuppressionWarning(state); notice != "" {
+		report.Warnings = append(report.Warnings, notice)
+	}
 
 	// 阶段 3：失效一次到位（D19）——①锚点 ②稳定工具面 + 空闲 actor 驱逐 ⑥token 计数。
 	report.AnchorCleared = clearSessionFrozenPromptAnchor(meta)
@@ -516,4 +521,17 @@ func sessionProfileSwitchPolicyWarnings(before sessionProfileSurfaceSnapshot, st
 			before.readOnly, state.ToolPolicy.ReadOnly)}
 	}
 	return nil
+}
+
+// sessionProfilePromptSuppressionWarning（D29 / Batch 14）：项目级 profile 的 prompts
+// 因工作区未信任被扣留时，切换报告必须显式呈现（禁止"假开关"）。未扣留返回空串。
+func sessionProfilePromptSuppressionWarning(state *profileRuntimeState) string {
+	if state == nil || state.Resolved == nil || !state.Resolved.PromptSuppressed {
+		return ""
+	}
+	reason := strings.TrimSpace(state.Resolved.PromptSuppressionReason)
+	if reason == "" {
+		reason = "项目级 profile 的 prompts 未应用（工作区未信任）"
+	}
+	return reason + "；授予信任后重新切换或重载 profile 即恢复"
 }

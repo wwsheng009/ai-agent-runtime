@@ -199,6 +199,11 @@ func applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitch
 	}
 	report.Warnings = append(report.Warnings, profileSwitchDeferredDefaultWarnings(session, state)...)
 	report.Warnings = append(report.Warnings, profileSwitchToolPolicyWarnings(before, state)...)
+	// D29（Batch 14）：未信任工作区的项目级 profile 被扣留 prompts 时，切换报告必须
+	// 显式呈现（否则用户看到"已切换"却少了提示词层 = 假开关）。
+	if notice := profilePromptSuppressionNotice(session); notice != "" {
+		report.Warnings = append(report.Warnings, notice)
+	}
 
 	// 阶段 3：失效一次到位（D19）——①锚点 ②稳定工具面 ③turn 面（存储层在
 	// 在途 turn 时天然保留）⑥token 计数。失效动作不出本函数。
@@ -445,6 +450,8 @@ func applyRuntimeProfileDetach(session *ChatSession) (*ProfileSwitchReport, erro
 	session.ProfileSkillSelection = runtimeprofileinput.ResolvedSkillSelection{}
 	session.ProfileMCPSelection = runtimeprofileinput.ResolvedMCPSelection{}
 	session.ProfilePromptMode = ""
+	session.ProfilePromptSuppressed = false
+	session.ProfilePromptSuppressionReason = ""
 	session.ProfileContext = nil
 	session.ToolPolicy = nil
 	session.BaseToolPolicy = nil
