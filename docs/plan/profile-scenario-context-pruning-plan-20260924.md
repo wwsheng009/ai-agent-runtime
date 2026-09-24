@@ -794,9 +794,9 @@ TUI `/profile use <name>` 与 Web `POST /runtime/commands {type:"set_profile", p
 | `off` | 清空 profile 绑定 + 完整失效（① ② ③ ⑥）+ 身份键清除 | 无 profile 时：幂等提示，不报错 |
 | `save` | 写回默认 profile 到目标层；config 层需 `--yes` | 与 `/routing save` 同一守卫 |
 
-> `create` / `duplicate` / `save-as` / `edit` / `rename` / `move` / `delete` / `export` 的行为细则见 §23 G4（同一"解析不了就报错"纪律，本节不重复；例如 `save-as` 无差分时明确提示且不生成空 profile）。
+> `create` / `duplicate` / `save-as` / `edit` / `rename` / `move` / `delete` / `export` 的行为细则见 §23 G4，`import` 见 §23 G5/D28（同一"解析不了就报错"纪律，本节不重复；例如 `save-as` 无差分时明确提示且不生成空 profile）。
 
-> **接线状态（2026-09-24，Batch 13 slice 6）**：全部子命令已在 TUI 落地（D34 + D35，含 `save-as` 差分固化）；`save-as` 的 API 入口（`POST /api/runtime/profiles {from_session}`）已接线（D36），本包（`internal/api/skills`）已无 501 端点。
+> **接线状态（2026-09-24，Batch 13 slice 7）**：全部子命令已在 TUI 落地（D34 + D35），含 `import` 闭环（D37；`export` 的"导入"提示行同步改指 TUI）；`save-as` 的 API 入口（`POST /api/runtime/profiles {from_session}`）已接线（D36），本包（`internal/api/skills`）已无 501 端点。
 
 ### 17.3 Web / 前端命令面
 
@@ -1015,7 +1015,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 | 13 | **分享**：导出 / 导入 / 项目级随仓库分发 | §9 D16 提到"项目级 profile 可随仓库分发"，但无导出/导入设计 | ❌ → **已补** §23 G5/D28 |
 | 14 | **安全**：项目级 profile 的信任门控 | **无**（见 G6：`internal/profile` 零 trust 引用） | ❌ **安全缺口** → **已补** §23 G6/D29 |
 | 15 | **验收**：端到端剧本（创建→用→改→分享） | 各批次有出口条件，但无跨阶段 E2E 剧本 | ❌ → **已补** §23 G7（E2E-1~7） |
-| 16 | **TUI 可达性**：在 TUI 内完成创建/保存 | §17.1 仅查看+切换（status/list/show/diff/use/pick/reload/off/save） | ✓ 全部落地：create/duplicate/rename/move/delete/export/edit（slice 4 / D34）+ `save-as` 差分固化（slice 5 / D35，A9）+ API `from_session` 接线（slice 6 / D36） |
+| 16 | **TUI 可达性**：在 TUI 内完成创建/保存 | §17.1 仅查看+切换（status/list/show/diff/use/pick/reload/off/save） | ✓ 全部落地：create/duplicate/rename/move/delete/export/edit（slice 4 / D34）+ `save-as` 差分固化（slice 5 / D35，A9）+ API `from_session` 接线（slice 6 / D36）+ `/profile import` 闭环（slice 7 / D37） |
 
 **结论**：**"使用/切换"闭环已完整（第三部分）；"创建/修改/分享/安全"存在 5 个实质缺口**（第 3、4、6/7、13、14 行），第 2、11、16 行为部分缺口。以下 G1-G7 逐项补遗，并**已回填正文**（§10.2 列表操作、§10.5 API 清单、§17.1/§17.2 命令面、§10.6 对照表、§11/§19 批次范围），本文档内部一致性已修复。
 
@@ -1223,7 +1223,9 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 **slice 3（CLI）补充**：`aicli profile export <profile> [--out <path>] [--dry-run]`、`aicli profile import <path> [--to user|project] [--name <name>] [--dry-run]`。两处实现细节：① 设计表的 `--output <dir|zip>` 与既有 `--output`（输出格式 text|json）重名，CLI 用 `--out`（缺省 `./<profile>.zip`，指向已存在目录则写 `<目录>/<profile>.zip`）；② `--dry-run` 的临时目录放系统临时区、**不创建层根**（预演不该在用户仓库里留下 `.aicli/` 空目录），真实导入仍在层根内建临时目录以保证 `os.Rename` 同盘原子落位。另外把「层根在哪」的规则收敛到 `internal/profile.LayerRoot`（API 与 CLI 共用一份，API 侧只留包内别名），导入命名契约也收敛为 `internal/profile.ResolveBundleProfileName`。
 
-**遗留（Batch 14 及后续）**：① G6/D29 信任门控——未信任工作区里导入的 profile 与本地创建同标准（本项目 profile 解析仍未接 foldertrust，Batch 14 处理）；② 导出/导入的 TUI/前端入口（CLI 与 API 已接线）；③ ~~`from_session`（G1/D24）的 **API 入口**仍是显式 501~~ **已随 slice 6 接线**（D36）。
+**遗留（Batch 14 及后续）**：① G6/D29 信任门控——未信任工作区里导入的 profile 与本地创建同标准（本项目 profile 解析仍未接 foldertrust，Batch 14 处理）；② 前端导出/导入入口（TUI 侧已随 slice 7 接线，见 D37）；③ ~~`from_session`（G1/D24）的 **API 入口**仍是显式 501~~ **已随 slice 6 接线**（D36）。
+
+> **Batch 13 slice 7 已落地（2026-09-24）**：**TUI `/profile import` 接线**（`cmd/aicli/commands/chat_profile_lifecycle_import.go` + `chat_profile_command.go` 的 dispatch/usage/旗标），复用 CLI 同一执行核心 `runProfileImportCommand`（命令层零复制）；`--dry-run` 只读预演不挡子会话、真实导入沿用写守卫（M16/INV-A3）；`export` 的"导入"提示行改指 TUI 闭环。契约见附录 D37。
 
 ## 附录 D34：Batch 13 slice 4 回填（2026-09-24）——TUI 生命周期落地契约
 
@@ -1239,7 +1241,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 **测试锚点**：`chat_profile_lifecycle_test.go`（create 模板/重名/未知模板/非法名/未知层；duplicate→export 往返，zip 可被 `ReadBundleZip` 读回；rename 声明名同步 + 目标冲突；move 同层/未知层；delete 清单 + default 引用保护（A10）；edit 路径与 `$EDITOR` 缺失；无 ref 且无绑定报错；save-as 显式拒绝；help 文本覆盖全部子命令）。测试通过 `HOME/USERPROFILE` 重定向（`useTemporaryHome`）把 `layer=user` 指到临时目录，**不污染真实用户目录**；旧的"生命周期子命令未启用"测试曾因此在 `~/.aicli/profiles/x` 留残留，本次改写为"缺参数给用法"并清理该残留。
 
-**遗留**：① `save-as`（G1/D24 + A9）待差分核心；② TUI `import` 入口（CLI/API 已接线）；③ 前端生命周期入口（Batch 12 只做了 apply/switch）；④ D29 信任门控（Batch 14）。
+**遗留**：① `save-as`（G1/D24 + A9）待差分核心；② ~~TUI `import` 入口（CLI/API 已接线）~~ **已随 slice 7 接线（D37）**；③ 前端生命周期入口（Batch 12 只做了 apply/switch）；④ D29 信任门控（Batch 14）。
 
 ## 附录 D35：Batch 13 slice 5 回填（2026-09-24）——save-as 差分固化落地契约
 
@@ -1270,7 +1272,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 **测试锚点**：`internal/profile/saveas_test.go`（只写差分 section、不写空 section、可被 `LoadProfile`/`ValidateProfileSpec` 接受、同一面恒得同一字节、空面/空名/空 agent 报错、各 section 形态）；`chat_profile_lifecycle_saveas_test.go`（allowlist 形态固化 + 重开复现工具面（E2E-2 核心）、无差分报错且不产目录（A9）、deny 形态 + read_only、目标已存在拒绝且不改写、基线与权限模式明示）。slice 4 的"save-as 显式拒绝"用例已删除，`chat_profile_command_test.go` 的 usage 断言同步收敛。
 
-**遗留**：① ~~API `from_session`（`POST /api/runtime/profiles`）——server 侧读取"会话生效面"的路径未接线~~ **已随 slice 6 接线（D36）**；② TUI `import` 入口（CLI/API 已接线）；③ 前端生命周期入口；④ D29 信任门控（Batch 14）。
+**遗留**：① ~~API `from_session`（`POST /api/runtime/profiles`）——server 侧读取"会话生效面"的路径未接线~~ **已随 slice 6 接线（D36）**；② ~~TUI `import` 入口（CLI/API 已接线）~~ **已随 slice 7 接线（D37）**；③ 前端生命周期入口；④ D29 信任门控（Batch 14）。
 
 ## 附录 D36：Batch 13 slice 6 回填（2026-09-24）——save-as 的 API 入口落地契约
 
@@ -1299,4 +1301,19 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 **测试锚点**：`profiles_saveas_handlers_test.go`——① deny 形态 + `read_only: true` + skills 收窄的源 profile 固化：断言 `mode`/`baseline`/`surface` 计数/`omitted` 非空/`profile.valid=true`，产物**含 `denylist:` 与 `read_only: true`、不含 `allowlist:` 与 `prompt:`**（形态保持 + prompt 不落盘），并用 `resolveProfileSessionState(<新 profile>, "default", "")` 读回验证**重开复现同一生效面**（E2E-2 的 server 半程）；② 无差分 400 + 无目录（A9）、混用/`force` 400、既有目录 409 + 内容零改写。`profiles_handlers_test.go` 的边界用例（原 501）改为"未知会话 404 + 零落盘"——该用例原先没有 session manager，改造后显式装一个（否则走的是"未配置"的 500 分支，测试实锤过一次）。
 
-**遗留**：① TUI `import` 入口（CLI/API 已接线）；② 前端生命周期入口（含"从当前会话创建"按钮）；③ D29 信任门控（Batch 14）；④ 前端 E2E-1 / E2E-3 / E2E-4 未跑。
+**遗留**：① ~~TUI `import` 入口（CLI/API 已接线）~~ **已随 slice 7 接线（D37）**；② 前端生命周期入口（含"从当前会话创建"按钮）；③ D29 信任门控（Batch 14）；④ 前端 E2E-1 / E2E-3 / E2E-4 未跑。
+
+## 附录 D37：Batch 13 slice 7 回填（2026-09-24）——TUI `import` 闭环落地契约
+
+**落地范围**：`backend/cmd/aicli/commands/chat_profile_lifecycle_import.go`（新增：`chatProfileImportLifecycleText`）、`chat_profile_command.go`（dispatch `case "import"` + usage 行 + `--name`/`--dry-run` 旗标解析）、`chat_profile_lifecycle_ops.go`（`export` 的"导入"提示行改指 TUI 闭环）+ 测试 `chat_profile_lifecycle_import_test.go`（新增）、`chat_profile_command_test.go`（子命令缺参断言列表纳入 `import`）。至此 TUI `/profile` 生命周期面**无未接线子命令**（`export` 与 `import` 成对闭环）。
+
+**D37（TUI import = CLI 执行核心的薄接线；dry-run 免写守卫）**：
+- **零复制**：导入语义（读包 → 层根下 `.import-*` 临时目录物化 → 同一个 `ValidateProfileReference` → 失败零落痕 → `os.Rename` 原子落位；同名冲突拒绝不覆盖；`dry_run` 只预演且不创建层根）全部由 CLI 侧 `runProfileImportCommand` 承担，TUI 只做旗标映射与报告渲染——与 export/duplicate 的"单一实现点"纪律一致，避免 TUI/CLI/API 三套导入方言。
+- **旗标映射**：`--to user|project`（缺省 user，与 CLI 同）、`--name <名字>`（须与包内 `profile.yaml` 声明名一致，D32 权威口径由 `ResolveBundleProfileName` 保证）、`--dry-run`（只预演）。
+- **守卫分级**：真实导入走 `chatProfileLifecycleWriteGuard`（子会话"写了也不生效"，M16/INV-A3）；`--dry-run` 是只读预演（不落盘、不创建层根），**不**挡子会话——预览不该被写成权限问题。
+- **配置上下文必需**：`session.Config == nil` 时显式报错，而不是跳过 validate（D28-1 要求"校验结论来自同一实现"，静默跳过等于把未校验产物当合格品）。
+- **报告口径**：路径清单（与导出/删除同一投影）+ 写盘后同一 validate 的校验结论（`chatProfilePostWriteNote`）+ `已导入但未激活` 提示 + `下一步: /profile use <name>`（D28-2：绝不自动激活）。
+
+**测试锚点**：`chat_profile_lifecycle_import_test.go`——① 模板渲染 → 打 zip → `--dry-run`（零落盘）→ 真实导入（物化 `profile.yaml` + `校验: 通过` + `未激活` + 会话绑定零变化）→ 同名再导入被拒且不覆盖；② 坏源（不存在 / 缺 `profile.yaml`）被拒且层根零条目 + 未知层不落盘；③ 子会话真实导入被写守卫挡住、`--dry-run` 正常预演。测试内 `writeProfileImportTestBundle` 复用 `RenderTemplate`/`CollectBundleFiles`/`WriteBundleZip`（不另造包格式）；经 `useTemporaryHome` 重定向 `HOME/USERPROFILE`，不污染真实用户目录。
+
+**遗留**：① 前端生命周期入口（含导出/导入按钮）；② D29 信任门控（Batch 14）；③ 前端 E2E-1 / E2E-3 / E2E-4 未跑。

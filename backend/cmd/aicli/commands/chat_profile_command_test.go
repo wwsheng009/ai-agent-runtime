@@ -403,14 +403,15 @@ func TestProfileCommandPickWithoutProfilesExplainsHow(t *testing.T) {
 	}
 }
 
-// §23 G4：生命周期子命令已接线（Batch 13 slice 4/5）；缺参数时给用法或"缺少引用"，
+// §23 G4/G5：生命周期子命令已接线（Batch 13 slice 4/5/7）；缺参数时给用法或"缺少引用"，
 // 而不是报"未启用"，也不静默挑一个 profile 下手。save-as（D24 差分固化）的
-// 产物与无差分路径专测见 chat_profile_lifecycle_saveas_test.go。
+// 产物与无差分路径专测见 chat_profile_lifecycle_saveas_test.go；import（D28）见
+// chat_profile_lifecycle_import_test.go。
 func TestProfileCommandLifecycleSubcommandsRequireArguments(t *testing.T) {
 	session, _, cleanup := newProfileLifecycleTestSession(t)
 	defer cleanup()
 
-	for _, sub := range []string{"create", "duplicate", "rename", "move", "delete", "export", "edit"} {
+	for _, sub := range []string{"create", "duplicate", "rename", "move", "delete", "export", "import", "edit"} {
 		text, handled := chatProfileCommandText(session, "/profile "+sub)
 		if !handled {
 			t.Fatalf("/profile %s 必须被命令面接管", sub)

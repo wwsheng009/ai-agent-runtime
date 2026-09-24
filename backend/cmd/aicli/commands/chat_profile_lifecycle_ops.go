@@ -230,7 +230,7 @@ func chatProfileExportLifecycleText(session *ChatSession, ref, out string) (stri
 		"  根:    " + target.Root,
 	}
 	lines = append(lines, chatProfileFormatPathList(profileBundlePathList(files), "    ")...)
-	lines = append(lines, "导入: aicli profile import <包路径> [--to user|project]（导入绝不自动激活）")
+	lines = append(lines, "导入: /profile import <包路径> [--to user|project]（导入绝不自动激活；CLI 等价 aicli profile import）")
 	return strings.Join(lines, "\n"), nil
 }
 

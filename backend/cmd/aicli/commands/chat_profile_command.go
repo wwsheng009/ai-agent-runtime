@@ -40,6 +40,8 @@ func chatProfileUsageText() string {
 		"  /profile move <ref> --to user|project              层级移动（跨层；同层拒绝）",
 		"  /profile delete <ref> [--force]                    删除（引用检查 + 文件清单；--force 清空 default）",
 		"  /profile export [<ref>] [--out <file|dir>]         导出 zip（默认 ./<name>.zip）",
+		"  /profile import <包路径|目录> [--to user|project] [--name <名字>] [--dry-run]",
+		"                                                     导入 zip/目录（不覆盖、不自动激活）",
 		"  /profile help                                      显示本用法",
 		"说明: 切换在下一个 turn 边界生效；profile 只能收窄安全基线，不会放宽权限",
 		"      save-as 固化的是与内置默认面的差分（prompt/权限模式不在 profile.yaml 字段内，报告中逐项明示）",
@@ -159,6 +161,16 @@ func tryExecuteStructuredProfileCommand(session *ChatSession, command string) (C
 			return commandErrorResult(err), true
 		}
 		return commandTextResult(text), true
+	case "import":
+		if len(positional) == 0 {
+			return commandErrorResult(fmt.Errorf(
+				"用法: /profile import <包路径|目录> [--to user|project] [--name <名字>] [--dry-run]")), true
+		}
+		text, err := chatProfileImportLifecycleText(session, positional[0], flags.Name, flags.Layer, flags.DryRun)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		return commandTextResult(text), true
 	case "edit":
 		ref := ""
 		if len(positional) > 0 {
@@ -232,9 +244,11 @@ type chatProfileCommandFlags struct {
 	Layer    string
 	Template string
 	Out      string
+	Name     string
 	Confirm  bool
 	Force    bool
 	Open     bool
+	DryRun   bool
 }
 
 // chatProfileParseFlags 解析 `/profile` 的旗标，返回旗标集合与剩余位置参数。
@@ -262,6 +276,13 @@ func chatProfileParseFlags(args []string) (chatProfileCommandFlags, []string) {
 				flags.Out = strings.TrimSpace(args[index+1])
 				index++
 			}
+		case "--name":
+			if index+1 < len(args) {
+				flags.Name = strings.TrimSpace(args[index+1])
+				index++
+			}
+		case "--dry-run":
+			flags.DryRun = true
 		case "--yes":
 			flags.Confirm = true
 		case "--force", "-f":
@@ -276,6 +297,8 @@ func chatProfileParseFlags(args []string) (chatProfileCommandFlags, []string) {
 				flags.Template = strings.TrimSpace(arg[len("--template="):])
 			case strings.HasPrefix(lower, "--out="):
 				flags.Out = strings.TrimSpace(arg[len("--out="):])
+			case strings.HasPrefix(lower, "--name="):
+				flags.Name = strings.TrimSpace(arg[len("--name="):])
 			default:
 				positional = append(positional, arg)
 			}
