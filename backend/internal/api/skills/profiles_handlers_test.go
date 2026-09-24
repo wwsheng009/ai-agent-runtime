@@ -27,8 +27,9 @@ import (
 //   - 创建（模板/复制）→ 列表 → 详情 → 更新（含 mtime 冲突与校验失败零副作用）
 //   - 删除的 default 引用门控（A10：被 default 引用时默认拒绝，force 才清理）
 //   - rename 的目录 + 配置同改
-//   - 未落地能力必须显式 501（from_session，指向 Batch 13），不允许假成功；
-//     apply 已由 Batch 13 接线，见 TestRuntimeProfilesAPI_ApplyWiresSessionSwitchCore
+//   - 未落地能力必须显式 501，不允许假成功（Batch 13 后本包已无 501 端点）；
+//     apply / from_session 均已接线，分别见
+//     TestRuntimeProfilesAPI_ApplyWiresSessionSwitchCore 与 profiles_saveas_handlers_test.go
 
 type profilesAPIHarness struct {
 	router    http.Handler
@@ -377,14 +378,18 @@ func TestRuntimeProfilesAPI_SetDefaultAndNotImplementedBoundaries(t *testing.T) 
 	// 这里会指向搜索路径里"碰巧找到"的另一个文件——2026-09-24 测试实锤过）。
 	assert.Equal(t, h.config, payload["config_path"])
 
-	// from_session（D24 差分固化）属 Batch 13：显式 501，不允许假成功
+	// from_session（D24 差分固化）已由 Batch 13 slice 6 接线：未知会话是 404
+	//（客户端语义，不是 500），且零落盘——本用例只钉住"不再 501"，
+	// 完整语义（差分产物 / A9 / 互斥）见 profiles_saveas_handlers_test.go。
+	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
+	t.Cleanup(sessionManager.Stop)
+	h.handler.SetSessionManager(sessionManager)
 	rec, payload = h.do(t, http.MethodPost, "/api/runtime/profiles", map[string]interface{}{
 		"name":         "batch8-from-session",
 		"from_session": "sess-123",
 		"root":         h.profileRoot("batch8-from-session"),
 	})
-	require.Equal(t, http.StatusNotImplemented, rec.Code, rec.Body.String())
-	assert.Contains(t, payload["error"], "Batch 13")
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	assert.NoDirExists(t, h.profileRoot("batch8-from-session"))
 
 	// apply 已接线（Batch 13）：缺 session_id 时 400，既不是假成功也不是 501

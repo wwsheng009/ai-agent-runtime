@@ -35,7 +35,8 @@ type profileCreateRequest struct {
 	Template string `json:"template,omitempty"`
 	// FromRef 复制来源（duplicate 模式）。
 	FromRef string `json:"from_ref,omitempty"`
-	// FromSession 会话固化（D24 差分固化）——**Batch 13 落地**，本批显式 501。
+	// FromSession 会话固化（D24 差分固化 / D35 落地口径）——Batch 13 slice 6 接线，
+	// 与 template / from_ref 互斥（三模式合一入口）。
 	FromSession string `json:"from_session,omitempty"`
 	// Agent 模板的 default_agent（缺省 TemplateDefaultAgent）。
 	Agent string `json:"agent,omitempty"`
@@ -67,7 +68,7 @@ type profileApplyRequest struct {
 	SessionID string `json:"session_id,omitempty"`
 }
 
-// CreateRuntimeProfile 创建 profile：模板 / 复制两模式（from_session 属 Batch 13）。
+// CreateRuntimeProfile 创建 profile：模板 / 复制 / 从会话固化三模式（G1 三模式合一入口）。
 func (h *Handler) CreateRuntimeProfile(w http.ResponseWriter, r *http.Request) {
 	if err := h.authorizeProfileWrite(r); err != nil {
 		h.writeError(w, http.StatusForbidden, err)
@@ -84,23 +85,29 @@ func (h *Handler) CreateRuntimeProfile(w http.ResponseWriter, r *http.Request) {
 // createRuntimeProfile 是创建端点族的共享实现（POST /profiles 与
 // POST /profiles/{ref}/duplicate 走同一段代码，避免两条路径语义漂移）。
 func (h *Handler) createRuntimeProfile(w http.ResponseWriter, r *http.Request, req profileCreateRequest) {
-	if strings.TrimSpace(req.FromSession) != "" {
-		// 诚实拒绝而不是半成品：差分固化需要会话级"实际生效面 vs 基线"的
-		// 权威来源（第三部分 set_profile 的执行核心），本批尚不存在该状态源。
-		h.writeError(w, http.StatusNotImplemented, errors.New(errors.ErrValidationFailed,
-			"from_session（save-as 差分固化，D24）属 Batch 13：本批只提供模板与复制两种创建模式"))
-		return
-	}
 	name := strings.TrimSpace(req.Name)
 	if err := profilesys.ValidateProfileName(name); err != nil {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 		return
 	}
+	fromSession := strings.TrimSpace(req.FromSession)
 	fromRef := strings.TrimSpace(req.FromRef)
 	template := strings.TrimSpace(req.Template)
 	if fromRef != "" && template != "" {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
 			"template 与 from_ref 互斥：复制用 from_ref，模板新建用 template"))
+		return
+	}
+	if fromSession != "" && (fromRef != "" || template != "") {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"from_session 与 template/from_ref 互斥：固化用 from_session，复制用 from_ref，模板新建用 template"))
+		return
+	}
+	if fromSession != "" && req.Force {
+		// 与 CLI 同一条纪律（D35）：差分固化不覆盖既有目录——半覆盖
+		//（profile.yaml 被换掉、agents/ 与 prompts/ 仍是旧的）比拒绝更糟。
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"save-as 不提供 force：差分固化不覆盖既有 profile，请换名或先删除目标"))
 		return
 	}
 
@@ -116,7 +123,38 @@ func (h *Handler) createRuntimeProfile(w http.ResponseWriter, r *http.Request, r
 
 	mode := "template"
 	files := []string{}
-	if fromRef != "" {
+	saveAsExtra := map[string]interface{}{}
+	switch {
+	case fromSession != "":
+		// 从会话固化（save-as 差分固化）：先渲染（此时不落盘），再走与模板创建
+		// 同一段落盘路径，避免两条路径的写盘纪律漂移。
+		mode = "save_as"
+		result, renderErr := h.renderRuntimeProfileSaveAs(r, fromSession, name, req.Agent)
+		if renderErr != nil {
+			switch {
+			case isRuntimeProfileSaveAsValidationError(renderErr):
+				h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, renderErr.Error()))
+			case stderrors.Is(renderErr, chat.ErrSessionNotFound):
+				// 未知会话是客户端语义（404），与 apply / handler.go 的会话读取一致。
+				h.writeError(w, http.StatusNotFound, renderErr)
+			default:
+				h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "save-as profile failed", renderErr))
+			}
+			return
+		}
+		files, err = writeRuntimeProfileSaveAsFiles(absRoot, result.files)
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "write profile file failed", err))
+			return
+		}
+		saveAsExtra = map[string]interface{}{
+			"from_session": fromSession,
+			"agent":        result.agent,
+			"baseline":     result.baseline,
+			"surface":      runtimeProfileSaveAsSurfaceSummary(result.surface),
+			"omitted":      result.omitted,
+		}
+	case fromRef != "":
 		mode = "duplicate"
 		source, err := h.resolveRuntimeProfileTarget(fromRef)
 		if err != nil {
@@ -133,7 +171,7 @@ func (h *Handler) createRuntimeProfile(w http.ResponseWriter, r *http.Request, r
 			return
 		}
 		files = listRuntimeProfileFiles(absRoot)
-	} else {
+	default:
 		if template == "" {
 			template = defaultRuntimeProfileTemplate()
 		}
@@ -208,7 +246,7 @@ func (h *Handler) createRuntimeProfile(w http.ResponseWriter, r *http.Request, r
 		Writable:  true,
 	}
 	describeRuntimeProfileEntry(&entry)
-	h.writeJSON(w, http.StatusCreated, map[string]interface{}{
+	response := map[string]interface{}{
 		"created":             true,
 		"mode":                mode,
 		"template":            template,
@@ -223,7 +261,11 @@ func (h *Handler) createRuntimeProfile(w http.ResponseWriter, r *http.Request, r
 		"default_profile_set": defaultSet,
 		// D26 文案口径：default 只影响新会话；要影响当前会话需 apply（Batch 13）。
 		"affects": "new_sessions_only",
-	})
+	}
+	for key, value := range saveAsExtra {
+		response[key] = value
+	}
+	h.writeJSON(w, http.StatusCreated, response)
 }
 
 // DuplicateRuntimeProfile 复制（等价于 POST /profiles 的 from_ref 模式）。

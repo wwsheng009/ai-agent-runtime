@@ -796,7 +796,7 @@ TUI `/profile use <name>` 与 Web `POST /runtime/commands {type:"set_profile", p
 
 > `create` / `duplicate` / `save-as` / `edit` / `rename` / `move` / `delete` / `export` 的行为细则见 §23 G4（同一"解析不了就报错"纪律，本节不重复；例如 `save-as` 无差分时明确提示且不生成空 profile）。
 
-> **接线状态（2026-09-24，Batch 13 slice 5）**：全部子命令已在 TUI 落地（D34 + D35，含 `save-as` 差分固化）；`save-as` 的 API 入口（`POST /api/runtime/profiles {from_session}`）仍显式 501。
+> **接线状态（2026-09-24，Batch 13 slice 6）**：全部子命令已在 TUI 落地（D34 + D35，含 `save-as` 差分固化）；`save-as` 的 API 入口（`POST /api/runtime/profiles {from_session}`）已接线（D36），本包（`internal/api/skills`）已无 501 端点。
 
 ### 17.3 Web / 前端命令面
 
@@ -1015,7 +1015,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 | 13 | **分享**：导出 / 导入 / 项目级随仓库分发 | §9 D16 提到"项目级 profile 可随仓库分发"，但无导出/导入设计 | ❌ → **已补** §23 G5/D28 |
 | 14 | **安全**：项目级 profile 的信任门控 | **无**（见 G6：`internal/profile` 零 trust 引用） | ❌ **安全缺口** → **已补** §23 G6/D29 |
 | 15 | **验收**：端到端剧本（创建→用→改→分享） | 各批次有出口条件，但无跨阶段 E2E 剧本 | ❌ → **已补** §23 G7（E2E-1~7） |
-| 16 | **TUI 可达性**：在 TUI 内完成创建/保存 | §17.1 仅查看+切换（status/list/show/diff/use/pick/reload/off/save） | ✓ 全部落地：create/duplicate/rename/move/delete/export/edit（slice 4 / D34）+ `save-as` 差分固化（slice 5 / D35，A9）；◐ API `from_session` 仍 501 |
+| 16 | **TUI 可达性**：在 TUI 内完成创建/保存 | §17.1 仅查看+切换（status/list/show/diff/use/pick/reload/off/save） | ✓ 全部落地：create/duplicate/rename/move/delete/export/edit（slice 4 / D34）+ `save-as` 差分固化（slice 5 / D35，A9）+ API `from_session` 接线（slice 6 / D36） |
 
 **结论**：**"使用/切换"闭环已完整（第三部分）；"创建/修改/分享/安全"存在 5 个实质缺口**（第 3、4、6/7、13、14 行），第 2、11、16 行为部分缺口。以下 G1-G7 逐项补遗，并**已回填正文**（§10.2 列表操作、§10.5 API 清单、§17.1/§17.2 命令面、§10.6 对照表、§11/§19 批次范围），本文档内部一致性已修复。
 
@@ -1040,7 +1040,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/runtime/profiles` | 创建：`{name, layer, template?|from_ref?, from_session?}`；模板/复制/固化三模式合一入口 |
+| POST | `/api/runtime/profiles` | 创建：`{name, layer, template?|from_ref?, from_session?}`；模板/复制/固化三模式合一入口（**三模式均已接线**；`from_session` 见 D36） |
 | POST | `/api/runtime/profiles/{ref}/duplicate` | 复制（等价于 POST 的 `from_ref` 模式，保留独立端点便于 UI 直接调用） |
 
 ### G2 — 修改补全：重命名 / 移动 / 删除 + 引用完整性（D25）
@@ -1103,7 +1103,9 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 > **Batch 13 slice 4 已落地（2026-09-24）**：上表除 `save-as` 外全部接线（执行核心 `cmd/aicli/commands/chat_profile_lifecycle{,_create,_ops}.go`，TUI 内闭环），改名/复制/报告口径见附录 D34；`save-as` 当时保持显式拒绝（缺"会话实际生效面 vs 基线"的差分核心，见 A9/R21），前端生命周期入口未动。
 >
-> **Batch 13 slice 5 已落地（2026-09-24）**：`save-as` 差分固化接线（执行核心 `cmd/aicli/commands/chat_profile_lifecycle_saveas.go` + 渲染/差分模型 `internal/profile/saveas.go`），差分口径（基线=内置默认面、形态保持、无差分不产 profile）、不可声明项（prompt / 权限模式 / skills 目录）与 agent 必需空声明见附录 D35；API `from_session` 仍为显式 501。
+> **Batch 13 slice 5 已落地（2026-09-24）**：`save-as` 差分固化接线（执行核心 `cmd/aicli/commands/chat_profile_lifecycle_saveas.go` + 渲染/差分模型 `internal/profile/saveas.go`），差分口径（基线=内置默认面、形态保持、无差分不产 profile）、不可声明项（prompt / 权限模式 / skills 目录）与 agent 必需空声明见附录 D35。
+>
+> **Batch 13 slice 6 已落地（2026-09-24）**：`save-as` 的 **API 入口**接线（`POST /api/runtime/profiles {from_session}`，server 侧生效面来源 = 会话绑定 profile 的**解析结果**，与 `set_profile` / `buildSessionActor` 同一路径），复用 slice 5 的渲染核心；互斥/不覆盖/无差分纪律与 404/400/409 分流见附录 D36。至此 §23 G1 的三模式（模板/复制/固化）在 CLI / TUI / API 三面全部可达。
 
 ### G5 — 分享闭环：导出 / 导入 / 项目级分发（D28）
 
@@ -1221,7 +1223,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 **slice 3（CLI）补充**：`aicli profile export <profile> [--out <path>] [--dry-run]`、`aicli profile import <path> [--to user|project] [--name <name>] [--dry-run]`。两处实现细节：① 设计表的 `--output <dir|zip>` 与既有 `--output`（输出格式 text|json）重名，CLI 用 `--out`（缺省 `./<profile>.zip`，指向已存在目录则写 `<目录>/<profile>.zip`）；② `--dry-run` 的临时目录放系统临时区、**不创建层根**（预演不该在用户仓库里留下 `.aicli/` 空目录），真实导入仍在层根内建临时目录以保证 `os.Rename` 同盘原子落位。另外把「层根在哪」的规则收敛到 `internal/profile.LayerRoot`（API 与 CLI 共用一份，API 侧只留包内别名），导入命名契约也收敛为 `internal/profile.ResolveBundleProfileName`。
 
-**遗留（Batch 14 及后续）**：① G6/D29 信任门控——未信任工作区里导入的 profile 与本地创建同标准（本项目 profile 解析仍未接 foldertrust，Batch 14 处理）；② 导出/导入的 TUI/前端入口（CLI 与 API 已接线）；③ `from_session`（G1/D24）的 **API 入口**仍是显式 501（差分核心已随 slice 5 落地，TUI/CLI 侧可用，见 D35）。
+**遗留（Batch 14 及后续）**：① G6/D29 信任门控——未信任工作区里导入的 profile 与本地创建同标准（本项目 profile 解析仍未接 foldertrust，Batch 14 处理）；② 导出/导入的 TUI/前端入口（CLI 与 API 已接线）；③ ~~`from_session`（G1/D24）的 **API 入口**仍是显式 501~~ **已随 slice 6 接线**（D36）。
 
 ## 附录 D34：Batch 13 slice 4 回填（2026-09-24）——TUI 生命周期落地契约
 
@@ -1241,7 +1243,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 ## 附录 D35：Batch 13 slice 5 回填（2026-09-24）——save-as 差分固化落地契约
 
-**落地范围**：`backend/internal/profile/saveas.go`（差分面模型 `SaveAsSurface` + `RenderSaveAsProfile` 渲染）、`backend/cmd/aicli/commands/chat_profile_lifecycle_saveas.go`（会话生效面折算 + 报告）、`chat_profile_command.go`（dispatch / usage 接线）+ 测试 `internal/profile/saveas_test.go`、`cmd/aicli/commands/chat_profile_lifecycle_saveas_test.go`。TUI `/profile save-as <name> [--to user|project]` 已接线（slice 4 的"显式拒绝"占位删除）；**API `from_session` 仍为显式 501**（server 侧"会话生效面"的读取路径未定，见遗留）。
+**落地范围**：`backend/internal/profile/saveas.go`（差分面模型 `SaveAsSurface` + `RenderSaveAsProfile` 渲染）、`backend/cmd/aicli/commands/chat_profile_lifecycle_saveas.go`（会话生效面折算 + 报告）、`chat_profile_command.go`（dispatch / usage 接线）+ 测试 `internal/profile/saveas_test.go`、`cmd/aicli/commands/chat_profile_lifecycle_saveas_test.go`。TUI `/profile save-as <name> [--to user|project]` 已接线（slice 4 的"显式拒绝"占位删除）；**API `from_session` 当时仍为显式 501**（server 侧"会话生效面"的读取路径未定）——**已随 slice 6 接线，见 D36**。
 
 **D35（差分的基线是"内置默认面"，不是绑定 profile）**：D24 只说"固化与基线的差分"，落地时把基线明确为**内置默认面**：
 
@@ -1268,4 +1270,33 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 
 **测试锚点**：`internal/profile/saveas_test.go`（只写差分 section、不写空 section、可被 `LoadProfile`/`ValidateProfileSpec` 接受、同一面恒得同一字节、空面/空名/空 agent 报错、各 section 形态）；`chat_profile_lifecycle_saveas_test.go`（allowlist 形态固化 + 重开复现工具面（E2E-2 核心）、无差分报错且不产目录（A9）、deny 形态 + read_only、目标已存在拒绝且不改写、基线与权限模式明示）。slice 4 的"save-as 显式拒绝"用例已删除，`chat_profile_command_test.go` 的 usage 断言同步收敛。
 
-**遗留**：① API `from_session`（`POST /api/runtime/profiles`）——server 侧读取"会话生效面"的路径未接线（runtime session 的 ProfileRef/ToolPolicy 投影），下一步 slice；② TUI `import` 入口（CLI/API 已接线）；③ 前端生命周期入口；④ D29 信任门控（Batch 14）。
+**遗留**：① ~~API `from_session`（`POST /api/runtime/profiles`）——server 侧读取"会话生效面"的路径未接线~~ **已随 slice 6 接线（D36）**；② TUI `import` 入口（CLI/API 已接线）；③ 前端生命周期入口；④ D29 信任门控（Batch 14）。
+
+## 附录 D36：Batch 13 slice 6 回填（2026-09-24）——save-as 的 API 入口落地契约
+
+**落地范围**：`backend/internal/api/skills/profiles_saveas_handlers.go`（新增：生效面折算 / 不可声明项 / 写盘回滚）、`profiles_write_handlers.go`（`createRuntimeProfile` 的 501 短路删除 + 互斥与不覆盖校验 + 响应合并）+ 测试 `profiles_saveas_handlers_test.go`（新增）、`profiles_handlers_test.go`（旧 501 断言改为"未知会话 404"）。`POST /api/runtime/profiles {from_session}` 从显式 501 转为真实执行；**本包已无 501 端点**（包注释同步改写）。
+
+**D36（server 侧"会话生效面"的来源 = 绑定 profile 的解析结果，不是会话投影字段）**：CLI/TUI 侧的 `buildSaveAsSurface` 消费的是 TUI 会话对象上的投影字段（`ToolAllowlist`/`ToolDenylist`/`Skills*`/`MCP*`）；server 侧**没有那份投影**（runtime session 只持久化 `sessionmeta.ProfileRef` / `ProfileAgent`）。两条路可选：① 在 server 侧另写一份折算；② 复用 `resolveProfileSessionState(ref, agent, "")` 重解析绑定 profile。**取 ②**——它与 `set_profile`（`/api/runtime/profiles/{ref}/apply`）和 `buildSessionActor`（真正决定下一轮请求工具面的那条路径）是**同一份解析器**；另写折算会让"固化出来的东西"与"实际生效的东西"分叉，正是 R21 的翻版。代价是 save-as 必须能解析绑定 profile：解析失败按校验错误 400 报出，不静默降级。
+
+**复用渲染核心**：产物由 slice 5 的 `profilesys.RenderSaveAsProfile(name, description, agent, surface)` 渲染，`SaveAsSurface` 是同一份结构——形态保持、无差分不落 section、`read_only` 仅 true 时写、agent 必需空声明等 D35 全部口径在 API 侧**自动继承**，不重复实现。形态判定：`state.ToolPolicy.AllowlistEnabled` → allowlist 形态（用 `AllowedToolNames()`，而非 `Allowlist` 原始字段，保证与生效集同序同源），否则 denylist 形态。**空 allowlist 显式报错**（`ValidateProfileSpec` 会拒——"不得变成隐式全禁"）：与其写出解析不了的 profile，不如报错（D35 同一纪律）。
+
+**错误分流（不猜、不假成功）**：
+
+| 情形 | 状态码 | 口径 |
+|---|---|---|
+| 缺 `session_id` | 400 | 必填——服务端不推断"当前会话"（设置页无会话上下文，与 apply 端点同一纪律） |
+| 未知会话 | 404 | `chat.ErrSessionNotFound`：这是客户端语义，不是 500 |
+| 会话未绑定 profile | 400 | A9："当前无差异，无需固化…"，**不产空 profile、不产目录** |
+| 绑定 profile 解析失败 | 400 | `isRuntimeProfileSaveAsValidationError` 分流（校验类错误，非服务器故障） |
+| `from_session` 与 `template`/`from_ref` 混用 | 400 | 三模式互斥，**不静默挑一个** |
+| `from_session` + `force` | 400 | save-as 不提供半覆盖（D35） |
+| 目标目录已存在（非空） | 409 | 与 CLI `assertRuntimeProfileCreateTarget` 同一纪律，且**零写入** |
+| 其它（如未配置 session manager） | 500 | 真故障 |
+
+**写盘回滚**：`writeRuntimeProfileSaveAsFiles` 先 `MkdirAll` 再逐文件写，任一步失败即 `RemoveAll` 新建目录——预存目录不动，延续"失败路径状态零改动"。目录冲突检查在写盘**之前**（409 分支下文件逐字节未变，测试用前后字节比对钉住）。
+
+**响应形状**：`mode=save_as` + `from_session` / `agent` / `baseline`（会话绑定 profile，仅报告用；产物基线恒为内置默认面，见 D35）/ `surface`（逐字段计数摘要 + `tools.read_only` 布尔）/ `omitted`（不可声明项逐项：prompt / 非默认权限模式 / skills 目录）/ `profile`（**写盘后跑同一 validate** 的视图，D28 纪律）/ `affects=new_sessions_only`。
+
+**测试锚点**：`profiles_saveas_handlers_test.go`——① deny 形态 + `read_only: true` + skills 收窄的源 profile 固化：断言 `mode`/`baseline`/`surface` 计数/`omitted` 非空/`profile.valid=true`，产物**含 `denylist:` 与 `read_only: true`、不含 `allowlist:` 与 `prompt:`**（形态保持 + prompt 不落盘），并用 `resolveProfileSessionState(<新 profile>, "default", "")` 读回验证**重开复现同一生效面**（E2E-2 的 server 半程）；② 无差分 400 + 无目录（A9）、混用/`force` 400、既有目录 409 + 内容零改写。`profiles_handlers_test.go` 的边界用例（原 501）改为"未知会话 404 + 零落盘"——该用例原先没有 session manager，改造后显式装一个（否则走的是"未配置"的 500 分支，测试实锤过一次）。
+
+**遗留**：① TUI `import` 入口（CLI/API 已接线）；② 前端生命周期入口（含"从当前会话创建"按钮）；③ D29 信任门控（Batch 14）；④ 前端 E2E-1 / E2E-3 / E2E-4 未跑。
