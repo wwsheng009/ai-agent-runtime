@@ -186,6 +186,30 @@ aicli chat --pprof
       网络异常显示 `加载失败: network_error`；失败时列表不残留旧条目、面板不静默关闭。
 - [ ] 刷新：工具栏「⟳ 刷新」重新拉取列表（不依赖会话是否变化）。
 
+### 2.7 网格窗口（会话列表「⧉ 在新窗口打开」+ 深链）
+
+数据源：`POST /web/api/mesh/spawn`（架构 §5.7，契约见
+[web-remote-api.md](web-remote-api.md) §9.6）。前置：两个 `aicli chat`/`resume --pprof --mesh`
+进程（或同一进程即可覆盖「复用」路径），DevTools 打开 Network 与 Application 面板。
+
+- [ ] **弹窗资格**：悬停会话 → 点 `⧉` → 新窗口**必须**打开（不是被拦截的提示条）。
+      实现要点：占位窗口在点击手势内同步 `window.open('', '_blank')`，spawn 返回后才 `location.replace`；
+      若改成「await 之后再 window.open」，Chrome 会拦截——这是本用例的回归重点。
+- [ ] **复用不新起进程**：同一会话连点两次 → 第二次响应 `status:"reused"`（Network 面板可见），
+      进程数不增加（`aicli-mesh ls --json` 的 `counts.live` 不变），新窗口地址端口与第一次相同。
+- [ ] **失败关窗**：把 `--mesh-allow-spawn=false` 的进程当目标（或断网/改坏 `session_id`）→
+      占位窗口**自动关闭**（不残留 `about:blank` 标签页）+ Toast 显示 `code — reason`
+      （如 `mesh_spawn_not_allowed — spawning is disabled`）。
+- [ ] **无令牌残留（M7）**：新窗口地址栏在加载后**不含** `token=`（只剩 `?session=<sid>`），
+      `Application → Local Storage / Session Storage` 里没有 `aicli-web-token` 之外的令牌副本，
+      页面 DOM 中无令牌原文；`history.length` 回退一步也看不到带令牌的 URL。
+- [ ] **深链对齐**：手动打开 `http://127.0.0.1:<port>/web?token=<t>&session=<sid>` →
+      页面正常加载（首个 `/web/api/sessions` 请求已带 `X-AICLI-Token`），列表高亮该会话；
+      若把 `session` 改成另一个存在的会话 → 自动走 `/web/api/sessions/resume` 切换；
+      不存在的会话 id → Toast「深链会话不存在」，页面不白屏。
+- [ ] **实时徽标**：新窗口连上后，原窗口会话列表的「当前 / 活节点」状态与 `mesh/peers`
+      在 ≤2s 内反映新进程（SSE 扇入，见 §9.4）。
+
 ## 3. 协议下拉框专项用例（combo popup）
 
 Provider 编辑弹窗的协议字段曾用原生 `<input list=datalist>`，存在**有值与无值显示不一致**的缺陷：浏览器会按 input 当前值过滤 datalist 选项，编辑 `openai` 协议的 provider 时下拉只剩匹配项，新增（空值）时才显示全部。已改为 ▼ 按钮 + 自定义 popup（与底部 Model 字段同方案）。以下用例为该组件的回归重点：

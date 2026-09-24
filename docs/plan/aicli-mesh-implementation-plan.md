@@ -407,7 +407,8 @@ go test ./backend/cmd/aicli/commands/... -run 'MeshCall' -v
 | 新增 | `backend/internal/mesh/spawn.go` | 单飞锁 + 锁内二次检查 + detach 启动 + 就绪等待 + URL 生成（**偏差 D3**） |
 | 改造 | `backend/cmd/aicli/commands/web_handlers_mesh.go` | `HandleChatWebAPIMeshSpawn`（四态：`reused/started/not_running/failed`） |
 | 改造 | `backend/internal/mesh/cli.go` | `open` 子命令 |
-| 改造 | `backend/cmd/aicli/commands/web/js/sessions.js`、新增 `commands/web/js/mesh.js`、`commands/web/index.html`、`commands/web/style.css` | Web 子方案 §9.1 文件级清单（样式实测为单文件 `style.css`，无 `css/` 目录） |
+| 改造 | `backend/cmd/aicli/commands/web/js/sessions.js` | 会话列表 `⧉`「在新窗口打开」+ `applyDeepLinkSession`（**偏差 D5**：不新增 `js/mesh.js`，「打开会话」与「在新窗口打开」是同一交互面，逻辑并入既有模块；样式复用 `.session-action`，`style.css` 无需改动） |
+| 改造 | `backend/cmd/aicli/commands/web_page.go` | 注入的 head 内联脚本增加 §7.3 深链自举：`?token=` → `sessionStorage` + `history.replaceState` 抹除地址栏令牌，`?session=` → `window.__aicli_deep_link_session`（**偏差 D6**：计划未列此文件，但令牌必须在 ES 模块首个 fetch 之前落位） |
 | 改造 | `backend/cmd/aicli/commands/web_handlers.go`、`web_schema.go` | `sessions` 增加 `endpoint` / `ownership` 便捷字段（与 peers 同源，**只增不改**）；`resume` 的 `running_elsewhere` 前置检查 |
 | 新增 | `backend/cmd/aicli/commands/web_handlers_mesh_spawn_test.go` | spawn 参数透传、状态机、单飞、失败带日志尾部 |
 

@@ -118,7 +118,8 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | GET | `/web/api/mesh/peers` | 网格：全量视图（`counts` 恒全量口径；`scope` / `workspace` / `state` 只过滤 `nodes[]`；`probe=0` 默认不发网络请求，见 §9） |
 | GET | `/web/api/mesh/events` | 网格：实时事件流（SSE 扇入；`?since_seq=<n>` 续传游标、`?peers=auto\|none` 订阅拓扑；只连本进程即可看到全网格，见 §9.4） |
 | POST | `/web/api/mesh/call` | 网格：跨进程调用（op 白名单 9 项；写操作逐次 `allow_write=true`；仅回环，见 §9.5） |
-| GET | `/web/` | 浏览器微型客户端页面（同一后端） |
+| POST | `/web/api/mesh/spawn` | 网格：拉起（在会话工作区复用活节点或拉起新进程，返回含令牌的窗口 URL；仅回环，见 §9.6） |
+| GET | `/web/` | 浏览器微型客户端页面（同一后端；`/web?session=<id>&token=<t>` 深链自举，见 §9.6） |
 | GET | `/debug/chat/screen` | 与 `/web/api/screen?view=tui` 同源的调试入口（保留） |
 
 > 所有 POST 均需 `X-AICLI-Token`（见上一节）。
@@ -695,3 +696,63 @@ op 白名单（9 项，硬编码于 `internal/mesh`；args 与转发目标都是
 > CLI 侧等价物：`aicli-mesh call <target> <op> [--args JSON] [--allow-write]`；`send` 与 `screen`
 > 是它的两个高频封装（见 [mesh-cli.md](mesh-cli.md) §4.7–§4.9）。CLI 在目标返回 401 时
 > 会重读目标档案并重试一次（令牌轮换，架构 §5.6 要点 5）。
+
+### 9.6 拉起与窗口深链：`POST /web/api/mesh/spawn`
+
+**一句话**：在**会话所属工作区**复用活节点，必要时拉起一个新进程，返回可直接交给浏览器的
+§7.3 窗口 URL——前端「在新窗口打开」按钮与 `aicli-mesh open` 共用同一套实现（`mesh.Spawn`），
+区别只是调用方标签（`origin`）。
+
+```bash
+# 复用或拉起：返回的 url 含令牌，直接丢给浏览器即可
+curl -s -X POST http://127.0.0.1:51234/web/api/mesh/spawn \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"sess-20260924-abc"}'
+```
+
+```powershell
+# CLI 等价物（退出码见 §7.3：0 成功 / 2 目标不存在 / 3 不可达 / 5 失败）
+aicli-mesh open sess-20260924-abc --json
+```
+
+请求体：
+
+| 字段 | 必需 | 语义 |
+|------|------|------|
+| `session_id` | 是 | 目标会话（决定工作区与单飞锁键）；空 → `400` |
+| `port` | 否 | 期望端口（1–65535）；缺省用 binding 的 sticky 端口，再缺省由子进程自选 |
+| `wait_ms` | 否 | 就绪等待预算（默认 `8000`，上限 `60000`）；超预算 → `not_running` |
+| `detach` | 否 | 只接受 `true`/缺省；`false` → `400`（拉起必须是脱离进程，见 §5.7） |
+| `origin` | 否 | 审计标签，默认 `web` |
+
+响应（四态 + §5.9 错误信封，字段见 `ChatWebAPIMeshSpawnResponse`）：
+
+| `status` | HTTP | 何时 |
+|----------|------|------|
+| `reused` | 200 | 工作区已有活节点（含单飞锁被别人持有时读到的那个）——**不新起进程** |
+| `started` | 200 | 本次拉起的进程已就绪（或 `--no-wait` 下已 spawn） |
+| `not_running` | 504 | 进程起了但未在预算内就绪（`reason` + 脱敏 `log_tail`） |
+| `failed` | 500 | 拉起本身失败（可执行文件缺失、日志目录不可建…） |
+| `refused` | 403 | `mesh_disabled`（`--mesh=false`）/ `mesh_spawn_not_allowed`（`--mesh-allow-spawn=false`）/ `mesh_nonloopback_denied` |
+| `error` | 400 / 413 | 参数形状错误 / 请求体超 1 MiB |
+
+**硬契约**：
+
+- **令牌唯一出口**：`url` 是 M7 里唯一允许出现令牌原文的字段，形如
+  `http://127.0.0.1:<port>/web?token=<tok>&session=<sid>`；其余响应字段、日志、journal 一律脱敏
+  （`log_tail` 已过 `redactSpawnTail`）。调用方拿到 `url` 后**立即**交给窗口，不得落
+  `localStorage`/`sessionStorage`/DOM。
+- **单飞**：先抢 `spawn-<session>` 租约；抢不到 → 直接按对方档案返回 `reused`，并发点击不会起第二个进程。
+- **仅回环**：与 `/web/api/mesh/call` 同层（`X-AICLI-Token` + 回环），跨机一律拒绝。
+- **降级**：网格关闭 → `refused`（不是 5xx），前端据此提示而不是白屏。
+
+前端侧（`web/js/sessions.js` + `web_page.go` 注入的内联脚本）：
+
+- 会话列表悬停 → `⧉`「在新窗口打开」：在**点击手势内同步** `window.open('', '_blank')` 占位
+  （否则 fetch 之后的 `window.open` 会被弹窗拦截），`POST /web/api/mesh/spawn` 成功后在占位窗口里
+  `location.replace(url)`；`not_running`/`failed`/`refused` → 关闭占位窗口 + Toast（`code — reason`）。
+- 深链 `/web?session=<id>&token=<t>`：页面 `<head>` 内联脚本（先于 ES 模块执行，模块顶层的第一个
+  fetch 之前）把 `token` 转存 `sessionStorage` 并用 `history.replaceState` 从地址栏抹掉；
+  `session` 交给 `applyDeepLinkSession()`——与 `current_session_id` 相同则什么都不做（子进程本就以
+  该会话启动），不同才走 `/web/api/sessions/resume`。
+- 手工验证步骤见 [web-testing.md](web-testing.md)。
