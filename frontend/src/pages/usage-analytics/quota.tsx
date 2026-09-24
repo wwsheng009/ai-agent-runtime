@@ -14,6 +14,7 @@ import {
   isUsageQuotaLedgerDisabled,
   isUsageQuotaLedgerUnavailable,
   useUsageQuota,
+  type UsageQuotaLedgerFilters,
   type UsageQuotaSectionError,
 } from "@/hooks/use-usage-quota";
 import { cn } from "@/lib/utils";
@@ -24,6 +25,7 @@ import { useTranslation } from "react-i18next";
 
 import { formatNumber, formatTimestamp } from "./format";
 import { PolicyBadge, QuotaBar, StatRow } from "./quota-atoms";
+import { LedgerProfileGroups } from "./quota-ledger-groups";
 import { FilterInput, FilterSelect } from "./primitives";
 import {
   clampLedgerLimit,
@@ -60,8 +62,15 @@ export function UsageQuotaPanel({ adminToken }: { adminToken: string }) {
       }
     : undefined;
 
+  // 分组视图是面板固有展示面（非用户筛选），固定请求 group_by=profile；
+  // 旧后端忽略该参数时响应无 groups，UI 如实提示「未返回分组」，不伪造空分组。
+  const ledgerFilters = useMemo<UsageQuotaLedgerFilters>(
+    () => ({ ...applied, groupBy: "profile" }),
+    [applied],
+  );
+
   const { stats, policy, ledger, knownScopes, loading, statsError, policyError, ledgerError, refresh } =
-    useUsageQuota({ adminToken, scope: scopeQuery, ledgerFilters: applied });
+    useUsageQuota({ adminToken, scope: scopeQuery, ledgerFilters });
 
   // 作用域下拉的可选项来自最近一次全局聚合响应（hook 保留，切到具体作用域后仍可回选）。
   const scopeOptions: UsageScope[] = knownScopes;
@@ -454,6 +463,10 @@ export function UsageQuotaPanel({ adminToken }: { adminToken: string }) {
         ) : (
           <p className="mt-2 text-xs text-muted-foreground">{t("quota.ledger.empty")}</p>
         )}
+
+        {ledger && ledgerError === null ? (
+          <LedgerProfileGroups groups={ledger.profileGroups} groupedTotal={ledger.groupedTotal} />
+        ) : null}
       </article>
     </section>
   );

@@ -5,6 +5,8 @@
 //       → { tracking_enabled, policy, usage, [scope, quota] | [scopes] }
 //   GET /api/runtime/usage/ledger?tenant_id=&project_id=&user_id=&entrypoint=&skill=&success=&since=&limit=
 //       → { records: TokenUsageHistory[], count, filters }
+//   GET /api/runtime/usage/ledger?...&group_by=profile
+//       → 追加 { group_by, groups: [{profile, requests, failures, input_tokens, output_tokens, total_tokens}], grouped_total }
 //   GET /api/runtime/usage/policy → { policy: UsagePolicyDetails }
 //
 // 三个端点均受 `authorizeUsageAdmin` 限制（Bearer admin token），前端沿用
@@ -13,9 +15,12 @@
 // 归一化说明：键名固定 snake_case（后端直接构造 map，无 struct tag 歧义）；
 // 结构不满足（缺 usage/policy/records 等核心字段）时返回 null，由调用方抛错，
 // 绝不伪造「正常空态」。scoped 响应缺 quota 是显式降级（UI 另有不可用提示），
-// 不计入结构失败——它不影响 token 用量的真实呈现。
+// 不计入结构失败——它不影响 token 用量的真实呈现。分组（`group_by=profile`）
+// 是可选维度：响应缺 `groups` 数组时 `profileGroups` 置 null，不让可选维度的
+// 缺失去否决 records 主契约；未请求分组时响应键与旧版逐字节一致。
 
 import type {
+  UsageLedgerGroup,
   UsageLedgerRecord,
   UsageLedgerView,
   UsageMetrics,
@@ -47,6 +52,11 @@ export type UsageLedgerQuery = UsageScopeQuery & {
   /** RFC3339；后端按时间过滤（`time.Parse(time.RFC3339, ...)`）。 */
   since?: string;
   limit?: number;
+  /**
+   * 按维度聚合账本（后端白名单当前只有 `"profile"`，FR-13）。
+   * 显式传参才发 `group_by`；未传时响应与旧版逐字节一致（records/count/filters）。
+   */
+  groupBy?: "profile";
 };
 
 type UsageRequestOptions = {
@@ -277,6 +287,25 @@ function normalizeUsageLedgerRecord(raw: unknown): UsageLedgerRecord | null {
 }
 
 /**
+ * 分组单条：`profile` 键必须存在且为字符串（空串是合法的「未归属」组身份，
+ * 不能像 record 缺 id 那样丢弃），其余计数键缺失按 0 处理（后端恒回传）。
+ */
+function normalizeUsageLedgerGroup(raw: unknown): UsageLedgerGroup | null {
+  const record = asRecord(raw);
+  if (!record || typeof record.profile !== "string") {
+    return null;
+  }
+  return {
+    profile: record.profile.trim(),
+    requests: pickNumber(record, "requests"),
+    failures: pickNumber(record, "failures"),
+    input_tokens: pickNumber(record, "input_tokens"),
+    output_tokens: pickNumber(record, "output_tokens"),
+    total_tokens: pickNumber(record, "total_tokens"),
+  };
+}
+
+/**
  * `GET /usage/ledger` → 归一化视图；缺 `records` 数组视为契约不满足（返回 null）。
  * 单条记录缺 `id` 时丢弃该行（无法稳定作 key），不臆造 id。
  */
@@ -293,10 +322,27 @@ export function normalizeUsageLedger(
     .filter((item): item is UsageLedgerRecord => item !== null);
   const filters = asRecord(record.filters);
   const echoedLimit = filters ? pickNumber(filters, "limit", fallbackLimit) : fallbackLimit;
+  // 分组是可选维度：响应缺 `groups` 数组（未请求分组 / 旧后端忽略 group_by）时
+  // 如实置 null，由 UI 区分「未返回分组」与「真实空分组」。
+  const profileGroups = Array.isArray(record.groups)
+    ? record.groups
+        .map((item) => normalizeUsageLedgerGroup(item))
+        .filter((item): item is UsageLedgerGroup => item !== null)
+    : null;
+  const rawGroupedTotal = record.grouped_total;
+  const groupedTotal =
+    profileGroups !== null &&
+    typeof rawGroupedTotal === "number" &&
+    Number.isFinite(rawGroupedTotal) &&
+    rawGroupedTotal >= 0
+      ? rawGroupedTotal
+      : null;
   return {
     records,
     count: records.length,
     limit: echoedLimit > 0 ? echoedLimit : fallbackLimit,
+    profileGroups,
+    groupedTotal,
   };
 }
 
@@ -346,6 +392,7 @@ export async function getUsageLedger(
       success: options.success === undefined ? undefined : String(options.success),
       since: options.since,
       limit,
+      group_by: options.groupBy,
     }),
     {
       headers: buildUsageHeaders(options.adminToken),

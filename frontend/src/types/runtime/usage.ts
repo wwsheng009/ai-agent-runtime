@@ -112,9 +112,32 @@ export type UsageLedgerRecord = {
   created_at: string;
 };
 
+/**
+ * `group_by=profile` 时的单组聚合（后端 `usageLedgerProfileGroup`）。
+ * `profile === ""` 表示「未归属」：历史行 / 未绑定 profile 的会话统一归入该组。
+ */
+export type UsageLedgerGroup = {
+  profile: string;
+  requests: number;
+  failures: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+};
+
 /** 归一化后的 `GET /usage/ledger`。 */
 export type UsageLedgerView = {
   records: UsageLedgerRecord[];
   count: number;
   limit: number;
+  /**
+   * `group_by=profile` 请求下的聚合分组（后端排序：total_tokens 降序 → profile 升序）。
+   * `null` 表示响应未携带分组数据（未请求分组，或后端版本不支持 group_by）。
+   */
+  profileGroups: UsageLedgerGroup[] | null;
+  /**
+   * 参与聚合的记录总数（聚合基于「过滤后、截断前」集合，故可能大于 `records.length`）。
+   * 无分组数据或后端未回传该键时为 `null`，不推算。
+   */
+  groupedTotal: number | null;
 };

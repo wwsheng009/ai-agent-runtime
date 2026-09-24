@@ -110,7 +110,7 @@ function policyView(): UsagePolicyDetails {
 }
 
 function ledgerView(limit = 50): UsageLedgerView {
-  return { records: [], count: 0, limit };
+  return { records: [], count: 0, limit, profileGroups: null, groupedTotal: null };
 }
 
 function serviceUnavailable(): Error {
@@ -232,6 +232,7 @@ describe("useUsageQuota", () => {
       success: false,
       since: "",
       limit: 20,
+      groupBy: undefined,
       adminToken: "admin-secret",
     });
     expect(hook.current.loading).toBe(false);
@@ -240,6 +241,40 @@ describe("useUsageQuota", () => {
     expect(hook.current.ledger?.limit).toBe(50);
     expect(hook.current.statsError).toBeNull();
     expect(hook.current.ledgerError).toBeNull();
+  });
+
+  it("账本分组参数透传：ledgerFilters.groupBy 进入请求，未传时为 undefined（不发 group_by）", async () => {
+    const hook = renderHook({ adminToken: "admin-secret" });
+    await flush();
+
+    expect(getUsageLedgerMock).toHaveBeenLastCalledWith({
+      tenantId: "",
+      projectId: "",
+      userId: "",
+      entrypoint: "",
+      skill: "",
+      success: undefined,
+      since: "",
+      limit: 50,
+      groupBy: undefined,
+      adminToken: "admin-secret",
+    });
+
+    hook.update({ adminToken: "admin-secret", ledgerFilters: { groupBy: "profile" } });
+    await flush();
+
+    expect(getUsageLedgerMock).toHaveBeenLastCalledWith({
+      tenantId: "",
+      projectId: "",
+      userId: "",
+      entrypoint: "",
+      skill: "",
+      success: undefined,
+      since: "",
+      limit: 50,
+      groupBy: "profile",
+      adminToken: "admin-secret",
+    });
   });
 
   it("账本 503 只标记账本段，stats / policy 仍呈现真实数据", async () => {

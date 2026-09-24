@@ -248,6 +248,70 @@ describe("normalizeUsageLedger", () => {
     expect(normalizeUsageLedger({ records: null })).toBeNull();
     expect(normalizeUsageLedger({})).toBeNull();
   });
+
+  it("未请求分组（响应无 groups）时 profileGroups / groupedTotal 如实为 null", () => {
+    const view = normalizeUsageLedger(LEDGER);
+
+    expect(view?.profileGroups).toBeNull();
+    expect(view?.groupedTotal).toBeNull();
+  });
+
+  it("解析 group_by=profile 的 groups 与 grouped_total（空 profile 是「未归属」组身份）", () => {
+    const view = normalizeUsageLedger({
+      ...LEDGER,
+      group_by: "profile",
+      groups: [
+        {
+          profile: "reviewer",
+          requests: 2,
+          failures: 1,
+          input_tokens: 900,
+          output_tokens: 300,
+          total_tokens: 1_200,
+        },
+        {
+          profile: "",
+          requests: 1,
+          failures: 0,
+          input_tokens: 100,
+          output_tokens: 0,
+          total_tokens: 100,
+        },
+        { requests: 5 },
+      ],
+      grouped_total: 3,
+    });
+
+    expect(view?.profileGroups).toEqual([
+      {
+        profile: "reviewer",
+        requests: 2,
+        failures: 1,
+        input_tokens: 900,
+        output_tokens: 300,
+        total_tokens: 1_200,
+      },
+      {
+        profile: "",
+        requests: 1,
+        failures: 0,
+        input_tokens: 100,
+        output_tokens: 0,
+        total_tokens: 100,
+      },
+    ]);
+    expect(view?.groupedTotal).toBe(3);
+  });
+
+  it("groups 非数组 / grouped_total 非法时如实置 null（不推算）", () => {
+    const notArray = normalizeUsageLedger({ ...LEDGER, groups: "nope", grouped_total: 3 });
+    expect(notArray?.profileGroups).toBeNull();
+    expect(notArray?.groupedTotal).toBeNull();
+
+    const empty = normalizeUsageLedger({ ...LEDGER, groups: [], grouped_total: -1 });
+    expect(empty?.profileGroups).toEqual([]);
+    expect(empty?.groupedTotal).toBeNull();
+  });
 });
 
 describe("usage API 调用", () => {
@@ -341,6 +405,40 @@ describe("usage API 调用", () => {
     respondWith({ count: 0 });
 
     await expect(getUsageLedger()).rejects.toThrow(/invalid usage ledger payload/);
+  });
+
+  it("getUsageLedger 传 group_by=profile 并解析分组（聚合基于截断前集合）", async () => {
+    respondWith({
+      ...LEDGER,
+      group_by: "profile",
+      groups: [
+        {
+          profile: "reviewer",
+          requests: 2,
+          failures: 0,
+          input_tokens: 1_800,
+          output_tokens: 600,
+          total_tokens: 2_400,
+        },
+      ],
+      grouped_total: 2,
+    });
+
+    const view = await getUsageLedger({ groupBy: "profile", limit: 20 });
+
+    expect(calls[0].url).toContain("group_by=profile");
+    expect(view.profileGroups).toHaveLength(1);
+    expect(view.profileGroups?.[0].profile).toBe("reviewer");
+    expect(view.groupedTotal).toBe(2);
+  });
+
+  it("未传 groupBy 时不发 group_by（旧版响应兼容）", async () => {
+    respondWith(LEDGER);
+
+    const view = await getUsageLedger();
+
+    expect(calls[0].url).not.toContain("group_by");
+    expect(view.profileGroups).toBeNull();
   });
 
   it("getUsagePolicy 解包 policy 并带 token", async () => {

@@ -252,10 +252,10 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 
 - `--profile auto` 自动路由（复用 server 端 `routeProfileForPrompt` 思路，映射规则配置化）；
 - runtime-server 只读 API 扩展 + frontend 展示（与"路由档位 profile"文案区分）；
-- usage ledger 按 profile 聚合；✅ **后端已落地**（slice 2，2026-09-24：记录面 + `group_by=profile` 聚合；前端展示待排期）
+- usage ledger 按 profile 聚合；✅ **已落地**（slice 2，2026-09-24：记录面 + `group_by=profile` 聚合；slice 2b，同日：前端分组对比 UI）
 - workspace `.aicli/profile` 项目级绑定（依赖 V10 结论）。
 
-**落地状态（2026-09-24，slice 1 = FR-11；slice 2 = FR-13 后端半程）**：`--profile auto` 与 usage ledger 按 profile 聚合（记录面 + 聚合面）已实施并验证，其余两项仍待排期。
+**落地状态（2026-09-24，slice 1 = FR-11；slice 2 = FR-13 后端半程；slice 2b = FR-13 前端展示面）**：`--profile auto` 与 usage ledger 按 profile 聚合（记录面 + 聚合面 + 前端分组对比 UI）已实施并验证，其余两项仍待排期。
 - 单一权威：新增 `internal/profile/autoroute.go`（`AutoProfileRef` / `AutoRouteRule` /
   `AutoRouteConfig` / `DefaultAutoRouteRules` / `IsAutoProfileRef` / `NormalizeAutoRouteRules` /
   `RouteProfileForPrompt` / `ResolveAutoProfileRef`）。匹配语义与历史 server 实现逐字一致
@@ -277,7 +277,19 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
   agentconfig 映射 / ref 判定）、`internal/api/skills/profile_auto_route_test.go`（默认 + 配置
   规则 + 设置期快照）、`cmd/aicli/commands/chat_profile_auto_route_test.go`（路由表驱动 /
   无提示词报错 / 配置默认 auto / 显式 ref 优先 / 归因可见面）。反证已执行：临时令
-  `RouteProfileForPrompt` 恒返回兜底 → 三层用例同时失败（core / server / CLI）。
+   `RouteProfileForPrompt` 恒返回兜底 → 三层用例同时失败（core / server / CLI）。
+- FR-13 前端（slice 2b）：`UsageLedgerView` 契约扩展 `profileGroups`/`groupedTotal`——响应缺
+  `groups` 数组 → `null`，UI 如实提示「未返回分组」（旧后端忽略 `group_by` 时绝不表达成
+  「正常但为空」）；`groups: []` 才是真实空态；`profile === ""` 为「未归属」组。
+  新增 `pages/usage-analytics/quota-ledger-groups.tsx`（分组表 + 「未归属」标记 + 聚合总数
+  「参与聚合 N 条（截断前全量）」，`groupedTotal` 可大于 `records.length`，不据此推断分页）；
+  `quota.tsx` 固定以 `group_by=profile` 请求（分组是面板固有展示面，非用户筛选）；
+  `use-usage-quota` 过滤器 `Pick` 增 `groupBy` 并透传。
+- FR-13 前端测试与反证：`usage.test.ts` +4 例（未请求分组 → null / 解析含空 profile 与丢弃缺
+  profile 条目 / `groups` 非数组与非法 `grouped_total` → null / 传 `groupBy` 发
+  `group_by=profile` 且未传不发）、`use-usage-quota.test.tsx` +1 例（透传）、`quota.test.tsx`
+  +3 例（分组表渲染 / 未返回分组提示 / 空数组真实空态）；反证（禁用 `groups` 解析 + 去掉面板
+  `groupBy`）→ 5 例精确失败（解析面 3 + 面板请求面 2；hook 层未受影响，分层正确），还原后复绿。
 
 ### Batch 7 — 配置覆盖接线（P0/P1，≈1.5 人日）
 
@@ -600,7 +612,7 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 | 12 | M4 | ✅ 已完成 | composer 可切换 + Switch Report 可见 + R20 能力门控（旧后端不注册命令） | V15/V16/V19 已回填；证据见变更记录（Batch 12） |
 | 13 | M5 | ✅ 已完成（slice 1-10：`apply` 执行核心 / export·import（API+CLI）/ TUI 生命周期子命令（含 import 闭环，D37）/ save-as 差分固化（TUI+API）/ 前端分享入口（D38）/ E2E-1·3·4·5 前端半程 / **slice 10 = 前端「从当前会话创建」入口（`/profile save-as`，G1/D24 的最后一处缺口）**） | E2E-1~5 + A9-A12 | V22、**V24、V25** 已回填；V17 部分回填；Q19/Q20/Q21 已闭环（差分口径=声明式字段逐个差分 / 硬删+二次确认 / 目录·zip 不做单文件内联，均落在各 slice 的测试锚点内） |
 | 14 | M6 | ✅ 已完成（V20/V21 已回填、D29 接入设计已冻结；slice 2 落地：foldertrust 检测面扩展 + 分级门控核心 + CLI/server 接线；slice 3 落地：三处警告面（`/profile status` / 启动摘要 / Switch Report，CLI+server）；slice 4 落地：E2E-6/7 自动化剧本（真实判定链 + `/trust grant` 恢复 + resume 漂移容错）；slice 5 落地：Q22 前端闭环（列表可选 `workspace` 参数 + "部分内容未应用"徽标 + 两步确认一键信任 + `/api/runtime/harness/trust` 只读/授予端点）） | E2E-6/7 + A13/A14 | V20、V21 已回填；Q22 已闭环（撤销信任仍走 CLI `/trust`） |
-| 6 | P2 | 🚧 部分完成（slice 1 = FR-11 `--profile auto`；slice 2 = FR-13 usage ledger 按 profile 聚合的**后端半程**——记录面 + 聚合面；余项：FR-12、FR-13 前端展示、FR-14） | FR-11 用例全绿 + 零变化（未配置 auto 时行为不变）+ 反证；FR-13 写入/聚合/反例用例全绿（含禁用写入路径反证）+ 未指定 `group_by` 时响应逐字节不变 | 单一权威 `internal/profile/autoroute.go`；`metadata.profile` 写时解析（aicli `WithProfileLookup` / server `UsageScope.Profile`）；`GET /api/runtime/usage/ledger?group_by=profile`；证据见 Batch 6 落地状态与变更记录 |
+| 6 | P2 | 🚧 部分完成（slice 1 = FR-11 `--profile auto`；slice 2 = FR-13 **后端半程**——记录面 + 聚合面；slice 2b = FR-13 **前端展示面**——分组对比 UI + 缺分组如实提示；余项：FR-12、FR-14） | FR-11 用例全绿 + 零变化（未配置 auto 时行为不变）+ 反证；FR-13 写入/聚合/反例用例全绿（含禁用写入路径反证）+ 未指定 `group_by` 时响应逐字节不变；FR-13 前端 3 文件 40 例全绿 + 反证 5 例精确失败 | 单一权威 `internal/profile/autoroute.go`；`metadata.profile` 写时解析（aicli `WithProfileLookup` / server `UsageScope.Profile`）；`GET /api/runtime/usage/ledger?group_by=profile`；前端 `profileGroups`/`groupedTotal` 契约 + `LedgerProfileGroups`；证据见 Batch 6 落地状态与变更记录 |
 
 ---
 
@@ -722,3 +734,13 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 > ⑤ 回归：`go build ./internal/usageledger/ ./internal/api/skills/`、`go build ./cmd/aicli/...` 退出 0；`go test ./internal/usageledger/ -count=1`、`go test ./internal/api/skills/ -run 'AggregateUsageLedger|UsageScopeJSON|LedgerProfileName' -count=1`、`go test ./cmd/aicli/commands/ -run 'TestLocalSessionProfileLookup' -count=1` 全绿；`gofmt -l` 对本次改动文件零输出。
 > ⑥ 文档：设计文档 §2 P2 FR-13 条新增落地状态（记录面键名/不猜纪律/聚合参数与口径/未归属语义）；本文件 Batch 6 段与附录 P 跟踪表同步回填。
 > ⑦ 余项：FR-13 **前端展示面**（分组对比 UI/报告——前端已有 `getUsageLedger` 消费方，`normalizeUsageLedger` 契约需扩展 `groups`）；FR-12、FR-14 仍 P2 待排期。
+
+> 变更记录：2026-09-24 实施（Batch 6 **slice 2b** 完成并验证——FR-13 前端展示面：usage ledger 分组对比 UI；P2 提前落地）：
+> ① 交付物（契约面）：`types/runtime/usage.ts` 新增 `UsageLedgerGroup`；`UsageLedgerView` 增 `profileGroups: UsageLedgerGroup[] | null` 与 `groupedTotal: number | null`。`api/runtime/usage.ts`：`UsageLedgerQuery` 增 `groupBy?: "profile"`（URL 构造落 `group_by`，未传不发参）；新增 `normalizeUsageLedgerGroup`（`profile` 键必须存在且为 string——空串是合法的「未归属」组身份，不能像 record 缺 id 那样丢弃）；`normalizeUsageLedger` 解析 `groups`（非数组 → `null`）与 `grouped_total`（须为非负有限数，否则 `null`）；`hooks/use-usage-quota.ts` 的 `UsageQuotaLedgerFilters` Pick 增 `groupBy` 并透传（`useCallback` 依赖同步）。
+> ② 交付物（展示面）：新增 `pages/usage-analytics/quota-ledger-groups.tsx`（`LedgerProfileGroups`：分组表 + 「未归属」标记 + 聚合总数「参与聚合 N 条（截断前全量）」）；`quota.tsx` 以 `useMemo` 固定 `groupBy: "profile"` 请求（分组是面板固有展示面，非用户筛选），组件拆出以守 500 行门禁（曾达 512 行触发 `verify:lines` 失败）；i18n zh/en 对称新增 `quota.ledger.groups.*`。
+> ③ 不伪造空态：旧后端忽略 `group_by` → `profileGroups === null` → UI 提示「未返回分组」，绝不表达成「正常但为空」；`groups: []` 是真实空态；`groupedTotal` 可 > `records.length`（后端聚合基于过滤后、截断前集合），UI 不据此推断分页。
+> ④ 测试：`usage.test.ts` +4 例（未请求分组 → null / 解析含空 profile 与丢弃缺 profile 条目 / `groups` 非数组与非法 `grouped_total` → null / 传 `groupBy` 发 `group_by=profile` 且未传不发）、`use-usage-quota.test.tsx` +1 例（透传；固件补字段）、`quota.test.tsx` +3 例（分组表渲染含「未归属」与聚合总数 / 未返回分组如实提示 / 空数组真实空态）——3 文件 40 例全绿。
+> ⑤ 反证：临时禁用 groups 解析（`Array.isArray(record.groups) && false`）与面板 `groupBy: "profile"` → **5 例精确失败**（解析面 3 + 面板请求面 2；hook 测试未受影响，分层正确），还原后复绿。
+> ⑥ 回归：`npx tsc -b` 退出 0；`npm run lint` 退出 0（0 errors / 2 warnings 均为既有 `react-hooks/exhaustive-deps`，与本切片无关）；`npm run lint:i18n` 0 违规（scanned=905）；`npm run verify:lines` 0 个 > 500 非空行；全量 `npx vitest run` 退出 0（333 files / 2768 tests passed，284.62s；含同树并行工作流的测试文件）。
+> ⑦ 文档：设计文档 §2 P2 FR-13 条落地状态补前端半程；本文件 Batch 6 段与附录 P 跟踪表同步回填。
+> ⑧ 余项：FR-12、FR-14 仍 P2 待排期。

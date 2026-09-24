@@ -749,6 +749,21 @@ export const enUsageAnalytics = {
       },
       rowSuccess: "Succeeded",
       rowFailure: "Failed",
+      groups: {
+        title: "By profile",
+        subtitle: "{{value}} rows aggregated (before truncation)",
+        unassigned: "Unassigned",
+        unavailable: "The backend returned no profile grouping (an older version may not support group_by).",
+        empty: "No groups to aggregate under the current filters.",
+        columns: {
+          profile: "Profile",
+          requests: "Requests",
+          failures: "Failures",
+          inputTokens: "Input tokens",
+          outputTokens: "Output tokens",
+          totalTokens: "Total tokens",
+        },
+      },
     },
   },
 } satisfies DeepStringShape<typeof zhUsageAnalytics>;

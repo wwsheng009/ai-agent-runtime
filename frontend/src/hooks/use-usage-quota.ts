@@ -30,7 +30,7 @@ export type UsageQuotaScope = {
 
 export type UsageQuotaLedgerFilters = Pick<
   UsageLedgerQuery,
-  "entrypoint" | "skill" | "success" | "since" | "limit"
+  "entrypoint" | "skill" | "success" | "since" | "limit" | "groupBy"
 >;
 
 export type UsageQuotaSectionError = {
@@ -125,6 +125,7 @@ export function useUsageQuota({
   const success = ledgerFilters?.success;
   const since = ledgerFilters?.since?.trim() ?? "";
   const limit = ledgerFilters?.limit ?? DEFAULT_USAGE_LEDGER_LIMIT;
+  const groupBy = ledgerFilters?.groupBy;
 
   const refresh = useCallback(() => {
     setRefreshToken((current) => current + 1);
@@ -152,6 +153,7 @@ export function useUsageQuota({
           success,
           since,
           limit,
+          groupBy,
           adminToken: token,
         }),
       ]);
@@ -191,6 +193,7 @@ export function useUsageQuota({
   }, [
     enabled,
     entrypoint,
+    groupBy,
     limit,
     projectId,
     refreshToken,

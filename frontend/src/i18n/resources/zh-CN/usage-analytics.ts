@@ -749,6 +749,21 @@ export const zhUsageAnalytics = {
       },
       rowSuccess: "成功",
       rowFailure: "失败",
+      groups: {
+        title: "按 Profile 分组",
+        subtitle: "参与聚合 {{value}} 条（截断前全量）",
+        unassigned: "未归属",
+        unavailable: "后端未返回按 profile 的分组数据（旧版本可能不支持 group_by）。",
+        empty: "当前筛选下没有可聚合的分组。",
+        columns: {
+          profile: "Profile",
+          requests: "请求",
+          failures: "失败",
+          inputTokens: "输入 Token",
+          outputTokens: "输出 Token",
+          totalTokens: "合计 Token",
+        },
+      },
     },
   },
 } as const;

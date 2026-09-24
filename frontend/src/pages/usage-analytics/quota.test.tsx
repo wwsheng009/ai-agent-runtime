@@ -136,6 +136,25 @@ function ledgerView(): UsageLedgerView {
     ],
     count: 2,
     limit: 50,
+    profileGroups: [
+      {
+        profile: "reviewer",
+        requests: 1,
+        failures: 0,
+        input_tokens: 900,
+        output_tokens: 300,
+        total_tokens: 1_200,
+      },
+      {
+        profile: "",
+        requests: 1,
+        failures: 1,
+        input_tokens: 100,
+        output_tokens: 0,
+        total_tokens: 100,
+      },
+    ],
+    groupedTotal: 2,
   };
 }
 
@@ -245,6 +264,7 @@ describe("UsageQuotaPanel", () => {
       success: undefined,
       since: "",
       limit: 50,
+      groupBy: "profile",
       adminToken: "admin-secret",
     });
   });
@@ -344,5 +364,55 @@ describe("UsageQuotaPanel", () => {
       userId: "",
       adminToken: "admin-secret",
     });
+  });
+
+  it("渲染按 profile 分组表：未归属组与聚合总数如实呈现", async () => {
+    render();
+    await flush();
+
+    expect(container.textContent).toContain("按 Profile 分组");
+    expect(container.textContent).toContain("参与聚合 2 条（截断前全量）");
+    expect(container.textContent).toContain("reviewer");
+    expect(container.textContent).toContain("未归属");
+    // 面板固定请求 group_by=profile（分组是固有展示面，不是用户筛选）
+    expect(getUsageLedgerMock).toHaveBeenLastCalledWith({
+      tenantId: "",
+      projectId: "",
+      userId: "",
+      entrypoint: "",
+      skill: "",
+      success: undefined,
+      since: "",
+      limit: 50,
+      groupBy: "profile",
+      adminToken: "admin-secret",
+    });
+  });
+
+  it("后端未返回分组数据时如实提示（不伪造空分组）", async () => {
+    getUsageLedgerMock.mockResolvedValue({
+      ...ledgerView(),
+      profileGroups: null,
+      groupedTotal: null,
+    });
+    render();
+    await flush();
+
+    expect(container.textContent).toContain("后端未返回按 profile 的分组数据");
+    expect(container.textContent).not.toContain("按 Profile 分组");
+  });
+
+  it("空分组数组是真实空态（区别于未返回分组）", async () => {
+    getUsageLedgerMock.mockResolvedValue({
+      ...ledgerView(),
+      profileGroups: [],
+      groupedTotal: 0,
+    });
+    render();
+    await flush();
+
+    expect(container.textContent).toContain("按 Profile 分组");
+    expect(container.textContent).toContain("当前筛选下没有可聚合的分组");
+    expect(container.textContent).not.toContain("后端未返回按 profile 的分组数据");
   });
 });
