@@ -4,7 +4,7 @@
 import { autoGrow, clearPendingPrompts, dropPendingUserPrompt, getUiState, promptEl, refreshScreen, sendStatusEl, setUI } from "./chat.js";
 import { refreshCacheAnalyticsIfActive, syncCacheSession } from "./cache.js";
 import { syncSkillsSession } from "./skills.js";
-import { showToast } from "./util.js";
+import { esc, showToast } from "./util.js";
 
 var sidebarEl = document.getElementById("sidebar");
 var sidebarToggleBtn = document.getElementById("sidebar-toggle");
@@ -14,6 +14,7 @@ var sessionsRefreshBtn = document.getElementById("sessions-refresh-btn");
 var sessionsSortEl = document.getElementById("sessions-sort");
 var sessionListEl = document.getElementById("session-list");
 var sessionSearchEl = document.getElementById("session-search");
+var sessionsOpenModeEl = document.getElementById("sessions-open-mode");
 var headerSessionTitleEl = document.getElementById("header-session-title");
 // 会话 ID 不在顶栏显示：写入「关于」页签的值元素（复制按钮交互在 ui.js）。
 var aboutSessionIDEl = document.getElementById("about-session-id");
@@ -27,11 +28,31 @@ var sessionSwitchConfirmBtn = document.getElementById("session-switch-confirm-bt
 var sessionSwitchCancelBtn = document.getElementById("session-switch-cancel-btn");
 var sessionSwitchCloseBtn = document.getElementById("session-switch-close");
 var pendingSwitchSessionId = null; // 切换确认弹窗当前待确认的目标会话 id
+// 会话归属冲突弹窗（Web 子方案 §5.7 / §6.3，S11）：
+// running_elsewhere 三段式；ownership=conflict 只读（禁用 in-place）。
+var sessionConflictOverlay = document.getElementById("session-conflict-overlay");
+var sessionConflictTextEl = document.getElementById("session-conflict-text");
+var sessionConflictHintEl = document.getElementById("session-conflict-hint");
+var sessionConflictNodesEl = document.getElementById("session-conflict-nodes");
+var sessionConflictOpenBtn = document.getElementById("session-conflict-open-btn");
+var sessionConflictForceBtn = document.getElementById("session-conflict-force-btn");
+var sessionConflictCancelBtn = document.getElementById("session-conflict-cancel-btn");
+var sessionConflictCloseBtn = document.getElementById("session-conflict-close");
+var pendingConflict = null;      // 冲突弹窗上下文 {sessionId, kind, nodeId, workspace, nodes}
 var sessions = [];               // 会话列表缓存（GET /web/api/sessions）
 var sessionsQuery = "";          // 会话列表搜索词（纯前端过滤）
 var sidebarCollapsed = false;    // 侧边栏折叠状态（localStorage 记忆）
 var sessionsReqSeq = 0;          // loadSessions 请求序号（丢弃过期响应）
 var sessionsSort = "created_at"; // 会话排序：created_at（默认）| updated_at
+
+// ---- 网格便捷视图（S11 / Web 子方案 §5.1、§5.3、§5.7）----
+// 打开方式开关（§5.1 / Q13）：默认 new_window（P1 起）；只有用户显式设置过
+// localStorage 才尊重用户值，未设置时不迁移。
+var sessionOpenMode = "new_window";      // new_window | in_place
+var otherWorkspacesCollapsed = false;    // 「其他工作区」分组折叠态（localStorage 记忆）
+var meshViewAvailable = false;           // self 段非空 = 网格可用（降级时 false）
+var meshSelf = null;                     // {node_id, mesh_root, workspace_path, workspace_name, counts}
+var meshWorkspaces = [];                 // [{path,name,nodes,session_count,running_count}]
 
 // 输入历史（localStorage 记忆，最近 50 条）
 var inputHistory = [];
@@ -43,6 +64,14 @@ try {
   if (savedSort === "created_at" || savedSort === "updated_at") { sessionsSort = savedSort; }
 } catch (e) { /* ignore */ }
 if (sessionsSortEl) { sessionsSortEl.value = sessionsSort; }
+
+// 恢复打开方式与分组折叠偏好（§5.1 / Q13；网格关闭时开关仍可见但不影响行为）
+try {
+  var savedOpenMode = localStorage.getItem("webSessionOpenMode");
+  if (savedOpenMode === "in_place" || savedOpenMode === "new_window") { sessionOpenMode = savedOpenMode; }
+  otherWorkspacesCollapsed = localStorage.getItem("webOtherWorkspacesCollapsed") === "1";
+} catch (e) { /* ignore */ }
+if (sessionsOpenModeEl) { sessionsOpenModeEl.value = sessionOpenMode; }
 
 // 恢复输入历史（localStorage 记忆）
 try {
@@ -179,83 +208,321 @@ function renderSessionList() {
     sessionListEl.appendChild(empty);
     return;
   }
+  // 跨工作区分组（§5.3）：网格可用时把非本进程工作区的条目归入「其他工作区」。
+  // 分组只是呈现方式、不是可见性边界（网格 §4.2 规则 5）；网格关闭/降级时
+  // meshViewAvailable=false，全部条目进主列表 = 现状视图。
+  var mainItems = [];
+  var otherItems = [];
   items.forEach(function (s) {
-    var item = document.createElement("div");
-    item.className = "session-item" + (s.current ? " active" : "");
-    item.title = s.id;
-
-    var main = document.createElement("button");
-    main.type = "button";
-    main.className = "session-main";
-    main.addEventListener("click", function () { resumeSession(s.id); });
-
-    var title = document.createElement("span");
-    title.className = "session-title";
-    title.textContent = s.title || "(未命名会话)";
-
-    var summary = null;
-    if (s.summary) {
-      summary = document.createElement("span");
-      summary.className = "session-summary";
-      summary.textContent = s.summary;
-    }
-
-    var meta = document.createElement("span");
-    meta.className = "session-meta";
-    var bits = [];
-    if (s.current) { bits.push('<span class="session-current">● 当前</span>'); }
-    if (typeof s.message_count === "number") { bits.push(s.message_count + " 条消息"); }
-    var ts = sessionsSort === "updated_at"
-      ? fmtSessionTime(s.updated_at || s.created_at)
-      : fmtSessionTime(s.created_at || s.updated_at);
-    if (ts) { bits.push(ts); }
-    meta.innerHTML = bits.join(" · ");
-
-    main.appendChild(title);
-    if (summary) { main.appendChild(summary); }
-    main.appendChild(meta);
-
-    var actions = document.createElement("span");
-    actions.className = "session-actions";
-    var renameBtn = document.createElement("button");
-    renameBtn.type = "button";
-    renameBtn.className = "session-action session-rename-btn";
-    renameBtn.title = "重命名会话";
-    renameBtn.textContent = "✎";
-    renameBtn.addEventListener("click", function (ev) {
-      ev.stopPropagation();
-      beginRenameSession(s.id, item, title);
-    });
-    actions.appendChild(renameBtn);
-    // 在新窗口打开（§7.3 窗口 URL）：复用活节点或拉起独立进程，见
-    // openSessionInNewWindow。当前会话同样可开（另一个进程 = 另一份上下文）。
-    var openBtn = document.createElement("button");
-    openBtn.type = "button";
-    openBtn.className = "session-action session-open-btn";
-    openBtn.title = "在新窗口打开（复用活节点，必要时拉起新进程）";
-    openBtn.textContent = "⧉";
-    openBtn.addEventListener("click", function (ev) {
-      ev.stopPropagation();
-      openSessionInNewWindow(s.id, item);
-    });
-    actions.appendChild(openBtn);
-    if (!s.current) {
-      var deleteBtn = document.createElement("button");
-      deleteBtn.type = "button";
-      deleteBtn.className = "session-action session-delete-btn";
-      deleteBtn.title = "删除会话";
-      deleteBtn.textContent = "🗑";
-      deleteBtn.addEventListener("click", function (ev) {
-        ev.stopPropagation();
-        confirmDeleteSession(s);
-      });
-      actions.appendChild(deleteBtn);
-    }
-
-    item.appendChild(main);
-    item.appendChild(actions);
-    sessionListEl.appendChild(item);
+    if (meshViewAvailable && isOtherWorkspaceSession(s)) { otherItems.push(s); } else { mainItems.push(s); }
   });
+  mainItems.forEach(function (s) { sessionListEl.appendChild(buildSessionItem(s)); });
+  if (otherItems.length) { sessionListEl.appendChild(buildOtherWorkspacesGroup(otherItems)); }
+}
+
+// buildSessionItem 渲染单个会话条目（主列表与「其他工作区」分组共用）。
+function buildSessionItem(s) {
+  var item = document.createElement("div");
+  item.className = "session-item" + (s.current ? " active" : "");
+  item.title = s.id;
+
+  var main = document.createElement("button");
+  main.type = "button";
+  main.className = "session-main";
+  main.addEventListener("click", function () { handleSessionPrimaryClick(s, item); });
+
+  var title = document.createElement("span");
+  title.className = "session-title";
+  title.textContent = s.title || "(未命名会话)";
+
+  var summary = null;
+  if (s.summary) {
+    summary = document.createElement("span");
+    summary.className = "session-summary";
+    summary.textContent = s.summary;
+  }
+
+  var meta = document.createElement("span");
+  meta.className = "session-meta";
+  var bits = [];
+  if (s.current) { bits.push('<span class="session-current">● 当前</span>'); }
+  if (typeof s.message_count === "number") { bits.push(s.message_count + " 条消息"); }
+  var ts = sessionsSort === "updated_at"
+    ? fmtSessionTime(s.updated_at || s.created_at)
+    : fmtSessionTime(s.created_at || s.updated_at);
+  if (ts) { bits.push(ts); }
+  meta.innerHTML = bits.join(" · ");
+
+  main.appendChild(title);
+  if (summary) { main.appendChild(summary); }
+  main.appendChild(meta);
+  var endpointLine = buildSessionEndpointLine(s);
+  if (endpointLine) { main.appendChild(endpointLine); }
+
+  var actions = document.createElement("span");
+  actions.className = "session-actions";
+  var renameBtn = document.createElement("button");
+  renameBtn.type = "button";
+  renameBtn.className = "session-action session-rename-btn";
+  renameBtn.title = "重命名会话";
+  renameBtn.textContent = "✎";
+  renameBtn.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    beginRenameSession(s.id, item, title);
+  });
+  actions.appendChild(renameBtn);
+  // 二级动作「在当前进程切换」（§5.1 表的二级动作列）：主点击被打开方式开关
+  // 或 peer 归属占走时的显式入口；会话在别处运行时由 /resume 的归属检查兜底
+  // （running_elsewhere → 三段式弹窗，§5.7）。
+  if (meshViewAvailable && !s.current && sessionPrimaryAction(s) !== "in_place") {
+    var switchBtn = document.createElement("button");
+    switchBtn.type = "button";
+    switchBtn.className = "session-action session-switch-btn";
+    switchBtn.title = "在当前进程切换（会话在别处运行时会有冲突提示）";
+    switchBtn.textContent = "⇄";
+    switchBtn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      resumeSession(s.id);
+    });
+    actions.appendChild(switchBtn);
+  }
+  // 在新窗口打开（§7.3 窗口 URL）：复用活节点或拉起独立进程，见
+  // openSessionInNewWindow。当前会话同样可开（另一个进程 = 另一份上下文）。
+  var openBtn = document.createElement("button");
+  openBtn.type = "button";
+  openBtn.className = "session-action session-open-btn";
+  openBtn.title = "在新窗口打开（复用活节点，必要时拉起新进程）";
+  openBtn.textContent = "⧉";
+  openBtn.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    if (!confirmSpawnForSession(s)) { return; }
+    openSessionInNewWindow(s.id, item);
+  });
+  actions.appendChild(openBtn);
+  if (!s.current) {
+    var deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "session-action session-delete-btn";
+    deleteBtn.title = "删除会话";
+    deleteBtn.textContent = "🗑";
+    deleteBtn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      confirmDeleteSession(s);
+    });
+    actions.appendChild(deleteBtn);
+  }
+
+  item.appendChild(main);
+  item.appendChild(actions);
+  return item;
+}
+
+// ---- 网格便捷视图的呈现（§5.1 徽标 / §5.3 分组）----
+
+// 路径归一：Windows 大小写与分隔符不敏感，用于本工作区/其他工作区的比较。
+function normalizePath(p) {
+  return String(p || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+function lastPathSegment(p) {
+  var parts = String(p || "").replace(/\\/g, "/").split("/");
+  for (var i = parts.length - 1; i >= 0; i--) { if (parts[i]) { return parts[i]; } }
+  return "";
+}
+
+// 条目工作区标签：优先 name，缺失时退化路径末段（§5.3：不做猜测）。
+function sessionWorkspaceLabel(s) {
+  if (s.workspace_name) { return s.workspace_name; }
+  return lastPathSegment(s.workspace_path);
+}
+
+// 是否属于「其他工作区」：与 self.workspace_path 不同即算（§5.3）。
+// 任一侧缺工作区信息时不猜（留在主列表）。
+function isOtherWorkspaceSession(s) {
+  var selfPath = meshSelf && meshSelf.workspace_path ? String(meshSelf.workspace_path) : "";
+  var path = s && s.workspace_path ? String(s.workspace_path) : "";
+  if (!selfPath || !path) { return false; }
+  return normalizePath(path) !== normalizePath(selfPath);
+}
+
+// 节点端点里的 host:port（徽标文案用）。
+function endpointAddr(ep) {
+  var base = ep && ep.base_url ? String(ep.base_url) : "";
+  if (!base) { return ""; }
+  return base.replace(/^[a-zA-Z]+:\/\//, "").replace(/\/.*$/, "");
+}
+
+// 节点 ID 短后缀（排障用，§5.1）：node-8124-2026… → node-8124。
+function shortNodeID(id) {
+  var s = String(id || "").trim();
+  if (!s) { return ""; }
+  var parts = s.split("-");
+  if (parts.length >= 2 && parts[0] && parts[1]) { return parts[0] + "-" + parts[1]; }
+  return s.length > 12 ? s.slice(0, 12) + "…" : s;
+}
+
+// 状态徽标（§5.1 优先级表在 S11 载荷下的折算）。形状 + 文本双编码（Q12），
+// 不只靠颜色；网格不可用时整条端点行不渲染（降级 = 无徽标现状视图）。
+function sessionBadge(s) {
+  var state = s.session_state || "unknown";
+  var own = s.ownership || "none";
+  var addr = endpointAddr(s.endpoint);
+  if (own === "conflict") {
+    return {
+      cls: "sb-conflict",
+      text: "⚠ 冲突（" + (s.conflict_count || 0) + " 个节点）",
+      title: "多个活节点声称服务同一会话；先运行 aicli-mesh doctor 人工判断"
+    };
+  }
+  if (state === "busy") {
+    return own === "owner"
+      ? { cls: "sb-busy", text: "◐ 忙碌（本窗口）", title: "本进程有任务进行中" }
+      : { cls: "sb-busy", text: "◐ 忙碌" + (addr ? " @" + addr : ""), title: "该节点有任务进行中，打开新窗口不打扰它" };
+  }
+  if (state === "running") {
+    return own === "owner"
+      ? { cls: "sb-running", text: "● 运行中（本窗口）", title: "本进程正在服务该会话" }
+      : { cls: "sb-running", text: "● 运行中" + (addr ? " @" + addr : ""), title: "别的活节点正在服务该会话（打开新窗口 = 复用对方节点）" };
+  }
+  if (state === "idle") {
+    var last = s.last_known;
+    var lastAddr = last && last.host ? last.host + ":" + last.port : "";
+    return lastAddr
+      ? { cls: "sb-idle", text: "— 仅历史 · 上次 @" + lastAddr, title: "当前无活节点；地址来自 mesh/bindings 的「上次地址」" }
+      : { cls: "sb-idle", text: "— 仅历史", title: "当前无活节点" };
+  }
+  return { cls: "sb-unknown", text: "? 状态未知", title: "网格不可读或档案不可解析：先运行 aicli-mesh show <session>" };
+}
+
+// 端点信息行（§5.1）：工作区名（跨工作区高亮）· 状态徽标 · 节点短后缀。
+function buildSessionEndpointLine(s) {
+  if (!meshViewAvailable) { return null; }
+  var badge = sessionBadge(s);
+  var line = document.createElement("span");
+  line.className = "session-endpoint";
+  var wsLabel = sessionWorkspaceLabel(s);
+  if (wsLabel) {
+    var ws = document.createElement("span");
+    ws.className = "session-ws" + (isOtherWorkspaceSession(s) ? " session-ws-other" : "");
+    ws.textContent = wsLabel;
+    if (s.workspace_path) { ws.title = s.workspace_path; }
+    line.appendChild(ws);
+    line.appendChild(document.createTextNode(" · "));
+  }
+  var badgeEl = document.createElement("span");
+  badgeEl.className = "session-badge " + badge.cls;
+  badgeEl.textContent = badge.text;
+  if (badge.title) { badgeEl.title = badge.title; }
+  line.appendChild(badgeEl);
+  var nodeID = s.endpoint && s.endpoint.node_id ? String(s.endpoint.node_id) : "";
+  if (nodeID) {
+    var nodeEl = document.createElement("span");
+    nodeEl.className = "session-node";
+    nodeEl.textContent = " · " + shortNodeID(nodeID);
+    nodeEl.title = nodeID;
+    line.appendChild(nodeEl);
+  }
+  return line;
+}
+
+// 主点击行为（§5.1 徽标优先级表 + 打开方式开关 §5.1/Q13）：
+//   refresh  当前会话 → 聚焦/刷新本窗口（既有 already_current 路径）
+//   conflict 归属冲突 → 展开冲突详情，禁用 in-place（§5.7）
+//   disabled 状态未知 → 禁用主点击（提示 aicli-mesh show）
+//   new_window / in_place 其余按开关；peer 占用恒走新窗口（复用对方节点，
+//   in-place 会把它加载进第二个进程、可能状态分叉）
+function sessionPrimaryAction(s) {
+  if (s.current) { return "refresh"; }
+  if (!meshViewAvailable) { return "in_place"; }
+  if (s.ownership === "conflict") { return "conflict"; }
+  if ((s.session_state || "unknown") === "unknown") { return "disabled"; }
+  if (s.ownership === "peer") { return "new_window"; }
+  return sessionOpenMode === "in_place" ? "in_place" : "new_window";
+}
+
+function handleSessionPrimaryClick(s, itemEl) {
+  var action = sessionPrimaryAction(s);
+  if (action === "disabled") {
+    showToast("状态未知：先运行 aicli-mesh show " + s.id + " 查看节点档案", "error");
+    return;
+  }
+  if (action === "conflict") {
+    showSessionConflict({ kind: "conflict", sessionId: s.id, nodes: [] });
+    return;
+  }
+  if (action === "new_window") {
+    if (!confirmSpawnForSession(s)) { return; }
+    openSessionInNewWindow(s.id, itemEl);
+    return;
+  }
+  // refresh（当前会话）与 in_place 都走既有切换路径（/resume 归属检查兜底）。
+  resumeSession(s.id);
+}
+
+// Q2：为「无活节点」的会话拉起新进程属高权限动作，先二次确认（文案含工作区与
+// 等价 CLI 命令）；有活节点时 spawn 只做复用（不新起进程），不打扰用户。
+function confirmSpawnForSession(s) {
+  var state = s.session_state || "unknown";
+  if (state === "running" || state === "busy") { return true; }
+  var ws = sessionWorkspaceLabel(s) || "(未知工作区)";
+  return window.confirm(
+    "会话「" + (s.title || s.id) + "」当前没有运行中的节点。\n" +
+    "将在工作区 " + ws + " 拉起新进程后打开窗口（等价命令：aicli-mesh open " + s.id + "）。\n\n继续？"
+  );
+}
+
+// 「其他工作区（N）」分组（§5.3）：数据来自 ?scope=all 合并的 peer 会话条目；
+// 分组内按工作区聚合，标题「name · N 个运行中」，有活节点的工作区优先。
+function buildOtherWorkspacesGroup(otherItems) {
+  var wrap = document.createElement("div");
+  wrap.className = "session-group" + (otherWorkspacesCollapsed ? " collapsed" : "");
+  var toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "session-group-toggle";
+  toggle.textContent = (otherWorkspacesCollapsed ? "▶" : "▼") + " 其他工作区（" + otherItems.length + "）";
+  toggle.title = "非本进程工作区的会话（网格全量口径，默认可见；分组只是呈现方式）";
+  toggle.addEventListener("click", function () {
+    otherWorkspacesCollapsed = !otherWorkspacesCollapsed;
+    try { localStorage.setItem("webOtherWorkspacesCollapsed", otherWorkspacesCollapsed ? "1" : "0"); } catch (e) { /* ignore */ }
+    renderSessionList();
+  });
+  wrap.appendChild(toggle);
+
+  var body = document.createElement("div");
+  body.className = "session-group-body";
+  var groups = [];
+  var indexByKey = {};
+  otherItems.forEach(function (s) {
+    var key = s.workspace_path || s.workspace_name || "(无工作区)";
+    if (indexByKey[key] === undefined) {
+      indexByKey[key] = groups.length;
+      groups.push({ key: key, name: sessionWorkspaceLabel(s) || "(无工作区)", items: [] });
+    }
+    groups[indexByKey[key]].items.push(s);
+  });
+  var runningCount = function (group) {
+    var n = 0;
+    group.items.forEach(function (s) {
+      if (s.session_state === "running" || s.session_state === "busy") { n++; }
+    });
+    return n;
+  };
+  groups.sort(function (a, b) {
+    var ar = runningCount(a);
+    var br = runningCount(b);
+    if (ar !== br) { return br - ar; }
+    return String(a.name).localeCompare(String(b.name));
+  });
+  groups.forEach(function (group) {
+    var head = document.createElement("div");
+    head.className = "session-group-ws";
+    head.textContent = group.name + " · " + runningCount(group) + " 个运行中";
+    head.title = group.key;
+    body.appendChild(head);
+    group.items.forEach(function (s) { body.appendChild(buildSessionItem(s)); });
+  });
+  wrap.appendChild(body);
+  return wrap;
 }
 
 // ---- 内联重命名：标题替换为输入框，Enter/失焦提交，Esc 取消 ----
@@ -443,15 +710,26 @@ function updateSessionIdentity(currentId) {
   }
 }
 
-// 拉取会话列表（GET /web/api/sessions）
+// applyMeshView 同步网格便捷视图（§6.2）：self 段为空 = 网格关闭 / 根不可读，
+// 前端整体回退到无徽标的现状视图（§4.7 降级契约：不报错、不提示）。
+function applyMeshView(data) {
+  meshSelf = data && data.self ? data.self : null;
+  meshWorkspaces = data && Array.isArray(data.workspaces) ? data.workspaces : [];
+  meshViewAvailable = !!meshSelf;
+}
+
+// 拉取会话列表（GET /web/api/sessions）。
+// scope=all（§5.3 / Q5 硬契约）：跨工作区节点默认就在侧栏里，分组只是呈现方式；
+// 网格关闭时该参数无副作用（后端不并 peer，口径与现状逐字一致）。
 export function loadSessions() {
   var seq = ++sessionsReqSeq;
-  fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort), { cache: "no-store" })
+  fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort) + "&scope=all", { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
       if (!data) { return; }
       if (seq !== sessionsReqSeq) { return; } // 丢弃过期响应
       sessions = data.sessions || [];
+      applyMeshView(data);
       // 同步当前会话 id：会话变化时缓存页签按需重拉（可见立即刷，后台则记录，
       // 下次进入页签时由 loadCacheAnalytics 按会话不一致强制刷新）。
       syncCacheSession(data.current_session_id);
@@ -504,8 +782,95 @@ function showSessionSwitchConfirm(target, id) {
   if (sessionSwitchConfirmBtn) { sessionSwitchConfirmBtn.focus(); }
 }
 
-// 确认后的实际切换逻辑（POST /web/api/sessions/resume → 注入 /resume <id>）
-function proceedResumeSession(id) {
+// ---- 会话归属冲突弹窗（§5.7，S11）----
+//
+// 两种来源（§6.3）：
+//   running_elsewhere → 三段式（打开那个窗口 / 仍在本进程切换 → force / 取消）；
+//   conflict          → 只读：列出冲突节点，禁用 in-place，提示 aicli-mesh doctor。
+// 「打开那个窗口」走本节点 mesh/spawn：服务端复用活节点并把令牌内联进 URL
+// （§5.5 红线 2），前端不解析、不存储、不显示令牌（M7）。
+function hideSessionConflict() {
+  if (sessionConflictOverlay) { sessionConflictOverlay.classList.remove("active"); }
+  pendingConflict = null;
+}
+
+function sessionTitleOf(id) {
+  for (var i = 0; i < sessions.length; i++) {
+    if (sessions[i].id === id) {
+      var t = sessions[i].title || "";
+      return t && t !== "(untitled)" ? t : "";
+    }
+  }
+  return "";
+}
+
+function showSessionConflict(ctx) {
+  if (!ctx) { return; }
+  if (!sessionConflictOverlay || !sessionConflictTextEl) {
+    // DOM 缺失：退化为 Toast——警示不可静默（§5.7）。
+    showToast(ctx.kind === "conflict"
+      ? "会话归属冲突：先运行 aicli-mesh doctor"
+      : "该会话正在其它窗口运行（可用 aicli-mesh open " + ctx.sessionId + " 打开）", "error");
+    return;
+  }
+  pendingConflict = ctx;
+  var isConflict = ctx.kind === "conflict";
+  var shown = sessionTitleOf(ctx.sessionId) || "(未命名会话)";
+  if (isConflict) {
+    sessionConflictTextEl.textContent = "会话「" + shown + "」被多个活节点声称服务（归属冲突）。";
+  } else {
+    var wsLabel = ctx.workspace ? lastPathSegment(ctx.workspace) : "";
+    sessionConflictTextEl.textContent = "会话「" + shown + "」正在 " +
+      (wsLabel ? wsLabel + " 工作区" : "其它工作区") + " 的窗口中运行" +
+      (ctx.nodeId ? "（" + ctx.nodeId + "）" : "") + "。";
+  }
+  sessionConflictTextEl.title = "会话 ID：" + ctx.sessionId;
+  if (sessionConflictHintEl) {
+    sessionConflictHintEl.textContent = isConflict
+      ? "冲突需人工判断：先运行 aicli-mesh doctor 查看节点档案；本进程切换已禁用。"
+      : "在本进程切换会把它加载进第二个进程，可能造成状态分叉。";
+    sessionConflictHintEl.style.display = "";
+  }
+  if (sessionConflictNodesEl) {
+    sessionConflictNodesEl.innerHTML = "";
+    var nodes = Array.isArray(ctx.nodes) ? ctx.nodes : [];
+    if (nodes.length) {
+      nodes.forEach(function (node) {
+        var li = document.createElement("li");
+        var bits = [String(node.node_id || "(未知节点)")];
+        if (node.pid) { bits.push("pid " + node.pid); }
+        if (node.workspace) { bits.push(lastPathSegment(node.workspace)); }
+        if (node.heartbeat_at) { bits.push("心跳 " + node.heartbeat_at); }
+        li.textContent = bits.join(" · ");
+        sessionConflictNodesEl.appendChild(li);
+      });
+      sessionConflictNodesEl.style.display = "";
+    } else {
+      sessionConflictNodesEl.style.display = "none";
+    }
+  }
+  if (sessionConflictOpenBtn) {
+    sessionConflictOpenBtn.style.display = isConflict ? "none" : "";
+    // 复用对方节点的前提是有可用的节点档案（node_id）；缺档案时只留 force / 取消。
+    sessionConflictOpenBtn.disabled = !ctx.nodeId;
+  }
+  if (sessionConflictForceBtn) {
+    // 冲突时禁用 in-place（§5.7）；force 只对 running_elsewhere 开放。
+    sessionConflictForceBtn.disabled = isConflict;
+    sessionConflictForceBtn.title = isConflict ? "归属冲突时禁用：先运行 aicli-mesh doctor" : "跳过归属检查，在本进程切换（可能状态分叉）";
+  }
+  sessionConflictOverlay.classList.add("active");
+  if (sessionConflictOpenBtn && !sessionConflictOpenBtn.disabled) {
+    sessionConflictOpenBtn.focus();
+  } else if (sessionConflictForceBtn) {
+    sessionConflictForceBtn.focus();
+  }
+}
+
+// 确认后的实际切换逻辑（POST /web/api/sessions/resume → 注入 /resume <id>）。
+// force=true 跳过网格归属检查（§6.3）：只在用户于冲突弹窗里显式确认
+// 「仍在本进程切换」时使用。
+function proceedResumeSession(id, force) {
   if (!id) { return; }
   // 点击项进入 resuming 状态，避免重复提交
   var all = sessionListEl.querySelectorAll(".session-item");
@@ -516,10 +881,12 @@ function proceedResumeSession(id) {
   }
   if (target) { target.classList.add("resuming"); }
   sendStatusEl.textContent = "切换会话中…";
+  var payload = { session_id: id };
+  if (force) { payload.force = true; }
   fetch("/web/api/sessions/resume", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: id })
+    body: JSON.stringify(payload)
   })
     .then(function (res) {
       return res.json().catch(function () { return { status: "error", reason: "bad response" }; });
@@ -538,13 +905,14 @@ function proceedResumeSession(id) {
           // 因此轮询 /web/api/sessions，直到 current_session_id 变成目标会话（带次数上限）。
           var attempts = 0;
           (function pollResumed() {
-            fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort), { cache: "no-store" })
+            fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort) + "&scope=all", { cache: "no-store" })
               .then(function (r) { return r.ok ? r.json() : null; })
               .then(function (data) {
                 if (!data) { return; }
                 var cur = data.current_session_id || "";
                 if (cur === id || ++attempts >= 8) {
                   sessions = data.sessions || [];
+                  applyMeshView(data);
                   clearPendingPrompts(); // 旧会话的本地回显不带到被恢复会话
                   renderSessionList();
                   refreshScreen(true);
@@ -562,6 +930,21 @@ function proceedResumeSession(id) {
               .catch(function (err) { console.error("resume poll failed:", err); });
           })();
         }
+      } else if (json.status === "running_elsewhere") {
+        // §5.7 / §6.3：目标会话正被另一个活节点服务，未注入队列 → 三段式弹窗。
+        sendStatusEl.textContent = "该会话正在其它窗口运行";
+        showSessionConflict({
+          kind: "running_elsewhere",
+          sessionId: id,
+          nodeId: json.node_id,
+          webUrl: json.web_url,
+          workspace: json.workspace,
+          endpoint: json.endpoint
+        });
+      } else if (json.status === "conflict") {
+        // ≥2 个活节点声称同一会话：禁用 in-place，提示人工判断（§6.5）。
+        sendStatusEl.textContent = "会话归属冲突，未切换";
+        showSessionConflict({ kind: "conflict", sessionId: id, nodes: json.nodes || [] });
       } else {
         sendStatusEl.textContent = "切换失败: " + (json.reason || json.status);
       }
@@ -590,13 +973,14 @@ function createNewSession() {
       if (json.status === "queued") {
         var attempts = 0;
         (function pollNew() {
-          fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort), { cache: "no-store" })
+          fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort) + "&scope=all", { cache: "no-store" })
             .then(function (r) { return r.ok ? r.json() : null; })
             .then(function (data) {
               if (!data) { return; }
               var cur = data.current_session_id || "";
               if ((cur !== "" && cur !== oldID) || ++attempts >= 8) {
                 sessions = data.sessions || [];
+                applyMeshView(data);
                 clearPendingPrompts(); // 旧会话的本地回显不带到新会话
                 renderSessionList();
                 refreshScreen(true);
@@ -656,6 +1040,15 @@ export function initSessions() {
       renderSessionList();
     });
   }
+  // 打开方式开关（§5.1 / Q13）：主点击行为 = 新窗口打开（默认）/ 在本进程切换。
+  // 只影响主点击；条目上的 ⧉ / ⇄ 二级动作始终可用。
+  if (sessionsOpenModeEl) {
+    sessionsOpenModeEl.addEventListener("change", function () {
+      sessionOpenMode = sessionsOpenModeEl.value === "in_place" ? "in_place" : "new_window";
+      try { localStorage.setItem("webSessionOpenMode", sessionOpenMode); } catch (e) { /* ignore */ }
+      renderSessionList();
+    });
+  }
 
   // ---- 切换确认弹窗：确认 / 取消 / 关闭按钮 / 遮罩空白处 ----
   if (sessionSwitchConfirmBtn) {
@@ -684,6 +1077,44 @@ export function initSessions() {
     e.preventDefault();
     e.stopPropagation();
     hideSessionSwitchConfirm();
+  }, true);
+
+  // ---- 冲突弹窗（§5.7）：打开那个窗口 / 仍在本进程切换（force=true）/ 取消 ----
+  if (sessionConflictOpenBtn) {
+    sessionConflictOpenBtn.addEventListener("click", function () {
+      var ctx = pendingConflict;
+      hideSessionConflict();
+      if (!ctx) { return; }
+      // 走本节点 mesh/spawn：服务端复用活节点并内联令牌（§5.5 红线 2/3）。
+      // 点击手势内 openSessionInNewWindow 会同步预开空白窗口，避免弹窗拦截（§5.2）。
+      openSessionInNewWindow(ctx.sessionId, null);
+    });
+  }
+  if (sessionConflictForceBtn) {
+    sessionConflictForceBtn.addEventListener("click", function () {
+      var ctx = pendingConflict;
+      hideSessionConflict();
+      if (ctx && ctx.kind !== "conflict") { proceedResumeSession(ctx.sessionId, true); }
+    });
+  }
+  if (sessionConflictCancelBtn) {
+    sessionConflictCancelBtn.addEventListener("click", function () { hideSessionConflict(); });
+  }
+  if (sessionConflictCloseBtn) {
+    sessionConflictCloseBtn.addEventListener("click", function () { hideSessionConflict(); });
+  }
+  if (sessionConflictOverlay) {
+    sessionConflictOverlay.addEventListener("click", function (e) {
+      if (e.target === sessionConflictOverlay) { hideSessionConflict(); }
+    });
+  }
+  // 与切换确认弹窗同策略：capture 阶段短路，避免 Esc 同时触发全局「中断」。
+  document.addEventListener("keydown", function (e) {
+    if (!sessionConflictOverlay || !sessionConflictOverlay.classList.contains("active")) { return; }
+    if (e.key !== "Escape") { return; }
+    e.preventDefault();
+    e.stopPropagation();
+    hideSessionConflict();
   }, true);
 
 }

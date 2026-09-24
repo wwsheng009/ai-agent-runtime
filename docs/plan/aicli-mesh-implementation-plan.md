@@ -44,8 +44,10 @@
 | S10 | P1 | E2E-DEBUG-03（M1–M10）+ 基线固化 | S6 S7 S8 S9 | 聚合回归绿 + 基线固化 |
 
 > **P2 治理项**（接管 `--takeover`、`--mesh-restrict-workspace`、`stop`、journal 查询、
-> `aicli mesh` 别名、About 页网格小节）作为 S10 之后的 **S11+** 追加切片，沿用本文同一模板；
+> `aicli mesh` 别名）作为 S10 之后的 **S11+** 追加切片，沿用本文同一模板；
 > 其中 M10 的收敛开关断言在 S10 场景内先落地（E2E 需要它验证「默认放行」的反面）。
+> **S11（Web 侧收口一：sessions 便捷视图 + 前端徽标/分组/开关 + resume 冲突）定义见 §19**，
+> About 页网格小节并入该切片；实时收口（`mesh/events` 前端订阅）为 S12。
 
 ### 0.3 硬顺序约束（不可交换）
 
@@ -498,6 +500,7 @@ go test ./backend/cmd/aicli/commands/... -run 'MeshSpawn|Sessions' -v
 | S8 | §5.6 §5.9 §9.2 §9.3 | M4 / M10；§12.2 call 用例 | 单测 + E2E |
 | S9 | §5.7 §8.2 §8.3 | M3；Web 子方案 §10.2 | 单测 + 手工 + E2E |
 | S10 | §12.3 | M1–M10 全量 | E2E |
+| S11 | Web 子方案 §5.x §6.2 §6.3 | Web 子方案 §10.1 单测 + asset 契约；D11/D12 落地 | 单测 + 手工 + E2E 门禁 |
 
 **M1–M10 归属**（断言表见 debug-guide §8.5）：
 
@@ -602,6 +605,7 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | S8 | 1 个 | `mesh(S8): mesh/call + CLI call/send/screen` |
 | S9 | 2 个（后端 spawn / 前端交互） | `mesh(S9): mesh/spawn + open` / `mesh(S9): Web 侧新窗口打开` |
 | S10 | 2 个（场景脚本 / 基线固化） | `mesh(S10): E2E-DEBUG-03 场景脚本` / `mesh(S10): 基线固化` |
+| S11 | 1 个（后端契约 + 前端视图，同一提交内前后端同源切换） | `mesh(S11): Web 侧收口——sessions 扩展 + 徽标/分组/开关 + resume 冲突` |
 
 **硬规则**：S3 的删除与替换必须在**同一个提交**内完成（否则中间态编译不过，违反「每提交可构建」）。
 
@@ -640,7 +644,7 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 |---|------|----------|----------|
 | 1 | `docs/user-guide/aicli.md:259` | `AICLI_WEB_PORTS_DIR` → `AICLI_MESH_DIR`；「粘性端口档案」→「会话绑定」 | S3 |
 | 2 | `docs/aicli/debug-chat-status.md:53-62` | 端口档案路径 `~/.aicli/web-ports/` → `mesh/bindings/` | S3 |
-| 3 | `docs/aicli/web-remote-api.md` | `mesh/*` 端点族已同步；`sessions` 新增字段（`endpoint` / `ownership`）与 `resume` 新错误码**未落地**（D11/D12），文档未声称已实现 | S5 / S9 |
+| 3 | `docs/aicli/web-remote-api.md` | `mesh/*` 端点族已同步；`sessions` 便捷视图与 `resume` 归属检查（D11/D12）**已落地并写入 §9.7**（S11） | S5 / S9 / S11 |
 | 4 | `docs/aicli/mesh-cli.md` | **新增**；网格方案 §7 是草稿，落地后以该文档为准 | S6 |
 | 5 | `docs/e2e/debug-guide.md` | 已同步（§8 + M1–M10）；S10 后回填「已落地」 | S10 |
 | 6 | `docs/plan/aicli-mesh-architecture.md` + Web 子方案 | 回填「已落地 / 偏差」标注（含 D1–D12） | S10 |
@@ -669,8 +673,8 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | D8 | `call.go::ResolveCallTarget` 与 CLI `resolveTarget` 合并为共享 `matchTargetNodes`（pid → node 精确 → node 前缀 → session 精确 → session 前缀；歧义时 node id 精确优先，大小写不敏感） | 两处各写一套匹配规则 → 口径分叉（CLI 能定位、`mesh call` 报 `target_not_found`） | §11.6 记录「目标解析唯一实现」（回归测试 `TestResolveCallTargetSharesCLITargetRules`） |
 | D9 | M3 断言口径：拒绝语义以「目标返回的 store 查找结果」为准（`session not found` / `busy` / `running_elsewhere` 都可能），E2E 断的是**归属不变**（owner 仍为 A、`counts.conflict=0`） | `sessions.resume` 是转发到目标 `/web/api/sessions/resume` 的写 op；目标本地存储没有该会话时返回 404，压根到不了租约判定。文档原写「返回 busy / running_elsewhere」属过度指定 | debug-guide §8.5 该行改写；租约「不抢活租约」由 `lease_test.go`（默认不抢 / `--takeover` 才抢 / host 感知被抢）覆盖 |
 | D10 | M5 前置「扇入就绪门」：先等 A 的流里出现 B 的帧（订阅接通时 A 合成的 `mesh.peer.joined`，上限 `-FaninReadySec`，缺省 20s）再发 invoke | 订阅由 `Subscriber.Sync` 按 tick 建立；订阅接通前的窗口里 B 的 `busy=true` 不会被扇入（流不重放历史）→ 断言会随 tick 时机抖动。实测：A 05:05:53 才接上 B，而 invoke 05:05:51.7 已开始，`busy=true` 永久丢失 | debug-guide §8.5/§8.6 记录该前置与失败排查路径 |
-| D11 | Web `GET /web/api/sessions` 的 `endpoint` / `ownership` 字段**未落地**（`chatWebSessionListItem` 仍只有 id/title/summary/message_count/created_at/updated_at/current），前端侧栏徽标 / 端点行 / 跨工作区分组随之未落地 | S9 只做了「⧉ 新窗口打开 + 深链 + spawn/open 端点」；子方案 P0 ① 与其后端字段是纯展示项，被挤出 S9 范围且未单列切片 | Web 子方案新增 §0.1「落地状态」标注未落地；后续 Web 侧收口切片按子方案 §5.1/§6.1 落地 |
-| D12 | `resume` 的 `running_elsewhere` 前置检查**未落地**（`/web/api/sessions/resume` 无归属判定，全仓 Go 代码无该标识） | 同 D11：归属/互斥已由网格租约（`session-<sid>`）与 `spawn` 锁内二次检查覆盖；Web 端冲突弹窗属体验项 | Web 子方案 §0.1 / FR11 标注未落地；租约语义由 `lease_test.go` 覆盖（见 D9） |
+| D11 | Web `GET /web/api/sessions` 的 `endpoint` / `ownership` 字段**未落地**（`chatWebSessionListItem` 仍只有 id/title/summary/message_count/created_at/updated_at/current），前端侧栏徽标 / 端点行 / 跨工作区分组随之未落地 | S9 只做了「⧉ 新窗口打开 + 深链 + spawn/open 端点」；子方案 P0 ① 与其后端字段是纯展示项，被挤出 S9 范围且未单列切片 | Web 子方案新增 §0.1「落地状态」标注未落地；后续 Web 侧收口切片按子方案 §5.1/§6.1 落地；**S11 已收敛**（见 §19.4） |
+| D12 | `resume` 的 `running_elsewhere` 前置检查**未落地**（`/web/api/sessions/resume` 无归属判定，全仓 Go 代码无该标识） | 同 D11：归属/互斥已由网格租约（`session-<sid>`）与 `spawn` 锁内二次检查覆盖；Web 端冲突弹窗属体验项 | Web 子方案 §0.1 / FR11 标注未落地；租约语义由 `lease_test.go` 覆盖（见 D9）；**S11 已收敛**（见 §19.4） |
 
 ---
 
@@ -750,6 +754,62 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | S8 | `web_handlers_mesh_call_test.go` | `internal/mesh/client.go`、`web_handlers_mesh.go`、`cli.go` | 单测 + M4 | 调用信封 JSON |
 | S9 | `internal/mesh/spawn.go`、`web/js/mesh.js`、`web_handlers_mesh_spawn_test.go` | `web/js/sessions.js`、`index.html`、`style.css`、`web_handlers.go` | 单测 + Web §10.2 | 新窗口截图 |
 | S10 | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1` | `scripts/test-aicli-e2e-all.ps1`、`e2e-assertion-baseline.json` | M1–M10 | `summary.json` + 基线 diff |
+| S11 | `web_handlers_mesh_sessions.go`、`web_handlers_mesh_sessions_test.go` | `web_handlers.go`、`web/js/sessions.js`、`web/js/ui.js`、`index.html`、`style.css` | Web §10.1 + 基线门禁 | 单测输出 + 手工验收 |
+
+---
+
+## 19. S11 · Web 侧收口（一）：sessions 便捷视图 + 前端徽标/分组/开关 + resume 冲突
+
+> 来源：Web 子方案 §0.1 未落地清单（P0 ①③④、P1 ③④⑥；偏差 **D11 / D12**）。
+> 实时项（P1 ②，`mesh/events` 前端订阅 + 退避重连 + 轮询兜底）拆为 **S12**，沿用同一模板；
+> P2 治理项（接管 / 收敛开关文案 / `stop` / journal 查询 / `aicli mesh` 别名 / 冲突横幅）仍留后续。
+
+### 19.1 范围与落点
+
+| 交付项 | 落点 | 说明 |
+| --- | --- | --- |
+| P0 ① 侧栏徽标 + 端点行 | `web_handlers.go`、`web_handlers_mesh_sessions.go`（新增）、`web/js/sessions.js`、`web/style.css` | `sessions` 条目新增 `workspace_path/workspace_name/session_state/ownership/conflict_count/endpoint/last_known`；响应新增 `self`/`workspaces`。全部来自同一次 `mesh.BuildView`（Web 子方案 §0.2 纪律 2） |
+| P0 ③ / P1 ⑥ 打开方式开关 | `web/js/sessions.js`、`web/index.html` | `localStorage: webSessionOpenMode`（`new_window` 默认，`in_place` 可选）；Q13：迁移只在用户未显式设置时生效 |
+| P0 ④ 关于页网格小节 | `web/js/ui.js`、`web/index.html` | 只读展示 `node_id` / `mesh.root` / `counts` / 建议命令；**不提供** gc / stop / spawn 按钮（§5.8） |
+| P1 ③ resume 冲突（D12） | `web_handlers.go`、`web/js/sessions.js`、`web/index.html` | `running_elsewhere` / `conflict` / `force:true`（§6.3）；判定复用 `internal/mesh` 归属结果；三段式弹窗 |
+| P1 ④ 跨工作区分组 | `web/js/sessions.js`、`web/style.css` | 「其他工作区（N）」可折叠分组；数据来自 `?scope=all` 合并的 peer 会话条目（§5.3） |
+| **不做**（留给 S12 / P2） | — | `mesh/events` 前端订阅（S12）；冲突横幅 / 接管 / 窗口标题后缀 / resume 事件化（P2） |
+
+### 19.2 契约增量（相对 Web 子方案 §6.2/§6.3 的三点明确 + 一处新增）
+
+1. **`?scope=all` 合并的 peer 会话条目**：`id/title` 取自节点档案 `session` 段；`created_at/updated_at`
+   用 `activated_at` 顶替（仅展示）；`message_count=0`；`ownership=peer|conflict`；`endpoint` 仅活节点给出，
+   `last_known` 来自该节点档案旁挂的 binding（视图已 join）。
+2. **`workspaces[]`**：`path/name/nodes` 复用 `MeshView.Workspaces`；`session_count`（本进程列表按工作区计数）
+   与 `running_count`（该工作区活节点且带会话）是**同一份视图 + 本进程列表**的派生，不新增聚合路径。
+3. **`session_state` 折算**：活节点占用 → `running|busy`（含 peer）；无活节点且网格可用 → `idle`；
+   网格不可用或档案不可读 → `unknown`（`endpoint=null`，`last_known` 仍尽力给出）。
+4. **新增字段 `conflict_count`**（int，仅 `ownership=conflict` 时非 0）：徽标「⚠ 冲突（N 个节点）」需要 N；
+   Web 子方案 §6.2 未列，登记为 S11 契约增量。
+
+### 19.3 验证
+
+| 层 | 断言 |
+| --- | --- |
+| 单测 | `sessions` 扩展结构（无活节点时 `endpoint=null` / `last_known=null` 稳定）；`sessions[].endpoint` 与 `peers.nodes[].endpoint` 同源一致；`scope=all` 去重合并；`resume` 的 `running_elsewhere` 不注入队列 / `force=true` 注入 / `conflict` 拒绝 / 网格关闭退回旧语义（回归锁定） |
+| 前端契约 | asset 字符串断言（沿用 `web_handlers_mesh_spawn_test.go` 风格）：徽标、分组、开关、冲突弹窗、关于页小节的关键标识符 |
+| 门禁 | `go test ./cmd/aicli/commands/ ./internal/mesh/`、`go vet`、E2E-DEBUG-01/02/03 基线（MN5） |
+| 手工 | `docs/aicli/web-testing.md` §2.7（「实时徽标」仍标注依赖 S12） |
+
+**降级契约（继承 §4.7）**：网格关闭 / 根不可读时 `sessions` 仍 200，`endpoint` 全 `null`、`self=null`、
+`workspaces=[]`，前端回退到无徽标的现状视图；`resume` 不做归属检查（旧语义）。
+
+### 19.4 落地记录（2026-09-24）
+
+| 项 | 实际 |
+| --- | --- |
+| 后端 | 新增 `web_handlers_mesh_sessions.go`（`buildChatWebMeshSessionIndex` / `chatWebSessionsResponse` / `chatWebResumeMeshGuard`）；`web_handlers.go` 扩展 `chatWebSessionListItem` 7 字段 + 响应 `self`/`workspaces` + `?scope=all` 合并去重 + `resume` 的 `force` 前置检查 |
+| 前端 | `web/js/sessions.js`（徽标 / 端点行 / 分组 / 打开方式开关 / 冲突弹窗）、`web/js/ui.js`（关于页只读小节）、`index.html`（`#sessions-open-mode`、冲突弹窗 DOM、`#about-mesh`）、`style.css`（对应样式，复用既有设计变量） |
+| 单测 | `web_handlers_mesh_sessions_test.go`：`TestChatWebMeshSessionIndexHints`、`TestHandleChatWebAPISessions_ScopeAllMergesPeers`、`TestHandleChatWebAPISessionsResume_MeshOwnershipGuard`、`TestHandleChatWebAPISessionsResume_MeshDisabledKeepsLegacySemantics`、`TestChatWebSessionsAssetHasMeshOwnershipView`（asset 契约：徽标 / 分组 / 开关 / 弹窗 / 关于页 + 令牌红线） |
+| 门禁 | `go build ./...`、`go vet ./cmd/aicli/commands/ ./internal/mesh/`、`go test ./cmd/aicli/commands/ ./internal/mesh/` 全绿（本地，2026-09-24） |
+| 文档 | `web-remote-api.md` 新增 §9.7（字段表 + `scope=all` + resume 归属）；`web-testing.md` 新增 §2.7.1 手工清单；Web 子方案 §0.1 状态表回填；网格方案 §11.6 回填 D11/D12 收敛 |
+| 契约增量 | 见 §19.2（三点明确 + `conflict_count` 新增）；打开方式**默认值**由子方案原写的 `in_place` 改为 `new_window`（Q13：仅对未显式设置过的用户生效，老用户选择被尊重） |
+| 未做（按计划） | `mesh/events` 前端订阅（S12）；接管 `--takeover` 入口（`takeover_available` 恒 `false`）、冲突横幅、窗口标题节点后缀（P2） |
 
 ---
 
@@ -762,5 +822,6 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | `aicli-micro-web-client-session-window-plan.md` | Web 侧交互与前端落点 | S5 / S9 前 |
 | `docs/e2e/debug-guide.md` §8 | 多进程 E2E 怎么断言 | S10 前 |
 
-> 变更记录：2026-09-24 初版（S1–S10 + 验收 / 回滚 / 锚点核验）。
+> 变更记录：2026-09-24 初版（S1–S10 + 验收 / 回滚 / 锚点核验）；
+> 2026-09-24 追加 §19（S11 · Web 侧收口一）与 §19.4 落地记录（sessions 便捷视图 + 前端徽标/分组/开关 + resume 冲突）。
 > 每完成一个切片，在 §15.3 登记实际偏差，并回填网格方案 §11.6。

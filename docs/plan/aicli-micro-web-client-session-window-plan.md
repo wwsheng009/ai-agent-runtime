@@ -80,14 +80,14 @@ v1 把「问题定义 + 数据模型 + 接口 + spawn + 路线图」全写在一
 | P1 ① 主点击 = 新窗口 + 预开窗口三态（失败关窗 + Toast） | ✅ 已落地 | `web/js/sessions.js`（`⧉`，悬停出现；手势内 `window.open` 占位 → `POST /web/api/mesh/spawn` → `location.replace(url)`）、`web_handlers_mesh.go`、`internal/mesh/spawn.go` |
 | P1 ⑤ `?session=` 深链 | ✅ 已落地（无独立横幅 UI） | `web_page.go` 注入 head 内联脚本（`?token=` → `sessionStorage` + `replaceState` 抹除；`?session=` → `window.__aicli_deep_link_session`）+ `sessions.js::applyDeepLinkSession`（与 `current_session_id` 不同才 resume） |
 | `aicli-mesh open`（网格 S9，本文范围外） | ✅ 已落地 | `internal/mesh/cli.go`（`--port/--wait/--no-wait/--json`） |
-| P0 ① 侧栏徽标 + 端点行 | ❌ 未落地 | 后端 `sessions.endpoint/ownership` 字段未加（`chatWebSessionListItem` 无该字段），前端未渲染 → 偏差 **D11** |
+| P0 ① 侧栏徽标 + 端点行 | ✅ 已落地（S11） | `sessions` 条目新增 `session_state/ownership/conflict_count/workspace_*/endpoint/last_known`，响应新增 `self`/`workspaces`（`web_handlers_mesh_sessions.go`）；前端徽标 + 端点行见 `web/js/sessions.js`。偏差 **D11** 已收敛 |
 | P0 ② 「仅复用 + `auth_required=false`」限制 | ⤳ 被取代 | S9 起主点击恒走 `mesh/spawn`（服务端复用活节点、必要时拉起），该 P0 阶段限制不再适用 |
-| P0 ③ 打开方式开关（默认 `in_place`） | ❌ 未落地 | 无开关；主点击恒新窗口 |
-| P0 ④ 「关于」页网格小节 | ❌ 未落地 | 「关于」页只渲染 `GET /debug/endpoints` 清单（其中含 S5 登记的 `mesh` 分组） |
-| P1 ② `mesh/events` 实时徽标 + 退避重连 + 轮询兜底 | ❌ 未落地 | 前端未订阅 `mesh/events`（端点本身 S7 已就绪）；`js/mesh.js` 未新增（**D5**）→ §10.2「实时徽标」断言当前不可执行 |
-| P1 ③ `resume` 的 `running_elsewhere` 三段式弹窗 | ❌ 未落地 | 后端无该状态（全仓 Go 代码无该标识）→ 偏差 **D12**；`resume` 拒绝语义见实施计划 §15.3 D9 |
-| P1 ④ 跨工作区分组 | ❌ 未落地 | 依赖 P0 ① 的端点数据 |
-| P1 ⑥ 开关默认切 `new_window` | ❌ 未落地 | 无开关（同 P0 ③） |
+| P0 ③ 打开方式开关 | ✅ 已落地（S11，默认取 `new_window`） | 侧栏 `#sessions-open-mode` + `localStorage: webSessionOpenMode`（`web/js/sessions.js`）；Q13 口径：只在用户未显式设置过时按新默认，显式选过 `in_place` 的老用户保持原选择 |
+| P0 ④ 「关于」页网格小节 | ✅ 已落地（S11） | `web/js/ui.js::loadAboutMesh` 只读渲染 `GET /web/api/mesh/self` + `peers` 的 `counts`；**不提供** gc / stop / spawn 按钮（§5.8） |
+| P1 ② `mesh/events` 实时徽标 + 退避重连 + 轮询兜底 | ❌ 未落地（S12） | 前端未订阅 `mesh/events`（端点本身 S7 已就绪）；`js/mesh.js` 未新增（**D5**）→ §10.2「实时徽标」断言当前不可执行；S11 只做到「刷新/轮询时一致」 |
+| P1 ③ `resume` 的 `running_elsewhere` 三段式弹窗 | ✅ 已落地（S11） | `POST /web/api/sessions/resume` 未带 `force` 时先做归属检查（`running_elsewhere` / `conflict`，`web_handlers_mesh_sessions.go::chatWebResumeMeshGuard`）；前端三段式弹窗见 `web/js/sessions.js`。偏差 **D12** 已收敛 |
+| P1 ④ 跨工作区分组 | ✅ 已落地（S11） | 「其他工作区（N）」可折叠分组（`?scope=all` 合并 peer 会话 + `workspaces[]` 汇总） |
+| P1 ⑥ 开关默认切 `new_window` | ✅ 已落地（S11） | 同 P0 ③（`new_window` 为缺省；`in_place` 可选） |
 | P2 全部（冲突横幅 / 接管二次确认 / 收敛开关文案 / resume SSE 事件化 / 窗口标题节点后缀） | ❌ 未落地 | S10 未排期 |
 | 偏差 D5 / D6 | ✅ 已登记 | 不新增 `js/mesh.js`（并入 `sessions.js`）；`web_page.go` 深链自举（计划未列该文件） |
 

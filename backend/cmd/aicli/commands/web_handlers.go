@@ -17,6 +17,7 @@ import (
 	cacheanalytics "github.com/wwsheng009/ai-agent-runtime/internal/cacheanalytics"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 )
 
 // ---------------------------------------------------------------------------
@@ -884,6 +885,16 @@ type chatWebSessionListItem struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 	Current      bool      `json:"current,omitempty"`
+
+	// 以下为网格便捷视图（Web 子方案 §6.2，S11）：网格关闭时 session_state
+	// 为 unknown、ownership 为 none、endpoint 恒为 null（前端据此回退旧视图）。
+	SessionState  string                   `json:"session_state,omitempty"`
+	Ownership     string                   `json:"ownership,omitempty"`
+	ConflictCount int                      `json:"conflict_count,omitempty"`
+	WorkspacePath string                   `json:"workspace_path,omitempty"`
+	WorkspaceName string                   `json:"workspace_name,omitempty"`
+	Endpoint      *chatWebSessionEndpoint  `json:"endpoint"`
+	LastKnown     *chatWebSessionLastKnown `json:"last_known"`
 }
 
 // HandleChatWebAPISessions 返回可恢复的历史会话列表（含当前会话，带 current 标记）。
@@ -891,8 +902,12 @@ type chatWebSessionListItem struct {
 // 响应结构：
 //
 //	{
-//	  "sessions": [ {id,title,summary,message_count,created_at,updated_at,current}, ... ],
-//	  "current_session_id": "<当前会话 ID，无会话时为空>"
+//	  "sessions": [ {id,title,summary,message_count,created_at,updated_at,current,
+//	                 session_state,ownership,conflict_count,
+//	                 workspace_path,workspace_name,endpoint,last_known}, ... ],
+//	  "current_session_id": "<当前会话 ID，无会话时为空>",
+//	  "self": {node_id,mesh_root,workspace_path,workspace_name,counts} | null,
+//	  "workspaces": [ {path,name,nodes,session_count,running_count}, ... ]
 //	}
 //
 // 列表顺序按 sort 参数决定：
@@ -901,6 +916,12 @@ type chatWebSessionListItem struct {
 //
 // 列表项来自 listResumeCandidateChatSessions（已排除当前会话并过滤无对话的空会话），
 // 与 TTY /resume 选择器的候选集一致。
+//
+// 网格便捷视图（Web 子方案 §6.2，S11）：
+//   - ?scope=all 额外并入 peers 发现的跨工作区会话（默认只列本进程清单）；
+//   - session_state / ownership / endpoint / last_known 与 self / workspaces 全部
+//     来自同一次 mesh.BuildView（与 /web/api/mesh/peers 同源，§0.2 纪律 2）；
+//   - 网格关闭 / 根不可读时整体退化：self=null、endpoint=null、清单口径不变（MN1）。
 func HandleChatWebAPISessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeWebAPIJSON(w, http.StatusMethodNotAllowed, map[string]string{
@@ -910,12 +931,11 @@ func HandleChatWebAPISessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	index := buildChatWebMeshSessionIndex(mesh.Current())
+
 	session := chatWebSession()
 	if session == nil || session.SessionManager == nil {
-		writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
-			"sessions":           []chatWebSessionListItem{},
-			"current_session_id": "",
-		})
+		writeWebAPIJSON(w, http.StatusOK, chatWebSessionsResponse([]chatWebSessionListItem{}, "", index))
 		return
 	}
 
@@ -945,6 +965,17 @@ func HandleChatWebAPISessions(w http.ResponseWriter, r *http.Request) {
 		items = append(items, buildChatWebSessionListItem(candidate, false))
 	}
 
+	// ?scope=all 才并入 peers 发现的跨工作区会话（默认口径逐字不变）。
+	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("scope")), "all") {
+		seen := make(map[string]bool, len(items))
+		for _, item := range items {
+			seen[item.ID] = true
+		}
+		items = append(items, index.peerSessionItems(seen)...)
+	}
+	// 网格提示（ownership / session_state / endpoint / last_known）写回条目。
+	index.decorate(items)
+
 	// 解析排序参数，默认按创建时间降序。
 	sortByUpdatedAt := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort"))) == "updated_at"
 	sort.SliceStable(items, func(i, j int) bool {
@@ -959,10 +990,7 @@ func HandleChatWebAPISessions(w http.ResponseWriter, r *http.Request) {
 		return strings.TrimSpace(left.ID) < strings.TrimSpace(right.ID)
 	})
 
-	writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
-		"sessions":           items,
-		"current_session_id": currentID,
-	})
+	writeWebAPIJSON(w, http.StatusOK, chatWebSessionsResponse(items, currentID, index))
 }
 
 // buildChatWebSessionListItem 从 runtimechat.Session 构建列表条目。
@@ -981,6 +1009,10 @@ func buildChatWebSessionListItem(s *runtimechat.Session, current bool) chatWebSe
 	}
 	if item.Title == "" {
 		item.Title = "(untitled)"
+	}
+	item.WorkspacePath = chatWebSessionWorkspacePath(s)
+	if item.WorkspacePath != "" {
+		item.WorkspaceName = chatWebWorkspaceName(item.WorkspacePath)
 	}
 	return item
 }
@@ -1048,6 +1080,8 @@ func HandleChatWebAPISessionsNew(w http.ResponseWriter, r *http.Request) {
 // chatWebSessionsResumeRequest 是 POST /web/api/sessions/resume 的请求体。
 type chatWebSessionsResumeRequest struct {
 	SessionID string `json:"session_id"`
+	// Force 跳过网格归属检查（§6.3）：用户在前端确认「仍在本进程切换」时置真。
+	Force bool `json:"force"`
 }
 
 // HandleChatWebAPISessionsResume 将 "/resume <session-id>" 注入输入队列，
@@ -1057,6 +1091,12 @@ type chatWebSessionsResumeRequest struct {
 // wakeComposerRead），保证会话状态只被主循环单写者修改，避免 HTTP
 // goroutine 与正在运行的 turn 竞态。注入成功后 SSE 会继续投递
 // session_end/session_start/screen_refresh，前端据此刷新屏幕。
+//
+// 网格归属（Web 子方案 §6.3，S11）：请求体可带 force=true 跳过检查。
+// 未带 force 且目标会话正被另一个活节点服务时返回 status=running_elsewhere
+// （附 node_id / endpoint / web_url / workspace），被 ≥2 个活节点声称时返回
+// status=conflict（附节点清单）；两者都不注入队列。网格关闭 / 不可读时不检查
+// （旧语义，MN1）。
 func HandleChatWebAPISessionsResume(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeWebAPIJSON(w, http.StatusMethodNotAllowed, map[string]string{
@@ -1131,6 +1171,15 @@ func HandleChatWebAPISessionsResume(w http.ResponseWriter, r *http.Request) {
 			"session_id": targetID,
 		})
 		return
+	}
+
+	// 归属前置检查：拦下「另一个活节点正在服务该会话」与「多节点冲突」两种
+	// 情况，避免两个进程同时写同一会话（§6.5）。
+	if !req.Force {
+		if _, payload := chatWebResumeMeshGuard(targetID); payload != nil {
+			writeWebAPIJSON(w, http.StatusOK, payload)
+			return
+		}
 	}
 
 	queue := ensureChatBufferedInputQueue(session)

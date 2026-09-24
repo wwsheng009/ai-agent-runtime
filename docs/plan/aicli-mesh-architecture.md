@@ -1108,7 +1108,10 @@ Windows 没有 POSIX 权限位：`0600` 语义退化为「依赖用户目录 ACL
 > 前端不新增 `js/mesh.js`（D5）、`web_page.go` 深链自举（D6）、
 > **Windows 判活必须读退出码**（D7）、`call`/`send` 目标解析与 CLI 合并为唯一实现（D8）、
 > E2E M3/M5 的断言口径与前置（D9/D10）。
-> Web 侧 `sessions.endpoint/ownership` 与 `resume running_elsewhere` **未落地**（D11/D12，见 Web 子方案 §0.1）。
+> Web 侧 `sessions.endpoint/ownership` 与 `resume running_elsewhere` **已落地（S11）**，D11/D12 收敛：
+> 见 [aicli-mesh-implementation-plan.md](./aicli-mesh-implementation-plan.md) §19.4 与
+> [web-remote-api.md](../aicli/web-remote-api.md) §9.7（前端手工清单见 web-testing.md §2.7.1）；
+> `mesh/events` 前端订阅（P1 ②）仍留给 S12。
 > 固化验证：E2E-DEBUG-03 单跑 13/13 绿（`artifacts/aicli-debug-endpoints-e2e-mesh/run5/`），
 > 聚合 01 → 02 → 03 全绿（`PASS=6 FAIL=0`，`artifacts/aicli-e2e-all/20260924-131132/`）。
 

@@ -192,9 +192,10 @@ aicli chat --pprof
 [web-remote-api.md](web-remote-api.md) §9.6）。前置：两个 `aicli chat`/`resume --pprof --mesh`
 进程（或同一进程即可覆盖「复用」路径），DevTools 打开 Network 与 Application 面板。
 
-> 状态（2026-09-24 回填）：`⧉` 流程、深链与 spawn 端点**已落地**（S9）；「实时徽标」一条依赖前端
-> `mesh/events` 订阅（Web 子方案 P1 ②，**未落地**）→ 暂不可执行，其余各条可执行。
-> 权威状态表见 `docs/plan/aicli-micro-web-client-session-window-plan.md` §0.1。
+> 状态（2026-09-24 回填）：`⧉` 流程、深链与 spawn 端点**已落地**（S9）；侧栏徽标 / 端点行 /
+> 跨工作区分组 / 打开方式开关 / resume 冲突弹窗**已落地**（S11，见 §2.7.1）；
+> 「实时徽标」一条依赖前端 `mesh/events` 订阅（Web 子方案 P1 ②，**未落地**，S12）→ 暂不可执行，
+> 其余各条可执行。权威状态表见 `docs/plan/aicli-micro-web-client-session-window-plan.md` §0.1。
 
 - [ ] **弹窗资格**：悬停会话 → 点 `⧉` → 新窗口**必须**打开（不是被拦截的提示条）。
       实现要点：占位窗口在点击手势内同步 `window.open('', '_blank')`，spawn 返回后才 `location.replace`；
@@ -211,8 +212,39 @@ aicli chat --pprof
       页面正常加载（首个 `/web/api/sessions` 请求已带 `X-AICLI-Token`），列表高亮该会话；
       若把 `session` 改成另一个存在的会话 → 自动走 `/web/api/sessions/resume` 切换；
       不存在的会话 id → Toast「深链会话不存在」，页面不白屏。
-- [ ] **实时徽标（暂不可执行：P1 ② 未落地）**：新窗口连上后，原窗口会话列表的「当前 / 活节点」状态与 `mesh/peers`
-      在 ≤2s 内反映新进程（SSE 扇入，见 §9.4）。
+- [ ] **实时徽标（暂不可执行：P1 ② / S12 未落地）**：新窗口连上后，原窗口会话列表的「当前 / 活节点」状态与
+      `mesh/peers` 在 ≤2s 内反映新进程（SSE 扇入，见 §9.4）。**当前实现**是轮询 + 打开页签时刷新，
+      因此该断言现在只能靠「手动刷新后一致」验证，延迟与自动性不属于本切片。
+
+#### 2.7.1 侧栏网格视图与 resume 冲突（S11）
+
+前置：两个 `aicli chat --pprof --mesh` 进程（**不同工作区**，用于覆盖分组），DevTools 打开 Network；
+在其中一个进程的 web 页操作。数据源：`GET /web/api/sessions?scope=all`（契约见
+[web-remote-api.md](web-remote-api.md) §9.7）。
+
+- [ ] **徽标 + 端点行**：会话条目第三行显示「工作区 · 状态徽标 · 节点短后缀」；徽标与
+      `sessions[]` 的 `session_state` / `ownership` / `conflict_count` 逐条对应
+      （`running` / `busy` / `idle` / `unknown`，`peer` / `conflict`），且**形状 + 文本双编码**
+      （不靠颜色单独区分，色盲可用）。
+- [ ] **同源**：条目 `endpoint.node_id` 与 `GET /web/api/mesh/peers` 的 `nodes[].node_id` 一致；
+      对端进程退出（或 `aicli-mesh stop`）后条目回落 `idle` / `unknown`，端点行显示 `last_known`
+      （「上次 @host:port」），**不残留**「运行中」。
+- [ ] **跨工作区分组**：另一个工作区的会话落在「其他工作区（N）」分组里，展开/折叠可切换且刷新后记忆；
+      分组只改变呈现，不改变会话集合（本工作区会话仍在主列表）。
+- [ ] **打开方式开关**：侧栏「打开方式」切到「当前进程切换」→ 点条目走 `POST /web/api/sessions/resume`；
+      切回「新窗口打开」→ 点条目走 `POST /web/api/mesh/spawn`（Network 可见）；
+      刷新页面后开关值保持（`localStorage: webSessionOpenMode`）。
+- [ ] **resume 冲突三段式**：点「正被另一个活节点服务」的会话 → 弹窗给出
+      「打开那个窗口（推荐）/ 仍在本进程切换 / 取消」（`status=running_elsewhere`）；
+      选「打开那个窗口」→ 新窗口落在对端端口；选「仍在本进程切换」→ 请求体带 `"force":true` 且切换成功。
+- [ ] **conflict 只读**：造出两个活节点声称同一会话（或直接改节点档案）→ 弹窗列出冲突节点
+      （node_id / pid / workspace），「仍在本进程切换」**禁用**并提示 `aicli-mesh doctor`，
+      「打开那个窗口」隐藏；取消后列表状态不变。
+- [ ] **降级（网格关闭）**：以 `--mesh=false` 启动 → 列表仍是旧视图（无徽标、无分组）；
+      `GET /web/api/sessions` 的 `self=null`、`workspaces=[]`、`endpoint` / `last_known` 全 `null`；
+      resume 不做归属检查（`queued`）；页面不报错、不出现空分组。
+- [ ] **关于页网格小节**：切到「关于」→ 只读展示 `node_id` / `mesh.root` / `counts` / 建议命令；
+      **没有** gc / stop / spawn 按钮；网格关闭时显示降级文案而不是报错。
 
 ## 3. 协议下拉框专项用例（combo popup）
 

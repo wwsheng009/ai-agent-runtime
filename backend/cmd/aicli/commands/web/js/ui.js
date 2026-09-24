@@ -58,6 +58,7 @@ var tabDebugEl = document.getElementById("tab-debug");
 var tabAboutBtn = document.getElementById("tab-about-btn");
 var tabAboutEl = document.getElementById("tab-about");
 var aboutEndpointsEl = document.getElementById("about-endpoints");
+var aboutMeshEl = document.getElementById("about-mesh");
 var aboutTokenValueEl = document.getElementById("about-token-value");
 // 当前会话 ID（值由 sessions.js 写入，见 updateSessionIdentity）
 var aboutSessionIDEl = document.getElementById("about-session-id");
@@ -108,7 +109,7 @@ function activateTab(tabName) {
   if (isDebug) { loadDebugInfo(); }
   // 关于页签的端点清单同样按「进入即重拉」处理：清单由服务端渲染，
   // 与 /debug display 区块同源，新增端点无需改前端。
-  if (isAbout) { loadAboutEndpoints(); }
+  if (isAbout) { loadAboutEndpoints(); loadAboutMesh(); }
 }
 
 // ---- 关于页签：远程调用端点清单（数据源 GET /debug/endpoints?format=json） ----
@@ -251,6 +252,87 @@ function fetchAboutEndpoints(attempt) {
       aboutEndpointsEl.innerHTML = '<span class="about-endpoints-dim">端点清单加载失败：' + esc(msg) + "</span>";
       aboutEndpointsLoading = false;
     });
+}
+
+// ---- 关于页签：网格小节（§5.8，只读）----
+//
+// 数据源：GET /web/api/mesh/self（档案 + derived + mesh 自描述）与
+// GET /web/api/mesh/peers（counts 恒全量口径）。两者都是只读端点、默认脱敏；
+// 治理动作（gc / stop / spawn）留在 CLI，本页不提供按钮（§8 R13）。
+var aboutMeshLoading = false;
+
+export function loadAboutMesh() {
+  if (!aboutMeshEl || aboutMeshLoading) { return; }
+  aboutMeshLoading = true;
+  fetch("/web/api/mesh/self", { cache: "no-store" })
+    .then(function (res) { return res.json(); })
+    .then(function (self) {
+      if (!self || self.available === false) {
+        aboutMeshEl.innerHTML = '<span class="about-endpoints-dim">网格未启用：' +
+          esc(self && self.reason ? self.reason : "mesh disabled") + "</span>";
+        aboutMeshLoading = false;
+        return null;
+      }
+      // counts 只有 peers 视图给（self 段不含）：peers 失败不影响本节点摘要渲染。
+      return fetch("/web/api/mesh/peers", { cache: "no-store" })
+        .then(function (res) { return res.json(); })
+        .catch(function () { return null; })
+        .then(function (peers) {
+          aboutMeshEl.innerHTML = renderAboutMesh(self, peers);
+          aboutMeshLoading = false;
+        });
+    })
+    .catch(function (err) {
+      var msg = err && err.message ? err.message : String(err);
+      aboutMeshEl.innerHTML = '<span class="about-endpoints-dim">网格信息加载失败：' + esc(msg) + "</span>";
+      aboutMeshLoading = false;
+    });
+}
+
+// renderAboutMesh 把 self（+peers.counts）渲染为只读清单 HTML。
+// 纯字符串拼接，所有服务端文本一律 esc() 转义；不含令牌原文（§5.5 红线 3）。
+export function renderAboutMesh(self, peers) {
+  if (!self || self.available === false) {
+    return '<span class="about-endpoints-dim">网格未启用：' +
+      esc(self && self.reason ? self.reason : "mesh disabled") + "</span>";
+  }
+  var mesh = self.mesh || {};
+  var derived = self.derived || {};
+  var workspace = self.workspace || {};
+  var rows = [];
+  function pushRow(label, value) {
+    var text = String(value || "").trim();
+    if (!text) { return; }
+    rows.push('<div class="about-endpoints-row">' +
+      '<span class="about-endpoints-method">' + esc(label) + "</span>" +
+      '<span class="about-endpoints-path">' + esc(text) + "</span></div>");
+  }
+  var node = String(self.node_id || "").trim();
+  if (self.pid) { node = (node ? node + " · " : "") + "pid " + self.pid; }
+  pushRow("节点", node);
+  var wsText = String(workspace.name || "").trim();
+  var wsPath = String(workspace.path || "").trim();
+  if (wsPath) { wsText = (wsText ? wsText + " " : "") + "(" + wsPath + ")"; }
+  pushRow("工作区", wsText);
+  pushRow("网格根", mesh.enabled === false ? "未启用" : mesh.root);
+  pushRow("journal", mesh.journal);
+  if (peers && peers.counts) {
+    var counts = peers.counts;
+    pushRow("节点计数", "live " + (counts.live || 0) + " · stale " + (counts.stale || 0) +
+      " · conflict " + (counts.conflict || 0));
+  }
+  if (derived.lease || derived.busy || derived.pending_inputs) {
+    var d = "归属 " + (derived.lease || "none");
+    if (derived.busy) { d += " · 忙碌"; }
+    if (derived.pending_inputs) { d += " · 排队 " + derived.pending_inputs; }
+    if (derived.peer_count) { d += " · 对端 live " + derived.peer_count; }
+    pushRow("会话", d);
+  }
+  pushRow("建议命令", "aicli-mesh ls --probe · aicli-mesh gc · aicli-mesh show <session>");
+  if (!rows.length) {
+    return '<span class="about-endpoints-dim">网格档案暂不可读。</span>';
+  }
+  return rows.join("");
 }
 
 // ---- 快捷键帮助面板切换 ----

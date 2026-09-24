@@ -756,3 +756,69 @@ aicli-mesh open sess-20260924-abc --json
   `session` 交给 `applyDeepLinkSession()`——与 `current_session_id` 相同则什么都不做（子进程本就以
   该会话启动），不同才走 `/web/api/sessions/resume`。
 - 手工验证步骤见 [web-testing.md](web-testing.md)。
+
+### 9.7 会话列表的网格便捷视图与 resume 归属检查（S11）
+
+**一句话**：`GET /web/api/sessions` 在旧字段之外附带「这个会话归谁 / 在哪个节点 / 什么状态」，
+`POST /web/api/sessions/resume` 在目标会话正被**另一个活节点**服务时先拦下——前端侧栏的徽标、
+端点行、跨工作区分组与冲突弹窗都只读这两处，不新增第二套聚合（Web 子方案 §0.2 纪律 2）。
+
+#### 会话条目的新增字段
+
+| 字段 | 类型 | 语义 |
+|------|------|------|
+| `session_state` | string | `running` / `busy` / `idle` / `unknown`：活节点占用 → `running\|busy`；无活节点且网格可用 → `idle`；网格不可用或档案不可读 → `unknown` |
+| `ownership` | string | `owner` / `peer` / `conflict` / `none`，与 `peers.nodes[].ownership` 同源同义（§9.3） |
+| `conflict_count` | int | 仅 `ownership=conflict` 时非 0：声称该会话的活节点数（侧栏「⚠ 冲突（N 个节点）」） |
+| `workspace_path` / `workspace_name` | string | 条目所属工作区；本进程条目取自会话档案，peer 条目取自节点档案 |
+| `endpoint` | object \| null | 活节点端点摘要（`node_id` / `base_url` / `web_url` / `loopback` / `auth_required` / `reachability` / `busy` / `heartbeat_at`）；无活节点时恒为 `null` |
+| `last_known` | object \| null | 「上次地址」（`host` / `port` / `from`，来自 `mesh/bindings/<session>.json`）：节点已死、端口已换后仍可展示 |
+
+响应顶层新增两段（网格关闭时 `self=null`、`workspaces=[]`）：
+
+| 段 | 语义 |
+|----|------|
+| `self` | `{node_id, mesh_root, workspace_path, workspace_name, counts}`；`counts` 与 §9.3 同口径 |
+| `workspaces[]` | `{path, name, nodes, session_count, running_count}`：`nodes` 复用视图；`session_count` 是本进程清单里绑定到该工作区的会话数；`running_count` 是该工作区「活节点且带会话」的节点数 |
+
+查询参数：
+
+| 参数 | 默认 | 语义 |
+|------|------|------|
+| `sort` | `created_at` | 不变（`updated_at` 可选） |
+| `scope` | `self` | `all` 时额外并入 peers 发现的跨工作区会话，并按 id 去重；合并条目的 `id/title` 取自节点档案 `session` 段、`created_at/updated_at` 用 `activated_at` 顶替（仅展示）、`message_count=0`、`ownership=peer\|conflict` |
+
+**硬契约**：`sessions[].endpoint` 与 `peers.nodes[].endpoint` 同源同形（同一次 `BuildView` 派生）。
+**降级**：网格关闭 / 根不可读 → `200` + 旧口径（`endpoint` / `last_known` 全 `null`、`self=null`、
+`workspaces=[]`），本进程清单条目本身不变，**绝不 5xx**（MN1）。
+
+```powershell
+# 跨工作区视图：主列表 + 其他工作区分组的数据源
+Invoke-RestMethod 'http://127.0.0.1:51234/web/api/sessions?scope=all&sort=updated_at' | ConvertTo-Json -Depth 6
+```
+
+#### resume 的归属检查（`force` 逃生门）
+
+请求体新增 `force`（bool，缺省 `false`）。未带 `force` 时先做**只读**归属判定（不探测网络）：
+
+| `status` | HTTP | 何时 | 响应附加字段 |
+|----------|------|------|--------------|
+| `running_elsewhere` | 200 | 恰有 1 个**别的**活节点声称该会话 | `node_id` / `endpoint`（同 §9.3 形状）/ `web_url`（有端点时）/ `workspace` / `takeover_available:false`（接管是 P2 项，入口未落地） |
+| `conflict` | 200 | ≥2 个活节点声称同一会话（§4.4 冲突） | `nodes[]`：`node_id` / `pid` / `workspace` / `heartbeat_at`，按 `node_id` 升序 |
+
+两者都**不注入队列**；`force=true` 跳过检查直接注入（前端在冲突弹窗里由用户显式选
+「仍在本进程切换」时才带；`conflict` 时前端禁用该动作，提示先跑 `aicli-mesh doctor`）。
+
+```bash
+# 被拦下：换到那个窗口，或显式 force 在本进程切换
+curl -s -X POST http://127.0.0.1:51234/web/api/sessions/resume \
+  -H 'Content-Type: application/json' -d '{"session_id":"sess-20260924-abc"}'
+curl -s -X POST http://127.0.0.1:51234/web/api/sessions/resume \
+  -H 'Content-Type: application/json' -d '{"session_id":"sess-20260924-abc","force":true}'
+```
+
+**降级**：网格关闭（`--mesh=false`）/ 网格不可读 / 占用者就是本进程 → 旧语义（`queued`），
+与 S11 之前逐字一致（MN1）。
+
+> 前端落点：`web/js/sessions.js`（徽标 / 端点行 / 跨工作区分组 / 打开方式开关 / 冲突弹窗）与
+> `web/js/ui.js`（关于页只读网格小节）；手工验证步骤见 [web-testing.md](web-testing.md) §2.7。

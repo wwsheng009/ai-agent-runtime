@@ -76,6 +76,12 @@
     </div>
     <div class="sidebar-search">
       <input id="session-search" type="search" placeholder="搜索会话…" autocomplete="off" title="按标题/摘要过滤会话">
+      <!-- 打开方式开关（Web 子方案 §5.1）：主点击行为 = 新窗口打开（默认）或在本进程切换。
+           值记忆在 localStorage: webSessionOpenMode（用户显式设置过就尊重用户）。 -->
+      <select id="sessions-open-mode" class="session-open-mode" title="主点击行为：新窗口打开（默认）/ 在当前进程切换">
+        <option value="new_window">新窗口打开</option>
+        <option value="in_place">当前进程切换</option>
+      </select>
     </div>
     <div id="session-list"><div class="session-empty">加载中…</div></div>
   </aside>
@@ -115,6 +121,28 @@
         <div id="session-switch-footer">
           <button id="session-switch-cancel-btn" type="button">取消</button>
           <button id="session-switch-confirm-btn" type="button">切换</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 会话归属冲突模态框（Web 子方案 §5.7 / §6.3）：
+         resume 返回 running_elsewhere 时三段式（打开那个窗口 / 仍在本进程切换 / 取消）；
+         ownership=conflict 时只读列出冲突节点并提示 aicli-mesh doctor（禁用 in-place）。 -->
+    <div id="session-conflict-overlay">
+      <div id="session-conflict-modal" role="dialog" aria-modal="true" aria-labelledby="session-conflict-title">
+        <div id="session-conflict-header">
+          <span id="session-conflict-title">会话正在别处运行</span>
+          <button id="session-conflict-close" class="modal-close" type="button" title="取消">✕</button>
+        </div>
+        <div id="session-conflict-body">
+          <p id="session-conflict-text"></p>
+          <p id="session-conflict-hint" class="session-switch-hint" style="display:none"></p>
+          <ul id="session-conflict-nodes" class="session-conflict-nodes" style="display:none"></ul>
+        </div>
+        <div id="session-conflict-footer">
+          <button id="session-conflict-cancel-btn" type="button">取消</button>
+          <button id="session-conflict-force-btn" type="button">仍在本进程切换</button>
+          <button id="session-conflict-open-btn" type="button" class="primary-btn">打开那个窗口（推荐）</button>
         </div>
       </div>
     </div>
@@ -673,6 +701,16 @@
               仅本机回环同源可读（页面已自动注入，手工调用脚本可读该端点或启动行）。
               本地开发时回环地址（127.0.0.1/localhost）自动跳过令牌校验，
               监听在 0.0.0.0 时回环 IP 始终免令牌，本地网络 IP 与远程 IP 需令牌。
+            </p>
+          </dd>
+          <dt>网格（aicli-mesh）</dt>
+          <dd>
+            <div id="about-mesh" class="about-endpoints">加载中…</div>
+            <p class="about-endpoints-hint">
+              多进程网格的<strong>只读</strong>视图（<code>GET /web/api/mesh/self</code> +
+              <code>GET /web/api/mesh/peers</code>）：节点 ID / 网格根 / 节点计数（live / stale / conflict）。
+              治理动作（<code>aicli-mesh gc</code> / <code>stop</code> / <code>spawn</code>）留在 CLI，
+              本页不提供按钮，避免误点（网格 §5.8）。令牌默认脱敏。
             </p>
           </dd>
           <dt>远程调用端点</dt>
