@@ -1,6 +1,7 @@
 # aicli micro web client — 会话切换「新窗口打开」与网格可见性（Web 侧方案）
 
-> 文档状态：📋 设计（**v2**，已对齐节点网格架构；未实施）
+> 文档状态：🚧 **部分落地**（v2，已对齐节点网格架构；S9 落地「⧉ 新窗口打开 + 深链 + spawn/open 端点」，
+> 其余 P0/P1 前端与 Web 层项未落地——**以 §0.1 为权威状态**，§5–§7 仍是设计目标而非现状）
 > 定位：**`aicli-mesh-architecture.md` 的 Web 客户端子方案**。本文只定义「前端交互 + Web 侧接口契约 +
 > Web 侧验收」；数据模型、生命周期、网格控制面、spawn 机制、CLI 工具一律由网格方案定义，本文不重复。
 > 上位方案：[`aicli-mesh-architecture.md`](./aicli-mesh-architecture.md)（命名 `~/.aicli/mesh/`、
@@ -66,6 +67,34 @@ v1 把「问题定义 + 数据模型 + 接口 + spawn + 路线图」全写在一
 1. 前端**不读文件系统**、不拼 `mesh/` 路径、不自己解析档案——一切经本节点 HTTP API（网格 §7.1「CLI 与 Web 同源聚合」）。
 2. Web 端点**不新写聚合逻辑**：`sessions.endpoint`、`peers.nodes` 必须复用 `internal/mesh/view` 的同一份结果。
 3. 浏览器**只持有本节点令牌**，不缓存、不落 `localStorage`、不在 UI 显示 peer 令牌（网格 §6.5、§9.1）。
+
+---
+
+### 0.1 落地状态（2026-09-24 回填）
+
+> 网格侧 S1–S10 已完成（见[实施计划](./aicli-mesh-implementation-plan.md) §10、§15.3）。本文的 Web 侧交付
+> **只落地了 S9 切片的三项**；下表逐项回填，未落地项不视为已交付。
+
+| 交付项 | 状态 | 落点 / 说明 |
+| --- | --- | --- |
+| P1 ① 主点击 = 新窗口 + 预开窗口三态（失败关窗 + Toast） | ✅ 已落地 | `web/js/sessions.js`（`⧉`，悬停出现；手势内 `window.open` 占位 → `POST /web/api/mesh/spawn` → `location.replace(url)`）、`web_handlers_mesh.go`、`internal/mesh/spawn.go` |
+| P1 ⑤ `?session=` 深链 | ✅ 已落地（无独立横幅 UI） | `web_page.go` 注入 head 内联脚本（`?token=` → `sessionStorage` + `replaceState` 抹除；`?session=` → `window.__aicli_deep_link_session`）+ `sessions.js::applyDeepLinkSession`（与 `current_session_id` 不同才 resume） |
+| `aicli-mesh open`（网格 S9，本文范围外） | ✅ 已落地 | `internal/mesh/cli.go`（`--port/--wait/--no-wait/--json`） |
+| P0 ① 侧栏徽标 + 端点行 | ❌ 未落地 | 后端 `sessions.endpoint/ownership` 字段未加（`chatWebSessionListItem` 无该字段），前端未渲染 → 偏差 **D11** |
+| P0 ② 「仅复用 + `auth_required=false`」限制 | ⤳ 被取代 | S9 起主点击恒走 `mesh/spawn`（服务端复用活节点、必要时拉起），该 P0 阶段限制不再适用 |
+| P0 ③ 打开方式开关（默认 `in_place`） | ❌ 未落地 | 无开关；主点击恒新窗口 |
+| P0 ④ 「关于」页网格小节 | ❌ 未落地 | 「关于」页只渲染 `GET /debug/endpoints` 清单（其中含 S5 登记的 `mesh` 分组） |
+| P1 ② `mesh/events` 实时徽标 + 退避重连 + 轮询兜底 | ❌ 未落地 | 前端未订阅 `mesh/events`（端点本身 S7 已就绪）；`js/mesh.js` 未新增（**D5**）→ §10.2「实时徽标」断言当前不可执行 |
+| P1 ③ `resume` 的 `running_elsewhere` 三段式弹窗 | ❌ 未落地 | 后端无该状态（全仓 Go 代码无该标识）→ 偏差 **D12**；`resume` 拒绝语义见实施计划 §15.3 D9 |
+| P1 ④ 跨工作区分组 | ❌ 未落地 | 依赖 P0 ① 的端点数据 |
+| P1 ⑥ 开关默认切 `new_window` | ❌ 未落地 | 无开关（同 P0 ③） |
+| P2 全部（冲突横幅 / 接管二次确认 / 收敛开关文案 / resume SSE 事件化 / 窗口标题节点后缀） | ❌ 未落地 | S10 未排期 |
+| 偏差 D5 / D6 | ✅ 已登记 | 不新增 `js/mesh.js`（并入 `sessions.js`）；`web_page.go` 深链自举（计划未列该文件） |
+
+> **已验证部分**：`web_handlers_mesh_spawn_test.go`（参数透传 / 四态 / 单飞 / 失败带日志尾部）、
+> `internal/mesh/spawn_test.go`、`cli_open_test.go`；E2E-DEBUG-03 的 M1–M10 覆盖**网格行为**
+> （归属不变、令牌不泄漏等），**不覆盖**前端 JS。§10.2 手工断言见 `docs/aicli/web-testing.md` §2.7
+> （其中「实时徽标」依赖 P1 ②，当前不可执行）。
 
 ---
 

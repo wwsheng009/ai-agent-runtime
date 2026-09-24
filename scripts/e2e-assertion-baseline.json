@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_at": "2026-09-24T01:51:59Z",
+  "generated_at": "2026-09-24T04:58:15Z",
   "note": "断言只增不减：删除或改名断言会让 scripts/test-aicli-e2e-all.ps1 失败；新增用 -UpdateBaseline 固化。",
   "scenarios": [
     {
@@ -83,6 +83,25 @@
         "exit/keep-alive",
         "exit/port-released",
         "exit/queued",
+        "startup/endpoints-ready"
+      ]
+    },
+    {
+      "id": "E2E-DEBUG-03",
+      "script": "scripts/test-aicli-debug-endpoints-e2e-mesh.ps1",
+      "assertions": [
+        "gate/mesh-endpoint-coverage",
+        "mesh/cli-api-parity",
+        "mesh/crash-reconcile",
+        "mesh/cross-call-invoke",
+        "mesh/cross-workspace-ops",
+        "mesh/discovery-both-nodes",
+        "mesh/legacy-purge",
+        "mesh/no-token-leak",
+        "mesh/realtime-fanin",
+        "mesh/self-containment",
+        "mesh/session-lease-exclusive",
+        "startup/build-artifacts",
         "startup/endpoints-ready"
       ]
     }

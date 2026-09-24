@@ -192,6 +192,10 @@ aicli chat --pprof
 [web-remote-api.md](web-remote-api.md) §9.6）。前置：两个 `aicli chat`/`resume --pprof --mesh`
 进程（或同一进程即可覆盖「复用」路径），DevTools 打开 Network 与 Application 面板。
 
+> 状态（2026-09-24 回填）：`⧉` 流程、深链与 spawn 端点**已落地**（S9）；「实时徽标」一条依赖前端
+> `mesh/events` 订阅（Web 子方案 P1 ②，**未落地**）→ 暂不可执行，其余各条可执行。
+> 权威状态表见 `docs/plan/aicli-micro-web-client-session-window-plan.md` §0.1。
+
 - [ ] **弹窗资格**：悬停会话 → 点 `⧉` → 新窗口**必须**打开（不是被拦截的提示条）。
       实现要点：占位窗口在点击手势内同步 `window.open('', '_blank')`，spawn 返回后才 `location.replace`；
       若改成「await 之后再 window.open」，Chrome 会拦截——这是本用例的回归重点。
@@ -207,7 +211,7 @@ aicli chat --pprof
       页面正常加载（首个 `/web/api/sessions` 请求已带 `X-AICLI-Token`），列表高亮该会话；
       若把 `session` 改成另一个存在的会话 → 自动走 `/web/api/sessions/resume` 切换；
       不存在的会话 id → Toast「深链会话不存在」，页面不白屏。
-- [ ] **实时徽标**：新窗口连上后，原窗口会话列表的「当前 / 活节点」状态与 `mesh/peers`
+- [ ] **实时徽标（暂不可执行：P1 ② 未落地）**：新窗口连上后，原窗口会话列表的「当前 / 活节点」状态与 `mesh/peers`
       在 ≤2s 内反映新进程（SSE 扇入，见 §9.4）。
 
 ## 3. 协议下拉框专项用例（combo popup）

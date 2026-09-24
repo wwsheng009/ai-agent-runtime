@@ -4,7 +4,7 @@
 > Harness：`scripts/test-aicli-debug-endpoints-e2e.ps1`
 > 首次固化验证：2026-09-23（Windows / pwsh 7，真实 provider），结果见 §7。
 > 姊妹场景：**E2E-DEBUG-02**（非回环鉴权，§7.3 / §9）、
-> **E2E-DEBUG-03**（多进程网格控制面，规划中，§8）。
+> **E2E-DEBUG-03**（多进程网格控制面，已落地，§8）。
 > 相关契约文档：[../aicli/web-remote-api.md](../aicli/web-remote-api.md)、
 > [../aicli/debug-chat-status.md](../aicli/debug-chat-status.md)、
 > [../user-guide/aicli-tui-remote.md](../user-guide/aicli-tui-remote.md)。
@@ -29,8 +29,9 @@ pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -BaselineOnly
 ```
 
 ```powershell
-# 多进程网格（E2E-DEBUG-03，规划中；设计见 §8，架构见 ../plan/aicli-mesh-architecture.md）
-# 两进程互发现 → 定向调用（aicli-mesh call/send）→ 崩溃对账 → GC；harness 尚未落地
+# 多进程网格（E2E-DEBUG-03，已落地；手册见 §8，架构见 ../plan/aicli-mesh-architecture.md）
+# 两进程互发现 → 定向调用（aicli-mesh call/send）→ 崩溃对账 → GC
+# harness：scripts/test-aicli-debug-endpoints-e2e-mesh.ps1
 ```
 
 被测命令就是用户视角的那条（根命令自动分发到默认 `chat` 子命令，两种写法等价）：
@@ -70,7 +71,7 @@ aicli --yolo --web-port 9999          # 等价 aicli chat --yolo --web-port 9999
 - **不做并发压测**：`/web/api/invoke` 是单飞锁，并发调用返回 `409 {"status":"busy"}`；
   并发行为属于契约文档范围，不在本场景。
 - **不做多进程协作**：本场景只驱动**一个**进程，进程之间的发现、定向调用、归属冲突与
-  崩溃对账都不在此处，由 **E2E-DEBUG-03**（多进程网格控制面，规划中，见 §8）覆盖。
+  崩溃对账都不在此处，由 **E2E-DEBUG-03**（多进程网格控制面，已落地，见 §8）覆盖。
   但网格控制面的**单进程只读契约**在本场景断言：`mesh` 分组进清单、`health`/`self`/
   `peers` 形状、令牌默认脱敏与回环 reveal（见 §3 的 S4f/S4g）。为了让口径确定
   （`counts.live` 恒为 1）且不污染真实 `~/.aicli/mesh`，脚本把 `AICLI_MESH_DIR`
@@ -511,12 +512,15 @@ reconciler 争用，实测单请求 924~3467ms。
 （注入阻塞采集器，读仍 <250ms 且报 `collecting`）、TTL 内复用同一样本且年龄单调、JSON 与
 文本在采集未完成时显式标注且不输出零值 `registry`。
 
-## 8. 多进程网格控制面（E2E-DEBUG-03，规划中）
+## 8. 多进程网格控制面（E2E-DEBUG-03，已落地）
 
-> **状态：设计已定，harness 未落地。** 本节是 debug-guide 从「单进程 HTTP 控制面」升级到
-> 「多进程网格控制面」的施工图。命名、目录、数据模型、API 契约与路线图见
-> [../plan/aicli-mesh-architecture.md](../plan/aicli-mesh-architecture.md)（下称「网格方案」）。
-> 本节的命令与端点按该方案书写；**在 harness 落地前不要把它当作可运行手册**。
+> **状态：已落地并固化验证。** harness 是
+> `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1`（M1–M10；含启动自检与清单覆盖门禁共
+> 13 条断言，基线已固化），一键回归 `scripts/test-aicli-e2e-all.ps1` 已把本场景排在 01 → 02 之后
+> （`03-mesh/`）。命名、目录、数据模型、API 契约与路线图见
+> [../plan/aicli-mesh-architecture.md](../plan/aicli-mesh-architecture.md)（下称「网格方案」）；
+> 落地偏差（Windows 判活口径、目标解析统一、M3/M5 断言口径）见
+> [../plan/aicli-mesh-implementation-plan.md](../plan/aicli-mesh-implementation-plan.md) §15.3 的 D5–D12（含 Web 侧两项未落地）。
 
 ### 8.1 为什么要升级：单进程假设的边界
 
@@ -620,9 +624,9 @@ aicli-mesh gc --apply
 |------------------------------|------|----------|--------------|
 | `mesh/discovery-both-nodes` | A、B 都启动就绪后 `aicli-mesh ls --json` + `GET /web/api/mesh/peers` | 两节点均 `state=live`，`endpoint.base_url` 非空且可达 | 档案未写 / 心跳未启 / 扫描路径不一致 |
 | `mesh/cli-api-parity` | 比对 CLI 与 HTTP 两个视图 | 节点集合、会话 ID、`base_url` 完全一致 | 工具与端点各写一套聚合逻辑（违反「同源」） |
-| `mesh/session-lease-exclusive` | B 尝试 resume A 的会话 | 返回 `busy` / `running_elsewhere`；`peers` 中该会话仍只有一个 `owner` | 租约未生效（无互斥 → 双开） |
+| `mesh/session-lease-exclusive` | B 尝试 resume A 的会话 | **拒绝即可**（`session not found` / `busy` / `running_elsewhere` 都是合法拒绝）；`peers` 中该会话仍只有一个 `owner` 且 `counts.conflict=0` | 租约未生效（无互斥 → 双开）/ 归属漂移 |
 | `mesh/cross-call-invoke` | A 通过 `mesh/call`（op=`invoke`，`allow_write`）让 B 跑一轮 | `status=ok`；B 侧 `/web/api/turn` 新增一条 `completed`；`duplicate=false` | op 白名单 / 令牌读取 / 幂等键透传任一环节断裂 |
-| `mesh/realtime-fanin` | B 忙碌翻转期间订阅 A 的 `/web/api/mesh/events` | 时间窗内收到 B 的 `mesh.peer.updated`（`busy=true` 与回落） | 扇入未订阅 / 事件白名单漏 `session.*` |
+| `mesh/realtime-fanin` | 先在 A 上订阅 `/web/api/mesh/events`，**等 A 的流里出现 B 的帧**（扇入订阅接通，A 会合成 `mesh.peer.joined`）再让 A 跨进程调用 B | 时间窗内收到 B 的 `mesh.peer.updated`（`busy=true` 与回落），且同窗口 A 自己不曾 `busy`（定向投递反证） | 订阅未接通就发调用（`busy=true` 落在订阅之前，流不重放历史）/ 扇入未订阅 / 事件白名单漏 `session.*` |
 | `mesh/crash-reconcile` | 强杀 B | A 的 `peers` 在 TTL 内把 B 标 `stale`；`gc --apply` 后 B 的档案与租约消失 | 判活只看文件时间不看 pid / GC 条件过宽误删活节点 |
 | `mesh/no-token-leak` | 扫描 peers 输出、journal 文件、`/debug/endpoints`（JSON+text）、证据目录 | 均不含令牌原文（只允许 `0f3a…` 形式脱敏提示） | 令牌被写进绑定/journal/清单（回归红线） |
 | `mesh/legacy-purge` | `gc --purge-legacy --apply` | 只删旧目录（`web-ports/` 等），`mesh/` 完全不受影响 | 清理路径写错，误伤新目录 |
@@ -641,15 +645,15 @@ aicli-mesh gc --apply
 
 ### 8.6 harness 落地要点（与既有机制对接）
 
-| 事项 | 位置（已验证） | 动作 |
-|------|----------------|------|
-| 场景表 | `scripts/test-aicli-e2e-all.ps1` 的 `$script:scenarios`（第 108–131 行，当前**硬编码 01/02 两项**） | 追加 `E2E-DEBUG-03` 一项（脚本名、超时、是否 `-SkipBuild`） |
-| 参数分支 | 同脚本第 236–245 行（`if ($sc.id -eq 'E2E-DEBUG-01') {...} else {...}`） | 增加第三分支（二进制路径、端口策略、超时） |
-| 断言名 | 基线抽取正则 `Add-(?:Result\|Skip)\s+(?:"([^"]+)"\|''([^'']+)'')`（第 138 行） | 新 harness 必须用 `Add-Result "mesh/..."` **字面量**，否则基线抓不到（等于没有门禁） |
-| 基线固化 | `scripts/e2e-assertion-baseline.json`（`{version,generated_at,note,scenarios[]}`） | 跑 `-UpdateBaseline` 固化 M1–M10；此后**缺失=FAIL、新增=提示** |
-| 字段归一化 | 01 用 `passed/failed`，02 用 `pass/fail/skip`；聚合做交叉校验 `results == PASS+FAIL` | 03 建议直接用 `pass/fail/skip` + `results[]`，**不要再添第三种方言** |
-| 观测工具 | `scripts/aicli-e2e-harness.ps1`：`Invoke-HarnessRequest`（从不抛异常，返回 `ok/status_code/text/json/ms/error`）、`Wait-AicliScreenStable`、`Save-AicliDiagnostics`、`Test-AicliEndpointCoverage` | 03 harness dot-source 复用，不新造轮子 |
-| 证据目录 | 沿用 `artifacts/.../<stamp>/` 约定 | 03 额外落盘 `mesh-ls.json` / `peers.json` / `journal/*.ndjson` 副本（**需脱敏**） |
+| 事项 | 位置 | 落地结果 |
+|------|------|----------|
+| 场景表 | `scripts/test-aicli-e2e-all.ps1` 的 `$script:scenarios` | 已追加 `E2E-DEBUG-03`（`dirName=03-mesh`；恒 `-SkipBuild`，复用 01 构建的 `aicli` 二进制） |
+| 参数分支 | 同脚本的场景执行分支 | 已加第三分支：不占固定端口（`--pprof` 随机端口，地址从节点档案读）；`aicli-mesh` 缺失时由 03 自行构建 |
+| 断言名 | 基线抽取正则 `Add-(?:Result\|Skip)\s+(?:"([^"]+)"\|''([^'']+)'')` | 已全部写成字面量：10 条 `mesh/*` + `gate/mesh-endpoint-coverage` + 2 条 `startup/*` = 13（基线可抓） |
+| 基线固化 | `scripts/e2e-assertion-baseline.json`（`{version,generated_at,note,scenarios[]}`） | 已固化 01=40 / 02=31 / 03=13；`-BaselineOnly` 三项全 PASS，此后**缺失=FAIL、新增=提示** |
+| 字段归一化 | 01 用 `passed/failed`，02 用 `pass/fail/skip`；聚合交叉校验 `results == PASS+FAIL` | 03 沿用 `pass/fail/skip` + `results[]`，未添第三种方言 |
+| 观测工具 | `scripts/aicli-e2e-harness.ps1`：`Invoke-HarnessRequest`、`Test-AicliEndpointCoverage`、`Save-AicliDiagnostics` 等 | 03 harness dot-source 复用，未新造轮子（含「清单里的端点必须被断言覆盖」门禁） |
+| 证据目录 | 沿用 `artifacts/.../<stamp>/` 约定 | 已落盘 `mesh-events.sse`（原始 SSE）、`evidence/*.json`（peers/ls/gc/resume/send 等，落盘前脱敏）、`A\|B\|B2` 的 stdout/stderr |
 
 ### 8.7 失败模式与排查（网格专属）
 
@@ -661,7 +665,10 @@ aicli-mesh gc --apply
 | `mesh/cross-call-invoke` 返回 `refused` | 策略拒绝：写 op 未带 `allow_write`、非回环、或（仅在 `--mesh-restrict-workspace` 开启时）跨工作区被禁 | 读响应 `code`（`mesh_write_not_allowed` / `mesh_cross_workspace_denied`）；按需显式开关，**不要**放宽默认值 |
 | `mesh/cross-call-invoke` 返回 `busy` | 目标会话正忙（单飞锁），与 01 的 `409 busy` 同源 | 等目标 turn 结束再重试；不要换 `client_request_id` 重发 |
 | `mesh/realtime-fanin` 收不到事件 | 扇入未订阅 / peer SSE 断线退避中 / 事件被白名单过滤 | 看 peers 视图的 `dropped_events` 与订阅状态；确认事件类型在白名单内 |
+| `mesh/realtime-fanin` 只有 `busy=false`、缺 `busy=true` | 发调用时 A 的扇入订阅还没接上 B：订阅由 `Subscriber.Sync` 按 tick 建立，接通前 B 的帧不会被扇入（流不重放历史） | 看 run 日志的 `fanin subscription to B: ready=... waited=...ms`；harness 已内置「扇入就绪门」（`-FaninReadySec`，缺省 20s），见方案 §15.3 D10 |
 | `mesh/crash-reconcile` 未转 `stale` | 判活只看心跳时间没看 pid，或心跳 TTL 配得过大 | 检查判活实现（pid 不存在必须立刻 `stale`）与 `--stale-ttl` |
+| `mesh/crash-reconcile` 里被强杀的 B 长期 `live`（Windows 特有） | 判活只看 `OpenProcess` 是否成功：Windows 上只要还有句柄指向进程对象，PID 就不回收，**已退出**进程照样「打开成功」 | 判活必须读退出码（`GetExitCodeProcess == STILL_ACTIVE`）；见方案 §15.3 D7 与 `process_alive_windows_test.go` |
+| `mesh/session-lease-exclusive` 返回 `session not found` | 目标节点的本地会话存储没有该会话（源会话尚未落盘时必然如此），压根到不了租约判定 | 这是**合法拒绝**：断言断的是「归属不变」（owner 仍为 A、`conflict=0`）；租约语义由 `lease_test.go` 覆盖，见方案 §15.3 D9 |
 | `aicli-mesh` 命令不存在 | 工具未构建/未登记 | 按网格方案 §7.5 登记进 `scripts/build.ps1` 的 `$script:toolRegistry` 与 `Makefile` 后重新构建 |
 | 03 在 `-BaselineOnly` 下报「基线缺失」 | 断言名被改名，或基线未固化 | 先 `-UpdateBaseline` 固化；改名视为回归（门禁故意拦） |
 
@@ -683,8 +690,8 @@ aicli-mesh gc --apply
 |------|---------|------|------|
 | **E2E-DEBUG-01**（本文） | `scripts/test-aicli-debug-endpoints-e2e.ps1` | 独立进程启动、`/debug/endpoints` 入口发现、读屏、同步 invoke、幂等回放、turn 后验、`/exit` 优雅退出（HTTP 控制面） | 真实 provider（第 4 步）；无交互桌面要求 |
 | **E2E-DEBUG-02**（§7.3） | `scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1` | 非回环（`--web-host 0.0.0.0` + `--web-token`）鉴权契约：LAN 令牌必需、`?token=`、错误令牌、页面/SSE/`/debug/*` 同权、回环与静态资产豁免、清单不泄露令牌、`/exit` 收尾 | 真实 provider（只走 interrupt 与 `/exit`，不注入 prompt）；需非回环 IPv4（无则相关断言 SKIP） |
-| **E2E-DEBUG-03**（§8，规划中） | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1`（待建） | 多进程网格控制面：两节点互发现、CLI/HTTP 视图同源、会话租约互斥、跨进程定向调用、实时扇入、崩溃对账与 GC、令牌不泄露、旧目录清理、无进程时仍可读、跨工作区默认可显示可操作 | 真实 provider（跨进程 invoke）；无交互桌面要求；需 `aicli-mesh` 工具已构建 |
-| **一键回归**（§5.1） | `scripts/test-aicli-e2e-all.ps1` | 断言基线门禁 + 顺序跑 01 → 02 + 聚合结论（`artifacts/aicli-e2e-all/<stamp>/summary.json`） | 01 与 02 依赖的并集（真实 provider；02 需非回环 IPv4） |
+| **E2E-DEBUG-03**（§8，已落地） | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1` | 多进程网格控制面：两节点互发现、CLI/HTTP 视图同源、会话租约互斥、跨进程定向调用、实时扇入、崩溃对账与 GC、令牌不泄露、旧目录清理、无进程时仍可读、跨工作区默认可显示可操作 | 真实 provider（跨进程 invoke）；无交互桌面要求；需 `aicli-mesh` 工具已构建 |
+| **一键回归**（§5.1） | `scripts/test-aicli-e2e-all.ps1` | 断言基线门禁 + 顺序跑 01 → 02 → 03 + 聚合结论（`artifacts/aicli-e2e-all/<stamp>/summary.json`） | 01/02/03 依赖的并集（真实 provider；02 需非回环 IPv4；03 需 `aicli-mesh`） |
 | 聚合逻辑自测（§5.1） | `scripts/test-aicli-e2e-all-selftest.ps1` | 桩 harness 验证聚合脚本的 4 个分支（字段归一化 / 计数交叉校验 / schema 漂移 / 子场景 FAIL） | 无（不碰 provider、终端、端口） |
 | 统一渲染 + marker exactly-once | `scripts/test-aicli-opencode-windows-terminal-e2e.ps1` | 真实 provider + Windows Terminal（UI Automation）下的渲染/历史/退出 | 交互桌面 |
 | 终端渲染基线 | `scripts/test-aicli-windows-terminal-e2e.ps1` | 合成数据在真实宿主终端中的渲染 | 交互桌面 |

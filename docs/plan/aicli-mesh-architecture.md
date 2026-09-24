@@ -1102,6 +1102,16 @@ Windows 没有 POSIX 权限位：`0600` 语义退化为「依赖用户目录 ACL
 
 ### 11.6 改动面清单（落地 checklist）
 
+> **落地状态：已完成（S1–S10，2026-09-24）。** 下表是设计期的改动面预估；实际落地与偏差见
+> [aicli-mesh-implementation-plan.md](./aicli-mesh-implementation-plan.md) §15.3 的 D1–D12：
+> 新增 `host.go` / `fanin.go` / `spawn.go`（D1–D3）、`cli.go` 未拆分（D4）、
+> 前端不新增 `js/mesh.js`（D5）、`web_page.go` 深链自举（D6）、
+> **Windows 判活必须读退出码**（D7）、`call`/`send` 目标解析与 CLI 合并为唯一实现（D8）、
+> E2E M3/M5 的断言口径与前置（D9/D10）。
+> Web 侧 `sessions.endpoint/ownership` 与 `resume running_elsewhere` **未落地**（D11/D12，见 Web 子方案 §0.1）。
+> 固化验证：E2E-DEBUG-03 单跑 13/13 绿（`artifacts/aicli-debug-endpoints-e2e-mesh/run5/`），
+> 聚合 01 → 02 → 03 全绿（`PASS=6 FAIL=0`，`artifacts/aicli-e2e-all/20260924-131132/`）。
+
 **代码：删除 / 改造 / 新增**
 
 | 动作 | 位置 | 说明 |
