@@ -569,12 +569,12 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 | 3 | M1 | ✅ 已完成 | §1.3 第 1-3 条全部达成 + 零变化回归 | 启动摘要（`chat_profile_summary.go`）+ exec 元数据（`ExecProfileMetadata`）+ 优先级测试；量化实测与两命令闭环证据见变更记录 |
 | 5 | 收尾 | ✅ 已完成 | 子会话 ⊆ 父允许集；不追溯已存在子代理 | V2、V5 已回填；证据见变更记录（Batch 5） |
 | 7 | M3 | ✅ 已完成（CLI + aicli 进程内 web 会话 + server 请求级；server 会话级 routing 转 Batch 12 前置） | 白名单 + 零变化 + server 请求级生效 | V10、V12、**V27** 已回填；Q9/Q11/Q12 见任务卡；server 侧 `skills_runtime.*` 字段级覆盖真实生效（`handler.go:1962`/`:2419`）；证据见变更记录（Batch 7 / Batch 7 server 半程） |
-| 8 | M4 | 未开始 | Profiles 页可编辑 | V6、V7、V22 |
-| 9 | M3 | ✅ 已完成 | T1 双重断言（白名单通过 + 字段真实翻转）+ T2 denylist 断言 + T3 D16/D17 断言；显式选择不被降级 | V8/V9/V11 已回填；修复 profile 路径默认 `permission_mode` 静默丢失；证据见变更记录（Batch 9） |
+| 8 | M4 | ✅ 已完成（代码已提交：`7fc2a3e0` 后端全链路 / `a3bca1e8` 设置页面板） | Profiles 页可编辑 | V6、V7、V22 已回填（Batch 8 前置） |
+| 9 | M3 | ✅ 已完成 | T1 双重断言（白名单通过 + 字段真实翻转）+ T2 denylist 断言 + T3 D16/D17 断言；显式选择不被降级 | V8/V9/V11 已回填；修复 profile 路径默认 `permission_mode` 静默丢失；落地证据：设计文档「Batch 9 落地状态」块 + `internal/profile/overrides_catalog_test.go` |
 | 10 | M2 | ✅ 已完成 | A1/A2/A3/A6 全绿（另覆盖 A4 持久化半程 / A5） | V13/V14/V18/V26 已回填；新增 D30；证据见变更记录 |
-| 11 | M2/M5 | 11a ✅ 已完成；11b 待 Batch 13 | 11a：命令面可用 + A4 resume 半程/A7/A8 全绿；11b：TUI 生命周期子命令（随 Batch 13 后端启用） | V17 已回填；证据见变更记录（Batch 11a） |
+| 11 | M2/M5 | 11a ✅ 已完成；11b 待 Batch 13 | 11a：命令面可用 + A4 resume 半程/A7/A8 全绿；11b：TUI 生命周期子命令（随 Batch 13 后端启用） | V17 部分回填（命令面可用；写回实现细节随 Batch 13 E7 复核）；证据见变更记录（Batch 11a） |
 | 12 | M4 | ✅ 已完成 | composer 可切换 + Switch Report 可见 + R20 能力门控（旧后端不注册命令） | V15/V16/V19 已回填；证据见变更记录（Batch 12） |
-| 13 | M5 | 未开始 | E2E-1~5 + A9-A12 | V17、V22、V24、V25、Q19/Q20/Q21 |
+| 13 | M5 | 🚧 进行中（slice 1：`apply` 执行核心接线 + 会话契约；A12 的 apply 半程已绿） | E2E-1~5 + A9-A12 | V22 已回填；V17 部分回填；V24、V25 待回填；Q19/Q20/Q21 |
 | 14 | M6 | 未开始 | E2E-6/7 + A13/A14 | V20、V21、Q22 |
 | 6 | P2 | 不承诺 | — | 按需排期 |
 
@@ -631,3 +631,10 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 > ⑤ 测试：后端 `session_profile_switch_test.go` 4 例（持久化绑定并清失效面 / 未知 profile 是校验错误且状态不动 / 驱逐空闲 actor 使下一轮取新面 / 在途 turn 不打断并在下一边界收敛）；前端 `use-composer-command-executor.profile.test.tsx` 11 例（弹窗打开、ref 切换回执、大小写不敏感唯一命中、未命中/解析失败/目录未就绪三种"不可用"不混淆、无会话不请求、在途回执、差异告警、失败回填、宿主未接线）+ `composer-profile-dialog.test.tsx` 11 例 + `composer-profile-options.test.ts` 12 例 + `use-composer-command-surface.test.tsx`（候选注入/能力门控）。测试文件按行数门禁拆分出 `use-composer-command-executor.test-helpers.tsx`（共享脚手架；`vi.mock` 提升语义要求 mock 留在各测试文件内，故脚手架只放渲染/驱动）。
 > ⑥ 回归：`go vet ./internal/api/skills` 退出 0；`go build ./...` OK；`go test ./internal/api/skills -count=1` 全绿（40.1s）；前端 `npx vitest run`（两个 executor 文件 34 例）通过、`npm run test` 全量 329 files / 2735 tests 通过、`npm run lint` 退出 0（i18n/no-backups/max-lines/message-tokens 全过）、`npx tsc -b` 退出 0。
 > ⑦ 核实回填：V15（server 不经 `chatWebSession()`，actor 句柄 `hub.Get` 精确可得）、V16（executor 分支结构与 popupSelect 回填通路）、V19（单例仅 aicli 本地 web 适用，server 按 sessionID 精确失效）→ 设计文档附录 D 第 3/4/7 项同步回填。
+> 变更记录：2026-09-24 实施（Batch 13 **slice 1** 完成并验证——`apply` 执行核心接线与会话契约；G3 / A12 的 apply 半程）：
+> ① 交付物（后端）：`ApplyRuntimeProfile`（`profiles_write_handlers.go`）由 501 转真实实现——请求体 `profileApplyRequest{SessionID}`（**必填**，D31）→ `applySessionProfileSwitch`（Batch 12 执行核心，五阶段与失效动作零复制）→ 响应 `{ok, session_id, profile, switch_report}`（`switch_report` 与 composer `/profile` 同一 JSON 契约，无第二套语义）。错误分类：缺 `session_id` → 400（可执行提示）、切换校验失败 → 400、租约冲突沿用 `writeSessionLeaseConflict`、未知 profile 沿用 Batch 8 的 `writeProfileTargetError` 口径、未知会话 → **404**（`chat.ErrSessionNotFound`，与 `handler.go` 会话读取口径一致，不落 500）。
+> ② 前端（设置页不再假报警）：设置页（`/runtime-config`）**没有会话上下文** → 页内 `apply` 只做引导——`profiles.tsx` 删除 `runApply` 与 `applyNotImplemented` 状态、按钮固定禁用（`applyDisabled`）；`profile-list-row.tsx` 的 `onApply` 转可选；i18n（zh/en）删 `applyNotImplemented`，`applyDisabled` 文案指向"在会话内用 `/profile` 切换"；`mutations.ts applyRuntimeProfile` 保留为端点绑定（含 API 测试），注释固化"sessionId 必填、服务端不推断「当前会话」"。
+> ③ 测试：后端 `TestRuntimeProfilesAPI_ApplyWiresSessionSwitchCore`（缺参 400 + 提示 / 显式会话真实切换：`effective_at=next_turn`、`anchor_cleared=true`、sessionmeta 绑定落库、冻结锚点被清 / **A12 作用域**：其它会话与 `default` 零变化 / 未知会话 404）；`TestRuntimeProfilesAPI_SetDefaultAndNotImplementedBoundaries` 的 apply 断言由 501 改为 400；前端 `profiles.test.tsx` 末条用例改为"apply 在本页只做引导：按钮禁用、不发请求"。
+> ④ 回归：`gofmt -l` 对改动文件零输出；`go test ./internal/api/skills -count=1` 全绿（41.350s）；前端 `npx tsc -b` 退出 0、`npm run test` 全量 329 files / 2735 tests 通过、`npm run lint` 退出 0（i18n/no-backups/max-lines/message-tokens 全过）。
+> ⑤ 核实与登记：设计文档 §G3 新增 **D31**（apply 必须显式 `session_id`，服务端不推断"当前会话"；缺参 400 / 未知会话 404）；修正本表过期行——Batch 8「未开始」→ ✅ 已完成（`7fc2a3e0`/`a3bca1e8`）、Batch 9 悬空引用改指设计文档「Batch 9 落地状态」块、Batch 11 行 V17 改标"部分回填（命令面可用；写回细节随 Batch 13 E7）"、Batch 13 行 → 🚧 进行中（slice 1）。
+> ⑥ Batch 13 剩余：`from_session`（create 第三模式）/ save-as 差分固化（D24）/ export·import（G5）/ 引用完整性四类检查（D25，V24 待回填）/ 原子写与冲突检测（R24，V25 待回填）/ TUI 11b 生命周期子命令 / 前端创建向导与列表操作 / E2E-1~5 与 A9-A11（A12 的 apply 半程本 slice 已绿）。

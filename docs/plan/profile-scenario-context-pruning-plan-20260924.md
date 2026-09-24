@@ -1070,9 +1070,11 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 | 方法 | 路径 | 语义 | 生效范围 |
 |---|---|---|---|
 | POST | `/api/runtime/profiles/{ref}/default` | 设为默认 profile | **新会话**（写 `config.profiles.default_profile`，走层感知写回） |
-| POST | `/api/runtime/profiles/{ref}/apply` | 应用到当前会话 | **当前会话下一 turn**（= 第三部分 `set_profile`，同一执行核心 D21） |
+| POST | `/api/runtime/profiles/{ref}/apply` | 应用到**指定会话**（`session_id` 必填，D31：不推断"当前会话"） | **该会话下一 turn**（= 第三部分 `set_profile`，同一执行核心 D21） |
 
 **D26**：两按钮在 UI 上并列且文案互斥说明——"新会话默认（不影响当前）" vs "立即切换（当前会话，下一轮生效）"。创建完成引导（G1）复用同一对动作，不新增语义。
+
+**D31（apply 的会话参数化，Batch 13 slice 1 补）**：HTTP `apply` **必须**显式携带 `session_id`，服务端**不推断**"当前会话"——设置页（`/runtime-config`）等无会话上下文的调用方没有"当前会话"可推断，猜测等于把别的会话切走。缺参 = 400 + 可执行提示；未知会话 = **404**（客户端语义，与 `handler.go` 会话读取口径一致，不落 500）。**A12 的 apply 作用域**（只动显式指定的那一个会话；`default` 与其它会话零变化）由 `TestRuntimeProfilesAPI_ApplyWiresSessionSwitchCore` 钉住；会话内立即切换仍走 composer `/profile`（D21 同一执行核心，不新增第二套语义）。
 
 ### G4 — TUI 可达性补全：`/profile` 全生命周期子命令（D27）
 
