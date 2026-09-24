@@ -264,20 +264,6 @@ func TestProfileCommandLifecycleRequiresRefWithoutBinding(t *testing.T) {
 	}
 }
 
-// §23 G4：save-as（D24 差分固化）随 Batch 13 后续 slice 落地，当前必须显式拒绝。
-func TestProfileCommandSaveAsIsExplicitlyDisabled(t *testing.T) {
-	session, _, cleanup := newProfileLifecycleTestSession(t)
-	defer cleanup()
-
-	text, handled := chatProfileCommandText(session, "/profile save-as tui-x")
-	if !handled {
-		t.Fatal("/profile save-as 必须被命令面接管")
-	}
-	if !strings.Contains(text, "尚未启用") {
-		t.Fatalf("/profile save-as 应显式说明未启用，got: %s", text)
-	}
-}
-
 // help 文本必须覆盖新增的生命周期子命令（Tab 补全与文档同源）。
 func TestProfileCommandHelpTextListsLifecycleSubcommands(t *testing.T) {
 	session, _, cleanup := newProfileLifecycleTestSession(t)

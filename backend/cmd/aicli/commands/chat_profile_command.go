@@ -34,7 +34,7 @@ func chatProfileUsageText() string {
 		"  /profile save [--to session|workspace|config] [--yes]   持久化默认 profile",
 		"  /profile create <name> [--template coding|review|minimal|docs] [--to user|project] [--force]",
 		"  /profile duplicate <ref> <name> [--to user|project]     复制（不覆盖同名）",
-		"  /profile save-as <name> [--to user|project]        从当前会话固化差分（待启用，见下）",
+		"  /profile save-as <name> [--to user|project]        从当前会话固化差分（D24；不覆盖同名）",
 		"  /profile edit [<ref>] [--open]                     打印 profile.yaml 路径；--open 拉起 $EDITOR",
 		"  /profile rename <ref> <new-name>                   重命名（同层；含配置引用改写）",
 		"  /profile move <ref> --to user|project              层级移动（跨层；同层拒绝）",
@@ -42,7 +42,8 @@ func chatProfileUsageText() string {
 		"  /profile export [<ref>] [--out <file|dir>]         导出 zip（默认 ./<name>.zip）",
 		"  /profile help                                      显示本用法",
 		"说明: 切换在下一个 turn 边界生效；profile 只能收窄安全基线，不会放宽权限",
-		"      save-as（D24 差分固化）随 Batch 13 后续 slice 启用；复杂编辑仍在前端 Profiles 页",
+		"      save-as 固化的是与内置默认面的差分（prompt/权限模式不在 profile.yaml 字段内，报告中逐项明示）",
+		"      复杂编辑仍在前端 Profiles 页",
 	}, "\n")
 }
 
@@ -171,10 +172,14 @@ func tryExecuteStructuredProfileCommand(session *ChatSession, command string) (C
 	case "help", "--help", "-h":
 		return commandTextResult(chatProfileUsageText()), true
 	case "save-as":
-		// save-as（D24 差分固化）需要"会话实际生效面 vs 基线"的差分核心，随 Batch 13
-		// 后续 slice 落地；此处显式拒绝而不是静默降级，避免"看起来可用但什么都没发生"。
-		return commandErrorResult(fmt.Errorf(
-			"/profile save-as 尚未启用（D24 差分固化随 Batch 13 后续 slice 落地）；当前可用: status|list|show|diff|use|pick|reload|off|save|create|duplicate|edit|rename|move|delete|export")), true
+		if len(positional) == 0 {
+			return commandErrorResult(fmt.Errorf("用法: /profile save-as <name> [--to user|project]")), true
+		}
+		text, err := chatProfileSaveAsLifecycleText(session, positional[0], flags.Layer)
+		if err != nil {
+			return commandErrorResult(err), true
+		}
+		return commandTextResult(text), true
 	default:
 		return commandErrorResult(fmt.Errorf("未知子命令 /profile %s\n\n%s", sub, chatProfileUsageText())), true
 	}

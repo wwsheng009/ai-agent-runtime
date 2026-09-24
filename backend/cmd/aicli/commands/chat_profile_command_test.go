@@ -403,9 +403,9 @@ func TestProfileCommandPickWithoutProfilesExplainsHow(t *testing.T) {
 	}
 }
 
-// §23 G4：生命周期子命令已接线（Batch 13 slice 4）；缺参数时给用法或"缺少引用"，
-// 而不是报"未启用"，也不静默挑一个 profile 下手。save-as（D24 差分固化）仍显式
-// 拒绝，专测见 chat_profile_lifecycle_test.go。
+// §23 G4：生命周期子命令已接线（Batch 13 slice 4/5）；缺参数时给用法或"缺少引用"，
+// 而不是报"未启用"，也不静默挑一个 profile 下手。save-as（D24 差分固化）的
+// 产物与无差分路径专测见 chat_profile_lifecycle_saveas_test.go。
 func TestProfileCommandLifecycleSubcommandsRequireArguments(t *testing.T) {
 	session, _, cleanup := newProfileLifecycleTestSession(t)
 	defer cleanup()
