@@ -114,6 +114,8 @@ export function normalizeProfileListResponse(
     defaultProfile: readAliasedString(record, "defaultProfile"),
     defaultRoot: readAliasedString(record, "defaultRoot"),
     profiles,
+    // R20：缺字段（旧后端）按「不支持会话级切换」处理，命令不注册。
+    sessionSwitch: readBoolean(record.session_switch ?? record.sessionSwitch),
   };
 }
 

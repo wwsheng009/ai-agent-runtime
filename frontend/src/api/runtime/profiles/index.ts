@@ -15,6 +15,14 @@ export {
 } from "./mutations";
 export { normalizeProfileView, readProfileDeleteBlockingReferences } from "./normalize";
 export {
+  normalizeSessionProfileSwitchReport,
+  setSessionProfile,
+  type SessionProfileSwitchChanged,
+  type SessionProfileSwitchReport,
+  type SessionProfileSwitchResponse,
+  type SetSessionProfileOptions,
+} from "./session-switch";
+export {
   getRuntimeProfile,
   listRuntimeProfileReferences,
   listRuntimeProfiles,

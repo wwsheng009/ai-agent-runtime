@@ -8,6 +8,7 @@
 // - 结果通知只持 i18n key 与插值（模型层不持文案），渲染层本地化。
 import { useCallback, useRef, useState } from "react";
 
+import type { SessionProfileSwitchReport } from "@/api/runtime/profiles";
 import { executeSkill } from "@/api/runtime/skills";
 import { createLogger } from "@/core/logger";
 import {
@@ -16,6 +17,10 @@ import {
   parseRenameCommandArgs,
 } from "@/lib/composer-builtin-commands";
 import type { ComposerCommand } from "@/lib/composer-commands";
+import {
+  resolveComposerProfileRef,
+  type ComposerProfileCandidate,
+} from "@/lib/composer-profile-options";
 import {
   exportSessionTrajectoryJsonl,
   type SessionTrajectoryExportResult,
@@ -44,6 +49,8 @@ export type UseComposerCommandExecutorOptions = {
   onRenameSession?: (sessionId: string, title: string) => Promise<void>;
   /** `/model`：宿主目录与「应用模型 / 打开弹窗」动作；缺省时命令如实报不可用。 */
   modelSelection?: ComposerModelSelectionBridge;
+  /** `/profile`：宿主目录与「切换 profile / 打开弹窗」动作；缺省时命令如实报不可用。 */
+  profileSelection?: ComposerProfileSelectionBridge;
   /** `/skill`：技能名称列表与「打开弹窗」动作；缺省时命令如实报不可用。 */
   skillNames?: string[];
   openSkillDialog?: () => void;
@@ -66,6 +73,18 @@ export type ComposerModelSelectionBridge = {
   /** 应用模型；与 composer 常驻座位同一处理器（单一事实源，不另建选择通道）。 */
   applyModel: (modelId: string) => void;
   /** 打开 `/model` 弹窗（无参数提交时使用）。 */
+  openDialog: () => void;
+};
+
+export type ComposerProfileSelectionBridge = {
+  /**
+   * 目录候选全集（含不可解析项）：回执要能区分「不存在」与「存在但不可用」，
+   * 菜单候选只用其中的 `valid` 项（见 `lib/composer-profile-options.ts`）。
+   */
+  candidates: readonly ComposerProfileCandidate[];
+  /** 切换当前会话 profile；返回后端 Switch Report（下一轮生效语义由回执呈现）。 */
+  applyProfile: (profileRef: string) => Promise<SessionProfileSwitchReport>;
+  /** 打开 `/profile` 弹窗（无参数提交时使用）。 */
   openDialog: () => void;
 };
 
@@ -109,6 +128,7 @@ export function useComposerCommandExecutor({
   sessionId,
   onRenameSession,
   modelSelection,
+  profileSelection,
   skillNames = [],
   openSkillDialog,
   onRunSkillTurn,
@@ -283,6 +303,97 @@ export function useComposerCommandExecutor({
     [modelSelection],
   );
 
+  const runProfile = useCallback(
+    (args: string) => {
+      const requested = args.trim();
+      if (requested.length === 0) {
+        // 无参数：打开 `/profile` 弹窗（候选由宿主持有，执行走同一处理器）。
+        if (!profileSelection) {
+          setNotice({
+            tone: "error",
+            messageKey: "composer.builtin.profile.unavailable",
+          });
+          return;
+        }
+        profileSelection.openDialog();
+        return;
+      }
+      if (!profileSelection || profileSelection.candidates.length === 0) {
+        // 目录未就绪（拉取中 / 失败 / 后端未声明能力）：不按「profile 不存在」报。
+        setNotice({
+          tone: "error",
+          messageKey: "composer.builtin.profile.unavailable",
+        });
+        return;
+      }
+      const candidate = resolveComposerProfileRef(
+        profileSelection.candidates,
+        requested,
+      );
+      if (!candidate) {
+        setNotice({
+          tone: "error",
+          messageKey: "composer.builtin.profile.notFound",
+          values: { profile: requested },
+        });
+        return;
+      }
+      if (!candidate.valid) {
+        // 存在但解析失败：如实报「不可用 + 原因」，不伪装成「不存在」。
+        setNotice({
+          tone: "error",
+          messageKey: "composer.builtin.profile.invalid",
+          values: {
+            profile: candidate.label,
+            reason: candidate.invalidReason || candidate.ref,
+          },
+        });
+        return;
+      }
+      if (!sessionId) {
+        setNotice({
+          tone: "error",
+          messageKey: "composer.builtin.profile.noSession",
+        });
+        return;
+      }
+      void (async () => {
+        try {
+          const report = await profileSelection.applyProfile(candidate.ref);
+          const warnings = report.warnings ?? [];
+          // 回执口径（D23/D30）：切换是「下一轮生效」；在途回合存在时显式说明
+          // 本回合仍走旧面；provider/model/permission 差异以 warnings 呈现
+          // （只报告不隐式应用），这里把首条告警一并回显，不吞掉。
+          setNotice({
+            tone: "success",
+            messageKey:
+              warnings.length > 0
+                ? "composer.builtin.profile.appliedWithWarnings"
+                : report.inFlightTurn
+                  ? "composer.builtin.profile.appliedAfterTurn"
+                  : "composer.builtin.profile.applied",
+            values: {
+              profile: candidate.label,
+              count: warnings.length,
+              warning: warnings[0] ?? "",
+            },
+          });
+        } catch (error) {
+          logger.error("profile switch failed", {
+            profileRef: candidate.ref,
+            error,
+          });
+          setNotice({
+            tone: "error",
+            messageKey: "composer.builtin.profile.failed",
+            values: { message: describeError(error) },
+          });
+        }
+      })();
+    },
+    [profileSelection, sessionId],
+  );
+
   const runSkill = useCallback(
     async (args: string) => {
       const trimmedArgs = args.trim();
@@ -396,6 +507,9 @@ export function useComposerCommandExecutor({
         case "model":
           runModel(args);
           return true;
+        case "profile":
+          runProfile(args);
+          return true;
         case "skill":
           runSkill(args);
           return true;
@@ -404,7 +518,7 @@ export function useComposerCommandExecutor({
           return false;
       }
     },
-    [runExport, runFeedback, runModel, runRename, runSkill],
+    [runExport, runFeedback, runModel, runProfile, runRename, runSkill],
   );
 
   const dismissNotice = useCallback(() => setNotice(null), []);

@@ -5,6 +5,9 @@
 //   `/rename`（会话重命名）、`/feedback`（log-only 反馈入口，无上报渠道）与
 //   `/model`（模型选择：宿主目录驱动候选 + 无参数弹窗）。执行器接线见
 //   `use-composer-command-executor.ts`；
+// - Batch 12：`/profile`（会话级 profile 切换）**仅在宿主确认后端能力后注册**
+//   （`profileSwitchSupported`，来自 `GET /api/runtime/profiles` 的
+//   `session_switch` 能力广告，R20）——旧后端不注册，而不是注册后执行时报错；
 // - `/model` 的候选项由宿主持有（真实运行时目录，见 `lib/composer-model-options.ts`），
 //   清单本身不内置任何模型名——没有目录就没有候选，不伪造；
 // - `/feedback` 是「log-only」入口：只写本地结构化日志，**不声称已上报**
@@ -21,6 +24,14 @@ export type ComposerBuiltinCommandHostOptions = {
   modelOptions?: readonly ComposerCommandOption[];
   /** `/skill` 的第二级候选（宿主用真实运行时目录组装）；缺省 / 空数组 = 无候选。 */
   skillOptions?: readonly ComposerCommandOption[];
+  /** `/profile` 的第二级候选（宿主用真实运行时目录组装）；缺省 / 空数组 = 无候选。 */
+  profileOptions?: readonly ComposerCommandOption[];
+  /**
+   * 后端是否支持会话级 profile 切换（`set_profile` 运行时命令，R20）。
+   * 缺省 false = **不注册** `/profile`：在旧后端上注册一条注定失败的命令，
+   * 只会把「后端不支持」伪装成「切换失败」。
+   */
+  profileSwitchSupported?: boolean;
 };
 
 /** 组装内置命令清单；宿主数据（`/model` 候选）由调用方注入，清单本身不持有模型名。 */
@@ -29,6 +40,17 @@ export function buildComposerBuiltinCommands(
 ): readonly ComposerCommandDefinition[] {
   const modelOptions = hostOptions.modelOptions ?? [];
   const skillOptions = hostOptions.skillOptions ?? [];
+  const profileOptions = hostOptions.profileOptions ?? [];
+  const profileCommand: ComposerCommandDefinition | null =
+    hostOptions.profileSwitchSupported
+      ? {
+          name: "profile",
+          kind: "popupSelect",
+          descriptionKey: "composer.builtin.profile.description",
+          argumentHintKey: "composer.builtin.profile.argumentHint",
+          options: profileOptions.length > 0 ? profileOptions : undefined,
+        }
+      : null;
   return [
     {
       name: "export",
@@ -62,6 +84,7 @@ export function buildComposerBuiltinCommands(
       argumentHintKey: "composer.builtin.skill.argumentHint",
       options: skillOptions.length > 0 ? skillOptions : undefined,
     },
+    ...(profileCommand ? [profileCommand] : []),
   ];
 }
 

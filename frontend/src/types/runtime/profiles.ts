@@ -39,6 +39,12 @@ export type RuntimeProfileListResponse = {
   /** 默认 profile 的根目录。 */
   defaultRoot: string;
   profiles: RuntimeProfileListEntry[];
+  /**
+   * 能力广告（R20）：后端支持会话级 profile 切换（`set_profile` 运行时命令）
+   * 时为 true。旧后端不返回该字段 → 归一化为 false → composer 不注册
+   * `/profile` 命令（而不是注册后执行时报错）。
+   */
+  sessionSwitch: boolean;
 };
 
 /** 工具面：allowlist/denylist 为 profile 声明（可写），其余为后端推导（只读）。 */

@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useMemo, useState } from "react";
 
+import { setSessionProfile, type SessionProfileSwitchReport } from "@/api/runtime/profiles";
 import { MessageComposer } from "@/components/workspace/message-composer";
 import { ComposerContextUsageControl } from "@/components/workspace/composer-context-usage-control";
 import { ComposerPermissionModeControl } from "@/components/workspace/composer-permission-mode-control";
@@ -9,6 +10,7 @@ import { MessageList } from "@/components/workspace/message-list";
 import { PendingInteractionBar } from "@/components/workspace/pending-interaction-bar";
 import { TodoPanel } from "@/components/workspace/task-panel";
 import { ComposerModelDialog } from "@/components/workspace/composer-model-dialog";
+import { ComposerProfileDialog } from "@/components/workspace/composer-profile-dialog";
 import { ComposerSkillDialog } from "@/components/workspace/composer-skill-dialog";
 import { JobsPanel } from "@/components/workspace/jobs-panel";
 import { SessionAgentsPanel } from "@/components/workspace/session-agents-panel";
@@ -30,6 +32,7 @@ import { useComposerFileReferences } from "@/hooks/workspace/composer/use-compos
 import { type ComposerMenuState } from "@/hooks/workspace/composer/use-composer-menu";
 import { useComposerCommandSurface } from "@/hooks/workspace/composer/use-composer-command-surface";
 import { type ComposerSkillTurnRunner } from "@/hooks/workspace/composer/use-composer-command-executor";
+import { useRuntimeProfileCatalog } from "@/hooks/workspace/composer/use-runtime-profile-catalog";
 import { useSessionAgents } from "@/hooks/use-session-agents";
 import { type ComposerReferenceGroup } from "@/lib/composer-menu";
 import { artifactReferenceGroup } from "@/lib/composer-references";
@@ -202,9 +205,30 @@ export function WorkspaceMainSection({
     },
     [onSubmit],
   );
+
+  // Batch 12：`/profile` 运行时目录（宿主数据源，一次拉取）+ 切换动作（单一处理器：
+  // 命令行提交与弹窗点选都经命令执行器派发，回执文案一致）。
+  const runtimeProfileCatalog = useRuntimeProfileCatalog();
+  const handleProfileSwitch = useCallback(
+    async (profileRef: string): Promise<SessionProfileSwitchReport> => {
+      const targetSessionId = selectedThread.sessionId?.trim() ?? "";
+      if (targetSessionId.length === 0) {
+        // 新会话尚未登记：如实抛错（执行器转成回执），不把请求发给空 id。
+        throw new Error("profile switch requires a registered session");
+      }
+      const result = await setSessionProfile(targetSessionId, profileRef);
+      if (!result.ok) {
+        throw new Error("profile switch was rejected by the runtime");
+      }
+      return result.report;
+    },
+    [selectedThread.sessionId],
+  );
   const composerCommandSurface = useComposerCommandSurface({
     runtimeModels,
     runtimeSkills,
+    runtimeProfiles: runtimeProfileCatalog.catalog,
+    onProfileSwitch: handleProfileSwitch,
     onDraftChange,
     onModelChange,
     onRenameSession: onRenameRuntimeSession,
@@ -479,6 +503,15 @@ export function WorkspaceMainSection({
         onSelect={composerCommandSurface.selectSkill}
         open={composerCommandSurface.skillDialogOpen}
         skills={runtimeSkills?.skills.map((s) => s.name) ?? []}
+      />
+      <ComposerProfileDialog
+        candidates={composerCommandSurface.profileCandidates}
+        error={runtimeProfileCatalog.error}
+        loading={runtimeProfileCatalog.loading}
+        onClose={composerCommandSurface.closeProfileDialog}
+        onRetry={runtimeProfileCatalog.refresh}
+        onSelect={composerCommandSurface.applyProfile}
+        open={composerCommandSurface.profileDialogOpen}
       />
     </section>
   );

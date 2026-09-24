@@ -8,14 +8,20 @@
 import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import type { SessionProfileSwitchReport } from "@/api/runtime/profiles";
 import {
   useComposerCommandExecutor,
   type ComposerCommandExecutor,
   type ComposerModelSelectionBridge,
+  type ComposerProfileSelectionBridge,
   type ComposerSkillTurnRunner,
 } from "@/hooks/workspace/composer/use-composer-command-executor";
 import { buildComposerBuiltinCommands } from "@/lib/composer-builtin-commands";
-import type { ComposerCommand, ComposerCommandDefinition } from "@/lib/composer-commands";
+import {
+  createComposerCommandRegistry,
+  type ComposerCommand,
+  type ComposerCommandDefinition,
+} from "@/lib/composer-commands";
 import {
   composerModelCatalogGroups,
   composerModelCommandOptions,
@@ -23,11 +29,20 @@ import {
   type ComposerModelCatalogGroup,
 } from "@/lib/composer-model-options";
 import {
+  composerProfileCandidates,
+  composerProfileCommandOptions,
+  type ComposerProfileCandidate,
+} from "@/lib/composer-profile-options";
+import {
   composerSkillCommandText,
   composerSkillCommandOptions,
   composerSkillNames,
 } from "@/lib/composer-skill-options";
-import type { RuntimeModelsResponse, RuntimeSkillCatalog } from "@/types/runtime";
+import type {
+  RuntimeModelsResponse,
+  RuntimeProfileListResponse,
+  RuntimeSkillCatalog,
+} from "@/types/runtime";
 
 export type ComposerCommandResultBanner = {
   text: string;
@@ -48,6 +63,18 @@ export type ComposerCommandSurface = {
   skillDialogOpen: boolean;
   openSkillDialog: () => void;
   closeSkillDialog: () => void;
+  /** `/profile` 弹窗状态（无参数提交 `/profile` 时打开）。 */
+  profileDialogOpen: boolean;
+  openProfileDialog: () => void;
+  closeProfileDialog: () => void;
+  /** `/profile` 弹窗候选（含不可解析项；弹窗只呈现 valid 项）。 */
+  profileCandidates: readonly ComposerProfileCandidate[];
+  /**
+   * `/profile` 弹窗点选的统一动作：走与命令行提交同一条执行器派发路径
+   * （同一回执、同一错误隔离），不另建选择通道。命令未注册（后端不支持）时
+   * 返回 false，调用方据此不产生任何「已切换」假象。
+   */
+  applyProfile: (profileRef: string) => boolean;
   /**
    * 选中 skill 的统一动作（菜单二级候选点选 / 弹窗点选）：
    * 只把 `/skill <name> ` 回填到输入框，不直接执行——执行发生在用户提交时。
@@ -67,6 +94,10 @@ export type UseComposerCommandSurfaceOptions = {
   runtimeModels?: RuntimeModelsResponse | null;
   /** 宿主持有的技能目录；null / 缺省 = 未就绪（不产生候选）。 */
   runtimeSkills?: RuntimeSkillCatalog | null;
+  /** 宿主持有的 profile 目录；null / 缺省 = 未就绪（不产生候选）。 */
+  runtimeProfiles?: RuntimeProfileListResponse | null;
+  /** 切换当前会话 profile；缺省时 `/profile` 如实报不可用（不注册执行分支）。 */
+  onProfileSwitch?: (profileRef: string) => Promise<SessionProfileSwitchReport>;
   /** 应用模型；与 composer 常驻座位同一处理器。 */
   onModelChange: (modelId: string) => void;
   /** 回填 composer 草稿；`/skill` 点选候选与弹窗选择共用（只回填不执行）。 */
@@ -82,6 +113,8 @@ export type UseComposerCommandSurfaceOptions = {
 export function useComposerCommandSurface({
   runtimeModels,
   runtimeSkills,
+  runtimeProfiles,
+  onProfileSwitch,
   onModelChange,
   onDraftChange,
   onRenameSession,
@@ -91,6 +124,7 @@ export function useComposerCommandSurface({
   const { t } = useTranslation("workspace");
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [skillDialogOpen, setSkillDialogOpen] = useState(false);
+  const [profileDialogOpen, setProfileDialogOpen] = useState(false);
 
   const modelOptions = useMemo(
     () => composerModelCommandOptions(runtimeModels),
@@ -100,18 +134,37 @@ export function useComposerCommandSurface({
     () => composerSkillCommandOptions(runtimeSkills),
     [runtimeSkills],
   );
+  const profileOptions = useMemo(
+    () => composerProfileCommandOptions(runtimeProfiles),
+    [runtimeProfiles],
+  );
+  // R20：命令注册由后端能力广告决定（缺字段的旧后端不注册 `/profile`）。
+  const profileSwitchSupported = runtimeProfiles?.sessionSwitch === true;
   const commands = useMemo(
-    () => buildComposerBuiltinCommands({ modelOptions, skillOptions }),
-    [modelOptions, skillOptions],
+    () =>
+      buildComposerBuiltinCommands({
+        modelOptions,
+        skillOptions,
+        profileOptions,
+        profileSwitchSupported,
+      }),
+    [modelOptions, profileOptions, profileSwitchSupported, skillOptions],
   );
   const modelGroups = useMemo(
     () => composerModelCatalogGroups(runtimeModels),
     [runtimeModels],
   );
+  const profileCandidates = useMemo(
+    () => composerProfileCandidates(runtimeProfiles),
+    [runtimeProfiles],
+  );
+  const registry = useMemo(() => createComposerCommandRegistry(commands), [commands]);
   const openModelDialog = useCallback(() => setModelDialogOpen(true), []);
   const closeModelDialog = useCallback(() => setModelDialogOpen(false), []);
   const openSkillDialog = useCallback(() => setSkillDialogOpen(true), []);
   const closeSkillDialog = useCallback(() => setSkillDialogOpen(false), []);
+  const openProfileDialog = useCallback(() => setProfileDialogOpen(true), []);
+  const closeProfileDialog = useCallback(() => setProfileDialogOpen(false), []);
   const modelSelection = useMemo<ComposerModelSelectionBridge>(
     () => ({
       modelIds: composerModelIds(runtimeModels),
@@ -120,6 +173,16 @@ export function useComposerCommandSurface({
     }),
     [onModelChange, openModelDialog, runtimeModels],
   );
+  const profileSelection = useMemo<ComposerProfileSelectionBridge | undefined>(() => {
+    if (!onProfileSwitch) {
+      return undefined;
+    }
+    return {
+      candidates: profileCandidates,
+      applyProfile: onProfileSwitch,
+      openDialog: openProfileDialog,
+    };
+  }, [onProfileSwitch, openProfileDialog, profileCandidates]);
 
   const selectSkill = useCallback(
     (skillName: string) => {
@@ -133,6 +196,7 @@ export function useComposerCommandSurface({
 
   const executor = useComposerCommandExecutor({
     modelSelection,
+    profileSelection,
     skillNames: composerSkillNames(runtimeSkills),
     openSkillDialog,
     onRenameSession,
@@ -159,6 +223,18 @@ export function useComposerCommandSurface({
     [runExecutorCommand, selectSkill],
   );
 
+  const applyProfile = useCallback(
+    (profileRef: string): boolean => {
+      const command = registry.byKey.get("profile");
+      if (!command) {
+        // 未注册（后端未声明 `set_profile` 能力 / 宿主未接线）：不派发。
+        return false;
+      }
+      return runExecutorCommand(command, profileRef);
+    },
+    [registry, runExecutorCommand],
+  );
+
   const commandResult = useMemo<ComposerCommandResultBanner | null>(() => {
     const notice = executor.notice;
     if (!notice) {
@@ -180,6 +256,11 @@ export function useComposerCommandSurface({
     skillDialogOpen,
     openSkillDialog,
     closeSkillDialog,
+    profileDialogOpen,
+    openProfileDialog,
+    closeProfileDialog,
+    profileCandidates,
+    applyProfile,
     selectSkill,
     onCommand: handleCommand,
     onDismissCommandResult: executor.dismissNotice,

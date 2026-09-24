@@ -508,6 +508,28 @@ export const zhWorkspaceBase = {
           noMatch: "没有匹配的 skill",
         },
       },
+      profile: {
+        description: "切换当前会话的 profile（下一轮生效）",
+        argumentHint: "[profile]",
+        applied: "已切换 profile：{{profile}}（下一轮生效）",
+        appliedAfterTurn: "已切换 profile：{{profile}}（当前回合仍在途，下一轮生效）",
+        appliedWithWarnings:
+          "已切换 profile：{{profile}}（下一轮生效；{{count}} 条差异提示，首条：{{warning}}）",
+        notFound: "运行时 profile 目录里没有 {{profile}}",
+        invalid: "profile {{profile}} 存在但不可用：{{reason}}",
+        unavailable: "运行时 profile 目录未就绪，暂不能切换 profile",
+        noSession: "当前没有可切换 profile 的会话",
+        failed: "切换 profile 失败：{{message}}",
+        dialog: {
+          title: "选择 Profile",
+          searchPlaceholder: "搜索 profile…",
+          loading: "加载中…",
+          empty: "没有可用的 profile",
+          noMatch: "没有匹配的 profile",
+          retry: "重试",
+          defaultBadge: "默认",
+        },
+      },
     },
     references: {
       files: "文件",

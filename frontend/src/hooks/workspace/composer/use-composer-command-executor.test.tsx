@@ -7,9 +7,11 @@
 //
 // 注意：`notice` 是渲染快照的一部分，断言一律读**最近一次渲染**的控制器（`current()`），
 // 而不是发起命令时那个旧引用。
+//
+// `/profile` 的执行分支用例见 `use-composer-command-executor.profile.test.tsx`
+// （行数门禁拆分）；两文件共享脚手架 `use-composer-command-executor.test-helpers.tsx`。
 
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { exportSessionTrajectoryJsonlMock, executeSkillMock } = vi.hoisted(() => ({
@@ -26,17 +28,14 @@ vi.mock("@/api/runtime/skills", async (importOriginal) => ({
   executeSkill: executeSkillMock,
 }));
 
-import {
-  useComposerCommandExecutor,
-  type ComposerCommandExecutor,
-  type UseComposerCommandExecutorOptions,
-} from "./use-composer-command-executor";
+import type { UseComposerCommandExecutorOptions } from "./use-composer-command-executor";
 import { COMPOSER_BUILTIN_COMMANDS } from "@/lib/composer-builtin-commands";
 import {
   createComposerCommandRegistry,
   findComposerCommand,
   type ComposerCommand,
 } from "@/lib/composer-commands";
+import { createComposerExecutorHarness } from "./use-composer-command-executor.test-helpers";
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
@@ -52,71 +51,31 @@ function command(key: string): ComposerCommand {
   return found;
 }
 
-function Harness({
-  onSnapshot,
-  options,
-}: {
-  onSnapshot: (executor: ComposerCommandExecutor) => void;
-  options: UseComposerCommandExecutorOptions;
-}) {
-  const executor = useComposerCommandExecutor(options);
-  onSnapshot(executor);
-  return null;
-}
-
 describe("useComposerCommandExecutor", () => {
-  let container: HTMLDivElement;
-  let root: Root;
-  let latest: ComposerCommandExecutor | null;
+  const harness = createComposerExecutorHarness();
 
   beforeEach(() => {
     (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
-    container = document.createElement("div");
-    document.body.appendChild(container);
-    root = createRoot(container);
-    latest = null;
+    harness.mount();
     exportSessionTrajectoryJsonlMock.mockReset();
     executeSkillMock.mockReset();
   });
 
   afterEach(() => {
-    act(() => root.unmount());
-    container.remove();
+    harness.unmount();
     delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
   });
 
   /** 最近一次渲染的控制器快照（notice 随之更新）。 */
-  function current(): ComposerCommandExecutor {
-    if (!latest) {
-      throw new Error("test setup: harness has not rendered yet");
-    }
-    return latest;
-  }
+  const current = () => harness.current();
 
   async function render(options: UseComposerCommandExecutorOptions) {
-    await act(async () => {
-      root.render(
-        <Harness onSnapshot={(value) => (latest = value)} options={options} />,
-      );
-    });
-    return current();
-  }
-
-  async function flush() {
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+    return harness.render(options);
   }
 
   /** 派发一条命令并等状态回填。 */
   async function run(key: string, args: string) {
-    let handled = false;
-    await act(async () => {
-      handled = current().run(command(key), args);
-    });
-    await flush();
-    return handled;
+    return harness.run(command(key), args);
   }
 
   it("未认领的命令返回 false（交回 composer 显示未接入提示）", async () => {

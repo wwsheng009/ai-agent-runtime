@@ -533,6 +533,29 @@ export const enWorkspaceBase = {
           noMatch: "No matching skills",
         },
       },
+      profile: {
+        description: "switch the profile for the current session (takes effect next turn)",
+        argumentHint: "[profile]",
+        applied: "profile switched to {{profile}} (takes effect next turn)",
+        appliedAfterTurn:
+          "profile switched to {{profile}} (a turn is in flight; takes effect next turn)",
+        appliedWithWarnings:
+          "profile switched to {{profile}} (takes effect next turn; {{count}} difference warning(s), first: {{warning}})",
+        notFound: "the runtime profile catalog has no {{profile}}",
+        invalid: "profile {{profile}} exists but is unavailable: {{reason}}",
+        unavailable: "the runtime profile catalog is not ready — cannot switch profiles",
+        noSession: "there is no session to switch profiles for",
+        failed: "profile switch failed: {{message}}",
+        dialog: {
+          title: "Select Profile",
+          searchPlaceholder: "Search profiles…",
+          loading: "Loading…",
+          empty: "No profiles available",
+          noMatch: "No matching profiles",
+          retry: "Retry",
+          defaultBadge: "default",
+        },
+      },
     },
     references: {
       files: "files",
