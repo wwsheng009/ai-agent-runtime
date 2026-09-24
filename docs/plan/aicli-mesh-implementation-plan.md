@@ -1038,7 +1038,7 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 | 开关 | 节点侧 `--mesh-allow-stop`（默认 false）：`mesh_flags.go` / `mesh_flags_test.go` |
 | CLI | `aicli-mesh stop <节点/会话> [--force] [--wait 30s] [--json]`；退出码 stopped=0 / not_found=2 / timeout=3 / refused=6 / 其它=5 |
 | Web | `POST /web/api/mesh/stop`（回环 + `X-AICLI-Token` + 目标开关），端点清单与门户 schema 同步 |
-| 文档 | `docs/aicli/mesh-cli.md`（速查 / §4.11 / §5 / §6.6 / §9）、`docs/aicli/web-remote-api.md`（§7.1 / §9.8） |
+| 文档 | `docs/aicli/mesh-cli.md`（速查 / §4.12 / §5 / §6.6 / §9）、`docs/aicli/web-remote-api.md`（§7.1 / §9.8） |
 
 ### 24.2 落地记录（2026-09-24）
 
@@ -1065,7 +1065,7 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 | 服务端 | `internal/mesh/watch.go`（`JournalFiles` / `CollectJournalEvents` / `WatchJournal`）——`internal/mesh` 仍只用标准库，不新增节点侧依赖 |
 | CLI | `aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]` |
 | 契约 | 回放（`--once`）给 §7.3 稳定信封 `{schema_version, events[], counts}`；实时模式逐行 NDJSON（`--json` 的唯一例外，已在文档声明）；退出码：过滤目标完全不存在 = 2、窗口内为空 = 0、Ctrl-C = 0、读 journal / 写 stdout 失败 = 5 |
-| 文档 | `docs/aicli/mesh-cli.md`（§1 / §2 / §4.12 / §5 / §6.7 / §9） |
+| 文档 | `docs/aicli/mesh-cli.md`（§1 / §2 / §4.13 / §5 / §6.7 / §9） |
 
 ### 25.2 验证
 
@@ -1169,6 +1169,49 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 
 ---
 
+## 28. S20 · `new`：CLI 新建会话（`aicli-mesh new`，CLI 专用）
+
+> 来源：运维日常缺一条「新建会话」路径——`open` 以**会话为键**（复用活节点 / 拉起既有会话），
+> 要开一个**全新**会话只能手工 `aicli chat`，再自己去 `ls` 里翻端口与令牌。本切片把它补成
+> `mesh.Spawn` 的第二个入口：**会话 ID 由子进程生成**，父进程按 pid 等档案读回来。
+
+### 28.1 范围与落点
+
+| 面 | 落点 |
+| --- | --- |
+| 服务端 | `internal/mesh/spawn.go`：`SpawnRequest.NewSession` + `spawnNewSession` / `spawnNewArgs` / `liveNodeForPID`；启动与就绪链路复用 `launchAndAwait` |
+| CLI | `internal/mesh/cli.go`：`aicli-mesh new [--workspace PATH] [--port N] [--wait 8s] [--no-wait] [--bin PATH] [--json]`；退出码 started=0 / not_running=3 / failed=5 |
+| Web | **无端点**：`POST /web/api/mesh/spawn` 仍只处理既有会话（`session_id` 必填），新会话入口只有 CLI |
+| 不变量 | 没有会话 ID 可复用、也不抢租约（`spawn-<会话>.lock` 无键可建）——CLI 依旧不写档案、不写绑定、不占租约，档案由子进程自己写 |
+| 文档 | `docs/aicli/mesh-cli.md`（§1 / §2 / §4.11 / §6.5 / §8 / §9 / §10 / §12）、`docs/aicli-mesh/`（README / quickstart / spawn-and-binaries / troubleshooting）、`docs/aicli/web-remote-api.md` §9.6、`docs/e2e/mesh-e2e.md` §3 |
+
+### 28.2 验证
+
+- 单测：`internal/mesh/spawn_new_test.go`（新建、不占租约、从不复用、拒绝 `SessionID`、
+  工作区三种失败、`--no-wait`、超时、fail-closed）、`internal/mesh/cli_new_test.go`
+  （请求翻译 / JSON 形状 / 默认工作区 / 退出码 / 参数错误 / `--help`）；
+  `go test ./internal/mesh/ -count=1` 全绿。
+- 端到端（2026-09-24，本地隔离 lab）：`new --workspace <lab>\ws --bin <child> --wait 25s --json`
+  → 退出码 0，返回新会话 ID / 节点 / 端口 / 带令牌窗口 URL（约 1s 就绪）；网格目录只有子进程
+  自己的档案、绑定与 `session-<sid>.lock`（**无 `spawn-*.lock`**）；同工作区连跑两次得到
+  **不同**会话（从不复用）；随后 `call node.info` → 200。
+- 失败面：`--workspace` 不存在 / 是文件 → 退出码 1；网格根不可用 → `mesh_disabled`；
+  等不到新会话档案 → `not_running` + `mesh_spawn_timeout`（带脱敏 `log_tail`）。
+
+### 28.3 落地记录（2026-09-24）
+
+| 项 | 实际 |
+| --- | --- |
+| 就绪判定 | 按 **pid** 等「属于该 pid 且 `session_id` 非空」的 live 档案：子进程先写档案、会话建好后再补写一次，等的就是第二笔；pid 取自 `exec.Command.Start()`（无 shell 包装），与档案里的 `os.Getpid()` 同源 |
+| 为什么不用 `resume <id>` | `aicli resume <id>` 对**没有存档的会话**会失败（`internal/chat.Manager.Get`）；新会话只能走 `chat`（不带 `--session`） |
+| `--no-wait` 的诚实性 | 会话 ID 还没生成 → `session_id` 留空、`url` 不带 `session=`，只报 pid / 端口，`reason` 指向 `aicli-mesh ls` 自查 |
+| 日志键 | `new-<UTC 时间戳>-<pid>`：两次 `new` 不共用启动日志（`open` 按会话键，天然唯一） |
+| 工作区 | CLI 侧 `--workspace` 缺省 = 当前目录，且**必须已存在**（用法错误 1 当场拒绝）；Spawn 层对「目录在启动前被删」再查一次 → `mesh_workspace_missing` |
+| 文档编号 | mesh-cli.md 的 §4 子命令按治理顺序插入 `new`（§4.11），`stop` / `watch` 顺延为 §4.12 / §4.13；相关交叉引用（web-remote-api.md §9.8、本计划 §24/§25 的文档行）同步更新 |
+| 未做 | Web 端点（`POST /web/api/mesh/new` 之类）与前端「新建会话」按钮：本切片只补 CLI；确有需要时按 `spawnNewSession` 再包一层 handler |
+
+---
+
 ## 附录：本文与三份基准文档的分工
 
 | 文档 | 回答的问题 | 何时看 |
@@ -1181,4 +1224,5 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 > 变更记录：2026-09-24 初版（S1–S10 + 验收 / 回滚 / 锚点核验）；
 > 2026-09-24 追加 §19（S11 · Web 侧收口一）与 §19.4 落地记录（sessions 便捷视图 + 前端徽标/分组/开关 + resume 冲突）。
 > 2026-09-24 追加 §23（S15 · 接管二次确认：CLI `--takeover` / Web 入口 / 租约回收 / `orphaned` 提示）与 §23.3 落地记录。
+> 2026-09-24 追加 §28（S20 · `new`：CLI 新建会话）与 §28.3 落地记录。
 > 每完成一个切片，在 §15.3 登记实际偏差，并回填网格方案 §11.6。

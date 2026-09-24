@@ -1,6 +1,7 @@
-# 拉起节点与可执行文件解析（`open` / `spawn` 专题）
+# 拉起节点与可执行文件解析（`open` / `new` / `spawn` 专题）
 
-> 适用：`aicli-mesh open`（CLI）与 `POST /web/api/mesh/spawn`（Web）——两者共用 `mesh.Spawn`。
+> 适用：`aicli-mesh open` / `aicli-mesh new`（CLI）与 `POST /web/api/mesh/spawn`（Web）——
+> 三者共用 `mesh.Spawn`。
 > 本文回答两个最容易踩的问题：**拉起的到底是哪个 aicli 二进制**、**改名部署怎么办**。
 
 ## 1. `open` 做什么
@@ -27,6 +28,28 @@ aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--bin 
 
 四态与退出码：`reused` / `started` → 0，`not_running` → 3，`failed` → 5。
 CLI 本身**不是节点**：单飞租约的 owner 记作 `cli-<pid>`，不写自己的节点档案。
+
+### 1.1 `new`：新建会话（同一套 Spawn，只是没有会话 ID）
+
+会话还不存在时用 `new`——它在 `--workspace` 里拉起 `aicli chat`（**不带** `--session`），
+由子进程生成新会话 ID，父进程再从节点档案里读回来：
+
+```text
+aicli-mesh new [--workspace PATH] [--port N] [--wait 8s] [--no-wait] [--bin PATH] [--json]
+```
+
+```text
+<解析出的 aicli>  chat  --pprof  --web-host 127.0.0.1  [--web-port N]  [--web-token <令牌>]
+```
+
+| 方面 | 行为 |
+|------|------|
+| 工作区 | `--workspace`，缺省 = 当前目录；必须已存在（CLI 当场校验，退出码 1） |
+| 复用 / 租约 | **都没有**：会话还不存在，没有键可抢——每次调用都产生一个新会话 |
+| 就绪判定 | 按 **pid** 等「属于该 pid、且 `session_id` 非空」的 live 档案（`open` 是按会话查） |
+| 退出码 | `started` → 0，`not_running`（超时）→ 3，`failed` → 5；不会出现 `reused` |
+
+二进制解析顺序（§2）、`AICLI_BIN` / `--bin` 的**不回退**规则、`doctor` 诊断（§5）与 `open` 完全一致。
 
 ## 2. 可执行文件解析顺序（硬契约）
 
@@ -78,7 +101,8 @@ aicli-mesh open session_20260924093535 --bin 'E:\tools\aicli-2x\aicli-2x.exe'
 | 解析不到任何二进制 | `status=failed` + `code=mesh_spawn_bin_unavailable` + `reason`，退出码 5 |
 | `AICLI_BIN` 指错 | 同上（`reason` 说明原因：找不到文件 / 是目录 / 权限错误） |
 | `open --bin` 指错 | CLI 用法错误，退出码 1，**不进入 Spawn** |
-| 子进程起来了但没就绪 | `status=not_running` + `code=mesh_spawn_timeout` + `log_tail`（末尾 20 行，已脱敏），退出码 3 |
+| `new --workspace` 指到不存在/非目录 | CLI 用法错误，退出码 1，**不进入 Spawn** |
+| 子进程起来了但没就绪（含 `new` 等不到新会话档案） | `status=not_running` + `code=mesh_spawn_timeout` + `log_tail`（末尾 20 行，已脱敏），退出码 3 |
 | 会话工作区不存在 | `code=mesh_workspace_missing` |
 | 网格根不可用（fail-closed） | `code=mesh_disabled` |
 | Web 端被开关关闭 | `403` + `mesh_spawn_not_allowed`（`--mesh-allow-spawn=false`；**默认开启**） |
@@ -98,7 +122,7 @@ aicli-mesh doctor --json | ConvertFrom-Json |
 | status | 含义 | 处理 |
 |--------|------|------|
 | `ok` | 解析到可用二进制 | 无需动作；`detail` 写明路径与来源（`--bin` / `AICLI_BIN` / `self` / `sibling` / `PATH`） |
-| `warn` | 一台机器上找不到 aicli 二进制 | 只读用法不受影响；需要 `open` 时再配置 |
+| `warn` | 一台机器上找不到 aicli 二进制 | 只读用法不受影响；需要 `open` / `new` 时再配置 |
 | `problem` | **`AICLI_BIN` 指错**（显式配置错误） | 修好或清空该变量；它不会退回其它候选 |
 
 `doctor` 的 `problems > 0` → 退出码 5，可直接用于 CI 门禁。
@@ -129,4 +153,5 @@ aicli-mesh open session_demo --bin (Join-Path $lab 'nope.exe')   # → 退出码
 3. **期望「自动回退」**：`AICLI_BIN` 指错时不会回退——这是**故意的**，修配置而不是让它猜；
 4. **复用判断依赖档案端点**：活节点已服务该会话时 `open` 直接返回它的 URL（`reused`）；
    要强制换新进程用 `--takeover`；
-5. **多套安装**：机器上多个 aicli 时，`PATH` 命中哪一个由环境决定——用 `doctor` 固化预期，别靠猜。
+5. **多套安装**：机器上多个 aicli 时，`PATH` 命中哪一个由环境决定——用 `doctor` 固化预期，别靠猜；
+6. **把 `new` 当成 `open`**：`new` 从不复用、也不接管，每次都是**新会话**；接旧会话用 `open <会话>`。

@@ -29,6 +29,11 @@ import (
 // 状态集合固定四值（§5.7），**不返回 starting**：wait_ms 内同步等待。
 // 令牌只出现在返回值与子进程命令行里：不写绑定、不进 journal（Journal 已注册
 // secrets 兜底脱敏）、不进日志尾部（回传前再脱敏一次，M7）。
+//
+// `aicli-mesh new`（SpawnRequest.NewSession）复用同一条链路的后半段，但没有会话
+// ID：复用与单飞租约都以会话为键，对新会话都不适用（每个调用本来就该得到不同的
+// 会话）。子进程 `aicli chat` 自己生成 ID，父进程按 pid 等它的档案，再从档案里
+// 读回 ID、节点与端口——见 spawnNewSession。
 // ============================================================================
 
 // Spawn statuses (architecture §5.7). The set is closed: `starting` is
@@ -90,6 +95,12 @@ type SpawnRequest struct {
 	// The old node is never killed: it marks itself orphaned on its next
 	// heartbeat and keeps running.
 	Takeover bool `json:"takeover,omitempty"`
+	// NewSession creates a brand-new session instead of opening an existing one
+	// (`aicli-mesh new`). SessionID must be empty: the child (`aicli chat`)
+	// generates the id and the parent learns it from the node record. Both the
+	// reuse short-circuit and the single-flight lease are skipped — they are
+	// keyed by session id, and a new session has none yet.
+	NewSession bool `json:"new_session,omitempty"`
 }
 
 // SpawnLaunchSpec is one detached launch. The caller (tests, CLI, HTTP layer)
@@ -176,6 +187,11 @@ type SpawnOptions struct {
 
 // Spawn implements §5.7: reuse the live node of a session or start one.
 func Spawn(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
+	if req.NewSession {
+		// 新会话没有 ID：复用与单飞租约都无处落脚，走一条更短的路
+		// （见 spawnNewSession）。
+		return spawnNewSession(req, opts)
+	}
 	started := time.Now()
 	paths := opts.paths()
 	now := opts.now()
@@ -275,81 +291,25 @@ func Spawn(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
 			return result
 		}
 	}
-	executable, execErr := opts.executable()
-	if execErr != nil {
-		// A broken AICLI_BIN fails loudly: silently falling through to another
-		// candidate would launch a different build than the operator asked for.
-		result.Status = SpawnStatusFailed
-		result.Code = SpawnCodeBinUnavailable
-		result.Reason = execErr.Error()
-		opts.appendSpawnAudit(JournalSpawnCompleted, result, "")
-		return result
-	}
-	if executable == "" {
-		result.Status = SpawnStatusFailed
-		result.Code = SpawnCodeBinUnavailable
-		result.Reason = "cannot locate the aicli executable (set AICLI_BIN or run from a full install)"
-		opts.appendSpawnAudit(JournalSpawnCompleted, result, "")
-		return result
-	}
-
-	port := resolveSpawnPort(paths, sessionID, req.Port, req.Takeover)
-	token := opts.token()
-	logPath := opts.logPath(sessionID)
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		result.Status = SpawnStatusFailed
-		result.Code = SpawnCodeFailed
-		result.Reason = fmt.Sprintf("create log dir %s: %v", filepath.Dir(logPath), err)
-		opts.appendSpawnAudit(JournalSpawnCompleted, result, "")
-		return result
-	}
-	spec := SpawnLaunchSpec{
-		Executable: executable,
-		Args:       spawnArgs(sessionID, port, token),
-		Dir:        workspace,
-		LogPath:    logPath,
-		Env:        spawnEnvForChild(opts.owner().NodeID, req.Takeover),
-	}
-	opts.appendSpawnAudit(JournalSpawnRequested, result, workspace)
-
-	pid, err := opts.launch()(spec)
-	if err != nil {
-		result.Status = SpawnStatusFailed
-		result.Code = SpawnCodeFailed
-		result.Reason = fmt.Sprintf("launch %s: %v", executable, err)
-		result.LogTail = redactSpawnTail(readSpawnLogTail(logPath, SpawnLogTailLines), token)
-		opts.appendSpawnAudit(JournalSpawnCompleted, result, workspace)
-		return result
-	}
-	result.PID = pid
-	result.Port = port
-
-	if opts.FireAndForget {
-		result.Status = SpawnStatusStarted
-		result.Port = port
-		result.URL = spawnURLForEndpoint(port, sessionID, token)
-		result.Reason = fmt.Sprintf("started pid %d without waiting for readiness (--no-wait); retry `aicli-mesh open %s` if the URL is not up yet",
-			pid, sessionID)
-		opts.appendSpawnAudit(JournalSpawnCompleted, result, workspace)
-		return result
-	}
-
-	node, ok := opts.waitForLiveNodeExcluding(paths, sessionID, previousNodeID)
-	if !ok {
-		result.Status = SpawnStatusNotRunning
-		result.Code = SpawnCodeTimeout
-		result.Reason = fmt.Sprintf("no live node for session %s after %s (pid %d may still be starting)",
-			sessionID, opts.waitBudget(), pid)
-		result.LogTail = redactSpawnTail(readSpawnLogTail(logPath, SpawnLogTailLines), token)
-		opts.appendSpawnAudit(JournalSpawnCompleted, result, workspace)
-		return result
-	}
-	result.Status = SpawnStatusStarted
-	fillSpawnResultFromNode(&result, node, sessionID)
-	if result.PID == 0 {
-		result.PID = node.PID
-	}
-	opts.appendSpawnAudit(JournalSpawnCompleted, result, workspace)
+	launchAndAwait(opts, paths, spawnLaunch{
+		SessionID: sessionID,
+		Workspace: workspace,
+		Port:      resolveSpawnPort(paths, sessionID, req.Port, req.Takeover),
+		Takeover:  req.Takeover,
+		LogKey:    sessionID,
+		Args:      func(port int, token string) []string { return spawnArgs(sessionID, port, token) },
+		Ready: func(paths Paths, _ int) (NodeView, bool) {
+			return opts.waitForLiveNodeExcluding(paths, sessionID, previousNodeID)
+		},
+		NoWaitNote: func(pid int) string {
+			return fmt.Sprintf("started pid %d without waiting for readiness (--no-wait); retry `aicli-mesh open %s` if the URL is not up yet",
+				pid, sessionID)
+		},
+		TimeoutNote: func(pid int) string {
+			return fmt.Sprintf("no live node for session %s after %s (pid %d may still be starting)",
+				sessionID, opts.waitBudget(), pid)
+		},
+	}, &result)
 	return result
 }
 
@@ -363,6 +323,27 @@ func spawnArgs(sessionID string, port int, token string) []string {
 		"--pprof",
 		"--web-host", "127.0.0.1",
 	}
+	return appendSpawnWebArgs(args, port, token)
+}
+
+// spawnNewArgs is the `new` command line: `aicli chat` **without** a session id,
+// so the child creates a fresh session (the flags are otherwise identical to
+// `open`). `aicli resume <id>` cannot be used here — it fails for an id that has
+// no stored session yet (internal/chat.Manager.Get).
+func spawnNewArgs(port int, token string) []string {
+	args := []string{
+		"chat",
+		"--pprof",
+		"--web-host", "127.0.0.1",
+	}
+	return appendSpawnWebArgs(args, port, token)
+}
+
+// appendSpawnWebArgs adds the loopback endpoint flags shared by both command
+// lines. --web-port is only added for a concrete port: `--web-port 0` is
+// rejected by the flag parser ("must be between 1 and 65535"), and omitting it
+// leaves the child free to pick a free port itself.
+func appendSpawnWebArgs(args []string, port int, token string) []string {
 	if port >= 1 && port <= 65535 {
 		args = append(args, "--web-port", fmt.Sprintf("%d", port))
 	}
@@ -370,6 +351,203 @@ func spawnArgs(sessionID string, port int, token string) []string {
 		args = append(args, "--web-token", token)
 	}
 	return args
+}
+
+// spawnLaunch is the mechanical half of a detached launch, shared by
+// `aicli-mesh open` (open an existing session) and `aicli-mesh new` (create
+// one): what to run, where, and how to tell that the child came up. Everything
+// session-keyed — the reuse short-circuit and the single-flight lease — stays
+// in the callers, because a brand-new session has no key to reuse or lock yet.
+type spawnLaunch struct {
+	// SessionID is empty for a new session: the child generates it, and the
+	// readiness wait learns it from the node record.
+	SessionID string
+	// Workspace is the child's working directory.
+	Workspace string
+	// Port is the loopback port resolved by the caller (0 = child picks one).
+	Port int
+	// Takeover asks the child to reclaim the session lease explicitly (§4.4).
+	Takeover bool
+	// LogKey names the launch log: the session id, or a per-invocation key when
+	// the session id does not exist yet.
+	LogKey string
+	// Args builds the child command line from the port and token this launch
+	// resolved (the child needs both on its own command line).
+	Args func(port int, token string) []string
+	// Ready waits for the child's node record inside the wait budget. The pid is
+	// the freshly launched process: for a new session it is the only handle the
+	// parent has before the record exists.
+	Ready func(paths Paths, pid int) (NodeView, bool)
+	// NoWaitNote / TimeoutNote explain what --no-wait left unknown and what a
+	// lapsed wait means. Both mention the launched pid, which only this function
+	// knows.
+	NoWaitNote  func(pid int) string
+	TimeoutNote func(pid int) string
+}
+
+// launchAndAwait resolves the binary, starts the detached child and waits for
+// its node record (unless the caller asked for fire-and-forget), filling result
+// in place. Every failure path leaves result at `failed` with a §5.9 code.
+func launchAndAwait(opts SpawnOptions, paths Paths, launch spawnLaunch, result *SpawnResult) {
+	if result == nil {
+		return
+	}
+	executable, execErr := opts.executable()
+	if execErr != nil {
+		// A broken AICLI_BIN fails loudly: silently falling through to another
+		// candidate would launch a different build than the operator asked for.
+		result.Status = SpawnStatusFailed
+		result.Code = SpawnCodeBinUnavailable
+		result.Reason = execErr.Error()
+		opts.appendSpawnAudit(JournalSpawnCompleted, *result, launch.Workspace)
+		return
+	}
+	if executable == "" {
+		result.Status = SpawnStatusFailed
+		result.Code = SpawnCodeBinUnavailable
+		result.Reason = "cannot locate the aicli executable (set AICLI_BIN or run from a full install)"
+		opts.appendSpawnAudit(JournalSpawnCompleted, *result, launch.Workspace)
+		return
+	}
+
+	token := opts.token()
+	logPath := opts.logPath(launch.LogKey)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		result.Status = SpawnStatusFailed
+		result.Code = SpawnCodeFailed
+		result.Reason = fmt.Sprintf("create log dir %s: %v", filepath.Dir(logPath), err)
+		opts.appendSpawnAudit(JournalSpawnCompleted, *result, launch.Workspace)
+		return
+	}
+	spec := SpawnLaunchSpec{
+		Executable: executable,
+		Args:       launch.Args(launch.Port, token),
+		Dir:        launch.Workspace,
+		LogPath:    logPath,
+		Env:        spawnEnvForChild(opts.owner().NodeID, launch.Takeover),
+	}
+	opts.appendSpawnAudit(JournalSpawnRequested, *result, launch.Workspace)
+
+	pid, err := opts.launch()(spec)
+	if err != nil {
+		result.Status = SpawnStatusFailed
+		result.Code = SpawnCodeFailed
+		result.Reason = fmt.Sprintf("launch %s: %v", executable, err)
+		result.LogTail = redactSpawnTail(readSpawnLogTail(logPath, SpawnLogTailLines), token)
+		opts.appendSpawnAudit(JournalSpawnCompleted, *result, launch.Workspace)
+		return
+	}
+	result.PID = pid
+	result.Port = launch.Port
+
+	if opts.FireAndForget {
+		result.Status = SpawnStatusStarted
+		result.URL = spawnURLForEndpoint(launch.Port, launch.SessionID, token)
+		result.Reason = launch.NoWaitNote(pid)
+		opts.appendSpawnAudit(JournalSpawnCompleted, *result, launch.Workspace)
+		return
+	}
+
+	node, ok := launch.Ready(paths, pid)
+	if !ok {
+		result.Status = SpawnStatusNotRunning
+		result.Code = SpawnCodeTimeout
+		result.Reason = launch.TimeoutNote(pid)
+		result.LogTail = redactSpawnTail(readSpawnLogTail(logPath, SpawnLogTailLines), token)
+		opts.appendSpawnAudit(JournalSpawnCompleted, *result, launch.Workspace)
+		return
+	}
+	result.Status = SpawnStatusStarted
+	sessionID := launch.SessionID
+	if sessionID == "" {
+		// 新会话：ID 只有子进程知道，档案就是它告诉我们的方式。
+		sessionID = strings.TrimSpace(sessionIDOf(node))
+		result.SessionID = sessionID
+	}
+	fillSpawnResultFromNode(result, node, sessionID)
+	if result.PID == 0 {
+		result.PID = node.PID
+	}
+	opts.appendSpawnAudit(JournalSpawnCompleted, *result, launch.Workspace)
+}
+
+// spawnNewSession implements `aicli-mesh new`: create a brand-new session by
+// launching `aicli chat` in a workspace and waiting for the node record the
+// child writes once its session exists.
+//
+// Two §5.7 shortcuts are deliberately absent, and both are the point of the
+// command:
+//
+//   - no reuse short-circuit: "new" means new. A window already serving another
+//     session in the same workspace is not what the caller asked for;
+//   - no single-flight lease: leases are keyed by session id, and this session
+//     id does not exist yet. There is nothing to contend for either — every
+//     call is supposed to produce a *different* session.
+//
+// The parent therefore has exactly one handle on the child before the record
+// exists: the pid the launcher returned. Readiness = a live node record with
+// that pid and a session id, which is also where the returned session id comes
+// from.
+func spawnNewSession(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
+	started := time.Now()
+	paths := opts.paths()
+	result = SpawnResult{
+		SchemaVersion: SchemaVersion,
+		Status:        SpawnStatusFailed,
+		Origin:        strings.TrimSpace(req.Origin),
+	}
+	defer func() { result.ElapsedMS = time.Since(started).Milliseconds() }()
+
+	if strings.TrimSpace(req.SessionID) != "" {
+		result.Reason = "session_id must be empty with new_session (the child generates it)"
+		return result
+	}
+	if !paths.Enabled() {
+		// Fail-closed, same as Spawn: without a mesh root there is no node record
+		// to watch, so "started" could not be verified (§4.7).
+		result.Code = SpawnCodeMeshDisabled
+		result.Reason = "mesh root unavailable (set AICLI_MESH_DIR / AICLI_HOME)"
+		return result
+	}
+	workspace, ok := opts.workspaceFor("")
+	workspace = strings.TrimSpace(workspace)
+	if !ok || workspace == "" {
+		// A new session has no binding to fall back on: the caller must say where
+		// it goes (the CLI passes --workspace or its own cwd). Guessing a
+		// directory would make the reported workspace a lie.
+		result.Code = SpawnCodeWorkspaceMissing
+		result.Reason = "cannot resolve the workspace of the new session"
+		return result
+	}
+	if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
+		// Risk R8, same wording as Spawn: a deleted/moved directory gets a
+		// readable reason instead of a silently failing child.
+		result.Code = SpawnCodeWorkspaceMissing
+		result.Reason = fmt.Sprintf("workspace directory not found: %s", workspace)
+		return result
+	}
+
+	launchAndAwait(opts, paths, spawnLaunch{
+		// SessionID stays empty: this is what makes the child create a session.
+		Workspace: workspace,
+		Port:      resolveSpawnPort(paths, "", req.Port, false),
+		Takeover:  false,
+		// No session id yet, so the log is keyed by this invocation (timestamp +
+		// our pid): two `new` calls must never share one launch log.
+		LogKey: fmt.Sprintf("new-%s-%d", opts.now().UTC().Format("20060102T150405"), os.Getpid()),
+		Args:   spawnNewArgs,
+		Ready: func(paths Paths, pid int) (NodeView, bool) {
+			return opts.waitForNewSessionNode(paths, pid)
+		},
+		NoWaitNote: func(pid int) string {
+			return fmt.Sprintf("started pid %d without waiting for readiness (--no-wait); the child generates the session id — run `aicli-mesh ls` to find it", pid)
+		},
+		TimeoutNote: func(pid int) string {
+			return fmt.Sprintf("the new session (pid %d) did not register a live node within %s; check the launch log below",
+				pid, opts.waitBudget())
+		},
+	}, &result)
+	return result
 }
 
 // NewSpawnToken generates the write token handed to the spawned node (§9.1).
@@ -399,18 +577,45 @@ func liveNodeForSessionExcluding(paths Paths, sessionID string, now time.Time, t
 	if !paths.Enabled() || strings.TrimSpace(sessionID) == "" {
 		return NodeView{}, false
 	}
+	return liveNodeMatching(paths, now, ttl, func(node NodeView) bool {
+		if excludeNodeID != "" && node.NodeID == excludeNodeID {
+			return false
+		}
+		return sessionIDOf(node) == sessionID
+	})
+}
+
+// liveNodeForPID finds the live node owned by one OS process. A brand-new
+// session (`aicli-mesh new`) has no session id to watch yet, so the pid of the
+// child we just launched is the only handle the parent has on it.
+//
+// A record without a session id does not match: the child writes its record at
+// startup and fills the session in once it exists, and the caller is waiting
+// precisely for that second write.
+func liveNodeForPID(paths Paths, pid int, now time.Time, ttl time.Duration) (NodeView, bool) {
+	if pid <= 0 {
+		return NodeView{}, false
+	}
+	return liveNodeMatching(paths, now, ttl, func(node NodeView) bool {
+		return node.PID == pid && strings.TrimSpace(sessionIDOf(node)) != ""
+	})
+}
+
+// liveNodeMatching is the one liveness rule of the package: a node is live when
+// its heartbeat is fresh and its owner process is alive (BuildView), so spawn,
+// `ls` and the HTTP layer never disagree about who owns a session (§7.5).
+func liveNodeMatching(paths Paths, now time.Time, ttl time.Duration, match func(NodeView) bool) (NodeView, bool) {
+	if !paths.Enabled() || match == nil {
+		return NodeView{}, false
+	}
 	view := BuildView(paths, ViewOptions{Now: now, HeartbeatTTL: ttl})
 	for _, node := range view.Nodes {
 		if node.State != NodeStateLive {
 			continue
 		}
-		if excludeNodeID != "" && node.NodeID == excludeNodeID {
-			continue
+		if match(node) {
+			return node, true
 		}
-		if sessionIDOf(node) != sessionID {
-			continue
-		}
-		return node, true
 	}
 	return NodeView{}, false
 }
@@ -792,10 +997,29 @@ func (o SpawnOptions) waitForLiveNode(paths Paths, sessionID string) (NodeView, 
 // waitForLiveNodeExcluding is waitForLiveNode minus one node id: a takeover
 // spawn must not mistake the node it is replacing for its own child.
 func (o SpawnOptions) waitForLiveNodeExcluding(paths Paths, sessionID, excludeNodeID string) (NodeView, bool) {
+	return o.waitForNode(paths, func(now time.Time, ttl time.Duration) (NodeView, bool) {
+		return liveNodeForSessionExcluding(paths, sessionID, now, ttl, excludeNodeID)
+	})
+}
+
+// waitForNewSessionNode waits for the node record of the child we just started:
+// the pid is the handle, the session id is what we are waiting to learn
+// (`aicli-mesh new`).
+func (o SpawnOptions) waitForNewSessionNode(paths Paths, pid int) (NodeView, bool) {
+	return o.waitForNode(paths, func(now time.Time, ttl time.Duration) (NodeView, bool) {
+		return liveNodeForPID(paths, pid, now, ttl)
+	})
+}
+
+// waitForNode polls the node records until lookup finds one, the budget lapses
+// or the context is cancelled. The lookup is injected so every caller waits by
+// its own handle (session id, or pid for a session that does not exist yet)
+// under one identical wait/backoff rule.
+func (o SpawnOptions) waitForNode(paths Paths, lookup func(now time.Time, ttl time.Duration) (NodeView, bool)) (NodeView, bool) {
 	deadline := time.Now().Add(o.waitBudget())
 	interval := o.pollInterval()
 	for {
-		if node, ok := liveNodeForSessionExcluding(paths, sessionID, o.now(), o.heartbeatTTL(), excludeNodeID); ok {
+		if node, ok := lookup(o.now(), o.heartbeatTTL()); ok {
 			return node, true
 		}
 		remaining := time.Until(deadline)

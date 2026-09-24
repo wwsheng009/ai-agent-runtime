@@ -35,13 +35,14 @@ func meshAliasExit(code int) {
 func NewMeshCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mesh [子命令] [参数...]",
-		Short: "节点网格工具（ls / show / url / call / send / screen / open / stop / watch / gc / doctor / version）",
+		Short: "节点网格工具（ls / show / url / call / send / screen / open / new / stop / watch / gc / doctor / version）",
 		Long: `节点网格工具：发现本机节点、跨进程调用、拉起/停止节点、复盘 journal 事件。
 
 与独立二进制 aicli-mesh 是同一套实现（internal/mesh.CLI），参数与退出码完全一致：
 
   aicli mesh ls --json
   aicli mesh show session_20260924093535
+  aicli mesh new --workspace E:\work\proj-a
   aicli mesh watch --since 5m
   aicli mesh gc --apply
 

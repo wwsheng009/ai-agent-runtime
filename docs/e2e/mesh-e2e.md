@@ -33,7 +33,7 @@
     ┌─────────────────────────── pwsh (harness) ───────────────────────────┐
     │ 1. go build → backend/.tmp/aicli-debug-e2e.exe                       │
     │ 2. Start-Process ×2（A、B：独立进程，无 TTY，端口自选）                │
-    │ 3. aicli-mesh ls --json            → 网格发现（不猜端口）             │
+    │ 3. aicli-mesh ls -a --json         → 网格发现（不猜端口）             │
     │ 4. aicli-mesh send <session> ...   → 定向调用（跨进程 invoke）         │
     │ 5. aicli-mesh screen <node>        → 读另一个进程的合成帧             │
     │ 6. GET /web/api/mesh/events        → 扇入实时流（A 看得到 B 变忙）     │
@@ -57,10 +57,11 @@
 |------|------|-----|----------------|
 | 存活探针 | `GET /web/api/health` | — | 就绪等待、探活（`--probe`） |
 | 节点自述 | `GET /web/api/mesh/self` | `aicli-mesh show <node>` | 断言令牌脱敏、地址自描述 |
-| 全量视图 | `GET /web/api/mesh/peers?probe=1` | `aicli-mesh ls --json` | M1 / M2（CLI 与 HTTP 同源） |
+| 全量视图 | `GET /web/api/mesh/peers?probe=1` | `aicli-mesh ls -a --json` | M1 / M2（CLI 与 HTTP 同源；CLI 默认只列在线，`-a` 才是全量口径） |
 | 实时扇入 | `GET /web/api/mesh/events` | `aicli-mesh watch` | M5（跨进程实时可见） |
 | 定向调用 | `POST /web/api/mesh/call` | `aicli-mesh call/send/screen` | M4（跨进程 invoke） |
 | 拉起节点 | `POST /web/api/mesh/spawn` | `aicli-mesh open` | 新窗口打开（不在 03 断言范围，01/02 不覆盖） |
+| 新建会话 | —（无 Web 端点） | `aicli-mesh new` | CLI 专用：子进程生成会话 ID（不在 03 断言范围） |
 | 停止节点 | `POST /web/api/mesh/stop` | `aicli-mesh stop` | M11（非回环下整机拒绝）；开关与 CLI 语义不在 03 断言范围 |
 
 **入口仍然只有一个**：`GET /debug/endpoints` 的清单新增 `mesh` 分组（`scheme: "mesh"`），
@@ -89,8 +90,8 @@ $b = Start-Process -FilePath $exe -ArgumentList 'chat','--yolo','--pprof' `
      -RedirectStandardOutput "$env:TEMP\mesh-b.out.log" -RedirectStandardError "$env:TEMP\mesh-b.err.log"
 
 # 2) 网格发现（不猜端口、不读别人的缓存文件）
-aicli-mesh ls
-aicli-mesh ls --json | ConvertFrom-Json | Select-Object -ExpandProperty nodes |
+aicli-mesh ls -a
+aicli-mesh ls -a --json | ConvertFrom-Json | Select-Object -ExpandProperty nodes |
     Format-Table node_id, pid, state, reachability, session_id, @{n='url';e={$_.endpoint.base_url}}
 
 # 3) 定向调用：让 B 跑一轮 prompt 并等结果（A 不受影响）
@@ -104,7 +105,7 @@ aicli-mesh watch --since 5m
 
 # 6) 崩溃对账：强杀 B → A 的视图转 stale → GC 清理
 Stop-Process -Id $b.Id -Force
-aicli-mesh ls
+aicli-mesh ls -a
 aicli-mesh gc --apply
 ```
 
@@ -115,7 +116,7 @@ aicli-mesh gc --apply
 
 | 断言名（`Add-Result` 字面量） | 动作 | 机器可判 | 失败典型原因 |
 |------------------------------|------|----------|--------------|
-| `mesh/discovery-both-nodes` | A、B 都启动就绪后 `aicli-mesh ls --json` + `GET /web/api/mesh/peers` | 两节点均 `state=live`，`endpoint.base_url` 非空且可达 | 档案未写 / 心跳未启 / 扫描路径不一致 |
+| `mesh/discovery-both-nodes` | A、B 都启动就绪后 `aicli-mesh ls -a --json` + `GET /web/api/mesh/peers` | 两节点均 `state=live`，`endpoint.base_url` 非空且可达 | 档案未写 / 心跳未启 / 扫描路径不一致 |
 | `mesh/cli-api-parity` | 比对 CLI 与 HTTP 两个视图 | 节点集合、会话 ID、`base_url` 完全一致 | 工具与端点各写一套聚合逻辑（违反「同源」） |
 | `mesh/session-lease-exclusive` | B 尝试 resume A 的会话 | **拒绝即可**（`session not found` / `busy` / `running_elsewhere` 都是合法拒绝）；`peers` 中该会话仍只有一个 `owner` 且 `counts.conflict=0` | 租约未生效（无互斥 → 双开）/ 归属漂移 |
 | `mesh/cross-call-invoke` | A 通过 `mesh/call`（op=`invoke`，`allow_write`）让 B 跑一轮 | `status=ok`；B 侧 `/web/api/turn` 新增一条 `completed`；`duplicate=false` | op 白名单 / 令牌读取 / 幂等键透传任一环节断裂 |
@@ -123,7 +124,7 @@ aicli-mesh gc --apply
 | `mesh/crash-reconcile` | 强杀 B | A 的 `peers` 在 TTL 内把 B 标 `stale`；`gc --apply` 后 B 的档案与租约消失 | 判活只看文件时间不看 pid / GC 条件过宽误删活节点 |
 | `mesh/no-token-leak` | 扫描 peers 输出、journal 文件、`/debug/endpoints`（JSON+text）、证据目录 | 均不含令牌原文（只允许 `0f3a…` 形式脱敏提示） | 令牌被写进绑定/journal/清单（回归红线） |
 | `mesh/legacy-purge` | `gc --purge-legacy --apply` | 只删旧目录（`web-ports/` 等），`mesh/` 完全不受影响 | 清理路径写错，误伤新目录 |
-| `mesh/self-containment` | 杀掉全部节点后 `aicli-mesh ls` | 正常返回（含 `stale` 节点与绑定），不报错、不卡住 | 工具依赖「有进程活着」才能工作 |
+| `mesh/self-containment` | 杀掉全部节点后 `aicli-mesh ls -a` | 正常返回（含 `stale` 节点与绑定），不报错、不卡住 | 工具依赖「有进程活着」才能工作 |
 | `mesh/cross-workspace-ops` | B 以**另一个工作区**（不同 cwd）启动，比对 `ls`/`peers` 与跨工作区写调用 | 默认同时列出两个工作区（`workspace.path` 不同）；A→B 写调用默认成功；`--mesh-restrict-workspace` 下同一调用 `refused`（`mesh_cross_workspace_denied`） | 工作区被误当权限边界（默认拒绝）/ 过滤实现误伤归属判定 |
 | `mesh/nonloopback-default-deny` | 目标进程带 `--web-host 0.0.0.0` 启动（非回环监听；另带 `--mesh-allow-stop=true` 只为让 stop 越过开关检查），用**回环地址**、带档案里的 `X-AICLI-Token` 直连同一端口发 `POST /web/api/mesh/call`（op=`node.info`）与 `POST /web/api/mesh/stop`（target=自己） | 两者都 HTTP 403 + `status=refused` + `code=mesh_nonloopback_denied`（整机退出网格写路径，与客户端来源无关）；同一节点的 `/web/api/status` 仍 200（拒绝是网格专属） | 非回环判定被短路/绕过（安全红线回归）；或把「非回环模式」误实现成「只拦非回环客户端」；或新端点（stop）漏接判定 |
 | `mesh/nonloopback-cli-parity` | 同一节点：`aicli-mesh call <pid> node.info --json`（CLI 照档案 advertise 的地址直连，无客户端侧回环豁免） | 退出码 6 + `code=mesh_nonloopback_denied`；档案地址在本机不可达时如实记 SKIP（HTTP 侧已锁规则本体） | CLI 侧偷偷加了回环豁免（两套口径）/ advertise 地址不可达且未登记 SKIP |

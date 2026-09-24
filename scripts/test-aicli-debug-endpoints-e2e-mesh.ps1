@@ -557,7 +557,8 @@ if ($baseA -ne '' -and $baseB -ne '') {
     $selfA = Invoke-JsonHttp -Url "$baseA/web/api/mesh/self" -TimeoutSec 15
     $selfB = Invoke-JsonHttp -Url "$baseB/web/api/mesh/self" -TimeoutSec 15
     $peersProbe = Invoke-JsonHttp -Url "$baseA/web/api/mesh/peers?probe=1" -TimeoutSec 40
-    $lsAll = Invoke-MeshCli -Arguments @('ls', '--json')
+    # -a：全量视图（含 stale/stopped），与 peers 的默认全量口径对齐（ls 默认只列在线）
+    $lsAll = Invoke-MeshCli -Arguments @('ls', '-a', '--json')
 
     Save-RedactedText -Path (Join-Path $evidenceDir 'm1-self-A.json') -Text $selfA.text -Secrets @($script:secrets)
     Save-RedactedText -Path (Join-Path $evidenceDir 'm1-peers-A-probe1.json') -Text $peersProbe.text -Secrets @($script:secrets)
@@ -597,7 +598,7 @@ if ($null -ne $peersProbe -and $null -ne $lsAll) {
         if ($attempt -gt 1) {
             Start-Sleep -Milliseconds 1500
             $peersProbe = Invoke-JsonHttp -Url "$baseA/web/api/mesh/peers?probe=1" -TimeoutSec 40
-            $lsAll = Invoke-MeshCli -Arguments @('ls', '--json')
+            $lsAll = Invoke-MeshCli -Arguments @('ls', '-a', '--json')
         }
         $httpNodes = @(Get-ViewNodes $peersProbe.json)
         $cliNodes = @(Get-ViewNodes $lsAll.json)
@@ -702,7 +703,7 @@ if ($null -ne $recordA) {
         if ($manifestA.text.Contains($tokenA)) { $leaks.Add('endpoints') }
         $screenA = Invoke-MeshCli -Arguments @('screen', "pid:$($procA.Id)", '--json')
         if ($screenA.text.Contains($tokenA)) { $leaks.Add('screen') }
-        $lsText = Invoke-MeshCli -Arguments @('ls')
+        $lsText = Invoke-MeshCli -Arguments @('ls', '-a')
         if ($lsText.text.Contains($tokenA)) { $leaks.Add('ls-text') }
         $showA = Invoke-MeshCli -Arguments @('show', "pid:$($procA.Id)", '--json')
         if ($showA.text.Contains($tokenA)) { $leaks.Add('show') }
@@ -1033,7 +1034,7 @@ if ($crashObserved) {
     $aKept = Test-Path -LiteralPath $recordAPath
     $aInPlan = @($actionPaths | Where-Object { $_ -eq $recordAPath }).Count -gt 0
 
-    $lsAfterGc = Invoke-MeshCli -Arguments @('ls', '--json')
+    $lsAfterGc = Invoke-MeshCli -Arguments @('ls', '-a', '--json')
     $nodesAfterGc = @(Get-ViewNodes $lsAfterGc.json)
     $stateAAfterGc = ''
     $viewAAfterGc = $nodesAfterGc | Where-Object { [string](Get-Prop $_ 'node_id') -eq $nodeIdA } | Select-Object -First 1
@@ -1278,7 +1279,8 @@ if ($null -ne $procA -and $baseA -ne '') {
     Write-Log ("A stopped (pid={0})" -f $procA.Id)
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $lsOffline = Invoke-MeshCli -Arguments @('ls', '--json')
+    # -a：全部进程已退出，A 必须是 stale——默认（只看在线）会把它藏起来（M9 断言依赖全量视图）
+    $lsOffline = Invoke-MeshCli -Arguments @('ls', '-a', '--json')
     $showOffline = Invoke-MeshCli -Arguments @('show', "pid:$($procA.Id)", '--json')
     $sw.Stop()
     Save-RedactedText -Path (Join-Path $evidenceDir 'm9-ls-offline.json') -Text $lsOffline.text -Secrets @($script:secrets)

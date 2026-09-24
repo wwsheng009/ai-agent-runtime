@@ -604,7 +604,8 @@ Invoke-RestMethod http://127.0.0.1:51234/web/api/mesh/peers | ConvertTo-Json -De
 Invoke-RestMethod 'http://127.0.0.1:51234/web/api/mesh/peers?scope=self&state=live&probe=1'
 ```
 
-> 与 CLI 同源：`aicli-mesh ls --json` 输出同一份 `BuildView` 结果（S6 起可用）；
+> 与 CLI 同源：`aicli-mesh ls -a --json` 输出同一份 `BuildView` 结果（`-a` 与 peers 的默认全量口径对齐；
+> CLI 默认只列在线，是同一视图上的输出过滤）（S6 起可用）；
 > 多进程验收（互发现 / 定向调用 / 崩溃对账 / GC）见
 > [../e2e/mesh-e2e.md](../e2e/mesh-e2e.md)（E2E-DEBUG-03）。
 
@@ -770,6 +771,9 @@ curl -s -X POST http://127.0.0.1:51234/web/api/mesh/spawn \
 aicli-mesh open sess-20260924-abc --json
 ```
 
+本端点只处理**既有会话**（`session_id` 必填）。**新建**会话没有对应的 Web 端点：CLI 侧是
+`aicli-mesh new`（会话 ID 由子进程生成，见 [mesh-cli.md](mesh-cli.md) §4.11）。
+
 请求体：
 
 | 字段 | 必需 | 语义 |
@@ -801,7 +805,8 @@ aicli-mesh open sess-20260924-abc --json
 - **可执行文件**：拉起用的 aicli 二进制按 `AICLI_BIN` → 自身（仅当文件名就叫 `aicli`）→
   同目录 `aicli.exe` → `PATH` 解析；`aicli-mesh doctor` 的 `spawn-executable` 会打印结果与
   来源。`AICLI_BIN` 指错时**不退回**其它候选，直接 `failed` + `mesh_spawn_bin_unavailable`
-  （CLI 侧的等价入口是 `aicli-mesh open --bin <路径>`，见 mesh-cli.md §4.10）。
+  （CLI 侧的等价入口是 `aicli-mesh open --bin <路径>` / `aicli-mesh new --bin <路径>`，
+  见 mesh-cli.md §4.10 / §4.11）。
 - **仅回环**：与 `/web/api/mesh/call` 同层（`X-AICLI-Token` + 回环），跨机一律拒绝。
 - **降级**：网格关闭 → `refused`（不是 5xx），前端据此提示而不是白屏。
 
@@ -896,7 +901,7 @@ curl -s -X POST http://127.0.0.1:51234/web/api/sessions/resume \
 
 **一句话**：把「让那个进程退场」做成一次可审计的网格调用——`graceful` 投 `/exit` 让目标自己
 收尾，`force` 直接终止进程（架构 §5.7 / §9.2）。CLI 侧等价物是 `aicli-mesh stop <节点|会话>`
-（见 [mesh-cli.md](mesh-cli.md) §4.11），两者共用 `mesh.StopNode`，Web 层不产生第二套语义。
+（见 [mesh-cli.md](mesh-cli.md) §4.12），两者共用 `mesh.StopNode`，Web 层不产生第二套语义。
 
 ```bash
 # 优雅停止：把 /exit 投给目标的 /web/api/input，等它保存会话、注销档案、释放租约

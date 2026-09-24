@@ -96,8 +96,24 @@ func TestCLILsJSONSchemaAndRedaction(t *testing.T) {
 	if view.Counts.Live != 1 || view.Counts.Stale != 1 {
 		t.Fatalf("counts = %+v, want live=1 stale=1", view.Counts)
 	}
+	// 默认只列在线：stale 档案不进 nodes[]，但 counts 仍是全量普查。
+	if len(view.Nodes) != 1 {
+		t.Fatalf("default ls listed %d nodes, want 1 (online only)", len(view.Nodes))
+	}
+	if view.Filter == nil || view.Filter.State != FilterStateLive {
+		t.Fatalf("default filter echo = %+v, want state=live", view.Filter)
+	}
+
+	code, stdout, stderr = runCLI(t, cli, "ls", "-a", "--json")
+	if code != ExitOK {
+		t.Fatalf("ls -a --json exit = %d (stderr %q)", code, stderr)
+	}
+	view = decodeJSON[MeshView](t, stdout)
 	if len(view.Nodes) != 2 {
-		t.Fatalf("nodes = %d, want 2", len(view.Nodes))
+		t.Fatalf("ls -a nodes = %d, want 2", len(view.Nodes))
+	}
+	if view.Filter != nil {
+		t.Fatalf("ls -a filter echo = %+v, want none", view.Filter)
 	}
 	live := nodeByName(t, view, "node-1000-20260924T100000Z")
 	if live.Auth == nil || live.Auth.TokenHint != "0f3a…" {
@@ -127,11 +143,32 @@ func TestCLILsFiltersNeverShrinkCounts(t *testing.T) {
 	seedLiveNode(t, paths, now, "node-1001-20260924T100001Z", "session_b", `E:\ws\b`)
 	writeViewNode(t, paths, viewNodeRecord("node-2000-20260924T090000Z", deadPID(t), now.Add(-time.Hour), "session_c", `E:\ws\a`))
 
-	code, stdout, stderr := runCLI(t, cli, "ls", "--live", "--json")
+	code, stdout, stderr := runCLI(t, cli, "ls", "--json")
+	if code != ExitOK {
+		t.Fatalf("ls exit = %d (stderr %q)", code, stderr)
+	}
+	view := decodeJSON[MeshView](t, stdout)
+	if len(view.Nodes) != 2 {
+		t.Fatalf("default ls listed %d nodes, want 2 (stale hidden)", len(view.Nodes))
+	}
+	if view.Counts.Live != 2 || view.Counts.Stale != 1 {
+		t.Fatalf("counts = %+v, want the full census (live=2 stale=1)", view.Counts)
+	}
+
+	code, stdout, stderr = runCLI(t, cli, "ls", "-a", "--json")
+	if code != ExitOK {
+		t.Fatalf("ls -a exit = %d (stderr %q)", code, stderr)
+	}
+	view = decodeJSON[MeshView](t, stdout)
+	if len(view.Nodes) != 3 {
+		t.Fatalf("ls -a listed %d nodes, want 3", len(view.Nodes))
+	}
+
+	code, stdout, stderr = runCLI(t, cli, "ls", "--live", "--json")
 	if code != ExitOK {
 		t.Fatalf("ls --live exit = %d (stderr %q)", code, stderr)
 	}
-	view := decodeJSON[MeshView](t, stdout)
+	view = decodeJSON[MeshView](t, stdout)
 	if len(view.Nodes) != 2 {
 		t.Fatalf("--live listed %d nodes, want 2 (stale hidden)", len(view.Nodes))
 	}
@@ -142,19 +179,78 @@ func TestCLILsFiltersNeverShrinkCounts(t *testing.T) {
 		t.Fatalf("filter echo = %+v, want state=live", view.Filter)
 	}
 
-	code, stdout, stderr = runCLI(t, cli, "ls", "--workspace", `E:\ws\a`, "--json")
+	code, stdout, stderr = runCLI(t, cli, "ls", "-a", "--workspace", `E:\ws\a`, "--json")
 	if code != ExitOK {
-		t.Fatalf("ls --workspace exit = %d (stderr %q)", code, stderr)
+		t.Fatalf("ls -a --workspace exit = %d (stderr %q)", code, stderr)
 	}
 	view = decodeJSON[MeshView](t, stdout)
 	if len(view.Nodes) != 2 {
-		t.Fatalf("--workspace listed %d nodes, want 2 (live + stale in E:\\ws\\a)", len(view.Nodes))
+		t.Fatalf("ls -a --workspace listed %d nodes, want 2 (live + stale in E:\\ws\\a)", len(view.Nodes))
 	}
 	if view.Counts.Live != 2 || view.Counts.Stale != 1 {
 		t.Fatalf("counts = %+v, want the full census", view.Counts)
 	}
 	if view.Filter == nil || len(view.Filter.Workspace) != 1 {
 		t.Fatalf("filter echo = %+v", view.Filter)
+	}
+
+	// 默认 + --workspace：工作区过滤仍叠加在「只看在线」之上。
+	code, stdout, stderr = runCLI(t, cli, "ls", "--workspace", `E:\ws\a`, "--json")
+	if code != ExitOK {
+		t.Fatalf("ls --workspace exit = %d (stderr %q)", code, stderr)
+	}
+	view = decodeJSON[MeshView](t, stdout)
+	if len(view.Nodes) != 1 {
+		t.Fatalf("ls --workspace listed %d nodes, want 1 (online only in E:\\ws\\a)", len(view.Nodes))
+	}
+	if view.Filter == nil || view.Filter.State != FilterStateLive || len(view.Filter.Workspace) != 1 {
+		t.Fatalf("filter echo = %+v, want state=live + workspace", view.Filter)
+	}
+}
+
+func TestCLILsOnlineDefaultAllFlagAndConflict(t *testing.T) {
+	paths := testCLIPaths(t)
+	clock := newFakeClock()
+	now := clock.Now()
+	cli := testCLI(paths, clock)
+
+	seedLiveNode(t, paths, now, "node-1000-20260924T100000Z", "session_live", `E:\ws\a`)
+	writeViewNode(t, paths, viewNodeRecord("node-2000-20260924T090000Z", deadPID(t), now.Add(-time.Hour), "session_dead", `E:\ws\b`))
+
+	// 人类可读的默认输出：只有在线行，并明说隐藏了多少（counts 仍全量）。
+	code, stdout, stderr := runCLI(t, cli, "ls")
+	if code != ExitOK {
+		t.Fatalf("ls exit = %d (stderr %q)", code, stderr)
+	}
+	if !strings.Contains(stdout, "node-1000-20260924T100000Z") {
+		t.Fatalf("default ls must list the live node:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "node-2000-20260924T090000Z") {
+		t.Fatalf("default ls must hide the stale node:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "共 2 个节点") || !strings.Contains(stdout, "已隐藏 1 个节点") {
+		t.Fatalf("default ls summary must keep the full census and say what is hidden:\n%s", stdout)
+	}
+
+	// --all 与 -a 等价：全量列出，且不再提示隐藏。
+	code, stdout, stderr = runCLI(t, cli, "ls", "--all")
+	if code != ExitOK {
+		t.Fatalf("ls --all exit = %d (stderr %q)", code, stderr)
+	}
+	if !strings.Contains(stdout, "node-1000-20260924T100000Z") || !strings.Contains(stdout, "node-2000-20260924T090000Z") {
+		t.Fatalf("ls --all must list every node:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "已隐藏") {
+		t.Fatalf("ls --all hides nothing and must not claim otherwise:\n%s", stdout)
+	}
+
+	// --live 已是默认行为（保留兼容），与 -a 同时出现属于自相矛盾。
+	if code, _, _ = runCLI(t, cli, "ls", "--live"); code != ExitOK {
+		t.Fatalf("ls --live exit = %d, want %d", code, ExitOK)
+	}
+	code, _, stderr = runCLI(t, cli, "ls", "-a", "--live")
+	if code != ExitUsage || !strings.Contains(stderr, "互斥") {
+		t.Fatalf("ls -a --live = %d (stderr %q), want usage error", code, stderr)
 	}
 }
 

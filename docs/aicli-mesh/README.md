@@ -10,9 +10,9 @@
 
 | 能力 | 一句话 | 命令 |
 |------|--------|------|
-| 发现 | 有哪些节点、谁活着、各自在哪个会话/工作区 | `aicli-mesh ls`（默认不发网络请求） |
+| 发现 | 有哪些节点、谁在线、各自在哪个会话/工作区 | `aicli-mesh ls`（默认只列在线、不发网络请求；`-a` 看全部档案） |
 | 定位与调用 | 拿地址、跨进程跑 prompt、读屏幕 | `url` / `show` / `send` / `screen` / `call` |
-| 生命周期 | 复用或拉起、停止、清理、复盘、体检 | `open` / `stop` / `gc` / `watch` / `doctor` |
+| 生命周期 | 复用、新建或拉起、停止、清理、复盘、体检 | `open` / `new` / `stop` / `gc` / `watch` / `doctor` |
 
 两种等价入口（**同一份实现**，参数/输出/退出码完全一致）：
 
@@ -24,7 +24,7 @@
 | 文档 | 回答什么问题 |
 |------|--------------|
 | [quickstart.md](./quickstart.md) | 从零到第一次跨进程调用：构建 → 起两个节点 → 发现 → 调用 → 复盘 → 收尾 |
-| [spawn-and-binaries.md](./spawn-and-binaries.md) | `open`/`spawn` 拉起的是哪个 aicli？改名部署怎么办？（可执行文件解析专题） |
+| [spawn-and-binaries.md](./spawn-and-binaries.md) | `open`/`new`/`spawn` 拉起的是哪个 aicli？改名部署怎么办？（可执行文件解析专题） |
 | [lifecycle.md](./lifecycle.md) | 档案/心跳/租约/接管/停止/GC 对账：一个节点从生到死的全过程 |
 | [troubleshooting.md](./troubleshooting.md) | 出错了看哪里：退出码、doctor 检查项、`mesh_*` 错误码、现象表 |
 | [../aicli/mesh-cli.md](../aicli/mesh-cli.md) | **权威 CLI 参考**：全部子命令、参数、JSON 契约、退出码 |
@@ -44,7 +44,10 @@ pwsh scripts/build.ps1 -Tools aicli-mesh      # 独立二进制
 aicli chat --yolo --pprof
 aicli chat --yolo --pprof
 
-# 2) 看网格（毫秒级，不发请求）
+# 1b) 或让网格起一个新会话（子进程生成会话 ID，返回可打开的窗口 URL）
+aicli-mesh new --workspace $PWD
+
+# 2) 看在线节点（毫秒级，不发请求；-a 连 stale/stopped 一起看）
 aicli-mesh ls
 
 # 3) 定位 + 调用（把 <会话> 换成 ls 里的 SESSION）
@@ -67,9 +70,10 @@ aicli-mesh doctor                        # 体检；problems > 0 → 退出码 5
 4. **写操作显式**：跨进程写（`invoke`/`input`/`cancel`/`sessions.resume`）必须 `--allow-write`；
    停止节点必须**目标进程自己**开 `--mesh-allow-stop=true`——「谁能停我」由被停者决定；
 5. **令牌单披露**：常规输出只有 `token_hint`（前 4 位 + `…`）；令牌原文只出现在 `url --with-token`
-   与 `open`/`spawn` 返回的窗口 URL 里；
-6. **同源聚合**：CLI 与 HTTP 消费同一份 `internal/mesh.BuildView`（`aicli-mesh ls --json` 与
-   `GET /web/api/mesh/peers` 的节点集合、会话 ID、`base_url` 完全一致），不各写一套口径。
+   与 `open`/`new`/`spawn` 返回的窗口 URL 里；
+6. **同源聚合**：CLI 与 HTTP 消费同一份 `internal/mesh.BuildView`（`aicli-mesh ls -a --json` 与
+   `GET /web/api/mesh/peers` 的默认全量口径在节点集合、会话 ID、`base_url` 上完全一致；CLI 默认只列
+   在线，是同一视图上的输出过滤，不另写口径），不各写一套口径。
 
 ## 5. 术语表
 
@@ -81,7 +85,7 @@ aicli-mesh doctor                        # 体检；problems > 0 → 退出码 5
 | 租约（lease） | `leases/<purpose>-<key>.lock`：单飞锁与归属凭据 |
 | 网格日志（journal） | `journal/<node_id>.ndjson`：每个进程只写自己那一个文件，进程全退也能复盘 |
 | 网格根（mesh root） | 解析顺序 `AICLI_MESH_DIR` → `AICLI_HOME/mesh` → `<主目录>/.aicli/mesh` |
-| 拉起（spawn） | `open` / `POST /web/api/mesh/spawn`：复用活节点或启动新进程 |
+| 拉起（spawn） | `open` / `new` / `POST /web/api/mesh/spawn`：复用活节点、新建会话或启动新进程 |
 | 接管（takeover） | 显式回收某会话的租约后拉起新节点；旧节点**不会被杀**，下次心跳把自己标 `orphaned` |
 | 归属（ownership） | 节点对某会话的身份：`owner`（本节点）/ `peer`（其它活节点）/ `conflict`（双占用）/ `-`（无） |
 | 单飞（single-flight） | 同一时刻只允许一个 `invoke` 等待；冲突返回 `busy`（HTTP 409） |

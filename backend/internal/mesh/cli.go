@@ -104,6 +104,8 @@ func (c *CLI) Run(args []string) int {
 		return c.runScreen(rest)
 	case "open":
 		return c.runOpen(rest)
+	case "new":
+		return c.runNew(rest)
 	case "stop":
 		return c.runStop(rest)
 	case "watch":
@@ -172,13 +174,14 @@ func (c *CLI) printUsage(w io.Writer) {
 	fmt.Fprint(w, `aicli-mesh —— aicli 节点网格工具（发现 / 运维）
 
 用法:
-  aicli-mesh ls [--json] [--probe] [--live] [--workspace PATH]... [--sort age|session|workspace]
+  aicli-mesh ls [-a|--all] [--json] [--probe] [--live] [--workspace PATH]... [--sort age|session|workspace]
   aicli-mesh show <节点|会话> [--json] [--events N]
   aicli-mesh url <节点|会话> [--with-token] [--path PATH] [--json]
   aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--allow-write] [--timeout 130s] [--json]
   aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--json]
   aicli-mesh screen <节点|会话> [--view tui] [--tail N] [--format json|text] [--json]
   aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--bin PATH] [--json]
+  aicli-mesh new [--workspace PATH] [--port N] [--wait 8s] [--no-wait] [--bin PATH] [--json]
   aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
   aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]
   aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
@@ -201,6 +204,13 @@ func (c *CLI) printUsage(w io.Writer) {
   AICLI_BIN → 自身（仅当就叫 aicli）→ 同目录 aicli.exe → PATH；AICLI_BIN 指错时
   直接失败，绝不退回其它候选（改名部署见 docs/aicli/mesh-cli.md）。
 
+新建（new）: 在一个工作区里新建一个会话——拉起 aicli chat（不带会话 ID，由子进程
+  自己生成），等它的节点档案出现后打印新会话 ID 与窗口 URL。与 open 的分工：open
+  是「让这个已有会话有窗口」（复用活节点、按会话单飞），new 是「开一个新会话」，
+  因此从不复用，也不抢会话租约（此时还没有会话 ID 可抢）。工作区默认是当前目录
+  （--workspace 指定，必须是已存在的目录）；--port/--wait/--bin/--no-wait 与 open
+  同义，但 --no-wait 时会话 ID 还未知（子进程自己生成），稍后用 aicli-mesh ls 查看。
+
 停止（stop）: 默认优雅——把 /exit 投给目标的 /web/api/input，让目标自己收尾
   （保存会话、注销档案、释放租约），并等进程消失；--force 才直接终止进程
   （不做收尾，残留档案由 gc 按「可证已死」回收）。停止是治理动作：**目标
@@ -220,6 +230,11 @@ func (c *CLI) printUsage(w io.Writer) {
   6 被策略拒绝
 
 默认不探活（毫秒级，纯读文件）；--probe 才发请求。
+
+列表（ls）: 默认只列**在线**（live）节点——日常问的是「现在谁在跑」；-a/--all 才列出
+  全部档案（stale/stopped/unknown 一并可见，冲突也照常提示）。--live 是默认行为的
+  显式写法（保留兼容，与 -a 互斥）。无论怎么过滤，counts 恒为全量普查口径（§5.4），
+  过滤只裁剪 nodes[]。
 `)
 }
 
@@ -498,6 +513,8 @@ func (c *CLI) runLs(args []string) int {
 		"json":      flagBool,
 		"probe":     flagBool,
 		"live":      flagBool,
+		"all":       flagBool,
+		"a":         flagBool,
 		"workspace": flagMulti,
 		"sort":      flagValue,
 		"help":      flagBool,
@@ -518,13 +535,20 @@ func (c *CLI) runLs(args []string) int {
 	default:
 		return c.fail(ExitUsage, "aicli-mesh ls: --sort 只接受 age|session|workspace（收到 %q）", sortKey)
 	}
+	// 默认只看在线：`ls` 回答的是「现在有哪些节点在跑」。-a/--all 才列全量
+	// （stale/stopped/unknown 也列出）。--live 是默认行为的显式写法（保留兼容），
+	// 与 -a 同时出现属于自相矛盾，按用法错误处理而不是静默取一个。
+	showAll := parsed.boolean("all") || parsed.boolean("a")
+	if showAll && parsed.boolean("live") {
+		return c.fail(ExitUsage, "aicli-mesh ls: -a/--all 与 --live 互斥（默认即只看在线；--all 列出全部状态）")
+	}
 	paths := c.paths()
 	opts := ViewOptions{Now: c.now(), Probe: parsed.boolean("probe")}
-	filter := ViewFilter{Scope: FilterScopeAll, State: FilterStateAll}
-	filtered := false
-	if parsed.boolean("live") {
-		filter.State = FilterStateLive
-		filtered = true
+	filter := ViewFilter{Scope: FilterScopeAll, State: FilterStateLive}
+	filtered := true
+	if showAll {
+		filter.State = FilterStateAll
+		filtered = false
 	}
 	if workspaces := parsed.list("workspace"); len(workspaces) > 0 {
 		filter.Workspace = workspaces
@@ -618,8 +642,17 @@ func (c *CLI) renderLsTable(view MeshView, sortKey string, probed bool) {
 	}
 	fmt.Fprint(c.out(), renderTable(headers, rows))
 	counts := view.Counts
+	// 总数用全量普查（§5.4）：过滤只裁剪 nodes[]，不能假装网格更小。
+	total := counts.Live + counts.Stale + counts.Stopped + counts.Unknown
 	fmt.Fprintf(c.out(), "\n共 %d 个节点：live=%d stale=%d stopped=%d unknown=%d conflict=%d（列出 %d，排序 %s）\n",
-		len(view.Nodes), counts.Live, counts.Stale, counts.Stopped, counts.Unknown, counts.Conflict, len(view.Nodes), sortKey)
+		total, counts.Live, counts.Stale, counts.Stopped, counts.Unknown, counts.Conflict, len(view.Nodes), sortKey)
+	if hidden := total - len(view.Nodes); hidden > 0 {
+		if view.Filter != nil && view.Filter.State == FilterStateLive {
+			fmt.Fprintf(c.out(), "已隐藏 %d 个节点（默认只列在线；用 `aicli-mesh ls -a` 查看全部，counts 仍为全量口径）。\n", hidden)
+		} else {
+			fmt.Fprintf(c.out(), "已隐藏 %d 个节点（当前过滤条件；counts 仍为全量口径）。\n", hidden)
+		}
+	}
 	if view.Root == "" {
 		fmt.Fprintln(c.out(), "网格根目录未解析（fail-closed）：没有可读的节点档案。")
 	} else {
@@ -2414,6 +2447,152 @@ func openExitCode(status string) int {
 		return ExitUnreachable
 	default:
 		return ExitFailure
+	}
+}
+
+// ---------------------------------------------------------------------------
+// new —— 新建会话（拉起 `aicli chat`，会话 ID 由子进程生成）
+// ---------------------------------------------------------------------------
+
+// newResult 是 `new --json` 的输出：与 open 同一形状（§5.7 的 SpawnResult），
+// 外加 workspace——会话 ID 是子进程生成的，工作区是调用方给的，脚本两个都要。
+type newResult struct {
+	SchemaVersion int    `json:"schema_version"`
+	Workspace     string `json:"workspace,omitempty"`
+	*SpawnResult
+}
+
+// runNew 在一个工作区里新建会话：拉起 `aicli chat`（不带会话 ID）并等它的节点
+// 档案出现，然后打印新会话 ID 与窗口 URL。
+//
+// 与 open 的差别是刻意的：open 以会话为键（复用活节点、按会话单飞），new 此时
+// 还没有会话 ID，所以只做「启动 + 按 pid 等档案」。CLI 依旧不是节点：不写档案、
+// 不写绑定、不占租约——档案是子进程自己写的（与 open 同一条实现，见 mesh.Spawn
+// 的 spawnNewSession）。
+func (c *CLI) runNew(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{
+		"workspace": flagValue,
+		"port":      flagValue,
+		"wait":      flagValue,
+		"no-wait":   flagBool,
+		"bin":       flagValue,
+		"json":      flagBool,
+		"help":      flagBool,
+	})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh new: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) != 0 {
+		return c.fail(ExitUsage, "aicli-mesh new: 不接受位置参数（工作区用 --workspace 指定）")
+	}
+	paths := c.paths()
+	if !paths.Enabled() {
+		return c.fail(ExitFailure, "aicli-mesh new: 网格根目录不可用（设置 AICLI_MESH_DIR 或 AICLI_HOME）")
+	}
+	wait, err := parsed.durationValue("wait", time.Duration(DefaultSpawnWaitMS)*time.Millisecond)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh new: --wait: %v", err)
+	}
+	port := 0
+	if raw := strings.TrimSpace(parsed.str("port", "")); raw != "" {
+		value, convErr := strconv.Atoi(raw)
+		if convErr != nil || value < 1 || value > 65535 {
+			return c.fail(ExitUsage, "aicli-mesh new: --port 需要 1-65535 的整数（收到 %q）", raw)
+		}
+		port = value
+	}
+	bin := strings.TrimSpace(parsed.str("bin", ""))
+	if bin != "" {
+		// 与 open 同一条规则：--bin 是「就用这一个二进制」，指错当场失败。
+		if info, statErr := os.Stat(bin); statErr != nil {
+			return c.fail(ExitUsage, "aicli-mesh new: --bin %s 不可用：%v", bin, statErr)
+		} else if info.IsDir() {
+			return c.fail(ExitUsage, "aicli-mesh new: --bin %s 是目录，不是可执行文件", bin)
+		}
+	}
+	workspace, code, msg := newWorkspaceTarget(parsed.str("workspace", ""))
+	if code != ExitOK {
+		return c.fail(code, "aicli-mesh new: %s", msg)
+	}
+
+	result := c.spawn()(
+		SpawnRequest{
+			NewSession: true,
+			Port:       port,
+			WaitMS:     int(wait / time.Millisecond),
+			Origin:     "cli",
+		},
+		SpawnOptions{
+			Paths:      paths,
+			Now:        c.now,
+			SelfNodeID: fmt.Sprintf("cli-%d", os.Getpid()),
+			PID:        os.Getpid(),
+			Wait:       wait,
+			Executable: bin,
+			// 新会话没有绑定可查：工作区只能由调用方给出（--workspace 或当前目录）。
+			WorkspaceFor:  func(string) (string, bool) { return workspace, true },
+			FireAndForget: parsed.boolean("no-wait"),
+		})
+	if parsed.boolean("json") {
+		if err := c.printJSON(newResult{SchemaVersion: SchemaVersion, Workspace: workspace, SpawnResult: &result}); err != nil {
+			return c.fail(ExitFailure, "aicli-mesh new: 输出 JSON 失败: %v", err)
+		}
+	} else {
+		c.printNewHuman(result, workspace)
+	}
+	return openExitCode(result.Status)
+}
+
+// newWorkspaceTarget 解析新会话的工作区：--workspace 优先，否则当前目录；返回
+// 绝对路径（档案里记的是子进程的 cwd，相对路径会随调用方目录漂移）。
+func newWorkspaceTarget(raw string) (dir string, code int, msg string) {
+	dir = strings.TrimSpace(raw)
+	if dir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", ExitFailure, fmt.Sprintf("无法确定当前目录：%v（用 --workspace 指定）", err)
+		}
+		dir = cwd
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", ExitUsage, fmt.Sprintf("--workspace %s 无法解析：%v", dir, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", ExitUsage, fmt.Sprintf("--workspace %s 不可用：%v", abs, err)
+	}
+	if !info.IsDir() {
+		return "", ExitUsage, fmt.Sprintf("--workspace %s 不是目录", abs)
+	}
+	return abs, ExitOK, ""
+}
+
+// printNewHuman 是新建结果的人读输出。--no-wait 时档案还没出现、会话 ID 未知：
+// 如实说「已启动、ID 待查」，而不是印一个空会话。
+func (c *CLI) printNewHuman(result SpawnResult, workspace string) {
+	if result.Status != SpawnStatusStarted {
+		c.printSpawnHuman(result)
+		return
+	}
+	if strings.TrimSpace(result.SessionID) == "" {
+		fmt.Fprintf(c.out(), "已启动新会话的节点进程（pid %d，端口 %d）\n", result.PID, result.Port)
+	} else {
+		fmt.Fprintf(c.out(), "新会话 %s 已就绪（节点 %s，pid %d，端口 %d）\n",
+			result.SessionID, result.NodeID, result.PID, result.Port)
+	}
+	if workspace != "" {
+		fmt.Fprintf(c.out(), "工作区：%s\n", workspace)
+	}
+	if strings.TrimSpace(result.URL) != "" {
+		fmt.Fprintln(c.out(), result.URL)
+	}
+	if result.Reason != "" {
+		fmt.Fprintln(c.errOut(), "提示："+result.Reason)
 	}
 }
 

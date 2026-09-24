@@ -60,8 +60,8 @@
 
 **最小可用切片（P0，不含拉进程）**：`internal/mesh` 包（registry + binding + lease）→
 进程启动/会话切换时写档案与绑定 → `GET /web/api/mesh/self|peers` + `/web/api/health` →
-`aicli-mesh ls / show / url / gc`。这一步就能回答「本机现在有哪些 aicli 在跑（**不分工作区，默认全量**）、
-分别服务哪个会话、地址是什么」。
+`aicli-mesh ls / show / url / gc`。这一步就能回答「本机现在有哪些 aicli 在跑（**不分工作区**；
+CLI 默认只列在线，`-a` 才是含残留档案的全量）、分别服务哪个会话、地址是什么」。
 
 ---
 
@@ -799,7 +799,7 @@ data: {"seq":17,"ts":"2026-09-24T07:31:42Z","source_node_id":"node-9001-...","ty
 
 | 命令 | 作用 | 关键参数 | 阶段 |
 |------|------|----------|------|
-| `aicli-mesh ls`（别名 `ps`） | 列出本机节点：状态/地址/会话/工作区（**默认全量、跨全部工作区**） | `--json` `--probe` `--live`（只看存活） `--workspace PATH`（可重复，过滤） `--sort age\|session\|workspace` | P0 |
+| `aicli-mesh ls`（别名 `ps`） | 列出本机节点：状态/地址/会话/工作区（**默认只列在线、跨全部工作区**；`-a` 列全部档案） | `-a`/`--all`（含 stale/stopped/unknown） `--json` `--probe` `--live`（默认行为的显式写法） `--workspace PATH`（可重复，过滤） `--sort age\|session\|workspace` | P0 |
 | `aicli-mesh show <node\|session>` | 单节点或单会话详情（含 journal 尾部、绑定、租约） | `--json` `--events N` | P0 |
 | `aicli-mesh url <node\|session>` | 打印可访问 URL | `--with-token` `--path /web` | P0 |
 | `aicli-mesh gc` | 清理死节点/过期租约/旧日志/旧目录 | `--apply` `--stale-ttl 10m` `--keep-days 7` `--purge-legacy` `--prune-bindings` | P0 |
@@ -834,9 +834,9 @@ data: {"seq":17,"ts":"2026-09-24T07:31:42Z","source_node_id":"node-9001-...","ty
 ### 7.4 典型用法
 
 ```powershell
-# 本机现在有哪些 aicli 在跑？（默认不探活，毫秒级）
+# 本机现在有哪些 aicli 在跑？（默认只列在线、不探活，毫秒级；-a 连残留档案一起看）
 aicli-mesh ls
-aicli-mesh ls --probe --json | ConvertFrom-Json | Select-Object -ExpandProperty nodes
+aicli-mesh ls -a --probe --json | ConvertFrom-Json | Select-Object -ExpandProperty nodes
 
 # 某个会话的访问地址（给人复制的 URL）
 aicli-mesh url session_20260924072950_ltYRU9tG
@@ -1193,7 +1193,7 @@ Windows 没有 POSIX 权限位：`0600` 语义退化为「依赖用户目录 ACL
 
 | 断言 | 内容 |
 |------|------|
-| M1 `mesh/discovery-both-nodes` | 两节点都出现在 `aicli-mesh ls --json` 与 `/web/api/mesh/peers` |
+| M1 `mesh/discovery-both-nodes` | 两节点都出现在 `aicli-mesh ls -a --json` 与 `/web/api/mesh/peers` |
 | M2 `mesh/cli-api-parity` | CLI 与 HTTP 两个视图的节点/会话/地址一致（同源校验） |
 | M3 `mesh/session-lease-exclusive` | B 尝试 resume A 的会话 → `busy`/`running_elsewhere`，无第二个进程声明该会话 |
 | M4 `mesh/cross-call-invoke` | A 通过 `mesh/call` 让 B 跑一轮 prompt，拿到 `turn_id` + `assistant`，`duplicate=false` |
@@ -1201,7 +1201,7 @@ Windows 没有 POSIX 权限位：`0600` 语义退化为「依赖用户目录 ACL
 | M6 `mesh/crash-reconcile` | 强杀 B → A 的 peers 视图在 TTL 内把 B 标 `stale`；`gc --apply` 后档案消失 |
 | M7 `mesh/no-token-leak` | peers 默认输出、journal 文件、`/debug/endpoints` 均不含令牌原文 |
 | M8 `mesh/legacy-purge` | `gc --purge-legacy --apply` 只删旧目录，`mesh/` 不受影响 |
-| M9 `mesh/self-containment` | 杀掉全部节点后 `aicli-mesh ls` 仍可读（含 stale 与绑定），不报错 |
+| M9 `mesh/self-containment` | 杀掉全部节点后 `aicli-mesh ls -a` 仍可读（含 stale 与绑定），不报错 |
 | M10 `mesh/cross-workspace-ops` | B 以**另一个工作区**（不同 cwd）启动：默认 `ls`/`peers` 同时列出两个工作区（`workspace.path` 不同）；A 对 B 的写调用（`invoke`）默认成功；开启 `--mesh-restrict-workspace` 后同一调用 → `refused` + `mesh_cross_workspace_denied` |
 
 **与既有 E2E 机制的对接**（事实，需同步修改）：

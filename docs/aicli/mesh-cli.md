@@ -15,6 +15,7 @@
 | 拿一个可直接打开/调用的 URL（需要令牌时显式披露） | `url` |
 | 让某个节点退场（默认投 `/exit` 等它收尾；`--force` 直接终止进程） | `stop`（治理动作，目标需 `--mesh-allow-stop=true`） |
 | 复用活节点或拉起新节点，并给出可直接打开的窗口 URL | `open` |
+| 新建一个会话（拉起新进程，返回新会话 ID 与窗口 URL） | `new` |
 | 观察事件流（谁起停、谁切会话、谁调用了谁）——进程全退也能复盘 | `watch` |
 | 清理已退出进程留下的档案 / 租约 / 日志 / 旧目录 | `gc`（默认 dry-run） |
 | 一次性体检：目录、权限、陈旧节点、双占用、令牌可读性、日志完整性 | `doctor` |
@@ -40,13 +41,14 @@
 ## 2. 用法总览
 
 ```text
-aicli-mesh ls [--json] [--probe] [--live] [--workspace PATH]... [--sort age|session|workspace]
+aicli-mesh ls [-a|--all] [--json] [--probe] [--live] [--workspace PATH]... [--sort age|session|workspace]
 aicli-mesh show <节点|会话> [--json] [--events N]
 aicli-mesh url <节点|会话> [--with-token] [--path PATH] [--json]
 aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--allow-write] [--timeout 130s] [--json]
 aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--client-request-id ID] [--json]
 aicli-mesh screen <节点|会话> [--view tui|web] [--tail N] [--format json|text] [--timeout 130s] [--json]
 aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--bin PATH] [--json]
+aicli-mesh new [--workspace PATH] [--port N] [--wait 8s] [--no-wait] [--bin PATH] [--json]
 aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
 aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]
 aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
@@ -81,13 +83,16 @@ aicli-mesh version [--json]
 
 ### 4.1 `ls` — 节点列表
 
-默认输出等宽表格（UTF-8，CJK 宽度按显示宽度对齐）：
+**默认只列在线（live）节点**——日常问的是「现在有哪些节点在跑」；要看全部档案
+（含 `stale` / `stopped` / `unknown`）加 `-a` / `--all`。默认输出等宽表格（UTF-8，CJK 宽度按显示宽度对齐）：
 
 ```text
 STATE  NODE                         PID    SESSION                          WORKSPACE                     ADDR                    AGE     OWN
 -----  ---------------------------  -----  -------------------------------  ----------------------------  ----------------------  ------  ----
 live   node-22024-20260924T013534Z  22024  session_20260924093535_4wCDwhqu  E:\projects\ai\ai-agent-run…  http://127.0.0.1:63910  8s      peer
-stale  node-22268-20260924T013300Z  22268  session_20260924093301_xK8JBDbV  E:\projects\ai\ai-agent-run…  http://127.0.0.1:18123  36m42s  -
+
+共 2 个节点：live=1 stale=1 stopped=0 unknown=0 conflict=0（列出 1，排序 age）
+已隐藏 1 个节点（默认只列在线；用 `aicli-mesh ls -a` 查看全部，counts 仍为全量口径）。
 ```
 
 列含义：`STATE`（live / stale / stopped / unknown）、`NODE`、`PID`、`SESSION`、`WORKSPACE`、
@@ -96,14 +101,15 @@ stale  node-22268-20260924T013300Z  22268  session_20260924093301_xK8JBDbV  E:\p
 
 | 参数 | 说明 |
 |------|------|
+| `-a`, `--all` | 列出全部档案（`stale` / `stopped` / `unknown` 一并显示）；默认只列在线 |
 | `--json` | 输出稳定 JSON（§6.1） |
 | `--probe` | 对列出的节点发一次 HTTP 探活（并发 8、单请求 1s、整轮预算 3s；预算内没答复记 `skipped`，不算 `unreachable`） |
-| `--live` | 只列出存活节点（等价 `state=live` 过滤） |
+| `--live` | 显式请求默认行为（等价 `state=live` 过滤，保留兼容；与 `-a` 互斥） |
 | `--workspace PATH` | 只列出该工作区的节点，可重复 |
 | `--sort age\|session\|workspace` | 排序键，默认 `age`（最旧在前） |
 
-**硬契约**：过滤只裁剪 `nodes[]`，`counts` 恒为**全量口径**——过滤过的视图也不能假装网格更小，
-更不允许「过滤掉一半冲突」的假象（§5.4）。
+**硬契约**：过滤（默认的「只看在线」、`-a`、`--workspace`）只裁剪 `nodes[]`，`counts` 与汇总行的
+「共 N 个节点」恒为**全量口径**——过滤过的视图也不能假装网格更小，更不允许「过滤掉一半冲突」的假象（§5.4）。
 
 ### 4.2 `show` — 节点详情
 
@@ -276,6 +282,7 @@ aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--bin 
 
 与 Web 端 `POST /web/api/mesh/spawn` 共用同一套实现（`mesh.Spawn`）。CLI 本身**不是节点**：
 单飞租约的 owner 记作 `cli-<pid>`，不冒充节点身份。
+会话还不存在、要**新建**一个时用 `new`（§4.11）：同一套 `mesh.Spawn` 的另一个入口。
 
 | 开关 | 作用 |
 |------|------|
@@ -307,7 +314,49 @@ aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--bin 
   而是直接 `failed`（`mesh_spawn_bin_unavailable`）——「我指定了哪个二进制」不该变成猜谜，
   悄悄拉起另一个版本比报错更难排查。`--bin` 同规则：指错按用法错误（退出码 1）当场拒绝。
 
-### 4.11 `stop` — 停止节点（治理动作，默认关闭）
+### 4.11 `new` — 新建会话（拉起一个新的 aicli 进程）
+
+```text
+aicli-mesh new [--workspace PATH] [--port N] [--wait 8s] [--no-wait] [--bin PATH] [--json]
+```
+
+与 `open`（§4.10）共用 `mesh.Spawn`，区别只在**会话从哪来**：`open` 处理既有会话（复用活节点，
+或把进程拉到该会话上），`new` 让子进程自己生成新会话 ID（跑的是**不带** `--session` 的
+`aicli chat`）。由此带来三条刻意的差异：
+
+| 方面 | `open <会话>` | `new` |
+|------|----------------|-------|
+| 会话来源 | 调用方给定的会话 ID | 子进程生成，**只有返回值里有** |
+| 复用 | 已有活节点直接 `reused` | **从不复用**：每次调用都该是一个新会话 |
+| 单飞租约 | 复用/回收该会话的 `spawn-<会话>.lock`（§4.4） | **不涉及**：会话还不存在，没有键可抢——CLI 依旧不写档案、不写绑定、不占租约 |
+| 工作区 | 从会话绑定/档案推导 | 调用方给出：`--workspace PATH`，缺省 = 当前目录 |
+
+`--workspace` 是唯一新增开关（必须已存在且是目录，否则按用法错误退出码 1 当场拒绝）；
+`--port` / `--wait` / `--no-wait` / `--bin` 与 §4.10 逐字同义，**可执行文件解析顺序**、
+`AICLI_BIN` 覆盖规则、`mesh_spawn_bin_unavailable` 也完全一样（不重复列出）。`new` 不接受位置参数。
+
+就绪判定靠 **pid**（没有会话 ID 可查）：等「新出现的、属于该 pid 的 live 档案」，且档案里的
+`session_id` 非空才算数——子进程启动时先写档案、会话建好后再补写一次，等的就是第二笔；
+随后从档案读回 `session_id` / `node_id` / `port`，拼出带令牌的窗口 URL。启动日志以
+`new-<UTC 时间戳>-<pid>` 为键，两次 `new` 不会共用一份日志。
+
+状态与退出码：`started` → 0，`not_running`（进程起了但迟迟没登记档案）→ 3，`failed` → 5；
+四态里的 `reused` **不会出现**——那与「从不复用」矛盾。`--no-wait` 不谎报：会话 ID 尚未生成，
+`session_id` 就留空，只报 pid、端口与不带 `session=` 的令牌 URL，`reason` 指向 `aicli-mesh ls` 自查。
+
+失败面（`code` / `reason` 与 `open` 共用 §5.7 的 `SpawnResult`）：
+
+| 情形 | `code` | 退出码 |
+|------|--------|--------|
+| `--workspace` 不存在 / 是文件 / 无法解析（CLI 当场拒绝） | —（用法错误） | 1 |
+| 工作区目录在启动前被删（CLI 查过之后、子进程启动之前） | `mesh_workspace_missing` | 5 |
+| 网格根目录不可用（fail-closed，§1） | `mesh_disabled` | 5 |
+| 找不到可拉起的 aicli 二进制（`--bin` / `AICLI_BIN` 指错） | `mesh_spawn_bin_unavailable` | 5 |
+| 进程起了但等不到会话档案（超时；带脱敏 `log_tail`） | `mesh_spawn_timeout` | 3 |
+
+`--workspace` 为空且取不到当前目录时同样退出码 5（CLI 直接报错，不带 `code`）。
+
+### 4.12 `stop` — 停止节点（治理动作，默认关闭）
 
 ```text
 aicli-mesh stop <节点|会话> [--force] [--wait 30s] [--json]
@@ -340,7 +389,7 @@ aicli-mesh stop session_20260924093535
 aicli-mesh stop node-22024 --force
 ```
 
-### 4.12 `watch` — 事件流（journal tail，不依赖节点存活）
+### 4.13 `watch` — 事件流（journal tail，不依赖节点存活）
 
 ```text
 aicli-mesh watch [--since 10m] [--node ID] [--session ID] [--once] [--limit N] [--interval 500ms] [--json] [--no-color]
@@ -437,8 +486,8 @@ aicli-mesh watch --session session_20260924093535 --once --json
 }
 ```
 
-- `filter` 只在有过滤条件时出现（`--live` → `"state": "live"`；`--workspace` → 数组回显）；
-  未过滤时字段整体省略，`workspace: null` 表示「未按工作区过滤」（§5.4）。
+- `filter` 只在有过滤条件时出现：默认（只看在线）与 `--live` 回显 `"state": "live"`；`-a/--all`
+  取消状态过滤，此时若也没给 `--workspace`，字段整体省略；`workspace: null` 表示「未按工作区过滤」（§5.4）。
 - `counts` 恒为全量口径（§4.1 硬契约）；`reachability` 只有 `--probe` 时才可能是 `ok` / `unreachable`。
 - 节点档案不可读或 schema 未知时，元素仍在 `nodes[]` 里（`state: "unknown"`）并带 `error` 字段——
   宁可展示「有个看不懂的档案」，也不静默丢弃。
@@ -488,7 +537,7 @@ aicli-mesh watch --session session_20260924093535 --once --json
 - `attempts` > 1 只在「目标 401 → 重读档案重试一次」时出现；
 - **`result` 里不会有令牌原文**：`node.info` 等端点默认脱敏（M7）。
 
-### 6.5 `open --json`
+### 6.5 `open` / `new` `--json`
 
 返回 §5.7 的 `SpawnResult` 信封（与 `POST /web/api/mesh/spawn` 同一份文档）：
 
@@ -512,6 +561,28 @@ aicli-mesh watch --session session_20260924093535 --once --json
   还会带脱敏后的 `log_tail`（末尾 20 行）；
 - `url` 是**唯一**携带令牌原文的字段（M7：它直接交给浏览器自举）。
 
+`new --json` 是同一形状外加 `workspace`（会话 ID 是子进程生成的、工作区是调用方给的，
+脚本两个都要）：
+
+```json
+{
+  "schema_version": 2,
+  "workspace": "E:\\work\\proj-a",
+  "status": "started",
+  "session_id": "session_20260924222328_aGz9TW3R",
+  "node_id": "node-25340-20260924T142328Z",
+  "pid": 25340,
+  "port": 64959,
+  "url": "http://127.0.0.1:64959/web?token=…&session=session_20260924222328_aGz9TW3R",
+  "origin": "cli",
+  "elapsed_ms": 997
+}
+```
+
+- `status` 只有 `started` / `not_running` / `failed`——`reused` 不会出现（§4.11）；
+- `--no-wait` 时 `session_id` 为空、`url` 不带 `session=`（会话还没生成，如实留空）；
+- `lease` 也不会出现：新会话没有可抢的租约（§4.11）。
+
 ### 6.6 `stop --json`
 
 返回 §5.7 的 `StopResult` 信封（与 `POST /web/api/mesh/stop` 同一份文档）：
@@ -528,7 +599,7 @@ aicli-mesh watch --session session_20260924093535 --once --json
 }
 ```
 
-- `status` ∈ `stopped` / `not_found` / `refused` / `timeout` / `error`（§4.11 的退出码映射）；
+- `status` ∈ `stopped` / `not_found` / `refused` / `timeout` / `error`（§4.12 的退出码映射）；
 - 幂等成功带 `code=mesh_stop_already_stopped` 与 `message`；失败带 `code` 与 `message`；
 - `graceful=true` 只说明这次**投递**了 `/exit`，不代表对方已完成收尾——进程消失才是判据。
 
@@ -574,16 +645,19 @@ aicli-mesh watch --session session_20260924093535 --once --json
 |------|------|
 | `AICLI_MESH_DIR` | 直接指定网格根目录（测试、多套网格隔离）；优先级最高 |
 | `AICLI_HOME` | 共享 AICLI 主目录；网格根为 `$AICLI_HOME/mesh`，`gc --purge-legacy` 也在该目录下找 `web-ports/` |
-| `AICLI_BIN` | 指定 `open` / Web 端拉起的 aicli 二进制（**建议绝对路径**）；指错时拉起直接失败（§4.10）。子节点原样继承该变量 |
+| `AICLI_BIN` | 指定 `open` / `new` / Web 端拉起的 aicli 二进制（**建议绝对路径**）；指错时拉起直接失败（§4.10）。子节点原样继承该变量 |
 
 ## 9. 常见用法
 
 ```powershell
-# 一眼看清所有节点（毫秒级，不发请求）
+# 一眼看清在线节点（毫秒级，不发请求；默认只列 live）
 aicli-mesh ls
 
-# 只关心活着的节点，并确认端口真的通
-aicli-mesh ls --live --probe
+# 全部档案（含已退出的 stale/stopped/unknown），排查残留与冲突
+aicli-mesh ls -a
+
+# 确认在线节点端口真的通
+aicli-mesh ls --probe
 
 # 脚本消费：活节点数
 (aicli-mesh ls --json | ConvertFrom-Json).counts.live
@@ -599,6 +673,9 @@ aicli-mesh open session_20260924093535
 
 # 改名部署：指定要拉起的二进制（优先于 AICLI_BIN；也可 $env:AICLI_BIN = '...'）
 aicli-mesh open session_20260924093535 --bin 'E:\tools\aicli-2x\aicli-2x.exe'
+
+# 新建一个会话（子进程自己生成会话 ID；工作区缺省 = 当前目录，必须已存在）
+aicli-mesh new --workspace 'E:\work\proj-a'
 
 # 跨进程调用：先只读探一眼（无需 --allow-write）
 aicli-mesh call session_20260924093535 node.info --json
@@ -651,6 +728,9 @@ aicli-mesh doctor --json
 | `open` 拉起的是另一个版本（或旁边的 `aicli.exe`） | 改名后的二进制既不是 `self`（名字不叫 aicli）也不是 `sibling`（兄弟名硬编码 `aicli.exe`）：用 `--bin` / `AICLI_BIN` 显式指定，或先 `doctor` 看 `spawn-executable` 的实际解析结果（§4.10） |
 | `doctor` 报 `spawn-executable` 为 problem | `AICLI_BIN` 指到了不存在/是目录的位置：修好或清空它。该覆盖**不会**退回 `self`/`sibling`/`PATH`（否则等于悄悄换版本） |
 | `open` 退出码 5 + `mesh_spawn_bin_unavailable` | 找不到可拉起的 aicli 二进制：设 `AICLI_BIN` / `open --bin`，或从完整安装运行（与 `aicli-mesh.exe` 同目录放一个 `aicli.exe`） |
+| `new` 报 `--workspace ... 不可用` | 工作区必须**已存在**：`new` 不会替你创建目录（会话要在里面落地，猜一个目录等于让返回值说谎）。先建目录，或改用 `open` 接上既有会话（§4.10 / §4.11） |
+| `new` 退出码 3 + `mesh_spawn_timeout` | 进程起了但迟迟没登记新会话档案：先看 `log_tail`（子进程启动即失败最常见）；`--wait` 加大只对慢启动有效（§4.11） |
+| 想接着旧会话跑，却用了 `new` | `new` 从不复用，每次都是新会话：接旧会话用 `open <会话>`（§4.10） |
 
 ## 11. 与其它组件的关系
 
@@ -681,7 +761,7 @@ aicli mesh gc --apply
 | 退出码 | 原样返回 0–6（§5），含 2 / 3 / 4 / 6 —— 别名**绕开** cobra 的错误路径，不会把「目标不存在」压成 1 |
 | 帮助 | `aicli mesh --help` 打印的就是 `aicli-mesh --help` 那份用法（文本仍以 `aicli-mesh` 为名：两边共用一份，不复制、不改写） |
 | 版本 | `aicli mesh version` 报**宿主 aicli 的构建版本**（与 `aicli` 自身版本同源，由 main 注入），不是 `aicli-mesh` 二进制的版本 |
-| 节点身份 | **不是节点**：`aicli mesh ...` 不写节点档案、不占租约、不出现在 `ls` 里（唯一写盘路径仍是 `gc --apply`，以及 `open` 拉起的子进程） |
+| 节点身份 | **不是节点**：`aicli mesh ...` 不写节点档案、不占租约、不出现在 `ls` 里（唯一写盘路径仍是 `gc --apply`，以及 `open` / `new` 拉起的子进程） |
 | 无参数 | `aicli mesh` 把用法打印到 stderr 并退出码 1（与 `aicli-mesh` 无参数一致） |
 
 什么时候用哪个：装了独立二进制就两者皆可（脚本里写 `aicli-mesh` 更明确）；

@@ -48,10 +48,23 @@ aicli chat --yolo --pprof
 - 两者都不带的**纯 TUI** 节点仍在网格里（`ls` 能看到），但**没有端点**：`url` 退出码 3、
   `call` 返回 `mesh_no_endpoint`。
 
+另一种起法：让网格替你起一个**新会话**（子进程生成会话 ID，直接给可打开的窗口 URL）：
+
+```powershell
+aicli-mesh new --workspace $PWD          # 工作区必须已存在；缺省 = 当前目录
+```
+
+接**既有**会话（复用活节点或拉起该会话的进程）用 `aicli-mesh open <会话>`——两者共用同一套
+可执行文件解析（见 [spawn-and-binaries.md](./spawn-and-binaries.md) §1.1）。
+
 ## 3. 发现：ls
 
 ```powershell
+# 默认只列在线（live）节点——日常问的是「现在谁在跑」
 aicli-mesh ls
+
+# 需要全部档案（含已退出的 stale/stopped/unknown）时加 -a
+aicli-mesh ls -a
 ```
 
 ```text
@@ -67,12 +80,13 @@ live   node-22024-20260924T013534Z  22024  session_20260924093535_4wCDwhqu  E:\p
 | `OWN` | `owner` 本节点 / `peer` 其它活节点 / `conflict` 双占用（要处理）/ `-` 无归属 |
 
 ```powershell
-aicli-mesh ls --live --probe       # 只看活节点，并确认端口真的通
+aicli-mesh ls --probe              # 确认在线节点端口真的通
 (aicli-mesh ls --json | ConvertFrom-Json).counts.live   # 脚本消费
 ```
 
-**硬契约**：`--live` / `--workspace` 只裁剪 `nodes[]`，`counts` 恒为**全量口径**——
-过滤过的视图不会假装网格更小，也不会「过滤掉一半冲突」。
+**硬契约**：默认的「只看在线」与 `-a` / `--workspace` 只裁剪 `nodes[]`，`counts`（以及汇总行的
+「共 N 个节点」）恒为**全量口径**——过滤过的视图不会假装网格更小，也不会「过滤掉一半冲突」；
+`--live` 是默认行为的显式写法（保留兼容，与 `-a` 互斥）。
 
 ## 4. 定位与地址：show / url
 
@@ -131,12 +145,14 @@ aicli-mesh gc --apply --purge-legacy --prune-bindings
 
 | 我想…… | 命令 |
 |--------|------|
-| 看全网格 | `aicli-mesh ls` / `aicli-mesh ls --live --probe` |
+| 看在线节点 | `aicli-mesh ls` / `aicli-mesh ls --probe` |
+| 看全部档案（含已退出） | `aicli-mesh ls -a` |
 | 看某个目标的一切 | `aicli-mesh show <目标>` |
 | 拿地址 | `aicli-mesh url <目标> [--with-token]` |
 | 读屏幕 | `aicli-mesh screen <目标> --tail N` |
 | 跑一轮 prompt | `aicli-mesh send <目标> "<prompt>" --allow-write` |
 | 复用/拉起 + 窗口 URL | `aicli-mesh open <会话> [--bin PATH]` |
+| 新建会话 + 窗口 URL | `aicli-mesh new [--workspace PATH] [--bin PATH]` |
 | 停节点 | `aicli-mesh stop <目标> [--force]` |
 | 复盘 | `aicli-mesh watch [--since 1h --once --json]` |
 | 清理 | `aicli-mesh gc [--apply]` |
