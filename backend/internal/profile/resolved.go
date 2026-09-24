@@ -87,6 +87,12 @@ type ResolvedAgent struct {
 	Skills     ResolvedSkillSelection `json:"skills,omitempty"`
 	Prompts    ResolvedPromptFiles    `json:"prompts,omitempty"`
 	PromptMode string                 `json:"prompt_mode,omitempty"`
-	ToolPolicy ResolvedToolPolicy     `json:"tool_policy,omitempty"`
-	Paths      ResolvedPaths          `json:"paths"`
+	// PromptSuppressed（D29 / Batch 14）：项目级 profile 在**未信任工作区**被
+	// 扣留 prompts 时置位。调用方（TUI / Switch Report / 前端）据此显示"部分内容
+	// 未应用"警告，而不是静默少一层生效面（禁止假开关）。
+	PromptSuppressed bool `json:"prompt_suppressed,omitempty"`
+	// PromptSuppressionReason 是给用户看的一句话原因（未扣留时为空）。
+	PromptSuppressionReason string             `json:"prompt_suppression_reason,omitempty"`
+	ToolPolicy              ResolvedToolPolicy `json:"tool_policy,omitempty"`
+	Paths                   ResolvedPaths      `json:"paths"`
 }

@@ -14,6 +14,11 @@ const (
 	ConfigKindHooks   ConfigKind = "hooks"
 	ConfigKindMCP     ConfigKind = "mcp"
 	ConfigKindAgents  ConfigKind = "agents"
+	// ConfigKindProfiles marks a repo-local profile layer (`.aicli/profiles`).
+	// Profiles carry free-text prompts that replace/append the system prompt, so
+	// they are trust-sensitive exactly like plugins/hooks/MCP: cloning a repo
+	// must not silently inject instructions (Batch 14 / D29).
+	ConfigKindProfiles ConfigKind = "profiles"
 )
 
 // RepoConfigsPresent reports whether any trust-sensitive project config exists
@@ -101,6 +106,15 @@ func CollectRepoConfigKinds(cwd string, firstOnly bool) []ConfigKind {
 					return kinds
 				}
 				break
+			}
+		}
+
+		// Project profile layer (`.aicli/profiles/<name>`): prompt injection
+		// surface. A dir holding only dotfiles / empty entries does not count,
+		// mirroring the agents rule above.
+		if directoryNonEmpty(filepath.Join(root, ".aicli", "profiles")) {
+			if hit(ConfigKindProfiles) && firstOnly {
+				return kinds
 			}
 		}
 	}

@@ -231,6 +231,33 @@ func TestRepoConfigsPresent(t *testing.T) {
 	if !RepoConfigsPresent(agentsRoot) {
 		t.Fatal("project agents should be detected")
 	}
+
+	// Project profiles (prompt injection surface; Batch 14 / D29)
+	profilesRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(profilesRoot, ".aicli", "profiles", "dev"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profilesRoot, ".aicli", "profiles", "dev", "profile.yaml"), []byte("profile:\n  name: dev\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !RepoConfigsPresent(profilesRoot) {
+		t.Fatal("project profiles should be detected")
+	}
+	if kinds := RepoConfigKinds(profilesRoot); len(kinds) != 1 || kinds[0] != ConfigKindProfiles {
+		t.Fatalf("expected profiles kind only, got %v", kinds)
+	}
+
+	// A profiles dir holding only dotfiles does not count (mirrors agents).
+	dotOnly := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dotOnly, ".aicli", "profiles"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dotOnly, ".aicli", "profiles", ".keep"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if RepoConfigsPresent(dotOnly) {
+		t.Fatal("dot-only profiles dir must not count as repo config")
+	}
 }
 
 func TestResolveGrantAndHeadless(t *testing.T) {

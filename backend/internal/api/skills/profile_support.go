@@ -10,6 +10,7 @@ import (
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/embedding"
+	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -66,6 +67,24 @@ func (h *Handler) SetProfileSupport(cfg ProfileSupportConfig) {
 	h.profileGlobalSkillDirs = append([]string(nil), cfg.GlobalSkillDirs...)
 }
 
+// workspaceFolderTrust 解析 server 侧 workspacePath 的 D29 信任结论。
+// server 永不弹提示：项目级配置存在且无已存决定 → 未信任（失败关闭）。
+// 特性关闭时 foldertrust 既有语义给出 Trusted=true，门控自然放行。
+func workspaceFolderTrust(workspacePath string) foldertrust.Resolution {
+	path := strings.TrimSpace(workspacePath)
+	if path == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			path = cwd
+		}
+	}
+	interactive := false
+	return foldertrust.Resolve(foldertrust.ResolveOptions{
+		CWD:         path,
+		Interactive: &interactive,
+		SkipPrompt:  true,
+	})
+}
+
 func (h *Handler) resolveProfileRuntimeState(ctx context.Context, profileRef, agentID string, scope UsageScope, workspacePath string) (*profileRuntimeState, func(), error) {
 	ref, err := h.resolveProfileReference(profileRef, agentID)
 	if err != nil || ref == "" {
@@ -86,6 +105,9 @@ func (h *Handler) resolveProfileRuntimeState(ctx context.Context, profileRef, ag
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// D29（Batch 14）：项目级 profile 在未信任工作区的 prompts 扣留（分级门控）。
+	profilesys.ApplyProjectPromptGate(resolved, workspacePath, workspaceFolderTrust(workspacePath).Trusted)
 
 	inputs, err := runtimeprofileinput.BuildResolvedAgentInputs(toProfileInputResolvedAgent(resolved))
 	if err != nil {
@@ -180,6 +202,9 @@ func (h *Handler) resolveProfileSessionState(profileRef, agentID string, workspa
 	if err != nil {
 		return nil, err
 	}
+
+	// D29（Batch 14）：项目级 profile 在未信任工作区的 prompts 扣留（分级门控）。
+	profilesys.ApplyProjectPromptGate(resolved, workspacePath, workspaceFolderTrust(workspacePath).Trusted)
 
 	inputs, err := runtimeprofileinput.BuildResolvedAgentInputs(toProfileInputResolvedAgent(resolved))
 	if err != nil {

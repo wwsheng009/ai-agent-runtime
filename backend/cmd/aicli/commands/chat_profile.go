@@ -136,6 +136,14 @@ func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*cha
 		return nil, err
 	}
 
+	// D29（Batch 14）：项目级 profile 在未信任工作区的 prompts 扣留（分级门控——
+	// tools/skills/mcp/permission_mode/overrides 仍生效）。时序：进程级 trust 在
+	// HandleChat / exec 启动早期解析（早于 profile 发现），而会话级 trust 挂载发生
+	// 在本函数之后（chat_setup.go）→ 必须读进程级 currentFolderTrust()，不能读
+	// session.FolderTrust。命中后 resolved.PromptSuppressed / PromptSuppressionReason
+	// 供警告面渲染（/profile status、启动摘要、Switch Report），此处不直写 stdout。
+	profilesys.ApplyProjectPromptGate(resolved, folderTrustProjectRoot(nil), currentFolderTrust().Trusted)
+
 	inputs, err := runtimeprofileinput.BuildResolvedAgentInputs(runtimeprofileinput.AdaptFromProfile(resolved))
 	if err != nil {
 		return nil, err

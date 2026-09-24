@@ -185,7 +185,7 @@ func PromptForTrust(key string, kinds []ConfigKind, stdin io.Reader, stderr io.W
 	if stdin == nil {
 		stdin = os.Stdin
 	}
-	kindList := "plugins/hooks/MCP"
+	kindList := "plugins/hooks/MCP/profiles"
 	if len(kinds) > 0 {
 		parts := make([]string, 0, len(kinds))
 		for _, k := range kinds {
@@ -194,9 +194,9 @@ func PromptForTrust(key string, kinds []ConfigKind, stdin io.Reader, stderr io.W
 		kindList = strings.Join(parts, "/")
 	}
 	_, _ = fmt.Fprintln(stderr)
-	_, _ = fmt.Fprintf(stderr, "This folder contains repo-local config (%s) that can run commands on your machine.\n", kindList)
+	_, _ = fmt.Fprintf(stderr, "This folder contains repo-local config (%s) that can run commands or inject prompts on your machine.\n", kindList)
 	_, _ = fmt.Fprintf(stderr, "  Folder: %s\n", key)
-	_, _ = fmt.Fprint(stderr, "Trust the authors of this folder and allow project plugins/hooks/MCP? [y/N] ")
+	_, _ = fmt.Fprint(stderr, "Trust the authors of this folder and allow project plugins/hooks/MCP/profiles? [y/N] ")
 	reader := bufio.NewReader(stdin)
 	line, err := reader.ReadString('\n')
 	if err != nil && len(strings.TrimSpace(line)) == 0 {
