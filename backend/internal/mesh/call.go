@@ -31,6 +31,11 @@ import (
 // 常量，避免两侧漂移（与 ChatWebMeshEventsPath 同一约定）。
 const ChatWebMeshCallPath = "/web/api/mesh/call"
 
+// ChatWebMeshSpawnPath 是网格拉起端点（架构 §5.7）：在正确的工作区把某个
+// 会话的节点拉起来，并把 §7.3 的窗口 URL 交给调用方。与 HTTP 层共用同一
+// 常量（同 ChatWebMeshCallPath 的约定）。
+const ChatWebMeshSpawnPath = "/web/api/mesh/spawn"
+
 // CallerNodeHeader 携带调用方 node_id：被调方用它做审计与（可选的）跨工作区
 // 判定，不参与鉴权（鉴权是回环 + 令牌，§5.6 / §5.8）。
 const CallerNodeHeader = "X-AICLI-Mesh-Caller"

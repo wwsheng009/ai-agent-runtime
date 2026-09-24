@@ -363,6 +363,10 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 		// 网格调用（S8，架构 §5.6）：读 op 走统一鉴权；写 op 还要求
 		// allow_write=true，且调用者必须是回环（§5.8）。
 		mux.HandleFunc(commands.ChatWebAPIMeshCallPath, commands.HandleChatWebAPIMeshCall)
+		// 网格拉起（S9，架构 §5.7）：复用该会话的活节点，或在它的工作区里
+		// 拉起新进程，并返回 §7.3 的窗口 URL（含令牌）。仅回环；
+		// --mesh-allow-spawn=false 时回 refused + mesh_spawn_not_allowed。
+		mux.HandleFunc(commands.ChatWebAPIMeshSpawnPath, commands.HandleChatWebAPIMeshSpawn)
 	}
 	mux.HandleFunc(commands.ChatWebAPIScreenPath, commands.HandleChatWebAPIScreen)
 	mux.HandleFunc(commands.ChatWebAPIStatusPath, commands.HandleChatWebAPIStatus)

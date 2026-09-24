@@ -62,6 +62,26 @@ func HandleChatWebPage(w http.ResponseWriter, r *http.Request) {
 const chatWebAuthFetchWrapperScript = `<script>
 (function () {
   var TOKEN_STORAGE_KEY = 'aicli-web-token';
+  // §7.3 窗口深链：/web?token=<t>&session=<id>（aicli-mesh open / mesh/spawn 产出）。
+  // 这段必须在内联脚本最前面、且在 ES 模块之前执行：模块顶层就会发起第一个
+  // fetch（loadSessions），那时令牌得已经在 sessionStorage 里。
+  // 令牌只允许在地址栏出现这一次：立刻转存并 history.replaceState 抹掉，
+  // 避免留在地址栏/历史记录（M7：令牌不落 localStorage/DOM）。
+  try {
+    var deepParams = new URLSearchParams(window.location.search);
+    var deepToken = deepParams.get('token');
+    if (deepToken && String(deepToken).trim()) {
+      sessionStorage.setItem(TOKEN_STORAGE_KEY, String(deepToken).trim());
+    }
+    if (deepToken !== null) {
+      deepParams.delete('token');
+      var deepQuery = deepParams.toString();
+      window.history.replaceState(null, '',
+        window.location.pathname + (deepQuery ? '?' + deepQuery : '') + window.location.hash);
+    }
+    var deepSession = deepParams.get('session');
+    if (deepSession) { window.__aicli_deep_link_session = String(deepSession); }
+  } catch (e) { /* 存储不可用/老浏览器：退回 meta 标签路径 */ }
   // 从 sessionStorage 缓存或 meta 标签获取 Token；优先使用浏览器缓存，
   // 避免在 /web 访问时每次都需要 ?token= 参数。API 请求仍可显式指定 ?token=。
   function getAICLIToken() {

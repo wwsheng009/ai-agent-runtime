@@ -72,6 +72,10 @@ type CLI struct {
 	Now func() time.Time
 	// Paths overrides the resolved mesh root (tests / embedded callers).
 	Paths *Paths
+	// Spawn overrides the spawn implementation of `open` (tests / embedded
+	// callers; the zero value means the real mesh.Spawn). Everything else in
+	// this CLI is read-only, so this is the only seam that can start a process.
+	Spawn func(SpawnRequest, SpawnOptions) SpawnResult
 }
 
 // Run executes one command line (without the program name) and returns the
@@ -96,6 +100,8 @@ func (c *CLI) Run(args []string) int {
 		return c.runSend(rest)
 	case "screen":
 		return c.runScreen(rest)
+	case "open":
+		return c.runOpen(rest)
 	case "gc":
 		return c.runGC(rest)
 	case "doctor":
@@ -149,6 +155,13 @@ func (c *CLI) paths() Paths {
 	return ResolvePaths()
 }
 
+func (c *CLI) spawn() func(SpawnRequest, SpawnOptions) SpawnResult {
+	if c.Spawn != nil {
+		return c.Spawn
+	}
+	return Spawn
+}
+
 func (c *CLI) printUsage(w io.Writer) {
 	fmt.Fprint(w, `aicli-mesh —— aicli 节点网格工具（发现 / 运维）
 
@@ -159,6 +172,7 @@ func (c *CLI) printUsage(w io.Writer) {
   aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--allow-write] [--timeout 130s] [--json]
   aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--json]
   aicli-mesh screen <节点|会话> [--view tui] [--tail N] [--format json|text] [--json]
+  aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--json]
   aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
   aicli-mesh doctor [--json]
   aicli-mesh version [--json]
@@ -169,6 +183,10 @@ func (c *CLI) printUsage(w io.Writer) {
 调用（call/send/screen）: op 白名单 node.info/status/screen/turn/sessions.list（只读）
   与 invoke/input/cancel/sessions.resume（写操作，**必须** --allow-write 显式允许）。
   调用方直接连目标的 loopback 端点，令牌取自目标档案（0600），不经过第三方。
+
+拉起（open）: 复用该会话的活节点，或在其工作区拉起新进程，并打印 §7.3 窗口 URL
+  （含令牌，交给浏览器自举）。与 POST /web/api/mesh/spawn 同一套实现；CLI 不是
+  节点，单飞租约的 owner 记作 cli-<pid>。--no-wait 只报告已启动，不等就绪。
 
 退出码:
   0 成功            1 用法/参数错误      2 目标不存在或无法唯一确定
@@ -2168,4 +2186,149 @@ func prettyJSON(raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	return buffer.String(), nil
+}
+
+// ---------------------------------------------------------------------------
+// open —— §5.7 的本地写法（确保会话有活节点，并给出 §7.3 的窗口 URL）
+// ---------------------------------------------------------------------------
+
+// openResult 是 `open --json` 的输出：与 HTTP 端点同一形状（§5.7 / §5.9），
+// 外层加 schema_version 以与其它子命令一致。
+type openResult struct {
+	SchemaVersion int `json:"schema_version"`
+	*SpawnResult
+}
+
+// runOpen 确保某个会话在它自己的工作区里有活节点，并打印 §7.3 的窗口 URL。
+//
+// 与浏览器路径（POST /web/api/mesh/spawn）的差别：CLI 就是操作者本人，敲下这
+// 条命令本身就是授权，所以没有 --mesh-allow-spawn 那样的进程开关；但 CLI
+// **不是节点**（从不写档案），单飞租约因此用一个合成 owner `cli-<pid>`——
+// 租约文件是可回收的审计记录，不冒充节点身份。
+func (c *CLI) runOpen(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{
+		"port":    flagValue,
+		"wait":    flagValue,
+		"no-wait": flagBool,
+		"json":    flagBool,
+		"help":    flagBool,
+	})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh open: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) != 1 {
+		return c.fail(ExitUsage, "aicli-mesh open: 需要 <会话>（会话 ID / 节点 ID / pid:<PID>）")
+	}
+	paths := c.paths()
+	if !paths.Enabled() {
+		return c.fail(ExitFailure, "aicli-mesh open: 网格根目录不可用（设置 AICLI_MESH_DIR 或 AICLI_HOME）")
+	}
+	wait, err := parsed.durationValue("wait", time.Duration(DefaultSpawnWaitMS)*time.Millisecond)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh open: --wait: %v", err)
+	}
+	port := 0
+	if raw := strings.TrimSpace(parsed.str("port", "")); raw != "" {
+		value, convErr := strconv.Atoi(raw)
+		if convErr != nil || value < 1 || value > 65535 {
+			return c.fail(ExitUsage, "aicli-mesh open: --port 需要 1-65535 的整数（收到 %q）", raw)
+		}
+		port = value
+	}
+	sessionID, source := openSessionTarget(paths, c.now(), parsed.pos[0])
+	if sessionID == "" {
+		return c.fail(ExitNotFound, "aicli-mesh open: 无法从 %q 解析出会话（节点没有会话，或目标为空）", parsed.pos[0])
+	}
+	if source == "assumed" {
+		fmt.Fprintf(c.errOut(), "提示：%s 既不是节点也不是已有绑定，按会话 ID 原样拉起。\n", sessionID)
+	}
+
+	result := c.spawn()(
+		SpawnRequest{SessionID: sessionID, Port: port, WaitMS: int(wait / time.Millisecond), Origin: "cli"},
+		SpawnOptions{
+			Paths:         paths,
+			Now:           c.now,
+			SelfNodeID:    fmt.Sprintf("cli-%d", os.Getpid()),
+			PID:           os.Getpid(),
+			Wait:          wait,
+			FireAndForget: parsed.boolean("no-wait"),
+		})
+	if parsed.boolean("json") {
+		if err := c.printJSON(openResult{SchemaVersion: SchemaVersion, SpawnResult: &result}); err != nil {
+			return c.fail(ExitFailure, "aicli-mesh open: 输出 JSON 失败: %v", err)
+		}
+	} else {
+		c.printSpawnHuman(result)
+	}
+	return openExitCode(result.Status)
+}
+
+// openSessionTarget 把 <会话> 参数解析成会话 ID，三种来源按可信度排序：
+//  1. 目标是节点（活档案或残留档案）→ 用它的 session.id；
+//  2. 目标命中会话绑定（S3：进程不在也能读到上次工作区）→ 用它；
+//  3. 都没有 → 原样当会话 ID（会话从未在本机落过绑定也能拉起，
+//     子进程会自己解析工作区，就像 `aicli resume` 一直做的那样）。
+//
+// 含路径分隔符的目标一律拒绝：那不是会话 ID，也没有必要把它交给子进程。
+func openSessionTarget(paths Paths, now time.Time, target string) (sessionID string, source string) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", ""
+	}
+	view := BuildView(paths, ViewOptions{Now: now})
+	if node, err := resolveTarget(view, target); err == nil {
+		if sid := sessionIDOf(node); sid != "" {
+			return sid, "node"
+		}
+		return "", ""
+	}
+	if binding, ok := LoadBinding(paths, target); ok && strings.TrimSpace(binding.SessionID) != "" {
+		return strings.TrimSpace(binding.SessionID), "binding"
+	}
+	if strings.ContainsAny(target, `/\`) {
+		return "", ""
+	}
+	return target, "assumed"
+}
+
+// printSpawnHuman 是拉起结果的人读输出：成功打印窗口 URL，失败打印原因与
+// 日志尾部（已脱敏，M7）。
+func (c *CLI) printSpawnHuman(result SpawnResult) {
+	switch result.Status {
+	case SpawnStatusReused, SpawnStatusStarted:
+		verb := "复用"
+		if result.Status == SpawnStatusStarted {
+			verb = "已拉起"
+		}
+		fmt.Fprintf(c.out(), "%s节点 %s（会话 %s，pid %d，端口 %d）\n",
+			verb, result.NodeID, result.SessionID, result.PID, result.Port)
+		if strings.TrimSpace(result.URL) != "" {
+			fmt.Fprintln(c.out(), result.URL)
+		}
+		if result.Reason != "" {
+			fmt.Fprintln(c.errOut(), "提示："+result.Reason)
+		}
+	default:
+		fmt.Fprintf(c.errOut(), "拉起未成功（%s）：%s\n", result.Status, result.Reason)
+		for _, line := range result.LogTail {
+			fmt.Fprintln(c.errOut(), "  "+line)
+		}
+	}
+}
+
+// openExitCode 把 §5.7 的四态映射到 §7.3 的退出码：复用/拉起成功 = 0，
+// 超时未见节点 = 3（目标不可达），启动失败 = 5（操作失败）。
+func openExitCode(status string) int {
+	switch status {
+	case SpawnStatusReused, SpawnStatusStarted:
+		return ExitOK
+	case SpawnStatusNotRunning:
+		return ExitUnreachable
+	default:
+		return ExitFailure
+	}
 }

@@ -33,7 +33,10 @@ const (
 	// ChatWebAPIMeshCallPath 是网格调用端点（架构 §5.6）：调用方（CLI /
 	// 其它节点 / 前端）以目标档案里的令牌发起，op 白名单与写操作
 	// allow_write 由被调方校验。与 internal/mesh 的调用方共用同一常量。
-	ChatWebAPIMeshCallPath  = mesh.ChatWebMeshCallPath
+	ChatWebAPIMeshCallPath = mesh.ChatWebMeshCallPath
+	// ChatWebAPIMeshSpawnPath 是网格拉起端点（架构 §5.7）：四态
+	// reused/started/not_running/failed，令牌只出现在返回的 url 里（M7）。
+	ChatWebAPIMeshSpawnPath = mesh.ChatWebMeshSpawnPath
 	ChatWebAPIScreenPath    = "/web/api/screen"
 	ChatWebAPIStatusPath    = "/web/api/status"
 	ChatWebAPIStatusBarPath = "/web/api/statusbar"

@@ -227,6 +227,18 @@ function renderSessionList() {
       beginRenameSession(s.id, item, title);
     });
     actions.appendChild(renameBtn);
+    // 在新窗口打开（§7.3 窗口 URL）：复用活节点或拉起独立进程，见
+    // openSessionInNewWindow。当前会话同样可开（另一个进程 = 另一份上下文）。
+    var openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "session-action session-open-btn";
+    openBtn.title = "在新窗口打开（复用活节点，必要时拉起新进程）";
+    openBtn.textContent = "⧉";
+    openBtn.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      openSessionInNewWindow(s.id, item);
+    });
+    actions.appendChild(openBtn);
     if (!s.current) {
       var deleteBtn = document.createElement("button");
       deleteBtn.type = "button";
@@ -330,6 +342,80 @@ function confirmDeleteSession(s) {
     .catch(function (err) { showToast("删除失败: " + err, "error"); });
 }
 
+// ---- 在新窗口打开（POST /web/api/mesh/spawn，架构 §5.7） ----
+//
+// 服务端在会话工作区复用活节点、必要时拉起新进程，返回 §7.3 窗口 URL
+// （含令牌）。浏览器侧两条约束：
+//   - 必须先在点击手势里同步 window.open 出空窗口，await 之后再
+//     win.location.replace(url)：fetch 之后才 window.open 会被弹窗拦截；
+//   - URL 只交给那个窗口，不落 localStorage/sessionStorage/DOM（M7：
+//     这是令牌唯一允许出现的传输位置）。
+function openSessionInNewWindow(id, itemEl) {
+  if (!id) { return; }
+  var win = null;
+  try { win = window.open("", "_blank"); } catch (e) { win = null; }
+  if (itemEl) { itemEl.classList.add("resuming"); }
+  fetch("/web/api/mesh/spawn", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: id, origin: "web" })
+  })
+    .then(function (res) {
+      return res.json().catch(function () { return { status: "error", reason: "bad response" }; });
+    })
+    .then(function (json) {
+      if (itemEl) { itemEl.classList.remove("resuming"); }
+      var url = json && json.url;
+      if (url && (json.status === "reused" || json.status === "started")) {
+        if (win) { win.location.replace(url); } else { window.open(url, "_blank"); }
+        showToast(json.status === "reused" ? "已在活节点打开新窗口" : "已拉起新进程并打开窗口", "ok");
+        return;
+      }
+      closeBlankWindow(win);
+      showToast("打开新窗口失败: " + spawnFailureText(json), "error");
+    })
+    .catch(function (err) {
+      if (itemEl) { itemEl.classList.remove("resuming"); }
+      closeBlankWindow(win);
+      showToast("打开新窗口失败: " + err, "error");
+    });
+}
+
+function closeBlankWindow(win) {
+  if (!win) { return; }
+  try { win.close(); } catch (e) { /* 跨源后 close 可能被拒，忽略 */ }
+}
+
+// spawnFailureText 把 §5.9 信封（status/code/reason/message）压成一行提示。
+function spawnFailureText(json) {
+  if (!json) { return "无响应"; }
+  var code = json.code || json.status || "error";
+  var detail = json.reason || json.message || "";
+  return detail ? code + " — " + detail : String(code);
+}
+
+// ---- 深链（§7.3 窗口 URL）：/web?session=<id>&token=<t> ----
+//
+// token 由页面头部的内联脚本（Go 注入，先于 ES 模块执行）转存 sessionStorage
+// 并从地址栏抹掉；这里只处理 session。子进程本就以该会话启动（spawn 传
+// `resume <sid>`），所以通常 current_session_id 已经相等——此时什么都不做。
+// 只有对不上（例如深链指向别的会话）才复用既有切换路径补一次。
+function applyDeepLinkSession() {
+  var target = window.__aicli_deep_link_session || "";
+  if (!target || target === currentSessionID) { return; }
+  window.__aicli_deep_link_session = "";
+  var known = false;
+  for (var i = 0; i < sessions.length; i++) {
+    if (sessions[i].id === target) { known = true; break; }
+  }
+  if (!known) {
+    showToast("深链会话不存在: " + target, "error");
+    return;
+  }
+  // 深链本身就是明确的切换意图，不弹确认框。
+  proceedResumeSession(target);
+}
+
 // 当前会话身份：顶栏只显示标题，「关于」页签显示完整会话 ID。currentId 为
 // /web/api/sessions 响应的 current_session_id；标题从 sessions 缓存按 id 匹配
 // （调用点都保证缓存已随响应同步更新：loadSessions / 切换轮询 / 新建轮询），
@@ -374,6 +460,8 @@ export function loadSessions() {
       // 顶栏标题 + 关于页签会话 ID 同步
       updateSessionIdentity(data.current_session_id);
       renderSessionList();
+      // §7.3 深链：列表就绪后再对齐 ?session=（见 applyDeepLinkSession）
+      applyDeepLinkSession();
     })
     .catch(function (err) { console.error("sessions fetch failed:", err); });
 }

@@ -2,10 +2,13 @@ package commands
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
@@ -342,4 +345,213 @@ func chatWebMeshPeersWantsTokens(r *http.Request) bool {
 	default:
 		return false
 	}
+}
+
+// ============================================================================
+// 网格拉起端点（架构 §5.7 / §8.2，实施方案 S9）
+//
+// 浏览器点「在新窗口打开」→ 本端点 → internal/mesh.Spawn：复用该会话的活节点，
+// 或在它的工作区里拉起一个新进程，并把 §7.3 的窗口 URL 交回调用方。
+//
+// 安全契约（§5.8 / §9.1）：
+//   - 非回环一律拒绝（mesh_nonloopback_denied）；
+//   - `--mesh-allow-spawn=false` 时拒绝（mesh_spawn_not_allowed；默认开启）；
+//   - 令牌**只**出现在响应体的 url 字段：不进 journal、不进日志、不进视图（M7）。
+//
+// 降级契约（§4.7）：网格关闭时路由通常不注册；真被调用到也只回 refused，不 panic。
+// ============================================================================
+
+// chatWebMeshSpawnMaxWaitMS 是 wait_ms 上限：spawn 在请求内同步等待就绪
+// （§5.7 不返回 starting），没有上限就等于让一个 HTTP 请求长期占住连接。
+const chatWebMeshSpawnMaxWaitMS = 30000
+
+// chatWebMeshSpawnSwitch 是 §5.7 要点 7 的进程开关：默认开启（浏览器点一下
+// 就该能开新窗口），显式 `--mesh-allow-spawn=false` 时整条端点回 refused。
+var chatWebMeshSpawnSwitch = struct {
+	mu      sync.RWMutex
+	allowed bool
+}{allowed: true}
+
+// SetChatWebMeshAllowSpawn 设置拉起开关（默认 true）。
+func SetChatWebMeshAllowSpawn(enabled bool) {
+	chatWebMeshSpawnSwitch.mu.Lock()
+	defer chatWebMeshSpawnSwitch.mu.Unlock()
+	chatWebMeshSpawnSwitch.allowed = enabled
+}
+
+// ChatWebMeshAllowSpawn 读取拉起开关的当前值。
+func ChatWebMeshAllowSpawn() bool {
+	chatWebMeshSpawnSwitch.mu.RLock()
+	defer chatWebMeshSpawnSwitch.mu.RUnlock()
+	return chatWebMeshSpawnSwitch.allowed
+}
+
+// chatWebMeshSpawnRequestBody 是 §5.7 的请求体。
+type chatWebMeshSpawnRequestBody struct {
+	SessionID string `json:"session_id"`
+	// Port 是期望端口；0 = 用会话绑定的粘性端口，再退到随机空闲端口。
+	Port int `json:"port"`
+	// Detach 只有 true 一种合法值（§5.7 的 body 固定 detach=true）：false 会被
+	// 显式拒绝，而不是静默忽略——静默忽略会把「同进程打开」的预期变成另一个进程。
+	Detach *bool `json:"detach"`
+	// WaitMS 是就绪等待预算；0 = 默认 8000ms。
+	WaitMS int `json:"wait_ms"`
+	// Origin 是审计标签（默认 web）。
+	Origin string `json:"origin"`
+}
+
+// ChatWebAPIMeshSpawnResponse 是 POST /web/api/mesh/spawn 的响应体。
+//
+// status 复用 §5.7 的四态（reused / started / not_running / failed）；错误路径
+// 用 §5.9 的信封词汇（refused / error）+ code，HTTP 状态见
+// chatWebMeshSpawnHTTPStatus。
+type ChatWebAPIMeshSpawnResponse struct {
+	SchemaVersion int    `json:"schema_version"`
+	Status        string `json:"status"`
+	Code          string `json:"code,omitempty"`
+	Message       string `json:"message,omitempty"`
+	SessionID     string `json:"session_id,omitempty"`
+	NodeID        string `json:"node_id,omitempty"`
+	PID           int    `json:"pid,omitempty"`
+	Port          int    `json:"port,omitempty"`
+	// URL 是 §7.3 的窗口地址，**含令牌原文**：调用方拿到后必须立即
+	// window.location.replace，绝不写入 localStorage/sessionStorage/DOM
+	// （Web 子方案 §10.2；M7 里唯一允许出现令牌的位置）。
+	URL string `json:"url,omitempty"`
+	// Reason / LogTail 解释 not_running / failed（日志尾部已脱敏）。
+	Reason    string   `json:"reason,omitempty"`
+	LogTail   []string `json:"log_tail,omitempty"`
+	Lease     string   `json:"lease,omitempty"`
+	ElapsedMS int64    `json:"elapsed_ms"`
+}
+
+// chatWebMeshSpawnFn 是端点实际调用的拉起实现：生产路径就是 mesh.Spawn。
+// 测试替换它来验证 §5.9 的状态映射与参数翻译——HTTP 层不该真的去 fork 一个
+// aicli，进程启动本身由 internal/mesh 的 spawn 测试覆盖。
+var chatWebMeshSpawnFn = mesh.Spawn
+
+// HandleChatWebAPIMeshSpawn 处理 POST /web/api/mesh/spawn（架构 §5.7）。
+func HandleChatWebAPIMeshSpawn(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeChatWebMeshSpawnError(w, http.StatusMethodNotAllowed, "error", "",
+			"method not allowed: use POST "+ChatWebAPIMeshSpawnPath, started)
+		return
+	}
+	host := mesh.Current()
+	if host == nil {
+		writeChatWebMeshSpawnError(w, http.StatusForbidden, "refused", mesh.SpawnCodeMeshDisabled,
+			"mesh disabled (start with --mesh)", started)
+		return
+	}
+	if !ChatWebMeshAllowSpawn() {
+		writeChatWebMeshSpawnError(w, http.StatusForbidden, "refused", mesh.SpawnCodeNotAllowed,
+			"spawning is disabled (--mesh-allow-spawn=false)", started)
+		return
+	}
+	// 拉起进程属于写路径：默认拒绝跨机（§5.8）。
+	if !chatWebRequestIsLoopback(r) {
+		writeChatWebMeshSpawnError(w, http.StatusForbidden, "refused", mesh.CallCodeNonLoopback,
+			"mesh spawn is loopback-only", started)
+		return
+	}
+	payload, err := io.ReadAll(io.LimitReader(r.Body, mesh.CallMaxBodyBytes+1))
+	if err != nil {
+		writeChatWebMeshSpawnError(w, http.StatusBadRequest, "error", "",
+			"read body: "+err.Error(), started)
+		return
+	}
+	if len(payload) > mesh.CallMaxBodyBytes {
+		writeChatWebMeshSpawnError(w, http.StatusRequestEntityTooLarge, "error", mesh.CallCodeBodyTooLarge,
+			fmt.Sprintf("body exceeds %d bytes", mesh.CallMaxBodyBytes), started)
+		return
+	}
+	var req chatWebMeshSpawnRequestBody
+	if err := json.Unmarshal(payload, &req); err != nil {
+		writeChatWebMeshSpawnError(w, http.StatusBadRequest, "error", "",
+			"invalid JSON body: "+err.Error(), started)
+		return
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		writeChatWebMeshSpawnError(w, http.StatusBadRequest, "error", "",
+			"session_id is required", started)
+		return
+	}
+	if req.Port != 0 && (req.Port < 1 || req.Port > 65535) {
+		writeChatWebMeshSpawnError(w, http.StatusBadRequest, "error", "",
+			fmt.Sprintf("invalid port %d: must be 0 (auto) or 1-65535", req.Port), started)
+		return
+	}
+	if req.WaitMS < 0 || req.WaitMS > chatWebMeshSpawnMaxWaitMS {
+		writeChatWebMeshSpawnError(w, http.StatusBadRequest, "error", "",
+			fmt.Sprintf("invalid wait_ms %d: must be 0-%d", req.WaitMS, chatWebMeshSpawnMaxWaitMS), started)
+		return
+	}
+	if req.Detach != nil && !*req.Detach {
+		writeChatWebMeshSpawnError(w, http.StatusBadRequest, "error", "",
+			"detach=false is not supported: the node always runs as a detached process", started)
+		return
+	}
+	origin := strings.TrimSpace(req.Origin)
+	if origin == "" {
+		origin = "web"
+	}
+	result := chatWebMeshSpawnFn(
+		mesh.SpawnRequest{SessionID: sessionID, Port: req.Port, WaitMS: req.WaitMS, Origin: origin},
+		mesh.SpawnOptions{
+			// 与 self/peers 同一份解析结果：spawn 读写的目录必须就是视图看到的目录。
+			Paths:      host.Paths(),
+			Now:        mesh.NowUTC,
+			SelfNodeID: host.NodeID(),
+			PID:        os.Getpid(),
+			Journal:    host.Journal(),
+			Wait:       time.Duration(req.WaitMS) * time.Millisecond, // 0 → mesh 默认 8s
+			Context:    r.Context(),
+		})
+	writeWebAPIJSON(w, chatWebMeshSpawnHTTPStatus(result.Status), ChatWebAPIMeshSpawnResponse{
+		SchemaVersion: mesh.SchemaVersion,
+		Status:        result.Status,
+		// Code 由 spawn 层给出（§5.9）：前端按 code 分支，不去解析 Reason 文案。
+		Code:      result.Code,
+		SessionID: result.SessionID,
+		NodeID:    result.NodeID,
+		PID:       result.PID,
+		Port:      result.Port,
+		URL:       result.URL,
+		Reason:    result.Reason,
+		LogTail:   result.LogTail,
+		Lease:     result.Lease,
+		ElapsedMS: result.ElapsedMS,
+	})
+}
+
+// chatWebMeshSpawnHTTPStatus 按 §5.9 的映射把四态翻成 HTTP 状态：
+// 复用/拉起成功 → 200；超时未见节点 → 504；进程启动失败 → 500。
+func chatWebMeshSpawnHTTPStatus(status string) int {
+	switch status {
+	case mesh.SpawnStatusReused, mesh.SpawnStatusStarted:
+		return http.StatusOK
+	case mesh.SpawnStatusNotRunning:
+		return http.StatusGatewayTimeout
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// writeChatWebMeshSpawnError 写 §5.9 的统一错误信封（与 call 的错误同形）。
+func writeChatWebMeshSpawnError(w http.ResponseWriter, httpStatus int, status, code, message string, started time.Time) {
+	nodeID := ""
+	if host := mesh.Current(); host != nil {
+		nodeID = host.NodeID()
+	}
+	writeWebAPIJSON(w, httpStatus, ChatWebAPIMeshSpawnResponse{
+		SchemaVersion: mesh.SchemaVersion,
+		Status:        status,
+		Code:          code,
+		Message:       message,
+		NodeID:        nodeID,
+		ElapsedMS:     time.Since(started).Milliseconds(),
+	})
 }
