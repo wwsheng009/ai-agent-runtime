@@ -6,9 +6,9 @@ import { clearPendingPrompts, getUiState, refreshScreen, setUI, updateTitle } fr
 import { handleCacheSSEEvent } from "./cache.js";
 import { loadRuntimeMeta } from "./runtime.js";
 import { loadStatusBar } from "./statusbar.js";
-import { loadSessions, notifySessionSwitchedCompleted } from "./sessions.js";
+import { handleMeshStreamEvent, loadSessions, meshResumeSeq, notifySessionSwitchedCompleted, notifySharedStreamState } from "./sessions.js";
 import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, endStream, isStreamActive, renderStream, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
-import { webAuthToken } from "./util.js";
+import { isNetDegraded, onNetStateChange, webAuthToken } from "./util.js";
 
 export var statusEl = document.getElementById("connection-status");
 var turnEl = document.getElementById("turn-status");
@@ -250,17 +250,37 @@ function onSSEEvent(eventName, data) {
   }
 }
 
+// eventsURL：本页唯一的 SSE 地址（单连接契约，Web 子方案 §5.6）。
+//
+// `?mesh=1` 让服务端把网格扇入帧并入这条流：过去每页要开两条常驻 SSE
+// （/web/api/events + /web/api/mesh/events），HTTP/1.1 下浏览器单 host 只有约
+// 6 条并发连接，两个标签页就能占满连接池，之后所有 /web/api/* 请求永久排队
+// ——页面既不报错也不恢复。合并后每页只占一条连接。
+//
+// `since_seq` 是网格帧的续传游标（对主事件流无副作用：它不重放历史）；
+// EventSource 无法设置请求头，非回环模式只能把写令牌追加到查询参数
+// （回环模式 GET/SSE 无需令牌；取值顺序见 util.js::webAuthToken）。
+function eventsURL() {
+  var url = "/web/api/events?mesh=1";
+  var since = meshResumeSeq();
+  if (since > 0) { url += "&since_seq=" + since; }
+  var token = webAuthToken();
+  if (token) { url += "&token=" + encodeURIComponent(token); }
+  return url;
+}
+
 function openEventSource() {
   setStatus("连接中…", false);
-  // EventSource 无法设置请求头：在非回环模式下，将写令牌追加到 URL 查询参数
-  // （回环模式 GET/SSE 无需令牌；取值顺序见 util.js::webAuthToken）。
-  var token = webAuthToken();
-  var eventsUrl = "/web/api/events";
-  if (token) { eventsUrl += "?token=" + encodeURIComponent(token); }
-  var es = new EventSource(eventsUrl);
-  es.onopen = function () { setStatus("已连接", true); };
+  var es = new EventSource(eventsURL());
+  es.onopen = function () {
+    setStatus("已连接", true);
+    // 通知 sessions.js：合并流已建立，网格帧进入 mesh.ready 宽限期。
+    notifySharedStreamState(true);
+  };
   es.onerror = function () {
     setStatus("已断开，重连中…", false);
+    // 主 SSE 断开 = 网格帧随之中断：sessions.js 据此退回 10s 轮询兜底（§5.6）。
+    notifySharedStreamState(false);
     es.close();
     setTimeout(openEventSource, 2000);
   };
@@ -280,6 +300,64 @@ function openEventSource() {
       onSSEEvent(name, data);
     });
   });
+  // 网格帧（合并流）：帧类型与独立端点逐字一致，处理逻辑统一在 sessions.js
+  // （续传游标 meshLastSeq、退避重连、200ms 合并刷新、10s 轮询兜底）。
+  // mesh.unavailable 表示服务端未提供网格（--mesh=false / 扇入客户端超限），
+  // 前端只降级不报错（§4.7）。
+  ["mesh.ready", "mesh.unavailable", "mesh.peer.joined", "mesh.peer.left",
+   "mesh.peer.updated", "mesh.session.changed", "mesh.peer.event", "mesh.lagged"].forEach(function (name) {
+    es.addEventListener(name, function (e) {
+      var data = {};
+      try { data = JSON.parse(e.data); } catch (err) { /* ignore */ }
+      handleMeshStreamEvent(name, data, e.lastEventId);
+    });
+  });
+}
+
+// ---- 降级模式（请求超时 + 轮询兜底，§4.7）----
+//
+// 触发：util.js 的降级状态机连续两次网络层失败（超时/断网）后置位。此时页面
+// 可能连一条请求都发不出去（浏览器连接池被常驻流占满），表现为「什么都没反应」。
+// 处理：显示常驻横幅如实告知 + 每 5s 用带超时的轻量 GET 重试（screen / sessions /
+// statusbar），任一请求成功即自动退出降级并刷新界面——不需要用户手动刷新页面。
+var DEGRADED_POLL_INTERVAL_MS = 5000;
+var degradedBannerEl = null;
+var degradedPollTimer = null;
+
+function renderDegradedBanner(active, reason) {
+  if (!active) {
+    if (degradedBannerEl && degradedBannerEl.parentNode) {
+      degradedBannerEl.parentNode.removeChild(degradedBannerEl);
+    }
+    degradedBannerEl = null;
+    return;
+  }
+  if (!degradedBannerEl) {
+    degradedBannerEl = document.createElement("div");
+    degradedBannerEl.id = "net-degraded-banner";
+    degradedBannerEl.style.cssText =
+      "position:fixed;top:0;left:0;right:0;z-index:9999;padding:6px 12px;" +
+      "background:#7a4b00;color:#ffe9c4;font-size:12px;text-align:center;";
+    document.body.appendChild(degradedBannerEl);
+  }
+  degradedBannerEl.textContent = "⚠ 连接异常：" + (reason || "请求超时") +
+    "。已切换为降级轮询，连接恢复后自动刷新。";
+}
+
+// startDegradedPolling：降级期间的轮询重试。只发 3 个轻量 GET（都带 12s 超时），
+// 避免在连接池已满时进一步堆请求。
+function startDegradedPolling() {
+  if (degradedPollTimer) { return; }
+  degradedPollTimer = setInterval(function () {
+    if (!isNetDegraded()) { stopDegradedPolling(); return; }
+    refreshScreen();
+    loadSessions();
+    loadStatusBar();
+  }, DEGRADED_POLL_INTERVAL_MS);
+}
+
+function stopDegradedPolling() {
+  if (degradedPollTimer) { clearInterval(degradedPollTimer); degradedPollTimer = null; }
 }
 
 export function initSSE() {
@@ -293,6 +371,15 @@ export function initSSE() {
   }
 
   openEventSource();
+  // 降级状态订阅（§4.7）：连续网络层失败 → 横幅 + 轮询重试；恢复 → 收起横幅。
+  onNetStateChange(function (degraded, reason) {
+    renderDegradedBanner(degraded, reason);
+    if (degraded) {
+      startDegradedPolling();
+    } else {
+      stopDegradedPolling();
+    }
+  });
   // 动态状态栏时钟:本地每秒推进 (N • esc to interrupt) 后缀;
   // 无活动状态时渲染函数直接置空,成本可忽略。
   setInterval(function () {

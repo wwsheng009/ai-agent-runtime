@@ -330,3 +330,132 @@ func TestHandleChatWebAPIMeshEvents_ClientLimitRejectsNewConnections(t *testing.
 		t.Fatal("既有连接期间扇入必须继续工作")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// /web/api/events?mesh=1 —— 网格帧并入主事件流（§5.6 单连接契约）
+// ---------------------------------------------------------------------------
+
+// waitForSSEBody 轮询等 SSE 响应体出现指定片段（超时即失败）。
+func waitForSSEBody(t *testing.T, rec *syncResponseRecorder, token string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(rec.BodyString(), token) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("等待 SSE 片段 %q 超时，实际响应体：%q", token, rec.BodyString())
+}
+
+// TestChatWebMeshMergeRequested 覆盖 `?mesh=` 取值解析：只有 1/true/yes/on 合并，
+// 其余（缺省、0、no、垃圾值）保持历史行为——不合并意味着前端要开第二条常驻流，
+// 在 HTTP/1.1 下会挤占单 host 约 6 条并发连接的预算。
+func TestChatWebMeshMergeRequested(t *testing.T) {
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{ChatWebAPIEventsPath + "?mesh=1", true},
+		{ChatWebAPIEventsPath + "?mesh=true", true},
+		{ChatWebAPIEventsPath + "?mesh=YES", true},
+		{ChatWebAPIEventsPath + "?mesh=on", true},
+		{ChatWebAPIEventsPath + "?mesh=0", false},
+		{ChatWebAPIEventsPath + "?mesh=no", false},
+		{ChatWebAPIEventsPath + "?mesh=garbage", false},
+		{ChatWebAPIEventsPath, false},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+		if got := chatWebMeshMergeRequested(req); got != tc.want {
+			t.Errorf("%s → %v, want %v", tc.url, got, tc.want)
+		}
+	}
+	if chatWebMeshMergeRequested(nil) {
+		t.Error("nil 请求不得合并（缺省 false）")
+	}
+}
+
+// TestHandleChatWebAPIEvents_MergedMeshStream 验证 `?mesh=1` 把网格帧并入主事件流：
+//   - 主事件流契约不变（首帧仍是 connected），随后是 mesh.ready 且 merged=true；
+//   - 扇入帧与主事件流共用同一条连接（「每页只占一条 HTTP/1.1 连接」的关键）；
+//   - 连接取消后 handler 正常退出：订阅泵必须先于 handler 返回停止写 ResponseWriter
+//     （否则 net/http 收尾时并发写会数据竞争/panic）。
+func TestHandleChatWebAPIEvents_MergedMeshStream(t *testing.T) {
+	host := meshTestHost(t)
+	fanin := meshFanin(t, host)
+	withWebTestSession(t, newWebTestSession())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPIEventsPath+"?mesh=1", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		HandleChatWebAPIEvents(rec, req)
+	}()
+
+	waitForSSEBody(t, rec, "event: connected")
+	waitForSSEBody(t, rec, "event: mesh.ready")
+	if body := rec.BodyString(); !strings.Contains(body, `"merged":true`) {
+		t.Fatalf("合并流的 mesh.ready 必须回显 merged=true：%q", body)
+	}
+	if body := rec.BodyString(); !strings.Contains(body, host.NodeID()) {
+		t.Fatalf("合并流的 mesh.ready 必须带本节点 ID %q：%q", host.NodeID(), body)
+	}
+
+	// 扇入帧落在同一条流上（业务帧带 seq → 有 id 行，续传游标同源）。
+	seq := fanin.PublishLocal(mesh.FramePeerUpdated, map[string]any{"index": 1})
+	if seq == 0 {
+		t.Fatal("扇入发布失败")
+	}
+	waitForSSEBody(t, rec, fmt.Sprintf("id: %d", seq))
+	waitForSSEBody(t, rec, mesh.FramePeerUpdated)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("合并流 handler 未随连接取消退出（订阅泵可能仍在写 ResponseWriter）")
+	}
+}
+
+// TestHandleChatWebAPIEvents_MergedMeshUnavailable 验证网格不可用时合并流只补一条
+// mesh.unavailable 降级帧（§4.7：不报错、不影响主事件流），且 handler 照常退出。
+func TestHandleChatWebAPIEvents_MergedMeshUnavailable(t *testing.T) {
+	// 显式清空网格宿主（不依赖测试执行顺序）：mesh.Current() == nil → 扇入不可用。
+	prevHost := mesh.Current()
+	mesh.SetCurrent(nil)
+	t.Cleanup(func() { mesh.SetCurrent(prevHost) })
+	withWebTestSession(t, newWebTestSession())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, ChatWebAPIEventsPath+"?mesh=1", nil).WithContext(ctx)
+	rec := newSyncResponseRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		HandleChatWebAPIEvents(rec, req)
+	}()
+
+	waitForSSEBody(t, rec, "event: connected")
+	waitForSSEBody(t, rec, "event: mesh.unavailable")
+	body := rec.BodyString()
+	if !strings.Contains(body, `"status":503`) {
+		t.Fatalf("mesh.unavailable 必须带 503 语义的状态（禁用/关闭）：%q", body)
+	}
+	if !strings.Contains(body, `"reason"`) {
+		t.Fatalf("mesh.unavailable 必须带 reason 供诊断：%q", body)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("网格不可用时合并流 handler 未随连接取消退出")
+	}
+}

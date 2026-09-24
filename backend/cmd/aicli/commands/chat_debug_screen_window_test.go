@@ -534,3 +534,77 @@ func BenchmarkChatWebScreenSnapshotWindowVsFull(b *testing.B) {
 		}
 	})
 }
+
+// TestHandleChatWebAPIScreen_DefaultWindowApplies 覆盖「缺省 msg_limit 的保守上限」
+// 契约（§4.2.2 降级）。
+//
+// 背景：不带 msg_limit 的请求过去会物化整段 transcript（长会话实测单次约 20MB），
+// 而本端点是前端秒级刷新 + 调试/脚本随手调用的高频端点——一次「忘了带窗口」的调用
+// 就足以让服务端搬运大对象、把浏览器连接占用到超时（HTTP/1.1 连接池被常驻流占满时
+// 会进一步放大排队）。现在缺省按 chatWebMessageWindowDefaultLimit 截断，确需全量的
+// 调用方显式传 msg_limit=all|full|0（0 保留历史「不限」语义，避免既有脚本被静默截断）。
+func TestHandleChatWebAPIScreen_DefaultWindowApplies(t *testing.T) {
+	total := chatWebMessageWindowDefaultLimit + 25
+	messages := make([]types.Message, 0, total)
+	for i := 0; i < total; i++ {
+		role := "user"
+		if i%2 == 1 {
+			role = "assistant"
+		}
+		messages = append(messages, types.Message{Role: role, Content: fmt.Sprintf("m%03d", i)})
+	}
+	withWebTestSession(t, &ChatSession{Messages: messages})
+
+	type screenWindowResponse struct {
+		Messages []chatWebScreenMessage    `json:"messages"`
+		Window   *chatWebMessageWindowInfo `json:"message_window"`
+	}
+	fetch := func(t *testing.T, url string) screenWindowResponse {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		rec := httptest.NewRecorder()
+		HandleChatWebAPIScreen(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", url, rec.Code)
+		}
+		var parsed screenWindowResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &parsed); err != nil {
+			t.Fatalf("%s: screen JSON invalid: %v", url, err)
+		}
+		return parsed
+	}
+
+	// 1) 缺省：截断到默认窗口（最新一页），并给出可继续上滚的游标。
+	parsed := fetch(t, ChatWebAPIScreenPath+"?format=json")
+	if len(parsed.Messages) != chatWebMessageWindowDefaultLimit {
+		t.Fatalf("缺省 messages = %d, want %d（默认窗口必须生效）",
+			len(parsed.Messages), chatWebMessageWindowDefaultLimit)
+	}
+	if parsed.Window == nil || parsed.Window.Total != total || !parsed.Window.HasMore ||
+		parsed.Window.Limit != chatWebMessageWindowDefaultLimit {
+		t.Fatalf("缺省 message_window = %+v, want {Total:%d HasMore:true Limit:%d}",
+			parsed.Window, total, chatWebMessageWindowDefaultLimit)
+	}
+	wantFirst := fmt.Sprintf("m%03d", total-chatWebMessageWindowDefaultLimit)
+	if got := parsed.Messages[0].Content; got != wantFirst {
+		t.Fatalf("缺省窗口首条 = %q, want %q（默认窗口取最新一页）", got, wantFirst)
+	}
+
+	// 2) 显式全量：all / full / 0（含大小写）都回到历史行为（不分页）。
+	for _, raw := range []string{"all", "full", "0", "ALL"} {
+		parsed = fetch(t, ChatWebAPIScreenPath+"?format=json&msg_limit="+raw)
+		if len(parsed.Messages) != total {
+			t.Fatalf("msg_limit=%s messages = %d, want %d", raw, len(parsed.Messages), total)
+		}
+		if parsed.Window == nil || parsed.Window.Limit != 0 || parsed.Window.HasMore || parsed.Window.Start != 0 {
+			t.Fatalf("msg_limit=%s message_window = %+v, want 不分页（Limit:0 HasMore:false Start:0）",
+				raw, parsed.Window)
+		}
+	}
+
+	// 3) 显式窗口：调用方的 msg_limit 优先，不被默认值覆盖。
+	parsed = fetch(t, ChatWebAPIScreenPath+"?format=json&msg_limit=7")
+	if len(parsed.Messages) != 7 || parsed.Window == nil || parsed.Window.Limit != 7 {
+		t.Fatalf("msg_limit=7 → messages=%d window=%+v", len(parsed.Messages), parsed.Window)
+	}
+}

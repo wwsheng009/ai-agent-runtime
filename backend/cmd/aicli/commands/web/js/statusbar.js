@@ -7,7 +7,7 @@
 //       动态状态（动态状态栏）由 SSE 的 dynamic_status 事件独立驱动，
 //       这里仅负责静态的 provider/model/balance/context/dir/git/window。
 
-import { esc } from "./util.js";
+import { apiFetch, esc } from "./util.js";
 
 var statusBarEl = document.getElementById("status-bar");
 var refreshBtnEl = document.getElementById("status-bar-refresh");
@@ -89,25 +89,22 @@ function renderStatusBar(snap) {
 export function loadStatusBar() {
   if (!statusBarEl) { return; }
 
-  var controller = new AbortController();
-  var timeoutId = setTimeout(function () { controller.abort(); }, 5000);
-
   // 在请求期间显示轻度 busy 状态
   if (refreshBtnEl) { refreshBtnEl.style.opacity = "0.4"; }
 
-  fetch("/web/api/statusbar", { cache: "no-store", signal: controller.signal })
+  // 带超时（util.js::apiFetch，5s）：状态栏属于页面主壳，连接池被常驻事件流
+  // 占满时它会永久排队（既不返回也不报错）。超时让它主动出队，并计入降级状态机
+  // （§4.7），由 sse.js 显示横幅、转入轮询重试，连接空出后自动恢复。
+  apiFetch("/web/api/statusbar", { cache: "no-store" }, 5000)
     .then(function (res) {
-      clearTimeout(timeoutId);
       if (!res.ok) { throw new Error("HTTP " + res.status); }
       return res.json();
     })
     .then(function (snap) {
-      clearTimeout(timeoutId);
       renderStatusBar(snap);
     })
     .catch(function (err) {
-      clearTimeout(timeoutId);
-      // abort (超时)不视为错误，仅静默
+      // abort (超时)不视为错误，仅静默（降级提示统一由 sse.js 的横幅负责）
       if (err && err.name === "AbortError") { return; }
       statusBarEl.className = "status-bar empty";
       statusBarEl.title = "";

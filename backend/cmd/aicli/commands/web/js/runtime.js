@@ -1,7 +1,7 @@
 // 底部 cfg-bar:provider/model/reasoning 切换器、model 自定义 popup、权威配置同步与轮询。
 // aicli micro web client 前端模块(拆分自 app.js,无构建步骤,由 app.js 入口聚合)。
 
-import { esc } from "./util.js";
+import { apiFetch, esc } from "./util.js";
 
 // ---- provider / model / reasoning_effort 配置选择器 ----
 // 权威值来自 GET /web/api/runtime；切换动作构造 /model 命令注入
@@ -208,7 +208,10 @@ function previewModelChange(modelName) {
 // reasoning 下拉来自最新缓存），但不覆盖用户正在确认的值，避免
 // “切 provider 后列表不变、reasoning 写死 low/medium/high/max”。
 export function loadRuntimeMeta() {
-  fetch("/web/api/runtime", { cache: "no-store" })
+  // 带超时（util.js::apiFetch）：连接池被常驻事件流占满时，这个请求会永久排队，
+  // 运行时配置面板就一直是空的且没有任何提示；超时后计入降级状态（§4.7），
+  // sse.js 显示横幅并转入轮询重试。
+  apiFetch("/web/api/runtime", { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (meta) {
       if (!meta) { return; }
@@ -313,11 +316,13 @@ function applyRuntimeConfig() {
     els.status.textContent = "切换中…";
     els.status.className = "cfg-status busy";
   }
-  fetch("/web/api/input", {
+  // 超时放宽到 30s：POST 一旦被服务端接收就可能已经排队，过早中断会让界面显示
+  // 「提交失败」而实际已入队（与 sessions.js::sendInput 同一口径）。
+  apiFetch("/web/api/input", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt: cmd })
-  })
+  }, 30000)
     .then(function (res) { return res.json().catch(function () { return { status: "error", reason: "bad response" }; }); })
     .then(function (json) {
       if (json.status !== "queued") {
@@ -356,7 +361,7 @@ function pollRuntimeMeta(expect, attempts) {
     }
     return;
   }
-  fetch("/web/api/runtime", { cache: "no-store" })
+  apiFetch("/web/api/runtime", { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (meta) {
       if (meta) { runtimeMetaCache = meta; }

@@ -148,10 +148,27 @@ func TestChatWebSessionsAssetUsesSessionSwitchedEvent(t *testing.T) {
 		`"session_switched", "session_interrupted"`,
 		`case "session_switched":`,
 		`if (eventName === "session_switched") { notifySessionSwitchedCompleted(); }`,
-		`import { loadSessions, notifySessionSwitchedCompleted } from "./sessions.js";`,
 	} {
 		if !strings.Contains(sse, token) {
 			t.Errorf("js/sse.js 缺少 %q（P2 ④ session_switched 契约）", token)
+		}
+	}
+	// 绑定必须来自 ./sessions.js 的同一条 import。按「模块 + 必需符号」断言，而不是
+	// 逐字匹配整行：该 import 会随新增共享符号（如网格合并流 handleMeshStreamEvent）
+	// 变长，逐字匹配会把无关变更变成假失败，而契约本身（这两个符号来自该模块）不变。
+	sessionsImport := ""
+	for _, line := range strings.Split(sse, "\n") {
+		if strings.Contains(line, `from "./sessions.js";`) {
+			sessionsImport = line
+			break
+		}
+	}
+	if sessionsImport == "" {
+		t.Fatalf("js/sse.js 缺少 ./sessions.js 的 import（P2 ④ session_switched 契约）")
+	}
+	for _, symbol := range []string{"loadSessions", "notifySessionSwitchedCompleted"} {
+		if !strings.Contains(sessionsImport, symbol) {
+			t.Errorf("js/sse.js 的 ./sessions.js import 缺少 %q：%s", symbol, sessionsImport)
 		}
 	}
 

@@ -11,10 +11,36 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 )
+
+// chatWebH2CIdleTimeout 是 h2c 连接的空闲上限：与 HTTP/1.1 侧的 IdleTimeout 语义
+// 对齐，长时间没有流的 h2 连接不长期占位。
+const chatWebH2CIdleTimeout = 120 * time.Second
+
+// newChatWebH2CHandler 把调试/Web 端点 handler 包成支持 h2c（明文 HTTP/2）的
+// handler（§4.2.1 连接预算）。
+//
+// 动机：本服务只监听回环明文，但页面要维持常驻 SSE。HTTP/1.1 下浏览器对单 host
+// 的并发连接上限约 6 条，多开两个标签页就占满连接池，之后所有 /web/api/* 请求在
+// 浏览器侧永久排队——页面既不报错也不恢复。h2c 让支持明文 HTTP/2 的客户端（Go
+// 客户端、aicli 自身、脚本、代理）把多条流复用到一个 TCP 连接；不支持 h2c 的
+// 客户端（浏览器对明文 HTTP/2 尚不启用）继续走 HTTP/1.1，行为与包装前逐字一致
+// ——纯增量能力，不是「必须协商成功」的依赖。浏览器侧的连接预算由
+// /web/api/events?mesh=1 单连接合并解决（见 commands.HandleChatWebAPIEvents）。
+//
+// 单独成函数是为了让测试能直接验证协商结果（见 pprof_h2c_test.go）。
+func newChatWebH2CHandler(handler http.Handler) http.Handler {
+	if handler == nil {
+		handler = http.NotFoundHandler()
+	}
+	return h2c.NewHandler(handler, &http2.Server{IdleTimeout: chatWebH2CIdleTimeout})
+}
 
 // pprofServerHandle 持有按需启动的 pprof HTTP 服务器。
 // 默认监听 127.0.0.1 上的随机空闲端口；仅本机可访问，
@@ -440,7 +466,19 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 		http.Redirect(w, r, target, http.StatusSeeOther)
 	})
 	server := &http.Server{
-		Handler: commands.ChatWebAuthGuard(mux.ServeHTTP),
+		// h2c（HTTP/2 cleartext，§4.2.1 连接预算）：
+		//
+		// 本服务只监听回环明文，但页面要维持两条常驻 SSE（/web/api/events 与
+		// /web/api/mesh/events）。HTTP/1.1 下浏览器对单 host 的并发连接上限约
+		// 6 条，多开两个标签页就占满连接池，之后所有 /web/api/* 请求在浏览器侧
+		// 永久排队——页面既不报错也不恢复（表现为「打不开 / 卡死」）。
+		//
+		// h2c 让支持明文 HTTP/2 的客户端（Go 客户端、aicli 自身、脚本、代理）
+		// 把多条流复用到一个 TCP 连接；不支持 h2c 的客户端（浏览器对明文 HTTP/2
+		// 尚不启用）继续走 HTTP/1.1，行为与之前逐字一致——因此这里是纯增量能力，
+		// 不是「必须协商成功」的依赖。浏览器侧的连接预算由
+		// /web/api/events?mesh=1 单连接合并解决（见 HandleChatWebAPIEvents）。
+		Handler: newChatWebH2CHandler(commands.ChatWebAuthGuard(mux.ServeHTTP)),
 		// 本地诊断端点：读请求头超时收紧，避免残留连接占用；
 		// profile 下载期属于 body 读取，不受此限制影响。
 		ReadHeaderTimeout: 10 * time.Second,

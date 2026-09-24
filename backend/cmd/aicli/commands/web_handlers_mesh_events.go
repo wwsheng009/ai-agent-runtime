@@ -44,6 +44,12 @@ const (
 )
 
 // HandleChatWebAPIMeshEvents 提供网格实时事件流（SSE，架构 §5.5）。
+//
+// 这是**独立端点**：节点间订阅固定用 `?peers=none`（避免 N² 转发，§5.5），
+// 非浏览器调用方（脚本、E2E、远程节点）也用它。浏览器默认走
+// `/web/api/events?mesh=1` 的合并流——同一条 SSE 承载主事件与网格帧，避免每个
+// 页面占用两条 HTTP/1.1 连接（浏览器单 host 并发上限约 6 条，见 §5.6 单连接契约）。
+// 两条路径共用 attachChatWebMeshStream，订阅语义逐字一致。
 func HandleChatWebAPIMeshEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -53,11 +59,7 @@ func HandleChatWebAPIMeshEvents(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	host := mesh.Current()
-	var hub *mesh.Fanin
-	if host != nil {
-		hub = host.Fanin()
-	}
+	hub := chatWebMeshFanin()
 	if hub == nil || !hub.Enabled() {
 		// --mesh=false 时路由通常不注册（§9.7）；真被调用到也只降级不报错。
 		writeWebAPIJSON(w, http.StatusOK, map[string]any{
@@ -72,10 +74,16 @@ func HandleChatWebAPIMeshEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sinceSeq := chatWebMeshSinceSeq(r)
-	peersOnly := chatWebMeshPeersMode(r) == "none"
-
-	client, err := hub.Subscribe()
+	// 订阅必须先于任何字节写出：失败要回 JSON 状态码（§6.4 的 429/503 映射），
+	// 而 SSE 响应头一旦写出就改不回来。attach 只把 mesh.ready 入队（不碰 socket），
+	// 所以这里可以先建 stream、再订阅、最后才设头并启动 writer。
+	stream := newChatWebSSEStream(w, flusher)
+	sub, err := attachChatWebMeshStream(stream, chatWebMeshStreamOptions{
+		SinceSeq:  chatWebMeshSinceSeq(r),
+		PeersMode: chatWebMeshPeersMode(r),
+		// 独立端点没有别的心跳来源，keepalive 由订阅自己发。
+		Keepalive: true,
+	})
 	if err != nil {
 		writeWebAPIJSON(w, chatWebMeshSubscribeStatus(err), map[string]any{
 			"status":         "error",
@@ -86,7 +94,6 @@ func HandleChatWebAPIMeshEvents(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	defer client.Close()
 
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -96,44 +103,163 @@ func HandleChatWebAPIMeshEvents(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	stream := newChatWebSSEStream(w, flusher)
 	// handler 返回前必须先停掉 writer goroutine（与 /web/api/events 同一约束：
 	// ResponseWriter 在 handler 返回后由 net/http 收尾）。
 	defer func() {
 		stream.Close()
 		<-stream.writerDone
 	}()
-	// mesh 流没有 EventBus 订阅，死流回调为空（客户端队列由 defer Close 回收）。
+	// mesh 流没有 EventBus 订阅，死流回调为空（订阅解绑由 run 的 defer 完成）。
 	stream.start(nil)
 
-	writeMeshFrame := func(frame mesh.Frame) {
-		payload, marshalErr := mesh.MarshalFrame(frame)
-		if marshalErr != nil {
-			return
-		}
-		id := ""
-		if frame.Seq > 0 {
-			id = strconv.FormatUint(frame.Seq, 10)
-		}
-		stream.writeRawEvent(frame.Type, id, payload)
-	}
+	// 事件泵直接占用本 handler goroutine：帧只做非阻塞入队，退出路径为
+	// ctx 取消（客户端断开）/ 流判死 / 订阅关闭（进程退出）。
+	sub.run(ctx)
+}
 
-	// 首帧 mesh.ready：对齐既有流的 connected 语义，客户端据此确认已接入，
-	// 并看到本次订阅生效的模式（since_seq / peers / 当前客户端数）。
-	if frame, ok := hub.ConnectionFrame(mesh.FrameReady, map[string]any{
+// ---------------------------------------------------------------------------
+// 扇入订阅：独立端点与合并流（/web/api/events?mesh=1）共用实现
+// ---------------------------------------------------------------------------
+
+// chatWebMeshStreamOptions 是一条网格扇入订阅的过滤与承载参数。
+type chatWebMeshStreamOptions struct {
+	// SinceSeq 是续传游标：跳过 seq<=SinceSeq 的帧（0 = 不过滤，§6.4）。
+	SinceSeq uint64
+	// PeersMode 是订阅拓扑：auto（本节点 + 已并入的 peer 帧）| none（只收本节点）。
+	PeersMode string
+	// Merged 表示帧并入 /web/api/events（`?mesh=1`）。只影响 mesh.ready 的回显
+	// 字段，供前端与诊断区分「合并流」与「独立端点」。
+	Merged bool
+	// Keepalive 表示由本订阅自己发 `: keepalive`（独立端点）。合并流由主循环
+	// 统一发心跳，避免同一条连接上出现两份 keepalive。
+	Keepalive bool
+}
+
+// peersOnly 报告是否只保留本节点自产帧。
+func (o chatWebMeshStreamOptions) peersOnly() bool {
+	return chatWebMeshPeersModeName(o.PeersMode) == "none"
+}
+
+// chatWebMeshStreamSubscription 是一条已建立的扇入订阅。
+//
+// 生命周期：attachChatWebMeshStream 订阅（失败返回错误且无副作用）→ run 泵帧
+// → run 返回时解绑（client.Close）。帧只经 stream 的非阻塞入队，因此 run 既可
+// 跑在独立 goroutine（合并流），也可直接占用 handler goroutine（独立端点）。
+type chatWebMeshStreamSubscription struct {
+	hub    *mesh.Fanin
+	client *mesh.FaninClient
+	opts   chatWebMeshStreamOptions
+	stream *chatWebSSEStream
+}
+
+// chatWebMeshFanin 返回本进程的扇入枢纽（网格未启用时返回 nil，§4.7 降级）。
+func chatWebMeshFanin() *mesh.Fanin {
+	host := mesh.Current()
+	if host == nil {
+		return nil
+	}
+	return host.Fanin()
+}
+
+// chatWebMeshNodeID 返回本节点 ID（网格未启用时为空串，用于降级提示帧）。
+func chatWebMeshNodeID() string {
+	if hub := chatWebMeshFanin(); hub != nil {
+		return hub.NodeID()
+	}
+	return ""
+}
+
+// chatWebMeshMergeRequested 解析 `?mesh=1|true|yes|on`：请求把网格帧并入
+// /web/api/events 这条单连接（Web 子方案 §5.6）。缺省/其它值 = 不合并（历史行为）。
+func chatWebMeshMergeRequested(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mesh"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// chatWebMeshPeersModeName 归一化订阅拓扑名（未知/空值按 auto，§5.5）。
+func chatWebMeshPeersModeName(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), "none") {
+		return "none"
+	}
+	return "auto"
+}
+
+// attachChatWebMeshStream 建立一条扇入订阅并写好 mesh.ready 首帧（§6.3 / §6.4）。
+//
+// 返回错误时无任何副作用（未订阅、未入队）：调用方可以安全地改回 JSON 错误响应
+// （独立端点）或补一条降级提示帧（合并流）。错误分类见 chatWebMeshSubscribeStatus。
+func attachChatWebMeshStream(stream *chatWebSSEStream, opts chatWebMeshStreamOptions) (*chatWebMeshStreamSubscription, error) {
+	hub := chatWebMeshFanin()
+	if hub == nil || !hub.Enabled() {
+		return nil, mesh.ErrFaninDisabled
+	}
+	client, err := hub.Subscribe()
+	if err != nil {
+		return nil, err
+	}
+	sub := &chatWebMeshStreamSubscription{hub: hub, client: client, opts: opts, stream: stream}
+	// 首帧 mesh.ready：对齐既有流的 connected 语义，客户端据此确认已接入，并看到
+	// 本次订阅生效的模式（since_seq / peers / 当前客户端数 / 是否合并流）。
+	sub.writeConnectionFrame(mesh.FrameReady, map[string]any{
 		"node_id":      hub.NodeID(),
 		"clients":      hub.Clients(),
-		"since_seq":    sinceSeq,
-		"peers":        chatWebMeshPeersMode(r),
+		"since_seq":    opts.SinceSeq,
+		"peers":        chatWebMeshPeersModeName(opts.PeersMode),
+		"merged":       opts.Merged,
 		"frame_schema": mesh.FrameSchemaVersion,
 		"resume_hint":  "since_seq 不重放历史：跳号时重新拉一次 /web/api/mesh/peers",
 		"generated_at": time.Now().UTC().Format(time.RFC3339),
-	}); ok {
-		writeMeshFrame(frame)
-	}
+	})
+	return sub, nil
+}
 
-	keepalive := time.NewTicker(chatWebMeshEventsKeepaliveInterval)
-	defer keepalive.Stop()
+// writeConnectionFrame 入队一条连接级帧（mesh.ready / mesh.lagged：无 seq，
+// 不广播、不带续传游标，§6.3）。
+func (s *chatWebMeshStreamSubscription) writeConnectionFrame(frameType string, data map[string]any) {
+	if s == nil || s.hub == nil || s.stream == nil {
+		return
+	}
+	frame, ok := s.hub.ConnectionFrame(frameType, data)
+	if !ok {
+		return
+	}
+	payload, err := mesh.MarshalFrame(frame)
+	if err != nil {
+		return
+	}
+	id := ""
+	if frame.Seq > 0 {
+		id = strconv.FormatUint(frame.Seq, 10)
+	}
+	s.stream.writeRawEvent(frame.Type, id, payload)
+}
+
+// run 是订阅的事件泵，直到 ctx 取消 / 流判死 / 订阅关闭（进程退出）才返回。
+//
+// 帧只做非阻塞入队（writeRawEvent：队列满即丢帧并计数），既不阻塞发布者也不阻塞
+// handler；返回前一定解绑订阅，避免扇入客户端泄漏到上限（§6.4，默认 32）。
+func (s *chatWebMeshStreamSubscription) run(ctx context.Context) {
+	if s == nil || s.client == nil || s.stream == nil {
+		return
+	}
+	defer s.client.Close()
+
+	// keepalive 只在独立端点启用；nil channel 的 select 分支永不就绪（合并流由
+	// /web/api/events 的主循环统一发心跳）。
+	var keepaliveC <-chan time.Time
+	if s.opts.Keepalive {
+		keepalive := time.NewTicker(chatWebMeshEventsKeepaliveInterval)
+		defer keepalive.Stop()
+		keepaliveC = keepalive.C
+	}
+	// lagged 提示即使没有新帧也要发：让消费方知道「刚才有帧被丢了」（§6.4）。
 	lagged := time.NewTicker(chatWebMeshEventsLaggedInterval)
 	defer lagged.Stop()
 
@@ -141,32 +267,33 @@ func HandleChatWebAPIMeshEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-stream.Done():
-			// writer 已因写入失败/超时判死：直接退出（defer 里幂等收尾）。
+		case <-s.stream.Done():
+			// writer 已因写入失败/超时判死：直接退出（defer 里解绑订阅）。
 			return
-		case message, ok := <-client.Payloads():
+		case <-s.client.Done():
+			// 扇入关闭（进程退出路径）：退出，避免空转。
+			return
+		case message, ok := <-s.client.Payloads():
 			if !ok {
 				return
 			}
-			if peersOnly && !chatWebMeshFrameIsLocal(message.Payload, hub.NodeID()) {
+			if s.opts.peersOnly() && !chatWebMeshFrameIsLocal(message.Payload, s.hub.NodeID()) {
 				continue
 			}
-			if seq := chatWebMeshFrameSeq(message.Payload); seq > 0 && seq <= sinceSeq {
+			if seq := chatWebMeshFrameSeq(message.Payload); seq > 0 && seq <= s.opts.SinceSeq {
 				continue
 			}
-			stream.writeRawEvent(message.Type, message.ID, message.Payload)
+			s.stream.writeRawEvent(message.Type, message.ID, message.Payload)
 		case <-lagged.C:
-			if skipped := client.TakeLagged(); skipped > 0 {
-				if frame, ok := hub.ConnectionFrame(mesh.FrameLagged, map[string]any{
-					"node_id": hub.NodeID(),
+			if skipped := s.client.TakeLagged(); skipped > 0 {
+				s.writeConnectionFrame(mesh.FrameLagged, map[string]any{
+					"node_id": s.hub.NodeID(),
 					"skipped": skipped,
 					"hint":    "重新拉 /web/api/mesh/peers 做全量兜底",
-				}); ok {
-					writeMeshFrame(frame)
-				}
+				})
 			}
-		case <-keepalive.C:
-			stream.keepalive()
+		case <-keepaliveC:
+			s.stream.keepalive()
 		}
 	}
 }

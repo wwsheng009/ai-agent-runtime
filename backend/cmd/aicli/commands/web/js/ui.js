@@ -8,7 +8,7 @@ import { loadCacheAnalytics, refreshCacheAnalytics } from "./cache.js";
 import { loadDebugInfo, refreshDebugInfo } from "./debug.js";
 import { loadMCPs } from "./mcp.js";
 import { loadSkills } from "./skills.js";
-import { esc, showToast } from "./util.js";
+import { apiFetch, esc, showToast } from "./util.js";
 
 var tabMainBtn = document.getElementById("tab-main-btn");
 var tabLogBtn = document.getElementById("tab-log-btn");
@@ -131,7 +131,9 @@ export function initAboutToken() {
     aboutTokenValueEl.textContent = token;
   } else {
     aboutTokenValueEl.textContent = "（不可用）";
-    fetch("/web/api/token", { cache: "no-store" })
+    // 带超时（util.js::apiFetch）：这是页面主壳里的初始化请求，连接池被常驻
+    // 事件流占满时不能永久排队（失败时保留「不可用」占位，不打扰用户）。
+    apiFetch("/web/api/token", { cache: "no-store" })
       .then(function (res) { return res.json(); })
       .then(function (data) {
         aboutTokenValueEl.textContent = (data && data.token) ? String(data.token) : "（不可用）";

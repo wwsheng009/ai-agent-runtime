@@ -69,6 +69,8 @@ func writeWebAPIJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 //   - ?tail=N：只返回末尾 N 行（长会话下避免整屏搬运；N 钳制到 [1, 2000]）
 //   - ?msg_limit=N / ?msg_before=M：只物化窗口内的结构化消息（分页拉取历史，
 //     O(窗口) 而非 O(总量)；响应含 message_window 元信息）
+//   - ?msg_limit=all：显式请求完整 transcript（不分页）。缺省不带 msg_limit 时
+//     按 chatWebMessageWindowDefaultLimit 截断——见该常量的动机说明。
 //   - ?roles=a,b / ?q=text：结构化消息过滤（角色多选 + 正文子串搜索，服务端
 //     过滤后仍按 msg_limit/msg_before 分页 = 搜索结果分页；响应 message_window
 //     的 total 为匹配总数、unfiltered_total 为过滤前总数）
@@ -80,6 +82,14 @@ func writeWebAPIJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 	tail := chatWebScreenTailParam(r)
 	window := chatWebMessageWindowParam(r)
+	// 默认窗口（§4.2.2 降级）：不带 msg_limit 的请求过去会物化整段 transcript
+	// （实测长会话单次约 20MB）。本端点是前端秒级刷新 + 调试/脚本随手调用的
+	// 高频端点，一次「忘了带窗口」的调用就足以让服务端搬运一个大对象、把浏览器
+	// 连接占用到超时。这里给缺省请求一个保守上限，让成本与意图都显式化：确需
+	// 全量的调用方显式传 `msg_limit=all`（整会话复制、导出脚本等）。
+	if !window.active() && !chatWebScreenFullTranscriptRequested(r) {
+		window.Limit = chatWebMessageWindowDefaultLimit
+	}
 	filter := chatWebMessageFilterParam(r)
 	// view=tui：返回终端视口的真实合成帧（与 /debug/chat/screen 同源），
 	// 供远程调用方获取"用户当前实际看到的 TUI 界面渲染"，而不是 web 客户端
@@ -132,6 +142,35 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 // "只取末尾"的意图（整帧本来也可以不分页取，见 /web/api/screen 默认视图）。
 const chatWebScreenTailMaxLines = 2000
 
+// chatWebMessageWindowDefaultLimit 是 /web/api/screen 未显式指定 msg_limit 时的
+// 默认窗口（条）。把「无参请求」的最坏响应体积从 O(全量 transcript)（实测长
+// 会话约 20MB）压到 O(默认窗口)。
+//
+// 为什么需要：/web/api/screen 既是前端秒级刷新的数据源，也是调试/脚本随手调用
+// 的端点；缺省全量意味着「一次误用 = 一次大对象搬运」——服务端要物化整段
+// transcript、浏览器连接被长时间占用（HTTP/1.1 连接池一旦被常驻流占满，这类
+// 大响应会进一步放大排队），而调用方往往只想看最近几屏。
+//
+// 需要全量的场景（整会话复制、离线导出）显式传 `msg_limit=all`：让「我要全量」
+// 与「全量的成本」一起显式化，而不是靠省略参数隐式获得。
+const chatWebMessageWindowDefaultLimit = 200
+
+// chatWebScreenFullTranscriptRequested 解析显式全量请求 `?msg_limit=all|full|0`。
+//
+// 0 在历史上与缺省同义（不分页），这里保留「0 = 不限」的直觉语义，避免既有
+// 脚本传 msg_limit=0 时被新默认窗口静默截断。
+func chatWebScreenFullTranscriptRequested(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("msg_limit"))) {
+	case "all", "full", "0":
+		return true
+	default:
+		return false
+	}
+}
+
 // chatWebScreenTailParam 解析 ?tail=N：缺省/非法/非正数返回 0（不裁剪），
 // 超过上限时钳制到 chatWebScreenTailMaxLines。
 func chatWebScreenTailParam(r *http.Request) int {
@@ -165,6 +204,10 @@ func chatWebApplyScreenTail(snap *chatDebugScreenSnapshot, n int) {
 // chatWebMessageWindowParam 解析 ?msg_limit=N&msg_before=M（结构化 messages
 // 分页窗口）。缺省/非法值按"未指定"处理（保持完整 transcript 的历史行为）；
 // msg_limit 钳制到 [1, chatWebMessageWindowMaxLimit]。
+//
+// 注意：调用方（HandleChatWebAPIScreen）会在"未指定"之上再套一层默认窗口，
+// 因此本函数只负责解析，不负责兜底——这样窗口参数的解析契约（缺省 = 0/0）
+// 与端点的响应体积策略（缺省 = chatWebMessageWindowDefaultLimit）各自独立。
 func chatWebMessageWindowParam(r *http.Request) chatWebMessageWindow {
 	var window chatWebMessageWindow
 	if r == nil {
@@ -620,11 +663,19 @@ func HandleChatWebAPIEvents(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	stream := newChatWebSSEStream(w, flusher)
+	// meshPumpDone 非 nil 表示本流已按 `?mesh=1` 合并订阅了网格扇入（见下方
+	// 「1b. 合并模式」）。handler 返回前必须等订阅泵退出：ResponseWriter 在
+	// handler 返回后由 net/http 收尾，泵不得再往里写（与 writer goroutine 同一约束）。
+	var meshPumpDone chan struct{}
 	// handler 返回前必须先停掉 writer goroutine：ResponseWriter 在 handler
 	// 返回后由 net/http 收尾，并发 Write/Flush 会数据竞争/panic。
 	defer func() {
 		stream.Close()
 		<-stream.writerDone
+		if meshPumpDone != nil {
+			// stream.Close() 已关闭 Done，泵会立刻退出（它只做非阻塞入队）。
+			<-meshPumpDone
+		}
 	}()
 
 	// 订阅管理（§8.5）：curBus 与 unsub 只在本 handler 的 goroutine 间通过 subMu 访问。
@@ -644,6 +695,41 @@ func HandleChatWebAPIEvents(w http.ResponseWriter, r *http.Request) {
 
 	// 1. connected 首事件（入队，由 writer goroutine 写出）
 	stream.writeEvent("connected", chatWebConnectedPayload(chatWebSession()), "connected")
+
+	// 1b. 合并模式（`?mesh=1`）：把网格扇入帧并入这条流（Web 子方案 §5.6 单连接契约）。
+	//
+	// 动机：HTTP/1.1 下浏览器对单 host 只有 ~6 条并发连接，而每个页面过去要开两条
+	// 常驻 SSE（本流 + /web/api/mesh/events）。多开两个标签页就占满连接池，之后的
+	// /web/api/* 请求全部在浏览器侧排队——页面既不报错也不恢复（既不超时也没有
+	// 降级提示）。合并后每页只占一条连接，且不依赖 HTTP/2 多路复用。
+	//
+	// 订阅语义与独立端点逐字一致（since_seq 游标 / peers 拓扑 / mesh.ready /
+	// mesh.lagged），只是换了承载流；mesh.ready 帧带 merged=true 便于前端与诊断
+	// 区分来源。peers=auto 时浏览器同样只看本进程，peer 事件由本节点扇入（§6.3）。
+	//
+	// 降级（§4.7）：网格未启用或订阅超限（429）都**不**影响主事件流，只补一条
+	// mesh.unavailable 提示帧；前端据此保持 10s 轮询兜底（§5.6），不报错、不重连风暴。
+	if chatWebMeshMergeRequested(r) {
+		sub, err := attachChatWebMeshStream(stream, chatWebMeshStreamOptions{
+			SinceSeq:  chatWebMeshSinceSeq(r),
+			PeersMode: chatWebMeshPeersMode(r),
+			Merged:    true,
+		})
+		if err != nil {
+			stream.writeEvent("mesh.unavailable", map[string]interface{}{
+				"reason":       err.Error(),
+				"status":       chatWebMeshSubscribeStatus(err),
+				"node_id":      chatWebMeshNodeID(),
+				"frame_schema": mesh.FrameSchemaVersion,
+			}, "mesh.unavailable")
+		} else {
+			meshPumpDone = make(chan struct{})
+			go func() {
+				defer close(meshPumpDone)
+				sub.run(ctx)
+			}()
+		}
+	}
 
 	// 事件转发 handler：由 EventBus.Publish 调用（发布者 goroutine）。
 	// 只做会话过滤 + 非阻塞入队；任何写/背压处理都在 stream 的 writer

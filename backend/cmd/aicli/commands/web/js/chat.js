@@ -9,7 +9,7 @@ import { getInputHistory, getInputHistoryIdx, meshNodeSuffix, sendInput, setInpu
 import { statusEl } from "./sse.js";
 import { clearStreamMessage, hideStreamMessage, isStreamActive, isStreamEnded } from "./stream.js";
 import { closeShortcutHelpIfOpen, toggleShortcutHelp, toggleTheme } from "./ui.js";
-import { esc, showToast } from "./util.js";
+import { apiFetch, esc, showToast } from "./util.js";
 
 export var screenEl = document.getElementById("screen");
 export var promptEl = document.getElementById("prompt");
@@ -506,7 +506,9 @@ export function loadOlderMessages() {
   var gen = filterGen; // 过滤条件代次：返回时若已变化，本页作废（游标属于旧条件）
   var url = "/web/api/screen?format=json&msg_limit=" + MSG_OLDER_PAGE_LIMIT +
     "&msg_before=" + cursor + filterQueryString();
-  fetch(url, { cache: "no-store" })
+  // 带超时（util.js::apiFetch）：连接池被常驻流占满时，上滚分页请求会永久排队，
+  // 表现为「一直转圈、没有新内容也没有错误」。
+  apiFetch(url, { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
       if (gen !== filterGen) { loadingOlder = false; return; }
@@ -614,7 +616,10 @@ function isWindowPartial() {
 function copyConversationText(done) {
   if (!isWindowPartial()) { done(domConversationText()); return; }
   // 过滤激活时同样带上条件：复制的是「当前看到的消息集合」，不是未过滤全量。
-  fetch("/web/api/screen?format=json" + filterQueryString(), { cache: "no-store" })
+  // msg_limit=all 显式请求完整 transcript（服务端缺省已按
+  // chatWebMessageWindowDefaultLimit 截断，见 HandleChatWebAPIScreen）；
+  // 全量响应可能很大，超时放宽到 60s。
+  apiFetch("/web/api/screen?format=json&msg_limit=all" + filterQueryString(), { cache: "no-store" }, 60000)
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
       var full = (data && typeof data.text === "string") ? data.text : "";
@@ -694,7 +699,10 @@ export function refreshScreen(forceClear, options) {
   // 只取最新一页（msg_limit）；更早的消息由上滚懒加载（loadOlderMessages）。
   // 过滤条件（roles/q）交给服务端：前端只持有最新一页，客户端过滤会漏掉未加载
   // 的更早消息，也拿不到「匹配 N / 共 M 条」的准确计数（= 搜索结果分页语义）。
-  fetch("/web/api/screen?format=json&msg_limit=" + MSG_WINDOW_LIMIT + filterQueryString(), { cache: "no-store" })
+  // 带超时（util.js::apiFetch）：这是页面最高频的请求（秒级刷新 + 每个事件触发的
+  // 节流刷新）。连接池被占满时它会永久排队，页面就停在旧快照上且没有任何提示；
+  // 超时后计入降级状态，sse.js 显示横幅并转入轮询重试（§4.7）。
+  apiFetch("/web/api/screen?format=json&msg_limit=" + MSG_WINDOW_LIMIT + filterQueryString(), { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
       if (seq !== screenReqSeq) { return; } // 过期响应（会话已切换/已有更新请求）丢弃

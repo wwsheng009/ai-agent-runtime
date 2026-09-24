@@ -4,7 +4,7 @@
 import { autoGrow, clearPendingPrompts, dropPendingUserPrompt, getUiState, promptEl, refreshScreen, sendStatusEl, setUI, updateTitle } from "./chat.js";
 import { refreshCacheAnalyticsIfActive, syncCacheSession } from "./cache.js";
 import { syncSkillsSession } from "./skills.js";
-import { esc, showToast, webAuthToken } from "./util.js";
+import { apiFetch, esc, showToast, webAuthToken } from "./util.js";
 
 var sidebarEl = document.getElementById("sidebar");
 var sidebarToggleBtn = document.getElementById("sidebar-toggle");
@@ -58,19 +58,25 @@ var meshSelf = null;                     // {node_id, mesh_root, workspace_path,
 var meshWorkspaces = [];                 // [{path,name,nodes,session_count,running_count}]
 
 // ---- 网格实时订阅（S12 / Web 子方案 §5.6）----
-// 第二条 SSE（与 /web/api/events 并列、语义互不干扰，R11）：只连本进程的
-// /web/api/mesh/events，服务端把全网格事件扇入这一条流（web-remote-api.md §9.4）。
+// 单连接契约（§5.6）：网格帧默认由 sse.js 那条 `/web/api/events?mesh=1` 承载
+// （服务端把扇入帧并入同一条流），本模块只负责帧处理与降级。只有在合并流没有
+// 按约给出 mesh.ready 时（旧服务端 / 中间层改写查询参数），才回退到独立端点
+// /web/api/mesh/events —— 那会多占一条 HTTP/1.1 连接，因此只作兜底。
+//
 // 帧只当「有变化」的信号，刷新统一回到 /web/api/sessions?scope=all 的同源数据——
 // 前端不自行合并 peer 帧，避免与 mesh/peers 出现第二套聚合口径（§6.2 同源）。
 var MESH_RECONNECT_MIN_MS = 1000;   // 断线退避 1s→2s→4s…（§5.6）
 var MESH_RECONNECT_MAX_MS = 30000;  // 退避上限 30s
 var MESH_POLL_INTERVAL_MS = 10000;  // SSE 不可用时的轮询兜底周期（§5.6 降级）
 var MESH_REFRESH_THROTTLE_MS = 200; // 事件驱动 + 200ms 合并刷新（§5.6 节流 / Q11）
+var MESH_READY_GRACE_MS = 3000;     // 合并流等 mesh.ready 的宽限期，超时才回退独立端点
 
-var meshStream = null;                  // EventSource（本进程 mesh/events）
+var meshFallbackStream = null;          // EventSource（独立端点，仅回退路径）
 var meshStreamStarted = false;          // 是否已进入订阅生命周期（网格可用才启动）
 var meshStreamReady = false;            // 收到 mesh.ready = 订阅生效（据此停轮询）
 var meshLastSeq = 0;                    // 续传游标（帧 id / data.seq，重连带 ?since_seq=）
+var sharedStreamOpen = false;           // sse.js 的合并流是否已建立（notifySharedStreamState）
+var meshReadyGraceTimer = null;         // 合并流 mesh.ready 宽限定时器
 var meshReconnectDelay = MESH_RECONNECT_MIN_MS;
 var meshReconnectTimer = null;
 var meshRefreshTimer = null;            // 合并刷新定时器
@@ -120,11 +126,14 @@ function saveInputHistory(text) {
 // await；不关心结果的既有调用方可以照旧忽略返回值。
 export function sendInput(payload) {
   var isInterrupt = payload && payload.type === "interrupt";
-  return fetch("/web/api/input", {
+  // 超时放宽到 30s：POST 一旦被服务端接收就可能已经排队，过早中断会让界面显示
+  // 「发送失败」而实际已入队（回合开始后 turn_start 会把状态纠回来）。30s 只用于
+  // 兜住「请求根本没发出去（连接池占满）」这一类无限等待。
+  return apiFetch("/web/api/input", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
-  })
+  }, 30000)
     .then(function (res) { return res.json().catch(function () { return { status: "error", reason: "bad response" }; }); })
     .then(function (json) {
       if (json.status === "queued") {
@@ -802,8 +811,9 @@ export function meshNodeSuffix() {
 
 // ---- 网格实时订阅：连接 / 退避 / 降级 / 节流（S12 / §5.6）----
 
-// meshEventsURL：续传游标 + 非回环模式的令牌（EventSource 不能设请求头，
-// 取值顺序见 util.js::webAuthToken；回环模式 GET/SSE 本就不需要令牌）。
+// meshEventsURL：独立端点（回退路径）地址 = 续传游标 + 非回环模式的令牌
+// （EventSource 不能设请求头，取值顺序见 util.js::webAuthToken；回环模式
+// GET/SSE 本就不需要令牌）。
 function meshEventsURL() {
   var url = "/web/api/mesh/events";
   if (meshLastSeq > 0) { url += "?since_seq=" + meshLastSeq; }
@@ -812,47 +822,88 @@ function meshEventsURL() {
   return url;
 }
 
+// handleMeshStreamEvent：合并流（/web/api/events?mesh=1）分发的网格帧入口
+// （sse.js 调用）。与独立端点共用 handleMeshFrame，只多一层 SSE `id:` 行带来的
+// 续传游标（合并流上 id 行只出现在网格帧上）。
+export function handleMeshStreamEvent(name, data, lastEventId) {
+  if (lastEventId) {
+    var id = Number(lastEventId);
+    if (id > meshLastSeq) { meshLastSeq = id; }
+  }
+  handleMeshFrame(name, data);
+}
+
+// meshResumeSeq：合并流的续传游标（sse.js 重连时带 ?since_seq=<n>）。
+export function meshResumeSeq() { return meshLastSeq; }
+
+// notifySharedStreamState：sse.js 的共享流连接状态回调。
+//   - 断开：网格帧随之中断 → 立即退回 10s 轮询兜底（§5.6 降级）；
+//   - 建立：进入 mesh.ready 宽限期；等到就停轮询，等不到才启用独立端点回退。
+export function notifySharedStreamState(open) {
+  sharedStreamOpen = !!open;
+  if (!open) {
+    meshStreamReady = false;
+    startMeshPolling();
+    return;
+  }
+  scheduleMeshReadyGrace();
+}
+
 // maybeStartMeshStream：只在网格可用（sessions 响应 self 非空）时订阅。
 // --mesh=false 时路由不注册（§9.7），订阅只会制造无意义的错误重试；降级视图
 // 本来也没有徽标要刷新（§4.7：不报错、不提示）。
 function maybeStartMeshStream() {
   if (meshStreamStarted || !meshViewAvailable) { return; }
   meshStreamStarted = true;
-  openMeshStream();
+  scheduleMeshReadyGrace();
+}
+
+// scheduleMeshReadyGrace：合并流的 mesh.ready 宽限期。合并流正常时会在连接建立
+// 后立刻回 mesh.ready（merged=true）；宽限期内没等到就回退独立端点，保证实时
+// 视图在任何服务端/中间层组合下都不丢（回退会多占一条连接，只发生在这条路径）。
+function scheduleMeshReadyGrace() {
+  if (!meshStreamStarted || meshStreamReady || meshFallbackStream || meshReadyGraceTimer) { return; }
+  if (!sharedStreamOpen) { return; }
+  meshReadyGraceTimer = setTimeout(function () {
+    meshReadyGraceTimer = null;
+    if (meshStreamReady || meshFallbackStream || !sharedStreamOpen) { return; }
+    openMeshStream();
+  }, MESH_READY_GRACE_MS);
+}
+
+function clearMeshReadyGrace() {
+  if (meshReadyGraceTimer) { clearTimeout(meshReadyGraceTimer); meshReadyGraceTimer = null; }
 }
 
 function closeMeshStream() {
-  if (meshStream) {
-    try { meshStream.close(); } catch (e) { /* ignore */ }
-    meshStream = null;
+  if (meshFallbackStream) {
+    try { meshFallbackStream.close(); } catch (e) { /* ignore */ }
+    meshFallbackStream = null;
   }
 }
 
-// openMeshStream：建立订阅。EventSource 自带重连既不能带 since_seq、也不能
-// 自定义退避，因此一律自行接管（onerror → 关连接 + 退避重连）。
+// openMeshStream：建立独立端点的回退订阅（旧服务端 / 中间层改写查询参数）。
+// EventSource 自带重连既不能带 since_seq、也不能自定义退避，因此一律自行接管
+// （onerror → 关连接 + 退避重连）。
 function openMeshStream() {
   if (!meshStreamStarted) { return; }
   closeMeshStream();
   meshStreamReady = false;
   var es;
   try { es = new EventSource(meshEventsURL()); } catch (e) { scheduleMeshReconnect(); return; }
-  meshStream = es;
+  meshFallbackStream = es;
   es.onerror = function () {
     closeMeshStream();
     meshStreamReady = false;
     startMeshPolling();      // 降级：SSE 不可用期间仍有 10s 全量兜底
     scheduleMeshReconnect(); // 退避重连（连上后由 mesh.ready 停掉轮询）
   };
-  ["mesh.ready", "mesh.peer.joined", "mesh.peer.left", "mesh.peer.updated",
+  ["mesh.ready", "mesh.unavailable", "mesh.peer.joined", "mesh.peer.left", "mesh.peer.updated",
    "mesh.session.changed", "mesh.peer.event", "mesh.lagged"].forEach(function (name) {
     es.addEventListener(name, function (e) {
       var data = {};
       try { data = JSON.parse(e.data); } catch (err) { /* 非 JSON 帧忽略 */ }
-      if (e.lastEventId) {
-        var id = Number(e.lastEventId);
-        if (id > meshLastSeq) { meshLastSeq = id; }
-      }
-      handleMeshFrame(name, data);
+      handleMeshStreamEvent(name, data, e.lastEventId);
     });
   });
 }
@@ -904,7 +955,13 @@ function handleMeshFrame(name, data) {
       // 订阅生效：重置退避、停掉降级轮询（首帧只回显订阅参数，无需刷新）。
       meshStreamReady = true;
       meshReconnectDelay = MESH_RECONNECT_MIN_MS;
+      clearMeshReadyGrace();
       stopMeshPolling();
+      return;
+    case "mesh.unavailable":
+      // 服务端明确表示本次不提供网格帧（--mesh=false / 扇入客户端超限 429）：
+      // 不报错、不重连，保持 10s 轮询兜底（§4.7 / §5.6 降级）。
+      startMeshPolling();
       return;
     case "mesh.lagged":
       // 缓冲溢出跳号：丢弃增量语义，立刻做一次全量兜底（§6.4）。
@@ -934,7 +991,9 @@ function handleMeshFrame(name, data) {
 // 网格关闭时该参数无副作用（后端不并 peer，口径与现状逐字一致）。
 export function loadSessions() {
   var seq = ++sessionsReqSeq;
-  fetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort) + "&scope=all", { cache: "no-store" })
+  // 带超时（util.js::apiFetch）：连接池被常驻流占满时，这里的请求会永久排队，
+  // 侧栏就一直是空的且没有任何提示——超时后计入降级状态（sse.js 显示横幅并轮询重试）。
+  apiFetch("/web/api/sessions?sort=" + encodeURIComponent(sessionsSort) + "&scope=all", { cache: "no-store" })
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
       if (!data) { return; }
