@@ -251,11 +251,11 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 ### Batch 6 — P2（按需排期，不承诺）
 
 - `--profile auto` 自动路由（复用 server 端 `routeProfileForPrompt` 思路，映射规则配置化）；
-- runtime-server 只读 API 扩展 + frontend 展示（与"路由档位 profile"文案区分）；
+- runtime-server 只读 API 扩展 + frontend 展示（与"路由档位 profile"文案区分）；✅ **已落地**（随 Batch 8 M4：只读清单/详情 API + 设置页 Profiles 面板；2026-09-24 核实回填）
 - usage ledger 按 profile 聚合；✅ **已落地**（slice 2，2026-09-24：记录面 + `group_by=profile` 聚合；slice 2b，同日：前端分组对比 UI）
 - workspace `.aicli/profile` 项目级绑定（依赖 V10 结论）。
 
-**落地状态（2026-09-24，slice 1 = FR-11；slice 2 = FR-13 后端半程；slice 2b = FR-13 前端展示面）**：`--profile auto` 与 usage ledger 按 profile 聚合（记录面 + 聚合面 + 前端分组对比 UI）已实施并验证，其余两项仍待排期。
+**落地状态（2026-09-24，slice 1 = FR-11；slice 2 = FR-13 后端半程；slice 2b = FR-13 前端展示面）**：`--profile auto` 与 usage ledger 按 profile 聚合（记录面 + 聚合面 + 前端分组对比 UI）已实施并验证；FR-12 已随 Batch 8（M4）落地（2026-09-24 核实回填）；FR-14 按 Q12 后置（不在本期范围）。
 - 单一权威：新增 `internal/profile/autoroute.go`（`AutoProfileRef` / `AutoRouteRule` /
   `AutoRouteConfig` / `DefaultAutoRouteRules` / `IsAutoProfileRef` / `NormalizeAutoRouteRules` /
   `RouteProfileForPrompt` / `ResolveAutoProfileRef`）。匹配语义与历史 server 实现逐字一致
@@ -290,6 +290,7 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
   `group_by=profile` 且未传不发）、`use-usage-quota.test.tsx` +1 例（透传）、`quota.test.tsx`
   +3 例（分组表渲染 / 未返回分组提示 / 空数组真实空态）；反证（禁用 `groups` 解析 + 去掉面板
   `groupBy`）→ 5 例精确失败（解析面 3 + 面板请求面 2；hook 层未受影响，分层正确），还原后复绿。
+- FR-12 回填（2026-09-24 核实）：只读列表/详情 API 与设置页展示已随 Batch 8（M4）落地——`GET /api/runtime/profiles`（三来源清单 + 默认标注 + 解析状态）、`GET /api/runtime/profiles/{ref}`（解析后视图：工具面/skills/mcp/prompts/agents/overrides/估算）；设置页 Profiles 面板（`backend-config-settings-page/.../profiles.tsx`）消费 `listRuntimeProfiles`/`getRuntimeProfile`；命名与路由域「难度档位」区分（面板副标题「按场景维护 profile.yaml…」）。
 
 ### Batch 7 — 配置覆盖接线（P0/P1，≈1.5 人日）
 
@@ -612,7 +613,7 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 | 12 | M4 | ✅ 已完成 | composer 可切换 + Switch Report 可见 + R20 能力门控（旧后端不注册命令） | V15/V16/V19 已回填；证据见变更记录（Batch 12） |
 | 13 | M5 | ✅ 已完成（slice 1-10：`apply` 执行核心 / export·import（API+CLI）/ TUI 生命周期子命令（含 import 闭环，D37）/ save-as 差分固化（TUI+API）/ 前端分享入口（D38）/ E2E-1·3·4·5 前端半程 / **slice 10 = 前端「从当前会话创建」入口（`/profile save-as`，G1/D24 的最后一处缺口）**） | E2E-1~5 + A9-A12 | V22、**V24、V25** 已回填；V17 部分回填；Q19/Q20/Q21 已闭环（差分口径=声明式字段逐个差分 / 硬删+二次确认 / 目录·zip 不做单文件内联，均落在各 slice 的测试锚点内） |
 | 14 | M6 | ✅ 已完成（V20/V21 已回填、D29 接入设计已冻结；slice 2 落地：foldertrust 检测面扩展 + 分级门控核心 + CLI/server 接线；slice 3 落地：三处警告面（`/profile status` / 启动摘要 / Switch Report，CLI+server）；slice 4 落地：E2E-6/7 自动化剧本（真实判定链 + `/trust grant` 恢复 + resume 漂移容错）；slice 5 落地：Q22 前端闭环（列表可选 `workspace` 参数 + "部分内容未应用"徽标 + 两步确认一键信任 + `/api/runtime/harness/trust` 只读/授予端点）） | E2E-6/7 + A13/A14 | V20、V21 已回填；Q22 已闭环（撤销信任仍走 CLI `/trust`） |
-| 6 | P2 | 🚧 部分完成（slice 1 = FR-11 `--profile auto`；slice 2 = FR-13 **后端半程**——记录面 + 聚合面；slice 2b = FR-13 **前端展示面**——分组对比 UI + 缺分组如实提示；余项：FR-12、FR-14） | FR-11 用例全绿 + 零变化（未配置 auto 时行为不变）+ 反证；FR-13 写入/聚合/反例用例全绿（含禁用写入路径反证）+ 未指定 `group_by` 时响应逐字节不变；FR-13 前端 3 文件 40 例全绿 + 反证 5 例精确失败 | 单一权威 `internal/profile/autoroute.go`；`metadata.profile` 写时解析（aicli `WithProfileLookup` / server `UsageScope.Profile`）；`GET /api/runtime/usage/ledger?group_by=profile`；前端 `profileGroups`/`groupedTotal` 契约 + `LedgerProfileGroups`；证据见 Batch 6 落地状态与变更记录 |
+| 6 | P2 | ✅ 已完成（本期范围：slice 1 = FR-11 `--profile auto`；slice 2 = FR-13 后端记录面 + 聚合面；slice 2b = FR-13 前端展示面（分组对比 UI）；FR-12 已随 Batch 8 M4 落地（2026-09-24 核实回填）；FR-14 按 Q12 后置，不在本期范围） | FR-11 用例全绿 + 零变化（未配置 auto 时行为不变）+ 反证；FR-13 写入/聚合/反例用例全绿（含禁用写入路径反证）+ 未指定 `group_by` 时响应逐字节不变；FR-13 前端 3 文件 40 例全绿 + 反证 5 例精确失败 | 单一权威 `internal/profile/autoroute.go`；`metadata.profile` 写时解析（aicli `WithProfileLookup` / server `UsageScope.Profile`）；`GET /api/runtime/usage/ledger?group_by=profile`；前端 `profileGroups`/`groupedTotal` 契约 + `LedgerProfileGroups`；证据见 Batch 6 落地状态与变更记录 |
 
 ---
 
@@ -744,3 +745,10 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 > ⑥ 回归：`npx tsc -b` 退出 0；`npm run lint` 退出 0（0 errors / 2 warnings 均为既有 `react-hooks/exhaustive-deps`，与本切片无关）；`npm run lint:i18n` 0 违规（scanned=905）；`npm run verify:lines` 0 个 > 500 非空行；全量 `npx vitest run` 退出 0（333 files / 2768 tests passed，284.62s；含同树并行工作流的测试文件）。
 > ⑦ 文档：设计文档 §2 P2 FR-13 条落地状态补前端半程；本文件 Batch 6 段与附录 P 跟踪表同步回填。
 > ⑧ 余项：FR-12、FR-14 仍 P2 待排期。
+
+> 变更记录：2026-09-24 实施（Batch 6 **收口**——FR-12 核实回填 + FR-14 后置确认；P2 项清账）：
+> ① 核实（FR-12 Web 集成）：只读面与设置页展示已由 **Batch 8（M4）** 完整覆盖，无需新增代码——`GET /api/runtime/profiles`（三来源清单 + 默认标注 + 解析状态，`profiles_handlers.go:25-26`）与 `GET /api/runtime/profiles/{ref}`（解析后视图：工具面/skills/mcp/prompts/agents/overrides/估算）；前端设置页 Profiles 面板（`backend-config-settings-page/sections/modes/profiles.tsx:77/124`）以 `listRuntimeProfiles({ workspace })` + `getRuntimeProfile(ref)` 展示列表与详情。
+> ② 命名区分（设计文档原注记「与 subagent 路由难度档位 profile 区分」）：面板标题 "Profiles"、副标题「按场景维护 profile.yaml：工具/技能/MCP/提示词/Agent/偏好一次成型，保存前可先校验并预览影响面。」；路由域使用「难度档位」（`editor-agent-routing.ts`），两者不共用词汇。
+> ③ FR-14 状态确认：按 **Q12 结论**（`.aicli/profile` 项目级绑定后置、不在本期范围）保持待排期，不计入 Batch 6 本期出口。
+> ④ 回填：设计文档 §2 P2 FR-12 条新增落地状态；本文件 Batch 6 段（条目 ✅ + 落地状态句 + FR-12 回填要点）与附录 P 跟踪表 Batch 6 行由 🚧 改 ✅（本期范围 FR-11/FR-12/FR-13 全落地；FR-14 按 Q12 后置）。
+> ⑤ 结论：Batch 6（P2 按需项）本期范围清账——FR-11 ✅（slice 1）、FR-12 ✅（随 Batch 8，核实回填）、FR-13 ✅（slice 2 后端 + slice 2b 前端）；FR-14 为唯一余项且已按 Q12 决策后置。
