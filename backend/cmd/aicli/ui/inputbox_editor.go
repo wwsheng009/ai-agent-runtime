@@ -141,7 +141,6 @@ func (ib *InputBox) ReadTransientSecretPrompt(prompt string) (string, error) {
 	if ib == nil {
 		return "", io.EOF
 	}
-	ib.historyPos = len(ib.history)
 	if prompt != "" {
 		_, _ = WriteTerminalText(os.Stdout, prompt)
 	}
@@ -170,9 +169,6 @@ func (ib *InputBox) readPrompt(prompt string, onChange func(string), keepHistory
 	if prompt == "" && useDefaultPrompt {
 		prompt = ib.GetPrompt()
 	}
-
-	// Keep history navigation stable even if the read is cancelled.
-	ib.historyPos = len(ib.history)
 
 	if onChange != nil {
 		onChange("")
@@ -240,9 +236,6 @@ func (ib *InputBox) readPromptWithHooksContext(ctx context.Context, prompt strin
 	if prompt == "" && useDefaultPrompt {
 		prompt = ib.GetPrompt()
 	}
-
-	// Keep history navigation stable even if the read is cancelled.
-	ib.historyPos = len(ib.history)
 
 	if !IsInteractiveTerminal() {
 		line, err := readBufferedLine(os.Stdin)
@@ -1448,8 +1441,8 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			if historyPos == len(history) {
 				draft = append(draft[:0], line...)
 			}
-			if historyPos > 0 {
-				historyPos--
+			if idx, ok := previousNavigableHistory(history, historyPos); ok {
+				historyPos = idx
 				setLine([]rune(history[historyPos]))
 			}
 		case editorKeyDown:
@@ -1464,18 +1457,19 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			if len(history) == 0 {
 				continue
 			}
-			if historyPos < len(history)-1 {
-				historyPos++
+			if idx, ok := nextNavigableHistory(history, historyPos); ok {
+				historyPos = idx
 				setLine([]rune(history[historyPos]))
 				continue
 			}
-			if historyPos == len(history)-1 {
-				historyPos = len(history)
-				if draft != nil {
-					setLine(append([]rune(nil), draft...))
-				} else {
-					setLine(nil)
-				}
+			if historyPos == len(history) {
+				continue
+			}
+			historyPos = len(history)
+			if draft != nil {
+				setLine(append([]rune(nil), draft...))
+			} else {
+				setLine(nil)
 			}
 		case editorKeyPageUp:
 			flushPasteBurstBeforeModifiedInput()
@@ -2407,4 +2401,44 @@ func findReverseHistoryMatch(history []string, query string, before int) (int, s
 		}
 	}
 	return 0, "", false
+}
+
+// isSlashHistoryEntry reports whether a history entry is a slash command
+// ("/help", "/model gpt-5", ...). Slash commands are still recorded in the
+// history (reverse search can find them), but Up/Down navigation skips them so
+// the prompt editor only recalls real prompts.
+func isSlashHistoryEntry(entry string) bool {
+	return strings.HasPrefix(strings.TrimSpace(entry), "/")
+}
+
+// previousNavigableHistory returns the nearest history index before pos whose
+// entry is recallable with the Up key. It returns false when no such entry
+// exists, in which case navigation stays where it is.
+func previousNavigableHistory(history []string, pos int) (int, bool) {
+	if pos > len(history) {
+		pos = len(history)
+	}
+	for idx := pos - 1; idx >= 0; idx-- {
+		if isSlashHistoryEntry(history[idx]) {
+			continue
+		}
+		return idx, true
+	}
+	return 0, false
+}
+
+// nextNavigableHistory returns the nearest history index after pos whose entry
+// is recallable with the Down key. It returns false when the draft position
+// (len(history)) is the only remaining stop, so the caller can restore it.
+func nextNavigableHistory(history []string, pos int) (int, bool) {
+	if pos < 0 {
+		pos = -1
+	}
+	for idx := pos + 1; idx < len(history); idx++ {
+		if isSlashHistoryEntry(history[idx]) {
+			continue
+		}
+		return idx, true
+	}
+	return 0, false
 }

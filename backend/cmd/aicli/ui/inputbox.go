@@ -11,13 +11,12 @@ import (
 
 // InputBox 输入框组件
 type InputBox struct {
-	layout     *Layout
-	terminal   *Terminal
-	theme      *Theme
-	multiLine  bool
-	maxLines   int
-	history    []string
-	historyPos int
+	layout    *Layout
+	terminal  *Terminal
+	theme     *Theme
+	multiLine bool
+	maxLines  int
+	history   []string
 }
 
 const defaultInputHistoryLimit = 200
@@ -193,7 +192,6 @@ func (ib *InputBox) AddToHistory(input string) {
 		return
 	}
 	if len(ib.history) > 0 && ib.history[len(ib.history)-1] == input {
-		ib.historyPos = len(ib.history)
 		return
 	}
 	ib.history = append(ib.history, input)
@@ -201,13 +199,11 @@ func (ib *InputBox) AddToHistory(input string) {
 		overflow := len(ib.history) - defaultInputHistoryLimit
 		ib.history = append([]string(nil), ib.history[overflow:]...)
 	}
-	ib.historyPos = len(ib.history)
 }
 
 // ClearHistory 清空历史记录
 func (ib *InputBox) ClearHistory() {
 	ib.history = make([]string, 0)
-	ib.historyPos = 0
 }
 
 // GetHistory 获取历史记录
@@ -226,24 +222,6 @@ func (ib *InputBox) GetHistoryAt(index int) (string, bool) {
 		return "", false
 	}
 	return ib.history[index], true
-}
-
-// PreviousHistory 获取上一条历史记录
-func (ib *InputBox) PreviousHistory() (string, bool) {
-	if ib.historyPos > 0 {
-		ib.historyPos--
-		return ib.history[ib.historyPos], true
-	}
-	return "", false
-}
-
-// NextHistory 获取下一条历史记录
-func (ib *InputBox) NextHistory() (string, bool) {
-	if ib.historyPos < len(ib.history)-1 {
-		ib.historyPos++
-		return ib.history[ib.historyPos], true
-	}
-	return "", false
 }
 
 // Clear 清除输入框

@@ -682,6 +682,88 @@ func TestReadInteractiveLine_RestoresDraftAfterHistoryNavigation(t *testing.T) {
 	}
 }
 
+func TestReadInteractiveLine_HistoryUpSkipsSlashCommands(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	line, err := readInteractiveLine(
+		strings.NewReader("\x1b[A\x1b[A\r\n"),
+		&output,
+		UserPromptText(0),
+		[]string{"/help", "hello", "/model gpt-5", "world", "/clear"},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != "hello" {
+		t.Fatalf("expected Up to skip slash commands and recall \"hello\", got %q", line)
+	}
+}
+
+func TestReadInteractiveLine_HistoryDownSkipsSlashCommandsAndRestoresDraft(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	line, err := readInteractiveLine(
+		strings.NewReader("draft\x1b[A\x1b[A\x1b[B\x1b[B\r\n"),
+		&output,
+		UserPromptText(0),
+		[]string{"first", "/help", "second"},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != "draft" {
+		t.Fatalf("expected Down to skip slash commands and restore the draft, got %q", line)
+	}
+}
+
+func TestReadInteractiveLine_SlashOnlyHistoryKeepsCurrentInputOnUp(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	line, err := readInteractiveLine(
+		strings.NewReader("draft\x1b[A\r\n"),
+		&output,
+		UserPromptText(0),
+		[]string{"/help", "/exit"},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine: %v", err)
+	}
+	if line != "draft" {
+		t.Fatalf("expected Up to keep the current input when history only holds slash commands, got %q", line)
+	}
+}
+
+func TestNavigableHistorySkipsSlashCommands(t *testing.T) {
+	t.Parallel()
+
+	history := []string{"/help", "alpha", "/model gpt-5", "beta", "/clear"}
+
+	if idx, ok := previousNavigableHistory(history, len(history)); !ok || idx != 3 {
+		t.Fatalf("expected Up from the draft to land on \"beta\" (3), got idx=%d ok=%v", idx, ok)
+	}
+	if idx, ok := previousNavigableHistory(history, 3); !ok || idx != 1 {
+		t.Fatalf("expected Up to skip the slash command and land on \"alpha\" (1), got idx=%d ok=%v", idx, ok)
+	}
+	if idx, ok := previousNavigableHistory(history, 1); ok {
+		t.Fatalf("expected no navigable entry before the first prompt, got idx=%d", idx)
+	}
+	if idx, ok := nextNavigableHistory(history, 1); !ok || idx != 3 {
+		t.Fatalf("expected Down to skip the slash command and land on \"beta\" (3), got idx=%d ok=%v", idx, ok)
+	}
+	if idx, ok := nextNavigableHistory(history, 3); ok {
+		t.Fatalf("expected Down from the last prompt to fall back to the draft, got idx=%d", idx)
+	}
+	if idx, ok := nextNavigableHistory(history, len(history)); ok {
+		t.Fatalf("expected Down at the draft position to stay on the draft, got idx=%d", idx)
+	}
+}
+
 func TestInputBoxAddToHistoryTrimsSkipsAdjacentDuplicatesAndLimitsSize(t *testing.T) {
 	ib := NewInputBox(nil)
 
@@ -710,8 +792,8 @@ func TestInputBoxAddToHistoryTrimsSkipsAdjacentDuplicatesAndLimitsSize(t *testin
 	if !ok || oldest != "item-005" {
 		t.Fatalf("expected oldest retained entry item-005, got %q ok=%v", oldest, ok)
 	}
-	if previous, ok := ib.PreviousHistory(); !ok || previous != "item-204" {
-		t.Fatalf("expected history cursor to point after latest retained entry, got %q ok=%v", previous, ok)
+	if newest, ok := ib.GetHistoryAt(ib.GetHistorySize() - 1); !ok || newest != "item-204" {
+		t.Fatalf("expected the newest retained entry to be item-204, got %q ok=%v", newest, ok)
 	}
 }
 
