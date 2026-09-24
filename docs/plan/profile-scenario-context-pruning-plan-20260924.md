@@ -86,6 +86,7 @@
     详见实施方案 Batch 6 落地状态。
 - **FR-12 Web 集成**：runtime-server 暴露 profile 只读列表/详情 API；frontend 设置页展示（需产品确认；注意与"subagent 路由难度档位 profile"命名区分）。
 - **FR-13 统计聚合**：usage ledger 按 profile 维度聚合 token 消耗对比。
+  - **落地状态（2026-09-24，slice 2 = 后端记录面 + 聚合面）**：已实施——① **记录面（写时单一权威）**：两处写入点同键同义——`internal/usageledger`（aicli 进程内 LLM 路径，subsystem=`llm_runtime`）新增可选 `WithProfileLookup` 回调，事件时刻经 `host.SessionStore` 读会话元数据（声明名 `sessionmeta.ProfileName` 优先，回退绑定 `ProfileRef`）；runtime-server 路径（subsystem=`skill_runtime`）由 `UsageScope.Profile`（`json:"profile,omitempty"`，不参与配额身份）承载 AgentChat 请求期解析出的身份（声明名优先，回退 ref），`appendUsageLedger` 落 `metadata.profile`。② **不猜纪律**：未解析 profile 的入口（`execute`）、未绑定会话与历史行一律不写 `profile` 键——聚合时归入 `profile=""`（未归属）组，分组请求数守恒、未接线可观察。③ **聚合面（读时同一实现）**：`GET /api/runtime/usage/ledger?group_by=profile` 返回 `groups[]`（profile/requests/failures/input_tokens/output_tokens/total_tokens，按 total_tokens 降序 → profile 升序）与 `grouped_total`；聚合基于"过滤后、截断前"集合（`records` 仍按 `limit` 截断，未指定 `group_by` 时响应三键逐字节不变）；非法 `group_by` 返回 400。④ **零 schema 变更**：复用既有 `metadata_json` 列。⑤ 余项：前端展示面（分组对比 UI/报告）待排期。
 - **FR-14 项目级绑定**：workspace `.aicli/profile` 文件声明项目默认 profile。
 
 ### 非功能需求
@@ -239,7 +240,7 @@ profile tool policy 与 CLI 工具开关（如有）叠加时：deny 恒优先
 
 - `--profile auto` 自动路由（映射规则配置化，复用 server 端 `routeProfileForPrompt` 思路）；
 - runtime-server 只读 API + frontend 展示；
-- usage ledger 按 profile 聚合；
+- usage ledger 按 profile 聚合；✅ **后端已落地**（slice 2，2026-09-24：记录面 + `group_by=profile` 聚合；前端展示待排期）
 - workspace `.aicli/profile` 项目级绑定。
 
 ## 5. 验收与度量
