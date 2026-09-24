@@ -77,13 +77,19 @@ type Host struct {
 	// journal is the node's event log; nil when the mesh root is unavailable.
 	journal *Journal
 
-	started   bool
-	closed    bool
-	writeOff  bool
-	failures  int
-	stopCh    chan struct{}
-	doneCh    chan struct{}
-	closeOnce sync.Once
+	started  bool
+	closed   bool
+	writeOff bool
+	failures int
+	// Session lease state (architecture §3.3 / §4.4): the lease this process
+	// holds for its active session, if any.
+	leasePurpose string
+	leaseKey     string
+	leaseHeld    bool
+	leaseLost    bool
+	stopCh       chan struct{}
+	doneCh       chan struct{}
+	closeOnce    sync.Once
 }
 
 // NewHost builds the host for this process. It never fails: an unresolvable
@@ -270,6 +276,7 @@ func (h *Host) SetSession(session *SessionInfo) {
 		h.touchLocked()
 		_ = h.writeRecordLocked()
 		h.journal.Append(JournalSessionDeactivated, previousID, nil)
+		h.releaseSessionLeaseLocked()
 		return
 	}
 	copied := *session
@@ -298,6 +305,7 @@ func (h *Host) SetSession(session *SessionInfo) {
 	}
 	if !sameSession {
 		h.journal.Append(JournalSessionActivated, copied.ID, map[string]any{"title": copied.Title})
+		h.acquireSessionLeaseLocked(copied.ID)
 	}
 }
 
@@ -326,6 +334,112 @@ func (h *Host) SetBusy(busy bool, turnID string) {
 		"busy":    busy,
 		"turn_id": turnID,
 	})
+}
+
+// SessionLeaseStatus reports the session lease this host holds.
+type SessionLeaseStatus struct {
+	Purpose string
+	Key     string
+	Held    bool
+	// Lost is true when another node took the lease over: this process keeps
+	// running but no longer owns the session (architecture §4.4).
+	Lost bool
+}
+
+// acquireSessionLeaseLocked takes the `session-<sid>` lease (architecture §3.3
+// / §4.1). A refusal or an unusable lease directory degrades to "no mutual
+// exclusion": the chat keeps running and the journal records why (MN1 / §4.7).
+func (h *Host) acquireSessionLeaseLocked(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || !h.paths.Enabled() || h.nodeID == "" {
+		return
+	}
+	if h.leaseHeld && h.leaseKey == sessionID && !h.leaseLost {
+		return
+	}
+	if h.leaseHeld {
+		h.releaseSessionLeaseLocked()
+	}
+	owner := LeaseOwner{NodeID: h.nodeID, PID: os.Getpid()}
+	outcome := Acquire(h.paths, LeasePurposeSession, sessionID, owner, AcquireOptions{
+		Now: h.cfg.Now(),
+		TTL: h.cfg.HeartbeatTTL,
+	})
+	detail := map[string]any{
+		"purpose": LeasePurposeSession,
+		"key":     sessionID,
+		"ttl_sec": int(h.cfg.HeartbeatTTL / time.Second),
+	}
+	switch {
+	case outcome.Acquired:
+		h.leasePurpose = LeasePurposeSession
+		h.leaseKey = sessionID
+		h.leaseHeld = true
+		h.leaseLost = false
+		if outcome.Reclaimed {
+			h.journal.Append(JournalLeaseReclaimed, sessionID, detail)
+		}
+		h.journal.Append(JournalLeaseAcquired, sessionID, detail)
+	case outcome.Reason == LeaseReasonHeld && outcome.Holder != nil:
+		// Another live node already serves this session. The mesh never takes
+		// over implicitly (§4.4): we keep running and say so in the journal.
+		h.leaseHeld = false
+		detail["reason"] = LeaseReasonHeld
+		detail["holder_node_id"] = outcome.Holder.OwnerNodeID
+		detail["holder_pid"] = outcome.Holder.OwnerPID
+		h.journal.Append(JournalLeaseDegraded, sessionID, detail)
+	default:
+		h.leaseHeld = false
+		reason := outcome.Reason
+		if reason == "" {
+			reason = LeaseReasonDegraded
+		}
+		detail["reason"] = reason
+		h.journal.Append(JournalLeaseDegraded, sessionID, detail)
+	}
+}
+
+// renewSessionLeaseLocked refreshes the lease from the heartbeat and notices a
+// takeover (architecture §4.4).
+func (h *Host) renewSessionLeaseLocked(now time.Time) {
+	if !h.leaseHeld || h.leaseLost || h.leaseKey == "" {
+		return
+	}
+	outcome := Renew(h.paths, h.leasePurpose, h.leaseKey, LeaseOwner{NodeID: h.nodeID, PID: os.Getpid()}, now, h.cfg.HeartbeatTTL)
+	if !outcome.Lost {
+		return
+	}
+	h.leaseHeld = false
+	h.leaseLost = true
+	h.journal.Append(JournalLeaseDegraded, h.leaseKey, map[string]any{
+		"purpose": h.leasePurpose,
+		"key":     h.leaseKey,
+		"reason":  "taken-over",
+	})
+}
+
+// releaseSessionLeaseLocked drops the session lease on deactivation or exit.
+func (h *Host) releaseSessionLeaseLocked() {
+	if !h.leaseHeld || h.leaseKey == "" {
+		h.leaseHeld, h.leaseLost = false, false
+		return
+	}
+	key, purpose := h.leaseKey, h.leasePurpose
+	if Release(h.paths, purpose, key, LeaseOwner{NodeID: h.nodeID, PID: os.Getpid()}) {
+		h.journal.Append(JournalLeaseReleased, key, map[string]any{"purpose": purpose, "key": key})
+	}
+	h.leaseHeld, h.leaseLost, h.leaseKey, h.leasePurpose = false, false, "", ""
+}
+
+// SessionLeaseStatus reports the lease state of this host (diagnostics, and the
+// `derived.lease` field of /web/api/mesh/self).
+func (h *Host) SessionLeaseStatus() SessionLeaseStatus {
+	if h == nil {
+		return SessionLeaseStatus{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return SessionLeaseStatus{Purpose: h.leasePurpose, Key: h.leaseKey, Held: h.leaseHeld, Lost: h.leaseLost}
 }
 
 // Close runs the normal-exit path: mark stopped, delete the record, stop the
@@ -360,6 +474,7 @@ func (h *Host) Close() {
 	if h.record.Session != nil {
 		sessionID = h.record.Session.ID
 	}
+	h.releaseSessionLeaseLocked()
 	h.record.Liveness.State = string(NodeStateStopped)
 	h.touchLocked()
 	_ = h.writeRecordLocked()
@@ -421,6 +536,7 @@ func (h *Host) heartbeatOnce() {
 		return
 	}
 	h.failures = 0
+	h.renewSessionLeaseLocked(now)
 }
 
 // writeRecordLocked persists the in-memory record. Heartbeats and state flips
