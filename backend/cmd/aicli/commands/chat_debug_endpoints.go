@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 	runtimeobserve "github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 )
 
@@ -122,6 +123,20 @@ var webDebugEndpoints = []struct {
 	{Method: "GET", Path: "/web/api/cache", Note: "LLM 缓存分析（/overview|/requests|/messages/{id}/trace）"},
 }
 
+// meshDebugEndpoints 列出多进程网格控制面端点（架构 §5.1，P0 只读三件套）：
+// 存活探针 / 本节点自述 / 网格聚合视图。与 loopback / web 同服务器同源，
+// 但语义上属于「网格」——`--mesh=false` 时不注册（§9.7），故单列一组，
+// 让「只认清单」的脚本能按 enabled 标记判断本进程是否参与网格。
+var meshDebugEndpoints = []struct {
+	Method string
+	Path   string
+	Note   string
+}{
+	{Method: "GET", Path: "/web/api/health", Note: "网格存活探针（极轻量；无会话也 200，供探活/就绪等待/aicli-mesh doctor）"},
+	{Method: "GET", Path: "/web/api/mesh/self", Note: "本节点自述（档案 + derived 实时段 + mesh 根目录；auth.token 默认脱敏，回环 ?reveal_token=1 给原文）"},
+	{Method: "GET", Path: "/web/api/mesh/peers", Note: "网格聚合视图（默认跨工作区全量；?scope=self|all&workspace=&state=all|live&probe=1&redact_token=1）"},
+}
+
 // observeDebugEndpoints 列出 Runtime Observation Plane 的版本化端点
 // （相对 RoutePrefix，默认 /api/runtime/observe/v1）。
 var observeDebugEndpoints = []struct {
@@ -208,6 +223,25 @@ func buildChatDebugEndpointList(session *ChatSession) *chatDebugEndpointsSnapsho
 		}
 		if loopbackActive {
 			// JSON 响应中不带 token；TUI 文字渲染时补充。
+			info.URL = loopbackBase + ep.Path
+		}
+		snap.Endpoints = append(snap.Endpoints, info)
+	}
+
+	// === 网格控制面端点（/web/api/health + /web/api/mesh/*）===
+	// 与 loopback / web 同服务器同源，但语义独立：--mesh=false 时进程不写档案、
+	// 不订阅、也不注册 mesh/* 路由（§9.7），此时清单里对应行显示为 [disabled]——
+	// 「只认清单」的脚本据此即可判断本进程是否参与网格，不必先探一次。
+	meshActive := loopbackActive && mesh.Current() != nil
+	for _, ep := range meshDebugEndpoints {
+		info := chatDebugEndpointInfo{
+			Method:  ep.Method,
+			Path:    ep.Path,
+			Scheme:  "mesh",
+			Enabled: meshActive,
+			Note:    ep.Note,
+		}
+		if loopbackActive {
 			info.URL = loopbackBase + ep.Path
 		}
 		snap.Endpoints = append(snap.Endpoints, info)
@@ -325,7 +359,7 @@ func BuildChatDebugEndpointsText() string {
 			}
 		}
 	}
-	for _, scheme := range []string{"loopback", "web", "runtime-observe"} {
+	for _, scheme := range []string{"loopback", "web", "mesh", "runtime-observe"} {
 		schemeLabel := chatDebugEndpointSchemeLabel(scheme)
 		if scheme == "loopback" && snap.ListenMode == "non-loopback" {
 			schemeLabel += " (non-loopback)"
@@ -338,6 +372,9 @@ func BuildChatDebugEndpointsText() string {
 			base = snap.LoopbackBaseURL
 		case "web":
 			base = snap.WebBaseURL
+		case "mesh":
+			// 网格端点与 loopback/web 同服务器：base 复用 loopback 地址。
+			base = snap.LoopbackBaseURL
 		case "runtime-observe":
 			base = snap.ObserveBaseURL
 		}
@@ -393,6 +430,8 @@ func chatDebugEndpointSchemeLabel(scheme string) string {
 		return "loopback  (aicli --pprof 本机调试服务器)"
 	case "web":
 		return "web  (aicli 微型 Web 客户端 / 远程调用 API)"
+	case "mesh":
+		return "mesh  (aicli 多进程网格控制面；--mesh=false 时不注册)"
 	case "runtime-observe":
 		return "runtime-observe  (Runtime Observation Plane)"
 	default:

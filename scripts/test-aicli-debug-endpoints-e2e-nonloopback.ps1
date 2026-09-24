@@ -92,6 +92,10 @@ if ([string]::IsNullOrWhiteSpace($ArtifactDir)) {
     $ArtifactDir = Join-Path $repoRoot $ArtifactDir
 }
 New-Item -ItemType Directory -Path $ArtifactDir -Force | Out-Null
+# 网格根隔离（同 01）：本场景不测网格，但进程默认会加入网格并写真实
+# ~/.aicli/mesh；指到证据目录既避免污染，也让本场景不受本机其它节点影响。
+$meshDir = Join-Path $ArtifactDir 'mesh'
+New-Item -ItemType Directory -Path $meshDir -Force | Out-Null
 
 $runLogPath = Join-Path $ArtifactDir 'run.log'
 $stdoutPath = Join-Path $ArtifactDir 'aicli.stdout.log'
@@ -233,6 +237,7 @@ $proc = $null
 $port = $Port
 $lanIp = $LanIp
 $exitedGracefully = $false
+$prevMeshDir = $env:AICLI_MESH_DIR
 $evidence = [ordered]@{}
 
 try {
@@ -287,6 +292,8 @@ try {
     if ([string]::IsNullOrWhiteSpace($lanIp)) { $lanIp = Get-LanIPv4 }
 
     $launchArgs = @('chat', '--yolo', '--web-host', $ListenHost, '--web-port', "$port", '--web-token', $WebToken)
+    # 子进程继承环境变量：网格根隔离（见 $meshDir 注释），脚本收尾恢复原值。
+    $env:AICLI_MESH_DIR = $meshDir
     Write-Log "launch: $ExePath $($launchArgs -join ' ') (cwd=$repoRoot)"
     $proc = Start-Process -FilePath $ExePath -ArgumentList $launchArgs -WorkingDirectory $repoRoot -PassThru `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
@@ -559,6 +566,7 @@ try {
         Add-Result 'exit/port-released' $portFree "port=$port free=$portFree"
     }
 } finally {
+    if ($null -eq $prevMeshDir) { Remove-Item Env:AICLI_MESH_DIR -ErrorAction SilentlyContinue } else { $env:AICLI_MESH_DIR = $prevMeshDir }
     # 收尾兜底：异常/KeepAlive 路径下不留下孤儿进程。
     if ($null -ne $proc) {
         try { $proc.Refresh() } catch { }

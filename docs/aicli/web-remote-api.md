@@ -113,6 +113,9 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | POST | `/web/api/mcps/{name}/tools/enable\|disable` | 批量启停工具，body `{"tools":[...]}`；缺省/空数组 = 全部 |
 | POST | `/web/api/mcps/reload` | 热重载 MCP 配置并重连 |
 | GET | `/web/api/token` | 读取本进程写令牌（`X-AICLI-Token`；含 `source` 来源标识，回环 + 同源可读，`no-store`） |
+| GET | `/web/api/health` | 网格存活探针：不依赖会话与渲染器，恒 200（`available` / `node_id` / `pid` / `uptime_sec` / `session_active` / `busy` / `mesh_ready`）；供网格探活、脚本就绪等待与 `aicli-mesh doctor` 复用 |
+| GET | `/web/api/mesh/self` | 网格：本节点自述（档案同形字段 + `derived` 内存实时值 + `mesh` 根目录；`auth.token` 默认脱敏，见 §9） |
+| GET | `/web/api/mesh/peers` | 网格：全量视图（`counts` 恒全量口径；`scope` / `workspace` / `state` 只过滤 `nodes[]`；`probe=0` 默认不发网络请求，见 §9） |
 | GET | `/web/` | 浏览器微型客户端页面（同一后端） |
 | GET | `/debug/chat/screen` | 与 `/web/api/screen?view=tui` 同源的调试入口（保留） |
 
@@ -451,3 +454,110 @@ curl -N -X POST http://127.0.0.1:61772/web/api/invoke \
 - SSE 与 invoke 均复用当前活动会话；无活动会话时返回 409 / `available=false`。
 - turn 记录只保留最近 128 条、30 分钟；服务重启后历史记录清空（持久用量查询请用
   `/web/api/analysis/*` 与 `/web/api/cache/*`）。
+
+## 9. 网格控制面（`/web/api/mesh/*` + `/web/api/health`）
+
+多进程网格（`~/.aicli/mesh/`，设计见
+[../plan/aicli-mesh-architecture.md](../plan/aicli-mesh-architecture.md)）把「本机有哪些
+aicli 进程、各自在哪个工作区、哪个会话归谁」变成可发现的事实。本节三条端点是**只读控制面**：
+与 `aicli-mesh ls` / `show` 消费同一份聚合（`internal/mesh` 的 `BuildView`），不另写口径。
+
+发现方式与其它端点一致：`GET /debug/endpoints` 的清单新增 `scheme: "mesh"` 分组。
+**URL 只从清单取**——端口由进程自选（网格负责发现），不要再假设「粘性端口 = 会话」。
+`--mesh=false` 时三条路由**不注册**（404），清单里也不出现。
+
+### 9.1 存活探针：`GET /web/api/health`
+
+极轻量（不扫盘、不派生重活），不依赖会话与渲染器——无会话时同样 200，只是
+`session_active=false`：
+
+| 字段 | 含义 |
+|------|------|
+| `available` | 恒 `true`（端点存在即可用；不可用时路由不存在） |
+| `node_id` | 本进程网格节点 ID（`--mesh=false` 时省略） |
+| `pid` / `uptime_sec` | 进程 ID / 已运行秒数 |
+| `session_active` | 是否已有活动会话（`--mesh=false` 时回退进程内 chat 会话判定） |
+| `busy` | 当前是否有 turn 在跑 |
+| `mesh_ready` | 网格根可用（目录可写）时为 `true` |
+
+### 9.2 节点自述：`GET /web/api/mesh/self`
+
+响应 = 磁盘档案 `nodes/<node_id>.json` 的同形字段（`schema_version` / `node_id` / `pid` /
+`process` / `endpoint` / `auth` / `session` / `workspace` / `liveness`…），外加三段：
+
+```jsonc
+{
+  "available": true,
+  "node_id": "n-1a2b3c4d",
+  "auth": { "mode": "loopback", "required": false, "token": "0f3a…" },  // 默认脱敏
+  "session": { "id": "sess-…", "busy": false },
+  "liveness": { "state": "live", "heartbeat_at": "…", "heartbeat_ttl_sec": 15 },
+  "derived": {                 // 内存实时值：比心跳落盘的档案更新
+    "busy": false, "pending_inputs": 0, "turn_id": "…",
+    "peer_count": 1,           // 除自己以外的 live 节点数（跨工作区全量）
+    "lease": "owner"           // owner | conflict | peer | none（§4.4）
+  },
+  "mesh": { "enabled": true, "root": "C:\\Users\\me\\.aicli\\mesh", "journal": "…\\journal\\n-1a2b3c4d.ndjson" }
+}
+```
+
+- **令牌脱敏（默认）**：`auth.token` 只给 `0f3a…` 形式的前缀提示；只有**回环同源**请求加
+  `?reveal_token=1` 才返回原文（与 `GET /web/api/token` 同一信任模型）。
+- **降级**：网格未启用 → `200 {"available":false,"reason":"mesh disabled"}`；档案尚未
+  可用 → `"mesh record unavailable"`。**绝不 5xx**。
+- 其它方法 → `405` + `Allow: GET`。
+
+### 9.3 全量视图：`GET /web/api/mesh/peers`
+
+查询参数（非法取值按默认处理，不 400——诊断面容错优先）：
+
+| 参数 | 默认 | 语义 |
+|------|------|------|
+| `scope` | `all` | `all`=跨工作区全量；`self`=只看本节点工作区（等价 `workspace=<本工作区>`） |
+| `workspace` | 空 | 工作区路径过滤，可重复或逗号分隔；原样回显在 `filter.workspace` |
+| `state` | `all` | `all` / `live`（只列 live） |
+| `probe` | `0` | `1` 时对其它节点做可达性探测（**默认关闭：不发任何网络请求**） |
+| `reveal_token` / `redact_token` | 脱敏 | 回环 + `reveal_token=1`（或 `redact_token=0`）时 `nodes[].auth.token` 回原文 |
+
+**硬契约**：`counts` 恒为**全量**口径（过滤只影响 `nodes[]`，不缩小 `counts`，也绝不隐藏
+`conflict`）；`filter` 原样回显生效条件；`nodes[]` 按 `state`（live 优先）→ `node_id` 稳定排序。
+
+```jsonc
+{
+  "schema_version": 1, "generated_at": "…", "root": "C:\\Users\\me\\.aicli\\mesh",
+  "self": { "node_id": "n-1a2b3c4d", "session_id": "sess-…" },
+  "counts": { "live": 2, "stale": 1, "unknown": 0, "conflict": 0 },   // 恒全量
+  "filter": { "scope": "all", "workspace": null, "state": "all" },
+  "nodes": [
+    {
+      "node_id": "n-1a2b3c4d", "pid": 1234, "state": "live",
+      "reachability": "skipped",            // probe=0 时恒为 skipped（未探测）
+      "endpoint": { "port": 51234, "base_url": "http://127.0.0.1:51234", "…": "…" },
+      "auth": { "required": false, "mode": "loopback", "token_hint": "0f3a…" },
+      "session": { "id": "sess-…", "busy": false },
+      "workspace": { "path": "E:\\proj", "name": "proj" },
+      "ownership": "owner",                 // owner | peer | conflict | none（§4.2/§4.4）
+      "heartbeat_at": "…", "age_sec": 1, "journal_tail": ["…"]
+    }
+  ],
+  "workspaces": [ { "path": "E:\\proj", "name": "proj", "nodes": 2 } ]
+}
+```
+
+- `state`：`live`（心跳新鲜）/ `stale`（心跳过期或 pid 已不在）/ `stopped`（优雅退出）/
+  `unknown`（档案不可读或 schema 不认识；`error` 字段带原因）。
+- `ownership`：`owner`=会话归本节点；`peer`=归其它 live 节点；`conflict`=同一会话被多个
+  live 节点同时认领（§4.4，写路径必须停下）；`none`=无会话。
+- **降级**：网格根不可读 → `200` + 空视图（`nodes: []`、`counts` 全 0），**绝不 5xx**。
+
+```powershell
+# 全量视图（默认不探测、不发网络请求）
+Invoke-RestMethod http://127.0.0.1:51234/web/api/mesh/peers | ConvertTo-Json -Depth 6
+
+# 只看本工作区、只要 live，并让服务端探测其它节点
+Invoke-RestMethod 'http://127.0.0.1:51234/web/api/mesh/peers?scope=self&state=live&probe=1'
+```
+
+> 与 CLI 同源：`aicli-mesh ls --json` 输出同一份 `BuildView` 结果（S6 起可用）；
+> 多进程验收（互发现 / 定向调用 / 崩溃对账 / GC）见
+> [../e2e/debug-guide.md](../e2e/debug-guide.md) §8（E2E-DEBUG-03）。

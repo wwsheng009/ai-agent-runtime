@@ -88,6 +88,9 @@ type ViewOptions struct {
 	ProbeClient *http.Client
 	// JournalTailLimit > 0 joins the last N journal event kinds per node.
 	JournalTailLimit int
+	// Filter narrows the *listed* nodes only (§5.4). Nil means "no filter and
+	// no filter echo"; counts, workspaces and ownership are always full-scope.
+	Filter *ViewFilter
 }
 
 // AuthView is the redacted auth section of a node (§5.4 / §9.1): the token
@@ -96,6 +99,10 @@ type AuthView struct {
 	Required  bool   `json:"required"`
 	Mode      string `json:"mode,omitempty"`
 	TokenHint string `json:"token_hint,omitempty"`
+	// Token is only ever filled by RevealTokens, i.e. after the caller verified
+	// the §9.1 trust boundary (`--with-token` / `?reveal_token=1` + loopback).
+	// Every default path leaves it empty so a view cannot leak a token (M7).
+	Token string `json:"token,omitempty"`
 }
 
 // SessionView is the session section of a node plus the derived state.
@@ -147,6 +154,28 @@ type MeshCounts struct {
 	Conflict int `json:"conflict"`
 }
 
+// ViewFilter is the §5.4 output filter: `scope=self|all`, `workspace=<path>`
+// and `state=all|live`. It only decides what is *listed* — the hard contract is
+// "默认全量": filtering must never hide a conflict or shrink `counts`.
+type ViewFilter struct {
+	// Scope is FilterScopeAll (default) or FilterScopeSelf (= the reader's own
+	// workspace, an alias for `workspace=<self workspace>`).
+	Scope string `json:"scope"`
+	// Workspace is the requested workspace list, echoed verbatim. Nil renders
+	// as JSON null, matching §5.4 ("workspace": null).
+	Workspace []string `json:"workspace"`
+	// State is FilterStateAll (default) or FilterStateLive.
+	State string `json:"state"`
+}
+
+// Filter scopes / states of §5.4.
+const (
+	FilterScopeAll  = "all"
+	FilterScopeSelf = "self"
+	FilterStateAll  = "all"
+	FilterStateLive = "live"
+)
+
 // WorkspaceGroup is one workspace bucket of the view (§5.4).
 type WorkspaceGroup struct {
 	Path  string `json:"path"`
@@ -163,13 +192,16 @@ type MeshSelf struct {
 // MeshView is the aggregated mesh state: the single source of truth behind
 // `aicli-mesh ls` and `GET /web/api/mesh/peers` (§5.4, §7.5).
 type MeshView struct {
-	SchemaVersion int              `json:"schema_version"`
-	GeneratedAt   time.Time        `json:"generated_at"`
-	Root          string           `json:"root,omitempty"`
-	Self          *MeshSelf        `json:"self,omitempty"`
-	Counts        MeshCounts       `json:"counts"`
-	Nodes         []NodeView       `json:"nodes"`
-	Workspaces    []WorkspaceGroup `json:"workspaces"`
+	SchemaVersion int        `json:"schema_version"`
+	GeneratedAt   time.Time  `json:"generated_at"`
+	Root          string     `json:"root,omitempty"`
+	Self          *MeshSelf  `json:"self,omitempty"`
+	Counts        MeshCounts `json:"counts"`
+	// Filter echoes the effective output filter (§5.4). Nil when the caller
+	// asked for no filter.
+	Filter     *ViewFilter      `json:"filter,omitempty"`
+	Nodes      []NodeView       `json:"nodes"`
+	Workspaces []WorkspaceGroup `json:"workspaces"`
 }
 
 // BuildView aggregates the mesh read-side view. It never writes to disk.
@@ -192,22 +224,125 @@ func BuildView(paths Paths, opts ViewOptions) MeshView {
 	for _, file := range files {
 		nodes = append(nodes, buildNodeView(paths, file, now, heartbeatTTL, opts))
 	}
-	applyOwnership(nodes, strings.TrimSpace(opts.SelfNodeID))
+	selfID := strings.TrimSpace(opts.SelfNodeID)
+	applyOwnership(nodes, selfID)
 	sortNodeViews(nodes)
-	if opts.Probe {
-		probeNodes(nodes, opts)
-	} else {
-		for i := range nodes {
-			nodes[i].Reachability = ReachabilitySkipped
-		}
-	}
-	view.Nodes = nodes
+	// Census first, list second: the filter below only trims nodes[] so a
+	// filtered view can never pretend the mesh is smaller than it is (§5.4).
 	view.Counts = countNodeViews(nodes)
 	view.Workspaces = groupWorkspaces(nodes)
-	if self := strings.TrimSpace(opts.SelfNodeID); self != "" {
-		view.Self = &MeshSelf{NodeID: self, SessionID: selfSessionID(nodes, self)}
+	if selfID != "" {
+		view.Self = &MeshSelf{NodeID: selfID, SessionID: selfSessionID(nodes, selfID)}
 	}
+	listed := filterNodeViews(nodes, opts.Filter, selfWorkspacePath(nodes, selfID))
+	// Probe only what is listed: filtered-out nodes are not part of the answer.
+	if opts.Probe {
+		probeNodes(listed, opts)
+	} else {
+		for i := range listed {
+			listed[i].Reachability = ReachabilitySkipped
+		}
+	}
+	view.Nodes = listed
+	view.Filter = opts.Filter
 	return view
+}
+
+// filterNodeViews applies the §5.4 output filter. Nil (or an empty filter)
+// returns the input untouched, so callers that never filter pay nothing.
+func filterNodeViews(nodes []NodeView, filter *ViewFilter, selfWorkspace string) []NodeView {
+	if filter == nil {
+		return nodes
+	}
+	state := strings.ToLower(strings.TrimSpace(filter.State))
+	wanted := normalizeFilterWorkspaces(filter.Workspace)
+	// `scope=self` is an alias for `workspace=<本节点工作区>`; a reader without
+	// a workspace resolves to the "(无工作区)" bucket instead of "everything".
+	matchEmptyWorkspace := false
+	if strings.ToLower(strings.TrimSpace(filter.Scope)) == FilterScopeSelf && len(wanted) == 0 {
+		if selfWorkspace = strings.TrimSpace(selfWorkspace); selfWorkspace == "" {
+			matchEmptyWorkspace = true
+		} else {
+			wanted = []string{selfWorkspace}
+		}
+	}
+	listed := make([]NodeView, 0, len(nodes))
+	for _, node := range nodes {
+		if state == FilterStateLive && node.State != NodeStateLive {
+			continue
+		}
+		switch {
+		case len(wanted) > 0:
+			if !workspaceIn(node, wanted) {
+				continue
+			}
+		case matchEmptyWorkspace:
+			if workspacePathOf(node) != "" {
+				continue
+			}
+		}
+		listed = append(listed, node)
+	}
+	return listed
+}
+
+// normalizeFilterWorkspaces trims, drops empties and de-duplicates (paths
+// compare case-insensitively: Windows paths are case-insensitive).
+func normalizeFilterWorkspaces(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range out {
+			if strings.EqualFold(existing, value) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// workspacePathOf returns the node's workspace path ("" when it has none).
+func workspacePathOf(node NodeView) string {
+	if node.Workspace == nil {
+		return ""
+	}
+	return strings.TrimSpace(node.Workspace.Path)
+}
+
+// workspaceIn reports whether the node belongs to one of the wanted workspaces.
+func workspaceIn(node NodeView, wanted []string) bool {
+	path := workspacePathOf(node)
+	if path == "" {
+		return false
+	}
+	for _, candidate := range wanted {
+		if strings.EqualFold(path, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// selfWorkspacePath resolves the reader's own workspace path ("" when unknown),
+// which is what `scope=self` filters by.
+func selfWorkspacePath(nodes []NodeView, selfID string) string {
+	if selfID == "" {
+		return ""
+	}
+	for _, node := range nodes {
+		if node.NodeID == selfID {
+			return workspacePathOf(node)
+		}
+	}
+	return ""
 }
 
 // buildNodeView turns one tolerant file read into a node view: structural state
@@ -247,7 +382,7 @@ func buildNodeView(paths Paths, file NodeFile, now time.Time, heartbeatTTL time.
 		node.Auth = &AuthView{
 			Required:  record.Auth.Required,
 			Mode:      record.Auth.Mode,
-			TokenHint: tokenHint(record.Auth.Token),
+			TokenHint: HintToken(record.Auth.Token),
 		}
 	}
 	if heartbeat := record.Liveness.HeartbeatAt; !heartbeat.IsZero() {
@@ -485,9 +620,10 @@ func journalTail(paths Paths, nodeID string, limit int) []string {
 	return tail
 }
 
-// tokenHint renders the documented `0f3a…` form of §5.4. Short tokens (and
-// empty ones) degrade to a bare ellipsis so a hint never reveals a whole token.
-func tokenHint(token string) string {
+// HintToken renders the documented `0f3a…` form of §5.4 / §9.1. Short tokens
+// (and empty ones) degrade to a bare ellipsis so a hint never reveals a whole
+// token. Exported so the HTTP layer, the CLI and the journal share one rule.
+func HintToken(token string) string {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return ""
@@ -496,6 +632,33 @@ func tokenHint(token string) string {
 		return "…"
 	}
 	return token[:4] + "…"
+}
+
+// RevealTokens copies the raw token of every node into AuthView.Token and
+// returns how many were revealed.
+//
+// This is the *only* path that puts a token into a view (§9.1). Callers must
+// have verified the trust boundary first — loopback + an explicit
+// `--with-token` / `?reveal_token=1` — because the default contract is
+// "视图永不含令牌" (M7).
+func RevealTokens(view *MeshView) int {
+	if view == nil {
+		return 0
+	}
+	revealed := 0
+	for i := range view.Nodes {
+		node := &view.Nodes[i]
+		if node.Auth == nil || node.Record == nil {
+			continue
+		}
+		token := strings.TrimSpace(node.Record.Auth.Token)
+		if token == "" {
+			continue
+		}
+		node.Auth.Token = token
+		revealed++
+	}
+	return revealed
 }
 
 // probeNodes fills Reachability for every node with an endpoint. The pass is

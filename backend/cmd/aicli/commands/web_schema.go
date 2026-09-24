@@ -16,15 +16,20 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	ChatWebPath          = "/web/"
+	ChatWebPath = "/web/"
 	// ChatWebAPIHealthPath 是网格存活探针（架构 §5.2）：极轻量、不依赖会话与
 	// 渲染器，无会话时同样 200；供网格探活、外部脚本就绪等待与 doctor 复用。
 	ChatWebAPIHealthPath = "/web/api/health"
-	ChatWebAPIScreenPath = "/web/api/screen"
-	ChatWebAPIStatusPath = "/web/api/status"
+	// ChatWebAPIMeshSelfPath / ChatWebAPIMeshPeersPath 是网格控制面的只读端点
+	// （架构 §5.3 / §5.4）：self=本节点自述，peers=网格聚合视图——也就是
+	// `aicli-mesh ls` 的同一数据源（§7.5）。--mesh=false 时两条路由不注册（§9.7）。
+	ChatWebAPIMeshSelfPath  = "/web/api/mesh/self"
+	ChatWebAPIMeshPeersPath = "/web/api/mesh/peers"
+	ChatWebAPIScreenPath    = "/web/api/screen"
+	ChatWebAPIStatusPath    = "/web/api/status"
 	ChatWebAPIStatusBarPath = "/web/api/statusbar"
-	ChatWebAPIEventsPath = "/web/api/events"
-	ChatWebAPIInputPath  = "/web/api/input"
+	ChatWebAPIEventsPath    = "/web/api/events"
+	ChatWebAPIInputPath     = "/web/api/input"
 	// ChatWebAPIInvokePath 是同步远程调用端点：一次请求内完成
 	// "注入 prompt → 等待 turn 结束 → 返回状态与渲染"，供脚本/外部 Agent
 	// 直接远程调用 aicli chat TUI（与异步的 /web/api/input 互补）。

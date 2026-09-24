@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_at": "2026-09-23T16:31:43Z",
+  "generated_at": "2026-09-24T01:51:59Z",
   "note": "断言只增不减：删除或改名断言会让 scripts/test-aicli-e2e-all.ps1 失败；新增用 -UpdateBaseline 固化。",
   "scenarios": [
     {
@@ -8,6 +8,12 @@
       "script": "scripts/test-aicli-debug-endpoints-e2e.ps1",
       "assertions": [
         "build/go-build",
+        "coverage/endpoints-asserted",
+        "debug/pprof-executor",
+        "debug/status-app-state-explicit",
+        "debug/status-available",
+        "debug/status-fast-bounded",
+        "debug/status-latency",
         "discovery/enabled:$($req.Name)",
         "discovery/listen-mode",
         "discovery/text-guide-block",
@@ -29,6 +35,12 @@
         "invoke/turn-id-inline",
         "invoke/turn-resolved",
         "invoke/usage-tokens",
+        "mesh/health-shape",
+        "mesh/manifest-group",
+        "mesh/peers-shape",
+        "mesh/self-shape",
+        "mesh/token-redacted",
+        "mesh/token-reveal-loopback",
         "screen/assistant-visible",
         "screen/debug-chat-screen",
         "screen/web-screen-tui",

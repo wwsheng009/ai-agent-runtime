@@ -13,6 +13,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/commands"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 )
 
 // pprofServerHandle 持有按需启动的 pprof HTTP 服务器。
@@ -350,6 +351,14 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// /web/api/health 网格存活探针（架构 §5.2）：极轻量，无会话也返回 200，
 	// 供网格探活 / 外部脚本就绪等待 / aicli-mesh doctor 使用。
 	mux.HandleFunc(commands.ChatWebAPIHealthPath, commands.HandleChatWebAPIHealth)
+	// /web/api/mesh/self|peers 网格控制面只读端点（架构 §5.3 / §5.4）：
+	// 自述与聚合视图，和 `aicli-mesh ls` 同源。总开关 --mesh=false 时
+	// 进程不参与网格，这两条路由**不注册**（§9.7）——此时请求落到 404，
+	// 比「注册后回 available=false」更诚实地表达「本进程不在网格里」。
+	if mesh.Current() != nil {
+		mux.HandleFunc(commands.ChatWebAPIMeshSelfPath, commands.HandleChatWebAPIMeshSelf)
+		mux.HandleFunc(commands.ChatWebAPIMeshPeersPath, commands.HandleChatWebAPIMeshPeers)
+	}
 	mux.HandleFunc(commands.ChatWebAPIScreenPath, commands.HandleChatWebAPIScreen)
 	mux.HandleFunc(commands.ChatWebAPIStatusPath, commands.HandleChatWebAPIStatus)
 	mux.HandleFunc(commands.ChatWebAPIStatusBarPath, commands.HandleChatWebAPIStatusLine)

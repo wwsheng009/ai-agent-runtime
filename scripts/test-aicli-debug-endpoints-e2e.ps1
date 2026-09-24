@@ -18,8 +18,13 @@
     6. 后验：`/web/api/turn?id=<turn_id>` found=true，且该记录 status=completed、
        duration_ms>0、steps>=1、assistant_preview 非空；
     7. 收尾：`POST /web/api/input {"prompt":"/exit"}` → 进程优雅退出、退出码 0、端口释放。
+    8. 网格只读控制面（S5）：清单的 `mesh` 分组含 `/web/api/health`、
+       `/web/api/mesh/self`、`/web/api/mesh/peers`；self 自描述网格根（本脚本把
+       `AICLI_MESH_DIR` 隔离到 artifacts 子目录，不碰真实 `~/.aicli/mesh`）；
+       peers 默认全量口径（counts 不被过滤影响）且令牌默认脱敏（M7），只有
+       回环 + `?reveal_token=1` 才回原文。多进程语义见 E2E-DEBUG-03。
 
-  不覆盖（由其他 harness 承担）：真实终端渲染与键盘输入路径，见
+   不覆盖（由其他 harness 承担）：真实终端渲染与键盘输入路径，见
   `scripts/test-aicli-windows-terminal-e2e.ps1` 与
   `scripts/test-aicli-opencode-windows-terminal-e2e.ps1`。本脚本只走 HTTP 控制面。
 
@@ -102,6 +107,10 @@ $stderrPath = Join-Path $ArtifactDir 'aicli.stderr.log'
 $summaryPath = Join-Path $ArtifactDir 'summary.json'
 $timelinePath = Join-Path $ArtifactDir 'timeline.jsonl'
 $diagDir = Join-Path $ArtifactDir 'diag'
+# 网格根隔离（施工纪律 A6）：本场景只驱动一个进程，把 AICLI_MESH_DIR 指到
+# artifacts 子目录——断言口径确定（counts.live 恒为 1），也不污染真实 ~/.aicli/mesh。
+$meshDir = Join-Path $ArtifactDir 'mesh'
+New-Item -ItemType Directory -Path $meshDir -Force | Out-Null
 
 # E2E 观测工具集（A1 时序采样 / A2 诊断包 / A3 稳态判据 / B4 清单覆盖 / C4 UIA）。
 . (Join-Path $PSScriptRoot 'aicli-e2e-harness.ps1')
@@ -228,6 +237,7 @@ $replayResult = $null
 $turnBeforeCount = -1
 $turnAfterCount = -1
 $exitedGracefully = $false
+$prevMeshDir = $env:AICLI_MESH_DIR
 
 try {
     # ------------------------------------------------------------------
@@ -271,6 +281,8 @@ try {
     # （B4：清单里的端点要么被断言，要么被显式豁免）。
     $launchArgs = @('chat', '--yolo', '--pprof', '--web-port', "$port")
     if ($Headless) { $launchArgs += '--headless' }
+    # 子进程继承环境变量：网格根隔离（见 $meshDir 注释），脚本收尾恢复原值。
+    $env:AICLI_MESH_DIR = $meshDir
     Write-Log "launch: $ExePath $($launchArgs -join ' ') (cwd=$repoRoot)"
 
     $proc = Start-Process -FilePath $ExePath -ArgumentList $launchArgs -WorkingDirectory $repoRoot -PassThru `
@@ -407,12 +419,74 @@ try {
     Add-Result 'debug/pprof-executor' (($execProbe.status_code -eq 200) -and ($null -ne $execProbe.json)) `
         ("HTTP {0} diagnosis='{1}' total_recoveries={2}" -f $execProbe.status_code, $execProbe.json.diagnosis, $execProbe.json.total_recoveries)
 
+    # S5：网格只读控制面入断言（health / self / peers）。三端点都单进程可达，
+    # 因此走断言而不是豁免；多进程语义（发现/调用/GC）留给 E2E-DEBUG-03。
+    $healthUrl = Get-DiscoveredEndpointUrl -Snapshot $snapshot.Json -Method 'GET' -Path '/web/api/health'
+    $meshSelfUrl = Get-DiscoveredEndpointUrl -Snapshot $snapshot.Json -Method 'GET' -Path '/web/api/mesh/self'
+    $meshPeersUrl = Get-DiscoveredEndpointUrl -Snapshot $snapshot.Json -Method 'GET' -Path '/web/api/mesh/peers'
+    $meshGroup = @($snapshot.Json.endpoints | Where-Object { [string]$_.scheme -eq 'mesh' } | ForEach-Object { [string]$_.path })
+    $meshGroupOk = ($meshGroup -contains '/web/api/health') -and ($meshGroup -contains '/web/api/mesh/self') -and `
+        ($meshGroup -contains '/web/api/mesh/peers') -and (-not [string]::IsNullOrWhiteSpace($healthUrl)) -and `
+        (-not [string]::IsNullOrWhiteSpace($meshSelfUrl)) -and (-not [string]::IsNullOrWhiteSpace($meshPeersUrl))
+    Add-Result 'mesh/manifest-group' $meshGroupOk ("scheme=mesh paths=[{0}]" -f ($meshGroup -join ','))
+
+    $health = Invoke-HarnessRequest -Url $healthUrl -TimeoutSec 15 -AsJson
+    $healthOk = ($health.status_code -eq 200) -and ([bool]$health.json.available) -and `
+        (-not [string]::IsNullOrWhiteSpace([string]$health.json.node_id)) -and ([int]$health.json.pid -gt 0) -and `
+        ([bool]$health.json.mesh_ready)
+    Add-Result 'mesh/health-shape' $healthOk `
+        ("HTTP {0} available={1} pid={2} session_active={3} mesh_ready={4}" -f $health.status_code, $health.json.available, $health.json.pid, $health.json.session_active, $health.json.mesh_ready)
+
+    $meshSelf = Invoke-HarnessRequest -Url $meshSelfUrl -TimeoutSec 15 -AsJson
+    $selfRoot = [string]$meshSelf.json.mesh.root
+    $selfToken = [string]$meshSelf.json.auth.token
+    $selfOk = ($meshSelf.status_code -eq 200) -and ([bool]$meshSelf.json.available) -and `
+        (-not [string]::IsNullOrWhiteSpace([string]$meshSelf.json.node_id)) -and ([int]$meshSelf.json.pid -gt 0) -and `
+        ([bool]$meshSelf.json.mesh.enabled) -and ($selfRoot.TrimEnd('\', '/') -ieq $meshDir.TrimEnd('\', '/')) -and `
+        (-not [string]::IsNullOrWhiteSpace([string]$meshSelf.json.mesh.journal)) -and ($null -ne $meshSelf.json.derived) -and `
+        ([string]$meshSelf.json.liveness.state -eq 'live') -and ($selfToken -like '*…')
+    Add-Result 'mesh/self-shape' $selfOk `
+        ("HTTP {0} available={1} node_id={2} root={3} liveness={4} lease={5} token={6}" -f $meshSelf.status_code, $meshSelf.json.available, $meshSelf.json.node_id, $selfRoot, $meshSelf.json.liveness.state, $meshSelf.json.derived.lease, $selfToken)
+
+    $meshPeers = Invoke-HarnessRequest -Url $meshPeersUrl -TimeoutSec 20 -AsJson
+    $peerNodes = @($meshPeers.json.nodes)
+    $selfNode = $peerNodes | Where-Object { [string]$_.node_id -eq [string]$meshSelf.json.node_id } | Select-Object -First 1
+    $peersOk = ($meshPeers.status_code -eq 200) -and ([int]$meshPeers.json.counts.live -eq 1) -and ($peerNodes.Count -eq 1) -and `
+        ($null -ne $selfNode) -and ([string]$selfNode.state -eq 'live') -and ([string]$selfNode.ownership -eq 'owner') -and `
+        ([string]$selfNode.reachability -eq 'skipped') -and ([string]$meshPeers.json.filter.scope -eq 'all') -and `
+        ([string]$meshPeers.json.filter.state -eq 'all') -and ([string]$meshPeers.json.self.node_id -eq [string]$meshSelf.json.node_id)
+    Add-Result 'mesh/peers-shape' $peersOk `
+        ("HTTP {0} live={1} nodes={2} state={3} ownership={4} reachability={5} filter={6}/{7}" -f $meshPeers.status_code, $meshPeers.json.counts.live, $peerNodes.Count, $selfNode.state, $selfNode.ownership, $selfNode.reachability, $meshPeers.json.filter.scope, $meshPeers.json.filter.state)
+
+    # M7 反证：默认输出不得出现写令牌原文——self 的 auth.token 只能是 `0f3a…` 提示，
+    # peers 的节点 auth 只有 token_hint（没有 token 键）。原文只在显式 reveal 时出现。
+    $peerAuth = $null
+    if ($null -ne $selfNode) { $peerAuth = $selfNode.auth }
+    $peerTokenHint = ''
+    if ($null -ne $peerAuth) { $peerTokenHint = [string]$peerAuth.token_hint }
+    $tokenKnown = -not [string]::IsNullOrWhiteSpace($tokenPlain)
+    $selfLeak = $tokenKnown -and ($meshSelf.text -like "*$tokenPlain*")
+    $peersLeak = $tokenKnown -and ($meshPeers.text -like "*$tokenPlain*")
+    $redactedOk = $tokenKnown -and (-not $selfLeak) -and (-not $peersLeak) -and ($peerTokenHint -like '*…') -and `
+        (($null -eq $peerAuth) -or ($null -eq $peerAuth.token))
+    Add-Result 'mesh/token-redacted' $redactedOk `
+        ("self_token={0} peer_token_hint={1} leaked={2}" -f $selfToken, $peerTokenHint, ($selfLeak -or $peersLeak))
+
+    $meshReveal = Invoke-HarnessRequest -Url "${meshPeersUrl}?reveal_token=1" -TimeoutSec 20 -AsJson
+    $revealNode = @($meshReveal.json.nodes) | Where-Object { [string]$_.node_id -eq [string]$meshSelf.json.node_id } | Select-Object -First 1
+    $revealToken = ''
+    if ($null -ne $revealNode -and $null -ne $revealNode.auth) { $revealToken = [string]$revealNode.auth.token }
+    $revealOk = $tokenKnown -and ($null -ne $revealNode) -and ($revealToken -eq $tokenPlain)
+    Add-Result 'mesh/token-reveal-loopback' $revealOk ("reveal_token=1 → token_matches={0}" -f ($revealToken -eq $tokenPlain))
+
     # B4 门禁：清单里的每个端点都必须被断言覆盖，或被显式豁免（附理由）。
     # 新端点悄悄进入清单而无人断言，就是这道门禁要拦的情况。
     $assertedPaths = @(
         '/debug/endpoints', '/debug/chat/status', '/debug/chat/screen',
         '/web/api/screen', '/web/api/invoke', '/web/api/turn', '/web/api/input',
-        '/debug/pprof/executor'
+        '/debug/pprof/executor',
+        # S5 网格只读控制面：走断言而不是豁免——三个端点都单进程可达。
+        '/web/api/health', '/web/api/mesh/self', '/web/api/mesh/peers'
     )
     $exemptPrefixes = @(
         @{ prefix = '/web/api/config';   reason = '配置面：由 Web 客户端 UI 承担，非本脚本范围' },
@@ -597,6 +671,7 @@ try {
 } catch {
     Add-Result 'harness/aborted' $false $_.Exception.Message
 } finally {
+    if ($null -eq $prevMeshDir) { Remove-Item Env:AICLI_MESH_DIR -ErrorAction SilentlyContinue } else { $env:AICLI_MESH_DIR = $prevMeshDir }
     Stop-AicliTimeline -Job $script:timelineJob
     $failedNow = @($script:results | Where-Object { -not $_.passed }).Count -gt 0
     # A2/C4：兜底取证（若首个 FAIL 已经抓过则直接返回）。中断/超时类失败
@@ -637,6 +712,7 @@ $summary = [pscustomobject]@{
         turns  = [pscustomobject]@{ before = $turnBeforeCount; after = $turnAfterCount }
         timeline = [pscustomobject]@{ path = $timelinePath; samples = $timelineSamples }
         diagnostics = [pscustomobject]@{ dir = $diagDir; captured = (Test-Path -LiteralPath $diagDir) }
+        mesh        = [pscustomobject]@{ dir = $meshDir; isolated = $true }
     }
 }
 [System.IO.File]::WriteAllText($summaryPath, ($summary | ConvertTo-Json -Depth 12), (New-Object System.Text.UTF8Encoding($false)))
