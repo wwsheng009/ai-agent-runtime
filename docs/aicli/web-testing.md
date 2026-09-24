@@ -108,6 +108,21 @@ aicli chat --pprof
       再上滚不再发请求。实时刷新/流式回合结束后已加载的更早内容不丢失、不重复。
       会话复制（⧉ 复制）在只加载了部分消息时仍复制**完整**会话（服务端全量 transcript）。
 
+- [ ] **assistant 消息 md|txt 渲染**：每条 assistant 气泡右上角有 `md` / `txt` 二选一控件，
+      默认 `txt`（纯文本，Markdown 标记原样显示）；点 `md` 后按 Markdown 渲染（标题 / 粗体 /
+      删除线 / 列表 / 任务列表 / 引用 / 表格 / 代码块），代码块悬停出现「复制」按钮且可复制；
+      再点 `txt` 立即切回原文，反复切换不丢内容、不叠加、不重解析。切换只作用于该条消息
+      （`data-render-mode` 属性驱动 CSS 显隐，无内联样式）；生成中的流式气泡固定按 Markdown
+      渲染，不参与切换。会话复制（⧉ 复制）仍取原文，不含代码块「复制」按钮文字。
+
+- [ ] **单条消息复制（所有角色）**：每条消息（你 / aicli / 推理 / 工具 / 系统 / 命令 / 诊断 /
+      事件）抬头行最右都有 `⧉` 复制图标，点击**只复制该条消息的正文**：不含角色标签、控件文字
+      （`md|txt`、展开/收起）与相邻消息。assistant 行复制 `.msg-text` 原文（切到 `md` 后不会
+      复制到渲染产物或代码块「复制」按钮文字）；推理行复制内容不带 `[推理] ` 前缀（那是会话
+      复制的语义标注，单条复制保持原文）；工具行复制完整工具输出。复制成功后图标短暂变 `✓`。
+      生成中的流式气泡右上角同样有复制图标，复制的是**已累积的完整**助手文本（不是打字机
+      当前已揭示的部分）。会话复制（⧉ 复制）行为不变，两者共存。
+
 - [ ] Provider / Reasoning 原生 `<select>` 可切换，当前生效配置（`openai · gpt-4o`）随之更新。
 - [ ] **窄屏 composer（≤767px）**：输入框与发送键同排，发送键右对齐且贴底（`#prompt` 多行增高时
       按钮不跟着拉高）；`#prompt` 与 `#cfg-model` 字号 ≥16px（低于 16px 时 iOS 聚焦会放大整页）；
@@ -314,6 +329,28 @@ Network（筛 `mesh/events`）与 Console。数据源：`GET /web/api/mesh/event
 - [ ] **新建按钮恢复**：点「新建会话」→ 切换完成后按钮恢复可用（S14 起由 `session_switched`
       分支调用 `notifySessionSwitchedCompleted()`；SSE 断连时由兜底定时器恢复）。
 
+### 2.8 审批 / 提问模态框（反向交互）
+
+前置：真实后端（方式 A）；分别触发一次工具审批与一次 `AskUserQuestion`。
+无真实 provider 时也可走方式 B：`web/tmp/serve-question-answer-e2e.mjs`（gitignore 的本地沙盒）
+静态伺服 `web/` 并 stub `/web/api/*`，`/__recorded` 回显收到的 `/web/api/input` payload。
+
+- [ ] **提问必须能写入答案**：`question_asked` 到达时模态框内出现回答输入区（建议项下方，自动聚焦），
+      输入文本按 Enter 或点「提交回答」→ `POST /web/api/input` 的 payload 为
+      `{"type":"question_answer","question_id":"…","answer":"…"}`，模态框收起。
+      修复前模态框内没有任何文本输入框，而遮罩层盖住了底部 composer，开放型提问**无法写入答案**。
+- [ ] **建议项是快捷入口**：点建议项直接作为答案提交，与自由输入走同一 payload。
+- [ ] **空答案不发送**：输入全空白按 Enter → 只在输入区内提示「请输入回答」，不产生请求、模态框不收起。
+- [ ] **换行与 IME**：Shift+Enter 换行；中文输入法组合态按 Enter 只确认候选词（`isComposing` /
+      `keyCode 229`），不提交。
+- [ ] **收起对话框不丢答案路由**：点 ✕ / 遮罩空白 / 输入区 Esc → 模态框收起并提示「可在底部输入区…」，
+      随后在底部输入区输入并回车仍能作为答案提交（`question_answer`）。
+- [ ] **审批语义不变**：审批模态框不显示回答输入区，收起即放弃本次决议（决议仍可在终端完成）；
+      允许/拒绝按钮 payload 为 `{"type":"approval","request_id":"…","allow":true|false}`。
+- [ ] **未送达必须可见（stale）**：提问在服务端已无挂起项（已被其它入口回答 / 本轮已终止）时提交回答，
+      服务端回 `{"status":"stale","reason":"…回答未送达模型"}`（不再冒充 `resolved`），前端弹错误提示并写状态行，
+      绝不显示「已提交」——静默成功会让「提交了回答但没有回传 LLM」变成无感故障。
+
 ## 3. 协议下拉框专项用例（combo popup）
 
 Provider 编辑弹窗的协议字段曾用原生 `<input list=datalist>`，存在**有值与无值显示不一致**的缺陷：浏览器会按 input 当前值过滤 datalist 选项，编辑 `openai` 协议的 provider 时下拉只剩匹配项，新增（空值）时才显示全部。已改为 ▼ 按钮 + 自定义 popup（与底部 Model 字段同方案）。以下用例为该组件的回归重点：
@@ -348,6 +385,9 @@ node scripts/verify-micro-web-skills-tab.mjs   # 技能页签：列表/会话感
 node scripts/verify-micro-web-tool-output.mjs  # 工具输出折叠/展开：抬头控件（文字 + ▼/▲ 图标）在「工具」行内、默认折叠（≤5 行）、溢出判定、点击/键盘切换、控件隐藏时不响应、复制不含控件文字
 node scripts/verify-micro-web-msg-window.mjs   # 长会话窗口化：首屏只渲染最新一页、尾部增量替换与窗口右移保留历史、上滚以 msg_before 前插并补偿 scrollTop、到顶停止、pending 气泡确认、游标异常守卫
 node scripts/verify-micro-web-menu.mjs         # 顶部菜单栏 + 会话导出：菜单栏/右侧状态簇结构、data-menu-action 均指向真实控件、开合与 Esc 回焦、导出请求与 Content-Disposition 命名下载、失败不下载；CSS 侧校验「无 fallback 的 var(--token) 必须已定义」与快捷键面板背景为不透明语义变量
+node scripts/verify-micro-web-render-mode.mjs  # assistant 消息 md|txt 渲染：默认 text、切换控件在气泡右上角（正文之前）、惰性 md 渲染与按钮 active/aria-pressed 同步、点击委托、复制取原文、代码块复制委托（流式气泡 + md 气泡）
+node scripts/verify-micro-web-copy-msg.mjs     # 单条消息复制：所有角色（含 error 回退）抬头行 ⧉ 图标、只取本行正文（标签/控件/相邻消息/md 产物均不入内）、行间隔离与 ✓ 反馈、整会话复制不受影响、工具行展开收起仍可用、流式气泡复制不重复响应
+node scripts/verify-micro-web-question-answer.mjs # 提问回答写入：建议项 / 自由回答（Enter、提交按钮、Shift+Enter、IME、空答案）→ question_answer payload、收起对话框保留 composer 答案路由、服务端回执分支（stale 未送达告警 / resolved 不误报）、审批语义不变、index.html/style.css 静态不变量
 ```
 
 模块化后另有一层静态检查：用带 DOM stub 的 Node 脚本对 `app.js` 入口做动态 `import()`，可在不启浏览器的情况下抓出语法错误、缺失导出、模块求值期错误（拆分落地时即靠它在浏览器回归前拦截了两处问题）。检查思路：stub `document/window/localStorage/fetch/EventSource` 后 `await import("./app.js")`，任何模块图断裂都会在这里抛错。
@@ -364,7 +404,14 @@ node scripts/verify-micro-web-menu.mjs         # 顶部菜单栏 + 会话导出�
 
 底部 composer 按同一组视口量：`#prompt` 与 `#send-btn` 底边对齐（多行增高时按钮贴底不拉高）、输入框空态高度 = CSS 最小高度（45px，清空后内联高度被移除）、`#cfg-bar` 折叠行高度（竖屏 360×640 / 414×896 与横屏 640×360 均为单行 45px；展开面板 122–128px 且完全落在视口内、正文区高度不变）、正文区高度（竖屏 ≥345px、横屏 ≥112px）与整页 `verticalFit`。压测：发送键瞬态文案「正在停止…」不得把输入框压到 200px 以下；输入 12 行时输入框被 `max-height: min(160px, 38vh)` 截住（横屏 30vh）且正文区不被挤到 0；面板内点 ▼ 弹出的模型列表（≤240px，矮视口 40vh）不得越出视口顶部。
 
-## 5. 已知问题（拆分时保持原行为，未修）
+## 5. 历史遗留问题（拆分时保持原行为）
 
-- 代码块"复制"按钮的事件委托注册在 `#stream-msg` 元素上，且注册时机早于该元素的惰性获取（`streamMsgEl` 初始为 null，`beginStream` 时才 `getElementById`），因此该委托实际从未生效。拆分时原样保留在 `js/stream.js` 的 `initStream()` 中；如需修复，改为 document 级事件委托即可。
+- **已修复**（提问回答写入，S15）：提问模态框 `#approval-overlay` 是全屏阻塞遮罩，遮住了底部 composer，
+  而模态框内只有建议项按钮、**没有自由文本输入框**；同时 `hideApproval()` 会清空 `pendingQuestionID`，
+  用户点 ✕ / 遮罩 / Esc 后答案路由永久丢失。三者叠加使开放型提问在 Web 客户端上「答案无法写入」。
+  现已在 `#approval-modal-body` 内加入 `#question-answer-row`（仅 question 显示，Enter / 按钮提交，
+  含 Shift+Enter 换行、IME 组合输入与空答案防护），并把主动收起改为「仅隐藏对话框、保留
+  `pendingQuestionID`」，底部 composer 分支（`chat.js` 的 `hasPendingQuestion()`）继续可用。
+  回归：`scripts/verify-micro-web-question-answer.mjs`。
+- **已修复**（随 assistant 消息 md|txt 渲染切换一并处理）：代码块"复制"按钮的事件委托注册在 `#stream-msg` 元素上，且注册时机早于该元素的惰性获取（`streamMsgEl` 初始为 null，`beginStream` 时才 `getElementById`），因此该委托实际从未生效。现改为挂在 `#conversation` 上（`#stream-msg` 与 `#screen` 都是它的子节点），一处覆盖流式气泡与 assistant 切到 md 后的代码块，且该元素在 `initStream()` 执行时已存在。回归：`scripts/verify-micro-web-render-mode.mjs` 第 8 组用例（两类气泡各复制一次）。
 

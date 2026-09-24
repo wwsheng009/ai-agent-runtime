@@ -299,6 +299,8 @@ curl -s -X POST http://127.0.0.1:61772/web/api/input \
 # 审批 / 提问 / 中断
 curl -s -X POST http://127.0.0.1:61772/web/api/input -H "X-AICLI-Token: $AICLI_WEB_TOKEN" -d '{"type":"approval","request_id":"req_1","allow":true}'
 curl -s -X POST http://127.0.0.1:61772/web/api/input -H "X-AICLI-Token: $AICLI_WEB_TOKEN" -d '{"type":"question_answer","question_id":"q_1","answer":"深色主题"}'
+# 该提问已无挂起项（已被其它入口回答 / 本轮已终止）时回 {"status":"stale","reason":"…回答未送达模型"}：
+# 回答没有进入模型上下文，调用方必须按失败处理，不得当成 resolved。
 curl -s -X POST http://127.0.0.1:61772/web/api/input -H "X-AICLI-Token: $AICLI_WEB_TOKEN" -d '{"type":"interrupt"}'
 ```
 

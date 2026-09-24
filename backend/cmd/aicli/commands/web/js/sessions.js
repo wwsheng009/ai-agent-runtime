@@ -116,9 +116,11 @@ function saveInputHistory(text) {
 //   - prompt：queued 后停留在 posting，等待 SSE turn_start 进入 busy（按钮变「停止」）
 //   - interrupt：收到 interrupted 即进入 interrupting，等待 session_interrupted 复位
 //   - approval / question_answer：resolved 只做轻提示，按钮状态由 SSE 驱动
+// 返回 fetch 链的 Promise（携带服务端判定结果），供需要按结果决策的调用方
+// await；不关心结果的既有调用方可以照旧忽略返回值。
 export function sendInput(payload) {
   var isInterrupt = payload && payload.type === "interrupt";
-  fetch("/web/api/input", {
+  return fetch("/web/api/input", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
@@ -144,6 +146,13 @@ export function sendInput(payload) {
         } else {
           setUI("interrupting", "正在停止…");
         }
+      } else if (json.status === "stale") {
+        // 反向交互已无对应挂起项（提问已被回答 / 本轮已终止）：答案没有进入
+        // 模型上下文，必须如实提示，不能落进「已提交」的成功分支。
+        sendStatusEl.textContent = "未送达: " + (json.reason || "提问已结束");
+        if (payload && payload.type === "question_answer") {
+          showToast("回答未送达模型: " + (json.reason || "提问已结束"), "error", 5000);
+        }
       } else if (json.status === "resolved") {
         sendStatusEl.textContent = "已提交";
       } else {
@@ -154,6 +163,7 @@ export function sendInput(payload) {
         }
         if (payload && payload.prompt) { dropPendingUserPrompt(payload.prompt); }
       }
+      return json;
     })
     .catch(function (err) {
       if (isInterrupt) {
@@ -164,6 +174,7 @@ export function sendInput(payload) {
         setUI("idle", "发送失败: " + err);
       }
       if (payload && payload.prompt) { dropPendingUserPrompt(payload.prompt); }
+      return { status: "error", reason: String(err) };
     });
 }// ---- 左侧会话列表：折叠/展开 ----
 function setSidebarCollapsed(collapsed) {

@@ -1,7 +1,7 @@
 // 打字机流式渲染:turn 增量累积、逐字揭示定时器、流式消息容器管理。
 // aicli micro web client 前端模块(拆分自 app.js,无构建步骤,由 app.js 入口聚合)。
 
-import { chatMsgRowHtml, getUserScrolledAway, refreshScreen, screenEl } from "./chat.js";
+import { chatMsgRowHtml, copyTextToClipboard, getUserScrolledAway, refreshScreen, screenEl } from "./chat.js";
 import { renderMarkdown } from "./markdown.js";
 import { esc, showToast } from "./util.js";
 
@@ -54,6 +54,20 @@ function stopTypeTimer() {
   }
 }
 
+// 流式气泡的复制图标（右上角）。类名与对话区单条复制的 .msg-copy-btn 分开：
+// 两处委托都挂在 #conversation 上，同名前缀会让两个处理器重复响应同一次点击。
+function streamCopyBtnHtml() {
+  return '<button class="stream-copy-btn" type="button" data-copy-stream="1"' +
+    ' title="复制本条消息" aria-label="复制本条消息">⧉</button>';
+}
+
+// 复制流式气泡内容：已累积的完整助手文本（streamText），尚未产生助手文本时
+// 退回推理文本。复制的是完整累积内容，不是打字机当前已揭示的部分——气泡每
+// tick 重建，来不及做「✓ 已复制」的行内反馈，故只用 toast。
+function onCopyStreamClick() {
+  copyTextToClipboard(streamText || streamReasoning, "本条消息已复制");
+}
+
 export function renderStream() {
   var parts = [];
   // 图像预览（assistant_image_progress）
@@ -80,6 +94,9 @@ export function renderStream() {
     }
   }
   if (!streamMsgEl) return;
+  if (parts.length) {
+    parts.unshift('<div class="stream-head">' + streamCopyBtnHtml() + '</div>');
+  }
   streamMsgEl.innerHTML = parts.length ? parts.join("\n") : '思考中…<span class="tw-cursor"></span>';
   if (!getUserScrolledAway()) {
     streamMsgEl.scrollIntoView(false);
@@ -178,28 +195,34 @@ export function clearStreamMessage() {
   if (streamMsgEl) { streamMsgEl.innerHTML = ""; }
 }
 
-export function initStream() {
-  // ---- 代码块复制按钮（事件委托，复制 <code> 文本） ----
-  if (streamMsgEl) {
-    streamMsgEl.addEventListener("click", function (e) {
-      var t = e.target;
-      var btn = (t && t.closest) ? t.closest(".copy-code-btn") : null;
-      if (!btn) { return; }
-      var codeEl = btn.parentNode ? btn.parentNode.querySelector("code") : null;
-      if (!codeEl) { return; }
-      var codeText = codeEl.textContent || "";
-      if (!navigator.clipboard) {
-        showToast("复制失败（浏览器不支持剪贴板）", "error");
-        return;
-      }
-      navigator.clipboard.writeText(codeText).then(function () {
-        var old = btn.textContent;
-        btn.textContent = "✓ 已复制";
-        setTimeout(function () { btn.textContent = old; }, 1500);
-      }).catch(function () {
-        showToast("复制失败", "error");
-      });
-    });
+// 代码块复制按钮（事件委托，复制 <code> 文本）。
+// 流式气泡与对话区 assistant 气泡（切到 md 后的 .msg-md）共用同一处理。
+function onCopyCodeClick(e) {
+  var t = e.target;
+  var streamBtn = (t && t.closest) ? t.closest(".stream-copy-btn") : null;
+  if (streamBtn) { onCopyStreamClick(); return; }
+  var btn = (t && t.closest) ? t.closest(".copy-code-btn") : null;
+  if (!btn) { return; }
+  var codeEl = btn.parentNode ? btn.parentNode.querySelector("code") : null;
+  if (!codeEl) { return; }
+  var codeText = codeEl.textContent || "";
+  if (!navigator.clipboard) {
+    showToast("复制失败（浏览器不支持剪贴板）", "error");
+    return;
   }
+  navigator.clipboard.writeText(codeText).then(function () {
+    var old = btn.textContent;
+    btn.textContent = "✓ 已复制";
+    setTimeout(function () { btn.textContent = old; }, 1500);
+  }).catch(function () {
+    showToast("复制失败", "error");
+  });
+}
 
+export function initStream() {
+  // 委托挂在 #conversation（#stream-msg 与 #screen 都是它的子节点）：一处覆盖
+  // 流式气泡与 assistant 切到 md 后的代码块。该元素在 init 时已存在，不再依赖
+  // beginStream 才惰性取得的 streamMsgEl（否则委托注册不到任何元素上）。
+  var root = document.getElementById("conversation") || streamMsgEl || screenEl;
+  if (root) { root.addEventListener("click", onCopyCodeClick); }
 }

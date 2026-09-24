@@ -247,6 +247,146 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   border: 1px solid var(--border); border-bottom-left-radius: 2px;
   max-width: 92%;
 }
+
+/* ---- 助手消息渲染方式切换（md | txt，气泡右上角） ----
+   data-render-mode 是唯一事实来源：txt（默认）显示 .msg-text 原文，
+   md 显示 .msg-md（惰性 Markdown 渲染结果），另一侧由 CSS 隐藏。 */
+#screen .msg-row.msg-assistant .msg-head {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 2px 2px 2px; min-height: 17px;
+}
+#screen .msg-row.msg-assistant .msg-head .msg-label { margin: 0; }
+#screen .msg-row.msg-assistant .msg-render-toggle { margin-left: auto; flex: 0 0 auto; }
+#screen .msg-render-toggle {
+  display: inline-flex; align-items: stretch;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 4px;
+  overflow: hidden;
+}
+#screen .msg-render-toggle .render-mode-btn {
+  padding: 1px 6px; font-size: 10px; line-height: 1.4;
+  font-family: inherit; letter-spacing: 0.02em;
+  background: transparent; color: var(--fg4);
+  border: none; cursor: pointer;
+}
+#screen .msg-render-toggle .render-mode-btn + .render-mode-btn { border-left: 1px solid var(--border); }
+#screen .msg-render-toggle .render-mode-btn:hover { background: var(--hoverBg); color: var(--fg2); }
+#screen .msg-render-toggle .render-mode-btn.active {
+  background: var(--bg4); color: var(--accent); font-weight: 600;
+}
+#screen .msg-render-toggle .render-mode-btn:focus-visible {
+  outline: 1px solid var(--accent2); outline-offset: -1px;
+}
+/* 渲染方式 → 正文容器显隐 */
+#screen .msg-row[data-render-mode="md"] .msg-text { display: none; }
+#screen .msg-row:not([data-render-mode="md"]) .msg-md { display: none; }
+
+/* Markdown 正文（.msg-md）：换行交给块级元素与 <br>，不吃气泡的 pre-wrap */
+#screen .msg-row.msg-assistant .msg-md { white-space: normal; }
+#screen .msg-row.msg-assistant .msg-md h1,
+#screen .msg-row.msg-assistant .msg-md h2,
+#screen .msg-row.msg-assistant .msg-md h3,
+#screen .msg-row.msg-assistant .msg-md h4,
+#screen .msg-row.msg-assistant .msg-md h5,
+#screen .msg-row.msg-assistant .msg-md h6 {
+  margin: 6px 0 4px; font-weight: 600; line-height: 1.3;
+}
+#screen .msg-row.msg-assistant .msg-md h1 { font-size: 16px; }
+#screen .msg-row.msg-assistant .msg-md h2 { font-size: 15px; }
+#screen .msg-row.msg-assistant .msg-md h3 { font-size: 14px; }
+#screen .msg-row.msg-assistant .msg-md h4 { font-size: 13px; }
+#screen .msg-row.msg-assistant .msg-md h5,
+#screen .msg-row.msg-assistant .msg-md h6 { font-size: 12px; }
+#screen .msg-row.msg-assistant .msg-md p { margin: 4px 0; }
+#screen .msg-row.msg-assistant .msg-md ul,
+#screen .msg-row.msg-assistant .msg-md ol { margin: 4px 0; padding-left: 20px; }
+#screen .msg-row.msg-assistant .msg-md li { margin: 2px 0; }
+#screen .msg-row.msg-assistant .msg-md li.task { list-style: none; margin-left: -18px; }
+#screen .msg-row.msg-assistant .msg-md li.task.done { color: var(--fg3); }
+#screen .msg-row.msg-assistant .msg-md a { color: var(--accent); }
+#screen .msg-row.msg-assistant .msg-md strong { color: var(--fg); }
+#screen .msg-row.msg-assistant .msg-md del { color: var(--fg3); }
+#screen .msg-row.msg-assistant .msg-md blockquote {
+  margin: 4px 0; padding: 2px 0 2px 8px;
+  border-left: 3px solid var(--border2); color: var(--fg2);
+}
+#screen .msg-row.msg-assistant .msg-md code {
+  background: var(--codeBg); color: var(--codeFg);
+  padding: 1px 4px; border-radius: 3px;
+  font-family: inherit; font-size: 12px;
+}
+#screen .msg-row.msg-assistant .msg-md table {
+  border-collapse: collapse; margin: 6px 0; font-size: 12px;
+}
+#screen .msg-row.msg-assistant .msg-md th,
+#screen .msg-row.msg-assistant .msg-md td {
+  border: 1px solid var(--border); padding: 3px 8px; text-align: left;
+}
+#screen .msg-row.msg-assistant .msg-md th { background: var(--bg2); font-weight: 600; }
+#screen .msg-row.msg-assistant .msg-md pre {
+  margin: 6px 0; padding: 8px 10px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+  position: relative;
+}
+#screen .msg-row.msg-assistant .msg-md pre code { background: transparent; padding: 0; font-size: 12px; }
+/* 代码块复制按钮 / 语言标签（与 #stream-msg 同款，见 js/markdown.js 输出结构） */
+#screen .msg-row.msg-assistant .msg-md pre .copy-code-btn {
+  position: absolute; top: 4px; right: 4px;
+  padding: 2px 8px; font-size: 10px; line-height: 1.4;
+  background: var(--bg3); color: var(--copyBtn);
+  border: 1px solid var(--border); border-radius: 4px;
+  cursor: pointer; opacity: 0; transition: opacity .15s;
+  font-family: inherit;
+}
+#screen .msg-row.msg-assistant .msg-md pre:hover .copy-code-btn { opacity: 1; }
+#screen .msg-row.msg-assistant .msg-md pre .copy-code-btn:hover {
+  background: var(--hoverBg); color: var(--copyBtnHover);
+}
+#screen .msg-row.msg-assistant .msg-md pre .lang-label {
+  position: absolute; top: 4px; left: 8px;
+  font-size: 10px; color: var(--fg4); font-style: italic;
+  pointer-events: none; text-transform: uppercase;
+  user-select: none;
+}
+
+/* ---- 单条消息复制（所有角色：抬头行最右的 ⧉ 图标，只复制本条正文） ----
+   与 md|txt 切换同款：控件在抬头行内、正文之前。复制内容由 JS 从正文容器
+   （.reasoning-content / .tool-output / .msg-text / .msg-body）提取，控件自身
+   文字与角色标签都不会混进复制结果。 */
+#screen .msg-row .msg-head {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 2px 2px 2px; min-height: 17px;
+}
+#screen .msg-row .msg-head .msg-label { margin: 0; }
+#screen .msg-copy-btn,
+#stream-msg .stream-copy-btn {
+  flex: 0 0 auto; margin-left: auto;
+  padding: 1px 6px; font-size: 11px; line-height: 1.4;
+  font-family: inherit;
+  background: transparent; color: var(--fg4);
+  border: 1px solid transparent; border-radius: 4px;
+  cursor: pointer;
+}
+#screen .msg-copy-btn:hover,
+#stream-msg .stream-copy-btn:hover {
+  background: var(--hoverBg); color: var(--accent2); border-color: var(--border);
+}
+#screen .msg-copy-btn:focus-visible,
+#stream-msg .stream-copy-btn:focus-visible {
+  outline: 1px solid var(--accent2); outline-offset: 1px;
+}
+/* 推理行：抬头行即 <summary>，图标绝对定位在行右上角（不放进 summary，
+   避免点击复制时连带展开/收起面板） */
+#screen .msg-row.msg-reasoning { position: relative; }
+#screen .msg-row.msg-reasoning > .msg-copy-btn {
+  position: absolute; top: 3px; right: 2px; margin-left: 0;
+}
+/* 流式气泡：右上角单独一行（气泡每 tick 重建，只保留图标，不做行内 ✓ 反馈） */
+#stream-msg .stream-head {
+  display: flex; align-items: center; justify-content: flex-end;
+  margin: 0 0 2px 0; min-height: 17px;
+}
+
 /* ---- 非气泡角色：各自专属样式（弱化但可区分） ---- */
 
 /* 推理过程：折叠面板（与流式渲染 #stream-msg .reasoning-block 同款） */
@@ -451,6 +591,27 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   font-family: inherit; font-size: 12px;
 }
 #question-suggestions .suggestion-btn:hover { background: var(--hoverBg); }
+/* 提问自由回答输入区（仅 question 显示）：模态框遮住底部 composer，
+   开放问题必须能在框内直接写入回答；建议项只是快捷入口。 */
+#question-answer-row { margin: 10px 0 6px; }
+#question-answer-row textarea {
+  width: 100%; box-sizing: border-box; padding: 8px 10px;
+  background: var(--bg2); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-family: inherit; font-size: 13px; line-height: 1.4;
+  resize: vertical; min-height: 44px; max-height: 160px;
+  white-space: pre-wrap;
+}
+#question-answer-row textarea:focus { outline: none; border-color: var(--accent); }
+#question-answer-actions {
+  display: flex; align-items: center; gap: 8px;
+  justify-content: flex-end; margin-top: 6px;
+}
+.question-answer-hint { margin-right: auto; font-size: 11px; color: var(--red); }
+#question-answer-row button.answer-submit-btn {
+  background: var(--accent); color: var(--userMsgFg, #fff); border-color: var(--accent);
+}
+#question-answer-row button.answer-submit-btn:hover { background: var(--accent2); }
 
 /* ---- 会话切换确认模态框（点击非当前会话时先确认） ---- */
 #session-switch-overlay {

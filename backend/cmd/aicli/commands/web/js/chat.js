@@ -2,6 +2,7 @@
 // aicli micro web client 前端模块(拆分自 app.js,无构建步骤,由 app.js 入口聚合)。
 
 import { hasPendingApproval, hasPendingQuestion, sendQuestionAnswer } from "./approvals.js";
+import { normalizeRenderMode, renderMessageBody } from "./markdown.js";
 import { loadRuntimeMeta } from "./runtime.js";
 import { getInputHistory, getInputHistoryIdx, meshNodeSuffix, sendInput, setInputHistoryIdx } from "./sessions.js";
 import { statusEl } from "./sse.js";
@@ -104,13 +105,60 @@ var MSG_LABELS = {
 // 单条消息 HTML：label（角色）+ body（内容），支持 pending 态。
 // index 为消息在服务端消息数组中的绝对索引（窗口化渲染用，写入 data-msg-index）：
 // 带索引的行属于「服务端窗口」，上滚加载/增量替换据此定位；pending 行无索引。
+// 所有角色都带单条复制图标（抬头行最右，见 messageCopyBtnHtml）：复制内容由
+// domMessageText 从该行自己的正文容器提取，控件文字不会混入。
+// assistant 行额外带 md|txt 渲染切换（抬头行）与两种正文容器：
+//   .msg-text 始终保存转义后的原文（复制/切回 txt 的权威来源）；
+//   .msg-md   仅在用户切到 md 时由 applyMessageRenderMode 惰性渲染。
+function messageRenderToggleHtml() {
+  return '<div class="msg-render-toggle" role="group" aria-label="渲染方式">' +
+    '<button class="render-mode-btn" type="button" data-render-mode-set="md"' +
+    ' aria-pressed="false" title="Markdown 渲染">md</button>' +
+    '<button class="render-mode-btn active" type="button" data-render-mode-set="txt"' +
+    ' aria-pressed="true" title="纯文本渲染（默认）">txt</button>' +
+    '</div>';
+}
+
+// 单条消息复制图标（所有角色共用）：抬头行最右的 ⧉ 按钮。
+// 只复制本条消息正文（domMessageText），不混入角色标签 / 控件 / 相邻消息。
+function messageCopyBtnHtml() {
+  return '<button class="msg-copy-btn" type="button" data-copy-msg="1"' +
+    ' title="复制本条消息" aria-label="复制本条消息">⧉</button>';
+}
+
+// 统一抬头行：角色标签 + 右上角复制图标（assistant / tool 各自在标签后追加专属控件）。
+function msgHeadHtml(labelHtml) {
+  return '<div class="msg-head">' +
+    '<div class="msg-label">' + labelHtml + '</div>' +
+    messageCopyBtnHtml() +
+    '</div>';
+}
+
 export function chatMsgRowHtml(role, content, pending, index) {
   var label = MSG_LABELS[role] || "消息";
   var cls = "msg-row msg-" + role + (pending ? " msg-pending" : "");
   var idxAttr = (typeof index === "number" && index >= 0) ? ' data-msg-index="' + index + '"' : "";
+  if (role === "assistant") {
+    // 默认 txt（纯文本）：data-render-mode 是渲染方式的唯一事实来源，CSS 按它
+    // 在 .msg-text / .msg-md 之间切换显示，不靠内联样式或 hidden 属性。
+    return '<div class="' + cls + '"' + idxAttr + ' data-render-mode="text">' +
+      '<div class="msg-head">' +
+      '<div class="msg-label">' + esc(label) + '</div>' +
+      messageRenderToggleHtml() +
+      messageCopyBtnHtml() +
+      '</div>' +
+      '<div class="msg-body">' +
+      '<div class="msg-text">' + esc(content) + '</div>' +
+      '<div class="msg-md"></div>' +
+      '</div>' +
+      '</div>';
+  }
   if (role === "reasoning") {
-    // 推理过程：折叠面板（与流式渲染 #stream-msg .reasoning-block 视觉一致）
+    // 推理过程：折叠面板（与流式渲染 #stream-msg .reasoning-block 视觉一致）。
+    // 抬头行即 <summary>，复制图标绝对定位在行右上角（不放进 summary，
+    // 避免点击复制时连带展开/收起面板）。
     return '<div class="' + cls + '"' + idxAttr + '>' +
+      messageCopyBtnHtml() +
       '<details class="reasoning-block">' +
       '<summary>' + esc(label) + '</summary>' +
       '<div class="reasoning-content">' + esc(content) + '</div>' +
@@ -122,10 +170,13 @@ export function chatMsgRowHtml(role, content, pending, index) {
     // 展开/收起控件并入「工具」抬头行（文字 + ▼/▲ 图标），仅内容溢出时可用；
     // 完整文本始终渲染在 DOM 中（CSS 截断），会话复制可获取全文。
     return '<div class="' + cls + '"' + idxAttr + '>' +
+      '<div class="msg-head">' +
       '<div class="msg-label tool-toggle" data-tool-toggle="1" role="button" tabindex="0" aria-expanded="false">' +
       '<span class="tool-toggle-text">' + esc(label) + '</span>' +
       '<span class="tool-toggle-action">展开</span>' +
       '<span class="tool-toggle-icon" aria-hidden="true">▼</span>' +
+      '</div>' +
+      messageCopyBtnHtml() +
       '</div>' +
       '<div class="msg-body">' +
       '<div class="tool-output tool-collapsed" data-tool-output="1">' + esc(content) + '</div>' +
@@ -133,9 +184,51 @@ export function chatMsgRowHtml(role, content, pending, index) {
       '</div>';
   }
   return '<div class="' + cls + '"' + idxAttr + '>' +
-    '<div class="msg-label">' + esc(label) + '</div>' +
+    msgHeadHtml(esc(label)) +
     '<div class="msg-body">' + esc(content) + '</div>' +
     '</div>';
+}
+
+// ---- assistant 消息渲染方式切换（md | txt）----
+
+// 读取行的当前渲染方式；非 assistant 行 / 缺省一律按默认 text。
+export function getMessageRenderMode(rowEl) {
+  if (!rowEl || !rowEl.getAttribute) { return "text"; }
+  return normalizeRenderMode(rowEl.getAttribute("data-render-mode"));
+}
+
+// 把渲染方式应用到单条 assistant 行：
+//   - data-render-mode 驱动 CSS 在 .msg-text / .msg-md 间切换；
+//   - 两个按钮同步 active / aria-pressed；
+//   - 切到 md 时才渲染 Markdown 正文（惰性，避免每行都跑解析器）。
+// 正文原文只从 .msg-text 取（渲染后的 .msg-md 不再作为输入，保证可反复切换）。
+export function applyMessageRenderMode(rowEl, mode) {
+  var next = normalizeRenderMode(mode);
+  if (!rowEl || !rowEl.setAttribute) { return next; }
+  rowEl.setAttribute("data-render-mode", next);
+  var buttons = rowEl.querySelectorAll ? rowEl.querySelectorAll(".render-mode-btn") : [];
+  for (var i = 0; i < buttons.length; i++) {
+    var btn = buttons[i];
+    var btnMode = (btn.getAttribute ? normalizeRenderMode(btn.getAttribute("data-render-mode-set")) : "text");
+    var on = btnMode === next;
+    if (btn.classList) { if (on) { btn.classList.add("active"); } else { btn.classList.remove("active"); } }
+    if (btn.setAttribute) { btn.setAttribute("aria-pressed", on ? "true" : "false"); }
+  }
+  var mdEl = rowEl.querySelector ? rowEl.querySelector(".msg-md") : null;
+  if (mdEl && next === "md") {
+    var textEl = rowEl.querySelector ? rowEl.querySelector(".msg-text") : null;
+    mdEl.innerHTML = renderMessageBody(textEl ? textEl.textContent : "", "md");
+  }
+  return next;
+}
+
+// md|txt 按钮点击入口（事件委托）：按钮 → 所属消息行 → 应用该按钮代表的渲染方式。
+export function toggleMessageRenderMode(btnEl) {
+  if (!btnEl || !btnEl.closest) { return "text"; }
+  var rowEl = btnEl.closest(".msg-row");
+  if (!rowEl) { return "text"; }
+  var mode = btnEl.getAttribute ? btnEl.getAttribute("data-render-mode-set") : "text";
+  return applyMessageRenderMode(rowEl, mode);
 }
 
 // 检测工具输出是否溢出折叠高度：溢出时保留折叠并启用抬头控件；
@@ -169,9 +262,10 @@ export function refreshToolOutputToggles(root) {
 }
 
 // 切换单条工具行的展开/收起（抬头控件点击/键盘触发）。
+// 抬头控件现在位于 .msg-head 内（不再是行的直接子节点），按 .msg-row 向上定位。
 function toggleToolOutput(labelEl) {
   if (!labelEl || labelEl.classList.contains("tool-toggle-off")) { return; }
-  var rowEl = labelEl.parentNode;
+  var rowEl = labelEl.closest ? labelEl.closest(".msg-row") : labelEl.parentNode;
   if (!rowEl) { return; }
   var output = rowEl.querySelector(".tool-output");
   if (!output) { return; }
@@ -414,28 +508,40 @@ function maybeFillViewport() {
   }
 }
 
-// ---- 会话复制 ----
+// ---- 消息复制（整会话 / 单条）----
 
-// 已渲染行 → 文本（按 DOM 顺序 = 对话时序）。推理内容在折叠面板内
-// （.reasoning-content），加前缀保留语义；工具输出取 .tool-output 内容
-// （排除 toggle 控件文字）；其余角色取 .msg-body 正文。
+// 单条消息的正文容器（按角色优先级）：推理 → .reasoning-content；工具 →
+// .tool-output（排除抬头 toggle 控件文字）；assistant → .msg-text（原文，
+// 切到 md 后 .msg-md 里的代码块「复制」按钮文字不得混进复制结果）；
+// 其余 → .msg-body。抬头行（.msg-head）在正文容器之外，角色标签与复制图标
+// 天然不入正文，因此单条复制与会话复制共用同一套提取规则。
+function messageBodyEl(rowEl) {
+  if (!rowEl || !rowEl.querySelector) { return null; }
+  return rowEl.querySelector(".reasoning-content")
+    || rowEl.querySelector(".tool-output")
+    || rowEl.querySelector(".msg-text")
+    || rowEl.querySelector(".msg-body");
+}
+
+// 单条消息正文文本（单条复制按钮用）：只取本条消息自己的正文容器，
+// 不含角色标签、控件文字与相邻消息。推理不加 "[推理] " 前缀——那是
+// 整会话复制的语义标注，单条复制保持原文。
+export function domMessageText(rowEl) {
+  var el = messageBodyEl(rowEl);
+  return el ? (el.textContent || "") : "";
+}
+
+// 已渲染行 → 文本（按 DOM 顺序 = 对话时序）：整会话复制用。
+// 推理内容加 [推理] 前缀保留语义，其余按各自正文容器收集。
 function domConversationText() {
   var rows = screenEl.querySelectorAll(".msg-row");
   if (!rows.length) { return screenEl.textContent || ""; }
   var parts = [];
   rows.forEach(function (row) {
-    var reasoningEl = row.querySelector(".reasoning-content");
-    if (reasoningEl) {
-      parts.push("[推理] " + reasoningEl.textContent);
-      return;
-    }
-    var toolOutputEl = row.querySelector(".tool-output");
-    if (toolOutputEl) {
-      parts.push(toolOutputEl.textContent);
-      return;
-    }
-    var bodyEl = row.querySelector(".msg-body");
-    if (bodyEl) { parts.push(bodyEl.textContent); }
+    var el = messageBodyEl(row);
+    if (!el) { return; }
+    var text = el.textContent || "";
+    parts.push(row.querySelector(".reasoning-content") ? "[推理] " + text : text);
   });
   return parts.join("\n\n");
 }
@@ -460,15 +566,36 @@ function copyConversationText(done) {
     .catch(function () { done(domConversationText()); });
 }
 
-// 写剪贴板 + toast 反馈。
-function writeClipboardText(text) {
-  if (!text || text === "(empty)") { return; }
+// 写剪贴板 + toast 反馈；okMessage 省略时用会话复制的提示语。
+// 整会话复制、单条消息复制与流式气泡复制（stream.js）共用。
+export function copyTextToClipboard(text, okMessage) {
+  if (!text) { showToast("没有可复制的内容", "error"); return; }
   if (!navigator.clipboard) { showToast("复制失败", "error"); return; }
   navigator.clipboard.writeText(text).then(function () {
-    showToast("会话内容已复制", "ok");
+    showToast(okMessage || "会话内容已复制", "ok");
   }).catch(function () {
     showToast("复制失败", "error");
   });
+}
+
+// 整会话复制：窗口占位符 / 空文本静默忽略，不弹错误提示。
+function writeClipboardText(text) {
+  if (!text || text === "(empty)") { return; }
+  copyTextToClipboard(text);
+}
+
+// 单条消息复制（事件委托入口）：按钮 → 所属消息行 → 该行正文。
+// 复制成功后图标短暂变 ✓（与代码块复制按钮同款反馈）；空内容只弹 toast。
+function copyRowMessage(btnEl) {
+  var rowEl = (btnEl && btnEl.closest) ? btnEl.closest(".msg-row") : null;
+  var text = domMessageText(rowEl);
+  if (!text) { showToast("没有可复制的内容", "error"); return; }
+  copyTextToClipboard(text, "本条消息已复制");
+  if (btnEl.classList) {
+    var old = btnEl.textContent;
+    btnEl.textContent = "✓";
+    setTimeout(function () { btnEl.textContent = old; }, 1200);
+  }
 }
 
 // 立即追加一条本地 user pending 气泡（乐观回显，不等服务端回合）。
@@ -761,8 +888,14 @@ export function initChat() {
       updateScrollBtn();
       maybeLoadOlderOnScroll(); // 上滚接近顶部：懒加载更早消息
     });
+    // ---- 单条消息复制（所有角色抬头行的 ⧉ 图标，真实 <button> 自带键盘激活）----
     // ---- 工具输出展开/收起（「工具」抬头行控件，事件委托 + 键盘可达）----
+    // ---- assistant 消息 md|txt 渲染切换（右上角控件，真实 <button> 自带键盘激活）----
     conversationEl.addEventListener("click", function (e) {
+      var copyBtn = (e.target && e.target.closest) ? e.target.closest(".msg-copy-btn") : null;
+      if (copyBtn) { copyRowMessage(copyBtn); return; }
+      var modeBtn = (e.target && e.target.closest) ? e.target.closest("[data-render-mode-set]") : null;
+      if (modeBtn) { toggleMessageRenderMode(modeBtn); return; }
       var labelEl = (e.target && e.target.closest) ? e.target.closest(".tool-toggle") : null;
       if (labelEl) { toggleToolOutput(labelEl); }
     });

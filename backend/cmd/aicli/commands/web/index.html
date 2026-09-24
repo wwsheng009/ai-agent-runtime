@@ -97,6 +97,18 @@
         <div id="approval-modal-body">
           <div id="approval-prompt" class="approval-prompt"></div>
           <div id="question-suggestions"></div>
+          <!-- 提问回答输入区（仅 question 显示；approval 隐藏）：
+               遮罩层覆盖底部输入区，用户点不到 composer，开放问题必须能在
+               模态框内自由写入回答，建议项只是快捷入口。 -->
+          <div id="question-answer-row" style="display:none">
+            <textarea id="question-answer-input" rows="2"
+              placeholder="输入回答，Enter 提交，Shift+Enter 换行…"
+              autocomplete="off" enterkeyhint="send"></textarea>
+            <div id="question-answer-actions">
+              <span id="question-answer-hint" class="question-answer-hint"></span>
+              <button id="question-answer-submit" class="answer-submit-btn" type="button">提交回答</button>
+            </div>
+          </div>
           <button id="detail-toggle" class="detail-toggle" type="button">显示详情</button>
           <div id="approval-detail" class="approval-detail"></div>
         </div>

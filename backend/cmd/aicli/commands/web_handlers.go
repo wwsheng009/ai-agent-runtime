@@ -902,6 +902,23 @@ func handleWebQuestionAnswer(w http.ResponseWriter, session *ChatSession, questi
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	// 先判定是否真的还有挂起提问：actor 侧对 PendingQuestion == nil 是幂等
+	// no-op（handleAnswerQuestion 直接回 nil），若这里仍回 resolved，前端会
+	// 关闭对话框并提示「已提交」，而答案从未进入模型上下文 —— 这正是
+	// 「页面上提交了回答，但没有回传 LLM」的静默丢失路径。这里如实区分。
+	if state := actor.State(); state == nil || state.PendingQuestion == nil {
+		writeWebAPIJSON(w, http.StatusOK, map[string]string{
+			"status": "stale",
+			"reason": "该提问已结束（已被回答或本轮已终止），回答未送达模型",
+		})
+		return
+	} else if id := strings.TrimSpace(state.PendingQuestion.ID); id != "" && id != strings.TrimSpace(questionID) {
+		writeWebAPIJSON(w, http.StatusOK, map[string]string{
+			"status": "stale",
+			"reason": "挂起提问与提交的 question_id 不匹配，回答未送达模型",
+		})
+		return
+	}
 	if err := actor.AnswerQuestion(ctx, questionID, answer); err != nil {
 		writeWebAPIJSON(w, http.StatusOK, map[string]string{
 			"status": "error",
@@ -911,6 +928,13 @@ func handleWebQuestionAnswer(w http.ResponseWriter, session *ChatSession, questi
 	}
 	// 双入口一致性：问题已被 web 端回答，唤醒 console 端可能挂起的优先级读取。
 	chatSignalPriorityResolvedElsewhere(session)
+	// 迟到的回答：该轮可能已被 drain 超时终结（EndRun 会 retire 该 turn 并清
+	// runActive），但运行时仍会继续被挂起的工具调用。若不把该轮标记为「待恢
+	// 复」，续跑事件会因 turn 不匹配/已退役被整段丢弃：模型续跑了，页面却毫无
+	// 反应。见 chatRuntimeEventBridge.expectResumedTurnAfterAnswer。
+	if bridge := session.RuntimeEventBridge; bridge != nil && !bridge.isRunActive() {
+		bridge.expectResumedTurnAfterAnswer(questionID)
+	}
 	writeWebAPIJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
 }
 
