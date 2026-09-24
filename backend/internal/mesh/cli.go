@@ -1,0 +1,1900 @@
+// aicli-mesh CLI: the mesh's first consumer and operations entry point
+// (architecture §7).
+//
+// Design notes that are easy to get wrong later:
+//
+//  1. The CLI is *not* a node: it never writes a record, a binding or a lease.
+//     Everything here is read-only except `gc --apply`, which only deletes
+//     files that are provably dead (never a live pid: rule R3).
+//  2. It works with zero aicli processes running: all commands read files.
+//  3. It reuses the same aggregation layer as the Web control plane
+//     (`BuildView`), so `aicli-mesh ls --json` and
+//     `GET /web/api/mesh/peers` cannot drift apart (§7.1).
+//  4. Output contract (§7.3): human tables by default, `--json` for scripts,
+//     stable exit codes 0..6.
+//
+// This file deliberately uses the standard library only (package invariant),
+// which is why it carries a tiny interspersed-flag parser: the documented
+// usage puts flags after positional arguments (`show <target> --json`), which
+// the stdlib flag package cannot express.
+
+package mesh
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Exit codes of the CLI contract (§7.3).
+const (
+	// ExitOK is success.
+	ExitOK = 0
+	// ExitUsage is a usage / argument error.
+	ExitUsage = 1
+	// ExitNotFound is a target that does not exist or cannot be resolved to
+	// exactly one node / session (ambiguity is reported with its candidates).
+	ExitNotFound = 2
+	// ExitUnreachable is a target that exists but cannot be reached: no
+	// loopback endpoint, or a failed liveness probe.
+	ExitUnreachable = 3
+	// ExitConflict is a busy or contested target (session claimed by another
+	// live node, invoke busy).
+	ExitConflict = 4
+	// ExitFailure is a failed operation (local I/O error, target returned an
+	// error, timeout) and is also what `doctor` returns when it finds problems.
+	ExitFailure = 5
+	// ExitRefused is a policy refusal (non-loopback, write without an explicit
+	// allow, cross-workspace write under a restrictive switch).
+	ExitRefused = 6
+)
+
+// CLIVersion is the fallback version string when the binary was built without
+// the -X main.version injection.
+const CLIVersion = "dev"
+
+// CLI is the aicli-mesh command line. Stdout/Stderr default to os.Stdout /
+// os.Stderr; Now and Paths are test seams.
+type CLI struct {
+	Stdout  io.Writer
+	Stderr  io.Writer
+	Version string
+	// Now overrides the clock (zero value means NowUTC()).
+	Now func() time.Time
+	// Paths overrides the resolved mesh root (tests / embedded callers).
+	Paths *Paths
+}
+
+// Run executes one command line (without the program name) and returns the
+// process exit code.
+func (c *CLI) Run(args []string) int {
+	if len(args) == 0 {
+		c.printUsage(c.errOut())
+		return ExitUsage
+	}
+	command := strings.ToLower(strings.TrimSpace(args[0]))
+	rest := args[1:]
+	switch command {
+	case "ls", "ps":
+		return c.runLs(rest)
+	case "show":
+		return c.runShow(rest)
+	case "url":
+		return c.runURL(rest)
+	case "gc":
+		return c.runGC(rest)
+	case "doctor":
+		return c.runDoctor(rest)
+	case "version":
+		return c.runVersion(rest)
+	case "help", "-h", "--help":
+		c.printUsage(c.out())
+		return ExitOK
+	default:
+		fmt.Fprintf(c.errOut(), "未知子命令: %s\n\n", args[0])
+		c.printUsage(c.errOut())
+		return ExitUsage
+	}
+}
+
+func (c *CLI) out() io.Writer {
+	if c.Stdout == nil {
+		return os.Stdout
+	}
+	return c.Stdout
+}
+
+func (c *CLI) errOut() io.Writer {
+	if c.Stderr == nil {
+		return os.Stderr
+	}
+	return c.Stderr
+}
+
+func (c *CLI) now() time.Time {
+	if c.Now != nil {
+		if at := c.Now(); !at.IsZero() {
+			return at
+		}
+	}
+	return NowUTC()
+}
+
+func (c *CLI) version() string {
+	if strings.TrimSpace(c.Version) == "" {
+		return CLIVersion
+	}
+	return c.Version
+}
+
+func (c *CLI) paths() Paths {
+	if c.Paths != nil {
+		return *c.Paths
+	}
+	return ResolvePaths()
+}
+
+func (c *CLI) printUsage(w io.Writer) {
+	fmt.Fprint(w, `aicli-mesh —— aicli 节点网格工具（发现 / 运维）
+
+用法:
+  aicli-mesh ls [--json] [--probe] [--live] [--workspace PATH]... [--sort age|session|workspace]
+  aicli-mesh show <节点|会话> [--json] [--events N]
+  aicli-mesh url <节点|会话> [--with-token] [--path PATH] [--json]
+  aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
+  aicli-mesh doctor [--json]
+  aicli-mesh version [--json]
+
+目标解析: 节点 ID / 节点 ID 前缀 / 会话 ID / 会话 ID 前缀 / pid:<PID>。
+歧义时列出候选并要求精确指定（不做「猜一个」）。
+
+退出码:
+  0 成功            1 用法/参数错误      2 目标不存在或无法唯一确定
+  3 目标不可达      4 冲突或忙碌         5 操作失败（doctor 发现问题时同码）
+  6 被策略拒绝
+
+默认不探活（毫秒级，纯读文件）；--probe 才发请求。
+`)
+}
+
+// ---------------------------------------------------------------------------
+// Interspersed flag parser (stdlib flag cannot do "positional then flags")
+// ---------------------------------------------------------------------------
+
+// flagKind describes how one accepted flag consumes its argument.
+type flagKind int
+
+const (
+	flagBool flagKind = iota
+	flagValue
+	flagMulti
+)
+
+// flagSpec is the accepted-flag table of one subcommand.
+type flagSpec map[string]flagKind
+
+// parsedArgs is the result of parsing: flags by name plus positional arguments.
+type parsedArgs struct {
+	flags map[string]string
+	multi map[string][]string
+	pos   []string
+}
+
+func parseArgs(args []string, spec flagSpec) (parsedArgs, error) {
+	out := parsedArgs{flags: map[string]string{}, multi: map[string][]string{}}
+	positionalOnly := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if positionalOnly || arg == "-" || !strings.HasPrefix(arg, "-") {
+			out.pos = append(out.pos, arg)
+			continue
+		}
+		if arg == "--" {
+			positionalOnly = true
+			continue
+		}
+		name := strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")
+		inline := ""
+		hasInline := false
+		if index := strings.Index(name, "="); index >= 0 {
+			name, inline, hasInline = name[:index], name[index+1:], true
+		}
+		kind, ok := spec[name]
+		if !ok {
+			return out, fmt.Errorf("未知参数: %s", arg)
+		}
+		switch kind {
+		case flagBool:
+			value := "true"
+			if hasInline {
+				parsed, err := strconv.ParseBool(inline)
+				if err != nil {
+					return out, fmt.Errorf("参数 --%s 需要一个布尔值（收到 %q）", name, inline)
+				}
+				value = strconv.FormatBool(parsed)
+			}
+			out.flags[name] = value
+		case flagValue, flagMulti:
+			value := inline
+			if !hasInline {
+				if i+1 >= len(args) {
+					return out, fmt.Errorf("参数 --%s 缺少取值", name)
+				}
+				i++
+				value = args[i]
+			}
+			if kind == flagMulti {
+				out.multi[name] = append(out.multi[name], value)
+			} else {
+				out.flags[name] = value
+			}
+		}
+	}
+	return out, nil
+}
+
+func (a parsedArgs) boolean(name string) bool {
+	value, ok := a.flags[name]
+	if !ok {
+		return false
+	}
+	parsed, err := strconv.ParseBool(value)
+	return err == nil && parsed
+}
+
+func (a parsedArgs) str(name, fallback string) string {
+	if value, ok := a.flags[name]; ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return fallback
+}
+
+func (a parsedArgs) list(name string) []string {
+	return a.multi[name]
+}
+
+func (a parsedArgs) intValue(name string, fallback int) (int, error) {
+	value, ok := a.flags[name]
+	if !ok || strings.TrimSpace(value) == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("参数 --%s 需要一个整数（收到 %q）", name, value)
+	}
+	return parsed, nil
+}
+
+func (a parsedArgs) durationValue(name string, fallback time.Duration) (time.Duration, error) {
+	value, ok := a.flags[name]
+	if !ok || strings.TrimSpace(value) == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("参数 --%s 需要一个时长（如 10m / 7d 不合法，请用 168h；收到 %q）", name, value)
+	}
+	return parsed, nil
+}
+
+// printJSON writes one JSON document followed by a newline.
+func (c *CLI) printJSON(payload any) error {
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(c.out(), string(data))
+	return err
+}
+
+// fail prints a CLI error and returns the matching exit code.
+func (c *CLI) fail(code int, format string, args ...any) int {
+	fmt.Fprintf(c.errOut(), format+"\n", args...)
+	return code
+}
+
+// ---------------------------------------------------------------------------
+// Target resolution (§7.2): node id / prefix / session id / prefix / pid:<PID>
+// ---------------------------------------------------------------------------
+
+// targetError carries the exit code that matches the resolution failure.
+type targetError struct {
+	code int
+	msg  string
+}
+
+func (e *targetError) Error() string { return e.msg }
+
+func newTargetError(code int, format string, args ...any) *targetError {
+	return &targetError{code: code, msg: fmt.Sprintf(format, args...)}
+}
+
+// resolveTarget maps a user-supplied reference onto exactly one node. Rules are
+// tried in order and the first rule with at least one match wins, so an exact
+// node id never loses to somebody else's prefix:
+//
+//  1. `pid:<PID>`           exact pid
+//  2. node id               exact
+//  3. node id prefix
+//  4. session id            exact
+//  5. session id prefix
+//
+// Zero matches is exit 2 ("目标不存在"); several matches is exit 2 as well
+// ("无法唯一确定") but lists the candidates — the CLI never guesses.
+func resolveTarget(view MeshView, ref string) (NodeView, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return NodeView{}, newTargetError(ExitUsage, "缺少目标：需要节点 ID、会话 ID 或 pid:<PID>")
+	}
+	lower := strings.ToLower(ref)
+	if strings.HasPrefix(lower, "pid:") {
+		raw := strings.TrimSpace(ref[len("pid:"):])
+		pid, err := strconv.Atoi(raw)
+		if err != nil || pid <= 0 {
+			return NodeView{}, newTargetError(ExitUsage, "pid: 目标需要正整数（收到 %q）", ref)
+		}
+		matches := make([]NodeView, 0, 1)
+		for _, node := range view.Nodes {
+			if node.PID == pid {
+				matches = append(matches, node)
+			}
+		}
+		return pickTarget(matches, ref)
+	}
+	rules := []func(NodeView) bool{
+		func(node NodeView) bool { return strings.EqualFold(node.NodeID, ref) },
+		func(node NodeView) bool { return hasFoldPrefix(node.NodeID, ref) },
+		func(node NodeView) bool {
+			return node.Session != nil && strings.EqualFold(node.Session.ID, ref)
+		},
+		func(node NodeView) bool {
+			return node.Session != nil && hasFoldPrefix(node.Session.ID, ref)
+		},
+	}
+	for _, rule := range rules {
+		matches := make([]NodeView, 0, 2)
+		for _, node := range view.Nodes {
+			if rule(node) {
+				matches = append(matches, node)
+			}
+		}
+		if len(matches) > 0 {
+			return pickTarget(matches, ref)
+		}
+	}
+	return NodeView{}, newTargetError(ExitNotFound, "找不到目标 %q（本机网格 %d 个节点）", ref, len(view.Nodes))
+}
+
+func hasFoldPrefix(value, prefix string) bool {
+	return prefix != "" && len(value) >= len(prefix) && strings.EqualFold(value[:len(prefix)], prefix)
+}
+
+func pickTarget(matches []NodeView, ref string) (NodeView, error) {
+	switch len(matches) {
+	case 0:
+		return NodeView{}, newTargetError(ExitNotFound, "找不到目标 %q", ref)
+	case 1:
+		return matches[0], nil
+	default:
+		lines := make([]string, 0, len(matches))
+		for _, node := range matches {
+			lines = append(lines, "  "+targetLabel(node))
+		}
+		return NodeView{}, newTargetError(ExitNotFound,
+			"目标 %q 匹配到 %d 个节点，无法唯一确定：\n%s\n请使用完整节点 ID 或 pid:<PID> 精确指定",
+			ref, len(matches), strings.Join(lines, "\n"))
+	}
+}
+
+func targetLabel(node NodeView) string {
+	label := node.NodeID
+	if node.PID > 0 {
+		label += fmt.Sprintf(" (pid %d", node.PID)
+		if node.Session != nil && node.Session.ID != "" {
+			label += ", session " + node.Session.ID
+		}
+		label += ")"
+	} else if node.Session != nil && node.Session.ID != "" {
+		label += " (session " + node.Session.ID + ")"
+	}
+	if node.State != NodeStateLive {
+		label += " [" + string(node.State) + "]"
+	}
+	return label
+}
+
+// ---------------------------------------------------------------------------
+// ls / ps
+// ---------------------------------------------------------------------------
+
+func (c *CLI) runLs(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{
+		"json":      flagBool,
+		"probe":     flagBool,
+		"live":      flagBool,
+		"workspace": flagMulti,
+		"sort":      flagValue,
+		"help":      flagBool,
+	})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh ls: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) > 0 {
+		return c.fail(ExitUsage, "aicli-mesh ls: 不接受位置参数（收到 %q）", parsed.pos[0])
+	}
+	sortKey := strings.ToLower(parsed.str("sort", "age"))
+	switch sortKey {
+	case "age", "session", "workspace":
+	default:
+		return c.fail(ExitUsage, "aicli-mesh ls: --sort 只接受 age|session|workspace（收到 %q）", sortKey)
+	}
+	paths := c.paths()
+	opts := ViewOptions{Now: c.now(), Probe: parsed.boolean("probe")}
+	filter := ViewFilter{Scope: FilterScopeAll, State: FilterStateAll}
+	filtered := false
+	if parsed.boolean("live") {
+		filter.State = FilterStateLive
+		filtered = true
+	}
+	if workspaces := parsed.list("workspace"); len(workspaces) > 0 {
+		filter.Workspace = workspaces
+		filtered = true
+	}
+	if filtered {
+		opts.Filter = &filter
+	}
+	view := BuildView(paths, opts)
+	sortListedNodes(view.Nodes, sortKey)
+	if parsed.boolean("json") {
+		if err := c.printJSON(view); err != nil {
+			return c.fail(ExitFailure, "aicli-mesh ls: 输出 JSON 失败: %v", err)
+		}
+		return ExitOK
+	}
+	c.renderLsTable(view, sortKey, parsed.boolean("probe"))
+	return ExitOK
+}
+
+// sortListedNodes applies --sort to the *listed* slice only. `age` is the
+// BuildView order (live first, newest heartbeat first) and stays untouched.
+func sortListedNodes(nodes []NodeView, key string) {
+	switch key {
+	case "session":
+		sort.SliceStable(nodes, func(i, j int) bool {
+			left, right := sessionIDOf(nodes[i]), sessionIDOf(nodes[j])
+			if left != right {
+				if left == "" {
+					return false
+				}
+				if right == "" {
+					return true
+				}
+				return left < right
+			}
+			return nodeOrderLess(nodes[i], nodes[j])
+		})
+	case "workspace":
+		sort.SliceStable(nodes, func(i, j int) bool {
+			left, right := workspacePathOf(nodes[i]), workspacePathOf(nodes[j])
+			if !strings.EqualFold(left, right) {
+				if left == "" {
+					return false
+				}
+				if right == "" {
+					return true
+				}
+				return strings.ToLower(left) < strings.ToLower(right)
+			}
+			return nodeOrderLess(nodes[i], nodes[j])
+		})
+	}
+}
+
+func nodeOrderLess(left, right NodeView) bool {
+	if leftRank, rightRank := stateRank(left.State), stateRank(right.State); leftRank != rightRank {
+		return leftRank < rightRank
+	}
+	return heartbeatOf(left).After(heartbeatOf(right))
+}
+
+func sessionIDOf(node NodeView) string {
+	if node.Session == nil {
+		return ""
+	}
+	return node.Session.ID
+}
+
+func (c *CLI) renderLsTable(view MeshView, sortKey string, probed bool) {
+	headers := []string{"STATE", "NODE", "PID", "SESSION", "WORKSPACE", "ADDR", "AGE", "OWN"}
+	if probed {
+		headers = append(headers, "REACH")
+	}
+	rows := make([][]string, 0, len(view.Nodes))
+	for _, node := range view.Nodes {
+		row := []string{
+			string(node.State),
+			node.NodeID,
+			pidCell(node.PID),
+			cellOrDash(truncateCell(sessionIDOf(node), 32)),
+			cellOrDash(truncateCell(workspacePathOf(node), 28)),
+			endpointCell(node),
+			formatAge(node.AgeSec),
+			ownershipCell(node),
+		}
+		if probed {
+			row = append(row, string(node.Reachability))
+		}
+		rows = append(rows, row)
+	}
+	fmt.Fprint(c.out(), renderTable(headers, rows))
+	counts := view.Counts
+	fmt.Fprintf(c.out(), "\n共 %d 个节点：live=%d stale=%d stopped=%d unknown=%d conflict=%d（列出 %d，排序 %s）\n",
+		len(view.Nodes), counts.Live, counts.Stale, counts.Stopped, counts.Unknown, counts.Conflict, len(view.Nodes), sortKey)
+	if view.Root == "" {
+		fmt.Fprintln(c.out(), "网格根目录未解析（fail-closed）：没有可读的节点档案。")
+	} else {
+		fmt.Fprintf(c.out(), "根目录 %s（%s）\n", view.Root, pathsSourceLabel(view))
+	}
+	if counts.Conflict > 0 {
+		fmt.Fprintln(c.out(), "提示：存在 conflict（同一会话被多个存活节点占用），用 `aicli-mesh show <会话>` 查看详情。")
+	}
+}
+
+func pathsSourceLabel(view MeshView) string {
+	if view.Self != nil {
+		return "self"
+	}
+	return "resolved"
+}
+
+func pidCell(pid int) string {
+	if pid <= 0 {
+		return "-"
+	}
+	return strconv.Itoa(pid)
+}
+
+func cellOrDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
+}
+
+func endpointCell(node NodeView) string {
+	if node.Endpoint == nil || strings.TrimSpace(node.Endpoint.BaseURL) == "" {
+		if node.Endpoint == nil {
+			return "-"
+		}
+		return fmt.Sprintf("%s:%d", fallbackHost(node.Endpoint.Host), node.Endpoint.Port)
+	}
+	return node.Endpoint.BaseURL
+}
+
+func fallbackHost(host string) string {
+	if strings.TrimSpace(host) == "" {
+		return "127.0.0.1"
+	}
+	return host
+}
+
+func ownershipCell(node NodeView) string {
+	if node.Ownership == "" || node.Ownership == OwnershipNone {
+		return "-"
+	}
+	return string(node.Ownership)
+}
+
+// formatAge renders AgeSec as a compact age (or "-" when never reported).
+func formatAge(ageSec int) string {
+	if ageSec < 0 {
+		return "-"
+	}
+	switch {
+	case ageSec < 60:
+		return fmt.Sprintf("%ds", ageSec)
+	case ageSec < 3600:
+		return fmt.Sprintf("%dm%02ds", ageSec/60, ageSec%60)
+	case ageSec < 86400:
+		return fmt.Sprintf("%dh%02dm", ageSec/3600, (ageSec%3600)/60)
+	default:
+		return fmt.Sprintf("%dd%02dh", ageSec/86400, (ageSec%86400)/3600)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Table rendering (UTF-8 aware: CJK glyphs occupy two cells)
+// ---------------------------------------------------------------------------
+
+func renderTable(headers []string, rows [][]string) string {
+	widths := make([]int, len(headers))
+	for i, header := range headers {
+		widths[i] = displayWidth(header)
+	}
+	for _, row := range rows {
+		for i, cell := range row {
+			if i >= len(widths) {
+				continue
+			}
+			if width := displayWidth(cell); width > widths[i] {
+				widths[i] = width
+			}
+		}
+	}
+	var builder strings.Builder
+	writeRow := func(cells []string) {
+		for i, cell := range cells {
+			if i >= len(widths) {
+				break
+			}
+			builder.WriteString(cell)
+			if i < len(cells)-1 {
+				builder.WriteString(strings.Repeat(" ", widths[i]-displayWidth(cell)+2))
+			}
+		}
+		builder.WriteString("\n")
+	}
+	writeRow(headers)
+	separators := make([]string, len(headers))
+	for i := range headers {
+		separators[i] = strings.Repeat("-", widths[i])
+	}
+	writeRow(separators)
+	for _, row := range rows {
+		writeRow(row)
+	}
+	return builder.String()
+}
+
+func displayWidth(value string) int {
+	width := 0
+	for _, r := range value {
+		switch {
+		case r == '\t':
+			width += 4
+		case isWideRune(r):
+			width += 2
+		default:
+			width++
+		}
+	}
+	return width
+}
+
+// isWideRune reports whether r renders two cells wide in a monospace terminal
+// (CJK / Hangul / fullwidth forms). Approximate on purpose: exact wcwidth
+// tables are not worth a dependency here.
+func isWideRune(r rune) bool {
+	switch {
+	case r >= 0x1100 && r <= 0x115F,
+		r >= 0x2E80 && r <= 0xA4CF,
+		r >= 0xAC00 && r <= 0xD7A3,
+		r >= 0xF900 && r <= 0xFAFF,
+		r >= 0xFE30 && r <= 0xFE6F,
+		r >= 0xFF00 && r <= 0xFF60,
+		r >= 0xFFE0 && r <= 0xFFE6:
+		return true
+	}
+	return false
+}
+
+func truncateCell(value string, max int) string {
+	if max <= 0 || displayWidth(value) <= max {
+		return value
+	}
+	var builder strings.Builder
+	width := 0
+	for _, r := range value {
+		runeWidth := 1
+		if isWideRune(r) {
+			runeWidth = 2
+		}
+		if width+runeWidth > max-1 {
+			break
+		}
+		builder.WriteRune(r)
+		width += runeWidth
+	}
+	builder.WriteString("…")
+	return builder.String()
+}
+
+// ---------------------------------------------------------------------------
+// show
+// ---------------------------------------------------------------------------
+
+// leaseView is the CLI's stable rendering of one lease file.
+type leaseView struct {
+	Purpose     string    `json:"purpose"`
+	Key         string    `json:"key"`
+	OwnerNodeID string    `json:"owner_node_id"`
+	OwnerPID    int       `json:"owner_pid"`
+	OwnerAlive  bool      `json:"owner_alive"`
+	Expired     bool      `json:"expired"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	TTLSec      int       `json:"ttl_sec"`
+	Path        string    `json:"path,omitempty"`
+}
+
+// showResult is the `show --json` document.
+type showResult struct {
+	SchemaVersion int         `json:"schema_version"`
+	Node          *NodeView   `json:"node"`
+	Leases        []leaseView `json:"leases,omitempty"`
+}
+
+func (c *CLI) runShow(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{
+		"json":   flagBool,
+		"events": flagValue,
+		"help":   flagBool,
+	})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh show: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) != 1 {
+		return c.fail(ExitUsage, "aicli-mesh show: 需要一个目标（节点 ID / 会话 ID / pid:<PID>）")
+	}
+	events, err := parsed.intValue("events", 10)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh show: %v", err)
+	}
+	if events < 0 {
+		return c.fail(ExitUsage, "aicli-mesh show: --events 不能为负数")
+	}
+	paths := c.paths()
+	view := BuildView(paths, ViewOptions{Now: c.now(), JournalTailLimit: events})
+	node, err := resolveTarget(view, parsed.pos[0])
+	if err != nil {
+		return c.failTargetError(err)
+	}
+	leases := c.leasesForNode(paths, node)
+	if parsed.boolean("json") {
+		if err := c.printJSON(showResult{SchemaVersion: SchemaVersion, Node: &node, Leases: leases}); err != nil {
+			return c.fail(ExitFailure, "aicli-mesh show: 输出 JSON 失败: %v", err)
+		}
+		return ExitOK
+	}
+	c.renderShow(node, leases, events)
+	return ExitOK
+}
+
+func (c *CLI) failTargetError(err error) int {
+	if target, ok := err.(*targetError); ok {
+		return c.fail(target.code, "aicli-mesh: %s", target.msg)
+	}
+	return c.fail(ExitFailure, "aicli-mesh: %v", err)
+}
+
+// leasesForNode returns the leases that concern this node: held by it, or keyed
+// by its session.
+func (c *CLI) leasesForNode(paths Paths, node NodeView) []leaseView {
+	sessionID := sessionIDOf(node)
+	out := make([]leaseView, 0, 2)
+	for _, file := range ListLeases(paths) {
+		if !file.OK {
+			continue
+		}
+		lease := file.Lease
+		if lease.OwnerNodeID != node.NodeID && (sessionID == "" || lease.Key != sessionID) {
+			continue
+		}
+		out = append(out, leaseView{
+			Purpose:     lease.Purpose,
+			Key:         lease.Key,
+			OwnerNodeID: lease.OwnerNodeID,
+			OwnerPID:    lease.OwnerPID,
+			OwnerAlive:  processAlive(lease.OwnerPID),
+			Expired:     lease.Expired(c.now()),
+			ExpiresAt:   lease.ExpiresAt(),
+			TTLSec:      lease.TTLSec,
+			Path:        file.Path,
+		})
+	}
+	return out
+}
+
+func (c *CLI) renderShow(node NodeView, leases []leaseView, events int) {
+	now := c.now()
+	state := string(node.State)
+	if node.State == NodeStateLive {
+		state = fmt.Sprintf("live（心跳 %s 前）", formatAge(node.AgeSec))
+	}
+	fmt.Fprintf(c.out(), "节点 %s\n", node.NodeID)
+	writeKV(c.out(), "  状态", state)
+	if node.PID > 0 {
+		writeKV(c.out(), "  进程", fmt.Sprintf("pid %d%s", node.PID, processOriginLabel(node)))
+	}
+	writeKV(c.out(), "  归属", string(node.Ownership))
+	writeKV(c.out(), "  端点", endpointDetail(node))
+	writeKV(c.out(), "  令牌", authDetail(node))
+	if node.Session != nil {
+		writeKV(c.out(), "  会话", fmt.Sprintf("%s %s state=%s busy=%t%s",
+			node.Session.ID, quotedTitle(node.Session.Title), node.Session.State, node.Session.Busy, turnSuffix(node.Session.TurnID)))
+	}
+	if node.Workspace != nil && node.Workspace.Path != "" {
+		writeKV(c.out(), "  工作区", fmt.Sprintf("%s（%s）", node.Workspace.Path, cellOrDash(node.Workspace.Name)))
+	}
+	if node.Binding != nil {
+		writeKV(c.out(), "  绑定", bindingDetail(node.Binding, now))
+	}
+	if len(leases) == 0 {
+		writeKV(c.out(), "  租约", "-")
+	}
+	for _, lease := range leases {
+		writeKV(c.out(), "  租约", fmt.Sprintf("%s-%s owner=%s pid=%d %s%s",
+			lease.Purpose, lease.Key, lease.OwnerNodeID, lease.OwnerPID,
+			leaseStateLabel(lease), leasePathSuffix(lease)))
+	}
+	writeKV(c.out(), "  记录", cellOrDash(node.Path))
+	if node.Err != "" {
+		writeKV(c.out(), "  错误", node.Err)
+	}
+	if events > 0 {
+		fmt.Fprintf(c.out(), "  日志尾部（最近 %d 条）\n", len(node.JournalTail))
+		for _, line := range node.JournalTail {
+			fmt.Fprintf(c.out(), "    %s\n", line)
+		}
+	}
+}
+
+func writeKV(w io.Writer, key, value string) {
+	fmt.Fprintf(w, "%s  %s\n", key, value)
+}
+
+func processOriginLabel(node NodeView) string {
+	if node.Process == nil {
+		return ""
+	}
+	parts := make([]string, 0, 2)
+	if node.Process.Version != "" {
+		parts = append(parts, node.Process.Version)
+	}
+	if node.Process.Origin != "" {
+		parts = append(parts, "origin="+node.Process.Origin)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "（" + strings.Join(parts, "，") + "）"
+}
+
+func quotedTitle(title string) string {
+	if strings.TrimSpace(title) == "" {
+		return ""
+	}
+	return fmt.Sprintf("%q", title)
+}
+
+func turnSuffix(turnID string) string {
+	if strings.TrimSpace(turnID) == "" {
+		return ""
+	}
+	return " turn=" + turnID
+}
+
+func endpointDetail(node NodeView) string {
+	if node.Endpoint == nil {
+		return "无（纯 TUI 进程：可被发现，不可调用）"
+	}
+	detail := endpointCell(node)
+	if node.Endpoint.WebBaseURL != "" {
+		detail += "（web " + node.Endpoint.WebBaseURL + "）"
+	}
+	if node.Endpoint.ManifestURL != "" {
+		detail += "（清单 " + node.Endpoint.ManifestURL + "）"
+	}
+	return detail
+}
+
+func authDetail(node NodeView) string {
+	if node.Auth == nil {
+		return "无（该节点不要求写令牌）"
+	}
+	detail := cellOrDash(node.Auth.TokenHint)
+	if node.Auth.Required {
+		detail += "（required=true"
+	} else {
+		detail += "（required=false"
+	}
+	if node.Auth.Mode != "" {
+		detail += ", mode=" + node.Auth.Mode
+	}
+	return detail + "；原文用 `aicli-mesh url <目标> --with-token` 获取）"
+}
+
+func bindingDetail(binding *SessionBinding, now time.Time) string {
+	detail := "-"
+	if binding.Preferred != nil {
+		detail = fmt.Sprintf("%s:%d", fallbackHost(binding.Preferred.Host), binding.Preferred.Port)
+	}
+	if binding.LastNodeID != "" {
+		detail += " last_node=" + binding.LastNodeID
+	}
+	if !binding.UpdatedAt.IsZero() {
+		detail += fmt.Sprintf(" 更新于 %s 前", formatAge(int(now.Sub(binding.UpdatedAt)/time.Second)))
+	}
+	return detail
+}
+
+func leaseStateLabel(lease leaseView) string {
+	state := "有效"
+	if lease.Expired {
+		state = "已过期"
+	}
+	if !lease.OwnerAlive {
+		state += "（持有者进程已退出）"
+	}
+	return state
+}
+
+func leasePathSuffix(lease leaseView) string {
+	if lease.Path == "" {
+		return ""
+	}
+	return " " + lease.Path
+}
+
+// ---------------------------------------------------------------------------
+// url
+// ---------------------------------------------------------------------------
+
+// urlResult is the `url --json` document.
+type urlResult struct {
+	SchemaVersion int    `json:"schema_version"`
+	NodeID        string `json:"node_id"`
+	SessionID     string `json:"session_id,omitempty"`
+	State         string `json:"state"`
+	URL           string `json:"url"`
+	WithToken     bool   `json:"with_token"`
+	TokenSource   string `json:"token_source,omitempty"`
+}
+
+func (c *CLI) runURL(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{
+		"with-token": flagBool,
+		"path":       flagValue,
+		"json":       flagBool,
+		"help":       flagBool,
+	})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh url: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) != 1 {
+		return c.fail(ExitUsage, "aicli-mesh url: 需要一个目标（节点 ID / 会话 ID / pid:<PID>）")
+	}
+	paths := c.paths()
+	view := BuildView(paths, ViewOptions{Now: c.now()})
+	node, err := resolveTarget(view, parsed.pos[0])
+	if err != nil {
+		return c.failTargetError(err)
+	}
+	if node.Endpoint == nil || (node.Endpoint.BaseURL == "" && node.Endpoint.Port <= 0) {
+		return c.fail(ExitUnreachable, "aicli-mesh url: 目标 %s 没有 loopback 端点（纯 TUI 进程不可访问）", node.NodeID)
+	}
+	base := node.Endpoint.BaseURL
+	if base == "" {
+		base = fmt.Sprintf("http://%s:%d", fallbackHost(node.Endpoint.Host), node.Endpoint.Port)
+	}
+	target := joinURLPath(base, parsed.str("path", "/web"))
+	withToken := parsed.boolean("with-token")
+	token, tokenSource := recordToken(node)
+	if withToken && token != "" {
+		target += "?token=" + queryEscape(token)
+	}
+	if withToken && token == "" {
+		fmt.Fprintln(c.errOut(), "提示：目标节点没有写令牌（开发模式或未启用写保护），URL 不含令牌。")
+	}
+	if node.State != NodeStateLive {
+		fmt.Fprintf(c.errOut(), "提示：目标当前状态为 %s，地址可能已失效。\n", node.State)
+	}
+	if parsed.boolean("json") {
+		if err := c.printJSON(urlResult{
+			SchemaVersion: SchemaVersion,
+			NodeID:        node.NodeID,
+			SessionID:     sessionIDOf(node),
+			State:         string(node.State),
+			URL:           target,
+			WithToken:     withToken && token != "",
+			TokenSource:   tokenSource,
+		}); err != nil {
+			return c.fail(ExitFailure, "aicli-mesh url: 输出 JSON 失败: %v", err)
+		}
+		return ExitOK
+	}
+	fmt.Fprintln(c.out(), target)
+	return ExitOK
+}
+
+// recordToken reads the node's raw write token from its record. This is the
+// only place the CLI materialises a token, and only for `url --with-token`
+// (the §9.1 trust boundary: the caller asked for it explicitly).
+func recordToken(node NodeView) (string, string) {
+	if node.Record == nil || node.Record.Auth == nil {
+		return "", ""
+	}
+	return strings.TrimSpace(node.Record.Auth.Token), strings.TrimSpace(node.Record.Auth.TokenSource)
+}
+
+func joinURLPath(base, path string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	path = strings.TrimSpace(path)
+	if path == "" || path == "/" {
+		return base + "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base + path
+}
+
+// queryEscape escapes a query value without pulling net/url into the hot path
+// of the package (it is a one-liner for the token alphabet we emit).
+func queryEscape(value string) string {
+	var builder strings.Builder
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') ||
+			b == '-' || b == '_' || b == '.' || b == '~' {
+			builder.WriteByte(b)
+			continue
+		}
+		fmt.Fprintf(&builder, "%%%02X", b)
+	}
+	return builder.String()
+}
+
+// ---------------------------------------------------------------------------
+// gc
+// ---------------------------------------------------------------------------
+
+// gc defaults (architecture §2.4 / §7.2).
+const (
+	// DefaultGCStaleTTL is the grace period before a dead process's leftovers
+	// (node record, lease) become collectable. It is deliberately longer than
+	// the heartbeat TTL: a short network hiccup must not let gc delete a node
+	// that is merely quiet.
+	DefaultGCStaleTTL = 10 * time.Minute
+	// DefaultGCKeepDays is how long journals and (with --prune-bindings)
+	// bindings survive after their node is gone.
+	DefaultGCKeepDays = 7
+)
+
+// gcAction is one planned deletion. The plan is computed identically for the
+// dry-run and the --apply pass, so the two outputs are comparable (§12.1).
+type gcAction struct {
+	Kind   string `json:"kind"`
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+	Bytes  int64  `json:"bytes,omitempty"`
+}
+
+// gcPlan is the `gc` document. Actions is the plan; Applied/Deleted/Errors only
+// differ between dry-run and --apply.
+type gcPlan struct {
+	SchemaVersion int        `json:"schema_version"`
+	DryRun        bool       `json:"dry_run"`
+	Root          string     `json:"root,omitempty"`
+	GeneratedAt   time.Time  `json:"generated_at"`
+	StaleTTL      string     `json:"stale_ttl"`
+	KeepDays      int        `json:"keep_days"`
+	PurgeLegacy   bool       `json:"purge_legacy"`
+	PruneBindings bool       `json:"prune_bindings"`
+	Actions       []gcAction `json:"actions"`
+	ActionCount   int        `json:"action_count"`
+	ReclaimBytes  int64      `json:"reclaim_bytes"`
+	Applied       bool       `json:"applied"`
+	Deleted       int        `json:"deleted"`
+	Errors        []string   `json:"errors,omitempty"`
+}
+
+func (c *CLI) runGC(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{
+		"apply":          flagBool,
+		"json":           flagBool,
+		"stale-ttl":      flagValue,
+		"keep-days":      flagValue,
+		"purge-legacy":   flagBool,
+		"prune-bindings": flagBool,
+		"help":           flagBool,
+	})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh gc: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) > 0 {
+		return c.fail(ExitUsage, "aicli-mesh gc: 不接受位置参数（收到 %q）", parsed.pos[0])
+	}
+	staleTTL, err := parsed.durationValue("stale-ttl", DefaultGCStaleTTL)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh gc: %v", err)
+	}
+	if staleTTL < 0 {
+		return c.fail(ExitUsage, "aicli-mesh gc: --stale-ttl 不能为负数")
+	}
+	keepDays, err := parsed.intValue("keep-days", DefaultGCKeepDays)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh gc: %v", err)
+	}
+	if keepDays < 0 {
+		return c.fail(ExitUsage, "aicli-mesh gc: --keep-days 不能为负数")
+	}
+	now := c.now()
+	paths := c.paths()
+	plan := c.buildGCPlan(paths, gcOptions{
+		Now:           now,
+		StaleTTL:      staleTTL,
+		KeepDays:      keepDays,
+		PurgeLegacy:   parsed.boolean("purge-legacy"),
+		PruneBindings: parsed.boolean("prune-bindings"),
+	})
+	apply := parsed.boolean("apply")
+	plan.DryRun = !apply
+	if apply {
+		plan.Applied = true
+		plan.Deleted, plan.Errors = applyGCActions(plan.Actions)
+	}
+	if parsed.boolean("json") {
+		if err := c.printJSON(plan); err != nil {
+			return c.fail(ExitFailure, "aicli-mesh gc: 输出 JSON 失败: %v", err)
+		}
+		return ExitOK
+	}
+	c.renderGC(plan)
+	if len(plan.Errors) > 0 {
+		return ExitFailure
+	}
+	return ExitOK
+}
+
+type gcOptions struct {
+	Now           time.Time
+	StaleTTL      time.Duration
+	KeepDays      int
+	PurgeLegacy   bool
+	PruneBindings bool
+}
+
+func (c *CLI) buildGCPlan(paths Paths, opts gcOptions) gcPlan {
+	plan := gcPlan{
+		SchemaVersion: SchemaVersion,
+		Root:          paths.Root,
+		GeneratedAt:   opts.Now,
+		StaleTTL:      opts.StaleTTL.String(),
+		KeepDays:      opts.KeepDays,
+		PurgeLegacy:   opts.PurgeLegacy,
+		PruneBindings: opts.PruneBindings,
+		Actions:       []gcAction{},
+	}
+	keepWindow := time.Duration(opts.KeepDays) * 24 * time.Hour
+	view := BuildView(paths, ViewOptions{Now: opts.Now})
+	aliveSessions := map[string]bool{}
+	recordedSessions := map[string]bool{}
+	for _, node := range view.Nodes {
+		sessionID := sessionIDOf(node)
+		if sessionID == "" {
+			continue
+		}
+		recordedSessions[sessionID] = true
+		if node.State == NodeStateLive {
+			aliveSessions[sessionID] = true
+		}
+	}
+	// 1. Dead node records: pid must be gone *and* the leftover must be older
+	//    than the grace period. A live pid is never deleted (rule R3).
+	for _, node := range view.Nodes {
+		if node.State != NodeStateStale && node.State != NodeStateStopped {
+			continue
+		}
+		if node.PID > 0 && processAlive(node.PID) {
+			continue
+		}
+		if age := nodeAge(node, opts.Now); age < opts.StaleTTL {
+			continue
+		}
+		if strings.TrimSpace(node.Path) == "" {
+			continue
+		}
+		plan.Actions = append(plan.Actions, gcAction{
+			Kind:   "node-record",
+			Path:   node.Path,
+			Reason: nodeRecordReason(node, opts.Now),
+			Bytes:  fileSize(node.Path),
+		})
+	}
+	// 2. Leases: expired by TTL, or held by a process that is gone.
+	for _, file := range ListLeases(paths) {
+		if !file.OK {
+			// Unreadable / unknown-schema lease: never destroy what we cannot
+			// interpret. `doctor` reports it instead.
+			continue
+		}
+		lease := file.Lease
+		ownerAlive := processAlive(lease.OwnerPID)
+		switch {
+		case lease.Expired(opts.Now):
+			plan.Actions = append(plan.Actions, gcAction{
+				Kind:   "lease",
+				Path:   file.Path,
+				Reason: fmt.Sprintf("租约已过期（%s-%s，TTL %s）", lease.Purpose, lease.Key, lease.TTL()),
+				Bytes:  fileSize(file.Path),
+			})
+		case !ownerAlive && opts.Now.Sub(leaseRenewedAt(lease)) > opts.StaleTTL:
+			plan.Actions = append(plan.Actions, gcAction{
+				Kind:   "lease",
+				Path:   file.Path,
+				Reason: fmt.Sprintf("持有者进程已退出（%s-%s，pid %d）", lease.Purpose, lease.Key, lease.OwnerPID),
+				Bytes:  fileSize(file.Path),
+			})
+		}
+	}
+	// 3. Journals: orphaned or belonging to a dead node, and older than
+	//    --keep-days (audit value: keep history for a while). --keep-days 0
+	//    means "collect immediately".
+	for _, entry := range listJournalFiles(paths) {
+		nodeID := strings.TrimSuffix(filepath.Base(entry.path), ".ndjson")
+		record, known := nodeRecordByID(view, nodeID)
+		orphan := !known
+		deadNode := known && record.PID > 0 && !processAlive(record.PID)
+		if !orphan && !deadNode {
+			continue
+		}
+		if opts.Now.Sub(entry.modTime) < keepWindow {
+			continue
+		}
+		reason := fmt.Sprintf("节点 %s 的日志（进程已退出）", nodeID)
+		if orphan {
+			reason = fmt.Sprintf("孤儿日志：没有 %s 的节点档案", nodeID)
+		}
+		plan.Actions = append(plan.Actions, gcAction{Kind: "journal", Path: entry.path, Reason: reason, Bytes: entry.size})
+	}
+	// 4. Bindings: a preference is only pruned when nothing live serves the
+	//    session and the file has been untouched for --keep-days.
+	if opts.PruneBindings {
+		for _, entry := range listBindingFiles(paths) {
+			sessionID := entry.sessionID
+			if sessionID == "" || aliveSessions[sessionID] {
+				continue
+			}
+			if opts.Now.Sub(entry.modTime) < keepWindow {
+				continue
+			}
+			reason := fmt.Sprintf("会话 %s 的绑定（已无存活节点服务，%d 天未更新）", sessionID, opts.KeepDays)
+			if !recordedSessions[sessionID] {
+				reason = fmt.Sprintf("会话 %s 的绑定（没有任何节点档案引用）", sessionID)
+			}
+			plan.Actions = append(plan.Actions, gcAction{Kind: "binding", Path: entry.path, Reason: reason, Bytes: entry.size})
+		}
+	}
+	// 5. Legacy directory (M8): the whole `web-ports/` tree is dead weight.
+	if opts.PurgeLegacy {
+		if legacy := legacyWebPortsDir(); legacy != "" {
+			if info, err := os.Stat(legacy); err == nil && info.IsDir() {
+				size, count := dirSize(legacy)
+				plan.Actions = append(plan.Actions, gcAction{
+					Kind:   "legacy-dir",
+					Path:   legacy,
+					Reason: fmt.Sprintf("旧目录已作废（%d 个文件；web-ports 由会话绑定取代，§2.4）", count),
+					Bytes:  size,
+				})
+			}
+		}
+	}
+	sort.SliceStable(plan.Actions, func(i, j int) bool {
+		if plan.Actions[i].Kind != plan.Actions[j].Kind {
+			return plan.Actions[i].Kind < plan.Actions[j].Kind
+		}
+		return plan.Actions[i].Path < plan.Actions[j].Path
+	})
+	plan.ActionCount = len(plan.Actions)
+	for _, action := range plan.Actions {
+		plan.ReclaimBytes += action.Bytes
+	}
+	return plan
+}
+
+func nodeAge(node NodeView, now time.Time) time.Duration {
+	if node.HeartbeatAt != nil {
+		if age := now.Sub(*node.HeartbeatAt); age > 0 {
+			return age
+		}
+		return 0
+	}
+	if info, err := os.Stat(node.Path); err == nil {
+		return now.Sub(info.ModTime())
+	}
+	return 0
+}
+
+func nodeRecordReason(node NodeView, now time.Time) string {
+	switch {
+	case node.State == NodeStateStopped:
+		return "进程已声明停止（stopped）"
+	case node.PID <= 0:
+		return "档案没有 pid，且心跳已过期"
+	default:
+		return fmt.Sprintf("进程已退出（pid %d 不存在，心跳 %s 前）", node.PID, formatAge(node.AgeSec))
+	}
+}
+
+func leaseRenewedAt(lease Lease) time.Time {
+	if !lease.RenewedAt.IsZero() {
+		return lease.RenewedAt
+	}
+	return lease.AcquiredAt
+}
+
+func nodeRecordByID(view MeshView, nodeID string) (NodeView, bool) {
+	for _, node := range view.Nodes {
+		if node.NodeID == nodeID {
+			return node, true
+		}
+	}
+	return NodeView{}, false
+}
+
+type dirEntryInfo struct {
+	path      string
+	size      int64
+	modTime   time.Time
+	sessionID string
+}
+
+func listJournalFiles(paths Paths) []dirEntryInfo {
+	if !paths.Enabled() {
+		return nil
+	}
+	entries, err := os.ReadDir(paths.Journal)
+	if err != nil {
+		return nil
+	}
+	out := make([]dirEntryInfo, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".ndjson") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		out = append(out, dirEntryInfo{
+			path:    filepath.Join(paths.Journal, entry.Name()),
+			size:    info.Size(),
+			modTime: info.ModTime(),
+		})
+	}
+	return out
+}
+
+func listBindingFiles(paths Paths) []dirEntryInfo {
+	if !paths.Enabled() {
+		return nil
+	}
+	entries, err := os.ReadDir(paths.Bindings)
+	if err != nil {
+		return nil
+	}
+	out := make([]dirEntryInfo, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(paths.Bindings, entry.Name())
+		sessionID := ""
+		if data, err := os.ReadFile(path); err == nil {
+			var binding SessionBinding
+			if json.Unmarshal(data, &binding) == nil {
+				sessionID = strings.TrimSpace(binding.SessionID)
+			}
+		}
+		out = append(out, dirEntryInfo{
+			path:      path,
+			size:      info.Size(),
+			modTime:   info.ModTime(),
+			sessionID: sessionID,
+		})
+	}
+	return out
+}
+
+func applyGCActions(actions []gcAction) (int, []string) {
+	deleted := 0
+	var failures []string
+	for _, action := range actions {
+		var err error
+		if action.Kind == "legacy-dir" {
+			err = os.RemoveAll(action.Path)
+		} else {
+			err = os.Remove(action.Path)
+		}
+		if err != nil && !os.IsNotExist(err) {
+			failures = append(failures, fmt.Sprintf("%s: %v", action.Path, err))
+			continue
+		}
+		deleted++
+	}
+	return deleted, failures
+}
+
+func (c *CLI) renderGC(plan gcPlan) {
+	if plan.DryRun {
+		fmt.Fprintln(c.out(), "网格清理计划（dry-run：未改动任何文件）")
+	} else {
+		fmt.Fprintln(c.out(), "网格清理（--apply）")
+	}
+	if plan.Root == "" {
+		fmt.Fprintln(c.out(), "  网格根目录未解析（fail-closed）：没有可清理的对象。")
+		return
+	}
+	fmt.Fprintf(c.out(), "  根目录 %s\n", plan.Root)
+	if len(plan.Actions) == 0 {
+		fmt.Fprintln(c.out(), "  没有可清理的对象。")
+		return
+	}
+	for _, action := range plan.Actions {
+		fmt.Fprintf(c.out(), "  [%s] %s：%s\n", action.Kind, action.Path, action.Reason)
+	}
+	fmt.Fprintf(c.out(), "  共 %d 项，可回收 %s\n", plan.ActionCount, humanBytes(plan.ReclaimBytes))
+	if plan.DryRun {
+		fmt.Fprintln(c.out(), "  应用：aicli-mesh gc --apply（另有 --purge-legacy / --prune-bindings）")
+	} else {
+		fmt.Fprintf(c.out(), "  已删除 %d 项\n", plan.Deleted)
+	}
+	for _, failure := range plan.Errors {
+		fmt.Fprintf(c.errOut(), "  失败：%s\n", failure)
+	}
+}
+
+func fileSize(path string) int64 {
+	if info, err := os.Stat(path); err == nil {
+		return info.Size()
+	}
+	return 0
+}
+
+func dirSize(path string) (int64, int) {
+	var size int64
+	count := 0
+	_ = filepath.WalkDir(path, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		if info, statErr := entry.Info(); statErr == nil {
+			size += info.Size()
+		}
+		count++
+		return nil
+	})
+	return size, count
+}
+
+func humanBytes(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	value := float64(size)
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	for _, suffix := range units {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%.1f PiB", value/unit)
+}
+
+// legacyWebPortsDir resolves the retired `~/.aicli/web-ports/` directory
+// (architecture §2.4). It follows the same home rules as the mesh root, minus
+// the `mesh` suffix. Returns "" when no home is resolvable.
+func legacyWebPortsDir() string {
+	if home := strings.TrimSpace(os.Getenv(EnvHome)); home != "" {
+		if expanded := ExpandUserPath(home); expanded != "" {
+			return filepath.Join(expanded, "web-ports")
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".aicli", "web-ports")
+	}
+	return ""
+}
+
+// ---------------------------------------------------------------------------
+// doctor
+// ---------------------------------------------------------------------------
+
+// legacyFreshWindow is how recently a `web-ports/` file must have been touched
+// to count as "an old-version process is probably still running" (§2.4).
+const legacyFreshWindow = 10 * time.Minute
+
+// doctorCheck is one self-check result: ok / warn / problem.
+type doctorCheck struct {
+	ID     string   `json:"id"`
+	Status string   `json:"status"`
+	Detail string   `json:"detail,omitempty"`
+	Items  []string `json:"items,omitempty"`
+}
+
+// doctorReport is the `doctor --json` document.
+type doctorReport struct {
+	SchemaVersion int           `json:"schema_version"`
+	Root          string        `json:"root,omitempty"`
+	Source        string        `json:"source"`
+	Now           time.Time     `json:"now"`
+	Checks        []doctorCheck `json:"checks"`
+	Problems      int           `json:"problems"`
+	Warnings      int           `json:"warnings"`
+}
+
+func (c *CLI) runDoctor(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{"json": flagBool, "help": flagBool})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh doctor: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) > 0 {
+		return c.fail(ExitUsage, "aicli-mesh doctor: 不接受位置参数（收到 %q）", parsed.pos[0])
+	}
+	report := c.buildDoctorReport(c.paths(), c.now())
+	if parsed.boolean("json") {
+		if err := c.printJSON(report); err != nil {
+			return c.fail(ExitFailure, "aicli-mesh doctor: 输出 JSON 失败: %v", err)
+		}
+	} else {
+		c.renderDoctor(report)
+	}
+	if report.Problems > 0 {
+		return ExitFailure
+	}
+	return ExitOK
+}
+
+func (c *CLI) buildDoctorReport(paths Paths, now time.Time) doctorReport {
+	report := doctorReport{
+		SchemaVersion: SchemaVersion,
+		Root:          paths.Root,
+		Source:        paths.Source,
+		Now:           now,
+		Checks:        []doctorCheck{},
+	}
+	add := func(id, status, detail string, items []string) {
+		report.Checks = append(report.Checks, doctorCheck{ID: id, Status: status, Detail: detail, Items: items})
+		switch status {
+		case "problem":
+			report.Problems++
+		case "warn":
+			report.Warnings++
+		}
+	}
+
+	// 1. Directory layout.
+	if !paths.Enabled() {
+		add("paths", "problem",
+			"网格根目录未解析（AICLI_MESH_DIR / AICLI_HOME / home 均不可用）：网格处于 fail-closed 状态，读为空、写跳过", nil)
+	} else {
+		missing := make([]string, 0, 4)
+		for _, dir := range []string{paths.Nodes, paths.Bindings, paths.Leases, paths.Journal} {
+			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+				missing = append(missing, dir)
+			}
+		}
+		detail := fmt.Sprintf("根目录 %s（来源 %s）", paths.Root, paths.Source)
+		if len(missing) > 0 {
+			detail += fmt.Sprintf("；尚未创建的目录 %d 个（首次写入时自动创建）", len(missing))
+		}
+		add("paths", "ok", detail, nil)
+	}
+
+	// 2. Permissions (Windows has no POSIX mode bits: profile ACL is the story).
+	report.addPermissionCheck(paths, add)
+
+	// 3. Records: readable? known schema? how many are dead?
+	view := BuildView(paths, ViewOptions{Now: now})
+	unreadable := make([]string, 0, 2)
+	unknownSchema := make([]string, 0, 2)
+	dead := make([]string, 0, 4)
+	for _, node := range view.Nodes {
+		switch {
+		case node.Err != "":
+			unreadable = append(unreadable, fmt.Sprintf("%s: %s", node.NodeID, node.Err))
+		case node.State == NodeStateUnknown:
+			unknownSchema = append(unknownSchema, node.NodeID)
+		case node.State == NodeStateStale || node.State == NodeStateStopped:
+			dead = append(dead, fmt.Sprintf("%s（%s，pid %d）", node.NodeID, node.State, node.PID))
+		}
+	}
+	switch {
+	case len(unreadable) > 0:
+		add("nodes", "problem", fmt.Sprintf("%d 个节点档案无法读取", len(unreadable)), unreadable)
+	case len(unknownSchema) > 0:
+		add("nodes", "warn", fmt.Sprintf("%d 个档案的 schema 版本未知（不参与归属判定，也不会被改写）", len(unknownSchema)), unknownSchema)
+	default:
+		add("nodes", "ok", fmt.Sprintf("%d 个节点档案可读", len(view.Nodes)), nil)
+	}
+	if len(dead) > 0 {
+		add("stale-nodes", "warn",
+			fmt.Sprintf("%d 个节点已退出但档案仍在（`aicli-mesh gc` 可清理）", len(dead)), dead)
+	} else {
+		add("stale-nodes", "ok", "没有陈旧节点档案", nil)
+	}
+
+	// 4. Ownership: the same session claimed by two live nodes is the conflict
+	//    the whole lease mechanism exists to prevent (§4.2).
+	conflicts := make([]string, 0, 2)
+	for _, node := range view.Nodes {
+		if node.Ownership == OwnershipConflict {
+			conflicts = append(conflicts, targetLabel(node))
+		}
+	}
+	if len(conflicts) > 0 {
+		add("ownership", "problem",
+			fmt.Sprintf("%d 个存活节点声明同一会话（双占用）", len(conflicts)), conflicts)
+	} else {
+		add("ownership", "ok", "没有会话双占用", nil)
+	}
+
+	// 5. Leases: readable, and not held by a dead process.
+	leaseIssues := make([]string, 0, 2)
+	deadLeases := make([]string, 0, 2)
+	for _, file := range ListLeases(paths) {
+		if !file.OK {
+			leaseIssues = append(leaseIssues, file.Path)
+			continue
+		}
+		if !processAlive(file.Lease.OwnerPID) {
+			deadLeases = append(deadLeases, fmt.Sprintf("%s-%s（pid %d）", file.Lease.Purpose, file.Lease.Key, file.Lease.OwnerPID))
+		}
+	}
+	if len(leaseIssues) > 0 {
+		add("leases", "warn", fmt.Sprintf("%d 个租约文件无法解析（保留不动，需人工确认）", len(leaseIssues)), leaseIssues)
+	} else if len(deadLeases) > 0 {
+		add("leases", "warn", fmt.Sprintf("%d 个租约的持有者已退出（`aicli-mesh gc` 可回收）", len(deadLeases)), deadLeases)
+	} else {
+		add("leases", "ok", "租约文件可读且持有者存活", nil)
+	}
+
+	// 6. Tokens: a record that claims auth.required must carry a token, or every
+	//    remote write will 403.
+	missingTokens := make([]string, 0, 2)
+	for _, node := range view.Nodes {
+		if node.Record == nil || node.Record.Auth == nil {
+			continue
+		}
+		if node.Record.Auth.Required && strings.TrimSpace(node.Record.Auth.Token) == "" {
+			missingTokens = append(missingTokens, node.NodeID)
+		}
+	}
+	if len(missingTokens) > 0 {
+		add("tokens", "warn", fmt.Sprintf("%d 个节点声明需要写令牌但档案中没有令牌（远程写操作会 403）", len(missingTokens)), missingTokens)
+	} else {
+		add("tokens", "ok", "所有声明需要令牌的节点都可读到令牌", nil)
+	}
+
+	// 7. Journals: torn lines are expected on a crash (the tail is appended
+	//    without a lock), an unreadable file is not.
+	torn := make([]string, 0, 2)
+	unreadableJournals := make([]string, 0, 2)
+	orphanJournals := make([]string, 0, 2)
+	totalTorn := 0
+	for _, entry := range listJournalFiles(paths) {
+		nodeID := strings.TrimSuffix(filepath.Base(entry.path), ".ndjson")
+		if _, known := nodeRecordByID(view, nodeID); !known {
+			orphanJournals = append(orphanJournals, nodeID)
+		}
+		data, err := os.ReadFile(entry.path)
+		if err != nil {
+			unreadableJournals = append(unreadableJournals, entry.path)
+			continue
+		}
+		if broken := countTornJournalLines(string(data)); broken > 0 {
+			totalTorn += broken
+			torn = append(torn, fmt.Sprintf("%s: %d 行", nodeID, broken))
+		}
+	}
+	switch {
+	case len(unreadableJournals) > 0:
+		add("journal", "problem", fmt.Sprintf("%d 个日志文件无法读取", len(unreadableJournals)), unreadableJournals)
+	case totalTorn > 0:
+		add("journal", "warn", fmt.Sprintf("日志中有 %d 行无法解析（崩溃时的半行，读侧会跳过）", totalTorn), torn)
+	default:
+		add("journal", "ok", "日志文件完整可读", nil)
+	}
+	if len(orphanJournals) > 0 {
+		add("journal-orphans", "warn",
+			fmt.Sprintf("%d 个日志没有对应的节点档案（`aicli-mesh gc` 在 --keep-days 后清理）", len(orphanJournals)), orphanJournals)
+	} else {
+		add("journal-orphans", "ok", "没有孤儿日志", nil)
+	}
+
+	// 8. Legacy directory freshness (§2.4): an old-version process is invisible
+	//    to the mesh, so a fresh `web-ports/` file is the only hint it exists.
+	legacy := legacyWebPortsDir()
+	if legacy == "" {
+		add("legacy", "warn", "无法解析 home 目录，跳过旧目录检查", nil)
+	} else if info, err := os.Stat(legacy); err != nil || !info.IsDir() {
+		add("legacy", "ok", "没有旧目录残留（web-ports 已作废）", nil)
+	} else {
+		fresh, count := 0, 0
+		_ = filepath.WalkDir(legacy, func(_ string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return nil
+			}
+			count++
+			if info, statErr := entry.Info(); statErr == nil && now.Sub(info.ModTime()) < legacyFreshWindow {
+				fresh++
+			}
+			return nil
+		})
+		if fresh > 0 {
+			add("legacy", "warn",
+				fmt.Sprintf("旧目录 %s 中有 %d/%d 个文件在 %s 内更新过：可能有旧版本进程在运行（未被网格收录），建议升级或重启该进程",
+					legacy, fresh, count, legacyFreshWindow), nil)
+		} else {
+			add("legacy", "warn",
+				fmt.Sprintf("旧目录残留 %s（%d 个文件）：`aicli-mesh gc --purge-legacy` 可清理", legacy, count), nil)
+		}
+	}
+	return report
+}
+
+func (r *doctorReport) addPermissionCheck(paths Paths, add func(id, status, detail string, items []string)) {
+	if runtime.GOOS == "windows" {
+		home, _ := os.UserHomeDir()
+		if paths.Enabled() && home != "" && !pathWithin(home, paths.Root) {
+			add("permissions", "warn", fmt.Sprintf(
+				"网格根目录不在用户 Profile 内（%s）：Windows 没有 POSIX 权限位，档案保密性依赖目录 ACL，共享目录属于误用（R13）",
+				paths.Root), nil)
+			return
+		}
+		add("permissions", "ok", "Windows 下档案保密性依赖用户 Profile 权限（无 POSIX 权限位，§9.6）", nil)
+		return
+	}
+	loose := make([]string, 0, 4)
+	if info, err := os.Stat(paths.Nodes); err == nil && info.Mode().Perm()&0o077 != 0 {
+		loose = append(loose, fmt.Sprintf("%s 权限 %04o（期望 0700）", paths.Nodes, info.Mode().Perm()))
+	}
+	for _, node := range ListNodeFiles(paths) {
+		if info, err := os.Stat(node.Path); err == nil && info.Mode().Perm()&0o077 != 0 {
+			loose = append(loose, fmt.Sprintf("%s 权限 %04o（期望 0600）", filepath.Base(node.Path), info.Mode().Perm()))
+		}
+	}
+	if len(loose) > 0 {
+		add("permissions", "warn", "档案权限比预期宽松（同机其它用户可读）", loose)
+		return
+	}
+	add("permissions", "ok", "档案与目录权限符合预期（0600/0700）", nil)
+}
+
+func pathWithin(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// countTornJournalLines counts lines that are not valid JSON objects. Blank
+// lines are not torn (the writer appends "\n" per entry).
+func countTornJournalLines(data string) int {
+	broken := 0
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var probe map[string]any
+		if err := json.Unmarshal([]byte(line), &probe); err != nil {
+			broken++
+		}
+	}
+	return broken
+}
+
+func (c *CLI) renderDoctor(report doctorReport) {
+	fmt.Fprintln(c.out(), "aicli-mesh doctor")
+	if report.Root == "" {
+		fmt.Fprintf(c.out(), "  根目录 -（来源 %s）\n", report.Source)
+	} else {
+		fmt.Fprintf(c.out(), "  根目录 %s（来源 %s）\n", report.Root, report.Source)
+	}
+	for _, check := range report.Checks {
+		marker := map[string]string{"ok": "[ok]  ", "warn": "[warn]", "problem": "[问题]"}[check.Status]
+		fmt.Fprintf(c.out(), "  %s %-16s %s\n", marker, check.ID, check.Detail)
+		for _, item := range check.Items {
+			fmt.Fprintf(c.out(), "           - %s\n", item)
+		}
+	}
+	fmt.Fprintf(c.out(), "\n  结论：问题 %d，告警 %d\n", report.Problems, report.Warnings)
+	if report.Problems > 0 {
+		fmt.Fprintln(c.out(), "  有问题需要处理（退出码 5）。")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// version
+// ---------------------------------------------------------------------------
+
+// versionResult is the `version --json` document.
+type versionResult struct {
+	SchemaVersion       int    `json:"schema_version"`
+	Name                string `json:"name"`
+	Version             string `json:"version"`
+	GoVersion           string `json:"go_version"`
+	OS                  string `json:"os"`
+	Arch                string `json:"arch"`
+	MeshRoot            string `json:"mesh_root,omitempty"`
+	MeshRootSource      string `json:"mesh_root_source"`
+	RecordSchemaVersion int    `json:"record_schema_version"`
+}
+
+func (c *CLI) runVersion(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{"json": flagBool, "help": flagBool})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh version: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) > 0 {
+		return c.fail(ExitUsage, "aicli-mesh version: 不接受位置参数（收到 %q）", parsed.pos[0])
+	}
+	paths := c.paths()
+	result := versionResult{
+		SchemaVersion:       SchemaVersion,
+		Name:                "aicli-mesh",
+		Version:             c.version(),
+		GoVersion:           runtime.Version(),
+		OS:                  runtime.GOOS,
+		Arch:                runtime.GOARCH,
+		MeshRoot:            paths.Root,
+		MeshRootSource:      paths.Source,
+		RecordSchemaVersion: SchemaVersion,
+	}
+	if parsed.boolean("json") {
+		if err := c.printJSON(result); err != nil {
+			return c.fail(ExitFailure, "aicli-mesh version: 输出 JSON 失败: %v", err)
+		}
+		return ExitOK
+	}
+	fmt.Fprintf(c.out(), "aicli-mesh %s（%s，%s/%s）\n", result.Version, result.GoVersion, result.OS, result.Arch)
+	if paths.Root == "" {
+		fmt.Fprintf(c.out(), "网格根目录 -（来源 %s）\n", paths.Source)
+	} else {
+		fmt.Fprintf(c.out(), "网格根目录 %s（来源 %s）\n", paths.Root, paths.Source)
+	}
+	fmt.Fprintf(c.out(), "记录 schema_version=%d\n", SchemaVersion)
+	return ExitOK
+}

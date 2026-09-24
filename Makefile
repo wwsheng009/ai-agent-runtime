@@ -1,4 +1,4 @@
-.PHONY: build test lint tidy clean aicli aicli-console install-aicli uninstall-aicli package-server contract contract-check
+.PHONY: build test lint tidy clean aicli aicli-console aicli-mesh install-aicli uninstall-aicli package-server contract contract-check
 
 BACKEND_DIR := backend
 FRONTEND_DIR := frontend
@@ -8,6 +8,8 @@ BIN_NAME    := aicli
 CMD_PATH    := ./cmd/aicli
 CONSOLE_BIN_NAME := aicli-console
 CONSOLE_CMD_PATH := ./cmd/aicli-console
+MESH_BIN_NAME := aicli-mesh
+MESH_CMD_PATH := ./cmd/aicli-mesh
 VERSION     ?= $(shell cat VERSION 2>/dev/null || echo dev)
 # 在不同平台拿到一个 ISO-8601 的构建时间（GNU date / BusyBox / git bash 都支持 -u）
 BUILD_TIME  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -24,6 +26,11 @@ aicli:
 # 环境中通过 CREATE_NEW_CONSOLE 启动同目录的 aicli.exe。
 aicli-console:
 	cd $(BACKEND_DIR) && go build -trimpath -ldflags "-s -w" -o ../$(CONSOLE_BIN_NAME) $(CONSOLE_CMD_PATH)
+
+# 构建网格运维 CLI（aicli-mesh：ls/show/url/gc/doctor/version）。
+# 只注入版本号（与 scripts/build.ps1 的 main-version 口径一致）。
+aicli-mesh:
+	cd $(BACKEND_DIR) && go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o ../$(MESH_BIN_NAME) $(MESH_CMD_PATH)
 
 # 安装 aicli 到 $GOBIN（默认 $(go env GOPATH)/bin）
 # 该目录通常已在用户 PATH 中，跨平台一致；可通过 GOBIN=/your/dir make install-aicli 覆盖

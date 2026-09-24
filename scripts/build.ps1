@@ -77,12 +77,13 @@ $script:webUIEntryAsset = $null
 # Tool registry: name -> Go package, output file names, ldflags kind.
 # Ldflags kinds:
 #   plain        -> no version injection (-s -w only)
-#   main-version -> -X main.version=<v>  (ssh-client, sftp-client, ssh-keygen)
+#   main-version -> -X main.version=<v>  (aicli-mesh, ssh-client, sftp-client, ssh-keygen)
 #   main-full    -> -X main.version=<v> -X main.buildTime=<t> (aicli)
 #   buildinfo    -> internal/buildinfo.version/buildTime (runtime-server)
 $script:toolRegistry = @(
     [pscustomobject]@{ Name = "aicli";            Package = "./cmd/aicli";            WindowsName = "aicli.exe";            Win7Name = "aicli-win7.exe";            LdflagsKind = "main-full" },
     [pscustomobject]@{ Name = "aicli-console";    Package = "./cmd/aicli-console";    WindowsName = "aicli-console.exe";    Win7Name = "aicli-console-win7.exe";    LdflagsKind = "main-version" },
+    [pscustomobject]@{ Name = "aicli-mesh";       Package = "./cmd/aicli-mesh";       WindowsName = "aicli-mesh.exe";       Win7Name = "aicli-mesh-win7.exe";       LdflagsKind = "main-version" },
     [pscustomobject]@{ Name = "runtime-server";   Package = "./cmd/runtime-server";   WindowsName = "runtime-server.exe";   Win7Name = "runtime-server-win7.exe";   LdflagsKind = "buildinfo" },
     [pscustomobject]@{ Name = "ssh-client";       Package = "./cmd/ssh-client";       WindowsName = "ssh-client.exe";       Win7Name = "ssh-client-win7.exe";       LdflagsKind = "main-version" },
     [pscustomobject]@{ Name = "sftp-client";      Package = "./cmd/sftp-client";      WindowsName = "sftp-client.exe";      Win7Name = "sftp-client-win7.exe";      LdflagsKind = "main-version" },
@@ -619,6 +620,7 @@ try {
                         switch ($tool.Name) {
                             "aicli"          { $testPackages.Add("./cmd/aicli/...") }
                             "aicli-console"  { $testPackages.Add("./cmd/aicli-console") }
+                            "aicli-mesh"     { $testPackages.Add("./cmd/aicli-mesh"); $testPackages.Add("./internal/mesh") }
                             "runtime-server" { $testPackages.Add("./cmd/runtime-server"); $testPackages.Add("./internal/webui") }
                             "ssh-client"     { $testPackages.Add("./cmd/ssh-client"); $testPackages.Add("./internal/winconsole/...") }
                             "sftp-client"    { $testPackages.Add("./cmd/sftp-client"); $testPackages.Add("./internal/winconsole/...") }

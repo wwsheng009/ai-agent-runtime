@@ -12,6 +12,10 @@ import (
 
 // deadPID returns a pid that is guaranteed not to be running any more: it runs
 // the test binary once with no matching test and reaps the child.
+//
+// Windows keeps the process object (and with it the pid) alive while any handle
+// to it is still open, so a reaped child can briefly still answer OpenProcess.
+// Wait that out instead of handing a "maybe alive" pid to the caller.
 func deadPID(t *testing.T) int {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
@@ -19,8 +23,12 @@ func deadPID(t *testing.T) int {
 		t.Fatalf("spawn throwaway process: %v", err)
 	}
 	pid := cmd.Process.Pid
-	if processAlive(pid) {
-		t.Fatalf("throwaway pid %d still looks alive", pid)
+	deadline := time.Now().Add(5 * time.Second)
+	for processAlive(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("throwaway pid %d still looks alive", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	return pid
 }
