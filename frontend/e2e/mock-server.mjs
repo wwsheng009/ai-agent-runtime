@@ -16,6 +16,8 @@
 
 import http from "node:http";
 
+import { createProfilesMock } from "./mock-profiles.mjs";
+
 const PORT = Number(process.env.MOCK_PORT ?? 8101);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,6 +64,11 @@ const mockJobsBySession = new Map(); // sessionId -> [{...backend background.Job
 // P2-1A：运行时文件读取（`POST /api/runtime/fs/read-file`）的 mock 文件表。
 // path -> { dataBase64, byteCount }；由 `/api/_test/files` 注入，未登记即 404。
 const mockFiles = new Map();
+
+// Batch 13 slice 9：profiles 域（列表 / 生命周期 / 导入导出 / 会话内切换）。
+// 契约与纪律见 mock-profiles.mjs 顶部注释；状态由 `/api/_test/profiles` 注入、
+// `/api/_test/reset` 清空。helper 按请求注入，避免模块求值顺序依赖。
+const profilesMock = createProfilesMock();
 
 // P0-P4：右侧栏「文件浏览器 / Git 变更面」夹具（/api/runtime/fs/*、/api/runtime/git/*）。
 // 夹具刻意做大（根层 83 项 / 60 个变更）：滚动条缺失与「预览区被挤出可视范围」这类缺陷
@@ -984,6 +991,12 @@ async function handleRequest(req, res) {
     return;
   }
 
+  // profiles 域先接管（含 `/api/runtime/sessions/{id}/runtime/commands` 的
+  // set_profile 分支）：未命中即返回 false，后续路由不受影响。
+  if (await profilesMock.handle(req, res, { path, url, readBody, writeJson })) {
+    return;
+  }
+
   // 测试隔离：POST /api/_test/reset
   // mock server 由 playwright webServer 跨整个 run 共享（workers=1），会话历史、
   // 事件存储与故障开关都会残留到后续 spec。每个用例开始前显式清空，避免
@@ -994,6 +1007,7 @@ async function handleRequest(req, res) {
     brokenEventsSessions.clear();
     mockJobsBySession.clear();
     mockFiles.clear();
+    profilesMock.reset();
     mockRuntimeModelsCatalog = null;
     mockSkillsEmbeddingEnabled = false;
     mockSkillsHotReload = {
