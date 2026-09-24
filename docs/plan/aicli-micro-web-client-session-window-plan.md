@@ -72,8 +72,9 @@ v1 把「问题定义 + 数据模型 + 接口 + spawn + 路线图」全写在一
 
 ### 0.1 落地状态（2026-09-24 回填）
 
-> 网格侧 S1–S10 已完成（见[实施计划](./aicli-mesh-implementation-plan.md) §10、§15.3）。本文的 Web 侧交付
-> **只落地了 S9 切片的三项**；下表逐项回填，未落地项不视为已交付。
+> 网格侧 S1–S10 已完成（见[实施计划](./aicli-mesh-implementation-plan.md) §10、§15.3）；Web 侧
+> **S11 / S12 / S13 三批收口已落地**（§19–§21）。下表逐项回填，未落地项不视为已交付；
+> P2 逐项对账见本表末五行（①③⑤ 已落地，②④ 留 S14+）。
 
 | 交付项 | 状态 | 落点 / 说明 |
 | --- | --- | --- |
@@ -88,14 +89,19 @@ v1 把「问题定义 + 数据模型 + 接口 + spawn + 路线图」全写在一
 | P1 ③ `resume` 的 `running_elsewhere` 三段式弹窗 | ✅ 已落地（S11） | `POST /web/api/sessions/resume` 未带 `force` 时先做归属检查（`running_elsewhere` / `conflict`，`web_handlers_mesh_sessions.go::chatWebResumeMeshGuard`）；前端三段式弹窗见 `web/js/sessions.js`。偏差 **D12** 已收敛 |
 | P1 ④ 跨工作区分组 | ✅ 已落地（S11） | 「其他工作区（N）」可折叠分组（`?scope=all` 合并 peer 会话 + `workspaces[]` 汇总） |
 | P1 ⑥ 开关默认切 `new_window` | ✅ 已落地（S11） | 同 P0 ③（`new_window` 为缺省；`in_place` 可选） |
-| P2 全部（冲突横幅 / 接管二次确认 / 收敛开关文案 / resume SSE 事件化 / 窗口标题节点后缀） | ❌ 未落地 | S10 未排期 |
+| P2 ① 冲突详情横幅（节点列表 + 心跳） | ✅ 已落地（S11） | `conflict` 响应带 `nodes[]`（`node_id/pid/workspace/heartbeat_at`，`web_handlers_mesh_sessions.go`）；前端 `sessions.js::showSessionConflict` 渲染 `#session-conflict-nodes`（`节点 · pid · 工作区 · 心跳`）。只读：不提供「强制接管」入口（§5.4） |
+| P2 ② 接管二次确认（`takeover`） | ❌ 未落地（留 S14+） | 只有租约原语（`internal/mesh/lease.go` 的 `AcquireOptions.Takeover` + 单测）与**显式占位**：`web_handlers_mesh_sessions.go` 恒回 `takeover_available: false`（单测锁定）——Web 入口存在前不显示无效按钮（§5.7） |
+| P2 ③ 收敛开关下的 `refused` 文案（`mesh_cross_workspace_denied`） | ✅ 已落地（S13） | `sessions.js::SPAWN_CODE_TEXT`（code → 可执行文案）+ §5.2 回退路径：`refused` → `aicli-mesh open <session> --print-url`，拉起失败 → `aicli-mesh show <session>`。注：`mesh_cross_workspace_denied` 目前只在 CLI/Agent 面的 `mesh/call` 上触发（§6.1 边界原则：前端不用 `call`），Web 侧映射是前瞻性的 |
+| P2 ④ resume 的 SSE 事件化（去 8×300ms 轮询） | ❌ 未落地（留 S14+） | `sessions.js` 仍 8×300ms 轮询；待先核对 runtime 在 `/resume` 时是否发布 `session_end/session_start`（`web_handlers.go` 注释称会投递、前端注释称不会，两者矛盾——需一次实测），再决定「订阅既有事件」还是「服务端补发事件」 |
+| P2 ⑤ 窗口标题加节点后缀 | ✅ 已落地（S13） | `sessions.js::meshNodeSuffix()`（`· <工作区> · <节点短 id>`；网格不可用时空串）+ `chat.js::updateTitle` 拼接；`applyMeshView` 在 self 段变化时重算（否则要等下一次状态翻转才出现） |
 | 偏差 D5 / D6 | ✅ 已登记 | 不新增 `js/mesh.js`（并入 `sessions.js`）；`web_page.go` 深链自举（计划未列该文件） |
 
 > **已验证部分**：`web_handlers_mesh_spawn_test.go`（参数透传 / 四态 / 单飞 / 失败带日志尾部）、
 > `internal/mesh/spawn_test.go`、`cli_open_test.go`；E2E-DEBUG-03 的 M1–M10 覆盖**网格行为**
 > （归属不变、令牌不泄漏等），**不覆盖**前端 JS。§10.2 手工断言见 `docs/aicli/web-testing.md` §2.7
-> （S12 起含「实时徽标」，见同文 §2.7.2）；前端 asset 契约由
-> `web_handlers_mesh_sessions_test.go` / `web_handlers_mesh_realtime_test.go` 锁定。
+> （S12 起含「实时徽标」，见同文 §2.7.2；S13 起含「标题后缀 / refused 文案」，见 §2.7.3）；
+> 前端 asset 契约由 `web_handlers_mesh_sessions_test.go` / `web_handlers_mesh_realtime_test.go` /
+> `web_handlers_mesh_polish_test.go` 锁定。
 
 ---
 
@@ -375,6 +381,8 @@ fetch("/web/api/mesh/spawn", {
   （`aicli-mesh show <session>` / `aicli-mesh doctor`）。
 - **回退路径**：若 `mesh/spawn` 返回 `refused`（如 `--mesh-allow-spawn=false`），
   提示改用 `aicli-mesh open <session> --print-url`（CLI 面），不在前端重试。
+  （**已落地**：S13，`sessions.js::SPAWN_CODE_TEXT` + `spawnFailureText(json, id)`；
+  拉起失败态另附 `aicli-mesh show <session>` 诊断命令。）
 
 ### 5.3 跨工作区分组
 
@@ -610,6 +618,8 @@ fetch("/web/api/mesh/spawn", {
 - 页面加载 → `GET /web/api/mesh/self` → `session.id` 应与 `?session` 一致（刚拉起的节点当前会话就是它）。
 - 若因竞态不一致（例如用户在别处又切了会话）→ 走 §5.4 横幅，**不静默**。
 - 窗口标题/图标可选加节点后缀（多窗口并排时的辨识，P2 打磨）。
+  （**已落地**：S13，`sessions.js::meshNodeSuffix()` → `· <工作区> · <节点短 id>`；
+  网格不可用（`self` 为空）时不加后缀。）
 
 ### 7.4 响应契约与失败态
 
@@ -664,7 +674,7 @@ v1 的 R1–R10 保留，逐条标注**归口**（网格承担 / Web 侧承担 /
 | --- | --- | --- | --- |
 | **P0** | S1–S6（`internal/mesh` + 档案/绑定 + `peers` + CLI） | ① 侧栏徽标 + 端点行（读 `sessions.endpoint/ownership`，与 peers 同源）<br>② 「在新窗口打开」**仅复用**已有节点，且仅当 `auth_required=false`（回环开发模式）可用；否则提示用 `aicli-mesh url --with-token`<br>③ 打开方式开关默认 `in_place`（此阶段无 spawn）<br>④ 「关于」页网格小节（只读） | 手工：双进程 `aicli-mesh ls` 与侧栏徽标一致；单测覆盖 sessions 扩展字段 |
 | **P1** | S7–S9（events / call / spawn + CLI） | ① 主点击 = 新窗口（`mesh/spawn`）+ 预开窗口三态处理（§5.2）<br>② `mesh/events` 实时徽标 + 退避重连 + 轮询兜底（§5.6）<br>③ `resume` 的 `running_elsewhere` 三段式弹窗（§5.7）<br>④ 跨工作区分组（§5.3）<br>⑤ `?session=` 深链横幅（§5.4）<br>⑥ 开关默认切到 `new_window` | E2E（§10.3）+ 手工验收表 |
-| **P2** | S10+（接管 / 工作区收敛开关 / stop / journal 查询） | ① 冲突详情横幅（节点列表 + 心跳）<br>② 接管二次确认（`takeover`）<br>③ 收敛开关（`--mesh-restrict-workspace`，opt-in）下的 `refused` 文案（`mesh_cross_workspace_denied`）<br>④ resume 的 SSE 事件化（去 8×300ms 轮询）<br>⑤ 窗口标题加节点后缀 | E2E-DEBUG-03 + 手工 |
+| **P2** | S10+（接管 / 工作区收敛开关 / stop / journal 查询） | ① 冲突详情横幅（节点列表 + 心跳）——**✅ S11**<br>② 接管二次确认（`takeover`）——**❌ 留 S14+**<br>③ 收敛开关（`--mesh-restrict-workspace`，opt-in）下的 `refused` 文案（`mesh_cross_workspace_denied`）——**✅ S13**<br>④ resume 的 SSE 事件化（去 8×300ms 轮询）——**❌ 留 S14+**<br>⑤ 窗口标题加节点后缀——**✅ S13** | E2E-DEBUG-03 + 手工（逐项状态见 §0.1） |
 
 ### 9.1 前端文件级实现清单
 

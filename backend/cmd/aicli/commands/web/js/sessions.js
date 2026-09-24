@@ -1,7 +1,7 @@
 // 侧边栏会话列表:CRUD/重命名/排序/搜索、输入历史、输入注入(sendInput)。
 // aicli micro web client 前端模块(拆分自 app.js,无构建步骤,由 app.js 入口聚合)。
 
-import { autoGrow, clearPendingPrompts, dropPendingUserPrompt, getUiState, promptEl, refreshScreen, sendStatusEl, setUI } from "./chat.js";
+import { autoGrow, clearPendingPrompts, dropPendingUserPrompt, getUiState, promptEl, refreshScreen, sendStatusEl, setUI, updateTitle } from "./chat.js";
 import { refreshCacheAnalyticsIfActive, syncCacheSession } from "./cache.js";
 import { syncSkillsSession } from "./skills.js";
 import { esc, showToast, webAuthToken } from "./util.js";
@@ -658,7 +658,7 @@ function openSessionInNewWindow(id, itemEl) {
         return;
       }
       closeBlankWindow(win);
-      showToast("打开新窗口失败: " + spawnFailureText(json), "error");
+      showToast("打开新窗口失败: " + spawnFailureText(json, id), "error");
     })
     .catch(function (err) {
       if (itemEl) { itemEl.classList.remove("resuming"); }
@@ -672,12 +672,35 @@ function closeBlankWindow(win) {
   try { win.close(); } catch (e) { /* 跨源后 close 可能被拒，忽略 */ }
 }
 
-// spawnFailureText 把 §5.9 信封（status/code/reason/message）压成一行提示。
-function spawnFailureText(json) {
+// SPAWN_CODE_TEXT 是 spawn 失败 code → 可执行文案的映射（P2 ③ / §5.2 回退路径）。
+// 前端不重试：策略拒绝与拉起失败一律指回 CLI 面，并给出对应诊断命令。
+var SPAWN_CODE_TEXT = {
+  mesh_spawn_not_allowed: "本节点已关闭 spawn（--mesh-allow-spawn=false）",
+  mesh_disabled: "本节点未启用网格（启动时加 --mesh）",
+  mesh_nonloopback_denied: "spawn 仅接受回环请求（请在本机浏览器操作）",
+  mesh_workspace_missing: "会话的工作区目录不存在或不可读",
+  mesh_cross_workspace_denied: "目标开启了 --mesh-restrict-workspace：跨工作区写调用被拒",
+  mesh_spawn_timeout: "等待节点就绪超时",
+  mesh_spawn_failed: "拉起节点进程失败"
+};
+
+// spawnFailureText 把 §5.9 信封（status/code/reason/message）压成一行提示；
+// 已知 code 用固定文案，其余回退到服务端 reason（code 永远保留，便于检索）。
+function spawnFailureText(json, sessionID) {
   if (!json) { return "无响应"; }
   var code = json.code || json.status || "error";
   var detail = json.reason || json.message || "";
-  return detail ? code + " — " + detail : String(code);
+  var known = SPAWN_CODE_TEXT[code];
+  var text = known ? code + " — " + known : (detail ? code + " — " + detail : String(code));
+  var target = sessionID || "<session>";
+  if (json.status === "refused") {
+    // §5.2 回退路径：策略拒绝不在前端重试，改用 CLI 面拿 URL。
+    text += "；改用 CLI：aicli-mesh open " + target + " --print-url";
+  } else if (code === "mesh_spawn_timeout" || code === "mesh_spawn_failed" || code === "mesh_workspace_missing") {
+    // 失败态给出诊断命令（§5.2「复制诊断命令」）：节点档案与最近心跳。
+    text += "；诊断：aicli-mesh show " + target;
+  }
+  return text;
 }
 
 // ---- 深链（§7.3 窗口 URL）：/web?session=<id>&token=<t> ----
@@ -736,6 +759,20 @@ function applyMeshView(data) {
   meshWorkspaces = data && Array.isArray(data.workspaces) ? data.workspaces : [];
   meshViewAvailable = !!meshSelf;
   maybeStartMeshStream();
+  updateTitle(); // 标题节点后缀（P2 ⑤）：self 到达 / 消失都要重算一次
+}
+
+// meshNodeSuffix 是窗口标题的节点后缀（P2 ⑤ / §7.3）：多窗口并排时回答
+// 「这个窗口是哪个节点、哪个工作区」。网格不可用（self 为空）时返回空串，
+// 标题保持原样——降级视图不显示无意义占位（§4.7）。
+export function meshNodeSuffix() {
+  if (!meshSelf) { return ""; }
+  var bits = [];
+  var ws = meshSelf.workspace_name || lastPathSegment(meshSelf.workspace_path || "");
+  if (ws) { bits.push(ws); }
+  var node = String(meshSelf.node_id || "");
+  if (node) { bits.push(node.length > 8 ? node.slice(0, 8) : node); }
+  return bits.length ? " · " + bits.join(" · ") : "";
 }
 
 // ---- 网格实时订阅：连接 / 退避 / 降级 / 节流（S12 / §5.6）----

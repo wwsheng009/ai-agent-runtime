@@ -194,7 +194,8 @@ aicli chat --pprof
 
 > 状态（2026-09-24 回填）：`⧉` 流程、深链与 spawn 端点**已落地**（S9）；侧栏徽标 / 端点行 /
 > 跨工作区分组 / 打开方式开关 / resume 冲突弹窗**已落地**（S11，见 §2.7.1）；
-> 「实时徽标」**已落地**（S12：前端订阅 `mesh/events`，退避重连 + 轮询兜底，见 §2.7.2）→
+> 「实时徽标」**已落地**（S12：前端订阅 `mesh/events`，退避重连 + 轮询兜底，见 §2.7.2）；
+> 窗口标题节点后缀与 spawn `refused` 文案**已落地**（S13，见 §2.7.3）→
 > 本节各条均可执行。权威状态表见 `docs/plan/aicli-micro-web-client-session-window-plan.md` §0.1。
 
 - [ ] **弹窗资格**：悬停会话 → 点 `⧉` → 新窗口**必须**打开（不是被拦截的提示条）。
@@ -274,6 +275,25 @@ Network（筛 `mesh/events`）与 Console。数据源：`GET /web/api/mesh/event
 - [ ] **无令牌残留（红线）**：回环模式下 `mesh/events` 的 URL **不带** `token=`；非回环模式
       （`--web-host 0.0.0.0`）下只带**本进程**令牌；`sessions.js` 源码与 `localStorage` /
       `sessionStorage` 中都没有 peer 令牌（M7）。
+
+#### 2.7.3 P2 打磨：窗口标题节点后缀与 refused 文案（S13）
+
+前置：两个 `aicli chat --pprof --mesh` 进程（不同工作区）。
+
+- [ ] **标题节点后缀**：窗口标题为 `aicli micro web client · <工作区> · <节点短 id>`（`node_id` 前 8 位）；
+      两个窗口并排时一眼分辨归属（`·` 后两段与各自 `GET /web/api/mesh/self` 一致）。
+- [ ] **降级不加后缀**：以 `--mesh=false` 启动（或 mesh 根不可读）→ 标题保持
+      `aicli micro web client`，**不出现**空占位（没有悬空的 ` · `）；网格可用后标题自动补齐后缀，
+      无需手动刷新页面（`self` 段到达即重算）。
+- [ ] **refused 文案（策略拒绝）**：对端以 `--mesh-allow-spawn=false` 启动，在它的窗口点会话主点击
+      （或 `⧉`）→ Toast 为「打开新窗口失败: mesh_spawn_not_allowed — 本节点已关闭 spawn
+      （--mesh-allow-spawn=false）；改用 CLI：aicli-mesh open <session> --print-url」，
+      **不**在前端重试（Web 子方案 §5.2 回退路径）。
+- [ ] **失败态诊断命令**：让 spawn 失败（例如把会话工作区目录移走 → `mesh_workspace_missing`）→
+      Toast 带「诊断：aicli-mesh show <session>」，可直接复制执行。
+- [ ] **收敛开关文案（前瞻项）**：`mesh_cross_workspace_denied` 目前只在 CLI/Agent 面的 `mesh/call`
+      上触发（前端不用 `call`，Web 子方案 §6.1），浏览器侧无需复现；只确认
+      `sessions.js::SPAWN_CODE_TEXT` 含该 code（由 `web_handlers_mesh_polish_test.go` 锁定）。
 
 ## 3. 协议下拉框专项用例（combo popup）
 

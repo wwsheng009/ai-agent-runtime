@@ -3,7 +3,7 @@
 
 import { hasPendingApproval, hasPendingQuestion, sendQuestionAnswer } from "./approvals.js";
 import { loadRuntimeMeta } from "./runtime.js";
-import { getInputHistory, getInputHistoryIdx, sendInput, setInputHistoryIdx } from "./sessions.js";
+import { getInputHistory, getInputHistoryIdx, meshNodeSuffix, sendInput, setInputHistoryIdx } from "./sessions.js";
 import { statusEl } from "./sse.js";
 import { clearStreamMessage, hideStreamMessage, isStreamActive, isStreamEnded } from "./stream.js";
 import { closeShortcutHelpIfOpen, toggleShortcutHelp, toggleTheme } from "./ui.js";
@@ -577,7 +577,9 @@ export function updateTitle() {
   else if (uiState === "posting") { prefix = "… "; }
   else if (uiState === "interrupting") { prefix = "… "; }
   else if (statusEl && statusEl.classList.contains("disconnected")) { prefix = "✗ "; }
-  document.title = prefix + "aicli micro web client";
+  // 节点后缀（P2 ⑤ / §7.3）：网格可用时拼「· <工作区> · <节点短 id>」，
+  // 多窗口并排时能直接分辨窗口归属；网格关闭时 meshNodeSuffix() 为空串。
+  document.title = prefix + "aicli micro web client" + meshNodeSuffix();
 }
 
 // ---- 欢迎页显示/隐藏 ----

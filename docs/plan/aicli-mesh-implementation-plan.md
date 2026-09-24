@@ -755,6 +755,8 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | S9 | `internal/mesh/spawn.go`、`web/js/mesh.js`、`web_handlers_mesh_spawn_test.go` | `web/js/sessions.js`、`index.html`、`style.css`、`web_handlers.go` | 单测 + Web §10.2 | 新窗口截图 |
 | S10 | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1` | `scripts/test-aicli-e2e-all.ps1`、`e2e-assertion-baseline.json` | M1–M10 | `summary.json` + 基线 diff |
 | S11 | `web_handlers_mesh_sessions.go`、`web_handlers_mesh_sessions_test.go` | `web_handlers.go`、`web/js/sessions.js`、`web/js/ui.js`、`index.html`、`style.css` | Web §10.1 + 基线门禁 | 单测输出 + 手工验收 |
+| S12 | `web_handlers_mesh_realtime_test.go` | `web/js/sessions.js`、`web/js/util.js`、`web/js/sse.js` | Web §10.2「实时徽标」+ 基线门禁 | 单测输出 + 手工验收 |
+| S13 | `web_handlers_mesh_polish_test.go` | `web/js/sessions.js`、`web/js/chat.js` | Web §10.2（标题后缀 / refused 文案）+ 基线门禁 | 单测输出 + 手工验收 |
 
 ---
 
@@ -864,6 +866,51 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 | 门禁 | `go build ./...`、`go vet ./cmd/aicli/commands/ ./internal/mesh/`、`go test ./cmd/aicli/commands/ ./internal/mesh/` 全绿；E2E-DEBUG-01/02/03 聚合回归全绿（本地，2026-09-24） |
 | 文档 | 本节 + `web-remote-api.md` §9.4 补「前端消费口径」 + `web-testing.md` §2.7/§2.7.2 + Web 子方案 §0.1 状态表回填 |
 | 未做（按计划） | P2 治理项：冲突详情横幅、接管二次确认、收敛开关文案、resume 的 SSE 事件化、窗口标题节点后缀 |
+
+---
+
+## 21. S13 · Web 侧收口（三）：P2 对账 + 窗口标题节点后缀 + spawn `refused` 文案
+
+> 来源：Web 子方案 §0.1 未落地清单（**P2 ①–⑤**）的一次计划↔实现对账——原表写「P2 全部未落地」，
+> 实测 **① 冲突详情横幅已随 S11 落地**，该行 stale。本切片落地其中两项**纯前端**打磨
+> （③ 收敛开关 `refused` 文案、⑤ 窗口标题节点后缀）；② 接管与 ④ resume SSE 事件化
+> （两者都含服务端面）留 S14+。
+
+### 21.1 对账结论（2026-09-24）
+
+| P2 项 | 对账结论 | 依据 |
+| --- | --- | --- |
+| ① 冲突详情横幅（节点列表 + 心跳） | ✅ 已随 S11 落地 | `conflict` 响应带 `nodes[]`（`node_id/pid/workspace/heartbeat_at`）+ `sessions.js::showSessionConflict` 渲染 `#session-conflict-nodes` |
+| ② 接管二次确认（`takeover`） | ❌ 未落地 | 仅租约原语（`internal/mesh/lease.go` 的 `AcquireOptions.Takeover`）；Web 侧恒回 `takeover_available:false` 占位 + 单测锁定 |
+| ③ 收敛开关 `refused` 文案 | ❌ → 本切片落地 | 前端原本没有任何 refused code 映射；`mesh_cross_workspace_denied` 只在 CLI/Agent 面的 `mesh/call` 上触发（前端不用 `call`，§6.1） |
+| ④ resume SSE 事件化 | ❌ 未落地 | `sessions.js` 仍 8×300ms 轮询；`web_handlers.go` 注释（会投递 `session_end/session_start`）与前端注释（不发布）互相矛盾——S14 先实测再定方案 |
+| ⑤ 窗口标题节点后缀 | ❌ → 本切片落地 | `chat.js::updateTitle` 原本输出固定标题，窗口并排时无法分辨节点归属 |
+
+### 21.2 范围与落点
+
+| 项 | 落点 | 说明 |
+| --- | --- | --- |
+| P2 ③ `refused` 文案（§5.2 回退路径） | `web/js/sessions.js` | `SPAWN_CODE_TEXT`：spawn 失败 code → 可执行文案（`mesh_spawn_not_allowed` / `mesh_disabled` / `mesh_nonloopback_denied` / `mesh_workspace_missing` / `mesh_cross_workspace_denied` / `mesh_spawn_timeout` / `mesh_spawn_failed`）；`refused` 追加 `aicli-mesh open <session> --print-url`，失败态追加 `aicli-mesh show <session>` |
+| P2 ⑤ 标题节点后缀（§7.3） | `web/js/sessions.js`、`web/js/chat.js` | 新增 `meshNodeSuffix()`（`· <工作区> · <节点短 id>`；网格不可用时空串）；`updateTitle` 拼接；`applyMeshView` 在 self 段变化时重算（否则要等下一次状态翻转才出现） |
+| **不做**（留 S14+） | — | ② 接管（需 CLI `--takeover` + Web 入口 + 租约回收 + `orphaned` 提示）；④ resume SSE 事件化（需先核对 runtime 事件流） |
+
+### 21.3 验证
+
+| 层 | 断言 |
+| --- | --- |
+| 前端契约 | `web_handlers_mesh_polish_test.go`：code 映射表全量、CLI 回退 / 诊断命令、调用点带会话 id（回退命令可复制）、`meshNodeSuffix` 实现 + 降级空串 + `applyMeshView` 重算 |
+| 门禁 | `go build ./...`、`go vet ./cmd/aicli/commands/ ./internal/mesh/`、`go test ./cmd/aicli/commands/ ./internal/mesh/`、`node --check`（ES 模块语法） |
+| E2E | 01/02/03 聚合回归（本切片不动端点与流，回归只作基线保护） |
+| 手工 | `web-testing.md` §2.7.3（标题后缀 / 双窗口辨识 / refused 文案与 CLI 回退） |
+
+### 21.4 落地记录（2026-09-24）
+
+| 项 | 实际 |
+| --- | --- |
+| 前端 | `sessions.js`：`SPAWN_CODE_TEXT` + `spawnFailureText(json, id)`；`meshNodeSuffix()` + `applyMeshView` 触发 `updateTitle()`；`chat.js::updateTitle` 拼接后缀 |
+| 单测 | `web_handlers_mesh_polish_test.go`：`TestChatWebSessionsAssetHasSpawnRefusalText`、`TestChatWebTitleHasMeshNodeSuffix` |
+| 文档 | 本节 + Web 子方案 §0.1（P2 五行逐项对账）+ §5.2 / §7.3 / §9 状态标注 + `web-testing.md` §2.7.3 |
+| 未做（按计划） | P2 ②（接管）/ ④（resume SSE 事件化）——留 S14+ |
 
 ---
 
