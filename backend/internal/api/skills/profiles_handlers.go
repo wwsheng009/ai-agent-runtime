@@ -68,7 +68,13 @@ func (h *Handler) ListRuntimeProfiles(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusForbidden, err)
 		return
 	}
-	result, err := h.listRuntimeProfileEntries()
+	// workspace 为可选参数（Batch 14 slice 5）：给出时清单附带 D29 工作区信任
+	// 上下文与逐条 prompts 扣留标记；不给出时响应与既有完全一致（旧前端零变化）。
+	workspace := strings.TrimSpace(r.URL.Query().Get("workspace"))
+	if workspace == "" {
+		workspace = strings.TrimSpace(r.URL.Query().Get("workspace_path"))
+	}
+	result, err := h.listRuntimeProfileEntries(workspace)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "failed to list profiles", err))
 		return

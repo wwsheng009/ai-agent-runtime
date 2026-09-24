@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/mux"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/plugins"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -20,12 +21,12 @@ import (
 // --- response / request DTOs -------------------------------------------------
 
 type harnessPermissionsResponse struct {
-	WorkspacePath string                             `json:"workspace_path"`
-	SourcePath    string                             `json:"source_path,omitempty"`
-	Exists        bool                               `json:"exists"`
-	Version       int                                `json:"version,omitempty"`
-	DenyTools     []string                           `json:"deny_tools,omitempty"`
-	AllowTools    []string                           `json:"allow_tools,omitempty"`
+	WorkspacePath string                              `json:"workspace_path"`
+	SourcePath    string                              `json:"source_path,omitempty"`
+	Exists        bool                                `json:"exists"`
+	Version       int                                 `json:"version,omitempty"`
+	DenyTools     []string                            `json:"deny_tools,omitempty"`
+	AllowTools    []string                            `json:"allow_tools,omitempty"`
 	Rules         []runtimepolicy.PermissionsFileRule `json:"rules,omitempty"`
 }
 
@@ -110,6 +111,28 @@ type harnessPluginUpdateRequest struct {
 	Action        string `json:"action"`
 	Trust         string `json:"trust"`
 	Enabled       *bool  `json:"enabled"`
+}
+
+// harnessTrustResponse 是 D29 工作区信任结论的 API 投影（Batch 14 slice 5）。
+//
+// 字段与 CLI `/trust`、启动摘要同源（foldertrust.Resolution），前端据此渲染
+// "部分内容未应用"提示与一键信任入口（Q22）。`trusted=false` + `feature_enabled=true`
+// 才意味着项目级 profile 的 prompts 正在被扣留。
+type harnessTrustResponse struct {
+	WorkspacePath  string   `json:"workspace_path"`
+	FeatureEnabled bool     `json:"feature_enabled"`
+	Trusted        bool     `json:"trusted"`
+	Source         string   `json:"source,omitempty"`
+	WorkspaceKey   string   `json:"workspace_key,omitempty"`
+	ProjectRoot    string   `json:"project_root,omitempty"`
+	StorePath      string   `json:"store_path,omitempty"`
+	ProjectConfigs []string `json:"project_configs,omitempty"`
+	Action         string   `json:"action,omitempty"`
+}
+
+type harnessTrustRequest struct {
+	WorkspacePath string `json:"workspace_path"`
+	Action        string `json:"action"`
 }
 
 // --- handlers ----------------------------------------------------------------
@@ -222,6 +245,77 @@ func (h *Handler) UpdateHarnessGrants(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeJSON(w, http.StatusOK, buildHarnessGrantsResponse(workspace, store, action, removed))
+}
+
+// GetHarnessTrust returns the D29 folder-trust decision for a workspace.
+//
+// 读侧与 CLI `/trust`、启动摘要同源（foldertrust.Resolution）：server 永不弹
+// 提示，无已存决定 + 项目级配置存在 → 未信任（失败关闭）。前端据此渲染
+// "部分内容未应用"提示与一键信任入口（Batch 14 slice 5 / Q22）。
+func (h *Handler) GetHarnessTrust(w http.ResponseWriter, r *http.Request) {
+	workspace, err := h.resolveHarnessWorkspace(r, "")
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, buildHarnessTrustResponse(workspace, ""))
+}
+
+// UpdateHarnessTrust grants durable folder trust for a workspace (Q22 一键信任).
+//
+// Body: {"action":"grant","workspace_path":"..."}
+//
+// 只支持 grant：撤销信任会让项目级配置整体失效，属于破坏性操作，不在本次 UX
+// 闭环内（需要时走 CLI `/trust` 面，避免 UI 误触）。授予信任是权限提升动作，
+// 因此与 profile 写端点同级授权（回环 / admin token / admin role）。
+func (h *Handler) UpdateHarnessTrust(w http.ResponseWriter, r *http.Request) {
+	var req harnessTrustRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	if err := h.authorizeProfileWrite(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	workspace, err := h.resolveHarnessWorkspace(r, req.WorkspacePath)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action == "" {
+		action = "grant"
+	}
+	if action != "grant" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "action must be grant"))
+		return
+	}
+	if _, err := foldertrust.GrantTrust(workspace); err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, buildHarnessTrustResponse(workspace, action))
+}
+
+// buildHarnessTrustResponse 把一次信任解析投影为 API 响应（读/写共用，保证
+// "授予后立刻回读"与"下一次 GET"看到同一结论）。
+func buildHarnessTrustResponse(workspace, action string) harnessTrustResponse {
+	res := workspaceFolderTrust(workspace)
+	resp := harnessTrustResponse{
+		WorkspacePath:  workspace,
+		FeatureEnabled: res.FeatureEnabled,
+		Trusted:        res.Trusted,
+		Source:         res.Source,
+		WorkspaceKey:   res.WorkspaceKey,
+		ProjectRoot:    res.ProjectRoot,
+		StorePath:      res.StorePath,
+		Action:         action,
+	}
+	for _, kind := range res.ConfigKinds {
+		resp.ProjectConfigs = append(resp.ProjectConfigs, string(kind))
+	}
+	return resp
 }
 
 // GetHarnessMemory lists or searches project memory notes.

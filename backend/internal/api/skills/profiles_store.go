@@ -46,6 +46,12 @@ type runtimeProfileEntry struct {
 	// Writable 标注 API 能否写回该 profile（当前：有 profile.yaml 的目录都可写；
 	// 保留字段用于后续内置只读 profile 的只读标记）。
 	Writable bool `json:"writable"`
+	// PromptSuppressed / PromptSuppressionReason 是 D29 门控在清单上的投影
+	// （Batch 14 slice 5）：工作区未信任时，项目层 profile 的 prompts 被扣留，
+	// 前端据此显示"部分内容未应用"徽标。只有**确有可扣留内容**的项目层 profile
+	// 才会置位——没有 prompt 的 profile 不制造假警告（与运行期门控同一判据）。
+	PromptSuppressed        bool   `json:"prompt_suppressed,omitempty"`
+	PromptSuppressionReason string `json:"prompt_suppression_reason,omitempty"`
 }
 
 type runtimeProfileListResult struct {
@@ -60,6 +66,13 @@ type runtimeProfileListResult struct {
 	// 命令——旧后端（无 Batch 12 执行核心）不返回该字段，命令不注册，
 	// 而不是注册后执行时报错。字段随清单端点一并返回，避免前端多一次探测。
 	SessionSwitch bool `json:"session_switch"`
+	// WorkspacePath / WorkspaceTrusted / WorkspaceTrustFeatureEnabled 是 D29 工作区
+	// 信任上下文（Batch 14 slice 5，Q22 前端闭环的数据面）：仅当调用方在请求里
+	// 显式给出 `workspace` 参数时填充。`workspace_path` 为空表示"本次请求未声明
+	// 工作区"，前端据此不渲染信任提示（旧调用零变化）。
+	WorkspacePath                string `json:"workspace_path,omitempty"`
+	WorkspaceTrusted             bool   `json:"workspace_trusted"`
+	WorkspaceTrustFeatureEnabled bool   `json:"workspace_trust_feature_enabled"`
 }
 
 // runtimeProfileTarget 是一次 ref → root 的解析结果。
@@ -124,7 +137,10 @@ func (v *profilesConfigView) itemRoot(name string) (string, bool) {
 
 // listRuntimeProfileEntries 枚举三来源（config 注册项 / default root 子目录 /
 // 默认值补行），并标注解析状态。排序：registered 优先，其余按名字。
-func (h *Handler) listRuntimeProfileEntries() (*runtimeProfileListResult, error) {
+//
+// workspace 非空时额外标注 D29 工作区信任上下文与逐条 prompts 扣留标记
+// （Batch 14 slice 5）；为空时行为与既有完全一致。
+func (h *Handler) listRuntimeProfileEntries(workspace string) (*runtimeProfileListResult, error) {
 	view := h.profileConfigSnapshot()
 	result := &runtimeProfileListResult{
 		Profiles:       make([]runtimeProfileEntry, 0, 8),
@@ -227,8 +243,52 @@ func (h *Handler) listRuntimeProfileEntries() (*runtimeProfileListResult, error)
 		}
 	}
 
+	h.annotateWorkspaceTrust(result, workspace)
+
 	result.Count = len(result.Profiles)
 	return result, nil
+}
+
+// annotateWorkspaceTrust 把 D29 工作区信任结论与逐条 prompts 扣留标记写进清单。
+//
+// 只在调用方显式给出 workspace 时工作：未给出时不填任何字段（旧调用零变化）。
+// 判定与运行期门控**同源**（`profilesys.EvaluateProjectPromptGate`，与
+// profile_support.go 的 `ApplyProjectPromptGate` 是同一函数），因此清单上显示的
+// "未应用"与实际生效面不会分叉。
+//
+// 成本：信任特性关闭或工作区已信任时零额外开销；仅"未信任"时对有效条目各做一次
+// 解析（项目层 profile 通常 0-1 个）。
+func (h *Handler) annotateWorkspaceTrust(result *runtimeProfileListResult, workspace string) {
+	if result == nil {
+		return
+	}
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return
+	}
+	res := workspaceFolderTrust(workspace)
+	result.WorkspacePath = workspace
+	result.WorkspaceTrusted = res.Trusted
+	result.WorkspaceTrustFeatureEnabled = res.FeatureEnabled
+	if res.Trusted {
+		return
+	}
+	for i := range result.Profiles {
+		entry := &result.Profiles[i]
+		if !entry.Valid || strings.TrimSpace(entry.Path) == "" {
+			continue
+		}
+		resolved, err := profilesys.Resolve(profilesys.ResolveOptions{Root: entry.Path})
+		if err != nil {
+			continue
+		}
+		gate := profilesys.EvaluateProjectPromptGate(resolved, workspace, false)
+		if !gate.Suppressed {
+			continue
+		}
+		entry.PromptSuppressed = true
+		entry.PromptSuppressionReason = gate.Reason
+	}
 }
 
 // describeRuntimeProfileEntry 填充 valid/error/description/default_agent。

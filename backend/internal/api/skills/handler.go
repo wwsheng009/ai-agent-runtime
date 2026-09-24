@@ -994,6 +994,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/harness/permissions", h.GetHarnessPermissions).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/grants", h.GetHarnessGrants).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/grants", h.UpdateHarnessGrants).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/harness/trust", h.GetHarnessTrust).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/harness/trust", h.UpdateHarnessTrust).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/harness/memory", h.GetHarnessMemory).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/harness/memory", h.UpdateHarnessMemory).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/harness/plugins", h.GetHarnessPlugins).Methods(http.MethodGet)
