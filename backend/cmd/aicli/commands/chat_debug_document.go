@@ -284,10 +284,24 @@ func buildChatDebugDisplayDocumentWithOptions(session *ChatSession, opts ChatDeb
 	// agents 区块与 JSON 侧同名区块同源：registry 行 + 一致性审计都要读
 	// agent registry（会话库单连接，与后台 reconciler 争用），实测能让单个
 	// status 请求阻塞数秒。fast/超预算时不排队，显式标注跳过。
-	if opts.heavySectionSkipped() {
+	switch {
+	case opts.heavySectionSkipped():
 		builder.heading("AgentControl Registry: (GET /debug/chat/status#agents)")
 		builder.meta("Agents:", "skipped (fast/deadline)")
-	} else {
+	case opts.snapshotRead():
+		// 轮询型 HTTP 快照：读缓存样本（永不阻塞），年龄随行标注。
+		snap := chatAgentBlockSnapshotFor(session)
+		registry, consistency, graph, mailbox := snap.DocumentLines()
+		builder.heading("AgentControl Registry: (GET /debug/chat/status#agents)")
+		builder.meta("Agents Sample Age:", snap.AgeLabel())
+		builder.plain(registry)
+		builder.plainLines(consistency)
+		builder.heading("Agent Graph: (GET /debug/chat/status#agents)")
+		builder.plainLines(graph)
+		builder.heading("Mailbox Pending: (GET /debug/chat/status#agents)")
+		builder.plainLines(mailbox)
+	default:
+		// 交互面板（零值选项）：同步直读，当场那一份。
 		builder.heading("AgentControl Registry: (GET /debug/chat/status#agents)")
 		builder.plain(chatAgentPanelRegistryLine(session))
 		builder.plainLines(chatAgentControlConsistencyLines(session))

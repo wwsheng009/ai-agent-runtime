@@ -485,6 +485,13 @@ func (o ChatDebugDisplayOptions) heavySectionSkipped() bool {
 	return !o.Deadline.IsZero() && time.Now().After(o.Deadline)
 }
 
+// snapshotRead 报告这是「轮询型 HTTP 快照」读取（fast 或带预算），而不是交互
+// 面板的直读。前者对 agents 区块读缓存（永不阻塞，返回样本 + 年龄），后者同步
+// 直读（人工排查要的正是当场那一份）。面板路径使用零值选项。
+func (o ChatDebugDisplayOptions) snapshotRead() bool {
+	return o.Fast || !o.Deadline.IsZero()
+}
+
 // chatDebugDisplayHTTPBudget 是 HTTP 快照路径的跨区块预算。风暴期实测
 // /debug/chat/status 会超过 3s（拖住轮询方与 CI 断言），预算把「慢」限制在
 // 可预期范围内：超预算的重区块被跳过并登记在 skipped_sections。

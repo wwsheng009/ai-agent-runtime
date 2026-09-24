@@ -1350,21 +1350,54 @@ func auditLocalAgentRegistryForDebug(registry *localActorRegistry) (agentcontrol
 	return registry.auditLocalAgentRegistry(ctx)
 }
 
-func chatAgentControlConsistencyLines(session *ChatSession) []string {
+// chatAgentRegistryAudit 是一次一致性审计的结果（含「未执行」语义：会话没有
+// registry）。registry 行与一致性行共用同一个值，单次渲染只读一次会话库。
+type chatAgentRegistryAudit struct {
+	Attempted bool
+	Report    agentcontrol.ConsistencyAuditReport
+	Err       error
+}
+
+// chatAgentRegistryAuditFor 执行一次有界审计（无 registry 时 Attempted=false）。
+func chatAgentRegistryAuditFor(session *ChatSession) chatAgentRegistryAudit {
 	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.ActorRegistry == nil {
-		return []string{"  consistency=<unavailable>"}
+		return chatAgentRegistryAudit{}
 	}
 	report, err := auditLocalAgentRegistryForDebug(session.LocalRuntimeHost.ActorRegistry)
-	if err != nil {
-		return []string{"  consistency=<error: " + err.Error() + ">"}
+	return chatAgentRegistryAudit{Attempted: true, Report: report, Err: err}
+}
+
+func chatAgentControlConsistencyLines(session *ChatSession) []string {
+	return chatAgentControlConsistencyLinesWithAudit(session, chatAgentRegistryAuditFor(session))
+}
+
+// chatAgentControlConsistencyLinesWithAudit 用调用方已算好的审计渲染一致性行。
+func chatAgentControlConsistencyLinesWithAudit(session *ChatSession, audit chatAgentRegistryAudit) []string {
+	if !audit.Attempted {
+		return []string{"  consistency=<unavailable>"}
 	}
+	if audit.Err != nil {
+		return []string{"  consistency=<error: " + audit.Err.Error() + ">"}
+	}
+	report := audit.Report
 	lines := []string{fmt.Sprintf("  consistency records=%d active=%d issues=%d", report.RecordsChecked, report.ActiveChecked, report.IssueCount)}
 	for _, issue := range report.Issues {
 		lines = append(lines, fmt.Sprintf("  issue=%s agent=%s session=%s detail=%s", issue.Code, chatDebugValueOrNone(issue.AgentID), chatDebugValueOrNone(issue.SessionID), issue.Detail))
 	}
-	// P2-9 可见性：最近一次周期对账的缓存结果（不触发新的 pass）。
-	lines = append(lines, "  "+session.LocalRuntimeHost.localRegistryReconcileSummary())
-	// P2-8 方案 4 可见性：本进程观察到的配额回收产品事件汇总（agent.reclaimed）。
+	return append(lines, chatAgentConsistencyTailLines(session)...)
+}
+
+// chatAgentConsistencyTailLines 是一致性审计之后的部分：P2-9 最近一次周期对账
+// 的缓存结果、P2-8 本进程观察到的配额回收事件汇总（agent.reclaimed），以及
+// 缓存的对账动作。全部取自内存缓存，不触发新的 pass。
+//
+// 拆出来供 agents 区块的缓存采集器复用：采集在后台线程跑，age 由读取方按样本
+// 时间戳计算，所以这里不写年龄。
+func chatAgentConsistencyTailLines(session *ChatSession) []string {
+	if session == nil || session.LocalRuntimeHost == nil {
+		return nil
+	}
+	lines := []string{"  " + session.LocalRuntimeHost.localRegistryReconcileSummary()}
 	lines = append(lines, "  "+session.LocalRuntimeHost.localAgentReclaimSummary())
 	if reconciler := session.LocalRuntimeHost.localRegistryReconcile(); reconciler != nil {
 		if cached, _, ok := reconciler.LastReport(); ok {
@@ -2193,6 +2226,12 @@ func chatAgentPanelLines(session *ChatSession, limit int) []string {
 }
 
 func chatAgentPanelRegistryLine(session *ChatSession) string {
+	return chatAgentPanelRegistryLineWithAudit(session, chatAgentRegistryAuditFor(session))
+}
+
+// chatAgentPanelRegistryLineWithAudit 用调用方已算好的审计渲染 registry 行：
+// 同一次渲染里 registry 行与一致性行共用一次审计，避免重复读会话库（单连接）。
+func chatAgentPanelRegistryLineWithAudit(session *ChatSession, audit chatAgentRegistryAudit) string {
 	parts := []string{"  registry=local"}
 	if session == nil || session.LocalRuntimeHost == nil {
 		return strings.Join(parts, " ")
@@ -2209,11 +2248,11 @@ func chatAgentPanelRegistryLine(session *ChatSession) string {
 	if session.LocalRuntimeHost.TeamStore != nil {
 		parts = append(parts, "tasks=durable")
 	}
-	if session.LocalRuntimeHost.ActorRegistry != nil {
-		if report, err := auditLocalAgentRegistryForDebug(session.LocalRuntimeHost.ActorRegistry); err != nil {
+	if audit.Attempted {
+		if audit.Err != nil {
 			parts = append(parts, "consistency=error")
 		} else {
-			parts = append(parts, fmt.Sprintf("consistency_issues=%d", report.IssueCount))
+			parts = append(parts, fmt.Sprintf("consistency_issues=%d", audit.Report.IssueCount))
 		}
 	}
 	// P2-9 可见性：缓存的对账摘要（含最近一次对账时间与收敛行数）。

@@ -128,6 +128,11 @@ type chatDebugDisplayAgentsInfo struct {
 	Consistency string                      `json:"consistency,omitempty"`
 	Graph       []chatDebugDisplayAgentInfo `json:"graph,omitempty"`
 	Mailbox     string                      `json:"mailbox,omitempty"`
+	// AgeSeconds 是这份样本的年龄（秒）。-1 表示尚无样本，见 Collecting。
+	AgeSeconds float64 `json:"age_seconds"`
+	// Collecting 为 true 时 AgeSeconds=-1 且 registry/graph/mailbox 为空：
+	// 消费者必须把它读作「尚未采集」，而不是「没有 agent」或「健康」。
+	Collecting bool `json:"collecting,omitempty"`
 }
 
 // chatDebugDisplayAgentInfo 是 Agent Graph 中单个 agent 的结构化投影。
@@ -358,33 +363,26 @@ func buildChatDebugDisplayComponentsInfo(session *ChatSession) *chatDebugDisplay
 
 // buildChatDebugDisplayAgentsInfo 构建 AgentControl Registry / Agent Graph /
 // Mailbox Pending 区块快照。
+//
+// 这里读 agents 区块缓存（永不阻塞）：三项数据都要读会话库单连接，与后台
+// reconciler 争用，同步读实测能把单个 status 请求阻塞数秒。缓存过期时返回旧
+// 样本并触发后台刷新，年龄写在 age_seconds 里由消费者判断新鲜度。
 func buildChatDebugDisplayAgentsInfo(session *ChatSession) *chatDebugDisplayAgentsInfo {
 	if session == nil {
 		return nil
 	}
+	snap := chatAgentBlockSnapshotFor(session)
 	info := &chatDebugDisplayAgentsInfo{
-		Registry:    strings.TrimSpace(chatAgentPanelRegistryLine(session)),
-		Consistency: strings.Join(chatAgentControlConsistencyLines(session), " | "),
-		Mailbox:     strings.Join(chatDebugMailboxLines(session), " | "),
+		Consistency: strings.Join(snap.ConsistencyLines(), " | "),
+		Mailbox:     strings.Join(snap.Sample.MailboxLines, " | "),
+		AgeSeconds:  -1,
+		Collecting:  snap.Collecting(),
 	}
-	agents, err := chatAgentGraphItems(session)
-	if err == nil {
-		info.Graph = make([]chatDebugDisplayAgentInfo, 0, len(agents))
-		for _, agent := range agents {
-			info.Graph = append(info.Graph, chatDebugDisplayAgentInfo{
-				Path:            firstNonEmptyChatValue(agent.Path, agent.SessionID, agent.ID),
-				Status:          firstNonEmptyChatValue(agent.Status, "unknown"),
-				SessionID:       firstNonEmptyChatValue(agent.SessionID, agent.ID),
-				SessionState:    agent.SessionState,
-				Parent:          agent.ParentSessionID,
-				Depth:           agent.Depth,
-				AgentType:       agent.AgentType,
-				TeamID:          agent.TeamID,
-				PendingApproval: agent.PendingApproval,
-				PendingQuestion: agent.PendingQuestion,
-				PendingTool:     agent.PendingToolName,
-			})
-		}
+	if snap.Collecting() {
+		return info
 	}
+	info.Registry = snap.Sample.RegistryLine
+	info.Graph = snap.Sample.GraphItems
+	info.AgeSeconds = snap.Age.Seconds()
 	return info
 }

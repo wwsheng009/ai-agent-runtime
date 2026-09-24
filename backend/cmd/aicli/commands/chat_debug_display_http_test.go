@@ -379,6 +379,9 @@ func TestChatDebugDisplayNewSections(t *testing.T) {
 	chatDebugDisplaySessionProvider = func() *ChatSession { return session }
 	defer func() { chatDebugDisplaySessionProvider = old }()
 
+	// agents 区块走缓存（永不阻塞）：先等首份样本落地，再断言线上字段形状。
+	waitForChatAgentBlockSample(t, session)
+
 	body, err := MarshalChatDebugDisplayJSON()
 	if err != nil {
 		t.Fatalf("MarshalChatDebugDisplayJSON failed: %v", err)
@@ -438,6 +441,10 @@ func TestChatDebugDisplayNewSections(t *testing.T) {
 	}
 	if _, ok := agents["mailbox"]; !ok {
 		t.Fatal("agents.mailbox should exist")
+	}
+	// 样本年龄是消费者判断「这份数据有多新」的唯一依据（缓存过期时会先给旧样本）。
+	if _, ok := agents["age_seconds"]; !ok {
+		t.Fatal("agents.age_seconds should exist")
 	}
 }
 
