@@ -232,6 +232,50 @@ export type RuntimeProfileValidateResponse = {
  */
 export type RuntimeProfileValidationReport = RuntimeProfileValidateResponse;
 
+/** 导出结果：zip 二进制 + 响应头里的身份信息（Batch 13 slice 8 / G5）。 */
+export type RuntimeProfileExportBundle = {
+  /** 实际导出的 ref（后端 X-Aicli-Profile-Ref，缺失时回填请求值）。 */
+  ref: string;
+  /** 建议文件名（来自 Content-Disposition，缺失时 `<ref>.zip`）。 */
+  filename: string;
+  /** 包内文件数（后端 X-Aicli-Profile-File-Count）。 */
+  fileCount: number;
+  blob: Blob;
+};
+
+export type RuntimeProfileImportOptions = {
+  /** 显式名：必须与包内 profile.yaml 声明名一致，不一致后端 400（D32）。 */
+  name?: string;
+  /** 目标层：user（默认）/ project。 */
+  layer?: string;
+  /** true 只预演不落盘（D33：预演连层根都不创建）。 */
+  dryRun?: boolean;
+};
+
+/**
+ * 导入报告：dry_run 与真实导入同一形状（D33）。
+ * `valid=false` 时目标目录未创建、`imported=false`——这是领域结果（D28-1），
+ * 调用方应展示 issues 而不是当成传输错误；`activated` 恒为 false（导入绝不自动激活）。
+ */
+export type RuntimeProfileImportReport = {
+  ok: boolean;
+  valid: boolean;
+  imported: boolean;
+  activated: boolean;
+  dryRun: boolean;
+  layer: string;
+  name: string;
+  root: string;
+  /** 将写入（或已写入）的路径清单，与删除端点同一投影。 */
+  paths: string[];
+  fileCount: number;
+  error: string;
+  errorCount: number;
+  warningCount: number;
+  issues: RuntimeProfileValidationIssue[];
+  hint: string;
+};
+
 /** preview 端点与 GET 同构（多用于带 draft 的预览），故复用视图类型。 */
 export type RuntimeProfilePreviewReport = RuntimeProfileView;
 

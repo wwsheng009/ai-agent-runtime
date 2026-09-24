@@ -13,10 +13,35 @@
 
 import type {
   RuntimeProfileCreateResponse,
+  RuntimeProfileExportBundle,
   RuntimeProfileListEntry,
   RuntimeProfileReferencesResponse,
   RuntimeProfileView,
 } from "@/types/runtime";
+
+/**
+ * 触发浏览器保存导出的 zip 包（POST 响应体 → Blob → 临时对象 URL）。
+ *
+ * jsdom 不实现 `URL.createObjectURL`：能力缺失时显式抛错，由调用方走错误提示，
+ * 而不是静默「成功但没下载」。revoke 紧跟 click（与 lib/trajectory/export.ts 同节奏）。
+ */
+export function downloadProfileBundle(bundle: RuntimeProfileExportBundle) {
+  if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
+    throw new Error("browser does not support blob downloads");
+  }
+  const url = URL.createObjectURL(bundle.blob);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = bundle.filename;
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 
 /** 按名称 / ref / 描述 / 层级做大小写不敏感过滤；空关键字原样返回。 */
 export function filterProfileEntries(

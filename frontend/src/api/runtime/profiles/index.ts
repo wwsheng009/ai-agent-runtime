@@ -33,6 +33,8 @@ export {
   buildRuntimeProfileApplyUrl,
   buildRuntimeProfileDefaultUrl,
   buildRuntimeProfileDuplicateUrl,
+  buildRuntimeProfileExportUrl,
+  buildRuntimeProfileImportUrl,
   buildRuntimeProfileMoveUrl,
   buildRuntimeProfilePreviewUrl,
   buildRuntimeProfileReferencesUrl,
@@ -40,3 +42,4 @@ export {
   buildRuntimeProfileUrl,
   buildRuntimeProfileValidateUrl,
 } from "./url";
+export { exportRuntimeProfile, importRuntimeProfile } from "./transfer";

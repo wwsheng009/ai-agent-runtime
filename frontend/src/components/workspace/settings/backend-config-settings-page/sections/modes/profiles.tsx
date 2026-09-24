@@ -16,7 +16,9 @@ import {
   createRuntimeProfile,
   deleteRuntimeProfile,
   duplicateRuntimeProfile,
+  exportRuntimeProfile,
   getRuntimeProfile,
+  importRuntimeProfile,
   listRuntimeProfileReferences,
   listRuntimeProfiles,
   moveRuntimeProfile,
@@ -37,6 +39,7 @@ import { formatProfileError } from "../../profiles/profile-i18n";
 import { ProfileListHeader } from "./profile-list-header";
 import { ProfileListRow } from "./profile-list-row";
 import {
+  downloadProfileBundle,
   entryFromMutation,
   entryFromMutationResult,
   filterProfileEntries,
@@ -290,6 +293,75 @@ export function ProfilesModeSection() {
     [t],
   );
 
+  const runExport = useCallback(
+    async (entry: RuntimeProfileListEntry) => {
+      setPending(`export:${entry.ref}`);
+      setError(null);
+      setStatusMessage(null);
+      try {
+        const bundle = await exportRuntimeProfile(entry.ref);
+        downloadProfileBundle(bundle);
+        setStatusMessage(
+          t("profiles.transfer.exportSucceeded", { name: entry.name, count: bundle.fileCount }),
+        );
+      } catch (exportError) {
+        setError(formatProfileError(exportError, t("profiles.transfer.exportFailed")));
+      } finally {
+        setPending(null);
+      }
+    },
+    [t],
+  );
+
+  const runImportPreview = useCallback(
+    async (bundle: File, name: string, layer: string) => {
+      setDialog((current) =>
+        current && current.kind === "import" ? { ...current, isPreviewing: true } : current,
+      );
+      setError(null);
+      try {
+        const report = await importRuntimeProfile(bundle, {
+          name: name || undefined,
+          layer,
+          dryRun: true,
+        });
+        setDialog({ kind: "import", isPreviewing: false, preview: report });
+      } catch (previewError) {
+        setDialog((current) =>
+          current && current.kind === "import" ? { ...current, isPreviewing: false } : current,
+        );
+        setError(formatProfileError(previewError, t("profiles.transfer.importFailed")));
+      }
+    },
+    [t],
+  );
+
+  const runImport = useCallback(
+    async (bundle: File, name: string, layer: string) => {
+      setPending("import");
+      setError(null);
+      setStatusMessage(null);
+      try {
+        const report = await importRuntimeProfile(bundle, { name: name || undefined, layer });
+        if (!report.imported) {
+          // 领域拒绝（D28-1：包过不了同一个 validate）：把问题清单留在对话框里，
+          // 不关对话框、不假装成功；此时后端未创建目标目录。
+          setDialog({ kind: "import", isPreviewing: false, preview: report });
+          setError(report.error || t("profiles.transfer.importFailed"));
+          return;
+        }
+        setDialog(null);
+        setStatusMessage(t("profiles.transfer.importSucceeded", { name: report.name }));
+        await refresh();
+      } catch (importError) {
+        setError(formatProfileError(importError, t("profiles.transfer.importFailed")));
+      } finally {
+        setPending(null);
+      }
+    },
+    [refresh, t],
+  );
+
   const filtered = useMemo(() => filterProfileEntries(entries, filter), [entries, filter]);
   const errorCount = entries.filter((entry) => !entry.valid).length;
   const busy = pending !== null;
@@ -309,6 +381,11 @@ export function ProfilesModeSection() {
           setDialog({ kind: "create" });
         }}
         onFilterChange={setFilter}
+        onImport={() => {
+          setError(null);
+          setStatusMessage(null);
+          setDialog({ kind: "import", isPreviewing: false, preview: null });
+        }}
         onRefresh={() => {
           void refresh();
         }}
@@ -364,6 +441,9 @@ export function ProfilesModeSection() {
               onDuplicate={(item) => {
                 setDialog({ kind: "duplicate", entry: item });
               }}
+              onExport={(item) => {
+                void runExport(item);
+              }}
               onMove={(item) => {
                 setDialog({ kind: "move", entry: item });
               }}
@@ -399,6 +479,12 @@ export function ProfilesModeSection() {
         }}
         onDuplicate={(entry, name, layer) => {
           void runDuplicate(entry, name, layer);
+        }}
+        onImportPreview={(bundle, name, layer) => {
+          void runImportPreview(bundle, name, layer);
+        }}
+        onImportSubmit={(bundle, name, layer) => {
+          void runImport(bundle, name, layer);
         }}
         onMove={(entry, layer) => {
           void runMove(entry, layer);

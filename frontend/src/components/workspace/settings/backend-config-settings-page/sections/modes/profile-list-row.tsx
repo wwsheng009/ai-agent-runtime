@@ -10,6 +10,7 @@ import {
   ArrowRightLeftIcon,
   CheckIcon,
   CopyIcon,
+  DownloadIcon,
   LinkIcon,
   PencilIcon,
   PencilLineIcon,
@@ -42,6 +43,11 @@ export type ProfileListRowProps = {
   onApply?: (entry: RuntimeProfileListEntry) => void;
   onDelete: (entry: RuntimeProfileListEntry) => void;
   onDuplicate: (entry: RuntimeProfileListEntry) => void;
+  /**
+   * 导出 zip（只读语义，但仍要求可解析根目录：builtin/config 条目没有可导出
+   * 的目录，故与写操作同样只在 writable 时开放）。
+   */
+  onExport: (entry: RuntimeProfileListEntry) => void;
   onMove: (entry: RuntimeProfileListEntry) => void;
   onOpen: (entry: RuntimeProfileListEntry) => void;
   onRename: (entry: RuntimeProfileListEntry) => void;
@@ -58,6 +64,7 @@ export function ProfileListRow({
   onApply,
   onDelete,
   onDuplicate,
+  onExport,
   onMove,
   onOpen,
   onRename,
@@ -168,6 +175,16 @@ export function ProfileListRow({
             }}
           >
             <LinkIcon size={13} />
+          </SettingsIconActionButton>
+          <SettingsIconActionButton
+            data-testid={`profiles-action-export-${entry.ref}`}
+            disabled={busy || !entry.writable}
+            label={t("profiles.list.export")}
+            onClick={() => {
+              onExport(entry);
+            }}
+          >
+            <DownloadIcon size={13} />
           </SettingsIconActionButton>
           <SettingsIconActionButton
             data-testid={`profiles-action-delete-${entry.ref}`}

@@ -5,7 +5,7 @@
 //
 // 本文件只构造 URL 与请求体，不发请求；端点实现见 queries.ts / mutations.ts。
 
-import { buildRuntimeUrl } from "../shared";
+import { buildRuntimeUrl, buildRuntimeUrlWithQuery } from "../shared";
 export const runtimeProfilesUrl = buildRuntimeUrl("/api/runtime/profiles");
 
 /** 单个 profile 的资源 URL；ref 可能含 `:` `/`，必须整段编码。 */
@@ -43,6 +43,24 @@ export function buildRuntimeProfileApplyUrl(ref: string) {
 
 export function buildRuntimeProfileReferencesUrl(ref: string) {
   return `${buildRuntimeProfileUrl(ref)}/references`;
+}
+
+/** 导出端点：POST + 二进制响应（zip），不是 JSON。 */
+export function buildRuntimeProfileExportUrl(ref: string) {
+  return `${buildRuntimeProfileUrl(ref)}/export`;
+}
+
+/** 导入端点：请求体是 zip 本身，name/layer/dry_run 一律走查询参数。 */
+export function buildRuntimeProfileImportUrl(query: {
+  name?: string;
+  layer?: string;
+  dryRun?: boolean;
+}) {
+  return buildRuntimeUrlWithQuery("/api/runtime/profiles/import", {
+    name: query.name,
+    layer: query.layer,
+    dry_run: query.dryRun === true ? "true" : undefined,
+  });
 }
 
 export const jsonRequestInit = (method: string, body: unknown): RequestInit => ({

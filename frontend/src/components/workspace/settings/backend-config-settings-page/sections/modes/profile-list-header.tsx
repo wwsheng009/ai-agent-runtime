@@ -1,9 +1,9 @@
-// Profiles 列表页头（纯展示）：标题 / 汇总胶囊 / 刷新与新建 / 过滤输入。
+// Profiles 列表页头（纯展示）：标题 / 汇总胶囊 / 刷新、导入与新建 / 过滤输入。
 //
 // 抽出的理由：profiles.tsx 只保留状态机（列表数据、对话框、编辑器），
 // 页头拆成无状态组件后既压缩宿主文件，也让「汇总数字口径」集中一处。
 
-import { RefreshCcwIcon, UserCogIcon } from "lucide-react";
+import { RefreshCcwIcon, UploadIcon, UserCogIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,8 @@ export type ProfileListHeaderProps = {
   isLoading: boolean;
   onCreate: () => void;
   onFilterChange: (value: string) => void;
+  /** 打开导入对话框（zip 包 → 先预演后落盘，D33）。 */
+  onImport: () => void;
   onRefresh: () => void;
 };
 
@@ -36,6 +38,7 @@ export function ProfileListHeader({
   isLoading,
   onCreate,
   onFilterChange,
+  onImport,
   onRefresh,
 }: ProfileListHeaderProps) {
   const { t } = useTranslation("runtimeConfig");
@@ -63,6 +66,17 @@ export function ProfileListHeader({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <Button
+            data-testid="profiles-import-open"
+            disabled={busy}
+            size="sm"
+            type="button"
+            variant="secondary"
+            onClick={onImport}
+          >
+            <UploadIcon size={14} />
+            {t("profiles.list.import")}
+          </Button>
           <Button
             disabled={isLoading || busy}
             size="sm"

@@ -4,9 +4,14 @@
 // `pending` 前缀约定（`create` / `rename:<ref>` / `delete:<ref>`），
 // 宿主与 profiles.tsx 的 pending 计算必须保持一致，否则按钮会假死。
 
-import type { RuntimeProfileCreateRequest, RuntimeProfileListEntry } from "@/types/runtime";
+import type {
+  RuntimeProfileCreateRequest,
+  RuntimeProfileImportReport,
+  RuntimeProfileListEntry,
+} from "@/types/runtime";
 
 import { ProfileCreateDialog } from "./profile-create-dialog";
+import { ProfileImportDialog } from "./profile-import-dialog";
 import {
   ProfileDeleteDialog,
   ProfileDuplicateDialog,
@@ -18,6 +23,7 @@ import type { ProfileReferenceItem } from "./profile-list-utils";
 
 export type ProfilesDialogState =
   | { kind: "create" }
+  | { kind: "import"; isPreviewing: boolean; preview: RuntimeProfileImportReport | null }
   | { kind: "rename"; entry: RuntimeProfileListEntry }
   | { kind: "duplicate"; entry: RuntimeProfileListEntry }
   | { kind: "move"; entry: RuntimeProfileListEntry }
@@ -42,6 +48,10 @@ export type ProfilesDialogHostProps = {
     name: string,
     layer: RuntimeProfileListEntry["layer"],
   ) => void;
+  /** 导入预演（dry_run=true，不落盘）。 */
+  onImportPreview: (bundle: File, name: string, layer: string) => void;
+  /** 真实导入（落位后绝不自动激活，D28）。 */
+  onImportSubmit: (bundle: File, name: string, layer: string) => void;
   onMove: (entry: RuntimeProfileListEntry, layer: RuntimeProfileListEntry["layer"]) => void;
   onRename: (entry: RuntimeProfileListEntry, name: string) => void;
 };
@@ -53,6 +63,8 @@ export function ProfilesDialogHost({
   onCreate,
   onDelete,
   onDuplicate,
+  onImportPreview,
+  onImportSubmit,
   onMove,
   onRename,
   pending,
@@ -69,6 +81,17 @@ export function ProfilesDialogHost({
           profiles={entries}
           onCancel={onClose}
           onSubmit={onCreate}
+        />
+      );
+    case "import":
+      return (
+        <ProfileImportDialog
+          isPreviewing={dialog.isPreviewing}
+          isSaving={pending === "import"}
+          preview={dialog.preview}
+          onCancel={onClose}
+          onPreview={onImportPreview}
+          onSubmit={onImportSubmit}
         />
       );
     case "rename":
