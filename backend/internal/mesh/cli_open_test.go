@@ -190,3 +190,40 @@ func TestCLIOpenHelp(t *testing.T) {
 		t.Fatalf("用法里应有 open:\n%s", stdout)
 	}
 }
+
+// TestCLIOpenTakeoverFlag 锁定 S15 的 CLI 入口：--takeover 透传到
+// SpawnRequest.Takeover（接管语义由 Spawn 与子进程负责），人读输出说明
+// 「旧节点继续运行」，且不带开关时保持零值（绝不顺手抢租约）。
+func TestCLIOpenTakeoverFlag(t *testing.T) {
+	paths := testCLIPaths(t)
+	cli := testCLI(paths, newFakeClock())
+
+	var gotReq SpawnRequest
+	cli.Spawn = func(req SpawnRequest, _ SpawnOptions) SpawnResult {
+		gotReq = req
+		return SpawnResult{Status: SpawnStatusStarted, SessionID: req.SessionID, NodeID: "node-new"}
+	}
+
+	code, stdout, stderr := runCLI(t, cli, "open", "session_takeover", "--takeover")
+	if code != ExitOK {
+		t.Fatalf("open --takeover exit = %d (stderr %q)", code, stderr)
+	}
+	if !gotReq.Takeover {
+		t.Fatalf("--takeover 必须透传 SpawnRequest.Takeover: %+v", gotReq)
+	}
+	if !strings.Contains(stdout, "接管") || !strings.Contains(stdout, "旧节点继续运行") {
+		t.Fatalf("人读输出应说明接管语义:\n%s", stdout)
+	}
+
+	code, _, stderr = runCLI(t, cli, "open", "session_plain")
+	if code != ExitOK {
+		t.Fatalf("open exit = %d (stderr %q)", code, stderr)
+	}
+	if gotReq.Takeover {
+		t.Fatalf("不带 --takeover 时不得置位: %+v", gotReq)
+	}
+
+	if _, usage, _ := runCLI(t, cli, "open", "--help"); !strings.Contains(usage, "--takeover") {
+		t.Fatalf("用法里应列出 --takeover:\n%s", usage)
+	}
+}

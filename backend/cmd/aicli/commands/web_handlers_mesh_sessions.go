@@ -138,6 +138,11 @@ func buildChatWebMeshSessionIndex(host *mesh.Host) chatWebMeshSessionIndex {
 		if node.State != mesh.NodeStateLive || node.Session == nil {
 			continue
 		}
+		if node.Session.State == mesh.SessionStateOrphaned {
+			// §4.4：租约已易主——旧节点仍在运行，但不再声称拥有该会话，
+			// 不算 claimant（否则接管完成后会立刻退化成假冲突）。
+			continue
+		}
 		id := strings.TrimSpace(node.Session.ID)
 		if id == "" {
 			continue
@@ -477,9 +482,10 @@ func chatWebResumeMeshGuard(targetID string) (string, map[string]any) {
 		"session_id": id,
 		"node_id":    node.NodeID,
 		"endpoint":   chatWebSessionEndpointFromNode(node),
-		// 接管（--takeover）是 P2 项：入口存在前恒为 false，前端据此不显示
-		// 「接管」动作（显示无效按钮比不显示更糟）。
-		"takeover_available": false,
+		// S15：接管入口已落地（CLI `aicli-mesh open --takeover` / Web 端
+		// 二次确认 → POST {takeover:true}，§4.4 / §6.3），前端据此显示
+		// 「接管并切换」动作；conflict 时仍然禁用（§5.7）。
+		"takeover_available": true,
 	}
 	if node.Endpoint != nil {
 		payload["web_url"] = node.Endpoint.WebBaseURL
@@ -488,4 +494,16 @@ func chatWebResumeMeshGuard(targetID string) (string, map[string]any) {
 		payload["workspace"] = node.Workspace.Path
 	}
 	return "running_elsewhere", payload
+}
+
+// chatWebTakeoverSession 执行 Web 端的显式接管（§4.4 / §6.3，S15）。
+//
+// 网格不可用或 host 缺失时返回 ok=false（MN1：绝不上报 5xx，也绝不假装接管
+// 成功）。真正回收租约的是 mesh.Host.TakeoverSession；本函数只做降级包装。
+func chatWebTakeoverSession(sessionID string) mesh.SessionTakeoverStatus {
+	host := mesh.Current()
+	if host == nil {
+		return mesh.SessionTakeoverStatus{Reason: "mesh-disabled"}
+	}
+	return host.TakeoverSession(sessionID)
 }

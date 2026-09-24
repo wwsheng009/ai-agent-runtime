@@ -54,12 +54,21 @@ func turnIDForIndex(index int) string {
 // / restoreChatStateFromRuntimeSession), so /new, resume, web session switch and
 // goal reconciliation are all covered by one hook.
 func syncChatMeshSession(session *ChatSession) {
-	if mesh.Current() == nil || session == nil || session.RuntimeSession == nil {
+	host := mesh.Current()
+	if host == nil || session == nil || session.RuntimeSession == nil {
 		return
 	}
 	sessionID := strings.TrimSpace(session.RuntimeSession.ID)
 	if sessionID == "" {
 		return
+	}
+	// S15：`aicli-mesh open --takeover` 拉起的进程带 AICLI_MESH_TAKEOVER=1，
+	// 在首个会话激活时显式回收租约（§4.4）。旧节点不会被杀：它在下一次心跳
+	// 发现租约易主，把自己的档案标成 orphaned 并提示。
+	if meshTakeoverRequested() {
+		if status := host.TakeoverSession(sessionID); !status.OK {
+			notifyMeshTakeoverFailure(sessionID, status)
+		}
 	}
 	mesh.SetCurrentSession(&mesh.SessionInfo{
 		ID:          sessionID,

@@ -81,6 +81,11 @@ type SpawnRequest struct {
 	WaitMS int
 	// Origin is the caller label for the audit trail ("web" / "cli").
 	Origin string
+	// Takeover skips the reuse short-circuit and asks the child to reclaim the
+	// session lease explicitly (architecture §4.4, `aicli-mesh open --takeover`).
+	// The old node is never killed: it marks itself orphaned on its next
+	// heartbeat and keeps running.
+	Takeover bool `json:"takeover,omitempty"`
 }
 
 // SpawnLaunchSpec is one detached launch. The caller (tests, CLI, HTTP layer)
@@ -188,12 +193,16 @@ func Spawn(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
 		return result
 	}
 
-	if node, ok := liveNodeForSession(paths, sessionID, now, opts.heartbeatTTL()); ok {
-		result.Status = SpawnStatusReused
-		result.Lease = "reused"
-		fillSpawnResultFromNode(&result, node, sessionID)
-		opts.appendSpawnAudit(JournalSpawnCompleted, result, "")
-		return result
+	// §4.4 显式接管：不复用旧节点（复用等于继续让它服务），直接拉起新进程；
+	// 旧节点由租约易主发现，不会被杀。
+	if !req.Takeover {
+		if node, ok := liveNodeForSession(paths, sessionID, now, opts.heartbeatTTL()); ok {
+			result.Status = SpawnStatusReused
+			result.Lease = "reused"
+			fillSpawnResultFromNode(&result, node, sessionID)
+			opts.appendSpawnAudit(JournalSpawnCompleted, result, "")
+			return result
+		}
 	}
 
 	owner := opts.owner()
@@ -207,11 +216,22 @@ func Spawn(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
 	}
 
 	// 锁内二次检查（§5.7）：两个请求几乎同时到达时，后到的那个不再拉进程。
-	if node, ok := liveNodeForSession(paths, sessionID, opts.now(), opts.heartbeatTTL()); ok {
-		result.Status = SpawnStatusReused
-		fillSpawnResultFromNode(&result, node, sessionID)
-		opts.appendSpawnAudit(JournalSpawnCompleted, result, "")
-		return result
+	// 接管请求例外：它就是要多起一个进程来顶掉旧节点。
+	if !req.Takeover {
+		if node, ok := liveNodeForSession(paths, sessionID, opts.now(), opts.heartbeatTTL()); ok {
+			result.Status = SpawnStatusReused
+			fillSpawnResultFromNode(&result, node, sessionID)
+			opts.appendSpawnAudit(JournalSpawnCompleted, result, "")
+			return result
+		}
+	}
+	// 接管：记下正被顶替的旧节点。等待新节点就绪时必须把它排除掉，否则会把
+	// 旧窗口的 URL 当成结果返回——用户点开的正是那个要被替换的窗口。
+	previousNodeID := ""
+	if req.Takeover {
+		if node, ok := liveNodeForSession(paths, sessionID, opts.now(), opts.heartbeatTTL()); ok {
+			previousNodeID = node.NodeID
+		}
 	}
 
 	if !outcome.Acquired {
@@ -257,7 +277,7 @@ func Spawn(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
 		return result
 	}
 
-	port := resolveSpawnPort(paths, sessionID, req.Port)
+	port := resolveSpawnPort(paths, sessionID, req.Port, req.Takeover)
 	token := opts.token()
 	logPath := opts.logPath(sessionID)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
@@ -272,7 +292,7 @@ func Spawn(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
 		Args:       spawnArgs(sessionID, port, token),
 		Dir:        workspace,
 		LogPath:    logPath,
-		Env:        spawnEnvForChild(opts.owner().NodeID),
+		Env:        spawnEnvForChild(opts.owner().NodeID, req.Takeover),
 	}
 	opts.appendSpawnAudit(JournalSpawnRequested, result, workspace)
 
@@ -298,7 +318,7 @@ func Spawn(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
 		return result
 	}
 
-	node, ok := opts.waitForLiveNode(paths, sessionID)
+	node, ok := opts.waitForLiveNodeExcluding(paths, sessionID, previousNodeID)
 	if !ok {
 		result.Status = SpawnStatusNotRunning
 		result.Code = SpawnCodeTimeout
@@ -353,12 +373,22 @@ func NewSpawnToken() string {
 // the owner process alive), and it is evaluated through BuildView so spawn,
 // `ls` and the HTTP layer never disagree about who owns a session (§7.5).
 func liveNodeForSession(paths Paths, sessionID string, now time.Time, ttl time.Duration) (NodeView, bool) {
+	return liveNodeForSessionExcluding(paths, sessionID, now, ttl, "")
+}
+
+// liveNodeForSessionExcluding is liveNodeForSession minus one node id. A
+// takeover spawn passes the node it is replacing: the old node is still live
+// until its next heartbeat, and handing its URL back would defeat the takeover.
+func liveNodeForSessionExcluding(paths Paths, sessionID string, now time.Time, ttl time.Duration, excludeNodeID string) (NodeView, bool) {
 	if !paths.Enabled() || strings.TrimSpace(sessionID) == "" {
 		return NodeView{}, false
 	}
 	view := BuildView(paths, ViewOptions{Now: now, HeartbeatTTL: ttl})
 	for _, node := range view.Nodes {
 		if node.State != NodeStateLive {
+			continue
+		}
+		if excludeNodeID != "" && node.NodeID == excludeNodeID {
 			continue
 		}
 		if sessionIDOf(node) != sessionID {
@@ -431,10 +461,15 @@ func spawnURLForEndpointPort(base string, port int, sessionID, token string) str
 }
 
 // resolveSpawnPort picks the loopback port: explicit request > session binding
-// preference > 0 (random free port, the child's own default).
-func resolveSpawnPort(paths Paths, sessionID string, requested int) int {
+// preference > 0 (random free port, the child's own default). A takeover spawn
+// ignores the binding preference: the node being taken over is still listening
+// on that port (architecture §4.4), so the new node must pick a free one.
+func resolveSpawnPort(paths Paths, sessionID string, requested int, takeover bool) int {
 	if requested >= 1 && requested <= 65535 {
 		return requested
+	}
+	if takeover {
+		return 0
 	}
 	if binding, ok := LoadBinding(paths, sessionID); ok && binding.Preferred != nil {
 		if port := binding.Preferred.Port; port >= 1 && port <= 65535 {
@@ -662,10 +697,16 @@ func (o SpawnOptions) workspaceFor(sessionID string) (string, bool) {
 // waitForLiveNode polls the node records until the session has a live node,
 // the budget lapses or the context is cancelled.
 func (o SpawnOptions) waitForLiveNode(paths Paths, sessionID string) (NodeView, bool) {
+	return o.waitForLiveNodeExcluding(paths, sessionID, "")
+}
+
+// waitForLiveNodeExcluding is waitForLiveNode minus one node id: a takeover
+// spawn must not mistake the node it is replacing for its own child.
+func (o SpawnOptions) waitForLiveNodeExcluding(paths Paths, sessionID, excludeNodeID string) (NodeView, bool) {
 	deadline := time.Now().Add(o.waitBudget())
 	interval := o.pollInterval()
 	for {
-		if node, ok := liveNodeForSession(paths, sessionID, o.now(), o.heartbeatTTL()); ok {
+		if node, ok := liveNodeForSessionExcluding(paths, sessionID, o.now(), o.heartbeatTTL(), excludeNodeID); ok {
 			return node, true
 		}
 		remaining := time.Until(deadline)

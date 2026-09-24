@@ -762,6 +762,7 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | S12 | `web_handlers_mesh_realtime_test.go` | `web/js/sessions.js`、`web/js/util.js`、`web/js/sse.js` | Web §10.2「实时徽标」+ 基线门禁 | 单测输出 + 手工验收 |
 | S13 | `web_handlers_mesh_polish_test.go` | `web/js/sessions.js`、`web/js/chat.js` | Web §10.2（标题后缀 / refused 文案）+ 基线门禁 | 单测输出 + 手工验收 |
 | S14 | `web_handlers_session_switch_test.go` | `web_handlers.go`、`web/js/sse.js`、`web/js/sessions.js` | Web §10.2（切换事件化）+ 基线门禁 | 单测输出 + 手工验收 |
+| S15 | `internal/mesh/takeover_test.go`、`commands/mesh_takeover.go` | `internal/mesh/{host,spawn,spawn_exec,cli,registry,view}.go`、`commands/{chat_mesh,web_handlers,web_handlers_mesh_sessions}.go`、`web/js/sessions.js`、`index.html` | 网格 §4.4（接管）+ Web §6.3 + 基线门禁 | 单测输出 + 双进程手工验收 |
 
 ---
 
@@ -970,6 +971,52 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 
 ---
 
+## 23. S15 · P2 ② 接管二次确认：`--takeover` + Web 入口 + 租约回收 + `orphaned` 提示
+
+> 来源：Web 子方案 §0.1 P2 ②「接管二次确认」。S13 对账时把它留给 S15（见 §21.1 / §22.4）。
+> 契约以网格方案 §4.4 为准：**接管是显式所有权转移，旧节点绝不被杀**——它在下一次心跳
+> 发现自己不再持有租约，把档案的会话段标成 `orphaned`、发一帧
+> `mesh.session.changed{event:"orphaned"}`、给操作者一条 warning，进程继续运行。
+
+### 23.1 范围与落点
+
+| 项 | 落点 | 说明 |
+| --- | --- | --- |
+| 数据模型 | `internal/mesh/registry.go`、`view.go` | `SessionInfo.Orphaned/OrphanedBy`；`SessionStateOrphaned = "orphaned"`；`buildNodeView` 在活节点上把状态改写为 `orphaned`（视图与档案同源） |
+| 租约回收 | `internal/mesh/host.go` | `Host.TakeoverSession(sessionID)`：唯一会抢活租约的入口（`AcquireOptions{Takeover:true}`），返回 `{OK, Reclaimed, PreviousOwnerNodeID, Reason}`；单槽位模型下先让出本进程当前会话；本地档案若已 `orphaned` 则清回正常态 |
+| 旧节点感知 | `internal/mesh/host.go` | 心跳 `Renew` 返回被抢 → journal `lease.degraded{holder_node_id}` + `markSessionOrphanedLocked`（幂等）：写档案、扇入 `peer.updated` + `session.changed{orphaned}`、warning 指名接管者 |
+| 拉起 | `internal/mesh/spawn.go`、`spawn_exec.go`、`cli.go` | `SpawnRequest.Takeover` 跳过两处「复用活节点」短路；`AICLI_MESH_TAKEOVER=1` 随环境下发（陈旧值一律清掉）；接管忽略会话绑定端口（旧节点还占着）；`aicli-mesh open <会话> --takeover` |
+| 子进程消费 | `commands/mesh_takeover.go`、`chat_mesh.go` | 首个会话激活读 `AICLI_MESH_TAKEOVER` 并**消费**（读到即清除，后续 /resume 不再抢租约）；接管失败只降级为一条诊断 |
+| Web 入口 | `web_handlers.go`、`web_handlers_mesh_sessions.go` | `POST /web/api/sessions/resume {takeover:true}`：只在 `running_elsewhere` 上生效，先回收租约再注入队列，响应 `status=taken_over` + `previous_owner_node_id`；接管失败 → `takeover_failed`（不注入、不 5xx）；`takeover_available` 由常量 `false` 改为 `true` |
+| 前端 | `web/js/sessions.js`、`web/index.html` | 冲突弹窗新增「接管并切换」按钮：第一次点击切到确认态，第二次才发 `{takeover:true}`；`conflict`（≥2 节点）时不显示；`orphaned` 徽标「⚠ 已让渡」+ 接管帧 toast |
+
+**不做**（按计划）：`conflict` 分支的自动接管——≥2 个活节点声称同一会话时仍需人工判断（网格方案 §5.7）；
+`orphaned` 节点的自动退出——网格绝不杀节点（网格方案 §4.4）。
+
+### 23.2 验证
+
+| 层 | 断言 |
+| --- | --- |
+| 租约单测 | `internal/mesh/takeover_test.go`：`TestHostTakeoverSessionReclaimsLeaseAndOrphansOwner`（接管 → 租约易主 + `lease.reclaimed` → 旧节点心跳标 `orphaned` + `lease.degraded` + warning + 视图 `state=orphaned` + 幂等不复活）、`TestHostTakeoverSessionRefusals`、`TestHostTakeoverSessionClearsOwnOrphanedRecord` |
+| 拉起单测 | 同文件：`TestSpawnTakeoverStartsNewNodeAndSkipsReuse`（对照组复用 / 接管拉新进程 / 环境带标记 / 不抢旧端口 / 结果指向新窗口）、`TestResolveSpawnPortTakeoverIgnoresBinding`、`TestSpawnEnvForChildTakeoverMarker`；`cli_open_test.go::TestCLIOpenTakeoverFlag` |
+| 进程侧单测 | `commands/mesh_takeover_test.go`：标记一次性消费（`ConsumesMarkerOnce` / `OnlyAcceptsTruthy` / 失败降级不 panic） |
+| Web 单测 | `web_handlers_mesh_sessions_test.go`：`TestHandleChatWebAPISessionsResume_Takeover`（接管成功 → `taken_over` + 租约归本进程 + 入队；`conflict` 带 takeover 仍拒绝且不碰租约；`force` 不回收租约）；`takeover_available=true`；前端契约（按钮 id / `payload.takeover = true` / `takeover_failed`） |
+| 门禁 | `go build ./...`、`go test ./internal/mesh/ ./cmd/aicli/commands/`、`gofmt -l` 空、`node --check`（ES 模块语法） |
+| 手工 | 双进程：A 持有会话 → `aicli-mesh open <会话> --takeover` → A 的窗口出现「已让渡」徽标 + warning，B 的 URL 可用；Web 端冲突弹窗走二次确认 |
+
+### 23.3 落地记录（2026-09-24）
+
+| 项 | 实际 |
+| --- | --- |
+| 服务端 | `host.go`（`TakeoverSession` / `markSessionOrphanedLocked` / 接管者取名）、`spawn.go`（跳过复用 + 等待时排除旧节点 + 端口规则）、`spawn_exec.go`（`AICLI_MESH_TAKEOVER`）、`cli.go`（`--takeover` + 人读提示）、`registry.go` / `view.go`（`orphaned` 字段与状态） |
+| 进程侧 | `commands/mesh_takeover.go`（一次性标记 + 失败诊断）、`chat_mesh.go::syncChatMeshSession` 接管钩子 |
+| Web | `web_handlers.go`（请求字段 + 接管分支）、`web_handlers_mesh_sessions.go`（`takeover_available` + 接管执行 + `orphaned` 不算 claimant）、`web/js/sessions.js`、`web/index.html` |
+| 单测 | `internal/mesh/takeover_test.go`（新建）、`cli_open_test.go`（+1）、`commands/mesh_takeover_test.go`（新建）、`web_handlers_mesh_sessions_test.go`（+1 与契约扩容） |
+| 施工期发现（写测试时暴露，已修） | ① `waitForLiveNode` 会把「正被顶替的旧节点」当成结果返回 → 用户拿到的是旧窗口 URL；改为排除旧节点 id。② 接管标记只清环境变量、不清内存位 → 同一进程后续每次会话切换都会再抢一次租约；改为读到即清零 |
+| 未做（按计划） | `conflict` 自动接管、`orphaned` 节点自动退出——见 §23.1「不做」 |
+
+---
+
 ## 附录：本文与三份基准文档的分工
 
 | 文档 | 回答的问题 | 何时看 |
@@ -981,4 +1028,5 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 
 > 变更记录：2026-09-24 初版（S1–S10 + 验收 / 回滚 / 锚点核验）；
 > 2026-09-24 追加 §19（S11 · Web 侧收口一）与 §19.4 落地记录（sessions 便捷视图 + 前端徽标/分组/开关 + resume 冲突）。
+> 2026-09-24 追加 §23（S15 · 接管二次确认：CLI `--takeover` / Web 入口 / 租约回收 / `orphaned` 提示）与 §23.3 落地记录。
 > 每完成一个切片，在 §15.3 登记实际偏差，并回填网格方案 §11.6。

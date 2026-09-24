@@ -52,6 +52,10 @@ const (
 	SessionStateBusy    = "busy"
 	SessionStateIdle    = "idle"
 	SessionStateUnknown = "unknown"
+	// SessionStateOrphaned marks a live node whose session lease was taken
+	// over by another node (architecture §4.4): the process keeps running but
+	// no longer owns the session it serves.
+	SessionStateOrphaned = "orphaned"
 )
 
 // Probe defaults (architecture §4.3): the list must stay usable even when a
@@ -110,12 +114,15 @@ type AuthView struct {
 }
 
 // SessionView is the session section of a node plus the derived state.
+// OrphanedBy names the node that took this session's lease over (empty unless
+// State is orphaned and the taker is known).
 type SessionView struct {
 	ID          string    `json:"id"`
 	Title       string    `json:"title,omitempty"`
 	State       string    `json:"state"`
 	Busy        bool      `json:"busy"`
 	TurnID      string    `json:"turn_id,omitempty"`
+	OrphanedBy  string    `json:"orphaned_by,omitempty"`
 	ActivatedAt time.Time `json:"activated_at,omitempty"`
 }
 
@@ -413,6 +420,10 @@ func buildNodeView(paths Paths, file NodeFile, now time.Time, heartbeatTTL time.
 	}
 	if record.Session != nil && strings.TrimSpace(record.Session.ID) != "" {
 		session := record.Session
+		orphanedBy := ""
+		if session.Orphaned {
+			orphanedBy = strings.TrimSpace(session.OrphanedBy)
+		}
 		node.Session = &SessionView{
 			ID:          session.ID,
 			Title:       session.Title,
@@ -420,6 +431,7 @@ func buildNodeView(paths Paths, file NodeFile, now time.Time, heartbeatTTL time.
 			Busy:        session.Busy,
 			TurnID:      session.TurnID,
 			ActivatedAt: session.ActivatedAt,
+			OrphanedBy:  orphanedBy,
 		}
 		if binding, ok := LoadBinding(paths, session.ID); ok {
 			node.Binding = &binding
@@ -431,6 +443,11 @@ func buildNodeView(paths Paths, file NodeFile, now time.Time, heartbeatTTL time.
 	node.State = effectiveNodeState(file.State, record, now, heartbeatTTL)
 	if node.Session != nil {
 		node.Session.State = sessionState(node.State, node.Session.Busy)
+		if node.State == NodeStateLive && record.Session.Orphaned {
+			// §4.4：租约被别的节点显式接管后本进程继续运行，档案的会话状态
+			// 标为 orphaned（接管者是谁在 orphaned_by 里，可能未知）。
+			node.Session.State = SessionStateOrphaned
+		}
 	}
 	return node
 }

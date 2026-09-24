@@ -76,6 +76,12 @@ type SessionInfo struct {
 	Busy        bool      `json:"busy"`
 	TurnID      string    `json:"turn_id,omitempty"`
 	ActivatedAt time.Time `json:"activated_at,omitempty"`
+	// Orphaned marks a session whose lease another node took over while this
+	// process was still running (architecture §4.4): the process keeps serving
+	// but no longer owns the session. OrphanedBy names the taker when it is
+	// known (empty means "somebody else", e.g. the lease file was unreadable).
+	Orphaned   bool   `json:"orphaned,omitempty"`
+	OrphanedBy string `json:"orphaned_by,omitempty"`
 }
 
 // WorkspaceInfo is a filter/grouping dimension only — never a permission or

@@ -22,6 +22,11 @@ import (
 // parent node in the node record (§3.1) and reports origin=mesh (§7.2).
 const spawnEnvSpawnedBy = "AICLI_MESH_SPAWNED_BY"
 
+// spawnEnvTakeover marks a child started by `aicli-mesh open --takeover`: the
+// child reclaims the session lease when it activates the session (architecture
+// §4.4) instead of degrading to "held". Mirrors cmd/aicli's meshEnvTakeover.
+const spawnEnvTakeover = "AICLI_MESH_TAKEOVER"
+
 // launchDetached starts spec.Executable and returns its pid without ever
 // waiting for it. A launch failure (missing binary, bad cwd, ...) is returned
 // so Spawn can answer `failed` with the log tail.
@@ -82,20 +87,31 @@ func openSpawnLog(path string) (*os.File, func(), error) {
 }
 
 // spawnEnvForChild is the child environment: ours plus the parent node id, so
-// the spawned node shows up with origin=mesh and spawned_by=<parent>.
-func spawnEnvForChild(selfNodeID string) []string {
+// the spawned node shows up with origin=mesh and spawned_by=<parent>. With
+// takeover it also carries the explicit-takeover marker; both variables are
+// always rewritten (a stale value must never leak into an unrelated child).
+func spawnEnvForChild(selfNodeID string, takeover bool) []string {
 	env := os.Environ()
-	selfNodeID = strings.TrimSpace(selfNodeID)
-	if selfNodeID == "" {
-		return env
-	}
-	prefix := spawnEnvSpawnedBy + "="
-	out := make([]string, 0, len(env)+1)
+	drop := []string{spawnEnvSpawnedBy + "=", spawnEnvTakeover + "="}
+	out := make([]string, 0, len(env)+2)
 	for _, entry := range env {
-		if strings.HasPrefix(entry, prefix) {
-			continue
+		skip := false
+		for _, prefix := range drop {
+			if strings.HasPrefix(entry, prefix) {
+				skip = true
+				break
+			}
 		}
-		out = append(out, entry)
+		if !skip {
+			out = append(out, entry)
+		}
 	}
-	return append(out, prefix+selfNodeID)
+	selfNodeID = strings.TrimSpace(selfNodeID)
+	if selfNodeID != "" {
+		out = append(out, spawnEnvSpawnedBy+"="+selfNodeID)
+	}
+	if takeover {
+		out = append(out, spawnEnvTakeover+"=1")
+	}
+	return out
 }

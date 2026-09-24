@@ -172,7 +172,7 @@ func (c *CLI) printUsage(w io.Writer) {
   aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--allow-write] [--timeout 130s] [--json]
   aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--json]
   aicli-mesh screen <节点|会话> [--view tui] [--tail N] [--format json|text] [--json]
-  aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--json]
+  aicli-mesh open <会话> [--port N] [--wait 8s] [--no-wait] [--takeover] [--json]
   aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
   aicli-mesh doctor [--json]
   aicli-mesh version [--json]
@@ -187,6 +187,8 @@ func (c *CLI) printUsage(w io.Writer) {
 拉起（open）: 复用该会话的活节点，或在其工作区拉起新进程，并打印 §7.3 窗口 URL
   （含令牌，交给浏览器自举）。与 POST /web/api/mesh/spawn 同一套实现；CLI 不是
   节点，单飞租约的 owner 记作 cli-<pid>。--no-wait 只报告已启动，不等就绪。
+  --takeover 跳过复用并显式回收该会话的租约（§4.4）：旧节点继续运行，但会在
+  下次心跳后把自己的档案标记为 orphaned（不会被杀；用 aicli-mesh show 查看）。
 
 退出码:
   0 成功            1 用法/参数错误      2 目标不存在或无法唯一确定
@@ -2227,11 +2229,12 @@ type openResult struct {
 // 租约文件是可回收的审计记录，不冒充节点身份。
 func (c *CLI) runOpen(args []string) int {
 	parsed, err := parseArgs(args, flagSpec{
-		"port":    flagValue,
-		"wait":    flagValue,
-		"no-wait": flagBool,
-		"json":    flagBool,
-		"help":    flagBool,
+		"port":     flagValue,
+		"wait":     flagValue,
+		"no-wait":  flagBool,
+		"takeover": flagBool,
+		"json":     flagBool,
+		"help":     flagBool,
 	})
 	if err != nil {
 		return c.fail(ExitUsage, "aicli-mesh open: %v", err)
@@ -2268,7 +2271,13 @@ func (c *CLI) runOpen(args []string) int {
 	}
 
 	result := c.spawn()(
-		SpawnRequest{SessionID: sessionID, Port: port, WaitMS: int(wait / time.Millisecond), Origin: "cli"},
+		SpawnRequest{
+			SessionID: sessionID,
+			Port:      port,
+			WaitMS:    int(wait / time.Millisecond),
+			Origin:    "cli",
+			Takeover:  parsed.boolean("takeover"),
+		},
 		SpawnOptions{
 			Paths:         paths,
 			Now:           c.now,
@@ -2283,6 +2292,9 @@ func (c *CLI) runOpen(args []string) int {
 		}
 	} else {
 		c.printSpawnHuman(result)
+		if parsed.boolean("takeover") && result.Status == SpawnStatusStarted {
+			fmt.Fprintln(c.out(), "接管：新节点将在会话激活时回收租约；旧节点继续运行并标记 orphaned（不会被杀）。")
+		}
 	}
 	return openExitCode(result.Status)
 }

@@ -464,11 +464,155 @@ func (h *Host) renewSessionLeaseLocked(now time.Time) {
 	}
 	h.leaseHeld = false
 	h.leaseLost = true
-	h.journal.Append(JournalLeaseDegraded, h.leaseKey, map[string]any{
+	detail := map[string]any{
 		"purpose": h.leasePurpose,
 		"key":     h.leaseKey,
 		"reason":  "taken-over",
+	}
+	takenBy := h.leaseTakerLocked()
+	if takenBy != "" {
+		detail["holder_node_id"] = takenBy
+	}
+	h.journal.Append(JournalLeaseDegraded, h.leaseKey, detail)
+	// §4.4：租约易主不是错误——本进程继续运行，档案标 orphaned 并提示操作者。
+	h.markSessionOrphanedLocked(h.leaseKey, takenBy)
+}
+
+// leaseTakerLocked names the current owner of this host's session lease when it
+// is no longer us (best effort: an unreadable or vanished lease yields "").
+// Called with h.mu held.
+func (h *Host) leaseTakerLocked() string {
+	if h.leasePurpose == "" || h.leaseKey == "" {
+		return ""
+	}
+	lease, ok := ReadLease(h.paths.LeasePath(h.leasePurpose, h.leaseKey))
+	if !ok || lease.OwnedBy(LeaseOwner{NodeID: h.nodeID, PID: os.Getpid()}) {
+		return ""
+	}
+	return strings.TrimSpace(lease.OwnerNodeID)
+}
+
+// markSessionOrphanedLocked records that another node took this session's lease
+// over (architecture §4.4): the session段 of the record flips to orphaned (the
+// views render state=orphaned), the local fan-in gets a session.changed frame so
+// the UI can banner it, and the operator gets one warning naming the taker. The
+// process itself keeps running — the mesh never kills a node. Called with h.mu
+// held.
+func (h *Host) markSessionOrphanedLocked(sessionID, byNodeID string) {
+	if h.record.Session == nil || strings.TrimSpace(h.record.Session.ID) != strings.TrimSpace(sessionID) {
+		return
+	}
+	if h.record.Session.Orphaned && h.record.Session.OrphanedBy == byNodeID {
+		return
+	}
+	h.record.Session.Orphaned = true
+	h.record.Session.OrphanedBy = byNodeID
+	h.touchLocked()
+	if err := h.writeRecordLocked(); err != nil {
+		h.warn("cannot mark session %s orphaned: %v", sessionID, err)
+	}
+	h.publishPeerUpdatedLocked(h.sessionStateLocked())
+	h.publishSessionChangedLocked("orphaned", sessionID, map[string]any{"by_node_id": byNodeID})
+	if byNodeID != "" {
+		h.warn("会话 %s 已被节点 %s 接管：本进程继续运行，但不再拥有该会话（aicli-mesh show %s）", sessionID, byNodeID, sessionID)
+	} else {
+		h.warn("会话 %s 的租约已易主：本进程继续运行，但不再拥有该会话（aicli-mesh show %s）", sessionID, sessionID)
+	}
+}
+
+// SessionTakeoverStatus reports the outcome of an explicit takeover (§4.4).
+type SessionTakeoverStatus struct {
+	// OK is true when this host owns the session lease after the call.
+	OK bool
+	// Reclaimed is true when the call took the lease from another owner
+	// (false when the lease was free or already ours).
+	Reclaimed bool
+	// PreviousOwnerNodeID names the node that held the lease before the call
+	// (best effort: "" when it was free or unreadable).
+	PreviousOwnerNodeID string
+	// Reason is a stable machine-readable cause when OK is false:
+	// "mesh-disabled" | "no-session" | <lease reason>.
+	Reason string
+}
+
+// TakeoverSession reclaims a session lease explicitly (architecture §4.4): the
+// `aicli-mesh open --takeover` / Web 二次确认 path. Every other acquire path
+// refuses to steal a live lease; this one is the only one that does. The
+// previous owner is never killed — it notices on its next heartbeat, flips its
+// record to orphaned and keeps running (§4.4).
+func (h *Host) TakeoverSession(sessionID string) SessionTakeoverStatus {
+	if h == nil {
+		return SessionTakeoverStatus{Reason: "mesh-disabled"}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed || !h.paths.Enabled() || h.nodeID == "" {
+		return SessionTakeoverStatus{Reason: "mesh-disabled"}
+	}
+	id := strings.TrimSpace(sessionID)
+	if id == "" {
+		return SessionTakeoverStatus{Reason: "no-session"}
+	}
+	owner := LeaseOwner{NodeID: h.nodeID, PID: os.Getpid()}
+	previous := ""
+	if lease, ok := ReadLease(h.paths.LeasePath(LeasePurposeSession, id)); ok && !lease.OwnedBy(owner) {
+		previous = strings.TrimSpace(lease.OwnerNodeID)
+	}
+	outcome := Acquire(h.paths, LeasePurposeSession, id, owner, AcquireOptions{
+		Now:      h.cfg.Now(),
+		TTL:      h.cfg.HeartbeatTTL,
+		Takeover: true,
 	})
+	detail := map[string]any{
+		"purpose":  LeasePurposeSession,
+		"key":      id,
+		"ttl_sec":  int(h.cfg.HeartbeatTTL / time.Second),
+		"explicit": true,
+	}
+	if !outcome.Acquired {
+		reason := outcome.Reason
+		if reason == "" {
+			reason = LeaseReasonDegraded
+		}
+		detail["reason"] = reason
+		if outcome.Holder != nil {
+			detail["holder_node_id"] = outcome.Holder.OwnerNodeID
+		}
+		h.journal.Append(JournalLeaseDegraded, id, detail)
+		return SessionTakeoverStatus{Reason: reason, PreviousOwnerNodeID: previous}
+	}
+	if h.leaseHeld && h.leaseKey != "" && h.leaseKey != id {
+		// 单槽位：接管目标会话前先让出本进程当前会话的租约（马上就会切过去）。
+		h.releaseSessionLeaseLocked()
+	}
+	h.leasePurpose = LeasePurposeSession
+	h.leaseKey = id
+	h.leaseHeld = true
+	h.leaseLost = false
+	if outcome.Reclaimed {
+		if previous != "" {
+			detail["previous_owner_node_id"] = previous
+		}
+		h.journal.Append(JournalLeaseReclaimed, id, detail)
+	}
+	h.journal.Append(JournalLeaseAcquired, id, detail)
+	if h.record.Session != nil && strings.TrimSpace(h.record.Session.ID) == id && h.record.Session.Orphaned {
+		// 之前被别人接管过、现在显式收回：档案回到正常状态。
+		h.record.Session.Orphaned = false
+		h.record.Session.OrphanedBy = ""
+		h.touchLocked()
+		if err := h.writeRecordLocked(); err != nil {
+			h.warn("cannot clear orphaned state of session %s: %v", id, err)
+		}
+	}
+	h.publishSessionChangedLocked("ownership", id, map[string]any{
+		"lease_state":            h.leaseLabelLocked(),
+		"lease_held":             true,
+		"reason":                 "takeover",
+		"previous_owner_node_id": previous,
+	})
+	h.publishPeerUpdatedLocked(h.sessionStateLocked())
+	return SessionTakeoverStatus{OK: true, Reclaimed: outcome.Reclaimed, PreviousOwnerNodeID: previous}
 }
 
 // releaseSessionLeaseLocked drops the session lease on deactivation or exit.
@@ -725,6 +869,15 @@ func (h *Host) sessionStateLocked() map[string]any {
 	data["session_id"] = h.record.Session.ID
 	data["busy"] = h.record.Session.Busy
 	data["title"] = h.record.Session.Title
+	if h.record.Session.Orphaned {
+		// §4.4：租约已被别的节点接管——订阅者（本进程 UI / 其它节点）看到的
+		// 是 orphaned，而不是「还在服务」的假象。
+		data["state"] = SessionStateOrphaned
+		if by := strings.TrimSpace(h.record.Session.OrphanedBy); by != "" {
+			data["orphaned_by"] = by
+		}
+		return data
+	}
 	if h.record.Session.Busy {
 		data["state"] = "busy"
 	}

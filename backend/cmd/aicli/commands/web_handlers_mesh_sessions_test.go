@@ -266,6 +266,19 @@ func postChatWebResume(t *testing.T, sessionID string, force bool) *httptest.Res
 	return rec
 }
 
+// postChatWebResumeTakeover 走一遍 resume 端点，带 {takeover:true}（S15 的显式
+// 接管分支：只在 running_elsewhere 上生效，conflict 仍然拒绝）。
+func postChatWebResumeTakeover(t *testing.T, sessionID string) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"session_id": sessionID, "takeover": true})
+	if err != nil {
+		t.Fatalf("marshal resume 请求: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISessionsResume(rec, httptest.NewRequest(http.MethodPost, ChatWebAPISessionsResumePath, bytes.NewReader(raw)))
+	return rec
+}
+
 // findChatWebSessionItem 按 id 找条目（列表顺序由排序决定，断言不该依赖它）。
 func findChatWebSessionItem(items []chatWebSessionListItem, id string) (chatWebSessionListItem, bool) {
 	for _, item := range items {
@@ -446,8 +459,9 @@ func TestHandleChatWebAPISessionsResume_MeshOwnershipGuard(t *testing.T) {
 	if blocked["workspace"] != `E:\ws\two` {
 		t.Fatalf("running_elsewhere 缺少工作区: %+v", blocked)
 	}
-	if blocked["takeover_available"] != false {
-		t.Fatalf("takeover_available 恒为 false（--takeover 是 P2 项）: %+v", blocked)
+	// S15：接管入口已落地，前端据此显示「接管并切换」（conflict 分支不给）。
+	if blocked["takeover_available"] != true {
+		t.Fatalf("takeover_available 必须为 true（S15 接管已落地）: %+v", blocked)
 	}
 	if count := queuedInputCount(session.InputQueue); count != 0 {
 		t.Fatalf("被拦下的 resume 不得注入队列，queued=%d", count)
@@ -474,6 +488,78 @@ func TestHandleChatWebAPISessionsResume_MeshOwnershipGuard(t *testing.T) {
 	first, _ := nodes[0].(map[string]any)
 	if first["node_id"] != "node-20260101T000000Z-302" {
 		t.Fatalf("冲突节点顺序不稳定（应按 node_id 升序）: %+v", nodes)
+	}
+	if _, ok := conflict["takeover_available"]; ok {
+		t.Fatalf("conflict 不得提供接管开关（§5.7）: %+v", conflict)
+	}
+}
+
+// TestHandleChatWebAPISessionsResume_Takeover 锁定 S15 的 Web 接管路径（§4.4 / §6.3）：
+// running_elsewhere + {takeover:true} → 显式回收租约后再注入 /resume，响应带
+// previous_owner_node_id；conflict 即使带 takeover 也仍然拒绝（§5.7），且绝不悄悄
+// 回收别人的租约；force=true 保持旧逃生门语义（跳过检查，但不碰租约）。
+func TestHandleChatWebAPISessionsResume_Takeover(t *testing.T) {
+	host := meshTestHost(t)
+	host.SetSession(&mesh.SessionInfo{ID: "session-current", Title: "self"})
+	peerID := "node-20260101T000000Z-501"
+	seedMeshSessionsTestNode(t, host.Paths(), peerID, "session-history", `E:\ws\two`, true)
+	seedMeshSessionsTestNode(t, host.Paths(), "node-20260101T000000Z-502", "session-conflict", `E:\ws\two`, false)
+	seedMeshSessionsTestNode(t, host.Paths(), "node-20260101T000000Z-503", "session-conflict", `E:\ws\three`, false)
+
+	// peer 真的持有该会话的租约：接管回收的是它，而不只是一个档案。
+	acquire := func(sessionID, ownerID string) {
+		t.Helper()
+		outcome := mesh.Acquire(host.Paths(), mesh.LeasePurposeSession, sessionID,
+			mesh.LeaseOwner{NodeID: ownerID, PID: os.Getpid()}, mesh.AcquireOptions{TTL: time.Minute})
+		if !outcome.Acquired {
+			t.Fatalf("前置失败：%s 未能拿到 %s 的租约: %+v", ownerID, sessionID, outcome)
+		}
+	}
+	acquire("session-history", peerID)
+
+	session := newMeshWebSessionsTestSession(t, "session-current", nil, "session-history", "session-conflict")
+	withWebTestSession(t, session)
+
+	// 1) running_elsewhere + takeover=true：先回收租约，再注入 /resume。
+	rec := postChatWebResumeTakeover(t, "session-history")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	got := decodeChatWebJSONMap(t, rec)
+	if got["status"] != "taken_over" {
+		t.Fatalf("status = %v, want taken_over: %+v", got["status"], got)
+	}
+	if got["previous_owner_node_id"] != peerID {
+		t.Fatalf("必须报告被接管的节点: %+v", got)
+	}
+	if count := queuedInputCount(session.InputQueue); count != 1 {
+		t.Fatalf("接管成功后必须注入 /resume，queued=%d", count)
+	}
+	if lease, ok := mesh.ReadLease(host.Paths().LeasePath(mesh.LeasePurposeSession, "session-history")); !ok || lease.OwnerNodeID != host.NodeID() {
+		t.Fatalf("接管后租约必须归本进程: %+v", lease)
+	}
+
+	// 2) conflict + takeover=true：仍然拒绝（§5.7），不注入、不回收租约。
+	conflict := decodeChatWebJSONMap(t, postChatWebResumeTakeover(t, "session-conflict"))
+	if conflict["status"] != "conflict" {
+		t.Fatalf("conflict 不得被 takeover 绕过: %+v", conflict)
+	}
+	if count := queuedInputCount(session.InputQueue); count != 1 {
+		t.Fatalf("被拒的接管不得注入队列，queued=%d", count)
+	}
+	if lease, ok := mesh.ReadLease(host.Paths().LeasePath(mesh.LeasePurposeSession, "session-conflict")); ok && lease.OwnerNodeID == host.NodeID() {
+		t.Fatalf("conflict 分支不得回收租约: %+v", lease)
+	}
+
+	// 3) force=true 仍是「原地切换」的逃生门：跳过检查，但不顺带回收租约
+	//    （回收只能来自显式 takeover，§4.4）。
+	acquire("session-conflict", "node-20260101T000000Z-502")
+	forced := decodeChatWebJSONMap(t, postChatWebResume(t, "session-conflict", true))
+	if forced["status"] != "queued" {
+		t.Fatalf("force=true 必须保持旧语义: %+v", forced)
+	}
+	if lease, ok := mesh.ReadLease(host.Paths().LeasePath(mesh.LeasePurposeSession, "session-conflict")); !ok || lease.OwnerNodeID == host.NodeID() {
+		t.Fatalf("force 不得回收租约: %+v", lease)
 	}
 }
 
@@ -546,6 +632,10 @@ func TestChatWebSessionsAssetHasMeshOwnershipView(t *testing.T) {
 				"session-conflict-overlay",
 				"session-conflict-open-btn",
 				"session-conflict-force-btn",
+				// S15 接管（§4.4 / §6.3）：二次确认按钮 + {takeover:true} + 失败提示。
+				"session-conflict-takeover-btn",
+				"payload.takeover = true",
+				"takeover_failed",
 				"running_elsewhere",
 				"payload.force = true",
 			},
@@ -561,6 +651,7 @@ func TestChatWebSessionsAssetHasMeshOwnershipView(t *testing.T) {
 				`id="session-conflict-text"`,
 				`id="session-conflict-open-btn"`,
 				`id="session-conflict-force-btn"`,
+				`id="session-conflict-takeover-btn"`,
 				`id="about-mesh"`,
 			},
 		},

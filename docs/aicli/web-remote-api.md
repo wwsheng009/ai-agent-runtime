@@ -812,11 +812,18 @@ Invoke-RestMethod 'http://127.0.0.1:51234/web/api/sessions?scope=all&sort=update
 
 | `status` | HTTP | 何时 | 响应附加字段 |
 |----------|------|------|--------------|
-| `running_elsewhere` | 200 | 恰有 1 个**别的**活节点声称该会话 | `node_id` / `endpoint`（同 §9.3 形状）/ `web_url`（有端点时）/ `workspace` / `takeover_available:false`（接管是 P2 项，入口未落地） |
+| `running_elsewhere` | 200 | 恰有 1 个**别的**活节点声称该会话 | `node_id` / `endpoint`（同 §9.3 形状）/ `web_url`（有端点时）/ `workspace` / `takeover_available:true`（S15：接管入口已落地，见下） |
 | `conflict` | 200 | ≥2 个活节点声称同一会话（§4.4 冲突） | `nodes[]`：`node_id` / `pid` / `workspace` / `heartbeat_at`，按 `node_id` 升序 |
 
 两者都**不注入队列**；`force=true` 跳过检查直接注入（前端在冲突弹窗里由用户显式选
 「仍在本进程切换」时才带；`conflict` 时前端禁用该动作，提示先跑 `aicli-mesh doctor`）。
+
+请求体另可带 `takeover`（bool，缺省 `false`，**S15 落地**）：仅在 `running_elsewhere` 上生效——
+显式回收会话租约（网格 §4.4：这是唯一会抢活租约的入口）后按旧语义注入队列，响应
+`status=taken_over` + `previous_owner_node_id`。**旧节点不会被杀**：它在下一次心跳发现自己
+不再持有租约，把档案的会话段标成 `orphaned` 并提示操作者（`aicli-mesh show <session>`）。
+回收失败 → `status=takeover_failed` + `reason`（不注入、HTTP 仍 200）；`conflict`（≥2 节点）
+时带 `takeover` 也一律拒绝，且不回收任何租约（§5.7）。CLI 等价入口：`aicli-mesh open <session> --takeover`。
 
 ```bash
 # 被拦下：换到那个窗口，或显式 force 在本进程切换
@@ -824,6 +831,9 @@ curl -s -X POST http://127.0.0.1:51234/web/api/sessions/resume \
   -H 'Content-Type: application/json' -d '{"session_id":"sess-20260924-abc"}'
 curl -s -X POST http://127.0.0.1:51234/web/api/sessions/resume \
   -H 'Content-Type: application/json' -d '{"session_id":"sess-20260924-abc","force":true}'
+# 显式接管：回收租约并切换（旧窗口继续运行，但会标记为已让渡）
+curl -s -X POST http://127.0.0.1:51234/web/api/sessions/resume \
+  -H 'Content-Type: application/json' -d '{"session_id":"sess-20260924-abc","takeover":true}'
 ```
 
 **降级**：网格关闭（`--mesh=false`）/ 网格不可读 / 占用者就是本进程 → 旧语义（`queued`），

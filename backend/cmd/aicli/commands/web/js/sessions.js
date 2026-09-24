@@ -36,8 +36,11 @@ var sessionConflictHintEl = document.getElementById("session-conflict-hint");
 var sessionConflictNodesEl = document.getElementById("session-conflict-nodes");
 var sessionConflictOpenBtn = document.getElementById("session-conflict-open-btn");
 var sessionConflictForceBtn = document.getElementById("session-conflict-force-btn");
+var sessionConflictTakeoverBtn = document.getElementById("session-conflict-takeover-btn");
 var sessionConflictCancelBtn = document.getElementById("session-conflict-cancel-btn");
 var sessionConflictCloseBtn = document.getElementById("session-conflict-close");
+// 「接管并切换」的二次确认态（§6.3）：第一次点击只把按钮切到确认态。
+var conflictTakeoverArmed = false;
 var pendingConflict = null;      // 冲突弹窗上下文 {sessionId, kind, nodeId, workspace, nodes}
 var sessions = [];               // 会话列表缓存（GET /web/api/sessions）
 var sessionsQuery = "";          // 会话列表搜索词（纯前端过滤）
@@ -402,6 +405,13 @@ function sessionBadge(s) {
     return own === "owner"
       ? { cls: "sb-running", text: "● 运行中（本窗口）", title: "本进程正在服务该会话" }
       : { cls: "sb-running", text: "● 运行中" + (addr ? " @" + addr : ""), title: "别的活节点正在服务该会话（打开新窗口 = 复用对方节点）" };
+  }
+  if (state === "orphaned") {
+    return {
+      cls: "sb-idle",
+      text: "⚠ 已让渡",
+      title: "会话租约已被其它节点显式接管（网格 §4.4）：本节点继续运行但不再拥有该会话；打开新窗口会复用新节点"
+    };
   }
   if (state === "idle") {
     var last = s.last_known;
@@ -889,6 +899,13 @@ function handleMeshFrame(name, data) {
     case "mesh.peer.left":
     case "mesh.peer.updated":
     case "mesh.session.changed":
+      // §4.4：本进程的会话被别的节点显式接管——提示不可静默（Q8）。
+      if (name === "mesh.session.changed" && data && data.event === "orphaned") {
+        var by = data.by_node_id ? "节点 " + data.by_node_id : "其它节点";
+        showToast("会话 " + (data.session_id || "") + " 已被" + by + "接管：本窗口继续运行，但不再拥有该会话", "error");
+      }
+      scheduleMeshRefresh();
+      return;
     case "mesh.peer.event":
       scheduleMeshRefresh();
       return;
@@ -993,6 +1010,7 @@ function showSessionConflict(ctx) {
     return;
   }
   pendingConflict = ctx;
+  conflictTakeoverArmed = false;
   var isConflict = ctx.kind === "conflict";
   var shown = sessionTitleOf(ctx.sessionId) || "(未命名会话)";
   if (isConflict) {
@@ -1007,7 +1025,7 @@ function showSessionConflict(ctx) {
   if (sessionConflictHintEl) {
     sessionConflictHintEl.textContent = isConflict
       ? "冲突需人工判断：先运行 aicli-mesh doctor 查看节点档案；本进程切换已禁用。"
-      : "在本进程切换会把它加载进第二个进程，可能造成状态分叉。";
+      : "在本进程切换会把它加载进第二个进程，可能造成状态分叉；「接管并切换」会显式回收租约（旧窗口继续运行，但会标记为已让渡）。";
     sessionConflictHintEl.style.display = "";
   }
   if (sessionConflictNodesEl) {
@@ -1037,6 +1055,17 @@ function showSessionConflict(ctx) {
     // 冲突时禁用 in-place（§5.7）；force 只对 running_elsewhere 开放。
     sessionConflictForceBtn.disabled = isConflict;
     sessionConflictForceBtn.title = isConflict ? "归属冲突时禁用：先运行 aicli-mesh doctor" : "跳过归属检查，在本进程切换（可能状态分叉）";
+  }
+  if (sessionConflictTakeoverBtn) {
+    // S15：接管入口（§6.3）只对 running_elsewhere 且服务端报告可用时开放；
+    // conflict（≥2 节点）时禁用——冲突需人工判断（§5.7）。
+    var canTakeover = !isConflict && ctx.takeoverAvailable === true;
+    sessionConflictTakeoverBtn.style.display = canTakeover ? "" : "none";
+    sessionConflictTakeoverBtn.disabled = !canTakeover;
+    sessionConflictTakeoverBtn.textContent = "接管并切换";
+    sessionConflictTakeoverBtn.title = canTakeover
+      ? "显式回收会话租约（网格 §4.4）：旧窗口继续运行，但会标记为已让渡（orphaned）"
+      : "";
   }
   sessionConflictOverlay.classList.add("active");
   if (sessionConflictOpenBtn && !sessionConflictOpenBtn.disabled) {
@@ -1079,8 +1108,8 @@ export function notifySessionSwitchedCompleted() {
 
 // 确认后的实际切换逻辑（POST /web/api/sessions/resume → 注入 /resume <id>）。
 // force=true 跳过网格归属检查（§6.3）：只在用户于冲突弹窗里显式确认
-// 「仍在本进程切换」时使用。
-function proceedResumeSession(id, force) {
+// 「仍在本进程切换」时使用；takeover=true 走显式租约回收（§4.4，S15）。
+function proceedResumeSession(id, force, takeover) {
   if (!id) { return; }
   // 点击项进入 resuming 状态，避免重复提交
   var all = sessionListEl.querySelectorAll(".session-item");
@@ -1093,6 +1122,7 @@ function proceedResumeSession(id, force) {
   sendStatusEl.textContent = "切换会话中…";
   var payload = { session_id: id };
   if (force) { payload.force = true; }
+  if (takeover) { payload.takeover = true; }
   fetch("/web/api/sessions/resume", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1103,7 +1133,14 @@ function proceedResumeSession(id, force) {
     })
     .then(function (json) {
       for (var k = 0; k < all.length; k++) { all[k].classList.remove("resuming"); }
-      if (json.status === "queued" || json.status === "already_current") {
+      if (json.status === "taken_over") {
+        // §4.4：租约已回收，/resume 已入队；等 session_switched 完成刷新。
+        sendStatusEl.textContent = "已接管，切换中…";
+        armSessionSwitchFallback(id, "已接管(状态未同步)");
+      } else if (json.status === "takeover_failed") {
+        sendStatusEl.textContent = "接管失败: " + (json.reason || "unknown");
+        showToast("接管失败: " + (json.reason || "unknown") + "（未切换，原窗口继续服务）", "error");
+      } else if (json.status === "queued" || json.status === "already_current") {
         sendStatusEl.textContent = json.status === "already_current" ? "已是当前会话" : "已切换，刷新中…";
         if (json.status === "already_current") {
           loadSessions();
@@ -1125,7 +1162,8 @@ function proceedResumeSession(id, force) {
           nodeId: json.node_id,
           webUrl: json.web_url,
           workspace: json.workspace,
-          endpoint: json.endpoint
+          endpoint: json.endpoint,
+          takeoverAvailable: json.takeover_available === true
         });
       } else if (json.status === "conflict") {
         // ≥2 个活节点声称同一会话：禁用 in-place，提示人工判断（§6.5）。
@@ -1255,6 +1293,23 @@ export function initSessions() {
       var ctx = pendingConflict;
       hideSessionConflict();
       if (ctx && ctx.kind !== "conflict") { proceedResumeSession(ctx.sessionId, true); }
+    });
+  }
+  if (sessionConflictTakeoverBtn) {
+    // 接管是显式所有权转移（§4.4）：第一次点击只把按钮切到确认态，第二次才
+    // 发 {takeover:true}；旧窗口不会被杀，只会标记为已让渡。
+    sessionConflictTakeoverBtn.addEventListener("click", function () {
+      var ctx = pendingConflict;
+      if (!ctx || ctx.kind === "conflict" || !ctx.sessionId) { return; }
+      if (!conflictTakeoverArmed) {
+        conflictTakeoverArmed = true;
+        sessionConflictTakeoverBtn.textContent = "确认接管（旧窗口继续运行）";
+        sessionConflictTakeoverBtn.title = "再次点击即回收租约并切换；旧窗口不会被杀，只会标记为已让渡";
+        return;
+      }
+      conflictTakeoverArmed = false;
+      hideSessionConflict();
+      proceedResumeSession(ctx.sessionId, false, true);
     });
   }
   if (sessionConflictCancelBtn) {

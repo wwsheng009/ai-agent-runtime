@@ -1124,6 +1124,10 @@ type chatWebSessionsResumeRequest struct {
 	SessionID string `json:"session_id"`
 	// Force 跳过网格归属检查（§6.3）：用户在前端确认「仍在本进程切换」时置真。
 	Force bool `json:"force"`
+	// Takeover 显式回收目标会话的租约后再切换（§4.4 / §6.3，S15）：用户在前端
+	// 二次确认「接管并切换」时置真。只在 running_elsewhere 分支生效，conflict
+	// 仍然拒绝（§5.7）。
+	Takeover bool `json:"takeover"`
 }
 
 // HandleChatWebAPISessionsResume 将 "/resume <session-id>" 注入输入队列，
@@ -1218,11 +1222,17 @@ func HandleChatWebAPISessionsResume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 归属前置检查：拦下「另一个活节点正在服务该会话」与「多节点冲突」两种
-	// 情况，避免两个进程同时写同一会话（§6.5）。
+	// 情况，避免两个进程同时写同一会话（§6.5）。takeover=true 时把
+	// running_elsewhere 留到队列接受后再回收租约（§4.4）：注入被拒时不会
+	// 已经抢走别人的租约。
+	takeoverCandidate := false
 	if !req.Force {
 		if _, payload := chatWebResumeMeshGuard(targetID); payload != nil {
-			writeWebAPIJSON(w, http.StatusOK, payload)
-			return
+			if !req.Takeover || payload["status"] != "running_elsewhere" {
+				writeWebAPIJSON(w, http.StatusOK, payload)
+				return
+			}
+			takeoverCandidate = true
 		}
 	}
 
@@ -1234,25 +1244,54 @@ func HandleChatWebAPISessionsResume(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	takenOver := mesh.SessionTakeoverStatus{}
+	if takeoverCandidate {
+		takenOver = chatWebTakeoverSession(targetID)
+		if !takenOver.OK {
+			// 接管失败：不注入 /resume（旧语义 = 不切换），也不上报 5xx。
+			writeWebAPIJSON(w, http.StatusOK, map[string]any{
+				"status":     "takeover_failed",
+				"session_id": targetID,
+				"reason":     takenOver.Reason,
+				"held_by":    takenOver.PreviousOwnerNodeID,
+			})
+			return
+		}
+	}
 	result := queue.routeInputText("/resume " + targetID)
+	status := "queued"
+	if takenOver.OK {
+		status = "taken_over"
+	}
 	switch {
 	case result.queued():
 		session.wakeComposerRead()
-		writeWebAPIJSON(w, http.StatusOK, map[string]string{
-			"status":     "queued",
-			"session_id": targetID,
-		})
+		writeWebAPIJSON(w, http.StatusOK, chatWebResumeQueuedPayload(status, targetID, takenOver))
 	case result.rejected():
+		reason := "input rejected by command gate"
+		if takenOver.OK {
+			// 租约已回收但注入被拒：明确告知可重试，避免误以为已经切换。
+			reason += "（租约已回收；重试 resume 即可完成切换）"
+		}
 		writeWebAPIJSON(w, http.StatusOK, map[string]string{
 			"status": "rejected",
-			"reason": "input rejected by command gate",
+			"reason": reason,
 		})
 	default:
-		writeWebAPIJSON(w, http.StatusOK, map[string]string{
-			"status":     "queued",
-			"session_id": targetID,
-		})
+		writeWebAPIJSON(w, http.StatusOK, chatWebResumeQueuedPayload(status, targetID, takenOver))
 	}
+}
+
+// chatWebResumeQueuedPayload 是 resume 已入队（或已接管并入队）的响应体。
+func chatWebResumeQueuedPayload(status, targetID string, takenOver mesh.SessionTakeoverStatus) map[string]any {
+	payload := map[string]any{
+		"status":     status,
+		"session_id": targetID,
+	}
+	if takenOver.OK && strings.TrimSpace(takenOver.PreviousOwnerNodeID) != "" {
+		payload["previous_owner_node_id"] = takenOver.PreviousOwnerNodeID
+	}
+	return payload
 }
 
 // ---------------------------------------------------------------------------
