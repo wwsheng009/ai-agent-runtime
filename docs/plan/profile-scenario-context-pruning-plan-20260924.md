@@ -240,9 +240,9 @@ profile tool policy 与 CLI 工具开关（如有）叠加时：deny 恒优先
 ### Batch 6 — P2（按需排期）
 
 - `--profile auto` 自动路由（映射规则配置化，复用 server 端 `routeProfileForPrompt` 思路）；
-- runtime-server 只读 API + frontend 展示；
-- usage ledger 按 profile 聚合；✅ **后端已落地**（slice 2，2026-09-24：记录面 + `group_by=profile` 聚合；前端展示待排期）
-- workspace `.aicli/profile` 项目级绑定。
+- runtime-server 只读 API + frontend 展示；✅ **已落地**（随 Batch 8 M4：只读清单/详情 API + 设置页 Profiles 面板；2026-09-24 核实回填）
+- usage ledger 按 profile 聚合；✅ **已落地**（slice 2，2026-09-24：记录面 + `group_by=profile` 聚合；slice 2b：前端分组对比 UI）
+- workspace `.aicli/profile` 项目级绑定；⏸ **后置**（Q12：不在本期范围，保持待排期）
 
 ## 5. 验收与度量
 
