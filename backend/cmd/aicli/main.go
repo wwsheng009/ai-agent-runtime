@@ -95,8 +95,13 @@ func main() {
 			meshHost = nil
 			mesh.SetCurrent(nil)
 			fmt.Fprintln(os.Stderr, "Info: mesh disabled (--mesh=false); this process stays invisible on the mesh")
-		} else if meshHost == nil && shouldJoinMesh(cmd) {
-			meshHost = startMeshHost(cmd)
+		} else {
+			// 网格治理开关（架构 §9.3 / §10）：默认关；开启后只拒绝跨工作区
+			// **写**调用，只读跨工作区与同工作区无差别。
+			applyMeshGovernanceFlags(rootCmd.Flags())
+			if meshHost == nil && shouldJoinMesh(cmd) {
+				meshHost = startMeshHost(cmd)
+			}
 		}
 
 		// loopback 服务器（Web 客户端 + /debug 端点）按需启动：
@@ -344,6 +349,7 @@ func main() {
 	rootCmd.PersistentFlags().String("web-token", "", "预设 Web 写令牌（默认每进程随机；也可用 AICLI_WEB_TOKEN；至少 16 位，字符集 A-Za-z0-9-._~）")
 	rootCmd.PersistentFlags().Bool("web-dev", false, "开发模式：在回环模式下跳过写令牌校验（POST/PUT/DELETE 无需 token）；默认在 127.0.0.1/localhost 自动开启。非回环模式下（0.0.0.0）回环 IP 始终免令牌，此旗仅影响回环模式 POST 校验")
 	rootCmd.PersistentFlags().Bool("mesh", true, "启用 mesh 多进程网格接入（默认开启；--mesh=false 完全不写网格节点档案、不注册 mesh 端点、不订阅网格事件）")
+	registerMeshGovernanceFlags(rootCmd.PersistentFlags())
 	rootCmd.PersistentFlags().Bool("console-host", false, "Windows：当前 stdin/stdout 为 PTY/pipe 时，在新的原生 Console 窗口中重启 aicli")
 
 	// config 子命令

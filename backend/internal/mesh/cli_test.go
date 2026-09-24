@@ -3,6 +3,7 @@ package mesh
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -634,5 +635,204 @@ func TestCLIWorksWithoutMeshRoot(t *testing.T) {
 		t.Fatalf("doctor without a root exit = %d, want %d", code, ExitFailure)
 	} else if report := decodeJSON[doctorReport](t, stdout); report.Problems != 1 {
 		t.Fatalf("doctor problems = %d, want 1 (unresolved root)", report.Problems)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// call / send / screen（S8，架构 §5.6 / §7.3）
+// ---------------------------------------------------------------------------
+
+func TestCLICallUsageErrors(t *testing.T) {
+	paths := testCLIPaths(t)
+	clock := newFakeClock()
+	cli := testCLI(paths, clock)
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"缺 op", []string{"call", "node-1"}, "需要 <目标> <op>"},
+		{"args 非 JSON", []string{"call", "node-1", "node.info", "--args", "{oops"}, "合法 JSON"},
+		{"timeout 非时长", []string{"call", "node-1", "node.info", "--timeout", "nope"}, "--timeout"},
+		{"screen 缺目标", []string{"screen"}, "需要 <目标>"},
+		{"screen tail 非整数", []string{"screen", "node-1", "--tail", "abc"}, "--tail 需要整数"},
+		{"send 缺 prompt", []string{"send", "node-1", "--allow-write"}, "需要 <目标> <prompt>"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, _, stderr := runCLI(t, cli, tc.args...)
+			if code != ExitUsage {
+				t.Fatalf("exit = %d, want %d (stderr %q)", code, ExitUsage, stderr)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Fatalf("stderr = %q, want 含 %q", stderr, tc.want)
+			}
+		})
+	}
+
+	if code, stdout, _ := runCLI(t, cli, "call", "--help"); code != ExitOK || !strings.Contains(stdout, "call") {
+		t.Fatalf("call --help exit = %d (stdout %q)", code, stdout)
+	}
+}
+
+func TestCLICallLocalRefusalsExitCodes(t *testing.T) {
+	paths := testCLIPaths(t)
+	clock := newFakeClock()
+	cli := testCLI(paths, clock)
+
+	// 未知 op：本地拒绝，error → ExitFailure。
+	code, _, stderr := runCLI(t, cli, "call", "node-1", "shell.exec")
+	if code != ExitFailure {
+		t.Fatalf("未知 op exit = %d, want %d (stderr %q)", code, ExitFailure, stderr)
+	}
+	if !strings.Contains(stderr, CallCodeUnknownOp) {
+		t.Fatalf("stderr 应带原因码: %q", stderr)
+	}
+
+	// 写操作无 --allow-write：refused → ExitRefused。
+	code, _, stderr = runCLI(t, cli, "call", "node-1", "invoke", "--args", `{"prompt":"hi"}`)
+	if code != ExitRefused {
+		t.Fatalf("invoke 无 allow-write exit = %d, want %d (stderr %q)", code, ExitRefused, stderr)
+	}
+	if !strings.Contains(stderr, CallCodeWriteNotAllowed) {
+		t.Fatalf("stderr 应带原因码: %q", stderr)
+	}
+
+	// send 是 invoke 的固定写法：同样无隐式放行。
+	code, _, stderr = runCLI(t, cli, "send", "node-1", "你好")
+	if code != ExitRefused || !strings.Contains(stderr, "--allow-write") {
+		t.Fatalf("send 无 allow-write exit = %d (stderr %q)", code, stderr)
+	}
+
+	// 目标不存在：not_found → ExitNotFound。
+	code, _, stderr = runCLI(t, cli, "call", "node-missing", "node.info")
+	if code != ExitNotFound {
+		t.Fatalf("未知目标 exit = %d, want %d (stderr %q)", code, ExitNotFound, stderr)
+	}
+	if !strings.Contains(stderr, CallCodeTargetNotFound) {
+		t.Fatalf("stderr 应带原因码: %q", stderr)
+	}
+}
+
+func TestCLICallJSONOutputAndRequestShape(t *testing.T) {
+	paths := testCLIPaths(t)
+	clock := newFakeClock()
+	now := clock.Now()
+	cli := testCLI(paths, clock)
+
+	capture := &callCapture{}
+	server := callEnvelopeServer(t, capture, http.StatusOK, CallEnvelope{
+		SchemaVersion: SchemaVersion,
+		Status:        CallStatusOK,
+		NodeID:        "node-target-20260924T100000Z",
+		Op:            "node.info",
+		ElapsedMs:     2,
+		Result:        json.RawMessage(`{"node_id":"node-target-20260924T100000Z","state":"live"}`),
+	})
+	seedCallableNode(t, paths, now, "node-target-20260924T100000Z", server.URL, "token-1")
+
+	code, stdout, stderr := runCLI(t, cli, "call", "node-target-20260924T100000Z", "node.info", "--json")
+	if code != ExitOK {
+		t.Fatalf("exit = %d (stderr %q)", code, stderr)
+	}
+	out := decodeJSON[callJSONResult](t, stdout)
+	if out.SchemaVersion != SchemaVersion || out.Status != CallStatusOK {
+		t.Fatalf("--json 输出 = %+v", out)
+	}
+	if out.NodeID != "node-target-20260924T100000Z" || out.Op != "node.info" {
+		t.Fatalf("node/op = %q/%q", out.NodeID, out.Op)
+	}
+	if len(out.Result) == 0 {
+		t.Fatal("--json 必须带 result（调用方原样透传）")
+	}
+
+	// CLI 不是节点：调用方头为空，但请求形状与令牌照旧。
+	got := capture.snapshot()
+	if got.path != ChatWebMeshCallPath || got.method != http.MethodPost {
+		t.Fatalf("请求 = %s %s", got.method, got.path)
+	}
+	if got.token != "token-1" {
+		t.Fatalf("令牌头 = %q", got.token)
+	}
+	if got.caller != "" {
+		t.Fatalf("CLI 调用不应带调用方 node_id: %q", got.caller)
+	}
+	body := capture.requestBody(t)
+	if body.Op != "node.info" || body.Target != "node-target-20260924T100000Z" {
+		t.Fatalf("请求体 = %+v", body)
+	}
+
+	// 人读输出：只读调用打印 pretty JSON（result 原样）。
+	code, stdout, _ = runCLI(t, cli, "call", "node-target-20260924T100000Z", "node.info")
+	if code != ExitOK || !strings.Contains(stdout, "node-target-20260924T100000Z") {
+		t.Fatalf("人读输出 exit = %d (stdout %q)", code, stdout)
+	}
+}
+
+func TestCLISendPrintsAssistantAndPassesArgs(t *testing.T) {
+	paths := testCLIPaths(t)
+	clock := newFakeClock()
+	now := clock.Now()
+	cli := testCLI(paths, clock)
+
+	capture := &callCapture{}
+	server := callEnvelopeServer(t, capture, http.StatusOK, CallEnvelope{
+		SchemaVersion: SchemaVersion,
+		Status:        CallStatusOK,
+		NodeID:        "node-target-20260924T100000Z",
+		Op:            "invoke",
+		Result:        json.RawMessage(`{"turn_id":"turn-1","assistant":{"content":"收到"}}`),
+	})
+	seedCallableNode(t, paths, now, "node-target-20260924T100000Z", server.URL, "token-1")
+
+	code, stdout, stderr := runCLI(t, cli, "send", "node-target-20260924T100000Z", "只回复两个字", "--allow-write", "--client-request-id", "mesh-7-1")
+	if code != ExitOK {
+		t.Fatalf("send exit = %d (stderr %q)", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != "收到" {
+		t.Fatalf("send 人读输出 = %q, want 助手正文", stdout)
+	}
+	body := capture.requestBody(t)
+	if body.Op != "invoke" || !body.AllowWrite {
+		t.Fatalf("请求体 = %+v, want invoke + allow_write", body)
+	}
+	if body.ClientRequestID != "mesh-7-1" {
+		t.Fatalf("client_request_id = %q", body.ClientRequestID)
+	}
+	if !strings.Contains(string(body.Args), "只回复两个字") {
+		t.Fatalf("args = %s", string(body.Args))
+	}
+}
+
+func TestCLIScreenDefaultsAndTail(t *testing.T) {
+	paths := testCLIPaths(t)
+	clock := newFakeClock()
+	now := clock.Now()
+	cli := testCLI(paths, clock)
+
+	capture := &callCapture{}
+	server := callEnvelopeServer(t, capture, http.StatusOK, CallEnvelope{
+		SchemaVersion: SchemaVersion,
+		Status:        CallStatusOK,
+		NodeID:        "node-target-20260924T100000Z",
+		Op:            "screen",
+		Result:        json.RawMessage(`{"text":"Debug Screen: hello"}`),
+	})
+	seedCallableNode(t, paths, now, "node-target-20260924T100000Z", server.URL, "")
+
+	code, stdout, stderr := runCLI(t, cli, "screen", "node-target-20260924T100000Z", "--tail", "40")
+	if code != ExitOK {
+		t.Fatalf("screen exit = %d (stderr %q)", code, stderr)
+	}
+	if !strings.Contains(stdout, "Debug Screen: hello") {
+		t.Fatalf("screen 人读输出 = %q", stdout)
+	}
+	var args map[string]any
+	if err := json.Unmarshal(capture.requestBody(t).Args, &args); err != nil {
+		t.Fatalf("args: %v", err)
+	}
+	if args["view"] != "tui" || args["format"] != "json" || args["tail"] != "40" {
+		t.Fatalf("screen args = %v, want view=tui + format=json + tail=40", args)
 	}
 }

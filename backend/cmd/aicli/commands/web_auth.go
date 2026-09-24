@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 )
 
 // ============================================================================
@@ -55,7 +57,8 @@ import (
 // ============================================================================
 
 // ChatWebAuthTokenHeader 是写操作令牌的请求头名称。
-const ChatWebAuthTokenHeader = "X-AICLI-Token"
+// 与网格调用端点共用同一头名（internal/mesh 是单一事实来源，避免两侧漂移）。
+const ChatWebAuthTokenHeader = mesh.CallTokenHeader
 
 // ChatWebAuthTokenEnv 是预设写令牌的环境变量名（--web-token 优先于它）。
 const ChatWebAuthTokenEnv = "AICLI_WEB_TOKEN"

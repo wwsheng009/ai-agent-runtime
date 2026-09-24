@@ -360,6 +360,9 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 		mux.HandleFunc(commands.ChatWebAPIMeshPeersPath, commands.HandleChatWebAPIMeshPeers)
 		// SSE 扇入（S7）：路由走统一鉴权（§5.8），写路径不存在——这条端点只读。
 		mux.HandleFunc(commands.ChatWebAPIMeshEventsPath, commands.HandleChatWebAPIMeshEvents)
+		// 网格调用（S8，架构 §5.6）：读 op 走统一鉴权；写 op 还要求
+		// allow_write=true，且调用者必须是回环（§5.8）。
+		mux.HandleFunc(commands.ChatWebAPIMeshCallPath, commands.HandleChatWebAPIMeshCall)
 	}
 	mux.HandleFunc(commands.ChatWebAPIScreenPath, commands.HandleChatWebAPIScreen)
 	mux.HandleFunc(commands.ChatWebAPIStatusPath, commands.HandleChatWebAPIStatus)

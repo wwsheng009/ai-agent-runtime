@@ -30,11 +30,15 @@ const (
 	// 作为扇入点，把 peer 事件并入本进程的流，浏览器只连自己的进程（§6.5）。
 	// 路径与 internal/mesh 的订阅端共用同一常量，避免两侧漂移。
 	ChatWebAPIMeshEventsPath = mesh.ChatWebMeshEventsPath
-	ChatWebAPIScreenPath     = "/web/api/screen"
-	ChatWebAPIStatusPath     = "/web/api/status"
-	ChatWebAPIStatusBarPath  = "/web/api/statusbar"
-	ChatWebAPIEventsPath     = "/web/api/events"
-	ChatWebAPIInputPath      = "/web/api/input"
+	// ChatWebAPIMeshCallPath 是网格调用端点（架构 §5.6）：调用方（CLI /
+	// 其它节点 / 前端）以目标档案里的令牌发起，op 白名单与写操作
+	// allow_write 由被调方校验。与 internal/mesh 的调用方共用同一常量。
+	ChatWebAPIMeshCallPath  = mesh.ChatWebMeshCallPath
+	ChatWebAPIScreenPath    = "/web/api/screen"
+	ChatWebAPIStatusPath    = "/web/api/status"
+	ChatWebAPIStatusBarPath = "/web/api/statusbar"
+	ChatWebAPIEventsPath    = "/web/api/events"
+	ChatWebAPIInputPath     = "/web/api/input"
 	// ChatWebAPIInvokePath 是同步远程调用端点：一次请求内完成
 	// "注入 prompt → 等待 turn 结束 → 返回状态与渲染"，供脚本/外部 Agent
 	// 直接远程调用 aicli chat TUI（与异步的 /web/api/input 互补）。

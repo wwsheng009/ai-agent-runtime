@@ -21,6 +21,8 @@
 package mesh
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -88,6 +90,12 @@ func (c *CLI) Run(args []string) int {
 		return c.runShow(rest)
 	case "url":
 		return c.runURL(rest)
+	case "call":
+		return c.runCall(rest)
+	case "send":
+		return c.runSend(rest)
+	case "screen":
+		return c.runScreen(rest)
 	case "gc":
 		return c.runGC(rest)
 	case "doctor":
@@ -148,12 +156,19 @@ func (c *CLI) printUsage(w io.Writer) {
   aicli-mesh ls [--json] [--probe] [--live] [--workspace PATH]... [--sort age|session|workspace]
   aicli-mesh show <节点|会话> [--json] [--events N]
   aicli-mesh url <节点|会话> [--with-token] [--path PATH] [--json]
+  aicli-mesh call <节点|会话> <op> [--args JSON] [--client-request-id ID] [--allow-write] [--timeout 130s] [--json]
+  aicli-mesh send <节点|会话> <prompt> [--allow-write] [--timeout 130s] [--json]
+  aicli-mesh screen <节点|会话> [--view tui] [--tail N] [--format json|text] [--json]
   aicli-mesh gc [--apply] [--stale-ttl 10m] [--keep-days 7] [--purge-legacy] [--prune-bindings] [--json]
   aicli-mesh doctor [--json]
   aicli-mesh version [--json]
 
 目标解析: 节点 ID / 节点 ID 前缀 / 会话 ID / 会话 ID 前缀 / pid:<PID>。
 歧义时列出候选并要求精确指定（不做「猜一个」）。
+
+调用（call/send/screen）: op 白名单 node.info/status/screen/turn/sessions.list（只读）
+  与 invoke/input/cancel/sessions.resume（写操作，**必须** --allow-write 显式允许）。
+  调用方直接连目标的 loopback 端点，令牌取自目标档案（0600），不经过第三方。
 
 退出码:
   0 成功            1 用法/参数错误      2 目标不存在或无法唯一确定
@@ -1897,4 +1912,260 @@ func (c *CLI) runVersion(args []string) int {
 	}
 	fmt.Fprintf(c.out(), "记录 schema_version=%d\n", SchemaVersion)
 	return ExitOK
+}
+
+// ---------------------------------------------------------------------------
+// 网格调用子命令（S8，架构 §5.6 / §7.3）
+//
+// call / send / screen 是同一套调用编排的三个入口：call 是通用形式（op +
+// --args），send 与 screen 是 op 的固定写法（invoke / screen），三者共用
+// mesh.Call 与同一退出码映射。
+// ---------------------------------------------------------------------------
+
+// callResultSchemaVersion 让 --json 输出带 schema_version，与其它子命令一致。
+type callJSONResult struct {
+	SchemaVersion int `json:"schema_version"`
+	*CallResult
+}
+
+func (c *CLI) runCall(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{
+		"args":              flagValue,
+		"client-request-id": flagValue,
+		"allow-write":       flagBool,
+		"timeout":           flagValue,
+		"json":              flagBool,
+		"help":              flagBool,
+	})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh call: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) != 2 {
+		return c.fail(ExitUsage, "aicli-mesh call: 需要 <目标> <op>（op 见 aicli-mesh help）")
+	}
+	timeout, err := parsed.durationValue("timeout", CallDefaultTimeout)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh call: --timeout: %v", err)
+	}
+	rawArgs := strings.TrimSpace(parsed.str("args", ""))
+	if rawArgs != "" && !json.Valid([]byte(rawArgs)) {
+		return c.fail(ExitUsage, "aicli-mesh call: --args 必须是合法 JSON（收到 %q）", rawArgs)
+	}
+	request := CallRequest{
+		Target:          parsed.pos[0],
+		Op:              parsed.pos[1],
+		Args:            json.RawMessage(rawArgs),
+		ClientRequestID: strings.TrimSpace(parsed.str("client-request-id", "")),
+		Timeout:         timeout,
+		AllowWrite:      parsed.boolean("allow-write"),
+	}
+	return c.runCallRequest(request, parsed.boolean("json"), "")
+}
+
+// runSend 是 invoke op 的固定写法：注入 prompt 并等待该 turn 结束（§5.6）。
+// 写操作无隐式放行：必须显式 --allow-write。
+func (c *CLI) runSend(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{
+		"allow-write":       flagBool,
+		"timeout":           flagValue,
+		"client-request-id": flagValue,
+		"json":              flagBool,
+		"help":              flagBool,
+	})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh send: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) < 2 {
+		return c.fail(ExitUsage, "aicli-mesh send: 需要 <目标> <prompt>")
+	}
+	timeout, err := parsed.durationValue("timeout", CallDefaultTimeout)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh send: --timeout: %v", err)
+	}
+	prompt := strings.TrimSpace(strings.Join(parsed.pos[1:], " "))
+	if prompt == "" {
+		return c.fail(ExitUsage, "aicli-mesh send: prompt 不能为空")
+	}
+	if !parsed.boolean("allow-write") {
+		// invoke 是写操作：无隐式放行（§5.6 要点 8）。
+		return c.fail(ExitRefused, "aicli-mesh send: invoke 是写操作，需要 --allow-write 显式允许")
+	}
+	body, err := json.Marshal(map[string]any{"prompt": prompt})
+	if err != nil {
+		return c.fail(ExitFailure, "aicli-mesh send: 编码请求失败: %v", err)
+	}
+	request := CallRequest{
+		Target:          parsed.pos[0],
+		Op:              "invoke",
+		Args:            body,
+		ClientRequestID: strings.TrimSpace(parsed.str("client-request-id", "")),
+		Timeout:         timeout,
+		AllowWrite:      true,
+	}
+	return c.runCallRequest(request, parsed.boolean("json"), "assistant.content")
+}
+
+// runScreen 是 screen op 的固定写法：读取目标的屏幕快照（只读，无需
+// --allow-write）。默认 view=tui + format=json，人读输出只打印 text 段。
+func (c *CLI) runScreen(args []string) int {
+	parsed, err := parseArgs(args, flagSpec{
+		"view":    flagValue,
+		"tail":    flagValue,
+		"format":  flagValue,
+		"timeout": flagValue,
+		"json":    flagBool,
+		"help":    flagBool,
+	})
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh screen: %v", err)
+	}
+	if parsed.boolean("help") {
+		c.printUsage(c.out())
+		return ExitOK
+	}
+	if len(parsed.pos) != 1 {
+		return c.fail(ExitUsage, "aicli-mesh screen: 需要 <目标>（节点 ID / 会话 ID）")
+	}
+	timeout, err := parsed.durationValue("timeout", CallDefaultTimeout)
+	if err != nil {
+		return c.fail(ExitUsage, "aicli-mesh screen: --timeout: %v", err)
+	}
+	payload := map[string]any{
+		"view":   parsed.str("view", "tui"),
+		"format": parsed.str("format", "json"),
+	}
+	if tail := strings.TrimSpace(parsed.str("tail", "")); tail != "" {
+		if _, convErr := strconv.Atoi(tail); convErr != nil {
+			return c.fail(ExitUsage, "aicli-mesh screen: --tail 需要整数（收到 %q）", tail)
+		}
+		payload["tail"] = tail
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return c.fail(ExitFailure, "aicli-mesh screen: 编码请求失败: %v", err)
+	}
+	request := CallRequest{
+		Target:  parsed.pos[0],
+		Op:      "screen",
+		Args:    body,
+		Timeout: timeout,
+	}
+	return c.runCallRequest(request, parsed.boolean("json"), "text")
+}
+
+// runCallRequest 执行一次调用并统一处理输出与退出码。
+//
+// humanField 指定人读输出优先打印 result 里的哪个字段（点分路径，如
+// "assistant.content"）：命中就只打印它（send/screen 的主产物），未命中则
+// 回退到 pretty JSON —— 输出永远不丢信息。
+func (c *CLI) runCallRequest(request CallRequest, asJSON bool, humanField string) int {
+	result := Call(context.Background(), c.paths(), "", request)
+	exitCode := callExitCode(result)
+	if asJSON {
+		if err := c.printJSON(callJSONResult{SchemaVersion: SchemaVersion, CallResult: result}); err != nil {
+			return c.fail(ExitFailure, "输出 JSON 失败: %v", err)
+		}
+		return exitCode
+	}
+	if !result.OK() {
+		message := strings.TrimSpace(result.Message)
+		if message == "" {
+			message = "目标返回 " + result.Status
+		}
+		fmt.Fprintf(c.errOut(), "调用失败: %s", result.Status)
+		if result.Code != "" {
+			fmt.Fprintf(c.errOut(), "（%s）", result.Code)
+		}
+		fmt.Fprintf(c.errOut(), ": %s\n", message)
+		return exitCode
+	}
+	if humanField != "" {
+		if text := callResultField(result.Result, strings.Split(humanField, ".")...); text != "" {
+			fmt.Fprintln(c.out(), text)
+			return exitCode
+		}
+	}
+	if len(result.Result) > 0 {
+		if pretty, err := prettyJSON(result.Result); err == nil {
+			fmt.Fprintln(c.out(), pretty)
+			return exitCode
+		}
+	}
+	fmt.Fprintf(c.out(), "%s %s（%dms）\n", result.NodeID, result.Op, result.ElapsedMs)
+	return exitCode
+}
+
+// callExitCode 把调用状态映射到 §7.3 的稳定退出码。
+func callExitCode(result *CallResult) int {
+	if result == nil {
+		return ExitFailure
+	}
+	switch result.Status {
+	case CallStatusOK:
+		return ExitOK
+	case CallStatusBusy:
+		return ExitConflict
+	case CallStatusNotFound:
+		return ExitNotFound
+	case CallStatusUnreachable, CallStatusTimeout:
+		return ExitUnreachable
+	case CallStatusRefused:
+		return ExitRefused
+	default:
+		return ExitFailure
+	}
+}
+
+// callResultField 按点分路径从 result JSON 里取字符串字段（数字也转字符串）。
+// 字段不存在或类型不符时返回空串。
+func callResultField(raw json.RawMessage, path ...string) string {
+	if len(raw) == 0 || len(path) == 0 {
+		return ""
+	}
+	var current any
+	if err := json.Unmarshal(raw, &current); err != nil {
+		// result 可能是 JSON 字符串（screen 的 text/plain 形态）：单段路径直接取它。
+		var text string
+		if stringErr := json.Unmarshal(raw, &text); stringErr == nil && len(path) == 1 {
+			return strings.TrimRight(text, "\n")
+		}
+		return ""
+	}
+	for _, key := range path {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return ""
+		}
+		current, ok = object[key]
+		if !ok {
+			return ""
+		}
+	}
+	switch value := current.(type) {
+	case string:
+		return strings.TrimRight(value, "\n")
+	case float64:
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(value)
+	default:
+		return ""
+	}
+}
+
+// prettyJSON 以两空格缩进重排一段 JSON（失败时由调用方回退）。
+func prettyJSON(raw json.RawMessage) (string, error) {
+	var buffer bytes.Buffer
+	if err := json.Indent(&buffer, raw, "", "  "); err != nil {
+		return "", err
+	}
+	return buffer.String(), nil
 }

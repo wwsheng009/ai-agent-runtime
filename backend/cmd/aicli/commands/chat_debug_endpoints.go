@@ -136,6 +136,7 @@ var meshDebugEndpoints = []struct {
 	{Method: "GET", Path: "/web/api/mesh/self", Note: "本节点自述（档案 + derived 实时段 + mesh 根目录；auth.token 默认脱敏，回环 ?reveal_token=1 给原文）"},
 	{Method: "GET", Path: "/web/api/mesh/peers", Note: "网格聚合视图（默认跨工作区全量；?scope=self|all&workspace=&state=all|live&probe=1&redact_token=1）"},
 	{Method: "GET", Path: "/web/api/mesh/events", Note: "网格实时事件流（SSE 扇入；?since_seq=<n> 续传游标、?peers=auto|none 订阅拓扑；只连本进程即可见全网格）"},
+	{Method: "POST", Path: "/web/api/mesh/call", Note: "网格调用（op 白名单：node.info/status/screen/turn/sessions.list 只读；invoke/input/cancel/sessions.resume 写操作需 allow_write=true；仅回环）"},
 }
 
 // observeDebugEndpoints 列出 Runtime Observation Plane 的版本化端点

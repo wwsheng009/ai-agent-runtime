@@ -24,6 +24,7 @@ const (
 	JournalLeaseDegraded      = "lease.degraded"
 	JournalCallReceived       = "mesh.call.received"
 	JournalCallCompleted      = "mesh.call.completed"
+	JournalCallSent           = "mesh.call.sent"
 	JournalSpawnRequested     = "mesh.spawn.requested"
 	JournalSpawnCompleted     = "mesh.spawn.completed"
 	JournalPeerObserved       = "mesh.peer.observed"
