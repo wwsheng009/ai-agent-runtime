@@ -17,6 +17,20 @@ type ResolvedToolPolicy struct {
 	Sources   []string               `json:"sources,omitempty"`
 }
 
+// ResolvedSkillSelection contains merged skill allow/deny declarations.
+// Mirrors profile.ResolvedSkillSelection.
+type ResolvedSkillSelection struct {
+	Allowlist []string `json:"allowlist,omitempty"`
+	Denylist  []string `json:"denylist,omitempty"`
+}
+
+// ResolvedMCPSelection contains merged MCP server use/exclude declarations.
+// Mirrors profile.ResolvedMCPSelection.
+type ResolvedMCPSelection struct {
+	UseServers     []string `json:"use_servers,omitempty"`
+	ExcludeServers []string `json:"exclude_servers,omitempty"`
+}
+
 // ResolvedPaths contains all selected paths for a resolved agent.
 type ResolvedPaths struct {
 	ProfileRoot         string `json:"profile_root"`
@@ -55,8 +69,11 @@ type ResolvedAgent struct {
 	Model           string              `json:"model,omitempty"`
 	RuntimeConfig   string              `json:"runtime_config,omitempty"`
 	MCPConfig       string              `json:"mcp_config,omitempty"`
+	MCPSelection    ResolvedMCPSelection `json:"mcp_selection,omitempty"`
 	SkillDirs       []string            `json:"skill_dirs,omitempty"`
+	Skills          ResolvedSkillSelection `json:"skills,omitempty"`
 	Prompts         ResolvedPromptFiles `json:"prompts,omitempty"`
+	PromptMode      string              `json:"prompt_mode,omitempty"`
 	ToolPolicy      ResolvedToolPolicy  `json:"tool_policy,omitempty"`
 	Paths           ResolvedPaths       `json:"paths"`
 }

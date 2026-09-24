@@ -4,19 +4,33 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func buildRuntimeInstructionMessages(profileState *profileRuntimeState, workspacePath, provider string) []types.Message {
 	layers := buildRuntimeInstructionLayers(profileState, workspacePath)
+	var compiled []types.Message
 	if layers.HasAny() {
-		return withDelegationGuidance(layers.CompileInstructionMessages(provider))
+		compiled = layers.CompileInstructionMessages(provider)
+	} else if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
+		compiled = []types.Message{*types.NewSystemMessage(strings.TrimSpace(profileState.PromptText))}
 	}
-	if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
-		return withDelegationGuidance([]types.Message{*types.NewSystemMessage(strings.TrimSpace(profileState.PromptText))})
+	// FR-7 prompt 组合模式：replace（默认）保持既有顺序（profile 组合在前，
+	// 内置基础指令追加其后）；append 把内置基础指令提到最前，profile 组合
+	// （system→role→tools）与 workspace 指令依次叠加在后。
+	if profilePromptModeIsAppend(profileState) {
+		return withAppendModeGuidanceOrder(compiled)
 	}
-	return withDelegationGuidance(nil)
+	return withDelegationGuidance(compiled)
+}
+
+func profilePromptModeIsAppend(profileState *profileRuntimeState) bool {
+	if profileState == nil || profileState.Resolved == nil {
+		return false
+	}
+	return runtimeprofileinput.ProfilePromptModeIsAppend(profileState.Resolved.PromptMode)
 }
 
 func buildRuntimeInstructionLayers(profileState *profileRuntimeState, workspacePath string) *runtimeprompt.Layers {
@@ -126,6 +140,38 @@ const (
 // discipline). Both blocks are idempotent.
 func withDelegationGuidance(messages []types.Message) []types.Message {
 	return withMultiAgentCollaborationGuidance(withTaskDifficultyGuidance(messages))
+}
+
+// withAppendModeGuidanceOrder 实现 FR-7 append 模式：内置基础指令
+// （difficulty + collaboration guidance）置于最前，profile 组合
+// （system→role→tools）与 workspace 指令依次叠加在后。
+//
+// 首条 system 片段与内置基础合并为同一条 system 消息（消息结构不变，仅顺序
+// 调整），其余片段（developer/user 层）保持原有相对顺序。
+func withAppendModeGuidanceOrder(compiled []types.Message) []types.Message {
+	base := withDelegationGuidance(nil)
+	if len(base) == 0 {
+		return cloneInstructionMessages(compiled)
+	}
+	if len(compiled) == 0 {
+		return base
+	}
+	first := *compiled[0].Clone()
+	if !strings.EqualFold(strings.TrimSpace(first.Role), "system") {
+		merged := append([]types.Message{}, base...)
+		return append(merged, cloneInstructionMessages(compiled)...)
+	}
+	merged := base[0]
+	if content := strings.TrimSpace(first.Content); content != "" {
+		merged.Content = strings.TrimSpace(merged.Content) + "\n\n" + content
+	}
+	if len(first.Metadata) > 0 {
+		merged.Metadata = first.Metadata
+	}
+	result := make([]types.Message, 0, len(base)+len(compiled))
+	result = append(result, merged)
+	result = append(result, cloneInstructionMessages(compiled[1:])...)
+	return result
 }
 
 func withTaskDifficultyGuidance(messages []types.Message) []types.Message {

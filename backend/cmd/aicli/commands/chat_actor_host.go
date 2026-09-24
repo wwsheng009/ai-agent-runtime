@@ -1157,6 +1157,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		Config:          runtimeConfig,
 		SkillDirs:       resolveChatSkillDirs(cfg, session, nil),
 		DiscoverOnly:    true,
+		SkillFilter:     runtimeprofileinput.BuildSkillFilter(session.ProfileSkillSelection),
 		MCPManager:      runtimeMCP,
 		ProviderConfigs: buildSkillsProviderConfigs(cfg),
 	})

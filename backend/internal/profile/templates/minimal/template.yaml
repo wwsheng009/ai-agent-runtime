@@ -1,0 +1,3 @@
+name: minimal
+description: Minimal profile with the smallest tool surface and all skills disabled
+default_agent: default

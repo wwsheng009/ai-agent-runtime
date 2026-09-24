@@ -27,6 +27,9 @@ type chatProfileState struct {
 	AgentSourcePath string
 	// AgentSource is builtin|user|project|profile (empty when unknown).
 	AgentSource string
+	// ConfigOverlay 是 runtime.overrides 的会话级配置覆盖视图（D13，Batch 7）。
+	// nil 表示该 profile 未声明覆盖，投影时必须保持基线配置不变。
+	ConfigOverlay *chatProfileConfigOverlay
 }
 
 func (s *chatProfileState) Active() bool {
@@ -52,6 +55,55 @@ func (s *chatProfileState) SkillDirs() []string {
 		return nil
 	}
 	return append([]string(nil), s.Resolved.SkillDirs...)
+}
+
+// applyProfileStateToChatSession 把解析后的 profile 生效面投影到会话字段。它是
+// "profile → 会话生效面"的唯一权威函数：启动路径（chat_setup）与会话内热切换
+// 路径（applyRuntimeProfileSwitch，D21）共用同一份投影，避免两处逻辑漂移。
+// 调用方负责在投影后执行缓存失效（工具面/锚点/token 计数）。
+func applyProfileStateToChatSession(session *ChatSession, state *chatProfileState) bool {
+	if session == nil || state == nil || !state.Active() {
+		return false
+	}
+	session.ProfileReference = state.Reference
+	session.ProfileName = state.Resolved.ProfileName
+	session.ProfileAgent = state.Resolved.AgentID
+	session.ProfileRoot = state.Resolved.ProfileRoot
+	session.AgentSourcePath = strings.TrimSpace(state.AgentSourcePath)
+	session.AgentSource = strings.TrimSpace(state.AgentSource)
+	session.SystemPromptText = state.PromptText
+	session.RuntimeConfigPath = state.RuntimeConfigPath()
+	session.MCPConfigPath = state.MCPConfigPath()
+	session.ResolvedSkillDirs = state.SkillDirs()
+	// Profile 场景化裁剪声明（Batch 1）：随会话携带，由各权威生效点消费
+	// （bootstrap skills 过滤 / MCP 启动服务器选择 / 系统提示组合模式）。
+	session.ProfileSkillSelection = runtimeprofileinput.ResolvedSkillSelection{
+		Allowlist: append([]string(nil), state.Resolved.Skills.Allowlist...),
+		Denylist:  append([]string(nil), state.Resolved.Skills.Denylist...),
+	}
+	session.ProfileMCPSelection = runtimeprofileinput.ResolvedMCPSelection{
+		UseServers:     append([]string(nil), state.Resolved.MCPSelection.UseServers...),
+		ExcludeServers: append([]string(nil), state.Resolved.MCPSelection.ExcludeServers...),
+	}
+	session.ProfilePromptMode = state.Resolved.PromptMode
+	session.ProfileContext = cloneSkillContextMap(state.ContextValues)
+	session.ToolPolicy = state.ToolPolicy
+	if session.ToolPolicy != nil {
+		session.BaseToolPolicy = session.ToolPolicy.Clone()
+	}
+	// function registry 的策略必须与 ToolPolicy 同步刷新：否则下一轮选出的
+	// 工具仍是旧 profile 的集合（A2 断言的失败模式）。
+	if session.FunctionCatalog != nil && session.ToolPolicy != nil {
+		session.FunctionCatalog.SetToolPolicy(session.ToolPolicy)
+	}
+	// Profile 配置覆盖（D13）：runtime.overrides 叠加到会话配置视图。失败不阻断
+	// 会话——profile 只能触碰白名单键，覆盖未生效等价于该 profile 少了一层配置
+	// 调整，其余生效面（提示词/工具策略/MCP/skills）仍然有效——但必须显式告警，
+	// 不能静默丢弃（禁止「假开关」）。
+	if err := applyProfileConfigOverlay(session, state.ConfigOverlay); err != nil {
+		emitProfileConfigOverlayWarning(err)
+	}
+	return true
 }
 
 func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*chatProfileState, error) {
@@ -97,6 +149,7 @@ func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*cha
 		ToolPolicy:      inputs.ToolPolicy,
 		SandboxWarnings: append([]string(nil), inputs.SandboxWarnings...),
 		AgentSource:     string(agentdef.SourceProfile),
+		ConfigOverlay:   newChatProfileConfigOverlay(resolved),
 	}
 	if resolved != nil {
 		if path := strings.TrimSpace(resolved.Paths.AgentConfigFile); path != "" {
@@ -105,7 +158,41 @@ func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*cha
 			state.AgentSourcePath = path
 		}
 	}
+	// D17：profile agent 声明的 permission_mode 是会话默认权限模式（仅当 CLI 未显式
+	// 指定 --permission-mode/--yolo 时生效）。必须走 agentdef 权威解析：profile 分支
+	// 只投影 prompt/工具/skills/mcp 时该默认值会被静默丢弃（假开关），且与 --agent
+	// 分支（resolveChatAgentdefState）行为不一致。
+	if mode := profileAgentPermissionMode(resolved); mode != "" {
+		state.PermissionMode = mode
+	}
 	return state, nil
+}
+
+// profileAgentPermissionMode 返回 profile agent 声明的默认权限模式（空表示未声明）。
+// 复用 agentdef 解析 + BuildBinding，保证与 --agent 路径同一权威来源，并继承 D16：
+// profile 默认 bypass_permissions 时 BuildBinding 报错，此处按"未声明"处理（更保守），
+// 违规本身由 `profile validate` / agentdef 解析路径显式报出。
+func profileAgentPermissionMode(resolved *profilesys.ResolvedAgent) runtimepolicy.Mode {
+	if resolved == nil {
+		return ""
+	}
+	agentName := strings.TrimSpace(resolved.AgentID)
+	if agentName == "" {
+		return ""
+	}
+	def, err := agentdef.Resolve(agentName, agentdefDiscoverOptions(
+		"",
+		strings.TrimSpace(resolved.ProfileRoot),
+		mergeActivePluginAgentDirs(nil),
+	))
+	if err != nil || def == nil {
+		return ""
+	}
+	binding, err := agentdef.BuildBinding(def)
+	if err != nil || binding == nil {
+		return ""
+	}
+	return binding.PermissionMode
 }
 
 // resolveChatAgentdefState loads a portable agent definition without a profile

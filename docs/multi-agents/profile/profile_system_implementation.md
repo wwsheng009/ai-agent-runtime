@@ -495,3 +495,28 @@ Execute Phase 1 first:
 3. avoid partial CLI-only shortcuts
 
 This keeps the architecture stable and allows CLI/API adoption in later patches.
+
+## 15. 现状与后续（2026-09-24 注记）
+
+> 本节为实施进度注记，不改动上文设计；单一事实源为
+> `docs/plan/profile-scenario-implementation-plan-20260924.md`（实施方案，含 Batch 0-14 与执行跟踪表）。
+
+- **现状（已完成）**：Phase 0 核实 V1-V4/V23 已回填；Batch 1 已落地
+  （spec 扩展 `SkillsSpec`/`MCPSpec`/`PromptsSpec` + merge/validate + skills/mcp/prompt-mode
+  三处过滤，CLI 与 server 两侧接线，无 profile 路径零变化）；Batch 2 已交付
+  `aicli profile list/show/validate/create`、四个内置模板、token 估算单点
+  （`internal/profile/estimate.go`）与用户文档 `docs/aicli/profiles.md`；Batch 3 已交付
+  chat 启动摘要（工具/skills/MCP/prompt 计数 + `估算` 标注）、exec JSON 元数据
+  （`profile.{ref,name,agent,tool_count,skill_count}`）与 FR-6 优先级测试锁定，
+  并通过实测达成 §1.3 第 1-3 条验收（量化界 40% 由
+  `cmd/aicli/commands/profile_quant_test.go` 钉住；被排除工具经请求 artifact 验证
+  确不在 `tools[]`）。Batch 5 已交付子 agent 继承（FR-9/D8）：
+  `internal/sessionmeta.CopyProfileBinding` 单点快照 + API/本地两个 spawn 装配点调用，
+  子 actor 据此解析父级 profile，再由 agentdef 叠加层按「父允许集 ∩ 子声明」收窄
+  （`DeriveChild`，只收窄；快照语义不追溯已存在子代理）。
+- **后续（按实施方案顺序）**：Batch 7/9（配置覆盖与开关）→
+  Batch 10/11（热切换）→ Batch 12/8（前端）→ Batch 13/14（闭环与安全收口）。
+- **实施期新发现（已固化）**：`agents/<id>/agent.yaml` 被两个消费者读取
+  （profile 解析器与 portable agentdef），二者 `tools` 形状互斥——工具策略统一写
+  `profile.yaml` 的 `agents.<id>.tools` 或 `agents/<id>/tools/policy.yaml`，
+  详见 `docs/aicli/profiles.md` §3。

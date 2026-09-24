@@ -227,6 +227,52 @@ func Delete(ctx map[string]interface{}, key string, legacyKeys ...string) {
 	}
 }
 
+// profileBindingKeys 是随会话持久化的 profile 绑定键及其 legacy 别名：
+// 引用（canonical profile_ref + API legacy profile_reference）、名称、代理、根目录。
+var profileBindingKeys = []struct {
+	canonical string
+	legacy    string
+}{
+	{ProfileRef, LegacyAPIProfileReference},
+	{ProfileName, LegacyAICLIProfileName},
+	{ProfileAgent, LegacyAICLIProfileAgent},
+	{ProfileRoot, LegacyAICLIProfileRoot},
+}
+
+// CopyProfileBinding 把 src 的 profile 绑定快照进 dst（FR-9/D8：spawn 子会话在装配点
+// 继承父会话的 profile 绑定）。
+//
+// 语义：
+//   - 只复制非空值；src 未绑定 profile 时 dst 保持不变、不写任何键，保证未引入
+//     profile 的路径「不声明 = 零变化」（NFR-1）。
+//   - dst 指向 nil map 时按需初始化（调用方直接传 &session.Metadata.Context 即可）。
+//   - 快照而非动态引用：父会话之后切换 profile 不追溯已有子代理。
+//   - 复制的是父级绑定本身，子会话是否收窄仍由子 agentdef 叠加层决定
+//     （applyAPIChildAgentdefToolPolicy / applyLocalChildAgentdefToolPolicy）。
+//
+// 返回是否发生了写入。
+func CopyProfileBinding(dst *map[string]interface{}, src map[string]interface{}) bool {
+	if dst == nil || len(src) == 0 {
+		return false
+	}
+	changed := false
+	for _, binding := range profileBindingKeys {
+		value := String(src, binding.canonical)
+		if value == "" {
+			continue
+		}
+		if String(*dst, binding.canonical) == value {
+			continue
+		}
+		if *dst == nil {
+			*dst = make(map[string]interface{}, len(profileBindingKeys))
+		}
+		Set(*dst, binding.canonical, value, binding.legacy)
+		changed = true
+	}
+	return changed
+}
+
 func Value(ctx map[string]interface{}, key string) (interface{}, bool) {
 	if ctx == nil {
 		return nil, false

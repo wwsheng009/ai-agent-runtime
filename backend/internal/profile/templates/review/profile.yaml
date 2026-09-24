@@ -1,0 +1,32 @@
+# {{name}} — 评审/巡检场景：只读工具面，禁止写入，不连接任何 MCP server。
+profile:
+  name: {{name}}
+  description: {{description}}
+  default_agent: {{agent}}
+
+prompts:
+  mode: replace
+
+# 只读工具集：仅检索/读取类内置工具；read_only: true 拒绝一切写操作。
+tools:
+  allowlist:
+    - view
+    - grep
+    - glob
+    - ls
+    - web_search
+    - fetch
+  # T2 能力裁剪（§9.2）：子代理/团队工具属"运行时自有"工具
+  # （policy.IsRuntimeOwnedEssentialTool），**不受 allowlist 收窄**——allowlist
+  # 只裁剪目录工具；要真正关闭只能显式 denylist（deny 恒优先于 allow，且显式
+  # deny 会覆盖 essential 豁免，见 policy/tool_policy.go:90-101）。
+  # 不新增 subagents.enabled 之类的配置开关：那是假开关（工具面不联动）。
+  denylist:
+    - spawn_agent
+    - spawn_subagents
+    - spawn_team
+  read_only: true
+
+# 无 MCP：排除全部服务器（连接前过滤：不连接、不注册工具）。
+mcp:
+  exclude_servers: ["*"]

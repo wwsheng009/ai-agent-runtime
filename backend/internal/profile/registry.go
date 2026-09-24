@@ -3,6 +3,7 @@ package profile
 import (
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -79,4 +80,39 @@ func looksLikePath(ref string) bool {
 		return true
 	}
 	return false
+}
+
+// Entry is one registered profile name/root pair.
+type Entry struct {
+	Name string `json:"name"`
+	Root string `json:"root"`
+}
+
+// Entries returns the registered names with their absolute roots, sorted by
+// name (deterministic order for API listing).
+func (r *Registry) Entries() []Entry {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.items) == 0 {
+		return nil
+	}
+	entries := make([]Entry, 0, len(r.items))
+	for name, root := range r.items {
+		entries = append(entries, Entry{Name: name, Root: root})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	return entries
+}
+
+// DefaultRoot returns the registry's default root (empty when unset).
+func (r *Registry) DefaultRoot() string {
+	if r == nil {
+		return ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.defaultRoot
 }

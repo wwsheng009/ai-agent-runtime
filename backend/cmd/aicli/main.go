@@ -479,6 +479,11 @@ func main() {
 		return cfg
 	}))
 
+	// profile 子命令 — 场景化 profile 管理（list/show/validate/create）
+	rootCmd.AddCommand(commands.NewProfileCommand(func() *config.Config {
+		return cfg
+	}))
+
 	rootCmd.AddCommand(commands.NewExecCommand(func() *config.Config {
 		return cfg
 	}))

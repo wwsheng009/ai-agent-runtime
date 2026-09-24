@@ -1,0 +1,19 @@
+# {{name}} — 编码场景：全工具基线，不裁剪工具面。
+# 由 `aicli profile create` 从内置模板生成；字段语义见 docs/aicli/profiles.md。
+profile:
+  name: {{name}}
+  description: {{description}}
+  default_agent: {{agent}}
+
+# 提示词组合：replace = profile 提示词整体替换内置基础 prompt（默认，零行为变化）；
+# 需要叠加时改为 append（内置基础 → profile 组合 → context notes）。
+prompts:
+  mode: replace
+
+# 全工具基线：不声明 allowlist/denylist 即全部内置工具可用。
+# read_only: false 显式声明本 profile 允许写操作（review 模板用 true）。
+tools:
+  read_only: false
+
+# skills：不声明 allowlist/denylist 即全部技能可见（deny 恒优先）。
+# mcp：不声明 use_servers/exclude_servers 即沿用 mcp.yaml 的全量服务器。

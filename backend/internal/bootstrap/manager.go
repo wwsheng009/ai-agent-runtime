@@ -24,6 +24,9 @@ type Options struct {
 	SkillDir            string
 	SkillDirs           []string
 	DiscoverOnly        bool
+	// SkillFilter optionally restricts which skill names are registered.
+	// nil keeps the pre-profile behavior (every discovered skill is kept).
+	SkillFilter         func(string) bool
 	MCPManager          skill.MCPManager
 	ResourceManager     llm.ResourceManager
 	GatewayProviderName string
@@ -105,6 +108,10 @@ func NewManager(opts *Options) (*Manager, error) {
 		return nil, err
 	}
 	manager.teamStore = teamStore
+
+	// Profile skill selection (Batch 1): applied on the loader so every
+	// registration path — including hot reload — honors the same predicate.
+	manager.loader.SetNameFilter(opts.SkillFilter)
 
 	if len(manager.skillDirs) > 0 {
 		manager.skillDir = manager.skillDirs[0]

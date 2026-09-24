@@ -403,6 +403,7 @@ func executeExec(ctx context.Context, session *ExecSession) error {
 		Model:     chatSession.Model,
 		Provider:  chatSession.ProviderName,
 		Ephemeral: opts.Ephemeral,
+		Profile:   execProfileMetadata(chatSession),
 	})
 	if strings.TrimSpace(opts.Prompt) == "" {
 		err := fmt.Errorf("未提供提示词。请通过参数、-p 或 stdin 提供提示词")
@@ -447,6 +448,7 @@ func executeExec(ctx context.Context, session *ExecSession) error {
 		Provider:   chatSession.ProviderName,
 		Usage:      usage,
 		DurationMs: duration.Milliseconds(),
+		Profile:    execProfileMetadata(chatSession),
 	}
 	processor.SetFinalResult(result)
 	if err := processor.PrintFinalOutput(opts); err != nil {
@@ -487,6 +489,32 @@ func execTokenUsage(session *ChatSession) TokenUsage {
 		OutputTokens: outputTokens,
 		TotalTokens:  session.TokenCount,
 	}
+}
+
+// execProfileMetadata 把会话上生效的 profile 面投影为 exec JSON 元数据
+// （D9/FR-10）。未启用 profile 时返回 nil：调用方保持字段省略，无 profile 的
+// 输出形状不变。计数口径：tool_count 取 allowlist 生效条目数（0=不限制），
+// skill_count 取会话实际可见的 skills 计数。
+func execProfileMetadata(session *ChatSession) *ExecProfileMetadata {
+	if session == nil {
+		return nil
+	}
+	name := strings.TrimSpace(session.ProfileName)
+	if name == "" {
+		return nil
+	}
+	meta := &ExecProfileMetadata{
+		Reference: strings.TrimSpace(session.ProfileReference),
+		Name:      name,
+		Agent:     strings.TrimSpace(session.ProfileAgent),
+	}
+	if policy := session.ToolPolicy; policy != nil {
+		meta.ToolCount = len(policy.AllowedToolNames())
+	}
+	if session.SkillsBinding != nil {
+		meta.SkillCount = session.SkillsBinding.Count()
+	}
+	return meta
 }
 
 func flushExecSession(session *ChatSession) {

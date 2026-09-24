@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -80,6 +81,19 @@ func LookupToolTaxonomy(toolName string) (ToolTaxonomy, bool) {
 	name := normalizeToolName(toolName)
 	tax, ok := knownToolTaxonomy[name]
 	return tax, ok
+}
+
+// KnownToolTaxonomyNames returns the sorted names registered in the built-in
+// taxonomy (the same table `profile validate` consults). It is the single
+// source for "全量工具清单" counts used by the quantified profile acceptance
+// (实施方案 §1.3 第 1 条)；调用方不得再维护第二份名单。
+func KnownToolTaxonomyNames() []string {
+	names := make([]string, 0, len(knownToolTaxonomy))
+	for name := range knownToolTaxonomy {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // TaxonomyFromMetadata builds taxonomy from tool definition metadata map.

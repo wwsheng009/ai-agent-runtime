@@ -600,6 +600,13 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 	if agentType := strings.TrimSpace(args.AgentType); agentType != "" {
 		childSession.SetContext(toolbroker.AgentSessionContextAgentType, agentType)
 	}
+	// FR-9/D8：spawn 子会话在装配点快照父会话的 profile 绑定（引用/名称/代理/根目录）。
+	// 子 actor 构建期据此解析出父级 profile，再按「父 profile ∩ 子 agentdef 声明」
+	// 派生策略（只收窄）；父会话之后切换 profile 不追溯已有子代理。父未绑定 profile
+	// 时不写任何键，保持「不声明 = 零变化」。
+	if parentSession != nil {
+		sessionmeta.CopyProfileBinding(&childSession.Metadata.Context, parentSession.Metadata.Context)
+	}
 	toolbroker.ApplySpawnAgentRouteContext(childSession, args)
 	if err := c.applyAPISpawnIsolation(ctx, childSession, args); err != nil {
 		_ = storage.Delete(ctx, childSession.ID)

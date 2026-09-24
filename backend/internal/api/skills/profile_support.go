@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/embedding"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
@@ -37,11 +39,20 @@ type profileRuntimeState struct {
 	ToolPolicy    *runtimepolicy.ToolExecutionPolicy
 	RuntimeConfig *runtimecfg.RuntimeConfig
 	RuntimePath   string
-	Registry      *skill.Registry
-	Loader        *skill.Loader
-	Embedding     *skill.SemanticEmbeddingRouter
-	MCPAdapter    skill.MCPManager
-	MCPManager    mcpmanager.Manager
+	// ConfigOverlay 是 profile `runtime.overrides` 叠加到宿主 aicli 配置快照后的
+	// 会话级合并视图（D13 server 半程；生效点由 V27 定位）。零覆盖 / 零变化时
+	// 为 nil，调用方必须回落宿主快照，保证未声明覆盖的 profile 逐字节零变化
+	// （NFR-1）。合并结果**不改动**宿主快照，覆盖不跨会话泄漏（D13/R10）。
+	ConfigOverlay *agentconfig.Config
+	// OverlayKeys / OverlayOrigins 记录覆盖叶子路径与来源标记（复用解析期的
+	// origins 结构，不新增格式），供展示与归因。
+	OverlayKeys    []string
+	OverlayOrigins map[string]string
+	Registry       *skill.Registry
+	Loader         *skill.Loader
+	Embedding      *skill.SemanticEmbeddingRouter
+	MCPAdapter     skill.MCPManager
+	MCPManager     mcpmanager.Manager
 }
 
 func (h *Handler) SetProfileSupport(cfg ProfileSupportConfig) {
@@ -93,6 +104,9 @@ func (h *Handler) resolveProfileRuntimeState(ctx context.Context, profileRef, ag
 
 	registryInstance := skill.NewRegistry(mcpAdapter)
 	loader := skill.NewLoader(mcpAdapter)
+	// FR-3 技能选择：过滤落在加载权威点（loader）；未声明时 filter 为 nil，
+	// 保持 profile 之前的全量行为（NFR-1）。
+	loader.SetNameFilter(runtimeprofileinput.BuildSkillFilter(toProfileInputSkillSelection(resolved.Skills)))
 	if len(resolved.SkillDirs) > 0 {
 		loader.SetSkillDirs(resolved.SkillDirs)
 		if err := loader.DiscoverAllWithRegistry(resolved.SkillDirs, registryInstance); err != nil {
@@ -111,20 +125,31 @@ func (h *Handler) resolveProfileRuntimeState(ctx context.Context, profileRef, ag
 		return nil, nil, err
 	}
 
+	overlayConfig, overlayKeys, overlayOrigins, err := h.buildProfileConfigOverlay(resolved)
+	if err != nil {
+		if mcpManager != nil {
+			_ = mcpManager.Stop()
+		}
+		return nil, nil, err
+	}
+
 	state := &profileRuntimeState{
-		Reference:     ref,
-		Resolved:      resolved,
-		PromptText:    inputs.PromptText,
-		PromptLayers:  inputs.PromptLayers,
-		ContextValues: cloneProfileContextValues(inputs.ContextValues),
-		ToolPolicy:    inputs.ToolPolicy,
-		RuntimeConfig: runtimeCfg,
-		RuntimePath:   runtimePath,
-		Registry:      registryInstance,
-		Loader:        loader,
-		Embedding:     embeddingRouter,
-		MCPAdapter:    mcpAdapter,
-		MCPManager:    mcpManager,
+		Reference:      ref,
+		Resolved:       resolved,
+		PromptText:     inputs.PromptText,
+		PromptLayers:   inputs.PromptLayers,
+		ContextValues:  cloneProfileContextValues(inputs.ContextValues),
+		ToolPolicy:     inputs.ToolPolicy,
+		RuntimeConfig:  runtimeCfg,
+		RuntimePath:    runtimePath,
+		ConfigOverlay:  overlayConfig,
+		OverlayKeys:    overlayKeys,
+		OverlayOrigins: overlayOrigins,
+		Registry:       registryInstance,
+		Loader:         loader,
+		Embedding:      embeddingRouter,
+		MCPAdapter:     mcpAdapter,
+		MCPManager:     mcpManager,
 	}
 
 	cleanup := func() {
@@ -166,16 +191,68 @@ func (h *Handler) resolveProfileSessionState(profileRef, agentID string, workspa
 		return nil, err
 	}
 
+	overlayConfig, overlayKeys, overlayOrigins, err := h.buildProfileConfigOverlay(resolved)
+	if err != nil {
+		return nil, err
+	}
+
 	return &profileRuntimeState{
-		Reference:     ref,
-		Resolved:      resolved,
-		PromptText:    inputs.PromptText,
-		PromptLayers:  inputs.PromptLayers,
-		ContextValues: cloneProfileContextValues(inputs.ContextValues),
-		ToolPolicy:    inputs.ToolPolicy,
-		RuntimeConfig: runtimeCfg,
-		RuntimePath:   runtimePath,
+		Reference:      ref,
+		Resolved:       resolved,
+		PromptText:     inputs.PromptText,
+		PromptLayers:   inputs.PromptLayers,
+		ContextValues:  cloneProfileContextValues(inputs.ContextValues),
+		ToolPolicy:     inputs.ToolPolicy,
+		RuntimeConfig:  runtimeCfg,
+		RuntimePath:    runtimePath,
+		ConfigOverlay:  overlayConfig,
+		OverlayKeys:    overlayKeys,
+		OverlayOrigins: overlayOrigins,
 	}, nil
+}
+
+// buildProfileConfigOverlay 构造 profile `runtime.overrides` 的会话级合并视图
+// （D13 server 半程；生效点由 V27 定位）。
+//
+// 基线取宿主 aicli 配置快照——即 SetAICLIConfig 存储、各消费者实际读取的那一份，
+// 因此覆盖视图与读取方同源；合并**不改动**宿主快照，覆盖只在本次解析结果上生效
+// （D13：不写回配置文件、不影响其它会话）。
+//
+// 返回 nil 覆盖视图表示「无覆盖 / 宿主未接线配置 / 合并后零变化」三种情况，调用方
+// 必须回落宿主配置：未声明 `runtime.overrides` 的 profile 与接线前逐字节一致
+// （NFR-1）。覆盖键已在解析期过 D14 白名单，这里的校验是运行时双执行的第二道。
+func (h *Handler) buildProfileConfigOverlay(resolved *profilesys.ResolvedAgent) (*agentconfig.Config, []string, map[string]string, error) {
+	if h == nil || resolved == nil || len(resolved.Overrides) == 0 {
+		return nil, nil, nil, nil
+	}
+	base := cloneAICLIRoutingConfig(h.aicliConfigSnapshot())
+	if base == nil {
+		// 宿主未接线配置时 server 侧没有任何配置消费者，覆盖自然无生效点。
+		return nil, nil, nil, nil
+	}
+	overlayYAML, err := profilesys.MergeOverridesIntoYAML(nil, resolved.Overrides)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	merged, changed, err := agentconfig.ApplyConfigOverlayYAML(base, overlayYAML)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !changed || merged == nil {
+		return nil, nil, nil, nil
+	}
+	return merged, profilesys.OverrideKeyList(resolved.Overrides), profilesys.OverrideOrigins(resolved.Overrides), nil
+}
+
+// skillsRuntimeConfigFor 返回本次请求生效的技能运行时配置：profile 覆盖优先，
+// 否则回落宿主快照（V27 定位的请求级消费点：AgentChat 的 catalog/exposure 注入）。
+//
+// 覆盖视图为 nil 时返回宿主快照本身（同一指针），调用方行为与接线前一致。
+func (h *Handler) skillsRuntimeConfigFor(profileState *profileRuntimeState) *agentconfig.SkillsRuntimeConfig {
+	if profileState != nil && profileState.ConfigOverlay != nil && profileState.ConfigOverlay.SkillsRuntime != nil {
+		return profileState.ConfigOverlay.SkillsRuntime
+	}
+	return h.runtimeSkillsConfig()
 }
 
 func (h *Handler) resolveProfileMetadata(profileRef, agentID string) (*profilesys.ResolvedAgent, string, error) {
@@ -253,6 +330,20 @@ func fallbackProfileRoot(name string, workspacePath string) string {
 	return ""
 }
 
+func toProfileInputSkillSelection(selection profilesys.ResolvedSkillSelection) runtimeprofileinput.ResolvedSkillSelection {
+	return runtimeprofileinput.ResolvedSkillSelection{
+		Allowlist: append([]string(nil), selection.Allowlist...),
+		Denylist:  append([]string(nil), selection.Denylist...),
+	}
+}
+
+func toProfileInputMCPSelection(selection profilesys.ResolvedMCPSelection) runtimeprofileinput.ResolvedMCPSelection {
+	return runtimeprofileinput.ResolvedMCPSelection{
+		UseServers:     append([]string(nil), selection.UseServers...),
+		ExcludeServers: append([]string(nil), selection.ExcludeServers...),
+	}
+}
+
 func toProfileInputResolvedAgent(resolved *profilesys.ResolvedAgent) *runtimeprofileinput.ResolvedAgent {
 	if resolved == nil {
 		return nil
@@ -267,7 +358,10 @@ func toProfileInputResolvedAgent(resolved *profilesys.ResolvedAgent) *runtimepro
 		Model:           resolved.Model,
 		RuntimeConfig:   resolved.RuntimeConfig,
 		MCPConfig:       resolved.MCPConfig,
+		MCPSelection:    toProfileInputMCPSelection(resolved.MCPSelection),
 		SkillDirs:       append([]string(nil), resolved.SkillDirs...),
+		Skills:          toProfileInputSkillSelection(resolved.Skills),
+		PromptMode:      resolved.PromptMode,
 		Prompts: runtimeprofileinput.ResolvedPromptFiles{
 			System: resolved.Prompts.System,
 			Role:   resolved.Prompts.Role,
@@ -381,14 +475,34 @@ func (h *Handler) resolveProfileMCPAdapter(ctx context.Context, resolved *profil
 		}
 		return h.mcpManager, nil, nil
 	}
-	if samePath(configPath, h.profileGlobalMCPPath) && h.mcpManager != nil {
+	// FR-4 服务器选择：全局 manager 是共享实例，不能被单个 profile 的选择收窄，
+	// 因此仅在选择为空时复用；有选择时必须新建独立 manager 并按选择过滤后再连接。
+	hasSelection := !resolved.MCPSelection.Empty()
+	if !hasSelection && samePath(configPath, h.profileGlobalMCPPath) && h.mcpManager != nil {
 		return h.mcpManager, nil, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	manager := mcpmanager.NewManager()
-	if err := manager.LoadConfig(configPath); err != nil {
+	if hasSelection {
+		scoped, ok := manager.(mcpmanager.ScopedManager)
+		if !ok {
+			return nil, nil, fmt.Errorf("MCP 管理器不支持内存配置快照，无法应用 profile 服务器选择")
+		}
+		cfg, dropped, err := runtimeprofileinput.LoadMCPConfigSnapshot(configPath, toProfileInputMCPSelection(resolved.MCPSelection))
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := scoped.LoadConfigFromConfig(cfg); err != nil {
+			return nil, nil, err
+		}
+		if len(dropped) > 0 {
+			logger.Warn("profile mcp selection skipped servers",
+				logger.String("profile", strings.TrimSpace(resolved.ProfileName)),
+				logger.String("servers", strings.Join(dropped, ", ")))
+		}
+	} else if err := manager.LoadConfig(configPath); err != nil {
 		return nil, nil, err
 	}
 	if err := manager.Start(ctx); err != nil {

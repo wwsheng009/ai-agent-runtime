@@ -148,6 +148,7 @@ func printExecResumeSummary(session *ExecSession) error {
 		SessionID: currentRuntimeSessionID(chatSession),
 		Model:     chatSession.Model,
 		Provider:  chatSession.ProviderName,
+		Profile:   execProfileMetadata(chatSession),
 	})
 	processor.OnTurnCompleted(TurnCompletedEvent{TurnID: generateTurnID(), Status: "resumed", Usage: execTokenUsage(chatSession)})
 	processor.SetFinalResult(ExecFinalResult{
@@ -157,6 +158,7 @@ func printExecResumeSummary(session *ExecSession) error {
 		Model:     chatSession.Model,
 		Provider:  chatSession.ProviderName,
 		Usage:     execTokenUsage(chatSession),
+		Profile:   execProfileMetadata(chatSession),
 	})
 	return processor.PrintFinalOutput(session.Options)
 }

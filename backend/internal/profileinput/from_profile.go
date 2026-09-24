@@ -16,12 +16,21 @@ func AdaptFromProfile(p *profilesys.ResolvedAgent) *ResolvedAgent {
 		Model:           p.Model,
 		RuntimeConfig:   p.RuntimeConfig,
 		MCPConfig:       p.MCPConfig,
+		MCPSelection: ResolvedMCPSelection{
+			UseServers:     append([]string(nil), p.MCPSelection.UseServers...),
+			ExcludeServers: append([]string(nil), p.MCPSelection.ExcludeServers...),
+		},
 		SkillDirs:       append([]string(nil), p.SkillDirs...),
+		Skills: ResolvedSkillSelection{
+			Allowlist: append([]string(nil), p.Skills.Allowlist...),
+			Denylist:  append([]string(nil), p.Skills.Denylist...),
+		},
 		Prompts: ResolvedPromptFiles{
 			System: p.Prompts.System,
 			Role:   p.Prompts.Role,
 			Tools:  p.Prompts.Tools,
 		},
+		PromptMode: p.PromptMode,
 		ToolPolicy: ResolvedToolPolicy{
 			Allowlist: append([]string(nil), p.ToolPolicy.Allowlist...),
 			Denylist:  append([]string(nil), p.ToolPolicy.Denylist...),

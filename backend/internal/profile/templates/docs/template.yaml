@@ -1,0 +1,3 @@
+name: docs
+description: Documentation profile with file read/write, search, and shell denied
+default_agent: default

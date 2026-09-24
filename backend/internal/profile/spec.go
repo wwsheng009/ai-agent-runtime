@@ -8,12 +8,17 @@ type ProfileSpec struct {
 	MCP       MCPSpec               `yaml:"mcp,omitempty" json:"mcp,omitempty"`
 	Skills    SkillsSpec            `yaml:"skills,omitempty" json:"skills,omitempty"`
 	Tools     ToolPolicySpec        `yaml:"tools,omitempty" json:"tools,omitempty"`
+	Prompts   PromptsSpec           `yaml:"prompts,omitempty" json:"prompts,omitempty"`
 	Agents    map[string]AgentSpec  `yaml:"agents,omitempty" json:"agents,omitempty"`
 }
 
 // ProfileMetaSpec contains profile metadata.
 type ProfileMetaSpec struct {
-	Name         string `yaml:"name,omitempty" json:"name,omitempty"`
+	Name string `yaml:"name,omitempty" json:"name,omitempty"`
+	// Description is informational metadata rendered by `profile create`
+	// templates and surfaced by `profile list/show`. It never affects
+	// resolution semantics.
+	Description  string `yaml:"description,omitempty" json:"description,omitempty"`
 	DefaultAgent string `yaml:"default_agent,omitempty" json:"default_agent,omitempty"`
 }
 
@@ -31,13 +36,30 @@ type RuntimeSpec struct {
 
 // MCPSpec contains profile-scoped MCP declarations.
 type MCPSpec struct {
-	MergeStrategy string                 `yaml:"merge_strategy,omitempty" json:"merge_strategy,omitempty"`
-	Extras        map[string]interface{} `yaml:",inline" json:"extras,omitempty"`
+	// UseServers / ExcludeServers are server-level selection declarations.
+	// They are applied before connecting: an excluded server is neither
+	// connected nor registered (see Batch 1 of the implementation plan).
+	// Exclude always wins over use; an empty UseServers means "all servers".
+	UseServers     []string               `yaml:"use_servers,omitempty" json:"use_servers,omitempty"`
+	ExcludeServers []string               `yaml:"exclude_servers,omitempty" json:"exclude_servers,omitempty"`
+	Extras         map[string]interface{} `yaml:",inline" json:"extras,omitempty"`
 }
 
 // SkillsSpec contains profile-scoped skill declarations.
 type SkillsSpec struct {
-	Extras map[string]interface{} `yaml:",inline" json:"extras,omitempty"`
+	// Allowlist / Denylist select skills by name. Denylist always wins over
+	// allowlist; an empty allowlist means "all discovered skills". The
+	// wildcard "*" matches every skill name.
+	Allowlist []string               `yaml:"allowlist,omitempty" json:"allowlist,omitempty"`
+	Denylist  []string               `yaml:"denylist,omitempty" json:"denylist,omitempty"`
+	Extras    map[string]interface{} `yaml:",inline" json:"extras,omitempty"`
+}
+
+// PromptsSpec contains profile-scoped prompt composition declarations.
+type PromptsSpec struct {
+	// Mode selects how the profile prompt composes with the host system
+	// prompt: "replace" (default, current behavior) or "append".
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 }
 
 // AgentSpec contains inline and file-based agent settings.

@@ -1,0 +1,24 @@
+# {{name}} — 最小场景：最小工具面 + 全部技能关闭，适合低成本/受限环境。
+profile:
+  name: {{name}}
+  description: {{description}}
+  default_agent: {{agent}}
+
+# 最短提示词：role.md 仅保留一句目标说明。
+prompts:
+  mode: replace
+
+# 最小工具集：仅读取与检索；read_only: true 拒绝写操作。
+tools:
+  allowlist:
+    - view
+    - grep
+  read_only: true
+
+# 全部技能关闭（通配 deny；deny 恒优先于 allow）。
+skills:
+  denylist: ["*"]
+
+# 无 MCP：排除全部服务器（连接前过滤：不连接、不注册工具）。
+mcp:
+  exclude_servers: ["*"]

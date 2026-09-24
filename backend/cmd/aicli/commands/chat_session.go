@@ -22,6 +22,7 @@ import (
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
@@ -187,6 +188,13 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	session.turnPrimed = false
 	resetChatTurnTokenUsage(session)
 	restoreChatRuntimeContext(session, session.RuntimeSession)
+	// A4 resume 半程（Batch 11a）：把持久化的 profile 身份读回会话，并按该引用
+	// 重新解析投影生效面（prompt/tools/skills/mcp 与身份一致；也避免下一次 sync
+	// 因内存字段为空而删除 sessionmeta 里的 profile_ref）。启动路径解析出的显式/
+	// 默认 profile 在 restore 之后投影，优先级更高（chat_setup.go:248-254）。
+	if resumedProfileRef := hydrateChatProfileIdentityFromResumedSession(session); resumedProfileRef != "" {
+		chatReapplyResumedProfileState(session, resumedProfileRef)
+	}
 	restoreChatRouteTransparency(session, session.RuntimeSession)
 	restoreChatContextTokenUsage(session, session.RuntimeSession)
 	restoreChatTokenCount(session, session.RuntimeSession)
@@ -1933,9 +1941,15 @@ func composeDurableChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd 
 		return ""
 	}
 	snapshot := ensureSessionEnvironmentSnapshot(session, cwd)
-	lines := make([]string, 0, 6)
-	if base := strings.TrimSpace(session.SystemPromptText); base != "" {
-		lines = append(lines, base)
+	lines := make([]string, 0, 7)
+	// FR-7 prompt 组合模式：replace（默认）保持既有顺序（profile 文本在
+	// 内置基础提示之前，逐字节不变）；append 把 profile 文本叠加在内置基础
+	// 提示（环境上下文 + agentguidance 等）之后。模式判定统一走
+	// profileinput，避免 CLI 自造第二套方言。
+	profilePrompt := strings.TrimSpace(session.SystemPromptText)
+	appendProfilePrompt := runtimeprofileinput.ProfilePromptModeIsAppend(session.ProfilePromptMode)
+	if profilePrompt != "" && !appendProfilePrompt {
+		lines = append(lines, profilePrompt)
 	}
 	if context := strings.TrimSpace(snapshot.ContextBlock); context != "" {
 		lines = append(lines, "Environment context:\n"+context)
@@ -1954,6 +1968,9 @@ func composeDurableChatSystemPromptWithGuidanceForCWD(session *ChatSession, cwd 
 	}
 	if guidance := strings.TrimSpace(runtimeprompt.RenderMultiAgentCollaborationGuidance()); guidance != "" {
 		lines = append(lines, guidance)
+	}
+	if profilePrompt != "" && appendProfilePrompt {
+		lines = append(lines, profilePrompt)
 	}
 	return strings.Join(lines, "\n\n")
 }

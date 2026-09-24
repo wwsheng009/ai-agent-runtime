@@ -18,6 +18,11 @@ func Resolve(options ResolveOptions) (*ResolvedAgent, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 解析期执行与 `profile validate` 同一份校验（D14 双执行 / Q11）：
+	// 非法覆盖键或已移除字段必须在这里报错，绝不带着"看起来生效"的声明继续。
+	if err := validateProfileSpecForResolve(spec); err != nil {
+		return nil, err
+	}
 
 	agentID, err := resolveAgentID(options.Agent, spec, rootPaths)
 	if err != nil {
@@ -63,6 +68,17 @@ func Resolve(options ResolveOptions) (*ResolvedAgent, error) {
 	)
 	skillDirs = appendUniqueStrings(skillDirs, collectExistingDirs(options.GlobalSkillDirs...)...)
 
+	// Selection declarations (Batch 1): union across layers, deny/exclude wins.
+	skillSelection := MergeSkillSelections(spec.Skills)
+	mcpSelection := MergeMCPSelections(spec.MCP)
+	promptMode, modeOK := NormalizePromptMode(spec.Prompts.Mode)
+	if !modeOK {
+		// "解析不了就报错": never silently fall back to a different composition
+		// mode than the one the profile asked for.
+		return nil, fmt.Errorf("%w: prompts.mode %q (allowed: %s, %s)",
+			ErrInvalidProfileSpec, spec.Prompts.Mode, PromptModeReplace, PromptModeAppend)
+	}
+
 	policyLayers := []ToolPolicySpec{spec.Tools, inlineAgent.Tools}
 	if agentFileSpec != nil {
 		policyLayers = append(policyLayers, agentFileSpec.Tools)
@@ -98,8 +114,12 @@ func Resolve(options ResolveOptions) (*ResolvedAgent, error) {
 		Model:           model,
 		RuntimeConfig:   runtimeConfig,
 		MCPConfig:       mcpConfig,
+		MCPSelection:    mcpSelection,
+		Overrides:       CloneOverrides(spec.Runtime.Overrides),
 		SkillDirs:       skillDirs,
+		Skills:          skillSelection,
 		Prompts:         prompts,
+		PromptMode:      promptMode,
 		ToolPolicy:      toolPolicy,
 		Paths: ResolvedPaths{
 			ProfileRoot:         root,

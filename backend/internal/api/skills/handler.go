@@ -511,9 +511,19 @@ func cloneAICLIRoutingConfig(config *agentconfig.Config) *agentconfig.Config {
 		// syncAICLIRoutingSnapshot 无法区分「快照未接线」与「文件里本来没有
 		// aicli 节」，只能放弃刷新——文件已是新值而快照仍为旧态，主 Agent
 		// 接线要等重启。读取方一律先判 `AICLI == nil`，因此行为不变。
-		return &agentconfig.Config{}
+		return &agentconfig.Config{
+			// ConfigFilePath / Profiles 是**宿主配置事实**，与 aicli 节无关：
+			// 漏拷会让 profiles 写端点（profiles.default / items）落到搜索路径
+			// 里"碰巧找到"的另一个配置文件，而 UI 与运行时快照都看不出差异。
+			ConfigFilePath: config.ConfigFilePath,
+			Profiles:       cloneProfilesConfig(config.Profiles),
+		}
 	}
-	cloned := &agentconfig.Config{AICLI: &agentconfig.AICLIConfig{}}
+	cloned := &agentconfig.Config{
+		ConfigFilePath: config.ConfigFilePath,
+		Profiles:       cloneProfilesConfig(config.Profiles),
+		AICLI:          &agentconfig.AICLIConfig{},
+	}
 	if config.AICLI.Chat != nil {
 		// Chat 默认值（default_provider/default_model/reasoning_effort）需要随
 		// 快照一起保留，供 /api/runtime/models 向前端暴露配置默认值。
@@ -546,6 +556,26 @@ func cloneAICLIRoutingConfig(config *agentconfig.Config) *agentconfig.Config {
 	if config.SkillsRuntime != nil {
 		skillsRuntime := *config.SkillsRuntime
 		cloned.SkillsRuntime = &skillsRuntime
+	}
+	return cloned
+}
+
+// cloneProfilesConfig 深拷贝 config.profiles（Batch 8 接线：profiles API 的
+// 只读视图与 default/items 写回都经 aicliConfigSnapshot 读取本字段；漏拷会让
+// 列表看不到 config 注册项、default 变更在快照里丢失，直到重启才生效）。
+func cloneProfilesConfig(profiles *agentconfig.ProfilesConfig) *agentconfig.ProfilesConfig {
+	if profiles == nil {
+		return nil
+	}
+	cloned := &agentconfig.ProfilesConfig{
+		Root:           profiles.Root,
+		DefaultProfile: profiles.DefaultProfile,
+	}
+	if len(profiles.Items) > 0 {
+		cloned.Items = make(map[string]agentconfig.ProfileConfig, len(profiles.Items))
+		for name, item := range profiles.Items {
+			cloned.Items[name] = item
+		}
 	}
 	return cloned
 }
@@ -887,6 +917,10 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/mcps/reload", h.ReloadRuntimeMCPs).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/teams/reload", h.ReloadRuntimeTeams).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/validate", h.ValidateRuntimeConfig).Methods(http.MethodGet)
+
+	// Profiles（§10.5 + §23 G1-G3：list/get/put/validate/preview/default/apply
+	// + create/duplicate/rename/move/delete/references）。
+	h.registerProfileRoutes(runtimeRouter)
 
 	// Sessions
 	runtimeRouter.HandleFunc("/sessions", h.ListSessions).Methods(http.MethodGet)
@@ -1959,7 +1993,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			}
 			execSession = execSession.Clone()
 			contextMessages := buildAgentContextMessages(agentContext, workspaceCtx)
-			skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, h.runtimeSkillsConfig())
+			skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, h.skillsRuntimeConfigFor(profileState))
 			if skillErr != nil {
 				h.writeError(w, http.StatusBadRequest, skillErr)
 				return
@@ -2416,7 +2450,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 
 	if req.EnableReAct && h.llmRuntime != nil {
 		contextMessages := buildAgentContextMessages(agentContext, workspaceCtx)
-		skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, h.runtimeSkillsConfig())
+		skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, h.skillsRuntimeConfigFor(profileState))
 		if skillErr != nil {
 			h.writeError(w, http.StatusBadRequest, skillErr)
 			return

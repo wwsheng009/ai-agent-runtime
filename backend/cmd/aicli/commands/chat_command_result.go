@@ -394,6 +394,14 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		result, handled := tryExecuteStructuredRoutingCommand(session, command)
 		return result, handled, nil
 	}
+	// 会话 profile 热切换（设计 §17.1/§17.2，Batch 11a）：/profile 同为新增
+	// 命名空间，没有 legacy 实现，因此在宽围栏之前无条件接管。只读子命令
+	// （status/list/show/diff）零副作用；use/reload/off/save 走唯一执行核心
+	// （applyRuntimeProfileSwitch / applyRuntimeProfileDetach，D21）。
+	if commandMatches(cmdLower, "/profile") {
+		result, handled := tryExecuteStructuredProfileCommand(session, command)
+		return result, handled, nil
+	}
 	if !commandMatches(cmdLower, "/debug") && !commandMatches(cmdLower, "/status") && !commandMatches(cmdLower, "/usage") && !commandMatches(cmdLower, "/load") &&
 		!commandMatches(cmdLower, "/account") && !commandMatches(cmdLower, "/accounts") &&
 		!commandMatches(cmdLower, "/goal") && !commandMatches(cmdLower, "/memory") && !commandMatches(cmdLower, "/stream") &&
@@ -407,7 +415,8 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		!commandMatches(cmdLower, "/permission-mode") && !commandMatches(cmdLower, "/mode") &&
 		!commandMatches(cmdLower, "/approval-reuse") && !commandMatches(cmdLower, "/plan") &&
 		!commandMatches(cmdLower, "/timeline") && !commandMatches(cmdLower, "/collab") &&
-		!commandMatches(cmdLower, "/mcp") && !commandMatches(cmdLower, "/web") && !commandMatches(cmdLower, "/routing") {
+		!commandMatches(cmdLower, "/mcp") && !commandMatches(cmdLower, "/web") && !commandMatches(cmdLower, "/routing") &&
+		!commandMatches(cmdLower, "/profile") {
 		return CommandResult{}, false, nil
 	}
 

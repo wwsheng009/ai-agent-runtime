@@ -246,24 +246,8 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 	initializeChatAccountBalanceRefresh(session)
 	session.Interaction.RefreshStatus("")
 	if profileState != nil && profileState.Active() {
-		session.ProfileReference = profileState.Reference
-		session.ProfileName = profileState.Resolved.ProfileName
-		session.ProfileAgent = profileState.Resolved.AgentID
-		session.ProfileRoot = profileState.Resolved.ProfileRoot
-		session.AgentSourcePath = strings.TrimSpace(profileState.AgentSourcePath)
-		session.AgentSource = strings.TrimSpace(profileState.AgentSource)
-		session.SystemPromptText = profileState.PromptText
-		session.RuntimeConfigPath = profileState.RuntimeConfigPath()
-		session.MCPConfigPath = profileState.MCPConfigPath()
-		session.ResolvedSkillDirs = profileState.SkillDirs()
-		session.ProfileContext = cloneSkillContextMap(profileState.ContextValues)
-		session.ToolPolicy = profileState.ToolPolicy
-		if session.ToolPolicy != nil {
-			session.BaseToolPolicy = session.ToolPolicy.Clone()
-		}
-		if session.FunctionCatalog != nil && session.ToolPolicy != nil {
-			session.FunctionCatalog.SetToolPolicy(session.ToolPolicy)
-		}
+		// 生效面投影走唯一权威函数（D21）；会话内热切换复用同一份实现。
+		applyProfileStateToChatSession(session, profileState)
 		for _, warning := range profileState.SandboxWarnings {
 			emitChatSandboxWarning(warning)
 		}
@@ -744,6 +728,11 @@ func printChatSessionPreamble(session *ChatSession) {
 			profileValue += fmt.Sprintf(" (agent=%s)", session.ProfileAgent)
 		}
 		printChatSessionInfoRow(os.Stderr, "Profile:", profileValue, chatSessionMetaLabelWidth)
+		// profile 生效面（Batch 3/FR-5）：计数 + prompt 估算，随启动摘要一起输出；
+		// 该函数由 shouldPrintChatSessionPreamble 统一门控（quiet/JSON/headless 抑制）。
+		for _, row := range chatProfileSurfaceRows(session) {
+			printChatSessionInfoRow(os.Stderr, row.label, row.value, chatSessionMetaLabelWidth)
+		}
 	}
 	if line := formatChatAgentSourceLine(session); line != "" {
 		printChatSessionInfoRow(os.Stderr, "Agent Source:", line, chatSessionMetaLabelWidth)

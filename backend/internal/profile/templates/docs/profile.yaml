@@ -1,0 +1,34 @@
+# {{name}} — 文档场景：文件读写 + 搜索；shell 类工具显式拒绝。
+profile:
+  name: {{name}}
+  description: {{description}}
+  default_agent: {{agent}}
+
+prompts:
+  mode: replace
+
+tools:
+  allowlist:
+    - view
+    - grep
+    - glob
+    - ls
+    - write
+    - edit
+    - multiedit
+    - append_write
+    - apply_patch
+    - web_search
+    - fetch
+  # deny 恒优先：显式声明拒绝 shell 类工具（即使 allowlist 未包含）。
+  denylist:
+    - shell
+    - bash
+    - aicli_exec
+  read_only: false
+
+# 仅暴露文档相关技能时取消注释（名称需与 skills 目录中的实际技能一致）：
+# skills:
+#   allowlist:
+#     - view_file_content
+#     - fetch_url_content

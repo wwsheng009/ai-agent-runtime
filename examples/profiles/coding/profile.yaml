@@ -1,3 +1,33 @@
-name: coding
-description: Sample coding profile with default and explore agents
-default_agent: default
+# coding — 参考样例：default 使用全量工具；explore 为只读探索角色。
+#
+# 与内置模板 backend/internal/profile/templates/coding 同源（由一致性测试保证）。
+profile:
+  name: coding
+  description: Sample coding profile with default and explore agents
+  default_agent: default
+
+# 工具策略：不声明 allowlist/denylist 即全量；read_only: false 表示允许写操作。
+tools:
+  read_only: false
+
+# explore 的只读工具面写在 profile.yaml。
+#
+# 注意：agents/<id>/agent.yaml **不要**写 tools/disallowed_tools —— 该文件同时被
+# profile 解析器（profile.AgentSpec：tools 为映射）与 portable agentdef
+# （tools 为列表）读取，两种形状无法共存；工具策略请写在 profile.yaml 的
+# agents.<id>.tools，或 agents/<id>/tools/policy.yaml。
+agents:
+  explore:
+    tools:
+      allowlist:
+        - view
+        - grep
+        - glob
+        - ls
+        - shell
+      denylist:
+        - write
+        - edit
+        - apply_patch
+        - append_write
+        - multiedit

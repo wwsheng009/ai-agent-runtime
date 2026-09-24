@@ -1,17 +1,10 @@
+# explore — coding profile 内的只读探索角色（portable agent definition 形状）。
+#
+# 工具策略不在这里声明（见 profile.yaml 的 agents.explore.tools）：
+# 本文件被 profile 解析器与 portable agentdef 同时读取，两边对 tools 的形状
+# 要求不同，因此该键必须留空。
 name: explore
 description: Read-only explorer role inside the coding profile
 permission_mode: plan
-tools:
-  - view
-  - grep
-  - glob
-  - ls
-  - shell
-disallowed_tools:
-  - write
-  - edit
-  - apply_patch
-  - append_write
-  - multiedit
 completion_requirement: none
 sandbox: read-only

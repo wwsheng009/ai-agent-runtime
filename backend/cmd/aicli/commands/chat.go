@@ -28,6 +28,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -159,12 +160,25 @@ type ChatSession struct {
 	AgentSourcePath string
 	// AgentSource classifies discovery origin: builtin|user|project|profile.
 	AgentSource       string
-	SystemPromptText  string                             // 组合后的系统提示
-	RuntimeConfigPath string                             // 解析后的 runtime 配置路径
-	MCPConfigPath     string                             // 解析后的 MCP 配置路径
-	ResolvedSkillDirs []string                           // 解析后的 skills 目录
-	ProfileContext    map[string]interface{}             // profile 提供的只读运行时上下文
-	ToolPolicy        *runtimepolicy.ToolExecutionPolicy // profile 解析后的工具策略
+	SystemPromptText  string   // 组合后的系统提示
+	RuntimeConfigPath string   // 解析后的 runtime 配置路径
+	MCPConfigPath     string   // 解析后的 MCP 配置路径
+	ResolvedSkillDirs []string // 解析后的 skills 目录
+	// Profile 场景化裁剪声明（Batch 1）：技能选择、MCP 服务器选择与提示词组合模式。
+	// 由 profile 解析结果回填，供 bootstrap（skills）与 MCP 启动（服务器选择）消费。
+	ProfileSkillSelection runtimeprofileinput.ResolvedSkillSelection
+	ProfileMCPSelection   runtimeprofileinput.ResolvedMCPSelection
+	ProfilePromptMode     string
+	ProfileContext        map[string]interface{}             // profile 提供的只读运行时上下文
+	ToolPolicy            *runtimepolicy.ToolExecutionPolicy // profile 解析后的工具策略
+	// Profile 配置覆盖（D13，Batch 7）：profile runtime.overrides 的会话级视图。
+	// ProfileConfigBase 是未叠加覆盖的基线配置（首次应用时捕获）；
+	// ProfileConfigOverlayApplied 是当前生效的叠加视图指针（nil 表示未叠加）。
+	// 两者一起保证热切换/解除覆盖时精确还原基线，避免覆盖层层叠加。
+	ProfileConfigBase           *config.Config
+	ProfileConfigOverlayApplied *config.Config
+	ProfileConfigOverlayKeys    []string
+	ProfileConfigOverlayOrigins map[string]string
 	// BaseToolPolicy is the pre-overlay policy (profile / session base) so
 	// project-root reloads can re-apply permissions without double-intersecting.
 	BaseToolPolicy *runtimepolicy.ToolExecutionPolicy
@@ -1574,6 +1588,13 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 						// 输入待消费，不能当作 stdin 关闭退出，应继续下一轮优先
 						// 消费队列（chatInteractiveReadLine 顶部会先读队列）。
 						if chatInputQueueHasQueuedLines(session) {
+							continue
+						}
+						// 网格拉起的脱离节点 stdin 是空设备：EOF 只是"没有终端
+						// 输入"，不是"输入结束"。只要输入队列还在（Web 侧仍可
+						// 投递），就继续等待而不是退出进程（见
+						// chatDetachedNodeStdinExhausted）。
+						if chatDetachedNodeStdinExhausted() && session != nil && session.InputQueue != nil {
 							continue
 						}
 						printDirectInteractiveOutput(session, "\n")

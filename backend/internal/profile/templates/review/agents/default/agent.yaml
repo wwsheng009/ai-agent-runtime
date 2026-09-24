@@ -1,0 +1,6 @@
+name: default
+description: Read-only review agent for the {{name}} profile
+model: ""
+permission_mode: default
+completion_requirement: none
+sandbox: workspace

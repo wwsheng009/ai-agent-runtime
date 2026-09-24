@@ -1,0 +1,3 @@
+name: review
+description: Read-only review profile with search/read tools only and no MCP servers
+default_agent: default

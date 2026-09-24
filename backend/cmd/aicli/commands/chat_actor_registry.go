@@ -712,6 +712,13 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 	if agentType := strings.TrimSpace(args.AgentType); agentType != "" {
 		childSession.SetContext(toolbroker.AgentSessionContextAgentType, agentType)
 	}
+	// FR-9/D8：与 API 侧同一机制——子会话快照父会话的 profile 绑定，使子会话在
+	// 独立加载（重启恢复/独立构建 actor）时仍能解析出父级 profile 并只收窄。
+	// 本地路径同时天然共享父 ChatSession 的 ProfileRoot/ToolPolicy；父未绑定 profile
+	// 时此处不写任何键（零变化）。
+	if parentSession != nil {
+		sessionmeta.CopyProfileBinding(&childSession.Metadata.Context, parentSession.Metadata.Context)
+	}
 	toolbroker.ApplySpawnAgentRouteContext(childSession, args)
 	if err := r.applyLocalSpawnIsolation(ctx, childSession, args); err != nil {
 		return nil, err

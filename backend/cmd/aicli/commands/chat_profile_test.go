@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -470,6 +471,49 @@ func writeTestFile(t *testing.T, path string, contents string) {
 	mustMkdir(t, filepath.Dir(path))
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// TestResolveChatProfileState_PrecedenceFlagBeatsConfigDefault 锁定 FR-6/D10 的
+// 优先级契约：--profile flag > config.profiles.default_profile（DEFAULT_PROFILE
+// env 经配置层进入同一字段）> 无 profile（全量，零变化）。
+func TestResolveChatProfileState_PrecedenceFlagBeatsConfigDefault(t *testing.T) {
+	profilesRoot := t.TempDir()
+	for _, name := range []string{"alpha", "beta"} {
+		profileRoot := filepath.Join(profilesRoot, name)
+		writeTestFile(t, filepath.Join(profileRoot, "profile.yaml"), fmt.Sprintf(`profile:
+  name: %s
+  default_agent: default
+`, name))
+		writeTestFile(t, filepath.Join(profileRoot, "agents", "default", "agent.yaml"), "name: default\ndescription: precedence fixture\n")
+	}
+	cfg := &config.Config{Profiles: &config.ProfilesConfig{Root: profilesRoot, DefaultProfile: "alpha"}}
+
+	// 1) 仅 config.default_profile 生效：解析到 alpha。
+	state, err := resolveChatProfileState(cfg, &chatCommandOptions{})
+	if err != nil {
+		t.Fatalf("default_profile resolve: %v", err)
+	}
+	if !state.Active() || state.Resolved.ProfileName != "alpha" {
+		t.Fatalf("expected default_profile alpha, got %+v", state)
+	}
+
+	// 2) flag 覆盖 config.default_profile：解析到 beta。
+	state, err = resolveChatProfileState(cfg, &chatCommandOptions{ProfileFlag: "beta"})
+	if err != nil {
+		t.Fatalf("flag resolve: %v", err)
+	}
+	if !state.Active() || state.Resolved.ProfileName != "beta" {
+		t.Fatalf("expected flag profile beta, got %+v", state)
+	}
+
+	// 3) 两者皆无：不激活（无 profile = 全量，行为零变化）。
+	state, err = resolveChatProfileState(&config.Config{}, &chatCommandOptions{})
+	if err != nil {
+		t.Fatalf("no-profile resolve: %v", err)
+	}
+	if state.Active() {
+		t.Fatalf("expected inactive profile state, got %+v", state)
 	}
 }
 

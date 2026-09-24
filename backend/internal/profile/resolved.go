@@ -25,6 +25,21 @@ type ResolvedToolPolicy struct {
 	Sources   []string               `json:"sources,omitempty"`
 }
 
+// ResolvedSkillSelection contains merged skill allow/deny declarations.
+// Empty means "no profile declaration" — callers must skip filtering so the
+// pre-profile behavior stays byte-for-byte identical (NFR-1).
+type ResolvedSkillSelection struct {
+	Allowlist []string `json:"allowlist,omitempty"`
+	Denylist  []string `json:"denylist,omitempty"`
+}
+
+// ResolvedMCPSelection contains merged MCP server use/exclude declarations.
+// Empty means "no profile declaration" (all servers keep their mcp.yaml state).
+type ResolvedMCPSelection struct {
+	UseServers     []string `json:"use_servers,omitempty"`
+	ExcludeServers []string `json:"exclude_servers,omitempty"`
+}
+
 // ResolvedPaths contains all selected paths for a resolved agent.
 type ResolvedPaths struct {
 	ProfileRoot         string `json:"profile_root"`
@@ -54,16 +69,24 @@ type ResolvedPaths struct {
 
 // ResolvedAgent is the system-level output of profile resolution.
 type ResolvedAgent struct {
-	ProfileName     string              `json:"profile_name"`
-	ProfileRoot     string              `json:"profile_root"`
-	AgentID         string              `json:"agent_id"`
-	DefaultProvider string              `json:"default_provider,omitempty"`
-	Provider        string              `json:"provider,omitempty"`
-	Model           string              `json:"model,omitempty"`
-	RuntimeConfig   string              `json:"runtime_config,omitempty"`
-	MCPConfig       string              `json:"mcp_config,omitempty"`
-	SkillDirs       []string            `json:"skill_dirs,omitempty"`
-	Prompts         ResolvedPromptFiles `json:"prompts,omitempty"`
-	ToolPolicy      ResolvedToolPolicy  `json:"tool_policy,omitempty"`
-	Paths           ResolvedPaths       `json:"paths"`
+	ProfileName     string               `json:"profile_name"`
+	ProfileRoot     string               `json:"profile_root"`
+	AgentID         string               `json:"agent_id"`
+	DefaultProvider string               `json:"default_provider,omitempty"`
+	Provider        string               `json:"provider,omitempty"`
+	Model           string               `json:"model,omitempty"`
+	RuntimeConfig   string               `json:"runtime_config,omitempty"`
+	MCPConfig       string               `json:"mcp_config,omitempty"`
+	MCPSelection    ResolvedMCPSelection `json:"mcp_selection,omitempty"`
+	// Overrides is the validated sparse config overlay declared by
+	// `runtime.overrides` (Batch 7 / D12 mode B). Nil means "no overlay":
+	// callers must skip the merge entirely so behavior stays byte-for-byte
+	// identical to the pre-profile baseline (NFR-1).
+	Overrides  map[string]interface{} `json:"overrides,omitempty"`
+	SkillDirs  []string               `json:"skill_dirs,omitempty"`
+	Skills     ResolvedSkillSelection `json:"skills,omitempty"`
+	Prompts    ResolvedPromptFiles    `json:"prompts,omitempty"`
+	PromptMode string                 `json:"prompt_mode,omitempty"`
+	ToolPolicy ResolvedToolPolicy     `json:"tool_policy,omitempty"`
+	Paths      ResolvedPaths          `json:"paths"`
 }

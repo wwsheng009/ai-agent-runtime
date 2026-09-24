@@ -16,6 +16,9 @@ type Loader struct {
 	skillDir     string
 	skillDirs    []string
 	filePatterns []string
+	// nameFilter optionally restricts which skill names may be registered.
+	// nil keeps the pre-profile behavior (every discovered skill is kept).
+	nameFilter func(string) bool
 }
 
 // NewLoader 创建加载器
@@ -234,6 +237,9 @@ func (l *Loader) registerSkills(skills []*Skill, registry *Registry) error {
 		if skill == nil {
 			continue
 		}
+		if !l.allowsName(skill.Name) {
+			continue
+		}
 		if err := registry.Register(skill); err != nil {
 			// 工具未在当前 surface 注册属于软失败：跳过该 skill（例如 tools
 			// 被禁用或运行时未暴露 fetch/bash/view 等工具时，声明依赖这些工具
@@ -259,6 +265,9 @@ func (l *Loader) registerSummaryStubs(summaries []*SkillSummary, registry *Regis
 	var errs []error
 	for _, summary := range summaries {
 		if summary == nil {
+			continue
+		}
+		if !l.allowsName(summary.Name) {
 			continue
 		}
 		if err := registry.Register(summary.ToSkillStub()); err != nil {
@@ -292,6 +301,23 @@ func (l *Loader) SetSkillDirs(dirs []string) {
 		return
 	}
 	l.skillDir = ""
+}
+
+// SetNameFilter restricts which skill names are registered and discovered.
+// A nil filter restores the unfiltered (pre-profile) behavior.
+//
+// The filter is consulted on every registration path — initial load, discovery
+// and hot reload — so a profile skill selection cannot be bypassed by a later
+// file change (无假开关).
+func (l *Loader) SetNameFilter(filter func(string) bool) {
+	l.nameFilter = filter
+}
+
+func (l *Loader) allowsName(name string) bool {
+	if l.nameFilter == nil {
+		return true
+	}
+	return l.nameFilter(name)
 }
 
 // GetSkillDir 获取技能目录

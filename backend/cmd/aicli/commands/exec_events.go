@@ -34,6 +34,9 @@ type ThreadStartedEvent struct {
 	Model     string `json:"model"`
 	Provider  string `json:"provider"`
 	Ephemeral bool   `json:"ephemeral,omitempty"`
+	// Profile 是本次运行生效的 profile 元数据（D9/FR-10）。未启用 profile 时为
+	// nil，字段整体缺席——保证无 profile 的 JSONL 输出形状逐字节不变。
+	Profile *ExecProfileMetadata `json:"profile,omitempty"`
 }
 
 type TurnStartedEvent struct {
@@ -112,6 +115,21 @@ type ExecFinalResult struct {
 	Provider   string     `json:"provider,omitempty"`
 	Usage      TokenUsage `json:"usage,omitempty"`
 	DurationMs int64      `json:"duration_ms,omitempty"`
+	// Profile 供 CI 断言实际生效的裁剪（D9/FR-10）；无 profile 时省略。
+	Profile *ExecProfileMetadata `json:"profile,omitempty"`
+}
+
+// ExecProfileMetadata 描述一次 exec 运行实际生效的 profile 面（D9/FR-10）。
+// 字段是稳定契约：ref/name/agent + 裁剪计数，供 CI 断言"工具面确实被收窄"。
+type ExecProfileMetadata struct {
+	Reference string `json:"ref"`
+	Name      string `json:"name,omitempty"`
+	Agent     string `json:"agent,omitempty"`
+	// ToolCount 是 profile allowlist 生效后的工具条目数；0 表示未声明
+	// allowlist（不限制工具面，即全量）。
+	ToolCount int `json:"tool_count"`
+	// SkillCount 是会话实际可见的 skill 数（exposure 绑定计数）。
+	SkillCount int `json:"skill_count"`
 }
 
 func generateThreadID() string {

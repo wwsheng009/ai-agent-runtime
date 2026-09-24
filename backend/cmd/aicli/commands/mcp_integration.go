@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
@@ -12,33 +13,48 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
+	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 )
 
 // MCPManager MCP 管理器全局实例
 var MCPManagerInstance manager.Manager
-var mcpManagerConfigPath string
+var (
+	mcpManagerConfigPath string
+	// mcpManagerSelectionKey 记录当前实例生效的 profile 服务器选择指纹，
+	// 选择变化时必须重建管理器，避免复用未过滤的旧实例。
+	mcpManagerSelectionKey string
+)
 
 // initMCPManager 初始化 MCP 管理器
 func initMCPManager(configPath string) error {
-	return initMCPManagerWithMode(configPath, false)
+	return initMCPManagerWithSelection(configPath, runtimeprofileinput.ResolvedMCPSelection{}, false)
 }
 
 // initMCPManagerAsync 初始化 MCP 管理器，并触发后台并行建连后立即返回。
 // 供 aicli chat/TUI 启动路径使用：不再等待全部 MCP 服务器就绪，
 // MCP 工具随各客户端连接完成动态出现在工具面（ListTools 实时读取注册表）。
 func initMCPManagerAsync(configPath string) error {
-	return initMCPManagerWithMode(configPath, true)
+	return initMCPManagerWithSelection(configPath, runtimeprofileinput.ResolvedMCPSelection{}, true)
 }
 
 func initMCPManagerWithMode(configPath string, async bool) error {
+	return initMCPManagerWithSelection(configPath, runtimeprofileinput.ResolvedMCPSelection{}, async)
+}
+
+// initMCPManagerWithSelection 初始化 MCP 管理器。selection 非空时先按 profile
+// 的 use/exclude 过滤服务器再加载（被排除的服务器既不建连也不进入工具面）；
+// selection 为空时保持原有文件加载路径不变（NFR-1 零变化）。
+func initMCPManagerWithSelection(configPath string, selection runtimeprofileinput.ResolvedMCPSelection, async bool) error {
 	configPath = strings.TrimSpace(configPath)
+	selectionKey := mcpSelectionKey(selection)
 	if MCPManagerInstance != nil {
-		if configPath == "" || configPath == mcpManagerConfigPath {
+		if configPath == "" || (configPath == mcpManagerConfigPath && selectionKey == mcpManagerSelectionKey) {
 			return nil
 		}
 		_ = MCPManagerInstance.Stop()
 		MCPManagerInstance = nil
 		mcpManagerConfigPath = ""
+		mcpManagerSelectionKey = ""
 	}
 	if MCPManagerInstance != nil {
 		return nil
@@ -54,10 +70,11 @@ func initMCPManagerWithMode(configPath string, async bool) error {
 	// 创建管理器
 	MCPManagerInstance = manager.NewManager()
 	mcpManagerConfigPath = configPath
+	mcpManagerSelectionKey = selectionKey
 
 	// 加载配置
-	if err := MCPManagerInstance.LoadConfig(configPath); err != nil {
-		return fmt.Errorf("加载 MCP 配置失败: %w", err)
+	if err := loadMCPConfigForSelection(MCPManagerInstance, configPath, selection); err != nil {
+		return err
 	}
 
 	// 启动所有启用的 MCP：chat 启动路径走后台并行建连，其余调用方保持同步语义。
@@ -68,6 +85,60 @@ func initMCPManagerWithMode(configPath string, async bool) error {
 	wireChatMCPToolSurfaceInvalidation(MCPManagerInstance)
 
 	return nil
+}
+
+// loadMCPConfigForSelection 加载 MCP 配置：无 profile 选择时沿用文件加载；
+// 有选择时改为「读文件 → 过滤服务器 → 内存快照」路径。
+func loadMCPConfigForSelection(mgr manager.Manager, configPath string, selection runtimeprofileinput.ResolvedMCPSelection) error {
+	if mcpSelectionKey(selection) == "" {
+		if err := mgr.LoadConfig(configPath); err != nil {
+			return fmt.Errorf("加载 MCP 配置失败: %w", err)
+		}
+		return nil
+	}
+	scoped, ok := mgr.(manager.ScopedManager)
+	if !ok {
+		return fmt.Errorf("MCP 管理器不支持内存配置快照，无法应用 profile 服务器选择")
+	}
+	cfg, dropped, err := runtimeprofileinput.LoadMCPConfigSnapshot(configPath, selection)
+	if err != nil {
+		return fmt.Errorf("加载 MCP 配置失败: %w", err)
+	}
+	if err := scoped.LoadConfigFromConfig(cfg); err != nil {
+		return fmt.Errorf("加载 MCP 配置失败: %w", err)
+	}
+	emitMCPSelectionNotice(dropped)
+	return nil
+}
+
+// mcpSelectionKey 生成选择声明的稳定指纹；无有效声明时返回空串。
+func mcpSelectionKey(selection runtimeprofileinput.ResolvedMCPSelection) string {
+	use := normalizeSelectionKeyPart(selection.UseServers)
+	exclude := normalizeSelectionKeyPart(selection.ExcludeServers)
+	if use == "" && exclude == "" {
+		return ""
+	}
+	return use + "|" + exclude
+}
+
+func normalizeSelectionKeyPart(values []string) string {
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			cleaned = append(cleaned, strings.ToLower(trimmed))
+		}
+	}
+	sort.Strings(cleaned)
+	return strings.Join(cleaned, ",")
+}
+
+// emitMCPSelectionNotice 把被 profile 选择过滤掉的服务器显式告知用户，
+// 避免"配置了却静默不生效"。
+func emitMCPSelectionNotice(dropped []string) {
+	if len(dropped) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Profile MCP selection: skipped server(s) %s\n", strings.Join(dropped, ", "))
 }
 
 // startMCPManager 优先使用 AsyncManager 的后台启动能力；不支持时回退同步 Start。
@@ -161,7 +232,11 @@ func prepareChatMCPManager(cfg *config.Config, session *ChatSession) error {
 	if !shouldInit {
 		return StopMCPManager()
 	}
-	return initMCPManagerAsync(configPath)
+	var selection runtimeprofileinput.ResolvedMCPSelection
+	if session != nil {
+		selection = session.ProfileMCPSelection
+	}
+	return initMCPManagerWithSelection(configPath, selection, true)
 }
 
 // registerMCPTools 注册 MCP 工具到 FunctionRegistry

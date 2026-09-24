@@ -8,8 +8,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 )
 
 // profileAgentYAML mirrors the subset of profile agents/*/agent.yaml we care about.
@@ -30,7 +30,7 @@ type profileAgentYAML struct {
 	CompletionReqAlt      string   `yaml:"completion_requirement"`
 	Sandbox               string   `yaml:"sandbox"`
 	// SystemPrompt inline fallback when prompts/role.md is absent.
-	SystemPrompt string `yaml:"system_prompt"`
+	SystemPrompt  string `yaml:"system_prompt"`
 	SystemPrompt2 string `yaml:"systemPrompt"`
 }
 
@@ -120,6 +120,18 @@ func BuildBinding(def *Definition) (*Binding, error) {
 			// Treat dont_ask as default for mode enum; ask resolution still headless-denies.
 			mode = runtimepolicy.ModeDefault
 		}
+	}
+
+	// D16（Batch 9）：profile 只能收窄安全基线——profile 声明的默认权限模式
+	// 不得为 bypass_permissions。profile 常随仓库/团队分发，允许默认 bypass
+	// 等于"打开别人的仓库就自动免审批"，与 foldertrust 信任模型直接冲突。
+	// 用户确需免审批时走显式 CLI flag（--yolo / --permission-mode），那是
+	// 用户在场的显式选择，不受本约束影响。
+	if clone.Source == SourceProfile && mode == runtimepolicy.ModeBypassPermissions {
+		return nil, fmt.Errorf(
+			"agentdef: profile agent %q 不得声明 permission_mode=%q（D16：profile 只能收窄安全基线；如需免审批请使用显式 --yolo / --permission-mode）",
+			clone.Name, runtimepolicy.ModeBypassPermissions,
+		)
 	}
 
 	var readOnly *bool
