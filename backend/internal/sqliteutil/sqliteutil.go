@@ -8,6 +8,8 @@
 //   - journal_mode=WAL（多读单写，写入不阻塞读）
 //   - busy_timeout（默认 5000ms，写锁冲突时在驱动内等待而非立即失败）
 //   - MaxOpenConns(1)/MaxIdleConns(1)（单写者连接，避免同库多连接自锁）
+//   - 打开前对账 -wal/-shm 附属文件，删除被带外替换/截断所遗留的陈旧 -shm
+//     （见 ReconcileOrphanedSidecars：陈旧 wal-index 会被 SQLite 采信并撕裂 B 树）
 //   - RetryLocked：仍遇到 "database is locked" 时的退避重试
 //     （另一进程可能持有长写锁：迁移、大会话 flush、wal checkpoint）。
 package sqliteutil
@@ -25,13 +27,13 @@ const DefaultBusyTimeoutMS = 5000
 
 // LockRetries 与退避参数：与 internal/chat 既有的锁重试语义一致。
 const (
-	LockRetries      = 10
+	LockRetries       = 10
 	lockRetryBaseWait = 50 * time.Millisecond
 	lockRetryMaxWait  = 500 * time.Millisecond
 )
 
 // IsLockedError 报告 err 是否为 SQLite 瞬时锁冲突
-//（另一个连接/进程正持有数据库写锁）。
+// （另一个连接/进程正持有数据库写锁）。
 func IsLockedError(err error) bool {
 	if err == nil {
 		return false
@@ -102,10 +104,11 @@ func lockRetryWait(retryIndex int) time.Duration {
 //   - PRAGMA journal_mode=WAL
 //   - PRAGMA busy_timeout=<DefaultBusyTimeoutMS>
 //   - 连接池限为单连接（单写者）
+//   - 先对账 -wal/-shm，必要时删除陈旧 wal-index（ReconcileOrphanedSidecarsDSN）
 //
 // 返回的 *sql.DB 已可直接使用；调用方仍需执行各自 schema/迁移 PRAGMA。
 // failOnLock 为 true 时以 RetryLockedCtx 语义重试打开 & 基线 PRAGMA
-//（另一进程长写锁场景），为 false 时单次尝试（内存库/测试路径）。
+// （另一进程长写锁场景），为 false 时单次尝试（内存库/测试路径）。
 // ctx 取消时立即返回，避免健康检查等短生命周期调用被锁竞争拖住。
 func OpenFileCtx(ctx context.Context, dsn string, failOnLock bool) (*sql.DB, error) {
 	if ctx == nil {
@@ -119,10 +122,22 @@ func OpenFileCtx(ctx context.Context, dsn string, failOnLock bool) (*sql.DB, err
 	db.SetMaxIdleConns(1)
 
 	apply := func() error {
+		// Reconcile the -wal/-shm sidecars before the first statement opens the
+		// file and maps -shm. A stale wal-index left by a replaced main file or a
+		// truncated -wal is adopted by SQLite as authoritative and corrupts the
+		// B-tree on the first write; the wal-index is a pure cache, so dropping a
+		// provably stale one loses no data.
+		if _, err := ReconcileOrphanedSidecarsDSN(dsn); err != nil {
+			return err
+		}
 		if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout="+intToStr(DefaultBusyTimeoutMS)); err != nil {
 			return err
 		}
-		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+		// journal_mode returns a result row. Consume it explicitly: older SQLite
+		// drivers can retain the schema lock when this PRAGMA is issued through
+		// Exec, wedging every later handle for the file.
+		var journalMode string
+		if err := db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
 			return err
 		}
 		return nil
@@ -147,7 +162,7 @@ func OpenFileCtx(ctx context.Context, dsn string, failOnLock bool) (*sql.DB, err
 //
 // 返回的 *sql.DB 已可直接使用；调用方仍需执行各自 schema/迁移 PRAGMA。
 // failOnLock 为 true 时以 RetryLocked 语义重试打开 & 基线 PRAGMA
-//（另一进程长写锁场景），为 false 时单次尝试（内存库/测试路径）。
+// （另一进程长写锁场景），为 false 时单次尝试（内存库/测试路径）。
 func OpenFile(dsn string, failOnLock bool) (*sql.DB, error) {
 	return OpenFileCtx(context.Background(), dsn, failOnLock)
 }

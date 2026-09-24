@@ -250,6 +250,11 @@ func (s *SQLiteGlobalMailboxRegistryStore) Close() error {
 	}
 	err := s.db.Close()
 	s.db = nil
+	// Drop the per-DSN WAL bookkeeping: the next open of this path must re-run
+	// the sidecar reconciliation and journal transition, because the file may
+	// have been replaced while this handle was closed. releaseAgentControlSharedDB
+	// does the same for shared handles; without this the entry leaked.
+	releaseAgentControlWALState(s.dsn)
 	return err
 }
 

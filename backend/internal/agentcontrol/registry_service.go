@@ -10,6 +10,7 @@ import (
 	"time"
 
 	_ "github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
 const (
@@ -372,6 +373,24 @@ func configureAgentControlSQLiteDB(ctx context.Context, db *sql.DB, dsn string) 
 		return fmt.Errorf("agent control registry db is not initialized")
 	}
 	dsn = strings.TrimSpace(dsn)
+	memoryDSN := isGlobalMailboxMemoryDSN(dsn)
+	if !memoryDSN {
+		// Serialize the sidecar check and the journal transition per DSN.
+		agentControlJournalMu.Lock()
+		defer agentControlJournalMu.Unlock()
+		// This must run before ANY statement: the first PRAGMA already opens the
+		// file and maps -shm. SQLite trusts an existing wal-index, so a -shm left
+		// over from a replaced main file or a truncated -wal would be adopted as
+		// authoritative and corrupt the B-tree on the first write. The wal-index
+		// is a pure cache, so dropping a provably stale one loses no data.
+		removed, err := sqliteutil.ReconcileOrphanedSidecarsDSN(dsn)
+		if err != nil {
+			return fmt.Errorf("reconcile agent control registry wal sidecars: %w", err)
+		}
+		if removed {
+			agentControlSidecarRepairHook(dsn)
+		}
+	}
 	// Connection-pool limits are selected by the caller before configuration.
 	// Path-backed stores use one connection so concurrent writers are
 	// serialized in-process, including with the Go 1.20-compatible driver.
@@ -381,37 +400,51 @@ func configureAgentControlSQLiteDB(ctx context.Context, db *sql.DB, dsn string) 
 	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
 		return fmt.Errorf("configure agent control registry busy timeout: %w", err)
 	}
-	if !isGlobalMailboxMemoryDSN(dsn) {
-		agentControlJournalMu.Lock()
-		defer agentControlJournalMu.Unlock()
-		if _, configured := agentControlWALConfigured[dsn]; configured {
-			return nil
+	// Connection-scoped WAL limits. These do not persist in the database file, so
+	// they must be re-applied on every open rather than cached per DSN below.
+	// Without them the WAL grows unbounded (54MB was observed in production),
+	// which slows crash recovery and widens the window for the sidecar
+	// inconsistency handled above. Values match the internal/chat baseline.
+	for _, pragma := range []string{
+		"PRAGMA wal_autocheckpoint = 256",
+		"PRAGMA journal_size_limit = 16777216",
+	} {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			return fmt.Errorf("configure agent control registry %s: %w", pragma, err)
 		}
-		var (
-			journalMode string
-			err         error
-		)
-		for attempt := 0; attempt < 8; attempt++ {
-			// journal_mode returns a result row. Consume it explicitly: older
-			// SQLite drivers can retain the schema lock when this PRAGMA is
-			// issued through Exec, wedging every later handle for the file.
-			err = db.QueryRowContext(ctx, "PRAGMA journal_mode = WAL").Scan(&journalMode)
-			if err == nil {
-				break
-			}
-			if !strings.Contains(strings.ToLower(err.Error()), "database is locked") {
-				break
-			}
-			time.Sleep(time.Duration(20*(attempt+1)) * time.Millisecond)
-		}
-		if err != nil {
-			return fmt.Errorf("configure agent control registry wal mode: %w", err)
-		}
-		if !strings.EqualFold(strings.TrimSpace(journalMode), "wal") {
-			return fmt.Errorf("configure agent control registry wal mode: sqlite returned %q", journalMode)
-		}
-		agentControlWALConfigured[dsn] = struct{}{}
 	}
+	if memoryDSN {
+		return nil
+	}
+	if _, configured := agentControlWALConfigured[dsn]; configured {
+		return nil
+	}
+	var (
+		journalMode string
+		err         error
+	)
+	for attempt := 0; attempt < 8; attempt++ {
+		// journal_mode returns a result row. Consume it explicitly: older
+		// SQLite drivers can retain the schema lock when this PRAGMA is
+		// issued through Exec, wedging every later handle for the file.
+		err = db.QueryRowContext(ctx, "PRAGMA journal_mode = WAL").Scan(&journalMode)
+		if err == nil {
+			break
+		}
+		// Reuse the shared predicate so SQLITE_BUSY variants such as
+		// "database table is locked" retry too, not just "database is locked".
+		if !sqliteutil.IsLockedError(err) {
+			break
+		}
+		time.Sleep(time.Duration(20*(attempt+1)) * time.Millisecond)
+	}
+	if err != nil {
+		return fmt.Errorf("configure agent control registry wal mode: %w", err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(journalMode), "wal") {
+		return fmt.Errorf("configure agent control registry wal mode: sqlite returned %q", journalMode)
+	}
+	agentControlWALConfigured[dsn] = struct{}{}
 	return nil
 }
 
@@ -427,6 +460,35 @@ var (
 	agentControlJournalMu     sync.Mutex
 	agentControlWALConfigured = make(map[string]struct{})
 )
+
+// agentControlSidecarRepairHook is invoked after a stale -shm sidecar has been
+// removed. Silent by default so this package keeps its zero logging dependency;
+// the assembly layer wires it to the real logger via
+// SetAgentControlSidecarRepairHook. Repair is rare but must not be invisible:
+// it means the on-disk WAL state was inconsistent with the main database.
+var agentControlSidecarRepairHook = func(dsn string) {}
+
+// SetAgentControlSidecarRepairHook registers the stale -shm repair callback.
+func SetAgentControlSidecarRepairHook(fn func(dsn string)) {
+	if fn != nil {
+		agentControlSidecarRepairHook = fn
+	}
+}
+
+// releaseAgentControlWALState drops the per-DSN WAL bookkeeping so a later open
+// of the same DSN re-runs the sidecar reconciliation and journal transition
+// instead of trusting state recorded for a previous handle. Without this, a
+// process that closes and reopens a path-backed store (or whose database file
+// was replaced underneath it) would skip both steps entirely.
+func releaseAgentControlWALState(dsn string) {
+	dsn = strings.TrimSpace(dsn)
+	if dsn == "" {
+		return
+	}
+	agentControlJournalMu.Lock()
+	delete(agentControlWALConfigured, dsn)
+	agentControlJournalMu.Unlock()
+}
 
 type agentControlSharedDB struct {
 	db   *sql.DB
@@ -464,9 +526,7 @@ func releaseAgentControlSharedDB(key string, db *sql.DB) error {
 		return nil
 	}
 	delete(agentControlSharedDBs, key)
-	agentControlJournalMu.Lock()
-	delete(agentControlWALConfigured, key)
-	agentControlJournalMu.Unlock()
+	releaseAgentControlWALState(key)
 	err := db.Close()
 	agentControlPathOpenMu.Unlock()
 	return err
