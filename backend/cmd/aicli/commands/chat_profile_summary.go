@@ -22,6 +22,10 @@ func chatProfileSurfaceRows(session *ChatSession) []chatProfileSummaryRow {
 		return nil
 	}
 	var rows []chatProfileSummaryRow
+	// FR-11：auto 路由的归因行（非自动路由时为空 → 既有摘要逐行零变化）。
+	if notice := profileAutoRouteNotice(session); notice != "" {
+		rows = append(rows, chatProfileSummaryRow{label: "Profile Route:", value: notice})
+	}
 	if policy := session.ToolPolicy; policy != nil {
 		value := fmt.Sprintf("allowlist %d / denylist %d", len(policy.AllowedToolNames()), countEnabledToolFlags(policy.DeniedTools))
 		if policy.ReadOnly {

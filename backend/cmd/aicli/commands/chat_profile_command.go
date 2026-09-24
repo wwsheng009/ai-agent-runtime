@@ -343,6 +343,10 @@ func chatProfileStatusText(session *ChatSession) string {
 	if notice := profilePromptSuppressionNotice(session); notice != "" {
 		lines = append(lines, fmt.Sprintf("  ⚠ %s", notice))
 	}
+	// FR-11：auto 路由必须可见（写了 auto 就要看到最终选了谁）。
+	if notice := profileAutoRouteNotice(session); notice != "" {
+		lines = append(lines, fmt.Sprintf("  路由: %s", notice))
+	}
 	lines = append(lines, chatProfileToolPolicySummary(session)...)
 	lines = append(lines, chatProfileSelectionSummary(session)...)
 	if session.Config != nil && session.Config.Profiles != nil {

@@ -152,9 +152,13 @@ type ChatSession struct {
 	InputReader      *bufio.Reader         // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
 	InputQueue       *chatInputQueue       // interactive line queue fed by stdin pump
 	ProfileReference string                // 用户指定或配置解析出的 profile 引用
-	ProfileName      string                // 当前 profile 名称
-	ProfileAgent     string                // 当前 profile agent
-	ProfileRoot      string                // 当前 profile 根目录
+	// ProfileAutoRoutedFrom 记录该绑定由哪个保留引用路由而来（FR-11：目前仅 "auto"；
+	// 空 = 非自动路由）。ProfileReference 始终是已解析的具体 profile，本字段只用于
+	// 归因展示（启动摘要 / /profile status），不参与任何解析。
+	ProfileAutoRoutedFrom string
+	ProfileName           string // 当前 profile 名称
+	ProfileAgent          string // 当前 profile agent
+	ProfileRoot           string // 当前 profile 根目录
 	// AgentSourcePath is the winning agentdef/profile agent config path
 	// (or builtin:<name>) that produced the active role binding.
 	AgentSourcePath string

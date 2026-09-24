@@ -33,7 +33,10 @@ func NewProfileCommand(getConfig func() *config.Config) *cobra.Command {
   import    导入目录或 zip 包为新 profile（先 validate、绝不自动激活、不覆盖同名）
 
 优先级：--profile flag > config profiles.default_profile（可经 DEFAULT_PROFILE
-env 提供）> 无 profile（全量，零变化）。`,
+env 提供）> 无 profile（全量，零变化）。
+--profile auto：按首轮提示词自动路由到具体 profile（--prompt/--message，
+exec 也可用 stdin；规则见 config profiles.auto，未配置时为内置启发式）。
+启动期无提示词（纯交互式 chat / agent stdio）时显式报错，不猜、不静默降级。`,
 	}
 	cmd.AddCommand(newProfileListCommand(getConfig))
 	cmd.AddCommand(newProfileShowCommand(getConfig))

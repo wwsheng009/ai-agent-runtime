@@ -30,6 +30,10 @@ type chatProfileState struct {
 	// ConfigOverlay 是 runtime.overrides 的会话级配置覆盖视图（D13，Batch 7）。
 	// nil 表示该 profile 未声明覆盖，投影时必须保持基线配置不变。
 	ConfigOverlay *chatProfileConfigOverlay
+	// AutoRoutedFrom 记录本次绑定由哪个保留引用路由而来（FR-11：目前仅 "auto"，
+	// 空 = 非自动路由）。只作归因展示：Reference 始终是已解析的具体 profile，
+	// 这样 /profile reload、/profile save 无需提示词即可复用同一引用。
+	AutoRoutedFrom string
 }
 
 func (s *chatProfileState) Active() bool {
@@ -66,6 +70,7 @@ func applyProfileStateToChatSession(session *ChatSession, state *chatProfileStat
 		return false
 	}
 	session.ProfileReference = state.Reference
+	session.ProfileAutoRoutedFrom = strings.TrimSpace(state.AutoRoutedFrom)
 	session.ProfileName = state.Resolved.ProfileName
 	session.ProfileAgent = state.Resolved.AgentID
 	session.ProfileRoot = state.Resolved.ProfileRoot
@@ -123,6 +128,32 @@ func profilePromptSuppressionNotice(session *ChatSession) string {
 	return reason + "；/trust grant 后可 /profile reload 恢复"
 }
 
+// profileAutoRouteNotice 返回 auto 路由的归因提示（FR-11）；非自动路由返回空串。
+// 启动摘要与 /profile status 共用同一文案：用户写了 `auto` 就必须看得到最终选了谁，
+// 不允许静默换挡。
+func profileAutoRouteNotice(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	source := strings.TrimSpace(session.ProfileAutoRoutedFrom)
+	if source == "" {
+		return ""
+	}
+	routed := firstNonEmptyChatValue(session.ProfileName, strings.TrimSpace(session.ProfileReference))
+	if routed == "" {
+		routed = "(未解析)"
+	}
+	return fmt.Sprintf("%s → %s（依据首轮提示词路由）", source, routed)
+}
+
+// profilesConfigOrNil 返回配置的 profiles 段（cfg 或字段缺省时为 nil）。
+func profilesConfigOrNil(cfg *config.Config) *config.ProfilesConfig {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Profiles
+}
+
 func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*chatProfileState, error) {
 	if opts == nil {
 		return nil, nil
@@ -131,6 +162,20 @@ func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*cha
 	profileRef := strings.TrimSpace(opts.ProfileFlag)
 	if profileRef == "" && cfg != nil && cfg.Profiles != nil {
 		profileRef = strings.TrimSpace(cfg.Profiles.DefaultProfile)
+	}
+	// FR-11（Batch 6）：`auto` 是保留引用，必须先用提示词解析成具体 profile 再进
+	// 注册表——否则会被当字面 ref 报"未知 profile"。启动期无提示词（纯交互式 chat /
+	// agent stdio）时不猜也不静默降级：显式报错并给出可执行替代。会话内路径
+	// （/profile reload 等）复用同一解析且 opts.Message 为空，所以 auto 只在启动期
+	// 落地，落地后会话恒持有具体 ref。
+	autoRoutedFrom := ""
+	if profilesys.IsAutoProfileRef(profileRef) {
+		routed := profilesys.RouteProfileForPrompt(strings.TrimSpace(opts.Message), profilesys.NewAutoRouteConfig(profilesConfigOrNil(cfg)))
+		if routed == "" {
+			return nil, fmt.Errorf("profile ref auto 需要首轮提示词才能路由：启动时用 --prompt/--message 提供提示词（exec 也支持 stdin 管道），或改用显式 profile ref（如 /profile use <name>）")
+		}
+		profileRef = routed
+		autoRoutedFrom = profilesys.AutoProfileRef
 	}
 	if profileRef == "" {
 		if agentName := strings.TrimSpace(opts.AgentFlag); agentName != "" {
@@ -180,6 +225,7 @@ func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*cha
 		SandboxWarnings: append([]string(nil), inputs.SandboxWarnings...),
 		AgentSource:     string(agentdef.SourceProfile),
 		ConfigOverlay:   newChatProfileConfigOverlay(resolved),
+		AutoRoutedFrom:  autoRoutedFrom,
 	}
 	if resolved != nil {
 		if path := strings.TrimSpace(resolved.Paths.AgentConfigFile); path != "" {
