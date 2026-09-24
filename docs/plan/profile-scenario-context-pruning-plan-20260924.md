@@ -523,8 +523,8 @@ Settings（现有设置入口）
 | GET | `/api/runtime/profiles/{ref}/references` | 只读：列出四类引用（删除/移动前展示，§23 G2） |
 | POST | `/api/runtime/profiles/{ref}/default` | 设为默认（写 config `profiles.default_profile`，只影响**新会话**，§23 G3/D26） |
 | POST | `/api/runtime/profiles/{ref}/apply` | 应用到当前会话（= 第三部分 `set_profile`，下一 turn 生效，§23 G3/D26） |
-| POST | `/api/runtime/profiles/{ref}/export` | 导出（目录/zip；不支持单文件内联格式，§23 G5/D28） |
-| POST | `/api/runtime/profiles/import` | 导入（先 validate、绝不自动激活、显示路径清单，§23 G5/D28） |
+| POST | `/api/runtime/profiles/{ref}/export` | 导出（目录/zip；不支持单文件内联格式，§23 G5/D28）——**Batch 13 slice 2 已落地（D32/D33）** |
+| POST | `/api/runtime/profiles/import` | 导入（先 validate、绝不自动激活、显示路径清单，§23 G5/D28）——**Batch 13 slice 2 已落地（D32/D33）**；CLI/TUI/前端入口待接线 |
 
 - 写操作沿用 admin token 鉴权与原子写工具；错误码风格对齐现有 handler。
 - 复用优先：`{ref}` 解析直接调 `internal/profile` 的 registry/resolver，**不新建解析逻辑**。
@@ -1196,3 +1196,21 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 | 5 | 会话 `profile_ref` 在 server 侧的写入点（`/api/agent/chat` 路径） | G2 删除引用检查必须覆盖 server 创建的会话 | grep `ProfileRef`/`profile_ref` 在 `internal/chat` 与 `internal/api` 的写入点 |
 | 6 | 原子写在 `profile.yaml` 上的适用性（§10.5 已假设） | G2 rename/move/delete 与 R24 冲突检测依赖它 | 定位既有原子写工具与其在配置文件写入处的用法 |
 | 7 | `/profile save --to session` 的会话层存储位置（附录 D 第 5 项的姊妹项） | G1 `save-as` 需要区分"会话层覆盖"与"落盘 profile" | 读 `sessionmeta` 与 runtime store 中 profile 相关字段 |
+
+---
+
+## 附录 D32/D33：Batch 13 slice 2 回填（2026-09-24）——export/import 落地契约
+
+**落地范围**：执行核心 `internal/profile/transfer.go`（收集/打包/读包/物化，API 与未来 CLI 共用）+ 两个端点（`POST /api/runtime/profiles/{ref}/export`、`POST /api/runtime/profiles/import`）。CLI `aicli profile export/import`、TUI `/profile export`、前端按钮**尚未接线**（下一 slice；TUI 的 `export` 子命令当前是"声明但未接线"状态）。
+
+**包格式（Q21 落地）**：zip 条目名 = profile 根相对路径（`profile.yaml`、`agents/...`、`skills/...`），导入原样物化、不重排、不改写内容。**不支持单文件内联**（会引入第二套 profile 方言）。
+
+**有界传输（R23）**：`BundleMaxFiles=256`、`BundleMaxFileBytes=2MiB`、`BundleMaxTotalBytes=8MiB`（未压缩）；请求体（压缩）上限 8MiB。导出跳过符号链接与 `*.tmp`（原子写残留）；导入拒绝符号链接条目、目录条目仅做路径检查。
+
+**D32（导入命名契约）**：包内 `profile.yaml` 的 `name` 是**权威**；显式 `name` 参数必须与之一致（不一致 → 400，提示"改名请导入后用 rename"）——**导入不静默改写 profile.yaml**（避免"目录名 vs 声明名"两套状态源）；包内无 `name` 时必须显式传 `name`。注意不能拿 `validation.ProfileName` 当声明名：它是 resolved 名，对没写 `name` 的包会退化成临时目录名。
+
+**D33（导入落位契约）**：物化到层根下 `.import-*` 临时目录 → 跑**同一个** `ValidateProfileReference` → 失败即拒绝（层根不留痕，含临时目录）→ 成功 `os.Rename` **原子落位**（列表随即以 `source=root` 可见）。同名目标 **409 不覆盖**；`dry_run=true` 只预演（返回路径清单但不落盘）；**绝不自动激活**（不写 default、不碰会话、不写宿主配置——测试断言宿主 config.yaml 不存在/字节不变）；响应含 `paths` 清单（与删除端点同一投影）与 `activated:false`。
+
+**测试锚点**：`internal/profile/transfer_test.go`（路径清洗表、读包安全、收集/打包往返、临时文件与符号链接排除、物化逃逸拒绝）；`internal/api/skills/profiles_transfer_handlers_test.go`（导出→导入往返 + 列表可见 + 不激活 + 冲突不覆盖 + dry_run + 命名契约 + 五类恶意包拒绝且磁盘不留痕 + 解压成功但 validate 失败拒绝）。测试通过 `HOME/USERPROFILE` 重定向把 `layer=user` 的层根指到临时目录，避免污染真实用户目录。
+
+**遗留（Batch 14 及后续）**：① G6/D29 信任门控——未信任工作区里导入的 profile 与本地创建同标准（本项目 profile 解析仍未接 foldertrust，Batch 14 处理）；② 导出/导入的 CLI/TUI/前端入口；③ `from_session`（G1/D24）仍是显式 501。

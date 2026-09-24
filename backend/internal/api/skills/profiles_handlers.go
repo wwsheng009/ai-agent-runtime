@@ -28,8 +28,10 @@ import (
 //	POST   /api/runtime/profiles/{ref}/validate     校验（与 CLI `profile validate` 同一实现）
 //	POST   /api/runtime/profiles/{ref}/preview      预览（只读解析 + 影响面，不写盘）
 //	POST   /api/runtime/profiles/{ref}/default      设为默认（新会话；写 profiles.default_profile）
-//	POST   /api/runtime/profiles/{ref}/apply        应用到当前会话（Batch 13 执行核心，本批 501）
+//	POST   /api/runtime/profiles/{ref}/apply        应用到当前会话（Batch 13 执行核心：显式 session_id，未知会话 404）
 //	POST   /api/runtime/profiles                    创建（模板 / 复制 / 从会话固化三模式合一）
+//	POST   /api/runtime/profiles/import             导入 zip 包为新 profile（Batch 13 G5/D28：先 validate、绝不自动激活）
+//	POST   /api/runtime/profiles/{ref}/export       导出 zip 包（Batch 13 G5：只读，不写盘）
 //	POST   /api/runtime/profiles/{ref}/duplicate    复制（等价创建端点 from_ref 模式）
 //	POST   /api/runtime/profiles/{ref}/rename       重命名（同层）
 //	POST   /api/runtime/profiles/{ref}/move         层级移动（user↔project）
@@ -39,10 +41,13 @@ import (
 // 权限：读端点与 `/mcps` 同级（回环 / admin token / admin role）；写端点显式声明
 // 同一策略（authorizeProfileWrite）。写回**只动 profile 目录**，唯一例外是
 // `default` 端点写 `profiles.default_profile`（走 agentconfig 的配置写锁与分层写路由）。
+// export 为只读；import 先物化到临时目录跑同一 validate、再原子 rename 落位，
+// 不写配置、不碰会话（D28）。
 
 func (h *Handler) registerProfileRoutes(runtimeRouter *mux.Router) {
 	runtimeRouter.HandleFunc("/profiles", h.ListRuntimeProfiles).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/profiles", h.CreateRuntimeProfile).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/profiles/import", h.ImportRuntimeProfile).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/profiles/{ref}", h.GetRuntimeProfile).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/profiles/{ref}", h.UpdateRuntimeProfile).Methods(http.MethodPut)
 	runtimeRouter.HandleFunc("/profiles/{ref}", h.DeleteRuntimeProfile).Methods(http.MethodDelete)
@@ -50,6 +55,7 @@ func (h *Handler) registerProfileRoutes(runtimeRouter *mux.Router) {
 	runtimeRouter.HandleFunc("/profiles/{ref}/preview", h.PreviewRuntimeProfile).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/profiles/{ref}/default", h.SetRuntimeProfileDefault).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/profiles/{ref}/apply", h.ApplyRuntimeProfile).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/profiles/{ref}/export", h.ExportRuntimeProfile).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/profiles/{ref}/duplicate", h.DuplicateRuntimeProfile).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/profiles/{ref}/rename", h.RenameRuntimeProfile).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/profiles/{ref}/move", h.MoveRuntimeProfile).Methods(http.MethodPost)
