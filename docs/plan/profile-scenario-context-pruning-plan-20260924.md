@@ -975,14 +975,17 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 | 6 | 切换后重组 prompt 时 `<environment_context>` 块是否仍与冻结值字节一致（⑧保留但 ①重建） | 防止"重建 prompt"意外改写环境块，破坏 ⑧ 的冻结语义 | 读 `buildLocalChatSystemPrompt`（`chat_actor_host.go:2278+`）组合顺序 |
 | 7 | `chatWebSession()` 单例假设在 runtime-server 多会话下的适用性 | 决定前端多会话并存的失效范围 | 读 `chat_mcp_surface_invalidation.go:40-48` 与 host 单例定义 |
 
-**回填结论（Batch 10 实施，2026-09-24；对应实施方案 §3.1 的 V13/V14/V18/V26）**：
+**回填结论（Batch 10 + Batch 12 实施，2026-09-24；对应实施方案 §3.1 的 V13/V14/V18/V26 与 V15/V16/V19）**：
 
 | # | 结论 | 证据 |
 |---|---|---|
 | 1 | **句柄可得**：`session.LocalRuntimeHost.SessionHub.Get(sessionID)` 直接返回 `*SessionActor`，命中即走精确单会话失效；未命中退化为 hub 全量失效 | `internal/chat/hub.go:77-103`、`:128-154`（hub 内部对每个 actor 调 `InvalidateStableToolSurface`，`:149`）；落地：`chat_profile_switch.go invalidateChatStableToolSurface`（报告 `tool_surface_scope`） |
 | 2 | **立即删除锚点**（不引入 `pending_profile_switch`）：锚点只在 compose 时被读取，compose 调用点都在 run 起点；在途 turn 的 head 已 materialize 进活体 agent 的 `cfg.SystemPrompt`；存储层在 `CurrentTurnID != ""` 时保留 `FrozenTurnTools` | `chat_actor_host.go:1848`（actor 构建）、`:2119-2145`（每 run 一次的 prepare 钩子）；`session_runtime_store.go:555-590`；`turn_tool_surface_snapshot.go:134-172`；在途标注用 `SessionActor.RunInFlight()`（`actor.go:844`） |
 | 6 | **环境块保留**：切换只删 `SystemPromptFrozen` 锚点，`sessionmeta.EnvironmentContextBlock` 不被触碰，下一次 compose 复用同一冻结值（⑧保留、①重建） | `sessionmeta.go:51-54`；`chat_profile_switch.go clearFrozenChatSystemPromptAnchor` |
-| 3 / 4 / 5 / 7 | Batch 10 不涉及（Web 命令路径 / 前端接线 / 写回 / 单例假设），保持待回填，随 Batch 12、11a 处理 | — |
+| 3 | **server 路径不经 `chatWebSession()`**：`SubmitSessionRuntimeCommand` 走 `sessionManager` + `peekSessionHub()`（只读探测，不懒加载）；`set_profile` 分支先于 hub 解析处理，actor 句柄 `hub.Get(sessionID)` 精确可得；无活体 actor 时下一次 `GetOrCreate` 天然取新面（无需 hub 全量失效） | `internal/api/skills/session_runtime_handlers.go:876-894`；`agent_control_runtime_state.go:104-110`；`session_profile_switch.go:329-377` |
+| 4 | **分支落点**：`switch (command.key)`；`runModel` = "解析 → API → 提示"样板，`runProfile` 同构；候选注入读能力广告 `sessionSwitch` 决定注册（R20），选中值经既有 `runCommand(key, value)` 通路回填 | `frontend/src/hooks/workspace/composer/use-composer-command-executor.ts:264-304/306+/503-511`；`use-composer-command-surface.ts:142-151/228` |
+| 5 | **命令面已可用（Batch 11a）**：`/profile save --to session / workspace / config` 已注册（`chat_profile_command.go`）；写回实现细节（复用既有会话层存储、不引入第二套）随 Batch 13（E7）逐行复核 | 见实施方案变更记录（Batch 11a）① |
+| 7 | **单例不适用**：`chatWebSession()` 是 aicli 进程内 web 会话单例（调用点全部在 `cmd/aicli/commands`）；runtime-server 按 sessionID 精确失效、多会话互不影响 → 不引入单例 | `cmd/aicli/commands/web_handlers.go:35-37`；`chat_mcp_surface_invalidation.go:40-48`（aicli 侧单例通道）；`session_profile_switch.go:329-377` |
 
 ---
 
