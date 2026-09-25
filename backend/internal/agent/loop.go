@@ -1456,8 +1456,17 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 	// 构造 assistant 工具调用（参数原文是非法 JSON，无法解析为 Args，置空）+ 失败反馈。
 	toolCalls := make([]types.ToolCall, 0, len(malformed.ToolCalls))
 	feedbacks := make([]string, 0, len(malformed.ToolCalls))
+	reasons := make([]string, 0, len(malformed.ToolCalls))
 	for _, call := range malformed.ToolCalls {
-		toolCalls = append(toolCalls, types.ToolCall{Name: call.Name, Args: map[string]interface{}{}})
+		// call identity 必须稳定且互不冲突：失败调用的 Args 一律是空对象，沿用
+		// 「名称+参数」派生的确定性 id 会把同一回合里反复降级的同名调用折叠成同一个
+		// id（历史 tool_call/tool_result、durable 回执与 transcript 行互相覆盖）。
+		// 这里把 step 与模型给出的调用身份并入种子。
+		toolCalls = append(toolCalls, types.ToolCall{
+			ID:   malformedToolCallID(call.Index, step, call.ID, call.Name),
+			Name: call.Name,
+			Args: map[string]interface{}{},
+		})
 		schemaText := "(no schema available)"
 		if text, ok := schemaByTool[call.Name]; ok && text != "" {
 			schemaText = text
@@ -1468,11 +1477,13 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 			feedbacks = append(feedbacks, fmt.Sprintf(
 				"Tool call %q was NOT executed because its arguments were cut off by the output budget (finish_reason=%s, received: %s). Re-emit the call with a smaller payload — split large writes into several calls — exactly per this schema:\n%s",
 				call.Name, malformed.FinishReason, call.Arguments, schemaText))
+			reasons = append(reasons, "tool call arguments were cut off by the output budget")
 			continue
 		}
 		feedbacks = append(feedbacks, fmt.Sprintf(
 			"Tool call %q was NOT executed because its arguments were not valid JSON (received: %s). Re-emit the call exactly per this schema:\n%s",
 			call.Name, call.Arguments, schemaText))
+		reasons = append(reasons, "tool call arguments were not valid JSON")
 	}
 
 	normalized := builder.AppendAssistantAction("", toolCalls, nil, nil)
@@ -1483,12 +1494,34 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 		if i < len(feedbacks) {
 			content = feedbacks[i]
 		}
-		payloads = append(payloads, ToolResultPayload{ToolCallID: call.ID, Content: content})
+		reason := "tool call arguments were not valid JSON"
+		if i < len(reasons) {
+			reason = reasons[i]
+		}
+		payloads = append(payloads, ToolResultPayload{
+			ToolCallID: call.ID,
+			Content:    content,
+			// tool_error 是工具结果失败的标准元数据位（上下文压缩与回执对账
+			// 同源读取）：缺省时回执会把「未执行」判成 ok=true 记入账本。
+			Metadata: types.Metadata{"tool_error": reason},
+		})
 	}
 	builder.AppendToolResults(normalized, DurableToolResultPayloads(payloads))
 	promptBuilder.AppendToolResults(normalized, payloads)
 	if persistErr := persistBuilderHistory(builder, options.PersistHistory); persistErr != nil {
 		return false
+	}
+
+	// 未执行的调用同样要投影成 live 工具事件：渲染层只按事件建工具行
+	// （tool.requested 建 cell、tool.completed 落终态）。缺少这对事件时这条调用在
+	// 实时 transcript 里没有 cell，回合末的 durable 回执对账只能命中「cell 缺失」
+	// 的崩溃恢复分支，把工具行补在正文与 agent.turn.finished 之后。
+	for i, call := range normalized {
+		reason := "tool call arguments were not valid JSON"
+		if i < len(reasons) {
+			reason = reasons[i]
+		}
+		loop.emitMalformedToolCallOutcome(sessionID, call, step, traceID, reason, payloads[i].Content)
 	}
 
 	for _, call := range malformed.ToolCalls {
@@ -1511,6 +1544,44 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 		"max_recoveries": maxMalformedToolCallRecoveries,
 	})
 	return true
+}
+
+// malformedToolCallID 为「参数非法、未执行」的降级调用分配稳定且在会话内唯一的
+// call id。
+//
+// 种子并入 step 与模型给出的调用身份（providerID）：同名工具在同一回合里反复降级
+// 时 Args 都是空对象，若只按 index+name+args 派生，两次不同的失败会折叠成同一个
+// call identity。step 参与派生同时保证重放/恢复得到同一 id（同一回合里 step 单调）。
+func malformedToolCallID(index, step int, providerID, name string) string {
+	seed := fmt.Sprintf("%s#step=%d#provider_id=%s", strings.TrimSpace(name), step, strings.TrimSpace(providerID))
+	return types.DeterministicToolCallIDFromJSON("toolcall_", index, seed, json.RawMessage(`{}`))
+}
+
+// emitMalformedToolCallOutcome 把一次「参数非法、未执行」的降级调用投影成与正常工具
+// 调用同形的 live 事件（tool.requested + tool.completed，error 非空即失败态）。
+//
+// 这些调用不会进入执行器，因此没有执行器发出的工具生命周期事件；若只把
+// assistant tool_call + tool_result 写进历史，渲染层（只按事件建工具行）在实时
+// transcript 里就看不到这条调用。回合末 durable 回执对账（tool_receipt_recorded）
+// 只能命中「cell 缺失」的崩溃恢复重建分支，把工具行补在正文与 agent.turn.finished
+// 之后。补齐事件后，实时渲染在发生的 step 就内联出这一行，回执到达时命中的是既有
+// 终态 cell（幂等跳过），尾部不再多出一行。
+func (loop *ReActLoop) emitMalformedToolCallOutcome(sessionID string, call types.ToolCall, step int, traceID, reason, content string) {
+	if loop == nil || loop.agent == nil {
+		return
+	}
+	loop.emitRuntimeEvent("tool.requested", sessionID, call.Name, toolRequestedEventPayload(call, step, traceID, map[string]interface{}{
+		"malformed_arguments": true,
+		"not_executed":        true,
+	}))
+	loop.emitRuntimeEvent("tool.completed", sessionID, call.Name, toolCompletedEventPayload(
+		toolExecutionResult{Call: call, Output: content, Error: reason},
+		step, traceID, map[string]interface{}{
+			"awaiting_model":      false,
+			"malformed_arguments": true,
+			"not_executed":        true,
+		},
+	))
 }
 
 // maxReasoningOnlyRecoveries 控制「只输出思维链」的反馈回注次数上限。与

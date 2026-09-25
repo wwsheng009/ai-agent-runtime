@@ -531,3 +531,82 @@ func TestReActLoop_AggregatedTruncatedToolCallEscalatesBudget(t *testing.T) {
 	require.Equal(t, llm.CappedDefaultMaxTokens, escalated.Payload["from_max_tokens"])
 	require.Equal(t, llm.EscalatedMaxTokens, escalated.Payload["to_max_tokens"])
 }
+
+// TestReActLoop_MalformedToolCallEmitsLiveToolEvents 固化「参数非法、未执行」的降级
+// 调用必须拥有自己的 live 工具事件与唯一 call identity。
+//
+// 动机（会话 session_20260925221754_dyRAoaEO 实证）：渲染层只按事件建工具行，只把
+// assistant tool_call + tool_result 写进历史、不发事件的合成调用在实时 transcript 里
+// 没有 cell；回合末 durable 回执对账（tool_receipt_recorded）因此命中「cell 缺失」的
+// 崩溃恢复重建分支，把一行裸工具行补在正文与 agent.turn.finished 之后。
+func TestReActLoop_MalformedToolCallEmitsLiveToolEvents(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(nil)
+	// 同一工具（write_file / call-bad）连续两次降级：id 必须区分，否则历史、回执与
+	// transcript 行会折叠成一行。
+	provider := &malformedToolCallProvider{
+		name: "test-provider",
+		// 每次 think 先做满 3 次退化重采样才冒泡到 loop：6 次非法 = 两轮降级恢复。
+		malformedRuns: 6,
+		responses: []*llm.LLMResponse{
+			{Content: "done after malformed recoveries", Model: "test-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{
+		Name: "malformed-live-events-agent", Provider: "test-provider", Model: "test-model", MaxSteps: 10,
+	}, &resetRecoveryMCPManager{}, llmRuntime)
+	bus := runtimeevents.NewBus()
+	var requested, completed []runtimeevents.Event
+	bus.Subscribe("tool.requested", func(event runtimeevents.Event) {
+		if event.Payload["malformed_arguments"] == true {
+			requested = append(requested, event)
+		}
+	})
+	bus.Subscribe("tool.completed", func(event runtimeevents.Event) {
+		if event.Payload["malformed_arguments"] == true {
+			completed = append(completed, event)
+		}
+	})
+	agent.SetEventBus(bus)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 10, EnableToolCalls: true})
+
+	result, err := loop.Run(context.Background(), "write the file")
+
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Len(t, requested, 2, "每次降级都要发 tool.requested，渲染层才能就地建工具行")
+	require.Len(t, completed, 2, "每次降级都要发 tool.completed，工具行才能落到终态")
+
+	requestedIDs := make([]string, 0, len(requested))
+	for _, event := range requested {
+		id, _ := event.Payload["tool_call_id"].(string)
+		require.NotEmpty(t, id, "降级调用必须有 call identity，否则渲染层只能降级成 system 行")
+		require.Equal(t, "write_file", event.Payload["logical_tool"])
+		require.Equal(t, true, event.Payload["not_executed"])
+		requestedIDs = append(requestedIDs, id)
+	}
+	require.NotEqual(t, requestedIDs[0], requestedIDs[1],
+		"同名工具的两次降级必须有不同的 call id（否则两次失败折叠成一行）")
+
+	for i, event := range completed {
+		require.Equal(t, requestedIDs[i], event.Payload["tool_call_id"], "requested/completed 必须描述同一次调用")
+		require.NotEmpty(t, event.Payload["error"], "未执行的调用必须以失败态落终态（• Failed ...）")
+		require.Contains(t, event.Payload["output"], "was NOT executed")
+		require.Equal(t, false, event.Payload["awaiting_model"])
+	}
+
+	// 历史里的 tool_result 必须带 tool_error 元数据：回执对账按它判定 ok=false，
+	// 缺省会把「未执行」记成执行成功。
+	lastRequest := provider.requests[len(provider.requests)-1]
+	toolMetadata := map[string]types.Metadata{}
+	for _, message := range lastRequest.Messages {
+		if strings.EqualFold(message.Role, "tool") && message.ToolCallID != "" {
+			toolMetadata[message.ToolCallID] = message.Metadata
+		}
+	}
+	for _, id := range requestedIDs {
+		metadata, ok := toolMetadata[id]
+		require.True(t, ok, "history must carry the synthetic tool_result for %s", id)
+		require.Contains(t, metadata["tool_error"], "not valid JSON")
+	}
+}
