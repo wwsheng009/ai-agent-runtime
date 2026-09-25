@@ -4,10 +4,11 @@
 import { hideApproval, showApproval, showQuestion } from "./approvals.js";
 import { clearPendingPrompts, getUiState, refreshScreen, setUI, updateTitle } from "./chat.js";
 import { handleCacheSSEEvent } from "./cache.js";
+import { createEventSequenceGuard } from "./event-sequence.js";
 import { loadRuntimeMeta } from "./runtime.js";
 import { loadStatusBar } from "./statusbar.js";
 import { handleMeshStreamEvent, loadSessions, meshResumeSeq, notifySessionSwitchedCompleted, notifySharedStreamState } from "./sessions.js";
-import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, endStream, isStreamActive, renderStream, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
+import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, endStream, isStreamActive, renderStream, resetStreamState, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
 import { handleTodoSSEEvent } from "./todos.js";
 import { isNetDegraded, onNetStateChange, webAuthToken } from "./util.js";
 
@@ -15,6 +16,33 @@ export var statusEl = document.getElementById("connection-status");
 var turnEl = document.getElementById("turn-status");
 var eventLogEl = document.getElementById("event-log");
 var lastSequence = 0;
+
+// ---- SSE 帧序号守卫（顺序保证 / 去重 / 丢帧对账） ----
+//
+// 服务端单连接内由唯一 writer goroutine 按 FIFO 分配 `_event.sequence`，
+// 但队列满/判死是**静默丢帧**，EventSource 重连也不带 Last-Event-ID、
+// 不重放。客户端因此自己守住三件事：
+//   duplicate —— 重复投递/重放：丢弃，绝不重复渲染（重复行的直接来源之一）；
+//   gap       —— 跳号（服务端丢帧）：立即重拉一次权威快照对账，把缺的内容补回来；
+//   reset     —— connected 帧（新连接序号从 1 重新开始）复位基线。
+var seqGuard = createEventSequenceGuard();
+var STREAM_RESYNC_MIN_INTERVAL_MS = 800;
+var lastStreamResyncAt = 0;
+
+function logStreamSync(message) {
+  logEvent("stream_sync", { detail: message });
+}
+
+// 丢帧后的权威对账：重拉当前窗口（chat.js 的窗口对账会把重复行收敛、
+// 顺序按绝对索引排好）。keepStream 保留实时气泡 —— 增量不全由回合终态
+// （assistant_message / turn_end / connected 看门狗）收口。
+function resyncConversationAfterGap() {
+  var now = Date.now();
+  if (now - lastStreamResyncAt < STREAM_RESYNC_MIN_INTERVAL_MS) { return; }
+  lastStreamResyncAt = now;
+  refreshScreen(false, { keepStream: isStreamActive() });
+}
+
 function setStatus(text, connected) {
   statusEl.textContent = text;
   statusEl.className = connected ? "connected" : "disconnected";
@@ -100,7 +128,23 @@ function renderDynamicStatus() {
 
 function onSSEEvent(eventName, data) {
   logEvent(eventName, data);
-  lastSequence = (data && data._event && data._event.sequence) || lastSequence;
+  var seq = (data && data._event && data._event.sequence) || 0;
+  if (eventName === "connected") {
+    // 新连接：服务端序号从 1 重新开始，先复位基线再处理本帧（否则整条新流
+    // 都会被判成重复帧而全部丢弃）。
+    seqGuard.reset(seq);
+  } else {
+    var verdict = seqGuard.accept(seq);
+    if (verdict === "duplicate") {
+      logStreamSync("丢弃重复帧 " + eventName + " seq=" + seq);
+      return;
+    }
+    if (verdict === "gap") {
+      logStreamSync("检测到丢帧（seq 跳号至 " + seq + "）：重拉权威快照对账");
+      resyncConversationAfterGap();
+    }
+  }
+  lastSequence = seqGuard.lastSeen() || lastSequence;
 
   // 任务列表浮动面板（composer 上沿，js/todos.js）：
   //   - tool_end 带 todo_snapshot（仅 todos 工具）→ 实时全量替换；
@@ -117,11 +161,16 @@ function onSSEEvent(eventName, data) {
       if (data.pending_approval) { showApproval(data.pending_approval); }
       if (data.pending_question) { showQuestion(data.pending_question); }
       if (data.session_busy) {
-        beginStream();
+        // 断线重连：本地已在同一回合的流式累积上时不重置气泡（重置会把已渲染
+        // 文本丢掉并从半截重新累积，收尾时与权威行各渲染一次）。
+        if (!isStreamActive()) { beginStream(); }
         // 运行态只由顶栏 #turn-status 呈现（#send-status 只承载发送/排队/
         // 停止等瞬态提示），避免同一执行状态在顶栏重复出现两次。
         setUI("busy", "");
       } else {
+        // 断线期间回合已结束（丢帧会让 turn_end 永远不来）：connected 是权威
+        // 终态，按回合收口，避免气泡永久停在"输出中"。
+        if (isStreamActive()) { endStream(); }
         refreshScreen();
         // 若正在等待自己刚发送的 prompt 的 turn_start，保持 posting
         if (getUiState() !== "posting") { setUI("idle", ""); }
@@ -215,7 +264,9 @@ function onSSEEvent(eventName, data) {
       clearPendingPrompts(); // 旧会话的本地回显不带到新会话
       loadSessions();
       loadStatusBar(); // 会话切换后刷新状态栏
-      endStream();
+      // 会话切换/结束：丢弃本回合的流式累积（不是"等打字机揭示完"——那段内容
+      // 属于旧会话，落行会把旧会话的文本串进新会话的对话区）。
+      resetStreamState();
       refreshScreen(true);
       // session_switched 由服务端按会话身份变化合成（P2 ④：/resume、/new、/load
       // 不产生 turn，运行时不会发布 session_start/end）：额外恢复切换期间禁用的

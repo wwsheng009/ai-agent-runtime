@@ -198,6 +198,10 @@ function createEl(tagName, attrs) {
   Object.defineProperty(el, "firstChild", {
     get: function () { return el.children.length ? el.children[0] : null; },
   });
+  // 真实 DOM 的 childNodes 与 children 同源（sse.js 的事件日志按 childNodes 裁剪）。
+  Object.defineProperty(el, "childNodes", {
+    get: function () { return el.children; },
+  });
   // className ↔ class 属性（classList 也读写同一份 attrs.class）
   Object.defineProperty(el, "className", {
     get: function () { return el.attrs["class"] || ""; },
@@ -330,8 +334,30 @@ globalThis.window = {
   localStorage: globalThis.localStorage,
 };
 
-globalThis.EventSource = function () {
-  return { addEventListener: function () {}, close: function () {} };
+// EventSource 捕获桩：记录实例与监听器，测试可据此把真实 SSE 帧喂给 js/sse.js
+// （帧序号守卫 / 丢帧对账 / 重连基线复位都走真实分发路径）。
+var eventSourceInstances = [];
+globalThis.EventSource = function (url) {
+  var instance = {
+    url: url,
+    onmessage: null,
+    onerror: null,
+    onopen: null,
+    listeners: {},
+    closed: false,
+    addEventListener: function (name, fn) {
+      if (!this.listeners[name]) { this.listeners[name] = []; }
+      this.listeners[name].push(fn);
+    },
+    close: function () { this.closed = true; },
+    emit: function (name, payload, lastEventId) {
+      var ev = { data: JSON.stringify(payload == null ? {} : payload), lastEventId: lastEventId || "" };
+      if (name === "message" && this.onmessage) { this.onmessage(ev); }
+      (this.listeners[name] || []).forEach(function (fn) { fn(ev); });
+    },
+  };
+  eventSourceInstances.push(instance);
+  return instance;
 };
 
 Object.defineProperty(globalThis, "navigator", {
@@ -339,6 +365,20 @@ Object.defineProperty(globalThis, "navigator", {
   writable: true,
   configurable: true,
 });
+
+// sse.js::initSSE 会注册常驻 setInterval（动态状态栏时钟）；验证脚本是批处理，
+// 断言结束后必须释放，否则事件循环不退出。这里统一登记、收尾清理。
+var testIntervals = [];
+var realSetInterval = globalThis.setInterval;
+globalThis.setInterval = function (fn, ms) {
+  var handle = realSetInterval(fn, ms);
+  testIntervals.push(handle);
+  return handle;
+};
+function clearTestIntervals() {
+  testIntervals.forEach(function (handle) { clearInterval(handle); });
+  testIntervals = [];
+}
 
 // 预注册各模块顶层需要的元素（与 verify-micro-web-tool-output.mjs 同集合）
 [
@@ -374,11 +414,17 @@ insertObserver = function (parent, count) {
 // ---- fetch 路由：/web/api/screen 依次消费 screenQueue；其余端点返回空响应 ----
 var screenQueue = [];
 var fetchCalls = [];
+// 第 15 节（SSE 序号守卫）会触发多次"由帧驱动"的权威刷新，数量由断言按增量
+// 校验；这里允许队列临时为空（返回 available=false，不改变对话区状态）。
+var allowUnexpectedScreen = false;
 
 globalThis.fetch = function (url, opts) {
   fetchCalls.push({ url: url, opts: opts || {} });
   if (url.indexOf("/web/api/screen") === 0) {
     if (!screenQueue.length) {
+      if (allowUnexpectedScreen) {
+        return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve({ available: false }); } });
+      }
       throw new Error("未预期的 screen 请求（screenQueue 为空）: " + url);
     }
     var payload = screenQueue.shift();
@@ -685,6 +731,153 @@ assert.strictEqual(screenFetchUrls().length, fetchCountFullWindow,
 assert.strictEqual(copied, Array.from({ length: 109 }, function (_, i) { return "m" + i; }).join("\n\n"),
   "窗口完整时复制按 DOM 顺序收集（既有格式）");
 
+// ===========================================================================
+// 权威窗口对账（重复渲染 / 顺序漂移 / pending 钉底）与 SSE 帧序号守卫
+// ===========================================================================
+
+function rowText(row) {
+  var body = row.querySelector(".msg-text") || row.querySelector(".msg-body");
+  return body ? body.textContent : "";
+}
+function countRowsWithText(text) {
+  return screenEl.querySelectorAll(".msg-row").filter(function (row) { return rowText(row) === text; }).length;
+}
+function freshWindowPayload() {
+  return screenPayload(0, 2, 2, {
+    contents: { 0: "你好", 1: "先看目录" },
+    roles: { 0: "user", 1: "assistant" },
+  });
+}
+
+// ---- 13. 本地兜底行（finishStream 落行）被权威窗口覆盖后只保留一行 ----
+screenQueue.push(freshWindowPayload());
+chat.refreshScreen();
+await flush();
+assert.strictEqual(rowIndices().length, 2, "对账基线：应渲染 2 条权威行");
+
+chat.appendLocalConversationRow("assistant", "先看目录", "stream");
+assert.strictEqual(screenEl.querySelectorAll('[data-msg-local="stream"]').length, 1,
+  "本地兜底行应带 data-msg-local 标记（对账据此识别）");
+assert.strictEqual(countRowsWithText("先看目录"), 2,
+  "重复现场：同一段助手文本同时有本地兜底行与权威行");
+
+screenQueue.push(freshWindowPayload());
+chat.refreshScreen();
+await flush();
+assert.strictEqual(screenEl.querySelectorAll('[data-msg-local="stream"]').length, 0,
+  "权威窗口覆盖同一内容后，本地兜底行必须被移除");
+assert.strictEqual(countRowsWithText("先看目录"), 1,
+  "同一段助手文本只能渲染一行（重复渲染回归）");
+assert.strictEqual(screenEl.querySelectorAll('[data-msg-index="1"]').length, 1,
+  "保留的是带绝对索引的权威行");
+
+// 前缀覆盖：断线/丢帧导致本地只攒了半截，权威版本更长 → 本地行让位
+chat.appendLocalConversationRow("assistant", "先看目录", "stream");
+screenQueue.push(screenPayload(0, 2, 2, {
+  contents: { 0: "你好", 1: "先看目录再决定" },
+  roles: { 0: "user", 1: "assistant" },
+}));
+chat.refreshScreen();
+await flush();
+assert.strictEqual(screenEl.querySelectorAll('[data-msg-local="stream"]').length, 0,
+  "本地半截文本被更完整的权威消息覆盖时也应移除");
+
+// 顺序收敛：未被覆盖的本地行必须回到列表末尾，服务端行按绝对索引升序
+chat.appendLocalConversationRow("assistant", "尚未被权威窗口覆盖的内容", "stream");
+screenEl.insertBefore(screenEl.querySelector('[data-msg-local="stream"]'), screenEl.children[0]);
+assert.strictEqual(screenEl.querySelectorAll(".msg-row")[0].getAttribute("data-msg-local"), "stream",
+  "人为制造顺序漂移：本地行被挪到最前");
+screenQueue.push(freshWindowPayload());
+chat.refreshScreen();
+await flush();
+var reconciledRows = screenEl.querySelectorAll(".msg-row");
+assert.strictEqual(reconciledRows[reconciledRows.length - 1].getAttribute("data-msg-local"), "stream",
+  "未覆盖的本地兜底行应被收敛到列表末尾（历史 → 本地兜底的顺序）");
+assert.deepStrictEqual(rowIndices(), [0, 1], "服务端行应恢复绝对索引升序");
+
+// ---- 14. pending 回显：服务端规范化改写文本时也必须释放（不得钉在末尾）----
+chat.setUI("idle", ""); // 复位发送状态机（上一节的发送停留在 posting）
+elements["prompt"].value = "安装依赖";
+elements["send-btn"].click();
+await flush();
+assert.ok(screenEl.querySelector(".msg-row.msg-pending"), "发送后应立即出现 pending 气泡");
+
+// 服务端把 prompt 规范化成带前缀的文本（与本地原文不完全相等）：
+screenQueue.push(screenPayload(0, 3, 3, {
+  contents: { 0: "你好", 1: "先看目录", 2: "[排队] 安装依赖" },
+  roles: { 0: "user", 1: "assistant", 2: "user" },
+}));
+chat.refreshScreen();
+await flush();
+assert.strictEqual(screenEl.querySelector(".msg-row.msg-pending"), null,
+  "服务端以规范化文本落库时 pending 回显也必须释放（文本精确匹配不是唯一判据）");
+assert.strictEqual(countRowsWithText("[排队] 安装依赖"), 1,
+  "确认后的消息由服务端行接管，不再出现钉在列表末尾的本地 user 气泡");
+assert.strictEqual(rowIndices()[rowIndices().length - 1], 2, "服务端行顺序保持绝对索引升序");
+
+// ---- 15. SSE 帧序号守卫：重复帧丢弃、丢帧触发对账、重连复位基线 ----
+const sse = await import(pathToFileURL(path.join(WEB_DIR, "sse.js")).href);
+sse.initSSE();
+var es = eventSourceInstances[eventSourceInstances.length - 1];
+assert.ok(es && es.url.indexOf("/web/api/events") === 0, "initSSE 应建立 /web/api/events 连接");
+allowUnexpectedScreen = true; // 帧驱动的刷新次数由下面的增量断言校验
+
+screenQueue.push(freshWindowPayload());
+es.emit("connected", { _event: { sequence: 1 }, session_active: true, session_busy: false, session_id: "s1" });
+await flush();
+var fetchesAfterConnected = screenFetchUrls().length;
+assert.ok(fetchesAfterConnected >= 1, "connected 应触发一次权威快照刷新");
+
+screenQueue.push(freshWindowPayload());
+es.emit("screen_refresh", { _event: { sequence: 2 }, reason: "turn_end" });
+await flush();
+var fetchesAfterAccepted = screenFetchUrls().length;
+assert.ok(fetchesAfterAccepted > fetchesAfterConnected, "序号 +1 的帧应被接受并触发刷新");
+
+es.emit("screen_refresh", { _event: { sequence: 2 }, reason: "turn_end" });
+await flush();
+assert.strictEqual(screenFetchUrls().length, fetchesAfterAccepted,
+  "重复序号的帧应被丢弃：不重复渲染、不重复刷新");
+
+screenQueue.push(freshWindowPayload());
+es.emit("screen_refresh", { _event: { sequence: 9 }, reason: "gap" });
+await flush();
+assert.ok(screenFetchUrls().length > fetchesAfterAccepted,
+  "序号跳号（服务端丢帧）应触发权威快照对账");
+
+// 重连：新连接的序号从 1 重新开始，基线必须复位，否则整条新流都被判成重复帧
+screenQueue.push(freshWindowPayload());
+es.emit("connected", { _event: { sequence: 1 }, session_active: true, session_busy: false, session_id: "s1" });
+await flush();
+var fetchesBeforeReconnectFrame = screenFetchUrls().length;
+screenQueue.push(freshWindowPayload());
+screenQueue.push(freshWindowPayload());
+screenQueue.push(freshWindowPayload());
+screenQueue.push(freshWindowPayload());
+screenQueue.push(freshWindowPayload());
+screenQueue.push(freshWindowPayload());
+es.emit("session_start", { _event: { sequence: 2 }, session_id: "s1" });
+await flush();
+assert.ok(screenFetchUrls().length > fetchesBeforeReconnectFrame,
+  "重连后序号 2 的帧必须被接受（基线已按 connected 复位）");
+
+// ---- 16. 会话切换：丢弃旧会话的流式累积（不串味、不落成新会话的本地行）----
+const stream = await import(pathToFileURL(path.join(WEB_DIR, "stream.js")).href);
+screenQueue.push(freshWindowPayload());
+stream.beginStream();
+stream.appendStreamText("旧会话正文");
+stream.appendStreamReasoning("旧会话推理");
+assert.strictEqual(stream.isStreamActive(), true, "beginStream 后应处于流式状态");
+stream.resetStreamState();
+var liveAfterSwitch = stream.getLiveStreamState();
+assert.strictEqual(liveAfterSwitch.active, false, "会话切换后流式状态应复位");
+assert.strictEqual(liveAfterSwitch.text, "", "旧会话正文不得带入新会话");
+assert.strictEqual(liveAfterSwitch.reasoning, "", "旧会话推理不得带入新会话");
+await flush();
+assert.strictEqual(screenEl.querySelectorAll('[data-msg-local="stream"]').length, 0,
+  "复位后不得把旧会话内容落成新会话的本地兜底行");
+
+clearTestIntervals();
 console.log("verify-micro-web-msg-window: 全部断言通过");
 console.log("  - 首屏只渲染最新一页（msg_limit=40），不随会话总 turn 数增长");
 console.log("  - 尾部增量替换 + 窗口右移保留已加载历史（游标不回退、不重复）");

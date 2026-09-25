@@ -558,7 +558,8 @@ node --check backend/cmd/aicli/commands/web/app.js
 # 4. 页签行为沙盒（Node，stub document/fetch，无需浏览器；在仓库根目录运行）：
 node scripts/verify-micro-web-skills-tab.mjs   # 技能页签：列表/会话感知/详情分组页签与键盘导航/错误/竞态/页签接线
 node scripts/verify-micro-web-tool-output.mjs  # 工具输出折叠/展开：抬头控件（文字 + ▼/▲ 图标）在「工具」行内、默认折叠（≤5 行）、溢出判定、点击/键盘切换、控件隐藏时不响应、复制不含控件文字
-node scripts/verify-micro-web-msg-window.mjs   # 长会话窗口化：首屏只渲染最新一页、尾部增量替换与窗口右移保留历史、上滚以 msg_before 前插并补偿 scrollTop、到顶停止、pending 气泡确认、游标异常守卫
+node scripts/verify-micro-web-msg-window.mjs   # 长会话窗口化 + 权威窗口对账 + SSE 序号守卫：首屏只渲染最新一页、尾部增量替换与窗口右移保留历史、上滚以 msg_before 前插并补偿 scrollTop、到顶停止、pending 气泡确认、游标异常守卫；本地兜底行被权威窗口覆盖后只保留一行（重复渲染回归）、半截兜底行让位、顺序按绝对索引收敛、pending 按发送基线 + 宽松文本匹配释放（不再钉在末尾）；重复序号帧丢弃 / 跳号触发权威对账 / connected 复位序号基线
+node scripts/verify-micro-web-event-sequence.mjs # SSE 帧序号守卫（纯逻辑）：首帧基线、连续递进、重复序号判 duplicate（不推进基线）、跳号判 gap、无序号帧放行、connected 复位、守卫实例相互独立
 node scripts/verify-micro-web-msg-filter.mjs   # 对话页签过滤面板：面板结构（sticky 居中吸附）与样式不变量、角色多选（aria-pressed/查询串顺序）、搜索图标展开与 300ms 去抖/回车立即提交/Esc 先清词再收起、服务端过滤接线（roles/q + msg_limit 组合 = 搜索结果分页）、匹配计数与 0 命中空态、条件变化作废在途分页请求、复制带过滤条件
 node scripts/verify-micro-web-menu.mjs         # 顶部菜单栏 + 会话导出：菜单栏/右侧状态簇结构、data-menu-action 均指向真实控件、开合与 Esc 回焦、导出请求与 Content-Disposition 命名下载、失败不下载；CSS 侧校验「无 fallback 的 var(--token) 必须已定义」与快捷键面板背景为不透明语义变量
 node scripts/verify-micro-web-render-mode.mjs  # assistant 消息 md|txt 渲染：默认 md（行生成时同步渲染）、切换控件在气泡右上角（正文之前）、按钮 active/aria-pressed 同步、点击委托、复制取 .msg-text 原文、代码块复制委托（流式气泡 + md 气泡）

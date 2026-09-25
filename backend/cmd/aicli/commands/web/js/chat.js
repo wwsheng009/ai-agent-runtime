@@ -7,7 +7,7 @@ import { filterAllowsRole, filterQueryString, isFilterActive, setFilterChangeHan
 import { loadRuntimeMeta } from "./runtime.js";
 import { currentSessionLabel, getInputHistory, getInputHistoryIdx, meshNodeSuffix, sendInput, setInputHistoryIdx } from "./sessions.js";
 import { statusEl } from "./sse.js";
-import { clearStreamMessage, hideStreamMessage, isStreamActive, isStreamEnded } from "./stream.js";
+import { clearStreamMessage, getLiveStreamState, hideStreamMessage, isStreamActive, isStreamEnded } from "./stream.js";
 import { closeShortcutHelpIfOpen, toggleShortcutHelp, toggleTheme } from "./ui.js";
 import { applyTodoReplay } from "./todos.js";
 import { apiFetch, esc, showToast } from "./util.js";
@@ -148,10 +148,14 @@ function msgHeadHtml(labelHtml) {
     '</div>';
 }
 
-export function chatMsgRowHtml(role, content, pending, index) {
+// localKind 非空表示这是**本地行**（数据-msg-local）：`stream` = 流式气泡的兜底落行，
+// `pending` = 乐观回显。本地行没有服务端绝对索引，因此由 applyServerWindow 的
+// 对账逻辑（内容覆盖判定 + 末尾排序）负责与权威窗口对齐。
+export function chatMsgRowHtml(role, content, pending, index, localKind) {
   var label = MSG_LABELS[role] || "消息";
   var cls = "msg-row msg-" + role + (pending ? " msg-pending" : "");
   var idxAttr = (typeof index === "number" && index >= 0) ? ' data-msg-index="' + index + '"' : "";
+  var localAttr = localKind ? ' data-msg-local="' + esc(localKind) + '"' : "";
   if (role === "assistant") {
     // 默认 Markdown（DEFAULT_RENDER_MODE=md）：data-render-mode 是渲染方式的唯一
     // 事实来源，CSS 按它在 .msg-text / .msg-md 之间切换显示，不靠内联样式或
@@ -159,7 +163,7 @@ export function chatMsgRowHtml(role, content, pending, index) {
     // .msg-text 始终保存转义原文，作为切回 txt / 复制的权威来源。
     var asstMode = DEFAULT_RENDER_MODE;
     var mdBody = asstMode === "md" ? renderMessageBody(content, "md") : "";
-    return '<div class="' + cls + '"' + idxAttr + ' data-render-mode="' + asstMode + '">' +
+    return '<div class="' + cls + '"' + idxAttr + localAttr + ' data-render-mode="' + asstMode + '">' +
       '<div class="msg-head">' +
       '<div class="msg-label">' + esc(label) + '</div>' +
       messageRenderToggleHtml() +
@@ -175,7 +179,7 @@ export function chatMsgRowHtml(role, content, pending, index) {
     // 推理过程：折叠面板（与流式渲染 #stream-msg .reasoning-block 视觉一致）。
     // 抬头行即 <summary>，复制图标绝对定位在行右上角（不放进 summary，
     // 避免点击复制时连带展开/收起面板）。
-    return '<div class="' + cls + '"' + idxAttr + '>' +
+    return '<div class="' + cls + '"' + idxAttr + localAttr + '>' +
       messageCopyBtnHtml() +
       '<details class="reasoning-block">' +
       '<summary>' + esc(label) + '</summary>' +
@@ -187,7 +191,7 @@ export function chatMsgRowHtml(role, content, pending, index) {
     // 工具输出：默认折叠（最多显示约 5 行）。
     // 展开/收起控件并入「工具」抬头行（文字 + ▼/▲ 图标），仅内容溢出时可用；
     // 完整文本始终渲染在 DOM 中（CSS 截断），会话复制可获取全文。
-    return '<div class="' + cls + '"' + idxAttr + '>' +
+    return '<div class="' + cls + '"' + idxAttr + localAttr + '>' +
       '<div class="msg-head">' +
       '<div class="msg-label tool-toggle" data-tool-toggle="1" role="button" tabindex="0" aria-expanded="false">' +
       '<span class="tool-toggle-text">' + esc(label) + '</span>' +
@@ -201,7 +205,7 @@ export function chatMsgRowHtml(role, content, pending, index) {
       '</div>' +
       '</div>';
   }
-  return '<div class="' + cls + '"' + idxAttr + '>' +
+  return '<div class="' + cls + '"' + idxAttr + localAttr + '>' +
     msgHeadHtml(esc(label)) +
     '<div class="msg-body">' + esc(content) + '</div>' +
     '</div>';
@@ -367,25 +371,207 @@ function removeServerRowsFrom(startIdx) {
   });
 }
 
-// 未确认的本地 prompt → pending 气泡（服务端窗口内已确认的丢弃）。
-function renderPendingPrompts(seenUser) {
-  if (!screenEl) { return; }
-  localPendingPrompts = localPendingPrompts.filter(function (text) {
-    return !seenUser[text];
+// ---- 权威窗口对账（去重 / 排序）------------------------------------------
+//
+// 会话区有两条写入来源：服务端权威窗口（/web/api/screen）与本地兜底行
+// （流式气泡落行、乐观回显）。两条来源没有共享游标，只靠"后到覆盖"必然产生
+// 重复行与顺序漂移（实测：同一段助手文本渲染两行、各自带一个 ⧉ 复制按钮；
+// 已发送的 user 气泡被钉在列表末尾）。这里把"对账"收敛到唯一入口：
+//   dropLocalStreamRowsCoveredByWindow  本地兜底行被权威内容覆盖 → 移除
+//   suppressRowsCoveredByLiveStream     流式期间权威尾部行让位给实时气泡
+//   orderConversationRows               服务端行按绝对索引升序、本地行留末尾
+
+// 正文归一化：只用于同一内容的跨来源比对（服务端 transcript ↔ 本地累积）。
+// 行尾空白 / CRLF 差异不构成"两条消息"。
+function normalizeMessageText(text) {
+  return String(text == null ? "" : text)
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+$/gm, "")
+    .trim();
+}
+
+// 行角色：从 msg-<role> 类名读取（行内没有独立的 data-role）。
+// 注意类名里还有 msg-row / msg-pending，必须排除，否则每行都会被判成 "row"。
+function rowRole(rowEl) {
+  var cls = (rowEl && rowEl.getAttribute) ? String(rowEl.getAttribute("class") || "") : "";
+  var parts = cls.split(/\s+/);
+  for (var i = 0; i < parts.length; i++) {
+    var m = /^msg-([a-z][a-z-]*)$/.exec(parts[i]);
+    if (m && m[1] !== "row" && m[1] !== "pending") { return m[1]; }
+  }
+  return "assistant";
+}
+
+// 本地流式兜底行被权威窗口覆盖时移除：
+//   ① 精确覆盖：窗口里有同角色 + 归一化文本相同的消息（多重集计数，一一消费）；
+//   ② 前缀覆盖（仅每个角色的最后一条兜底行）：窗口里的同角色消息以它开头
+//      —— 断线/丢帧导致本地只攒了一部分，权威版本更完整，本地行必须让位。
+// 过滤激活时窗口是"匹配子集"而非权威全集，跳过对账以免误删。
+function dropLocalStreamRowsCoveredByWindow(messages) {
+  if (!screenEl || !screenEl.querySelectorAll || isFilterActive()) { return; }
+  var bundles = {};
+  (messages || []).forEach(function (m) {
+    var key = String(m.role || "assistant") + "\u0000" + normalizeMessageText(m.content);
+    bundles[key] = (bundles[key] || 0) + 1;
   });
+  var leftover = [];
+  screenEl.querySelectorAll('[data-msg-local="stream"]').forEach(function (row) {
+    var key = rowRole(row) + "\u0000" + normalizeMessageText(domMessageText(row));
+    if (bundles[key] > 0) {
+      bundles[key] -= 1;
+      row.remove();
+      return;
+    }
+    leftover.push(row);
+  });
+  // 前缀覆盖只作用于每个角色的最后一条本地兜底行，避免误伤更早的历史兜底。
+  var lastByRole = {};
+  leftover.forEach(function (row) { lastByRole[rowRole(row)] = row; });
+  Object.keys(lastByRole).forEach(function (role) {
+    var row = lastByRole[role];
+    var text = normalizeMessageText(domMessageText(row));
+    if (text.length < 4) { return; }
+    var covered = (messages || []).some(function (m) {
+      if (String(m.role || "assistant") !== role) { return false; }
+      var full = normalizeMessageText(m.content);
+      return full.length > text.length && full.indexOf(text) === 0;
+    });
+    if (covered) { row.remove(); }
+  });
+}
+
+// 流式期间：权威窗口里"与实时气泡同源"的尾部行让位给气泡，保证同一段内容
+// 只由一个承载者渲染（回合结束后 finishStream 收掉气泡，refreshScreen 再由
+// 权威行接管）。只处理最后一条 user 消息之后的行 —— 那是当前回合。
+function suppressRowsCoveredByLiveStream(messages, w) {
+  if (!screenEl || !screenEl.querySelectorAll || !w) { return; }
+  var live = getLiveStreamState();
+  if (!live || !live.active) { return; }
+  var liveText = normalizeMessageText(live.text);
+  var liveReasoning = normalizeMessageText(live.reasoning);
+  var lastUserIndex = -1;
+  (messages || []).forEach(function (m, i) {
+    if ((m.role || "") === "user") { lastUserIndex = i; }
+  });
+  screenEl.querySelectorAll("[data-msg-index]").forEach(function (row) {
+    var idx = parseInt(row.getAttribute("data-msg-index"), 10);
+    if (isNaN(idx)) { return; }
+    var rel = idx - w.start;
+    if (rel <= lastUserIndex) { return; }
+    var role = rowRole(row);
+    var accumulated = role === "reasoning" ? liveReasoning : (role === "assistant" ? liveText : "");
+    if (!accumulated) { return; }
+    var text = normalizeMessageText(domMessageText(row));
+    if (text && accumulated.indexOf(text) === 0) { row.remove(); }
+  });
+}
+
+// 服务端行按绝对索引升序排列，本地行（兜底/乐观回显）保持原本相对顺序并留在末尾。
+// 增量插入只保证"新窗口整体插在 pending 之前"，窗口重叠/本地行夹在中间时仍可能
+// 顺序漂移；这里做一次幂等的收敛（已有序时零操作）。
+function orderConversationRows() {
+  if (!screenEl || !screenEl.querySelectorAll || !screenEl.insertBefore) { return; }
+  var rows = screenEl.querySelectorAll(".msg-row");
+  if (rows.length < 2) { return; }
+  var indexed = [];
+  var locals = [];
+  rows.forEach(function (row) {
+    if (row.getAttribute("data-msg-index") != null) { indexed.push(row); } else { locals.push(row); }
+  });
+  indexed.sort(function (a, b) {
+    return parseInt(a.getAttribute("data-msg-index"), 10) - parseInt(b.getAttribute("data-msg-index"), 10);
+  });
+  var ordered = indexed.concat(locals);
+  var same = ordered.every(function (row, i) { return row === rows[i]; });
+  if (same) { return; }
+  var anchor = rows[0];
+  var frag = document.createDocumentFragment();
+  ordered.forEach(function (row) { frag.appendChild(row); });
+  screenEl.insertBefore(frag, anchor);
+}
+
+// 待确认回显的文本匹配：服务端可能对内容做规范化（命令展开、附加前缀），
+// 精确相等之外允许"一方以另一方开头 / 服务端文本包含本地文本"的宽松判定。
+function pendingTextMatches(serverText, pendingText) {
+  var server = normalizeMessageText(serverText);
+  var pending = normalizeMessageText(pendingText);
+  if (!server || !pending) { return false; }
+  if (server === pending) { return true; }
+  if (server.indexOf(pending) === 0 || pending.indexOf(server) === 0) { return true; }
+  return pending.length >= 4 && server.indexOf(pending) >= 0;
+}
+
+// 未确认的本地 prompt → pending 气泡。释放条件（按优先级）：
+//   ① 窗口里存在绝对索引 >= 发送基线、且文本匹配的 user 消息（服务端已落库）；
+//   ② FIFO 兜底：窗口里出现"发送基线之后的新 user 行"而文本不匹配（服务端做了
+//      规范化/改写）—— 服务端是权威，最早的待确认回显让位，绝不允许它一直钉在
+//      列表末尾（历史顺序错乱的直接来源）。
+// 过滤把「用户消息」排除在外时不渲染本地乐观回显（队列保留，清过滤后重现）。
+function renderPendingPrompts(messages, w) {
+  if (!screenEl) { return; }
+  var startIdx = (w && typeof w.start === "number") ? w.start : 0;
+  var userRows = [];
+  (messages || []).forEach(function (m, i) {
+    if ((m.role || "") === "user") {
+      userRows.push({ index: startIdx + i, text: m.content || "" });
+    }
+  });
+  var used = {};
+  var remaining = [];
+  localPendingPrompts.forEach(function (entry) {
+    var text = (entry && typeof entry === "object") ? entry.text : entry;
+    var baseline = (entry && typeof entry === "object" && typeof entry.baseline === "number") ? entry.baseline : 0;
+    var matched = -1;
+    for (var i = 0; i < userRows.length; i++) {
+      if (used[i] || userRows[i].index < baseline) { continue; }
+      if (pendingTextMatches(userRows[i].text, text)) { matched = i; break; }
+    }
+    if (matched < 0) {
+      for (var j = 0; j < userRows.length; j++) {
+        if (used[j] || userRows[j].index < baseline) { continue; }
+        if (pendingTextMatches(userRows[j].text, text)) { continue; } // 已被别的 entry 认领
+        matched = j;
+        break;
+      }
+    }
+    if (matched >= 0) { used[matched] = true; return; }
+    remaining.push({ text: text, baseline: baseline });
+  });
+  localPendingPrompts = remaining;
   var stale = screenEl.querySelectorAll(".msg-row.msg-pending");
   stale.forEach(function (el) { el.remove(); });
   if (!localPendingPrompts.length) { return; }
-  // 过滤把「用户消息」排除在外时不渲染本地乐观回显：它下一轮就会被服务端
-  // 过滤掉，先显示再消失比不显示更突兀（pendingPrompts 仍保留，清过滤后重现）。
   if (!filterAllowsRole("user")) { return; }
   // 首条消息时先清除占位符 "(empty)"，避免气泡混在占位文本后。
   if (screenEl.textContent === "(empty)" && !screenEl.querySelector(".msg-row")) {
     screenEl.innerHTML = "";
   }
-  localPendingPrompts.forEach(function (text) {
-    screenEl.insertAdjacentHTML("beforeend", chatMsgRowHtml("user", text, true));
+  localPendingPrompts.forEach(function (entry) {
+    screenEl.insertAdjacentHTML("beforeend", chatMsgRowHtml("user", entry.text, true, undefined, "pending"));
   });
+}
+
+// 本地兜底行（流式气泡落行）插入到 pending 回显之前：回合输出属于历史，
+// 待确认的输入永远在列表末尾。
+export function appendLocalConversationRow(role, content, localKind) {
+  if (!screenEl || !content) { return; }
+  if (screenEl.textContent === "(empty)" && !screenEl.querySelector(".msg-row")) {
+    screenEl.innerHTML = "";
+  }
+  // 先追加再前移到 pending 之前：只需 insertAdjacentHTML + insertBefore 两个
+  // DOM 能力（与既有工具行/回显路径一致），不引入 DocumentFragment 依赖。
+  screenEl.insertAdjacentHTML("beforeend", chatMsgRowHtml(role, content, false, undefined, localKind || "stream"));
+  var rows = screenEl.querySelectorAll(".msg-row");
+  var newRow = rows.length ? rows[rows.length - 1] : null;
+  var pendingRow = firstPendingRow();
+  if (newRow && pendingRow && newRow !== pendingRow) {
+    screenEl.insertBefore(newRow, pendingRow);
+  }
+}
+
+// 供 stream.js 记录基线：本地兜底行 / 乐观回显生成时的服务端窗口右边界。
+export function getServerWindowState() {
+  return { start: loadedStart, end: loadedEnd, total: serverMessageTotal };
 }
 
 // 重置窗口状态（会话切换 / 回退到纯文本快照时）。
@@ -418,12 +604,6 @@ function onFilterChange() {
 // 应用服务端窗口：需要时整体重建，否则只替换尾部新增/变更部分。
 function applyServerWindow(messages, win) {
   if (!screenEl) { return; }
-  var seenUser = {};
-  (messages || []).forEach(function (m) {
-    if ((m.role || "assistant") === "user") {
-      seenUser[(m.content || "").replace(/\s+$/, "")] = true;
-    }
-  });
   var w = parseMessageWindow(win, (messages || []).length);
   // 过滤激活时 message_window.total 是「匹配条数」，unfiltered_total 是过滤前
   // 总数（见后端 buildChatWebScreenSnapshotForFilter）；未过滤时两者一致。
@@ -445,7 +625,15 @@ function applyServerWindow(messages, win) {
   serverMessageTotal = w.total;
   olderExhausted = loadedStart <= 0;
   syncOlderHint();
-  renderPendingPrompts(seenUser);
+  // 权威窗口落地后的统一对账（顺序 + 去重）：
+  //   ① 本地流式兜底行被窗口内容覆盖 → 移除（否则与权威行各渲染一次）；
+  //   ② 流式期间的权威尾部行让位给实时气泡（同一段内容只由一个承载者渲染）；
+  //   ③ 服务端行按绝对索引升序、本地行留末尾；
+  //   ④ 待确认回显按发送基线 + 文本匹配释放，不再永久钉在列表末尾。
+  dropLocalStreamRowsCoveredByWindow(messages);
+  suppressRowsCoveredByLiveStream(messages, w);
+  orderConversationRows();
+  renderPendingPrompts(messages, w);
   refreshToolOutputToggles();
 }
 
@@ -664,14 +852,16 @@ function copyRowMessage(btnEl) {
 // 立即追加一条本地 user pending 气泡（乐观回显，不等服务端回合）。
 function appendPendingUserPrompt(text) {
   if (!text) { return; }
-  localPendingPrompts.push(text);
+  // 发送基线 = 当前服务端窗口右边界：只有绝对索引 >= 基线的 user 行才可能是
+  // 这条 prompt 的落地结果（否则会误把历史里的同文本消息当成确认）。
+  localPendingPrompts.push({ text: text, baseline: loadedEnd > 0 ? loadedEnd : serverMessageTotal });
   // 过滤排除用户消息时不追加乐观回显（与 renderPendingPrompts 同口径）。
   if (screenEl && filterAllowsRole("user")) {
     // 首个消息时先清除占位符 "(empty)"，避免气泡混在占位文本后。
     if (screenEl.textContent === "(empty)" && !screenEl.querySelector(".msg-row")) {
       screenEl.innerHTML = "";
     }
-    screenEl.insertAdjacentHTML("beforeend", chatMsgRowHtml("user", text, true));
+    screenEl.insertAdjacentHTML("beforeend", chatMsgRowHtml("user", text, true, undefined, "pending"));
   }
   scrollToBottom(true);
 }
@@ -679,7 +869,9 @@ function appendPendingUserPrompt(text) {
 // 发送失败时移除本地 pending 气泡（释放乐观回显）。
 export function dropPendingUserPrompt(text) {
   if (!text) { return; }
-  localPendingPrompts = localPendingPrompts.filter(function (p) { return p !== text; });
+  localPendingPrompts = localPendingPrompts.filter(function (entry) {
+    return (entry && typeof entry === "object") ? entry.text !== text : entry !== text;
+  });
   if (screenEl) {
     var pendingRows = screenEl.querySelectorAll(".msg-row.msg-pending");
     pendingRows.forEach(function (el) {

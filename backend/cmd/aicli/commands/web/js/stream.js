@@ -1,7 +1,7 @@
 // 打字机流式渲染:turn 增量累积、逐字揭示定时器、流式消息容器管理。
 // aicli micro web client 前端模块(拆分自 app.js,无构建步骤,由 app.js 入口聚合)。
 
-import { chatMsgRowHtml, copyTextToClipboard, getUserScrolledAway, refreshScreen, screenEl } from "./chat.js";
+import { appendLocalConversationRow, copyTextToClipboard, getUserScrolledAway, refreshScreen, screenEl } from "./chat.js";
 import { renderMarkdown } from "./markdown.js";
 import { filterAllowsRole, isFilterActive } from "./msg-filter.js";
 import { esc, showToast } from "./util.js";
@@ -158,11 +158,14 @@ function finishStream() {
     // 结构化模式（服务端 messages 气泡）：以角色行追加，保留现场；
     // 纯文本回退模式（无 surface 快照）：沿用旧拼接逻辑。
     if (screenEl.querySelector(".msg-row")) {
+      // 本地兜底行（data-msg-local=stream）：随后 refreshScreen 的权威窗口
+      // 一旦覆盖同一内容就会把它移除（见 chat.js 的对账），因此不会与服务端
+      // 行重复；窗口不可用（无 surface / 请求失败）时它保证内容不丢。
       if (streamReasoning) {
-        screenEl.insertAdjacentHTML("beforeend", chatMsgRowHtml("reasoning", streamReasoning, false));
+        appendLocalConversationRow("reasoning", streamReasoning, "stream");
       }
       if (streamText) {
-        screenEl.insertAdjacentHTML("beforeend", chatMsgRowHtml("assistant", streamText, false));
+        appendLocalConversationRow("assistant", streamText, "stream");
       }
     } else {
       var existing = screenEl.textContent;
@@ -193,6 +196,11 @@ export function endStream() {
 // ---- 跨模块状态访问接口(拆分引入:可变流式状态不跨模块直读直写) ----
 export function isStreamActive() { return streamActive; }
 export function isStreamEnded() { return streamEnded; }
+// 实时气泡当前承载的内容：供 chat.js 的窗口对账判定"权威行是否与气泡同源"
+// （同源行让位给气泡，避免同一段内容被渲染两次）。
+export function getLiveStreamState() {
+  return { active: streamActive, ended: streamEnded, text: streamText, reasoning: streamReasoning };
+}
 export function appendStreamReasoning(text) { streamReasoning += text; }
 export function appendStreamText(text) { streamText += text; }
 export function setStreamText(text) { streamText = text || streamText; }
@@ -207,6 +215,23 @@ export function hideStreamMessage() {
 }
 export function clearStreamMessage() {
   if (streamMsgEl) { streamMsgEl.innerHTML = ""; }
+}
+
+// 会话切换 / 会话结束：丢弃本回合的流式累积与气泡。
+// 不这么做的话，旧会话的累积文本会在新会话的第一帧刷新里成为"实时气泡同源"
+// 的判定输入（chat.js 的 suppressRowsCoveredByLiveStream），并被 finishStream
+// 落成新会话的本地兜底行——两种都是跨会话的串味/重复渲染。
+export function resetStreamState() {
+  streamActive = false;
+  streamEnded = false;
+  streamReasoning = "";
+  streamReasoningRevealed = 0;
+  streamText = "";
+  streamRevealed = 0;
+  streamTool = "";
+  streamImages = [];
+  stopTypeTimer();
+  hideStreamMessage();
 }
 
 // 代码块复制按钮（事件委托，复制 <code> 文本）。
