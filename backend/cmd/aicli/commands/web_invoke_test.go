@@ -13,7 +13,60 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
+
+// 回归（实测，独立进程 + /web/api/invoke）：第二次 invoke 时模型回复与上一轮
+// 完全相同（两次都是"收到"），旧判定 `assistant != baselineAssistant` 只比文本，
+// 于是把合法回复判成"没有新消息"，响应里 assistant 为空——而 TUI 与会话里回复都在。
+// 判据改为"文本不同 或 assistant 消息条数增长"。
+func TestChatWebInvokeFinalizeKeepsRepeatedAssistantReply(t *testing.T) {
+	stubChatWebInvokeProbe(t)
+	session := &ChatSession{Messages: []runtimetypes.Message{
+		{Role: "user", Content: "只回复两个字：收到"},
+		{Role: "assistant", Content: "收到"},
+	}}
+	baseline := chatWebInvokeAssistantContent(session)
+	watch := newChatWebInvokeWatch()
+	watch.baselineAssistantCount = chatWebInvokeAssistantMessageCount(session)
+
+	// 第二轮：同文本回复，会话里多出一条 assistant 消息。
+	session.Messages = append(session.Messages,
+		runtimetypes.Message{Role: "user", Content: "只回复两个字：收到"},
+		runtimetypes.Message{Role: "assistant", Content: "收到"},
+	)
+
+	resp := chatWebInvokeFinalize(&chatWebInvokeResponse{}, session, watch, baseline, "completed", "")
+	if resp.Assistant == nil || resp.Assistant.Content != "收到" {
+		t.Fatalf("与上一轮同文本的新回复不能被丢弃: %+v", resp.Assistant)
+	}
+}
+
+// 反向纪律：turn 没有产生新回复（条数不变、文本等于基线）时不得回显基线，
+// 否则调用方会把"上一轮的回复"读成"本轮回复"。
+func TestChatWebInvokeFinalizeDoesNotEchoBaselineAssistant(t *testing.T) {
+	stubChatWebInvokeProbe(t)
+	session := &ChatSession{Messages: []runtimetypes.Message{
+		{Role: "assistant", Content: "收到"},
+	}}
+	baseline := chatWebInvokeAssistantContent(session)
+	watch := newChatWebInvokeWatch()
+	watch.baselineAssistantCount = chatWebInvokeAssistantMessageCount(session)
+
+	resp := chatWebInvokeFinalize(&chatWebInvokeResponse{}, session, watch, baseline, "timeout", "")
+	if resp.Assistant != nil {
+		t.Fatalf("没有新回复时不应回显基线: %+v", resp.Assistant)
+	}
+}
+
+func stubChatWebInvokeProbe(t *testing.T) {
+	t.Helper()
+	prev := chatWebInvokeProbeFn
+	chatWebInvokeProbeFn = func(*ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{}) {
+		return "session-invoke-test", "turn-invoke-test", false, nil, nil
+	}
+	t.Cleanup(func() { chatWebInvokeProbeFn = prev })
+}
 
 // ---------------------------------------------------------------------------
 // 纯判定函数

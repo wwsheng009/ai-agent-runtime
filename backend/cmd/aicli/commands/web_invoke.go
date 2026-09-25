@@ -11,6 +11,7 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // ============================================================================
@@ -309,6 +310,10 @@ func HandleChatWebAPIInvoke(w http.ResponseWriter, r *http.Request) {
 		baselineAssistant = ""
 	}
 	watch := newChatWebInvokeWatch()
+	// 判定"本轮有没有新回复"不能只比文本：模型两轮回复一致时（实测两次都是
+	// "收到"）文本相等会被误判成"没有新消息"，响应里 assistant 为空——而 TUI 与
+	// 会话里回复其实都在。因此同时记录 invoke 起点的 assistant 消息条数作为身份判据。
+	watch.baselineAssistantCount = chatWebInvokeAssistantMessageCount(session)
 	stream := startChatWebInvokeStream(w, r, currentSessionID)
 	if stream != nil {
 		// handler 返回前必须先停掉 writer goroutine：ResponseWriter 在 handler
@@ -449,6 +454,9 @@ type chatWebInvokeWatch struct {
 	mu           sync.Mutex
 	sessionID    string // 绑定的会话 ID；非空时忽略其他会话的事件
 	turnID       string // 最近一次 session_start/session_end 事件携带的 turn 身份（供终态回填）
+	// baselineAssistantCount 是 invoke 起点会话内正文非空的 assistant 消息条数，
+	// 用于区分"本轮新回复"与"上一轮遗留的同文本回复"（见 finalize 的判定）。
+	baselineAssistantCount int
 	lastActivity time.Time
 	starts       int
 	finishes     int
@@ -776,11 +784,65 @@ func chatWebInvokeFinalize(resp *chatWebInvokeResponse, session *ChatSession, wa
 	if assistant == "" && session != nil {
 		assistant = chatWebInvokeAssistantContent(session)
 	}
-	if assistant != "" && assistant != baselineAssistant {
+	if chatWebInvokeFreshAssistant(session, watch, baselineAssistant, assistant) {
 		resp.Assistant = &chatWebScreenMessage{Role: "assistant", Content: assistant}
 	}
 	resp.Screen = BuildChatDebugScreenSnapshot()
 	return resp
+}
+
+// chatWebInvokeFreshAssistant 判定 assistant 是否属于本轮新产生的回复。
+//
+// 文本不同 ⇒ 必然是新回复；文本相同 ⇒ 还要求 assistant 消息条数相比 invoke 起点
+// 增长。为什么不能只比文本：模型两轮回复可以完全一致（实测两次都是"收到"），
+// 只比文本会把这类合法回复误判成"没有新消息"，响应里 assistant 为空而 TUI/会话
+// 里其实有回复——调用方无法区分"空回复"和"回复与上轮相同"。
+func chatWebInvokeFreshAssistant(session *ChatSession, watch *chatWebInvokeWatch, baselineAssistant, assistant string) bool {
+	assistant = strings.TrimSpace(assistant)
+	if assistant == "" {
+		return false
+	}
+	if assistant != baselineAssistant {
+		return true
+	}
+	if watch == nil {
+		return false
+	}
+	// baselineAssistantCount 只在等待开始前写入，finalize 是等待之后的单线程读取。
+	return chatWebInvokeAssistantMessageCount(session) > watch.baselineAssistantCount
+}
+
+// chatWebInvokeAssistantMessageCount 统计会话中正文非空的 assistant 消息条数。
+// 与 chatWebInvokeAssistantContent 同源（同一取消息口径、同一"非空正文"过滤）。
+func chatWebInvokeAssistantMessageCount(session *ChatSession) int {
+	if session == nil {
+		return 0
+	}
+	messages := chatWebInvokeAssistantMessages(session)
+	count := 0
+	for i := range messages {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+		if strings.TrimSpace(messages[i].Content) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+// chatWebInvokeAssistantMessages 返回会话可见的消息序列（与
+// chatWebInvokeAssistantContent 的取用口径一致：优先 ChatSession.Messages，
+// 为空时回退 RuntimeSession.History）。
+func chatWebInvokeAssistantMessages(session *ChatSession) []runtimetypes.Message {
+	if session == nil {
+		return nil
+	}
+	messages := session.Messages
+	if len(messages) == 0 && session.RuntimeSession != nil {
+		messages = session.RuntimeSession.History
+	}
+	return messages
 }
 
 // chatWebInvokeAssistantContent 返回当前会话最后一条 assistant 消息正文；
@@ -789,10 +851,7 @@ func chatWebInvokeAssistantContent(session *ChatSession) string {
 	if session == nil {
 		return ""
 	}
-	messages := session.Messages
-	if len(messages) == 0 && session.RuntimeSession != nil {
-		messages = session.RuntimeSession.History
-	}
+	messages := chatWebInvokeAssistantMessages(session)
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role != "assistant" {
 			continue
