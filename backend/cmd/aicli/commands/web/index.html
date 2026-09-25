@@ -205,11 +205,103 @@
       </div>
       <span id="screen-copy-btn" class="screen-copy-btn" style="display:none" title="复制会话内容">⧉ 复制</span>
       <span id="scroll-bottom-btn" class="scroll-bottom-btn" style="display:none">↓ 最新</span>
-      <!-- 输入区（#input-row）/ provider·model·reasoning 选择器（#cfg-bar）/ 动态状态条
-           （#dynamic-status）已整体移出本页签：它们现在住在 body 级的浮动 composer 面板
-           （#composer-panel，见 .layout 之后）里，切换任意页签都能继续输入与切换配置；
-           旧结构挂在 #tab-main 内，切到文件/GIT/配置页签时输入区整块消失。
-           本页签只保留信息流与两个浮动按钮（复制 / 回到底部）。 -->
+      <!-- 嵌入对话页底部的 composer 面板：用户输入 + provider / model / reasoning_effort + 动态状态条。
+           ① 结构位置：#tab-main（「对话」页签）的最后一个子节点，与 #conversation 同列。面板是
+              常规流里的一行：#conversation 是 flex:1 的滚动区，面板占的高度由它自己让出——
+              消息不再被浮层盖住（2026-09 口径修订，用户明确要求「按 ⇲ 复位后嵌入对话页底部」；
+              旧结构挂在 `.layout` 下做绝对定位浮层，停靠时会盖住内容区底部约 132px）。
+           ② 可见范围：面板随「对话」页签显隐——切到文件/GIT/配置等页签时输入区整块收起
+              （回到旧结构语义，是本次口径修订明确接受的代价）。
+           ③ 几何：停靠态就是常规流里的一行（水平居中于对话列，见 style.css #composer-panel）；
+              自由拖动后由 js/composer.js 改成 position:fixed 跟手，仍留在本页签内。
+           ④ 记忆：位置与折叠态由 js/composer.js 落 localStorage（隐私模式静默降级）。
+           ⑤ 按钮显隐：⇲「复位到底部居中停靠」只在面板离开原位（自由拖动后）时出现——停靠态
+              它无事可做，显隐由 CSS 按 data-composer-mode 控制，不做 JS 状态判断。
+           ⑥ 无障碍：role=region + 头部把手（可聚焦，方向键微调、Home 复位）+
+              折叠按钮 aria-expanded；快捷键 Ctrl+J（与「视图」菜单同一入口）。
+              配置文案只在标题行 #composer-summary 与窄屏 ⚙ 触发按钮上出现：面板底部不再重复
+              一份 provider · model · reasoning（与三个选择框完全重复）。 -->
+      <div id="composer-panel" class="composer-panel" role="region" aria-label="输入与模型配置（停靠 / 可拖动面板）">
+        <!-- 任务列表浮动面板（todo）：底边与 composer 面板上沿衔接——style.css 用
+              bottom:calc(100% + 1px) 把它贴在 #composer-panel 顶部（左/右各外扩 1px 对齐
+              外边框），因此它随 composer 停靠 / 拖动 / 折叠一起移动，不需要 JS 同步几何，
+              也不吃页面任何元素的高度。默认隐藏，有任务快照时由 js/todos.js 显示。 -->
+         <div id="todo-panel" class="todo-panel" role="region" aria-label="任务列表" hidden>
+           <div class="todo-head">
+             <span class="todo-title">任务</span>
+             <span id="todo-progress" class="todo-progress" aria-live="polite"></span>
+             <span class="todo-spacer"></span>
+             <span id="todo-current" class="todo-current"></span>
+             <!-- 折叠按钮固定在标题行最右（标题/计数在左、当前任务靠右收尾） -->
+             <button id="todo-toggle" class="todo-toggle" type="button" aria-expanded="true"
+               aria-controls="todo-body" title="折叠任务列表">▾</button>
+           </div>
+           <div id="todo-body" class="todo-body">
+             <div id="todo-progressbar" class="todo-progressbar" role="progressbar"
+               aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" title="任务完成进度">
+               <span id="todo-progressbar-fill" class="todo-progressbar-fill"></span>
+             </div>
+             <ul id="todo-list" class="todo-list"></ul>
+           </div>
+         </div>
+         <div id="composer-header" class="composer-header">
+          <button id="composer-grip" class="composer-grip" type="button"
+            title="拖动移动面板（方向键微调，Home 复位）" aria-label="移动浮动输入面板">⠿</button>
+          <span class="composer-title">输入</span>
+          <span id="composer-summary" class="composer-summary" title="当前生效配置"></span>
+          <span class="composer-spacer"></span>
+          <button id="composer-reset-btn" class="composer-icon-btn" type="button"
+            title="复位到底部居中停靠">⇲</button>
+          <button id="composer-collapse-btn" class="composer-icon-btn" type="button"
+            aria-expanded="true" aria-controls="composer-body" title="折叠/展开浮动输入面板（Ctrl+J）">▾</button>
+        </div>
+        <!-- 动态状态条（与 aicli chat 底部活动状态行同步）：随面板一起浮动，
+             非「对话」页签下也能看到「正在思考 / 调用工具 / 等待审批」等实时状态。 -->
+        <div id="dynamic-status" class="dynamic-status" style="display:none" aria-live="polite"></div>
+        <div id="composer-body" class="composer-body">
+          <div id="input-row">
+            <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off" enterkeyhint="send"></textarea>
+            <button id="send-btn">发送</button>
+          </div>
+          <div id="cfg-bar">
+            <!-- 窄屏折叠触发器（桌面 display:none）：小屏不把三个选择器平铺占三行，
+                 改为单行按钮 + 向上弹出的面板；当前生效配置也由本按钮承载。 -->
+            <button id="cfg-toggle" type="button" aria-expanded="false" title="展开 provider / model / reasoning 选择器">
+              <span class="cfg-toggle-icon" aria-hidden="true">⚙</span>
+              <span id="cfg-toggle-value" class="cfg-toggle-value">配置</span>
+              <span class="cfg-toggle-caret" aria-hidden="true">▾</span>
+            </button>
+            <!-- 桌面 display:contents：包裹层不生成盒子，三个选择器仍是 #cfg-bar 的平铺 flex 子项 -->
+            <div class="cfg-controls">
+              <label class="cfg-item">
+                <span class="cfg-label">Provider</span>
+                <select id="cfg-provider" title="切换 provider（/model --provider）"></select>
+              </label>
+              <label class="cfg-item cfg-model">
+                <span class="cfg-label">Model</span>
+                <span class="cfg-model-wrap">
+                  <input id="cfg-model" placeholder="当前模型" title="切换模型（/model --model）：可直接输入自定义模型名，或点 ▼ 弹出列表选择" autocomplete="off">
+                  <datalist id="cfg-model-options" hidden></datalist>
+                  <button id="cfg-model-toggle" type="button" title="弹出模型列表">▼</button>
+                  <span id="cfg-model-count" class="cfg-model-count" title="该 provider 可选模型数"></span>
+                  <div id="cfg-model-popup" class="cfg-model-popup" style="display:none"></div>
+                </span>
+              </label>
+              <label class="cfg-item">
+                <span class="cfg-label">Reasoning</span>
+                <select id="cfg-reasoning" title="切换 reasoning_effort（/model -r）">
+                  <option value="">(默认)</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="max">max</option>
+                </select>
+              </label>
+            </div>
+            <span id="cfg-status" class="cfg-status"></span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div id="tab-skills" class="tab-panel">
@@ -884,103 +976,6 @@
       </div>
     </div>
   </div>
-
-  <!-- 浮动 composer 面板：用户输入 + provider / model / reasoning_effort + 动态状态条。
-       ① 结构位置：.layout 内的浮层子节点（与 #main-col 平级），不属于任何页签——留在
-          #tab-main 内就只随「对话」页签显示，切到文件/GIT/配置等页签时输入区整块消失。
-       ② 几何：停靠态 position:absolute 浮在内容区底部居中（z-index 低于各模态框），
-          自由拖动后改 position:fixed 跟手。它是**独立浮层**：不参与常规流、不吃任何元素的
-          高度，尤其不改变 #footer（状态栏）的位置与尺寸——状态栏是页面自己的一层、永远
-          贴底，面板只是浮在它上方，两者互不影响。旧设计用 --composer-reserve 让正文区与
-          状态栏整体上移「让位」，把两层耦合成一层，已移除。
-       ③ 记忆：位置与折叠态由 js/composer.js 落 localStorage（隐私模式静默降级）。
-       ④ 按钮显隐：⇲「复位到底部居中停靠」只在面板离开原位（自由拖动后）时出现——停靠态
-          它无事可做，显隐由 CSS 按 data-composer-mode 控制，不做 JS 状态判断。
-       ⑤ 无障碍：role=region + 头部把手（可聚焦，方向键微调、Home 复位）+
-          折叠按钮 aria-expanded；快捷键 Ctrl+J（与「视图」菜单同一入口）。
-          配置文案只在标题行 #composer-summary 与窄屏 ⚙ 触发按钮上出现：面板底部不再重复
-          一份 provider · model · reasoning（与三个选择框完全重复）。 -->
-    <div id="composer-panel" class="composer-panel" role="region" aria-label="输入与模型配置（浮动面板）">
-      <!-- 任务列表浮动面板（todo）：底边与 composer 面板上沿衔接——style.css 用
-            bottom:calc(100% + 1px) 把它贴在 #composer-panel 顶部（左/右各外扩 1px 对齐
-            外边框），因此它随 composer 停靠 / 拖动 / 折叠一起移动，不需要 JS 同步几何，
-            也不吃页面任何元素的高度。默认隐藏，有任务快照时由 js/todos.js 显示。 -->
-       <div id="todo-panel" class="todo-panel" role="region" aria-label="任务列表" hidden>
-         <div class="todo-head">
-           <span class="todo-title">任务</span>
-           <span id="todo-progress" class="todo-progress" aria-live="polite"></span>
-           <span class="todo-spacer"></span>
-           <span id="todo-current" class="todo-current"></span>
-           <!-- 折叠按钮固定在标题行最右（标题/计数在左、当前任务靠右收尾） -->
-           <button id="todo-toggle" class="todo-toggle" type="button" aria-expanded="true"
-             aria-controls="todo-body" title="折叠任务列表">▾</button>
-         </div>
-         <div id="todo-body" class="todo-body">
-           <div id="todo-progressbar" class="todo-progressbar" role="progressbar"
-             aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" title="任务完成进度">
-             <span id="todo-progressbar-fill" class="todo-progressbar-fill"></span>
-           </div>
-           <ul id="todo-list" class="todo-list"></ul>
-         </div>
-       </div>
-       <div id="composer-header" class="composer-header">
-        <button id="composer-grip" class="composer-grip" type="button"
-          title="拖动移动面板（方向键微调，Home 复位）" aria-label="移动浮动输入面板">⠿</button>
-        <span class="composer-title">输入</span>
-        <span id="composer-summary" class="composer-summary" title="当前生效配置"></span>
-        <span class="composer-spacer"></span>
-        <button id="composer-reset-btn" class="composer-icon-btn" type="button"
-          title="复位到底部居中停靠">⇲</button>
-        <button id="composer-collapse-btn" class="composer-icon-btn" type="button"
-          aria-expanded="true" aria-controls="composer-body" title="折叠/展开浮动输入面板（Ctrl+J）">▾</button>
-      </div>
-      <!-- 动态状态条（与 aicli chat 底部活动状态行同步）：随面板一起浮动，
-           非「对话」页签下也能看到「正在思考 / 调用工具 / 等待审批」等实时状态。 -->
-      <div id="dynamic-status" class="dynamic-status" style="display:none" aria-live="polite"></div>
-      <div id="composer-body" class="composer-body">
-        <div id="input-row">
-          <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off" enterkeyhint="send"></textarea>
-          <button id="send-btn">发送</button>
-        </div>
-        <div id="cfg-bar">
-          <!-- 窄屏折叠触发器（桌面 display:none）：小屏不把三个选择器平铺占三行，
-               改为单行按钮 + 向上弹出的面板；当前生效配置也由本按钮承载。 -->
-          <button id="cfg-toggle" type="button" aria-expanded="false" title="展开 provider / model / reasoning 选择器">
-            <span class="cfg-toggle-icon" aria-hidden="true">⚙</span>
-            <span id="cfg-toggle-value" class="cfg-toggle-value">配置</span>
-            <span class="cfg-toggle-caret" aria-hidden="true">▾</span>
-          </button>
-          <!-- 桌面 display:contents：包裹层不生成盒子，三个选择器仍是 #cfg-bar 的平铺 flex 子项 -->
-          <div class="cfg-controls">
-            <label class="cfg-item">
-              <span class="cfg-label">Provider</span>
-              <select id="cfg-provider" title="切换 provider（/model --provider）"></select>
-            </label>
-            <label class="cfg-item cfg-model">
-              <span class="cfg-label">Model</span>
-              <span class="cfg-model-wrap">
-                <input id="cfg-model" placeholder="当前模型" title="切换模型（/model --model）：可直接输入自定义模型名，或点 ▼ 弹出列表选择" autocomplete="off">
-                <datalist id="cfg-model-options" hidden></datalist>
-                <button id="cfg-model-toggle" type="button" title="弹出模型列表">▼</button>
-                <span id="cfg-model-count" class="cfg-model-count" title="该 provider 可选模型数"></span>
-                <div id="cfg-model-popup" class="cfg-model-popup" style="display:none"></div>
-              </span>
-            </label>
-            <label class="cfg-item">
-              <span class="cfg-label">Reasoning</span>
-              <select id="cfg-reasoning" title="切换 reasoning_effort（/model -r）">
-                <option value="">(默认)</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-                <option value="max">max</option>
-              </select>
-            </label>
-          </div>
-          <span id="cfg-status" class="cfg-status"></span>
-        </div>
-      </div>
-    </div>
 </div>
 
     <div id="footer">

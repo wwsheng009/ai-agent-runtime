@@ -127,19 +127,25 @@ aicli chat --pprof
       当前已揭示的部分）。会话复制（⧉ 复制）行为不变，两者共存。
 
 - [ ] Provider / Reasoning 原生 `<select>` 可切换，当前生效配置（`openai · gpt-4o`）随之更新。
-- [ ] **浮动 composer 面板（任意页签可用）**：输入区 / 配置栏 / 动态状态条在 `.layout` 内的浮层
-      `#composer-panel`（停靠态 `position: absolute`，自由拖动改 `fixed`，见 `js/composer.js`），
-      切到技能 / 文件 / GIT / MCP / 日志 / 配置 / 缓存 / 分析 / 调试 / 关于任一页签都仍在
-      （旧结构挂在 `#tab-main` 内，切页签整块消失）。标题行左侧把手 `⠿` 可拖动（自由位置落盘）、
+- [ ] **底部 composer 面板（嵌入「对话」页底部）**：输入区 / 配置栏 / 动态状态条在
+      `#composer-panel`——`#tab-main`（「对话」页签）内排在 `#conversation` 之后的**常规流一行**
+      （见 `js/composer.js`）。`#conversation` 是 `flex:1 + min-height:0 + overflow:auto` 的滚动区，
+      面板占的高度由它自己让出：消息不会被面板压住（2026-09 口径修订，用户明确要求「按 ⇲ 复位后
+      嵌入对话页底部」；旧实现挂在 `.layout` 下做 `position:absolute` 浮层，停靠时盖住内容区底部
+      ——实测 1280×800 盖住 131.6px）。**代价（已确认）**：面板随「对话」页签显隐，切到技能 /
+      文件 / GIT / MCP / 日志 / 配置 / 缓存 / 分析 / 调试 / 关于页签时输入区整块收起
+      （回到旧结构语义）。标题行左侧把手 `⠿` 可拖动（自由位置落盘、改 `position:fixed` 跟手）、
       `⇲` 复位回停靠位——**`⇲` 只在面板离开原位（自由拖动后）时出现**，停靠态它无事可做、由
       CSS 按 `data-composer-mode` 隐藏（键盘仍可用把手 `Home` / 双击复位）；折叠按钮或
-      `Ctrl+J`（macOS `Cmd+J`）收起为单行，「视图」菜单同一入口；
-      **面板与状态栏是两个互不影响的图层**：停靠时面板停在状态栏上方 8px（居中），
-      `#footer` 永远贴底、不因面板让位或移动（也绝不写 `--composer-reserve` 之类的页面级变量）；
+      `Ctrl+J`（macOS `Cmd+J`）收起为单行，「视图」菜单同一入口；折叠 / 展开 / 拖动 / 复位都会
+      改变信息流高度，「最新」按钮由 `ResizeObserver`（观察 `#conversation` 与面板子块）重锚。
+      **面板与状态栏依旧互不影响**：`#footer` 在 `.layout` 之外、整条路径上坐标零变化；
+      也没有 `--composer-reserve` / `body padding` 之类的占位机制（让位由 flex 自动完成）。
       位置与折叠态记在 `localStorage`（`aicli.web.composer.v1`，隐私模式静默降级）；
       把手可聚焦，方向键微调 8px、`Shift+方向键` 1px、`Home` 复位。
       回归：`scripts/verify-micro-web-composer.mjs`（沙盒）+ 真实浏览器临时脚本
-      `backend/cmd/aicli/commands/web/tmp/composer-layer-check.mjs`（断言状态栏坐标零变化）。
+      `backend/cmd/aicli/commands/web/tmp/composer-embed-check.mjs`（7 个视口断言信息流让位、
+      对话列居中、拖动 / 复位的几何与状态栏零变化）。
  - [ ] **任务列表浮层（贴在 composer 面板上沿）**：模型调用 `todos` 工具后，`#todo-panel`
        （`#composer-panel` 内的绝对定位子层，`bottom: calc(100% + 1px)`）在 composer **上面**
        展开，**底边与 composer 面板上沿严丝合缝**（左右各外扩 1px 对齐外边框、只有上圆角、
@@ -569,7 +575,7 @@ node scripts/verify-micro-web-copy-msg.mjs     # 单条消息复制：所有角�
 node scripts/verify-micro-web-question-answer.mjs # 提问回答写入：建议项 / 自由回答（Enter、提交按钮、Shift+Enter、IME、空答案）→ question_answer payload、收起对话框保留 composer 答案路由、服务端回执分支（stale 未送达告警 / resolved 不误报）、审批语义不变、index.html/style.css 静态不变量
 node scripts/verify-micro-web-pane-split.mjs   # 左右分栏助手（文件 / GIT 页签共用）：折叠 class 只在大屏生效、宽度写 CSS 变量并夹进可用范围（容器变窄时上限自己降）、端点空操作不抹记忆值、←→/Home/End 与落盘、拖拽（pane-resizing / 松手才落盘 / 折叠与非主键不起拖 / 失焦兜底）、双击复位、跨断点 onApply 与 onBreakpoint、记忆恢复与隐私模式降级、matchMedia 缺失按窄屏降级、元素缺失静默降级
 node scripts/verify-micro-web-git-diff.mjs     # GIT 页签 diff 行渲染（单列行号）：每行只有一个行号格（回归：曾把老/新行号拼成「老 新」两列）、add→新侧 / del→老侧 / context→新侧 / nonewline→空、两侧不同时只出现该侧数字、null 缺字段不补 0（0 是合法行号保留）、文本转义、renderDiff 复用同一行构造器、style.css 行号列宽度按单列给
-node scripts/verify-micro-web-composer.mjs     # 浮动 composer 面板：面板是 .layout 内浮层子节点（与 #main-col 平级，输入区/配置栏/动态状态条不在 #tab-main 内）、必需元素与既有 cfg-* id 全保留、菜单与 Ctrl+J 折叠入口接线（无第二份折叠逻辑）、style.css 浮层几何（.layout 内 absolute 停靠在状态栏上方 / 自由位置改 fixed 且清 transform / z-index 低于模态框 / 折叠规则）、**无让位机制**（没有 --composer-reserve、body 不为面板留白、#footer 规则无 composer 耦合）、行为（拖动跟随与夹取、键盘微调与 Home 复位、**全程不写页面级 CSS 变量**、Ctrl+J、localStorage 回放）
+node scripts/verify-micro-web-composer.mjs     # 底部 composer 面板：面板是 #tab-main 内、排在 #conversation 之后的常规流一行（祖先链 html/body/.layout/#main-col/#tab-main）、必需元素与既有 cfg-* id 全保留、菜单与 Ctrl+J 折叠入口接线（无第二份折叠逻辑）、style.css 几何（停靠 relative + flex:0 0 auto + margin:0 auto 居中且底部不留外边距 / 自由位置改 fixed 且清 margin / z-index 低于模态框 / 折叠规则）、**让位靠 flex**（#conversation 是 flex:1+min-height:0+overflow:auto；没有 --composer-reserve、body 不为面板留白、#footer 规则无 composer 耦合）、「最新」按钮按信息流下沿锚定且 ResizeObserver 观察 #conversation、模式切换不搬 DOM、行为（拖动跟随与夹取、键盘微调与 Home 复位、**全程不写页面级 CSS 变量**、Ctrl+J、localStorage 回放）
 node scripts/verify-micro-web-todos.mjs        # 任务列表浮层（贴在 composer 上沿）：结构（#todo-panel 在 #composer-panel 内且在标题行之前）与样式不变量（bottom:calc(100% + 1px) 衔接、[hidden] 不占位、折叠只收 .todo-body、进行中加粗 / 已完成删除线）；接线（sse.js 在 switch 前分流 tool_end / 会话边界、chat.js 应用 screen 回放、app.js 初始化、后端 web_schema.go 与 chat_debug_screen_http.go 两个字段名）；纯函数（解析裁剪：坏条目丢弃 / 整组不可用 → null、计数与进度、当前项、快照合并：runtime 按 seq 单调 / history 只兜底）；面板行为（无快照隐藏、回放恢复计数与逐项状态、实时旧序号不回退、会话切换清空、折叠与 localStorage 记忆、面板缺失静默降级）
 ```
 
@@ -587,31 +593,44 @@ node scripts/verify-micro-web-todos.mjs        # 任务列表浮层（贴在 com
 
 窄屏布局同理在真实 Chromium 里量（沙盒量不出 `scrollWidth` 与断点行为）：视口切到 360×640 / 390×844 / 414×896 / 640×360（横屏）/ 768×1024 / 1280×800，断言 `document.documentElement.scrollWidth === innerWidth`（无横向滚动条）、顶栏在 ≤767px 折成两行（约 62px；>767px 保持单行约 31px）、状态簇右缘贴合顶栏内容右缘、`文件/视图/帮助` 三个下拉面板的 `getBoundingClientRect()` 完全落在视口内、底部 `.status-bar` 单行（`scrollHeight === clientHeight`）且内容超宽时横向滚动（`scrollWidth > clientWidth`）；另用长文案（"连接已断开 / 轮次 12/99 / 发送中…排队 3 条"）复测，确认状态簇不会把菜单栏挤到第二行。
 
-底部 composer 是**浮层**（`#composer-panel`，逻辑在 `js/composer.js`）：拖动 / 夹取 / 键盘微调 /
-复位 / 折叠 / 记忆回放由 `scripts/verify-micro-web-composer.mjs` 在沙盒里覆盖，但「浮层与页面
-是否互不影响、会不会跑出视口」是盒模型问题，沙盒量不出，仍需真实 Chromium 按同一组视口量。
-**口径（2026-09 修订，用户明确要求）**：面板与状态栏是**两个互不影响的图层**——
-`#footer`（状态栏）是页面自己的一行、永远贴底，**绝不因面板让位 / 上移**；面板只是浮在它上面的
-另一层。实现方式：面板挂在 `.layout` 内（`position: absolute; left: 50%; bottom: 8px`），
-因此天然停在状态栏上方且**不参与常规流**——不吃任何元素的高度、不写任何页面级 CSS 变量
-（旧的 `--composer-reserve` + `body padding-bottom` 让位机制已删除；它还有个副作用：页面出现
-根滚动条时 `100vh` 与布局视口高度不等，会让面板与状态栏重叠 2px）。自由拖动
-（`data-composer-mode="free"`）改回 `position: fixed` 跟手并清 `transform`，拖到视口四角不越界
-（夹取 8px）；面板 z-index 低于审批 / 会话切换模态框（模态打开时面板落在其下方）；窄屏（≤767px）
-面板降到会话抽屉之下（抽屉是临时覆盖层，打开时盖住面板，此时把手不可拖，需先收起抽屉）。
-真实浏览器回归用临时 CDP 脚本（`backend/cmd/aicli/commands/web/tmp/composer-layer-check.mjs`，
-`tmp/` 已 gitignore、按需重建）：6 个视口（1440×900 / 1280×800 / 1024×768 / 800×600 / 640×480 /
-375×667）各跑「停靠 → 折叠 → 展开 → 拖动 → 点 ⇲ 复位 → 切到「配置」页签」，核心断言是
-**状态栏的 top/bottom/height 在整条路径上零变化**（不让位的硬指标），外加：面板父节点是
-`.layout`、停靠 `absolute` / 自由 `fixed`、停靠时 `panel.bottom ≤ footer.top − 8px` 且状态栏
-可命中、body padding 是基础值、无 `--composer-reserve`、根滚动容器无滚动条、
-**`⇲` 停靠态隐藏 / 拖动后出现 / 复位后再次隐藏**、底部不再有重复的配置文案（无 `#cfg-current`）。
-注意面板浮在内容区底部时会盖住内容约 132–149px
-（浮层固有代价，可用折叠 / 拖动让开）；「最新」按钮按矩形重叠自动抬到面板上方，避免被盖住点不到。
+底部 composer 面板（`#composer-panel`，逻辑在 `js/composer.js`）是**「对话」页底部的一行**：
+拖动 / 夹取 / 键盘微调 / 复位 / 折叠 / 记忆回放由 `scripts/verify-micro-web-composer.mjs`
+在沙盒里覆盖，但「信息流是否真的让位、面板是否居中于对话列、拖动 / 复位后的几何」是盒模型问题，
+沙盒量不出，仍需真实 Chromium 按同一组视口量。
+**口径（2026-09-25 修订，用户明确要求）**：按「⇲ 复位到底部居中停靠」后面板必须**嵌入「对话」
+页底部**——面板是 `#tab-main` 内排在 `#conversation` 之后的常规流一行
+（`position: relative; flex: 0 0 auto; margin: 0 auto`——水平居中于对话列、底部不留外边距，
+面板下沿直接落到底，与状态栏之间只隔状态栏自己的 `margin-top: 8px`），
+`#conversation`（`flex: 1; min-height: 0; overflow: auto`）自己让出面板占的高度，消息不再被
+盖住（旧口径的 `.layout` 内浮层停靠会盖住内容区底部——实测 1280×800 盖住 131.6px——已废弃）。
+折叠 / 展开即时回收 / 让出那部分高度；自由拖动（`data-composer-mode="free"`）改回
+`position: fixed` 跟手并显式清掉停靠态 margin（否则 `left/top` 落点被 `0 auto` 的 auto 水平外边距顶偏），
+拖到视口四角不越界（夹取 8px）；面板 z-index 低于审批 / 会话切换模态框（模态打开时面板落在
+其下方）；窄屏（≤767px）面板降到会话抽屉之下（抽屉是临时覆盖层，打开时盖住面板，此时把手
+不可拖，需先收起抽屉）。**代价（已确认）**：面板随「对话」页签显隐，切到其它页签时输入区整块
+收起；`#footer`（状态栏）在 `.layout` 之外，任何路径上坐标零变化，页面也没有
+`--composer-reserve` / `body padding` 之类的占位机制（让位由 flex 完成）。
+另外「最新」按钮以信息流下沿锚定（`ResizeObserver` 观察 `#conversation` 与面板子块重算），
+面板让位后它天然落在信息流内，不需要再按浮层重叠躲让。
+真实浏览器回归用临时 CDP 脚本（`backend/cmd/aicli/commands/web/tmp/composer-embed-check.mjs`，
+`tmp/` 已 gitignore、按需重建）：7 个视口（1440×900 / 1280×800 / 800×600 / 375×667 / 360×640 /
+414×896 / 640×360）各跑「停靠 → 折叠 → 展开 → 拖动 → 点 ⇲ 复位 → 把手 Home 复位 → 上滚显示
+「最新」按钮 → 切到「配置」页签再切回」，断言：面板父节点是 `#tab-main` 且 `position: relative`、
+信息流下沿与面板上沿间隙 8px（不重叠）、面板居中于对话列（偏差 ≤2px）、折叠 / 展开时信息流高度
+增 / 减、拖动后信息流恢复满高、复位后回到内嵌停靠、**状态栏坐标零变化**、根滚动容器无滚动条、
+**面板底边不留外边距**（computed `margin-bottom: 0px`，与状态栏之间只隔状态栏自己的
+`margin-top`）、「最新」按钮底边在面板上沿之上、非「对话」页签面板隐藏、`⇲` 停靠态隐藏 /
+拖动后出现 / 复位后再次隐藏。
+实测让位后可见信息流（面板底部不留外边距的口径）：1440×900 → 630.8px、1280×800 → 530.8px、
+800×600 → 330.8px、375×667 → 280.8px、360×640 → 253.8px、414×896 → 509.8px；面板下沿到
+状态栏上边只剩 8px（窄屏 4px、640×360 为 2px）——即状态栏自己的 `margin-top`，面板不再叠加。
+**640×360（横屏矮视口）可见信息流 21.3px**：比旧浮层口径「面板盖住 148.6px 后剩下的可见条带
+≈13.3px」还多 8px，所以这不是回归；该视口下仍可用 ▾ 折叠（→127.5px）或拖走面板（→169.9px）
+腾出空间。
 以下原口径继续适用（数值需按新结构复测）：`#prompt` 与 `#send-btn` 底边对齐（多行增高时
 按钮贴底不拉高）、输入框空态高度 = CSS 最小高度（45px，清空后内联高度被移除）、`#cfg-bar` 折叠行
 高度（竖屏 360×640 / 414×896 与横屏 640×360 均为单行 45px；展开面板 122–128px 且完全落在视口内）、
-正文区高度（竖屏 ≥345px、横屏 ≥112px）与整页 `verticalFit`。压测：发送键瞬态文案「正在停止…」
+整页 `verticalFit`。压测：发送键瞬态文案「正在停止…」
 不得把输入框压到 200px 以下；输入 12 行时输入框被 `max-height: min(160px, 38vh)` 截住（横屏 30vh）
 且正文区不被挤到 0；面板内点 ▼ 弹出的模型列表（≤240px，矮视口 40vh）不得越出视口顶部。
 

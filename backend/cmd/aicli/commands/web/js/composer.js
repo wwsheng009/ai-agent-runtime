@@ -1,16 +1,18 @@
-// 浮动 composer 面板：用户输入 + provider / model / reasoning_effort 选择器 + 动态状态条。
-// 结构见 index.html #composer-panel（挂在 .layout 之外的 body 下，position:fixed）。
+// composer 面板：用户输入 + provider / model / reasoning_effort 选择器 + 动态状态条。
+// 结构见 index.html #composer-panel（#tab-main「对话」页签的最后一个子节点）。
 //
-// 为什么是浮动面板：旧结构把 #input-row / #cfg-bar / #dynamic-status 放在 #tab-main 内，
-// 只有「对话」页签可见——切到文件/GIT/配置等页签时输入区整块消失，必须先切回对话页签
-// 才能说话。提到 body 级 + fixed 后，任意页签都能继续输入与切换配置。
+// 口径（2026-09 修订，用户明确要求）：停靠 = 嵌入对话页底部的常规流一行——#conversation
+// 是 flex:1 的滚动区，面板占的高度由它自己让出，消息不再被浮层盖住；自由拖动 = 拖动后的
+// left/top 内联样式 + position:fixed 跟手。两者靠 data-composer-mode 区分，几何全在 CSS，
+// JS 只写这一个属性（外加 free 态的内联 left/top），不写任何页面级 CSS 变量。
+// 已知代价（本次口径已确认）：面板随「对话」页签显隐——切到文件/GIT/配置等页签时输入区
+// 一并收起（旧实现挂在 .layout 下做 body 级浮层，任意页签可用）。
 //
 // 分工（几何在 CSS，状态在 JS，见 style.css 同名注释）：
-//   1. 停靠 = CSS 的 left:50% / bottom:8px 居中（面板是 .layout 内的浮层，天然停在
-//      #footer 状态栏上方）；自由 = 拖动后的 left/top 内联样式 + position:fixed，
-//      两者靠 data-composer-mode 区分。
-//   2. 折叠态写 .composer-collapsed（只留标题行）。面板是独立浮层：不吃任何元素的高度，
-//      状态栏等页面元素都不因它移动（旧实现的 --composer-reserve 让位机制已移除）。
+//   1. 停靠 = CSS 的常规流 + flex 让位（面板是 #tab-main 里的一行，水平居中于对话列）；
+//      复位（⇲ / Home / 双击把手）就是回到这个状态。
+//   2. 折叠态写 .composer-collapsed（只留标题行），消息区随之回收高度——让位由 flex 自动完成，
+//      没有 --composer-reserve 之类的占位变量（旧机制已删除）。
 //   3. 拖动：优先指针事件，回退鼠标事件；拖动期间 body 加 .composer-dragging
 //      （锁光标、禁选中）；落点始终夹在视口内，窗口缩小后不会跑到屏幕外。
 //   4. 键盘：把手可聚焦——方向键 8px 微调、Shift+方向键 1px 精调、Home 复位停靠，
@@ -22,15 +24,12 @@
 // aicli micro web client 前端模块(无构建步骤,由 app.js 入口聚合)。
 
 var STORAGE_KEY = "aicli.web.composer.v1";
-var DOCK_GAP = 8;  // 停靠态与状态栏的间隙（px）；真实几何由 CSS 的 bottom:8px 给出，
-                   // 这里只用于「无布局引擎」时推算拖动起点（沙盒兜底）
-var EDGE = 8;      // 自由位置至少留在视口内的边距（px）
+var EDGE = 8;      // 自由位置至少留在视口内的边距（px）；也是无布局引擎时的兜底下边距
 var KEY_STEP = 8;  // 方向键微调步长（px）
 var KEY_FINE = 1;  // Shift+方向键精调步长（px）
-var FOOTER_FALLBACK = 28; // 无布局引擎时状态栏高度的近似值（仅沙盒兜底，不参与真实布局）
 
 var els = null;
-var mode = "dock";              // "dock" 底部居中 | "free" 自由位置
+var mode = "dock";              // "dock" 嵌入对话页底部（常规流）| "free" 自由浮层位置
 var pos = { left: 0, top: 0 };  // 自由位置的左上角（视口坐标）
 var collapsed = false;
 var dragging = null;            // { dx, dy }：拖动起点相对面板左上角的偏移；非拖动中为 null
@@ -79,8 +78,8 @@ function panelSize() {
 }
 
 // 面板当前左上角：优先真实几何；无布局引擎（沙盒 / 隐藏）时按模式推算。
-// 注意：停靠态的**真值在 CSS**（.layout 内 absolute + bottom:8px），这里的推算只用于
-// 沙盒里给拖动 / 键盘微调一个合理起点，不参与任何页面布局计算。
+// 注意：停靠态的**真值在布局引擎**（面板是 #tab-main 常规流里的最后一行，几何由 flex 给出），
+// 这里的推算只用于沙盒里给拖动 / 键盘微调一个合理起点，不参与任何页面布局计算。
 function panelRect() {
   var el = els && els.panel;
   if (el && typeof el.getBoundingClientRect === "function") {
@@ -89,12 +88,15 @@ function panelRect() {
   }
   if (mode === "free") { return { left: pos.left, top: pos.top }; }
   var vp = viewport(), size = panelSize();
-  return { left: (vp.w - size.w) / 2, top: vp.h - FOOTER_FALLBACK - DOCK_GAP - size.h };
+  return { left: (vp.w - size.w) / 2, top: vp.h - EDGE - size.h };
 }
 
 // 自由位置夹取：整个面板留在视口内（拖动、键盘微调、窗口缩小共用）。
+// 面板未渲染（非「对话」页签，量不出尺寸）时保持原位：拿 0 尺寸去夹取会算出错误落点，
+// 用户切回对话页签时面板会被拽到角落。
 function clampPos(left, top) {
   var vp = viewport(), size = panelSize();
+  if (!size.w && !size.h) { return { left: left, top: top }; }
   var maxLeft = Math.max(EDGE, vp.w - size.w - EDGE);
   var maxTop = Math.max(EDGE, vp.h - size.h - EDGE);
   return {
@@ -124,7 +126,8 @@ function apply() {
   }
 }
 
-// resetDock 复位到底部居中停靠（⇲ 按钮、把手 Home / 双击共用）。
+// resetDock 复位到底部居中停靠（⇲ 按钮、把手 Home / 双击共用）：回到 #tab-main 常规流底部，
+// 即「嵌入对话页底部」的那一行（消息区随之让位/回收高度，不再被遮挡）。
 function resetDock() {
   if (!els || !els.panel) { return; }
   mode = "dock";
@@ -227,7 +230,7 @@ function bindDrag() {
 }
 
 // 视口变化：自由位置重新夹回视口内（窗口缩小可能已越界）；停靠态无需任何重算——
-// 面板由 CSS 定位在 .layout 底部，与面板自身高度、状态栏高度都无关。
+// 面板是常规流里的一行，宽度由 CSS（min(920px, 100% - 24px) + 居中）给出，与视口无关。
 function observeSize() {
   if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
     window.addEventListener("resize", function () {

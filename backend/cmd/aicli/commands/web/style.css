@@ -928,32 +928,39 @@ button.sending-btn:not(.stop-btn) { animation: pulse 1.2s ease-in-out infinite; 
 #footer a:hover { text-decoration: underline; color: var(--accent2); }
 #footer .sep { color: var(--fg4); }
 
-/* ---- 浮动 composer 面板（输入 + provider/model/reasoning + 动态状态条） ----
-   结构见 index.html #composer-panel：它是 .layout 内的浮层子节点（与 #main-col 平级），
-   不属于任何页签，所以切换任意页签都保持可用（旧结构是 #tab-main 的子节点，切页签即消失）。
-   状态由 js/composer.js 写进 data-composer-mode / class：
-     [data-composer-mode="dock"]（默认）停靠在**状态栏上方**居中；
+/* ---- 嵌入对话页底部的 composer 面板（输入 + provider/model/reasoning + 动态状态条） ----
+   结构见 index.html #composer-panel：#tab-main（「对话」页签）的最后一个子节点，与
+   #conversation 同列。状态由 js/composer.js 写进 data-composer-mode / class：
+     [data-composer-mode="dock"]（默认）嵌入对话页底部：常规流里的一行，#conversation
+       （flex:1 + min-height:0 + overflow:auto）自己让出面板占的高度——消息不再被浮层盖住；
+       #footer（状态栏）在 .layout 之外，位置与尺寸完全不受影响。
      [data-composer-mode="free"] 拖动后的自由位置（改 position:fixed，left/top 内联给出）；
-     .composer-collapsed 只留标题行。
-   两层互不影响是这里的关键约束：面板不参与常规流、不吃任何元素的高度，#footer（状态栏）
-   永远贴底，位置与尺寸都不因面板改变；反过来面板也不需要测量状态栏——它只是 .layout 的
-   子节点，bottom:8px 天然落在状态栏上方。旧实现把面板高度写进 --composer-reserve、再由
-   body 的 padding-bottom 消费，让正文区与状态栏整体上移「让位」，把两层耦合在一起，而且
-   页面一旦出现根滚动条（100vh 与布局视口高度不等）就会与状态栏重叠，已移除。 */
+     .composer-collapsed 只留标题行，消息区立刻回收那部分高度（让位是 flex 自动完成的）。
+   2026-09 口径修订（用户明确要求）：旧实现在 .layout 内做 absolute 浮层、停靠时盖住内容区
+   底部约 132px；现在面板移入 #tab-main 参与常规流，代价是随「对话」页签显隐（切到文件 /
+   GIT / 配置等页签时输入区整块收起，属已确认的口径）。 */
 #composer-panel {
-  position: absolute; z-index: 50;
-  left: 50%; bottom: 8px; transform: translateX(-50%);
+  position: relative; z-index: 50;
+  flex: 0 0 auto;
   width: min(920px, calc(100% - 24px));
+  /* 底部不留外边距：面板直接落到底（2026-09 口径），与状态栏之间只隔状态栏自己的
+     margin-top:8px——旧写法 `0 auto 8px` 会与它叠加成 16px 的空档。 */
+  margin: 0 auto;
   padding: 6px 10px 10px;
   background: var(--bg2); border: 1px solid var(--border2); border-radius: 10px;
   box-shadow: 0 10px 30px var(--shadow);
   font-size: 12px;
 }
-/* 焦点在面板内（如正在输入）时强调边框：浮层压在内容上，需要一眼看出焦点归属 */
+/* 焦点在面板内（如正在输入）时强调边框：面板嵌在页面底部，焦点归属仍要一眼可见 */
 #composer-panel:focus-within { border-color: var(--accent); }
 /* 自由位置：改回 position:fixed 跟手（拖动坐标是视口坐标，窗口缩放/页面滚动时仍贴指针），
-   left/top 由 composer.js 内联给出；必须清掉 translateX(-50%)，否则面板会再向左偏半个身位。 */
-#composer-panel[data-composer-mode="free"] { position: fixed; left: 0; top: 0; bottom: auto; transform: none; }
+   left/top 由 composer.js 内联给出；margin 必须显式清 0——停靠态的 `0 auto` 仍是外边距简写，
+   不写死会在 free 态残留（auto 水平外边距把落点顶偏），宽度基准也从对话列换成视口
+   （fixed 的包含块是视口，两态的公式因此一致）。 */
+#composer-panel[data-composer-mode="free"] {
+  position: fixed; left: 0; top: 0; right: auto; bottom: auto;
+  margin: 0;
+}
 /* 「⇲ 复位到底部居中停靠」只在面板离开原位（自由拖动后）时出现：停靠态它无事可做，
    常驻只是标题行噪音。显隐直接跟 data-composer-mode 走，不需要 JS 状态；
    display:none 的元素不参与点按与 Tab 焦点，键盘用户仍可用把手 Home 复位。 */
@@ -1070,7 +1077,8 @@ body.composer-dragging * { cursor: grabbing !important; user-select: none !impor
 #todo-panel.todo-collapsed .todo-body { display: none; }
 #todo-panel.todo-collapsed .todo-head { padding-bottom: 3px; }
 
-/* 面板不再占用正文区 / 状态栏的空间：body 保持基础内边距，没有占位变量。 */
+/* 面板占用的高度由 #conversation（flex:1）自动让出：没有页面级留白、没有占位变量，
+   body 保持基础内边距；状态栏在 .layout 之外，与面板互不影响。 */
 
 /* 窄屏：配置摘要隐藏（同一份文案已由 #cfg-toggle 承载），z-index 降到会话抽屉（30）
    之下——抽屉是临时覆盖层，打开时应当盖住面板。宽度与停靠位置沿用基础规则。 */
@@ -1126,8 +1134,9 @@ body.composer-dragging * { cursor: grabbing !important; user-select: none !impor
 
 
 /* ---- 左侧会话列表侧边栏 ---- */
-/* position:relative 是浮动 composer 面板的定位基准（见下方 #composer-panel）：面板停靠态
-   用 absolute 浮在内容区底部，所以它既不吃高度、也不会改变 #footer（状态栏）的位置。 */
+/* .layout 是「顶栏以下、状态栏以上」的内容行（flex 行：侧栏 + 主列）。composer 面板已改为
+   嵌在 #tab-main 内的常规流底部（见上方 #composer-panel），不再依赖这里的 position:relative；
+   保留它作为内容行自身的一般定位锚点（当前没有子节点依赖，删掉会改变将来浮层的包含块）。 */
 .layout { position: relative; display: flex; flex: 1; min-height: 0; }
 #sidebar {
   width: 264px; min-width: 0; flex-shrink: 0;
@@ -1400,10 +1409,9 @@ body.sidebar-collapsed #sidebar {
   user-select: none;
 }
 #screen-copy-btn { top: 10px; }
-/* 兜底值；运行时由 chat.js positionScrollBtn() 按信息流下沿与浮动面板顶边重算覆盖。
-   停靠的面板浮在内容区底部（约 132px + 8px 间隙），兜底值必须高于它，否则首帧
-   JS 还没跑到时按钮会藏在面板后面。 */
-#scroll-bottom-btn { bottom: 160px; }
+/* 兜底值；运行时由 chat.js positionScrollBtn() 按信息流下沿重算覆盖。面板在常规流里占住
+   #tab-main 底部，信息流（#conversation）天然止于面板上沿，兜底值取 12px 即可。 */
+#scroll-bottom-btn { bottom: 12px; }
 #screen-copy-btn:hover, #scroll-bottom-btn:hover {
   background: var(--hoverBg2); border-color: var(--accent);
 }

@@ -1003,29 +1003,21 @@ function updateScrollBtn() {
 }
 
 // 锚定到信息流可视区右下角：以信息流下沿为基准反推它与 #tab-main 下沿的距离。
-// 输入区 / 配置栏 / 动态状态条在浮动 composer 面板里（见 js/composer.js），它们不占
-// #tab-main 的高度，按钮因此紧贴信息流下沿。浮动面板是独立浮层、不对正文与状态栏让位，
-// 停靠时会盖住内容区底部——按钮这种**浮层里的控件**必须自己让开它，否则会被盖住点不到；
-// 这里只挪按钮自身的位置，不改动任何一行的布局。
+// 输入区 / 配置栏 / 动态状态条住在 #tab-main 底部的 composer 面板里（见 js/composer.js），
+// 面板参与常规流、占住对话页底部，信息流（#conversation，flex:1 + overflow:auto）因此
+// 天然止于面板上沿——按钮贴信息流下沿即可，不需要再按浮层重叠躲让。
+// 面板折叠 / 展开 / 拖动 / 复位都会改变信息流高度：initChat 里的 ResizeObserver 观察了
+// #conversation 与面板内的几个子块，尺寸一变就重算（这里只挪按钮自身，不改任何行的布局）。
 function positionScrollBtn() {
   if (!scrollBottomBtn || !conversationEl) { return; }
   var panel = document.getElementById("tab-main");
   if (!panel) { return; }
-  // 面板隐藏（非「对话」页签）时几何全为 0，跳过以免写入错误位置；切回后
-  // 由滚动事件或下一次 updateScrollBtn 重新锚定。
+  // 对话页签未激活时几何全为 0，跳过以免写入错误位置；切回后由 ResizeObserver
+  // （#conversation 从 0 尺寸恢复）或下一次 updateScrollBtn 重新锚定。
   if (!panel.clientHeight) { return; }
   var streamBottom = (conversationEl.offsetTop || 0) + (conversationEl.offsetHeight || 0);
   var below = (panel.clientHeight || 0) - streamBottom;
-  var bottom = Math.max(0, below) + 12;
-  // 停靠态的浮动面板浮在内容区底部：按真实矩形把按钮抬到面板顶边之上（+12px 呼吸位）。
-  // 用矩形相减而不是面板高度常量——折叠、动态状态条增高、窄屏换行都会自动跟上。
-  var composer = document.getElementById("composer-panel");
-  if (composer && composer.getAttribute("data-composer-mode") === "dock") {
-    var pr = composer.getBoundingClientRect(), tr = panel.getBoundingClientRect();
-    var overlap = tr.bottom - pr.top;
-    if (overlap > 0) { bottom = Math.max(bottom, overlap + 12); }
-  }
-  scrollBottomBtn.style.bottom = bottom + "px";
+  scrollBottomBtn.style.bottom = Math.max(0, below) + 12 + "px";
 }
 
 // ---- 跨模块状态访问接口(拆分引入) ----
@@ -1203,12 +1195,14 @@ export function initChat() {
       updateScrollBtn();
     });
   }
-  // 信息流右下角锚定：多行输入增高 / 窄屏配置栏换行 / 动态状态条显隐 / 面板折叠或
-  // 拖动，都可能改变按钮与浮动面板的相对位置（面板不再让正文区让位，所以正文高度
-  // 不变，但面板自身的高度与位置会变），必须重算，否则「最新」按钮会被面板盖住。
+  // 信息流右下角锚定：面板折叠 / 展开 / 拖动 / 复位都会改变信息流高度，多行输入增高 /
+  // 窄屏配置栏换行 / 动态状态条显隐也会挪动信息流下沿——必须重算，否则「最新」按钮会
+  // 离开信息流右下角（或落进 composer 面板里被盖住）。#conversation 是高度变化的直接
+  // 承受者（flex:1），面板内的几个子块则负责「面板自身变高」这一类变化。
   window.addEventListener("resize", positionScrollBtn);
   if (typeof ResizeObserver === "function") {
     var bottomObserver = new ResizeObserver(function () { positionScrollBtn(); });
+    if (conversationEl) { bottomObserver.observe(conversationEl); }
     ["dynamic-status", "input-row", "cfg-bar"].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) { bottomObserver.observe(el); }

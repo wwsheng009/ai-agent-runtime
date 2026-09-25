@@ -1,15 +1,15 @@
-// 行为验证：aicli micro web client 浮动 composer 面板（无需浏览器）。
+// 行为验证：aicli micro web client composer 面板（无需浏览器）。
 // 运行：node scripts/verify-micro-web-composer.mjs（仓库根目录）
 // 覆盖：
-//   1. index.html 结构：面板是 .layout 内的浮层子节点（与 #main-col 平级），
-//      输入区 / 配置栏 / 动态状态条都在面板内、都不在 #tab-main 内（旧结构切页签即消失）
+//   1. index.html 结构：面板是 #tab-main（「对话」页签）内、排在 #conversation 之后的
+//      常规流一行（= 对话页底部），输入区 / 配置栏 / 动态状态条都在面板内
 //   2. 面板必需元素齐全（拖动把手 / 折叠 / 复位 / 摘要 + 既有输入与选择器 id 不变）
 //   3. 「视图」菜单与快捷键表都提供折叠入口，且转发到同一实现（无第二份折叠逻辑）
-//   4. style.css：「独立浮层」不变量——.layout 内 absolute 停靠 / 自由位置改 fixed 并清
-//      transform、z-index 低于模态框、**不得存在让位机制**（面板不吃任何元素的高度：
-//      没有 --composer-reserve、body 没有 composer 相关 padding；状态栏永远贴底）
+//   4. style.css：让位靠 flex 常规流（#conversation flex:1 + min-height:0 + overflow:auto
+//      自己收缩）——没有 --composer-reserve / body padding 之类的占位机制；自由位置改
+//      fixed 并清掉停靠态的 margin；z-index 低于模态框
 //   5. js/composer.js 行为（DOM stub + 动态 import）：停靠 → 拖动 → 夹取 → 键盘微调 →
-//      复位 → 折叠 / 展开 → Ctrl+J → localStorage 记忆；且全程不写页面级 CSS 变量
+//      复位 → 折叠 / 展开 → Ctrl+J → localStorage 记忆；且全程不写页面级 CSS 变量、不搬 DOM
 import assert from "node:assert";
 import fs from "node:fs";
 import path from "node:path";
@@ -46,7 +46,7 @@ async function checkAsync(name, fn) {
 }
 
 // ===========================================================================
-// 场景 1：index.html 结构（面板必须是 body 级，不在 #tab-main 内）
+// 场景 1：index.html 结构（面板嵌在 #tab-main 底部、参与常规流）
 // ===========================================================================
 const VOID_TAGS = new Set(["meta", "link", "br", "img", "input", "hr", "source"]);
 
@@ -79,17 +79,24 @@ function ancestorsOf(html, id) {
 
 console.log("[1] index.html 浮动面板结构");
 const panelChain = ancestorsOf(INDEX_HTML, "composer-panel");
-check("面板存在且是 .layout 的浮层子节点（与 #main-col 平级，不在 #tab-main 内）", () => {
+check("面板存在且是 #tab-main 的常规流子节点（不再挂在 .layout 下做浮层）", () => {
   assert.ok(panelChain, "index.html 缺少 #composer-panel");
-  assert.deepEqual(panelChain, ["html", "body", ".layout"],
-    "面板祖先链应为 [html, body, .layout]（浮层定位基准），实际 " + JSON.stringify(panelChain));
+  assert.deepEqual(panelChain, ["html", "body", ".layout", "#main-col", "#tab-main"],
+    "面板祖先链应为 [html, body, .layout, #main-col, #tab-main]（对话页底部内嵌），实际 " + JSON.stringify(panelChain));
 });
-check("输入区 / 配置栏 / 动态状态条都在面板内，不在 #tab-main 内", () => {
+check("面板排在 #conversation 之后（flex 列的最后一行 = 对话页底部）", () => {
+  const conv = INDEX_HTML.indexOf('id="conversation"');
+  const panel = INDEX_HTML.indexOf('id="composer-panel"');
+  assert.ok(conv > 0, "index.html 缺少 #conversation");
+  assert.ok(panel > conv, "#composer-panel 必须排在 #conversation 之后，否则不是底部一行（实际 " + conv + " / " + panel + "）");
+  assert.ok(panel < INDEX_HTML.indexOf('id="tab-skills"'), "#composer-panel 必须留在 #tab-main 内");
+});
+check("输入区 / 配置栏 / 动态状态条都在面板内，且面板在 #tab-main 内（随「对话」页签显隐）", () => {
   ["input-row", "cfg-bar", "dynamic-status", "prompt", "send-btn"].forEach((id) => {
     const chain = ancestorsOf(INDEX_HTML, id);
     assert.ok(chain, "缺少 #" + id);
     assert.ok(chain.indexOf("#composer-panel") >= 0, "#" + id + " 不在 #composer-panel 内: " + JSON.stringify(chain));
-    assert.ok(chain.indexOf("#tab-main") < 0, "#" + id + " 仍在 #tab-main 内（切页签会消失）");
+    assert.ok(chain.indexOf("#tab-main") >= 0, "#" + id + " 不在 #tab-main 内（面板应嵌在对话页底部）");
   });
 });
 check("面板必需元素齐全（把手 / 折叠 / 复位 / 摘要 / 面板体）", () => {
@@ -139,33 +146,37 @@ check("app.js 已接线 initComposerPanel()", () => {
 });
 
 // ===========================================================================
-// 场景 3：style.css 浮层几何
+// 场景 3：style.css 几何（常规流内嵌 + 自由浮层）
 // ===========================================================================
-console.log("[3] style.css 浮层几何");
+console.log("[3] style.css 几何（常规流内嵌 + 自由浮层）");
 const panelBlock = STYLE_CSS.slice(STYLE_CSS.indexOf("#composer-panel {"), STYLE_CSS.indexOf("#composer-panel:focus-within"));
-check("#composer-panel 是 .layout 内的 absolute 浮层，默认停在状态栏上方居中", () => {
-  assert.ok(/position:\s*absolute/.test(panelBlock), "停靠态不是 position:absolute（浮层不参与常规流）");
-  assert.ok(/left:\s*50%/.test(panelBlock) && /bottom:\s*8px/.test(panelBlock), "默认停靠不是「状态栏上方 8px 居中」");
-  assert.ok(/transform:\s*translateX\(-50%\)/.test(panelBlock), "缺少居中位移");
-  assert.ok(/\.layout\s*\{[^}]*position:\s*relative/.test(STYLE_CSS), ".layout 未声明 position:relative（浮层定位基准缺失）");
+check("#composer-panel 是 #tab-main 常规流里的底部一行（不收缩、水平居中）", () => {
+  assert.ok(/position:\s*relative/.test(panelBlock), "停靠态应是常规流定位（position:relative）");
+  assert.ok(/flex:\s*0 0 auto/.test(panelBlock), "缺少 flex:0 0 auto（面板高度不应被压缩）");
+  assert.ok(/margin:\s*0 auto;/.test(panelBlock), "缺少「水平居中、底部不留外边距」的 margin: 0 auto");
+  assert.ok(!/margin:\s*0 auto 8px/.test(panelBlock), "面板底部重新出现 8px 外边距（会与状态栏自己的 margin-top 叠成 16px 空档）");
+  assert.ok(/width:\s*min\(920px/.test(panelBlock), "面板宽度契约丢失（min(920px, …)）");
+  assert.ok(!/position:\s*absolute/.test(panelBlock), "停靠态不应再用 absolute（浮层会盖住消息）");
 });
-check("自由位置改回 fixed 并清掉 transform（拖动跟手、不再左偏半个身位）", () => {
+check("自由位置改回 fixed 并清掉停靠态 margin（拖动跟手、落点不被顶偏）", () => {
   const free = STYLE_CSS.slice(STYLE_CSS.indexOf('#composer-panel[data-composer-mode="free"]'));
   const rule = free.slice(0, free.indexOf("}"));
   assert.ok(/position:\s*fixed/.test(rule), "自由位置未改回 position:fixed（拖动坐标是视口坐标）");
   assert.ok(/left:\s*0/.test(rule) && /top:\s*0/.test(rule), "自由模式未接管 left/top");
-  assert.ok(/transform:\s*none/.test(rule), "自由模式未清 transform");
+  assert.ok(/margin:\s*0/.test(rule), "自由模式未清 margin（停靠态的 auto/8px 会顶偏落点）");
   assert.ok(/bottom:\s*auto/.test(rule), "自由模式未清 bottom");
 });
-// 「两层互不影响」的核心静态不变量：面板不得让任何页面元素为它让位。
-// 旧实现用 --composer-reserve + body padding-bottom 把正文区与状态栏整体上移，
-// 一旦页面出现根滚动条（100vh 与布局视口高度不等）就会与状态栏重叠，已删除；
-// 这里断言它不会再回来。
-check("无让位机制：没有 --composer-reserve、body 不为面板留白", () => {
+// 让位是**结构性的**：面板是 #tab-main 常规流里的一行，#conversation 是 flex:1 的滚动区，
+// 自动收缩到面板上沿。旧实现用 --composer-reserve + body padding-bottom 做占位（已删除），
+// 这里既断言新机制存在，也断言占位机制不会再回来。
+check("让位靠 flex 常规流：#conversation 自己收缩，没有占位变量 / body 留白", () => {
+  const convRule = (STYLE_CSS.match(/#conversation \{[^}]*\}/) || [""])[0];
+  assert.ok(/flex:\s*1/.test(convRule) && /min-height:\s*0/.test(convRule) && /overflow:\s*auto/.test(convRule),
+    "#conversation 必须是 flex:1 + min-height:0 + overflow:auto 的可收缩滚动区，实际: " + convRule);
   // 只看代码本体：注释里保留「旧机制已移除」的说明是有意为之，不能因此误报。
   const styleCode = STYLE_CSS.replace(/\/\*[\s\S]*?\*\//g, "");
   const composerCode = COMPOSER_JS.replace(/^\s*\/\/.*$/gm, "");
-  assert.ok(!/--composer-reserve/.test(styleCode), "style.css 仍存在 --composer-reserve（让位机制已废弃）");
+  assert.ok(!/--composer-reserve/.test(styleCode), "style.css 仍存在 --composer-reserve（占位机制已废弃）");
   assert.ok(!/--composer-reserve/.test(composerCode), "composer.js 仍在写 --composer-reserve");
   assert.ok(!/body\s*\{[^}]*padding-bottom[^}]*composer/i.test(styleCode), "body 仍为面板留出 padding-bottom");
   // #footer（状态栏）自身规则里不得出现 composer 相关耦合（只取这一条规则，别扫到邻居注释）
@@ -192,12 +203,18 @@ check("⇲ 复位按钮只在自由位置显示（停靠态隐藏）", () => {
     "缺少「停靠态隐藏复位按钮」规则");
   assert.ok(!/resetBtn\.hidden/.test(COMPOSER_JS), "复位按钮显隐应交由 CSS，不要在 JS 里再判一次");
 });
-// 面板是浮层、盖在内容区底部：「最新」按钮这类**浮层内的控件**要让开它（否则点不到）。
-// 只挪按钮自身的位置，不改任何行的布局——所以静态断言只检查接线，几何在真实浏览器里量。
-check("「最新」按钮按几何让开停靠面板（浮层之间不互相遮挡）", () => {
-  assert.ok(/getElementById\("composer-panel"\)/.test(CHAT_JS), "chat.js 未读取浮动面板");
-  assert.ok(/data-composer-mode/.test(CHAT_JS), "chat.js 未按停靠态判断面板是否压在按钮上");
-  assert.ok(/overlap/.test(CHAT_JS), "chat.js 未按矩形重叠把按钮抬到面板上方");
+// 面板参与常规流后，「最新」按钮只需贴信息流下沿（#conversation 天然止于面板上沿），
+// 不再需要按浮层重叠躲让；面板折叠 / 拖动 / 复位由 ResizeObserver 观察 #conversation 触发重算。
+check("「最新」按钮按信息流下沿锚定，且随 #conversation 尺寸变化重算", () => {
+  assert.ok(/conversationEl\.offsetTop/.test(CHAT_JS) && /conversationEl\.offsetHeight/.test(CHAT_JS),
+    "chat.js 未按信息流下沿（offsetTop + offsetHeight）锚定按钮");
+  assert.ok(!/data-composer-mode/.test(CHAT_JS), "chat.js 不应再按 composer 停靠态做重叠躲让（面板已让位）");
+  assert.ok(/bottomObserver\.observe\(conversationEl\)/.test(CHAT_JS), "ResizeObserver 未观察 #conversation");
+});
+check("模式切换不改 DOM：结构固定在 index.html，composer.js 只切属性 / 样式", () => {
+  const code = COMPOSER_JS.replace(/^\s*\/\/.*$/gm, "");
+  assert.ok(!/appendChild|insertBefore|removeChild|parentNode|replaceChild/.test(code),
+    "composer.js 不应搬移 DOM 节点（停靠 / 自由只靠 data-composer-mode）");
 });
 
 // ===========================================================================
@@ -259,11 +276,11 @@ function makeEl(id) {
 
 const VIEWPORT = { w: 1000, h: 800 };
 const PANEL_W = 600, PANEL_H = 120;
-// 停靠几何：面板是 .layout 内的浮层，bottom:8px 落在状态栏上方。
-// stub 里没有真实布局引擎，用「视口高 − 状态栏高 − 间隙 − 面板高」模拟停靠位置。
-const FOOTER_H = 25, DOCK_GAP = 8;
-const DOCK_LEFT = (VIEWPORT.w - PANEL_W) / 2;              // 200
-const DOCK_TOP = VIEWPORT.h - FOOTER_H - DOCK_GAP - PANEL_H; // 647
+// 停靠几何：面板是 #tab-main 常规流里的最后一行，真实位置由 flex 布局给出。
+// stub 里没有布局引擎，按 composer.js panelRect() 的兜底公式模拟：水平居中 + 贴视口底部
+// 留 EDGE(8px) 边距（真实浏览器里停靠几何由 CSS 直接给出，不走这条兜底）。
+const DOCK_LEFT = (VIEWPORT.w - PANEL_W) / 2;   // 200
+const DOCK_TOP = VIEWPORT.h - 8 - PANEL_H;      // 672
 
 const ids = ["composer-panel", "composer-header", "composer-grip", "composer-collapse-btn",
   "composer-reset-btn", "composer-summary", "composer-body"];
@@ -316,7 +333,7 @@ check("拖动：mousedown → mousemove 进入自由模式，落点跟随指针�
   stubDocument.dispatch("mousemove", { clientX: 300, clientY: 640 });
   assert.equal(panel.getAttribute("data-composer-mode"), "free");
   assert.equal(panel.style.left, "250px", "left 未跟随指针（期望 300-50）");
-  assert.equal(panel.style.top, "587px", "top 未跟随指针（期望 640-53）");
+  assert.equal(panel.style.top, "612px", "top 未跟随指针（期望 640-28）");
   assert.deepEqual(Object.keys(cssVars), [], "自由位置同样不应写页面级 CSS 变量");
   stubDocument.dispatch("mouseup", {});
   assert.ok(!bodyEl.classList.contains("composer-dragging"), "松手后未解除 body.composer-dragging");
@@ -325,7 +342,8 @@ check("拖动：mousedown → mousemove 进入自由模式，落点跟随指针�
 
 check("拖动落点夹在视口内（窗口缩小也不会跑到屏幕外）", () => {
   grip.dispatch("mousedown", { button: 0, clientX: 100, clientY: 100 });
-  stubDocument.dispatch("mousemove", { clientX: -500, clientY: -500 });
+  // 指针拖到视口左上角之外很远：两个轴都必须被 EDGE(8px) 夹住
+  stubDocument.dispatch("mousemove", { clientX: -500, clientY: -1200 });
   stubDocument.dispatch("mouseup", {});
   assert.equal(panel.style.left, "8px");
   assert.equal(panel.style.top, "8px");
