@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -190,7 +191,7 @@ func TestSpawnStartsDetachedNode(t *testing.T) {
 	}
 }
 
-func TestSpawnUsesBindingPortAndWorkspace(t *testing.T) {
+func TestSpawnUsesBindingWorkspaceAndLeavesPortToChild(t *testing.T) {
 	paths := testMeshPaths(t)
 	clock := newFakeClock()
 	workspace := t.TempDir()
@@ -216,11 +217,63 @@ func TestSpawnUsesBindingPortAndWorkspace(t *testing.T) {
 	if result.Status != SpawnStatusStarted {
 		t.Fatalf("status = %q (reason %q)", result.Status, result.Reason)
 	}
-	if !containsArgPair(captured.Args, "--web-port", "55130") {
-		t.Fatalf("args = %v, want --web-port 55130 from the binding", captured.Args)
+	// 绑定端口不由父进程钉成显式 --web-port：子进程自己按 S3 粘性端口复用，
+	// 被占时回退随机（显式端口会让 bind 冲突变成致命启动错误）。
+	for _, arg := range captured.Args {
+		if arg == "--web-port" {
+			t.Fatalf("args = %v, 不得把 binding 端口写成显式 --web-port", captured.Args)
+		}
 	}
 	if captured.Dir != workspace {
 		t.Fatalf("dir = %q, want the binding workspace %q", captured.Dir, workspace)
+	}
+}
+
+// TestSpawnDoesNotPinOccupiedBindingPort 回归线上 504 现场：binding 端口被活节点
+// 占用（这里用真实 listener 模拟——线上占用者通常是刚服务过该会话、随后切到别
+// 的会话但仍监听同一端口的父节点）时，spawn 仍不得把它写成显式 --web-port，
+// 否则子进程 bind 失败即退出，父进程等满预算后只能报 not_running（HTTP 504）。
+func TestSpawnDoesNotPinOccupiedBindingPort(t *testing.T) {
+	paths := testMeshPaths(t)
+	clock := newFakeClock()
+	workspace := t.TempDir()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	occupied := listener.Addr().(*net.TCPAddr).Port
+
+	if err := TouchBinding(paths, BindingUpdate{
+		SessionID:     "sess-occupied",
+		Host:          "127.0.0.1",
+		Port:          occupied,
+		NodeID:        "node-holder",
+		WorkspacePath: workspace,
+	}); err != nil {
+		t.Fatalf("TouchBinding: %v", err)
+	}
+
+	var captured SpawnLaunchSpec
+	opts := spawnTestOptions(t, paths, clock, func(spec SpawnLaunchSpec) (int, error) {
+		captured = spec
+		writeSpawnTestRecord(t, paths, clock, "node-child", "sess-occupied", os.Getpid(), 55131)
+		return 889, nil
+	})
+	opts.WorkspaceFor = nil
+	result := Spawn(SpawnRequest{SessionID: "sess-occupied"}, opts)
+
+	if result.Status != SpawnStatusStarted {
+		t.Fatalf("status = %q (reason %q)", result.Status, result.Reason)
+	}
+	for _, arg := range captured.Args {
+		if arg == "--web-port" {
+			t.Fatalf("绑定端口 %d 已被占用，args = %v 不得把它钉成显式 --web-port", occupied, captured.Args)
+		}
+	}
+	if !containsArgPair(captured.Args, "--web-host", "127.0.0.1") {
+		t.Fatalf("其余启动参数不得改变: %v", captured.Args)
 	}
 }
 

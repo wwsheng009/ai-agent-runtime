@@ -225,25 +225,19 @@ func TestSpawnTakeoverStartsNewNodeAndSkipsReuse(t *testing.T) {
 	}
 }
 
-func TestResolveSpawnPortTakeoverIgnoresBinding(t *testing.T) {
-	paths := testMeshPaths(t)
-	if err := TouchBinding(paths, BindingUpdate{
-		SessionID: "sess-port",
-		Host:      "127.0.0.1",
-		Port:      55130,
-		NodeID:    "node-old",
-	}); err != nil {
-		t.Fatalf("TouchBinding: %v", err)
+func TestResolveSpawnPortHonorsExplicitRequestOnly(t *testing.T) {
+	// 绑定偏好不在父进程解析后回传：子进程自己走粘性端口（命中即复用，被占则
+	// 随机兜底）。显式请求仍原样透传；非法值一律当作未指定。
+	if got := resolveSpawnPort(0); got != 0 {
+		t.Fatalf("缺省必须交给子进程自选端口，got %d", got)
 	}
-
-	if got := resolveSpawnPort(paths, "sess-port", 0, false); got != 55130 {
-		t.Fatalf("非接管必须沿用绑定端口，got %d", got)
+	if got := resolveSpawnPort(55200); got != 55200 {
+		t.Fatalf("显式端口必须原样透传，got %d", got)
 	}
-	if got := resolveSpawnPort(paths, "sess-port", 0, true); got != 0 {
-		t.Fatalf("接管必须换空闲端口（旧节点还占着绑定端口），got %d", got)
-	}
-	if got := resolveSpawnPort(paths, "sess-port", 55200, true); got != 55200 {
-		t.Fatalf("显式 --port 优先于接管规则，got %d", got)
+	for _, bad := range []int{-1, 70000} {
+		if got := resolveSpawnPort(bad); got != 0 {
+			t.Fatalf("非法端口 %d 必须视为未指定，got %d", bad, got)
+		}
 	}
 }
 

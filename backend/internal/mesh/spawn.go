@@ -294,7 +294,7 @@ func Spawn(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
 	launchAndAwait(opts, paths, spawnLaunch{
 		SessionID: sessionID,
 		Workspace: workspace,
-		Port:      resolveSpawnPort(paths, sessionID, req.Port, req.Takeover),
+		Port:      resolveSpawnPort(req.Port),
 		Takeover:  req.Takeover,
 		LogKey:    sessionID,
 		Args:      func(port int, token string) []string { return spawnArgs(sessionID, port, token) },
@@ -313,10 +313,11 @@ func Spawn(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
 	return result
 }
 
-// spawnArgs is the §5.7 command line. --web-port is only added for a concrete
-// port: `--web-port 0` is rejected by the flag parser ("must be between 1 and
-// 65535"), and omitting it leaves the child free to reuse the session binding's
-// sticky port (S3), which resolveSpawnPort already preferred anyway.
+// spawnArgs is the §5.7 command line. --web-port is only added for an explicit
+// request: `--web-port 0` is rejected by the flag parser ("must be between 1
+// and 65535"), and omitting it lets the child apply its own sticky-port rule
+// (S3) — reuse the session binding's port when free, fall back to a random free
+// port when occupied — instead of treating a busy port as a fatal bind error.
 func spawnArgs(sessionID string, port int, token string) []string {
 	args := []string{
 		"resume", sessionID,
@@ -530,7 +531,7 @@ func spawnNewSession(req SpawnRequest, opts SpawnOptions) (result SpawnResult) {
 	launchAndAwait(opts, paths, spawnLaunch{
 		// SessionID stays empty: this is what makes the child create a session.
 		Workspace: workspace,
-		Port:      resolveSpawnPort(paths, "", req.Port, false),
+		Port:      resolveSpawnPort(req.Port),
 		Takeover:  false,
 		// No session id yet, so the log is keyed by this invocation (timestamp +
 		// our pid): two `new` calls must never share one launch log.
@@ -681,21 +682,21 @@ func spawnURLForEndpointPort(base string, port int, sessionID, token string) str
 	return target + "?" + strings.Join(query, "&")
 }
 
-// resolveSpawnPort picks the loopback port: explicit request > session binding
-// preference > 0 (random free port, the child's own default). A takeover spawn
-// ignores the binding preference: the node being taken over is still listening
-// on that port (architecture §4.4), so the new node must pick a free one.
-func resolveSpawnPort(paths Paths, sessionID string, requested int, takeover bool) int {
+// resolveSpawnPort only forwards an **explicit** port request; everything else
+// is 0 = the child decides.
+//
+// The binding preference (S3 sticky port) is deliberately NOT resolved here and
+// passed down: once the binding port becomes an explicit --web-port, the child
+// loses its "occupied → random fallback" path — a bind conflict becomes a fatal
+// startup error, and the parent can only report not_running (HTTP 504) after
+// the wait budget lapses. Omitting the flag lets the child apply the sticky
+// rule itself: reuse the binding port when free, warn and fall back to a random
+// free port when occupied (architecture §5.7 / session-window plan R5). The
+// same applies to takeover: the old node is still listening on the binding port
+// (§4.4), so the new node must pick its own port.
+func resolveSpawnPort(requested int) int {
 	if requested >= 1 && requested <= 65535 {
 		return requested
-	}
-	if takeover {
-		return 0
-	}
-	if binding, ok := LoadBinding(paths, sessionID); ok && binding.Preferred != nil {
-		if port := binding.Preferred.Port; port >= 1 && port <= 65535 {
-			return port
-		}
 	}
 	return 0
 }
