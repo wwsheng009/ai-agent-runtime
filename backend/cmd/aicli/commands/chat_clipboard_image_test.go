@@ -79,19 +79,26 @@ func TestAttachClipboardImageAddsAndDedupes(t *testing.T) {
 }
 
 func TestAttachClipboardImageRejectsInvalidFile(t *testing.T) {
-	// 剪贴板读取成功但落盘内容不是合法图片：必须拒绝，而不是把坏文件塞进附件。
-	broken := filepath.Join(t.TempDir(), "broken.png")
-	if err := os.WriteFile(broken, []byte("not a png"), 0o644); err != nil {
-		t.Fatalf("写入坏文件失败: %v", err)
-	}
-	stubClipboardImageRead(t, clipboardimage.Result{Path: broken, Width: 1, Height: 1}, nil)
-
-	session := &ChatSession{}
-	if _, err := attachClipboardImage(session, false); err == nil {
-		t.Fatal("非法图片必须报错")
-	}
-	if len(session.ImagePaths) != 0 {
-		t.Fatalf("非法图片不应进入附件: %+v", session.ImagePaths)
+	// 读取成功但路径不可用（文件被清理 / 指向目录）时必须拒绝，
+	// 而不是把坏路径塞进附件——附件校验与 /attach <path> 共用同一套规则。
+	missing := filepath.Join(t.TempDir(), "missing.png")
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "文件不存在", path: missing},
+		{name: "路径是目录", path: t.TempDir()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubClipboardImageRead(t, clipboardimage.Result{Path: tc.path, Width: 1, Height: 1}, nil)
+			session := &ChatSession{}
+			if _, err := attachClipboardImage(session, false); err == nil {
+				t.Fatalf("不可用路径必须报错: %s", tc.path)
+			}
+			if len(session.ImagePaths) != 0 {
+				t.Fatalf("不可用路径不应进入附件: %+v", session.ImagePaths)
+			}
+		})
 	}
 }
 
