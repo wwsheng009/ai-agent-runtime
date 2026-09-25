@@ -34,6 +34,7 @@ const (
 	ToolAskUserQuestion        = "ask_user_question"
 	ToolEnterPlanMode          = "enter_plan_mode"
 	ToolExitPlanMode           = "exit_plan_mode"
+	ToolPlanReview             = "plan_review"
 	ToolBackgroundTask         = "background_task"
 	ToolTaskOutput             = "task_output"
 	ToolSpawnAgent             = "spawn_agent"
@@ -76,8 +77,11 @@ const (
 
 // Broker provides synthetic tools backed by runtime services.
 type Broker struct {
-	UserInput            UserInputHandler
-	PlanMode             PlanModeController
+	UserInput UserInputHandler
+	PlanMode  PlanModeController
+	// PlanReview backs the read-only plan_review tool (open a plan in the
+	// review surface). Optional: nil keeps the tool out of the advertised set.
+	PlanReview           PlanReviewController
 	Background           *background.Manager
 	AgentSessions        AgentSessionController
 	SessionContextStore  SessionContextStore
@@ -173,7 +177,7 @@ func isVolatileEmptyReplayTool(name string) bool {
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
+	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return true
 	default:
 		return false
@@ -210,7 +214,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		definitions = append(definitions,
 			types.ToolDefinition{
 				Name:        ToolEnterPlanMode,
-				Description: "Enter plan mode for the current session. Restricts writes to the plan artifact (default plan.md) until exit_plan_mode. Prefer this before large implementation work when a plan should be reviewed first. Nested re-enter keeps the original previous permission mode.",
+				Description: "Enter plan mode for the current session. Restricts writes to the plan artifact (default plan.md) until exit_plan_mode. Prefer this before large implementation work when a plan should be reviewed first. Nested re-enter keeps the original previous permission mode. Entering is user-gated by default: the request is confirmed interactively (or denied when there is no interactive user, e.g. headless runs) unless the host runs with model autonomy enabled, so ask the user to confirm instead of retrying a denial.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -242,7 +246,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolExitPlanMode,
-				Description: "Exit plan mode with an explicit decision. decision=approve restores the previous permission mode to execute; request_changes stays in plan mode for revisions; quit restores previous mode without executing. Completion does not auto-exit plan mode.",
+				Description: "Submit the plan for review or exit plan mode. decision=approve asks the user to approve and start implementation (the user decides unless the host runs with model autonomy); request_changes stays in plan mode for your own revision pass; quit asks the user to close plan mode without executing. A model-authored approve/quit is recorded as a pending exit request, so summarize the plan and stop instead of assuming approval.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -257,6 +261,31 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						},
 					},
 					"required": []string{"decision"},
+				},
+			},
+		)
+	}
+	if b != nil && b.PlanReview != nil {
+		definitions = append(definitions,
+			types.ToolDefinition{
+				Name:        ToolPlanReview,
+				Description: "Open a plan in the review surface (read-only). Use it when the user asks to see, revisit or judge a plan without changing plan state - for example an archived plan from the plans browser, or the current session plan after a restart. Returns the plan text plus the verdict entry points; it never approves, edits or exits a plan. Deciding a review is a user action (approve / request_changes / quit).",
+				Parameters: map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"plan_id": map[string]interface{}{
+							"type":        "string",
+							"description": "Archived plan id (may contain \"/\", e.g. ai-agent-runtime/plan). Empty means the current session plan.",
+						},
+						"plan_path": map[string]interface{}{
+							"type":        "string",
+							"description": "Plan file path relative to the workspace; used when the plan is not archived yet.",
+						},
+						"version": map[string]interface{}{
+							"type":        "integer",
+							"description": "Archived snapshot version to read; 0 or omitted means latest.",
+						},
+					},
 				},
 			},
 		)
@@ -1263,7 +1292,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			return nil, nil, fmt.Errorf("plan mode controller is not configured")
 		}
 		primaryPath, extraPaths := planPathArgs(args)
-		req := EnterPlanModeArgs{PlanPath: primaryPath, PlanWritePaths: extraPaths}
+		req := EnterPlanModeArgs{PlanPath: primaryPath, PlanWritePaths: extraPaths, Source: "model"}
 		result, err := b.PlanMode.EnterPlanMode(ctx, sessionID, req)
 		if err != nil {
 			return nil, nil, err
@@ -1292,6 +1321,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if req.Decision == "" {
 			return nil, nil, fmt.Errorf("decision is required (approve|request_changes|quit)")
 		}
+		// The broker is the model-facing path: tag the decision author so the
+		// host can keep approve/quit user-gated.
+		req.Source = "model"
 		result, err := b.PlanMode.ExitPlanMode(ctx, sessionID, req)
 		if err != nil {
 			return nil, nil, err
@@ -1303,6 +1335,43 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			meta["active"] = result.Active
 			meta["permission_mode"] = result.PermissionMode
 			meta["exit_decision"] = result.ExitDecision
+			meta["pending_exit_request"] = result.PendingExitRequest
+			if result.ExitSource != "" {
+				meta["exit_source"] = result.ExitSource
+			}
+		}
+		return result, meta, nil
+
+	case ToolPlanReview:
+		if b.PlanReview == nil {
+			return nil, nil, fmt.Errorf("plan review controller is not configured")
+		}
+		req := PlanReviewArgs{}
+		if value, ok := args["plan_id"].(string); ok {
+			req.PlanID = strings.TrimSpace(value)
+		}
+		if value, ok := args["plan_path"].(string); ok {
+			req.PlanPath = strings.TrimSpace(value)
+		}
+		if value, ok := args["version"].(float64); ok && value > 0 {
+			req.Version = int(value)
+		}
+		result, err := b.PlanReview.ReviewPlan(ctx, sessionID, req)
+		if err != nil {
+			return nil, nil, err
+		}
+		meta := map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindStructured,
+		}
+		if result != nil {
+			meta["active"] = result.Active
+			meta["status"] = result.Status
+			meta["plan_id"] = result.PlanID
+			meta["plan_path"] = result.PlanPath
+			meta["version"] = result.Version
+			meta["review_round"] = result.ReviewRound
+			meta["source"] = result.Source
+			meta["truncated"] = result.Truncated
 		}
 		return result, meta, nil
 
@@ -3444,6 +3513,8 @@ func normalizeToolName(name string) string {
 		return ToolEnterPlanMode
 	case "exitplanmode":
 		return ToolExitPlanMode
+	case "planreview":
+		return ToolPlanReview
 	case "backgroundtask":
 		return ToolBackgroundTask
 	case "taskoutput":

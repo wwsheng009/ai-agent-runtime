@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -8,8 +9,17 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
+	"github.com/wwsheng009/ai-agent-runtime/internal/planstore"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
+
+// chatPlanWorkspacePathKey mirrors sessionmeta.WorkspacePath so archive
+// anchoring does not need the meta package in this command file.
+const chatPlanWorkspacePathKey = "workspace_path"
+
+// chatPlanArtifactStore overrides the plan artifact store for /plan archiving.
+// nil uses the process-wide default ($HOME/.aicli/plans or AICLI_PLANS_DIR).
+var chatPlanArtifactStore *planstore.Store
 
 // handlePlanCommand implements the /plan slash command.
 //
@@ -23,6 +33,7 @@ import (
 //	/plan approve [notes]          exit approve
 //	/plan request_changes [notes]  exit request_changes (stay in plan)
 //	/plan quit [notes]             exit quit
+//	/plan review                   show the plan revision and verdict hints
 //	/plan off                      alias of exit quit
 func handlePlanCommand(session *ChatSession, command string) bool {
 	if unifiedDirectInteractiveOutput(session) {
@@ -72,6 +83,10 @@ func handlePlanCommand(session *ChatSession, command string) bool {
 
 	case "quit", "cancel", "abort", "off", "no", "n":
 		return exitChatPlanModeCommand(session, "quit", rest)
+
+	case "review", "show":
+		fmt.Println(planReviewText(session))
+		return false
 
 	default:
 		// Treat bare path as enter with that plan path.
@@ -130,6 +145,8 @@ func executeStructuredPlanCommand(session *ChatSession, command string) CommandR
 		return executeStructuredPlanModeExit(session, "request_changes", rest)
 	case "quit", "cancel", "abort", "off", "no", "n":
 		return executeStructuredPlanModeExit(session, "quit", rest)
+	case "review", "show":
+		return commandTextResult(planReviewText(session))
 	default:
 		if looksLikePlanPath(verb) && rest == "" {
 			result, err := enterChatPlanModeWithResult(session, verb)
@@ -240,7 +257,27 @@ func enterChatPlanModeWithResult(session *ChatSession, planPath string) (chatPla
 	applyChatPlanPermissionMode(session, runtimepolicy.ModePlan)
 	syncErr := syncRuntimeSessionFromChat(session)
 	refreshChatComposerContext(session)
+	archiveChatPlanArtifact(session, "enter", "")
 	return chatPlanModeMutationResult{State: loadChatPlanMode(session), SyncErr: syncErr}, nil
+}
+
+// archiveChatPlanArtifact persists the plan artifact index + review-round
+// snapshot for the CLI /plan path. Best-effort: the durable plan-mode state is
+// already written, so archive failures must not fail the command.
+func archiveChatPlanArtifact(session *ChatSession, decision, notes string) {
+	if session == nil || session.RuntimeSession == nil {
+		return
+	}
+	state := planmode.Load(session.RuntimeSession)
+	_, _ = planmode.ArchivePlan(context.Background(), planmode.ArchiveOptions{
+		Store:     chatPlanArtifactStore,
+		SessionID: session.RuntimeSession.ID,
+		Workspace: chatPlanWorkspacePath(session),
+		PlanPath:  state.PlanPath,
+		Decision:  strings.TrimSpace(decision),
+		Source:    string(planmode.ExitSourceUser),
+		Notes:     strings.TrimSpace(notes),
+	})
 }
 
 func exitChatPlanMode(session *ChatSession, decisionToken, notes string) error {
@@ -271,6 +308,7 @@ func exitChatPlanModeWithResult(session *ChatSession, decisionToken, notes strin
 	if err != nil {
 		return chatPlanModeMutationResult{}, err
 	}
+	exited.LastExitSource = planmode.ExitSourceUser
 
 	resume := planmode.ResumeModeAfterExit(exited)
 	mode, parseErr := parseChatPermissionMode(resume, false)
@@ -282,6 +320,9 @@ func exitChatPlanModeWithResult(session *ChatSession, decisionToken, notes strin
 		// Stay active for another revision pass while recording the decision.
 		exited.Status = planmode.StatusActive
 		exited.PendingExitRequest = false
+		if strings.TrimSpace(notes) != "" {
+			exited = planmode.RecordReviewNotes(exited, notes)
+		}
 		saveChatPlanMode(session, exited)
 		applyChatPlanPermissionMode(session, runtimepolicy.ModePlan)
 	} else {
@@ -291,6 +332,7 @@ func exitChatPlanModeWithResult(session *ChatSession, decisionToken, notes strin
 
 	syncErr := syncRuntimeSessionFromChat(session)
 	refreshChatComposerContext(session)
+	archiveChatPlanArtifact(session, string(exited.ExitDecision), notes)
 	return chatPlanModeMutationResult{State: loadChatPlanMode(session), SyncErr: syncErr}, nil
 }
 
@@ -309,6 +351,18 @@ func applyChatPlanPermissionMode(session *ChatSession, mode runtimepolicy.Mode) 
 		return
 	}
 	setChatPermissionMode(session, mode)
+}
+
+// chatPlanWorkspacePath returns the session workspace root used to resolve
+// relative plan paths (mirrors the runtime session context key).
+func chatPlanWorkspacePath(session *ChatSession) string {
+	if session == nil || session.RuntimeSession == nil || session.RuntimeSession.Metadata.Context == nil {
+		return ""
+	}
+	if raw, ok := session.RuntimeSession.Metadata.Context[chatPlanWorkspacePathKey]; ok {
+		return strings.TrimSpace(fmt.Sprint(raw))
+	}
+	return ""
 }
 
 func loadChatPlanMode(session *ChatSession) planmode.State {
@@ -393,7 +447,60 @@ func planModeStatusText(session *ChatSession) string {
 	if state.PendingExitRequest {
 		lines = append(lines, "  pending exit request: true")
 	}
-	lines = append(lines, "用法: /plan enter [path] | /plan exit <approve|request_changes|quit>")
+	if active && state.LastExitSource == planmode.ExitSourceModel && state.PendingExitRequest {
+		lines = append(lines, "  待裁决: 模型已请求评审，请 /plan approve | /plan request_changes <notes> | /plan quit")
+	} else if hint := planReviewReadyHint(session, state); hint != "" {
+		lines = append(lines, "  "+hint)
+	}
+	lines = append(lines, "用法: /plan enter [path] | /plan review | /plan exit <approve|request_changes|quit>")
+	return strings.Join(lines, "\n")
+}
+
+// planReviewReadyHint reports that the plan file already holds a revision that
+// has not been reviewed yet (the CLI counterpart of the run-end backstop). It
+// stays silent while a verdict request is already pending, since that state is
+// surfaced by its own hint.
+func planReviewReadyHint(session *ChatSession, state planmode.State) string {
+	if !planmode.IsActive(state) || state.PendingExitRequest {
+		return ""
+	}
+	if len(planmode.ReadPlanArtifact(chatPlanWorkspacePath(session), state.PlanPath)) == 0 {
+		return ""
+	}
+	return "计划已就绪待评审（/plan review 查看正文，/plan approve | /plan request_changes <notes> | /plan quit 裁决）"
+}
+
+// planReviewText renders the plan revision plus the verdict affordances for
+// `/plan review`.
+func planReviewText(session *ChatSession) string {
+	state := loadChatPlanMode(session)
+	if !planmode.IsActive(state) {
+		return "当前没有生效的 plan 模式（用 /plan enter [path] 进入，或用 /plans 浏览已归档计划）"
+	}
+	planPath := state.PlanPath
+	if strings.TrimSpace(planPath) == "" {
+		planPath = planmode.DefaultPlanPath
+	}
+	content := planmode.ReadPlanArtifact(chatPlanWorkspacePath(session), planPath)
+	lines := []string{
+		fmt.Sprintf("计划评审: %s", planPath),
+		fmt.Sprintf("  status: %s", firstNonEmptyChatValue(string(state.Status), string(planmode.StatusActive))),
+	}
+	if state.ReviewRound > 0 {
+		lines = append(lines, fmt.Sprintf("  review round: %d", state.ReviewRound))
+	}
+	if state.PendingExitRequest {
+		lines = append(lines, "  pending exit request: true（模型已请求裁决）")
+	}
+	if len(content) == 0 {
+		lines = append(lines, "  (计划文件尚无可读内容，模型可能还没写入)")
+	} else {
+		lines = append(lines, "", string(content))
+	}
+	lines = append(lines,
+		"",
+		"裁决: /plan approve [notes] | /plan request_changes <notes> | /plan quit [notes]",
+	)
 	return strings.Join(lines, "\n")
 }
 

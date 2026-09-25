@@ -290,6 +290,8 @@ export function ArtifactPanel({
         <SelfContainedSurfacePanel
           key={spec.id}
           active={resolvedActiveSurface === spec.id}
+          lastRuntimeEventType={lastRuntimeEventType}
+          runtimeEventCount={runtimeEventCount}
           sessionId={sessionId?.trim() ?? ""}
           spec={spec}
           tabIds={surfaceTabIds[spec.id]}

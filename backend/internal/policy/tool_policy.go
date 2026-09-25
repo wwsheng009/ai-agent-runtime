@@ -31,6 +31,17 @@ type ToolExecutionPolicy struct {
 	BlockUntrustedMCP      bool
 	BlockRemoteWrites      bool
 	Sandbox                *executor.Sandbox
+	// PlanModeActive marks that the session is in plan mode, and
+	// PlanWriteAllowPaths / PlanWriteAllowPathsResolved carry the plan write
+	// allowlist (raw relative / workspace-resolved absolute, see
+	// SetPlanWriteExemption). While active, file-mutating tools may bypass the
+	// tool allowlist gate when every call target is a plan file, so a narrow
+	// --allow-tool list cannot brick plan mode's own write path. Explicit deny,
+	// read-only, capability scope, and the sandbox boundary keep their
+	// precedence.
+	PlanModeActive              bool
+	PlanWriteAllowPaths         []string
+	PlanWriteAllowPathsResolved []string
 	// PathAnchorRoot is the filesystem root this policy resolves relative path
 	// arguments against when the caller's context carries no
 	// toolctx.WorkspaceRoot. It must mirror the base path the toolkit tools were
@@ -77,6 +88,26 @@ func (p *ToolExecutionPolicy) SetPathAnchorRoot(root string) *ToolExecutionPolic
 	return p
 }
 
+// SetPlanWriteExemption records the plan-mode write exemption for this policy:
+// while plan mode is active, file-mutating tools (write/apply_patch and their
+// aliases) bypass the tool allowlist gate for calls whose every target is
+// covered by the plan write allowlist. Pass the raw allowlist (relative,
+// display/fallback semantics) and, when known, its workspace-resolved absolute
+// form; the resolved list wins during matching.
+//
+// The exemption does not weaken any other check: explicit denies, read-only
+// delegation, capability scope, and the sandbox path boundary are still
+// enforced, and the concrete target paths are verified per call.
+func (p *ToolExecutionPolicy) SetPlanWriteExemption(active bool, raw []string, resolved []string) *ToolExecutionPolicy {
+	if p == nil {
+		return nil
+	}
+	p.PlanModeActive = active
+	p.PlanWriteAllowPaths = cleanPlanAllowPaths(raw)
+	p.PlanWriteAllowPathsResolved = cleanPlanAllowPaths(resolved)
+	return p
+}
+
 // AllowTool checks whether a tool is allowed by name.
 func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 	if p == nil {
@@ -95,7 +126,8 @@ func (p *ToolExecutionPolicy) AllowTool(toolName string) error {
 	// allowlist means tools are fully disabled (DisableTools) and essentials
 	// do not bypass. Explicit deny, capability scope, and read-only still apply.
 	if p.AllowlistEnabled && !p.AllowedTools[toolName] {
-		if len(p.AllowedTools) == 0 || !IsRuntimeOwnedEssentialTool(normalizedToolName) {
+		if len(p.AllowedTools) == 0 ||
+			(!IsRuntimeOwnedEssentialTool(normalizedToolName) && !p.planWriteAllowlistExempt(normalizedToolName)) {
 			return fmt.Errorf("tool not allowed by execution policy: %s", toolName)
 		}
 	}
@@ -126,7 +158,7 @@ func IsRuntimeOwnedEssentialTool(toolName string) bool {
 	switch normalizeToolName(toolName) {
 	case "search_tool",
 		"ask_user_question",
-		"enter_plan_mode", "exit_plan_mode",
+		"enter_plan_mode", "exit_plan_mode", "plan_review",
 		"todos", "get_goal", "read_goal", "update_goal",
 		"background_task", "task_output",
 		"spawn_agent", "spawn_subagents", "spawn_team",
@@ -155,6 +187,48 @@ func runtimeOwnedEssentialExplicitlyDenied(deniedTools map[string]bool, normaliz
 		}
 	}
 	return false
+}
+
+// planWriteAllowlistExempt reports whether the plan-mode write exemption lets a
+// tool name past the allowlist gate.
+//
+// The exemption is claimable only while plan mode is active, only for
+// file-mutating tools, and only with a configured plan allowlist. It relaxes
+// the allowlist gate alone: the concrete targets are still verified per call in
+// allowToolCall, and explicit deny, read-only, capability scope, and the
+// sandbox boundary are checked either before or after this gate.
+func (p *ToolExecutionPolicy) planWriteAllowlistExempt(normalizedToolName string) bool {
+	if p == nil || !p.PlanModeActive {
+		return false
+	}
+	if !isPlanWriteToolName(normalizedToolName) {
+		return false
+	}
+	return hasPlanAllowEntries(p.PlanWriteAllowPaths) || hasPlanAllowEntries(p.PlanWriteAllowPathsResolved)
+}
+
+// planWriteExemptionClaimed reports whether this exact tool name took the
+// plan-mode write exemption (i.e. the allowlist gate was relaxed for it). The
+// condition mirrors AllowTool's gate so the per-call target verification in
+// allowToolCall runs exactly for the calls the exemption let through.
+func (p *ToolExecutionPolicy) planWriteExemptionClaimed(toolName string) bool {
+	if p == nil || !p.AllowlistEnabled || p.AllowedTools[toolName] {
+		return false
+	}
+	return p.planWriteAllowlistExempt(toolName)
+}
+
+// planTargetWorkspaceRoot resolves plan exemption targets the same way the
+// sandbox check resolves path arguments: the session-bound workspace root from
+// ctx first, then the tool-registered PathAnchorRoot.
+func (p *ToolExecutionPolicy) planTargetWorkspaceRoot(ctx context.Context) string {
+	if root := planWorkspaceRoot(ctx); root != "" {
+		return root
+	}
+	if p == nil {
+		return ""
+	}
+	return strings.TrimSpace(p.PathAnchorRoot)
 }
 
 // AllowToolInfo validates a tool's governance metadata.
@@ -215,6 +289,30 @@ func (p *ToolExecutionPolicy) allowToolCall(ctx context.Context, tool skill.Tool
 	// from the policy below.
 	args = toolargs.Normalize(args)
 	argKeys := policyArgKeysForTool(tool.Name)
+
+	// Plan-mode write exemption: AllowTool waved this file-mutating tool past
+	// the allowlist gate, so every concrete target of this call must be verified
+	// against the plan write allowlist here. Explicit deny, read-only, and
+	// capability scope were already enforced (AllowTool), and the sandbox
+	// boundary below still runs, so the exemption never widens an execution
+	// beyond the plan files it was granted for. Calls the allowlist already
+	// covers keep their previous treatment (the engine's plan gate still applies
+	// to them), so the exemption never narrows an explicitly granted tool.
+	if p.planWriteExemptionClaimed(tool.Name) {
+		targets := planWriteTargets(tool.Name, args)
+		if len(targets) == 0 {
+			return fmt.Errorf("plan mode cannot verify %s targets against the plan write allowlist", tool.Name)
+		}
+		if !planWriteTargetsAllowed(
+			tool.Name,
+			args,
+			p.PlanWriteAllowPathsResolved,
+			p.PlanWriteAllowPaths,
+			p.planTargetWorkspaceRoot(ctx),
+		) {
+			return fmt.Errorf("plan mode allows %s only for plan files, got: %s", tool.Name, strings.Join(targets, ", "))
+		}
+	}
 
 	// A non-string path/url/command cannot be inspected, and silently skipping
 	// it would turn a sandbox or read-only rule into a no-op. Refuse the call
@@ -347,6 +445,9 @@ func (p *ToolExecutionPolicy) Clone() *ToolExecutionPolicy {
 		BlockRemoteWrites:      p.BlockRemoteWrites,
 		PathAnchorRoot:         p.PathAnchorRoot,
 	}
+	cloned.PlanModeActive = p.PlanModeActive
+	cloned.PlanWriteAllowPaths = append([]string(nil), p.PlanWriteAllowPaths...)
+	cloned.PlanWriteAllowPathsResolved = append([]string(nil), p.PlanWriteAllowPathsResolved...)
 	if p.Sandbox != nil {
 		cfg := p.Sandbox.Config()
 		cloned.Sandbox = executor.NewSandbox(&cfg)

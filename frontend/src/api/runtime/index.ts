@@ -127,6 +127,14 @@ export {
 } from "./sessions";
 export { branchRuntimeSession } from "./session-branch";
 export {
+  buildStoredPlanDetailPath,
+  getRuntimePlan,
+  listRuntimePlans,
+  normalizeStoredPlan,
+  normalizeStoredPlanList,
+  RUNTIME_PLANS_PATH,
+} from "./plans";
+export {
   compactSessionContext,
   normalizeSessionCompactOutcome,
   normalizeSessionCompactResult,

@@ -16,6 +16,7 @@ import type {
   PendingQuestionInteraction,
 } from "@/lib/pending-interaction";
 import type { RuntimeSessionPlanModeExitDecision } from "@/lib/runtime-api";
+import { approvalReasonText } from "@/lib/pending-interaction/approval-copy";
 import { cn } from "@/lib/utils";
 
 type PendingInteractionBarProps = {
@@ -165,7 +166,7 @@ export function PendingInteractionBar({
 
           {interaction.kind === "approval" && interaction.reason ? (
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              {interaction.reason}
+              {approvalReasonText(interaction.reason)}
             </p>
           ) : null}
           {interaction.kind === "question" ? (

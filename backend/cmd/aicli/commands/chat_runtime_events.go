@@ -5703,6 +5703,8 @@ func humanApprovalReason(reason string) string {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
 	case "permission_mode_requires_approval":
 		return "当前权限模式要求在执行前获得确认（permission_mode_requires_approval）"
+	case "plan_mode:model_auto_enter":
+		return "模型请求进入计划模式：进入后会限制为只读探索、仅可写计划文件，需要你确认（plan_mode:model_auto_enter）"
 	case "manual approval":
 		return "当前工具策略要求人工审批"
 	case "approval_required":

@@ -32,6 +32,7 @@ const PERMISSION_MODE_RELOAD_EVENTS = new Set([
   "tool_completed",
   "permission_mode_changed",
   "plan_mode_changed",
+  "plan_review_available",
   "plan_updated",
   "session_updated",
 ]);

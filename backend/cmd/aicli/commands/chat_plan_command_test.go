@@ -9,8 +9,20 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
+	"github.com/wwsheng009/ai-agent-runtime/internal/planstore"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
+
+// withPlanArtifactStore redirects /plan archive writes to a temp store so tests
+// never touch $HOME/.aicli/plans.
+func withPlanArtifactStore(t *testing.T) *planstore.Store {
+	t.Helper()
+	previous := chatPlanArtifactStore
+	store := planstore.NewStore(t.TempDir())
+	chatPlanArtifactStore = store
+	t.Cleanup(func() { chatPlanArtifactStore = previous })
+	return store
+}
 
 func newPlanCommandSession(mode runtimepolicy.Mode) *ChatSession {
 	return &ChatSession{
@@ -27,6 +39,7 @@ func newPlanCommandSession(mode runtimepolicy.Mode) *ChatSession {
 }
 
 func TestHandlePlanCommand_EnterExitStatus(t *testing.T) {
+	withPlanArtifactStore(t)
 	session := newPlanCommandSession(runtimepolicy.ModeDefault)
 
 	statusOut := captureStdout(t, func() {
@@ -111,6 +124,7 @@ func TestHandlePlanCommand_EnterExitStatus(t *testing.T) {
 }
 
 func TestHandlePlanCommand_QuitRestoresPreviousMode(t *testing.T) {
+	withPlanArtifactStore(t)
 	session := newPlanCommandSession(runtimepolicy.ModeAcceptEdits)
 
 	captureStdout(t, func() {
@@ -146,6 +160,7 @@ func TestHandlePlanCommand_QuitRestoresPreviousMode(t *testing.T) {
 }
 
 func TestHandlePlanCommand_BareMarkdownPathEnters(t *testing.T) {
+	withPlanArtifactStore(t)
 	session := newPlanCommandSession(runtimepolicy.ModeDefault)
 	out := captureStdout(t, func() {
 		_ = handlePlanCommand(session, "/plan plans/iteration-b.md")
@@ -186,6 +201,7 @@ func TestHandlePlanCommand_ExitWithoutActiveRequiresPlanMode(t *testing.T) {
 
 func TestDispatchPlanCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
+	withPlanArtifactStore(t)
 	session := newPlanCommandSession(runtimepolicy.ModeDefault)
 	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
 	interaction := newTestChatInteractionCoordinator(t, session)
@@ -247,6 +263,7 @@ func TestDispatchPlanCommandStaysOnUnifiedTerminalSession(t *testing.T) {
 }
 
 func TestEnterChatPlanMode_NestedEnterKeepsOriginalPreviousMode(t *testing.T) {
+	withPlanArtifactStore(t)
 	session := newPlanCommandSession(runtimepolicy.ModeAcceptEdits)
 	if err := enterChatPlanMode(session, "plan.md"); err != nil {
 		t.Fatalf("enter: %v", err)
@@ -264,6 +281,7 @@ func TestEnterChatPlanMode_NestedEnterKeepsOriginalPreviousMode(t *testing.T) {
 }
 
 func TestApplyChatPlanModeToAgent_ActiveStateForcesPlanPaths(t *testing.T) {
+	withPlanArtifactStore(t)
 	session := newPlanCommandSession(runtimepolicy.ModeDefault)
 	if err := enterChatPlanMode(session, "plan.md"); err != nil {
 		t.Fatalf("enter: %v", err)

@@ -30,6 +30,8 @@ export function ArtifactPanelSurfaceLoading() {
 
 export function SelfContainedSurfacePanel({
   active,
+  lastRuntimeEventType,
+  runtimeEventCount,
   sessionId,
   spec,
   tabIds,
@@ -37,6 +39,8 @@ export function SelfContainedSurfacePanel({
   workspacePath,
 }: {
   active: boolean;
+  lastRuntimeEventType?: string;
+  runtimeEventCount?: number;
   sessionId: string;
   spec: WorkspacePanelSurfaceSpec;
   tabIds: WorkspacePanelSurfaceTabIds;
@@ -64,6 +68,8 @@ export function SelfContainedSurfacePanel({
       {active ? (
         <Suspense fallback={<ArtifactPanelSurfaceLoading />}>
           <Surface
+            lastRuntimeEventType={lastRuntimeEventType}
+            runtimeEventCount={runtimeEventCount}
             sessionId={sessionId}
             threadRelation={threadRelation}
             workspacePath={workspacePath}

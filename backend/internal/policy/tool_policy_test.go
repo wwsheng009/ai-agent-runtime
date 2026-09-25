@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
@@ -95,7 +96,7 @@ func TestToolExecutionPolicy_AllowTool_AllowsRuntimeSearchOutsideAllowlist(t *te
 func TestToolExecutionPolicy_AllowTool_AllowsRuntimeOwnedEssentialsOutsideAllowlist(t *testing.T) {
 	policy := NewToolExecutionPolicy([]string{"view", "grep"}, false)
 	essentials := []string{
-		"enter_plan_mode", "exit_plan_mode", "ask_user_question",
+		"enter_plan_mode", "exit_plan_mode", "plan_review", "ask_user_question",
 		"todos", "get_goal", "update_goal",
 		"spawn_agent", "list_agents", "wait_agent", "resolve_agent_approval",
 		"task_output", "search_tool",
@@ -279,6 +280,130 @@ func TestCapabilityScopedPolicyExposesOnlyDeclaredCapabilitySurface(t *testing.T
 	assert.Error(t, policy.AllowTool("write_file"))
 	assert.Error(t, policy.AllowTool("spawn_agent"))
 	assert.Equal(t, []string{"network", "read_only"}, policy.AllowedCapabilityNames())
+}
+
+// TestToolExecutionPolicy_PlanWriteExemptionUnderNarrowAllowlist pins the §4.7
+// narrow-allowlist exemption: with plan mode active, write/apply_patch may run
+// for plan files even when the product allowlist only listed read tools, while
+// explicit deny, read-only, capability scope, and the sandbox boundary keep
+// their precedence.
+//
+// Patch texts are assembled with the helpers declared in engine_test.go so no
+// literal patch marker appears in this source file.
+func TestToolExecutionPolicy_PlanWriteExemptionUnderNarrowAllowlist(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	ctx := toolctx.WithWorkspaceRoot(context.Background(), workspace)
+	writeInfo := skill.ToolInfo{Name: "write", MCPTrustLevel: "local", ExecutionMode: "local_mcp"}
+	patchInfo := skill.ToolInfo{Name: "apply_patch", MCPTrustLevel: "local", ExecutionMode: "local_mcp"}
+	narrowPlanPolicy := func() *ToolExecutionPolicy {
+		return NewToolExecutionPolicy([]string{"view", "grep"}, false).
+			SetPlanWriteExemption(true, []string{"plan.md"}, []string{filepath.Join(workspace, "plan.md")})
+	}
+
+	t.Run("plan file target is allowed", func(t *testing.T) {
+		policy := narrowPlanPolicy()
+		require.NoError(t, policy.AllowTool("write"))
+		require.NoError(t, policy.AllowToolCallWithContext(ctx, writeInfo, map[string]interface{}{
+			"file_path": "plan.md",
+			"content":   "# plan",
+		}))
+	})
+
+	t.Run("non-plan target is denied", func(t *testing.T) {
+		policy := narrowPlanPolicy()
+		err := policy.AllowToolCallWithContext(ctx, writeInfo, map[string]interface{}{
+			"file_path": "main.go",
+			"content":   "package main",
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("same base name in another directory is denied", func(t *testing.T) {
+		policy := narrowPlanPolicy()
+		err := policy.AllowToolCallWithContext(ctx, writeInfo, map[string]interface{}{
+			"file_path": "other/plan.md",
+			"content":   "# trap",
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("apply_patch limited to the plan file is allowed", func(t *testing.T) {
+		policy := narrowPlanPolicy()
+		patchText := buildCodexPatch(codexUpdateFile+"plan.md", "@@", "+# step")
+		require.NoError(t, policy.AllowToolCallWithContext(ctx, patchInfo, map[string]interface{}{
+			"patch": patchText,
+		}))
+	})
+
+	t.Run("apply_patch with an extra target is denied", func(t *testing.T) {
+		policy := narrowPlanPolicy()
+		patchText := buildCodexPatch(
+			codexUpdateFile+"plan.md",
+			"@@",
+			"+# step",
+			codexUpdateFile+"main.go",
+			"@@",
+			"+package main",
+		)
+		err := policy.AllowToolCallWithContext(ctx, patchInfo, map[string]interface{}{
+			"patch": patchText,
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("apply_patch without a parseable target is denied", func(t *testing.T) {
+		policy := narrowPlanPolicy()
+		err := policy.AllowToolCallWithContext(ctx, patchInfo, map[string]interface{}{
+			"patch": "plan.md\nnot a patch header\n",
+		})
+		require.Error(t, err)
+	})
+
+	t.Run("without plan mode the narrow allowlist still applies", func(t *testing.T) {
+		policy := NewToolExecutionPolicy([]string{"view", "grep"}, false)
+		require.Error(t, policy.AllowTool("write"))
+		require.Error(t, policy.AllowTool("apply_patch"))
+	})
+
+	t.Run("explicit deny wins over the plan exemption", func(t *testing.T) {
+		policy := narrowPlanPolicy()
+		policy.DeniedTools = map[string]bool{"write": true}
+		require.Error(t, policy.AllowTool("write"))
+	})
+
+	t.Run("read-only policy still blocks plan writes", func(t *testing.T) {
+		policy := NewToolExecutionPolicy([]string{"view"}, true).
+			SetPlanWriteExemption(true, []string{"plan.md"}, []string{filepath.Join(workspace, "plan.md")})
+		require.Error(t, policy.AllowTool("write"))
+		require.Error(t, policy.AllowToolCallWithContext(ctx, writeInfo, map[string]interface{}{
+			"file_path": "plan.md",
+			"content":   "# plan",
+		}))
+	})
+
+	t.Run("capability scope still blocks plan writes", func(t *testing.T) {
+		policy := NewCapabilityScopedToolExecutionPolicy([]string{"view"}, []Capability{CapReadOnly}).
+			SetPlanWriteExemption(true, []string{"plan.md"}, []string{filepath.Join(workspace, "plan.md")})
+		require.Error(t, policy.AllowTool("write"))
+	})
+
+	t.Run("sandbox path boundary still blocks outside the root", func(t *testing.T) {
+		root := t.TempDir()
+		outside := filepath.Join(root, "..", "plan.md")
+		policy := NewToolExecutionPolicy([]string{"view"}, false).
+			SetPlanWriteExemption(true, nil, []string{outside})
+		policy.Sandbox = executor.NewSandbox(&executor.SandboxConfig{
+			Enabled:      true,
+			AllowedPaths: []string{root},
+		})
+		patchText := buildCodexPatch(codexHeader("Add File: ")+outside, "+# plan")
+		err := policy.AllowToolCall(patchInfo, map[string]interface{}{
+			"patch": patchText,
+		})
+		require.Error(t, err, "the plan exemption must not bypass the sandbox boundary")
+	})
 }
 
 func TestDeriveChildForTaskNarrowsParentCapabilities(t *testing.T) {

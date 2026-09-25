@@ -40,6 +40,7 @@ var knownToolTaxonomy = map[string]ToolTaxonomy{
 	"ask_user_question":       {Name: "ask_user_question", Kind: types.ToolKindControl, ReadOnly: true},
 	"enter_plan_mode":         {Name: "enter_plan_mode", Kind: types.ToolKindControl, ReadOnly: true},
 	"exit_plan_mode":          {Name: "exit_plan_mode", Kind: types.ToolKindControl, ReadOnly: true},
+	"plan_review":             {Name: "plan_review", Kind: types.ToolKindControl, ReadOnly: true},
 	"background_task":         {Name: "background_task", Kind: types.ToolKindControl},
 	"task_output":             {Name: "task_output", Kind: types.ToolKindRead, ReadOnly: true},
 	"spawn_agent":             {Name: "spawn_agent", Kind: types.ToolKindControl, ReadOnly: true},

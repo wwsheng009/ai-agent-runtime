@@ -23,6 +23,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimeoutput "github.com/wwsheng009/ai-agent-runtime/internal/output"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
+	"github.com/wwsheng009/ai-agent-runtime/internal/planstore"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -163,6 +164,10 @@ type SessionActorConfig struct {
 	// followup_task 的 child-session RunMeta 重建口径
 	// (toolbroker.SpawnAgentRunMetaFromContext)；nil 表示提交空 RunMeta。
 	TriggerTurnRunMeta func(ctx context.Context, session *Session) *team.RunMeta
+	// PlanStore overrides the plan artifact archive store (index + review-round
+	// snapshots). nil uses the process-wide default ($HOME/.aicli/plans or
+	// AICLI_PLANS_DIR).
+	PlanStore *planstore.Store
 }
 
 // SessionActor serializes session commands and manages execution state.
@@ -192,8 +197,14 @@ type SessionActor struct {
 	terminalGuard bool
 	// triggerTurnDrain / 限流状态实现 P0-3b：run 结束后消费 trigger_turn
 	// mailbox 指令。triggerTurnMu 保护 lastAutoAt/consecutive 与 dropped 去重。
-	triggerTurnDrain          bool
-	triggerTurnRunMeta        func(ctx context.Context, session *Session) *team.RunMeta
+	triggerTurnDrain   bool
+	triggerTurnRunMeta func(ctx context.Context, session *Session) *team.RunMeta
+	// planStore archives plan artifacts (index + review-round snapshots); nil
+	// falls back to the process-wide default store.
+	planStore *planstore.Store
+	// planReviewHash deduplicates run-end plan-review announcements per plan
+	// revision (see maybeAnnouncePlanReview).
+	planReviewHash            atomic.Value
 	triggerTurnDrainInFlight  atomic.Bool
 	triggerTurnMu             sync.Mutex
 	triggerTurnLastAutoAt     time.Time
@@ -285,6 +296,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		terminalGuard:      cfg.ApprovalTerminalGuard == nil || *cfg.ApprovalTerminalGuard,
 		triggerTurnDrain:   cfg.TriggerTurnDrain,
 		triggerTurnRunMeta: cfg.TriggerTurnRunMeta,
+		planStore:          cfg.PlanStore,
 		onStop:             cfg.OnStop,
 		runStallTimeout:    cfg.RunStallTimeout,
 		onRunStalled:       cfg.OnRunStalled,
@@ -924,6 +936,12 @@ func (a *SessionActor) handleSubmitPrompt(cmd SubmitPrompt) {
 		a.releaseSessionRun(run)
 		run.complete(SubmitResult{Err: err})
 		return
+	}
+	// Plan-review feedback recorded while plan mode is active is user input for
+	// this turn: deliver it through the request-only system channel and clear
+	// the durable copy so it is never injected twice.
+	if reviewMsg := a.consumePlanReviewNotes(runCtx, session); reviewMsg != nil {
+		cmd.TurnSystemMessages = append(cmd.TurnSystemMessages, *reviewMsg)
 	}
 	preparedPrompt := llm.NewUserPromptMessage(prompt)
 	if len(cmd.ImagePaths) > 0 {
@@ -2954,6 +2972,12 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 				TraceID:   resultTraceID(result, turnID),
 				Payload:   payload,
 			})
+		}
+		// Harness backstop (report §4.5): a clean run that stopped while plan
+		// mode stayed active announces the unreviewed revision, so the user has
+		// a review entry point even when the model never asked for a verdict.
+		if publishTerminal && status == SessionIdle && execErr == nil {
+			a.maybeAnnouncePlanReview(withSessionRunControl(context.Background(), run), session)
 		}
 		// P0-4: a deadline/cancel-class run retires its detached approval here, so
 		// the supervision projector closes the blocked row instead of treating the
@@ -5360,13 +5384,16 @@ func (a *SessionActor) configureRuntime() {
 
 	broker := a.agent.GetToolBroker()
 	if broker == nil {
-		a.agent.SetToolBroker(&toolbroker.Broker{UserInput: a, PlanMode: a})
+		a.agent.SetToolBroker(&toolbroker.Broker{UserInput: a, PlanMode: a, PlanReview: a})
 	} else {
 		if broker.UserInput == nil {
 			broker.UserInput = a
 		}
 		if broker.PlanMode == nil {
 			broker.PlanMode = a
+		}
+		if broker.PlanReview == nil {
+			broker.PlanReview = a
 		}
 	}
 }
@@ -5391,6 +5418,11 @@ func (a *SessionActor) applyPlanModeStateToEngine(engine *runtimepolicy.Engine, 
 	if engine == nil {
 		return
 	}
+	// Keep the tool-execution policy's plan exemption in lockstep with durable
+	// plan state: a narrow --allow-tool list must still be able to write the
+	// plan file while plan mode is active (report §4.7), and must stop being
+	// exempt the moment plan mode ends.
+	a.syncPlanWriteExemption(state)
 	if !planmode.IsActive(state) {
 		if engine.Mode == runtimepolicy.ModePlan {
 			// Bare permission_mode=plan (no durable plan_mode state) still gets default allow paths.
@@ -5399,6 +5431,21 @@ func (a *SessionActor) applyPlanModeStateToEngine(engine *runtimepolicy.Engine, 
 		return
 	}
 	planmode.ApplyToEngine(engine, state)
+}
+
+// syncPlanWriteExemption mirrors the durable plan write allowlist onto the
+// agent's tool-execution policy. Nil policies (agent has none, or it is
+// unrestricted) are left alone: an absent policy already allows the tools.
+func (a *SessionActor) syncPlanWriteExemption(state planmode.State) {
+	if a == nil || a.agent == nil {
+		return
+	}
+	policy := a.agent.GetToolExecutionPolicy()
+	if policy == nil {
+		return
+	}
+	active := planmode.IsActive(state)
+	policy.SetPlanWriteExemption(active, state.WriteAllowPaths, state.WriteAllowPathsResolved)
 }
 
 // applyDurablePlanModeToRun re-applies durable plan state after prepareRun and

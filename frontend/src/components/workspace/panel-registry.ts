@@ -10,6 +10,7 @@
 import { lazy, type ComponentType, type LazyExoticComponent, type ReactNode } from "react";
 import {
   FileCode2Icon,
+  FileTextIcon,
   FolderTreeIcon,
   GitCompareIcon,
   HistoryIcon,
@@ -26,6 +27,7 @@ export type WorkspacePanelSurfaceId =
   | "artifacts"
   | "checkpoints"
   | "plan"
+  | "plans"
   | "files"
   | "git"
   | "sessionDetail";
@@ -62,6 +64,13 @@ export type WorkspacePanelSurfaceProps = {
   workspacePath?: string;
   /** 当前线程与会话的关联快照；未提供时面不渲染关联状态区块。 */
   threadRelation?: WorkspacePanelThreadRelation;
+  /**
+   * 当前线程最新运行时事件（与面板级 hook 同源，见 `artifact-panel.tsx`）。
+   * 自包含面用它做「事件 → 重载」，避免各自再建一条订阅通道。
+   */
+  lastRuntimeEventType?: string;
+  /** 当前线程已消费的运行时事件计数，与 lastRuntimeEventType 组成重载键。 */
+  runtimeEventCount?: number;
 };
 
 export type WorkspacePanelSurfaceSpec = {
@@ -156,6 +165,21 @@ export const WORKSPACE_PANEL_SURFACES: readonly WorkspacePanelSurfaceSpec[] = [
     surface: lazySurface(() =>
       import("@/components/workspace/session-detail-surface").then((module) => ({
         default: module.SessionDetailSurface,
+      })),
+    ),
+  },
+  {
+    // 归档计划浏览器（报告 §4.5）：全局资源、不依赖当前会话，故注册为自包含面。
+    // 排在数组末尾：tab 顺序与 PanelHost 里「面板级面 + 自包含面」的 DOM 顺序保持一致。
+    id: "plans",
+    labelKey: "panels.artifacts.tabs.plans",
+    icon: FileTextIcon,
+    tone: "plan",
+    requiresSession: false,
+    widthClass: "wide",
+    surface: lazySurface(() =>
+      import("@/components/workspace/artifact-panel-plans-surface").then((module) => ({
+        default: module.ArtifactPanelPlansSurface,
       })),
     ),
   },

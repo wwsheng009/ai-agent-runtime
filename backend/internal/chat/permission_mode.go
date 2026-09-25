@@ -50,6 +50,9 @@ func (a *SessionActor) SetPermissionMode(ctx context.Context, sessionID string, 
 		engine.Mode = normalized
 	}
 	a.syncLivePermissionMode(ctx, string(normalized))
+	if state := planmode.Load(session); state.Status == planmode.StatusExited && state.ExitDecision == planmode.ExitQuit {
+		a.archivePlanModeArtifact(ctx, session, state, string(planmode.ExitQuit), planmode.ExitSourceUser)
+	}
 	return nil
 }
 
@@ -66,6 +69,7 @@ func clearPlanStateForPermissionSwitch(session *Session) {
 	if err != nil {
 		return
 	}
+	exited.LastExitSource = planmode.ExitSourceUser
 	planmode.Save(session, exited)
 }
 

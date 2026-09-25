@@ -9,6 +9,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
+	"github.com/wwsheng009/ai-agent-runtime/internal/planstore"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -43,6 +44,9 @@ func newPlanModeTestActor(t *testing.T, sessionID string, mode runtimepolicy.Mod
 		SessionStore: storage,
 		StateStore:   runtimeStore,
 		EventStore:   runtimeStore,
+		// Archive into a temp store so plan-mode tests never touch
+		// $HOME/.aicli/plans.
+		PlanStore: planstore.NewStore(t.TempDir()),
 	})
 	require.NoError(t, err)
 
@@ -422,4 +426,154 @@ func TestSessionActorPlanModeToolsRepublishLiveRunMeta(t *testing.T) {
 	assert.False(t, result.Active)
 	assert.Equal(t, string(runtimepolicy.ModeAcceptEdits), live.PermissionMode)
 	assert.Equal(t, runtimepolicy.ModeAcceptEdits, engine.Mode)
+}
+
+// Model-authored approve/quit is a review request, not a verdict: the session
+// stays in plan mode until the host decides (S0 of
+// docs/analysis/commandcode-plan-mode-design-borrowing-20260925.md §4.1).
+func TestSessionActorModelApproveBecomesPendingExitRequest(t *testing.T) {
+	actor, _, engine := newPlanModeTestActor(t, "plan-model-approve-1", runtimepolicy.ModeDefault)
+	ctx := context.Background()
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "plan.md"})
+	require.NoError(t, err)
+
+	result, err := actor.ExitPlanMode(ctx, "", toolbroker.ExitPlanModeArgs{
+		Decision: "approve",
+		Notes:    "plan is ready",
+		Source:   "model",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Active, "model approve must not exit plan mode")
+	assert.Equal(t, "active", result.Status)
+	assert.True(t, result.PendingExitRequest)
+	assert.Equal(t, "model", result.ExitSource)
+	assert.Equal(t, "", result.ExitDecision)
+	assert.Equal(t, string(runtimepolicy.ModePlan), result.PermissionMode)
+	assert.Equal(t, runtimepolicy.ModePlan, engine.Mode, "engine must stay in plan mode")
+
+	session, err := actor.sessionStore.Load(ctx, actor.id)
+	require.NoError(t, err)
+	state := planmode.Load(session)
+	assert.True(t, planmode.IsActive(state))
+	assert.True(t, state.PendingExitRequest)
+	assert.Equal(t, planmode.ExitSourceModel, state.LastExitSource)
+	assert.Equal(t, planmode.ExitNone, state.ExitDecision)
+	assert.Equal(t, "plan is ready", state.Notes)
+}
+
+// Headless/autonomous hosts opt back into direct model verdicts.
+func TestSessionActorModelApproveAppliesWithAutonomyEnabled(t *testing.T) {
+	t.Setenv("AICLI_PLAN_MODE_MODEL_AUTONOMY", "1")
+	actor, _, engine := newPlanModeTestActor(t, "plan-model-approve-2", runtimepolicy.ModeAcceptEdits)
+	ctx := context.Background()
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "plan.md"})
+	require.NoError(t, err)
+
+	result, err := actor.ExitPlanMode(ctx, "", toolbroker.ExitPlanModeArgs{
+		Decision: "approve",
+		Source:   "model",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Active)
+	assert.Equal(t, "approve", result.ExitDecision)
+	assert.Equal(t, string(runtimepolicy.ModeAcceptEdits), result.PermissionMode)
+	assert.Equal(t, runtimepolicy.ModeAcceptEdits, engine.Mode)
+}
+
+// A user approve must never silently restore bypass_permissions: the session
+// lands in accept_edits instead.
+func TestSessionActorApproveFromBypassDowngradesToAcceptEdits(t *testing.T) {
+	actor, _, engine := newPlanModeTestActor(t, "plan-bypass-approve-1", runtimepolicy.ModeBypassPermissions)
+	ctx := context.Background()
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "plan.md"})
+	require.NoError(t, err)
+
+	result, err := actor.ExitPlanMode(ctx, "", toolbroker.ExitPlanModeArgs{
+		Decision: "approve",
+		Source:   "user",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.Active)
+	assert.Equal(t, string(runtimepolicy.ModeAcceptEdits), result.PermissionMode)
+	assert.Equal(t, runtimepolicy.ModeAcceptEdits, engine.Mode)
+}
+
+// User review feedback is recorded for delivery and moves the review round.
+func TestSessionActorUserRequestChangesRecordsPendingReviewNotes(t *testing.T) {
+	actor, _, _ := newPlanModeTestActor(t, "plan-review-notes-1", runtimepolicy.ModeDefault)
+	ctx := context.Background()
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "plan.md"})
+	require.NoError(t, err)
+
+	result, err := actor.ExitPlanMode(ctx, "", toolbroker.ExitPlanModeArgs{
+		Decision: "request_changes",
+		Notes:    "add rollback risks",
+		Source:   "user",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Active)
+	assert.Equal(t, "add rollback risks", result.PendingReviewNotes)
+	assert.Equal(t, 1, result.ReviewRound)
+
+	session, err := actor.sessionStore.Load(ctx, actor.id)
+	require.NoError(t, err)
+	state := planmode.Load(session)
+	assert.Equal(t, "add rollback risks", state.PendingReviewNotes)
+	assert.Equal(t, 1, state.ReviewRound)
+}
+
+// Model self-revision notes must not be echoed back to the model as user review
+// feedback.
+func TestSessionActorModelRequestChangesDoesNotQueueReviewNotes(t *testing.T) {
+	actor, _, _ := newPlanModeTestActor(t, "plan-review-notes-2", runtimepolicy.ModeDefault)
+	ctx := context.Background()
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "plan.md"})
+	require.NoError(t, err)
+
+	_, err = actor.ExitPlanMode(ctx, "", toolbroker.ExitPlanModeArgs{
+		Decision: "request_changes",
+		Notes:    "self revision",
+		Source:   "model",
+	})
+	require.NoError(t, err)
+
+	session, err := actor.sessionStore.Load(ctx, actor.id)
+	require.NoError(t, err)
+	assert.Empty(t, planmode.Load(session).PendingReviewNotes)
+}
+
+// Review feedback is delivered into the turn channel exactly once.
+func TestSessionActorConsumePlanReviewNotesDeliversOnce(t *testing.T) {
+	actor, _, _ := newPlanModeTestActor(t, "plan-consume-notes-1", runtimepolicy.ModeDefault)
+	ctx := context.Background()
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "plan.md"})
+	require.NoError(t, err)
+	_, err = actor.ExitPlanMode(ctx, "", toolbroker.ExitPlanModeArgs{
+		Decision: "request_changes",
+		Notes:    "add rollback risks",
+		Source:   "user",
+	})
+	require.NoError(t, err)
+
+	loaded, err := actor.sessionStore.Load(ctx, actor.id)
+	require.NoError(t, err)
+	msg := actor.consumePlanReviewNotes(ctx, loaded)
+	require.NotNil(t, msg)
+	assert.Contains(t, msg.Content, "add rollback risks")
+	assert.Equal(t, agent.ReminderKindPlanReview, agent.ReminderKindOf(*msg))
+
+	reloaded, err := actor.sessionStore.Load(ctx, actor.id)
+	require.NoError(t, err)
+	assert.Empty(t, planmode.Load(reloaded).PendingReviewNotes)
+	assert.Nil(t, actor.consumePlanReviewNotes(ctx, reloaded), "feedback must not be delivered twice")
 }

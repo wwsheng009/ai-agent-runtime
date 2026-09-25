@@ -22,6 +22,7 @@ var brokerToolArgKeys = map[string][]string{
 	ToolAskUserQuestion:      {"prompt", "required", "suggestions"},
 	ToolEnterPlanMode:        {"plan_path", "plan_write_paths"},
 	ToolExitPlanMode:         {"decision", "notes"},
+	ToolPlanReview:           {"plan_id", "plan_path", "version"},
 	ToolBackgroundTask:       {"command", "cwd", "priority", "restart_policy", "startup_acceptance", "timeout_sec"},
 	ToolTaskOutput:           {"job_id", "limit", "offset"},
 	ToolSpawnAgent:           spawnAgentToolArgKeys,

@@ -58,9 +58,12 @@ type HookDispatcher interface {
 //  3. Rule engine → deny > ask > allow
 //  4. Remembered grants (never for dangerous tools)
 //  5. Taxonomy / shell read-only auto-allow
-//  6. permission_mode policy
-//  7. Callback override (patched args re-validated against hard constraints)
-//  8. Ask handler / headless deny (patched args re-validated against hard constraints)
+//  6. Model plan-entry gate: enter_plan_mode asks for one user confirmation
+//     unless Engine.PlanAutoEnterWithoutApproval or the process policy opts in
+//     (see PlanEnterToolName / PlanAutoEnterApprovalReason)
+//  7. permission_mode policy
+//  8. Callback override (patched args re-validated against hard constraints)
+//  9. Ask handler / headless deny (patched args re-validated against hard constraints)
 //
 // bypass_permissions may skip ask/grants flow for mode decisions, but MUST NOT
 // skip hook denials or hard deny rules / policy denials. Any argument patch
@@ -81,6 +84,28 @@ type Engine struct {
 	DisableReadOnlyAuto bool
 	// PlanWriteAllowPaths restricts write tools under mode=plan to these path prefixes/names (optional).
 	PlanWriteAllowPaths []string
+	// PlanWriteAllowPathsResolved carries the workspace-resolved absolute form of
+	// PlanWriteAllowPaths (see planmode.State.WriteAllowPathsResolved). When set
+	// it is the authoritative allowlist: the engine matches cleaned absolute
+	// paths or separator-boundary directory prefixes only, and a relative target
+	// is anchored to the session workspace root carried in the evaluation
+	// context. Base-name matches are never accepted in either mode.
+	PlanWriteAllowPathsResolved []string
+	// PlanAutoEnterWithoutApproval disables the default user-confirmation gate
+	// for a model-driven enter_plan_mode call (PlanEnterToolName). The zero
+	// value (false) keeps the product default: the request is routed through the
+	// existing approval channel (DecisionAsk with Reason =
+	// PlanAutoEnterApprovalReason), and a host without an AskHandler denies it
+	// with the pipeline's ordinary headless semantics (StageHeadlessDeny,
+	// reason=approval_required) — such hosts opt back into autonomous entry with
+	// AICLI_PLAN_MODE_MODEL_AUTONOMY=1 (PlanModelAutonomyEnabled).
+	//
+	// Set it to true only for trusted/autonomous deployments that intentionally
+	// restore the legacy behavior. Callers are runtime hosts that build the
+	// permission engine from configuration; the field never applies to any other
+	// tool, and never to explicit user actions such as `/plan enter` or
+	// `--permission-mode plan`.
+	PlanAutoEnterWithoutApproval bool
 }
 
 const DefaultApprovalTimeout = 30 * time.Minute
@@ -131,6 +156,34 @@ func SetPlanWriteAllowPaths(engine *Engine, paths ...string) {
 		return
 	}
 	engine.PlanWriteAllowPaths = cleaned
+}
+
+// SetPlanWriteAllowPathsResolved replaces the workspace-resolved plan-mode write
+// allowlist (absolute paths, workspace-anchored). Empty input clears it, which
+// returns matching to the raw PlanWriteAllowPaths relative semantics.
+func SetPlanWriteAllowPathsResolved(engine *Engine, paths ...string) {
+	if engine == nil {
+		return
+	}
+	cleaned := make([]string, 0, len(paths))
+	seen := map[string]struct{}{}
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		key := strings.ToLower(filepath.Clean(path))
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		cleaned = append(cleaned, filepath.Clean(path))
+	}
+	if len(cleaned) == 0 {
+		engine.PlanWriteAllowPathsResolved = nil
+		return
+	}
+	engine.PlanWriteAllowPathsResolved = cleaned
 }
 
 // Evaluate performs a permission evaluation for the given request.
@@ -227,19 +280,42 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	}
 
 	// 5) Taxonomy / shell read-only auto-allow.
-	if decision.Type == "" && e != nil && !e.DisableReadOnlyAuto {
+	//
+	// enter_plan_mode is skipped while the plan-entry gate below is armed: its
+	// taxonomy capabilities (read_only + ask_user) would auto-allow it here and
+	// the gate would never see an undecided request. The opt-out paths keep the
+	// legacy behavior untouched, because the gate is not armed for them.
+	if decision.Type == "" && e != nil && !e.DisableReadOnlyAuto && !e.planEnterGateArmed(req) {
 		if auto, reason := e.readOnlyAutoDecision(req); auto {
 			decision = withStage(Decision{Type: DecisionAllow, Reason: reason}, StageReadonlyAuto, reason)
 		}
 	}
 
-	// 6) permission_mode policy when still undecided.
+	// 6) Model plan-entry gate: switching into plan mode is a change the user
+	// confirms once. Rules (step 3) and grants (step 4) already decided win —
+	// this only fires on a still-undecided request — and plan mode already being
+	// in effect is a no-op re-entry that must not prompt again. bypass_permissions
+	// adds no special case here: the ask flows into resolveAsk, which keeps its
+	// existing bypass → allow semantics. Without an AskHandler, resolveAsk turns
+	// the ask into the pipeline's headless deny (StageHeadlessDeny,
+	// reason=approval_required), which is the intended behavior for
+	// non-interactive hosts; AICLI_PLAN_MODE_MODEL_AUTONOMY=1 or
+	// Engine.PlanAutoEnterWithoutApproval restores autonomous entry.
+	if decision.Type == "" && e.planEnterNeedsApproval(req, mode) {
+		// withStage composes "stage:reason"; PlanAutoEnterApprovalReason is a
+		// public contract hosts match on, so pin it verbatim (same pattern as the
+		// permission_mode branch below).
+		decision = withStage(Decision{Type: DecisionAsk}, StageMode, "")
+		decision.Reason = PlanAutoEnterApprovalReason
+	}
+
+	// 7) permission_mode policy when still undecided.
 	if decision.Type == "" {
 		// Plan-mode write path pre-check: when PlanWriteAllowPaths is set, CapWriteFS
 		// is allowed only for matching paths; otherwise keep legacy mode deny.
 		if mode == ModePlan && hasCapability(req.Capabilities, CapWriteFS) {
-			if e != nil && len(e.PlanWriteAllowPaths) > 0 {
-				if e.planWriteAllowed(req) {
+			if e != nil && (len(e.PlanWriteAllowPaths) > 0 || len(e.PlanWriteAllowPathsResolved) > 0) {
+				if e.planWriteAllowed(ctx, req) {
 					decision = withStage(Decision{
 						Type:   DecisionAllow,
 						Reason: "plan_mode_write_path_allowed",
@@ -261,7 +337,7 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 		}
 	}
 
-	// 7) Callback override.
+	// 8) Callback override.
 	if e.Callback != nil {
 		callbackDecision, reason, err := e.Callback(ctx, req)
 		if err != nil {
@@ -549,44 +625,30 @@ func allShellCommandsReadOnly(raw interface{}) bool {
 	}
 }
 
-func (e *Engine) planWriteAllowed(req EvalRequest) bool {
+// planWriteAllowed applies the plan-mode write allowlist to one request.
+//
+// Every write target of the call must be covered (see planWriteTargetsAllowed):
+// file tools contribute their path arguments and apply_patch contributes each
+// parsed patch header, so one patch cannot smuggle a second file past the
+// allowlist. A call whose targets cannot be extracted is denied. Matching is
+// cleaned-path equality or a separator-boundary directory prefix; base-name
+// equality is not accepted.
+func (e *Engine) planWriteAllowed(ctx context.Context, req EvalRequest) bool {
 	if e == nil {
 		return false
 	}
 	// If no allow paths configured, keep legacy modeDecision behavior (deny writes in plan via mode).
 	// Returning true here means "do not extra-deny"; modeDecision still applies when decision empty.
-	if len(e.PlanWriteAllowPaths) == 0 {
+	if len(e.PlanWriteAllowPaths) == 0 && len(e.PlanWriteAllowPathsResolved) == 0 {
 		return true
 	}
-	path, ok := firstStringArg(req.Args, "file_path", "path")
-	if !ok {
-		// apply_patch may use freeform patch; allow if plan paths include plan.md heuristic later.
-		if raw, ok := req.Args["patch"].(string); ok && strings.TrimSpace(raw) != "" {
-			lower := strings.ToLower(raw)
-			for _, allow := range e.PlanWriteAllowPaths {
-				allow = strings.ToLower(strings.TrimSpace(allow))
-				if allow != "" && strings.Contains(lower, allow) {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	clean := filepath.Clean(path)
-	base := strings.ToLower(filepath.Base(clean))
-	for _, allow := range e.PlanWriteAllowPaths {
-		allow = strings.TrimSpace(allow)
-		if allow == "" {
-			continue
-		}
-		if strings.EqualFold(filepath.Base(allow), base) {
-			return true
-		}
-		if strings.HasPrefix(strings.ToLower(clean), strings.ToLower(filepath.Clean(allow))) {
-			return true
-		}
-	}
-	return false
+	return planWriteTargetsAllowed(
+		req.ToolName,
+		req.Args,
+		e.PlanWriteAllowPathsResolved,
+		e.PlanWriteAllowPaths,
+		planWorkspaceRoot(ctx),
+	)
 }
 
 func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequest) (Decision, error) {

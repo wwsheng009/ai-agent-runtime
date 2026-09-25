@@ -357,6 +357,9 @@ type EnterPlanModeArgs struct {
 	// mode is active. It is a write-allowlist union with PlanPath: the primary
 	// path remains the artifact surfaced in results and reviews.
 	PlanWritePaths []string `json:"plan_write_paths,omitempty"`
+	// Source identifies the entry author: "user" (host/CLI/API) or "model"
+	// (agent tool call). Empty defaults to "user".
+	Source string `json:"source,omitempty"`
 }
 
 // ExitPlanModeArgs describes exit_plan_mode tool input.
@@ -365,6 +368,11 @@ type ExitPlanModeArgs struct {
 	Decision string `json:"decision"`
 	// Notes are optional free-form notes recorded with the exit decision.
 	Notes string `json:"notes,omitempty"`
+	// Source identifies the decision author: "user" (host/CLI/API) or "model"
+	// (agent tool call). Empty defaults to "user" for compatibility. Model
+	// approve/quit is recorded as an exit request unless the host runs with
+	// model autonomy enabled.
+	Source string `json:"source,omitempty"`
 }
 
 // PlanModeResult reports plan-mode enter/exit outcome for agent tools.
@@ -379,6 +387,15 @@ type PlanModeResult struct {
 	WriteAllowPaths []string `json:"write_allow_paths,omitempty"`
 	EnteredAt       string   `json:"entered_at,omitempty"`
 	ExitedAt        string   `json:"exited_at,omitempty"`
+	// PendingExitRequest is true when a model/host exit request is waiting for
+	// the user's verdict; the session stays in plan mode meanwhile.
+	PendingExitRequest bool `json:"pending_exit_request,omitempty"`
+	// ExitSource is the author of the last decision/request: user|model.
+	ExitSource string `json:"exit_source,omitempty"`
+	// ReviewRound counts completed review rounds for the current plan session.
+	ReviewRound int `json:"review_round,omitempty"`
+	// PendingReviewNotes carries user review feedback not yet delivered to the model.
+	PendingReviewNotes string `json:"pending_review_notes,omitempty"`
 }
 
 // PlanModeController toggles durable plan mode for the current session mid-turn.
@@ -388,6 +405,44 @@ type PlanModeResult struct {
 type PlanModeController interface {
 	EnterPlanMode(ctx context.Context, sessionID string, args EnterPlanModeArgs) (*PlanModeResult, error)
 	ExitPlanMode(ctx context.Context, sessionID string, args ExitPlanModeArgs) (*PlanModeResult, error)
+}
+
+// PlanReviewArgs describes plan_review tool input.
+type PlanReviewArgs struct {
+	// PlanID selects an archived plan (planstore id; may contain "/", e.g.
+	// "ai-agent-runtime/plan"). When set it wins over PlanPath.
+	PlanID string `json:"plan_id,omitempty"`
+	// PlanPath selects a plan file directly, relative to the session workspace.
+	// Empty means the current session's active plan (or last known plan path).
+	PlanPath string `json:"plan_path,omitempty"`
+	// Version selects an archived snapshot version; 0 means latest.
+	Version int `json:"version,omitempty"`
+}
+
+// PlanReviewResult is the review payload returned by plan_review: the plan text
+// plus the state a reviewer needs (status, round, verdict entry points).
+type PlanReviewResult struct {
+	Active      bool   `json:"active,omitempty"`
+	Status      string `json:"status,omitempty"`
+	PlanID      string `json:"plan_id,omitempty"`
+	PlanPath    string `json:"plan_path,omitempty"`
+	Version     int    `json:"version,omitempty"`
+	ReviewRound int    `json:"review_round,omitempty"`
+	Source      string `json:"source,omitempty"` // session|archive
+	Content     string `json:"content,omitempty"`
+	ContentSize int    `json:"content_size,omitempty"`
+	Truncated   bool   `json:"truncated,omitempty"`
+	// VerdictOptions lists the host commands a user can run to decide the review.
+	VerdictOptions []string `json:"verdict_options,omitempty"`
+	// Hint is a ready-to-relay sentence the model can show the user.
+	Hint string `json:"hint,omitempty"`
+}
+
+// PlanReviewController loads a plan (session or archived) for the review
+// surface behind the plan_review tool. Implementations must not mutate plan
+// state: opening a review never decides it.
+type PlanReviewController interface {
+	ReviewPlan(ctx context.Context, sessionID string, args PlanReviewArgs) (*PlanReviewResult, error)
 }
 
 // SpawnAgentArgs describes a lightweight child-agent session request.

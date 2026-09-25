@@ -10,6 +10,8 @@ package planmode
 
 import (
 	"fmt"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,23 +39,48 @@ const (
 type ExitDecision string
 
 const (
-	ExitApprove         ExitDecision = "approve"
-	ExitRequestChanges  ExitDecision = "request_changes"
-	ExitQuit            ExitDecision = "quit"
-	ExitNone            ExitDecision = ""
+	ExitApprove        ExitDecision = "approve"
+	ExitRequestChanges ExitDecision = "request_changes"
+	ExitQuit           ExitDecision = "quit"
+	ExitNone           ExitDecision = ""
+)
+
+// ExitSource identifies who decided (or requested) a plan-mode exit.
+type ExitSource string
+
+const (
+	ExitSourceUser  ExitSource = "user"
+	ExitSourceModel ExitSource = "model"
+	ExitSourceNone  ExitSource = ""
 )
 
 // State is the durable plan-mode session state.
 type State struct {
-	Status             Status       `json:"status"`
-	PlanPath           string       `json:"plan_path,omitempty"`
-	EnteredAt          string       `json:"entered_at,omitempty"`
-	ExitedAt           string       `json:"exited_at,omitempty"`
-	ExitDecision       ExitDecision `json:"exit_decision,omitempty"`
-	PreviousMode       string       `json:"previous_mode,omitempty"`
-	Notes              string       `json:"notes,omitempty"`
-	WriteAllowPaths    []string     `json:"write_allow_paths,omitempty"`
-	PendingExitRequest bool         `json:"pending_exit_request,omitempty"`
+	Status          Status       `json:"status"`
+	PlanPath        string       `json:"plan_path,omitempty"`
+	EnteredAt       string       `json:"entered_at,omitempty"`
+	ExitedAt        string       `json:"exited_at,omitempty"`
+	ExitDecision    ExitDecision `json:"exit_decision,omitempty"`
+	PreviousMode    string       `json:"previous_mode,omitempty"`
+	Notes           string       `json:"notes,omitempty"`
+	WriteAllowPaths []string     `json:"write_allow_paths,omitempty"`
+	// WriteAllowPathsResolved is the workspace-anchored absolute form of
+	// WriteAllowPaths, filled at enter time when the host knows the session
+	// workspace. Permission matching prefers it (cleaned absolute equality or a
+	// separator-boundary directory prefix); when it is empty the raw
+	// WriteAllowPaths relative semantics apply. Best-effort: resolution never
+	// fails an enter.
+	WriteAllowPathsResolved []string `json:"write_allow_paths_resolved,omitempty"`
+	PendingExitRequest      bool     `json:"pending_exit_request,omitempty"`
+	// LastExitSource records who last decided or requested the exit
+	// (user|model). It is diagnostic: the decision itself lives in
+	// ExitDecision/PendingExitRequest.
+	LastExitSource ExitSource `json:"last_exit_source,omitempty"`
+	// PendingReviewNotes carries user review feedback (request_changes) that
+	// must reach the model on its next turn. It is cleared once delivered.
+	PendingReviewNotes string `json:"pending_review_notes,omitempty"`
+	// ReviewRound counts completed review rounds for the current plan session.
+	ReviewRound int `json:"review_round,omitempty"`
 }
 
 // ContextGetter reads a session context value.
@@ -148,7 +175,39 @@ func Clear(setter ContextSetter) {
 	setter.SetContext(ContextKey, State{Status: StatusInactive}.ToMap())
 }
 
+// EnterOptions configures a plan-mode entry.
+type EnterOptions struct {
+	// PreviousMode is the permission mode to restore when plan mode exits.
+	PreviousMode string
+	// PlanPath is the primary plan artifact path.
+	PlanPath string
+	// WriteAllowPaths extends the plan write allowlist. The primary plan path is
+	// always unioned in (see Enter).
+	WriteAllowPaths []string
+	// Workspace is the session workspace root used to resolve WriteAllowPaths
+	// into State.WriteAllowPathsResolved. Empty (or unresolvable) input keeps the
+	// legacy relative-path semantics: resolved stays empty and the raw allowlist
+	// is compared as-is. planmode deliberately does not read the workspace from
+	// session metadata; the host passes it in, so this package stays free of a
+	// sessionmeta dependency.
+	Workspace string
+}
+
+// EnterPlan activates plan mode from options, resolving the write allowlist
+// against the supplied workspace.
+//
+// With EnterOptions.Workspace empty this is exactly Enter: no resolved paths are
+// recorded and matching falls back to the raw relative allowlist.
+func EnterPlan(opts EnterOptions) State {
+	state := Enter(opts.PreviousMode, opts.PlanPath, opts.WriteAllowPaths...)
+	state.WriteAllowPathsResolved = resolveWriteAllowPaths(state.WriteAllowPaths, opts.Workspace)
+	return state
+}
+
 // Enter activates plan mode, recording previous permission mode and plan path.
+//
+// It is the workspace-less entry point; hosts that know the session workspace
+// should call EnterPlan so the allowlist is also recorded in its resolved form.
 func Enter(previousMode, planPath string, writeAllowPaths ...string) State {
 	path := NormalizePlanPath(planPath)
 	allows := cleanPaths(writeAllowPaths...)
@@ -170,6 +229,50 @@ func Enter(previousMode, planPath string, writeAllowPaths ...string) State {
 	}
 }
 
+// resolveWriteAllowPaths anchors each allowlist entry to the workspace root.
+//
+// Best-effort by contract: an unknown or unresolvable workspace yields nil (so
+// matching keeps the relative fallback), and absolute entries are only cleaned.
+// It never returns partial garbage for an entry it cannot resolve: such an entry
+// is skipped, and the raw allowlist still covers it.
+func resolveWriteAllowPaths(allows []string, workspace string) []string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" || len(allows) == 0 {
+		return nil
+	}
+	root := workspace
+	if !filepath.IsAbs(root) {
+		absRoot, err := filepath.Abs(root)
+		if err != nil {
+			return nil
+		}
+		root = absRoot
+	}
+	resolved := make([]string, 0, len(allows))
+	seen := map[string]struct{}{}
+	for _, allow := range allows {
+		allow = strings.TrimSpace(allow)
+		if allow == "" {
+			continue
+		}
+		path := allow
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, path)
+		}
+		path = filepath.Clean(path)
+		key := strings.ToLower(path)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		resolved = append(resolved, path)
+	}
+	if len(resolved) == 0 {
+		return nil
+	}
+	return resolved
+}
+
 // RequestExit marks that the agent requested exit approval without deciding yet.
 func RequestExit(state State) State {
 	state = normalizeState(state)
@@ -178,6 +281,66 @@ func RequestExit(state State) State {
 	}
 	state.PendingExitRequest = true
 	return state
+}
+
+// NormalizeExitSource parses user|model. Unknown/empty input falls back to
+// user, the historical default for host-driven exit decisions.
+func NormalizeExitSource(raw string) ExitSource {
+	switch ExitSource(strings.ToLower(strings.TrimSpace(raw))) {
+	case ExitSourceModel, "agent", "assistant":
+		return ExitSourceModel
+	case ExitSourceUser, "host", "human":
+		return ExitSourceUser
+	default:
+		return ExitSourceUser
+	}
+}
+
+// RequestExitFrom marks an exit request that still needs a user decision while
+// recording who asked (model|user).
+func RequestExitFrom(state State, source ExitSource, notes string) State {
+	state = RequestExit(state)
+	state.LastExitSource = NormalizeExitSource(string(source))
+	if text := strings.TrimSpace(notes); text != "" {
+		state.Notes = text
+	}
+	return state
+}
+
+// ModelMayDecideExit reports whether a model-authored approve/quit may be
+// applied directly. Interactive hosts require an explicit user decision;
+// headless/autonomous hosts opt in with AICLI_PLAN_MODE_MODEL_AUTONOMY=1.
+//
+// The switch lives in internal/policy so plan entry (the engine's
+// enter_plan_mode confirmation gate) and plan exit share one policy and cannot
+// diverge.
+func ModelMayDecideExit() bool {
+	return runtimepolicy.PlanModelAutonomyEnabled()
+}
+
+// RecordReviewNotes stores user review feedback for delivery on the next turn
+// and advances the review round.
+func RecordReviewNotes(state State, notes string) State {
+	state = normalizeState(state)
+	if text := strings.TrimSpace(notes); text != "" {
+		state.PendingReviewNotes = text
+	}
+	state.ReviewRound++
+	return state
+}
+
+// ConsumeReviewNotes returns pending review feedback and clears it, so the
+// feedback is delivered exactly once.
+func ConsumeReviewNotes(state State) (State, string) {
+	state = normalizeState(state)
+	notes := strings.TrimSpace(state.PendingReviewNotes)
+	state.PendingReviewNotes = ""
+	return state, notes
+}
+
+// ExitRequested reports whether an exit request awaits a user decision.
+func ExitRequested(state State) bool {
+	return normalizeState(state).PendingExitRequest
 }
 
 // Exit finalizes plan mode with an approve/request_changes/quit decision.
@@ -215,8 +378,9 @@ func EffectivePermissionMode(state State) string {
 }
 
 // ApplyToEngine configures a permission engine for the current plan state.
-// When active, forces PlanWriteAllowPaths; when inactive, leaves engine untouched
-// except ensuring defaults if already in plan mode elsewhere.
+// When active, forces PlanWriteAllowPaths (and, when the host resolved them, the
+// workspace-anchored PlanWriteAllowPathsResolved); when inactive, leaves engine
+// untouched except ensuring defaults if already in plan mode elsewhere.
 func ApplyToEngine(engine *runtimepolicy.Engine, state State) {
 	if engine == nil {
 		return
@@ -226,6 +390,7 @@ func ApplyToEngine(engine *runtimepolicy.Engine, state State) {
 		return
 	}
 	runtimepolicy.SetPlanWriteAllowPaths(engine, state.WriteAllowPaths...)
+	runtimepolicy.SetPlanWriteAllowPathsResolved(engine, state.WriteAllowPathsResolved...)
 	engine.Mode = runtimepolicy.ModePlan
 }
 
@@ -243,6 +408,14 @@ func ResumeModeAfterExit(state State) string {
 	case ExitRequestChanges:
 		// Stay ready for another plan revision under plan mode.
 		return string(runtimepolicy.ModePlan)
+	case ExitApprove:
+		// Approving a plan must not silently restore a permission-bypass mode:
+		// implementation starts in accept_edits so the approval is not also a
+		// blanket "no more prompts" switch for the rest of the session.
+		if prev == string(runtimepolicy.ModeBypassPermissions) {
+			return string(runtimepolicy.ModeAcceptEdits)
+		}
+		return prev
 	default:
 		return prev
 	}
@@ -279,8 +452,24 @@ func (s State) ToMap() map[string]interface{} {
 		}
 		out["write_allow_paths"] = paths
 	}
+	if len(s.WriteAllowPathsResolved) > 0 {
+		paths := make([]interface{}, 0, len(s.WriteAllowPathsResolved))
+		for _, p := range s.WriteAllowPathsResolved {
+			paths = append(paths, p)
+		}
+		out["write_allow_paths_resolved"] = paths
+	}
 	if s.PendingExitRequest {
 		out["pending_exit_request"] = true
+	}
+	if s.LastExitSource != "" {
+		out["last_exit_source"] = string(s.LastExitSource)
+	}
+	if s.PendingReviewNotes != "" {
+		out["pending_review_notes"] = s.PendingReviewNotes
+	}
+	if s.ReviewRound > 0 {
+		out["review_round"] = s.ReviewRound
 	}
 	return out
 }
@@ -297,7 +486,18 @@ func normalizeState(state State) State {
 			state.ExitDecision = decision
 		}
 	}
+	state.PendingReviewNotes = strings.TrimSpace(state.PendingReviewNotes)
+	if state.LastExitSource != "" {
+		state.LastExitSource = NormalizeExitSource(string(state.LastExitSource))
+	}
+	if state.ReviewRound < 0 {
+		state.ReviewRound = 0
+	}
 	state.WriteAllowPaths = cleanPaths(state.WriteAllowPaths...)
+	state.WriteAllowPathsResolved = cleanPaths(state.WriteAllowPathsResolved...)
+	if len(state.WriteAllowPathsResolved) == 0 {
+		state.WriteAllowPathsResolved = nil
+	}
 	if state.Status == StatusActive && len(state.WriteAllowPaths) == 0 {
 		state.WriteAllowPaths = []string{state.PlanPath}
 	}
@@ -316,6 +516,11 @@ func stateFromMap(raw map[string]interface{}) State {
 		PreviousMode:       strings.TrimSpace(fmt.Sprint(rawValueOrEmpty(raw, "previous_mode"))),
 		Notes:              strings.TrimSpace(fmt.Sprint(rawValueOrEmpty(raw, "notes"))),
 		PendingExitRequest: asBool(raw["pending_exit_request"]),
+		PendingReviewNotes: strings.TrimSpace(fmt.Sprint(rawValueOrEmpty(raw, "pending_review_notes"))),
+		ReviewRound:        asInt(raw["review_round"]),
+	}
+	if source := strings.TrimSpace(fmt.Sprint(rawValueOrEmpty(raw, "last_exit_source"))); source != "" && source != "<nil>" {
+		state.LastExitSource = NormalizeExitSource(source)
 	}
 	if decision := strings.TrimSpace(fmt.Sprint(rawValueOrEmpty(raw, "exit_decision"))); decision != "" && decision != "<nil>" {
 		if normalized, err := NormalizeExitDecision(decision); err == nil {
@@ -324,6 +529,9 @@ func stateFromMap(raw map[string]interface{}) State {
 	}
 	if paths, ok := raw["write_allow_paths"]; ok {
 		state.WriteAllowPaths = stringList(paths)
+	}
+	if paths, ok := raw["write_allow_paths_resolved"]; ok {
+		state.WriteAllowPathsResolved = stringList(paths)
 	}
 	return state
 }
@@ -354,6 +562,22 @@ func asBool(value interface{}) bool {
 		return typed != 0
 	}
 	return false
+}
+
+func asInt(value interface{}) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+			return parsed
+		}
+	}
+	return 0
 }
 
 func stringList(value interface{}) []string {
