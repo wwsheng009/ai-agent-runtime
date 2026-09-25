@@ -1994,6 +1994,18 @@ body.sidebar-collapsed #sidebar {
 }
 .skill-desc { font-size: 12px; line-height: 1.6; color: var(--fg3); }
 
+/* 启停开关（列表行与详情头部共用）：点击写配置 + 热生效，见 js/skills.js。
+   用 span[role=button] 而不是 button：列表行本身就是 button，嵌套 button 非法。 */
+.skill-toggle {
+  flex: none; margin-left: auto; cursor: pointer; user-select: none;
+  font-size: 11px; padding: 2px 8px; border-radius: 3px;
+  color: var(--fg2); background: var(--bg4); border: 1px solid var(--border2);
+}
+.skill-toggle:hover { color: var(--fg); border-color: var(--accent); }
+.skill-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.skill-row-disabled .skill-name { color: var(--fg3); text-decoration: line-through; }
+.skill-badge-off { color: var(--danger, #e5534b); border-color: var(--border2); }
+
 /* ---- 技能详情弹层：头部摘要 + 页签 + 面板 ----
    页签按钮与面板内容由 js/skills.js 按「后端有值才显示」渲染：
    #skill-detail-tabs 内是 role="tablist"，内容区每次只渲染当前页签的

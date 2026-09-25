@@ -17,8 +17,14 @@ var skillsLoadedSessionID = "";
 
 function skillsEl(id) { return document.getElementById(id); }
 
-function skillsAPI(path) {
-  return fetch(path, { cache: "no-store" }).then(function (res) {
+function skillsAPI(path, options) {
+  var init = { cache: "no-store" };
+  if (options && options.method) { init.method = options.method; }
+  if (options && options.body !== undefined) {
+    init.headers = { "Content-Type": "application/json" };
+    init.body = options.body;
+  }
+  return fetch(path, init).then(function (res) {
     return res.json().then(function (body) {
       return { status: res.status, body: body };
     }, function () {
@@ -108,7 +114,9 @@ function renderSkillsList(body) {
 // 就不出现对应节点，不补默认值。
 function renderSkillRow(item) {
   var name = item && item.name ? String(item.name) : "";
+  var disabled = !!(item && item.disabled);
   var badges = [];
+  if (disabled) { badges.push('<span class="skill-badge skill-badge-off">已停用</span>'); }
   if (item && item.category) { badges.push('<span class="skill-badge">' + esc(item.category) + "</span>"); }
   if (item && item.version) { badges.push('<span class="skill-badge">v' + esc(item.version) + "</span>"); }
   if (item && item.kind) { badges.push('<span class="skill-badge skill-badge-kind">' + esc(item.kind) + "</span>"); }
@@ -117,13 +125,24 @@ function renderSkillRow(item) {
     sub.push('<span class="skill-fn">' + esc(item.function_name) + "</span>");
   }
   if (item && item.description) { sub.push('<span class="skill-desc">' + esc(item.description) + "</span>"); }
-  return '<button class="skill-row" type="button" data-skill-name="' + esc(name) + '">'
+  return '<button class="skill-row' + (disabled ? " skill-row-disabled" : "") + '" type="button" data-skill-name="' + esc(name) + '">'
     + '<span class="skill-row-main"><span class="skill-name">' + esc(name) + "</span>" + badges.join("") + "</span>"
     + (sub.length ? '<span class="skill-row-sub">' + sub.join("") + "</span>" : "")
+    + skillToggleControlHtml(name, disabled)
     + "</button>";
 }
 
 function bindSkillRows(listEl) {
+  // 开关先绑：点击落在开关上时阻止冒泡，避免同时打开详情弹窗。
+  var toggles = listEl.querySelectorAll("[data-skill-toggle]");
+  for (var t = 0; t < toggles.length; t++) {
+    toggles[t].addEventListener("click", function (event) {
+      event.stopPropagation();
+      if (event.preventDefault) { event.preventDefault(); }
+      var control = event.currentTarget;
+      toggleSkill(control.getAttribute("data-skill-name"), control.getAttribute("data-skill-enabled") !== "true");
+    });
+  }
   var rows = listEl.querySelectorAll(".skill-row");
   for (var i = 0; i < rows.length; i++) {
     rows[i].addEventListener("click", function (event) {
@@ -131,6 +150,59 @@ function bindSkillRows(listEl) {
       openSkillDetail(event.currentTarget.getAttribute("data-skill-name"));
     });
   }
+}
+
+// ---- 启停 ----
+//
+// 开关走 POST /web/api/skills/{name}（{"enabled":bool}）：后端复用 TUI
+// /skills disable|enable 的同一条链路（写配置文件 + 运行面热刷新），响应带回
+// 刷新后的列表，页面据此重绘；失败时保留原列表并就地显示错误码/消息。
+
+function skillToggleControlHtml(name, disabled) {
+  var label = disabled ? "启用" : "停用";
+  var title = disabled ? "启用该 skill（写入配置并热生效）" : "停用该 skill（写入配置并热生效）";
+  return '<span class="skill-toggle" role="button" tabindex="0" data-skill-toggle="1"'
+    + ' data-skill-name="' + esc(name) + '"'
+    + ' data-skill-enabled="' + (disabled ? "false" : "true") + '"'
+    + ' title="' + esc(title) + '">' + esc(label) + "</span>";
+}
+
+function skillToggleControlFrom(node) {
+  while (node && node !== document) {
+    if (node.getAttribute && node.getAttribute("data-skill-toggle")) { return node; }
+    node = node.parentNode;
+  }
+  return null;
+}
+
+function toggleSkill(name, enabled) {
+  if (!name) { return; }
+  var seq = ++skillsSeq;
+  skillsAPI("/web/api/skills/" + encodeURIComponent(name), {
+    method: "POST",
+    body: JSON.stringify({ enabled: !!enabled }),
+  }).then(function (result) {
+    if (seq !== skillsSeq) { return; }
+    if (result.status !== 200) {
+      var err = result.body && result.body.error;
+      var code = err && err.code ? err.code : "toggle_failed";
+      var msg = err && err.message ? err.message : "";
+      var countEl = skillsEl("skills-count");
+      if (countEl) { countEl.textContent = "启停失败: " + code + (msg ? " — " + msg : ""); }
+      return;
+    }
+    renderSkillsList(result.body);
+    // 详情面板正打开同一 skill 时同步刷新（详情里的开关状态跟着变）。
+    var overlay = skillsEl("skill-detail-overlay");
+    var titleEl = skillsEl("skill-detail-title");
+    if (overlay && overlay.classList.contains("active") && titleEl && titleEl.textContent === name) {
+      openSkillDetail(name);
+    }
+  }).catch(function () {
+    if (seq !== skillsSeq) { return; }
+    var countEl = skillsEl("skills-count");
+    if (countEl) { countEl.textContent = "启停失败: network_error"; }
+  });
 }
 
 // ---- 详情面板 ----
@@ -230,10 +302,12 @@ function renderSkillDetailMeta(body) {
   var metaEl = skillsEl("skill-detail-meta");
   if (!metaEl) { return; }
   var badges = [];
+  if (body && body.disabled) { badges.push('<span class="skill-badge skill-badge-off">已停用</span>'); }
   if (body && body.kind) { badges.push('<span class="skill-badge skill-badge-kind">' + esc(body.kind) + "</span>"); }
   if (body && body.category) { badges.push('<span class="skill-badge">' + esc(body.category) + "</span>"); }
   if (body && body.version) { badges.push('<span class="skill-badge">v' + esc(body.version) + "</span>"); }
-  metaEl.innerHTML = badges.join("");
+  var toggleName = body && body.name ? String(body.name) : "";
+  metaEl.innerHTML = badges.join("") + (toggleName ? skillToggleControlHtml(toggleName, !!(body && body.disabled)) : "");
 }
 
 function renderSkillTabs(groups, activeKey) {
@@ -468,6 +542,16 @@ export function initSkills() {
     });
   }
   var closeBtn = skillsEl("skill-detail-close");
+  // 详情面板内的启停开关：容器级委托（面板内容每次打开都重建）。
+  if (overlay) {
+    overlay.addEventListener("click", function (event) {
+      var control = skillToggleControlFrom(event.target);
+      if (!control) { return; }
+      event.stopPropagation();
+      if (event.preventDefault) { event.preventDefault(); }
+      toggleSkill(control.getAttribute("data-skill-name"), control.getAttribute("data-skill-enabled") !== "true");
+    });
+  }
   if (closeBtn) { closeBtn.addEventListener("click", function () { closeSkillDetail(); }); }
   var refreshBtn = skillsEl("skills-refresh-btn");
   if (refreshBtn) { refreshBtn.addEventListener("click", function () { refreshSkills(); }); }

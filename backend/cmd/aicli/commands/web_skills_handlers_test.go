@@ -4,10 +4,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
+	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
@@ -192,4 +197,94 @@ func TestHandleChatWebAPISkills_EmptyCatalog(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"skills":[]`) {
 		t.Fatalf("empty catalog must serialize an empty array, got %s", rec.Body.String())
 	}
+}
+
+// TestHandleChatWebAPISkills_ToggleWritesConfigAndRefreshesList 锁定启停端点：
+// 与 TUI 同一条写入链路（落盘 + 热刷新），并一次往返带回刷新后的列表。
+func TestHandleChatWebAPISkills_ToggleWritesConfigAndRefreshesList(t *testing.T) {
+	tempDir := t.TempDir()
+	chdirTest(t, tempDir)
+	writeToggleTestSkill(t, tempDir, "imagegen_web")
+
+	configPath := filepath.Join(tempDir, "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("skills_runtime:\n  enabled: true\n"), 0o644))
+	cfg := &config.Config{
+		ConfigFilePath: configPath,
+		SkillsRuntime:  &config.SkillsRuntimeConfig{Enabled: true, SkillDir: tempDir},
+	}
+	session := &ChatSession{
+		ProviderName:     "nvidia",
+		Model:            "z-ai/glm4.7",
+		FunctionRegistry: functions.NewFunctionRegistry(),
+		Config:           cfg,
+	}
+	binding, err := initSkillFunctions(cfg, session, nil, nil, 0, "")
+	require.NoError(t, err)
+	require.NotNil(t, binding)
+	defer func() { _ = binding.Close() }()
+	withWebTestSession(t, session)
+
+	type togglePayload struct {
+		Name    string                `json:"name"`
+		Enabled bool                  `json:"enabled"`
+		Message string                `json:"message"`
+		Count   int                   `json:"count"`
+		Skills  []chatWebSkillSummary `json:"skills"`
+	}
+	var payload togglePayload
+
+	// 停用：200 + enabled=false + 列表里该 skill 变成 disabled 行 + 配置落盘。
+	rec := httptest.NewRecorder()
+	HandleChatWebAPISkills(rec, httptest.NewRequest(http.MethodPost, ChatWebAPISkillsPath+"/imagegen_web", strings.NewReader(`{"enabled":false}`)))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	decodeSkillsBody(t, rec, &payload)
+	assert.False(t, payload.Enabled)
+	assert.Contains(t, payload.Message, "已停用")
+	require.Len(t, payload.Skills, 1)
+	assert.True(t, payload.Skills[0].Disabled)
+	assert.Equal(t, "imagegen_web", payload.Skills[0].Name)
+	raw, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), "disabled_skills")
+
+	// 停用后的详情仍可打开（页面在详情面板里启用它）。
+	rec = httptest.NewRecorder()
+	HandleChatWebAPISkills(rec, httptest.NewRequest(http.MethodGet, ChatWebAPISkillsPath+"/imagegen_web", nil))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var detail chatWebSkillDetail
+	decodeSkillsBody(t, rec, &detail)
+	assert.True(t, detail.Disabled)
+	assert.Equal(t, "imagegen_web", detail.Name)
+
+	// 启用（toggle 语义）：回到可用列表。
+	rec = httptest.NewRecorder()
+	HandleChatWebAPISkills(rec, httptest.NewRequest(http.MethodPost, ChatWebAPISkillsPath+"/imagegen_web", strings.NewReader(`{"toggle":true}`)))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	// 注意：json.Unmarshal 不会清空 JSON 里缺席的字段，复用同一个变量会保留
+	// 上一次的 disabled=true，所以每个响应解到独立变量。
+	var enabledPayload togglePayload
+	decodeSkillsBody(t, rec, &enabledPayload)
+	assert.True(t, enabledPayload.Enabled, rec.Body.String())
+	require.Len(t, enabledPayload.Skills, 1)
+	assert.False(t, enabledPayload.Skills[0].Disabled, rec.Body.String())
+
+	// 自相矛盾的请求不返回"什么都没做"的 200。
+	rec = httptest.NewRecorder()
+	HandleChatWebAPISkills(rec, httptest.NewRequest(http.MethodPost, ChatWebAPISkillsPath+"/imagegen_web", strings.NewReader(`{"enabled":false}`)))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = httptest.NewRecorder()
+	HandleChatWebAPISkills(rec, httptest.NewRequest(http.MethodPost, ChatWebAPISkillsPath+"/imagegen_web", strings.NewReader(`{"enabled":false}`)))
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "skill_already_disabled")
+
+	rec = httptest.NewRecorder()
+	HandleChatWebAPISkills(rec, httptest.NewRequest(http.MethodPost, ChatWebAPISkillsPath+"/no-such", strings.NewReader(`{"enabled":false}`)))
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "skill_not_found")
+
+	rec = httptest.NewRecorder()
+	HandleChatWebAPISkills(rec, httptest.NewRequest(http.MethodPost, ChatWebAPISkillsPath+"/imagegen_web", strings.NewReader("{not json")))
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "invalid_request")
 }

@@ -225,7 +225,7 @@
 | P2 占位符与参数 | 已完成 | `internal/skill/substitute.go` + TUI `/skill` + API `skill_args` + 灰度开关，含单测 |
 | P1 标准字段 | 已完成（生效面） | frontmatter 全字段解析 + `user-invocable` / `disable-model-invocation` / `when_to_use` 生效点 + `~/.agents/skills` 遮蔽与规范警告；`allowed-tools` 与 `model`/`effort` 仅解析透出，尚未接入工具策略与执行建议 |
 | P3 发现对齐与遮蔽诊断 | 已完成（核心） | `~/.agents/skills` 用户根、`--skill`/`--no-skills`、同名遮蔽与规范 warning 进入 `codex_list` 响应 |
-| P5 per-skill 启停 | 已完成（配置/热重载/API/TUI 命令 + picker） | `skills_runtime.disabled_skills` + `~/.agents/skills`；三处 loader 过滤器权威点同源；`config/document` 写入热生效；TUI `/skills disable\|enable <name>` 与选择器内 `x` 键（双向）均写配置 + 运行面热刷新；剩余仅 Web 详情页开关按钮（同一链路的 UI 糖） |
+| P5 per-skill 启停 | 已完成（配置/热重载/API/TUI/Web） | `skills_runtime.disabled_skills` + `~/.agents/skills`；三处 loader 过滤器权威点同源；`config/document` 写入热生效；TUI `/skills disable\|enable <name>`、选择器 `x` 键、Web 列表/详情开关均走同一条"写配置 + 运行面热刷新"链路 |
 | P4 CLI add/list/remove | 已完成 | `aicli skill list [--debug]`、`skill remove <name> [-g]`、`skill add <owner/repo>[@ref]`（tarball + 校验 + 来源记录 + 路径穿越防护） |
 | P6 正文 shell 注入 | 不做 | 见 §5.6 |
 
@@ -257,7 +257,7 @@
   - `go test ./internal/skill ./internal/agentconfig ./internal/profileinput ./internal/bootstrap ./internal/runtimeserver -count=1`：通过；
   - `go test ./internal/api/runtimeapi -run 'TestBuildSkillExposureMessages|TestCodexList|TestCatalog|TestSkill' -count=1`：通过；
   - `go test ./cmd/aicli/commands -run 'TestRunSkill|TestParseSkillAddSource|TestExtractSkillTarGz|TestLocateSkillDirInArchive|TestResolveConfiguredSkillDirs|TestSkill|TestChatSkill|TestBuildFunctionCatalog' -count=1`：通过。
-- 仍未做：Web 详情页开关（"写 config document + 热重载"链路的 UI 入口；TUI 的文本命令与选择器 `x` 键已在第三轮补齐）；P1 的 `allowed-tools` 策略求交与 `model`/`effort` 执行建议。
+- 仍未做：P1 的 `allowed-tools` 策略求交与 `model`/`effort` 执行建议（P5 四个入口——TUI 命令、TUI 选择器、Web 列表、Web 详情——已全部接通）。
 
 ### 第三轮实施记录（2026-09-25，P5 交互面）
 
@@ -280,6 +280,19 @@
 - 测试：`skills_persistence_test.go`（归一化/清理/不新造节点/路径必填）、
   `chat_skill_toggle_test.go`（停用-解禁闭环：registry+catalog 撤销与恢复、配置落盘与清理、
   未知名称与重复操作提示、结构化 `/skills disable` 路由）。
+- Web 入口（`web_skills_handlers.go` + `web/js/skills.js`）：
+  - `GET /web/api/skills` 列表在可调用 skill 之后补"已停用"行（`disabled:true`，与 TUI 选择器
+    同一 `buildSkillPickerCatalogEntries`），`GET /web/api/skills/{name}` 对停用 skill 也返回
+    200（不再是 404），详情面板才打得开、才谈得上在详情里启用；
+  - `POST /web/api/skills/{name}`，体 `{"enabled":bool}` 或 `{"toggle":true}`，内部复用
+    `runSkillToggleCommand`（落盘 + 热刷新），响应带新状态 + 刷新后的列表，页面一次往返重绘；
+    自相矛盾的目标状态返回 404（`skill_already_disabled` / `skill_not_disabled`），未知 skill
+    404 `skill_not_found`，非法 JSON 400 `invalid_request`；裸路径 POST 仍 405（保持既有契约）。
+  - 前端：列表行与详情头部共用 `skillToggleControlHtml`（`span[role=button]`——行本身是
+    `button`，嵌套 `button` 非法），点击 `stopPropagation` 避免顺带打开详情；失败时保留原列表，
+    只在计数位就地显示错误码/消息。
+  - 测试：`TestHandleChatWebAPISkills_ToggleWritesConfigAndRefreshesList`（停用→列表变停用行+
+    配置落盘→详情仍可打开→toggle 启用回到可用列表→自相矛盾/未知/非法 JSON 的错误码）。
 - 迁移债基线：legacy stdout 回退路径新增 1 个 `fmt.Println`（结果输出），
   `TestChatInteractiveDirectWriterInventory` 的 `chat_skills_command.go/handleSkillsMenuCommand`
   计数由 10 调整为 11，并在基线条目上注明原因；统一渲染通道那条路径不写 stdout。
