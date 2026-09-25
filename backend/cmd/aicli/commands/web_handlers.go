@@ -930,10 +930,10 @@ func injectChatWebPrompt(session *ChatSession, prompt string) (chatInputRouteRes
 	if actor := chatWebSessionActor(session); actor != nil {
 		actor.EnableStreaming()
 	}
-	// 若队列未处于外部捕获模式，挂起 KeyHandler，避免与 Web 输入竞争（§4.2.4 步骤 4）。
-	if !queue.hasExternalInputCaptureActive() {
-		queue.setExternalInputCaptureActive(true)
-	}
+	// Web 注入属于外部（非控制台）输入面：按 web 捕获单独登记，避免与 TUI
+	// busy capture 混用同一标志——后者在 TUI 里每个回合都会置真，若共用会让
+	// 控制台提问/审批面板被静默跳过（§4.2.4 步骤 4）。
+	queue.setWebInputCaptureActive(true)
 	result := queue.routeInputText(prompt)
 	switch {
 	case result.queued():

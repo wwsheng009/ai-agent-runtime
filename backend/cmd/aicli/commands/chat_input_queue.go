@@ -229,11 +229,17 @@ type chatInputQueue struct {
 	priorityMode          bool
 	priorityPrompt        string
 	priorityRevision      uint64
+	// externalCaptureActive：TUI busy queued-input capture 持有底部 prompt 行
+	// （chat_send.go -> startBusyQueuedInputCapture）。它只表示"主读取循环不是
+	// 读者"，提问/审批仍必须走控制台合并回答路径。
 	externalCaptureActive bool
-	priorityAnswerMerged  bool
-	terminalMu            sync.RWMutex
-	terminalErr           error
-	routeMu               sync.Mutex
+	// webCaptureActive：外部 Web/远程客户端接管输入面，控制台没有读者，
+	// 提问/审批只能经 Web 的 pending_question/pending_approval 回流。
+	webCaptureActive     bool
+	priorityAnswerMerged bool
+	terminalMu           sync.RWMutex
+	terminalErr          error
+	routeMu              sync.Mutex
 
 	draftMu     sync.RWMutex
 	draftNotify func(active bool, lines int, text string)
@@ -1523,6 +1529,9 @@ func (q *chatInputQueue) signalPriorityCaptureChange() {
 	}
 }
 
+// setExternalInputCaptureActive 标记 TUI busy queued-input capture 持有底部
+// prompt 行。它不代表"控制台没有读者"：运行期提问/审批的答案正是由该 capture
+// 绘制到 prompt 行并回流（见 readChatRuntimeMergedAnswer）。
 func (q *chatInputQueue) setExternalInputCaptureActive(active bool) {
 	if q == nil {
 		return
@@ -1530,6 +1539,30 @@ func (q *chatInputQueue) setExternalInputCaptureActive(active bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.externalCaptureActive = active
+}
+
+// setWebInputCaptureActive 标记输入面由外部 Web/远程客户端接管。与 busy
+// capture 分开登记：Web 注入没有控制台读者，askQuestion/askApproval 不能在此
+// 阻塞事件 worker（2026-09-24 停摆回归，见 chat_runtime_events.go 的
+// externalInputCaptureOwnsInput）。
+func (q *chatInputQueue) setWebInputCaptureActive(active bool) {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.webCaptureActive = active
+}
+
+// webInputCaptureOwnsInput 报告输入面是否已被外部 Web/远程客户端接管。
+// TUI 自身的 busy capture 故意不计入：它仍有控制台读者，面板必须照常弹出。
+func (q *chatInputQueue) webInputCaptureOwnsInput() bool {
+	if q == nil {
+		return false
+	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.webCaptureActive
 }
 
 // setPriorityAnswerMerged 标记当前优先提示（审批/提问）的输入由底部 prompt 行
@@ -1555,13 +1588,17 @@ func (q *chatInputQueue) priorityAnswerMergedPrompt() bool {
 	return q.priorityMode && q.priorityAnswerMerged
 }
 
+// hasExternalInputCaptureActive 报告控制台主读取循环是否不再是 prompt 行的
+// 读者（TUI busy capture 或 Web/远程客户端任一接管）。它用于"答案怎么读"
+// （合并回答 / 队列回流），不用于"要不要弹面板"——后者只看
+// webInputCaptureOwnsInput。
 func (q *chatInputQueue) hasExternalInputCaptureActive() bool {
 	if q == nil {
 		return false
 	}
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	return q.externalCaptureActive
+	return q.externalCaptureActive || q.webCaptureActive
 }
 
 func (q *chatInputQueue) routeLine(item chatQueuedInput) chatInputRouteResult {

@@ -2648,11 +2648,20 @@ func runtimeEventRequiresLegacyInteraction(event runtimeevents.Event) bool {
 //
 // 接管时提问/审批只走 Web 回流：pending_question/pending_approval 由 actor
 // 状态投影到屏幕与 SSE，回答经 /web/api/input 回到协调器，不需要控制台提示。
+//
+// 判定只认 web 捕获标志（chat_input_queue.webCaptureActive）。TUI 每个前台
+// 回合都会启动 busy queued-input capture（chat_send.go ->
+// startBusyQueuedInputCapture），它同样让控制台主循环不再直接读 stdin，但
+// 控制台仍有读者：提问/审批面板必须照常弹出，答案经合并回答路径由该 capture
+// 绘制到 prompt 行回流（readChatRuntimeMergedAnswer）。2026-09-25 回归实测：
+// 两者共用同一标志时，TUI 里 ask_user_question 只在状态栏显示
+// "Running ask_user_question"，面板永不出现，工具挂到用户 ESC 取消；goroutine
+// dump 证实当时 startBusyQueuedInputCapture 正在运行。
 func (b *chatRuntimeEventBridge) externalInputCaptureOwnsInput() bool {
 	if b == nil || b.session == nil || b.session.InputQueue == nil {
 		return false
 	}
-	return b.session.InputQueue.hasExternalInputCaptureActive()
+	return b.session.InputQueue.webInputCaptureOwnsInput()
 }
 
 func (b *chatRuntimeEventBridge) postRuntimeEventToUIActor(event runtimeevents.Event) bool {

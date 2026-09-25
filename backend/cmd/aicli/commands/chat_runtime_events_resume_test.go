@@ -2,13 +2,14 @@ package commands
 
 import (
 	"bufio"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
 // newResumeTestBridge builds a bridge that has already finished one foreground
@@ -156,9 +157,9 @@ func TestChatRuntimeEventBridge_ExternalInputCaptureSkipsConsolePrompt(t *testin
 
 	require.False(t, bridge.externalInputCaptureOwnsInput(),
 		"a console-owned session must keep the legacy prompt path")
-	session.InputQueue.setExternalInputCaptureActive(true)
+	session.InputQueue.setWebInputCaptureActive(true)
 	require.True(t, bridge.externalInputCaptureOwnsInput(),
-		"an active input capture owns the input face")
+		"an active web input capture owns the input face")
 
 	done := make(chan struct{})
 	go func() {
@@ -191,5 +192,59 @@ func TestChatRuntimeEventBridge_ExternalInputCaptureSkipsConsolePrompt(t *testin
 	case got := <-prompted:
 		t.Fatalf("console prompt %q must not run while an external input capture owns the input", got)
 	default:
+	}
+}
+
+// TestChatRuntimeEventBridge_BusyCaptureStillPromptsConsole pins the 2026-09-25
+// regression: the TUI's own busy queued-input capture stores the same "capture
+// active" state during every foreground turn (chat_send.go ->
+// startBusyQueuedInputCapture). Treating it as an external input owner silently
+// skipped askQuestion/askApproval: the TUI showed only the
+// "Running ask_user_question" band and the tool hung until ESC (the goroutine
+// dump of the live session showed chatBusyComposerCapture.ReadLine running
+// while the question was pending). Only web/remote capture may skip the console
+// prompt; the busy capture keeps the merged answer panel alive.
+func TestChatRuntimeEventBridge_BusyCaptureStillPromptsConsole(t *testing.T) {
+	session := &ChatSession{}
+	session.InputQueue = newChatInputQueue(bufio.NewReader(strings.NewReader("")))
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.writeLine = func(string) {}
+
+	// The TUI busy capture owns the bottom prompt row for the whole turn.
+	session.InputQueue.setExternalInputCaptureActive(true)
+	require.True(t, session.InputQueue.hasExternalInputCaptureActive(),
+		"the merged answer path must still see the busy capture")
+	require.False(t, bridge.externalInputCaptureOwnsInput(),
+		"the TUI busy capture must not disable the console question panel")
+
+	prompted := make(chan string, 1)
+	bridge.askQuestion = func(prompt string, _ []string, _ bool) (string, error) {
+		prompted <- prompt
+		return "", errors.New("test stop")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		bridge.handleEvent(runtimeevents.Event{
+			Type:      runtimechat.EventQuestionAsked,
+			SessionID: "session-busy-capture",
+			Payload: map[string]interface{}{
+				"question_id": "q-busy",
+				"prompt":      "继续吗?",
+			},
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleEvent must not block on the TUI busy-capture path")
+	}
+	select {
+	case got := <-prompted:
+		require.Equal(t, "继续吗?", got)
+	default:
+		t.Fatal("the console question panel must run while the TUI busy capture owns the prompt row")
 	}
 }
