@@ -435,7 +435,9 @@ Network（筛 `mesh/events`）与 Console。数据源：`GET /web/api/mesh/event
 - [ ] stage / unstage：行内按钮 → `POST /web/api/git/stage`，响应里的 `status` 直接替换本地缓存
       （不二次拉取），条目在两个分组间即时移动；失败时提示错误并保持原分组。
 - [ ] diff 弹窗：点变更行打开；「工作区 / 已暂存」切换与「忽略空白」开关都能重拉；
-      hunk 头 + 行号 + 增删着色正确；`parse_error` 非空时降级显示 `raw`（不显示空白）。
+      hunk 头 + 增删着色正确；行号**只有一列**（add→新侧、del→老侧、context→新侧，
+      `nonewline` 留空；不再出现「老 新」两列并排），两侧行号不同时行号格内只出现该侧那一个数字；
+      `parse_error` 非空时降级显示 `raw`（不显示空白）。
 - [ ] 大屏左右分栏（≥900px）：左栏是 git 侧栏（标题行 + `«` 折叠按钮 + 仓库标签 / 刷新 / 状态行 +
       变更/提交记录两个子页签），右栏是选中项的 diff——**不再**是覆盖全页的遮罩弹窗
       （`#git-diff-overlay` 由 `position: fixed` 退回 `static`、`#git-diff-modal` 撑满右栏），
@@ -566,6 +568,7 @@ node scripts/verify-micro-web-render-mode.mjs  # assistant 消息 md|txt 渲染�
 node scripts/verify-micro-web-copy-msg.mjs     # 单条消息复制：所有角色（含 error 回退）抬头行 ⧉ 图标、只取本行正文（标签/控件/相邻消息/md 产物均不入内）、行间隔离与 ✓ 反馈、整会话复制不受影响、工具行展开收起仍可用、流式气泡复制不重复响应
 node scripts/verify-micro-web-question-answer.mjs # 提问回答写入：建议项 / 自由回答（Enter、提交按钮、Shift+Enter、IME、空答案）→ question_answer payload、收起对话框保留 composer 答案路由、服务端回执分支（stale 未送达告警 / resolved 不误报）、审批语义不变、index.html/style.css 静态不变量
 node scripts/verify-micro-web-pane-split.mjs   # 左右分栏助手（文件 / GIT 页签共用）：折叠 class 只在大屏生效、宽度写 CSS 变量并夹进可用范围（容器变窄时上限自己降）、端点空操作不抹记忆值、←→/Home/End 与落盘、拖拽（pane-resizing / 松手才落盘 / 折叠与非主键不起拖 / 失焦兜底）、双击复位、跨断点 onApply 与 onBreakpoint、记忆恢复与隐私模式降级、matchMedia 缺失按窄屏降级、元素缺失静默降级
+node scripts/verify-micro-web-git-diff.mjs     # GIT 页签 diff 行渲染（单列行号）：每行只有一个行号格（回归：曾把老/新行号拼成「老 新」两列）、add→新侧 / del→老侧 / context→新侧 / nonewline→空、两侧不同时只出现该侧数字、null 缺字段不补 0（0 是合法行号保留）、文本转义、renderDiff 复用同一行构造器、style.css 行号列宽度按单列给
 node scripts/verify-micro-web-composer.mjs     # 浮动 composer 面板：面板是 .layout 内浮层子节点（与 #main-col 平级，输入区/配置栏/动态状态条不在 #tab-main 内）、必需元素与既有 cfg-* id 全保留、菜单与 Ctrl+J 折叠入口接线（无第二份折叠逻辑）、style.css 浮层几何（.layout 内 absolute 停靠在状态栏上方 / 自由位置改 fixed 且清 transform / z-index 低于模态框 / 折叠规则）、**无让位机制**（没有 --composer-reserve、body 不为面板留白、#footer 规则无 composer 耦合）、行为（拖动跟随与夹取、键盘微调与 Home 复位、**全程不写页面级 CSS 变量**、Ctrl+J、localStorage 回放）
 node scripts/verify-micro-web-todos.mjs        # 任务列表浮层（贴在 composer 上沿）：结构（#todo-panel 在 #composer-panel 内且在标题行之前）与样式不变量（bottom:calc(100% + 1px) 衔接、[hidden] 不占位、折叠只收 .todo-body、进行中加粗 / 已完成删除线）；接线（sse.js 在 switch 前分流 tool_end / 会话边界、chat.js 应用 screen 回放、app.js 初始化、后端 web_schema.go 与 chat_debug_screen_http.go 两个字段名）；纯函数（解析裁剪：坏条目丢弃 / 整组不可用 → null、计数与进度、当前项、快照合并：runtime 按 seq 单调 / history 只兜底）；面板行为（无快照隐藏、回放恢复计数与逐项状态、实时旧序号不回退、会话切换清空、折叠与 localStorage 记忆、面板缺失静默降级）
 ```

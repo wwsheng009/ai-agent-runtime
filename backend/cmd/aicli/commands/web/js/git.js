@@ -498,6 +498,27 @@ function renderCommits() {
 
 // ---- diff ----
 
+// diffLineNo 取该行在**单列行号**里显示的那一个数字：add 行没有老侧行号 → 取新侧，
+// del 行没有新侧行号 → 取老侧，context / 其他 → 取新侧（与磁盘上的文件对齐）。
+// 两侧都由后端给出（`old_no`/`new_no` 缺省是 null），这里只做选择、不编造数字。
+// 历史缺陷：渲染层曾把两侧并排拼成「老 新」两列（88px 宽），既是冗余信息又挤占正文。
+export function diffLineNo(line, type) {
+  if (type === "nonewline") { return ""; }
+  var no = type === "del" ? line.old_no : line.new_no;
+  return (no === null || no === undefined) ? "" : String(no);
+}
+
+// diffLineHtml 生成一行 diff 的 HTML（纯函数，`scripts/verify-micro-web-git-diff.mjs`
+// 直接 import 验证；行号只有一列，语义见 diffLineNo）。文本一律经 esc() 转义。
+export function diffLineHtml(line) {
+  var type = line.type || "context";
+  var prefix = type === "add" ? "+" : (type === "del" ? "-" : (type === "nonewline" ? "\\" : " "));
+  return '<div class="git-diff-line git-diff-' + esc(type) + '">'
+    + '<span class="git-diff-no">' + esc(diffLineNo(line, type)) + "</span>"
+    + '<span class="git-diff-text">' + esc(prefix + " " + (line.text || "")) + "</span>"
+    + "</div>";
+}
+
 function openDiff(path, target, trigger) {
   var overlay = gitEl("git-diff-overlay");
   if (!overlay || !gitRoot) { return; }
@@ -581,15 +602,7 @@ function renderDiff(diff) {
     html.push('<div class="git-hunk-head">' + esc(hunk.header || "") + "</div>");
     var lines = hunk.lines || [];
     for (var j = 0; j < lines.length; j++) {
-      var line = lines[j] || {};
-      var type = line.type || "context";
-      var oldNo = line.old_no ? String(line.old_no) : "";
-      var newNo = line.new_no ? String(line.new_no) : "";
-      var prefix = type === "add" ? "+" : (type === "del" ? "-" : (type === "nonewline" ? "\\" : " "));
-      html.push('<div class="git-diff-line git-diff-' + esc(type) + '">'
-        + '<span class="git-diff-no">' + esc(oldNo + " " + newNo) + "</span>"
-        + '<span class="git-diff-text">' + esc(prefix + " " + (line.text || "")) + "</span>"
-        + "</div>");
+      html.push(diffLineHtml(lines[j] || {}));
     }
   }
   bodyEl.innerHTML = html.join("");

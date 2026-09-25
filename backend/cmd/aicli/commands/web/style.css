@@ -2602,7 +2602,9 @@ body.pane-resizing * { cursor: col-resize !important; user-select: none !importa
   position: sticky; top: 0;
 }
 .git-diff-line { display: flex; align-items: flex-start; gap: 8px; padding: 0 12px; }
-.git-diff-no { flex: 0 0 auto; width: 88px; color: var(--fg4); user-select: none; text-align: right; }
+/* 行号只有一列（add→新侧 / del→老侧 / context→新侧，见 js/git.js diffLineNo）：
+   宽度按单列需求给，88px 是「老 新」两列并排时代的遗留，白占半屏。 */
+.git-diff-no { flex: 0 0 auto; width: 48px; color: var(--fg4); user-select: none; text-align: right; }
 .git-diff-text { flex: 1 1 auto; white-space: pre-wrap; word-break: break-word; }
 .git-diff-add { background: var(--greenBg, rgba(63, 185, 80, 0.12)); }
 .git-diff-del { background: var(--redBg, rgba(229, 83, 75, 0.12)); }
