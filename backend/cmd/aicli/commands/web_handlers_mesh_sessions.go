@@ -1,9 +1,12 @@
 package commands
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -232,7 +235,7 @@ func (idx chatWebMeshSessionIndex) lastKnown(sessionID string) *chatWebSessionLa
 	if !idx.enabled || id == "" {
 		return nil
 	}
-	binding, ok := mesh.LoadBinding(idx.paths, id)
+	binding, ok := loadMeshBindingCached(idx.paths, id)
 	if !ok || binding.Preferred == nil {
 		return nil
 	}
@@ -241,6 +244,68 @@ func (idx chatWebMeshSessionIndex) lastKnown(sessionID string) *chatWebSessionLa
 		return nil
 	}
 	return &chatWebSessionLastKnown{Host: addr.Host, Port: addr.Port, From: "binding"}
+}
+
+// ---------------------------------------------------------------------------
+// binding 读取缓存：会话列表最多 100 行，每行一次 LoadBinding = 每请求 100 次
+// 「打开 + 解析 JSON」小文件 IO（历史会话没有活节点声明时，走的正是这条路径）。
+//
+// 缓存按「文件状态」做内容寻址（路径 + size + mtime），不设时间窗口：
+//   - 同一文件状态 → 复用解析结果，语义与重新读取完全一致；
+//   - 文件被重写（会话切换/退出会重写 binding）→ mtime 变化 → key 变化 → 重新读取。
+//
+// 因此它既不会读到过期内容，也不会与 chatWebSessionsVersion 的 binding 摘要
+// （同样基于 size+mtime）产生「指纹已变但渲染用旧值」的不一致。
+// ---------------------------------------------------------------------------
+
+const meshBindingCacheLimit = 512
+
+type meshBindingCacheEntry struct {
+	binding mesh.SessionBinding
+	ok      bool
+}
+
+var meshBindingCache = struct {
+	mu      sync.Mutex
+	entries map[string]meshBindingCacheEntry
+}{entries: map[string]meshBindingCacheEntry{}}
+
+// meshBindingFileVersion 返回 binding 文件的状态指纹（不存在 → "missing"）。
+func meshBindingFileVersion(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return "invalid"
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "missing"
+	}
+	return fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
+}
+
+func loadMeshBindingCached(paths mesh.Paths, sessionID string) (mesh.SessionBinding, bool) {
+	path := paths.BindingPath(sessionID)
+	if strings.TrimSpace(path) == "" {
+		return mesh.SessionBinding{}, false
+	}
+	key := path + "\x00" + meshBindingFileVersion(path)
+
+	meshBindingCache.mu.Lock()
+	if entry, ok := meshBindingCache.entries[key]; ok {
+		meshBindingCache.mu.Unlock()
+		return entry.binding, entry.ok
+	}
+	meshBindingCache.mu.Unlock()
+
+	binding, ok := mesh.LoadBinding(paths, sessionID)
+
+	meshBindingCache.mu.Lock()
+	if len(meshBindingCache.entries) >= meshBindingCacheLimit {
+		// 极简回收：容量上限下整体重置（条目都是可重算的只读快照）。
+		meshBindingCache.entries = map[string]meshBindingCacheEntry{}
+	}
+	meshBindingCache.entries[key] = meshBindingCacheEntry{binding: binding, ok: ok}
+	meshBindingCache.mu.Unlock()
+	return binding, ok
 }
 
 // peerSessionItems 合成 ?scope=all 才并入的跨工作区会话条目（§5.3）：

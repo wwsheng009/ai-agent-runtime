@@ -175,7 +175,8 @@ func HandleChatWebAPIMeshPeers(w http.ResponseWriter, r *http.Request) {
 	if chatWebMeshPeersWantsTokens(r) {
 		mesh.RevealTokens(&view)
 	}
-	writeWebAPIJSON(w, http.StatusOK, view)
+	// 视图含 GeneratedAt/心跳等每请求变化的字段，不做条件请求，只做 gzip 协商。
+	writeWebAPIJSONBody(w, r, http.StatusOK, view, "")
 }
 
 // chatWebMeshRecordBody 把内存档案快照转成可增补的 JSON 对象：字段名与磁盘档案

@@ -80,6 +80,7 @@ func writeWebAPIJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 // 窗口内消息），避免 resume
 // 历史会话后视口裁剪导致只显示最后一个 turn。
 func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
+	requestStart := time.Now()
 	tail := chatWebScreenTailParam(r)
 	window := chatWebMessageWindowParam(r)
 	// 默认窗口（§4.2.2 降级）：不带 msg_limit 的请求过去会物化整段 transcript
@@ -95,6 +96,7 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 	// 供远程调用方获取"用户当前实际看到的 TUI 界面渲染"，而不是 web 客户端
 	// 使用的完整语义 transcript（默认视图，见下方注释）。
 	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("view")), "tui") {
+		renderStart := time.Now()
 		snap := BuildChatDebugScreenSnapshot()
 		chatWebApplyScreenTail(snap, tail)
 		if r.URL.Query().Get("format") == "json" {
@@ -105,19 +107,35 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 				return
 			}
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			_, _ = w.Write(body)
+			renderDur := time.Since(renderStart)
+			etag := webHTTPBodyETag(body, "tui", chatWebScreenParamsKey(r))
+			webHTTPServerTiming(w,
+				webHTTPTiming{Name: "screen-render", Dur: renderDur},
+				webHTTPTiming{Name: "total", Dur: time.Since(requestStart)})
+			if webHTTPETagMatches(r, etag) {
+				webHTTPWriteNotModified(w, etag)
+				return
+			}
+			webHTTPWriteBody(w, r, webAPIJSONContentType, body, etag)
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		if !snap.Available {
-			_, _ = w.Write([]byte("Debug Screen: " + snap.Reason + "\n"))
+		payload := []byte("Debug Screen: " + snap.Reason + "\n")
+		if snap.Available {
+			payload = []byte(chatWebTailTextLines(snap.Text, tail) + "\n")
+		}
+		etag := webHTTPBodyETag(payload, "tui-text", chatWebScreenParamsKey(r))
+		webHTTPServerTiming(w,
+			webHTTPTiming{Name: "screen-render", Dur: time.Since(renderStart)},
+			webHTTPTiming{Name: "total", Dur: time.Since(requestStart)})
+		if webHTTPETagMatches(r, etag) {
+			webHTTPWriteNotModified(w, etag)
 			return
 		}
-		_, _ = w.Write([]byte(chatWebTailTextLines(snap.Text, tail) + "\n"))
+		webHTTPWriteBody(w, r, "text/plain; charset=utf-8", payload, etag)
 		return
 	}
 	if r.URL.Query().Get("format") == "json" {
+		renderStart := time.Now()
 		body, err := marshalChatWebScreenJSONWindowFiltered(window, filter)
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -125,17 +143,37 @@ func HandleChatWebAPIScreen(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_, _ = w.Write(body)
+		etag := webHTTPBodyETag(body, "json", chatWebScreenParamsKey(r))
+		webHTTPServerTiming(w,
+			webHTTPTiming{Name: "screen-render", Dur: time.Since(renderStart)},
+			webHTTPTiming{Name: "total", Dur: time.Since(requestStart)})
+		if webHTTPETagMatches(r, etag) {
+			webHTTPWriteNotModified(w, etag)
+			return
+		}
+		webHTTPWriteBody(w, r, webAPIJSONContentType, body, etag)
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	renderStart := time.Now()
 	snap := buildChatWebScreenSnapshotForFilter(window, filter)
+	renderDur := time.Since(renderStart)
 	if !snap.Available {
-		_, _ = w.Write([]byte("Debug Screen: " + snap.Reason + "\n"))
+		webHTTPServerTiming(w,
+			webHTTPTiming{Name: "screen-render", Dur: renderDur},
+			webHTTPTiming{Name: "total", Dur: time.Since(requestStart)})
+		writeWebAPITextBody(w, r, []byte("Debug Screen: "+snap.Reason+"\n"))
 		return
 	}
-	_, _ = w.Write([]byte(chatWebTailTextLines(snap.Text, tail) + "\n"))
+	payload := []byte(chatWebTailTextLines(snap.Text, tail) + "\n")
+	etag := webHTTPBodyETag(payload, "text", chatWebScreenParamsKey(r))
+	webHTTPServerTiming(w,
+		webHTTPTiming{Name: "screen-render", Dur: renderDur},
+		webHTTPTiming{Name: "total", Dur: time.Since(requestStart)})
+	if webHTTPETagMatches(r, etag) {
+		webHTTPWriteNotModified(w, etag)
+		return
+	}
+	webHTTPWriteBody(w, r, "text/plain; charset=utf-8", payload, etag)
 }
 
 // chatWebScreenTailMaxLines 限制 ?tail=N 的上限：避免调用方用超大 N 绕过
@@ -290,9 +328,11 @@ func HandleChatWebAPIStatus(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("fast") == "1" {
 		opts = ChatDebugDisplayFastOptions()
 	}
+	renderStart := time.Now()
 	if r.URL.Query().Get("format") == "text" {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = w.Write([]byte(BuildChatDebugDisplayTextWithOptions(opts)))
+		payload := []byte(BuildChatDebugDisplayTextWithOptions(opts))
+		webHTTPServerTiming(w, webHTTPTiming{Name: "status-render", Dur: time.Since(renderStart)})
+		writeWebAPITextBody(w, r, payload)
 		return
 	}
 	body, err := MarshalChatDebugDisplayJSONWithOptions(opts)
@@ -302,8 +342,15 @@ func HandleChatWebAPIStatus(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_, _ = w.Write(body)
+	// 状态快照含随时钟变化的字段（runtime/stage 等），ETag 命中率低但内容寻址
+	// 不会误判：命中即省一次传输。
+	etag := webHTTPBodyETag(body, "status", chatWebScreenParamsKey(r))
+	webHTTPServerTiming(w, webHTTPTiming{Name: "status-render", Dur: time.Since(renderStart)})
+	if webHTTPETagMatches(r, etag) {
+		webHTTPWriteNotModified(w, etag)
+		return
+	}
+	webHTTPWriteBody(w, r, webAPIJSONContentType, body, etag)
 }
 
 // HandleChatWebAPIEventsSchema 返回 SSE 事件类型定义文档（§4.2.5）。
@@ -1122,21 +1169,28 @@ func HandleChatWebAPISessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	requestStart := time.Now()
 	index := buildChatWebMeshSessionIndex(mesh.Current())
 
 	session := chatWebSession()
 	if session == nil || session.SessionManager == nil {
-		writeWebAPIJSON(w, http.StatusOK, chatWebSessionsResponse([]chatWebSessionListItem{}, "", index))
+		writeWebAPIJSONBody(w, r, http.StatusOK, chatWebSessionsResponse([]chatWebSessionListItem{}, "", index), "")
 		return
 	}
 
 	currentID := currentRuntimeSessionID(session)
-	candidates, err := listResumeCandidateChatSessions(
+	sortBy := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort")))
+	scope := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope")))
+	// 侧栏列表只读元数据：候选不再逐个完整 Get（历史反序列化会把单连接会话库
+	// 排队到相互饿死）。标题/摘要缺失的少数行由 helper 按需回退一次完整加载。
+	dbStart := time.Now()
+	candidates, err := listResumeCandidateChatSessionMetadata(
 		session.SessionManager,
 		session.SessionUserID,
 		session.SessionFilter,
 		currentID,
 	)
+	dbDur := time.Since(dbStart)
 	if err != nil {
 		writeWebAPIJSON(w, http.StatusInternalServerError, map[string]string{
 			"status": "error",
@@ -1157,18 +1211,52 @@ func HandleChatWebAPISessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ?scope=all 才并入 peers 发现的跨工作区会话（默认口径逐字不变）。
-	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("scope")), "all") {
+	if scope == "all" {
 		seen := make(map[string]bool, len(items))
 		for _, item := range items {
 			seen[item.ID] = true
 		}
 		items = append(items, index.peerSessionItems(seen)...)
 	}
+
+	// 条件请求短路：指纹覆盖元数据行 + 当前会话 + 网格视图 + binding 文件状态，
+	// 命中即返回 304 —— 这批请求不产生任何完整加载，也不做序列化。
+	// 需要历史才能渲染预览的少数行（标题/摘要缺失）不参与指纹：它们的内容
+	// 来自历史而不是元数据行，指纹无法证明其未变（补齐预览后自然消失，
+	// 见 chatWebSessionPreviewReplacements 的调用方注释）。
+	version := chatWebSessionsVersion(items, currentID, sortBy, scope, index)
+	etag := webHTTPWeakETag("sessions", version)
+	if !chatWebSessionsVersionCacheable(candidates) {
+		etag = ""
+	}
+	if webHTTPETagMatches(r, etag) {
+		webHTTPServerTiming(w,
+			webHTTPTiming{Name: "sessions-db", Dur: dbDur},
+			webHTTPTiming{Name: "total", Dur: time.Since(requestStart)})
+		webHTTPWriteNotModified(w, etag)
+		return
+	}
+
+	// 渲染阶段：只对元数据渲染不出预览的行回退一次完整加载。
+	renderStart := time.Now()
+	if replacements, dropped := chatWebSessionPreviewReplacements(session, candidates, currentID); len(replacements) > 0 || len(dropped) > 0 {
+		compacted := items[:0]
+		for _, item := range items {
+			if dropped[item.ID] {
+				continue
+			}
+			if replacement, ok := replacements[item.ID]; ok {
+				item = replacement
+			}
+			compacted = append(compacted, item)
+		}
+		items = compacted
+	}
 	// 网格提示（ownership / session_state / endpoint / last_known）写回条目。
 	index.decorate(items)
 
 	// 解析排序参数，默认按创建时间降序。
-	sortByUpdatedAt := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort"))) == "updated_at"
+	sortByUpdatedAt := sortBy == "updated_at"
 	sort.SliceStable(items, func(i, j int) bool {
 		left, right := items[i], items[j]
 		lt, rt := left.CreatedAt, right.CreatedAt
@@ -1180,8 +1268,25 @@ func HandleChatWebAPISessions(w http.ResponseWriter, r *http.Request) {
 		}
 		return strings.TrimSpace(left.ID) < strings.TrimSpace(right.ID)
 	})
+	renderDur := time.Since(renderStart)
 
-	writeWebAPIJSON(w, http.StatusOK, chatWebSessionsResponse(items, currentID, index))
+	// 微缓存 + 单飞：TTL 窗口内多 tab / 多事件的重复请求合并成一次构建。
+	payload := chatWebSessionsResponse(items, currentID, index)
+	body, _, err := chatWebSessionsCache.get(version, func() ([]byte, error) {
+		return marshalWebAPIJSON(payload)
+	})
+	if err != nil {
+		writeWebAPIJSON(w, http.StatusInternalServerError, map[string]string{
+			"status": "error",
+			"reason": err.Error(),
+		})
+		return
+	}
+	webHTTPServerTiming(w,
+		webHTTPTiming{Name: "sessions-db", Dur: dbDur},
+		webHTTPTiming{Name: "sessions-render", Dur: renderDur},
+		webHTTPTiming{Name: "total", Dur: time.Since(requestStart)})
+	webHTTPWriteBody(w, r, webAPIJSONContentType, body, etag)
 }
 
 // buildChatWebSessionListItem 从 runtimechat.Session 构建列表条目。
@@ -1208,6 +1313,72 @@ func buildChatWebSessionListItem(s *runtimechat.Session, current bool) chatWebSe
 	return item
 }
 
+// loadChatWebSessionCandidateForPreview 把候选元数据行补全到可渲染预览：
+//
+//   - 元数据已带标题与摘要（PreviewNeedsHistory=false）→ 原样返回，零额外读取；
+//   - 否则回退一次完整 Get（含历史），并沿用旧的「必须有对话」判定，保证这些
+//     少数行的标题/摘要与旧的逐候选加载行为逐字一致（真实库中该比例 <3%）。
+//
+// 返回 nil 表示该候选应被跳过（完整加载失败或没有真实对话）。
+func loadChatWebSessionCandidateForPreview(session *ChatSession, candidate *runtimechat.Session, currentID string) *runtimechat.Session {
+	if candidate == nil {
+		return nil
+	}
+	if !candidate.PreviewNeedsHistory() {
+		return candidate
+	}
+	if session == nil || session.SessionManager == nil {
+		return candidate
+	}
+	loaded, err := session.SessionManager.Get(context.Background(), candidate.ID)
+	if err != nil || shouldSkipRuntimeResumeSession(loaded, currentID, true) {
+		return nil
+	}
+	return loaded
+}
+
+// chatWebSessionsVersionCacheable 报告这批候选能否用元数据指纹做条件请求短路。
+// 只要有候选的预览需要历史（标题/摘要缺失），指纹就不足以证明响应内容未变
+// —— 这些行的显示值来自历史而不是元数据列，因此整批退回无条件请求。
+func chatWebSessionsVersionCacheable(candidates []*runtimechat.Session) bool {
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		if candidate.PreviewNeedsHistory() {
+			return false
+		}
+	}
+	return true
+}
+
+// chatWebSessionPreviewReplacements 对「元数据渲染不出预览」的少数行回退一次
+// 完整加载，返回 {会话 ID → 渲染条目} 与应剔除的会话集合（加载失败 / 没有真实
+// 对话）。调用方在条件请求短路之后、序列化之前调用：命中 304 的请求不产生
+// 任何完整加载（真实库 top100 中这类行 <3%，补齐持久化预览后归零，见
+// Session.PreviewNeedsHistory 的注释）。
+func chatWebSessionPreviewReplacements(session *ChatSession, candidates []*runtimechat.Session, currentID string) (map[string]chatWebSessionListItem, map[string]bool) {
+	replacements := map[string]chatWebSessionListItem{}
+	dropped := map[string]bool{}
+	for _, candidate := range candidates {
+		if candidate == nil || !candidate.PreviewNeedsHistory() {
+			continue
+		}
+		loaded := loadChatWebSessionCandidateForPreview(session, candidate, currentID)
+		if loaded == nil {
+			dropped[candidate.ID] = true
+			continue
+		}
+		// 懒修复：把本次渲染用到的派生预览写回元数据行，使这一行以后不再需要
+		// 完整加载。失败只影响下次是否再加载一次，绝不影响本次响应。
+		if session.SessionManager != nil {
+			_ = session.SessionManager.PersistPreviewMetadata(context.Background(), loaded)
+		}
+		replacements[candidate.ID] = buildChatWebSessionListItem(loaded, false)
+	}
+	return replacements, dropped
+}
+
 // ---------------------------------------------------------------------------
 // POST /web/api/sessions/new — 新建会话（§4.2.8）
 // ---------------------------------------------------------------------------
@@ -1227,6 +1398,8 @@ func HandleChatWebAPISessionsNew(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// 写路径立即失效列表微缓存：新建/切换后的第一次刷新必须看到新状态。
+	chatWebSessionsCache.invalidate()
 
 	session := chatWebSession()
 	if session == nil {
@@ -1302,6 +1475,8 @@ func HandleChatWebAPISessionsResume(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// 写路径立即失效列表微缓存：切换后的第一次刷新必须看到新状态。
+	chatWebSessionsCache.invalidate()
 
 	session := chatWebSession()
 	if session == nil {
@@ -1347,7 +1522,9 @@ func HandleChatWebAPISessionsResume(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	target, err := manager.Get(context.Background(), targetID)
+	// 目标校验只需要存在性 + 归属，走元数据单行读取：完整 Get 会为一次校验
+	// 反序列化整段历史（大会话上足以让切换本身明显变慢）。
+	target, err := manager.GetMetadata(context.Background(), targetID)
 	if err != nil {
 		writeWebAPIJSON(w, http.StatusNotFound, map[string]string{
 			"status": "error",
@@ -1465,6 +1642,8 @@ func HandleChatWebAPISessionsDelete(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// 写路径立即失效列表微缓存：删除后的第一次刷新必须看到新状态。
+	chatWebSessionsCache.invalidate()
 
 	session := chatWebSession()
 	if session == nil {
@@ -1572,6 +1751,8 @@ func HandleChatWebAPISessionsRename(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// 写路径立即失效列表微缓存：改名后的第一次刷新必须看到新标题。
+	chatWebSessionsCache.invalidate()
 
 	session := chatWebSession()
 	if session == nil {
