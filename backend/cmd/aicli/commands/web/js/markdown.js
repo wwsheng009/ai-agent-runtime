@@ -75,10 +75,14 @@ function trimBlankEdges(lines) {
 // 代码块：<pre> + 复制按钮 + 语言标签 + <code>。
 // 内容取自原文（此处未经 esc），这里只转义一次；换行原样保留，不参与
 // 「\n → <br>」转换，由 CSS white-space: pre-wrap 呈现。
+// 带语言时 <pre> 加 has-lang：语言标签绝对定位在顶部预留带内（见 style.css
+// 各作用域的 pre.has-lang 规则），正文首行从预留带下方开始，标签与正文分层，
+// 不再叠在第一行代码上。无语言时不加类，代码块不额外占高。
 // 复制行为由 #conversation 上的事件委托处理（见 app.js）。
 function codeBlockHtml(lang, code) {
   var label = lang ? '<span class="lang-label">' + esc(lang) + "</span>" : "";
-  return '<pre><button class="copy-code-btn" type="button" title="复制代码">复制</button>'
+  return "<pre" + (lang ? ' class="has-lang"' : "") + ">"
+    + '<button class="copy-code-btn" type="button" title="复制代码">复制</button>'
     + label + '<code class="lang-' + esc(lang || "text") + '">' + esc(code) + "</code></pre>";
 }
 

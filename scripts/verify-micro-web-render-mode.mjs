@@ -379,6 +379,16 @@ assert.ok(md.renderMarkdown("```\n    indented\n```").indexOf("    indented") >=
 assert.ok(md.renderMarkdown("**b** 与 `**x**`").indexOf("<code>**x**</code>") >= 0,
   "行内代码内的 ** 不应被当成粗体");
 
+// 语言标签与正文分层：带语言的代码块 <pre> 必须带 has-lang（style.css 据此
+// 预留顶部标签带，见第 7 节 CSS 断言），无语言代码块不带（不额外占高）。
+var langCodeHtml = md.renderMarkdown("```go\ncode\n```");
+assert.ok(langCodeHtml.indexOf('<pre class="has-lang">') >= 0,
+  '带语言的代码块应输出 <pre class="has-lang">（语言标签带）');
+assert.ok(langCodeHtml.indexOf('<span class="lang-label">go</span>') >= 0,
+  "带语言的代码块应保留语言标签");
+assert.ok(md.renderMarkdown("```\nplain\n```").indexOf('<pre class="has-lang"') < 0,
+  "无语言代码块不应输出 has-lang（不预留标签带）");
+
 // ---- 2. assistant 行结构：右上角 md|txt 控件 + 默认 md + 同步渲染 md 容器 ----
 var assistantHtml = chat.chatMsgRowHtml("assistant", rawText, false);
 assert.ok(assistantHtml.indexOf('class="msg-row msg-assistant"') >= 0, "assistant 行应带 msg-assistant 类");
@@ -513,6 +523,15 @@ assert.ok(hasRule("#screen .msg-row.msg-assistant .msg-md ol", "margin: 0"),
   ".msg-md 列表纵向外边距应清零");
 assert.ok(hasRule("#screen .msg-row.msg-assistant .msg-md blockquote", "margin: 0"),
   ".msg-md 引用块纵向外边距应清零");
+// 语言标签带：has-lang 代码块在顶部预留 24px（标签 top:4px、行高 15px，
+// 悬停「复制」按钮高 20px 也落在带内），正文首行从带下方开始 ——
+// 语言标识与正文分层，不再叠在第一行代码上。三处 renderMarkdown 容器同契约。
+["#screen .msg-row.msg-assistant .msg-md pre.has-lang",
+  "#stream-msg pre.has-lang",
+  ".files-view-md pre.has-lang"].forEach(function (sel) {
+  assert.ok(hasRule(sel, "padding-top: 24px"),
+    "style.css 缺少语言标签带顶部预留: " + sel);
+});
 assert.ok(/#screen \.msg-row\.msg-assistant \.msg-md h6 \{\s*margin: 0;/.test(css),
   ".msg-md 标题纵向外边距应清零");
 // 审批/问答弹窗同样吃 renderMarkdown 的块级输出，需要同一套清零规则。
