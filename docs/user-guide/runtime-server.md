@@ -46,7 +46,7 @@
 
 | 参数 | 适用于 | 说明 |
 |------|--------|------|
-| `-c, --config <path>` | serve/start/status | 配置文件路径；未指定时按 `$HOME/.aicli/` → `./.aicli/` → `./` → `./configs/` 顺序查找（找不到回退 `config.yaml`） |
+| `-c, --config <path>` | serve/start/status | 配置文件路径；未指定时按 `./.aicli/config.yaml` → `$HOME/.aicli/config.yaml` → `./aicli.yaml` → `./config.yaml` → `./configs/config.yaml` 顺序查找（首个存在即采用） |
 | `--listen <host:port>` | serve/start/status | 监听地址，优先级高于配置文件，如 `127.0.0.1:8101` |
 | `--pid-file <path>` | serve/start/stop/status | PID 文件路径（默认 `./logs/runtime-server.pid`） |
 | `--wait <duration>` | start | 等待后台进程完成启动的超时时间（默认 30s） |

@@ -27,7 +27,7 @@
 
 相关入口：
 
-- `backend/cmd/aicli/main.go` 负责解析 `--config`，按 `$HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./aicli.yaml -> ./configs/config.yaml` 搜索配置。
+- `backend/cmd/aicli/main.go` 负责解析 `--config`，按 `$HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./aicli.yaml -> ./configs/config.yaml` 搜索配置。（**2026-09-25 修订**：此为当时的顺序。分层配置落地后实际顺序为 `./.aicli/config.yaml`（项目级）→ `$HOME/.aicli/config.yaml`（用户级）→ `./aicli.yaml` → `./config.yaml` → `./configs/config.yaml`，即**项目级优先**；help 文案已改为从 `ConfigLayerStack` 派生，见 `internal/agentconfig/config_layers.go` 与 `ConfigSearchSummary()`。）
 - 历史状态下 `backend/internal/agentconfig/config.go` 的 `AICLIConfig` 只有 `mcp/log/retry/timeout/theme`，没有 chat 默认模型偏好；当前已经新增 `chat`。
 - `backend/cmd/aicli/commands/chat_options.go` 负责解析 chat flags，并提供 `resolveChatProviderName`、`resolveChatModelName`、`resolveChatStreamMode`。
 - `backend/cmd/aicli/commands/chat_bootstrap.go` 的 `prepareChatRuntimeState` 组合 provider、model、reasoning effort、adapter、baseURL。

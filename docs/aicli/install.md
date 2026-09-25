@@ -207,12 +207,18 @@ aicli version
 | 优先级 | 路径 | 用途 |
 |---|---|---|
 | 显式覆盖 | `-c/--config <path>` | 命令行显式指定（最高） |
-| 1 | `$HOME/.aicli/config.yaml` | 用户级全局配置 |
-| 2 | `./.aicli/config.yaml` | 项目级配置（cwd 下 `.aicli/`） |
-| 3 | `./aicli.yaml` | 项目级单文件配置 |
-| 4 | `./configs/config.yaml` | 旧版默认（向后兼容） |
+| 1 | `./.aicli/config.yaml` | 项目级配置（cwd 下 `.aicli/`；**优先于用户级**） |
+| 2 | `$HOME/.aicli/config.yaml` | 用户级全局配置 |
+| 3 | `./aicli.yaml` | 项目级单文件配置（遗留） |
+| 4 | `./config.yaml` | 遗留散落文件 |
+| 5 | `./configs/config.yaml` | 便携默认（向后兼容） |
 
-四个默认候选位置都不存在时，当前 `aicli` 会优先创建用户级 starter 配置 `$HOME/.aicli/config.yaml`，从而与默认查找顺序保持一致；如果用户目录不可用，则回退到当前工作目录的 `./.aicli/config.yaml`。starter 中默认开启 `aicli.chat.stream: true`，并保留空的 `providers.items`，方便后续通过 `aicli login` 或手工编辑补 provider。
+默认是**单文件语义**（`AICLI_CONFIG_MERGE` 未开启）：只加载首个命中的文件，低层不补键；需要跨层合并时设
+`AICLI_CONFIG_MERGE=on`（低→高逐层合并，高层只覆盖自己显式写的键，显式 `null` 删除下层键），`dry-run` 只预览不改变行为。
+
+所有默认候选位置都不存在时，当前 `aicli` 会优先创建用户级 starter 配置 `$HOME/.aicli/config.yaml`（这是**创建**落点，
+不是读取优先级）；如果用户目录不可用，则回退到当前工作目录的 `./.aicli/config.yaml`。starter 中默认开启
+`aicli.chat.stream: true`，并保留空的 `providers.items`，方便后续通过 `aicli login` 或手工编辑补 provider。
 
 注意：`./configs/config.yaml` 是相对当前工作目录解析的路径。仓库示例配置实际位于 `backend/configs/config.yaml`，只有从 `backend` 目录运行时才会被默认候选命中；从仓库根运行时请使用 `-c backend/configs/config.yaml` 或创建项目级 `./.aicli/config.yaml`。
 

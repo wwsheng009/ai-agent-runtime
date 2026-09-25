@@ -84,7 +84,7 @@
 
 | 维度 | runtime-server | aicli | 影响 |
 | --- | --- | --- | --- |
-| 配置搜索 | `$HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./config.yaml -> ./configs/config.yaml` | `$HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./aicli.yaml -> ./configs/config.yaml` | 在项目根目录有 `aicli.yaml` 或 `config.yaml` 时，两边可能加载不同配置。 |
+| 配置搜索 | `$HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./config.yaml -> ./configs/config.yaml` | `$HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./aicli.yaml -> ./configs/config.yaml` | 在项目根目录有 `aicli.yaml` 或 `config.yaml` 时，两边可能加载不同配置。（**2026-09-25 修订**：两侧现已共用同一个 `ConfigLayerStack`，顺序为 `./.aicli/config.yaml` → `$HOME/.aicli/config.yaml` → `./aicli.yaml` → `./config.yaml` → `./configs/config.yaml`，本行的两侧分歧已消除。） |
 | 会话历史目录 | 默认 `~/.aicli/sessions`，可由 `runtime.sessions.dir` 覆盖 | 默认 `~/.aicli/sessions`，可由 `--session-dir` 覆盖 | 默认可能一致，但覆盖逻辑不同。 |
 | 默认用户 | API 默认 `anonymous` 或 usage scope user | OS 用户名，或 `AICLI_SESSION_USER` 等环境变量 | 同目录下按 `userId` 列表过滤，互相看不到很常见。 |
 | 会话元数据 | 写 `profile_reference/profile_name/profile_agent/profile_root` 等 API profile 键 | 写 `aicli_provider_name/aicli_protocol/aicli_model/aicli_stream/...` | 同一 JSON 格式下元数据语义不统一。 |

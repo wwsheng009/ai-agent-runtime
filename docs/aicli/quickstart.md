@@ -87,13 +87,14 @@ aicli config
 
 能读到配置路径（通常是 `~/.aicli/config.yaml`）。
 
-默认配置查找顺序（首个存在即采用）：
+默认配置查找顺序（**高→低优先级，首个存在即采用**）：
 
-1. `-c/--config <path>`
-2. `$HOME/.aicli/config.yaml`（用户级，推荐）
-3. `./.aicli/config.yaml`
-4. `./aicli.yaml`
-5. `./configs/config.yaml`
+1. `-c/--config <path>`（显式指定；只读该文件，不做层合并）
+2. `./.aicli/config.yaml`（项目级）
+3. `$HOME/.aicli/config.yaml`（用户级，推荐由 `aicli init --global` 创建）
+4. `./aicli.yaml`（遗留单文件）
+5. `./config.yaml`（遗留散落文件）
+6. `./configs/config.yaml`（便携默认）
 
 没有配置时，启动某些命令也可能自动创建 starter；显式 `aicli init` 更清晰。字段与环境变量说明见 [install.md](./install.md)。
 

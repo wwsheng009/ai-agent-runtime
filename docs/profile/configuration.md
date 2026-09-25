@@ -11,8 +11,10 @@
 | 2 | `<profile-root>/profile.yaml` + `agents/<id>/…` | 场景声明：工具面、技能、MCP、prompt、agent | 人 / CLI / TUI / Web 编辑器 |
 | 3 | `<workspace>/.aicli/profile` | 项目绑定指针（只读发现） | 人（随仓库提交） |
 
-配置文件查找顺序（未显式 `-c/--config` 时）：
-`$HOME/.aicli/config.yaml` → `./.aicli/config.yaml` → `./aicli.yaml` → `./configs/config.yaml`。
+配置文件查找顺序（未显式 `-c/--config` 时，**按高→低优先级取第一个存在的文件**）：
+`./.aicli/config.yaml`（项目级）→ `$HOME/.aicli/config.yaml`（用户级）→ `./aicli.yaml` → `./config.yaml` → `./configs/config.yaml`。
+默认是**单文件语义**：只有命中的那一个文件参与，低层不补键；`AICLI_CONFIG_MERGE=on` 时才按层合并（低→高，
+高层只覆盖自己显式写的键，显式 `null` 删除下层键）。本文件讲的 `profiles` 段读取同样受此约定约束。
 
 ---
 

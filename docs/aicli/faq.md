@@ -18,7 +18,7 @@ aicli config --output json
 - 当前加载的配置里 `providers.items` 仍为空（只初始化了 starter，还没 login）
 - 从仓库根运行时，误以为会自动读取 `backend/configs/config.yaml`（默认不会）
 
-说明：用户级 `$HOME/.aicli/config.yaml` 优先级高于项目级 `./.aicli/config.yaml`；项目级不会覆盖用户级。若两边都存在，以用户级为准。
+说明：**项目级 `./.aicli/config.yaml` 优先级高于用户级 `$HOME/.aicli/config.yaml`**；两边都存在时以项目级为准（默认单文件语义：只加载命中的那一个文件，低层不补键）。若你只想用用户级配置，用 `aicli -c ~/.aicli/config.yaml …` 显式指定。
 
 处理建议：
 

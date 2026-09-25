@@ -236,7 +236,7 @@ request → accept → execute 落 durable action 行（`action_id` 可在输出
 
 | 参数 | 说明 |
 |------|------|
-| `-c, --config <path>` | 配置文件路径（默认按 `$HOME/.aicli/` → `./.aicli/` → `./` → `./configs/` 顺序查找） |
+| `-c, --config <path>` | 配置文件路径（默认按 `./.aicli/config.yaml` → `$HOME/.aicli/config.yaml` → `./aicli.yaml` → `./config.yaml` → `./configs/config.yaml` 顺序查找，首个存在即采用） |
 | `-l, --logfile <path>` | 日志文件路径（默认取 `aicli.log.file_path` 或 `log.file_path`） |
 | `--theme <name>` | 主题配色/明暗：`classic`、`focus`、`contrast`、`mono` 或 `auto`/`dark`/`light` |
 | `--syntax-theme <name>` | 代码语法高亮主题（`auto` 或 Chroma 主题名） |

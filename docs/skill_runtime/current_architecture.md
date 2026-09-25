@@ -270,7 +270,7 @@ Registry + LLM/MCP + Session + Policies
 当前独立 HTTP 宿主是 `backend/cmd/runtime-server/main.go`。它负责：
 
 - 解析 `serve/start/stop/status` 子命令、配置路径、监听地址与 PID 文件
-- 按 `$HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./config.yaml -> ./configs/config.yaml` 搜索配置
+- 按 `./.aicli/config.yaml -> $HOME/.aicli/config.yaml -> ./aicli.yaml -> ./config.yaml -> ./configs/config.yaml` 搜索配置（首个存在即采用）
 - 创建 `RuntimeManager`
 - 创建 `bootstrap.Manager`
 - 建立 MCP runtime、session hub、background manager、service control、config document service、file transfer service

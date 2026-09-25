@@ -28,7 +28,7 @@ go run ./cmd/runtime-server serve --listen 127.0.0.1:8081
 
 - 不带子命令时等价于 `serve`，旧的 `go run ./cmd/runtime-server --listen ...` 写法仍可用。
 - 默认 PID 文件为 `./logs/runtime-server.pid`。
-- 未指定 `--config` 时，配置搜索顺序为 `$HOME/.aicli/config.yaml -> ./.aicli/config.yaml -> ./config.yaml -> ./configs/config.yaml`。
+- 未指定 `--config` 时，配置搜索顺序为 `./.aicli/config.yaml -> $HOME/.aicli/config.yaml -> ./aicli.yaml -> ./config.yaml -> ./configs/config.yaml`（首个存在即采用）。
 - 当前 runtime config snapshot 已收敛为 base config only；旧的 `config.runtime.snapshot.yaml` 语义应视为历史说明。
 
 ## 主入口
