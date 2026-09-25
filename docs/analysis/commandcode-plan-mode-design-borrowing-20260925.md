@@ -502,3 +502,26 @@
 ### 11.4 备注（环境）
 
 `go build ./...` 期间撞到过一次另一会话在 `cmd/aicli/commands/command.go` 的半成品改动（`printChatCommandOutput` 参数不匹配），数秒后对方改完即恢复；与本轮改动无关，最终构建为 exit 0。
+
+### 11.5 提交与“干净检出”验证（重要）
+
+本轮把工作树里属于 plan 模式的改动按**路径白名单**提交（避开另一会话 staged 的 `skills → runtimeapi` 包改名），提交为：
+
+- `60d5c419` feat(plan): plan_review 工具、模型自主进入确认门控与归档保留策略（第三轮）
+- `74220302` feat(plan): /plans reopen 归档回灌重评审（第四轮）
+- `a40ebb74` fix(plan): 补交 plan_review reminder 定义（system_reminder）
+
+用 `git worktree add --detach <commit>` 做干净检出后逐提交构建，暴露并修掉了两个**只在干净检出下可见**的问题：
+
+1. **漏提交定义文件**：`chat/plan_mode_tools.go` 引用的 `agent.ReminderKindPlanReview` / `agent.PlanReviewNotesBody` 定义在 `internal/agent/system_reminder.go`，该文件此前未纳入提交。已由 `a40ebb74` 补交（中间提交 `60d5c419`/`74220302` 因此不可独立构建，故不推荐对这两个提交做 bisect；`a40ebb74` 起恢复可构建）。
+2. **前置的他人提交不一致（非本工作引入）**：干净检出下 `go test ./cmd/aicli/commands/` 因 `resolveConfiguredSkillDirs` 签名不匹配（定义 3 参 / 调用 2 参）无法编译。该文件最后一次变更来自 `0df28afa`（skills 启停）——`05c03d45` 时定义与调用一致（均 2 参），且本工作的任何提交都未触碰 `skills_integration.go`；主工作树里调用方已被对方改好（未提交）。
+
+干净检出（`a40ebb74`）实测：
+
+| 命令 | 结果 |
+|---|---|
+| `go build ./internal/... ./cmd/...` | 仅 `internal/webui/assets.go: pattern dist: no matching files found`（前端 dist 未构建，历史现象），无其它错误 |
+| `go test ./internal/planmode/ ./internal/toolbroker/ ./internal/chat/ -count=1` | 全绿（3.0s / 23.9s / 50.2s） |
+| `go test ./cmd/aicli/commands/` | 被上述他人提交的签名不一致阻塞（主工作树内该包全绿：202.6s） |
+
+另外，`internal/api/**` 的 `/plans` 路由、`DELETE /api/runtime/plans/{id}`（第三轮）与 `plan_mode_handlers.go` 的改动**仍未提交**：这些文件位于另一会话正在进行的 `internal/api/skills → internal/api/runtimeapi` 包改名路径下（该改名已 staged 204 条），单独提交会产生编译不过的中间态。待对方改名落地后需要补一次提交。
