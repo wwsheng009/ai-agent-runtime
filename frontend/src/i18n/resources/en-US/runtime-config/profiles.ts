@@ -42,6 +42,23 @@ export const enRuntimeConfigProfiles = {
     statusError: "Parse failed",
     layerUnknown: "Unknown layer",
     selectedHint: "{{name}} selected; the actions below target it.",
+    projectBound: "Project binding",
+  },
+  projectBinding: {
+    title: "Project binding (this workspace)",
+    description:
+      "The project-level profile referenced by this workspace's .aicli/profile. Discovery is read-only: nothing is activated automatically and the default profile is unchanged.",
+    refLabel: "Ref",
+    workspaceLabel: "Workspace",
+    sourceLabel: "Source",
+    pointerLabel: "Pointer file",
+    targetLabel: "Target directory",
+    statusValid: "Target available",
+    statusInvalid: "Binding unavailable",
+    suppressed:
+      "This profile's prompts are currently not applied: the workspace is not trusted (narrowing declarations such as tools/skills/MCP still apply).",
+    applyHint:
+      "To apply it, run /profile {{ref}} inside a session (this page only discovers and edits; it does not switch sessions).",
   },
   trust: {
     title: "Workspace not trusted: project prompts are not applied",

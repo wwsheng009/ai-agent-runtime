@@ -35,6 +35,7 @@ function entry(
     writable: true,
     promptSuppressed: false,
     promptSuppressionReason: "",
+    isBound: false,
     ...overrides,
   };
 }
@@ -52,6 +53,7 @@ function catalog(
     workspacePath: "",
     workspaceTrusted: true,
     workspaceTrustFeatureEnabled: false,
+    projectBinding: null,
     ...overrides,
   };
 }

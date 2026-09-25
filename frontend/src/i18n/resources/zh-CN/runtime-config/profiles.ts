@@ -43,6 +43,22 @@ export const zhRuntimeConfigProfiles = {
     statusError: "解析失败",
     layerUnknown: "未知层级",
     selectedHint: "已选中 {{name}}，下方操作针对该 profile。",
+    projectBound: "项目绑定",
+  },
+  projectBinding: {
+    title: "项目绑定（本工作区）",
+    description:
+      "本工作区 .aicli/profile 指向的项目级 profile。只读发现：不会自动启用，也不改变默认 profile。",
+    refLabel: "引用",
+    workspaceLabel: "工作区",
+    sourceLabel: "来源",
+    pointerLabel: "指针文件",
+    targetLabel: "目标目录",
+    statusValid: "目标可用",
+    statusInvalid: "绑定不可用",
+    suppressed:
+      "该 profile 的提示词当前未应用：工作区未信任（工具/技能/MCP 等收窄声明仍然生效）。",
+    applyHint: "应用请在会话内执行 /profile {{ref}}（本页只做发现与编辑，不切换会话）。",
   },
   trust: {
     title: "工作区未信任：项目级提示词未应用",

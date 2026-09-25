@@ -358,6 +358,22 @@ func fallbackProfileRoot(name string, workspacePath string) string {
 			return candidate
 		}
 	}
+	// .aicli 标准层根（当前落盘目标，与 CLI/TUI 的 create/move/import 同源）：
+	// `.gagent` 是历史目录约定（保留在前，兼容旧安装），不补这一段就会出现
+	// "清单里可见的层 profile，set_profile 解析仍报未找到"的写读分叉。
+	// project 层按**会话工作区**解析（服务端 cwd 不等于工作区）。
+	if workspacePath != "" {
+		if root, err := profilesys.LayerRootForWorkspace("project", workspacePath); err == nil {
+			if candidate := filepath.Join(root, name); profileRootExists(candidate) {
+				return candidate
+			}
+		}
+	}
+	if root, err := profilesys.LayerRootForWorkspace("user", ""); err == nil {
+		if candidate := filepath.Join(root, name); profileRootExists(candidate) {
+			return candidate
+		}
+	}
 	return ""
 }
 

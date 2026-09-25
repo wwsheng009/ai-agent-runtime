@@ -91,10 +91,35 @@ func LayerForRoot(root string) string {
 // 一个读不到的层根（权限、临时目录被清理）不该让"config 注册项可用"的会话
 // 整体解析失败。层根的缺失/不可读不等于"该 profile 不存在"，因此调用方在
 // 解析失败时仍会如实报错（不静默降级为"未找到"）。
+//
+// project 层按**进程 cwd** 解析（CLI 语义）；服务端要按会话工作区解析时必须
+// 用 LayerProfilesForWorkspace，不能用本函数（server cwd ≠ 会话工作区）。
 func LayerProfiles() []LayerProfile {
+	return layerProfilesWith(func(layer string) (string, error) { return LayerRoot(layer) })
+}
+
+// LayerProfilesForWorkspace 与 LayerProfiles 同语义，但 project 层绑定到
+// **指定工作区**（`<workspace>/.aicli/profiles`），user 层不变。
+//
+// workspace 为空时退化为 LayerProfiles()（project 层按进程 cwd）：调用方没声明
+// 工作区时不该凭空挑一个，保持既有行为。项目层枚举范围与 LayerRootForWorkspace
+// 同源，避免"清单从 A 目录发现、解析在 B 目录命中"的分叉。
+func LayerProfilesForWorkspace(workspace string) []LayerProfile {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return LayerProfiles()
+	}
+	return layerProfilesWith(func(layer string) (string, error) {
+		return LayerRootForWorkspace(layer, workspace)
+	})
+}
+
+// layerProfilesWith 是层枚举的单一实现：rootFor 只负责给出每层的根目录，
+// 扫描口径（只认含 profile.yaml 的目录、层内按名升序、单层不可读即跳过）只此一份。
+func layerProfilesWith(rootFor func(layer string) (string, error)) []LayerProfile {
 	found := make([]LayerProfile, 0, 4)
 	for _, layer := range LayerNames() {
-		base, err := LayerRoot(layer)
+		base, err := rootFor(layer)
 		if err != nil || strings.TrimSpace(base) == "" {
 			continue
 		}

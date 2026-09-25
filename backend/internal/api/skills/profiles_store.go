@@ -19,6 +19,11 @@ import (
 var (
 	errRuntimeProfileNotFound = stderrors.New("runtime profile not found")
 	errRuntimeProfileBadRef   = stderrors.New("invalid runtime profile reference")
+	// errRuntimeProfileWorkspaceInvalid 表示请求给出的 workspace 参数本身不可用
+	// （为空以外的非法形态：路径不存在、不是目录）。这是**调用方输入错误**（400），
+	// 与"绑定文件内容有错"（仍是 200 + project_binding.error）刻意分开：前者重试
+	// 同样的参数永远不会成功，后者是工作区里的事实，应当展示而不是让整页列表失败。
+	errRuntimeProfileWorkspaceInvalid = stderrors.New("invalid profile workspace parameter")
 )
 
 // Profiles API 的文件系统层（Batch 8 任务 1）。
@@ -52,6 +57,10 @@ type runtimeProfileEntry struct {
 	// 才会置位——没有 prompt 的 profile 不制造假警告（与运行期门控同一判据）。
 	PromptSuppressed        bool   `json:"prompt_suppressed,omitempty"`
 	PromptSuppressionReason string `json:"prompt_suppression_reason,omitempty"`
+	// IsBound 标注该条目名就是本工作区 `.aicli/profile` 指针指向的 profile
+	// （FR-14 只读发现）。它**不是** default，也不代表已激活：绑定只是候选，
+	// 应用仍要用户显式发起（会话内 `/profile`）。
+	IsBound bool `json:"is_bound,omitempty"`
 }
 
 type runtimeProfileListResult struct {
@@ -73,6 +82,12 @@ type runtimeProfileListResult struct {
 	WorkspacePath                string `json:"workspace_path,omitempty"`
 	WorkspaceTrusted             bool   `json:"workspace_trusted"`
 	WorkspaceTrustFeatureEnabled bool   `json:"workspace_trust_feature_enabled"`
+	// ProjectBinding 是本工作区 `.aicli/profile` 的只读发现结果（FR-14）：
+	// 仅当调用方显式给出 workspace 参数时填充（否则字段省略，旧调用零变化）。
+	//
+	// 绑定错误**留在本字段**而不是让整个列表失败（除 workspace 参数本身非法外），
+	// 这样"上一个项目留了个指向不存在 profile 的绑定文件"不会把设置页打成空页。
+	ProjectBinding *profilesys.ProjectProfileBinding `json:"project_binding,omitempty"`
 }
 
 // runtimeProfileTarget 是一次 ref → root 的解析结果。
@@ -135,8 +150,9 @@ func (v *profilesConfigView) itemRoot(name string) (string, bool) {
 	return "", false
 }
 
-// listRuntimeProfileEntries 枚举三来源（config 注册项 / default root 子目录 /
-// 默认值补行），并标注解析状态。排序：registered 优先，其余按名字。
+// listRuntimeProfileEntries 枚举四来源（config 注册项 / default root 子目录 /
+// 标准层根（user|project）/ 默认值补行），并标注解析状态。排序：registered 优先，
+// 其余按名字。去重顺序即优先级：config > root > project 层 > user 层。
 //
 // workspace 非空时额外标注 D29 工作区信任上下文与逐条 prompts 扣留标记
 // （Batch 14 slice 5）；为空时行为与既有完全一致。
@@ -216,6 +232,27 @@ func (h *Handler) listRuntimeProfileEntries(workspace string) (*runtimeProfileLi
 		}
 	}
 
+	// 层来源（G4 写点的读侧，与 CLI `profile list` 共用 profilesys 的层枚举）：
+	// create/move/import 的落盘目标是标准层根，清单必须与 config/root 同列可见，
+	// 否则"创建成功但清单里查不到、切不了"（写读分叉）。
+	//
+	// 请求给出 workspace 时 project 层按**该工作区**枚举（LayerProfilesForWorkspace，
+	// FR-14）：服务进程 cwd 不等于会话工作区，用无参 LayerProfiles() 会列出 server
+	// 启动目录的项目层 profile——既是错误发现，也是跨工作区信息泄漏。
+	for _, layerProfile := range profilesys.LayerProfilesForWorkspace(workspace) {
+		entry := runtimeProfileEntry{
+			Ref:       layerProfile.Name,
+			Name:      layerProfile.Name,
+			Source:    "layer",
+			Layer:     layerProfile.Layer,
+			Path:      layerProfile.Root,
+			IsDefault: layerProfile.Name == view.DefaultProfile,
+			Writable:  true,
+		}
+		describeRuntimeProfileEntry(&entry)
+		addEntry(entry)
+	}
+
 	// 默认值指向的 profile 未出现在任何来源时补一行（与 CLI `profile list` 同语义：
 	// "默认值指向不存在的 profile"必须可见，不能被静默吞掉）。
 	if view.DefaultProfile != "" {
@@ -243,10 +280,45 @@ func (h *Handler) listRuntimeProfileEntries(workspace string) (*runtimeProfileLi
 		}
 	}
 
+	// FR-14：workspace 声明时读取该工作区的项目绑定（只读指针，不激活、不改 default）。
+	// 绑定文件本身的错误（YAML/ref/目标缺失）留在 metadata 里；只有 workspace 参数
+	// 本身不可用才升级成 400（调用方输入错误，不该伪装成"工作区没有绑定"）。
+	if strings.TrimSpace(workspace) != "" {
+		binding, err := profilesys.LoadProjectProfileBinding(workspace)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", errRuntimeProfileWorkspaceInvalid, err)
+		}
+		result.ProjectBinding = binding
+		markBoundRuntimeProfileEntry(result)
+	}
+
 	h.annotateWorkspaceTrust(result, workspace)
 
 	result.Count = len(result.Profiles)
 	return result, nil
+}
+
+// markBoundRuntimeProfileEntry 把"这个名字就是本工作区绑定目标"标注到清单条目上。
+//
+// 只在绑定有效时标注：绑定指向不存在的 profile 时，清单里没有可信的对应条目，
+// 不能靠名字猜一个（那会把别的层的同名 profile 说成"已绑定"）。
+// 名字命中即标注（不限制 layer）：binding 只约束**目标目录**必须是本工作区项目层，
+// 而条目来源仍按既有去重优先级（config > root > project > user）如实展示；若同名的
+// config 条目压过项目层，用户在这里看到"已绑定"但解析落到 config——这是既有优先级
+// 语义，不是绑定引入的新行为，首版不额外做来源仲裁。
+func markBoundRuntimeProfileEntry(result *runtimeProfileListResult) {
+	if result == nil || result.ProjectBinding == nil {
+		return
+	}
+	binding := result.ProjectBinding
+	if !binding.Valid || strings.TrimSpace(binding.Ref) == "" {
+		return
+	}
+	for i := range result.Profiles {
+		if result.Profiles[i].Name == binding.Ref {
+			result.Profiles[i].IsBound = true
+		}
+	}
 }
 
 // annotateWorkspaceTrust 把 D29 工作区信任结论与逐条 prompts 扣留标记写进清单。
@@ -278,17 +350,35 @@ func (h *Handler) annotateWorkspaceTrust(result *runtimeProfileListResult, works
 		if !entry.Valid || strings.TrimSpace(entry.Path) == "" {
 			continue
 		}
-		resolved, err := profilesys.Resolve(profilesys.ResolveOptions{Root: entry.Path})
-		if err != nil {
-			continue
+		if suppressed, reason := projectPromptSuppression(entry.Path, workspace); suppressed {
+			entry.PromptSuppressed = true
+			entry.PromptSuppressionReason = reason
 		}
-		gate := profilesys.EvaluateProjectPromptGate(resolved, workspace, false)
-		if !gate.Suppressed {
-			continue
-		}
-		entry.PromptSuppressed = true
-		entry.PromptSuppressionReason = gate.Reason
 	}
+	// 绑定目标同样要如实报告扣留：绑定卡片上的"部分内容未应用"必须与实际
+	// 解析（ApplyProjectPromptGate）同源，否则用户会以为绑定已完整生效。
+	if binding := result.ProjectBinding; binding != nil && binding.Valid {
+		if suppressed, reason := projectPromptSuppression(binding.Root, workspace); suppressed {
+			binding.PromptSuppressed = true
+			binding.PromptSuppressionReason = reason
+		}
+	}
+}
+
+// projectPromptSuppression 用与运行期**同一函数**（EvaluateProjectPromptGate）
+// 判定某个 profile root 在未信任工作区下是否有 prompts 被扣留。解析失败返回
+// false：条目本身已由 valid/error 报告解析问题，这里不制造第二套诊断。
+func projectPromptSuppression(root, workspace string) (bool, string) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return false, ""
+	}
+	resolved, err := profilesys.Resolve(profilesys.ResolveOptions{Root: root})
+	if err != nil {
+		return false, ""
+	}
+	gate := profilesys.EvaluateProjectPromptGate(resolved, workspace, false)
+	return gate.Suppressed, gate.Reason
 }
 
 // describeRuntimeProfileEntry 填充 valid/error/description/default_agent。
@@ -360,6 +450,13 @@ func (h *Handler) resolveRuntimeProfileTarget(ref string) (runtimeProfileTarget,
 		}
 		if root, err := h.profileRegistry.Resolve(ref); err == nil && profileRootHasProfileYAML(root) {
 			return runtimeProfileTarget{Ref: ref, Root: root, Source: "default", Layer: profileLayerForRoot(root)}, nil
+		}
+	}
+	// 层兜底：与 TUI `/profile` 的解析侧同源（profilesys.RegisterLayerFallbacks）。
+	// 优先级不变：config 注册项 > default root 子目录 > project 层 > user 层。
+	for _, layerProfile := range profilesys.LayerProfiles() {
+		if layerProfile.Name == ref {
+			return runtimeProfileTarget{Ref: ref, Root: layerProfile.Root, Source: "layer", Layer: layerProfile.Layer}, nil
 		}
 	}
 	return runtimeProfileTarget{}, fmt.Errorf("%w: profile %q 未找到（可查 GET /api/runtime/profiles 的可用清单）",

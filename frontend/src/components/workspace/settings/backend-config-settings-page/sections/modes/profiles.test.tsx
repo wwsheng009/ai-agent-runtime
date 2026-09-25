@@ -36,6 +36,8 @@ type ListEntry = {
   is_default: boolean;
   default_agent: string;
   writable: boolean;
+  /** FR-14：后端 runtimeProfileEntry.is_bound（旧后端缺失 = 不显示徽标）。 */
+  is_bound?: boolean;
 };
 
 type RecordedCall = { url: string; method: string; body: string | null };
@@ -47,6 +49,8 @@ let defaultProfile = "";
 let calls: RecordedCall[] = [];
 /** 下一次 DELETE 返回 409 引用阻断（模拟 profiles_lifecycle_handlers 的语义）。 */
 let deleteBlocked = false;
+/** 列表响应里的 FR-14 项目绑定（null = 旧后端/未声明工作区：不发该字段）。 */
+let projectBinding: Record<string, unknown> | null = null;
 
 /**
  * 与组件同源取词：固定 runtimeConfig 命名空间；键来自测试用的动态拼装，
@@ -81,11 +85,15 @@ function entry(ref: string, overrides: Partial<ListEntry> = {}): ListEntry {
   };
 }
 
-function installFetchMock(seed: ListEntry[]) {
+function installFetchMock(
+  seed: ListEntry[],
+  options: { binding?: Record<string, unknown> | null } = {},
+) {
   entries = seed.map((item) => ({ ...item }));
   defaultProfile = entries.find((item) => item.is_default)?.name ?? "";
   calls = [];
   deleteBlocked = false;
+  projectBinding = options.binding ?? null;
 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -99,6 +107,12 @@ function installFetchMock(seed: ListEntry[]) {
         count: entries.length,
         default_profile: defaultProfile,
         profiles: entries,
+        // FR-14：后端只在请求带 workspace 参数时回填 project_binding；这里用
+        // "字段是否存在"复现旧后端/新后端两种响应，避免前端为旧后端猜测状态。
+        ...(projectBinding ? { project_binding: projectBinding } : {}),
+        workspace_path: "/ws",
+        workspace_trusted: true,
+        workspace_trust_feature_enabled: false,
       });
     }
 
@@ -460,5 +474,102 @@ describe("ProfilesModeSection", () => {
     expect(applyButton?.getAttribute("aria-label")).toBe(t("profiles.list.applyDisabled"));
     expect(applyButton?.getAttribute("aria-label")).toContain("/profile");
     expect(calls.some((call) => call.url.includes("/apply"))).toBe(false);
+  });
+
+  /** FR-14 绑定载荷：字段名与 Go ProjectProfileBinding 的 json tag 一致。 */
+  function bindingPayload(overrides: Record<string, unknown> = {}) {
+    return {
+      present: true,
+      valid: true,
+      ref: "demo",
+      workspace_path: "/ws/demo",
+      path: "/ws/demo/.aicli/profile",
+      profile_root: "/ws/demo/.aicli/profiles/demo",
+      layer: "project",
+      source: "project_binding",
+      error: "",
+      prompt_suppressed: false,
+      prompt_suppression_reason: "",
+      ...overrides,
+    };
+  }
+
+  it("旧后端响应无 project_binding：不渲染绑定卡片，也不制造错误", async () => {
+    installFetchMock([entry(REF_SPACED)]);
+
+    await renderSection();
+
+    expect(document.body.querySelector('[data-testid="profiles-project-binding"]')).toBeNull();
+    expect(
+      document.body.querySelector('[data-testid="profiles-project-binding-error"]'),
+    ).toBeNull();
+  });
+
+  it("没有绑定文件（present=false）：不渲染卡片，也不标注任何行", async () => {
+    installFetchMock([entry("project:demo", { name: "demo" })], {
+      binding: bindingPayload({ present: false, valid: false, ref: "" }),
+    });
+
+    await renderSection();
+
+    expect(document.body.querySelector('[data-testid="profiles-project-binding"]')).toBeNull();
+    expect(document.body.querySelector('[data-testid="profiles-bound-project:demo"]')).toBeNull();
+  });
+
+  it("项目绑定：只读卡片 + 行内绑定徽标，且不自动 apply / 不设默认", async () => {
+    installFetchMock([entry("project:demo", { name: "demo", is_bound: true })], {
+      binding: bindingPayload(),
+    });
+
+    await renderSection();
+
+    const card = document.body.querySelector('[data-testid="profiles-project-binding"]');
+    expect(card).not.toBeNull();
+    expect(card?.textContent).toContain(t("profiles.projectBinding.statusValid"));
+    expect(card?.textContent).toContain("/ws/demo/.aicli/profiles/demo");
+    // 只读：给出"会话内用 /profile <ref>"的指引，而不是暴露一个点了会报错的按钮。
+    expect(card?.textContent).toContain(t("profiles.projectBinding.applyHint", { ref: "demo" }));
+    expect(document.body.querySelector('[data-testid="profiles-bound-project:demo"]')).not.toBeNull();
+
+    // 发现是只读的：列表加载不得触发 apply / default 写端点。
+    expect(
+      calls.some((call) => call.url.includes("/apply") || call.url.includes("/default")),
+    ).toBe(false);
+  });
+
+  it("绑定不可用：展示错误与路径，隐藏应用指引且不标注行", async () => {
+    installFetchMock([entry("project:demo", { name: "demo" })], {
+      binding: bindingPayload({
+        valid: false,
+        error: "project profile target 不存在：/ws/demo/.aicli/profiles/demo/profile.yaml",
+      }),
+    });
+
+    await renderSection();
+
+    const error = document.body.querySelector('[data-testid="profiles-project-binding-error"]');
+    expect(error?.textContent).toContain("不存在");
+    expect(
+      document.body.querySelector('[data-testid="profiles-project-binding-apply-hint"]'),
+    ).toBeNull();
+    expect(document.body.querySelector('[data-testid="profiles-bound-project:demo"]')).toBeNull();
+  });
+
+  it("未信任工作区：绑定卡片显示提示词扣留警告", async () => {
+    installFetchMock([entry("project:demo", { name: "demo", is_bound: true })], {
+      binding: bindingPayload({
+        prompt_suppressed: true,
+        prompt_suppression_reason: "工作区未信任：项目级 prompts 未应用",
+      }),
+    });
+
+    await renderSection();
+
+    const warning = document.body.querySelector(
+      '[data-testid="profiles-project-binding-suppressed"]',
+    );
+    expect(warning).not.toBeNull();
+    expect(warning?.textContent).toContain(t("profiles.projectBinding.suppressed"));
+    expect(warning?.getAttribute("title")).toBe("工作区未信任：项目级 prompts 未应用");
   });
 });

@@ -98,6 +98,13 @@ export function ProfileListRow({
           {entry.isDefault ? (
             <Badge className="normal-case">{t("profiles.list.default")}</Badge>
           ) : null}
+          {entry.isBound ? (
+            // FR-14：该条目是本工作区 `.aicli/profile` 指向的候选（只读发现）。
+            // 与 default 区分展示：绑定不会自动启用，也不是默认 profile。
+            <span data-testid={`profiles-bound-${entry.ref}`}>
+              <Badge className="normal-case">{t("profiles.list.projectBound")}</Badge>
+            </span>
+          ) : null}
           {!entry.writable ? (
             <Badge className="normal-case">{t("profiles.list.readOnly")}</Badge>
           ) : null}

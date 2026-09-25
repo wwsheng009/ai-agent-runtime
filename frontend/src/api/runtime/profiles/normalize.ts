@@ -13,6 +13,7 @@ import type {
   RuntimeProfileCreateResponse,
   RuntimeProfileListEntry,
   RuntimeProfileListResponse,
+  RuntimeProfileProjectBinding,
   RuntimeProfileReferencesResponse,
   RuntimeProfileValidationIssue,
   RuntimeProfileView,
@@ -101,6 +102,34 @@ export function normalizeProfileListEntry(value: unknown, index: number): Runtim
     // Batch 14 / D29：旧后端不返回这两个字段 → 归一化为 false/空（不显示徽标）。
     promptSuppressed: readBoolean(record.prompt_suppressed ?? record.promptSuppressed),
     promptSuppressionReason: readAliasedString(record, "promptSuppressionReason"),
+    // FR-14：旧后端不返回 is_bound → false（不显示绑定徽标）。
+    isBound: readBoolean(record.is_bound ?? record.isBound),
+  };
+}
+
+/**
+ * FR-14 项目绑定归一化：字段缺失（旧后端 / 本页未声明 workspace）返回 null，
+ * **不**把缺失当成"绑定无效"——那会在旧后端上凭空显示一条错误。
+ */
+export function normalizeProfileProjectBinding(
+  value: unknown,
+): RuntimeProfileProjectBinding | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  return {
+    present: readBoolean(record.present),
+    valid: readBoolean(record.valid),
+    ref: readAliasedString(record, "ref"),
+    workspacePath: readAliasedString(record, "workspacePath"),
+    path: readAliasedString(record, "path"),
+    profileRoot: readAliasedString(record, "profileRoot"),
+    layer: readAliasedString(record, "layer"),
+    source: readAliasedString(record, "source"),
+    error: readAliasedString(record, "error"),
+    promptSuppressed: readBoolean(record.prompt_suppressed ?? record.promptSuppressed),
+    promptSuppressionReason: readAliasedString(record, "promptSuppressionReason"),
   };
 }
 
@@ -125,6 +154,8 @@ export function normalizeProfileListResponse(
     workspaceTrustFeatureEnabled: readBoolean(
       record.workspace_trust_feature_enabled ?? record.workspaceTrustFeatureEnabled,
     ),
+    // FR-14：缺字段即 null（不渲染绑定卡片，也不制造"绑定无效"的假错误）。
+    projectBinding: normalizeProfileProjectBinding(record.project_binding ?? record.projectBinding),
   };
 }
 

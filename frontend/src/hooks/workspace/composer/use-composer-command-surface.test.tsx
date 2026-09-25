@@ -111,6 +111,7 @@ function profileCatalog(
     workspacePath: "",
     workspaceTrusted: true,
     workspaceTrustFeatureEnabled: false,
+    projectBinding: null,
     profiles: [
       {
         ref: "review",
@@ -125,6 +126,7 @@ function profileCatalog(
         writable: true,
         promptSuppressed: false,
         promptSuppressionReason: "",
+        isBound: false,
       },
       {
         ref: "broken",
@@ -139,6 +141,7 @@ function profileCatalog(
         writable: true,
         promptSuppressed: false,
         promptSuppressionReason: "",
+        isBound: false,
       },
     ],
     ...overrides,

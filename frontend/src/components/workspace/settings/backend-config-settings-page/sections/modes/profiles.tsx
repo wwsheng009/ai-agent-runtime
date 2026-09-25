@@ -26,6 +26,7 @@ import { useRuntimeClientIdentity } from "@/lib/runtime-client";
 import type {
   RuntimeProfileCreateRequest,
   RuntimeProfileListEntry,
+  RuntimeProfileProjectBinding,
   RuntimeProfileView,
 } from "@/types/runtime";
 
@@ -35,6 +36,7 @@ import { ProfileEditor } from "../../profiles/profile-editor";
 import { formatProfileError } from "../../profiles/profile-i18n";
 import { ProfileListHeader } from "./profile-list-header";
 import { ProfileListRow } from "./profile-list-row";
+import { ProfilesProjectBindingCard } from "./profiles-project-binding";
 import { ProfilesTrustNotice } from "./profiles-trust-notice";
 import {
   downloadProfileBundle,
@@ -69,6 +71,11 @@ export function ProfilesModeSection() {
     featureEnabled: boolean;
   } | null>(null);
   const [isGrantingTrust, setIsGrantingTrust] = useState(false);
+  /**
+   * FR-14 项目绑定发现结果；null = 本页未声明工作区或后端不支持（旧后端），
+   * 两种情况都不渲染绑定卡片、不显示错误。
+   */
+  const [projectBinding, setProjectBinding] = useState<RuntimeProfileProjectBinding | null>(null);
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
@@ -82,6 +89,7 @@ export function ProfilesModeSection() {
         trusted: result.workspaceTrusted,
         featureEnabled: result.workspaceTrustFeatureEnabled,
       });
+      setProjectBinding(result.projectBinding);
     } catch (loadError) {
       setError(formatProfileError(loadError, t("profiles.list.loadFailed")));
     } finally {
@@ -328,6 +336,10 @@ export function ProfilesModeSection() {
             void runGrantTrust();
           }}
         />
+      ) : null}
+
+      {projectBinding && projectBinding.present ? (
+        <ProfilesProjectBindingCard binding={projectBinding} />
       ) : null}
 
       {statusMessage ? (

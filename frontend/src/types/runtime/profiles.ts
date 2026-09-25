@@ -38,6 +38,40 @@ export type RuntimeProfileListEntry = {
   promptSuppressed: boolean;
   /** 扣留原因（promptSuppressed=true 时由后端给出，可直接展示）。 */
   promptSuppressionReason: string;
+  /**
+   * FR-14：该条目名就是本工作区 `.aicli/profile` 指向的 profile（只读发现）。
+   * 它不是 default、也不代表已激活——绑定只是候选，应用仍要显式发起。
+   * 旧后端不返回该字段 → 归一化为 false（不显示徽标）。
+   */
+  isBound: boolean;
+};
+
+/**
+ * FR-14 项目绑定（后端 `project_binding`）：本工作区 `.aicli/profile` 指针的
+ * **只读发现结果**。发现不改变 default、不写会话、不激活任何 profile。
+ *
+ * 字段缺失（旧后端 / 未声明 workspace）→ 归一化为 null → UI 不渲染绑定卡片。
+ */
+export type RuntimeProfileProjectBinding = {
+  /** 指针文件是否存在（false 时其余字段无意义，UI 不渲染卡片）。 */
+  present: boolean;
+  /** 指针合法且目标 profile.yaml 存在（目标内容是否可解析由列表条目报告）。 */
+  valid: boolean;
+  /** 指针声明的 profile 名（单段名；非法文档时为空）。 */
+  ref: string;
+  /** 规范化后的工作区绝对路径。 */
+  workspacePath: string;
+  /** 指针文件路径：`<workspace>/.aicli/profile`。 */
+  path: string;
+  /** 目标 profile 根目录：`<workspace>/.aicli/profiles/<ref>`。 */
+  profileRoot: string;
+  layer: RuntimeProfileLayer;
+  source: string;
+  /** 指针/目标不可用时的原因（present=true 且 valid=false 时非空）。 */
+  error: string;
+  /** D29：工作区未信任时目标 profile 的 prompts 被扣留。 */
+  promptSuppressed: boolean;
+  promptSuppressionReason: string;
 };
 
 export type RuntimeProfileListResponse = {
@@ -60,6 +94,11 @@ export type RuntimeProfileListResponse = {
   workspacePath: string;
   workspaceTrusted: boolean;
   workspaceTrustFeatureEnabled: boolean;
+  /**
+   * FR-14 项目绑定发现结果：仅当请求带 workspace 参数且后端支持时给出，
+   * 否则为 null（旧后端 / 本页未声明工作区）——此时不渲染绑定卡片、不显示错误。
+   */
+  projectBinding: RuntimeProfileProjectBinding | null;
 };
 
 /** 工具面：allowlist/denylist 为 profile 声明（可写），其余为后端推导（只读）。 */

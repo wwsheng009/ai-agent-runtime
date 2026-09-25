@@ -124,6 +124,9 @@ export function entryFromMutationResult(
     // 置为"未扣留"，下一次列表刷新会以服务端结论为准。
     promptSuppressed: false,
     promptSuppressionReason: "",
+    // 绑定标注同样等下一次列表刷新：新建的 profile 是否就是本工作区绑定目标，
+    // 只有服务端发现结果知道（这里不猜）。
+    isBound: false,
   };
 }
 

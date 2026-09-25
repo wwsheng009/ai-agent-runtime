@@ -76,6 +76,13 @@ func (h *Handler) ListRuntimeProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.listRuntimeProfileEntries(workspace)
 	if err != nil {
+		// workspace 参数本身不可用（不存在/不是目录）是调用方输入错误：400，
+		// 而不是让前端把它当成服务故障重试。绑定**文件**的问题不走这里
+		// （它们留在 project_binding.error 里，列表照常返回）。
+		if stderrors.Is(err, errRuntimeProfileWorkspaceInvalid) {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+			return
+		}
 		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "failed to list profiles", err))
 		return
 	}
