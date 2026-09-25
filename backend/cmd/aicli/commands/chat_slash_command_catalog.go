@@ -657,6 +657,18 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "approve", Summary: "批准计划并退出"},
 				{Token: "request_changes", Summary: "请求修改并保持 plan mode"},
 				{Token: "quit", Summary: "放弃计划并退出"},
+				{Token: "review", Summary: "查看当前计划正文与裁决方式"},
+			},
+		},
+		{
+			Name:        "/plans",
+			Usage:       "/plans [id | reopen <id> [vN] [--force]]",
+			Summary:     "浏览已归档的计划工件（状态/轮次/正文），或把某轮快照回灌并继续评审",
+			Group:       string(chatSlashCommandGroupPermission),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "<id>", Summary: "查看某个已归档计划的详情与最新正文"},
+				{Token: "reopen", Summary: "把归档快照写回工作区计划文件并进入 plan mode（vN 选版本，--force 覆盖已改动的文件）"},
 			},
 		},
 		{

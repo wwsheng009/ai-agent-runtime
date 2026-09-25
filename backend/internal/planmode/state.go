@@ -81,6 +81,11 @@ type State struct {
 	PendingReviewNotes string `json:"pending_review_notes,omitempty"`
 	// ReviewRound counts completed review rounds for the current plan session.
 	ReviewRound int `json:"review_round,omitempty"`
+	// ReopenedFrom/ReopenedVersion record that the current plan body was
+	// restored from the archive (see ReopenPlan), so hosts can show the lineage
+	// instead of presenting restored content as fresh work.
+	ReopenedFrom    string `json:"reopened_from,omitempty"`
+	ReopenedVersion int    `json:"reopened_version,omitempty"`
 }
 
 // ContextGetter reads a session context value.
@@ -465,6 +470,12 @@ func (s State) ToMap() map[string]interface{} {
 	if s.LastExitSource != "" {
 		out["last_exit_source"] = string(s.LastExitSource)
 	}
+	if s.ReopenedFrom != "" {
+		out["reopened_from"] = s.ReopenedFrom
+	}
+	if s.ReopenedVersion > 0 {
+		out["reopened_version"] = s.ReopenedVersion
+	}
 	if s.PendingReviewNotes != "" {
 		out["pending_review_notes"] = s.PendingReviewNotes
 	}
@@ -487,6 +498,10 @@ func normalizeState(state State) State {
 		}
 	}
 	state.PendingReviewNotes = strings.TrimSpace(state.PendingReviewNotes)
+	state.ReopenedFrom = strings.TrimSpace(state.ReopenedFrom)
+	if state.ReopenedVersion < 0 {
+		state.ReopenedVersion = 0
+	}
 	if state.LastExitSource != "" {
 		state.LastExitSource = NormalizeExitSource(string(state.LastExitSource))
 	}
@@ -518,6 +533,8 @@ func stateFromMap(raw map[string]interface{}) State {
 		PendingExitRequest: asBool(raw["pending_exit_request"]),
 		PendingReviewNotes: strings.TrimSpace(fmt.Sprint(rawValueOrEmpty(raw, "pending_review_notes"))),
 		ReviewRound:        asInt(raw["review_round"]),
+		ReopenedFrom:       strings.TrimSpace(fmt.Sprint(rawValueOrEmpty(raw, "reopened_from"))),
+		ReopenedVersion:    asInt(raw["reopened_version"]),
 	}
 	if source := strings.TrimSpace(fmt.Sprint(rawValueOrEmpty(raw, "last_exit_source"))); source != "" && source != "<nil>" {
 		state.LastExitSource = NormalizeExitSource(source)

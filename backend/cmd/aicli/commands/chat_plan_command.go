@@ -447,6 +447,9 @@ func planModeStatusText(session *ChatSession) string {
 	if state.PendingExitRequest {
 		lines = append(lines, "  pending exit request: true")
 	}
+	if provenance := planmode.ReopenProvenance(state); provenance != "" {
+		lines = append(lines, "  reopened from: "+provenance)
+	}
 	if active && state.LastExitSource == planmode.ExitSourceModel && state.PendingExitRequest {
 		lines = append(lines, "  待裁决: 模型已请求评审，请 /plan approve | /plan request_changes <notes> | /plan quit")
 	} else if hint := planReviewReadyHint(session, state); hint != "" {

@@ -460,3 +460,45 @@
 本轮首次派发两个写子代理被单写者策略拒绝（`single-writer policy violation: 2 writer subagents requested`，0/2 完成），已改为串行派发；期间另一会话仍在并发改动 `cmd/aicli/commands` 与 `internal/api/runtimeapi`，出现过一次 `web_mcp_handlers.go` 的编译中断（与本轮改动无关，随后自行恢复）。上表结果为最终稳定态输出。
 
 另外：前端 `/plans` 面板的子代理在写完代码（hook/surface/api/types/i18n/面板注册全套 + 19 个用例）后，其 run 卡在供应商排队里 13 分钟无进展（`run_status=queued`，且父会话无权 cancel 该 run）。父会话随后关闭该子会话并**自行接管控件的验证**：`npx tsc -b` 与上述 221 文件 vitest 全量均在其产物上通过，故表中前端结果由父会话实测得出，而非子代理自述。
+
+---
+
+## 11. 实施记录：第四轮（2026-09-25，归档回灌 `reopen`）
+
+**状态**：`planmode.ReopenPlan` 与 CLI `/plans reopen` **已落地**（提交 `feat(plan): 归档回灌…`）；Web 面板里的图形化 reopen 入口未做（面板仍是只读阅读面）。
+
+### 11.1 行为变更
+
+| 场景 | 变更前 | 变更后 |
+|------|--------|--------|
+| 继续评审一份已归档的计划 | 只有 `/plans <id>` 能看快照正文，无法回到 plan 模式 | `/plans reopen <id> [vN] [--force]`：把选中的快照写回工作区计划文件并直接进入 plan mode（`restore` 为别名，`--version N` 等价 `vN`） |
+| 覆盖工作区文件的安全边界 | — | 文件不存在 → 创建（含父目录）；内容与快照一致 → 不改写；内容不一致 → **默认拒绝**并提示 `--force`（保护工作区里更新的正文） |
+| 回灌来源可见性 | — | plan 状态新增 `reopened_from`/`reopened_version`：`/plan status` 显示 `reopened from: <id> vN`，模型侧 `plan_mode_*`/`plan_review` 结果的 `PlanModeResult` 同步透出 |
+| 越界/缺失防护 | — | 相对计划路径逃逸工作区 → `cannot resolve plan path`（绝不写出工作区）；记录无快照 → 明确报错；未知 id → `planstore.ErrNotFound` |
+
+### 11.2 接线点
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 回灌核心 | `backend/internal/planmode/reopen.go`（新增） | `ErrReopenConflict`、`ReopenOptions`/`ReopenResult`、`ReopenPlan`、`MarkReopened`、`ReopenProvenance`；复用 `resolveArchivePath` 的工作区锚定与逃逸拒绝 |
+| 状态 schema | `backend/internal/planmode/state.go` | `ReopenedFrom`/`ReopenedVersion` + `ToMap`/`stateFromMap`/`normalizeState` 支持 |
+| 工具结果 | `backend/internal/toolbroker/types.go`、`backend/internal/chat/plan_mode_tools.go` | `PlanModeResult.ReopenedFrom/ReopenedVersion` 透传，宿主/模型都能看到恢复来源 |
+| CLI | `backend/cmd/aicli/commands/chat_plans_command.go` | `reopen` 动作解析（`vN`/`--version[=]N`/`--force`/`-f`）、恢复 + 进入 plan mode + 结果文案；`plansCommandTextForSession`（保留 `plansCommandText` 兼容壳） |
+| CLI 状态与帮助 | `backend/cmd/aicli/commands/chat_plan_command.go`、`chat_slash_command_catalog.go` | `/plan status` 增 `reopened from`；命令目录补 reopen 用法与参数说明 |
+| 文档 | `docs/aicli/plan-mode.md` | §2.2 用法 + reopen 语义/安全边界、§5.1 反向回灌、§8 Q9、§9 未实施清单 |
+
+### 11.3 验证（第四轮）
+
+| 命令（cwd = `backend/`） | 结果 |
+|---|---|
+| `go build ./...` | exit 0 |
+| `go test ./internal/planmode/ -run Reopen -count=1` | ok |
+| `go test ./cmd/aicli/commands/ -run 'PlansReopen\|ParsePlansReopen\|PlansCommand' -count=1` | ok |
+| `go test ./internal/planmode/ ./internal/toolbroker/ ./internal/chat/ ./cmd/aicli/commands/ -count=1` | 全绿（3.3s / 23.3s / 44.0s / 202.6s） |
+| `gofmt -l <改动文件>` | 无输出 |
+
+新增用例（要点）：`planmode/reopen_test.go` —— 缺失文件按快照创建、内容一致不改写、冲突拒绝且**不写盘**、`--force` 覆盖、指定版本（v1 vs 最新）、未知 id / 空 id / 无快照 / 越界路径、provenance 经 `ToMap`↔`stateFromMap` 往返；CLI —— 恢复 + 进入 plan mode + provenance、冲突拒绝与强制覆盖、版本选择、无会话提示、参数解析表（含 `--version` 缺值/`v0` 报错与 `vX` 保持字面 id）。
+
+### 11.4 备注（环境）
+
+`go build ./...` 期间撞到过一次另一会话在 `cmd/aicli/commands/command.go` 的半成品改动（`printChatCommandOutput` 参数不匹配），数秒后对方改完即恢复；与本轮改动无关，最终构建为 exit 0。

@@ -5,7 +5,7 @@
 内容依据仓库内权威材料整理，并逐条与代码核对：
 
 - 设计分析 `docs/analysis/commandcode-plan-mode-design-borrowing-20260925.md` §2 / §4 / §5 / §8（§8 为 2026-09-25 落地记录，§8.5 为未实施清单）；
-- 代码：`backend/internal/planmode/state.go`、`planmode/archive.go`、`backend/internal/planstore/store.go`、`backend/internal/chat/plan_mode_tools.go`、`backend/internal/toolbroker/types.go`、`backend/internal/api/runtimeapi/plans_handlers.go`、`backend/cmd/aicli/commands/chat_plan_command.go`。
+- 代码：`backend/internal/planmode/state.go`、`planmode/archive.go`、`planmode/reopen.go`、`backend/internal/planstore/store.go`、`backend/internal/chat/plan_mode_tools.go`、`backend/internal/toolbroker/types.go`、`backend/internal/api/runtimeapi/plans_handlers.go`、`backend/cmd/aicli/commands/chat_plan_command.go`、`chat_plans_command.go`。
 
 > 一句话定位：plan 模式把「先出计划、再动手」变成运行时状态机——写操作被收窄到计划白名单，模型的 approve/quit 只是**请求裁决**，真正的裁决权在用户/宿主手里，计划与评审轮次额外归档到会话之外。
 
@@ -55,7 +55,7 @@
 - 在非 plan 状态下执行 `/plan exit ...`：只要当前 permission-mode 是 `plan` 仍可退出（会按「previous=default」补一个临时状态）；否则提示先执行 `/plan enter`。
 - `/plan status` 在「plan active + 计划文件已有内容 + 模型尚未请求裁决」时会额外提示「计划已就绪待评审」；模型已请求裁决时改为提示「待裁决」。
 
-### 2.2 `/plans [id]`：浏览已归档计划
+### 2.2 `/plans [id]`：浏览与恢复已归档计划
 
 `/plan status` 报告的是**当前会话**的 plan 状态；`/plans` 报告的是**归档存储**（`$HOME/.aicli/plans`，见 §5）：
 
@@ -63,10 +63,19 @@
 |------|------|
 | `/plans` | 列出全部归档记录：`ID`、状态徽标、版本（`vN`）、更新时间、计划路径 |
 | `/plans <id>` | 打印单条记录的状态、会话、项目、版本、各轮次决策与 **最新快照正文**（`id` 可含 `/`，如 `ai-agent-runtime/plan`） |
+| `/plans reopen <id> [vN] [--force]` | 把某轮快照**恢复回工作区计划文件**并直接进入 plan mode，继续下一轮评审（`restore` 是别名，`--version N` 等价于 `vN`） |
 
 两种入口等价：直接输入命令，或在统一 TTY 下由命令面板渲染（与 `chat_slash_command_catalog.go` 中的条目一致）。
 
 **Web**：Artifact 面板里的「归档计划」（`plans` 面）是同一份数据的图形入口——列表（状态徽标 / 版本 / 更新时间 / 计划路径 / 会话）与详情（轮次决策 + 最新快照正文），并订阅 `plan_review_requested` / `plan_review_available` 事件自动刷新。它是只读阅读面：裁决仍走计划面板的三种决策或 `/plan ...`；`DELETE` 端点目前只在 HTTP 层暴露，尚未接入 UI。
+
+**重新评审（reopen）的语义与安全边界**：归档是快照副本，工作区文件才是 plan 模式实际编辑的对象，因此 reopen 会把选中的快照写回工作区文件，并进入 plan mode（`reopened_from` / `reopened_version` 会记入会话 plan 状态，`/plan status` 与模型侧 `plan_review`/`plan_mode_*` 结果都能看到来源）。写入策略是三选一：
+
+- 文件不存在 → 按快照创建（含父目录）；
+- 文件内容与快照一致 → 不改写，直接进入 plan mode；
+- 内容不一致 → **拒绝并提示加 `--force`**（避免覆盖工作区里更新的计划正文），加 `--force` 才覆盖。
+
+相对计划路径逃逸工作区、记录无快照、记录不存在这三种情况都会直接报错，不会写出工作区或静默降级。Web 面板的图形入口（归档右键「重新评审」）尚未接入，CLI/HTTP 之外的宿主可调用 `planmode.ReopenPlan`。
 
 ### 2.3 `/mode`（`/permission-mode` 的别名）
 
@@ -167,6 +176,7 @@
 
 - 记录 ID 为 `<projectSlug>/<planName>`：项目名取工作区最后一段路径、计划名取计划文件名（去掉 `.md`），两者都做 slug 归一化——只保留 `[a-z0-9-_]`，其余字符（中文、空格、分隔符等）折叠为单个 `-`，空结果回退为 `project` / `plan`。
 - 归档是**附加副本**：工作区里的计划文件仍是模型实际读写、权限白名单判定的对象；归档目录不参与权限判定。
+- **反向回灌**：`/plans reopen <id> [vN]` 会把归档快照写回工作区计划文件并进入 plan mode（见 §2.2）；回灌同样是显式动作，归档本身保持只读。
 - **保留策略**：`AICLI_PLANS_MAX_VERSIONS=N`（正整数）在每次归档后只保留最新 N 轮快照，旧快照文件与轮次条目一起删除；未设置或非法值 = 保留全部轮次（历史行为）。`version` 计数器不回退，被裁掉的版本号随之不可读。显式删除走 `DELETE /api/runtime/plans/{id}`（幂等）。归档删除/裁剪失败不会回滚 plan 模式迁移。
 
 ### 5.2 记录字段与状态
@@ -268,6 +278,10 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 
 `/plan review`、`plan_review` 与 `/plans` 都只是打开评审面，不会因为被拒而改变 plan 状态。
 
+**Q9：之前归档的计划，怎么接着评审 / 继续改？**
+
+`/plans reopen <id> [vN] [--force]`：把归档的第 N 轮（默认最新）快照写回工作区计划文件，并直接进入 plan mode，随后照常走 `/plan request_changes <notes>` / `/plan approve`。工作区文件与快照不一致时默认拒绝（保护你手改过的正文），确认要覆盖时加 `--force`。恢复来源会记在 plan 状态里（`/plan status` 的 `reopened from`、模型侧结果的 `reopened_from`）。
+
 ---
 
 ## 9. 尚未实现（依据报告 §8.5）
@@ -275,7 +289,7 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 以下能力在已落地范围（2026-09-25：报告 §8 + §9 + §10）之外，本文档不为它们承诺时间：
 
 - §4.4 行级评论与轮次 diff（依赖前端评审器改造）；归档已保存逐轮快照，前端尚未做变更行高亮。
-- §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具与 run 结束兜底均已落地；仍是缺口的是「从归档一键重新进入评审」（归档只读）。
+- §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具、run 结束兜底与 **CLI 的 `/plans reopen`（归档回灌重评审）**均已落地；仍是缺口的是 Web 面板里的图形化 reopen 入口。
 - §4.6 模式循环键位（`shift+tab`）与常驻模式横幅：模型自主进入的确认门控已落地，键位/横幅未做。
 - 评审反馈的**自动修订回合**：当前是「下一次用户输入时交付」，Web 裁决后主动 trigger-turn 未接入。
 

@@ -396,6 +396,11 @@ type PlanModeResult struct {
 	ReviewRound int `json:"review_round,omitempty"`
 	// PendingReviewNotes carries user review feedback not yet delivered to the model.
 	PendingReviewNotes string `json:"pending_review_notes,omitempty"`
+	// ReopenedFrom is the archived record id the current plan body was restored
+	// from (see planmode.ReopenPlan); empty for plans authored in this session.
+	ReopenedFrom string `json:"reopened_from,omitempty"`
+	// ReopenedVersion is the restored snapshot version.
+	ReopenedVersion int `json:"reopened_version,omitempty"`
 }
 
 // PlanModeController toggles durable plan mode for the current session mid-turn.

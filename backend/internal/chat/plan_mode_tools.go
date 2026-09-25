@@ -490,6 +490,8 @@ func planModeResultFromState(state planmode.State, permissionMode string) *toolb
 		ExitSource:         string(state.LastExitSource),
 		ReviewRound:        state.ReviewRound,
 		PendingReviewNotes: state.PendingReviewNotes,
+		ReopenedFrom:       state.ReopenedFrom,
+		ReopenedVersion:    state.ReopenedVersion,
 	}
 }
 
