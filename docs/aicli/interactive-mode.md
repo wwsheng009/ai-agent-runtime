@@ -9,7 +9,7 @@
 | 层 | 内容 | 是否可重映射 |
 |---|---|---|
 | 固定键 | `enter` 提交、`esc` 中断/回退、`ctrl+c` 中断、`ctrl+d` 退出、`ctrl+j`/`ctrl+o` 换行、`tab`（slash 补全 / `@` 路径补全 / plan 模式）、方向键导航 | 否 |
-| 动作键 | `app.permission.cycle`（默认 `shift+tab`、`alt+m`）、`app.transcript.pager`（默认 `ctrl+t`） | 是 |
+| 动作键 | `app.permission.cycle`（默认 `shift+tab`、`alt+m`）、`app.transcript.pager`（默认 `ctrl+t`）、`app.attach.clipboard_image`（默认 `alt+v`） | 是 |
 | 行编辑器内部键 | Emacs 风格移动/删除（`ctrl+a`、`ctrl+e`、`ctrl+w`、`ctrl+k`、`ctrl+t` 未认领时的 transpose 等） | 否 |
 
 固定键保持固定的原因：其中一部分是终端差异键（例如 Windows 控制台把 `shift+enter` 送成普通回车），重映射会制造"看起来生效、实际不通"的假象。当前生效表用 `/hotkeys` 查看。
@@ -40,18 +40,19 @@
 
 | 终端 | shift+tab | 多行输入 | 粘贴 | 剪贴板文本 | 剪贴板图片 |
 |---|---|---|---|---|---|
-| Windows Terminal / WSL | 可用 | 可用 | 可用 | Windows 可用 / WSL 不可用 | 未实现 |
-| VS Code 集成终端 | 可用（IDE 可能抢占） | 可用 | 可用 | 同上 | 未实现 |
-| WezTerm / ConEmu / iTerm2 / Apple Terminal / xterm | 可用 | 可用 | 可用 | Windows 可用 / 其它不可用 | 未实现 |
-| mintty / Git Bash | 可用 | 可用 | 可用 | 可用 | 未实现 |
-| Windows 传统控制台 (conhost) | **不承诺**（用 `alt+m`） | **不可用**（用 `ctrl+j`/`ctrl+o`） | **不识别 bracketed paste** | 可用 | 未实现 |
-| 未识别终端 | 不承诺（保守） | 按可用处理 | 按可用处理 | 按平台 | 未实现 |
+| Windows Terminal / WSL | 可用 | 可用 | 可用 | Windows 可用 / WSL 不可用 | Windows 可用（CF_DIB/CF_DIBV5）；WSL 由宿主终端决定 |
+| VS Code 集成终端 | 可用（IDE 可能抢占） | 可用 | 可用 | 同上 | 同上 |
+| WezTerm / ConEmu / iTerm2 / Apple Terminal / xterm | 可用 | 可用 | 可用 | Windows 可用 / 其它不可用 | 按平台（见下） |
+| mintty / Git Bash | 可用 | 可用 | 可用 | 可用 | 按平台（见下） |
+| Windows 传统控制台 (conhost) | **不承诺**（用 `alt+m`） | **不可用**（用 `ctrl+j`/`ctrl+o`） | **不识别 bracketed paste** | 可用 | 按平台（见下） |
+| 未识别终端 | 不承诺（保守） | 按可用处理 | 按可用处理 | 按平台 | 按平台（见下） |
 
 说明：
 
 - "剪贴板文本不可用"的终端请使用终端自身的粘贴（`Ctrl+Shift+V` / `Cmd+V`），它走 bracketed paste，粘贴折叠与提交语义一致。
+- "剪贴板图片"由运行平台决定：Windows 走剪贴板位图（CF_DIB/CF_DIBV5）、macOS 走 `osascript`、Linux 需 `wl-paste` 或 `xclip`；缺失时 `/hotkeys` 会说明原因并给出 `/attach <path>` 退路。
 - 非 TTY（headless / `--output json`）下按键矩阵不适用，`/hotkeys` 会带一行说明。
-- 探测只读环境变量，不做任何副作用调用；未知一律按保守值处理。
+- `ui/termcaps` 只读环境变量、不做副作用调用；剪贴板图片能力是运行时事实（平台 + 外部工具），由 `/hotkeys` 命令层按 `clipboardimage.Availability()` 覆盖该行。
 
 ## 3. 权限模式与审批
 
@@ -103,7 +104,10 @@ aicli:
 ### 4.2 附件
 
 - 文本/图片**路径**附件：`/attach <path>` 添加、`/attach` 列表、`/attach clear` 清空、`/attach remove N` 移除；随会话发送。
-- 剪贴板**图片**粘贴尚未实现：`/hotkeys` 会如实显示不可用，并提示改用 `/attach <path>`。
+- 剪贴板**图片**：`alt+v`（可重映射的 `app.attach.clipboard_image`）或 `/attach paste` 读取剪贴板位图，落盘为临时 PNG（`aicli-clipboard-*.png`）后加入待发送附件；`/attach` 列表里可见、`/attach remove N` 可移除。
+  - 仅读取**位图**：Windows 直接读 CF_DIB/CF_DIBV5（24/32 位、BI_RGB/BI_BITFIELDS、上下两种行序）；macOS 用 `osascript` 取 PNGf；Linux 依次尝试 `wl-paste`、`xclip`。
+  - 不抢占终端自己的粘贴键（`ctrl+v` / `ctrl+shift+v` 仍由终端处理文本）；剪贴板里没有图片时只提示，不改动草稿。
+  - 读取失败的原因会直接写状态行（没有图片 / 平台不支持 / 超时 / 其它），并始终给出 `/attach <path>` 退路。
 - `@` 路径引用补全：输入 `@` 后按 `Tab` 触发，在工作区内按需扫描（有界）。
   - **唯一命中**：补全为完整相对路径；文件补一个空格，目录补 `/` 以便继续下钻。
   - **多命中**：先补到公共前缀，并在状态行给出「匹配 N 项」与若干示例；继续按 `Tab` 收窄。
@@ -127,5 +131,5 @@ aicli:
 | VS Code 里 `shift+tab` 被 IDE 抢占 | 改用 `alt+m`，或在 IDE 里解除该快捷键绑定 |
 | 改了 `keybindings.json` 没生效 | `/hotkeys reload`；再看"配置提示"里的告警（未知动作/坏按键/冲突都会提示） |
 | 粘贴没有折叠 | 检查 `aicli.chat.collapse_pasted_text` 是否为 `false`；或单次粘贴未超过 1000 字符 |
-| 剪贴板里的图片贴不进来 | 当前不支持；用 `/attach <path>` 添加图片附件 |
+| 剪贴板里的图片贴不进来 | 确认平台与依赖（`/hotkeys` 的"剪贴板图片"行有原因）；Windows/macOS 直接 `alt+v` 或 `/attach paste`，无依赖的 Linux 用 `/attach <path>` |
 | 审批看不懂要执行什么 | 看 `[说明]` 行，或按 `[3]` 展开完整参数 |

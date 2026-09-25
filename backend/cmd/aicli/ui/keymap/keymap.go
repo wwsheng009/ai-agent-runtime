@@ -30,6 +30,8 @@ const (
 	ActionPermissionCycle Action = "app.permission.cycle"
 	// ActionTranscriptPager 打开全屏 transcript 分页器。
 	ActionTranscriptPager Action = "app.transcript.pager"
+	// ActionClipboardImage 读取剪贴板图片并加入待发送附件。
+	ActionClipboardImage Action = "app.attach.clipboard_image"
 )
 
 // ActionSpec 描述一个可绑定动作的静态元数据。
@@ -52,6 +54,12 @@ var catalog = []ActionSpec{
 		Action:      ActionTranscriptPager,
 		Description: "打开全屏 transcript 分页器（等价 ctrl+t 默认行为）",
 		Defaults:    []string{"ctrl+t"},
+		Remappable:  true,
+	},
+	{
+		Action:      ActionClipboardImage,
+		Description: "读取剪贴板图片并加入待发送附件（等价 /attach paste）",
+		Defaults:    []string{"alt+v"},
 		Remappable:  true,
 	},
 }

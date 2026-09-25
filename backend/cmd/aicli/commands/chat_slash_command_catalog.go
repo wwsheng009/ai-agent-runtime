@@ -571,7 +571,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/attach",
-			Usage:       "/attach [path|clear|remove <序号>]",
+			Usage:       "/attach [path|paste|clear|remove <序号>]",
 			Summary:     "查看、添加或清空待发送图片附件",
 			Group:       string(chatSlashCommandGroupContext),
 			AcceptsArgs: true,

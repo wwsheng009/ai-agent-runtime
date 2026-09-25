@@ -288,6 +288,13 @@ func (c *chatComposerController) onActionKey(snapshot ui.LineEditorSnapshot, act
 			return true, true
 		}
 		return false, false
+	case keymap.ActionClipboardImage:
+		message, err := attachClipboardImage(c.session, false)
+		if err != nil {
+			message = chatClipboardImageErrorMessage(err)
+		}
+		c.setStatusLine(message)
+		return true, false
 	}
 	return false, false
 }

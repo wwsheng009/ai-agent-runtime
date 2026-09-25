@@ -86,7 +86,9 @@ func Detect(getenv func(string) string, goos string, stdoutIsTTY bool) Capabilit
 	} else {
 		caps.ClipboardText = Support{false, "未实现 Unix 剪贴板读取；请用终端自身粘贴（Ctrl+Shift+V / Cmd+V），它走 bracketed paste"}
 	}
-	caps.ClipboardImage = Support{false, "暂未实现剪贴板图片；可先用 /attach <path> 添加图片附件"}
+	// 剪贴板图片能力依赖运行平台与外部工具，属于运行时事实而非环境变量推导结果；
+	// Detect 保持纯函数，调用方（/hotkeys 命令）用 clipboardimage.Availability() 覆盖此行。
+	caps.ClipboardImage = Support{false, "未探测（/hotkeys 会按运行平台覆盖该行）；可先用 /attach <path> 添加图片附件"}
 
 	if !interactive {
 		caps.Notes = append(caps.Notes, "标准输出不是终端：按键与粘贴能力不适用（headless/JSON 输出）")

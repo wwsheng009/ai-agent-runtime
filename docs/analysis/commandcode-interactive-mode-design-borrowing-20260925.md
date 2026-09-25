@@ -305,7 +305,7 @@
 
 ### 8.3 未完成（保持原优先级）
 
-- P1：4.4 第二步（剪贴板图片 + 内联令牌）与 4.5 的**弹层候选列表 + 内容注入/AGENTS.md 片段**（本轮只交付了无弹层的路径补全，见 §8.4）。
+- P1：4.4 第二步的**内联令牌**与发送前压缩/上限（剪贴板图片本体已交付，见 §8.4），以及 4.5 的**弹层候选列表 + 内容注入/AGENTS.md 片段**（4.5 本轮只交付无弹层的路径补全）。
 - P2：4.8 TODOS 带。
 
 ### 8.4 批次 2 已实施（第二轮）
@@ -316,9 +316,11 @@
 | 4.7 集成 | `/hotkeys` 增加「本终端」一节（逐项可用性 + 原因 + 备注），headless 下如实标注不适用 | `commands/chat_hotkeys_command.go` | `chat_hotkeys_command_test.go` |
 | 4.6 审批前通俗解释 | 新增启发式解释器（动作类别 + 目标 + 影响范围），覆盖删除/丢弃改动/推送/安装依赖/下载执行/改权限/写设备/Git 索引/破坏性 DB/容器删除 + 文件写删移/网络/MCP/子 agent/后台任务/只读；识别不出**不输出**，参数不可解析时只留类别并指向 `[3]` | `commands/chat_approval_explain.go`，接线于 `chat_runtime_events.go:approvalPriorityPromptLines`（两条审批入口共用） | `chat_approval_explain_test.go`：分类表、未知工具静默、坏 JSON、长目标截断、提示行顺序 |
 | 4.10 交互文档页 | 新增 `docs/aicli/interactive-mode.md`：按键分层与覆盖规则、终端能力矩阵、审批提示结构、粘贴与附件语义、输入所有权、排障表；已从 `install.md` 链接 | `docs/aicli/interactive-mode.md` | 文档，无编译面 |
-| 4.4 第一步（部分） | 剪贴板图片的**诚实提示**由能力矩阵承担（「暂未实现剪贴板图片；可先用 `/attach <path>`」）；粘贴时刻的即时提示仍需编辑器提示行机制，未做 | `ui/termcaps`、`docs/aicli/interactive-mode.md` | 同上 |
+| 4.4 第一步（已被第二步取代） | 当时由能力矩阵承担「暂未实现剪贴板图片」的诚实提示；第二步（见下方 4.4 行）已实现读取本体，能力矩阵改为按运行平台如实报告 | `ui/termcaps`、`docs/aicli/interactive-mode.md` | 同上 |
 | 4.5 `@` 路径引用补全（第一版） | 新增 `@` token 解析（行首/空白/左括号后，`a@b` 不算）、工作区**有界扫描**（跳过 `.git`/`node_modules` 等，单次 6000 项、40 候选）与 Tab 补全：唯一命中补全整路径（目录补 `/`）、多命中补到公共前缀并在状态行列出「匹配 N 项 + 示例」、无命中也消费按键（不误触 plan mode 切换）。语义保持**路径引用**（提交原样发送，不注入内容/不注入 AGENTS.md 片段） | `commands/chat_mention_completion.go`、`chat_composer.go:onComplete`（`mentionRoot` 可注入） | `chat_mention_completion_test.go`：token 规则表、扫描/跳过/上限、唯一/多命中/无命中、composer 接线 |
 | 4.5 未做（明确遗留） | ① 复用 slash 补全的**弹层**做候选列表（当前只用状态行文本）；② 提交时的内容展开与 AGENTS.md 片段注入；③ 以会话工作区（而非进程 CWD）为扫描根 | — | — |
+| 4.4 第二步·剪贴板图片 | 新增 `internal/clipboardimage`：Windows 直接读 CF_DIB/CF_DIBV5（24/32 位、BI_RGB/BI_BITFIELDS、上下行序、**V5 头后重复掩码块**的 GDI+ 兼容布局），macOS 走 `osascript`（PNGf），Linux 依次 `wl-paste`/`xclip`，其它平台明确 `ErrUnsupported`；错误分档为「没有图片 / 平台不支持 / 超时 / 其它」并始终给出 `/attach <path>` 退路。入口：`alt+v`（新增可重映射动作 `app.attach.clipboard_image`）与 `/attach paste`，落盘临时 PNG 后进入**既有**附件通道；`/hotkeys` 的「剪贴板图片」行改为按运行平台如实报告 | `internal/clipboardimage/*`、`commands/chat_clipboard_image.go`、`chat_composer.go:onActionKey`、`command.go`/`chat_command_result.go`（`/attach paste`）、`ui/keymap`（动作）、`ui/inputbox_editor.go`（alt+v chord） | `dib_test.go`（24/32 位、掩码、上下行序、V5 重复掩码块、截断/不支持位深）、`clipboardimage_e2e_test.go`（真实剪贴板 E2E：尺寸 + 像素 + 方向，含 `AICLI_CLIPBOARD_E2E*` 开关）、`chat_clipboard_image_test.go`（去重、非法图片拒绝、错误文案、`/attach paste`、composer 动作接线、catalog 默认键） |
+| 4.4 仍未做（明确遗留） | ① **内联令牌**语义（`[Image #N]`、删令牌即弃图、编号复用、可点击预览）；② 发送前压缩到 1200px 与 32MB 上限、透明保 PNG / 其余 JPEG 的转码；③ 终端自身粘贴键（`ctrl+v`）触发图片读取的编辑器事件钩子 | — | — |
 
 ### 8.5 结论修正与遗留清单
 

@@ -718,6 +718,15 @@ func handleImageAttachmentCommand(session *ChatSession, command string) bool {
 		printfChatCommandOutput(session, "已清空 %d 个待发送图片附件", count)
 		return false
 	}
+	if strings.EqualFold(arg, "paste") || strings.EqualFold(arg, "clipboard") {
+		message, err := attachClipboardImage(session, true)
+		if err != nil {
+			printfChatCommandOutput(session, "错误: %s", chatClipboardImageErrorMessage(err))
+			return false
+		}
+		printChatCommandOutput(session, message)
+		return false
+	}
 	if strings.HasPrefix(strings.ToLower(arg), "remove ") {
 		if len(session.ImagePaths) == 0 {
 			printChatCommandOutput(session, "错误: 当前没有可移除的图片附件")

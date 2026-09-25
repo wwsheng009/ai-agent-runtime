@@ -951,6 +951,13 @@ func executeStructuredAttachmentCommand(session *ChatSession, command string) Co
 		}
 		return commandTextResult(strings.Join(lines, "\n"))
 	}
+	if strings.EqualFold(arg, "paste") || strings.EqualFold(arg, "clipboard") {
+		message, err := attachClipboardImage(session, true)
+		if err != nil {
+			return commandTextResult("错误: " + chatClipboardImageErrorMessage(err))
+		}
+		return commandTextResult(message)
+	}
 	if strings.EqualFold(arg, "clear") {
 		count := len(session.ImagePaths)
 		session.ImagePaths = nil

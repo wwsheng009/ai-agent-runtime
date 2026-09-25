@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/keymap"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/termcaps"
+	"github.com/wwsheng009/ai-agent-runtime/internal/clipboardimage"
 	"golang.org/x/term"
 )
 
@@ -54,6 +55,12 @@ func handleHotkeysCommand(session *ChatSession, command string) bool {
 	}
 
 	caps := termcaps.Detect(os.Getenv, runtime.GOOS, chatHotkeysStdoutIsTTY())
+	// 剪贴板图片能力是运行时事实（平台 + 外部工具），由命令层覆盖 termcaps 的纯函数结果。
+	if available, reason := clipboardimage.Availability(); available {
+		caps.ClipboardImage = termcaps.Support{Supported: true, Reason: reason + "；alt+v 或 /attach paste 加入附件"}
+	} else {
+		caps.ClipboardImage = termcaps.Support{Supported: false, Reason: reason + "；可先用 /attach <path> 添加图片附件"}
+	}
 	lines = append(lines, "", "本终端: "+caps.Name)
 	lines = append(lines,
 		fmt.Sprintf("  %-16s %s", "shift+tab", caps.ShiftTab.Describe()),
@@ -74,7 +81,7 @@ func handleHotkeysCommand(session *ChatSession, command string) bool {
 
 	lines = append(lines, "", "配置文件: "+chatKeybindingsPath())
 	lines = append(lines, `用法: {"app.permission.cycle": ["alt+c"]}；空数组 [] 表示禁用；改完执行 /hotkeys reload 生效`)
-	lines = append(lines, "可重映射范围: shift+tab、alt+m、ctrl+t；行编辑器内部键与终端差异键保持固定（见上表）")
+	lines = append(lines, "可重映射范围: shift+tab、alt+m、ctrl+t、alt+v；行编辑器内部键与终端差异键保持固定（见上表）")
 	if warnings := registry.Warnings(); len(warnings) > 0 {
 		lines = append(lines, "", "配置提示:")
 		for _, warning := range warnings {

@@ -29,6 +29,16 @@ func TestDecodeInteractiveKeyAltMProducesChord(t *testing.T) {
 	}
 }
 
+func TestDecodeInteractiveKeyAltVProducesChord(t *testing.T) {
+	decoded, ok := decodeInteractiveKey([]byte("\x1bv"))
+	if !ok {
+		t.Fatal("decodeInteractiveKey(alt+v) 未解码")
+	}
+	if decoded.key.kind != editorKeyAction || decoded.key.chord != "alt+v" {
+		t.Fatalf("decodeInteractiveKey(alt+v) = %#v, want editorKeyAction alt+v", decoded.key)
+	}
+}
+
 func TestReadInteractiveLine_ActionKeyClaimConsumesShiftTab(t *testing.T) {
 	var output bytes.Buffer
 	var actions []string

@@ -742,6 +742,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - 权限模式循环键（默认 `shift+tab`，Windows 终端可用 `alt+m`）按 `default → accept_edits → plan → bypass_permissions → default` 顺序切换；进入 `bypass_permissions` 仍需二次确认，弹层/选择器持有输入时按键不会抢占。
 - 大段粘贴默认折叠为输入框占位符（提交时仍发送全文）；设置 `aicli.chat.collapse_pasted_text: false` 可关闭折叠、原样显示粘贴内容。
 - `@` 路径引用支持 `Tab` 补全：唯一命中直接补全（目录补 `/`），多命中先补公共前缀并在状态行给出「匹配 N 项」与示例，无命中也会消费按键（不触发 `Tab` 的 plan mode 切换）。补全是**路径引用**语义，提交时原样发送，内容由模型按需读取。
+- 剪贴板图片可直接加成附件：`alt+v`（可重映射动作 `app.attach.clipboard_image`）或 `/attach paste` 读取剪贴板位图，落盘为临时 PNG 后进入待发送附件（Windows 读 CF_DIB/CF_DIBV5，macOS 用 `osascript`，Linux 需 `wl-paste`/`xclip`）；`/hotkeys` 的「剪贴板图片」行会如实说明当前平台是否可用与原因，不可用时用 `/attach <path>`。
 - 审批面板在工具名后会先给一行通俗解释（`[说明] 动作 / 目标 / 影响`），再列原因、风险等级、上下文与参数摘要；解释是启发式规则、不调用模型，识别不出时不会输出任何猜测。按 `[3]` 可展开完整参数。
 - 交互模式的完整说明（按键分层与重映射、终端能力矩阵、粘贴与附件语义、输入所有权、排障）见 [interactive-mode.md](./interactive-mode.md)。
 - `/theme` 支持双轴主题：明暗（`auto|dark|light`）与配色（`classic|focus|contrast|mono`）。会立即切换当前终端主题，并在可写配置存在时写回 `aicli.theme.name`（配色）与 `aicli.theme.mode`（明暗）。无参数时交互选择；`list`/`status`/`preview` 只读（`list`/`preview` 带角色色样例）；可写 `/theme dark`、`/theme focus`、`/theme light contrast` 等。配色别名：`default`/`balanced`→focus，`high-contrast`→contrast，`minimal`→mono。启动优先级：`--theme` > `AICLI_THEME`/`AICLI_THEME_MODE` > 配置文件。

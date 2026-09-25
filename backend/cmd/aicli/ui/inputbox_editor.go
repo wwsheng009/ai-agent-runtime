@@ -2260,6 +2260,10 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 		case 'm', 'M':
 			// Alt+M 是 Windows 终端里 Shift+Tab 送不到进程时的回退键。
 			return decodedInteractiveKey{key: editorKey{kind: editorKeyAction, chord: "alt+m"}, consumed: 2}, true
+		case 'v', 'V':
+			// Alt+V：把剪贴板图片加成附件（终端自己的粘贴键多为 ctrl+v / ctrl+shift+v，
+			// 这里不抢占它们）。
+			return decodedInteractiveKey{key: editorKey{kind: editorKeyAction, chord: "alt+v"}, consumed: 2}, true
 		}
 		// Bare ESC or an unhandled alt-modified key. Drop the ESC and keep processing.
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyIgnore}, consumed: 1}, true

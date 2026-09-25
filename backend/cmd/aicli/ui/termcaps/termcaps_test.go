@@ -26,7 +26,7 @@ func TestDetectWindowsTerminalMatrix(t *testing.T) {
 		}
 	}
 	if caps.ClipboardImage.Supported {
-		t.Fatal("剪贴板图片尚未实现，能力矩阵必须如实报告不可用")
+		t.Fatal("测试环境的 GOOS 未声明剪贴板图片支持时不应报告可用")
 	}
 	if !strings.Contains(caps.ClipboardImage.Reason, "/attach") {
 		t.Fatalf("图片不可用原因应给出替代路径，got %q", caps.ClipboardImage.Reason)
