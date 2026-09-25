@@ -1,8 +1,6 @@
 package commands
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -218,7 +216,13 @@ type chatRuntimeEventBridge struct {
 	eventLogCount            uint64 // 已写入事件数
 	eventLogReplayed         uint64 // 启动时重放事件数
 	eventLogFailures         uint64 // 写入/重放失败次数
-	eventLogDirEnsured       bool   // 会话 events/ 目录已确保存在（惰性 MkdirAll）
+	// L1.1 恢复重放便宜路径的观测计数（设计/不变量见 chat_eventlog_trim.go）：
+	// 跳过 ≠ 失败，eventLogFailures 语义不变，这几项只用于归因与 A/B 对照。
+	eventLogTrimmed       uint64 // Tier A 白名单：跳过解析的行数（Encode 仍逐条调用）
+	eventLogCheapProgress uint64 // tool.progress 走便宜解析的行数
+	eventLogCheapStarted  uint64 // llm.request.started 走便宜解析的行数（L1.2）
+	eventLogCheapFallback uint64 // 便宜解析在 apply 期回落全量解码的次数
+	eventLogDirEnsured    bool   // 会话 events/ 目录已确保存在（惰性 MkdirAll）
 
 	// 渲染层双跑文本对照（切片 9）：coordinator 每个完整块提交后调用
 	// checkTextParity，把旧路径实际写出的行序列与 Scene 快照 RenderText
@@ -3359,35 +3363,81 @@ func (b *chatRuntimeEventBridge) replayEventLogWithLoadAuthorization(sessionLoad
 		b.eventLogMu.Unlock()
 		return 0, err
 	}
+	// 重放是启动关键路径上最贵的一段：大会话的事件日志可达几十 MB，读取 /
+	// 逐行解析 / 逐事件 Encode 三段必须分开计量，否则 ready 前后的卡顿只能
+	// 看到一个合计数，无法判断是 IO、JSON 还是渲染模型。
+	markChatStartup("eventlog_read")
 	type entry struct {
 		historyReset           bool
 		history                []runtimetypes.Message
 		historyResetHeader     string
 		event                  runtimeevents.Event
-		userInput              string          // 非空表示用户输入注入记录（无 runtime 事件类型）
-		assistant              string          // 非空表示 direct assistant 终态注入记录
-		assistantBoundaryGroup string          // 可选；旧日志为空时保持独立块语义
-		command                string          // 非空表示命令结果注入记录
-		err                    string          // 非空表示操作错误注入记录
-		supplement             string          // 非空表示本地补充注入记录
-		priorityKind           string          // approval_requested/question_asked
-		priorityKey            string          // request_id/question_id-derived key
-		priorityTranscript     string          // retained prompt + answer
-		interaction            string          // 非空表示用户交互输出注入记录
-		interactionAnchor      *encoding.Tail  // 交互输出触发时刻锚点
-		document               render.Document // 可选结构化 command/interaction IR
+		userInput              string             // 非空表示用户输入注入记录（无 runtime 事件类型）
+		assistant              string             // 非空表示 direct assistant 终态注入记录
+		assistantBoundaryGroup string             // 可选；旧日志为空时保持独立块语义
+		command                string             // 非空表示命令结果注入记录
+		err                    string             // 非空表示操作错误注入记录
+		supplement             string             // 非空表示本地补充注入记录
+		priorityKind           string             // approval_requested/question_asked
+		priorityKey            string             // request_id/question_id-derived key
+		priorityTranscript     string             // retained prompt + answer
+		interaction            string             // 非空表示用户交互输出注入记录
+		interactionAnchor      *encoding.Tail     // 交互输出触发时刻锚点
+		document               render.Document    // 可选结构化 command/interaction IR
+		trim                   *eventLogTrimEntry // L1.1 便宜路径（非 nil 时以上字段均为零值）
 	}
 	var entries []entry
-	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	// L1.1：逐行手工切分 + 三类便宜路径（设计/不变量见 chat_eventlog_trim.go）。
+	// 相对 bufio.Scanner：(a) 行切片直接指向 raw，省掉 Text()+[]byte() 两次拷贝；
+	// (b) 摆脱 64KB token 上限（真实会话最长行 65,516B，距上限仅 20B，再长一点
+	// 就会整段报 token too long 而中止恢复）；(c) 已知 opNone 类型（Tier A）与
+	// tool.progress 不再全量解码。AICLI_RESUME_REPLAY_TRIM=0 时逐字节回到旧路径。
+	trimEnabled := !eventLogTrimDisabled()
+	var trimmedLines, cheapProgress, cheapStarted uint64
 	lineIndex := 0
-	for scanner.Scan() {
+	for start := 0; start < len(raw); {
 		lineIndex++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+		var line []byte
+		line, start = eventLogNextLine(raw, start)
+		if len(line) == 0 {
 			continue
 		}
+		if trimEnabled {
+			if evType := eventLogTypePrefix(line); evType != "" {
+				if _, skip := eventLogTrimAlwaysSkip[evType]; skip {
+					entries = append(entries, entry{trim: &eventLogTrimEntry{kind: evType}})
+					trimmedLines++
+					continue
+				}
+				if evType == eventLogProgressFastType {
+					if fast, ok := decodeEventLogProgressFast(line); ok {
+						entries = append(entries, entry{trim: &eventLogTrimEntry{
+							rawLine:   line,
+							lineIndex: lineIndex,
+							callID:    fast.CallID,
+							detail:    fast.progressText(),
+						}})
+						cheapProgress++
+						continue
+					}
+					// 便宜解码失败（含损坏 JSON）→ 回落全量解析，报错语义不变。
+				}
+				if evType == eventLogStartedFastType {
+					if fast, ok := decodeEventLogStartedFast(line); ok {
+						entries = append(entries, entry{trim: &eventLogTrimEntry{
+							rawLine:   line,
+							lineIndex: lineIndex,
+							started:   &fast,
+						}})
+						cheapStarted++
+						continue
+					}
+					// 同上：解码失败一律回落全量解析（错误语义与行号不变）。
+				}
+			}
+		}
 		var ev runtimeevents.Event
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		if err := json.Unmarshal(line, &ev); err != nil {
 			b.eventLogMu.Lock()
 			b.eventLogFailures++
 			b.eventLogMu.Unlock()
@@ -3397,7 +3447,7 @@ func (b *chatRuntimeEventBridge) replayEventLogWithLoadAuthorization(sessionLoad
 			// 注入记录行（runtimeevents.Event 的 Type 恒非空）：按非空
 			// 字段判别类别（用户输入 / 命令结果 / 操作错误 / 交互输出）。
 			var inj eventLogInjection
-			if err := json.Unmarshal([]byte(line), &inj); err != nil {
+			if err := json.Unmarshal(line, &inj); err != nil {
 				b.eventLogMu.Lock()
 				b.eventLogFailures++
 				b.eventLogMu.Unlock()
@@ -3447,12 +3497,7 @@ func (b *chatRuntimeEventBridge) replayEventLogWithLoadAuthorization(sessionLoad
 		}
 		entries = append(entries, entry{event: ev})
 	}
-	if err := scanner.Err(); err != nil {
-		b.eventLogMu.Lock()
-		b.eventLogFailures++
-		b.eventLogMu.Unlock()
-		return uint64(len(entries)), err
-	}
+	markChatStartup("eventlog_parse")
 	// 重建 Scene 数据面：与实时路径走同一入口（Encode → ChangeSet →
 	// ChangeSetMapper.Apply）。Replay 内部即逐事件 Encode，但丢弃
 	// ChangeSet，因此这里显式循环以同步驱动 Scene；语义等价。
@@ -3460,6 +3505,9 @@ func (b *chatRuntimeEventBridge) replayEventLogWithLoadAuthorization(sessionLoad
 	// applyChangeSet 恢复，顺序与实时路径一致（同一日志全序）。
 	b.renderMu.Lock()
 	b.resetCanonicalHistoryProjectionLocked()
+	var replayErr error
+	replayErrLine := 0
+applyEntries:
 	for _, en := range entries {
 		switch {
 		case en.historyReset:
@@ -3486,6 +3534,49 @@ func (b *chatRuntimeEventBridge) replayEventLogWithLoadAuthorization(sessionLoad
 			// 锚点 ItemID 必然存在（实时时 Tail 指向模型尾部项）；锚点
 			// nil（空模型触发）退化为 append，与实时路径一致。
 			b.applyChangeSet(b.renderEncoder.SubmitUserInteractionDocument(en.interaction, en.document, en.interactionAnchor))
+		case en.trim != nil && en.trim.kind != "":
+			// Tier A（已知 opNone 类型）：payload 与其余字段均不参与判定，
+			// 只回放类型名。仍逐条 Encode，保持 clock / EncodeCount / Tail
+			// 与实时路径一致（opNone 不产生任何变更）。
+			if !isChatRenderDataPlaneSuppressedEvent(en.trim.kind) {
+				b.applyChangeSet(b.renderEncoder.Encode(runtimeevents.Event{Type: en.trim.kind}))
+			}
+		case en.trim != nil && en.trim.started != nil:
+			// llm.request.started 便宜解析（L1.2）：读取面按构造就是 identity
+			// 6 键 + envelope TraceID，apply 分支没有第二路径，因此没有守卫
+			// （设计见 chat_eventlog_trim.go 的 eventLogStartedEvent）。
+			// 抑制判定与全量路径同源，保持两条路径逐字一致。
+			if !isChatRenderDataPlaneSuppressedEvent(eventLogStartedFastType) {
+				b.applyChangeSet(b.renderEncoder.Encode(eventLogStartedEvent(*en.trim.started)))
+			}
+		case en.trim != nil:
+			// tool.progress 便宜解析：仅当编码器确认会走 upsert 分支时才用
+			// 最小事件（该分支读取面 = tool_call_id + toolProgressText）；
+			// 否则回落全量解码，与实时路径逐字等价。
+			if b.renderEncoder.ToolProgressAttachable(en.trim.callID) {
+				b.applyChangeSet(b.renderEncoder.Encode(
+					eventLogProgressEvent(en.trim.callID, en.trim.detail),
+				))
+				break
+			}
+			b.eventLogMu.Lock()
+			b.eventLogCheapFallback++
+			b.eventLogMu.Unlock()
+			var ev runtimeevents.Event
+			if err := json.Unmarshal(en.trim.rawLine, &ev); err != nil {
+				// 解析期已用便宜解码验证过 JSON 合法；此处失败属"全量解码对
+				// 同一行更严格"的极端情况（如字段类型不符），按旧语义计入
+				// 失败并中止重放。
+				b.eventLogMu.Lock()
+				b.eventLogFailures++
+				b.eventLogMu.Unlock()
+				replayErr = fmt.Errorf("event log line %d: %w", en.trim.lineIndex, err)
+				replayErrLine = en.trim.lineIndex
+				break applyEntries
+			}
+			if !isChatRenderDataPlaneSuppressedEvent(ev.Type) {
+				b.applyChangeSet(b.renderEncoder.Encode(ev))
+			}
 		default:
 			// 与实时路径 Handle 同源抑制：input.queue.* / dynamic_status /
 			// user_submitted 等镜像事件实时时已挡在渲染数据面外（只进日志
@@ -3497,8 +3588,15 @@ func (b *chatRuntimeEventBridge) replayEventLogWithLoadAuthorization(sessionLoad
 		}
 	}
 	b.renderMu.Unlock()
+	if replayErr != nil {
+		return uint64(replayErrLine - 1), replayErr
+	}
+	markChatStartup("eventlog_apply")
 	b.eventLogMu.Lock()
 	b.eventLogReplayed = uint64(len(entries))
+	b.eventLogTrimmed = trimmedLines
+	b.eventLogCheapProgress = cheapProgress
+	b.eventLogCheapStarted = cheapStarted
 	b.eventLogMu.Unlock()
 	// Replay rebuilds the same semantic Scene used by live runtime events. Once
 	// the reconstruction is complete, publish one immutable snapshot through
@@ -3532,6 +3630,17 @@ func (b *chatRuntimeEventBridge) eventLogStats() (path string, count, replayed, 
 	b.eventLogMu.Lock()
 	defer b.eventLogMu.Unlock()
 	return b.eventLogFilePath(), b.eventLogCount, b.eventLogReplayed, b.eventLogFailures
+}
+
+// eventLogTrimStats 返回恢复重放便宜路径的计数（/debug 归因用，L1.1/L1.2）。
+// 与 eventLogStats 分开返回，避免改动后者的四值签名（已有调用点与测试）。
+func (b *chatRuntimeEventBridge) eventLogTrimStats() (trimmed, cheapProgress, cheapStarted, cheapFallback uint64) {
+	if b == nil {
+		return 0, 0, 0, 0
+	}
+	b.eventLogMu.Lock()
+	defer b.eventLogMu.Unlock()
+	return b.eventLogTrimmed, b.eventLogCheapProgress, b.eventLogCheapStarted, b.eventLogCheapFallback
 }
 
 // renderModelSnapshot 返回编码器当前渲染模型快照（/debug 诊断用）。

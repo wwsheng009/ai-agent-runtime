@@ -2354,6 +2354,26 @@ func (e *EventEncoder) applyToolProgress(ev runtimeevents.Event, cs *ChangeSet) 
 	}
 }
 
+// ToolProgressAttachable 报告一条 tool.progress 事件是否会走 upsert 分支：
+// 存在同 tool_call_id 且未终态的 mutable tool cell 时为真。
+//
+// 恢复重放的便宜解析（commands/chat_eventlog_trim.go）用它决定能否丢弃
+// payload 的其余键——applyToolProgress 在 upsert 分支的读取面收敛为
+// tool_call_id + toolProgressText，其余键一律不读。一旦为假（callID 为空 /
+// cell 不存在 / cell 已终态），applyToolProgress 会回落 applySystem，那里
+// 会读完整 payload；调用方此时必须改用全量解码的事件，不得传最小事件。
+//
+// ⚠️ 与 applyToolProgress 的守卫条件必须逐字同构（同一张 toolByID +
+// Status.Terminal()）；改动任一侧都要同步另一侧并补 commands 包的等价性
+// 测试（TestReplayTrimToolProgressGuards）。
+func (e *EventEncoder) ToolProgressAttachable(callID string) bool {
+	if e == nil || callID == "" {
+		return false
+	}
+	it := e.toolByID[callID]
+	return it != nil && !it.Status.Terminal()
+}
+
 func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) {
 	callID := toolCallID(ev)
 	it := e.toolByID[callID]
