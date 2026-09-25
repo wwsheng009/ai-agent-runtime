@@ -100,9 +100,71 @@ func (m *SessionManager) Get(ctx context.Context, sessionID string) (*Session, e
 	return session, nil
 }
 
+// GetMetadata 获取会话元数据（不含消息历史），存在性与过期语义与 Get 完全一致。
+//
+// 只需要「存在性 + 标题/摘要/时间/计数/工作区」的调用方（Web 侧栏列表、resume
+// 目标校验等）必须走这里：Get 会把整段 prompt 投影反序列化进内存，而会话库
+// 连接池恒为单连接（SetMaxOpenConns(1)），逐个候选 Get 会让列表请求把并发读
+// （启动期历史分页、/web/api/status 快照、会话切换）排队到相互饿死。
+// 存储不支持 SessionStorageMetadataReader 时回退到完整 Get，语义不变。
+func (m *SessionManager) GetMetadata(ctx context.Context, sessionID string) (*Session, error) {
+	reader, ok := m.storage.(SessionStorageMetadataReader)
+	if !ok {
+		return m.Get(ctx, sessionID)
+	}
+
+	session, err := reader.LoadMetadata(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load session metadata: %w", err)
+	}
+
+	// 过期检查与 Get 保持同一条语义：过期即回收并报 ErrSessionExpired。
+	if session.IsExpired() {
+		_ = m.storage.Delete(ctx, sessionID)
+		return nil, ErrSessionExpired
+	}
+
+	return session, nil
+}
+
 // CreateSession 创建新会话（Create的别名）
 func (m *SessionManager) CreateSession(ctx context.Context, userID string) (*Session, error) {
 	return m.Create(ctx, userID)
+}
+
+// PersistPreviewMetadata 把内存会话的渲染预览（标题/摘要）写回存储的元数据行，
+// 供只读列表路径做一次性懒修复：这些行之后无需完整加载即可渲染预览。
+//
+// 语义与失败处理：
+//   - 存储不支持 SessionStoragePreviewWriter → 静默成功（能力渐进，行为不变）；
+//   - 会话未加载历史 → 静默跳过（预览派生需要历史，调用方必须先 Get）；
+//   - 写入失败原样返回，由调用方决定是否忽略（渲染路径必须忽略：懒修复失败
+//     只意味着下次列表请求再试一次，绝不能影响本次响应）；
+//   - 只改元数据列，不改 updated_at / 计数 / 历史。
+//
+// 持久化的值取自 BuildPreview（即列表实际渲染的值），保证「写回的预览」与
+// 「本来会渲染的预览」逐字一致；标题若在渲染时由历史派生，则把 title_source
+// 标成 derived，使下次的 Session.PreviewNeedsHistory 判定为「不需要历史」。
+func (m *SessionManager) PersistPreviewMetadata(ctx context.Context, session *Session) error {
+	if m == nil || session == nil || !session.HistoryLoaded {
+		return nil
+	}
+	writer, ok := m.storage.(SessionStoragePreviewWriter)
+	if !ok {
+		return nil
+	}
+	preview := session.BuildPreview()
+	if preview == nil {
+		return nil
+	}
+	title := strings.TrimSpace(preview.Title)
+	titleSource := session.Metadata.TitleSource
+	if title != strings.TrimSpace(session.Metadata.Title) {
+		// 渲染时从历史派生的标题：标记来源，避免下次列表再走完整加载。
+		titleSource = sessionTitleSourceDerived
+	}
+	summary := strings.TrimSpace(preview.Summary)
+	return writer.UpdatePreviewMetadata(ctx, session.ID, title, titleSource, summary)
 }
 
 // GetSession 获取会话（Get的别名）

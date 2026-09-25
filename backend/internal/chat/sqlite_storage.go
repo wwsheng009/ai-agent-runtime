@@ -37,6 +37,15 @@ type SQLiteSessionStorage struct {
 	db  *sql.DB
 	cfg PersistentSessionStorageConfig
 
+	// 只读查询连接池（WAL 读并发，见 sqlite_storage_read_pool.go）。
+	// readPoolDegraded=true 表示读池已降级/未启用：所有读回落写池 s.db。
+	readPoolMu       sync.Mutex
+	readDB           *sql.DB
+	readPoolOpen     bool
+	readPoolDegraded bool
+	// readDSN 仅供测试注入非法 DSN 以验证降级路径，生产恒为空。
+	readDSN string
+
 	snapshotMu      sync.Mutex
 	snapshotDB      *sql.DB
 	snapshotOpenErr error
@@ -368,6 +377,9 @@ func (s *SQLiteSessionStorage) CloseStorage() error {
 	// 先关快照池：其读事务会阻止主库的 TRUNCATE checkpoint 越过它
 	// （P2.13/D7、审查 R6），且快照池只服务快照，关闭无副作用。
 	s.closeSnapshotPool()
+	// 再关读池：读池连接同样是 WAL 读者，不释放会让下面的 TRUNCATE
+	// checkpoint 拿不到独占窗口（与快照池同一理由）。
+	s.closeReadPool()
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.BusyTimeout)
 	defer cancel()
 	// TRUNCATE checkpoint 会返回 (busy, log, checkpointed) 行：跨进程快照
@@ -1420,7 +1432,8 @@ func (s *SQLiteSessionStorage) LoadMetadata(ctx context.Context, sessionID strin
 	if sessionID == "" {
 		return nil, ErrInvalidSession
 	}
-	session, err := scanSQLiteSession(s.db.QueryRowContext(ctx, `
+	// 只读：走读池（WAL 下与写并发；读池不可用时自动回落写池）。
+	session, err := scanSQLiteSession(s.readPoolHandle().QueryRowContext(ctx, `
 		SELECT id, user_id, state, title, title_source, summary, message_count,
 		       head_offset, tags_json, metadata_json, created_at, updated_at, expires_at
 		FROM sessions WHERE id = ?
@@ -1478,7 +1491,8 @@ func scanSQLiteSession(row rowScanner) (*Session, error) {
 }
 
 func (s *SQLiteSessionStorage) loadPromptMessages(ctx context.Context, sessionID string) ([]types.Message, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	// 只读：走读池（不受并发写阻塞）。
+	rows, err := s.readPoolHandle().QueryContext(ctx, `
 		SELECT payload_json FROM session_prompt_messages
 		WHERE session_id = ? ORDER BY position ASC
 	`, sessionID)
@@ -2142,7 +2156,8 @@ func (s *SQLiteSessionStorage) GetMessagePage(ctx context.Context, sessionID str
 	if beforeSeq > 0 && beforeSeq < upperBound {
 		upperBound = beforeSeq
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	// 只读：走读池（列表预览同样不得被写事务排队）。
+	rows, err := s.readPoolHandle().QueryContext(ctx, `
 		SELECT seq, payload_json, artifact_path, preview_json, byte_count, sha256
 		FROM session_messages
 		WHERE session_id = ? AND seq < ?
@@ -2480,7 +2495,8 @@ func (s *SQLiteSessionStorage) listMetadata(ctx context.Context, where string, a
 		query += ` LIMIT ? OFFSET ?`
 		args = append(args, limit, max(offset, 0))
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	// 只读：走读池（列表是最高频的读，不能被写事务排队）。
+	rows, err := s.readPoolHandle().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list sqlite sessions: %w", err)
 	}
@@ -2502,7 +2518,8 @@ func (s *SQLiteSessionStorage) ListPreviews(ctx context.Context, userID string, 
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	// 只读：走读池（列表预览不得被写事务排队）。
+	rows, err := s.readPoolHandle().QueryContext(ctx, `
 		SELECT id, user_id, state, title, summary, message_count,
 		       tags_json, created_at, updated_at
 		FROM sessions WHERE user_id = ?

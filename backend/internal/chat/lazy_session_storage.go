@@ -188,6 +188,20 @@ func (s *lazySessionStorage) Delete(ctx context.Context, sessionID string) error
 	return store.Delete(ctx, sessionID)
 }
 
+// UpdatePreviewMetadata 只写回预览元数据（见 SessionStoragePreviewWriter）。
+// 内层存储不支持该能力时静默跳过：懒修复是优化而不是语义，缺少能力不改变
+// 任何可见行为（列表仍会按需回退一次完整加载）。
+func (s *lazySessionStorage) UpdatePreviewMetadata(ctx context.Context, sessionID, title, titleSource, summary string) error {
+	store, err := s.ensure(ctx)
+	if err != nil {
+		return err
+	}
+	if writer, ok := store.(SessionStoragePreviewWriter); ok {
+		return writer.UpdatePreviewMetadata(ctx, sessionID, title, titleSource, summary)
+	}
+	return nil
+}
+
 func (s *lazySessionStorage) List(ctx context.Context, userID string) ([]*Session, error) {
 	store, err := s.ensure(ctx)
 	if err != nil {

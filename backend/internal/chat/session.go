@@ -698,6 +698,43 @@ func (s *Session) BuildPreview() *SessionPreview {
 	return preview
 }
 
+// PreviewNeedsHistory 报告 BuildPreview 是否会读取消息历史来渲染标题/摘要。
+//
+// 只读元数据的列表路径（Web 侧栏、分页选择器）用它决定是否需要为这一行回退
+// 到完整加载：元数据已带标题与摘要时，BuildPreview 完全不碰历史，可以零 Load
+// 渲染；标题为空（需从消息派生）或摘要为空（需从最后一条消息生成）时才需要
+// 历史。判定必须与 BuildPreview/effectiveTitle 的实际取值路径一致，否则列表
+// 会渲染出与完整加载不同的标题/摘要。
+//
+// HistoryLoaded=true 的会话（内存中的当前会话）恒为 false：历史已在内存里，
+// 无需任何读取。
+func (s *Session) PreviewNeedsHistory() bool {
+	if s == nil {
+		return true
+	}
+	if s.HistoryLoaded {
+		return false
+	}
+	// 摘要为空时 BuildPreview 会回退到 lastContent()（需要历史）。
+	if strings.TrimSpace(s.Metadata.Summary) == "" {
+		return true
+	}
+
+	title := strings.TrimSpace(s.Metadata.Title)
+	titleSource := strings.TrimSpace(s.Metadata.TitleSource)
+	// manual 标题恒返回存储值；compact 标题恒返回（修复标记后的）存储值：
+	// 两条路径都不会回退到 derivedTitle()。
+	if titleSource == sessionTitleSourceManual || titleSource == sessionTitleSourceCompact {
+		return false
+	}
+	if cleaned, changed := repairCompactTitleMarker(title); changed {
+		title = cleaned
+	}
+	// 标题为空 → derivedTitle()（需要历史）；标题是旧的压缩摘要/指令污染时
+	// effectiveTitle 也会重新派生（需要历史）。
+	return title == "" || shouldRepairLegacyDerivedTitle(title)
+}
+
 // Clone 克隆会话（不包含敏感信息）
 func (s *Session) Clone() *Session {
 	if s == nil {

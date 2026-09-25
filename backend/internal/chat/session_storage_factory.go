@@ -29,8 +29,12 @@ type PersistentSessionStorageConfig struct {
 	HistoryPageBytes      int
 	MaxInlineMessageBytes int
 	SQLiteCacheKiB        int
-	BusyTimeout           time.Duration
-	ImportLegacyJSON      bool
+	// ReadPoolSize 是只读查询的连接池大小（WAL 下读读/读写并发）。
+	// <=0 用默认值 4；=1 显式退回历史单连接行为（排障/极端内存受限）。
+	// 写路径始终单连接，不受此值影响。
+	ReadPoolSize     int
+	BusyTimeout      time.Duration
+	ImportLegacyJSON bool
 	// SessionSnapshotTimeout 限制单次 SnapshotSession/Snapshot 的全程耗时；
 	// 默认 min(BusyTimeout*6, 60s)，负值表示不额外加 deadline（沿用调用方 ctx）。
 	SessionSnapshotTimeout time.Duration
@@ -50,6 +54,7 @@ func DefaultPersistentSessionStorageConfig(dir string) PersistentSessionStorageC
 		HistoryPageBytes:      4 * 1024 * 1024,
 		MaxInlineMessageBytes: 512 * 1024,
 		SQLiteCacheKiB:        2048,
+		ReadPoolSize:          sqliteSessionReadPoolDefaultSize,
 		BusyTimeout:           5 * time.Second,
 		ImportLegacyJSON:      true,
 	}

@@ -78,6 +78,20 @@ type SessionStorageMetadataReader interface {
 	LoadMetadata(ctx context.Context, sessionID string) (*Session, error)
 }
 
+// SessionStoragePreviewWriter 可选接口：只写回会话的预览元数据（title /
+// title_source / summary），不触碰消息历史与任何投影。
+//
+// 用途：列表类调用方（Web 侧栏、TUI 分页选择器）只读元数据渲染预览，
+// 少量历史遗留行（标题或摘要为空）需要一次完整加载才能渲染。加载后把这些
+// 派生值写回元数据行，这类行的代价就从「每次列表一次全量加载」变成「一次
+// 全量加载 + 之后零加载」（懒迁移模型，与 refreshDerivedTitle 的持久化一致）。
+//
+// 实现必须满足：幂等；不修改 updated_at（否则一次懒修复会让列表顺序跳动）；
+// 只更新指定列。不支持该接口的存储由调用方静默跳过（这是优化，不是语义）。
+type SessionStoragePreviewWriter interface {
+	UpdatePreviewMetadata(ctx context.Context, sessionID, title, titleSource, summary string) error
+}
+
 // SessionStatistics 会话统计信息
 type SessionStatistics struct {
 	Total         int            `json:"total" yaml:"total"`
@@ -155,6 +169,28 @@ func (s *InMemoryStorage) Load(ctx context.Context, sessionID string) (*Session,
 	}
 
 	return cloneSession(session), nil
+}
+
+// UpdatePreviewMetadata 只写回预览元数据（见 SessionStoragePreviewWriter）。
+// updated_at 保持不变：懒修复不得让列表顺序跳动。
+func (s *InMemoryStorage) UpdatePreviewMetadata(ctx context.Context, sessionID, title, titleSource, summary string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, exists := s.sessions[sessionID]
+	if !exists {
+		return ErrSessionNotFound
+	}
+	if session.Metadata.Title == title && session.Metadata.TitleSource == titleSource && session.Metadata.Summary == summary {
+		return nil
+	}
+	session.Metadata.Title = title
+	session.Metadata.TitleSource = titleSource
+	session.Metadata.Summary = summary
+	return nil
 }
 
 // Delete 删除会话
