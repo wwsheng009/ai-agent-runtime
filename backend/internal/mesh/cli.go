@@ -231,6 +231,11 @@ func (c *CLI) printUsage(w io.Writer) {
 
 默认不探活（毫秒级，纯读文件）；--probe 才发请求。
 
+详情（show）: 单目标的可操作细节。档案里有写令牌时，输出直接给出令牌原文与
+  /web?token=<令牌> 的打开地址（CLI 本机披露面；ls 与 HTTP 视图仍只给
+  token_hint），--json 的 token / token_source / web_url 同源；纯 TUI 节点没有
+  端点，只给令牌不给地址。输出含密钥，别贴到会被转发的地方。
+
 列表（ls）: 默认只列**在线**（live）节点——日常问的是「现在谁在跑」；-a/--all 才列出
   全部档案（stale/stopped/unknown 一并可见，冲突也照常提示）。--live 是默认行为的
   显式写法（保留兼容，与 -a 互斥）。无论怎么过滤，counts 恒为全量普查口径（§5.4），
@@ -839,10 +844,24 @@ type leaseView struct {
 	Path        string    `json:"path,omitempty"`
 }
 
+// showReveal is the token-facing section of `show`: unlike `ls` / the HTTP
+// views (which only ever publish auth.token_hint), `show` is a targeted local
+// inspection, so it reports the record's write token and the browser bootstrap
+// URL verbatim (§9.1). Fields stay empty when the node has no token or no
+// loopback endpoint.
+type showReveal struct {
+	Token       string `json:"token,omitempty"`
+	TokenSource string `json:"token_source,omitempty"`
+	WebURL      string `json:"web_url,omitempty"`
+}
+
 // showResult is the `show --json` document.
 type showResult struct {
 	SchemaVersion int         `json:"schema_version"`
 	Node          *NodeView   `json:"node"`
+	Token         string      `json:"token,omitempty"`
+	TokenSource   string      `json:"token_source,omitempty"`
+	WebURL        string      `json:"web_url,omitempty"`
 	Leases        []leaseView `json:"leases,omitempty"`
 }
 
@@ -876,13 +895,22 @@ func (c *CLI) runShow(args []string) int {
 		return c.failTargetError(err)
 	}
 	leases := c.leasesForNode(paths, node)
+	token, tokenSource := recordToken(node)
+	reveal := showReveal{Token: token, TokenSource: tokenSource, WebURL: webURLWithToken(node, token)}
 	if parsed.boolean("json") {
-		if err := c.printJSON(showResult{SchemaVersion: SchemaVersion, Node: &node, Leases: leases}); err != nil {
+		if err := c.printJSON(showResult{
+			SchemaVersion: SchemaVersion,
+			Node:          &node,
+			Token:         reveal.Token,
+			TokenSource:   reveal.TokenSource,
+			WebURL:        reveal.WebURL,
+			Leases:        leases,
+		}); err != nil {
 			return c.fail(ExitFailure, "aicli-mesh show: 输出 JSON 失败: %v", err)
 		}
 		return ExitOK
 	}
-	c.renderShow(node, leases, events)
+	c.renderShow(node, leases, events, reveal)
 	return ExitOK
 }
 
@@ -921,7 +949,7 @@ func (c *CLI) leasesForNode(paths Paths, node NodeView) []leaseView {
 	return out
 }
 
-func (c *CLI) renderShow(node NodeView, leases []leaseView, events int) {
+func (c *CLI) renderShow(node NodeView, leases []leaseView, events int, reveal showReveal) {
 	now := c.now()
 	state := string(node.State)
 	if node.State == NodeStateLive {
@@ -934,7 +962,10 @@ func (c *CLI) renderShow(node NodeView, leases []leaseView, events int) {
 	}
 	writeKV(c.out(), "  归属", string(node.Ownership))
 	writeKV(c.out(), "  端点", endpointDetail(node))
-	writeKV(c.out(), "  令牌", authDetail(node))
+	writeKV(c.out(), "  令牌", tokenDetail(node, reveal))
+	if reveal.WebURL != "" {
+		writeKV(c.out(), "  访问", reveal.WebURL)
+	}
 	if node.Session != nil {
 		writeKV(c.out(), "  会话", fmt.Sprintf("%s %s state=%s busy=%t%s",
 			node.Session.ID, quotedTitle(node.Session.Title), node.Session.State, node.Session.Busy, turnSuffix(node.Session.TurnID)))
@@ -1014,6 +1045,28 @@ func endpointDetail(node NodeView) string {
 	return detail
 }
 
+// tokenDetail is the `令牌` line of `show`: with a readable token the CLI
+// prints the record's secret verbatim (the §9.1 disclosure surface chosen for
+// `show`), annotated with the record's auth mode; without one it degrades to
+// the redacted hint so readers can still tell "no token" from "required".
+func tokenDetail(node NodeView, reveal showReveal) string {
+	if reveal.Token == "" {
+		return authDetail(node)
+	}
+	detail := reveal.Token
+	if node.Auth != nil {
+		segments := []string{fmt.Sprintf("required=%t", node.Auth.Required)}
+		if node.Auth.Mode != "" {
+			segments = append(segments, "mode="+node.Auth.Mode)
+		}
+		if reveal.TokenSource != "" {
+			segments = append(segments, "source="+reveal.TokenSource)
+		}
+		detail += "（" + strings.Join(segments, ", ") + "）"
+	}
+	return detail
+}
+
 func authDetail(node NodeView) string {
 	if node.Auth == nil {
 		return "无（该节点不要求写令牌）"
@@ -1027,7 +1080,7 @@ func authDetail(node NodeView) string {
 	if node.Auth.Mode != "" {
 		detail += ", mode=" + node.Auth.Mode
 	}
-	return detail + "；原文用 `aicli-mesh url <目标> --with-token` 获取）"
+	return detail + "）"
 }
 
 func bindingDetail(binding *SessionBinding, now time.Time) string {
@@ -1100,12 +1153,9 @@ func (c *CLI) runURL(args []string) int {
 	if err != nil {
 		return c.failTargetError(err)
 	}
-	if node.Endpoint == nil || (node.Endpoint.BaseURL == "" && node.Endpoint.Port <= 0) {
+	base, ok := nodeBaseURL(node)
+	if !ok {
 		return c.fail(ExitUnreachable, "aicli-mesh url: 目标 %s 没有 loopback 端点（纯 TUI 进程不可访问）", node.NodeID)
-	}
-	base := node.Endpoint.BaseURL
-	if base == "" {
-		base = fmt.Sprintf("http://%s:%d", fallbackHost(node.Endpoint.Host), node.Endpoint.Port)
 	}
 	target := joinURLPath(base, parsed.str("path", "/web"))
 	withToken := parsed.boolean("with-token")
@@ -1137,14 +1187,40 @@ func (c *CLI) runURL(args []string) int {
 	return ExitOK
 }
 
-// recordToken reads the node's raw write token from its record. This is the
-// only place the CLI materialises a token, and only for `url --with-token`
-// (the §9.1 trust boundary: the caller asked for it explicitly).
+// recordToken reads the node's raw write token from its record. The CLI
+// materialises the token for its two local disclosure surfaces only: `show`
+// (token + window URL) and `url --with-token` (§9.1).
 func recordToken(node NodeView) (string, string) {
 	if node.Record == nil || node.Record.Auth == nil {
 		return "", ""
 	}
 	return strings.TrimSpace(node.Record.Auth.Token), strings.TrimSpace(node.Record.Auth.TokenSource)
+}
+
+// nodeBaseURL returns the node's loopback HTTP base URL and whether it has a
+// usable endpoint at all (a pure TUI node has none).
+func nodeBaseURL(node NodeView) (string, bool) {
+	if node.Endpoint == nil || (strings.TrimSpace(node.Endpoint.BaseURL) == "" && node.Endpoint.Port <= 0) {
+		return "", false
+	}
+	base := strings.TrimSpace(node.Endpoint.BaseURL)
+	if base == "" {
+		base = fmt.Sprintf("http://%s:%d", fallbackHost(node.Endpoint.Host), node.Endpoint.Port)
+	}
+	return base, true
+}
+
+// webURLWithToken builds the §7.3 browser bootstrap URL (`<web_base_url>?token=…`)
+// that `show` prints: empty when the node has no token or no loopback endpoint.
+func webURLWithToken(node NodeView, token string) string {
+	if strings.TrimSpace(token) == "" {
+		return ""
+	}
+	base, ok := nodeBaseURL(node)
+	if !ok {
+		return ""
+	}
+	return joinURLPath(base, "/web") + "?token=" + queryEscape(token)
 }
 
 func joinURLPath(base, path string) string {

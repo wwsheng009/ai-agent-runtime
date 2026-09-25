@@ -11,7 +11,7 @@
 | 场景 | 命令 |
 |------|------|
 | 有哪些节点、谁活着、各自在哪个会话/工作区 | `ls` |
-| 某个节点的端点、令牌提示、绑定、租约、日志尾部 | `show` |
+| 某个节点的端点、令牌原文与打开地址、绑定、租约、日志尾部 | `show` |
 | 拿一个可直接打开/调用的 URL（需要令牌时显式披露） | `url` |
 | 让某个节点退场（默认投 `/exit` 等它收尾；`--force` 直接终止进程） | `stop`（治理动作，目标需 `--mesh-allow-stop=true`） |
 | 复用活节点或拉起新节点，并给出可直接打开的窗口 URL | `open` |
@@ -35,8 +35,8 @@
   三者都解析不到时进入 **fail-closed** 状态：读取返回空视图、`ls`/`gc` 退出码 0（不是错误），
   `doctor` 报 1 个问题（退出码 5）。工具**不会**回退到当前目录（与 `internal/aiclipath` 的
   `./.aicli/...` 回退不同，见 `internal/mesh/paths.go` 顶部说明）；
-- 令牌只在 `show` / `ls` 中以 `token_hint`（前 4 位 + `…`）出现，原文只有 `url --with-token`
-  一条披露路径（§7）。
+- `ls` 与 HTTP 视图只给 `token_hint`（前 4 位 + `…`）；令牌原文出现在 CLI 的**本机披露面**：
+  `show`（文本的「令牌 / 访问」行与 `--json` 的 `token` / `web_url`）与 `url --with-token`（§7）。
 
 ## 2. 用法总览
 
@@ -119,7 +119,8 @@ live   node-22024-20260924T013534Z  22024  session_20260924093535_4wCDwhqu  E:\p
   进程  pid 22024（dev，origin=cli）
   归属  peer
   端点  http://127.0.0.1:63910（web http://127.0.0.1:63910/web）（清单 http://127.0.0.1:63910/debug/endpoints）
-  令牌  42ad…（required=false, mode=loopback-dev；原文用 `aicli-mesh url <目标> --with-token` 获取）
+  令牌  42ad9c1f8b6e4d2a（required=false, mode=loopback-dev, source=random）
+  访问  http://127.0.0.1:63910/web?token=42ad9c1f8b6e4d2a
   会话  session_20260924093535_4wCDwhqu  state=running busy=false
   工作区  E:\projects\ai\ai-agent-runtime\backend（backend）
   绑定  127.0.0.1:63910 last_node=node-22024-20260924T013534Z 更新于 34m52s 前
@@ -131,9 +132,14 @@ live   node-22024-20260924T013534Z  22024  session_20260924093535_4wCDwhqu  E:\p
     lease.acquired
 ```
 
-`--events N` 控制日志尾部条数（默认 10）。`--json` 返回 `{schema_version, node, leases[]}`
-（§6.2），其中 `node` 与 `ls --json` 的 `nodes[]` 元素同构；`leases[]` 额外带
-`owner_alive` / `expired`，让脚本不必自己判活。
+`--events N` 控制日志尾部条数（默认 10）。`--json` 返回
+`{schema_version, node, token, token_source, web_url, leases[]}`（§6.2），其中 `node` 与
+`ls --json` 的 `nodes[]` 元素同构（`node.auth` 仍是 `token_hint` 脱敏视图）。
+
+`show` 是 CLI 的**本机披露面**：档案里能读到写令牌时，文本直接给原文与 `/web?token=…`
+打开地址，`--json` 在同级字段给 `token` / `token_source` / `web_url`。纯 TUI 节点没有端点
+→ 只给令牌不给地址；开发模式没有令牌 → 两个字段都不出现。输出含密钥，**不要**粘贴到日志、
+聊天记录或任何会被转发的地方。`leases[]` 额外带 `owner_alive` / `expired`，让脚本不必自己判活。
 
 ### 4.3 `url` — 可直接使用的地址
 
@@ -141,7 +147,7 @@ live   node-22024-20260924T013534Z  22024  session_20260924093535_4wCDwhqu  E:\p
 |------|------|
 | 默认 | 打印 `<web_base_url>`（不带令牌） |
 | `--path PATH` | 覆盖路径，如 `--path /debug/endpoints`（相对路径自动补 `/`） |
-| `--with-token` | 追加 `?token=<原文>`——**唯一**的令牌披露路径 |
+| `--with-token` | 追加 `?token=<原文>`；与 `show` 并列的 CLI 本机披露面（§7） |
 | `--json` | 输出 `{schema_version, node_id, session_id, state, url, with_token, token_source}` |
 
 目标没有端点（纯 TUI / 未开 HTTP 服务）时退出码 3（不可达），而不是「不存在」。
@@ -451,7 +457,8 @@ aicli-mesh watch --session session_20260924093535 --once --json
 
 1. 每个文档都带 `schema_version`（当前 2）；
 2. 数组字段**恒为数组**，不会出现 `null`（空网格是 `"nodes": []`）；
-3. 令牌原文**从不出现**，只有 `auth.token_hint`（`url --with-token` 的 URL 除外）。
+3. 令牌原文**不在默认视图里**：`ls` 与 HTTP 视图只有 `auth.token_hint`；只有 `show` 的顶层
+   `token` / `web_url` 与 `url --with-token` 的 URL 会带原文（§7）。
 
 ### 6.1 `ls --json`
 
@@ -495,11 +502,16 @@ aicli-mesh watch --session session_20260924093535 --once --json
 ### 6.2 `show --json`
 
 ```json
-{ "schema_version": 2, "node": { ...与 6.1 元素同构... },
+{ "schema_version": 2, "node": { ...与 6.1 元素同构（auth 仍脱敏）... },
+  "token": "42ad9c1f8b6e4d2a", "token_source": "random",
+  "web_url": "http://127.0.0.1:63910/web?token=42ad9c1f8b6e4d2a",
   "leases": [ { "purpose": "session", "key": "session_...", "owner_node_id": "node-...",
                 "owner_pid": 22024, "expires_at": "2026-09-24T02:11:04Z", "ttl_sec": 60,
                 "owner_alive": true, "expired": false, "path": "C:\\...\\leases\\session-....lock" } ] }
 ```
+
+`token` / `token_source` / `web_url` 是 `show` 的本机披露字段（§7）：节点没有令牌时整体省略，
+纯 TUI 节点（没有 loopback 端点）只有 `token` / `token_source`，`web_url` 省略。
 
 ### 6.3 `doctor --json`
 
@@ -559,7 +571,8 @@ aicli-mesh watch --session session_20260924093535 --once --json
 - `status` ∈ `reused` / `started` / `not_running` / `failed`（§4.10 的退出码映射）；
 - 失败时带 `code`（如 `mesh_spawn_bin_unavailable`）与 `reason`；`not_running` / `failed`
   还会带脱敏后的 `log_tail`（末尾 20 行）；
-- `url` 是**唯一**携带令牌原文的字段（M7：它直接交给浏览器自举）。
+- `url` 是**本响应里唯一**携带令牌原文的字段（M7：它直接交给浏览器自举；CLI 侧的 `show` /
+  `url --with-token` 是同一信任域内的披露面，见 §7）。
 
 `new --json` 是同一形状外加 `workspace`（会话 ID 是子进程生成的、工作区是调用方给的，
 脚本两个都要）：
@@ -633,8 +646,10 @@ aicli-mesh watch --session session_20260924093535 --once --json
 
 ## 7. 令牌与安全（M7）
 
-- `ls` / `show` 只输出 `token_hint`（前 4 位 + `…`），**任何** `--json` 都不会带原文；
-- `url --with-token` 是唯一的原文披露路径，且只在**本机回环**场景有意义；
+- `ls` 与 HTTP 视图（`self` / `peers`）只输出 `token_hint`（前 4 位 + `…`），**任何** `--json` 都不会带原文；
+- `show` 是 CLI 的**本机披露面**：文本给令牌原文与 `/web?token=…` 打开地址，`--json` 给
+  `token` / `token_source` / `web_url`；`url --with-token` 给同一原文的 URL 形式。
+  三者都只在**本机回环**场景有意义，输出含密钥，别贴到会被转发的地方；
 - 网格目录（`nodes/` 等）在 Windows 上没有 POSIX 权限位，保密性依赖用户 Profile 权限，
   `doctor` 的 `permissions` 检查会就此给出提示（§9.6）；
 - 工具不做任何网络写入：唯一的网络行为是 `ls --probe` 的 GET 探活。
@@ -661,6 +676,9 @@ aicli-mesh ls --probe
 
 # 脚本消费：活节点数
 (aicli-mesh ls --json | ConvertFrom-Json).counts.live
+
+# 详情 + 令牌原文 + 可直接打开的窗口地址（show 是本机披露面；输出含密钥）
+aicli-mesh show session_20260924093535
 
 # 从会话 ID 前缀拿到可打开的地址（不带令牌）
 aicli-mesh url session_20260924093535
@@ -721,7 +739,7 @@ aicli-mesh doctor --json
 | 两个进程都显示同一会话 | `doctor` 的 `ownership` 会报 problem（双占用）；先 `show` 看两边的心跳与租约，再停掉过期的一方 |
 | `call` 退出码 2 + `mesh_no_endpoint` | 目标没开回环控制面（纯 TUI 节点）：让目标带 `--pprof` / `--web-port` 启动 |
 | `call` 退出码 6 + `mesh_write_not_allowed` | 写 op（`invoke`/`input`/`cancel`/`sessions.resume`）缺 `--allow-write`：确认意图后显式加上 |
-| `call` 退出码 6 + `mesh_token_stale` | 目标重启导致写令牌轮换：CLI 已自动重读档案重试一次，仍失败说明档案里的令牌已过期——`aicli-mesh show` 确认目标心跳，必要时重取 `url --with-token` |
+| `call` 退出码 6 + `mesh_token_stale` | 目标重启导致写令牌轮换：CLI 已自动重读档案重试一次，仍失败说明档案里的令牌已过期——`aicli-mesh show` 确认目标心跳并直接取回新令牌（或 `url --with-token`） |
 | `call` 退出码 3 + `unreachable` | 目标档案还在但端口已关：目标进程已退出或未监听；`ls` 看状态、`doctor` 看 `permissions`/`stale-nodes` |
 | `call` 退出码 4 + `busy` | 目标已有 invoke 在等待（单飞锁）：稍后重试，或先用 `screen` 观察它在忙什么 |
 | `call` 退出码 6 + `mesh_cross_workspace_denied` | 目标开了 `--mesh-restrict-workspace`，而这是**跨工作区的写调用**：改用同工作区的节点，或让目标关掉该开关（默认关闭；只读调用不受影响） |

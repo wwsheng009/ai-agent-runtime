@@ -103,7 +103,7 @@ CLI 默认只列在线，`-a` 才是含残留档案的全量）、分别服务�
 | 功能 | MF6 | 新窗口打开：复用已有节点或按需拉起新节点，并给出可访问 URL（含令牌策略） |
 | 非功能 | MN1 | 网格故障不影响 chat：写盘失败/探活失败/订阅失败一律降级 |
 | 非功能 | MN2 | 无守护进程、无中心协调者、无第三方依赖 |
-| 非功能 | MN3 | 令牌与档案权限最小化；默认输出脱敏 |
+| 非功能 | MN3 | 令牌与档案权限最小化；`ls`/HTTP 视图默认输出脱敏，`show` 是本机显式披露面（见 §9.1） |
 | 非功能 | MN4 | Windows / POSIX 行为一致；Windows 无 POSIX 权限位时明确记录限制 |
 | 非功能 | MN5 | 单进程路径零回归：E2E-DEBUG-01 / 02 断言全绿是硬门禁 |
 
@@ -800,7 +800,7 @@ data: {"seq":17,"ts":"2026-09-24T07:31:42Z","source_node_id":"node-9001-...","ty
 | 命令 | 作用 | 关键参数 | 阶段 |
 |------|------|----------|------|
 | `aicli-mesh ls`（别名 `ps`） | 列出本机节点：状态/地址/会话/工作区（**默认只列在线、跨全部工作区**；`-a` 列全部档案） | `-a`/`--all`（含 stale/stopped/unknown） `--json` `--probe` `--live`（默认行为的显式写法） `--workspace PATH`（可重复，过滤） `--sort age\|session\|workspace` | P0 |
-| `aicli-mesh show <node\|session>` | 单节点或单会话详情（含 journal 尾部、绑定、租约） | `--json` `--events N` | P0 |
+| `aicli-mesh show <node\|session>` | 单节点或单会话详情（含令牌原文 + 窗口 URL、journal 尾部、绑定、租约） | `--json` `--events N` | P0 |
 | `aicli-mesh url <node\|session>` | 打印可访问 URL | `--with-token` `--path /web` | P0 |
 | `aicli-mesh gc` | 清理死节点/过期租约/旧日志/旧目录 | `--apply` `--stale-ttl 10m` `--keep-days 7` `--purge-legacy` `--prune-bindings` | P0 |
 | `aicli-mesh doctor` | 自检：目录、权限、陈旧节点、双占用、令牌可读性、journal 完整性 | `--json` | P0 |
@@ -947,7 +947,7 @@ POST /web/api/mesh/spawn {session_id, port:0, wait_ms:8000}
 | 生成 | 内存 | — | 沿用既有：`--web-token` > `AICLI_WEB_TOKEN` > 每进程随机 |
 | 写档案 | `nodes/<node_id>.json` | 0600（POSIX）/ 用户目录 ACL（Windows） | 只为让同用户进程之间能互相调用 |
 | 读取 | 同用户进程 | — | `internal/mesh/client` 只在**回环**调用时读取 |
-| 输出 | CLI/HTTP | — | 默认脱敏（`0f3a…`）；`--with-token` / `?reveal_token=1` 才给原文 |
+| 输出 | CLI/HTTP | — | 默认脱敏（`0f3a…`）；CLI `show`（文本/--json）、`url --with-token` 与 HTTP `?reveal_token=1`（回环）才给原文 |
 | 退出 | 随档案删除 | — | 不留历史令牌 |
 | 禁止 | journal / 日志 / 绑定 / `/debug/endpoints` | — | 有专门断言（§12） |
 
@@ -1199,7 +1199,7 @@ Windows 没有 POSIX 权限位：`0600` 语义退化为「依赖用户目录 ACL
 | M4 `mesh/cross-call-invoke` | A 通过 `mesh/call` 让 B 跑一轮 prompt，拿到 `turn_id` + `assistant`，`duplicate=false` |
 | M5 `mesh/realtime-fanin` | B 的忙碌翻转在 A 的 `/web/api/mesh/events` 时间窗内可见 |
 | M6 `mesh/crash-reconcile` | 强杀 B → A 的 peers 视图在 TTL 内把 B 标 `stale`；`gc --apply` 后档案消失 |
-| M7 `mesh/no-token-leak` | peers 默认输出、journal 文件、`/debug/endpoints` 均不含令牌原文 |
+| M7 `mesh/no-token-leak` | peers / ls / 清单 / journal 文件均不含令牌原文；CLI `show` 作为本机披露面另行断言（文本与 `--json` 直给原文 + `web_url`） |
 | M8 `mesh/legacy-purge` | `gc --purge-legacy --apply` 只删旧目录，`mesh/` 不受影响 |
 | M9 `mesh/self-containment` | 杀掉全部节点后 `aicli-mesh ls -a` 仍可读（含 stale 与绑定），不报错 |
 | M10 `mesh/cross-workspace-ops` | B 以**另一个工作区**（不同 cwd）启动：默认 `ls`/`peers` 同时列出两个工作区（`workspace.path` 不同）；A 对 B 的写调用（`invoke`）默认成功；开启 `--mesh-restrict-workspace` 后同一调用 → `refused` + `mesh_cross_workspace_denied` |

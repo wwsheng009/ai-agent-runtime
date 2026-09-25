@@ -9,7 +9,7 @@
 ```powershell
 aicli-mesh ls -a               # 1) 现状：有哪些节点/谁在线、谁残留（-a 含 stale/stopped）、ADDR 是否为空
 aicli-mesh doctor              # 2) 体检：problems/warnings 定位到具体检查项
-aicli-mesh show <目标>         # 3) 细节：心跳/绑定/租约/日志尾部
+aicli-mesh show <目标>         # 3) 细节：心跳/绑定/租约/日志尾部 + 令牌原文与 /web?token=… 打开地址
 aicli-mesh watch --since 10m   # 4) 时间线：谁起停、谁接管、谁调用了谁（进程全退也能看）
 ```
 
@@ -61,7 +61,7 @@ aicli-mesh watch --since 10m   # 4) 时间线：谁起停、谁接管、谁调�
 | `mesh_write_not_allowed` | 6 | 写 op 缺 `--allow-write`：确认意图后显式加上（CLI 本地拒绝，不发请求） |
 | `mesh_nonloopback_denied` | 6 | 非回环调用：跨机一律拒绝（本机 127.0.0.1 才行）。目标以非回环地址监听时**整机**退出网格写路径（连回环客户端也拒）；逃生门 `--mesh-allow-nonloopback=true` 开在**目标进程**上、默认关 |
 | `mesh_cross_workspace_denied` | 6 | 目标开了 `--mesh-restrict-workspace` 且这是**跨工作区写调用**：改用同工作区节点，或让目标关掉该开关（只读不受影响） |
-| `mesh_token_stale` | 6 | 目标重启导致写令牌轮换：CLI 已自动重读档案重试一次仍失败——`show` 确认目标心跳，必要时重取 `url --with-token` |
+| `mesh_token_stale` | 6 | 目标重启导致写令牌轮换：CLI 已自动重读档案重试一次仍失败——`show` 确认目标心跳并直接取回新令牌（或 `url --with-token`） |
 | `mesh_no_endpoint` | 2 | 目标没开回环控制面（纯 TUI）：让目标带 `--pprof` / `--web-port` 启动 |
 | `mesh_target_stopped` | 2 | 目标档案已标 `stopped`：它已退出，改选活节点 |
 | `mesh_target_ambiguous` | 2 | 目标引用命中多个：改用完整 ID 或 `pid:<PID>` |

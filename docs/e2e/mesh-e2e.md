@@ -56,7 +56,7 @@
 | 能力 | HTTP | CLI | 用途（本场景） |
 |------|------|-----|----------------|
 | 存活探针 | `GET /web/api/health` | — | 就绪等待、探活（`--probe`） |
-| 节点自述 | `GET /web/api/mesh/self` | `aicli-mesh show <node>` | 断言令牌脱敏、地址自描述 |
+| 节点自述 | `GET /web/api/mesh/self` | `aicli-mesh show <node>` | `self`/`peers` 断言默认脱敏、地址自描述；`show` 断言本机披露面（原文 + `web_url`），见 M7 |
 | 全量视图 | `GET /web/api/mesh/peers?probe=1` | `aicli-mesh ls -a --json` | M1 / M2（CLI 与 HTTP 同源；CLI 默认只列在线，`-a` 才是全量口径） |
 | 实时扇入 | `GET /web/api/mesh/events` | `aicli-mesh watch` | M5（跨进程实时可见） |
 | 定向调用 | `POST /web/api/mesh/call` | `aicli-mesh call/send/screen` | M4（跨进程 invoke） |

@@ -322,12 +322,16 @@ func TestCLIShowResolvesTargetsAndRendersDetails(t *testing.T) {
 		TTLSec:      DefaultLeaseTTLSec,
 	})
 
-	// node id prefix
+	// node id prefix: 文本输出直接披露令牌原文与 /web?token=… 打开地址。
 	code, stdout, stderr := runCLI(t, cli, "show", "node-1000")
 	if code != ExitOK {
 		t.Fatalf("show prefix exit = %d (stderr %q)", code, stderr)
 	}
-	for _, want := range []string{nodeID, sessionID, "127.0.0.1:55124", "0f3a…", "live"} {
+	for _, want := range []string{
+		nodeID, sessionID, "127.0.0.1:55124", "live",
+		"0f3a-secret-token",
+		"http://127.0.0.1:55124/web?token=0f3a-secret-token",
+	} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("show output missing %q:\n%s", want, stdout)
 		}
@@ -349,6 +353,15 @@ func TestCLIShowResolvesTargetsAndRendersDetails(t *testing.T) {
 		if len(result.Leases) != 1 || result.Leases[0].Key != sessionID || !result.Leases[0].OwnerAlive {
 			t.Fatalf("show %s leases = %+v", ref, result.Leases)
 		}
+		// --json 与文本同源：token / token_source / web_url 顶层披露。
+		if result.Token != "0f3a-secret-token" || result.TokenSource != "random" ||
+			result.WebURL != "http://127.0.0.1:55124/web?token=0f3a-secret-token" {
+			t.Fatalf("show %s reveal = token %q source %q url %q", ref, result.Token, result.TokenSource, result.WebURL)
+		}
+		// node 元素仍是脱敏视图（M7）：原文只出现在顶层披露字段里。
+		if result.Node.Auth == nil || result.Node.Auth.Token != "" || result.Node.Auth.TokenHint != "0f3a…" {
+			t.Fatalf("show %s node auth = %+v, want the redacted view", ref, result.Node.Auth)
+		}
 	}
 
 	// unknown target, missing target
@@ -357,6 +370,58 @@ func TestCLIShowResolvesTargetsAndRendersDetails(t *testing.T) {
 	}
 	if code, _, _ = runCLI(t, cli, "show"); code != ExitUsage {
 		t.Fatalf("show without target exit = %d, want %d", code, ExitUsage)
+	}
+}
+
+func TestCLIShowRevealDegradesWithoutTokenOrEndpoint(t *testing.T) {
+	paths := testCLIPaths(t)
+	clock := newFakeClock()
+	now := clock.Now()
+	cli := testCLI(paths, clock)
+
+	// 纯 TUI 节点：有令牌但没有 loopback 端点 → 只给令牌，不给打开地址。
+	tuiID := "node-2000-20260924T090000Z"
+	tui := viewNodeRecord(tuiID, os.Getpid(), now.Add(-5*time.Second), "session_tui", `E:\ws\a`)
+	tui.Auth = &AuthInfo{Mode: "loopback-dev", Required: true, Token: "tui-secret-token", TokenSource: "env"}
+	writeViewNode(t, paths, tui)
+
+	// 有端点但没启用令牌（开发模式）→ 两个披露字段都不出现。
+	devID := "node-3000-20260924T090000Z"
+	dev := viewNodeRecord(devID, os.Getpid(), now.Add(-5*time.Second), "session_dev", `E:\ws\a`)
+	dev.Endpoint = &EndpointInfo{
+		Scheme: "http", Host: "127.0.0.1", Port: 55125, Loopback: true,
+		BaseURL: "http://127.0.0.1:55125",
+	}
+	dev.Auth = &AuthInfo{Mode: "loopback-dev", Required: false}
+	writeViewNode(t, paths, dev)
+
+	code, stdout, stderr := runCLI(t, cli, "show", tuiID, "--json")
+	if code != ExitOK {
+		t.Fatalf("show %s exit = %d (stderr %q)", tuiID, code, stderr)
+	}
+	result := decodeJSON[showResult](t, stdout)
+	if result.Token != "tui-secret-token" || result.TokenSource != "env" || result.WebURL != "" {
+		t.Fatalf("TUI node reveal = token %q source %q url %q, want no web_url", result.Token, result.TokenSource, result.WebURL)
+	}
+
+	code, stdout, stderr = runCLI(t, cli, "show", tuiID)
+	if code != ExitOK {
+		t.Fatalf("show %s exit = %d (stderr %q)", tuiID, code, stderr)
+	}
+	if !strings.Contains(stdout, "tui-secret-token") || strings.Contains(stdout, "/web?token=") {
+		t.Fatalf("TUI node text = token without address, got:\n%s", stdout)
+	}
+
+	code, stdout, stderr = runCLI(t, cli, "show", devID, "--json")
+	if code != ExitOK {
+		t.Fatalf("show %s exit = %d (stderr %q)", devID, code, stderr)
+	}
+	result = decodeJSON[showResult](t, stdout)
+	if result.Token != "" || result.TokenSource != "" || result.WebURL != "" {
+		t.Fatalf("tokenless node reveal = token %q source %q url %q, want all empty", result.Token, result.TokenSource, result.WebURL)
+	}
+	if strings.Contains(stdout, "secret") {
+		t.Fatalf("tokenless node leaked a secret:\n%s", stdout)
 	}
 }
 

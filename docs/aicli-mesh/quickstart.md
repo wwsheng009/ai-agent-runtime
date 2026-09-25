@@ -91,9 +91,9 @@ aicli-mesh ls --probe              # 确认在线节点端口真的通
 ## 4. 定位与地址：show / url
 
 ```powershell
-aicli-mesh show session_20260924093535     # 端点/令牌提示/绑定/租约/日志尾部
+aicli-mesh show session_20260924093535     # 端点/令牌原文 + /web?token=… 打开地址/绑定/租约/日志尾部
 aicli-mesh url  session_20260924093535     # 可直接打开的 web URL（不含令牌）
-aicli-mesh url  session_20260924093535 --with-token   # 唯一令牌披露路径（别贴到会被转发的地方）
+aicli-mesh url  session_20260924093535 --with-token   # 带令牌 URL（show 与本命令是本机披露面；别贴到会被转发的地方）
 ```
 
 目标解析（第一个命中的胜出）：`pid:<PID>` → 节点 ID → 节点 ID 前缀 → 会话 ID → 会话 ID 前缀。

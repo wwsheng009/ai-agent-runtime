@@ -840,10 +840,11 @@ aicli-mesh open sess-20260924-abc --json
 
 **硬契约**：
 
-- **令牌唯一出口**：`url` 是 M7 里唯一允许出现令牌原文的字段，形如
+- **令牌唯一出口（HTTP 响应内）**：`url` 是本 API 里唯一允许出现令牌原文的字段，形如
   `http://127.0.0.1:<port>/web?token=<tok>&session=<sid>`；其余响应字段、日志、journal 一律脱敏
   （`log_tail` 已过 `redactSpawnTail`）。调用方拿到 `url` 后**立即**交给窗口，不得落
-  `localStorage`/`sessionStorage`/DOM。
+  `localStorage`/`sessionStorage`/DOM。（CLI 侧 `aicli-mesh show` 也会在本机输出令牌原文与
+  同形式的窗口 URL，见 mesh-cli.md §4.2 / §7。）
 - **单飞**：先抢 `spawn-<session>` 租约；抢不到 → 直接按对方档案返回 `reused`，并发点击不会起第二个进程。
 - **可执行文件**：拉起用的 aicli 二进制按 `AICLI_BIN` → 自身（仅当文件名就叫 `aicli`）→
   同目录 `aicli.exe` → `PATH` 解析；`aicli-mesh doctor` 的 `spawn-executable` 会打印结果与

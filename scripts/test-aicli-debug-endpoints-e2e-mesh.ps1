@@ -696,7 +696,9 @@ if ($null -ne $recordA) {
         $selfReveal = Invoke-JsonHttp -Url "$baseA/web/api/mesh/self?reveal_token=1" -TimeoutSec 15
         $leaks = New-Object System.Collections.Generic.List[string]
 
-        # 1) 可读面（peers / ls / self / 清单 / screen）都不得出现原文
+        # 1) 可读面（peers / ls / self / 清单 / screen）都不得出现原文；show 是 CLI 的
+        #    **显式披露面**（文本与 --json 直给令牌原文 + /web?token=… 打开地址），
+        #    因此单独断言「确实披露」而不是「不得出现」。
         if ($peersProbe.text.Contains($tokenA)) { $leaks.Add('peers') }
         if ($lsAll.text.Contains($tokenA)) { $leaks.Add('ls') }
         if ($selfPlain.text.Contains($tokenA)) { $leaks.Add('self') }
@@ -706,7 +708,12 @@ if ($null -ne $recordA) {
         $lsText = Invoke-MeshCli -Arguments @('ls', '-a')
         if ($lsText.text.Contains($tokenA)) { $leaks.Add('ls-text') }
         $showA = Invoke-MeshCli -Arguments @('show', "pid:$($procA.Id)", '--json')
-        if ($showA.text.Contains($tokenA)) { $leaks.Add('show') }
+        $showToken = [string](Get-Prop $showA.json 'token')
+        $showWebUrl = [string](Get-Prop $showA.json 'web_url')
+        $showRevealOk = ($showA.exit_code -eq 0) -and ($showToken -eq $tokenA) -and `
+            $showWebUrl.Contains($tokenA) -and $showWebUrl.Contains('/web?token=')
+        $showText = Invoke-MeshCli -Arguments @('show', "pid:$($procA.Id)")
+        $showTextOk = ($showText.exit_code -eq 0) -and $showText.text.Contains($tokenA) -and $showText.text.Contains('/web?token=')
 
         # 2) 网格根内的静态文件（nodes/ 档案按设计持有令牌，其余不得出现）
         $nodesRoot = (Join-Path $meshDir 'nodes')
@@ -730,10 +737,11 @@ if ($null -ne $recordA) {
         $hint = [string](Get-Prop $selfPlain.json 'auth.token_hint')
         if ([string]::IsNullOrWhiteSpace($hint)) { $hint = [string](Get-Prop $selfPlain.json 'auth.hint') }
 
-        $ok = ($leaks.Count -eq 0)
+        $ok = ($leaks.Count -eq 0) -and $showRevealOk -and $showTextOk
+        $showDetail = "show 披露（--json 原文+web_url={0}，文本原文+地址={1}）" -f $showRevealOk, $showTextOk
         Add-Result 'mesh/no-token-leak' -Passed $ok -Detail (
-            "令牌长度={0} 泄漏面={1}；self 默认返回 token_hint={2}（非空={3}），reveal_token=1 回原文={4}" -f `
-                $tokenA.Length, $(if ($leaks.Count -eq 0) { '无' } else { $leaks -join ',' }), $hint, (-not [string]::IsNullOrWhiteSpace($hint)), $revealOk)
+            "令牌长度={0} 其余可读面泄漏={1}；{2}；self 默认返回 token_hint={3}（非空={4}），reveal_token=1 回原文={5}" -f `
+                $tokenA.Length, $(if ($leaks.Count -eq 0) { '无' } else { $leaks -join ',' }), $showDetail, $hint, (-not [string]::IsNullOrWhiteSpace($hint)), $revealOk)
     }
 } else {
     Add-Result 'mesh/no-token-leak' -Passed $false -Detail '缺少 A 的节点档案'

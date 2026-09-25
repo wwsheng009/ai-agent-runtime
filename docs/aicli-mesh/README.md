@@ -51,7 +51,7 @@ aicli-mesh new --workspace $PWD
 aicli-mesh ls
 
 # 3) 定位 + 调用（把 <会话> 换成 ls 里的 SESSION）
-aicli-mesh show <会话>
+aicli-mesh show <会话>                                     # 详情 + 令牌原文 + /web?token=… 打开地址
 aicli-mesh screen <会话> --tail 20                        # 只读
 aicli-mesh send <会话> "只回复两个字：收到" --allow-write   # 写：需要显式允许
 
@@ -69,8 +69,9 @@ aicli-mesh doctor                        # 体检；problems > 0 → 退出码 5
    `doctor` 报 1 个问题（退出码 5）；
 4. **写操作显式**：跨进程写（`invoke`/`input`/`cancel`/`sessions.resume`）必须 `--allow-write`；
    停止节点必须**目标进程自己**开 `--mesh-allow-stop=true`——「谁能停我」由被停者决定；
-5. **令牌单披露**：常规输出只有 `token_hint`（前 4 位 + `…`）；令牌原文只出现在 `url --with-token`
-   与 `open`/`new`/`spawn` 返回的窗口 URL 里；
+5. **令牌披露面收窄**：`ls` 与 HTTP 视图只有 `token_hint`（前 4 位 + `…`）；令牌原文只出现在本机
+   披露面——`show`（文本 / `--json` 的 `token` + `web_url`）、`url --with-token`、以及
+   `open`/`new`/`spawn` 返回的窗口 URL；
 6. **同源聚合**：CLI 与 HTTP 消费同一份 `internal/mesh.BuildView`（`aicli-mesh ls -a --json` 与
    `GET /web/api/mesh/peers` 的默认全量口径在节点集合、会话 ID、`base_url` 上完全一致；CLI 默认只列
    在线，是同一视图上的输出过滤，不另写口径），不各写一套口径。
