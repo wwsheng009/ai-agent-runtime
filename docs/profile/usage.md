@@ -33,13 +33,17 @@
   适合 `chat --prompt/--message` 与 `exec`；纯交互式 `chat`、`agent stdio` 没有首轮提示词，启动即报错并给出替代。
 - `--agent <id>`：有 profile 时选 profile 内 agent；无 profile 时加载 portable agentdef（builtin / 项目 `.agents/agents`）。
 - 切换**下一轮生效**：写入会话身份 + 删除 prompt 冻结锚点 + 驱逐空闲 actor；在途 turn 仍走旧面（回执里会说明）。
+- 全新环境的可用集来自**首启播种**：首次引导把内置模板写进 user 层（仅当该层还没有任何 profile），
+  来源标注是 `user`、与手工 `aicli profile create` 产物一致；它们只是"可用"，不写 `profiles.default_profile`，
+  也不会自动生效（播种纪律见 [configuration.md §7](./configuration.md#7-参考样例与内置模板)）。
 
 ---
 
 ## 3. CLI 命令参考
 
 ```powershell
-# 列表：标注四来源与默认生效项（config 注册项 / profiles.root / project 层 / user 层 / 显式路径）
+# 列表：标注来源与默认生效项（config 注册项 / profiles.root / project 层 / user 层 / 显式路径）
+# 首次引导已把内置模板播种进 user 层（仅当该层还没有任何 profile）
 aicli profile list
 aicli profile list .\profiles\review --output json
 

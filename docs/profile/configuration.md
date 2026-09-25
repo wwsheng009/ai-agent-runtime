@@ -191,7 +191,19 @@ token 估算来自单一实现点 `backend/internal/profile/estimate.go`（固�
   每个 agent 目录可解析）。**注意样例 ≠ 模板产物**：例如 `examples/profiles/coding` 比 `coding` 模板多一个
   `explore` agent，是“参考样例是模板超集”的关系，不是逐字节相同。
 
-**没有“内置可用 profile”**：二进制不随附任何可直接选用的 profile 目录——模板只是脚手架，样例目录默认不被任何
-来源发现（除非用 `-c`/`profiles.items`/`profiles.root` 指过去）。全新环境（空 `$HOME` + 空工作目录）
-`aicli profile list` 的输出就是「未发现任何 profile。可用 `aicli profile create <name> --template coding` 生成一个。」；
-接口契约里的 `builtin` 层（前端 `RuntimeProfileLayer`、API 的 `writable` 注释）是**后置预留**，当前不产出。
+**内置 profile 的首启播种（不是 `builtin` 层）**：模板随二进制嵌入，`aicli` / `runtime-server` 启动引导时
+（与 starter config、`~/.aicli/presets.yaml` 同一时机）在**用户层根** `<home>/.aicli/profiles` 还**没有任何
+profile** 的情况下，把 4 个模板渲染落盘——因此全新环境（空 `$HOME`）`aicli profile list` 会列出
+`coding`/`docs`/`minimal`/`review`，来源标注仍是 `user`。播种的四条纪律（实现 `backend/internal/profile/builtin.go`，
+由 `builtin_test.go` 钉住）：
+
+1. **内容只有一个来源**：模板渲染，与 `aicli profile create <name> --template <name>` 产物逐字节相同，
+   不为“内置 profile”另写一份内容（否则模板与内置项立刻分叉）。
+2. **层里已有任何 profile 就整体不动**：判据与 `profile list` / 层枚举同口径（层根下存在含 `profile.yaml` 的目录）；
+   不补齐缺失项、不覆盖同名目录、不复活用户删掉的内置项——删除是用户的合法选择。
+3. **不写 config**：`profiles.default_profile` / `profiles.items` / 项目绑定一律不变，内置 profile 只是“可用”，
+   不等于“生效”，首次启动不会悄悄改变既有会话行为。
+4. **只写用户层**：服务端不为会话工作区写 project 层，FR-14 的只读发现语义不变。
+
+接口契约里的 `builtin` 层（前端 `RuntimeProfileLayer`、API 的 `writable` 注释）仍是**后置预留**：播种产物落在 user 层，
+来源标注仍是 `user`，不产出 `builtin` 层。home 不可定位时播种静默跳过（与 presets 同口径）。

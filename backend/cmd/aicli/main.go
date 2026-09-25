@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -13,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/consolehost"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mesh"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 )
 
 var (
@@ -275,6 +277,15 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to prepare user presets: %v\n", presetsErr)
 		} else if created {
 			fmt.Fprintf(os.Stderr, "Info: no user presets found, created presets at %s\n", presetsPath)
+		}
+		// 内置 profile 首次初始化落盘（与 starter config / user presets 同一时机）：
+		// 只在用户层根还没有任何 profile 时物化，不写 config、不设默认、不覆盖用户内容。
+		if seeded, seedErr := profilesys.SeedUserProfiles(); seedErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to seed built-in profiles: %v\n", seedErr)
+		} else if len(seeded) > 0 {
+			fmt.Fprintf(os.Stderr,
+				"Info: no user profiles found, seeded %d built-in profiles at %s (%s)\n",
+				len(seeded), filepath.Dir(seeded[0].Root), strings.Join(profilesys.BuiltinProfileNames(), ", "))
 		}
 		loadedConfig, err := config.InitGlobalConfigLayered(configPath, explicitConfigPath)
 		if err != nil {

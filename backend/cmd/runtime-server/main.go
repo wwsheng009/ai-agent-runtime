@@ -331,6 +331,17 @@ func runServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "Info: no user presets found, created presets at %s\n", presetsPath)
 	}
 
+	// 内置 profile 首次初始化落盘（与 user presets 同一时机、同一层根）。
+	// 服务端不额外写 project 层：内置内容进用户层一次即可，会话工作区的项目层
+	// 只属于用户自己（FR-14 的只读发现语义不变）。
+	if seeded, seedErr := profilesys.SeedUserProfiles(); seedErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to seed built-in profiles: %v\n", seedErr)
+	} else if len(seeded) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"Info: no user profiles found, seeded %d built-in profiles at %s (%s)\n",
+			len(seeded), filepath.Dir(seeded[0].Root), strings.Join(profilesys.BuiltinProfileNames(), ", "))
+	}
+
 	cfg, configSnapshotInfo, err := runtimeserver.LoadRuntimeAgentConfig(opts.ConfigPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)

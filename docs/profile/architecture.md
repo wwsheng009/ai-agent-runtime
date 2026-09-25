@@ -52,6 +52,7 @@ profile 是**会话装配期的输入**：它在一次会话（和每个 turn �
 | `estimate.go` | token 估算的单一实现点（固定 bytes/4 向上取整） |
 | `reference_validation.go` / `rewrite.go` / `name.go` | 引用检查、重命名/移动、名称规则 |
 | `templates.go` + `templates/{coding,docs,minimal,review}/` | 内置模板（随二进制嵌入；`consistency_test.go` 保证模板可解析/双消费者可读、`examples/profiles/*` 与 schema 一致） |
+| `builtin.go` | 首启播种：用户层根还没有任何 profile 时把内置模板渲染落盘（只写 user 层、不写 config、不复活已删除项；契约见 [configuration.md §7](./configuration.md#7-参考样例与内置模板)） |
 
 ### 2.2 CLI / TUI
 
