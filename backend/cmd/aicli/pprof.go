@@ -448,6 +448,14 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// 启停 / 热重载；配置读写与 CLI、runtime-server 共用 internal/mcp/admin。
 	mux.HandleFunc(commands.ChatWebAPIMCPsPath, commands.HandleChatWebAPIMCPs)
 	mux.HandleFunc(commands.ChatWebAPIMCPsPath+"/", commands.HandleChatWebAPIMCP)
+	// /web/api/fs/* 文件浏览器（「文件」页签）：roots / list / stat / preview /
+	// download / search，作用域根为当前 aicli 会话的工作目录；只读端点。
+	mux.HandleFunc(commands.ChatWebAPIFsPath, commands.HandleChatWebAPIFs)
+	mux.HandleFunc(commands.ChatWebAPIFsPath+"/", commands.HandleChatWebAPIFs)
+	// /web/api/git/* git 浏览（「GIT」页签）：status / diff / commits 只读，
+	// stage 为写操作（stage|unstage）；与文件页签共用同一作用域根解析。
+	mux.HandleFunc(commands.ChatWebAPIGitPath, commands.HandleChatWebAPIGit)
+	mux.HandleFunc(commands.ChatWebAPIGitPath+"/", commands.HandleChatWebAPIGit)
 	// style.css / app.js / js/*.js 等静态资源由 HandleChatWebPage 统一伺服
 	// （go:embed 嵌入 web/ 目录，按文件名 + 扩展名 Content-Type 返回）。
 
