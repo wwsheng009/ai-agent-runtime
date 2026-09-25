@@ -258,6 +258,16 @@ type ChatSession struct {
 	priorityPromptMu              sync.Mutex     // serializes modal prompts that own the priority input channel
 	priorityPopupHandle           ui.PopupHandle // active priority prompt popup input handle (fixed-surface mode)
 	priorityPopupLines            []string       // popup lines of the active priority prompt (fixed-surface mode)
+	// restoredPendingMu guards restoredPending: a pending question/approval that a
+	// previous process left in the durable runtime state and that this process had
+	// to re-project onto the input face (see chat_restored_pending.go). Only the
+	// interactive main goroutine mutates it.
+	restoredPendingMu sync.Mutex
+	restoredPending   *chatRestoredPendingPrompt
+	// restoredPendingChecked records that the durable runtime state was already
+	// inspected for a restored pending request in this session epoch; it keeps
+	// the main loop from re-reading the session store on every iteration.
+	restoredPendingChecked bool
 	queuedInputDrain              bool           // suppress repeated queued-input notices while draining
 	queuedInputEchoed             bool           // queued input was already echoed in the fixed prompt while busy
 	lastInteractiveInputQueued    bool           // last chatInteractiveReadLine result came from InputQueue
@@ -670,6 +680,9 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	// replay so `aicli resume <id>` / `aicli chat --session` match in-chat
 	// `/resume` visibility even when interactive TUI is enabled.
 	presentChatStartupSession(session, opts, persistenceState.loadedRuntimeSession)
+	// 上一进程遗留的 pending 提问/审批：启动首帧之后显式投影到输入面
+	// （事件日志重放本身不产生交互副作用，见 chat_restored_pending.go）。
+	ensureRestoredPendingInteractivePrompt(session)
 	// 首帧（最新页历史已 seed）之后才补齐较早的页：composer 不再被全量翻页
 	// 挡在启动关键路径之外，同时保持 canonical 历史的第一帧始终先于任何 live
 	// 内容（较早 unit 由 reconcile 锚点插入，不需要重排已经绘制的行）。
@@ -1529,6 +1542,12 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			break
 		}
 
+		// 恢复态作答：上一进程遗留的 pending 提问/审批在作答前每轮保持可见
+		// （历史重放/切换会话会重置底部面板，弹层需要重新铺一次）。
+		if !noInteractive {
+			ensureRestoredPendingInteractivePrompt(session)
+		}
+
 		var input string
 		var err error
 
@@ -1696,6 +1715,13 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			if noInteractive {
 				break
 			}
+			continue
+		}
+
+		// 恢复态作答：这一行是上一进程遗留提问/审批的回答，必须路由给 actor 的
+		// 续跑链路，而不是作为新 prompt 提交（否则会撞上 waitForAICLIActorReady
+		// 的 30s 挂起态超时）。空行与 live 语义一致：审批=拒绝、可选提问=空回答。
+		if !noInteractive && handleRestoredPendingAnswerLine(session, input) {
 			continue
 		}
 

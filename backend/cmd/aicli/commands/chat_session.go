@@ -182,6 +182,9 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	clearChatTurnRecovery(session)
 	if !strings.EqualFold(strings.TrimSpace(previousSessionID), strings.TrimSpace(runtimeSession.ID)) {
 		resetStableSharedToolSurface(session)
+		// 会话身份已切换：上一会话的恢复态作答投影与“已检查”标记都不得泄漏到新会话。
+		clearRestoredPendingPrompt(session)
+		resetRestoredPendingPromptCheck(session)
 	}
 	session.MsgCount = countRuntimeUserMessages(session.Messages)
 	session.TurnRequestCount = 0
@@ -286,6 +289,8 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 		session.runtimeSessionUnpersisted = true
 	}
 	clearChatTurnRecovery(session)
+	clearRestoredPendingPrompt(session)
+	resetRestoredPendingPromptCheck(session)
 	resetStableSharedToolSurface(session)
 	// 新会话也记录当前 loopback 地址：后续 `aicli resume <id> --pprof/--debug`
 	// 能回到同一端口（mesh/bindings/，S3）。
