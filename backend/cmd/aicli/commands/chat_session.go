@@ -720,21 +720,92 @@ func (s *ChatSession) deferResumeHistoryCompletion(sessionID string, beforeSeq i
 	s.resumeHistoryDeferredBeforeSeq = beforeSeq
 }
 
-// resumeHistoryIncrementalPublishStride 决定补齐较早页时「每多少页发布一次统一
-// 快照」。读取、前插与 reconcile 仍然是逐页的（顺序正确性依赖它），合并的只是
-// 发布：每次发布都会把整份转录重新规划一遍，实测单次发布让后台补齐从 ~1.0s
-// （整份一次性 seed）涨到 13 页 ~5.3s；按步长发布把这段开销压回 ~1/stride，
-// 用户仍看到历史分多步长出，只是步长从「每页」变成「每 stride 页」。
-const resumeHistoryIncrementalPublishStride = 1
+// 补齐较早页时「画几次」是这一段的成本杠杆。读取、前插与 reconcile 都必须逐页
+// （顺序正确性依赖它们），只有统一帧发布可以合并：每次发布都会把整份转录重新
+// 规划一遍，实测同一会话 42 页历史下每次发布让补齐段多花 ~130ms（帧本身让
+// UI actor 重规划，补齐线程随后在锁/队列上排队）。
+//
+// 因此发布次数必须随历史规模**有界**，而不是按固定步长线性放大：42 页 × 固定
+// 步长 3 会画 14 帧（≈1.8s），400 页就是 133 帧。这里按首帧已知的页数把补齐期间
+// 的发布次数钳在 ~6 步以内（观感仍保留「分多步长出」），少于最小步长时退回
+// 「每 3 页一帧」；尾部由装载收尾那一次授权式快照兜住，最后一页无需单独触发。
+const (
+	resumeHistoryIncrementalPublishMinStride = 3
+	resumeHistoryIncrementalPublishMaxSteps  = 6
+	resumeHistoryIncrementalPublishPageSize  = 100
+)
+
+// resumeHistoryIncrementalPublishStride 按首页给出的总消息数估算页数，求出把补齐
+// 期间发布次数钳在 ~6 次所需的步长。Total 缺失时保守退回最小步长。
+func resumeHistoryIncrementalPublishStride(page *runtimechat.SessionHistoryPage) int {
+	pageSize := resumeHistoryIncrementalPublishPageSize
+	total := 0
+	if page != nil {
+		if observed := len(page.Messages); observed > 0 {
+			pageSize = observed
+		}
+		total = page.Total
+	}
+	stride := resumeHistoryIncrementalPublishMinStride
+	if total <= 0 {
+		return stride
+	}
+	pages := estimatedHistoryPageCount(total, pageSize)
+	if bounded := (pages + resumeHistoryIncrementalPublishMaxSteps - 1) / resumeHistoryIncrementalPublishMaxSteps; bounded > stride {
+		stride = bounded
+	}
+	return stride
+}
+
+// resumeHistoryEstimatedPageCount 按总消息数与观测页大小估算页数；信息不足时返回 0
+// （调用方据此走保守分支，而不是猜一个数字）。
+func resumeHistoryEstimatedPageCount(page *runtimechat.SessionHistoryPage) int {
+	if page == nil || page.Total <= 0 {
+		return 0
+	}
+	pageSize := resumeHistoryIncrementalPublishPageSize
+	if observed := len(page.Messages); observed > 0 {
+		pageSize = observed
+	}
+	return estimatedHistoryPageCount(page.Total, pageSize)
+}
+
+func estimatedHistoryPageCount(total, pageSize int) int {
+	if total <= 0 || pageSize <= 0 {
+		return 0
+	}
+	return (total + pageSize - 1) / pageSize
+}
+
+// resumeHistoryIncrementalStepIsLast 报告本次发布之后补齐段只剩不到一个步长的页，
+// 即它大概率是**最后一次可见更新**：其后紧跟装载收尾的授权式替换。
+//
+// 这种发布不值得再铸造非授权快照：快照实测单次 0.25-2.3s（逐页补齐段里最贵的一
+// 段），而收尾的授权式替换会在几百毫秒内整份覆盖它。跳过只让「最后一次可见更新」
+// 推迟到收尾那一帧，内容不丢（数据面照旧插入 Scene）。页数未知时保守返回 false，
+// 宁可多花一次快照，也不让补齐段退化成「最后一步看不见」。
+//
+// 首步（visited==1）永不跳过：它是「边读边画」对用户的第一次承诺，而且小历史
+// （页数 ≤ 步长）下它是**唯一**的可见更新——允许跳过会让这类会话彻底看不到补齐
+// 过程（回归测试 chat_resume_incremental_test.go:288 正是守住这一点）。
+func resumeHistoryIncrementalStepIsLast(visited, stride, estimatedPages int) bool {
+	if estimatedPages <= 0 || stride <= 0 || visited <= 1 {
+		return false
+	}
+	return estimatedPages-visited < stride
+}
 
 // shouldPublishResumeHistoryIncrementalPage 报告第 pages 页（1-based，按补齐顺序）
 // 取回后是否要发布统一快照：首页必发（用户立刻看到最新一页），其后每 stride 页
-// 发一次；尾部由装载收尾那一次授权式快照兜住，因此最后一页无需单独触发。
-func shouldPublishResumeHistoryIncrementalPage(pages int) bool {
+// 发一次。stride <= 0 视为最小步长。
+func shouldPublishResumeHistoryIncrementalPage(pages, stride int) bool {
 	if pages <= 1 {
 		return true
 	}
-	return pages%resumeHistoryIncrementalPublishStride == 0
+	if stride <= 0 {
+		stride = resumeHistoryIncrementalPublishMinStride
+	}
+	return pages%stride == 0
 }
 
 // startDeferredResumeHistoryLoad 在首帧（最新页已 seed）之后补齐较早页：逐页读取、
@@ -763,6 +834,10 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 		// 去替它铸造一次授权式装载。
 		aborted := false
 		visited := 0
+		// 步长在首页（唯一能读到 Total 的地方）确定一次：历史规模越大，发布次数
+		// 越要压低（见 resumeHistoryIncrementalPublishStride 的成本说明）。
+		publishStride := 0
+		estimatedPages := 0
 		pages, err := streamOlderResumeHistoryPagesWithRetry(
 			context.Background(), session.SessionManager, sessionID, beforeSeq,
 			func(page *runtimechat.SessionHistoryPage) bool {
@@ -772,11 +847,20 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 					return false
 				}
 				visited++
+				if publishStride == 0 {
+					publishStride = resumeHistoryIncrementalPublishStride(page)
+					estimatedPages = resumeHistoryEstimatedPageCount(page)
+				}
 				// 逐页读取单独记一个标记：发布被合并后，恢复过程的阶段表仍要能
 				// 区分「读了多少页」与「画了多少次」，否则观测面会以为页变少了。
 				markChatStartup("resume_history_page")
-				if shouldPublishResumeHistoryIncrementalPage(visited) {
-					renderResumeHistoryPageIncremental(session, page.Messages)
+				if shouldPublishResumeHistoryIncrementalPage(visited, publishStride) {
+					// 非授权快照是逐页补齐段里最贵的一段，且成本在**投递**而非构造
+					// （实测构造 0-134ms、post 74ms-1.12s）。因此按步子分三档：首步
+					// 阻塞投递保证可见，其后非阻塞投递（actor 忙就放弃中间态），末步
+					// 直接跳过（收尾的授权式替换必覆盖它）。
+					mode := resumeHistorySnapshotModeForStep(visited, publishStride, estimatedPages, page.HasMore)
+					renderResumeHistoryPageIncremental(session, page.Messages, mode)
 				}
 				return true
 			})
@@ -803,6 +887,9 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 		// （seeded=false），装载好的生成也必须替换原生 scrollback，否则补回的
 		// 历史只停留在 Scene 里，用户滚不到。
 		printVisibleSessionLoadHistory(session, "")
+		// 收官这一次全量 seed + 授权式快照是 ready 之后最后的固定成本，单独打点，
+		// 否则它只能从 chat_loop_exit 里反推（补齐段的打点在它之前）。
+		markChatStartup("resume_history_complete")
 		// 后台补页同样经 ReplaceTranscriptAction 投递，且发生在启动关键路径
 		// 之外；补帧后重新钉住 composer，避免补页把主界面输入行挤掉。
 		presentStartupInteractiveComposer(session)

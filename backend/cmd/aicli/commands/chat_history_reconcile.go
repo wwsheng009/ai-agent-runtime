@@ -292,6 +292,17 @@ func (b *chatRuntimeEventBridge) claimHistorySeedItem(identity, itemID string) {
 // 这是「边读取、边渲染」的数据面入口：调用方每从分页后端取回一页就调用一次，
 // 用户看到的历史从最新一页开始逐页补齐，而不是等全量读完才一次性绘制。
 func (b *chatRuntimeEventBridge) seedPersistedHistoryPage(messages []runtimetypes.Message) bool {
+	return b.seedPersistedHistoryPageWithSnapshot(messages, resumeHistorySnapshotAwait)
+}
+
+// seedPersistedHistoryPageWithSnapshot 是带呈现侧模式的版本：Skip 只做数据面
+// （建 unit + 锚点插入），不发布非授权快照；Await/Try 分别用阻塞/非阻塞 ingress 发布。
+//
+// 为什么需要这个开关：非授权快照实测是逐页补齐段里最贵的一段（首次 ~1.3-2.8s，
+// 其后每页 ~0.13-0.77s，见 docs/e2e/resume-incremental-publish-coalescing.md §7/§10）。
+// 两种省钱方式：末次发布跳过（收尾的授权式替换必覆盖它），以及其后的步子改用非阻塞
+// 投递（actor 忙时放弃中间态，而不是让后台线程停等）。数据面都不受影响。
+func (b *chatRuntimeEventBridge) seedPersistedHistoryPageWithSnapshot(messages []runtimetypes.Message, mode resumeHistorySnapshotMode) bool {
 	if b == nil || b.renderEncoder == nil || len(messages) == 0 {
 		return false
 	}
@@ -299,16 +310,30 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryPage(messages []runtimetype
 	if len(units) == 0 {
 		return false
 	}
+	// 逐页 reconcile 的成本必须能分三段看：建 unit（锁外）、匹配+插入（锁内）、
+	// 非授权快照（锁外）。实测**第一次** reconcile 比其后各页贵 8~25×，而各页体积
+	// 均匀（见 docs/e2e/resume-incremental-publish-coalescing.md §6），只有拆开才能
+	// 判断该优化哪一段，否则容易把一次性初始化误当成「这一页太重」。
+	markChatStartup("resume_history_reconcile_units")
 	b.renderMu.Lock()
 	seeded := b.seedPersistedHistoryPageLocked(units)
 	b.renderMu.Unlock()
+	markChatStartup("resume_history_reconcile_apply")
 	if !seeded {
 		return false
 	}
-	// 增量页只更新语义转录（非授权式快照）：原生 scrollback 的替换授权属于
-	// 整次会话装载，由装载收尾的那一次 seed 一次性铸造，不能让每一页都触发
-	// 一次销毁式重放。
-	b.sessionInteractionSnapshot()
+	switch mode {
+	case resumeHistorySnapshotSkip:
+		// 数据面已就位：这一页不进语义转录（收尾的授权式替换会整份覆盖它）。
+	case resumeHistorySnapshotTry:
+		// 后台步子：actor 忙就放弃这次中间态，绝不停等。
+		b.sessionInteractionSnapshotNonBlocking()
+	default:
+		// 增量页只更新语义转录（非授权式快照）：原生 scrollback 的替换授权属于
+		// 整次会话装载，由装载收尾的那一次 seed 一次性铸造，不能让每一页都触发
+		// 一次销毁式重放。
+		b.sessionInteractionSnapshot()
+	}
 	return true
 }
 

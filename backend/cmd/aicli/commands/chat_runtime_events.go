@@ -2906,6 +2906,16 @@ func (b *chatRuntimeEventBridge) sessionInteractionSnapshot() {
 	}
 }
 
+// sessionInteractionSnapshotNonBlocking 是 sessionInteractionSnapshot 的非阻塞版本，
+// 专供后台逐页历史补齐：actor 忙时宁可放弃这一次中间态发布，也不让后台线程停等。
+// 返回值报告这次发布是否真的进了邮箱（false = 已放弃，内容仍在 Scene 里）。
+func (b *chatRuntimeEventBridge) sessionInteractionSnapshotNonBlocking() bool {
+	if b == nil || b.session == nil || b.session.Interaction == nil {
+		return false
+	}
+	return b.session.Interaction.tryPostTranscriptSnapshotFromBridge(b)
+}
+
 // sessionInteractionReplacementSnapshot publishes the current Scene as a
 // canonical-history replacement and requests the one-shot scrollback-replay
 // authorization in the same action. Session load (/resume, /load, startup

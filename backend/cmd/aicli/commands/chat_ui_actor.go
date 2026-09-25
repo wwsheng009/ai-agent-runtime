@@ -878,7 +878,34 @@ func (c *chatInteractionCoordinator) postTranscriptSnapshotFromBridgeWithReplayA
 	if snapshot == nil {
 		return
 	}
+	// 快照发布要走两段：生产侧把整份 Scene 拷成不可变快照，再投递给 UI actor。
+	// 逐页补齐实测「非授权快照」是这段里最贵的一笔（首次 2.3-2.8s，其后 0.13-0.77s）；
+	// 拆开后定论在**投递**侧（构造 0-134ms，post 74ms-1.12s），因此增量载荷不是正解，
+	// 非阻塞 ingress 才是（见 tryPostTranscriptSnapshotFromBridge）。
+	markChatStartup("transcript_snapshot_build")
 	_ = c.postUIAction(ui.ReplaceTranscriptAction{Snapshot: snapshot, ArmScrollbackReplay: armReplay})
+	markChatStartup("transcript_snapshot_post")
+}
+
+// tryPostTranscriptSnapshotFromBridge 是 postTranscriptSnapshotFromBridge 的非阻塞
+// 版本，供**后台生产者**（逐页历史补齐、流式运行事件）使用：邮箱满时立即返回 false，
+// 由调用方放弃这次语义转录发布，而不是让 actor 的忙碌通过投递回压到后台线程。
+//
+// 放弃是安全的：数据面（锚点插入）已经完成，内容留在 Scene 里；下一次发布或装载收尾
+// 的授权式替换会把完整 generation 重新发布。实测后台补齐的每次阻塞投递要 74ms-1.12s
+// （首次最贵，正在与首帧争用），而它换来的只是一次「较早页已就位」的中间态。
+func (c *chatInteractionCoordinator) tryPostTranscriptSnapshotFromBridge(bridge *chatRuntimeEventBridge) bool {
+	if c == nil || bridge == nil {
+		return false
+	}
+	snapshot := bridge.sceneSnapshot()
+	if snapshot == nil {
+		return false
+	}
+	markChatStartup("transcript_snapshot_build")
+	posted := c.tryPostUIAction(ui.ReplaceTranscriptAction{Snapshot: snapshot})
+	markChatStartup("transcript_snapshot_post")
+	return posted
 }
 
 // closeUIActor 关闭 UI actor：停止接受新 action，Run 排空剩余队列后退出。

@@ -88,6 +88,10 @@ func prepareChatPersistence(cfg *config.Config, opts *chatCommandOptions, profil
 		}
 		state.loadedRuntimeSession = loadedRuntimeSession
 	}
+	// 「读会话」与「建管理器」是两笔性质不同的成本：前者是存储整份加载（含消息
+	// 历史），后者是打开存储/建连接。窗口化恢复要求首帧前不读全量历史，因此这条
+	// 打点用于持续盯住会话加载是否退化成全量加载。
+	markChatStartup("persistence_session")
 
 	return state, nil
 }

@@ -360,23 +360,77 @@ func TestDeferredResumeHistoryBackfillAbortsWhenSnapshotReplaced(t *testing.T) {
 
 // TestResumeHistoryIncrementalPublishSchedule 固化「按步长发布」的取舍：首页必发
 // （首帧之后用户立刻看到最新一页），其后每 stride 页发一次；尾部由装载收尾的授权
-// 式快照兜住。逐页发布会让一次恢复把整份转录反复重规划（实测 13 页 ~5.3s 后台），
-// 所以 stride 必须 > 1，且首页不能被合并掉。
+// 式快照兜住。逐页发布会让一次恢复把整份转录反复重规划（实测同一会话 42 页、
+// 每次发布 ~130ms），所以 stride 必须 > 1，且首页不能被合并掉。
 func TestResumeHistoryIncrementalPublishSchedule(t *testing.T) {
-	stride := resumeHistoryIncrementalPublishStride
-	require.Greater(t, stride, 1, "stride=1 等于逐页发布，回到被优化掉的成本")
-
+	const stride = 4
 	published := make([]int, 0, 8)
 	for page := 1; page <= 12; page++ {
-		if shouldPublishResumeHistoryIncrementalPage(page) {
+		if shouldPublishResumeHistoryIncrementalPage(page, stride) {
 			published = append(published, page)
 		}
 	}
-	want := []int{1}
-	for page := stride; page <= 12; page += stride {
-		want = append(want, page)
-	}
-	require.Equal(t, want, published)
-	require.True(t, shouldPublishResumeHistoryIncrementalPage(1), "首页必须发布：否则首帧之后长时间只显示最新一页")
+	require.Equal(t, []int{1, 4, 8, 12}, published)
+	require.True(t, shouldPublishResumeHistoryIncrementalPage(1, stride),
+		"首页必须发布：否则首帧之后长时间只显示最新一页")
 	require.Less(t, len(published), 12, "12 页不得发布 12 次（合并必须真实生效）")
+	// stride <= 0 视为最小步长：调用方尚未读到首页 Total 时不得退化成逐页发布。
+	require.False(t, shouldPublishResumeHistoryIncrementalPage(2, 0))
+	require.True(t, shouldPublishResumeHistoryIncrementalPage(resumeHistoryIncrementalPublishMinStride, 0))
+}
+
+// TestResumeHistoryIncrementalPublishStride 固化「发布次数随历史规模有界」：
+// 步长随页数增长（把补齐期间的发布次数钳在 ~6 次），小历史退回最小步长，
+// Total 缺失时保守处理而不是退化成逐页发布。
+func TestResumeHistoryIncrementalPublishStride(t *testing.T) {
+	page := func(total, size int) *runtimechat.SessionHistoryPage {
+		messages := make([]runtimetypes.Message, size)
+		return &runtimechat.SessionHistoryPage{Messages: messages, Total: total}
+	}
+	require.Equal(t, resumeHistoryIncrementalPublishMinStride, resumeHistoryIncrementalPublishStride(nil))
+	require.Equal(t, resumeHistoryIncrementalPublishMinStride,
+		resumeHistoryIncrementalPublishStride(&runtimechat.SessionHistoryPage{Messages: nil, Total: 0}))
+
+	// 42 页（4221 条）的历史：钳在 ~6 步 ⇒ 步长 8。
+	require.Equal(t, 8, resumeHistoryIncrementalPublishStride(page(4221, 100)))
+	// 400 页：步长 67 ⇒ 发布 ~6 次，而不是固定步长下的 133 次。
+	require.Equal(t, 67, resumeHistoryIncrementalPublishStride(page(40000, 100)))
+	// 小历史：不低于最小步长（观感优先，成本可忽略）。
+	require.Equal(t, resumeHistoryIncrementalPublishMinStride, resumeHistoryIncrementalPublishStride(page(600, 100)))
+	// 页大小按实际观测值估算，不写死 100：40 页 ⇒ 步长 7。
+	require.Equal(t, 7, resumeHistoryIncrementalPublishStride(page(2000, 50)))
+}
+
+// TestResumeHistoryIncrementalStepIsLast 固化「最后一次可见步不铸造非授权快照」的
+// 边界：快照单次 0.25-2.3s，被收尾的授权式替换覆盖即为纯浪费；但首步与小历史必须
+// 保留（否则补齐过程会整段看不见——真实回归见
+// TestDeferredResumeHistoryBackfillStreamsPagesIntoScene）。
+func TestResumeHistoryIncrementalStepIsLast(t *testing.T) {
+	// 42 页 + 步长 8：40 页之后只剩 3 页，本次必被收尾覆盖 ⇒ 跳过。
+	require.True(t, resumeHistoryIncrementalStepIsLast(40, 8, 43))
+	// 同一序列的前几次发布：后面还有整段历史要读，快照是用户实际看到的更新 ⇒ 不跳过。
+	require.False(t, resumeHistoryIncrementalStepIsLast(8, 8, 43))
+	require.False(t, resumeHistoryIncrementalStepIsLast(32, 8, 43))
+	// 首步永不跳过（小历史的唯一可见更新）。
+	require.False(t, resumeHistoryIncrementalStepIsLast(1, 3, 3))
+	require.False(t, resumeHistoryIncrementalStepIsLast(1, 8, 43))
+	// 页数未知：保守发布快照，不退化成「最后一步看不见」。
+	require.False(t, resumeHistoryIncrementalStepIsLast(9, 3, 0))
+}
+
+// TestResumeHistorySnapshotModeForStep 固化逐页补齐的三档快照策略：首步阻塞投递
+// （保证第一次可见）、中间步子非阻塞投递（actor 忙就不再停等）、末步跳过（收尾的
+// 授权式替换必覆盖它）。成本依据见 docs/e2e/resume-incremental-publish-coalescing.md §10。
+func TestResumeHistorySnapshotModeForStep(t *testing.T) {
+	// 42 页 + 步长 8。
+	require.Equal(t, resumeHistorySnapshotAwait, resumeHistorySnapshotModeForStep(1, 8, 43, true))
+	require.Equal(t, resumeHistorySnapshotTry, resumeHistorySnapshotModeForStep(8, 8, 43, true))
+	require.Equal(t, resumeHistorySnapshotTry, resumeHistorySnapshotModeForStep(32, 8, 43, true))
+	require.Equal(t, resumeHistorySnapshotSkip, resumeHistorySnapshotModeForStep(40, 8, 43, true))
+
+	// 最后一页必跳过，即便它是首步（其后紧跟装载收尾）。
+	require.Equal(t, resumeHistorySnapshotSkip, resumeHistorySnapshotModeForStep(1, 3, 3, false))
+	// 小历史的唯一可见更新：首步仍阻塞投递（回归见
+	// TestDeferredResumeHistoryBackfillStreamsPagesIntoScene）。
+	require.Equal(t, resumeHistorySnapshotAwait, resumeHistorySnapshotModeForStep(1, 3, 3, true))
 }

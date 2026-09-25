@@ -188,14 +188,49 @@ func printVisibleChatHistoryWithLoadGrant(session *ChatSession, header string, s
 	return len(messages)
 }
 
+// resumeHistorySnapshotMode 决定一次逐页补齐如何处理「非授权式语义转录快照」。
+//
+// 背景（实测，见 docs/e2e/resume-incremental-publish-coalescing.md §10）：逐页发布里
+// 真正贵的是**投递**而不是构造——场景快照构造只要 0-134ms，而把 action 投进 UI actor
+// 要 74ms-1.12s（首次最贵，正在与首帧投递争用）。因此增量载荷不是正解，控制「这次
+// 中间态值不值得让后台线程停等」才是。
+type resumeHistorySnapshotMode int
+
+const (
+	// resumeHistorySnapshotSkip：完全跳过。这一页之后紧跟装载收尾的授权式替换，会整份
+	// 覆盖语义转录与原生 scrollback，本次快照必被立刻覆盖。
+	resumeHistorySnapshotSkip resumeHistorySnapshotMode = iota
+	// resumeHistorySnapshotAwait：阻塞投递，保证这一帧真的进邮箱并被画出来。用于首步
+	// ——它是「边读边画」对用户的第一次承诺，也是小历史下唯一的可见更新。
+	resumeHistorySnapshotAwait
+	// resumeHistorySnapshotTry：非阻塞投递，actor 忙时放弃这次中间态（数据面已在 Scene
+	// 里，下一次发布或收尾的授权式替换会补上）。用于首步之后的各个步子。
+	resumeHistorySnapshotTry
+)
+
+// resumeHistorySnapshotModeForStep 选择第 visited 次发布（1-based）的快照模式。
+// estimatedPages 未知（0）时按「不是最后一步」处理，只影响是否多花一次快照。
+func resumeHistorySnapshotModeForStep(visited, stride, estimatedPages int, hasMore bool) resumeHistorySnapshotMode {
+	if !hasMore || resumeHistoryIncrementalStepIsLast(visited, stride, estimatedPages) {
+		return resumeHistorySnapshotSkip
+	}
+	if visited <= 1 {
+		return resumeHistorySnapshotAwait
+	}
+	return resumeHistorySnapshotTry
+}
+
 // renderResumeHistoryPageIncremental 把「刚取回的较早一页」增量装配进统一渲染
-// 数据面：只 reconcile 这一页（锚点插入 + 非授权式快照 + 统一帧），不重算已经
-// 装载过的部分，也不铸造原生 scrollback 的销毁式替换——那属于整次会话装载的收尾
-// （装载收尾那一次 seed 会把完整 generation 一次性替换进原生 scrollback）。
+// 数据面：只 reconcile 这一页（锚点插入 + 可选的非授权式快照 + 统一帧），不重算
+// 已经装载过的部分，也不铸造原生 scrollback 的销毁式替换——那属于整次会话装载的
+// 收尾（装载收尾那一次 seed 会把完整 generation 一次性替换进原生 scrollback）。
 //
 // 没有统一渲染通道（plain / JSON / legacy / 无协调器）时是 no-op：这些平面的
 // 输出顺序保持原有的一次性装载语义，不会被逐页绘制打断。
-func renderResumeHistoryPageIncremental(session *ChatSession, page []runtimetypes.Message) bool {
+//
+// mode 决定这次发布的非授权快照怎么走：跳过 / 阻塞投递（保证可见）/ 非阻塞投递
+// （actor 忙时放弃中间态）。三种模式的选择见 resumeHistorySnapshotModeForStep。
+func renderResumeHistoryPageIncremental(session *ChatSession, page []runtimetypes.Message, mode resumeHistorySnapshotMode) bool {
 	if session == nil || len(page) == 0 {
 		return false
 	}
@@ -207,9 +242,13 @@ func renderResumeHistoryPageIncremental(session *ChatSession, page []runtimetype
 	if bridge == nil {
 		return false
 	}
-	if !bridge.seedPersistedHistoryPage(page) {
+	if !bridge.seedPersistedHistoryPageWithSnapshot(page, mode) {
 		return false
 	}
+	// 增量装载的成本要分两笔看：数据面 reconcile（建 unit + 锚点插入 + 非授权
+	// 快照）与呈现面统一帧（整份转录重规划）。二者合并成一个标记时无法判断该
+	// 按页合并发布还是该优化 reconcile，因此分开计量。
+	markChatStartup("resume_history_reconcile")
 	markChatStartup("resume_history_publish")
 	session.Interaction.RequestUnifiedFrame()
 	return true
