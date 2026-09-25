@@ -505,14 +505,16 @@ func TestEnsureUserPresetsFile_CreatesFromEmbedded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("created presets unparsable: %v", err)
 	}
-	if len(presets) != 2 {
+	if len(presets) != 3 {
 		t.Fatalf("created presets unexpected: %+v", presets)
 	}
 	names := make([]string, 0, len(presets))
 	for _, preset := range presets {
 		names = append(names, preset.Name)
 	}
-	if names[0] != "opencode-gateway" || names[1] != "opencode-gateway-minimax-marker-cleanup" {
+	if names[0] != "opencode-gateway" ||
+		names[1] != "opencode-gateway-minimax-marker-cleanup" ||
+		names[2] != "skills-runtime-enabled-by-default" {
 		t.Fatalf("created presets unexpected: %+v", names)
 	}
 }
@@ -634,5 +636,42 @@ func TestLoadSystemPresets_UserFileOverridesSystemDirectory(t *testing.T) {
 	}
 	if headers["x-user-only"] != "yes" {
 		t.Fatalf("user-only header missing: %+v", headers)
+	}
+}
+
+// TestBuiltinPresetBaseline_EnablesSkillsRuntimeByDefault 锁定文档承诺：
+// `skills_runtime.enabled` 默认 true（docs/aicli/agents.md、「aicli_skills_usage.md
+// 默认启用」）。starter config 只写 config_file 不写 enabled，若基线层不补
+// enabled，Go 零值会把 skills 静默关掉；同时显式 false 必须仍然生效
+// （基线不能反向打开用户的显式关闭）。
+func TestBuiltinPresetBaseline_EnablesSkillsRuntimeByDefault(t *testing.T) {
+	isolatePresetTestEnv(t)
+	// 激活 preset 层（真实环境由 EnsureUserPresetsFile 在启动时落盘）。
+	if err := os.WriteFile(filepath.Join(SystemPresetDir(), "presets.yaml"), []byte("presets: []\n"), 0o644); err != nil {
+		t.Fatalf("write presets.yaml: %v", err)
+	}
+
+	starterPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(starterPath, []byte("skills_runtime:\n  config_file: configs/runtime.yaml\n"), 0o644); err != nil {
+		t.Fatalf("write starter config: %v", err)
+	}
+	cfg, err := InitGlobalConfig(starterPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig: %v", err)
+	}
+	if cfg.SkillsRuntime == nil || !cfg.SkillsRuntime.Enabled {
+		t.Fatalf("skills_runtime.enabled must default to true, got %+v", cfg.SkillsRuntime)
+	}
+
+	disabledPath := filepath.Join(t.TempDir(), "disabled.yaml")
+	if err := os.WriteFile(disabledPath, []byte("skills_runtime:\n  enabled: false\n"), 0o644); err != nil {
+		t.Fatalf("write disabled config: %v", err)
+	}
+	disabledCfg, err := InitGlobalConfig(disabledPath)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig(disabled): %v", err)
+	}
+	if disabledCfg.SkillsRuntime == nil || disabledCfg.SkillsRuntime.Enabled {
+		t.Fatalf("explicit skills_runtime.enabled=false must stay disabled, got %+v", disabledCfg.SkillsRuntime)
 	}
 }

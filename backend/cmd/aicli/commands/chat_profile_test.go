@@ -523,3 +523,40 @@ func mustMkdir(t *testing.T, path string) {
 		t.Fatalf("mkdir %s: %v", path, err)
 	}
 }
+
+// D14「白名单键不允许是假开关」：profile 的 runtime.overrides 可以覆盖
+// skills_runtime.skill_dir / skill_dirs / extra_skill_dirs。profile 会话的 skill
+// 目录来自 Resolved.SkillDirs（profile 分支不再调用 resolveConfiguredSkillDirs），
+// 覆盖必须在这里就进入解析结果，否则 profile 自己声明的技能目录永远进不了 loader。
+func TestResolveChatProfileState_ProfileSkillDirOverrideReachesResolvedDirs(t *testing.T) {
+	profilesRoot := t.TempDir()
+	overrideDir := filepath.Join(t.TempDir(), "override-skills")
+	writeTestFile(t, filepath.Join(overrideDir, "override_skill", "skill.yaml"),
+		"name: override_skill\ndescription: override fixture\n")
+
+	profileYAML := "profile:\n  name: coding\n  default_agent: coder\n" +
+		"agents:\n  coder:\n    model: fixture\n" +
+		"runtime:\n  overrides:\n    skills_runtime:\n      skill_dir: " +
+		filepath.ToSlash(overrideDir) + "\n"
+	writeProfileSwitchFixture(t, profilesRoot, "coding", profileYAML, "Coding prompt.", "allowlist: [read_file]\n")
+
+	cfg := &config.Config{Profiles: &config.ProfilesConfig{Root: profilesRoot}}
+	state, err := resolveChatProfileState(cfg, &chatCommandOptions{ProfileFlag: "coding"})
+	if err != nil {
+		t.Fatalf("resolveChatProfileState: %v", err)
+	}
+	if state == nil || !state.Active() {
+		t.Fatal("expected an active profile state")
+	}
+
+	want := overrideDir
+	if resolved, err := filepath.EvalSymlinks(overrideDir); err == nil && strings.TrimSpace(resolved) != "" {
+		want = resolved
+	}
+	for _, dir := range state.SkillDirs() {
+		if dir == want || dir == overrideDir {
+			return
+		}
+	}
+	t.Fatalf("profile 覆盖的 skill_dir 未进入 Resolved.SkillDirs: got %#v, want %q", state.SkillDirs(), want)
+}

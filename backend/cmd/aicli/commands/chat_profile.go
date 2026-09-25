@@ -193,14 +193,33 @@ func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*cha
 	// 不补这一层就会出现"创建成功 → /profile use 报未知 profile"的写读分叉。
 	// 优先级不变：config 注册项 > profiles.root > project 层 > user 层（G4/D5）。
 	profilesys.RegisterLayerFallbacks(registry)
-	resolved, err := profilesys.ResolveRef(registry, profileRef, profilesys.ResolveOptions{
+	resolveOptions := profilesys.ResolveOptions{
 		Agent:             strings.TrimSpace(opts.AgentFlag),
 		GlobalRuntimePath: resolveGlobalRuntimeConfigPath(cfg),
 		GlobalMCPPath:     resolveConfiguredMCPConfigPath(cfg),
 		GlobalSkillDirs:   resolveConfiguredSkillDirs(skillRuntimeConfig(cfg), nil),
-	})
+	}
+	resolved, err := profilesys.ResolveRef(registry, profileRef, resolveOptions)
 	if err != nil {
 		return nil, err
+	}
+
+	// D14「白名单键不允许是假开关」：profile 的 runtime.overrides 可以覆盖
+	// skills_runtime.skill_dir / skill_dirs / extra_skill_dirs，但覆盖只存在于
+	// resolved.Overrides（不写回 cfg），而 profile 会话的 skill 目录来自
+	// Resolved.SkillDirs（profile 分支不再调用 resolveConfiguredSkillDirs）→ 必须
+	// 用「覆盖后的配置」重算全局目录并重解析一次，否则 profile 自己声明的技能目录
+	// 永远进不了 loader。第二次解析与第一次只有 GlobalSkillDirs 不同，profile 目录
+	// 仍由 resolver 排在全局目录之前（不改变优先级）。
+	if cfg != nil {
+		if overlay := newChatProfileConfigOverlay(resolved); overlay.Active() && overlayDeclaresSkillDirs(overlay.Keys) {
+			if effective, applyErr := overlay.Apply(cfg); applyErr == nil && effective != nil && effective != cfg {
+				resolveOptions.GlobalSkillDirs = resolveConfiguredSkillDirs(skillRuntimeConfig(effective), nil)
+				if reResolved, reErr := profilesys.ResolveRef(registry, profileRef, resolveOptions); reErr == nil && reResolved != nil {
+					resolved = reResolved
+				}
+			}
+		}
 	}
 
 	// D29（Batch 14）：项目级 profile 在未信任工作区的 prompts 扣留（分级门控——
@@ -405,6 +424,19 @@ func skillRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfig {
 		return nil
 	}
 	return cfg.SkillsRuntime
+}
+
+// effectiveChatSkillConfig 返回 skills 生效面的配置来源：会话生效配置
+// （session.Config，含 profile runtime.overrides 的叠加结果）优先，回退到调用方
+// 传入的配置。profile 覆盖只写会话配置、不写回全局配置单例（chat_profile_overlay.go
+// 的 D13/D14 语义），若加载面读全局配置，白名单里的
+// skills_runtime.enabled / skill_dir / skill_dirs / extra_skill_dirs /
+// aicli_skill_exposure_* 覆盖就是假开关。
+func effectiveChatSkillConfig(cfg *config.Config, session *ChatSession) *config.Config {
+	if session != nil && session.Config != nil {
+		return session.Config
+	}
+	return cfg
 }
 
 func resolveChatSkillDirs(cfg *config.Config, session *ChatSession, cliSkillDirs []string) []string {

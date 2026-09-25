@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -938,7 +939,14 @@ func initSkillFunctions(cfg *config.Config, session *ChatSession, toolManager *r
 // by the returned binding.
 func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, toolManager *runtimetools.Manager, shared *runtimebootstrap.Manager, cliSkillDirs []string, cliSkillsTopK int, cliSkillsMode string) (*skillsRuntimeBinding, error) {
 	catalog := ensureFunctionCatalog(session)
-	if cfg == nil || session == nil || catalog == nil || catalog.Registry() == nil {
+	if session == nil || catalog == nil || catalog.Registry() == nil {
+		return nil, nil
+	}
+	// 生效配置源 = 会话生效配置（含 profile runtime.overrides）优先，回退调用方配置。
+	// 门、目录、runtime 配置路径与 provider 视图都必须读同一份配置，否则 profile
+	// 覆盖的 skills_runtime.* 只改了 session.Config、进不了加载面（假开关）。
+	cfg = effectiveChatSkillConfig(cfg, session)
+	if cfg == nil {
 		return nil, nil
 	}
 	if cfg.SkillsRuntime == nil || !cfg.SkillsRuntime.Enabled {
@@ -1181,6 +1189,23 @@ func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []
 					addDir(dir)
 				}
 			}
+		}
+	}
+
+	// 工作区锚点：进程 cwd（及祖先目录）下的 .agents/skills 必须无条件参与
+	// 加载，与 web「Codex skills list」（internal/api/skills/codex_list.go 以
+	// cwd 为锚点）和文档承诺（仓库 skill 目录默认进入 loader/registry）一致。
+	// 只以「配置文件所在目录」为锚点时，配置文件位于 ~/.aicli（用户级配置的
+	// 常态）或未配置 config_file 时，<workspace>/.agents/skills 永远不会进入
+	// loader/registry，chat 的 skill catalog 恒为 total=0。
+	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+		for dir := filepath.Clean(cwd); dir != ""; {
+			addDir(filepath.Join(dir, ".agents", "skills"))
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
 		}
 	}
 

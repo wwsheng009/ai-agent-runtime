@@ -683,6 +683,9 @@ func TestBuildSkillMainLoopInjection_HonorsBridgeOption(t *testing.T) {
 
 func TestInitSkillFunctionsRegistersSkills(t *testing.T) {
 	tempDir := t.TempDir()
+	// 固定工作区：本包目录位于仓库内，工作区锚点会（按设计）发现仓库根的
+	// .agents/skills；这里只验证显式 skill_dir 的注册行为。
+	t.Chdir(tempDir)
 	skillDir := filepath.Join(tempDir, "abap_search")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -843,6 +846,10 @@ triggers:
 }
 
 func TestResolveConfiguredSkillDirs_AppendsCLIAndConfigDirs(t *testing.T) {
+	// 固定工作区：避免本包目录（位于仓库内）的工作区锚点影响计数；该锚点
+	// 由 TestResolveConfiguredSkillDirs_IncludesWorkspaceAgentsSkillsWithoutConfig
+	// 单独覆盖。
+	t.Chdir(t.TempDir())
 	systemDir := t.TempDir()
 	extraDir := t.TempDir()
 	cliDir := t.TempDir()
@@ -1656,5 +1663,108 @@ func TestSkillUsesDefaultExecution_AndToolLoopOption(t *testing.T) {
 	disabled := enableSkillToolLoopOption(map[string]interface{}{"tool_loop": false})
 	if disabled["tool_loop"] != false {
 		t.Fatalf("explicit tool_loop=false must be preserved, got %#v", disabled["tool_loop"])
+	}
+}
+
+// TestResolveConfiguredSkillDirs_IncludesWorkspaceAgentsSkillsWithoutConfig 锁定
+// 「工作区 .agents/skills 无条件参与加载」这条契约：不依赖 config_file 的位置
+// （用户级配置的常态是 ~/.aicli/config.yaml，位于工作区之外）也不依赖
+// skills_runtime.skill_dir 是否配置。修复前该场景下 resolveConfiguredSkillDirs
+// 返回空列表，chat 的 skill catalog 恒为 total=0。
+func TestResolveConfiguredSkillDirs_IncludesWorkspaceAgentsSkillsWithoutConfig(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	skillsDir := filepath.Join(workspace, ".agents", "skills")
+	writeTestFile(t, filepath.Join(skillsDir, "demo", "skill.yaml"), "name: demo\ndescription: demo skill\n")
+	t.Chdir(workspace)
+
+	got := resolveConfiguredSkillDirs(nil, nil)
+
+	want := skillsDir
+	if resolved, err := filepath.EvalSymlinks(skillsDir); err == nil && strings.TrimSpace(resolved) != "" {
+		want = resolved
+	}
+	for _, dir := range got {
+		if dir == want || dir == skillsDir {
+			return
+		}
+	}
+	t.Fatalf("workspace .agents/skills not discovered: got %#v, want %q", got, want)
+}
+
+// profile 的 runtime.overrides 只写会话生效配置（session.Config），不写回全局 cfg：
+// skills 加载面（enabled 门 / 目录 / runtime 配置路径）必须以会话生效配置为准，否则
+// 白名单里的 skills_runtime.* 覆盖是假开关（D13/D14）。
+func TestInitSkillFunctionsUsesSessionEffectiveConfig(t *testing.T) {
+	t.Chdir(t.TempDir()) // 固定工作区：避免仓库 .agents/skills 干扰计数
+	skillRoot := t.TempDir()
+	skillDir := filepath.Join(skillRoot, "abap_search")
+	skillYAML := `name: abap_search
+description: Search ABAP objects
+category: abap
+capabilities:
+  - object_search
+triggers:
+  - type: keyword
+    values: ["abap", "search"]
+    weight: 1
+`
+	writeTestFile(t, filepath.Join(skillDir, "skill.yaml"), skillYAML)
+
+	newSession := func(cfg *config.Config) *ChatSession {
+		return &ChatSession{
+			ProviderName:     "nvidia",
+			Model:            "z-ai/glm4.7",
+			Config:           cfg,
+			FunctionRegistry: functions.NewFunctionRegistry(),
+		}
+	}
+	enabledCfg := &config.Config{SkillsRuntime: &config.SkillsRuntimeConfig{Enabled: true, SkillDir: skillRoot}}
+	disabledCfg := &config.Config{SkillsRuntime: &config.SkillsRuntimeConfig{Enabled: false, SkillDir: skillRoot}}
+
+	// 1) 全局启用 + profile 覆盖 enabled=false → 必须关闭（会话生效面优先）。
+	session := newSession(disabledCfg)
+	binding, err := initSkillFunctions(enabledCfg, session, nil, nil, 0, "")
+	if err != nil {
+		t.Fatalf("initSkillFunctions: %v", err)
+	}
+	if binding != nil {
+		_ = binding.Close()
+		t.Fatalf("profile 覆盖 enabled=false 必须关闭 skills，got count=%d", binding.Count())
+	}
+
+	// 2) 全局关闭 + profile 覆盖 enabled=true → 必须开启（反向也不能被全局 cfg 吞掉）。
+	session = newSession(enabledCfg)
+	binding, err = initSkillFunctions(disabledCfg, session, nil, nil, 0, "")
+	if err != nil {
+		t.Fatalf("initSkillFunctions: %v", err)
+	}
+	if binding == nil {
+		t.Fatal("profile 覆盖 enabled=true 必须开启 skills")
+	}
+	defer func() { _ = binding.Close() }()
+	if binding.Count() != 1 {
+		t.Fatalf("unexpected skill count: %d", binding.Count())
+	}
+
+	// 3) 暴露模式同样必须读会话生效面（否则 profile 覆盖的
+	// aicli_skill_exposure_mode / top_k 也是假开关）。
+	exposureCfg := &config.Config{SkillsRuntime: &config.SkillsRuntimeConfig{
+		Enabled:                true,
+		SkillDir:               skillRoot,
+		AICLISkillExposureMode: skillExposurePrefer,
+		AICLISkillExposureTopK: 3,
+	}}
+	session = newSession(exposureCfg)
+	binding, err = initSkillFunctions(enabledCfg, session, nil, nil, 0, "")
+	if err != nil {
+		t.Fatalf("initSkillFunctions: %v", err)
+	}
+	if binding == nil {
+		t.Fatal("profile 覆盖 enabled=true 必须开启 skills")
+	}
+	defer func() { _ = binding.Close() }()
+	if binding.exposureMode != skillExposurePrefer || binding.exposureTopK != 3 {
+		t.Fatalf("会话生效面的 exposure 覆盖未生效: mode=%q topK=%d", binding.exposureMode, binding.exposureTopK)
 	}
 }

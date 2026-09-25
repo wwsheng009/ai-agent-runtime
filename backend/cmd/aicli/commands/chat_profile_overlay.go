@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
@@ -47,6 +48,26 @@ func newChatProfileConfigOverlay(resolved *profilesys.ResolvedAgent) *chatProfil
 // Active 报告该覆盖视图是否含有实际生效的覆盖键。
 func (o *chatProfileConfigOverlay) Active() bool {
 	return o != nil && len(o.Overrides) > 0
+}
+
+// overlayDeclaresSkillDirs 报告覆盖键是否触碰 skills_runtime 的目录键
+// （skill_dir / skill_dirs / extra_skill_dirs）。只有触碰这些键时才需要用覆盖后的
+// 配置重算 skill 目录，避免给所有带覆盖的 profile 增加一次多余的解析。
+// 键是点分隔叶子路径（profilesys.OverrideKeyList）；列表键本身就是叶子
+// （如 skills_runtime.skill_dirs），这里额外兼容 [i] / .i 形式。
+func overlayDeclaresSkillDirs(keys []string) bool {
+	for _, key := range keys {
+		normalized := strings.NewReplacer("[", ".", "]", "").Replace(strings.TrimSpace(key))
+		segments := strings.Split(normalized, ".")
+		if len(segments) < 2 || segments[0] != "skills_runtime" {
+			continue
+		}
+		switch segments[1] {
+		case "skill_dir", "skill_dirs", "extra_skill_dirs":
+			return true
+		}
+	}
+	return false
 }
 
 // Apply 返回叠加覆盖后的会话配置视图。

@@ -285,7 +285,10 @@ func defaultStarterConfigYAML() string {
 aicli:
   chat:
     stream: true
+# skills_runtime.enabled 默认 true（显式写出以便用户发现开关；改成 false 可关闭
+# skills 加载与 chat 的 skill catalog）。
 skills_runtime:
+  enabled: true
   config_file: %s
 providers:
   default_provider: ""

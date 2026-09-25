@@ -54,3 +54,18 @@ presets:
             response_marker_rules:
               - models: ["*minimax*"]
                 markers: ["]<]minimax[>["]
+  # Skills Runtime 的文档化缺省值：**默认启用**
+  # （docs/skill_runtime/aicli_skills_usage.md「默认启用」、
+  # docs/aicli/agents.md「skills_runtime.enabled 默认 true」）。
+  # 这里以「基线层」写出 enabled，正是为了保持三态语义：
+  #   - 用户 config.yaml 未写 enabled → 本 preset 生效，skills 默认开启；
+  #   - 用户 config.yaml / profile overrides 显式 enabled: false → 用户层优先，
+  #     skills 关闭（基线不能反向打开）。
+  # 少了这一层时，`aicli init` 生成的 starter config（不含 enabled）会让
+  # Enabled 落到 Go 零值 false，chat 的 skill catalog 恒为 total=0 —— 与
+  # 文档承诺的「默认启用」相反。
+  - name: skills-runtime-enabled-by-default
+    enabled: true
+    config:
+      skills_runtime:
+        enabled: true
