@@ -58,7 +58,7 @@ export const enRuntimeConfigProfiles = {
     suppressed:
       "This profile's prompts are currently not applied: the workspace is not trusted (narrowing declarations such as tools/skills/MCP still apply).",
     applyHint:
-      "To apply it, run /profile {{ref}} inside a session (this page only discovers and edits; it does not switch sessions).",
+      "To apply it, switch inside a session: run /profile {{ref}} in the web composer, or /profile use {{ref}} in the terminal TUI (this page only discovers and edits; it does not switch sessions).",
   },
   trust: {
     title: "Workspace not trusted: project prompts are not applied",

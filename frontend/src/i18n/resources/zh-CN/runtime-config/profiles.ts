@@ -58,7 +58,8 @@ export const zhRuntimeConfigProfiles = {
     statusInvalid: "绑定不可用",
     suppressed:
       "该 profile 的提示词当前未应用：工作区未信任（工具/技能/MCP 等收窄声明仍然生效）。",
-    applyHint: "应用请在会话内执行 /profile {{ref}}（本页只做发现与编辑，不切换会话）。",
+    applyHint:
+      "应用请在会话内切换：Web 输入框执行 /profile {{ref}}；终端 TUI 执行 /profile use {{ref}}（本页只做发现与编辑，不切换会话）。",
   },
   trust: {
     title: "工作区未信任：项目级提示词未应用",

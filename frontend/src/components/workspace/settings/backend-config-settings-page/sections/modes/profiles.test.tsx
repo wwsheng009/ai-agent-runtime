@@ -527,8 +527,14 @@ describe("ProfilesModeSection", () => {
     expect(card).not.toBeNull();
     expect(card?.textContent).toContain(t("profiles.projectBinding.statusValid"));
     expect(card?.textContent).toContain("/ws/demo/.aicli/profiles/demo");
-    // 只读：给出"会话内用 /profile <ref>"的指引，而不是暴露一个点了会报错的按钮。
-    expect(card?.textContent).toContain(t("profiles.projectBinding.applyHint", { ref: "demo" }));
+    // 只读：给出"会话内切换"的可执行指引，而不是暴露一个点了会报错的按钮。
+    const hint = t("profiles.projectBinding.applyHint", { ref: "demo" });
+    expect(card?.textContent).toContain(hint);
+    // 两个会话面语法不同，文案必须各写各的：Web composer 的 `/profile <ref>` 把整串当
+    // ref（argumentHint `[profile | save-as …]`），终端 TUI 的 `/profile` 需要 `use`
+    // 子命令（裸 ref 会落到 unknown subcommand）。只给一种写法就会让另一面的用户照着敲出报错。
+    expect(hint).toContain("/profile demo");
+    expect(hint).toContain("/profile use demo");
     expect(document.body.querySelector('[data-testid="profiles-bound-project:demo"]')).not.toBeNull();
 
     // 发现是只读的：列表加载不得触发 apply / default 写端点。
