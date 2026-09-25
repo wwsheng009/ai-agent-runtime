@@ -281,6 +281,32 @@ git status --short
 
 不得用 `git reset --hard`、`git checkout --` 或覆盖其它未提交文件；任何失败需区分 FR-14 回归与工作树既有变更导致的基线问题。
 
+### 6.5 测试矩阵落地对照（2026-09-25 复核）
+
+§6.1-§6.3 逐条对应关系（"后置"= 本阶段有意不做，见 §4.2 偏差与 §8.4）：
+
+| 计划项（§6.x） | 落地证据 / 状态 |
+|---|---|
+| 6.1 无绑定文件 `present=false`、旧路径不变 | `binding_test.go:TestLoadProjectProfileBindingAbsent` + API `...WithoutBindingIsNotAnError` |
+| 6.1 合法 `profile: coding` | `binding_test.go:TestLoadProjectProfileBindingValid` |
+| 6.1 空/标量/数组/非法 YAML/重复/未知字段/内嵌 spec | `TestLoadProjectProfileBindingRejectsBadDocuments`（13 类，含"数组值"“嵌入 mapping”“未知字段”） |
+| 6.1 绝对路径/驱动器/UNC/分隔符/`.`/`..`/穿越拒绝 | `TestLoadProjectProfileBindingRejectsUnsafeRefs`（14 类） |
+| 6.1 target 缺失显式错误且不命中 user 同名 | `TestLoadProjectProfileBindingTargetMissingDoesNotFallBack` + API `...BindingTargetMissingDoesNotFallBack` |
+| 6.1 双 workspace 同名互不串用 | `TestLoadProjectProfileBindingKeepsWorkspacesSeparate` + API `...WorkspaceIsolation` |
+| 6.1 project layer 优先于 user layer，绑定只接受本工作区项目层 | `layer_test.go:TestRegisterLayerFallbacksPrecedence` + binding 目标 containment 校验 |
+| 6.2 workspace-specific 项目条目 + binding metadata | API `...ReportsWorkspaceProjectBinding` |
+| 6.2 不带 workspace 保持旧字段/旧语义 | `profiles_handlers_test.go` 既有用例 + `LayerProfiles()` 逐字不变 |
+| 6.2 非法 workspace / 绑定 YAML 错误 / target missing 显式报错不 fallback | API `...InvalidWorkspaceParameterIsBadRequest`（400）/ `...BindingDocumentErrorsAreReported`（200+error）/ `...BindingTargetMissingDoesNotFallBack` |
+| 6.2 discovery 不改 default/session/actor | 同上用例断言 `is_default=false` + 磁盘无写入；`...BindingIsNotImplicitlyActivated` 反证 |
+| 6.2 未信任 prompt suppression / trusted 恢复 | API `...BindingPromptSuppressionFollowsTrust`（与 `ApplyProjectPromptGate` 同源） |
+| 6.2 runtime 请求级 / session 显式 / `--profile` / `/profile use` 优先于 binding | 结构性成立（绑定不参与任何解析链路）+ `...BindingIsNotImplicitlyActivated` 反证 |
+| 6.2 apply 需要显式 session id、binding-ref/workspace 一致性检查 | **后置**：不新增绑定 apply 端点/校验（§3.3 已定的接入条件见 §8.4），显式应用沿用会话内 `/profile <ref>` |
+| 6.3 旧响应无 binding 字段正常渲染 / 无 binding 不显示错误 | `profiles.test.tsx`（旧后端缺字段、`present=false` 两例） |
+| 6.3 合法 binding 显示 ref/source/workspace/status | `profiles.test.tsx`（只读卡片 + 徽标） |
+| 6.3 invalid/missing target 显示错误且按钮禁用、显式 apply 成功/失败 | **部分后置**：错误展示已落地；按钮不存在（§4.2 偏差记录），apply 走会话内 `/profile` |
+| 6.3 加载/刷新不自动 apply、default 标记不因 binding 改变 | `profiles.test.tsx`（断言 apply/default 未被触发） |
+| 6.3 D29 trust notice 兼容 | `profiles.test.tsx`（未信任扣留警告）+ 既有 trust 用例 |
+
 ## 7. Definition of Done
 
 - 绑定文件格式、错误语义、workspace 计算和 precedence 有代码测试锁定；
@@ -354,3 +380,4 @@ npm run test                                           # 333/333 文件、2773/2
 - 不让项目绑定覆盖 `--profile` / `/profile use` / runtime 请求级 `profile`；
 - 不新增绑定专属 apply 端点：显式应用沿用会话内 `/profile <ref>`（复用既有 `applySessionProfileSwitch` 语义与会话工作区解析）。若将来新增"从绑定直接 apply"，按 §3.3 要求同时携带 `workspace` + `session_id` 并做一致性校验。
 - CLI/TUI 的绑定**展示**不在本切片（发现面已通过只读 API + 设置页可见；`/profile` 的显式切换沿用既有按会话工作区解析的层兜底，无需改动）。
+- **遗留风险（登记，2026-09-25 完成度审计发现）**：`{ref}` 类端点的普通解析仍按**进程 cwd** 解析 project 层（`resolveRuntimeProfileTarget` → `LayerProfiles()`，§3.2 明确的既有语义），而列表在带 `workspace` 时按**该工作区**枚举（`LayerProfilesForWorkspace`）→ 当 server cwd ≠ 会话工作区时，工作区项目层条目可能“列表可见、详情/编辑不可达”；若 cwd 侧存在同名项目层 profile，还会命中另一份（**跨工作区写入风险**，非安全绕过）。本阶段不改 `{ref}` 解析语义（避免扩大 diff 并保持旧调用零变化）；后续项：给 `resolveRuntimeProfileTarget` 增 workspace 变体（或列表侧标注口径差异），并把 `workspace` 透传到详情/写端点后再解除登记。

@@ -392,7 +392,7 @@ func TestProfileCommandPickWithoutSurfaceFallsBackToList(t *testing.T) {
 }
 
 func TestProfileCommandPickWithoutProfilesExplainsHow(t *testing.T) {
-	t.Parallel()
+	useTemporaryHome(t) // 层发现会读 user 层根，隔离开发机上的真实 profile
 	session, cleanup := newProfileSwitchTestSession(t, t.TempDir())
 	defer cleanup()
 	session.NoInteractive = true

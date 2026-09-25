@@ -9,10 +9,12 @@ import (
 
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 )
 
 // profileListEntry 描述 `profile list` 的一行。
-// 三来源（设计文档 D5）：config 注册项 / default root 下的目录 / 显式路径。
+// 四来源（设计文档 D5 + G4 层）：config 注册项 / default root 下的目录 /
+// 标准层（user|project）根下的目录 / 显式路径。
 type profileListEntry struct {
 	Name        string `json:"name"`
 	Source      string `json:"source"`
@@ -35,11 +37,14 @@ func newProfileListCommand(getConfig func() *config.Config) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list [path]",
 		Short: "列出可用 profile",
-		Long: `列出可用 profile，标注三来源与当前默认生效项：
+		Long: `列出可用 profile，标注四来源与当前默认生效项：
 
   1. config profiles.items 注册项
   2. profiles.root（default root）下含 profile.yaml 的子目录
-  3. 命令行显式给出的路径
+  3. 标准层根下含 profile.yaml 的子目录（user=<home>/.aicli/profiles，project=<cwd>/.aicli/profiles）
+  4. 命令行显式给出的路径
+
+同名去重顺序即优先级：config 注册项 > profiles.root > project 层 > user 层。
 
 DEFAULT_PROFILE / PROFILES_ROOT 环境变量生效时会在输出中标注。`,
 		Example: `  aicli profile list
@@ -146,6 +151,23 @@ func runProfileListCommand(cfg *config.Config, explicitPath string) (profileList
 				addEntry(entry, true)
 			}
 		}
+	}
+
+	// 层来源（G4 写点的读侧）：create/duplicate/import/move 的落盘目标是标准层根，
+	// 层目录必须与 config/root 同列可见——否则"刚创建的 profile 查不到、切不了"。
+	// 去重顺序即优先级：config 注册项 > profiles.root > project 层 > user 层。
+	for _, layerProfile := range profilesys.LayerProfiles() {
+		root := layerProfile.Root
+		entry := profileListEntry{
+			Name:      layerProfile.Name,
+			Source:    layerProfile.Layer,
+			Root:      root,
+			Exists:    true,
+			IsDefault: layerProfile.Name == defaultName,
+			FromEnv:   defaultFromEnv && layerProfile.Name == defaultName,
+		}
+		entry.Description, entry.Error = describeProfileRoot(root, true)
+		addEntry(entry, true)
 	}
 
 	// 默认 profile 尚未出现在任何来源时补一行，避免"默认值指向不存在的 profile"被静默吞掉。

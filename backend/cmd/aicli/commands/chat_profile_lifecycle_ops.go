@@ -266,13 +266,18 @@ func chatProfileEditLifecycleText(session *ChatSession, ref string, open bool) (
 		if editor == "" {
 			return "", fmt.Errorf("--open 需要 $EDITOR 或 $VISUAL；也可以手工编辑：%s", yamlPath)
 		}
-		fields := strings.Fields(editor)
-		command := exec.Command(fields[0], append(fields[1:], yamlPath)...)
+		name, args, err := resolveEditorCommand(editor)
+		if err != nil {
+			return "", fmt.Errorf("无法解析 $EDITOR/$VISUAL（%s）: %w；也可以手工编辑：%s", editor, err, yamlPath)
+		}
+		command := exec.Command(name, append(args, yamlPath)...)
 		command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if err := command.Run(); err != nil {
 			return "", fmt.Errorf("编辑器退出异常（%s）: %w", editor, err)
 		}
-		lines = append(lines, "  编辑器已退出；若编辑的是当前绑定 profile，用 /profile reload 重新解析")
+		// GUI 编辑器（如 VS Code）把文件交给已运行实例后立即返回：进程退出不等于
+		// 用户已保存，这里如实描述，不假装"编辑完成"。
+		lines = append(lines, "  编辑器进程已退出；保存后用 /profile reload 重新解析")
 		return strings.Join(lines, "\n"), nil
 	}
 	if editor == "" {

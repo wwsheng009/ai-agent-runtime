@@ -201,6 +201,10 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 		// §10.2 I-9：逐段补全（作用域 → 键 → 值）+ 非法值最近似兜底，
 		// 见 chat_routing_completion.go。
 		return completeChatRoutingSlashArgs(session, argsText, cursor)
+	case "/profile":
+		// Batch 13 G4：逐段补全（子命令 → 引用位 profile 名 → 旗标/枚举值），
+		// 见 chat_profile_completion.go。
+		return completeProfileSlashArgs(session, argsText, cursor)
 	case "/skill", "/skills":
 		return completeSkillArgs(session, argsText, cursor)
 	case "/mcp":

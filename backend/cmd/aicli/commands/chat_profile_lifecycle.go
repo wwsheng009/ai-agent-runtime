@@ -95,38 +95,9 @@ func chatProfileDefaultRefForSession(session *ChatSession) string {
 }
 
 // chatProfileLayerForRoot 判定 root 属于哪个标准层（用于同层/跨层判断与报告）。
+// 规则本体在 profilesys.LayerForRoot（与 `profile list` 的层来源同一份），此处只做别名。
 func chatProfileLayerForRoot(root string) string {
-	root = strings.TrimSpace(root)
-	if root == "" {
-		return ""
-	}
-	for _, layer := range []string{chatProfileLayerUser, chatProfileLayerProject} {
-		base, err := profilesys.LayerRoot(layer)
-		if err != nil || strings.TrimSpace(base) == "" {
-			continue
-		}
-		if chatProfilePathWithin(base, root) {
-			return layer
-		}
-	}
-	return ""
-}
-
-// chatProfilePathWithin 判断 child 是否位于 parent 之内（路径前缀比较，不解析符号链接）。
-func chatProfilePathWithin(parent, child string) bool {
-	parent = strings.TrimSpace(parent)
-	child = strings.TrimSpace(child)
-	if parent == "" || child == "" {
-		return false
-	}
-	rel, err := filepath.Rel(parent, child)
-	if err != nil {
-		return false
-	}
-	if rel == "." {
-		return true
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return profilesys.LayerForRoot(root)
 }
 
 // chatProfileLayerBase 返回目标层的层根（user/project），未知层报错。
