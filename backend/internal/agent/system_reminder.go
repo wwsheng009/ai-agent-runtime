@@ -37,6 +37,10 @@ const (
 	ReminderKindExplorationStall      = "exploration_stall"
 	ReminderKindPollingBackoff        = "polling_backoff"
 	ReminderKindPlanMode              = "plan_mode"
+	// ReminderKindPlanReview carries user plan-review feedback into the model's
+	// next turn. It is prompt-only: the feedback is delivered exactly once from
+	// durable plan state and never re-injected after consumption.
+	ReminderKindPlanReview = "plan_review"
 	// ReminderKindTurnBudget marks the PR-4 per-turn budget wrap-up cue
 	// (docs/plan/ui-event-bridge-drop-hardening.md §6.4). It stays durable on
 	// purpose: the handoff instruction must survive into the next turn so the
@@ -77,6 +81,7 @@ func NormalizeReminderKind(kind string) string {
 		ReminderKindExplorationStall,
 		ReminderKindPollingBackoff,
 		ReminderKindPlanMode,
+		ReminderKindPlanReview,
 		ReminderKindTurnBudget,
 		ReminderKindMainAgentRouting,
 		ReminderKindRuntimeAdvisory:
@@ -220,6 +225,20 @@ func PlanModeReminderBody(planPath string) string {
 		lines = append(lines, "Plan file path: "+path)
 	}
 	return strings.Join(lines, " ")
+}
+
+// PlanReviewNotesBody is the ephemeral instruction that carries user
+// plan-review feedback (request_changes notes) to the model on its next turn.
+func PlanReviewNotesBody(notes string) string {
+	notes = strings.TrimSpace(notes)
+	if notes == "" {
+		return ""
+	}
+	return strings.Join([]string{
+		"You are still in plan mode. The user reviewed your plan and requested changes:",
+		notes,
+		"Revise the plan file accordingly, then summarize the revision and wait for approve / request_changes / quit.",
+	}, "\n")
 }
 
 // planModeSystemReminder returns a one-shot plan-mode reminder when the
