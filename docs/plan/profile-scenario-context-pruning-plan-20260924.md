@@ -1,6 +1,6 @@
 # Profile 场景化上下文裁剪方案（Profile Presets & Context Pruning）
 
-> 状态：**已实施**（2026-09-24 制定并实施：Batch 0-14 全部 ✅、V 表零待回填；唯一余项 FR-14 按 Q12 后置，见实施方案附录 P 跟踪表；同日第二轮深化：**配置域化可行性 / 特性开关与审批偏好 / 前端配置 UI**，见「第二部分」§8-§13；同日第三轮深化：**热切换（运行时 `/profile` 切换 + 缓存失效矩阵）**，见「第三部分」§14-§21；同日第四轮审查：**生命周期闭环（创建/修改/前端配置/使用切换）+ 项目级 profile 信任门控**，见「第四部分」§22-§26 与补遗 G1-G7）
+> 状态：**已实施**（2026-09-24 制定并实施：Batch 0-14 全部 ✅、V 表零待回填；唯一余项 FR-14 按 Q12 后置，见实施方案附录 P 跟踪表；同日第二轮深化：**配置域化可行性 / 特性开关与审批偏好 / 前端配置 UI**，见「第二部分」§8-§13；同日第三轮深化：**热切换（运行时 `/profile` 切换 + 缓存失效矩阵）**，见「第三部分」§14-§21；同日第四轮审查：**生命周期闭环（创建/修改/前端配置/使用切换）+ 项目级 profile 信任门控**，见「第四部分」§22-§26 与补遗 G1-G7）；2026-09-25：**FR-14 第一阶段落地**（项目绑定只读发现 + 显式应用；自动默认激活 / 多工作区自动解析 / 默认开启策略仍后置）
 > 范围：backend（`internal/profile`、`internal/profileinput`、`internal/skill`、`internal/mcp`、`internal/agentconfig`、`internal/chat`、`internal/api/skills`、`cmd/aicli`）+ **frontend（Profiles 页、编辑器与 `/profile` 命令，§10/§17）** + docs。
 > 关联文档：
 > - **实施方案**：`docs/plan/profile-scenario-implementation-plan-20260924.md`（批次执行顺序 / V 表门禁 / DoD / 验收与回滚——本文档负责"做什么"，实施方案负责"怎么做"）
@@ -89,6 +89,8 @@
 - **FR-13 统计聚合**：usage ledger 按 profile 维度聚合 token 消耗对比。
   - **落地状态（2026-09-24，slice 2 = 后端记录面 + 聚合面；slice 2b = 前端展示面）**：已实施——① **记录面（写时单一权威）**：两处写入点同键同义——`internal/usageledger`（aicli 进程内 LLM 路径，subsystem=`llm_runtime`）新增可选 `WithProfileLookup` 回调，事件时刻经 `host.SessionStore` 读会话元数据（声明名 `sessionmeta.ProfileName` 优先，回退绑定 `ProfileRef`）；runtime-server 路径（subsystem=`skill_runtime`）由 `UsageScope.Profile`（`json:"profile,omitempty"`，不参与配额身份）承载 AgentChat 请求期解析出的身份（声明名优先，回退 ref），`appendUsageLedger` 落 `metadata.profile`。② **不猜纪律**：未解析 profile 的入口（`execute`）、未绑定会话与历史行一律不写 `profile` 键——聚合时归入 `profile=""`（未归属）组，分组请求数守恒、未接线可观察。③ **聚合面（读时同一实现）**：`GET /api/runtime/usage/ledger?group_by=profile` 返回 `groups[]`（profile/requests/failures/input_tokens/output_tokens/total_tokens，按 total_tokens 降序 → profile 升序）与 `grouped_total`；聚合基于"过滤后、截断前"集合（`records` 仍按 `limit` 截断，未指定 `group_by` 时响应三键逐字节不变）；非法 `group_by` 返回 400。④ **零 schema 变更**：复用既有 `metadata_json` 列。⑤ **前端展示面（slice 2b，同日）**：`UsageLedgerView` 契约扩展 `profileGroups`/`groupedTotal`（响应缺 `groups` → `null`，UI 如实提示「未返回分组」，不伪造空分组；`groups: []` 才是真实空态）；用量面板固定以 `group_by=profile` 请求并渲染分组表（含「未归属」组与「参与聚合 N 条（截断前全量）」，不据 `groupedTotal` 推断分页）。⑥ 余项：无（FR-12/FR-14 另计）。
 - **FR-14 项目级绑定**：workspace `.aicli/profile` 文件声明项目默认 profile。
+  - **落地状态（2026-09-25，第一阶段 = 只读发现 + 显式应用）**：已实施——① 单一绑定 helper `internal/profile/binding.go`（`LoadProjectProfileBinding`，pointer-only：仅接受 `<workspace>/.aicli/profile`，ref 必须是单段安全名，目标必须在**本工作区**项目层，缺失/非法一律 `valid=false` + error，**不回退** user/config/default；不解析、不激活 profile）；② 工作区感知发现 `LayerProfilesForWorkspace`（project 层按工作区、user 层不变；空工作区退化为既有 `LayerProfiles()`）；③ 只读 API 投影：`GET /api/runtime/profiles?workspace=...` 新增 `project_binding`（`present/valid/ref/workspace_path/path/profile_root/layer/source/error/prompt_suppressed/prompt_suppression_reason`）与条目 `is_bound`；workspace 参数本身不可用 → 400，绑定文件问题 → 200 + error；④ D29 同源：绑定目标的 `prompt_suppressed` 与运行期 `ApplyProjectPromptGate` 共用一个判定函数；⑤ 前端只读卡片 `profiles-project-binding.tsx` + 行内“项目绑定”徽标（旧后端缺字段 → `null`，不渲染、不报错）；⑥ 显式应用沿用会话内 `/profile <ref>`（apply 必须显式 session_id，设置页不提供切换入口）。
+  - **仍后置（Q12 未撤）**：自动把绑定作为新会话默认 profile / 多工作区自动选择 / 默认开启策略；`profiles.default_profile` 不受绑定影响。
 
 ### 非功能需求
 
@@ -242,7 +244,7 @@ profile tool policy 与 CLI 工具开关（如有）叠加时：deny 恒优先
 - `--profile auto` 自动路由（映射规则配置化，复用 server 端 `routeProfileForPrompt` 思路）；
 - runtime-server 只读 API + frontend 展示；✅ **已落地**（随 Batch 8 M4：只读清单/详情 API + 设置页 Profiles 面板；2026-09-24 核实回填）
 - usage ledger 按 profile 聚合；✅ **已落地**（slice 2，2026-09-24：记录面 + `group_by=profile` 聚合；slice 2b：前端分组对比 UI）
-- workspace `.aicli/profile` 项目级绑定；⏸ **后置**（Q12：不在本期范围，保持待排期）
+- workspace `.aicli/profile` 项目级绑定；✅ **第一阶段已落地**（2026-09-25：只读发现 + 显式应用；自动默认激活 / 多工作区自动解析 / 默认开启策略仍后置）
 
 ## 5. 验收与度量
 

@@ -40,7 +40,7 @@
 
 ### 1.2 明确不做（本期）
 
-- FR-11~FR-14（P2）：`--profile auto`、usage 按 profile 聚合、runtime-server 只读 API 扩展、项目级绑定（Batch 6 按需排期，不承诺工期）；
+- FR-11~FR-14（P2）：`--profile auto` ✅（slice 1）、usage 按 profile 聚合 ✅（slice 2/2b）、runtime-server 只读 API 扩展 ✅（随 Batch 8 核实回填）、项目级绑定 ✅ **第一阶段**（2026-09-25：只读发现 + 显式应用；**自动默认激活 / 多工作区自动解析 / 默认开启策略仍后置**，见 `fr14-profile-binding-implementation-plan-20260925.md`）；
 - D12 模式 C（`runtime.base` 引用合并）与 M1 文件层插入（设计文档明确不推荐，§8.3）；
 - 软删除（`.trash/`；开放问题 20 倾向硬删）；单文件内联导出（开放问题 21 倾向目录/zip）；
 - headless（exec/ACP）运行期切换（开放问题 18：保持启动期解析，`agent_stdio.go:685` 现状即正确）；
@@ -132,7 +132,7 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 | V7 | agents 清单端点（`api/runtime/agents.ts` 对应后端路由与语义） | 附录 C2 | 8 | 读 + 实测 | ✅ 已回填（Batch 8 前置，2026-09-24）：**不是 profile 级 agent 清单**——`agents.ts` = `GET /api/runtime/agent-control/agents`（运行中子代理身份图，`handler.go:963`）→ Agents 卡片数据源 = profiles get 视图的 `agents` 字段（profile spec `agents` map） |
 | V8 | `AICLISubagentsConfig` / `AICLITeamsConfig` 内部字段（是否已有 enabled 语义） | 附录 C3 | 9 | 读 `config.go:650-659` | ✅ 已回填（Batch 9，2026-09-24）：**无 `enabled` 语义**——两者仅有 `routing` 子节（teams 缺 routing 时回落 subagents.routing）→ T2 只能纯工具面（denylist）建模，**不新增配置开关** |
 | V9 | supervision 审批可配置性（档位/超时/策略） | 附录 C4 | 9 | 读 `agentconfig/config.go:43` + `internal/supervision/config.go:18-121` | ✅ 已回填（Batch 9，2026-09-24）：**可配置但属宿主级 supervision 运行时预算/灰度**（`wake_max_*`/`turn_end_check`/`progress_check_interval`/`approval_terminal_guard`/`message_semantics_v2`），非"审批偏好档位" → **不纳入** profile 覆盖目录（避免假开关） |
-| V10 | `WorkspaceSpec` 消费状态（决定是否纳入本期） | 附录 C5 | 7 | 读 `profile/spec.go:51-55` + grep 消费点 | ✅ 已回填（Batch 7 前置，2026-09-24）：**已消费**——定义在 `profile/spec.go:73-78`（Provider/Model/Tools）；`loader.go:35 LoadWorkspace` 被 `resolver.go:36` 调用，作为 `workspace.file` 层参与 provider/model/tool-policy 解析（`resolver.go:209`）→ 项目级绑定可复用既有层；按 Q12 **本期后置**（不新增 `.aicli/profile` 绑定） |
+| V10 | `WorkspaceSpec` 消费状态（决定是否纳入本期） | 附录 C5 | 7 | 读 `profile/spec.go:51-55` + grep 消费点 | ✅ 已回填（Batch 7 前置，2026-09-24）：**已消费**——定义在 `profile/spec.go:73-78`（Provider/Model/Tools）；`loader.go:35 LoadWorkspace` 被 `resolver.go:36` 调用，作为 `workspace.file` 层参与 provider/model/tool-policy 解析（`resolver.go:209`）→ 项目级绑定可复用既有层；Q12 于 2026-09-25 **分阶段解冻**：第一阶段（只读发现 + 显式应用）已落地（`internal/profile/binding.go`、`LayerProfilesForWorkspace`、列表端点 `project_binding`/`is_bound`），自动默认激活仍后置 |
 | V11 | `skills_runtime.enabled=false` 时 profile 级 skill 目录的行为 | 附录 C6 | 9 | 读 `skills_integration.go:944-951` + `config.go:42` | ✅ 已回填（Batch 9，2026-09-24）：**一并关闭**——`enabled=false`（或 `SkillsRuntime==nil`）时在解析 skill 目录**之前**早退，profile 级 `ResolvedSkillDirs` 不再被扫描；键路径为**配置根** `skills_runtime.*`（Batch 7 白名单已修正，旧 `aicli.skills_runtime.*` 是 dormant 假开关） |
 | V12 | `mcp.merge_strategy` 语义（定义接线或从 spec 删除） | 附录 C7 | 7 | 读 `profile/spec.go:34` | ✅ 已回填（Batch 7 前置，2026-09-24）：**零生产消费点**（全仓 grep 仅 `spec_test.go` 解析测试）→ dormant（R9）；按 Q11 **从 spec 移除**，validate 对未知字段报错；MCP 选择语义由 `use_servers`/`exclude_servers` 承担（Batch 1 已落地） |
 | V13 | `SessionActor.InvalidateStableToolSurface` 能否从命令路径直接取得句柄（vs 走 SessionHub 全量失效） | 附录 D1 | 10 | 读 `hub.go:128` + `chat_actor_host.go` 持有关系 | ✅ 已回填（Batch 10）：**可以**——`session.LocalRuntimeHost.SessionHub.Get(sessionID)` 直接返回 `*SessionActor`（`hub.go:77-103`），命中即调 `actor.InvalidateStableToolSurface(ctx)`（`hub.go:149` 同款用法）；未命中退化为 `SessionHub.InvalidateStableToolSurfaces`（`:128-154`）。落地：`chat_profile_switch.go invalidateChatStableToolSurface`（报告 `tool_surface_scope=actor\|hub\|none`） |
@@ -253,9 +253,9 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 - `--profile auto` 自动路由（复用 server 端 `routeProfileForPrompt` 思路，映射规则配置化）；
 - runtime-server 只读 API 扩展 + frontend 展示（与"路由档位 profile"文案区分）；✅ **已落地**（随 Batch 8 M4：只读清单/详情 API + 设置页 Profiles 面板；2026-09-24 核实回填）
 - usage ledger 按 profile 聚合；✅ **已落地**（slice 2，2026-09-24：记录面 + `group_by=profile` 聚合；slice 2b，同日：前端分组对比 UI）
-- workspace `.aicli/profile` 项目级绑定（依赖 V10 结论）。
+- workspace `.aicli/profile` 项目级绑定（依赖 V10 结论）；✅ **第一阶段已落地**（2026-09-25）：只读发现（`.aicli/profile` pointer-only 校验 + 目标必须落在本工作区项目层）+ 显式应用（沿用会话内 `/profile <ref>`，不新增自动激活）；自动默认激活 / 多工作区自动解析 / 默认开启策略仍后置（Q12 未撤）。
 
-**落地状态（2026-09-24，slice 1 = FR-11；slice 2 = FR-13 后端半程；slice 2b = FR-13 前端展示面）**：`--profile auto` 与 usage ledger 按 profile 聚合（记录面 + 聚合面 + 前端分组对比 UI）已实施并验证；FR-12 已随 Batch 8（M4）落地（2026-09-24 核实回填）；FR-14 按 Q12 后置（不在本期范围）。
+**落地状态（2026-09-24，slice 1 = FR-11；slice 2 = FR-13 后端半程；slice 2b = FR-13 前端展示面；2026-09-25 = FR-14 第一阶段）**：`--profile auto` 与 usage ledger 按 profile 聚合（记录面 + 聚合面 + 前端分组对比 UI）已实施并验证；FR-12 已随 Batch 8（M4）落地（2026-09-24 核实回填）；FR-14 第一阶段（项目绑定只读发现 + 显式应用，自动默认激活后置）已于 2026-09-25 落地并验证（证据见本文件变更记录与本文件 Batch 6 段）。
 - 单一权威：新增 `internal/profile/autoroute.go`（`AutoProfileRef` / `AutoRouteRule` /
   `AutoRouteConfig` / `DefaultAutoRouteRules` / `IsAutoProfileRef` / `NormalizeAutoRouteRules` /
   `RouteProfileForPrompt` / `ResolveAutoProfileRef`）。匹配语义与历史 server 实现逐字一致
@@ -585,14 +585,14 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 | Q5 | `/capabilities` 是否含内置工具全清单 | 8 | 先核实 V6；不足则新增只读端点 | 技术负责人 | Phase 0 |
 | Q9 | 白名单边界（`skills_runtime.enabled`、`providers.items.*` 非密钥字段） | 7/9 | 放行非密钥字段；密钥/端点类拒绝 | 技术负责人 | M0 |
 | Q11 | `mcp.merge_strategy` 定义或删除 | 7 | 二选一（不留 dormant） | 技术负责人 | M0 |
-| Q12 | `WorkspaceSpec` 是否纳入本期 | 7 | 按 V10 结论；默认后置 | 技术负责人 | M0 |
+| Q12 | `WorkspaceSpec` 是否纳入本期 | 7/14 | 2026-09-25 分阶段决议：**只读发现 + 显式应用解冻**（第一阶段已落地）；**自动默认激活 / 多工作区自动解析 / 默认开启策略仍后置**（Q12 原“整体后置”不再适用，但后两项未撤） | 技术负责人 | M0 / M6 |
 | Q13 | 在途 turn 切换策略（立即 vs pending） | 10 | 按 V14 + A3 验收线 | 技术负责人 | M0 |
 | Q19 | `save-as` 差分口径 | 13 | 按声明式字段逐个差分 | 技术负责人 | M4 |
 | Q20 | 删除硬删 vs 软删 | 13 | 硬删 + 二次确认 | 产品 | M4 |
 | Q21 | 导出包格式 | 13 | 目录/zip（不做单文件内联） | 产品 | M4 |
 | Q22 | 未信任工作区"一键信任并重载" | 14 | 提供（复用 foldertrust UI 通道，显式确认） | 产品 | M5 |
 
-**Q9/Q11/Q12 结论（Batch 7 前置核实，2026-09-24）**：Q9 = 按建议执行——白名单放行非密钥字段（`skills_runtime.enabled`、`providers.items.*` 非密钥字段），密钥/端点类（`api_key`/`base_url` 等）一律拒绝；Q11 = **从 spec 移除** `mcp.merge_strategy`（零消费点，移除后 validate 报未知字段，避免"配了不生效"）；Q12 = **后置**（V10 显示 `WorkspaceSpec` 已被 resolver 消费，但 `.aicli/profile` 项目级绑定不在本期范围）。
+**Q9/Q11/Q12 结论（Batch 7 前置核实，2026-09-24）**：Q9 = 按建议执行——白名单放行非密钥字段（`skills_runtime.enabled`、`providers.items.*` 非密钥字段），密钥/端点类（`api_key`/`base_url` 等）一律拒绝；Q11 = **从 spec 移除** `mcp.merge_strategy`（零消费点，移除后 validate 报未知字段，避免"配了不生效"）；Q12 = **分阶段解冻**（2026-09-25 更新）：V10 显示 `WorkspaceSpec` 已被 resolver 消费，但 `.aicli/profile` 项目级绑定当时整体后置；后续按“发现可解冻、激活仍后置”拆分——第一阶段落地只读发现 + 显式应用，自动默认激活 / 多工作区自动解析 / 默认开启策略仍未实施（见 `fr14-profile-binding-implementation-plan-20260925.md`）。
 
 **已定/不阻塞（记录）**：Q1 保持默认全量（不改默认）；Q3 已由本期纳入（Batch 8/12）；Q4 四模板先行，`web-debug` 后置；Q14 `/profile use` 写 sessionmeta（是）；Q16 独立目录端点；Q17 切换记录会话事件（不进 token 统计）；Q18 headless 不暴露运行期切换。
 
@@ -613,7 +613,7 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 | 12 | M4 | ✅ 已完成 | composer 可切换 + Switch Report 可见 + R20 能力门控（旧后端不注册命令） | V15/V16/V19 已回填；证据见变更记录（Batch 12） |
 | 13 | M5 | ✅ 已完成（slice 1-10：`apply` 执行核心 / export·import（API+CLI）/ TUI 生命周期子命令（含 import 闭环，D37）/ save-as 差分固化（TUI+API）/ 前端分享入口（D38）/ E2E-1·3·4·5 前端半程 / **slice 10 = 前端「从当前会话创建」入口（`/profile save-as`，G1/D24 的最后一处缺口）**） | E2E-1~5 + A9-A12 | V22、**V24、V25** 已回填；V17 已回填（E7 复核，2026-09-24）；Q19/Q20/Q21 已闭环（差分口径=声明式字段逐个差分 / 硬删+二次确认 / 目录·zip 不做单文件内联，均落在各 slice 的测试锚点内） |
 | 14 | M6 | ✅ 已完成（V20/V21 已回填、D29 接入设计已冻结；slice 2 落地：foldertrust 检测面扩展 + 分级门控核心 + CLI/server 接线；slice 3 落地：三处警告面（`/profile status` / 启动摘要 / Switch Report，CLI+server）；slice 4 落地：E2E-6/7 自动化剧本（真实判定链 + `/trust grant` 恢复 + resume 漂移容错）；slice 5 落地：Q22 前端闭环（列表可选 `workspace` 参数 + "部分内容未应用"徽标 + 两步确认一键信任 + `/api/runtime/harness/trust` 只读/授予端点）） | E2E-6/7 + A13/A14 | V20、V21 已回填；Q22 已闭环（撤销信任仍走 CLI `/trust`） |
-| 6 | P2 | ✅ 已完成（本期范围：slice 1 = FR-11 `--profile auto`；slice 2 = FR-13 后端记录面 + 聚合面；slice 2b = FR-13 前端展示面（分组对比 UI）；FR-12 已随 Batch 8 M4 落地（2026-09-24 核实回填）；FR-14 按 Q12 后置，不在本期范围） | FR-11 用例全绿 + 零变化（未配置 auto 时行为不变）+ 反证；FR-13 写入/聚合/反例用例全绿（含禁用写入路径反证）+ 未指定 `group_by` 时响应逐字节不变；FR-13 前端 3 文件 40 例全绿 + 反证 5 例精确失败 | 单一权威 `internal/profile/autoroute.go`；`metadata.profile` 写时解析（aicli `WithProfileLookup` / server `UsageScope.Profile`）；`GET /api/runtime/usage/ledger?group_by=profile`；前端 `profileGroups`/`groupedTotal` 契约 + `LedgerProfileGroups`；证据见 Batch 6 落地状态与变更记录 |
+| 6 | P2 | ✅ 已完成（本期范围：slice 1 = FR-11 `--profile auto`；slice 2 = FR-13 后端记录面 + 聚合面；slice 2b = FR-13 前端展示面（分组对比 UI）；FR-12 已随 Batch 8 M4 落地（2026-09-24 核实回填）；**FR-14 第一阶段已落地**（2026-09-25：只读发现 + 显式应用；自动默认激活 / 多工作区自动解析 / 默认开启策略仍后置）） | FR-11 用例全绿 + 零变化（未配置 auto 时行为不变）+ 反证；FR-13 写入/聚合/反例用例全绿（含禁用写入路径反证）+ 未指定 `group_by` 时响应逐字节不变；FR-13 前端 3 文件 40 例全绿 + 反证 5 例精确失败；FR-14 后端 `internal/profile` 全包 + 7 例 API 用例全绿、前端 12 例全绿 | 单一权威 `internal/profile/autoroute.go`；`metadata.profile` 写时解析（aicli `WithProfileLookup` / server `UsageScope.Profile`）；`GET /api/runtime/usage/ledger?group_by=profile`；前端 `profileGroups`/`groupedTotal` 契约 + `LedgerProfileGroups`；FR-14 单一绑定 helper `internal/profile/binding.go` + `LayerProfilesForWorkspace` + `project_binding`/`is_bound` 只读投影；证据见 Batch 6 落地状态与变更记录 |
 
 ---
 
@@ -765,3 +765,13 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 > ② 前端证据（`frontend/src` 零在途改动 ≡ HEAD）：`npm run verify:lines` 0 超标（1324 文件，最大 500 行）；`npm run lint:i18n` scanned=905 / violations=0；定向 vitest 10 文件 / 86 例全绿；全量 `npm run test` **333/333 文件全绿**（371.6s）。
 > ③ 审计结论：附录 P 跟踪表 Batch 0-14 全部 ✅；§3.1 V 表（V1-V27）零待回填；**唯一未实施项 = FR-14**（按 Q12 后置，需先撤该决策才可开工）。
 > ④ 设计文档回填清账（同 commit）：状态行「待实施」→「已实施」；附录 A 四行「待核实」→ ✅ 回填（V1-V4）；附录 C/D/E 标题「（待回填）」→「（已回填）」；附录 E 新增回填结论表（第 1/2/4/5/6/7 项 → V20/V21/V23/V24/V25/V17）。
+
+> 变更记录：2026-09-25 实施（**FR-14 分阶段解冻 第一阶段**：项目绑定只读发现 + 显式应用；自动默认激活仍后置）：
+> ① 决策与范围（对齐 `docs/plan/fr14-profile-binding-implementation-plan-20260925.md`）：Q12 由“整体后置”改为**分阶段解冻**——只读发现与显式应用进入本期；自动默认激活、多工作区自动解析、默认开启策略**仍后置**（不引入任何隐式激活路径）。
+> ② 交付物（后端·单一绑定 helper）：新增 `internal/profile/binding.go`（`ProjectProfileBinding` / `LoadProjectProfileBinding`）——只读 `<workspace>/.aicli/profile`，pointer-only（唯一字段 `profile`，必须字符串标量）、ref 单段安全校验（拒绝绝对路径/驱动器/UNC/`/`/`\`/`:`/`.`/`..`/路径穿越/非法名）、目标限定 `<projectRoot>/<ref>/profile.yaml` 且必须存在；`Present=false`（无文件）与 `Present=true, Valid=false`（文件坏了/目标缺失）刻意分开，**不回退** user/config/default。
+> ③ 交付物（后端·workspace-aware 发现）：`internal/profile/layer.go` 新增 `LayerProfilesForWorkspace`（project 层按工作区解析、user 层不变；空工作区退化为既有 `LayerProfiles()`），层扫描口径抽成 `layerProfilesWith` 单点；`internal/api/skills/profiles_store.go` 列表端点：workspace 声明时按该工作区枚举项目层、回填 `project_binding` 元数据、给绑定目标标注只读 `is_bound`（**不改** `is_default`）、`annotateWorkspaceTrust` 复用同一 `EvaluateProjectPromptGate` 给绑定目标打 D29 扣留标记；workspace 参数本身不可用（不存在/非目录）→ 400，绑定**文件**问题仍是 200 + `project_binding.error`。
+> ④ 交付物（前端）：`types/runtime/profiles.ts` 新增 `RuntimeProfileProjectBinding` 与条目 `isBound`；`api/runtime/profiles/normalize.ts` 新增 `normalizeProfileProjectBinding`（字段缺失 → `null`，不把旧后端当成“绑定无效”）；新增只读卡片 `modes/profiles-project-binding.tsx`（引用/工作区/指针文件/目标目录/状态/错误/D29 提示）并在 `profiles.tsx` 接线（仅 `present=true` 时挂载）；`profile-list-row.tsx` 增“项目绑定”徽标；i18n zh/en 对称新增 `profiles.list.projectBound` 与 `profiles.projectBinding.*`。
+> ⑤ 只读与显式应用（A12/D26 语义不变）：发现不写盘、不改 default、不碰会话；绑定卡片**不提供**“应用到会话”按钮（设置页无会话上下文，apply 必须显式 session_id），改为指向会话内 `/profile <ref>`——复用既有显式切换核心，未新增第二套 actor/session 变更路径。
+> ⑥ 测试与反证：新增 `internal/profile/binding_test.go`（缺文件/坏文档表 13 例/不安全 ref 表 14 例/目标缺失不回退 user 同名/目标非文件/双工作区隔离/相对路径归一化）、`layer_test.go` 增 workspace 枚举用例（cwd 项目层不得混入）、`internal/api/skills/profiles_binding_handlers_test.go` 8 例（合法绑定元数据 + `is_bound` 且 `is_default=false`、无绑定文件不是错误、非法 YAML → 200 + error、目标缺失不回退 user 同名、非法 workspace → 400、双工作区隔离、D29 扣留随信任授予消失、绑定不被隐性激活反证）、前端 `profiles.test.tsx` +5 例（旧后端无字段不渲染/`present=false` 不渲染/合法绑定只读卡片 + 徽标且不触发 apply·default/绑定不可用显示错误且隐藏应用指引/未信任显示扣留警告）。
+> ⑦ 验证证据：`go build ./cmd/aicli/... ./internal/profile/... ./internal/api/skills/... ./internal/foldertrust/...` 退出 0；`go test ./internal/profile/ ./internal/foldertrust/ ./internal/profileinput/ -count=1` 全绿（3.3s / 1.2s / 1.6s）；`go test ./internal/api/skills/ ./internal/profile/ -count=1`（全包）ok（38.1s / 3.0s）；定向 `-run "TestRuntimeProfilesAPI(...|BindingIsNotImplicitlyActivated)$"` 8/8 PASS；`gofmt -l` 对改动文件零输出；前端 `npm run verify:lines` 0 超标（1325 文件）、`npm run lint:i18n` 0 违规（scanned=906）、`npx tsc -b` 退出 0、全量 `npm run test` **333/333 文件、2773/2773 用例通过**（360.1s）。
+> ⑧ 仍后置（有测试/文档断言）：不做 `.aicli/profile` 的自动默认激活、不做多工作区自动选择/猜测、不改 `profiles.default_profile`、不让项目绑定覆盖 `--profile` / `/profile use` / 请求级 `profile`。
