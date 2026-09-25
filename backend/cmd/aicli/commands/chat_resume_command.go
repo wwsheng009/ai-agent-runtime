@@ -315,6 +315,11 @@ func resumeInteractiveSelect(session *ChatSession) bool {
 
 	currentID := currentRuntimeSessionID(session)
 	current := currentRuntimeSessionForResumeList(session)
+	// 退化（非分页）选择器保留逐候选完整加载的资格判定：元数据计数会把
+	// 「只有 instructions 占位消息」的会话算作有对话，而这里的用户可见口径
+	// （chatMessagesHaveConversation）必须排除它们——两者不等价，不能互换。
+	// 分页选择器（readResumeSessionPickFullScreen）走的是元数据口径，
+	// Web 侧栏与它同源；这里是交互式一次性操作，加载成本可接受。
 	sessions, err := listResumeCandidateChatSessions(session.SessionManager, session.SessionUserID, session.SessionFilter, currentID)
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)

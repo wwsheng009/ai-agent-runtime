@@ -1024,11 +1024,22 @@ func loadLatestResumableRuntimeSessionExcludingWithFilter(ctx context.Context, m
 			if excludedSessionID != "" && strings.EqualFold(strings.TrimSpace(preview.ID), excludedSessionID) {
 				continue
 			}
-			loaded, loadErr := manager.Get(ctx, preview.ID)
-			if loadErr != nil || loaded == nil {
+			// 先用元数据判定过滤条件，命中后才完整加载：这条路径会按页扫过全部
+			// 历史会话，逐条 Get 会让「恢复最近会话」在大会话库上退化成
+			// O(候选数 × 历史体积) 的全量反序列化。
+			//
+			// 「有对话」仍以加载后的权威判定为准（下面的 shouldSkipRuntimeResumeSession）：
+			// 元数据计数会把只有 instructions 占位消息的会话算作有对话，与这里的
+			// fallback 语义不等价，因此不能把它提前用于跳过加载。
+			metadata, metadataErr := manager.GetMetadata(ctx, preview.ID)
+			if metadataErr != nil || metadata == nil {
 				continue
 			}
-			if !matchesChatSessionFilter(loaded, filter) {
+			if !matchesChatSessionFilter(metadata, filter) {
+				continue
+			}
+			loaded, loadErr := manager.Get(ctx, preview.ID)
+			if loadErr != nil || loaded == nil {
 				continue
 			}
 			if fallback == nil {
@@ -1479,6 +1490,44 @@ func listResumeCandidateChatSessions(manager *runtimechat.SessionManager, userID
 	}
 	// Re-sort after filter/load so UI order matches true recency even if a
 	// storage backend returned unstable equal-time order or skipped rows.
+	sortChatSessionsByRecency(candidates)
+	return candidates, nil
+}
+
+// listResumeCandidateChatSessionMetadata 是 listResumeCandidateChatSessions 的
+// 元数据版：只走 ListMetadataPage（sessions 单表分页查询），不为每个候选做完整
+// manager.Get。
+//
+// 动机：完整 Get 会把整段 prompt 投影反序列化进内存，而会话库连接池恒为单连接；
+// Web 侧栏列表按候选逐个 Get 会把并发读（历史分页、/web/api/status、会话切换）
+// 排队到相互饿死。侧栏只需要标题/摘要/时间/消息数/工作区，全部可由元数据行渲染
+// （标题/摘要缺失的少数行由调用方按需回退，见 Session.PreviewNeedsHistory）。
+//
+// 「有对话」判定与 TUI 分页选择器同源（resumePickerMetadataHasConversation：
+// 元数据行携带 canonical 计数），保证列表口径与选择器一致。
+func listResumeCandidateChatSessionMetadata(manager *runtimechat.SessionManager, userID string, filter ChatSessionListFilter, currentID string) ([]*runtimechat.Session, error) {
+	limit := filter.Limit
+	filter.Limit = 0
+
+	sessions, err := listFilteredChatSessions(manager, userID, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := make([]*runtimechat.Session, 0, len(sessions))
+	for _, session := range sessions {
+		if session == nil || strings.EqualFold(strings.TrimSpace(session.ID), strings.TrimSpace(currentID)) {
+			continue
+		}
+		if !resumePickerMetadataHasConversation(session) {
+			continue
+		}
+		candidates = append(candidates, session)
+		if limit > 0 && len(candidates) >= limit {
+			break
+		}
+	}
+	// 与完整版同一排序口径：UpdatedAt 降序、ID 升序兜底，列表位置不跳动。
 	sortChatSessionsByRecency(candidates)
 	return candidates, nil
 }
