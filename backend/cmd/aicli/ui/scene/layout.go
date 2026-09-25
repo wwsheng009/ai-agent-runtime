@@ -2,6 +2,7 @@ package scene
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/boundary"
 )
@@ -47,10 +48,25 @@ type LayoutRow struct {
 // PolicyVersion 由调用方传入（LayoutGeneration 或政策版本），用于
 // BoundaryKey 稳定重算与 handoff 判重。
 func LayoutTranscript(cells []*TranscriptCell, policyVersion uint64) []LayoutRow {
-	var rows []LayoutRow
+	// 两遍：先解析每个 cell 的语义行并统计总行数，再一次性分配 rows。
+	// 恢复会话量级（6,719 cells / 146,535 行）下，单遍 append 增长会为
+	// 7.7 MB 的最终切片反复复制（基准实测 ~52 MB/op 分配、其中大半是行切片
+	// 的重复增长）；lineSets 自身的代价是 len(cells) 个切片头（~160 KB）。
+	lineSets := make([][]string, len(cells))
+	total := 0
+	for i, c := range cells {
+		if c == nil {
+			continue
+		}
+		lines := layoutSplitSourceLines(c)
+		lineSets[i] = lines
+		total += len(lines)
+	}
+	// 容量上界：内容行 + 最多 len(cells)-1 个 gap row。
+	rows := make([]LayoutRow, 0, total+len(cells))
 	index := 0
 	var prev *TranscriptCell
-	for _, c := range cells {
+	for i, c := range cells {
 		if c == nil {
 			continue
 		}
@@ -69,7 +85,7 @@ func LayoutTranscript(cells []*TranscriptCell, policyVersion uint64) []LayoutRow
 			}
 		}
 		prev = c
-		for _, line := range layoutSplitSourceLines(c) {
+		for _, line := range lineSets[i] {
 			rows = append(rows, LayoutRow{CellID: c.ID, Text: line, Index: index})
 			index++
 		}
@@ -84,7 +100,10 @@ func splitSourceLines(source string) []string {
 	if source == "" {
 		return nil
 	}
-	out := []string{}
+	// 先数 '\n' 再精确分配：旧实现用 append 增长，24 行的 cell 要 6 次分配，
+	// 恢复会话量级（161k 行）下这是冷启动布局的最大分配源
+	// （基准 cold 实测 41.8k allocs/op，占 54%）。strings.Count 走 SIMD 字节扫描。
+	out := make([]string, 0, strings.Count(source, "\n")+1)
 	start := 0
 	for i := 0; i < len(source); i++ {
 		if source[i] == '\n' {
