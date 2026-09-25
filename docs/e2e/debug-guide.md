@@ -360,6 +360,7 @@ pwsh -File scripts/read-terminal-buffer.ps1 -WindowTitle 'ai-agent-runtime' -Pat
 | 统一渲染 + marker exactly-once | `scripts/test-aicli-opencode-windows-terminal-e2e.ps1` | 真实 provider + Windows Terminal（UI Automation）下的渲染/历史/退出；`-Provider` / `-Model` / `-ReasoningEffort` 可覆盖（默认 `opencode.ai` / `deepseek-v4-flash` / `max`），某个模型额度耗尽时可用本机可用模型复跑**同一套**断言。**2026-09-24 已转全绿**（`opencode-wt-3c82e753…`、`opencode-wt-7f825835…` 两轮 `status=passed`、`failures=[]`、marker exactly-once 违例 0）；`manifest.json` 的 `reasoning_projection_skipped` 非空 = 该 provider 本次没返回带签名的 reasoning summary，投影断言按 §6 显式跳过（记录见 [debug-guide-evidence.md](./debug-guide-evidence.md)） | 交互桌面 |
 | 终端渲染基线 | `scripts/test-aicli-windows-terminal-e2e.ps1` | 合成数据在真实宿主终端中的渲染 | 交互桌面 |
 | turn 预算 / 生命周期 | `scripts/test-aicli-turn-budget-e2e.ps1` | 受控注入（无网络）的 turn 生命周期、预算熔断 | 无 |
+| **E2E-RESUME-01**（[手册](./resume-history-e2e.md)） | `scripts/test-aicli-resume-history-e2e.ps1` | resume 历史交付闭环：计划完整（`plan_incomplete=false`）、续跑未死锁（`plan_stalled=false`）、队列排空、每个 cell 已交付（`acked >= cells`）、整份 transcript 已规划（`cell_rows_misses`/`plan_misses` >= 90% cells）、尾部真的写到终端、`/exit` 优雅退出；渲染器模式 7 断言 / 行模式 5 断言 | 真实 provider + **已存在的大 transcript 会话**（首次固化：291,920 行）；渲染器模式需交互桌面，行模式（`-RedirectTerminalStream`）无桌面要求 |
 
 > 三者互补：本场景回答"HTTP 控制面能不能可靠驱动/验收一次真实 turn"；
 > E2E-DEBUG-03 回答"多个进程能不能互相发现、定向调用且不互相踩"；
@@ -377,6 +378,8 @@ pwsh -File scripts/read-terminal-buffer.ps1 -WindowTitle 'ai-agent-runtime' -Pat
 - [debug-guide-evidence.md](./debug-guide-evidence.md) — 本文证据附录：固化运行结果、02 实测、复验、status agents 修复记录。
 - [mesh-e2e.md](./mesh-e2e.md) — E2E-DEBUG-03 多进程网格控制面场景（原 §8）。
 - [nonloopback-auth-e2e.md](./nonloopback-auth-e2e.md) — E2E-DEBUG-02 非回环鉴权场景。
+- [resume-history-e2e.md](./resume-history-e2e.md) — E2E-RESUME-01 resume 历史交付闭环场景
+  （大 transcript 尾部缺失事故的固化判据与首次验证证据）。
 - [harness-observability.md](./harness-observability.md) — harness 观测与取证工具集（原 §5.2）。
 - [../plan/aicli-terminal-e2e-methodology.md](../plan/aicli-terminal-e2e-methodology.md) — 终端 E2E 方法论。
 - [../plan/aicli-mesh-architecture.md](../plan/aicli-mesh-architecture.md) — 多进程网格架构方案
@@ -389,6 +392,8 @@ pwsh -File scripts/read-terminal-buffer.ps1 -WindowTitle 'ai-agent-runtime' -Pat
 - `scripts/aicli-e2e-harness.ps1` — 观测工具集（A1 时序采样 / A2 诊断包 / A3 稳态判据 /
   B4 清单覆盖门禁 / C4 双通道取证），由三个 harness dot-source（见 [harness-observability.md](./harness-observability.md)）。
 - `scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1` — 姊妹场景 E2E-DEBUG-02 harness（见 [nonloopback-auth-e2e.md](./nonloopback-auth-e2e.md)）。
+- `scripts/test-aicli-resume-history-e2e.ps1` — E2E-RESUME-01 harness（[resume-history-e2e.md](./resume-history-e2e.md) §5 断言表；
+  渲染器模式 / 行模式两种运行方式见其 §4）。
 - `scripts/test-aicli-e2e-all.ps1` — 一键回归聚合入口（断言基线 + 01 + 02 + 03 + 聚合结论，本文 §5.1）。
 - `scripts/e2e-assertion-baseline.json` — 断言基线（"断言只增不减"的机器化检查）。
 - `scripts/test-aicli-e2e-all-selftest.ps1` — 聚合脚本自测（桩 harness、负例驱动，本文 §5.1）。
