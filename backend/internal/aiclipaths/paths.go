@@ -243,8 +243,11 @@ const DefaultMCPConfigRelativePath = "configs/" + DefaultMCPConfigFileName
 // ./.aicli/mcp.yaml > ~/.aicli/mcp.yaml > explicit override > upward search
 // (configs/mcp.yaml) > executable directory > configs/mcp.yaml.
 //
-// An empty explicit path yields "" so callers keep their "MCP not configured"
-// semantics instead of silently loading a directory-wide default.
+// An empty (unset) explicit path is discovery mode: the documented workspace >
+// user > upward-search order runs on its own, so a project ./.aicli/mcp.yaml is
+// honoured without also writing aicli.mcp.config_file. When no candidate exists
+// on disk the path stays "" so callers keep their "MCP not configured" semantics
+// instead of silently loading a directory-wide default.
 func ResolveMCPConfigPath(explicitPath string) string {
 	return ResolveMCPConfigPathDetailed(explicitPath).Path
 }
@@ -277,12 +280,11 @@ func ResolveMCPConfigPathDetailed(explicitPath string) MCPConfigResolution {
 	searchPaths := []string{DefaultMCPConfigRelativePath}
 
 	explicit := expandExplicitConfigPath(explicitPath)
+	// Unset aicli.mcp.config_file is discovery mode (see ResolveMCPConfigPath):
+	// the documented priority chain still runs, and the resolution stays empty
+	// when no candidate exists instead of inventing the portable default path.
+	discoverOnly := explicit == ""
 	realOverride := explicit != "" && !isConventionConfigPath(explicit, filename, portableDefault, searchPaths)
-	if strings.TrimSpace(explicitPath) == "" {
-		// Empty explicit path keeps the "MCP not configured" semantics without
-		// touching the filesystem.
-		return MCPConfigResolution{}
-	}
 
 	seen := map[string]bool{}
 	addCandidate := func(path, source string) {
@@ -302,7 +304,7 @@ func ResolveMCPConfigPathDetailed(explicitPath string) MCPConfigResolution {
 		resolution.Candidates = append(resolution.Candidates, MCPConfigCandidate{Path: cleaned, Source: source, Exists: exists})
 	}
 
-	if explicit != "" {
+	if !discoverOnly {
 		addCandidate(explicit, "explicit")
 	}
 	if cwd, err := os.Getwd(); err == nil {
@@ -325,10 +327,8 @@ func ResolveMCPConfigPathDetailed(explicitPath string) MCPConfigResolution {
 	default:
 		if path, source := firstExistingMCPConfigCandidate(filename, searchPaths); path != "" {
 			resolution.Path, resolution.Source = path, source
-		} else if explicit != "" {
+		} else if !discoverOnly {
 			resolution.Path, resolution.Source = explicit, "explicit"
-		} else {
-			resolution.Path, resolution.Source = portableDefault, "default"
 		}
 	}
 	return resolution

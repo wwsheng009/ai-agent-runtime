@@ -197,6 +197,11 @@ func TestResolveMCPConfigPathPrefersProjectThenUserAICLIDirs(t *testing.T) {
 	if got := ResolveMCPConfigPath(DefaultMCPConfigRelativePath); got != userConfig {
 		t.Fatalf("user-level mcp config = %q, want %q", got, userConfig)
 	}
+	// 未设置 config_file（空值）同为“发现”语义：项目层之外回落到用户层。
+	if got := ResolveMCPConfigPath(""); got != userConfig {
+		t.Fatalf("unset mcp config outside project = %q, want user layer %q", got, userConfig)
+	}
+	t.Chdir(projectDir)
 
 	// An explicit, non-convention override still wins.
 	override := filepath.Join(t.TempDir(), "selected-mcp.yaml")
@@ -204,9 +209,32 @@ func TestResolveMCPConfigPathPrefersProjectThenUserAICLIDirs(t *testing.T) {
 		t.Fatalf("explicit mcp config = %q, want %q", got, override)
 	}
 
-	// Empty stays empty so callers keep "MCP not configured" semantics.
+	// 未设置 aicli.mcp.config_file 不再等于“无 MCP 配置”：工作区层直接生效，
+	// 不需要用户额外写 config_file 才能使用 ./.aicli/mcp.yaml。
+	if got := ResolveMCPConfigPath(""); got != projectConfig {
+		t.Fatalf("unset mcp config = %q, want project layer %q", got, projectConfig)
+	}
+}
+
+func TestResolveMCPConfigPathUnsetKeepsNotConfiguredSemantics(t *testing.T) {
+	home := t.TempDir()
+	isolateHome(t, home)
+	emptyDir := t.TempDir()
+	t.Chdir(emptyDir)
+
+	// 与 portable 兜底用例同因：开发机祖先链上可能真实存在 mcp.yaml，命中即为文档
+	// 行为（向上搜索），此时不存在“任何候选都不存在”的前提，跳过而非误报。
+	if leaked := ancestorMCPConfigPath(emptyDir); leaked != "" {
+		t.Skipf("环境提供祖先 mcp.yaml：%s（向上搜索按文档命中），跳过“未配置”断言", leaked)
+	}
+
+	// 未设置 config_file 且磁盘上没有任何候选：保持“未配置”语义（空路径），
+	// 不凭空返回 portable 默认值。
 	if got := ResolveMCPConfigPath(""); got != "" {
-		t.Fatalf("empty mcp config = %q, want empty", got)
+		t.Fatalf("unset mcp config without candidates = %q, want empty", got)
+	}
+	if resolution := ResolveMCPConfigPathDetailed(""); resolution.Path != "" || resolution.Source != "" {
+		t.Fatalf("unset resolution without candidates = %+v, want empty path/source", resolution)
 	}
 }
 
@@ -316,10 +344,14 @@ func TestResolveMCPConfigPathDetailedReportsSourceAndCandidates(t *testing.T) {
 		t.Fatalf("explicit resolution = %+v, want path=%q source=explicit", explicit, override)
 	}
 
-	// 空显式保持“未配置”语义，且不触发候选枚举。
-	empty := ResolveMCPConfigPathDetailed("")
-	if empty.Path != "" || empty.Source != "" || len(empty.Candidates) != 0 {
-		t.Fatalf("empty resolution = %+v, want empty", empty)
+	// 未设置 config_file（空值）是“发现”语义：工作区层直接命中，同时保留候选
+	// 枚举供观测（“任何候选都不存在”时的空路径语义由专门用例覆盖）。
+	unset := ResolveMCPConfigPathDetailed("")
+	if unset.Path != projectConfig || unset.Source != "project" {
+		t.Fatalf("unset resolution = %+v, want path=%q source=project", unset, projectConfig)
+	}
+	if len(unset.Candidates) == 0 {
+		t.Fatalf("unset resolution should still enumerate candidates: %+v", unset)
 	}
 }
 

@@ -97,8 +97,30 @@ func TestResolveRuntimeMCPConfigResolutionEmptyConfig(t *testing.T) {
 	if got := resolveRuntimeMCPConfigResolution(nil); got.Path != "" {
 		t.Fatalf("nil cfg resolution = %+v, want empty", got)
 	}
-	cfg := &config.Config{AICLI: &config.AICLIConfig{MCP: &config.AICLIMCPConfig{}}}
-	if got := resolveRuntimeMCPConfigResolution(cfg); got.Path != "" {
-		t.Fatalf("empty config_file resolution = %+v, want empty", got)
+
+	// 未设置 config_file（含 MCP 节整体缺失）是“发现”语义：工作区
+	// ./.aicli/mcp.yaml 直接生效，不需要额外写 aicli.mcp.config_file。
+	projectDir := t.TempDir()
+	projectConfig := filepath.Join(projectDir, ".aicli", "mcp.yaml")
+	if err := os.MkdirAll(filepath.Dir(projectConfig), 0o755); err != nil {
+		t.Fatalf("create project mcp dir: %v", err)
+	}
+	if err := os.WriteFile(projectConfig, []byte("mcpServers: {}\n"), 0o644); err != nil {
+		t.Fatalf("write project mcp config: %v", err)
+	}
+	t.Chdir(projectDir)
+
+	cases := map[string]*config.Config{
+		"nil mcp block":     {AICLI: &config.AICLIConfig{}},
+		"empty config_file": {AICLI: &config.AICLIConfig{MCP: &config.AICLIMCPConfig{}}},
+	}
+	for name, cfg := range cases {
+		resolution := resolveRuntimeMCPConfigResolution(cfg)
+		if resolution.Path != projectConfig || resolution.Source != "project" {
+			t.Fatalf("%s: resolution = %+v, want path=%q source=project", name, resolution, projectConfig)
+		}
+		if got := resolveRuntimeMCPConfigPath(cfg); got != projectConfig {
+			t.Fatalf("%s: resolveRuntimeMCPConfigPath = %q, want %q", name, got, projectConfig)
+		}
 	}
 }

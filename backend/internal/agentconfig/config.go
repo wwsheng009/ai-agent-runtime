@@ -545,6 +545,19 @@ type AICLIMCPConfig struct {
 	ConfigFile string `yaml:"config_file" mapstructure:"config_file" env:"MCP_CONFIG_FILE"`
 }
 
+// EffectiveAICLIMCPConfigFile 返回 MCP 路径解析实际使用的选择值：环境变量
+// MCP_CONFIG_FILE（见上面的 env 标签）优先于 YAML 值；未设置时返回空串，交由
+// aiclipaths 解析器按“发现”语义处理工作区层（./.aicli/mcp.yaml）与用户层。
+func EffectiveAICLIMCPConfigFile(cfg *Config) string {
+	if env := strings.TrimSpace(os.Getenv("MCP_CONFIG_FILE")); env != "" {
+		return env
+	}
+	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.MCP == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.AICLI.MCP.ConfigFile)
+}
+
 // AICLILogConfig holds aicli log configuration.
 type AICLILogConfig struct {
 	Enabled  *bool  `yaml:"enabled" mapstructure:"enabled" env:"AICLI_LOG_ENABLED"`

@@ -69,6 +69,19 @@ MCP 配置文件按以下顺序查找（命中即用；写操作也写到命中�
 
 本仓库使用工作区级 `E:\projects\ai\ai-agent-runtime\.aicli\mcp.yaml`。
 
+> **未设置 `aicli.mcp.config_file` 的语义（2026-09-25 修复）**：该键未设置（或为空、或 MCP 节整体缺失）时
+> **不再**等价于“无 MCP 配置”，解析器按“发现”语义直接执行上表 1→4：工作区 `./.aicli/mcp.yaml` 命中即用，
+> 其次用户级 `~/.aicli/mcp.yaml`，再向上搜索；只有磁盘上任何候选都不存在时才回到“未配置”
+> （空路径，chat 静默跳过，`aicli mcp list` 报「没有配置任何 MCP 服务器」）。因此**不需要**为了使用
+> 工作区配置而额外写 `config_file`；`MCP_CONFIG_FILE` 环境变量优先于 YAML 值。
+> 实现：`backend/internal/aiclipaths/paths.go`（`ResolveMCPConfigPath` 的“发现”分支）+
+> `backend/internal/agentconfig/config.go`（`EffectiveAICLIMCPConfigFile`），调用点为 CLI/chat、runtime-server
+> 与配置热重载。
+>
+> 注意：不要把 `aicli.mcp.config_file` 写进**工作区** `.aicli/config.yaml`——分层合并默认关闭
+> （`AICLI_CONFIG_MERGE` 未设时只读取第一个存在的配置文件），工作区配置文件会整体遮蔽用户级配置
+> （providers 等全部丢失）。
+
 ### 3.2 attach：连接已打开的 Edge / Chrome（当前仓库采用）
 
 ```yaml
@@ -426,3 +439,5 @@ aicli mcp test chrome-devtools take_screenshot '{"pageId":2,"filePath":"E:/tmp/s
 | 2026-09-19 | 跨项目复用验证：将本配置复制到 `E:\projects\ai\ai-sites-client\.aicli\mcp.yaml`（workspace 级，已被该仓库 gitignore），会话重启后 MCP 直接生效，用 `list_pages`/`take_snapshot`/`list_console_messages` 一次定位 React 白屏（根因：`useToast` 未包在 `<ToastProvider>` 内）。同时修正 4.1 实测注记（WS 握手实际为 101 而非 403），新增两条排查经验：① inspect 模式下所有 CDP HTTP 发现端点 404 属预期行为；② Node ≥22 内置 WebSocket 连该端点会挂起，手写 CDP 脚本不可靠，页面诊断应直接使用 MCP 工具。已同步到第 4.1 节与第 8 节排查表。 |
 | 2026-09-19 | 可用参考脚本留档：绕过 Node 内置 WebSocket 挂起问题的手工实现归档于本目录 [list-pages.js](list-pages.js)（Node 原始 `net.Socket` + 手工 WebSocket 握手 + 最小帧编解码 + 客户端掩码，经浏览器级 WS 端点调 `Target.getTargets` 成功列出真实标签页）。要点：① 用 `Sec-WebSocket-Key` 随机 16 字节 base64，校验服务端返回 `101`；② 客户端帧必须带掩码（4 字节 XOR）；③ 支持 126/127 扩展长度；④ HTTP 发现接口不可用时，WS 路径从 user-data-dir 下 `DevToolsActivePort` 第二行读取；⑤ 该脚本仅适合拿 target 列表等简单 CDP 调用，attach 后的 console/network 事件路由手工实现仍会丢事件——复杂诊断务必用 MCP 工具。同目录 [probe-devtools.js](probe-devtools.js)（握手探测）与 [debug-page.js](debug-page.js)（失败的反例）仅供参考/留证。注：脚本中的 `DevToolsActivePort` 路径硬编码为作者本机用户目录，复用时需按实际 profile 路径修改。 |
 | 2026-09-18 | 新增「Chrome/Edge 浏览器侧手动配置 / 需要更新配置」内容：4.2 分浏览器步骤（Chrome / Edge）、MCP 配置同步项与 4 项校验清单；4.3 需重新手动配置的典型场景；第 2 节前置条件改为可操作检查项；第 7/8 节补充环境变更重配提示与 inspect 开关缺失、`--auto-connect` 握手超时、profile 选错等排错条目。本机实测：Edge 153.0.4234.32 已生成 `DevToolsActivePort`，Chrome 153.0.8010.48 未开启远程调试（无该文件）。 |
+| 2026-09-25 | 按本手册重做安装校验（Node 24.14.0 / Edge 153.0.4234.48 / aicli v0.4.5）：浏览器侧 4 项校验全过（Edge 运行中、inspect 开关已开、`DevToolsActivePort` 两行、attach 成功）；`aicli mcp list` → `connected`、工具数 **30**（`@latest` 已由 29 增至 30，第 5 节表格为 29 项基线，以实际 `aicli mcp tools` 为准）；`aicli mcp test chrome-devtools list_pages '{}'` 列出真实标签页。 |
+| 2026-09-25 | 修复配置解析缺陷：`aicli.mcp.config_file` 未设置（或 MCP 节缺失）时被当作“无 MCP 配置”，工作区 `./.aicli/mcp.yaml` 被忽略、静默退化到 `configs/mcp.yaml` 空兜底——与 3.1/install.md 承诺的优先级矛盾。`aiclipaths.ResolveMCPConfigPath` 增加“发现”语义（空值即按 工作区 > 用户 > 向上搜索 命中，皆无才回到“未配置”），CLI/chat、runtime-server、配置热重载三处调用点同步去掉 nil/空值短路；同时补齐 `MCP_CONFIG_FILE` 环境变量支持（`agentconfig.EffectiveAICLIMCPConfigFile`，此前 `env:` 标签只是声明、实测无效）。验证：无任何 `config_file` 配置时 `aicli mcp list` → `connected`/30 工具、`list_pages` 列出真实标签页；临时修复（用户级 `aicli.mcp.config_file: configs/mcp.yaml`）已从 `~/.aicli/config.yaml` 移除；新增回归用例（`paths_test.go`、`mcp_config_resolution_test.go`、`main_mcp_resolution_test.go`、`mcp_config_file_test.go`）。 |

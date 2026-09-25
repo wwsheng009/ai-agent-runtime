@@ -595,13 +595,15 @@ func normalizeSkillsRuntimeConfigForHotReload(cfg *agentconfig.Config) *agentcon
 }
 
 func configuredMCPConfigPathForHotReload(cfg *agentconfig.Config) string {
-	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.MCP == nil {
+	if cfg == nil || cfg.AICLI == nil {
 		return ""
 	}
 	// Keep hot reload aligned with the startup path: both must resolve MCP
 	// config through the same ./.aicli > ~/.aicli > override > upward search
 	// order, otherwise a reload silently switches the effective MCP file.
-	return aiclipaths.ResolveMCPConfigPath(cfg.AICLI.MCP.ConfigFile)
+	// An unset aicli.mcp.config_file is discovery mode, so a workspace
+	// ./.aicli/mcp.yaml is honoured without extra configuration.
+	return aiclipaths.ResolveMCPConfigPath(agentconfig.EffectiveAICLIMCPConfigFile(cfg))
 }
 
 func defaultProfileForHotReload(cfg *agentconfig.Config) string {

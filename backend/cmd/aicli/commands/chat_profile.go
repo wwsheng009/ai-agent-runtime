@@ -390,12 +390,14 @@ func resolveGlobalRuntimeConfigPath(cfg *config.Config) string {
 }
 
 func resolveConfiguredMCPConfigPath(cfg *config.Config) string {
-	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.MCP == nil {
+	if cfg == nil || cfg.AICLI == nil {
 		return ""
 	}
 	// Same priority as the runtime config and the runtime-server: ./.aicli/mcp.yaml >
 	// ~/.aicli/mcp.yaml > explicit override > upward search > configs/mcp.yaml.
-	return aiclipaths.ResolveMCPConfigPath(cfg.AICLI.MCP.ConfigFile)
+	// An unset aicli.mcp.config_file is discovery mode: the resolver runs the same
+	// chain, so a workspace ./.aicli/mcp.yaml works without extra configuration.
+	return aiclipaths.ResolveMCPConfigPath(config.EffectiveAICLIMCPConfigFile(cfg))
 }
 
 func skillRuntimeConfig(cfg *config.Config) *config.SkillsRuntimeConfig {

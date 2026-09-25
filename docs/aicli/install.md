@@ -542,6 +542,12 @@ MCP 配置文件解析顺序（chat 会话、`aicli mcp *`、console / 微型 We
 | 4 | 可执行文件目录逐级向上搜索 | 覆盖从无关目录启动的场景 |
 | 5 | `configs/mcp.yaml` | 兜底（`config_file` 为约定值时返回该字面路径） |
 
+`aicli.mcp.config_file` **未设置（或为空）不等于“未配置”**：解析器按“发现”语义依序查找上表 1→4 层，
+工作区 `./.aicli/mcp.yaml`、用户 `~/.aicli/mcp.yaml`、向上搜索命中即用，无需用户先写 `config_file`。
+只有磁盘上**任何候选都不存在**时才回到“未配置”（空路径，chat 静默跳过，`aicli mcp list` 报无服务器）；
+第 5 行的字面兜底仅适用于 `config_file` 显式写成约定值（如 `configs/mcp.yaml`）的场景。
+`MCP_CONFIG_FILE` 环境变量优先于 YAML 值（见 `agentconfig.EffectiveAICLIMCPConfigFile`）。
+
 `aicli mcp add` / `/mcp add` 的**写入**路径与上表一致：命中哪个文件就写哪个；若全部不存在，则创建 `~/.aicli/mcp.yaml`（runtime-server 同样落到用户级，避免在任意工作目录生成 `configs/mcp.yaml`）。
 
 ### skill 安装概览

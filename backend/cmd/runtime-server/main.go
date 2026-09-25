@@ -1627,12 +1627,15 @@ func buildSkillsScopeResolverConfig(cfg *config.SkillsRuntimeConfig) skillsapi.S
 }
 
 func configuredMCPConfigPath(cfg *config.Config) string {
-	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.MCP == nil {
+	if cfg == nil || cfg.AICLI == nil {
 		return ""
 	}
 	// Same priority as the runtime config and the CLI: ./.aicli/mcp.yaml >
 	// ~/.aicli/mcp.yaml > explicit override > upward search > configs/mcp.yaml.
-	return aiclipaths.ResolveMCPConfigPath(cfg.AICLI.MCP.ConfigFile)
+	// An unset aicli.mcp.config_file is discovery mode: the workspace layer wins
+	// without the key being written first (MCP_CONFIG_FILE 环境变量优先，见
+	// agentconfig.EffectiveAICLIMCPConfigFile)。
+	return aiclipaths.ResolveMCPConfigPath(config.EffectiveAICLIMCPConfigFile(cfg))
 }
 
 // resolveRuntimeMCPConfigPath 解析 runtime-server 实际使用的 MCP 配置路径：
@@ -1646,13 +1649,10 @@ func resolveRuntimeMCPConfigPath(cfg *config.Config) string {
 // 命中来源（explicit/project/user/upward/executable/default）与候选清单，供启动日志
 // 与管理接口观测使用。
 func resolveRuntimeMCPConfigResolution(cfg *config.Config) aiclipaths.MCPConfigResolution {
-	if cfg == nil || cfg.AICLI == nil || cfg.AICLI.MCP == nil {
+	if cfg == nil || cfg.AICLI == nil {
 		return aiclipaths.MCPConfigResolution{}
 	}
-	if strings.TrimSpace(cfg.AICLI.MCP.ConfigFile) == "" {
-		return aiclipaths.MCPConfigResolution{}
-	}
-	return applyMCPUserFallback(aiclipaths.ResolveMCPConfigPathDetailed(cfg.AICLI.MCP.ConfigFile))
+	return applyMCPUserFallback(aiclipaths.ResolveMCPConfigPathDetailed(config.EffectiveAICLIMCPConfigFile(cfg)))
 }
 
 // applyMCPUserFallback 在解析结果不存在时把模板约定默认值（相对 configs/mcp.yaml）
