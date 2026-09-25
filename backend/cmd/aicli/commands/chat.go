@@ -30,6 +30,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -617,6 +618,11 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 		defer persistenceState.runtimeSessionManager.Stop()
 	}
 	startupTiming.mark("persistence")
+
+	// 会话存储是惰性打开的（启动阶段不碰 SQLite），于是 Wasm 模块的编译会被推到
+	// 第一个真正使用存储的请求上（live 实测 +1.07s）。在持久化就绪后立刻后台预热，
+	// 让这段成本与启动后半程重叠，而不是落在首个 web/TUI 请求上。
+	sqlitedriver.WarmAsync()
 
 	if opts.ListSessionsFlag {
 		if err := printChatSessionSummaries(persistenceState.runtimeSessionManager, persistenceState.sessionUserID, "", opts.SessionFilter); err != nil {
