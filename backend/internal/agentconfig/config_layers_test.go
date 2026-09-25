@@ -123,7 +123,7 @@ nested:
   drop:
 empty_map: {}
 `)
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	document, err := loadLayeredConfigDocument()
 	if err != nil {
@@ -190,7 +190,7 @@ providers:
   headers:
     X-Project: "1"
 `)
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 	t.Setenv(MergeConfigEnvVar, "on")
 
 	cfg, err := InitGlobalConfigLayered(ResolveConfigPath(DefaultConfigSearchPaths()), "")
@@ -238,7 +238,7 @@ providers:
   headers:
     X-Project: "1"
 `)
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 	t.Setenv(MergeConfigEnvVar, "off")
 
 	cfg, err := InitGlobalConfigLayered(ResolveConfigPath(DefaultConfigSearchPaths()), "")
@@ -268,7 +268,7 @@ providers:
   headers:
     X-Project: "1"
 `)
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 	t.Setenv(MergeConfigEnvVar, "dry-run")
 
 	cfg, err := InitGlobalConfigLayered(ResolveConfigPath(DefaultConfigSearchPaths()), "")
@@ -295,7 +295,7 @@ providers:
   headers:
     X-Project: "1"
 `)
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 	t.Setenv(MergeConfigEnvVar, "on")
 
 	explicitPath := filepath.Join(t.TempDir(), "picked.yaml")

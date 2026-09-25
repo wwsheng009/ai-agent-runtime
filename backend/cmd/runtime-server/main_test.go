@@ -96,7 +96,7 @@ func TestNormalizeSkillsRuntimeConfigIgnoresDevelopmentLayout(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 
 	skills := normalizeSkillsRuntimeConfig(&config.Config{})
 	if skills.ConfigFile != "" {

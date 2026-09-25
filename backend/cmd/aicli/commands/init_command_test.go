@@ -36,7 +36,7 @@ func runInitWithFlags(t *testing.T, flags map[string]string) (initCommandResult,
 func TestInitCommandDefaultsToUserLevelConfig(t *testing.T) {
 	home := isolateInitHome(t)
 	projectDir := t.TempDir()
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	result, err := runInitWithFlags(t, nil)
 	if err != nil {
@@ -57,7 +57,7 @@ func TestInitCommandDefaultsToUserLevelConfig(t *testing.T) {
 func TestInitCommandProjectFlagCreatesProjectLevelConfig(t *testing.T) {
 	home := isolateInitHome(t)
 	projectDir := t.TempDir()
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	result, err := runInitWithFlags(t, map[string]string{"project": "true"})
 	if err != nil {
@@ -79,7 +79,7 @@ func TestInitCommandProjectFlagCreatesProjectLevelConfig(t *testing.T) {
 // The legacy --global flag keeps working for existing scripts.
 func TestInitCommandGlobalFlagStillCreatesUserLevelConfig(t *testing.T) {
 	home := isolateInitHome(t)
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 
 	result, err := runInitWithFlags(t, map[string]string{"global": "true"})
 	if err != nil {
@@ -92,7 +92,7 @@ func TestInitCommandGlobalFlagStillCreatesUserLevelConfig(t *testing.T) {
 
 func TestInitCommandRejectsConflictingFlags(t *testing.T) {
 	isolateInitHome(t)
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 
 	if _, err := runInitWithFlags(t, map[string]string{"project": "true", "global": "true"}); err == nil {
 		t.Fatal("expected --project/--global conflict to fail")

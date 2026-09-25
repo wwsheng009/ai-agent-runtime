@@ -321,7 +321,7 @@ func TestChatRoutingCommandConfigLayerRequiresConfirm(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("HOMEDRIVE", "")
 	t.Setenv("HOMEPATH", "")
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 
 	configPath, _ := agentconfig.AICLIConfigWriteTargetForRouting()
 	if strings.TrimSpace(configPath) == "" {

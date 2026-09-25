@@ -18,7 +18,7 @@ func TestRuntimeConfigLayerStackMergesUserAndProjectLayers(t *testing.T) {
 	preserveGlobalConfig(t)
 	home := isolateConfigLayerHome(t)
 	projectDir := t.TempDir()
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	// A development-directory file must be ignored entirely, even when it is the
 	// only file that would win a naive precedence search.
@@ -83,7 +83,7 @@ func TestRuntimeConfigLayerStackMergesUserAndProjectLayers(t *testing.T) {
 func TestRuntimeConfigLayerStackFreshInstallTargetsUserPath(t *testing.T) {
 	preserveGlobalConfig(t)
 	home := isolateConfigLayerHome(t)
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 
 	merged, err := LoadMergedRuntimeConfigDocument()
 	if err != nil {

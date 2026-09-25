@@ -27,7 +27,7 @@ func TestLoadRuntimeServerManagerUsesLayeredRuntimeConfig(t *testing.T) {
 	t.Cleanup(func() { config.SetUserHomeDirForTest(previous) })
 
 	projectDir := t.TempDir()
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	portable := filepath.Join(projectDir, "configs", aiclipaths.DefaultRuntimeConfigFileName)
 	writeRuntimeServerLayer(t, portable, "agent:\n  maxSteps: 1\n")

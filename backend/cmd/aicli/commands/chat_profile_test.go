@@ -14,6 +14,9 @@ import (
 )
 
 func TestResolveChatProfileState_AppliesDefaultsPromptAndPolicy(t *testing.T) {
+	// 固定工作区：profile 的 skill 目录会追加 cwd 祖先的 .agents/skills，
+	// 仓库自带的 .agents/skills 会让下面的目录计数随检出内容变化，必须隔离。
+	chdirTest(t, t.TempDir())
 	profilesRoot := t.TempDir()
 	globalSkills := t.TempDir()
 	profileRoot := filepath.Join(profilesRoot, "dev")
@@ -196,7 +199,7 @@ func TestResolveGlobalRuntimeConfigPath_NoLayerResolvesEmpty(t *testing.T) {
 	home := isolateInitHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 
 	if got := resolveGlobalRuntimeConfigPath(nil); got != "" {
 		t.Fatalf("no-layer resolution = %q, want empty", got)
@@ -231,7 +234,7 @@ func TestResolveGlobalRuntimeConfigPath_IgnoresDevelopmentDirectory(t *testing.T
 	repoDir := t.TempDir()
 	writeTestFile(t, filepath.Join(repoDir, "backend", "configs", aiclipaths.DefaultRuntimeConfigFileName), "agent:\n  defaultModel: dev-only\n")
 	writeTestFile(t, filepath.Join(repoDir, "configs", aiclipaths.DefaultRuntimeConfigFileName), "agent:\n  defaultModel: dev-only\n")
-	t.Chdir(repoDir)
+	chdirTest(t, repoDir)
 
 	// Even an executable sitting inside the development directory must not make
 	// resolution walk up into it.
@@ -240,9 +243,14 @@ func TestResolveGlobalRuntimeConfigPath_IgnoresDevelopmentDirectory(t *testing.T
 	writeTestFile(t, executablePathForTest, "#!/bin/sh\n")
 	t.Cleanup(func() { executablePathForTest = originalExe })
 
+	// 约定值随构建 profile 变化（win7compat 的默认运行时文件名是
+	// runtime.win7.yaml，见 internal/aiclipaths/profile_win7.go）：硬编码主线名
+	// 会让"开发目录约定值"退化成显式覆盖，测试语义随构建 profile 漂移。
+	backendConvention := filepath.ToSlash(filepath.Join("backend", "configs", aiclipaths.DefaultRuntimeConfigFileName))
+	portableConvention := filepath.ToSlash(aiclipaths.DefaultRuntimeConfigRelativePath)
 	for name, cfg := range map[string]*config.Config{
-		"backend/configs convention value": {SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: "backend/configs/runtime.yaml"}},
-		"configs convention value":         {SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: "configs/runtime.yaml"}},
+		"backend/configs convention value": {SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: backendConvention}},
+		"configs convention value":         {SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: portableConvention}},
 		"no skills runtime section":        nil,
 	} {
 		if got := resolveGlobalRuntimeConfigPath(cfg); got != "" {
@@ -267,7 +275,7 @@ func TestResolveGlobalRuntimeConfigPath_PrefersUserLayerOverNothing(t *testing.T
 
 	userConfig := filepath.Join(home, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
 	writeTestFile(t, userConfig, "agent:\n  defaultModel: user\n")
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 
 	if got := resolveGlobalRuntimeConfigPath(nil); got != userConfig {
 		t.Fatalf("user layer = %q, want %q", got, userConfig)
@@ -380,7 +388,7 @@ func TestResolveGlobalRuntimeConfigPath_NeverReturnsMissingPath(t *testing.T) {
 	outside := t.TempDir()
 	fakeExe := filepath.Join(outside, "bin", "aicli-test-bin")
 	writeTestFile(t, fakeExe, "#!/bin/sh\n")
-	t.Chdir(outside)
+	chdirTest(t, outside)
 
 	originalExe := executablePathForTest
 	executablePathForTest = fakeExe
@@ -420,10 +428,10 @@ func TestResolveGlobalRuntimeConfigPath_PrefersWorkspaceDotAICLI(t *testing.T) {
 	workspaceConfig := filepath.Join(workspace, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
 	writeTestFile(t, workspaceConfig, "agent:\n  defaultModel: workspace\n")
 	writeTestFile(t, filepath.Join(workspace, "backend", "configs", aiclipaths.DefaultRuntimeConfigFileName), "agent:\n  defaultModel: portable\n")
-	t.Chdir(workspace)
+	chdirTest(t, workspace)
 
 	cfg := &config.Config{
-		SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: "backend/configs/runtime.yaml"},
+		SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: filepath.ToSlash(filepath.Join("backend", "configs", aiclipaths.DefaultRuntimeConfigFileName))},
 	}
 	if got := resolveGlobalRuntimeConfigPath(cfg); got != workspaceConfig {
 		t.Fatalf("expected workspace .aicli config %q, got %q", workspaceConfig, got)
@@ -444,14 +452,14 @@ func TestLoadRuntimeToolConfig_MissingConventionPathStaysSilent(t *testing.T) {
 	outside := t.TempDir()
 	fakeExe := filepath.Join(outside, "bin", "aicli-test-bin")
 	writeTestFile(t, fakeExe, "#!/bin/sh\n")
-	t.Chdir(outside)
+	chdirTest(t, outside)
 
 	originalExe := executablePathForTest
 	executablePathForTest = fakeExe
 	t.Cleanup(func() { executablePathForTest = originalExe })
 
 	cfg := &config.Config{
-		SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: "backend/configs/runtime.yaml"},
+		SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: filepath.ToSlash(filepath.Join("backend", "configs", aiclipaths.DefaultRuntimeConfigFileName))},
 	}
 
 	var cfgLoaded bool

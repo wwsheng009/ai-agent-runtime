@@ -36,6 +36,22 @@ func writeProfileCommandFixtures(t *testing.T, root string) {
 	writeProfileCommandFixture(t, root, "minimal", "Minimal prompt.", "allowlist: [read_file]\n")
 }
 
+// isolateUserProfileLayer 把用户层 profile 根（~/.aicli/profiles）指向空临时目录。
+//
+// 必要性：profile 解析在 config/root 都给不出可用同名目录时会做层兜底
+// （profilesys.RegisterLayerFallbacks 的 G4/D5 语义），因此"删掉 fixture 里的
+// coding 目录 ⇒ 解析必定失败"只有在本机不存在同名用户级 profile 时才成立。
+// 不隔离会让测试结果随开发机 ~/.aicli/profiles 的内容变化（本机存在 coding
+// 时该测试必失败），属于测试隔离缺陷，而非产品行为缺陷。
+//
+// 注意：t.Setenv 要求测试串行，调用方不得再调用 t.Parallel()。
+func isolateUserProfileLayer(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
 func TestProfileCommandStatusWithoutBinding(t *testing.T) {
 	t.Parallel()
 	session, cleanup := newProfileSwitchTestSession(t, t.TempDir())
@@ -196,7 +212,10 @@ func TestProfileCommandReloadWithoutBindingFails(t *testing.T) {
 
 // R18：reload 解析失败时保留旧状态（不静默降级、不崩）。
 func TestProfileCommandReloadFailureKeepsOldState(t *testing.T) {
-	t.Parallel()
+	// 不能 t.Parallel()：isolateUserProfileLayer 使用 t.Setenv（要求串行）。
+	// 必须隔离：否则删掉 fixture 的 coding 后，本机同名用户级 profile 会被
+	// 层兜底解析成功，reload 不报错（详见 isolateUserProfileLayer）。
+	isolateUserProfileLayer(t)
 	profilesRoot := t.TempDir()
 	writeProfileCommandFixtures(t, profilesRoot)
 	session, cleanup := newProfileSwitchTestSession(t, profilesRoot)

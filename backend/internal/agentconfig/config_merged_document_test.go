@@ -54,7 +54,7 @@ aicli:
   chat:
     default_model: project-model
 `)
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 	t.Setenv(MergeConfigEnvVar, "on")
 
 	merged, err := LoadMergedConfigDocument()
@@ -114,7 +114,7 @@ func TestApplyMergedDocumentChangesIsNoopWithoutChanges(t *testing.T) {
 	projectDir := t.TempDir()
 	projectConfig := filepath.Join(projectDir, ".aicli", aiclipaths.DefaultConfigFileName)
 	writeConfigLayerFile(t, projectConfig, "skills_runtime:\n  config_file: project.yaml\n")
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 	t.Setenv(MergeConfigEnvVar, "on")
 
 	merged, err := LoadMergedConfigDocument()
@@ -143,7 +143,7 @@ func TestMergedDocumentWriteLayerKind(t *testing.T) {
 	projectDir := t.TempDir()
 	projectConfig := filepath.Join(projectDir, ".aicli", aiclipaths.DefaultConfigFileName)
 	writeConfigLayerFile(t, projectConfig, "skills_runtime:\n  config_file: project.yaml\n")
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 	t.Setenv(MergeConfigEnvVar, "on")
 
 	merged, err := LoadMergedConfigDocument()

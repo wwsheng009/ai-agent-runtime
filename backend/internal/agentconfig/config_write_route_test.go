@@ -88,7 +88,7 @@ func TestRouteConfigWritePathOnlyReroutesStackMembers(t *testing.T) {
 	projectDir := t.TempDir()
 	projectConfig := filepath.Join(projectDir, ".aicli", aiclipaths.DefaultConfigFileName)
 	writeConfigLayerFile(t, projectConfig, "providers:\n  items:\n    other:\n      api_key: project-key\n")
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 	t.Setenv(MergeConfigEnvVar, "on")
 
 	if _, err := InitGlobalConfigLayered(ResolveConfigPath(DefaultConfigSearchPaths()), ""); err != nil {
@@ -135,7 +135,7 @@ providers:
     other:
       api_key: project-key
 `)
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 	t.Setenv(MergeConfigEnvVar, "on")
 
 	cfg, err := InitGlobalConfigLayered(ResolveConfigPath(DefaultConfigSearchPaths()), "")

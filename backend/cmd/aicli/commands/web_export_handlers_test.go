@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -143,11 +144,14 @@ func TestChatWebAPIExportSessionIDParam(t *testing.T) {
 		t.Fatalf("create sqlite session manager: %v", err)
 	}
 	t.Cleanup(manager.Stop)
-	runtimeSession, err := manager.CreateSession(t.Context(), userID)
+	// 用 context.Background() 而不是 t.Context()：后者是 Go 1.24+ 的 API，
+	// Win7 兼容构建（Go 1.21.4）没有，测试二进制会编译失败。
+	ctx := context.Background()
+	runtimeSession, err := manager.CreateSession(ctx, userID)
 	if err != nil {
 		t.Fatalf("create runtime session: %v", err)
 	}
-	if err := manager.AddMessage(t.Context(), runtimeSession.ID, *runtimetypes.NewUserMessage("hello from store")); err != nil {
+	if err := manager.AddMessage(ctx, runtimeSession.ID, *runtimetypes.NewUserMessage("hello from store")); err != nil {
 		t.Fatalf("append message: %v", err)
 	}
 	// 当前会话与目标会话不同：显式 session_id 必须导出目标会话而非当前会话。

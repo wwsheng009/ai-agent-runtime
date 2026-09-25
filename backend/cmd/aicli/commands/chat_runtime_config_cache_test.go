@@ -92,7 +92,7 @@ func TestLoadCachedRuntimeConfig_MergesUserAndProjectLayers(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 
 	workspace := t.TempDir()
-	t.Chdir(workspace)
+	chdirTest(t, workspace)
 
 	userConfig := filepath.Join(home, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
 	writeTestFile(t, userConfig, "agent:\n  maxSteps: 7\n  defaultModel: user-model\n")
@@ -149,7 +149,7 @@ func TestLoadCachedRuntimeConfig_ExplicitPathIsNotMerged(t *testing.T) {
 	home := isolateInitHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 
 	writeTestFile(t, filepath.Join(home, ".aicli", aiclipaths.DefaultRuntimeConfigFileName), "agent:\n  maxSteps: 7\n")
 

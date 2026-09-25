@@ -41,7 +41,7 @@ providers:
       base_url: https://project.example.invalid/v1
       enabled: true
 `)
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 	t.Setenv(MergeConfigEnvVar, "on")
 	return userConfig, projectConfig
 }
