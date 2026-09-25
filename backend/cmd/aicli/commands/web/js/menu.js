@@ -14,6 +14,7 @@
 //      点击外部或 Esc 关闭(把焦点还给菜单按钮)。
 
 import { toggleShortcutHelp } from "./ui.js";
+import { toggleComposerPanel } from "./composer.js";
 import { showToast } from "./util.js";
 
 // data-menu-action → 导出格式。format 取值与 CLI 的格式词一致
@@ -124,6 +125,9 @@ function handleAction(action) {
     case "session-refresh": clickExisting("sessions-refresh-btn"); break;
     case "sidebar-toggle": clickExisting("sidebar-toggle"); break;
     case "theme-toggle": clickExisting("theme-toggle"); break;
+    // 浮动 composer 面板：直接调 composer.js 的入口（与 Ctrl+J 同一函数），
+    // 不转发点击——面板按钮的语义是"折叠"，菜单项语义是"折叠/展开"，转发会多一次翻转。
+    case "composer-toggle": toggleComposerPanel(); break;
     case "shortcut-help": toggleShortcutHelp(); break;
     case "tab-main":
     case "tab-log":

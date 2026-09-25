@@ -6,6 +6,8 @@ import { loadConfigAdmin } from "./config-admin.js";
 import { loadAnalysis, stopAnalysisAuto } from "./analysis.js";
 import { loadCacheAnalytics, refreshCacheAnalytics } from "./cache.js";
 import { loadDebugInfo, refreshDebugInfo } from "./debug.js";
+import { loadFiles } from "./files.js";
+import { loadGit } from "./git.js";
 import { loadMCPs } from "./mcp.js";
 import { loadSkills } from "./skills.js";
 import { apiFetch, esc, showToast } from "./util.js";
@@ -16,6 +18,10 @@ var tabMainEl = document.getElementById("tab-main");
 var tabLogEl = document.getElementById("tab-log");
 var tabSkillsBtn = document.getElementById("tab-skills-btn");
 var tabSkillsEl = document.getElementById("tab-skills");
+var tabFilesBtn = document.getElementById("tab-files-btn");
+var tabFilesEl = document.getElementById("tab-files");
+var tabGitBtn = document.getElementById("tab-git-btn");
+var tabGitEl = document.getElementById("tab-git");
 var tabMCPBtn = document.getElementById("tab-mcp-btn");
 var tabMCPEl = document.getElementById("tab-mcp");
 var themeToggleBtn = document.getElementById("theme-toggle");
@@ -66,6 +72,8 @@ var aboutSessionIDEl = document.getElementById("about-session-id");
 function activateTab(tabName) {
   var isMain = tabName === "main";
   var isSkills = tabName === "skills";
+  var isFiles = tabName === "files";
+  var isGit = tabName === "git";
   var isMCP = tabName === "mcp";
   var isLog = tabName === "log";
   var isConfig = tabName === "config";
@@ -75,6 +83,8 @@ function activateTab(tabName) {
   var isAbout = tabName === "about";
   tabMainBtn.classList.toggle("active", isMain);
   if (tabSkillsBtn) { tabSkillsBtn.classList.toggle("active", isSkills); }
+  if (tabFilesBtn) { tabFilesBtn.classList.toggle("active", isFiles); }
+  if (tabGitBtn) { tabGitBtn.classList.toggle("active", isGit); }
   if (tabMCPBtn) { tabMCPBtn.classList.toggle("active", isMCP); }
   tabLogBtn.classList.toggle("active", isLog);
   if (tabConfigBtn) { tabConfigBtn.classList.toggle("active", isConfig); }
@@ -84,6 +94,8 @@ function activateTab(tabName) {
   if (tabAboutBtn) { tabAboutBtn.classList.toggle("active", isAbout); }
   tabMainEl.classList.toggle("active", isMain);
   if (tabSkillsEl) { tabSkillsEl.classList.toggle("active", isSkills); }
+  if (tabFilesEl) { tabFilesEl.classList.toggle("active", isFiles); }
+  if (tabGitEl) { tabGitEl.classList.toggle("active", isGit); }
   if (tabMCPEl) { tabMCPEl.classList.toggle("active", isMCP); }
   tabLogEl.classList.toggle("active", isLog);
   if (tabConfigEl) { tabConfigEl.classList.toggle("active", isConfig); }
@@ -95,6 +107,12 @@ function activateTab(tabName) {
   // 技能页签：目录来自当前会话的 Function Catalog（与 TUI /skills 同源），
   // 首次进入或显式刷新才拉取，同会话重复切页签不重复发请求。
   if (isSkills) { loadSkills(); }
+  // 文件页签：作用域根与目录列表属于当前会话的工作目录，首次进入或会话变化
+  // 才拉取（同一会话内切回页签沿用已有列表，手动刷新见工具栏 ⟳）。
+  if (isFiles) { loadFiles(); }
+  // GIT 页签：状态按「进入即重拉」处理（工作区随时被外部命令改变），
+  // 一次 status + 一页 commits 足够轻量。
+  if (isGit) { loadGit(); }
   // MCP 页签：管理本地 mcp.yaml（进程级，非会话数据），首次激活懒加载，之后每次
   // 进入都重拉一次，保证列表反映外部改动与服务端热重载后的最新状态。
   if (isMCP) { loadMCPs(); }
@@ -121,11 +139,12 @@ var aboutEndpointsLoading = false;
 // meta 缺失（例如手工用其它服务器托管静态页）才回退到服务端端点。
 export function initAboutToken() {
   if (!aboutTokenValueEl) { return; }
-  // 优先从 sessionStorage 读取浏览器缓存的 Token，回退到 meta 标签。
-  var token = sessionStorage.getItem('aicli-web-token');
+  // 优先 meta（**当前**进程注入的权威值），回退 sessionStorage 缓存：
+  // 反序会在进程重启换随机令牌后把上一个进程的旧令牌显示在「关于」页。
+  var meta = document.querySelector('meta[name="aicli-web-token"]');
+  var token = meta && meta.content ? String(meta.content).trim() : "";
   if (!token) {
-    var meta = document.querySelector('meta[name="aicli-web-token"]');
-    token = meta && meta.content ? String(meta.content).trim() : "";
+    try { token = sessionStorage.getItem('aicli-web-token') || ""; } catch (e) { /* ignore */ }
   }
   if (token) {
     aboutTokenValueEl.textContent = token;
@@ -356,6 +375,8 @@ export function closeShortcutHelpIfOpen() {
 export function initTabs() {
   tabMainBtn.addEventListener("click", function () { activateTab("main"); });
   if (tabSkillsBtn) { tabSkillsBtn.addEventListener("click", function () { activateTab("skills"); }); }
+  if (tabFilesBtn) { tabFilesBtn.addEventListener("click", function () { activateTab("files"); }); }
+  if (tabGitBtn) { tabGitBtn.addEventListener("click", function () { activateTab("git"); }); }
   if (tabMCPBtn) { tabMCPBtn.addEventListener("click", function () { activateTab("mcp"); }); }
   tabLogBtn.addEventListener("click", function () { activateTab("log"); });
   if (tabConfigBtn) { tabConfigBtn.addEventListener("click", function () { activateTab("config"); }); }

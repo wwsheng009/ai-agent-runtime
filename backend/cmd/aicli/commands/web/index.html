@@ -31,6 +31,7 @@
       <div class="menu-dropdown" id="menu-view-dropdown" role="menu" aria-labelledby="menu-view-btn">
         <button class="menu-item" type="button" role="menuitem" data-menu-action="sidebar-toggle">折叠/展开会话列表</button>
         <button class="menu-item" type="button" role="menuitem" data-menu-action="theme-toggle">切换主题（Ctrl+L）</button>
+        <button class="menu-item" type="button" role="menuitem" data-menu-action="composer-toggle">折叠/展开浮动输入面板（Ctrl+J）</button>
         <div class="menu-sep" role="separator"></div>
         <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-main">对话页签</button>
         <button class="menu-item" type="button" role="menuitem" data-menu-action="tab-log">日志页签</button>
@@ -163,6 +164,8 @@
     <div class="tabs">
       <button class="tab-btn active" id="tab-main-btn" type="button">对话</button>
       <button class="tab-btn" id="tab-skills-btn" type="button" title="当前会话可用的 skills（与 /skills 命令同源）">技能</button>
+      <button class="tab-btn" id="tab-files-btn" type="button" title="当前会话工作目录的文件管理器（/web/api/fs/*，与 runtime-server 文件浏览器同源）">文件</button>
+      <button class="tab-btn" id="tab-git-btn" type="button" title="当前会话工作目录的 git 状态 / diff / 提交（/web/api/git/*，与 runtime-server git 查看器同源）">GIT</button>
       <button class="tab-btn" id="tab-mcp-btn" type="button" title="MCP Server 管理：列表 / 新增 / 编辑 / 启停 / 热重载（与 /web/api/mcps 同源）">MCP</button>
       <button class="tab-btn" id="tab-log-btn" type="button">日志</button>
       <button class="tab-btn" id="tab-config-btn" type="button" title="provider / model / reasoning effort 配置管理">配置</button>
@@ -202,49 +205,11 @@
       </div>
       <span id="screen-copy-btn" class="screen-copy-btn" style="display:none" title="复制会话内容">⧉ 复制</span>
       <span id="scroll-bottom-btn" class="scroll-bottom-btn" style="display:none">↓ 最新</span>
-      <div id="dynamic-status" class="dynamic-status" style="display:none" aria-live="polite"></div>
-      <div id="input-row">
-        <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off" enterkeyhint="send"></textarea>
-        <button id="send-btn">发送</button>
-      </div>
-      <div id="cfg-bar">
-        <!-- 窄屏折叠触发器（桌面 display:none）：小屏不把三个选择器平铺占三行，
-             改为单行按钮 + 向上弹出的面板；当前生效配置也由本按钮承载。 -->
-        <button id="cfg-toggle" type="button" aria-expanded="false" title="展开 provider / model / reasoning 选择器">
-          <span class="cfg-toggle-icon" aria-hidden="true">⚙</span>
-          <span id="cfg-toggle-value" class="cfg-toggle-value">配置</span>
-          <span class="cfg-toggle-caret" aria-hidden="true">▾</span>
-        </button>
-        <!-- 桌面 display:contents：包裹层不生成盒子，三个选择器仍是 #cfg-bar 的平铺 flex 子项 -->
-        <div class="cfg-controls">
-          <label class="cfg-item">
-            <span class="cfg-label">Provider</span>
-            <select id="cfg-provider" title="切换 provider（/model --provider）"></select>
-          </label>
-          <label class="cfg-item cfg-model">
-            <span class="cfg-label">Model</span>
-            <span class="cfg-model-wrap">
-              <input id="cfg-model" placeholder="当前模型" title="切换模型（/model --model）：可直接输入自定义模型名，或点 ▼ 弹出列表选择" autocomplete="off">
-              <datalist id="cfg-model-options" hidden></datalist>
-              <button id="cfg-model-toggle" type="button" title="弹出模型列表">▼</button>
-              <span id="cfg-model-count" class="cfg-model-count" title="该 provider 可选模型数"></span>
-              <div id="cfg-model-popup" class="cfg-model-popup" style="display:none"></div>
-            </span>
-          </label>
-          <label class="cfg-item">
-            <span class="cfg-label">Reasoning</span>
-            <select id="cfg-reasoning" title="切换 reasoning_effort（/model -r）">
-              <option value="">(默认)</option>
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
-              <option value="max">max</option>
-            </select>
-          </label>
-          <span id="cfg-current" class="cfg-current" title="当前生效配置"></span>
-        </div>
-        <span id="cfg-status" class="cfg-status"></span>
-      </div>
+      <!-- 输入区（#input-row）/ provider·model·reasoning 选择器（#cfg-bar）/ 动态状态条
+           （#dynamic-status）已整体移出本页签：它们现在住在 body 级的浮动 composer 面板
+           （#composer-panel，见 .layout 之后）里，切换任意页签都能继续输入与切换配置；
+           旧结构挂在 #tab-main 内，切到文件/GIT/配置页签时输入区整块消失。
+           本页签只保留信息流与两个浮动按钮（复制 / 回到底部）。 -->
     </div>
 
     <div id="tab-skills" class="tab-panel">
@@ -268,6 +233,161 @@
           </div>
           <div id="skill-detail-tabs" class="skill-tabs" role="tablist" aria-label="技能详情分组"></div>
           <div id="skill-detail-body"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-files" class="tab-panel">
+      <!-- 二级页签：目录浏览 + 每个打开的文件一个页签（js/files.js）。
+           页签栏与技能详情同款（role=tablist + ←/→/Home/End 环绕、Delete 关闭文件页签）；
+           除「目录浏览」外都由客户端按需增删（打开文件即「查找或新建」），不新增后端端点。
+           大屏（≥900px）改成编辑器式左右分栏：左栏 = 文件浏览器（可折叠成窄轨），右栏 = 打开的
+           文件页签 + 面板；「目录浏览」页签由左栏取代（隐藏），浏览面板改为常显区域。
+           与文件浏览器相关的控件（作用域根 / 排序 / 上级 / 刷新 / 隐藏项 / 计数）**全部在左栏面板里**：
+           它们只作用于左栏那份目录列表，摆在页面顶部会让人误以为是页面级操作；窄屏下也少一条
+           与页签栏抢位置的横条（控件随浏览面板一起收起，见 .files-layout.browse-hidden）。
+           窄屏仍是「页签栏在上、面板在下」的上下结构。几何全在 style.css 的媒体查询里，
+            js/files.js 只对账 CSS 表达不了的可见性（浏览面板 hidden / 右栏空态 / 折叠态 /
+            左栏控件随浏览面板隐藏）。 -->
+      <div id="files-layout" class="files-layout">
+        <div id="files-side" class="files-side">
+          <!-- 左栏面板头 + 文件浏览器控件：大屏下整块 sticky（左栏自己滚动，列表再长控件也在手边），
+               窄屏下标题行隐藏、控件行跟在浏览面板上方——浏览面板不可见时整块一起收起。 -->
+          <div class="files-side-bar">
+            <div class="files-side-head">
+              <span class="files-side-title">文件浏览器</span>
+              <span class="config-toolbar-spacer"></span>
+              <button id="files-side-toggle" type="button" aria-expanded="true" aria-controls="files-side"
+                title="折叠文件浏览器（左栏）">«</button>
+            </div>
+            <div class="files-side-tools">
+              <select id="files-root-select" title="作用域根（当前 aicli 会话工作目录）"></select>
+              <select id="files-sort" title="排序方式">
+                <option value="type_then_name">目录优先</option>
+                <option value="name_asc">名称 ↑</option>
+                <option value="name_desc">名称 ↓</option>
+                <option value="mtime_desc">修改时间 ↓</option>
+                <option value="size_desc">大小 ↓</option>
+              </select>
+              <button id="files-up-btn" type="button" title="回到上级目录">⬆ 上级</button>
+              <button id="files-refresh-btn" type="button" title="重新拉取 /web/api/fs/roots 与当前目录">⟳ 刷新</button>
+              <label class="files-toggle" title="显示以 . 开头的隐藏条目">
+                <input id="files-hidden-toggle" type="checkbox"> 隐藏项
+              </label>
+              <span class="skills-count files-tools-count" id="files-count">未加载</span>
+            </div>
+          </div>
+          <div id="files-pane-browse" class="files-pane" role="tabpanel" aria-labelledby="files-tab-browse">
+            <div class="files-searchbar">
+              <input id="files-search" type="search" placeholder="按名称搜索（字面匹配，回车执行）…" autocomplete="off"
+                aria-label="搜索文件与目录" />
+              <button id="files-search-btn" type="button" title="在当前目录下搜索">🔍 搜索</button>
+              <button id="files-search-clear" type="button" title="清除搜索并回到目录浏览">✕</button>
+            </div>
+            <div id="files-path" class="files-path"></div>
+            <div id="files-status" class="files-status" aria-live="polite"></div>
+            <div id="files-list" class="files-list"><div class="files-empty">加载中…</div></div>
+          </div>
+        </div>
+
+        <!-- 左右分栏的宽度拖拽把手（窄屏隐藏）：role=separator 是标准的分栏语义，
+             可聚焦 → 键盘 ←/→ 微调、Home/End 到两端、双击复位；宽度记在
+             localStorage.webFilesSideWidth。见 js/files.js beginFilesSideDrag。 -->
+        <div id="files-side-splitter" class="files-splitter" role="separator" aria-orientation="vertical"
+          tabindex="0" aria-label="调整文件浏览器宽度"
+          title="拖拽调整左栏宽度（←/→ 微调、Home/End 到两端、双击复位）"></div>
+
+        <div id="files-main" class="files-main">
+          <div id="files-tabs" class="files-tabs" role="tablist" aria-label="文件面板视图">
+            <button id="files-tab-browse" class="files-tab active" type="button" role="tab" data-files-tab="browse"
+              aria-selected="true" aria-controls="files-pane-browse" tabindex="0">目录浏览</button>
+          </div>
+
+          <!-- 打开的文件面板挂载点：每个文件页签对应一个 role=tabpanel，由 js/files.js 创建/销毁
+               （不写死在 HTML 里，避免空面板被当成「已打开」）。内容走 /fs/preview：文本取 text、
+               图片取 data_base64、二进制与超限如实说明；Markdown 文件默认渲染并可切原文；
+               下载走 /fs/download（浏览器侧 blob 下载）。 -->
+          <div id="files-panes" class="files-panes"></div>
+
+          <!-- 大屏右栏空态：左栏常显后「目录浏览」页签不再占位，没有打开任何文件时给一句引导
+               （窄屏由「目录浏览」页签承载，这里始终 hidden）。 -->
+          <div id="files-main-empty" class="files-empty" hidden>从左侧文件浏览器选择一个文件打开（Markdown 文件默认渲染，可切原文）</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-git" class="tab-panel">
+      <!-- git 管理器：窄屏是「列表在上、diff 弹窗」的上下结构；大屏（≥900px）改成与「文件」
+           页签同款（js/splitpane.js）的左右分栏——左栏 = 状态分组 / 变更列表 / 提交记录，
+           右栏 = 选中变更的 diff。diff 面板是**同一个 DOM**：窄屏由 #git-diff-overlay 当弹窗遮罩，
+           大屏（媒体查询里改定位）变成右栏里的常驻块，语义同步从 dialog 换成 region
+           （见 js/git.js syncGitLayout）。几何全在 style.css，JS 只对账 CSS 表达不了的可见性。 -->
+      <div id="git-layout" class="git-layout">
+        <div id="git-side" class="git-side">
+          <!-- 左栏面板头 + 仓库信息 + 刷新：大屏下整块 sticky（左栏自己滚动，列表再长也在手边），
+               窄屏下标题行隐藏、仓库信息与刷新按钮留在顶部。 -->
+          <div class="git-side-bar">
+            <div class="git-side-head">
+              <span class="git-side-title">GIT</span>
+              <span class="config-toolbar-spacer"></span>
+              <button id="git-side-toggle" type="button" aria-expanded="true" aria-controls="git-side"
+                title="折叠 git 侧栏（左栏）">«</button>
+            </div>
+            <div class="git-side-tools">
+              <span class="skills-count" id="git-repo-label">未加载</span>
+              <button id="git-refresh-btn" type="button" title="重新拉取 /web/api/git/status 与提交列表">⟳ 刷新</button>
+            </div>
+            <div id="git-status-line" class="files-status" aria-live="polite"></div>
+            <!-- 侧栏二级页签：变更 / 提交记录（切换逻辑见 js/git.js selectGitSubTab）。
+                 两条列表不再上下堆叠，一次只看一条；页签上带条数，切换是纯客户端状态、
+                 不重新请求。键盘 ←/→/Home/End 走 roving tabindex，与文件页签同款。
+                 位置有讲究：必须留在 .git-side-bar 内部——大屏下左栏自己滚动、整块
+                 sticky 贴顶（见 style.css 同名媒体查询），页签才跟标题行一起留在视野里，
+                 变更列表再长也能换页签；挪到块外会静默退化成「一滚就看不见」。 -->
+            <div id="git-subtabs" class="git-subtabs" role="tablist" aria-label="git 侧栏视图">
+              <button id="git-subtab-changes" class="git-subtab active" type="button" role="tab"
+                data-git-subtab="changes" aria-selected="true" aria-controls="git-panel-changes"
+                tabindex="0">变更 <span class="git-subtab-count" id="git-changes-count"></span></button>
+              <button id="git-subtab-commits" class="git-subtab" type="button" role="tab"
+                data-git-subtab="commits" aria-selected="false" aria-controls="git-panel-commits"
+                tabindex="-1">提交记录 <span class="git-subtab-count" id="git-commits-count"></span></button>
+            </div>
+          </div>
+          <div id="git-panel-changes" class="git-panel" role="tabpanel" aria-labelledby="git-subtab-changes">
+            <div id="git-changes" class="git-changes"><div class="files-empty">加载中…</div></div>
+          </div>
+          <div id="git-panel-commits" class="git-panel" role="tabpanel" aria-labelledby="git-subtab-commits" hidden>
+            <div id="git-commits" class="git-commits"><div class="files-empty">加载中…</div></div>
+          </div>
+        </div>
+
+        <!-- 左右分栏的宽度拖拽把手（窄屏隐藏）：与文件页签同款，role=separator 可聚焦 →
+             键盘 ←/→ 微调、Home/End 到两端、双击复位；宽度记在 localStorage.webGitSideWidth。 -->
+        <div id="git-side-splitter" class="git-splitter" role="separator" aria-orientation="vertical"
+          tabindex="0" aria-label="调整 git 侧栏宽度"
+          title="拖拽调整左栏宽度（←/→ 微调、Home/End 到两端、双击复位）"></div>
+
+        <div id="git-main" class="git-main">
+          <!-- 大屏右栏空态：左栏常显后「没选中任何变更」不再是弹窗没打开，给一句引导
+               （窄屏始终 hidden，弹窗本身承载空态）。 -->
+          <div id="git-detail-empty" class="files-empty" hidden>从左侧选择一条变更查看 diff（可在工作区 / 已暂存之间切换）</div>
+
+          <!-- diff 面板：点击变更行打开（Esc / 遮罩 / ✕ 关闭）；target 可在
+               working / staged 间切换，whitespace 开关走服务端 --ignore-all-space。 -->
+          <div id="git-diff-overlay">
+            <div id="git-diff-modal" role="dialog" aria-modal="true" aria-labelledby="git-diff-title">
+              <div class="git-diff-header">
+                <span id="git-diff-title">diff</span>
+                <span class="config-toolbar-spacer"></span>
+                <button id="git-diff-target-working" type="button" title="工作区 vs 暂存区（git diff）">工作区</button>
+                <button id="git-diff-target-staged" type="button" title="暂存区 vs HEAD（git diff --cached）">已暂存</button>
+                <button id="git-diff-whitespace" type="button" title="忽略空白差异（git diff --ignore-all-space）">忽略空白: 关</button>
+                <button id="git-diff-close" type="button" aria-label="关闭">✕</button>
+              </div>
+              <div id="git-diff-meta" class="git-diff-meta"></div>
+              <div id="git-diff-body" class="git-diff-body"></div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -764,6 +884,81 @@
       </div>
     </div>
   </div>
+
+  <!-- 浮动 composer 面板：用户输入 + provider / model / reasoning_effort + 动态状态条。
+       ① 结构位置：.layout 内的浮层子节点（与 #main-col 平级），不属于任何页签——留在
+          #tab-main 内就只随「对话」页签显示，切到文件/GIT/配置等页签时输入区整块消失。
+       ② 几何：停靠态 position:absolute 浮在内容区底部居中（z-index 低于各模态框），
+          自由拖动后改 position:fixed 跟手。它是**独立浮层**：不参与常规流、不吃任何元素的
+          高度，尤其不改变 #footer（状态栏）的位置与尺寸——状态栏是页面自己的一层、永远
+          贴底，面板只是浮在它上方，两者互不影响。旧设计用 --composer-reserve 让正文区与
+          状态栏整体上移「让位」，把两层耦合成一层，已移除。
+       ③ 记忆：位置与折叠态由 js/composer.js 落 localStorage（隐私模式静默降级）。
+       ④ 按钮显隐：⇲「复位到底部居中停靠」只在面板离开原位（自由拖动后）时出现——停靠态
+          它无事可做，显隐由 CSS 按 data-composer-mode 控制，不做 JS 状态判断。
+       ⑤ 无障碍：role=region + 头部把手（可聚焦，方向键微调、Home 复位）+
+          折叠按钮 aria-expanded；快捷键 Ctrl+J（与「视图」菜单同一入口）。
+          配置文案只在标题行 #composer-summary 与窄屏 ⚙ 触发按钮上出现：面板底部不再重复
+          一份 provider · model · reasoning（与三个选择框完全重复）。 -->
+    <div id="composer-panel" class="composer-panel" role="region" aria-label="输入与模型配置（浮动面板）">
+      <div id="composer-header" class="composer-header">
+        <button id="composer-grip" class="composer-grip" type="button"
+          title="拖动移动面板（方向键微调，Home 复位）" aria-label="移动浮动输入面板">⠿</button>
+        <span class="composer-title">输入</span>
+        <span id="composer-summary" class="composer-summary" title="当前生效配置"></span>
+        <span class="composer-spacer"></span>
+        <button id="composer-reset-btn" class="composer-icon-btn" type="button"
+          title="复位到底部居中停靠">⇲</button>
+        <button id="composer-collapse-btn" class="composer-icon-btn" type="button"
+          aria-expanded="true" aria-controls="composer-body" title="折叠/展开浮动输入面板（Ctrl+J）">▾</button>
+      </div>
+      <!-- 动态状态条（与 aicli chat 底部活动状态行同步）：随面板一起浮动，
+           非「对话」页签下也能看到「正在思考 / 调用工具 / 等待审批」等实时状态。 -->
+      <div id="dynamic-status" class="dynamic-status" style="display:none" aria-live="polite"></div>
+      <div id="composer-body" class="composer-body">
+        <div id="input-row">
+          <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off" enterkeyhint="send"></textarea>
+          <button id="send-btn">发送</button>
+        </div>
+        <div id="cfg-bar">
+          <!-- 窄屏折叠触发器（桌面 display:none）：小屏不把三个选择器平铺占三行，
+               改为单行按钮 + 向上弹出的面板；当前生效配置也由本按钮承载。 -->
+          <button id="cfg-toggle" type="button" aria-expanded="false" title="展开 provider / model / reasoning 选择器">
+            <span class="cfg-toggle-icon" aria-hidden="true">⚙</span>
+            <span id="cfg-toggle-value" class="cfg-toggle-value">配置</span>
+            <span class="cfg-toggle-caret" aria-hidden="true">▾</span>
+          </button>
+          <!-- 桌面 display:contents：包裹层不生成盒子，三个选择器仍是 #cfg-bar 的平铺 flex 子项 -->
+          <div class="cfg-controls">
+            <label class="cfg-item">
+              <span class="cfg-label">Provider</span>
+              <select id="cfg-provider" title="切换 provider（/model --provider）"></select>
+            </label>
+            <label class="cfg-item cfg-model">
+              <span class="cfg-label">Model</span>
+              <span class="cfg-model-wrap">
+                <input id="cfg-model" placeholder="当前模型" title="切换模型（/model --model）：可直接输入自定义模型名，或点 ▼ 弹出列表选择" autocomplete="off">
+                <datalist id="cfg-model-options" hidden></datalist>
+                <button id="cfg-model-toggle" type="button" title="弹出模型列表">▼</button>
+                <span id="cfg-model-count" class="cfg-model-count" title="该 provider 可选模型数"></span>
+                <div id="cfg-model-popup" class="cfg-model-popup" style="display:none"></div>
+              </span>
+            </label>
+            <label class="cfg-item">
+              <span class="cfg-label">Reasoning</span>
+              <select id="cfg-reasoning" title="切换 reasoning_effort（/model -r）">
+                <option value="">(默认)</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="max">max</option>
+              </select>
+            </label>
+          </div>
+          <span id="cfg-status" class="cfg-status"></span>
+        </div>
+      </div>
+    </div>
 </div>
 
     <div id="footer">
@@ -773,6 +968,22 @@
       </span>
     </div>
     <div id="toast-container"></div>
+
+    <!-- 文件页签的右键小菜单（js/files.js openFilesTabMenu）：页签多起来后逐个点 ✕ 太慢，
+         右键（或键盘 Shift+F10 / 菜单键）在页签上弹出，一次关掉其它 / 左侧 / 右侧 / 全部。
+         放在 body 末尾而不是 #tab-files 里：它用 position:fixed 定位到指针处，
+         既是浮层就不该被页签容器的 overflow/层叠上下文牵连；样式也不必跟
+         #tab-files button 的通用按钮规则打架（见 style.css .tab-menu）。 -->
+    <div id="files-tab-menu" class="tab-menu" role="menu" aria-label="页签操作" hidden>
+      <button class="tab-menu-item" type="button" role="menuitem" data-menu-action="close">关闭当前页签</button>
+      <button class="tab-menu-item" type="button" role="menuitem" data-menu-action="others">关闭其它页签</button>
+      <div class="tab-menu-sep" role="separator"></div>
+      <button class="tab-menu-item" type="button" role="menuitem" data-menu-action="left">关闭左侧页签</button>
+      <button class="tab-menu-item" type="button" role="menuitem" data-menu-action="right">关闭右侧页签</button>
+      <div class="tab-menu-sep" role="separator"></div>
+      <button class="tab-menu-item" type="button" role="menuitem" data-menu-action="all">关闭全部文件页签</button>
+    </div>
+
     <div id="shortcut-help" style="display:none">
       <div class="shortcut-overlay"></div>
       <div class="shortcut-panel">
@@ -784,6 +995,7 @@
           <tr><td>Esc</td><td>中断（停止）</td></tr>
           <tr><td>Ctrl+L</td><td>切换深色/浅色主题</td></tr>
           <tr><td>Ctrl+K</td><td>清空当前屏幕</td></tr>
+          <tr><td>Ctrl+J</td><td>折叠/展开浮动输入面板（任意页签可用）</td></tr>
           <tr><td>Ctrl+/</td><td>显示/隐藏此面板</td></tr>
         </table>
         <button class="shortcut-close" type="button">关闭</button>

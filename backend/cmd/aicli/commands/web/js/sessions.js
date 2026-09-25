@@ -4,6 +4,8 @@
 import { autoGrow, clearPendingPrompts, dropPendingUserPrompt, getUiState, promptEl, refreshScreen, sendStatusEl, setUI, updateTitle } from "./chat.js";
 import { refreshCacheAnalyticsIfActive, syncCacheSession } from "./cache.js";
 import { syncSkillsSession } from "./skills.js";
+import { syncFilesSession } from "./files.js";
+import { syncGitSession } from "./git.js";
 import { apiFetch, esc, showToast, webAuthToken } from "./util.js";
 
 var sidebarEl = document.getElementById("sidebar");
@@ -622,6 +624,8 @@ function commitRenameSession(id, val, itemEl) {
         for (var i = 0; i < sessions.length; i++) {
           if (sessions[i].id === id) { sessions[i].title = json.title || val; break; }
         }
+        // 当前会话改名：标签页立即跟上（loadSessions 之前先给一次反馈）。
+        if (id === currentSessionID) { updateTitle(); }
         showToast("已重命名为「" + (json.title || val) + "」", "ok");
         loadSessions();
       } else {
@@ -759,31 +763,36 @@ function applyDeepLinkSession() {
   proceedResumeSession(target);
 }
 
+// currentSessionLabel：当前会话的展示标题，顶栏与浏览器标签页共用同一口径
+// （chat.js::updateTitle 经此取会话段，两处文案不会漂移）。"(untitled)"（后端
+// 占位标题）归一为中文占位；无当前会话时返回空串，占位文案由调用方决定
+// （顶栏「未选择会话」/ 标签页不加会话段）。
+export function currentSessionLabel() {
+  if (!currentSessionID) { return ""; }
+  return sessionTitleOf(currentSessionID) || "(未命名会话)";
+}
+
 // 当前会话身份：顶栏只显示标题，「关于」页签显示完整会话 ID。currentId 为
 // /web/api/sessions 响应的 current_session_id；标题从 sessions 缓存按 id 匹配
 // （调用点都保证缓存已随响应同步更新：loadSessions / 切换轮询 / 新建轮询），
-// 与侧栏列表同一数据时机。"(untitled)"（后端占位标题）归一为中文占位；
-// 长标题由 CSS 截断，悬停（title）看全值。
+// 与侧栏列表同一数据时机；长标题由 CSS 截断，悬停（title）看全值。
 function updateSessionIdentity(currentId) {
   currentSessionID = currentId || "";
+  var label = currentSessionLabel();
   if (headerSessionTitleEl) {
-    if (!currentSessionID) {
+    if (!label) {
       headerSessionTitleEl.textContent = "未选择会话";
       headerSessionTitleEl.removeAttribute("title");
     } else {
-      var title = "";
-      for (var i = 0; i < sessions.length; i++) {
-        if (sessions[i].id === currentSessionID) { title = sessions[i].title || ""; break; }
-      }
-      var shown = title && title !== "(untitled)" ? title : "(未命名会话)";
-      headerSessionTitleEl.textContent = shown;
-      headerSessionTitleEl.title = shown;
+      headerSessionTitleEl.textContent = label;
+      headerSessionTitleEl.title = label;
     }
   }
   if (aboutSessionIDEl) {
     // 值始终完整显示（CSS 允许换行），无需再用 title 兜底。
     aboutSessionIDEl.textContent = currentSessionID || "（未选择会话）";
   }
+  updateTitle(); // 窗口标题（P2 ⑤ + 会话标题）：切换 / 新建 / 重命名后重算
 }
 
 // applyMeshView 同步网格便捷视图（§6.2）：self 段为空 = 网格关闭 / 根不可读，
@@ -1005,6 +1014,10 @@ export function loadSessions() {
       syncCacheSession(data.current_session_id);
       // 技能页签同约定：目录属于当前会话的 Function Catalog，会话变化即过期。
       syncSkillsSession(data.current_session_id);
+      // 文件 / GIT 页签同约定：浏览的是当前会话的工作目录，会话变化即过期
+      // （可见时立即重拉，后台则记录，下次进入页签时按会话不一致强制刷新）。
+      syncFilesSession(data.current_session_id);
+      syncGitSession(data.current_session_id);
       // 顶栏标题 + 关于页签会话 ID 同步
       updateSessionIdentity(data.current_session_id);
       renderSessionList();

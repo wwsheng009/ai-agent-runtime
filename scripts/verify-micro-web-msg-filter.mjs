@@ -769,8 +769,9 @@ getElement("screen-copy-btn").click();
 await flush();
 await flush();
 var copyUrl = screenFetchUrls().pop();
-assert.strictEqual(copyUrl, "/web/api/screen?format=json&q=no-such-text",
-  "窗口只覆盖一部分时复制应取服务端完整文本（不带 msg_limit）并带上过滤条件");
+// 同 msg-window：复制显式带 msg_limit=all 取完整文本，过滤条件一并带上。
+assert.strictEqual(copyUrl, "/web/api/screen?format=json&msg_limit=all&q=no-such-text",
+  "窗口只覆盖一部分时复制应显式取服务端完整文本（msg_limit=all）并带上过滤条件");
 assert.ok(clipboardWrites.length > 0 && clipboardWrites[clipboardWrites.length - 1].indexOf("shell output") >= 0,
   "复制内容应来自过滤后的 transcript，实际 " + JSON.stringify(clipboardWrites));
 

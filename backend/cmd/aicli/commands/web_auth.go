@@ -53,6 +53,17 @@ import (
 // ?token=）」：GET/HEAD/SSE 事件流 likewise 需要令牌。Origin 校验在
 // 非回环模式下自动放宽（跨域访问是合法场景）。这确保仅拥有令牌的人能
 // 访问，避免暴露调试端点到局域网上的非授权用户。
+//
+// 「页面刷新」为什么需要 cookie：前端在页面加载后立刻把地址栏里的
+// ?token= 用 history.replaceState 抹掉（M7 红线，web-testing.md），于是
+// 浏览器随后发起的**文档导航**（F5 / 在新标签页粘贴同一地址 / 标签页恢复）
+// 既没有请求头、也读不到 sessionStorage —— 服务端只看到一个干净的 /web/，
+// 非回环模式下必然 403（F5 打不开页面）。cookie 是唯一能随导航自动回传的
+// 凭证通道，故页面响应在非回环模式下额外下发一枚 HttpOnly cookie
+// （SetChatWebPageAuthCookie），并**只**用它放行「GET/HEAD 请求客户端页面
+// 本身」这一种请求（chatWebPageCookieMayAuthorize）：/web/api/*、/debug/*
+// 与所有写方法仍只认 X-AICLI-Token / ?token=，cookie 拿不到任何读写能力，
+// 第三方页面也就无法借它发起 CSRF。
 // ============================================================================
 // ============================================================================
 
@@ -367,6 +378,77 @@ func chatWebIsStaticAssetRequest(r *http.Request) bool {
 	return false
 }
 
+// chatWebPageNavCookieName 是「客户端页面导航」鉴权 cookie 名。
+//
+// 它承载的仍是本进程写令牌（同一份，不复制），但只用于放行页面自身的
+// GET/HEAD 导航；API 与写方法一律走 X-AICLI-Token / ?token=。
+const chatWebPageNavCookieName = "aicli_web_token"
+
+// SetChatWebPageAuthCookie 在非回环模式下为客户端页面响应下发导航 cookie。
+//
+// 动机见文件头「页面刷新为什么需要 cookie」：地址栏 ?token= 被前端抹掉后，
+// F5 / 新标签页 / 标签页恢复这类浏览器自发的导航无法携带请求头或
+// sessionStorage，只有 cookie 会随导航自动回传。
+//
+// 属性与边界：
+//   - HttpOnly：页面 JS 读不到，前端存储/DOM 里不会出现第三份令牌副本（M7）；
+//   - SameSite=Strict：跨站请求不携带，避免被其它页面借力；
+//   - Path=/：同时覆盖 /web 与 /web/ 两种写法（刷新可能落在任一个上）；
+//   - 无 Max-Age/Expires：浏览器会话级 cookie，关闭浏览器即失效；
+//   - 回环模式不下发（那种模式下 GET 导航本就免令牌），令牌未生成时不动作。
+func SetChatWebPageAuthCookie(w http.ResponseWriter) {
+	if w == nil || IsChatWebLoopbackMode() {
+		return
+	}
+	token := ChatWebAuthToken()
+	if token == "" {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     chatWebPageNavCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+// chatWebPageCookieMayAuthorize 判断本次请求是否为「导航到客户端页面本身」，
+// 这是唯一允许用导航 cookie 换放行的场景（GET/HEAD + /web 或 /web/）。
+func chatWebPageCookieMayAuthorize(r *http.Request) bool {
+	if r == nil || IsChatWebLoopbackMode() {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(r.Method)) {
+	case http.MethodGet, http.MethodHead:
+	default:
+		return false
+	}
+	p := r.URL.Path
+	return p == ChatWebPath || p == strings.TrimSuffix(ChatWebPath, "/")
+}
+
+// chatWebCookieTokenValid 校验导航 cookie 中的写令牌（常量时间比较）。
+// 令牌未初始化 / 无 cookie / 值不匹配均返回 false（非回环模式默认拒绝）。
+func chatWebCookieTokenValid(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	expected := ChatWebAuthToken()
+	if expected == "" {
+		return false
+	}
+	c, err := r.Cookie(chatWebPageNavCookieName)
+	if err != nil || c == nil {
+		return false
+	}
+	provided := strings.TrimSpace(c.Value)
+	if provided == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
 // ChatWebAuthGuard 包装 HTTP 处理器，实施 Host/Origin/写令牌校验。
 // 校验失败返回 403 JSON（status=forbidden + reason）。
 func ChatWebAuthGuard(next http.HandlerFunc) http.HandlerFunc {
@@ -419,6 +501,11 @@ func chatWebAuthRejectReason(r *http.Request) string {
 			return ""
 		}
 		if isClientLoopbackIP(chatWebClientIP(r)) {
+			return ""
+		}
+		// 例外 3：页面导航 cookie —— 仅放行客户端页面本身的 GET/HEAD
+		// （F5 / 新标签页 / 标签页恢复；token 已从地址栏抹掉的场景）。
+		if chatWebPageCookieMayAuthorize(r) && chatWebCookieTokenValid(r) {
 			return ""
 		}
 		if !chatWebTokenValid(r) {

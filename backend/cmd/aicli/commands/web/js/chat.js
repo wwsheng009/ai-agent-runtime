@@ -5,7 +5,7 @@ import { hasPendingApproval, hasPendingQuestion, sendQuestionAnswer } from "./ap
 import { normalizeRenderMode, renderMessageBody } from "./markdown.js";
 import { filterAllowsRole, filterQueryString, isFilterActive, setFilterChangeHandler, updateFilterMatchInfo } from "./msg-filter.js";
 import { loadRuntimeMeta } from "./runtime.js";
-import { getInputHistory, getInputHistoryIdx, meshNodeSuffix, sendInput, setInputHistoryIdx } from "./sessions.js";
+import { currentSessionLabel, getInputHistory, getInputHistoryIdx, meshNodeSuffix, sendInput, setInputHistoryIdx } from "./sessions.js";
 import { statusEl } from "./sse.js";
 import { clearStreamMessage, hideStreamMessage, isStreamActive, isStreamEnded } from "./stream.js";
 import { closeShortcutHelpIfOpen, toggleShortcutHelp, toggleTheme } from "./ui.js";
@@ -767,16 +767,24 @@ export function autoGrow() {
   updateScrollBtn();
 }
 
-// ---- 页面标题反映运行状态 ----
+// ---- 页面标题反映运行状态与当前会话 ----
+// 组成：[状态前缀][<会话标题> · ]aicli micro web client[ · <工作区> · <节点短 id>]。
+// 会话标题打头：多窗口并排时标签页先回答「这是哪个会话」，再看节点归属；
+// 超长标题截断，避免把节点后缀挤出标签页可视区（悬停看全值仍是顶栏的职责）。
+// 会话未就绪（sessions 未返回）或未选择时不加该段，标题退回产品名 + 节点后缀。
+var TITLE_SESSION_MAX = 40;
 export function updateTitle() {
   var prefix = "";
   if (uiState === "busy") { prefix = "● "; }
   else if (uiState === "posting") { prefix = "… "; }
   else if (uiState === "interrupting") { prefix = "… "; }
   else if (statusEl && statusEl.classList.contains("disconnected")) { prefix = "✗ "; }
+  var label = currentSessionLabel();
+  if (label.length > TITLE_SESSION_MAX) { label = label.slice(0, TITLE_SESSION_MAX - 1) + "…"; }
+  var sessionPart = label ? label + " · " : "";
   // 节点后缀（P2 ⑤ / §7.3）：网格可用时拼「· <工作区> · <节点短 id>」，
   // 多窗口并排时能直接分辨窗口归属；网格关闭时 meshNodeSuffix() 为空串。
-  document.title = prefix + "aicli micro web client" + meshNodeSuffix();
+  document.title = prefix + sessionPart + "aicli micro web client" + meshNodeSuffix();
 }
 
 // ---- 欢迎页显示/隐藏 ----
@@ -798,9 +806,11 @@ function updateScrollBtn() {
   positionScrollBtn();
 }
 
-// 锚定到信息流可视区右下角：以信息流下沿为基准反推它与面板下沿的距离，
-// 底部区域（动态状态条 / 输入区 / 配置栏）任意高度变化都自动跟随。
-// 旧实现只减输入区高度、漏了其下的配置栏，按钮落进输入行里压住发送/结束按钮。
+// 锚定到信息流可视区右下角：以信息流下沿为基准反推它与 #tab-main 下沿的距离。
+// 输入区 / 配置栏 / 动态状态条在浮动 composer 面板里（见 js/composer.js），它们不占
+// #tab-main 的高度，按钮因此紧贴信息流下沿。浮动面板是独立浮层、不对正文与状态栏让位，
+// 停靠时会盖住内容区底部——按钮这种**浮层里的控件**必须自己让开它，否则会被盖住点不到；
+// 这里只挪按钮自身的位置，不改动任何一行的布局。
 function positionScrollBtn() {
   if (!scrollBottomBtn || !conversationEl) { return; }
   var panel = document.getElementById("tab-main");
@@ -810,7 +820,16 @@ function positionScrollBtn() {
   if (!panel.clientHeight) { return; }
   var streamBottom = (conversationEl.offsetTop || 0) + (conversationEl.offsetHeight || 0);
   var below = (panel.clientHeight || 0) - streamBottom;
-  scrollBottomBtn.style.bottom = (Math.max(0, below) + 12) + "px";
+  var bottom = Math.max(0, below) + 12;
+  // 停靠态的浮动面板浮在内容区底部：按真实矩形把按钮抬到面板顶边之上（+12px 呼吸位）。
+  // 用矩形相减而不是面板高度常量——折叠、动态状态条增高、窄屏换行都会自动跟上。
+  var composer = document.getElementById("composer-panel");
+  if (composer && composer.getAttribute("data-composer-mode") === "dock") {
+    var pr = composer.getBoundingClientRect(), tr = panel.getBoundingClientRect();
+    var overlap = tr.bottom - pr.top;
+    if (overlap > 0) { bottom = Math.max(bottom, overlap + 12); }
+  }
+  scrollBottomBtn.style.bottom = bottom + "px";
 }
 
 // ---- 跨模块状态访问接口(拆分引入) ----
@@ -988,8 +1007,9 @@ export function initChat() {
       updateScrollBtn();
     });
   }
-  // 信息流右下角锚定：多行输入增高 / 窄屏配置栏换行 / 动态状态条显隐都会
-  // 改变信息流下沿，必须重算，否则「最新」按钮可能再次压回发送/结束按钮。
+  // 信息流右下角锚定：多行输入增高 / 窄屏配置栏换行 / 动态状态条显隐 / 面板折叠或
+  // 拖动，都可能改变按钮与浮动面板的相对位置（面板不再让正文区让位，所以正文高度
+  // 不变，但面板自身的高度与位置会变），必须重算，否则「最新」按钮会被面板盖住。
   window.addEventListener("resize", positionScrollBtn);
   if (typeof ResizeObserver === "function") {
     var bottomObserver = new ResizeObserver(function () { positionScrollBtn(); });

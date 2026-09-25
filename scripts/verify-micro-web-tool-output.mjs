@@ -235,7 +235,7 @@ var chatElements = ["screen", "prompt", "send-btn", "send-status", "welcome",
   "sidebar-collapse-btn", "sessions-new-btn", "sessions-refresh-btn",
   "sessions-sort", "session-list", "cfg-provider", "cfg-model",
   "cfg-model-options", "cfg-model-toggle", "cfg-model-popup",
-  "cfg-model-count", "cfg-reasoning", "cfg-current", "cfg-status",
+  "cfg-model-count", "cfg-reasoning", "cfg-status",
 ];
 chatElements.forEach(function (id) { elements[id] = makeEl(id); });
 

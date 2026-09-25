@@ -159,8 +159,8 @@ func TestHandleChatWebPage_HeaderLayout(t *testing.T) {
 	}
 }
 
-// TestHandleChatWebPage_Tabs 锁定页签集合：对话 / 技能 / 日志 / 配置 / 缓存 / 分析 / 调试 / 关于。
-// 「技能」紧邻「对话」（会话的第二页签），承载当前会话的 skill 目录与详情弹层。
+// TestHandleChatWebPage_Tabs 锁定页签集合：对话 / 技能 / 文件 / GIT / MCP / 日志 / 配置 / 缓存 / 分析 / 调试 / 关于。
+// 「技能」「文件」「GIT」紧邻「对话」，依次承载当前会话的 skill 目录、文件管理器与 git 管理器。
 // 「分析」紧跟「缓存」，承载工具 / 子代理 / 失败模式聚合（runtime.analytics.v1）。
 // 「调试」页签承载与 aicli /debug 一致的「状态文档」，「关于」页签展示客户端标识。
 func TestHandleChatWebPage_Tabs(t *testing.T) {
@@ -170,27 +170,100 @@ func TestHandleChatWebPage_Tabs(t *testing.T) {
 	HandleChatWebPage(rec, req)
 
 	body := rec.Body.String()
-	for _, id := range []string{"tab-main-btn", "tab-skills-btn", "tab-log-btn", "tab-config-btn", "tab-cache-btn", "tab-analysis-btn", "tab-debug-btn", "tab-about-btn"} {
+	for _, id := range []string{"tab-main-btn", "tab-skills-btn", "tab-files-btn", "tab-git-btn", "tab-log-btn", "tab-config-btn", "tab-cache-btn", "tab-analysis-btn", "tab-debug-btn", "tab-about-btn"} {
 		if !strings.Contains(body, `id="`+id+`"`) {
 			t.Fatalf("page body missing tab button %q", id)
 		}
 	}
-	for _, id := range []string{"tab-main", "tab-skills", "tab-log", "tab-config", "tab-cache", "tab-analysis", "tab-debug", "tab-about"} {
+	for _, id := range []string{"tab-main", "tab-skills", "tab-files", "tab-git", "tab-log", "tab-config", "tab-cache", "tab-analysis", "tab-debug", "tab-about"} {
 		if !strings.Contains(body, `id="`+id+`"`) {
 			t.Fatalf("page body missing tab panel %q", id)
 		}
 	}
-	// 技能页签紧跟对话：main < skills < log。
+	// 会话相关页签紧跟对话且同序：main < skills < files < git < log。
 	mainBtnIdx := strings.Index(body, `id="tab-main-btn"`)
 	skillsBtnIdx := strings.Index(body, `id="tab-skills-btn"`)
+	filesBtnIdx := strings.Index(body, `id="tab-files-btn"`)
+	gitBtnIdx := strings.Index(body, `id="tab-git-btn"`)
 	logBtnIdx := strings.Index(body, `id="tab-log-btn"`)
-	if !(mainBtnIdx < skillsBtnIdx && skillsBtnIdx < logBtnIdx) {
-		t.Fatalf("tab button order = main:%d skills:%d log:%d, want main < skills < log", mainBtnIdx, skillsBtnIdx, logBtnIdx)
+	if !(mainBtnIdx < skillsBtnIdx && skillsBtnIdx < filesBtnIdx && filesBtnIdx < gitBtnIdx && gitBtnIdx < logBtnIdx) {
+		t.Fatalf("tab button order = main:%d skills:%d files:%d git:%d log:%d, want main < skills < files < git < log",
+			mainBtnIdx, skillsBtnIdx, filesBtnIdx, gitBtnIdx, logBtnIdx)
 	}
 	// 技能页签：列表容器 + 刷新入口 + 点击条目打开的详情弹层外壳。
 	for _, id := range []string{"skills-list", "skills-count", "skills-refresh-btn", "skill-detail-overlay", "skill-detail-body", "skill-detail-close"} {
 		if !strings.Contains(body, `id="`+id+`"`) {
 			t.Fatalf("skills tab missing element %q", id)
+		}
+	}
+	// 文件页签：作用域根下拉 + 工具栏 + 二级页签（目录浏览 + 每个打开的文件一个页签）+
+	// 目录列表 + 文件页签面板挂载点（元素 id 与 js/files.js 一一对应）。
+	// 查看文件不开弹窗：文件页签与其面板都由客户端按需创建，所以 HTML 里只有挂载点。
+	for _, id := range []string{
+		"files-count", "files-root-select", "files-sort", "files-hidden-toggle",
+		"files-up-btn", "files-refresh-btn", "files-search", "files-search-btn", "files-search-clear",
+		"files-path", "files-status", "files-list",
+		"files-tabs", "files-tab-browse", "files-pane-browse", "files-panes",
+		"files-layout", "files-side", "files-side-toggle", "files-side-splitter", "files-main", "files-main-empty",
+	} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Fatalf("files tab missing element %q", id)
+		}
+	}
+	// 左栏宽度把手：可聚焦的垂直分隔条（键盘 ←/→ 可调，见 js/files.js）。
+	if !strings.Contains(body, `id="files-side-splitter" class="files-splitter" role="separator" aria-orientation="vertical"`) {
+		t.Fatalf("files splitter should be an accessible vertical separator")
+	}
+	// 二级页签：大屏左右分栏的容器里，左栏（文件浏览器 + 折叠按钮）先于右栏（页签栏 +
+	// 面板挂载点 + 右栏空态）；目录浏览是页签栏里的第一个页签（默认选中）。
+	sideToggleIdx := strings.Index(body, `id="files-side-toggle"`)
+	browsePaneIdx := strings.Index(body, `id="files-pane-browse"`)
+	splitterIdx := strings.Index(body, `id="files-side-splitter"`)
+	tabsIdx := strings.Index(body, `id="files-tabs"`)
+	browseTabIdx := strings.Index(body, `id="files-tab-browse"`)
+	panesIdx := strings.Index(body, `id="files-panes"`)
+	mainEmptyIdx := strings.Index(body, `id="files-main-empty"`)
+	if !(filesBtnIdx < sideToggleIdx && sideToggleIdx < browsePaneIdx && browsePaneIdx < splitterIdx &&
+		splitterIdx < tabsIdx && tabsIdx < browseTabIdx && browseTabIdx < panesIdx && panesIdx < mainEmptyIdx) {
+		t.Fatalf("files tab order = filesBtn:%d sideToggle:%d browsePane:%d splitter:%d tabs:%d browseTab:%d panes:%d mainEmpty:%d, want filesBtn < sideToggle < browsePane < splitter < tabs < browseTab < panes < mainEmpty",
+			filesBtnIdx, sideToggleIdx, browsePaneIdx, splitterIdx, tabsIdx, browseTabIdx, panesIdx, mainEmptyIdx)
+	}
+	// 文件浏览器控件（作用域根 / 排序 / 上级 / 刷新 / 隐藏项 / 计数）都在左栏面板头顶那一块里：
+	// 它们只作用于左栏那份目录列表，页面顶部不再留文件工具栏（顶部工具栏会让人误以为是页面级
+	// 操作，窄屏下还要跟页签栏抢一行）。顺序：左栏 → 面板头 → 控件行 → 浏览面板。
+	sideIdx := strings.Index(body, `id="files-side"`)
+	sideBarIdx := strings.Index(body, `class="files-side-bar"`)
+	toolsIdx := strings.Index(body, `class="files-side-tools"`)
+	if !(filesBtnIdx < sideIdx && sideIdx < sideBarIdx && sideBarIdx < toolsIdx && toolsIdx < browsePaneIdx) {
+		t.Fatalf("files browser controls order = filesBtn:%d side:%d sideBar:%d tools:%d browsePane:%d, want filesBtn < side < sideBar < tools < browsePane",
+			filesBtnIdx, sideIdx, sideBarIdx, toolsIdx, browsePaneIdx)
+	}
+	for _, id := range []string{
+		"files-root-select", "files-sort", "files-up-btn", "files-refresh-btn", "files-hidden-toggle", "files-count",
+	} {
+		idx := strings.Index(body, `id="`+id+`"`)
+		if idx < toolsIdx || idx > browsePaneIdx {
+			t.Fatalf("files control %q must live in the browser panel controls row (between .files-side-tools and #files-pane-browse), got idx=%d tools=%d browsePane=%d",
+				id, idx, toolsIdx, browsePaneIdx)
+		}
+	}
+	if strings.Contains(body, `<h2 class="skills-title">文件</h2>`) {
+		t.Fatalf("files tab must not keep a page-level toolbar: its browser controls belong to the left panel")
+	}
+	if !strings.Contains(body, `id="files-tab-browse" class="files-tab active"`) {
+		t.Fatalf("files secondary tab bar should default to the browse tab being active")
+	}
+	if strings.Contains(body, "files-preview-overlay") {
+		t.Fatalf("files tab must not ship a preview dialog: opened files render in secondary tabs")
+	}
+	// GIT 页签：仓库标签 + 变更/提交两区 + diff 弹层（元素 id 与 js/git.js 一一对应）。
+	for _, id := range []string{
+		"git-repo-label", "git-refresh-btn", "git-status-line", "git-changes", "git-commits",
+		"git-diff-overlay", "git-diff-title", "git-diff-target-working", "git-diff-target-staged",
+		"git-diff-whitespace", "git-diff-close", "git-diff-meta", "git-diff-body",
+	} {
+		if !strings.Contains(body, `id="`+id+`"`) {
+			t.Fatalf("git tab missing element %q", id)
 		}
 	}
 	// 按钮与面板同序：分析紧跟缓存、调试在分析之后、关于在调试之后，避免新的页签插错位置。
@@ -228,6 +301,44 @@ func TestHandleChatWebPage_Tabs(t *testing.T) {
 	}
 	if debugBtnIdx > aboutIdx {
 		t.Fatalf("about panel must follow the debug panel: debug-btn=%d about=%d", debugBtnIdx, aboutIdx)
+	}
+}
+
+// TestHandleChatWebPage_FilesGitModules 验证「文件」「GIT」页签的前端模块随 go:embed 发布，
+// 数据源固定为 /web/api/fs/* 与 /web/api/git/*（与 internal/filebrowse、internal/gitbrowse 同源），
+// 且装配链完整：app.js 启动初始化、ui.js 页签激活时懒加载、sessions.js 会话切换时同步作用域。
+func TestHandleChatWebPage_FilesGitModules(t *testing.T) {
+	for _, asset := range []struct {
+		path string
+		want []string
+	}{
+		{path: "js/files.js", want: []string{
+			"/web/api/fs/roots", "/web/api/fs/list", "/web/api/fs/preview",
+			"/web/api/fs/download", "/web/api/fs/search",
+		}},
+		{path: "js/git.js", want: []string{
+			"/web/api/git/status", "/web/api/git/diff", "/web/api/git/commits", "/web/api/git/stage",
+		}},
+		{path: "app.js", want: []string{"initFiles()", "initGit()"}},
+		{path: "js/ui.js", want: []string{`activateTab("files")`, `activateTab("git")`, "loadFiles", "loadGit"}},
+		{path: "js/sessions.js", want: []string{"syncFilesSession(", "syncGitSession("}},
+	} {
+		req := httptest.NewRequest(http.MethodGet, ChatWebPath+asset.path, nil)
+		rec := httptest.NewRecorder()
+		HandleChatWebPage(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want 200", asset.path, rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/javascript") {
+			t.Fatalf("GET %s Content-Type = %q, want text/javascript", asset.path, ct)
+		}
+		body := rec.Body.String()
+		for _, want := range asset.want {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s missing %q", asset.path, want)
+			}
+		}
 	}
 }
 

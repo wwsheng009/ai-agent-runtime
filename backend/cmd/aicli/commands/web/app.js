@@ -3,6 +3,7 @@
 // <script type="module"> 直接加载本入口);各模块导出 initXxx() 供此处按
 // 原初始化顺序统一调用。测试方法见 docs/aicli/web-testing.md。
 import { initChat, renderButton, refreshScreen } from "./js/chat.js";
+import { initComposerPanel } from "./js/composer.js";
 import { initAnalysis } from "./js/analysis.js";
 import { initConfigAdmin } from "./js/config-admin.js";
 import { initProviderEditor } from "./js/provider-editor.js";
@@ -11,6 +12,8 @@ import { initApprovals } from "./js/approvals.js";
 import { initRuntimeBar, loadRuntimeMeta } from "./js/runtime.js";
 import { initSessions, loadSessions } from "./js/sessions.js";
 import { initSkills } from "./js/skills.js";
+import { initFiles } from "./js/files.js";
+import { initGit } from "./js/git.js";
 import { initMCP } from "./js/mcp.js";
 import { initMenu } from "./js/menu.js";
 import { initMsgFilter } from "./js/msg-filter.js";
@@ -29,6 +32,7 @@ initMenu(); // 顶部菜单栏（文件/视图/帮助 下拉 + 会话导出下�
 initStatusBar();
 initStream();
 initChat();
+initComposerPanel(); // 浮动 composer 面板（输入 + provider/model/reasoning + 动态状态条，任意页签可用）
 initMsgFilter(); // 对话区消息过滤面板（角色多选 + 正文搜索，服务端过滤）
 initRuntimeBar();
 initSessions();
@@ -37,6 +41,8 @@ initConfigAdmin();
 initProviderEditor();
 initProviderImport();
 initSkills();
+initFiles(); // 「文件」页签：文件管理器（预览弹窗 reparent + 工具栏事件绑定）
+initGit();   // 「GIT」页签：git 管理器（diff 弹窗 reparent + 工具栏事件绑定）
 initMCP();
 initAnalysis();
 

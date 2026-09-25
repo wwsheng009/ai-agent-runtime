@@ -1,4 +1,5 @@
-// 底部 cfg-bar:provider/model/reasoning 切换器、model 自定义 popup、权威配置同步与轮询。
+// 浮动 composer 面板里的 cfg-bar:provider/model/reasoning 切换器、model 自定义 popup、
+// 权威配置同步与轮询（面板本身的位置 / 折叠见 js/composer.js）。
 // aicli micro web client 前端模块(拆分自 app.js,无构建步骤,由 app.js 入口聚合)。
 
 import { apiFetch, esc } from "./util.js";
@@ -20,8 +21,8 @@ function cfgEls() {
     modelPopup: document.getElementById("cfg-model-popup"),
     modelCount: document.getElementById("cfg-model-count"),
     reasoning: document.getElementById("cfg-reasoning"),
-    current: document.getElementById("cfg-current"),
     toggleValue: document.getElementById("cfg-toggle-value"),
+    summary: document.getElementById("composer-summary"),
     status: document.getElementById("cfg-status")
   };
 }
@@ -259,9 +260,10 @@ export function loadRuntimeMeta() {
         els.reasoning.value = keepReasoning;
       }
       var currentText = (cfg.provider || "?") + " · " + (cfg.model || "?") + (cfg.reasoning ? " · " + cfg.reasoning : "");
-      els.current.textContent = currentText;
-      // 窄屏 #cfg-current 不占行，同一份「当前生效配置」改由折叠按钮承载。
+      // 这份配置文案只出现两处：窄屏的 ⚙ 触发按钮（选择框收进弹出面板）与面板标题行
+      // （折叠后只剩标题行）。桌面配置栏底部不再重复一份——三个选择框已经显示全了。
       if (els.toggleValue) { els.toggleValue.textContent = currentText; }
+      if (els.summary) { els.summary.textContent = currentText; els.summary.title = "当前生效配置: " + currentText; }
     })
     .catch(function (err) { console.error("runtime meta fetch failed:", err); });
 }

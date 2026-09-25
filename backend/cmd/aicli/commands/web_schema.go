@@ -75,6 +75,15 @@ const (
 	// 与 TUI /export、顶层 `aicli export` 共用同一套写出实现；只读端点，
 	// 回环模式免写令牌（非回环模式由页面注入的 fetch 包装附 X-AICLI-Token）。
 	ChatWebAPIExportPath = "/web/api/export"
+	// ChatWebAPIFsPath 文件浏览器端点前缀（「文件」页签）：roots / list /
+	// stat / preview / download / search 六个只读子路径，数据源与
+	// runtime-server 的 /api/runtime/fs/* 同一实现（internal/filebrowse +
+	// internal/fsscope），作用域根为当前 aicli 会话的工作目录。
+	ChatWebAPIFsPath = "/web/api/fs"
+	// ChatWebAPIGitPath git 浏览端点前缀（「GIT」页签）：status / diff /
+	// commits 只读，stage 为写操作（stage|unstage），数据源与
+	// runtime-server 的 /api/runtime/git/* 同一实现（internal/gitbrowse）。
+	ChatWebAPIGitPath = "/web/api/git"
 )
 
 // chatWebSchemaVersion 是 SSE 事件 data 中 _event.schema_version 字段的值。

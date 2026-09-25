@@ -72,6 +72,13 @@ web  (aicli 微型 Web 客户端 / 远程调用 API)
    - **页面注入**：`index.html` 注入 `<meta name="aicli-web-token">` 并由内联脚本包装
      `window.fetch` 自动附加，内置页面与「关于」页签无需手工操作。
 4. 只读 GET（含 SSE 事件流，`EventSource` 无法设置请求头）不要求令牌，但仍受 Host/Origin 校验。
+5. **页面导航 cookie（刷新 / 新标签页回读令牌）**：非回环访问下，返回内置页面（`/web`、`/web/`）时响应
+   附带 `Set-Cookie: aicli_web_token=<token>; Path=/; HttpOnly; SameSite=Strict`（会话级、无 `Max-Age`；
+   回环入口不下发）。F5 / 新标签页 / 标签页恢复属于**文档导航**，既没有自定义请求头、也读不到
+   `sessionStorage`，cookie 是唯一能随导航自动回传的凭证通道：客户端非回环且 cookie 内令牌校验通过时，
+   `GET`/`HEAD` 的 `/web`、`/web/` 页面请求放行；**API 请求与写方法一律不接受 cookie**，仍须
+   `X-AICLI-Token` / `?token=`。进程重启后随机令牌轮换、旧 cookie 随之失效，刷新会再次 `403`——
+   用启动行打印的带 `?token=` 地址重新打开一次即可恢复（`--web-token` 固定令牌则不会遇到）。
 
 ```powershell
 # 外部脚本：先从端点取 token（或从启动行 / /debug display 复制）后调用
@@ -105,6 +112,10 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | GET | `/web/api/skills[/{name}]` | 技能目录与详情 |
 | GET | `/web/api/analysis[/status\|tools\|subagents\|errors]` | 用量分析 |
 | GET | `/web/api/cache[/overview\|requests\|messages/{id}/trace]` | LLM 缓存分析 |
+| GET | `/web/api/fs/roots` | 文件页签：作用域根列表（`scope`/`kind`/`name`/`path`/`exists`/`is_git_repo`；`kind=session` 即当前会话工作目录，见本节「文件与 Git 浏览」） |
+| GET | `/web/api/fs/list\|stat\|preview\|download\|search` | 文件页签：目录列表（`cursor` 分页 / `sort` / `show_hidden` / `dirs_first`）/ 单路径元信息 / 文本与图片预览 / 附件下载（支持 Range/HEAD）/ 名称搜索 |
+| GET | `/web/api/git/status\|diff\|commits` | GIT 页签：仓库状态分组 / 结构化 diff（hunks，解析失败降级 `raw`）/ 提交分页 |
+| POST | `/web/api/git/stage` | GIT 页签：`{"scope","path","action":"stage"\|"unstage","files":[…]}`，响应自带更新后的 status（需写令牌） |
 | GET/POST | `/web/api/mcps` | MCP 列表（`config`+`status`，并附 `config` 解析诊断与 `summary` 计数）/ 新增（写 `mcp.yaml` 并热重载） |
 | GET/PUT/DELETE | `/web/api/mcps/{name}` | 查看 / 更新 / 删除单个 MCP |
 | POST | `/web/api/mcps/{name}/enable\|disable` | 启用/停用（持久化 `enabled` + 重连，刷新会话工具） |
@@ -178,6 +189,38 @@ curl.exe -s -OJ 'http://127.0.0.1:61772/web/api/export?format=trace'
 URL 传输据此生成 HTTP 头。页面「MCP」页签的键值行编辑器：stdio 全部按环境变量行编辑，
 URL 传输把 `HEADER_*` 拆成请求头行（去前缀），保存时合并回 `env` 并整体替换
 （支持删除行来清空）；行内支持 `KEY=VALUE` / `Key: Value` 多行粘贴自动拆分。
+
+### 文件与 Git 浏览（`/web/api/fs/*`、`/web/api/git/*`）
+
+页面「文件」「GIT」页签的数据源，与 runtime-server 的 `/api/runtime/fs/*`、`/api/runtime/git/*`
+共用同一实现（`internal/filebrowse` + `internal/fsscope`、`internal/gitbrowse`），两端行为一致。
+
+- **作用域根**：`GET /web/api/fs/roots` 列出可用根；aicli 进程内只有会话根（`kind=session`，
+  路径取当前会话的工作区绑定 `Metadata.Context[workspace_path]`），缺省 `session_id` 时按当前会话解析。
+  会话存在但没有工作区目录 → 400 `scope_has_no_root`，**绝不回退进程 cwd**。
+  前端必须把 roots 返回的 `scope` **原样回传**，不自行拼接 `session:` / `workspace:` 前缀。
+- **路径纪律**：`path` 是相对作用域根的路径（`/` 分隔）；URL 解码 → Clean → 越界校验统一由
+  `internal/fsscope` 负责，越界/非法路径返回 4xx + `{"error":{"code":"path_…","message":"…"}}`。
+- **只读端点**：`fs/list`（`scope`/`path`/`cursor`/`limit`/`sort`/`show_hidden`/`dirs_first`）、
+  `fs/stat`、`fs/preview`（`kind` = `text|image|binary|too_large`，文本超限时 `truncated=true`）、
+  `fs/download`（`http.ServeContent`，支持 Range/HEAD + `Content-Disposition: attachment`）、
+  `fs/search`（`q` 字面匹配 + `kinds`/`max_depth`/`max_scan`/`budget_ms`/`cursor` 分页）、
+  `git/status`（`repo` + `staged`/`unstaged`/`untracked`/`conflicts`/`renames` 分组）、
+  `git/diff`（`file`/`target=working|staged`/`context`/`whitespace`；解析失败时 `parse_error` 非空、
+  原文在 `raw`）、`git/commits`（`limit`/`cursor`，附 `has_more`/`next_cursor`）。
+- **写操作**：仅 `POST /web/api/git/stage`（`action` 只允许 `stage` / `unstage`），body
+  `{"scope","path","action","files":[…]}`；响应 `{action,files,status}` 里的 `status` 与
+  `GET /git/status` 同构，前端可直接替换本地缓存。非回环模式需 `X-AICLI-Token`。
+- **前端渲染约定**：`fs/preview` 的 `kind=text` 只返回原文，服务端不做任何 Markdown 渲染；
+  `mime` 为 `text/markdown` 的文件（`.md` / `.markdown`）由前端用对话区同款精简解析器渲染，
+  页签里的 `md|txt` 切换是纯客户端状态（不产生额外请求）。「文件」页签的二级页签
+   （目录浏览 + 每个打开的文件一个页签）同样是客户端状态：查看文件不开弹窗、内容就地显示在页签面板里，
+   大屏（≥900px）下这些页签改成编辑器式左右分栏（左：文件浏览器，含作用域根 / 排序 / 上级 /
+   刷新 / 隐藏项等控件，可折叠；右：打开的文件页签），断点、左栏宽度（拖拽/键盘可调）与折叠态、
+   右栏空态、控件行的显隐（随浏览面板）都只在前端——**不新增端点**。
+- **错误体**：fs 为 `{"error":{"code","message",…details}}`（details 来自 fsscope，如 `expected_offset`），
+  git 额外带 `exit_code`（仅 `git_failed`）；未知子路径分别返回 404 `fs_endpoint_not_found` /
+  `git_endpoint_not_found`，方法不符沿用 web 端点统一的 405 `{"status":"rejected","reason":"method not allowed"}`。
 
 ## 3. 同步远程调用：`POST /web/api/invoke`
 

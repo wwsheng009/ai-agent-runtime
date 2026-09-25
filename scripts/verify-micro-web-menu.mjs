@@ -202,6 +202,9 @@ check("每个菜单动作都指向真实存在的目标控件", () => {
     "tab-cache": "#tab-cache-btn",
     "tab-analysis": "#tab-analysis-btn",
     "shortcut-help": "#shortcut-help",
+    // 浮动 composer 面板的折叠开关：菜单动作转发到 js/composer.js 的
+    // toggleComposerPanel()（而不是点击某个控件），面板本身即目标。
+    "composer-toggle": "#composer-panel",
   };
   const items = header.querySelectorAll("#menu-bar .menu-item");
   assert.ok(items.length >= 12, "菜单项过少: " + items.length);

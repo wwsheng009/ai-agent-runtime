@@ -42,6 +42,11 @@ func HandleChatWebPage(w http.ResponseWriter, r *http.Request) {
 	}
 	if name == "index.html" {
 		data = chatWebInjectAuthToken(data)
+		// 非回环模式：下发导航 cookie，让 F5 / 新标签页 / 标签页恢复这类
+		// 「浏览器自己发起、带不了请求头也读不到 sessionStorage」的导航也能通过
+		// 鉴权（web_auth.go::SetChatWebPageAuthCookie；回环模式为空操作，
+		// cookie 只用于页面本身，不参与 API 与写方法）。
+		SetChatWebPageAuthCookie(w)
 	}
 	w.Header().Set("Content-Type", webAssetContentType(name))
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -52,12 +57,8 @@ func HandleChatWebPage(w http.ResponseWriter, r *http.Request) {
 // 执行）包装 window.fetch：对同源 /web/api/* 的请求自动附加 X-AICLI-Token。
 // 在回环模式下只对状态变更方法附加；在非回环模式（--web-host 0.0.0.0）下
 // 对所有方法（含 GET）附加，确保局域网访问也受令牌保护。
-// EventSource（SSE）无法设置请求头，sse.js 单独处理其 URL。
-// chatWebAuthFetchWrapperScript 在页面最早期（head 内联脚本，先于 ES 模块
-// 执行）包装 window.fetch：对同源 /web/api/* 的请求自动附加 X-AICLI-Token。
-// 在回环模式下只对状态变更方法附加；在非回环模式（--web-host 0.0.0.0）下
-// 对所有方法（含 GET）附加，确保局域网访问也受令牌保护。
-// Token 优先从 sessionStorage 读取（浏览器缓存），回退到 meta 标签。
+// 令牌取值顺序与 js/util.js::webAuthToken 一致：meta（当前进程注入的权威值）
+// 优先，sessionStorage 仅在 meta 缺失时兜底。
 // EventSource（SSE）无法设置请求头，sse.js 单独处理其 URL。
 const chatWebAuthFetchWrapperScript = `<script>
 (function () {
@@ -82,25 +83,33 @@ const chatWebAuthFetchWrapperScript = `<script>
     var deepSession = deepParams.get('session');
     if (deepSession) { window.__aicli_deep_link_session = String(deepSession); }
   } catch (e) { /* 存储不可用/老浏览器：退回 meta 标签路径 */ }
-  // 从 sessionStorage 缓存或 meta 标签获取 Token；优先使用浏览器缓存，
-  // 避免在 /web 访问时每次都需要 ?token= 参数。API 请求仍可显式指定 ?token=。
-  function getAICLIToken() {
-    var cached = sessionStorage.getItem(TOKEN_STORAGE_KEY);
-    if (cached) { return String(cached).trim(); }
+  // 令牌取值顺序（2026-09 修订，与 js/util.js::webAuthToken 一致）：
+  //   1. <meta name="aicli-web-token">：由**当前**进程注入，是权威值，且 meta
+  //      就在本脚本之前，head 阶段即可读到；
+  //   2. sessionStorage：同源缓存，只在 meta 缺失时兜底——进程重启换了随机
+  //      令牌后，缓存里可能是上一个进程的过期值。
+  // 顺序反了会怎样：ES 模块顶层的第一个写请求会带旧令牌 → 403。
+  function readMetaToken() {
     var meta = document.querySelector('meta[name="aicli-web-token"]');
-    if (meta && meta.content) {
-      var token = String(meta.content).trim();
-      sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+    return meta && meta.content ? String(meta.content).trim() : '';
+  }
+  function getAICLIToken() {
+    var token = readMetaToken();
+    if (token) {
+      try { sessionStorage.setItem(TOKEN_STORAGE_KEY, token); } catch (e) { /* 存储不可用 */ }
       return token;
     }
+    try {
+      var cached = sessionStorage.getItem(TOKEN_STORAGE_KEY);
+      if (cached) { return String(cached).trim(); }
+    } catch (e) { /* 隐私模式下 sessionStorage 可能抛错 */ }
     return '';
   }
-  // 页面加载时缓存 Token 到 sessionStorage，供后续请求使用。
+  // head 阶段同步把 meta 令牌写进 sessionStorage：ES 模块顶层（loadSessions 等）
+  // 可能在 DOMContentLoaded 之前就发请求，不能等事件回调再落缓存。
+  getAICLIToken();
+  // 「关于」页的链接改写放在 DOMContentLoaded：那时 DOM 才完整。
   window.addEventListener('DOMContentLoaded', function () {
-    var meta = document.querySelector('meta[name="aicli-web-token"]');
-    if (meta && meta.content) {
-      sessionStorage.setItem(TOKEN_STORAGE_KEY, String(meta.content).trim());
-    }
     // 非回环模式下：为关于页的所有外部链接附加 ?token=，
     // 这样在新标签页打开时也能通过查询参数携带令牌。
     if (!window.__aicli_non_loopback) { return; }

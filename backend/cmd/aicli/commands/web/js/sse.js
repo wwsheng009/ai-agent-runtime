@@ -123,7 +123,7 @@ function onSSEEvent(eventName, data) {
       loadStatusBar(); // 重连后刷新底部状态栏
       break;
     case "turn_start":
-      // 顶栏不再附带 provider/model（当前配置见底部配置栏 / 状态栏）。
+      // 顶栏不再附带 provider/model（当前配置见浮动 composer 面板的配置栏 / 状态栏）。
       setTurn("处理中");
       setUI("busy", "");
       beginStream();

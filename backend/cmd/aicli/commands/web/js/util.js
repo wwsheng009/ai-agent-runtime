@@ -30,21 +30,20 @@ export function configEl(id) { return document.getElementById(id); }
 //
 // 回环模式下 GET/SSE 无需令牌（Host/Origin 校验已足够，web_auth.go）；非回环模式
 // 下所有请求（含 SSE）都要带令牌，而 EventSource 无法设置请求头，只能走
-// `?token=`。取值顺序（与页面骨架注入的 fetch 包装一致）：
-//   1. sessionStorage 缓存（本页内复用，避免每连接都查 DOM）；
-//   2. 页面 <meta name="aicli-web-token">（非回环模式由服务端注入，先于 ES 模块执行）。
+// `?token=`。取值顺序（与页面骨架注入的 fetch 包装一致，2026-09 修订）：
+//   1. 页面 <meta name="aicli-web-token">：**当前**进程注入的权威值（先于 ES
+//      模块执行，head 内联脚本已把同一个值写进 sessionStorage）；
+//   2. sessionStorage 缓存：仅当 meta 缺失时兜底——同源上一个进程（随机令牌
+//      重启后）可能留下过期值，反序会让首个请求带旧令牌 → 403。
 // 只返回**本进程**令牌；peer 令牌从不进入前端（Web 子方案 §5.5 红线 1）。
 export function webAuthToken() {
-  try {
-    var cached = sessionStorage.getItem("aicli-web-token");
-    if (cached) { return cached; }
-  } catch (e) { /* 隐私模式下 sessionStorage 可能抛错：退回 meta */ }
   var meta = document.querySelector('meta[name="aicli-web-token"]');
   var token = meta && meta.content ? String(meta.content).trim() : "";
   if (token) {
     try { sessionStorage.setItem("aicli-web-token", token); } catch (e) { /* ignore */ }
+    return token;
   }
-  return token;
+  try { return sessionStorage.getItem("aicli-web-token") || ""; } catch (e) { return ""; }
 }
 
 

@@ -357,7 +357,7 @@ Object.defineProperty(globalThis, "navigator", {
   "sidebar-collapse-btn", "sessions-new-btn", "sessions-refresh-btn",
   "sessions-sort", "session-list", "cfg-provider", "cfg-model",
   "cfg-model-options", "cfg-model-toggle", "cfg-model-popup",
-  "cfg-model-count", "cfg-reasoning", "cfg-current", "cfg-status",
+  "cfg-model-count", "cfg-reasoning", "cfg-status",
   "input-row", "cfg-bar",
 ].forEach(function (id) { elements[id] = createEl("div", { id: id }); });
 
@@ -663,8 +663,10 @@ var copyBtn = elements["screen-copy-btn"];
 var fetchCountBeforeCopy = screenFetchUrls().length;
 screenQueue.push({ available: true, text: "full-0\nfull-1\nfull-2" });
 copyBtn.dispatch("click", { target: copyBtn });
-assert.strictEqual(screenFetchUrls()[screenFetchUrls().length - 1], "/web/api/screen?format=json",
-  "窗口不完整时复制应取全量 transcript（不带 msg_limit）");
+// 复制路径显式带 msg_limit=all：服务端缺省虽也返回完整 transcript，但显式参数
+// 让「要的是全量」这一意图不依赖服务端缺省值（见 chat.js::copyConversationText）。
+assert.strictEqual(screenFetchUrls()[screenFetchUrls().length - 1], "/web/api/screen?format=json&msg_limit=all",
+  "窗口不完整时复制应显式取全量 transcript（msg_limit=all）");
 assert.strictEqual(screenFetchUrls().length, fetchCountBeforeCopy + 1, "复制应只多发一次请求");
 assert.strictEqual(copied, "", "全量 transcript 取回前不应写入部分内容");
 await flush();

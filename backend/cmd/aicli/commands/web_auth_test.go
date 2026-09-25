@@ -91,6 +91,18 @@ func TestChatWebInjectAuthToken(t *testing.T) {
 	if !strings.Contains(out, "X-AICLI-Token") {
 		t.Fatalf("fetch wrapper missing: %s", out)
 	}
+	// 令牌取值顺序：meta（**当前**进程注入的权威值）必须先于 sessionStorage
+	// 兜底 —— 反序会让进程重启（随机令牌）后的首个请求带旧令牌 → 403。
+	getIdx := strings.Index(out, "function getAICLIToken")
+	if getIdx < 0 {
+		t.Fatalf("fetch wrapper missing getAICLIToken: %s", out)
+	}
+	body := out[getIdx:]
+	metaIdx := strings.Index(body, "readMetaToken()")
+	cacheIdx := strings.Index(body, "sessionStorage.getItem(TOKEN_STORAGE_KEY)")
+	if metaIdx < 0 || cacheIdx < 0 || metaIdx > cacheIdx {
+		t.Fatalf("令牌取值必须 meta 优先、sessionStorage 兜底（meta=%d, cache=%d）", metaIdx, cacheIdx)
+	}
 	if strings.Index(out, "aicli-web-token") > strings.Index(out, "</head>") {
 		t.Fatalf("snippet must be injected before </head>")
 	}
@@ -206,6 +218,121 @@ func TestChatWebInjectAuthTokenNonLoopback(t *testing.T) {
 	// fetch wrapper 条件应包含非回环判断
 	if !strings.Contains(out, "window.__aicli_non_loopback") {
 		t.Fatalf("fetch wrapper missing non-loopback check: %s", out)
+	}
+}
+
+// TestChatWebAuthGuardNonLoopbackPageCookie 覆盖「页面导航 cookie」例外：
+// 地址栏 ?token= 被前端 history.replaceState 抹掉后，F5 / 新标签页 / 标签页恢复
+// 这类浏览器自发的文档导航既没有请求头也读不到 sessionStorage，只有 cookie 会
+// 自动回传（web_auth.go 文件头「页面刷新为什么需要 cookie」）。
+func TestChatWebAuthGuardNonLoopbackPageCookie(t *testing.T) {
+	withTestWebToken(t, "nav-cookie-token-01")
+	withTestWebLoopbackMode(t, false)
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		cookie     string
+		token      string
+		wantStatus int
+	}{
+		{"页面导航无凭据被拒（刷新前态）", http.MethodGet, ChatWebPath, "", "", http.StatusForbidden},
+		{"页面导航带导航 cookie 放行（F5）", http.MethodGet, ChatWebPath, "nav-cookie-token-01", "", http.StatusOK},
+		{"HEAD 导航同样放行", http.MethodHead, ChatWebPath, "nav-cookie-token-01", "", http.StatusOK},
+		{"无尾斜杠 /web 同样放行", http.MethodGet, strings.TrimSuffix(ChatWebPath, "/"), "nav-cookie-token-01", "", http.StatusOK},
+		{"旧进程遗留 cookie 被拒（令牌已轮换）", http.MethodGet, ChatWebPath, "stale-token-from-old-process", "", http.StatusForbidden},
+		{"API GET 不接受导航 cookie（仍需请求头）", http.MethodGet, "/web/api/sessions", "nav-cookie-token-01", "", http.StatusForbidden},
+		{"API GET 带请求头正常放行", http.MethodGet, "/web/api/sessions", "", "nav-cookie-token-01", http.StatusOK},
+		{"写方法不接受导航 cookie", http.MethodPost, ChatWebPath, "nav-cookie-token-01", "", http.StatusForbidden},
+		{"静态资产本就免令牌", http.MethodGet, ChatWebPath + "js/util.js", "", "", http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "http://192.168.1.5:8080"+tt.path, nil)
+			req.Host = "192.168.1.5:8080"
+			if tt.cookie != "" {
+				req.AddCookie(&http.Cookie{Name: chatWebPageNavCookieName, Value: tt.cookie})
+			}
+			if tt.token != "" {
+				req.Header.Set(ChatWebAuthTokenHeader, tt.token)
+			}
+			rec := httptest.NewRecorder()
+			ChatWebAuthGuard(guardProbeHandler())(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d (body=%s)", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestChatWebPageAuthCookieLifecycle 验证导航 cookie 只在非回环模式下发，
+// 属性满足 HttpOnly + SameSite=Strict + Path=/ 且为浏览器会话级；
+// 并端到端验证「把响应里的 cookie 原样回灌到刷新请求上」能通过鉴权。
+func TestChatWebPageAuthCookieLifecycle(t *testing.T) {
+	withTestWebToken(t, "page-cookie-token-01")
+
+	// 回环模式：GET 导航本就免令牌，不下发 cookie（不扩大暴露面）。
+	withTestWebLoopbackMode(t, true)
+	rec := httptest.NewRecorder()
+	HandleChatWebPage(rec, httptest.NewRequest(http.MethodGet, ChatWebPath, nil))
+	if cookies := rec.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("回环模式不应下发导航 cookie，实际 %v", cookies)
+	}
+
+	// 非回环模式：页面响应带导航 cookie。
+	withTestWebLoopbackMode(t, false)
+	rec = httptest.NewRecorder()
+	HandleChatWebPage(rec, httptest.NewRequest(http.MethodGet, ChatWebPath, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("非回环模式应下发 1 枚导航 cookie，实际 %d: %v", len(cookies), cookies)
+	}
+	c := cookies[0]
+	if c.Name != chatWebPageNavCookieName || c.Value != "page-cookie-token-01" {
+		t.Fatalf("cookie = %s=%s, want %s=page-cookie-token-01", c.Name, c.Value, chatWebPageNavCookieName)
+	}
+	if !c.HttpOnly {
+		t.Fatalf("导航 cookie 必须 HttpOnly（页面 JS 不得读到令牌原文）")
+	}
+	if c.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("导航 cookie 必须 SameSite=Strict，实际 %v", c.SameSite)
+	}
+	if c.Path != "/" {
+		t.Fatalf("Path = %q, want /（同时覆盖 /web 与 /web/）", c.Path)
+	}
+	if c.MaxAge != 0 || !c.Expires.IsZero() {
+		t.Fatalf("导航 cookie 必须是浏览器会话级（不下发 Max-Age/Expires），实际 MaxAge=%d Expires=%v", c.MaxAge, c.Expires)
+	}
+	// 刷新形态：浏览器把 cookie 原样带回 /web/ 导航 → 放行（此前恒 403）。
+	refresh := httptest.NewRequest(http.MethodGet, ChatWebPath, nil)
+	refresh.AddCookie(c)
+	rec = httptest.NewRecorder()
+	ChatWebAuthGuard(guardProbeHandler())(rec, refresh)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("刷新请求 status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestChatWebAuthFrontendTokenOrder 锁定前端两处取值顺序为 meta 优先：
+// js/util.js（SSE 的 ?token= 取值）与 js/ui.js（「关于」页显示）都必须先读
+// 当前进程注入的 meta，再回退 sessionStorage —— 反序会把上一个进程的旧令牌
+// 带进请求/界面（随机令牌重启后 403）。
+func TestChatWebAuthFrontendTokenOrder(t *testing.T) {
+	for _, path := range []string{"web/js/util.js", "web/js/ui.js"} {
+		data, err := webFS.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		body := string(data)
+		metaIdx := strings.Index(body, `meta[name="aicli-web-token"]`)
+		cacheIdx := strings.Index(body, "sessionStorage.getItem(")
+		if metaIdx < 0 || cacheIdx < 0 || metaIdx > cacheIdx {
+			t.Errorf("%s 必须 meta 优先、sessionStorage 兜底（meta=%d, cache=%d）", path, metaIdx, cacheIdx)
+		}
 	}
 }
 

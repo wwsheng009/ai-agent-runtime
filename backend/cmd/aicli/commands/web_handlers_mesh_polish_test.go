@@ -67,7 +67,7 @@ func TestChatWebTitleHasMeshNodeSuffix(t *testing.T) {
 	chat := fetchChatWebAsset(t, "js/chat.js")
 	for _, token := range []string{
 		"meshNodeSuffix",
-		`document.title = prefix + "aicli micro web client" + meshNodeSuffix()`,
+		`document.title = prefix + sessionPart + "aicli micro web client" + meshNodeSuffix()`,
 	} {
 		if !strings.Contains(chat, token) {
 			t.Errorf("js/chat.js 缺少 %q（P2 ⑤ 标题节点后缀契约）", token)
@@ -86,6 +86,41 @@ func TestChatWebTitleHasMeshNodeSuffix(t *testing.T) {
 	} {
 		if !strings.Contains(sessions, token) {
 			t.Errorf("js/sessions.js 缺少 %q（P2 ⑤ 标题节点后缀契约）", token)
+		}
+	}
+}
+
+// TestChatWebTitleHasSessionLabel 断言窗口标题的会话标题段（2026-09-25 扩展）：
+// 标签页标题以当前会话标题打头（多窗口并排时先看会话，再看节点归属），
+// 会话身份变化（切换 / 新建 / 重命名 / 深链兜底）后必须重算——否则标签页会
+// 停在旧会话上，而这正是「窗口并排时认错窗口」的来源。
+func TestChatWebTitleHasSessionLabel(t *testing.T) {
+	chat := fetchChatWebAsset(t, "js/chat.js")
+	for _, token := range []string{
+		// 会话段取自 sessions.js 的同一口径（顶栏 / 标签页不漂移）。
+		"currentSessionLabel",
+		`var sessionPart = label ? label + " · " : ""`,
+		// 超长标题截断：节点后缀不能被挤出标签页可视区。
+		"TITLE_SESSION_MAX",
+	} {
+		if !strings.Contains(chat, token) {
+			t.Errorf("js/chat.js 缺少 %q（会话标题契约）", token)
+		}
+	}
+
+	sessions := fetchChatWebAsset(t, "js/sessions.js")
+	for _, token := range []string{
+		"export function currentSessionLabel",
+		// "(untitled)"（后端占位标题）归一为中文占位；无当前会话时返回空串，
+		// 由调用方决定占位（顶栏「未选择会话」/ 标签页不加会话段）。
+		`return sessionTitleOf(currentSessionID) || "(未命名会话)"`,
+		// 会话身份变化即重算标题（loadSessions / 切换 / 新建 / 深链回退）。
+		"updateTitle(); // 窗口标题（P2 ⑤ + 会话标题）",
+		// 当前会话改名：不等下一次列表拉取，标签页立即跟上。
+		"if (id === currentSessionID) { updateTitle(); }",
+	} {
+		if !strings.Contains(sessions, token) {
+			t.Errorf("js/sessions.js 缺少 %q（会话标题契约）", token)
 		}
 	}
 }

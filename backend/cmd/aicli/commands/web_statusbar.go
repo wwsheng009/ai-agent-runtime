@@ -6,7 +6,7 @@ package commands
 // 与 TUI 底部状态行（ChatBar）复用同一份段值构建函数（chatSurface*StatusSegment），
 // 保证 micro web client 的底部状态栏与 aicli chat TUI Seen 同一份数据：
 // balance / context used % / directory / git branch / window tokens / input|output tokens。
-// 注意：provider / model / reasoning_effort 在 Web 客户端由底部 cfg-bar 实时
+// 注意：provider / model / reasoning_effort 在 Web 客户端由浮动 composer 面板的 cfg-bar 实时
 // 展示，此处不重复。
 //
 // 响应示例：
@@ -117,7 +117,7 @@ func buildChatWebStatusBarSnapshotForSession(session *ChatSession) *chatWebStatu
 		SessionID: currentRuntimeSessionID(session),
 	}
 
-	// provider  / model / reasoning_effort 已在 cfg-bar 实时展示，
+	// provider  / model / reasoning_effort 已在浮动 composer 面板的 cfg-bar 实时展示，
 	// 此处状态栏仅显示运行时状态：balance / context / directory / git / window / tokens。
 
 	// routing（§6.4：与 TUI 状态栏段同源；零配置时不显示，§6.2 可见性）

@@ -579,7 +579,15 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   padding: 6px 10px; font-size: 12px; font-style: italic;
   text-align: left; max-width: 100%;
 }
-.tabs { display: flex; gap: 6px; margin-top: 8px; border-bottom: 1px solid var(--border); }
+.tabs {
+  display: flex; gap: 6px; margin-top: 8px;
+  /* 页签多起来（11 个）时把横向溢出关在页签条内部，别撑出页面级横向滚动条：
+     根滚动条会同时改变「视口高」(100vh) 与「布局视口高」(documentElement.clientHeight)，
+     任何按视口定位的元素都要额外处理这层差异（浮动面板的旧实现就因此在 800×600 下与
+     状态栏重叠 2px）。当前面板已改为 .layout 内定位、不受影响，这条仍是页面自身的卫生要求。 */
+  min-width: 0; overflow-x: auto; overflow-y: hidden;
+  border-bottom: 1px solid var(--border);
+}
 .tab-btn {
   padding: 5px 16px; cursor: pointer;
   background: var(--bg3); color: var(--fg3);
@@ -870,8 +878,9 @@ button:hover { background: var(--hoverBg2); }
   border: 1px solid var(--border); border-radius: 0 4px 4px 0;
 }
 #cfg-provider-protocol-toggle:hover { color: var(--fg); background: var(--hoverBg2); }
-#cfg-bar .cfg-current { color: var(--fg3); margin-left: auto; font-size: 11px; }
-#cfg-bar .cfg-status { font-size: 11px; color: var(--fg4); }
+/* 配置文案（provider · model · reasoning）不再在底部重复一份：三个选择框已经把它显示全了，
+   这里只留状态提示（切换中… / 提交失败…），并靠 margin-left:auto 保持右对齐。 */
+#cfg-bar .cfg-status { margin-left: auto; font-size: 11px; color: var(--fg4); }
 #cfg-bar .cfg-status.busy { color: var(--accent); }
 #cfg-bar .cfg-status.ok { color: var(--green); }
 #cfg-bar .cfg-status.err { color: var(--red, #e5534b); }
@@ -915,9 +924,91 @@ button.sending-btn:not(.stop-btn) { animation: pulse 1.2s ease-in-out infinite; 
 #footer a:hover { text-decoration: underline; color: var(--accent2); }
 #footer .sep { color: var(--fg4); }
 
+/* ---- 浮动 composer 面板（输入 + provider/model/reasoning + 动态状态条） ----
+   结构见 index.html #composer-panel：它是 .layout 内的浮层子节点（与 #main-col 平级），
+   不属于任何页签，所以切换任意页签都保持可用（旧结构是 #tab-main 的子节点，切页签即消失）。
+   状态由 js/composer.js 写进 data-composer-mode / class：
+     [data-composer-mode="dock"]（默认）停靠在**状态栏上方**居中；
+     [data-composer-mode="free"] 拖动后的自由位置（改 position:fixed，left/top 内联给出）；
+     .composer-collapsed 只留标题行。
+   两层互不影响是这里的关键约束：面板不参与常规流、不吃任何元素的高度，#footer（状态栏）
+   永远贴底，位置与尺寸都不因面板改变；反过来面板也不需要测量状态栏——它只是 .layout 的
+   子节点，bottom:8px 天然落在状态栏上方。旧实现把面板高度写进 --composer-reserve、再由
+   body 的 padding-bottom 消费，让正文区与状态栏整体上移「让位」，把两层耦合在一起，而且
+   页面一旦出现根滚动条（100vh 与布局视口高度不等）就会与状态栏重叠，已移除。 */
+#composer-panel {
+  position: absolute; z-index: 50;
+  left: 50%; bottom: 8px; transform: translateX(-50%);
+  width: min(920px, calc(100% - 24px));
+  padding: 6px 10px 10px;
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: 10px;
+  box-shadow: 0 10px 30px var(--shadow);
+  font-size: 12px;
+}
+/* 焦点在面板内（如正在输入）时强调边框：浮层压在内容上，需要一眼看出焦点归属 */
+#composer-panel:focus-within { border-color: var(--accent); }
+/* 自由位置：改回 position:fixed 跟手（拖动坐标是视口坐标，窗口缩放/页面滚动时仍贴指针），
+   left/top 由 composer.js 内联给出；必须清掉 translateX(-50%)，否则面板会再向左偏半个身位。 */
+#composer-panel[data-composer-mode="free"] { position: fixed; left: 0; top: 0; bottom: auto; transform: none; }
+/* 「⇲ 复位到底部居中停靠」只在面板离开原位（自由拖动后）时出现：停靠态它无事可做，
+   常驻只是标题行噪音。显隐直接跟 data-composer-mode 走，不需要 JS 状态；
+   display:none 的元素不参与点按与 Tab 焦点，键盘用户仍可用把手 Home 复位。 */
+#composer-panel[data-composer-mode="dock"] #composer-reset-btn { display: none; }
+/* 拖动期间锁光标与选中（与 .pane-resizing 同一套路） */
+body.composer-dragging { cursor: grabbing; user-select: none; }
+body.composer-dragging * { cursor: grabbing !important; user-select: none !important; }
+
+#composer-panel .composer-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 0 4px; margin-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+#composer-panel .composer-title { font-size: 11px; font-weight: 600; color: var(--fg3); }
+#composer-panel .composer-spacer { flex: 1 1 auto; }
+#composer-grip {
+  padding: 2px 6px; line-height: 1.2; font-size: 12px;
+  background: transparent; color: var(--fg4);
+  border: 1px solid transparent; border-radius: 4px;
+  cursor: grab;
+  touch-action: none; /* 触屏拖把手时不触发页面滚动 */
+}
+#composer-grip:hover { color: var(--fg); background: var(--hoverBg); }
+#composer-grip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#composer-panel .composer-summary {
+  min-width: 0; font-size: 11px; color: var(--fg4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#composer-panel .composer-summary:empty { display: none; }
+#composer-panel .composer-icon-btn {
+  padding: 2px 8px; line-height: 1.2; font-size: 12px;
+  background: transparent; color: var(--fg3);
+  border: 1px solid transparent; border-radius: 4px;
+}
+#composer-panel .composer-icon-btn:hover { background: var(--hoverBg2); color: var(--fg); }
+#composer-panel .composer-body { display: flex; flex-direction: column; gap: 6px; }
+/* 面板内的既有控件：外边距归零，行距交给 .composer-body 的 gap 统一控制 */
+#composer-panel #cfg-bar { margin: 0; }
+#composer-panel #dynamic-status { margin: 0 0 6px 0; background: var(--bg3); }
+/* 折叠态：只留标题行（高度约 34px），正文与状态条一并收起 */
+#composer-panel.composer-collapsed .composer-body,
+#composer-panel.composer-collapsed #dynamic-status { display: none !important; }
+#composer-panel.composer-collapsed .composer-header {
+  margin-bottom: 0; padding-bottom: 2px; border-bottom: none;
+}
+
+/* 面板不再占用正文区 / 状态栏的空间：body 保持基础内边距，没有占位变量。 */
+
+/* 窄屏：配置摘要隐藏（同一份文案已由 #cfg-toggle 承载），z-index 降到会话抽屉（30）
+   之下——抽屉是临时覆盖层，打开时应当盖住面板。宽度与停靠位置沿用基础规则。 */
+@media (max-width: 767px) {
+  #composer-panel { z-index: 20; padding: 4px 8px 8px; }
+  #composer-panel .composer-summary { display: none; }
+  #composer-panel .composer-icon-btn { padding: 4px 10px; }
+}
+
 /* ---- 底部状态栏（micro web client 版 ChatBar） ---- */
 /* 与 TUI 底部状态行同源：balance · context · directory · git branch · window
-   （provider/model/reasoning 见底部 cfg-bar，不在此重复）。*/
+   （provider/model/reasoning 见浮动 composer 面板里的 cfg-bar，不在此重复）。*/
 #status-bar-container {
   display: inline-flex; align-items: center; gap: 4px;
   font-family: var(--font-mono, "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace);
@@ -957,7 +1048,9 @@ button.sending-btn:not(.stop-btn) { animation: pulse 1.2s ease-in-out infinite; 
 
 
 /* ---- 左侧会话列表侧边栏 ---- */
-.layout { display: flex; flex: 1; min-height: 0; }
+/* position:relative 是浮动 composer 面板的定位基准（见下方 #composer-panel）：面板停靠态
+   用 absolute 浮在内容区底部，所以它既不吃高度、也不会改变 #footer（状态栏）的位置。 */
+.layout { position: relative; display: flex; flex: 1; min-height: 0; }
 #sidebar {
   width: 264px; min-width: 0; flex-shrink: 0;
   display: flex; flex-direction: column;
@@ -1226,8 +1319,10 @@ body.sidebar-collapsed #sidebar {
   user-select: none;
 }
 #screen-copy-btn { top: 10px; }
-/* 兜底值；运行时由 chat.js positionScrollBtn() 按信息流下沿重算覆盖 */
-#scroll-bottom-btn { bottom: 56px; }
+/* 兜底值；运行时由 chat.js positionScrollBtn() 按信息流下沿与浮动面板顶边重算覆盖。
+   停靠的面板浮在内容区底部（约 132px + 8px 间隙），兜底值必须高于它，否则首帧
+   JS 还没跑到时按钮会藏在面板后面。 */
+#scroll-bottom-btn { bottom: 160px; }
 #screen-copy-btn:hover, #scroll-bottom-btn:hover {
   background: var(--hoverBg2); border-color: var(--accent);
 }
@@ -1261,8 +1356,13 @@ body.sidebar-collapsed #sidebar {
    会话标题也不再与状态争抢同一行。 */
 @media (max-width: 767px) {
   /* 100dvh：移动浏览器地址栏收放时不至于把输入区顶出可视范围（不支持的浏览器保留 100vh）。
-     底部再叠加 iPhone 手势条安全区：env() 不被支持时该声明整条失效，回退到上面的 8px。 */
-  body { padding: 8px; height: 100dvh; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+     底部安全区只保护页面自己的底行（状态栏）：浮动面板是独立的另一层，停靠在 .layout
+     底部、天然位于状态栏上方，这里不需要也不应该为它让出占位。
+     env() 取不到时由 max() 的第一个分支兜底。 */
+  body {
+    padding: 8px; height: 100dvh;
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
+  }
   header {
     /* 下拉面板的定位基准：窄屏统一按顶栏宽度展开，彻底消除右侧溢出 */
     position: relative;
@@ -1286,8 +1386,8 @@ body.sidebar-collapsed #sidebar {
   .menu-dropdown { left: 0; right: 0; min-width: 0; max-width: none; padding: 6px; }
   .menu-btn { padding: 5px 10px; }
   .menu-item { white-space: normal; padding: 9px 12px; }
-  /* 会话列表抽屉：整高覆盖在内容之上（此前上下留白 48px/40px，与内容区错位） */
-  .layout { position: relative; }
+  /* 会话列表抽屉：整高覆盖在内容之上（此前上下留白 48px/40px，与内容区错位）。
+     .layout 的定位基准已在基础规则里给出（浮动面板停靠也用它），这里不再重复声明。 */
   #sidebar {
     position: absolute; left: 0; top: 0; bottom: 0; z-index: 30;
     width: min(240px, 78vw); margin: 0;
@@ -1295,7 +1395,7 @@ body.sidebar-collapsed #sidebar {
     box-shadow: 0 4px 16px var(--shadow);
   }
   body.sidebar-collapsed #sidebar { width: 0; }
-  /* ---- 底部 composer（输入区 + cfg-bar）----
+  /* ---- 浮动 composer 面板内的输入区 + cfg-bar（面板几何见前面的 #composer-panel）----
      触屏三条硬规则：① 输入控件字号 ≥16px（低于 16px 时 iOS 聚焦会自动放大整页）；
      ② 可点按控件高度 ≥44px；③ 输入区与发送键同排右对齐，别让 composer 吃掉正文高度。 */
   #input-row { flex-wrap: nowrap; gap: 6px; }
@@ -1312,7 +1412,7 @@ body.sidebar-collapsed #sidebar {
   /* ---- 配置栏：小屏折叠成弹出面板 ----
      三个选择器平铺在窄屏要占 3 行 99px；改为单行触发按钮 + 向上弹出的面板。
      面板绝对定位覆盖在正文之上（不挤压正文，也不触发 ResizeObserver 重排），
-     当前生效配置（#cfg-current）小屏不再单独占行，改由触发按钮承载。 */
+     配置文案（provider · model · reasoning）小屏由触发按钮承载，桌面也不在底部重复。 */
   #cfg-bar {
     position: relative; display: flex; align-items: center; gap: 8px;
     margin: 4px 0 0; padding: 4px 6px;
@@ -1344,7 +1444,6 @@ body.sidebar-collapsed #sidebar {
   #cfg-bar .cfg-model-wrap { flex: 1 1 auto; min-width: 0; }
   /* 面板里模型名最需要宽度：解除桌面 150px 上限，输入框吃满该行剩余空间 */
   #cfg-bar .cfg-model input { flex: 1 1 auto; min-width: 0; width: auto; max-width: none; }
-  #cfg-bar .cfg-current { display: none; }
   #cfg-bar .cfg-status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #cfg-bar .cfg-status:empty { display: none; }
   #cfg-model-toggle { padding: 8px 12px; font-size: 13px; }
@@ -1991,4 +2090,501 @@ body.sidebar-collapsed #sidebar {
   font-size: 12px;
   line-height: 1.5;
   white-space: pre;
+}
+
+/* ---- 「文件」页签：文件管理器（js/files.js）----
+   工具条/空态复用 skills-* 与 config-* 现有类；这里补列表行、路径面包屑、
+   搜索栏、二级页签与文件页签面板。查看文件不开弹窗：每个打开的文件一个二级页签，
+   内容直接渲染在页签面板里（Markdown 默认渲染，可切原文）。 */
+#tab-files { padding-top: 8px; overflow: auto; }
+#tab-files button, #tab-git button {
+  cursor: pointer; font-family: inherit; font-size: 12px; padding: 4px 10px;
+  background: var(--bg3); color: var(--fg2); border: 1px solid var(--border); border-radius: 6px;
+}
+#tab-files button:hover, #tab-git button:hover { background: var(--hoverBg); color: var(--fg); }
+#tab-files button:disabled, #tab-git button:disabled { opacity: 0.5; cursor: default; }
+#tab-files select, #tab-git select {
+  font-family: inherit; font-size: 12px; padding: 3px 6px;
+  background: var(--bg3); color: var(--fg2); border: 1px solid var(--border); border-radius: 6px;
+  max-width: 240px;
+}
+.files-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--fg3); }
+.files-searchbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+#files-search {
+  flex: 1; min-width: 0; box-sizing: border-box;
+  background: var(--bg3); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 8px; font-family: inherit; font-size: 12px;
+}
+#files-search:focus { outline: none; border-color: var(--border2); }
+.files-path {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px; color: var(--fg3); margin-bottom: 6px;
+}
+.files-path:empty { display: none; }
+.files-crumb {
+  background: none; border: none; padding: 1px 4px; border-radius: 4px;
+  color: var(--fg2); font-family: inherit; font-size: 11.5px;
+}
+#tab-files .files-crumb { padding: 1px 4px; background: none; border: none; }
+#tab-files .files-crumb:hover { background: var(--hoverBg); color: var(--fg); }
+.files-crumb-sep { color: var(--fg4); }
+.files-status { font-size: 11px; color: var(--fg4); margin-bottom: 6px; }
+.files-status:empty { display: none; }
+.files-list { display: flex; flex-direction: column; gap: 4px; padding-bottom: 16px; }
+.files-empty { color: var(--fg4); font-size: 12px; padding: 8px 0; }
+.files-empty.files-error { color: var(--red, #e5534b); }
+.files-search-head { font-size: 11px; color: var(--fg4); padding: 2px 0 6px; }
+.files-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  padding: 6px 10px; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.files-row:hover { background: var(--hoverBg); border-color: var(--border2); }
+.files-icon { flex: 0 0 auto; font-size: 13px; }
+.files-name {
+  flex: 1 1 auto; min-width: 0; font-size: 12.5px; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+/* meta 允许被压缩并省略：左栏可以拖到 200px，此时「大小 · 时间」比名字还宽会把整行顶出
+   列表（横向溢出 → 左栏长出横向滚动条）。名字本来就带省略号，meta 同样处理。 */
+.files-meta {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  font-size: 11px; color: var(--fg4); white-space: nowrap;
+}
+.files-more {
+  align-self: flex-start; margin-top: 4px;
+  font-size: 12px; padding: 4px 10px;
+}
+#git-diff-overlay {
+  display: none; position: fixed; z-index: 1100;
+  inset: 0; background: var(--overlayBg); padding: 16px;
+  justify-content: center; align-items: center;
+}
+#git-diff-overlay.active { display: flex; }
+#git-diff-modal {
+  position: relative; width: min(860px, calc(100vw - 32px));
+  max-height: min(88vh, 900px); overflow: hidden;
+  background: var(--modalBg); border: 1px solid var(--border2);
+  border-radius: 12px; display: flex; flex-direction: column;
+  box-shadow: 0 12px 40px var(--shadow);
+}
+.git-diff-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 16px; border-bottom: 1px solid var(--border);
+  background: var(--bg3); font-size: 13px; color: var(--fg2);
+}
+.git-diff-header button {
+  cursor: pointer; font-family: inherit; font-size: 12px; padding: 4px 10px;
+  background: var(--bg2); color: var(--fg2); border: 1px solid var(--border); border-radius: 6px;
+}
+.git-diff-header button:hover { background: var(--hoverBg); color: var(--fg); }
+.git-diff-header button.active { background: var(--activeBg); color: var(--fg); border-color: var(--border2); }
+.git-diff-meta {
+  padding: 7px 16px; font-size: 11px; color: var(--fg4);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 文件页签面板（js/files.js createFileTab）：头部（文件名 / 作用域内路径 / 操作按钮）
+   + meta 行 + 正文。正文随面板一起在 #tab-files 里滚动，不另开内滚动区——
+   与目录列表的滚动方式一致。 */
+.files-view-head {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.files-view-name { flex: 0 0 auto; font-size: 13px; font-weight: 600; color: var(--fg); }
+.files-view-path {
+  flex: 0 1 auto; min-width: 0;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px; color: var(--fg4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.files-view-meta {
+  padding: 6px 0; font-size: 11px; color: var(--fg4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.files-view-body {
+  margin: 0; padding: 2px 0 16px;
+  font-size: 12px; line-height: 1.6; color: var(--fg2);
+  white-space: pre-wrap; word-break: break-word;
+}
+.files-view-body.files-view-text {
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px; line-height: 1.55;
+  background: var(--codeBg); color: var(--codeFg);
+}
+.files-view-body.files-view-image { text-align: center; }
+.files-view-body.files-view-image img { max-width: 100%; height: auto; border-radius: 8px; }
+
+/* 二级页签条：文件面板（目录浏览 + 每个打开的文件）与 git 侧栏（变更 / 提交记录）共用
+   同一套外观（切换逻辑见 js/files.js selectFilesTab / js/git.js selectGitSubTab）。
+   与技能详情页签同款：选中下划线画在按钮内部（::after, bottom:0），不靠
+   margin-bottom:-1px 去压页签栏外边框——页签栏 overflow-x:auto 会把 overflow-y
+   算成 auto，压边框会让页签多出 1px 并长出纵向滚动条。 */
+.files-tabs, .git-subtabs {
+  display: flex; align-items: stretch; gap: 2px;
+  margin-bottom: 8px; border-bottom: 1px solid var(--border);
+  overflow-x: auto; overflow-y: hidden;
+}
+#files-tabs .files-tab,
+#git-subtabs .git-subtab {
+  position: relative; padding: 5px 12px 8px;
+  background: none; border: none;
+  border-radius: 6px 6px 0 0; /* 覆盖全局 button 的全圆角，贴合页签下边框 */
+  color: var(--fg4); font: inherit; font-size: 12px; cursor: pointer;
+  white-space: nowrap; transition: color 0.12s ease;
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 220px; /* 文件名过长时省略，页签栏保持单行横向滚动 */
+}
+#files-tabs .files-tab::after,
+#git-subtabs .git-subtab::after {
+  content: ""; position: absolute; left: 8px; right: 8px; bottom: 0;
+  height: 2px; border-radius: 2px; background: transparent;
+  transition: background-color 0.12s ease;
+}
+#files-tabs .files-tab:hover,
+#git-subtabs .git-subtab:hover { color: var(--fg2); background: var(--hoverBg); }
+#files-tabs .files-tab.active,
+#git-subtabs .git-subtab.active { color: var(--accent2); font-weight: 600; }
+#files-tabs .files-tab.active::after,
+#git-subtabs .git-subtab.active::after { background: var(--accent); }
+#files-tabs .files-tab:focus-visible,
+#git-subtabs .git-subtab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
+.files-tab-icon { flex: 0 0 auto; font-size: 12px; }
+.files-tab-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 关闭 ✕：页签内部的 span（button 里不能再嵌 button，浏览器会把内层拆掉）。
+   默认淡显，悬停或选中时才醒目；点它只关页签、不切页签（见 js/files.js 的点击委托），
+   键盘走 Delete。 */
+.files-tab-close {
+  flex: 0 0 auto; margin-left: 2px; padding: 0 3px; border-radius: 4px;
+  font-size: 11px; line-height: 15px; color: var(--fg4); opacity: 0.5;
+}
+#files-tabs .files-tab:hover .files-tab-close,
+#files-tabs .files-tab.active .files-tab-close { opacity: 1; }
+#files-tabs .files-tab .files-tab-close:hover { background: var(--hoverBg); color: var(--fg); }
+
+/* 二级页签面板：hidden 必须显式生效（.files-pane 自身不设 display，
+   避免 class 规则盖掉 UA 的 [hidden]{display:none}）。 */
+.files-pane[hidden] { display: none; }
+
+/* 文件面板容器：窄屏是「页签栏在上、面板在下」的上下结构——.files-main 用 order 提到最前，
+   浏览面板（.files-side 内）排在其后；没有打开任何文件时页签栏整条收起（只剩「目录浏览」
+   一条、没得可切，窄屏大屏同理）。
+   大屏（≥900px）换成编辑器式左右分栏，见下面同名媒体查询。 */
+.files-layout { display: flex; flex-direction: column; }
+.files-side { min-width: 0; }
+.files-main { min-width: 0; display: flex; flex-direction: column; order: -1; }
+.files-main.no-file-tabs #files-tabs { display: none; }
+.files-side-head { display: none; } /* 标题行 + 折叠按钮只在分栏时出现 */
+/* 文件浏览器控件（作用域根 / 排序 / 上级 / 刷新 / 隐藏项 / 计数）：都在左栏面板内——窄屏跟在
+   浏览面板上方，大屏与标题行一起 sticky 在左栏顶部（见下面的媒体查询）。允许换行：左栏最窄
+   200px，一行放不下就摊成两行，不横向溢出、不把下拉挤没。 */
+.files-side-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.files-side-tools select { flex: 1 1 96px; min-width: 0; max-width: 100%; }
+.files-side-tools button, .files-side-tools .files-toggle { flex: 0 0 auto; }
+.files-tools-count { flex: 0 0 auto; margin-left: auto; white-space: nowrap; }
+/* 浏览面板不可见时（窄屏切到某个文件页签）控件一起收起——它们本来就只作用于那份目录列表。 */
+.files-layout.browse-hidden .files-side-tools { display: none; }
+.files-splitter { display: none; }  /* 宽度拖拽把手只在分栏时出现 */
+
+/* ---- 大屏（≥900px）：文件页签改成编辑器式左右分栏 ----
+   左栏 = 文件浏览器（可折叠成窄轨），右栏 = 打开的文件页签 + 面板；两栏各自滚动
+   （#tab-files 不再整体滚动）。窄屏那个「目录浏览」页签在大屏被左栏取代（隐藏），
+   浏览面板相应改成常显——用 id 特异性盖掉 .files-pane[hidden]，折叠态再盖回来。 */
+@media (min-width: 900px) {
+  /* 只改滚动方式：#tab-files 就是 .tab-panel（active 时已是 flex 纵向），这里若写
+     display 会盖掉 .tab-panel 的 display:none——id 选择器比 class 选择器重，
+     面板会跑到别的页签上去。 */
+  #tab-files { overflow: hidden; }
+  .files-layout { flex: 1 1 auto; min-height: 0; flex-direction: row; }
+  /* 左栏宽度由 --files-side-width 决定（js/files.js 拖拽时改它，默认 300px）：
+     flex-shrink 保持 1、两侧各有 min-width，窗口变窄时浏览器自己把两栏挤到最小宽度，
+     不需要 JS 跟着窗口 resize 重算。折叠态用 flex-basis 直接盖掉（不是改变量）。 */
+  .files-side {
+    flex: 0 1 var(--files-side-width, 300px); min-width: 200px; min-height: 0; overflow: auto;
+    padding-right: 10px; border-right: 1px solid var(--border);
+  }
+  .files-main {
+    /* flex-basis 必须是 0：basis:auto 会取内容宽度，内容一宽就把左栏按比例挤小——
+       用户明明拖到 585px、右侧也放得下，左栏却会莫名其妙缩水。basis 0 + min-width
+       表示「右栏只吃剩下的空间，不够时先挤左栏」。 */
+    flex: 1 1 0; min-width: 320px; min-height: 0; order: 0;
+    padding-left: 12px; overflow: hidden;
+  }
+  /* 拖拽把手：负外边距吃掉自身宽度，所以只加命中区、不改两栏几何；
+     hover / 聚焦 / 拖拽中在交界处亮一条 2px 竖线做提示。 */
+  .files-splitter {
+    display: block; flex: 0 0 8px; margin: 0 -4px;
+    position: relative; cursor: col-resize; touch-action: none;
+  }
+  .files-splitter::after {
+    content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px;
+    border-radius: 2px; background: transparent; transition: background-color 0.12s ease;
+  }
+  .files-splitter:hover::after,
+  .files-splitter:focus-visible::after,
+  body.pane-resizing .files-splitter::after { background: var(--accent); }
+  .files-splitter:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 2px; }
+  #files-tabs { flex: 0 0 auto; }
+  #files-panes { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  #files-pane-browse { display: block; }
+  /* 双 id：页签按钮的 display 由 #files-tabs .files-tab 给出（1,1,0），单个 id 盖不住。 */
+  #files-tabs #files-tab-browse { display: none; }
+  /* 左栏自己滚动（overflow:auto 在上面 .files-side 上），标题行 + 控件整块 sticky 贴顶：
+     列表滚到哪都能改排序 / 回上级 / 刷新。背景用页面底色，滚动内容从下面穿过不重影。 */
+  .files-side-bar {
+    position: sticky; top: 0; z-index: 2; background: var(--bg);
+    margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+  .files-side-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .files-side-title { font-size: 12px; font-weight: 600; color: var(--fg2); }
+  .files-side-tools { margin-bottom: 0; }
+  /* 折叠：左栏收成一条窄轨，只留折叠按钮（按钮始终在 DOM 里且可见，焦点不丢）；
+      宽度把手与浏览控件一起收起来（要先展开才能用）。 */
+  .files-layout.side-collapsed .files-side { flex-basis: 34px; min-width: 0; padding-right: 0; }
+  .files-layout.side-collapsed .files-side-bar {
+    margin-bottom: 0; padding-bottom: 0; border-bottom: none;
+  }
+  .files-layout.side-collapsed .files-side-head { flex-direction: column; margin-bottom: 0; }
+  .files-layout.side-collapsed .files-side-title,
+  .files-layout.side-collapsed .files-side-tools { display: none; }
+  .files-layout.side-collapsed #files-pane-browse { display: none; }
+  .files-layout.side-collapsed .files-splitter { display: none; }
+}
+
+/* 拖拽中：光标锁成 col-resize，并禁掉文本选中（否则拖到列表/代码上会一路刷选区）。
+   由 js/splitpane.js 在拖拽期间挂在 <body> 上，「文件」与「GIT」两个页签共用。 */
+body.pane-resizing { cursor: col-resize; user-select: none; }
+body.pane-resizing * { cursor: col-resize !important; user-select: none !important; }
+
+/* ---- 文件页签的右键小菜单（js/files.js openFilesTabMenu）----
+   浮层：position:fixed 到指针处（贴边时 JS 翻到内侧并夹进视口），hidden 属性控制显隐
+   （菜单项一律 tabindex=-1，焦点由脚本在打开/↑↓ 时给——标准 menu 模式，页签栏仍是唯一
+   的 Tab 停靠点）。放在 <body> 末尾而不是 #tab-files 里，样式不必跟 #tab-files button
+   的通用按钮规则打架（那条是 id 选择器，权重比类高）。 */
+.tab-menu {
+  position: fixed; z-index: 1200; min-width: 170px;
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 4px; background: var(--modalBg); border: 1px solid var(--border2);
+  border-radius: 8px; box-shadow: 0 8px 24px var(--shadow);
+}
+.tab-menu[hidden] { display: none; }
+.tab-menu-item {
+  text-align: left; cursor: pointer; font-family: inherit; font-size: 12.5px;
+  padding: 6px 10px; border: none; border-radius: 5px;
+  background: transparent; color: var(--fg2);
+}
+.tab-menu-item:hover:not(:disabled), .tab-menu-item:focus-visible:not(:disabled) {
+  background: var(--hoverBg); color: var(--fg);
+}
+.tab-menu-item:focus-visible { outline: 1px solid var(--border2); outline-offset: -1px; }
+.tab-menu-item:disabled { cursor: default; color: var(--fg4); opacity: 0.55; }
+.tab-menu-sep { height: 1px; margin: 3px 6px; background: var(--border); }
+
+/* Markdown 渲染（js/files.js updateFileTab）：正文由块级元素排版，不吃
+   .files-view-body 的 pre-wrap；排版规则与对话区 .msg-md 对齐，但两处样式
+   各自独立（改对话区不会连带改动文件页签，反之亦然）。 */
+.files-view-body.files-view-md { white-space: normal; }
+.files-view-md h1, .files-view-md h2, .files-view-md h3,
+.files-view-md h4, .files-view-md h5, .files-view-md h6 { margin: 0; color: var(--fg); }
+.files-view-md h1 { font-size: 17px; }
+.files-view-md h2 { font-size: 16px; }
+.files-view-md h3 { font-size: 15px; }
+.files-view-md h4 { font-size: 14px; }
+.files-view-md h5, .files-view-md h6 { font-size: 13px; }
+.files-view-md p { margin: 0; }
+.files-view-md ul, .files-view-md ol { margin: 0; padding-left: 20px; }
+.files-view-md li { margin: 0; }
+.files-view-md li.task { list-style: none; margin-left: -18px; }
+.files-view-md li.task.done { color: var(--fg3); }
+.files-view-md a { color: var(--accent); }
+.files-view-md strong { color: var(--fg); }
+.files-view-md del { color: var(--fg3); }
+.files-view-md blockquote {
+  margin: 0; padding: 2px 10px;
+  border-left: 3px solid var(--border2); color: var(--fg3);
+}
+.files-view-md code {
+  background: var(--codeBg); color: var(--codeFg);
+  padding: 1px 4px; border-radius: 3px;
+  font-family: inherit; font-size: 12px;
+}
+.files-view-md table { border-collapse: collapse; margin: 0; font-size: 12px; }
+.files-view-md th, .files-view-md td { border: 1px solid var(--border); padding: 3px 8px; text-align: left; }
+.files-view-md th { background: var(--bg2); font-weight: 600; }
+.files-view-md pre {
+  margin: 0; padding: 8px 10px; position: relative;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+}
+.files-view-md pre code { background: transparent; padding: 0; font-size: 12px; }
+/* 代码块复制按钮 / 语言标签：结构与对话区一致（见 js/markdown.js 输出结构）。 */
+.files-view-md pre .copy-code-btn {
+  position: absolute; top: 4px; right: 4px;
+  padding: 2px 8px; font-size: 10px; line-height: 1.4;
+  background: var(--bg3); color: var(--copyBtn);
+  border: 1px solid var(--border); border-radius: 4px;
+  cursor: pointer; opacity: 0; transition: opacity .15s;
+  font-family: inherit;
+}
+.files-view-md pre:hover .copy-code-btn { opacity: 1; }
+.files-view-md pre .copy-code-btn:hover { background: var(--hoverBg); color: var(--copyBtnHover); }
+.files-view-md pre .lang-label {
+  position: absolute; top: 4px; left: 8px;
+  font-size: 10px; color: var(--fg4); font-style: italic;
+  pointer-events: none; text-transform: uppercase; user-select: none;
+}
+
+/* ---- 「GIT」页签：git 管理器（js/git.js）---- */
+#tab-git { padding-top: 8px; overflow: auto; }
+/* git 管理器容器：窄屏是「列表在上、diff 弹窗」的上下结构；大屏（≥900px）换成与「文件」
+   页签同款的编辑器式左右分栏（左栏列表 + 右栏 diff），几何见下面同名媒体查询。
+   与文件页签共用 js/splitpane.js，所以折叠/拖拽/记忆值那套行为完全一致。 */
+.git-layout { display: flex; flex-direction: column; }
+.git-side { min-width: 0; }
+.git-main { min-width: 0; display: flex; flex-direction: column; }
+.git-side-head { display: none; } /* 标题行 + 折叠按钮只在分栏时出现 */
+.git-side-tools { display: flex; align-items: center; gap: 8px; }
+.git-side-tools .skills-count {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.git-splitter { display: none; } /* 宽度拖拽把手只在分栏时出现 */
+/* 右栏正在显示的那条变更：与 .git-row:hover 同色系但更明确（accent 描边），
+   大屏左右分栏时「右边是谁的 diff」一眼可辨；窄屏也照样标。 */
+.git-row.active { border-color: var(--accent); background: var(--activeBg); }
+/* 侧栏二级页签（变更 / 提交记录）：页签条外观与文件页签共用上面那一组规则，
+   这里只补 git 特有的两处——页签上的条数徽标、面板 hidden 的显式生效。 */
+.git-subtab-count {
+  flex: 0 0 auto; padding: 0 5px; border-radius: 8px;
+  background: var(--bg3); color: var(--fg4); font-size: 10px; line-height: 15px;
+}
+.git-subtab-count:empty { display: none; } /* 加载中不占位，也不留上一轮的旧数字 */
+#git-subtabs .git-subtab.active .git-subtab-count { color: var(--accent2); }
+/* hidden 必须显式生效（.git-panel 自身不设 display，避免 class 规则盖掉 UA 的
+   [hidden]{display:none}），与 .files-pane 同款。 */
+.git-panel[hidden] { display: none; }
+.git-changes, .git-commits { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; }
+.git-group { display: flex; flex-direction: column; gap: 4px; }
+.git-group-head { font-size: 11.5px; color: var(--fg3); margin-top: 4px; }
+.git-group-count { color: var(--fg4); }
+.git-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.git-row:hover { background: var(--hoverBg); border-color: var(--border2); }
+.git-row[role="button"] { cursor: pointer; }
+.git-row-static { cursor: default; }
+.git-badge {
+  flex: 0 0 auto; min-width: 18px; text-align: center;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10.5px; padding: 1px 5px; border-radius: 4px;
+  background: var(--bg3); color: var(--fg3); border: 1px solid var(--border);
+}
+.git-badge-staged { color: var(--green, #3fb950); border-color: var(--green, #3fb950); }
+.git-badge-unstaged { color: var(--orange, #d29922); border-color: var(--orange, #d29922); }
+.git-badge-untracked { color: var(--accent); border-color: var(--accent); }
+.git-badge-conflict { color: var(--red, #e5534b); border-color: var(--red, #e5534b); }
+.git-path {
+  flex: 1 1 auto; min-width: 0; font-size: 12.5px; color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.git-row-meta { flex: 0 0 auto; font-size: 11px; color: var(--fg4); white-space: nowrap; }
+.git-row-actions { flex: 0 0 auto; display: inline-flex; gap: 4px; }
+.git-action { padding: 1px 7px; line-height: 1.4; }
+.git-commit {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px; background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+}
+.git-commit-sha {
+  flex: 0 0 auto; font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px; color: var(--accent);
+}
+.git-commit-subject { flex: 1 1 auto; min-width: 0; font-size: 12.5px; color: var(--fg); }
+.git-commit-meta { flex: 0 0 auto; font-size: 11px; color: var(--fg4); }
+.git-commit-refs { flex: 0 0 100%; font-size: 11px; color: var(--fg3); }
+.git-diff-body {
+  flex: 1; min-height: 160px; overflow: auto;
+  background: var(--codeBg); color: var(--codeFg);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px; line-height: 1.5;
+  white-space: pre; padding: 8px 0;
+}
+.git-hunk-head {
+  padding: 3px 12px; color: var(--accent); background: var(--bg3);
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0;
+}
+.git-diff-line { display: flex; align-items: flex-start; gap: 8px; padding: 0 12px; }
+.git-diff-no { flex: 0 0 auto; width: 88px; color: var(--fg4); user-select: none; text-align: right; }
+.git-diff-text { flex: 1 1 auto; white-space: pre-wrap; word-break: break-word; }
+.git-diff-add { background: var(--greenBg, rgba(63, 185, 80, 0.12)); }
+.git-diff-del { background: var(--redBg, rgba(229, 83, 75, 0.12)); }
+.git-diff-nonewline { color: var(--fg4); }
+/* ---- 大屏（≥900px）：git 页签改成编辑器式左右分栏 ----
+   左栏 = 状态分组 / 变更列表 / 提交记录（可折叠成窄轨），右栏 = 选中变更的 diff；
+   两栏各自滚动（#tab-git 不再整体滚动）。diff 面板是**同一个 DOM**：窄屏靠 position:fixed
+   当弹窗遮罩，这里把定位/遮罩底色撤掉，变成右栏里的常驻块（语义由 js/git.js syncGitLayout
+   从 dialog 换成 region——同一个节点两种呈现，语义得跟着走）。 */
+@media (min-width: 900px) {
+  #tab-git { overflow: hidden; }
+  .git-layout { flex: 1 1 auto; min-height: 0; flex-direction: row; }
+  /* 左栏宽度由 --git-side-width 决定（js/git.js 拖拽时改它，默认 320px）：flex-shrink
+     保持 1、两侧各有 min-width，窗口变窄时浏览器自己把两栏挤到最小宽度，不需要 JS 跟着
+     resize 重算。折叠态用 flex-basis 直接盖掉（不是改变量）。 */
+  .git-side {
+    flex: 0 1 var(--git-side-width, 320px); min-width: 200px; min-height: 0; overflow: auto;
+    padding-right: 10px; border-right: 1px solid var(--border);
+  }
+  /* flex-basis 必须是 0（与文件页签同理）：basis:auto 会取内容宽度，diff 一宽就把左栏
+     按比例挤小。basis 0 + min-width 表示「右栏只吃剩下的空间，不够时先挤左栏」。 */
+  .git-main { flex: 1 1 0; min-width: 320px; min-height: 0; padding-left: 12px; overflow: hidden; }
+  .git-splitter {
+    display: block; flex: 0 0 8px; margin: 0 -4px;
+    position: relative; cursor: col-resize; touch-action: none;
+  }
+  .git-splitter::after {
+    content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px;
+    border-radius: 2px; background: transparent; transition: background-color 0.12s ease;
+  }
+  .git-splitter:hover::after,
+  .git-splitter:focus-visible::after,
+  body.pane-resizing .git-splitter::after { background: var(--accent); }
+  .git-splitter:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 2px; }
+  /* 左栏自己滚动（overflow:auto 在上面 .git-side 上），标题行 + 仓库信息 + 二级页签整块
+     sticky 贴顶：列表滚到哪都能刷新、能看清当前仓库、能换页签。背景用页面底色，滚动内容
+     穿过不重影；sticky 块的最下沿就是页签栏的分隔线，这里不再自带一条（否则两条线叠一起）。 */
+  .git-side-bar {
+    position: sticky; top: 0; z-index: 2; background: var(--bg);
+    margin-bottom: 8px;
+  }
+  /* 页签栏是 sticky 块的最后一行：块的下沿正好落在页签栏的分隔线上（页签栏自己那条
+     border-bottom），与列表的间距统一交给 .git-side-bar 的 margin-bottom——页签栏自己
+     那份 8px 留着会在分隔线与列表之间空出两段，也对不上「下沿即分隔线」这句话。 */
+  .git-side-bar .git-subtabs { margin-bottom: 0; }
+  .git-side-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .git-side-title { font-size: 12px; font-weight: 600; color: var(--fg2); }
+  /* 折叠：左栏收成一条窄轨，只留折叠按钮（按钮始终在 DOM 里且可见，焦点不丢）；
+     宽度把手与整份列表一起收起来（要先展开才能用）。 */
+  .git-layout.side-collapsed .git-side { flex-basis: 34px; min-width: 0; padding-right: 0; }
+  .git-layout.side-collapsed .git-side-bar { margin-bottom: 0; }
+  .git-layout.side-collapsed .git-side-head { flex-direction: column; margin-bottom: 0; }
+  .git-layout.side-collapsed .git-side-title,
+  .git-layout.side-collapsed .git-side-tools { display: none; }
+  .git-layout.side-collapsed .git-subtabs,
+  .git-layout.side-collapsed .git-panel { display: none; }
+  .git-layout.side-collapsed .git-splitter { display: none; }
+  /* diff 面板从弹窗变成右栏常驻块：撑满右栏剩余高度，卡片内部自己滚（.git-diff-body
+     已有 overflow:auto），不把整个右栏顶高。 */
+  #git-diff-overlay { position: static; z-index: auto; inset: auto; padding: 0; background: none; flex: 1 1 auto; min-height: 0; }
+  #git-diff-modal { width: 100%; max-height: none; height: 100%; border-radius: 8px; box-shadow: none; }
+  .git-diff-body { min-height: 0; }
+}
+@media (max-width: 560px) {
+  #git-diff-overlay { padding: 8px; }
+  #git-diff-modal { width: calc(100vw - 16px); max-height: 92vh; }
+  .files-meta, .git-row-meta { display: none; }
 }

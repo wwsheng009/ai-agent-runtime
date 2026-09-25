@@ -93,7 +93,7 @@ v1 把「问题定义 + 数据模型 + 接口 + spawn + 路线图」全写在一
 | P2 ② 接管二次确认（`takeover`） | ✅ 已落地（S15） | `POST /web/api/sessions/resume {takeover:true}` → `chatWebTakeoverSession` 走 `Host.TakeoverSession`（网格 §4.4：唯一抢活租约的入口），成功回 `status=taken_over` + `previous_owner_node_id`，失败回 `takeover_failed`（不注入、不 5xx）；`takeover_available` 只在 `running_elsewhere` 且非 `conflict` 时为 `true`。前端 `session-conflict-takeover-btn` 二次确认（首次点击切确认态，再点才发）；旧节点下一跳心跳标 `orphaned` + 徽标「⚠ 已让渡」+ toast。CLI 入口 `aicli-mesh open <session> --takeover` |
 | P2 ③ 收敛开关下的 `refused` 文案（`mesh_cross_workspace_denied`） | ✅ 已落地（S13） | `sessions.js::SPAWN_CODE_TEXT`（code → 可执行文案）+ §5.2 回退路径：`refused` → `aicli-mesh open <session> --print-url`，拉起失败 → `aicli-mesh show <session>`。注：`mesh_cross_workspace_denied` 目前只在 CLI/Agent 面的 `mesh/call` 上触发（§6.1 边界原则：前端不用 `call`），Web 侧映射是前瞻性的 |
 | P2 ④ resume 的 SSE 事件化（去 8×300ms 轮询） | ✅ 已落地（S14） | **实测判定**：`session_start/session_end` 是 turn 边界事件（唯一发布点 `internal/chat/actor.go`），`/resume`、`/new`、`/load` 不产生 turn → 「订阅既有事件」不成立，改**服务端补发**：SSE handler 每 250ms 看会话身份，合成 `session_switched`（`web_handlers.go::chatWebSessionSwitchNotice`）；前端 `sessions.js` 删两处 8×300ms 轮询，`sse.js` 订阅该事件刷新，仅保留单次 4s 断连兜底。resume handler 的 stale 注释一并纠偏 |
-| P2 ⑤ 窗口标题加节点后缀 | ✅ 已落地（S13） | `sessions.js::meshNodeSuffix()`（`· <工作区> · <节点短 id>`；网格不可用时空串）+ `chat.js::updateTitle` 拼接；`applyMeshView` 在 self 段变化时重算（否则要等下一次状态翻转才出现） |
+| P2 ⑤ 窗口标题加节点后缀 | ✅ 已落地（S13） | `sessions.js::meshNodeSuffix()`（`· <工作区> · <节点短 id>`；网格不可用时空串）+ `chat.js::updateTitle` 拼接；`applyMeshView` 在 self 段变化时重算（否则要等下一次状态翻转才出现）。2026-09-25 扩展：标题以**会话标题**打头（`sessions.js::currentSessionLabel()`，与顶栏同口径；切换 / 新建 / 重命名后经 `updateSessionIdentity` 重算，超 40 字符截断） |
 | 偏差 D5 / D6 | ✅ 已登记 | 不新增 `js/mesh.js`（并入 `sessions.js`）；`web_page.go` 深链自举（计划未列该文件） |
 
 > **已验证部分**：`web_handlers_mesh_spawn_test.go`（参数透传 / 四态 / 单飞 / 失败带日志尾部）、
@@ -426,6 +426,13 @@ fetch("/web/api/mesh/spawn", {
 3. **默认视图全部脱敏**：`peers` / `self` 默认 `redact_token=1`（`0f3a…`）；
    只有 `?reveal_token=1` 且回环同源才回原文（网格 §5.3）。
    `aicli-mesh url --with-token` 是人工取原文令牌的正规途径。
+4. **页面导航 cookie 只承载本节点令牌、且只放行页面导航**（非回环入口）：服务端在返回内置页面
+   （`/web`、`/web/`）时下发 `Set-Cookie: aicli_web_token=<本节点令牌>; Path=/; HttpOnly; SameSite=Strict`
+   （会话级、回环不下发）。F5 / 新标签页 / 标签页恢复是无自定义请求头的**文档导航**，只有 cookie 能自动回传：
+   客户端非回环且 cookie 内令牌校验通过时才放行 `GET`/`HEAD` 页面请求，**API 与写方法不接受 cookie**。
+   不构成新红线：HttpOnly 使其不可被页面脚本读取，`SameSite=Strict` 不接受跨站携带，内容仍是本节点令牌
+   （不引入 peer 令牌）。前端取令牌顺序统一为 **meta 优先、sessionStorage 兜底**（进程重启换随机令牌后，
+   避免旧 `sessionStorage` 令牌先于新 meta 进入首个请求）。
 
 「关于」页签新增「网格」小节：本节点 `node_id`、`mesh.root` 路径、令牌提示（脱敏）、
 `counts`（live/stale/conflict）、建议命令（`aicli-mesh ls --probe`、`aicli-mesh gc`）——**只读展示**。
@@ -621,6 +628,10 @@ fetch("/web/api/mesh/spawn", {
 - 窗口标题/图标可选加节点后缀（多窗口并排时的辨识，P2 打磨）。
   （**已落地**：S13，`sessions.js::meshNodeSuffix()` → `· <工作区> · <节点短 id>`；
   网格不可用（`self` 为空）时不加后缀。）
+- 标题以当前**会话标题**打头（2026-09-25 扩展）：`[●|…|✗ ]<会话标题> · aicli micro web client
+  · <工作区> · <节点短 id>`；会话标题与顶栏共用 `sessions.js::currentSessionLabel()`
+  （`(untitled)` → `(未命名会话)`，超 40 字符截断），切换 / 新建 / 重命名后自动重算，
+  会话未就绪时不加该段（标题退回产品名 + 节点后缀）。
 
 ### 7.4 响应契约与失败态
 
@@ -720,6 +731,7 @@ v1 的 R1–R10 保留，逐条标注**归口**（网格承担 / Web 侧承担 /
 | 失败关窗 | `not_running` / `failed` 时占位窗口被关闭，且 Toast 可见、诊断信息可复制 |
 | 实时徽标（S12 起可执行，细化见 `web-testing.md` §2.7.2） | peer 忙碌翻转在 ≤2s 内反映到徽标；断网后 10s 轮询兜底仍能刷新 |
 | 无令牌残留 | 打开新窗口后，`localStorage` / `sessionStorage` / 当前页面 DOM 中无 peer 令牌 |
+| 刷新回读（非回环） | 局域网 IP 打开带 `?token=` 的地址后 F5 → 正常渲染（无 403 JSON 页）；`aicli_web_token` 为 HttpOnly / `SameSite=Strict` / 会话级；删 cookie 后 F5 → 403；GET API 与 POST 即使带 cookie 仍 403 |
 
 > 若仓库后续引入前端自动化（如 Playwright），上表应转为脚本断言；当前保持手工 + DevTools 检查。
 

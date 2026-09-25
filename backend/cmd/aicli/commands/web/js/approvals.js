@@ -101,7 +101,7 @@ export function showQuestion(data) {
     questionSuggestionsEl.appendChild(btn);
   });
   // 自由回答：开放问题（无建议项 / 建议项不匹配）必须能在模态框内直接写入。
-  // 遮罩层盖住了底部 composer，这里不给输入框就等于「答案无法写入」。
+  // 遮罩层盖住了浮动 composer 面板，这里不给输入框就等于「答案无法写入」。
   setQuestionAnswerRowVisible(true);
   if (approvalOverlay) { approvalOverlay.classList.add("active"); }
   if (questionAnswerInput) {
