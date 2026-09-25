@@ -160,6 +160,10 @@ func printVisibleChatHistoryWithLoadGrant(session *ChatSession, header string, s
 			} else {
 				bridge.seedPersistedHistory(messages, seedHeader)
 			}
+			// seed 是「进入恢复」的可见内容起点：它决定了第一帧有多少 cell，
+			// 也是布局规划与行投递的输入。单独计量以便区分「读日志慢」与
+			// 「协调 6197 条历史慢」。
+			markChatStartup("history_seed")
 			session.Interaction.RequestUnifiedFrame()
 		}
 		return len(messages)
@@ -182,6 +186,42 @@ func printVisibleChatHistoryWithLoadGrant(session *ChatSession, header string, s
 		renderVisibleChatHistoryMessage(renderer, messages[index], toolCalls)
 	}
 	return len(messages)
+}
+
+// renderResumeHistoryPageIncremental 把「刚取回的较早一页」增量装配进统一渲染
+// 数据面：只 reconcile 这一页（锚点插入 + 非授权式快照 + 统一帧），不重算已经
+// 装载过的部分，也不铸造原生 scrollback 的销毁式替换——那属于整次会话装载的收尾
+// （装载收尾那一次 seed 会把完整 generation 一次性替换进原生 scrollback）。
+//
+// 没有统一渲染通道（plain / JSON / legacy / 无协调器）时是 no-op：这些平面的
+// 输出顺序保持原有的一次性装载语义，不会被逐页绘制打断。
+func renderResumeHistoryPageIncremental(session *ChatSession, page []runtimetypes.Message) bool {
+	if session == nil || len(page) == 0 {
+		return false
+	}
+	if session.NoInteractive || session.JSONOutput || session.Interaction == nil ||
+		!session.Interaction.UnifiedRendererEnabled() {
+		return false
+	}
+	bridge := ensureChatRuntimeEventBridge(session)
+	if bridge == nil {
+		return false
+	}
+	if !bridge.seedPersistedHistoryPage(page) {
+		return false
+	}
+	markChatStartup("resume_history_publish")
+	session.Interaction.RequestUnifiedFrame()
+	return true
+}
+
+// replayLoadedSessionHistory 在会话装载（/resume、/load、resume picker）的确认
+// 单元提交之后回放已装载的展示历史，并启动窗口化装载的较早页后台补齐。两者必须
+// 保持这个顺序：先画出用户最关心的尾部，再逐页往前补齐。
+func replayLoadedSessionHistory(session *ChatSession, header string) int {
+	count := printVisibleChatHistory(session, header)
+	startDeferredResumeHistoryLoad(session)
+	return count
 }
 
 // replayVisibleChatHistoryAfterTruncation re-renders the already-truncated

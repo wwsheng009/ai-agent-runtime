@@ -77,8 +77,19 @@ type chatRuntimeEventBridge struct {
 	runErr                      error
 	rendered                    map[string]struct{}
 	historySeedSeen             map[string]struct{}
-	approvalGrants              map[string]time.Time
-	permissionHintShown         bool
+	// historySeedClaimedItems / historySeedItemByIdentity / historySeedFrontItemID
+	// 是「按页增量装载」（resume 历史逐页读取 → 逐页绘制）的账本，与
+	// historySeedSeen 一样由 renderMu 保护：
+	//   - claimed：已经被某次 seed 认领的 Scene item，跨页匹配时不得再匹配，
+	//     否则同内容的另一条真实消息会被误判为「已表达」而丢弃；
+	//   - itemByIdentity：unit identity → item 身份，重复命中（幂等重放）时
+	//     仍能把插入游标推进到该单元格；
+	//   - front：canonical 区域最早的 item，更早的页插到它之前。
+	historySeedClaimedItems   map[string]struct{}
+	historySeedItemByIdentity map[string]string
+	historySeedFrontItemID    string
+	approvalGrants            map[string]time.Time
+	permissionHintShown       bool
 	// headlessQuestionErr keeps the last transport error of the headless
 	// question hook so the fail-closed message can explain why the panel did
 	// not answer (guarded by renderMu).

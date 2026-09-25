@@ -93,6 +93,16 @@ func markChatStartup(name string) {
 	}
 }
 
+// flushChatStartupTiming 再输出一次阶段表，供 ready 之后才完成的异步关键路径
+// （后台补齐较早页 → 全量 seed → 统一帧）使用：这些 mark 落在第一次 flush
+// 之后，只有补一次 flush 才能看到「进入恢复」之后的真实耗时分布。
+func flushChatStartupTiming() {
+	if t := activeChatStartupTiming.Load(); t != nil {
+		// opts 只影响输出通道选择，两者都写 stderr；异步阶段没有 opts 也无妨。
+		t.flush(nil)
+	}
+}
+
 func (t *chatStartupTiming) mark(name string) {
 	if t == nil {
 		return

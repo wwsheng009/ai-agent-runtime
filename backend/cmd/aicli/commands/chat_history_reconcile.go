@@ -121,6 +121,11 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 	}
 	seededAny := false
 	snapshot := b.renderEncoder.Snapshot()
+	// 注意：这里的匹配作用域**不**排除历史增量装载已经认领的 item。全量 reconcile
+	// 描述的是完整的 canonical 转录，它的 unit 与屏幕上的 item 按 canonical 顺序
+	// 一一配对；排除认领项只会让已经装载过（但 identity 作用域不同）的 unit 落空，
+	// 然后被当成缺失内容重复导入。认领集只用于「按页增量装载」，那里的匹配范围
+	// 必须排除别人已经认领的单元格（见 seedPersistedHistoryPageLocked）。
 	matchedItemIDs := make(map[string]struct{})
 	headerSeededNow := false
 	// A history header must lead the imported transcript. Once a partial event
@@ -163,6 +168,7 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 			continue
 		}
 		matchedUnits[unit.identity] = item
+		b.rememberHistorySeedItem(unit.identity, item.ID)
 		if unit.boundaryGroupKey != "" && item.BoundaryGroupKey != "" {
 			if _, exists := groupAliases[unit.boundaryGroupKey]; !exists {
 				groupAliases[unit.boundaryGroupKey] = item.BoundaryGroupKey
@@ -178,6 +184,7 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 			representedItemIDs[index] = item.ID
 		}
 	}
+	insertedItemIDs := make([]string, len(units))
 	for index, unit := range units {
 		if _, alreadySeeded := b.historySeedSeen[unit.identity]; alreadySeeded {
 			continue
@@ -213,11 +220,171 @@ func (b *chatRuntimeEventBridge) seedPersistedHistoryLocked(units []persistedHis
 		// 排到新内容之后——用户看到的“尾部重复块、最后一条消息被顶到中间”正是
 		// 这个顺序倒置。此时插入到下一条已表达 unit 之前，保持 canonical 顺序；
 		// 模型里没有更晚的规范内容时（事件日志只覆盖前缀）仍追加到尾部。
-		unit.applyBefore(b, persistedHistorySuccessorAnchor(representedItemIDs, index))
+		insertedItemIDs[index] = unit.applyBefore(b, persistedHistorySuccessorAnchor(representedItemIDs, index))
 		b.historySeedSeen[unit.identity] = struct{}{}
+		b.claimHistorySeedItem(unit.identity, insertedItemIDs[index])
 		seededAny = true
 	}
+	b.rememberCanonicalHistoryFront(units, representedItemIDs, insertedItemIDs)
 	return seededAny
+}
+
+// rememberCanonicalHistoryFront 记录 canonical 区域最早的 Scene item 身份。
+// 「按页增量装载」把更早的页插到这个 item 之前；它必须是 canonical 顺序意义上
+// 的第一条已装载内容，否则补回来的历史会插到会话中间。
+func (b *chatRuntimeEventBridge) rememberCanonicalHistoryFront(
+	units []persistedHistorySeedUnit, representedItemIDs, insertedItemIDs []string,
+) {
+	if b == nil {
+		return
+	}
+	for index := range units {
+		id := ""
+		if index < len(insertedItemIDs) {
+			id = insertedItemIDs[index]
+		}
+		if id == "" && index < len(representedItemIDs) {
+			id = representedItemIDs[index]
+		}
+		if id == "" {
+			id = b.historySeedItemByIdentity[units[index].identity]
+		}
+		if id != "" {
+			b.historySeedFrontItemID = id
+			return
+		}
+	}
+}
+
+// rememberHistorySeedItem 记录 unit identity → Scene item 身份。增量分页装载
+// 在「本页已装载过」时仍需推进插入游标，只有身份表能给出该 unit 的落点。
+func (b *chatRuntimeEventBridge) rememberHistorySeedItem(identity, itemID string) {
+	if b == nil {
+		return
+	}
+	identity = strings.TrimSpace(identity)
+	itemID = strings.TrimSpace(itemID)
+	if identity == "" || itemID == "" {
+		return
+	}
+	if b.historySeedItemByIdentity == nil {
+		b.historySeedItemByIdentity = make(map[string]string)
+	}
+	b.historySeedItemByIdentity[identity] = itemID
+}
+
+// claimHistorySeedItem 记住「这个 Scene item 已经被某次 seed 认领」。跨页匹配
+// 必须排除它们，否则同内容的另一条消息会被误判为已表达而丢弃。
+func (b *chatRuntimeEventBridge) claimHistorySeedItem(identity, itemID string) {
+	if b == nil || strings.TrimSpace(itemID) == "" {
+		return
+	}
+	b.rememberHistorySeedItem(identity, itemID)
+	if b.historySeedClaimedItems == nil {
+		b.historySeedClaimedItems = make(map[string]struct{})
+	}
+	b.historySeedClaimedItems[itemID] = struct{}{}
+}
+
+// seedPersistedHistoryPage 增量 reconcile 一个「较早的 canonical 页」：只匹配
+// 与导入这一页的 unit，并把它们按 canonical 顺序插到已装载区域之前。
+//
+// 这是「边读取、边渲染」的数据面入口：调用方每从分页后端取回一页就调用一次，
+// 用户看到的历史从最新一页开始逐页补齐，而不是等全量读完才一次性绘制。
+func (b *chatRuntimeEventBridge) seedPersistedHistoryPage(messages []runtimetypes.Message) bool {
+	if b == nil || b.renderEncoder == nil || len(messages) == 0 {
+		return false
+	}
+	units := buildPersistedHistorySeedUnitsScoped(messages, persistedHistoryPageScope(messages))
+	if len(units) == 0 {
+		return false
+	}
+	b.renderMu.Lock()
+	seeded := b.seedPersistedHistoryPageLocked(units)
+	b.renderMu.Unlock()
+	if !seeded {
+		return false
+	}
+	// 增量页只更新语义转录（非授权式快照）：原生 scrollback 的替换授权属于
+	// 整次会话装载，由装载收尾的那一次 seed 一次性铸造，不能让每一页都触发
+	// 一次销毁式重放。
+	b.sessionInteractionSnapshot()
+	return true
+}
+
+// seedPersistedHistoryPageLocked 是 seedPersistedHistoryPage 的渲染事务半程。
+//
+// 插入方向：一页较早的历史必须整体落在已装载区域之前，因此按页内逆序逐条
+// 「插入到当前游标之前」，插完把游标前移到刚插入的单元格，最终得到页内正序。
+func (b *chatRuntimeEventBridge) seedPersistedHistoryPageLocked(units []persistedHistorySeedUnit) bool {
+	if b == nil || b.renderEncoder == nil || len(units) == 0 {
+		return false
+	}
+	if b.historySeedSeen == nil {
+		b.historySeedSeen = make(map[string]struct{})
+	}
+	snapshot := b.renderEncoder.Snapshot()
+	matched := make(map[string]struct{}, len(b.historySeedClaimedItems))
+	for id := range b.historySeedClaimedItems {
+		matched[id] = struct{}{}
+	}
+	cursor := strings.TrimSpace(b.historySeedFrontItemID)
+	seededAny := false
+	for index := len(units) - 1; index >= 0; index-- {
+		unit := units[index]
+		if _, alreadySeeded := b.historySeedSeen[unit.identity]; alreadySeeded {
+			// 同一页被重复装载（重试/幂等重放）：不重复导入，但仍要把游标
+			// 前移到该单元格，后续更早的 unit 才插得到它前面。
+			if id := b.historySeedItemByIdentity[unit.identity]; id != "" {
+				cursor = id
+			}
+			continue
+		}
+		if item := persistedHistoryUnitMatch(snapshot, unit, matched); item != nil {
+			// 已在屏幕上（事件日志重放等）：不重复导入，但更早的 unit 必须
+			// 插到它之前，canonical 顺序才正确。
+			b.historySeedSeen[unit.identity] = struct{}{}
+			b.claimHistorySeedItem(unit.identity, item.ID)
+			cursor = item.ID
+			continue
+		}
+		if unit.kind == persistedHistorySeedSupplement && unit.boundaryGroupKey != "" &&
+			persistedHistoryReasoningRepresented(snapshot, unit.content) {
+			b.historySeedSeen[unit.identity] = struct{}{}
+			continue
+		}
+		if unit.kind == persistedHistorySeedTool && strings.TrimSpace(unit.toolCallID) != "" {
+			if item := b.renderEncoder.ToolItemForCall(unit.toolCallID); item != nil && item.Status.Terminal() {
+				b.historySeedSeen[unit.identity] = struct{}{}
+				continue
+			}
+		}
+		insertedID := unit.applyBefore(b, cursor)
+		b.historySeedSeen[unit.identity] = struct{}{}
+		b.claimHistorySeedItem(unit.identity, insertedID)
+		if insertedID != "" {
+			cursor = insertedID
+		}
+		seededAny = true
+	}
+	if strings.TrimSpace(cursor) != "" {
+		b.historySeedFrontItemID = cursor
+	}
+	return seededAny
+}
+
+// persistedHistoryPageScope 为「按页增量装载」派生一个稳定的页作用域：优先用
+// 页首消息的持久化身份（分页后端会补齐 message_id），缺失时退回页内容的哈希。
+// 作用域只能依赖页自身内容，同一页重复装载（重试）才会得到同一 identity。
+func persistedHistoryPageScope(messages []runtimetypes.Message) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	if id := strings.TrimSpace(runtimetypes.MessageID(messages[0])); id != "" {
+		return "page:" + id
+	}
+	sum := sha256.Sum256([]byte(messages[0].Role + "\x00" + messages[0].Content))
+	return fmt.Sprintf("page:%x:%d", sum[:8], len(messages))
 }
 
 // replaceCanonicalHistoryProjection rebuilds the owned transcript from the
@@ -268,6 +435,9 @@ func (b *chatRuntimeEventBridge) resetCanonicalHistoryProjectionLocked() {
 	// Revision 漂移）。
 	b.renderEncoder.EnableReasoningOrderingBarrier(true)
 	b.historySeedSeen = make(map[string]struct{})
+	b.historySeedClaimedItems = nil
+	b.historySeedItemByIdentity = nil
+	b.historySeedFrontItemID = ""
 	b.interactionAnchorMu.Lock()
 	b.interactionAnchor = nil
 	b.interactionAnchorAt = time.Time{}
@@ -302,12 +472,24 @@ func (b *chatRuntimeEventBridge) resetRenderPlaneForNewSession() {
 }
 
 func buildPersistedHistorySeedUnits(messages []runtimetypes.Message) []persistedHistorySeedUnit {
+	return buildPersistedHistorySeedUnitsScoped(messages, "")
+}
+
+// buildPersistedHistorySeedUnitsScoped 是「按页增量装载」使用的带作用域版本。
+// identity 前缀带上页作用域，避免内容完全相同的两条消息分布在不同页时，因为
+// 内容哈希 + 页内序号相同而撞进同一个 identity：那样后到的一页会被
+// historySeedSeen 直接当成「已装载」跳过，屏幕上少一条真实消息。同一页重复
+// 装载仍得到同一 identity（作用域只由页自身内容派生），保持幂等。
+func buildPersistedHistorySeedUnitsScoped(messages []runtimetypes.Message, scope string) []persistedHistorySeedUnit {
 	toolCalls := indexChatHistoryToolCalls(messages)
 	units := make([]persistedHistorySeedUnit, 0, len(messages))
 	occurrences := make(map[string]uint64)
 	assistantRequestOccurrences := make(map[string]uint64)
 	appendUnit := func(unit persistedHistorySeedUnit) {
 		base := unit.stableKey()
+		if scope != "" {
+			base = scope + ":" + base
+		}
 		occurrences[base]++
 		unit.identity = fmt.Sprintf("persisted-history:%s:%d", base, occurrences[base])
 		units = append(units, unit)
@@ -617,21 +799,26 @@ func (u persistedHistorySeedUnit) apply(b *chatRuntimeEventBridge) {
 // 表达 unit 之前，模型顺序才与 canonical 顺序一致（否则旧内容被追加到新内容
 // 之后，最后一条消息被顶到中间）。锚定路径复用与 apply 相同的终态构造，只有
 // 工具单元格需要额外登记 callID，后续 SubmitToolResult* 才能就地归并。
-func (u persistedHistorySeedUnit) applyBefore(b *chatRuntimeEventBridge, anchorItemID string) {
+// 返回新单元格的 Scene item 身份（追加路径退化为模型尾部），供「按页增量装载」
+// 推进插入游标。
+func (u persistedHistorySeedUnit) applyBefore(b *chatRuntimeEventBridge, anchorItemID string) string {
 	if b == nil || b.renderEncoder == nil {
-		return
+		return ""
 	}
 	if strings.TrimSpace(anchorItemID) == "" {
 		u.apply(b)
-		return
+		if tail := b.renderEncoder.Tail(); tail != nil {
+			return tail.ItemID
+		}
+		return ""
 	}
 	switch u.kind {
 	case persistedHistorySeedUser:
-		b.applyChangeSet(b.renderEncoder.SubmitPersistedHistoryCellBefore(
+		return applyChangeSetItemID(b, b.renderEncoder.SubmitPersistedHistoryCellBefore(
 			encoding.KindUser, u.content, "", anchorItemID,
 		))
 	case persistedHistorySeedAssistant:
-		b.applyChangeSet(b.renderEncoder.SubmitPersistedHistoryCellBefore(
+		return applyChangeSetItemID(b, b.renderEncoder.SubmitPersistedHistoryCellBefore(
 			encoding.KindAssistant, u.content, u.boundaryGroupKey, anchorItemID,
 		))
 	case persistedHistorySeedSupplement:
@@ -641,19 +828,33 @@ func (u persistedHistorySeedUnit) applyBefore(b *chatRuntimeEventBridge, anchorI
 			// 一致地导入为 KindReasoning + divider Head（见 apply）。
 			kind = encoding.KindReasoning
 		}
-		b.applyChangeSet(b.renderEncoder.SubmitPersistedHistoryCellBefore(
+		return applyChangeSetItemID(b, b.renderEncoder.SubmitPersistedHistoryCellBefore(
 			kind, u.content, u.boundaryGroupKey, anchorItemID,
 		))
 	case persistedHistorySeedTool:
-		b.applyChangeSet(b.renderEncoder.SubmitPersistedHistoryToolCallBefore(
+		itemID := applyChangeSetItemID(b, b.renderEncoder.SubmitPersistedHistoryToolCallBefore(
 			u.toolCallID, u.toolName, anchorItemID,
 		))
 		if strings.TrimSpace(u.toolDisplay) != "" {
 			b.applyChangeSet(b.renderEncoder.SubmitToolResultDisplay(u.toolCallID, u.toolDisplay))
-			return
+			return itemID
 		}
 		b.applyChangeSet(b.renderEncoder.SubmitToolResult(
 			u.toolCallID, u.toolName, u.toolOutput, u.toolError, u.success,
 		))
+		return itemID
 	}
+	return ""
+}
+
+// applyChangeSetItemID 提交一次增量变更集并返回它新增/更新的单元格身份。
+func applyChangeSetItemID(b *chatRuntimeEventBridge, cs *encoding.ChangeSet) string {
+	if b == nil {
+		return ""
+	}
+	b.applyChangeSet(cs)
+	if cs == nil || len(cs.Changes) == 0 || cs.Changes[0].Item == nil {
+		return ""
+	}
+	return cs.Changes[0].Item.ID
 }

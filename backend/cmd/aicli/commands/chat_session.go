@@ -513,11 +513,17 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 // SQLite 等分页后端（SessionStorageHistoryPager）从最新页往前翻页取回全量；
 // 文件/内存等无分页后端保持投影历史不变。
 //
-// 这是同步入口：会话内 /resume、/load 等用户显式动作一次性装载全量，保持
-// 「先加载、后绘制」的既有顺序（用户已经在看另一个会话，回放必须是一帧完整内容）。
+// 会话内 /resume、/load：统一渲染（窗口化恢复开启）时只同步装载最新一页，更早
+// 的页登记给首帧之后的 startDeferredResumeHistoryLoad 逐页读取、逐页绘制；没有
+// 增量绘制通道（plain / JSON / legacy 输出）时保持原有的一次性同步装载，保证
+// 这些平面的输出顺序与内容完全不变。
 func loadResumeCanonicalHistory(session *ChatSession, sessionID string) {
 	first, ok := loadNewestResumeHistoryPage(session, sessionID)
 	if !ok || !first.HasMore {
+		return
+	}
+	if chatWindowedResumeHistoryEnabled(session) {
+		session.deferResumeHistoryCompletion(sessionID, first.NextBeforeSeq)
 		return
 	}
 	pages := fetchOlderResumeHistoryPages(context.Background(), session.SessionManager, sessionID, first.NextBeforeSeq)
@@ -565,25 +571,52 @@ func loadNewestResumeHistoryPage(session *ChatSession, sessionID string) (*runti
 	return page, true
 }
 
-// fetchOlderResumeHistoryPages 从 beforeSeq 起继续往前翻页，返回
-// 「较新页 → 较早页」的页集合（与 GetHistoryPage 的翻页方向一致）。
-// best-effort：中途失败时返回已经取到的页。
-func fetchOlderResumeHistoryPages(ctx context.Context, manager *runtimechat.SessionManager, sessionID string, beforeSeq int) [][]runtimetypes.Message {
+// streamOlderResumeHistoryPages 从 beforeSeq 起继续往前翻页，每取到一页立即交给
+// visit 处理（页序为「较新页 → 较早页」，与 GetHistoryPage 的翻页方向一致），
+// 不再把所有页收集完才返回——这是「边读取、边渲染」的读取半程。
+//
+// visit 返回 false 表示调用方要求停止翻页（例如展示快照已被整体替换）。
+// 返回已访问页数与错误：错误仅在分页读取失败时非 nil（「历史到头」不是错误）。
+func streamOlderResumeHistoryPages(
+	ctx context.Context,
+	manager *runtimechat.SessionManager,
+	sessionID string,
+	beforeSeq int,
+	visit func(page *runtimechat.SessionHistoryPage) bool,
+) (int, error) {
 	if manager == nil {
-		return nil
+		return 0, nil
 	}
-	var pages [][]runtimetypes.Message
+	pages := 0
 	for beforeSeq > 0 {
 		page, err := manager.GetHistoryPage(ctx, sessionID, beforeSeq, 0)
-		if err != nil || page == nil || len(page.Messages) == 0 {
-			break
+		if err != nil {
+			return pages, err
 		}
-		pages = append(pages, page.Messages)
+		if page == nil || len(page.Messages) == 0 {
+			return pages, nil
+		}
+		pages++
+		if visit != nil && !visit(page) {
+			return pages, nil
+		}
 		if !page.HasMore || page.NextBeforeSeq <= 0 || page.NextBeforeSeq >= beforeSeq {
-			break
+			return pages, nil
 		}
 		beforeSeq = page.NextBeforeSeq
 	}
+	return pages, nil
+}
+
+// fetchOlderResumeHistoryPages 从 beforeSeq 起把更早的页全部取回，返回
+// 「较新页 → 较早页」的页集合。best-effort：中途失败时返回已经取到的页。
+// 需要边读边绘制的调用方应改用 streamOlderResumeHistoryPages。
+func fetchOlderResumeHistoryPages(ctx context.Context, manager *runtimechat.SessionManager, sessionID string, beforeSeq int) [][]runtimetypes.Message {
+	var pages [][]runtimetypes.Message
+	_, _ = streamOlderResumeHistoryPages(ctx, manager, sessionID, beforeSeq, func(page *runtimechat.SessionHistoryPage) bool {
+		pages = append(pages, page.Messages)
+		return true
+	})
 	return pages
 }
 
@@ -666,6 +699,16 @@ func (s *ChatSession) prependResumeHistoryPages(generation uint64, pages [][]run
 	return true
 }
 
+// prependResumeHistoryPage 把单页（页内按 seq 升序）前插到展示历史，供逐页装载
+// 使用：每读回一页立即可见，而不是等所有页读完再一次性前插。
+// generation 不匹配（快照已被整体替换）时返回 false，调用方应停止本次补齐。
+func (s *ChatSession) prependResumeHistoryPage(generation uint64, page *runtimechat.SessionHistoryPage) bool {
+	if s == nil || page == nil || len(page.Messages) == 0 {
+		return false
+	}
+	return s.prependResumeHistoryPages(generation, [][]runtimetypes.Message{page.Messages})
+}
+
 // deferResumeHistoryCompletion 登记「较早页待补齐」游标，供首帧之后启动后台任务。
 func (s *ChatSession) deferResumeHistoryCompletion(sessionID string, beforeSeq int) {
 	if s == nil || beforeSeq <= 0 {
@@ -677,8 +720,28 @@ func (s *ChatSession) deferResumeHistoryCompletion(sessionID string, beforeSeq i
 	s.resumeHistoryDeferredBeforeSeq = beforeSeq
 }
 
-// startDeferredResumeHistoryLoad 在启动首帧（最新页已 seed）之后补齐较早页：
-// 取回 → 前插展示历史 → 复用幂等 seed 重放（锚点插入 + 请求统一帧）。
+// resumeHistoryIncrementalPublishStride 决定补齐较早页时「每多少页发布一次统一
+// 快照」。读取、前插与 reconcile 仍然是逐页的（顺序正确性依赖它），合并的只是
+// 发布：每次发布都会把整份转录重新规划一遍，实测单次发布让后台补齐从 ~1.0s
+// （整份一次性 seed）涨到 13 页 ~5.3s；按步长发布把这段开销压回 ~1/stride，
+// 用户仍看到历史分多步长出，只是步长从「每页」变成「每 stride 页」。
+const resumeHistoryIncrementalPublishStride = 1
+
+// shouldPublishResumeHistoryIncrementalPage 报告第 pages 页（1-based，按补齐顺序）
+// 取回后是否要发布统一快照：首页必发（用户立刻看到最新一页），其后每 stride 页
+// 发一次；尾部由装载收尾那一次授权式快照兜住，因此最后一页无需单独触发。
+func shouldPublishResumeHistoryIncrementalPage(pages int) bool {
+	if pages <= 1 {
+		return true
+	}
+	return pages%resumeHistoryIncrementalPublishStride == 0
+}
+
+// startDeferredResumeHistoryLoad 在首帧（最新页已 seed）之后补齐较早页：逐页读取、
+// 逐页前插展示历史并增量 reconcile 进统一渲染数据面（锚点插入 + 按步长发布统一
+// 帧），用户看到历史从最新一页往前分多步长出，而不是等全部页读完才一次性出现。
+// 全部页读完后再做一次授权式装载收尾，让完整 generation 替换原生 scrollback。
+//
 // 未登记补齐任务时是 no-op，因此可以无条件在首帧之后调用。
 func startDeferredResumeHistoryLoad(session *ChatSession) {
 	if session == nil || session.SessionManager == nil {
@@ -695,17 +758,45 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 		return
 	}
 	go func() {
-		pages := fetchOlderResumeHistoryPagesWithRetry(context.Background(), session.SessionManager, sessionID, beforeSeq)
-		if len(pages) == 0 {
+		// aborted 表示展示快照在补齐途中被整体替换（切换会话/压缩）：此时
+		// 必须原地放弃——收官那一次 seed 针对的是新快照，不能拿旧会话的补齐
+		// 去替它铸造一次授权式装载。
+		aborted := false
+		visited := 0
+		pages, err := streamOlderResumeHistoryPagesWithRetry(
+			context.Background(), session.SessionManager, sessionID, beforeSeq,
+			func(page *runtimechat.SessionHistoryPage) bool {
+				if !session.prependResumeHistoryPage(generation, page) {
+					// 展示快照已被整体替换（切换会话/压缩）：放弃本次补齐。
+					aborted = true
+					return false
+				}
+				visited++
+				// 逐页读取单独记一个标记：发布被合并后，恢复过程的阶段表仍要能
+				// 区分「读了多少页」与「画了多少次」，否则观测面会以为页变少了。
+				markChatStartup("resume_history_page")
+				if shouldPublishResumeHistoryIncrementalPage(visited) {
+					renderResumeHistoryPageIncremental(session, page.Messages)
+				}
+				return true
+			})
+		if aborted {
+			return
+		}
+		if pages == 0 {
 			// 游标表明仍有较早页，因此「一页都没取到」只可能是存储读取失败。
 			// 静默放弃会让用户以为会话只恢复了最新一页，必须显式提示。
 			notifyDeferredResumeHistoryFailure(session)
 			return
 		}
-		if !session.prependResumeHistoryPages(generation, pages) {
-			return
+		if err != nil {
+			// 已经补回一部分：已装载的页保留，明确告诉用户后面还有没补上的。
+			notifyDeferredResumeHistoryPartialFailure(session, pages)
 		}
 		markChatStartup("resume_history_deferred")
+		// 补齐较早页会触发全量 seed + 统一帧，是 ready 之后最贵的一段；立刻补
+		// 一次 flush，否则这段耗时只能靠 500ms 采样间接推断。
+		flushChatStartupTiming()
 		// 幂等重放：较早 unit 由 reconcile 的锚点插入 Scene，再请求统一帧；
 		// bridge 持有稳定身份，已经 seed 过的最新页不会重复渲染。
 		// 补齐同样属于「会话装载」：较早页即便全部命中已重放的事件日志
@@ -718,22 +809,26 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 	}()
 }
 
-// fetchOlderResumeHistoryPagesWithRetry 是后台补齐较早页的有界重试版本。
-// 调用方只会在分页游标表明「还有更早的页」时登记补齐任务，因此空结果意味着
-// 存储读取失败（分页查询错误、写事务争用等），而不是历史真的到头了。重试全部
-// 失败时返回 nil，由调用方提示用户。
-func fetchOlderResumeHistoryPagesWithRetry(
-	ctx context.Context, manager *runtimechat.SessionManager, sessionID string, beforeSeq int,
-) [][]runtimetypes.Message {
+// streamOlderResumeHistoryPagesWithRetry 是后台补齐较早页的有界重试版本。
+// 调用方只会在分页游标表明「还有更早的页」时登记补齐任务，因此「一页都没取到」
+// 意味着存储读取失败（分页查询错误、写事务争用等），而不是历史真的到头了；只有
+// 这种情况下才重试。已经成功访问过页之后不再重试，避免重复访问同一页。
+func streamOlderResumeHistoryPagesWithRetry(
+	ctx context.Context,
+	manager *runtimechat.SessionManager,
+	sessionID string,
+	beforeSeq int,
+	visit func(page *runtimechat.SessionHistoryPage) bool,
+) (int, error) {
 	delays := [...]time.Duration{200 * time.Millisecond, 600 * time.Millisecond, 1500 * time.Millisecond}
 	for attempt := 0; ; attempt++ {
-		pages := fetchOlderResumeHistoryPages(ctx, manager, sessionID, beforeSeq)
-		if len(pages) > 0 || attempt >= len(delays) {
-			return pages
+		pages, err := streamOlderResumeHistoryPages(ctx, manager, sessionID, beforeSeq, visit)
+		if pages > 0 || attempt >= len(delays) {
+			return pages, err
 		}
 		select {
 		case <-ctx.Done():
-			return nil
+			return 0, ctx.Err()
 		case <-time.After(delays[attempt]):
 		}
 	}
@@ -747,6 +842,18 @@ func notifyDeferredResumeHistoryFailure(session *ChatSession) {
 	}
 	printfDirectInteractiveOutput(session,
 		"较早的历史分页加载失败，当前仅恢复最新一页；可稍后用 /history 重试。\n")
+}
+
+// notifyDeferredResumeHistoryPartialFailure 在较早页补到一半就中断时提示用户：
+// 已经补回的部分保留在屏幕上，未补回的页可以用 /history 重试。
+func notifyDeferredResumeHistoryPartialFailure(session *ChatSession, pages int) {
+	if session == nil || session.Interaction == nil || !session.Interaction.UnifiedRendererEnabled() {
+		return
+	}
+	// 直接传常量格式串：把 fmt.Sprintf 的结果当格式串会触发 go vet 的
+	// printf 检查（non-constant format string），并让 `go test` 整包编译失败。
+	printfDirectInteractiveOutput(session,
+		"较早的历史分页加载中断（已补回 %d 页）；可稍后用 /history 重试。\n", pages)
 }
 
 func resumeLatestRuntimeConversation(session *ChatSession) error {

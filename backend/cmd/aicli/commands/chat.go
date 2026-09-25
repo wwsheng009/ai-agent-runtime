@@ -692,6 +692,11 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 
 	// 开始聊天循环
 	runChatLoop(session, opts.NoInteractive, opts.Message)
+	// ready 之后仍有关键路径：后台补齐较早页（resume_history_deferred）会触发
+	// 全量 seed 与统一帧，而它不在第一次 flush 的视野里。会话结束时再 flush
+	// 一次，才能看到「进入恢复」前后完整的耗时分布。
+	startupTiming.mark("chat_loop_exit")
+	startupTiming.flush(opts)
 }
 
 func loadRuntimeToolConfig(cfg *config.Config, session *ChatSession) *runtimecfg.RuntimeConfig {

@@ -36,7 +36,10 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 				// /load: replay the loaded transcript after the confirmation
 				// cell. The replay renderer owns its cells (one per message)
 				// and falls back to plain output when no surface is present.
-				printVisibleChatHistory(session, "已加载历史会话")
+				// 统一渲染下这里只画出最新一页，更早的页由随后的逐页补齐
+				// （replayLoadedSessionHistory → startDeferredResumeHistoryLoad）
+				// 边读边补，会话装载不再等全量翻页。
+				replayLoadedSessionHistory(session, "已加载历史会话")
 			}
 			if result.OpenTranscript && session != nil {
 				// /history in the unified TUI is a view operation over the already

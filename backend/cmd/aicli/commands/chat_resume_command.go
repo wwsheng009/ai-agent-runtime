@@ -32,7 +32,8 @@ func handleResumeCommand(session *ChatSession, command string) bool {
 				return false
 			}
 			if renderErr == nil && result.ReplayHistory {
-				printVisibleChatHistory(session, "已加载历史会话")
+				// 与 dispatch 同款：先画最新一页，再逐页补齐更早的页。
+				replayLoadedSessionHistory(session, "已加载历史会话")
 			}
 			return false
 		}
@@ -260,7 +261,7 @@ func openChatResumePicker(session *ChatSession, request ResumePickerRequest) {
 		ReplayHistory: hasVisibleChatHistory(session),
 	}
 	if err := renderChatCommandResult(session, result, false); err == nil && result.ReplayHistory {
-		printVisibleChatHistory(session, "已加载历史会话")
+		replayLoadedSessionHistory(session, "已加载历史会话")
 	}
 }
 
