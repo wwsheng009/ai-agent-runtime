@@ -101,10 +101,24 @@ type AsyncManager interface {
 	WaitReady(ctx context.Context) error
 }
 
+// ScopedManager 暴露「内存配置快照」加载能力（与主线 manager.go 保持一致的
+// 形状，供 internal/api/runtimeapi、cmd/aicli/commands 的 profile/ACP 路径编译）。
+// Win7 兼容构建整体禁用 MCP，禁用实现接受快照但不建立任何连接。
+type ScopedManager interface {
+	Manager
+	// LoadConfigFromConfig 用内存快照替换待加载配置；禁用实现接受但忽略。
+	LoadConfigFromConfig(cfg *config.Config) error
+}
+
 // disabledManager 是 Win7 兼容构建中的空实现：不加载、不启动任何 MCP。
 type disabledManager struct{}
 
 func (disabledManager) LoadConfig(configPath string) error { return nil }
+
+// LoadConfigFromConfig 接受内存配置快照但不加载任何 MCP（Win7 兼容构建整体禁用）。
+// 返回 nil 与 LoadConfig 的禁用语义一致：调用方不应因为平台不支持 MCP 而在能力
+// 断言处硬失败（否则「带 profile 服务器选择」会比「无选择」多出一条错误路径）。
+func (disabledManager) LoadConfigFromConfig(cfg *config.Config) error { return nil }
 
 func (disabledManager) Start(ctx context.Context) error { return nil }
 

@@ -6,10 +6,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
-	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/transport"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/transport"
 )
 
 func TestConvertSDKTool_ParsesRawSchema(t *testing.T) {

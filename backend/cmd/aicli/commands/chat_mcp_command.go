@@ -156,6 +156,9 @@ func chatMCPItemLines(item mcpadmin.Item) []string {
 	}
 	if item.Status != nil {
 		switch {
+		case item.Status.RequiresAuth:
+			marker = "!"
+			status = "需认证"
 		case item.Status.Connected:
 			marker = "●"
 			status = "已连接"
@@ -179,6 +182,15 @@ func chatMCPItemLines(item mcpadmin.Item) []string {
 	lines := []string{fmt.Sprintf("%s %s [%s] %s", marker, name, transport, status)}
 	if target := chatMCPEndpoint(item.Config); target != "" {
 		lines = append(lines, "    "+target)
+	}
+	// 分层配置来源（§4.5 Step 1）：同名覆盖必须可见，否则「改了不生效」很难排查。
+	if item.Status != nil {
+		if source := mcpConfigSourceLabel(item.Status.ConfigSource, item.Status.ConfigPath); source != "" {
+			lines = append(lines, "    来源: "+source)
+		}
+		for _, shadowed := range item.Status.ShadowedSources {
+			lines = append(lines, fmt.Sprintf("    覆盖: %s (%s)", shadowed.Source, shadowed.Path))
+		}
 	}
 	return lines
 }

@@ -233,6 +233,43 @@ func (m *mergedManager) StderrDiagnostics(name string) string {
 	return ""
 }
 
+// MCPConfigOrigins 来源查询：secondary（本地配置链）为基础，primary（客户端下发）覆盖同名项。
+func (m *mergedManager) MCPConfigOrigins() map[string]config.ServerOrigin {
+	out := make(map[string]config.ServerOrigin)
+	if m.secondary != nil {
+		if reporter, ok := m.secondary.(ConfigOriginReporter); ok && reporter != nil {
+			for name, origin := range reporter.MCPConfigOrigins() {
+				out[name] = origin
+			}
+		}
+	}
+	if m.primary != nil {
+		if reporter, ok := m.primary.(ConfigOriginReporter); ok && reporter != nil {
+			for name, origin := range reporter.MCPConfigOrigins() {
+				out[name] = origin
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// MCPConfigWarnings 返回两侧的分层加载告警（primary 在前，便于定位来源）。
+func (m *mergedManager) MCPConfigWarnings() []string {
+	var out []string
+	for _, mgr := range []Manager{m.primary, m.secondary} {
+		if mgr == nil {
+			continue
+		}
+		if reporter, ok := mgr.(ConfigOriginReporter); ok && reporter != nil {
+			out = append(out, reporter.MCPConfigWarnings()...)
+		}
+	}
+	return out
+}
+
 // ListMCPs 返回两边的状态并集（primary 优先，同名去重）。
 func (m *mergedManager) ListMCPs() []*config.MCPStatus {
 	if m.primary == nil {
@@ -284,6 +321,21 @@ func (m *mergedManager) LoadConfig(configPath string) error {
 		return m.primary.LoadConfig(configPath)
 	}
 	return m.secondary.LoadConfig(configPath)
+}
+
+// LoadConfigEffective 分层加载入口（实现 LayeredConfigLoader）：优先 primary，
+// primary 不支持该能力时回退 secondary（本地配置链通常是分层加载的一方）。
+func (m *mergedManager) LoadConfigEffective(explicitPath string) error {
+	if loader, ok := m.primary.(LayeredConfigLoader); ok && loader != nil {
+		return loader.LoadConfigEffective(explicitPath)
+	}
+	if loader, ok := m.secondary.(LayeredConfigLoader); ok && loader != nil {
+		return loader.LoadConfigEffective(explicitPath)
+	}
+	if m.primary != nil {
+		return m.primary.LoadConfig(explicitPath)
+	}
+	return m.secondary.LoadConfig(explicitPath)
 }
 
 // AddLifecycleObserver 订阅两个 manager 的生命周期事件。

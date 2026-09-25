@@ -28,7 +28,7 @@ func TestResolveRuntimeMCPConfigResolutionPrefersProjectFile(t *testing.T) {
 	if err := os.WriteFile(projectConfig, []byte("mcpServers: {}\n"), 0o644); err != nil {
 		t.Fatalf("write project mcp config: %v", err)
 	}
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	cfg := &config.Config{AICLI: &config.AICLIConfig{MCP: &config.AICLIMCPConfig{ConfigFile: "configs/mcp.yaml"}}}
 	resolution := resolveRuntimeMCPConfigResolution(cfg)
@@ -42,7 +42,7 @@ func TestResolveRuntimeMCPConfigResolutionPrefersProjectFile(t *testing.T) {
 
 func TestResolveRuntimeMCPConfigResolutionFallsBackToUserLevel(t *testing.T) {
 	home := isolateMCPResolutionHome(t)
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 
 	// resolver 会从 cwd 逐级向上搜索（docs/aicli/install.md：每级先 .aicli/mcp.yaml，
 	// 再 configs/mcp.yaml）。开发机上 %TEMP% 位于用户主目录之下时，祖先链上真实的
@@ -64,7 +64,7 @@ func TestResolveRuntimeMCPConfigResolutionFallsBackToUserLevel(t *testing.T) {
 // 已存在的路径与其它显式路径原样返回。该规则不依赖向上搜索，任何环境都可确定断言。
 func TestApplyMCPUserFallbackRewritesConventionDefaultOnly(t *testing.T) {
 	home := isolateMCPResolutionHome(t)
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 	want := filepath.Join(home, ".aicli", "mcp.yaml")
 
 	got := applyMCPUserFallback(aiclipaths.MCPConfigResolution{
@@ -108,7 +108,7 @@ func TestResolveRuntimeMCPConfigResolutionEmptyConfig(t *testing.T) {
 	if err := os.WriteFile(projectConfig, []byte("mcpServers: {}\n"), 0o644); err != nil {
 		t.Fatalf("write project mcp config: %v", err)
 	}
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	cases := map[string]*config.Config{
 		"nil mcp block":     {AICLI: &config.AICLIConfig{}},

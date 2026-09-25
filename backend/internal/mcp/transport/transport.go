@@ -48,6 +48,10 @@ type Config struct {
 	// 优先于 Env；Env 仅在 Headers 为空时作为历史兼容的头部来源。
 	Headers map[string]string
 
+	// AccessToken 可选的 OAuth 访问令牌来源（streamable / sse）。
+	// 非空且未配置静态 Authorization 头时，按需注入 Bearer 令牌并在 401 后刷新重试。
+	AccessToken AccessTokenProvider
+
 	// WorkingDir 工作目录（stdio）
 	WorkingDir string
 
@@ -216,9 +220,10 @@ func (t *SSETransport) ToMCPSdkTransport(ctx context.Context) mcp.Transport {
 	inner := &mcp.SSEClientTransport{
 		Endpoint: t.cfg.URL,
 	}
-	if headers := buildHeaders(t.cfg.Headers, t.cfg.Env); len(headers) > 0 {
+	headers := buildHeaders(t.cfg.Headers, t.cfg.Env)
+	if len(headers) > 0 || t.cfg.AccessToken != nil {
 		inner.HTTPClient = &http.Client{
-			Transport: headerRoundTripper{base: http.DefaultTransport, headers: headers},
+			Transport: headerRoundTripper{base: http.DefaultTransport, headers: headers, provider: t.cfg.AccessToken},
 		}
 	}
 	return newObservedMCPTransport("sse", strings.TrimSpace(t.cfg.URL), inner, &t.emitter)

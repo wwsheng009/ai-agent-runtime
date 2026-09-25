@@ -17,6 +17,9 @@ func CloneWithDefaults(cfg *Config) *Config {
 		}
 	}
 	ApplyDefaults(out)
+	// 内存配置（如 ACP 客户端下发）与文件加载共用同一套插值语义：
+	// 缺失项写入各 server 的 EnvError，由 manager 启动时按 server 隔离。
+	ExpandEnv(out)
 	return out
 }
 

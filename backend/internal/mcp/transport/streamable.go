@@ -44,18 +44,23 @@ func (t *StreamableTransport) ToMCPSdkTransport(_ context.Context) mcp.Transport
 	inner := &mcp.StreamableClientTransport{
 		Endpoint: strings.TrimSpace(t.cfg.URL),
 	}
-	if headers := buildHeaders(t.cfg.Headers, t.cfg.Env); len(headers) > 0 {
+	headers := buildHeaders(t.cfg.Headers, t.cfg.Env)
+	if len(headers) > 0 || t.cfg.AccessToken != nil {
 		inner.HTTPClient = &http.Client{
-			Transport: headerRoundTripper{base: http.DefaultTransport, headers: headers},
+			Transport: headerRoundTripper{base: http.DefaultTransport, headers: headers, provider: t.cfg.AccessToken},
 		}
 	}
 	return newObservedMCPTransport("streamable", t.cfg.URL, inner, &t.emitter)
 }
 
 // headerRoundTripper 为每个请求注入配置的 HTTP 头（Headers 优先，Env 兜底）。
+//
+// provider 非空且未配置静态 Authorization 时，改为按需注入 OAuth Bearer 令牌，
+// 并在 401/403 时强制刷新后重试一次（见 oauth_roundtripper.go）。
 type headerRoundTripper struct {
-	base    http.RoundTripper
-	headers http.Header
+	base     http.RoundTripper
+	headers  http.Header
+	provider AccessTokenProvider
 }
 
 func (rt headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -63,11 +68,8 @@ func (rt headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	cloned := req.Clone(req.Context())
-	for key, values := range rt.headers {
-		for _, value := range values {
-			cloned.Header.Set(key, value)
-		}
+	if rt.provider != nil && !hasStaticAuthorization(rt.headers) {
+		return roundTripWithAccessToken(base, req, rt.headers, rt.provider)
 	}
-	return base.RoundTrip(cloned)
+	return base.RoundTrip(cloneRequestWithHeaders(req, rt.headers))
 }

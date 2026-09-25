@@ -128,6 +128,8 @@ aicli exec --yolo "复杂任务"
 ```
 
 > 详细用法与输出格式见 [docs/aicli/exec.md](../aicli/exec.md)。
+>
+> plan 模式的完整说明（模式选择、`/plan` 命令、模型裁决与评审闭环、计划工件归档、HTTP API 与未实现清单）见 [docs/aicli/plan-mode.md](../aicli/plan-mode.md)。
 
 ### 4.3 `aicli config` / `init` / `doctor`
 
@@ -155,21 +157,56 @@ aicli balance                     # 查询账户余额
 
 ```bash
 aicli mcp list                  # 列出已配置 MCP
-aicli mcp add <名称> <URL|命令>  # 添加 MCP server
+aicli mcp add <名称> <URL|命令>  # 添加 MCP server（缺省按目标推断传输类型）
+aicli mcp add <名称> -- <命令> [参数...]  # stdio：名称在 -- 之前，命令在 -- 之后
+aicli mcp auth <名称>           # OAuth 登录（浏览器 + 本地回调，PKCE）
+aicli mcp auth --status         # 查看各 server 授权状态
+aicli mcp logout <名称>          # 清除本地 OAuth 令牌
 aicli mcp test <名称> <工具> [参数JSON]  # 测试工具
 aicli mcp tools [名称]          # 列出工具
 aicli mcp reload                # 重载配置
 ```
 
 支持的传输类型：`stdio`、`sse`、`websocket`、`streamable`（Streamable HTTP，MCP 2025-03-26 规范，推荐）。
+未显式指定 `--transport` 时会按目标推断：`http(s)://` → `streamable`、`ws(s)://` → `websocket`、本地命令 → `stdio`；
+`--env KEY=VALUE` 可重复传入，`--header "Key: Value"` 会镜像为 `HEADER_*` 环境变量。
 
 ```bash
-# Streamable HTTP（如 mcp-chrome 本地端点）
+# stdio（推荐写法）
+aicli mcp add chrome-devtools -- npx -y chrome-devtools-mcp@latest
+
+# Streamable HTTP（显式指定亦可）
 aicli mcp add --transport streamable chrome-mcp http://127.0.0.1:12306/mcp
 
-# 传统 SSE
+# 传统 SSE（端点形如 /sse 时显式指定）
 aicli mcp add --transport sse legacy-sse https://example.com/sse
 ```
+
+配置值支持环境变量引用：`${NAME}` 严格（未设置时该 server 被隔离并在 `mcp list/status` 的「最近错误」里指名变量）、
+`${NAME:-default}` 带默认值、`$${NAME}` 表示字面量；配置文件始终保留原始引用，仅在运行时连接前展开。
+
+需要 OAuth 的远端服务：
+
+```bash
+aicli mcp add notion https://mcp.notion.com/mcp --auth oauth --oauth-scope read
+aicli mcp auth notion                 # 浏览器完成授权；令牌存 ~/.aicli/mcp-tokens.json
+aicli mcp auth notion --no-browser    # 无桌面环境：打印链接，手动粘贴回调 URL/code
+```
+
+未登录时该 server 显示为「需认证」（`mcp list/status`、`/mcp`、微型 Web 面板），401/403 会自动刷新令牌并重试一次；
+刷新失败即回到「需认证」。websocket / stdio 暂不支持自动 OAuth，请用 `headers` 配置静态凭证。
+
+配置分层：`configs/mcp.yaml`（默认）< `~/.aicli/mcp.yaml`（个人全局）< `./.aicli/mcp.yaml`（项目级）< `~/.aicli/projects/<项目>/mcp.yaml`（local，项目私有）
+会**按名合并**——低优先级提供基础 server，高优先级同名 server 整体覆盖。`mcp list` 会标注 `来源:` 与 `覆盖:`，避免「改了用户级却被项目级盖掉」的困惑。
+
+```bash
+aicli mcp add my-tools https://example.com/mcp            # 默认写用户级
+aicli mcp add team-tools https://team.example.com/mcp --scope project   # 写 ./.aicli/mcp.yaml（可提交共享）
+aicli mcp add private-tool https://x.example.com/mcp --scope local      # 写 ~/.aicli/projects/<项目>/mcp.yaml（私有）
+```
+
+`--scope project` 拒绝明文凭证（`Authorization`/`api-key`/`token` 等）：请写成 `${VAR}`，例如
+`--header "Authorization: Bearer ${TEAM_TOKEN}"`；`enable/disable/remove` 会作用在定义该 server 的那个文件上。
 
 查看某个 MCP 当前暴露的工具：CLI 用 `aicli mcp tools <名称>`；微型 Web（`aicli chat --web`）与 console 设置页的 MCP 列表里都有「工具」按钮，
 分别读取 `GET /web/api/mcps/{name}/tools`（微 Web）与 `GET /api/runtime/mcps/{name}/tools`（runtime-server），

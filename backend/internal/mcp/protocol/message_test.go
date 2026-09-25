@@ -362,7 +362,7 @@ func TestCallToolResult_WithMultipleContent(t *testing.T) {
 
 func TestContent_JSON(t *testing.T) {
 	tests := []struct {
-		name string
+		name    string
 		content Content
 	}{
 		{
@@ -484,7 +484,7 @@ func TestReadResourceResult_JSON(t *testing.T) {
 
 func TestResourceContents_JSON(t *testing.T) {
 	tests := []struct {
-		name string
+		name    string
 		content ResourceContents
 	}{
 		{

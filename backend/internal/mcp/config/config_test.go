@@ -255,7 +255,6 @@ func TestExpandEnvVars(t *testing.T) {
 	os.Setenv("TEST_URL", "http://example.com")
 	defer os.Unsetenv("TEST_URL")
 
-	loader := &Loader{}
 	config := &Config{
 		MCPServers: map[string]MCPConfig{
 			"test_mcp": {
@@ -272,10 +271,7 @@ func TestExpandEnvVars(t *testing.T) {
 		},
 	}
 
-	err := loader.expandEnvVars(config)
-	if err != nil {
-		t.Fatalf("Failed to expand env vars: %v", err)
-	}
+	ExpandEnv(config)
 
 	testMCP := config.MCPServers["test_mcp"]
 	expectedURL := "http://example.com/sse"
@@ -299,7 +295,6 @@ func TestExpandEnvVars_WithCommand(t *testing.T) {
 	os.Setenv("NODE_PATH", "/usr/local/bin")
 	defer os.Unsetenv("NODE_PATH")
 
-	loader := &Loader{}
 	config := &Config{
 		MCPServers: map[string]MCPConfig{
 			"test_mcp": {
@@ -312,10 +307,7 @@ func TestExpandEnvVars_WithCommand(t *testing.T) {
 		},
 	}
 
-	err := loader.expandEnvVars(config)
-	if err != nil {
-		t.Fatalf("Failed to expand env vars: %v", err)
-	}
+	ExpandEnv(config)
 
 	testMCP := config.MCPServers["test_mcp"]
 	expectedCommand := "/usr/local/bin/node server.js"
@@ -450,7 +442,14 @@ mcpServers:
 		t.Fatalf("Failed to load config: %v", err)
 	}
 
+	// 加载期保持原始引用（管理操作可安全读改写回），运行时入口才展开。
 	testMCP := config.MCPServers["test_mcp"]
+	if testMCP.URL != "$MCP_URL/mcp" || testMCP.Env["CMD"] != "$MCP_CMD" {
+		t.Fatalf("load must keep raw env refs: %#v", testMCP)
+	}
+
+	ExpandEnv(config)
+	testMCP = config.MCPServers["test_mcp"]
 	expectedURL := "http://test.example.com/mcp"
 	if testMCP.URL != expectedURL {
 		t.Errorf("Expected URL %s, got %s", expectedURL, testMCP.URL)

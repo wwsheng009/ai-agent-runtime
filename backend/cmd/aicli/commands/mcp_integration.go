@@ -45,6 +45,12 @@ func initMCPManagerWithMode(configPath string, async bool) error {
 // 的 use/exclude 过滤服务器再加载（被排除的服务器既不建连也不进入工具面）；
 // selection 为空时保持原有文件加载路径不变（NFR-1 零变化）。
 func initMCPManagerWithSelection(configPath string, selection runtimeprofileinput.ResolvedMCPSelection, async bool) error {
+	return initMCPManagerWithSelectionOverride(configPath, "", selection, async)
+}
+
+// initMCPManagerWithSelectionOverride 在 initMCPManagerWithSelection 之上接收
+// 「显式覆盖值」：为空时按发现链分层合并加载（用户级基础 + 项目级增量）。
+func initMCPManagerWithSelectionOverride(configPath, explicitOverride string, selection runtimeprofileinput.ResolvedMCPSelection, async bool) error {
 	configPath = strings.TrimSpace(configPath)
 	selectionKey := mcpSelectionKey(selection)
 	if MCPManagerInstance != nil {
@@ -73,7 +79,7 @@ func initMCPManagerWithSelection(configPath string, selection runtimeprofileinpu
 	mcpManagerSelectionKey = selectionKey
 
 	// 加载配置
-	if err := loadMCPConfigForSelection(MCPManagerInstance, configPath, selection); err != nil {
+	if err := loadMCPConfigForSelection(MCPManagerInstance, configPath, explicitOverride, selection); err != nil {
 		return err
 	}
 
@@ -87,13 +93,22 @@ func initMCPManagerWithSelection(configPath string, selection runtimeprofileinpu
 	return nil
 }
 
-// loadMCPConfigForSelection 加载 MCP 配置：无 profile 选择时沿用文件加载；
+// loadMCPConfigForSelection 加载 MCP 配置：无 profile 选择时走分层合并加载；
 // 有选择时改为「读文件 → 过滤服务器 → 内存快照」路径。
-func loadMCPConfigForSelection(mgr manager.Manager, configPath string, selection runtimeprofileinput.ResolvedMCPSelection) error {
+func loadMCPConfigForSelection(mgr manager.Manager, configPath, explicitOverride string, selection runtimeprofileinput.ResolvedMCPSelection) error {
 	if mcpSelectionKey(selection) == "" {
-		if err := mgr.LoadConfig(configPath); err != nil {
+		loader, ok := mgr.(manager.LayeredConfigLoader)
+		if !ok || loader == nil {
+			// 兼容实现（Win7 禁用等）：没有分层能力时保持单文件加载语义。
+			if err := mgr.LoadConfig(configPath); err != nil {
+				return fmt.Errorf("加载 MCP 配置失败: %w", err)
+			}
+			return nil
+		}
+		if err := loader.LoadConfigEffective(explicitOverride); err != nil {
 			return fmt.Errorf("加载 MCP 配置失败: %w", err)
 		}
+		emitMCPConfigWarnings(mgr)
 		return nil
 	}
 	scoped, ok := mgr.(manager.ScopedManager)
@@ -227,6 +242,18 @@ func resolveChatMCPStartupConfigPath(cfg *config.Config, session *ChatSession) (
 	return configPath, true
 }
 
+// resolveChatMCPConfigOverride 返回 chat 侧的「显式覆盖值」：会话指定的配置文件优先，
+// 否则取 MCP_CONFIG_FILE / aicli.mcp.config_file；为空表示走发现链的分层合并。
+//
+// 约定路径（如 configs/mcp.yaml）由 aiclipaths 在解析时判定为非真实覆盖，
+// 因此这里直接透传即可，不会破坏「默认路径仍按发现链」的既有语义。
+func resolveChatMCPConfigOverride(cfg *config.Config, session *ChatSession) string {
+	if session != nil && strings.TrimSpace(session.MCPConfigPath) != "" {
+		return strings.TrimSpace(session.MCPConfigPath)
+	}
+	return config.EffectiveAICLIMCPConfigFile(cfg)
+}
+
 func prepareChatMCPManager(cfg *config.Config, session *ChatSession) error {
 	configPath, shouldInit := resolveChatMCPStartupConfigPath(cfg, session)
 	if !shouldInit {
@@ -236,7 +263,7 @@ func prepareChatMCPManager(cfg *config.Config, session *ChatSession) error {
 	if session != nil {
 		selection = session.ProfileMCPSelection
 	}
-	return initMCPManagerWithSelection(configPath, selection, true)
+	return initMCPManagerWithSelectionOverride(configPath, resolveChatMCPConfigOverride(cfg, session), selection, true)
 }
 
 // registerMCPTools 注册 MCP 工具到 FunctionRegistry

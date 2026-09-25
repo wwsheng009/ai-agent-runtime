@@ -29,7 +29,16 @@ var (
 	addCommand     string
 	addDescription string
 	headers        []string
+	addEnv         []string
 	authType       string
+	// add 命令的 OAuth 参数（--auth oauth 时生效）
+	addOAuthClientID     string
+	addOAuthClientSecret string
+	addOAuthScopes       []string
+	addOAuthCallbackPort int
+	addOAuthAuthServer   string
+	// add 命令的写入层级（--scope user|local|project）。
+	addScope string
 
 	// test-server 命令参数
 	testServerShowStderr bool
@@ -53,36 +62,53 @@ func MCPCommand() *cobra.Command {
 
 	// 添加 MCP
 	addCmd := &cobra.Command{
-		Use:   "add <名称> <URL|命令>",
+		Use:   "add <名称> <URL|命令> [-- <命令> [参数...]]",
 		Short: "添加 MCP 服务器",
 		Long: `添加 MCP 服务器
 
+目标与传输类型:
+  未显式指定 --transport 时按目标推断：http(s):// → streamable；ws(s):// → websocket；
+  本地命令（-- 之后的命令或 --command）→ stdio。
+  flag 建议写在 MCP 名称之前；本地进程命令写在 -- 之后。
+
 示例:
+  # stdio：名称在 -- 之前，命令与其参数在 -- 之后（推荐写法）
+  aicli mcp add chrome-devtools -- npx -y chrome-devtools-mcp@latest
+
+  # stdio：显式 --command 写法（兼容旧用法）
+  aicli mcp add --command npx chrome-devtools -y chrome-devtools-mcp@latest
+
   # Streamable HTTP 传输 (MCP 2025-03-26 规范，推荐)
   aicli mcp add --transport streamable context7 https://mcp.context7.com/mcp
 
-  # 本地 Streamable HTTP 端点 (如 mcp-chrome)
-  aicli mcp add --transport streamable chrome-mcp http://127.0.0.1:12306/mcp
-
-  # 传统 SSE 传输
+  # 传统 SSE 传输（端点形如 /sse 时显式指定）
   aicli mcp add --transport sse my-sse https://example.com/sse
 
   # WebSocket 传输 (ws:// 或 wss://)
   aicli mcp add --transport websocket my-mcp wss://example.com/mcp
 
-  # stdio 传输 (本地进程)
-  aicli mcp add --transport stdio -- npx chrome-devtools-mcp@latest
+  # 带 Header / 环境变量（值为 ${VAR} 时在加载配置时展开，未设置会报错）
+  aicli mcp add context7 https://mcp.context7.com/mcp --header "Authorization: Bearer ${CONTEXT7_TOKEN}"
+  aicli mcp add --command npx local-fs -y @modelcontextprotocol/server-filesystem --env FS_ROOT=/data
 
-  # 带 Header
-  aicli mcp add --transport streamable context7 https://mcp.context7.com/mcp --header "API_KEY: your-key"`,
-		Args: cobra.MinimumNArgs(2),
+写入层级 (--scope):
+  user（默认）→ ~/.aicli/mcp.yaml；local → ~/.aicli/projects/<项目>/mcp.yaml（私有）；
+  project → <项目>/.aicli/mcp.yaml（可提交共享；拒绝明文凭证，请用 ${VAR} 引用）。`,
+		Args: mcpAddArgsValidator,
 		Run:  addMCP,
 	}
-	addCmd.Flags().StringVarP(&transportType, "transport", "t", "sse", "传输类型 (stdio, sse, websocket, streamable)")
+	addCmd.Flags().StringVarP(&transportType, "transport", "t", "", "传输类型 (stdio, sse, websocket, streamable)；缺省按目标推断")
 	addCmd.Flags().StringVar(&addDescription, "description", "", "描述")
-	addCmd.Flags().StringVar(&addCommand, "command", "", "启动命令 (stdio 类型使用)")
-	addCmd.Flags().StringSliceVar(&headers, "header", []string{}, "HTTP 头部，格式: 'Key: Value'")
-	addCmd.Flags().StringVar(&authType, "auth", "", "认证类型 (oauth)")
+	addCmd.Flags().StringVar(&addCommand, "command", "", "启动命令 (stdio；与 -- 之后的命令等价)")
+	addCmd.Flags().StringArrayVar(&headers, "header", nil, "HTTP 头部，格式: 'Key: Value'（可重复）")
+	addCmd.Flags().StringArrayVar(&addEnv, "env", nil, "环境变量，格式: KEY=VALUE（可重复）")
+	addCmd.Flags().StringVar(&authType, "auth", "", "认证类型：oauth 启用 OAuth（配合 --oauth-* 参数）、none 清除认证")
+	addCmd.Flags().StringVar(&addOAuthClientID, "oauth-client-id", "", "OAuth client_id（缺省时尝试动态客户端注册）")
+	addCmd.Flags().StringVar(&addOAuthClientSecret, "oauth-client-secret", "", "OAuth client_secret（机密客户端；注意：会明文写入配置文件）")
+	addCmd.Flags().StringArrayVar(&addOAuthScopes, "oauth-scope", nil, "OAuth scope（可重复）")
+	addCmd.Flags().IntVar(&addOAuthCallbackPort, "oauth-callback-port", 0, "OAuth 本地回调端口（0=随机）")
+	addCmd.Flags().StringVar(&addOAuthAuthServer, "oauth-auth-server", "", "OAuth 授权服务器地址（覆盖自动发现）")
+	addCmd.Flags().StringVar(&addScope, "scope", "", "写入层级: user | local | project（project 可提交共享，禁止明文凭证）")
 
 	// 移除 MCP
 	removeCmd := &cobra.Command{
@@ -156,7 +182,8 @@ func MCPCommand() *cobra.Command {
 		Run:   reloadConfig,
 	}
 
-	cmd.AddCommand(addCmd, removeCmd, listCmd, statusCmd, enableCmd, disableCmd, toolsCmd, testCmd, testServerCmd, reloadCmd)
+	cmd.AddCommand(addCmd, removeCmd, listCmd, statusCmd, enableCmd, disableCmd, toolsCmd, testCmd, testServerCmd, reloadCmd,
+		newMCPAuthCommand(), newMCPLogoutCommand())
 
 	return cmd
 }
@@ -216,15 +243,14 @@ func ensureMCPManager() error {
 		return nil
 	}
 
-	configPath := getMCPConfigPath()
-	if configPath == "" {
-		return fmt.Errorf("找不到 MCP 配置文件\n请创建配置文件或使用 --config 指定")
-	}
-
 	MCPManager = manager.NewManager()
-	if err := MCPManager.LoadConfig(configPath); err != nil {
-		return fmt.Errorf("加载 MCP 配置失败: %w", err)
+	// 分层加载（§4.5 Step 1）：低优先级文件提供基础项，高优先级同名整体覆盖；
+	// --config-file 等显式覆盖仍然精确加载单个文件。
+	if err := loadMCPManagerLayered(MCPManager); err != nil {
+		MCPManager = nil
+		return err
 	}
+	emitMCPConfigWarnings(MCPManager)
 
 	// 启动 MCPs
 	ctx := context.Background()
@@ -282,6 +308,8 @@ type mcpActionCommandResult struct {
 	Enabled    *bool             `json:"enabled,omitempty"`
 	Config     *config.MCPConfig `json:"config,omitempty"`
 	Status     *config.MCPStatus `json:"status,omitempty"`
+	// TransportInferred 表示本次 add 未显式指定 --transport，类型由目标推断。
+	TransportInferred bool `json:"transport_inferred,omitempty"`
 }
 
 type mcpToolCommandResult struct {
@@ -306,14 +334,18 @@ type mcpCommandOptions struct {
 }
 
 type mcpAddCommandOptions struct {
-	Name        string
-	Target      string
-	Transport   string
-	Description string
-	Command     string
-	Headers     []string
-	AuthType    string
-	ExtraArgs   []string
+	Name              string
+	Target            string
+	Transport         string
+	TransportInferred bool
+	Description       string
+	Command           string
+	Headers           []string
+	Env               []string
+	AuthType          string
+	ExtraArgs         []string
+	// Scope 指定写入层级（user|local|project）；空串沿用既有路径解析。
+	Scope string
 }
 
 func resolveMCPCommandOptions(cmd *cobra.Command) (mcpCommandOptions, error) {
@@ -424,16 +456,11 @@ func runMCPTestToolCommand(mcpName, toolName, jsonArg string) (*mcpToolCommandRe
 }
 
 func runMCPTestServerCommand(name string, showStderr bool) (*mcpServerCommandResult, error) {
-	configPath := getMCPConfigPath()
-	if configPath == "" {
-		return nil, fmt.Errorf("找不到 MCP 配置文件")
-	}
-
-	cfgLoader := config.NewLoader(configPath)
-	cfg, err := cfgLoader.Load()
+	layered, err := loadMCPConfigLayered()
 	if err != nil {
-		return nil, fmt.Errorf("加载配置文件失败: %w", err)
+		return nil, err
 	}
+	cfg := layered.Config
 
 	mcpCfg, exists := cfg.MCPServers[name]
 	if !exists {
@@ -444,8 +471,8 @@ func runMCPTestServerCommand(name string, showStderr bool) (*mcpServerCommandRes
 	defer manager.SetStatusOutput(os.Stdout)
 
 	testManager := manager.NewManager()
-	if err := testManager.LoadConfig(configPath); err != nil {
-		return nil, fmt.Errorf("加载配置失败: %w", err)
+	if err := loadMCPManagerLayered(testManager); err != nil {
+		return nil, err
 	}
 	if err := testManager.Start(context.Background()); err != nil {
 		if tail := mcpStderrDiagnostics(testManager, name); showStderr && tail != "" && !strings.Contains(err.Error(), tail) {
@@ -497,7 +524,9 @@ func mcpStderrDiagnostics(mgr manager.Manager, name string) string {
 }
 
 func runMCPSetEnabledCommand(name string, enabled bool) (*mcpActionCommandResult, error) {
-	service := newMCPAdminService(false)
+	// 分层合并下，启停必须写在「实际定义该 server 的文件」里，
+	// 否则会出现「改了用户级、生效的却是项目级」。
+	service := newMCPAdminServiceForServer(name, false)
 	if _, err := service.SetEnabled(context.Background(), name, enabled); err != nil {
 		return nil, err
 	}
@@ -515,13 +544,26 @@ func runMCPReloadCommand() (*mcpActionCommandResult, error) {
 }
 
 func runMCPAddCommand(opts mcpAddCommandOptions) (*mcpActionCommandResult, error) {
-	configPath := resolveMCPConfigPathForWrite()
+	authCfg, err := buildMCPAuthConfig(opts.AuthType)
+	if err != nil {
+		return nil, err
+	}
+	env, err := parseMCPEnvOptions(opts.Env)
+	if err != nil {
+		return nil, err
+	}
+	configPath, err := resolveMCPWritePathForScope(opts.Scope)
+	if err != nil {
+		return nil, err
+	}
 	target := os.ExpandEnv(opts.Target)
 	enabled := true
 	request := mcpadmin.UpsertRequest{
 		Name:    opts.Name,
 		Type:    opts.Transport,
 		Enabled: &enabled,
+		Env:     env,
+		Auth:    authCfg,
 	}
 	if strings.TrimSpace(opts.Description) != "" {
 		description := opts.Description
@@ -541,23 +583,40 @@ func runMCPAddCommand(opts mcpAddCommandOptions) (*mcpActionCommandResult, error
 		request.Headers = headers
 	}
 
-	mcpCfg, err := newMCPAdminService(false).Add(context.Background(), request)
+	// 项目级配置可提交共享：明文凭证必须挡在写入之前（§4.5 Step 2）。
+	if normalized, _ := parseMCPWriteScope(opts.Scope); normalized == mcpWriteScopeProject {
+		if err := validateProjectScopeSecrets(request, configPath); err != nil {
+			return nil, err
+		}
+	}
+	// 同名覆盖不可静默：写入前提示已存在的其它层级定义。
+	emitMCPShadowNotice(opts.Name, configPath)
+
+	service := mcpadmin.NewService(configPath, mcpadmin.WithApplyOnMutate(false))
+	mcpCfg, err := service.Add(context.Background(), request)
 	if err != nil {
 		return nil, err
+	}
+	if normalized, _ := parseMCPWriteScope(opts.Scope); normalized == mcpWriteScopeProject {
+		emitMCPProjectScopeNotice(configPath)
 	}
 
 	status := probeMCPStatus(configPath, opts.Name, mcpCfg.Type)
 	return &mcpActionCommandResult{
-		MCPName:    opts.Name,
-		ConfigPath: configPath,
-		Config:     mcpCfg,
-		Status:     status,
+		MCPName:           opts.Name,
+		ConfigPath:        configPath,
+		Config:            mcpCfg,
+		Status:            status,
+		TransportInferred: opts.TransportInferred,
 	}, nil
 }
 
 func runMCPRemoveCommand(name string) (*mcpActionCommandResult, error) {
-	configPath := resolveMCPConfigPathForWrite()
-	if err := newMCPAdminService(false).Remove(context.Background(), name); err != nil {
+	configPath := locateMCPServerConfigFile(name)
+	if configPath == "" {
+		configPath = resolveMCPConfigPathForWrite()
+	}
+	if err := newMCPAdminServiceForServer(name, false).Remove(context.Background(), name); err != nil {
 		return nil, err
 	}
 	return &mcpActionCommandResult{
@@ -601,6 +660,112 @@ func parseMCPHeaderOptions(headers []string) map[string]string {
 		parsed[key] = strings.TrimSpace(parts[1])
 	}
 	return parsed
+}
+
+// parseMCPEnvOptions 解析 --env KEY=VALUE 列表；格式错误直接报错，避免静默丢配置。
+func parseMCPEnvOptions(values []string) (map[string]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	env := make(map[string]string, len(values))
+	for _, raw := range values {
+		key, value, ok := strings.Cut(raw, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			return nil, fmt.Errorf("无效的 --env %q：需要 KEY=VALUE 格式", raw)
+		}
+		env[key] = value
+	}
+	return env, nil
+}
+
+// buildMCPAuthConfig 把 --auth 与 --oauth-* 参数转成配置结构。
+//
+// 返回值语义：nil = 不改变认证配置；Type 为空 = 清除认证；否则启用对应认证。
+func buildMCPAuthConfig(authType string) (*config.MCPAuthConfig, error) {
+	switch strings.ToLower(strings.TrimSpace(authType)) {
+	case "":
+		return nil, nil
+	case "none":
+		return &config.MCPAuthConfig{}, nil
+	case "oauth":
+		return &config.MCPAuthConfig{
+			Type:                "oauth",
+			ClientID:            strings.TrimSpace(addOAuthClientID),
+			ClientSecret:        strings.TrimSpace(addOAuthClientSecret),
+			Scopes:              addOAuthScopes,
+			CallbackPort:        addOAuthCallbackPort,
+			AuthorizationServer: strings.TrimSpace(addOAuthAuthServer),
+		}, nil
+	default:
+		return nil, fmt.Errorf("不支持的 --auth %q：目前支持 oauth（OAuth 2.0 授权码 + PKCE）或 none（清除认证）；静态凭证请用 --header", strings.TrimSpace(authType))
+	}
+}
+
+// mcpAddArgs 是 `mcp add` 的位置参数解析结果。
+//
+// 约定：`--` 之前是 MCP 名称（可带目标），`--` 之后是 stdio 命令与其参数。
+type mcpAddArgs struct {
+	Name      string
+	Target    string
+	ExtraArgs []string
+}
+
+// parseMCPAddArgs 解析位置参数；dash 为 cobra 的 ArgsLenAtDash()（无 `--` 时为 -1）。
+func parseMCPAddArgs(args []string, dash int) (mcpAddArgs, error) {
+	if dash >= 0 {
+		before := args[:dash]
+		after := args[dash:]
+		if len(before) == 0 {
+			return mcpAddArgs{}, fmt.Errorf("需要在 -- 之前指定 MCP 名称，例如: aicli mcp add my-server -- npx -y @scope/pkg")
+		}
+		if len(after) == 0 {
+			return mcpAddArgs{}, fmt.Errorf("需要在 -- 之后指定本地命令，例如: aicli mcp add my-server -- npx -y @scope/pkg")
+		}
+		parsed := mcpAddArgs{Name: before[0]}
+		if len(before) >= 2 {
+			// 兼容 `add <名称> <目标> -- <额外参数>`。
+			parsed.Target = before[1]
+			parsed.ExtraArgs = append([]string(nil), after...)
+			return parsed, nil
+		}
+		parsed.Target = after[0]
+		parsed.ExtraArgs = append([]string(nil), after[1:]...)
+		return parsed, nil
+	}
+	if len(args) == 0 {
+		return mcpAddArgs{}, fmt.Errorf("需要指定 MCP 名称与目标（URL 或命令）")
+	}
+	parsed := mcpAddArgs{Name: args[0]}
+	if len(args) >= 2 {
+		parsed.Target = args[1]
+	}
+	if len(args) > 2 {
+		parsed.ExtraArgs = append([]string(nil), args[2:]...)
+	}
+	return parsed, nil
+}
+
+// mcpAddArgsValidator 校验 `mcp add` 的位置参数数量（校验逻辑与 parseMCPAddArgs 对齐）。
+func mcpAddArgsValidator(cmd *cobra.Command, args []string) error {
+	_, err := parseMCPAddArgs(args, cmd.ArgsLenAtDash())
+	return err
+}
+
+// inferMCPTransport 在未显式指定 --transport 时按目标推断传输类型。
+func inferMCPTransport(target, command string) string {
+	if strings.TrimSpace(command) != "" {
+		return "stdio"
+	}
+	lower := strings.ToLower(strings.TrimSpace(target))
+	switch {
+	case strings.HasPrefix(lower, "ws://"), strings.HasPrefix(lower, "wss://"):
+		return "websocket"
+	case strings.HasPrefix(lower, "http://"), strings.HasPrefix(lower, "https://"):
+		return "streamable"
+	default:
+		return "stdio"
+	}
 }
 
 func probeMCPStatus(configPath, name, transportType string) *config.MCPStatus {
@@ -723,21 +888,33 @@ func reloadConfig(cmd *cobra.Command, args []string) {
 // addMCP 添加 MCP 服务器
 func addMCP(cmd *cobra.Command, args []string) {
 	withMCPCommand(cmd, func(options mcpCommandOptions) {
-		name := args[0]
+		parsed, parseErr := parseMCPAddArgs(args, cmd.ArgsLenAtDash())
+		if parseErr != nil {
+			exitCommandError("mcp", options.OutputFormat, parseErr, map[string]interface{}{"subcommand": "add"})
+		}
+		transport := strings.TrimSpace(transportType)
+		inferred := false
+		if transport == "" {
+			transport = inferMCPTransport(parsed.Target, addCommand)
+			inferred = true
+		}
 		payload, err := runMCPAddCommand(mcpAddCommandOptions{
-			Name:        name,
-			Target:      args[1],
-			Transport:   transportType,
-			Description: addDescription,
-			Command:     addCommand,
-			Headers:     headers,
-			AuthType:    authType,
-			ExtraArgs:   append([]string(nil), args[2:]...),
+			Name:              parsed.Name,
+			Target:            parsed.Target,
+			Transport:         transport,
+			TransportInferred: inferred,
+			Description:       addDescription,
+			Command:           addCommand,
+			Headers:           headers,
+			Env:               addEnv,
+			AuthType:          authType,
+			ExtraArgs:         parsed.ExtraArgs,
+			Scope:             addScope,
 		})
 		if err != nil {
-			exitCommandError("mcp", options.OutputFormat, err, map[string]interface{}{"subcommand": "add", "mcpName": name})
+			exitCommandError("mcp", options.OutputFormat, err, map[string]interface{}{"subcommand": "add", "mcpName": parsed.Name})
 		}
-		renderMCPAddResult("add", transportType, addDescription, payload, options)
+		renderMCPAddResult("add", addDescription, payload, options)
 	})
 }
 
@@ -795,10 +972,24 @@ func renderMCPStatuses(statuses []*config.MCPStatus, options mcpCommandOptions) 
 				status = "disconnected"
 			}
 		}
+		if mcp.RequiresAuth {
+			status = "需认证"
+		}
 		fmt.Printf("  %s\n", mcp.Name)
 		fmt.Printf("    类型: %s\n", mcp.Type)
 		fmt.Printf("    状态: %s\n", status)
 		fmt.Printf("    工具数量: %d\n", mcp.ToolCount)
+		if errText := strings.TrimSpace(mcp.LastError); errText != "" {
+			fmt.Printf("    最近错误: %s\n", errText)
+		}
+		// 分层配置来源（§4.5 Step 1）：明确「来自哪一层」与「覆盖了谁」，
+		// 避免用户级改了却不生效却没有提示。
+		if source := mcpConfigSourceLabel(mcp.ConfigSource, mcp.ConfigPath); source != "" {
+			fmt.Printf("    来源: %s\n", source)
+		}
+		for _, shadowed := range mcp.ShadowedSources {
+			fmt.Printf("    覆盖: %s (%s)\n", shadowed.Source, shadowed.Path)
+		}
 		fmt.Println()
 	}
 }
@@ -843,6 +1034,12 @@ func renderMCPStatusResult(status *config.MCPStatus, options mcpCommandOptions) 
 	fmt.Printf("  启用: %v\n", status.Enabled)
 	fmt.Printf("  已连接: %v\n", status.Connected)
 	fmt.Printf("  工具数量: %d\n", status.ToolCount)
+	if status.RequiresAuth {
+		fmt.Printf("  需认证: true\n")
+	}
+	if errText := strings.TrimSpace(status.LastError); errText != "" {
+		fmt.Printf("  最近错误: %s\n", errText)
+	}
 }
 
 func renderMCPToolCallResult(result *mcpToolCommandResult, options mcpCommandOptions) {
@@ -891,7 +1088,7 @@ func renderMCPActionResult(action string, payload *mcpActionCommandResult, optio
 	}
 }
 
-func renderMCPAddResult(action, transportType, description string, payload *mcpActionCommandResult, options mcpCommandOptions) {
+func renderMCPAddResult(action, description string, payload *mcpActionCommandResult, options mcpCommandOptions) {
 	if options.OutputFormat == "json" {
 		printCommandActionJSON("mcp", options.JSONEnvelope, action, payload)
 		return
@@ -906,11 +1103,14 @@ func renderMCPAddResult(action, transportType, description string, payload *mcpA
 	status := payload.Status
 
 	fmt.Printf("✅ 已添加 MCP: %s\n", name)
-	fmt.Printf("   类型: %s\n", transportType)
+	fmt.Printf("   类型: %s\n", mcpCfg.Type)
+	if payload.TransportInferred && mcpCfg.Type != "stdio" {
+		fmt.Printf("   提示: 未指定 --transport，已按目标推断为 %s；如端点需要其它传输请显式指定（如 --transport sse）\n", mcpCfg.Type)
+	}
 	if description != "" {
 		fmt.Printf("   描述: %s\n", description)
 	}
-	if transportType == "stdio" {
+	if mcpCfg.Type == "stdio" {
 		fmt.Printf("   命令: %s\n", mcpCfg.Command)
 		if len(mcpCfg.Args) > 0 {
 			fmt.Printf("   参数: %v\n", mcpCfg.Args)

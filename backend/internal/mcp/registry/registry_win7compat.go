@@ -20,10 +20,15 @@ const maxCanonicalToolNameLength = 64
 
 // ToolInfo 工具信息
 type ToolInfo struct {
-	Tool     *protocol.Tool
-	MCPName  string
-	Enabled  bool
-	Metadata map[string]interface{}
+	Tool    *protocol.Tool
+	MCPName string
+	Enabled bool
+	// UserDisabled 是配置意图位（mcp.yaml tools 条目）；零值表示未禁用。
+	// Win7 兼容构建下 MCP 整体禁用，该位恒为零；保留字段是为了让直接读取该
+	// 字段的调用方（internal/api/runtimeapi、cmd/aicli/commands 的 web MCP 工具面
+	// 板）与主线 registry.go 保持相同的类型形状。
+	UserDisabled bool
+	Metadata     map[string]interface{}
 }
 
 // QuarantinedToolInfo records an externally supplied tool that failed schema

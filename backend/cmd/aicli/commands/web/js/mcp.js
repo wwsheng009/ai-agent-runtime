@@ -107,14 +107,16 @@ function renderMCPRow(item) {
   var type = cfg.type ? String(cfg.type) : "";
   var enabled = mcpConfigEnabled(cfg);
   var connected = !!(status && status.connected);
+  var requiresAuth = !!(status && status.requiresAuth);
   var toolCount = status && typeof status.toolCount === "number" ? status.toolCount : 0;
   var trust = cfg.trustLevel || (status && status.trustLevel) || "";
   var endpoint = mcpEndpoint(cfg);
 
-  var statusText = connected ? "已连接" : (enabled ? "未连接" : "已停用");
+  var statusText = requiresAuth ? "需认证" : (connected ? "已连接" : (enabled ? "未连接" : "已停用"));
+  var statusClass = requiresAuth ? "mcp-badge-auth" : (connected ? "mcp-badge-on" : "mcp-badge-off");
   var badges = [
     '<span class="skill-badge">' + esc(type || "-") + "</span>",
-    '<span class="skill-badge ' + (connected ? "mcp-badge-on" : "mcp-badge-off") + '">' + esc(statusText) + "</span>",
+    '<span class="skill-badge ' + statusClass + '">' + esc(statusText) + "</span>",
     '<span class="skill-badge">工具 ' + toolCount + "</span>"
   ];
   if (trust) { badges.push('<span class="skill-badge">' + esc(trust) + "</span>"); }
@@ -124,6 +126,21 @@ function renderMCPRow(item) {
   if (cfg.description) { sub.push('<span class="skill-desc">' + esc(cfg.description) + "</span>"); }
   if (status && status.lastError) {
     sub.push('<span class="skill-desc mcp-last-error">错误: ' + esc(status.lastError) + "</span>");
+  }
+  if (requiresAuth) {
+    sub.push('<span class="skill-desc mcp-auth-hint">运行 <code>aicli mcp auth ' + esc(name) + '</code> 完成 OAuth 授权</span>');
+  }
+  // 分层配置来源（§4.5 Step 1）：同名覆盖与来源层级必须在面板上可见。
+  var configSource = status && status.configSource ? String(status.configSource) : "";
+  if (configSource) {
+    var shadowed = (status && status.shadowedSources) || [];
+    var sourceText = "来源: " + configSource + (status.configPath ? " (" + status.configPath + ")" : "");
+    if (shadowed.length) {
+      sourceText += " · 覆盖: " + shadowed.map(function (item) {
+        return String(item.source) + " (" + String(item.path) + ")";
+      }).join(", ");
+    }
+    sub.push('<span class="skill-desc mcp-config-source">' + esc(sourceText) + "</span>");
   }
 
   var actions = '<div class="mcp-row-actions">'

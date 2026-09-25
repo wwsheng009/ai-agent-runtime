@@ -1,3 +1,9 @@
+//go:build !win7compat
+
+// 本文件用 modelcontextprotocol/go-sdk 起真实 MCP server 验证 ACP 主机的
+// 服务器下发路径。go-sdk 要求 go >= 1.23，不在 go.win7.mod 依赖图内，且
+// Win7 兼容构建整体禁用 MCP（见 manager_win7compat.go），因此整文件排除。
+
 package commands
 
 import (

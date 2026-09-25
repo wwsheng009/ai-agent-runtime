@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	echo "github.com/wwsheng009/ai-agent-runtime/internal/mcp/server/echo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	echo "github.com/wwsheng009/ai-agent-runtime/internal/mcp/server/echo"
 )
 
 func TestManager_RemoteEchoConnectivity(t *testing.T) {

@@ -1,6 +1,9 @@
 package aiclipaths
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +35,14 @@ func DefaultLogsDir() string {
 // must use internal/mesh.ResolvePaths, not this helper.
 func DefaultMeshDir() string {
 	return defaultAICLIDir("mesh")
+}
+
+// DefaultAICLIDir returns the user-level ~/.aicli directory (falling back to
+// ./.aicli when no home resolves). Callers that need an environment override
+// (for example AICLI_HOME, which internal/mesh honours for the mesh root) must
+// apply it themselves before calling this helper.
+func DefaultAICLIDir() string {
+	return defaultAICLIDir("")
 }
 
 // ResolveConfigFilePath resolves a config file path with the following priority
@@ -307,6 +318,14 @@ func ResolveMCPConfigPathDetailed(explicitPath string) MCPConfigResolution {
 	if !discoverOnly {
 		addCandidate(explicit, "explicit")
 	}
+	// local 层（个人为当前项目追加的私有配置）优先级最高：CommandCode 语义为
+	// local > project > user，且该文件位于用户目录（不随仓库分发、不受 foldertrust
+	// 项目门限制）。只有写入过 --scope local 时才会存在。
+	if cwd, err := os.Getwd(); err == nil {
+		if localPath, err := LocalMCPConfigPath(cwd); err == nil {
+			addCandidate(localPath, "local")
+		}
+	}
 	if cwd, err := os.Getwd(); err == nil {
 		addCandidate(filepath.Join(cwd, ".aicli", filename), "project")
 	}
@@ -337,6 +356,13 @@ func ResolveMCPConfigPathDetailed(explicitPath string) MCPConfigResolution {
 // firstExistingMCPConfigCandidate reports the first existing config among the
 // non-explicit priority layers, mirroring ResolveConfigFilePath's ordering.
 func firstExistingMCPConfigCandidate(filename string, searchPaths []string) (string, string) {
+	if cwd, err := os.Getwd(); err == nil {
+		if localPath, err := LocalMCPConfigPath(cwd); err == nil {
+			if path := firstExistingConfigFile(localPath); path != "" {
+				return path, "local"
+			}
+		}
+	}
 	if cwd, err := os.Getwd(); err == nil {
 		if path := firstExistingConfigFile(filepath.Join(cwd, ".aicli", filename)); path != "" {
 			return path, "project"
@@ -369,6 +395,57 @@ func firstExistingConfigFile(path string) string {
 		return filepath.Clean(path)
 	}
 	return ""
+}
+
+// ProjectScopeSlug 把项目根路径规范化为可安全用作目录名的短标识：
+// 仅保留 [a-z0-9_-]，其余字符折叠为单个 "-"，并去掉首尾 "-"。
+//
+// 与 planstore 的内部 slug 规则一致（那里为包内私有）；这里单独实现，
+// 避免 aiclipaths 依赖具体业务包。全大写/中文等无法成词时返回 ""，
+// 由调用方追加稳定的哈希后缀兜底（见 LocalMCPConfigPath）。
+func ProjectScopeSlug(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	path = strings.ReplaceAll(path, "\\", "/")
+
+	var builder strings.Builder
+	pendingDash := false
+	for _, r := range strings.ToLower(path) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			builder.WriteRune(r)
+			pendingDash = false
+			continue
+		}
+		if builder.Len() > 0 && !pendingDash {
+			builder.WriteByte('-')
+			pendingDash = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
+}
+
+// LocalMCPConfigPath 返回项目私有（local scope）的 MCP 配置路径：
+// ~/.aicli/projects/<slug>/mcp.yaml。
+//
+// 该层既不进入版本库，也不受项目级 foldertrust 门限制——适合个人在本机
+// 为某个项目追加私有 server。slug 为空（路径规范化后无可用字符）时用
+// 路径哈希兜底，保证不同项目不会共用一个目录。
+func LocalMCPConfigPath(projectRoot string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("解析用户主目录失败: %w", err)
+	}
+	slug := ProjectScopeSlug(projectRoot)
+	if slug == "" {
+		sum := sha256.Sum256([]byte(strings.TrimSpace(projectRoot)))
+		slug = "project-" + hex.EncodeToString(sum[:8])
+	}
+	return filepath.Join(home, ".aicli", "projects", slug, DefaultMCPConfigFileName), nil
 }
 
 // DatePartition returns year/month/day path segments for t in local time.

@@ -48,19 +48,21 @@ func notFoundf(format string, args ...interface{}) error {
 //
 // 指针字段用于区分「未提供」与「显式置空」：nil 表示保持原值（新增时用默认值）。
 type UpsertRequest struct {
-	Name             string            `json:"name"`
-	Description      *string           `json:"description,omitempty"`
-	Type             string            `json:"type,omitempty"`
-	Command          string            `json:"command,omitempty"`
-	Args             []string          `json:"args,omitempty"`
-	URL              string            `json:"url,omitempty"`
-	Env              map[string]string `json:"env,omitempty"`
-	Headers          map[string]string `json:"headers,omitempty"`
-	Enabled          *bool             `json:"enabled,omitempty"`
-	TrustLevel       string            `json:"trustLevel,omitempty"`
-	TimeoutSeconds   *int              `json:"timeoutSeconds,omitempty"`
-	MaxParallelCalls *int              `json:"maxParallelCalls,omitempty"`
+	Name             string                          `json:"name"`
+	Description      *string                         `json:"description,omitempty"`
+	Type             string                          `json:"type,omitempty"`
+	Command          string                          `json:"command,omitempty"`
+	Args             []string                        `json:"args,omitempty"`
+	URL              string                          `json:"url,omitempty"`
+	Env              map[string]string               `json:"env,omitempty"`
+	Headers          map[string]string               `json:"headers,omitempty"`
+	Enabled          *bool                           `json:"enabled,omitempty"`
+	TrustLevel       string                          `json:"trustLevel,omitempty"`
+	TimeoutSeconds   *int                            `json:"timeoutSeconds,omitempty"`
+	MaxParallelCalls *int                            `json:"maxParallelCalls,omitempty"`
 	Tools            map[string]config.MCPToolConfig `json:"tools,omitempty"`
+	// Auth 认证配置：nil = 保持既有；Type 为空 = 清除认证；否则整体替换。
+	Auth *config.MCPAuthConfig `json:"auth,omitempty"`
 }
 
 // NormalizeTransportType 归一化传输类型别名。
@@ -258,13 +260,33 @@ func BuildConfig(req UpsertRequest, existing *config.MCPConfig) (config.MCPConfi
 	}
 
 	if req.Env != nil {
-		mcpCfg.Env = cloneStringMap(req.Env)
+		// 与 headers 一致：增量合并而不是整体替换，避免 Update 时静默丢掉已有 env。
+		merged := cloneStringMap(mcpCfg.Env)
+		if merged == nil {
+			merged = map[string]string{}
+		}
+		for key, value := range req.Env {
+			merged[key] = value
+		}
+		mcpCfg.Env = merged
 	}
 	if mcpCfg.Env == nil {
 		mcpCfg.Env = map[string]string{}
 	}
 	if req.Headers != nil {
 		mcpCfg.Env = applyHeaders(mcpCfg.Env, req.Headers)
+	}
+
+	if req.Auth != nil {
+		if strings.TrimSpace(req.Auth.Type) == "" {
+			mcpCfg.Auth = nil
+		} else {
+			authCfg := *req.Auth
+			if authCfg.Scopes != nil {
+				authCfg.Scopes = append([]string(nil), req.Auth.Scopes...)
+			}
+			mcpCfg.Auth = &authCfg
+		}
 	}
 
 	enabled := true

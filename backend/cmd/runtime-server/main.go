@@ -1450,7 +1450,9 @@ func buildSkillsMCPManager(ctx context.Context, cfg *config.Config, runtimeConfi
 			return nil, nil, fmt.Errorf("failed to prepare MCP config: %w", err)
 		}
 		manager = mcpmanager.NewManager()
-		if err := manager.LoadConfig(mcpConfigPath); err != nil {
+		// 分层加载（§4.5 Step 1）：用户级提供基础项，项目级同名整体覆盖。
+		// 显式 aicli.mcp.config_file 仍然精确加载单个文件。
+		if err := loadRuntimeMCPManagerConfig(manager, cfg); err != nil {
 			return nil, nil, fmt.Errorf("failed to load MCP config: %w", err)
 		}
 		statuses := manager.ListMCPs()
@@ -1458,6 +1460,12 @@ func buildSkillsMCPManager(ctx context.Context, cfg *config.Config, runtimeConfi
 		for _, status := range statuses {
 			if status != nil && status.Enabled {
 				enabledCount++
+			}
+		}
+		// 分层加载的告警（如低优先级文件损坏被跳过）必须可观测，不能静默丢配置。
+		if reporter, ok := manager.(mcpmanager.ConfigOriginReporter); ok && reporter != nil {
+			for _, warning := range reporter.MCPConfigWarnings() {
+				logger.Warn("MCP config layer skipped", logger.String("detail", warning))
 			}
 		}
 		logger.Info("MCP config loaded",
@@ -1636,6 +1644,21 @@ func configuredMCPConfigPath(cfg *config.Config) string {
 	// without the key being written first (MCP_CONFIG_FILE 环境变量优先，见
 	// agentconfig.EffectiveAICLIMCPConfigFile)。
 	return aiclipaths.ResolveMCPConfigPath(config.EffectiveAICLIMCPConfigFile(cfg))
+}
+
+// loadRuntimeMCPManagerConfig 让 runtime-server 的 MCP manager 按发现链分层加载：
+// 低优先级文件提供基础项，高优先级文件同名整体覆盖（§4.5 Step 1）。
+// 显式 aicli.mcp.config_file / MCP_CONFIG_FILE 仍走精确加载。
+func loadRuntimeMCPManagerConfig(manager mcpmanager.Manager, cfg *config.Config) error {
+	explicit := ""
+	if cfg != nil {
+		explicit = config.EffectiveAICLIMCPConfigFile(cfg)
+	}
+	if loader, ok := manager.(mcpmanager.LayeredConfigLoader); ok && loader != nil {
+		return loader.LoadConfigEffective(explicit)
+	}
+	// 兼容实现（无分层能力）：退回单文件加载，保持既有行为。
+	return manager.LoadConfig(configuredMCPConfigPath(cfg))
 }
 
 // resolveRuntimeMCPConfigPath 解析 runtime-server 实际使用的 MCP 配置路径：

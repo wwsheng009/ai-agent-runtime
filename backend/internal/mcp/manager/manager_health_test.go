@@ -6,12 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/client"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
-	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
-	"github.com/stretchr/testify/require"
 )
 
 type fakeClient struct {

@@ -528,27 +528,84 @@ sessions:
 - `test`
 - `test-server`
 - `reload`
+- `auth`
+- `logout`
 
-常用参数包括 `--config-file/-C`、`--transport`、`--header`、`--auth` 等；完整参数以 `aicli mcp --help` 和各子命令 `--help` 为准。
+常用参数包括 `--config-file/-C`、`--transport`、`--header`、`--env` 等；完整参数以 `aicli mcp --help` 和各子命令 `--help` 为准。
+
+`aicli mcp add` 的目标与传输类型：
+
+- 未显式指定 `--transport` 时按目标推断：`http(s)://` → `streamable`；`ws(s)://` → `websocket`；本地命令 → `stdio`。推断结果会在添加输出里提示，可用 `--transport` 显式覆盖。
+- stdio 推荐写法：名称在 `--` 之前，命令与其参数在 `--` 之后，例如
+  `aicli mcp add chrome-devtools -- npx -y chrome-devtools-mcp@latest`；
+  `--command <cmd>` 是保留的兼容写法。
+- `--env KEY=VALUE` 与 `--header "Key: Value"` 均可重复；header 会镜像为 `HEADER_*` 环境变量（与 console / 微型 Web 面板同一约定）。
+- `--auth` 目前是占位参数：MCP OAuth 尚未实现，传值会直接报错并提示改用 `--header` / `--env`（后续计划见 `docs/analysis/commandcode-mcp-design-borrowing-20260925.md` 的 M2）。
+
+MCP 配置中的环境变量插值（作用于 `url` / `command` / `env` 与 `args` / `headers`）：
+
+- `${NAME}`：严格语义；变量未设置时该 server 会记录 `EnvError`（内容形如「引用未设置的环境变量: NAME」），变量已设置但为空串视为合法。
+- `${NAME:-default}`：变量未设置或为空时使用默认值；`$${NAME}` 展开为字面量 `${NAME}`。
+- 历史 `$NAME` 语法仅在 `url` / `command` / `env` 上按旧行为展开（未设置→空串）；`args` / `headers` 只识别 `${...}` 显式语法，避免误伤 `$1`、`cost$5` 这类字面量。
+- **配置文件始终保留原始 `${NAME}` 字面量**：展开只发生在运行时入口（manager 建立连接时）。因此 `mcp add/enable/disable/remove` 等管理操作不会把展开后的真实值（或空串）写回文件，也不会把密钥固化进配置。
+- 缺变量的 server 会被隔离：不参与连接，但会在 `aicli mcp list` / `aicli mcp status <名称>` 的「最近错误」、`/mcp` 与 Web 面板的错误列中显示；其它 server 与管理操作不受影响。
+
+MCP OAuth（`--auth oauth` + `aicli mcp auth`）：
+
+- 启用：`aicli mcp add <名称> <URL> --auth oauth [--oauth-scope read ...] [--oauth-client-id ...] [--oauth-callback-port 3344]`；
+  也可直接写配置：`auth: oauth` 或结构化 `auth: {type: oauth, clientId: ..., scopes: [...], callbackPort: ...}`；`--auth none` 清除认证。
+- 登录：`aicli mcp auth <名称>`（浏览器 + 本地回调，Authorization Code + PKCE S256；未配置 `clientId` 时尝试动态客户端注册 RFC 7591）。
+  浏览器打不开/无桌面环境时用 `aicli mcp auth <名称> --no-browser`：复制打印的授权 URL 手动访问，再把回调 URL（或 code）粘贴回终端。
+- 查看与清理：`aicli mcp auth --status`、`aicli mcp auth --list`（只输出元数据，绝不打印令牌明文）、
+  `aicli mcp auth --clear <名称>` / `aicli mcp auth --clear --all`，或 `aicli mcp logout <名称> [--all]`。
+- 令牌存 `~/.aicli/mcp-tokens.json`（写入为 0600 且原子替换，目录 0700），可用 `AICLI_MCP_TOKENS_FILE` 覆盖路径；
+  server URL 变化时同名旧令牌会被忽略，避免把旧站令牌发给新站。
+- 401/403 时会用 refresh_token 自动刷新并重试一次；未登录或刷新失败时该 server 被隔离为「需认证」
+  （`aicli mcp list` / `aicli mcp status`、`/mcp`、微型 Web 面板均可见），不影响其它 server。
+- 目前支持 streamable 与 sse；websocket / stdio 请用 `headers` 配置静态凭证。Win7 兼容构建不会自动打开浏览器，始终打印授权链接。
+- 安全提示：`--oauth-client-secret` 会明文写入配置文件（公共客户端留空即可）。
+
+配置分层与写入层级（`--scope`）：
+
+- **同名覆盖**：解析链上的所有已存在文件按「低 → 高」合并，低优先级提供基础项，高优先级**整体覆盖**同名 server（不做字段级合并）。
+  层级顺序（低→高）：`configs/mcp.yaml`（向上搜索 / 默认） < `~/.aicli/mcp.yaml`（user） < `./.aicli/mcp.yaml`（project）。
+  `--config-file` / `MCP_CONFIG_FILE` 指定**真实覆盖**路径时退化为「只加载该文件」，不合并。
+- 合并结果可见：`aicli mcp list` / `mcp status` 会打印 `来源: <层级> (<文件>)`；被覆盖的低优先级定义打印 `覆盖: <层级> (<文件>)`。
+  `--output json` 的 `configSource` / `configPath` / `shadowedSources` 字段、chat `/mcp` 面板与微型 Web 面板同源展示。
+- 写入目标：`aicli mcp add ... --scope user|local|project`
+  - `user`（默认）→ `~/.aicli/mcp.yaml`
+  - `local` → `~/.aicli/projects/<项目标识>/mcp.yaml`（项目私有，不进版本库）
+  - `project` → `<项目>/.aicli/mcp.yaml`（可提交共享）
+  `enable` / `disable` / `remove` 不需要 `--scope`：它们会作用在**实际定义该 server 的文件**上（删除项目级定义后，用户级同名定义自动重新生效）。
+- **项目级秘密剥离**：`--scope project` 拒绝明文凭证（`Authorization`/`api-key`/`token`/`secret`/`password`/`cookie` 等 header 或 env 值、`auth.clientSecret`）。
+  请改写成 `${VAR}` 引用（例如 `--header "Authorization=Bearer ${MY_TOKEN}"`），或改用 `--scope user` / `--scope local`。
+  写入项目级时会提示：「若仓库 `.gitignore` 忽略了 `.aicli/`，请追加豁免 `!.aicli/mcp.yaml`」。
+- 低优先级文件损坏时：跳过该层并打印告警（`警告: 已跳过 ...`，runtime-server 记入日志），不会让整次加载失败；最高优先级文件损坏仍然直接报错。
 
 MCP 配置文件解析顺序（chat 会话、`aicli mcp *`、console / 微型 Web 面板、runtime-server 共用同一套）：
 
 | 优先级 | 路径 | 说明 |
 |---|---|---|
 | 0 | session / profile 显式指定，或 `config_file` 指向**非约定路径** | `--profile`、session 级覆盖，或 `aicli.mcp.config_file` / `MCP_CONFIG_FILE` 写成自定义路径时直接胜出 |
-| 1 | `./.aicli/mcp.yaml` | **工作区级**（cwd 下的 `.aicli/`，该目录默认在 `.gitignore`） |
-| 2 | `~/.aicli/mcp.yaml` | 用户级 |
-| 3 | 从 cwd 逐级向上搜索 | 每级先 `.aicli/mcp.yaml`，再 `configs/mcp.yaml` |
-| 4 | 可执行文件目录逐级向上搜索 | 覆盖从无关目录启动的场景 |
-| 5 | `configs/mcp.yaml` | 兜底（`config_file` 为约定值时返回该字面路径） |
+| 1 | `~/.aicli/projects/<项目标识>/mcp.yaml` | **local 层**：个人为本项目追加的私有配置（`--scope local` 写入，不进版本库） |
+| 2 | `./.aicli/mcp.yaml` | **工作区级 / project 层**（cwd 下的 `.aicli/`，该目录默认在 `.gitignore`） |
+| 3 | `~/.aicli/mcp.yaml` | user 层 |
+| 4 | 从 cwd 逐级向上搜索 | 每级先 `.aicli/mcp.yaml`，再 `configs/mcp.yaml` |
+| 5 | 可执行文件目录逐级向上搜索 | 覆盖从无关目录启动的场景 |
+| 6 | `configs/mcp.yaml` | 兜底（`config_file` 为约定值时返回该字面路径） |
 
-`aicli.mcp.config_file` **未设置（或为空）不等于“未配置”**：解析器按“发现”语义依序查找上表 1→4 层，
-工作区 `./.aicli/mcp.yaml`、用户 `~/.aicli/mcp.yaml`、向上搜索命中即用，无需用户先写 `config_file`。
+`aicli.mcp.config_file` **未设置（或为空）不等于“未配置”**：解析器按“发现”语义依序查找上表 1→5 层，
+local 层（若存在）、工作区 `./.aicli/mcp.yaml`、用户 `~/.aicli/mcp.yaml`、向上搜索命中即用，无需用户先写 `config_file`。
 只有磁盘上**任何候选都不存在**时才回到“未配置”（空路径，chat 静默跳过，`aicli mcp list` 报无服务器）；
-第 5 行的字面兜底仅适用于 `config_file` 显式写成约定值（如 `configs/mcp.yaml`）的场景。
+第 6 行的字面兜底仅适用于 `config_file` 显式写成约定值（如 `configs/mcp.yaml`）的场景。
 `MCP_CONFIG_FILE` 环境变量优先于 YAML 值（见 `agentconfig.EffectiveAICLIMCPConfigFile`）。
 
-`aicli mcp add` / `/mcp add` 的**写入**路径与上表一致：命中哪个文件就写哪个；若全部不存在，则创建 `~/.aicli/mcp.yaml`（runtime-server 同样落到用户级，避免在任意工作目录生成 `configs/mcp.yaml`）。
+**加载**不再是“命中即用”，而是把上表里**所有已存在**的文件按 6→1 的「低 → 高」顺序合并（同名整体覆盖，见上文「配置分层」）；
+1 号位（local 层）优先级最高，其次是 project，再是 user / upward / default；被覆盖的定义会在 `mcp list` 中以 `来源` / `覆盖` 两行显式说明。
+`config_file` 写成真实覆盖路径（非约定值）时不合并，只加载该文件。
+
+`aicli mcp add` / `/mcp add` 的**写入**路径默认与上表一致：命中哪个文件就写哪个；若全部不存在，则创建 `~/.aicli/mcp.yaml`（runtime-server 同样落到用户级，避免在任意工作目录生成 `configs/mcp.yaml`）。
+显式 `--scope user|local|project` 时改为强制写入对应层级（`project` 会拒绝明文凭证）。`enable` / `disable` / `remove` 始终作用在定义该 server 的文件上。
 
 ### skill 安装概览
 

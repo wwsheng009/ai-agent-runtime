@@ -256,7 +256,7 @@ func (s *EchoServer) handleToolCall(req *jsonrpc.Request) (jsonrpc.Message, erro
 	default:
 		content = []map[string]interface{}{
 			{
-				"type":  "text",
+				"type": "text",
 				"text": "Unknown tool: " + params.Name,
 			},
 		}

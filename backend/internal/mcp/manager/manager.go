@@ -13,6 +13,7 @@ import (
 	"time"
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/auth"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/client"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
@@ -149,19 +150,31 @@ type manager struct {
 	pending     map[string]client.Client
 	lastStderr  map[string]string
 	mu          sync.RWMutex
+
+	// OAuth 会话：令牌存储全局共享，会话按 server 名缓存（仅在 Start/Reload 时重建）。
+	authMu       sync.Mutex
+	authStore    *auth.TokenStore
+	authSessions map[string]*auth.Session
+
+	// 分层配置来源（§4.5 Step 1）：说明每个 server 来自哪个配置文件、覆盖了谁。
+	layered        bool
+	explicitPath   string
+	origins        map[string]config.ServerOrigin
+	originWarnings []string
 }
 
 // NewManager 创建管理器
 func NewManager() Manager {
 	return &manager{
-		registry:   registry.NewRegistry(),
-		clients:    make(map[string]client.Client),
-		status:     make(map[string]*config.MCPStatus),
-		newClient:  client.NewClient,
-		observers:  make([]LifecycleObserver, 0),
-		connecting: make(map[string]struct{}),
-		pending:    make(map[string]client.Client),
-		lastStderr: make(map[string]string),
+		registry:     registry.NewRegistry(),
+		clients:      make(map[string]client.Client),
+		status:       make(map[string]*config.MCPStatus),
+		newClient:    client.NewClient,
+		observers:    make([]LifecycleObserver, 0),
+		connecting:   make(map[string]struct{}),
+		pending:      make(map[string]client.Client),
+		lastStderr:   make(map[string]string),
+		authSessions: make(map[string]*auth.Session),
 	}
 }
 
@@ -193,6 +206,10 @@ func (m *manager) LoadConfig(configPath string) error {
 	if err != nil {
 		return fmt.Errorf("加载配置失败: %w", err)
 	}
+	// 运行时入口才展开环境变量：文件与内存配置保持 `${VAR}` 原始字面量，
+	// 避免管理操作读改写回时把真实值（或空串）固化进配置文件。
+	// 缺失项写入各 server 的 EnvError，StartAsync 会隔离这些 server。
+	config.ExpandEnv(cfg)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -200,6 +217,9 @@ func (m *manager) LoadConfig(configPath string) error {
 		return fmt.Errorf("管理器已经启动")
 	}
 	m.cfg = cfg
+	m.layered = false
+	m.explicitPath = configPath
+	m.recordSingleFileOrigins(cfg, configPath)
 	return nil
 }
 
@@ -265,6 +285,38 @@ func (m *manager) StartAsync(ctx context.Context) error {
 			continue
 		}
 		status.Enabled = true
+		if envErr := strings.TrimSpace(mcpCfg.EnvError); envErr != "" {
+			// 环境变量插值缺失：只停掉该 server，并在状态里带出可行动的错误，
+			// 不影响其它 server 与配置管理操作。
+			status.LastError = envErr
+			m.emitLifecycleEvent(ctx, "mcp.connect_failed", name, map[string]interface{}{
+				"error":          envErr,
+				"execution_mode": mcpCfg.ExecutionMode(),
+				"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
+			})
+			printStatusf("[Manager] 启动 MCP 失败: %s - %s\n", name, envErr)
+			continue
+		}
+		if mcpCfg.IsOAuth() {
+			session, sessErr := m.oauthSessionFor(name, &mcpCfg)
+			if sessErr != nil {
+				status.RequiresAuth = true
+				status.LastError = fmt.Sprintf("OAuth 初始化失败: %v", sessErr)
+				m.emitLifecycleEvent(ctx, "mcp.auth.required", name, map[string]interface{}{"error": status.LastError})
+				printStatusf("[Manager] 需要认证: %s - %s\n", name, status.LastError)
+				continue
+			}
+			if session != nil && !session.Ready() {
+				// 未登录：隔离该 server，并把可行动提示写进状态（CLI / `/mcp` / Web 共用）。
+				status.RequiresAuth = true
+				status.LastError = fmt.Sprintf("需要认证：运行 `aicli mcp auth %s` 完成 OAuth 授权", name)
+				m.emitLifecycleEvent(ctx, "mcp.auth.required", name, map[string]interface{}{"target": mcpCfg.URL})
+				printStatusf("[Manager] 需要认证: %s - %s\n", name, status.LastError)
+				continue
+			}
+			mcpCfg.TokenSource = session
+			status.RequiresAuth = false
+		}
 		m.emitLifecycleEvent(ctx, "mcp.starting", name, map[string]interface{}{
 			"execution_mode": mcpCfg.ExecutionMode(),
 			"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
@@ -363,6 +415,7 @@ func (m *manager) connectMCP(ctx context.Context, gen uint64, name string, mcpCf
 	status := m.ensureStatusLocked(name, mcpCfg)
 	status.LastConnect = time.Now()
 	status.LastError = ""
+	status.RequiresAuth = false
 	m.mu.Unlock()
 	m.clearStderrDiagnostics(name)
 
@@ -384,6 +437,15 @@ func (m *manager) recordConnectFailure(ctx context.Context, name string, mcpCfg 
 	}
 	m.setStatus(name, mcpCfg, func(status *config.MCPStatus) {
 		status.LastError = err.Error()
+		// OAuth：401/403 或刷新失败时，把状态升级为「需认证」并给出可行动提示。
+		if session := m.oauthSession(name); session != nil {
+			if needs, reason := session.NeedsAuth(); needs {
+				status.RequiresAuth = true
+				if strings.TrimSpace(reason) != "" {
+					status.LastError = reason
+				}
+			}
+		}
 	})
 	m.emitLifecycleEvent(ctx, "mcp.connect_failed", name, map[string]interface{}{
 		"error":          err.Error(),
@@ -391,6 +453,54 @@ func (m *manager) recordConnectFailure(ctx context.Context, name string, mcpCfg 
 		"trust_level":    string(mcpCfg.ResolvedTrustLevel()),
 	})
 	printStatusf("[Manager] 启动 MCP 失败: %s - %v\n", name, err)
+}
+
+// tokenStore 懒加载全局共享的令牌存储。
+func (m *manager) tokenStore() (*auth.TokenStore, error) {
+	m.authMu.Lock()
+	defer m.authMu.Unlock()
+	if m.authStore != nil {
+		return m.authStore, nil
+	}
+	store, err := auth.NewTokenStore("")
+	if err != nil {
+		return nil, err
+	}
+	m.authStore = store
+	return store, nil
+}
+
+// oauthSessionFor 重建并缓存指定 server 的 OAuth 会话；非 oauth server 返回 nil。
+func (m *manager) oauthSessionFor(name string, mcpCfg *config.MCPConfig) (*auth.Session, error) {
+	if mcpCfg == nil || !mcpCfg.IsOAuth() || mcpCfg.Auth == nil {
+		return nil, nil
+	}
+	store, err := m.tokenStore()
+	if err != nil {
+		return nil, err
+	}
+	session, err := auth.NewSession(name, mcpCfg.URL, *mcpCfg.Auth, auth.SessionOptions{Store: store})
+	if err != nil {
+		return nil, err
+	}
+	m.authMu.Lock()
+	if m.authSessions == nil {
+		// 测试或外部构造的 manager 可能绕开 NewManager，这里兜底初始化。
+		m.authSessions = make(map[string]*auth.Session)
+	}
+	m.authSessions[name] = session
+	m.authMu.Unlock()
+	return session, nil
+}
+
+// oauthSession 返回已缓存的会话（可能为 nil）。
+func (m *manager) oauthSession(name string) *auth.Session {
+	if m == nil {
+		return nil
+	}
+	m.authMu.Lock()
+	defer m.authMu.Unlock()
+	return m.authSessions[name]
 }
 
 // trackPending 登记在建客户端，供 Stop/Reload 主动取消慢握手。
@@ -832,8 +942,14 @@ func (m *manager) mcpStatusLocked(name string) (*config.MCPStatus, error) {
 		MaxParallelCalls: mcpCfg.MaxParallelCalls,
 		Enabled:          mcpCfg.IsEnabled(),
 	}
+	if origin, ok := m.origins[name]; ok && strings.TrimSpace(origin.Path) != "" {
+		status.ConfigSource = origin.Source
+		status.ConfigPath = origin.Path
+		status.ShadowedSources = append([]config.SourceRef(nil), origin.Shadowed...)
+	}
 	if runtimeStatus, ok := m.status[name]; ok && runtimeStatus != nil {
 		status.LastError = runtimeStatus.LastError
+		status.RequiresAuth = runtimeStatus.RequiresAuth
 		status.LastConnect = runtimeStatus.LastConnect
 		status.HealthCheck = runtimeStatus.HealthCheck
 	}
@@ -901,13 +1017,25 @@ func (m *manager) ReloadConfig() error {
 	}
 
 	// 重新加载配置
-	if m.loader != nil {
+	if m.layered {
+		result, err := config.LoadEffective(m.explicitPath)
+		if err != nil {
+			return err
+		}
+		config.ExpandEnv(result.Config)
+		m.mu.Lock()
+		m.cfg = result.Config
+		m.origins = result.Origins
+		m.originWarnings = append([]string(nil), result.Warnings...)
+		m.mu.Unlock()
+	} else if m.loader != nil {
 		cfg, err := m.loader.Load()
 		if err != nil {
 			return err
 		}
 		m.mu.Lock()
 		m.cfg = cfg
+		m.recordSingleFileOrigins(cfg, m.explicitPath)
 		m.mu.Unlock()
 	}
 
@@ -1194,6 +1322,7 @@ func (m *manager) reconnectMCP(name string, mcpCfg *config.MCPConfig) {
 	status := m.ensureStatusLocked(name, mcpCfg)
 	status.LastConnect = time.Now()
 	status.LastError = ""
+	status.RequiresAuth = false
 	m.mu.Unlock()
 	m.emitLifecycleEvent(reconnectCtx, "mcp.reconnected", name, map[string]interface{}{
 		"execution_mode": mcpCfg.ExecutionMode(),

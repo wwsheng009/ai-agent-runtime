@@ -112,7 +112,7 @@ func TestResolveRuntimeConfigBootstrapPathPreservesExplicitPath(t *testing.T) {
 	if err := os.WriteFile(projectConfig, []byte("version: project\n"), 0o644); err != nil {
 		t.Fatalf("write project runtime config: %v", err)
 	}
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	explicit := filepath.Join("custom", "runtime.yaml")
 	if got := ResolveRuntimeConfigBootstrapPath(explicit); got != explicit {
@@ -137,7 +137,7 @@ func TestResolveRuntimeConfigBootstrapPathIgnoresRepositoryLayout(t *testing.T) 
 	if err := os.WriteFile(legacy, []byte("version: legacy\n"), 0o644); err != nil {
 		t.Fatalf("write legacy runtime config: %v", err)
 	}
-	t.Chdir(repoDir)
+	chdirTest(t, repoDir)
 
 	legacyValue := filepath.FromSlash(filepath.Join("backend", "configs", DefaultRuntimeConfigFileName))
 	if got := ResolveRuntimeConfigBootstrapPath(legacyValue); got != "" {
@@ -180,7 +180,7 @@ func TestResolveMCPConfigPathPrefersProjectThenUserAICLIDirs(t *testing.T) {
 	if err := os.WriteFile(projectConfig, []byte("mcp_servers: {}\n"), 0o644); err != nil {
 		t.Fatalf("write project mcp config: %v", err)
 	}
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	// The template default value (configs/mcp.yaml) is a convention path and
 	// must fall through to the .aicli lookups instead of being returned as-is.
@@ -193,7 +193,7 @@ func TestResolveMCPConfigPathPrefersProjectThenUserAICLIDirs(t *testing.T) {
 	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
 		t.Fatalf("create nested dir: %v", err)
 	}
-	t.Chdir(nestedDir)
+	chdirTest(t, nestedDir)
 	if got := ResolveMCPConfigPath(DefaultMCPConfigRelativePath); got != userConfig {
 		t.Fatalf("user-level mcp config = %q, want %q", got, userConfig)
 	}
@@ -201,7 +201,7 @@ func TestResolveMCPConfigPathPrefersProjectThenUserAICLIDirs(t *testing.T) {
 	if got := ResolveMCPConfigPath(""); got != userConfig {
 		t.Fatalf("unset mcp config outside project = %q, want user layer %q", got, userConfig)
 	}
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	// An explicit, non-convention override still wins.
 	override := filepath.Join(t.TempDir(), "selected-mcp.yaml")
@@ -220,7 +220,7 @@ func TestResolveMCPConfigPathUnsetKeepsNotConfiguredSemantics(t *testing.T) {
 	home := t.TempDir()
 	isolateHome(t, home)
 	emptyDir := t.TempDir()
-	t.Chdir(emptyDir)
+	chdirTest(t, emptyDir)
 
 	// 与 portable 兜底用例同因：开发机祖先链上可能真实存在 mcp.yaml，命中即为文档
 	// 行为（向上搜索），此时不存在“任何候选都不存在”的前提，跳过而非误报。
@@ -241,7 +241,7 @@ func TestResolveMCPConfigPathUnsetKeepsNotConfiguredSemantics(t *testing.T) {
 func TestResolveMCPConfigPathExpandsTildeToUserHome(t *testing.T) {
 	home := t.TempDir()
 	isolateHome(t, home)
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 
 	// Tilde values must expand to the user home instead of being passed through
 	// literally to the MCP loader.
@@ -261,7 +261,7 @@ func TestResolveMCPConfigPathFallsBackToPortableDefault(t *testing.T) {
 	home := t.TempDir()
 	isolateHome(t, home)
 	emptyDir := t.TempDir()
-	t.Chdir(emptyDir)
+	chdirTest(t, emptyDir)
 
 	// resolver 会从 cwd 逐级向上搜索（docs/aicli/install.md：每级先 .aicli/mcp.yaml，
 	// 再 configs/mcp.yaml）。开发机上 %TEMP% 位于用户主目录之下时，祖先链上真实的
@@ -314,7 +314,7 @@ func TestResolveMCPConfigPathDetailedReportsSourceAndCandidates(t *testing.T) {
 	if err := os.WriteFile(projectConfig, []byte("mcpServers: {}\n"), 0o644); err != nil {
 		t.Fatalf("write project mcp config: %v", err)
 	}
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	resolution := ResolveMCPConfigPathDetailed(DefaultMCPConfigRelativePath)
 	if resolution.Path != projectConfig || resolution.Source != "project" {
@@ -379,7 +379,7 @@ func TestResolveRuntimeConfigBootstrapPathPrefersUserHomeConfig(t *testing.T) {
 	}
 
 	// Change to the repo directory so CWD-based search would find repoConfig
-	t.Chdir(repoDir)
+	chdirTest(t, repoDir)
 
 	// Case 1: empty configPath → should prefer user home
 	got := ResolveRuntimeConfigBootstrapPath("")
@@ -429,7 +429,7 @@ func TestResolveRuntimeConfigBootstrapPathPrefersProjectLevelOverUserHome(t *tes
 	}
 
 	// Change to the project directory so CWD-based search would find projectConfig
-	t.Chdir(projectDir)
+	chdirTest(t, projectDir)
 
 	// Project-level config should take priority over user-level config
 	got := ResolveRuntimeConfigBootstrapPath("")
@@ -501,11 +501,23 @@ func TestIsRuntimeConfigConventionPath(t *testing.T) {
 	overrides := []string{
 		filepath.Join(t.TempDir(), "custom-runtime.yaml"),
 		filepath.FromSlash(filepath.Join("my-org", "runtime.yaml")),
-		filepath.FromSlash(filepath.Join("configs", "runtime.win7.yaml")),
+		// 另一个构建 profile 的运行时配置名放在约定位置时仍是显式覆盖：主线看
+		// runtime.win7.yaml，win7compat 构建反过来看主线的 runtime.yaml（各自的
+		// 默认文件名见 profile_standard.go / profile_win7.go）。
+		filepath.FromSlash(filepath.Join("configs", otherBuildProfileRuntimeFileName())),
 	}
 	for _, candidate := range overrides {
 		if IsRuntimeConfigConventionPath(candidate) {
 			t.Fatalf("expected %q to be treated as an explicit override", candidate)
 		}
 	}
+}
+
+// otherBuildProfileRuntimeFileName 返回"非当前构建 profile"的运行时配置文件名。
+func otherBuildProfileRuntimeFileName() string {
+	const mainlineRuntimeFileName = "runtime.yaml"
+	if DefaultRuntimeConfigFileName == mainlineRuntimeFileName {
+		return "runtime.win7.yaml"
+	}
+	return mainlineRuntimeFileName
 }

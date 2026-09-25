@@ -174,13 +174,14 @@ func (c *mcpClient) Connect(ctx context.Context) error {
 
 	// 创建官方 SDK Transport
 	transportCfg := &transport.Config{
-		Type:       c.cfg.Type,
-		Command:    c.cfg.Command,
-		Args:       c.cfg.Args,
-		URL:        c.cfg.URL,
-		Env:        c.cfg.Env,
-		Headers:    c.cfg.Headers,
-		WorkingDir: strings.TrimSpace(c.cfg.WorkingDir),
+		Type:        c.cfg.Type,
+		Command:     c.cfg.Command,
+		Args:        c.cfg.Args,
+		URL:         c.cfg.URL,
+		Env:         c.cfg.Env,
+		Headers:     c.cfg.Headers,
+		AccessToken: c.cfg.TokenSource,
+		WorkingDir:  strings.TrimSpace(c.cfg.WorkingDir),
 	}
 
 	t, err := c.newTransport(transportCfg)

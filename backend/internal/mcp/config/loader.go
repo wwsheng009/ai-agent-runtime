@@ -26,50 +26,39 @@ func NewLoader(configPath string) *Loader {
 
 // Load 加载配置文件
 func (l *Loader) Load() (*Config, error) {
-	// 读取文件
-	data, err := os.ReadFile(l.configPath)
+	// 与分层加载（layered.go）共用同一套读取/解析/默认值/校验语义，避免两套行为。
+	// 注意：这里保持原始值不展开。配置文件可能在管理操作（add/enable/remove）
+	// 中被读改写回；若在加载期就地展开，`${VAR}` 会被真实值（或空串）替换并
+	// 落盘，既可能泄露密钥，也会丢失字面量。展开只由运行时入口显式调用
+	// （manager.LoadConfig / CloneWithDefaults），见 ExpandEnv。
+	config, err := loadConfigFile(l.configPath)
 	if err != nil {
-		return nil, fmt.Errorf("读取配置文件失败 %s: %w", l.configPath, err)
+		return nil, err
 	}
+	l.config = config
+	return config, nil
+}
 
-	// 解析配置
+// unmarshalConfig 按扩展名解析配置文本；未知扩展名先试 JSON 再试 YAML。
+func unmarshalConfig(data []byte, path string) (*Config, error) {
 	var config Config
-	ext := strings.ToLower(filepath.Ext(l.configPath))
-
+	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".json":
-		// 解析 JSON
 		if err := json.Unmarshal(data, &config); err != nil {
 			return nil, fmt.Errorf("解析配置文件失败: %w", err)
 		}
 	case ".yaml", ".yml":
-		// 解析 YAML
 		if err := yaml.Unmarshal(data, &config); err != nil {
 			return nil, fmt.Errorf("解析配置文件失败: %w", err)
 		}
 	default:
-		// 尝试自动检测（先尝试 JSON，再尝试 YAML）
 		if err := json.Unmarshal(data, &config); err != nil {
 			if err := yaml.Unmarshal(data, &config); err != nil {
 				return nil, fmt.Errorf("无法解析配置文件（尝试了 JSON 和 YAML）: %w", err)
 			}
 		}
 	}
-
-	// 设置默认值
-	l.setDefaults(&config)
-
-	// 展开环境变量
-	if err := l.expandEnvVars(&config); err != nil {
-		return nil, fmt.Errorf("展开环境变量失败: %w", err)
-	}
-
-	// 验证配置
-	if err := l.validate(&config); err != nil {
-		return nil, fmt.Errorf("配置验证失败: %w", err)
-	}
-
-	l.config = &config
 	return &config, nil
 }
 
@@ -125,27 +114,6 @@ func ApplyDefaults(config *Config) {
 	}
 }
 
-// expandEnvVars 展开环境变量
-func (l *Loader) expandEnvVars(config *Config) error {
-	for name, mcp := range config.MCPServers {
-		// 展开环境变量
-		if mcp.URL != "" {
-			mcp.URL = os.ExpandEnv(mcp.URL)
-		}
-		if mcp.Command != "" {
-			mcp.Command = os.ExpandEnv(mcp.Command)
-		}
-
-		// 展开环境变量映射
-		for key, value := range mcp.Env {
-			mcp.Env[key] = os.ExpandEnv(value)
-		}
-
-		config.MCPServers[name] = mcp
-	}
-	return nil
-}
-
 // findConfigFile 查找配置文件
 func findConfigFile(configPath string) (string, error) {
 	// 如果提供了绝对路径，直接使用
@@ -194,6 +162,11 @@ func (l *Loader) validate(config *Config) error {
 	}
 
 	for name, mcp := range config.MCPServers {
+		if strings.TrimSpace(mcp.EnvError) != "" {
+			// 插值缺失的配置结构可能不完整（如 URL 展开为空），
+			// 交由运行时状态报错，不在这里阻断整份配置。
+			continue
+		}
 		// 检查传输类型
 		if !validTypes[mcp.Type] && !IsStreamableHTTPTransport(mcp.Type) {
 			return fmt.Errorf("无效的传输类型 '%s' (MCP: %s)，支持: stdio, sse, websocket, streamable", mcp.Type, name)
@@ -210,6 +183,19 @@ func (l *Loader) validate(config *Config) error {
 			strings.EqualFold(strings.TrimSpace(mcp.Type), "ws") ||
 			IsStreamableHTTPTransport(mcp.Type)) && mcp.URL == "" {
 			return fmt.Errorf("%s 类型的 MCP 需要指定 url (MCP: %s)", mcp.Type, name)
+		}
+
+		// 认证配置：目前仅支持 oauth，且只适用于 streamable/sse 远程传输。
+		if mcp.Auth != nil && strings.TrimSpace(mcp.Auth.Type) != "" {
+			if !mcp.IsOAuth() {
+				return fmt.Errorf("不支持的 auth 类型 '%s' (MCP: %s)，目前仅支持 oauth；静态凭证请用 headers", mcp.Auth.Type, name)
+			}
+			if !IsStreamableHTTPTransport(mcp.Type) && !strings.EqualFold(strings.TrimSpace(mcp.Type), "sse") {
+				return fmt.Errorf("oauth 认证目前仅支持 streamable/sse 传输 (MCP: %s, type: %s)；其它传输请用 headers 配置静态凭证", name, mcp.Type)
+			}
+			if mcp.Auth.CallbackPort < 0 || mcp.Auth.CallbackPort > 65535 {
+				return fmt.Errorf("auth.callbackPort 必须在 0-65535 之间 (MCP: %s)", name)
+			}
 		}
 
 		// 检查超时时间

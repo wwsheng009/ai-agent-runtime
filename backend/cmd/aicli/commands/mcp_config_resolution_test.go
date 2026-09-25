@@ -39,7 +39,7 @@ func TestResolveChatMCPConfigPathPrefersWorkspaceDotAICLI(t *testing.T) {
 	writeMCPResolutionFixture(t, filepath.Join(root, "configs", "mcp.yaml"), "mcpServers: {}\n")
 	workspaceOverride := filepath.Join(root, ".aicli", "mcp.yaml")
 	writeMCPResolutionFixture(t, workspaceOverride, "mcpServers: {}\n")
-	t.Chdir(root)
+	chdirTest(t, root)
 
 	cfg := mcpResolutionConfig()
 	if got := resolveChatMCPConfigPath(cfg, nil); filepath.Clean(got) != filepath.Clean(workspaceOverride) {
@@ -70,7 +70,7 @@ func TestResolveChatMCPConfigPathFallsBackToConfigsDir(t *testing.T) {
 
 	portable := filepath.Join(root, "configs", "mcp.yaml")
 	writeMCPResolutionFixture(t, portable, "mcpServers: {}\n")
-	t.Chdir(root)
+	chdirTest(t, root)
 
 	got := resolveChatMCPConfigPath(mcpResolutionConfig(), nil)
 	if filepath.Clean(got) != filepath.Clean(portable) {
@@ -91,7 +91,7 @@ func TestResolveChatMCPConfigPathWithoutConfigFile(t *testing.T) {
 	writeMCPResolutionFixture(t, filepath.Join(root, "configs", "mcp.yaml"), "mcpServers: {}\n")
 	workspaceOverride := filepath.Join(root, ".aicli", "mcp.yaml")
 	writeMCPResolutionFixture(t, workspaceOverride, "mcpServers: {}\n")
-	t.Chdir(root)
+	chdirTest(t, root)
 
 	cases := map[string]*agentconfig.Config{
 		"nil mcp block":     {AICLI: &agentconfig.AICLIConfig{}},

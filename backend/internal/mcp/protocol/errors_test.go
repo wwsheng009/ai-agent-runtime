@@ -7,13 +7,13 @@ import (
 
 func TestErrorValues(t *testing.T) {
 	expectedCodes := map[string]int{
-		"ErrorCodeInvalidRequest":  -32600,
-		"ErrorCodeMethodNotFound":  -32601,
-		"ErrorCodeInvalidParams":   -32602,
-		"ErrorCodeInternalError":   -32603,
+		"ErrorCodeInvalidRequest":   -32600,
+		"ErrorCodeMethodNotFound":   -32601,
+		"ErrorCodeInvalidParams":    -32602,
+		"ErrorCodeInternalError":    -32603,
 		"ErrorCodeResourceNotFound": -32001,
-		"ErrorCodeToolNotFound":    -32002,
-		"ErrorCodeServerError":     -32003,
+		"ErrorCodeToolNotFound":     -32002,
+		"ErrorCodeServerError":      -32003,
 	}
 
 	if ErrorCodeInvalidRequest != expectedCodes["ErrorCodeInvalidRequest"] {

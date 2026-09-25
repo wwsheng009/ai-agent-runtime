@@ -2120,7 +2120,10 @@ body.sidebar-collapsed #sidebar {
 .mcp-row-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
 .mcp-badge-on { color: var(--green); border-color: var(--border2); }
 .mcp-badge-off { color: var(--red, #e5534b); }
+.mcp-badge-auth { color: var(--yellow, #d29922); border-color: var(--border2); }
 .mcp-last-error { color: var(--red, #e5534b); word-break: break-word; }
+.mcp-auth-hint { color: var(--yellow, #d29922); }
+.mcp-config-source { color: var(--muted, #7d8590); word-break: break-word; }
 /* config-form-block 内的单行输入（描述 / 命令 / URL）复用表单输入样式：
    现有规则只覆盖了 .config-form-grid input 与 .config-form-block textarea。 */
 #tab-mcp .config-form-block input {
