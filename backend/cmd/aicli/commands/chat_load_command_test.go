@@ -52,19 +52,22 @@ func TestTryExecuteStructuredChatCommandLoad(t *testing.T) {
 	if len(result.Blocks) != 1 {
 		t.Fatalf("/load blocks=%d want 1", len(result.Blocks))
 	}
-	plain := ui.RenderDocumentPlain(result.Document())
+	doc := result.Document()
+	plain := ui.RenderDocumentPlain(doc)
+	// 协调器信息流下的 /load 确认与 /resume 同形：单行「会话已加载: 标题
+	// （compact #N · X轮/Y条消息）」。meta 块留给 /session 与 /debug display。
+	if doc.LineCount() != 1 {
+		t.Fatalf("/load one-line confirmation lines=%d want 1:\n%s", doc.LineCount(), plain)
+	}
 	for _, marker := range []string{
 		"会话已加载",
-		"Session:",
-		"load-structured-session [active]",
-		"Title:",
 		"Load fixture",
-		"History:",
 	} {
 		if !strings.Contains(plain, marker) {
 			t.Fatalf("/load document missing %q:\n%s", marker, plain)
 		}
 	}
+	assertSessionConfirmationStreamClean(t, plain)
 	if strings.HasPrefix(plain, "\n") || strings.HasSuffix(plain, "\n") {
 		t.Fatalf("/load document owns a top-level boundary blank: %q", plain)
 	}
@@ -126,6 +129,8 @@ func TestDispatchChatCommandLoadCommitsDocumentBeforeReplay(t *testing.T) {
 	if !strings.Contains(text, "我先检查目录。") {
 		t.Fatalf("replayed transcript missing assistant body:\n%s", text)
 	}
+	// 确认 cell 只允许一行摘要：整段信息流（确认 + 回放）不得出现会话 meta 行。
+	assertSessionConfirmationStreamClean(t, text)
 }
 
 func TestDispatchChatCommandLoadSurvivesOwnedViewportRepaints(t *testing.T) {

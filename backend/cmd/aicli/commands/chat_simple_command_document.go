@@ -78,11 +78,30 @@ func buildChatSessionSummariesDocument(manager *runtimechat.SessionManager, user
 // simple to exercise in tests.
 var timeNowForChatSessionSummary = func() time.Time { return time.Now() }
 
-func buildChatNewSessionDocument(session *ChatSession) render.Document {
+// buildChatNewSessionDocument renders the /new success confirmation.
+//
+// interactiveStream selects the same one-line confirmation shape as /resume
+// and /load: the fresh session is identified by its ID, and the session
+// metadata block stays out of the message stream. The flag mirrors the
+// dispatch-side owner check (chatCommandDocumentOwnedByCoordinator), so every
+// document the coordinator commits is already meta-free. Plain/JSON
+// projections keep the block (shared rows with the legacy
+// printCurrentRuntimeSession output) so script-parseable stdout does not
+// change; /session and /debug display remain the on-demand views for those
+// rows.
+func buildChatNewSessionDocument(session *ChatSession, interactiveStream bool) render.Document {
 	if session == nil || session.RuntimeSession == nil {
 		return render.SingleLineDoc(render.TextSpan("错误: 创建新会话失败"))
 	}
 	var builder chatDebugDocumentBuilder
+	if interactiveStream {
+		heading := "已创建新会话"
+		if id := strings.TrimSpace(session.RuntimeSession.ID); id != "" {
+			heading += ": " + id
+		}
+		builder.heading(heading)
+		return builder.document()
+	}
 	builder.heading("已创建新会话")
 	appendChatLoadSessionMeta(&builder, session)
 	return builder.document()

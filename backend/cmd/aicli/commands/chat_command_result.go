@@ -538,7 +538,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			return CommandResult{}, true, err
 		}
 		return CommandResult{
-			Blocks: []RenderBlock{{Document: buildChatNewSessionDocument(session)}},
+			// 协调器信息流只提交单行确认；plain/JSON 投影保留 meta 块
+			// （与 /resume、/load 同一策略，见 buildChatNewSessionDocument）。
+			Blocks: []RenderBlock{{Document: buildChatNewSessionDocument(session, chatCommandDocumentOwnedByCoordinator(session))}},
 			Action: CommandContinue,
 		}, true, nil
 	}
@@ -610,7 +612,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			return CommandResult{}, false, nil
 		}
 		return CommandResult{
-			Blocks:        []RenderBlock{{Document: buildChatLoadDocument(session)}},
+			// 协调器信息流只提交单行确认（标题/compact/计数），meta 块只在
+			// plain/JSON 投影保留；与 /resume 的确认形状一致。
+			Blocks:        []RenderBlock{{Document: buildChatLoadDocument(session, chatCommandDocumentOwnedByCoordinator(session))}},
 			Action:        CommandContinue,
 			ReplayHistory: hasVisibleChatHistory(session),
 		}, true, nil

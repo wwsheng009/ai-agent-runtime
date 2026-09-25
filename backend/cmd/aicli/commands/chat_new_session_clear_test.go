@@ -73,6 +73,15 @@ func TestDispatchChatCommandNewClearsPreviousConversationFromRenderPlane(t *test
 	if !strings.Contains(after, "已创建新会话") {
 		t.Fatalf("/new confirmation missing from transcript:\n%s", after)
 	}
+	// /new 的确认同样只允许一行摘要：必须点出新建会话的 ID，且不得把
+	// 会话/日志/产物路径的 meta 块重新带进信息流。
+	if strings.TrimSpace(session.RuntimeSession.ID) == "" {
+		t.Fatal("/new did not assign a runtime session id")
+	}
+	if !strings.Contains(after, session.RuntimeSession.ID) {
+		t.Fatalf("/new confirmation did not identify the fresh session:\n%s", after)
+	}
+	assertSessionConfirmationStreamClean(t, after)
 	if strings.TrimSpace(after) == "" {
 		t.Fatalf("/new left the render plane empty")
 	}

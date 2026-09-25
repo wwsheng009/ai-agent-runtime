@@ -415,6 +415,24 @@ func unifiedDirectInteractiveOutput(session *ChatSession) bool {
 	return session.TerminalSession != nil || session.TerminalSessionExecutor != nil
 }
 
+// chatCommandDocumentOwnedByCoordinator reports whether renderChatCommandResult
+// will commit a structured command document into the interaction coordinator's
+// retained stream instead of the Plain/JSON stdout projection. Confirmation
+// builders use it to decide whether the session metadata block may be appended:
+// the retained stream keeps one-line summaries, stdout keeps the legacy meta
+// rows for scripts.
+//
+// It is deliberately broader than unifiedDirectInteractiveOutput: the
+// coordinator owns the stream as soon as it exists, even before the unified
+// renderer attaches, and the metadata block must not leak into the stream in
+// either state.
+func chatCommandDocumentOwnedByCoordinator(session *ChatSession) bool {
+	if session == nil || session.NoInteractive || session.JSONOutput {
+		return false
+	}
+	return session.Interaction != nil
+}
+
 // unifiedInteractiveOutputMustFailClosed identifies teardown/race states in
 // which the unified terminal authority still exists but its coordinator has
 // already gone away. Producers must claim and drop their output here; they

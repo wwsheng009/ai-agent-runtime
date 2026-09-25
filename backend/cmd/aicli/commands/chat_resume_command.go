@@ -734,7 +734,13 @@ func printResumeSuccess(session *ChatSession) {
 			fmt.Print(line)
 		}
 	}
-	printCurrentRuntimeSession(session)
+	// TUI（统一渲染器）信息流只保留上面的单行恢复摘要：会话/日志/产物路径
+	// 不再跟在恢复确认后面刷屏，历史回放可以紧接着开始。这些路径仍可通过
+	// /session 与 /debug display 按需查看。plain/legacy 直写路径保持原有
+	// meta 输出不变，避免改变脚本可解析的 stdout。
+	if !unifiedDirectInteractiveOutput(session) {
+		printCurrentRuntimeSession(session)
+	}
 	if hasVisibleChatHistory(session) {
 		// No raw fmt.Println: history settles layout then owns spacing via header.
 		printVisibleChatHistory(session, "已加载历史会话")
