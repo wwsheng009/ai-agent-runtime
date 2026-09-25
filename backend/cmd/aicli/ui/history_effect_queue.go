@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
@@ -39,7 +40,33 @@ type HistoryEffectQueueState struct {
 	// epoch is consumed by the next reconcile, which the reducer performs as
 	// soon as the frame proof exists (HistoryProjectionRecovered).
 	ProvenScrollbackEpoch uint64
-	ledger                *HistoryCommitLedger
+	// PlanIncomplete records that the most recent transcript plan was cut off by
+	// historyCommitPlanningBudget: the ledger holds a valid *oldest prefix* of
+	// the eligible history, and the cells the layout walk never reached were
+	// never planned at all. The prefix is not a delivered session, and nothing
+	// re-plans on its own — syncHistoryEffectsForTranscript runs on transcript
+	// transitions, and an idle resumed session has none. The executor drains the
+	// prefix, the ledger then reads pending=0/acked=N over a transcript whose
+	// layout is hundreds of thousands of rows (live: next=1068, acked=356,
+	// layout_rows=290957), and the rows the walk never reached stay missing from
+	// native scrollback with nothing left to schedule. The flag makes that state
+	// observable: the ack handlers continue the plan as soon as the delivered
+	// prefix drains (continueTruncatedHistoryPlan), so a truncated plan is
+	// carried to completion instead of waiting for an interaction that never
+	// comes. It clears only when a plan reports complete.
+	PlanIncomplete bool
+	// PlanStalled records that a continuation pass at the current plan inputs
+	// minted nothing while the plan stayed incomplete: every candidate the
+	// budgeted layout walk reaches is already terminal in this epoch (delivered,
+	// or quarantined by a settle), so another pass would only burn one more
+	// layout budget without moving the queue. It is the spin guard for the
+	// executor-side continuation kick, which stays armed while PlanIncomplete is
+	// set and this flag is clear. Any plan-input change that misses the plan
+	// memo (a transcript transition, a new epoch, geometry/theme) clears it and
+	// allows a fresh attempt, so a stalled epoch heals as soon as it can make
+	// progress again.
+	PlanStalled bool
+	ledger      *HistoryCommitLedger
 	// lastPlanned* memoize the active-cell inputs from the most recent
 	// syncHistoryEffectsForActiveCell pass. Append-only stream updates that
 	// do not move any source boundary (Stable/Enqueued/Acked), resize, or
@@ -97,10 +124,37 @@ type HistoryEffectQueueState struct {
 	// requires the ledger to still hold a lifecycle whenever the last plan
 	// produced candidates.
 	lastPlannedCandidateCount int
+	// PlanCount / LastPlanDuration / MaxPlanDuration 是 P16 的归因读数（方案
+	// docs/plan/resume-large-session-optimization-plan-20260924.md §7.3）：
+	// P12（端点冻结）只说「用户被卡住」，这三个标量说明冻结是不是花在**规划**
+	// （screening + 铸 commit）上，而不是布局或终端写。只由
+	// syncHistoryEffectsForTranscriptWithin 记录；纯诊断标量，不参与任何投递
+	// 判定，因此不会改变规划/交付语义。
+	PlanCount        uint64
+	LastPlanDuration time.Duration
+	MaxPlanDuration  time.Duration
 }
 
 func (s HistoryEffectQueueState) Clone() HistoryEffectQueueState {
 	s.ledger = s.ledger.Clone()
+	return s
+}
+
+// cloneForDiagnostics returns a detached queue without the commit ledger.
+//
+// The ledger is the expensive part of this struct: on a resumed session it
+// holds one entry per display fragment (measured: 100,000 entries for a
+// 4,000-cell page), and copying it costs ~79 MB and ~130 ms per snapshot even
+// with the render payload dropped — the per-entry maps, not the lines, are the
+// floor. Diagnostic consumers read queue scalars and counters, never an entry,
+// so the snapshot drops the ledger outright and the counters come from
+// UIController.HistoryEffectDiagnostics under the same mutex.
+//
+// A ledger-less queue is indistinguishable from an empty one, so Entries() and
+// Pending() on this snapshot return nothing: never use it for delivery
+// decisions.
+func (s HistoryEffectQueueState) cloneForDiagnostics() HistoryEffectQueueState {
+	s.ledger = nil
 	return s
 }
 
@@ -147,6 +201,112 @@ func (s HistoryEffectQueueState) Pending() []HistoryCommit {
 func (s HistoryEffectQueueState) HasPending() bool {
 	return !s.Frozen && !s.ProjectionUnknown && !s.hasUnresolvedTerminalDelivery() &&
 		s.ledger != nil && s.ledger.HasPending()
+}
+
+// recordTranscriptPlanTiming 记录一次 transcript 规划 pass 的耗时（P16 归因）。
+// 耗时与计数分列：PlanCount>0 且 MaxPlanMs 接近冻结窗口，才说明 P12 的卡顿
+// 花在规划器上。
+func (s *HistoryEffectQueueState) recordTranscriptPlanTiming(duration time.Duration) {
+	if s == nil {
+		return
+	}
+	s.PlanCount++
+	s.LastPlanDuration = duration
+	if duration > s.MaxPlanDuration {
+		s.MaxPlanDuration = duration
+	}
+}
+
+// HistoryEffectQueueSummary is a payload-free projection of the queue's
+// delivery lifecycle for diagnostics.
+type HistoryEffectQueueSummary struct {
+	// LedgerEntries is the whole ledger inventory (len(byToken)), which only
+	// grows. It is the size driver of every ledger copy, so a diagnostic that
+	// reports queue counters without it cannot tell "a short queue" from "a
+	// long queue whose entries are all terminal".
+	LedgerEntries           int
+	Pending                 int
+	InFlight                int
+	Acked                   int
+	Failed                  int
+	Invalidated             int
+	Abandoned               int
+	OldestPendingToken      uint64
+	OldestPendingGeneration uint64
+	// PlanCount / LastPlanMs / MaxPlanMs 归因单次规划耗时（P16）：冻结窗口内
+	// 只要有一次规划接近窗口时长，P12 的卡顿就应归到规划器，而不是布局/写。
+	PlanCount  uint64
+	LastPlanMs int64
+	MaxPlanMs  int64
+}
+
+// Summary scans the ledger once and allocates nothing. It replaces the
+// diagnostic Entries() walk, which detached every entry — render payload
+// included — purely to count states.
+func (s HistoryEffectQueueState) Summary() HistoryEffectQueueSummary {
+	summary := HistoryEffectQueueSummary{}
+	summary.PlanCount = s.PlanCount
+	summary.LastPlanMs = s.LastPlanDuration.Milliseconds()
+	summary.MaxPlanMs = s.MaxPlanDuration.Milliseconds()
+	if s.ledger == nil {
+		return summary
+	}
+	summary.LedgerEntries = len(s.ledger.byToken)
+	for token, entry := range s.ledger.byToken {
+		switch entry.State {
+		case HistoryCommitPending:
+			summary.Pending++
+			// Tokens are minted ascending, so the smallest pending token is the
+			// oldest eligible claim — the same head Pending() returns.
+			if summary.OldestPendingToken == 0 || token < summary.OldestPendingToken {
+				summary.OldestPendingToken = token
+				summary.OldestPendingGeneration = entry.Commit.LayoutGeneration
+			}
+		case HistoryCommitInFlight:
+			summary.InFlight++
+		case HistoryCommitAcked:
+			summary.Acked++
+		case HistoryCommitStateFailed:
+			summary.Failed++
+		case HistoryCommitInvalidated:
+			summary.Invalidated++
+		case HistoryCommitAbandoned:
+			summary.Abandoned++
+		}
+	}
+	return summary
+}
+
+// HistoryEffectDiagnostics is the ledger-free projection the debug endpoints
+// read: queue scalars plus the delivery counters. This is everything
+// /debug/chat/status needs from the queue, and building it allocates nothing.
+type HistoryEffectDiagnostics struct {
+	Frozen                 bool
+	ProjectionUnknown      bool
+	ReconciliationRequired bool
+	ScrollbackReplayArmed  bool
+	PlanIncomplete         bool
+	PlanStalled            bool
+	NextToken              uint64
+	TerminalEpoch          uint64
+	Summary                HistoryEffectQueueSummary
+}
+
+// Diagnostics projects the queue without detaching anything. The caller must
+// hold the actor mutex because it reads the actor-owned ledger; see
+// UIController.HistoryEffectDiagnostics.
+func (s HistoryEffectQueueState) Diagnostics() HistoryEffectDiagnostics {
+	return HistoryEffectDiagnostics{
+		Frozen:                 s.Frozen,
+		ProjectionUnknown:      s.ProjectionUnknown,
+		ReconciliationRequired: s.ReconciliationRequired,
+		ScrollbackReplayArmed:  s.ScrollbackReplayArmed,
+		PlanIncomplete:         s.PlanIncomplete,
+		PlanStalled:            s.PlanStalled,
+		NextToken:              s.NextToken,
+		TerminalEpoch:          s.TerminalEpoch,
+		Summary:                s.Summary(),
+	}
 }
 
 func (s *HistoryEffectQueueState) enqueue(commit HistoryCommit) error {

@@ -961,6 +961,21 @@ func (e *TerminalSessionExecutor) runOne() bool {
 		})
 		return continued
 	}
+	if claimedToken == 0 && schedule.planIncomplete {
+		// No pending token and no recovery obligation, but the transcript plan
+		// still owes cells. The trigger that carries a budget-truncated plan
+		// forward is the ack handler, and every gate that can block that single
+		// attempt (projection unknown, an unresolved delivery, a settle that
+		// quarantined a delivered batch) clears through a transition that is
+		// not an ack — so the plan can be stranded with an empty queue while
+		// the executor goes idle (live: 6622 cells / 291842 rows, next=1288,
+		// acked=322, pending=0, projection known). Ask the reducer to continue
+		// the plan; the stall guard (PlanStalled) keeps a plan that cannot
+		// advance in this epoch from spinning this loop.
+		if e.controller.Post(ContinueHistoryPlanAction{}) {
+			return true
+		}
+	}
 	if claimedToken != 0 && snapshot.claimed == nil {
 		// BeginHistoryCommit is queued behind any reducer actions that raced the
 		// scalar schedule read. If one of those actions replaced the candidate or

@@ -134,11 +134,11 @@ func TestCanonicalHistorySeedArmsReplayOnlyForImportedUnits(t *testing.T) {
 // whether an outstanding history obligation will replace native scrollback or
 // settle in place.
 func TestHistoryEffectDiagnosticsExposeScrollbackReplayGrant(t *testing.T) {
-	spent := chatDebugHistoryEffectSummary(ui.HistoryEffectQueueState{})
+	spent := chatDebugHistoryEffectSummary(ui.HistoryEffectDiagnostics{})
 	if !strings.Contains(spent, "scrollback-replay-armed=false") {
 		t.Fatalf("history effect summary hides the replay grant: %q", spent)
 	}
-	armed := chatDebugHistoryEffectSummary(ui.HistoryEffectQueueState{ScrollbackReplayArmed: true})
+	armed := chatDebugHistoryEffectSummary(ui.HistoryEffectDiagnostics{ScrollbackReplayArmed: true})
 	if !strings.Contains(armed, "scrollback-replay-armed=true") {
 		t.Fatalf("history effect summary hides the armed replay grant: %q", armed)
 	}

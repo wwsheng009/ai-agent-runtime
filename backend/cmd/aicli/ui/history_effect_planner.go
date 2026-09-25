@@ -16,7 +16,12 @@ import (
 // fences) a single candidate render can take hundreds of milliseconds, so the
 // loop stops committing new rows once the budget is spent and lets the next
 // reduce continue from the same enqueued boundary.
-const historyCommitPlanningBudget = 250 * time.Millisecond
+//
+// 它是 var 而不是 const，只为了让测试能把它压到 0 来**确定性地**走到截断前缀：
+// 真实预算下是否截断取决于机器速度与布局缓存状态（warm cache 上 250ms 通常够
+// 走完整份历史），而截断路径必须被测到 —— 见 history_planning_budget_test.go。
+// 生产代码只读它。
+var historyCommitPlanningBudget = 250 * time.Millisecond
 
 // planEligibleHistoryCommits selects finalized display ranges above the retained
 // primary transcript viewport. It keeps source/display identity explicit: plain
@@ -60,13 +65,25 @@ func planEligibleHistoryCommitsWithin(state AppState, deadline time.Time) ([]His
 	// screening 循环就只能返回空前缀，规划永远 0 候选（next=0 / pending=0），
 	// 授权过的销毁式重放清空 scrollback 后无内容可写 —— 永久空屏。因此预算从
 	// screening 自身开始计时：仍然限制最贵的那部分工作，但每一轮都真的前进。
+	//
+	// 顺序同样重要：**必须先求值 layoutRows，再建立 screenDeadline**。把
+	// time.Now().Add(...) 写在实参列表前面（旧实现）时，deadline 在前置工作开始
+	// 之前就已经建立，于是它被 LayoutTranscript 整个吃掉，screening 循环在第一个
+	// 采样点（index=layoutBudgetCheckRows）拿到的 deadline 已经过期，每一轮都只
+	// 返回同一个前缀：前缀全是缓存命中（不产生新的 cell_rows miss），前缀里的 cell
+	// 也早已有终态记录（不产生新的 token），continueTruncatedHistoryPlan 因此判定
+	// 「无法推进」，永久置位 PlanStalled 并解除执行器的续跑 kick —— 缺失的尾部再也
+	// 不会被规划（live: next=1288 / acked=322 / pending=0 / plan_incomplete=true /
+	// plan_stalled=true，注入 /status 让 transcript 真的变了也不自愈）。
+	layoutRows := state.Transcript.LayoutRows(state.LayoutGeneration)
+	// 预算从这里才开始计时：若在 layoutRows 之前建立 deadline，它会被上面这次
+	// 语义布局整个吃掉，screening 的第一个采样点就已过期（见上）。
 	screenDeadline := deadline
 	if !deadline.IsZero() {
 		screenDeadline = time.Now().Add(historyCommitPlanningBudget)
 	}
 	rows, complete := layoutTranscriptScreenRowsWithin(
-		state.Transcript.LayoutRows(state.LayoutGeneration), byID,
-		mutableTranscriptCellIDs(state.Transcript), width, screenDeadline, state.Theme)
+		layoutRows, byID, mutableTranscriptCellIDs(state.Transcript), width, screenDeadline, state.Theme)
 	if len(rows) == 0 {
 		return activeCommits, complete
 	}
@@ -91,7 +108,12 @@ func planEligibleHistoryCommitsWithin(state AppState, deadline time.Time) ([]His
 				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, state.LayoutGeneration, byID)...)
 			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, width, themeFingerprint(state.Theme), state.LayoutGeneration, byID); mapped {
 				commits = append(commits, segments...)
-			} else if skipRows == 0 && end <= firstVisible {
+			} else if complete && skipRows == 0 && end <= firstVisible {
+				// 截断窗口里被切断的 cell 只看得到一部分物理行，而
+				// wholeCellHistoryCommit 把 SourceRange 记成整个 cell（fragment 恒为
+				// 0），只带得动可见的那几行。它和续跑后完整窗口给出的逐行 fragment
+				// 是**不同身份**，两份都会被投递 —— 边界 cell 的可见行会在 scrollback
+				// 里写两遍。截断窗口下跳过，交给完整窗口那一轮。
 				commits = append(commits, wholeCellHistoryCommit(cell, rows[start:end], start, end, state.LayoutGeneration, byID))
 			}
 		}
@@ -709,6 +731,14 @@ func cellIsFinalizedForHistory(cell scene.TranscriptCell) bool {
 // when every planEligibleHistoryCommits input is unchanged; see the
 // lastPlannedTranscript* field comment on HistoryEffectQueueState.
 func syncHistoryEffectsForTranscript(state *UIControllerState) {
+	syncHistoryEffectsForTranscriptWithin(state, time.Now().Add(historyCommitPlanningBudget))
+}
+
+// syncHistoryEffectsForTranscriptWithin 是带 deadline 的规划实现。零值 deadline
+// 表示**不设预算**：screening 循环不会截断，因此这一轮要么完整覆盖 transcript，
+// 要么真的没有可交付的候选。续跑（continueTruncatedHistoryPlan）必须用零值调用
+// 它，否则一轮预算走不完的会话会让每一轮都停在同一个采样点上（见该函数的注释）。
+func syncHistoryEffectsForTranscriptWithin(state *UIControllerState, deadline time.Time) {
 	if state == nil {
 		return
 	}
@@ -722,12 +752,23 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 		syncHistoryEffectsForActiveCell(state)
 		return
 	}
+	// A memo miss means the plan inputs moved, so whatever the previous
+	// continuation attempt could not reach is worth another pass at these
+	// inputs. This is also what re-arms the executor-side continuation kick
+	// after a pass that could not advance (see HistoryEffectQueueState.
+	// PlanStalled).
+	state.HistoryEffects.PlanStalled = false
 	// 预算必须在布局之前建立：布局本身（遍历全部 cell 并对未命中的结构化
 	// cell 重跑 markdown/chroma）就是这一轮 pass 里最贵的部分，旧实现把
 	// deadline 建在 commit 循环里，等布局跑完才生效，等于没有预算。
-	deadline := time.Now().Add(historyCommitPlanningBudget)
+	// P16：规划器本体（screening + 铸 commit）的耗时归因。这是锁内最贵的
+	// 一段，必须能回答「P12 的冻结是不是花在规划上」；memo 命中（上方早退）
+	// 不算一次规划，因此不记录，避免把空转计成规划。
+	planStarted := time.Now()
 	commits, complete := planEligibleHistoryCommitsWithin(state.AppState, deadline)
+	state.HistoryEffects.recordTranscriptPlanTiming(time.Since(planStarted))
 	if complete {
+		state.HistoryEffects.PlanIncomplete = false
 		syncHistoryEffectCandidates(state, commits, 0)
 		recordTranscriptPlanMemo(state, len(commits))
 		return
@@ -735,9 +776,90 @@ func syncHistoryEffectsForTranscript(state *UIControllerState) {
 	// 截断的规划结果只能当**前缀**用：它缺少的只是「还没走到」的尾部 cell，
 	// 不代表那些 cell 的候选失效。交给 syncHistoryEffectCandidates 会把尾部
 	// 已经排队、甚至已经在写的提交全部 invalidate（token 抖动会回退 Enqueued
-	// 前沿）。这里只入队不逐出，逐出留给下一次完整规划；memo 同样不记录，
-	// 下一次 reduce 会带着已经预热的布局缓存重跑，直到走完整个历史。
+	// 前沿）。这里只入队不逐出，逐出留给下一次完整规划。
+	//
+	// 截断还必须留下两件事，否则这个前缀就是这条计划的终点：旧 memo 要失效
+	// （截断只发生在 memo 未命中时，但旧指纹可能再次匹配 —— 例如主题切回原值
+	// —— 命中会把续跑变成空操作，而 ledger 里只有前缀），PlanIncomplete 要置位
+	// 以便前缀真正交付完之后由 ack 处理器续跑。resume 后的空闲会话没有任何
+	// transcript 迁移，规划不可能靠「下一次 reduce」自己接上。
+	state.HistoryEffects.PlanIncomplete = true
+	state.HistoryEffects.invalidateTranscriptPlanMemo()
 	syncHistoryEffectCandidatesPrefix(state, commits)
+}
+
+// continueTruncatedHistoryPlan carries a budget-truncated transcript plan to
+// completion. A truncated plan only ever mints the oldest prefix the layout walk
+// could reach inside historyCommitPlanningBudget, and the continuation it relies
+// on is a *later* transcript transition — which an idle session never produces.
+// The delivered prefix was therefore the whole plan: the executor drained it,
+// the ledger read pending=0/acked=N, and every row the walk never reached stayed
+// missing from native scrollback (live resume: 356 acked commits for a
+// 290,957-row transcript, executor idle, replay authorization already spent).
+// Called from the ack handlers, this replaces "wait for a transition that may
+// never come" with "continue as soon as the prefix has actually been delivered".
+//
+// The drain gate is what makes the loop terminate: a continuation pass runs only
+// while the queue holds no undelivered token, and each pass either completes the
+// plan (clearing PlanIncomplete) or mints the next prefix, which the executor
+// must deliver before another continuation is allowed. A pass that mints nothing
+// leaves PlanIncomplete set and simply stops — no spinner, no repeated layout of
+// the same prefix.
+func continueTruncatedHistoryPlan(state *UIControllerState) bool {
+	if state == nil {
+		return false
+	}
+	effects := &state.HistoryEffects
+	if !effects.PlanIncomplete {
+		return false
+	}
+	// While the prefix still has pending work the executor is already carrying
+	// the plan forward; re-planning here would burn another layout budget per ack
+	// without adding anything the queue does not already hold. In-flight tokens
+	// are not observable at this point on purpose: the ack that drains the queue
+	// is reduced after its own token was acknowledged, and the executor claims the
+	// next token only after that reduction returned.
+	if effects.ledger != nil && effects.ledger.pendingCount > 0 {
+		return false
+	}
+	if effects.Frozen || effects.ProjectionUnknown || effects.hasUnresolvedTerminalDelivery() {
+		// Recovery owns the queue; the replan that follows recovery
+		// (HistoryProjectionRecovered / HistoryScrollbackReconciled) re-arms the
+		// obligation on its own.
+		return false
+	}
+	if state.Geometry.Width < 1 || state.Geometry.Height < 1 {
+		return false
+	}
+	before := effects.NextToken
+	// 续跑用**无预算**的一轮，这是它能真正走到 transcript 尾部的前提：有预算的
+	// 那一轮在冷缓存的大前缀上会再次停在同一个采样点，每一轮都返回同一个前缀
+	// （前缀全是缓存命中 → 没有新 miss；前缀里的 cell 早已有终态记录 → 没有新
+	// token），于是 NextToken 不变、PlanStalled 被永久置位、执行器续跑 kick 被
+	// 解除，缺失的尾部再也不会被规划 —— live 的终态（next=1288 / acked=322 /
+	// pending=0 / plan_incomplete=true / plan_stalled=true，注入 /status 让
+	// transcript 真的变了也不自愈）就是这么来的。
+	//
+	// 无预算在这里是安全的：续跑不在流式热路径上 —— 队列已经排空（上面的
+	// pendingCount 门），且每个截断计划最多走到这里一次，之后 PlanIncomplete
+	// 就被清掉。有预算的一轮仍然守着流式路径（每一次 transcript 迁移）。
+	syncHistoryEffectsForTranscriptWithin(state, time.Time{})
+	// 无预算的一轮不截断，因此 PlanIncomplete 正常情况下已经清掉；保留下面的
+	// 兜底：真的没有可交付候选时不要让执行器 kick 空转同样的输入，下一次 memo
+	// 未命中会清掉 PlanStalled 并允许再试一次。
+	if effects.PlanIncomplete && effects.NextToken == before {
+		effects.PlanStalled = true
+	}
+	return true
+}
+
+// planContinuationPending reports whether a budget-truncated plan still owes
+// cells and has not already been proven unable to advance at the current plan
+// inputs. The executor reads it to decide whether a wake with an empty queue
+// and no recovery obligation should ask the reducer to continue the plan
+// instead of going idle on a transcript it only partly delivered.
+func (s HistoryEffectQueueState) planContinuationPending() bool {
+	return s.PlanIncomplete && !s.PlanStalled
 }
 
 // transcriptFinalizedPrefixFence fingerprints every finalized transcript cell

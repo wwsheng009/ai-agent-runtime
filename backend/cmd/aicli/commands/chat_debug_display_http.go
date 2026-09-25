@@ -127,6 +127,16 @@ type chatDebugDisplayEventLogInfo struct {
 	Recorded uint64 `json:"recorded"`
 	Replayed uint64 `json:"replayed"`
 	Failures uint64 `json:"failures"`
+	// L1.1 恢复重放便宜路径计数（设计见 chat_eventlog_trim.go）：Trimmed =
+	// Tier A 白名单跳解析的行数（Encode 仍逐条调用），CheapProgress =
+	// tool.progress 走便宜解码的行数，CheapStarted = llm.request.started
+	// 走便宜解码的行数（L1.2），CheapFallback = apply 期守卫拒绝后
+	// 回落全量解码的行数（正常会话应为 0）。以上各项与 Failures 语义无关：
+	// 跳过 ≠ 失败。
+	Trimmed       uint64 `json:"trimmed,omitempty"`
+	CheapProgress uint64 `json:"cheap_progress,omitempty"`
+	CheapStarted  uint64 `json:"cheap_started,omitempty"`
+	CheapFallback uint64 `json:"cheap_fallback,omitempty"`
 }
 
 type chatDebugDisplayModelItemInfo struct {
@@ -367,6 +377,17 @@ type chatDebugDisplayHistoryGateInfo struct {
 	PendingCount            int    `json:"pending_count"`
 	OldestPendingToken      uint64 `json:"oldest_pending_token,omitempty"`
 	OldestPendingGeneration uint64 `json:"oldest_pending_generation,omitempty"`
+	// PlanIncomplete/PlanStalled expose the budget-truncated transcript plan.
+	// pending_count=0 is not proof that history is complete: a plan cut off by
+	// historyCommitPlanningBudget leaves the cells the layout walk never reached
+	// unplanned, so a resumed session can read pending=0/acked=N over a
+	// transcript whose tail never entered native scrollback (live: 6622 cells /
+	// 291842 rows, next=1288, acked=322). PlanStalled additionally marks a plan
+	// that cannot advance at the current inputs (its remaining sources are
+	// already terminal in this epoch), which is the difference between "the
+	// continuation is still scheduled" and "this epoch is out of options".
+	PlanIncomplete bool `json:"plan_incomplete"`
+	PlanStalled    bool `json:"plan_stalled"`
 }
 
 type chatDebugDisplayActiveCellInfo struct {
@@ -581,11 +602,16 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 			}
 		}
 		if path, count, replayed, failures := bridge.eventLogStats(); path != "" {
+			trimmed, cheapProgress, cheapStarted, cheapFallback := bridge.eventLogTrimStats()
 			enc.EventLog = &chatDebugDisplayEventLogInfo{
-				Path:     path,
-				Recorded: count,
-				Replayed: replayed,
-				Failures: failures,
+				Path:          path,
+				Recorded:      count,
+				Replayed:      replayed,
+				Failures:      failures,
+				Trimmed:       trimmed,
+				CheapProgress: cheapProgress,
+				CheapStarted:  cheapStarted,
+				CheapFallback: cheapFallback,
 			}
 		}
 		model := bridge.renderModelSnapshot()
@@ -743,7 +769,14 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 
 	// ====== AppState (Presenter Migration) ======
 	if session.Interaction != nil && session.Interaction.uiActor != nil {
-		state := session.Interaction.uiActor.State()
+		// DiagnosticState: this endpoint reports scalars, geometry, gates, and
+		// the history-effect lifecycle, but never a commit entry. State() would
+		// detach the whole commit ledger under the actor mutex on each poll —
+		// the dominant cost of this probe on a resumed session.
+		state := session.Interaction.uiActor.DiagnosticState()
+		// The snapshot carries no ledger, so the queue counters come from their
+		// own ledger-free projection under the same mutex (no allocation).
+		effectDiagnostics := session.Interaction.uiActor.HistoryEffectDiagnostics()
 		lease := "inactive"
 		if state.Lease.Active {
 			lease = "active"
@@ -755,13 +788,13 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 			Width:            state.Geometry.Width,
 			Height:           state.Geometry.Height,
 			PrimaryLease:     lease,
-			HistoryEffects:   chatDebugHistoryEffectSummary(state.HistoryEffects),
+			HistoryEffects:   chatDebugHistoryEffectSummary(effectDiagnostics),
 		}
 		// Structured commit gates: the same predicate the presenter scheduler
 		// uses (terminalHistoryRecoveryActionable) plus the oldest pending
 		// token identity so a poller can correlate a stuck pending commit with
 		// the current layout generation.
-		effects := state.HistoryEffects
+		effects := effectDiagnostics
 		gates := &chatDebugDisplayHistoryGateInfo{
 			Frozen:                 effects.Frozen,
 			ProjectionUnknown:      effects.ProjectionUnknown,
@@ -769,16 +802,13 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 			ScrollbackReplayArmed:  effects.ScrollbackReplayArmed,
 			RecoveryActionable: !state.Lease.Active && !effects.Frozen &&
 				(effects.ProjectionUnknown || effects.ReconciliationRequired),
-		}
-		for _, entry := range effects.Entries() {
-			if entry.State != ui.HistoryCommitPending {
-				continue
-			}
-			gates.PendingCount++
-			if gates.OldestPendingToken == 0 {
-				gates.OldestPendingToken = entry.Commit.Token
-				gates.OldestPendingGeneration = entry.Commit.LayoutGeneration
-			}
+			PlanIncomplete: effects.PlanIncomplete,
+			PlanStalled:    effects.PlanStalled,
+			// Ledger-free counts; the old loop walked Entries() and detached
+			// every commit's render lines to count states.
+			PendingCount:            effects.Summary.Pending,
+			OldestPendingToken:      effects.Summary.OldestPendingToken,
+			OldestPendingGeneration: effects.Summary.OldestPendingGeneration,
 		}
 		app.HistoryGates = gates
 		// 消费端成本快照（§6.2 第 2 条）：只在有活动时输出，避免空会话的

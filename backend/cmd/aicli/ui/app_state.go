@@ -54,6 +54,19 @@ func (s AppState) Clone() AppState {
 	return s
 }
 
+// cloneForDiagnostics is Clone without the history-effect ledger. Diagnostics
+// read the queue's scalars and counters, never a commit entry, and they read
+// under the actor mutex — see UIControllerState.CloneForDiagnostics.
+func (s AppState) cloneForDiagnostics() AppState {
+	s.Theme = cloneThemeContext(s.Theme)
+	s.Transcript = s.Transcript.Clone()
+	s.Active = s.Active.Clone()
+	s.Bottom = s.Bottom.Clone()
+	s.HistoryEffects = s.HistoryEffects.cloneForDiagnostics()
+	s.TranscriptOverlay = s.TranscriptOverlay.Clone()
+	return s
+}
+
 // TranscriptState is the semantic transcript part of AppState. It intentionally
 // stores cells rather than rendered terminal rows, so resize/replay derives a
 // new layout from source instead of reverse-engineering a viewport.

@@ -138,12 +138,14 @@ func (e *HistoryCommitExecutor) runOne() bool {
 	// cleared inFlight. Waiting here keeps selection causally after the state
 	// that caused the wake-up without ever blocking that actor goroutine.
 	e.controller.WaitIdle()
-	state := e.controller.State()
-	commits := state.HistoryEffects.Pending()
-	if len(commits) == 0 {
+	// The claim and its two confirmation reads are payload-free projections:
+	// State() would detach every commit's render lines, and because the drain
+	// calls runOne once per commit, that made a full drain quadratic in ledger
+	// size.
+	commit, ok := e.controller.PendingHistoryCommit()
+	if !ok {
 		return false
 	}
-	commit := commits[0]
 	if !e.controller.Post(BeginHistoryCommit{
 		Token:            commit.Token,
 		LayoutGeneration: commit.LayoutGeneration,
@@ -151,7 +153,7 @@ func (e *HistoryCommitExecutor) runOne() bool {
 		return false
 	}
 	e.controller.WaitIdle()
-	if !historyCommitClaimCurrent(e.controller.State(), commit) {
+	if !historyCommitClaimCurrent(e.controller.historyCommitGateOf(commit.Token), commit) {
 		return false
 	}
 
@@ -188,7 +190,7 @@ func (e *HistoryCommitExecutor) runOne() bool {
 		return false
 	}
 	e.controller.WaitIdle()
-	return historyCommitAcked(e.controller.State(), commit.Token)
+	return historyCommitAcked(e.controller.historyCommitGateOf(commit.Token))
 }
 
 // commitHistory converts a terminal-side panic into the same conservative
@@ -207,20 +209,17 @@ func (e *HistoryCommitExecutor) commitHistory(commit HistoryCommit) (result Hist
 	return e.sink.CommitHistory(commit)
 }
 
-func historyCommitClaimCurrent(state UIControllerState, commit HistoryCommit) bool {
-	if state.HistoryEffects.Frozen || state.HistoryEffects.ProjectionUnknown ||
-		state.LayoutGeneration != commit.LayoutGeneration {
+// historyCommitClaimCurrent accepts the payload-free gate projection of the
+// claimed token rather than a full state clone; see UIController.historyCommitGateOf.
+func historyCommitClaimCurrent(gate historyCommitGate, commit HistoryCommit) bool {
+	if gate.Frozen || gate.ProjectionUnknown ||
+		gate.LayoutGeneration != commit.LayoutGeneration {
 		return false
 	}
-	entry, ok := state.HistoryEffects.Entry(commit.Token)
-	if !ok {
-		return false
-	}
-	return entry.State == HistoryCommitInFlight &&
-		entry.Commit.LayoutGeneration == commit.LayoutGeneration
+	return gate.EntryFound && gate.EntryState == HistoryCommitInFlight &&
+		gate.EntryGeneration == commit.LayoutGeneration
 }
 
-func historyCommitAcked(state UIControllerState, token uint64) bool {
-	entry, ok := state.HistoryEffects.Entry(token)
-	return ok && entry.State == HistoryCommitAcked
+func historyCommitAcked(gate historyCommitGate) bool {
+	return gate.EntryFound && gate.EntryState == HistoryCommitAcked
 }

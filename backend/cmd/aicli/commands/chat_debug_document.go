@@ -409,7 +409,16 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 		builder.meta("AppState:", "unavailable ("+chatDebugAppStateUnavailableReason(session)+")")
 		return
 	}
-	state := session.Interaction.uiActor.State()
+	// DiagnosticState keeps the ledger-free snapshot: this document reads
+	// scalars, transcript cells, and the history-effect lifecycle, never a
+	// commit entry. State() would detach the whole commit ledger while holding
+	// the actor mutex on every /debug/chat/status poll — 100,000 entries and
+	// ~96 MB on a 4,000-cell resumed page.
+	state := session.Interaction.uiActor.DiagnosticState()
+	// The snapshot carries no ledger, so the queue counters come from their own
+	// ledger-free projection: one O(entries) count under the same mutex, and no
+	// allocation at all.
+	effectDiagnostics := session.Interaction.uiActor.HistoryEffectDiagnostics()
 	builder.heading("AppState / Presenter Migration: (GET /debug/chat/status#app_state)")
 	builder.meta("UI Revision:", strconv.FormatUint(state.Revision, 10))
 	builder.meta("Layout Generation:", strconv.FormatUint(state.LayoutGeneration, 10))
@@ -419,7 +428,13 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 	} else {
 		builder.meta("Primary Lease:", "inactive")
 	}
-	builder.meta("History Effects:", chatDebugHistoryEffectSummary(state.HistoryEffects))
+	// The queue counters alone cannot distinguish "everything delivered" from
+	// "the plan was cut off and its tail was never planned": both read
+	// pending=0. Report the truncated-plan flags on the same line so a live
+	// session is diagnosable without a rebuild.
+	builder.meta("History Effects:", fmt.Sprintf("%s planIncomplete=%t planStalled=%t",
+		chatDebugHistoryEffectSummary(effectDiagnostics),
+		effectDiagnostics.PlanIncomplete, effectDiagnostics.PlanStalled))
 	// next=0 with a populated Scene is the blank-screen signature: the reducer
 	// never planned a single history commit. The queue counters cannot say why,
 	// so report the planner's cheap inputs beside them (cells the planner
@@ -435,7 +450,7 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 			"rows=%d screened=%d budgeted=%d budgetComplete=%t",
 			plan.LayoutRowsTotal, plan.LayoutRowsScreened, plan.LayoutRowsBudgeted, plan.LayoutBudgetComplete))
 	}
-	if state.HistoryEffects.ProjectionUnknown {
+	if effectDiagnostics.ProjectionUnknown {
 		builder.meta("History Projection:", "unknown (recovery required)")
 	} else {
 		builder.meta("History Projection:", "known")
@@ -467,22 +482,13 @@ func appendChatDebugAppStatePresenterLines(builder *chatDebugDocumentBuilder, se
 	builder.plainLines(strings.Split(parity, "\n"))
 }
 
-func chatDebugHistoryEffectSummary(effects ui.HistoryEffectQueueState) string {
-	var pending, inFlight, acked, failed, invalidated int
-	for _, entry := range effects.Entries() {
-		switch entry.State {
-		case ui.HistoryCommitPending:
-			pending++
-		case ui.HistoryCommitInFlight:
-			inFlight++
-		case ui.HistoryCommitAcked:
-			acked++
-		case ui.HistoryCommitStateFailed:
-			failed++
-		case ui.HistoryCommitInvalidated:
-			invalidated++
-		}
-	}
+func chatDebugHistoryEffectSummary(effects ui.HistoryEffectDiagnostics) string {
+	// Summary is counted once, under the actor mutex, without detaching a single
+	// entry. The previous Entries() walk detached every entry — including
+	// Commit.Lines — purely to count, which on a resumed session cost
+	// O(entire history x payload) per poll of a document that prints six
+	// integers.
+	summary := effects.Summary
 	// scrollback-replay-armed is the reducer-installed one-shot authorization
 	// that lets the executor replace native scrollback and replay history. It is
 	// the state that explains why a history obligation will (or will not) reset
@@ -494,8 +500,18 @@ func chatDebugHistoryEffectSummary(effects ui.HistoryEffectQueueState) string {
 	// exists but is not deliverable yet" (next>0: the gate is the
 	// projection/freeze barrier, not planning). epoch is the terminal epoch the
 	// ledger was last reconciled into.
-	return fmt.Sprintf("pending=%d in-flight=%d acked=%d failed=%d invalidated=%d frozen=%t scrollback-replay-armed=%t next=%d epoch=%d",
-		pending, inFlight, acked, failed, invalidated, effects.Frozen, effects.ScrollbackReplayArmed,
+	// ledger-entries is the whole token inventory, which only grows: it is what
+	// makes a "pending=0" line ambiguous between an idle queue and a ledger that
+	// is accumulating terminal entries forever, and it is the size driver of
+	// every ledger copy. abandoned closes the state inventory so the counts can
+	// be reconciled against it.
+	// plan-count/plan-last-ms/plan-max-ms 是 P16 的归因读数：P12 说端点（=用户
+	// 界面）被冻结，这三个数说冻结花在规划器上的部分有多大。
+	return fmt.Sprintf("pending=%d in-flight=%d acked=%d failed=%d invalidated=%d abandoned=%d ledger-entries=%d plan-count=%d plan-last-ms=%d plan-max-ms=%d frozen=%t scrollback-replay-armed=%t next=%d epoch=%d",
+		summary.Pending, summary.InFlight, summary.Acked, summary.Failed, summary.Invalidated,
+		summary.Abandoned, summary.LedgerEntries,
+		summary.PlanCount, summary.LastPlanMs, summary.MaxPlanMs,
+		effects.Frozen, effects.ScrollbackReplayArmed,
 		effects.NextToken, effects.TerminalEpoch)
 }
 
@@ -592,6 +608,15 @@ func appendChatDebugRenderEncoderLines(builder *chatDebugDocumentBuilder, sessio
 	if path, count, replayed, failures := bridge.eventLogStats(); path != "" {
 		builder.meta("Event Log:", fmt.Sprintf("%s (recorded=%d replayed=%d failures=%d)",
 			chatDebugValueOrNone(path), count, replayed, failures))
+		// L1.1 恢复重放便宜路径（设计见 chat_eventlog_trim.go）：trimmed =
+		// Tier A 跳解析行数，cheap_progress = tool.progress 便宜解码行数，
+		// cheap_started = llm.request.started 便宜解码行数（L1.2），
+		// cheap_fallback = apply 期守卫拒绝后回落全量解码的行数（正常会话
+		// 应为 0）。全为 0（如 kill-switch 关闭）时不显示。
+		if trimmed, cheapProgress, cheapStarted, cheapFallback := bridge.eventLogTrimStats(); trimmed > 0 || cheapProgress > 0 || cheapStarted > 0 || cheapFallback > 0 {
+			builder.meta("Event Log Trim:", fmt.Sprintf("trimmed=%d cheap_progress=%d cheap_started=%d cheap_fallback=%d",
+				trimmed, cheapProgress, cheapStarted, cheapFallback))
+		}
 	}
 	model := bridge.renderModelSnapshot()
 	if model == nil || len(model.Items) == 0 {

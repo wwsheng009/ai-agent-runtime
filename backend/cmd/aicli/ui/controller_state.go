@@ -29,6 +29,23 @@ func (s UIControllerState) Clone() UIControllerState {
 	return s
 }
 
+// CloneForDiagnostics returns a detached snapshot that carries every scalar,
+// the transcript/active/bottom state, and the history-effect queue scalars, but
+// no commit ledger at all — no entries, and therefore no render payload.
+//
+// It exists because /debug/chat/status runs while holding the same actor mutex
+// the renderer needs, and the commit ledger grows with the session — one entry
+// per display fragment, measured at 100,000 entries for a 4,000-cell page.
+// Detaching it cost ~96 MB and ~180 ms per poll. The diagnostic consumers
+// (queue counters, plan inputs, frame parity) read no entry, so the snapshot
+// drops the ledger entirely and the counters come from
+// UIController.HistoryEffectDiagnostics. Callers that need entries must keep
+// using Clone.
+func (s UIControllerState) CloneForDiagnostics() UIControllerState {
+	s.AppState = s.AppState.cloneForDiagnostics()
+	return s
+}
+
 // GeometryState records only explicit known geometry. A zero dimension means
 // the Phase 1 adapter requested a refresh/probe rather than reporting a new
 // terminal size, so it does not overwrite the last known dimension.
@@ -263,6 +280,13 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			if entry, ok := state.HistoryEffects.ledger.Entry(a.Token); ok {
 				advanceActiveCellLedgerOnAck(&state, []HistoryCommit{entry.Commit})
 			}
+			// A budget-truncated plan mints only its oldest prefix, and an idle
+			// resumed session produces no later transcript transition to carry
+			// it forward. The prefix has now been delivered, so continue the
+			// plan here; without this the remaining cells are never planned
+			// (pending=0 / acked=N / executor idle) and stay missing from native
+			// scrollback forever.
+			continueTruncatedHistoryPlan(&state)
 		}
 		traceHistoryReduction(state, "ack token=%d tokenGen=%d frame=%d err=%v", a.Token, a.LayoutGeneration, a.Frame, ackErr)
 	case HistoryCommitsAcknowledged:
@@ -278,6 +302,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			state.HistoryEffects.ProjectionUnknown = true
 		} else if len(a.Commits) > 0 {
 			advanceActiveCellLedgerOnAck(&state, a.Commits)
+			// Same continuation rule as the single ack above: the batch may have
+			// been the truncated plan's delivered prefix.
+			continueTruncatedHistoryPlan(&state)
 		}
 		firstToken, lastToken := uint64(0), uint64(0)
 		if len(a.Commits) > 0 {
@@ -314,7 +341,18 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// by a settle that raced it.
 		if a.LayoutGeneration == state.LayoutGeneration && !state.HistoryEffects.ScrollbackReplayArmed {
 			state.HistoryEffects.settleUnresolvedWithoutReplay()
+			// Settling is the transition that clears the unresolved-delivery
+			// gate, and it is not an ack. A continuation attempt that ran while
+			// that gate was set returned early; without retrying it here the
+			// truncated plan is stranded with pending=0 and an idle executor.
+			continueTruncatedHistoryPlan(&state)
 		}
+	case ContinueHistoryPlanAction:
+		// The executor found no pending token and no recovery obligation while
+		// the plan still owes cells. Carrying the plan forward from here is what
+		// makes an incomplete plan self-heal: the ack handlers remain the fast
+		// path, but they are no longer the only trigger.
+		continueTruncatedHistoryPlan(&state)
 	case HistoryProjectionRecovered:
 		if !state.Lease.Active && !state.HistoryEffects.Frozen && a.LayoutGeneration == state.LayoutGeneration {
 			state.HistoryEffects.markProjectionKnown()
@@ -329,6 +367,12 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 				resetActiveHistoryProgressForTerminalEpoch(&state)
 				syncHistoryEffectsForTranscript(&state)
 			}
+			// Clearing ProjectionUnknown is the other non-ack transition that
+			// unblocks the continuation gate. When the reconcile above did not
+			// run (the epoch was already consumed) nothing else replans, and the
+			// plan would stay truncated forever. The call is cheap when the
+			// reconcile just queued tokens (the pending gate returns early).
+			continueTruncatedHistoryPlan(&state)
 		}
 	case HistoryProjectionInvalidated:
 		if a.LayoutGeneration == state.LayoutGeneration {

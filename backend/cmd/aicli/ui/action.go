@@ -501,6 +501,28 @@ func (HistoryScrollbackReconciled) isUIAction()         {}
 func (HistoryScrollbackReconciled) Class() ActionClass  { return ClassBarrier }
 func (HistoryScrollbackReconciled) CoalesceKey() string { return "" }
 
+// ContinueHistoryPlanAction asks the reducer to carry a budget-truncated
+// transcript plan forward.
+//
+// A truncated plan mints only the oldest prefix the layout walk could reach
+// inside historyCommitPlanningBudget, and the continuation that carries it to
+// completion used to run from the ack handlers alone. That single trigger is
+// what strands a resumed session: every gate that can block the one attempt
+// (projection unknown, an unresolved delivery, a settle that quarantined a
+// delivered batch) clears through a transition that is *not* an ack, so no
+// later ack ever retries the continuation. The executor then finds an empty
+// queue, no recovery obligation, and a transcript it only partly delivered
+// (live: 6622 cells / 291842 rows, next=1288, acked=322, pending=0, projection
+// known, executor idle) — and nothing in the system schedules the missing
+// tail. The executor posts this action in exactly that state, so an incomplete
+// plan self-heals instead of depending on one trigger that may already have
+// been consumed.
+type ContinueHistoryPlanAction struct{}
+
+func (ContinueHistoryPlanAction) isUIAction()         {}
+func (ContinueHistoryPlanAction) Class() ActionClass  { return ClassBarrier }
+func (ContinueHistoryPlanAction) CoalesceKey() string { return "" }
+
 // TerminalEffectAck is the typed success result for a terminal transaction.
 // It is an alias-shaped action payload rather than an implicit nil error, so
 // Phase 4 reducers can validate token/generation before advancing handoff.

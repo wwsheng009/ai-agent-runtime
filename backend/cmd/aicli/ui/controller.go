@@ -949,6 +949,100 @@ func (c *UIController) State() UIControllerState {
 	return c.state.Clone()
 }
 
+// DiagnosticState returns the detached snapshot the debug endpoints consume:
+// every scalar plus transcript/active/bottom, but no commit ledger at all.
+// /debug/chat/status polls while holding the same actor mutex the renderer
+// needs, and the ledger holds one entry per display fragment (100,000 entries
+// for a 4,000-cell page), so a full State() cost ~96 MB and ~180 ms per poll on
+// a resumed session. The diagnostic consumers (queue counters, plan inputs,
+// frame parity) read no entry, so the ledger is left behind and the counters
+// come from HistoryEffectDiagnostics.
+func (c *UIController) DiagnosticState() UIControllerState {
+	if c == nil {
+		return UIControllerState{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.CloneForDiagnostics()
+}
+
+// HistoryEffectDiagnostics projects the history-effect queue under the actor
+// mutex without allocating or detaching per-entry data: queue scalars plus
+// delivery counters. It is the diagnostic counterpart of PendingHistoryCommit —
+// both exist so that debug reads stop cloning a ledger that grows with the
+// session.
+func (c *UIController) HistoryEffectDiagnostics() HistoryEffectDiagnostics {
+	if c == nil {
+		return HistoryEffectDiagnostics{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state.HistoryEffects.Diagnostics()
+}
+
+// historyCommitGate is the payload-free projection of the controller state that
+// the history-commit executor's claim/ack predicates read.
+type historyCommitGate struct {
+	Frozen            bool
+	ProjectionUnknown bool
+	LayoutGeneration  uint64
+	EntryFound        bool
+	EntryState        HistoryCommitState
+	EntryGeneration   uint64
+}
+
+// historyCommitGateOf reads one token's gate projection under the actor mutex
+// without detaching any payload. runOne previously read it through State(),
+// which cloned the whole ledger three times per commit — and since the drain
+// calls runOne once per commit, that made the drain quadratic in ledger size.
+func (c *UIController) historyCommitGateOf(token uint64) historyCommitGate {
+	if c == nil {
+		return historyCommitGate{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	gate := historyCommitGate{
+		Frozen:            c.state.HistoryEffects.Frozen,
+		ProjectionUnknown: c.state.HistoryEffects.ProjectionUnknown,
+		LayoutGeneration:  c.state.LayoutGeneration,
+	}
+	if entry, ok := c.state.HistoryEffects.ledger.entry(token); ok {
+		gate.EntryFound = true
+		gate.EntryState = entry.State
+		gate.EntryGeneration = entry.Commit.LayoutGeneration
+	}
+	return gate
+}
+
+// PendingHistoryCommit returns the oldest eligible pending commit with its
+// payload detached, or false when the queue has no eligible head. It replaces
+// State().HistoryEffects.Pending()[0], which detached every pending commit's
+// render lines just to hand back one, and it applies the same gates: frozen,
+// projection-unknown, and unresolved terminal delivery all yield no head.
+func (c *UIController) PendingHistoryCommit() (HistoryCommit, bool) {
+	if c == nil {
+		return HistoryCommit{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	effects := c.state.HistoryEffects
+	if effects.Frozen || effects.ProjectionUnknown || effects.hasUnresolvedTerminalDelivery() {
+		return HistoryCommit{}, false
+	}
+	if effects.ledger == nil || !effects.ledger.HasPending() {
+		return HistoryCommit{}, false
+	}
+	// orderedTokens is ascending, so the first Pending entry is the oldest
+	// eligible claim — the same head Pending() would return.
+	for _, token := range effects.ledger.orderedTokens() {
+		entry, ok := effects.ledger.byToken[token]
+		if ok && entry.State == HistoryCommitPending {
+			return entry.Commit.Clone(), true
+		}
+	}
+	return HistoryCommit{}, false
+}
+
 // AppState returns the detached semantic/layout snapshot without controller
 // delivery diagnostics. Layout and future presenters must consume this value,
 // never a live surface mutex state or terminal front buffer.
