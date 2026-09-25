@@ -16,6 +16,8 @@ type chatComposerController struct {
 	prompt     string
 	initial    ui.LineEditorSnapshot
 	completion *chatSlashCompletionController
+	// mentionRoot 是 @ 路径补全的扫描根；为空时取进程工作目录（测试注入用）。
+	mentionRoot string
 }
 
 type chatBusyComposerCapture struct {
@@ -198,6 +200,17 @@ func (c *chatComposerController) onComplete(snapshot ui.LineEditorSnapshot) (ui.
 			return ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor}, true
 		}
 	}
+	// @ 路径引用：Tab 在有 @token 时优先做路径补全（无弹层；结果写状态行），
+	// 并消费按键，避免误触 plan mode 切换。
+	if mention := applyChatMentionCompletion(c.mentionWorkspaceRoot(), snapshot.Text, snapshot.Cursor, chatMentionCandidateLimit); mention.Handled {
+		if status := strings.TrimSpace(mention.Status); status != "" {
+			c.setStatusLine(status)
+		}
+		if mention.Text != snapshot.Text || mention.Cursor != snapshot.Cursor {
+			return ui.LineEditorReplacement{Text: mention.Text, Cursor: mention.Cursor}, true
+		}
+		return ui.LineEditorReplacement{}, true
+	}
 	// Preserve Tab completion semantics for slash-command drafts. Everywhere
 	// else in the main chat composer, Tab is the plan-mode toggle shortcut.
 	if isSlashCommandInput(snapshot.Text) {
@@ -212,6 +225,23 @@ func (c *chatComposerController) onComplete(snapshot ui.LineEditorSnapshot) (ui.
 	// Re-apply the unchanged draft so the line editor redraws after the fixed
 	// status bar changes without inserting a literal tab character.
 	return ui.LineEditorReplacement{Text: snapshot.Text, Cursor: snapshot.Cursor}, true
+}
+
+// mentionWorkspaceRoot 返回 @ 补全的扫描根：优先注入值，否则用进程工作目录。
+func (c *chatComposerController) mentionWorkspaceRoot() string {
+	if c != nil {
+		if root := strings.TrimSpace(c.mentionRoot); root != "" {
+			return root
+		}
+	}
+	return chatMentionWorkspaceRoot()
+}
+
+func (c *chatComposerController) setStatusLine(status string) {
+	if c == nil || c.session == nil || c.session.Surface == nil {
+		return
+	}
+	c.session.Surface.SetPromptEditorStatusLine(status)
 }
 
 func (c *chatComposerController) onNavigate(_ ui.LineEditorSnapshot, delta int) bool {

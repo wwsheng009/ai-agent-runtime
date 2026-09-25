@@ -305,7 +305,7 @@
 
 ### 8.3 未完成（保持原优先级）
 
-- P1：4.5 `@` mention（补全 + 语义）与 4.4 第二步（剪贴板图片 + 内联令牌）。
+- P1：4.4 第二步（剪贴板图片 + 内联令牌）与 4.5 的**弹层候选列表 + 内容注入/AGENTS.md 片段**（本轮只交付了无弹层的路径补全，见 §8.4）。
 - P2：4.8 TODOS 带。
 
 ### 8.4 批次 2 已实施（第二轮）
@@ -317,9 +317,11 @@
 | 4.6 审批前通俗解释 | 新增启发式解释器（动作类别 + 目标 + 影响范围），覆盖删除/丢弃改动/推送/安装依赖/下载执行/改权限/写设备/Git 索引/破坏性 DB/容器删除 + 文件写删移/网络/MCP/子 agent/后台任务/只读；识别不出**不输出**，参数不可解析时只留类别并指向 `[3]` | `commands/chat_approval_explain.go`，接线于 `chat_runtime_events.go:approvalPriorityPromptLines`（两条审批入口共用） | `chat_approval_explain_test.go`：分类表、未知工具静默、坏 JSON、长目标截断、提示行顺序 |
 | 4.10 交互文档页 | 新增 `docs/aicli/interactive-mode.md`：按键分层与覆盖规则、终端能力矩阵、审批提示结构、粘贴与附件语义、输入所有权、排障表；已从 `install.md` 链接 | `docs/aicli/interactive-mode.md` | 文档，无编译面 |
 | 4.4 第一步（部分） | 剪贴板图片的**诚实提示**由能力矩阵承担（「暂未实现剪贴板图片；可先用 `/attach <path>`」）；粘贴时刻的即时提示仍需编辑器提示行机制，未做 | `ui/termcaps`、`docs/aicli/interactive-mode.md` | 同上 |
+| 4.5 `@` 路径引用补全（第一版） | 新增 `@` token 解析（行首/空白/左括号后，`a@b` 不算）、工作区**有界扫描**（跳过 `.git`/`node_modules` 等，单次 6000 项、40 候选）与 Tab 补全：唯一命中补全整路径（目录补 `/`）、多命中补到公共前缀并在状态行列出「匹配 N 项 + 示例」、无命中也消费按键（不误触 plan mode 切换）。语义保持**路径引用**（提交原样发送，不注入内容/不注入 AGENTS.md 片段） | `commands/chat_mention_completion.go`、`chat_composer.go:onComplete`（`mentionRoot` 可注入） | `chat_mention_completion_test.go`：token 规则表、扫描/跳过/上限、唯一/多命中/无命中、composer 接线 |
+| 4.5 未做（明确遗留） | ① 复用 slash 补全的**弹层**做候选列表（当前只用状态行文本）；② 提交时的内容展开与 AGENTS.md 片段注入；③ 以会话工作区（而非进程 CWD）为扫描根 | — | — |
 
 ### 8.5 结论修正与遗留清单
 
 - **4.9（`esc esc` 快速回退）判定为无需实现**：编辑器在空输入下按单个 `esc` 已经返回 `ErrInteractiveInputBacktrackRequested`，由 `chat.go:1624-1628` 打开 user-turn 回退选择器，语义已覆盖对标行为；再加双击只会引入「第一次 Esc 要不要清空输入」的歧义。
-- **4.5（`@` mention）未实施**：需要复用/扩展 `chatSlashCompletionController` 的弹层状态机（`ApplyCompletion` / `ApplySubmission` / `Navigate` / `Cancel` + 固定表面 popup 投影），并新增「路径引用 vs 内容注入」的语义决策与注入上限；属于独立批次，不宜以半成品合入。
+- **4.5（`@` mention）已交付第一版（无弹层路径补全）**：见 §8.4。剩余部分是弹层候选列表与「内容注入 / AGENTS.md 片段注入」——那部分需要复用/扩展 `chatSlashCompletionController` 的弹层状态机（`ApplyCompletion` / `ApplySubmission` / `Navigate` / `Cancel` + 固定表面 popup 投影）并定义注入上限，另行开工。
 - keymap 纳管范围说明：当前只注册 `app.permission.cycle` 与 `app.transcript.pager`；解码器仅对 `shift+tab`、`alt+m`、`ctrl+t`、`ctrl+o`、`tab`、`enter`、`backspace` 产出 chord，行编辑器内部键（Emacs 风格移动/删除）保持固定，并由 `/hotkeys` 的「固定快捷键」表如实列出。
