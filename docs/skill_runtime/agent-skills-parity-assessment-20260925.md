@@ -225,7 +225,7 @@
 | P2 占位符与参数 | 已完成 | `internal/skill/substitute.go` + TUI `/skill` + API `skill_args` + 灰度开关，含单测 |
 | P1 标准字段 | 已完成（生效面） | frontmatter 全字段解析 + `user-invocable` / `disable-model-invocation` / `when_to_use` 生效点 + `~/.agents/skills` 遮蔽与规范警告；`allowed-tools` 与 `model`/`effort` 仅解析透出，尚未接入工具策略与执行建议 |
 | P3 发现对齐与遮蔽诊断 | 已完成（核心） | `~/.agents/skills` 用户根、`--skill`/`--no-skills`、同名遮蔽与规范 warning 进入 `codex_list` 响应 |
-| P5 per-skill 启停 | 已完成（配置/热重载/API/TUI 命令） | `skills_runtime.disabled_skills` + `~/.agents/skills`；三处 loader 过滤器权威点同源；`config/document` 写入热生效；TUI `/skills disable\|enable <name>` 写配置 + 运行面热刷新；剩余为 picker 内 Enter 启停与 Web 详情页开关按钮（同一链路的 UI 糖） |
+| P5 per-skill 启停 | 已完成（配置/热重载/API/TUI 命令 + picker） | `skills_runtime.disabled_skills` + `~/.agents/skills`；三处 loader 过滤器权威点同源；`config/document` 写入热生效；TUI `/skills disable\|enable <name>` 与选择器内 `x` 键（双向）均写配置 + 运行面热刷新；剩余仅 Web 详情页开关按钮（同一链路的 UI 糖） |
 | P4 CLI add/list/remove | 已完成 | `aicli skill list [--debug]`、`skill remove <name> [-g]`、`skill add <owner/repo>[@ref]`（tarball + 校验 + 来源记录 + 路径穿越防护） |
 | P6 正文 shell 注入 | 不做 | 见 §5.6 |
 
@@ -257,7 +257,7 @@
   - `go test ./internal/skill ./internal/agentconfig ./internal/profileinput ./internal/bootstrap ./internal/runtimeserver -count=1`：通过；
   - `go test ./internal/api/runtimeapi -run 'TestBuildSkillExposureMessages|TestCodexList|TestCatalog|TestSkill' -count=1`：通过；
   - `go test ./cmd/aicli/commands -run 'TestRunSkill|TestParseSkillAddSource|TestExtractSkillTarGz|TestLocateSkillDirInArchive|TestResolveConfiguredSkillDirs|TestSkill|TestChatSkill|TestBuildFunctionCatalog' -count=1`：通过。
-- 仍未做：TUI `/skills` picker 内的 Enter 启停与 Web 详情页开关（两者都是"写 config document + 热重载"这一既有链路的 UI 入口；文本命令 `/skills disable|enable` 已在第三轮补齐）；P1 的 `allowed-tools` 策略求交与 `model`/`effort` 执行建议。
+- 仍未做：Web 详情页开关（"写 config document + 热重载"链路的 UI 入口；TUI 的文本命令与选择器 `x` 键已在第三轮补齐）；P1 的 `allowed-tools` 策略求交与 `model`/`effort` 执行建议。
 
 ### 第三轮实施记录（2026-09-25，P5 交互面）
 
@@ -283,6 +283,19 @@
 - 迁移债基线：legacy stdout 回退路径新增 1 个 `fmt.Println`（结果输出），
   `TestChatInteractiveDirectWriterInventory` 的 `chat_skills_command.go/handleSkillsMenuCommand`
   计数由 10 调整为 11，并在基线条目上注明原因；统一渲染通道那条路径不写 stdout。
+- 选择器内启停（`x` 键，双向）：
+  - 统一全屏选择器：`selectChatSkillPickerList` 用 `FullScreenListOptions.OnDelete` 把
+    `x/X/Delete` 变成启停请求；列表关闭后落盘 + 热刷新，再带新状态重开（对齐该 hook
+    "关闭 → 持久化 → 重开"的既有契约）。Enter 仍是"选中"，停用行选中时给提示而不是
+    产生 draft，避免把启停绑到 Enter 造成误操作。
+  - 行式回退选择器：`x <编号|名称>` / `toggle <编号|名称>` 同义，结果写回列表 header
+    的 warning 行（不新增 stdout 直写，迁移债计数不变）。
+  - 已停用行由 `buildSkillPickerCatalogEntries` 从生效配置补齐（按名去重、可重复调用，
+    幂等），并用 `aicliFunctionDescriptorReport.Disabled` 标记；**刻意不设
+    `ui.FullScreenListItem.Disabled`**——该字段会让列表在导航时跳过整行，x 键永远够不到，
+    等于"停用了却启不回来"，故改用 `Leading="已停用"` + `Detail="按 x 启用"` 的可见标记。
+  - 测试：`TestParseSkillCatalogToggleInput`、`TestBuildSkillPickerCatalogEntriesIncludesDisabledRows`
+    （去重、幂等、停用行无可调用函数、无停用名单时行为不变）。
 - 验证命令与结果：
   - `go build ./...`：通过；
   - `go test ./internal/agentconfig ./internal/skill ./internal/profileinput ./internal/bootstrap ./internal/runtimeserver -count=1`：通过；

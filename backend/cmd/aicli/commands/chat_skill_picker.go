@@ -41,77 +41,68 @@ func openChatSkillPicker(session *ChatSession, _ SkillPickerRequest) {
 		_ = renderChatCommandResult(session, commandTextResult("错误: Function Catalog: 未初始化"), false)
 		return
 	}
-	report := buildFunctionCatalogReport(catalog)
-	if report == nil {
-		_ = renderChatCommandResult(session, commandTextResult("错误: Function Catalog: 未初始化"), false)
-		return
-	}
-	skills := filterSkillCatalogEntries(report.Skills, "")
-	skills = filterUserInvocableSkillEntries(catalog, skills)
-	if len(skills) == 0 {
-		_ = renderChatCommandResult(session, commandTextResult("错误: 未找到匹配 skill"), false)
-		return
-	}
 
-	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
-		Title: "选择 Skill",
-	})
-	if err != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开 skill 选择器失败: %w", err)), false)
-		return
-	}
-	if !session.Interaction.postUIAction(ui.OpenSkillPicker{LeaseID: lease.ID()}) {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("skill 选择器状态未提交")), false)
-		return
-	}
-	// Lifecycle barrier only: the first list frame sees the matching actor
-	// state. Key navigation stays local to the fullscreen list.
-	if !session.Interaction.waitUIActorIdleBounded("open skill picker") {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("skill 选择器渲染未就绪")), false)
-		return
-	}
+	for {
+		report := buildFunctionCatalogReport(catalog)
+		if report == nil {
+			_ = renderChatCommandResult(session, commandTextResult("错误: Function Catalog: 未初始化"), false)
+			return
+		}
+		skills := filterSkillCatalogEntries(report.Skills, "")
+		skills = filterUserInvocableSkillEntries(catalog, skills)
+		skills = buildSkillPickerCatalogEntries(session, skills)
+		if len(skills) == 0 {
+			_ = renderChatCommandResult(session, commandTextResult("错误: 未找到匹配 skill"), false)
+			return
+		}
 
-	picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
-		Title:        "选择 Skill",
-		Subtitle:     "Enter 确认 · Esc 取消",
-		EmptyMessage: "没有匹配的 skill",
-		ConfirmLabel: "使用选中 skill",
-		Items:        buildSkillPickerFullScreenItems(skills),
-	}, lease)
+		toggleIndex := -1
+		picked, pickErr := selectChatSkillPickerList(session, skills, func(index int) error {
+			toggleIndex = index
+			return nil
+		})
+		if pickErr != nil {
+			_ = renderChatCommandResult(session, commandErrorResult(pickErr), false)
+			return
+		}
 
-	_ = session.Interaction.postUIAction(ui.CloseSkillPicker{LeaseID: lease.ID()})
-	releaseErr := lease.Release(context.Background())
-	// LeaseReleased is the primary recovery barrier. Do not touch the composer
-	// until the actor has observed it.
-	if !session.Interaction.waitUIActorIdleBounded("close skill picker") {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("skill 选择器关闭未就绪")), false)
-		return
-	}
+		// x/X/Delete：停用/启用高亮行，落盘 + 热刷新后带着新状态重开列表。
+		if picked.DeleteRequested {
+			if toggleIndex < 0 || toggleIndex >= len(skills) {
+				continue
+			}
+			entry := skills[toggleIndex]
+			message, toggleErr := runSkillToggleCommand(session, entry.Disabled, skillCatalogEntryLabel(entry))
+			if toggleErr != nil {
+				_ = renderChatCommandResult(session, commandErrorResult(toggleErr), false)
+				return
+			}
+			_ = renderChatCommandResult(session, commandTextResult(message), false)
+			continue
+		}
 
-	if releaseErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭 skill 选择器失败: %w", releaseErr)), false)
-		return
-	}
-	if pickErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("skill 选择器失败: %w", pickErr)), false)
-		return
-	}
-	if picked.Cancelled || picked.Index < 0 || picked.Index >= len(skills) {
-		_ = renderChatCommandResult(session, commandTextResult("已取消选择 skill"), false)
-		return
-	}
+		if picked.Cancelled || picked.Index < 0 || picked.Index >= len(skills) {
+			_ = renderChatCommandResult(session, commandTextResult("已取消选择 skill"), false)
+			return
+		}
 
-	selected := skills[picked.Index]
-	draft := "/skill " + strings.TrimSpace(selected.FunctionName) + " "
-	result := commandTextResult(fmt.Sprintf("已选择 skill: %s\n请在输入区输入 prompt 后按 Enter 执行。", skillCatalogEntryLabel(selected)))
-	result.RestoreComposerDraft = draft
-	_ = renderChatCommandResult(session, result, false)
-	// renderChatCommandResult only commits the document; the composer draft is a
-	// typed post-commit effect consumed here (mirroring the /retry dispatch).
-	if err := restoreChatRetryDraft(session, draft); err != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(err), false)
+		selected := skills[picked.Index]
+		if selected.Disabled {
+			// 停用行不可选中：提示后重开列表（Enter 不是启停键，避免误操作）。
+			_ = renderChatCommandResult(session, commandTextResult(fmt.Sprintf("skill %s 已停用；按 x 键启用后再选择", skillCatalogEntryLabel(selected))), false)
+			continue
+		}
+
+		draft := "/skill " + strings.TrimSpace(selected.FunctionName) + " "
+		result := commandTextResult(fmt.Sprintf("已选择 skill: %s\n请在输入区输入 prompt 后按 Enter 执行。", skillCatalogEntryLabel(selected)))
+		result.RestoreComposerDraft = draft
+		_ = renderChatCommandResult(session, result, false)
+		// renderChatCommandResult only commits the document; the composer draft is a
+		// typed post-commit effect consumed here (mirroring the /retry dispatch).
+		if err := restoreChatRetryDraft(session, draft); err != nil {
+			_ = renderChatCommandResult(session, commandErrorResult(err), false)
+		}
+		return
 	}
 }
 
@@ -119,13 +110,66 @@ func openChatSkillPicker(session *ChatSession, _ SkillPickerRequest) {
 func buildSkillPickerFullScreenItems(skills []aicliFunctionDescriptorReport) []ui.FullScreenListItem {
 	items := make([]ui.FullScreenListItem, 0, len(skills))
 	for _, skill := range skills {
-		items = append(items, ui.FullScreenListItem{
+		item := ui.FullScreenListItem{
 			Title:      skillCatalogEntryLabel(skill),
 			Detail:     skillCatalogEntryDetail(skill),
 			SearchText: skillCatalogEntrySearchText(skill),
-		})
+		}
+		if skill.Disabled {
+			// 刻意不设 item.Disabled：列表会跳过停用行，x 键就再也够不到它，
+			// 等于"停用了却启不回来"。改用可见标记 + Enter 时的提示。
+			item.Leading = "已停用"
+			item.Detail = "按 x 启用"
+		}
+		items = append(items, item)
 	}
 	return items
+}
+
+// selectChatSkillPickerList 执行一次"接管备用屏 → 全屏列表 → 释放备用屏"的
+// 生命周期：返回结果前必须等 actor 观察到 LeaseReleased，调用方才能安全地
+// 碰 composer（或再次开列表）。onToggle 非 nil 时启用 x/X/Delete 键。
+func selectChatSkillPickerList(session *ChatSession, skills []aicliFunctionDescriptorReport, onToggle func(index int) error) (ui.FullScreenListResult, error) {
+	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
+		Title: "选择 Skill",
+	})
+	if err != nil {
+		return ui.FullScreenListResult{}, fmt.Errorf("打开 skill 选择器失败: %w", err)
+	}
+	if !session.Interaction.postUIAction(ui.OpenSkillPicker{LeaseID: lease.ID()}) {
+		_ = lease.Release(context.Background())
+		return ui.FullScreenListResult{}, fmt.Errorf("skill 选择器状态未提交")
+	}
+	// Lifecycle barrier only: the first list frame sees the matching actor
+	// state. Key navigation stays local to the fullscreen list.
+	if !session.Interaction.waitUIActorIdleBounded("open skill picker") {
+		_ = lease.Release(context.Background())
+		return ui.FullScreenListResult{}, fmt.Errorf("skill 选择器渲染未就绪")
+	}
+
+	picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
+		Title:        "选择 Skill",
+		Subtitle:     "Enter 选择 · x 启用/停用 · Esc 取消",
+		EmptyMessage: "没有匹配的 skill",
+		ConfirmLabel: "使用选中 skill",
+		Items:        buildSkillPickerFullScreenItems(skills),
+		OnDelete:     onToggle,
+	}, lease)
+
+	_ = session.Interaction.postUIAction(ui.CloseSkillPicker{LeaseID: lease.ID()})
+	releaseErr := lease.Release(context.Background())
+	// LeaseReleased is the primary recovery barrier. Do not touch the composer
+	// until the actor has observed it.
+	if !session.Interaction.waitUIActorIdleBounded("close skill picker") {
+		return ui.FullScreenListResult{}, fmt.Errorf("skill 选择器关闭未就绪")
+	}
+	if releaseErr != nil {
+		return ui.FullScreenListResult{}, fmt.Errorf("关闭 skill 选择器失败: %w", releaseErr)
+	}
+	if pickErr != nil {
+		return ui.FullScreenListResult{}, fmt.Errorf("skill 选择器失败: %w", pickErr)
+	}
+	return picked, nil
 }
 
 // executeStructuredSkillCommand is the unified interactive entry point for

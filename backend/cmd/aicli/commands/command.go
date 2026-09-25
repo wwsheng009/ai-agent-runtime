@@ -374,6 +374,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/trust") {
 		return handleTrustCommand(session, command)
 	}
+	if commandMatches(cmdLower, "/plans") {
+		return handlePlansCommand(session, command)
+	}
 	if commandMatches(cmdLower, "/plan") {
 		return handlePlanCommand(session, command)
 	}
@@ -914,6 +917,10 @@ func stripJSONOption(argument string) (string, bool) {
 type aicliFunctionDescriptorReport struct {
 	FunctionName string                 `json:"function_name"`
 	Descriptor   *capability.Descriptor `json:"descriptor,omitempty"`
+	// Disabled 标记"已停用"的 skill 行（skills_runtime.disabled_skills）。
+	// 这类行只出现在选择器里，没有对应函数：它让 x 键既能停用也能启用，
+	// 避免停用后在同一个入口无法恢复。
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 type aicliFunctionCatalogReport struct {

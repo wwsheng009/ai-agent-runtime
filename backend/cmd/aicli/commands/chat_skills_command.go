@@ -178,6 +178,8 @@ func promptSkillCatalogSelection(session *ChatSession, skills []aicliFunctionDes
 
 	warning := ""
 	for {
+		// 停用的 skill 不在函数面里，补成"已停用"行后同一个入口既能停用也能启用。
+		skills = buildSkillPickerCatalogEntries(session, skills)
 		lines := buildSkillCatalogLines(skills, query, warning)
 		if usePopup {
 			showRuntimeSelectionPopup(session, lines, skillCatalogSelectionPrompt)
@@ -201,12 +203,37 @@ func promptSkillCatalogSelection(session *ChatSession, skills []aicliFunctionDes
 		warning = ""
 		switch strings.ToLower(choice) {
 		case "", "1":
+			if skills[0].Disabled {
+				warning = "  该 skill 已停用，输入 x <编号> 可启用"
+				continue
+			}
 			return &skills[0], nil
 		case "q", "quit", "cancel", "exit":
 			return nil, nil
 		}
 
+		// x <编号|名称>：与统一全屏选择器的 x 键同义（写配置 + 热刷新）。
+		if target, isToggle := parseSkillCatalogToggleInput(choice); isToggle {
+			index, found := findSkillCatalogEntryIndex(skills, target)
+			if !found {
+				warning = "  未找到该 skill"
+				continue
+			}
+			entry := skills[index]
+			message, toggleErr := runSkillToggleCommand(session, entry.Disabled, skillCatalogEntryLabel(entry))
+			if toggleErr != nil {
+				warning = "  启停失败: " + toggleErr.Error()
+				continue
+			}
+			warning = "  " + message
+			continue
+		}
+
 		if index, ok := findSkillCatalogEntryIndex(skills, choice); ok {
+			if skills[index].Disabled {
+				warning = "  该 skill 已停用，输入 x <编号> 可启用"
+				continue
+			}
 			return &skills[index], nil
 		}
 

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 )
 
 func TestParseSkillToggleQuery(t *testing.T) {
@@ -165,4 +166,62 @@ func TestExecuteStructuredSkillsMenuCommand_RoutesToggle(t *testing.T) {
 	raw, err := os.ReadFile(configPath)
 	require.NoError(t, err)
 	assert.True(t, strings.Contains(string(raw), "alpha_skill"))
+}
+
+func TestParseSkillCatalogToggleInput(t *testing.T) {
+	cases := []struct {
+		input  string
+		target string
+		ok     bool
+	}{
+		{"x 1", "1", true},
+		{"X 2", "2", true},
+		{"toggle beta_skill", "beta_skill", true},
+		{"TOGGLE 1", "1", true},
+		{"x", "", false},
+		{"", "", false},
+		{"1", "", false},
+		{"beta_skill", "", false},
+		{"disable beta_skill", "", false},
+	}
+	for _, item := range cases {
+		target, ok := parseSkillCatalogToggleInput(item.input)
+		if ok != item.ok || target != item.target {
+			t.Fatalf("parseSkillCatalogToggleInput(%q) = (%q, %v), want (%q, %v)", item.input, target, ok, item.target, item.ok)
+		}
+	}
+}
+
+// TestBuildSkillPickerCatalogEntriesIncludesDisabledRows 回归"停用后必须在同一
+// 入口启得回来"：选择器要带上已停用行，且与可用行去重、可重复调用。
+func TestBuildSkillPickerCatalogEntriesIncludesDisabledRows(t *testing.T) {
+	cfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{
+			Enabled:        true,
+			DisabledSkills: []string{"Gamma_Skill", "beta_skill"},
+		},
+	}
+	session := &ChatSession{Config: cfg}
+	enabled := []aicliFunctionDescriptorReport{
+		{FunctionName: "skill__beta_skill", Descriptor: &capability.Descriptor{Name: "beta_skill"}},
+	}
+
+	entries := buildSkillPickerCatalogEntries(session, enabled)
+	require.Len(t, entries, 2, "beta_skill 已在可用列表里，不应重复追加")
+	assert.False(t, entries[0].Disabled)
+	assert.Equal(t, "beta_skill", skillCatalogEntryLabel(entries[0]))
+	assert.True(t, entries[1].Disabled, "停用名单里的 skill 必须以已停用行出现")
+	assert.Equal(t, "Gamma_Skill", skillCatalogEntryLabel(entries[1]))
+	assert.Empty(t, strings.TrimSpace(entries[1].FunctionName), "停用行没有可调用函数，不能被当作 draft 目标")
+
+	// 幂等：选择器每轮刷新都会重新合并，不能越合并越多。
+	again := buildSkillPickerCatalogEntries(session, entries)
+	require.Len(t, again, len(entries))
+
+	// 没有停用名单时原样返回（不改变未配置行为）。
+	plain := buildSkillPickerCatalogEntries(&ChatSession{Config: &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{Enabled: true},
+	}}, enabled)
+	require.Len(t, plain, 1)
+	assert.False(t, plain[0].Disabled)
 }

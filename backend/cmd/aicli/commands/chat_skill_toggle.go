@@ -2,9 +2,11 @@ package commands
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
 )
 
 // parseSkillToggleQuery 解析 /skills 的启停子命令：
@@ -114,6 +116,77 @@ func runSkillToggleCommand(session *ChatSession, enable bool, name string) (stri
 		message += "（disabled_skills 已清空）"
 	}
 	return message, nil
+}
+
+// parseSkillCatalogToggleInput 解析行式选择器里的启停输入：`x <编号|名称>`、
+// `toggle <编号|名称>`，与统一全屏选择器的 x 键同义。
+func parseSkillCatalogToggleInput(choice string) (target string, ok bool) {
+	fields := strings.Fields(strings.TrimSpace(choice))
+	if len(fields) < 2 {
+		return "", false
+	}
+	switch strings.ToLower(fields[0]) {
+	case "x", "toggle":
+		return strings.TrimSpace(strings.Join(fields[1:], " ")), true
+	default:
+		return "", false
+	}
+}
+
+// skillDisabledNameSet 返回当前会话生效配置里的停用名单：小写名 → 原始名。
+func skillDisabledNameSet(session *ChatSession) map[string]string {
+	names := map[string]string{}
+	if session == nil {
+		return names
+	}
+	cfg := effectiveChatSkillConfig(session.Config, session)
+	if cfg == nil || cfg.SkillsRuntime == nil {
+		return names
+	}
+	for _, name := range cfg.SkillsRuntime.DisabledSkillNames() {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" {
+			continue
+		}
+		names[key] = strings.TrimSpace(name)
+	}
+	return names
+}
+
+// buildSkillPickerCatalogEntries 在可调用 skill 之后补上"已停用"行，让
+// picker 里的 x 键双向可用：停用的 skill 不在函数面里，只放可用 skill 会让
+// 用户无法从同一个入口把它启用回来。
+func buildSkillPickerCatalogEntries(session *ChatSession, skills []aicliFunctionDescriptorReport) []aicliFunctionDescriptorReport {
+	disabled := skillDisabledNameSet(session)
+	if len(disabled) == 0 {
+		return skills
+	}
+	entries := append([]aicliFunctionDescriptorReport(nil), skills...)
+	seen := make(map[string]struct{}, len(entries))
+	for _, item := range entries {
+		key := strings.ToLower(strings.TrimSpace(skillCatalogEntryLabel(item)))
+		if key != "" {
+			seen[key] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(disabled))
+	for key, name := range disabled {
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		entries = append(entries, aicliFunctionDescriptorReport{
+			Descriptor: &capability.Descriptor{
+				Name:        name,
+				Description: "已停用（x 键启用）",
+			},
+			Disabled: true,
+		})
+	}
+	return entries
 }
 
 // chatSessionSkillName 在当前会话函数面内按名字（大小写不敏感）找 skill，
