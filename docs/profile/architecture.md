@@ -51,7 +51,7 @@ profile 是**会话装配期的输入**：它在一次会话（和每个 turn �
 | `transfer.go` | 导入/导出（zip）与不覆盖同名的约束 |
 | `estimate.go` | token 估算的单一实现点（固定 bytes/4 向上取整） |
 | `reference_validation.go` / `rewrite.go` / `name.go` | 引用检查、重命名/移动、名称规则 |
-| `templates.go` + `templates/{coding,docs,minimal,review}/` | 内置模板（随二进制嵌入，`consistency_test.go` 保证与 `examples/profiles/*` 一致） |
+| `templates.go` + `templates/{coding,docs,minimal,review}/` | 内置模板（随二进制嵌入；`consistency_test.go` 保证模板可解析/双消费者可读、`examples/profiles/*` 与 schema 一致） |
 
 ### 2.2 CLI / TUI
 
@@ -281,6 +281,6 @@ profile: coding
 | 信任门控 | `backend/internal/foldertrust/*_test.go`、`prompts_gate` 相关测试 |
 | CLI/TUI 命令面与切换 | `backend/cmd/aicli/commands/`（`TestProfile*`、`TestChatWebInvoke*`、profile 生命周期测试） |
 | REST + 多 workspace | `backend/internal/api/skills/profiles_*_test.go`、`session_profile_inheritance_test.go` |
-| 模板/样例一致性 | `backend/internal/profile/consistency_test.go`（与 `examples/profiles/*` 对齐） |
+| 模板/样例一致性 | `backend/internal/profile/consistency_test.go`（模板渲染后可解析 + 样例符合当前 schema） |
 | 前端 | `frontend/src/**/profiles*.test.tsx`、`composer-profile-options.test.ts`、`use-composer-command-executor.profile*.test.tsx` |
 | 端到端（独立进程） | `artifacts/profile-io-e2e/`（harness + report）、`docs/e2e/debug-guide.md` |

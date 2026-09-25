@@ -185,5 +185,13 @@ token 估算来自单一实现点 `backend/internal/profile/estimate.go`（固�
 
 - 内置模板（随二进制嵌入，`aicli profile create` 使用）：`backend/internal/profile/templates/{coding,docs,minimal,review}/`。
 - 参考样例：`examples/profiles/coding/`（含 `default` 与 `explore` 两个 agent）。
-- 一致性由测试保证：`backend/internal/profile/consistency_test.go` 校验“每个模板渲染后 = 对应样例目录”，
-  样例与模板漂移会直接失败。
+- 一致性由测试保证（`backend/internal/profile/consistency_test.go`）：① 每个内置模板渲染出来的 profile 必须可解析、
+  可校验、能解析出 agent，且同一份 `agent.yaml` 能被两个消费者（profile 解析器 / portable agentdef）读取；
+  ② `examples/profiles/*` 必须与当前 schema 一致（嵌套 `profile.name` / `profile.default_agent`、无 error 级问题、
+  每个 agent 目录可解析）。**注意样例 ≠ 模板产物**：例如 `examples/profiles/coding` 比 `coding` 模板多一个
+  `explore` agent，是“参考样例是模板超集”的关系，不是逐字节相同。
+
+**没有“内置可用 profile”**：二进制不随附任何可直接选用的 profile 目录——模板只是脚手架，样例目录默认不被任何
+来源发现（除非用 `-c`/`profiles.items`/`profiles.root` 指过去）。全新环境（空 `$HOME` + 空工作目录）
+`aicli profile list` 的输出就是「未发现任何 profile。可用 `aicli profile create <name> --template coding` 生成一个。」；
+接口契约里的 `builtin` 层（前端 `RuntimeProfileLayer`、API 的 `writable` 注释）是**后置预留**，当前不产出。

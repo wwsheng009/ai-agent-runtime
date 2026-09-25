@@ -110,7 +110,7 @@ aicli profile import .\incoming\coding --name coding --dry-run
 
 **设置页（Runtime Config → Profiles）**
 
-- 列表：来源（user / project / 内置）、状态（可解析 / 不可用 + 原因）、默认标注、行内「项目绑定」徽标。
+- 列表：来源（`config` 注册项 / `root` / `layer`(user|project) / `default`，后端不产出 `builtin` 层）、状态（可解析 / 不可用 + 原因）、默认标注、行内「项目绑定」徽标。
 - 编辑器：基础字段 / agent / overrides / 范围（层）四张卡片；保存走 PUT（带 `expected_mtime`，冲突 409，不合并）。
 - 生命周期：创建（模板/复制/从会话固化）、导入导出、重命名、移动、删除——与 CLI/TUI 同一后端实现。
 - 信任提示：工作区未信任时展示项目级提示词被扣留的说明与「信任并重载」动作。
