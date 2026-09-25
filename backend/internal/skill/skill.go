@@ -166,6 +166,30 @@ func (s *Skill) IsDocumentModeEnabled(autoEnabled bool) bool {
 		!s.HasCustomHandler() && !s.HasWorkflow()
 }
 
+// UserInvocable 报告技能是否允许用户显式调用（/skills 菜单、命令补全）。
+// 仅 Codex 风格技能读取标准字段，其余形态默认允许。
+func (s *Skill) UserInvocable() bool {
+	if s == nil {
+		return false
+	}
+	if s.Codex != nil {
+		return s.Codex.UserInvocableEnabled()
+	}
+	return true
+}
+
+// ModelInvocable 报告技能是否允许被模型隐式选中（catalog / 函数暴露 / 路由）。
+// disable-model-invocation 只影响隐式面，显式 /skill 调用仍可用。
+func (s *Skill) ModelInvocable() bool {
+	if s == nil {
+		return false
+	}
+	if s.Codex != nil {
+		return s.Codex.ImplicitInvocationAllowed()
+	}
+	return true
+}
+
 // SetSource 设置技能来源信息
 func (s *Skill) SetSource(path, dir, layer string) {
 	if s == nil {

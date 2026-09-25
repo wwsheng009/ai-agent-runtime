@@ -49,6 +49,9 @@ func NewSkillCommand() *cobra.Command {
 			"角色 agent 与 skill 内 agents/openai.yaml 的区别见 docs/aicli/agents.md。",
 	}
 	cmd.AddCommand(newSkillInstallCommand())
+	cmd.AddCommand(newSkillListCommand())
+	cmd.AddCommand(newSkillAddCommand())
+	cmd.AddCommand(newSkillRemoveCommand())
 	return cmd
 }
 

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
@@ -156,12 +157,30 @@ func resolveSkillTurnPin(session *ChatSession, request *SendSkillTurnRequest) (*
 	if skillItem != nil {
 		// SK-7：文档模式技能不走 ProgramGuide，把正文注入上下文，由模型用既有工具完成任务。
 		cfg := skillRuntimeConfig(session.Config)
+		// Agent Skills 占位符替换：单趟替换，插入内容不再解析。灰度开关
+		// skills_runtime.argument_substitution（默认 on）。
+		projectDir := ""
+		if cwd, err := os.Getwd(); err == nil {
+			projectDir = cwd
+		}
+		substitutionCtx := runtimeskill.NewSubstitutionContext(
+			skillItem,
+			runtimeskill.SplitSkillArguments(request.Prompt),
+			projectDir,
+			chatSessionID(session),
+			session.ReasoningEffort,
+			cfg.ArgumentSubstitutionEnabled(),
+		)
 		if skillItem.IsDocumentModeEnabled(cfg != nil && cfg.DocumentModeAuto()) {
 			if body := strings.TrimSpace(skillItem.Body); body != "" {
+				if rendered, _ := runtimeskill.SubstituteSkillText(body, substitutionCtx); strings.TrimSpace(rendered) != "" {
+					body = rendered
+				}
 				pin.Guide = "## Skill instructions (document mode: " + functionName + ")\n" + body
 			}
 		} else {
-			pin.Guide = runtimeskill.ProgramGuide(skillItem)
+			guide, _ := runtimeskill.SubstituteSkillText(runtimeskill.ProgramGuide(skillItem), substitutionCtx)
+			pin.Guide = guide
 		}
 	}
 	if strings.TrimSpace(pin.Guide) == "" {

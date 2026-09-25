@@ -888,6 +888,45 @@ type SkillsRuntimeConfig struct {
 	// DisciplineBlock 控制是否在 catalog 后附加"How to use skills"纪律块（SK-2）。
 	// 默认开启（*bool 便于显式关闭）；nil/true 开启，显式 false 关闭。
 	DisciplineBlock *bool `yaml:"discipline_block" mapstructure:"discipline_block" env:"SKILLS_RUNTIME_DISCIPLINE_BLOCK"`
+	// ArgumentSubstitution 控制 skill 文本（SKILL.md 正文 / ProgramGuide）的
+	// Agent Skills 占位符替换（$ARGUMENTS、$name、${SKILL_DIR} 等）。
+	// 默认开启；显式 "off"/"false"/"0" 关闭。
+	ArgumentSubstitution string `yaml:"argument_substitution" mapstructure:"argument_substitution" env:"SKILLS_RUNTIME_ARGUMENT_SUBSTITUTION"`
+	// DisabledSkills 是 SK-6 的 per-skill 启停名单：列出的 skill 名不再注册到
+	// registry（loader 过滤器权威点），但目录与诊断仍保留。
+	// 与 profile 的 skill 允许/拒绝名单取交集：deny 优先（disabled 覆盖 allow）。
+	// 兼容外部写法 disabledSkills。
+	DisabledSkills       []string `yaml:"disabled_skills" mapstructure:"disabled_skills" env:"SKILLS_RUNTIME_DISABLED_SKILLS"`
+	DisabledSkillsCompat []string `yaml:"disabledSkills,omitempty" mapstructure:"disabledSkills"`
+}
+
+// DisabledSkillNames 返回归一化（去空白、去重、保序）的禁用 skill 名单。
+// yaml/mapstructure 的 snake 与 camel 两种写法都接受。
+func (c *SkillsRuntimeConfig) DisabledSkillNames() []string {
+	if c == nil {
+		return nil
+	}
+	values := make([]string, 0, len(c.DisabledSkills)+len(c.DisabledSkillsCompat))
+	values = append(values, c.DisabledSkills...)
+	values = append(values, c.DisabledSkillsCompat...)
+	seen := make(map[string]struct{}, len(values))
+	names := make([]string, 0, len(values))
+	for _, value := range values {
+		name := strings.TrimSpace(value)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
 }
 
 // DisciplineBlockEnabled 报告是否应在 catalog 后附加纪律块。
@@ -897,6 +936,19 @@ func (c *SkillsRuntimeConfig) DisciplineBlockEnabled() bool {
 		return true
 	}
 	return *c.DisciplineBlock
+}
+
+// ArgumentSubstitutionEnabled 报告是否启用 skill 占位符替换。
+// 未配置（nil/空）默认开启；显式 off/false/0 关闭。
+func (c *SkillsRuntimeConfig) ArgumentSubstitutionEnabled() bool {
+	if c == nil {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(c.ArgumentSubstitution)) {
+	case "off", "false", "0", "no", "disabled":
+		return false
+	}
+	return true
 }
 
 // DocumentModeAuto 报告是否开启 Codex 技能的自动文档模式识别。

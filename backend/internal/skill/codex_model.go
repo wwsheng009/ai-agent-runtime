@@ -34,6 +34,55 @@ type CodexSkillMetadata struct {
 	Scope            string                  `json:"scope,omitempty"`
 	Enabled          bool                    `json:"enabled"`
 	Body             string                  `json:"body,omitempty"`
+
+	// Agent Skills 标准可选字段（frontmatter 直读，缺失保持零值）。
+	License                string   `json:"license,omitempty"`
+	Compatibility          string   `json:"compatibility,omitempty"`
+	Author                 string   `json:"author,omitempty"`
+	StandardVersion        string   `json:"version,omitempty"`
+	AllowedTools           []string `json:"allowed_tools,omitempty"`
+	DisallowedTools        []string `json:"disallowed_tools,omitempty"`
+	ArgumentHint           string   `json:"argument_hint,omitempty"`
+	WhenToUse              string   `json:"when_to_use,omitempty"`
+	DisableModelInvocation bool     `json:"disable_model_invocation,omitempty"`
+	// UserInvocable 为 nil 表示未声明（默认允许），显式 false 时不得出现在
+	// /skills 菜单与函数暴露面。
+	UserInvocable *bool                `json:"user_invocable,omitempty"`
+	Arguments     []CodexSkillArgument `json:"arguments,omitempty"`
+	Model         string               `json:"model,omitempty"`
+	Effort        string               `json:"effort,omitempty"`
+}
+
+// CodexSkillArgument 描述 frontmatter `arguments` 中声明的命名参数。
+type CodexSkillArgument struct {
+	Name        string `json:"name" yaml:"name"`
+	Description string `json:"description,omitempty" yaml:"description"`
+	Required    bool   `json:"required,omitempty" yaml:"required"`
+	Default     string `json:"default,omitempty" yaml:"default"`
+}
+
+// UserInvocableEnabled 报告技能是否允许用户显式调用（默认允许）。
+func (m *CodexSkillMetadata) UserInvocableEnabled() bool {
+	if m == nil || m.UserInvocable == nil {
+		return true
+	}
+	return *m.UserInvocable
+}
+
+// ImplicitInvocationAllowed 报告技能是否允许被模型隐式选中：
+// disable-model-invocation 显式关闭，或 agents/openai.yaml 的
+// policy.allow_implicit_invocation=false 关闭；默认允许。
+func (m *CodexSkillMetadata) ImplicitInvocationAllowed() bool {
+	if m == nil {
+		return true
+	}
+	if m.DisableModelInvocation {
+		return false
+	}
+	if m.Policy != nil && m.Policy.AllowImplicitInvocationValue != nil {
+		return *m.Policy.AllowImplicitInvocationValue
+	}
+	return true
 }
 
 // CodexSkillInterface captures UI-facing metadata from agents/openai.yaml.
@@ -77,6 +126,9 @@ type CodexSkillError struct {
 type CodexSkillLoadOutcome struct {
 	Skills []*CodexSkillMetadata `json:"skills,omitempty"`
 	Errors []CodexSkillError     `json:"errors,omitempty"`
+	// Warnings 是"仍可加载、但不符合 Agent Skills 标准或存在歧义"的诊断，
+	// 例如 name 与目录名不一致、name 含非小写连字符字符集。
+	Warnings []CodexSkillError `json:"warnings,omitempty"`
 }
 
 // Clone returns a deep copy of the metadata.
@@ -98,6 +150,13 @@ func (m *CodexSkillMetadata) Clone() *CodexSkillMetadata {
 		policy := *m.Policy
 		policy.Products = append([]string(nil), m.Policy.Products...)
 		cloned.Policy = &policy
+	}
+	cloned.AllowedTools = append([]string(nil), m.AllowedTools...)
+	cloned.DisallowedTools = append([]string(nil), m.DisallowedTools...)
+	cloned.Arguments = append([]CodexSkillArgument(nil), m.Arguments...)
+	if m.UserInvocable != nil {
+		value := *m.UserInvocable
+		cloned.UserInvocable = &value
 	}
 	return &cloned
 }
@@ -126,6 +185,16 @@ func (m *CodexSkillMetadata) Normalize() {
 		m.Interface.DefaultPrompt = collapseWhitespace(m.Interface.DefaultPrompt)
 	}
 	m.Scope = collapseWhitespace(m.Scope)
+	m.License = collapseWhitespace(m.License)
+	m.Compatibility = collapseWhitespace(m.Compatibility)
+	m.Author = collapseWhitespace(m.Author)
+	m.StandardVersion = collapseWhitespace(m.StandardVersion)
+	m.ArgumentHint = collapseWhitespace(m.ArgumentHint)
+	m.WhenToUse = collapseWhitespace(m.WhenToUse)
+	m.Model = collapseWhitespace(m.Model)
+	m.Effort = collapseWhitespace(m.Effort)
+	m.AllowedTools = normalizeStandardToolList(m.AllowedTools)
+	m.DisallowedTools = normalizeStandardToolList(m.DisallowedTools)
 	if path := strings.TrimSpace(m.PathToSkillsMD); path != "" {
 		m.PathToSkillsMD = filepath.Clean(path)
 	}
@@ -227,6 +296,31 @@ func collapseWhitespace(value string) string {
 
 func isCodexSkillPath(path string) bool {
 	return strings.EqualFold(filepath.Base(strings.TrimSpace(path)), "SKILL.md")
+}
+
+// normalizeStandardToolList 去空白、去重并保持声明顺序。
+func normalizeStandardToolList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func isCodexMetadataPath(path string) bool {

@@ -13,9 +13,56 @@ import (
 type codexSkillFrontmatter struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
-	Metadata    struct {
+	License     string `yaml:"license"`
+	// Compatibility 是标准可选字段（≤500 字符），用于描述环境/依赖兼容性。
+	Compatibility string `yaml:"compatibility"`
+	Metadata      struct {
 		ShortDescription string `yaml:"short-description"`
+		Author           string `yaml:"author"`
+		Version          string `yaml:"version"`
 	} `yaml:"metadata"`
+	// AllowedTools / DisallowedTools 同时接受 YAML 列表与空格分隔字符串
+	// （Claude Code 风格的 `allowed-tools: Bash(git:*) Read`）。
+	AllowedTools    codexStringList `yaml:"allowed-tools"`
+	DisallowedTools codexStringList `yaml:"disallowed-tools"`
+	ArgumentHint    string          `yaml:"argument-hint"`
+	// WhenToUse 既接受 snake_case 也接受 kebab-case（不同实现的写法差异）。
+	WhenToUseSnake         string               `yaml:"when_to_use"`
+	WhenToUseKebab         string               `yaml:"when-to-use"`
+	DisableModelInvocation *bool                `yaml:"disable-model-invocation"`
+	UserInvocable          *bool                `yaml:"user-invocable"`
+	Arguments              []CodexSkillArgument `yaml:"arguments"`
+	Model                  string               `yaml:"model"`
+	Effort                 string               `yaml:"effort"`
+}
+
+// codexStringList 兼容标量（空格/逗号分隔）与序列两种 YAML 形态。
+type codexStringList []string
+
+func (l *codexStringList) UnmarshalYAML(value *yaml.Node) error {
+	if value == nil {
+		return nil
+	}
+	switch value.Kind {
+	case yaml.ScalarNode:
+		for _, part := range strings.FieldsFunc(value.Value, func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+		}) {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				*l = append(*l, trimmed)
+			}
+		}
+	case yaml.SequenceNode:
+		for _, item := range value.Content {
+			if item == nil {
+				continue
+			}
+			if trimmed := strings.TrimSpace(item.Value); trimmed != "" {
+				*l = append(*l, trimmed)
+			}
+		}
+	}
+	return nil
 }
 
 type codexOpenAIMetadataFile struct {
@@ -123,13 +170,31 @@ func parseCodexSkillMetadata(filePath string, data []byte, loadBody bool) (*Code
 			fmt.Sprintf("codex skill short description exceeds %d characters", codexFrontmatterMaxDescriptionLen))
 	}
 
+	whenToUse := strings.TrimSpace(frontmatter.WhenToUseSnake)
+	if whenToUse == "" {
+		whenToUse = strings.TrimSpace(frontmatter.WhenToUseKebab)
+	}
+
 	skill := &CodexSkillMetadata{
-		Name:             name,
-		Description:      description,
-		ShortDescription: shortDescription,
-		PathToSkillsMD:   filepath.Clean(filePath),
-		MetadataPath:     codexMetadataPathForSkillPath(filePath),
-		Enabled:          true,
+		Name:                   name,
+		Description:            description,
+		ShortDescription:       shortDescription,
+		PathToSkillsMD:         filepath.Clean(filePath),
+		MetadataPath:           codexMetadataPathForSkillPath(filePath),
+		Enabled:                true,
+		License:                frontmatter.License,
+		Compatibility:          frontmatter.Compatibility,
+		Author:                 frontmatter.Metadata.Author,
+		StandardVersion:        frontmatter.Metadata.Version,
+		AllowedTools:           append([]string(nil), frontmatter.AllowedTools...),
+		DisallowedTools:        append([]string(nil), frontmatter.DisallowedTools...),
+		ArgumentHint:           frontmatter.ArgumentHint,
+		WhenToUse:              whenToUse,
+		DisableModelInvocation: frontmatter.DisableModelInvocation != nil && *frontmatter.DisableModelInvocation,
+		UserInvocable:          cloneOptionalBool(frontmatter.UserInvocable),
+		Arguments:              normalizeCodexArguments(frontmatter.Arguments),
+		Model:                  frontmatter.Model,
+		Effort:                 frontmatter.Effort,
 	}
 	if loadBody {
 		skill.Body = string(bodyBytes)
@@ -139,7 +204,84 @@ func parseCodexSkillMetadata(filePath string, data []byte, loadBody bool) (*Code
 		skill.Dependencies = meta.Dependencies
 		skill.Policy = meta.Policy
 	}
+	skill.Normalize()
 	return skill, nil
+}
+
+// normalizeCodexArguments 清理命名参数声明：去空白、按名去重、保持声明顺序，
+// 并丢弃缺名的条目。
+func normalizeCodexArguments(values []CodexSkillArgument) []CodexSkillArgument {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]CodexSkillArgument, 0, len(values))
+	for _, item := range values {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, CodexSkillArgument{
+			Name:        name,
+			Description: collapseWhitespace(item.Description),
+			Required:    item.Required,
+			Default:     item.Default,
+		})
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// validateCodexSkillName 按 Agent Skills 标准校验 name：
+// 小写字母/数字/连字符，不得以连字符开头或结尾，不得出现连续连字符。
+// 返回空串表示合法；否则返回可直接展示的诊断文案。
+func validateCodexSkillName(name string) string {
+	name = collapseWhitespace(name)
+	if name == "" {
+		return "skill name is empty"
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+		default:
+			return fmt.Sprintf("skill name %q should only contain lowercase letters, digits and hyphens (Agent Skills standard)", name)
+		}
+	}
+	if strings.HasPrefix(name, "-") || strings.HasSuffix(name, "-") {
+		return fmt.Sprintf("skill name %q must not start or end with a hyphen", name)
+	}
+	if strings.Contains(name, "--") {
+		return fmt.Sprintf("skill name %q must not contain consecutive hyphens", name)
+	}
+	return ""
+}
+
+// codexSkillStandardWarnings 返回该技能的"可加载但不符合标准"诊断列表。
+func codexSkillStandardWarnings(meta *CodexSkillMetadata, skillPath string) []string {
+	if meta == nil {
+		return nil
+	}
+	warnings := make([]string, 0, 2)
+	if message := validateCodexSkillName(meta.Name); message != "" {
+		warnings = append(warnings, message)
+	}
+	dirName := filepath.Base(filepath.Dir(filepath.Clean(skillPath)))
+	if dirName != "" && dirName != "." && !strings.EqualFold(dirName, meta.Name) {
+		warnings = append(warnings, fmt.Sprintf(
+			"skill directory %q does not match frontmatter name %q (Agent Skills standard requires them to match)",
+			dirName, meta.Name))
+	}
+	if len(warnings) == 0 {
+		return nil
+	}
+	return warnings
 }
 
 func splitCodexFrontmatter(data []byte) ([]byte, []byte, error) {

@@ -16,6 +16,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -549,6 +550,57 @@ tools: ["echo_tool"]
 	require.True(t, ok)
 	assert.Equal(t, "system duplicate", loadedSkill.Description)
 	assert.Equal(t, skill.SkillSourceLayerSystem, loadedSkill.Source.Layer)
+}
+
+// SK-6：disabled_skills 走 loader 过滤器权威点时，禁用与解禁都必须立即生效
+// （热重载不能出现"假开关"：只挡新注册、不撤销已注册）。
+func TestManager_ApplySkillNameFilter_DisableAndRestore(t *testing.T) {
+	mcpManager := &bootstrapMCPManager{}
+	skillDir := t.TempDir()
+	writeSkillYAML := func(fileName, name, description string) {
+		t.Helper()
+		require.NoError(t, os.WriteFile(filepath.Join(skillDir, fileName), []byte(fmt.Sprintf(`name: %s
+description: %s
+version: 1.0.0
+triggers:
+  - type: keyword
+    values: ["%s"]
+    weight: 1
+tools: ["echo_tool"]
+`, name, description, name)), 0o644))
+	}
+	writeSkillYAML("alpha.yaml", "alpha-skill", "alpha")
+	writeSkillYAML("beta.yaml", "beta-skill", "beta")
+
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.HotReload.Enabled = false
+	manager, err := NewManager(&Options{
+		Config:     cfg,
+		SkillDir:   skillDir,
+		MCPManager: mcpManager,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	require.True(t, registryHas(manager, "alpha-skill"))
+	require.True(t, registryHas(manager, "beta-skill"))
+
+	require.NoError(t, manager.ApplySkillNameFilter(
+		profileinput.WithDisabledSkills(nil, []string{" ALPHA-SKILL "}),
+	))
+	assert.False(t, registryHas(manager, "alpha-skill"), "disabled skill must be unregistered")
+	assert.True(t, registryHas(manager, "beta-skill"), "other skills must stay registered")
+
+	require.NoError(t, manager.ApplySkillNameFilter(nil))
+	assert.True(t, registryHas(manager, "alpha-skill"), "clearing the filter must restore the skill")
+}
+
+func registryHas(manager *Manager, name string) bool {
+	if manager == nil || manager.Registry() == nil {
+		return false
+	}
+	_, ok := manager.Registry().Get(name)
+	return ok
 }
 
 func TestManager_NewManager_TeamStorePathIsLazyUntilFirstUse(t *testing.T) {

@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,6 +42,7 @@ func discoverCodexSkillLoadOutcome(anchor, configFile, homeDir string, extraRoot
 
 	seenRoots := make(map[string]struct{})
 	seenSkills := make(map[string]struct{})
+	seenNames := make(map[string]string)
 
 	addRoot := func(spec codexSkillRootSpec) {
 		spec.Path = canonicalizeSkillTreePath(spec.Path, true)
@@ -118,6 +120,27 @@ func discoverCodexSkillLoadOutcome(anchor, configFile, homeDir string, extraRoot
 			}
 			meta.Enabled = true
 			meta.Normalize()
+			// 同名遮蔽：标准要求 skill 名唯一。两者都保留（registry 以 path 索引
+			// 共存），但必须把"谁遮蔽了谁"作为可见诊断报出来，避免静默歧义。
+			nameKey := strings.ToLower(strings.TrimSpace(meta.Name))
+			if nameKey != "" {
+				if firstPath, exists := seenNames[nameKey]; exists && !strings.EqualFold(firstPath, skillPath) {
+					outcome.Warnings = append(outcome.Warnings, CodexSkillError{
+						Path: skillPath,
+						Message: fmt.Sprintf(
+							"duplicate skill name %q: first defined at %s, this definition is shadowed for name lookup",
+							meta.Name, firstPath),
+					})
+				} else if !exists {
+					seenNames[nameKey] = skillPath
+				}
+			}
+			for _, message := range codexSkillStandardWarnings(meta, skillPath) {
+				outcome.Warnings = append(outcome.Warnings, CodexSkillError{
+					Path:    skillPath,
+					Message: message,
+				})
+			}
 			outcome.Skills = append(outcome.Skills, meta)
 			return nil
 		}); err != nil {

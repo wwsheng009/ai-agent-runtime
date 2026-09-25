@@ -27,6 +27,38 @@ func BuildSkillFilter(selection ResolvedSkillSelection) func(string) bool {
 	return authority.AllowsSkill
 }
 
+// WithDisabledSkills 在既有 skill 过滤器之上叠加运行时"禁用名单"
+// （skills_runtime.disabled_skills，SK-6 per-skill 启停）。
+//
+// 语义（与 profile allow/deny 的关系固化为 deny 优先）：
+//   - disabled 覆盖 allow：命中禁用名单的 skill 一律不注册；
+//   - base 为 nil 且 disabled 非空时，返回的过滤器只做禁用判断（其余全放行）；
+//   - disabled 为空时原样返回 base（保持 nil 语义，NFR-1：未配置不改变行为）。
+//
+// 名称匹配大小写不敏感，与 profile 选择器保持一致。
+func WithDisabledSkills(base func(string) bool, disabled []string) func(string) bool {
+	denied := make(map[string]struct{}, len(disabled))
+	for _, name := range disabled {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" {
+			continue
+		}
+		denied[key] = struct{}{}
+	}
+	if len(denied) == 0 {
+		return base
+	}
+	return func(name string) bool {
+		if _, blocked := denied[strings.ToLower(strings.TrimSpace(name))]; blocked {
+			return false
+		}
+		if base == nil {
+			return true
+		}
+		return base(name)
+	}
+}
+
 // ApplyMCPSelection narrows an MCP config snapshot to the servers allowed by
 // the profile declaration. The input config is never mutated: an active
 // selection returns a clone (so shared configs are unaffected); an empty

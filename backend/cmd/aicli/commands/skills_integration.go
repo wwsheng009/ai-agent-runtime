@@ -16,6 +16,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -45,11 +46,14 @@ type skillsRuntimeBinding struct {
 	// ownsManager is true when this binding created the bootstrap manager and
 	// must stop it on Close. Shared host bootstrap managers set this false so
 	// LocalRuntimeHost remains the single owner.
-	ownsManager          bool
-	count                int
-	exposureTopK         int
-	exposureMode         string
-	exposureRouter       *runtimeskill.Router
+	ownsManager    bool
+	count          int
+	exposureTopK   int
+	exposureMode   string
+	exposureRouter *runtimeskill.Router
+	// mcpRuntime 供热刷新（per-skill 启停）复用手柄：refresh 不重新解析 MCP 来源，
+	// 避免刷新后的函数面与初始函数面指向不同的 MCP 通道。
+	mcpRuntime           runtimeskill.MCPManager
 	catalog              *aicliFunctionCatalog
 	skillFunctions       map[string]*SkillFunction
 	skillFunctionsByPath map[string]*SkillFunction
@@ -119,8 +123,24 @@ func (b *skillsRuntimeBinding) AnalyzeSkillExposure(session *ChatSession, prompt
 		Mode: normalizeSkillExposureMode(b.exposureMode),
 		TopK: resolveSkillExposureTopK(b.exposureTopK),
 	}
+	// disable-model-invocation（标准字段）：技能仍在 skillFunctions 中注册，
+	// 显式 /skill 回合可用，但不得进入模型隐式暴露面（路由候选 / 历史回补 /
+	// 文本提及触发）。
+	modelInvocable := func(name string) bool {
+		fn, ok := b.skillFunctions[name]
+		if !ok || fn == nil {
+			return false
+		}
+		if fn.summary != nil {
+			return fn.summary.ModelInvocable()
+		}
+		if fn.skill != nil {
+			return fn.skill.ModelInvocable()
+		}
+		return true
+	}
 	addFunction := func(name string) {
-		if _, ok := b.skillFunctions[name]; ok {
+		if _, ok := b.skillFunctions[name]; ok && modelInvocable(name) {
 			exposed[name] = struct{}{}
 		}
 	}
@@ -186,6 +206,9 @@ func (b *skillsRuntimeBinding) findExplicitSkillMentions(prompt string) []string
 
 	matches := make([]string, 0)
 	for functionName, fn := range b.skillFunctions {
+		if fn != nil && !fn.ModelInvocable() {
+			continue
+		}
 		if strings.Contains(normalizedPrompt, strings.ToLower(functionName)) {
 			matches = append(matches, functionName)
 			continue
@@ -301,6 +324,34 @@ type SkillFunction struct {
 
 func (f *SkillFunction) Name() string {
 	return f.functionName
+}
+
+// ModelInvocable 报告该 skill 函数是否允许被模型隐式暴露/调用（默认允许）。
+func (f *SkillFunction) ModelInvocable() bool {
+	if f == nil {
+		return false
+	}
+	if f.summary != nil {
+		return f.summary.ModelInvocable()
+	}
+	if f.skill != nil {
+		return f.skill.ModelInvocable()
+	}
+	return true
+}
+
+// UserInvocable 报告该 skill 函数是否允许出现在用户可见的 /skills 菜单（默认允许）。
+func (f *SkillFunction) UserInvocable() bool {
+	if f == nil {
+		return false
+	}
+	if f.summary != nil {
+		return f.summary.UserInvocable()
+	}
+	if f.skill != nil {
+		return f.skill.UserInvocable()
+	}
+	return true
 }
 
 func (f *SkillFunction) Description() string {
@@ -1001,10 +1052,33 @@ func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, too
 		return nil, err
 	}
 
+	return buildSkillsRuntimeBindingFromManager(cfg, session, mcpRuntime, manager, ownsManager, cliSkillsTopK, cliSkillsMode, nil)
+}
+
+// buildSkillsRuntimeBindingFromManager 从已就绪的 manager 构建（或就地刷新）
+// 会话的 skill 函数面。
+//
+// reuse 非 nil 时表示热刷新：原地更新同一个 binding 指针（保持 catalog 与
+// session 上已捕获的引用有效），并撤销新集合之外的 skill 函数。
+func buildSkillsRuntimeBindingFromManager(cfg *config.Config, session *ChatSession, mcpRuntime runtimeskill.MCPManager, manager *runtimebootstrap.Manager, ownsManager bool, cliSkillsTopK int, cliSkillsMode string, reuse *skillsRuntimeBinding) (*skillsRuntimeBinding, error) {
+	catalog := ensureFunctionCatalog(session)
+	if catalog == nil || catalog.Registry() == nil || manager == nil {
+		return nil, nil
+	}
 	summaries := manager.Registry().ListSummaries()
 	if len(summaries) == 0 {
 		if ownsManager {
 			_ = manager.Stop()
+		}
+		// 全部停用/无可用 skill：reuse 模式（热刷新）仍要撤销旧函数面，
+		// 否则停用后 /skills 还能选中并执行——假开关。
+		if reuse != nil {
+			reuse.count = 0
+			reuse.skillFunctions = map[string]*SkillFunction{}
+			reuse.skillFunctionsByPath = map[string]*SkillFunction{}
+			reuse.skillNameCounts = map[string]int{}
+			catalog.PruneSkillFunctionsExcept(nil)
+			return reuse, nil
 		}
 		return nil, nil
 	}
@@ -1126,21 +1200,60 @@ func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, too
 		}
 	}
 
-	binding := &skillsRuntimeBinding{
-		manager:              manager,
-		ownsManager:          ownsManager,
-		count:                len(summaries),
-		exposureTopK:         exposureTopK,
-		exposureMode:         resolveConfiguredSkillExposureMode(cfg.SkillsRuntime, cliSkillsMode),
-		exposureRouter:       exposureRouter,
-		catalog:              catalog,
-		skillFunctions:       skillFunctions,
-		skillFunctionsByPath: skillFunctionsByPath,
-		skillNameCounts:      skillNameCounts,
+	binding := reuse
+	if binding == nil {
+		binding = &skillsRuntimeBinding{}
+	}
+	binding.manager = manager
+	binding.ownsManager = ownsManager
+	binding.mcpRuntime = mcpRuntime
+	binding.count = len(summaries)
+	binding.exposureTopK = exposureTopK
+	binding.exposureMode = resolveConfiguredSkillExposureMode(cfg.SkillsRuntime, cliSkillsMode)
+	binding.exposureRouter = exposureRouter
+	binding.catalog = catalog
+	binding.skillFunctions = skillFunctions
+	binding.skillFunctionsByPath = skillFunctionsByPath
+	binding.skillNameCounts = skillNameCounts
+	if reuse != nil {
+		// 热刷新：撤销新集合之外的 skill 函数（停用即不可再被 /skills 选中）。
+		catalog.PruneSkillFunctionsExcept(skillFunctionKeepSet(skillFunctions))
+		return binding, nil
 	}
 	catalog.SetSkillsBinding(binding)
 	session.SkillsBinding = binding
 	return binding, nil
+}
+
+// refreshSkillsRuntimeBinding 按当前生效配置的 disabled_skills 重建会话 skill 面。
+//
+// 顺序不可交换：先让 loader 过滤器 + registry 重建（撤销/恢复注册），再用新的
+// summaries 重建函数面并撤销 stale 函数。配置落盘与内存更新由调用方负责。
+func refreshSkillsRuntimeBinding(session *ChatSession, cfg *config.Config) error {
+	if session == nil || session.SkillsBinding == nil || session.SkillsBinding.manager == nil {
+		return fmt.Errorf("当前会话没有可刷新的 skills runtime")
+	}
+	cfg = effectiveChatSkillConfig(cfg, session)
+	if cfg == nil {
+		return fmt.Errorf("skills 配置不可用")
+	}
+	binding := session.SkillsBinding
+	if err := binding.manager.ApplySkillNameFilter(runtimeprofileinput.WithDisabledSkills(
+		runtimeprofileinput.BuildSkillFilter(session.ProfileSkillSelection),
+		disabledSkillNames(cfg),
+	)); err != nil {
+		return fmt.Errorf("应用 skills 启停名单失败: %w", err)
+	}
+	_, err := buildSkillsRuntimeBindingFromManager(cfg, session, binding.mcpRuntime, binding.manager, false, binding.exposureTopK, binding.exposureMode, binding)
+	return err
+}
+
+func skillFunctionKeepSet(functions map[string]*SkillFunction) map[string]struct{} {
+	keep := make(map[string]struct{}, len(functions))
+	for name := range functions {
+		keep[name] = struct{}{}
+	}
+	return keep
 }
 
 func resolveChatRuntimeConfigPath(cfg *config.Config, session *ChatSession) string {
@@ -1150,7 +1263,13 @@ func resolveChatRuntimeConfigPath(cfg *config.Config, session *ChatSession) stri
 	return resolveGlobalRuntimeConfigPath(cfg)
 }
 
-func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []string) []string {
+// resolveConfiguredSkillDirs 解析生效的 skill 目录集合。
+// includeDiscovered=false（--no-skills）时只保留 CLI 显式目录，跳过配置目录、
+// Codex 兼容发现、cwd 祖先锚点与 plugin 根。
+func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []string, includeDiscovered bool) []string {
+	if !includeDiscovered {
+		return appendUniqueExistingDirs(nil, cliSkillDirs)
+	}
 	seen := make(map[string]struct{})
 	capacity := len(cliSkillDirs) + 6
 	if cfg != nil {
@@ -1193,7 +1312,7 @@ func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []
 	}
 
 	// 工作区锚点：进程 cwd（及祖先目录）下的 .agents/skills 必须无条件参与
-	// 加载，与 web「Codex skills list」（internal/api/skills/codex_list.go 以
+	// 加载，与 web「Codex skills list」（internal/api/runtimeapi/codex_list.go 以
 	// cwd 为锚点）和文档承诺（仓库 skill 目录默认进入 loader/registry）一致。
 	// 只以「配置文件所在目录」为锚点时，配置文件位于 ~/.aicli（用户级配置的
 	// 常态）或未配置 config_file 时，<workspace>/.agents/skills 永远不会进入
@@ -1211,6 +1330,15 @@ func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []
 
 	// Trusted+enabled plugins contribute skill roots into the existing skill loader path.
 	return mergeActivePluginSkillDirs(resolved)
+}
+
+// disabledSkillNames 返回 skills_runtime.disabled_skills 的归一化名单（SK-6）。
+// cfg 为 nil 或未配置时返回 nil，调用方据此保持"未配置不改变行为"。
+func disabledSkillNames(cfg *config.Config) []string {
+	if cfg == nil || cfg.SkillsRuntime == nil {
+		return nil
+	}
+	return cfg.SkillsRuntime.DisabledSkillNames()
 }
 
 func bindSessionModelAlias(manager *runtimebootstrap.Manager, session *ChatSession) error {

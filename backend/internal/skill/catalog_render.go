@@ -32,6 +32,8 @@ type SkillCatalogEntry struct {
 	SourcePath       string // SKILL.md / skill.yaml 绝对路径
 	SourceDir        string // 技能目录（用于别名表）
 	UseAliases       bool   // 渲染提示：是否以别名+short path 形态
+	// WhenToUse 是 Agent Skills 标准的 when_to_use 提示，追加在描述之后。
+	WhenToUse string
 }
 
 // CatalogBudget 约束 catalog 在上下文中的字符开销。
@@ -87,9 +89,16 @@ func BuildCatalogEntries(skills []*SkillSummary) []SkillCatalogEntry {
 		if s == nil || s.Name == "" {
 			continue
 		}
+		// disable-model-invocation 的技能不进 catalog：catalog 是模型隐式面的
+		// 入口，显式 /skill 调用仍由函数面/菜单承载。
+		if !s.ModelInvocable() {
+			continue
+		}
 		scope := ""
+		whenToUse := ""
 		if s.Codex != nil {
 			scope = s.Codex.Scope
+			whenToUse = s.Codex.WhenToUse
 		}
 		if scope == "" && s.Source != nil {
 			scope = s.Source.Layer
@@ -110,6 +119,7 @@ func BuildCatalogEntries(skills []*SkillSummary) []SkillCatalogEntry {
 			SourcePath:       sourcePath,
 			SourceDir:        sourceDir,
 			UseAliases:       useAliases,
+			WhenToUse:        whenToUse,
 		})
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
@@ -210,9 +220,15 @@ func catalogLine(e *SkillCatalogEntry) string {
 		locator = e.SourceDir
 	}
 	if desc == "" {
-		return fmt.Sprintf("- %s (path: %s)", name, locator)
+		if e.WhenToUse == "" {
+			return fmt.Sprintf("- %s (path: %s)", name, locator)
+		}
+		return fmt.Sprintf("- %s (when: %s) (path: %s)", name, e.WhenToUse, locator)
 	}
-	return fmt.Sprintf("- %s — %s (path: %s)", name, desc, locator)
+	if e.WhenToUse == "" {
+		return fmt.Sprintf("- %s — %s (path: %s)", name, desc, locator)
+	}
+	return fmt.Sprintf("- %s — %s (when: %s) (path: %s)", name, desc, e.WhenToUse, locator)
 }
 
 // trimLinesToBudget 在累计行预算内降级描述：先截长描述到阈值，再从尾部省略描述。

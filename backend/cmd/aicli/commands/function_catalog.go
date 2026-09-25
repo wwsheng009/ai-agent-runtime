@@ -196,6 +196,52 @@ func (c *aicliFunctionCatalog) registerFunction(fn functions.Function, descripto
 	}
 }
 
+// PruneSkillFunctionsExcept 撤销 catalog 与 registry 中所有不在 keep 集合内的
+// skill 函数，返回被撤销的函数名（升序）。
+//
+// per-skill 启停热刷新的收口点：只挡新注册、不撤销已注册会造成假开关——
+// 停用后的 skill 仍能被 /skills 选中并执行。
+func (c *aicliFunctionCatalog) PruneSkillFunctionsExcept(keep map[string]struct{}) []string {
+	if c == nil || c.entries == nil {
+		return nil
+	}
+	removed := make([]string, 0, 4)
+	for name, entry := range c.entries {
+		if entry == nil || !entry.isSkill {
+			continue
+		}
+		if keep != nil {
+			if _, kept := keep[name]; kept {
+				continue
+			}
+		}
+		delete(c.entries, name)
+		if c.registry != nil {
+			c.registry.Unregister(name)
+		}
+		removed = append(removed, name)
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	if len(c.entryOrder) > 0 {
+		drop := make(map[string]struct{}, len(removed))
+		for _, name := range removed {
+			drop[name] = struct{}{}
+		}
+		keptOrder := c.entryOrder[:0]
+		for _, item := range c.entryOrder {
+			if _, gone := drop[item]; gone {
+				continue
+			}
+			keptOrder = append(keptOrder, item)
+		}
+		c.entryOrder = keptOrder
+	}
+	sort.Strings(removed)
+	return removed
+}
+
 func (c *aicliFunctionCatalog) syncFromRegistry() {
 	if c == nil || c.registry == nil {
 		return

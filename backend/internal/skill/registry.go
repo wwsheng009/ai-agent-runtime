@@ -378,6 +378,11 @@ func (r *Registry) validate(s *Skill) error {
 
 // buildIndex 构建索引
 func (r *Registry) buildIndex(s *Skill) {
+	// disable-model-invocation：技能仍可被显式调用（registry.Get / List），
+	// 但不进入 keyword/pattern 路由索引，避免被模型隐式选中。
+	if !s.ModelInvocable() {
+		return
+	}
 	// 计算总权重
 	totalWeight := 0.0
 	for _, trigger := range s.Triggers {

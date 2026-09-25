@@ -51,6 +51,19 @@ func (r *FunctionRegistry) Register(fn Function) {
 	r.functions[fn.Name()] = fn
 }
 
+// Unregister 移除一个 Function，返回是否确实删除了条目。
+// 用于运行时热操作（例如 per-skill 启停后撤销 skill__<name> 函数）。
+func (r *FunctionRegistry) Unregister(name string) bool {
+	if r == nil || r.functions == nil {
+		return false
+	}
+	if _, ok := r.functions[name]; !ok {
+		return false
+	}
+	delete(r.functions, name)
+	return true
+}
+
 // Get 获取 Function
 func (r *FunctionRegistry) Get(name string) (Function, bool) {
 	fn, ok := r.functions[name]

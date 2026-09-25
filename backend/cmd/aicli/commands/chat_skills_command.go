@@ -50,6 +50,16 @@ func handleSkillsMenuCommand(session *ChatSession, command string) bool {
 	query = strings.TrimSpace(query)
 	useJSON := jsonOutput || session.JSONOutput
 
+	// per-skill 启停：/skills disable|enable <name>（写配置 + 运行面热刷新）。
+	if enable, name, ok := parseSkillToggleQuery(query); ok {
+		message, err := runSkillToggleCommand(session, enable, name)
+		if err != nil {
+			message = formatCommandError(err.Error(), useJSON)
+		}
+		fmt.Println(message)
+		return false
+	}
+
 	catalog := ensureFunctionCatalog(session)
 	if catalog == nil || catalog.Registry() == nil {
 		fmt.Println(formatCommandError("Function Catalog: 未初始化", useJSON))
@@ -63,6 +73,7 @@ func handleSkillsMenuCommand(session *ChatSession, command string) bool {
 	}
 
 	skills := filterSkillCatalogEntries(report.Skills, query)
+	skills = filterUserInvocableSkillEntries(catalog, skills)
 	if useJSON {
 		payload := struct {
 			Count  int                             `json:"count"`
@@ -242,6 +253,23 @@ func filterSkillCatalogEntries(entries []aicliFunctionDescriptorReport, query st
 		if skillCatalogEntryMatchesQuery(item, query) {
 			filtered = append(filtered, item)
 		}
+	}
+	return filtered
+}
+
+// filterUserInvocableSkillEntries 过滤 user-invocable: false 的技能条目：
+// 它们不出现在 /skills 菜单与选择器，但仍可被模型隐式调用（除非同时声明
+// disable-model-invocation）。
+func filterUserInvocableSkillEntries(catalog *aicliFunctionCatalog, entries []aicliFunctionDescriptorReport) []aicliFunctionDescriptorReport {
+	if len(entries) == 0 {
+		return entries
+	}
+	filtered := make([]aicliFunctionDescriptorReport, 0, len(entries))
+	for _, item := range entries {
+		if fn := skillFunctionForName(catalog, item.FunctionName); fn != nil && !fn.UserInvocable() {
+			continue
+		}
+		filtered = append(filtered, item)
 	}
 	return filtered
 }

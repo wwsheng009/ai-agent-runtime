@@ -40,6 +40,28 @@ func (s *SkillSummary) HasWorkflow() bool {
 	return s.WorkflowStepCount > 0 || len(s.WorkflowSteps) > 0
 }
 
+// UserInvocable 报告摘要对应的技能是否允许用户显式调用（默认允许）。
+func (s *SkillSummary) UserInvocable() bool {
+	if s == nil {
+		return false
+	}
+	if s.Codex != nil {
+		return s.Codex.UserInvocableEnabled()
+	}
+	return true
+}
+
+// ModelInvocable 报告摘要对应的技能是否允许被模型隐式选中（默认允许）。
+func (s *SkillSummary) ModelInvocable() bool {
+	if s == nil {
+		return false
+	}
+	if s.Codex != nil {
+		return s.Codex.ImplicitInvocationAllowed()
+	}
+	return true
+}
+
 // IsDocumentMode 报告摘要是否对应"指令文档、无执行器"形态的技能（SK-7）。
 // 显式声明 execution_mode: document，或自动识别为 Codex 兼容技能且无
 // handler/workflow。与 Skill.IsDocumentMode 判定口径一致，供 discovery 阶段

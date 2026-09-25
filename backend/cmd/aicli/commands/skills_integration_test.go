@@ -685,7 +685,7 @@ func TestInitSkillFunctionsRegistersSkills(t *testing.T) {
 	tempDir := t.TempDir()
 	// 固定工作区：本包目录位于仓库内，工作区锚点会（按设计）发现仓库根的
 	// .agents/skills；这里只验证显式 skill_dir 的注册行为。
-	t.Chdir(tempDir)
+	chdirTest(t, tempDir)
 	skillDir := filepath.Join(tempDir, "abap_search")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
@@ -849,7 +849,7 @@ func TestResolveConfiguredSkillDirs_AppendsCLIAndConfigDirs(t *testing.T) {
 	// 固定工作区：避免本包目录（位于仓库内）的工作区锚点影响计数；该锚点
 	// 由 TestResolveConfiguredSkillDirs_IncludesWorkspaceAgentsSkillsWithoutConfig
 	// 单独覆盖。
-	t.Chdir(t.TempDir())
+	chdirTest(t, t.TempDir())
 	systemDir := t.TempDir()
 	extraDir := t.TempDir()
 	cliDir := t.TempDir()
@@ -857,7 +857,7 @@ func TestResolveConfiguredSkillDirs_AppendsCLIAndConfigDirs(t *testing.T) {
 	resolved := resolveConfiguredSkillDirs(&config.SkillsRuntimeConfig{
 		SkillDir:       systemDir,
 		ExtraSkillDirs: []string{extraDir},
-	}, []string{cliDir, extraDir})
+	}, []string{cliDir, extraDir}, true)
 
 	if len(resolved) != 3 {
 		t.Fatalf("unexpected resolved dir count: %d", len(resolved))
@@ -903,7 +903,7 @@ func TestResolveConfiguredSkillDirs_ResolvesUpwardRelativePaths(t *testing.T) {
 		SkillDir:       "./.agents/skills",
 		SkillDirs:      []string{"./.agents/skills"},
 		ExtraSkillDirs: []string{"./extra-skills"},
-	}, []string{"./.agents/skills", "./cli-skills"})
+	}, []string{"./.agents/skills", "./cli-skills"}, true)
 
 	if len(resolved) != 3 {
 		t.Fatalf("unexpected resolved dir count: %d (%#v)", len(resolved), resolved)
@@ -1676,9 +1676,9 @@ func TestResolveConfiguredSkillDirs_IncludesWorkspaceAgentsSkillsWithoutConfig(t
 	workspace := filepath.Join(root, "workspace")
 	skillsDir := filepath.Join(workspace, ".agents", "skills")
 	writeTestFile(t, filepath.Join(skillsDir, "demo", "skill.yaml"), "name: demo\ndescription: demo skill\n")
-	t.Chdir(workspace)
+	chdirTest(t, workspace)
 
-	got := resolveConfiguredSkillDirs(nil, nil)
+	got := resolveConfiguredSkillDirs(nil, nil, true)
 
 	want := skillsDir
 	if resolved, err := filepath.EvalSymlinks(skillsDir); err == nil && strings.TrimSpace(resolved) != "" {
@@ -1696,7 +1696,7 @@ func TestResolveConfiguredSkillDirs_IncludesWorkspaceAgentsSkillsWithoutConfig(t
 // skills 加载面（enabled 门 / 目录 / runtime 配置路径）必须以会话生效配置为准，否则
 // 白名单里的 skills_runtime.* 覆盖是假开关（D13/D14）。
 func TestInitSkillFunctionsUsesSessionEffectiveConfig(t *testing.T) {
-	t.Chdir(t.TempDir()) // 固定工作区：避免仓库 .agents/skills 干扰计数
+	chdirTest(t, t.TempDir()) // 固定工作区：避免仓库 .agents/skills 干扰计数
 	skillRoot := t.TempDir()
 	skillDir := filepath.Join(skillRoot, "abap_search")
 	skillYAML := `name: abap_search

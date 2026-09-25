@@ -15,6 +15,30 @@ import (
 // - `~/.aicli/skills`
 // - `~/.aicli/agents/skills`
 func DiscoverCodexCompatibleSkillDirs(anchor string, configFile string) []string {
+	return discoverCodexCompatibleSkillDirs(anchor, configFile, resolveSkillDiscoveryHomeDir())
+}
+
+// CodexSkillRoot 描述一个参与发现的 Codex 兼容 skill 根目录（SK-6/发现诊断用）。
+type CodexSkillRoot struct {
+	Path  string
+	Scope string
+}
+
+// DiscoverCodexCompatibleSkillRoots 返回 anchor/configFile 下参与发现的根目录，
+// 含 scope（repo|user|…），顺序与发现顺序一致；仅包含实际存在的目录。
+func DiscoverCodexCompatibleSkillRoots(anchor string, configFile string) []CodexSkillRoot {
+	specs := discoverCodexCompatibleSkillRootSpecs(anchor, configFile, resolveSkillDiscoveryHomeDir())
+	roots := make([]CodexSkillRoot, 0, len(specs))
+	for _, spec := range specs {
+		if strings.TrimSpace(spec.Path) == "" {
+			continue
+		}
+		roots = append(roots, CodexSkillRoot{Path: spec.Path, Scope: spec.Scope})
+	}
+	return roots
+}
+
+func resolveSkillDiscoveryHomeDir() string {
 	homeDir := strings.TrimSpace(os.Getenv("USERPROFILE"))
 	if homeDir == "" {
 		homeDir = strings.TrimSpace(os.Getenv("HOME"))
@@ -24,8 +48,7 @@ func DiscoverCodexCompatibleSkillDirs(anchor string, configFile string) []string
 			homeDir = strings.TrimSpace(resolvedHomeDir)
 		}
 	}
-
-	return discoverCodexCompatibleSkillDirs(anchor, configFile, homeDir)
+	return homeDir
 }
 
 func discoverCodexCompatibleSkillDirs(anchor string, configFile string, homeDir string) []string {
@@ -94,6 +117,9 @@ func discoverCodexCompatibleSkillRootSpecs(anchor string, configFile string, hom
 	}
 
 	if homeDir != "" {
+		// Agent Skills 标准的用户级目录：~/.agents/skills（显式发现，不依赖
+		// cwd 是否位于 home 之下）。
+		addDir(filepath.Join(homeDir, ".agents", "skills"), CodexSkillScopeUser)
 		addDir(filepath.Join(homeDir, ".aicli", "skills"), CodexSkillScopeUser)
 		addDir(filepath.Join(homeDir, ".aicli", "agents", "skills"), CodexSkillScopeUser)
 	}

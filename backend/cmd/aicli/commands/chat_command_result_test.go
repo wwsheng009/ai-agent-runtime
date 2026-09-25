@@ -1118,8 +1118,9 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_model_switch.go", Func: "promptRuntimeModelSelectionLegacy", Kind: "fmt.Print", Count: 2},
 		{File: "chat_model_switch.go", Func: "selectRuntimeReasoningEffortLegacy", Kind: "fmt.Print", Count: 5},
 		{File: "chat_plan_command.go", Func: "exitChatPlanModeCommand", Kind: "fmt.Print", Count: 5},
-		{File: "chat_plan_command.go", Func: "handlePlanCommand", Kind: "fmt.Print", Count: 7},
+		{File: "chat_plan_command.go", Func: "handlePlanCommand", Kind: "fmt.Print", Count: 8},
 		{File: "chat_plan_command.go", Func: "printPlanModeStatus", Kind: "fmt.Print", Count: 1},
+		{File: "chat_plans_command.go", Func: "handlePlansCommand", Kind: "fmt.Print", Count: 1},
 		{File: "chat_preferences.go", Func: "persistChatPreferencesIfNeeded", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_preferences.go", Func: "resolveWorkspaceChatPreferences", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_provider_turn.go", Func: "method Complete", Kind: "fmt.Fprint(os.Std*)", Count: 2},
@@ -1151,7 +1152,9 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_setup.go", Func: "initializeChatCapabilities", Kind: "fmt.Fprint(os.Std*)", Count: 3},
 		{File: "chat_setup.go", Func: "printChatExitResumeHint", Kind: "fmt.Print", Count: 1},
 		{File: "chat_setup.go", Func: "printChatSessionPreamble", Kind: "fmt.Fprint(os.Std*)", Count: 2},
-		{File: "chat_skills_command.go", Func: "handleSkillsMenuCommand", Kind: "fmt.Print", Count: 10},
+		// 11 = 迁移前基线 10 + per-skill 启停（/skills disable|enable）在 legacy
+		// stdout 回退路径上的单条结果输出；统一渲染通道那条路径不写 stdout。
+		{File: "chat_skills_command.go", Func: "handleSkillsMenuCommand", Kind: "fmt.Print", Count: 11},
 		{File: "chat_skills_command.go", Func: "printSkillCatalogReport", Kind: "fmt.Print", Count: 1},
 		{File: "chat_skills_command.go", Func: "promptSkillCatalogSelection", Kind: "fmt.Print", Count: 1},
 		{File: "chat_skills_command.go", Func: "promptSkillExecutionInput", Kind: "fmt.Print", Count: 1},

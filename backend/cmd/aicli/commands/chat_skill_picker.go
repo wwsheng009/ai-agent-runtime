@@ -47,6 +47,7 @@ func openChatSkillPicker(session *ChatSession, _ SkillPickerRequest) {
 		return
 	}
 	skills := filterSkillCatalogEntries(report.Skills, "")
+	skills = filterUserInvocableSkillEntries(catalog, skills)
 	if len(skills) == 0 {
 		_ = renderChatCommandResult(session, commandTextResult("错误: 未找到匹配 skill"), false)
 		return
@@ -210,10 +211,16 @@ func executeStructuredSkillsMenuCommand(session *ChatSession, command string) (C
 		return commandTextResult("错误: Function Catalog: 未初始化"), true
 	}
 
+	// per-skill 启停：/skills disable|enable <name>（写配置 + 运行面热刷新）。
+	if enable, name, ok := parseSkillToggleQuery(query); ok {
+		return executeStructuredSkillToggleCommand(session, enable, name, jsonOutput), true
+	}
+
 	// --json is a finite structured projection: render the JSON payload as one
 	// plain command cell instead of falling back to legacy stdout.
 	if jsonOutput {
 		skills := filterSkillCatalogEntries(report.Skills, query)
+		skills = filterUserInvocableSkillEntries(catalog, skills)
 		payload := struct {
 			Count  int                             `json:"count"`
 			Query  string                          `json:"query,omitempty"`

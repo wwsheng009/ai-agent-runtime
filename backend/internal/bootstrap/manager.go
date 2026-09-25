@@ -20,10 +20,10 @@ const defaultGatewayProviderName = "gateway"
 
 // Options Runtime Bootstrap 选项
 type Options struct {
-	Config              *runtimecfg.RuntimeConfig
-	SkillDir            string
-	SkillDirs           []string
-	DiscoverOnly        bool
+	Config       *runtimecfg.RuntimeConfig
+	SkillDir     string
+	SkillDirs    []string
+	DiscoverOnly bool
 	// SkillFilter optionally restricts which skill names are registered.
 	// nil keeps the pre-profile behavior (every discovered skill is kept).
 	SkillFilter         func(string) bool
@@ -638,6 +638,24 @@ func (m *Manager) Registry() *skill.Registry { return m.registry }
 
 // Loader 返回 Skill Loader
 func (m *Manager) Loader() *skill.Loader { return m.loader }
+
+// ApplySkillNameFilter 在 loader 过滤器权威点更新 skill 名过滤（SK-6：
+// skills_runtime.disabled_skills 的热重载入口）。
+//
+// 过滤器在每次注册路径上生效，但已注册的技能不会自动回滚，因此这里显式
+// 清空注册表并按新过滤器重新全量发现：禁用与解禁都能立即生效（无假开关）。
+// 传入 nil 恢复未过滤行为（与启动路径一致）。
+func (m *Manager) ApplySkillNameFilter(filter func(string) bool) error {
+	if m == nil || m.loader == nil || m.registry == nil {
+		return nil
+	}
+	m.loader.SetNameFilter(filter)
+	if len(m.skillDirs) == 0 {
+		return nil
+	}
+	m.registry.Clear()
+	return m.loader.DiscoverAllWithRegistry(m.skillDirs, m.registry)
+}
 
 // SessionManager 返回 Session Manager
 func (m *Manager) SessionManager() *chat.SessionManager { return m.sessionManager }
