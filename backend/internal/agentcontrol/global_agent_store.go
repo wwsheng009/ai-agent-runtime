@@ -50,6 +50,10 @@ type SQLiteGlobalAgentRegistryStore struct {
 	openErr    error
 	closed     bool
 	sharedOpen func() error
+	// sharedReset, when non-nil, resets the RegistryService's shared DB handle
+	// so the next ensure()/sharedOpen call re-opens the database and re-runs
+	// WAL reconciliation. Only set for shared (RegistryService-managed) stores.
+	sharedReset func() error
 
 	db     *sql.DB
 	dsn    string
@@ -274,6 +278,90 @@ func (s *SQLiteGlobalAgentRegistryStore) Close() error {
 	// does the same for shared handles; without this the entry leaked.
 	releaseAgentControlWALState(s.dsn)
 	return err
+}
+
+// isSQLiteIOErr reports whether err is a SQLite disk I/O error.
+// On Windows, the ncruces/go-sqlite3 driver can return SQLITE_IOERR (or a
+// subcode like IOERR_SHORT_READ) when a concurrent process truncates the WAL
+// file to 0 bytes while this process's connection still holds a stale
+// in-memory wal-index.  The primary error code maps to "disk I/O error".
+func isSQLiteIOErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", err)))
+	return strings.Contains(msg, "disk i/o error")
+}
+
+// resetDBHandle closes the current SQLite connection handle and resets the
+// store's initialization state so the next ensure()/dbHandle() call re-opens
+// the database and re-runs WAL sidecar reconciliation.
+//
+// This is the recovery path for SQLITE_IOERR caused by another process
+// truncating the WAL file to 0 bytes while this connection's in-memory
+// wal-index still references WAL frames.  The stale state cannot be detected
+// without trying a query, and sync.Once prevents re-running initialization,
+// so we explicitly reset both.
+//
+// The store lock is released before closing the handle or delegating to
+// sharedReset: the shared reset path re-acquires the very same lock, and
+// sync.RWMutex is not reentrant.
+func (s *SQLiteGlobalAgentRegistryStore) resetDBHandle() error {
+	if s == nil {
+		return nil
+	}
+	s.openMu.Lock()
+	db := s.db
+	ownsDB := s.ownsDB
+	sharedOpen := s.sharedOpen
+	sharedReset := s.sharedReset
+	if sharedOpen == nil && !ownsDB {
+		// Externally provided pool (nothing this store may close or re-open).
+		s.openMu.Unlock()
+		return nil
+	}
+	s.db = nil
+	s.openErr = nil
+	s.openMu.Unlock()
+
+	if sharedOpen != nil {
+		// RegistryService-managed pool: the service owns close/ref-count
+		// bookkeeping, and the next ensure()→sharedOpen() re-opens the pool.
+		if sharedReset != nil {
+			return sharedReset()
+		}
+		return nil
+	}
+	if db != nil {
+		_ = db.Close()
+	}
+	s.openMu.Lock()
+	s.openOnce = sync.Once{}
+	s.openMu.Unlock()
+	return nil
+}
+
+// withRetryOnIOErr executes fn, retrying once after resetting the DB handle
+// if the first attempt fails with a SQLite disk I/O error.
+func (s *SQLiteGlobalAgentRegistryStore) withRetryOnIOErr(fn func(*sql.DB) error) error {
+	for attempt := 0; ; attempt++ {
+		db, err := s.dbHandle()
+		if err != nil {
+			return err
+		}
+		err = fn(db)
+		if err == nil {
+			return nil
+		}
+		if !isSQLiteIOErr(err) || attempt >= 1 {
+			return err
+		}
+		// Stale WAL state from a concurrent process truncating the WAL.
+		// Re-open the connection (which re-runs WAL reconciliation) and retry.
+		if resetErr := s.resetDBHandle(); resetErr != nil {
+			return resetErr
+		}
+	}
 }
 
 func (s *SQLiteGlobalAgentRegistryStore) closeAgentWakeWatchers() {
@@ -593,7 +681,7 @@ func (s *SQLiteGlobalAgentRegistryStore) ListAgentControlAgents(ctx context.Cont
 	if s == nil {
 		return nil, fmt.Errorf("agent control agent registry store is not initialized")
 	}
-	db, skip, err := s.dbHandleForRead()
+	_, skip, err := s.dbHandleForRead()
 	if err != nil {
 		return nil, err
 	}
@@ -619,22 +707,31 @@ func (s *SQLiteGlobalAgentRegistryStore) ListAgentControlAgents(ctx context.Cont
 		query += " LIMIT ?"
 		args = append(args, filter.Limit)
 	}
-	rows, err := db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list agent control agents: %w", err)
-	}
-	defer rows.Close()
 
-	records := make([]AgentRecord, 0)
-	for rows.Next() {
-		record, err := scanAgentRecord(rows)
+	var records []AgentRecord
+	listErr := s.withRetryOnIOErr(func(db *sql.DB) error {
+		rows, err := db.QueryContext(ctx, query, args...)
 		if err != nil {
-			return nil, err
+			return fmt.Errorf("list agent control agents: %w", err)
 		}
-		records = append(records, record.Normalize())
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		defer rows.Close()
+
+		result := make([]AgentRecord, 0)
+		for rows.Next() {
+			record, err := scanAgentRecord(rows)
+			if err != nil {
+				return err
+			}
+			result = append(result, record.Normalize())
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		records = result
+		return nil
+	})
+	if listErr != nil {
+		return nil, listErr
 	}
 	return records, nil
 }
@@ -1159,11 +1256,9 @@ func (s *SQLiteGlobalAgentRegistryStore) deleteAgentControlWakeRows(ctx context.
 }
 
 func (s *SQLiteGlobalAgentRegistryStore) getAgentControlAgentByID(ctx context.Context, agentID string) (AgentRecord, error) {
-	db, err := s.dbHandle()
-	if err != nil {
-		return AgentRecord{}, err
-	}
-	row := db.QueryRowContext(ctx, `
+	var record AgentRecord
+	err := s.withRetryOnIOErr(func(db *sql.DB) error {
+		row := db.QueryRowContext(ctx, `
 		SELECT id, agent_id, root_session_id, parent_agent_id, parent_session_id, session_id, agent_path, depth,
 			agent_type, nickname, workflow, team_id, teammate_id, provider, model, reasoning_effort,
 			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
@@ -1173,7 +1268,10 @@ func (s *SQLiteGlobalAgentRegistryStore) getAgentControlAgentByID(ctx context.Co
 		FROM agent_control_agents
 		WHERE agent_id = ?
 	`, strings.TrimSpace(agentID))
-	record, err := scanAgentRecord(row)
+		var scanErr error
+		record, scanErr = scanAgentRecord(row)
+		return scanErr
+	})
 	if err != nil {
 		return AgentRecord{}, fmt.Errorf("read agent control agent: %w", err)
 	}

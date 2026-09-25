@@ -233,6 +233,47 @@ func NewRegistryService(ctx context.Context, cfg RegistryServiceConfig) (*Regist
 		}
 		mailboxStore.sharedOpen = openShared
 		agentStore.sharedOpen = openShared
+		// sharedReset backs the SQLITE_IOERR recovery path: another process can
+		// truncate the WAL to 0 bytes while this connection still holds a stale
+		// in-memory wal-index, which makes every later read fail with
+		// "sqlite3: disk I/O error".  Drop the pool and both store handles so
+		// the next ensure()→sharedOpen() re-opens it and re-runs the sidecar
+		// reconciliation (configureAgentControlSQLiteDB).
+		//
+		// Lock order matches openShared: service.mu → agentControlPathOpenMu
+		// (inside release) → store.openMu.  Callers must NOT hold store.openMu.
+		sharedReset := func() error {
+			service.mu.Lock()
+			defer service.mu.Unlock()
+			db := service.db
+			sharedKey := service.sharedKey
+			service.db = nil
+			service.sharedKey = ""
+			if db == nil {
+				releaseAgentControlWALState(agentStore.dsn)
+				return nil
+			}
+			var firstErr error
+			if sharedKey != "" {
+				if err := releaseAgentControlSharedDB(sharedKey, db); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			} else if err := db.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+			// Detach both stores; the next sharedOpen() call re-attaches them.
+			mailboxStore.openMu.Lock()
+			mailboxStore.db = nil
+			mailboxStore.openErr = nil
+			mailboxStore.openMu.Unlock()
+			agentStore.openMu.Lock()
+			agentStore.db = nil
+			agentStore.openErr = nil
+			agentStore.openMu.Unlock()
+			releaseAgentControlWALState(agentStore.dsn)
+			return firstErr
+		}
+		agentStore.sharedReset = sharedReset
 		// Memory DSN still opens eagerly for tests that inspect tables immediately.
 		if mailboxStore.path == "" || isGlobalMailboxMemoryDSN(mailboxStore.dsn) {
 			if err := openShared(); err != nil {
