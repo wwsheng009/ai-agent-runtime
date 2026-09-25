@@ -660,6 +660,15 @@ func chatProfileSwitchReportText(report *ProfileSwitchReport) string {
 	lines = append(lines, fmt.Sprintf("  失效: 锚点=%t 工具面=%s(%t) token计数=%t",
 		report.AnchorCleared, firstNonEmptyChatValue(report.ToolSurfaceScope, profileSwitchSurfaceScopeNone),
 		report.ToolSurfaceInvalidated, report.ContextTokenCountReset))
+	// ④ 旧 actor 驱逐：本地 chat 的 agent 工具策略在 actor 构建期固化，不驱逐就
+	// 不换面。这里显式呈现，避免"报告已收窄、请求面照旧"的静默失效。
+	if report.ToolSurfaceScope == profileSwitchSurfaceScopeActor {
+		if report.ActorEvicted {
+			lines = append(lines, "  生效面重建: 旧 actor 已驱逐（下一轮按新 profile 重建 agent/工具面）")
+		} else if report.InFlightTurn {
+			lines = append(lines, "  生效面重建: 延迟到本轮结束后的回合入口（在途 turn 不打断）")
+		}
+	}
 	for _, warning := range report.Warnings {
 		if text := strings.TrimSpace(warning); text != "" {
 			lines = append(lines, "  ! "+text)

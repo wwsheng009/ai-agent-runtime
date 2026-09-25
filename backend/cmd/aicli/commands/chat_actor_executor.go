@@ -169,6 +169,9 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	if err := ensureSessionDurableBeforeActor(session); err != nil {
 		return "", fmt.Errorf("persist runtime session: %w", err)
 	}
+	// 上一轮切换撞上在途 turn 时留下的延迟重建：actor 此刻已空闲，先驱逐再
+	// GetOrCreate，否则本回合仍会用到旧 agent 的工具策略（A1 的假开关失效模式）。
+	reconcilePendingChatProfileRebuild(session)
 	ctx = prepareAICLIActorRuntimeContext(ctx, session)
 
 	actor, err := chatActorForSession(ctx, session)
@@ -285,6 +288,7 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
 		return "", fmt.Errorf("local runtime host is not configured")
 	}
+	reconcilePendingChatProfileRebuild(session)
 	ctx = prepareAICLIActorRuntimeContext(ctx, session)
 
 	actor, err := chatActorForSession(ctx, session)
