@@ -688,6 +688,7 @@ S1 ──> S2 ──> S3 ──> S4 ──> S5 ──┬──> S6 ──┬─�
 | D11 | Web `GET /web/api/sessions` 的 `endpoint` / `ownership` 字段**未落地**（`chatWebSessionListItem` 仍只有 id/title/summary/message_count/created_at/updated_at/current），前端侧栏徽标 / 端点行 / 跨工作区分组随之未落地 | S9 只做了「⧉ 新窗口打开 + 深链 + spawn/open 端点」；子方案 P0 ① 与其后端字段是纯展示项，被挤出 S9 范围且未单列切片 | Web 子方案新增 §0.1「落地状态」标注未落地；后续 Web 侧收口切片按子方案 §5.1/§6.1 落地；**S11 已收敛**（见 §19.4） |
 | D12 | `resume` 的 `running_elsewhere` 前置检查**未落地**（`/web/api/sessions/resume` 无归属判定，全仓 Go 代码无该标识） | 同 D11：归属/互斥已由网格租约（`session-<sid>`）与 `spawn` 锁内二次检查覆盖；Web 端冲突弹窗属体验项 | Web 子方案 §0.1 / FR11 标注未落地；租约语义由 `lease_test.go` 覆盖（见 D9）；**S11 已收敛**（见 §19.4） |
 | D13 | 架构 §9.4 / §9.5 承诺的 `--mesh-allow-nonloopback` 与 `--mesh-journal` 两个进程级开关**未落地**（§9.7 的 flag 表却已按存在列出），`mesh/self` 也无审计开关回显 | 「文档说 A、代码做 B」：收口切片 S19 补实现而**不改文档承诺**；同时把 P9/P10/P11 三条只跑过临时脚本的治理语义机器化 | 网格方案 §11 登记「两开关已落地」；mesh-e2e.md §5 追加 M11/M12；基线 03=16（见 §27.3） |
+| D14 | 非回环入口（`--web-host 0.0.0.0` + 局域网 IP）首次带 `?token=` 能进，**F5 / 新标签页 / 标签页恢复必 403**：新引入页面导航 cookie `aicli_web_token`（HttpOnly / `SameSite=Strict` / 会话级，仅非回环下发，仅放行 `GET`/`HEAD` 的 `/web`、`/web/`；API 与写方法继续只认 `X-AICLI-Token` / `?token=`）；同时把前端取令牌顺序改为 **meta 优先、sessionStorage 兜底** | 子方案 §5.5 / §10.2 R12·M7 只规定「本进程令牌可经 meta / sessionStorage 保存、peer 令牌不得落存储」与「加载后抹掉地址栏 token」，**未覆盖无自定义请求头的文档导航如何回读令牌**：F5 既带不了请求头、也读不到 `sessionStorage`，cookie 是唯一随导航自动回传的通道。顺带修掉「进程重启换随机令牌后，`sessionStorage` 旧令牌先于 meta 新令牌进首个请求」的顺序缺陷 | 子方案 §5.5 补「页面导航 cookie」条目、§10.2 手工清单补刷新用例（均已回填）；`web-remote-api.md` §1 鉴权新增第 5 条；回归 `web_auth_test.go`（cookie 放行/生命周期/前端顺序）3 个新用例 |
 
 ---
 
@@ -906,14 +907,14 @@ peer 令牌依旧只出现在 `mesh/spawn` 返回的 URL 里、由服务端内�
 | 项 | 落点 | 说明 |
 | --- | --- | --- |
 | P2 ③ `refused` 文案（§5.2 回退路径） | `web/js/sessions.js` | `SPAWN_CODE_TEXT`：spawn 失败 code → 可执行文案（`mesh_spawn_not_allowed` / `mesh_disabled` / `mesh_nonloopback_denied` / `mesh_workspace_missing` / `mesh_cross_workspace_denied` / `mesh_spawn_timeout` / `mesh_spawn_failed`）；`refused` 追加 `aicli-mesh open <session> --print-url`，失败态追加 `aicli-mesh show <session>` |
-| P2 ⑤ 标题节点后缀（§7.3） | `web/js/sessions.js`、`web/js/chat.js` | 新增 `meshNodeSuffix()`（`· <工作区> · <节点短 id>`；网格不可用时空串）；`updateTitle` 拼接；`applyMeshView` 在 self 段变化时重算（否则要等下一次状态翻转才出现） |
+| P2 ⑤ 标题节点后缀（§7.3） | `web/js/sessions.js`、`web/js/chat.js` | 新增 `meshNodeSuffix()`（`· <工作区> · <节点短 id>`；网格不可用时空串）；`updateTitle` 拼接；`applyMeshView` 在 self 段变化时重算（否则要等下一次状态翻转才出现）。2026-09-25 扩展：标题以**会话标题**打头（`currentSessionLabel()`，与顶栏同口径；`updateSessionIdentity` 在切换 / 新建 / 重命名后重算） |
 | **不做**（留 S14+） | — | ② 接管（需 CLI `--takeover` + Web 入口 + 租约回收 + `orphaned` 提示）；④ resume SSE 事件化（需先核对 runtime 事件流） |
 
 ### 21.3 验证
 
 | 层 | 断言 |
 | --- | --- |
-| 前端契约 | `web_handlers_mesh_polish_test.go`：code 映射表全量、CLI 回退 / 诊断命令、调用点带会话 id（回退命令可复制）、`meshNodeSuffix` 实现 + 降级空串 + `applyMeshView` 重算 |
+| 前端契约 | `web_handlers_mesh_polish_test.go`：code 映射表全量、CLI 回退 / 诊断命令、调用点带会话 id（回退命令可复制）、`meshNodeSuffix` 实现 + 降级空串 + `applyMeshView` 重算、会话标题段（`currentSessionLabel` + `updateTitle` 拼接 + 身份变化重算） |
 | 门禁 | `go build ./...`、`go vet ./cmd/aicli/commands/ ./internal/mesh/`、`go test ./cmd/aicli/commands/ ./internal/mesh/`、`node --check`（ES 模块语法） |
 | E2E | 01/02/03 聚合回归（本切片不动端点与流，回归只作基线保护） |
 | 手工 | `web-testing.md` §2.7.3（标题后缀 / 双窗口辨识 / refused 文案与 CLI 回退） |
