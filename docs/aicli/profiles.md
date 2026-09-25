@@ -2,6 +2,7 @@
 
 > 状态：已实施（2026-09-24，实施方案 Batch 2：`aicli profile` 命令组 + 内置模板 + 估算单点）。
 > 代码位置：`backend/internal/profile/`、`backend/cmd/aicli/commands/profile*.go`。
+> 完整文档集（架构 / 设计 / 使用 / 配置，含项目绑定 FR-14）：[../profile/README.md](../profile/README.md)。
 
 本页只讲**运行 profile**（一个目录：`profile.yaml` + `agents/<id>/`），它决定一次会话的
 工具面、技能可见性、MCP 服务器、提示词组合与路径。

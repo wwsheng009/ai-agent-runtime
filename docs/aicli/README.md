@@ -18,6 +18,8 @@ Recommended entry points:
   - Portable AgentDefinition, `aicli chat --agent` (with or without profile), `spawn_agent.agent_type` defaults, `aicli agent stdio` ACP host, agents three-layer meanings, and difference from skill `openai.yaml`.
 - [profiles.md](./profiles.md)
   - Runtime profile guide (`profile.yaml` + `agents/`): schema fields and narrow-only semantics, the `agent.yaml` tools-shape constraint (profile parser vs portable agentdef — keep tool policy in `profile.yaml` `agents.<id>.tools` or `agents/<id>/tools/policy.yaml`), selection precedence (`--profile` > `profiles.default_profile`), `aicli profile list/show/validate/create` usage and exit codes, validation error/warning split, and the single-point token estimation.
+- [../profile/README.md](../profile/README.md)
+  - Profile 文档集（架构与运行时 / 设计与决策 / 使用手册 / 配置参考），含会话内切换语义（TUI `/profile use <ref>` vs Web composer `/profile <ref>`）、项目绑定（`<workspace>/.aicli/profile` 只读发现 + 显式应用）、D29 信任分级门控与 REST 端点表；本目录 `profiles.md` 保留为最短上手路径。
 - [tool_image_generate.md](./tool_image_generate.md)
   - `openai_image_generate` / `aicli image` / chat `/image` paths: OpenAI-compatible images API vs Codex native image generation, auto path selection, and output directories.
 - [debug-chat-status.md](./debug-chat-status.md)
