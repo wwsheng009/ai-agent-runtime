@@ -19,6 +19,7 @@ import { initMenu } from "./js/menu.js";
 import { initMsgFilter } from "./js/msg-filter.js";
 import { initSSE } from "./js/sse.js";
 import { initStream } from "./js/stream.js";
+import { initTodoPanel } from "./js/todos.js";
 import { initAboutSessionCopy, initAboutToken, initShortcutHelp, initTabs, initTheme } from "./js/ui.js";
 import { initStatusBar, loadStatusBar } from "./js/statusbar.js";
 
@@ -33,6 +34,7 @@ initStatusBar();
 initStream();
 initChat();
 initComposerPanel(); // 浮动 composer 面板（输入 + provider/model/reasoning + 动态状态条，任意页签可用）
+initTodoPanel(); // 任务列表浮动面板（贴在 composer 上沿；SSE tool_end 实时 + screen 回放）
 initMsgFilter(); // 对话区消息过滤面板（角色多选 + 正文搜索，服务端过滤）
 initRuntimeBar();
 initSessions();

@@ -1802,6 +1802,7 @@ func chatWebSSEFieldsFor(busEvent string) []webSSEFieldSpec {
 			webSSEFieldSpec{Name: "tool_name", Type: "string", Description: "工具名称"},
 			webSSEFieldSpec{Name: "tool_call_id", Type: "string", Description: "工具调用标识"},
 			webSSEFieldSpec{Name: "result_summary", Type: "string", Description: "结果摘要"},
+			webSSEFieldSpec{Name: "todo_snapshot", Type: "object", Description: "任务列表全量快照（仅 todos 工具带；items:[{content,status,active_form}] + session_id/goal_id）"},
 		)
 	case runtimechat.EventApprovalRequested:
 		fields = append(fields,

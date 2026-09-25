@@ -9,6 +9,7 @@ import { currentSessionLabel, getInputHistory, getInputHistoryIdx, meshNodeSuffi
 import { statusEl } from "./sse.js";
 import { clearStreamMessage, hideStreamMessage, isStreamActive, isStreamEnded } from "./stream.js";
 import { closeShortcutHelpIfOpen, toggleShortcutHelp, toggleTheme } from "./ui.js";
+import { applyTodoReplay } from "./todos.js";
 import { apiFetch, esc, showToast } from "./util.js";
 
 export var screenEl = document.getElementById("screen");
@@ -706,6 +707,9 @@ export function refreshScreen(forceClear, options) {
     .then(function (res) { return res.ok ? res.json() : null; })
     .then(function (data) {
       if (seq !== screenReqSeq) { return; } // 过期响应（会话已切换/已有更新请求）丢弃
+      // 任务列表回放通道（js/todos.js）：screen 快照自带会话级 todo_snapshot，
+      // 刷新页面 / 会话切换后据此恢复面板；无字段或已有实时快照时不覆盖。
+      applyTodoReplay(data && data.todo_snapshot);
       loadRuntimeMeta(); // 会话切换/命令执行后同步 provider/model/reasoning 权威值
       if (!data || !data.available) {
         // 无可用屏幕快照（无 surface / 空帧）：保留 screenEl 已有内容

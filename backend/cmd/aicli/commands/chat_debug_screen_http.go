@@ -43,6 +43,10 @@ type chatDebugScreenSnapshot struct {
 	// MessageWindow 是结构化 messages 的分页元信息（windowChatWebMessages
 	// 填充）。前端据此判断是否还有更早消息，以及下次上滚加载的游标。
 	MessageWindow *chatWebMessageWindowInfo `json:"message_window,omitempty"`
+	// TodoSnapshot 是会话里最近一次 todos 工具结果的全量快照（回放通道，
+	// 见 web_todo_snapshot.go）：刷新页面 / 会话切换后，web 客户端的任务列表
+	// 面板据此恢复，不必重放历史工具事件。无快照时省略该字段（前端保留现值）。
+	TodoSnapshot *chatWebTodoSnapshot `json:"todo_snapshot,omitempty"`
 }
 
 // chatWebMessageWindow 描述结构化 messages 的分页窗口（绝对索引，左闭右开），
@@ -518,6 +522,10 @@ func marshalChatWebScreenJSONWindow(window chatWebMessageWindow) ([]byte, error)
 // 过滤未激活时与 marshalChatWebScreenJSONWindow 完全一致。
 func marshalChatWebScreenJSONWindowFiltered(window chatWebMessageWindow, filter chatWebMessageFilter) ([]byte, error) {
 	snap := buildChatWebScreenSnapshotForFilter(window, filter)
+	// 回放通道（任务列表面板）：与消息窗口/过滤无关——快照是会话级「最近一次
+	// todos 工具结果」，历史页与搜索结果页都应带上，前端只在没有实时快照时兜底。
+	// 走这里而不是 build*：/debug/chat/screen 的 JSON 形状保持逐字节兼容。
+	snap.TodoSnapshot = chatWebTodoSnapshotForSession()
 	if !window.active() && !filter.active() {
 		// 未指定窗口：仍写入分页元信息（Total/Start/End/HasMore），
 		// 便于调用方统一处理响应形状；messages 保持全量。

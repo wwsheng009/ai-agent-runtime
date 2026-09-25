@@ -278,6 +278,12 @@ func chatWebSSEDataForEvent(ev runtimeevents.Event) map[string]interface{} {
 		pickField(data, payload, "tool_name")
 		pickField(data, payload, "tool_call_id")
 		pickField(data, payload, "result_summary")
+		// 任务列表面板的实时通道：todos 工具完成事件带
+		// payload.protocol_result.metadata.todo_snapshot（按工具作用域裁剪的全量
+		// 小视图）。只搬运裁剪快照，不整体透传 protocol_result（体积无上界）。
+		if snapshot := chatWebTodoSnapshotFromToolPayload(payload); snapshot != nil {
+			data["todo_snapshot"] = snapshot
+		}
 
 	case runtimechat.EventApprovalRequested:
 		pickField(data, payload, "turn_id")

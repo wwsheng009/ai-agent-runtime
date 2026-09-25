@@ -140,6 +140,19 @@ aicli chat --pprof
       把手可聚焦，方向键微调 8px、`Shift+方向键` 1px、`Home` 复位。
       回归：`scripts/verify-micro-web-composer.mjs`（沙盒）+ 真实浏览器临时脚本
       `backend/cmd/aicli/commands/web/tmp/composer-layer-check.mjs`（断言状态栏坐标零变化）。
+ - [ ] **任务列表浮层（贴在 composer 面板上沿）**：模型调用 `todos` 工具后，`#todo-panel`
+       （`#composer-panel` 内的绝对定位子层，`bottom: calc(100% + 1px)`）在 composer **上面**
+       展开，**底边与 composer 面板上沿严丝合缝**（左右各外扩 1px 对齐外边框、只有上圆角、
+       不画底边），因此停靠 / 自由拖动 / 折叠 composer 时都随它一起移动，不需要 JS 同步几何，
+       也不吃页面任何元素的高度；无快照时 `hidden` 不占位。标题行给出「已完成 N · 进行中 N ·
+       待处理 N」计数、进度条（`role=progressbar`）与当前进行项的执行态文案；标题行**最右端**的
+       折叠按钮 `▾/▸` 收起/展开（只收列表，计数保留），折叠态记 `localStorage`（`aicli.web.todos.v1`）。
+       数据两条通道：SSE `tool_end.todo_snapshot`（实时，按 `_event.sequence` 单调推进）与
+       `GET /web/api/screen?format=json` 的 `todo_snapshot`（刷新页面 / 会话切换后回放兜底，
+       不覆盖实时值）；会话开始/结束/切换先清空面板，等新会话事件或回放。
+       回归：`scripts/verify-micro-web-todos.mjs`（沙盒 + 静态契约）+ 真实 Chromium 几何探针
+       `backend/cmd/aicli/commands/web/tmp/todo-panel-geometry.mjs`（1280×800 / 390×844：
+       衔接 gap ≤1px、左右与宽度对齐、折叠与自由位置下仍衔接、无横向滚动条）。
 - [ ] **窄屏 composer（≤767px）**：输入框与发送键同排，发送键右对齐且贴底（`#prompt` 多行增高时
       按钮不跟着拉高）；`#prompt` 与 `#cfg-model` 字号 ≥16px（低于 16px 时 iOS 聚焦会放大整页）；
       可点按控件高度 ≥44px；输入框空态回到 CSS 最小高度（占位提示折行不再把空输入框撑成两行，
@@ -553,6 +566,7 @@ node scripts/verify-micro-web-copy-msg.mjs     # 单条消息复制：所有角�
 node scripts/verify-micro-web-question-answer.mjs # 提问回答写入：建议项 / 自由回答（Enter、提交按钮、Shift+Enter、IME、空答案）→ question_answer payload、收起对话框保留 composer 答案路由、服务端回执分支（stale 未送达告警 / resolved 不误报）、审批语义不变、index.html/style.css 静态不变量
 node scripts/verify-micro-web-pane-split.mjs   # 左右分栏助手（文件 / GIT 页签共用）：折叠 class 只在大屏生效、宽度写 CSS 变量并夹进可用范围（容器变窄时上限自己降）、端点空操作不抹记忆值、←→/Home/End 与落盘、拖拽（pane-resizing / 松手才落盘 / 折叠与非主键不起拖 / 失焦兜底）、双击复位、跨断点 onApply 与 onBreakpoint、记忆恢复与隐私模式降级、matchMedia 缺失按窄屏降级、元素缺失静默降级
 node scripts/verify-micro-web-composer.mjs     # 浮动 composer 面板：面板是 .layout 内浮层子节点（与 #main-col 平级，输入区/配置栏/动态状态条不在 #tab-main 内）、必需元素与既有 cfg-* id 全保留、菜单与 Ctrl+J 折叠入口接线（无第二份折叠逻辑）、style.css 浮层几何（.layout 内 absolute 停靠在状态栏上方 / 自由位置改 fixed 且清 transform / z-index 低于模态框 / 折叠规则）、**无让位机制**（没有 --composer-reserve、body 不为面板留白、#footer 规则无 composer 耦合）、行为（拖动跟随与夹取、键盘微调与 Home 复位、**全程不写页面级 CSS 变量**、Ctrl+J、localStorage 回放）
+node scripts/verify-micro-web-todos.mjs        # 任务列表浮层（贴在 composer 上沿）：结构（#todo-panel 在 #composer-panel 内且在标题行之前）与样式不变量（bottom:calc(100% + 1px) 衔接、[hidden] 不占位、折叠只收 .todo-body、进行中加粗 / 已完成删除线）；接线（sse.js 在 switch 前分流 tool_end / 会话边界、chat.js 应用 screen 回放、app.js 初始化、后端 web_schema.go 与 chat_debug_screen_http.go 两个字段名）；纯函数（解析裁剪：坏条目丢弃 / 整组不可用 → null、计数与进度、当前项、快照合并：runtime 按 seq 单调 / history 只兜底）；面板行为（无快照隐藏、回放恢复计数与逐项状态、实时旧序号不回退、会话切换清空、折叠与 localStorage 记忆、面板缺失静默降级）
 ```
 
 模块化后另有一层静态检查：用带 DOM stub 的 Node 脚本对 `app.js` 入口做动态 `import()`，可在不启浏览器的情况下抓出语法错误、缺失导出、模块求值期错误（拆分落地时即靠它在浏览器回归前拦截了两处问题）。检查思路：stub `document/window/localStorage/fetch/EventSource` 后 `await import("./app.js")`，任何模块图断裂都会在这里抛错。

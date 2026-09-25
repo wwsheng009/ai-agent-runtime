@@ -901,7 +901,29 @@
           配置文案只在标题行 #composer-summary 与窄屏 ⚙ 触发按钮上出现：面板底部不再重复
           一份 provider · model · reasoning（与三个选择框完全重复）。 -->
     <div id="composer-panel" class="composer-panel" role="region" aria-label="输入与模型配置（浮动面板）">
-      <div id="composer-header" class="composer-header">
+      <!-- 任务列表浮动面板（todo）：底边与 composer 面板上沿衔接——style.css 用
+            bottom:calc(100% + 1px) 把它贴在 #composer-panel 顶部（左/右各外扩 1px 对齐
+            外边框），因此它随 composer 停靠 / 拖动 / 折叠一起移动，不需要 JS 同步几何，
+            也不吃页面任何元素的高度。默认隐藏，有任务快照时由 js/todos.js 显示。 -->
+       <div id="todo-panel" class="todo-panel" role="region" aria-label="任务列表" hidden>
+         <div class="todo-head">
+           <span class="todo-title">任务</span>
+           <span id="todo-progress" class="todo-progress" aria-live="polite"></span>
+           <span class="todo-spacer"></span>
+           <span id="todo-current" class="todo-current"></span>
+           <!-- 折叠按钮固定在标题行最右（标题/计数在左、当前任务靠右收尾） -->
+           <button id="todo-toggle" class="todo-toggle" type="button" aria-expanded="true"
+             aria-controls="todo-body" title="折叠任务列表">▾</button>
+         </div>
+         <div id="todo-body" class="todo-body">
+           <div id="todo-progressbar" class="todo-progressbar" role="progressbar"
+             aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" title="任务完成进度">
+             <span id="todo-progressbar-fill" class="todo-progressbar-fill"></span>
+           </div>
+           <ul id="todo-list" class="todo-list"></ul>
+         </div>
+       </div>
+       <div id="composer-header" class="composer-header">
         <button id="composer-grip" class="composer-grip" type="button"
           title="拖动移动面板（方向键微调，Home 复位）" aria-label="移动浮动输入面板">⠿</button>
         <span class="composer-title">输入</span>

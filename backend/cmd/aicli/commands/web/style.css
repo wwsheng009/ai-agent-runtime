@@ -404,6 +404,10 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   pointer-events: none; text-transform: uppercase;
   user-select: none;
 }
+/* 带语言的代码块（pre.has-lang，js/markdown.js 输出）在顶部预留标签带：
+   标签绝对定位在带内，正文首行从带下方开始，语言标识不再压住第一行代码；
+   悬停才出现的「复制」按钮同样落在带内。无语言代码块不带 has-lang，保持原高度。 */
+#screen .msg-row.msg-assistant .msg-md pre.has-lang { padding-top: 24px; }
 
 /* ---- 单条消息复制（所有角色：抬头行最右的 ⧉ 图标，只复制本条正文） ----
    与 md|txt 切换同款：控件在抬头行内、正文之前。复制内容由 JS 从正文容器
@@ -996,6 +1000,76 @@ body.composer-dragging * { cursor: grabbing !important; user-select: none !impor
   margin-bottom: 0; padding-bottom: 2px; border-bottom: none;
 }
 
+/* ---- 任务列表浮动面板（todo，贴在 composer 面板上沿） ----
+   结构见 index.html #todo-panel（#composer-panel 的子节点，位于标题行之前）。
+   几何：bottom:calc(100% + 1px) 把面板底边对到 composer 面板外边框上沿（绝对定位的
+   包含块是 padding box，100% 落在边框内侧，+1px 正好补掉 border-top），
+   left/right:-1px 让左右外扩到卡片外边框，宽度自动与 composer 面板一致。
+   因此它是「底边与 composer 面板上沿衔接」的独立浮层：随 composer 停靠 / 拖动 /
+   折叠一起移动，不需要 JS 同步几何，也不吃页面任何元素的高度（abs 子元素不参与
+   父级盒模型，composer.js 的拖动 / 夹取测量不受影响）。
+   数据与折叠逻辑见 js/todos.js：无快照时 hidden（不占位），有任务时显示。 */
+#todo-panel {
+  position: absolute; z-index: 1;
+  left: -1px; right: -1px; bottom: calc(100% + 1px);
+  background: var(--bg3); border: 1px solid var(--border2); border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  box-shadow: 0 -6px 16px var(--shadow);
+  font-size: 12px;
+  overflow: hidden;
+}
+#todo-panel[hidden] { display: none; }
+#todo-panel .todo-head {
+  display: flex; align-items: center; gap: 6px;
+  /* 右侧留 6px 贴着折叠按钮（按钮自身有 6px 内边距），左侧 8px 对齐列表文字 */
+  padding: 4px 6px 4px 8px;
+}
+#todo-panel .todo-title { font-size: 11px; font-weight: 600; color: var(--fg3); }
+#todo-panel .todo-progress { font-size: 11px; color: var(--fg3); white-space: nowrap; }
+#todo-panel .todo-spacer { flex: 1 1 auto; }
+#todo-panel .todo-current {
+  min-width: 0; max-width: 46%; font-size: 11px; color: var(--fg4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#todo-panel .todo-current:empty { display: none; }
+#todo-panel .todo-toggle {
+  padding: 1px 6px; line-height: 1.3; font-size: 11px;
+  background: transparent; color: var(--fg3);
+  border: 1px solid transparent; border-radius: 4px;
+}
+#todo-panel .todo-toggle:hover { background: var(--hoverBg2); color: var(--fg); }
+#todo-panel .todo-progressbar {
+  height: 3px; margin: 0 8px 5px; border-radius: 2px;
+  background: var(--bg2); overflow: hidden;
+}
+#todo-panel .todo-progressbar-fill {
+  display: block; height: 100%; width: 0;
+  background: var(--accent); transition: width .18s ease;
+}
+#todo-panel .todo-list {
+  list-style: none; margin: 0; padding: 0 8px 6px;
+  max-height: 168px; overflow-y: auto;
+}
+#todo-panel .todo-item {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 1px 0; color: var(--fg2);
+}
+#todo-panel .todo-icon { flex: 0 0 auto; width: 12px; text-align: center; }
+#todo-panel .todo-text {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#todo-panel .todo-status-pending { color: var(--fg4); }
+#todo-panel .todo-status-in-progress { color: var(--accent); }
+#todo-panel .todo-status-in-progress .todo-text { font-weight: 600; }
+#todo-panel .todo-status-completed { color: var(--fg4); }
+#todo-panel .todo-status-completed .todo-text { text-decoration: line-through; }
+#todo-panel .todo-more { padding: 1px 0; color: var(--fg4); font-style: italic; }
+/* 全部完成：整体降噪（勾除结果仍可见，但不再抢注意力） */
+#todo-panel.todo-all-done { opacity: .82; }
+/* 折叠态：只留标题行（计数与当前任务仍可见），列表与进度条收起 */
+#todo-panel.todo-collapsed .todo-body { display: none; }
+#todo-panel.todo-collapsed .todo-head { padding-bottom: 3px; }
+
 /* 面板不再占用正文区 / 状态栏的空间：body 保持基础内边距，没有占位变量。 */
 
 /* 窄屏：配置摘要隐藏（同一份文案已由 #cfg-toggle 承载），z-index 降到会话抽屉（30）
@@ -1004,6 +1078,10 @@ body.composer-dragging * { cursor: grabbing !important; user-select: none !impor
   #composer-panel { z-index: 20; padding: 4px 8px 8px; }
   #composer-panel .composer-summary { display: none; }
   #composer-panel .composer-icon-btn { padding: 4px 10px; }
+  /* 任务列表：窄屏不显示「当前任务」短语（同一份信息已在列表首行），
+     列表高度收紧，避免浮层在矮屏上盖住正文 */
+  #todo-panel .todo-current { display: none; }
+  #todo-panel .todo-list { max-height: 120px; }
 }
 
 /* ---- 底部状态栏（micro web client 版 ChatBar） ---- */
@@ -1219,6 +1297,9 @@ body.sidebar-collapsed #sidebar {
   pointer-events: none; text-transform: uppercase;
   user-select: none;
 }
+/* 顶部标签带（与对话区同款契约，见 #screen ... pre.has-lang）：语言标签与
+   「复制」按钮都在带内，正文首行从带下方开始，不与语言标识叠在一起。 */
+#stream-msg pre.has-lang { padding-top: 24px; }
 
 /* 图像预览（assistant_image_progress） */
 #stream-msg .image-preview {
@@ -2436,6 +2517,8 @@ body.pane-resizing * { cursor: col-resize !important; user-select: none !importa
   font-size: 10px; color: var(--fg4); font-style: italic;
   pointer-events: none; text-transform: uppercase; user-select: none;
 }
+/* 顶部标签带（与对话区 / 流式气泡同款契约）：语言标识不再与正文首行重叠。 */
+.files-view-md pre.has-lang { padding-top: 24px; }
 
 /* ---- 「GIT」页签：git 管理器（js/git.js）---- */
 #tab-git { padding-top: 8px; overflow: auto; }

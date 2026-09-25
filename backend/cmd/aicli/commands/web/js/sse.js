@@ -8,6 +8,7 @@ import { loadRuntimeMeta } from "./runtime.js";
 import { loadStatusBar } from "./statusbar.js";
 import { handleMeshStreamEvent, loadSessions, meshResumeSeq, notifySessionSwitchedCompleted, notifySharedStreamState } from "./sessions.js";
 import { addStreamImage, appendStreamReasoning, appendStreamText, beginStream, endStream, isStreamActive, renderStream, setStreamText, setStreamTool, startTypeTimer } from "./stream.js";
+import { handleTodoSSEEvent } from "./todos.js";
 import { isNetDegraded, onNetStateChange, webAuthToken } from "./util.js";
 
 export var statusEl = document.getElementById("connection-status");
@@ -100,6 +101,12 @@ function renderDynamicStatus() {
 function onSSEEvent(eventName, data) {
   logEvent(eventName, data);
   lastSequence = (data && data._event && data._event.sequence) || lastSequence;
+
+  // 任务列表浮动面板（composer 上沿，js/todos.js）：
+  //   - tool_end 带 todo_snapshot（仅 todos 工具）→ 实时全量替换；
+  //   - 会话开始/结束/切换 → 清空并隐藏，等新会话的事件或 /web/api/screen 回放。
+  // 放在 switch 之前：面板更新与下方分支（流式渲染、对话区刷新）互不依赖。
+  handleTodoSSEEvent(eventName, data);
 
   switch (eventName) {
     case "connected":
