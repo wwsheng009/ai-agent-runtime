@@ -52,9 +52,19 @@ type LineEditorHooks struct {
 	// transcript overlay. Returning false preserves the editor's normal
 	// transpose-character behavior, so non-chat editors are unchanged.
 	OnTranscriptRequested func(LineEditorSnapshot) bool
-	OnSubmit              func(LineEditorSnapshot) (LineEditorReplacement, bool)
-	OnCancelPopup         func(LineEditorSnapshot) bool
-	OnCancel              func(LineEditorSnapshot) bool
+	// ActionForChord 把规范化 chord（如 "shift+tab"、"ctrl+t"）解析为已注册的
+	// keymap 动作 id；nil 表示不启用动作路由。
+	ActionForChord func(chord string) (string, bool)
+	// OnActionKey 在按键解析出已注册动作时调用。claimed 表示宿主认领该键
+	// （编辑器吞掉它）；exitEditor 表示宿主需要接管屏幕，编辑器以
+	// ErrInteractiveInputTranscriptRequested 退出（例如全屏 transcript pager）。
+	OnActionKey func(snapshot LineEditorSnapshot, action string) (claimed bool, exitEditor bool)
+	// CollapsePastedText 控制大段粘贴是否折叠为占位符（提交时仍发送全文）。
+	// nil 表示使用默认行为（折叠）。
+	CollapsePastedText *bool
+	OnSubmit           func(LineEditorSnapshot) (LineEditorReplacement, bool)
+	OnCancelPopup      func(LineEditorSnapshot) bool
+	OnCancel           func(LineEditorSnapshot) bool
 	// MaxVisibleRows bounds the editor viewport. Zero preserves the legacy
 	// unbounded rendering behavior used by transient prompts and tests.
 	// ResolveMaxVisibleRows, when set, is evaluated for every snapshot and

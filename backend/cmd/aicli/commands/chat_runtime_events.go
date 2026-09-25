@@ -5669,6 +5669,7 @@ func approvalPriorityPromptLines(approval *runtimechat.ApprovalRequest, contextL
 		}
 	}
 	lines = append(lines, "[审批] 工具："+toolName)
+	lines = append(lines, approvalExplanationLines(approval)...)
 
 	if approval != nil {
 		if reason := strings.TrimSpace(approval.Reason); reason != "" {

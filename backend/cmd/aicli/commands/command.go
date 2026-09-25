@@ -323,7 +323,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		if arg == "" || strings.EqualFold(firstToken(arg), "list") || strings.EqualFold(firstToken(arg), "ls") {
 			return handleBacktrackCommand(session, "/backtrack "+arg)
 		}
-		printChatCommandOutput(session, "提示: /rewind <checkpoint_id> 尚未接线；数字参数请用 /backtrack <user_turn_index>\n用法: /backtrack [list|<index> --apply|--both|--edit|--submit]")
+		printChatCommandOutput(session, "提示: /rewind 仅支持数字 user turn 序号（等价 /backtrack <index>）与 list/select；checkpoint-id 直接恢复未提供\n用法: /backtrack [list|select|audit|<index> --apply|--both|--edit|--submit]")
 		return false
 	}
 	if commandMatches(cmdLower, "/provider") {
@@ -367,6 +367,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	}
 	if commandMatches(cmdLower, "/permission-mode") || commandMatches(cmdLower, "/mode") {
 		return handlePermissionModeCommand(session, command)
+	}
+	if commandMatches(cmdLower, "/hotkeys") {
+		return handleHotkeysCommand(session, command)
 	}
 	if commandMatches(cmdLower, "/trust") {
 		return handleTrustCommand(session, command)

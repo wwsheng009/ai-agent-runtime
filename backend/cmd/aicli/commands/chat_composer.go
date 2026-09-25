@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/keymap"
 )
 
 type chatComposerController struct {
@@ -103,6 +104,9 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 		OnTerminalWrite:       c.onTerminalWrite,
 		OnComplete:            c.onComplete,
 		OnTranscriptRequested: c.onTranscriptRequested,
+		ActionForChord:        chatComposerActionForChord,
+		OnActionKey:           c.onActionKey,
+		CollapsePastedText:    chatComposerCollapsePastedText(c.session),
 		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
 		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
 		SuppressSubmitEcho:    chatComposerUsesFixedSurface(c.session),
@@ -237,6 +241,25 @@ func (c *chatComposerController) onTranscriptRequested(snapshot ui.LineEditorSna
 	// exact text/cursor first so the next composer instance restores the draft.
 	c.onChange(snapshot)
 	return true
+}
+
+// onActionKey 分发 keymap 动作：claimed 决定编辑器是否吞掉该键，exitEditor
+// 表示需要把屏幕交给宿主（全屏 pager）。均未命中时按键回落到编辑器原有语义
+// （例如 ctrl+t 未被认领时仍是 transpose）。
+func (c *chatComposerController) onActionKey(snapshot ui.LineEditorSnapshot, action string) (bool, bool) {
+	if c == nil || c.session == nil {
+		return false, false
+	}
+	switch keymap.Action(action) {
+	case keymap.ActionPermissionCycle:
+		return cycleChatPermissionMode(c.session), false
+	case keymap.ActionTranscriptPager:
+		if c.onTranscriptRequested(snapshot) {
+			return true, true
+		}
+		return false, false
+	}
+	return false, false
 }
 
 func normalizeChatComposerReadError(session *ChatSession, err error) error {

@@ -102,6 +102,9 @@ const (
 	editorKeyFocusGained
 	editorKeyFocusLost
 	editorKeyEscapeDropped
+	// editorKeyAction 是没有传统编辑器语义、只服务于 keymap 动作路由的按键
+	// （例如 shift+tab / alt+m）。未命中动作时被吞掉，绝不插入文本。
+	editorKeyAction
 )
 
 type editorKey struct {
@@ -109,6 +112,9 @@ type editorKey struct {
 	r                  rune
 	fromCarriageReturn bool
 	fromConsoleCtrlV   bool
+	// chord 是规范化按键组合（如 "ctrl+t"、"shift+tab"），供 keymap 动作路由
+	// 使用；空串表示该键不参与动作路由。
+	chord string
 }
 
 var interactiveInputCarryover struct {
@@ -333,6 +339,9 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 	}
 	line := []rune(initialText)
 	composer := NewComposerState()
+	if hooks != nil {
+		composer.SetCollapseLargePaste(hooks.CollapsePastedText)
+	}
 	composer.SetText(initialText)
 	cursor := initialCursor
 	if cursor < 0 || cursor > len(line) {
@@ -1176,6 +1185,20 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 				continue
 			}
 			continue
+		}
+
+		// keymap 动作路由：命中已注册动作且被宿主认领时吞掉该键；未注册或
+		// 宿主返回 false 时回落到编辑器原有语义（例如 ctrl+t 仍是 transpose）。
+		if key.chord != "" && hooks != nil && hooks.ActionForChord != nil && hooks.OnActionKey != nil {
+			if action, resolved := hooks.ActionForChord(key.chord); resolved {
+				claimed, exitEditor := hooks.OnActionKey(snapshot(), action)
+				if exitEditor {
+					return "", ErrInteractiveInputTranscriptRequested
+				}
+				if claimed {
+					continue
+				}
+			}
 		}
 
 		switch key.kind {
@@ -2159,17 +2182,17 @@ func decodeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 		if len(pending) >= 2 && pending[1] == '\n' {
 			return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter}, consumed: 2}, true
 		}
-		return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter, fromCarriageReturn: true}, consumed: 1}, true
+		return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter, fromCarriageReturn: true, chord: "enter"}, consumed: 1}, true
 	case '\n':
-		return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter}, consumed: 1}, true
+		return decodedInteractiveKey{key: editorKey{kind: editorKeyEnter, chord: "enter"}, consumed: 1}, true
 	case 15:
 		// Ctrl+O is the portable control-key fallback for inserting a newline.
 		// Ctrl+J is indistinguishable from a terminal LF/Enter submission.
-		return decodedInteractiveKey{key: editorKey{kind: editorKeyInsertNewline}, consumed: 1}, true
+		return decodedInteractiveKey{key: editorKey{kind: editorKeyInsertNewline, chord: "ctrl+o"}, consumed: 1}, true
 	case '\t':
-		return decodedInteractiveKey{key: editorKey{kind: editorKeyComplete}, consumed: 1}, true
+		return decodedInteractiveKey{key: editorKey{kind: editorKeyComplete, chord: "tab"}, consumed: 1}, true
 	case '\b', 127:
-		return decodedInteractiveKey{key: editorKey{kind: editorKeyBackspace}, consumed: 1}, true
+		return decodedInteractiveKey{key: editorKey{kind: editorKeyBackspace, chord: "backspace"}, consumed: 1}, true
 	case 1:
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyHome}, consumed: 1}, true
 	case 2:
@@ -2189,7 +2212,7 @@ func decodeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 	case 18:
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyReverseSearch}, consumed: 1}, true
 	case 20:
-		return decodedInteractiveKey{key: editorKey{kind: editorKeyTranspose}, consumed: 1}, true
+		return decodedInteractiveKey{key: editorKey{kind: editorKeyTranspose, chord: "ctrl+t"}, consumed: 1}, true
 	case 11:
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyKillToEnd}, consumed: 1}, true
 	case 23:
@@ -2234,6 +2257,9 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 			return decodedInteractiveKey{key: editorKey{kind: editorKeyDeleteForwardWord}, consumed: 2}, true
 		case '\b', 127:
 			return decodedInteractiveKey{key: editorKey{kind: editorKeyDeleteWord}, consumed: 2}, true
+		case 'm', 'M':
+			// Alt+M 是 Windows 终端里 Shift+Tab 送不到进程时的回退键。
+			return decodedInteractiveKey{key: editorKey{kind: editorKeyAction, chord: "alt+m"}, consumed: 2}, true
 		}
 		// Bare ESC or an unhandled alt-modified key. Drop the ESC and keep processing.
 		return decodedInteractiveKey{key: editorKey{kind: editorKeyIgnore}, consumed: 1}, true
@@ -2270,6 +2296,10 @@ func decodeEscapeInteractiveKey(pending []byte) (decodedInteractiveKey, bool) {
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyHome}, consumed: i + 1}, true
 			case 'F':
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyEnd}, consumed: i + 1}, true
+			case 'Z':
+				// CSI Z（含 CSI 1;2Z）：Shift+Tab。传统编辑器没有该键语义，
+				// 统一交给 keymap 动作路由处理。
+				return decodedInteractiveKey{key: editorKey{kind: editorKeyAction, chord: "shift+tab"}, consumed: i + 1}, true
 			case 'I':
 				return decodedInteractiveKey{key: editorKey{kind: editorKeyFocusGained}, consumed: i + 1}, true
 			case 'O':

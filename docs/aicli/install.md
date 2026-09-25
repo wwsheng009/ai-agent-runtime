@@ -625,6 +625,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | 命令 | 用途 |
 |---|---|
 | `/help`、`/?` | 显示 slash 命令帮助；帮助内容由当前 catalog 渲染 |
+| `/hotkeys [reload]` | 显示**当前生效**的快捷键（含用户覆盖与配置告警）、固定快捷键清单与 `keybindings.json` 路径；`reload` 重新读取用户按键配置 |
 | `/exit`、`/quit`、`/q` | 退出聊天 |
 | `/clear`、`/cls` | 清空当前会话历史 |
 | `/new` | 创建新会话 |
@@ -680,6 +681,11 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - `/accounts` 的备用屏是**可刷新**的：屏内按 `r`（或 `R`）提交（或复用）一次后台刷新并立刻重投影缓存快照，页脚常驻 `r 刷新显示` 提示；任务完成时屏幕会自动从「后台刷新中」翻到「已刷新」并带上新余额，不需要退出屏幕再敲一次命令。屏内刷新沿用打开屏幕那一刻的 `--enabled-only` / `--timeout` 参数，提交失败（例如过滤后没有目标）只在状态行显示 `刷新未提交` + 原因，缓存表格照常显示。`/account` 单账户屏、`/usage`、`/debug`、`/web` 仍是静态快照屏（没有 `r` 键）。
 - 交互式 TUI 会把当前 provider 的账户余额显示在底部状态栏，并在启动后立即刷新一次，随后按 `aicli.balance.refresh_interval` 定时刷新。对于未声明 `site_type` 的 `openai` 协议 provider（例如直连 DeepSeek 网关），TUI 会在首个刷新周期内探测并识别站点类型（`deepseek` / `sub2api` / `new-api`）后拉取余额；探测结果与余额仅保存在会话本地，不改写配置文件。刷新失败时保留最后一次成功值；探测到不支持账户查询的 upstream 则仅探测一次，不再每轮重试探测。
 - `/stream`、`/s`、`/normal` 会更新当前会话，并在可写配置存在时写回 `aicli.chat.stream`。
+- 交互式快捷键支持用户覆盖：配置文件为 `$AICLI_HOME/keybindings.json`（未设置时 `~/.aicli/keybindings.json`），只写要改的 action，未提及的保持默认；绑定值可为字符串或字符串数组，空数组 `[]` 表示禁用。当前可重映射动作：`app.permission.cycle`（默认 `shift+tab`、`alt+m`）与 `app.transcript.pager`（默认 `ctrl+t`）。文件缺失、JSON 损坏、未知 action、无法解析的按键都只告警并回退默认，不会导致启动失败；改完执行 `/hotkeys reload` 生效，`/hotkeys` 查看当前生效表。示例：`{"app.permission.cycle": ["alt+c"]}`。
+- 权限模式循环键（默认 `shift+tab`，Windows 终端可用 `alt+m`）按 `default → accept_edits → plan → bypass_permissions → default` 顺序切换；进入 `bypass_permissions` 仍需二次确认，弹层/选择器持有输入时按键不会抢占。
+- 大段粘贴默认折叠为输入框占位符（提交时仍发送全文）；设置 `aicli.chat.collapse_pasted_text: false` 可关闭折叠、原样显示粘贴内容。
+- 审批面板在工具名后会先给一行通俗解释（`[说明] 动作 / 目标 / 影响`），再列原因、风险等级、上下文与参数摘要；解释是启发式规则、不调用模型，识别不出时不会输出任何猜测。按 `[3]` 可展开完整参数。
+- 交互模式的完整说明（按键分层与重映射、终端能力矩阵、粘贴与附件语义、输入所有权、排障）见 [interactive-mode.md](./interactive-mode.md)。
 - `/theme` 支持双轴主题：明暗（`auto|dark|light`）与配色（`classic|focus|contrast|mono`）。会立即切换当前终端主题，并在可写配置存在时写回 `aicli.theme.name`（配色）与 `aicli.theme.mode`（明暗）。无参数时交互选择；`list`/`status`/`preview` 只读（`list`/`preview` 带角色色样例）；可写 `/theme dark`、`/theme focus`、`/theme light contrast` 等。配色别名：`default`/`balanced`→focus，`high-contrast`→contrast，`minimal`→mono。启动优先级：`--theme` > `AICLI_THEME`/`AICLI_THEME_MODE` > 配置文件。
 - `/resume` 会打开按最后更新时间倒序排列的全屏历史会话选择器，默认仅显示 `workspace_path` 与当前工作目录一致的历史会话；`/resume --cwd` 可显式声明相同行为。不再把候选项挤在聊天输入框上方的小弹层中。使用方向键或 `j`/`k` 移动，`PgUp`/`PgDn` 翻页，`Home`/`End` 跳到首尾，`/` 搜索，回车恢复，`Esc` 或 `q` 取消。当前会话和只有 system prompt 的启动占位 session 不会出现在列表中；不支持 ANSI/TTY 的环境自动回退到编号输入列表。
 - `/resume latest` 直接恢复最近的其他可恢复会话。全屏选择器显示最后更新时间（绝对时间与相对时间）、会话轮次、消息数、清理后的标题和选中会话摘要；session id、protocol、provider 和 model 只进入搜索索引，不占用候选行。轮次按持久化的 user 消息数统计，消息数包含 system、user、assistant 和 tool 消息。

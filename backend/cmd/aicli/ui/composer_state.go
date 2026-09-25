@@ -20,10 +20,28 @@ type ComposerState struct {
 	text               []rune
 	pendingPastes      []PendingPaste
 	largePasteCounters map[int]int
+	// collapseLargePaste 为 nil 时按默认行为折叠大段粘贴；显式 false 时
+	// 原样插入全文（对齐 CommandCode 的 collapsePastedText=false）。
+	collapseLargePaste *bool
 }
 
 func NewComposerState() *ComposerState {
 	return &ComposerState{}
+}
+
+// SetCollapseLargePaste 配置大段粘贴是否折叠为占位符（nil 表示默认折叠）。
+func (c *ComposerState) SetCollapseLargePaste(enabled *bool) {
+	if c == nil {
+		return
+	}
+	c.collapseLargePaste = enabled
+}
+
+func (c *ComposerState) largePasteCollapseEnabled() bool {
+	if c == nil || c.collapseLargePaste == nil {
+		return true
+	}
+	return *c.collapseLargePaste
 }
 
 func NormalizePastedText(text string) string {
@@ -101,7 +119,7 @@ func (c *ComposerState) HandlePasteAt(cursor int, pasted string) int {
 		return cursor
 	}
 	charCount := utf8.RuneCountInString(pasted)
-	if charCount > LargePasteCharThreshold {
+	if charCount > LargePasteCharThreshold && c.largePasteCollapseEnabled() {
 		placeholder := c.nextLargePastePlaceholder(pasted, charCount)
 		cursor = c.clampCursor(cursor)
 		placeholderLen := utf8.RuneCountInString(placeholder)

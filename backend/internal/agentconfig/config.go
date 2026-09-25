@@ -618,6 +618,9 @@ type AICLIChatConfig struct {
 	FastMode      *bool                     `yaml:"fast_mode,omitempty" mapstructure:"fast_mode"`
 	TerminalTitle *AICLITerminalTitleConfig `yaml:"terminal_title,omitempty" mapstructure:"terminal_title"`
 	Notifications *AICLIChatNotifications   `yaml:"notifications,omitempty" mapstructure:"notifications"`
+	// CollapsePastedText 控制大段粘贴是否折叠为输入框占位符（提交时仍发送
+	// 全文）。使用指针以便区分“未配置”（默认折叠）与显式 false（原样显示）。
+	CollapsePastedText *bool `yaml:"collapse_pasted_text,omitempty" mapstructure:"collapse_pasted_text"`
 	// Routing 仅在工作区偏好文件（chat-prefs.yaml）中有意义（方案 §3.3）。
 	// 全局配置中的 aicli.chat.routing 不参与解析——解析器只读
 	// aicli.main_agent.routing / aicli.subagents.routing（见 routing_resolution.go）。

@@ -49,6 +49,16 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			},
 		},
 		{
+			Name:    "/hotkeys",
+			Usage:   "/hotkeys [reload]",
+			Summary: "显示当前生效的快捷键与固定按键（reload 重新读取 ~/.aicli/keybindings.json）",
+			Group:   string(chatSlashCommandGroupHelp),
+			Args: []chatSlashCommandArgSpec{
+				{Token: "reload", Summary: "重新加载用户按键配置"},
+			},
+			AcceptsArgs: true,
+		},
+		{
 			Name:        "/exit",
 			Aliases:     []string{"/quit", "/q"},
 			Usage:       "/exit",
