@@ -223,7 +223,7 @@
 | 文档落地 | 已完成 | 本文件 |
 | §6 包名调整 | 已完成 | `internal/api/skills` → `internal/api/runtimeapi`，见 §6 执行结果 |
 | P2 占位符与参数 | 已完成 | `internal/skill/substitute.go` + TUI `/skill` + API `skill_args` + 灰度开关，含单测 |
-| P1 标准字段 | 已完成（生效面） | frontmatter 全字段解析 + `user-invocable` / `disable-model-invocation` / `when_to_use` 生效点 + `~/.agents/skills` 遮蔽与规范警告；`allowed-tools` 与 `model`/`effort` 仅解析透出，尚未接入工具策略与执行建议 |
+| P1 标准字段 | 已完成 | frontmatter 全字段解析 + `user-invocable` / `disable-model-invocation` / `when_to_use` 生效点 + `~/.agents/skills` 遮蔽与规范警告；`allowed-tools`/`disallowed-tools` 折成本回合工具面收窄（只减不增，未命中进诊断），`model`/`effort` 作为执行建议写入 guide 并影响本回合 `${effort}` |
 | P3 发现对齐与遮蔽诊断 | 已完成（核心） | `~/.agents/skills` 用户根、`--skill`/`--no-skills`、同名遮蔽与规范 warning 进入 `codex_list` 响应 |
 | P5 per-skill 启停 | 已完成（配置/热重载/API/TUI/Web） | `skills_runtime.disabled_skills` + `~/.agents/skills`；三处 loader 过滤器权威点同源；`config/document` 写入热生效；TUI `/skills disable\|enable <name>`、选择器 `x` 键、Web 列表/详情开关均走同一条"写配置 + 运行面热刷新"链路 |
 | P4 CLI add/list/remove | 已完成 | `aicli skill list [--debug]`、`skill remove <name> [-g]`、`skill add <owner/repo>[@ref]`（tarball + 校验 + 来源记录 + 路径穿越防护） |
@@ -257,7 +257,8 @@
   - `go test ./internal/skill ./internal/agentconfig ./internal/profileinput ./internal/bootstrap ./internal/runtimeserver -count=1`：通过；
   - `go test ./internal/api/runtimeapi -run 'TestBuildSkillExposureMessages|TestCodexList|TestCatalog|TestSkill' -count=1`：通过；
   - `go test ./cmd/aicli/commands -run 'TestRunSkill|TestParseSkillAddSource|TestExtractSkillTarGz|TestLocateSkillDirInArchive|TestResolveConfiguredSkillDirs|TestSkill|TestChatSkill|TestBuildFunctionCatalog' -count=1`：通过。
-- 仍未做：P1 的 `allowed-tools` 策略求交与 `model`/`effort` 执行建议（P5 四个入口——TUI 命令、TUI 选择器、Web 列表、Web 详情——已全部接通）。
+- 仍未做（第二轮结束时）：TUI `/skills` picker 内的启停交互、Web 详情页开关；P1 的
+  `allowed-tools` 策略求交与 `model`/`effort` 执行建议（分别由第三、四轮落地）。
 
 ### 第三轮实施记录（2026-09-25，P5 交互面）
 
@@ -316,6 +317,36 @@
   - 全包 `go test ./cmd/aicli/commands -count=1` 观察到一个与 skill 无关的顺序敏感用例
     `TestStreamingAssistantFinalTailTransfersExactlyOnceToNativeHistory` 失败（单独运行与和
     本轮新增用例同跑均通过），判断为并发会话在 streaming/history 区域的既有抖动，未做改动。
+
+### 第四轮实施记录（2026-09-25，P1 工具策略求交与执行建议）
+
+- 生效点：`/skill` 回合物化 pin 时（`chat_skill_turn.go` + 新文件
+  `chat_skill_tool_restriction.go`）。选这个点是因为请求工具面确实来自本回合
+  selection——`chat_core.go` 的 `Tools: toolDefinitionsFromSelection(selection)`，
+  所以对 selection 的过滤是真实生效，而不是只写在提示词里的"君子协定"。
+- 语义（与既有工具策略同向：**只减不增**）：
+  - `allowed-tools` 非空 → 本回合工具面收窄到「允许的名字 ∪ 触发本回合的 skill 函数」，
+    绝不放大用户/会话已允许的工具面；skill 函数本身恒保留（本回合由它触发）；
+  - `disallowed-tools` → 恒从 `BuiltinFunctions` / `SkillFunctions` /
+    `FinalFunctionNames` / `Schemas` 四个列表剔除；
+  - 名字按函数目录（schema 索引，大小写不敏感）解析；Claude Code 风格的括号限定
+    （`Bash(git:*)`）取括号前的工具名，限定内容记入 `QualifiedAllowed` 并在 guide 里说明
+    "本运行时无命令级准入层，仅工具名生效"——不给"命令已被限制"的错觉；
+  - 未命中的 `allowed-tools` 进 `UnavailableAllowed` 并写进 guide 的诊断行，沿用既有
+    unavailable 语义（不阻断回合）；
+  - 收窄在叠加之后执行（先 pin 程序、再做减法）；即使本回合没有 pin 到任何工具
+    （例如 skill 函数不在目录里）也照常收窄，避免静默失去限制。
+- 执行建议：`model` / `effort` 只作建议——写进本回合 guide 的
+  `## Skill execution hints`，并把 skill 声明的 `effort` 作为本回合 `${effort}`
+  占位符取值（不覆盖会话模型与推理强度）。
+- 测试：`chat_skill_tool_restriction_test.go`——声明解析（`Bash(git:*)`）、命中/未命中诊断、
+  "只减不增"的白名单收窄、纯剔除、会话级稳定快照不被修改，以及端到端
+  SKILL.md → pin → overlay 之后 `write` 真的从请求 schema 消失。
+- 验证命令与结果：
+  - `go build ./...`：通过；
+  - `go test ./cmd/aicli/commands -run 'TestParseSkillToolDeclaration|TestApplySkillToolRestriction|TestSkillTurnHints|TestRestrictFunctionSelection|TestResolveSkillTurnPin' -count=1`：通过；
+  - `go test ./cmd/aicli/commands -run 'TestSkillTurn|TestOverlayPinned|TestResolveSkill|TestConsumeSkill|TestBuildSkillCatalog|TestSendSkillTurn|TestChatSkill|TestSkill' -count=1`：通过（无回归）。
+- 仍未做：无（P1–P5 的缺口已全部落地；P6 正文 shell 注入按计划不做）。
 
 ---
 

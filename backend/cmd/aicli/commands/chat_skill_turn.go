@@ -18,6 +18,18 @@ type skillTurnPin struct {
 	PinnedFunctions   []string
 	PinnedTools       []runtimetypes.ToolDefinition
 	UnmatchedPrograms []string
+	// Agent Skills 的 allowed-tools / disallowed-tools 折算出的本回合工具面收窄
+	// （见 chat_skill_tool_restriction.go）：AllowedFunctions 非空时只保留这些名字
+	// ∪ skill 函数本身；DisallowedFunctions 恒剔除。二者都只减不增。
+	AllowedFunctions    []string
+	DisallowedFunctions []string
+	// UnavailableAllowed 记录 allowed-tools 里在当前函数目录中不存在（或未命中）
+	// 的原始声明，QualifiedAllowed 记录带括号限定的声明，均只用于诊断与提示。
+	UnavailableAllowed []string
+	QualifiedAllowed   []string
+	// SkillModel / SkillEffort 是 skill 声明的执行建议（不强制覆盖会话设置）。
+	SkillModel  string
+	SkillEffort string
 }
 
 // buildSkillTurnVisiblePrompt 还原提交到会话与界面的完整命令文本。
@@ -163,12 +175,20 @@ func resolveSkillTurnPin(session *ChatSession, request *SendSkillTurnRequest) (*
 		if cwd, err := os.Getwd(); err == nil {
 			projectDir = cwd
 		}
+		// skill 声明的 effort 优先作为本回合 ${effort} 取值（建议值语义：只影响
+		// skill 正文与占位符，不覆盖会话推理强度）。
+		substitutionEffort := strings.TrimSpace(session.ReasoningEffort)
+		if skillItem.Codex != nil {
+			if declared := strings.TrimSpace(skillItem.Codex.Effort); declared != "" {
+				substitutionEffort = declared
+			}
+		}
 		substitutionCtx := runtimeskill.NewSubstitutionContext(
 			skillItem,
 			runtimeskill.SplitSkillArguments(request.Prompt),
 			projectDir,
 			chatSessionID(session),
-			session.ReasoningEffort,
+			substitutionEffort,
 			cfg.ArgumentSubstitutionEnabled(),
 		)
 		if skillItem.IsDocumentModeEnabled(cfg != nil && cfg.DocumentModeAuto()) {
@@ -220,6 +240,18 @@ func resolveSkillTurnPin(session *ChatSession, request *SendSkillTurnRequest) (*
 	}
 	// SK-3: record the explicit /skill invocation at dispatch time, regardless of
 	// which pinned tool (skill function or program like bash) finishes the turn.
+	// Agent Skills 标准字段：allowed-tools / disallowed-tools 折算成工具面收窄，
+	// model / effort 作为建议写进 guide（见 chat_skill_tool_restriction.go）。
+	if skillItem != nil {
+		applySkillToolRestriction(pin, skillItem, schemas)
+		if hints := skillTurnHints(pin); hints != "" {
+			if strings.TrimSpace(pin.Guide) == "" {
+				pin.Guide = hints
+			} else {
+				pin.Guide = pin.Guide + "\n\n" + hints
+			}
+		}
+	}
 	publishSkillTurnInvocation(session, functionName, skillItem)
 	return pin, nil
 }
@@ -306,7 +338,9 @@ func toolDefinitionForCatalogSchema(schemas map[string]map[string]interface{}, n
 // overlayPinnedFunctions 把 pin 叠加到本回合函数选择上，返回新副本；稳定快照
 // （session.stableSharedToolSelection）始终不被修改。
 func overlayPinnedFunctions(selection *aicliFunctionSelection, pin *skillTurnPin) *aicliFunctionSelection {
-	if pin == nil || len(pin.PinnedTools) == 0 {
+	// 没有可叠加工具、也没有声明收窄时原样返回；只要声明了 allowed/disallowed，
+	// 即使本回合没有 pin 到任何工具（例如 skill 函数不在目录里）也要走收窄。
+	if pin == nil || (len(pin.PinnedTools) == 0 && len(pin.AllowedFunctions) == 0 && len(pin.DisallowedFunctions) == 0) {
 		return selection
 	}
 	overlaid := cloneFunctionSelection(selection)
@@ -342,7 +376,9 @@ func overlayPinnedFunctions(selection *aicliFunctionSelection, pin *skillTurnPin
 			overlaid.SkillFunctions = appendUniqueCaseInsensitive(overlaid.SkillFunctions, name)
 		}
 	}
-	return overlaid
+	// 收窄必须在叠加之后：先让 pin 里的程序进入函数面，再按 skill 声明的
+	// allowed-tools / disallowed-tools 做减法（只减不增）。
+	return restrictFunctionSelection(overlaid, pin)
 }
 
 // toolDefinitionSchema 把单个工具定义还原为函数目录使用的 schema 结构。
