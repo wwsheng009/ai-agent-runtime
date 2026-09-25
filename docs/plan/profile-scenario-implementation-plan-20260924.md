@@ -759,3 +759,9 @@ Phase 0（V 表核实 + 决策拍板）────────── 全批次�
 > ③ **HEAD 悬空引用修复（重要，超出 V17 范围但阻塞全仓）**：`74b42959`（Batch 14 slice 3）提交的 `chat_profile.go:195` 调用 `profilesys.RegisterLayerFallbacks`，其定义此前**只存在于同树并行工作流的未提交** `internal/profile/layer.go`（纯新增 +154）→ 干净 HEAD 自该提交起无法编译 `cmd/aicli`（`git grep HEAD` 全仓仅调用点、零定义；此前各切片"绿灯"均在脏工作树取得、**对 HEAD 无效**）。修复 = `b522f2f6` 仅提交该定义文件（`LayerNames` / `LayerRootForWorkspace` / `LayerProfile` / `LayerForRoot` / `LayerProfiles` / `RegisterLayerFallbacks`），census 确认无其他同类悬空引用；在途测试与 server 侧镜像仍未提交（归并行工作流）。
 > ④ 环境提示（非缺陷）：干净检出的 `go build ./...` 会因 `internal/webui` embed `dist` 目录缺失而失败——该目录是前端构建产物（主工作树已生成），需先构建前端再全量编译。
 > ⑤ 回填：本文件 §3.1 V17 行 待回填 → ✅ 已回填；附录 P 跟踪表 Batch 11/13 行"V17 部分回填"同步更新；设计文档第四部分核实清单第 5 行标注复核完成。
+
+> 变更记录：2026-09-24 **完成度审计**（profile 全链路复核 + 设计文档回填清账）：
+> ① 审计证据（**干净 HEAD `772793b2` 的临时 worktree**，隔离同树在途脏改动）：`go build ./cmd/aicli/... ./internal/profile/... ./internal/api/skills/... ./internal/foldertrust/...` 退出 0；`go test ./internal/profile/...`（3.4s）/`./internal/foldertrust/...`（1.3s）/`./internal/profileinput/...`（1.2s）全绿；定向 `go test ./cmd/aicli/commands/ -run "Profile|E2E6|E2E7"` 全绿（6.9s，复跑 6.1s）/`./internal/api/skills/ -run "Profile|PromptGate"` 全绿（5.3s）。**注**：首轮 CLI 测试与 vitest 并发时出现 Go 编译器崩溃 + 3 个 vitest worker 异常退出，单独/复跑均全绿——判定为机器负载抖动（并行工作流同时构建），非代码缺陷。
+> ② 前端证据（`frontend/src` 零在途改动 ≡ HEAD）：`npm run verify:lines` 0 超标（1324 文件，最大 500 行）；`npm run lint:i18n` scanned=905 / violations=0；定向 vitest 10 文件 / 86 例全绿；全量 `npm run test` **333/333 文件全绿**（371.6s）。
+> ③ 审计结论：附录 P 跟踪表 Batch 0-14 全部 ✅；§3.1 V 表（V1-V27）零待回填；**唯一未实施项 = FR-14**（按 Q12 后置，需先撤该决策才可开工）。
+> ④ 设计文档回填清账（同 commit）：状态行「待实施」→「已实施」；附录 A 四行「待核实」→ ✅ 回填（V1-V4）；附录 C/D/E 标题「（待回填）」→「（已回填）」；附录 E 新增回填结论表（第 1/2/4/5/6/7 项 → V20/V21/V23/V24/V25/V17）。

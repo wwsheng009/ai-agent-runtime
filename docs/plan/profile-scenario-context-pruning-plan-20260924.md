@@ -1,6 +1,6 @@
 # Profile 场景化上下文裁剪方案（Profile Presets & Context Pruning）
 
-> 状态：待实施（2026-09-24 制定；同日第二轮深化：**配置域化可行性 / 特性开关与审批偏好 / 前端配置 UI**，见「第二部分」§8-§13；同日第三轮深化：**热切换（运行时 `/profile` 切换 + 缓存失效矩阵）**，见「第三部分」§14-§21；同日第四轮审查：**生命周期闭环（创建/修改/前端配置/使用切换）+ 项目级 profile 信任门控**，见「第四部分」§22-§26 与补遗 G1-G7）
+> 状态：**已实施**（2026-09-24 制定并实施：Batch 0-14 全部 ✅、V 表零待回填；唯一余项 FR-14 按 Q12 后置，见实施方案附录 P 跟踪表；同日第二轮深化：**配置域化可行性 / 特性开关与审批偏好 / 前端配置 UI**，见「第二部分」§8-§13；同日第三轮深化：**热切换（运行时 `/profile` 切换 + 缓存失效矩阵）**，见「第三部分」§14-§21；同日第四轮审查：**生命周期闭环（创建/修改/前端配置/使用切换）+ 项目级 profile 信任门控**，见「第四部分」§22-§26 与补遗 G1-G7）
 > 范围：backend（`internal/profile`、`internal/profileinput`、`internal/skill`、`internal/mcp`、`internal/agentconfig`、`internal/chat`、`internal/api/skills`、`cmd/aicli`）+ **frontend（Profiles 页、编辑器与 `/profile` 命令，§10/§17）** + docs。
 > 关联文档：
 > - **实施方案**：`docs/plan/profile-scenario-implementation-plan-20260924.md`（批次执行顺序 / V 表门禁 / DoD / 验收与回滚——本文档负责"做什么"，实施方案负责"怎么做"）
@@ -271,14 +271,14 @@ profile tool policy 与 CLI 工具开关（如有）叠加时：deny 恒优先
 3. **Web UI 排期**：P2 的 runtime-server 只读 API + frontend 展示是否本期需要？（涉及与"路由档位 profile"的文案区分工作量。）
 4. **模板集合**：`coding/review/minimal/docs` 四个是否够？是否需要 `web-debug`（chrome-devtools MCP 场景）？
 
-## 附录 A — Batch 0 核实结论（待回填）
+## 附录 A — Batch 0 核实结论（已回填，2026-09-24）
 
 | 核实项 | 结论 | 证据 |
 |--------|------|------|
-| MCP 工具进入 CLI function registry 的注册函数 | 待核实 | — |
-| agent 层 tool surface 是否受 ToolPolicy 过滤（exec/子 agent） | 待核实 | — |
-| skill 注册构建点（allow/deny 插入点） | 待核实 | — |
-| 内置工具名清单权威来源 | 待核实 | — |
+| MCP 工具进入 CLI function registry 的注册函数 | ✅ 已回填（Batch 1）：selection 经 `chat_setup.go:265-268` 落到 session、`mcp_integration.go:237` 消费；server 侧 `profile_support.go:391 resolveProfileMCPAdapter` | 实施方案 §3.1 V1 |
+| agent 层 tool surface 是否受 ToolPolicy 过滤（exec/子 agent） | ✅ 已回填（Batch 1；子 agent 继承随 Batch 5 修复）：exec/headless 经 `exec_run.go:268` 判定 profile 生效；子策略 = 父允许集 ∩ 子 agentdef 声明（`DeriveChild` 只收窄） | 实施方案 §3.1 V2、V5 |
+| skill 注册构建点（allow/deny 插入点） | ✅ 已回填（Batch 1）：CLI `skills_integration.go`；server 侧 `internal/api/skills/handler.go:1732/1805`（运行时 registry/context 注入） | 实施方案 §3.1 V3 |
+| 内置工具名清单权威来源 | ✅ 已回填（Batch 2）：`profile_validate.go:123-137 validateToolNames` 以登记清单（`internal/policy.KnownToolTaxonomyNames()`）校验；未登记=warning（MCP/动态工具合法） | 实施方案 §3.1 V4 |
 | spawn 子会话 ToolPolicy 传递现状 | **API 侧曾缺失继承（Batch 5 已修复）**：`sessionAgentController.Spawn` 只写父子/根/深度等上下文，从不复制父会话 profile 绑定，子 actor 构建期 `profileState == nil`，工具面可宽于已收窄的父策略（违反 FR-9）；本地侧天然继承（与父共用同一 `ChatSession`/`apiAgent`，`applyLocalChildAgentdefToolPolicy` 再收窄）。修复：`sessionmeta.CopyProfileBinding` 单点快照 + API/本地两个 spawn 装配点调用；子策略 = 父 profile 允许集 ∩ 子 agentdef 声明（`DeriveChild`，只收窄），快照语义不追溯已存在子代理 | `internal/api/skills/session_runtime_support.go:604-611`（快照点）、`:4176-4202`（agentdef 叠加层 `DeriveChild`）、`cmd/aicli/commands/chat_actor_registry.go:715-722`、`cmd/aicli/commands/chat_actor_host.go:1591-1596`；测试 `internal/api/skills/session_profile_inheritance_test.go`（5 例）、`internal/sessionmeta/profile_binding_copy_test.go`（4 例）、`cmd/aicli/commands/chat_profile_child_inheritance_test.go`（1 例） |
 
 ## 附录 B — 目录与文件参考
@@ -600,7 +600,7 @@ Settings（现有设置入口）
 11. **`mcp.merge_strategy`**：定义语义（merge/replace）或删除字段。
 12. **`WorkspaceSpec`**：spec 中已定义（`profile/spec.go:51-55`）但消费状态待核实，决定是否纳入本期。
 
-## 附录 C — 第二轮核实清单（待回填）
+## 附录 C — 第二轮核实清单（已回填，2026-09-24）
 
 | 核实项 | 结论 | 证据 |
 |--------|------|------|
@@ -971,7 +971,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 | 17 | 切换是否计入 usage/审计（`/usage` 面板）？ | 建议记录到会话事件（便于排查"哪一轮换了 profile"），不进入 token 统计 |
 | 18 | exec/ACP headless 是否暴露运行期切换？ | 不暴露（headless 是单轮语义，profile 保持启动期解析；`agent_stdio.go:685` 现状即正确） |
 
-## 附录 D — 第三轮核实清单（待回填）
+## 附录 D — 第三轮核实清单（已回填，2026-09-24；结论见下方「回填结论」表）
 
 | # | 核实项 | 为什么影响设计 | 核实方式 |
 |---|---|---|---|
@@ -1199,7 +1199,7 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 | 21 | 导出包格式：目录 / zip / 单文件（含内联 agents） | G5 实现 | 倾向**目录或 zip**（单文件内联会引入第二套 profile 方言，违背纪律） |
 | 22 | 未信任工作区是否提供"一键信任并重载"（G6 的 UI 闭环） | D29 UX | 倾向提供（复用 foldertrust 既有 UI 通道），但信任动作仍需显式确认 |
 
-## 附录 E — 第四轮核实清单（待回填）
+## 附录 E — 第四轮核实清单（已回填，2026-09-24）
 
 > 第四部分的设计引用了以下尚未逐一核实的事实；实施 Batch 13-14 前需回填验证（延续附录 B/D 的"先核实再实施"纪律）。
 
@@ -1212,6 +1212,17 @@ applyRuntimeProfileSwitch(session *ChatSession, ref string) (*ProfileSwitchRepor
 | 5 | 会话 `profile_ref` 在 server 侧的写入点（`/api/agent/chat` 路径） | G2 删除引用检查必须覆盖 server 创建的会话 | grep `ProfileRef`/`profile_ref` 在 `internal/chat` 与 `internal/api` 的写入点 |
 | 6 | 原子写在 `profile.yaml` 上的适用性（§10.5 已假设） | G2 rename/move/delete 与 R24 冲突检测依赖它 | 定位既有原子写工具与其在配置文件写入处的用法 |
 | 7 | `/profile save --to session` 的会话层存储位置（附录 D 第 5 项的姊妹项） | G1 `save-as` 需要区分"会话层覆盖"与"落盘 profile" | 读 `sessionmeta` 与 runtime store 中 profile 相关字段 |
+
+**回填结论（Batch 13/14 实施，2026-09-24；对应实施方案 §3.1 的 V20/V21/V23/V24/V25 与 V17）**：
+
+| # | 结论 | 证据 |
+|---|---|---|
+| 1 | ✅ **先例 = 单一 Resolution + 按资源类型消费**：插件 `plugin_runtime.go:28`、MCP `mcp_integration.go:213-218`、agentdef `chat_folder_trust.go:129-140`；D29 门控点落在 prompt 解析/消费边界（`resolved.Prompts` → `profileinput.LoadPromptText/LoadPromptLayers`）；**时序陷阱**：`chat_setup.go:248-260` 先投影 profile 后挂 trust → 读进程级 `currentFolderTrust()` | 实施方案 §3.1 V20 |
+| 2 | ✅ **未被间接门控（假门控风险实锤并已修复）**：`CollectRepoConfigKinds`（`configs.go:31-108`）marker 扫描原不含 `.aicli/profiles` → `Decide` 第 4 步直接 trusted（`decide.go:51-53`）；Batch 14 slice 2 新增 `ConfigKindProfiles` + marker 修复 | 实施方案 §3.1 V21 |
+| 4 | ✅ **不复用 `init.go`**：独立 `internal/profile/templates.go`（go:embed）+ `templates/{coding,review,minimal,docs}/`；模板↔样例一致性由 `consistency_test.go` 锁定 | 实施方案 §3.1 V23 |
+| 5 | ✅ **server 侧唯一写入点** = `applyProfileSessionContext`（`handler.go:3931-3967`：`ProfileRef` + legacy 别名 / `ProfileName` / `ProfileAgent` / `ProfileRoot`）；引用检查 `collectRuntimeProfileReferences`（`profiles_lifecycle_handlers.go:309+`）三类键同读、有界扫描 500 | 实施方案 §3.1 V24 |
+| 6 | ✅ **原子写可直接复用**：`writeProfileYAMLAtomic`（`profiles_store.go:447-449`：临时文件 + rename）为 profile.yaml 通道；rename 的声明名改写非原子但失败回滚目录（D34）；save-as 新建目录失败 `os.RemoveAll`；目标已存在 → 409（不合并） | 实施方案 §3.1 V25 |
+| 7 | ✅ **session 层零写回**（会话绑定经 sessionmeta ⑩ 持久化、resume 沿用）；workspace/config 层复用 `agentconfig` 写通道（`UpdateProfilesConfig`，config 层带 `--yes` 门禁）；分层路由时如实提示"未落在上述路径" | 实施方案 §3.1 V17（Batch 13 E7 复核） |
 
 ---
 
