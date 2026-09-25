@@ -169,10 +169,10 @@ Notes:
   - 不带子命令时，等价于 serve，以前的启动方式保持兼容。
   - start 会在后台启动服务并写入 PID 文件。
   - stop 优先使用 PID 文件停止受管实例，也支持 --pid 直接停止指定进程。
-  - 未指定 --config 时，按 $HOME/.aicli/%[1]s -> ./.aicli/%[1]s -> ./%[1]s -> ./configs/%[1]s 顺序查找。
+  - 未指定 --config 时，按优先级从高到低取第一个存在的文件：%[2]s。
   - 默认 PID 文件为 ./logs/runtime-server.pid。
   - 每个子命令都支持 -h / --help，例如：runtime-server serve --help。
-`, runtimeServerDefaultConfigName, aiclipaths.StandardConfigFileName)
+`, runtimeServerDefaultConfigName, config.ConfigSearchSummary())
 }
 
 func printRuntimeServerVersion() {

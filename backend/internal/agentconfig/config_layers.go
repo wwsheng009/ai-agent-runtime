@@ -201,6 +201,34 @@ func ConfigLayerSearchPaths() []string {
 	return paths
 }
 
+// ConfigSearchSummary renders the bootstrap config search order (highest
+// precedence first) for help text and diagnostics.
+//
+// 取文口只此一份：路径列表来自 ConfigLayerSearchPaths，中文/英文外壳由调用方拼，
+// 帮助文案因此不可能与真实解析顺序漂移（历史上 CLI help 与 install/faq 文档曾各写
+// 一套反过来的顺序）。home 前缀折叠为 "$HOME"、分隔符统一为 "/"，让不同机器上打印
+// 出来的同一段文案保持可读与可比。
+func ConfigSearchSummary() string {
+	paths := ConfigLayerSearchPaths()
+	if len(paths) == 0 {
+		return ""
+	}
+	if home, err := userHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		home = filepath.Clean(home)
+		for index, path := range paths {
+			rel, relErr := filepath.Rel(home, filepath.Clean(path))
+			if relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+			paths[index] = filepath.Join("$HOME", rel)
+		}
+	}
+	for index, path := range paths {
+		paths[index] = filepath.ToSlash(path)
+	}
+	return strings.Join(paths, " -> ")
+}
+
 // mergeMergeMapsMasked behaves like mergeMergeMaps but treats an explicit null
 // in the overlay as "remove this key from the lower layers" (Kubernetes/Helm
 // style) instead of storing a nil value. It is only used by the layered loader;

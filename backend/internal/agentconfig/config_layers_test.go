@@ -318,3 +318,47 @@ providers:
 		t.Fatalf("ConfigFilePath = %q, want %q", cfg.ConfigFilePath, want)
 	}
 }
+
+// ConfigSearchSummary 是帮助文案/诊断的取文口：必须与层栈同序（项目层在用户层之前），
+// 且把 home 折叠成 $HOME。这条断言防的是"help 与实际解析顺序再次分叉"——
+// 历史上 CLI help、install.md 与 faq.md 都曾把顺序写成 user 在前。
+func TestConfigSearchSummaryFollowsLayerStack(t *testing.T) {
+	home := isolateConfigLayerHome(t)
+
+	got := ConfigSearchSummary()
+	parts := strings.Split(got, " -> ")
+	want := ConfigLayerSearchPaths()
+	if len(parts) != len(want) {
+		t.Fatalf("ConfigSearchSummary 条目数 = %d, want %d（got=%q）", len(parts), len(want), got)
+	}
+	for index := range want {
+		expected := filepath.ToSlash(filepath.Clean(want[index]))
+		// 与实现同一口径的 home 折叠：只折叠落在 home 之内的路径。
+		if rel, err := filepath.Rel(home, filepath.Clean(want[index])); err == nil && rel != "." && rel != ".." &&
+			!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			expected = filepath.ToSlash(filepath.Join("$HOME", rel))
+		}
+		if parts[index] != expected {
+			t.Fatalf("ConfigSearchSummary[%d] = %q, want %q（got=%q）", index, parts[index], expected, got)
+		}
+	}
+
+	// 顺序本身：项目层（./.aicli/config.yaml）必须排在用户层（$HOME/.aicli/config.yaml）之前。
+	projectIndex, userIndex := -1, -1
+	projectPath := filepath.ToSlash(filepath.Join(".aicli", aiclipaths.DefaultConfigFileName))
+	userPath := filepath.ToSlash(filepath.Join("$HOME", ".aicli", aiclipaths.DefaultConfigFileName))
+	for index, part := range parts {
+		switch part {
+		case projectPath:
+			projectIndex = index
+		case userPath:
+			userIndex = index
+		}
+	}
+	if projectIndex < 0 || userIndex < 0 {
+		t.Fatalf("ConfigSearchSummary 缺少层条目（project=%d user=%d，got=%q）", projectIndex, userIndex, got)
+	}
+	if projectIndex >= userIndex {
+		t.Fatalf("项目层必须优先于用户层（高→低）：project@%d, user@%d（got=%q）", projectIndex, userIndex, got)
+	}
+}
