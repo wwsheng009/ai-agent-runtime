@@ -10,6 +10,8 @@ Recommended entry points:
   - Full install/config guide: configuration loading order, starter bootstrap, `aicli init`, `aicli login`, default `aicli` / `aicli chat` startup, session/resume flags, MCP / skill / plugin / agent CLI overview, shell/background notes, current chat slash commands, subagent difficulty routing dry-run/debug notes, and uninstall.
 - [faq.md](./faq.md)
   - Common troubleshooting: empty providers, login models validation, `/model` switch failures, HTTP 401, Windows PATH, config overrides, logs, and doctor usage.
+- [permissions.md](./permissions.md)
+  - aicli 权限手册：一分钟快速版（五种模式 + 最常用 5 条规则）→ 规则语法参考（命令/路径/域名/参数/工具名 specifier 与锚点）→ 决策阶梯（11 级流水线、规则管不到的根/主目录断路器、敏感写、外部目录门）→ 常用 recipes（只读 git、推送前确认、lockfile、`.git/`、CI `dont_ask`、`--add-dir`、三层分层写法）→ 审批与记忆（remember 作用域/grants/拒绝反馈/按需解释）→ 已知限制；项目文件 schema 与合并语义互链 `docs/product/project-permissions.md`。
 - [exec.md](./exec.md)
   - Headless `aicli exec` usage, JSON/JSONL output contracts, session resume, code review, schema validation, config overrides, exit codes, and CI examples.
 - [session-export-import.md](./session-export-import.md)
