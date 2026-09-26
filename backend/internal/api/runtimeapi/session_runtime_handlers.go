@@ -49,6 +49,12 @@ type sessionRuntimeCommandRequest struct {
 	RequestID            string                 `json:"request_id,omitempty"`
 	Allow                *bool                  `json:"allow,omitempty"`
 	PatchedArgs          json.RawMessage        `json:"patched_args,omitempty"`
+	// §4.8 审批选项：remember_scope 取 once|session|project（缺省 once，未知值
+	// 400 而不是静默降级）；feedback 是用户的拒绝说明，随决策原因回给模型。
+	// 故意不暴露 remember_pattern：模式恒由引擎按调用参数派生，避免宿主用
+	// 自由文本把记忆范围放宽。
+	RememberScope string `json:"remember_scope,omitempty"`
+	Feedback      string `json:"feedback,omitempty"`
 	// TurnID 可选：interrupt 命令据此做回合身份校验 —— 只有与当前在途回合
 	// 一致才取消（建议 3 契约）。空值表示「取消当前在途回合」，不做身份约束。
 	TurnID       string `json:"turn_id,omitempty"`
@@ -1006,7 +1012,17 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "allow is required"))
 			return
 		}
-		if err := actor.ApproveToolWithArgs(r.Context(), requestID, *req.Allow, req.PatchedArgs); err != nil {
+		decision := chat.ApproveToolDecision{
+			Allow:         *req.Allow,
+			PatchedArgs:   req.PatchedArgs,
+			RememberScope: req.RememberScope,
+			Feedback:      req.Feedback,
+		}
+		if err := validateApproveToolDecision(decision); err != nil {
+			h.writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := actor.ApproveToolWithDecision(r.Context(), requestID, decision); err != nil {
 			h.writeError(w, http.StatusInternalServerError, err)
 			return
 		}

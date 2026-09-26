@@ -79,11 +79,18 @@ type ContinueOption struct {
 
 // ApproveTool responds to a pending approval request.
 type ApproveTool struct {
-	Ctx         context.Context
-	RequestID   string
-	Allow       bool
+	Ctx       context.Context
+	RequestID string
+	Allow     bool
+	// PatchedArgs optionally replaces the tool arguments on an allow.
 	PatchedArgs json.RawMessage
-	Reply       chan error
+	// §4.8：审批选项。RememberScope 取 ""|once|session|project（"" 等价 once）；
+	// RememberPattern 仅在宿主显式给出时使用（HTTP 面不暴露，恒由引擎派生）；
+	// Feedback 是用户的自由文本说明，拒绝时随决策原因回给模型。
+	RememberScope   string
+	RememberPattern string
+	Feedback        string
+	Reply           chan error
 }
 
 // AnswerQuestion answers a pending user question request.

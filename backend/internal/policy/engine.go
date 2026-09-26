@@ -1001,6 +1001,11 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 			approvalReq.ArgsJSON = payload
 		}
 	}
+	// §4.8：把「记住会记住什么」提前告诉宿主 UI（危险工具/硬问询/敏感写/外部目录
+	// 准入不可 remember，此时不给建议模式）。
+	if !grantRememberForbidden(decision) && !IsDangerousTool(req.ToolName) {
+		approvalReq.RememberPattern = DeriveGrantPattern(req.ToolName, req.Args)
+	}
 	resp, err := e.AskHandler.RequestApproval(ctx, approvalReq)
 	if err != nil {
 		return withStage(Decision{

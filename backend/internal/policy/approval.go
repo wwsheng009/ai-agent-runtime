@@ -17,6 +17,13 @@ type ApprovalRequest struct {
 	Reason     string          `json:"reason,omitempty"`
 	RiskLevel  string          `json:"risk_level,omitempty"`
 	ExpiresAt  time.Time       `json:"expires_at,omitempty"`
+	// RememberPattern is the grant pattern the engine would store if the host
+	// resolves this ask with RememberScope=session|project (§4.8). It is the
+	// server-derived value ("cmd:/path:/host:/exact:"), so approval UIs can show
+	// what "记住" actually covers instead of asking for blind trust. Empty when
+	// remembering is forbidden for this ask (dangerous tool, hard ask, sensitive
+	// write, external-dir admission).
+	RememberPattern string `json:"remember_pattern,omitempty"`
 }
 
 // ApprovalResponse captures the resolution of an approval request.

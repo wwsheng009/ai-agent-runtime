@@ -540,6 +540,37 @@ func (a *SessionActor) ApproveTool(ctx context.Context, requestID string, allow 
 
 // ApproveToolWithArgs resolves a pending approval request with optional patched args.
 func (a *SessionActor) ApproveToolWithArgs(ctx context.Context, requestID string, allow bool, patchedArgs json.RawMessage) error {
+	return a.ApproveToolWithDecision(ctx, requestID, ApproveToolDecision{Allow: allow, PatchedArgs: patchedArgs})
+}
+
+// ApproveToolDecision is the §4.8-capable form of an approval resolution:
+// patched args plus the remember scope / feedback carried by host UIs. An
+// unknown remember scope is coerced to once (never durable) rather than
+// rejected, so a fuzzy host cannot widen a grant by typo.
+type ApproveToolDecision struct {
+	Allow           bool
+	PatchedArgs     json.RawMessage
+	RememberScope   string
+	RememberPattern string
+	Feedback        string
+}
+
+// NormalizedRememberScope returns one of once|session|project; unknown values
+// collapse to once.
+func (d ApproveToolDecision) NormalizedRememberScope() string {
+	switch strings.ToLower(strings.TrimSpace(d.RememberScope)) {
+	case runtimepolicy.RememberScopeSession:
+		return runtimepolicy.RememberScopeSession
+	case runtimepolicy.RememberScopeProject:
+		return runtimepolicy.RememberScopeProject
+	default:
+		return runtimepolicy.RememberScopeOnce
+	}
+}
+
+// ApproveToolWithDecision resolves a pending approval request with the full
+// decision payload (§4.8).
+func (a *SessionActor) ApproveToolWithDecision(ctx context.Context, requestID string, decision ApproveToolDecision) error {
 	if a == nil {
 		return fmt.Errorf("session actor is nil")
 	}
@@ -548,14 +579,17 @@ func (a *SessionActor) ApproveToolWithArgs(ctx context.Context, requestID string
 	cmd := ApproveTool{
 		Ctx:       ctx,
 		RequestID: requestID,
-		Allow:     allow,
+		Allow:     decision.Allow,
 		PatchedArgs: func() json.RawMessage {
-			if len(patchedArgs) == 0 {
+			if len(decision.PatchedArgs) == 0 {
 				return nil
 			}
-			return append(json.RawMessage(nil), patchedArgs...)
+			return append(json.RawMessage(nil), decision.PatchedArgs...)
 		}(),
-		Reply: reply,
+		RememberScope:   strings.TrimSpace(decision.RememberScope),
+		RememberPattern: strings.TrimSpace(decision.RememberPattern),
+		Feedback:        strings.TrimSpace(decision.Feedback),
+		Reply:           reply,
 	}
 	if err := a.send(ctx, cmd); err != nil {
 		return err
@@ -1142,8 +1176,12 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 	}
 	resumed := false
 	if a.resolveApproval(cmd.RequestID, runtimepolicy.ApprovalResponse{
-		Allowed:     cmd.Allow,
-		PatchedArgs: cmd.PatchedArgs,
+		Allowed:         cmd.Allow,
+		PatchedArgs:     cmd.PatchedArgs,
+		Remember:        cmd.Allow && strings.TrimSpace(cmd.RememberScope) != "",
+		RememberScope:   strings.TrimSpace(cmd.RememberScope),
+		RememberPattern: strings.TrimSpace(cmd.RememberPattern),
+		Feedback:        strings.TrimSpace(cmd.Feedback),
 	}) {
 		// A blocked run picked the decision up in place: nothing is restarted.
 		if err := a.updateState(ctx, func(state *RuntimeState) error {
@@ -1160,7 +1198,13 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 			return
 		}
 	} else if !cmd.Allow {
-		if err := a.resumePendingToolWithResult(ctx, state, nil, "approval_denied"); err != nil {
+		denyReason := strings.TrimSpace(cmd.Feedback)
+		if denyReason == "" {
+			denyReason = "approval_denied"
+		} else {
+			denyReason = "approval_denied; user feedback: " + denyReason
+		}
+		if err := a.resumePendingToolWithResult(ctx, state, nil, denyReason); err != nil {
 			cmd.Reply <- err
 			return
 		}
@@ -1179,6 +1223,12 @@ func (a *SessionActor) handleApproveTool(cmd ApproveTool) {
 	payload := approvalResolvedEventPayload(state, cmd.RequestID, cmd.Allow)
 	payload["resolution"] = resolution
 	payload["resumed"] = resumed
+	if feedback := strings.TrimSpace(cmd.Feedback); feedback != "" {
+		payload["feedback"] = feedback
+	}
+	if scope := strings.TrimSpace(cmd.RememberScope); cmd.Allow && scope != "" && scope != runtimepolicy.RememberScopeOnce {
+		payload["remember_scope"] = scope
+	}
 	a.recordApprovalOutcome(cmd.RequestID, resolution, resumed)
 	a.publish(runtimeevents.Event{
 		Type:      EventApprovalResolved,
@@ -4501,6 +4551,10 @@ func approvalRequestedEventPayload(state *RuntimeState, pending *ApprovalRequest
 		"tool_name":  req.ToolName,
 		"reason":     req.Reason,
 		"risk_level": req.RiskLevel,
+	}
+	// §4.8：审批 UI 可据此展示「记住」将覆盖的模式（危险/一次性审批为空）。
+	if pattern := strings.TrimSpace(req.RememberPattern); pattern != "" {
+		payload["remember_pattern"] = pattern
 	}
 	if pending != nil && strings.TrimSpace(pending.ToolCallID) != "" {
 		payload["tool_call_id"] = strings.TrimSpace(pending.ToolCallID)
