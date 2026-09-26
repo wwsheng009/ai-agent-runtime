@@ -109,6 +109,7 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 		ActionForChord:        chatComposerActionForChord,
 		OnActionKey:           c.onActionKey,
 		OnClipboardTextEmpty:  c.onClipboardTextEmpty,
+		OnPasteText:           c.onPasteText,
 		CollapsePastedText:    chatComposerCollapsePastedText(c.session),
 		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
 		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
@@ -340,13 +341,7 @@ func (c *chatComposerController) attachClipboardImageToLine(snapshot ui.LineEdit
 		return ui.LineEditorActionResult{Claimed: true}
 	}
 	// 附件读入成功：把 [Image #N] 令牌插到光标处，删掉令牌即不再随消息发送。
-	index := len(c.session.ImagePaths)
-	markChatImageTokenPath(c.session, c.session.ImagePaths[index-1], index)
-	nextText, nextCursor := insertChatImageToken(snapshot.Text, snapshot.Cursor, index)
-	return ui.LineEditorActionResult{
-		Claimed:     true,
-		Replacement: &ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor},
-	}
+	return chatImageTokenReplacement(c.session, c.session.ImagePaths[len(c.session.ImagePaths)-1], snapshot)
 }
 
 func normalizeChatComposerReadError(session *ChatSession, err error) error {

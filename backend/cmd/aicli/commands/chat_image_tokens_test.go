@@ -2,6 +2,8 @@ package commands
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -362,5 +364,125 @@ func TestComposerClipboardTextEmptyHookStaysQuietWithoutImage(t *testing.T) {
 	}
 	if len(session.ImagePaths) != 0 {
 		t.Fatalf("没有图片时不应新增附件: %+v", session.ImagePaths)
+	}
+}
+
+// writeImageFixtureNamed 复制测试 PNG 并改名为指定文件名（用于"路径含空格需加引号"的场景）。
+func writeImageFixtureNamed(t *testing.T, name string) string {
+	t.Helper()
+	data, err := os.ReadFile(writeClipboardFixturePNG(t))
+	if err != nil {
+		t.Fatalf("读取测试 PNG 失败: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("写入 %s 失败: %v", name, err)
+	}
+	return path
+}
+
+// Windows Terminal 场景的判定：只有"整段就是一个图片路径"才命中。
+func TestChatPastedImagePath(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		want string
+		ok   bool
+	}{
+		{name: "双引号包裹的路径", text: `"C:\pics\a.png"`, want: `C:\pics\a.png`, ok: true},
+		{name: "单引号包裹的路径", text: `'C:\pics\a.PNG'`, want: `C:\pics\a.PNG`, ok: true},
+		{name: "无引号无空格的路径", text: `C:\pics\a.jpeg`, want: `C:\pics\a.jpeg`, ok: true},
+		{name: "前后有空白但整体仍是路径", text: "  \"C:\\pics\\a.webp\"  ", want: `C:\pics\a.webp`, ok: true},
+		{name: "夹在句子里的路径不动", text: `请看 C:\pics\a.png 这张`, ok: false},
+		{name: "无引号但含空格更可能是句子", text: `C:\my pics\a.png`, ok: false},
+		{name: "多行粘贴不动", text: `"C:\pics\a.png"` + "\n" + `"C:\pics\b.png"`, ok: false},
+		{name: "多文件同一行不动", text: `"a.png" "b.png"`, ok: false},
+		{name: "非图片扩展名不动", text: `C:\docs\a.txt`, ok: false},
+		{name: "空文本不动", text: "   ", ok: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := chatPastedImagePath(tc.text)
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v（text=%q）", ok, tc.ok, tc.text)
+			}
+			if ok && got != tc.want {
+				t.Fatalf("path = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// 粘贴图片路径（含空格，Windows Terminal 会加引号）→ 落附件 + 插令牌，而不是贴路径。
+func TestComposerOnPasteTextAttachesImageFromQuotedPath(t *testing.T) {
+	path := writeImageFixtureNamed(t, "图 片.png")
+	session := &ChatSession{}
+	controller := &chatComposerController{session: session}
+
+	result := controller.onPasteText(`"`+path+`"`, ui.LineEditorSnapshot{Text: "看这张 ", Cursor: 4})
+	if !result.Claimed || result.Replacement == nil {
+		t.Fatalf("应认领并改写输入行: %+v", result)
+	}
+	if !strings.HasPrefix(result.Replacement.Text, "看这张 ") || !strings.Contains(result.Replacement.Text, "[Image #1]") {
+		t.Fatalf("应保留用户前缀并插入令牌: %q", result.Replacement.Text)
+	}
+	if len(session.ImagePaths) != 1 {
+		t.Fatalf("应落一个附件: %+v", session.ImagePaths)
+	}
+	if _, err := os.Stat(session.ImagePaths[0]); err != nil {
+		t.Fatalf("附件路径应真实存在: %v", err)
+	}
+	if index := session.imageTokenPaths[session.ImagePaths[0]]; index != 1 {
+		t.Fatalf("令牌标记应为 1，得到 %d", index)
+	}
+}
+
+// 同一路径重复粘贴：不重复加附件，只补令牌。
+func TestComposerOnPasteTextDedupesSamePath(t *testing.T) {
+	path := writeImageFixtureNamed(t, "same.png")
+	session := &ChatSession{}
+	controller := &chatComposerController{session: session}
+
+	if result := controller.onPasteText(`"`+path+`"`, ui.LineEditorSnapshot{}); result.Replacement == nil {
+		t.Fatalf("首次粘贴应命中: %+v", result)
+	}
+	first := session.ImagePaths[0]
+	result := controller.onPasteText(`"`+path+`"`, ui.LineEditorSnapshot{Text: "[Image #1] "})
+	if result.Replacement == nil {
+		t.Fatalf("重复粘贴仍应补令牌: %+v", result)
+	}
+	if len(session.ImagePaths) != 1 || session.ImagePaths[0] != first {
+		t.Fatalf("重复粘贴不应新增附件: %+v", session.ImagePaths)
+	}
+	if !strings.Contains(result.Replacement.Text, "[Image #1]") {
+		t.Fatalf("重复粘贴应复用同一编号: %q", result.Replacement.Text)
+	}
+}
+
+// 失败/不适用场景全部回落到原样粘贴（不认领、不改行、不加附件）。
+func TestComposerOnPasteTextFallsBackToText(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "不存在.png")
+	cases := []struct {
+		name string
+		text string
+	}{
+		{name: "句子里的路径", text: `请看 C:\pics\a.png 这张`},
+		{name: "无引号含空格的路径", text: `C:\my pics\a.png`},
+		{name: "多行路径", text: `"C:\pics\a.png"` + "\n" + `"C:\pics\b.png"`},
+		{name: "非图片扩展名", text: `C:\docs\a.txt`},
+		{name: "看起来是图片但文件不存在", text: `"` + missing + `"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			session := &ChatSession{}
+			controller := &chatComposerController{session: session}
+			result := controller.onPasteText(tc.text, ui.LineEditorSnapshot{Text: "abc", Cursor: 3})
+			if result.Claimed || result.Replacement != nil {
+				t.Fatalf("应回落到文本粘贴: %+v", result)
+			}
+			if len(session.ImagePaths) != 0 {
+				t.Fatalf("不应新增附件: %+v", session.ImagePaths)
+			}
+		})
 	}
 }

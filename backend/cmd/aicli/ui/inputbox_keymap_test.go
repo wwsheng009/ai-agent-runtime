@@ -272,3 +272,66 @@ func TestReadInteractiveLine_ClipboardTextEmptyWithoutHookStaysSilent(t *testing
 		t.Fatalf("没有兜底钩子时不应改写输入行: %q", line)
 	}
 }
+
+// 粘贴拦截：宿主可以把"整段粘贴 = 一个图片路径"换成 [Image #N] 令牌，且不再插入原文本。
+func TestReadInteractiveLine_PasteTextHookReplacesPayload(t *testing.T) {
+	var output bytes.Buffer
+	payload := `"C:\pics\a.png"`
+	calls := 0
+	hooks := &LineEditorHooks{
+		OnPasteText: func(text string, _ LineEditorSnapshot) LineEditorActionResult {
+			calls++
+			if text != payload {
+				t.Fatalf("钩子应收到归一化后的整段粘贴文本，得到 %q", text)
+			}
+			replacement := LineEditorReplacement{Text: "[Image #1] ", Cursor: len([]rune("[Image #1] "))}
+			return LineEditorActionResult{Claimed: true, Replacement: &replacement}
+		},
+	}
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("\x1b[200~"+payload+"\x1b[201~\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		hooks,
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks returned error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("bracketed paste 应调用一次粘贴钩子，实际 %d 次", calls)
+	}
+	if strings.TrimSpace(line) != "[Image #1]" {
+		t.Fatalf("粘贴内容应被替换为令牌，得到 %q", line)
+	}
+}
+
+// 未命中（钩子返回零值）时粘贴必须原样插入，保持既有语义。
+func TestReadInteractiveLine_PasteTextHookFallsBackToPlainInsert(t *testing.T) {
+	var output bytes.Buffer
+	payload := `"C:\pics\a.png"`
+	hooks := &LineEditorHooks{
+		OnPasteText: func(string, LineEditorSnapshot) LineEditorActionResult {
+			return LineEditorActionResult{}
+		},
+	}
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("\x1b[200~"+payload+"\x1b[201~\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		hooks,
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks returned error: %v", err)
+	}
+	if line != payload {
+		t.Fatalf("未认领的粘贴应原样插入，得到 %q", line)
+	}
+}

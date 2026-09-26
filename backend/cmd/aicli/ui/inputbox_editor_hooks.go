@@ -73,6 +73,10 @@ type LineEditorHooks struct {
 	// 图片）。返回 Replacement 时编辑器改写当前行（例如插入 [Image #N] 令牌）；返回
 	// 零值表示不处理，保持编辑器原有的静默行为（不打扰"剪贴板为空"的普通按键）。
 	OnClipboardTextEmpty func(snapshot LineEditorSnapshot) LineEditorActionResult
+	// OnPasteText 在插入任何一段粘贴文本之前调用（唯一粘贴入口：bracketed paste、
+	// ctrl+v 文本、粘贴突发）。返回 Replacement 时编辑器**不插入**原文本，改用替换内容
+	// ——例如把"整段粘贴就是一个图片文件路径"换成 [Image #N] 令牌；返回零值表示按原样插入。
+	OnPasteText func(text string, snapshot LineEditorSnapshot) LineEditorActionResult
 	// CollapsePastedText 控制大段粘贴是否折叠为占位符（提交时仍发送全文）。
 	// nil 表示使用默认行为（折叠）。
 	CollapsePastedText *bool

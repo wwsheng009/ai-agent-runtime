@@ -645,6 +645,21 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		if text == "" {
 			return false
 		}
+		// 粘贴前给宿主一次接管机会（例如"整段粘贴 = 单个图片路径" → 转成附件 + 令牌）。
+		// 宿主返回零值时按原样插入，保持既有粘贴语义不变。
+		if hooks != nil && hooks.OnPasteText != nil {
+			if result := hooks.OnPasteText(text, snapshot()); result.Replacement != nil {
+				preferredVisualCol = -1
+				reverseSearchActive = false
+				reverseSearchQuery = reverseSearchQuery[:0]
+				reverseSearchStart = len(history)
+				promoteDraft()
+				applyReplacement(*result.Replacement)
+				emitChange()
+				redraw()
+				return true
+			}
+		}
 		preferredVisualCol = -1
 		reverseSearchActive = false
 		reverseSearchQuery = reverseSearchQuery[:0]
