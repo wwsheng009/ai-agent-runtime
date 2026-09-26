@@ -655,3 +655,51 @@
 | `git show --stat 8ec8f58b` | 4 files changed, 474 insertions(+), 10 deletions(-)（handler.go 仅 +9 行） |
 
 至此报告 §11.5 记下的「`internal/api/**` 尚未提交」缺口已关闭；剩余未落地项仍是：§4.4 前端变更行高亮与行级评论、§4.6 常驻模式横幅、Web 面板的图形化 reopen、评审反馈的自动修订回合、profile→`Engine.PlanAutoEnterWithoutApproval` 接线。
+
+---
+
+## 15. 实施记录：第八轮（2026-09-25，§4.5 收尾：HTTP 重新评审入口）
+
+**状态**：`/plans reopen` 的 HTTP 孪生已落地（`9843c892`）：`POST /api/runtime/sessions/{id}/plan/reopen`。Web 面板上的图形按钮仍待做（面板目前仍只读，`use-runtime-plans` 无写操作）。
+
+### 15.1 行为
+
+| 场景 | 行为 |
+|------|------|
+| 继续评审一份归档计划 | `POST /api/runtime/sessions/{id}/plan/reopen`，body `{"plan_id":"<id>","version":0,"force":false}`：把快照写回工作区计划文件并**进入 plan mode**，返回 `{reopened,plan_id,plan_path,display_path,version,bytes,created,unchanged,forced,plan_mode}` |
+| 工作区文件与快照不一致 | `409` + `{"conflict":true,"error":...,"hint":"…force=true 重试"}`，且**不写盘**；带 `force=true` 重试即覆盖 |
+| 未知记录 / 缺 `plan_id` | `404`（`ErrAPINotFound`）/ `400`（`plan_id is required`）；越界路径与其它归档错误统一 `400` |
+| 血统（与 CLI 一致） | 会话状态写 `reopened_from`/`reopened_version`：`GET /api/runtime/sessions/{id}/plan` 与 reopen 响应都透出（`sessionPlanModeResponse` 新增两字段），`/plan status` 语义对齐 |
+| actor 路径 | 活跃 actor 走新增的 `SessionActor.ReopenPlanMode`（进入 plan mode + 写血统 + 更新权限引擎），无 actor 则直接写 durable 会话并补 `enter` 归档元数据 |
+
+**为什么 plan id 在 body**：归档 id 形如 `ai-agent-runtime/plan`，作为路径段再接 `/reopen` 后缀会重新引入 `{id:.*}` 的贪婪匹配歧义；body 传参同时与 CLI 的参数解析保持一致。
+
+### 15.2 接线点
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| HTTP handler | `backend/internal/api/runtimeapi/plans_handlers.go` | `ReopenStoredPlan`、`storedPlanReopenRequest/Response`、`writeStoredPlanReopenError`（409/404/400 映射）、`decodeStoredPlanReopenRequest`、`reloadSessionForPlanMode` |
+| actor | `backend/internal/chat/plan_mode_tools.go` | `ReopenPlanModeArgs` + `SessionActor.ReopenPlanMode`（EnterPlanMode + `planmode.MarkReopened` + `persistSession` + engine 同步） |
+| 状态透出 | `backend/internal/api/runtimeapi/plan_mode_handlers.go` | `sessionPlanModeResponse` 增 `reopened_from`/`reopened_version` |
+| 路由 | `backend/internal/api/runtimeapi/handler.go` | `POST /sessions/{id}/plan/reopen`（+3 行，经临时 index 只提交本工作改动） |
+
+### 15.3 验证
+
+| 命令 | 结果 |
+|---|---|
+| 主干：`go test ./internal/api/runtimeapi/ -run 'Reopen\|Plan' -count=1` | ok（2.0s，含 3 组新用例） |
+| 主干：`go test ./internal/chat/ -run ReopenPlanMode -count=1` | ok（2.3s，2 组新用例） |
+| 干净检出 `9843c892`：`go build ./internal/...` | 仅 `webui dist` 历史现象 |
+| 干净检出：同两条定向测试 | ok（1.99s / 0.69s） |
+
+新增用例要点：快照恢复后文件按快照创建、plan mode 激活、`plan_mode.reopened_from/version` 与后续 `GET /plan` 一致；冲突→409 且**文件未被改写**，`force=true` 后覆盖；未知 id → 404；缺 `plan_id` → 400；未知会话非 200；actor 侧 `ReopenPlanMode` 写血统并可经 `sessionStore.Load` 复核，停止的 actor 返回 `ErrSessionActorStopped`。
+
+### 15.4 并发风险处置（重要）
+
+提交时发现**并发会话的 index 里 stage 了本工作的反向改动**（`D plans_handlers.go`、`D plans_handlers_test.go`、以及 `handler.go`/`plan_mode_handlers.go`/`plan_mode_tools.go` 的逆向 hunk），来源是他们在较早基线上做 `read-tree`/`add` 的残余。处理：
+
+1. 自己的提交走临时 index（`GIT_INDEX_FILE`）+ 干净基线 blob，**不**碰真实 index 与工作区；
+2. 提交后对受影响的 6 个路径执行 `git reset HEAD -- <path>`，把「删除/回退本工作」的 staged 项撤掉，保留他们自己的 MCP staged 集合（`mcp.go` M + importers 删除 + 文档 M）；
+3. 该清理只动 index，不动工作区：他们未提交的 `handler.go`（SkillArgs 等）原样保留为 ` M`。
+
+若该模式再次出现（他们的流程可能重复从旧基线重建 index），恢复方式：`git checkout 9843c892 -- <path>`（本工作已在 main 历史中，不会丢）。

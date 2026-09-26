@@ -214,6 +214,7 @@
 | `GET /api/runtime/plans` | 列出全部归档记录，按 `updated_at` 倒序；可选查询参数 `?project=<slug>` 过滤项目；响应 `{"plans":[...],"count":N}` |
 | `GET /api/runtime/plans/{id}` | 单条记录 + **最新快照正文**；`id` 允许包含 `/`（如 `ai-agent-runtime/plan`）；兼容旧写法 `?id=<id>` |
 | `DELETE /api/runtime/plans/{id}` | 删除一条归档记录及其全部快照（保留策略见 §5.1）；幂等：不存在时返回 200 + `{"deleted":false}`，存在时 `{"deleted":true}` |
+| `POST /api/runtime/sessions/{id}/plan/reopen` | 把某条归档记录的快照写回工作区计划文件并进入 plan mode（`/plans reopen` 的 HTTP 孪生）。body：`{"plan_id":"<id>","version":0,"force":false}`；冲突（文件与快照不一致）返回 **409** + `conflict/hint` 且不写盘，确认后带 `force=true` 重试；未知记录 404。响应含 `plan_mode` 投影（`reopened_from`/`reopened_version` 与 `/plan status` 一致） |
 
 列表项与详情条目字段一致（详情多出正文相关字段）：
 
@@ -266,7 +267,7 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 
 **Q6：计划被 `quit` 后还能找回吗？**
 
-正文与轮次已归档（状态 `not_implemented`）。CLI 用 `/plans` 列出、`/plans <id>` 打开；HTTP 用 `GET /api/runtime/plans`、`GET /api/runtime/plans/{id}`。目前没有「重开评审」的 API 或 UI 入口（§9）。
+正文与轮次已归档（状态 `not_implemented`）。CLI 用 `/plans` 列出、`/plans <id>` 打开、`/plans reopen <id> [vN]` 回灌重评审；HTTP 用 `GET /api/runtime/plans`、`GET /api/runtime/plans/{id}`、`POST /api/runtime/sessions/{id}/plan/reopen`。仍缺的是 Web 面板里的图形按钮（§9）。
 
 **Q7：一个会话能同时维护多份计划吗？**
 
@@ -293,7 +294,7 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 以下能力在已落地范围（2026-09-25：报告 §8 + §9 + §10）之外，本文档不为它们承诺时间：
 
 - §4.4 行级评论与轮次 diff：**CLI 侧轮次 diff 已落地**（`/plans diff <id> [vA [vB]]`，复用 `planmode.UnifiedDiff` / `planmode.DiffArchivedVersions`）；仍未做的是前端评审面的变更行高亮与行级评论。
-- §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具、run 结束兜底与 **CLI 的 `/plans reopen`（归档回灌重评审）**均已落地；仍是缺口的是 Web 面板里的图形化 reopen 入口。
+- §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具、run 结束兜底、**CLI 的 `/plans reopen`（归档回灌重评审）**与 **HTTP 的 `POST /sessions/{id}/plan/reopen`** 均已落地；仍是缺口的是 Web 面板里的图形按钮（后端入口已就绪，面板 hook 仍只读）。
 - §4.6 模式循环键位（`shift+tab` / `alt+m`）已随并发的 CLI 改动落地（`chat_permission_mode.go`：`default → accept_edits → plan → bypass_permissions`，进入 bypass 仍二次确认，`/hotkeys` 可见；plan 档走 `/mode` 语义，见 §2.3）；模型自主进入的确认门控已落地；仍未做的是**常驻模式横幅**。
 - 评审反馈的**自动修订回合**：当前是「下一次用户输入时交付」，Web 裁决后主动 trigger-turn 未接入。
 
