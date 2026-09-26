@@ -1034,3 +1034,40 @@ Web 横幅位于聊天区顶部、可换行、能放「模式 + 状态 + 路径 
 1. **HTTP**：`GET/POST/DELETE /api/runtime/plans/{id}/comments`（含按最新轮次重放的 `status/start_line/end_line` 投影），路由注册在 `GET /plans/{id:.*}` 之前。
 2. **CLI**：`/plan comment <Lx[-Ly]> <正文>`、`/plan comments [--all]`（默认只列当前轮），`/plan request_changes` 时把重放后的评论并入 notes。
 3. **Web**：diff 视图内按行选择 + 评论列表（与面板轮次 diff 同一 `planmode` 口径）。
+
+---
+
+## 23. 实施记录：第十六轮（2026-09-25，行级评论 HTTP 面）
+
+**状态**：§4.4 接线第一面完成。三条端点落地，读侧直接给出「重放后的当前位置」，CLI / Web 因此不必各自实现一遍锚点逻辑。
+
+### 23.1 端点
+
+| 方法与路径 | 行为 |
+|------------|------|
+| `GET /api/runtime/plans/{id}/comments` | `?revision=N`（0/缺省 = 最新轮）；响应 `{plan_id, revision, latest_revision, comments[], count}`，每条同时携带**原始锚点**（`revision`/`start_line`/`end_line`/`excerpt`）与**重放结果**（`status`、`current_*`） |
+| `POST /api/runtime/plans/{id}/comments` | body `{revision, start_line, end_line, body, author}`；`revision` 缺省 = 最新轮；摘录由服务端用 `planmode.NewLineComment` 从锚定轮正文截取；成功 201（新建必然 `anchored`） |
+| `DELETE /api/runtime/plans/{id}/comments/{comment_id}` | 幂等：未知记录/评论 200 + `deleted:false`（与 `DELETE /plans/{id}` 同约定） |
+
+错误映射沿用既有口径：未知记录/轮次 404（`plan revision not archived: N`）、区间越界/正文为空 400（分别来自 `planmode.ErrCommentRange` 与 `planstore.ErrInvalidComment`）、`revision` 非整数 400。
+
+**路由顺序**：三条都注册在贪婪的 `GET /plans/{id:.*}` 明细路由**之前**（与 `/diff` 同一原因），并把这条约定钉进了一条用例（断言响应里没有明细路由的 `content_available` 字段）。
+
+### 23.2 落点与验证
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 处理器 | `backend/internal/api/runtimeapi/plan_comments_handlers.go`（新） | 三条端点 + 共享的 id/记录解析、`?revision=` 目标解码、轮次正文读取、错误映射、响应投影 |
+| 路由 | `backend/internal/api/runtimeapi/handler.go` | 注册三条路由（明细路由之前） |
+| 测试 | `backend/internal/api/runtimeapi/plan_comments_handlers_test.go`（新） | 生命周期与跨轮重放（v1 锚定 → v2 `moved` 到 5-6、原锚点仍 3-4、显式 `revision=1` 仍 `anchored`）、缺省锚定最新轮、非法输入矩阵（空正文/越界/零起始/未知轮/未知记录/非整数 revision）、无轮次记录（读 200 空表 + 写 404）、路由优先级 |
+
+| 命令（cwd=backend） | 结果 |
+|---|---|
+| `go test ./internal/api/runtimeapi/ -run 'StoredPlanComment' -count=1` | 通过（5 例） |
+| `go test ./internal/api/runtimeapi/ -count=1` | 整包通过（36.7s） |
+| `go vet ./internal/api/runtimeapi/`、`gofmt -l`（3 文件） | exit 0 / 空 |
+
+### 23.3 下一轮（接线剩余）
+
+1. **CLI**：`/plan comment <Lx[-Ly]> <正文>`、`/plan comments [--all]`，并在 `/plan request_changes <notes>` 时把 `FormatPlanCommentsForReview` 的结果并入 notes（复用既有一次性通道）。
+2. **Web**：面板轮次 diff 视图内按行选择 → `POST .../comments`；评论列表直接消费 `status`/`current_*` 投影（同一口径，不再重算）。
