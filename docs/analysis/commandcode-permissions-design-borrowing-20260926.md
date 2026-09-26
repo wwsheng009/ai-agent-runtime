@@ -388,7 +388,7 @@
 | **M1 安全护栏（P0）** | 4.3 根/主目录断路器（+共享 shell 解析层）、4.4 敏感写保护、4.7 只读机密参数过滤、4.2 dont-ask 模式 | 无（可与规则重构解耦） | 防欺骗矩阵、敏感路径分类表驱动、5 模式决策矩阵、`aicli exec --permission-mode dont-ask` 冒烟 |
 | **M2 规则引擎（P0/P1）** | 4.1 specifier（命令/路径/域名/MCP）、4.6 复合命令逐段匹配与不对称、4.10 参数匹配+工具名通配、4.11 accept-edits 安全命令快车道 | M1 的解析层 | specifier 单测矩阵、旧 permissions.yaml 全量回归、`git status && rm -rf x` 反例 |
 | **M3 边界与配置（P0/P1）** | 4.5 外部目录门（/add-dir、additionalDirectories 生效、temp/skill/plan 例外）、4.9 分层配置累积 + disableBypass、CLI chat 的 sandbox/policy 接线 | M2（豁免规则用到 specifier） | 外部路径矩阵、分层合并单测、disableBypass 四层拒绝、ACP e2e |
-| **M4 体验与文档（P1/P2）** | 4.8 审批选项统一（反馈+remember 作用域）**已落地：policy 核心 + actor 接线 + Web API/UI（§12.2）；CLI/ACP 面待做**、4.12 模式入口/banner、4.13 按需解释、4.14 文档 IA | M1–M3 | policy/chat 全绿、Web 前端 lint+343 用例通过；CLI/ACP UI 一致性与新会话 grant 生效 e2e 待补 |
+| **M4 体验与文档（P1/P2）** | 4.8 审批选项统一（反馈+remember 作用域）**Web 面已落地（§12.2）；CLI/ACP 面待做**、4.13 按需解释**已落地（模型摘要 + 规则降级，Web UI 已接线；CLI/ACP 与设置项待做）**、4.12 模式入口/banner、4.14 文档 IA | M1–M3 | policy/chat/runtimeapi 全绿、Web 前端 lint + 全量用例通过；CLI/ACP UI 一致性、新会话 grant 生效 e2e 待补 |
 
 分阶段风险控制：
 
@@ -546,6 +546,8 @@
 | 宿主接线（store 侧） | ✅ | `internal/chat` actor：每会话内存 store + 工作区 `.aicli/grants.json`（惰性创建、不覆盖宿主已设 store；root 取 tool policy anchor 再回退进程 CWD）。CLI/Web/ACP 共用该 actor，`harness_handlers.go` 的 grant 管理 API 与运行时读写同一文件 | `actor_grants_test.go` |
 | Web API（HTTP 面） | ✅ | `approve_tool` 命令新增 `remember_scope`/`feedback`（未知 scope 400，feedback 上限 2000 字符；**不暴露 remember_pattern**，模式恒由引擎派生）；`approval_requested` 事件携带 `remember_pattern` 供 UI 展示；`approval_resolved` 回执带 `feedback`/生效 scope；拒绝且无 waiter 时 `approval_denied; user feedback: …` 回到模型 | `session_approval_validation_test.go`、`actor_approval_decision_test.go` |
 | Web UI | ✅ | 共用控件 `ApprovalDecisionControls` 覆盖主会话待办条与子代理下钻弹层：后端下发 `remember_pattern` 时才出现「记住」勾选，勾选前即展示将记住的模式，作用域可选仅本会话/本项目；可选说明输入（批准/拒绝都随决策送达）。事件/快照/类型三层透传，`usePendingInteractions` 与 `useSubagentSession` 的 `resolveApproval` 接受可选 options（缺省请求体逐字节不变） | `pending-interaction-bar.test.tsx`、`subagent-session-dialog.test.tsx`、`sessions.test.ts` |
+| 4.13 按需解释（后端） | ✅ | `POST /sessions/{id}/runtime/approvals/{request_id}/explain`：只读加载 durable state 的 pending 审批（`request_id` 不匹配 → 409，不泄漏当前审批内容）；模型摘要走 `Handler.llmRuntime.Call`（独立 20s 超时 + 320 max_tokens + 参数 4000 字截断）；模型缺失/报错 → 200 + `source=rules` 规则摘要（工具/原因/风险/参数摘要/可否记忆），**永不把模型故障变成 5xx**；解释不写状态、不解析决定 | `session_approval_explain_test.go` |
+| 4.13 按需解释（Web UI） | ✅ | 审批控件新增「解释」按钮（`data-approval-explain`）：点击 → `useApprovalExplanation` → 只读展示正文 + 来源（`由 {model} 生成` / `规则解释（未调用模型）`）；失败就地提示可重试；解释期间不阻塞批准/拒绝 | `pending-interaction-bar.test.tsx`、`sessions.test.ts` |
 
 验证说明：`internal/policy`、`internal/chat` 全绿。`internal/chat` 的 `TestAppendEventsLockHoldBudget`（锁持有时长预算）在并发构建负载下出现过一次失败，单跑 `-count=3` 3/3 通过，属既存时序敏感用例，与本次改动无关。
 
@@ -554,4 +556,5 @@
 - CLI `[5] 拒绝并说明原因`（自由文本 → `Feedback`）与 `[4]` 复用经由同一 `ApprovalResponse.Remember + Scope`（CLI 现有 10 分钟 TTL 复用仍是独立轨道，未合并；`cmd/aicli/commands` 与并发会话的工作面重叠，排在后面做）；
 - ACP `reject_always`（`acp/types.go` 已定义未启用）与 `allow-always` → `RememberScope=project` 的映射；
 - `/grants` 命令面展示新 specifier 形态（durable store 读写已通，展示层待跟进）；
-- 4.12/4.13/4.14（模式入口与 banner、按需解释、文档 IA）整体未开始。
+- 4.13 剩余：CLI/ACP 面的「解释」入口；`pre_generate`（审批到达即预生成）与 `off` 设置项（当前恒为按需）；解释调用未纳入 usage 记账；模型取运行时默认 provider/model（会话级模型解析待接 profile 面）；服务端未做按需结果缓存（重复点击会重复计费，但每次都是用户显式动作）。
+- 4.12/4.14（模式入口与 banner、文档 IA）整体未开始。
