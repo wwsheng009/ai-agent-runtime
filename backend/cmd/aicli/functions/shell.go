@@ -29,9 +29,9 @@ func modelHistoryArtifactThresholdBytes() int {
 }
 
 const (
-	defaultShellFunctionTimeout        = 30 * time.Second
-	shellFunctionTimeoutEnv            = "AICLI_SHELL_COMMAND_TIMEOUT"
-	shellFunctionTimeoutMSEnv          = "AICLI_SHELL_COMMAND_TIMEOUT_MS"
+	defaultShellFunctionTimeout = 30 * time.Second
+	shellFunctionTimeoutEnv     = "AICLI_SHELL_COMMAND_TIMEOUT"
+	shellFunctionTimeoutMSEnv   = "AICLI_SHELL_COMMAND_TIMEOUT_MS"
 	// shellTimeoutNoiseFloor rejects absurdly small numeric timeout_ms values.
 	// Deliberate sub-100ms budgets remain available through timeout="30ms".
 	shellTimeoutNoiseFloor = 100 * time.Millisecond
@@ -272,8 +272,13 @@ func prefixPowershellUTF8ForCmd(cmd *exec.Cmd) {
 	if len(cmd.Args) < 3 {
 		return
 	}
+	// -EncodedCommand already carries the UTF-8 directive inside its base64
+	// payload; prefixing the argument would corrupt the encoded script.
+	if runtimeexecutor.ShellArgsUseEncodedCommand(cmd.Args) {
+		return
+	}
 	lastIdx := len(cmd.Args) - 1
-	cmd.Args[lastIdx] = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + cmd.Args[lastIdx]
+	cmd.Args[lastIdx] = runtimeexecutor.PowerShellCommandPrefix + cmd.Args[lastIdx]
 }
 
 // friendlyHintForCommand returns a user-friendly hint when a command fails.

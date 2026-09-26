@@ -189,7 +189,7 @@ func (t *AICLIExecTool) DefinitionMetadata() map[string]interface{} {
 
 // Execute runs one aicli process and hands its output to the shared shell
 // window contract: the tool folds the captured stream to shellOutputBudgetBytes
-// head-only, archives the complete capture first, and stamps
+// as a head+tail window, archives the complete capture first, and stamps
 // skip_render_truncation so the render layer never folds it again.
 func (t *AICLIExecTool) Execute(ctx context.Context, params map[string]interface{}) (result *toolkit.ToolResult, err error) {
 	defer func() { result = ownShellOutputWindow(ctx, "aicli_exec", result) }()

@@ -1,11 +1,13 @@
 package executor
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"unicode/utf16"
 )
 
 // ShellType represents the kind of shell detected on the system.
@@ -62,12 +64,31 @@ func (s Shell) Metadata() map[string]interface{} {
 	return metadata
 }
 
+// PowerShellCommandPrefix makes PowerShell emit UTF-8 regardless of the host's
+// active code page. It is embedded into -EncodedCommand payloads and prefixed
+// onto -Command payloads by the callers.
+const PowerShellCommandPrefix = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+
+// PowerShellEncodedCommandThreshold is the script length above which
+// DeriveExecArgs passes the script as -EncodedCommand (base64 UTF-16LE) instead
+// of -Command. Long scripts otherwise have to survive the Windows command line
+// limit and every intermediate quoting layer (cmd.exe parsing, powershellQuote,
+// CreateProcess re-quoting), which is where "it worked in my shell" failures
+// come from.
+const PowerShellEncodedCommandThreshold = 7000
+
 // DeriveExecArgs returns the argv slice needed to execute a command string
 // through this shell, mirroring the logic from codex-rs/core/src/shell.rs
 // derive_exec_args().
 //
 //	login=true  → login shell flags (-l / -NoProfile absent)
-//	login=false → non-login shell flags
+//	login=false → non-login, hardened agent flags (PowerShell: -NoProfile
+//	              -NonInteractive so a profile or an interactive prompt can
+//	              never block or pollute a tool call)
+//
+// PowerShell payloads longer than PowerShellEncodedCommandThreshold switch to
+// -EncodedCommand in both modes; the caller must then not prefix the script
+// again (the UTF-8 directive is already inside the encoded payload).
 func (s Shell) DeriveExecArgs(command string, login bool) []string {
 	switch s.Type {
 	case ShellTypeBash, ShellTypeZsh, ShellTypeSh:
@@ -76,10 +97,18 @@ func (s Shell) DeriveExecArgs(command string, login bool) []string {
 		}
 		return []string{s.Path, "-c", command}
 	case ShellTypePowerShell, ShellTypePwsh:
+		longScript := len(command) > PowerShellEncodedCommandThreshold
 		if login {
+			if longScript {
+				return []string{s.Path, "-EncodedCommand", EncodePowerShellCommand(command)}
+			}
 			return []string{s.Path, "-Command", command}
 		}
-		return []string{s.Path, "-NoProfile", "-Command", command}
+		args := []string{s.Path, "-NoProfile", "-NonInteractive"}
+		if longScript {
+			return append(args, "-EncodedCommand", EncodePowerShellCommand(command))
+		}
+		return append(args, "-Command", command)
 	case ShellTypeCmd:
 		return []string{s.Path, "/c", command}
 	default:
@@ -89,6 +118,31 @@ func (s Shell) DeriveExecArgs(command string, login bool) []string {
 		}
 		return []string{s.Path, "-c", command}
 	}
+}
+
+// EncodePowerShellCommand base64-encodes a script as UTF-16LE, the encoding
+// -EncodedCommand expects, and prepends PowerShellCommandPrefix so the
+// encoded payload keeps the UTF-8 output contract on its own.
+func EncodePowerShellCommand(command string) string {
+	script := PowerShellCommandPrefix + command
+	units := utf16.Encode([]rune(script))
+	payload := make([]byte, 0, len(units)*2)
+	for _, unit := range units {
+		payload = append(payload, byte(unit), byte(unit>>8))
+	}
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
+// ShellArgsUseEncodedCommand reports whether argv carries a PowerShell script
+// through -EncodedCommand, i.e. the script argument is already base64 and must
+// not be text-prefixed (doing so would corrupt the payload).
+func ShellArgsUseEncodedCommand(args []string) bool {
+	for _, arg := range args {
+		if strings.EqualFold(strings.TrimSpace(arg), "-EncodedCommand") {
+			return true
+		}
+	}
+	return false
 }
 
 // DetectShellType maps a shell binary name (e.g. "bash", "pwsh") to a

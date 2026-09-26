@@ -857,7 +857,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - `spawn_team auto_start=true` 之后应使用 `wait_team` 等待持久 `team.completed` / `team.summary`；`wait_agent` / `read_agent_events` 面向 `spawn_agent` child session，不应拿 team member id 当 child session id。
 - `/shell` / `/cmd` 支持 `--output-bytes-cap <bytes>` 与 `--disable-output-cap`；默认使用检测到的用户 shell。危险命令仍会进入确认/权限流程。
 - builtin `execute_shell_command` function 支持 `command`、`workdir`、`output_bytes_cap`、`disable_output_cap`；Windows PowerShell/pwsh 下不要把 POSIX-only 命令如 `head` 当默认可用命令。
-- background toolbroker 能力包括 `background_task` 和 `task_output`；HTTP 观测入口见 `docs/skill_runtime/runtime_operations_api.md` 的 Background Jobs 章节。
+- background toolbroker 能力包括 `background_task`、`task_output`（支持 `wait=output|exit` + `timeout_ms` 长轮询，返回 `wait_condition`/`waited_ms`）和 `task_kill`（按 job_id/task_id 终止，已结束/未知 id/已受理三分支可区分）；HTTP 观测入口见 `docs/skill_runtime/runtime_operations_api.md` 的 Background Jobs 章节。
 - shell / background：进程正常结束但 exit≠0 是内容结果，不是工具崩溃。前台 bash 返回 `Success:true` + `exit_code`；background job 状态为 `completed` 并保留 `exit_code`（可选 `non_zero_exit`），仅启动失败、超时、取消、权限/健康检查等硬失败才是 `failed`/`timed_out`/`cancelled` 并带 `error_code`。
 - MCP 默认启动即连（后台异步并行建连，已移除 `auto_connect` 开关）：`config_file` 解析到实际存在的配置时，chat 加载并连接其中 `enabled: true` 的 server；配置缺失时静默跳过，不再为缺失的默认 `configs/mcp.yaml` 打印 warning。单个 server 是否参与连接由 `mcpServers.<name>.enabled` 控制（缺省启用）。
 

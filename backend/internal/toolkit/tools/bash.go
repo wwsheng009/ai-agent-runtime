@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	stderrors "errors"
@@ -182,6 +183,9 @@ func (b *BashTool) DefinitionMetadata() map[string]interface{} {
 		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
+		// bash / execute_shell_command are compatibility aliases: the canonical
+		// model-facing shell surface is `shell` (agent-side dedupe keeps one).
+		"alias_of": "shell",
 	}
 }
 
@@ -388,6 +392,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			metadata := buildCommandExecutionMetadata(command, mutatedPaths, execResult)
 			metadata["exit_code"] = exitCode
 			metadata["non_zero_exit"] = exitCode != 0
+			annotateTerminationMetadata(metadata, err)
 			if duration > 0 {
 				metadata["duration_ms"] = duration.Milliseconds()
 			}
@@ -412,6 +417,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		if code := exitCodeFromError(err); code >= 0 {
 			failureMetadata["exit_code"] = code
 		}
+		annotateTerminationMetadata(failureMetadata, err)
 		if next := bashCommandFailureNextAction(command, execResult.Output, err); next != "" {
 			failureMetadata[toolresult.MetadataNextActionKey] = next
 		}
@@ -1385,10 +1391,11 @@ func buildCommandExecutionMetadata(command string, mutatedPaths []string, result
 	}
 	// Shell output owns its model-visible window instead of relying on the
 	// render-layer backstop: the capture limit (256 KiB default) bounds memory,
-	// and ownShellOutputWindow folds the body to shellOutputBudgetBytes
-	// head-only after archiving the complete capture, so the omitted tail stays
-	// pageable with artifact_read. The budget is declared here as well because
-	// the window is a property of the result, not of the fold path.
+	// and ownShellOutputWindow folds the body to shellOutputBudgetBytes as a
+	// head+tail window after archiving the complete capture, so the omitted
+	// middle stays pageable with artifact_read while errors and test verdicts
+	// stay visible in the tail. The budget is declared here as well because the
+	// window is a property of the result, not of the fold path.
 	metadata[toolresult.MetadataModelVisibleBudgetKey] = shellOutputBudgetBytes
 	if !result.CaptureLimitDisabled && result.CaptureLimitBytes > 0 {
 		metadata["output_capture_limit_bytes"] = result.CaptureLimitBytes
@@ -1492,9 +1499,14 @@ func prefixPowershellUTF8(cmd *exec.Cmd) {
 	if len(cmd.Args) < 3 {
 		return
 	}
+	// -EncodedCommand already carries the UTF-8 directive inside its base64
+	// payload; prefixing the argument would corrupt the encoded script.
+	if runtimeexecutor.ShellArgsUseEncodedCommand(cmd.Args) {
+		return
+	}
 	// The command is the last arg; prepend UTF-8 encoding directive
 	lastIdx := len(cmd.Args) - 1
-	cmd.Args[lastIdx] = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + cmd.Args[lastIdx]
+	cmd.Args[lastIdx] = runtimeexecutor.PowerShellCommandPrefix + cmd.Args[lastIdx]
 }
 
 // friendlyHintFor returns a user-friendly hint when a command fails.
@@ -1513,12 +1525,7 @@ func friendlyHintFor(command string, output string, err error, workdir string) s
 		searchCmd = mainCmd
 	}
 
-	exitCode := -1
-	if exitError, ok := err.(*exec.ExitError); ok {
-		exitCode = exitError.ExitCode()
-	} else {
-		exitCode = exitCodeFromError(err)
-	}
+	exitCode := exitCodeFromError(err)
 
 	switch {
 	case mainCmd == "pwd" && runtimeexecutor.IsWindows():
@@ -1820,12 +1827,20 @@ var ansiEscapeSequencePattern = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]|\x1b\]
 // exitCodeFromError extracts a process exit code from *exec.ExitError or from
 // common "exit status N" / Windows hex status strings. Used when errors are
 // wrapped or when only the message remains after shell layers.
+//
+// Signal deaths are reported the way shells report them: a process killed by
+// signal N has no exit status of its own (Go's ExitCode() returns -1), so the
+// observable code is 128+N (SIGKILL → 137, SIGTERM → 143). Reporting -1 would
+// make the model read "killed by the OS" as "unknown tool failure".
 func exitCodeFromError(err error) int {
 	if err == nil {
 		return -1
 	}
 	var exitErr *exec.ExitError
 	if stderrors.As(err, &exitErr) {
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return 128 + int(status.Signal())
+		}
 		return exitErr.ExitCode()
 	}
 	msg := strings.TrimSpace(err.Error())
@@ -1859,6 +1874,42 @@ func exitCodeFromError(err error) int {
 		}
 	}
 	return -1
+}
+
+// terminationFromError classifies how a failed process ended: a signal death
+// returns termination="signal" plus the signal label (e.g. "killed"), anything
+// else returns empty strings so callers keep whatever termination the process
+// guard already recorded (timeout, tree kill, ...).
+func terminationFromError(err error) (termination string, signalName string) {
+	var exitErr *exec.ExitError
+	if !stderrors.As(err, &exitErr) {
+		return "", ""
+	}
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() {
+		return "", ""
+	}
+	return "signal", status.Signal().String()
+}
+
+// annotateTerminationMetadata stamps the signal-death classification onto a
+// result's metadata: the guard's own termination reason (e.g. timeout) wins
+// when present, because "we killed it after the timeout" is more actionable
+// than the bare signal that reached the process.
+func annotateTerminationMetadata(metadata map[string]interface{}, err error) {
+	if metadata == nil {
+		return
+	}
+	termination, signalName := terminationFromError(err)
+	if termination == "" {
+		return
+	}
+	if existing, _ := metadata["termination"].(string); strings.TrimSpace(existing) == "" {
+		metadata["termination"] = termination
+	}
+	if signalName != "" {
+		metadata["signal"] = signalName
+	}
 }
 
 // isHardShellExecutionError reports true only for control-plane / launch failures
