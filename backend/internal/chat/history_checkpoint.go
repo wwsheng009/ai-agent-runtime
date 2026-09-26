@@ -11,7 +11,7 @@ import (
 //
 // 该常量与 CheckpointWindow 是「长 turn 中途落库」这条链路的唯一策略来源：
 // aicli chat actor（SessionActor.checkpointSessionHistory）与 runtime HTTP
-// agent-chat（internal/api/skills 的 agentChatHistoryCheckpointer）共用同一份
+// agent-chat（internal/api/runtimeapi 的 agentChatHistoryCheckpointer）共用同一份
 // 窗口实现，避免两条入口各自演化出不同的及时性语义。
 const DefaultSessionCheckpointInterval = 15 * time.Second
 

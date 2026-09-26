@@ -19,7 +19,7 @@ import (
 	"github.com/spf13/pflag"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -966,7 +966,7 @@ func runtimeServerHealthURL(listenAddr string) (string, bool) {
 
 type runtimeServerApp struct {
 	router          *mux.Router
-	handler         *skillsapi.Handler
+	handler         *runtimeapi.Handler
 	cfg             *config.Config
 	skillsCfg       *config.SkillsRuntimeConfig
 	runtimeManager  *runtimecfg.RuntimeManager
@@ -1052,7 +1052,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		return nil, fmt.Errorf("invalid runtime bootstrap: %w", err)
 	}
 
-	handler := skillsapi.NewHandler(bootstrapManager.Registry(), bootstrapManager.Loader(), mcpAdapter)
+	handler := runtimeapi.NewHandler(bootstrapManager.Registry(), bootstrapManager.Loader(), mcpAdapter)
 	if manager != nil {
 		resolution := resolveRuntimeMCPConfigResolution(cfg)
 		if resolution.Path != "" {
@@ -1072,7 +1072,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	handler.SetSiteAccountService(siteAccountService)
 	handler.SetRuntimeConfig(runtimeConfig, runtimeManager.GetFilePath())
 	handler.SetRuntimeLogFilePath(strings.TrimSpace(cfg.Log.FilePath))
-	handler.SetRuntimeConfigResolver(func(scope skillsapi.UsageScope) *runtimecfg.RuntimeConfig {
+	handler.SetRuntimeConfigResolver(func(scope runtimeapi.UsageScope) *runtimecfg.RuntimeConfig {
 		selectedConfig, selectedPath := runtimeManager.SelectConfigForScopeWithPath(scope.ScopeKey)
 		if selectedConfig == nil {
 			return nil
@@ -1106,7 +1106,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	handler.SetRuntimeConfigLayersProvider(
 		runtimeserver.NewRuntimeConfigLayersProvider(),
 	)
-	handler.SetProfileSupport(skillsapi.ProfileSupportConfig{
+	handler.SetProfileSupport(runtimeapi.ProfileSupportConfig{
 		Registry:          profilesys.NewRegistryFromProfilesConfig(cfg.Profiles),
 		DefaultProfile:    defaultProfile(cfg),
 		GlobalRuntimePath: strings.TrimSpace(runtimeManager.GetFilePath()),
@@ -1235,14 +1235,14 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	// 追加式注册：不改变既有 /fs/read-file 等端点的语义；服务未注入时模块内统一 503 降级。
 	if runtimeRouter != nil {
 		if roots := handler.FSBrowserRoots(); roots != nil {
-			skillsapi.RegisterFSBrowserRoutes(runtimeRouter, filebrowse.NewService(filebrowse.Deps{
+			runtimeapi.RegisterFSBrowserRoutes(runtimeRouter, filebrowse.NewService(filebrowse.Deps{
 				Roots:  roots,
 				Limits: filebrowse.DefaultLimits(),
 			}))
 			// 右侧栏「Git」面板（P3 只读 + P4-1 stage/unstage）：/git/status|diff|commits|stage。
 			// 与 /fs/* 共用同一个作用域解析器（gitbrowse.RootResolver 与 fsscope.RootResolver 同形）。
 			// git 不可用时由服务层返回 git_unavailable（503），不影响启动。
-			skillsapi.RegisterGitBrowseRoutes(runtimeRouter, gitbrowse.NewService(gitbrowse.Deps{Roots: roots}))
+			runtimeapi.RegisterGitBrowseRoutes(runtimeRouter, gitbrowse.NewService(gitbrowse.Deps{Roots: roots}))
 		}
 	}
 	if webui.Available() {
@@ -1588,20 +1588,20 @@ func buildLLMRetryRules(cfg *config.Config) []runtimellm.RetryRule {
 	return result
 }
 
-func applySkillsRuntimePolicies(handler *skillsapi.Handler, cfg *config.SkillsRuntimeConfig) {
+func applySkillsRuntimePolicies(handler *runtimeapi.Handler, cfg *config.SkillsRuntimeConfig) {
 	if handler == nil || cfg == nil {
 		return
 	}
 	handler.SetAdminToken(cfg.AdminToken)
 	handler.SetSearchReindexCooldown(cfg.ReindexCooldown)
-	handler.SetMutationPolicy(skillsapi.MutationPolicy{
+	handler.SetMutationPolicy(runtimeapi.MutationPolicy{
 		ReadOnly:         cfg.ReadOnly,
 		DisableImport:    cfg.DisableImport,
 		DisablePersist:   cfg.DisablePersist,
 		DisableReloadOps: cfg.DisableReloadOps,
 		DisableHotReload: cfg.DisableHotReloadOps,
 	})
-	handler.SetUsagePolicy(skillsapi.UsagePolicy{
+	handler.SetUsagePolicy(runtimeapi.UsagePolicy{
 		TrackingEnabled:    cfg.UsageTrackingEnabled,
 		QuotaEnabled:       cfg.QuotaEnabled,
 		DefaultMaxRequests: cfg.DefaultMaxRequests,
@@ -1613,11 +1613,11 @@ func applySkillsRuntimePolicies(handler *skillsapi.Handler, cfg *config.SkillsRu
 	handler.SetScopeResolverConfig(buildSkillsScopeResolverConfig(cfg))
 }
 
-func buildSkillsScopeResolverConfig(cfg *config.SkillsRuntimeConfig) skillsapi.ScopeResolverConfig {
+func buildSkillsScopeResolverConfig(cfg *config.SkillsRuntimeConfig) runtimeapi.ScopeResolverConfig {
 	if cfg == nil {
-		return skillsapi.ScopeResolverConfig{}
+		return runtimeapi.ScopeResolverConfig{}
 	}
-	return skillsapi.ScopeResolverConfig{
+	return runtimeapi.ScopeResolverConfig{
 		Enabled:          cfg.ScopeResolverEnabled,
 		TenantHeaders:    append([]string(nil), cfg.TenantHeaders...),
 		ProjectHeaders:   append([]string(nil), cfg.ProjectHeaders...),
@@ -1779,13 +1779,13 @@ func runtimeInfoHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func buildSkillsUsageQuotaLimits(configured map[string]config.SkillsRuntimeQuotaLimit) map[string]skillsapi.UsageQuotaLimit {
+func buildSkillsUsageQuotaLimits(configured map[string]config.SkillsRuntimeQuotaLimit) map[string]runtimeapi.UsageQuotaLimit {
 	if len(configured) == 0 {
 		return nil
 	}
-	limits := make(map[string]skillsapi.UsageQuotaLimit, len(configured))
+	limits := make(map[string]runtimeapi.UsageQuotaLimit, len(configured))
 	for key, value := range configured {
-		limits[key] = skillsapi.UsageQuotaLimit{
+		limits[key] = runtimeapi.UsageQuotaLimit{
 			MaxRequests: value.MaxRequests,
 			MaxTokens:   value.MaxTokens,
 		}
@@ -1793,13 +1793,13 @@ func buildSkillsUsageQuotaLimits(configured map[string]config.SkillsRuntimeQuota
 	return limits
 }
 
-func buildSkillsScopeBindings(configured map[string]config.SkillsRuntimeScopeBinding) map[string]skillsapi.UsageScope {
+func buildSkillsScopeBindings(configured map[string]config.SkillsRuntimeScopeBinding) map[string]runtimeapi.UsageScope {
 	if len(configured) == 0 {
 		return nil
 	}
-	bindings := make(map[string]skillsapi.UsageScope, len(configured))
+	bindings := make(map[string]runtimeapi.UsageScope, len(configured))
 	for key, value := range configured {
-		bindings[key] = skillsapi.UsageScope{
+		bindings[key] = runtimeapi.UsageScope{
 			TenantID:  value.TenantID,
 			ProjectID: value.ProjectID,
 			UserID:    value.UserID,

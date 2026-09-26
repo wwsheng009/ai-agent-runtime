@@ -7,7 +7,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// 契约入口：runtime server（backend/internal/api/skills）调用的冻结 API。
+// 契约入口：runtime server（backend/internal/api/runtimeapi）调用的冻结 API。
 // 全部为转发/投影，逻辑本体在 classify.go / capabilities.go / catalog.go。
 // ---------------------------------------------------------------------------
 

@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"gopkg.in/yaml.v3"
 )
@@ -21,7 +21,7 @@ import (
 // 因此开发态下编辑 agent.maxSteps 不会再改脏仓库里的 backend/configs/runtime.yaml。
 func NewLayeredRuntimeAgentMaxStepsPersister(
 	manager *runtimecfg.RuntimeManager,
-) skillsapi.AgentMaxStepsPersister {
+) runtimeapi.AgentMaxStepsPersister {
 	return func(maxSteps int) (string, error) {
 		if manager == nil {
 			return "", fmt.Errorf("runtime config manager is not configured")
@@ -60,7 +60,7 @@ func NewLayeredRuntimeAgentMaxStepsPersister(
 // 换成**写入目标**（可写层；全新安装时是用户级路径），使设置页显示的文件与实际落盘一致。
 func NewLayeredRuntimeAgentMaxStepsReader(
 	manager *runtimecfg.RuntimeManager,
-) skillsapi.AgentMaxStepsProvider {
+) runtimeapi.AgentMaxStepsProvider {
 	return func() (int, string, error) {
 		if manager == nil {
 			return 0, "", fmt.Errorf("runtime config manager is not configured")
@@ -85,7 +85,7 @@ func NewLayeredRuntimeAgentMaxStepsReader(
 // 的既有 persister 一致，也与 RuntimeManager.Load 把「文件不存在」当成功相呼应）。
 func NewRuntimeAgentMaxStepsPersister(
 	manager *runtimecfg.RuntimeManager,
-) skillsapi.AgentMaxStepsPersister {
+) runtimeapi.AgentMaxStepsPersister {
 	return func(maxSteps int) (string, error) {
 		if manager == nil {
 			return "", fmt.Errorf("runtime config manager is not configured")
@@ -117,7 +117,7 @@ func NewRuntimeAgentMaxStepsPersister(
 // 内存快照与来源配置文件路径，不修改快照、不写文件（路径原样返回，trim 交给 handler）。
 func NewRuntimeAgentMaxStepsReader(
 	manager *runtimecfg.RuntimeManager,
-) skillsapi.AgentMaxStepsProvider {
+) runtimeapi.AgentMaxStepsProvider {
 	return func() (int, string, error) {
 		if manager == nil {
 			return 0, "", fmt.Errorf("runtime config manager is not configured")

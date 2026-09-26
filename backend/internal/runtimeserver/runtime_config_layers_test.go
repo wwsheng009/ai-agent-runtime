@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 )
 
@@ -47,13 +47,13 @@ func TestRuntimeConfigLayersProviderOmitsDevelopmentDirectory(t *testing.T) {
 			"development layout must not be a layer: %#v", layers)
 	}
 
-	find := func(kind string, present bool) (skillsapi.ConfigDocumentLayer, bool) {
+	find := func(kind string, present bool) (runtimeapi.ConfigDocumentLayer, bool) {
 		for _, layer := range layers {
 			if layer.Kind == kind && layer.Present == present {
 				return layer, true
 			}
 		}
-		return skillsapi.ConfigDocumentLayer{}, false
+		return runtimeapi.ConfigDocumentLayer{}, false
 	}
 
 	userLayer, ok := find("user", true)

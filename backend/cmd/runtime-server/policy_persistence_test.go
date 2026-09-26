@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"gopkg.in/yaml.v3"
 )
@@ -55,7 +55,7 @@ skills_runtime:
 	persister := runtimeserver.NewSkillsRuntimePolicyPersister(configPath, cfg)
 	require.NotNil(t, persister)
 
-	authPolicy := skillsapi.ScopeResolverConfig{
+	authPolicy := runtimeapi.ScopeResolverConfig{
 		Enabled:          true,
 		JWTClaimsEnabled: true,
 		TenantHeaders:    []string{"X-Skills-Tenant"},
@@ -67,7 +67,7 @@ skills_runtime:
 		UserClaims:       []string{"user", "uid"},
 		RoleClaims:       []string{"role", "roles"},
 		AdminRoles:       []string{"admin"},
-		APIKeyScopes: map[string]skillsapi.UsageScope{
+		APIKeyScopes: map[string]runtimeapi.UsageScope{
 			"test-key": {
 				TenantID:  "tenant-a",
 				ProjectID: "project-a",
@@ -77,12 +77,12 @@ skills_runtime:
 	}
 	require.NoError(t, persister.PersistAuthPolicy(authPolicy, "tester"))
 
-	usagePolicy := skillsapi.UsagePolicy{
+	usagePolicy := runtimeapi.UsagePolicy{
 		TrackingEnabled:    true,
 		QuotaEnabled:       true,
 		DefaultMaxRequests: 10,
 		DefaultMaxTokens:   500,
-		TenantQuotas: map[string]skillsapi.UsageQuotaLimit{
+		TenantQuotas: map[string]runtimeapi.UsageQuotaLimit{
 			"tenant-a": {
 				MaxRequests: intPtr(20),
 				MaxTokens:   intPtr(1000),
@@ -91,7 +91,7 @@ skills_runtime:
 	}
 	require.NoError(t, persister.PersistUsagePolicy(usagePolicy, "tester"))
 
-	mutationPolicy := skillsapi.MutationPolicy{
+	mutationPolicy := runtimeapi.MutationPolicy{
 		ReadOnly:         true,
 		DisableImport:    true,
 		DisablePersist:   true,

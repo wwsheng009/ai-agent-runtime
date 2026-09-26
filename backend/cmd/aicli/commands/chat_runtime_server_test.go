@@ -15,7 +15,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -832,7 +832,7 @@ func TestPrepareChatPersistence_ServerModeUsesRuntimeServerSessionManager(t *tes
 	remoteManager := runtimechat.NewSessionManager(remoteStorage, runtimechat.DefaultSessionManagerConfig())
 	defer remoteManager.Stop()
 
-	handler := skillsapi.NewHandler(nil, nil, nil)
+	handler := runtimeapi.NewHandler(nil, nil, nil)
 	handler.SetSessionManager(remoteManager)
 	router := mux.NewRouter()
 	router.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {

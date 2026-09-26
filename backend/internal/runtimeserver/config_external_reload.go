@@ -11,7 +11,7 @@ import (
 	"time"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"gopkg.in/yaml.v3"
 )
@@ -164,7 +164,7 @@ func (r *ConfigExternalReloader) PollOnce() (bool, ConfigDocumentHotReloadResult
 func configDocumentRuntimeImpactForConfigs(
 	current *agentconfig.Config,
 	next *agentconfig.Config,
-) (*skillsapi.ConfigDocumentRuntimeImpact, error) {
+) (*runtimeapi.ConfigDocumentRuntimeImpact, error) {
 	if current == nil || next == nil {
 		return nil, nil
 	}

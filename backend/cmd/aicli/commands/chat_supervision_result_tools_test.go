@@ -15,7 +15,7 @@ import (
 
 // P0-4 改动 1/2 的 CLI 宿主验收：include_results 从宿主 batch store 取数，
 // read_agent_result 按 batch task → mailbox completion payload 的优先级读取。
-// HTTP 宿主的同契约用例在 internal/api/skills/supervision_tool_controller_test.go。
+// HTTP 宿主的同契约用例在 internal/api/runtimeapi/supervision_tool_controller_test.go。
 //
 // 两个宿主都调用 supervision.BuildReadResultPayload 渲染同一条
 // runtimeserver.SupervisionResultSource 记录，因此宿主间差异只可能是

@@ -26,7 +26,7 @@ import (
 // ============================================================================
 
 // 编译期断言：SQLiteRuntimeStore 必须持续满足 cacheanalytics.RequestStore，
-// 挂载方的类型断言（cmd/aicli/commands、internal/api/skills）才能注入成功。
+// 挂载方的类型断言（cmd/aicli/commands、internal/api/runtimeapi）才能注入成功。
 var _ cacheanalytics.RequestStore = (*SQLiteRuntimeStore)(nil)
 
 // SaveRequest 幂等写入一条终态缓存请求记录（cache_requests 镜像表）。

@@ -5,14 +5,14 @@ import (
 	"strings"
 	"time"
 
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/providerhealth"
 )
 
 func (s *LocalConfigDocumentService) PreviewAgentRoute(
-	req skillsapi.AgentRoutePreviewRequest,
-) (*skillsapi.AgentRoutePreviewResult, error) {
+	req runtimeapi.AgentRoutePreviewRequest,
+) (*runtimeapi.AgentRoutePreviewResult, error) {
 	documentPath := s.documentPath()
 	if s == nil || strings.TrimSpace(documentPath) == "" {
 		return nil, fmt.Errorf("config path is required")
@@ -89,18 +89,18 @@ func (s *LocalConfigDocumentService) PreviewAgentRoute(
 		return nil, err
 	}
 
-	return &skillsapi.AgentRoutePreviewResult{
+	return &runtimeapi.AgentRoutePreviewResult{
 		Scope:          scope,
 		RoutingSource:  routingSource,
 		RoutingEnabled: modelrouting.RoutingEnabled(routing),
-		Parent: skillsapi.AgentRoutePreviewParent{
+		Parent: runtimeapi.AgentRoutePreviewParent{
 			Provider:        parent.Provider,
 			Model:           parent.Model,
 			ReasoningEffort: parent.ReasoningEffort,
 			MaxTokens:       parent.MaxTokens,
 			Timeout:         formatRouteDuration(parent.Timeout),
 		},
-		Decision: skillsapi.AgentRoutePreviewDecision{
+		Decision: runtimeapi.AgentRoutePreviewDecision{
 			Difficulty:          decision.Difficulty,
 			DifficultySource:    decision.DifficultySource,
 			DifficultyRationale: decision.DifficultyRationale,
@@ -132,4 +132,4 @@ func formatRouteDuration(value time.Duration) string {
 	return value.String()
 }
 
-var _ skillsapi.AgentRoutePreviewService = (*LocalConfigDocumentService)(nil)
+var _ runtimeapi.AgentRoutePreviewService = (*LocalConfigDocumentService)(nil)

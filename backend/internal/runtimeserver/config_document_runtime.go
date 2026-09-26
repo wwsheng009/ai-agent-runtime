@@ -10,7 +10,7 @@ import (
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
@@ -97,12 +97,12 @@ type ConfigDocumentHotReloader interface {
 type RuntimeConfigApplyTarget interface {
 	SetAICLIConfig(config *agentconfig.Config)
 	SetAdminToken(token string)
-	SetMutationPolicy(policy skillsapi.MutationPolicy)
-	SetProfileSupport(cfg skillsapi.ProfileSupportConfig)
+	SetMutationPolicy(policy runtimeapi.MutationPolicy)
+	SetProfileSupport(cfg runtimeapi.ProfileSupportConfig)
 	SetRuntimeLogFilePath(path string)
-	SetScopeResolverConfig(config skillsapi.ScopeResolverConfig)
+	SetScopeResolverConfig(config runtimeapi.ScopeResolverConfig)
 	SetSearchReindexCooldown(cooldown time.Duration)
-	SetUsagePolicy(policy skillsapi.UsagePolicy)
+	SetUsagePolicy(policy runtimeapi.UsagePolicy)
 }
 
 type RuntimeConfigHotReloader struct {
@@ -225,7 +225,7 @@ func (r *RuntimeConfigHotReloader) updateCurrentConfig(nextCfg *agentconfig.Conf
 func analyzeConfigDocumentRuntimeImpact(
 	current interface{},
 	next interface{},
-) *skillsapi.ConfigDocumentRuntimeImpact {
+) *runtimeapi.ConfigDocumentRuntimeImpact {
 	changedSet := make(map[string]struct{})
 	collectConfigDocumentChangedPaths("", current, next, changedSet)
 	changedPaths := mapKeysSorted(changedSet)
@@ -233,7 +233,7 @@ func analyzeConfigDocumentRuntimeImpact(
 		return nil
 	}
 
-	impact := &skillsapi.ConfigDocumentRuntimeImpact{
+	impact := &runtimeapi.ConfigDocumentRuntimeImpact{
 		ChangedPaths: changedPaths,
 	}
 	for _, path := range changedPaths {
@@ -391,7 +391,7 @@ func classifyProviderItemPath(path string) runtimeConfigPathDisposition {
 }
 
 func buildConfigDocumentWarnings(
-	impact *skillsapi.ConfigDocumentRuntimeImpact,
+	impact *runtimeapi.ConfigDocumentRuntimeImpact,
 	appliedPaths []string,
 	applyWarnings []string,
 ) []string {
@@ -495,14 +495,14 @@ func applySkillsRuntimePoliciesToTarget(
 
 	target.SetAdminToken(cfg.AdminToken)
 	target.SetSearchReindexCooldown(cfg.ReindexCooldown)
-	target.SetMutationPolicy(skillsapi.MutationPolicy{
+	target.SetMutationPolicy(runtimeapi.MutationPolicy{
 		ReadOnly:         cfg.ReadOnly,
 		DisableImport:    cfg.DisableImport,
 		DisablePersist:   cfg.DisablePersist,
 		DisableReloadOps: cfg.DisableReloadOps,
 		DisableHotReload: cfg.DisableHotReloadOps,
 	})
-	target.SetUsagePolicy(skillsapi.UsagePolicy{
+	target.SetUsagePolicy(runtimeapi.UsagePolicy{
 		TrackingEnabled:    cfg.UsageTrackingEnabled,
 		QuotaEnabled:       cfg.QuotaEnabled,
 		DefaultMaxRequests: cfg.DefaultMaxRequests,
@@ -511,7 +511,7 @@ func applySkillsRuntimePoliciesToTarget(
 		ProjectQuotas:      buildSkillsUsageQuotaLimitsForHotReload(cfg.QuotaPolicies.Projects),
 		UserQuotas:         buildSkillsUsageQuotaLimitsForHotReload(cfg.QuotaPolicies.Users),
 	})
-	target.SetScopeResolverConfig(skillsapi.ScopeResolverConfig{
+	target.SetScopeResolverConfig(runtimeapi.ScopeResolverConfig{
 		Enabled:          cfg.ScopeResolverEnabled,
 		TenantHeaders:    append([]string(nil), cfg.TenantHeaders...),
 		ProjectHeaders:   append([]string(nil), cfg.ProjectHeaders...),
@@ -528,9 +528,9 @@ func applySkillsRuntimePoliciesToTarget(
 	})
 }
 
-func buildProfileSupportConfigForHotReload(cfg *agentconfig.Config) skillsapi.ProfileSupportConfig {
+func buildProfileSupportConfigForHotReload(cfg *agentconfig.Config) runtimeapi.ProfileSupportConfig {
 	skillsCfg := normalizeSkillsRuntimeConfigForHotReload(cfg)
-	return skillsapi.ProfileSupportConfig{
+	return runtimeapi.ProfileSupportConfig{
 		Registry:          profilesys.NewRegistryFromProfilesConfig(cfg.Profiles),
 		DefaultProfile:    defaultProfileForHotReload(cfg),
 		GlobalRuntimePath: strings.TrimSpace(skillsCfg.ConfigFile),
@@ -660,13 +660,13 @@ func resolvedExtraSkillDirsForHotReload(cfg *agentconfig.SkillsRuntimeConfig) []
 
 func buildSkillsUsageQuotaLimitsForHotReload(
 	configured map[string]agentconfig.SkillsRuntimeQuotaLimit,
-) map[string]skillsapi.UsageQuotaLimit {
+) map[string]runtimeapi.UsageQuotaLimit {
 	if len(configured) == 0 {
 		return nil
 	}
-	limits := make(map[string]skillsapi.UsageQuotaLimit, len(configured))
+	limits := make(map[string]runtimeapi.UsageQuotaLimit, len(configured))
 	for key, value := range configured {
-		limits[key] = skillsapi.UsageQuotaLimit{
+		limits[key] = runtimeapi.UsageQuotaLimit{
 			MaxRequests: value.MaxRequests,
 			MaxTokens:   value.MaxTokens,
 		}
@@ -676,13 +676,13 @@ func buildSkillsUsageQuotaLimitsForHotReload(
 
 func buildSkillsScopeBindingsForHotReload(
 	configured map[string]agentconfig.SkillsRuntimeScopeBinding,
-) map[string]skillsapi.UsageScope {
+) map[string]runtimeapi.UsageScope {
 	if len(configured) == 0 {
 		return nil
 	}
-	bindings := make(map[string]skillsapi.UsageScope, len(configured))
+	bindings := make(map[string]runtimeapi.UsageScope, len(configured))
 	for key, value := range configured {
-		bindings[key] = skillsapi.UsageScope{
+		bindings[key] = runtimeapi.UsageScope{
 			TenantID:  value.TenantID,
 			ProjectID: value.ProjectID,
 			UserID:    value.UserID,

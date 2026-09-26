@@ -7,7 +7,7 @@ import (
 )
 
 // FR-11（Batch 6）：`--profile auto` 的提示词自动路由。本文件是**唯一权威**：
-// server（internal/api/skills）与 CLI（cmd/aicli/commands）共用同一份规则匹配与
+// server（internal/api/runtimeapi）与 CLI（cmd/aicli/commands）共用同一份规则匹配与
 // 兜底语义，禁止出现第二套解析逻辑。未配置 `profiles.auto` 时逐字保留历史
 // 启发式（write→executor / plan→planner / search→explore，未命中→executor），
 // 因此"从不开 auto"的既有部署零变化（NFR-1）。

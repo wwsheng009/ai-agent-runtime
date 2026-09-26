@@ -270,7 +270,7 @@ func TestSubagentAuditEventChannelRegistrations(t *testing.T) {
 // 字面量散落在发射点，注册表与发射点之间就没有任何机械约束，漏登记的症状只是
 // 「前端没反应 / 事后查不到账」。
 //
-// 扫描 internal/agent、internal/api/skills、internal/toolbroker 的生产源码
+// 扫描 internal/agent、internal/api/runtimeapi、internal/toolbroker 的生产源码
 // （跳过 _test.go），对 emitRuntimeEvent("<literal>" 形态的调用提取字面量并断言
 // 已登记。登记为 0 通道也是合法表态（「当前无 chat 侧交付通道」），因此本门禁
 // 只强迫**表态**，不强迫给通道；新发射点更推荐改用 internal/events 的常量。

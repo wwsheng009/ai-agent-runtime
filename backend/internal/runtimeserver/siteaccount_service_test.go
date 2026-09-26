@@ -13,7 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/siteaccount"
 )
 
@@ -40,7 +40,7 @@ func TestLocalSiteAccountServiceDetect(t *testing.T) {
 	service := NewLocalSiteAccountService("", "")
 	service.SetClient(siteaccount.NewClient(server.Client()))
 
-	result, err := service.Detect(context.Background(), skillsapi.SiteAccountDetectRequest{
+	result, err := service.Detect(context.Background(), runtimeapi.SiteAccountDetectRequest{
 		BaseURL: server.URL,
 	})
 	require.NoError(t, err)
@@ -70,7 +70,7 @@ func TestLocalSiteAccountServiceFetchSub2API(t *testing.T) {
 	service := NewLocalSiteAccountService("", "")
 	service.SetClient(siteaccount.NewClient(server.Client()))
 
-	result, err := service.Fetch(context.Background(), skillsapi.SiteAccountFetchRequest{
+	result, err := service.Fetch(context.Background(), runtimeapi.SiteAccountFetchRequest{
 		BaseURL:  server.URL,
 		SiteType: "sub2api",
 		APIKey:   "sk-test",
@@ -122,7 +122,7 @@ func TestLocalSiteAccountServiceRefreshProviderPersists(t *testing.T) {
 		return time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	}
 
-	result, err := service.RefreshProvider(context.Background(), "alpha", skillsapi.SiteAccountRefreshRequest{
+	result, err := service.RefreshProvider(context.Background(), "alpha", runtimeapi.SiteAccountRefreshRequest{
 		SiteType:   "sub2api",
 		SkipDetect: true,
 	})
@@ -178,7 +178,7 @@ func TestLocalSiteAccountServiceRefreshDeepSeekPersistsBalanceDetails(t *testing
 
 	service := NewLocalSiteAccountService(configPath, authPath)
 	service.SetClient(siteaccount.NewClient(server.Client()))
-	result, err := service.RefreshProvider(context.Background(), "deepseek", skillsapi.SiteAccountRefreshRequest{
+	result, err := service.RefreshProvider(context.Background(), "deepseek", runtimeapi.SiteAccountRefreshRequest{
 		SiteType:   "deepseek",
 		SkipDetect: true,
 	})
@@ -257,7 +257,7 @@ func TestLocalSiteAccountServiceRefreshProviderUsesAuthStore(t *testing.T) {
 	service := NewLocalSiteAccountService(configPath, authPath)
 	service.SetClient(siteaccount.NewClient(server.Client()))
 
-	result, err := service.RefreshProvider(context.Background(), "newapi", skillsapi.SiteAccountRefreshRequest{
+	result, err := service.RefreshProvider(context.Background(), "newapi", runtimeapi.SiteAccountRefreshRequest{
 		SkipDetect: true,
 		SiteType:   "new-api",
 	})
@@ -312,7 +312,7 @@ func TestLocalSiteAccountServiceRefreshTriggersProviderReloader(t *testing.T) {
 		return nil
 	})
 
-	result, err := service.RefreshProvider(context.Background(), "alpha", skillsapi.SiteAccountRefreshRequest{
+	result, err := service.RefreshProvider(context.Background(), "alpha", runtimeapi.SiteAccountRefreshRequest{
 		SiteType:   "sub2api",
 		SkipDetect: true,
 		APIKey:     "sk-alpha-rotated",

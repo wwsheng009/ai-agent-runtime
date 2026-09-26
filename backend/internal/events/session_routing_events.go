@@ -4,7 +4,7 @@ package events
 //
 // 与姊妹文件 main_agent_routing.go / subagent_audit_events.go 同构：
 //
-//  1. 类型名在这里定义一次，发射点（internal/api/skills/session_routing_handlers.go）
+//  1. 类型名在这里定义一次，发射点（internal/api/runtimeapi/session_routing_handlers.go）
 //     只引用常量，不写裸字面量；
 //  2. contract.go 的 runtimeEventContracts 登记同一常量（同包引用），通道由注册表决定；
 //  3. contract_test.go 断言「常量 ↔ 注册表 ↔ runtimeobserve 已知目录」三方一致。

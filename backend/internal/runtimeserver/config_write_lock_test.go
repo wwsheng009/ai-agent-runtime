@@ -8,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 )
 
 // TestRuntimeConfigWritersHonorSharedWriteLock：runtime-server 侧对**同一份 config.yaml**
@@ -40,7 +40,7 @@ func TestRuntimeConfigWritersHonorSharedWriteLock(t *testing.T) {
 			write: func() error {
 				raw := "server:\n  port: 8102\n"
 				_, err := NewLocalConfigDocumentService(configPath).SaveDocument(
-					skillsapi.ConfigDocumentSaveRequest{Raw: &raw, Mode: "raw"},
+					runtimeapi.ConfigDocumentSaveRequest{Raw: &raw, Mode: "raw"},
 				)
 				return err
 			},

@@ -42,7 +42,7 @@ const (
 
 // chatRoutingSessionIsChildAgent 判定当前会话是否为子 Agent 会话（M16/INV-A3）。
 // 判据与宿主接线同源（chat_actor_host.go:1379-1403 与
-// internal/api/skills/session_runtime_support.go:3938-3942 的 child 标记）：
+// internal/api/runtimeapi/session_runtime_support.go:3938-3942 的 child 标记）：
 // agent_type / depth>0 / read_only 任一命中即为子会话——这类会话可能被
 // `aicli chat --session <id>`、`/load`、`/resume` 或 ACP 载入到 TUI。
 func chatRoutingSessionIsChildAgent(session *ChatSession) bool {

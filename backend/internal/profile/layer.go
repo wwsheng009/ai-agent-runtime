@@ -10,7 +10,7 @@ import (
 
 // LayerRoot 返回层根目录（G1/G2 只允许 user 与 project 两层）。
 //
-// 规则本体只此一份：API（internal/api/skills 的 profile 写端点）与 CLI
+// 规则本体只此一份：API（internal/api/runtimeapi 的 profile 写端点）与 CLI
 // （aicli profile create/import/move）共用。两个入口各写一套"层根在哪"会立刻
 // 分叉——一个写 <home>/.aicli/profiles、另一个写 ./profiles，而冲突检查、
 // 引用重定向都建立在这个路径上。

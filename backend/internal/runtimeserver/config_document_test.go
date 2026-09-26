@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 )
 
 func TestLocalConfigDocumentServiceLoadAndSaveRaw(t *testing.T) {
@@ -26,7 +26,7 @@ func TestLocalConfigDocumentServiceLoadAndSaveRaw(t *testing.T) {
 	require.Equal(t, resolveAbsolutePath(configPath), document.Path)
 
 	updated := "server:\n  host: 0.0.0.0\nproviders:\n  default_provider: updated\n"
-	document, err = service.SaveDocument(skillsapi.ConfigDocumentSaveRequest{
+	document, err = service.SaveDocument(runtimeapi.ConfigDocumentSaveRequest{
 		Raw:  &updated,
 		Mode: "raw",
 	})
@@ -55,7 +55,7 @@ func TestLocalConfigDocumentServiceSaveStructured(t *testing.T) {
 	service := NewLocalConfigDocumentService(configPath)
 	require.NotNil(t, service)
 
-	document, err := service.SaveDocument(skillsapi.ConfigDocumentSaveRequest{
+	document, err := service.SaveDocument(runtimeapi.ConfigDocumentSaveRequest{
 		Mode: "structured",
 		Parsed: map[string]interface{}{
 			"server": map[string]interface{}{
@@ -89,7 +89,7 @@ providers:
 	service := NewLocalConfigDocumentService(configPath)
 	require.NotNil(t, service)
 
-	document, err := service.SaveDocument(skillsapi.ConfigDocumentSaveRequest{
+	document, err := service.SaveDocument(runtimeapi.ConfigDocumentSaveRequest{
 		Mode: "structured",
 		Parsed: map[string]interface{}{
 			"providers": map[string]interface{}{
@@ -132,7 +132,7 @@ func TestLocalConfigDocumentServicePreviewDoesNotPersist(t *testing.T) {
 	service := NewLocalConfigDocumentService(configPath)
 	require.NotNil(t, service)
 
-	preview, err := service.PreviewDocument(skillsapi.ConfigDocumentSaveRequest{
+	preview, err := service.PreviewDocument(runtimeapi.ConfigDocumentSaveRequest{
 		Raw:  ptrToString("server:\n  host: 0.0.0.0\n"),
 		Mode: "raw",
 	})
@@ -155,7 +155,7 @@ func TestLocalConfigDocumentServiceRejectsInvalidTeamRouting(t *testing.T) {
 	require.NotNil(t, service)
 
 	invalid := "aicli:\n  teams:\n    routing:\n      enabled: true\n      default_difficulty: impossible\n"
-	_, err := service.PreviewDocument(skillsapi.ConfigDocumentSaveRequest{
+	_, err := service.PreviewDocument(runtimeapi.ConfigDocumentSaveRequest{
 		Raw:  &invalid,
 		Mode: "raw",
 	})

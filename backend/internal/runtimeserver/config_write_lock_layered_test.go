@@ -8,7 +8,7 @@ import (
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 )
 
 // 分层文档保存的锁编排（方案 §9.1 U-2 / §12 R4，2026-09-22 第四次增补）。
@@ -55,7 +55,7 @@ aicli:
 }
 
 // layeredSaveRequestFor 读取分层合并视图，交给 mutate 改一处，返回结构化保存请求。
-func layeredSaveRequestFor(t *testing.T, service *LocalConfigDocumentService, mutate func(t *testing.T, parsed map[string]interface{})) skillsapi.ConfigDocumentSaveRequest {
+func layeredSaveRequestFor(t *testing.T, service *LocalConfigDocumentService, mutate func(t *testing.T, parsed map[string]interface{})) runtimeapi.ConfigDocumentSaveRequest {
 	t.Helper()
 
 	doc, err := service.LoadDocument()
@@ -67,7 +67,7 @@ func layeredSaveRequestFor(t *testing.T, service *LocalConfigDocumentService, mu
 	}
 	parsed := copyDocumentMap(t, doc.Parsed)
 	mutate(t, parsed)
-	return skillsapi.ConfigDocumentSaveRequest{Parsed: parsed, Mode: "structured"}
+	return runtimeapi.ConfigDocumentSaveRequest{Parsed: parsed, Mode: "structured"}
 }
 
 // setUserLayerBaseURL 改一个**用户层所有**的键（落点 = 用户层文件）。

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"gopkg.in/yaml.v3"
 )
@@ -107,7 +107,7 @@ aicli:
 	openai := items["openai"].(map[string]interface{})
 	openai["base_url"] = "https://from-server.example"
 
-	if _, err := service.SaveDocument(skillsapi.ConfigDocumentSaveRequest{
+	if _, err := service.SaveDocument(runtimeapi.ConfigDocumentSaveRequest{
 		Parsed: parsed,
 		Mode:   "structured",
 	}); err != nil {
@@ -178,7 +178,7 @@ func TestLayeredConfigDocumentPreviewAttributesChangedPaths(t *testing.T) {
 	items["openai"].(map[string]interface{})["base_url"] = "https://preview.example"
 	parsed["aicli"].(map[string]interface{})["chat"].(map[string]interface{})["default_model"] = "next-model"
 
-	preview, err := service.PreviewDocument(skillsapi.ConfigDocumentSaveRequest{
+	preview, err := service.PreviewDocument(runtimeapi.ConfigDocumentSaveRequest{
 		Parsed: parsed,
 		Mode:   "structured",
 	})

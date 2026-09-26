@@ -1722,7 +1722,7 @@ func (r *localActorRegistry) materializeLocalAgentRegistry(ctx context.Context) 
 
 // localAgentRecordIndex answers "does this identity already exist?" from one
 // registry listing instead of one query per projected record. The API host
-// keeps the same shape (internal/api/skills/agent_control_agent_handlers.go);
+// keeps the same shape (internal/api/runtimeapi/agent_control_agent_handlers.go);
 // identities are keyed exactly like the previous point lookups: agent id first,
 // then the root-session + path binding, so the closed-row guard keeps its
 // semantics.

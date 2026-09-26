@@ -19,7 +19,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	skillshandler "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/embedding"
@@ -197,15 +197,15 @@ func (s *testUsageLedgerStore) GetSince(since time.Time, limit int) ([]*entity.T
 	return filtered, nil
 }
 
-func newTestServer(t *testing.T, remote bool, configure func(*skillshandler.Handler)) *httptest.Server {
-	return newManagedTestServer(t, remote, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+func newTestServer(t *testing.T, remote bool, configure func(*runtimeapi.Handler)) *httptest.Server {
+	return newManagedTestServer(t, remote, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		if configure != nil {
 			configure(handler)
 		}
 	})
 }
 
-func newManagedTestServer(t *testing.T, remote bool, configure func(*skillshandler.Handler, *runtimeskill.Registry, *runtimeskill.Loader, *chat.SessionManager)) *httptest.Server {
+func newManagedTestServer(t *testing.T, remote bool, configure func(*runtimeapi.Handler, *runtimeskill.Registry, *runtimeskill.Loader, *chat.SessionManager)) *httptest.Server {
 	t.Helper()
 
 	mcpManager := &testMCPManager{}
@@ -226,7 +226,7 @@ func newManagedTestServer(t *testing.T, remote bool, configure func(*skillshandl
 		}),
 	}))
 
-	handler := skillshandler.NewHandler(registry, loader, mcpManager)
+	handler := runtimeapi.NewHandler(registry, loader, mcpManager)
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
 	require.NoError(t, runtime.RegisterProvider("test-model", &testProvider{
 		name:    "test-model",
@@ -378,7 +378,7 @@ func TestClient_AgentChatStream_UsesCanonicalEndpoint(t *testing.T) {
 }
 
 func TestClient_GetRuntimeStatus(t *testing.T) {
-	server := newTestServer(t, true, func(handler *skillshandler.Handler) {
+	server := newTestServer(t, true, func(handler *runtimeapi.Handler) {
 		handler.SetAdminToken("secret-token")
 	})
 	client := NewClient(server.URL, WithAdminToken("secret-token"))
@@ -976,7 +976,7 @@ func TestSearchStatsAndEmbeddingDecodeHelpers(t *testing.T) {
 }
 
 func TestClient_GetRuntimeHealth(t *testing.T) {
-	server := newManagedTestServer(t, true, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, true, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		handler.SetAdminToken("secret-token")
 		runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "good-model", MaxRetries: 0})
 		require.NoError(t, runtime.RegisterProvider("good-model", &testProvider{name: "good-model", content: "ok"}))
@@ -1006,7 +1006,7 @@ func TestClient_ReloadRuntimeMCPs(t *testing.T) {
 	mcpAdapter := runtimeskill.NewMCPAdapter(lifecycleManager)
 	registry := runtimeskill.NewRegistry(mcpAdapter)
 	loader := runtimeskill.NewLoader(mcpAdapter)
-	handler := skillshandler.NewHandler(registry, loader, mcpAdapter)
+	handler := runtimeapi.NewHandler(registry, loader, mcpAdapter)
 	handler.SetAdminToken("secret-token")
 
 	router := mux.NewRouter()
@@ -1023,7 +1023,7 @@ func TestClient_ReloadRuntimeMCPs(t *testing.T) {
 }
 
 func TestClient_ValidateRuntime(t *testing.T) {
-	server := newTestServer(t, true, func(handler *skillshandler.Handler) {
+	server := newTestServer(t, true, func(handler *runtimeapi.Handler) {
 		handler.SetAdminToken("secret-token")
 	})
 	client := NewClient(server.URL, WithAdminToken("secret-token"))
@@ -1115,7 +1115,7 @@ func TestClient_AgentChat_WithPlanningAndWorkspace(t *testing.T) {
 func SearchDocs() {}
 `), 0o644))
 
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, registry *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, registry *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		require.NoError(t, registry.Register(&runtimeskill.Skill{
 			Name:        "planned-skill",
 			Description: "planned workflow skill",
@@ -1155,7 +1155,7 @@ func TestClient_AgentChat_WithWorkspaceAndPlanning(t *testing.T) {
 func SearchDocs() {}
 `), 0o644))
 
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, registry *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, registry *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		require.NoError(t, registry.Register(&runtimeskill.Skill{
 			Name:        "planned-skill",
 			Description: "planned workflow skill",
@@ -1391,7 +1391,7 @@ func TestClient_AgentChatStream_NextDecoded(t *testing.T) {
 }
 
 func TestClient_AgentChatStream_DecodeToolChunks(t *testing.T) {
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 0})
 		require.NoError(t, runtime.RegisterProvider("test-model", &testProvider{
 			name:    "test-model",
@@ -1631,7 +1631,7 @@ func TestStream_Consume_CallbackError(t *testing.T) {
 }
 
 func TestClient_AdminMutationUsesToken(t *testing.T) {
-	server := newTestServer(t, true, func(handler *skillshandler.Handler) {
+	server := newTestServer(t, true, func(handler *runtimeapi.Handler) {
 		handler.SetAdminToken("secret-token")
 	})
 
@@ -1766,9 +1766,9 @@ triggers:
 userPrompt: "search customer orders in sap"
 `), 0o644))
 
-	server := newManagedTestServer(t, true, func(handler *skillshandler.Handler, registry *runtimeskill.Registry, loader *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, true, func(handler *runtimeapi.Handler, registry *runtimeskill.Registry, loader *runtimeskill.Loader, _ *chat.SessionManager) {
 		handler.SetAdminToken("secret-token")
-		handler.SetUsagePolicy(skillshandler.UsagePolicy{
+		handler.SetUsagePolicy(runtimeapi.UsagePolicy{
 			TrackingEnabled:    true,
 			QuotaEnabled:       true,
 			DefaultMaxRequests: 10,
@@ -1872,8 +1872,8 @@ userPrompt: "search customer orders in sap"
 }
 
 func TestClient_UsageScopeSeparatesQuota(t *testing.T) {
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
-		handler.SetUsagePolicy(skillshandler.UsagePolicy{
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+		handler.SetUsagePolicy(runtimeapi.UsagePolicy{
 			TrackingEnabled:    true,
 			QuotaEnabled:       true,
 			DefaultMaxRequests: 1,
@@ -1919,7 +1919,7 @@ func TestClient_UsageScopeSeparatesQuota(t *testing.T) {
 }
 
 func TestClient_UsagePolicyEndpoints(t *testing.T) {
-	server := newManagedTestServer(t, true, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, true, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		handler.SetAdminToken("secret-token")
 	})
 
@@ -1955,9 +1955,9 @@ func TestClient_UsagePolicyEndpoints(t *testing.T) {
 }
 
 func TestClient_GetAuthPolicy(t *testing.T) {
-	server := newManagedTestServer(t, true, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, true, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		handler.SetAdminToken("secret-token")
-		handler.SetScopeResolverConfig(skillshandler.ScopeResolverConfig{
+		handler.SetScopeResolverConfig(runtimeapi.ScopeResolverConfig{
 			Enabled:          true,
 			JWTClaimsEnabled: true,
 			JWTSecret:        "jwt-secret",
@@ -1986,11 +1986,11 @@ func TestClient_GetAuthPolicy(t *testing.T) {
 }
 
 func TestClient_AuthPolicyEndpoints(t *testing.T) {
-	server := newManagedTestServer(t, true, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, true, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		handler.SetAdminToken("secret-token")
-		handler.SetScopeResolverConfig(skillshandler.ScopeResolverConfig{
+		handler.SetScopeResolverConfig(runtimeapi.ScopeResolverConfig{
 			Enabled: true,
-			APIKeyScopes: map[string]skillshandler.UsageScope{
+			APIKeyScopes: map[string]runtimeapi.UsageScope{
 				"scope-key-a": {TenantID: "tenant-a", ProjectID: "project-a", UserID: "alice"},
 			},
 			AdminRoles: []string{"skills-admin"},
@@ -2022,9 +2022,9 @@ func TestClient_AuthPolicyEndpoints(t *testing.T) {
 }
 
 func TestClient_MutationPolicyEndpoints(t *testing.T) {
-	server := newManagedTestServer(t, true, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, true, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		handler.SetAdminToken("secret-token")
-		handler.SetMutationPolicy(skillshandler.MutationPolicy{
+		handler.SetMutationPolicy(runtimeapi.MutationPolicy{
 			ReadOnly: false,
 		})
 	})
@@ -2048,15 +2048,15 @@ func TestClient_MutationPolicyEndpoints(t *testing.T) {
 }
 
 func TestClient_GetGovernancePolicy(t *testing.T) {
-	server := newManagedTestServer(t, true, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, true, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		handler.SetAdminToken("secret-token")
-		handler.SetMutationPolicy(skillshandler.MutationPolicy{ReadOnly: true})
-		handler.SetUsagePolicy(skillshandler.UsagePolicy{
+		handler.SetMutationPolicy(runtimeapi.MutationPolicy{ReadOnly: true})
+		handler.SetUsagePolicy(runtimeapi.UsagePolicy{
 			TrackingEnabled:    true,
 			QuotaEnabled:       true,
 			DefaultMaxRequests: 7,
 		})
-		handler.SetScopeResolverConfig(skillshandler.ScopeResolverConfig{
+		handler.SetScopeResolverConfig(runtimeapi.ScopeResolverConfig{
 			Enabled: true,
 		})
 	})
@@ -2073,9 +2073,9 @@ func TestClient_GetGovernancePolicy(t *testing.T) {
 }
 
 func TestClient_GetUsageLedger(t *testing.T) {
-	server := newManagedTestServer(t, true, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, true, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		handler.SetAdminToken("secret-token")
-		handler.SetUsagePolicy(skillshandler.UsagePolicy{TrackingEnabled: true})
+		handler.SetUsagePolicy(runtimeapi.UsagePolicy{TrackingEnabled: true})
 		handler.SetUsageLedgerStore(&testUsageLedgerStore{})
 	})
 
@@ -2163,7 +2163,7 @@ func TestSessionRuntimeState_UnmarshalExplicitEmptySnapshot(t *testing.T) {
 }
 
 func TestClient_SessionAgentLifecycle(t *testing.T) {
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
 	})
 	client := NewClient(server.URL)
@@ -2430,7 +2430,7 @@ func TestClient_GetTeamTask(t *testing.T) {
 		taskID     string
 		followupID string
 	)
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-team-task?mode=memory&cache=shared"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = store.Close() })
@@ -2480,7 +2480,7 @@ func TestClient_ListTeamTasks(t *testing.T) {
 		depID      string
 		followupID string
 	)
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-team-list-tasks?mode=memory&cache=shared"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = store.Close() })
@@ -2540,7 +2540,7 @@ func TestClient_ListTaskDependenciesAndDependents(t *testing.T) {
 		depID      string
 		followupID string
 	)
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-team-deps?mode=memory&cache=shared"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = store.Close() })
@@ -2587,7 +2587,7 @@ func TestClient_ListTaskDependenciesAndDependents(t *testing.T) {
 }
 
 func TestClient_CreateAndListTeams(t *testing.T) {
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-teams?mode=memory&cache=shared"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = store.Close() })
@@ -2621,7 +2621,7 @@ func TestClient_CreateAndListTeams(t *testing.T) {
 
 func TestClient_ListTeammates(t *testing.T) {
 	var teamID string
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-teammates?mode=memory&cache=shared"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = store.Close() })
@@ -2960,7 +2960,7 @@ func TestClient_GetTaskGraph(t *testing.T) {
 		taskID string
 		depID  string
 	)
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		var err error
 		store, err = team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-task-graph?mode=memory&cache=shared"})
 		require.NoError(t, err)
@@ -3020,7 +3020,7 @@ func TestClient_GetTaskGraph(t *testing.T) {
 
 func TestClient_CreateAndUpdateTeamTask(t *testing.T) {
 	var teamID string
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-team-write-task?mode=memory&cache=shared"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = store.Close() })
@@ -3071,7 +3071,7 @@ func TestClient_AddTaskDependency(t *testing.T) {
 		taskID string
 		depID  string
 	)
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-team-add-dep?mode=memory&cache=shared"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = store.Close() })
@@ -3103,7 +3103,7 @@ func TestClient_AddTaskDependency(t *testing.T) {
 
 func TestClient_ClaimReadyTasks(t *testing.T) {
 	var teamID string
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-claim-ready?mode=memory&cache=shared"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = store.Close() })
@@ -3140,7 +3140,7 @@ func TestClient_ReclaimExpiredTasks(t *testing.T) {
 		teamID string
 		taskID string
 	)
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		var err error
 		store, err = team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-reclaim-expired?mode=memory&cache=shared"})
 		require.NoError(t, err)
@@ -3218,7 +3218,7 @@ func TestClient_MarkReadyTasks(t *testing.T) {
 		taskID string
 		depID  string
 	)
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		var err error
 		store, err = team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-mark-ready?mode=memory&cache=shared"})
 		require.NoError(t, err)
@@ -3257,7 +3257,7 @@ func TestClient_MarkReadyTasks(t *testing.T) {
 
 func TestClient_SendTeamMailboxMessage(t *testing.T) {
 	var teamID string
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-team-send-mail?mode=memory&cache=shared"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = store.Close() })
@@ -3332,7 +3332,7 @@ func TestClient_ListAndAckTeamMailbox(t *testing.T) {
 		teamID    string
 		messageID string
 	)
-	server := newManagedTestServer(t, false, func(handler *skillshandler.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
+	server := newManagedTestServer(t, false, func(handler *runtimeapi.Handler, _ *runtimeskill.Registry, _ *runtimeskill.Loader, _ *chat.SessionManager) {
 		store, err := team.NewSQLiteStore(&team.StoreConfig{DSN: "file:skillsapi-team-mailbox?mode=memory&cache=shared"})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = store.Close() })

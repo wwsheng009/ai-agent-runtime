@@ -8,7 +8,7 @@ import (
 	"time"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/siteaccount"
 )
 
@@ -65,7 +65,7 @@ func (s *LocalSiteAccountService) SetProviderReloader(reloader func(cfg *agentco
 // reloadRuntimeProviders reloads the latest config from disk and refreshes the
 // in-memory provider registry. Errors are surfaced as warnings on the result
 // instead of failing the underlying account refresh operation.
-func (s *LocalSiteAccountService) reloadRuntimeProviders(out *skillsapi.SiteAccountRefreshResult) error {
+func (s *LocalSiteAccountService) reloadRuntimeProviders(out *runtimeapi.SiteAccountRefreshResult) error {
 	if s == nil || s.providerReloader == nil {
 		return nil
 	}
@@ -82,8 +82,8 @@ func (s *LocalSiteAccountService) reloadRuntimeProviders(out *skillsapi.SiteAcco
 // Detect probes base_url and returns a normalized DetectResult.
 func (s *LocalSiteAccountService) Detect(
 	ctx context.Context,
-	req skillsapi.SiteAccountDetectRequest,
-) (*skillsapi.SiteAccountDetectResult, error) {
+	req runtimeapi.SiteAccountDetectRequest,
+) (*runtimeapi.SiteAccountDetectResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("siteaccount service is not configured")
 	}
@@ -101,14 +101,14 @@ func (s *LocalSiteAccountService) Detect(
 	if err != nil {
 		return nil, err
 	}
-	return &skillsapi.SiteAccountDetectResult{Detect: cloneDetectResult(&result)}, nil
+	return &runtimeapi.SiteAccountDetectResult{Detect: cloneDetectResult(&result)}, nil
 }
 
 // Fetch runs optional detect + account snapshot for an ad-hoc base_url (no provider persistence).
 func (s *LocalSiteAccountService) Fetch(
 	ctx context.Context,
-	req skillsapi.SiteAccountFetchRequest,
-) (*skillsapi.SiteAccountFetchResult, error) {
+	req runtimeapi.SiteAccountFetchRequest,
+) (*runtimeapi.SiteAccountFetchResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("siteaccount service is not configured")
 	}
@@ -120,7 +120,7 @@ func (s *LocalSiteAccountService) Fetch(
 		ctx = context.Background()
 	}
 
-	out := &skillsapi.SiteAccountFetchResult{}
+	out := &runtimeapi.SiteAccountFetchResult{}
 	siteType, autoDetect, err := siteaccount.ParseSiteTypeFlag(req.SiteType)
 	if err != nil {
 		return nil, err
@@ -185,8 +185,8 @@ func (s *LocalSiteAccountService) Fetch(
 func (s *LocalSiteAccountService) RefreshProvider(
 	ctx context.Context,
 	providerName string,
-	req skillsapi.SiteAccountRefreshRequest,
-) (*skillsapi.SiteAccountRefreshResult, error) {
+	req runtimeapi.SiteAccountRefreshRequest,
+) (*runtimeapi.SiteAccountRefreshResult, error) {
 	if s == nil {
 		return nil, fmt.Errorf("siteaccount service is not configured")
 	}
@@ -213,7 +213,7 @@ func (s *LocalSiteAccountService) RefreshProvider(
 		return nil, fmt.Errorf("provider %q not found", providerName)
 	}
 
-	out := &skillsapi.SiteAccountRefreshResult{
+	out := &runtimeapi.SiteAccountRefreshResult{
 		Provider: providerName,
 	}
 	persist := true
@@ -388,7 +388,7 @@ func (s *LocalSiteAccountService) RefreshProvider(
 	return out, nil
 }
 
-func (s *LocalSiteAccountService) persistSiteTypeOnly(providerName string, out *skillsapi.SiteAccountRefreshResult) error {
+func (s *LocalSiteAccountService) persistSiteTypeOnly(providerName string, out *runtimeapi.SiteAccountRefreshResult) error {
 	if out == nil || strings.TrimSpace(out.SiteType) == "" {
 		return nil
 	}
@@ -412,7 +412,7 @@ func (s *LocalSiteAccountService) persistSiteTypeOnly(providerName string, out *
 	return nil
 }
 
-func appendProviderReloadWarning(out *skillsapi.SiteAccountRefreshResult, err error) {
+func appendProviderReloadWarning(out *runtimeapi.SiteAccountRefreshResult, err error) {
 	if err == nil {
 		return
 	}
@@ -445,7 +445,7 @@ func (s *LocalSiteAccountService) nowOrDefault() time.Time {
 }
 
 func resolveFetchCredential(
-	req skillsapi.SiteAccountFetchRequest,
+	req runtimeapi.SiteAccountFetchRequest,
 	siteType siteaccount.SiteType,
 ) (siteaccount.AccountCredential, []string, error) {
 	var warnings []string
@@ -488,7 +488,7 @@ func normalizeSiteConfidence(raw string) siteaccount.Confidence {
 }
 
 func resolveProviderRefreshCredential(
-	req skillsapi.SiteAccountRefreshRequest,
+	req runtimeapi.SiteAccountRefreshRequest,
 	providerName string,
 	provider *agentconfig.Provider,
 	siteType siteaccount.SiteType,
@@ -525,7 +525,7 @@ func resolveProviderRefreshCredential(
 		if token == "" || userIDText == "" {
 			return siteaccount.AccountCredential{}, authRef, nil, warnings, fmt.Errorf("new-api system access token or user id is missing for provider %q", providerName)
 		}
-		userID, err := parseSubjectUserID(skillsapi.FlexibleString(userIDText))
+		userID, err := parseSubjectUserID(runtimeapi.FlexibleString(userIDText))
 		if err != nil {
 			return siteaccount.AccountCredential{}, authRef, nil, warnings, err
 		}
@@ -662,7 +662,7 @@ func timeoutFromMillis(ms int) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-func parseSubjectUserID(raw skillsapi.FlexibleString) (int64, error) {
+func parseSubjectUserID(raw runtimeapi.FlexibleString) (int64, error) {
 	text := strings.TrimSpace(string(raw))
 	if text == "" {
 		return 0, nil

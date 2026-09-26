@@ -27,7 +27,7 @@ import (
 // localObserveSessionSource 把本地 host 的 SessionHub 活动 session actor 投影为
 // 低敏 SessionSummary。只读取 StateSummary()（idle/running 等状态 + turn id），
 // 不触碰 prompt、工具参数、tool receipt、checkpoint 内容等敏感或重量级数据。
-// 与服务端 observeSessionSource（internal/api/skills/observe_handlers.go）同构。
+// 与服务端 observeSessionSource（internal/api/runtimeapi/observe_handlers.go）同构。
 type localObserveSessionSource struct {
 	host *localChatRuntimeHost
 }

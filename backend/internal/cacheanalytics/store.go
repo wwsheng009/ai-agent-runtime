@@ -5,7 +5,7 @@ package cacheanalytics
 //
 // 依赖方向约束（types.go 包注释）：本包不 import cmd 层与 internal/api 层，
 // 因此 sqlite 实现放在 internal/chat.SQLiteRuntimeStore 上，由挂载方
-// （cmd/aicli/commands/chat_cache_local.go、internal/api/skills）以接口注入，
+// （cmd/aicli/commands/chat_cache_local.go、internal/api/runtimeapi）以接口注入，
 // 与 HistoryLookup 同模式。
 //
 // 语义约定：

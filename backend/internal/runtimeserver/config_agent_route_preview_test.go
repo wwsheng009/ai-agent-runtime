@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 )
 
 func TestLocalConfigDocumentServicePreviewAgentRouteUsesDraftWithoutPersisting(t *testing.T) {
@@ -43,10 +43,10 @@ aicli:
           reasoning_effort: high
 `
 	service := NewLocalConfigDocumentService(configPath)
-	result, err := service.PreviewAgentRoute(skillsapi.AgentRoutePreviewRequest{
-		Document: skillsapi.ConfigDocumentSaveRequest{Mode: "raw", Raw: &draft},
+	result, err := service.PreviewAgentRoute(runtimeapi.AgentRoutePreviewRequest{
+		Document: runtimeapi.ConfigDocumentSaveRequest{Mode: "raw", Raw: &draft},
 		Scope:    "subagent",
-		Task:     skillsapi.AgentRoutePreviewTask{Difficulty: "hard"},
+		Task:     runtimeapi.AgentRoutePreviewTask{Difficulty: "hard"},
 	})
 
 	require.NoError(t, err)
@@ -84,10 +84,10 @@ aicli:
 	require.NoError(t, os.WriteFile(configPath, []byte(draft), 0o644))
 	service := NewLocalConfigDocumentService(configPath)
 
-	result, err := service.PreviewAgentRoute(skillsapi.AgentRoutePreviewRequest{
-		Document: skillsapi.ConfigDocumentSaveRequest{Mode: "raw", Raw: &draft},
+	result, err := service.PreviewAgentRoute(runtimeapi.AgentRoutePreviewRequest{
+		Document: runtimeapi.ConfigDocumentSaveRequest{Mode: "raw", Raw: &draft},
 		Scope:    "team",
-		Task:     skillsapi.AgentRoutePreviewTask{Difficulty: "normal"},
+		Task:     runtimeapi.AgentRoutePreviewTask{Difficulty: "normal"},
 	})
 
 	require.NoError(t, err)

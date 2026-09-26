@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"gopkg.in/yaml.v3"
 )
 
@@ -41,7 +41,7 @@ func (s *LocalConfigDocumentService) SetHotReloader(hotReloader ConfigDocumentHo
 	s.hotReloader = hotReloader
 }
 
-func (s *LocalConfigDocumentService) LoadDocument() (*skillsapi.ConfigDocument, error) {
+func (s *LocalConfigDocumentService) LoadDocument() (*runtimeapi.ConfigDocument, error) {
 	documentPath := s.documentPath()
 	if s == nil || strings.TrimSpace(documentPath) == "" {
 		return nil, fmt.Errorf("config path is required")
@@ -63,7 +63,7 @@ func (s *LocalConfigDocumentService) LoadDocument() (*skillsapi.ConfigDocument, 
 		"结构化保存会重新序列化整个文档，注释和手工排版可能会丢失；原始 YAML 模式更适合保留注释。",
 	)
 
-	doc := &skillsapi.ConfigDocument{
+	doc := &runtimeapi.ConfigDocument{
 		Path:                   resolveAbsolutePath(documentPath),
 		Format:                 format,
 		Raw:                    string(raw),
@@ -87,8 +87,8 @@ func (s *LocalConfigDocumentService) LoadDocument() (*skillsapi.ConfigDocument, 
 }
 
 func (s *LocalConfigDocumentService) PreviewDocument(
-	req skillsapi.ConfigDocumentSaveRequest,
-) (*skillsapi.ConfigDocument, error) {
+	req runtimeapi.ConfigDocumentSaveRequest,
+) (*runtimeapi.ConfigDocument, error) {
 	documentPath := s.documentPath()
 	if s == nil || strings.TrimSpace(documentPath) == "" {
 		return nil, fmt.Errorf("config path is required")
@@ -139,7 +139,7 @@ func (s *LocalConfigDocumentService) PreviewDocument(
 		"结构化保存会重新序列化整个文档，注释和手工排版可能会丢失；原始 YAML 模式更适合保留注释。",
 	)
 
-	preview := &skillsapi.ConfigDocument{
+	preview := &runtimeapi.ConfigDocument{
 		Path:                   resolveAbsolutePath(documentPath),
 		Format:                 format,
 		Raw:                    string(content),
@@ -158,7 +158,7 @@ func (s *LocalConfigDocumentService) PreviewDocument(
 	return preview, nil
 }
 
-func (s *LocalConfigDocumentService) SaveDocument(req skillsapi.ConfigDocumentSaveRequest) (*skillsapi.ConfigDocument, error) {
+func (s *LocalConfigDocumentService) SaveDocument(req runtimeapi.ConfigDocumentSaveRequest) (*runtimeapi.ConfigDocument, error) {
 	documentPath := s.documentPath()
 	if s == nil || strings.TrimSpace(documentPath) == "" {
 		return nil, fmt.Errorf("config path is required")
@@ -336,13 +336,13 @@ func (s *LocalConfigDocumentService) loadEffectiveDocument(
 }
 
 // configDocumentLayers converts the layered stack into the API shape.
-func configDocumentLayers(merged *agentconfig.MergedConfigDocument) []skillsapi.ConfigDocumentLayer {
+func configDocumentLayers(merged *agentconfig.MergedConfigDocument) []runtimeapi.ConfigDocumentLayer {
 	if merged == nil {
 		return nil
 	}
-	layers := make([]skillsapi.ConfigDocumentLayer, 0, len(merged.Layers))
+	layers := make([]runtimeapi.ConfigDocumentLayer, 0, len(merged.Layers))
 	for _, layer := range merged.Layers {
-		layers = append(layers, skillsapi.ConfigDocumentLayer{
+		layers = append(layers, runtimeapi.ConfigDocumentLayer{
 			Kind:    string(layer.Kind),
 			Path:    resolveAbsolutePath(layer.Path),
 			Present: layer.Present,
@@ -355,7 +355,7 @@ func configDocumentLayers(merged *agentconfig.MergedConfigDocument) []skillsapi.
 // write will land in, so the runtime impact can name the file an edit touches
 // (design §9 H4). No-op when layering is off or nothing changed.
 func attachConfigDocumentPathLayers(
-	impact *skillsapi.ConfigDocumentRuntimeImpact,
+	impact *runtimeapi.ConfigDocumentRuntimeImpact,
 	merged *agentconfig.MergedConfigDocument,
 ) {
 	if impact == nil || merged == nil || len(impact.ChangedPaths) == 0 {
@@ -410,7 +410,7 @@ func (s *LocalConfigDocumentService) snapshotWarning(sourcePath string, recovere
 }
 
 func (s *LocalConfigDocumentService) resolveDocumentBytes(
-	req skillsapi.ConfigDocumentSaveRequest,
+	req runtimeapi.ConfigDocumentSaveRequest,
 	format string,
 ) ([]byte, error) {
 	if req.Raw != nil {
@@ -427,7 +427,7 @@ func (s *LocalConfigDocumentService) resolveDocumentBytes(
 }
 
 func (s *LocalConfigDocumentService) resolveDocumentBytesWithCurrent(
-	req skillsapi.ConfigDocumentSaveRequest,
+	req runtimeapi.ConfigDocumentSaveRequest,
 	format string,
 	currentParsed interface{},
 ) ([]byte, bool, error) {
@@ -589,7 +589,7 @@ func normalizeConfigDocumentValue(value interface{}) interface{} {
 	}
 }
 
-func summarizeConfigSections(value interface{}) []skillsapi.ConfigDocumentSection {
+func summarizeConfigSections(value interface{}) []runtimeapi.ConfigDocumentSection {
 	root, ok := value.(map[string]interface{})
 	if !ok || len(root) == 0 {
 		return nil
@@ -601,10 +601,10 @@ func summarizeConfigSections(value interface{}) []skillsapi.ConfigDocumentSectio
 	}
 	sort.Strings(keys)
 
-	sections := make([]skillsapi.ConfigDocumentSection, 0, len(keys))
+	sections := make([]runtimeapi.ConfigDocumentSection, 0, len(keys))
 	for _, key := range keys {
 		child := root[key]
-		section := skillsapi.ConfigDocumentSection{
+		section := runtimeapi.ConfigDocumentSection{
 			Key:  key,
 			Kind: configDocumentValueKind(child),
 		}
@@ -655,4 +655,4 @@ func sameConfigPath(left, right string) bool {
 	return left != "" && right != "" && strings.EqualFold(left, right)
 }
 
-var _ skillsapi.ConfigDocumentService = (*LocalConfigDocumentService)(nil)
+var _ runtimeapi.ConfigDocumentService = (*LocalConfigDocumentService)(nil)

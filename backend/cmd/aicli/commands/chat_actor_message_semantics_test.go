@@ -17,7 +17,7 @@ import (
 )
 
 // P0-3a/M5 CLI 宿主三态语义矩阵（ADR-3）。与 API 宿主
-// (internal/api/skills/session_agent_controller_test.go) 成对断言同一契约。
+// (internal/api/runtimeapi/session_agent_controller_test.go) 成对断言同一契约。
 
 func newLocalAgentSemanticsHost(t *testing.T, v2 bool) (*localChatRuntimeHost, string) {
 	t.Helper()

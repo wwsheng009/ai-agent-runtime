@@ -246,7 +246,7 @@ func buildKnownEventTypes() map[string]bool {
 
 	// 来源 10：会话级路由管理事件（见文件头说明）。常量定义在
 	// internal/events/session_routing_events.go；发射点是
-	// internal/api/skills/session_routing_handlers.go（写入/清除覆盖后发布），
+	// internal/api/runtimeapi/session_routing_handlers.go（写入/清除覆盖后发布），
 	// 由 internal/events/contract_test.go 的三方一致门禁断言不漂移。
 	add(
 		"session.routing_changed", // events.EventSessionRoutingChanged

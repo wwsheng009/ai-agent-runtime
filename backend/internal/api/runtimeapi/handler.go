@@ -1,0 +1,13230 @@
+package runtimeapi
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	stderrors "errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
+	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	"github.com/wwsheng009/ai-agent-runtime/internal/capability"
+	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
+	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	runtimecontext "github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
+	"github.com/wwsheng009/ai-agent-runtime/internal/contextpack"
+	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
+	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
+	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
+	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
+	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
+	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
+	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
+	toolbrokersessionctx "github.com/wwsheng009/ai-agent-runtime/internal/toolbroker/sessionctx"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"github.com/wwsheng009/ai-agent-runtime/internal/workspace"
+	"github.com/wwsheng009/ai-agent-runtime/internal/workspaceregistry"
+	"go.uber.org/zap/zapcore"
+)
+
+type searchMode string
+
+const (
+	searchModeAuto     searchMode = "auto"
+	searchModeLexical  searchMode = "lexical"
+	searchModeSemantic searchMode = "semantic"
+	searchModeHybrid   searchMode = "hybrid"
+
+	canonicalRuntimeEntrypoint   = "/api/runtime"
+	canonicalAgentChatEntrypoint = "/api/agent/chat"
+
+	skillMutationActionCreate         = "skill_create"
+	skillMutationActionUpdate         = "skill_update"
+	skillMutationActionDelete         = "skill_delete"
+	skillMutationActionBatchCreate    = "skill_batch_create"
+	skillMutationActionImport         = "skill_import"
+	skillMutationActionReload         = "skill_reload"
+	skillMutationActionConfigWrite    = "skill_config_write"
+	skillMutationActionHotReloadStart = "skill_hot_reload_start"
+	skillMutationActionHotReloadStop  = "skill_hot_reload_stop"
+	skillMutationActionHotReloadRun   = "skill_hot_reload_reload"
+	skillHotReloadActionAdded         = "skill_hot_reload_added"
+	skillHotReloadActionUpdated       = "skill_hot_reload_updated"
+	skillHotReloadActionRemoved       = "skill_hot_reload_removed"
+	skillsChangedEventType            = "skills.changed"
+	// skillsInvokedEventType 是隐式/显式技能调用命中时发布的运行时事件（SK-3）。
+	skillsInvokedEventType = skill.SkillInvokedEventType
+	// skillsInvokedEnabled 控制是否启用隐式调用判定与事件发布（SK-3 灰度开关）。
+	skillsInvokedEnabled = true
+
+	apiProfileContextReference = sessionmeta.LegacyAPIProfileReference
+	apiProfileContextName      = sessionmeta.ProfileName
+	apiProfileContextAgent     = sessionmeta.ProfileAgent
+	apiProfileContextRoot      = sessionmeta.ProfileRoot
+
+	sessionActorLeaseOwnerKind = "runtime-server-actor"
+	agentChatLeaseOwnerKind    = "runtime-server-agent-chat"
+)
+
+// Handler Skills API 处理器
+type Handler struct {
+	skillRegistry                  *skill.Registry
+	skillLoader                    *skill.Loader
+	mcpManager                     skill.MCPManager
+	mcpAdmin                       mcpadmin.AdminService
+	llmRuntime                     *llm.LLMRuntime
+	sessionManager                 *chat.SessionManager
+	hotReload                      *skill.HotReload
+	embeddingRouter                *skill.SemanticEmbeddingRouter
+	embeddingHotReloadSyncAttached bool
+	searchTelemetry                *searchTelemetry
+	searchAdminToken               string
+	searchReindexCooldown          time.Duration
+	searchReindexMu                sync.Mutex
+	lastSearchReindexAt            time.Time
+	workspaceScanMu                sync.Mutex
+	workspaceScanCache             map[string]*workspaceScanCacheEntry
+	mutationPolicyMu               sync.RWMutex
+	mutationPolicy                 MutationPolicy
+	usagePolicyMu                  sync.RWMutex
+	usagePolicy                    UsagePolicy
+	usageTracker                   *usageTracker
+	usageLedgerStore               UsageLedgerStore
+	// usageLedgerUnavailableReason 记录「配置启用了账本但 store 初始化失败」的原因，
+	// 由启动期降级路径写入（见 cmd/runtime-server）。用于让 ledger 接口返回可排障的 503，
+	// 而不是把它伪装成「未配置」。
+	usageLedgerUnavailableReason string
+	authPolicyPersister          AuthPolicyPersister
+	usagePolicyPersister         UsagePolicyPersister
+	mutationPolicyPersister      MutationPolicyPersister
+	runtimeEventBus              *runtimeevents.Bus
+	runtimeToolCatalog           *mcpcatalog.Gateway
+	runtimeToolCatalogConfigKey  string
+	runtimeMCPBridgeOnce         sync.Once
+	runtimeEventBridgeOnce       sync.Once
+	// P1.5：事件批量落盘缓冲（默认关闭）。仅当
+	// sessionRuntime.eventPersist.batchingEnabled=true 且事件 store 支持
+	// AppendEvents 时由 attachRuntimeEventBridge 创建；shutdown 时由
+	// CloseRuntimeEventPersistence flush。
+	runtimeEventPersistMu     sync.Mutex
+	runtimeEventPersistBuffer *chat.EventPersistBuffer
+	// P4-刷新续传：会话在途回合注册表（懒初始化，见 session_active_turn.go）。
+	activeTurnsOnce       sync.Once
+	activeTurns           *activeTurnRegistry
+	observeMu             sync.RWMutex
+	observeService        *runtimeobserve.Service
+	scopeResolverMu       sync.RWMutex
+	scopeResolverConfig   ScopeResolverConfig
+	runtimeConfig         *runtimecfg.RuntimeConfig
+	runtimeConfigFile     string
+	runtimeConfigResolver func(UsageScope) *runtimecfg.RuntimeConfig
+	// subagentLimiterMu / subagentLimiter 缓存进程级子代理并发上限
+	//（P1-4/H12）：与 CLI 宿主同口径——agents.maxThreads > 0 时本进程构建的
+	// 全部 scheduler 共用同一 limiter；≤0（含 -1 显式不限）时为 nil，只保留
+	// 每批 agents.maxConcurrent。首次构建后不再重建（见 subagentGlobalLimiter）。
+	subagentLimiterMu           sync.Mutex
+	subagentLimiter             *agent.SubagentConcurrencyLimiter
+	aicliConfigMu               sync.RWMutex
+	aicliConfig                 *agentconfig.Config
+	siteAccountService          SiteAccountService
+	providerOpsService          ProviderOpsService
+	configDocumentService       ConfigDocumentService
+	agentMaxStepsPersister      AgentMaxStepsPersister
+	agentMaxStepsProvider       AgentMaxStepsProvider
+	runtimeConfigLayersProvider RuntimeConfigLayersProvider
+	serviceControlService       RuntimeServiceControlService
+	fileTransferService         FileTransferService
+	logFilePath                 string
+	usageAnalyticsDBPath        string
+	profileRegistry             *profilesys.Registry
+	profileDefaultRef           string
+	profileGlobalRuntimePath    string
+	profileGlobalMCPPath        string
+	profileGlobalSkillDirs      []string
+	// profileAutoRoute 是 FR-11 的提示词路由表（`profiles.auto`；零值 = 内置默认）。
+	profileAutoRoute profilesys.AutoRouteConfig
+
+	teamStoreMu               sync.RWMutex
+	teamStoreConfigKey        string
+	teamStore                 team.Store
+	teamOrchestrator          *team.Orchestrator
+	teamClaimsManager         *team.PathClaimManager
+	teamLifecycle             *handlerTeamLifecycleService
+	teamOrchestratorOwnerOnce sync.Once
+	teamOrchestratorOwnerID   string
+
+	supervisionStoreMu            sync.RWMutex
+	supervisionStore              supervision.Store
+	supervisionActions            *supervision.ActionService
+	supervisionWakes              *supervision.WakeScheduler
+	supervisionDescendantProvider supervision.DescendantProvider
+	supervisionConfig             supervision.Config
+	supervisionWakeOnce           sync.Once
+	// supervisionWake 是宿主唯一的 wake consumer（惰性构造并复用；Wakes 指针
+	// 变了就重建）。巡查、batch 终态桥与 approval 事件都从它取 Runnable/Deliver
+	// 门，宿主与测试也据此覆盖投递实现（与 CLI 的 host.supervisionWake 同形）。
+	supervisionWakeMu sync.Mutex
+	supervisionWake   *supervision.WakeConsumer
+
+	executionSupervisorMu   sync.RWMutex
+	executionSupervisor     *supervision.ExecutionSupervisor
+	executionSupervisorStop context.CancelFunc
+
+	// P0-B/P2-D：宿主级 durable batch 控制面（见 supervision_batch_store.go）。
+	// API 宿主此前让每个 agent 各自惰性创建一次性内存 store，progress 投影因此
+	// 永远读不到数据；共享 store 让 preflight digest 与周期巡查看到同一份 batch
+	// 状态，且不影响无 batch 宿主（惰性创建 + 失败缓存）。
+	subagentBatchMu    sync.Mutex
+	subagentBatchStore subagentbatch.BatchStore
+	subagentBatchTried bool
+
+	// P2-D：opt-in 的周期巡查循环（ProgressCheckInterval > 0 时启动）。
+	// SetSupervisionConfig 是唯一启动点，stop 供测试与宿主关闭使用。
+	supervisionProgressCheckMu   sync.Mutex
+	supervisionProgressCheckStop context.CancelFunc
+	// supervisionProgressCheckWG 让 StopSupervisionProgressCheck 能等到循环真正
+	// 退出（重配后不留残留巡检 goroutine）。
+	supervisionProgressCheckWG sync.WaitGroup
+
+	// P0-1c/M7：per-host 长生命周期的 live-only 进度镜像（与 CLI 宿主的
+	// host.subagentProgressMirror 同形）。子会话事件订阅与 progress 投影的
+	// Messages 富化共用同一实例，保证两宿主的 last_message 口径一致。
+	supervisionProgressMirrorOnce  sync.Once
+	supervisionProgressMirrorValue *supervision.SubagentProgressMirror
+
+	// P2 恢复对等（与 CLI 的 runLocalSubagentStartupRecovery 对称）：durable
+	// batch store 注入后跑两趟有界恢复（立即 + 宽限期后），把上次进程遗留的
+	// queued/running batch 收敛为终态，并重放投递失败的终态通知。
+	// Start/StopSubagentBatchRecovery 是唯一入口。
+	subagentBatchRecoveryMu   sync.Mutex
+	subagentBatchRecoveryStop context.CancelFunc
+	subagentBatchRecoveryWG   sync.WaitGroup
+
+	agentControlMu               sync.RWMutex
+	agentControlRegistryService  *agentcontrol.RegistryService
+	agentControlRegistryStoreKey string
+	agentControlMailboxStore     agentcontrol.GlobalMailboxRegistryStore
+	agentControlMailboxStoreKey  string
+	agentControlMailboxStoreAuto bool
+	agentControlAgentStore       agentcontrol.AgentRegistryStore
+	agentControlAgentStoreKey    string
+	agentControlAgentStoreAuto   bool
+
+	// P2-9：周期性一致性对账循环绑定当前 durable agent store，配置热加载
+	// 换 store 时会重建，store 被清空时停止（见 agent_registry_reconcile.go）。
+	agentControlReconcileMu     sync.Mutex
+	agentControlReconciler      *agentcontrol.Reconciler
+	agentControlReconcilerStore agentcontrol.AgentRegistryStore
+	agentControlReconcilerStop  context.CancelFunc
+
+	// 投影物化是一次 O(sessions) 的全量扫描，spawn 门控、列表刷新与周期对账
+	// 都会触发；单飞锁保证同一时刻只有一次扫描 + 写入在进行（见
+	// materializeAgentControlAgentProjections）。
+	agentControlMaterializeMu sync.Mutex
+
+	sessionRuntimeMu       sync.RWMutex
+	sessionHub             *chat.SessionHub
+	sessionRuntimeStore    chat.RuntimeStateStore
+	sessionEventStore      chat.EventStore
+	sessionRuntimeStoreKey string
+
+	// Batch 12（V15/V19 延迟收敛）：切换撞上在途 turn 时的会话级重建标记。
+	// 只记进程内状态——actor 是进程内对象，重启后不存在旧 actor，下一次构建
+	// 本就会读到已落地的 sessionmeta（见 session_profile_switch.go）。
+	profileSwitchMu      sync.Mutex
+	profileSwitchPending map[string]string
+
+	backgroundMu        sync.Mutex
+	backgroundManager   *background.Manager
+	backgroundConfigKey string
+
+	codexSkillsListMu           sync.RWMutex
+	codexSkillsListCache        map[string]codexSkillsListResponse
+	codexSkillsListCacheVersion uint64
+
+	workspaceDirectoriesOnce sync.Once
+	workspaceDirectories     *workspaceregistry.Store
+}
+
+type searchTelemetry struct {
+	mu                 sync.RWMutex
+	totalRequests      int
+	totalResults       int
+	embeddingRequests  int
+	reindexCount       int
+	lastQuery          string
+	lastRequestedMode  string
+	lastResolvedMode   string
+	lastResultCount    int
+	lastEmbeddingUsed  bool
+	lastReindexStatus  string
+	lastReindexAt      time.Time
+	requestedModeCount map[string]int
+	resolvedModeCount  map[string]int
+}
+
+type routeHeaderOptions struct {
+	canonicalEntrypoint string
+	canonicalResolver   func(*http.Request) string
+	mode                string
+	warning             string
+	warningResolver     func(*http.Request) string
+}
+
+// MutationPolicy 控制 skills 变更接口的轻量治理策略。
+type MutationPolicy struct {
+	ReadOnly         bool
+	DisableImport    bool
+	DisablePersist   bool
+	DisableReloadOps bool
+	DisableHotReload bool
+}
+
+// UsagePolicy 控制 usage tracking 与 quota。
+type UsagePolicy struct {
+	TrackingEnabled    bool
+	QuotaEnabled       bool
+	DefaultMaxRequests int
+	DefaultMaxTokens   int
+	TenantQuotas       map[string]UsageQuotaLimit
+	ProjectQuotas      map[string]UsageQuotaLimit
+	UserQuotas         map[string]UsageQuotaLimit
+}
+
+type UsageQuotaLimit struct {
+	MaxRequests *int `json:"max_requests,omitempty"`
+	MaxTokens   *int `json:"max_tokens,omitempty"`
+}
+
+type ScopeResolverConfig struct {
+	Enabled          bool
+	TenantHeaders    []string
+	ProjectHeaders   []string
+	UserHeaders      []string
+	RoleHeaders      []string
+	JWTClaimsEnabled bool
+	JWTSecret        string
+	TenantClaims     []string
+	ProjectClaims    []string
+	UserClaims       []string
+	RoleClaims       []string
+	AdminRoles       []string
+	APIKeyScopes     map[string]UsageScope
+}
+
+type usagePolicyUpdateRequest struct {
+	Replace            bool                       `json:"replace,omitempty"`
+	TrackingEnabled    *bool                      `json:"tracking_enabled,omitempty"`
+	QuotaEnabled       *bool                      `json:"quota_enabled,omitempty"`
+	DefaultMaxRequests *int                       `json:"default_max_requests,omitempty"`
+	DefaultMaxTokens   *int                       `json:"default_max_tokens,omitempty"`
+	Tenants            map[string]UsageQuotaLimit `json:"tenants,omitempty"`
+	Projects           map[string]UsageQuotaLimit `json:"projects,omitempty"`
+	Users              map[string]UsageQuotaLimit `json:"users,omitempty"`
+}
+
+type authPolicyUpdateRequest struct {
+	Replace          bool                  `json:"replace,omitempty"`
+	Enabled          *bool                 `json:"enabled,omitempty"`
+	JWTClaimsEnabled *bool                 `json:"jwt_claims_enabled,omitempty"`
+	TenantHeaders    []string              `json:"tenant_headers,omitempty"`
+	ProjectHeaders   []string              `json:"project_headers,omitempty"`
+	UserHeaders      []string              `json:"user_headers,omitempty"`
+	RoleHeaders      []string              `json:"role_headers,omitempty"`
+	TenantClaims     []string              `json:"tenant_claims,omitempty"`
+	ProjectClaims    []string              `json:"project_claims,omitempty"`
+	UserClaims       []string              `json:"user_claims,omitempty"`
+	RoleClaims       []string              `json:"role_claims,omitempty"`
+	AdminRoles       []string              `json:"admin_roles,omitempty"`
+	APIKeyScopes     map[string]UsageScope `json:"api_key_scopes,omitempty"`
+}
+
+type mutationPolicyUpdateRequest struct {
+	ReadOnly         *bool `json:"read_only,omitempty"`
+	DisableImport    *bool `json:"disable_import,omitempty"`
+	DisablePersist   *bool `json:"disable_persist,omitempty"`
+	DisableReloadOps *bool `json:"disable_reload_ops,omitempty"`
+	DisableHotReload *bool `json:"disable_hot_reload,omitempty"`
+}
+
+type UsageLedgerStore interface {
+	Create(history *entity.TokenUsageHistory) error
+	GetSince(since time.Time, limit int) ([]*entity.TokenUsageHistory, error)
+}
+
+type AuthPolicyPersister func(ScopeResolverConfig, string) error
+type UsagePolicyPersister func(UsagePolicy, string) error
+type MutationPolicyPersister func(MutationPolicy, string) error
+
+type usageTracker struct {
+	mu    sync.RWMutex
+	users map[string]*UsageSnapshot
+}
+
+type UsageScope struct {
+	TenantID  string `json:"tenant_id"`
+	ProjectID string `json:"project_id"`
+	UserID    string `json:"user_id"`
+	ScopeKey  string `json:"scope_key"`
+	// Profile 是 FR-13 的 profile 维度：请求期解析出的 profile 身份
+	// （声明名 ProfileName 优先，回退 ref）。它只由实际解析 profile 的入口
+	// （AgentChat）填充，不参与配额身份（ScopeKey 仍是唯一配额键）；
+	// 空值不序列化，旧 API 响应逐字节不变。
+	Profile string `json:"profile,omitempty"`
+}
+
+type UsageSnapshot struct {
+	TenantID         string         `json:"tenant_id"`
+	ProjectID        string         `json:"project_id"`
+	UserID           string         `json:"user_id"`
+	ScopeKey         string         `json:"scope_key"`
+	RequestCount     int            `json:"request_count"`
+	ExecuteCount     int            `json:"execute_count"`
+	AgentChatCount   int            `json:"agent_chat_count"`
+	SuccessCount     int            `json:"success_count"`
+	FailureCount     int            `json:"failure_count"`
+	PromptTokens     int            `json:"prompt_tokens"`
+	CompletionTokens int            `json:"completion_tokens"`
+	TotalTokens      int            `json:"total_tokens"`
+	LastSkill        string         `json:"last_skill,omitempty"`
+	LastEntrypoint   string         `json:"last_entrypoint,omitempty"`
+	LastRequestAt    time.Time      `json:"last_request_at,omitempty"`
+	EntrypointCounts map[string]int `json:"entrypoint_counts,omitempty"`
+	SkillCounts      map[string]int `json:"skill_counts,omitempty"`
+}
+
+// NewHandler 创建 Skills API 处理器
+func NewHandler(
+	registry *skill.Registry,
+	loader *skill.Loader,
+	mcpManager skill.MCPManager,
+) *Handler {
+	return &Handler{
+		skillRegistry:               registry,
+		skillLoader:                 loader,
+		mcpManager:                  mcpManager,
+		runtimeEventBus:             runtimeevents.NewBusWithRetention(2048),
+		searchReindexCooldown:       30 * time.Second,
+		codexSkillsListCache:        make(map[string]codexSkillsListResponse),
+		codexSkillsListCacheVersion: 0,
+		usageTracker: &usageTracker{
+			users: make(map[string]*UsageSnapshot),
+		},
+		searchTelemetry: &searchTelemetry{
+			requestedModeCount: make(map[string]int),
+			resolvedModeCount:  make(map[string]int),
+		},
+	}
+}
+
+// SetLLMRuntime 设置 LLM Runtime
+func (h *Handler) SetLLMRuntime(runtime *llm.LLMRuntime) {
+	h.llmRuntime = runtime
+}
+
+// SetAICLIConfig stores the user-facing aicli config for runtime-server
+// behavior that is intentionally outside the skills runtime config.
+func (h *Handler) SetAICLIConfig(config *agentconfig.Config) {
+	if h == nil {
+		return
+	}
+	snapshot := cloneAICLIRoutingConfig(config)
+	h.aicliConfigMu.Lock()
+	h.aicliConfig = snapshot
+	h.aicliConfigMu.Unlock()
+}
+
+func (h *Handler) subagentRoutingConfig() *agentconfig.AICLISubagentRoutingConfig {
+	config := h.aicliConfigSnapshot()
+	if config == nil || config.AICLI == nil || config.AICLI.Subagents == nil {
+		return nil
+	}
+	return config.AICLI.Subagents.Routing
+}
+
+func (h *Handler) teamRoutingConfig() *agentconfig.AICLISubagentRoutingConfig {
+	return agentconfig.EffectiveTeamRoutingConfig(h.aicliConfigSnapshot())
+}
+
+// mainAgentRoutingConfig 返回主 Agent 动态路由配置（aicli.main_agent.routing）。
+//
+// 与 subagentRoutingConfig 是**两个独立配置节**：主 Agent 的开关不改变子 Agent
+// 路由，子 Agent 的开关也不改变主 Agent（§6.3 配置隔离）。
+func (h *Handler) mainAgentRoutingConfig() *agentconfig.AICLIMainAgentRoutingConfig {
+	config := h.aicliConfigSnapshot()
+	if config == nil || config.AICLI == nil || config.AICLI.MainAgent == nil {
+		return nil
+	}
+	return config.AICLI.MainAgent.Routing
+}
+
+func (h *Handler) aicliConfigSnapshot() *agentconfig.Config {
+	if h == nil {
+		return nil
+	}
+	h.aicliConfigMu.RLock()
+	config := h.aicliConfig
+	h.aicliConfigMu.RUnlock()
+	return config
+}
+
+// defaultReasoningEffort 返回 config.yaml 中 aicli.chat.reasoning_effort 的默认档位，
+// 供前端在会话未显式选择时展示/回退。
+func (h *Handler) defaultReasoningEffort() string {
+	config := h.aicliConfigSnapshot()
+	if config == nil || config.AICLI == nil || config.AICLI.Chat == nil {
+		return ""
+	}
+	return strings.TrimSpace(config.AICLI.Chat.ReasoningEffort)
+}
+
+func cloneAICLIRoutingConfig(config *agentconfig.Config) *agentconfig.Config {
+	if config == nil {
+		return nil
+	}
+	if config.AICLI == nil {
+		// 保留「配置已接线、但没有 aicli 节」这一状态（而不是塌缩成 nil 快照）：
+		// 否则 config 层首次写入 routing（S1 主用例：无全局配置时开启）后，
+		// syncAICLIRoutingSnapshot 无法区分「快照未接线」与「文件里本来没有
+		// aicli 节」，只能放弃刷新——文件已是新值而快照仍为旧态，主 Agent
+		// 接线要等重启。读取方一律先判 `AICLI == nil`，因此行为不变。
+		return &agentconfig.Config{
+			// ConfigFilePath / Profiles 是**宿主配置事实**，与 aicli 节无关：
+			// 漏拷会让 profiles 写端点（profiles.default / items）落到搜索路径
+			// 里"碰巧找到"的另一个配置文件，而 UI 与运行时快照都看不出差异。
+			ConfigFilePath: config.ConfigFilePath,
+			Profiles:       cloneProfilesConfig(config.Profiles),
+		}
+	}
+	cloned := &agentconfig.Config{
+		ConfigFilePath: config.ConfigFilePath,
+		Profiles:       cloneProfilesConfig(config.Profiles),
+		AICLI:          &agentconfig.AICLIConfig{},
+	}
+	if config.AICLI.Chat != nil {
+		// Chat 默认值（default_provider/default_model/reasoning_effort）需要随
+		// 快照一起保留，供 /api/runtime/models 向前端暴露配置默认值。
+		chatConfig := *config.AICLI.Chat
+		cloned.AICLI.Chat = &chatConfig
+	}
+	if config.AICLI.Subagents != nil {
+		cloned.AICLI.Subagents = &agentconfig.AICLISubagentsConfig{
+			Routing: cloneAgentRoutingConfig(config.AICLI.Subagents.Routing),
+		}
+	}
+	if config.AICLI.Teams != nil {
+		cloned.AICLI.Teams = &agentconfig.AICLITeamsConfig{
+			Routing: cloneAgentRoutingConfig(config.AICLI.Teams.Routing),
+		}
+	}
+	// MainAgent 必须随快照保留：主 Agent 动态路由（aicli.main_agent.routing）经
+	// mainAgentRoutingConfig() 读取本字段并在 buildSessionActor 接进 loop 配置；
+	// 漏拷会让「宿主接线」静默失效，而配置侧看起来一切正常（与 SkillsRuntime
+	// 同类问题）。
+	if config.AICLI.MainAgent != nil {
+		cloned.AICLI.MainAgent = &agentconfig.AICLIMainAgentConfig{
+			Routing: cloneMainAgentRoutingConfigForHandler(config.AICLI.MainAgent.Routing),
+		}
+	}
+	// SkillsRuntime 必须随快照保留：handler 侧 catalog 注入（SK-1/SK-2）与
+	// catalog_budget_chars / discipline_block / document_mode 三个灰度开关都经
+	// runtimeSkillsConfig() 读取本字段；漏拷会让注入与开关静默失效（2026-09-18
+	// 修复——runtime-server 唯一注入点就是 SetAICLIConfig）。
+	if config.SkillsRuntime != nil {
+		skillsRuntime := *config.SkillsRuntime
+		cloned.SkillsRuntime = &skillsRuntime
+	}
+	return cloned
+}
+
+// cloneProfilesConfig 深拷贝 config.profiles（Batch 8 接线：profiles API 的
+// 只读视图与 default/items 写回都经 aicliConfigSnapshot 读取本字段；漏拷会让
+// 列表看不到 config 注册项、default 变更在快照里丢失，直到重启才生效）。
+func cloneProfilesConfig(profiles *agentconfig.ProfilesConfig) *agentconfig.ProfilesConfig {
+	if profiles == nil {
+		return nil
+	}
+	cloned := &agentconfig.ProfilesConfig{
+		Root:           profiles.Root,
+		DefaultProfile: profiles.DefaultProfile,
+	}
+	if len(profiles.Items) > 0 {
+		cloned.Items = make(map[string]agentconfig.ProfileConfig, len(profiles.Items))
+		for name, item := range profiles.Items {
+			cloned.Items[name] = item
+		}
+	}
+	return cloned
+}
+
+func cloneAgentRoutingConfig(config *agentconfig.AICLISubagentRoutingConfig) *agentconfig.AICLISubagentRoutingConfig {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	cloned.Enabled = cloneBoolPointer(config.Enabled)
+	cloned.InheritParentWhenMissing = cloneBoolPointer(config.InheritParentWhenMissing)
+	cloned.ValidateModelCapabilities = cloneBoolPointer(config.ValidateModelCapabilities)
+	cloned.AllowedProviderOverrides = append([]string(nil), config.AllowedProviderOverrides...)
+	cloned.AllowedModelOverrides = append([]string(nil), config.AllowedModelOverrides...)
+	cloned.Levels = make(map[string]agentconfig.AICLISubagentRouteProfile, len(config.Levels))
+	for difficulty, profile := range config.Levels {
+		cloned.Levels[difficulty] = cloneAgentRouteProfile(profile)
+	}
+	cloned.Roles = make(map[string]map[string]agentconfig.AICLISubagentRouteProfile, len(config.Roles))
+	for role, levels := range config.Roles {
+		clonedLevels := make(map[string]agentconfig.AICLISubagentRouteProfile, len(levels))
+		for difficulty, profile := range levels {
+			clonedLevels[difficulty] = cloneAgentRouteProfile(profile)
+		}
+		cloned.Roles[role] = clonedLevels
+	}
+	return &cloned
+}
+
+func cloneAgentRouteProfile(profile agentconfig.AICLISubagentRouteProfile) agentconfig.AICLISubagentRouteProfile {
+	cloned := profile
+	if profile.Temperature != nil {
+		temperature := *profile.Temperature
+		cloned.Temperature = &temperature
+	}
+	return cloned
+}
+
+// cloneMainAgentRoutingConfigForHandler 深拷贝主 Agent 路由配置。快照与运行期
+// 共享 map/slice 会让热重载后的配置写入互相影响，因此与 subagent 路由同口径克隆。
+func cloneMainAgentRoutingConfigForHandler(config *agentconfig.AICLIMainAgentRoutingConfig) *agentconfig.AICLIMainAgentRoutingConfig {
+	if config == nil {
+		return nil
+	}
+	cloned := *config
+	cloned.Levels = append([]string(nil), config.Levels...)
+	cloned.ExpensiveLevels = append([]string(nil), config.ExpensiveLevels...)
+	if len(config.Profiles) > 0 {
+		cloned.Profiles = make(map[string]agentconfig.AICLISubagentRouteProfile, len(config.Profiles))
+		for difficulty, profile := range config.Profiles {
+			cloned.Profiles[difficulty] = cloneAgentRouteProfile(profile)
+		}
+	} else {
+		cloned.Profiles = nil
+	}
+	return &cloned
+}
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+// SetSessionManager 设置 Session Manager
+func (h *Handler) SetSessionManager(manager *chat.SessionManager) {
+	h.sessionManager = manager
+}
+
+// SetHotReload 设置 HotReload
+func (h *Handler) SetHotReload(hotReload *skill.HotReload) {
+	h.hotReload = hotReload
+	h.attachEmbeddingHotReloadSync()
+}
+
+// SetEmbeddingRouter 设置 Embedding 路由器
+func (h *Handler) SetEmbeddingRouter(router *skill.SemanticEmbeddingRouter) {
+	h.embeddingRouter = router
+	h.attachEmbeddingHotReloadSync()
+}
+
+// SetSearchAdminToken 设置搜索运维接口的管理员令牌
+func (h *Handler) SetSearchAdminToken(token string) {
+	h.searchAdminToken = strings.TrimSpace(token)
+}
+
+// SetAdminToken 设置 skills 管理接口的管理员令牌
+func (h *Handler) SetAdminToken(token string) {
+	h.SetSearchAdminToken(token)
+}
+
+// SetMutationPolicy 设置 skills 变更治理策略
+func (h *Handler) SetMutationPolicy(policy MutationPolicy) {
+	h.mutationPolicyMu.Lock()
+	defer h.mutationPolicyMu.Unlock()
+	h.mutationPolicy = policy
+}
+
+// SetMCPAdminService 注入 MCP 管理服务（runtime-server 启动时装配）。
+func (h *Handler) SetMCPAdminService(service mcpadmin.AdminService) {
+	if h == nil {
+		return
+	}
+	h.mcpAdmin = service
+}
+
+// SetUsagePolicy 设置 usage tracking / quota 策略
+func (h *Handler) SetUsagePolicy(policy UsagePolicy) {
+	if policy.QuotaEnabled {
+		policy.TrackingEnabled = true
+	}
+	h.usagePolicyMu.Lock()
+	defer h.usagePolicyMu.Unlock()
+	h.usagePolicy = cloneUsagePolicy(policy)
+}
+
+// SetUsageLedgerStore 设置 usage ledger 持久化存储
+func (h *Handler) SetUsageLedgerStore(store UsageLedgerStore) {
+	h.usageLedgerStore = store
+}
+
+// SetUsageLedgerUnavailableReason 记录账本启用但不可用的原因（启动期降级，见 cmd/runtime-server）。
+// 写入后 GET /api/runtime/usage/ledger 的 503 会带上该原因，便于直接定位是 dsn、驱动还是建表问题。
+func (h *Handler) SetUsageLedgerUnavailableReason(reason string) {
+	h.usageLedgerUnavailableReason = strings.TrimSpace(reason)
+}
+
+// SetAuthPolicyPersister 设置 auth/scope policy 持久化回调
+func (h *Handler) SetAuthPolicyPersister(persister AuthPolicyPersister) {
+	h.authPolicyPersister = persister
+}
+
+// SetUsagePolicyPersister 设置 usage/quota policy 持久化回调
+func (h *Handler) SetUsagePolicyPersister(persister UsagePolicyPersister) {
+	h.usagePolicyPersister = persister
+}
+
+// SetMutationPolicyPersister 设置 mutation policy 持久化回调
+func (h *Handler) SetMutationPolicyPersister(persister MutationPolicyPersister) {
+	h.mutationPolicyPersister = persister
+}
+
+// SetScopeResolverConfig 设置 scope 解析配置
+func (h *Handler) SetScopeResolverConfig(config ScopeResolverConfig) {
+	h.scopeResolverMu.Lock()
+	defer h.scopeResolverMu.Unlock()
+	h.scopeResolverConfig = cloneScopeResolverConfig(config)
+}
+
+// SetRuntimeConfig 设置 skills runtime 配置快照与路径
+func (h *Handler) SetRuntimeConfig(config *runtimecfg.RuntimeConfig, configFile string) {
+	if config != nil {
+		sessionruntime.ApplyDefaults(config, sessionruntime.ResolveOptions{
+			Config:     config,
+			ConfigFile: configFile,
+			Mode:       sessionruntime.ModeServer,
+		})
+	}
+	h.runtimeConfig = config
+	h.runtimeConfigFile = strings.TrimSpace(configFile)
+	_, _ = h.refreshTeamStore(config, h.runtimeConfigFile, "", "")
+	_, _ = h.refreshSessionRuntimeStore(config, h.runtimeConfigFile)
+	_, _ = h.refreshAgentControlRegistryService(config, h.runtimeConfigFile)
+}
+
+// SetRuntimeConfigResolver 设置 runtime config 选择器（用于 rollout）
+func (h *Handler) SetRuntimeConfigResolver(resolver func(UsageScope) *runtimecfg.RuntimeConfig) {
+	h.runtimeConfigResolver = resolver
+}
+
+// SetRuntimeLogFilePath 设置 runtime 服务日志文件路径。
+func (h *Handler) SetRuntimeLogFilePath(path string) {
+	path = aiclipaths.ExpandUserPath(path)
+	if path != "" {
+		if absolutePath, err := filepath.Abs(path); err == nil {
+			path = absolutePath
+		}
+	}
+	h.logFilePath = path
+}
+
+// SetSearchReindexCooldown 设置索引重建冷却时间
+func (h *Handler) SetSearchReindexCooldown(cooldown time.Duration) {
+	if cooldown < 0 {
+		cooldown = 0
+	}
+	h.searchReindexCooldown = cooldown
+}
+
+func (h *Handler) withRouteHeaders(next http.HandlerFunc, options routeHeaderOptions) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r != nil && r.URL != nil {
+			w.Header().Set("X-AI-Gateway-Entrypoint", r.URL.Path)
+		}
+		canonicalEntrypoint := strings.TrimSpace(options.canonicalEntrypoint)
+		if options.canonicalResolver != nil {
+			canonicalEntrypoint = strings.TrimSpace(options.canonicalResolver(r))
+		}
+		warning := strings.TrimSpace(options.warning)
+		if options.warningResolver != nil {
+			warning = strings.TrimSpace(options.warningResolver(r))
+		}
+		if canonicalEntrypoint != "" {
+			w.Header().Set("X-AI-Gateway-Canonical-Entrypoint", canonicalEntrypoint)
+			if warning != "" || (r != nil && r.URL != nil && r.URL.Path != canonicalEntrypoint) {
+				w.Header().Set("Link", fmt.Sprintf("<%s>; rel=\"canonical\"", canonicalEntrypoint))
+			}
+		}
+		if options.mode != "" {
+			w.Header().Set("X-AI-Gateway-Entrypoint-Mode", options.mode)
+		}
+		if warning != "" {
+			w.Header().Set("Warning", warning)
+		}
+		next(w, r)
+	}
+}
+
+func adminDebugRouteWarning(entrypoint, preferredPath string) string {
+	entrypoint = strings.TrimSpace(entrypoint)
+	preferredPath = strings.TrimSpace(preferredPath)
+	if entrypoint == "" || preferredPath == "" {
+		return ""
+	}
+	return fmt.Sprintf(`299 ai-agent-runtime "%s is an admin/debug endpoint; prefer %s for normal usage"`, entrypoint, preferredPath)
+}
+
+func requestPath(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return ""
+	}
+	return strings.TrimSpace(r.URL.Path)
+}
+
+// RegisterRoutes 注册路由
+func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
+	runtimeRouter := router.PathPrefix(canonicalRuntimeEntrypoint).Subrouter()
+	agentRouter := router.PathPrefix("/api/agent").Subrouter()
+
+	agentRouter.HandleFunc("/chat", h.withRouteHeaders(h.AgentChat, routeHeaderOptions{
+		canonicalEntrypoint: canonicalAgentChatEntrypoint,
+		mode:                "canonical",
+	})).Methods(http.MethodPost)
+
+	// Skills 管理与执行
+	runtimeRouter.HandleFunc("/skills", h.ListSkills).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/list", h.ListCodexSkills).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills", h.CreateSkill).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/search", h.SearchSkills).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/search/stats", h.GetSearchStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/search/reindex", h.ReindexSearchIndex).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/capabilities", h.ListCapabilities).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/models", h.GetRuntimeModels).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/batch", h.BatchCreateSkills).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/stats", h.GetStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/reload", h.ReloadSkills).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/validate", h.ValidateSkill).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/export", h.ExportSkills).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/import", h.ImportSkills).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/hot-reload/start", h.StartHotReload).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/hot-reload/stop", h.StopHotReload).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/hot-reload/reload", h.ReloadHotReload).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/skills/hot-reload/stats", h.GetHotReloadStats).Methods(http.MethodGet)
+
+	// Runtime / governance / observability
+	runtimeRouter.HandleFunc("/siteaccount/detect", h.DetectRuntimeSiteAccount).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/siteaccount/fetch", h.FetchRuntimeSiteAccount).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/providers/{name}/account/refresh", h.RefreshRuntimeProviderAccount).Methods(http.MethodPost)
+	h.registerProviderOpsRoutes(runtimeRouter)
+	runtimeRouter.HandleFunc("/usage/stats", h.GetUsageStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/usage/ledger", h.GetUsageLedger).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/usage/reset", h.ResetUsageStats).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/usage/policy", h.GetUsagePolicy).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/usage/policy", h.UpdateUsagePolicy).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/usage/policy", h.DeleteUsagePolicyEntry).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/mutation/policy", h.GetMutationPolicy).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/mutation/policy", h.UpdateMutationPolicy).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/auth/policy", h.GetAuthPolicy).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/auth/policy", h.UpdateAuthPolicy).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/auth/policy", h.DeleteAuthPolicyEntry).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/governance/policy", h.GetGovernancePolicy).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/config/document", h.GetConfigDocument).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/config/document/preview", h.PreviewConfigDocument).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/config/document/agent-route-preview", h.PreviewAgentRoute).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/config/document", h.UpdateConfigDocument).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/skills/config/write", h.WriteConfigDocument).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/config/agent/max-steps", h.UpdateAgentMaxSteps).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/config/agent/max-steps", h.GetAgentMaxSteps).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/service", h.GetRuntimeServiceStatus).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/service/restart", h.RestartRuntimeService).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/fs/read-file", h.ReadRuntimeFile).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/fs/write-file", h.WriteRuntimeFile).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/fs/append-file", h.AppendRuntimeFile).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/debug/prompt-layout", h.withRouteHeaders(h.PreviewPromptLayout, routeHeaderOptions{
+		canonicalEntrypoint: canonicalRuntimeEntrypoint + "/debug/prompt-layout",
+		mode:                "admin-debug",
+		warning:             adminDebugRouteWarning(canonicalRuntimeEntrypoint+"/debug/prompt-layout", canonicalAgentChatEntrypoint),
+	})).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/status", h.GetRuntimeStatus).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/health", h.GetRuntimeHealth).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/events", h.ListRuntimeEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/logs", h.ListRuntimeLogs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/logs/stream", h.StreamRuntimeLogs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/sessions", h.ListAnalyticsSessions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/overview", h.GetAnalyticsOverview).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/summary", h.GetAnalyticsSummary).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/dimensions", h.GetAnalyticsDimensions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/sessions/{id}", h.GetAnalyticsSessionUsage).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/sessions/{id}/usage", h.GetAnalyticsSessionUsage).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/sessions/{id}/turns", h.ListAnalyticsSessionTurns).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/tools", h.ListAnalyticsToolStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/tools/{tool}", h.GetAnalyticsToolStatsDetail).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/subagents", h.ListAnalyticsSubagentStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/errors", h.ListAnalyticsErrorPatterns).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/routing", h.ListAnalyticsRoutingStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/routing/events", h.ListAnalyticsRoutingEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/traces/stats", h.GetRuntimeTraceStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/traces/governance", h.GetRuntimeTraceGovernance).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/traces", h.GetRuntimeTraces).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/traces/{trace_id}", h.GetRuntimeTrace).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/background/jobs", h.ListBackgroundJobs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/background/jobs/{id}", h.GetBackgroundJob).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/cancel", h.CancelBackgroundJob).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/events", h.ListBackgroundJobEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/output", h.GetBackgroundJobOutput).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/mcps", h.ListRuntimeMCPs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/mcps", h.CreateRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}", h.UpdateRuntimeMCP).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/mcps/{name}", h.DeleteRuntimeMCP).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/mcps/{name}/enable", h.EnableRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}/disable", h.DisableRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}/tools", h.ListRuntimeMCPTools).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/mcps/{name}/tools/{tool}/enable", h.EnableRuntimeMCPTool).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}/tools/{tool}/disable", h.DisableRuntimeMCPTool).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}/tools/enable", h.EnableRuntimeMCPTools).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/{name}/tools/disable", h.DisableRuntimeMCPTools).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/mcps/reload", h.ReloadRuntimeMCPs).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/reload", h.ReloadRuntimeTeams).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/validate", h.ValidateRuntimeConfig).Methods(http.MethodGet)
+
+	// Profiles（§10.5 + §23 G1-G3：list/get/put/validate/preview/default/apply
+	// + create/duplicate/rename/move/delete/references）。
+	h.registerProfileRoutes(runtimeRouter)
+
+	// Sessions
+	runtimeRouter.HandleFunc("/sessions", h.ListSessions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions", h.CreateSession).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/search", h.SearchSessions).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/batch/delete", h.BatchDeleteSessions).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/batch/archive", h.BatchArchiveSessions).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/stats", h.GetSessionStats).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/users", h.ListSessionUsers).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}", h.GetSession).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}", h.UpdateSession).Methods(http.MethodPatch)
+	runtimeRouter.HandleFunc("/sessions/{id}", h.DeleteSession).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/sessions/{id}/archive", h.ArchiveSession).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/activate", h.ActivateSession).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/close", h.CloseSession).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/branch", h.BranchSession).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/history", h.GetSessionHistory).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime", h.GetSessionRuntimeState).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/events", h.ListSessionRuntimeEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/tools", h.ListSessionRuntimeTools).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/tool-receipts", h.ListSessionToolReceipts).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/stream", h.StreamSessionRuntimeEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/commands", h.SubmitSessionRuntimeCommand).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agent-control/mailbox", h.ListSessionAgentControlMailbox).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents", h.SpawnSessionAgent).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/wait", h.WaitSessionAgents).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/events", h.ListSessionAgentEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}", h.GetSessionAgentStatus).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/input", h.SendSessionAgentInput).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/events", h.ListSessionAgentEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/close", h.CloseSessionAgent).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/agents/{agent_id}/resume", h.ResumeSessionAgent).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/generated-images/{name}", h.GetSessionGeneratedImage).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints", h.ListSessionCheckpoints).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/files", h.GetCheckpointFiles).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/preview", h.PreviewSessionCheckpoint).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/checkpoints/{checkpoint_id}/restore", h.RestoreSessionCheckpoint).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/turns", h.ListSessionTurns).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/backtrack/audit", h.ListSessionBacktrackAudit).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/backtrack/preview", h.PreviewSessionBacktrack).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/backtrack", h.ApplySessionBacktrack).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.GetSessionPlanMode).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.UpdateSessionPlanMode).Methods(http.MethodPost)
+	// 会话权限模式（composer 权限选择器）：运行中切换同样生效。
+	runtimeRouter.HandleFunc("/sessions/{id}/permission-mode", h.GetSessionPermissionMode).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/permission-mode", h.UpdateSessionPermissionMode).Methods(http.MethodPost)
+	// 会话级 Agent 路由（难度 → provider/model/reasoning_effort，§4.4/§6.5）。
+	// GET 只读投影（与 TUI 状态栏 / frontend 会话详情区块同一投影函数）；
+	// PATCH 写入/清除目标层（session|workspace|config），写后失效 actor（下一 turn 生效）。
+	runtimeRouter.HandleFunc("/sessions/{id}/routing", h.GetSessionRouting).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/routing", h.UpdateSessionRouting).Methods(http.MethodPatch)
+	// 用量分析 + 缓存分析：server 启动（路由注册）即挂载（§3.2），
+	// 二者写/读同一个 usage_analytics.sqlite；避免启动初期到首个请求
+	// 之间的 LLM 事件丢失。
+	h.attachUsageAnalyticsService()
+	h.attachCacheAnalyticsService()
+	runtimeRouter.HandleFunc("/sessions/{id}/cache", h.HandleSessionCache).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/cache/{rest:.*}", h.HandleSessionCache).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/history", h.ClearSessionHistory).Methods(http.MethodDelete)
+
+	// Workspace directories（工作目录注册表，§4.2）
+	h.RegisterWorkspaceDirectoryRoutes(runtimeRouter)
+
+	// Harness control plane (project permissions / grants / memory / plugins)
+	runtimeRouter.HandleFunc("/harness/permissions", h.GetHarnessPermissions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/harness/grants", h.GetHarnessGrants).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/harness/grants", h.UpdateHarnessGrants).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/harness/trust", h.GetHarnessTrust).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/harness/trust", h.UpdateHarnessTrust).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/harness/memory", h.GetHarnessMemory).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/harness/memory", h.UpdateHarnessMemory).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/harness/plugins", h.GetHarnessPlugins).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/harness/plugins/{id}", h.UpdateHarnessPlugin).Methods(http.MethodPost)
+
+	// Teams
+	runtimeRouter.HandleFunc("/agent-control/agents", h.ListAgentControlAgents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/agent-control/mailbox", h.ListAgentControlMailbox).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/agent-control/tasks", h.ListAgentControlTasks).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/agent-control/tasks", h.CreateAgentControlTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/events", h.ListAgentControlTaskGraphEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}", h.UpdateAgentControlTask).Methods(http.MethodPatch)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/status", h.UpdateAgentControlTaskStatus).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/claim", h.ClaimAgentControlTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/lease", h.RenewAgentControlTaskLease).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/release", h.ReleaseAgentControlTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/terminal", h.UpdateAgentControlTaskTerminal).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/block", h.BlockAgentControlTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/dependencies", h.ListAgentControlTaskDependencies).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/agent-control/tasks/{task_id}/dependencies", h.CreateAgentControlTaskDependency).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams", h.ListTeams).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams", h.CreateTeam).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/summary", h.ListTeamSummaries).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}", h.GetTeam).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}", h.UpdateTeam).Methods(http.MethodPatch)
+	runtimeRouter.HandleFunc("/teams/{id}", h.DeleteTeam).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/teams/{id}/events", h.ListTeamEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/summary", h.GetTeamSummary).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/summary/final", h.GetTeamFinalSummary).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/teammates", h.ListTeammates).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/teammates", h.UpsertTeammate).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/teammates/{teammate_id}", h.UpdateTeammate).Methods(http.MethodPatch)
+	runtimeRouter.HandleFunc("/teams/{id}/teammates/{teammate_id}/heartbeat", h.UpdateTeammateHeartbeat).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks", h.ListTasks).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/plan", h.PlanTeamTasks).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/graph", h.GetTaskGraph).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks", h.CreateTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}", h.GetTask).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}", h.UpdateTask).Methods(http.MethodPatch)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/dependencies", h.ListTaskDependencies).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/dependencies", h.AddTaskDependency).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/dependents", h.ListTaskDependents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/replan", h.ReplanTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/lease", h.RenewTaskLease).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/release", h.ReleaseTaskLease).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/retry", h.RetryTask).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/{task_id}/outcome", h.withRouteHeaders(h.ReportTaskOutcome, routeHeaderOptions{
+		canonicalResolver: requestPath,
+		mode:              "canonical",
+	})).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/ready", h.MarkReadyTasks).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/claim", h.ClaimReadyTasks).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/tasks/reclaim", h.ReclaimExpiredTasks).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/mailbox", h.ListMailbox).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/mailbox", h.SendMailboxMessage).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/mailbox/{message_id}/ack", h.AckMailboxMessage).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/path-claims", h.ListPathClaims).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/teams/{id}/path-claims/check", h.CheckPathClaims).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/path-claims/prune", h.PrunePathClaims).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/teams/{id}/teammates/sweep", h.SweepTeammates).Methods(http.MethodPost)
+
+	// Supervision control plane (P2: doc 6.2-6.9)
+	runtimeRouter.HandleFunc("/supervision/digest", h.GetSupervisionDigest).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/supervision/snapshot", h.GetSupervisionSnapshot).Methods(http.MethodGet)
+	// C0-E（§7.3）度量基线读数：口径与验收用例同源。
+	runtimeRouter.HandleFunc("/supervision/metrics", h.GetSupervisionMetrics).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/supervision/actions", h.RequestSupervisionAction).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/actions", h.ListSupervisionActions).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/supervision/actions/{id}", h.GetSupervisionAction).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/supervision/actions/{id}/accept", h.AcceptSupervisionAction).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/actions/{id}/execute", h.ExecuteSupervisionAction).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/notifications/{id}/ack", h.AcknowledgeSupervisionNotification).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/notifications/{id}/defer", h.DeferSupervisionNotification).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/wake", h.ScheduleSupervisionWake).Methods(http.MethodPost)
+	// 2026-09-22 手动核查（docs/plan/supervision-manual-audit-plan-20260922.md）：
+	// turn 结束自动核查关闭后，核查与投递只能显式发起——audit 只读聚合
+	// （digest + snapshot + pending wake + 预算），wake/drain 复用宿主唯一
+	// consumer 的 runnable/预算闸门，绝不绕过。
+	runtimeRouter.HandleFunc("/supervision/audit", h.GetSupervisionAudit).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/supervision/wake/drain", h.DrainSupervisionWakes).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/team-edges", h.RecordSupervisionTeamEdge).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/supervision/team-edges", h.ListSupervisionTeamEdges).Methods(http.MethodGet)
+
+	runtimeRouter.HandleFunc("/skills/{name}", h.GetSkill).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/skills/{name}", h.UpdateSkill).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/skills/{name}", h.DeleteSkill).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/skills/{name}/execute", h.withRouteHeaders(h.ExecuteSkill, routeHeaderOptions{
+		canonicalResolver: requestPath,
+		mode:              "admin-debug",
+		warningResolver: func(r *http.Request) string {
+			return adminDebugRouteWarning(requestPath(r), canonicalAgentChatEntrypoint)
+		},
+	})).Methods(http.MethodPost)
+
+	// Runtime Observation Plane (Phase 2): 仅当 runtime.observe.enabled=true 时注册。
+	// SSE 与 renderer 依赖 Phase 3/4，v1 阶段不注册 /stream 与 /renderers/*。
+	if h.ensureObserveService() != nil {
+		observeRouter := runtimeRouter.PathPrefix("/observe/v1").Subrouter()
+		observeRouter.HandleFunc("/capabilities", h.ObserveCapabilities).Methods(http.MethodGet)
+		observeRouter.HandleFunc("/snapshot", h.ObserveSnapshot).Methods(http.MethodGet)
+		observeRouter.HandleFunc("/sessions/{session_id}", h.ObserveSession).Methods(http.MethodGet)
+		observeRouter.HandleFunc("/events", h.ObserveEvents).Methods(http.MethodGet)
+	}
+
+	return runtimeRouter
+}
+
+// ListSkills 列出所有 Skills
+func (h *Handler) ListSkills(w http.ResponseWriter, r *http.Request) {
+	layer, dir := parseSkillSourceFilters(r)
+	skills := filterSkillsBySource(h.skillRegistry.List(), layer, dir)
+	hydratedSkills, err := h.hydrateSkillsForResponse(skills)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	response := map[string]interface{}{
+		"skills": hydratedSkills,
+		"count":  len(hydratedSkills),
+	}
+	// SK-4：加性返回 unavailable 分组，使"列表可见"与"可执行集合"一致可解释。
+	unavailable := unavailableSkillsForResponse(h.skillRegistry, layer, dir)
+	response["unavailable"] = unavailable
+	response["unavailable_count"] = len(unavailable)
+	// SK-5：注册表口径的 catalog 投影——前端展示与模型所见同一渲染/预算口径。
+	if projection := h.catalogProjectionFromRegistry(); projection != nil {
+		response["catalog"] = projection
+	}
+
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// GetSkill 获取单个 Skill
+func (h *Handler) GetSkill(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	name := vars["name"]
+
+	skillItem, exists := h.skillRegistry.Get(name)
+	if !exists {
+		// SK-4：未注册但命中 unavailable 集合时给出可操作引导，而不是
+		// 只报 "skill not found"（列表里仍能看到该技能）。
+		if unavailable, ok := h.skillRegistry.LookupUnavailable(name); ok {
+			h.writeUnavailableSkillError(w, unavailable)
+			return
+		}
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrSkillNotFound,
+			fmt.Sprintf("skill not found: %s", name)))
+		return
+	}
+
+	hydratedSkill, err := h.hydrateSkillForResponse(skillItem)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, hydratedSkill)
+}
+
+// CreateSkill 创建新 Skill
+func (h *Handler) CreateSkill(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSkillMutation(r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionCreate, "forbidden", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforceMutationActionPolicy(skillMutationActionCreate, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionCreate, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforcePersistPolicy(nil, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionCreate, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	var newSkill skill.Skill
+	if err := json.NewDecoder(r.Body).Decode(&newSkill); err != nil {
+		h.auditSkillMutation(r, skillMutationActionCreate, "invalid_request")
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+	newSkill.SetSource("", "", skill.SkillSourceLayerRuntime)
+
+	if err := h.skillRegistry.Register(&newSkill); err != nil {
+		h.auditSkillMutation(r, skillMutationActionCreate, "failed", logger.Err(err))
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// 尝试更新 embedding 索引（如果有）
+	h.updateEmbeddingIndex(&newSkill)
+
+	if shouldPersistSkill(r) {
+		if err := h.persistSkill(&newSkill, nil, r); err != nil {
+			h.auditSkillMutation(r, skillMutationActionCreate, "failed", logger.Err(err))
+			h.writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	skillChange := skillChangePayloadFromSkill(&newSkill, handlerSkillDirs(h.skillLoader))
+	skillChange["action"] = skillMutationActionCreate
+	skillChange["status"] = "success"
+	skillChange["affected_count"] = 1
+	skillChange["count"] = h.currentSkillCount()
+	h.publishSkillsChangedEvent(r, skillChange)
+	h.auditSkillMutation(r, skillMutationActionCreate, "success",
+		logger.String("skill", newSkill.Name),
+		logger.String("source_layer", newSkill.Source.Layer))
+
+	h.writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"message": "skill created successfully",
+		"skill":   newSkill.Name,
+		"source":  newSkill.Source,
+	})
+}
+
+// UpdateSkill 更新 Skill
+func (h *Handler) UpdateSkill(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSkillMutation(r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionUpdate, "forbidden", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforceMutationActionPolicy(skillMutationActionUpdate, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionUpdate, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	vars := mux.Vars(r)
+	name := vars["name"]
+
+	// 检查 Skill 是否存在
+	existingSkill, exists := h.skillRegistry.Get(name)
+	if !exists {
+		h.auditSkillMutation(r, skillMutationActionUpdate, "not_found", logger.String("skill", name))
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrSkillNotFound,
+			fmt.Sprintf("skill not found: %s", name)))
+		return
+	}
+	if err := h.enforcePersistPolicy(existingSkill, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionUpdate, "disabled", logger.String("skill", name), logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	var updatedSkill skill.Skill
+	if err := json.NewDecoder(r.Body).Decode(&updatedSkill); err != nil {
+		h.auditSkillMutation(r, skillMutationActionUpdate, "invalid_request", logger.String("skill", name))
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+	updatedSkill.SetSource("", "", skill.SkillSourceLayerRuntime)
+
+	// 注销旧的 Skill
+	h.skillRegistry.Unregister(name)
+
+	// 注册新的 Skill
+	if err := h.skillRegistry.Register(&updatedSkill); err != nil {
+		h.auditSkillMutation(r, skillMutationActionUpdate, "failed", logger.String("skill", name), logger.Err(err))
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	h.removeEmbeddingIndex(existingSkill)
+	h.updateEmbeddingIndex(&updatedSkill)
+
+	if shouldPersistUpdatedSkill(existingSkill, r) {
+		if err := h.persistSkill(&updatedSkill, existingSkill.Source, r); err != nil {
+			h.auditSkillMutation(r, skillMutationActionUpdate, "failed", logger.String("skill", name), logger.Err(err))
+			h.writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	skillChange := skillChangePayloadFromSkill(&updatedSkill, handlerSkillDirs(h.skillLoader))
+	skillChange["action"] = skillMutationActionUpdate
+	skillChange["status"] = "success"
+	skillChange["affected_count"] = 1
+	skillChange["count"] = h.currentSkillCount()
+	h.publishSkillsChangedEvent(r, skillChange)
+	h.auditSkillMutation(r, skillMutationActionUpdate, "success",
+		logger.String("skill", updatedSkill.Name),
+		logger.String("source_layer", updatedSkill.Source.Layer))
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message": "skill updated successfully",
+		"skill":   updatedSkill.Name,
+		"source":  updatedSkill.Source,
+	})
+}
+
+// DeleteSkill 删除 Skill
+func (h *Handler) DeleteSkill(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSkillMutation(r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionDelete, "forbidden", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforceMutationActionPolicy(skillMutationActionDelete, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionDelete, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	vars := mux.Vars(r)
+	name := vars["name"]
+
+	// 检查 Skill 是否存在
+	skillItem, exists := h.skillRegistry.Get(name)
+	if !exists {
+		h.auditSkillMutation(r, skillMutationActionDelete, "not_found", logger.String("skill", name))
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrSkillNotFound,
+			fmt.Sprintf("skill not found: %s", name)))
+		return
+	}
+	if err := h.enforceDeleteFilePolicy(r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionDelete, "disabled", logger.String("skill", name), logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	fileDeleted := false
+	if shouldDeleteSkillFile(r) {
+		if err := h.deletePersistedSkillFile(skillItem); err != nil {
+			h.auditSkillMutation(r, skillMutationActionDelete, "failed", logger.String("skill", name), logger.Err(err))
+			h.writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		fileDeleted = true
+	}
+
+	h.removeEmbeddingIndex(skillItem)
+	h.skillRegistry.Unregister(name)
+	skillChange := skillChangePayloadFromSkill(skillItem, handlerSkillDirs(h.skillLoader))
+	skillChange["action"] = skillMutationActionDelete
+	skillChange["status"] = "success"
+	skillChange["affected_count"] = 1
+	skillChange["count"] = h.currentSkillCount()
+	h.publishSkillsChangedEvent(r, skillChange)
+	h.auditSkillMutation(r, skillMutationActionDelete, "success", logger.String("skill", name))
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"message":      "skill deleted successfully",
+		"skill":        name,
+		"file_deleted": fileDeleted,
+	})
+}
+
+// ExecuteSkill 执行 Skill
+func (h *Handler) ExecuteSkill(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	name := vars["name"]
+
+	skillItem, exists := h.skillRegistry.Get(name)
+	if !exists {
+		// SK-4：点名执行 unavailable 技能时返回 409 + 结构化引导
+		//（missing_tools / reason / hint），对齐 Codex 的安装提示语义。
+		if unavailable, ok := h.skillRegistry.LookupUnavailable(name); ok {
+			h.writeUnavailableSkillError(w, unavailable)
+			return
+		}
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrSkillNotFound,
+			fmt.Sprintf("skill not found: %s", name)))
+		return
+	}
+
+	executeReq, err := h.decodeExecuteSkillRequest(r)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse execution parameters"))
+		return
+	}
+
+	ctx := r.Context()
+	usageScope := h.resolveUsageScope(r, executeReq.TenantID, executeReq.ProjectID, executeReq.UserID)
+	// 会话获取/创建会写共享 session_history.sqlite，被并发 aicli 进程锁定时
+	// 会阻塞在 sqlite busy_timeout 上（驱动不响应 Go context 取消），
+	// 必须用短超时 context 包裹并在超时后快速返回 503，而不是无限等待。
+	storeCtx, storeCancel := sessionStoreQueryContext(r)
+	session, err := h.getOrCreateSession(storeCtx, usageScope.UserID, executeReq.SessionID)
+	storeCancel()
+	if err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	runtimeReq := types.NewRequest(executeReq.Prompt)
+	runtimeReq.History = h.normalizeMessages(executeReq.History)
+	runtimeReq.Context = h.mergeContext(executeReq.Context, executeReq.Params)
+	runtimeReq.Options = make(map[string]interface{}, len(executeReq.Options))
+	for key, value := range executeReq.Options {
+		runtimeReq.Options[key] = value
+	}
+	runtimeReq.ReasoningEffort = types.ResolveReasoningEffort(executeReq.ReasoningEffort, executeReq.Options)
+	runtimeReq.Thinking = types.ResolveThinkingConfig(executeReq.Thinking, executeReq.Options)
+	if grantedPermissions := h.resolveGrantedSkillPermissions(r); len(grantedPermissions) > 0 {
+		runtimeReq.Metadata.Set("permissions", grantedPermissions)
+	}
+
+	if session != nil && len(runtimeReq.History) == 0 {
+		runtimeReq.History = append(runtimeReq.History, session.GetMessages()...)
+	}
+	estimatedPromptTokens := h.estimateRequestTokens(executeReq.Prompt, runtimeReq.History)
+	if err := h.enforceUsageQuota(usageScope, estimatedPromptTokens, "execute"); err != nil {
+		h.writeError(w, http.StatusTooManyRequests, err)
+		return
+	}
+
+	executor := skill.NewExecutor(h.skillRegistry, h.mcpManager, h.llmRuntime)
+	if skillsInvokedEnabled {
+		executor.SetImplicitInvocationIndex(h.implicitInvocationIndex())
+	}
+	result, err := executor.Execute(ctx, skillItem, runtimeReq)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	if session != nil {
+		_ = h.persistChatTurn(ctx, session, executeReq.Prompt, result.Output, nil)
+	}
+	h.recordUsage(usageScope, "execute", skillItem.Name, result.Success, estimatedPromptTokens, result.Usage, result.Output)
+	h.publishSkillInvokedEvents(r, sessionID(session), result.ImplicitInvocations)
+
+	response := map[string]interface{}{
+		"skill":      skillItem.Name,
+		"status":     executionStatus(result.Success),
+		"result":     result,
+		"session_id": sessionID(session),
+	}
+
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// BatchCreateSkills 批量创建 Skills
+func (h *Handler) BatchCreateSkills(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSkillMutation(r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionBatchCreate, "forbidden", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforceMutationActionPolicy(skillMutationActionBatchCreate, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionBatchCreate, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforcePersistPolicy(nil, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionBatchCreate, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	var skills []struct {
+		Content string                 `json:"content"` // YAML 内容
+		Params  map[string]interface{} `json:"params,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&skills); err != nil {
+		h.auditSkillMutation(r, skillMutationActionBatchCreate, "invalid_request")
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+
+	results := make([]map[string]interface{}, 0, len(skills))
+	var errorsList []error
+	successCount := 0
+	var firstChangedSkill *skill.Skill
+
+	for i, skillData := range skills {
+		// 解析 YAML
+		skillItem, err := skill.NewManifestParser().ParseBytes([]byte(skillData.Content))
+		if err != nil {
+			errorsList = append(errorsList, err)
+			results = append(results, map[string]interface{}{
+				"index":   i,
+				"success": false,
+				"error":   err.Error(),
+			})
+			continue
+		}
+		skillItem.SetSource("", "", skill.SkillSourceLayerRuntime)
+
+		// 注册 Skill
+		if err := h.skillRegistry.Register(skillItem); err != nil {
+			errorsList = append(errorsList, err)
+			results = append(results, map[string]interface{}{
+				"index":   i,
+				"success": false,
+				"error":   err.Error(),
+			})
+			continue
+		}
+
+		h.updateEmbeddingIndex(skillItem)
+
+		if shouldPersistSkill(r) {
+			if err := h.persistSkill(skillItem, nil, r); err != nil {
+				errorsList = append(errorsList, err)
+				results = append(results, map[string]interface{}{
+					"index":   i,
+					"success": false,
+					"skill":   skillItem.Name,
+					"error":   err.Error(),
+				})
+				continue
+			}
+		}
+		if firstChangedSkill == nil {
+			firstChangedSkill = skillItem
+		}
+		successCount++
+
+		results = append(results, map[string]interface{}{
+			"index":   i,
+			"success": true,
+			"skill":   skillItem.Name,
+		})
+	}
+
+	response := map[string]interface{}{
+		"results": results,
+		"total":   len(skills),
+		"success": len(skills) - len(errorsList),
+		"failed":  len(errorsList),
+	}
+
+	statusCode := http.StatusOK
+	if len(errorsList) > 0 {
+		statusCode = http.StatusMultiStatus
+	}
+	outcome := "success"
+	if len(errorsList) > 0 {
+		outcome = "partial_success"
+	}
+	if successCount > 0 {
+		skillChange := skillChangePayloadFromSkill(firstChangedSkill, handlerSkillDirs(h.skillLoader))
+		skillChange["action"] = skillMutationActionBatchCreate
+		skillChange["status"] = outcome
+		skillChange["affected_count"] = successCount
+		skillChange["failed_count"] = len(errorsList)
+		skillChange["count"] = h.currentSkillCount()
+		h.publishSkillsChangedEvent(r, skillChange)
+	}
+	h.auditSkillMutation(r, skillMutationActionBatchCreate, outcome,
+		logger.Int("total", len(skills)),
+		logger.Int("failed", len(errorsList)))
+
+	h.writeJSON(w, statusCode, response)
+}
+
+// SearchSkills 搜索 Skills
+func (h *Handler) SearchSkills(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	limitStr := r.URL.Query().Get("limit")
+	category := r.URL.Query().Get("category")
+	mode := parseSearchMode(r)
+	layer, dir := parseSkillSourceFilters(r)
+
+	if query == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"query parameter 'q' is required"))
+		return
+	}
+
+	// 应用 limit
+	limit := 20
+	if limitStr != "" {
+		l, err := strconv.Atoi(limitStr)
+		if err == nil && l > 0 {
+			limit = l
+		}
+	}
+	matches, resolvedMode := h.searchSkillMatches(r.Context(), query, category, mode)
+	matches = filterRouteResultsBySource(matches, layer, dir)
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
+	hydratedMatches, err := h.hydrateRouteResultsForResponse(matches)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	skills := extractSkillsFromMatches(hydratedMatches)
+
+	response := map[string]interface{}{
+		"query":          query,
+		"results":        skills,
+		"matches":        serializeSearchMatches(hydratedMatches),
+		"count":          len(skills),
+		"limit":          limit,
+		"requested_mode": string(mode),
+		"resolved_mode":  string(resolvedMode),
+		"used_embedding": searchUsesEmbedding(hydratedMatches),
+	}
+	// SK-4：搜索契约同样加性暴露 unavailable 技能（按名称/缺失工具匹配），
+	// 避免搜索时它们再次"消失"。
+	unavailableMatches := searchUnavailableSkills(h.skillRegistry, query, layer, dir, limit)
+	response["unavailable"] = unavailableMatches
+	response["unavailable_count"] = len(unavailableMatches)
+	h.recordSearchTelemetry(query, mode, resolvedMode, len(hydratedMatches), response["used_embedding"].(bool))
+
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// ListCapabilities 列出统一能力描述
+func (h *Handler) ListCapabilities(w http.ResponseWriter, r *http.Request) {
+	if h.skillRegistry == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"skill registry not configured"))
+		return
+	}
+
+	descriptors := h.skillRegistry.CapabilityDescriptors()
+	agentDescriptor := h.agentCapabilityDescriptor()
+	if agentDescriptor != nil {
+		descriptors = append([]*capability.Descriptor{agentDescriptor}, descriptors...)
+	}
+
+	response := map[string]interface{}{
+		"capabilities": descriptors,
+		"count":        len(descriptors),
+	}
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// GetRuntimeModels 列出前端可用的聊天 provider / model 目录。
+func (h *Handler) GetRuntimeModels(w http.ResponseWriter, r *http.Request) {
+	payload := runtimeModelsSnapshot(h.llmRuntime)
+	payload["default_reasoning_effort"] = h.defaultReasoningEffort()
+	if err := h.attachProfileMetadata(r, payload); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
+// AgentChat Agent 对话接口
+func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
+	httpTraceID, requestID := runtimeTraceIDForRequest(r)
+	if requestID == "" {
+		requestID = httpTraceID
+	}
+	if requestID != "" {
+		w.Header().Set("X-Request-ID", requestID)
+	}
+
+	var req struct {
+		Messages        []map[string]string   `json:"messages"`
+		Profile         string                `json:"profile,omitempty"`
+		Agent           string                `json:"agent,omitempty"`
+		Provider        string                `json:"provider,omitempty"`
+		Model           string                `json:"model,omitempty"`
+		ReasoningEffort string                `json:"reasoning_effort,omitempty"`
+		Thinking        *types.ThinkingConfig `json:"thinking,omitempty"`
+		SessionID       string                `json:"session_id,omitempty"`
+		TeamID          string                `json:"team_id,omitempty"`
+		TaskID          string                `json:"task_id,omitempty"`
+		UserID          string                `json:"user_id,omitempty"`
+		TenantID        string                `json:"tenant_id,omitempty"`
+		ProjectID       string                `json:"project_id,omitempty"`
+		WorkspacePath   string                `json:"workspace_path,omitempty"`
+		MaxSteps        int                   `json:"max_steps,omitempty"`
+		EnableRoute     bool                  `json:"enable_routing,omitempty"`
+		EnableReAct     bool                  `json:"enable_react,omitempty"`
+		// ExposeSkills：本回合显式暴露的 skill 名称列表。运行时把对应 skill 的说明与
+		// 程序清单注入模型上下文，由模型自行选择调用哪些程序（模型驱动），而不是由
+		// 后端确定性直执行。
+		ExposeSkills               []string             `json:"expose_skills,omitempty"`
+		PlanningMode               string               `json:"planning_mode,omitempty"`
+		ExecutePlannedSubagents    bool                 `json:"execute_planned_subagents,omitempty"`
+		AllowWritePlannedSubagents bool                 `json:"allow_write_planned_subagents,omitempty"`
+		PatchDecisionPolicy        string               `json:"patch_decision_policy,omitempty"`
+		ApproveBlockedPatches      bool                 `json:"approve_blocked_patches,omitempty"`
+		PatchApprovalNote          string               `json:"patch_approval_note,omitempty"`
+		PatchApproval              *agent.PatchApproval `json:"patch_approval,omitempty"`
+		TurnID                     string               `json:"turn_id,omitempty"`
+		Stream                     bool                 `json:"stream,omitempty"`
+		// ResumeOnDisconnect（P4-刷新续传）：客户端断开（页面刷新/关标签）后
+		// 不取消本回合，run 继续执行并把增量/历史照常落库；刷新后的新页面通过
+		// GET /runtime/stream 按游标续传，并依据 /runtime 的 active_turn 重新
+		// 挂载在途回合身份。缺省 false 保持旧语义（客户端断开即中止）。
+		ResumeOnDisconnect bool `json:"resume_on_disconnect,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+
+	if len(req.Messages) == 0 {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"messages is required"))
+		return
+	}
+
+	// expose_skills 依赖 ReAct 回合把 skill 程序清单交给模型执行：显式暴露 skill 时
+	// 强制打开 ReAct，避免宿主漏配 enable_react 时"文档注入了却没有工具面可用"。
+	if len(req.ExposeSkills) > 0 {
+		req.EnableReAct = true
+	}
+
+	ctx := r.Context()
+	if requestID != "" {
+		ctx = logger.WithRequestID(ctx, requestID)
+	}
+	// The workspace consumes assistant deltas from the session runtime stream.
+	// Carry a client-provided turn identity through the agent context so a
+	// delayed event from a previous turn cannot be rendered into the new one.
+	turnID := strings.TrimSpace(req.TurnID)
+	if turnID == "" {
+		turnID = "turn_" + uuid.NewString()
+	}
+	ctx = agent.WithTurnID(ctx, turnID)
+	usageScope := h.resolveUsageScope(r, req.TenantID, req.ProjectID, req.UserID)
+	// 会话获取/创建会写共享 session_history.sqlite，被并发 aicli 进程锁定时
+	// 会阻塞在 sqlite busy_timeout 上（驱动不响应 Go context 取消），
+	// 必须用短超时 context 包裹并在超时后快速返回 503，而不是无限等待。
+	// （§4.3.2：会话解析前移到 profile 解析之前——目录绑定会话的首轮
+	// profile 回退需要读到创建时绑定的 workspace_path。）
+	storeCtx, storeCancel := sessionStoreQueryContext(r)
+	session, err := h.getOrCreateSession(storeCtx, usageScope.UserID, req.SessionID)
+	storeCancel()
+	if err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	// 目录回退（§4.3.2）：请求未显式指定 workspace_path 时，采用会话创建时
+	// 绑定的目录。会话上下文已有值时不覆盖（目录一经绑定不随单轮请求漂移）。
+	workspacePath := agentChatEffectiveWorkspacePath(session, req.WorkspacePath)
+
+	resolveProfile := func(ref string) (*profileRuntimeState, func(), error) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" && profilesys.IsAutoProfileRef(h.profileDefaultRef) {
+			ref = h.profileDefaultRef
+		}
+		if profilesys.IsAutoProfileRef(ref) {
+			// FR-11：auto 按**最后一条 user 消息**路由（与历史启发式一致）；空提示词
+			// 返回 ""，即回落该请求的默认/无 profile 语义（不猜、不静默换挡）。
+			ref = h.routeAutoProfileForPrompt(extractLastUserPrompt(req.Messages))
+		}
+		return h.resolveProfileRuntimeState(ctx, ref, req.Agent, usageScope, workspacePath)
+	}
+	effectiveProfile := strings.TrimSpace(req.Profile)
+	// Batch 12（V15 结论的 Web 直连半程）：请求未显式指定 profile 时回落到
+	// **会话绑定**（`set_profile` / 首轮落地写下的 sessionmeta 身份），使 Web 端
+	// `/profile` 切换在下一轮请求生效——Web 回合走 `/api/agent/chat`，不经过 actor。
+	sessionBoundProfile := ""
+	if effectiveProfile == "" && session != nil {
+		sessionBoundProfile = sessionmeta.String(session.Metadata.Context, sessionmeta.ProfileRef)
+		effectiveProfile = sessionBoundProfile
+	}
+	profileState, profileCleanup, err := resolveProfile(effectiveProfile)
+	bindingResolveFailed := false
+	if err != nil && sessionBoundProfile != "" {
+		// 会话绑定的 profile 解析失败（被删除 / 不可读）：不 brick 会话、也不
+		// 静默改写绑定——记警告、回落默认/自动路由，并保留原绑定（E2E-7/R18）。
+		logger.Warnf("agent chat: session-bound profile %q resolve failed: %s", sessionBoundProfile, err)
+		bindingResolveFailed = true
+		profileState, profileCleanup, err = resolveProfile("")
+	}
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	if profileCleanup != nil {
+		defer profileCleanup()
+	}
+	// FR-13：profile 是 usage ledger 的聚合维度之一——此处是 AgentChat 全部
+	// recordUsage 调用点（含 streamLLMChat 的传值路径）共享的 usageScope，
+	// 赋值一次即覆盖整条请求链；execute 等未解析 profile 的入口保持缺省
+	// （ledger 不写 profile 键，不猜）。
+	usageScope.Profile = ledgerProfileName(profileState)
+	if session != nil {
+		leaseScope := requestID
+		if leaseScope == "" {
+			leaseScope = uuid.NewString()
+		}
+		leaseHandle, leaseErr := h.acquireSessionLease(ctx, session.ID, agentChatLeaseOwnerKind, leaseScope)
+		if leaseErr != nil {
+			if h.writeSessionLeaseConflict(w, leaseErr) {
+				return
+			}
+			h.writeError(w, http.StatusInternalServerError, leaseErr)
+			return
+		}
+		if leaseHandle != nil {
+			defer func() {
+				_ = leaseHandle.Release(context.Background())
+			}()
+		}
+	}
+
+	selectedConfig := h.resolveRuntimeConfig(usageScope)
+	if profileState != nil && profileState.RuntimeConfig != nil {
+		selectedConfig = profileState.RuntimeConfig
+	}
+	requestedProvider := strings.TrimSpace(req.Provider)
+	instructionProvider := requestedProvider
+	if instructionProvider == "" {
+		instructionProvider = resolveAgentProvider(profileState, selectedConfig, h.llmRuntime)
+	}
+	instructionMessages := buildRuntimeInstructionMessages(profileState, workspacePath, instructionProvider)
+
+	if session != nil {
+		sessionUpdated := false
+		if ensureSessionInstructionMessages(session, instructionMessages) {
+			sessionUpdated = true
+		}
+		if !bindingResolveFailed && h.applyProfileSessionContext(session, profileState) {
+			sessionUpdated = true
+		}
+		if sessionUpdated && h.sessionManager != nil {
+			updateCtx, updateCancel := sessionStoreQueryContext(r)
+			_ = h.sessionManager.Update(updateCtx, session)
+			updateCancel()
+		}
+	}
+
+	chatMessages, lastMessage := h.buildChatMessages(req.Messages, session)
+	chatMessages = injectInstructionMessages(chatMessages, instructionMessages)
+	if lastMessage == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"at least one user message is required"))
+		return
+	}
+	workspaceCtx, workspaceErr := h.buildWorkspaceContext(workspacePath, lastMessage, selectedConfig)
+	if workspaceErr != nil {
+		h.writeError(w, http.StatusBadRequest, workspaceErr)
+		return
+	}
+	// Persist the workspace directory on the durable session metadata so the
+	// frontend can group sessions by working directory. Only materialized after
+	// the workspace scan succeeded: binding a path that fails validation would
+	// strand the session on an invalid directory (every later turn without an
+	// explicit workspace_path would reuse it and fail again). A bound path is
+	// never overwritten — directory binding must not drift with per-turn
+	// explicit request paths (§4.3 一经绑定不漂移).
+	if sessionNeedsWorkspacePathMaterialization(session, workspacePath) && h.sessionManager != nil {
+		if session.Metadata.Context == nil {
+			session.Metadata.Context = make(map[string]interface{})
+		}
+		sessionmeta.Set(session.Metadata.Context, sessionmeta.WorkspacePath, workspacePath)
+		updateCtx, updateCancel := sessionStoreQueryContext(r)
+		if updateErr := h.sessionManager.Update(updateCtx, session); updateErr != nil {
+			logger.Warnf("agent chat: materialize session workspace_path failed: %s", updateErr)
+		}
+		updateCancel()
+	}
+	requestTraceID := ""
+	if !req.EnableReAct {
+		requestTraceID = "trace_" + uuid.NewString()
+	}
+	contextPack := h.buildContextPack(ctx, session, buildProfileContextPack(profileState), workspaceCtx, chatMessages, lastMessage, workspacePath, req.TeamID, req.TaskID, requestTraceID, selectedConfig)
+	agentContext := map[string]interface{}{
+		"workspace_path":   workspacePath,
+		"context_pack":     contextPack,
+		"session_id":       sessionID(session),
+		"reasoning_effort": types.ResolveReasoningEffort(req.ReasoningEffort),
+	}
+	// Freeze measured environment facts once per durable session and reuse them
+	// for multi-turn request assembly. Do not re-probe every agent chat turn.
+	envSnap := ensureSessionEnvironmentSnapshot(session, workspacePath)
+	applyEnvironmentSnapshotToAgentContext(agentContext, envSnap)
+	if grantedPermissions := h.resolveGrantedSkillPermissions(r); len(grantedPermissions) > 0 {
+		agentContext["permissions"] = grantedPermissions
+	}
+	if profileState != nil && len(profileState.ContextValues) > 0 {
+		mergeProfileContextInto(agentContext, profileState.ContextValues)
+	}
+	estimatedPromptTokens := h.estimateMessagesTokens(chatMessages)
+	if err := h.enforceUsageQuota(usageScope, estimatedPromptTokens, "agent_chat"); err != nil {
+		h.writeError(w, http.StatusTooManyRequests, err)
+		return
+	}
+
+	runtimeRegistry := h.skillRegistry
+	runtimeEmbedding := h.embeddingRouter
+	runtimeMCP := h.mcpManager
+	runtimeLLM := h.llmRuntime
+	if profileState != nil {
+		if profileState.Registry != nil {
+			runtimeRegistry = profileState.Registry
+		}
+		if profileState.Embedding != nil {
+			runtimeEmbedding = profileState.Embedding
+		}
+		if profileState.MCPAdapter != nil {
+			runtimeMCP = profileState.MCPAdapter
+		}
+	}
+
+	// 创建 Agent 配置
+	agentProvider := resolveAgentProvider(profileState, selectedConfig, runtimeLLM)
+	agentModel := resolveAgentModel(profileState, selectedConfig, runtimeLLM)
+	if requestedProvider != "" {
+		agentProvider = requestedProvider
+	}
+	if model := strings.TrimSpace(req.Model); model != "" {
+		agentModel = model
+	}
+	effectiveReasoningEffort := types.ResolveReasoningEffort(req.ReasoningEffort)
+	chatRoute := resolveAgentChatRouteTransparency(
+		runtimeLLM,
+		session,
+		req.Provider,
+		req.Model,
+		req.ReasoningEffort,
+		agentProvider,
+		agentModel,
+		effectiveReasoningEffort,
+	)
+	if session != nil {
+		persistExecutionRouteTransparency(session, chatRoute)
+		if h.sessionManager != nil {
+			updateCtx, updateCancel := sessionStoreQueryContext(r)
+			_ = h.sessionManager.Update(updateCtx, session)
+			updateCancel()
+		}
+	}
+	if agentProvider != "" {
+		ctx = logger.WithProvider(ctx, agentProvider)
+	}
+	if agentModel != "" {
+		ctx = logger.WithModel(ctx, agentModel)
+	}
+	ctx = llm.WithHTTPDebugReporter(ctx, runtimeHTTPDebugReporter(ctx))
+	agentConfig := &agent.Config{
+		Name:     "api-agent",
+		Provider: agentProvider,
+		Model:    agentModel,
+		MaxSteps: req.MaxSteps,
+	}
+	if systemPrompt := primarySystemInstructionContent(instructionMessages); systemPrompt != "" {
+		agentConfig.SystemPrompt = systemPrompt
+	} else if profileState != nil && strings.TrimSpace(profileState.PromptText) != "" {
+		agentConfig.SystemPrompt = strings.TrimSpace(profileState.PromptText)
+	}
+	if selectedConfig != nil {
+		agentConfig.MaxToolCalls = selectedConfig.Agent.MaxToolCalls
+		agentConfig.MaxRunDuration = selectedConfig.Agent.Timeout
+		agentConfig.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
+		agentConfig.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
+		agentConfig.MaxRepeatedPollCalls = selectedConfig.Agent.MaxRepeatedPollCalls
+		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig)
+	}
+	if agentConfig.Options == nil {
+		agentConfig.Options = make(map[string]interface{})
+	}
+	agentConfig.Options["route"] = chatRoute.payload()
+	if strings.TrimSpace(req.TeamID) != "" || strings.TrimSpace(req.TaskID) != "" {
+		if agentConfig.Options == nil {
+			agentConfig.Options = make(map[string]interface{})
+		}
+		if value := strings.TrimSpace(req.TeamID); value != "" {
+			agentConfig.Options["team_id"] = value
+		}
+		if value := strings.TrimSpace(req.TaskID); value != "" {
+			agentConfig.Options["task_id"] = value
+		}
+	}
+	if workspacePath != "" {
+		if agentConfig.Options == nil {
+			agentConfig.Options = make(map[string]interface{})
+		}
+		agentConfig.Options["workspace_path"] = workspacePath
+	}
+	if profilePack := buildProfileContextPack(profileState); len(profilePack) > 0 {
+		if agentConfig.Options == nil {
+			agentConfig.Options = make(map[string]interface{})
+		}
+		agentConfig.Options["profile_context"] = cloneProfileContextValues(profilePack)
+	}
+	if agentConfig.MaxSteps < 0 {
+		agentConfig.MaxSteps = 0
+	} else if agentConfig.MaxSteps == 0 && selectedConfig != nil {
+		agentConfig.MaxSteps = agent.NormalizeMaxSteps(selectedConfig.Agent.MaxMaxSteps)
+	}
+	// Set the stream option before constructing the API agent.  The ReAct loop
+	// reads this option from the agent configuration when each provider request
+	// is assembled; setting it only after construction makes custom agent
+	// implementations that snapshot options miss the reporter opt-in.
+	if (req.Stream || wantsEventStream(r)) && req.EnableReAct {
+		if agentConfig.Options == nil {
+			agentConfig.Options = make(map[string]interface{})
+		}
+		agentConfig.Options["stream"] = true
+	}
+
+	a := h.newAPIAgentWithRuntime(agentConfig, &agentRuntimeComponents{
+		registry:        runtimeRegistry,
+		embeddingRouter: runtimeEmbedding,
+		mcpManager:      runtimeMCP,
+		llmRuntime:      runtimeLLM,
+	})
+	defer func() {
+		_ = a.Close()
+	}()
+	h.applyAgentExecutionPolicy(a, workspacePath, selectedConfig, profileStateToolPolicy(profileState))
+	h.applyAgentHooks(a, selectedConfig)
+	h.applyAgentRuntimeServices(a, selectedConfig)
+	usesSessionHistory := session != nil && (len(req.Messages) == 0 || (len(req.Messages) == 1 && strings.EqualFold(strings.TrimSpace(req.Messages[0]["role"]), "user")))
+	if usesSessionHistory {
+		h.maybeAutoCompactSessionHistory(ctx, session, a, agentProvider, agentModel, requestTraceID, req.TaskID)
+		chatMessages, lastMessage = h.buildChatMessages(req.Messages, session)
+		chatMessages = injectInstructionMessages(chatMessages, instructionMessages)
+	}
+	historyForAgent := trimLatestUserMessage(chatMessages)
+	streamingRequested := req.Stream || wantsEventStream(r)
+	effectivePlanningMode := h.resolvePlanningMode(req.PlanningMode, selectedConfig)
+	plannerPreferred := strings.EqualFold(strings.TrimSpace(effectivePlanningMode), string(agent.OrchestrationPlannerPreferred))
+	routeAttempted := req.EnableRoute || plannerPreferred || strings.EqualFold(strings.TrimSpace(effectivePlanningMode), string(agent.OrchestrationRoutePreferred))
+	var routeCandidates []*skill.RouteResult
+	if routeAttempted {
+		routeCandidates = routeCandidatesWithRuntime(ctx, lastMessage, runtimeRegistry, runtimeEmbedding)
+	}
+	if streamingRequested {
+		if req.EnableReAct && h.llmRuntime != nil {
+			execSession := session
+			if execSession == nil {
+				execSession = chat.NewSession(usageScope.UserID)
+			}
+			execSession = execSession.Clone()
+			contextMessages := buildAgentContextMessages(agentContext, workspaceCtx)
+			skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, h.skillsRuntimeConfigFor(profileState))
+			if skillErr != nil {
+				h.writeError(w, http.StatusBadRequest, skillErr)
+				return
+			}
+			contextMessages = append(contextMessages, skillMessages...)
+			execSession.ReplaceHistory(prependContextMessages(historyForAgent, contextMessages))
+			execSession.AddMessage(*types.NewUserMessage(lastMessage))
+
+			// Open the request SSE before entering the ReAct loop.  The loop's
+			// provider reporter observes every upstream text/reasoning/image
+			// chunk; forwarding those chunks here restores the incremental
+			// workspace experience instead of waiting for streamStaticResult.
+			//
+			// 建议 4（服务端 flush 背压）：provider 按 token 回调，逐帧 flush 会把
+			// 一条普通回复放大成数百次 socket 写，所以这里也用按 tick 合并的写出器
+			// （默认 50ms，见 pacedFlushWriter）。帧内容/顺序/seq 都不变，只改出站
+			// 时刻；收尾 Close 与在途回合释放的先后由下方 releaseActiveTurn 旁的
+			// 同一个 defer 固定（先 flush 再释放，见 2026-09-18 时序修正）。
+			h.prepareSSEHeaders(w)
+			chatFlusher, _ := w.(http.Flusher)
+			pacedChat := newPacedFlushWriter(w, chatFlusher, streamWriteBufferSize, streamFlushTickInterval)
+			emitter := h.newTrajectoryEmitter(pacedChat, session, turnID)
+			emitter.Emit("meta", map[string]interface{}{
+				"session_id": sessionID(session),
+				"agent_id":   a.GetConfig().Name,
+				"source":     "agent_react",
+				"kind":       "agent",
+				"model":      agentModel,
+				"status":     "streaming",
+				"turn_id":    turnID,
+				"orchestration": buildOrchestrationPayload(
+					"agent_react",
+					routeAttempted,
+					routeCandidates,
+					nil,
+					nil,
+					"",
+				),
+			})
+
+			var streamMu sync.Mutex
+			chunkIndex := 0
+			textChars := 0
+			streamSink := func(chunk llm.StreamChunk) {
+				if chunk.Content == "" && len(chunk.Metadata) == 0 {
+					return
+				}
+				streamMu.Lock()
+				defer streamMu.Unlock()
+
+				chunkIndex++
+				switch chunk.Type {
+				case llm.EventTypeText:
+					if chunk.Content == "" {
+						return
+					}
+					textChars += len(chunk.Content)
+					emitter.Emit("chunk", buildStreamChunkPayload(chunk, chunkIndex, textChars))
+				case llm.EventTypeReasoning:
+					if chunk.Content == "" {
+						return
+					}
+					emitter.Emit("reasoning", buildStreamChunkPayload(chunk, chunkIndex, textChars))
+				case llm.EventTypeImage:
+					if len(chunk.Metadata) == 0 {
+						return
+					}
+					emitter.Emit("chunk", buildStreamChunkPayload(chunk, chunkIndex, textChars))
+				}
+			}
+
+			// 实时工具桥：ReAct 循环在执行每个工具时会发 tool.requested /
+			// tool.completed 运行事件（loop.go:2248 / 2400），把同一条流实时翻译
+			// 成 chat SSE 帧，工具行就在工具真正开始/结束时出现——而不是等整个
+			// 回合结束后由证据尾巴一次性补齐（实测 21 帧挤在末尾 18ms 内）。
+			// emit 与 streamSink 共用 streamMu：总线派发在独立 goroutine 上执行，
+			// SSE 写入与事件持久化都不能并发。
+			liveTools := newLiveToolStreamTracker()
+			unsubscribeLiveToolBridge := subscribeLiveToolStream(
+				h.getRuntimeEventBus(),
+				sessionID(execSession),
+				liveTools,
+				func(eventName string, payload map[string]interface{}) {
+					streamMu.Lock()
+					defer streamMu.Unlock()
+					emitter.Emit(eventName, payload)
+				},
+			)
+			defer unsubscribeLiveToolBridge()
+
+			// 长 turn 中途落库：与 aicli chat actor 共用同一套节流窗口，让权威
+			// 会话在 turn 运行期间就持续前进（刷新/新标签页/其他观察者读
+			// /history 时不再只看到起始状态），且无论 turn 成功、失败还是客户端
+			// 断开，本轮已产生的对话都会落库。
+			historyCheckpointer := newAgentChatHistoryCheckpointer(h, r, session, execSession, contextMessages, turnID)
+
+			// P4-刷新续传：`resume_on_disconnect` 声明「客户端断开后回合继续」。
+			// 浏览器刷新会 abort 在途 POST → r.Context() 取消；若把请求上下文直接
+			// 交给 ReAct 循环，刷新就等于中止回合（这正是「刷新后整个 SSE live
+			// 断开」的根因）。detach 后 run 与请求解耦：SSE 写出失败不再影响执行
+			// （前端已断开），增量与历史照常落库，新页面在 /runtime/stream 上按
+			// 游标续传并据 active_turn 重新挂载在途回合。
+			// 建议 3（后端 cancel 契约）：两条路径都派生一个「本回合可控」的 ctx，
+			// 区别只在父 ctx —— detached 以 WithoutCancel 为父（客户端断开不取消），
+			// 非 detached 仍以请求 ctx 为父（断开即取消）。这样无论哪条路径，
+			// 注册表里都握着一个能真正中止本回合的 CancelFunc：stop 不再只是
+			// 「停本页接收」，而是服务端真停。
+			baseRunCtx := ctx
+			if req.ResumeOnDisconnect {
+				baseRunCtx = context.WithoutCancel(ctx)
+			}
+			runCtx, cancelRun := context.WithCancel(baseRunCtx)
+			defer cancelRun()
+			var cancelTimeoutRun context.CancelFunc
+			if req.ResumeOnDisconnect {
+				// 无取消信号的 run 必须有兜底时限：上游挂死时不能留下常驻 goroutine。
+				// 以配置的 Agent.Timeout 为准，未配置时退化为默认上限。
+				runTimeout := agentConfig.MaxRunDuration
+				if runTimeout <= 0 {
+					runTimeout = defaultDetachedAgentChatRunTimeout
+				}
+				runCtx, cancelTimeoutRun = context.WithTimeout(runCtx, runTimeout+detachedAgentChatRunGrace)
+				defer cancelTimeoutRun()
+			}
+			// turnInterrupted 是「本回合收到过接口显式取消」的进程内真相来源：
+			// error 帧据此回填 cancel_source（与 actor 路径同一字面量），
+			// 让 trajectory/前端把「用户停止」与「真失败」分开。
+			var turnInterrupted atomic.Bool
+			// 在途回合登记（进程内）：刷新后的新页面据此重新挂载回合身份，
+			// 打开增量渲染门控（renderLiveDeltas）继续把增量写进同一条消息。
+			// 同时登记取消句柄：interrupt 命令（建议 3）据此真正中止本回合。
+			releaseActiveTurn := h.getActiveTurnRegistry().beginCancelable(
+				sessionID(execSession),
+				turnID,
+				agentChatActiveTurnSource,
+				req.ResumeOnDisconnect,
+				func(string) bool {
+					turnInterrupted.Store(true)
+					cancelRun()
+					return true
+				},
+			)
+			// 2026-09-18 时序修正：defer 是 LIFO。此前 Close 在 1844 行先注册、
+			// releaseActiveTurn 在 1966 行后注册，于是 release 先执行——paced 缓冲里
+			// 的 orchestration/route/result/done 还没出站，`/runtime` 就已报
+			// `active_turn:null`（实测存在 ≤50ms 窗口）。刷新/新标签页在该窗口按快照
+			// 判定「回合已结束」，而流上终态帧还没到，前端只能靠终态兜底收敛。
+			// 把 Close 收进同一个 defer：先 flush 收尾帧，再释放在途登记。
+			defer func() {
+				_ = pacedChat.Close()
+				releaseActiveTurn()
+			}()
+
+			reactResult, reactErr := a.RunReActWithSession(runCtx, h.llmRuntime, lastMessage, execSession, &agent.LoopReActConfig{
+				MaxSteps:             agentConfig.MaxSteps,
+				MaxToolCalls:         agentConfig.MaxToolCalls,
+				MaxRunDuration:       agentConfig.MaxRunDuration,
+				MaxExplorationSteps:  agentConfig.MaxExplorationSteps,
+				MaxRepeatedToolCalls: agentConfig.MaxRepeatedToolCalls,
+				MaxRepeatedPollCalls: agentConfig.MaxRepeatedPollCalls,
+				EnableThought:        true,
+				EnableToolCalls:      true,
+				EnableParallelTools:  selectedConfig != nil && selectedConfig.Agent.EnableParallelTools,
+				MaxParallelToolCalls: func() int {
+					if selectedConfig != nil && selectedConfig.Agent.MaxParallelToolCalls > 0 {
+						return selectedConfig.Agent.MaxParallelToolCalls
+					}
+					return 1
+				}(),
+				ReasoningEffort:     types.ResolveReasoningEffort(req.ReasoningEffort),
+				Thinking:            types.ResolveThinkingConfig(req.Thinking),
+				Temperature:         0.7,
+				StreamSink:          streamSink,
+				OnHistoryCheckpoint: historyCheckpointer.OnCheckpoint,
+			})
+			if reactErr != nil {
+				// 失败/中断（含客户端断开导致的 ctx 取消）也要落库：否则本轮已产生
+				// 的 user/assistant/tool 行只存在于事件仓库，权威对话永久缺失。
+				if persistErr := historyCheckpointer.PersistFinal(); persistErr != nil {
+					logger.Warnf("agent chat: persist turn history after failure: %s", persistErr)
+				}
+				errorPayload := map[string]interface{}{
+					"index":   chunkIndex,
+					"message": reactErr.Error(),
+					"source":  "agent_react",
+					"turn_id": turnID,
+				}
+				// 显式取消（stop/interrupt 命令）不是「异常失败」：回填与 durable
+				// actor 路径同名的 cancel_source，让 trajectory 与前端能把
+				// 「用户主动停止」与「真错误」分开判定（actor 侧同一字面量见
+				// chat/actor.go 的 sessionRunCancelSource）。
+				if turnInterrupted.Load() {
+					errorPayload["cancel_source"] = activeTurnCancelSourceUserInterrupt
+				}
+				emitter.Emit("error", errorPayload)
+				return
+			}
+
+			if persistErr := historyCheckpointer.PersistFinal(); persistErr != nil {
+				logger.Warnf("agent chat: persist turn history: %s", persistErr)
+			}
+
+			resultPayload := buildAgentResultPayload("agent_react", reactResult)
+			attachExecutionRouteTransparency(resultPayload, chatRoute)
+			resultPayload["orchestration"] = buildOrchestrationPayload(
+				"agent_react",
+				routeAttempted,
+				routeCandidates,
+				reactResult,
+				nil,
+				"",
+			)
+			h.recordUsage(usageScope, "agent_chat", reactResult.Skill, reactResult.Success, estimatedPromptTokens, reactResult.Usage, reactResult.Output)
+
+			// Emit the post-run evidence tail without replaying a full-output
+			// chunk.  Replaying that chunk after the live deltas would append the
+			// answer a second time in the workspace.
+			emitter.Emit("orchestration", resultPayload["orchestration"])
+			if routePayload, ok := buildAgentRouteEventPayload(resultPayload); ok {
+				emitter.Emit("route", routePayload)
+			}
+			// 已实时下发过帧的工具不再重放三段式，只补一条权威 tool_end：
+			// 前端按 id upsert，因此既能就地补全 arguments/output（观测里的
+			// 完整值覆盖实时帧的预览值），又不会多出一行重复工具。
+			for _, toolEvent := range buildObservedToolEventPayloadsWithLive(resultPayload, liveTools) {
+				emitter.Emit(toolEvent.Event, toolEvent.Payload)
+			}
+			for _, observationPayload := range buildObservationEventPayloads(resultPayload) {
+				emitter.Emit("observation", observationPayload)
+			}
+			for _, subagentPayload := range buildSubagentEventPayloads(resultPayload) {
+				emitter.Emit("subagent", subagentPayload)
+			}
+			emitter.Emit("result", resultPayload)
+			emitter.Emit("done", map[string]interface{}{
+				"session_id": sessionID(session),
+				"agent_id":   a.GetConfig().Name,
+				"source":     responseResultSource(resultPayload),
+				"status":     finalResultStatus(resultPayload),
+				"content":    resultPayload["output"],
+				"result":     resultPayload,
+				"turn_id":    turnID,
+			})
+			return
+		}
+
+		if req.ExecutePlannedSubagents {
+			orchestrationMode := agent.OrchestrationAgentOnly
+			if strings.EqualFold(strings.TrimSpace(effectivePlanningMode), string(agent.OrchestrationPlannerPreferred)) {
+				orchestrationMode = agent.OrchestrationPlannerPreferred
+			} else if req.EnableRoute || strings.EqualFold(strings.TrimSpace(effectivePlanningMode), string(agent.OrchestrationRoutePreferred)) {
+				orchestrationMode = agent.OrchestrationRoutePreferred
+			} else if h.llmRuntime != nil {
+				orchestrationMode = agent.OrchestrationLLMOnly
+			}
+
+			orchResult, orchErr := a.Orchestrate(ctx, &agent.OrchestrationRequest{
+				Prompt:                     lastMessage,
+				History:                    historyForAgent,
+				Mode:                       orchestrationMode,
+				Provider:                   agentProvider,
+				Model:                      agentModel,
+				MaxTokens:                  4096,
+				Temperature:                0.7,
+				Context:                    agentContext,
+				Workspace:                  workspaceCtx,
+				ExecutePlannedSubagents:    req.ExecutePlannedSubagents,
+				AllowWritePlannedSubagents: req.AllowWritePlannedSubagents,
+				PatchDecisionPolicy:        req.PatchDecisionPolicy,
+				ApproveBlockedPatches:      req.ApproveBlockedPatches,
+				PatchApprovalNote:          req.PatchApprovalNote,
+				PatchApproval:              req.PatchApproval,
+			})
+			if orchErr != nil {
+				h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, orchErr, session, requestTraceID)
+				return
+			}
+
+			if orchResult.RouteAttempted && len(orchResult.RouteCandidates) > 0 {
+				routeCandidates = orchResult.RouteCandidates
+			}
+
+			publicSource := orchResult.Source
+			if publicSource == "llm_direct" {
+				publicSource = "llm_fallback"
+			}
+
+			var resultPayload map[string]interface{}
+			switch orchResult.Source {
+			case "agent_route", "agent_direct", "agent_planned_subagents":
+				resultPayload = buildAgentResultPayload(publicSource, orchResult.AgentResult)
+				resultPayload["orchestration"] = buildOrchestrationPayload(
+					publicSource,
+					orchResult.RouteAttempted,
+					routeCandidates,
+					orchResult.AgentResult,
+					nil,
+					orchResult.FallbackReason,
+				)
+				if orchResult.AgentResult != nil {
+					h.recordUsage(usageScope, "agent_chat", orchResult.AgentResult.Skill, orchResult.AgentResult.Success, estimatedPromptTokens, orchResult.AgentResult.Usage, orchResult.AgentResult.Output)
+				}
+			default:
+				resultPayload = buildLLMResultPayload(publicSource, orchResult.LLMResponse)
+				resultPayload["orchestration"] = buildOrchestrationPayload(
+					publicSource,
+					orchResult.RouteAttempted,
+					routeCandidates,
+					nil,
+					orchResult.LLMResponse,
+					orchResult.FallbackReason,
+				)
+				if orchResult.LLMResponse != nil {
+					h.recordUsage(usageScope, "agent_chat", "", true, estimatedPromptTokens, orchResult.LLMResponse.Usage, orchResult.LLMResponse.Content)
+				}
+			}
+			attachExecutionRouteTransparency(resultPayload, chatRoute)
+
+			if planningPayload := buildPlanningPayload(orchResult); planningPayload != nil {
+				resultPayload["planning"] = planningPayload
+				if orchestration, ok := resultPayload["orchestration"].(map[string]interface{}); ok {
+					orchestration["planning_attempted"] = orchResult.PlanningAttempted
+					orchestration["planning_source"] = orchResult.PlanningSource
+					orchestration["plan_step_count"] = planningPayload["step_count"]
+					orchestration["subagent_task_count"] = planningPayload["subagent_task_count"]
+					orchestration["subagent_execution_requested"] = planningPayload["subagent_execution_requested"]
+					orchestration["subagent_execution_eligible"] = planningPayload["subagent_execution_eligible"]
+					orchestration["subagent_execution_blocked_reason"] = planningPayload["subagent_execution_blocked_reason"]
+					orchestration["subagent_execution_attempted"] = planningPayload["subagent_execution_attempted"]
+					orchestration["patch_decision"] = planningPayload["patch_decision"]
+					orchestration["patch_decision_reason"] = planningPayload["patch_decision_reason"]
+					orchestration["patch_decision_required"] = planningPayload["patch_decision_required"]
+					if orchResult.PlanningError != "" {
+						orchestration["planning_error"] = orchResult.PlanningError
+					}
+				}
+			}
+
+			switch orchResult.Source {
+			case "agent_route", "agent_direct", "agent_planned_subagents":
+				if session != nil && orchResult.AgentResult != nil {
+					_ = h.persistChatTurn(
+						ctx,
+						session,
+						lastMessage,
+						orchResult.AgentResult.Output,
+						buildWorkspaceEvidenceMetadata(resultPayload),
+					)
+				}
+			default:
+				if session != nil && orchResult.LLMResponse != nil {
+					_ = h.persistChatTurn(
+						ctx,
+						session,
+						lastMessage,
+						orchResult.LLMResponse.Content,
+						buildWorkspaceEvidenceMetadata(resultPayload),
+					)
+				}
+			}
+
+			h.streamStaticResult(w, session, a.GetConfig().Name, resultPayload, turnID)
+			return
+		}
+
+		var planningPayload map[string]interface{}
+		if plannerPreferred {
+			plan, planningSource, planningError := a.PreviewPlan(ctx, &agent.OrchestrationRequest{
+				Prompt:                     lastMessage,
+				History:                    historyForAgent,
+				Mode:                       agent.OrchestrationPlannerPreferred,
+				Provider:                   agentProvider,
+				Model:                      agentModel,
+				MaxTokens:                  4096,
+				Temperature:                0.7,
+				Context:                    agentContext,
+				Workspace:                  workspaceCtx,
+				ExecutePlannedSubagents:    req.ExecutePlannedSubagents,
+				AllowWritePlannedSubagents: req.AllowWritePlannedSubagents,
+				PatchDecisionPolicy:        req.PatchDecisionPolicy,
+				ApproveBlockedPatches:      req.ApproveBlockedPatches,
+				PatchApprovalNote:          req.PatchApprovalNote,
+				PatchApproval:              req.PatchApproval,
+			}, routeCandidates)
+			planningPayload = buildPlanningPayload(&agent.OrchestrationResult{
+				Mode:              agent.OrchestrationPlannerPreferred,
+				Plan:              plan,
+				SubagentTasks:     agent.BuildSubagentTasksFromPlan(plan),
+				PlanningAttempted: true,
+				PlanningSource:    planningSource,
+				PlanningError:     planningError,
+			})
+		}
+
+		if req.EnableRoute || plannerPreferred || strings.EqualFold(strings.TrimSpace(effectivePlanningMode), string(agent.OrchestrationRoutePreferred)) {
+			result, routeErr := a.RunWithHistoryAndContext(ctx, lastMessage, historyForAgent, agentContext)
+			if routeErr != nil {
+				h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, routeErr, session, requestTraceID)
+				return
+			}
+			if shouldUseAgentResult(result, h.llmRuntime) {
+				h.recordUsage(usageScope, "agent_chat", result.Skill, result.Success, estimatedPromptTokens, result.Usage, result.Output)
+				payload := buildAgentResultPayload("agent_route", result)
+				attachExecutionRouteTransparency(payload, chatRoute)
+				payload["orchestration"] = buildOrchestrationPayload("agent_route", routeAttempted, routeCandidates, result, nil, "")
+				if planningPayload != nil {
+					payload["planning"] = planningPayload
+					if orchestration, ok := payload["orchestration"].(map[string]interface{}); ok {
+						orchestration["planning_attempted"] = planningPayload["attempted"]
+						orchestration["planning_source"] = planningPayload["planning_source"]
+						orchestration["plan_step_count"] = planningPayload["step_count"]
+						orchestration["subagent_task_count"] = planningPayload["subagent_task_count"]
+						orchestration["subagent_execution_requested"] = planningPayload["subagent_execution_requested"]
+						orchestration["subagent_execution_eligible"] = planningPayload["subagent_execution_eligible"]
+						orchestration["subagent_execution_blocked_reason"] = planningPayload["subagent_execution_blocked_reason"]
+						orchestration["subagent_execution_attempted"] = planningPayload["subagent_execution_attempted"]
+						orchestration["patch_decision"] = planningPayload["patch_decision"]
+						orchestration["patch_decision_reason"] = planningPayload["patch_decision_reason"]
+						orchestration["patch_decision_required"] = planningPayload["patch_decision_required"]
+						if planningError, ok := planningPayload["planning_error"].(string); ok && planningError != "" {
+							orchestration["planning_error"] = planningError
+						}
+					}
+				}
+				if session != nil {
+					_ = h.persistChatTurn(
+						ctx,
+						session,
+						lastMessage,
+						result.Output,
+						buildWorkspaceEvidenceMetadata(payload),
+					)
+				}
+				h.streamStaticResult(w, session, a.GetConfig().Name, payload, turnID)
+				return
+			}
+		}
+
+		if h.llmRuntime == nil {
+			h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+				"LLM runtime not configured for streaming"))
+			return
+		}
+
+		fallbackReason := "llm_runtime_required"
+		if routeAttempted {
+			fallbackReason = "no_matching_skill"
+		}
+		if err := h.streamLLMChat(ctx, w, session, a.GetConfig().Name, agentModel, lastMessage, chatMessages, effectiveReasoningEffort, types.ResolveThinkingConfig(req.Thinking), routeAttempted, routeCandidates, fallbackReason, usageScope, estimatedPromptTokens, requestTraceID, planningPayload, chatRoute); err != nil {
+			return
+		}
+		return
+	}
+
+	if req.EnableReAct && h.llmRuntime != nil {
+		contextMessages := buildAgentContextMessages(agentContext, workspaceCtx)
+		skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, h.skillsRuntimeConfigFor(profileState))
+		if skillErr != nil {
+			h.writeError(w, http.StatusBadRequest, skillErr)
+			return
+		}
+		contextMessages = append(contextMessages, skillMessages...)
+		// execSession 由 chatcore 在内部创建、失败时不返回，因此非流式入口用
+		// 提交点快照做中途落库与失败收尾，保证长 turn 不会整轮丢失。
+		historyCheckpointer := newAgentChatHistoryCheckpointer(h, r, session, nil, contextMessages, turnID)
+		execResult, reactErr := runtimechatcore.ExecuteNonStream(ctx, runtimechatcore.ExecuteRequest{
+			Agent:           a,
+			LLMRuntime:      h.llmRuntime,
+			Session:         session,
+			SessionUserID:   usageScope.UserID,
+			Prompt:          lastMessage,
+			PreparedHistory: prependContextMessages(historyForAgent, contextMessages),
+			EnableReAct:     true,
+			ReActConfig: &agent.LoopReActConfig{
+				MaxSteps:             agentConfig.MaxSteps,
+				MaxToolCalls:         agentConfig.MaxToolCalls,
+				MaxRunDuration:       agentConfig.MaxRunDuration,
+				MaxExplorationSteps:  agentConfig.MaxExplorationSteps,
+				MaxRepeatedToolCalls: agentConfig.MaxRepeatedToolCalls,
+				EnableThought:        true,
+				EnableToolCalls:      true,
+				EnableParallelTools:  selectedConfig != nil && selectedConfig.Agent.EnableParallelTools,
+				MaxParallelToolCalls: func() int {
+					if selectedConfig != nil && selectedConfig.Agent.MaxParallelToolCalls > 0 {
+						return selectedConfig.Agent.MaxParallelToolCalls
+					}
+					return 1
+				}(),
+				ReasoningEffort:     types.ResolveReasoningEffort(req.ReasoningEffort),
+				Thinking:            types.ResolveThinkingConfig(req.Thinking),
+				Temperature:         0.7,
+				OnHistoryCheckpoint: historyCheckpointer.OnCheckpoint,
+			},
+		})
+		if reactErr != nil {
+			// 失败（含客户端断开）也要落库：否则本轮已产生的 user/assistant/tool
+			// 行只存在于事件仓库，权威对话永久缺失。
+			if persistErr := historyCheckpointer.PersistFinal(); persistErr != nil {
+				logger.Warnf("agent chat: persist turn history after failure: %s", persistErr)
+			}
+			h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, reactErr, session, requestTraceID)
+			return
+		}
+		reactResult := execResult.ReactResult
+
+		if session != nil && execResult.UpdatedSession != nil {
+			// 与流式入口共用同一条写路径：剥离请求级上下文前缀、增量追加，并
+			// 使用不随客户端断开取消的写 ctx。
+			if persistErr := h.persistAgentChatTurnHistory(
+				r, session, execResult.UpdatedSession.GetMessages(), contextMessages, true,
+			); persistErr != nil {
+				logger.Warnf("agent chat: persist turn history: %s", persistErr)
+			}
+		}
+
+		responseResult := buildAgentResultPayload("agent_react", reactResult)
+		attachAgentChatTurnID(responseResult, turnID)
+		attachExecutionRouteTransparency(responseResult, chatRoute)
+		responseResult["orchestration"] = buildOrchestrationPayload(
+			"agent_react",
+			routeAttempted,
+			routeCandidates,
+			reactResult,
+			nil,
+			"",
+		)
+		h.recordUsage(usageScope, "agent_chat", reactResult.Skill, reactResult.Success, estimatedPromptTokens, reactResult.Usage, reactResult.Output)
+
+		response := map[string]interface{}{
+			"session_id": sessionID(session),
+			"agent_id":   a.GetConfig().Name,
+			"result":     responseResult,
+			"source":     responseResultSource(responseResult),
+			"status":     finalResultStatus(responseResult),
+			"turn_id":    turnID,
+		}
+		attachExecutionRouteTransparency(response, chatRoute)
+		h.writeJSON(w, http.StatusOK, response)
+		return
+	}
+
+	orchestrationMode := agent.OrchestrationAgentOnly
+	if strings.EqualFold(strings.TrimSpace(effectivePlanningMode), string(agent.OrchestrationPlannerPreferred)) {
+		orchestrationMode = agent.OrchestrationPlannerPreferred
+	} else if req.EnableRoute || strings.EqualFold(strings.TrimSpace(effectivePlanningMode), string(agent.OrchestrationRoutePreferred)) {
+		orchestrationMode = agent.OrchestrationRoutePreferred
+	} else if h.llmRuntime != nil {
+		orchestrationMode = agent.OrchestrationLLMOnly
+	}
+
+	execResult, orchErr := runtimechatcore.ExecuteNonStream(ctx, runtimechatcore.ExecuteRequest{
+		Agent:  a,
+		Prompt: lastMessage,
+		OrchestrationRequest: &agent.OrchestrationRequest{
+			Prompt:                     lastMessage,
+			History:                    historyForAgent,
+			Mode:                       orchestrationMode,
+			Provider:                   agentProvider,
+			Model:                      agentModel,
+			ReasoningEffort:            types.ResolveReasoningEffort(req.ReasoningEffort),
+			Thinking:                   types.ResolveThinkingConfig(req.Thinking),
+			MaxTokens:                  4096,
+			Temperature:                0.7,
+			Context:                    agentContext,
+			Workspace:                  workspaceCtx,
+			ExecutePlannedSubagents:    req.ExecutePlannedSubagents,
+			AllowWritePlannedSubagents: req.AllowWritePlannedSubagents,
+			PatchDecisionPolicy:        req.PatchDecisionPolicy,
+			ApproveBlockedPatches:      req.ApproveBlockedPatches,
+			PatchApprovalNote:          req.PatchApprovalNote,
+			PatchApproval:              req.PatchApproval,
+		},
+	})
+	if orchErr != nil {
+		h.writeAgentChatExecutionError(ctx, w, http.StatusInternalServerError, orchErr, session, requestTraceID)
+		return
+	}
+	orchResult := execResult.OrchestrationResult
+
+	if orchResult.RouteAttempted && len(orchResult.RouteCandidates) > 0 {
+		routeCandidates = orchResult.RouteCandidates
+	}
+
+	var responseResult interface{}
+	publicSource := orchResult.Source
+	if publicSource == "llm_direct" {
+		publicSource = "llm_fallback"
+	}
+	switch orchResult.Source {
+	case "agent_route", "agent_direct", "agent_planned_subagents":
+		responseResult = buildAgentResultPayload(publicSource, orchResult.AgentResult)
+		responseResult.(map[string]interface{})["orchestration"] = buildOrchestrationPayload(
+			publicSource,
+			orchResult.RouteAttempted,
+			routeCandidates,
+			orchResult.AgentResult,
+			nil,
+			orchResult.FallbackReason,
+		)
+		if orchResult.AgentResult != nil {
+			h.recordUsage(usageScope, "agent_chat", orchResult.AgentResult.Skill, orchResult.AgentResult.Success, estimatedPromptTokens, orchResult.AgentResult.Usage, orchResult.AgentResult.Output)
+		}
+	default:
+		responseResult = buildLLMResultPayload(publicSource, orchResult.LLMResponse)
+		responseResult.(map[string]interface{})["orchestration"] = buildOrchestrationPayload(
+			publicSource,
+			orchResult.RouteAttempted,
+			routeCandidates,
+			nil,
+			orchResult.LLMResponse,
+			orchResult.FallbackReason,
+		)
+		if orchResult.LLMResponse != nil {
+			h.recordUsage(usageScope, "agent_chat", "", true, estimatedPromptTokens, orchResult.LLMResponse.Usage, orchResult.LLMResponse.Content)
+		}
+	}
+	attachExecutionRouteTransparency(responseResult.(map[string]interface{}), chatRoute)
+	attachAgentChatTurnID(responseResult.(map[string]interface{}), turnID)
+	if planningPayload := buildPlanningPayload(orchResult); planningPayload != nil {
+		responseResult.(map[string]interface{})["planning"] = planningPayload
+		if orchestration, ok := responseResult.(map[string]interface{})["orchestration"].(map[string]interface{}); ok {
+			orchestration["planning_attempted"] = orchResult.PlanningAttempted
+			orchestration["planning_source"] = orchResult.PlanningSource
+			orchestration["plan_step_count"] = planningPayload["step_count"]
+			orchestration["subagent_task_count"] = planningPayload["subagent_task_count"]
+			orchestration["subagent_execution_requested"] = planningPayload["subagent_execution_requested"]
+			orchestration["subagent_execution_eligible"] = planningPayload["subagent_execution_eligible"]
+			orchestration["subagent_execution_blocked_reason"] = planningPayload["subagent_execution_blocked_reason"]
+			orchestration["subagent_execution_attempted"] = planningPayload["subagent_execution_attempted"]
+			orchestration["patch_decision"] = planningPayload["patch_decision"]
+			orchestration["patch_decision_reason"] = planningPayload["patch_decision_reason"]
+			orchestration["patch_decision_required"] = planningPayload["patch_decision_required"]
+			if orchResult.PlanningError != "" {
+				orchestration["planning_error"] = orchResult.PlanningError
+			}
+		}
+	}
+	switch orchResult.Source {
+	case "agent_route", "agent_direct", "agent_planned_subagents":
+		if session != nil && orchResult.AgentResult != nil {
+			_ = h.persistChatTurn(
+				ctx,
+				session,
+				lastMessage,
+				orchResult.AgentResult.Output,
+				buildWorkspaceEvidenceMetadata(responseResult.(map[string]interface{})),
+			)
+		}
+	default:
+		if session != nil && orchResult.LLMResponse != nil {
+			_ = h.persistChatTurn(
+				ctx,
+				session,
+				lastMessage,
+				orchResult.LLMResponse.Content,
+				buildWorkspaceEvidenceMetadata(responseResult.(map[string]interface{})),
+			)
+		}
+	}
+
+	response := map[string]interface{}{
+		"session_id": sessionID(session),
+		"agent_id":   a.GetConfig().Name,
+		"result":     responseResult,
+		"source":     responseResultSource(responseResult),
+		"status":     finalResultStatus(responseResult),
+		"turn_id":    turnID,
+	}
+	attachExecutionRouteTransparency(response, chatRoute)
+	responseTraceID := requestTraceID
+	if resultMap, ok := responseResult.(map[string]interface{}); ok {
+		if traceValue, ok := resultMap["trace_id"].(string); ok && strings.TrimSpace(traceValue) != "" {
+			responseTraceID = strings.TrimSpace(traceValue)
+		}
+	}
+	if responseTraceID != "" {
+		response["trace_id"] = responseTraceID
+	}
+
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// CreateSession 创建会话
+func (h *Handler) CreateSession(w http.ResponseWriter, r *http.Request) {
+	if h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager not configured"))
+		return
+	}
+
+	var req struct {
+		UserID        string `json:"user_id,omitempty"`
+		Title         string `json:"title,omitempty"`
+		WorkspacePath string `json:"workspace_path,omitempty"` // 目录绑定：直接给路径
+		DirectoryID   string `json:"directory_id,omitempty"`   // 目录绑定：注册表 id（优先于路径）
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+
+	if req.UserID == "" {
+		req.UserID = r.URL.Query().Get("user_id")
+	}
+	req.UserID = h.resolveServerSessionUserID(req.UserID)
+
+	// 创建会话同样会写共享的 session_history.sqlite：并发 aicli 进程持锁时，
+	// 必须带截止时间快速失败（503），而不是跑满 10+ 次重试让前端
+	// AbortSignal.timeout 中止 → 显示 "signal timed out"。
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	session, err := h.sessionManager.CreateSession(ctx, req.UserID)
+	if err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	// 目录绑定（§4.3.1）：directory_id 优先，否则校验并规范化 workspace_path。
+	// 绑定写入 metadata.context.workspace_path，一经绑定不随单轮请求漂移。
+	boundPath, boundDirectoryID, bindErr := h.resolveSessionDirectoryBinding(req.WorkspacePath, req.DirectoryID)
+	if bindErr != nil {
+		h.writeWorkspaceDirectoryError(w, bindErr)
+		return
+	}
+	needsUpdate := false
+	if req.Title != "" {
+		session.UpdateTitle(req.Title)
+		needsUpdate = true
+	}
+	if boundPath != "" {
+		session.SetContext(sessionmeta.WorkspacePath, boundPath)
+		needsUpdate = true // 绑定后必须落库，否则 GET /sessions 看不到 workspace_path
+	}
+	if needsUpdate {
+		if err := h.sessionManager.Update(ctx, session); err != nil {
+			writeSessionStoreError(w, err)
+			return
+		}
+	}
+	if boundDirectoryID != "" {
+		// last_used_at 尽力而为刷新：失败不影响会话创建结果。
+		if err := h.workspaceDirectoryRegistry().Touch(boundDirectoryID); err != nil {
+			logger.Warnf("workspace directory touch failed: %s", err)
+		}
+	}
+
+	h.writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"session": session,
+	})
+}
+
+// resolveSessionDirectoryBinding resolves the workspace path a new session
+// binds to (§4.3.1). directory_id wins over workspace_path; raw paths are
+// validated (absolute + existing directory) and normalized. Returns the
+// normalized path plus the matched registry id (empty when unbound or when
+// the path is not registered).
+func (h *Handler) resolveSessionDirectoryBinding(workspacePath, directoryID string) (string, string, error) {
+	registry := h.workspaceDirectoryRegistry()
+	directoryID = strings.TrimSpace(directoryID)
+	if directoryID != "" {
+		record, ok := registry.Get(directoryID)
+		if !ok {
+			return "", "", fmt.Errorf("%w: unknown directory id %s",
+				workspaceregistry.ErrNotFound, directoryID)
+		}
+		return record.Path, record.ID, nil
+	}
+	workspacePath = strings.TrimSpace(workspacePath)
+	if workspacePath == "" {
+		return "", "", nil
+	}
+	normalized, err := workspaceregistry.NormalizePath(workspacePath)
+	if err != nil {
+		return "", "", err
+	}
+	if record, ok := registry.FindByPath(normalized); ok {
+		return normalized, record.ID, nil
+	}
+	return normalized, "", nil
+}
+
+// agentChatEffectiveWorkspacePath resolves the workspace path for an agent
+// chat turn (§4.3.2): an explicit request value wins; otherwise the path
+// bound at session creation is used. Sessions without a bound path keep the
+// legacy behavior (empty path → server cwd).
+func agentChatEffectiveWorkspacePath(session *chat.Session, requested string) string {
+	requested = strings.TrimSpace(requested)
+	if requested != "" {
+		return requested
+	}
+	if session != nil {
+		if v, ok := session.Metadata.Context[sessionmeta.WorkspacePath].(string); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// sessionNeedsWorkspacePathMaterialization reports whether the resolved
+// workspace path should be written back onto the session context once
+// (legacy GetOrCreate flow: context empty + explicit request path). A bound
+// path is never overwritten — directory binding does not drift per turn.
+func sessionNeedsWorkspacePathMaterialization(session *chat.Session, workspacePath string) bool {
+	if session == nil || workspacePath == "" {
+		return false
+	}
+	current, _ := session.Metadata.Context[sessionmeta.WorkspacePath].(string)
+	return current == ""
+}
+
+// sessionListContextKeys 是会话"列表/检索"响应中保留的 metadata.context 白名单。
+//
+// metadata.context 同时承担两类职责：会话内部账目（冻结的系统提示词、环境快照、
+// 工具句柄别名、compact/backtrack 审计链）和前端分组/展示所需的小字段。前者单条
+// 会话可达数 KB——实测 245 条会话的 system_prompt_frozen + environment_* 等键共
+// 1.4 MB，占 GET /sessions 响应体的 79%——而列表 UI 只消费下列键：
+//   - 工作目录绑定：侧栏按目录分组（frontend/src/components/workspace/workspace-sidebar-shared.ts）
+//   - 分支谱系：分支行归属（frontend/src/lib/workspace/session-lineage.ts）
+//   - reasoning_effort：输入框档位回显（frontend/src/lib/thread-state/sessions.ts）
+//
+// 单会话详情（GET /sessions/{id}）与运行时接口不做裁剪，需要完整上下文的调用方
+// 应直接使用 sessionManager 返回的对象。
+var sessionListContextKeys = []string{
+	sessionmeta.WorkspacePath,
+	"workspacePath",
+	"cwd",
+	"workdir",
+	"working_dir",
+	sessionmeta.ProfileRoot,
+	"profileRoot",
+	sessionmeta.LegacyAICLIProfileRoot,
+	sessionmeta.ReasoningEffort,
+	"fork_parent_session_id",
+	"fork_source_message_id",
+	"fork_origin_title",
+}
+
+// projectSessionsForList 返回会话列表响应用的浅拷贝：只把 metadata.context 缩减为
+// filterAddressableSessions 丢弃无法按原字符串读回的会话记录（历史脏数据：
+// ID 带路径分隔符如 "/root/p26s3b"，或为 "<nil>"）。读取路径会先做
+// NormalizeSessionID，这类 ID 命中另一个键，因此记录只能出现在列表里、点开必然
+// 404。只在展示层过滤，不删除数据，列表之外的行为不受影响。
+func filterAddressableSessions(sessions []*chat.Session) []*chat.Session {
+	if len(sessions) == 0 {
+		return sessions
+	}
+	filtered := make([]*chat.Session, 0, len(sessions))
+	for _, session := range sessions {
+		if session == nil || !chat.IsAddressableSessionID(session.ID) {
+			continue
+		}
+		filtered = append(filtered, session)
+	}
+	return filtered
+}
+
+// projectSessionsForList 返回会话列表响应用的浅拷贝：只把 metadata.context 缩减为
+// sessionListContextKeys。sessionManager 返回的对象可能与正在运行的会话共享
+// （context map 由 live run 持续写入），因此这里必须复制而不是原地删除键。
+// 未持有任何白名单键的会话保持原对象返回，避免无谓分配。
+func projectSessionsForList(sessions []*chat.Session) []*chat.Session {
+	if sessions == nil {
+		return nil
+	}
+	projected := make([]*chat.Session, 0, len(sessions))
+	for _, session := range sessions {
+		if session == nil || len(session.Metadata.Context) == 0 {
+			projected = append(projected, session)
+			continue
+		}
+		trimmed := make(map[string]interface{}, len(sessionListContextKeys))
+		for _, key := range sessionListContextKeys {
+			if value, ok := session.Metadata.Context[key]; ok {
+				trimmed[key] = value
+			}
+		}
+		clone := *session
+		clone.Metadata.Context = trimmed
+		projected = append(projected, &clone)
+	}
+	return projected
+}
+
+// ListSessions 列出会话
+func (h *Handler) ListSessions(w http.ResponseWriter, r *http.Request) {
+	if h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager not configured"))
+		return
+	}
+
+	// 用户 id 不是分组展示的关键因素；按工作目录分组展示所有会话，
+	// 使前端能按工作目录（workspace_path）分组展示用户的所有会话。
+	// 会话存储可能被并发运行的 aicli CLI 进程共享（同一 session_history.sqlite），
+	// 查询必须带上截止时间：共享数据库被写锁占用时，5s 内快速返回 503，
+	// 而不是让 HTTP 请求无限挂起（前端表现为 “Connecting to runtime…” 卡死）。
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	sessions, err := h.sessionManager.SearchSessions(ctx, &chat.SessionSearchOptions{})
+	if err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+	sessions = filterAddressableSessions(sessions)
+
+	resolvedUserID := h.resolveServerSessionUserID(r.URL.Query().Get("user_id"))
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"sessions": projectSessionsForList(sessions),
+		"count":    len(sessions),
+		"user_id":  resolvedUserID,
+	})
+}
+
+// GetSession 获取会话详情
+func (h *Handler) GetSession(w http.ResponseWriter, r *http.Request) {
+	if h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager not configured"))
+		return
+	}
+
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	session, err := h.sessionManager.GetSession(ctx, chat.NormalizeSessionID(mux.Vars(r)["id"]))
+	if err != nil {
+		if stderrors.Is(err, chat.ErrSessionNotFound) {
+			h.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session": session,
+	})
+}
+
+// DeleteSession 删除会话
+func (h *Handler) DeleteSession(w http.ResponseWriter, r *http.Request) {
+	if h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager not configured"))
+		return
+	}
+
+	// 删除会话同样写共享的 session_history.sqlite：并发 aicli 进程持锁时，
+	// 必须带截止时间快速失败（503），而不是让前端 AbortSignal.timeout 中止
+	// 显示 "signal timed out"。会话不存在仍保留 404 语义。
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	if err := h.sessionManager.Delete(ctx, sessionID); err != nil {
+		if stderrors.Is(err, chat.ErrSessionNotFound) {
+			h.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"deleted": true,
+		"id":      sessionID,
+	})
+}
+
+// GetSessionHistory 获取会话历史
+func (h *Handler) GetSessionHistory(w http.ResponseWriter, r *http.Request) {
+	if h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager not configured"))
+		return
+	}
+
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
+	limit := 100
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsed, parseErr := strconv.Atoi(rawLimit)
+		if parseErr != nil || parsed <= 0 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "history limit must be a positive integer"))
+			return
+		}
+		limit = min(parsed, 1000)
+	}
+	beforeSeq := 0
+	if rawBefore := strings.TrimSpace(r.URL.Query().Get("before_seq")); rawBefore != "" {
+		parsed, parseErr := strconv.Atoi(rawBefore)
+		if parseErr != nil || parsed <= 0 {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "before_seq must be a positive integer"))
+			return
+		}
+		beforeSeq = parsed
+	}
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	page, err := h.sessionManager.GetHistoryPage(ctx, sessionID, beforeSeq, limit)
+	if err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+	history := page.Messages
+	if history == nil {
+		history = []types.Message{}
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id":      sessionID,
+		"history":         history,
+		"count":           len(history),
+		"total":           page.Total,
+		"has_more":        page.HasMore,
+		"limit":           limit,
+		"first_seq":       page.FirstSeq,
+		"last_seq":        page.LastSeq,
+		"next_before_seq": page.NextBeforeSeq,
+	})
+}
+
+// GetSessionStats 获取会话统计
+func (h *Handler) GetSessionStats(w http.ResponseWriter, r *http.Request) {
+	if h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager not configured"))
+		return
+	}
+
+	userID := h.resolveServerSessionUserID(r.URL.Query().Get("user_id"))
+
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	stats, err := h.sessionManager.GetStatistics(ctx, userID)
+	if err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"user_id": userID,
+		"stats":   stats,
+	})
+}
+
+// SearchSessions 搜索会话
+func (h *Handler) SearchSessions(w http.ResponseWriter, r *http.Request) {
+	if h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager not configured"))
+		return
+	}
+
+	var req struct {
+		UserID string   `json:"user_id,omitempty"`
+		Tags   []string `json:"tags,omitempty"`
+		State  string   `json:"state,omitempty"`
+		Limit  int      `json:"limit,omitempty"`
+		Offset int      `json:"offset,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+
+	if req.UserID == "" {
+		req.UserID = r.URL.Query().Get("user_id")
+	}
+	if req.State == "" {
+		req.State = r.URL.Query().Get("state")
+	}
+	if req.Limit == 0 {
+		if limit, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil {
+			req.Limit = limit
+		}
+	}
+	if req.Offset == 0 {
+		if offset, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil {
+			req.Offset = offset
+		}
+	}
+
+	searchOpts := &chat.SessionSearchOptions{
+		UserID: req.UserID,
+		Tags:   append([]string(nil), req.Tags...),
+		Limit:  req.Limit,
+		Offset: req.Offset,
+	}
+	if req.State != "" {
+		searchOpts.State = chat.SessionState(req.State)
+	}
+
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	sessions, err := h.sessionManager.SearchSessions(ctx, searchOpts)
+	if err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"sessions": projectSessionsForList(sessions),
+		"count":    len(sessions),
+		"filters":  searchOpts,
+	})
+}
+
+// UpdateSession 更新会话元数据与状态
+func (h *Handler) UpdateSession(w http.ResponseWriter, r *http.Request) {
+	if h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager not configured"))
+		return
+	}
+
+	var req struct {
+		Title      *string                `json:"title,omitempty"`
+		State      *string                `json:"state,omitempty"`
+		TagsAdd    []string               `json:"tags_add,omitempty"`
+		TagsRemove []string               `json:"tags_remove,omitempty"`
+		Context    map[string]interface{} `json:"context,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	session, err := h.sessionManager.GetSession(ctx, sessionID)
+	if err != nil {
+		if stderrors.Is(err, chat.ErrSessionNotFound) {
+			h.writeError(w, http.StatusNotFound, err)
+			return
+		}
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	if req.Title != nil {
+		session.UpdateTitle(*req.Title)
+	}
+	for _, tag := range req.TagsAdd {
+		session.AddTag(tag)
+	}
+	for _, tag := range req.TagsRemove {
+		session.RemoveTag(tag)
+	}
+	for key, value := range req.Context {
+		// §4.5/N4（U-11）：路由覆盖必须走专用端点 PATCH /sessions/{id}/routing。
+		// 裸 SetContext 会绕过 §3.5 校验与 actor 失效，产生「配置已改但路由没变」
+		// 的幽灵态，因此首版直接拒绝并提示专用端点。
+		if key == agentconfig.SessionRoutingOverrideContextKey || key == sessionmeta.LegacyAICLIRoutingOverride {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+				"context key "+key+" must be written via PATCH /api/runtime/sessions/{id}/routing"))
+			return
+		}
+		session.SetContext(key, value)
+	}
+	if req.State != nil {
+		switch chat.SessionState(*req.State) {
+		case chat.StateActive, chat.StateIdle, chat.StateClosed, chat.StateArchived:
+			session.UpdateState(chat.SessionState(*req.State))
+		default:
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+				"invalid session state"))
+			return
+		}
+	}
+
+	if err := h.sessionManager.Update(ctx, session); err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session": session,
+	})
+}
+
+// ArchiveSession 归档会话
+func (h *Handler) ArchiveSession(w http.ResponseWriter, r *http.Request) {
+	h.changeSessionState(w, r, func(ctx context.Context, sessionID string) error {
+		return h.sessionManager.ArchiveSession(ctx, sessionID)
+	}, "archived")
+}
+
+// ActivateSession 激活会话
+func (h *Handler) ActivateSession(w http.ResponseWriter, r *http.Request) {
+	h.changeSessionState(w, r, func(ctx context.Context, sessionID string) error {
+		return h.sessionManager.Activate(ctx, sessionID)
+	}, "active")
+}
+
+// CloseSession 关闭会话
+func (h *Handler) CloseSession(w http.ResponseWriter, r *http.Request) {
+	h.changeSessionState(w, r, func(ctx context.Context, sessionID string) error {
+		return h.sessionManager.Close(ctx, sessionID)
+	}, "closed")
+}
+
+// ClearSessionHistory 清空会话历史
+func (h *Handler) ClearSessionHistory(w http.ResponseWriter, r *http.Request) {
+	if h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager not configured"))
+		return
+	}
+
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	if err := h.sessionManager.ClearHistory(ctx, sessionID); err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id": sessionID,
+		"cleared":    true,
+	})
+}
+
+// BatchDeleteSessions 批量删除会话
+func (h *Handler) BatchDeleteSessions(w http.ResponseWriter, r *http.Request) {
+	h.batchSessionAction(w, r, func(ctx context.Context, sessionID string) error {
+		return h.sessionManager.Delete(ctx, sessionID)
+	}, "deleted")
+}
+
+// BatchArchiveSessions 批量归档会话
+func (h *Handler) BatchArchiveSessions(w http.ResponseWriter, r *http.Request) {
+	h.batchSessionAction(w, r, func(ctx context.Context, sessionID string) error {
+		return h.sessionManager.ArchiveSession(ctx, sessionID)
+	}, "archived")
+}
+
+func (h *Handler) changeSessionState(w http.ResponseWriter, r *http.Request, action func(context.Context, string) error, state string) {
+	if h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager not configured"))
+		return
+	}
+
+	sessionID := chat.NormalizeSessionID(mux.Vars(r)["id"])
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	if err := action(ctx, sessionID); err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	session, err := h.sessionManager.GetSession(ctx, sessionID)
+	if err != nil {
+		writeSessionStoreError(w, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session": session,
+		"state":   state,
+	})
+}
+
+func (h *Handler) batchSessionAction(w http.ResponseWriter, r *http.Request, action func(context.Context, string) error, actionName string) {
+	if h.sessionManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"session manager not configured"))
+		return
+	}
+
+	var req struct {
+		SessionIDs []string `json:"session_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+	if len(req.SessionIDs) == 0 {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"session_ids is required"))
+		return
+	}
+
+	ctx, cancel := sessionStoreQueryContext(r)
+	defer cancel()
+	processed := make([]string, 0, len(req.SessionIDs))
+	failures := make(map[string]string)
+	for _, sessionID := range req.SessionIDs {
+		if err := action(ctx, sessionID); err != nil {
+			failures[sessionID] = err.Error()
+			continue
+		}
+		processed = append(processed, sessionID)
+	}
+
+	statusCode := http.StatusOK
+	if len(failures) > 0 && len(processed) == 0 {
+		statusCode = http.StatusNotFound
+	} else if len(failures) > 0 {
+		statusCode = http.StatusMultiStatus
+	}
+
+	h.writeJSON(w, statusCode, map[string]interface{}{
+		"action":    actionName,
+		"processed": processed,
+		"count":     len(processed),
+		"failures":  failures,
+	})
+}
+
+// StartHotReload 启动热加载
+func (h *Handler) StartHotReload(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSkillMutation(r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadStart, "forbidden", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforceMutationActionPolicy(skillMutationActionHotReloadStart, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadStart, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	hotReload, err := h.ensureHotReload()
+	if err != nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadStart, "failed", logger.Err(err))
+		h.writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+
+	var req struct {
+		Dir        string   `json:"dir,omitempty"`
+		Dirs       []string `json:"dirs,omitempty"`
+		DebounceMS int      `json:"debounce_ms,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.auditSkillMutation(r, skillMutationActionHotReloadStart, "invalid_request")
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+
+	skillDirs := h.resolveRequestedSkillDirs(req.Dir, req.Dirs, r)
+	if len(skillDirs) == 0 {
+		h.auditSkillMutation(r, skillMutationActionHotReloadStart, "invalid_request")
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"skill directory is required"))
+		return
+	}
+
+	if req.DebounceMS > 0 {
+		hotReload.SetDebounceTime(time.Duration(req.DebounceMS) * time.Millisecond)
+	}
+
+	if err := hotReload.StartMany(skillDirs); err != nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadStart, "failed", logger.Err(err))
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := hotReload.Reload(); err != nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadStart, "failed", logger.Err(err))
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.rebuildEmbeddingIndex()
+	h.publishSkillsChangedEvent(r, map[string]interface{}{
+		"action":         skillMutationActionHotReloadStart,
+		"status":         "success",
+		"affected_count": len(skillDirs),
+		"count":          h.currentSkillCount(),
+		"watching":       true,
+		"skill_dirs":     append([]string{}, skillDirs...),
+	})
+	h.auditSkillMutation(r, skillMutationActionHotReloadStart, "success", logger.Int("dir_count", len(skillDirs)))
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"started": true,
+		"dir":     skillDirs[0],
+		"dirs":    skillDirs,
+		"stats":   hotReload.GetStats(),
+	})
+}
+
+// StopHotReload 停止热加载
+func (h *Handler) StopHotReload(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSkillMutation(r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadStop, "forbidden", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforceMutationActionPolicy(skillMutationActionHotReloadStop, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadStop, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	if h.hotReload == nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadStop, "failed", logger.String("reason", "not_configured"))
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"hot reload not configured"))
+		return
+	}
+
+	if err := h.hotReload.Stop(); err != nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadStop, "failed", logger.Err(err))
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.publishSkillsChangedEvent(r, map[string]interface{}{
+		"action":         skillMutationActionHotReloadStop,
+		"status":         "success",
+		"affected_count": 0,
+		"count":          h.currentSkillCount(),
+		"watching":       false,
+		"skill_dirs":     append([]string{}, handlerSkillDirs(h.skillLoader)...),
+	})
+	h.auditSkillMutation(r, skillMutationActionHotReloadStop, "success")
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"stopped": true,
+		"stats":   h.hotReload.GetStats(),
+	})
+}
+
+// ReloadHotReload 手动触发热重载
+func (h *Handler) ReloadHotReload(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSkillMutation(r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadRun, "forbidden", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforceMutationActionPolicy(skillMutationActionHotReloadRun, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadRun, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	if h.hotReload == nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadRun, "failed", logger.String("reason", "not_configured"))
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"hot reload not configured"))
+		return
+	}
+
+	if err := h.hotReload.Reload(); err != nil {
+		h.auditSkillMutation(r, skillMutationActionHotReloadRun, "failed", logger.Err(err))
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	h.rebuildEmbeddingIndex()
+	if skills := h.skillRegistry.List(); len(skills) > 0 {
+		skillChange := skillChangePayloadFromSkill(skills[0], handlerSkillDirs(h.skillLoader))
+		skillChange["action"] = skillMutationActionHotReloadRun
+		skillChange["status"] = "success"
+		skillChange["affected_count"] = h.currentSkillCount()
+		skillChange["count"] = h.currentSkillCount()
+		h.publishSkillsChangedEvent(r, skillChange)
+	} else {
+		h.publishSkillsChangedEvent(r, map[string]interface{}{
+			"action":         skillMutationActionHotReloadRun,
+			"status":         "success",
+			"affected_count": h.currentSkillCount(),
+			"count":          h.currentSkillCount(),
+			"skill_dirs":     append([]string(nil), handlerSkillDirs(h.skillLoader)...),
+		})
+	}
+	h.auditSkillMutation(r, skillMutationActionHotReloadRun, "success")
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"reloaded": true,
+		"stats":    h.hotReload.GetStats(),
+	})
+}
+
+// GetHotReloadStats 获取热加载状态
+func (h *Handler) GetHotReloadStats(w http.ResponseWriter, r *http.Request) {
+	if h.hotReload == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"hot reload not configured"))
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"stats": h.hotReload.GetStats(),
+	})
+}
+
+// updateEmbeddingIndex 更新 Embedding 索引（如果有）
+func (h *Handler) updateEmbeddingIndex(skillItem *skill.Skill) {
+	if h.embeddingRouter == nil || skillItem == nil {
+		return
+	}
+	_ = h.embeddingRouter.IncrementalIndex(skillItem)
+}
+
+func (h *Handler) removeEmbeddingIndex(skillItem *skill.Skill) {
+	if h.embeddingRouter == nil || skillItem == nil {
+		return
+	}
+	_ = h.embeddingRouter.RemoveIndex(skillItem)
+}
+
+func (h *Handler) rebuildEmbeddingIndex() {
+	if h.embeddingRouter == nil {
+		return
+	}
+	_ = h.embeddingRouter.RebuildIndex()
+}
+
+type executeSkillRequest struct {
+	Prompt          string                 `json:"prompt,omitempty"`
+	Params          map[string]interface{} `json:"params,omitempty"`
+	Context         map[string]interface{} `json:"context,omitempty"`
+	History         []map[string]string    `json:"history,omitempty"`
+	Options         map[string]interface{} `json:"options,omitempty"`
+	ReasoningEffort string                 `json:"reasoning_effort,omitempty"`
+	Thinking        *types.ThinkingConfig  `json:"thinking,omitempty"`
+	SessionID       string                 `json:"session_id,omitempty"`
+	UserID          string                 `json:"user_id,omitempty"`
+	TenantID        string                 `json:"tenant_id,omitempty"`
+	ProjectID       string                 `json:"project_id,omitempty"`
+}
+
+func (h *Handler) decodeExecuteSkillRequest(r *http.Request) (*executeSkillRequest, error) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(body) == 0 {
+		return &executeSkillRequest{
+			Params:  map[string]interface{}{},
+			Context: map[string]interface{}{},
+			Options: map[string]interface{}{},
+		}, nil
+	}
+
+	req := &executeSkillRequest{}
+	if err := json.Unmarshal(body, req); err == nil {
+		if req.Params == nil {
+			req.Params = map[string]interface{}{}
+		}
+		if req.Context == nil {
+			req.Context = map[string]interface{}{}
+		}
+		if req.Options == nil {
+			req.Options = map[string]interface{}{}
+		}
+		if req.Prompt != "" || req.SessionID != "" || req.UserID != "" || len(req.Params) > 0 || len(req.Context) > 0 || len(req.History) > 0 || len(req.Options) > 0 {
+			return req, nil
+		}
+	}
+
+	legacyParams := map[string]interface{}{}
+	if err := json.Unmarshal(body, &legacyParams); err != nil {
+		return nil, err
+	}
+
+	prompt, _ := legacyParams["prompt"].(string)
+	return &executeSkillRequest{
+		Prompt:  prompt,
+		Params:  legacyParams,
+		Context: map[string]interface{}{},
+		Options: map[string]interface{}{},
+	}, nil
+}
+
+func (h *Handler) getOrCreateSession(ctx context.Context, userID, requestedSessionID string) (*chat.Session, error) {
+	if h.sessionManager == nil {
+		return nil, nil
+	}
+	userID = h.resolveServerSessionUserID(userID)
+	return h.sessionManager.GetOrCreate(ctx, userID, requestedSessionID)
+}
+
+func (h *Handler) resolveServerSessionUserID(userID string) string {
+	var config *runtimecfg.RuntimeConfig
+	if h != nil {
+		config = h.runtimeConfig
+	}
+	return sessionruntime.ResolveSessionUserID(sessionruntime.IdentitySource{
+		ExplicitUserID: userID,
+		Config:         config,
+		ServerFallback: true,
+	})
+}
+
+// sessionLeaseSameProcessWaitBudget bounds how long a request waits for a
+// lease held by another channel of the *same* runtime-server process (e.g. a
+// web agent-chat turn waiting behind a hub actor turn on the same session).
+// Same-process contention means the holder is still executing inside this
+// process, so waiting is safe and queues the turn instead of failing 409.
+// The budget must cover a full turn; the holder also yields on stall/stop.
+const sessionLeaseSameProcessWaitBudget = 5 * time.Minute
+
+// sessionLeaseSameProcessPollInterval is the poll interval while waiting for
+// a same-process lease holder to release.
+const sessionLeaseSameProcessPollInterval = 250 * time.Millisecond
+
+func (h *Handler) acquireSessionLease(ctx context.Context, sessionID, ownerKind, ownerScope string) (*chat.SessionLeaseHandle, error) {
+	return h.acquireSessionLeaseMode(ctx, sessionID, ownerKind, ownerScope, true)
+}
+
+// acquireSessionLeaseNoWait acquires the session lease without queueing
+// behind same-process holders. Use it only where blocking is unsafe, e.g.
+// inside the session hub factory (hub.GetOrCreate holds the hub lock while
+// building an actor; a long wait there would stall every session).
+func (h *Handler) acquireSessionLeaseNoWait(ctx context.Context, sessionID, ownerKind, ownerScope string) (*chat.SessionLeaseHandle, error) {
+	return h.acquireSessionLeaseMode(ctx, sessionID, ownerKind, ownerScope, false)
+}
+
+func (h *Handler) acquireSessionLeaseMode(ctx context.Context, sessionID, ownerKind, ownerScope string, waitSameProcess bool) (*chat.SessionLeaseHandle, error) {
+	sessionID = chat.NormalizeSessionID(sessionID)
+	if h == nil || sessionID == "" {
+		return nil, nil
+	}
+	store := h.getSessionRuntimeStore()
+	leaseStore, ok := store.(chat.SessionLeaseStore)
+	if !ok || leaseStore == nil {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ownerKind = strings.TrimSpace(ownerKind)
+	if ownerKind == "" {
+		ownerKind = sessionruntime.DefaultSessionRuntimeOwner()
+	}
+	req := chat.LeaseRequest{
+		SessionID: sessionID,
+		OwnerID:   sessionLeaseOwnerID(ownerKind, ownerScope),
+		OwnerKind: ownerKind,
+		PID:       os.Getpid(),
+		Hostname:  currentHostname(),
+	}
+	for {
+		handle, err := chat.AcquireSessionLease(ctx, leaseStore, req)
+		if err == nil {
+			return handle, nil
+		}
+		var conflict *chat.LeaseConflictError
+		if !stderrors.As(err, &conflict) || conflict.Lease == nil {
+			return nil, err
+		}
+		if !waitSameProcess || !sameProcessLease(conflict.Lease) {
+			// Cross-process ownership, or waiting disabled: keep the conflict
+			// semantics; the holder is an independent runtime (e.g. aicli) we
+			// cannot queue behind.
+			return nil, err
+		}
+		// Same-process holder (web agent chat vs hub actor, or two web turns):
+		// the holder lives inside this runtime-server, so wait for it to
+		// release instead of failing immediately. This makes concurrent turns
+		// on one session queue instead of producing 409 self-conflicts.
+		if !waitForSameProcessLeaseRelease(ctx, leaseStore, sessionID, conflict.Lease,
+			sessionLeaseSameProcessWaitBudget, sessionLeaseSameProcessPollInterval) {
+			return nil, err
+		}
+		// Lease released (or superseded by another owner): retry acquisition.
+	}
+}
+
+// sameProcessLease reports whether lease belongs to this runtime-server process.
+func sameProcessLease(lease *chat.SessionLease) bool {
+	return lease != nil && lease.PID == os.Getpid() && lease.Hostname == currentHostname()
+}
+
+// waitForSameProcessLeaseRelease polls until the given holder no longer owns
+// the session lease (released, expired, or superseded). Returns false when ctx
+// is done or the budget expires without the holder yielding.
+func waitForSameProcessLeaseRelease(ctx context.Context, store chat.SessionLeaseStore, sessionID string, holder *chat.SessionLease, budget, interval time.Duration) bool {
+	if store == nil || holder == nil {
+		return false
+	}
+	deadline := time.Now().Add(budget)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		lease, err := store.GetLease(ctx, sessionID)
+		if err == nil && (lease == nil || lease.OwnerID != holder.OwnerID) {
+			return true
+		}
+		if lease != nil && !lease.ExpiresAt.IsZero() && time.Now().After(lease.ExpiresAt) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				return false
+			}
+		}
+	}
+}
+
+func (h *Handler) writeSessionLeaseConflict(w http.ResponseWriter, err error) bool {
+	var conflict *chat.LeaseConflictError
+	if !stderrors.As(err, &conflict) {
+		return false
+	}
+	runtimeErr := errors.New(errors.ErrSessionLeaseConflict, sessionLeaseConflictMessage(conflict))
+	if conflict != nil && conflict.Lease != nil {
+		runtimeErr = runtimeErr.
+			WithContext("lease", conflict.Lease).
+			WithContext("retryable", true).
+			WithContext("suggested_action", sessionLeaseConflictSuggestedAction(conflict.Lease))
+	}
+	h.writeError(w, http.StatusConflict, runtimeErr)
+	return true
+}
+
+func sessionLeaseConflictMessage(conflict *chat.LeaseConflictError) string {
+	if conflict == nil || conflict.Lease == nil {
+		return "session runtime lease conflict"
+	}
+	lease := conflict.Lease
+	owner := strings.TrimSpace(lease.OwnerKind)
+	if owner == "" {
+		owner = strings.TrimSpace(lease.OwnerID)
+	}
+	if owner == "" {
+		owner = "another runtime"
+	}
+	label := sessionLeaseOwnerLabel(lease.OwnerKind)
+	if label != "" && label != owner {
+		owner = fmt.Sprintf("%s (%s)", label, owner)
+	}
+	location := ""
+	if lease.PID > 0 {
+		location = fmt.Sprintf(" (pid %d", lease.PID)
+		if hostname := strings.TrimSpace(lease.Hostname); hostname != "" {
+			location += " on " + hostname
+		}
+		location += ")"
+	} else if hostname := strings.TrimSpace(lease.Hostname); hostname != "" {
+		location = " (on " + hostname + ")"
+	}
+	message := fmt.Sprintf("session runtime lease conflict: session is currently owned by %s%s", owner, location)
+	if !lease.ExpiresAt.IsZero() {
+		if remaining := time.Until(lease.ExpiresAt); remaining > 0 {
+			message += fmt.Sprintf("; lease expires in ~%s (at %s)", remaining.Round(time.Second), lease.ExpiresAt.Format(time.RFC3339))
+		} else {
+			message += fmt.Sprintf("; lease marked expired at %s", lease.ExpiresAt.Format(time.RFC3339))
+		}
+	}
+	return message
+}
+
+// sessionLeaseOwnerLabel 把 ownerKind 映射为占用通道的人读标签（CLI / web / runtime）。
+func sessionLeaseOwnerLabel(ownerKind string) string {
+	switch strings.ToLower(strings.TrimSpace(ownerKind)) {
+	case "aicli-actor":
+		return "CLI (aicli)"
+	case "runtime-server-actor":
+		return "runtime session actor (command API)"
+	case "runtime-server-agent-chat":
+		return "web (agent chat)"
+	default:
+		return strings.TrimSpace(ownerKind)
+	}
+}
+
+func sessionLeaseConflictSuggestedAction(lease *chat.SessionLease) string {
+	if lease == nil {
+		return "wait for the current session owner to release the lease, then retry"
+	}
+	switch strings.ToLower(strings.TrimSpace(lease.OwnerKind)) {
+	case "aicli-actor":
+		return "continue in the owning aicli process, exit it before retrying here, or launch aicli with --runtime-server auto"
+	case sessionActorLeaseOwnerKind:
+		return "submit the turn through the session runtime command API so the existing runtime-server actor can serialize it"
+	default:
+		return "wait for the current session owner to release the lease, then retry"
+	}
+}
+
+func sessionLeaseOwnerID(ownerKind, scope string) string {
+	parts := []string{sanitizeLeaseOwnerPart(ownerKind)}
+	if hostname := currentHostname(); hostname != "" {
+		parts = append(parts, sanitizeLeaseOwnerPart(hostname))
+	}
+	parts = append(parts, strconv.Itoa(os.Getpid()))
+	if scope = strings.TrimSpace(scope); scope != "" {
+		parts = append(parts, sanitizeLeaseOwnerPart(scope))
+	}
+	return strings.Join(parts, ":")
+}
+
+func currentHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(hostname)
+}
+
+func sanitizeLeaseOwnerPart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	value = strings.ReplaceAll(value, ":", "_")
+	value = strings.ReplaceAll(value, " ", "_")
+	return value
+}
+
+func (h *Handler) persistChatTurn(ctx context.Context, session *chat.Session, userPrompt, assistantReply string, assistantMetadata types.Metadata) error {
+	if h.sessionManager == nil || session == nil {
+		return nil
+	}
+	if userPrompt != "" {
+		if err := h.sessionManager.AddMessage(ctx, session.ID, *types.NewUserMessage(userPrompt)); err != nil {
+			return err
+		}
+	}
+	if assistantReply != "" {
+		assistantMessage := types.NewAssistantMessage(assistantReply)
+		if len(assistantMetadata) > 0 {
+			assistantMessage.Metadata = assistantMetadata.Clone()
+		}
+		if err := h.sessionManager.AddMessage(ctx, session.ID, *assistantMessage); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Handler) normalizeMessages(messages []map[string]string) []types.Message {
+	result := make([]types.Message, 0, len(messages))
+	for _, message := range messages {
+		role := message["role"]
+		content := message["content"]
+		if role == "" && content == "" {
+			continue
+		}
+		result = append(result, types.Message{
+			Role:     role,
+			Content:  content,
+			Metadata: types.NewMetadata(),
+		})
+	}
+	return result
+}
+
+func (h *Handler) mergeContext(contextMap, params map[string]interface{}) map[string]interface{} {
+	merged := make(map[string]interface{}, len(contextMap)+len(params))
+	for key, value := range params {
+		merged[key] = value
+	}
+	for key, value := range contextMap {
+		merged[key] = value
+	}
+	return merged
+}
+
+func (h *Handler) buildChatMessages(rawMessages []map[string]string, session *chat.Session) ([]types.Message, string) {
+	requestMessages := h.normalizeMessages(rawMessages)
+	messages := requestMessages
+	if session != nil && len(requestMessages) == 1 && requestMessages[0].Role == "user" {
+		messages = append(messages[:0:0], session.GetMessages()...)
+		messages = append(messages, requestMessages[0])
+	} else if session != nil && len(requestMessages) == 0 {
+		messages = append(messages, session.GetMessages()...)
+	}
+
+	lastUserMessage := ""
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			lastUserMessage = messages[i].Content
+			break
+		}
+	}
+	return messages, lastUserMessage
+}
+
+func (h *Handler) ensureSessionSystemPrompt(ctx context.Context, session *chat.Session, prompt string) bool {
+	if session == nil {
+		return false
+	}
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return false
+	}
+	history := session.GetMessages()
+	if len(history) == 0 {
+		session.ReplaceHistory([]types.Message{*types.NewSystemMessage(prompt)})
+		return true
+	}
+	if history[0].Role == "system" {
+		if strings.TrimSpace(history[0].Content) == prompt {
+			return false
+		}
+		history[0].Content = prompt
+		session.ReplaceHistory(history)
+		return true
+	}
+	newHistory := append([]types.Message{*types.NewSystemMessage(prompt)}, history...)
+	session.ReplaceHistory(newHistory)
+	return true
+}
+
+func (h *Handler) applyProfileSessionContext(session *chat.Session, state *profileRuntimeState) bool {
+	if session == nil || state == nil || state.Resolved == nil {
+		return false
+	}
+	changed := false
+	setValue := func(key, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if existing := sessionmeta.String(session.Metadata.Context, key); existing == value {
+			return
+		}
+		if session.Metadata.Context == nil {
+			session.Metadata.Context = make(map[string]interface{})
+		}
+		switch key {
+		case apiProfileContextReference:
+			sessionmeta.Set(session.Metadata.Context, sessionmeta.ProfileRef, value, apiProfileContextReference)
+		case apiProfileContextName:
+			sessionmeta.Set(session.Metadata.Context, sessionmeta.ProfileName, value)
+		case apiProfileContextAgent:
+			sessionmeta.Set(session.Metadata.Context, sessionmeta.ProfileAgent, value)
+		case apiProfileContextRoot:
+			sessionmeta.Set(session.Metadata.Context, sessionmeta.ProfileRoot, value)
+		default:
+			session.SetContext(key, value)
+		}
+		changed = true
+	}
+
+	setValue(apiProfileContextReference, state.Reference)
+	setValue(apiProfileContextName, state.Resolved.ProfileName)
+	setValue(apiProfileContextAgent, state.Resolved.AgentID)
+	setValue(apiProfileContextRoot, state.Resolved.ProfileRoot)
+	return changed
+}
+
+func (h *Handler) maybeAutoCompactSessionHistory(ctx context.Context, session *chat.Session, apiAgent *agent.Agent, provider, model, traceID, taskID string) {
+	if h == nil || session == nil || apiAgent == nil || h.llmRuntime == nil {
+		return
+	}
+
+	manager := apiAgent.GetContextManager()
+	keepRecent := 0
+	if manager != nil {
+		keepRecent = manager.Budget.KeepRecentMessages
+	}
+
+	runtime := compactruntime.New(h.llmRuntime, manager)
+	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
+		SessionID:          session.ID,
+		TaskID:             firstNonEmptyString(taskID, session.ID),
+		Provider:           provider,
+		Model:              model,
+		History:            session.GetMessages(),
+		KeepRecentMessages: keepRecent,
+		Phase:              compactruntime.PhasePreTurn,
+		CountTokens:        h.llmRuntime.CountMessagesTokens,
+	})
+
+	payload := map[string]interface{}{
+		"session_id":          session.ID,
+		"phase":               compactruntime.PhasePreTurn,
+		"mode":                status.Mode,
+		"reason":              status.Reason,
+		"token_before":        status.TokenBefore,
+		"trigger_token_limit": status.TriggerTokenLimit,
+		"max_context_tokens":  status.MaxContextTokens,
+		"provider":            status.ResolvedProvider,
+		"model":               status.ResolvedModel,
+	}
+	if status.TriggerTokenLimit > 0 && status.TokenBefore > status.TriggerTokenLimit {
+		h.publishSessionRuntimeEvent(chat.EventSessionCompactStarted, traceID, session.ID, cloneAnyMap(payload))
+	}
+
+	if err != nil {
+		payload["error"] = err.Error()
+		h.publishSessionRuntimeEvent(chat.EventSessionCompactFailed, traceID, session.ID, payload)
+		return
+	}
+	if result == nil {
+		h.publishSessionRuntimeEvent(chat.EventSessionCompactSkipped, traceID, session.ID, payload)
+		return
+	}
+
+	originalHistory := session.GetMessages()
+	session.ReplaceHistory(result.ReplacementHistory)
+	if h.sessionManager != nil {
+		if updateErr := h.sessionManager.Update(ctx, session); updateErr != nil {
+			session.ReplaceHistory(originalHistory)
+			payload["error"] = updateErr.Error()
+			h.publishSessionRuntimeEvent(chat.EventSessionCompactFailed, traceID, session.ID, payload)
+			return
+		}
+	}
+
+	payload["token_after"] = result.TokenAfter
+	payload["compacted_messages"] = result.CompactedMessages
+	payload["message_count_after"] = len(result.ReplacementHistory)
+	if len(result.CheckpointIDs) > 0 {
+		payload["checkpoint_ids"] = append([]string(nil), result.CheckpointIDs...)
+		payload["checkpoint_id"] = result.CheckpointIDs[len(result.CheckpointIDs)-1]
+	}
+	h.publishSessionRuntimeEvent(chat.EventSessionCompactCompleted, traceID, session.ID, payload)
+}
+
+func injectSystemPrompt(messages []types.Message, prompt string) []types.Message {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return messages
+	}
+	if len(messages) == 0 {
+		return []types.Message{*types.NewSystemMessage(prompt)}
+	}
+	if messages[0].Role == "system" {
+		if strings.TrimSpace(messages[0].Content) == prompt {
+			return messages
+		}
+		cloned := append([]types.Message(nil), messages...)
+		cloned[0].Content = prompt
+		return cloned
+	}
+	return append([]types.Message{*types.NewSystemMessage(prompt)}, messages...)
+}
+
+func resolveAgentProvider(profileState *profileRuntimeState, config *runtimecfg.RuntimeConfig, runtime *llm.LLMRuntime) string {
+	if profileState != nil && profileState.Resolved != nil {
+		if provider := strings.TrimSpace(profileState.Resolved.Provider); provider != "" {
+			return provider
+		}
+	}
+	if config != nil {
+		if provider := strings.TrimSpace(config.Agent.DefaultProvider); provider != "" {
+			return provider
+		}
+	}
+	if runtime != nil {
+		if provider := strings.TrimSpace(runtime.DefaultProvider()); provider != "" {
+			return provider
+		}
+	}
+	return ""
+}
+
+func resolveAgentModel(profileState *profileRuntimeState, config *runtimecfg.RuntimeConfig, runtime *llm.LLMRuntime) string {
+	if profileState != nil && profileState.Resolved != nil {
+		if model := strings.TrimSpace(profileState.Resolved.Model); model != "" {
+			return model
+		}
+	}
+	if config != nil {
+		if model := strings.TrimSpace(config.Agent.DefaultModel); model != "" {
+			return model
+		}
+	}
+	return defaultAgentModel(runtime)
+}
+
+func profileStateToolPolicy(state *profileRuntimeState) *runtimepolicy.ToolExecutionPolicy {
+	if state == nil {
+		return nil
+	}
+	return state.ToolPolicy
+}
+
+func mergeProfileContextInto(target map[string]interface{}, values map[string]interface{}) {
+	if target == nil || len(values) == 0 {
+		return
+	}
+	for key, value := range values {
+		target[key] = cloneProfileContextValue(value)
+	}
+}
+
+func buildProfileContextPack(state *profileRuntimeState) map[string]interface{} {
+	if state == nil {
+		return nil
+	}
+	pack := map[string]interface{}{}
+	if reference := strings.TrimSpace(state.Reference); reference != "" {
+		pack["reference"] = reference
+	}
+	if state.Resolved != nil {
+		if name := strings.TrimSpace(state.Resolved.ProfileName); name != "" {
+			pack["name"] = name
+		}
+		if agentID := strings.TrimSpace(state.Resolved.AgentID); agentID != "" {
+			pack["agent"] = agentID
+		}
+		if root := strings.TrimSpace(state.Resolved.ProfileRoot); root != "" {
+			pack["root"] = root
+		}
+	}
+	if state.ContextValues != nil {
+		if memoryPath, ok := state.ContextValues["profile_memory_path"].(string); ok && strings.TrimSpace(memoryPath) != "" {
+			pack["memory_path"] = strings.TrimSpace(memoryPath)
+		}
+		if notesPath, ok := state.ContextValues["profile_notes_path"].(string); ok && strings.TrimSpace(notesPath) != "" {
+			pack["notes_path"] = strings.TrimSpace(notesPath)
+		}
+		if resources, ok := state.ContextValues["profile_resources"].(map[string]interface{}); ok && len(resources) > 0 {
+			pack["resources"] = cloneProfileContextValues(resources)
+		}
+	}
+	if len(pack) == 0 {
+		return nil
+	}
+	return pack
+}
+
+func (h *Handler) newAPIAgent(cfg *agent.Config) *agent.Agent {
+	return h.newAPIAgentWithRuntime(cfg, nil)
+}
+
+// subagentGlobalLimiter returns the ONE process-wide subagent concurrency
+// limiter shared by every scheduler this handler builds (P1-4/H12). Precedence
+// mirrors the CLI host: agents.maxThreads > 0 sizes the shared limiter so total
+// concurrent children across all batches ≤ maxThreads, while agents.maxConcurrent
+// keeps bounding a single batch; maxThreads ≤ 0 (including -1 "explicitly
+// unlimited") yields nil, leaving only the per-batch ceiling. The limiter is
+// created on first use and kept for the process lifetime so a config change
+// cannot strand waiters on a retired limiter or double the budget.
+func (h *Handler) subagentGlobalLimiter(maxThreads int) *agent.SubagentConcurrencyLimiter {
+	if maxThreads <= 0 {
+		return nil
+	}
+	if h == nil {
+		return agent.NewSubagentConcurrencyLimiter(maxThreads)
+	}
+	h.subagentLimiterMu.Lock()
+	defer h.subagentLimiterMu.Unlock()
+	if h.subagentLimiter == nil {
+		h.subagentLimiter = agent.NewSubagentConcurrencyLimiter(maxThreads)
+	}
+	return h.subagentLimiter
+}
+
+// subagentCapacityView 返回 A6 resume 门控需要的进程级子代理准入瞬时视图。
+// 与 CLI 宿主同口径：只读缓存字段，不创建 limiter、不解析配置（未配置
+// agents.maxThreads 时视图 Limit=0 ⇒ 门控放行，保持旧行为）。
+func (h *Handler) subagentCapacityView() supervision.SubagentCapacityView {
+	if h == nil {
+		return supervision.SubagentCapacityView{}
+	}
+	h.subagentLimiterMu.Lock()
+	limiter := h.subagentLimiter
+	h.subagentLimiterMu.Unlock()
+	if limiter == nil {
+		return supervision.SubagentCapacityView{}
+	}
+	return supervision.SubagentCapacityView{
+		Limit:    limiter.Limit(),
+		InFlight: limiter.InFlight(),
+	}
+}
+
+type agentRuntimeComponents struct {
+	registry        *skill.Registry
+	embeddingRouter *skill.SemanticEmbeddingRouter
+	mcpManager      skill.MCPManager
+	llmRuntime      *llm.LLMRuntime
+}
+
+func (h *Handler) newAPIAgentWithRuntime(cfg *agent.Config, runtime *agentRuntimeComponents) *agent.Agent {
+	registry := h.skillRegistry
+	embeddingRouter := h.embeddingRouter
+	mcpManager := h.mcpManager
+	llmRuntime := h.llmRuntime
+
+	if runtime != nil {
+		if runtime.registry != nil {
+			registry = runtime.registry
+		}
+		if runtime.embeddingRouter != nil {
+			embeddingRouter = runtime.embeddingRouter
+		}
+		if runtime.mcpManager != nil {
+			mcpManager = runtime.mcpManager
+		}
+		if runtime.llmRuntime != nil {
+			llmRuntime = runtime.llmRuntime
+		}
+	}
+
+	var apiAgent *agent.Agent
+	if llmRuntime != nil {
+		apiAgent = agent.NewAgentWithLLM(cfg, mcpManager, llmRuntime)
+	} else {
+		apiAgent = agent.NewAgent(cfg, mcpManager)
+	}
+	// P1-4/H12：并发上限透传 + 进程级共享 limiter（过去只透传 Routing，每个
+	// batch 各自拿到默认 4 路窗口 → 实际并发 4×N）。agents.maxThreads > 0 时
+	// 全部 scheduler 共用同一 limiter；agents.maxConcurrent 仍是每批上限；
+	// 背压队列默认关闭（0），保持 P2-8 的快速失败语义。
+	agentsConfig := (&sessionAgentController{handler: h}).agentsConfig()
+	subagentScheduler := agent.NewSubagentScheduler(apiAgent, agent.SubagentSchedulerConfig{
+		Routing:       h.subagentRoutingConfig(),
+		MaxConcurrent: agentsConfig.MaxConcurrent,
+		GlobalLimiter: h.subagentGlobalLimiter(agentsConfig.MaxThreads),
+		MaxQueueDepth: agentsConfig.MaxConcurrentQueueDepth,
+		QueueTimeout:  time.Duration(agentsConfig.MaxConcurrentQueueTimeoutMs) * time.Millisecond,
+	})
+	apiAgent.SetSubagentScheduler(subagentScheduler)
+	// Batch 终态投影：只有 durable 控制面就绪时才装（与 supervision 工具门控同
+	// 口径，无 store 的宿主保持现状）。没有这一钩子，API 宿主的后台 batch 终态
+	// 不会进入 store/digest/wake——父会话在 runtime-server 上永远等不到"batch
+	// 结束"的汇报点（CLI 早有线，见 supervision_batch_projector.go）。
+	if h.getSupervisionStore() != nil {
+		apiAgent.SetBatchLifecycleProjector(h.apiBatchLifecycleProjector())
+	}
+	// P0-B/P2-D：把宿主级共享 batch store 注入每个 API agent。没有这一步，
+	// agent 会惰性创建只属于自己的内存 store，父会话的 progress 投影永远读不到
+	// "batch 进行到哪了"。顺序必须在 SetBatchLifecycleProjector 之后：
+	// SetSubagentBatchCoordinator 从 agent 上取 projector 快照。
+	if coordinator := h.subagentBatchCoordinator(subagentScheduler); coordinator != nil {
+		// terminal sink 必须显式装上：agent 只会从自身回填 emitter/projector，
+		// 没有 sink 时 batch 终态不会写进父会话 mailbox（父会话只能靠 supervision
+		// wake 知道"有事发生"，拿不到那条 durable 汇报消息）。
+		coordinator.SetTerminalSink(h.apiSubagentBatchTerminalSink())
+		apiAgent.SetSubagentBatchCoordinator(coordinator)
+	}
+
+	if registry != nil {
+		for _, summary := range registry.ListSummaries() {
+			if summary == nil {
+				continue
+			}
+			_ = apiAgent.RegisterSkill(summary.ToSkillStub())
+		}
+	}
+	if embeddingRouter != nil {
+		if agentEmbeddingRouter, err := embeddingRouter.CloneForRegistry(apiAgent.GetSkillRouter().Registry()); err == nil {
+			apiAgent.GetSkillRouter().SetEmbeddingRouter(agentEmbeddingRouter)
+		}
+	}
+	apiAgent.SetEventBus(h.getRuntimeEventBus())
+	if h.teamStore != nil {
+		if ctxMgr := apiAgent.GetContextManager(); ctxMgr != nil {
+			ctxMgr.TeamContext = team.NewContextBuilder(h.teamStore)
+		}
+	}
+	if runtime == nil {
+		if gateway := h.getRuntimeToolCatalogGateway(); gateway != nil {
+			gateway.Refresh()
+			apiAgent.SetToolCatalog(gateway.Catalog())
+		}
+	}
+
+	return apiAgent
+}
+
+func (h *Handler) getRuntimeEventBus() *runtimeevents.Bus {
+	if h.runtimeEventBus == nil {
+		h.runtimeEventBus = runtimeevents.NewBusWithRetention(2048)
+	}
+	h.attachRuntimeEventBridge()
+	return h.runtimeEventBus
+}
+
+func (h *Handler) attachRuntimeEventBridge() {
+	if h == nil {
+		return
+	}
+	h.runtimeEventBridgeOnce.Do(func() {
+		bus := h.runtimeEventBus
+		if bus == nil {
+			return
+		}
+		// P1.5：批量开关关闭时 buffer 为 nil，下面的回调保持原逐条同步路径。
+		buffer := h.newRuntimeEventPersistBuffer()
+		bus.Subscribe("", func(event runtimeevents.Event) {
+			if !shouldPersistRuntimeSessionEvent(event) {
+				// P0-2：A 通道的未命中原先完全无声——事件既不落盘（无实时/无回放），
+				// 也不出现在任何日志或指标里。按 runtimeobserve 的已知类型目录记入
+				// runtime_event_delivery（已知但被裁掉 vs 完全未知可区分）。
+				recordRuntimeEventDeliveryDrop(event.Type, event.SessionID)
+				return
+			}
+			mapped := mapRuntimeEventToSession(event)
+			if buffer != nil {
+				// P1.5：只入队（非阻塞）；落盘/重试/flush 由 buffer worker 负责，
+				// 失败经 persist.failed 与限频告警可见（P0.5 的可见性要求不回退）。
+				buffer.Enqueue(mapped)
+				return
+			}
+			store := h.getSessionEventStore()
+			if store == nil {
+				return
+			}
+			if _, err := store.AppendEvent(context.Background(), mapped); err != nil {
+				// P0.5：落盘失败必须可见（历史行为是静默丢弃）。
+				recordRuntimeEventPersistError(mapped.Type, mapped.SessionID, err)
+			}
+		})
+	})
+}
+
+// runtimeEventPersistSettings 读取运行时配置中的批量落盘设置（默认关闭）。
+func (h *Handler) runtimeEventPersistSettings() chat.EventPersistSettings {
+	if h == nil || h.runtimeConfig == nil {
+		return chat.EventPersistSettings{}
+	}
+	cfg := h.runtimeConfig.SessionRuntime.EventPersist
+	return chat.EventPersistSettings{
+		Enabled:         cfg.BatchingEnabled,
+		BatchSize:       cfg.BatchSize,
+		FlushInterval:   cfg.FlushInterval,
+		QueueLimit:      cfg.QueueLimit,
+		QueueBytesLimit: cfg.QueueBytesLimit,
+		ShutdownTimeout: cfg.ShutdownTimeout,
+		FailMode:        cfg.FailMode,
+		AsyncDispatch:   cfg.AsyncDispatch,
+		// D3：关键事件（approval / session 终态 / 工具完成 / checkpoint）立即 flush。
+		CriticalTypes: runtimeevents.IsPersistCriticalEventType,
+	}
+}
+
+// newRuntimeEventPersistBuffer 在批量开关开启且 store 支持批量时创建缓冲。
+// store 不支持（如内存 store）时记录告警并保持同步路径，不静默丢事件。
+func (h *Handler) newRuntimeEventPersistBuffer() *chat.EventPersistBuffer {
+	settings := h.runtimeEventPersistSettings()
+	if !settings.Enabled {
+		if settings.AsyncDispatch {
+			logger.Warnf("runtime event persist async dispatch requires batching; ignoring (P2.11 前置条件未满足)")
+		}
+		return nil
+	}
+	batchStore, ok := h.getSessionEventStore().(chat.EventPersistBatchStore)
+	if !ok {
+		logger.Warnf("runtime event persist batching enabled but session event store does not support AppendEvents; keeping synchronous path")
+		return nil
+	}
+	buffer := chat.NewEventPersistBuffer(batchStore, settings.BufferConfig())
+	h.runtimeEventPersistMu.Lock()
+	h.runtimeEventPersistBuffer = buffer
+	h.runtimeEventPersistMu.Unlock()
+	return buffer
+}
+
+// CloseRuntimeEventPersistence 在服务器 shutdown 时 flush 并关闭批量缓冲，
+// 必须在关闭 session runtime store 之前调用（P1.5/G4：关闭时有界 flush、不静默丢）。
+func (h *Handler) CloseRuntimeEventPersistence() {
+	if h == nil {
+		return
+	}
+	h.runtimeEventPersistMu.Lock()
+	buffer := h.runtimeEventPersistBuffer
+	h.runtimeEventPersistBuffer = nil
+	h.runtimeEventPersistMu.Unlock()
+	if buffer == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), h.runtimeEventPersistSettings().ShutdownTimeoutOrDefault())
+	defer cancel()
+	if err := buffer.Close(ctx); err != nil {
+		logger.Warnf("runtime event persist buffer close: %v", err)
+	}
+}
+
+// runtimeEventPersistSnapshot 返回批量落盘缓冲的只读统计快照；
+// 未启用批量（或已关闭）时 ok=false，健康端点据此省略 persist 段。
+func (h *Handler) runtimeEventPersistSnapshot() (chat.EventPersistBufferStats, bool) {
+	if h == nil {
+		return chat.EventPersistBufferStats{}, false
+	}
+	h.runtimeEventPersistMu.Lock()
+	buffer := h.runtimeEventPersistBuffer
+	h.runtimeEventPersistMu.Unlock()
+	if buffer == nil {
+		return chat.EventPersistBufferStats{}, false
+	}
+	return buffer.Stats(), true
+}
+
+// runtimeStorePoolSnapshot 返回 runtime store 双池统计（P1.7 G6）；
+// 存储未装配或实现不支持 PoolStats 时 ok=false，健康端点省略 store_pools 段。
+func (h *Handler) runtimeStorePoolSnapshot() (chat.RuntimeStorePoolStats, bool) {
+	if h == nil {
+		return chat.RuntimeStorePoolStats{}, false
+	}
+	statter, ok := h.getSessionEventStore().(interface {
+		PoolStats() chat.RuntimeStorePoolStats
+	})
+	if !ok {
+		return chat.RuntimeStorePoolStats{}, false
+	}
+	return statter.PoolStats(), true
+}
+
+// isPersistedRuntimeEventType 是 A 通道（总线 → 会话事件库）的落盘判定。
+//
+// 清单已收敛到 internal/events 的声明式注册表（Batch 2 事件契约单一真源）：
+// 这里只做委托，不再保留第二份手写白名单——原先「落盘判定」与「交付通道分类」
+// 各持一份清单，漂移时的症状只是前端没反应。新增/调整类型请改
+// internal/events/contract.go 的注册表，契约漂移由 contract_test.go 门禁拦截。
+func isPersistedRuntimeEventType(eventType string) bool {
+	return runtimeevents.IsPersistedEventType(eventType)
+}
+
+func shouldPersistRuntimeSessionEvent(event runtimeevents.Event) bool {
+	if strings.TrimSpace(event.SessionID) == "" {
+		return false
+	}
+	// 生产者已自行落盘的事件（如 agent-controller 的 subagent.completed 摘要行，
+	// 见 session_runtime_support.go 的 store.AppendEvent + payload["seq"] 回填）
+	// 不再经 A 通道重复 append：契约里 subagent.completed 带 session_store 位，
+	// 但该类型的「父库摘要行」所有权在生产者，桥只负责其余路径。
+	// 判定收敛在 internal/events.ProducerPersistedEvent（CLI 本地桥共用）。
+	if runtimeevents.ProducerPersistedEvent(event) {
+		return false
+	}
+	return isPersistedRuntimeEventType(event.Type)
+}
+
+func mapRuntimeEventToSession(event runtimeevents.Event) runtimeevents.Event {
+	mapped := event
+	// 别名映射收敛到 internal/events 单一实现（aicli 本地 A 通道桥共用）；
+	// 这里不再保留第二份 switch，避免两处落盘名漂移。
+	mapped.Type = runtimeevents.SessionStoreTypeAlias(event.Type)
+	return mapped
+}
+
+func (h *Handler) getRuntimeToolCatalogGateway() *mcpcatalog.Gateway {
+	if h == nil || h.mcpManager == nil {
+		return nil
+	}
+	backend, resolvedPath, configKey := h.runtimeToolCatalogConfig()
+	if h.runtimeToolCatalog != nil && h.runtimeToolCatalogConfigKey == configKey {
+		h.attachRuntimeMCPLifecycleBridge()
+		return h.runtimeToolCatalog
+	}
+	store := runtimeToolCatalogSnapshotStore(backend, resolvedPath)
+	if manager := h.runtimeMCPManager(); manager != nil {
+		h.runtimeToolCatalog = mcpcatalog.NewManagerGatewayWithStore(manager, store)
+		h.runtimeToolCatalogConfigKey = configKey
+		h.attachRuntimeMCPLifecycleBridge()
+		return h.runtimeToolCatalog
+	}
+	h.runtimeToolCatalog = mcpcatalog.NewGatewayWithStore(h.mcpManager, store)
+	h.runtimeToolCatalogConfigKey = configKey
+	h.attachRuntimeMCPLifecycleBridge()
+	return h.runtimeToolCatalog
+}
+
+func (h *Handler) runtimeToolCatalogConfig() (string, string, string) {
+	backend := "memory"
+	snapshotPath := ""
+	if h != nil && h.runtimeConfig != nil {
+		if value := strings.TrimSpace(h.runtimeConfig.Catalog.Backend); value != "" {
+			backend = strings.ToLower(value)
+		}
+		snapshotPath = strings.TrimSpace(h.runtimeConfig.Catalog.SnapshotPath)
+	}
+	resolvedPath := resolveRuntimeCatalogSnapshotPath(h.runtimeConfigFile, snapshotPath)
+	return backend, resolvedPath, backend + ":" + resolvedPath
+}
+
+func runtimeToolCatalogSnapshotStore(backend, resolvedPath string) mcpcatalog.SnapshotStore {
+	switch backend {
+	case "file":
+		return mcpcatalog.NewFileSnapshotStore(resolvedPath)
+	case "sqlite":
+		if store, err := mcpcatalog.NewSQLiteSnapshotStore(resolvedPath); err == nil {
+			return store
+		}
+	}
+	return nil
+}
+
+func resolveRuntimeCatalogSnapshotPath(configFile, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) || strings.TrimSpace(configFile) == "" {
+		return path
+	}
+	baseDir := filepath.Dir(strings.TrimSpace(configFile))
+	if baseDir == "" || baseDir == "." {
+		return path
+	}
+	return filepath.Join(baseDir, path)
+}
+
+func resolveRuntimeTeamStorePath(configFile, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) || strings.TrimSpace(configFile) == "" {
+		return path
+	}
+	baseDir := filepath.Dir(strings.TrimSpace(configFile))
+	if baseDir == "" || baseDir == "." {
+		return path
+	}
+	return filepath.Join(baseDir, path)
+}
+
+func resolveRuntimeAgentControlMailboxStorePath(configFile, path string) string {
+	return resolveRuntimeTeamStorePath(configFile, path)
+}
+
+func resolveRuntimeAgentControlAgentStorePath(configFile, path string) string {
+	return resolveRuntimeTeamStorePath(configFile, path)
+}
+
+func resolveRuntimeAgentControlStorePath(configFile, path string) string {
+	return resolveRuntimeTeamStorePath(configFile, path)
+}
+
+func resolveRuntimeBackgroundStorePath(configFile, path string) string {
+	return resolveRuntimeTeamStorePath(configFile, path)
+}
+
+func resolveRuntimeBackgroundLogDir(configFile, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) || strings.TrimSpace(configFile) == "" {
+		return path
+	}
+	baseDir := filepath.Dir(strings.TrimSpace(configFile))
+	if baseDir == "" || baseDir == "." {
+		return path
+	}
+	return filepath.Join(baseDir, path)
+}
+
+func resolveRuntimeSessionRuntimeStorePath(configFile, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) || strings.TrimSpace(configFile) == "" {
+		return path
+	}
+	baseDir := filepath.Dir(strings.TrimSpace(configFile))
+	if baseDir == "" || baseDir == "." {
+		return path
+	}
+	return filepath.Join(baseDir, path)
+}
+
+func splitTeamStoreKey(key string) (string, string) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", ""
+	}
+	parts := strings.SplitN(key, "|", 2)
+	if len(parts) == 1 {
+		return parts[0], ""
+	}
+	return parts[0], parts[1]
+}
+
+func buildTeamReloadAuditPayload(r *http.Request, scope UsageScope, current, desired map[string]interface{}) map[string]interface{} {
+	payload := map[string]interface{}{
+		"request_ip": requestRemoteIP(r),
+		"user_agent": requestUserAgent(r),
+		"current":    current,
+		"desired":    desired,
+	}
+	if requestID := requestIDFromRequest(r); requestID != "" {
+		payload["request_id"] = requestID
+	}
+	if scope.TenantID != "" {
+		payload["tenant_id"] = scope.TenantID
+	}
+	if scope.ProjectID != "" {
+		payload["project_id"] = scope.ProjectID
+	}
+	if scope.UserID != "" {
+		payload["user_id"] = scope.UserID
+	}
+	if scope.ScopeKey != "" {
+		payload["scope_key"] = scope.ScopeKey
+	}
+	return payload
+}
+
+func requestUserAgent(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	return strings.TrimSpace(r.UserAgent())
+}
+
+func requestIDFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	for _, key := range []string{"X-Request-ID", "X-Request-Id", "X-Correlation-ID"} {
+		if value := strings.TrimSpace(r.Header.Get(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (h *Handler) refreshTeamStore(config *runtimecfg.RuntimeConfig, configFile, traceID, requestID string) (bool, error) {
+	if h == nil || config == nil {
+		return false, nil
+	}
+	storePath := resolveRuntimeTeamStorePath(configFile, config.Team.StorePath)
+	storeDSN := strings.TrimSpace(config.Team.StoreDSN)
+	configKey := storePath + "|" + storeDSN
+
+	h.teamStoreMu.RLock()
+	currentKey := h.teamStoreConfigKey
+	currentStore := h.teamStore
+	h.teamStoreMu.RUnlock()
+
+	if currentKey == "" && configKey == "|" && currentStore != nil {
+		h.teamStoreMu.Lock()
+		if h.teamStoreConfigKey == "" {
+			h.teamStoreConfigKey = configKey
+		}
+		h.teamStoreMu.Unlock()
+		return false, nil
+	}
+	if configKey == currentKey {
+		return false, nil
+	}
+
+	store, err := team.NewSQLiteStore(&team.StoreConfig{
+		Path: strings.TrimSpace(storePath),
+		DSN:  storeDSN,
+	})
+	if err != nil {
+		payload := map[string]interface{}{
+			"store_path": storePath,
+			"uses_dsn":   storeDSN != "",
+			"error":      err.Error(),
+		}
+		if strings.TrimSpace(requestID) != "" {
+			payload["request_id"] = strings.TrimSpace(requestID)
+		}
+		h.publishRuntimeEvent("team.store.reload_failed", traceID, payload)
+		return false, err
+	}
+
+	if lifecycle := h.teamLifecycleService(); lifecycle != nil {
+		lifecycle.StopAllLoops()
+	}
+	h.teamStoreMu.Lock()
+	oldStore := h.teamStore
+	h.teamStore = store
+	h.teamStoreConfigKey = configKey
+	h.teamClaimsManager = nil
+	h.teamOrchestrator = nil
+	h.teamLifecycle = nil
+	h.teamStoreMu.Unlock()
+
+	if oldStore != nil {
+		_ = oldStore.Close()
+	}
+	h.configureMailboxWriteThrough(h.getAgentControlMailboxStore())
+	payload := map[string]interface{}{
+		"store_path": storePath,
+		"uses_dsn":   storeDSN != "",
+	}
+	if strings.TrimSpace(requestID) != "" {
+		payload["request_id"] = strings.TrimSpace(requestID)
+	}
+	h.publishRuntimeEvent("team.store.reloaded", traceID, payload)
+	if lifecycle := h.teamLifecycleService(); lifecycle != nil {
+		lifecycle.SyncLoops()
+	}
+	return true, nil
+}
+
+func (h *Handler) refreshAgentControlMailboxStore(config *runtimecfg.RuntimeConfig, configFile string) (bool, error) {
+	if h == nil || config == nil {
+		return false, nil
+	}
+	storePath := resolveRuntimeAgentControlMailboxStorePath(configFile, firstNonEmptyString(config.AgentControl.MailboxStorePath, config.AgentControl.StorePath))
+	storeDSN := strings.TrimSpace(firstNonEmptyString(config.AgentControl.MailboxStoreDSN, config.AgentControl.StoreDSN))
+	configKey := storePath + "|" + storeDSN
+
+	h.agentControlMu.RLock()
+	currentKey := h.agentControlMailboxStoreKey
+	currentStore := h.agentControlMailboxStore
+	autoManaged := h.agentControlMailboxStoreAuto
+	h.agentControlMu.RUnlock()
+
+	if configKey == "|" {
+		if currentStore != nil && autoManaged {
+			h.agentControlMu.Lock()
+			if h.agentControlMailboxStore == currentStore && h.agentControlMailboxStoreAuto {
+				h.agentControlMailboxStore = nil
+				h.agentControlMailboxStoreKey = ""
+				h.agentControlMailboxStoreAuto = false
+			}
+			h.agentControlMu.Unlock()
+			_ = currentStore.Close()
+			h.configureMailboxWriteThrough(nil)
+			return true, nil
+		}
+		return false, nil
+	}
+	if currentStore != nil && !autoManaged {
+		return false, nil
+	}
+	if configKey == currentKey && currentStore != nil {
+		return false, nil
+	}
+
+	store, err := agentcontrol.NewSQLiteGlobalMailboxRegistryStore(&agentcontrol.GlobalMailboxStoreConfig{
+		Path: strings.TrimSpace(storePath),
+		DSN:  storeDSN,
+	})
+	if err != nil {
+		h.publishRuntimeEvent("agent_control.mailbox.store.reload_failed", "", map[string]interface{}{
+			"store_path": storePath,
+			"uses_dsn":   storeDSN != "",
+			"error":      err.Error(),
+		})
+		return false, err
+	}
+
+	h.agentControlMu.Lock()
+	oldStore := h.agentControlMailboxStore
+	oldAutoManaged := h.agentControlMailboxStoreAuto
+	h.agentControlMailboxStore = store
+	h.agentControlMailboxStoreKey = configKey
+	h.agentControlMailboxStoreAuto = true
+	h.agentControlMu.Unlock()
+	h.configureMailboxWriteThrough(store)
+
+	if oldStore != nil && oldAutoManaged {
+		_ = oldStore.Close()
+	}
+	h.publishRuntimeEvent("agent_control.mailbox.store.reloaded", "", map[string]interface{}{
+		"store_path": storePath,
+		"uses_dsn":   storeDSN != "",
+	})
+	return true, nil
+}
+
+func (h *Handler) refreshAgentControlRegistryService(config *runtimecfg.RuntimeConfig, configFile string) (bool, error) {
+	if h == nil || config == nil {
+		return false, nil
+	}
+	cfg := agentcontrol.RegistryServiceConfig{
+		StorePath:        resolveRuntimeAgentControlStorePath(configFile, config.AgentControl.StorePath),
+		StoreDSN:         strings.TrimSpace(config.AgentControl.StoreDSN),
+		MailboxStorePath: resolveRuntimeAgentControlMailboxStorePath(configFile, config.AgentControl.MailboxStorePath),
+		MailboxStoreDSN:  strings.TrimSpace(config.AgentControl.MailboxStoreDSN),
+		AgentStorePath:   resolveRuntimeAgentControlAgentStorePath(configFile, config.AgentControl.AgentStorePath),
+		AgentStoreDSN:    strings.TrimSpace(config.AgentControl.AgentStoreDSN),
+	}
+	configKey := cfg.Key()
+
+	h.agentControlMu.RLock()
+	currentKey := h.agentControlRegistryStoreKey
+	currentService := h.agentControlRegistryService
+	currentMailboxStore := h.agentControlMailboxStore
+	currentAgentStore := h.agentControlAgentStore
+	mailboxAuto := h.agentControlMailboxStoreAuto
+	agentAuto := h.agentControlAgentStoreAuto
+	h.agentControlMu.RUnlock()
+
+	if cfg.Empty() {
+		if currentService != nil && mailboxAuto && agentAuto {
+			h.agentControlMu.Lock()
+			if h.agentControlRegistryService == currentService {
+				h.agentControlRegistryService = nil
+				h.agentControlRegistryStoreKey = ""
+				h.agentControlMailboxStore = nil
+				h.agentControlMailboxStoreKey = ""
+				h.agentControlMailboxStoreAuto = false
+				h.agentControlAgentStore = nil
+				h.agentControlAgentStoreKey = ""
+				h.agentControlAgentStoreAuto = false
+			}
+			h.agentControlMu.Unlock()
+			h.configureMailboxWriteThrough(nil)
+			// P2-9：store 已被清空，对账循环必须同步停止。
+			h.ensureAgentRegistryReconciler()
+			_ = currentService.Close()
+			return true, nil
+		}
+		return false, nil
+	}
+	if (currentMailboxStore != nil && !mailboxAuto) || (currentAgentStore != nil && !agentAuto) {
+		return false, nil
+	}
+	if currentService != nil && currentKey == configKey {
+		return false, nil
+	}
+
+	service, err := agentcontrol.NewRegistryService(context.Background(), cfg)
+	if err != nil {
+		h.publishRuntimeEvent("agent_control.registry.store.reload_failed", "", map[string]interface{}{
+			"store_path":         cfg.Normalize().StorePath,
+			"mailbox_store_path": cfg.Normalize().MailboxStorePath,
+			"agent_store_path":   cfg.Normalize().AgentStorePath,
+			"uses_dsn":           cfg.Normalize().StoreDSN != "" || cfg.Normalize().MailboxStoreDSN != "" || cfg.Normalize().AgentStoreDSN != "",
+			"error":              err.Error(),
+		})
+		return false, err
+	}
+
+	h.agentControlMu.Lock()
+	oldService := h.agentControlRegistryService
+	h.agentControlRegistryService = service
+	h.agentControlRegistryStoreKey = configKey
+	h.agentControlMailboxStore = service.MailboxStore
+	h.agentControlMailboxStoreKey = "registry|" + configKey
+	h.agentControlMailboxStoreAuto = true
+	h.agentControlAgentStore = service.AgentStore
+	h.agentControlAgentStoreKey = "registry|" + configKey
+	h.agentControlAgentStoreAuto = true
+	h.agentControlMu.Unlock()
+	h.configureMailboxWriteThrough(service.MailboxStore)
+	// P2-9：绑定新的 durable agent store（旧循环在此被取消，避免审计已关闭的 store）。
+	h.ensureAgentRegistryReconciler()
+
+	if oldService != nil {
+		_ = oldService.Close()
+	}
+	normalized := cfg.Normalize()
+	h.publishRuntimeEvent("agent_control.registry.store.reloaded", "", map[string]interface{}{
+		"store_path":         normalized.StorePath,
+		"mailbox_store_path": normalized.MailboxStorePath,
+		"agent_store_path":   normalized.AgentStorePath,
+		"uses_dsn":           normalized.StoreDSN != "" || normalized.MailboxStoreDSN != "" || normalized.AgentStoreDSN != "",
+	})
+	return true, nil
+}
+
+func (h *Handler) refreshAgentControlAgentStore(config *runtimecfg.RuntimeConfig, configFile string) (bool, error) {
+	if h == nil || config == nil {
+		return false, nil
+	}
+	storePath := resolveRuntimeAgentControlAgentStorePath(configFile, firstNonEmptyString(config.AgentControl.AgentStorePath, config.AgentControl.StorePath))
+	storeDSN := strings.TrimSpace(firstNonEmptyString(config.AgentControl.AgentStoreDSN, config.AgentControl.StoreDSN))
+	configKey := storePath + "|" + storeDSN
+
+	h.agentControlMu.RLock()
+	currentKey := h.agentControlAgentStoreKey
+	currentStore := h.agentControlAgentStore
+	autoManaged := h.agentControlAgentStoreAuto
+	h.agentControlMu.RUnlock()
+
+	if configKey == "|" {
+		if currentStore != nil && autoManaged {
+			h.agentControlMu.Lock()
+			if h.agentControlAgentStore == currentStore && h.agentControlAgentStoreAuto {
+				h.agentControlAgentStore = nil
+				h.agentControlAgentStoreKey = ""
+				h.agentControlAgentStoreAuto = false
+			}
+			h.agentControlMu.Unlock()
+			// P2-9：store 已被清空，对账循环必须同步停止。
+			h.ensureAgentRegistryReconciler()
+			_ = currentStore.Close()
+			return true, nil
+		}
+		return false, nil
+	}
+	if currentStore != nil && !autoManaged {
+		return false, nil
+	}
+	if configKey == currentKey && currentStore != nil {
+		return false, nil
+	}
+
+	store, err := agentcontrol.NewSQLiteGlobalAgentRegistryStore(&agentcontrol.GlobalAgentStoreConfig{
+		Path: strings.TrimSpace(storePath),
+		DSN:  storeDSN,
+	})
+	if err != nil {
+		h.publishRuntimeEvent("agent_control.agent.store.reload_failed", "", map[string]interface{}{
+			"store_path": storePath,
+			"uses_dsn":   storeDSN != "",
+			"error":      err.Error(),
+		})
+		return false, err
+	}
+
+	h.agentControlMu.Lock()
+	oldStore := h.agentControlAgentStore
+	oldAutoManaged := h.agentControlAgentStoreAuto
+	h.agentControlAgentStore = store
+	h.agentControlAgentStoreKey = configKey
+	h.agentControlAgentStoreAuto = true
+	h.agentControlMu.Unlock()
+	// P2-9：绑定新的 durable agent store（旧循环在此被取消，避免审计已关闭的 store）。
+	h.ensureAgentRegistryReconciler()
+
+	if oldStore != nil && oldAutoManaged {
+		_ = oldStore.Close()
+	}
+	h.publishRuntimeEvent("agent_control.agent.store.reloaded", "", map[string]interface{}{
+		"store_path": storePath,
+		"uses_dsn":   storeDSN != "",
+	})
+	return true, nil
+}
+
+func (h *Handler) refreshSessionRuntimeStore(config *runtimecfg.RuntimeConfig, configFile string) (bool, error) {
+	if h == nil || config == nil {
+		return false, nil
+	}
+
+	storePath := resolveRuntimeSessionRuntimeStorePath(configFile, config.SessionRuntime.StorePath)
+	storeDSN := strings.TrimSpace(config.SessionRuntime.StoreDSN)
+	readPool := config.SessionRuntime.ReadPool
+	hasStoreConfig := storePath != "" || storeDSN != ""
+	// P1.7：读池配置在构造期生效，故非默认时纳入 store 标识（变更即重建）；
+	// 默认配置保持既有 key 形状，升级不触发无谓重建，也保留"无 store 配置"
+	// 的空键哨兵语义（见下）。
+	configKey := storePath + "|" + storeDSN
+	if readPool != (runtimecfg.ReadPoolConfig{}) {
+		configKey = fmt.Sprintf("%s|%t|%d|%s|%s", configKey,
+			readPool.Disable, readPool.Size,
+			readPool.BusyTimeout.String(), readPool.OperationTimeout.String())
+	}
+
+	h.sessionRuntimeMu.RLock()
+	currentKey := h.sessionRuntimeStoreKey
+	currentStore := h.sessionRuntimeStore
+	h.sessionRuntimeMu.RUnlock()
+
+	if currentKey == "" && !hasStoreConfig && currentStore != nil {
+		h.sessionRuntimeMu.Lock()
+		if h.sessionRuntimeStoreKey == "" {
+			h.sessionRuntimeStoreKey = configKey
+		}
+		h.sessionRuntimeMu.Unlock()
+		return false, nil
+	}
+	if configKey == currentKey && currentStore != nil {
+		return false, nil
+	}
+
+	var (
+		stateStore chat.RuntimeStateStore
+		eventStore chat.EventStore
+	)
+	if storePath != "" || storeDSN != "" {
+		store, err := chat.NewSQLiteRuntimeStore(&chat.RuntimeStoreConfig{
+			Path:                 strings.TrimSpace(storePath),
+			DSN:                  storeDSN,
+			DisableReadPool:      readPool.Disable,
+			ReadPoolSize:         readPool.Size,
+			ReadPoolBusyTimeout:  readPool.BusyTimeout,
+			ReadOperationTimeout: readPool.OperationTimeout,
+		})
+		if err != nil {
+			h.publishRuntimeEvent("session.runtime.store.reload_failed", "", map[string]interface{}{
+				"store_path": storePath,
+				"uses_dsn":   storeDSN != "",
+				"error":      err.Error(),
+			})
+			return false, err
+		}
+		stateStore = store
+		eventStore = store
+	} else {
+		memoryStore := chat.NewInMemoryRuntimeStore(2048)
+		stateStore = memoryStore
+		eventStore = memoryStore
+	}
+
+	h.sessionRuntimeMu.Lock()
+	oldStore := h.sessionRuntimeStore
+	oldEventStore := h.sessionEventStore
+	oldHub := h.sessionHub
+	h.sessionRuntimeStore = stateStore
+	h.sessionEventStore = eventStore
+	h.sessionRuntimeStoreKey = configKey
+	h.sessionHub = nil
+	h.sessionRuntimeMu.Unlock()
+
+	if oldHub != nil {
+		oldHub.StopAll()
+	}
+	closeRuntimeStore(oldStore, oldEventStore)
+	h.configureMailboxWriteThrough(h.getAgentControlMailboxStore())
+
+	h.publishRuntimeEvent("session.runtime.store.reloaded", "", map[string]interface{}{
+		"store_path": storePath,
+		"uses_dsn":   storeDSN != "",
+	})
+	return true, nil
+}
+
+func closeRuntimeStore(store chat.RuntimeStateStore, eventStore chat.EventStore) {
+	seen := map[interface{}]struct{}{}
+	closeStore := func(value interface{}) {
+		if value == nil {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		if closer, ok := value.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	}
+	closeStore(store)
+	closeStore(eventStore)
+}
+
+func (h *Handler) publishRuntimeEvent(eventType, traceID string, payload map[string]interface{}) {
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	if traceID != "" {
+		payload["trace_id"] = traceID
+	}
+	h.getRuntimeEventBus().Publish(runtimeevents.Event{
+		Type:      eventType,
+		TraceID:   traceID,
+		AgentName: "runtime-admin",
+		Payload:   payload,
+	})
+}
+
+func (h *Handler) publishSessionRuntimeEvent(eventType, traceID, sessionID string, payload map[string]interface{}) {
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	if traceID != "" {
+		payload["trace_id"] = traceID
+	}
+	h.getRuntimeEventBus().Publish(runtimeevents.Event{
+		Type:      eventType,
+		TraceID:   traceID,
+		SessionID: strings.TrimSpace(sessionID),
+		AgentName: "runtime-admin",
+		Payload:   payload,
+	})
+}
+
+func (h *Handler) attachRuntimeMCPLifecycleBridge() {
+	if h == nil {
+		return
+	}
+	manager := h.runtimeMCPManager()
+	if manager == nil {
+		return
+	}
+	observable, ok := manager.(mcpmanager.ObservableManager)
+	if !ok || observable == nil {
+		return
+	}
+
+	h.runtimeMCPBridgeOnce.Do(func() {
+		observable.AddLifecycleObserver(func(event mcpmanager.LifecycleEvent) {
+			payload := make(map[string]interface{}, len(event.Payload)+1)
+			for key, value := range event.Payload {
+				payload[key] = value
+			}
+			payload["mcp_name"] = event.MCPName
+
+			switch event.Type {
+			case "mcp.connected", "mcp.tools.loaded", "mcp.reconnected", "mcp.disabled", "mcp.stopped", "mcp.tool.state_changed":
+				if gateway := h.runtimeToolCatalog; gateway != nil {
+					gateway.Refresh()
+				}
+				h.invalidateSessionRuntimeToolSurfaces()
+			}
+
+			h.getRuntimeEventBus().Publish(runtimeevents.Event{
+				Type:      event.Type,
+				TraceID:   event.TraceID,
+				AgentName: "mcp-manager",
+				Payload:   payload,
+				Timestamp: event.Timestamp,
+			})
+		})
+	})
+}
+
+// invalidateSessionRuntimeToolSurfaces 清除持久化的会话稳定工具面缓存，
+// 使 MCP 目录变化（连接/重载/服务与工具启停）在会话下一个 turn 边界生效。
+func (h *Handler) invalidateSessionRuntimeToolSurfaces() {
+	if h == nil {
+		return
+	}
+	store := h.getSessionRuntimeStore()
+	if store == nil {
+		return
+	}
+	invalidator, ok := store.(chat.StableToolSurfaceInvalidator)
+	if !ok || invalidator == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, _ = invalidator.InvalidateStableToolSurfaces(ctx)
+}
+
+func (h *Handler) applyAgentExecutionPolicy(a *agent.Agent, workspacePath string, runtimeConfig *runtimecfg.RuntimeConfig, profilePolicy *runtimepolicy.ToolExecutionPolicy) {
+	if a == nil {
+		return
+	}
+
+	mutationPolicy := h.getMutationPolicy()
+	readOnly := mutationPolicy.ReadOnly
+	if profilePolicy != nil && profilePolicy.ReadOnly {
+		readOnly = true
+	}
+	allowlist := []string(nil)
+	if profilePolicy != nil && profilePolicy.AllowlistEnabled {
+		allowlist = profilePolicy.AllowedToolNames()
+	}
+	toolPolicy := agent.NewToolExecutionPolicy(allowlist, readOnly)
+	if profilePolicy != nil && len(profilePolicy.DeniedTools) > 0 {
+		toolPolicy.DeniedTools = make(map[string]bool, len(profilePolicy.DeniedTools))
+		for name, denied := range profilePolicy.DeniedTools {
+			if denied {
+				toolPolicy.DeniedTools[name] = true
+			}
+		}
+	}
+	sandboxCfg := executor.SandboxConfig{}
+	if runtimeConfig != nil {
+		sandboxCfg = executor.CloneSandboxConfig(runtimeConfig.Sandbox)
+	}
+	if profilePolicy != nil && profilePolicy.Sandbox != nil {
+		executor.OverlaySandboxConfig(&sandboxCfg, profilePolicy.Sandbox.Config())
+	}
+
+	// If profile/runtime only carried a named profile label without path bounds,
+	// materialize against the request workspace so workspace/read-only/strict
+	// actually enforce application-layer isolation.
+	if profile := strings.TrimSpace(sandboxCfg.Profile); profile != "" && strings.TrimSpace(workspacePath) != "" {
+		if resolved, err := executor.ResolveSandboxProfile(profile, executor.SandboxProfileOptions{
+			WorkspaceRoot: workspacePath,
+			Override:      sandboxCfg,
+		}); err == nil {
+			sandboxCfg = resolved.Config
+			if resolved.ReadOnly {
+				readOnly = true
+			}
+			for _, warning := range resolved.Warnings {
+				logger.Warnf("API agent sandbox: %s", warning)
+			}
+		}
+	}
+
+	if readOnly {
+		sandboxCfg.DeniedCommands = appendUniqueStrings(sandboxCfg.DeniedCommands, defaultReadOnlyDeniedCommands()...)
+	}
+	if strings.TrimSpace(workspacePath) != "" {
+		sandboxCfg.AllowedPaths = appendUniqueStrings(sandboxCfg.AllowedPaths, workspacePath)
+		if readOnly {
+			sandboxCfg.ReadOnlyPaths = appendUniqueStrings(sandboxCfg.ReadOnlyPaths, workspacePath)
+		}
+	}
+	if executor.SandboxConfigActive(sandboxCfg) || strings.TrimSpace(workspacePath) != "" || readOnly {
+		sandboxCfg.Enabled = true
+		toolPolicy.Sandbox = executor.NewSandbox(&sandboxCfg)
+		for _, warning := range toolPolicy.Sandbox.CollectOSSandboxWarnings(context.Background()) {
+			logger.Warnf("API agent sandbox: %s", warning)
+		}
+	}
+
+	// Anchor relative path checks to the same base the toolkit executes against
+	// (SetBasePath = config.Workspace.Root). Without it a run context that carries
+	// no session workspace root would have the policy resolve relative arguments
+	// against the process working directory while the executor falls back to the
+	// registered base path, so the sandbox could approve a different file than
+	// the tool touches.
+	runtimeWorkspaceRoot := ""
+	if runtimeConfig != nil {
+		runtimeWorkspaceRoot = runtimeConfig.Workspace.Root
+	}
+	toolPolicy.SetPathAnchorRoot(runtimeWorkspaceRoot)
+
+	a.SetToolExecutionPolicy(toolPolicy)
+}
+
+func (h *Handler) applyAgentHooks(a *agent.Agent, runtimeConfig *runtimecfg.RuntimeConfig) {
+	if a == nil {
+		return
+	}
+	config := runtimeConfig
+	if config == nil {
+		config = h.runtimeConfig
+	}
+	if config == nil || len(config.Hooks) == 0 {
+		return
+	}
+	a.SetHookManager(runtimehooks.NewManager(config.Hooks))
+}
+
+func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runtimecfg.RuntimeConfig) {
+	if a == nil {
+		return
+	}
+	// The broker resolves wait_team windows on its own, so it has to read the
+	// same live agents policy as this host's wait_agent / read_agent_events
+	// paths. Stamped on the way out so every branch below (including the
+	// config==nil early return) leaves the broker on the operator policy instead
+	// of the shared fallback.
+	defer func() {
+		if broker := a.GetToolBroker(); broker != nil {
+			broker.WaitTimeoutPolicy = h.brokerWaitTimeoutPolicy
+		}
+	}()
+	config := runtimeConfig
+	if config == nil {
+		config = h.runtimeConfig
+	}
+
+	if h.getSessionHub() != nil && h.sessionManager != nil {
+		broker := a.GetToolBroker()
+		if broker == nil {
+			broker = &toolbroker.Broker{}
+			a.SetToolBroker(broker)
+		}
+		if broker.SessionContextStore == nil {
+			broker.SessionContextStore = toolbrokersessionctx.New(h.sessionManager.GetStorage())
+		}
+		broker.AgentSessions = &sessionAgentController{handler: h}
+		broker.ExecutionSupervisor = h.getExecutionSupervisor()
+	}
+
+	if store := h.getTeamStore(); store != nil {
+		broker := a.GetToolBroker()
+		if broker == nil {
+			broker = &toolbroker.Broker{}
+			a.SetToolBroker(broker)
+		}
+		if broker.SessionContextStore == nil && h.sessionManager != nil {
+			broker.SessionContextStore = toolbrokersessionctx.New(h.sessionManager.GetStorage())
+		}
+		broker.AgentSessions = &sessionAgentController{handler: h}
+		broker.ExecutionSupervisor = h.getExecutionSupervisor()
+		broker.TeamStore = store
+		broker.TeamClaims = h.getTeamClaimsManager()
+		broker.TeamDispatcher = h
+		broker.TeamLifecycleChanged = func() {
+			if lifecycle := h.teamLifecycleService(); lifecycle != nil {
+				lifecycle.SyncLoops()
+			}
+		}
+		if orchestrator := h.getTeamOrchestrator(); orchestrator != nil {
+			broker.TeamEvents = orchestrator.Events
+		}
+		if hub := h.getSessionHub(); hub != nil {
+			broker.TeamPlanner = &team.LeadPlanner{
+				Sessions:    &sessionActorClient{hub: hub, handler: h},
+				Store:       store,
+				Mailbox:     team.NewMailboxService(store),
+				AutoPersist: true,
+			}
+		}
+	}
+
+	// P0-A 方案 A（doc 6.2/7）：把 unified 快照读模型接到模型工具面，让父
+	// agent 一次调用看清整个子 agent 批次，而不是逐行轮询 wait_agent。门控与
+	// CLI 宿主一致：没有 durable store 时 broker.Supervision 保持 nil，四个
+	// 监督工具不会出现在 Definitions()（悬空工具比缺少工具更糟）。
+	if h.getSupervisionStore() != nil {
+		broker := a.GetToolBroker()
+		if broker == nil {
+			broker = &toolbroker.Broker{}
+			a.SetToolBroker(broker)
+		}
+		if broker.Supervision == nil {
+			if controller := newHandlerSupervisionToolController(h); controller != nil {
+				broker.Supervision = controller
+			}
+		}
+	}
+
+	if config == nil {
+		return
+	}
+
+	a.ApplyCheckpointConfig(
+		config.Checkpoint.Enabled,
+		config.Checkpoint.MaxFileBytes,
+		agent.CheckpointStorageOptions{
+			StoreMode:                config.Checkpoint.StoreMode,
+			ConversationSnapshot:     config.Checkpoint.ConversationSnapshot,
+			MaxDiffBytes:             config.Checkpoint.MaxDiffBytes,
+			MaxCheckpointsPerSession: config.Checkpoint.MaxCheckpointsPerSession,
+		},
+	)
+
+	if bgManager := h.getBackgroundManager(config); bgManager != nil {
+		broker := a.GetToolBroker()
+		if broker == nil {
+			broker = &toolbroker.Broker{}
+			a.SetToolBroker(broker)
+		}
+		if broker.SessionContextStore == nil && h.sessionManager != nil {
+			broker.SessionContextStore = toolbrokersessionctx.New(h.sessionManager.GetStorage())
+		}
+		if broker.AgentSessions == nil {
+			broker.AgentSessions = &sessionAgentController{handler: h}
+		}
+		broker.Background = bgManager
+	}
+}
+
+// getExecutionSupervisor lazily builds the P3 child-run watchdog (doc 5.2 /
+// 10): durable run records, deadline/progress scan, interrupt + cancel grace,
+// and terminal completion outbox dispatch into the parent's AgentControl
+// mailbox. It returns nil when the supervision store is not configured, in
+// which case broker spawns keep working without run supervision.
+func (h *Handler) getExecutionSupervisor() *supervision.ExecutionSupervisor {
+	if h == nil {
+		return nil
+	}
+	h.executionSupervisorMu.Lock()
+	defer h.executionSupervisorMu.Unlock()
+	if h.executionSupervisor != nil {
+		return h.executionSupervisor
+	}
+	store := h.getSupervisionStore()
+	runStore, ok := store.(supervision.ExecutionRunStore)
+	if !ok || runStore == nil {
+		return nil
+	}
+	cfg := supervision.DefaultExecutionSupervisorConfig()
+	cfg.Enabled = true
+	supervisor := &supervision.ExecutionSupervisor{
+		Store:       runStore,
+		StoreFull:   store,
+		Wakes:       h.getSupervisionWakeScheduler(),
+		Config:      cfg,
+		Interrupter: toolbroker.AgentSessionRunInterrupter{Controller: &sessionAgentController{handler: h}},
+	}
+	if eventStore := h.getSessionEventStore(); eventStore != nil {
+		mailboxStore := chat.SessionEventMailboxStore{Events: eventStore}
+		supervisor.Dispatcher = toolbroker.CompletionDispatchFunc(func(ctx context.Context, entry supervision.CompletionOutboxEntry) (int64, error) {
+			payload := map[string]interface{}{}
+			if strings.TrimSpace(entry.PayloadJSON) != "" {
+				_ = json.Unmarshal([]byte(entry.PayloadJSON), &payload)
+			}
+			payload["status"] = entry.Status
+			payload["run_id"] = entry.RunID
+			message := toolbroker.BuildSubagentCompletionMailboxMessage(
+				entry.ParentSessionID, entry.SessionID, "", "", "completion_outbox", payload)
+			_, seq, err := mailboxStore.AppendAgentControlMailbox(ctx, entry.ParentSessionID, message)
+			return seq, err
+		})
+	}
+	h.executionSupervisor = supervisor
+	ctx, cancel := context.WithCancel(context.Background())
+	h.executionSupervisorStop = cancel
+	go supervisor.RunLoop(ctx)
+	return supervisor
+}
+
+func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *background.Manager {
+	if h == nil {
+		return nil
+	}
+	cfg := config
+	if cfg == nil {
+		cfg = h.runtimeConfig
+	}
+	if cfg == nil {
+		return nil
+	}
+	bgCfg := cfg.Background
+	storePath := resolveRuntimeBackgroundStorePath(h.runtimeConfigFile, bgCfg.StorePath)
+	storeDSN := strings.TrimSpace(bgCfg.StoreDSN)
+	logDir := resolveRuntimeBackgroundLogDir(h.runtimeConfigFile, bgCfg.LogDir)
+	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%s|%d|%s|%d|%v", storePath, storeDSN, logDir, bgCfg.MaxOutputBytes, bgCfg.MaxConcurrentJobs, bgCfg.DefaultTimeout, bgCfg.MonitorInterval, bgCfg.HeartbeatTimeout, bgCfg.LaunchMaxAttempts, bgCfg.RetryBackoff, bgCfg.RecoveryMaxAttempts, bgCfg.RecoveryBackoffSchedule)
+
+	h.backgroundMu.Lock()
+	defer h.backgroundMu.Unlock()
+	if h.backgroundManager != nil && h.backgroundConfigKey == key {
+		return h.backgroundManager
+	}
+	manager := background.NewManager(background.Config{
+		MaxOutputBytes:          bgCfg.MaxOutputBytes,
+		DefaultTimeout:          bgCfg.DefaultTimeout,
+		MonitorInterval:         bgCfg.MonitorInterval,
+		HeartbeatTimeout:        bgCfg.HeartbeatTimeout,
+		LaunchMaxAttempts:       bgCfg.LaunchMaxAttempts,
+		RetryBackoff:            bgCfg.RetryBackoff,
+		RecoveryMaxAttempts:     bgCfg.RecoveryMaxAttempts,
+		RecoveryBackoffSchedule: append([]time.Duration(nil), bgCfg.RecoveryBackoffSchedule...),
+		StorePath:               storePath,
+		StoreDSN:                storeDSN,
+		LogDir:                  logDir,
+		MaxConcurrentJobs:       bgCfg.MaxConcurrentJobs,
+		EventHandler:            h.handleBackgroundEvent,
+	})
+	h.backgroundManager = manager
+	h.backgroundConfigKey = key
+	return manager
+}
+
+func (h *Handler) handleBackgroundEvent(event background.JobEvent) {
+	if h == nil {
+		return
+	}
+	eventType := mapBackgroundEventType(event.Type)
+	payload := map[string]interface{}{}
+	for key, value := range event.Payload {
+		payload[key] = value
+	}
+	if event.JobID != "" {
+		payload["job_id"] = event.JobID
+	}
+	sessionID := ""
+	if value, ok := payload["session_id"].(string); ok {
+		sessionID = strings.TrimSpace(value)
+	}
+	if sessionID != "" && event.JobID != "" {
+		h.updateSessionActiveJobs(sessionID, event.JobID, event.Type)
+	}
+	runtimeEvent := runtimeevents.Event{
+		Type:      eventType,
+		AgentName: "background-manager",
+		SessionID: sessionID,
+		Payload:   payload,
+		Timestamp: event.CreatedAt,
+	}
+	if store := h.getSessionEventStore(); store != nil && sessionID != "" && eventType != "job_output" {
+		if _, err := store.AppendEvent(context.Background(), runtimeEvent); err != nil {
+			recordRuntimeEventPersistError(runtimeEvent.Type, runtimeEvent.SessionID, err)
+		}
+	}
+	h.getRuntimeEventBus().Publish(runtimeEvent)
+}
+
+func (h *Handler) updateSessionActiveJobs(sessionID, jobID, eventType string) {
+	eventType = strings.ToLower(strings.TrimSpace(eventType))
+	switch eventType {
+	case "queued", "running", "completed", "failed", "cancelled":
+		// handled below
+	default:
+		return
+	}
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(jobID) == "" {
+		return
+	}
+	store := h.getSessionRuntimeStore()
+	if store == nil {
+		return
+	}
+	ctx := context.Background()
+	state, err := store.LoadState(ctx, sessionID)
+	if err != nil || state == nil {
+		return
+	}
+
+	changed := false
+	switch eventType {
+	case "queued", "running":
+		if !stringSliceContains(state.ActiveJobIDs, jobID) {
+			state.ActiveJobIDs = append(state.ActiveJobIDs, jobID)
+			changed = true
+		}
+	case "completed", "failed", "cancelled":
+		if filtered, removed := stringSliceRemove(state.ActiveJobIDs, jobID); removed {
+			state.ActiveJobIDs = filtered
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+	state.UpdatedAt = time.Now().UTC()
+	_ = store.SaveState(ctx, state)
+}
+
+func stringSliceContains(values []string, target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, value := range values {
+		if strings.TrimSpace(value) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceRemove(values []string, target string) ([]string, bool) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return values, false
+	}
+	filtered := make([]string, 0, len(values))
+	removed := false
+	for _, value := range values {
+		if strings.TrimSpace(value) == target {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	return filtered, removed
+}
+
+func mapBackgroundEventType(eventType string) string {
+	switch strings.ToLower(strings.TrimSpace(eventType)) {
+	case "queued":
+		return "job_queued"
+	case "running":
+		return "job_started"
+	case "output":
+		return "job_output"
+	case "cancelled":
+		return "job_cancelled"
+	case "completed", "failed":
+		return "job_finished"
+	default:
+		if strings.TrimSpace(eventType) == "" {
+			return "job_event"
+		}
+		return "job_" + strings.ToLower(strings.TrimSpace(eventType))
+	}
+}
+
+func defaultReadOnlyDeniedCommands() []string {
+	return []string{"sh", "bash", "zsh", "fish", "cmd", "powershell", "pwsh", "python", "python3", "node"}
+}
+
+func appendUniqueStrings(existing []string, values ...string) []string {
+	seen := make(map[string]bool, len(existing)+len(values))
+	result := make([]string, 0, len(existing)+len(values))
+	for _, item := range existing {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		result = append(result, trimmed)
+	}
+	for _, item := range values {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		result = append(result, trimmed)
+	}
+	return result
+}
+
+func trimLatestUserMessage(messages []types.Message) []types.Message {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			trimmed := make([]types.Message, 0, len(messages)-1)
+			trimmed = append(trimmed, messages[:i]...)
+			trimmed = append(trimmed, messages[i+1:]...)
+			return trimmed
+		}
+	}
+	return messages
+}
+
+func shouldUseAgentResult(result *agent.Result, runtime *llm.LLMRuntime) bool {
+	if result == nil {
+		return false
+	}
+	if runtime == nil {
+		return true
+	}
+	return result.Skill != "" || result.Success || result.Output != "No matching skill found for the request"
+}
+
+// attachAgentChatTurnID adds the request turn identity to a result envelope
+// without replacing a more specific identity already supplied by the runtime.
+// The frontend uses this field as the boundary between live assistant deltas
+// and a later chat turn, so every response dialect (agent, LLM, and fallback)
+// must carry the same value.
+func attachAgentChatTurnID(payload map[string]interface{}, turnID string) map[string]interface{} {
+	if payload == nil {
+		return payload
+	}
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return payload
+	}
+	if existing, ok := payload["turn_id"].(string); ok && strings.TrimSpace(existing) != "" {
+		return payload
+	}
+	payload["turn_id"] = turnID
+	return payload
+}
+
+func buildAgentResultPayload(source string, result *agent.Result) map[string]interface{} {
+	if result == nil {
+		return map[string]interface{}{
+			"kind":    "agent",
+			"source":  source,
+			"success": false,
+		}
+	}
+
+	payload := map[string]interface{}{
+		"kind":         "agent",
+		"source":       source,
+		"success":      result.Success,
+		"output":       result.Output,
+		"skill":        result.Skill,
+		"trace_id":     result.TraceID,
+		"steps":        result.Steps,
+		"observations": result.Observations,
+		"state":        result.State,
+		"usage":        result.Usage,
+		"duration":     result.Duration,
+		"error":        result.Error,
+	}
+	if turnID := strings.TrimSpace(result.TurnID); turnID != "" {
+		payload["turn_id"] = turnID
+	}
+	if streamID := strings.TrimSpace(result.AssistantStreamID); streamID != "" {
+		payload["assistant_stream_id"] = streamID
+	}
+	if result.AssistantStreamSequence > 0 {
+		payload["assistant_stream_sequence"] = result.AssistantStreamSequence
+	}
+	if result.Reasoning != nil {
+		// Keep the public result shape compatible with the LLM path (a
+		// displayable string) while also retaining the provider/format metadata
+		// needed by trajectory consumers.
+		payload["reasoning"] = result.Reasoning.RawDisplayText()
+		payload["reasoning_block"] = result.Reasoning.ToMap()
+	}
+	if toolCalls := observedToolCalls(result.Observations); len(toolCalls) > 0 {
+		payload["tool_calls"] = toolCalls
+	}
+	if subagentSummary := summarizeSubagents(result.Observations); subagentSummary != nil {
+		payload["subagent_summary"] = subagentSummary
+	}
+	if subagentResults := collectSubagentResults(result.Observations); len(subagentResults) > 0 {
+		payload["subagent_results"] = subagentResults
+	}
+	return payload
+}
+
+func buildLLMResultPayload(source string, response *llm.LLMResponse) map[string]interface{} {
+	if response == nil {
+		return map[string]interface{}{
+			"kind":    "llm",
+			"source":  source,
+			"success": false,
+		}
+	}
+
+	result := map[string]interface{}{
+		"kind":       "llm",
+		"source":     source,
+		"success":    true,
+		"output":     response.Content,
+		"usage":      response.Usage,
+		"model":      response.Model,
+		"tool_calls": response.ToolCalls,
+		"reasoning":  response.Reasoning,
+		"metadata":   response.Metadata,
+	}
+	if response.ReasoningBlock != nil {
+		result["reasoning_block"] = response.ReasoningBlock.ToMap()
+	}
+	return result
+}
+
+func responseResultSource(result interface{}) string {
+	if payload, ok := result.(map[string]interface{}); ok {
+		if source, ok := payload["source"].(string); ok {
+			return source
+		}
+	}
+	return ""
+}
+
+func buildOrchestrationPayload(source string, routeAttempted bool, routeCandidates []*skill.RouteResult, agentResult *agent.Result, llmResponse *llm.LLMResponse, fallback string) map[string]interface{} {
+	observations := []types.Observation(nil)
+	skillName := ""
+	steps := 0
+	success := false
+	model := ""
+	toolCalls := 0
+	output := ""
+
+	if agentResult != nil {
+		observations = agentResult.Observations
+		skillName = agentResult.Skill
+		steps = agentResult.Steps
+		success = agentResult.Success
+		output = agentResult.Output
+		toolCalls = countObservedToolCalls(observations)
+	}
+	if skillName == "" && source == "agent_planned_subagents" && len(routeCandidates) > 0 && routeCandidates[0] != nil && routeCandidates[0].Skill != nil {
+		skillName = routeCandidates[0].Skill.Name
+	}
+	if llmResponse != nil {
+		model = llmResponse.Model
+		toolCalls = len(llmResponse.ToolCalls)
+		success = true
+		output = llmResponse.Content
+	}
+
+	capabilityCandidates := skill.RouteResultsToCapabilityCandidates(routeCandidates)
+	selectedCapability := selectCapabilityDescriptor(capabilityCandidates, skillName)
+
+	return map[string]interface{}{
+		"source":                source,
+		"route_attempted":       routeAttempted,
+		"route_matched":         skillName != "",
+		"candidate_count":       len(routeCandidates),
+		"route_candidates":      summarizeRouteCandidates(routeCandidates, skillName, source),
+		"capability_candidates": capabilityCandidates,
+		"capability":            selectedCapability,
+		"fallback_reason":       fallback,
+		"skill":                 skillName,
+		"model":                 model,
+		"success":               success,
+		"steps":                 steps,
+		"tool_call_count":       toolCalls,
+		"observation_summary":   summarizeObservations(observations),
+		"output_preview":        previewText(output, 120),
+	}
+}
+
+func countObservedToolCalls(observations []types.Observation) int {
+	if len(observations) == 0 {
+		return 0
+	}
+	count := 0
+	for _, observation := range observations {
+		if strings.TrimSpace(observation.Tool) == "" {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func observedToolCalls(observations []types.Observation) []map[string]interface{} {
+	if len(observations) == 0 {
+		return nil
+	}
+
+	calls := make([]map[string]interface{}, 0, len(observations))
+	for index, observation := range observations {
+		toolName := strings.TrimSpace(observation.Tool)
+		if toolName == "" {
+			continue
+		}
+
+		call := map[string]interface{}{
+			"id":   observationToolCallID(observation, index),
+			"name": toolName,
+		}
+		if args := cloneObservedToolArguments(observation.Input); len(args) > 0 {
+			call["arguments"] = args
+		}
+		calls = append(calls, call)
+	}
+
+	if len(calls) == 0 {
+		return nil
+	}
+	return calls
+}
+
+func observationToolCallID(observation types.Observation, index int) string {
+	step := strings.TrimSpace(observation.Step)
+	if step == "" {
+		return fmt.Sprintf("observation_tool_%d", index+1)
+	}
+
+	replacer := strings.NewReplacer(" ", "_", ":", "_", "/", "_", "\\", "_")
+	return "observation_" + replacer.Replace(step)
+}
+
+func cloneObservedToolArguments(input interface{}) map[string]interface{} {
+	args, ok := input.(map[string]interface{})
+	if !ok || len(args) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]interface{}, len(args))
+	for key, value := range args {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func selectCapabilityDescriptor(candidates []*capability.Candidate, skillName string) *capability.Descriptor {
+	if skillName == "" {
+		return nil
+	}
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.Descriptor == nil {
+			continue
+		}
+		if candidate.Descriptor.Name == skillName || candidate.Descriptor.ID == skillName {
+			return candidate.Descriptor
+		}
+	}
+	return &capability.Descriptor{
+		ID:   skillName,
+		Name: skillName,
+		Kind: capability.KindSkill,
+	}
+}
+
+func summarizeRouteCandidates(candidates []*skill.RouteResult, selectedSkill string, source string) []map[string]interface{} {
+	if len(candidates) == 0 {
+		return []map[string]interface{}{}
+	}
+
+	summary := make([]map[string]interface{}, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.Skill == nil {
+			continue
+		}
+		chosen := selectedSkill != "" && candidate.Skill.Name == selectedSkill
+		selectionReason := "not_selected"
+		if chosen {
+			selectionReason = "selected"
+		} else if source == "llm_fallback" {
+			selectionReason = "fallback_to_llm"
+		}
+		summary = append(summary, map[string]interface{}{
+			"skill":            candidate.Skill.Name,
+			"score":            candidate.Score,
+			"matched_by":       candidate.MatchedBy,
+			"details":          candidate.Details,
+			"chosen":           chosen,
+			"selection_reason": selectionReason,
+		})
+	}
+	return summary
+}
+
+func summarizeObservations(observations []types.Observation) map[string]interface{} {
+	summary := map[string]interface{}{
+		"count":                             len(observations),
+		"successful":                        0,
+		"failed":                            0,
+		"tools":                             []string{},
+		"failed_tools":                      []string{},
+		"failed_details":                    []map[string]interface{}{},
+		"step_durations_ms":                 map[string]int64{},
+		"total_duration_ms":                 int64(0),
+		"max_duration_ms":                   int64(0),
+		"average_duration_ms":               int64(0),
+		"subagent_batches":                  0,
+		"subagent_count":                    0,
+		"subagent_dispatched":               0,
+		"subagent_successful":               0,
+		"subagent_failed":                   0,
+		"subagent_roles":                    []string{},
+		"subagent_patch_count":              0,
+		"subagent_applied_patch_count":      0,
+		"subagent_verified_patch_count":     0,
+		"subagent_needs_review_patch_count": 0,
+		"subagent_unverified_patch_count":   0,
+		"subagent_patch_paths":              []string{},
+	}
+	if len(observations) == 0 {
+		return summary
+	}
+
+	tools := make([]string, 0, len(observations))
+	failedTools := make([]string, 0)
+	failedDetails := make([]map[string]interface{}, 0)
+	stepDurations := make(map[string]int64, len(observations))
+	subagentRoles := make([]string, 0)
+	subagentPatchPaths := make([]string, 0)
+	seenRoles := make(map[string]bool)
+	seenPatchPaths := make(map[string]bool)
+	var totalDuration int64
+	var maxDuration int64
+	for _, observation := range observations {
+		tools = append(tools, observation.Tool)
+		durationMS := observation.Duration.GetDuration().Milliseconds()
+		stepKey := observation.Step
+		if stepKey == "" {
+			stepKey = observation.Tool
+		}
+		stepDurations[stepKey] = durationMS
+		totalDuration += durationMS
+		if durationMS > maxDuration {
+			maxDuration = durationMS
+		}
+		if observation.Success {
+			summary["successful"] = summary["successful"].(int) + 1
+		} else {
+			summary["failed"] = summary["failed"].(int) + 1
+			failedTools = append(failedTools, observation.Tool)
+			failedDetails = append(failedDetails, map[string]interface{}{
+				"step":        observation.Step,
+				"tool":        observation.Tool,
+				"error":       observation.Error,
+				"duration_ms": durationMS,
+			})
+		}
+
+		for _, report := range observationSubagentReports(observation) {
+			summary["subagent_count"] = summary["subagent_count"].(int) + 1
+			if report.Success {
+				summary["subagent_successful"] = summary["subagent_successful"].(int) + 1
+			} else {
+				summary["subagent_failed"] = summary["subagent_failed"].(int) + 1
+			}
+			if report.Role != "" && !seenRoles[report.Role] {
+				seenRoles[report.Role] = true
+				subagentRoles = append(subagentRoles, report.Role)
+			}
+			for _, patch := range report.Patches {
+				summary["subagent_patch_count"] = summary["subagent_patch_count"].(int) + 1
+				if patchApplyStatus(patch) == "applied" {
+					summary["subagent_applied_patch_count"] = summary["subagent_applied_patch_count"].(int) + 1
+				}
+				switch strings.TrimSpace(patch.VerificationStatus) {
+				case "verified":
+					summary["subagent_verified_patch_count"] = summary["subagent_verified_patch_count"].(int) + 1
+				case "needs_review":
+					summary["subagent_needs_review_patch_count"] = summary["subagent_needs_review_patch_count"].(int) + 1
+				default:
+					summary["subagent_unverified_patch_count"] = summary["subagent_unverified_patch_count"].(int) + 1
+				}
+				if patch.Path != "" && !seenPatchPaths[patch.Path] {
+					seenPatchPaths[patch.Path] = true
+					subagentPatchPaths = append(subagentPatchPaths, patch.Path)
+				}
+			}
+		}
+		if _, ok := observation.GetMetric("subagent_reports"); ok {
+			summary["subagent_batches"] = summary["subagent_batches"].(int) + 1
+		}
+		// C4-1：异步派发 turn 只带回 batch 句柄（没有子任务报告），这里统计"已派发"，
+		// 让父会话在 turn 结束时仍能看到派发事实；successful/roles 等终态字段由
+		// 批次终态投递（resume / 监督通道）在后续 turn 的观测里补齐。
+		if batchID, ok := observation.GetMetric("subagent_batch_id"); ok {
+			if id, _ := batchID.(string); id != "" {
+				summary["subagent_batches"] = summary["subagent_batches"].(int) + 1
+				if dispatched, ok := observation.GetMetric("subagent_count"); ok {
+					switch n := dispatched.(type) {
+					case int:
+						summary["subagent_dispatched"] = summary["subagent_dispatched"].(int) + n
+					case float64:
+						summary["subagent_dispatched"] = summary["subagent_dispatched"].(int) + int(n)
+					}
+				}
+			}
+		}
+	}
+	summary["tools"] = tools
+	summary["failed_tools"] = failedTools
+	summary["failed_details"] = failedDetails
+	summary["step_durations_ms"] = stepDurations
+	summary["total_duration_ms"] = totalDuration
+	summary["max_duration_ms"] = maxDuration
+	summary["average_duration_ms"] = totalDuration / int64(len(observations))
+	summary["subagent_roles"] = subagentRoles
+	summary["subagent_patch_paths"] = subagentPatchPaths
+	return summary
+}
+
+func summarizeSubagents(observations []types.Observation) map[string]interface{} {
+	observationSummary := summarizeObservations(observations)
+	count, _ := observationSummary["subagent_count"].(int)
+	dispatched, _ := observationSummary["subagent_dispatched"].(int)
+	if count == 0 && dispatched == 0 {
+		return nil
+	}
+	return map[string]interface{}{
+		"batches":                  observationSummary["subagent_batches"],
+		"count":                    observationSummary["subagent_count"],
+		"dispatched":               observationSummary["subagent_dispatched"],
+		"successful":               observationSummary["subagent_successful"],
+		"failed":                   observationSummary["subagent_failed"],
+		"roles":                    observationSummary["subagent_roles"],
+		"patch_count":              observationSummary["subagent_patch_count"],
+		"applied_patch_count":      observationSummary["subagent_applied_patch_count"],
+		"verified_patch_count":     observationSummary["subagent_verified_patch_count"],
+		"needs_review_patch_count": observationSummary["subagent_needs_review_patch_count"],
+		"unverified_patch_count":   observationSummary["subagent_unverified_patch_count"],
+		"patch_paths":              observationSummary["subagent_patch_paths"],
+	}
+}
+
+func collectSubagentResults(observations []types.Observation) []agent.SubagentResult {
+	results := make([]agent.SubagentResult, 0)
+	seen := make(map[string]bool)
+	for _, observation := range observations {
+		for _, report := range observationSubagentReports(observation) {
+			key := firstNonEmptyString(report.SessionID, report.ID)
+			if key != "" && seen[key] {
+				continue
+			}
+			if key != "" {
+				seen[key] = true
+			}
+			results = append(results, report)
+		}
+	}
+	return results
+}
+
+func observationSubagentReports(observation types.Observation) []agent.SubagentResult {
+	value, ok := observation.GetMetric("subagent_reports")
+	if !ok || value == nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case []agent.SubagentResult:
+		return typed
+	case []map[string]interface{}:
+		reports := make([]agent.SubagentResult, 0, len(typed))
+		for _, reportMap := range typed {
+			reports = append(reports, subagentResultFromMap(reportMap))
+		}
+		return reports
+	case []interface{}:
+		reports := make([]agent.SubagentResult, 0, len(typed))
+		for _, item := range typed {
+			reportMap, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			reports = append(reports, subagentResultFromMap(reportMap))
+		}
+		return reports
+	default:
+		return nil
+	}
+}
+
+func subagentResultFromMap(reportMap map[string]interface{}) agent.SubagentResult {
+	return agent.SubagentResult{
+		ID:        stringMapValueAny(reportMap, "id"),
+		Role:      stringMapValueAny(reportMap, "role"),
+		SessionID: stringMapValueAny(reportMap, "session_id"),
+		Summary:   stringMapValueAny(reportMap, "summary"),
+		Success:   boolMapValueAny(reportMap, "success"),
+		ReadOnly:  boolMapValueAny(reportMap, "read_only"),
+		Patches:   filePatchesFromAny(reportMap["patches"]),
+		Error:     stringMapValueAny(reportMap, "error"),
+	}
+}
+
+func stringMapValueAny(values map[string]interface{}, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	value, _ := values[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func boolMapValueAny(values map[string]interface{}, key string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	value, _ := values[key].(bool)
+	return value
+}
+
+func intMapValueAny(values map[string]interface{}, key string) int {
+	if len(values) == 0 {
+		return 0
+	}
+	switch value := values[key].(type) {
+	case int:
+		return value
+	case int32:
+		return int(value)
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	default:
+		return 0
+	}
+}
+
+func stringSliceValueAny(value interface{}) []string {
+	switch items := value.(type) {
+	case []string:
+		values := make([]string, 0, len(items))
+		for _, item := range items {
+			text := strings.TrimSpace(item)
+			if text == "" {
+				continue
+			}
+			values = append(values, text)
+		}
+		return values
+	case []interface{}:
+		values := make([]string, 0, len(items))
+		for _, item := range items {
+			text, _ := item.(string)
+			text = strings.TrimSpace(text)
+			if text == "" {
+				continue
+			}
+			values = append(values, text)
+		}
+		return values
+	default:
+		return nil
+	}
+}
+
+func filePatchesFromAny(value interface{}) []agent.FilePatch {
+	items, ok := value.([]interface{})
+	if !ok {
+		return nil
+	}
+	patches := make([]agent.FilePatch, 0, len(items))
+	for _, item := range items {
+		patchMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		patch := agent.FilePatch{
+			Path:               stringMapValueAny(patchMap, "path"),
+			Summary:            stringMapValueAny(patchMap, "summary"),
+			Diff:               stringMapValueAny(patchMap, "diff"),
+			ApplyStatus:        stringMapValueAny(patchMap, "apply_status"),
+			AppliedBy:          stringSliceValueAny(patchMap["applied_by"]),
+			ArtifactRefs:       stringSliceValueAny(patchMap["artifact_refs"]),
+			VerificationStatus: stringMapValueAny(patchMap, "verification_status"),
+			VerifiedBy:         stringSliceValueAny(patchMap["verified_by"]),
+		}
+		patches = append(patches, patch)
+	}
+	return patches
+}
+
+func patchApplyStatus(patch agent.FilePatch) string {
+	status := strings.TrimSpace(patch.ApplyStatus)
+	if status == "" {
+		return "applied"
+	}
+	return status
+}
+
+func previewText(text string, maxLen int) string {
+	if maxLen <= 0 || len(text) <= maxLen {
+		return text
+	}
+	if maxLen <= 3 {
+		return text[:maxLen]
+	}
+	return text[:maxLen-3] + "..."
+}
+
+func fallbackReason(routeAttempted bool) string {
+	if routeAttempted {
+		return "no_matching_skill"
+	}
+	return "route_disabled"
+}
+
+func buildPlanningPayload(result *agent.OrchestrationResult) map[string]interface{} {
+	if result == nil || (!result.PlanningAttempted && result.Plan == nil) {
+		return nil
+	}
+
+	payload := map[string]interface{}{
+		"mode":                              string(result.Mode),
+		"attempted":                         result.PlanningAttempted,
+		"planning_source":                   result.PlanningSource,
+		"planning_error":                    result.PlanningError,
+		"step_count":                        0,
+		"subagent_task_count":               0,
+		"subagent_execution_requested":      result.SubagentExecutionRequested,
+		"subagent_execution_eligible":       result.SubagentExecutionEligible,
+		"subagent_execution_blocked_reason": result.SubagentExecutionBlockedReason,
+		"subagent_execution_attempted":      result.SubagentExecutionAttempted,
+		"subagent_execution_error":          result.SubagentExecutionError,
+		"patch_decision":                    result.PatchDecision,
+		"patch_decision_reason":             result.PatchDecisionReason,
+		"patch_decision_required":           result.PatchDecisionRequired,
+		"patch_decision_policy":             result.PatchDecisionPolicy,
+		"patch_decision_override_applied":   result.PatchDecisionOverrideApplied,
+		"patch_approval":                    result.PatchApproval,
+		"subagent_result_count":             len(result.SubagentResults),
+		"subagent_patch_count":              0,
+		"subagent_applied_patch_count":      0,
+		"subagent_verified_patch_count":     0,
+		"subagent_needs_review_patch_count": 0,
+		"subagent_unverified_patch_count":   0,
+		"goal":                              "",
+		"steps":                             []map[string]interface{}{},
+		"subagent_tasks":                    []agent.SubagentTask{},
+	}
+	if patchCount, appliedCount, verifiedCount, needsReviewCount, unverifiedCount := subagentPatchStats(result.SubagentResults); patchCount > 0 {
+		payload["subagent_patch_count"] = patchCount
+		payload["subagent_applied_patch_count"] = appliedCount
+		payload["subagent_verified_patch_count"] = verifiedCount
+		payload["subagent_needs_review_patch_count"] = needsReviewCount
+		payload["subagent_unverified_patch_count"] = unverifiedCount
+	}
+	if result.Plan == nil {
+		if len(result.SubagentTasks) > 0 {
+			payload["subagent_tasks"] = result.SubagentTasks
+			payload["subagent_task_count"] = len(result.SubagentTasks)
+		}
+		return payload
+	}
+
+	payload["goal"] = result.Plan.Goal
+	payload["step_count"] = len(result.Plan.Steps)
+	steps := make([]map[string]interface{}, 0, len(result.Plan.Steps))
+	for _, step := range result.Plan.Steps {
+		steps = append(steps, map[string]interface{}{
+			"id":          step.ID,
+			"description": step.Description,
+			"tool":        step.Tool,
+			"depends_on":  step.DependsOn,
+			"priority":    step.Priority,
+		})
+	}
+	payload["steps"] = steps
+	if len(result.SubagentTasks) > 0 {
+		payload["subagent_tasks"] = result.SubagentTasks
+		payload["subagent_task_count"] = len(result.SubagentTasks)
+	}
+	return payload
+}
+
+func subagentPatchStats(results []agent.SubagentResult) (int, int, int, int, int) {
+	total := 0
+	applied := 0
+	verified := 0
+	needsReview := 0
+	unverified := 0
+	for _, result := range results {
+		for _, patch := range result.Patches {
+			total++
+			if patchApplyStatus(patch) == "applied" {
+				applied++
+			}
+			switch strings.TrimSpace(patch.VerificationStatus) {
+			case "verified":
+				verified++
+			case "needs_review":
+				needsReview++
+			default:
+				unverified++
+			}
+		}
+	}
+	return total, applied, verified, needsReview, unverified
+}
+
+func (h *Handler) buildWorkspaceContext(path, query string, config *runtimecfg.RuntimeConfig) (*workspace.WorkspaceContext, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, nil
+	}
+
+	scan, symbols, references, err := h.scanWorkspaceCached(path, config)
+	if err != nil {
+		return nil, errors.New(errors.ErrValidationFailed,
+			fmt.Sprintf("failed to scan workspace path: %s", path))
+	}
+
+	builder := workspace.NewContextBuilderWithIndexes(scan, symbols, references, nil)
+	return builder.Build(query), nil
+}
+
+// workspaceScanCacheTTL 工作区扫描结果的缓存时长。全量扫描大仓库耗时可达数十秒，
+// 每次请求都重扫会让 SSE 首包（meta 事件）迟迟不发，前端表现为一直 "Connecting to runtime…"。
+const workspaceScanCacheTTL = 60 * time.Second
+
+type workspaceScanCacheEntry struct {
+	scan       *workspace.ScanResult
+	symbols    *workspace.SymbolIndex
+	references *workspace.ReferenceGraph
+	at         time.Time
+}
+
+// scanWorkspaceCached 返回 workspace 的扫描结果，带 TTL 缓存：
+// 命中缓存直接返回；未命中时在锁内执行扫描，同一工作区的并发请求会复用同一次扫描结果。
+// 符号索引与引用图随扫描结果一起缓存，避免每次请求重复构建（大仓库可达数秒）。
+func (h *Handler) scanWorkspaceCached(path string, config *runtimecfg.RuntimeConfig) (*workspace.ScanResult, *workspace.SymbolIndex, *workspace.ReferenceGraph, error) {
+	key := path + "|" + workspaceConfigFingerprint(config)
+
+	h.workspaceScanMu.Lock()
+	defer h.workspaceScanMu.Unlock()
+
+	if h.workspaceScanCache == nil {
+		h.workspaceScanCache = make(map[string]*workspaceScanCacheEntry)
+	}
+	if entry := h.workspaceScanCache[key]; entry != nil && time.Since(entry.at) < workspaceScanCacheTTL {
+		return entry.scan, entry.symbols, entry.references, nil
+	}
+
+	scanner := workspace.NewScanner(workspaceConfigFromRuntime(config))
+	scan, err := scanner.Scan(path)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	entry := &workspaceScanCacheEntry{
+		scan:       scan,
+		symbols:    workspace.NewSymbolIndex(scan),
+		references: workspace.NewReferenceGraph(scan),
+		at:         time.Now(),
+	}
+	h.workspaceScanCache[key] = entry
+	return entry.scan, entry.symbols, entry.references, nil
+}
+
+// workspaceConfigFingerprint 将影响扫描结果的配置参数编码进缓存 key，
+// 配置变化（如 include/exclude 调整）时自动失效。
+func workspaceConfigFingerprint(config *runtimecfg.RuntimeConfig) string {
+	cfg := workspaceConfigFromRuntime(config)
+	if cfg == nil {
+		return "default"
+	}
+	return fmt.Sprintf("%d|%d|%d|%v|%v", cfg.MaxFileSize, cfg.MaxChunkSize, cfg.ChunkOverlap, cfg.IncludePatterns, cfg.ExcludePatterns)
+}
+
+func workspaceConfigFromRuntime(config *runtimecfg.RuntimeConfig) *workspace.WorkspaceConfig {
+	if config == nil {
+		return nil
+	}
+	ws := config.Workspace
+	cfg := workspace.DefaultWorkspaceConfig()
+	if ws.MaxFileSize > 0 {
+		cfg.MaxFileSize = ws.MaxFileSize
+	}
+	if ws.MaxChunkSize > 0 {
+		cfg.MaxChunkSize = ws.MaxChunkSize
+	}
+	if ws.ChunkOverlap > 0 {
+		cfg.ChunkOverlap = ws.ChunkOverlap
+	}
+	if len(ws.Include) > 0 {
+		cfg.IncludePatterns = append([]string(nil), ws.Include...)
+	}
+	if len(ws.Exclude) > 0 {
+		cfg.ExcludePatterns = append([]string(nil), ws.Exclude...)
+	}
+	return cfg
+}
+
+func (h *Handler) routeCandidates(ctx context.Context, prompt string) []*skill.RouteResult {
+	return routeCandidatesWithRuntime(ctx, prompt, h.skillRegistry, h.embeddingRouter)
+}
+
+func routeCandidatesWithRuntime(ctx context.Context, prompt string, registry *skill.Registry, embeddingRouter *skill.SemanticEmbeddingRouter) []*skill.RouteResult {
+	if registry == nil {
+		return nil
+	}
+	router := skill.NewRouter(registry)
+	if embeddingRouter != nil {
+		if handlerEmbeddingRouter, err := embeddingRouter.CloneForRegistry(registry); err == nil {
+			router.SetEmbeddingRouter(handlerEmbeddingRouter)
+		}
+	}
+	return router.Route(ctx, prompt)
+}
+
+func (h *Handler) searchSkillMatches(ctx context.Context, query, category string, mode searchMode) ([]*skill.RouteResult, searchMode) {
+	lexicalMatches := h.lexicalSearchMatches(ctx, query, category)
+	semanticMatches := h.semanticSearchMatches(ctx, query, category)
+
+	switch mode {
+	case searchModeLexical:
+		return lexicalMatches, searchModeLexical
+	case searchModeSemantic:
+		return semanticMatches, searchModeSemantic
+	case searchModeHybrid:
+		return mergeSearchMatches(lexicalMatches, semanticMatches), searchModeHybrid
+	case searchModeAuto:
+		if len(lexicalMatches) > 0 {
+			return lexicalMatches, searchModeLexical
+		}
+		if len(semanticMatches) > 0 {
+			return semanticMatches, searchModeSemantic
+		}
+		return lexicalMatches, searchModeAuto
+	default:
+		return lexicalMatches, searchModeLexical
+	}
+}
+
+func (h *Handler) lexicalSearchMatches(ctx context.Context, query, category string) []*skill.RouteResult {
+	if h.skillRegistry == nil {
+		return nil
+	}
+
+	router := skill.NewRouter(h.skillRegistry)
+	return filterRouteResultsByCategory(router.Route(ctx, query), category)
+}
+
+func (h *Handler) semanticSearchMatches(ctx context.Context, query, category string) []*skill.RouteResult {
+	if h.embeddingRouter == nil {
+		return nil
+	}
+
+	results, err := h.embeddingRouter.Route(ctx, query)
+	if err != nil {
+		return nil
+	}
+	return filterRouteResultsByCategory(results, category)
+}
+
+func filterRouteResultsByCategory(results []*skill.RouteResult, category string) []*skill.RouteResult {
+	if category == "" {
+		return results
+	}
+
+	filtered := make([]*skill.RouteResult, 0, len(results))
+	for _, result := range results {
+		if result == nil || result.Skill == nil {
+			continue
+		}
+		if strings.EqualFold(result.Skill.Category, category) {
+			filtered = append(filtered, result)
+		}
+	}
+	return filtered
+}
+
+func filterRouteResultsBySource(results []*skill.RouteResult, layer, dir string) []*skill.RouteResult {
+	if layer == "" && dir == "" {
+		return results
+	}
+
+	filtered := make([]*skill.RouteResult, 0, len(results))
+	for _, result := range results {
+		if result == nil || result.Skill == nil {
+			continue
+		}
+		if matchesSkillSource(result.Skill, layer, dir) {
+			filtered = append(filtered, result)
+		}
+	}
+	return filtered
+}
+
+func mergeSearchMatches(groups ...[]*skill.RouteResult) []*skill.RouteResult {
+	bestBySkill := make(map[string]*skill.RouteResult)
+	order := make([]string, 0)
+
+	for _, group := range groups {
+		for _, match := range group {
+			if match == nil || match.Skill == nil {
+				continue
+			}
+
+			name := match.Skill.Name
+			existing, exists := bestBySkill[name]
+			if !exists {
+				bestBySkill[name] = match
+				order = append(order, name)
+				continue
+			}
+
+			if match.Score > existing.Score || (match.Score == existing.Score && existing.MatchedBy == "embedding" && match.MatchedBy != "embedding") {
+				bestBySkill[name] = match
+			}
+		}
+	}
+
+	merged := make([]*skill.RouteResult, 0, len(order))
+	for _, name := range order {
+		merged = append(merged, bestBySkill[name])
+	}
+	return merged
+}
+
+func extractSkillsFromMatches(matches []*skill.RouteResult) []*skill.Skill {
+	results := make([]*skill.Skill, 0, len(matches))
+	for _, match := range matches {
+		if match == nil || match.Skill == nil {
+			continue
+		}
+		results = append(results, match.Skill)
+	}
+	return results
+}
+
+func serializeSearchMatches(matches []*skill.RouteResult) []map[string]interface{} {
+	serialized := make([]map[string]interface{}, 0, len(matches))
+	for _, match := range matches {
+		if match == nil || match.Skill == nil {
+			continue
+		}
+
+		serialized = append(serialized, map[string]interface{}{
+			"skill":      match.Skill,
+			"score":      match.Score,
+			"matched_by": match.MatchedBy,
+			"details":    match.Details,
+		})
+	}
+	return serialized
+}
+
+func searchUsesEmbedding(matches []*skill.RouteResult) bool {
+	for _, match := range matches {
+		if match != nil && match.MatchedBy == "embedding" {
+			return true
+		}
+	}
+	return false
+}
+
+func parseSearchMode(r *http.Request) searchMode {
+	mode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+	if mode == "" {
+		if semantic, err := strconv.ParseBool(r.URL.Query().Get("semantic")); err == nil && semantic {
+			return searchModeSemantic
+		}
+		return searchModeAuto
+	}
+
+	switch searchMode(mode) {
+	case searchModeAuto, searchModeLexical, searchModeSemantic, searchModeHybrid:
+		return searchMode(mode)
+	default:
+		return searchModeAuto
+	}
+}
+
+func (h *Handler) recordSearchTelemetry(query string, requestedMode, resolvedMode searchMode, resultCount int, usedEmbedding bool) {
+	if h.searchTelemetry == nil {
+		return
+	}
+
+	h.searchTelemetry.mu.Lock()
+	defer h.searchTelemetry.mu.Unlock()
+
+	h.searchTelemetry.totalRequests++
+	h.searchTelemetry.totalResults += resultCount
+	if usedEmbedding {
+		h.searchTelemetry.embeddingRequests++
+	}
+	h.searchTelemetry.lastQuery = query
+	h.searchTelemetry.lastRequestedMode = string(requestedMode)
+	h.searchTelemetry.lastResolvedMode = string(resolvedMode)
+	h.searchTelemetry.lastResultCount = resultCount
+	h.searchTelemetry.lastEmbeddingUsed = usedEmbedding
+	h.searchTelemetry.requestedModeCount[string(requestedMode)]++
+	h.searchTelemetry.resolvedModeCount[string(resolvedMode)]++
+}
+
+func (h *Handler) recordSearchReindex(status string) {
+	if h.searchTelemetry == nil {
+		return
+	}
+
+	h.searchTelemetry.mu.Lock()
+	defer h.searchTelemetry.mu.Unlock()
+
+	h.searchTelemetry.reindexCount++
+	h.searchTelemetry.lastReindexStatus = status
+	h.searchTelemetry.lastReindexAt = time.Now()
+}
+
+func (h *Handler) authorizeSearchAdmin(r *http.Request) error {
+	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) || isLoopbackRequest(r) {
+		return nil
+	}
+	return errors.New(errors.ErrAgentPermission, "search admin endpoints require loopback access, valid admin token, or admin role")
+}
+
+func (h *Handler) authorizeUsageAdmin(r *http.Request) error {
+	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) || isLoopbackRequest(r) {
+		return nil
+	}
+	return errors.New(errors.ErrAgentPermission, "usage admin endpoints require loopback access, valid admin token, or admin role")
+}
+
+func (h *Handler) authorizeSkillMutation(r *http.Request) error {
+	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) || isLoopbackRequest(r) {
+		return nil
+	}
+	return errors.New(errors.ErrAgentPermission, "skill mutation endpoints require loopback access, valid admin token, or admin role")
+}
+
+func (h *Handler) enforceMutationActionPolicy(action string, r *http.Request) error {
+	policy := h.getMutationPolicy()
+	if policy.ReadOnly {
+		switch action {
+		case skillMutationActionCreate, skillMutationActionUpdate, skillMutationActionDelete, skillMutationActionBatchCreate, skillMutationActionImport:
+			return errors.New(errors.ErrAgentPermission, "skills runtime is read-only")
+		}
+	}
+
+	if policy.DisableImport && action == skillMutationActionImport {
+		return errors.New(errors.ErrAgentPermission, "skill import is disabled by policy")
+	}
+	if policy.DisableReloadOps && action == skillMutationActionReload {
+		return errors.New(errors.ErrAgentPermission, "skill reload is disabled by policy")
+	}
+	if policy.DisableHotReload {
+		switch action {
+		case skillMutationActionHotReloadStart, skillMutationActionHotReloadStop, skillMutationActionHotReloadRun:
+			return errors.New(errors.ErrAgentPermission, "skill hot reload is disabled by policy")
+		}
+	}
+	return nil
+}
+
+func (h *Handler) enforcePersistPolicy(existingSkill *skill.Skill, r *http.Request) error {
+	if !h.getMutationPolicy().DisablePersist {
+		return nil
+	}
+	if shouldPersistSkill(r) || shouldPersistUpdatedSkill(existingSkill, r) {
+		return errors.New(errors.ErrAgentPermission, "skill persistence is disabled by policy")
+	}
+	return nil
+}
+
+func (h *Handler) enforceDeleteFilePolicy(r *http.Request) error {
+	if !h.getMutationPolicy().DisablePersist {
+		return nil
+	}
+	if shouldDeleteSkillFile(r) {
+		return errors.New(errors.ErrAgentPermission, "skill file deletion is disabled by policy")
+	}
+	return nil
+}
+
+func (h *Handler) searchAdminAccessMode(r *http.Request) string {
+	switch {
+	case h.hasValidSearchAdminToken(r):
+		return "token"
+	case h.hasTrustedAdminRole(r):
+		return "role"
+	case isLoopbackRequest(r):
+		return "loopback"
+	default:
+		return "denied"
+	}
+}
+
+func (h *Handler) skillMutationAccessMode(r *http.Request) string {
+	switch {
+	case h.hasValidSearchAdminToken(r):
+		return "token"
+	case h.hasTrustedAdminRole(r):
+		return "role"
+	case isLoopbackRequest(r):
+		return "loopback"
+	default:
+		return "denied"
+	}
+}
+
+func (h *Handler) mutationPolicySnapshot() map[string]interface{} {
+	policy := h.getMutationPolicy()
+	return map[string]interface{}{
+		"read_only":          policy.ReadOnly,
+		"disable_import":     policy.DisableImport,
+		"disable_persist":    policy.DisablePersist,
+		"disable_reload_ops": policy.DisableReloadOps,
+		"disable_hot_reload": policy.DisableHotReload,
+	}
+}
+
+func (h *Handler) usagePolicySnapshot() map[string]interface{} {
+	policy := h.getUsagePolicy()
+	return map[string]interface{}{
+		"tracking_enabled":     policy.TrackingEnabled,
+		"ledger_enabled":       h.usageLedgerStore != nil,
+		"quota_enabled":        policy.QuotaEnabled,
+		"default_max_requests": policy.DefaultMaxRequests,
+		"default_max_tokens":   policy.DefaultMaxTokens,
+		"tenant_quota_count":   len(policy.TenantQuotas),
+		"project_quota_count":  len(policy.ProjectQuotas),
+		"user_quota_count":     len(policy.UserQuotas),
+	}
+}
+
+func (h *Handler) usagePolicyDetailedSnapshot() map[string]interface{} {
+	policy := h.getUsagePolicy()
+	return map[string]interface{}{
+		"tracking_enabled":     policy.TrackingEnabled,
+		"ledger_enabled":       h.usageLedgerStore != nil,
+		"quota_enabled":        policy.QuotaEnabled,
+		"default_max_requests": policy.DefaultMaxRequests,
+		"default_max_tokens":   policy.DefaultMaxTokens,
+		"tenants":              serializeUsageQuotaLimits(policy.TenantQuotas),
+		"projects":             serializeUsageQuotaLimits(policy.ProjectQuotas),
+		"users":                serializeUsageQuotaLimits(policy.UserQuotas),
+	}
+}
+
+func (h *Handler) scopeResolverPolicySnapshot() map[string]interface{} {
+	return serializeScopeResolverPolicy(h.getScopeResolverConfig())
+}
+
+func serializeScopeResolverPolicy(config ScopeResolverConfig) map[string]interface{} {
+	return map[string]interface{}{
+		"enabled":               config.Enabled,
+		"jwt_claims_enabled":    config.JWTClaimsEnabled,
+		"jwt_secret_configured": strings.TrimSpace(config.JWTSecret) != "",
+		"tenant_headers":        append([]string(nil), config.TenantHeaders...),
+		"project_headers":       append([]string(nil), config.ProjectHeaders...),
+		"user_headers":          append([]string(nil), config.UserHeaders...),
+		"role_headers":          append([]string(nil), config.RoleHeaders...),
+		"tenant_claims":         append([]string(nil), config.TenantClaims...),
+		"project_claims":        append([]string(nil), config.ProjectClaims...),
+		"user_claims":           append([]string(nil), config.UserClaims...),
+		"role_claims":           append([]string(nil), config.RoleClaims...),
+		"admin_roles":           append([]string(nil), config.AdminRoles...),
+		"api_key_scope_count":   len(config.APIKeyScopes),
+	}
+}
+
+func (h *Handler) getUsagePolicy() UsagePolicy {
+	h.usagePolicyMu.RLock()
+	defer h.usagePolicyMu.RUnlock()
+	return cloneUsagePolicy(h.usagePolicy)
+}
+
+func (h *Handler) getMutationPolicy() MutationPolicy {
+	h.mutationPolicyMu.RLock()
+	defer h.mutationPolicyMu.RUnlock()
+	return h.mutationPolicy
+}
+
+func (h *Handler) updateMutationPolicy(update mutationPolicyUpdateRequest) MutationPolicy {
+	h.mutationPolicyMu.Lock()
+	defer h.mutationPolicyMu.Unlock()
+
+	current := h.mutationPolicy
+	if update.ReadOnly != nil {
+		current.ReadOnly = *update.ReadOnly
+	}
+	if update.DisableImport != nil {
+		current.DisableImport = *update.DisableImport
+	}
+	if update.DisablePersist != nil {
+		current.DisablePersist = *update.DisablePersist
+	}
+	if update.DisableReloadOps != nil {
+		current.DisableReloadOps = *update.DisableReloadOps
+	}
+	if update.DisableHotReload != nil {
+		current.DisableHotReload = *update.DisableHotReload
+	}
+	h.mutationPolicy = current
+	return current
+}
+
+func (h *Handler) getScopeResolverConfig() ScopeResolverConfig {
+	h.scopeResolverMu.RLock()
+	defer h.scopeResolverMu.RUnlock()
+	return cloneScopeResolverConfig(h.scopeResolverConfig)
+}
+
+func cloneUsagePolicy(policy UsagePolicy) UsagePolicy {
+	cloned := policy
+	cloned.TenantQuotas = cloneUsageQuotaMap(policy.TenantQuotas)
+	cloned.ProjectQuotas = cloneUsageQuotaMap(policy.ProjectQuotas)
+	cloned.UserQuotas = cloneUsageQuotaMap(policy.UserQuotas)
+	return cloned
+}
+
+func cloneUsageQuotaMap(source map[string]UsageQuotaLimit) map[string]UsageQuotaLimit {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]UsageQuotaLimit, len(source))
+	for key, value := range source {
+		cloned[key] = UsageQuotaLimit{
+			MaxRequests: cloneIntPointer(value.MaxRequests),
+			MaxTokens:   cloneIntPointer(value.MaxTokens),
+		}
+	}
+	return cloned
+}
+
+func cloneIntPointer(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneUsageScopeMap(source map[string]UsageScope) map[string]UsageScope {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]UsageScope, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneScopeResolverConfig(config ScopeResolverConfig) ScopeResolverConfig {
+	return ScopeResolverConfig{
+		Enabled:          config.Enabled,
+		TenantHeaders:    append([]string(nil), config.TenantHeaders...),
+		ProjectHeaders:   append([]string(nil), config.ProjectHeaders...),
+		UserHeaders:      append([]string(nil), config.UserHeaders...),
+		RoleHeaders:      append([]string(nil), config.RoleHeaders...),
+		JWTClaimsEnabled: config.JWTClaimsEnabled,
+		JWTSecret:        strings.TrimSpace(config.JWTSecret),
+		TenantClaims:     append([]string(nil), config.TenantClaims...),
+		ProjectClaims:    append([]string(nil), config.ProjectClaims...),
+		UserClaims:       append([]string(nil), config.UserClaims...),
+		RoleClaims:       append([]string(nil), config.RoleClaims...),
+		AdminRoles:       append([]string(nil), config.AdminRoles...),
+		APIKeyScopes:     cloneUsageScopeMap(config.APIKeyScopes),
+	}
+}
+
+func serializeUsageQuotaLimits(source map[string]UsageQuotaLimit) map[string]map[string]interface{} {
+	if len(source) == 0 {
+		return map[string]map[string]interface{}{}
+	}
+	serialized := make(map[string]map[string]interface{}, len(source))
+	for key, value := range source {
+		item := map[string]interface{}{}
+		if value.MaxRequests != nil {
+			item["max_requests"] = *value.MaxRequests
+		}
+		if value.MaxTokens != nil {
+			item["max_tokens"] = *value.MaxTokens
+		}
+		serialized[key] = item
+	}
+	return serialized
+}
+
+func normalizeUsageQuotaLimit(limit UsageQuotaLimit) UsageQuotaLimit {
+	return UsageQuotaLimit{
+		MaxRequests: cloneIntPointer(limit.MaxRequests),
+		MaxTokens:   cloneIntPointer(limit.MaxTokens),
+	}
+}
+
+func (h *Handler) updateUsagePolicy(update usagePolicyUpdateRequest) UsagePolicy {
+	h.usagePolicyMu.Lock()
+	defer h.usagePolicyMu.Unlock()
+
+	current := cloneUsagePolicy(h.usagePolicy)
+	if update.Replace {
+		current.TenantQuotas = nil
+		current.ProjectQuotas = nil
+		current.UserQuotas = nil
+	}
+	if update.TrackingEnabled != nil {
+		current.TrackingEnabled = *update.TrackingEnabled
+	}
+	if update.QuotaEnabled != nil {
+		current.QuotaEnabled = *update.QuotaEnabled
+	}
+	if update.DefaultMaxRequests != nil {
+		current.DefaultMaxRequests = *update.DefaultMaxRequests
+	}
+	if update.DefaultMaxTokens != nil {
+		current.DefaultMaxTokens = *update.DefaultMaxTokens
+	}
+
+	mergeUsageQuotaMap(&current.TenantQuotas, update.Tenants, update.Replace)
+	mergeUsageQuotaMap(&current.ProjectQuotas, update.Projects, update.Replace)
+	mergeUsageQuotaMap(&current.UserQuotas, update.Users, update.Replace)
+
+	if current.QuotaEnabled {
+		current.TrackingEnabled = true
+	}
+	h.usagePolicy = current
+	return cloneUsagePolicy(current)
+}
+
+func (h *Handler) updateScopeResolverConfig(update authPolicyUpdateRequest) ScopeResolverConfig {
+	h.scopeResolverMu.Lock()
+	defer h.scopeResolverMu.Unlock()
+
+	current := cloneScopeResolverConfig(h.scopeResolverConfig)
+	if update.Replace {
+		current.TenantHeaders = nil
+		current.ProjectHeaders = nil
+		current.UserHeaders = nil
+		current.RoleHeaders = nil
+		current.TenantClaims = nil
+		current.ProjectClaims = nil
+		current.UserClaims = nil
+		current.RoleClaims = nil
+		current.AdminRoles = nil
+		current.APIKeyScopes = nil
+	}
+	if update.Enabled != nil {
+		current.Enabled = *update.Enabled
+	}
+	if update.JWTClaimsEnabled != nil {
+		current.JWTClaimsEnabled = *update.JWTClaimsEnabled
+	}
+	mergeOrReplaceStringList(&current.TenantHeaders, update.TenantHeaders, update.Replace, false)
+	mergeOrReplaceStringList(&current.ProjectHeaders, update.ProjectHeaders, update.Replace, false)
+	mergeOrReplaceStringList(&current.UserHeaders, update.UserHeaders, update.Replace, false)
+	mergeOrReplaceStringList(&current.RoleHeaders, update.RoleHeaders, update.Replace, false)
+	mergeOrReplaceStringList(&current.TenantClaims, update.TenantClaims, update.Replace, false)
+	mergeOrReplaceStringList(&current.ProjectClaims, update.ProjectClaims, update.Replace, false)
+	mergeOrReplaceStringList(&current.UserClaims, update.UserClaims, update.Replace, false)
+	mergeOrReplaceStringList(&current.RoleClaims, update.RoleClaims, update.Replace, false)
+	mergeOrReplaceStringList(&current.AdminRoles, update.AdminRoles, update.Replace, true)
+	mergeOrReplaceScopeBindings(&current.APIKeyScopes, update.APIKeyScopes, update.Replace)
+
+	current.AdminRoles = normalizeAdminRoles(current.AdminRoles)
+	h.scopeResolverConfig = current
+	return cloneScopeResolverConfig(current)
+}
+
+func (h *Handler) deleteAuthPolicyEntry(field, key string) (ScopeResolverConfig, bool) {
+	h.scopeResolverMu.Lock()
+	defer h.scopeResolverMu.Unlock()
+
+	current := cloneScopeResolverConfig(h.scopeResolverConfig)
+	removed := false
+	switch field {
+	case "api_key_scope":
+		if current.APIKeyScopes != nil {
+			if _, ok := current.APIKeyScopes[key]; ok {
+				delete(current.APIKeyScopes, key)
+				removed = true
+			}
+		}
+	case "admin_role":
+		target := strings.ToLower(strings.TrimSpace(key))
+		filtered := make([]string, 0, len(current.AdminRoles))
+		for _, role := range current.AdminRoles {
+			if role == target {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, role)
+		}
+		if removed {
+			current.AdminRoles = filtered
+		}
+	}
+	if removed {
+		h.scopeResolverConfig = current
+	}
+	return cloneScopeResolverConfig(current), removed
+}
+
+func mergeUsageQuotaMap(target *map[string]UsageQuotaLimit, incoming map[string]UsageQuotaLimit, replace bool) {
+	if replace && len(incoming) == 0 {
+		*target = nil
+		return
+	}
+	if len(incoming) == 0 {
+		return
+	}
+	if *target == nil {
+		*target = make(map[string]UsageQuotaLimit)
+	}
+	for key, value := range incoming {
+		(*target)[key] = normalizeUsageQuotaLimit(value)
+	}
+}
+
+func mergeOrReplaceStringList(target *[]string, incoming []string, replace bool, normalizeRoles bool) {
+	if replace && len(incoming) == 0 {
+		*target = nil
+		return
+	}
+	if len(incoming) == 0 {
+		return
+	}
+	values := append([]string(nil), incoming...)
+	if normalizeRoles {
+		values = normalizeRoleValues(values)
+	} else {
+		values = normalizeStringList(values)
+	}
+	if replace {
+		*target = values
+		return
+	}
+	combined := append(append([]string(nil), *target...), values...)
+	if normalizeRoles {
+		*target = uniqueStrings(normalizeRoleValues(combined))
+		return
+	}
+	*target = uniqueStrings(normalizeStringList(combined))
+}
+
+func mergeOrReplaceScopeBindings(target *map[string]UsageScope, incoming map[string]UsageScope, replace bool) {
+	if replace && len(incoming) == 0 {
+		*target = nil
+		return
+	}
+	if len(incoming) == 0 {
+		return
+	}
+	if replace || *target == nil {
+		*target = make(map[string]UsageScope, len(incoming))
+	} else if *target == nil {
+		*target = make(map[string]UsageScope)
+	}
+	for key, value := range incoming {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		(*target)[key] = UsageScope{
+			TenantID:  strings.TrimSpace(value.TenantID),
+			ProjectID: strings.TrimSpace(value.ProjectID),
+			UserID:    strings.TrimSpace(value.UserID),
+		}
+	}
+}
+
+func normalizeStringList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func (h *Handler) deleteUsagePolicyEntry(level, key string) (UsagePolicy, bool) {
+	h.usagePolicyMu.Lock()
+	defer h.usagePolicyMu.Unlock()
+
+	removed := false
+	switch level {
+	case "tenant":
+		if h.usagePolicy.TenantQuotas != nil {
+			if _, ok := h.usagePolicy.TenantQuotas[key]; ok {
+				delete(h.usagePolicy.TenantQuotas, key)
+				removed = true
+			}
+		}
+	case "project":
+		if h.usagePolicy.ProjectQuotas != nil {
+			if _, ok := h.usagePolicy.ProjectQuotas[key]; ok {
+				delete(h.usagePolicy.ProjectQuotas, key)
+				removed = true
+			}
+		}
+	case "user":
+		if h.usagePolicy.UserQuotas != nil {
+			if _, ok := h.usagePolicy.UserQuotas[key]; ok {
+				delete(h.usagePolicy.UserQuotas, key)
+				removed = true
+			}
+		}
+	}
+
+	return cloneUsagePolicy(h.usagePolicy), removed
+}
+
+func (h *Handler) resolveUsageScope(r *http.Request, tenantID, projectID, userID string) UsageScope {
+	config := h.getScopeResolverConfig()
+	jwtScope := h.resolveScopeFromJWTClaims(r)
+	apiKeyScope := h.resolveScopeFromAPIKey(r)
+	resolvedUserID := h.resolveUsageScopeValue(userID, r, "user_id", config.UserHeaders, jwtScope.UserID, apiKeyScope.UserID)
+	return normalizeUsageScope(UsageScope{
+		TenantID:  h.resolveUsageScopeValue(tenantID, r, "tenant_id", config.TenantHeaders, jwtScope.TenantID, apiKeyScope.TenantID),
+		ProjectID: h.resolveUsageScopeValue(projectID, r, "project_id", config.ProjectHeaders, jwtScope.ProjectID, apiKeyScope.ProjectID),
+		UserID:    h.resolveServerSessionUserID(resolvedUserID),
+	})
+}
+
+func (h *Handler) resolveUsageScopeFilter(r *http.Request, tenantID, projectID, userID string) (UsageScope, bool) {
+	config := h.getScopeResolverConfig()
+	jwtScope := h.resolveScopeFromJWTClaims(r)
+	rawTenant := h.resolveUsageScopeValue(tenantID, r, "tenant_id", config.TenantHeaders, jwtScope.TenantID)
+	rawProject := h.resolveUsageScopeValue(projectID, r, "project_id", config.ProjectHeaders, jwtScope.ProjectID)
+	rawUser := h.resolveUsageScopeValue(userID, r, "user_id", config.UserHeaders, jwtScope.UserID)
+	if strings.TrimSpace(rawTenant) == "" && strings.TrimSpace(rawProject) == "" && strings.TrimSpace(rawUser) == "" {
+		return UsageScope{}, false
+	}
+	return normalizeUsageScope(UsageScope{
+		TenantID:  rawTenant,
+		ProjectID: rawProject,
+		UserID:    rawUser,
+	}), true
+}
+
+func (h *Handler) resolveUsageScopeValue(primary string, r *http.Request, queryKey string, headerKeys []string, fallbacks ...string) string {
+	if value := strings.TrimSpace(primary); value != "" {
+		return value
+	}
+	if r == nil {
+		return firstNonEmptyString(fallbacks...)
+	}
+	if value := strings.TrimSpace(r.URL.Query().Get(queryKey)); value != "" {
+		return value
+	}
+	if h.getScopeResolverConfig().Enabled {
+		for _, headerKey := range headerKeys {
+			if value := strings.TrimSpace(r.Header.Get(headerKey)); value != "" {
+				return value
+			}
+		}
+	}
+	return firstNonEmptyString(fallbacks...)
+}
+
+func (h *Handler) resolveScopeFromAPIKey(r *http.Request) UsageScope {
+	config := h.getScopeResolverConfig()
+	if !config.Enabled || r == nil || len(config.APIKeyScopes) == 0 {
+		return UsageScope{}
+	}
+	if apiKey := presentedAPIKey(r); apiKey != "" {
+		if scope, ok := config.APIKeyScopes[apiKey]; ok {
+			return scope
+		}
+	}
+	return UsageScope{}
+}
+
+func (h *Handler) resolveScopeFromJWTClaims(r *http.Request) UsageScope {
+	config := h.getScopeResolverConfig()
+	if !config.Enabled || !config.JWTClaimsEnabled || r == nil {
+		return UsageScope{}
+	}
+	claims, ok := h.parseJWTClaims(r)
+	if !ok {
+		return UsageScope{}
+	}
+	return UsageScope{
+		TenantID:  firstClaimValue(claims, config.TenantClaims...),
+		ProjectID: firstClaimValue(claims, config.ProjectClaims...),
+		UserID:    firstClaimValue(claims, config.UserClaims...),
+	}
+}
+
+func (h *Handler) hasTrustedAdminRole(r *http.Request) bool {
+	config := h.getScopeResolverConfig()
+	if !config.Enabled || len(config.AdminRoles) == 0 {
+		return false
+	}
+	for _, role := range h.resolveRequestRoles(r) {
+		if containsNormalizedRole(config.AdminRoles, role) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) resolveRequestRoles(r *http.Request) []string {
+	config := h.getScopeResolverConfig()
+	roles := headerRoles(r, config.RoleHeaders)
+	if len(roles) > 0 {
+		return roles
+	}
+	if !config.JWTClaimsEnabled {
+		return nil
+	}
+	claims, ok := h.parseJWTClaims(r)
+	if !ok {
+		return nil
+	}
+	return normalizeRoleValues(claimStringValues(claims, config.RoleClaims...))
+}
+
+func (h *Handler) parseJWTClaims(r *http.Request) (jwt.MapClaims, bool) {
+	config := h.getScopeResolverConfig()
+	tokenString := presentedBearerToken(r)
+	if tokenString == "" || strings.Count(tokenString, ".") != 2 {
+		return nil, false
+	}
+	secret := strings.TrimSpace(config.JWTSecret)
+	if secret == "" {
+		return nil, false
+	}
+
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unsupported signing method: %s", token.Method.Alg())
+		}
+		return []byte(secret), nil
+	}, jwt.WithValidMethods([]string{
+		jwt.SigningMethodHS256.Alg(),
+		jwt.SigningMethodHS384.Alg(),
+		jwt.SigningMethodHS512.Alg(),
+	}))
+	if err != nil || token == nil || !token.Valid {
+		return nil, false
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, false
+	}
+	return claims, true
+}
+
+func presentedAPIKey(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if apiKey := strings.TrimSpace(r.Header.Get("x-api-key")); apiKey != "" {
+		return apiKey
+	}
+	return presentedBearerToken(r)
+}
+
+func presentedBearerToken(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+		return strings.TrimSpace(authHeader[7:])
+	}
+	return ""
+}
+
+func firstClaimValue(claims jwt.MapClaims, keys ...string) string {
+	values := claimStringValues(claims, keys...)
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func claimStringValues(claims jwt.MapClaims, keys ...string) []string {
+	values := make([]string, 0, len(keys))
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if value, ok := claims[key]; ok {
+			switch typed := value.(type) {
+			case string:
+				if strings.TrimSpace(typed) != "" {
+					values = append(values, strings.TrimSpace(typed))
+				}
+			case fmt.Stringer:
+				if strings.TrimSpace(typed.String()) != "" {
+					values = append(values, strings.TrimSpace(typed.String()))
+				}
+			case []string:
+				for _, item := range typed {
+					if strings.TrimSpace(item) != "" {
+						values = append(values, strings.TrimSpace(item))
+					}
+				}
+			case []interface{}:
+				for _, item := range typed {
+					if text := strings.TrimSpace(fmt.Sprint(item)); text != "" {
+						values = append(values, text)
+					}
+				}
+			default:
+				if text := strings.TrimSpace(fmt.Sprint(typed)); text != "" && text != "<nil>" {
+					values = append(values, text)
+				}
+			}
+		}
+	}
+	return values
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func cloneAnyMap(input map[string]interface{}) map[string]interface{} {
+	if len(input) == 0 {
+		return map[string]interface{}{}
+	}
+	cloned := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func normalizeAdminRoles(roles []string) []string {
+	return normalizeRoleValues(roles)
+}
+
+func normalizeRoleValues(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, part := range splitRoleValues(value) {
+			if normalized := strings.ToLower(strings.TrimSpace(part)); normalized != "" {
+				result = append(result, normalized)
+			}
+		}
+	}
+	return result
+}
+
+func splitRoleValues(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ' ' || r == ';'
+	})
+}
+
+func headerRoles(r *http.Request, headerKeys []string) []string {
+	if r == nil {
+		return nil
+	}
+	values := make([]string, 0, len(headerKeys))
+	for _, key := range headerKeys {
+		if value := strings.TrimSpace(r.Header.Get(key)); value != "" {
+			values = append(values, value)
+		}
+	}
+	return normalizeRoleValues(values)
+}
+
+func containsNormalizedRole(roles []string, target string) bool {
+	target = strings.ToLower(strings.TrimSpace(target))
+	if target == "" {
+		return false
+	}
+	for _, role := range roles {
+		if role == target {
+			return true
+		}
+	}
+	return false
+}
+
+func requestChangedBy(r *http.Request) string {
+	if r == nil {
+		return "api"
+	}
+	if value := strings.TrimSpace(r.Header.Get("X-Changed-By")); value != "" {
+		return value
+	}
+	return "api"
+}
+
+func normalizeUsageScope(scope UsageScope) UsageScope {
+	scope.TenantID = strings.TrimSpace(scope.TenantID)
+	if scope.TenantID == "" {
+		scope.TenantID = "default"
+	}
+	scope.ProjectID = strings.TrimSpace(scope.ProjectID)
+	if scope.ProjectID == "" {
+		scope.ProjectID = "default"
+	}
+	scope.UserID = strings.TrimSpace(scope.UserID)
+	if scope.UserID == "" {
+		scope.UserID = "anonymous"
+	}
+	scope.ScopeKey = fmt.Sprintf("%s/%s/%s", scope.TenantID, scope.ProjectID, scope.UserID)
+	return scope
+}
+
+func (h *Handler) estimateRequestTokens(prompt string, history []types.Message) int {
+	total := h.estimateTextTokens(prompt)
+	total += h.estimateMessagesTokens(history)
+	return total
+}
+
+func (h *Handler) estimateMessagesTokens(messages []types.Message) int {
+	if len(messages) == 0 {
+		return 0
+	}
+	if h.llmRuntime != nil {
+		return h.llmRuntime.CountMessagesTokens(messages)
+	}
+	total := 0
+	for _, message := range messages {
+		total += h.estimateTextTokens(message.Content)
+	}
+	return total
+}
+
+func (h *Handler) estimateTextTokens(text string) int {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0
+	}
+	if h.llmRuntime != nil {
+		return h.llmRuntime.CountTokens(text)
+	}
+	return len(strings.Fields(text)) + len(text)/10
+}
+
+func (h *Handler) enforceUsageQuota(scope UsageScope, estimatedPromptTokens int, entrypoint string) error {
+	if !h.usagePolicy.QuotaEnabled || h.usageTracker == nil {
+		return nil
+	}
+
+	snapshot := h.usageTracker.snapshot(scope)
+	quota := h.resolveQuotaForScope(scope)
+	if maxRequests := quota.MaxRequests; maxRequests > 0 && snapshot.RequestCount >= maxRequests {
+		h.recordUsageQuotaMetric(entrypoint, "requests")
+		return errors.New(errors.ErrAPIRateLimit, "skills request quota exceeded").
+			WithContext("quota_type", "requests").
+			WithContext("entrypoint", entrypoint).
+			WithContext("scope_key", scope.ScopeKey).
+			WithContext("resolved_from", quota.ResolvedFrom).
+			WithContext("max_requests", maxRequests)
+	}
+	if maxTokens := quota.MaxTokens; maxTokens > 0 && snapshot.TotalTokens+estimatedPromptTokens > maxTokens {
+		h.recordUsageQuotaMetric(entrypoint, "tokens")
+		return errors.New(errors.ErrAPIRateLimit, "skills token quota exceeded").
+			WithContext("quota_type", "tokens").
+			WithContext("entrypoint", entrypoint).
+			WithContext("scope_key", scope.ScopeKey).
+			WithContext("resolved_from", quota.ResolvedFrom).
+			WithContext("max_tokens", maxTokens)
+	}
+	return nil
+}
+
+func (h *Handler) recordUsage(scope UsageScope, entrypoint, skillName string, success bool, estimatedPromptTokens int, usage *types.TokenUsage, output string) {
+	if !h.usagePolicy.TrackingEnabled || h.usageTracker == nil {
+		return
+	}
+
+	recorded := usage
+	if recorded == nil {
+		recorded = &types.TokenUsage{
+			PromptTokens:     estimatedPromptTokens,
+			CompletionTokens: h.estimateTextTokens(output),
+		}
+		recorded.TotalTokens = recorded.PromptTokens + recorded.CompletionTokens
+	} else {
+		recorded = recorded.Clone()
+		if recorded.PromptTokens == 0 {
+			recorded.PromptTokens = estimatedPromptTokens
+		}
+		if recorded.TotalTokens == 0 {
+			recorded.TotalTokens = recorded.PromptTokens + recorded.CompletionTokens
+		}
+	}
+
+	h.usageTracker.record(scope, entrypoint, skillName, success, recorded)
+	h.recordUsageMetrics(entrypoint, success, recorded)
+	h.appendUsageLedger(scope, entrypoint, skillName, success, recorded)
+}
+
+func (h *Handler) usageQuotaSnapshot(scope UsageScope) map[string]interface{} {
+	usage := h.usageTracker.snapshot(scope)
+	quota := h.resolveQuotaForScope(scope)
+	maxRequests := quota.MaxRequests
+	maxTokens := quota.MaxTokens
+
+	remainingRequests := -1
+	if maxRequests > 0 {
+		remainingRequests = maxRequests - usage.RequestCount
+		if remainingRequests < 0 {
+			remainingRequests = 0
+		}
+	}
+
+	remainingTokens := -1
+	if maxTokens > 0 {
+		remainingTokens = maxTokens - usage.TotalTokens
+		if remainingTokens < 0 {
+			remainingTokens = 0
+		}
+	}
+
+	return map[string]interface{}{
+		"scope_key":          scope.ScopeKey,
+		"enabled":            h.usagePolicy.QuotaEnabled,
+		"max_requests":       maxRequests,
+		"max_tokens":         maxTokens,
+		"remaining_requests": remainingRequests,
+		"remaining_tokens":   remainingTokens,
+		"resolved_from":      quota.ResolvedFrom,
+	}
+}
+
+type resolvedUsageQuota struct {
+	MaxRequests  int
+	MaxTokens    int
+	ResolvedFrom string
+}
+
+func (h *Handler) resolveQuotaForScope(scope UsageScope) resolvedUsageQuota {
+	resolved := resolvedUsageQuota{
+		MaxRequests:  h.usagePolicy.DefaultMaxRequests,
+		MaxTokens:    h.usagePolicy.DefaultMaxTokens,
+		ResolvedFrom: "default",
+	}
+
+	apply := func(limit UsageQuotaLimit, source string) {
+		applied := false
+		if limit.MaxRequests != nil {
+			resolved.MaxRequests = *limit.MaxRequests
+			applied = true
+		}
+		if limit.MaxTokens != nil {
+			resolved.MaxTokens = *limit.MaxTokens
+			applied = true
+		}
+		if applied {
+			resolved.ResolvedFrom = source
+		}
+	}
+
+	if limit, ok := h.usagePolicy.TenantQuotas[scope.TenantID]; ok {
+		apply(limit, "tenant")
+	}
+	for _, key := range []string{scope.TenantID + "/" + scope.ProjectID, scope.ProjectID} {
+		if limit, ok := h.usagePolicy.ProjectQuotas[key]; ok {
+			apply(limit, "project")
+			break
+		}
+	}
+	for _, key := range []string{scope.ScopeKey, scope.UserID} {
+		if limit, ok := h.usagePolicy.UserQuotas[key]; ok {
+			apply(limit, "user")
+			break
+		}
+	}
+
+	return resolved
+}
+
+func (t *usageTracker) record(scope UsageScope, entrypoint, skillName string, success bool, usage *types.TokenUsage) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	snapshot, ok := t.users[scope.ScopeKey]
+	if !ok {
+		snapshot = &UsageSnapshot{
+			TenantID:         scope.TenantID,
+			ProjectID:        scope.ProjectID,
+			UserID:           scope.UserID,
+			ScopeKey:         scope.ScopeKey,
+			EntrypointCounts: make(map[string]int),
+			SkillCounts:      make(map[string]int),
+		}
+		t.users[scope.ScopeKey] = snapshot
+	}
+
+	snapshot.RequestCount++
+	snapshot.LastRequestAt = time.Now()
+	snapshot.LastEntrypoint = entrypoint
+	if skillName != "" {
+		snapshot.LastSkill = skillName
+		snapshot.SkillCounts[skillName]++
+	}
+	snapshot.EntrypointCounts[entrypoint]++
+	switch entrypoint {
+	case "execute":
+		snapshot.ExecuteCount++
+	case "agent_chat":
+		snapshot.AgentChatCount++
+	}
+	if success {
+		snapshot.SuccessCount++
+	} else {
+		snapshot.FailureCount++
+	}
+	if usage != nil {
+		snapshot.PromptTokens += usage.PromptTokens
+		snapshot.CompletionTokens += usage.CompletionTokens
+		snapshot.TotalTokens += usage.TotalTokens
+	}
+}
+
+func (t *usageTracker) snapshot(scope UsageScope) UsageSnapshot {
+	if t == nil {
+		return UsageSnapshot{
+			TenantID:         scope.TenantID,
+			ProjectID:        scope.ProjectID,
+			UserID:           scope.UserID,
+			ScopeKey:         scope.ScopeKey,
+			EntrypointCounts: map[string]int{},
+			SkillCounts:      map[string]int{},
+		}
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	snapshot, ok := t.users[scope.ScopeKey]
+	if !ok || snapshot == nil {
+		return UsageSnapshot{
+			TenantID:         scope.TenantID,
+			ProjectID:        scope.ProjectID,
+			UserID:           scope.UserID,
+			ScopeKey:         scope.ScopeKey,
+			EntrypointCounts: map[string]int{},
+			SkillCounts:      map[string]int{},
+		}
+	}
+
+	cloned := *snapshot
+	cloned.EntrypointCounts = make(map[string]int, len(snapshot.EntrypointCounts))
+	for key, value := range snapshot.EntrypointCounts {
+		cloned.EntrypointCounts[key] = value
+	}
+	cloned.SkillCounts = make(map[string]int, len(snapshot.SkillCounts))
+	for key, value := range snapshot.SkillCounts {
+		cloned.SkillCounts[key] = value
+	}
+	return cloned
+}
+
+func (t *usageTracker) aggregate() map[string]interface{} {
+	if t == nil {
+		return map[string]interface{}{
+			"scope_count":       0,
+			"user_count":        0,
+			"request_count":     0,
+			"execute_count":     0,
+			"agent_chat_count":  0,
+			"success_count":     0,
+			"failure_count":     0,
+			"prompt_tokens":     0,
+			"completion_tokens": 0,
+			"total_tokens":      0,
+		}
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	uniqueUsers := make(map[string]struct{})
+	summary := map[string]interface{}{
+		"scope_count":       len(t.users),
+		"user_count":        0,
+		"request_count":     0,
+		"execute_count":     0,
+		"agent_chat_count":  0,
+		"success_count":     0,
+		"failure_count":     0,
+		"prompt_tokens":     0,
+		"completion_tokens": 0,
+		"total_tokens":      0,
+	}
+	for _, snapshot := range t.users {
+		if snapshot == nil {
+			continue
+		}
+		uniqueUsers[snapshot.UserID] = struct{}{}
+		summary["request_count"] = summary["request_count"].(int) + snapshot.RequestCount
+		summary["execute_count"] = summary["execute_count"].(int) + snapshot.ExecuteCount
+		summary["agent_chat_count"] = summary["agent_chat_count"].(int) + snapshot.AgentChatCount
+		summary["success_count"] = summary["success_count"].(int) + snapshot.SuccessCount
+		summary["failure_count"] = summary["failure_count"].(int) + snapshot.FailureCount
+		summary["prompt_tokens"] = summary["prompt_tokens"].(int) + snapshot.PromptTokens
+		summary["completion_tokens"] = summary["completion_tokens"].(int) + snapshot.CompletionTokens
+		summary["total_tokens"] = summary["total_tokens"].(int) + snapshot.TotalTokens
+	}
+	summary["user_count"] = len(uniqueUsers)
+	return summary
+}
+
+func (t *usageTracker) reset(scope *UsageScope) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if scope == nil {
+		t.users = make(map[string]*UsageSnapshot)
+		return
+	}
+	delete(t.users, scope.ScopeKey)
+}
+
+func (t *usageTracker) scopes() []UsageScope {
+	if t == nil {
+		return nil
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	scopes := make([]UsageScope, 0, len(t.users))
+	for _, snapshot := range t.users {
+		if snapshot == nil {
+			continue
+		}
+		scopes = append(scopes, UsageScope{
+			TenantID:  snapshot.TenantID,
+			ProjectID: snapshot.ProjectID,
+			UserID:    snapshot.UserID,
+			ScopeKey:  snapshot.ScopeKey,
+		})
+	}
+	sort.Slice(scopes, func(i, j int) bool {
+		return scopes[i].ScopeKey < scopes[j].ScopeKey
+	})
+	return scopes
+}
+
+func (h *Handler) appendUsageLedger(scope UsageScope, entrypoint, skillName string, success bool, usage *types.TokenUsage) {
+	if h.usageLedgerStore == nil || usage == nil {
+		return
+	}
+
+	quota := h.resolveQuotaForScope(scope)
+	record := &entity.TokenUsageHistory{
+		ID:           uuid.NewString(),
+		RequestID:    uuid.NewString(),
+		ModelID:      uuid.Nil.String(),
+		ProviderID:   uuid.Nil.String(),
+		InputTokens:  usage.PromptTokens,
+		OutputTokens: usage.CompletionTokens,
+		TotalTokens:  usage.TotalTokens,
+		MessageCount: 0,
+		MaxTokens:    quota.MaxTokens,
+		Success:      success,
+		StatusCode:   http.StatusOK,
+		Metadata: entity.JSONMap{
+			"subsystem":     "skill_runtime",
+			"tenant_id":     scope.TenantID,
+			"project_id":    scope.ProjectID,
+			"user_id":       scope.UserID,
+			"scope_key":     scope.ScopeKey,
+			"entrypoint":    entrypoint,
+			"skill":         skillName,
+			"resolved_from": quota.ResolvedFrom,
+		},
+	}
+	// FR-13：profile 维度（AgentChat 请求期解析出的身份）；未解析该维度的
+	// 入口（如 execute）不写键，保持"未归属"可观察。
+	if profile := strings.TrimSpace(scope.Profile); profile != "" {
+		record.Metadata["profile"] = profile
+	}
+	if !success {
+		record.StatusCode = http.StatusInternalServerError
+	}
+	if err := h.usageLedgerStore.Create(record); err != nil {
+		logger.Warn("failed to persist skills usage ledger", logger.Err(err))
+	}
+}
+
+func (h *Handler) recordUsageMetrics(entrypoint string, success bool, usage *types.TokenUsage) {
+	labels := map[string]string{
+		observability.LabelEntrypoint: entrypoint,
+		observability.LabelOutcome:    quotaOutcome(success),
+	}
+	observability.IncrementCounter(observability.MetricSkillUsageRequests, labels)
+	if usage == nil {
+		return
+	}
+
+	observability.GlobalMetrics.GetOrCreateCounter(observability.MetricSkillUsageTokens, map[string]string{
+		observability.LabelEntrypoint: entrypoint,
+		observability.LabelTokenType:  "prompt",
+	}).IncBy(float64(usage.PromptTokens))
+	observability.GlobalMetrics.GetOrCreateCounter(observability.MetricSkillUsageTokens, map[string]string{
+		observability.LabelEntrypoint: entrypoint,
+		observability.LabelTokenType:  "completion",
+	}).IncBy(float64(usage.CompletionTokens))
+	observability.GlobalMetrics.GetOrCreateCounter(observability.MetricSkillUsageTokens, map[string]string{
+		observability.LabelEntrypoint: entrypoint,
+		observability.LabelTokenType:  "total",
+	}).IncBy(float64(usage.TotalTokens))
+}
+
+func (h *Handler) recordUsageQuotaMetric(entrypoint, quotaType string) {
+	observability.IncrementCounter(observability.MetricSkillQuotaDenials, map[string]string{
+		observability.LabelEntrypoint: entrypoint,
+		observability.LabelQuotaType:  quotaType,
+	})
+}
+
+func quotaOutcome(success bool) string {
+	if success {
+		return "success"
+	}
+	return "failed"
+}
+
+func (h *Handler) hasValidSearchAdminToken(r *http.Request) bool {
+	expected := strings.TrimSpace(h.searchAdminToken)
+	if expected == "" || r == nil {
+		return false
+	}
+
+	provided := strings.TrimSpace(r.Header.Get("X-Skills-Admin-Token"))
+	if provided == "" {
+		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+		if strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+			provided = strings.TrimSpace(authHeader[7:])
+		}
+	}
+	if provided == "" {
+		return false
+	}
+
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+
+	host := requestRemoteIP(r)
+	if host == "" {
+		return false
+	}
+
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func requestRemoteIP(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+
+	host := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+	if host != "" {
+		if idx := strings.Index(host, ","); idx >= 0 {
+			host = strings.TrimSpace(host[:idx])
+		}
+		return host
+	}
+
+	host = strings.TrimSpace(r.Header.Get("X-Real-IP"))
+	if host != "" {
+		return host
+	}
+
+	host = strings.TrimSpace(r.RemoteAddr)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		return parsedHost
+	}
+	return host
+}
+
+func (h *Handler) reindexRetryAfter() (time.Duration, bool) {
+	h.searchReindexMu.Lock()
+	defer h.searchReindexMu.Unlock()
+
+	if h.searchReindexCooldown <= 0 || h.lastSearchReindexAt.IsZero() {
+		return 0, false
+	}
+
+	elapsed := time.Since(h.lastSearchReindexAt)
+	if elapsed >= h.searchReindexCooldown {
+		return 0, false
+	}
+
+	return h.searchReindexCooldown - elapsed, true
+}
+
+func (h *Handler) markSearchReindexStart() {
+	h.searchReindexMu.Lock()
+	defer h.searchReindexMu.Unlock()
+	h.lastSearchReindexAt = time.Now()
+}
+
+func (h *Handler) searchTelemetrySnapshot() map[string]interface{} {
+	if h.searchTelemetry == nil {
+		return map[string]interface{}{}
+	}
+
+	h.searchTelemetry.mu.RLock()
+	defer h.searchTelemetry.mu.RUnlock()
+
+	requestedModeCount := make(map[string]int, len(h.searchTelemetry.requestedModeCount))
+	for key, value := range h.searchTelemetry.requestedModeCount {
+		requestedModeCount[key] = value
+	}
+
+	resolvedModeCount := make(map[string]int, len(h.searchTelemetry.resolvedModeCount))
+	for key, value := range h.searchTelemetry.resolvedModeCount {
+		resolvedModeCount[key] = value
+	}
+
+	avgResults := 0.0
+	if h.searchTelemetry.totalRequests > 0 {
+		avgResults = float64(h.searchTelemetry.totalResults) / float64(h.searchTelemetry.totalRequests)
+	}
+
+	return map[string]interface{}{
+		"total_requests":       h.searchTelemetry.totalRequests,
+		"total_results":        h.searchTelemetry.totalResults,
+		"average_results":      avgResults,
+		"embedding_requests":   h.searchTelemetry.embeddingRequests,
+		"requested_mode_count": requestedModeCount,
+		"resolved_mode_count":  resolvedModeCount,
+		"last_query":           h.searchTelemetry.lastQuery,
+		"last_requested_mode":  h.searchTelemetry.lastRequestedMode,
+		"last_resolved_mode":   h.searchTelemetry.lastResolvedMode,
+		"last_result_count":    h.searchTelemetry.lastResultCount,
+		"last_used_embedding":  h.searchTelemetry.lastEmbeddingUsed,
+		"reindex_count":        h.searchTelemetry.reindexCount,
+		"last_reindex_status":  h.searchTelemetry.lastReindexStatus,
+		"last_reindex_at":      h.searchTelemetry.lastReindexAt,
+	}
+}
+
+func (h *Handler) auditSearchAdminAction(r *http.Request, action, outcome string, extraFields ...interface{}) {
+	fields := []interface{}{
+		logger.String("action", action),
+		logger.String("outcome", outcome),
+		logger.String("access_mode", h.searchAdminAccessMode(r)),
+		logger.String("remote_ip", requestRemoteIP(r)),
+		logger.RequestID(logger.GetRequestID(r.Context())),
+		logger.Any("search_summary", h.searchTelemetrySnapshot()),
+	}
+	fields = append(fields, extraFields...)
+	h.recordSearchAdminMetric(action, outcome, h.searchAdminAccessMode(r))
+
+	adminLogger := logger.Admin().Named("skills_search")
+
+	switch outcome {
+	case "forbidden", "rate_limited":
+		adminLogger.Warn("skills search admin action", fieldsToZap(fields)...)
+	case "failed":
+		adminLogger.Error("skills search admin action", fieldsToZap(fields)...)
+	default:
+		adminLogger.Info("skills search admin action", fieldsToZap(fields)...)
+	}
+}
+
+func (h *Handler) auditSkillMutation(r *http.Request, action, outcome string, extraFields ...interface{}) {
+	fields := []interface{}{
+		logger.String("action", action),
+		logger.String("outcome", outcome),
+		logger.String("access_mode", h.skillMutationAccessMode(r)),
+		logger.String("remote_ip", requestRemoteIP(r)),
+		logger.RequestID(logger.GetRequestID(r.Context())),
+	}
+	fields = append(fields, extraFields...)
+	h.recordSkillMutationMetric(action, outcome, h.skillMutationAccessMode(r))
+
+	adminLogger := logger.Admin().Named("skills_mutation")
+	switch outcome {
+	case "forbidden", "invalid_request":
+		adminLogger.Warn("skills mutation action", fieldsToZap(fields)...)
+	case "failed":
+		adminLogger.Error("skills mutation action", fieldsToZap(fields)...)
+	default:
+		adminLogger.Info("skills mutation action", fieldsToZap(fields)...)
+	}
+}
+
+func (h *Handler) recordSearchAdminMetric(action, outcome, accessMode string) {
+	labels := map[string]string{
+		observability.LabelAction:     action,
+		observability.LabelOutcome:    outcome,
+		observability.LabelAccessMode: accessMode,
+	}
+	observability.IncrementCounter(observability.MetricSearchAdminActions, labels)
+	if action == "search_reindex" {
+		observability.IncrementCounter(observability.MetricSearchReindexRuns, labels)
+	}
+}
+
+func (h *Handler) recordSkillMutationMetric(action, outcome, accessMode string) {
+	labels := map[string]string{
+		observability.LabelAction:     action,
+		observability.LabelOutcome:    outcome,
+		observability.LabelAccessMode: accessMode,
+	}
+	observability.IncrementCounter(observability.MetricSkillMutationActions, labels)
+}
+
+func fieldsToZap(fields []interface{}) []zapcore.Field {
+	converted := make([]zapcore.Field, 0, len(fields))
+	for _, field := range fields {
+		if zapField, ok := field.(zapcore.Field); ok {
+			converted = append(converted, zapField)
+		}
+	}
+	return converted
+}
+
+func defaultAgentModel(runtime *llm.LLMRuntime) string {
+	if runtime == nil {
+		return ""
+	}
+	if model := runtime.DefaultModel(); model != "" {
+		return model
+	}
+	providers := runtime.ListProviders()
+	if len(providers) == 0 {
+		return ""
+	}
+	return providers[0]
+}
+
+func totalMessageContentChars(messages []types.Message) int {
+	total := 0
+	for _, msg := range messages {
+		total += len(strings.TrimSpace(msg.Content))
+	}
+	return total
+}
+
+func totalMessageContentTokens(messages []types.Message, runtime *llm.LLMRuntime, model string) int {
+	if runtime == nil {
+		return 0
+	}
+	provider, err := runtime.GetProvider(model)
+	if err != nil || provider == nil {
+		return 0
+	}
+	total := 0
+	for _, msg := range messages {
+		content := strings.TrimSpace(msg.Content)
+		if content != "" {
+			total += provider.CountTokens(content)
+		}
+	}
+	return total
+}
+
+func defaultAgentProvider(runtime *llm.LLMRuntime) string {
+	if runtime == nil {
+		return ""
+	}
+	if provider := strings.TrimSpace(runtime.DefaultProvider()); provider != "" {
+		return provider
+	}
+	return ""
+}
+
+func runtimeProviderModels(runtime *llm.LLMRuntime, providerName, defaultProvider, defaultModel string) []string {
+	if runtime == nil {
+		return []string{}
+	}
+
+	models := make([]string, 0)
+	for _, alias := range runtime.ProviderAliases(providerName) {
+		alias = strings.TrimSpace(alias)
+		if alias == "" || alias == providerName {
+			continue
+		}
+		models = append(models, alias)
+	}
+
+	if model := strings.TrimSpace(defaultModel); model != "" {
+		resolvedDefault := runtime.ResolveProviderName(model)
+		if resolvedDefault == providerName || (resolvedDefault == "" && defaultProvider == providerName) {
+			models = append(models, model)
+		}
+	}
+
+	models = uniqueStrings(normalizeStringList(models))
+	if len(models) == 0 {
+		if defaultProvider == providerName {
+			return []string{providerName}
+		}
+		return []string{}
+	}
+	sort.Strings(models)
+	return models
+}
+
+func runtimeProviderDefaultModel(runtime *llm.LLMRuntime, providerName, defaultProvider, defaultModel string, models []string) string {
+	if runtime != nil {
+		if model := strings.TrimSpace(defaultModel); model != "" {
+			resolvedDefault := runtime.ResolveProviderName(model)
+			if resolvedDefault == providerName || (resolvedDefault == "" && defaultProvider == providerName) {
+				return model
+			}
+		}
+	}
+	if len(models) > 0 {
+		return models[0]
+	}
+	return ""
+}
+
+func runtimeModelsSnapshot(runtime *llm.LLMRuntime) map[string]interface{} {
+	defaultProvider := defaultAgentProvider(runtime)
+	defaultModel := defaultAgentModel(runtime)
+	providersPayload := make([]map[string]interface{}, 0)
+	totalModels := 0
+
+	if runtime != nil {
+		providers := runtime.ListProviders()
+		sort.Strings(providers)
+
+		for _, name := range providers {
+			models := runtimeProviderModels(runtime, name, defaultProvider, defaultModel)
+			providerPayload := map[string]interface{}{
+				"name":        name,
+				"models":      models,
+				"model_count": len(models),
+			}
+
+			if providerDefault := runtimeProviderDefaultModel(
+				runtime,
+				name,
+				defaultProvider,
+				defaultModel,
+				models,
+			); providerDefault != "" {
+				providerPayload["default_model"] = providerDefault
+			}
+
+			if caps, err := runtime.GetCapabilities(name); err == nil && caps != nil {
+				providerPayload["supports_tools"] = caps.SupportsTools
+				providerPayload["supports_streaming"] = caps.SupportsStreaming
+				providerPayload["max_context_tokens"] = caps.MaxContextTokens
+				providerPayload["max_output_tokens"] = caps.MaxOutputTokens
+			}
+
+			if provider, err := runtime.GetProvider(name); err == nil && provider != nil {
+				if lister, ok := provider.(interface {
+					ListModelCapabilities() map[string]agentconfig.ModelCapabilitySpec
+				}); ok {
+					if modelCapabilities := lister.ListModelCapabilities(); len(modelCapabilities) > 0 {
+						providerPayload["model_capabilities"] = modelCapabilities
+					}
+				}
+			}
+
+			providersPayload = append(providersPayload, providerPayload)
+			totalModels += len(models)
+		}
+	}
+
+	return map[string]interface{}{
+		"default_provider": defaultProvider,
+		"default_model":    defaultModel,
+		"providers":        providersPayload,
+		"count":            totalModels,
+	}
+}
+
+func executionStatus(success bool) string {
+	if success {
+		return "completed"
+	}
+	return "failed"
+}
+
+func sessionID(session *chat.Session) string {
+	if session == nil {
+		return ""
+	}
+	return session.ID
+}
+
+func (h *Handler) writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(data)
+}
+
+// buildSkillExposureMessages 把请求显式指定的 skill 说明与程序清单投影为系统消息，
+// 让模型先读文档、再自行决定调用 skill 中的哪些程序。与 skill.Executor 的
+// execution_mode=model 共用同一投影（skill.ProgramGuide），避免两套口径漂移。
+//
+// SK-1/SK-2：在 expose_skills 回合前附加全量 catalog（name + description + 定位符）
+// 与纪律块，镜像 Codex 的常驻 directory；catalog 条目永不因预算消失，只裁剪描述。
+// SK-7：文档模式技能（显式 execution_mode: document，或 auto 配置下自动识别）不走
+// ProgramGuide，把 SKILL.md 正文注入上下文，由模型用既有工具自行完成任务。
+func buildSkillExposureMessages(registry *skill.Registry, names []string, cfg *agentconfig.SkillsRuntimeConfig) ([]types.Message, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	if registry == nil {
+		return nil, errors.New(errors.ErrConfigInvalid, "skill registry not configured")
+	}
+	messages := make([]types.Message, 0, len(names)+1)
+	seen := make(map[string]struct{}, len(names))
+
+	// 目录块：仅在配置可用且注册表非空时注入。
+	if catalogMsgs := buildSkillCatalogMessages(registry, cfg); len(catalogMsgs) > 0 {
+		messages = append(messages, catalogMsgs...)
+	}
+
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		item, ok := registry.Get(name)
+		if !ok || item == nil {
+			// SK-4：显式点名（ExposeSkills）一个 unavailable 技能时，
+			// 返回带 missing_tools/hint 的可操作错误，而不是普通 not found。
+			if unavailable, found := registry.LookupUnavailable(name); found {
+				return nil, unavailableSkillError(unavailable)
+			}
+			return nil, fmt.Errorf("skill not found: %s", name)
+		}
+		if hydrated, hydrateErr := registry.Hydrate(item); hydrateErr == nil && hydrated != nil {
+			item = hydrated
+		}
+		// SK-7：文档模式 → 正文注入上下文，不走 ProgramGuide/executeDefault。
+		if item.IsDocumentModeEnabled(cfg != nil && cfg.DocumentModeAuto()) {
+			if body := strings.TrimSpace(item.Body); body != "" {
+				messages = append(messages, *types.NewSystemMessage("## Skill instructions (document mode: " + name + ")\n" + body))
+				continue
+			}
+		}
+		if guide := skill.ProgramGuide(item); guide != "" {
+			messages = append(messages, *types.NewSystemMessage(guide))
+		}
+	}
+	return messages, nil
+}
+
+// buildSkillCatalogMessages 把全量可用技能目录渲染为系统消息（SK-1/SK-2）。
+// 仅在配置可用时注入；catalog 条目永不因预算消失，只裁剪描述。
+func buildSkillCatalogMessages(registry *skill.Registry, cfg *agentconfig.SkillsRuntimeConfig) []types.Message {
+	if registry == nil || cfg == nil {
+		return nil
+	}
+	summaries := registry.ListSummaries()
+	if len(summaries) == 0 {
+		return nil
+	}
+	entries := skill.BuildCatalogEntries(summaries)
+	if len(entries) == 0 {
+		return nil
+	}
+	budget := skill.CatalogBudget{Characters: cfg.CatalogBudget()}
+	body, report := skill.RenderSkillCatalogWithOptions(entries, budget, cfg.DisciplineBlockEnabled())
+	if report.Degraded() {
+		logger.Warn("skill catalog degraded to fit budget", logger.String("report", report.String()))
+	}
+	if strings.TrimSpace(body) == "" {
+		return nil
+	}
+	return []types.Message{*types.NewSystemMessage(body)}
+}
+
+// runtimeSkillsConfig 安全读取当前技能运行时配置（aicliConfig 可能未设置时返回 nil）。
+func (h *Handler) runtimeSkillsConfig() *agentconfig.SkillsRuntimeConfig {
+	if h == nil {
+		return nil
+	}
+	ac := h.aicliConfigSnapshot()
+	if ac == nil {
+		return nil
+	}
+	return ac.SkillsRuntime
+}
+
+func (h *Handler) streamLLMChat(ctx context.Context, w http.ResponseWriter, session *chat.Session, agentID, modelName, userPrompt string, messages []types.Message, reasoningEffort string, thinking *types.ThinkingConfig, routeAttempted bool, routeCandidates []*skill.RouteResult, fallback string, usageScope UsageScope, estimatedPromptTokens int, traceID string, planningPayload map[string]interface{}, routeAudit ...executionRouteTransparency) error {
+	model := strings.TrimSpace(modelName)
+	if model == "" {
+		model = defaultAgentModel(h.llmRuntime)
+	}
+	metadata := map[string]interface{}{
+		"session_id": sessionID(session),
+	}
+	var activeRoute executionRouteTransparency
+	if len(routeAudit) > 0 {
+		activeRoute = routeAudit[0]
+		metadata["route"] = activeRoute.payload()
+	}
+	promptLayoutPreview := ""
+	promptLayoutLength := 0
+	instructionTokens := 0
+	var promptLayoutLayers []string
+	var promptLayoutSources []string
+	if layout := runtimeprompt.RenderInstructionMessagesLayout(messages); layout != "" {
+		metadata["prompt_layout"] = layout
+	}
+	var tokenCountFunc func(string) int
+	if provider, pErr := h.llmRuntime.GetProvider(model); pErr == nil && provider != nil {
+		tokenCountFunc = provider.CountTokens
+	}
+	layoutInfo := runtimeprompt.SummarizeInstructionMessagesWithTokens(messages, tokenCountFunc)
+	if layoutInfo.Summary != "" {
+		promptLayoutPreview = layoutInfo.Summary
+		promptLayoutLength = layoutInfo.InstructionChars
+		instructionTokens = layoutInfo.InstructionTokens
+		promptLayoutLayers = append([]string(nil), layoutInfo.Layers...)
+		promptLayoutSources = append([]string(nil), layoutInfo.Sources...)
+	}
+	requestPayload := map[string]interface{}{
+		"session_id":    sessionID(session),
+		"agent_id":      agentID,
+		"model":         model,
+		"message_count": len(messages),
+	}
+	if promptLayoutPreview != "" {
+		requestPayload["prompt_layout_summary"] = promptLayoutPreview
+	}
+	if promptLayoutLength > 0 {
+		requestPayload["prompt_layout_length"] = promptLayoutLength
+	}
+	if totalMessageChars := totalMessageContentChars(messages); totalMessageChars > 0 {
+		requestPayload["total_message_chars"] = totalMessageChars
+	}
+	if totalMessageTokens := totalMessageContentTokens(messages, h.llmRuntime, model); totalMessageTokens > 0 {
+		requestPayload["total_tokens"] = totalMessageTokens
+	}
+	if instructionTokens > 0 {
+		requestPayload["instruction_tokens"] = instructionTokens
+	}
+	if len(promptLayoutLayers) > 0 {
+		requestPayload["prompt_layers"] = promptLayoutLayers
+	}
+	if len(promptLayoutSources) > 0 {
+		requestPayload["prompt_sources"] = promptLayoutSources
+	}
+	turnID := agent.TurnIDFromContext(ctx)
+	ctx = llm.WithRetryEventReporter(ctx, h.runtimeRetryEventReporter(traceID, sessionID(session)))
+	h.publishSessionRuntimeEvent("llm.request.started", traceID, sessionID(session), requestPayload)
+	stream, err := h.llmRuntime.Stream(ctx, &llm.LLMRequest{
+		Model:           model,
+		Messages:        messages,
+		MaxTokens:       4096,
+		Temperature:     0.7,
+		ReasoningEffort: reasoningEffort,
+		Thinking:        types.CloneThinkingConfig(thinking),
+		Stream:          true,
+		Metadata:        metadata,
+	})
+	if err != nil {
+		h.publishSessionRuntimeEvent("llm.request.finished", traceID, sessionID(session), map[string]interface{}{
+			"model":   model,
+			"success": false,
+			"error":   err.Error(),
+		})
+		h.writeError(w, http.StatusInternalServerError, err)
+		return err
+	}
+
+	h.prepareSSEHeaders(w)
+	emitter := h.newTrajectoryEmitter(w, session, turnID)
+	initialOrchestration := buildOrchestrationPayload("llm_stream", routeAttempted, routeCandidates, nil, &llm.LLMResponse{Model: model}, fallback)
+	if planningPayload != nil {
+		initialOrchestration["planning_attempted"] = planningPayload["attempted"]
+		initialOrchestration["planning_source"] = planningPayload["planning_source"]
+		initialOrchestration["plan_step_count"] = planningPayload["step_count"]
+		initialOrchestration["subagent_task_count"] = planningPayload["subagent_task_count"]
+		initialOrchestration["subagent_execution_requested"] = planningPayload["subagent_execution_requested"]
+		initialOrchestration["subagent_execution_eligible"] = planningPayload["subagent_execution_eligible"]
+		initialOrchestration["subagent_execution_blocked_reason"] = planningPayload["subagent_execution_blocked_reason"]
+		initialOrchestration["subagent_execution_attempted"] = planningPayload["subagent_execution_attempted"]
+		initialOrchestration["patch_decision"] = planningPayload["patch_decision"]
+		initialOrchestration["patch_decision_reason"] = planningPayload["patch_decision_reason"]
+		initialOrchestration["patch_decision_required"] = planningPayload["patch_decision_required"]
+		if planningError, ok := planningPayload["planning_error"].(string); ok && planningError != "" {
+			initialOrchestration["planning_error"] = planningError
+		}
+	}
+	emitter.Emit("meta", map[string]interface{}{
+		"session_id":    sessionID(session),
+		"agent_id":      agentID,
+		"source":        "llm_stream",
+		"kind":          "llm",
+		"model":         model,
+		"orchestration": initialOrchestration,
+		"planning":      planningPayload,
+		"status":        "streaming",
+	})
+	if planningPayload != nil {
+		emitter.Emit("planning", planningPayload)
+	}
+
+	var builder strings.Builder
+	var reasoningBuilder strings.Builder
+	toolEvents := make([]map[string]interface{}, 0)
+	chunkIndex := 0
+	for chunk := range stream {
+		chunkIndex++
+		switch chunk.Type {
+		case llm.EventTypeText:
+			if chunk.Content != "" {
+				builder.WriteString(chunk.Content)
+				emitter.Emit("chunk", buildStreamChunkPayload(chunk, chunkIndex, builder.Len()))
+			}
+		case llm.EventTypeReasoning, llm.EventTypeToolCall, llm.EventTypeToolStart, llm.EventTypeToolEnd:
+			payload := buildStreamChunkPayload(chunk, chunkIndex, builder.Len())
+			if chunk.Type == llm.EventTypeReasoning && chunk.Content != "" {
+				reasoningBuilder.WriteString(chunk.Content)
+			}
+			if chunk.ToolCall != nil || chunk.Delta != nil || chunk.Content != "" {
+				toolEvents = append(toolEvents, payload)
+			}
+			emitter.Emit(streamEventName(chunk.Type), payload)
+			emitter.Emit("chunk", payload)
+		case llm.EventTypeImage:
+			payload := buildStreamChunkPayload(chunk, chunkIndex, builder.Len())
+			emitter.Emit("chunk", payload)
+		case llm.EventTypeError:
+			h.publishSessionRuntimeEvent("llm.request.finished", traceID, sessionID(session), map[string]interface{}{
+				"model":   model,
+				"success": false,
+				"error":   chunk.Error,
+			})
+			emitter.Emit("error", map[string]interface{}{
+				"index":   chunkIndex,
+				"message": chunk.Error,
+				"source":  "llm_stream",
+			})
+			return fmt.Errorf("%s", chunk.Error)
+		case llm.EventTypeDone:
+			// handled after loop
+		}
+		if chunk.Done {
+			break
+		}
+	}
+
+	fullContent := builder.String()
+	h.recordUsage(usageScope, "agent_chat", "", true, estimatedPromptTokens, nil, fullContent)
+	resultPayload := map[string]interface{}{
+		"kind":        "llm",
+		"source":      "llm_stream",
+		"success":     true,
+		"output":      fullContent,
+		"model":       model,
+		"reasoning":   reasoningBuilder.String(),
+		"tool_events": toolEvents,
+	}
+	attachAgentChatTurnID(resultPayload, turnID)
+	if len(routeAudit) > 0 {
+		attachExecutionRouteTransparency(resultPayload, activeRoute)
+	}
+	resultPayload["orchestration"] = buildOrchestrationPayload("llm_stream", routeAttempted, routeCandidates, nil, &llm.LLMResponse{Model: model, Content: fullContent}, fallback)
+	if planningPayload != nil {
+		resultPayload["planning"] = planningPayload
+		if orchestration, ok := resultPayload["orchestration"].(map[string]interface{}); ok {
+			orchestration["planning_attempted"] = planningPayload["attempted"]
+			orchestration["planning_source"] = planningPayload["planning_source"]
+			orchestration["plan_step_count"] = planningPayload["step_count"]
+			orchestration["subagent_task_count"] = planningPayload["subagent_task_count"]
+			orchestration["subagent_execution_requested"] = planningPayload["subagent_execution_requested"]
+			orchestration["subagent_execution_eligible"] = planningPayload["subagent_execution_eligible"]
+			orchestration["subagent_execution_blocked_reason"] = planningPayload["subagent_execution_blocked_reason"]
+			orchestration["subagent_execution_attempted"] = planningPayload["subagent_execution_attempted"]
+			orchestration["patch_decision"] = planningPayload["patch_decision"]
+			orchestration["patch_decision_reason"] = planningPayload["patch_decision_reason"]
+			orchestration["patch_decision_required"] = planningPayload["patch_decision_required"]
+			if planningError, ok := planningPayload["planning_error"].(string); ok && planningError != "" {
+				orchestration["planning_error"] = planningError
+			}
+		}
+	}
+	if session != nil {
+		_ = h.persistChatTurn(
+			ctx,
+			session,
+			userPrompt,
+			fullContent,
+			buildWorkspaceEvidenceMetadata(resultPayload),
+		)
+	}
+	h.publishSessionRuntimeEvent("llm.request.finished", traceID, sessionID(session), map[string]interface{}{
+		"model":   model,
+		"success": true,
+	})
+	emitter.Emit("orchestration", resultPayload["orchestration"])
+	if planningPayload != nil {
+		emitter.Emit("planning", planningPayload)
+	}
+	emitter.Emit("result", resultPayload)
+
+	emitter.Emit("done", map[string]interface{}{
+		"session_id": sessionID(session),
+		"agent_id":   agentID,
+		"source":     "llm_stream",
+		"status":     "completed",
+		"content":    fullContent,
+		"result":     resultPayload,
+	})
+	return nil
+}
+
+func (h *Handler) streamStaticResult(w http.ResponseWriter, session *chat.Session, agentID string, resultPayload map[string]interface{}, turnIDs ...string) {
+	turnID := ""
+	if len(turnIDs) > 0 {
+		turnID = strings.TrimSpace(turnIDs[0])
+	}
+	attachAgentChatTurnID(resultPayload, turnID)
+	output, _ := resultPayload["output"].(string)
+	h.prepareSSEHeaders(w)
+	emitter := h.newTrajectoryEmitter(w, session, turnID)
+	emitter.Emit("meta", map[string]interface{}{
+		"session_id":    sessionID(session),
+		"agent_id":      agentID,
+		"source":        responseResultSource(resultPayload),
+		"kind":          resultPayload["kind"],
+		"orchestration": resultPayload["orchestration"],
+		"status":        "streaming",
+	})
+	if planningPayload, ok := resultPayload["planning"]; ok && planningPayload != nil {
+		emitter.Emit("planning", planningPayload)
+	}
+	emitter.Emit("orchestration", resultPayload["orchestration"])
+	if routePayload, ok := buildAgentRouteEventPayload(resultPayload); ok {
+		emitter.Emit("route", routePayload)
+	}
+	for _, toolEvent := range buildObservedToolEventPayloads(resultPayload) {
+		emitter.Emit(toolEvent.Event, toolEvent.Payload)
+	}
+	for _, observationPayload := range buildObservationEventPayloads(resultPayload) {
+		emitter.Emit("observation", observationPayload)
+	}
+	for _, subagentPayload := range buildSubagentEventPayloads(resultPayload) {
+		emitter.Emit("subagent", subagentPayload)
+	}
+	emitter.Emit("result", resultPayload)
+	emitter.Emit("chunk", map[string]interface{}{
+		"type":    "text",
+		"content": output,
+	})
+	emitter.Emit("done", map[string]interface{}{
+		"session_id": sessionID(session),
+		"agent_id":   agentID,
+		"source":     responseResultSource(resultPayload),
+		"status":     finalResultStatus(resultPayload),
+		"content":    output,
+		"result":     resultPayload,
+	})
+}
+
+func streamEventName(eventType llm.StreamEventType) string {
+	switch eventType {
+	case llm.EventTypeReasoning:
+		return "reasoning"
+	case llm.EventTypeToolCall:
+		return "tool_call"
+	case llm.EventTypeToolStart:
+		return "tool_start"
+	case llm.EventTypeToolEnd:
+		return "tool_end"
+	default:
+		return "chunk"
+	}
+}
+
+func buildStreamChunkPayload(chunk llm.StreamChunk, index int, totalChars int) map[string]interface{} {
+	payload := map[string]interface{}{
+		"index":    index,
+		"type":     string(chunk.Type),
+		"content":  chunk.Content,
+		"metadata": chunk.Metadata,
+	}
+	if strings.TrimSpace(chunk.StreamID) != "" {
+		payload["stream_id"] = chunk.StreamID
+	}
+	if chunk.Sequence > 0 {
+		payload["sequence"] = chunk.Sequence
+	}
+	if strings.TrimSpace(chunk.TurnID) != "" {
+		payload["turn_id"] = chunk.TurnID
+	}
+	if chunk.Step > 0 {
+		payload["step"] = chunk.Step
+	}
+
+	switch chunk.Type {
+	case llm.EventTypeText:
+		payload["total_chars"] = totalChars
+		payload["text"] = map[string]interface{}{
+			"content":     chunk.Content,
+			"total_chars": totalChars,
+		}
+	case llm.EventTypeReasoning:
+		payload["reasoning"] = map[string]interface{}{
+			"content": chunk.Content,
+			"delta":   chunk.Content,
+			"length":  len(chunk.Content),
+		}
+	case llm.EventTypeToolCall, llm.EventTypeToolStart, llm.EventTypeToolEnd:
+		payload["tool_call"] = chunk.ToolCall
+		payload["delta"] = chunk.Delta
+		payload["tool"] = buildToolEventPayload(chunk)
+	}
+
+	return payload
+}
+
+func buildToolEventPayload(chunk llm.StreamChunk) map[string]interface{} {
+	var toolID string
+	var toolName string
+	var toolArgs map[string]interface{}
+
+	if chunk.ToolCall != nil {
+		toolID = chunk.ToolCall.ID
+		toolName = chunk.ToolCall.Name
+		toolArgs = chunk.ToolCall.Args
+	}
+	if chunk.Delta != nil {
+		if toolID == "" {
+			toolID = chunk.Delta.ID
+		}
+		if toolName == "" {
+			toolName = chunk.Delta.Name
+		}
+		if len(toolArgs) == 0 {
+			toolArgs = chunk.Delta.Args
+		}
+	}
+
+	return map[string]interface{}{
+		"id":      toolID,
+		"name":    toolName,
+		"args":    toolArgs,
+		"status":  string(chunk.Type),
+		"content": chunk.Content,
+	}
+}
+
+type staticToolEvent struct {
+	Event   string
+	Payload map[string]interface{}
+}
+
+func buildObservedToolEventPayloads(resultPayload map[string]interface{}) []staticToolEvent {
+	return buildObservedToolEventPayloadsWithLive(resultPayload, nil)
+}
+
+// buildObservedToolEventPayloadsWithLive 构建回合末的工具证据尾巴。
+//
+// live 非空时，已经在实时通道下发过帧的工具（键为观测命名 `step_N_tool_M`）
+// 只补一条 tool_end：行 id 改写成实时帧使用的真实 provider call id，前端
+// upsert 合并进同一行，title/arguments/output 用观测里的权威值就地补全。
+// 未实时下发的工具（总线不可用、跨进程执行、被过滤的事件等）保持原有
+// tool_call + tool_start + tool_end 三段式，行为与修复前一致。
+func buildObservedToolEventPayloadsWithLive(resultPayload map[string]interface{}, live *liveToolStreamTracker) []staticToolEvent {
+	observations := observationsFromResultPayload(resultPayload)
+	if len(observations) == 0 {
+		return nil
+	}
+
+	events := make([]staticToolEvent, 0, len(observations)*3)
+	for index, observation := range observations {
+		toolName := strings.TrimSpace(observation.Tool)
+		if toolName == "" {
+			continue
+		}
+
+		toolCallID := observationToolCallID(observation, index)
+		toolCall := map[string]interface{}{
+			"id":   toolCallID,
+			"name": toolName,
+		}
+		if args := cloneObservedToolArguments(observation.Input); len(args) > 0 {
+			toolCall["arguments"] = args
+		}
+
+		metadata := map[string]interface{}{
+			"step":        observation.Step,
+			"success":     observation.Success,
+			"duration_ms": observation.Duration.GetDuration().Milliseconds(),
+		}
+		if strings.TrimSpace(observation.Error) != "" {
+			metadata["error"] = observation.Error
+		}
+		if len(observation.Metrics) > 0 {
+			metadata["metrics"] = observation.Metrics
+		}
+
+		if rowID, ok := live.rowIDForObservationKey(observation.Step, toolName); ok {
+			toolCall["id"] = rowID
+			metadata["live"] = true
+			liveEnd := buildStaticToolEventPayload(index, llm.EventTypeToolEnd, toolCall, metadata, observationOutputText(observation))
+			// 行 id 是实时通道登记过的真实 provider call id ⇒ 身份权威，可直接
+			// 与实时帧 upsert 合并（P1-2：把这件事写进载荷而不是留给前端猜）。
+			attachToolEntity(liveEnd.Payload, rowID)
+			events = append(events, liveEnd)
+			continue
+		}
+
+		legacyFrames := []staticToolEvent{
+			buildStaticToolEventPayload(index, llm.EventTypeToolCall, toolCall, metadata, ""),
+			buildStaticToolEventPayload(index, llm.EventTypeToolStart, toolCall, metadata, ""),
+			buildStaticToolEventPayload(index, llm.EventTypeToolEnd, toolCall, metadata, observationOutputText(observation)),
+		}
+		// 观测合成身份 `observation_<step>`：三帧之间自洽，但与实时帧的 provider
+		// call id 无法合并。显式标 degraded（见 attachDegradedToolEntity）。
+		for _, frame := range legacyFrames {
+			attachDegradedToolEntity(frame.Payload, toolCallID)
+		}
+		events = append(events, legacyFrames...)
+	}
+
+	if len(events) == 0 {
+		return nil
+	}
+	return events
+}
+
+func buildStaticToolEventPayload(index int, eventType llm.StreamEventType, toolCall map[string]interface{}, metadata map[string]interface{}, content string) staticToolEvent {
+	toolPayload := map[string]interface{}{
+		"id":      toolCall["id"],
+		"name":    toolCall["name"],
+		"args":    toolCall["arguments"],
+		"status":  string(eventType),
+		"content": content,
+	}
+
+	payload := map[string]interface{}{
+		"index":     index + 1,
+		"type":      string(eventType),
+		"content":   content,
+		"metadata":  metadata,
+		"tool_call": toolCall,
+		"tool":      toolPayload,
+	}
+	if eventType == llm.EventTypeToolCall {
+		payload["delta"] = toolCall
+	}
+	return staticToolEvent{
+		Event:   streamEventName(eventType),
+		Payload: payload,
+	}
+}
+
+func observationOutputText(observation types.Observation) string {
+	if strings.TrimSpace(observation.Error) != "" {
+		return observation.Error
+	}
+
+	switch value := observation.Output.(type) {
+	case nil:
+		return ""
+	case string:
+		return value
+	case []byte:
+		return string(value)
+	default:
+		encoded, err := json.Marshal(value)
+		if err == nil {
+			return string(encoded)
+		}
+		return fmt.Sprintf("%v", value)
+	}
+}
+
+func buildAgentRouteEventPayload(resultPayload map[string]interface{}) (map[string]interface{}, bool) {
+	if resultPayload == nil {
+		return nil, false
+	}
+	orchestration, ok := resultPayload["orchestration"].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	return map[string]interface{}{
+		"source":           responseResultSource(resultPayload),
+		"skill":            resultPayload["skill"],
+		"route_attempted":  orchestration["route_attempted"],
+		"route_matched":    orchestration["route_matched"],
+		"candidate_count":  orchestration["candidate_count"],
+		"route_candidates": orchestration["route_candidates"],
+	}, true
+}
+
+func buildObservationEventPayloads(resultPayload map[string]interface{}) []map[string]interface{} {
+	observations := observationsFromResultPayload(resultPayload)
+	if len(observations) == 0 {
+		return nil
+	}
+
+	payloads := make([]map[string]interface{}, 0, len(observations))
+	for idx, observation := range observations {
+		payloads = append(payloads, map[string]interface{}{
+			"index":       idx + 1,
+			"step":        observation.Step,
+			"tool":        observation.Tool,
+			"success":     observation.Success,
+			"error":       observation.Error,
+			"duration_ms": observation.Duration.GetDuration().Milliseconds(),
+			"input":       observation.Input,
+			"output":      observation.Output,
+			"metrics":     observation.Metrics,
+		})
+	}
+	return payloads
+}
+
+func observationsFromResultPayload(resultPayload map[string]interface{}) []types.Observation {
+	if resultPayload == nil {
+		return nil
+	}
+
+	rawObservations, ok := resultPayload["observations"]
+	if !ok {
+		return nil
+	}
+
+	switch value := rawObservations.(type) {
+	case []types.Observation:
+		return value
+	case []interface{}:
+		observations := make([]types.Observation, 0, len(value))
+		for _, item := range value {
+			switch observation := item.(type) {
+			case types.Observation:
+				observations = append(observations, observation)
+			case map[string]interface{}:
+				decoded, ok := observationFromMap(observation)
+				if ok {
+					observations = append(observations, decoded)
+				}
+			}
+		}
+		return observations
+	default:
+		return nil
+	}
+}
+
+func observationFromMap(value map[string]interface{}) (types.Observation, bool) {
+	if len(value) == 0 {
+		return types.Observation{}, false
+	}
+
+	observation := types.Observation{
+		Step:    stringMapValueAny(value, "step"),
+		Tool:    stringMapValueAny(value, "tool"),
+		Input:   value["input"],
+		Output:  value["output"],
+		Success: boolMapValueAny(value, "success"),
+		Error:   stringMapValueAny(value, "error"),
+		Metrics: mapMapValueAny(value["metrics"]),
+	}
+	if timestamp, ok := value["timestamp"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, timestamp); err == nil {
+			observation.Timestamp = parsed
+		}
+	}
+	if durationMap, ok := value["duration"].(map[string]interface{}); ok {
+		if start, ok := durationMap["start"].(string); ok {
+			if parsed, err := time.Parse(time.RFC3339Nano, start); err == nil {
+				observation.Duration.Start = parsed
+			}
+		}
+		if end, ok := durationMap["end"].(string); ok {
+			if parsed, err := time.Parse(time.RFC3339Nano, end); err == nil {
+				observation.Duration.End = parsed
+			}
+		}
+	}
+	return observation, strings.TrimSpace(observation.Tool) != ""
+}
+
+func mapMapValueAny(value interface{}) map[string]interface{} {
+	typed, ok := value.(map[string]interface{})
+	if !ok || len(typed) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]interface{}, len(typed))
+	for key, item := range typed {
+		cloned[key] = item
+	}
+	return cloned
+}
+
+func buildSubagentEventPayloads(resultPayload map[string]interface{}) []map[string]interface{} {
+	if resultPayload == nil {
+		return nil
+	}
+	rawResults, ok := resultPayload["subagent_results"]
+	if !ok {
+		return nil
+	}
+
+	var results []agent.SubagentResult
+	switch typed := rawResults.(type) {
+	case []agent.SubagentResult:
+		results = typed
+	case []interface{}:
+		results = make([]agent.SubagentResult, 0, len(typed))
+		for _, item := range typed {
+			reportMap, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			results = append(results, agent.SubagentResult{
+				ID:           stringMapValueAny(reportMap, "id"),
+				Role:         stringMapValueAny(reportMap, "role"),
+				SessionID:    stringMapValueAny(reportMap, "session_id"),
+				ReadOnly:     boolMapValueAny(reportMap, "read_only"),
+				BudgetTokens: intMapValueAny(reportMap, "budget_tokens"),
+				Success:      boolMapValueAny(reportMap, "success"),
+				Summary:      stringMapValueAny(reportMap, "summary"),
+				Findings:     stringSliceValueAny(reportMap["findings"]),
+				Patches:      filePatchesFromAny(reportMap["patches"]),
+				Error:        stringMapValueAny(reportMap, "error"),
+			})
+		}
+	default:
+		return nil
+	}
+
+	payloads := make([]map[string]interface{}, 0, len(results))
+	for idx, report := range results {
+		payloads = append(payloads, map[string]interface{}{
+			"index":         idx + 1,
+			"id":            report.ID,
+			"role":          report.Role,
+			"session_id":    report.SessionID,
+			"read_only":     report.ReadOnly,
+			"budget_tokens": report.BudgetTokens,
+			"success":       report.Success,
+			"summary":       report.Summary,
+			"findings":      report.Findings,
+			"patches":       report.Patches,
+			"error":         report.Error,
+		})
+	}
+	return payloads
+}
+
+func buildWorkspaceEvidenceMetadata(resultPayload map[string]interface{}) types.Metadata {
+	if len(resultPayload) == 0 {
+		return nil
+	}
+
+	evidence := buildWorkspaceEvidenceEntries(resultPayload)
+	if len(evidence) == 0 {
+		return nil
+	}
+
+	artifactIDs := make([]string, 0, len(evidence))
+	for _, item := range evidence {
+		id, _ := item["id"].(string)
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		artifactIDs = append(artifactIDs, id)
+	}
+	if len(artifactIDs) == 0 {
+		return nil
+	}
+
+	metadata := types.NewMetadata()
+	metadata["workspace_related_artifact_ids"] = artifactIDs
+	metadata["workspace_related_artifacts"] = evidence
+	return metadata
+}
+
+func buildWorkspaceEvidenceEntries(resultPayload map[string]interface{}) []map[string]interface{} {
+	entries := make([]map[string]interface{}, 0, 8)
+	source := strings.TrimSpace(responseResultSource(resultPayload))
+
+	entries = append(entries, buildWorkspaceEvidenceEntry(
+		"agent-chat-response",
+		"Final response payload persisted with the assistant history.",
+		source,
+		map[string]interface{}{
+			"source": resultPayload["source"],
+			"kind":   resultPayload["kind"],
+			"status": finalResultStatus(resultPayload),
+			"result": resultPayload,
+		},
+	))
+
+	if planning, ok := resultPayload["planning"].(map[string]interface{}); ok && len(planning) > 0 {
+		entries = append(entries, buildWorkspaceEvidenceEntry(
+			"planning",
+			"Planning payload emitted by /api/agent/chat.",
+			source,
+			planning,
+		))
+	}
+
+	if orchestration, ok := resultPayload["orchestration"].(map[string]interface{}); ok && len(orchestration) > 0 {
+		entries = append(entries, buildWorkspaceEvidenceEntry(
+			"orchestration",
+			"Structured orchestration summary emitted by /api/agent/chat.",
+			source,
+			orchestration,
+		))
+	}
+
+	if route, ok := buildAgentRouteEventPayload(resultPayload); ok && len(route) > 0 {
+		entries = append(entries, buildWorkspaceEvidenceEntry(
+			"route",
+			"Route metadata emitted by static agent execution.",
+			source,
+			route,
+		))
+	}
+
+	if toolEvents := buildObservedToolEventPayloads(resultPayload); len(toolEvents) > 0 {
+		payloads := make([]map[string]interface{}, 0, len(toolEvents))
+		for _, item := range toolEvents {
+			if len(item.Payload) == 0 {
+				continue
+			}
+			payloads = append(payloads, item.Payload)
+		}
+		if len(payloads) > 0 {
+			entries = append(entries, buildWorkspaceEvidenceEntry(
+				"tool-events",
+				"Tool events observed during agent execution.",
+				source,
+				payloads,
+			))
+		}
+	}
+
+	if observations := buildObservationEventPayloads(resultPayload); len(observations) > 0 {
+		entries = append(entries, buildWorkspaceEvidenceEntry(
+			"observations",
+			"Observation events emitted by static agent execution.",
+			source,
+			observations,
+		))
+	}
+
+	if subagents := buildSubagentEventPayloads(resultPayload); len(subagents) > 0 {
+		entries = append(entries, buildWorkspaceEvidenceEntry(
+			"subagents",
+			"Subagent events emitted by static agent execution.",
+			source,
+			subagents,
+		))
+	}
+
+	return entries
+}
+
+func buildWorkspaceEvidenceEntry(kind, summary, source string, payload interface{}) map[string]interface{} {
+	if strings.TrimSpace(kind) == "" {
+		return nil
+	}
+	idSource := strings.TrimSpace(source)
+	if idSource == "" {
+		idSource = "runtime"
+	}
+	filename := kind + "-" + idSource + ".json"
+	return map[string]interface{}{
+		"id":       "persisted-" + kind + "-" + idSource,
+		"name":     filename,
+		"path":     "runtime/" + filename,
+		"summary":  summary,
+		"kind":     "json",
+		"language": "json",
+		"content":  payload,
+	}
+}
+
+func finalResultStatus(result interface{}) string {
+	payload, ok := result.(map[string]interface{})
+	if !ok || len(payload) == 0 {
+		return "completed"
+	}
+	if planning, ok := payload["planning"].(map[string]interface{}); ok {
+		if decision, ok := planning["patch_decision"].(string); ok && strings.TrimSpace(decision) == "blocked" {
+			policy, _ := planning["patch_decision_policy"].(string)
+			overrideApplied, _ := planning["patch_decision_override_applied"].(bool)
+			if strings.TrimSpace(policy) == agent.PatchDecisionPolicyWarn || overrideApplied {
+				return "completed"
+			}
+			return "blocked"
+		}
+	}
+	if success, ok := payload["success"].(bool); ok && !success {
+		return "failed"
+	}
+	return "completed"
+}
+
+type sseEmitter struct {
+	w        http.ResponseWriter
+	sequence int64
+	// turnID is copied onto every top-level chat SSE payload when present.
+	// Keeping this at the emitter boundary prevents one terminal path from
+	// accidentally omitting the identity required for frontend turn gating.
+	turnID string
+	// persist 可选：每个事件写出前先持久化到会话事件存储（chat 轨迹事件日志），
+	// 返回持久化 seq；返回 <=0 表示未持久化，降级为连接内计数。
+	// 用于 /api/agent/chat 的轨迹录制，不影响其他 SSE 使用方。
+	persist func(event string, data interface{}) int64
+	// wireOnly 可选：判定该帧是否「只走 wire、不落盘」（Batch 1 去重名单）。
+	// 命中时既不写 EventStore，也不写 `_event.sequence`/`id:`——连接内计数器
+	// 不是持久化游标，写进游标位会被前端当作真实 seq 幂等丢弃（宁缺勿假）。
+	wireOnly func(event string, data interface{}) bool
+}
+
+func newSSEEmitter(w http.ResponseWriter) *sseEmitter {
+	return &sseEmitter{w: w}
+}
+
+func (e *sseEmitter) Emit(event string, data interface{}) {
+	data = e.withTurnID(data)
+	if e.persist != nil && e.wireOnly != nil && e.wireOnly(event, data) {
+		writeSSEEventFrame(e.w, event, data, 0, 0)
+		return
+	}
+	e.sequence++
+	// Batch 4（游标单一真源）：启用 persist 钩子后，游标只有 EventStore 的
+	// session 级 seq 一个真源。写失败（seq<=0）时整帧既不带 `id:` 也不带
+	// `_event.sequence`：连接内计数器与持久化 seq 不同空间，混进游标位会被
+	// 前端轨迹 reducer（eventSeqOf，0 = 降级按到达序）当成真实 seq 做幂等去重，
+	// 把降级帧误判为重复而丢弃（宁缺勿假，同 P0-3）。
+	// persist == nil 的 SSE 端点没有存储游标语义，连接内计数照旧供到达序排序。
+	var wireSequence, id int64
+	if e.persist != nil {
+		if seq := e.persist(event, data); seq > 0 {
+			e.sequence = seq
+			wireSequence = seq
+			id = seq
+		}
+	} else {
+		wireSequence = e.sequence
+	}
+	writeSSEEventFrame(e.w, event, data, wireSequence, id)
+}
+
+func (e *sseEmitter) withTurnID(data interface{}) interface{} {
+	if e == nil || strings.TrimSpace(e.turnID) == "" {
+		return data
+	}
+	payload, ok := data.(map[string]interface{})
+	if !ok {
+		return data
+	}
+	cloned := make(map[string]interface{}, len(payload)+1)
+	for key, value := range payload {
+		cloned[key] = value
+	}
+	attachAgentChatTurnID(cloned, e.turnID)
+	return cloned
+}
+
+func (h *Handler) prepareSSEHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+}
+
+func (h *Handler) writeSSEEvent(w http.ResponseWriter, event string, data interface{}) {
+	writeSSEEventWithEnvelope(w, event, data, 0)
+}
+
+func writeSSEEventWithEnvelope(w http.ResponseWriter, event string, data interface{}, sequence int64) {
+	writeSSEEventFrame(w, event, data, sequence, 0)
+}
+
+// writeSSEEventFrame 写一帧 SSE：`id:`（仅持久化 seq）→ `event:` → `data:` 信封。
+//
+// id <= 0 时不写 `id:` 行：宁缺勿假——连接内计数器与 EventStore seq 不在同一
+// 空间，写出去会让 `Last-Event-ID` 续传拿到假游标（见 P0-3 / Batch 4）。
+func writeSSEEventFrame(w http.ResponseWriter, event string, data interface{}, sequence int64, id int64) {
+	if id > 0 {
+		_, _ = fmt.Fprintf(w, "id: %d\n", id)
+	}
+	if event != "" {
+		_, _ = fmt.Fprintf(w, "event: %s\n", event)
+	}
+	encoded, err := json.Marshal(wrapSSEData(event, data, sequence))
+	if err != nil {
+		encoded = []byte(`{"error":"failed to marshal event"}`)
+	}
+	_, _ = fmt.Fprintf(w, "data: %s\n\n", encoded)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+// writeSSEComment 写一行 SSE 注释帧（`: keepalive`）并立即 flush。
+// 注释帧按 SSE 规范被客户端忽略，只用于静默长连接的存活证明：既让 proxy/LB 的
+// idle timeout 不至于把「没有业务事件」误判为死连接，也给客户端一个可观测的
+// 建连证据（配合 handler 首帧前的响应头 flush）。
+func writeSSEComment(w http.ResponseWriter, comment string) {
+	if _, err := fmt.Fprintf(w, ": %s\n\n", comment); err != nil {
+		return
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func wrapSSEData(event string, data interface{}, sequence int64) interface{} {
+	eventMeta := map[string]interface{}{
+		"name":           event,
+		"schema_version": "skill_runtime.sse.v1",
+		"timestamp":      time.Now().Format(time.RFC3339Nano),
+	}
+	if sequence > 0 {
+		eventMeta["sequence"] = sequence
+	}
+
+	if payload, ok := data.(map[string]interface{}); ok {
+		cloned := make(map[string]interface{}, len(payload)+1)
+		for key, value := range payload {
+			cloned[key] = value
+		}
+		cloned["_event"] = eventMeta
+		return cloned
+	}
+
+	return map[string]interface{}{
+		"data":   data,
+		"_event": eventMeta,
+	}
+}
+
+func wantsEventStream(r *http.Request) bool {
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
+}
+
+func (h *Handler) ensureHotReload() (*skill.HotReload, error) {
+	if h.hotReload != nil {
+		return h.hotReload, nil
+	}
+	if h.skillLoader == nil {
+		return nil, errors.New(errors.ErrConfigInvalid, "skill loader not configured")
+	}
+	if h.skillRegistry == nil {
+		return nil, errors.New(errors.ErrConfigInvalid, "skill registry not configured")
+	}
+
+	hotReload, err := skill.NewHotReload(h.skillLoader, h.skillRegistry)
+	if err != nil {
+		return nil, err
+	}
+	h.hotReload = hotReload
+	h.attachEmbeddingHotReloadSync()
+	return hotReload, nil
+}
+
+func (h *Handler) attachEmbeddingHotReloadSync() {
+	if h.hotReload == nil || h.embeddingRouter == nil || h.embeddingHotReloadSyncAttached {
+		return
+	}
+
+	h.hotReload.AddCallback(func(event *skill.ReloadEvent) {
+		if event == nil {
+			return
+		}
+
+		switch event.Type {
+		case skill.ReloadEventSkillAdded, skill.ReloadEventSkillUpdated:
+			if registeredSkill, ok := h.skillRegistry.Get(event.SkillName); ok {
+				_ = h.embeddingRouter.IncrementalIndex(registeredSkill)
+			}
+			h.publishHotReloadSkillChangedEvent(event)
+		case skill.ReloadEventSkillRemoved:
+			_ = h.embeddingRouter.RemoveIndex(&skill.Skill{Name: event.SkillName})
+			h.publishHotReloadSkillChangedEvent(event)
+		case skill.ReloadEventReloadDone:
+			_ = h.embeddingRouter.RebuildIndex()
+		}
+	})
+	h.embeddingHotReloadSyncAttached = true
+}
+
+func (h *Handler) publishSkillsChangedEvent(r *http.Request, payload map[string]interface{}) {
+	if h == nil {
+		return
+	}
+	h.invalidateCodexSkillsListCache()
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	if _, ok := payload["skill_dirs"]; !ok {
+		skillDirs := handlerSkillDirs(h.skillLoader)
+		if skillDirs == nil {
+			skillDirs = []string{}
+		}
+		payload["skill_dirs"] = append([]string{}, skillDirs...)
+	}
+	if _, ok := payload["count"]; !ok {
+		payload["count"] = h.currentSkillCount()
+	}
+	if _, ok := payload["codex_list_cache_version"]; !ok {
+		payload["codex_list_cache_version"] = h.currentCodexSkillsListCacheVersion()
+	}
+
+	traceID := ""
+	if r != nil {
+		traceID = strings.TrimSpace(logger.GetRequestID(r.Context()))
+		if traceID != "" {
+			payload["trace_id"] = traceID
+		}
+	}
+
+	h.getRuntimeEventBus().Publish(runtimeevents.Event{
+		Type:      skillsChangedEventType,
+		TraceID:   traceID,
+		AgentName: "skills-runtime",
+		Payload:   payload,
+	})
+}
+
+// implicitInvocationIndex 返回当前 registry 的隐式调用判定索引（SK-3）。
+// 懒构建：首次调用或 registry 摘要变化时重建。返回 nil 表示停用。
+func (h *Handler) implicitInvocationIndex() *skill.ImplicitInvocationIndex {
+	if h == nil || h.skillRegistry == nil {
+		return nil
+	}
+	summaries := h.skillRegistry.ListSummaries()
+	if len(summaries) == 0 {
+		return nil
+	}
+	return skill.BuildImplicitInvocationIndex(summaries)
+}
+
+// publishSkillInvokedEvents 把技能调用命中发布为 skills.invoked 运行时事件（SK-3）。
+// 每次命中一条事件（已去重），字段对齐计划口径：name/scope/path/kind/basis/tool（+session_id）。
+// 仅观测用途，不参与权限与计费。Event.SessionID 刻意留空：该事件与 skills.changed 一样
+// 是总线级事件，不进会话事件库，避免被 A 通道记成「未落盘丢弃」。
+func (h *Handler) publishSkillInvokedEvents(r *http.Request, sessionID string, invocations []skill.ImplicitInvocation) {
+	if h == nil || len(invocations) == 0 {
+		return
+	}
+	traceID := ""
+	if r != nil {
+		traceID = strings.TrimSpace(logger.GetRequestID(r.Context()))
+	}
+	for _, inv := range skill.DedupeInvocations(invocations) {
+		payload := skill.SkillInvokedEventPayload(inv)
+		if sessionID != "" {
+			payload["session_id"] = sessionID
+		}
+		h.getRuntimeEventBus().Publish(runtimeevents.Event{
+			Type:      skillsInvokedEventType,
+			TraceID:   traceID,
+			AgentName: "skills-runtime",
+			Payload:   payload,
+		})
+	}
+}
+
+func (h *Handler) publishHotReloadSkillChangedEvent(event *skill.ReloadEvent) {
+	if h == nil || event == nil {
+		return
+	}
+
+	action := hotReloadActionForEventType(event.Type)
+	if action == "" {
+		return
+	}
+
+	payload := map[string]interface{}{
+		"action":         action,
+		"status":         "success",
+		"affected_count": 1,
+	}
+	if name := strings.TrimSpace(event.SkillName); name != "" {
+		payload["skill_name"] = name
+	}
+	if path := strings.TrimSpace(event.FilePath); path != "" {
+		payload["skill_path"] = path
+		if layer := h.skillSourceLayerForPath(path); layer != skill.SkillSourceLayerUnknown {
+			payload["source_layer"] = layer
+		}
+	}
+	if h.skillRegistry != nil {
+		if registeredSkill, ok := h.skillRegistry.Get(event.SkillName); ok && registeredSkill != nil {
+			if name := strings.TrimSpace(registeredSkill.Name); name != "" {
+				payload["skill_name"] = name
+			}
+			if registeredSkill.Source != nil {
+				if path := strings.TrimSpace(registeredSkill.Source.Path); path != "" {
+					payload["skill_path"] = path
+				}
+				if layer := strings.TrimSpace(registeredSkill.Source.Layer); layer != "" {
+					payload["source_layer"] = layer
+				}
+			}
+		}
+	}
+
+	h.publishSkillsChangedEvent(nil, payload)
+}
+
+func hotReloadActionForEventType(eventType skill.ReloadEventType) string {
+	switch eventType {
+	case skill.ReloadEventSkillAdded:
+		return skillHotReloadActionAdded
+	case skill.ReloadEventSkillUpdated:
+		return skillHotReloadActionUpdated
+	case skill.ReloadEventSkillRemoved:
+		return skillHotReloadActionRemoved
+	default:
+		return ""
+	}
+}
+
+func (h *Handler) skillSourceLayerForPath(path string) string {
+	skillDirs := handlerSkillDirs(h.skillLoader)
+	if len(skillDirs) == 0 {
+		return skill.SkillSourceLayerUnknown
+	}
+
+	normalizedPath := filepath.Clean(strings.TrimSpace(path))
+	if normalizedPath == "." || normalizedPath == "" {
+		return skill.SkillSourceLayerUnknown
+	}
+
+	for index, dir := range skillDirs {
+		normalizedDir := filepath.Clean(strings.TrimSpace(dir))
+		if normalizedDir == "." || normalizedDir == "" {
+			continue
+		}
+		if normalizedPath == normalizedDir || strings.HasPrefix(normalizedPath, normalizedDir+string(os.PathSeparator)) {
+			if index == 0 {
+				return skill.SkillSourceLayerSystem
+			}
+			return skill.SkillSourceLayerExternal
+		}
+	}
+
+	return skill.SkillSourceLayerUnknown
+}
+
+func (h *Handler) currentSkillCount() int {
+	if h == nil || h.skillRegistry == nil {
+		return 0
+	}
+	return h.skillRegistry.Count()
+}
+
+func skillChangePayloadFromSkill(skillItem *skill.Skill, skillDirs []string) map[string]interface{} {
+	payload := make(map[string]interface{})
+	if skillItem == nil {
+		return payload
+	}
+	if name := strings.TrimSpace(skillItem.Name); name != "" {
+		payload["skill_name"] = name
+	}
+	if skillItem.Source != nil {
+		if path := strings.TrimSpace(skillItem.Source.Path); path != "" {
+			payload["skill_path"] = path
+		}
+		if layer := strings.TrimSpace(skillItem.Source.Layer); layer != "" {
+			payload["source_layer"] = layer
+		}
+	}
+	if _, ok := payload["source_layer"]; !ok {
+		if path, _ := payload["skill_path"].(string); path != "" {
+			if layer := skillSourceLayerForPath(path, skillDirs); layer != skill.SkillSourceLayerUnknown {
+				payload["source_layer"] = layer
+			}
+		}
+	}
+	return payload
+}
+
+func skillSourceLayerForPath(path string, skillDirs []string) string {
+	normalizedPath := filepath.Clean(strings.TrimSpace(path))
+	if normalizedPath == "." || normalizedPath == "" {
+		return skill.SkillSourceLayerUnknown
+	}
+	for index, dir := range skillDirs {
+		normalizedDir := filepath.Clean(strings.TrimSpace(dir))
+		if normalizedDir == "." || normalizedDir == "" {
+			continue
+		}
+		if normalizedPath == normalizedDir || strings.HasPrefix(normalizedPath, normalizedDir+string(os.PathSeparator)) {
+			if index == 0 {
+				return skill.SkillSourceLayerSystem
+			}
+			return skill.SkillSourceLayerExternal
+		}
+	}
+	return skill.SkillSourceLayerUnknown
+}
+
+// sessionStoreQueryTimeout 是会话存储查询的超时。会话存储（session_history.sqlite）
+// 与并发运行的 aicli CLI 进程共享，被写锁占用时查询会阻塞在 sqlite busy_timeout
+// 或连接池排队。带超时的 context 确保 HTTP 请求在时限内返回（503 或 504），
+// 而不是让前端无限显示 "Connecting to runtime…"。
+// 5s 严格小于前端 RUNTIME_FETCH_TIMEOUT_MS（10s），确保后端 503 在先，
+// 不会出现前端 AbortSignal.timeout 先触发 → "signal timed out"。
+const sessionStoreQueryTimeout = 5 * time.Second
+
+// sessionStoreQueryContext 为会话存储的读操作创建一个有截止时间的 context。
+// 如果父 context 已有更早的截止时间则优先使用父 context。
+func sessionStoreQueryContext(r *http.Request) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(sessionStoreQueryTimeout)
+	if r == nil || r.Context() == nil {
+		return context.WithDeadline(context.Background(), deadline)
+	}
+	// 如果父 context 已有截止时间且早于我们的默认值，则优先使用父 context
+	parent := r.Context()
+	if parentDeadline, ok := parent.Deadline(); ok && parentDeadline.Before(deadline) {
+		return context.WithCancel(parent)
+	}
+	return context.WithDeadline(parent, deadline)
+}
+
+// writeSessionStoreError 将会话存储查询的错误映射为 HTTP 503 响应，
+// 附带对人类友好的错误提示，而不是裸 500 或无限挂起。
+func writeSessionStoreError(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+	statusCode := http.StatusServiceUnavailable
+	code := "STORE_UNAVAILABLE"
+	message := err.Error()
+
+	// 会话不存在是客户端语义（404），不是"存储不可用"（503）。此前统一
+	// 落 503，前端把 503 当作可重试的服务故障（退避重试 + 降级横幅），
+	// 已删除/失效会话的读取因此会在控制台反复报错，且掩盖了真正的存储
+	// 故障。仅当错误确实是 not-found 时才降级为 404。
+	if stderrors.Is(err, chat.ErrSessionNotFound) ||
+		strings.Contains(strings.ToLower(message), "session not found") {
+		code = "SESSION_NOT_FOUND"
+		statusCode = http.StatusNotFound
+	} else if strings.Contains(message, "database is locked") ||
+		strings.Contains(message, "database locked") {
+		code = "STORE_LOCKED"
+		message = "会话存储被其他进程（aicli CLI）锁定，请稍后重试。"
+	} else if strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "deadline exceeded") {
+		code = "STORE_TIMEOUT"
+		message = "会话存储查询超时（共享数据库被并发写入占用），请稍后重试。"
+	} else if strings.Contains(message, "database is busy") ||
+		strings.Contains(message, "database busy") {
+		code = "STORE_BUSY"
+		message = "会话存储正忙，请稍后重试。"
+	} else if strings.Contains(message, "context canceled") {
+		code = "STORE_CANCELED"
+		message = "会话存储请求被取消。"
+		statusCode = http.StatusGatewayTimeout
+	}
+
+	response := map[string]interface{}{
+		"error": message,
+		"code":  code,
+	}
+	if requestID := strings.TrimSpace(w.Header().Get("X-Request-ID")); requestID != "" {
+		response["request_id"] = requestID
+	}
+
+	// 使用 writeJSON 直接写 response，避免 writeError 的额外逻辑
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (h *Handler) writeError(w http.ResponseWriter, statusCode int, err error) {
+	response := map[string]interface{}{
+		"error": err.Error(),
+	}
+	if requestID := strings.TrimSpace(w.Header().Get("X-Request-ID")); requestID != "" {
+		response["request_id"] = requestID
+	}
+	if traceID := strings.TrimSpace(w.Header().Get("X-Trace-ID")); traceID != "" {
+		response["trace_id"] = traceID
+	}
+
+	var runtimeErr *errors.RuntimeError
+	if stderrors.As(err, &runtimeErr) {
+		response["code"] = runtimeErr.Code
+		response["context"] = runtimeErr.GetContext()
+	}
+	if preflightErr, ok := agent.AsPromptPreflightError(err); ok && preflightErr != nil {
+		response["error_type"] = "prompt_preflight"
+		for key, value := range preflightErr.Metadata() {
+			response[key] = value
+		}
+	}
+
+	h.writeJSON(w, statusCode, response)
+}
+
+func (h *Handler) writeAgentChatExecutionError(ctx context.Context, w http.ResponseWriter, statusCode int, err error, session *chat.Session, traceID string) {
+	if err == nil {
+		return
+	}
+	preparedErr, resolvedTraceID := h.prepareAgentChatExecutionError(ctx, err, session, traceID)
+	if resolvedTraceID != "" {
+		w.Header().Set("X-Trace-ID", resolvedTraceID)
+	}
+	h.writeError(w, statusCode, preparedErr)
+}
+
+func (h *Handler) prepareAgentChatExecutionError(ctx context.Context, err error, session *chat.Session, traceID string) (error, string) {
+	resolvedTraceID := strings.TrimSpace(traceID)
+	preflightErr, ok := agent.AsPromptPreflightError(err)
+	if !ok || preflightErr == nil {
+		return err, resolvedTraceID
+	}
+
+	preflightErr.ReplacementHistoryApplied = false
+	replacement := preflightErr.CloneReplacementHistory()
+	if resolvedTraceID == "" {
+		resolvedTraceID = "trace_" + uuid.NewString()
+	}
+	if len(replacement) == 0 || h == nil || session == nil || h.sessionManager == nil {
+		h.publishAgentChatPromptPreflightEvent(resolvedTraceID, session, err)
+		return err, resolvedTraceID
+	}
+
+	originalHistory := session.GetMessages()
+	session.ReplaceHistory(replacement)
+	if updateErr := h.sessionManager.Update(ctx, session); updateErr != nil {
+		session.ReplaceHistory(originalHistory)
+		wrappedErr := fmt.Errorf("%w: failed to persist prompt preflight recovery history: %v", err, updateErr)
+		h.publishAgentChatPromptPreflightEvent(resolvedTraceID, session, wrappedErr)
+		return wrappedErr, resolvedTraceID
+	}
+
+	preflightErr.ReplacementHistoryApplied = true
+	h.publishAgentChatPromptPreflightEvent(resolvedTraceID, session, err)
+	return err, resolvedTraceID
+}
+
+func (h *Handler) publishAgentChatPromptPreflightEvent(traceID string, session *chat.Session, err error) {
+	if h == nil || strings.TrimSpace(traceID) == "" || err == nil {
+		return
+	}
+	preflightErr, ok := agent.AsPromptPreflightError(err)
+	if !ok || preflightErr == nil {
+		return
+	}
+	payload := map[string]interface{}{
+		"success":     false,
+		"error":       err.Error(),
+		"error_type":  "prompt_preflight",
+		"source":      "agent_chat",
+		"entrypoint":  canonicalAgentChatEntrypoint,
+		"session_id":  sessionID(session),
+		"request_end": true,
+	}
+	for key, value := range preflightErr.Metadata() {
+		payload[key] = value
+	}
+	h.publishSessionRuntimeEvent(chat.EventSessionEnd, traceID, sessionID(session), payload)
+}
+
+func (h *Handler) runtimeRetryEventReporter(traceID, sessionID string) llm.RetryEventReporter {
+	if h == nil {
+		return nil
+	}
+	traceID = strings.TrimSpace(traceID)
+	sessionID = strings.TrimSpace(sessionID)
+	return func(event llm.RetryEvent) {
+		payload := map[string]interface{}{
+			"source": strings.TrimSpace(event.Source),
+		}
+		if provider := strings.TrimSpace(event.Provider); provider != "" {
+			payload["provider"] = provider
+		}
+		if protocol := strings.TrimSpace(event.Protocol); protocol != "" {
+			payload["protocol"] = protocol
+		}
+		if model := strings.TrimSpace(event.Model); model != "" {
+			payload["model"] = model
+		}
+		if event.Attempt > 0 {
+			payload["attempt"] = event.Attempt
+		}
+		if event.MaxAttempts > 0 {
+			payload["max_attempts"] = event.MaxAttempts
+		}
+		if reason := strings.TrimSpace(event.RetryReason); reason != "" {
+			payload["retry_reason"] = reason
+		}
+		if event.RetryDelayMS > 0 {
+			payload["retry_delay_ms"] = event.RetryDelayMS
+		}
+		if errText := strings.TrimSpace(event.Error); errText != "" {
+			payload["error"] = errText
+		}
+		if event.PartialOutput {
+			payload["partial_output"] = true
+		}
+		if sessionID != "" {
+			h.publishSessionRuntimeEvent("llm.retry", traceID, sessionID, payload)
+			return
+		}
+		h.publishRuntimeEvent("llm.retry", traceID, payload)
+	}
+}
+
+func runtimeHTTPDebugReporter(ctx context.Context) llm.HTTPDebugReporter {
+	return func(event llm.HTTPDebugEvent) {
+		fields := make([]zapcore.Field, 0, 12)
+		if value := strings.TrimSpace(event.Source); value != "" {
+			fields = append(fields, logger.String("http_debug_source", value))
+		}
+		if value := strings.TrimSpace(event.Phase); value != "" {
+			fields = append(fields, logger.String("http_debug_phase", value))
+		}
+		if value := strings.TrimSpace(event.Provider); value != "" {
+			fields = append(fields, logger.String("upstream_provider", value))
+		}
+		if value := strings.TrimSpace(event.Protocol); value != "" {
+			fields = append(fields, logger.String("upstream_protocol", value))
+		}
+		if value := strings.TrimSpace(event.Model); value != "" {
+			fields = append(fields, logger.String("upstream_model", value))
+		}
+		if value := strings.TrimSpace(event.Method); value != "" {
+			fields = append(fields, logger.Method(value))
+		}
+		if value := strings.TrimSpace(event.URL); value != "" {
+			fields = append(fields, logger.URL(value))
+		}
+		if event.Attempt > 0 {
+			fields = append(fields, logger.Int("attempt", event.Attempt))
+		}
+		if event.MaxAttempts > 0 {
+			fields = append(fields, logger.Int("max_attempts", event.MaxAttempts))
+		}
+		if value := strings.TrimSpace(event.RetryReason); value != "" {
+			fields = append(fields, logger.String("retry_reason", value))
+		}
+		if event.RetryDelayMS > 0 {
+			fields = append(fields, logger.Int64("retry_delay_ms", event.RetryDelayMS))
+		}
+		if event.RequestBodyBytes > 0 {
+			fields = append(fields, logger.Int("request_body_bytes", event.RequestBodyBytes))
+		}
+		if debug := llm.HTTPDebugRequestDiagnostics(event.RequestMetadata); len(debug) > 0 {
+			for _, key := range []string{"request_sha256", "cache_surface_sha256", "input_sha256", "tools_sha256", "prompt_layout_sha256"} {
+				if value := strings.TrimSpace(stringMapValueAny(debug, key)); value != "" {
+					fields = append(fields, logger.String(key, value))
+				}
+			}
+			for _, key := range []string{"message_count", "input_count", "tool_count", "instructions_length", "prompt_layout_length"} {
+				if value := intMapValueAny(debug, key); value > 0 {
+					fields = append(fields, logger.Int(key, value))
+				}
+			}
+			if value := strings.TrimSpace(stringMapValueAny(debug, "prompt_cache_key")); value != "" {
+				fields = append(fields, logger.String("prompt_cache_key", value))
+			}
+		}
+		if event.ResponseStatusCode > 0 {
+			fields = append(fields, logger.Int("response_status_code", event.ResponseStatusCode))
+		}
+		if event.ResponseBodyBytes > 0 {
+			fields = append(fields, logger.Int("response_body_bytes", event.ResponseBodyBytes))
+		}
+		if value := strings.TrimSpace(event.ResponseBodyPreview); value != "" {
+			fields = append(fields, logger.String("response_body_preview", value))
+		}
+		if value := strings.TrimSpace(event.Error); value != "" {
+			fields = append(fields, logger.String("upstream_error", value))
+		}
+
+		switch {
+		case strings.TrimSpace(event.Error) != "" || event.ResponseStatusCode >= http.StatusBadRequest:
+			logger.CtxError(ctx, "LLM upstream request failed", fields...)
+		case logger.L().Core().Enabled(zapcore.DebugLevel):
+			message := "LLM upstream response"
+			if strings.EqualFold(strings.TrimSpace(event.Phase), "request") {
+				message = "LLM upstream request"
+			}
+			logger.CtxDebug(ctx, message, fields...)
+		}
+	}
+}
+
+// SkillStats Skill 统计信息
+type SkillStats struct {
+	Name        string `json:"name"`
+	Category    string `json:"category"`
+	CallCount   int    `json:"call_count"`
+	SuccessRate int    `json:"success_rate"`
+	AvgDuration int    `json:"avg_duration_ms"`
+	SourceDir   string `json:"source_dir,omitempty"`
+	SourcePath  string `json:"source_path,omitempty"`
+	SourceLayer string `json:"source_layer,omitempty"`
+}
+
+type mcpStatusReader interface {
+	ListMCPs() []*mcpconfig.MCPStatus
+}
+
+type mcpAdapterReader interface {
+	GetManager() mcpmanager.Manager
+}
+
+func (h *Handler) runtimeStatusSnapshot(ctx context.Context, mode llm.HealthCheckMode) map[string]interface{} {
+	providers := make([]map[string]interface{}, 0)
+	if h.llmRuntime != nil {
+		healthCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+
+		if mode == "" {
+			mode = llm.HealthCheckModeStale
+		}
+		h.llmRuntime.CheckHealthWithMode(healthCtx, mode)
+		healthMap := h.llmRuntime.ProviderHealthSnapshot()
+		for _, name := range h.llmRuntime.ListProviders() {
+			item := map[string]interface{}{
+				"name": name,
+			}
+			if caps, err := h.llmRuntime.GetCapabilities(name); err == nil && caps != nil {
+				item["supports_tools"] = caps.SupportsTools
+				item["supports_streaming"] = caps.SupportsStreaming
+				item["max_context_tokens"] = caps.MaxContextTokens
+				item["max_output_tokens"] = caps.MaxOutputTokens
+			}
+			if health, ok := healthMap[name]; ok {
+				item["status"] = string(health.Status)
+				item["healthy"] = health.Status == llm.HealthStatusHealthy
+				item["consecutive_failures"] = health.ConsecutiveFailures
+				item["consecutive_successes"] = health.ConsecutiveSuccesses
+				if !health.LastCheckTime.IsZero() {
+					item["last_check"] = health.LastCheckTime
+				}
+				if !health.LastSuccessTime.IsZero() {
+					item["last_success"] = health.LastSuccessTime
+				}
+				if !health.LastFailureTime.IsZero() {
+					item["last_failure"] = health.LastFailureTime
+				}
+				if health.LastError != "" {
+					item["error"] = health.LastError
+				}
+			} else {
+				item["status"] = string(llm.HealthStatusUnknown)
+				item["healthy"] = false
+			}
+			providers = append(providers, item)
+		}
+		sort.Slice(providers, func(i, j int) bool {
+			return providers[i]["name"].(string) < providers[j]["name"].(string)
+		})
+	}
+
+	mcps := make([]map[string]interface{}, 0)
+	var statusReader mcpStatusReader
+	if reader, ok := h.mcpManager.(mcpStatusReader); ok && reader != nil {
+		statusReader = reader
+	} else if manager := h.runtimeMCPManager(); manager != nil {
+		if reader, ok := manager.(mcpStatusReader); ok {
+			statusReader = reader
+		}
+	}
+	if statusReader != nil {
+		for _, status := range statusReader.ListMCPs() {
+			if status == nil {
+				continue
+			}
+			mcps = append(mcps, map[string]interface{}{
+				"name":           status.Name,
+				"type":           status.Type,
+				"trust_level":    status.TrustLevel,
+				"execution_mode": status.ExecutionMode,
+				"enabled":        status.Enabled,
+				"connected":      status.Connected,
+				"tool_count":     status.ToolCount,
+				"last_error":     status.LastError,
+				"last_connect":   status.LastConnect,
+				"health_check":   status.HealthCheck,
+			})
+		}
+		sort.Slice(mcps, func(i, j int) bool {
+			return mcps[i]["name"].(string) < mcps[j]["name"].(string)
+		})
+	}
+
+	patchGovernance := map[string]interface{}{
+		"decisions":             0,
+		"blocked":               0,
+		"approved":              0,
+		"approved_override":     0,
+		"approvals_with_ticket": 0,
+		"policies":              map[string]int{},
+		"trace_count":           0,
+		"latest_trace_ids":      []string{},
+	}
+	provenance := map[string]interface{}{
+		"profile_context_injected": 0,
+		"recall_with_source_refs":  0,
+		"profile_resource_refs":    []string{},
+		"profile_resource_kinds":   map[string]int{},
+		"profile_resource_count":   0,
+		"profile_memory_count":     0,
+		"profile_notes_count":      0,
+		"profile_resource_labels":  []string{},
+		"trace_count":              0,
+		"latest_trace_ids":         []string{},
+	}
+	if bus := h.getRuntimeEventBus(); bus != nil {
+		traceStats := bus.TraceStats(runtimeevents.TraceFilter{Limit: 50})
+		patchGovernance = buildPatchGovernanceSummaryFromView(traceStats.Governance)
+		patchGovernance["trace_count"] = traceStats.TraceCount
+		patchGovernance["latest_trace_ids"] = traceStats.LatestTraceIDs
+		provenance = buildProvenanceSummaryFromView(traceStats.Provenance)
+		provenance["trace_count"] = traceStats.TraceCount
+		provenance["latest_trace_ids"] = traceStats.LatestTraceIDs
+	}
+
+	contextSnapshot := map[string]interface{}{
+		"profile": "balanced",
+	}
+	if h.runtimeConfig != nil {
+		contextSnapshot = contextSnapshotFromRuntimeConfig(h.runtimeConfig)
+	}
+
+	toolCatalog := map[string]interface{}{
+		"backend":       "memory",
+		"snapshot_path": "",
+		"tool_count":    0,
+		"added":         0,
+		"removed":       0,
+		"updated":       0,
+	}
+	backend, resolvedPath, _ := h.runtimeToolCatalogConfig()
+	if backend == "file" {
+		toolCatalog["backend"] = "file"
+		toolCatalog["snapshot_path"] = resolvedPath
+	} else if backend == "sqlite" {
+		toolCatalog["backend"] = "sqlite"
+		toolCatalog["snapshot_path"] = resolvedPath
+	}
+	if gateway := h.getRuntimeToolCatalogGateway(); gateway != nil {
+		stats := gateway.RefreshStats()
+		toolCatalog = map[string]interface{}{
+			"backend":         toolCatalog["backend"],
+			"snapshot_path":   toolCatalog["snapshot_path"],
+			"tool_count":      stats.ToolCount,
+			"added":           stats.Added,
+			"removed":         stats.Removed,
+			"updated":         stats.Updated,
+			"last_refresh_at": stats.LastRefreshAt,
+		}
+	}
+
+	return map[string]interface{}{
+		"execution_core":        chat.SessionActorRuntimeCore(),
+		"default_provider":      defaultAgentProvider(h.llmRuntime),
+		"default_model":         defaultAgentModel(h.llmRuntime),
+		"providers":             providers,
+		"provider_count":        len(providers),
+		"mcps":                  mcps,
+		"mcp_count":             len(mcps),
+		"context":               contextSnapshot,
+		"session_persistence":   h.sessionPersistenceSnapshot(),
+		"tool_catalog":          toolCatalog,
+		"tool_efficiency":       observability.SnapshotToolEfficiency(),
+		"patch_governance":      patchGovernance,
+		"provenance":            provenance,
+		"execution_diagnostics": h.executionDiagnosticsSnapshot(ctx),
+		// P0-2：运行时事件「交付通道」未命中/转发计数（A 丢弃按原因+类型三分，
+		// B live-only 转发量）。四条通道的白名单都可观测，不再有静默丢弃。
+		"runtime_event_delivery": SnapshotRuntimeEventDelivery(),
+		// P0-1/批次 3.2：分析库采集健康（attached/db_path/ingested_total/
+		// conflict_total/last_ingest_at）；attached=false 时字段仍齐全。
+		"usage_analytics": h.usageAnalyticsHealthSnapshot(),
+	}
+}
+
+func (h *Handler) sessionPersistenceSnapshot() map[string]interface{} {
+	if h == nil {
+		return map[string]interface{}{}
+	}
+	paths := sessionruntime.ResolvePaths(sessionruntime.ResolveOptions{
+		Config:     h.runtimeConfig,
+		ConfigFile: h.runtimeConfigFile,
+		Mode:       sessionruntime.ModeServer,
+	})
+	result := map[string]interface{}{
+		"config_file":                  h.runtimeConfigFile,
+		"session_dir":                  paths.SessionDir,
+		"runtime_dir":                  paths.RuntimeDir,
+		"session_runtime_store_path":   paths.SessionRuntimeStorePath,
+		"legacy_runtime_store_path":    paths.LegacySessionRuntimeStorePath,
+		"team_store_path":              paths.TeamStorePath,
+		"agent_control_store_path":     paths.AgentControlStorePath,
+		"artifact_store_path":          paths.ArtifactStorePath,
+		"background_store_path":        paths.BackgroundStorePath,
+		"background_log_dir":           paths.BackgroundLogDir,
+		"default_persistence":          paths.DefaultPersistence,
+		"file_defaults_enabled":        paths.FileDefaultsEnabled,
+		"session_runtime_store_active": h.sessionRuntimeStoreKey,
+		"team_store_active":            h.teamStoreConfigKey,
+		"background_active":            h.backgroundConfigKey,
+	}
+	if paths.AgentControlMailboxStorePath != "" {
+		result["agent_control_mailbox_store_path"] = paths.AgentControlMailboxStorePath
+	}
+	if paths.AgentControlAgentStorePath != "" {
+		result["agent_control_agent_store_path"] = paths.AgentControlAgentStorePath
+	}
+	if h.sessionManager != nil && h.sessionManager.GetStorage() != nil {
+		if dirReader, ok := h.sessionManager.GetStorage().(interface{ Dir() string }); ok {
+			result["session_store_dir"] = dirReader.Dir()
+		}
+	}
+	if h.runtimeConfig != nil {
+		result["checkpoint_enabled"] = h.runtimeConfig.Checkpoint.Enabled
+	}
+	return result
+}
+
+// RuntimeStatusSnapshot 导出 runtime 状态快照
+func (h *Handler) RuntimeStatusSnapshot(ctx context.Context, mode llm.HealthCheckMode) map[string]interface{} {
+	return h.runtimeStatusSnapshot(ctx, mode)
+}
+
+// RuntimeValidationSnapshot 导出 runtime 校验快照
+func (h *Handler) RuntimeValidationSnapshot() map[string]interface{} {
+	return h.runtimeValidationSnapshot()
+}
+
+// RuntimeHealthSummary 导出 runtime 健康摘要
+func (h *Handler) RuntimeHealthSummary(runtime map[string]interface{}) map[string]interface{} {
+	return runtimeHealthSummary(runtime)
+}
+
+func runtimeHealthSummary(runtime map[string]interface{}) map[string]interface{} {
+	if runtime == nil {
+		return map[string]interface{}{
+			"healthy": false,
+			"issues":  []string{"runtime status unavailable"},
+		}
+	}
+
+	issues := make([]string, 0)
+	healthyProviders := 0
+	degradedProviders := 0
+	unhealthyProviders := 0
+	unknownProviders := 0
+	if providers, ok := runtime["providers"].([]map[string]interface{}); ok {
+		for _, provider := range providers {
+			name, _ := provider["name"].(string)
+			status, _ := provider["status"].(string)
+			if status == "" {
+				if healthy, ok := provider["healthy"].(bool); ok {
+					if healthy {
+						status = string(llm.HealthStatusHealthy)
+					} else {
+						status = string(llm.HealthStatusUnhealthy)
+					}
+				} else {
+					status = string(llm.HealthStatusUnknown)
+				}
+			}
+
+			switch status {
+			case string(llm.HealthStatusHealthy):
+				healthyProviders++
+			case string(llm.HealthStatusDegraded):
+				degradedProviders++
+				unhealthyProviders++
+			case string(llm.HealthStatusUnhealthy):
+				unhealthyProviders++
+			default:
+				unknownProviders++
+			}
+
+			if status != string(llm.HealthStatusHealthy) {
+				errText, _ := provider["error"].(string)
+				statusText := status
+				if statusText == string(llm.HealthStatusUnknown) {
+					statusText = "status unknown"
+				}
+				if errText != "" {
+					issues = append(issues, fmt.Sprintf("provider %s %s: %s", name, statusText, errText))
+				} else {
+					issues = append(issues, fmt.Sprintf("provider %s %s", name, statusText))
+				}
+			}
+		}
+	}
+
+	connectedMCPs := 0
+	disconnectedMCPs := 0
+	if mcps, ok := runtime["mcps"].([]map[string]interface{}); ok {
+		for _, mcp := range mcps {
+			enabled, _ := mcp["enabled"].(bool)
+			connected, _ := mcp["connected"].(bool)
+			name, _ := mcp["name"].(string)
+			if enabled && connected {
+				connectedMCPs++
+			} else if enabled {
+				disconnectedMCPs++
+				issues = append(issues, fmt.Sprintf("mcp %s is enabled but not connected", name))
+			}
+		}
+	}
+
+	return map[string]interface{}{
+		"healthy":             len(issues) == 0,
+		"healthy_providers":   healthyProviders,
+		"degraded_providers":  degradedProviders,
+		"unhealthy_providers": unhealthyProviders,
+		"unknown_providers":   unknownProviders,
+		"connected_mcps":      connectedMCPs,
+		"disconnected_mcps":   disconnectedMCPs,
+		"issues":              issues,
+	}
+}
+
+func (h *Handler) runtimeMCPManager() mcpmanager.Manager {
+	if h == nil || h.mcpManager == nil {
+		return nil
+	}
+	if adapter, ok := h.mcpManager.(mcpAdapterReader); ok && adapter != nil {
+		return adapter.GetManager()
+	}
+	return nil
+}
+
+func (h *Handler) runtimeValidationSnapshot() map[string]interface{} {
+	issues := make([]string, 0)
+	warnings := make([]string, 0)
+	configIssues := make([]string, 0)
+	configWarnings := make([]string, 0)
+
+	if h.skillRegistry == nil {
+		issues = append(issues, "skill registry is not configured")
+	}
+
+	skillCount := 0
+	if h.skillRegistry != nil {
+		skillCount = len(h.skillRegistry.List())
+		if skillCount == 0 {
+			warnings = append(warnings, "no skills loaded")
+		}
+	}
+
+	skillDirs := handlerSkillDirs(h.skillLoader)
+	if len(skillDirs) == 0 {
+		warnings = append(warnings, "no skill directories configured")
+	} else {
+		for _, dir := range skillDirs {
+			if dir == "" {
+				continue
+			}
+			if _, err := os.Stat(dir); err != nil {
+				if os.IsNotExist(err) {
+					warnings = append(warnings, buildMissingPathMessage("skill directory not found", dir))
+				} else {
+					warnings = append(warnings, fmt.Sprintf("skill directory not accessible: %s", dir))
+				}
+			}
+		}
+	}
+
+	if h.llmRuntime == nil {
+		warnings = append(warnings, "llm runtime is not configured")
+	} else {
+		providers := h.llmRuntime.ListProviders()
+		if len(providers) == 0 {
+			issues = append(issues, "no llm providers registered")
+		}
+		defaultModel := defaultAgentModel(h.llmRuntime)
+		if defaultModel == "" {
+			warnings = append(warnings, "default model is empty")
+		} else if _, err := h.llmRuntime.GetProvider(defaultModel); err != nil {
+			issues = append(issues, fmt.Sprintf("default model/provider not registered: %s", defaultModel))
+		}
+	}
+
+	hasEmbeddingSkill := false
+	hasToolBackedSkill := false
+	if h.skillRegistry != nil {
+		for _, skillItem := range h.skillRegistry.List() {
+			if skillItem == nil {
+				continue
+			}
+			if !hasToolBackedSkill && (len(skillItem.Tools) > 0 || skillItem.HasWorkflow()) {
+				hasToolBackedSkill = true
+			}
+			if !hasEmbeddingSkill {
+				for _, trigger := range skillItem.Triggers {
+					if trigger.Type == "embedding" {
+						hasEmbeddingSkill = true
+						break
+					}
+				}
+			}
+		}
+	}
+	if hasEmbeddingSkill && h.embeddingRouter == nil {
+		warnings = append(warnings, "embedding-triggered skills exist but embedding router is not configured")
+	}
+	if hasToolBackedSkill && h.mcpManager == nil {
+		warnings = append(warnings, "tool-backed skills exist but mcp manager is not configured")
+	}
+	if h.sessionManager == nil {
+		warnings = append(warnings, "session manager is not configured")
+	}
+
+	if h.runtimeConfigFile != "" {
+		info, err := os.Stat(h.runtimeConfigFile)
+		if err != nil {
+			if os.IsNotExist(err) {
+				configWarnings = append(configWarnings, buildMissingPathMessage("runtime config file not found", h.runtimeConfigFile))
+			} else {
+				configIssues = append(configIssues, fmt.Sprintf("runtime config file not accessible: %s", h.runtimeConfigFile))
+			}
+		} else if info.IsDir() {
+			configIssues = append(configIssues, fmt.Sprintf("runtime config path is a directory: %s", h.runtimeConfigFile))
+		}
+	}
+
+	if h.runtimeConfig != nil {
+		if err := runtimecfg.ValidateRuntimeConfig(h.runtimeConfig); err != nil {
+			configIssues = append(configIssues, fmt.Sprintf("runtime config invalid: %s", err.Error()))
+		}
+		if h.runtimeConfig.Router.EnableEmbedding && !h.runtimeConfig.Embedding.Enabled {
+			configWarnings = append(configWarnings, "embedding router enabled but embedding is disabled")
+		}
+		if h.runtimeConfig.Embedding.Enabled && !h.runtimeConfig.Router.EnableEmbedding {
+			configWarnings = append(configWarnings, "embedding enabled but router embedding is disabled")
+		}
+		if h.runtimeConfig.HotReload.Enabled && len(handlerSkillDirs(h.skillLoader)) == 0 {
+			configWarnings = append(configWarnings, "hot reload enabled but no skill directories configured")
+		}
+		workspaceRoot := strings.TrimSpace(h.runtimeConfig.Workspace.Root)
+		if workspaceRoot != "" {
+			if _, err := os.Stat(workspaceRoot); err != nil {
+				if os.IsNotExist(err) {
+					configWarnings = append(configWarnings, buildMissingPathMessage("workspace root not found", workspaceRoot))
+				} else {
+					configWarnings = append(configWarnings, fmt.Sprintf("workspace root not accessible: %s", workspaceRoot))
+				}
+			}
+		}
+		if h.runtimeConfig.Rollout.Enabled {
+			candidateFile := strings.TrimSpace(h.runtimeConfig.Rollout.CandidateFile)
+			if candidateFile != "" {
+				if _, err := os.Stat(candidateFile); err != nil {
+					if os.IsNotExist(err) {
+						configWarnings = append(configWarnings, buildMissingPathMessage("rollout candidate file not found", candidateFile))
+					} else {
+						configWarnings = append(configWarnings, fmt.Sprintf("rollout candidate file not accessible: %s", candidateFile))
+					}
+				}
+			}
+		}
+	}
+
+	if len(configIssues) > 0 {
+		issues = append(issues, configIssues...)
+	}
+	if len(configWarnings) > 0 {
+		warnings = append(warnings, configWarnings...)
+	}
+
+	return map[string]interface{}{
+		"healthy":       len(issues) == 0,
+		"issue_count":   len(issues),
+		"warning_count": len(warnings),
+		"issues":        issues,
+		"warnings":      warnings,
+		"skill_count":   skillCount,
+		"skill_dirs":    skillDirs,
+		"default_model": defaultAgentModel(h.llmRuntime),
+		"config": map[string]interface{}{
+			"file":     h.runtimeConfigFile,
+			"valid":    len(configIssues) == 0,
+			"issues":   configIssues,
+			"warnings": configWarnings,
+			"version":  runtimeConfigVersion(h.runtimeConfig),
+			"rollout":  runtimeConfigRollout(h.runtimeConfig),
+		},
+	}
+}
+
+func runtimeConfigVersion(config *runtimecfg.RuntimeConfig) string {
+	if config == nil {
+		return ""
+	}
+	return config.Version
+}
+
+func runtimeConfigRollout(config *runtimecfg.RuntimeConfig) interface{} {
+	if config == nil {
+		return nil
+	}
+	return config.Rollout
+}
+
+func (h *Handler) agentCapabilityDescriptor() *capability.Descriptor {
+	cfg := runtimecfg.AgentConfig{}
+	if h.runtimeConfig != nil {
+		cfg = h.runtimeConfig.Agent
+	}
+	model := cfg.DefaultModel
+	if model == "" {
+		model = defaultAgentModel(h.llmRuntime)
+	}
+	if model == "" {
+		return nil
+	}
+	return &capability.Descriptor{
+		ID:           "api-agent",
+		Name:         "api-agent",
+		Kind:         capability.KindAgent,
+		Description:  "Unified skill orchestration entry point",
+		Capabilities: []string{"route", "execute", "orchestrate"},
+		Metadata: map[string]interface{}{
+			"model":           model,
+			"max_steps":       cfg.MaxMaxSteps,
+			"timeout":         cfg.Timeout,
+			"enable_memory":   cfg.EnableMemory,
+			"enable_planning": cfg.EnablePlanning,
+		},
+	}
+}
+
+// GetStats 获取统计信息
+func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
+	layer, dir := parseSkillSourceFilters(r)
+	skills := filterSkillsBySource(h.skillRegistry.List(), layer, dir)
+	stats := make([]SkillStats, 0, len(skills))
+
+	for _, s := range skills {
+		stat := SkillStats{
+			Name:        s.Name,
+			Category:    s.Category,
+			CallCount:   0,
+			SuccessRate: 0,
+		}
+		if s.Source != nil {
+			stat.SourceDir = s.Source.Dir
+			stat.SourcePath = s.Source.Path
+			stat.SourceLayer = s.Source.Layer
+		}
+		stats = append(stats, stat)
+	}
+
+	// SK-4：unavailable 技能单独计数；注册表当前没有 disabled 概念
+	//（被策略禁用走的是 tools 缺失 → unavailable 路径），故 counts 只含
+	// available/unavailable，disabled 不在本契约中虚构。
+	unavailable := unavailableSkillsForResponse(h.skillRegistry, layer, dir)
+	response := map[string]interface{}{
+		"stats":             stats,
+		"total_skills":      len(skills),
+		"available_count":   len(skills),
+		"unavailable_count": len(unavailable),
+		"unavailable":       unavailable,
+		"counts": map[string]int{
+			"available":   len(skills),
+			"unavailable": len(unavailable),
+		},
+		"skill_dirs":            handlerSkillDirs(h.skillLoader),
+		"source_summary":        buildSkillSourceSummary(skills),
+		"mutation_policy":       h.mutationPolicySnapshot(),
+		"usage_policy":          h.usagePolicySnapshot(),
+		"scope_resolver_policy": h.scopeResolverPolicySnapshot(),
+		"search":                h.searchTelemetrySnapshot(),
+		"embedding": map[string]interface{}{
+			"enabled": h.embeddingRouter != nil,
+			"stats":   embeddingRouterStats(h.embeddingRouter),
+		},
+		"runtime":    h.runtimeStatusSnapshot(r.Context(), llm.HealthCheckModeStale),
+		"validation": h.runtimeValidationSnapshot(),
+	}
+	// SK-5：stats 与 list/注入共享同一 catalog 投影，便于诊断"预算是否在裁剪"。
+	if projection := h.catalogProjectionFromRegistry(); projection != nil {
+		response["catalog"] = projection
+	}
+	if err := h.attachProfileMetadata(r, response); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// GetRuntimeStatus 获取 provider / MCP 运行时状态
+func (h *Handler) GetRuntimeStatus(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	mode := parseHealthRecheckMode(r)
+	runtime := h.runtimeStatusSnapshot(r.Context(), mode)
+	payload := map[string]interface{}{
+		"runtime": runtime,
+	}
+	if err := h.attachProfileMetadata(r, payload); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
+// GetRuntimeHealth 获取 provider / MCP 健康摘要
+func (h *Handler) GetRuntimeHealth(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	mode := parseHealthRecheckMode(r)
+	runtime := h.runtimeStatusSnapshot(r.Context(), mode)
+	payload := map[string]interface{}{
+		"runtime": runtime,
+		"health":  runtimeHealthSummary(runtime),
+	}
+	if err := h.attachProfileMetadata(r, payload); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
+// GetRuntimeTrace 获取指定 trace 的 runtime 审计事件。
+func (h *Handler) GetRuntimeTraces(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	limit, err := parseRuntimeTraceLimit(r, 20, 200)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	filters := runtimeevents.TraceFilter{
+		TraceIDPrefix:       strings.TrimSpace(r.URL.Query().Get("trace_prefix")),
+		SessionID:           chat.NormalizeSessionID(r.URL.Query().Get("session_id")),
+		AgentName:           strings.TrimSpace(r.URL.Query().Get("agent_name")),
+		ToolName:            strings.TrimSpace(r.URL.Query().Get("tool_name")),
+		EventType:           strings.TrimSpace(r.URL.Query().Get("event_type")),
+		TeamID:              strings.TrimSpace(r.URL.Query().Get("team_id")),
+		ProfileResourceKind: strings.TrimSpace(r.URL.Query().Get("profile_resource_kind")),
+		Limit:               limit,
+	}
+
+	traces := h.getRuntimeEventBus().RecentTraces(filters)
+	rawTeamIDLimit := strings.TrimSpace(r.URL.Query().Get("team_id_limit"))
+	teamIDLimitSource := "default"
+	if rawTeamIDLimit != "" {
+		teamIDLimitSource = "query"
+	} else if h.runtimeTeamIDLimit() > 0 {
+		teamIDLimitSource = "config"
+	}
+	teamIDLimit, err := parseRuntimeTeamIDLimit(r, h.runtimeTeamIDLimit(), 50)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.Header().Set("X-AI-Gateway-Team-ID-Limit", strconv.Itoa(teamIDLimit))
+	w.Header().Set("X-AI-Gateway-Team-ID-Limit-Source", teamIDLimitSource)
+	teamIDTruncated := false
+	if teamIDLimit > 0 {
+		for _, trace := range traces {
+			if len(trace.TeamIDs) > teamIDLimit {
+				teamIDTruncated = true
+				break
+			}
+		}
+	}
+	if teamIDLimit > 0 {
+		traces = limitTraceTeamIDs(traces, teamIDLimit)
+	}
+	payload := map[string]interface{}{
+		"count":                len(traces),
+		"traces":               traces,
+		"recovery":             buildRecoverySummaryFromTraceSummaries(traces),
+		"team_count":           countTraceTeams(traces),
+		"team_id_limit":        teamIDLimit,
+		"team_id_limit_source": teamIDLimitSource,
+		"team_id_truncated":    teamIDTruncated,
+		"filters": map[string]interface{}{
+			"trace_prefix":          filters.TraceIDPrefix,
+			"session_id":            filters.SessionID,
+			"agent_name":            filters.AgentName,
+			"tool_name":             filters.ToolName,
+			"event_type":            filters.EventType,
+			"team_id":               filters.TeamID,
+			"profile_resource_kind": filters.ProfileResourceKind,
+			"limit":                 filters.Limit,
+			"team_id_limit":         teamIDLimit,
+			"team_id_limit_source":  teamIDLimitSource,
+			"team_id_truncated":     teamIDTruncated,
+		},
+	}
+	if err := h.attachProfileMetadata(r, payload); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
+// GetRuntimeTraceStats 获取最近 traces 的聚合统计。
+func (h *Handler) GetRuntimeTraceStats(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	limit, err := parseRuntimeTraceLimit(r, 50, 500)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	teamLimit, teamLimitSource := h.runtimeTeamIDLimitMeta()
+	w.Header().Set("X-AI-Gateway-Team-ID-Limit", strconv.Itoa(teamLimit))
+	w.Header().Set("X-AI-Gateway-Team-ID-Limit-Source", teamLimitSource)
+
+	filters := runtimeevents.TraceFilter{
+		TraceIDPrefix:       strings.TrimSpace(r.URL.Query().Get("trace_prefix")),
+		SessionID:           chat.NormalizeSessionID(r.URL.Query().Get("session_id")),
+		AgentName:           strings.TrimSpace(r.URL.Query().Get("agent_name")),
+		ToolName:            strings.TrimSpace(r.URL.Query().Get("tool_name")),
+		EventType:           strings.TrimSpace(r.URL.Query().Get("event_type")),
+		TeamID:              strings.TrimSpace(r.URL.Query().Get("team_id")),
+		ProfileResourceKind: strings.TrimSpace(r.URL.Query().Get("profile_resource_kind")),
+		Limit:               limit,
+	}
+
+	stats := h.getRuntimeEventBus().TraceStats(filters)
+	payload := map[string]interface{}{
+		"stats":                stats,
+		"patch_governance":     buildPatchGovernanceSummaryFromView(stats.Governance),
+		"recovery":             buildRecoverySummaryFromView(stats.Recovery),
+		"team_count":           stats.TeamCount,
+		"team_id_limit":        teamLimit,
+		"team_id_limit_source": teamLimitSource,
+		"filters": map[string]interface{}{
+			"trace_prefix":          filters.TraceIDPrefix,
+			"session_id":            filters.SessionID,
+			"agent_name":            filters.AgentName,
+			"tool_name":             filters.ToolName,
+			"event_type":            filters.EventType,
+			"team_id":               filters.TeamID,
+			"profile_resource_kind": filters.ProfileResourceKind,
+			"limit":                 filters.Limit,
+		},
+	}
+	if err := h.attachProfileMetadata(r, payload); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
+// GetRuntimeTraceGovernance 获取最近 traces 的治理导出视图。
+func (h *Handler) GetRuntimeTraceGovernance(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	limit, err := parseRuntimeTraceLimit(r, 50, 500)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	teamLimit, teamLimitSource := h.runtimeTeamIDLimitMeta()
+	w.Header().Set("X-AI-Gateway-Team-ID-Limit", strconv.Itoa(teamLimit))
+	w.Header().Set("X-AI-Gateway-Team-ID-Limit-Source", teamLimitSource)
+
+	filters := runtimeevents.TraceFilter{
+		TraceIDPrefix:       strings.TrimSpace(r.URL.Query().Get("trace_prefix")),
+		SessionID:           chat.NormalizeSessionID(r.URL.Query().Get("session_id")),
+		AgentName:           strings.TrimSpace(r.URL.Query().Get("agent_name")),
+		ToolName:            strings.TrimSpace(r.URL.Query().Get("tool_name")),
+		EventType:           strings.TrimSpace(r.URL.Query().Get("event_type")),
+		TeamID:              strings.TrimSpace(r.URL.Query().Get("team_id")),
+		ProfileResourceKind: strings.TrimSpace(r.URL.Query().Get("profile_resource_kind")),
+		Limit:               limit,
+	}
+
+	allTraces := h.getRuntimeEventBus().RecentTraces(filters)
+	deniedTraces := make([]runtimeevents.TraceSummary, 0, len(allTraces))
+	for _, trace := range allTraces {
+		if trace.Governance.DeniedEvents > 0 || trace.Governance.PatchDecisions > 0 {
+			deniedTraces = append(deniedTraces, trace)
+		}
+	}
+
+	governanceStats := h.getRuntimeEventBus().GovernanceStats(filters)
+	payload := map[string]interface{}{
+		"stats":                governanceStats,
+		"patch_governance":     buildPatchGovernanceSummaryFromStats(governanceStats),
+		"provenance":           buildProvenanceSummaryFromView(governanceStats.Provenance),
+		"traces":               deniedTraces,
+		"count":                len(deniedTraces),
+		"team_count":           governanceStats.TeamCount,
+		"team_id_limit":        teamLimit,
+		"team_id_limit_source": teamLimitSource,
+		"filters": map[string]interface{}{
+			"trace_prefix":          filters.TraceIDPrefix,
+			"session_id":            filters.SessionID,
+			"agent_name":            filters.AgentName,
+			"tool_name":             filters.ToolName,
+			"event_type":            filters.EventType,
+			"team_id":               filters.TeamID,
+			"profile_resource_kind": filters.ProfileResourceKind,
+			"limit":                 filters.Limit,
+		},
+	}
+	if err := h.attachProfileMetadata(r, payload); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
+// GetRuntimeTrace 获取指定 trace 的 runtime 审计事件。
+func (h *Handler) GetRuntimeTrace(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	traceID := strings.TrimSpace(mux.Vars(r)["trace_id"])
+	if traceID == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "trace_id is required"))
+		return
+	}
+
+	limit, err := parseRuntimeTraceLimit(r, 200, 1000)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	bus := h.getRuntimeEventBus()
+	events := bus.Query(runtimeevents.QueryFilter{
+		TraceID:   traceID,
+		SessionID: chat.NormalizeSessionID(r.URL.Query().Get("session_id")),
+		AgentName: strings.TrimSpace(r.URL.Query().Get("agent_name")),
+		ToolName:  strings.TrimSpace(r.URL.Query().Get("tool_name")),
+		EventType: strings.TrimSpace(r.URL.Query().Get("event_type")),
+		TeamID:    strings.TrimSpace(r.URL.Query().Get("team_id")),
+		Limit:     limit,
+	})
+	summary := summarizeRuntimeTrace(events)
+	patchGovernance := map[string]interface{}{
+		"decisions":             0,
+		"blocked":               0,
+		"approved":              0,
+		"approved_override":     0,
+		"approvals_with_ticket": 0,
+		"policies":              map[string]int{},
+	}
+	promptSummary := map[string]interface{}{
+		"layouts_observed":   0,
+		"instruction_chars":  0,
+		"total_chars":        0,
+		"instruction_tokens": 0,
+		"total_tokens":       0,
+		"layers":             map[string]int{},
+		"sources":            []string{},
+		"source_count":       0,
+	}
+	recoverySummary := map[string]interface{}{
+		"prompt_preflight_events":        0,
+		"prompt_preflight_by_event_type": map[string]int{},
+		"prompt_preflight_failure_codes": map[string]int{},
+		"replacement_history_available":  0,
+		"replacement_history_applied":    0,
+		"summary_failure_events":         0,
+		"summary_failure_reasons":        map[string]int{},
+		"summary_fallbacks":              0,
+		"summary_fallback_reasons":       map[string]int{},
+	}
+	if summaryGovernance, ok := summary["governance"].(map[string]interface{}); ok {
+		patchGovernance = patchGovernanceSummaryFromMap(summaryGovernance)
+	}
+	if summaryPrompt, ok := summary["prompt"].(map[string]interface{}); ok {
+		promptSummary = promptSummaryFromMap(summaryPrompt)
+	}
+	if summaryRecovery, ok := summary["recovery"].(map[string]interface{}); ok {
+		recoverySummary = recoverySummaryFromMap(summaryRecovery)
+	}
+	payload := map[string]interface{}{
+		"trace_id":         traceID,
+		"count":            len(events),
+		"events":           events,
+		"summary":          summary,
+		"patch_governance": patchGovernance,
+		"prompt":           promptSummary,
+		"recovery":         recoverySummary,
+		"team_count":       countTeamIDsFromSummary(summary),
+		"filters": map[string]interface{}{
+			"session_id": chat.NormalizeSessionID(r.URL.Query().Get("session_id")),
+			"agent_name": strings.TrimSpace(r.URL.Query().Get("agent_name")),
+			"tool_name":  strings.TrimSpace(r.URL.Query().Get("tool_name")),
+			"event_type": strings.TrimSpace(r.URL.Query().Get("event_type")),
+			"team_id":    strings.TrimSpace(r.URL.Query().Get("team_id")),
+			"limit":      limit,
+		},
+	}
+	if err := h.attachProfileMetadata(r, payload); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
+func parseRuntimeTraceLimit(r *http.Request, defaultLimit, maxLimit int) (int, error) {
+	limit := defaultLimit
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 {
+			return 0, errors.New(errors.ErrValidationFailed, "invalid limit value")
+		}
+		limit = parsed
+	}
+	if maxLimit > 0 && limit > maxLimit {
+		limit = maxLimit
+	}
+	return limit, nil
+}
+
+func countTraceTeams(traces []runtimeevents.TraceSummary) int {
+	teams := make(map[string]bool)
+	for _, trace := range traces {
+		for _, teamID := range trace.TeamIDs {
+			if strings.TrimSpace(teamID) == "" {
+				continue
+			}
+			teams[strings.TrimSpace(teamID)] = true
+		}
+	}
+	return len(teams)
+}
+
+func countTeamIDsFromSummary(summary map[string]interface{}) int {
+	if len(summary) == 0 {
+		return 0
+	}
+	if teamIDs, ok := summary["team_ids"].([]string); ok {
+		return len(teamIDs)
+	}
+	if raw, ok := summary["team_ids"].([]interface{}); ok {
+		seen := make(map[string]bool)
+		for _, item := range raw {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				seen[strings.TrimSpace(text)] = true
+			}
+		}
+		return len(seen)
+	}
+	return 0
+}
+
+func (h *Handler) runtimeTeamIDLimit() int {
+	if h == nil {
+		return 0
+	}
+	if h.runtimeConfig != nil && h.runtimeConfig.Trace.TeamIDLimit > 0 {
+		return h.runtimeConfig.Trace.TeamIDLimit
+	}
+	return 0
+}
+
+func (h *Handler) runtimeTeamIDLimitMeta() (int, string) {
+	limit := h.runtimeTeamIDLimit()
+	source := "default"
+	if limit > 0 {
+		source = "config"
+	}
+	return limit, source
+}
+
+func limitTraceTeamIDs(traces []runtimeevents.TraceSummary, limit int) []runtimeevents.TraceSummary {
+	if limit <= 0 || len(traces) == 0 {
+		return traces
+	}
+	limited := make([]runtimeevents.TraceSummary, len(traces))
+	for i, trace := range traces {
+		limited[i] = trace
+		if len(trace.TeamIDs) > limit {
+			limited[i].TeamIDs = append([]string(nil), trace.TeamIDs[:limit]...)
+		} else if len(trace.TeamIDs) > 0 {
+			limited[i].TeamIDs = append([]string(nil), trace.TeamIDs...)
+		}
+	}
+	return limited
+}
+
+func parseRuntimeTeamIDLimit(r *http.Request, defaultLimit, maxLimit int) (int, error) {
+	limit := defaultLimit
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("team_id_limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed < 0 {
+			return 0, errors.New(errors.ErrValidationFailed, "invalid team_id_limit value")
+		}
+		limit = parsed
+	}
+	if maxLimit > 0 && limit > maxLimit {
+		limit = maxLimit
+	}
+	return limit, nil
+}
+
+func traceEventTeamID(event runtimeevents.Event) string {
+	if event.Payload == nil {
+		return ""
+	}
+	if value, ok := event.Payload["team_id"].(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	if value, ok := event.Payload["teamID"].(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+// ReloadRuntimeMCPs 重新加载并重连 MCP runtime
+func (h *Handler) ReloadRuntimeMCPs(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	manager := h.runtimeMCPManager()
+	service := h.runtimeMCPAdminService()
+	if manager == nil && service == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"MCP runtime manager not available"))
+		return
+	}
+	if policy := h.getMutationPolicy(); policy.DisableReloadOps {
+		h.writeError(w, http.StatusForbidden, errors.New(errors.ErrAgentPermission,
+			"MCP reload 已被 disable_reload_ops 策略禁用"))
+		return
+	}
+
+	traceID := "trace_" + uuid.NewString()
+	_ = h.getRuntimeToolCatalogGateway()
+	mcpCount := 0
+	if manager != nil {
+		mcpCount = len(manager.ListMCPs())
+	}
+	h.publishRuntimeEvent("mcp.reload.started", traceID, map[string]interface{}{
+		"mcp_count": mcpCount,
+	})
+
+	reloadCtx, cancel := context.WithTimeout(r.Context(), runtimeMCPMutationTimeout)
+	defer cancel()
+	var reloadErr error
+	if service != nil {
+		reloadErr = service.Reload(reloadCtx)
+	} else if err := manager.ReloadConfig(); err != nil {
+		reloadErr = err
+	} else {
+		reloadErr = manager.Start(mcpmanager.WithTraceID(reloadCtx, traceID))
+	}
+	if reloadErr != nil {
+		h.publishRuntimeEvent("mcp.reload.completed", traceID, map[string]interface{}{
+			"success": false,
+			"error":   reloadErr.Error(),
+		})
+		h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "failed to reload MCP runtime", reloadErr))
+		return
+	}
+
+	catalogToolCount := 0
+	catalogStats := mcpcatalog.RefreshStats{}
+	if gateway := h.getRuntimeToolCatalogGateway(); gateway != nil {
+		catalogStats = gateway.Refresh()
+		catalogToolCount = gateway.Catalog().Count()
+		h.publishRuntimeEvent("mcp.catalog.refreshed", traceID, map[string]interface{}{
+			"tool_count":      catalogToolCount,
+			"added":           catalogStats.Added,
+			"removed":         catalogStats.Removed,
+			"updated":         catalogStats.Updated,
+			"last_refresh_at": catalogStats.LastRefreshAt,
+		})
+	}
+	mcpCount = 0
+	if manager != nil {
+		mcpCount = len(manager.ListMCPs())
+	} else if service != nil {
+		if items, err := service.List(r.Context()); err == nil {
+			mcpCount = len(items)
+		}
+	}
+	h.publishRuntimeEvent("mcp.reload.completed", traceID, map[string]interface{}{
+		"success":    true,
+		"mcp_count":  mcpCount,
+		"tool_count": catalogToolCount,
+	})
+
+	runtime := h.runtimeStatusSnapshot(r.Context(), llm.HealthCheckModeAll)
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"reloaded": true,
+		"trace_id": traceID,
+		"catalog": map[string]interface{}{
+			"tool_count":      catalogToolCount,
+			"added":           catalogStats.Added,
+			"removed":         catalogStats.Removed,
+			"updated":         catalogStats.Updated,
+			"last_refresh_at": catalogStats.LastRefreshAt,
+		},
+		"runtime": runtime,
+		"health":  runtimeHealthSummary(runtime),
+	})
+}
+
+// ReloadRuntimeTeams reloads the team store based on the current runtime config.
+func (h *Handler) ReloadRuntimeTeams(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if h.runtimeConfig == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "runtime config not configured"))
+		return
+	}
+
+	var req struct {
+		DryRun bool `json:"dry_run,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "failed to parse request body"))
+		return
+	}
+	dryRun := req.DryRun
+	if raw := strings.TrimSpace(r.URL.Query().Get("dry_run")); raw != "" {
+		dryRun = parseOptionalBool(raw)
+	}
+	forceReload := false
+	if raw := strings.TrimSpace(r.URL.Query().Get("force")); raw != "" {
+		forceReload = parseOptionalBool(raw)
+	}
+	if force := strings.TrimSpace(r.URL.Query().Get("reload")); force != "" {
+		forceReload = forceReload || parseOptionalBool(force)
+	}
+
+	storePath := resolveRuntimeTeamStorePath(h.runtimeConfigFile, h.runtimeConfig.Team.StorePath)
+	storeDSN := strings.TrimSpace(h.runtimeConfig.Team.StoreDSN)
+	desiredKey := storePath + "|" + storeDSN
+
+	h.teamStoreMu.RLock()
+	currentKey := h.teamStoreConfigKey
+	currentStore := h.teamStore
+	h.teamStoreMu.RUnlock()
+
+	shouldReload := desiredKey != currentKey || forceReload
+	if currentKey == "" && desiredKey == "|" && currentStore != nil {
+		shouldReload = false
+	}
+
+	beforePath, beforeDSN := splitTeamStoreKey(currentKey)
+	before := map[string]interface{}{
+		"config_key": currentKey,
+		"store_path": beforePath,
+		"store_dsn":  beforeDSN,
+		"uses_dsn":   strings.TrimSpace(beforeDSN) != "",
+	}
+	after := map[string]interface{}{
+		"config_key": desiredKey,
+		"store_path": storePath,
+		"store_dsn":  storeDSN,
+		"uses_dsn":   storeDSN != "",
+	}
+
+	if dryRun {
+		h.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"dry_run":      true,
+			"would_reload": shouldReload,
+			"force":        forceReload,
+			"current":      before,
+			"desired":      after,
+		})
+		return
+	}
+
+	traceID := "trace_" + uuid.NewString()
+	requestID := requestIDFromRequest(r)
+	startPayload := map[string]interface{}{
+		"store_path": storePath,
+		"uses_dsn":   storeDSN != "",
+		"current":    before,
+		"desired":    after,
+	}
+	startPayload["request_id"] = strings.TrimSpace(requestID)
+	startPayload["request_ip"] = requestRemoteIP(r)
+	startPayload["user_agent"] = requestUserAgent(r)
+	scope := h.resolveUsageScope(r, "", "", "")
+	if scope.TenantID != "" {
+		startPayload["tenant_id"] = scope.TenantID
+	}
+	if scope.ProjectID != "" {
+		startPayload["project_id"] = scope.ProjectID
+	}
+	if scope.UserID != "" {
+		startPayload["user_id"] = scope.UserID
+	}
+	if scope.ScopeKey != "" {
+		startPayload["scope_key"] = scope.ScopeKey
+	}
+	h.publishRuntimeEvent("team.store.reload.started", traceID, startPayload)
+	if forceReload {
+		h.publishRuntimeEvent("team.store.reload.forced", traceID, buildTeamReloadAuditPayload(r, h.resolveUsageScope(r, "", "", ""), before, after))
+	}
+
+	reloaded, err := h.refreshTeamStore(h.runtimeConfig, h.runtimeConfigFile, traceID, requestID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !reloaded && forceReload {
+		store, err := team.NewSQLiteStore(&team.StoreConfig{
+			Path: strings.TrimSpace(storePath),
+			DSN:  storeDSN,
+		})
+		if err != nil {
+			h.publishRuntimeEvent("team.store.reload_failed", traceID, map[string]interface{}{
+				"store_path": storePath,
+				"uses_dsn":   storeDSN != "",
+				"error":      err.Error(),
+				"force":      true,
+				"request_id": requestID,
+			})
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if lifecycle := h.teamLifecycleService(); lifecycle != nil {
+			lifecycle.StopAllLoops()
+		}
+		h.teamStoreMu.Lock()
+		oldStore := h.teamStore
+		h.teamStore = store
+		h.teamStoreConfigKey = desiredKey
+		h.teamClaimsManager = nil
+		h.teamOrchestrator = nil
+		h.teamLifecycle = nil
+		h.teamStoreMu.Unlock()
+		if oldStore != nil {
+			_ = oldStore.Close()
+		}
+		reloaded = true
+		h.publishRuntimeEvent("team.store.reloaded", traceID, map[string]interface{}{
+			"store_path": storePath,
+			"uses_dsn":   storeDSN != "",
+			"force":      true,
+			"request_id": requestID,
+		})
+		if lifecycle := h.teamLifecycleService(); lifecycle != nil {
+			lifecycle.SyncLoops()
+		}
+	}
+
+	payload := map[string]interface{}{
+		"trace_id":   traceID,
+		"reloaded":   reloaded,
+		"store_path": storePath,
+		"uses_dsn":   storeDSN != "",
+		"force":      forceReload,
+		"current":    before,
+		"desired":    after,
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
+func summarizeRuntimeTrace(events []runtimeevents.Event) map[string]interface{} {
+	summary := map[string]interface{}{
+		"event_types": map[string]int{},
+		"agents":      []string{},
+		"sessions":    []string{},
+		"team_ids":    []string{},
+		"execution": map[string]interface{}{
+			"tool_requested":           0,
+			"tool_completed":           0,
+			"tool_reduced":             0,
+			"artifact_refs":            0,
+			"reducers":                 map[string]int{},
+			"subagent_batches":         0,
+			"subagent_batch_completed": 0,
+			"subagent_started":         0,
+			"subagent_completed":       0,
+			"subagent_roles":           map[string]int{},
+			"patch_applied":            0,
+			"applied_by":               map[string]int{},
+		},
+		"governance": map[string]interface{}{
+			"denied_events":               0,
+			"tool_denied":                 0,
+			"subagent_denied":             0,
+			"patch_decisions":             0,
+			"patch_blocked":               0,
+			"patch_approved":              0,
+			"patch_approved_override":     0,
+			"patch_approvals_with_ticket": 0,
+			"policies":                    map[string]int{},
+			"reasons":                     map[string]int{},
+			"patch_policies":              map[string]int{},
+		},
+		"provenance": map[string]interface{}{
+			"profile_context_injected": 0,
+			"recall_with_source_refs":  0,
+			"profile_resource_refs":    []string{},
+			"profile_resource_kinds":   map[string]int{},
+			"profile_resource_count":   0,
+			"profile_memory_count":     0,
+			"profile_notes_count":      0,
+			"profile_resource_labels":  []string{},
+		},
+		"prompt": map[string]interface{}{
+			"layouts_observed":   0,
+			"instruction_chars":  0,
+			"total_chars":        0,
+			"instruction_tokens": 0,
+			"total_tokens":       0,
+			"layers":             map[string]int{},
+			"sources":            []string{},
+			"source_count":       0,
+		},
+		"recovery": map[string]interface{}{
+			"prompt_preflight_events":        0,
+			"prompt_preflight_by_event_type": map[string]int{},
+			"prompt_preflight_failure_codes": map[string]int{},
+			"replacement_history_available":  0,
+			"replacement_history_applied":    0,
+			"summary_failure_events":         0,
+			"summary_failure_reasons":        map[string]int{},
+			"summary_fallbacks":              0,
+			"summary_fallback_reasons":       map[string]int{},
+		},
+		"patch_approval_tickets": []string{},
+		"started_at":             nil,
+		"ended_at":               nil,
+	}
+	if len(events) == 0 {
+		return summary
+	}
+
+	eventTypes := make(map[string]int)
+	agents := make(map[string]bool)
+	sessions := make(map[string]bool)
+	teams := make(map[string]bool)
+	tickets := make(map[string]bool)
+	execution := map[string]interface{}{
+		"tool_requested":           0,
+		"tool_completed":           0,
+		"tool_reduced":             0,
+		"artifact_refs":            0,
+		"reducers":                 map[string]int{},
+		"subagent_batches":         0,
+		"subagent_batch_completed": 0,
+		"subagent_started":         0,
+		"subagent_completed":       0,
+		"subagent_roles":           map[string]int{},
+		"patch_applied":            0,
+		"applied_by":               map[string]int{},
+	}
+	governance := map[string]interface{}{
+		"denied_events":               0,
+		"tool_denied":                 0,
+		"subagent_denied":             0,
+		"patch_decisions":             0,
+		"patch_blocked":               0,
+		"patch_approved":              0,
+		"patch_approved_override":     0,
+		"patch_approvals_with_ticket": 0,
+		"policies":                    map[string]int{},
+		"reasons":                     map[string]int{},
+		"patch_policies":              map[string]int{},
+	}
+	provenance := map[string]interface{}{
+		"profile_context_injected": 0,
+		"recall_with_source_refs":  0,
+		"profile_resource_refs":    []string{},
+		"profile_resource_kinds":   map[string]int{},
+		"profile_resource_count":   0,
+		"profile_memory_count":     0,
+		"profile_notes_count":      0,
+		"profile_resource_labels":  []string{},
+	}
+	prompt := map[string]interface{}{
+		"layouts_observed":   0,
+		"instruction_chars":  0,
+		"total_chars":        0,
+		"instruction_tokens": 0,
+		"total_tokens":       0,
+		"layers":             map[string]int{},
+		"sources":            []string{},
+		"source_count":       0,
+	}
+	recovery := map[string]interface{}{
+		"prompt_preflight_events":        0,
+		"prompt_preflight_by_event_type": map[string]int{},
+		"prompt_preflight_failure_codes": map[string]int{},
+		"replacement_history_available":  0,
+		"replacement_history_applied":    0,
+		"summary_failure_events":         0,
+		"summary_failure_reasons":        map[string]int{},
+		"summary_fallbacks":              0,
+		"summary_fallback_reasons":       map[string]int{},
+	}
+	startedAt := events[0].Timestamp
+	endedAt := events[len(events)-1].Timestamp
+
+	for _, event := range events {
+		eventTypes[event.Type]++
+		if event.AgentName != "" {
+			agents[event.AgentName] = true
+		}
+		if event.SessionID != "" {
+			sessions[event.SessionID] = true
+		}
+		if teamID := traceEventTeamID(event); teamID != "" {
+			teams[teamID] = true
+		}
+		if !event.Timestamp.IsZero() && event.Timestamp.Before(startedAt) {
+			startedAt = event.Timestamp
+		}
+		if event.Timestamp.After(endedAt) {
+			endedAt = event.Timestamp
+		}
+		applyTraceGovernanceEvent(governance, tickets, event)
+		applyTraceExecutionEvent(execution, event)
+		applyTraceProvenanceEvent(provenance, event)
+		applyTracePromptEvent(prompt, event)
+		applyTraceRecoveryEvent(recovery, event)
+	}
+
+	summary["event_types"] = eventTypes
+	summary["agents"] = sortedStringKeys(agents)
+	summary["sessions"] = sortedStringKeys(sessions)
+	summary["team_ids"] = sortedStringKeys(teams)
+	summary["execution"] = execution
+	summary["governance"] = governance
+	summary["provenance"] = provenance
+	summary["prompt"] = prompt
+	summary["recovery"] = recovery
+	summary["patch_approval_tickets"] = sortedStringKeys(tickets)
+	summary["started_at"] = startedAt
+	summary["ended_at"] = endedAt
+	return summary
+}
+
+func applyTraceGovernanceEvent(governance map[string]interface{}, tickets map[string]bool, event runtimeevents.Event) {
+	if len(governance) == 0 {
+		return
+	}
+	policies := governance["policies"].(map[string]int)
+	reasons := governance["reasons"].(map[string]int)
+	patchPolicies := governance["patch_policies"].(map[string]int)
+
+	switch event.Type {
+	case "tool.denied":
+		governance["denied_events"] = governance["denied_events"].(int) + 1
+		governance["tool_denied"] = governance["tool_denied"].(int) + 1
+		if policy, ok := event.Payload["policy"].(string); ok && strings.TrimSpace(policy) != "" {
+			policies[strings.TrimSpace(policy)]++
+		}
+		if reason, ok := event.Payload["reason"].(string); ok && strings.TrimSpace(reason) != "" {
+			reasons[strings.TrimSpace(reason)]++
+		}
+	case "subagent.denied":
+		governance["denied_events"] = governance["denied_events"].(int) + 1
+		governance["subagent_denied"] = governance["subagent_denied"].(int) + 1
+		if policy, ok := event.Payload["policy"].(string); ok && strings.TrimSpace(policy) != "" {
+			policies[strings.TrimSpace(policy)]++
+		}
+		if reason, ok := event.Payload["reason"].(string); ok && strings.TrimSpace(reason) != "" {
+			reasons[strings.TrimSpace(reason)]++
+		}
+	case "patch.decision":
+		governance["patch_decisions"] = governance["patch_decisions"].(int) + 1
+		if policy, ok := event.Payload["patch_decision_policy"].(string); ok && strings.TrimSpace(policy) != "" {
+			patchPolicies[strings.TrimSpace(policy)]++
+		}
+		if decision, ok := event.Payload["patch_decision"].(string); ok {
+			switch strings.TrimSpace(decision) {
+			case "blocked":
+				governance["patch_blocked"] = governance["patch_blocked"].(int) + 1
+			case "approved":
+				governance["patch_approved"] = governance["patch_approved"].(int) + 1
+			case "approved_override":
+				governance["patch_approved"] = governance["patch_approved"].(int) + 1
+				governance["patch_approved_override"] = governance["patch_approved_override"].(int) + 1
+			}
+		}
+		if approval, ok := event.Payload["patch_approval"].(map[string]interface{}); ok {
+			if ticketID, ok := approval["ticket_id"].(string); ok && strings.TrimSpace(ticketID) != "" {
+				if tickets != nil {
+					tickets[strings.TrimSpace(ticketID)] = true
+				}
+				governance["patch_approvals_with_ticket"] = governance["patch_approvals_with_ticket"].(int) + 1
+			}
+		}
+	}
+}
+
+func applyTraceExecutionEvent(execution map[string]interface{}, event runtimeevents.Event) {
+	if len(execution) == 0 {
+		return
+	}
+	reducers := execution["reducers"].(map[string]int)
+	subagentRoles := execution["subagent_roles"].(map[string]int)
+	appliedBy := execution["applied_by"].(map[string]int)
+
+	switch event.Type {
+	case "tool.requested":
+		execution["tool_requested"] = execution["tool_requested"].(int) + 1
+	case "tool.completed":
+		execution["tool_completed"] = execution["tool_completed"].(int) + 1
+	case "tool.reduced":
+		execution["tool_reduced"] = execution["tool_reduced"].(int) + 1
+		execution["artifact_refs"] = execution["artifact_refs"].(int) + intMapValueAny(event.Payload, "artifact_ref_count")
+		if reducer, ok := event.Payload["reducer"].(string); ok && strings.TrimSpace(reducer) != "" {
+			reducers[strings.TrimSpace(reducer)]++
+		}
+	case "subagent.batch.started":
+		execution["subagent_batches"] = execution["subagent_batches"].(int) + 1
+	case "subagent.batch.completed":
+		execution["subagent_batch_completed"] = execution["subagent_batch_completed"].(int) + 1
+	case "subagent.started":
+		execution["subagent_started"] = execution["subagent_started"].(int) + 1
+		if role, ok := event.Payload["role"].(string); ok && strings.TrimSpace(role) != "" {
+			subagentRoles[strings.TrimSpace(role)]++
+		}
+	case "subagent.completed":
+		execution["subagent_completed"] = execution["subagent_completed"].(int) + 1
+	case "patch.applied":
+		execution["patch_applied"] = execution["patch_applied"].(int) + 1
+		execution["artifact_refs"] = execution["artifact_refs"].(int) + intMapValueAny(event.Payload, "artifact_ref_count")
+		for _, actor := range stringSliceValueAny(event.Payload["applied_by"]) {
+			appliedBy[actor]++
+		}
+	}
+}
+
+func applyTraceProvenanceEvent(provenance map[string]interface{}, event runtimeevents.Event) {
+	if len(provenance) == 0 {
+		return
+	}
+	kinds := provenance["profile_resource_kinds"].(map[string]int)
+	refs := stringSliceValueAny(event.Payload["source_refs"])
+	if len(refs) == 0 {
+		refs = stringSliceValueAny(event.Payload["profile_source_refs"])
+	}
+	switch event.Type {
+	case "context.profile.injected":
+		provenance["profile_context_injected"] = provenance["profile_context_injected"].(int) + 1
+	case "recall.performed":
+		if len(refs) > 0 {
+			provenance["recall_with_source_refs"] = provenance["recall_with_source_refs"].(int) + 1
+		}
+	}
+	if len(refs) == 0 {
+		return
+	}
+	provenance["profile_resource_refs"] = mergeStringSlicesAny(provenance["profile_resource_refs"], refs)
+	for _, ref := range refs {
+		switch {
+		case strings.HasPrefix(ref, "profile-resource:memory:"):
+			kinds["memory"]++
+		case strings.HasPrefix(ref, "profile-resource:notes:"):
+			kinds["notes"]++
+		}
+	}
+	refreshTraceProvenanceDisplay(provenance)
+}
+
+func applyTracePromptEvent(prompt map[string]interface{}, event runtimeevents.Event) {
+	if len(prompt) == 0 {
+		return
+	}
+	layers := map[string]int{}
+	switch typed := prompt["layers"].(type) {
+	case map[string]int:
+		layers = cloneIntMap(typed)
+	case map[string]interface{}:
+		layers = make(map[string]int, len(typed))
+		for key, value := range typed {
+			switch count := value.(type) {
+			case int:
+				layers[key] = count
+			case float64:
+				layers[key] = int(count)
+			}
+		}
+	}
+	summary := runtimeevents.PromptView{
+		LayoutsObserved:   intMapValueAny(prompt, "layouts_observed"),
+		InstructionChars:  intMapValueAny(prompt, "instruction_chars"),
+		TotalChars:        intMapValueAny(prompt, "total_chars"),
+		InstructionTokens: intMapValueAny(prompt, "instruction_tokens"),
+		TotalTokens:       intMapValueAny(prompt, "total_tokens"),
+		Layers:            layers,
+		Sources:           stringSliceValueAny(prompt["sources"]),
+		SourceCount:       intMapValueAny(prompt, "source_count"),
+	}
+	runtimeevents.ApplyPromptEventForAPI(&summary, event)
+	built := buildPromptSummaryFromView(summary)
+	for key, value := range built {
+		prompt[key] = value
+	}
+}
+
+func applyTraceRecoveryEvent(recovery map[string]interface{}, event runtimeevents.Event) {
+	if len(recovery) == 0 {
+		return
+	}
+	summary := runtimeevents.RecoveryView{
+		PromptPreflightEvents:       intMapValueAny(recovery, "prompt_preflight_events"),
+		PromptPreflightByEventType:  cloneIntMapAny(recovery["prompt_preflight_by_event_type"]),
+		PromptPreflightFailureCodes: cloneIntMapAny(recovery["prompt_preflight_failure_codes"]),
+		ReplacementHistoryAvailable: intMapValueAny(recovery, "replacement_history_available"),
+		ReplacementHistoryApplied:   intMapValueAny(recovery, "replacement_history_applied"),
+		SummaryFailureEvents:        intMapValueAny(recovery, "summary_failure_events"),
+		SummaryFailureReasons:       cloneIntMapAny(recovery["summary_failure_reasons"]),
+		SummaryFallbacks:            intMapValueAny(recovery, "summary_fallbacks"),
+		SummaryFallbackReasons:      cloneIntMapAny(recovery["summary_fallback_reasons"]),
+	}
+	runtimeevents.ApplyRecoveryEventForAPI(&summary, event)
+	built := buildRecoverySummaryFromView(summary)
+	for key, value := range built {
+		recovery[key] = value
+	}
+}
+
+func sortedStringKeys(values map[string]bool) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func buildPatchGovernanceSummaryFromView(view runtimeevents.GovernanceView) map[string]interface{} {
+	return map[string]interface{}{
+		"decisions":             view.PatchDecisions,
+		"blocked":               view.PatchBlocked,
+		"approved":              view.PatchApproved,
+		"approved_override":     view.PatchApprovedOverride,
+		"approvals_with_ticket": view.PatchApprovalsWithTicket,
+		"policies":              cloneIntMap(view.PatchPolicies),
+	}
+}
+
+func buildPatchGovernanceSummaryFromStats(stats runtimeevents.GovernanceStats) map[string]interface{} {
+	return map[string]interface{}{
+		"decisions":             stats.PatchDecisions,
+		"blocked":               stats.PatchBlocked,
+		"approved":              stats.PatchApproved,
+		"approved_override":     stats.PatchApprovedOverride,
+		"approvals_with_ticket": stats.PatchApprovalsWithTicket,
+		"policies":              cloneIntMap(stats.PatchPolicies),
+	}
+}
+
+func cloneIntMap(values map[string]int) map[string]int {
+	if len(values) == 0 {
+		return map[string]int{}
+	}
+	cloned := make(map[string]int, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneIntMapAny(value interface{}) map[string]int {
+	switch typed := value.(type) {
+	case map[string]int:
+		return cloneIntMap(typed)
+	case map[string]interface{}:
+		cloned := make(map[string]int, len(typed))
+		for key, raw := range typed {
+			switch count := raw.(type) {
+			case int:
+				cloned[key] = count
+			case int32:
+				cloned[key] = int(count)
+			case int64:
+				cloned[key] = int(count)
+			case float64:
+				cloned[key] = int(count)
+			}
+		}
+		return cloned
+	default:
+		return map[string]int{}
+	}
+}
+
+func buildProvenanceSummaryFromView(view runtimeevents.ProvenanceView) map[string]interface{} {
+	return map[string]interface{}{
+		"profile_context_injected": view.ProfileContextInjected,
+		"recall_with_source_refs":  view.RecallWithSourceRefs,
+		"profile_resource_refs":    append([]string(nil), view.ProfileResourceRefs...),
+		"profile_resource_kinds":   cloneIntMap(view.ProfileResourceKinds),
+		"profile_resource_count":   view.ProfileResourceCount,
+		"profile_memory_count":     view.ProfileMemoryCount,
+		"profile_notes_count":      view.ProfileNotesCount,
+		"profile_resource_labels":  append([]string(nil), view.ProfileResourceLabels...),
+	}
+}
+
+func buildPromptSummaryFromView(view runtimeevents.PromptView) map[string]interface{} {
+	return map[string]interface{}{
+		"layouts_observed":   view.LayoutsObserved,
+		"instruction_chars":  view.InstructionChars,
+		"total_chars":        view.TotalChars,
+		"instruction_tokens": view.InstructionTokens,
+		"total_tokens":       view.TotalTokens,
+		"layers":             cloneIntMap(view.Layers),
+		"sources":            append([]string(nil), view.Sources...),
+		"source_count":       view.SourceCount,
+	}
+}
+
+func buildRecoverySummaryFromView(view runtimeevents.RecoveryView) map[string]interface{} {
+	return map[string]interface{}{
+		"prompt_preflight_events":        view.PromptPreflightEvents,
+		"prompt_preflight_by_event_type": cloneIntMap(view.PromptPreflightByEventType),
+		"prompt_preflight_failure_codes": cloneIntMap(view.PromptPreflightFailureCodes),
+		"replacement_history_available":  view.ReplacementHistoryAvailable,
+		"replacement_history_applied":    view.ReplacementHistoryApplied,
+		"summary_failure_events":         view.SummaryFailureEvents,
+		"summary_failure_reasons":        cloneIntMap(view.SummaryFailureReasons),
+		"summary_fallbacks":              view.SummaryFallbacks,
+		"summary_fallback_reasons":       cloneIntMap(view.SummaryFallbackReasons),
+	}
+}
+
+func summarizeRuntimeEventProvenance(events []runtimeevents.Event) map[string]interface{} {
+	summary := runtimeevents.ProvenanceView{
+		ProfileResourceKinds: make(map[string]int),
+	}
+	for _, event := range events {
+		runtimeevents.ApplyProvenanceEventForAPI(&summary, event)
+	}
+	return buildProvenanceSummaryFromView(summary)
+}
+
+func refreshTraceProvenanceDisplay(provenance map[string]interface{}) {
+	if len(provenance) == 0 {
+		return
+	}
+	refs := stringSliceValueAny(provenance["profile_resource_refs"])
+	provenance["profile_resource_count"] = len(refs)
+	memoryCount := 0
+	notesCount := 0
+	labels := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		switch {
+		case strings.HasPrefix(ref, "profile-resource:memory:"):
+			memoryCount++
+			labels = append(labels, "memory:"+shortTraceProfileResourceName(strings.TrimPrefix(ref, "profile-resource:memory:")))
+		case strings.HasPrefix(ref, "profile-resource:notes:"):
+			notesCount++
+			labels = append(labels, "notes:"+shortTraceProfileResourceName(strings.TrimPrefix(ref, "profile-resource:notes:")))
+		}
+	}
+	provenance["profile_memory_count"] = memoryCount
+	provenance["profile_notes_count"] = notesCount
+	provenance["profile_resource_labels"] = mergeStringSlicesAny(provenance["profile_resource_labels"], labels)
+}
+
+func shortTraceProfileResourceName(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\\", "/"))
+	if value == "" {
+		return ""
+	}
+	if index := strings.LastIndex(value, "/"); index >= 0 && index+1 < len(value) {
+		return value[index+1:]
+	}
+	return value
+}
+
+func mergeStringSlicesAny(current interface{}, values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	merged := make([]string, 0)
+	switch typed := current.(type) {
+	case []string:
+		for _, value := range typed {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			merged = append(merged, value)
+		}
+	case []interface{}:
+		for _, item := range typed {
+			if value, ok := item.(string); ok && strings.TrimSpace(value) != "" {
+				value = strings.TrimSpace(value)
+				if _, ok := seen[value]; ok {
+					continue
+				}
+				seen[value] = struct{}{}
+				merged = append(merged, value)
+			}
+		}
+	}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		merged = append(merged, value)
+	}
+	sort.Strings(merged)
+	return merged
+}
+
+func patchGovernanceSummaryFromMap(governance map[string]interface{}) map[string]interface{} {
+	if len(governance) == 0 {
+		return map[string]interface{}{
+			"decisions":             0,
+			"blocked":               0,
+			"approved":              0,
+			"approved_override":     0,
+			"approvals_with_ticket": 0,
+			"policies":              map[string]int{},
+		}
+	}
+	return map[string]interface{}{
+		"decisions":             governance["patch_decisions"],
+		"blocked":               governance["patch_blocked"],
+		"approved":              governance["patch_approved"],
+		"approved_override":     governance["patch_approved_override"],
+		"approvals_with_ticket": governance["patch_approvals_with_ticket"],
+		"policies":              governance["patch_policies"],
+	}
+}
+
+func promptSummaryFromMap(prompt map[string]interface{}) map[string]interface{} {
+	if len(prompt) == 0 {
+		return map[string]interface{}{
+			"layouts_observed":   0,
+			"instruction_chars":  0,
+			"total_chars":        0,
+			"instruction_tokens": 0,
+			"total_tokens":       0,
+			"layers":             map[string]int{},
+			"sources":            []string{},
+			"source_count":       0,
+		}
+	}
+	return map[string]interface{}{
+		"layouts_observed":   intMapValueAny(prompt, "layouts_observed"),
+		"instruction_chars":  intMapValueAny(prompt, "instruction_chars"),
+		"total_chars":        intMapValueAny(prompt, "total_chars"),
+		"instruction_tokens": intMapValueAny(prompt, "instruction_tokens"),
+		"total_tokens":       intMapValueAny(prompt, "total_tokens"),
+		"layers":             cloneIntMapAny(prompt["layers"]),
+		"sources":            stringSliceValueAny(prompt["sources"]),
+		"source_count":       intMapValueAny(prompt, "source_count"),
+	}
+}
+
+func recoverySummaryFromMap(recovery map[string]interface{}) map[string]interface{} {
+	if len(recovery) == 0 {
+		return map[string]interface{}{
+			"prompt_preflight_events":        0,
+			"prompt_preflight_by_event_type": map[string]int{},
+			"prompt_preflight_failure_codes": map[string]int{},
+			"replacement_history_available":  0,
+			"replacement_history_applied":    0,
+			"summary_failure_events":         0,
+			"summary_failure_reasons":        map[string]int{},
+			"summary_fallbacks":              0,
+			"summary_fallback_reasons":       map[string]int{},
+		}
+	}
+	return map[string]interface{}{
+		"prompt_preflight_events":        intMapValueAny(recovery, "prompt_preflight_events"),
+		"prompt_preflight_by_event_type": cloneIntMapAny(recovery["prompt_preflight_by_event_type"]),
+		"prompt_preflight_failure_codes": cloneIntMapAny(recovery["prompt_preflight_failure_codes"]),
+		"replacement_history_available":  intMapValueAny(recovery, "replacement_history_available"),
+		"replacement_history_applied":    intMapValueAny(recovery, "replacement_history_applied"),
+		"summary_failure_events":         intMapValueAny(recovery, "summary_failure_events"),
+		"summary_failure_reasons":        cloneIntMapAny(recovery["summary_failure_reasons"]),
+		"summary_fallbacks":              intMapValueAny(recovery, "summary_fallbacks"),
+		"summary_fallback_reasons":       cloneIntMapAny(recovery["summary_fallback_reasons"]),
+	}
+}
+
+func buildRecoverySummaryFromTraceSummaries(traces []runtimeevents.TraceSummary) map[string]interface{} {
+	view := runtimeevents.RecoveryView{
+		PromptPreflightByEventType:  make(map[string]int),
+		PromptPreflightFailureCodes: make(map[string]int),
+		SummaryFailureReasons:       make(map[string]int),
+		SummaryFallbackReasons:      make(map[string]int),
+	}
+	for _, trace := range traces {
+		view.PromptPreflightEvents += trace.Recovery.PromptPreflightEvents
+		view.ReplacementHistoryAvailable += trace.Recovery.ReplacementHistoryAvailable
+		view.ReplacementHistoryApplied += trace.Recovery.ReplacementHistoryApplied
+		view.SummaryFailureEvents += trace.Recovery.SummaryFailureEvents
+		view.SummaryFallbacks += trace.Recovery.SummaryFallbacks
+		for eventType, count := range trace.Recovery.PromptPreflightByEventType {
+			view.PromptPreflightByEventType[eventType] += count
+		}
+		for code, count := range trace.Recovery.PromptPreflightFailureCodes {
+			view.PromptPreflightFailureCodes[code] += count
+		}
+		for reason, count := range trace.Recovery.SummaryFailureReasons {
+			view.SummaryFailureReasons[reason] += count
+		}
+		for reason, count := range trace.Recovery.SummaryFallbackReasons {
+			view.SummaryFallbackReasons[reason] += count
+		}
+	}
+	return buildRecoverySummaryFromView(view)
+}
+
+func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[string]interface{} {
+	if config == nil {
+		return nil
+	}
+	options := make(map[string]interface{})
+	ctxCfg := config.Context
+	if strings.TrimSpace(ctxCfg.Profile) != "" {
+		options["context_profile"] = strings.TrimSpace(ctxCfg.Profile)
+	}
+	if strings.TrimSpace(ctxCfg.CompactionMode) != "" {
+		options["context_compaction_mode"] = strings.TrimSpace(ctxCfg.CompactionMode)
+	}
+	if strings.TrimSpace(ctxCfg.RecallMode) != "" {
+		options["context_recall_mode"] = strings.TrimSpace(ctxCfg.RecallMode)
+	}
+	if strings.TrimSpace(ctxCfg.ObservationMode) != "" {
+		options["context_observation_mode"] = strings.TrimSpace(ctxCfg.ObservationMode)
+	}
+	if strings.TrimSpace(ctxCfg.WorkspaceMode) != "" {
+		options["context_workspace_mode"] = strings.ToLower(strings.TrimSpace(ctxCfg.WorkspaceMode))
+	}
+	if ctxCfg.MinCompactionMessages > 0 {
+		options["context_min_compaction_messages"] = ctxCfg.MinCompactionMessages
+	}
+	if ctxCfg.MinRecallQueryLength > 0 {
+		options["context_min_recall_query_length"] = ctxCfg.MinRecallQueryLength
+	}
+	if ctxCfg.LedgerLoadLimit > 0 {
+		options["context_ledger_load_limit"] = ctxCfg.LedgerLoadLimit
+	}
+	if ctxCfg.MaxPromptTokens > 0 {
+		options["context_max_prompt_tokens"] = ctxCfg.MaxPromptTokens
+	}
+	if ctxCfg.FallbackMaxPromptTokens > 0 {
+		options["context_fallback_max_prompt_tokens"] = ctxCfg.FallbackMaxPromptTokens
+	}
+	if ctxCfg.MaxMessages > 0 {
+		options["context_max_messages"] = ctxCfg.MaxMessages
+	}
+	if ctxCfg.KeepRecentMessages > 0 {
+		options["context_keep_recent_messages"] = ctxCfg.KeepRecentMessages
+	}
+	if ctxCfg.MaxRecallResults > 0 {
+		options["context_max_recall_results"] = ctxCfg.MaxRecallResults
+	}
+	if ctxCfg.MaxObservationItems > 0 {
+		options["context_max_observation_items"] = ctxCfg.MaxObservationItems
+	}
+	wsCfg := config.Workspace
+	if strings.TrimSpace(ctxCfg.WorkspaceMode) == "" && strings.TrimSpace(wsCfg.Mode) != "" {
+		options["context_workspace_mode"] = strings.ToLower(strings.TrimSpace(wsCfg.Mode))
+	}
+	if wsCfg.MaxFileSize > 0 {
+		options["workspace_max_file_size"] = wsCfg.MaxFileSize
+	}
+	if wsCfg.MaxChunkSize > 0 {
+		options["workspace_max_chunk_size"] = wsCfg.MaxChunkSize
+	}
+	if wsCfg.ChunkOverlap > 0 {
+		options["workspace_chunk_overlap"] = wsCfg.ChunkOverlap
+	}
+	if len(wsCfg.Include) > 0 {
+		options["workspace_include"] = append([]string(nil), wsCfg.Include...)
+	}
+	if len(wsCfg.Exclude) > 0 {
+		options["workspace_exclude"] = append([]string(nil), wsCfg.Exclude...)
+	}
+	if path := strings.TrimSpace(config.Artifact.StorePath); path != "" {
+		options["artifact_store_path"] = path
+	}
+	if dsn := strings.TrimSpace(config.Artifact.StoreDSN); dsn != "" {
+		options["artifact_store_dsn"] = dsn
+	}
+	if len(options) == 0 {
+		return nil
+	}
+	return options
+}
+
+func contextSnapshotFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[string]interface{} {
+	if config == nil {
+		budget := runtimecontext.ResolveBudget(runtimecontext.BudgetProfileBalanced, runtimecontext.Budget{})
+		strategy := runtimecontext.ResolveStrategy(runtimecontext.BudgetProfileBalanced, runtimecontext.Strategy{})
+		return map[string]interface{}{
+			"profile":                    runtimecontext.BudgetProfileBalanced,
+			"resolved_profile":           strategy.Profile,
+			"compaction_mode":            strategy.CompactionMode,
+			"recall_mode":                strategy.RecallMode,
+			"observation_mode":           strategy.ObservationMode,
+			"max_prompt_tokens":          budget.MaxPromptTokens,
+			"fallback_max_prompt_tokens": runtimecontext.DefaultFallbackMaxPromptTokens,
+			"max_messages":               budget.MaxMessages,
+			"keep_recent_messages":       budget.KeepRecentMessages,
+			"max_recall_results":         budget.MaxRecallResults,
+			"max_observation_items":      budget.MaxObservationItems,
+			"layers":                     runtimecontext.ResolvedLayerPlan(runtimecontext.BudgetProfileBalanced, budget, strategy),
+		}
+	}
+	ctxCfg := config.Context
+	profile := strings.TrimSpace(ctxCfg.Profile)
+	if profile == "" {
+		profile = runtimecontext.BudgetProfileBalanced
+	}
+	budget := runtimecontext.ResolveBudget(profile, runtimecontext.Budget{
+		MaxPromptTokens:     ctxCfg.MaxPromptTokens,
+		MaxMessages:         ctxCfg.MaxMessages,
+		KeepRecentMessages:  ctxCfg.KeepRecentMessages,
+		MaxRecallResults:    ctxCfg.MaxRecallResults,
+		MaxObservationItems: ctxCfg.MaxObservationItems,
+	})
+	fallbackMaxPromptTokens := ctxCfg.FallbackMaxPromptTokens
+	if fallbackMaxPromptTokens <= 0 {
+		fallbackMaxPromptTokens = runtimecontext.DefaultFallbackMaxPromptTokens
+	}
+	strategy := runtimecontext.ResolveStrategy(profile, runtimecontext.Strategy{
+		CompactionMode:        ctxCfg.CompactionMode,
+		RecallMode:            ctxCfg.RecallMode,
+		ObservationMode:       ctxCfg.ObservationMode,
+		MinCompactionMessages: ctxCfg.MinCompactionMessages,
+		MinRecallQueryLength:  ctxCfg.MinRecallQueryLength,
+		LedgerLoadLimit:       ctxCfg.LedgerLoadLimit,
+	})
+	return map[string]interface{}{
+		"profile":                    profile,
+		"resolved_profile":           strategy.Profile,
+		"compaction_mode":            strategy.CompactionMode,
+		"recall_mode":                strategy.RecallMode,
+		"observation_mode":           strategy.ObservationMode,
+		"min_compaction_messages":    strategy.MinCompactionMessages,
+		"min_recall_query_length":    strategy.MinRecallQueryLength,
+		"ledger_load_limit":          strategy.LedgerLoadLimit,
+		"max_prompt_tokens":          budget.MaxPromptTokens,
+		"fallback_max_prompt_tokens": fallbackMaxPromptTokens,
+		"max_messages":               budget.MaxMessages,
+		"keep_recent_messages":       budget.KeepRecentMessages,
+		"max_recall_results":         budget.MaxRecallResults,
+		"max_observation_items":      budget.MaxObservationItems,
+		"layers":                     runtimecontext.ResolvedLayerPlan(profile, budget, strategy),
+	}
+}
+
+// ValidateRuntimeConfig 获取 runtime 配置健康校验结果
+func (h *Handler) ValidateRuntimeConfig(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	payload := map[string]interface{}{
+		"validation": h.runtimeValidationSnapshot(),
+	}
+	if err := h.attachProfileMetadata(r, payload); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
+func embeddingRouterStats(router *skill.SemanticEmbeddingRouter) interface{} {
+	if router == nil {
+		return nil
+	}
+	return router.GetStats()
+}
+
+func handlerSkillDirs(loader *skill.Loader) []string {
+	if loader == nil {
+		return nil
+	}
+	return loader.GetSkillDirs()
+}
+
+func parseSkillSourceFilters(r *http.Request) (string, string) {
+	if r == nil {
+		return "", ""
+	}
+	layer := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source_layer")))
+	dir := strings.TrimSpace(r.URL.Query().Get("source_dir"))
+	return layer, dir
+}
+
+func (h *Handler) resolveRuntimeConfig(scope UsageScope) *runtimecfg.RuntimeConfig {
+	if h.runtimeConfigResolver != nil {
+		if cfg := h.runtimeConfigResolver(scope); cfg != nil {
+			return cfg
+		}
+	}
+	return h.runtimeConfig
+}
+
+func (h *Handler) generatedImageCacheMaxAge() time.Duration {
+	if h == nil {
+		return time.Hour
+	}
+	if cfg := h.resolveRuntimeConfig(UsageScope{}); cfg != nil {
+		cacheMaxAge := cfg.Images.CacheMaxAge
+		if cacheMaxAge > 0 {
+			return cacheMaxAge
+		}
+		if cacheMaxAge == 0 {
+			return 0
+		}
+	}
+	return time.Hour
+}
+
+func cacheControlHeader(cacheMaxAge time.Duration) string {
+	if cacheMaxAge <= 0 {
+		return "no-store"
+	}
+	return fmt.Sprintf("private, max-age=%d", int(cacheMaxAge.Seconds()))
+}
+
+func (h *Handler) resolvePlanningMode(requested string, config *runtimecfg.RuntimeConfig) string {
+	mode := strings.TrimSpace(requested)
+	if mode != "" {
+		return mode
+	}
+	if config != nil {
+		return strings.TrimSpace(config.Agent.DefaultPlanningMode)
+	}
+	if h.runtimeConfig != nil {
+		return strings.TrimSpace(h.runtimeConfig.Agent.DefaultPlanningMode)
+	}
+	return ""
+}
+
+func (h *Handler) buildContextPack(ctx context.Context, session *chat.Session, profileCtx map[string]interface{}, workspaceCtx *workspace.WorkspaceContext, messages []types.Message, prompt, workspacePath, teamID, taskID, traceID string, config *runtimecfg.RuntimeConfig) map[string]interface{} {
+	builder := contextpack.NewBuilder()
+	if len(profileCtx) > 0 {
+		builder.AddProvider(contextpack.NewProfileProvider())
+	}
+	builder.AddProvider(contextpack.NewWorkspaceProvider())
+	maxMessages := h.contextPackMaxMessages(config)
+	builder.AddProvider(contextpack.NewSessionProvider(maxMessages))
+	if store := h.getTeamStore(); store != nil && (strings.TrimSpace(teamID) != "" || strings.TrimSpace(taskID) != "") {
+		builder.AddProvider(contextpack.NewTeamProvider(team.NewContextBuilder(store), 6))
+	}
+
+	pack, _ := builder.Build(ctx, &contextpack.Input{
+		Prompt:        prompt,
+		Messages:      messages,
+		Session:       buildContextPackSessionSnapshot(session, maxMessages),
+		Profile:       cloneProfileContextValues(profileCtx),
+		Workspace:     workspaceCtx,
+		WorkspacePath: strings.TrimSpace(workspacePath),
+		TeamID:        strings.TrimSpace(teamID),
+		TaskID:        strings.TrimSpace(taskID),
+	})
+	if traceID != "" && pack != nil {
+		if teamPack, ok := pack["team"].(map[string]interface{}); ok {
+			payload := map[string]interface{}{}
+			if value := teamPack["team_id"]; value != nil {
+				payload["team_id"] = value
+			}
+			if value := teamPack["task_id"]; value != nil {
+				payload["task_id"] = value
+			}
+			if value := teamPack["task_count"]; value != nil {
+				payload["task_count"] = value
+			}
+			if value := teamPack["mail_count"]; value != nil {
+				payload["mail_count"] = value
+			}
+			if value := teamPack["mate_count"]; value != nil {
+				payload["mate_count"] = value
+			}
+			if summary, ok := teamPack["summary"].(string); ok && strings.TrimSpace(summary) != "" {
+				payload["summary_present"] = true
+			}
+			if session != nil && strings.TrimSpace(session.ID) != "" {
+				payload["session_id"] = session.ID
+			}
+			h.publishRuntimeEvent("context.team.pack", traceID, payload)
+		}
+	}
+	return pack
+}
+
+func buildContextPackSessionSnapshot(session *chat.Session, maxMessages int) *contextpack.SessionSnapshot {
+	if session == nil {
+		return nil
+	}
+	recentMessages := session.GetRecentMessages(maxMessages)
+	clonedMessages := make([]types.Message, 0, len(recentMessages))
+	for index := range recentMessages {
+		clonedMessages = append(clonedMessages, *recentMessages[index].Clone())
+	}
+	return &contextpack.SessionSnapshot{
+		ID:             session.ID,
+		UserID:         session.UserID,
+		State:          string(session.State),
+		Tags:           append([]string(nil), session.Metadata.Tags...),
+		Context:        cloneProfileContextValues(session.Metadata.Context),
+		TotalTurns:     session.Metadata.TotalTurns,
+		LastAgent:      session.Metadata.LastAgent,
+		LastSkill:      session.Metadata.LastSkill,
+		LastModel:      session.Metadata.LastModel,
+		RecentMessages: clonedMessages,
+		UpdatedAt:      session.UpdatedAt,
+	}
+}
+
+func (h *Handler) resolveGrantedSkillPermissions(r *http.Request) []string {
+	if r == nil {
+		return nil
+	}
+	if h.hasValidSearchAdminToken(r) || h.hasTrustedAdminRole(r) || isLoopbackRequest(r) {
+		return []string{"*"}
+	}
+
+	seen := make(map[string]struct{})
+	granted := make([]string, 0)
+	add := func(value string) {
+		for _, item := range strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ';' || r == '\n' || r == '\t'
+		}) {
+			item = strings.ToLower(strings.TrimSpace(item))
+			if item == "" {
+				continue
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			granted = append(granted, item)
+		}
+	}
+
+	for _, value := range r.Header.Values("X-Skills-Permission") {
+		add(value)
+	}
+	for _, value := range r.Header.Values("X-Skills-Permissions") {
+		add(value)
+	}
+	return granted
+}
+
+func (h *Handler) contextPackMaxMessages(config *runtimecfg.RuntimeConfig) int {
+	if config != nil && config.Agent.MaxMemorySize > 0 {
+		return config.Agent.MaxMemorySize
+	}
+	if h.runtimeConfig != nil && h.runtimeConfig.Agent.MaxMemorySize > 0 {
+		return h.runtimeConfig.Agent.MaxMemorySize
+	}
+	return 10
+}
+
+func parseHealthRecheckMode(r *http.Request) llm.HealthCheckMode {
+	if r == nil {
+		return llm.HealthCheckModeStale
+	}
+	value := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("recheck")))
+	switch value {
+	case "", "false", "0", "off":
+		return llm.HealthCheckModeStale
+	case "true", "1", "all":
+		return llm.HealthCheckModeAll
+	case "unhealthy", "degraded":
+		return llm.HealthCheckModeUnhealthy
+	case "stale":
+		return llm.HealthCheckModeStale
+	case "none":
+		return llm.HealthCheckModeNone
+	default:
+		return llm.HealthCheckModeStale
+	}
+}
+
+func (h *Handler) attachProfileMetadata(r *http.Request, target map[string]interface{}) error {
+	if h == nil || target == nil {
+		return nil
+	}
+	profileRef, agentID := resolveProfileRequestParams(r)
+	resolved, ref, err := h.resolveProfileMetadata(profileRef, agentID)
+	if err != nil {
+		return err
+	}
+	if resolved == nil {
+		return nil
+	}
+	target["profile"] = map[string]interface{}{
+		"reference": ref,
+		"resolved":  resolved,
+	}
+	return nil
+}
+
+func resolveProfileRequestParams(r *http.Request) (string, string) {
+	if r == nil || r.URL == nil {
+		return "", ""
+	}
+	query := r.URL.Query()
+	return strings.TrimSpace(query.Get("profile")), strings.TrimSpace(query.Get("agent"))
+}
+
+func filterSkillsBySource(skills []*skill.Skill, layer, dir string) []*skill.Skill {
+	if layer == "" && dir == "" {
+		return skills
+	}
+
+	filtered := make([]*skill.Skill, 0, len(skills))
+	for _, skillItem := range skills {
+		if matchesSkillSource(skillItem, layer, dir) {
+			filtered = append(filtered, skillItem)
+		}
+	}
+	return filtered
+}
+
+func (h *Handler) hydrateSkillForResponse(skillItem *skill.Skill) (*skill.Skill, error) {
+	if skillItem == nil {
+		return nil, nil
+	}
+	if h != nil && h.skillRegistry != nil {
+		return h.skillRegistry.Hydrate(skillItem)
+	}
+	return skill.HydrateSkill(skillItem)
+}
+
+func (h *Handler) hydrateSkillsForResponse(skills []*skill.Skill) ([]*skill.Skill, error) {
+	if len(skills) == 0 {
+		return skills, nil
+	}
+	hydrated := make([]*skill.Skill, 0, len(skills))
+	for _, skillItem := range skills {
+		item, err := h.hydrateSkillForResponse(skillItem)
+		if err != nil {
+			return nil, err
+		}
+		if item != nil {
+			hydrated = append(hydrated, item)
+		}
+	}
+	return hydrated, nil
+}
+
+func (h *Handler) hydrateRouteResultsForResponse(matches []*skill.RouteResult) ([]*skill.RouteResult, error) {
+	if len(matches) == 0 {
+		return matches, nil
+	}
+	hydrated := make([]*skill.RouteResult, 0, len(matches))
+	for _, match := range matches {
+		if match == nil || match.Skill == nil {
+			continue
+		}
+		item, err := h.hydrateSkillForResponse(match.Skill)
+		if err != nil {
+			return nil, err
+		}
+		cloned := *match
+		cloned.Skill = item
+		hydrated = append(hydrated, &cloned)
+	}
+	return hydrated, nil
+}
+
+func matchesSkillSource(skillItem *skill.Skill, layer, dir string) bool {
+	if skillItem == nil {
+		return false
+	}
+	if layer == "" && dir == "" {
+		return true
+	}
+	if skillItem.Source == nil {
+		return false
+	}
+	if layer != "" && !strings.EqualFold(skillItem.Source.Layer, layer) {
+		return false
+	}
+	if dir != "" {
+		normalizedFilter := filepath.Clean(dir)
+		normalizedSource := filepath.Clean(skillItem.Source.Dir)
+		if normalizedSource != normalizedFilter && !strings.HasPrefix(normalizedSource, normalizedFilter+string(filepath.Separator)) {
+			return false
+		}
+	}
+	return true
+}
+
+func buildSkillSourceSummary(skills []*skill.Skill) map[string]int {
+	summary := make(map[string]int)
+	for _, skillItem := range skills {
+		layer := skill.SkillSourceLayerUnknown
+		if skillItem != nil && skillItem.Source != nil && skillItem.Source.Layer != "" {
+			layer = skillItem.Source.Layer
+		}
+		summary[layer]++
+	}
+	return summary
+}
+
+// GetSearchStats 获取搜索与 embedding 观测数据
+func (h *Handler) GetSearchStats(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSearchAdmin(r); err != nil {
+		h.auditSearchAdminAction(r, "search_stats", "forbidden", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	h.auditSearchAdminAction(r, "search_stats", "success")
+
+	response := map[string]interface{}{
+		"search": h.searchTelemetrySnapshot(),
+		"embedding": map[string]interface{}{
+			"enabled": h.embeddingRouter != nil,
+			"stats":   embeddingRouterStats(h.embeddingRouter),
+		},
+	}
+
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// ReindexSearchIndex 手动重建 embedding 搜索索引
+func (h *Handler) ReindexSearchIndex(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSearchAdmin(r); err != nil {
+		h.recordSearchReindex("forbidden")
+		h.auditSearchAdminAction(r, "search_reindex", "forbidden", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	if h.embeddingRouter == nil {
+		h.recordSearchReindex("embedding_disabled")
+		h.auditSearchAdminAction(r, "search_reindex", "failed", logger.String("reason", "embedding_disabled"))
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"embedding router not configured"))
+		return
+	}
+
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	if !force {
+		if retryAfter, limited := h.reindexRetryAfter(); limited {
+			h.recordSearchReindex("rate_limited")
+			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+			h.auditSearchAdminAction(r, "search_reindex", "rate_limited",
+				logger.Int("retry_after_seconds", int(retryAfter.Seconds())),
+				logger.Bool("force", force),
+			)
+			h.writeJSON(w, http.StatusTooManyRequests, map[string]interface{}{
+				"error":               "search reindex cooldown active",
+				"retry_after_seconds": int(retryAfter.Seconds()),
+				"search":              h.searchTelemetrySnapshot(),
+			})
+			return
+		}
+	}
+
+	h.markSearchReindexStart()
+	if err := h.embeddingRouter.RebuildIndex(); err != nil {
+		h.recordSearchReindex("failed")
+		h.auditSearchAdminAction(r, "search_reindex", "failed", logger.Err(err), logger.Bool("force", force))
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	h.recordSearchReindex("success")
+	h.auditSearchAdminAction(r, "search_reindex", "success", logger.Bool("force", force))
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"reindexed": true,
+		"embedding": map[string]interface{}{
+			"enabled": true,
+			"stats":   embeddingRouterStats(h.embeddingRouter),
+		},
+		"search": h.searchTelemetrySnapshot(),
+	})
+}
+
+// GetUsageStats 获取 usage/quota 统计
+func (h *Handler) GetUsageStats(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	scope, scoped := h.resolveUsageScopeFilter(r, "", "", "")
+	response := map[string]interface{}{
+		"tracking_enabled": h.usagePolicy.TrackingEnabled,
+		"policy":           h.usagePolicySnapshot(),
+	}
+	if scoped {
+		response["scope"] = scope
+		response["quota"] = h.usageQuotaSnapshot(scope)
+		response["usage"] = h.usageTracker.snapshot(scope)
+	} else {
+		response["usage"] = h.usageTracker.aggregate()
+		response["scopes"] = h.usageTracker.scopes()
+	}
+
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// GetUsageLedger 获取持久化 usage ledger
+func (h *Handler) GetUsageLedger(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if h.usageLedgerStore == nil {
+		// 区分两种 503：配置未启用账本 vs 已启用但初始化失败（原因由启动期降级路径写入）。
+		// 后者必须带上原因，否则排障时会误判成「没开开关」。
+		message := "usage ledger not configured"
+		if reason := strings.TrimSpace(h.usageLedgerUnavailableReason); reason != "" {
+			message = "usage ledger unavailable: " + reason
+		}
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, message))
+		return
+	}
+
+	scope, scoped := h.resolveUsageScopeFilter(r, "", "", "")
+	entrypoint := strings.TrimSpace(r.URL.Query().Get("entrypoint"))
+	skillName := strings.TrimSpace(r.URL.Query().Get("skill"))
+	limit := 50
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	since := time.Time{}
+	if rawSince := strings.TrimSpace(r.URL.Query().Get("since")); rawSince != "" {
+		parsed, err := time.Parse(time.RFC3339, rawSince)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid since value"))
+			return
+		}
+		since = parsed
+	}
+
+	var successFilter *bool
+	if rawSuccess := strings.TrimSpace(r.URL.Query().Get("success")); rawSuccess != "" {
+		parsed, err := strconv.ParseBool(rawSuccess)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid success value"))
+			return
+		}
+		successFilter = &parsed
+	}
+
+	// FR-13：group_by=profile 打开按 profile 维度的聚合并返回 groups；
+	// 未指定时响应与聚合前逐字节一致（records/count/filters 三键不变）。
+	groupBy := strings.TrimSpace(r.URL.Query().Get("group_by"))
+	if groupBy != "" && groupBy != usageLedgerGroupByProfile {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "unsupported group_by value"))
+		return
+	}
+
+	fetchLimit := limit * 5
+	if fetchLimit < limit {
+		fetchLimit = limit
+	}
+	if fetchLimit > 1000 {
+		fetchLimit = 1000
+	}
+
+	records, err := h.usageLedgerStore.GetSince(since, fetchLimit)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// 过滤后的集合全量保留：records 仍按 limit 截断（旧行为不变），但
+	// group_by 聚合必须基于"过滤后、截断前"的集合，否则分组会随 limit 漂移。
+	matched := make([]*entity.TokenUsageHistory, 0, limit)
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		if scoped {
+			if fmt.Sprint(record.Metadata["scope_key"]) != scope.ScopeKey {
+				continue
+			}
+		}
+		if entrypoint != "" && fmt.Sprint(record.Metadata["entrypoint"]) != entrypoint {
+			continue
+		}
+		if skillName != "" && fmt.Sprint(record.Metadata["skill"]) != skillName {
+			continue
+		}
+		if successFilter != nil && record.Success != *successFilter {
+			continue
+		}
+		matched = append(matched, record)
+	}
+	filtered := matched
+	if len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+
+	response := map[string]interface{}{
+		"records": filtered,
+		"count":   len(filtered),
+		"filters": map[string]interface{}{
+			"scope": func() interface{} {
+				if scoped {
+					return scope
+				}
+				return nil
+			}(),
+			"entrypoint": entrypoint,
+			"skill":      skillName,
+			"success":    successFilter,
+			"since":      since,
+			"limit":      limit,
+		},
+	}
+	if groupBy == usageLedgerGroupByProfile {
+		response["group_by"] = groupBy
+		response["groups"] = aggregateUsageLedgerByProfile(matched)
+		response["grouped_total"] = len(matched)
+	}
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// ResetUsageStats 重置 usage 统计
+func (h *Handler) ResetUsageStats(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	var req struct {
+		TenantID  string `json:"tenant_id,omitempty"`
+		ProjectID string `json:"project_id,omitempty"`
+		UserID    string `json:"user_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+	scope, scoped := h.resolveUsageScopeFilter(r, req.TenantID, req.ProjectID, req.UserID)
+	if scoped {
+		h.usageTracker.reset(&scope)
+	} else {
+		h.usageTracker.reset(nil)
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"reset": true,
+		"scope": func() interface{} {
+			if scoped {
+				return scope
+			}
+			return nil
+		}(),
+	})
+}
+
+// GetUsagePolicy 获取 runtime usage/quota policy
+func (h *Handler) GetUsagePolicy(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"policy": h.usagePolicyDetailedSnapshot(),
+	})
+}
+
+// GetMutationPolicy 获取 runtime mutation policy
+func (h *Handler) GetMutationPolicy(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSkillMutation(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"policy": h.mutationPolicySnapshot(),
+	})
+}
+
+// GetGovernancePolicy 获取统一治理策略视图
+func (h *Handler) GetGovernancePolicy(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"mutation_policy": h.mutationPolicySnapshot(),
+		"usage_policy":    h.usagePolicyDetailedSnapshot(),
+		"auth_policy":     h.scopeResolverPolicySnapshot(),
+		"persistence": map[string]interface{}{
+			"mutation_policy_enabled": h.mutationPolicyPersister != nil,
+			"usage_policy_enabled":    h.usagePolicyPersister != nil,
+			"auth_policy_enabled":     h.authPolicyPersister != nil,
+			"usage_ledger_enabled":    h.usageLedgerStore != nil,
+		},
+		"search_admin": map[string]interface{}{
+			"admin_token_configured":   strings.TrimSpace(h.searchAdminToken) != "",
+			"reindex_cooldown_seconds": int(h.searchReindexCooldown.Seconds()),
+		},
+	})
+}
+
+// UpdateMutationPolicy 更新 runtime mutation policy
+func (h *Handler) UpdateMutationPolicy(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSkillMutation(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	var req mutationPolicyUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+
+	previous := h.getMutationPolicy()
+	policy := h.updateMutationPolicy(req)
+	if h.mutationPolicyPersister != nil {
+		changedBy := requestChangedBy(r)
+		if err := h.mutationPolicyPersister(policy, changedBy); err != nil {
+			h.SetMutationPolicy(previous)
+			h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "failed to persist mutation policy", err))
+			return
+		}
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"updated": true,
+		"policy":  h.mutationPolicySnapshot(),
+	})
+}
+
+// GetAuthPolicy 获取 runtime scope/auth resolver policy
+func (h *Handler) GetAuthPolicy(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"policy": h.scopeResolverPolicySnapshot(),
+	})
+}
+
+// UpdateAuthPolicy 更新 runtime scope/auth resolver policy
+func (h *Handler) UpdateAuthPolicy(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	var req authPolicyUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+
+	previous := h.getScopeResolverConfig()
+	policy := h.updateScopeResolverConfig(req)
+	if h.authPolicyPersister != nil {
+		changedBy := requestChangedBy(r)
+		if err := h.authPolicyPersister(policy, changedBy); err != nil {
+			h.SetScopeResolverConfig(previous)
+			h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "failed to persist auth policy", err))
+			return
+		}
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"updated": true,
+		"policy":  serializeScopeResolverPolicy(policy),
+	})
+}
+
+// DeleteAuthPolicyEntry 删除 runtime auth/scope policy 条目
+func (h *Handler) DeleteAuthPolicyEntry(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	var req struct {
+		Field string `json:"field"`
+		Key   string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+	req.Field = strings.ToLower(strings.TrimSpace(req.Field))
+	req.Key = strings.TrimSpace(req.Key)
+	if req.Key == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "policy key is required"))
+		return
+	}
+	switch req.Field {
+	case "api_key_scope", "admin_role":
+	default:
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "policy field must be api_key_scope or admin_role"))
+		return
+	}
+
+	previous := h.getScopeResolverConfig()
+	policy, removed := h.deleteAuthPolicyEntry(req.Field, req.Key)
+	if !removed {
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "policy entry not found"))
+		return
+	}
+	if h.authPolicyPersister != nil {
+		changedBy := requestChangedBy(r)
+		if err := h.authPolicyPersister(policy, changedBy); err != nil {
+			h.SetScopeResolverConfig(previous)
+			h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "failed to persist auth policy", err))
+			return
+		}
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"deleted": true,
+		"field":   req.Field,
+		"key":     req.Key,
+		"policy":  serializeScopeResolverPolicy(policy),
+	})
+}
+
+// UpdateUsagePolicy 更新 runtime usage/quota policy
+func (h *Handler) UpdateUsagePolicy(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	var req usagePolicyUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+
+	previous := h.getUsagePolicy()
+	policy := h.updateUsagePolicy(req)
+	if h.usagePolicyPersister != nil {
+		changedBy := requestChangedBy(r)
+		if err := h.usagePolicyPersister(policy, changedBy); err != nil {
+			h.SetUsagePolicy(previous)
+			h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "failed to persist usage policy", err))
+			return
+		}
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"updated": true,
+		"policy": map[string]interface{}{
+			"tracking_enabled":     policy.TrackingEnabled,
+			"quota_enabled":        policy.QuotaEnabled,
+			"default_max_requests": policy.DefaultMaxRequests,
+			"default_max_tokens":   policy.DefaultMaxTokens,
+			"tenants":              serializeUsageQuotaLimits(policy.TenantQuotas),
+			"projects":             serializeUsageQuotaLimits(policy.ProjectQuotas),
+			"users":                serializeUsageQuotaLimits(policy.UserQuotas),
+		},
+	})
+}
+
+// DeleteUsagePolicyEntry 删除 runtime usage/quota policy 条目
+func (h *Handler) DeleteUsagePolicyEntry(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	var req struct {
+		Level string `json:"level"`
+		Key   string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+	req.Level = strings.ToLower(strings.TrimSpace(req.Level))
+	req.Key = strings.TrimSpace(req.Key)
+	if req.Key == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "policy key is required"))
+		return
+	}
+	switch req.Level {
+	case "tenant", "project", "user":
+	default:
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "policy level must be tenant, project, or user"))
+		return
+	}
+
+	previous := h.getUsagePolicy()
+	policy, removed := h.deleteUsagePolicyEntry(req.Level, req.Key)
+	if !removed {
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "policy entry not found"))
+		return
+	}
+	if h.usagePolicyPersister != nil {
+		changedBy := requestChangedBy(r)
+		if err := h.usagePolicyPersister(policy, changedBy); err != nil {
+			h.SetUsagePolicy(previous)
+			h.writeError(w, http.StatusInternalServerError, errors.Wrap(errors.ErrConfigInvalid, "failed to persist usage policy", err))
+			return
+		}
+	}
+
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"deleted": true,
+		"level":   req.Level,
+		"key":     req.Key,
+		"policy": map[string]interface{}{
+			"tracking_enabled":     policy.TrackingEnabled,
+			"quota_enabled":        policy.QuotaEnabled,
+			"default_max_requests": policy.DefaultMaxRequests,
+			"default_max_tokens":   policy.DefaultMaxTokens,
+			"tenants":              serializeUsageQuotaLimits(policy.TenantQuotas),
+			"projects":             serializeUsageQuotaLimits(policy.ProjectQuotas),
+			"users":                serializeUsageQuotaLimits(policy.UserQuotas),
+		},
+	})
+}
+
+// ReloadSkills 重新加载 Skills
+func (h *Handler) ReloadSkills(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSkillMutation(r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionReload, "forbidden", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforceMutationActionPolicy(skillMutationActionReload, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionReload, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	if h.skillLoader == nil {
+		h.auditSkillMutation(r, skillMutationActionReload, "failed", logger.String("reason", "loader_not_configured"))
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
+			"skill loader not configured"))
+		return
+	}
+
+	var req struct {
+		Dir  string   `json:"dir,omitempty"`
+		Dirs []string `json:"dirs,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		h.auditSkillMutation(r, skillMutationActionReload, "invalid_request")
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+
+	dirs := h.resolveRequestedSkillDirs(req.Dir, req.Dirs, r)
+	if len(dirs) == 0 {
+		h.auditSkillMutation(r, skillMutationActionReload, "invalid_request")
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"skill directory is required"))
+		return
+	}
+
+	h.skillRegistry.Clear()
+	skill.InvalidateAllHydratedSkills()
+	if h.skillRegistry != nil {
+		h.skillRegistry.ClearLoadedCache()
+	}
+	if len(dirs) == 1 {
+		h.skillLoader.SetSkillDir(dirs[0])
+		if err := h.skillLoader.DiscoverAllWithRegistry([]string{dirs[0]}, h.skillRegistry); err != nil {
+			h.auditSkillMutation(r, skillMutationActionReload, "failed", logger.Err(err))
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	} else {
+		h.skillLoader.SetSkillDirs(dirs)
+		if err := h.skillLoader.DiscoverAllWithRegistry(dirs, h.skillRegistry); err != nil {
+			h.auditSkillMutation(r, skillMutationActionReload, "failed", logger.Err(err))
+			h.writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	h.rebuildEmbeddingIndex()
+	if skills := h.skillRegistry.List(); len(skills) > 0 {
+		skillChange := skillChangePayloadFromSkill(skills[0], dirs)
+		skillChange["action"] = skillMutationActionReload
+		skillChange["status"] = "success"
+		skillChange["affected_count"] = h.currentSkillCount()
+		skillChange["count"] = h.currentSkillCount()
+		skillChange["skill_dirs"] = append([]string(nil), dirs...)
+		h.publishSkillsChangedEvent(r, skillChange)
+	} else {
+		h.publishSkillsChangedEvent(r, map[string]interface{}{
+			"action":         skillMutationActionReload,
+			"status":         "success",
+			"affected_count": h.currentSkillCount(),
+			"count":          h.currentSkillCount(),
+			"skill_dirs":     append([]string(nil), dirs...),
+		})
+	}
+	h.auditSkillMutation(r, skillMutationActionReload, "success", logger.Int("dir_count", len(dirs)))
+
+	response := map[string]interface{}{
+		"message":      "skills reloaded",
+		"status":       "success",
+		"skill_dirs":   dirs,
+		"total_skills": h.skillRegistry.Count(),
+	}
+
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// ValidateSkill 验证 Skill 配置
+func (h *Handler) ValidateSkill(w http.ResponseWriter, r *http.Request) {
+	var newSkill skill.Skill
+	if err := json.NewDecoder(r.Body).Decode(&newSkill); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse request body"))
+		return
+	}
+
+	// 基本验证
+	if newSkill.Name == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"skill name is required"))
+		return
+	}
+
+	// 验证工具是否存在
+	toolsAvailable := true
+	if len(newSkill.Tools) > 0 {
+		// 这里可以添加工具存在性验证
+		// toolsAvailable = h.mcpManager.ValidateTools(newSkill.Tools)
+	}
+
+	response := map[string]interface{}{
+		"valid": true,
+		"skill": newSkill.Name,
+		"checks": []string{
+			"manifest_valid",
+		},
+	}
+
+	if toolsAvailable && len(newSkill.Tools) > 0 {
+		response["checks"] = append(response["checks"].([]string), "tools_available")
+	}
+
+	if len(newSkill.Triggers) > 0 {
+		response["checks"] = append(response["checks"].([]string), "triggers_valid")
+	}
+
+	h.writeJSON(w, http.StatusOK, response)
+}
+
+// ExportSkills 导出 Skills
+func (h *Handler) ExportSkills(w http.ResponseWriter, r *http.Request) {
+	layer, dir := parseSkillSourceFilters(r)
+	skills := filterSkillsBySource(h.skillRegistry.List(), layer, dir)
+	hydratedSkills, err := h.hydrateSkillsForResponse(skills)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", "attachment; filename=skills_export.json")
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"skills":         hydratedSkills,
+		"count":          len(hydratedSkills),
+		"source_summary": buildSkillSourceSummary(hydratedSkills),
+	})
+}
+
+// ImportSkills 导入 Skills
+func (h *Handler) ImportSkills(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeSkillMutation(r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionImport, "forbidden", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforceMutationActionPolicy(skillMutationActionImport, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionImport, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err := h.enforcePersistPolicy(nil, r); err != nil {
+		h.auditSkillMutation(r, skillMutationActionImport, "disabled", logger.Err(err))
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+
+	var importData struct {
+		Skills []*skill.Skill `json:"skills"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&importData); err != nil {
+		h.auditSkillMutation(r, skillMutationActionImport, "invalid_request")
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+			"failed to parse import data"))
+		return
+	}
+
+	for _, skillItem := range importData.Skills {
+		if skillItem != nil {
+			skillItem.SetSource("", "", skill.SkillSourceLayerRuntime)
+		}
+	}
+
+	errs := make([]error, 0)
+	imported := 0
+	persisted := 0
+	var firstImportedSkill *skill.Skill
+	for _, skillItem := range importData.Skills {
+		if skillItem == nil {
+			errs = append(errs, errors.New(errors.ErrValidationFailed, "skill entry cannot be nil"))
+			continue
+		}
+		if err := h.skillRegistry.Register(skillItem); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+
+		if shouldPersistSkill(r) {
+			if err := h.persistSkill(skillItem, nil, r); err != nil {
+				h.skillRegistry.Unregister(skillItem.Name)
+				errs = append(errs, err)
+				continue
+			}
+			persisted++
+		}
+
+		h.updateEmbeddingIndex(skillItem)
+		if firstImportedSkill == nil {
+			firstImportedSkill = skillItem
+		}
+		imported++
+	}
+
+	response := map[string]interface{}{
+		"imported":  imported,
+		"persisted": persisted,
+		"failed":    len(errs),
+		"errors":    errs,
+	}
+
+	statusCode := http.StatusOK
+	if len(errs) > 0 {
+		statusCode = http.StatusMultiStatus
+	}
+	outcome := "success"
+	if len(errs) > 0 {
+		outcome = "partial_success"
+	}
+	if imported > 0 {
+		skillChange := skillChangePayloadFromSkill(firstImportedSkill, handlerSkillDirs(h.skillLoader))
+		skillChange["action"] = skillMutationActionImport
+		skillChange["status"] = outcome
+		skillChange["affected_count"] = imported
+		skillChange["imported"] = imported
+		skillChange["persisted"] = persisted
+		skillChange["failed_count"] = len(errs)
+		skillChange["count"] = h.currentSkillCount()
+		h.publishSkillsChangedEvent(r, skillChange)
+	}
+	h.auditSkillMutation(r, skillMutationActionImport, outcome,
+		logger.Int("imported", imported),
+		logger.Int("persisted", persisted),
+		logger.Int("failed", len(errs)))
+
+	h.writeJSON(w, statusCode, response)
+}
+
+func shouldPersistSkill(r *http.Request) bool {
+	persist, _ := queryBoolFlag(r, "persist")
+	return persist
+}
+
+func shouldDeleteSkillFile(r *http.Request) bool {
+	deleteFile, _ := queryBoolFlag(r, "delete_file")
+	return deleteFile
+}
+
+func shouldPersistUpdatedSkill(existingSkill *skill.Skill, r *http.Request) bool {
+	persist, specified := queryBoolFlag(r, "persist")
+	if specified {
+		return persist
+	}
+	if existingSkill == nil || existingSkill.Source == nil {
+		return false
+	}
+	return existingSkill.Source.Layer == skill.SkillSourceLayerExternal && strings.TrimSpace(existingSkill.Source.Path) != ""
+}
+
+func queryBoolFlag(r *http.Request, name string) (bool, bool) {
+	if r == nil {
+		return false, false
+	}
+	rawValues, ok := r.URL.Query()[name]
+	if !ok || len(rawValues) == 0 {
+		return false, false
+	}
+	value, err := strconv.ParseBool(strings.TrimSpace(rawValues[0]))
+	if err != nil {
+		return false, true
+	}
+	return value, true
+}
+
+func (h *Handler) persistSkill(skillItem *skill.Skill, previousSource *skill.SkillSource, r *http.Request) error {
+	if h.skillLoader == nil {
+		return errors.New(errors.ErrConfigInvalid, "skill loader not configured")
+	}
+	targetFile, targetLayer, err := h.resolvePersistTargetPath(skillItem, previousSource, r)
+	if err != nil {
+		return err
+	}
+	if err := h.skillLoader.SaveToFile(skillItem, targetFile); err != nil {
+		return err
+	}
+	skill.InvalidateHydratedSkill(targetFile)
+	if h.skillRegistry != nil {
+		h.skillRegistry.InvalidateLoadedSkill(skillItem.Name)
+	}
+	if previousSource != nil && strings.TrimSpace(previousSource.Path) != "" && filepath.Clean(previousSource.Path) != filepath.Clean(targetFile) {
+		skill.InvalidateHydratedSkill(previousSource.Path)
+	}
+	skillItem.SetSource(targetFile, filepath.Dir(targetFile), targetLayer)
+	return nil
+}
+
+func (h *Handler) resolvePersistTargetPath(skillItem *skill.Skill, previousSource *skill.SkillSource, r *http.Request) (string, string, error) {
+	targetDir := ""
+	if r != nil {
+		targetDir = strings.TrimSpace(r.URL.Query().Get("target_dir"))
+	}
+
+	configuredDirs := handlerSkillDirs(h.skillLoader)
+	systemDir := ""
+	if len(configuredDirs) > 0 {
+		systemDir = filepath.Clean(configuredDirs[0])
+	}
+
+	if targetDir != "" {
+		targetDir = filepath.Clean(targetDir)
+		if systemDir != "" && isSameOrSubdir(targetDir, systemDir) {
+			return "", "", errors.New(errors.ErrValidationFailed, "persist target cannot be the system skill directory")
+		}
+		return filepath.Join(targetDir, skillItem.Name, "skill.yaml"), skill.SkillSourceLayerExternal, nil
+	}
+
+	if previousSource != nil && previousSource.Layer == skill.SkillSourceLayerExternal && previousSource.Path != "" {
+		return filepath.Clean(previousSource.Path), skill.SkillSourceLayerExternal, nil
+	}
+
+	if len(configuredDirs) > 1 {
+		targetDir = filepath.Clean(configuredDirs[1])
+		return filepath.Join(targetDir, skillItem.Name, "skill.yaml"), skill.SkillSourceLayerExternal, nil
+	}
+
+	return "", "", errors.New(errors.ErrValidationFailed, "external skill directory is required; configure extra_skill_dirs or provide target_dir")
+}
+
+func (h *Handler) resolveRequestedSkillDirs(primary string, extras []string, r *http.Request) []string {
+	seen := make(map[string]struct{})
+	resolved := make([]string, 0, 1+len(extras))
+
+	addDir := func(dir string) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			return
+		}
+		dir = filepath.Clean(dir)
+		if _, exists := seen[dir]; exists {
+			return
+		}
+		seen[dir] = struct{}{}
+		resolved = append(resolved, dir)
+	}
+
+	addDir(primary)
+	for _, dir := range extras {
+		addDir(dir)
+	}
+
+	if len(resolved) == 0 && r != nil {
+		addDir(r.URL.Query().Get("dir"))
+	}
+	if len(resolved) == 0 && h.skillLoader != nil {
+		for _, dir := range h.skillLoader.GetSkillDirs() {
+			addDir(dir)
+		}
+	}
+
+	return resolved
+}
+
+func isSameOrSubdir(path string, parent string) bool {
+	path = filepath.Clean(path)
+	parent = filepath.Clean(parent)
+	return path == parent || strings.HasPrefix(path, parent+string(filepath.Separator))
+}
+
+func (h *Handler) deletePersistedSkillFile(skillItem *skill.Skill) error {
+	if skillItem == nil || skillItem.Source == nil || strings.TrimSpace(skillItem.Source.Path) == "" {
+		return errors.New(errors.ErrValidationFailed, "skill does not have a persisted source file")
+	}
+	if skillItem.Source.Layer == skill.SkillSourceLayerSystem {
+		return errors.New(errors.ErrValidationFailed, "cannot delete file for system skill")
+	}
+
+	filePath := filepath.Clean(skillItem.Source.Path)
+	if err := os.Remove(filePath); err != nil {
+		return err
+	}
+	skill.InvalidateHydratedSkill(filePath)
+	if h.skillRegistry != nil {
+		h.skillRegistry.InvalidateLoadedSkill(skillItem.Name)
+	}
+	promptPath := strings.TrimSpace(skillItem.Source.PromptPath)
+	if promptPath == "" {
+		promptPath = filepath.Join(filepath.Dir(filePath), "prompt.md")
+	}
+	if err := os.Remove(filepath.Clean(promptPath)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	dirPath := filepath.Dir(filePath)
+	entries, err := os.ReadDir(dirPath)
+	if err == nil && len(entries) == 0 {
+		_ = os.Remove(dirPath)
+	}
+	return nil
+}
+
+// routeAutoProfileForPrompt 把提示词路由为 profile 引用（FR-11）。路由表来自配置
+// `profiles.auto`（未配置 → 内置启发式）；空提示词返回 ""，调用方保留自身默认语义。
+// 匹配实现是 internal/profile 的单一权威（profilesys.RouteProfileForPrompt），
+// server 与 CLI 共用同一份规则，禁止在本包内再写第二套关键词表。
+func (h *Handler) routeAutoProfileForPrompt(prompt string) string {
+	if h == nil {
+		return ""
+	}
+	return profilesys.RouteProfileForPrompt(prompt, h.profileAutoRoute)
+}
+
+func extractLastUserPrompt(messages []map[string]string) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		role := strings.ToLower(strings.TrimSpace(messages[i]["role"]))
+		if role == "" || role == "user" {
+			if content := strings.TrimSpace(messages[i]["content"]); content != "" {
+				return content
+			}
+		}
+	}
+	return ""
+}

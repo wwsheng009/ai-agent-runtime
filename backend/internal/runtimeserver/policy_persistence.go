@@ -11,7 +11,7 @@ import (
 	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,7 +35,7 @@ func NewSkillsRuntimePolicyPersister(configPath string, cfg *config.Config) *Ski
 	}
 }
 
-func (p *SkillsRuntimePolicyPersister) PersistAuthPolicy(policy skillsapi.ScopeResolverConfig, _ string) error {
+func (p *SkillsRuntimePolicyPersister) PersistAuthPolicy(policy runtimeapi.ScopeResolverConfig, _ string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -60,7 +60,7 @@ func (p *SkillsRuntimePolicyPersister) PersistAuthPolicy(policy skillsapi.ScopeR
 	return nil
 }
 
-func (p *SkillsRuntimePolicyPersister) PersistUsagePolicy(policy skillsapi.UsagePolicy, _ string) error {
+func (p *SkillsRuntimePolicyPersister) PersistUsagePolicy(policy runtimeapi.UsagePolicy, _ string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -82,7 +82,7 @@ func (p *SkillsRuntimePolicyPersister) PersistUsagePolicy(policy skillsapi.Usage
 	return nil
 }
 
-func (p *SkillsRuntimePolicyPersister) PersistMutationPolicy(policy skillsapi.MutationPolicy, _ string) error {
+func (p *SkillsRuntimePolicyPersister) PersistMutationPolicy(policy runtimeapi.MutationPolicy, _ string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -326,7 +326,7 @@ func cloneSkillsRuntimeConfig(current *config.SkillsRuntimeConfig) *config.Skill
 	return &cloned
 }
 
-func buildConfigScopeBindings(configured map[string]skillsapi.UsageScope) map[string]config.SkillsRuntimeScopeBinding {
+func buildConfigScopeBindings(configured map[string]runtimeapi.UsageScope) map[string]config.SkillsRuntimeScopeBinding {
 	if len(configured) == 0 {
 		return nil
 	}
@@ -341,7 +341,7 @@ func buildConfigScopeBindings(configured map[string]skillsapi.UsageScope) map[st
 	return bindings
 }
 
-func buildConfigQuotaLimits(configured map[string]skillsapi.UsageQuotaLimit) map[string]config.SkillsRuntimeQuotaLimit {
+func buildConfigQuotaLimits(configured map[string]runtimeapi.UsageQuotaLimit) map[string]config.SkillsRuntimeQuotaLimit {
 	if len(configured) == 0 {
 		return nil
 	}

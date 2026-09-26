@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 )
 
 type LocalRuntimeServiceControl struct {
@@ -50,9 +50,9 @@ func NewLocalRuntimeServiceControl(
 	}
 }
 
-func (s *LocalRuntimeServiceControl) Status() (*skillsapi.RuntimeServiceStatus, error) {
+func (s *LocalRuntimeServiceControl) Status() (*runtimeapi.RuntimeServiceStatus, error) {
 	currentPID := os.Getpid()
-	status := &skillsapi.RuntimeServiceStatus{
+	status := &runtimeapi.RuntimeServiceStatus{
 		Running:          true,
 		PID:              currentPID,
 		PIDFile:          s.pidFile,
@@ -82,7 +82,7 @@ func (s *LocalRuntimeServiceControl) Status() (*skillsapi.RuntimeServiceStatus, 
 	return status, nil
 }
 
-func applyInstanceInfoToStatus(status *skillsapi.RuntimeServiceStatus, info *InstanceInfo) {
+func applyInstanceInfoToStatus(status *runtimeapi.RuntimeServiceStatus, info *InstanceInfo) {
 	if status == nil || info == nil {
 		return
 	}
@@ -116,7 +116,7 @@ func appendStatusNote(current string, extra string) string {
 	return current + " " + extra
 }
 
-func (s *LocalRuntimeServiceControl) Restart() (*skillsapi.RuntimeServiceRestartResult, error) {
+func (s *LocalRuntimeServiceControl) Restart() (*runtimeapi.RuntimeServiceRestartResult, error) {
 	if !s.canRestart() {
 		return nil, fmt.Errorf("restart is not supported for the current runtime process")
 	}
@@ -135,7 +135,7 @@ func (s *LocalRuntimeServiceControl) Restart() (*skillsapi.RuntimeServiceRestart
 		return nil, fmt.Errorf("start restart helper: %w", err)
 	}
 
-	return &skillsapi.RuntimeServiceRestartResult{
+	return &runtimeapi.RuntimeServiceRestartResult{
 		Accepted:    true,
 		Message:     "restart helper started; runtime-server will stop and relaunch in the background",
 		RequestedAt: time.Now().UTC().Format(time.RFC3339),
@@ -276,4 +276,4 @@ func quoteShellLiteral(value string) string {
 	return "'" + strings.ReplaceAll(trimmed, "'", `'"'"'`) + "'"
 }
 
-var _ skillsapi.RuntimeServiceControlService = (*LocalRuntimeServiceControl)(nil)
+var _ runtimeapi.RuntimeServiceControlService = (*LocalRuntimeServiceControl)(nil)

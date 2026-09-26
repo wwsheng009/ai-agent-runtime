@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
-	skillsapi "github.com/wwsheng009/ai-agent-runtime/internal/api/skills"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 )
 
 // TestNormalizeSkillsRuntimeConfigForHotReloadIgnoresDevelopmentLayout 固定新策略：
@@ -52,11 +52,11 @@ type fakeRuntimeConfigApplyTarget struct {
 	aicliConfig    *agentconfig.Config
 	adminToken     string
 	logFilePath    string
-	profileSupport skillsapi.ProfileSupportConfig
-	mutationPolicy skillsapi.MutationPolicy
-	scopeResolver  skillsapi.ScopeResolverConfig
+	profileSupport runtimeapi.ProfileSupportConfig
+	mutationPolicy runtimeapi.MutationPolicy
+	scopeResolver  runtimeapi.ScopeResolverConfig
 	searchCooldown time.Duration
-	usagePolicy    skillsapi.UsagePolicy
+	usagePolicy    runtimeapi.UsagePolicy
 }
 
 func (f *fakeRuntimeConfigApplyTarget) SetAICLIConfig(config *agentconfig.Config) {
@@ -67,11 +67,11 @@ func (f *fakeRuntimeConfigApplyTarget) SetAdminToken(token string) {
 	f.adminToken = token
 }
 
-func (f *fakeRuntimeConfigApplyTarget) SetMutationPolicy(policy skillsapi.MutationPolicy) {
+func (f *fakeRuntimeConfigApplyTarget) SetMutationPolicy(policy runtimeapi.MutationPolicy) {
 	f.mutationPolicy = policy
 }
 
-func (f *fakeRuntimeConfigApplyTarget) SetProfileSupport(cfg skillsapi.ProfileSupportConfig) {
+func (f *fakeRuntimeConfigApplyTarget) SetProfileSupport(cfg runtimeapi.ProfileSupportConfig) {
 	f.profileSupport = cfg
 }
 
@@ -79,7 +79,7 @@ func (f *fakeRuntimeConfigApplyTarget) SetRuntimeLogFilePath(path string) {
 	f.logFilePath = path
 }
 
-func (f *fakeRuntimeConfigApplyTarget) SetScopeResolverConfig(config skillsapi.ScopeResolverConfig) {
+func (f *fakeRuntimeConfigApplyTarget) SetScopeResolverConfig(config runtimeapi.ScopeResolverConfig) {
 	f.scopeResolver = config
 }
 
@@ -87,7 +87,7 @@ func (f *fakeRuntimeConfigApplyTarget) SetSearchReindexCooldown(cooldown time.Du
 	f.searchCooldown = cooldown
 }
 
-func (f *fakeRuntimeConfigApplyTarget) SetUsagePolicy(policy skillsapi.UsagePolicy) {
+func (f *fakeRuntimeConfigApplyTarget) SetUsagePolicy(policy runtimeapi.UsagePolicy) {
 	f.usagePolicy = policy
 }
 
@@ -304,7 +304,7 @@ skills_runtime:
 auth:
   admin_token: new-auth-token
 `
-	document, err := service.SaveDocument(skillsapi.ConfigDocumentSaveRequest{
+	document, err := service.SaveDocument(runtimeapi.ConfigDocumentSaveRequest{
 		Mode: "raw",
 		Raw:  ptrToString(updated),
 	})
