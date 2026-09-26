@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
 // §4.13：解释端点只读、可降级、不误伤别的审批。
@@ -61,6 +62,10 @@ func TestExplainSessionApproval_ModelPathAndRulesFallback(t *testing.T) {
 	require.Contains(t, rules.Explanation, "cmd:rm:*")
 
 	// 注入模型摘要：source=model 并带上生成模型。
+	var published []map[string]interface{}
+	handler.getRuntimeEventBus().Subscribe("llm.request.finished", func(event runtimeevents.Event) {
+		published = append(published, event.Payload)
+	})
 	handler.approvalSummarizer = func(context.Context, string, *chat.ApprovalRequest) (string, string, error) {
 		return "会删除 build/ 目录下的构建产物，不涉及源码。", "mock-model", nil
 	}
@@ -71,6 +76,8 @@ func TestExplainSessionApproval_ModelPathAndRulesFallback(t *testing.T) {
 	require.Equal(t, approvalExplainSourceModel, model.Source)
 	require.Equal(t, "mock-model", model.Model)
 	require.Contains(t, model.Explanation, "构建产物")
+	// 注入实现由宿主自担记账；只有内建 llmRuntime 路径才发 usage 事件。
+	require.Empty(t, published)
 
 	// 模型失败：不得把故障变成 5xx，仍回规则摘要。
 	handler.approvalSummarizer = func(context.Context, string, *chat.ApprovalRequest) (string, string, error) {

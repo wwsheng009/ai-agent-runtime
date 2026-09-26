@@ -134,6 +134,7 @@ func (h *Handler) summarizeApproval(ctx context.Context, sessionID string, pendi
 
 	callCtx, cancel := context.WithTimeout(ctx, approvalExplainTimeout)
 	defer cancel()
+	requestID := fmt.Sprintf("approval-explain-%s-%d", sessionID, time.Now().UnixNano())
 	resp, err := h.llmRuntime.Call(callCtx, &llm.LLMRequest{
 		Provider:  provider,
 		Model:     model,
@@ -143,6 +144,10 @@ func (h *Handler) summarizeApproval(ctx context.Context, sessionID string, pendi
 			{Role: "user", Content: approvalExplainUserPrompt(pending)},
 		},
 	})
+	// 记账：解释也是一次真实计费调用，必须落 usage 账本（usageledger 订阅
+	// `llm.request.finished`）。失败路径同样上报（success=false，无 usage），
+	// 便于把「解释被点了很多次却总失败」这类现象看在眼里。
+	h.publishApprovalExplainUsage(sessionID, requestID, provider, model, resp, err)
 	if err != nil {
 		return "", "", err
 	}
@@ -150,6 +155,38 @@ func (h *Handler) summarizeApproval(ctx context.Context, sessionID string, pendi
 		return "", "", fmt.Errorf("empty llm response")
 	}
 	return strings.TrimSpace(resp.Content), model, nil
+}
+
+// publishApprovalExplainUsage 发布一次 `llm.request.finished`，让 usage 账本
+// 与应用分析看到按需解释的开销。事件带 origin 标记，便于与回合内调用区分。
+func (h *Handler) publishApprovalExplainUsage(
+	sessionID string,
+	requestID string,
+	provider string,
+	model string,
+	resp *llm.LLMResponse,
+	callErr error,
+) {
+	if h == nil {
+		return
+	}
+	payload := map[string]interface{}{
+		"llm_request_id": requestID,
+		"success":        callErr == nil && resp != nil,
+		"source":         "approval_explain",
+		"origin":         "approval_explain",
+		"provider":       provider,
+		"model":          model,
+	}
+	if callErr != nil {
+		payload["error"] = callErr.Error()
+	}
+	if resp != nil && resp.Usage != nil {
+		payload["usage_prompt_tokens"] = resp.Usage.PromptTokens
+		payload["usage_completion_tokens"] = resp.Usage.CompletionTokens
+		payload["usage_total_tokens"] = resp.Usage.TotalTokens
+	}
+	h.publishSessionRuntimeEvent("llm.request.finished", "", sessionID, payload)
 }
 
 const approvalExplainSystemPrompt = "你是审批解释器：用户即将批准或拒绝一次工具调用，需要快速判断它在做什么。\n" +
