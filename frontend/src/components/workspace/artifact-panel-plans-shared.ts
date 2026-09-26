@@ -89,7 +89,81 @@ export function classifyPlanDiffLines(text: string): RuntimePlanDiffLine[] {
   if (lines.length > 0 && lines[lines.length - 1] === "") {
     lines.pop();
   }
-  return lines.map((line, index) => ({ kind: classifyPlanDiffLine(line, index), text: line }));
+  // hunk 头给出两边的起始行号，之后按标记符推进——评论锚点要用**正文本行号**，
+  // 而不是 diff 文本里的行序（后者含框架行 / hunk 头 / 删除行）。
+  let oldLine = 0;
+  let newLine = 0;
+  return lines.map((line, index) => {
+    const kind = classifyPlanDiffLine(line, index);
+    const entry: RuntimePlanDiffLine = { kind, text: line };
+    switch (kind) {
+      case "hunk": {
+        const hunk = parsePlanDiffHunkHeader(line);
+        oldLine = hunk?.oldStart ?? 0;
+        newLine = hunk?.newStart ?? 0;
+        return entry;
+      }
+      case "meta":
+        return entry;
+      case "context":
+        entry.oldLine = oldLine++;
+        entry.newLine = newLine++;
+        return entry;
+      case "del":
+        entry.oldLine = oldLine++;
+        return entry;
+      default:
+        entry.newLine = newLine++;
+        return entry;
+    }
+  });
+}
+
+/** 解析 `@@ -old,count +new,count @@`；格式不符返回 null（后端渲染的 hunk 头永远合规）。 */
+export function parsePlanDiffHunkHeader(
+  line: string,
+): { oldStart: number; newStart: number } | null {
+  const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line.trim());
+  if (!match) {
+    return null;
+  }
+  return { oldStart: Number(match[1]), newStart: Number(match[2]) };
+}
+
+/** 行号区间文案：`L12` / `L12-14`（与 CLI、后端 FormatCommentRange 同一口径）。 */
+export function formatPlanCommentRange(start: number, end: number) {
+  return end <= start ? `L${start}` : `L${start}-${end}`;
+}
+
+const PLAN_COMMENT_STATUS_I18N_KEYS: Record<string, string> = {
+  anchored: "anchored",
+  moved: "moved",
+  orphaned: "orphaned",
+};
+
+/** 重放状态文案；未知状态原文透传。 */
+export function planCommentStatusLabel(status: string) {
+  const normalized = status.trim();
+  if (!normalized) {
+    return "—";
+  }
+  return PLAN_COMMENT_STATUS_I18N_KEYS[normalized]
+    ? `${PLAN_I18N_PREFIX}comments.status.${PLAN_COMMENT_STATUS_I18N_KEYS[normalized]}`
+    : normalized;
+}
+
+/** 状态配色：仍锚定=青（可对齐）、已移动=橙（要看一眼）、失效=灰（保留原文）。 */
+export function planCommentStatusClass(status: string) {
+  switch (status) {
+    case "anchored":
+      return "border-accent-teal/30 bg-accent-teal/10 text-accent-teal";
+    case "moved":
+      return "border-accent-orange/30 bg-accent-orange/10 text-accent-orange";
+    case "orphaned":
+      return "border-white/12 bg-white/5 text-muted-foreground";
+    default:
+      return undefined;
+  }
 }
 
 function classifyPlanDiffLine(line: string, index: number): RuntimePlanDiffLineKind {

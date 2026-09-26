@@ -20,6 +20,7 @@ import {
   readStoredPlanReopenHint,
   reopenRuntimePlan,
 } from "@/lib/runtime-api";
+import { useRuntimePlanComments } from "@/hooks/workspace/use-runtime-plan-comments";
 import type { RuntimeStoredPlan } from "@/types/runtime";
 
 /** 运行时事件名：计划被请求评审（后端 `chat.EventPlanReviewRequested`）。 */
@@ -128,6 +129,14 @@ export function useRuntimePlans({
   const [detailError, setDetailError] = useState<string | null>(null);
   const [reopenState, setReopenState] = useState<RuntimePlanReopenState>(IDLE_REOPEN_STATE);
   const [diffState, setDiffState] = useState<RuntimePlanDiffState>(IDLE_DIFF_STATE);
+  // 行级评论是独立状态机（见 use-runtime-plan-comments）：只在选中计划/事件刷新时联动。
+  const {
+    clear: clearComments,
+    commentsState,
+    create: createComment,
+    load: loadComments,
+    remove: deleteComment,
+  } = useRuntimePlanComments();
 
   const lastRuntimeEventKey = buildRuntimeEventReloadKey(
     lastRuntimeEventType,
@@ -202,6 +211,7 @@ export function useRuntimePlans({
     }
   }, []);
 
+
   // 首次挂载拉一次列表；之后由运行时事件驱动（见下方 effect）。
   useEffect(() => {
     void loadPlans("");
@@ -223,11 +233,13 @@ export function useRuntimePlans({
     const currentDetailId = selectedPlanIdRef.current;
     if (currentDetailId) {
       void loadDetail(currentDetailId);
+      void loadComments(currentDetailId);
     }
   }, [
     lastHandledEventKey,
     lastRuntimeEventKey,
     lastRuntimeEventType,
+    loadComments,
     loadDetail,
     loadPlans,
   ]);
@@ -245,9 +257,12 @@ export function useRuntimePlans({
 
       if (nextId) {
         void loadDetail(nextId);
+        void loadComments(nextId);
+      } else {
+        clearComments();
       }
     },
-    [loadDetail],
+    [clearComments, loadComments, loadDetail],
   );
 
   /** 手动刷新：列表 + （若已打开详情）当前详情。 */
@@ -256,8 +271,9 @@ export function useRuntimePlans({
     await Promise.all([
       loadPlans(lastRuntimeEventKeyRef.current),
       currentDetailId ? loadDetail(currentDetailId) : Promise.resolve(),
+      currentDetailId ? loadComments(currentDetailId) : Promise.resolve(),
     ]);
-  }, [loadDetail, loadPlans]);
+  }, [loadComments, loadDetail, loadPlans]);
 
   /**
    * 回灌一条归档快照并进入 plan mode（POST /sessions/{id}/plan/reopen）。
@@ -403,11 +419,16 @@ export function useRuntimePlans({
 
   return {
     clearDiff,
+    clearComments,
     clearReopenState,
+    commentsState,
+    createComment,
+    deleteComment,
     detailError,
     detailLoading,
     diffState,
     loadDiff,
+    loadComments,
     loadedOnce,
     plans,
     plansError,

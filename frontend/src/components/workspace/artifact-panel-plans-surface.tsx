@@ -27,6 +27,7 @@ import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ArtifactPlanCommentsBlock } from "@/components/workspace/artifact-panel-plans-comments";
 import { ArtifactPlanDiffBlock } from "@/components/workspace/artifact-panel-plans-diff";
 import {
   formatStoredPlanProject,
@@ -108,6 +109,9 @@ export function ArtifactPanelPlansSurface({
     clearReopenState,
     detailError,
     detailLoading,
+    commentsState,
+    createComment,
+    deleteComment,
     diffState,
     loadDiff,
     loadedOnce,
@@ -357,8 +361,19 @@ export function ArtifactPanelPlansSurface({
                               </div>
                               {diffOpen ? (
                                 <ArtifactPlanDiffBlock
+                                  commentRevision={pair.to}
                                   diffKey={`${pair.from}-${pair.to}`}
                                   onCollapse={clearDiff}
+                                  onCreateComment={async (selection, body) => {
+                                    // 锚定到该 diff 的 `to` 版本：点击的行号属于它。
+                                    const outcome = await createComment(selectedPlan.id, {
+                                      revision: pair.to,
+                                      startLine: selection.startLine,
+                                      endLine: selection.endLine,
+                                      body,
+                                    });
+                                    return outcome.ok ? "" : outcome.message;
+                                  }}
                                   onRetry={() => {
                                     void loadDiff(selectedPlan.id, pair);
                                   }}
@@ -380,6 +395,14 @@ export function ArtifactPanelPlansSurface({
                       </div>
                     )}
                   </div>
+
+                  <ArtifactPlanCommentsBlock
+                    onDelete={async (comment) => {
+                      const outcome = await deleteComment(selectedPlan.id, comment.id);
+                      return outcome.ok ? "" : outcome.message;
+                    }}
+                    state={commentsState}
+                  />
 
                   <div className="overflow-hidden rounded-card-lg border border-white/8 bg-black/15">
                     <div className="flex items-center justify-between gap-2 border-b border-white/8 px-3 py-2 app-text-10 uppercase tracking-[0.16em] text-muted-foreground">

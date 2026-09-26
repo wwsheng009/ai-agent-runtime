@@ -9,6 +9,9 @@
 // %2F，后端 mux 的 `{id:.*}` 路由与 store.Get 都拿不到原始 id（404）。
 
 import type {
+  RuntimePlanComment,
+  RuntimePlanCommentCreateInput,
+  RuntimePlanCommentListResponse,
   RuntimePlanDiffOptions,
   RuntimePlanDiffResult,
   RuntimeStoredPlan,
@@ -297,4 +300,120 @@ export async function getRuntimePlanDiff(
   }
 
   return result;
+}
+
+// --- 行级评论（§4.4）：/plans/{id}/comments -------------------------------------
+
+/** 行级评论端点路径（与详情端点同样逐段编码 plan id）。 */
+export function buildStoredPlanCommentsPath(planId: string) {
+  return `${buildStoredPlanDetailPath(planId)}/comments`;
+}
+
+/** 单条评论：缺字段给稳定默认值，`status` / `current_*` 原样透传（不重算重放）。 */
+export function normalizePlanComment(raw: unknown): RuntimePlanComment | null {
+  const record = asRecord(raw);
+  const id = readOptionalString(record?.id);
+  if (!record || !id) {
+    return null;
+  }
+
+  return {
+    id,
+    revision: readNumber(record.revision),
+    start_line: readNumber(record.start_line),
+    end_line: readNumber(record.end_line),
+    excerpt: readOptionalString(record.excerpt),
+    body: readString(record.body),
+    author: readOptionalString(record.author),
+    created_at: readOptionalString(record.created_at),
+    status: readOptionalString(record.status) ?? "",
+    current_revision: readNumber(record.current_revision),
+    current_start_line: readNumber(record.current_start_line),
+    current_end_line: readNumber(record.current_end_line),
+  };
+}
+
+export function normalizePlanCommentList(raw: unknown): RuntimePlanCommentListResponse {
+  const record = asRecord(raw);
+  const comments = Array.isArray(record?.comments)
+    ? record.comments
+        .map((comment) => normalizePlanComment(comment))
+        .filter((comment): comment is RuntimePlanComment => comment !== null)
+    : [];
+
+  return {
+    plan_id: readOptionalString(record?.plan_id) ?? "",
+    revision: readNumber(record?.revision),
+    latest_revision: readNumber(record?.latest_revision),
+    comments,
+    count: readNumber(record?.count, comments.length),
+  };
+}
+
+/**
+ * 读取一条归档计划的评论，并按 `revision`（0/缺省 = 最新轮）重放锚点。
+ * 响应里的 `status` / `current_*` 就是渲染层要展示的定位，前端不再计算。
+ */
+export async function listRuntimePlanComments(
+  planId: string,
+  revision = 0,
+): Promise<RuntimePlanCommentListResponse> {
+  const payload = await fetchRuntimeJson<unknown>(
+    buildRuntimeUrlWithQuery(buildStoredPlanCommentsPath(planId), {
+      revision: revision || undefined,
+    }),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+
+  return normalizePlanCommentList(payload);
+}
+
+/** 新建一条行级评论；摘录由后端从锚定轮正文截取（越界/空正文是 400）。 */
+export async function createRuntimePlanComment(
+  planId: string,
+  input: RuntimePlanCommentCreateInput,
+): Promise<RuntimePlanCommentListResponse> {
+  const payload = await fetchRuntimeJson<unknown>(
+    buildRuntimeUrl(buildStoredPlanCommentsPath(planId)),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        revision: input.revision ?? 0,
+        start_line: input.startLine,
+        end_line: input.endLine ?? 0,
+        body: input.body,
+        author: input.author ?? "",
+      }),
+    },
+  );
+
+  return normalizePlanCommentList(payload);
+}
+
+/**
+ * 删除一条评论；幂等（后端对未知评论返回 `deleted:false`），因此返回布尔值而非抛错：
+ * 客户端只需要知道「现在它不在了」。
+ */
+export async function deleteRuntimePlanComment(planId: string, commentId: string): Promise<boolean> {
+  const payload = await fetchRuntimeJson<unknown>(
+    buildRuntimeUrl(
+      `${buildStoredPlanCommentsPath(planId)}/${encodeURIComponent(commentId.trim())}`,
+    ),
+    {
+      method: "DELETE",
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+
+  return asRecord(payload)?.deleted === true;
 }

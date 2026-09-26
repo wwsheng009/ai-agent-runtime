@@ -128,6 +128,31 @@ export const enWorkspacePanelsArtifacts = {
       coarse: "Coarse",
       truncated: "Truncated",
     },
+    // Line comments (report §4.4 frontend half): GET/POST/DELETE /plans/{id}/comments.
+    comments: {
+      title: "Line comments",
+      loading: "Loading comments…",
+      failed: "Failed to load comments",
+      empty: "No line comments yet; click a line number in a round diff to add one.",
+      replayTarget: "anchors replayed against v{{version}}",
+      delete: "Delete comment",
+      status: {
+        anchored: "matches current text",
+        moved: "text moved",
+        orphaned: "anchor lost",
+      },
+      diff: {
+        selectHint:
+          "Click a line number to select it; Shift+click to extend the range (the comment anchors to this revision).",
+        selected: "Selected {{range}} (anchored to v{{revision}})",
+        noSelection: "No line selected.",
+        placeholder: "Write a note for these lines — it rides the next “request changes”…",
+        submit: "Comment",
+        submitting: "Submitting…",
+        cancel: "Cancel",
+        emptyBody: "The comment body must not be empty.",
+      },
+    },
   },
   checkpoints: {
     title: "Restore points",

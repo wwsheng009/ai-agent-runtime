@@ -143,4 +143,56 @@ export type RuntimePlanDiffLineKind = "context" | "add" | "del" | "hunk" | "meta
 export type RuntimePlanDiffLine = {
   kind: RuntimePlanDiffLineKind;
   text: string;
+  /**
+   * 该行在「旧版」正文里的 1-based 行号（`del` / `context` 有值）。
+   * 由 `@@ -a,b +c,d @@` 起算，供评论锚点定位；框架行 / hunk 头没有。
+   */
+  oldLine?: number;
+  /** 该行在「新版」正文里的 1-based 行号（`add` / `context` 有值）。 */
+  newLine?: number;
+};
+
+// --- 行级评论（§4.4）：GET/POST/DELETE /api/runtime/plans/{id}/comments ---------
+
+/** 锚点重放状态；未知值按原文透传（后端新增状态时不至于显示成空白）。 */
+export type RuntimePlanCommentStatus = "anchored" | "moved" | "orphaned" | string;
+
+/**
+ * 一条行级评论。`revision`/`start_line`/`end_line`/`excerpt` 是**原始锚点**
+ * （锚定时那一轮的正文与行号），`status` 与 `current_*` 是后端按目标修订重放后的
+ * 当前位置——前端直接消费投影，不自己重算重放。
+ */
+export type RuntimePlanComment = {
+  id: string;
+  revision: number;
+  start_line: number;
+  end_line: number;
+  excerpt?: string;
+  body: string;
+  author?: string;
+  created_at?: string;
+  status: RuntimePlanCommentStatus;
+  current_revision: number;
+  current_start_line: number;
+  current_end_line: number;
+};
+
+/** GET/POST `/plans/{id}/comments` 响应（POST 成功 201，形状一致）。 */
+export type RuntimePlanCommentListResponse = {
+  plan_id: string;
+  /** 本次重放的目标修订（= 请求的 revision，缺省为最新轮）。 */
+  revision: number;
+  latest_revision: number;
+  comments: RuntimePlanComment[];
+  count: number;
+};
+
+/** 新建评论的入参；`revision` 为 0/未给 = 最新归档轮。 */
+export type RuntimePlanCommentCreateInput = {
+  revision?: number;
+  startLine: number;
+  /** 未给或等于 `startLine` 时为单行评论。 */
+  endLine?: number;
+  body: string;
+  author?: string;
 };

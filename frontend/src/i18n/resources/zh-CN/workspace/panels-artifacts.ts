@@ -120,6 +120,30 @@ export const zhWorkspacePanelsArtifacts = {
       coarse: "粗粒度",
       truncated: "已截断",
     },
+    // 行级评论（报告 §4.4 前端部分）：`GET/POST/DELETE /plans/{id}/comments`。
+    comments: {
+      title: "行级评论",
+      loading: "正在读取评论…",
+      failed: "评论加载失败",
+      empty: "暂无行级评论；在轮次差异里点击行号即可留评论。",
+      replayTarget: "按 v{{version}} 重放锚点",
+      delete: "删除评论",
+      status: {
+        anchored: "与当前正文一致",
+        moved: "原文已移动",
+        orphaned: "锚点失效",
+      },
+      diff: {
+        selectHint: "点击行号选中该行；Shift+点击选取区间（评论锚定这一版正文）。",
+        selected: "已选 {{range}}（锚定 v{{revision}}）",
+        noSelection: "未选择行。",
+        placeholder: "针对这几行写下意见，随「请求修改」一并交给模型…",
+        submit: "留评论",
+        submitting: "提交中…",
+        cancel: "取消",
+        emptyBody: "评论正文不能为空。",
+      },
+    },
   },
   checkpoints: {
     title: "还原点",

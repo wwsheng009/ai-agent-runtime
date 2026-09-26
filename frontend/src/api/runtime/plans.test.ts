@@ -3,10 +3,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildStoredPlanCommentsPath,
   buildStoredPlanDiffPath,
   buildStoredPlanDetailPath,
   buildStoredPlanReopenPath,
   isStoredPlanReopenConflict,
+  normalizePlanComment,
+  normalizePlanCommentList,
   normalizePlanDiffResult,
   normalizeStoredPlan,
   normalizeStoredPlanList,
@@ -35,6 +38,65 @@ describe("buildStoredPlanDetailPath", () => {
     expect(buildStoredPlanDetailPath("/proj//plan/")).toBe(
       "/api/runtime/plans/proj/plan",
     );
+  });
+});
+
+describe("行级评论端点", () => {
+  it("路径复用详情端点的分段编码，id 允许含 '/'", () => {
+    expect(buildStoredPlanCommentsPath("ai-agent-runtime/plan")).toBe(
+      "/api/runtime/plans/ai-agent-runtime/plan/comments",
+    );
+    expect(buildStoredPlanCommentsPath("my project/plan #1.md")).toBe(
+      "/api/runtime/plans/my%20project/plan%20%231.md/comments",
+    );
+  });
+
+  it("normalizePlanComment：status 与 current_* 原样透传（前端不重算重放）", () => {
+    const comment = normalizePlanComment({
+      id: "c-1",
+      revision: 2,
+      start_line: 3,
+      end_line: 4,
+      excerpt: "1. ship it",
+      body: "补上回滚风险",
+      status: "moved",
+      current_revision: 3,
+      current_start_line: 5,
+      current_end_line: 6,
+    });
+
+    expect(comment).toMatchObject({
+      id: "c-1",
+      revision: 2,
+      status: "moved",
+      current_revision: 3,
+      current_start_line: 5,
+      current_end_line: 6,
+    });
+    expect(comment?.author).toBeUndefined();
+
+    // 没有 id 的行丢弃（形状不整，不猜语义）。
+    expect(normalizePlanComment({ body: "无 id" })).toBeNull();
+    expect(normalizePlanComment(null)).toBeNull();
+  });
+
+  it("normalizePlanCommentList：缺字段给稳定形状", () => {
+    const list = normalizePlanCommentList({
+      plan_id: "proj/plan",
+      revision: 3,
+      latest_revision: 3,
+      comments: [{ id: "c-1", status: "orphaned" }, { body: "丢弃" }],
+    });
+
+    expect(list.count).toBe(1);
+    expect(list.comments[0]).toMatchObject({ id: "c-1", status: "orphaned" });
+    expect(normalizePlanCommentList(null)).toEqual({
+      plan_id: "",
+      revision: 0,
+      latest_revision: 0,
+      comments: [],
+      count: 0,
+    });
   });
 });
 
