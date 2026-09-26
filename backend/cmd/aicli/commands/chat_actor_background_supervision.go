@@ -55,12 +55,18 @@ func (h *localChatRuntimeHost) handleLocalBackgroundEvent(event background.JobEv
 	if h == nil || h.Supervision == nil || h.Supervision.Store == nil {
 		return
 	}
-	if !supervision.IsTerminalBackgroundJobStatus(event.Type) {
+	family := supervision.ClassifyBackgroundJobEvent(event.Type)
+	if family == supervision.BackgroundJobFamilyNone {
 		return
 	}
 	jobID := strings.TrimSpace(event.JobID)
 	sessionID := strings.TrimSpace(localBackgroundJobEventString(event.Payload["session_id"]))
 	if jobID == "" || sessionID == "" {
+		return
+	}
+	if family == supervision.BackgroundJobFamilyMonitor {
+		// 巡检到点：progress 类唤醒 + 一次即时投递尝试；busy/限流保持 durable。
+		go h.projectLocalBackgroundJobMonitor(event, sessionID)
 		return
 	}
 	// 立刻返回 job 终态推进；投影与投递在后台完成（best-effort，绝不阻塞 manager）。
@@ -112,6 +118,74 @@ func (h *localChatRuntimeHost) projectLocalBackgroundJobTerminal(event backgroun
 	}
 	// busy/rate-limited 都是既有 durable 语义，不作为错误上报。
 	_ = h.wakeSupervisedParent(ctx, sessionID, rootScopeID)
+}
+
+// projectLocalBackgroundJobMonitor 处理巡检到点（task_monitor）：把 job 当前状态
+// 投影成 durable 记录 + progress 类唤醒，然后尝试一次即时投递；busy/限流保持
+// durable，由 turn 边界或 preflight 补投。best-effort，绝不阻塞 manager。
+func (h *localChatRuntimeHost) projectLocalBackgroundJobMonitor(event background.JobEvent, sessionID string) {
+	if h == nil || h.Supervision == nil || h.Supervision.Store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), localBackgroundJobProjectionTimeout)
+	defer cancel()
+
+	command := ""
+	if h.Background != nil {
+		if job, err := h.Background.GetJob(ctx, strings.TrimSpace(event.JobID)); err == nil && job != nil {
+			command = job.Command
+		}
+	}
+	rootScopeID := h.localBackgroundJobRootScope(sessionID)
+	_, err := supervision.ProjectBackgroundJobMonitor(ctx, h.Supervision.Store, h.Supervision.Wakes, supervision.BackgroundJobMonitorInput{
+		RootScopeID:           rootScopeID,
+		TargetParentSessionID: sessionID,
+		JobID:                 strings.TrimSpace(event.JobID),
+		Status:                localBackgroundJobEventString(event.Payload["status"]),
+		Command:               command,
+		Elapsed:               localBackgroundJobPayloadDuration(event.Payload["elapsed_ms"]),
+		CheckAfter:            localBackgroundJobPayloadDuration(event.Payload["check_after_ms"]),
+		MaxDuration:           localBackgroundJobPayloadDuration(event.Payload["max_duration_ms"]),
+		Epoch:                 localBackgroundJobEventEpoch(event),
+	})
+	if err != nil {
+		// 投影失败不改变 job 状态；下一次 turn 的 preflight 仍能读到 job store。
+		return
+	}
+	_ = h.wakeSupervisedParent(ctx, sessionID, rootScopeID)
+}
+
+// localBackgroundJobPayloadDuration 把 manager 事件里的毫秒字段读成 duration。
+func localBackgroundJobPayloadDuration(value interface{}) time.Duration {
+	switch typed := value.(type) {
+	case time.Duration:
+		return typed
+	case int64:
+		return time.Duration(typed) * time.Millisecond
+	case int:
+		return time.Duration(typed) * time.Millisecond
+	case float64:
+		return time.Duration(typed) * time.Millisecond
+	default:
+		return 0
+	}
+}
+
+// disarmLocalChatSessionMonitors 会话关闭时停掉本会话的巡检计时器：投递目标
+// （本会话的下一轮 turn）已经不存在，迟到的 check 只会给不存在的会话补记录。
+func disarmLocalChatSessionMonitors(session *ChatSession) int {
+	if session == nil || session.RuntimeSession == nil {
+		return 0
+	}
+	host := session.LocalRuntimeHost
+	if host == nil || host.Background == nil {
+		return 0
+	}
+	sessionID := strings.TrimSpace(session.RuntimeSession.ID)
+	if sessionID == "" {
+		return 0
+	}
+	return host.Background.CancelSessionMonitors(sessionID)
 }
 
 // localBackgroundJobRootScope 沿用巡查/preflight 的作用域口径：CLI host 绑定

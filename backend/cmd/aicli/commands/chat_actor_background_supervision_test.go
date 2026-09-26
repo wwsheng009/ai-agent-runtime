@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -188,4 +189,70 @@ func TestResolveLocalChatSessionPendingWakes(t *testing.T) {
 	require.Zero(t, resolveLocalChatSessionPendingWakes(session), "cleanup must be idempotent")
 	require.Zero(t, resolveLocalChatSessionPendingWakes(nil))
 	require.Zero(t, resolveLocalChatSessionPendingWakes(&ChatSession{}))
+}
+
+// TestLocalBackgroundJobRelay_ProjectsMonitorCheck 覆盖巡检到点的接线：manager 的
+// monitor_check 事件投影出一条 durable 进展记录 + 一条 progress 类唤醒（旧白名单
+// 只认终态，会把巡检事件整条丢掉）。
+func TestLocalBackgroundJobRelay_ProjectsMonitorCheck(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	relay := &localBackgroundJobEventRelay{}
+	relay.bind(host)
+	ctx := context.Background()
+	sessionID := "sess-cli-monitor"
+
+	relay.handle(localBackgroundJobTestEvent("job-cli-monitor", background.MonitorCheckEventType, sessionID, map[string]interface{}{
+		"status":         "running",
+		"elapsed_ms":     int64(92_000),
+		"check_after_ms": int64(90_000),
+	}))
+
+	require.Eventually(t, func() bool {
+		rows, err := host.Supervision.Store.ListNotifications(ctx, supervision.NotificationFilter{RootScopeID: sessionID})
+		return err == nil && len(rows) == 1
+	}, 5*time.Second, 10*time.Millisecond, "a monitor check must project exactly one durable item")
+
+	rows, err := host.Supervision.Store.ListNotifications(ctx, supervision.NotificationFilter{RootScopeID: sessionID})
+	require.NoError(t, err)
+	require.Equal(t, supervision.EventBackgroundJobMonitor, rows[0].EventType)
+	require.Contains(t, rows[0].Reason, "still running after 1m32s")
+	require.Equal(t, supervision.ResolutionUnresolved, rows[0].ResolutionState)
+
+	require.Eventually(t, func() bool {
+		pending, err := host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{RootScopeID: sessionID, UnclaimedOnly: true})
+		return err == nil && len(pending) == 1
+	}, 5*time.Second, 10*time.Millisecond, "a monitor check must schedule one progress wake")
+}
+
+// TestDisarmLocalChatSessionMonitors 覆盖会话关闭时的巡检清理。
+func TestDisarmLocalChatSessionMonitors(t *testing.T) {
+	sleeper := "sleep 20"
+	if runtime.GOOS == "windows" {
+		sleeper = "powershell -NoProfile -Command \"Start-Sleep -Seconds 20\""
+	}
+	manager := background.NewManager(background.Config{})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	ctx := context.Background()
+
+	job, err := manager.SubmitShell(ctx, "sess-cli-1", background.BackgroundTaskArgs{Command: sleeper})
+	require.NoError(t, err)
+	_, err = manager.ScheduleMonitor(job.ID, background.MonitorOptions{CheckAfter: 20 * time.Second})
+	require.NoError(t, err)
+	require.Equal(t, 1, manager.ActiveMonitorCount())
+
+	host := newLocalSupervisionTestHost(t)
+	host.Background = manager
+	session := &ChatSession{
+		LocalRuntimeHost: host,
+		RuntimeSession:   &runtimechat.Session{ID: "sess-cli-1"},
+	}
+
+	require.Equal(t, 1, disarmLocalChatSessionMonitors(session))
+	require.Zero(t, manager.ActiveMonitorCount())
+	require.Zero(t, disarmLocalChatSessionMonitors(session), "disarming must be idempotent")
+	require.Zero(t, disarmLocalChatSessionMonitors(nil))
+	require.Zero(t, disarmLocalChatSessionMonitors(&ChatSession{}))
+
+	// 清理长睡 job。
+	_, _ = manager.CancelJob(ctx, job.ID)
 }

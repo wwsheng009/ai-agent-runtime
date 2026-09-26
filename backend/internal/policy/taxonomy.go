@@ -44,6 +44,7 @@ var knownToolTaxonomy = map[string]ToolTaxonomy{
 	"background_task":         {Name: "background_task", Kind: types.ToolKindControl},
 	"task_output":             {Name: "task_output", Kind: types.ToolKindRead, ReadOnly: true},
 	"task_kill":               {Name: "task_kill", Kind: types.ToolKindControl},
+	"task_monitor":            {Name: "task_monitor", Kind: types.ToolKindControl},
 	"spawn_agent":             {Name: "spawn_agent", Kind: types.ToolKindControl, ReadOnly: true},
 	"list_agents":             {Name: "list_agents", Kind: types.ToolKindControl, ReadOnly: true},
 	"send_message":            {Name: "send_message", Kind: types.ToolKindControl, ReadOnly: true},

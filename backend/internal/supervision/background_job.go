@@ -45,6 +45,26 @@ func IsTerminalBackgroundJobStatus(status string) bool {
 	return eventType != ""
 }
 
+// BackgroundJobEventFamily* 是宿主投影对 manager 事件的分类结果：终态、巡检
+// 到点，或「与监督面无关」的高频 output 路径（必须被忽略）。
+const (
+	BackgroundJobFamilyNone     = ""
+	BackgroundJobFamilyTerminal = "terminal"
+	BackgroundJobFamilyMonitor  = "monitor"
+)
+
+// ClassifyBackgroundJobEvent 是全部宿主共用的唯一分类口径，避免 CLI 与 API
+// 各自维护一份白名单而漂移。
+func ClassifyBackgroundJobEvent(eventType string) string {
+	if IsTerminalBackgroundJobStatus(eventType) {
+		return BackgroundJobFamilyTerminal
+	}
+	if IsBackgroundJobMonitorCheck(eventType) {
+		return BackgroundJobFamilyMonitor
+	}
+	return BackgroundJobFamilyNone
+}
+
 // BackgroundJobTerminalInput is the host-neutral input for a terminal
 // background job projection. Hosts fill it from their background manager event
 // and the job record; the projection below owns the durable shape so every host

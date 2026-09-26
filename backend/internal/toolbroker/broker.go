@@ -38,6 +38,7 @@ const (
 	ToolBackgroundTask         = "background_task"
 	ToolTaskOutput             = "task_output"
 	ToolTaskKill               = "task_kill"
+	ToolTaskMonitor            = "task_monitor"
 	ToolSpawnAgent             = "spawn_agent"
 	ToolListAgents             = "list_agents"
 	ToolSendMessage            = "send_message"
@@ -178,7 +179,7 @@ func isVolatileEmptyReplayTool(name string) bool {
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolBackgroundTask, ToolTaskOutput, ToolTaskKill, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
+	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolBackgroundTask, ToolTaskOutput, ToolTaskKill, ToolTaskMonitor, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return true
 	default:
 		return false
@@ -407,6 +408,34 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					"reason": map[string]interface{}{
 						"type":        "string",
 						"description": "Optional audit note recorded with the cancellation.",
+					},
+				},
+				"required": []string{},
+			},
+		},
+		types.ToolDefinition{
+			Name:        ToolTaskMonitor,
+			Description: "Arm a one-shot check on a running background task (alias: task_id). When the deadline arrives the session is woken once with the job's current state, so a wait loop is never needed; the terminal transition wakes the session on its own as well. Optional max_duration_ms additionally terminates the job at its own deadline (cancel_source=monitor_max_duration) as a watchdog. Monitoring an already-finished job returns scheduled=false as a content result.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"job_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Background job id returned by background_task.",
+					},
+					"task_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Alias for job_id.",
+					},
+					"check_after_ms": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     5000,
+						"description": "Check deadline in milliseconds. Defaults to 45000, clamped to 5000..600000.",
+					},
+					"max_duration_ms": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     5000,
+						"description": "Optional auto-termination deadline in milliseconds, clamped to 5000..3600000, for jobs that must not run forever.",
 					},
 				},
 				"required": []string{},
@@ -1688,6 +1717,24 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"message":   "cancel requested; process-tree termination may take a moment, re-read task_output for the final status",
 			"exit_code": exitCode,
 		}, killMetadata, nil
+
+	case ToolTaskMonitor:
+		if b.Background == nil {
+			return nil, nil, fmt.Errorf("background manager is not configured")
+		}
+		jobID := monitorJobIDArg(args)
+		if jobID == "" {
+			return nil, nil, fmt.Errorf("job_id is required (task_id is accepted as an alias)")
+		}
+		resolvedJobID := jobID
+		displayJobID := jobID
+		if handleAliases != nil {
+			resolvedJobID, displayJobID, err = handleAliases.Jobs.resolve(jobID, backgroundJobAliasPrefix, "background job")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		return b.monitorBackgroundTask(ctx, resolvedJobID, displayJobID, args)
 
 	case ToolSpawnAgent:
 		if b.AgentSessions == nil {

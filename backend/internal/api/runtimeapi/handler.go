@@ -5522,10 +5522,16 @@ func (h *Handler) handleBackgroundEvent(event background.JobEvent) {
 	if sessionID != "" && event.JobID != "" {
 		h.updateSessionActiveJobs(sessionID, event.JobID, event.Type)
 	}
-	// 终态 job 投影到 supervision inbox + 调度一次唤醒，让空闲的所属会话续跑并读取
-	// 结果（异步、best-effort）。output 等高频事件在此白名单之外，绝不触发调度。
-	if sessionID != "" && event.JobID != "" && isTerminalBackgroundJobEventType(event.Type) {
-		go h.projectBackgroundJobTerminal(context.Background(), event, sessionID)
+	// 终态 / 巡检到点分别投影到 supervision inbox 并按族调度唤醒（异步、best-effort）：
+	// 终态唤醒空闲会话去读结果，巡检按 progress 预算提醒一次进展。output 等高频事件
+	// 在此白名单之外，绝不触发调度。
+	if sessionID != "" && event.JobID != "" {
+		switch supervision.ClassifyBackgroundJobEvent(event.Type) {
+		case supervision.BackgroundJobFamilyTerminal:
+			go h.projectBackgroundJobTerminal(context.Background(), event, sessionID)
+		case supervision.BackgroundJobFamilyMonitor:
+			go h.projectBackgroundJobMonitor(context.Background(), event, sessionID)
+		}
 	}
 	runtimeEvent := runtimeevents.Event{
 		Type:      eventType,

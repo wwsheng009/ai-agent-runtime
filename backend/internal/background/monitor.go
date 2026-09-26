@@ -213,12 +213,16 @@ func (m *Manager) fireMonitor(jobID, monitorID string) {
 		return
 	}
 	elapsed := time.Since(entry.info.CheckAt.Add(-entry.info.CheckAfter))
-	m.appendJobEvent(context.Background(), jobID, MonitorCheckEventType, map[string]interface{}{
+	payload := map[string]interface{}{
 		"status":         job.Status,
 		"monitor_id":     entry.info.MonitorID,
 		"check_after_ms": entry.info.CheckAfter.Milliseconds(),
 		"elapsed_ms":     elapsed.Milliseconds(),
-	})
+	}
+	if entry.info.MaxDuration > 0 {
+		payload["max_duration_ms"] = entry.info.MaxDuration.Milliseconds()
+	}
+	m.appendJobEvent(context.Background(), jobID, MonitorCheckEventType, payload)
 }
 
 // fireMonitorMaxDuration terminates a job that outlived its monitor deadline.

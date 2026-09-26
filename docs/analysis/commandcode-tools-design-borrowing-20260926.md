@@ -576,3 +576,22 @@
 - **测试（3 例新增）**：supervision 侧「只清本会话、其他会话与其他 root scope 不受影响」「空 session/nil store 是 no-op 且 ledger 不动」；CLI 侧「关掉本会话 1 条、其他会话 1 条保留、重复调用与 nil 幂等」（复用巡检测试的监督控制面 fixture）。
 - **验证**：`go test ./internal/supervision/ -run ResolvePendingWakesForSession` 2 例全绿；CLI 侧 5 例全绿（本轮又遇并行会话把 `cmd/aicli/commands` 写成半成品导致一次 `[build failed]`，重跑即恢复——非本改动）。
 - **残留**：API 侧 `DeleteSession` / `CloseSession` / `CloseSessionAgent` 尚未接同一清理（需要该侧 root scope 口径与 store accessor，且 `internal/api/runtimeapi/handler.go` 当前有并行会话写入；接入点已定位，留待并入该侧改动时一起做）。
+
+### 9.20 `task_monitor` 定时巡检唤醒（§9.17 未做③ / §4.4 落地 3 收口）
+
+**问题**：`task_output(wait=exit)` 只解决「终态」，长跑任务在**未终态**期间的进展（或卡住不动）没有任何机制把空闲会话叫醒，模型只能自觉轮询（polling guard 会软刹车）。CommandCode 的 `monitor_command(checkAfterMs)` 正是补这一格：到点唤醒一次 + 退出再唤醒一次。
+
+- **manager 内核（`internal/background/monitor.go`）**：
+  - `ScheduleMonitor(jobID, {CheckAfter, MaxDuration})`：只接受**未终态** job（未知 id → `ErrJobNotFound`；已结束 → `ErrJobNotRunning`）；一次性到点计时器到点后经 `appendJobEvent` 发 `monitor_check` 事件（复用既有事件通道：自动带 `session_id`、落 store、走同一个 EventHandler）；
+  - `MaxDuration` 到点走**共享取消路径** `cancelJobWithSource(jobID, "monitor_max_duration")`（`CancelJob` 重构为它的 `user_request` 包装），于是终止证据仍走终态投影，只是 `cancel_source` 能区分「用户 kill」与「巡检超时兜底」；
+  - 生命周期收口：终态迁移时自动解除该 job 的计时器（`appendJobEvent` 内）；`CancelSessionMonitors(sessionID)` 供宿主在会话关闭时清理；计时器**纯进程内**（重启即丢，证据仍在 job store，符合「monitor 只负责叫醒活着的会话」）；
+  - 边界：manager 侧防御性夹取（check ≥100ms、≤30min；max duration ≤2h），模型面范围在工具层收窄。
+- **supervision 投影（`internal/supervision/background_job_monitor.go`）**：`ProjectBackgroundJobMonitor` 落**未解决**的 durable 记录（`SubjectJob`、`EventType=background_job_monitor`、severity=info、state=running、reason 含「still running after Xm Ys / command / auto-terminate at X」并指向 `task_output`），再调度 **progress 族**唤醒（`WakeEventProgress` + `EventSeq=notification.EventSeq`，落 other 预算类，不挤占 failure 配额）。
+  - 语义澄清（测试钉住）：同一 check epoch 重放只更新同一行、不重复唤醒；**未投递**的连续巡检按 (target, event_type) 合并成一条 pending wake（避免堆 N 个 turn）；该 pending 被消费后再来的巡检仍能唤醒。
+- **事件词表单一来源**：`supervision.ClassifyBackgroundJobEvent` 返回 terminal/monitor/none，CLI 与 API 两个宿主共用（此前各自维护终态白名单，新增族时容易漏一边）；monitor 事件名以纯字符串常量镜像 manager 的 `MonitorCheckEventType` 并由测试钉住相等。
+- **模型面（`ToolTaskMonitor` = `task_monitor`）**：`job_id`（别名 `task_id`）、`check_after_ms`（默认 45000、夹取 5000..600000）、`max_duration_ms`（可选，夹取 5000..3600000）；结果区分三分支：已登记（`scheduled=true` + monitor_id + 生效的毫秒值）、已结束（内容结果 `scheduled=false` + 终态 + exit_code）、未知 id（可修复错误 + 「用 background_task 返回的 id」提示）。越界值夹取后回带生效值（与 `task_output.timeout_ms` 同惯例）。
+- **策略面**：`taxonomy` 记 control；`capability` 映射 `CapBackgroundTask`（`max_duration_ms` 能杀进程，故不开只读后门）；`grants` 列 dangerous（不可 always-allow）；`tool_policy` read-only 拦截；`broker_arg_kinds`/`broker_arg_audit` 契约表补齐（契约测试全绿）。
+- **宿主接线**：API `handleBackgroundEvent` 与 CLI relay 改走共享分类器，monitor 族走新适配器（读 job 补 command）；CLI 投影后尝试一次即时投递（busy/限流保持 durable）；会话关闭额外 `disarmLocalChatSessionMonitors`。
+- **测试（13 例新增）**：manager 6（到点只发一次且报当前状态、终态/未知 id 拒绝、终态自动解除、max duration 终止且 `cancel_source=monitor_max_duration`、按会话清理、nil/空输入）；supervision 3（progress 唤醒 + 合并/消费语义、非法身份、事件词表镜像）；broker 4（夹取与登记、max duration 看门狗、已结束是内容结果、修复提示）；CLI 2（relay 投影 monitor_check、关闭清理）；API 1（适配器落库 + 唤醒）。
+- **验证**：`internal/background`、`internal/supervision`、`internal/toolbroker`、`internal/policy`、`internal/tools`、`internal/api/runtimeapi` 全绿；CLI 相关用例 7 例全绿。
+- **残留**：① 巡检一旦挂上**无法从工具面取消**（只能 `task_kill` 结束 job 或关闭会话）——需要时给 `task_monitor` 加 `cancel=true` 复用 `CancelJobMonitors`；② 巡检不跨进程恢复（重启丢计时器）；③ API 侧会话删除/关闭仍未接 wake/monitor 清理（同 §9.19 残留①）。

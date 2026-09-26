@@ -26,6 +26,7 @@ var brokerToolArgKeys = map[string][]string{
 	ToolBackgroundTask:       {"command", "cwd", "priority", "restart_policy", "startup_acceptance", "timeout_sec"},
 	ToolTaskOutput:           {"job_id", "limit", "offset", "timeout_ms", "wait"},
 	ToolTaskKill:             {"job_id", "reason", "task_id"},
+	ToolTaskMonitor:          {"check_after_ms", "job_id", "max_duration_ms", "task_id"},
 	ToolSpawnAgent:           spawnAgentToolArgKeys,
 	ToolListAgents:           {"include_closed", "parent_session_id", "path_prefix"},
 	ToolSendMessage:          {"id", "message", "session_id", "target"},

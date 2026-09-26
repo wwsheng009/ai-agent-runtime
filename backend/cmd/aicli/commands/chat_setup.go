@@ -939,6 +939,8 @@ func finalizeChatSessionWithError(session *ChatSession, terminalErr error) {
 	// 由 resume 后首个自然 turn 的 preflight digest 呈现），避免恢复后再补投一轮
 	// 过时 digest。
 	resolveLocalChatSessionPendingWakes(session)
+	// 同一时刻停掉本会话的巡检计时器：会话没了，迟到的 check 无处投递。
+	disarmLocalChatSessionMonitors(session)
 	// Skip durable flush for brand-new shells that never left memory. Writing
 	// an empty system-prompt-only session only pollutes history and forces a
 	// late session-history SQLite open during shutdown.

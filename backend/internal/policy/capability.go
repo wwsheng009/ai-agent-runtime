@@ -94,6 +94,10 @@ func controlPlaneToolCapabilities(normalizedToolName string) ([]Capability, bool
 		// 终止后台进程与启动它同级：都要 background_task 能力，并在
 		// accept_edits/dont_ask 等模式下走 ask/deny。
 		return []Capability{CapBackgroundTask}, true
+	case "task_monitor":
+		// 巡检本身只读，但 max_duration_ms 能终止进程，故与 background_task
+		// 同级授权（宁可多问一次，不给只读通道开后门）。
+		return []Capability{CapBackgroundTask}, true
 	case "task_output":
 		return []Capability{CapReadOnly}, true
 	case "spawn_agent", "send_message", "followup_task", "send_input", "close_agent", "resume_agent", "resolve_agent_approval", "spawn_team", "send_team_message":
@@ -145,6 +149,8 @@ func normalizeToolName(name string) string {
 		return "task_output"
 	case "taskkill":
 		return "task_kill"
+	case "taskmonitor":
+		return "task_monitor"
 	case "spawnagent":
 		return "spawn_agent"
 	case "listagents":

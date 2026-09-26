@@ -81,6 +81,12 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"task_id": toolArgFieldString,
 		"reason":  toolArgFieldString,
 	},
+	ToolTaskMonitor: {
+		"job_id":          toolArgFieldString,
+		"task_id":         toolArgFieldString,
+		"check_after_ms":  toolArgFieldNumber,
+		"max_duration_ms": toolArgFieldNumber,
+	},
 	ToolListAgents: {
 		"include_closed":    toolArgFieldBool,
 		"parent_session_id": toolArgFieldString,

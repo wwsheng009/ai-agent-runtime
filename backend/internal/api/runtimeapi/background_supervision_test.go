@@ -280,3 +280,49 @@ func TestProjectBackgroundJobTerminal_ObservedJobSkipsTheWake(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, pending, "an observed terminal state must not schedule a wake")
 }
+
+// monitorJobTestEvent 造一个 manager 的巡检到点事件。
+func monitorJobTestEvent(jobID, sessionID string, payload map[string]interface{}) background.JobEvent {
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
+	payload["job_id"] = jobID
+	payload["session_id"] = sessionID
+	return background.JobEvent{
+		JobID:     jobID,
+		Type:      background.MonitorCheckEventType,
+		Payload:   payload,
+		CreatedAt: time.Now().UTC(),
+	}
+}
+
+// TestProjectBackgroundJobMonitor_ProjectsItemAndProgressWake pins the API host's
+// monitor adapter: the durable item carries the job's current state plus the
+// command, and exactly one progress-class wake is scheduled for the session.
+func TestProjectBackgroundJobMonitor_ProjectsItemAndProgressWake(t *testing.T) {
+	handler, store, _ := newAPIWakeTestHandler(t, "api-bg-monitor")
+	ctx := context.Background()
+	manager := newObservedBackgroundManager(t, "job-monitor")
+	handler.backgroundMu.Lock()
+	handler.backgroundManager = manager
+	handler.backgroundMu.Unlock()
+
+	handler.projectBackgroundJobMonitor(ctx, monitorJobTestEvent("job-monitor", "sess-1", map[string]interface{}{
+		"status":         "running",
+		"elapsed_ms":     int64(92_000),
+		"check_after_ms": int64(90_000),
+	}), "sess-1")
+
+	notifications, err := store.ListNotifications(ctx, supervision.NotificationFilter{RootScopeID: "sess-1"})
+	require.NoError(t, err)
+	require.Len(t, notifications, 1)
+	require.Equal(t, supervision.EventBackgroundJobMonitor, notifications[0].EventType)
+	require.Equal(t, supervision.SeverityInfo, notifications[0].Severity)
+	require.Equal(t, supervision.ResolutionUnresolved, notifications[0].ResolutionState)
+	require.Contains(t, notifications[0].Reason, "still running after 1m32s")
+	require.Contains(t, notifications[0].Reason, "command: go test ./...")
+	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{RootScopeID: "sess-1", UnclaimedOnly: true})
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "a check must schedule exactly one wake")
+	require.Equal(t, supervision.EventBackgroundJobMonitor, pending[0].WakeReason)
+}

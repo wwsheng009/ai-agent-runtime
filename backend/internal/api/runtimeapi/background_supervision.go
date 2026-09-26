@@ -62,6 +62,62 @@ func (h *Handler) projectBackgroundJobTerminal(parent context.Context, event bac
 	})
 }
 
+// projectBackgroundJobMonitor is the API host adapter for a scheduled job check:
+// it enriches the projection with the job's command and delegates to the shared
+// monitor projection (durable inbox item + progress-class wake), so a waiting
+// session is nudged once instead of polling. Best-effort like the terminal path:
+// a supervision outage never changes the job outcome.
+func (h *Handler) projectBackgroundJobMonitor(parent context.Context, event background.JobEvent, sessionID string) {
+	jobID := strings.TrimSpace(event.JobID)
+	sessionID = strings.TrimSpace(sessionID)
+	if h == nil || jobID == "" || sessionID == "" {
+		return
+	}
+	if !supervision.IsBackgroundJobMonitorCheck(event.Type) {
+		return
+	}
+	store := h.getSupervisionStore()
+	if store == nil {
+		return
+	}
+	ctx := parent
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, backgroundJobTerminalProjectionTimeout)
+	defer cancel()
+
+	command, _ := h.backgroundJobDigestInfo(ctx, jobID)
+	_, _ = supervision.ProjectBackgroundJobMonitor(ctx, store, h.getSupervisionWakeScheduler(), supervision.BackgroundJobMonitorInput{
+		RootScopeID:           h.backgroundJobRootScope(ctx, sessionID),
+		TargetParentSessionID: sessionID,
+		JobID:                 jobID,
+		Status:                backgroundJobPayloadString(event.Payload["status"]),
+		Command:               command,
+		Elapsed:               backgroundJobPayloadDuration(event.Payload["elapsed_ms"]),
+		CheckAfter:            backgroundJobPayloadDuration(event.Payload["check_after_ms"]),
+		MaxDuration:           backgroundJobPayloadDuration(event.Payload["max_duration_ms"]),
+		Epoch:                 backgroundJobTerminalEpoch(event),
+	})
+}
+
+// backgroundJobPayloadDuration reads a millisecond payload field as a duration:
+// the manager writes int64, while a JSON round trip can hand back float64.
+func backgroundJobPayloadDuration(value interface{}) time.Duration {
+	switch typed := value.(type) {
+	case time.Duration:
+		return typed
+	case int64:
+		return time.Duration(typed) * time.Millisecond
+	case int:
+		return time.Duration(typed) * time.Millisecond
+	case float64:
+		return time.Duration(typed) * time.Millisecond
+	default:
+		return 0
+	}
+}
+
 // backgroundJobRootScope resolves the budget/inbox root for the owning
 // session. A session lookup failure degrades to the session id itself, which
 // keeps the projection usable in hosts without a session manager.
