@@ -22,7 +22,7 @@
 | `bypass_permissions` | 放行 | 放行 | 放行 | 放行 | 放行 | 受信任的批量自动化（风险最高） |
 
 - `dont_ask` 是 fail-closed 的无人值守模式：**该问的一律拒绝**（`mode:dont_ask_denies_unapproved`），但读、只读 shell、allow 规则与已记忆授权照常生效——它是 CI 里比 `--yolo` 更该用的那个。
-- `bypass_permissions` 也不能越过：硬 deny 名单、hook 的 block、根/主目录断路器、敏感写保护、外部目录门（`disable_bypass` 可再关掉 bypass 本身）。
+- `bypass_permissions` 不能越过：硬 deny 名单与显式 deny 规则、hook 的 `block`、根/主目录断路器（HardAsk）；但它**会跳过**敏感写保护与外部目录门的询问（敏感写在 yolo 下直接放行）——需要更强保证就别开 yolo，或用 `disable_bypass` 关掉它。
 - 取值只有这五个（无 `yolo` 字面值）：`--yolo` ≡ `--permission-mode bypass_permissions`。
 
 ### 0.2 最常用的 5 条规则
@@ -124,7 +124,7 @@ CI 推荐组合：`dont_ask` + 项目 `permissions.yaml` 把需要的只读/白�
 
 - 规则按 `user → project → local` 顺序**拼接**，规则名自动带层前缀（如 `project/allow-git-read-only`），仍然是 **first-match-wins**：因此用户级 deny 会先于项目级 allow 求值。
 - `deny_tools` / `allow_tools` 跨层取**并集**（deny 单调不可撤销）；`disable_bypass` 取 OR。
-- 缺文件不是错误（跳过该层）；文件存在但语法/取值非法会让**整个权限文件装载失败**并给出可操作报错（fail closed，不会静默忽略某条规则）。
+- 缺文件不是错误（跳过该层）；语法/取值非法时**不会部分生效**——整个文件被丢弃（CLI 记一条 warning 后跳过该 overlay，会话照常启动）。也就是说**写坏了的权限文件等于没有这条限制**，请把权限文件当代码评审，并在 CI 里校验（见 §6.10）。
 - `.yml` 与 `.yaml` 都接受，解析顺序见 [`project-permissions.md`](../product/project-permissions.md)（`permissions.yaml` → `permissions.yml`）。
 
 最小可用文件：
@@ -136,7 +136,7 @@ allow_tools: []              # 省略/空 = 不启用项目 allowlist 门
 rules:
   - name: example
     tools: ["Shell(git status)"]
-    decision: allow          # allow | deny | ask
+    decision: allow          # allow|yes|true / deny|block|false|no / ask|prompt|approval
     capabilities: [exec_shell]   # 可选：能力域全含才命中
     reason: allow_git_status     # 可选：进入审批/日志的 reason
 ```
@@ -154,7 +154,7 @@ tools:
 - **复合命令会被拆段**：`&& || ; | &` 与换行都作为分隔；`deny`/`ask` 只要**任意一段**命中即生效，`allow` 要求**每一段**都命中。
 - **不可解析/包装器命令永不自动 allow**：含 `> < \` $` 等动态语法、`xargs`/`sh -c`/解释器 payload、变量拼接等，`allow` 规则不生效（掉回模式询问）；`deny`/`ask` 仍可命中。
 - 命令前缀按**基命令 + 参数**匹配：`Shell(git:*)` 覆盖 `git ...` 所有子命令，`Shell(git diff:*)` 只覆盖 `git diff ...`。
-- 大小写：命令匹配不折叠大小写（Windows 除外，由工具层归一后比较）。
+- 大小写：`allow` 侧折叠大小写（`Shell(Git Status)` 可命中 `git status`），`deny`/`ask` 侧精确区分——收紧用的规则别指望大小写通配。
 
 ### 2.3 路径规则：`Read(...)` / `Edit(...)` / `Write(...)` / `View(...)`
 
@@ -192,6 +192,7 @@ tools:
 ```
 
 - 按模型**实际发送的顶层参数**匹配；`allow` 规则中使用参数语法会在装载时报错（不可执行地「放行」是危险的）。
+- 参数名属于工具「已拥有」的字段时不能用 param 形态：`command`/`cmd`/`commands`/`file_path`/`path`/`paths`/`url`/`urls`/`patch`/`diff`——这类语义请用对应的命令/路径/域名 specifier 表达（装载期会报专门的错）。
 
 ### 2.6 工具名与 glob
 
@@ -231,7 +232,7 @@ aicli exec --deny-tool download --enable-tools --prompt "..."
 | 1 | 入参校验 / 能力解析 | 参数非法、未知工具、缺能力声明 → 拒绝 | 校验类 reason | 不能 |
 | 2 | Permission hook | hook `block` → 拒绝；hook `modify` → 改写参数后继续 | hook 自带 | **block 连 `bypass_permissions` 也挡** |
 | 3 | 静态策略 | 能力域（读/写/网络/后台）、工具 deny/allowlist、只读约束、MCP 信任分级与远端写策略、sandbox 路径/URL/命令校验 | `policy:*` | allow 规则**不能放大**能力域 |
-| 4 | 安全前置 | 根/主目录断路器、敏感写保护、外部目录门 | `shell_breaker:root_home_removal`、`sensitive_write:secret`、`external_dir:admit` | 规则不能放开；断路器与敏感写连 bypass 也不放行（外部目录门在 bypass 下静默准入） |
+| 4 | 安全前置 | 根/主目录断路器、敏感写保护、外部目录门 | `shell_breaker:root_home_removal`、`sensitive_write:secret`、`external_dir:admit` | 规则不能放开；**断路器是 HardAsk（连 bypass 也要人工确认）**，敏感写与外部目录门在 bypass 下被跳过/静默准入 |
 | 5 | 规则 | 分层 `rules` first-match（deny 立即返回） | 规则自带 `reason` | —— |
 | 6 | 记忆授权（grants） | `session`/`project` 记忆命中直接放行 | `grant:*` | bypass 跳过 grants；危险工具永不命中 |
 | 7 | 只读快车道 | 纯只读能力 / 只读 shell 命令表 / `commands[]` 全只读 | `readonly:*` | 命中机密路径参数（`.env`、`id_rsa*`…）的读取**掉出快车道** |
@@ -243,7 +244,7 @@ aicli exec --deny-tool download --enable-tools --prompt "..."
 ### 3.2 规则管不到的三件事
 
 1. **根/主目录断路器**：`rm -rf /`、`rm -rf ~`、`$HOME` 变体、env/包装器伪装等（reason `shell_breaker:root_home_removal`）——任何模式、任何 `allow` 规则都不能放行，只能拒绝或人工确认（按模式）。
-2. **敏感写保护**：向密钥/凭据类路径（`.env`、`.env.*`、`.envrc`、`id_rsa*`、`credentials(.json)`、`.git-credentials`、`.ssh/**` 等，见 `sensitive_paths.go`）写入（reason `sensitive_write:secret`）——不可 remember、不能被 allow 规则放开。
+2. **敏感写保护**：向密钥/凭据类路径（`.env`、`.env.*`、`.envrc`、`id_rsa*`、`credentials(.json)`、`.git-credentials`、`.ssh/**` 等，见 `sensitive_paths.go`）写入（reason `sensitive_write:secret`）——不可 remember、不能被 allow 规则放开；但 **`bypass_permissions` 会跳过它**（`TestEngineSensitiveWriteBypassSkipsGate` 固化了这条），要硬保证请写 `deny` 规则或别开 yolo。
 3. **外部目录门**：路径参数（含 shell 的 `cwd`/`workdir`）与补丁文本落在会话工作区之外时，先要一次准入（`external_dir:admit`）。工作区内 / 已准入目录 / OS 临时目录不触发；`bypass_permissions` 静默准入；`dont_ask` 直接拒绝。
 
 ### 3.3 审批阶段
@@ -425,6 +426,7 @@ disable_bypass: true         # 我的机器上永不开 yolo
 7. **记忆是便利不是沙箱**：`project` 记忆落工作区文件，需要像代码一样评审；危险工具与安全前置永远不可记忆。
 8. **平台差异**：CLI 的 `/mode` 只改权限模式字段，不清理 durable plan 状态（请用 `/plan quit`）；HTTP/Web 从 plan 切出会自动 `quit` 收口并归档。ACP/Web 的入口集合小于 CLI（例如 Web 只能「切出」plan）。
 9. **解释与规则模板的边界**：解释只是提示，任何审批结果都以决策阶梯为准；识别不出语义时宁可不解释。
+10. **权限文件写坏了等于没有**：语法/取值非法会让整个文件被丢弃（CLI 只记 warning 后继续），不会 fail closed——把它当代码评审，并在 CI 里做一次装载校验（本仓库用手册示例测试同源的 `ParsePermissionsFile` 兜底）。
 
 ---
 
