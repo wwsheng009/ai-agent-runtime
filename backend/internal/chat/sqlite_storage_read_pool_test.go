@@ -2,7 +2,7 @@ package chat
 
 import (
 	"context"
-	"strings"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -111,7 +111,10 @@ func TestSQLiteSessionStorageReadPoolDegradesOnBrokenDSN(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	// 注入非法 DSN（生产恒为空）：读池打不开 → 降级。
-	store.readDSN = "file:" + strings.Repeat("x", 3) + "?_pragma=definitely_not_a_pragma(1)"
+	// 目标必须是绝对路径（t.TempDir()）：DSN 里的相对路径会被 SQLite 当成进程工作目录下的
+	// 文件创建——本用例曾写 "file:xxx?..."，于是每次跑包测试都在包目录留下 0 字节的 xxx。
+	brokenDSNPath := filepath.ToSlash(filepath.Join(t.TempDir(), "broken-dsn.sqlite"))
+	store.readDSN = "file:" + brokenDSNPath + "?_pragma=definitely_not_a_pragma(1)"
 
 	loaded, err := store.LoadMetadata(ctx, session.ID)
 	if err != nil {
