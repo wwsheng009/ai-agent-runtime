@@ -37,6 +37,7 @@ const (
 	ToolPlanReview             = "plan_review"
 	ToolBackgroundTask         = "background_task"
 	ToolTaskOutput             = "task_output"
+	ToolTaskKill               = "task_kill"
 	ToolSpawnAgent             = "spawn_agent"
 	ToolListAgents             = "list_agents"
 	ToolSendMessage            = "send_message"
@@ -177,7 +178,7 @@ func isVolatileEmptyReplayTool(name string) bool {
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolBackgroundTask, ToolTaskOutput, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
+	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolBackgroundTask, ToolTaskOutput, ToolTaskKill, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return true
 	default:
 		return false
@@ -359,7 +360,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 		},
 		types.ToolDefinition{
 			Name:        ToolTaskOutput,
-			Description: "Read background task output, process/heartbeat health, quiet duration, and automatic recovery state by offset. Inspect status and exit_code in the structured result; non-zero exit with status completed is a content result, not a tool crash. error_code is set only for hard failures.",
+			Description: "Read background task output, process/heartbeat health, quiet duration, and automatic recovery state by offset. Prefer wait=output/exit over repeated polling: the call blocks until new output appears, the job reaches a terminal state, or timeout_ms elapses, and reports wait_condition (immediate/output/exit/timeout) plus waited_ms. Inspect status and exit_code in the structured result; non-zero exit with status completed is a content result, not a tool crash. error_code is set only for hard failures.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -375,8 +376,40 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"type":        "integer",
 						"description": "Maximum bytes to return.",
 					},
+					"wait": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"none", "output", "exit"},
+						"description": "none (default) returns immediately; output waits for new output or a terminal state; exit waits only for a terminal state. Timeout is not an error: check wait_condition.",
+					},
+					"timeout_ms": map[string]interface{}{
+						"type":        "integer",
+						"minimum":     1,
+						"description": "Optional wait budget in milliseconds for wait=output/exit. Defaults to 30000, clamped to 1000..120000.",
+					},
 				},
 				"required": []string{"job_id"},
+			},
+		},
+		types.ToolDefinition{
+			Name:        ToolTaskKill,
+			Description: "Terminate a running background task by job id (alias: task_id). Uses the same cancellation path as task_output: request cancel first, then process-tree termination. The structured result distinguishes unknown ids, already-finished jobs (cancelled=false), and accepted cancellations (cancelled=true); a non-zero exit_code on a finished job is a content result, not a tool crash.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"job_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Background job id returned by background_task.",
+					},
+					"task_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Alias for job_id.",
+					},
+					"reason": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional audit note recorded with the cancellation.",
+					},
+				},
+				"required": []string{},
 			},
 		},
 	)
@@ -1505,11 +1538,21 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		} else if ok {
 			limit = value
 		}
-		output, err := b.Background.ReadOutput(ctx, background.TaskOutputArgs{
-			JobID:  resolvedJobID,
-			Offset: offset,
-			Limit:  limit,
-		})
+		waitMode := strings.ToLower(brokerTaskStringArg(args, "wait"))
+		switch waitMode {
+		case "", "none":
+			waitMode = "none"
+		case "output", "exit":
+		default:
+			return nil, nil, fmt.Errorf("unsupported wait mode %q: use none, output or exit", waitMode)
+		}
+		timeoutMs := int64(0)
+		if value, ok, waitErr := toolArgInt64(ToolTaskOutput, args, "timeout_ms"); waitErr != nil {
+			return nil, nil, waitErr
+		} else if ok {
+			timeoutMs = value
+		}
+		output, waitCondition, waitedMs, err := b.readTaskOutputWithWait(ctx, resolvedJobID, offset, limit, waitMode, timeoutMs)
 		if err != nil {
 			if runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound) {
 				return nil, nil, fmt.Errorf("%w; use the exact job_id returned by background_task instead of guessing an id", err)
@@ -1529,6 +1572,10 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"job_alias":            displayJobID,
 			"status":               output.Status,
 			"next_offset":          output.NextOffset,
+		}
+		if waitMode != "none" {
+			outputMetadata["wait_condition"] = waitCondition
+			outputMetadata["waited_ms"] = waitedMs
 		}
 		for key, value := range map[string]interface{}{
 			"error_code":           output.ErrorCode,
@@ -1577,6 +1624,70 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			MaxConcurrent: output.MaxConcurrent, SchedulerState: output.SchedulerState,
 			NextAction: output.NextAction,
 		}, outputMetadata, nil
+
+	case ToolTaskKill:
+		if b.Background == nil {
+			return nil, nil, fmt.Errorf("background manager is not configured")
+		}
+		jobID := brokerTaskStringArg(args, "job_id")
+		if jobID == "" {
+			jobID = brokerTaskStringArg(args, "task_id")
+		}
+		if jobID == "" {
+			return nil, nil, fmt.Errorf("job_id is required (task_id is accepted as an alias)")
+		}
+		resolvedJobID := jobID
+		displayJobID := jobID
+		if handleAliases != nil {
+			resolvedJobID, displayJobID, err = handleAliases.Jobs.resolve(jobID, backgroundJobAliasPrefix, "background job")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		job, killErr := b.Background.CancelJob(ctx, resolvedJobID)
+		killMetadata := map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindStructured,
+			"job_id":               strings.TrimSpace(jobIDValue(job, resolvedJobID)),
+			"job_alias":            displayJobID,
+		}
+		if reason := brokerTaskStringArg(args, "reason"); reason != "" {
+			killMetadata["reason"] = reason
+		}
+		if killErr != nil {
+			if runtimeerrors.Is(killErr, runtimeerrors.ErrJobNotFound) {
+				return nil, nil, fmt.Errorf("%w; use the exact job_id returned by background_task instead of guessing an id", killErr)
+			}
+			// 已结束不是错误：明确回报状态与 exit_code，避免模型把它当成 kill 失败。
+			if job != nil && strings.Contains(killErr.Error(), "already finished") {
+				finalStatus := string(job.Status)
+				killMetadata["status"] = finalStatus
+				killMetadata["cancelled"] = false
+				return map[string]interface{}{
+					"job_id":    displayJobID,
+					"status":    finalStatus,
+					"cancelled": false,
+					"message":   "job already finished; nothing to kill",
+					"exit_code": job.ExitCode,
+				}, killMetadata, nil
+			}
+			return nil, nil, killErr
+		}
+		finalStatus := ""
+		var exitCode *int
+		if job != nil {
+			finalStatus = string(job.Status)
+			exitCode = job.ExitCode
+		}
+		killMetadata["status"] = finalStatus
+		killMetadata["cancelled"] = true
+		killMetadata["cancel_source"] = "user_request"
+		return map[string]interface{}{
+			"job_id":    displayJobID,
+			"status":    finalStatus,
+			"cancelled": true,
+			"message":   "cancel requested; process-tree termination may take a moment, re-read task_output for the final status",
+			"exit_code": exitCode,
+		}, killMetadata, nil
 
 	case ToolSpawnAgent:
 		if b.AgentSessions == nil {

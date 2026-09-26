@@ -123,7 +123,7 @@ type managedJob struct {
 	// scheduledAt records when the job was handed to a worker goroutine; the
 	// watchdog uses it to reclaim slots that never transition to running.
 	scheduledAt time.Time
-	cancel       context.CancelFunc
+	cancel      context.CancelFunc
 }
 
 // NewManager creates a new background manager.
@@ -1950,13 +1950,19 @@ func finishedProcessExitCode(err error) (int, bool) {
 	return -1, false
 }
 
-func isTerminalStatus(status JobStatus) bool {
+// IsTerminalStatus reports whether a job status is final: no further state
+// transition will happen, so readers can stop waiting.
+func IsTerminalStatus(status JobStatus) bool {
 	switch status {
 	case StatusCompleted, StatusFailed, StatusTimedOut, StatusCancelled, StatusOrphaned:
 		return true
 	default:
 		return false
 	}
+}
+
+func isTerminalStatus(status JobStatus) bool {
+	return IsTerminalStatus(status)
 }
 
 func jobNotFoundError(jobID string) error {

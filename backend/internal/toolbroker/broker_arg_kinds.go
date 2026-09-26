@@ -70,9 +70,16 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"priority":           toolArgFieldNumber,
 	},
 	ToolTaskOutput: {
-		"job_id": toolArgFieldString,
-		"offset": toolArgFieldNumber,
-		"limit":  toolArgFieldNumber,
+		"job_id":     toolArgFieldString,
+		"offset":     toolArgFieldNumber,
+		"limit":      toolArgFieldNumber,
+		"wait":       toolArgFieldString,
+		"timeout_ms": toolArgFieldNumber,
+	},
+	ToolTaskKill: {
+		"job_id":  toolArgFieldString,
+		"task_id": toolArgFieldString,
+		"reason":  toolArgFieldString,
 	},
 	ToolListAgents: {
 		"include_closed":    toolArgFieldBool,

@@ -25,7 +25,7 @@ func TestBuildWindowsDetachedRunnerContentUsesDetectedShellAndCwd(t *testing.T) 
 	)
 
 	require.Contains(t, content, `$shellPath = 'C:\Program Files\PowerShell\7\pwsh.exe'`)
-	require.Contains(t, content, `$shellArgs = @('-NoProfile', '-Command', 'git status')`)
+	require.Contains(t, content, `$shellArgs = @('-NoProfile', '-NonInteractive', '-Command', 'git status')`)
 	require.Contains(t, content, `Set-Location -LiteralPath 'E:\projects\ai\ai-agent-runtime'`)
 	require.Contains(t, content, `[System.IO.File]::WriteAllText('C:\logs\job.status'`)
 	require.Contains(t, content, `$env:PATH = "$systemRoot\System32\WindowsPowerShell\v1.0`)
