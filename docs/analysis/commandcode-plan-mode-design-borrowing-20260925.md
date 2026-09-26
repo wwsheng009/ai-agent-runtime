@@ -613,3 +613,44 @@
 
 - 本轮另一会话已把 §4.6 的 **shift+tab 权限模式循环**做进 `cmd/aicli/commands/chat_permission_mode.go`（`default → accept_edits → plan → bypass_permissions`，进入 bypass 仍二次确认）；文档 §9 的「模式循环未做」已随之修正为「键位已落地，常驻横幅未做」。该循环的 plan 档走 `/mode` 语义（只翻 permission-mode，不建 durable plan 状态），与本仓库既有文档一致，未由本轮改动。
 - `internal/chat/integration_test.go`、`run_meta_test.go`、`session_runtime_store_test.go` 与 `internal/policy/permissions_file.go` 存在**既有** gofmt 偏差（`git status` 显示未修改，非本轮产物），未触碰。
+
+---
+
+## 14. 实施记录：第七轮（2026-09-25，§4.5/§4.7 的 HTTP 层落地）
+
+**状态**：此前因并发会话的包改名而**未提交**的 `internal/api/**` plan 工作，随改名提交 `8e3744c2` 落地后一并提交（`8ec8f58b`）：`/api/runtime/plans` 列表/详情/删除、无 actor 路径的 plan 归档与状态透出。
+
+### 14.1 行为变更（HTTP 面）
+
+| 端点 | 行为 |
+|------|------|
+| `GET /api/runtime/plans` | 列出归档记录（按 `updated_at` 倒序），`?project=<slug>` 过滤，响应 `{"plans":[...],"count":N}` |
+| `GET /api/runtime/plans/{id}` | 单条记录：状态/版本/轮次元数据 + **最新快照正文**（越界 id 拒绝；`{id:.*}` 允许 id 内含 `/`） |
+| `DELETE /api/runtime/plans/{id}` | 幂等删除记录与全部快照；自动保留由归档时的 `AICLI_PLANS_MAX_VERSIONS` 约束 |
+| `POST /api/runtime/sessions/{id}/plan`（无 actor 路径） | 迁移后补一次归档（`ExitSource=user`，失败不影响状态机）；响应新增 `exit_source` / `review_round` / `pending_review_notes` 字段 |
+
+### 14.2 接线点
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 路由与注入点 | `backend/internal/api/runtimeapi/handler.go` | 注册三个 `/plans` 路由；新增 `plansStore *planstore.Store`（tests/hosts 覆盖进程级 planstore） |
+| 归档读写 | `backend/internal/api/runtimeapi/plans_handlers.go`（新增） | `planArtifactStore`、`ListStoredPlans`、`GetStoredPlan`、`DeleteStoredPlan`、`storedPlanResponseFromRecord`、正文截断 |
+| 会话 plan 迁移 | `backend/internal/api/runtimeapi/plan_mode_handlers.go` | 无 actor 路径的 `archiveSessionPlanArtifact`（best-effort）+ 响应字段透出 |
+
+### 14.3 提交方式（并发安全）
+
+`handler.go` 同时含并发会话的在制改动（`SkillArgs` / `skillExposureOptions` 等），无法用常规 `git commit -- <path>` 只提交我的 hunk（pathspec 模式会带上整文件）。采用的流程：
+
+1. 在临时 detached worktree（干净 `HEAD`）上按最小改动改出 `handler.go`（仅 3 处：`planstore` import、`plansStore` 字段、三条 `/plans` 路由），`git hash-object -w --path=…` 生成规范化 blob（`--path` 保证 CRLF→LF 走 clean filter）；
+2. 主仓库用**临时 index**（`GIT_INDEX_FILE`）`read-tree HEAD` → `add` 我新增/修改的 3 个文件 → `update-index --cacheinfo` 放入第 1 步的 blob → `commit`；
+3. 校验：新提交父提交 == 制作基线（`8ec8f58b` 的父为 `bea210eb`）；真实 index 未被动过（并发会话 staged 的 MCP 删除仍在）；`handler.go` 在 worktree 里仍是 `MM`（他们的在制改动原样保留）。
+
+### 14.4 验证（第七轮）
+
+| 命令 | 结果 |
+|---|---|
+| 干净检出 `8ec8f58b`：`go build ./internal/... ./cmd/...` | 仅 `internal/webui/assets.go: pattern dist` 缺失（历史现象），无其它错误 |
+| 干净检出：`go test ./internal/api/runtimeapi/ -run Plan -count=1` | ok（1.6s：plans 列表/详情/删除 + plan_mode 无 actor 归档与状态字段） |
+| `git show --stat 8ec8f58b` | 4 files changed, 474 insertions(+), 10 deletions(-)（handler.go 仅 +9 行） |
+
+至此报告 §11.5 记下的「`internal/api/**` 尚未提交」缺口已关闭；剩余未落地项仍是：§4.4 前端变更行高亮与行级评论、§4.6 常驻模式横幅、Web 面板的图形化 reopen、评审反馈的自动修订回合、profile→`Engine.PlanAutoEnterWithoutApproval` 接线。
