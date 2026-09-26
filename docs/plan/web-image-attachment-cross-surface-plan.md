@@ -1,8 +1,20 @@
 # 跨端图片附件（上传）方案 —— 核心抽取 + micro web / React 两个前端接线
 
-状态：**执行中**（S1 核心抽取进行中；S2 micro web 后端、S3 micro web UI、S4 runtime server、S5 React
-待接）。日期：2026-09-26。负责范围：`backend/internal/imageattach`（新）、
+状态：**执行中**（S1 核心抽取、S2 micro web 后端、S4 runtime server **已交付并提交**：
+`b9cb78b9`（核心 + CLI 薄封装 + micro web 上传/发送 + 方案文档）、`24e27cca`（runtime
+`POST /api/runtime/uploads` + `submit_prompt.images`，含路径边界校验）；S3 micro web UI 与
+S5 React 前端接线进行中）。日期：2026-09-26。负责范围：`backend/internal/imageattach`（新）、
 `backend/cmd/aicli/commands/web_*.go` 与 `web/js/*`、`backend/internal/api/runtimeapi/*`、`frontend/`。
+
+## 0. 实施进度（滚动更新）
+
+| 阶段 | 状态 | 证据 |
+|---|---|---|
+| S1 共享核心 `internal/imageattach` + CLI 薄封装 | ✅ 已提交 `b9cb78b9` | 核心 10 例（含「限制内上传必须返回持久 artifact」回归）；CLI 图片链路广域全绿 |
+| S2 micro web 后端 `POST /web/api/attachments` + `/web/api/input.image_paths` | ✅ 已提交 `b9cb78b9` | 8 例（上传落盘、非图片单条跳过、409/400/405、带图发送入列并去重、不可用路径给原因、纯文本契约不变） |
+| S3 micro web 前端（粘贴/选择/拖拽 + 附件轨 + verify 脚本） | 🚧 进行中 | 待 `scripts/verify-micro-web-attachments.mjs` |
+| S4 runtime `POST /api/runtime/uploads` + `submit_prompt.images` | ✅ 已提交 `24e27cca` | 9 例（落盘缩放、超限/非图片逐条跳过、503 降级、目录外路径拒绝含兄弟目录陷阱、附加字段透明） |
+| S5 React 前端接线（上传 → 发送带 images + i18n + 测试） | 🚧 进行中 | 待 vitest/e2e |
 
 ## 1. 结论：核心**半独立**
 

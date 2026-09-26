@@ -4,6 +4,7 @@
 // 原初始化顺序统一调用。测试方法见 docs/aicli/web-testing.md。
 import { initChat, renderButton, refreshScreen } from "./js/chat.js";
 import { initComposerPanel } from "./js/composer.js";
+import { initComposerAttachments } from "./js/attachments.js";
 import { initAnalysis } from "./js/analysis.js";
 import { initConfigAdmin } from "./js/config-admin.js";
 import { initProviderEditor } from "./js/provider-editor.js";
@@ -36,6 +37,10 @@ initChat();
 initComposerPanel(); // composer 面板（首行动态状态条；正文 = 输入 + provider/model/reasoning 选择器）
 initTodoPanel(); // 任务列表浮动面板（贴在 composer 上沿；SSE tool_end 实时 + screen 回放）
 initMsgFilter(); // 对话区消息过滤面板（角色多选 + 正文搜索，服务端过滤）
+// 图片附件（📎 / 粘贴 / 面板内拖放 → 上传 → 附件轨；发送带 image_paths）。
+// 不挪到 initComposerPanel() 旁边：verify-micro-web-msg-filter.mjs 要求
+// initChat()→initMsgFilter() 之间的文本不超过 200 字符，插进那个窗口会挤爆它。
+initComposerAttachments();
 initRuntimeBar();
 initSessions();
 initApprovals();

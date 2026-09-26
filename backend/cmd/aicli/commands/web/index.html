@@ -260,7 +260,17 @@
             aria-expanded="true" aria-controls="composer-body" title="折叠/展开浮动输入面板（Ctrl+J）">▾</button>
         </div>
         <div id="composer-body" class="composer-body">
+          <!-- 图片附件轨（2026-09，接线口径见 docs/plan/web-image-attachment-cross-surface-plan.md §3.2）：
+               位于 #input-row **上方**，由 js/attachments.js 渲染——无附件时整轨隐藏（hidden）。
+               轨道只呈现服务端回执里的本地路径元信息（文件名 / 尺寸 / 字节数），**不放缩略图**：
+               浏览器读不到本地绝对路径，<img src="..."> 只会得到坏图，等于伪造。 -->
+          <div id="attachment-track" class="attachment-track" aria-live="polite" hidden></div>
           <div id="input-row">
+            <!-- 图片附件三入口之一：📎 按钮 + 隐藏 file input（另两条是 #prompt 粘贴与
+                 面板内拖放；三条入口共用 js/attachments.js 里的同一条上传路径）。 -->
+            <button id="attach-btn" class="attach-btn" type="button"
+              title="添加图片附件（也可直接粘贴 / 拖入图片）" aria-label="添加图片附件">📎</button>
+            <input id="attach-file" class="attach-file" type="file" accept="image/*" multiple tabindex="-1">
             <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off" enterkeyhint="send"></textarea>
             <button id="send-btn">发送</button>
           </div>

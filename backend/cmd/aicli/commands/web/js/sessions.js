@@ -1,4 +1,4 @@
-// 侧边栏会话列表:CRUD/重命名/排序/搜索、输入历史、输入注入(sendInput)。
+// 侧边栏会话列表:CRUD/重命名/排序/搜索、输入历史、输入注入(sendInput,含图片附件路径)。
 // aicli micro web client 前端模块(拆分自 app.js,无构建步骤,由 app.js 入口聚合)。
 
 import { autoGrow, clearPendingPrompts, dropPendingUserPrompt, getUiState, promptEl, refreshScreen, sendStatusEl, setUI, updateTitle } from "./chat.js";
@@ -7,6 +7,7 @@ import { syncSkillsSession } from "./skills.js";
 import { syncFilesSession } from "./files.js";
 import { syncGitSession } from "./git.js";
 import { apiFetch, esc, showToast, webAuthToken } from "./util.js";
+import { clearComposerAttachments, composerImagePaths } from "./attachments.js";
 
 var sidebarEl = document.getElementById("sidebar");
 var sidebarToggleBtn = document.getElementById("sidebar-toggle");
@@ -128,6 +129,18 @@ function saveInputHistory(text) {
 // await；不关心结果的既有调用方可以照旧忽略返回值。
 export function sendInput(payload) {
   var isInterrupt = payload && payload.type === "interrupt";
+  // 图片附件:只在发送 prompt 时并入(interrupt / approval / question_answer 不带附件)。
+  // 无附件时**不写 image_paths 字段**——不带该字段的请求与响应语义跟既有完全一致
+  // (后端 handleWebPrompt 只在该字段非空时才追加 attached_images / image_notes)。
+  // 待发条目由 attachments.js 维护;发送成功(queued)后清空轨道,见下面的 queued 分支。
+  var imagePaths = null;
+  if (payload && payload.prompt) {
+    var attached = composerImagePaths();
+    if (attached.length) {
+      imagePaths = attached;
+      payload.image_paths = imagePaths;
+    }
+  }
   // 超时放宽到 30s：POST 一旦被服务端接收就可能已经排队，过早中断会让界面显示
   // 「发送失败」而实际已入队（回合开始后 turn_start 会把状态纠回来）。30s 只用于
   // 兜住「请求根本没发出去（连接池占满）」这一类无限等待。
@@ -140,6 +153,9 @@ export function sendInput(payload) {
     .then(function (json) {
       if (json.status === "queued") {
         if (payload && payload.prompt) { saveInputHistory(payload.prompt); }
+        // 附件已随本次输入登记进会话（后端 attachChatWebImages）：待发轨道随即清空，
+        // 「上传了但没发出去」的图片不会粘到下一轮。只在 queued 分支清，失败时留着可重试。
+        if (imagePaths) { clearComposerAttachments(); }
         promptEl.value = "";
         inputHistoryIdx = -1;
         autoGrow();
@@ -148,6 +164,10 @@ export function sendInput(payload) {
           sendStatusEl.textContent = "已排队，将在当前任务后执行…";
         } else {
           setUI("posting", "已排队，等待执行…");
+        }
+        // 发送瞬间的图片说明（被跳过 / 已压缩）如实并入状态行，不静默吞掉。
+        if (json.image_notes && json.image_notes.length) {
+          sendStatusEl.textContent += "（图片：" + json.image_notes.join("；") + "）";
         }
       } else if (json.status === "interrupted") {
         // 竞态防御：turn_end 可能已先行到达（此时已是 idle）。

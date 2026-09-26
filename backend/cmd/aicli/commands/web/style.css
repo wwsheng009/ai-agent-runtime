@@ -804,6 +804,42 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 #dynamic-status.ds-approval { color: var(--reasoningFg); }
 #dynamic-status.ds-approval::before { color: var(--reasoningFg); }
 
+/* ---- 图片附件（js/attachments.js）：📎 按钮 + #input-row 上方的附件轨 ----
+   轨道只列服务端回执里的元信息（文件名 / 尺寸 / 字节数）与失败原因，**不放缩略图**：
+   浏览器读不到本地绝对路径，<img src="..."> 只会得到坏图。颜色一律走主题变量。 */
+.attachment-track { display: flex; flex-wrap: wrap; gap: 6px; }
+/* hidden 属性优先于上面的 display:flex（属性选择器特异性更高，不需要 !important） */
+.attachment-track[hidden] { display: none; }
+.attach-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  max-width: 100%; padding: 2px 4px 2px 8px;
+  background: var(--bg2); color: var(--fg2);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 12px; line-height: 1.5;
+}
+.attach-item.attach-failed { border-color: var(--redBorder); }
+.attach-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-meta { color: var(--fg3); white-space: nowrap; }
+.attach-item.attach-failed .attach-name, .attach-item.attach-failed .attach-meta { color: var(--red); }
+.attach-remove {
+  padding: 0 4px; font-size: 12px; line-height: 1.4;
+  background: transparent; color: var(--fg3);
+  border: 1px solid transparent; border-radius: 4px;
+}
+.attach-remove:hover { background: var(--hoverBg2); color: var(--fg); }
+/* 📎 按钮与 #send-btn 同排：常态就是普通按钮外观（与 composer 里其它控件一致） */
+#composer-panel .attach-btn {
+  flex: 0 0 auto; padding: 8px 10px;
+  background: var(--bg3); color: var(--fg2);
+  border: 1px solid var(--border2); border-radius: 6px;
+  font-size: 14px; line-height: 1;
+}
+#composer-panel .attach-btn:hover { background: var(--hoverBg2); color: var(--fg); }
+/* 隐藏的文件选择器：以 id 级特异性压掉 #input-row 的 flex 子项占位，且不进 Tab 序 */
+#composer-panel .attach-file { display: none; }
+/* 拖入高亮：面板接过拖放（dragover 已阻止默认）时给整块面板一个虚线轮廓 */
+#composer-panel.attach-dragover { outline: 2px dashed var(--accent); outline-offset: -2px; }
+
 #input-row { display: flex; gap: 8px; }
 #prompt {
   flex: 1; padding: 8px 10px;
@@ -1498,6 +1534,11 @@ body.sidebar-collapsed #sidebar {
     flex: 0 0 auto; align-self: flex-end;
     min-width: 76px; min-height: 44px; max-width: 42%;
     padding: 9px 14px; font-size: 15px;
+  }
+  /* 📎 附件按钮同样要够 44px 点按区（与发送键同排，靠底对齐） */
+  #composer-panel .attach-btn {
+    align-self: flex-end; min-width: 44px; min-height: 44px;
+    padding: 10px; font-size: 16px;
   }
   /* ---- 配置栏：小屏折叠成弹出面板 ----
      三个选择器平铺在窄屏要占 3 行 99px；改为单行触发按钮 + 向上弹出的面板。
