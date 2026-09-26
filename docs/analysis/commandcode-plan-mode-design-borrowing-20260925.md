@@ -1071,3 +1071,43 @@ Web 横幅位于聊天区顶部、可换行、能放「模式 + 状态 + 路径 
 
 1. **CLI**：`/plan comment <Lx[-Ly]> <正文>`、`/plan comments [--all]`，并在 `/plan request_changes <notes>` 时把 `FormatPlanCommentsForReview` 的结果并入 notes（复用既有一次性通道）。
 2. **Web**：面板轮次 diff 视图内按行选择 → `POST .../comments`；评论列表直接消费 `status`/`current_*` 投影（同一口径，不再重算）。
+
+---
+
+## 24. 实施记录：第十七轮（2026-09-25，行级评论 CLI 面）
+
+**状态**：§4.4 接线第二面完成，只剩 Web diff 视图内的锚点定位。
+
+### 24.1 命令
+
+| 命令 | 行为 |
+|------|------|
+| `/plan comment <Lx\|Lx-Ly> <正文>` | 在**最新归档轮**上留一条评论。首次评论时若记录还没有轮次，先把当前计划正文按 `decision=comment` 登记为 v1（`archiveStatus` 对 `comment` 保持原状态：只补快照、不改状态）；正文还没写入工作区则报错而不猜行号。摘录由 `planmode.NewLineComment` 从该轮正文截取，越界/格式错误直接拒绝且不落盘 |
+| `/plan comments` | 列出本会话计划的全部评论（按最新轮重放锚点），三态并列：`[与当前正文一致]` / `[原文已移动（原 L3-4）]` / `[锚点失效（该处正文已改写，保留当时内容）]`——**失效锚点不隐藏**，评论是用户输入，不因锚点漂移而消失 |
+
+**交付**：`/plan request_changes <notes>` 时把 `FormatPlanCommentsForReview(重放结果)` 并入 `pending_review_notes` 一次性提醒通道；**归档轮次里仍只存用户自己写的 notes**——评论有独立日志，同一内容不在两处漂移。`/plan comment(s)` 与 `/plans diff` 一致，直接读写归档存储，不经 HTTP。
+
+### 24.2 落点
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 命令实现 | `backend/cmd/aicli/commands/chat_plan_comments_command.go`（新） | 目标解析、首次评论补一轮、范围解析（`L12`/`L12-14`/裸数字）、列表渲染、交付渲染与并入、错误文案 |
+| 分发 | `backend/cmd/aicli/commands/chat_plan_command.go` | 纯文本与统一 TTY 两个 switch 各加一档；`request_changes` 分支改用 `chatPlanReviewNotesWithComments` 合成提醒；用法行/提示行更新 |
+| 命令目录 | `backend/cmd/aicli/commands/chat_slash_command_catalog.go` | `/plan` 用法与 `comment`/`comments` 两个子命令条目 |
+| 复用 | `backend/internal/planmode/comments.go` | `formatCommentRange`/`compressCommentExcerpt` 导出为 `FormatCommentRange`/`CompressCommentExcerpt`（CLI 与后续 Web 共用同一渲染） |
+| 门禁 | `backend/cmd/aicli/commands/chat_command_result_test.go` | 直写清单登记新增的 `fmt.Println` 调用点（8 → 9） |
+
+### 24.3 验证（含一次归属仲裁）
+
+| 命令（cwd=backend） | 结果 |
+|---|---|
+| `go test ./cmd/aicli/commands/ -run 'PlanComment' -count=1` | 通过（5 例：首次评论补轮 + 存储断言、跨轮移动 + 提醒并入 + 轮次 notes 不重复、非法输入矩阵、无计划上下文、空态提示） |
+| `go test ./cmd/aicli/commands/ -run 'TestChatInteractiveDirectWriterInventory' -count=1` | 修正登记后通过 |
+| `go test ./internal/planmode/ ./internal/planstore/ ./internal/api/runtimeapi/ -run 'Plan\|Comment' -count=1` | 全绿（导出重命名未破坏既有调用） |
+| `gofmt -l`（7 文件） | 空 |
+
+**归属仲裁**：整包首跑出现 6 条失败，其中 5 条（`TestChatDebugDisplayShowsStorageSection`、两条 resume 动态行、两条历史视图）与 `TestChatInteractiveDirectWriterInventory`。用 `git worktree add --detach HEAD`（当时 HEAD `2f870e24`，**不含**本轮 CLI 改动）复跑：三条历史/resume 用例在 HEAD 上**全绿**，但它们所在的 `cmd/aicli/commands` 与 `cmd/aicli/ui` 正被并发会话改着 40 个文件（`chat_history.go`、`chat_interaction.go`、`ui/controller.go`、`ui/fixed_bottom_surface.go` 等）——失败来自该在途改动，不是本轮代码。`TestChatInteractiveDirectWriterInventory` 则确属本轮：新增了 `handlePlanCommand` 的直写点，按该门禁的设计更新期望计数（8 → 9）而非绕过检查。
+
+### 24.4 下一轮
+
+**Web**：面板轮次 diff 视图内按行选择 → `POST /plans/{id}/comments`；评论列表直接消费 `GET .../comments` 的 `status`/`current_*` 投影（同一口径，前端不重算重放）。前端文件（`web/` 下的面板与共享 types）目前与本线无重叠，可安全落子。
