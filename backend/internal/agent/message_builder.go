@@ -71,6 +71,9 @@ func (b *MessageBuilder) AppendToolResults(toolCalls []types.ToolCall, results [
 		}
 		b.history = append(b.history, *message)
 	}
+	// 工具结果里的图片直通附件必须在整批 tool_result 之后注入 user 消息：
+	// provider 协议只在 user 角色渲染 image block。
+	b.appendImagePassthroughMessages(normalizedResults)
 }
 
 func normalizeToolCalls(toolCalls []types.ToolCall) []types.ToolCall {
