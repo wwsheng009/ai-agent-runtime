@@ -20,16 +20,32 @@ export type RuntimeAgentStatus = "active" | "stale" | "closed" | "unknown";
  *
  * 身份状态回答「这个身份还能不能接路由」，只在显式 close / 收敛时改变；运行态
  * 回答「这个身份的容器此刻在不在跑」：
- *   - `running`：容器正在执行（含等待审批 / 等待输入 / 回滚）；
+ *   - `running`：容器正在执行（回滚等内部阶段同样计入）；
+ *   - `waiting_approval`：容器仍在跑，但阻塞在人的审批决定上（不折叠成
+ *     `running`，父平面要能看出「谁在等审批」）；
+ *   - `waiting_input`：容器仍在跑，但阻塞在输入（提问 / 澄清）上；
  *   - `idle`：容器没有在跑（回合之间 / 已跑完）；
  *   - `stopped`：容器已被显式停止；
  *   - `unknown`：后端本次没取到运行态证据（字段缺失 / 未知取值）——
  *     **不得据此推断「已结束」**，展示层回退到身份状态。
  */
-export type RuntimeAgentRuntimeState = "running" | "idle" | "stopped" | "unknown";
+export type RuntimeAgentRuntimeState =
+  | "running"
+  | "waiting_approval"
+  | "waiting_input"
+  | "idle"
+  | "stopped"
+  | "unknown";
 
-/** 展示状态：身份状态 + 前端收口的 `ended`（容器已结束、身份仍开放）。 */
-export type RuntimeAgentDisplayStatus = RuntimeAgentStatus | "ended";
+/**
+ * 展示状态：身份状态 + 前端收口的 `ended`（容器已结束、身份仍开放）+
+ * 两种等待态（容器在跑但被人阻塞，必须区别于 `running` 与 `ended`）。
+ */
+export type RuntimeAgentDisplayStatus =
+  | RuntimeAgentStatus
+  | "ended"
+  | "waiting_approval"
+  | "waiting_input";
 
 export type RuntimeAgentRecord = {
   agentId: string;

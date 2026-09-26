@@ -104,6 +104,7 @@ export function WorkspaceShell({
   onStopResponding,
   onSubmit,
   pendingInteraction = null,
+  parkedTurn = null,
   onResolvePendingApproval,
   onAnswerPendingQuestion,
   planActionPending,
@@ -409,6 +410,7 @@ export function WorkspaceShell({
           onToggleRightRail={() => setRightRailManualOpen((current) => !current)}
           openSettings={openSettings}
           pendingInteraction={pendingInteraction}
+          parkedTurn={parkedTurn}
           plan={plan}
           planActionPending={planActionPending}
           planNotesDraft={planNotesDraft}

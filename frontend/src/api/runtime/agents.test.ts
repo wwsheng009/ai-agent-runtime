@@ -93,6 +93,15 @@ describe("normalizeRuntimeAgent", () => {
     ).toBe("idle");
   });
 
+  it("等待审批 / 等待输入原样透传（trim + 小写；不折叠成 running）", () => {
+    expect(normalizeRuntimeAgentRuntimeState(" WAITING_APPROVAL ")).toBe("waiting_approval");
+    expect(normalizeRuntimeAgentRuntimeState("waiting_input")).toBe("waiting_input");
+    expect(
+      normalizeRuntimeAgent({ agent_id: "a1", runtime_state: "waiting_approval" })
+        ?.runtimeState,
+    ).toBe("waiting_approval");
+  });
+
   it("缺 agent_id 时丢弃该条；非对象同样丢弃", () => {
     expect(normalizeRuntimeAgent({ nickname: "no-id" })).toBeNull();
     expect(normalizeRuntimeAgent("child-1")).toBeNull();

@@ -10,6 +10,7 @@ import {
   agentPathSegments,
   agentReadOnlyReason,
   agentStatusLabelKey,
+  agentStatusToneClass,
   agentTranscriptTarget,
   buildAgentForest,
   canResumeAgent,
@@ -18,6 +19,7 @@ import {
   formatAgentDuration,
   formatAgentDurationExact,
   isAgentRunning,
+  projectParkedTurnTaskCounts,
   splitSessionAgents,
 } from "./session-agents-panel-shared";
 
@@ -77,6 +79,8 @@ describe("动作可用性（未知状态不给动作）", () => {
   it("running 划分：active / stale 属运行中", () => {
     expect(isAgentRunning("active")).toBe(true);
     expect(isAgentRunning("stale")).toBe(true);
+    expect(isAgentRunning("waiting_approval")).toBe(true);
+    expect(isAgentRunning("waiting_input")).toBe(true);
     expect(isAgentRunning("closed")).toBe(false);
     expect(isAgentRunning("ended")).toBe(false);
     expect(isAgentRunning("unknown")).toBe(false);
@@ -84,7 +88,16 @@ describe("动作可用性（未知状态不给动作）", () => {
 
   it("状态文案键与状态一一对应", () => {
     expect(agentStatusLabelKey("active")).toBe("panels.agents.status.active");
+    expect(agentStatusLabelKey("waiting_approval")).toBe(
+      "panels.agents.status.waiting_approval",
+    );
+    expect(agentStatusLabelKey("waiting_input")).toBe("panels.agents.status.waiting_input");
     expect(agentStatusLabelKey("unknown")).toBe("panels.agents.status.unknown");
+  });
+
+  it("等待态用警示色（与 stale 同档）", () => {
+    expect(agentStatusToneClass("waiting_approval")).toBe("text-analytics-warning");
+    expect(agentStatusToneClass("waiting_input")).toBe("text-analytics-warning");
   });
 });
 
@@ -107,6 +120,19 @@ describe("agentDisplayStatus（身份状态 + 运行态 → 展示状态）", ()
     ).toBe("active");
   });
 
+  it("等待审批 / 等待输入原样透出，不收敛成 running / ended", () => {
+    expect(
+      agentDisplayStatus(
+        agent({ agentId: "c1", agentType: "child", runtimeState: "waiting_approval" }),
+      ),
+    ).toBe("waiting_approval");
+    expect(
+      agentDisplayStatus(
+        agent({ agentId: "c2", agentType: "child", runtimeState: "waiting_input" }),
+      ),
+    ).toBe("waiting_input");
+  });
+
   it("身份终态优先透传，不被运行态覆盖", () => {
     expect(
       agentDisplayStatus(agent({ agentId: "c1", agentType: "child", status: "closed", runtimeState: "idle" })),
@@ -122,6 +148,14 @@ describe("agentDisplayStatus（身份状态 + 运行态 → 展示状态）", ()
   it("根行按会话容器看待：轮次之间的 idle 不算结束", () => {
     expect(
       agentDisplayStatus(agent({ agentId: "root", agentType: "root", runtimeState: "idle" })),
+    ).toBe("active");
+  });
+
+  it("等待态透出只针对子代理行；根行仍回退身份状态（不臆断）", () => {
+    expect(
+      agentDisplayStatus(
+        agent({ agentId: "root", agentType: "root", runtimeState: "waiting_approval" }),
+      ),
     ).toBe("active");
   });
 });
@@ -158,11 +192,79 @@ describe("splitSessionAgents", () => {
       status: "active",
       runtimeState: "idle",
     });
+    const waitingChild = agent({
+      agentId: "child-waiting",
+      agentType: "child",
+      status: "active",
+      runtimeState: "waiting_approval",
+    });
+    const waitingInputChild = agent({
+      agentId: "child-waiting-input",
+      agentType: "child",
+      status: "active",
+      runtimeState: "waiting_input",
+    });
 
-    const split = splitSessionAgents([endedChild, liveChild, idleRoot]);
+    const split = splitSessionAgents([
+      endedChild,
+      liveChild,
+      idleRoot,
+      waitingChild,
+      waitingInputChild,
+    ]);
 
-    expect(split.running.map((entry) => entry.agentId)).toEqual(["child-live", "root"]);
+    expect(split.running.map((entry) => entry.agentId)).toEqual([
+      "child-live",
+      "root",
+      "child-waiting",
+      "child-waiting-input",
+    ]);
     expect(split.settled.map((entry) => entry.agentId)).toEqual(["child-ended"]);
+  });
+});
+
+describe("projectParkedTurnTaskCounts", () => {
+  it("active → 运行中；closed / ended → 完成；stale → 异常", () => {
+    const counts = projectParkedTurnTaskCounts([
+      agent({ agentId: "live", agentType: "child", status: "active", runtimeState: "running" }),
+      agent({ agentId: "closed", status: "closed" }),
+      agent({
+        agentId: "ended",
+        agentType: "child",
+        status: "active",
+        runtimeState: "stopped",
+      }),
+      agent({ agentId: "stale", status: "stale" }),
+    ]);
+
+    expect(counts).toEqual({ running: 1, completed: 2, failed: 1 });
+  });
+
+  it("unknown 不归入任何一档（宁可少算，不把未知说成异常）", () => {
+    const counts = projectParkedTurnTaskCounts([
+      agent({ agentId: "unknown", status: "unknown" }),
+      agent({ agentId: "stale", status: "stale" }),
+    ]);
+
+    expect(counts).toEqual({ running: 0, completed: 0, failed: 1 });
+  });
+
+  it("等待审批 / 等待输入计入运行中（未结束的挂起任务）", () => {
+    const counts = projectParkedTurnTaskCounts([
+      agent({ agentId: "wait-approval", agentType: "child", runtimeState: "waiting_approval" }),
+      agent({ agentId: "wait-input", agentType: "child", runtimeState: "waiting_input" }),
+      agent({ agentId: "closed", status: "closed" }),
+    ]);
+
+    expect(counts).toEqual({ running: 2, completed: 1, failed: 0 });
+  });
+
+  it("空目录（后端未覆盖）返回全 0，由呈现端降级为义务数", () => {
+    expect(projectParkedTurnTaskCounts([])).toEqual({
+      running: 0,
+      completed: 0,
+      failed: 0,
+    });
   });
 });
 

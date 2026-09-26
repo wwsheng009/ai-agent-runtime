@@ -59,6 +59,8 @@ export const enWorkspacePanelsAgents = {
   },
   status: {
     active: "Running",
+    waiting_approval: "Waiting for approval",
+    waiting_input: "Waiting for input",
     stale: "Stale",
     closed: "Stopped",
     ended: "Ended",

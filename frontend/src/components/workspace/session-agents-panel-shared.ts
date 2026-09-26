@@ -7,6 +7,7 @@
 //   * 分区沿用 jobs 面板口径（运行中 / 已结束），不按数组下标分页。
 
 import type { SubagentSessionTarget } from "@/components/workspace/trajectory/subagent-session-target";
+import type { ParkedTurnTaskCounts } from "@/lib/parked-turn";
 import type {
   RuntimeAgentDisplayStatus,
   RuntimeAgentRecord,
@@ -14,7 +15,7 @@ import type {
 } from "@/types/runtime";
 
 export type SessionAgentSplit = {
-  /** 仍在跑（含失联 stale，需人工处置）。 */
+  /** 仍在跑（含失联 stale 与等待审批 / 输入——在跑但被人阻塞，需人工处置）。 */
   running: RuntimeAgentRecord[];
   /** 已结束（closed / unknown，以及容器已停但身份行还没关的 ended）。 */
   settled: RuntimeAgentRecord[];
@@ -34,6 +35,8 @@ export function agentStatusToneClass(status: RuntimeAgentDisplayStatus): string 
     case "active":
       return "text-accent-primary";
     case "stale":
+    case "waiting_approval":
+    case "waiting_input":
       return "text-analytics-warning";
     case "closed":
     case "ended":
@@ -46,10 +49,16 @@ export function agentStatusToneClass(status: RuntimeAgentDisplayStatus): string 
 /**
  * active / stale 视为「运行中」（stale 是失联但未关闭，须人工干预）。
  *
- * 只认「运行中」的两个状态，`ended` / `closed` / `unknown` 一律落到已结束分区。
+ * 等待审批 / 等待输入是「在跑但被人阻塞」，同样不能落进「已结束」分区；
+ * `ended` / `closed` / `unknown` 才落到已结束分区。
  */
 export function isAgentRunning(status: RuntimeAgentDisplayStatus): boolean {
-  return status === "active" || status === "stale";
+  return (
+    status === "active" ||
+    status === "stale" ||
+    status === "waiting_approval" ||
+    status === "waiting_input"
+  );
 }
 
 /** 根容器行（当前会话自己）：会话在轮次之间本来就是 idle，不能算「已结束」。 */
@@ -64,6 +73,8 @@ export function isRootAgentRecord(agent: RuntimeAgentRecord): boolean {
  *   * 身份终态 / 未知优先（`closed` / `stale` / `unknown` 原样透传）：
  *     `ended` 只描述「容器没在跑」，不得覆盖显式关闭与失联；
  *   * 根容器行不做 `ended` 收敛（轮次之间的 idle 不代表主代理结束）；
+ *   * 等待审批 / 等待输入原样透出（在跑但被人阻塞），不得收敛成 `running`
+ *     或 `ended`；
  *   * 运行态 `unknown`（后端未上报）→ 回退身份状态，**不臆断已结束**。
  *
  * 修复背景：后端身份行只有在显式 close / reclaim 时才变终态，子代理跑完一轮后
@@ -75,6 +86,12 @@ export function agentDisplayStatus(agent: RuntimeAgentRecord): RuntimeAgentDispl
   }
   if (isRootAgentRecord(agent)) {
     return agent.status;
+  }
+  if (
+    agent.runtimeState === "waiting_approval" ||
+    agent.runtimeState === "waiting_input"
+  ) {
+    return agent.runtimeState;
   }
   if (agent.runtimeState === "idle" || agent.runtimeState === "stopped") {
     return "ended";
@@ -126,6 +143,43 @@ export function splitSessionAgents(agents: RuntimeAgentRecord[]): SessionAgentSp
     }
   }
   return { running, settled };
+}
+
+/**
+ * §6.8 托管挂起：把身份行目录投影成「运行中 / 完成 / 异常」三档计数。
+ *
+ * 口径（只使用后端真实上报的字段，不猜）：
+ *   * 运行中 = 展示状态 `active` / `waiting_approval` / `waiting_input`
+ *     （容器仍在跑，含等人处置的等待态）；
+ *   * 完成 = 展示状态 `closed` / `ended`（身份已关，或容器已停）；
+ *   * 异常 = 展示状态 `stale`（失联但未关闭，需人工处置）；
+ *   * `unknown`（后端未上报状态）**不归入任何一档**——三档之和允许小于目录
+ *     行数，宁可少算也不把「未知」说成「异常」。
+ *
+ * 边界：这是身份行目录的投影，不是 obligation 的权威计数——挂起文案里的
+ * 义务数仍以 `turn.suspended` 的 `obligation_count` 为准。
+ */
+export function projectParkedTurnTaskCounts(
+  agents: readonly RuntimeAgentRecord[],
+): ParkedTurnTaskCounts {
+  let running = 0;
+  let completed = 0;
+  let failed = 0;
+  for (const agent of agents) {
+    const status = agentDisplayStatus(agent);
+    if (
+      status === "active" ||
+      status === "waiting_approval" ||
+      status === "waiting_input"
+    ) {
+      running += 1;
+    } else if (status === "closed" || status === "ended") {
+      completed += 1;
+    } else if (status === "stale") {
+      failed += 1;
+    }
+  }
+  return { running, completed, failed };
 }
 
 /** agent_path → 面包屑片段（空段剔除；无路径返回 []）。 */

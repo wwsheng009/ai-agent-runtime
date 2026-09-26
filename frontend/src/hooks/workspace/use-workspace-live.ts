@@ -16,6 +16,7 @@ import {
   reportSnapshotRefresh,
   reportUnownedTurn,
 } from "@/lib/live-diagnostics/store";
+import type { ParkedTurnSnapshot } from "@/lib/parked-turn";
 import { normalizeSessionId } from "@/lib/session-id";
 import {
   type RuntimeSessionActiveTurn,
@@ -42,6 +43,7 @@ import {
   getRuntimeEventSeq,
   mergeRuntimeEvent,
 } from "./thread-runtime";
+import { useParkedTurns } from "./use-parked-turns";
 import { useResumedSessionTurn } from "./use-resumed-session-turn";
 import { useSessionRuntimeStream } from "./use-session-runtime-stream";
 import { type TrajectoryStore } from "./use-trajectory-snapshot";
@@ -89,6 +91,8 @@ export type UseWorkspaceLiveResult = {
   liveTurnId: string | null;
   /** 当前会话是否正在生成回复（本地回合或续传回合）。 */
   currentSessionResponding: boolean;
+  /** §6.8 当前会话的托管挂起快照；未挂起 / 无会话时为 null。 */
+  parkedTurn: ParkedTurnSnapshot | null;
   /**
    * P4-刷新续传：停止「服务端仍在跑、本地没有请求可 abort」的续传回合。
    *
@@ -156,6 +160,12 @@ export function useWorkspaceLive({
     localResponding,
     setThreads,
     refreshRuntimeState,
+  });
+  // §6.8 托管挂起：本会话的 `turn.suspended` / `turn.resumed` 边沿投影。状态挂在
+  // 事件入口的同一层（本 hook 持有前台会话的 onRuntimeEvent 投递），随会话切换
+  // 按 session_id select；`agent.turn.finished` 不参与清除（见 lib/parked-turn）。
+  const { applyRuntimeEvent: applyParkedTurnEvent, parkedTurn } = useParkedTurns({
+    sessionId,
   });
   // 本地直连回合 / 服务端续传回合统一成一个「当前在途回合」身份：增量闸门、
   // 流通道归属判定与流式消息都按它对齐。
@@ -269,6 +279,8 @@ export function useWorkspaceLive({
       ) {
         reportBlockedDelta(sessionId);
       }
+      // §6.8：挂起 / 恢复事件在同一入口做边沿归约（只读投影，不影响线程状态）。
+      applyParkedTurnEvent(event);
       onRuntimeEvent(event);
     },
     // 方案B：请求进行中才渲染 runtime/stream 的打字机增量（delta/reasoning/
@@ -286,6 +298,7 @@ export function useWorkspaceLive({
     connectionStatus,
     currentSessionResponding,
     liveTurnId,
+    parkedTurn,
     retryConnection,
     stopResumedTurn,
   };

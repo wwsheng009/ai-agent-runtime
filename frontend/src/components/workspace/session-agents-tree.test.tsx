@@ -219,4 +219,33 @@ describe("SessionAgentsTree", () => {
       container.querySelector('[data-agent-id="no-stamps"] [data-testid="agent-duration"]'),
     ).toBeNull();
   });
+
+  it("等待态行可见：data-status 原样透出，文案为等待审批 / 等待输入", () => {
+    render([
+      agent({ agentId: "root", agentPath: "/root", agentType: "root" }),
+      agent({
+        agentId: "waiting-approval",
+        parentAgentId: "root",
+        agentPath: "/root/waiting-approval",
+        agentType: "child",
+        nickname: "blocked",
+        runtimeState: "waiting_approval",
+      }),
+      agent({
+        agentId: "waiting-input",
+        parentAgentId: "root",
+        agentPath: "/root/waiting-input",
+        agentType: "child",
+        runtimeState: "waiting_input",
+      }),
+    ]);
+
+    const approvalRow = container.querySelector('[data-agent-id="waiting-approval"]');
+    expect(approvalRow?.getAttribute("data-status")).toBe("waiting_approval");
+    expect(approvalRow?.textContent).toContain("等待审批");
+
+    const inputRow = container.querySelector('[data-agent-id="waiting-input"]');
+    expect(inputRow?.getAttribute("data-status")).toBe("waiting_input");
+    expect(inputRow?.textContent).toContain("等待输入");
+  });
 });

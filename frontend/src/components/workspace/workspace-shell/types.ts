@@ -7,6 +7,7 @@ import { type ComposerImageSubmitController } from "@/hooks/workspace/composer/u
 import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
 import type { SessionBacktrackDialogState } from "@/hooks/workspace/use-session-backtrack";
 import { type ConnectionStatus } from "@/lib/connection-status";
+import type { ParkedTurnSnapshot } from "@/lib/parked-turn";
 import type { PendingInteraction } from "@/lib/pending-interaction";
 import { type RuntimeClientIdentity } from "@/lib/runtime-client";
 import {
@@ -150,6 +151,8 @@ export type WorkspaceShellProps = {
   imageSubmitFeedback?: ComposerImageSubmitController | null;
   /** P1-7：待交互统一呈现位（审批 / 提问 / 计划评审），null 时不渲染。 */
   pendingInteraction?: PendingInteraction | null;
+  /** §6.8 托管挂起：当前会话的挂起快照（`turn.suspended` / `turn.resumed` 边沿投影）。 */
+  parkedTurn?: ParkedTurnSnapshot | null;
   /** §4.6 常驻模式标识：页面既有的 `/plan` 快照（与右侧「计划」面板同源）。 */
   plan?: RuntimeSessionPlanMode | null;
   planStatusLabel?: string;

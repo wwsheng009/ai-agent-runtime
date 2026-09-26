@@ -257,24 +257,20 @@ export function WorkspacePage() {
   });
   // P4-刷新续传：live 通道（续传回合认领 → 在途回合身份统一 → /runtime/stream 按
   // 游标重连并继续渲染增量）整链路收口在 use-workspace-live。
-  const {
-    connectionStatus,
-    currentSessionResponding,
-    retryConnection,
-    stopResumedTurn,
-  } = useWorkspaceLive({
-    deltaCoordinator: runtimeDeltaCoordinator,
-    localResponding: isResponding,
-    localTurnId: activeTurnId,
-    onRuntimeEvent: applyPendingInteractionEvent,
-    refreshRuntimeState: refreshSessionRuntimeState,
-    selectedThread,
-    sessionActiveTurn,
-    sessionId: selectedThread?.sessionId,
-    setThreads,
-    trajectoryReady: trajectoryReplay.ready,
-    trajectoryStore,
-  });
+  const { connectionStatus, currentSessionResponding, parkedTurn, retryConnection, stopResumedTurn } =
+    useWorkspaceLive({
+      deltaCoordinator: runtimeDeltaCoordinator,
+      localResponding: isResponding,
+      localTurnId: activeTurnId,
+      onRuntimeEvent: applyPendingInteractionEvent,
+      refreshRuntimeState: refreshSessionRuntimeState,
+      selectedThread,
+      sessionActiveTurn,
+      sessionId: selectedThread?.sessionId,
+      setThreads,
+      trajectoryReady: trajectoryReplay.ready,
+      trajectoryStore,
+    });
   // P1-7 + ESC 阶段 A：停止 = 收敛未决交互 +（刷新后）服务端 interrupt；Esc 与按钮等价。
   const handleStopResponding = useStopResponding({
     activeTurnId,
@@ -481,6 +477,7 @@ export function WorkspacePage() {
       selectedProvider={selectedProvider}
       selectedReasoningEffort={selectedReasoningEffort}
       pendingInteraction={pendingInteraction}
+      parkedTurn={parkedTurn}
       onResolvePendingApproval={resolvePendingApproval}
       onAnswerPendingQuestion={answerPendingQuestion}
       plan={runtimePlanMode}

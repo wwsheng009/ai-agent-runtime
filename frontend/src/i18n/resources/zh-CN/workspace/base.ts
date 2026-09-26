@@ -416,6 +416,11 @@ export const zhWorkspaceBase = {
         waiting: "计划尚未写就，等待模型产出。",
       },
     },
+    // §6.8 托管挂起（parked turn）：等待子 Agent / Team 义务终态期间的常驻状态表达。
+    parkedTurn: {
+      waiting: "托管中：等待 {{count}} 个义务",
+      tasks: "托管中：{{running}} 个任务运行中（{{completed}} 完成 / {{failed}} 异常）",
+    },
     loadingModels: "正在加载模型",
     modelCatalogUnavailable: "模型目录不可用",
     runtimeDefaultModel: "运行时默认模型",

@@ -438,6 +438,11 @@ export const enWorkspaceBase = {
         waiting: "No plan text yet; waiting for the model.",
       },
     },
+    // §6.8 hosted suspension (parked turn): persistent state while obligations settle.
+    parkedTurn: {
+      waiting: "Parked: waiting on {{count}} obligation(s)",
+      tasks: "Parked: {{running}} task(s) running ({{completed}} done / {{failed}} failed)",
+    },
     loadingModels: "loading models",
     modelCatalogUnavailable: "model catalog unavailable",
     runtimeDefaultModel: "runtime default model",

@@ -49,6 +49,7 @@ export type WorkspaceMainSectionProps = Pick<
   | "onSelectBacktrackNavigationMessage"
   | "onStopResponding"
   | "onSubmit"
+  | "parkedTurn"
   | "pendingInteraction"
   | "phase"
   | "plan"

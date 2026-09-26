@@ -269,6 +269,27 @@ describe("SessionAgentsPanel", () => {
     expect(row?.querySelector("button")).toBeNull();
   });
 
+  it("等待审批的子代理留在进行中分区，行内可见等待文案", async () => {
+    const waitingChild = agent({
+      agentId: "worker-1",
+      parentAgentId: "child-1",
+      parentSessionId: SESSION_ID,
+      sessionId: "sess-worker-1",
+      agentPath: "/root/child-1/worker-1",
+      depth: 2,
+      agentType: "child",
+      nickname: "scout",
+      runtimeState: "waiting_approval",
+    });
+    await renderPanel(makeResult([rootAgent, currentAgent, waitingChild]));
+
+    const row = document.body.querySelector('[data-agent-id="worker-1"]');
+    expect(row?.getAttribute("data-status")).toBe("waiting_approval");
+    expect(row?.textContent).toContain("等待审批");
+    expect(panel()?.textContent).toContain("进行中（1）");
+    expect(panel()?.textContent).toContain("已结束（0）");
+  });
+
   it("点击停止 / 恢复调用对应动作", async () => {
     const result = makeResult([rootAgent, currentAgent, runningChild, closedGrand]);
     await renderPanel(result);

@@ -71,6 +71,10 @@ export type RuntimeEventType =
   | "main_agent.route_prediction_unresolvable"
   | "patch.applied"
   | "patch.decision"
+  | "plan_archive_failed"
+  | "plan_mode_changed"
+  | "plan_review_available"
+  | "plan_review_requested"
   | "question_answered"
   | "question_asked"
   | "recall.performed"
@@ -116,6 +120,8 @@ export type RuntimeEventType =
   | "tool_receipt_recorded"
   | "tool_receipt_replayed"
   | "tool_started"
+  | "turn.resumed"
+  | "turn.suspended"
 ;
 
 export const RUNTIME_EVENT_CHANNELS: Record<
@@ -170,6 +176,10 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "main_agent.route_prediction_unresolvable": ["session_store"],
   "patch.applied": [],
   "patch.decision": [],
+  "plan_archive_failed": [],
+  "plan_mode_changed": [],
+  "plan_review_available": [],
+  "plan_review_requested": [],
   "question_answered": [],
   "question_asked": [],
   "recall.performed": ["session_store"],
@@ -215,6 +225,8 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "tool_receipt_recorded": [],
   "tool_receipt_replayed": [],
   "tool_started": [],
+  "turn.resumed": ["session_store", "tail_only"],
+  "turn.suspended": ["session_store", "tail_only"],
 };
 
 export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
@@ -254,6 +266,8 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
   "subagent.suspension.unavailable",
   "tool.completed",
   "tool.requested",
+  "turn.resumed",
+  "turn.suspended",
 ];
 
 export const RUNTIME_EVENT_LIVE_ONLY_TYPES: readonly RuntimeEventType[] = [
@@ -280,6 +294,8 @@ export const RUNTIME_EVENT_TAIL_ONLY_TYPES: readonly RuntimeEventType[] = [
   "subagent.suspension.unavailable",
   "subagent.task.completed",
   "subagent.task.started",
+  "turn.resumed",
+  "turn.suspended",
 ];
 
 export const RUNTIME_EVENT_PROVENANCE_TYPES: readonly RuntimeEventType[] = [

@@ -59,6 +59,8 @@ export const zhWorkspacePanelsAgents = {
   },
   status: {
     active: "运行中",
+    waiting_approval: "等待审批",
+    waiting_input: "等待输入",
     stale: "已失联",
     closed: "已停止",
     ended: "已结束",

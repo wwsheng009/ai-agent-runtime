@@ -84,12 +84,19 @@ export function normalizeRuntimeAgentStatus(value: unknown): RuntimeAgentStatus 
 }
 
 /**
- * 运行态收口：只承认 running / idle / stopped，其余（缺字段 / 未知取值）一律
- * `unknown`。**未知不得被当作「已结束」**，展示层据此回退到身份状态。
+ * 运行态收口：只承认 running / waiting_approval / waiting_input / idle /
+ * stopped，其余（缺字段 / 未知取值）一律 `unknown`。**未知不得被当作
+ * 「已结束」**，展示层据此回退到身份状态。
  */
 export function normalizeRuntimeAgentRuntimeState(value: unknown): RuntimeAgentRuntimeState {
   const state = readTrimmed(value)?.toLowerCase();
-  if (state === "running" || state === "idle" || state === "stopped") {
+  if (
+    state === "running" ||
+    state === "waiting_approval" ||
+    state === "waiting_input" ||
+    state === "idle" ||
+    state === "stopped"
+  ) {
     return state;
   }
   return "unknown";

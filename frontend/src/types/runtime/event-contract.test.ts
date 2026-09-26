@@ -35,7 +35,8 @@ const sorted = (values: readonly string[]) => [...values].sort();
 // ChannelSessionStore | ChannelTailOnly，写侧由 ProducerPersistedEvent 去重）。
 // 除此之外，落盘类型与 live-only / tail-only 仍互斥。
 //
-// 口径 = 生成物里同时含 session_store 与 tail_only 的类型（当前 7 个）。注册表
+// 口径 = 生成物里同时含 session_store 与 tail_only 的类型（当前 9 个：2026-09-26
+// §6.8 托管挂起新增 turn.suspended / turn.resumed）。注册表
 // 扩容新增双通道类型时本清单需同步，否则下面的互斥断言先失败（它正是这么用的）。
 const DUAL_CHANNEL_TAIL_TYPES = new Set<string>([
   "subagent.batch.canceled",
@@ -45,6 +46,8 @@ const DUAL_CHANNEL_TAIL_TYPES = new Set<string>([
   "subagent.completed",
   "subagent.route.resolved",
   "subagent.suspension.unavailable",
+  "turn.resumed",
+  "turn.suspended",
 ]);
 
 describe("runtime 事件契约（前端消费路径覆盖）", () => {
@@ -173,6 +176,8 @@ describe("runtime 事件契约（前端消费路径覆盖）", () => {
       "subagent.completed",
       "subagent.route.resolved",
       "subagent.suspension.unavailable",
+      "turn.resumed",
+      "turn.suspended",
     ]);
     expect(sorted([...ASSISTANT_RUNTIME_EVENT_TYPES])).toEqual([
       "assistant.image_progress",

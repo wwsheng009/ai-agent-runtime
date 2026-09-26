@@ -6,6 +6,7 @@
 
 import { PendingInteractionBar } from "@/components/workspace/pending-interaction-bar";
 import { SessionModeBanner } from "@/components/workspace/session-mode-banner";
+import type { ParkedTurnView } from "@/lib/parked-turn";
 import type { PendingInteraction } from "@/lib/pending-interaction";
 import type {
   RuntimeSessionPlanMode,
@@ -18,6 +19,8 @@ type SessionInteractionDockProps = {
   onPlanDecision?: (decision: Exclude<RuntimeSessionPlanModeExitDecision, "">) => void;
   onPlanNotesChange?: (value: string) => void;
   onResolveApproval?: (requestId: string, allow: boolean) => void;
+  /** §6.8 托管挂起：挂起快照 + 任务投影（见 SessionModeBanner 的落点说明）。 */
+  parkedTurn?: ParkedTurnView | null;
   plan: RuntimeSessionPlanMode | null;
   planActionPending?: boolean;
   planNotesDraft?: string;
@@ -31,6 +34,7 @@ export function SessionInteractionDock({
   onPlanDecision,
   onPlanNotesChange,
   onResolveApproval,
+  parkedTurn,
   plan,
   planActionPending,
   planNotesDraft,
@@ -39,7 +43,12 @@ export function SessionInteractionDock({
 }: SessionInteractionDockProps) {
   return (
     <div className="pointer-events-auto mx-auto w-full max-w-[var(--app-chat-content-width-dock)]">
-      <SessionModeBanner plan={plan} planStatusLabel={planStatusLabel} sessionId={sessionId} />
+      <SessionModeBanner
+        parkedTurn={parkedTurn ?? null}
+        plan={plan}
+        planStatusLabel={planStatusLabel}
+        sessionId={sessionId}
+      />
       <PendingInteractionBar
         interaction={interaction}
         onAnswerQuestion={(questionId, answer) => onAnswerQuestion?.(questionId, answer)}
