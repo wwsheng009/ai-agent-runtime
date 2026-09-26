@@ -120,7 +120,11 @@ func spawnAgentPermissionPinnedToParent(parent, requested string) bool {
 	switch runtimepolicy.Mode(parent) {
 	case runtimepolicy.ModeBypassPermissions:
 		return spawnAgentPermissionRequiresApproval(requested)
-	case runtimepolicy.ModePlan:
+	case runtimepolicy.ModePlan, runtimepolicy.ModeDontAsk:
+		// plan never writes and dont_ask never prompts: both are session-level
+		// pins, so a child must not escape them by requesting a mode that
+		// would delegate or prompt. A plan request already returned earlier as
+		// a strict narrowing.
 		return true
 	}
 	return false
@@ -138,17 +142,20 @@ func spawnAgentPermissionRequiresApproval(mode string) bool {
 }
 
 // spawnAgentPermissionRank orders modes by how much they delegate to the model
-// without user involvement. plan is the strictest (read-only).
+// without user involvement: plan (read-only) < dont_ask (fail-closed) <
+// default < accept_edits < bypass_permissions.
 func spawnAgentPermissionRank(mode string) int {
 	switch runtimepolicy.Mode(mode) {
 	case runtimepolicy.ModePlan:
 		return 0
-	case runtimepolicy.ModeDefault:
+	case runtimepolicy.ModeDontAsk:
 		return 1
-	case runtimepolicy.ModeAcceptEdits:
+	case runtimepolicy.ModeDefault:
 		return 2
-	case runtimepolicy.ModeBypassPermissions:
+	case runtimepolicy.ModeAcceptEdits:
 		return 3
+	case runtimepolicy.ModeBypassPermissions:
+		return 4
 	}
 	return 0
 }

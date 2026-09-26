@@ -376,6 +376,8 @@ func buildChatStatusPermissionsValue(session *ChatSession) string {
 		return "Accept Edits"
 	case runtimepolicy.ModePlan:
 		return "Plan"
+	case runtimepolicy.ModeDontAsk:
+		return "Don't Ask"
 	case runtimepolicy.ModeDefault, "":
 		return "Default"
 	default:

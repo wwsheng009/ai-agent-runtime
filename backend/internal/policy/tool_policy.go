@@ -342,6 +342,12 @@ func (p *ToolExecutionPolicy) allowToolCall(ctx context.Context, tool skill.Tool
 				if assessment.Reason == ShellReadOnlyReasonDynamicSyntax {
 					return fmt.Errorf("read-only policy blocks shell redirection or dynamic command syntax: %s", command)
 				}
+				if assessment.Reason == ShellReadOnlyReasonSensitiveArg {
+					return fmt.Errorf("read-only policy blocks shell access to sensitive paths: %s", command)
+				}
+				if assessment.Reason == ShellReadOnlyReasonUnparsable {
+					return fmt.Errorf("read-only policy blocks a shell command that could not be parsed: %s", command)
+				}
 				if !assessment.Allowed {
 					return fmt.Errorf("read-only policy blocks non-readonly shell command: %s", command)
 				}

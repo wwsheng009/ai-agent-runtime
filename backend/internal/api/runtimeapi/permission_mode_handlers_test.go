@@ -65,6 +65,7 @@ func TestGetSessionPermissionModeListsBackendModes(t *testing.T) {
 		string(runtimepolicy.ModeAcceptEdits),
 		string(runtimepolicy.ModePlan),
 		string(runtimepolicy.ModeBypassPermissions),
+		string(runtimepolicy.ModeDontAsk),
 	}, values)
 
 	// 危险模式与 plan 入口语义必须暴露给前端，避免 UI 静默放宽策略。
@@ -72,6 +73,7 @@ func TestGetSessionPermissionModeListsBackendModes(t *testing.T) {
 	require.False(t, resp.Supported[1].Dangerous)
 	require.True(t, resp.Supported[2].RequiresPlanEntry)
 	require.True(t, resp.Supported[3].Dangerous)
+	require.False(t, resp.Supported[4].Dangerous, "dont_ask narrows permissions and must not be flagged dangerous")
 }
 
 func TestUpdateSessionPermissionModePersistsForIdleSession(t *testing.T) {

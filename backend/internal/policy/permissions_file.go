@@ -35,12 +35,18 @@ const (
 //	  - name: allow-readonly
 //	    tools: [view, grep, glob, ls]
 //	    decision: allow
+//	  - name: allow-git-status-only
+//	    tools: ["Shell(git status)", "Shell(git diff:*)"]   # per-segment command match
+//	    decision: allow
+//	  - name: protect-secrets
+//	    tools: ["Read(.env)", "Read(**/*.pem)"]             # // ~/ / and relative anchors
+//	    decision: ask
 type PermissionsFile struct {
-	Version    int                    `yaml:"version,omitempty" json:"version,omitempty"`
-	DenyTools  []string               `yaml:"deny_tools,omitempty" json:"deny_tools,omitempty"`
-	AllowTools []string               `yaml:"allow_tools,omitempty" json:"allow_tools,omitempty"`
-	Rules      []PermissionsFileRule  `yaml:"rules,omitempty" json:"rules,omitempty"`
-	SourcePath string                 `yaml:"-" json:"source_path,omitempty"`
+	Version    int                   `yaml:"version,omitempty" json:"version,omitempty"`
+	DenyTools  []string              `yaml:"deny_tools,omitempty" json:"deny_tools,omitempty"`
+	AllowTools []string              `yaml:"allow_tools,omitempty" json:"allow_tools,omitempty"`
+	Rules      []PermissionsFileRule `yaml:"rules,omitempty" json:"rules,omitempty"`
+	SourcePath string                `yaml:"-" json:"source_path,omitempty"`
 }
 
 // PermissionsFileRule is one static rule entry in permissions.yaml.
@@ -149,6 +155,13 @@ func (f *PermissionsFile) Validate() error {
 	if f == nil {
 		return nil
 	}
+	// The hard gates are exact tool names by contract (§4.1 item 4): a
+	// specifier or glob here would silently match nothing.
+	for _, entry := range append(append([]string{}, f.DenyTools...), f.AllowTools...) {
+		if strings.ContainsAny(entry, "()*") {
+			return fmt.Errorf("deny_tools/allow_tools take exact tool names only; put %q in a rule's tools list to use specifiers or globs", entry)
+		}
+	}
 	for i, rule := range f.Rules {
 		decision, err := parsePermissionsDecision(rule.Decision)
 		if err != nil {
@@ -159,6 +172,13 @@ func (f *PermissionsFile) Validate() error {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 		f.Rules[i].Decision = string(decision)
+		if _, _, err := splitRuleToolEntries(f.Rules[i].Tools, decision); err != nil {
+			name := strings.TrimSpace(rule.Name)
+			if name == "" {
+				name = fmt.Sprintf("rules[%d]", i)
+			}
+			return fmt.Errorf("%s: %w", name, err)
+		}
 	}
 	return nil
 }
@@ -188,6 +208,10 @@ func (f *PermissionsFile) ToRules(sourceLabel string) []Rule {
 		if err != nil {
 			continue
 		}
+		tools, specifiers, err := splitRuleToolEntries(entry.Tools, decision)
+		if err != nil {
+			continue
+		}
 		name := strings.TrimSpace(entry.Name)
 		if name == "" {
 			name = fmt.Sprintf("%s:rule_%d", sourceLabel, i)
@@ -200,13 +224,44 @@ func (f *PermissionsFile) ToRules(sourceLabel string) []Rule {
 		}
 		out = append(out, Rule{
 			Name:         name,
-			Tools:        normalizeToolNameList(entry.Tools),
+			Tools:        tools,
+			Specifiers:   specifiers,
 			Capabilities: parseCapabilityNames(entry.Capabilities),
 			Decision:     decision,
 			Reason:       reason,
 		})
 	}
 	return out
+}
+
+// splitRuleToolEntries separates plain tool names (legacy exact match) from
+// parsed specifier entries. It returns an error for specifier syntax that is
+// illegal for the rule's decision (broad allow globs, allow+param patterns).
+func splitRuleToolEntries(entries []string, decision DecisionType) ([]string, []ToolSpecifier, error) {
+	normalized := normalizeToolNameList(entries)
+	if len(normalized) == 0 {
+		return nil, nil, nil
+	}
+	tools := make([]string, 0, len(normalized))
+	specifiers := make([]ToolSpecifier, 0, len(normalized))
+	for _, entry := range normalized {
+		spec, err := ParseToolSpecifier(entry, decision)
+		if err != nil {
+			return nil, nil, err
+		}
+		if spec == nil {
+			tools = append(tools, entry)
+			continue
+		}
+		specifiers = append(specifiers, *spec)
+	}
+	if len(tools) == 0 {
+		tools = nil
+	}
+	if len(specifiers) == 0 {
+		specifiers = nil
+	}
+	return tools, specifiers, nil
 }
 
 // BuildPermissionsOverlay merges project file + CLI allow/deny tool lists.

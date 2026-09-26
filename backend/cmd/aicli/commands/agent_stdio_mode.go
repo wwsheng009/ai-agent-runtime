@@ -49,6 +49,11 @@ func acpPermissionModeChoices() []acpPermissionModeChoice {
 			Description: "Investigate read-only and propose a plan before changing anything.",
 		},
 		{
+			Value:       string(runtimepolicy.ModeDontAsk),
+			Name:        "Don't Ask (fail closed)",
+			Description: "Never prompt: run only pre-approved tools (reads, read-only shell, allow rules) and deny the rest. For unattended runs.",
+		},
+		{
 			Value:       string(runtimepolicy.ModeBypassPermissions),
 			Name:        "Bypass Permissions (yolo)",
 			Description: "Auto-approve every tool call without prompting. Equivalent to --yolo.",

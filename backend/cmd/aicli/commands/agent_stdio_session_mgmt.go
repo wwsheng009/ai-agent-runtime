@@ -347,7 +347,7 @@ func acpAvailableCommands() []acp.AvailableCommand {
 		{Name: "model", Description: "切换模型", Input: &acp.AvailableCommandInput{Hint: "<model-id>"}},
 		{Name: "provider", Description: "切换模型提供方", Input: &acp.AvailableCommandInput{Hint: "<provider-id>"}},
 		{Name: "reasoning_effort", Description: "切换推理强度", Input: &acp.AvailableCommandInput{Hint: "<level|default>"}},
-		{Name: "mode", Description: "切换权限模式（default/accept_edits/plan/bypass_permissions）", Input: &acp.AvailableCommandInput{Hint: "<mode>"}},
+		{Name: "mode", Description: "切换权限模式（default/accept_edits/plan/bypass_permissions/dont_ask）", Input: &acp.AvailableCommandInput{Hint: "<mode>"}},
 	}
 }
 

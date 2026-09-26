@@ -34,6 +34,51 @@ rules:
     decision: allow
 ```
 
+## Rule specifiers (rules[].tools)
+
+Plain tool names keep their exact-match semantics. In addition, `rules[].tools`
+accepts `Tool(specifier)` entries and tool-name globs
+(see `docs/analysis/commandcode-permissions-design-borrowing-20260926.md` §4.1/§4.6/§4.10/§4.11):
+
+```yaml
+rules:
+  - name: allow-git-read-only
+    tools: ["Shell(git status)", "Shell(git diff:*)", "Shell(git log:*)"]  # per-segment match
+    decision: allow
+  - name: ask-before-push
+    tools: ["Shell(git push:*)", "Shell(rm -rf .)"]
+    decision: ask
+  - name: protect-secret-material
+    tools: ["Read(.env)", "Read(**/*.pem)", "Edit(.ssh/**)"]
+    decision: ask
+  - name: restrict-mcp
+    tools: ["mcp__github__get_*", "mcp__*"]        # deny/ask may use broad globs
+    decision: deny
+  - name: no-background-shell
+    tools: ["Shell(run_in_background:true)"]        # top-level arg match, deny/ask only
+    decision: deny
+```
+
+- **Command patterns** (`Shell/Bash`): exact (`git status`), prefix (`git:*`),
+  or `*`/`?` globs. Compound commands are split at `&& || ; | &` and newlines;
+  **deny/ask match any segment, allow requires every segment** and never
+  auto-allows an unparsable command or a wrapper/interpreter payload.
+- **Path patterns** (`Read/Edit/Write/View`): `//abs` filesystem, `~/home`,
+  `/workspace-root`, relative matches at any depth; `*` does not cross `/`,
+  `**` does. deny/ask fold case; allow is exact (Windows is case-insensitive).
+- **Domain patterns** (`WebFetch(domain:*.example.com)`, `WebFetch(example.com)`):
+  matched against the URL host of network tools; `*.example.com` excludes the apex.
+- **Param patterns** (`Tool(param:value)`, `Tool(param:value*)`): matched against
+  the top-level arguments the model actually sent; **deny/ask only**.
+- **Tool globs**: `mcp__github__get_*`, `edit_*`; allow rules must name a concrete
+  server/prefix (`*` and `mcp__*` are rejected at load time).
+- `deny_tools` / `allow_tools` are **hard exact names** and reject specifier
+  syntax at load time; the CLI `--deny-tool` / `--allow-tool` flags are exact
+  names too (specifier syntax there is not interpreted). Use `rules` for the
+  syntax above.
+- Specifier syntax in `allow` rules that would be unenforceable (bare `*`,
+  `mcp__*`, param patterns) makes the file fail validation with an actionable error.
+
 ## CLI product flags
 
 ```bash

@@ -17,6 +17,7 @@ const (
 	DenialCodeReadOnlyShell         = "ERR_READONLY_SHELL"
 	DenialCodeReadOnlyShellCompound = "ERR_READONLY_SHELL_COMPOUND"
 	DenialCodeReadOnlyShellDynamic  = "ERR_READONLY_SHELL_DYNAMIC"
+	DenialCodeReadOnlyShellSecret   = "ERR_READONLY_SHELL_SECRET"
 )
 
 // 只读拒绝熔断阈值（M6）。连续拒绝达到 Escalate 阈值后，向父会话邮箱发送
@@ -52,6 +53,8 @@ func denialCodeForReason(reason string) string {
 		return DenialCodeReadOnlyShellCompound
 	case strings.Contains(lower, "redirection") || strings.Contains(lower, "dynamic command"):
 		return DenialCodeReadOnlyShellDynamic
+	case strings.Contains(lower, "sensitive"):
+		return DenialCodeReadOnlyShellSecret
 	case strings.Contains(lower, "write-like tool") || strings.Contains(lower, "background command"):
 		return DenialCodeReadOnlyTool
 	default:
@@ -69,6 +72,8 @@ func denialFixForCode(code string) string {
 		return "Split the command: submit exactly one read-only command per shell.commands entry (chained/compound commands cannot be validated independently)."
 	case DenialCodeReadOnlyShellDynamic:
 		return "The read-only boundary rejects redirection, variable expansion, and command substitution; submit plain single commands only."
+	case DenialCodeReadOnlyShellSecret:
+		return "Reading secret material (.env, keys, credential stores) is outside the read-only boundary. Report the need to the parent instead of retrying with another reader."
 	default:
 		return "The command is not on the read-only allow list. Use git status/diff/log/show, rg, ls/glob, Get-Content, pwd, echo, or " + runtimepolicy.ReadOnlyEscalationPathText
 	}

@@ -1,7 +1,6 @@
 package policy
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -62,8 +61,13 @@ func TestReadOnlyChildCapabilitiesAllowsControlPlaneNotMutations(t *testing.T) {
 	}
 	if err := policy.AllowToolCall(skill.ToolInfo{Name: "shell"}, map[string]interface{}{
 		"command": "git status; git diff",
-	}); err == nil || !strings.Contains(err.Error(), "shell.commands") {
-		t.Fatalf("expected compound command recovery guidance, got %v", err)
+	}); err != nil {
+		t.Fatalf("expected every-read-only compound to be allowed, got %v", err)
+	}
+	if err := policy.AllowToolCall(skill.ToolInfo{Name: "shell"}, map[string]interface{}{
+		"command": "git status; rm -rf build",
+	}); err == nil {
+		t.Fatal("expected a compound with a mutating segment to be blocked")
 	}
 	if err := policy.AllowToolCall(skill.ToolInfo{Name: "shell"}, map[string]interface{}{
 		"commands": []interface{}{

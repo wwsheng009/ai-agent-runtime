@@ -436,3 +436,46 @@
 - 相关仓库文档：`docs/product/project-permissions.md`（项目权限文件 schema）、`docs/analysis/commandcode-plan-mode-design-borrowing-20260925.md`（plan mode 借鉴，含 `plan_review`/plans 存储/评审闭环）、`docs/analysis/commandcode-mcp-design-borrowing-20260925.md`（MCP 借鉴）、`docs/analysis/commandcode-interactive-mode-design-borrowing-20260925.md`（交互模式借鉴）。
 - 调查方式：3 个只读子代理分别盘点「策略核心+规则/配置」「执行安全面（shell/路径/沙箱）」「宿主交互面（审批/子代理/MCP/hooks）」，并对关键文件做第一手复核（`policy/engine.go`、`policy/modes.go`、`policy/grants.go`、`policy/file_grants.go`、`policy/tool_policy.go`、`executor/sandbox.go`、`chat/actor.go`、`cmd/aicli/commands/chat_runtime_events.go` 等）；全部结论附 `文件:行号`。
 - 后续落地时建议把 §4 的每一项转成对应里程碑的 issue/测试清单，并以 §6 的 `decision_table_test.go` 作为统一验收。
+
+---
+
+## 9. 落地状态（2026-09-26，M1 已实施）
+
+按 §6 里程碑实施 **M1 安全护栏**（P0 全部 4 项），默认开启、可显式回退：
+
+| 项 | 状态 | 代码落点 | 验证 |
+|----|------|----------|------|
+| 4.2 `dont-ask` 模式 | ✅ 已实施 | `policy/modes.go`（`ModeDontAsk`、`modeDecision` 把 ask→deny）、`policy/engine.go` resolveAsk fail-closed（含 `enter_plan_mode` 门与 ask 规则）、CLI/HTTP/ACP/agentdef/`spawn_agent` schema 入口 | `policy/engine_safety_test.go`、`api/runtimeapi/permission_mode_handlers_test.go`、`toolbroker` 测试 |
+| 4.3 根/主目录删除断路器 | ✅ 已实施 | 新包 `internal/shellrisk`（分段/env 前缀/包装器/引号/命令替换/`$HOME` 变体/PowerShell/cmd 形式）；`policy/engine.go` 阶段 5b（bypass 不可解析的 `HardAsk`） | `shellrisk_test.go` 防欺骗矩阵、`engine_safety_test.go`（bypass/plan/dont-ask/callback/批量） |
+| 4.4 敏感写入保护 | ✅ 已实施（内置清单；配置扩展留待 M3） | `policy/sensitive_paths.go`（secret/persistence/vcs/control_plane 四类，含 `.aicli` 控制面）；`policy/engine.go` 阶段 5c（plan/bypass 跳过、dont-ask deny、其余 ask） | `sensitive_paths_test.go`、`engine_safety_test.go` |
+| 4.7 只读 shell 机密参数过滤 | ✅ 已实施 | `policy/grants.go`（`sensitive_argument`，`cat/type/head/tail/get-content/gc` 命中机密路径落出快车道）、`policy/tool_policy.go` 文案、`agent/denial_guidance.go`（`ERR_READONLY_SHELL_SECRET`） | `policy` 引擎测试（default ask / plan deny / 普通文件仍免问） |
+
+实现说明与兼容性：
+
+- **默认开启**：`Engine.DisableShellBreaker` / `Engine.DisableSensitiveWriteGate` 提供回退开关；spawn 子代理继承父模式，`dont_ask`/`plan` 父会话对子代理是硬上限（`toolbroker/spawn_agent_permission.go`）。
+- **豁免语义**：命中 `HardAsk` 的断路器审批不可 remember（危险工具本就不入 grants）；工具级 allow 规则/已记忆授权仍可豁免敏感写——内容级豁免依赖 §4.1 的 specifier 语法（M2）。
+- **已知回退差异**：`agentdef` 的 `dont_ask` 不再静默降级为 `default`，而是映射为真正的 fail-closed 模式；旧配置若依赖该降级需改用 `default`。
+- **验证记录**：`policy`、`shellrisk`、`toolbroker`、`agent`、`agentdef`、`api/runtimeapi`、`chat` 全量通过；`cmd/aicli/commands` 中与本次相关的用例（PermissionMode/ModeConfigOption/SessionMode/Status/ImageToken）通过。验证时另发现两处**既有问题**：`chat_image_tokens_test.go` 的单复数命名漂移（本次顺手修复以解除包编译阻塞）、`TestChatDebugDisplayShowsStorageSection` 调试面板断言过期（与本次改动无关，未修复）。
+- **未实施（后续里程碑）**：4.5/4.9（外部目录门、配置分层与 `disableBypass`，M3）、4.8/4.12/4.13/4.14（审批选项统一/模式 UX/按需解释/文档 IA，M4）；M2 见 §10。
+
+---
+
+## 10. 落地状态（2026-09-26，M2 已实施）
+
+按 §6 里程碑实施 **M2 规则引擎**（4.1/4.6/4.10/4.11），保持旧 `permissions.yaml` 语义不变：
+
+| 项 | 状态 | 代码落点 | 验证 |
+|----|------|----------|------|
+| 4.1 规则 specifier | ✅ 已实施 | 新 `policy/specifier.go`（`Shell/Read/Edit/WebFetch` 组、命令/路径/域名/参数/工具 glob、友好名归一、`*` 不跨段、`**` 跨段、四类路径锚点）；`policy/rules.go` 的 `Rule.Specifiers` + `MatchesRequest`；`policy/permissions_file.go` 解析/校验 | `specifier_test.go` 全矩阵、`permissions_file` 回归（纯工具名保持精确；`deny_tools/allow_tools` 拒绝 specifier 语法） |
+| 4.6 复合命令逐段匹配 | ✅ 已实施 | `shellrisk.Segments/ResolveSegment`（env 前缀、包装器穿透、解释器/替换不可静态解析）；`AssessShellReadOnlyCommand` 改为逐段判定；规则匹配不对称：**deny/ask 任一段命中、allow 必须每段命中且可解析** | `pipeline_test.go`（`cat a \| head -5` 免问、`git status; rm -rf build` 拒绝、未闭合引号→`unparsable_command`）、`specifier_test.go` 反例 `git status && rm -rf x` |
+| 4.10 参数匹配 + 工具名通配 | ✅ 已实施 | `Tool(param:value)`（仅 deny/ask；未发送参数不匹配；own 字段禁止 param 形式）、`mcp__*`/`edit_*`（allow 侧拒绝裸 `*`/`mcp__*`，加载期报错） | `specifier_test.go`（param/glob/非法 allow 形式） |
+| 4.11 accept-edits 安全文件快车道 | ✅ 已实施 | 新 `policy/safe_file_commands.go`（mkdir/touch/cp/mv/rmdir/非递归 rm + PowerShell 形式；目标必须在工作区内且非敏感；递归删除、`find -delete`、glob/越界/敏感目标一律回落）；`engine.go` 第 7 阶段接线 + `DisableSafeFileFastPath` 回退 | `safe_file_commands_test.go`、`decision_table_test.go`（`mkdir dist` 免问、`rm -rf dist` 仍问） |
+| 统一验收闸门 | ✅ 已实施 | 新 `policy/decision_table_test.go`（5 模式 × 读/写/只读 shell/敏感读/breaker/安全文件命令 + headless/hard-ask 两行） | 全量通过 |
+
+实现说明与兼容性：
+
+- **旧语义不变**：裸工具名仍是精确匹配；`deny_tools`/`allow_tools` 仍是硬闸精确名；CLI `--deny-tool/--allow-tool` 不解释 specifier。
+- **规则细节**：命令模式 `git status`（精确、空格敏感）、`git:*`（前缀）、`*`/`?` glob；路径 `//`（文件系统）、`~/`（家目录）、`/`（工作区根，取 `toolctx.WorkspaceRoot`，回退 `PathAnchorRoot`）、相对（任意深度，单段模式匹配 basename）；域名从 URL 参数取 host；`*.example.com` 不匹配 apex。
+- **决策明细**：rules 阶段新增 `Decision.RuleDetail`（命中的 segment/path/host），便于审计与后续审批文案使用。
+- **已知限制（文档 §7 对齐）**：specifier 的读规则按"调用参数"匹配，不展开工具内部 glob；shell 命令内的绝对路径参数不做目录门；opaque 命令永不自动 allow。
+- **未实施（后续里程碑）**：4.5/4.9（M3）、4.8/4.12/4.13/4.14（M4）；CLI 审批"能否记住"分类器与 policy 的第二套实现仍待收敛（§4.6 长期项）；CLI `--deny-rule/--ask-rule/--allow-rule` 入口未加（可选）。

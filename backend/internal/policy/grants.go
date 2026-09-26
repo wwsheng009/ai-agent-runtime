@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/shellrisk"
 )
 
 // Decision stage identifiers for permission pipeline observability.
@@ -13,10 +15,15 @@ const (
 	StageRules        = "rules"
 	StageGrants       = "grants"
 	StageReadonlyAuto = "readonly_auto"
-	StageMode         = "mode"
-	StageCallback     = "callback"
-	StageAsk          = "ask"
-	StageHeadlessDeny = "headless_deny"
+	// StageShellBreaker marks the root/home removal circuit breaker, and
+	// StageSensitiveWrite the sensitive-path write gate (see engine.go steps
+	// 5b/5c).
+	StageShellBreaker   = "shell_breaker"
+	StageSensitiveWrite = "sensitive_write"
+	StageMode           = "mode"
+	StageCallback       = "callback"
+	StageAsk            = "ask"
+	StageHeadlessDeny   = "headless_deny"
 )
 
 // Grant records a remembered allow decision for a tool (and optional pattern).
@@ -218,6 +225,13 @@ const (
 	ShellReadOnlyReasonCompound      = "compound_command"
 	ShellReadOnlyReasonDynamicSyntax = "dynamic_shell_syntax"
 	ShellReadOnlyReasonNotAllowed    = "command_not_allowlisted"
+	// ShellReadOnlyReasonUnparsable marks a command whose quoting could not be
+	// tokenized; it is never auto-allowed.
+	ShellReadOnlyReasonUnparsable = "unparsable_command"
+	// ShellReadOnlyReasonSensitiveArg marks a read-only command whose file
+	// argument names a sensitive path (e.g. "cat .env"): the command must fall
+	// out of the fast path and reach the mode/approval decision.
+	ShellReadOnlyReasonSensitiveArg = "sensitive_argument"
 )
 
 // ShellReadOnlyAssessment describes why a shell command is or is not accepted
@@ -229,20 +243,14 @@ type ShellReadOnlyAssessment struct {
 }
 
 // AssessShellReadOnlyCommand validates one concrete shell command against the
-// read-only allow table. Compound statements are deliberately rejected: callers
-// should submit multiple commands through the shell tool's structured commands
-// array so every entry can be validated independently.
+// read-only allow table. Compound commands are split at &&, ||, ;, |, & and
+// newlines and every segment must be on the table (§4.6): `cat a | head -5`
+// is read-only, while any mutating or unresolvable segment keeps the whole
+// command out of the fast path.
 func AssessShellReadOnlyCommand(command string) ShellReadOnlyAssessment {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonEmpty}
-	}
-	// Reject obvious chaining first so callers can return a precise recovery
-	// action (use commands=[...], not an approval request).
-	for _, bad := range []string{"&&", "||", "&", ";", "|", "\n", "\r"} {
-		if strings.Contains(command, bad) {
-			return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonCompound}
-		}
 	}
 	// Redirection and command substitution can smuggle side effects even when
 	// argv[0] itself is a read-only command.
@@ -258,14 +266,33 @@ func AssessShellReadOnlyCommand(command string) ShellReadOnlyAssessment {
 		return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonDynamicSyntax}
 	}
 
-	fields := splitCommandFields(command)
-	if len(fields) == 0 {
+	segments, parsed := shellrisk.Segments(command)
+	if !parsed {
+		return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonUnparsable}
+	}
+	if len(segments) == 0 {
 		return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonEmpty}
 	}
-	argv0 := strings.ToLower(filepath.Base(fields[0]))
-	argv0 = strings.TrimSuffix(argv0, ".exe")
-	argv0 = strings.TrimSuffix(argv0, ".cmd")
-	argv0 = strings.TrimSuffix(argv0, ".bat")
+
+	for _, segment := range segments {
+		assessment := assessShellReadOnlySegment(segment)
+		if !assessment.Allowed {
+			return assessment
+		}
+	}
+	return ShellReadOnlyAssessment{Allowed: true}
+}
+
+// assessShellReadOnlySegment validates one independently executed segment
+// after env-prefix stripping and wrapper piercing. Segments that cannot be
+// resolved statically (shell interpreters, unknown wrapper shapes) are not
+// allowlisted, so the fast path stays fail-closed.
+func assessShellReadOnlySegment(segment string) ShellReadOnlyAssessment {
+	fields, ok := shellrisk.ResolveSegment(segment)
+	if !ok || len(fields) == 0 {
+		return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonNotAllowed}
+	}
+	argv0 := normalizeShellCommandName(fields[0])
 
 	allowed := false
 	switch argv0 {
@@ -284,10 +311,39 @@ func AssessShellReadOnlyCommand(command string) ShellReadOnlyAssessment {
 	case "npm", "pnpm", "yarn", "cargo", "python", "python3", "node", "pip", "pip3":
 		allowed = isReadOnlyVersionFlag(fields[1:])
 	}
+	if allowed && shellReadsFileContent(argv0) {
+		for _, candidate := range fields[1:] {
+			if SensitiveReadArgument(candidate) {
+				return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonSensitiveArg}
+			}
+		}
+	}
 	if allowed {
 		return ShellReadOnlyAssessment{Allowed: true}
 	}
 	return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonNotAllowed}
+}
+
+// normalizeShellCommandName lowercases the argv0 basename for the read-only
+// table lookup.
+func normalizeShellCommandName(name string) string {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	lower = strings.TrimSuffix(lower, ".exe")
+	lower = strings.TrimSuffix(lower, ".cmd")
+	lower = strings.TrimSuffix(lower, ".bat")
+	return strings.ToLower(filepath.Base(lower))
+}
+
+// shellReadsFileContent reports the read-only commands whose arguments are
+// files whose contents flow back to the model. Other allow-table commands
+// (ls, wc, file, git status) only expose metadata and stay on the fast path.
+func shellReadsFileContent(argv0 string) bool {
+	switch argv0 {
+	case "cat", "type", "get-content", "gc", "head", "tail":
+		return true
+	default:
+		return false
+	}
 }
 
 func isReadOnlyRipgrepCommand(args []string) bool {

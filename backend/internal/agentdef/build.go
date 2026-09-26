@@ -114,11 +114,10 @@ func BuildBinding(def *Definition) (*Binding, error) {
 	mode := runtimepolicy.ModeDefault
 	if clone.PermissionMode != "" {
 		switch runtimepolicy.Mode(clone.PermissionMode) {
-		case runtimepolicy.ModeAcceptEdits, runtimepolicy.ModePlan, runtimepolicy.ModeBypassPermissions, runtimepolicy.ModeDefault:
+		case runtimepolicy.ModeAcceptEdits, runtimepolicy.ModePlan, runtimepolicy.ModeBypassPermissions, runtimepolicy.ModeDefault, runtimepolicy.ModeDontAsk:
 			mode = runtimepolicy.Mode(clone.PermissionMode)
-		case "dont_ask":
-			// Treat dont_ask as default for mode enum; ask resolution still headless-denies.
-			mode = runtimepolicy.ModeDefault
+		case "dont-ask":
+			mode = runtimepolicy.ModeDontAsk
 		}
 	}
 

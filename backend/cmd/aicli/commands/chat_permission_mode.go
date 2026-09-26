@@ -20,8 +20,10 @@ func parseChatPermissionMode(raw string, yolo bool) (runtimepolicy.Mode, error) 
 		return runtimepolicy.ModePlan, nil
 	case runtimepolicy.ModeBypassPermissions:
 		return runtimepolicy.ModeBypassPermissions, nil
+	case runtimepolicy.ModeDontAsk, "dont-ask":
+		return runtimepolicy.ModeDontAsk, nil
 	default:
-		return "", fmt.Errorf("无效的 permission-mode: %s（可选值: default|accept_edits|plan|bypass_permissions）", raw)
+		return "", fmt.Errorf("无效的 permission-mode: %s（可选值: default|accept_edits|plan|bypass_permissions|dont_ask）", raw)
 	}
 }
 

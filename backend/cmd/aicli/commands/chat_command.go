@@ -124,7 +124,7 @@ func registerChatFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("skills-top-k", 0, "aicli chat 暴露给模型的候选 skills 数量（0=使用配置默认值）")
 	cmd.Flags().String("skills-mode", "auto", "aicli chat 的 skills 暴露模式（auto|prefer|only）")
 	cmd.Flags().Bool("skills-debug", false, "打印当前请求的 skill route 候选、暴露结果与模式")
-	cmd.Flags().String("permission-mode", "default", "本地 actor/team 运行的权限模式（default|accept_edits|plan|bypass_permissions）")
+	cmd.Flags().String("permission-mode", "default", "本地 actor/team 运行的权限模式（default|accept_edits|plan|bypass_permissions|dont_ask）")
 	cmd.Flags().StringSlice("allow-tool", nil, "允许指定工具（可重复；写入权限规则 allow，并参与工具 allowlist）")
 	cmd.Flags().StringSlice("deny-tool", nil, "拒绝指定工具（可重复；硬拒绝，优先于项目 allow 规则）")
 	cmd.Flags().Bool("trust", false, "信任当前工作区并允许项目级 plugins/hooks/MCP（写入 durable store；需 AICLI_FOLDER_TRUST=1）")

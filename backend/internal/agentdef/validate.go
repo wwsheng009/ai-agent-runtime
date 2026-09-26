@@ -36,9 +36,10 @@ func Validate(def *Definition) error {
 		case runtimepolicy.ModeDefault,
 			runtimepolicy.ModeAcceptEdits,
 			runtimepolicy.ModePlan,
-			runtimepolicy.ModeBypassPermissions:
+			runtimepolicy.ModeBypassPermissions,
+			runtimepolicy.ModeDontAsk:
 			// ok
-		case "dont_ask":
+		case "dont-ask":
 			// accepted alias; runtime may map later
 		default:
 			return fmt.Errorf("agentdef: invalid permissionMode %q", def.PermissionMode)

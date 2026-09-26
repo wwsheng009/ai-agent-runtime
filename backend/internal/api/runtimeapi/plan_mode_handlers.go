@@ -586,6 +586,8 @@ func parseSessionPlanPermissionMode(raw string) runtimepolicy.Mode {
 		return runtimepolicy.ModePlan
 	case runtimepolicy.ModeBypassPermissions:
 		return runtimepolicy.ModeBypassPermissions
+	case runtimepolicy.ModeDontAsk:
+		return runtimepolicy.ModeDontAsk
 	default:
 		return runtimepolicy.ModeDefault
 	}

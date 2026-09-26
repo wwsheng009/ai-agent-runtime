@@ -93,14 +93,35 @@ func TestIsShellReadOnlyCommandAllowsExplicitQueryForms(t *testing.T) {
 	}
 }
 
-func TestAssessShellReadOnlyCommandReportsCompoundRecoveryReason(t *testing.T) {
+func TestAssessShellReadOnlyCommandAllowsReadOnlyCompoundSegments(t *testing.T) {
 	assessment := AssessShellReadOnlyCommand("git status; git diff")
+	assert.True(t, assessment.Allowed, "every segment is on the read-only table")
+
+	assessment = AssessShellReadOnlyCommand("cat a | head -5 || echo none")
+	assert.True(t, assessment.Allowed, "read-only pipeline with fallback stays on the fast path")
+
+	assessment = AssessShellReadOnlyCommand("git status; rm -rf build")
 	assert.False(t, assessment.Allowed)
-	assert.Equal(t, ShellReadOnlyReasonCompound, assessment.Reason)
+	assert.Equal(t, ShellReadOnlyReasonNotAllowed, assessment.Reason)
 
 	assessment = AssessShellReadOnlyCommand("git status")
 	assert.True(t, assessment.Allowed)
 	assert.Empty(t, assessment.Reason)
+}
+
+func TestAssessShellReadOnlyCommandRejectsUnparsableAndWrappedSegments(t *testing.T) {
+	assessment := AssessShellReadOnlyCommand("cat 'unterminated")
+	assert.False(t, assessment.Allowed)
+	assert.Equal(t, ShellReadOnlyReasonUnparsable, assessment.Reason)
+
+	// Wrapper piercing is allowed for resolvable commands...
+	assessment = AssessShellReadOnlyCommand("timeout 5 cat README.md")
+	assert.True(t, assessment.Allowed)
+
+	// ...but shell-interpreter payloads stay out of the fast path.
+	assessment = AssessShellReadOnlyCommand(`bash -c "cat README.md"`)
+	assert.False(t, assessment.Allowed)
+	assert.Equal(t, ShellReadOnlyReasonNotAllowed, assessment.Reason)
 }
 
 func TestMemoryGrantStoreRejectsDangerousTools(t *testing.T) {

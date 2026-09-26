@@ -269,7 +269,7 @@ func TestBroker_Definitions_ExposeSpawnAgentRouteSchema(t *testing.T) {
 		t.Fatalf("permission_mode property has unexpected shape: %#v", properties["permission_mode"])
 	}
 	permissionEnum, ok := permissionMode["enum"].([]string)
-	if !ok || strings.Join(permissionEnum, ",") != "default,accept_edits,plan,bypass_permissions" {
+	if !ok || strings.Join(permissionEnum, ",") != "default,accept_edits,plan,bypass_permissions,dont_ask" {
 		t.Fatalf("unexpected permission_mode enum: %#v", permissionMode["enum"])
 	}
 	isolation, ok := properties["isolation"].(map[string]interface{})

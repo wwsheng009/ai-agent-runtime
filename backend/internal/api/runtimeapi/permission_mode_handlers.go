@@ -64,7 +64,7 @@ func (h *Handler) GetSessionPermissionMode(w http.ResponseWriter, r *http.Reques
 
 // UpdateSessionPermissionMode 切换会话权限模式；会话运行中同样生效。
 //
-// Body: {"mode":"default|accept_edits|bypass_permissions"}（canonical 下划线式枚举）
+// Body: {"mode":"default|accept_edits|bypass_permissions|dont_ask"}（canonical 下划线式枚举）
 // 切离 plan 模式时会关闭持久 plan 状态（decision=quit）。
 func (h *Handler) UpdateSessionPermissionMode(w http.ResponseWriter, r *http.Request) {
 	if h == nil || h.sessionManager == nil {
@@ -88,7 +88,7 @@ func (h *Handler) UpdateSessionPermissionMode(w http.ResponseWriter, r *http.Req
 	mode, ok := runtimepolicy.ParseMode(req.Mode)
 	if !ok {
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
-			"unsupported permission mode "+strings.TrimSpace(req.Mode)+" (default|accept_edits|bypass_permissions)"))
+			"unsupported permission mode "+strings.TrimSpace(req.Mode)+" (default|accept_edits|bypass_permissions|dont_ask)"))
 		return
 	}
 	if mode == runtimepolicy.ModePlan {
@@ -203,6 +203,11 @@ func supportedSessionPermissionModes() []sessionPermissionModeOption {
 			Label:             "计划模式",
 			Description:       "只读探索 + 仅允许写入 plan 文件",
 			RequiresPlanEntry: true,
+		},
+		{
+			Value:       string(runtimepolicy.ModeDontAsk),
+			Label:       "不询问（fail-closed）",
+			Description: "不弹审批：只运行已允许的调用（读、只读命令、allow 规则），其余直接拒绝；适合无人值守",
 		},
 		{
 			Value:       string(runtimepolicy.ModeBypassPermissions),

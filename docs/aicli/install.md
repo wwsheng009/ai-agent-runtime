@@ -793,7 +793,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | `/attach [path|clear]` | 查看、添加或清空待发送图片附件 |
 | `/image [prompt] [--provider <name>] [--model <name>] [--path auto\|api\|codex_native]` | 调用 `openai_image_generate` 生成图片，行为与 `aicli image` 对齐 |
 | `/queue [status|clear]` | 查看或清空排队输入 |
-| `/permission-mode [default|accept_edits|plan|bypass_permissions]`、`/mode` | 查看或切换权限模式 |
+| `/permission-mode [default|accept_edits|plan|bypass_permissions|dont_ask]`、`/mode` | 查看或切换权限模式（`dont_ask` 为 fail-closed 无人值守模式：不弹审批，仅运行已允许的调用） |
 | `/approval-reuse [off|session_readonly_shell|team_readonly_shell]` | 查看或切换审批复用策略 |
 | `/yolo` | 切换到 `bypass_permissions` |
 | `/functions <prompt>` | 预览当前 prompt 会暴露哪些 builtin tools / skill functions |

@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/shellrisk"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 )
 
 // DecisionType represents a permission decision.
@@ -29,6 +31,14 @@ type Decision struct {
 	PatchedArgs json.RawMessage
 	HookMessage string
 	HookContext map[string]string
+	// RuleDetail carries the matching specifier detail of a rules-stage
+	// decision (e.g. the matched command segment or path) for diagnostics.
+	RuleDetail string
+	// HardAsk marks an ask that bypass_permissions must not resolve: the
+	// root/home removal circuit breaker still requires an explicit user
+	// decision (or the usual headless deny when no AskHandler exists). Host
+	// callbacks cannot downgrade it to an allow.
+	HardAsk bool
 }
 
 // EvalRequest captures information required to evaluate tool permissions.
@@ -58,6 +68,8 @@ type HookDispatcher interface {
 //  3. Rule engine → deny > ask > allow
 //  4. Remembered grants (never for dangerous tools)
 //  5. Taxonomy / shell read-only auto-allow
+//     5b. Root/home removal circuit breaker (bypass-proof ask; plan/dont-ask deny)
+//     5c. Sensitive-write gate (ask in default/accept_edits; plan/dont-ask deny)
 //  6. Model plan-entry gate: enter_plan_mode asks for one user confirmation
 //     unless Engine.PlanAutoEnterWithoutApproval or the process policy opts in
 //     (see PlanEnterToolName / PlanAutoEnterApprovalReason)
@@ -106,6 +118,21 @@ type Engine struct {
 	// tool, and never to explicit user actions such as `/plan enter` or
 	// `--permission-mode plan`.
 	PlanAutoEnterWithoutApproval bool
+	// DisableShellBreaker turns off the root/home removal circuit breaker
+	// (docs/analysis/commandcode-permissions-design-borrowing-20260926.md §4.3).
+	// Zero value keeps it enabled; disabling it is only for tests and for hosts
+	// that implement an equivalent guard themselves.
+	DisableShellBreaker bool
+	// DisableSensitiveWriteGate turns off the sensitive-write gate (§4.4),
+	// which requires an approval before writing secret material, persistence
+	// vectors, VCS metadata, or the runtime's own configuration. Zero value
+	// keeps it enabled.
+	DisableSensitiveWriteGate bool
+	// DisableSafeFileFastPath turns off the accept-edits safe-file-command fast
+	// lane (§4.11), which auto-accepts mkdir/touch/cp/mv/rmdir and
+	// non-recursive rm when every target stays inside the workspace and is not
+	// sensitive. Zero value keeps it enabled.
+	DisableSafeFileFastPath bool
 }
 
 const DefaultApprovalTimeout = 30 * time.Minute
@@ -263,9 +290,16 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 		return *deny, nil
 	}
 
+	// ruleRoot anchors specifier path patterns (/ and relative) to the same
+	// workspace root the executor uses.
+	ruleRoot := planWorkspaceRoot(ctx)
+	if ruleRoot == "" && e != nil && e.Policy != nil {
+		ruleRoot = strings.TrimSpace(e.Policy.PathAnchorRoot)
+	}
+
 	// 3) Rules — first match wins; deny is hard (not skipped by bypass).
 	var decision Decision
-	if ruleDecision, matched := e.firstMatchingRule(req); matched {
+	if ruleDecision, matched := e.firstMatchingRule(ruleRoot, req); matched {
 		decision = ruleDecision
 		if decision.Type == DecisionDeny {
 			return decision, nil
@@ -288,6 +322,46 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	if decision.Type == "" && e != nil && !e.DisableReadOnlyAuto && !e.planEnterGateArmed(req) {
 		if auto, reason := e.readOnlyAutoDecision(req); auto {
 			decision = withStage(Decision{Type: DecisionAllow, Reason: reason}, StageReadonlyAuto, reason)
+		}
+	}
+
+	// 5b) Root/home removal circuit breaker. It runs before the mode decision
+	// and before ask resolution: bypass_permissions cannot auto-allow a
+	// recursive delete of / or the home directory, and plan/dont-ask deny it
+	// outright. Rules and grants (steps 3/4) already decided win, which keeps
+	// an explicit deny authoritative and lets a remembered read-only grant
+	// short-circuit harmlessly.
+	if decision.Type == "" && e != nil && !e.DisableShellBreaker {
+		if commands := shellBreakerCommands(req); len(commands) > 0 {
+			if finding, risky := shellrisk.AssessCommands(commands).First(); risky {
+				reason := "shell_breaker:" + string(finding.Risk)
+				if mode == ModePlan || mode == ModeDontAsk {
+					decision = withStage(Decision{Type: DecisionDeny, Reason: reason}, StageShellBreaker, reason)
+				} else {
+					decision = withStage(Decision{Type: DecisionAsk, Reason: reason, HardAsk: true}, StageShellBreaker, reason)
+				}
+			}
+		}
+	}
+
+	// 5c) Sensitive-write gate. Writing secret material, persistence vectors,
+	// VCS metadata, or the runtime's own configuration needs an explicit
+	// approval in default/accept_edits. plan mode keeps its own write
+	// allowlist (step 7) and bypass skips the gate, mirroring CommandCode's
+	// decision ladder. A rule or grant that already allowed this tool call
+	// short-circuits the gate (content-level granularity arrives with the
+	// specifier syntax, §4.1).
+	if decision.Type == "" && e != nil && !e.DisableSensitiveWriteGate {
+		if targets := e.sensitiveWriteTargets(ctx, req); len(targets) > 0 {
+			reason := "sensitive_write:" + string(targets[0].Match.Kind)
+			switch mode {
+			case ModePlan, ModeBypassPermissions:
+				// plan: plan write allowlist governs; bypass: allow via mode.
+			case ModeDontAsk:
+				decision = withStage(Decision{Type: DecisionDeny, Reason: reason}, StageSensitiveWrite, reason)
+			default:
+				decision = withStage(Decision{Type: DecisionAsk, Reason: reason}, StageSensitiveWrite, reason)
+			}
 		}
 	}
 
@@ -325,6 +399,23 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 				}
 			}
 		}
+		// Accept-edits safe-file-command fast lane (§4.11): mkdir/touch/cp/mv/
+		// rmdir and non-recursive rm are auto-accepted when every target stays
+		// inside the workspace and is not sensitive. Recursive deletes, targets
+		// outside the workspace, sensitive targets, and unresolvable commands
+		// keep the normal ask behavior.
+		if decision.Type == "" && mode == ModeAcceptEdits && e != nil && !e.DisableSafeFileFastPath &&
+			hasCapability(req.Capabilities, CapExecShell) {
+			if commands := shellBreakerCommands(req); len(commands) > 0 {
+				if allowed, detail := acceptEditsSafeFileAllowed(commands, ruleRoot); allowed {
+					decision = withStage(Decision{
+						Type:       DecisionAllow,
+						Reason:     "mode:accept_edits_safe_file",
+						RuleDetail: detail,
+					}, StageMode, "accept_edits_safe_file:"+detail)
+				}
+			}
+		}
 		if decision.Type == "" {
 			decision = withStage(Decision{Type: modeDecision(mode, req.Capabilities)}, StageMode, string(mode))
 			if decision.Type == DecisionAsk {
@@ -333,9 +424,16 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 				decision.Reason = "mode:bypass_permissions"
 			} else if decision.Type == DecisionDeny && mode == ModePlan {
 				decision.Reason = "mode:plan_denies_non_readonly"
+			} else if decision.Type == DecisionDeny && mode == ModeDontAsk {
+				decision.Reason = "mode:dont_ask_denies_unapproved"
 			}
 		}
 	}
+
+	// A hard ask (root/home removal breaker) survives callback overrides: a
+	// host callback may deny or re-ask it, but cannot turn it into an allow.
+	hardAsk := decision.HardAsk
+	hardAskReason := decision.Reason
 
 	// 8) Callback override.
 	if e.Callback != nil {
@@ -371,6 +469,9 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 		}
 		if callbackDecision.Stage != "" {
 			decision.Stage = callbackDecision.Stage
+		}
+		if hardAsk && decision.Type == DecisionAllow {
+			decision = withStage(Decision{Type: DecisionAsk, Reason: hardAskReason, HardAsk: true}, StageShellBreaker, hardAskReason)
 		}
 	}
 
@@ -434,15 +535,18 @@ func (e *Engine) validateStaticPolicy(ctx context.Context, req EvalRequest) *Dec
 }
 
 // firstMatchingRule returns the decision for the first matching static rule.
-func (e *Engine) firstMatchingRule(req EvalRequest) (Decision, bool) {
+// root anchors specifier path patterns to the session workspace.
+func (e *Engine) firstMatchingRule(root string, req EvalRequest) (Decision, bool) {
 	if e == nil {
 		return Decision{}, false
 	}
 	for _, rule := range e.Rules {
-		if !rule.Matches(req) {
+		matched, detail := rule.MatchesRequest(root, req)
+		if !matched {
 			continue
 		}
-		return withStage(Decision{Type: rule.Decision, Reason: rule.Reason}, StageRules, firstNonEmpty(rule.Reason, string(rule.Decision))), true
+		decision := Decision{Type: rule.Decision, Reason: rule.Reason, RuleDetail: detail}
+		return withStage(decision, StageRules, firstNonEmpty(rule.Reason, string(rule.Decision))), true
 	}
 	return Decision{}, false
 }
@@ -456,7 +560,11 @@ func (e *Engine) validateHardConstraints(ctx context.Context, req EvalRequest) *
 	if deny := e.validateStaticPolicy(ctx, req); deny != nil {
 		return deny
 	}
-	if ruleDecision, matched := e.firstMatchingRule(req); matched && ruleDecision.Type == DecisionDeny {
+	root := planWorkspaceRoot(ctx)
+	if root == "" && e != nil && e.Policy != nil {
+		root = strings.TrimSpace(e.Policy.PathAnchorRoot)
+	}
+	if ruleDecision, matched := e.firstMatchingRule(root, req); matched && ruleDecision.Type == DecisionDeny {
 		return &ruleDecision
 	}
 	return nil
@@ -625,6 +733,110 @@ func allShellCommandsReadOnly(raw interface{}) bool {
 	}
 }
 
+// shellBreakerCommands extracts every shell command a request would execute:
+// the single command/args form and the structured commands batch. Non-shell
+// tools yield nil.
+func shellBreakerCommands(req EvalRequest) []string {
+	if !IsShellLikeToolName(req.ToolName) {
+		return nil
+	}
+	var commands []string
+	if command := ExtractShellCommand(req.Args); strings.TrimSpace(command) != "" {
+		commands = append(commands, command)
+	}
+	if raw, ok := req.Args["commands"]; ok {
+		commands = append(commands, shellCommandList(raw)...)
+	}
+	return commands
+}
+
+// shellCommandList flattens the structured commands argument into command
+// strings, accepting both []string and the provider-shaped []interface{}
+// entries.
+func shellCommandList(raw interface{}) []string {
+	switch typed := raw.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			switch value := item.(type) {
+			case string:
+				out = append(out, value)
+			case map[string]interface{}:
+				if command, ok := firstStringArg(value, "command", "cmd"); ok {
+					out = append(out, command)
+				}
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// sensitiveWriteTarget is one write target that matched the sensitive-path
+// classifier.
+type sensitiveWriteTarget struct {
+	Path  string
+	Match SensitivePathMatch
+}
+
+// sensitiveWriteTargets returns the sensitive targets of a file-mutating call,
+// resolved against the same workspace root the executor uses. A call whose
+// targets cannot be extracted yields nil; the static policy and plan gate stay
+// responsible for those.
+func (e *Engine) sensitiveWriteTargets(ctx context.Context, req EvalRequest) []sensitiveWriteTarget {
+	if !callMutatesFiles(req) {
+		return nil
+	}
+	paths := collectPathArgs(req.Args, policyArgKeysForTool(req.ToolName))
+	if len(paths) == 0 {
+		return nil
+	}
+	root := ""
+	if ctx != nil {
+		root = strings.TrimSpace(toolctx.WorkspaceRoot(ctx))
+	}
+	if root == "" && e != nil && e.Policy != nil {
+		root = strings.TrimSpace(e.Policy.PathAnchorRoot)
+	}
+	targets := make([]sensitiveWriteTarget, 0, len(paths))
+	for _, path := range paths {
+		resolved := resolveSensitiveTarget(root, path)
+		if match, ok := ClassifySensitivePath(resolved); ok {
+			targets = append(targets, sensitiveWriteTarget{Path: resolved, Match: match})
+		}
+	}
+	return targets
+}
+
+// callMutatesFiles reports whether a request can write files: write-like tool
+// names or the CapWriteFS capability (taxonomy-derived for file tools).
+func callMutatesFiles(req EvalRequest) bool {
+	if IsWriteLikeToolName(req.ToolName) {
+		return true
+	}
+	return hasCapability(req.Capabilities, CapWriteFS)
+}
+
+// resolveSensitiveTarget anchors a relative target to the workspace root the
+// same way the executor does; absolute paths are returned unchanged.
+func resolveSensitiveTarget(root, target string) string {
+	trimmed := strings.TrimSpace(target)
+	if trimmed == "" || root == "" || filepath.IsAbs(trimmed) {
+		return trimmed
+	}
+	if !filepath.IsAbs(root) {
+		absolute, err := filepath.Abs(root)
+		if err != nil {
+			return trimmed
+		}
+		root = absolute
+	}
+	return filepath.Clean(filepath.Join(root, trimmed))
+}
+
 // planWriteAllowed applies the plan-mode write allowlist to one request.
 //
 // Every write target of the call must be covered (see planWriteTargetsAllowed):
@@ -655,8 +867,22 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 	if decision.Type != DecisionAsk {
 		return decision, nil
 	}
+	// dont_ask is the fail-closed unattended mode: a request that would ask
+	// (mode ask, ask rule, or the model plan-entry gate) is denied instead of
+	// prompting. Reads, read-only shell, grants, and allow rules never reach
+	// resolveAsk, so they keep running.
+	if normalizeMode(req.Mode) == ModeDontAsk || normalizeMode(e.Mode) == ModeDontAsk {
+		return withStage(Decision{
+			Type:        DecisionDeny,
+			Reason:      "mode:dont_ask_denies_unapproved",
+			HookMessage: decision.HookMessage,
+			HookContext: cloneStringMap(decision.HookContext),
+		}, StageMode, "mode:dont_ask_denies_unapproved"), nil
+	}
 	// bypass should not reach ask (modeDecision returns allow), but be defensive.
-	if normalizeMode(req.Mode) == ModeBypassPermissions || normalizeMode(e.Mode) == ModeBypassPermissions {
+	// A HardAsk (root/home removal breaker) is deliberately *not* resolvable by
+	// bypass_permissions: it still requires an explicit user decision.
+	if !decision.HardAsk && (normalizeMode(req.Mode) == ModeBypassPermissions || normalizeMode(e.Mode) == ModeBypassPermissions) {
 		return withStage(Decision{
 			Type:        DecisionAllow,
 			Reason:      "bypass_permissions",
@@ -714,8 +940,9 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 			HookContext: cloneStringMap(decision.HookContext),
 		}, StageAsk, reason), nil
 	}
-	// Optionally remember grant when requested and not dangerous.
-	if resp.Remember && e.Grants != nil && !IsDangerousTool(req.ToolName) {
+	// Optionally remember grant when requested and not dangerous. Hard asks are
+	// one-shot by design: a breaker confirmation must never be remembered.
+	if resp.Remember && !decision.HardAsk && e.Grants != nil && !IsDangerousTool(req.ToolName) {
 		_ = e.Grants.Remember(Grant{Tool: req.ToolName, Scope: "session"})
 	}
 	// Preserve any hook/callback patch already carried on the decision; the
