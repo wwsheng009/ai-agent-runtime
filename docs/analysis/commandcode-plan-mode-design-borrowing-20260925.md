@@ -556,8 +556,12 @@
 |---|---|
 | `go build ./...` | exit 0 |
 | `go test ./internal/planmode/ -count=1` | ok（2.8s，含 7 组新增 diff 用例） |
-| `go test ./cmd/aicli/commands/ -run 'Plans\|ParsePlans' -count=1` | 见 §12.4（本轮期间该包被并发改动打断，最终以独立包 + 干净检出复核） |
+| `go test ./cmd/aicli/commands/ -run 'Plans\|ParsePlans' -count=1` | ok（1.1s） |
+| `go test ./cmd/aicli/commands/ -count=1`（整包） | ok（199.0s）；同命令在前一次运行中因并发会话的 skills 测试告警失败过一次（213.4s），复跑稳定通过 |
 | `gofmt -l cmd/aicli/commands internal/planmode` | 无输出 |
+| 干净检出 `a704c09b`：`go build ./internal/... ./cmd/...` | 仅 `internal/webui/assets.go: pattern dist` 缺失（历史现象），无其它错误 |
+| 干净检出：`go test ./internal/planmode/ -count=1` | ok（2.0s） |
+| 干净检出：`go vet ./cmd/aicli/commands/` | 仍被 `0df28afa`（他人在 plan 工作之外的提交）的 `resolveConfiguredSkillDirs` 签名不一致阻塞（见 §11.5 第 2 条），与本轮改动无关 |
 
 新增用例（要点）：`planmode/diff_test.go` —— 相同文本、`空→新`（`@@ -1,0 +1,2 @@`）、带上下文的单行替换、相距较远的两处改动拆成两个 hunk、900 行整文重写的 `Coarse`+截断（计数仍准确）、无换行结尾标记、`DiffArchivedVersions` 的轮次标签与区间推导（隐式 = 显式）、同版本自比、未知 id / 空 id / 越界版本 / 无快照四类错误；CLI —— `/plans diff <id>` 输出各要素、`v2 v2` 相同提示、缺 id 的用法提示、未知 id 错误，以及 `parsePlansDiffArgs` 参数表（含「三个版本报错」「`vX` 留在 id 里」）。
 
