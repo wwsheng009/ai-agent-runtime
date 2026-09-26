@@ -210,12 +210,13 @@ type CommandResult struct {
 	// mode still uses the legacy handler).
 	SendObjective string
 	// SendMessageAfterCommit requests a chat send of the given message after
-	// the command cell is committed. Only commands that share a captured
-	// execution result with the AI (currently /shell and /cmd) set it: the
-	// result document stays the atomic command cell, while the message streams
-	// through the normal send pipeline as its own turn. Plain/JSON/
-	// noninteractive projections ignore the flag; dispatch performs the send
-	// for every projection that entered the structured path.
+	// the command cell is committed. Commands that share a captured execution
+	// result with the AI (/shell, /cmd) and the plan revision round
+	// (/plan request_changes, §4.4) set it: the result document stays the atomic
+	// command cell, while the message streams through the normal send pipeline
+	// as its own turn. Plain/JSON/noninteractive projections ignore the flag;
+	// dispatch performs the send for every projection that entered the
+	// structured path.
 	SendMessageAfterCommit string
 	// SendSkillTurn requests a post-commit chat turn for `/skill <name> <args>`.
 	// The default /skill path no longer executes the skill directly: it registers

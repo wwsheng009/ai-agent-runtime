@@ -164,7 +164,11 @@ func executeStructuredPlanModeExit(session *ChatSession, decisionToken, notes st
 	if err != nil {
 		return commandErrorResult(err)
 	}
-	return planModeMutationCommandResult(result, formatPlanModeExited(session, result.State))
+	out := planModeMutationCommandResult(result, formatPlanModeExited(session, result.State))
+	// §4.4 自动修订回合：裁决单元先落盘，修订轮再经正常 send 管线作为独立 turn
+	// 提交（command.go 的 post-commit 效果；纯文本路径见 chat_plan_revision.go）。
+	out.SendMessageAfterCommit = planRevisionAfterCommitEffect(session, decisionToken, notes)
+	return out
 }
 
 func planModeMutationCommandResult(result chatPlanModeMutationResult, message string) CommandResult {
@@ -219,6 +223,7 @@ func exitChatPlanModeCommand(session *ChatSession, decisionToken, notes string) 
 	default:
 		fmt.Printf("提示: plan mode 已更新（permission-mode=%s）\n", mode)
 	}
+	startChatPlanRevisionRound(session, decisionToken, notes)
 	return false
 }
 
