@@ -12,10 +12,13 @@
  *
  * 文案由调用方以 `labels` 传入（各入口分属不同 i18n 命名空间），本组件不做翻译。
  */
-import { CheckIcon, XIcon } from "lucide-react";
+import { CheckIcon, SparklesIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 
-import type { SessionApprovalRememberScope } from "@/api/runtime/sessions";
+import type {
+  SessionApprovalExplanation,
+  SessionApprovalRememberScope,
+} from "@/api/runtime/sessions";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -36,6 +39,13 @@ export type ApprovalDecisionLabels = {
   deny: string;
   /** 提交中时的批准按钮文案（缺省回退 `approve`）。 */
   busyApprove?: string;
+  explain: string;
+  explaining: string;
+  /** 由调用方以 i18n 插值错误信息（组件只透传 message）。 */
+  explanationFailed: (message: string) => string;
+  /** 由调用方以 i18n 插值模型名。 */
+  explanationSourceModel: (model: string) => string;
+  explanationSourceRules: string;
 };
 
 type ApprovalDecisionControlsProps = {
@@ -48,6 +58,11 @@ type ApprovalDecisionControlsProps = {
   /** 透传到批准/拒绝按钮的 `data-*`（既有测试与埋点的稳定锚点）。 */
   approveAttrs?: Record<string, string>;
   rejectAttrs?: Record<string, string>;
+  /**
+   * §4.13 按需解释：给出则渲染「解释」动作。回调返回模型摘要或规则降级文本，
+   * 结果只在本组件内展示，绝不参与决定（真正的决定仍只由批准/拒绝发起）。
+   */
+  onExplain?: () => Promise<SessionApprovalExplanation>;
 };
 
 export function ApprovalDecisionControls({
@@ -58,12 +73,18 @@ export function ApprovalDecisionControls({
   className,
   approveAttrs,
   rejectAttrs,
+  onExplain,
 }: ApprovalDecisionControlsProps) {
   // 调用方以 `key={交互条目 id}` 挂载：身份切换即重建（草稿不串条目）。
   const [remember, setRemember] = useState(false);
   const [scope, setScope] =
     useState<Exclude<SessionApprovalRememberScope, "once">>("session");
   const [feedback, setFeedback] = useState("");
+  const [explaining, setExplaining] = useState(false);
+  const [explanation, setExplanation] = useState<SessionApprovalExplanation | null>(
+    null,
+  );
+  const [explainError, setExplainError] = useState("");
   const pattern = rememberPattern?.trim() ?? "";
   const options = {
     ...(feedback.trim() ? { feedback } : {}),
@@ -74,6 +95,26 @@ export function ApprovalDecisionControls({
     Object.keys(options).length > 0
       ? onDecide(allow, options)
       : onDecide(allow);
+
+  const explain = async () => {
+    if (!onExplain || explaining) {
+      return;
+    }
+    setExplaining(true);
+    setExplainError("");
+    try {
+      setExplanation(await onExplain());
+    } catch (error) {
+      setExplanation(null);
+      setExplainError(
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : String(error),
+      );
+    } finally {
+      setExplaining(false);
+    }
+  };
 
   return (
     <div
@@ -125,7 +166,20 @@ export function ApprovalDecisionControls({
         onChange={(event) => setFeedback(event.target.value)}
       />
       <div className="flex flex-wrap items-center gap-2">
+        {onExplain ? (
+          <Button
+            data-approval-explain
+            disabled={explaining}
+            size="sm"
+            variant="ghost"
+            onClick={() => void explain()}
+          >
+            <SparklesIcon className="size-3.5" />
+            {explaining ? labels.explaining : labels.explain}
+          </Button>
+        ) : null}
         <Button
+          data-approval-approve
           disabled={disabled}
           size="sm"
           variant="primary"
@@ -136,6 +190,7 @@ export function ApprovalDecisionControls({
           {disabled && labels.busyApprove ? labels.busyApprove : labels.approve}
         </Button>
         <Button
+          data-approval-deny
           disabled={disabled}
           size="sm"
           variant="destructive"
@@ -146,6 +201,26 @@ export function ApprovalDecisionControls({
           {labels.deny}
         </Button>
       </div>
+      {explanation ? (
+        <div
+          className="space-y-1 rounded-field border border-border/70 bg-surface-solid/60 px-2.5 py-2"
+          data-approval-explanation
+        >
+          <p className="whitespace-pre-wrap text-xs leading-5 text-foreground">
+            {explanation.explanation}
+          </p>
+          <p className="text-[10px] text-muted-foreground">
+            {explanation.source === "model" && explanation.model
+              ? labels.explanationSourceModel(explanation.model)
+              : labels.explanationSourceRules}
+          </p>
+        </div>
+      ) : null}
+      {explainError ? (
+        <p className="text-xs leading-5 text-accent-orange" data-approval-explain-error>
+          {labels.explanationFailed(explainError)}
+        </p>
+      ) : null}
     </div>
   );
 }

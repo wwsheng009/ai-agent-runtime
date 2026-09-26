@@ -110,6 +110,9 @@ type Handler struct {
 	mcpManager     skill.MCPManager
 	mcpAdmin       mcpadmin.AdminService
 	llmRuntime     *llm.LLMRuntime
+	// §4.13 审批解释（可选注入）：nil 时用 llmRuntime 的内建一次性调用；
+	// 两者都不可用则端点降级为规则摘要（永不把模型故障变成 5xx）。
+	approvalSummarizer ApprovalSummarizer
 	sessionManager *chat.SessionManager
 	// plansStore overrides the process-wide plan artifact store (tests/hosts).
 	plansStore                     *planstore.Store
@@ -970,6 +973,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/tool-receipts", h.ListSessionToolReceipts).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/stream", h.StreamSessionRuntimeEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/commands", h.SubmitSessionRuntimeCommand).Methods(http.MethodPost)
+	// §4.13 按需解释：只读摘要（模型优先，失败降级规则），不写状态、不解析决定。
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/approvals/{request_id}/explain", h.ExplainSessionApproval).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agent-control/mailbox", h.ListSessionAgentControlMailbox).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents", h.SpawnSessionAgent).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/agents/wait", h.WaitSessionAgents).Methods(http.MethodPost)

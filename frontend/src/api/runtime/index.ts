@@ -107,6 +107,7 @@ export {
   applySessionBacktrack,
   createRuntimeSession,
   deleteRuntimeSession,
+  explainSessionApproval,
   getRuntimeSession,
   getSessionHistory,
   getSessionCheckpointFiles,
@@ -127,6 +128,7 @@ export {
 } from "./sessions";
 export type {
   ResolveSessionToolApprovalRequest,
+  SessionApprovalExplanation,
   SessionApprovalRememberScope,
 } from "./sessions";
 export { branchRuntimeSession } from "./session-branch";

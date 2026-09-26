@@ -439,9 +439,11 @@ export async function updateSessionPermissionMode(
 // re-export 保持既有调用方与 `vi.mock("@/api/runtime/sessions")` 不变。
 export {
   answerSessionQuestion,
+  explainSessionApproval,
   resolveSessionToolApproval,
   type AnswerSessionQuestionRequest,
   type ResolveSessionToolApprovalRequest,
+  type SessionApprovalExplanation,
   type SessionApprovalRememberScope,
   type SessionRuntimeCommandOptions,
 } from "./session-interaction-commands";

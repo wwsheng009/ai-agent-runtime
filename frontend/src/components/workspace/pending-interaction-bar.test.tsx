@@ -6,11 +6,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PendingInteraction } from "@/lib/pending-interaction";
 
+const approvalExplanation = vi.hoisted(() => ({ explain: vi.fn() }));
+
+vi.mock("@/hooks/workspace/use-approval-explanation", () => ({
+  useApprovalExplanation: () => approvalExplanation.explain,
+}));
+
 vi.mock("react-i18next", () => ({
   // 插值原样拼接，便于断言「将记住的模式」确实渲染到了 DOM。
   useTranslation: () => ({
-    t: (key: string, options?: { pattern?: string }) =>
-      options?.pattern ? `${key}:${options.pattern}` : key,
+    t: (
+      key: string,
+      options?: { pattern?: string; model?: string; message?: string },
+    ) =>
+      options?.pattern
+        ? `${key}:${options.pattern}`
+        : options?.model
+          ? `${key}:${options.model}`
+          : options?.message
+            ? `${key}:${options.message}`
+            : key,
   }),
 }));
 
@@ -76,6 +91,7 @@ describe("PendingInteractionBar", () => {
 
   beforeEach(() => {
     (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
+    approvalExplanation.explain.mockReset();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = null;
@@ -122,8 +138,18 @@ describe("PendingInteractionBar", () => {
     return container;
   }
 
-  function buttons() {
+  /** 卡片内的全部按钮（提问 / 计划评审用；审批断言请用 buttons()）。 */
+  function allButtons() {
     return Array.from(container.querySelectorAll("button"));
+  }
+
+  function buttons() {
+    // 只取批准/拒绝：解释按钮是只读动作，不参与决定断言。
+    return Array.from(
+      container.querySelectorAll(
+        "button[data-approval-approve], button[data-approval-deny]",
+      ),
+    );
   }
 
   it("renders nothing without an interaction", () => {
@@ -208,6 +234,53 @@ describe("PendingInteractionBar", () => {
     expect(onResolveApproval).toHaveBeenCalledWith("req-1", true);
   });
 
+  it("§4.13：可按需生成解释，只读展示来源，不影响批准/拒绝提交", async () => {
+    approvalExplanation.explain.mockResolvedValue({
+      explanation: "会执行 rm -rf build/，删除构建产物目录",
+      source: "model",
+      model: "gpt-5.1",
+    });
+    const onResolveApproval = vi.fn();
+    renderBar({
+      interaction: approvalInteraction(),
+      onResolveApproval,
+    });
+
+    const explain = container.querySelector<HTMLButtonElement>(
+      "[data-approval-explain]",
+    );
+    expect(explain).not.toBeNull();
+    await act(async () => {
+      explain?.click();
+    });
+
+    // 只读：按条目会话与请求号取解释，不产生任何决定。
+    expect(approvalExplanation.explain).toHaveBeenCalledWith(
+      "session-1",
+      "req-1",
+    );
+    expect(onResolveApproval).not.toHaveBeenCalled();
+    const block = container.querySelector("[data-approval-explanation]");
+    expect(block?.textContent).toContain("删除构建产物目录");
+    expect(block?.textContent).toContain("gpt-5.1");
+  });
+
+  it("§4.13：解释失败就地提示，按钮可再试", async () => {
+    approvalExplanation.explain.mockRejectedValue(new Error("model offline"));
+    renderBar({ interaction: approvalInteraction() });
+
+    const explain = container.querySelector<HTMLButtonElement>(
+      "[data-approval-explain]",
+    );
+    await act(async () => {
+      explain?.click();
+    });
+
+    const error = container.querySelector("[data-approval-explain-error]");
+    expect(error?.textContent).toContain("model offline");
+    expect(container.querySelector("[data-approval-explanation]")).toBeNull();
+  });
+
   it("answers questions via suggestion or typed draft", () => {
     const onAnswerQuestion = vi.fn();
     renderBar({
@@ -216,7 +289,7 @@ describe("PendingInteractionBar", () => {
     });
 
     // 建议按钮（main / dev）在前，提交按钮在后。
-    const suggestionButton = buttons()[0];
+    const suggestionButton = allButtons()[0];
     expect(suggestionButton.textContent).toContain("main");
     act(() => {
       suggestionButton.click();
@@ -254,13 +327,13 @@ describe("PendingInteractionBar", () => {
     expect(onPlanNotesChange).toHaveBeenCalledWith("please split");
 
     act(() => {
-      buttons()[0].click();
+      allButtons()[0].click();
     });
     act(() => {
-      buttons()[1].click();
+      allButtons()[1].click();
     });
     act(() => {
-      buttons()[2].click();
+      allButtons()[2].click();
     });
     expect(onPlanDecision.mock.calls.map((call) => call[0])).toEqual([
       "approve",

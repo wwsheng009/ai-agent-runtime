@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   answerSessionQuestion,
+  explainSessionApproval,
   resolveSessionToolApproval,
 } from "@/api/runtime/sessions";
 
@@ -125,6 +126,48 @@ describe("resolveSessionToolApproval", () => {
       request_id: "approval-9",
       allow: false,
       feedback: "不要动这个文件",
+    });
+  });
+});
+
+describe("explainSessionApproval", () => {
+  const originalFetch = globalThis.fetch;
+  let calls: Array<{ url: string; init?: RequestInit }> = [];
+
+  beforeEach(() => {
+    calls = [];
+    globalThis.fetch = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(input), init });
+        return new Response(
+          JSON.stringify({
+            explanation: "会删除 build/ 目录",
+            source: "model",
+            model: "gpt-5.1",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    ) as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("§4.13：POST 到 approvals/{request_id}/explain，只读且不带决定字段", async () => {
+    const result = await explainSessionApproval("child/1", "approval-42");
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain(
+      "/api/runtime/sessions/child%2F1/runtime/approvals/approval-42/explain",
+    );
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({});
+    expect(result).toEqual({
+      explanation: "会删除 build/ 目录",
+      source: "model",
+      model: "gpt-5.1",
     });
   });
 });

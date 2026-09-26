@@ -122,6 +122,7 @@ export function SubagentSessionDialog({
     resolvingApproval,
     approvalError,
     resolveApproval,
+    explainApproval,
     reconnect,
   } = useSubagentSession({
     sessionId: target?.sessionId ?? null,
@@ -243,6 +244,25 @@ export function SubagentSessionDialog({
               approveAttrs={{ "data-subagent-session-approval-approve": "" }}
               disabled={resolvingApproval}
               labels={{
+                explain: t(
+                  "panels.shell.trajectory.subagentSession.approval.explain",
+                ),
+                explaining: t(
+                  "panels.shell.trajectory.subagentSession.approval.explaining",
+                ),
+                explanationFailed: (message: string) =>
+                  t(
+                    "panels.shell.trajectory.subagentSession.approval.explanationFailed",
+                    { message },
+                  ),
+                explanationSourceModel: (model: string) =>
+                  t(
+                    "panels.shell.trajectory.subagentSession.approval.explanationSourceModel",
+                    { model },
+                  ),
+                explanationSourceRules: t(
+                  "panels.shell.trajectory.subagentSession.approval.explanationSourceRules",
+                ),
                 busyApprove: t(
                   "panels.shell.trajectory.subagentSession.approval.resolving",
                 ),
@@ -274,6 +294,7 @@ export function SubagentSessionDialog({
               }}
               rejectAttrs={{ "data-subagent-session-approval-reject": "" }}
               rememberPattern={pendingApproval.rememberPattern}
+              onExplain={() => explainApproval()}
               onDecide={(allow, options) => void resolveApproval(allow, options)}
             />
           </div>

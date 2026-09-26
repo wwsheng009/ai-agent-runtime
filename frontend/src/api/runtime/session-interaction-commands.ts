@@ -83,6 +83,43 @@ export type AnswerSessionQuestionRequest = {
   answer: string;
 };
 
+/** §4.13 审批解释：模型摘要（`model`）或规则模板降级（`rules`）。 */
+export type SessionApprovalExplanation = {
+  /** 解释正文（要点式纯文本；纯 UI 展示，不进入工具调用决策链）。 */
+  explanation: string;
+  /** `model` = 由当前会话模型摘要；`rules` = 未调用模型时的规则降级。 */
+  source: "model" | "rules";
+  /** 生成解释所用的模型名（`source=model` 时给出）。 */
+  model?: string;
+};
+
+/**
+ * §4.13 按需解释：对指定会话的 pending 审批做一次只读解释（不改变任何决定）。
+ *
+ * 服务端把该审批的工具名 + 完整参数 + 风险级别 + 准入原因交给会话模型做摘要；
+ * 模型不可用时降级为规则模板解释。结果按 request_id 缓存于服务端。
+ */
+export async function explainSessionApproval(
+  sessionId: string,
+  requestId: string,
+  options: SessionRuntimeCommandOptions = {},
+): Promise<SessionApprovalExplanation> {
+  return fetchRuntimeJson<SessionApprovalExplanation>(
+    buildRuntimeUrl(
+      `/api/runtime/sessions/${encodeURIComponent(sessionId)}/runtime/approvals/${encodeURIComponent(requestId)}/explain`,
+    ),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
+  );
+}
+
 /**
  * 提问联动（P1-7）：对指定会话的 pending 提问提交回答。
  *

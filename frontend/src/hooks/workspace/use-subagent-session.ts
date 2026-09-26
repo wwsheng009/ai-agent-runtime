@@ -19,7 +19,9 @@ import { useCallback, useEffect, useState } from "react";
 
 import {
   fetchSessionRuntimeEvents,
+  explainSessionApproval,
   resolveSessionToolApproval,
+  type SessionApprovalExplanation,
   type SessionApprovalRememberScope,
 } from "@/api/runtime/sessions";
 import { streamSessionRuntime } from "@/api/runtime/sse";
@@ -58,6 +60,8 @@ export type SubagentSessionHandle = {
     allow: boolean,
     options?: { rememberScope?: SessionApprovalRememberScope; feedback?: string },
   ) => Promise<boolean>;
+  /** §4.13 按需解释：对当前 inline 审批取一次只读摘要（不参与决定）。 */
+  explainApproval: () => Promise<SessionApprovalExplanation>;
   /** 手动重连（closed / error 状态可用；沿用当前游标增量续传）。 */
   reconnect: () => void;
 };
@@ -209,6 +213,18 @@ export function useSubagentSession(options: {
     [pendingApproval, sessionId],
   );
 
+  /**
+   * §4.13 按需解释：对当前 inline 审批做一次只读摘要（不改状态、不参与决定）。
+   * 失败向上抛出，弹层就地提示。
+   */
+  const explainApproval = useCallback(async (): Promise<SessionApprovalExplanation> => {
+    const requestId = pendingApproval?.requestId ?? "";
+    if (!sessionId || !requestId) {
+      throw new Error("no pending approval to explain");
+    }
+    return explainSessionApproval(sessionId, requestId);
+  }, [pendingApproval, sessionId]);
+
   useEffect(() => {
     if (!enabled || !sessionId) {
       setStore(null);
@@ -357,6 +373,7 @@ export function useSubagentSession(options: {
     resolvingApproval,
     approvalError,
     resolveApproval,
+    explainApproval,
     reconnect,
   };
 }

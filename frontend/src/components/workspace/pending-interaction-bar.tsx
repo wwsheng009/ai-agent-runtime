@@ -9,9 +9,12 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ApprovalDecisionControls } from "@/components/workspace/approval-decision-controls";
+import { useApprovalExplanation } from "@/hooks/workspace/use-approval-explanation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { SessionApprovalRememberScope } from "@/api/runtime/sessions";
+import type {
+  SessionApprovalRememberScope,
+} from "@/api/runtime/sessions";
 import type {
   PendingInteraction,
   PendingQuestionInteraction,
@@ -108,8 +111,10 @@ export function PendingInteractionBar({
   className,
 }: PendingInteractionBarProps) {
   const { t } = useTranslation("workspace");
+  const explainApproval = useApprovalExplanation();
   const interactionId = interaction?.id ?? "";
   const interactionKind = interaction?.kind ?? "";
+  const interactionSessionId = interaction?.sessionId ?? "";
   const interactionStatus = interaction?.status ?? "";
 
   if (!interaction) {
@@ -198,6 +203,17 @@ export function PendingInteractionBar({
           className="mt-2"
           disabled={isResolving}
           labels={{
+            explain: t("panels.interactions.approval.explain"),
+            explaining: t("panels.interactions.approval.explaining"),
+            explanationFailed: (message: string) =>
+              t("panels.interactions.approval.explanationFailed", { message }),
+            explanationSourceModel: (model: string) =>
+              t("panels.interactions.approval.explanationSourceModel", {
+                model,
+              }),
+            explanationSourceRules: t(
+              "panels.interactions.approval.explanationSourceRules",
+            ),
             remember: t("panels.interactions.approval.remember"),
             rememberScopeLabel: t(
               "panels.interactions.approval.rememberScopeLabel",
@@ -218,6 +234,12 @@ export function PendingInteractionBar({
             deny: t("panels.interactions.approval.deny"),
           }}
           rememberPattern={interaction.rememberPattern}
+          {...(interactionSessionId
+            ? {
+                onExplain: () =>
+                  explainApproval(interactionSessionId, interaction.id),
+              }
+            : {})}
           onDecide={(allow, options) =>
             options
               ? onResolveApproval(interaction.id, allow, options)
