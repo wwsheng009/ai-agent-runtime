@@ -51,6 +51,14 @@ type SubagentTask struct {
 	BudgetTokens        int         `json:"budget_tokens,omitempty" yaml:"budget_tokens,omitempty"`
 	TimeoutSec          int         `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	ReadOnly            bool        `json:"read_only,omitempty" yaml:"read_only,omitempty"`
+	// AgentType optionally references a portable agent definition
+	// (.agents/agents/*.md, ~/.aicli/agents/*, builtin) whose defaults
+	// (read-only, tools, model/provider/reasoning, maxTurns, completion) fill
+	// any field the task left empty. Explicit task fields always win.
+	AgentType string `json:"agent_type,omitempty" yaml:"agent_type,omitempty"`
+	// MaxTurns caps this child's loop steps (0 = inherit the session config).
+	// Sourced from the referenced agent definition when present.
+	MaxTurns int `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
 	// ReadOnlySource records an inherited or explicit read-only boundary for
 	// diagnostics. It is internal metadata and is not part of the tool payload.
 	ReadOnlySource string `json:"-" yaml:"-"`

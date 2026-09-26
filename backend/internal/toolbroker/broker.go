@@ -396,7 +396,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"message":              map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. A spawn_agent call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
 						"goal":                 map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
 						"task":                 map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
-						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional orchestration role hint for the child agent (compatibility alias; prefer task_type for routing)."},
+						"prompt":               map[string]interface{}{"type": "string", "description": "Alias for message."},
+						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional portable agent definition (builtin/user/project) whose defaults (read_only, permission_mode, model, provider) fill fields the call left empty; explicit args win. Also accepted as an orchestration role hint for the child agent."},
 						"difficulty":           map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
 						"difficulty_rationale": map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
 						"task_type": map[string]interface{}{
@@ -419,6 +420,10 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + " Defaults permission_mode to plan when omitted."},
 						"fork_context":           map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
 						"fork_turns":             map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
+						"timeout_sec":            map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional wall-clock limit in seconds for the child run."},
+						"progress_timeout_sec":   map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional no-progress timeout in seconds; a child without progress for this long is treated as stalled."},
+						"approval_timeout_sec":   map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional approval wait timeout in seconds for child tool approvals."},
+						"cancel_grace_sec":       map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional grace period in seconds before a cancelled child is force-stopped."},
 					},
 				},
 			},
@@ -583,7 +588,8 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"message":              map[string]interface{}{"type": "string", "description": "Required: the child's initial task prompt. A spawn_agent call without a task prompt (or its alias goal/task) is rejected instead of creating an empty child session that has no task in context."},
 						"goal":                 map[string]interface{}{"type": "string", "description": "Alias for message (spawn_subagents/spawn_team name the same concept goal). Prefer message."},
 						"task":                 map[string]interface{}{"type": "string", "description": "Alias for message. Prefer message."},
-						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional orchestration role hint for the child agent (compatibility alias; prefer task_type for routing)."},
+						"prompt":               map[string]interface{}{"type": "string", "description": "Alias for message."},
+						"agent_type":           map[string]interface{}{"type": "string", "description": "Optional portable agent definition (builtin/user/project) whose defaults (read_only, permission_mode, model, provider) fill fields the call left empty; explicit args win. Also accepted as an orchestration role hint for the child agent."},
 						"difficulty":           map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Optional task difficulty hint for local child routing."},
 						"difficulty_rationale": map[string]interface{}{"type": "string", "description": "Optional short rationale for the selected task difficulty."},
 						"task_type": map[string]interface{}{
@@ -606,6 +612,10 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"read_only":              map[string]interface{}{"type": "boolean", "description": runtimepolicy.ReadOnlyChildOptionDescription + " Defaults permission_mode to plan when omitted."},
 						"fork_context":           map[string]interface{}{"type": "boolean", "description": "Whether to copy the parent session history into the child session."},
 						"fork_turns":             map[string]interface{}{"type": "string", "description": "Optional fork mode: none, all, or a positive integer. Overrides fork_context when provided."},
+						"timeout_sec":            map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional wall-clock limit in seconds for the child run."},
+						"progress_timeout_sec":   map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional no-progress timeout in seconds; a child without progress for this long is treated as stalled."},
+						"approval_timeout_sec":   map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional approval wait timeout in seconds for child tool approvals."},
+						"cancel_grace_sec":       map[string]interface{}{"type": "integer", "minimum": 0, "description": "Optional grace period in seconds before a cancelled child is force-stopped."},
 					},
 				},
 			},
@@ -4200,6 +4210,9 @@ func applySpawnAgentAgentdefDefaults(request *SpawnAgentArgs, permissionModeExpl
 	}
 	if strings.TrimSpace(request.Model) == "" {
 		request.Model = strings.TrimSpace(binding.Model)
+	}
+	if strings.TrimSpace(request.ReasoningEffort) == "" && strings.TrimSpace(request.ThinkingEffort) == "" {
+		request.ReasoningEffort = strings.TrimSpace(binding.ReasoningEffort)
 	}
 }
 

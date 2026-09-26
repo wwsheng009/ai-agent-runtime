@@ -73,13 +73,19 @@ Do not mutate the workspace.
 
 | 字段 | 含义 |
 | --- | --- |
-| `tools` / `disallowedTools` | 工具 allow / deny（runtime ToolPolicy） |
+| `tools` / `disallowedTools` | 工具 allow / deny（runtime ToolPolicy）。`tools` **省略 = 继承完整工具箱**；`tools: ["*"]` = 显式全量（含 MCP）；deny 优先 |
 | `permissionMode` | `default` / `accept_edits` / `plan` / `bypass_permissions` / `dont_ask` |
 | `promptMode` | `extend`（追加）或 `full`（替换 role 段） |
 | `completionRequirement` | `none` 或 `complete_task`（worker 需 outcome） |
 | `sandbox` | 应用层 profile：`off` / `workspace` / `read-only` / `strict`（见下） |
-| `skills` | 可选 skill id 白名单；空 = 走全局 skills route |
+| `skills` | 可选 skill id 白名单；空 = 走全局 skills route（非空时投影到 session `ProfileSkillSelection.Allowlist`） |
 | `model` / `provider` | 可选覆盖 |
+| `reasoningEffort` | `none` / `low` / `medium` / `high` / `xhigh` / `max`。未知档位在**加载期**丢弃并记 warning（文件仍加载），运行期再由 modelrouting 按解析出的模型校验/回退 |
+| `maxTurns` | 该角色子代理的循环步数上限（0 = 继承会话默认；负数归一化为 0）。当前在 `spawn_subagents` 的 agent_type 通道生效；`spawn_agent` 单会话的 `--agent` 通道仍由运行配置决定 |
+| `background` | 声明该角色默认后台运行。当前运行时子代理**一律异步派发**（P3 已删除阻塞路径），字段用于目录/审计与后续前台模式对齐，不是模式开关 |
+| `showOutput` | 声明把子代理最终消息原文回显到父 feed。字段已解析/校验并在目录中可见；回显接线（原文 vs 有界摘要）仍走现有 `read_subagent`/transcript 路径 |
+
+> 与 CommandCode 的语义差异（有意保留）：本地 `tools` 省略是 **fail-open（继承全量）**，CommandCode 是 fail-closed（省略=无工具）。`aicli agents lint` 会对"省略 tools"给出 info 级提示，`tools: ["*"]` 则为显式全量。
 
 `sandbox` 产品语义（应用层，非 OS 隔离）：
 
@@ -108,6 +114,30 @@ workspace root 尚未可知时会 **显式降级并告警**（stderr/log），�
 
 - 交互/general chat 默认 `completionRequirement: none`
 - **team worker 不读 def 改 completion**：`TeammateRunner` 在 `RunMeta` 上强制 `complete_task`（`report_task_outcome` / `block_current_task`）
+
+### 创建与校验：`aicli agents` 命令组
+
+```bash
+# 按来源（builtin/user/project/profile）分组列出定义、覆盖关系与加载告警
+aicli agents list
+aicli agents list --json
+
+# 展示单个定义：原始声明 + 运行时绑定（read_only/permission/tools/skills）+ lint
+aicli agents show my-reviewer
+
+# 全量校验：工具语义、同名覆盖、未知推理档等；存在 warning 时退出码非 0
+# （同名覆盖/覆盖内置以 info 标注，可见但不导致失败；未知推理档、空 description 才是 warning）
+aicli agents lint
+
+# 从模板创建（默认项目 .agents/agents/<name>.md；不覆盖已有文件）
+aicli agents new code-reviewer --description "Reviews diffs for bugs"
+aicli agents new safe-reader --template read-only --scope user
+```
+
+模板：`read-only`（只读探索）、`writer`（可写实现）、`blank`（最小骨架，`tools: ["*"]`）。
+创建时会立即解析并 lint，warning 会打印出来（例如 description 为空、覆盖内置角色名）。
+
+chat 内可用只读视图：`/agents defs [list|show <name>|lint]`（与 `/agents` 的运行期协作面板共用入口，动词不同）。
 
 ## 3. CLI：`aicli chat --agent`
 
@@ -175,7 +205,7 @@ Agent Source:      profile · E:\repo\examples\profiles\coding\agents\coder\agen
 
 - `permission_mode`（explore → `plan`）
 - `read_only`（sandbox read-only → true）
-- `model` / `provider`（若 def 声明）
+- `model` / `provider` / `reasoning_effort`（若 def 声明）
 
 **显式参数永远赢**，例如：
 
@@ -189,6 +219,21 @@ Agent Source:      profile · E:\repo\examples\profiles\coding\agents\coder\agen
 ```
 
 不会被 explore 的 plan/read-only 默认覆盖。
+
+### `spawn_subagents` 的 agent_type（批量通道）
+
+`spawn_subagents` 的每个任务条目支持 `agent_type`：引用目录中的一个便携定义，未显式给出的字段由该定义补齐：
+
+- `read_only`（sandbox read-only → true，并在子提示词标注来源）
+- `tools_whitelist`（def 的 tools 减去 disallowedTools；显式 `tools_whitelist` 永远赢）
+- `model` / `provider` / `reasoning_effort`（显式参数永远赢；provider 覆盖受 routing 的显式开关约束）
+- `max_turns`（映射为子代理循环步数上限，取 def 与运行配置的较小值）
+- `completion_requirement`
+
+解析失败不会拒绝整批：任务照跑，并在回执的 `route_warnings` 写入 `agent_type_not_found:<name>`，便于父模型纠正。
+
+工具面会把已发现定义渲染进 `spawn_subagents` 的工具描述（`name: description (source, read-only)`），父模型无需自行扫描目录即可选择角色。
+参考实现：`internal/agent/agentdef_bridge.go`、`internal/agent/loop.go`（`decodeSubagentTasks`）。
 
 `completion_requirement` 对普通 `spawn_agent` 固定为 `none`：schema 不再宣传 `complete_task`，显式 snake/camel 或 agentdef 解析出 `complete_task` 会在创建 child 前被拒绝，并提示改用 `spawn_team` / Team assignment。fork 会复制父上下文，但 route context 会覆盖为 `none`；真正的 teammate `complete_task` 只由 `TeammateRunner` 在绑定了 `TeamID` + `CurrentTaskID` 的 `RunMeta` 上注入。
 
@@ -212,7 +257,7 @@ Agent Source:      profile · E:\repo\examples\profiles\coding\agents\coder\agen
 - Skills **默认启用**（`skills_runtime.enabled` 默认 true；chat 默认暴露 tools/skills）。
 - 暴露是 **route + top-k**，不是全量 dump。详见 [`docs/skill_runtime/aicli_skills_usage.md`](../skill_runtime/aicli_skills_usage.md)。
 - `aicli exec` 对**纯文本 headless** 常默认 `--disable-tools`，这不是 “skills 没装”，而是 headless 安全默认；需要工具时用 `--enable-tools` / `--yolo` / 非 default permission / 带 profile|agent。
-- AgentDefinition 的 `skills: []` 表示走全局 route；非空则是可选白名单（与全局 top-k 叠加，不替代 loader）。
+- AgentDefinition 的 `skills: []` 表示走全局 route；非空时投影到 session `ProfileSkillSelection.Allowlist` 生效（与全局 top-k 叠加，不替代 loader）。
 
 ## 7. Permission 可观测（A4 摘要）
 
@@ -238,8 +283,18 @@ go test ./internal/toolbroker -count=1 -run "TestBroker_Execute_SpawnAgentApplie
 go test ./internal/agentdef -count=1
 go test ./internal/policy -count=1 -run "TestEngineShellReadOnly|TestEngineTaxonomyReadOnly|TestIsShellReadOnly|TestEngineBypass"
 
+# unit：agents 管理命令 + 新字段 + agent_type 批量通道 + routing 关闭修复
+go test ./cmd/aicli/commands -count=1 -run "TestAgents|TestNormalizeAgents"
+go test ./internal/agentdef -count=1 -run "TestDefinition|TestCatalog|TestModelVisible|TestLint|TestUnknownReasoning"
+go test ./internal/modelrouting -count=1 -run "TestResolveDisabled"
+go test ./internal/agent -count=1 -run "TestApplyAgentdef|TestDecodeSubagentTasksAcceptsAgentType|TestSpawnSubagentsSchemaAdvertises"
+
 # 手工 smoke（需可用 provider）
 # aicli chat --agent explore --no-interactive -M "List top-level packages under backend/internal"
+
+# 手工 smoke（无需 provider）
+aicli agents list
+aicli agents lint
 ```
 
 ## 9. ACP 宿主：`aicli agent stdio`

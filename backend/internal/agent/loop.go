@@ -3714,7 +3714,7 @@ func (loop *ReActLoop) computeAvailableTools(ctx context.Context, goal string, t
 
 	if scheduler := loop.agent.GetSubagentScheduler(); scheduler != nil {
 		if shouldExposeSpawnSubagents(loop.agent, allowed) {
-			definition := spawnSubagentsToolDefinition(loop.agent.SupportsSuspension())
+			definition := spawnSubagentsToolDefinition(loop.agent.SupportsSuspension(), loop.agent.AgentDefinitionsSummary())
 			if !seen[definition.Name] {
 				seen[definition.Name] = true
 				tools = append(tools, definition)
@@ -6264,9 +6264,14 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 		if timeoutWarning != "" {
 			routeWarnings = append(routeWarnings, timeoutWarning)
 		}
+		maxTurns, maxTurnsWarning := sanitizeDecodedSubagentOptionRange("max_turns", item["max_turns"])
+		if maxTurnsWarning != "" {
+			routeWarnings = append(routeWarnings, maxTurnsWarning)
+		}
 		task := SubagentTask{
 			ID:                    stringValue(item["id"]),
 			Role:                  stringValue(item["role"]),
+			AgentType:             stringValue(item["agent_type"]),
 			TaskType:              stringValue(item["task_type"]),
 			TaskSubject:           stringValue(item["task_subject"]),
 			Goal:                  stringValue(item["goal"]),
@@ -6278,6 +6283,7 @@ func decodeSubagentTasks(args map[string]interface{}) ([]SubagentTask, error) {
 			RouteWarnings:         routeWarnings,
 			BudgetTokens:          budgetTokens,
 			TimeoutSec:            timeoutSec,
+			MaxTurns:              maxTurns,
 			ReadOnly:              boolValue(item["read_only"]),
 			CompletionRequirement: completionRequirement,
 		}
@@ -6412,6 +6418,7 @@ var decodedSubagentFieldTypes = []struct {
 }{
 	{"id", subagentFieldString},
 	{"role", subagentFieldString},
+	{"agent_type", subagentFieldString},
 	{"task_type", subagentFieldString},
 	{"task_subject", subagentFieldString},
 	{"goal", subagentFieldString},
@@ -6425,6 +6432,7 @@ var decodedSubagentFieldTypes = []struct {
 	{"completionRequirement", subagentFieldString},
 	{"budget_tokens", subagentFieldNumber},
 	{"timeout", subagentFieldNumber},
+	{"max_turns", subagentFieldNumber},
 	{"read_only", subagentFieldBool},
 	{"tools_whitelist", subagentFieldArray},
 	{"depends_on", subagentFieldArray},
@@ -7077,8 +7085,11 @@ func cloneOptionValue(value interface{}) interface{} {
 // description must say so, because a parked turn then cannot be resumed after a
 // crash. The dispatch itself stays asynchronous — P3 / C4-1 deleted the inline
 // blocking path, so nothing falls back to a synchronous wait any more.
-func spawnSubagentsToolDefinition(suspensionAvailable bool) types.ToolDefinition {
+func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string) types.ToolDefinition {
 	description := "Spawn isolated subagents for parallel subtasks. Use only when tasks are independent or when hard/expert work benefits from isolated research, writing, or verification. Include difficulty, difficulty_rationale and task_type for every child task when known. Leave provider/model empty unless explicitly requested; runtime routing maps difficulty to local provider/model configuration. Dispatch is asynchronous: the call returns a batch handle immediately and lifecycle updates arrive later through supervision resume."
+	if catalog := strings.TrimSpace(agentCatalog); catalog != "" {
+		description += "\n\nAvailable agent definitions (pass the name as agent_type to inherit its defaults):\n" + catalog
+	}
 	executionModeDescription := "Deprecated and optional — omit it. Dispatch is always asynchronous; the legacy values wait|sync stay accepted for compatibility but no longer block the parent turn."
 	if !suspensionAvailable {
 		description += " This session does not support supervised suspension (当前会话不支持托管挂起): the batch control plane does not survive a restart, so a parked turn cannot be resumed after a crash. The dispatch still returns a batch handle and the host projects one degradation warning."
@@ -7107,8 +7118,12 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool) types.ToolDefinition
 					"items": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
-							"id":                   map[string]interface{}{"type": "string"},
-							"role":                 map[string]interface{}{"type": "string", "description": "Deprecated routing alias (kept one release); prefer task_type."},
+							"id":   map[string]interface{}{"type": "string"},
+							"role": map[string]interface{}{"type": "string", "description": "Deprecated routing alias (kept one release); prefer task_type."},
+							"agent_type": map[string]interface{}{
+								"type":        "string",
+								"description": "Optional portable agent definition (builtin/user/project) whose defaults fill omitted fields: read_only, tools_whitelist, model/provider/reasoning_effort, max_turns, completion_requirement. Explicit task fields win. Use only names from the available-agent list.",
+							},
 							"goal":                 map[string]interface{}{"type": "string"},
 							"difficulty":           map[string]interface{}{"type": "string", "enum": []string{"easy", "normal", "hard", "expert"}, "description": "Estimated task difficulty. Local runtime treats this as a routing hint."},
 							"difficulty_rationale": map[string]interface{}{"type": "string", "description": "Short reason for the difficulty rating."},
@@ -7158,6 +7173,12 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool) types.ToolDefinition
 								"minimum":     1,
 								"maximum":     subagentNumericOptionMax,
 								"description": "Optional per-task wall-clock limit in seconds. 0 or a negative value is ignored (the routed default applies) and reported in route_warnings, so omit the field instead of sending 0. Non-integer values are truncated and values above the maximum are clipped, both reported in route_warnings.",
+							},
+							"max_turns": map[string]interface{}{
+								"type":        "integer",
+								"minimum":     1,
+								"maximum":     subagentNumericOptionMax,
+								"description": "Optional per-task loop-step cap. 0 or a negative value is ignored and reported in route_warnings; omit to inherit the agent_type definition or session default.",
 							},
 							"read_only": map[string]interface{}{
 								"type":        "boolean",

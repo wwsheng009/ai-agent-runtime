@@ -246,7 +246,7 @@ func TestDurableSuspensionParksTurnAndSurvivesReopen(t *testing.T) {
 // half of §6.13: a degraded session must say so, a durable session must keep the
 // original contract text.
 func TestSpawnSubagentsDescriptionStatesSuspensionAvailability(t *testing.T) {
-	degraded := spawnSubagentsToolDefinition(false)
+	degraded := spawnSubagentsToolDefinition(false, "")
 	require.Contains(t, degraded.Description, "当前会话不支持托管挂起")
 	properties, ok := degraded.Parameters["properties"].(map[string]interface{})
 	require.True(t, ok)
@@ -254,7 +254,7 @@ func TestSpawnSubagentsDescriptionStatesSuspensionAvailability(t *testing.T) {
 	require.True(t, ok)
 	require.Contains(t, mode["description"], "当前会话不支持托管挂起")
 
-	durable := spawnSubagentsToolDefinition(true)
+	durable := spawnSubagentsToolDefinition(true, "")
 	require.NotContains(t, durable.Description, "当前会话不支持托管挂起")
 	require.Contains(t, durable.Description, "Dispatch is asynchronous")
 	durableProperties, ok := durable.Parameters["properties"].(map[string]interface{})

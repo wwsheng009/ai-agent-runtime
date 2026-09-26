@@ -51,12 +51,31 @@ type Definition struct {
 	PromptMode            PromptMode            `yaml:"promptMode,omitempty" json:"promptMode,omitempty"`
 	CompletionRequirement CompletionRequirement `yaml:"completionRequirement,omitempty" json:"completionRequirement,omitempty"`
 	Sandbox               string                `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+	// MaxTurns caps the agent loop for runs of this role. 0 = inherit the
+	// runtime/session default (CommandCode-compatible maxTurns semantics).
+	MaxTurns int `yaml:"maxTurns,omitempty" json:"max_turns,omitempty"`
+	// ReasoningEffort is the preferred reasoning level for this role. Unknown
+	// load-time values are dropped with a warning (see Normalize) so a typo
+	// cannot silently disable reasoning; the runtime re-validates it against
+	// the resolved model afterwards.
+	ReasoningEffort string `yaml:"reasoningEffort,omitempty" json:"reasoning_effort,omitempty"`
+	// Background marks this role's runs as detached by default. The local
+	// runtime always dispatches children asynchronously, so this is currently
+	// a declarative hint surfaced in spawn defaults/audit, not a mode switch.
+	Background bool `yaml:"background,omitempty" json:"background,omitempty"`
+	// ShowOutput surfaces the child's final message verbatim in the parent
+	// feed instead of the compact summary projection.
+	ShowOutput bool `yaml:"showOutput,omitempty" json:"show_output,omitempty"`
 	// Body is the markdown/role instruction body after YAML frontmatter.
 	Body string `yaml:"-" json:"body,omitempty"`
 	// SourcePath is the file path (or builtin:<name>) that produced this definition.
 	SourcePath string `yaml:"-" json:"source_path,omitempty"`
 	// Source classifies the discovery root that won for this name.
 	Source Source `yaml:"-" json:"source,omitempty"`
+	// Warnings carries load-time diagnostics for non-fatal issues (unknown
+	// reasoning effort, negative maxTurns, ...). It is not part of the file
+	// schema; lint and catalog views surface it.
+	Warnings []string `yaml:"-" json:"warnings,omitempty"`
 }
 
 // Binding is the runtime-facing projection of a Definition.
@@ -74,9 +93,32 @@ type Binding struct {
 	SkillAllowlist        []string
 	Sandbox               map[string]interface{}
 	ReadOnly              *bool
-	SourcePath            string
-	Source                Source
+	MaxTurns              int
+	ReasoningEffort       string
+	Background            bool
+	ShowOutput            bool
+	// ToolsWildcard is true when the definition declared tools: "*" (explicit
+	// allow-all). A nil ToolAllowlist alone cannot distinguish "omitted" from
+	// "wildcard".
+	ToolsWildcard bool
+	Warnings      []string
+	SourcePath    string
+	Source        Source
 }
+
+// knownReasoningEfforts is the canonical accepted set (mirrors the routing
+// layer's reasoningEffortRank). Unknown values are dropped at load time.
+var knownReasoningEfforts = map[string]struct{}{
+	"none":   {},
+	"low":    {},
+	"medium": {},
+	"high":   {},
+	"xhigh":  {},
+	"max":    {},
+}
+
+// ToolWildcard is the literal allow-all entry for tools.
+const ToolWildcard = "*"
 
 // Normalize fills defaults and trims fields in place.
 func (d *Definition) Normalize() {
@@ -100,8 +142,38 @@ func (d *Definition) Normalize() {
 		d.CompletionRequirement = CompletionNone
 	}
 	d.Sandbox = strings.ToLower(strings.TrimSpace(d.Sandbox))
+	d.ReasoningEffort = strings.ToLower(strings.TrimSpace(d.ReasoningEffort))
+	if d.ReasoningEffort != "" {
+		if _, ok := knownReasoningEfforts[d.ReasoningEffort]; !ok {
+			d.Warnings = append(d.Warnings, "reasoning_effort_unknown:"+d.ReasoningEffort)
+			d.ReasoningEffort = ""
+		}
+	}
+	if d.MaxTurns < 0 {
+		d.Warnings = append(d.Warnings, "max_turns_negative")
+		d.MaxTurns = 0
+	}
 	d.Body = strings.TrimSpace(d.Body)
 	d.SourcePath = strings.TrimSpace(d.SourcePath)
+}
+
+// HasExplicitTools reports whether the definition declared any tools entry
+// (including the "*" wildcard). Omitted tools inherit the full toolkit.
+func (d *Definition) HasExplicitTools() bool {
+	return d != nil && len(d.Tools) > 0
+}
+
+// ToolsWildcard reports whether tools: "*" was declared.
+func (d *Definition) ToolsWildcard() bool {
+	if d == nil {
+		return false
+	}
+	for _, tool := range d.Tools {
+		if strings.TrimSpace(tool) == ToolWildcard {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeAgentName(name string) string {

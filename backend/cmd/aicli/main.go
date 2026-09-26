@@ -496,6 +496,11 @@ func main() {
 		return cfg
 	}))
 
+	// agents 子命令 — 便携 agent 定义管理（list/show/lint/new）
+	rootCmd.AddCommand(commands.NewAgentsCommand(func() *config.Config {
+		return cfg
+	}))
+
 	rootCmd.AddCommand(commands.NewExecCommand(func() *config.Config {
 		return cfg
 	}))

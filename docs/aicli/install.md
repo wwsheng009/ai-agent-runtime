@@ -719,6 +719,10 @@ aicli skill install aicli --source-dir .\.agents\skills --dry-run --output json
 chat 内 skills **暴露 / 路由**（默认启用、top-k、exec 假阴性）见 [skill_runtime/aicli_skills_usage.md](../skill_runtime/aicli_skills_usage.md)。  
 角色 agent 与 skill 内 `agents/openai.yaml` 的区别见 [agents.md](./agents.md)。
 
+便携 agent 定义（`.agents/agents/*`、`~/.aicli/agents/*`、profile agents）可用
+`aicli agents list|show|lint|new` 浏览、校验与按模板创建；chat 内对应只读视图为
+`/agents defs [list|show <name>|lint]`。
+
 ### plugin 本地包概览
 
 `aicli plugin`（别名 `plugins`）管理**本地** plugin 包，不做 marketplace：
@@ -807,7 +811,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | `/load <session-id>` | 加载指定会话 |
 | `/resume [latest|<session-id>]` | 恢复最近会话或指定会话；无参数时显示可恢复会话选择器 |
 | `/export [current|latest|<session-id>] [--full|--body|--tools|--trace]` | 导出当前或历史会话；完整 JSON 保留 tool_calls、tool 结果和 metadata，正文模式输出 Markdown，`--tools`/`--trace` 在 Markdown 中附带工具调用（名称+输入参数 / 输入+输出结果） |
-| `/agents [panel|pick|target|send|followup|routing]` | 查看 agent tree、选择默认 agent target、向 child agent 投递消息或 follow-up；`/agents routing test` 可 dry-run 子 agent 路由 |
+| `/agents [panel|pick|target|view|defs|send|followup|routing|cleanup]` | 查看 agent tree、选择默认 agent target、查看 transcript、浏览便携 agent 定义（`defs`）、投递消息或 follow-up；`/agents routing test` 可 dry-run 子 agent 路由 |
 | `/timeline [team|active] [limit] [filter=<text>]` | 查看 active team 或指定 team 的持久事件时间线 |
 | `/collab [follow] [target|selected|parent|all] [limit] [filter=<text>] [timeout=10s]` | 查看 parent/child/team teammate 的 mailbox/collab 时间线 |
 | `/shell <command>`、`/cmd <command>` | 执行 shell 命令并把输出分享给 AI |

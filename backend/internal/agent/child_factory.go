@@ -32,7 +32,7 @@ type ChildAgentFactory struct{}
 func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (ChildAgentSpec, error) {
 	_ = ctx
 	parent := req.Parent
-	task := req.Task
+	task := applyAgentdefTaskDefaults(req.Parent, req.Task)
 	parentConfig := parent.GetConfig()
 
 	resolver := modelrouting.Resolver{
@@ -135,8 +135,12 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 	childAgent.inheritToolHooksFrom(parent)
 	childAgent.SetToolExecutionPolicy(childPolicy)
 
+	effectiveMaxSteps := childConfig.MaxSteps
+	if task.MaxTurns > 0 && (effectiveMaxSteps <= 0 || task.MaxTurns < effectiveMaxSteps) {
+		effectiveMaxSteps = task.MaxTurns
+	}
 	loopConfig := &LoopReActConfig{
-		MaxSteps:              childConfig.MaxSteps,
+		MaxSteps:              effectiveMaxSteps,
 		MaxToolCalls:          childConfig.MaxToolCalls,
 		MaxRunDuration:        childConfig.MaxRunDuration,
 		MaxExplorationSteps:   childConfig.MaxExplorationSteps,

@@ -34,6 +34,12 @@ type DiscoverOptions struct {
 type Catalog struct {
 	ByName map[string]*Definition
 	Order  []string // stable sorted names
+	// Overridden records, per name, the source that was replaced by a
+	// later-priority definition (e.g. "builtin" when a project file wins).
+	Overridden map[string]Source
+	// Warnings records, per name, non-fatal load diagnostics
+	// (unknown reasoningEffort, negative maxTurns, ...).
+	Warnings map[string][]string
 }
 
 // Get returns a definition by name (case-insensitive).
@@ -67,7 +73,11 @@ func (c *Catalog) List() []*Definition {
 //  4. profile agents/*/agent.yaml (when ProfileRoot set)
 //  5. ExtraDirs (highest priority among filesystem roots)
 func Discover(opts DiscoverOptions) (*Catalog, error) {
-	catalog := &Catalog{ByName: make(map[string]*Definition)}
+	catalog := &Catalog{
+		ByName:     make(map[string]*Definition),
+		Overridden: make(map[string]Source),
+		Warnings:   make(map[string][]string),
+	}
 
 	includeBuiltin := true
 	if opts.IncludeBuiltin != nil {
@@ -152,6 +162,22 @@ func (c *Catalog) put(def *Definition) error {
 		c.ByName = make(map[string]*Definition)
 	}
 	clone := *def
+	if previous, ok := c.ByName[clone.Name]; ok && previous != nil && previous.Source != clone.Source {
+		if c.Overridden == nil {
+			c.Overridden = make(map[string]Source)
+		}
+		c.Overridden[clone.Name] = previous.Source
+	}
+	if c.Warnings == nil {
+		c.Warnings = make(map[string][]string)
+	}
+	if len(clone.Warnings) > 0 {
+		// Reset, not append: a winning definition must not inherit the
+		// diagnostics of the shadowed file it replaced.
+		c.Warnings[clone.Name] = append([]string(nil), clone.Warnings...)
+	} else {
+		delete(c.Warnings, clone.Name)
+	}
 	c.ByName[clone.Name] = &clone
 	return nil
 }

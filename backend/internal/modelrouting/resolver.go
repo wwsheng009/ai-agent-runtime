@@ -14,7 +14,7 @@ import (
 // allow the task model field to override only the model.
 func (r Resolver) Resolve(parent ParentDefaults, task TaskHint) (RouteDecision, error) {
 	if !RoutingEnabled(r.Config) {
-		return r.resolveDisabled(parent, task), nil
+		return r.resolveDisabled(parent, task)
 	}
 	staticWarnings, err := ValidateConfigWithWarnings(r.Config)
 	if err != nil {
@@ -58,7 +58,7 @@ func (r Resolver) Resolve(parent ParentDefaults, task TaskHint) (RouteDecision, 
 	return decision, nil
 }
 
-func (r Resolver) resolveDisabled(parent ParentDefaults, task TaskHint) RouteDecision {
+func (r Resolver) resolveDisabled(parent ParentDefaults, task TaskHint) (RouteDecision, error) {
 	decision := RouteDecision{
 		Provider:            strings.TrimSpace(parent.Provider),
 		Model:               strings.TrimSpace(parent.Model),
@@ -79,13 +79,45 @@ func (r Resolver) resolveDisabled(parent ParentDefaults, task TaskHint) RouteDec
 	if strings.TrimSpace(task.Model) != "" {
 		decision.Model = strings.TrimSpace(task.Model)
 	}
+	// Routing disabled used to drop task.Provider silently while honoring
+	// task.Model. Apply the same explicit-provider gate as the enabled path so
+	// an agentdef/spawn provider is either honored (opt-in + allowlist) or
+	// reported as a warning instead of disappearing.
+	if provider := strings.TrimSpace(task.Provider); provider != "" {
+		if AllowExplicitProviderOverride(r.Config) {
+			resolvedProvider := r.resolveProviderName(provider)
+			if overrideValueAllowed(provider, r.Config.AllowedProviderOverrides, resolvedProvider) {
+				nextProvider := firstNonEmptyString(resolvedProvider, provider)
+				if strings.TrimSpace(task.Model) == "" && !strings.EqualFold(nextProvider, decision.Provider) {
+					decision.Model = ""
+				}
+				decision.Provider = nextProvider
+				decision.Source = SourceExplicitOverride
+			} else {
+				decision.Warnings = append(decision.Warnings, "explicit_provider_override_not_allowed")
+			}
+		} else {
+			decision.Warnings = append(decision.Warnings, "explicit_provider_override_denied")
+		}
+	}
+	if effort := NormalizeReasoningEffort(task.ReasoningEffort); effort != "" {
+		if AllowExplicitReasoningOverride(r.Config) {
+			decision.ReasoningEffort = effort
+			decision.Source = SourceExplicitOverride
+		} else {
+			decision.Warnings = append(decision.Warnings, "explicit_reasoning_override_denied")
+		}
+	}
 	if task.BudgetTokens > 0 {
 		decision.MaxTokens = task.BudgetTokens
 	}
 	if task.Timeout > 0 {
 		decision.Timeout = task.Timeout
 	}
-	return decision
+	if err := r.applyReasoningCompatibility(&decision); err != nil {
+		return RouteDecision{}, err
+	}
+	return decision, nil
 }
 
 func resolveDifficulty(cfg *agentconfig.AICLISubagentRoutingConfig, task TaskHint) (string, string, []string, error) {

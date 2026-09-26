@@ -315,10 +315,12 @@ func executeStructuredAgentsCommand(session *ChatSession, command string) Comman
 		}
 	case "routing", "route":
 		return executeStructuredAgentRoutingCommand(session, arg)
+	case "defs", "definitions", "roles":
+		return executeStructuredAgentDefsCommand(session, command)
 	case "cleanup", "prune", "gc":
 		return executeStructuredAgentCleanupCommand(session, arg)
 	default:
-		return commandTextResult("用法: /agents [pick|select|send|followup|target|panel|view|approve|deny|answer|routing|cleanup]；/agent [target] 查看子 agent transcript")
+		return commandTextResult("用法: /agents [pick|select|send|followup|target|panel|view|defs|approve|deny|answer|routing|cleanup]；/agent [target] 查看子 agent transcript")
 	}
 }
 

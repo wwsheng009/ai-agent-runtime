@@ -1,5 +1,21 @@
 package agentdef
 
+// ReservedAgentNames are the built-in role ids. User/project/profile
+// definitions may still override them by name (documented behavior), but lint
+// and management surfaces must make the override visible.
+var ReservedAgentNames = []string{"explore", "plan", "general"}
+
+// IsReservedAgentName reports whether name (normalized) is a built-in role id.
+func IsReservedAgentName(name string) bool {
+	normalized := normalizeAgentName(name)
+	for _, reserved := range ReservedAgentNames {
+		if normalized == reserved {
+			return true
+		}
+	}
+	return false
+}
+
 // BuiltinDefinitions returns the minimal built-in role stubs (explore / plan / general).
 // Project and user definitions override these by name during discovery.
 func BuiltinDefinitions() []*Definition {

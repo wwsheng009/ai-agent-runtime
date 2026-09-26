@@ -23,6 +23,9 @@ type chatProfileState struct {
 	// PermissionMode is optional agent/profile default applied only when the
 	// CLI did not explicitly set --permission-mode / --yolo.
 	PermissionMode runtimepolicy.Mode
+	// ReasoningEffort is the optional agent-definition default applied only
+	// when the CLI did not explicitly set --reasoning-effort.
+	ReasoningEffort string
 	// AgentSourcePath is the definition/config file that won for this binding.
 	AgentSourcePath string
 	// AgentSource is builtin|user|project|profile (empty when unknown).
@@ -313,6 +316,10 @@ func resolveChatAgentdefState(agentName, profileRoot string) (*chatProfileState,
 	if resolved == nil {
 		return nil, fmt.Errorf("agentdef: failed to project agent %q", agentName)
 	}
+	// Wire the definition's skills allowlist into the resolved profile surface
+	// so applyProfileStateToChatSession propagates it to the session (previously
+	// the field was validated/projected but never consumed).
+	applyAgentdefSkillsToResolved(resolved, binding)
 
 	toolPolicy, sandboxWarnings, err := runtimeprofileinput.BuildToolExecutionPolicyWithWorkspace(runtimeprofileinput.ResolvedToolPolicy{
 		Allowlist: append([]string(nil), binding.ToolAllowlist...),
@@ -345,7 +352,20 @@ func resolveChatAgentdefState(agentName, profileRoot string) (*chatProfileState,
 	if binding.PermissionMode != "" {
 		state.PermissionMode = binding.PermissionMode
 	}
+	state.ReasoningEffort = strings.TrimSpace(binding.ReasoningEffort)
 	return state, nil
+}
+
+// applyAgentdefSkillsToResolved mirrors a definition's skills allowlist onto
+// the resolved agent surface. Empty declarations keep the global skills route
+// untouched (byte-for-byte pre-agentdef behavior).
+func applyAgentdefSkillsToResolved(resolved *profilesys.ResolvedAgent, binding *agentdef.Binding) {
+	if resolved == nil || binding == nil || len(binding.SkillAllowlist) == 0 {
+		return
+	}
+	resolved.Skills = profilesys.ResolvedSkillSelection{
+		Allowlist: append([]string(nil), binding.SkillAllowlist...),
+	}
 }
 
 func applyProfileDefaultsToChatOptions(opts *chatCommandOptions, state *chatProfileState) {
@@ -360,6 +380,9 @@ func applyProfileDefaultsToChatOptions(opts *chatCommandOptions, state *chatProf
 	}
 	if !opts.PermissionModeChanged && state.PermissionMode != "" {
 		opts.PermissionMode = state.PermissionMode
+	}
+	if !opts.ReasoningEffortChanged && strings.TrimSpace(opts.ReasoningEffortFlag) == "" {
+		opts.ReasoningEffortFlag = strings.TrimSpace(state.ReasoningEffort)
 	}
 	if strings.TrimSpace(opts.SessionDirFlag) == "" {
 		opts.SessionDirFlag = strings.TrimSpace(state.Resolved.Paths.SessionsDir)

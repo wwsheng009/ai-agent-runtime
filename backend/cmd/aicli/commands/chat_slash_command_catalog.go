@@ -193,7 +193,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/agents",
-			Usage:       "/agents [panel [full|follow|target <target>|next|prev|close]|pick|target <target>|view [target]|send [target] <message>|followup [target] <message>|routing test [--scope auto|subagent|team] --role <role> --difficulty <level>|cleanup [--dry-run] [--idle <duration>]]",
+			Usage:       "/agents [panel [full|follow|target <target>|next|prev|close]|pick|target <target>|view [target]|defs [list|show <name>|lint]|send [target] <message>|followup [target] <message>|routing test [--scope auto|subagent|team] --role <role> --difficulty <level>|cleanup [--dry-run] [--idle <duration>]]",
 			Summary:     "显示、选择或发送 agent 协作消息",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
@@ -206,6 +206,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "view", Summary: "只读查看子 agent transcript（默认当前选中 target）"},
 				{Token: "open", Summary: "view 的别名"},
 				{Token: "transcript", Summary: "view 的别名"},
+				{Token: "defs", Summary: "浏览便携 agent 定义（list/show <name>/lint），按来源分组"},
 				{Token: "follow", Summary: "进入 fixed-bottom 面板跟随模式，legacy 终端等待 mailbox 更新后刷新一次"},
 				{Token: "watch", Summary: "follow 的别名"},
 				{Token: "next", Summary: "切换 panel 到下一个 agent target"},

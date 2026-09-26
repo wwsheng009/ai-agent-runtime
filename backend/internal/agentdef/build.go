@@ -29,6 +29,13 @@ type profileAgentYAML struct {
 	CompletionRequirement string   `yaml:"completionRequirement"`
 	CompletionReqAlt      string   `yaml:"completion_requirement"`
 	Sandbox               string   `yaml:"sandbox"`
+	MaxTurns              int      `yaml:"maxTurns"`
+	MaxTurnsAlt           int      `yaml:"max_turns"`
+	ReasoningEffort       string   `yaml:"reasoningEffort"`
+	ReasoningEffortAlt    string   `yaml:"reasoning_effort"`
+	Background            bool     `yaml:"background"`
+	ShowOutput            bool     `yaml:"showOutput"`
+	ShowOutputAlt         bool     `yaml:"show_output"`
 	// SystemPrompt inline fallback when prompts/role.md is absent.
 	SystemPrompt  string `yaml:"system_prompt"`
 	SystemPrompt2 string `yaml:"systemPrompt"`
@@ -89,6 +96,10 @@ func AdaptProfileAgent(profileRoot, agentID, configFile string) (*Definition, er
 		PromptMode:            PromptMode(promptMode),
 		CompletionRequirement: CompletionRequirement(completion),
 		Sandbox:               raw.Sandbox,
+		MaxTurns:              firstNonZeroInt(raw.MaxTurns, raw.MaxTurnsAlt),
+		ReasoningEffort:       firstNonEmpty(raw.ReasoningEffort, raw.ReasoningEffortAlt),
+		Background:            raw.Background,
+		ShowOutput:            raw.ShowOutput || raw.ShowOutputAlt,
 		Body:                  body,
 		SourcePath:            configFile,
 		Source:                SourceProfile,
@@ -152,6 +163,14 @@ func BuildBinding(def *Definition) (*Binding, error) {
 		}
 	}
 
+	allowlist := append([]string(nil), clone.Tools...)
+	wildcard := clone.ToolsWildcard()
+	if wildcard {
+		// tools: "*" is an explicit allow-all; nil allowlist is the runtime's
+		// allow-all representation. ToolsWildcard keeps the declaration visible
+		// for lint/audit (omitted tools and "*" otherwise look identical).
+		allowlist = nil
+	}
 	return &Binding{
 		Definition:            clone,
 		AgentID:               clone.Name,
@@ -161,11 +180,17 @@ func BuildBinding(def *Definition) (*Binding, error) {
 		PromptText:            promptText,
 		PromptMode:            clone.PromptMode,
 		CompletionRequirement: clone.CompletionRequirement,
-		ToolAllowlist:         append([]string(nil), clone.Tools...),
+		ToolAllowlist:         allowlist,
 		ToolDenylist:          append([]string(nil), clone.DisallowedTools...),
 		SkillAllowlist:        append([]string(nil), clone.Skills...),
 		Sandbox:               sandbox,
 		ReadOnly:              readOnly,
+		MaxTurns:              clone.MaxTurns,
+		ReasoningEffort:       clone.ReasoningEffort,
+		Background:            clone.Background,
+		ShowOutput:            clone.ShowOutput,
+		ToolsWildcard:         wildcard,
+		Warnings:              append([]string(nil), clone.Warnings...),
 		SourcePath:            clone.SourcePath,
 		Source:                clone.Source,
 	}, nil
@@ -234,4 +259,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonZeroInt(values ...int) int {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }
