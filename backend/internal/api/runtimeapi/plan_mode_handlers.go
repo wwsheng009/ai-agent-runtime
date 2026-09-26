@@ -369,6 +369,11 @@ func applyPlanModeToSession(session *chat.Session, action string, decision planm
 			return nil
 		}
 		planmode.Save(session, exited)
+		// §4.9 F2：退出 plan 时不要把 disable_bypass 明令禁止的 bypass 还原回来
+		// （离线路径不经切换入口；approve 已映射为 accept_edits，这里兜住 quit）。
+		if mode == runtimepolicy.ModeBypassPermissions && sessionBypassDisabled(session) {
+			mode = runtimepolicy.ModeDefault
+		}
 		applySessionPermissionMode(session, mode)
 		return nil
 

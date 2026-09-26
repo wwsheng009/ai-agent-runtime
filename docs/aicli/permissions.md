@@ -108,6 +108,7 @@ CI 推荐组合：`dont_ask` + 项目 `permissions.yaml` 把需要的只读/白�
 - 引擎把以 `bypass_permissions` 进入的请求按 `default` 处理（该问的照问、headless 场景照拒）；`dont_ask` 与 `plan` 不受影响；
 - CLI 的切换入口（`/permission-mode bypass_permissions`、shift+tab 循环、`/yolo`）会被拒绝（提示后不切换）；ACP 客户端在模式选择器里点选 bypass 同样不会被应用；
 - runtime API 的切换接口（`POST /api/runtime/sessions/{id}/permission-mode`）在目标为 `bypass_permissions` 时直接返回 **403**，不会写入一个求值期又被降级的 bypass 元数据；
+- plan 退出等**还原路径**同样不会把 bypass 带回来：从 bypass 进入 plan 后退出（`quit`）写回的是 `default`（approve 本来就映射为 `accept_edits`，属既有设计）；
 - `--yolo` 启动参数只能靠引擎侧降级（进程启动时无法询问），此时元数据可能仍显示 `bypass_permissions`——以实际审批行为为准。
 
 适合把 `disable_bypass: true` 放在用户级 `~/.aicli/permissions.yaml`，让个人环境永远保留审批。

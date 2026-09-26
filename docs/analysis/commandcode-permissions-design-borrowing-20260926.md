@@ -586,7 +586,7 @@
 | # | 发现 | 定级 | 建议 |
 |---|------|------|------|
 | F1 | runtime API 切 bypass 无确认、无令牌，对运行中会话即时生效 | 中 | `UpdateSessionPermissionMode` 对 `bypass_permissions` 复用「危险动作」语义（要求显式 `confirm=true` 或写令牌）；`disable_bypass` 生效时直接 403，而不是静默降级 |
-| F2 | `disable_bypass` 只降级求值、不拒绝切换 | 低 | **已收口**：`UpdateSessionPermissionMode` 在目标模式为 `bypass_permissions` 时解析会话工作区的 permissions 分层（用户/项目/本地 OR），命中 `disable_bypass` 直接 `403 AGENT_PERMISSION`，不再写入一个求值期会被降级回 default 的 bypass 元数据；解析失败的层按「未启用」处理，与引擎的整文件丢弃语义一致。见 `permission_mode_handlers.go` 与 `permission_mode_disable_bypass_test.go` |
+| F2 | `disable_bypass` 只降级求值、不拒绝切换 | 低 | **已收口**：`UpdateSessionPermissionMode` 在目标模式为 `bypass_permissions` 时解析会话工作区的 permissions 分层（用户/项目/本地 OR），命中 `disable_bypass` 直接 `403 AGENT_PERMISSION`，不再写入一个求值期会被降级回 default 的 bypass 元数据；解析失败的层按「未启用」处理，与引擎的整文件丢弃语义一致（判定收敛到 `policy.BypassDisabledForWorkspace`）。**还原路径同样收口**：plan 退出（`quit`）时 `internal/chat` 与 runtimeapi 离线分支都把 bypass 降为 default，避免「元数据说 bypass、引擎按 default」。见 `permission_mode_handlers.go`、`plan_mode_tools.go`、`plan_mode_handlers.go` 与同名 `*_test.go` |
 | F3 | Web 注入面可承载命令并可满足 yolo 确认 | 低-中 | 至少让 `/yolo` 的确认**不接受** web/external 捕获来源的输入（或要求两个来源各确认一次），使确认真正等于「终端前的人」 |
 | F4 | 文档未集中写「谁能提权」 | 低 | 手册补「提权边界」小节（本次已补，§1.4）；`docs/aicli/web-remote-api.md` 补「远程调用者能力边界」 |
 

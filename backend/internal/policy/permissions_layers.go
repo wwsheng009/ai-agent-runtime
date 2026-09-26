@@ -122,6 +122,23 @@ func MergePermissionsLayers(layers []PermissionsLayer) *PermissionsFile {
 	return merged
 }
 
+// BypassDisabledForWorkspace reports whether the layered permission files
+// disable bypass_permissions for a workspace (§4.9). A missing layer or an
+// unparsable one counts as "not disabled": the engine drops a broken file
+// wholesale, so it neither contributes rules nor downgrades bypass, and this
+// predicate must not disagree with the engine.
+//
+// Callers use it where a bypass value could otherwise be restored or written
+// without going through the switch entry points (plan-mode exit, plan previous
+// mode), so metadata never claims a mode the engine will not honor.
+func BypassDisabledForWorkspace(workspaceRoot string) bool {
+	merged, _, err := LoadLayeredPermissions(workspaceRoot)
+	if err != nil || merged == nil {
+		return false
+	}
+	return merged.DisableBypass
+}
+
 // firstExistingPermissionsFile resolves permissions.yaml → permissions.yml.
 func firstExistingPermissionsFile(dir string) (string, error) {
 	return firstExistingFileIn(dir, []string{DefaultPermissionsFileName, permissionsFileNameYML})

@@ -187,6 +187,13 @@ func (a *SessionActor) ExitPlanMode(ctx context.Context, sessionID string, args 
 
 	resume := planmode.ResumeModeAfterExit(exited)
 	mode := parsePlanPermissionMode(resume)
+	// §4.9 F2：退出 plan 时不要把 disable_bypass 明令禁止的 bypass 还原回来。
+	// approve 路径已由 planmode.ResumeModeAfterExit 映射为 accept_edits，这里
+	// 兜住 quit（以及未来新增的还原路径）：它不经切换入口（CLI 提示 / runtime
+	// API 403），若不降级，元数据会显示 bypass 而引擎按 default 求值。
+	if mode == runtimepolicy.ModeBypassPermissions && runtimepolicy.BypassDisabledForWorkspace(planModeWorkspacePath(session)) {
+		mode = runtimepolicy.ModeDefault
+	}
 
 	if exited.ExitDecision == planmode.ExitRequestChanges {
 		// Stay active for another revision pass while recording the decision.

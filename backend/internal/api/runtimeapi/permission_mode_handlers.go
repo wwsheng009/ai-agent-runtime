@@ -205,18 +205,11 @@ func normalizePermissionModeText(raw string) string {
 
 // sessionBypassDisabled 解析会话工作区的 permissions 分层，判断 disable_bypass
 // 是否生效（§4.9：用户 / 项目 / 本地三层 OR）。工作区为空时仍会读用户层。
-//
-// 解析失败按「未启用」处理：与引擎的整文件丢弃语义一致——解析失败的层不参与
-// 规则求值，也就不会把 bypass 降级；这里若反过来拒绝，会与引擎行为相左。
 func sessionBypassDisabled(session *chat.Session) bool {
 	if session == nil {
 		return false
 	}
-	merged, _, err := runtimepolicy.LoadLayeredPermissions(planModeWorkspacePath(session))
-	if err != nil || merged == nil {
-		return false
-	}
-	return merged.DisableBypass
+	return runtimepolicy.BypassDisabledForWorkspace(planModeWorkspacePath(session))
 }
 
 // supportedSessionPermissionModes 与后端策略枚举保持同源，避免前后端漂移。
