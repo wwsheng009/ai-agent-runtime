@@ -290,6 +290,8 @@ func (h *acpSessionHost) NewSession(ctx context.Context, req acp.NewSessionReque
 	// Record the workspace so session/list?cwd=<workspace> can narrow the
 	// history panel to this project. Best-effort: never fails session/new.
 	recordACPSessionWorkspace(ctx, hostSess, acpResolveSessionWorkspace(cwd))
+	// §4.5：客户端下发的 additionalDirectories 直接作为会话准入目录。
+	applyACPAdditionalDirectories(hostSess.chat, req.AdditionalDirectories)
 	// Advertise the command catalog + initial session_info without waiting for
 	// a prompt: the client renders the slash-command panel from session/new.
 	h.emitSessionCatalog(h.emit, hostSess.id, hostSess.chat)
@@ -546,6 +548,7 @@ func (h *acpSessionHost) LoadSession(ctx context.Context, req acp.LoadSessionReq
 		return err
 	}
 	h.sess[hostSess.id] = hostSess
+	applyACPAdditionalDirectories(hostSess.chat, req.AdditionalDirectories)
 	if err := replayACPSessionHistory(hostSess.id, hostSess, emit); err != nil {
 		return err
 	}
@@ -615,6 +618,7 @@ func (h *acpSessionHost) ResumeSession(ctx context.Context, req acp.ResumeSessio
 		return err
 	}
 	h.sess[hostSess.id] = hostSess
+	applyACPAdditionalDirectories(hostSess.chat, req.AdditionalDirectories)
 	return nil
 }
 

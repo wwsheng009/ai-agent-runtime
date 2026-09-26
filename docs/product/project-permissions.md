@@ -145,9 +145,16 @@ CLI deny always wins over a project `allow` rule for the same tool.
 | 已注册 skill/plugin 目录（`ExternalReadOnlyRoots`） | 读免门，写仍需准入 |
 | shell 命令**字符串内部**的绝对路径（如 `cat /etc/hosts`） | 不做此门（与 specifier 读规则一致，见 §7 已知限制） |
 
-预准入方式：agent 选项 `allowed_roots`（也接受 `additional_directories` /
-`additionalDirectories`，支持数组或逗号分隔字符串）。CLI `/add-dir` 与
-ACP `additionalDirectories` 的接线见分析文档 §12 的剩余项。
+预准入方式：
+
+- CLI chat：`--add-dir <路径>`（可重复）或会话内 `/add-dir`；`/add-dir list`
+  查看当前集合，`/add-dir remove <路径>` 撤销。集合随会话持久化，恢复会话仍有效。
+- agent 选项：`allowed_roots`（也接受 `additional_directories` /
+  `additionalDirectories`，支持数组或逗号分隔字符串）；ACP 客户端在
+  `session/new|load|resume` 下发的 `additionalDirectories` 会并入同一集合。
+- 批准的 `external_dir:admit` 审批会把该目录并入集合（本次会话内不再重复询问）。
+
+`aicli exec`、Web 会话入口与 `sandbox_dirs` 的接线见分析文档 §12 的剩余项。
 
 ## Wiring
 

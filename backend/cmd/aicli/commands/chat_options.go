@@ -55,6 +55,8 @@ type chatCommandOptions struct {
 	// (--allow-tool / --deny-tool). Applied after profile tool policy.
 	CLIAllowTools []string
 	CLIDenyTools  []string
+	// AllowedDirs is CLI --add-dir: pre-admitted external directories (§4.5).
+	AllowedDirs []string
 	// TrustGrant is CLI --trust: durable grant of the current workspace before decide.
 	TrustGrant               bool
 	ApprovalReuseMode        chatApprovalReuseMode
@@ -191,6 +193,11 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	approvalReuseFlag, _ := cmd.Flags().GetString("approval-reuse")
 	cliAllowTools, _ := cmd.Flags().GetStringSlice("allow-tool")
 	cliDenyTools, _ := cmd.Flags().GetStringSlice("deny-tool")
+	addDirFlags, _ := cmd.Flags().GetStringSlice("add-dir")
+	allowedDirs, err := applyChatAddDirFlagArgs(addDirFlags)
+	if err != nil {
+		return nil, err
+	}
 	trustGrant := false
 	if cmd.Flags().Lookup("trust") != nil {
 		trustGrant, _ = cmd.Flags().GetBool("trust")
@@ -289,6 +296,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		PermissionModeChanged:  cmd.Flags().Changed("permission-mode") || yoloFlag,
 		CLIAllowTools:          append([]string(nil), cliAllowTools...),
 		CLIDenyTools:           append([]string(nil), cliDenyTools...),
+		AllowedDirs:            allowedDirs,
 		TrustGrant:             trustGrant,
 		ApprovalReuseMode:      approvalReuseMode,
 		JSONOutput:             jsonOutput,

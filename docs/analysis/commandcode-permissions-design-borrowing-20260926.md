@@ -511,9 +511,23 @@
 | 豁免 | ✅ | OS 临时目录全模式静默（读写都免门，写仍走普通模式规则；`Engine.ExternalDirTempRoots` 可覆盖/追加）；plan 模式下 plan 文件写豁免；`Engine.ExternalReadOnlyRoots`（skill/plugin 目录）**只读**豁免，写仍需准入；shell 命令串内的绝对路径不做门（与 §7 契约一致） | 同上（临时目录、只读根读/写、命令内路径各一例） |
 | 随 run 下发 | ✅ | `internal/agent`：`toolCallContext` / `approvedToolCallContext` 绑定 `toolctx.WithAllowedRoots`，来源为 agent options（`allowed_roots` → `additional_directories` → ACP 风格 `additionalDirectories`，支持 []string / []interface{} / 逗号分号空格分隔字符串） | `agent/allowed_roots_binding_test.go` |
 
+### 12.1 落地状态（2026-09-26，M3 第三切片：外部目录门 CLI/ACP 面，§4.5）
+
+| 项 | 状态 | 代码落点 | 验证 |
+|----|------|----------|------|
+| `/add-dir` 命令 | ✅ | 新 `cmd/aicli/commands/chat_add_dir.go`：`/add-dir <路径> [更多路径]`（支持引号路径）、`/add-dir list`、`/add-dir remove <路径>`；目录存在性与「已在工作区内」校验，失败显式报错不静默；命令目录 + 补全 + 统一/兼容两路 dispatch 全部接线 | `chat_add_dir_test.go`（增删列、非法路径、引号、metadata 回退）＋ `chat_slash_completion_test.go` |
+| 会话状态与持久化 | ✅ | `ChatSession.AllowedRoots` 为权威值，写入 `RuntimeSession.Metadata.Context["allowed_roots"]` 并经 `SessionManager.UpdateContext` 落盘；恢复会话自动回退读 metadata | 同上 |
+| `--add-dir` 启动参数 | ✅ | `aicli chat --add-dir <路径>`（可重复）；解析期校验目录存在，非法即报错退出（不做静默丢参） | 同上（`applyChatAddDirFlagArgs`） |
+| 随 run 生效 | ✅ | `buildLocalChatAgent` 构建期写入 `allowed_roots`；`localChatPrepareRunHook` 每轮同步（`/add-dir` 无需重启即对下一轮工具调用生效）；`/add-dir` 变更后仍调用 runtime 刷新，覆盖已构建的子代理/团队 actor | `TestBuildLocalChatAgentCarriesAllowedRoots` |
+| 审批闭环 | ✅ | 每轮把 `policy.Engine.ApproveExternalDir` 接到会话集合（批准即准入并持久化），并携带 `Engine.ExternalAllowedRoots` 覆盖 ctx 未携带集合的路径 | 引擎侧测试（`policy/external_dirs_test.go`）＋ hook 接线 |
+| 审批文案 | ✅ | `humanApprovalReason` 新增 `external_dir:admit` 中文解释（含 `/add-dir` 提示） | `chat_runtime_events.go` |
+| ACP `additionalDirectories` | ✅ | `session/new`、`session/load`、`session/resume` 三处把客户端下发目录作为会话准入集合；非法项跳过并告警，不阻断会话建立（真正访问仍会触发外部目录门） | `chat_add_dir_test.go`（`TestApplyACPAdditionalDirectoriesSkipsInvalidEntries`） |
+
+验证说明：`cmd/aicli/commands` 全量回归除以下**既存**问题外全绿（在 HEAD 基线 worktree 复核过同一批用例）：`TestChatDebugDisplayShowsStorageSection`（`/debug` 输出缺 `Maintenance: runs=`）、`TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsideActiveReasoning`（视口布局断言）、`TestAICLIChatActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled`（时序 flaky，单独 `-count=3` 两败一过）。三者均与权限/外部目录无关。
+
 本切片明确**未做**（4.5 剩余）：
 
-- CLI `/add-dir` 与会话状态持久化（把准入目录写回 session runtime state 并由 CLI 侧再下发）、`--add-dir` 启动参数、`sandbox_dirs` 接线；
-- ACP `additionalDirectories`（`internal/acp/types.go` 已解析）到 `allowed_roots` 的映射；
-- CLI chat 生产路径的 `Sandbox` 接线与「已注册 skill 目录」的实际填充（`ExternalReadOnlyRoots` 已留好挂点）；
-- 审批文案（`chat_approval_explain.go`）对 `external_dir:admit` 的中文解释与 deny guidance 条目。
+- `aicli exec --add-dir`（exec 路径当前无会话准入集合，非交互审批语义需单独设计）；
+- `sandbox_dirs` 配置项与「已注册 skill 目录」的实际填充（`Engine.ExternalReadOnlyRoots` 已留好挂点）；
+- Web/`runtimeapi` 会话入口的 `/add-dir` 等价命令面（`runtimeapi/session_runtime_support.go` 自建引擎处需接 `ApproveExternalDir`/`ExternalAllowedRoots`）；
+- deny guidance（拒绝后的可执行下一步提示）中的 `/add-dir` 条目。

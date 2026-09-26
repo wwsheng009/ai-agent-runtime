@@ -64,8 +64,12 @@ type ChatSession struct {
 	// （--yolo / --permission-mode）。恢复或切换持久化会话时，
 	// 不得用会话中存储的权限模式覆盖 CLI 显式指定值。
 	permissionModeCLIChanged bool
-	HTTPDebug                bool
-	Stream                   bool
+	// AllowedRoots 是 §4.5 的会话级外部目录准入集合（工作区外，`/add-dir` 与
+	// 外部目录门批准结果的并集）。随会话元数据持久化，并按 run 下发到 agent
+	// options 的 allowed_roots。
+	AllowedRoots []string
+	HTTPDebug    bool
+	Stream       bool
 	// FastMode enables Codex service_tier=priority. Only meaningful when protocol is codex.
 	FastMode bool
 	BaseURL  string

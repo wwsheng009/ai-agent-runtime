@@ -645,6 +645,17 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			},
 		},
 		{
+			Name:        "/add-dir",
+			Usage:       "/add-dir [list|remove <路径>|<路径> ...]",
+			Summary:     "预先准入工作区外的目录（外部目录门 §4.5；批准一次即加入本次会话）",
+			Group:       string(chatSlashCommandGroupPermission),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "list", Summary: "列出本次会话已准入的外部目录"},
+				{Token: "remove", Summary: "移除已准入的外部目录"},
+			},
+		},
+		{
 			Name:        "/plan",
 			Usage:       "/plan [status|enter [path]|exit <approve|request_changes|quit>|comment <Lx[-Ly]> <正文>|comments]",
 			Summary:     "进入/退出 plan mode，或查看计划写路径状态",

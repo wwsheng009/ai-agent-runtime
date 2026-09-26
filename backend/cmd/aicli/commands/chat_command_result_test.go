@@ -1039,6 +1039,9 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_actor_host.go", Func: "buildLocalChatGlobalMailboxStore", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_actor_host.go", Func: "buildLocalChatRuntimeStores", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_actor_host.go", Func: "loadLocalChatRuntimeConfig", Kind: "fmt.Fprint(os.Std*)", Count: 1},
+		// /add-dir 的旧终端回退路径（plain/JSON 投影仍由统一 CommandResult 渲染，
+		// 这里的 2 处 fmt.Print 只服务非 unified 的兼容终端）。
+		{File: "chat_add_dir.go", Func: "handleAddDirCommand", Kind: "fmt.Print", Count: 2},
 		{File: "chat_backtrack_command.go", Func: "handleBacktrackAuditList", Kind: "fmt.Print", Count: 7},
 		{File: "chat_backtrack_command.go", Func: "handleBacktrackCommand", Kind: "fmt.Print", Count: 18},
 		{File: "chat_backtrack_command.go", Func: "listChatBacktrackTurns", Kind: "fmt.Print", Count: 4},

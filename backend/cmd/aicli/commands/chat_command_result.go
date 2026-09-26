@@ -372,6 +372,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	if commandMatches(cmdLower, "/trust") && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredTrustCommand(session, command), true, nil
 	}
+	if commandMatches(cmdLower, "/add-dir") && unifiedDirectInteractiveOutput(session) {
+		return executeStructuredAddDirCommand(session, command), true, nil
+	}
 	if commandMatches(cmdLower, "/agents") && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredAgentsCommand(session, command), true, nil
 	}

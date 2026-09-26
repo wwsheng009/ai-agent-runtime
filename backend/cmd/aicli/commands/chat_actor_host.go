@@ -1938,6 +1938,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	}
 	workspaceMode := resolveLocalChatWorkspaceMode(runtimeConfig)
 	workspaceContextEnabled := workspaceMode != "" && !strings.EqualFold(workspaceMode, contextmgr.WorkspaceModeDisabled)
+	allowedRoots := chatAllowedRoots(session)
 	stream := session != nil && session.Stream
 	var profileContext map[string]interface{}
 	sessionReasoningEffort := ""
@@ -1949,7 +1950,7 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	// tool_base_path is always set when a workspace root is known so preflight /
 	// relative path resolution match toolkit SetBasePath even when workspace
 	// context scanning remains disabled by default.
-	if stream || strings.TrimSpace(reasoningEffort) != "" || workspaceRoot != "" || len(profileContext) > 0 {
+	if stream || strings.TrimSpace(reasoningEffort) != "" || workspaceRoot != "" || len(allowedRoots) > 0 || len(profileContext) > 0 {
 		agentConfig.Options = make(map[string]interface{})
 		if stream {
 			agentConfig.Options["stream"] = true
@@ -1964,6 +1965,10 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			agentConfig.Options["workspace_path"] = workspaceRoot
 			agentConfig.Options["context_workspace_mode"] = workspaceMode
 			agentConfig.Options["context_min_workspace_query_length"] = 4
+		}
+		// §4.5：会话准入的外部目录随 run 下发，外部目录门据此放行。
+		if len(allowedRoots) > 0 {
+			agentConfig.Options["allowed_roots"] = allowedRoots
 		}
 		if len(profileContext) > 0 {
 			agentConfig.Options["profile_context"] = cloneSkillContextMap(profileContext)
@@ -2189,10 +2194,22 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 			} else {
 				delete(cfg.Options, "active_goal_guidance")
 			}
+			// §4.5：每轮同步会话准入的外部目录，/add-dir 无需重建 actor 即生效。
+			if roots := chatAllowedRoots(session); len(roots) > 0 {
+				cfg.Options["allowed_roots"] = roots
+			} else {
+				delete(cfg.Options, "allowed_roots")
+			}
 		}
 		// Plan mode may recreate/mutate the engine; re-apply product overlay after it.
 		applyChatPlanModeToAgent(apiAgent, session, runtimeSession)
 		applyChatPermissionsOverlayToAgent(apiAgent, session)
+		// §4.5：批准外部目录 ask 后把目录写回会话集合；引擎同时携带当前集合，
+		// 覆盖 ctx 未携带 allowed_roots 的路径（团队/子代理等）。
+		if engine := apiAgent.GetPermissionEngine(); engine != nil {
+			engine.ApproveExternalDir = chatAllowedRootsPolicyAdmitter(session)
+			engine.ExternalAllowedRoots = chatAllowedRoots(session)
+		}
 		return nil
 	}
 }

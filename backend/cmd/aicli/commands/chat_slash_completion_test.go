@@ -470,6 +470,7 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/queue", forms: []string{"/queue"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/permission-mode", forms: []string{"/permission-mode", "/mode"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/trust", forms: []string{"/trust"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/add-dir", forms: []string{"/add-dir"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/plan", forms: []string{"/plan"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/plans", forms: []string{"/plans"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/approval-reuse", forms: []string{"/approval-reuse"}, acceptsArgs: true, requiresArgs: false},

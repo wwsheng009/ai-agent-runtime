@@ -5749,6 +5749,8 @@ func humanApprovalReason(reason string) string {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
 	case "permission_mode_requires_approval":
 		return "当前权限模式要求在执行前获得确认（permission_mode_requires_approval）"
+	case "external_dir:admit":
+		return "该调用需要访问工作区外的目录/文件；批准后该目录加入本次会话（/add-dir 可预先准入），同目录后续不再重复询问（external_dir:admit）"
 	case "plan_mode:model_auto_enter":
 		return "模型请求进入计划模式：进入后会限制为只读探索、仅可写计划文件，需要你确认（plan_mode:model_auto_enter）"
 	case "manual approval":

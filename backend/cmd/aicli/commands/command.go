@@ -381,6 +381,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/trust") {
 		return handleTrustCommand(session, command)
 	}
+	if commandMatches(cmdLower, "/add-dir") {
+		return handleAddDirCommand(session, command)
+	}
 	if commandMatches(cmdLower, "/plans") {
 		return handlePlansCommand(session, command)
 	}
