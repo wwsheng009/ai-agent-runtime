@@ -3,8 +3,9 @@
 // 契约：自包含面（见 panel-registry 注释），只从 PanelHost 收上下文 props；数据由
 // `useRuntimePlans` 经 `GET /api/runtime/plans` / `GET /api/runtime/plans/{id}` 读取。
 //
-// 只读阅读面：这里**不做裁决**（批准/请求修改/退出仍由「计划」面的当前会话评审入口负责），
-// 只回看归档记录 + 评审轮次 + 最新快照正文，避免出现第二套写入口。
+// 阅读面 + 唯一的写动作是「重新评审」（归档回灌，报告 §4.5/§15）：
+// 按当前会话把选中的快照写回工作区计划文件并进入 plan mode；冲突由用户二次确认后强制覆盖。
+// 裁决（批准/请求修改/退出）仍由「计划」面的当前会话评审入口负责，避免出现第二套裁决入口。
 //
 // 布局（单列，宽面 416–672px）：
 //   * 头部：面标题 + （详情态）返回列表 + 刷新；
@@ -17,6 +18,7 @@ import {
   FileTextIcon,
   LoaderCircleIcon,
   RefreshCwIcon,
+  RotateCcwIcon,
   ScrollTextIcon,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -87,6 +89,7 @@ function PlanRoundRow({
 }
 
 export function ArtifactPanelPlansSurface({
+  sessionId,
   lastRuntimeEventType,
   runtimeEventCount,
 }: WorkspacePanelSurfaceProps) {
@@ -95,6 +98,7 @@ export function ArtifactPanelPlansSurface({
   // 动态键（状态 / 决策）必须走宽松包装：键类型由 zh-CN 字典静态约束，运行期才收敛。
   const translate = (key: string) => t(key as never) as string;
   const {
+    clearReopenState,
     detailError,
     detailLoading,
     loadedOnce,
@@ -102,6 +106,8 @@ export function ArtifactPanelPlansSurface({
     plansError,
     plansLoading,
     refresh,
+    reopen,
+    reopenState,
     select,
     selectedPlan,
     selectedPlanId,
@@ -109,6 +115,9 @@ export function ArtifactPanelPlansSurface({
 
   const detailOpen = selectedPlanId !== null;
   const busy = plansLoading || detailLoading;
+  const reopenRunning = reopenState.status === "running";
+  const reopenTargetId = selectedPlanId ?? selectedPlan?.id ?? "";
+  const reopenNotice = detailOpen && reopenState.planId === reopenTargetId;
 
   return (
     <div
@@ -133,13 +142,33 @@ export function ArtifactPanelPlansSurface({
           <div className="flex flex-wrap items-center justify-end gap-1.5">
             {detailOpen ? (
               <Button
-                onClick={() => select(null)}
+                onClick={() => {
+                  clearReopenState();
+                  select(null);
+                }}
                 size="sm"
                 type="button"
                 variant="ghost"
               >
                 <ChevronLeftIcon size={14} />
                 {t("panels.artifacts.plans.back")}
+              </Button>
+            ) : null}
+            {detailOpen ? (
+              <Button
+                disabled={busy || reopenRunning || !sessionId}
+                onClick={() => {
+                  void reopen(sessionId, reopenTargetId);
+                }}
+                size="sm"
+                title={sessionId ? undefined : t("panels.artifacts.plans.reopen.noSession")}
+                type="button"
+                variant="secondary"
+              >
+                <RotateCcwIcon size={14} className={reopenRunning ? "animate-spin" : undefined} />
+                {reopenRunning
+                  ? t("panels.artifacts.plans.reopen.running")
+                  : t("panels.artifacts.plans.reopen.action")}
               </Button>
             ) : null}
             <Button
@@ -187,6 +216,57 @@ export function ArtifactPanelPlansSurface({
 
               {selectedPlan ? (
                 <>
+                  {reopenNotice && reopenState.status === "succeeded" ? (
+                    <div
+                      className="space-y-1 rounded-card-lg border border-accent-teal/18 bg-accent-teal/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground"
+                      data-testid="plans-reopen-notice"
+                    >
+                      <div className="text-foreground">
+                        {reopenState.unchanged
+                          ? t("panels.artifacts.plans.reopen.unchanged")
+                          : t("panels.artifacts.plans.reopen.succeeded", {
+                              version: String(reopenState.version),
+                            })}
+                      </div>
+                      <div>{t("panels.artifacts.plans.reopen.enteredPlanMode")}</div>
+                    </div>
+                  ) : null}
+
+                  {reopenNotice && reopenState.status === "conflict" ? (
+                    <div
+                      className="space-y-2 rounded-card-lg border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground"
+                      data-testid="plans-reopen-conflict"
+                    >
+                      <div className="text-foreground">
+                        {t("panels.artifacts.plans.reopen.conflict")}
+                      </div>
+                      <div>{reopenState.hint || reopenState.message}</div>
+                      <Button
+                        disabled={reopenRunning || !sessionId}
+                        onClick={() => {
+                          void reopen(sessionId, reopenTargetId, { force: true });
+                        }}
+                        size="sm"
+                        type="button"
+                        variant="secondary"
+                      >
+                        {t("panels.artifacts.plans.reopen.force")}
+                      </Button>
+                    </div>
+                  ) : null}
+
+                  {reopenNotice && reopenState.status === "failed" ? (
+                    <div
+                      className="space-y-1 rounded-card-lg border border-accent-orange/18 bg-accent-orange/8 px-3 py-2.5 text-sm leading-6 text-muted-foreground"
+                      data-testid="plans-reopen-error"
+                    >
+                      <div className="text-foreground">
+                        {t("panels.artifacts.plans.reopen.failed")}
+                      </div>
+                      <div>{reopenState.message}</div>
+                    </div>
+                  ) : null}
+
                   <div className="space-y-1 rounded-card-lg border border-white/8 bg-black/10 px-3 py-2.5 text-sm leading-6">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <Badge

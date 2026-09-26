@@ -10,6 +10,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildRuntimeEventReloadKey } from "@/hooks/workspace/use-runtime-checkpoints";
+import { RuntimeApiError } from "@/lib/runtime-api";
 import type { RuntimeStoredPlan } from "@/types/runtime";
 
 import {
@@ -18,9 +19,10 @@ import {
   useRuntimePlans,
 } from "./use-runtime-plans";
 
-const { getRuntimePlanMock, listRuntimePlansMock } = vi.hoisted(() => ({
+const { getRuntimePlanMock, listRuntimePlansMock, reopenRuntimePlanMock } = vi.hoisted(() => ({
   getRuntimePlanMock: vi.fn(),
   listRuntimePlansMock: vi.fn(),
+  reopenRuntimePlanMock: vi.fn(),
 }));
 
 vi.mock("@/lib/runtime-api", async (importOriginal) => {
@@ -29,6 +31,7 @@ vi.mock("@/lib/runtime-api", async (importOriginal) => {
     ...actual,
     getRuntimePlan: getRuntimePlanMock,
     listRuntimePlans: listRuntimePlansMock,
+    reopenRuntimePlan: reopenRuntimePlanMock,
   };
 });
 
@@ -310,5 +313,159 @@ describe("useRuntimePlans", () => {
 
     expect(getRuntimePlanMock).toHaveBeenCalledTimes(2);
     expect(holder.current?.selectedPlan?.content).toBe("# 第二版");
+  });
+});
+
+// 归档回灌（reopen）：成功刷新列表与详情、冲突保留 hint 且不刷新、无会话不发请求。
+describe("useRuntimePlans.reopen", () => {
+  beforeEach(() => {
+    (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
+    getRuntimePlanMock.mockReset();
+    listRuntimePlansMock.mockReset();
+    reopenRuntimePlanMock.mockReset();
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => {
+      root?.unmount();
+    });
+    root = null;
+    container.remove();
+    document.body.innerHTML = "";
+    delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("成功后刷新列表并记录成功态（含版本）", async () => {
+    listRuntimePlansMock.mockResolvedValue({ plans: [plan("proj/plan")], count: 1 });
+    getRuntimePlanMock.mockResolvedValue(
+      plan("proj/plan", { content: "# 计划", content_available: true }),
+    );
+    reopenRuntimePlanMock.mockResolvedValue({
+      plan_id: "proj/plan",
+      version: 4,
+      bytes: 12,
+      created: true,
+      unchanged: false,
+      forced: false,
+    });
+
+    const holder: { current: UseRuntimePlansResult | null } = { current: null };
+    await mount(holder);
+    expect(listRuntimePlansMock).toHaveBeenCalledTimes(1);
+
+    let outcome: Awaited<ReturnType<UseRuntimePlansResult["reopen"]>> | undefined;
+    await act(async () => {
+      outcome = await holder.current!.reopen("session-1", " proj/plan ");
+    });
+    await settle();
+
+    expect(reopenRuntimePlanMock).toHaveBeenCalledWith("session-1", "proj/plan", {});
+    expect(outcome).toMatchObject({ ok: true, planId: "proj/plan", version: 4, created: true });
+    expect(holder.current?.reopenState).toMatchObject({
+      status: "succeeded",
+      planId: "proj/plan",
+      version: 4,
+      forced: false,
+    });
+    // 回灌会同时改写计划文件与 plan mode 状态：列表重拉一次。
+    expect(listRuntimePlansMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("冲突保留 hint 且不刷新，force 重试后进入成功态", async () => {
+    listRuntimePlansMock.mockResolvedValue({ plans: [plan("proj/plan")], count: 1 });
+    reopenRuntimePlanMock
+      .mockRejectedValueOnce(
+        new RuntimeApiError(409, {
+          conflict: true,
+          error: "planmode: plan file differs from the archived snapshot",
+          hint: "确认覆盖后带 force=true 重试",
+        } as never),
+      )
+      .mockResolvedValueOnce({
+        plan_id: "proj/plan",
+        version: 2,
+        bytes: 12,
+        created: false,
+        unchanged: false,
+        forced: true,
+      });
+
+    const holder: { current: UseRuntimePlansResult | null } = { current: null };
+    await mount(holder);
+
+    let outcome: Awaited<ReturnType<UseRuntimePlansResult["reopen"]>> | undefined;
+    await act(async () => {
+      outcome = await holder.current!.reopen("session-1", "proj/plan");
+    });
+    await settle();
+
+    expect(outcome).toMatchObject({ ok: false, conflict: true, hint: "确认覆盖后带 force=true 重试" });
+    expect(holder.current?.reopenState).toMatchObject({
+      status: "conflict",
+      planId: "proj/plan",
+      hint: "确认覆盖后带 force=true 重试",
+    });
+    // 冲突不写盘：不需要刷新列表。
+    expect(listRuntimePlansMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      outcome = await holder.current!.reopen("session-1", "proj/plan", { force: true });
+    });
+    await settle();
+
+    expect(reopenRuntimePlanMock).toHaveBeenLastCalledWith("session-1", "proj/plan", { force: true });
+    expect(outcome).toMatchObject({ ok: true, forced: true });
+    expect(holder.current?.reopenState).toMatchObject({
+      status: "succeeded",
+      forced: true,
+      version: 2,
+    });
+    expect(listRuntimePlansMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("无会话上下文时不发请求，直接失败态", async () => {
+    listRuntimePlansMock.mockResolvedValue({ plans: [], count: 0 });
+
+    const holder: { current: UseRuntimePlansResult | null } = { current: null };
+    await mount(holder);
+
+    let outcome: Awaited<ReturnType<UseRuntimePlansResult["reopen"]>> | undefined;
+    await act(async () => {
+      outcome = await holder.current!.reopen("", "proj/plan");
+    });
+    await settle();
+
+    expect(reopenRuntimePlanMock).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ ok: false, conflict: false });
+    expect(holder.current?.reopenState.status).toBe("failed");
+  });
+
+  it("clearReopenState 把提示复位为 idle", async () => {
+    listRuntimePlansMock.mockResolvedValue({ plans: [plan("proj/plan")], count: 1 });
+    reopenRuntimePlanMock.mockResolvedValue({
+      plan_id: "proj/plan",
+      version: 1,
+      bytes: 1,
+      created: false,
+      unchanged: true,
+      forced: false,
+    });
+
+    const holder: { current: UseRuntimePlansResult | null } = { current: null };
+    await mount(holder);
+    await act(async () => {
+      await holder.current!.reopen("session-1", "proj/plan");
+    });
+    await settle();
+    expect(holder.current?.reopenState.status).toBe("succeeded");
+
+    await act(async () => {
+      holder.current!.clearReopenState();
+    });
+    expect(holder.current?.reopenState.status).toBe("idle");
   });
 });

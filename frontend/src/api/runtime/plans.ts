@@ -13,7 +13,7 @@ import type {
   RuntimeStoredPlanListResponse,
 } from "@/types/runtime";
 
-import { buildRuntimeUrl, fetchRuntimeJson } from "./shared";
+import { RuntimeApiError, buildRuntimeUrl, fetchRuntimeJson } from "./shared";
 
 export const RUNTIME_PLANS_PATH = "/api/runtime/plans";
 
@@ -145,4 +145,95 @@ export async function getRuntimePlan(id: string): Promise<RuntimeStoredPlan> {
   }
 
   return plan;
+}
+
+/** 重新评审端点（POST，会话内）：把归档快照写回工作区计划文件并进入 plan mode。 */
+export function buildStoredPlanReopenPath(sessionId: string) {
+  return `/api/runtime/sessions/${encodeURIComponent(sessionId.trim())}/plan/reopen`;
+}
+
+export type RuntimePlanReopenOptions = {
+  /** 指定轮次；0/未给 = 最新快照。 */
+  version?: number;
+  /** 工作区文件与快照不一致时是否覆盖（后端 409 后由用户确认）。 */
+  force?: boolean;
+};
+
+export type RuntimePlanReopenResult = {
+  plan_id: string;
+  version: number;
+  bytes: number;
+  plan_path?: string;
+  display_path?: string;
+  created: boolean;
+  unchanged: boolean;
+  forced: boolean;
+};
+
+/** 只做形状归一化，语义（created/unchanged/forced）原样透出给渲染层。 */
+export function normalizePlanReopenResult(raw: unknown): RuntimePlanReopenResult | null {
+  const record = asRecord(raw);
+  const planId = readOptionalString(record?.plan_id);
+  if (!record || !planId) {
+    return null;
+  }
+
+  return {
+    plan_id: planId,
+    version: readNumber(record.version),
+    bytes: readNumber(record.bytes),
+    plan_path: readOptionalString(record.plan_path),
+    display_path: readOptionalString(record.display_path),
+    created: record.created === true,
+    unchanged: record.unchanged === true,
+    forced: record.forced === true,
+  };
+}
+
+/**
+ * 回灌一条归档快照并进入 plan mode（`/plans reopen` 的 HTTP 入口）。
+ * 冲突（409：工作区文件与快照不一致、未写盘）由调用方决定是否带 `force` 重试，
+ * 提示文案用 `isStoredPlanReopenConflict` + `readStoredPlanReopenHint` 读取。
+ */
+export async function reopenRuntimePlan(
+  sessionId: string,
+  planId: string,
+  options: RuntimePlanReopenOptions = {},
+): Promise<RuntimePlanReopenResult> {
+  const payload = await fetchRuntimeJson<unknown>(
+    buildRuntimeUrl(buildStoredPlanReopenPath(sessionId)),
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        plan_id: planId,
+        version: options.version ?? 0,
+        force: options.force === true,
+      }),
+    },
+  );
+
+  const result = normalizePlanReopenResult(payload);
+  if (!result) {
+    throw new Error("runtime plan reopen response is missing a plan_id");
+  }
+
+  return result;
+}
+
+/** 409 冲突：工作区计划文件与归档快照不一致（后端未写盘，可带 force 重试）。 */
+export function isStoredPlanReopenConflict(error: unknown) {
+  if (!(error instanceof RuntimeApiError) || error.status !== 409) {
+    return false;
+  }
+  return asRecord(error.payload)?.conflict === true;
+}
+
+/** 冲突提示：后端 hint 优先，其次 error 文案。 */
+export function readStoredPlanReopenHint(error: unknown) {
+  const payload = error instanceof RuntimeApiError ? asRecord(error.payload) : null;
+  return readOptionalString(payload?.hint) ?? readOptionalString(payload?.error) ?? "";
 }

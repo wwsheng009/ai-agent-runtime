@@ -4,9 +4,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildStoredPlanDetailPath,
+  buildStoredPlanReopenPath,
+  isStoredPlanReopenConflict,
   normalizeStoredPlan,
   normalizeStoredPlanList,
+  normalizePlanReopenResult,
+  readStoredPlanReopenHint,
 } from "./plans";
+import { RuntimeApiError } from "./shared";
 
 describe("buildStoredPlanDetailPath", () => {
   it("保留 '/' 作为段分隔，逐段 encodeURIComponent", () => {
@@ -87,5 +92,55 @@ describe("normalizeStoredPlanList / normalizeStoredPlan", () => {
 
     expect(list.plans.map((plan) => plan.id)).toEqual(["proj/plan"]);
     expect(list.count).toBe(1);
+  });
+});
+
+// 归档回灌（reopen）：URL/请求体形状、结果归一化、409 冲突识别（纯函数，不触网）。
+describe("reopenRuntimePlan helpers", () => {
+  it("buildStoredPlanReopenPath 走会话内 POST 端点并编码会话 id", () => {
+    expect(buildStoredPlanReopenPath("session-1")).toBe(
+      "/api/runtime/sessions/session-1/plan/reopen",
+    );
+    expect(buildStoredPlanReopenPath(" session/2 ")).toBe(
+      "/api/runtime/sessions/session%2F2/plan/reopen",
+    );
+  });
+
+  it("normalizePlanReopenResult 归一形状并保留 created/unchanged/forced", () => {
+    const result = normalizePlanReopenResult({
+      plan_id: "proj/plan",
+      version: 4,
+      bytes: 128,
+      display_path: "docs/plan.md",
+      created: true,
+      forced: false,
+    });
+
+    expect(result).toMatchObject({
+      plan_id: "proj/plan",
+      version: 4,
+      bytes: 128,
+      display_path: "docs/plan.md",
+      created: true,
+      unchanged: false,
+      forced: false,
+    });
+    expect(normalizePlanReopenResult({ version: 1 })).toBeNull();
+  });
+
+  it("409 + conflict=true 才算冲突，hint 优先于 error", () => {
+    const conflict = new RuntimeApiError(409, {
+      conflict: true,
+      error: "planmode: plan file differs from the archived snapshot",
+      hint: "确认覆盖后带 force=true 重试",
+    } as never);
+
+    expect(isStoredPlanReopenConflict(conflict)).toBe(true);
+    expect(readStoredPlanReopenHint(conflict)).toBe("确认覆盖后带 force=true 重试");
+
+    const notFound = new RuntimeApiError(404, { error: "missing" } as never);
+    expect(isStoredPlanReopenConflict(notFound)).toBe(false);
+    expect(readStoredPlanReopenHint(notFound)).toBe("missing");
+    expect(isStoredPlanReopenConflict(new Error("network"))).toBe(false);
   });
 });

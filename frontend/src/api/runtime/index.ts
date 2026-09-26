@@ -128,10 +128,15 @@ export {
 export { branchRuntimeSession } from "./session-branch";
 export {
   buildStoredPlanDetailPath,
+  buildStoredPlanReopenPath,
   getRuntimePlan,
+  isStoredPlanReopenConflict,
   listRuntimePlans,
+  normalizePlanReopenResult,
   normalizeStoredPlan,
   normalizeStoredPlanList,
+  readStoredPlanReopenHint,
+  reopenRuntimePlan,
   RUNTIME_PLANS_PATH,
 } from "./plans";
 export {

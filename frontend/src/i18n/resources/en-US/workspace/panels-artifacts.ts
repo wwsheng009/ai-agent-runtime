@@ -103,6 +103,18 @@ export const enWorkspacePanelsArtifacts = {
       snapshotTruncated: "Truncated",
       snapshotEmpty: "This plan has no stored snapshot body yet.",
     },
+    // Archive restore (report §4.5/§15): write the snapshot back and enter plan mode.
+    reopen: {
+      action: "Reopen",
+      running: "Restoring…",
+      noSession: "Reopening a plan requires an active session.",
+      succeeded: "Restored v{{version}} from the archive.",
+      unchanged: "The workspace file already matches the snapshot.",
+      enteredPlanMode: "Plan mode is now active on this plan.",
+      conflict: "The workspace plan file differs from the archived snapshot; nothing was written.",
+      force: "Overwrite and reopen",
+      failed: "Reopen failed",
+    },
   },
   checkpoints: {
     title: "Restore points",

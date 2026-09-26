@@ -11,13 +11,15 @@ import { beforeAll, afterEach, beforeEach, describe, expect, it, vi } from "vite
 
 import { codeHighlightingReady } from "@/components/ui/code-highlighting";
 import { WORKSPACE_PANEL_SURFACES } from "@/components/workspace/panel-registry";
+import { RuntimeApiError } from "@/lib/runtime-api";
 import type { RuntimeStoredPlan } from "@/types/runtime";
 
 import { ArtifactPanelPlansSurface } from "./artifact-panel-plans-surface";
 
-const { getRuntimePlanMock, listRuntimePlansMock } = vi.hoisted(() => ({
+const { getRuntimePlanMock, listRuntimePlansMock, reopenRuntimePlanMock } = vi.hoisted(() => ({
   getRuntimePlanMock: vi.fn(),
   listRuntimePlansMock: vi.fn(),
+  reopenRuntimePlanMock: vi.fn(),
 }));
 
 vi.mock("@/lib/runtime-api", async (importOriginal) => {
@@ -26,6 +28,7 @@ vi.mock("@/lib/runtime-api", async (importOriginal) => {
     ...actual,
     getRuntimePlan: getRuntimePlanMock,
     listRuntimePlans: listRuntimePlansMock,
+    reopenRuntimePlan: reopenRuntimePlanMock,
   };
 });
 
@@ -60,10 +63,16 @@ function plan(id: string, overrides: Partial<RuntimeStoredPlan> = {}): RuntimeSt
   };
 }
 
-async function renderSurface(props: { lastRuntimeEventType?: string; runtimeEventCount?: number } = {}) {
+async function renderSurface(
+  props: { sessionId?: string; lastRuntimeEventType?: string; runtimeEventCount?: number } = {},
+) {
   await act(async () => {
     root?.render(
-      <ArtifactPanelPlansSurface sessionId="" {...props} />,
+      <ArtifactPanelPlansSurface
+        lastRuntimeEventType={props.lastRuntimeEventType}
+        runtimeEventCount={props.runtimeEventCount}
+        sessionId={props.sessionId ?? ""}
+      />,
     );
   });
   await settle();
@@ -92,6 +101,7 @@ describe("ArtifactPanelPlansSurface", () => {
     (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
     getRuntimePlanMock.mockReset();
     listRuntimePlansMock.mockReset();
+    reopenRuntimePlanMock.mockReset();
 
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -277,5 +287,84 @@ describe("ArtifactPanelPlansSurface", () => {
     await settle();
 
     expect(listRuntimePlansMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("重新评审：无会话时按钮禁用，有会话时回灌并给出成功提示", async () => {
+    listRuntimePlansMock.mockResolvedValue({
+      plans: [plan("proj/plan", { plan_path: "docs/plan.md" })],
+      count: 1,
+    });
+    getRuntimePlanMock.mockResolvedValue(
+      plan("proj/plan", { plan_path: "docs/plan.md", content: "# 计划", content_available: true }),
+    );
+    reopenRuntimePlanMock.mockResolvedValue({
+      plan_id: "proj/plan",
+      version: 3,
+      bytes: 12,
+      created: true,
+      unchanged: false,
+      forced: false,
+    });
+
+    await renderSurface();
+    clickButtonByText("docs/plan.md");
+    await settle();
+
+    const disabledButton = findButtonByText("重新评审");
+    expect(disabledButton).toBeInstanceOf(HTMLButtonElement);
+    expect((disabledButton as HTMLButtonElement).disabled).toBe(true);
+
+    // 面板拿到会话上下文后（同一详情视图重渲染），同一个按钮才可点。
+    await renderSurface({ sessionId: "session-1" });
+    clickButtonByText("重新评审");
+    await settle();
+
+    expect(reopenRuntimePlanMock).toHaveBeenCalledWith("session-1", "proj/plan", {});
+    expect(container.textContent).toContain("已从归档恢复 v3");
+    expect(container.textContent).toContain("已进入 plan mode");
+  });
+
+  it("重新评审冲突：展示后端 hint，确认后带 force 重试", async () => {
+    listRuntimePlansMock.mockResolvedValue({
+      plans: [plan("proj/plan", { plan_path: "docs/plan.md" })],
+      count: 1,
+    });
+    getRuntimePlanMock.mockResolvedValue(
+      plan("proj/plan", { plan_path: "docs/plan.md", content: "# 计划", content_available: true }),
+    );
+    reopenRuntimePlanMock
+      .mockRejectedValueOnce(
+        new RuntimeApiError(409, {
+          conflict: true,
+          error: "planmode: plan file differs from the archived snapshot",
+          hint: "确认覆盖后带 force=true 重试",
+        } as never),
+      )
+      .mockResolvedValueOnce({
+        plan_id: "proj/plan",
+        version: 3,
+        bytes: 12,
+        created: false,
+        unchanged: false,
+        forced: true,
+      });
+
+    await renderSurface({ sessionId: "session-1" });
+    clickButtonByText("docs/plan.md");
+    await settle();
+    clickButtonByText("重新评审");
+    await settle();
+
+    expect(container.textContent).toContain("工作区计划文件与归档快照不一致");
+    expect(container.textContent).toContain("确认覆盖后带 force=true 重试");
+
+    clickButtonByText("强制覆盖并重新评审");
+    await settle();
+
+    expect(reopenRuntimePlanMock).toHaveBeenLastCalledWith("session-1", "proj/plan", {
+      force: true,
+    });
+    expect(container.textContent).toContain("已从归档恢复 v3");
+    expect(container.textContent).not.toContain("确认覆盖后带 force=true 重试");
   });
 });

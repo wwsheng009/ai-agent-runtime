@@ -95,6 +95,18 @@ export const zhWorkspacePanelsArtifacts = {
       snapshotTruncated: "已截断",
       snapshotEmpty: "该计划尚未保存快照正文。",
     },
+    // 归档回灌（报告 §4.5/§15）：按当前会话把快照写回工作区并进入 plan mode。
+    reopen: {
+      action: "重新评审",
+      running: "正在回灌…",
+      noSession: "重新评审需要活动会话。",
+      succeeded: "已从归档恢复 v{{version}}。",
+      unchanged: "工作区文件已与快照一致。",
+      enteredPlanMode: "已进入 plan mode，可继续评审这份计划。",
+      conflict: "工作区计划文件与归档快照不一致，未改写。",
+      force: "强制覆盖并重新评审",
+      failed: "重新评审失败",
+    },
   },
   checkpoints: {
     title: "还原点",

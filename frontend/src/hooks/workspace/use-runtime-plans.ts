@@ -11,7 +11,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { buildRuntimeEventReloadKey } from "@/hooks/workspace/use-runtime-checkpoints";
-import { getRuntimePlan, listRuntimePlans } from "@/lib/runtime-api";
+import {
+  getRuntimePlan,
+  isStoredPlanReopenConflict,
+  listRuntimePlans,
+  readStoredPlanReopenHint,
+  reopenRuntimePlan,
+} from "@/lib/runtime-api";
 import type { RuntimeStoredPlan } from "@/types/runtime";
 
 /** 运行时事件名：计划被请求评审（后端 `chat.EventPlanReviewRequested`）。 */
@@ -28,6 +34,38 @@ const PLAN_RELOAD_EVENTS = new Set([
 export type UseRuntimePlansOptions = {
   lastRuntimeEventType?: string;
   runtimeEventCount?: number;
+};
+
+/** 重新评审（归档回灌）的进行态，供渲染层展示 running/成功/冲突/失败。 */
+export type RuntimePlanReopenState = {
+  status: "idle" | "running" | "succeeded" | "conflict" | "failed";
+  planId: string;
+  version: number;
+  unchanged: boolean;
+  forced: boolean;
+  message: string;
+  hint: string;
+};
+
+export type RuntimePlanReopenOutcome =
+  | {
+      ok: true;
+      planId: string;
+      version: number;
+      created: boolean;
+      unchanged: boolean;
+      forced: boolean;
+    }
+  | { ok: false; conflict: boolean; message: string; hint: string };
+
+const IDLE_REOPEN_STATE: RuntimePlanReopenState = {
+  status: "idle",
+  planId: "",
+  version: 0,
+  unchanged: false,
+  forced: false,
+  message: "",
+  hint: "",
 };
 
 type ShouldReloadRuntimePlansOptions = {
@@ -67,6 +105,7 @@ export function useRuntimePlans({
   const [selectedPlan, setSelectedPlan] = useState<RuntimeStoredPlan | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [reopenState, setReopenState] = useState<RuntimePlanReopenState>(IDLE_REOPEN_STATE);
 
   const lastRuntimeEventKey = buildRuntimeEventReloadKey(
     lastRuntimeEventType,
@@ -76,6 +115,7 @@ export function useRuntimePlans({
   const selectedPlanIdRef = useRef<string | null>(null);
   const listRequestSeq = useRef(0);
   const detailRequestSeq = useRef(0);
+  const reopenRequestSeq = useRef(0);
 
   useEffect(() => {
     lastRuntimeEventKeyRef.current = lastRuntimeEventKey;
@@ -196,7 +236,93 @@ export function useRuntimePlans({
     ]);
   }, [loadDetail, loadPlans]);
 
+  /**
+   * 回灌一条归档快照并进入 plan mode（POST /sessions/{id}/plan/reopen）。
+   * 成功后刷新列表与已打开详情——reopen 会同时改写计划文件与 plan mode 状态。
+   * 冲突（409）不写盘：把 hint 交给渲染层，由用户确认后带 force=true 重试。
+   */
+  const reopen = useCallback(
+    async (
+      sessionId: string,
+      planId: string,
+      options: { version?: number; force?: boolean } = {},
+    ): Promise<RuntimePlanReopenOutcome> => {
+      const seq = reopenRequestSeq.current + 1;
+      reopenRequestSeq.current = seq;
+      const trimmedPlanId = planId.trim();
+      const trimmedSessionId = sessionId.trim();
+      if (!trimmedSessionId) {
+        const outcome: RuntimePlanReopenOutcome = {
+          ok: false,
+          conflict: false,
+          message: "runtime plan reopen requires an active session",
+          hint: "",
+        };
+        setReopenState({
+          ...IDLE_REOPEN_STATE,
+          status: "failed",
+          planId: trimmedPlanId,
+          message: outcome.message,
+        });
+        return outcome;
+      }
+
+      setReopenState({
+        ...IDLE_REOPEN_STATE,
+        status: "running",
+        planId: trimmedPlanId,
+        version: options.version ?? 0,
+      });
+
+      try {
+        const result = await reopenRuntimePlan(trimmedSessionId, trimmedPlanId, options);
+        if (seq === reopenRequestSeq.current) {
+          setReopenState({
+            ...IDLE_REOPEN_STATE,
+            status: "succeeded",
+            planId: result.plan_id,
+            version: result.version,
+            unchanged: result.unchanged,
+            forced: result.forced,
+          });
+        }
+        await refresh();
+        return {
+          ok: true,
+          planId: result.plan_id,
+          version: result.version,
+          created: result.created,
+          unchanged: result.unchanged,
+          forced: result.forced,
+        };
+      } catch (error) {
+        const conflict = isStoredPlanReopenConflict(error);
+        const message = readErrorMessage(error, "failed to reopen archived plan");
+        const hint = conflict ? readStoredPlanReopenHint(error) : "";
+        if (seq === reopenRequestSeq.current) {
+          setReopenState({
+            ...IDLE_REOPEN_STATE,
+            status: conflict ? "conflict" : "failed",
+            planId: trimmedPlanId,
+            version: options.version ?? 0,
+            message,
+            hint,
+          });
+        }
+        return { ok: false, conflict, message, hint };
+      }
+    },
+    [refresh],
+  );
+
+  /** 关闭重新评审提示（切换选择或返回列表时调用）。 */
+  const clearReopenState = useCallback(() => {
+    reopenRequestSeq.current += 1;
+    setReopenState(IDLE_REOPEN_STATE);
+  }, []);
+
   return {
+    clearReopenState,
     detailError,
     detailLoading,
     loadedOnce,
@@ -204,6 +330,8 @@ export function useRuntimePlans({
     plansError,
     plansLoading,
     refresh,
+    reopen,
+    reopenState,
     select,
     selectedPlan,
     selectedPlanId,
