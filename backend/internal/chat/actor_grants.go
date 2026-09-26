@@ -47,12 +47,11 @@ func newPermissionGrantStores(root string) (*runtimepolicy.MemoryGrantStore, run
 // grant store: the tool policy anchor first (hosts set it from the runtime
 // workspace config), then the process working directory.
 func (a *SessionActor) permissionWorkspaceRoot() string {
-	if a == nil || a.agent == nil {
-		return ""
-	}
-	if policy := a.agent.GetToolExecutionPolicy(); policy != nil {
-		if root := strings.TrimSpace(policy.PathAnchorRoot); root != "" {
-			return root
+	if a != nil && a.agent != nil {
+		if policy := a.agent.GetToolExecutionPolicy(); policy != nil {
+			if root := strings.TrimSpace(policy.PathAnchorRoot); root != "" {
+				return root
+			}
 		}
 	}
 	if root, err := os.Getwd(); err == nil {
