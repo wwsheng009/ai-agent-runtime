@@ -107,6 +107,19 @@ export const zhWorkspacePanelsArtifacts = {
       force: "强制覆盖并重新评审",
       failed: "重新评审失败",
     },
+    // 轮次差异（报告 §4.4 前端部分）：`GET /plans/{id}/diff` 的统一 diff 渲染。
+    diff: {
+      title: "轮次差异",
+      show: "差异",
+      hide: "收起差异",
+      collapse: "收起差异面板",
+      loading: "正在生成差异…",
+      failed: "差异加载失败",
+      identical: "无变更",
+      identicalHint: "这一轮快照与上一轮完全一致。",
+      coarse: "粗粒度",
+      truncated: "已截断",
+    },
   },
   checkpoints: {
     title: "还原点",

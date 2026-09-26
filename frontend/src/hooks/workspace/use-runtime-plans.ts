@@ -12,9 +12,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { buildRuntimeEventReloadKey } from "@/hooks/workspace/use-runtime-checkpoints";
 import {
+  getRuntimePlanDiff,
   getRuntimePlan,
   isStoredPlanReopenConflict,
   listRuntimePlans,
+  type RuntimePlanDiffResult,
   readStoredPlanReopenHint,
   reopenRuntimePlan,
 } from "@/lib/runtime-api";
@@ -68,6 +70,25 @@ const IDLE_REOPEN_STATE: RuntimePlanReopenState = {
   hint: "",
 };
 
+/** 轮次差异（`/plans/{id}/diff`）的一次读取状态。 */
+export type RuntimePlanDiffState = {
+  status: "idle" | "loading" | "ready" | "error";
+  planId: string;
+  from: number;
+  to: number;
+  result: RuntimePlanDiffResult | null;
+  error: string;
+};
+
+const IDLE_DIFF_STATE: RuntimePlanDiffState = {
+  status: "idle",
+  planId: "",
+  from: 0,
+  to: 0,
+  result: null,
+  error: "",
+};
+
 type ShouldReloadRuntimePlansOptions = {
   lastHandledEventKey?: string;
   lastRuntimeEventKey?: string;
@@ -106,6 +127,7 @@ export function useRuntimePlans({
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [reopenState, setReopenState] = useState<RuntimePlanReopenState>(IDLE_REOPEN_STATE);
+  const [diffState, setDiffState] = useState<RuntimePlanDiffState>(IDLE_DIFF_STATE);
 
   const lastRuntimeEventKey = buildRuntimeEventReloadKey(
     lastRuntimeEventType,
@@ -116,6 +138,7 @@ export function useRuntimePlans({
   const listRequestSeq = useRef(0);
   const detailRequestSeq = useRef(0);
   const reopenRequestSeq = useRef(0);
+  const diffRequestSeq = useRef(0);
 
   useEffect(() => {
     lastRuntimeEventKeyRef.current = lastRuntimeEventKey;
@@ -321,10 +344,70 @@ export function useRuntimePlans({
     setReopenState(IDLE_REOPEN_STATE);
   }, []);
 
+  /**
+   * 读取一条归档计划的轮次差异（`from`/`to` 为 0 时由后端推导：上一轮 → 最新轮）。
+   * 失败只落在 `diffState`，不影响列表/详情；`null` 返回值让调用方可以静默处理。
+   */
+  const loadDiff = useCallback(
+    async (
+      planId: string,
+      options: { from?: number; to?: number } = {},
+    ): Promise<RuntimePlanDiffResult | null> => {
+      const seq = diffRequestSeq.current + 1;
+      diffRequestSeq.current = seq;
+      const trimmedPlanId = planId.trim();
+      setDiffState({
+        ...IDLE_DIFF_STATE,
+        status: "loading",
+        planId: trimmedPlanId,
+        from: options.from ?? 0,
+        to: options.to ?? 0,
+      });
+
+      try {
+        const result = await getRuntimePlanDiff(trimmedPlanId, options);
+        if (seq === diffRequestSeq.current) {
+          setDiffState({
+            status: "ready",
+            planId: result.plan_id,
+            from: result.from_version,
+            to: result.to_version,
+            result,
+            error: "",
+          });
+        }
+        return result;
+      } catch (error) {
+        const message = readErrorMessage(error, "failed to load plan diff");
+        if (seq === diffRequestSeq.current) {
+          setDiffState({
+            ...IDLE_DIFF_STATE,
+            status: "error",
+            planId: trimmedPlanId,
+            from: options.from ?? 0,
+            to: options.to ?? 0,
+            error: message,
+          });
+        }
+        return null;
+      }
+    },
+    [],
+  );
+
+  /** 收起差异面板（同一轮次再次点击或切换计划时调用）。 */
+  const clearDiff = useCallback(() => {
+    diffRequestSeq.current += 1;
+    setDiffState(IDLE_DIFF_STATE);
+  }, []);
+
   return {
+    clearDiff,
     clearReopenState,
     detailError,
     detailLoading,
+    diffState,
+    loadDiff,
     loadedOnce,
     plans,
     plansError,

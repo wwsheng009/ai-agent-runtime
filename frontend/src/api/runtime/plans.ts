@@ -9,11 +9,18 @@
 // %2F，后端 mux 的 `{id:.*}` 路由与 store.Get 都拿不到原始 id（404）。
 
 import type {
+  RuntimePlanDiffOptions,
+  RuntimePlanDiffResult,
   RuntimeStoredPlan,
   RuntimeStoredPlanListResponse,
 } from "@/types/runtime";
 
-import { RuntimeApiError, buildRuntimeUrl, fetchRuntimeJson } from "./shared";
+import {
+  RuntimeApiError,
+  buildRuntimeUrl,
+  buildRuntimeUrlWithQuery,
+  fetchRuntimeJson,
+} from "./shared";
 
 export const RUNTIME_PLANS_PATH = "/api/runtime/plans";
 
@@ -236,4 +243,58 @@ export function isStoredPlanReopenConflict(error: unknown) {
 export function readStoredPlanReopenHint(error: unknown) {
   const payload = error instanceof RuntimeApiError ? asRecord(error.payload) : null;
   return readOptionalString(payload?.hint) ?? readOptionalString(payload?.error) ?? "";
+}
+
+/** 轮次对比端点（GET）：`/plans/{id}/diff`，即 CLI `/plans diff` 的 HTTP 孪生。 */
+export function buildStoredPlanDiffPath(planId: string) {
+  return `${buildStoredPlanDetailPath(planId)}/diff`;
+}
+
+export function normalizePlanDiffResult(raw: unknown): RuntimePlanDiffResult | null {
+  const record = asRecord(raw);
+  const planId = readOptionalString(record?.plan_id);
+  if (!record || !planId) {
+    return null;
+  }
+
+  return {
+    plan_id: planId,
+    from_version: readNumber(record.from_version),
+    to_version: readNumber(record.to_version),
+    identical: record.identical === true,
+    added: readNumber(record.added),
+    removed: readNumber(record.removed),
+    old_lines: readNumber(record.old_lines),
+    new_lines: readNumber(record.new_lines),
+    coarse: record.coarse === true,
+    truncated: record.truncated === true,
+    text: readOptionalString(record.text) ?? "",
+  };
+}
+
+/** 读取一条归档计划的轮次差异（`identical=true` 时 `text` 只剩两行版本框架）。 */
+export async function getRuntimePlanDiff(
+  planId: string,
+  options: RuntimePlanDiffOptions = {},
+): Promise<RuntimePlanDiffResult> {
+  const payload = await fetchRuntimeJson<unknown>(
+    buildRuntimeUrlWithQuery(buildStoredPlanDiffPath(planId), {
+      from: options.from || undefined,
+      to: options.to || undefined,
+      context: options.context || undefined,
+      max_lines: options.maxLines || undefined,
+    }),
+    {
+      headers: {
+        Accept: "application/json",
+      },
+    },
+  );
+
+  const result = normalizePlanDiffResult(payload);
+  if (!result) {
+    throw new Error("runtime plan diff response is missing a plan_id");
+  }
+
+  return result;
 }

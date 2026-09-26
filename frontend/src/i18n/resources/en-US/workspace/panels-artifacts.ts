@@ -115,6 +115,19 @@ export const enWorkspacePanelsArtifacts = {
       force: "Overwrite and reopen",
       failed: "Reopen failed",
     },
+    // Round diff (report §4.4 frontend half): the unified diff from GET /plans/{id}/diff.
+    diff: {
+      title: "Round diff",
+      show: "Diff",
+      hide: "Hide diff",
+      collapse: "Collapse diff panel",
+      loading: "Rendering diff…",
+      failed: "Failed to load the diff",
+      identical: "No changes",
+      identicalHint: "This round's snapshot is identical to the previous one.",
+      coarse: "Coarse",
+      truncated: "Truncated",
+    },
   },
   checkpoints: {
     title: "Restore points",

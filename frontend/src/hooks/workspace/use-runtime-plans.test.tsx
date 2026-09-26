@@ -19,16 +19,19 @@ import {
   useRuntimePlans,
 } from "./use-runtime-plans";
 
-const { getRuntimePlanMock, listRuntimePlansMock, reopenRuntimePlanMock } = vi.hoisted(() => ({
-  getRuntimePlanMock: vi.fn(),
-  listRuntimePlansMock: vi.fn(),
-  reopenRuntimePlanMock: vi.fn(),
-}));
+const { getRuntimePlanDiffMock, getRuntimePlanMock, listRuntimePlansMock, reopenRuntimePlanMock } =
+  vi.hoisted(() => ({
+    getRuntimePlanDiffMock: vi.fn(),
+    getRuntimePlanMock: vi.fn(),
+    listRuntimePlansMock: vi.fn(),
+    reopenRuntimePlanMock: vi.fn(),
+  }));
 
 vi.mock("@/lib/runtime-api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/runtime-api")>();
   return {
     ...actual,
+    getRuntimePlanDiff: getRuntimePlanDiffMock,
     getRuntimePlan: getRuntimePlanMock,
     listRuntimePlans: listRuntimePlansMock,
     reopenRuntimePlan: reopenRuntimePlanMock,
@@ -467,5 +470,88 @@ describe("useRuntimePlans.reopen", () => {
       holder.current!.clearReopenState();
     });
     expect(holder.current?.reopenState.status).toBe("idle");
+  });
+});
+
+// 轮次差异取数：成功进入 ready 态、失败只落在 diffState、clearDiff 复位。
+describe("useRuntimePlans.diff", () => {
+  beforeEach(() => {
+    (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
+    getRuntimePlanDiffMock.mockReset();
+    getRuntimePlanMock.mockReset();
+    listRuntimePlansMock.mockReset();
+    reopenRuntimePlanMock.mockReset();
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => {
+      root?.unmount();
+    });
+    root = null;
+    container.remove();
+    document.body.innerHTML = "";
+    delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("loadDiff 成功：按 from/to 取数并进入 ready 态，clearDiff 复位", async () => {
+    listRuntimePlansMock.mockResolvedValue({ plans: [plan("proj/plan")], count: 1 });
+    getRuntimePlanDiffMock.mockResolvedValue({
+      plan_id: "proj/plan",
+      from_version: 1,
+      to_version: 2,
+      identical: false,
+      added: 2,
+      removed: 1,
+      old_lines: 2,
+      new_lines: 3,
+      coarse: false,
+      truncated: false,
+      text: "--- v1 a\n+++ v2 b\n",
+    });
+
+    const holder: { current: UseRuntimePlansResult | null } = { current: null };
+    await mount(holder);
+
+    let result: Awaited<ReturnType<UseRuntimePlansResult["loadDiff"]>> | undefined;
+    await act(async () => {
+      result = await holder.current!.loadDiff("proj/plan", { from: 1, to: 2 });
+    });
+
+    expect(getRuntimePlanDiffMock).toHaveBeenCalledWith("proj/plan", { from: 1, to: 2 });
+    expect(result).toMatchObject({ from_version: 1, to_version: 2, added: 2 });
+    expect(holder.current?.diffState).toMatchObject({
+      status: "ready",
+      planId: "proj/plan",
+      from: 1,
+      to: 2,
+      error: "",
+    });
+
+    await act(async () => {
+      holder.current!.clearDiff();
+    });
+    expect(holder.current?.diffState).toMatchObject({ status: "idle", planId: "", result: null });
+  });
+
+  it("loadDiff 失败：返回 null 且原因落在 diffState（列表与详情不受影响）", async () => {
+    listRuntimePlansMock.mockResolvedValue({ plans: [plan("proj/plan")], count: 1 });
+    getRuntimePlanDiffMock.mockRejectedValue(new Error("diff boom"));
+
+    const holder: { current: UseRuntimePlansResult | null } = { current: null };
+    await mount(holder);
+
+    let result: Awaited<ReturnType<UseRuntimePlansResult["loadDiff"]>> | undefined;
+    await act(async () => {
+      result = await holder.current!.loadDiff("proj/plan", {});
+    });
+
+    expect(result).toBeNull();
+    expect(holder.current?.diffState.status).toBe("error");
+    expect(holder.current?.diffState.error).toContain("diff boom");
+    expect(holder.current?.plansError).toBeNull();
   });
 });

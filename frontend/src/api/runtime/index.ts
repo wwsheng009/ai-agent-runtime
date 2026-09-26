@@ -127,11 +127,14 @@ export {
 } from "./sessions";
 export { branchRuntimeSession } from "./session-branch";
 export {
+  buildStoredPlanDiffPath,
   buildStoredPlanDetailPath,
   buildStoredPlanReopenPath,
   getRuntimePlan,
+  getRuntimePlanDiff,
   isStoredPlanReopenConflict,
   listRuntimePlans,
+  normalizePlanDiffResult,
   normalizePlanReopenResult,
   normalizeStoredPlan,
   normalizeStoredPlanList,

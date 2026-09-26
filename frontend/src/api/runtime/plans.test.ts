@@ -3,9 +3,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildStoredPlanDiffPath,
   buildStoredPlanDetailPath,
   buildStoredPlanReopenPath,
   isStoredPlanReopenConflict,
+  normalizePlanDiffResult,
   normalizeStoredPlan,
   normalizeStoredPlanList,
   normalizePlanReopenResult,
@@ -142,5 +144,40 @@ describe("reopenRuntimePlan helpers", () => {
     expect(isStoredPlanReopenConflict(notFound)).toBe(false);
     expect(readStoredPlanReopenHint(notFound)).toBe("missing");
     expect(isStoredPlanReopenConflict(new Error("network"))).toBe(false);
+  });
+});
+
+// 轮次差异 API 客户端：路径编码 + 结果归一化（不触网，纯函数断言）。
+describe("getRuntimePlanDiff helpers", () => {
+  it("buildStoredPlanDiffPath 在详情路径后追加 /diff 并逐段编码", () => {
+    expect(buildStoredPlanDiffPath("proj/plan")).toBe("/api/runtime/plans/proj/plan/diff");
+    expect(buildStoredPlanDiffPath("my project/plan #1.md")).toBe(
+      "/api/runtime/plans/my%20project/plan%20%231.md/diff",
+    );
+  });
+
+  it("normalizePlanDiffResult 归一形状并按布尔默认 false", () => {
+    const result = normalizePlanDiffResult({
+      plan_id: "proj/plan",
+      from_version: 1,
+      to_version: 3,
+      added: 4,
+      removed: 2,
+      old_lines: 40,
+      new_lines: 42,
+      text: "--- v1\n+++ v3\n",
+    });
+
+    expect(result).toMatchObject({
+      plan_id: "proj/plan",
+      from_version: 1,
+      to_version: 3,
+      identical: false,
+      added: 4,
+      removed: 2,
+      coarse: false,
+      truncated: false,
+    });
+    expect(normalizePlanDiffResult({ from_version: 1 })).toBeNull();
   });
 });

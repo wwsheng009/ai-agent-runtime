@@ -15,16 +15,19 @@
 
 import {
   ChevronLeftIcon,
+  FileDiffIcon,
   FileTextIcon,
   LoaderCircleIcon,
   RefreshCwIcon,
   RotateCcwIcon,
   ScrollTextIcon,
 } from "lucide-react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ArtifactPlanDiffBlock } from "@/components/workspace/artifact-panel-plans-diff";
 import {
   formatStoredPlanProject,
   formatStoredPlanTitle,
@@ -57,9 +60,11 @@ function PlanMetaRow({ label, value }: { label: string; value: string }) {
 function PlanRoundRow({
   round,
   t,
+  children,
 }: {
   round: RuntimeStoredPlanRound;
   t: (key: string) => string;
+  children?: ReactNode;
 }) {
   const notes = summarizeRoundNotes(round.notes);
 
@@ -84,6 +89,7 @@ function PlanRoundRow({
           {notes}
         </div>
       ) : null}
+      {children}
     </li>
   );
 }
@@ -98,9 +104,12 @@ export function ArtifactPanelPlansSurface({
   // 动态键（状态 / 决策）必须走宽松包装：键类型由 zh-CN 字典静态约束，运行期才收敛。
   const translate = (key: string) => t(key as never) as string;
   const {
+    clearDiff,
     clearReopenState,
     detailError,
     detailLoading,
+    diffState,
+    loadDiff,
     loadedOnce,
     plans,
     plansError,
@@ -118,6 +127,17 @@ export function ArtifactPanelPlansSurface({
   const reopenRunning = reopenState.status === "running";
   const reopenTargetId = selectedPlanId ?? selectedPlan?.id ?? "";
   const reopenNotice = detailOpen && reopenState.planId === reopenTargetId;
+
+  // 轮次差异：与 CLI `/plans diff <id> [vA [vB]]` 同一口径（from=上一轮，单轮快照回退到自身）。
+  const roundDiffPair = (version: number) => ({ from: Math.max(1, version - 1), to: version });
+  const isDiffOpen = (
+    planId: string,
+    pair: { from: number; to: number },
+  ): boolean =>
+    diffState.status !== "idle" &&
+    diffState.planId === planId &&
+    diffState.from === pair.from &&
+    diffState.to === pair.to;
 
   return (
     <div
@@ -143,6 +163,7 @@ export function ArtifactPanelPlansSurface({
             {detailOpen ? (
               <Button
                 onClick={() => {
+                  clearDiff();
                   clearReopenState();
                   select(null);
                 }}
@@ -303,13 +324,55 @@ export function ArtifactPanelPlansSurface({
                     </div>
                     {selectedPlan.rounds && selectedPlan.rounds.length > 0 ? (
                       <ul className="space-y-1.5">
-                        {selectedPlan.rounds.map((round, index) => (
-                          <PlanRoundRow
-                            key={`${round.version}-${index}`}
-                            round={round}
-                            t={translate}
-                          />
-                        ))}
+                        {selectedPlan.rounds.map((round, index) => {
+                          const pair = roundDiffPair(round.version);
+                          const diffOpen = isDiffOpen(selectedPlan.id, pair);
+
+                          return (
+                            <PlanRoundRow
+                              key={`${round.version}-${index}`}
+                              round={round}
+                              t={translate}
+                            >
+                              <div className="flex items-center gap-1.5">
+                                <Button
+                                  data-testid={`plan-round-diff-${pair.from}-${pair.to}`}
+                                  disabled={busy}
+                                  onClick={() => {
+                                    if (diffOpen) {
+                                      clearDiff();
+                                      return;
+                                    }
+                                    void loadDiff(selectedPlan.id, pair);
+                                  }}
+                                  size="sm"
+                                  type="button"
+                                  variant="ghost"
+                                >
+                                  <FileDiffIcon size={13} />
+                                  {diffOpen
+                                    ? t("panels.artifacts.plans.diff.hide")
+                                    : t("panels.artifacts.plans.diff.show")}
+                                </Button>
+                              </div>
+                              {diffOpen ? (
+                                <ArtifactPlanDiffBlock
+                                  diffKey={`${pair.from}-${pair.to}`}
+                                  onCollapse={clearDiff}
+                                  onRetry={() => {
+                                    void loadDiff(selectedPlan.id, pair);
+                                  }}
+                                  state={{
+                                    status:
+                                      diffState.status === "loading" ? "loading" : diffState.status === "error" ? "error" : "ready",
+                                    result: diffState.result,
+                                    error: diffState.error,
+                                  }}
+                                />
+                              ) : null}
+                            </PlanRoundRow>
+                          );
+                        })}
                       </ul>
                     ) : (
                       <div className="rounded-card border border-dashed border-white/10 px-3 py-3 text-center text-muted-foreground">
@@ -374,7 +437,10 @@ export function ArtifactPanelPlansSurface({
                   <button
                     className="w-full space-y-1 rounded-card-lg border border-white/8 bg-black/10 px-3 py-2.5 text-left transition-colors hover:border-white/15 hover:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
                     data-testid={`plans-list-item-${plan.id}`}
-                    onClick={() => select(plan.id)}
+                    onClick={() => {
+                      clearDiff();
+                      select(plan.id);
+                    }}
                     type="button"
                   >
                     <div className="flex flex-wrap items-center gap-1.5">

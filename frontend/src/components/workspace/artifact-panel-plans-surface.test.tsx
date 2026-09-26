@@ -16,16 +16,19 @@ import type { RuntimeStoredPlan } from "@/types/runtime";
 
 import { ArtifactPanelPlansSurface } from "./artifact-panel-plans-surface";
 
-const { getRuntimePlanMock, listRuntimePlansMock, reopenRuntimePlanMock } = vi.hoisted(() => ({
-  getRuntimePlanMock: vi.fn(),
-  listRuntimePlansMock: vi.fn(),
-  reopenRuntimePlanMock: vi.fn(),
-}));
+const { getRuntimePlanDiffMock, getRuntimePlanMock, listRuntimePlansMock, reopenRuntimePlanMock } =
+  vi.hoisted(() => ({
+    getRuntimePlanDiffMock: vi.fn(),
+    getRuntimePlanMock: vi.fn(),
+    listRuntimePlansMock: vi.fn(),
+    reopenRuntimePlanMock: vi.fn(),
+  }));
 
 vi.mock("@/lib/runtime-api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/runtime-api")>();
   return {
     ...actual,
+    getRuntimePlanDiff: getRuntimePlanDiffMock,
     getRuntimePlan: getRuntimePlanMock,
     listRuntimePlans: listRuntimePlansMock,
     reopenRuntimePlan: reopenRuntimePlanMock,
@@ -99,6 +102,7 @@ describe("ArtifactPanelPlansSurface", () => {
 
   beforeEach(() => {
     (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
+    getRuntimePlanDiffMock.mockReset();
     getRuntimePlanMock.mockReset();
     listRuntimePlansMock.mockReset();
     reopenRuntimePlanMock.mockReset();
@@ -366,5 +370,147 @@ describe("ArtifactPanelPlansSurface", () => {
     });
     expect(container.textContent).toContain("已从归档恢复 v3");
     expect(container.textContent).not.toContain("确认覆盖后带 force=true 重试");
+  });
+});
+
+// 轮次差异（§4.4 前端部分）：展开/收起、着色行与计数、identical、失败重试。
+describe("ArtifactPanelPlansSurface 轮次差异", () => {
+  beforeAll(async () => {
+    await codeHighlightingReady;
+  });
+
+  beforeEach(() => {
+    (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT = true;
+    getRuntimePlanDiffMock.mockReset();
+    getRuntimePlanMock.mockReset();
+    listRuntimePlansMock.mockReset();
+    reopenRuntimePlanMock.mockReset();
+
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => {
+      root?.unmount();
+    });
+    root = null;
+    container.remove();
+    document.body.innerHTML = "";
+    delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  function clickByTestId(testId: string) {
+    const element = container.querySelector(`[data-testid="${testId}"]`);
+    expect(element).toBeInstanceOf(HTMLButtonElement);
+    act(() => {
+      element?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+  }
+
+  async function openDetailWithRounds() {
+    listRuntimePlansMock.mockResolvedValue({
+      plans: [plan("proj/plan", { plan_path: "docs/plan.md" })],
+      count: 1,
+    });
+    getRuntimePlanMock.mockResolvedValue(
+      plan("proj/plan", {
+        plan_path: "docs/plan.md",
+        version: 2,
+        content: "# 计划",
+        content_available: true,
+        rounds: [
+          { version: 1, decision: "request_changes", notes: "补充回滚方案" },
+          { version: 2, decision: "approve" },
+        ],
+      }),
+    );
+
+    await renderSurface({ sessionId: "session-1" });
+    clickButtonByText("docs/plan.md");
+    await settle();
+  }
+
+  it("展开某一轮的差异：按上一轮→该轮取数，渲染计数与着色行，再点收起", async () => {
+    getRuntimePlanDiffMock.mockResolvedValue({
+      plan_id: "proj/plan",
+      from_version: 1,
+      to_version: 2,
+      identical: false,
+      added: 2,
+      removed: 1,
+      old_lines: 2,
+      new_lines: 3,
+      coarse: false,
+      truncated: false,
+      text: "--- v1 request_changes (user)\n+++ v2 approve (user)\n@@ -1,2 +1,3 @@\n # 计划\n-1. 先发布\n+1. 先灰度\n+2. 再发布\n",
+    });
+
+    await openDetailWithRounds();
+    clickByTestId("plan-round-diff-1-2");
+    await settle();
+
+    expect(getRuntimePlanDiffMock).toHaveBeenCalledWith("proj/plan", { from: 1, to: 2 });
+    expect(container.querySelector('[data-testid="plan-diff-1-2"]')).not.toBeNull();
+    expect(container.textContent).toContain("v1 → v2");
+    expect(container.textContent).toContain("+2");
+    expect(container.textContent).toContain("-1");
+    expect(container.textContent).toContain("+2. 再发布");
+
+    clickByTestId("plan-round-diff-1-2");
+    expect(container.querySelector('[data-testid="plan-diff-1-2"]')).toBeNull();
+  });
+
+  it("identical：判等走 identical 字段而不是文本，提示无变更", async () => {
+    getRuntimePlanDiffMock.mockResolvedValue({
+      plan_id: "proj/plan",
+      from_version: 1,
+      to_version: 2,
+      identical: true,
+      added: 0,
+      removed: 0,
+      old_lines: 2,
+      new_lines: 2,
+      coarse: false,
+      truncated: false,
+      text: "--- v1 request_changes (user)\n+++ v2 approve (user)\n",
+    });
+
+    await openDetailWithRounds();
+    clickByTestId("plan-round-diff-1-2");
+    await settle();
+
+    expect(container.textContent).toContain("无变更");
+    expect(container.textContent).toContain("这一轮快照与上一轮完全一致");
+  });
+
+  it("失败：给出错误文案，重试按钮重新取数", async () => {
+    getRuntimePlanDiffMock.mockRejectedValueOnce(new Error("boom"));
+    getRuntimePlanDiffMock.mockResolvedValueOnce({
+      plan_id: "proj/plan",
+      from_version: 1,
+      to_version: 2,
+      identical: false,
+      added: 1,
+      removed: 0,
+      old_lines: 1,
+      new_lines: 2,
+      coarse: false,
+      truncated: false,
+      text: "--- v1 a\n+++ v2 b\n@@ -1 +1,2 @@\n # 计划\n+2. 再发布\n",
+    });
+
+    await openDetailWithRounds();
+    clickByTestId("plan-round-diff-1-2");
+    await settle();
+
+    expect(container.textContent).toContain("差异加载失败");
+
+    clickButtonByText("重试");
+    await settle();
+
+    expect(getRuntimePlanDiffMock).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("+2. 再发布");
   });
 });
