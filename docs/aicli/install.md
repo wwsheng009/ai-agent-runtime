@@ -835,7 +835,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - 剪贴板图片可直接加成附件：`alt+v`（可重映射动作 `app.attach.clipboard_image`）或 `/attach paste` 读取剪贴板位图，落盘为临时 PNG 后进入待发送附件（Windows 读 CF_DIB/CF_DIBV5，macOS 用 `osascript`，Linux 需 `wl-paste`/`xclip`）；`/hotkeys` 的「剪贴板图片」行会如实说明当前平台是否可用与原因，不可用时用 `/attach <path>`。
 - `ctrl+v` 读不到剪贴板文本时（例如剪贴板里只有图片）会按 `alt+v` 的同一套语义读图并插入 `[Image #N]` 令牌；没有图片时完全静默（只有明确按 `alt+v` 才提示错误）。剪贴板同时有文本和图片时仍优先粘贴文本。
 - 粘贴图片**路径**会自动成为附件：整段粘贴就是**一个或多个**存在的图片文件路径时生效（Windows Terminal 把复制的图片文件转成路径、资源管理器拖拽路径都算，多选即多个路径），落附件后按顺序插入 `[Image #N]` 令牌；校验全有或全无，任一不是可用图片就整体按文本粘贴。一次最多 8 张，夹在句子里的路径保持原样。注意 WT 自己处理 `Ctrl+V`/右键，位图请用 `alt+v`。
-- 发送前图片处理：长边超过 `1568px` 等比缩小（含透明通道保 PNG，其余转 JPEG），超过 `32MB` 直接跳过；提示里会写明前后尺寸与体积，绝不静默发送原图。上限可在配置文件里改：`aicli.chat.max_image_dimension`（像素；`0` 或负数 = 关闭压缩/不缩放）与 `aicli.chat.max_image_mb`（MB；`<=0` = 用默认 32MB）；环境变量 `AICLI_IMAGE_MAX_DIMENSION` / `AICLI_IMAGE_MAX_MB` 优先于配置，都未提供时用内置默认。
+- 发送前图片处理：长边超过 `1568px` 等比缩小（含透明通道保 PNG，其余转 JPEG），超过 `32MB` 直接跳过；提示里会写明前后尺寸与体积，绝不静默发送原图。`AICLI_IMAGE_MAX_DIMENSION` 可覆盖长边上限（`0` 关闭压缩）。
 - 图片附件带可见令牌 `[Image #N]`：`alt+v` 在光标处插入、`/attach <path>` 在命令执行后写回草稿；**删掉令牌即不再发送该图**（只约束令牌引入的附件，ACP/Web 等其它来源不受影响）。
 - 审批面板在工具名后会先给一行通俗解释（`[说明] 动作 / 目标 / 影响`），再列原因、风险等级、上下文与参数摘要；解释是启发式规则、不调用模型，识别不出时不会输出任何猜测。按 `[3]` 可展开完整参数。
 - 交互模式的完整说明（按键分层与重映射、终端能力矩阵、粘贴与附件语义、输入所有权、排障）见 [interactive-mode.md](./interactive-mode.md)。
