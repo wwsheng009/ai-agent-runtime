@@ -1111,3 +1111,47 @@ Web 横幅位于聊天区顶部、可换行、能放「模式 + 状态 + 路径 
 ### 24.4 下一轮
 
 **Web**：面板轮次 diff 视图内按行选择 → `POST /plans/{id}/comments`；评论列表直接消费 `GET .../comments` 的 `status`/`current_*` 投影（同一口径，前端不重算重放）。前端文件（`web/` 下的面板与共享 types）目前与本线无重叠，可安全落子。
+
+---
+
+## 25. 实施记录：第十八轮（2026-09-25，行级评论 Web 面 → §4.4 收口）
+
+**状态**：§4.4 **全部落地**（存储 / 锚点重放 / HTTP / CLI / Web 五面齐备）。§4.4 与 §4.5、§4.6 一样从「未落地清单」里关闭。
+
+### 25.1 Web 行为
+
+| 环节 | 行为 |
+|------|------|
+| 选行 | 轮次差异视图里点击行号选中该行、Shift+点击扩成区间。**行号取该 diff `to` 版本的正文行号**——由 hunk 头 `@@ -a,b +c,d @@` 起算并逐行推进（`add`/`context` 有新版行号，`del` 只有旧版行号、不可选），不是 diff 文本行序（后者含框架行与 hunk 头） |
+| 提交 | `POST /plans/{id}/comments`，`revision=to`——锚点必须落在用户点击的那一版正文上，否则行号会锚错版本；越界/空正文由后端 400，原样显示给用户 |
+| 列表 | 按**最新轮**重放（与 CLI `/plan comments` 同一口径），直接消费响应里的 `status`/`current_*` 投影——**前端不重算重放**；三态并列（一致 / 原文已移动 / 锚点失效），可删除（幂等） |
+| 取数 | 与详情同生命周期：选中计划、事件驱动刷新（`plan_*` 事件）、reopen 后刷新；失败只落在评论区块，不影响列表/详情 |
+
+### 25.2 落点
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 类型 | `frontend/src/types/runtime/plans.ts` | 评论三类型 + diff 行号字段（`oldLine`/`newLine`） |
+| 解析 | `artifact-panel-plans-shared.ts` | `classifyPlanDiffLines` 带行号；`parsePlanDiffHunkHeader`、`formatPlanCommentRange`、状态文案/配色 |
+| 客户端 | `api/runtime/plans.ts` + `api/runtime/index.ts` | `buildStoredPlanCommentsPath`、两个归一化函数、三个端点调用；barrel 显式导出 |
+| 状态 | `hooks/workspace/use-runtime-plan-comments.ts`（新） | 评论状态机（load/create/remove/clear）；从 `use-runtime-plans.ts` 抽出以满足 P0-2 单文件 ≤500 非空行 |
+| 视图 | `artifact-panel-plans-diff.tsx`（改写）、`artifact-panel-plans-comments.tsx`（新）、`artifact-panel-plans-surface.tsx`（接线） | 行选择 + 编辑器；评论列表；面内联动 |
+| 文案 | `i18n/resources/{zh-CN,en-US}/workspace/panels-artifacts.ts` | `panels.artifacts.plans.comments.*`（数字插值走 `String(...)`，与既有 `reopen.succeeded` 同口径） |
+| 测试 | `plans.test.ts`、`artifact-panel-plans-shared.test.ts`、`artifact-panel-plans-surface-diff.test.tsx`（新，从 surface 测试拆出） | 端点路径/归一化、行号起算与多 hunk、端到端「点行号 → 提交 → 列表 → 删除」 |
+
+### 25.3 验证（cwd=frontend）
+
+| 命令 | 结果 |
+|---|---|
+| `npx vitest run`（4 个相关文件） | 35 例通过（含新端到端评论用例） |
+| `npx vitest run src/hooks/workspace/use-runtime-plans.test.tsx` | 13 例通过（抽出子 hook 后行为不变） |
+| `npx tsc -b` | exit 0 |
+| `npm run lint` | exit 0（eslint 0 error；i18n lint 0 violation；max-lines 0 超限——`use-runtime-plans.ts` 511→406、surface 测试 577→344，新文件 318） |
+
+**两处被门禁逼出来的改进**：① 评论状态机从 511 行的 `use-runtime-plans.ts` 里抽出成独立 hook——浏览与评论本就是两块状态机，评论读不到不该让浏览面塌掉；② surface 测试超 500 行，把「轮次差异 + 评论」整块拆成 `artifact-panel-plans-surface-diff.test.tsx`（harness 复制而非共享，因为 `vi.mock` 必须按文件 hoist）。
+
+### 25.4 §4.4 收口后的边界
+
+- 评论锚点是**行区间**，不跟随正文重排自动改锚——`moved`/`orphaned` 如实报告，宁可显示「锚点失效」也不猜新位置。
+- 列表的重放目标是**最新归档轮**；某条评论锚在旧轮时，展示的位置就是它在当前轮的位置（这正是评审时要看的）。
+- 尚未做（不在本轮承诺内）：评论的编辑（只有新增/删除）、评论线程回复、按评论过滤 diff。
