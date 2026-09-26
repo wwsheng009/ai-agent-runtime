@@ -337,3 +337,57 @@ M1 交付清单：
 - `project` 层当前为 `./.aicli/mcp.yaml`（沿用既有发现链的第 1 层）；`.mcp.json` 兼容名与仓库级 `.gitignore`
   豁免只做提示，不自动修改用户仓库——完整的外部格式互操作留给 M4 的 importers。
 - `mcp get`（导出单 server 的可复制配置）与 `--scope` 的交互留给 M4 §4.7。
+
+---
+
+## 11. M4 实施备注（跨 agent 导入 + 单 server 导出，2026-09-25）
+
+对齐 §4.6 / §4.7 的落地结果；§4.8（`/mcp` 交互菜单）另行说明。
+
+**新增 `internal/mcp/importers` 包（纯解析，可单测）**
+
+- `Import(vendor, Options{Root,Home,Names})` 返回按来源分组的 `Result`；来源：`claude` / `cursor` / `gemini` /
+  `opencode` / `codex` / `all`。候选文件按「用户级 → 项目级」排序，后者覆盖前者并在告警里记录覆盖关系。
+- JSON 解析兼容 `mcpServers`（Claude/Cursor/Gemini/OpenCode）与 `servers`（VS Code 风格）两种容器键，
+  以及 `~/.claude.json` 的 `projects.<path>.mcpServers`；`env: ["K=V"]` 数组形态也接受。
+- 映射规则集中在 `mapServerEntry`：`http/streamable*` → `streamable`、`sse` → `sse`、`ws/websocket` → `websocket`、
+  `stdio/local` → `stdio`；缺 `type` 按 `url`/`command` 推断；`headers/http_headers` → `headers`；
+  `timeout`/`timeout_sec`/`startup_timeout_ms`/`tool_timeout_sec` → 秒；`enabled`/`disabled` 各自保留语义；
+  `oauth: true | {...}` / `scopes: [...]` → `auth`。
+- **未知字段与不支持的构造只告警、不失败**：`knownEntryKeys` 之外记 `忽略未映射字段`；Codex TOML 的数组表
+  与嵌套子表记 `不支持…（已跳过）`。单个来源文件解析失败只影响该文件（`ScannedFile.Err`），其余来源照常。
+- `codex.go` 自带 TOML 子集解析器（仓库无 TOML 依赖）：表头（含引号键 `"odd.name"`）、基本/字面字符串、
+  数字、布尔、跨行字符串数组、内联表 `env = { K = "v" }`；行尾注释与引号内的 `#` 都正确处理。
+
+**CLI：`mcp import` / `mcp get` / `mcp add-json`（`cmd/aicli/commands/mcp_import.go`）**
+
+- `mcp import`：`--from`、`--scope`（默认 `local`）、`--dry-run`、`--on-conflict skip|overwrite|rename`、
+  `--on-secrets mask|reject|keep`、`--only`；文本摘要 + `--output json --envelope` 双形态。
+- **dry-run 零副作用**：规划阶段改用只读的 `loadMCPTargetFile`（文件不存在返回空配置），不再调用会
+  `EnsureFile` 的 `admin.LoadFile` —— 这一点是 e2e 断言「--dry-run 不创建文件」时发现的真问题。
+- 冲突处理：`skip` 不动；`rename` 生成 `<name>-imported(-N)`；`overwrite` 走 `Service.Update`
+  （`admin.Add` 对已存在名字直接报错，实测踩到过）。
+- 秘密策略（仅 `--scope project` 生效，因为 user/local 是个人配置）：`mask`（默认）把明文改写为 `${VAR}`，
+  变量名形如 `CODEX_REMOTE_X_API_KEY`，**相同明文复用同一个变量名**，摘要里列出需要设置的环境变量；
+  `reject` 跳过该 server 并标记原因；`keep` 原样写入（兼容显式选择）。
+- `mcp get <name> [--json]`：输出分层合并后**生效**的那份配置与 `configSource/configPath`；
+  `--json` 的 `.config` 片段可直接喂回 `add-json`（e2e 里做了往返验证）。
+- `mcp add-json <name> <JSON>`：接受 `type` 别名、`headers/http_headers`、`timeoutSeconds`、`maxParallelCalls`、
+  `enabled/disabled`，以及 `get --json` 的 `.config` 包装；未声明 `type` 时按 `url`/`command` 推断
+  （否则 admin 会把纯 url 请求当 stdio 并要求 command）。同样受 `--scope` 与项目级秘密剥离约束。
+
+**验证**
+
+- 单测：`importers`（Claude 映射与 projects 段、项目级覆盖用户级、Codex TOML 含跨行数组与不支持构造、
+  非法来源/缺失文件、`all` 与 `--only` 过滤、坏文件隔离）；`commands`（dry-run 无副作用、local 层落盘并生效、
+  project 层 mask/reject、冲突三策略、`--only` 未命中、秘密变量复用、add-json 解析与类型推断、
+  项目级拒绝明文、`get --json` → `add-json` 往返）。
+- 真实二进制端到端：`go run ./scripts/mcp_import_e2e.go` —— 隔离 HOME + 临时项目，覆盖五条断言链
+  （dry-run 不落盘 / local 层生效并显示来源 / project 层 ${VAR} 化并提示变量名 / get→add-json 往返 /
+  非法输入报错且不改文件）。
+
+**§4.8 `/mcp` 交互菜单的现状**
+
+文本面板已具备状态标记、工具数、trust、来源/覆盖与「需认证」提示（M2/M3 已交付），
+但**可交互选择器（动作：状态 / 认证 / 启停 / 移除）尚未实现**：`chat_*_picker.go` 一族正在被并行的
+会话改造，此刻接入会与在制品冲突。下一步单独切片：先在 picker 稳定后接入，非 TTY 保持现有纯文本输出。

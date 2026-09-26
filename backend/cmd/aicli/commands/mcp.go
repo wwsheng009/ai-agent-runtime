@@ -183,7 +183,8 @@ func MCPCommand() *cobra.Command {
 	}
 
 	cmd.AddCommand(addCmd, removeCmd, listCmd, statusCmd, enableCmd, disableCmd, toolsCmd, testCmd, testServerCmd, reloadCmd,
-		newMCPAuthCommand(), newMCPLogoutCommand())
+		newMCPAuthCommand(), newMCPLogoutCommand(),
+		newMCPImportCommand(), newMCPGetCommand(), newMCPAddJSONCommand())
 
 	return cmd
 }

@@ -582,6 +582,49 @@ MCP OAuth（`--auth oauth` + `aicli mcp auth`）：
   写入项目级时会提示：「若仓库 `.gitignore` 忽略了 `.aicli/`，请追加豁免 `!.aicli/mcp.yaml`」。
 - 低优先级文件损坏时：跳过该层并打印告警（`警告: 已跳过 ...`，runtime-server 记入日志），不会让整次加载失败；最高优先级文件损坏仍然直接报错。
 
+从其它 agent 工具导入（`aicli mcp import`）：
+
+| 来源 (--from) | 扫描的文件 |
+|---|---|
+| `claude` | `~/.claude.json`（含 `projects.<path>.mcpServers`）、`<项目>/.mcp.json` |
+| `cursor` | `~/.cursor/mcp.json`、`<项目>/.cursor/mcp.json` |
+| `gemini` | `~/.gemini/settings.json`、`<项目>/.gemini/settings.json` |
+| `opencode` | `~/.config/opencode/opencode.json`、`<项目>/opencode.json` |
+| `codex` | `~/.codex/config.toml` 的 `[mcp_servers.*]`（TOML 子集解析） |
+| `all`（默认） | 以上全部；同一来源内项目级覆盖用户级 |
+
+```bash
+aicli mcp import --dry-run                      # 预览：将导入 N、改名 M、跳过 K
+aicli mcp import --from claude --scope user     # 导入到个人全局
+aicli mcp import --from codex --scope project   # 导入到项目配置（明文凭证会被 ${VAR} 化）
+aicli mcp import --on-conflict rename --only context7
+```
+
+| 参数 | 说明 |
+|---|---|
+| `--scope` | `user` / `local`（默认）/ `project`，语义见上文 |
+| `--dry-run` | 只输出计划，**不写任何文件**（也不会创建目标文件） |
+| `--on-conflict` | `skip`（默认）/ `overwrite` / `rename`（改名 `<name>-imported`） |
+| `--on-secrets` | `mask`（默认，仅 `--scope project` 生效）/ `reject` / `keep` |
+| `--only` | 只导入指定 server（可重复） |
+
+映射规则：`http`→`streamable`、`sse`→`sse`、`ws/websocket`→`websocket`、`stdio`→`stdio`；缺 `type` 时按 `url`/`command` 推断；
+`headers/http_headers` 映射到 `headers`，`env` 保留（`${VAR}` 引用原样保留）；`startup_timeout_ms` 换算为秒；
+`enabled: false` 保留为 aicli 的 `enabled: false`，`disabled: true` 保留 MCP 官方兼容形态；
+未映射的字段与不支持的 TOML 构造（数组表、嵌套子表）会出现在导入摘要的告警里，不会让整份导入失败。
+
+单 server 导出与 JSON 直填（脚本/跨机复制）：
+
+```bash
+aicli mcp get context7                       # 文本：类型/URL/命令/Headers/Env/来源
+aicli mcp get context7 --json | jq -c .config   # 拿到可直接复制的 JSON
+aicli mcp add-json context7 '{"type":"http","url":"https://mcp.context7.com/mcp","headers":{"Authorization":"Bearer ${CONTEXT7_TOKEN}"}}'
+aicli mcp add-json local-fs '{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/data"]}'
+```
+
+`add-json` 接受 `type` 别名（`http`/`sse`/`ws`/`stdio`）与 `get --json` 的 `.config` 片段，
+同样受 `--scope` 与项目级秘密剥离约束；`mcp get` 显示的是**分层合并后**生效的那一份配置（含 `configSource`）。
+
 MCP 配置文件解析顺序（chat 会话、`aicli mcp *`、console / 微型 Web 面板、runtime-server 共用同一套）：
 
 | 优先级 | 路径 | 说明 |
