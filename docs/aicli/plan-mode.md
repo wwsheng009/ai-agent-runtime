@@ -242,6 +242,8 @@
 
 **Web 的常驻模式标识**（§4.6）：聊天区顶部常显当前权限模式（`plan` 走强调色、`bypass_permissions` 走告警色，未知值原样呈现），plan active 时补计划状态、路径与一句读法（模型已请求裁决 / 计划已就绪 / 尚未写就）。它只消费与右侧「计划」面板同源的 `GET /sessions/{id}/plan` 快照，**不承载任何裁决动作** —— 批准 / 请求修改 / 退出仍由 composer 上沿的待交互卡片与右侧计划面板承担，避免出现第二套 pending 判定。
 
+**CLI/TUI 的对应物**：页脚最前部的模式段（`chatSurfacePlanModeStatusSegment`）——它与 Web 横幅共用同一份口径：tone 映射（`plan` 强调色、`bypass_permissions` 告警色、其余中性）与读法优先级（模型已请求裁决 > 计划正文可用 > 计划尚未写就，最后一档在页脚不占位）。段位本就位于页脚最前且窄宽度下不被裁掉，因此窄屏只牺牲细节：`Plan·待裁决` / `Plan·就绪`。计划路径不进页脚（`/plan status`、`/plans` 负责），两处都只做展示、不承载裁决动作。
+
 ---
 
 ## 7. 与 checkpoint / 回滚的关系
@@ -311,8 +313,8 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 
 - §4.4 行级评论与轮次 diff：**CLI 与 Web 都已落地轮次 diff**（`/plans diff <id> [vA [vB]]` + `GET /plans/{id}/diff` + 面板评审轮次行的「差异」展开，同一 `planmode.DiffArchivedVersions` 口径，新增行 teal / 删除行 orange，`identical` / `coarse` / `truncated` 有独立徽标）；仍未做的是**行级评论**（含 diff 内的锚点定位）。
 - §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具、run 结束兜底、**CLI 的 `/plans reopen`**、**HTTP 的 `POST /sessions/{id}/plan/reopen`** 与**面板「重新评审」按钮**（含 409 冲突 → 强制覆盖二次确认）均已落地；该小节的缺口已关闭。
-- §4.6 模式循环键位（`shift+tab` / `alt+m`）已随并发的 CLI 改动落地（`chat_permission_mode.go`：`default → accept_edits → plan → bypass_permissions`，进入 bypass 仍二次确认，`/hotkeys` 可见；plan 档走 `/mode` 语义，见 §2.3）；模型自主进入的确认门控已落地；**Web 的常驻模式标识已落地**（聊天区顶部，见 §6 末）；仍未做的是 **TUI/CLI 侧的常驻模式横幅**。
-- 评审反馈的**自动修订回合**：**已落地（§4 第 4 条）** —— HTTP `trigger_revision=true`、Web 面板「请求修改」、交互式 CLI `/plan request_changes <notes>`（统一 TTY 走 `SendMessageAfterCommit` post-commit 边界，纯文本 REPL 在裁决行后直接提交）都在裁决落地后立刻起一轮；脚本 / JSON 仍是「下一次用户输入时交付」。该小节只剩**行级评论**，§4.6 只剩 **TUI/CLI 常驻模式横幅**。
+- §4.6 模式循环键位（`shift+tab` / `alt+m`）已随并发的 CLI 改动落地（`chat_permission_mode.go`：`default → accept_edits → plan → bypass_permissions`，进入 bypass 仍二次确认，`/hotkeys` 可见；plan 档走 `/mode` 语义，见 §2.3）；模型自主进入的确认门控已落地；**Web 的常驻模式标识已落地**（聊天区顶部，见 §6 末），**CLI/TUI 的对应物也已落地**——页脚最前部的模式段常驻显示当前模式与计划状态（`Plan ON · 待裁决` / `Plan ON · 已就绪` / `Plan ON` / `Plan OFF`，`bypass_permissions` 显示 `Full Access` 并走告警色，`accept_edits` 显示 `Accept edits`，未知枚举回落原文），口径与 Web 横幅逐条对齐。**§4.6 至此关闭**。
+- 评审反馈的**自动修订回合**：**已落地（§4 第 4 条）** —— HTTP `trigger_revision=true`、Web 面板「请求修改」、交互式 CLI `/plan request_changes <notes>`（统一 TTY 走 `SendMessageAfterCommit` post-commit 边界，纯文本 REPL 在裁决行后直接提交）都在裁决落地后立刻起一轮；脚本 / JSON 仍是「下一次用户输入时交付」。**§4.6 已全部关闭**；§4.4 只剩**行级评论**。
 
 ---
 

@@ -954,3 +954,42 @@
 **唯一残留红的归属**：`TestChatDebugDisplayShowsStorageSection` 断言 `/debug` 输出含 `Maintenance: runs=`，而并发会话正在拆除 `internal/chat` 的 maintenance 机制（`runtime_store_maintenance.go` 已删、`chat_debug_storage.go` 在途）。该文件不在本轮落点内，未改动。
 
 **踩到的门禁与修法**（值得记一笔）：首轮整包跑出 `TestChatInteractiveDirectWriterInventory` 失败——它是「交互式命令面不得出现新的直接终端写入」的 P0 债务基线，报出 `chat_plan_revision.go startChatPlanRevisionRound fmt.Print want=0 got=2`。修法不是登记豁免（门禁明确禁止为新特性加条目），而是改用既有合法通道 `printfDirectInteractiveOutput`（`chat_surface_output.go`：统一会话走 semantic supplement、纯文本回退 `beginDirectInteractiveOutput`），新文件因此零直接写入；降级提示在纯文本 REPL 仍可见（用例断言了打印内容）。
+
+---
+
+## 21. 实施记录：第十四轮（2026-09-25，CLI/TUI 常驻模式标识）
+
+**状态**：§4.6 的最后一项落地并关闭。至此 §4.4 只剩**行级评论**，其余 §4.x 缺口均已闭合。
+
+### 21.1 载体选择：不新开横幅，用页脚既有模式段
+
+Web 横幅位于聊天区顶部、可换行、能放「模式 + 状态 + 路径 + 一句读法」；CLI/TUI 没有等价容器，但页脚已有一个 `StatusSegMode` 段（`chatSurfacePlanModeStatusSegment`），且该段**位于段序最前、窄宽度下也不会被裁掉**（`buildChatSurfaceStatusSegments` 的既有设计意图：plan 状态属于「交互式 composer 模式」而非瞬时阶段）。因此把它作为常驻标识的载体，而不是新增段位/新横幅——后者会破坏既有页脚组成与大量页脚断言（含余额段的顺序快照测试）。
+
+### 21.2 与 Web 横幅逐条对齐的口径
+
+| 维度 | Web（`session-mode-banner-shared.ts`） | CLI/TUI（本轮） |
+|------|----------------------------------------|------------------|
+| tone | `plan` → plan、`bypass_permissions` → danger、其余 neutral；未知值回落原文 | `Plan*` → `RoleAccent`；`Full Access` → `RoleWarning`；`Accept edits` → 中性；未知枚举 → `formatChatStatusModeValue` 回落原文 |
+| 读法优先级 | 模型已请求裁决 > 计划正文可用（可评审）> 计划尚未写就 | 同优先级：`Plan ON · 待裁决` > `Plan ON · 已就绪` > `Plan ON`（最后一档在页脚不占位，相当于 Web 只在 hint 行显示整句） |
+| 裁决动作 | 不承载（仍由 composer 卡片/计划面板） | 不承载（仍由 `/plan` 命令与 composer 卡片） |
+| 计划路径 | 横幅内展示 | 不进页脚（`/plan status`、`/plans`）；页脚宽度敏感 |
+| 窄屏 | 换行 | 紧凑态 `Plan·待裁决` / `Plan·就绪` |
+
+### 21.3 落点与验证
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 段位 | `backend/cmd/aicli/commands/chat_interaction.go` | `chatSurfacePlanModeStatusSegment` 重写（模式分支 + plan 读法优先级）；调用处尊重段位自带角色（`bypass` 告警色） |
+| 测试 | `backend/cmd/aicli/commands/chat_plan_mode_status_segment_test.go`（新） | 模式矩阵（default/bypass/accept_edits/未知）与读法优先级（空正文 → 有正文 → 待裁决），含角色与紧凑文本断言 |
+
+| 命令（cwd=backend） | 结果 |
+|---|---|
+| `go test ./cmd/aicli/commands/ -run 'TestChatSurfacePlanModeStatusSegment\|TestBuildChatSurfaceStatusLine\|TestChatInteractiveDirectWriterInventory' -count=1` | 通过（含既有页脚家族与 P0 直写清单） |
+| `go test ./cmd/aicli/commands/ -count=1 -json`（整包） | 失败集合 = `{TestChatDebugDisplayShowsStorageSection}`（并发会话在途的 `/debug` storage 断言，与本轮无关）；本轮的段位用例与页脚家族全绿 |
+| `gofmt -l`（2 个文件） | 空 |
+
+**回归中修掉的一处自伤**：`TestBuildChatSurfaceStatusLine_ShowsPlanModeState` 用裸 `&ChatSession{Model: …}`（权限模式字段为空）断言 `Plan OFF`；新实现最初把空值走 `default` 分支吞掉了段位。修法是把空值等同 `default`（并在回落分支兜底），而不是去改测试——「不显式设置模式字段」的会话很多，段位不能因此消失。
+
+### 21.4 未实施
+
+- **行级评论**（§4.4 最后一项）：需要先定「行锚点 + 备注」的存储与投影契约（锚点随正文重写的漂移策略是核心决策）。
