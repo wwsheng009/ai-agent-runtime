@@ -2684,7 +2684,13 @@ func buildChatSurfaceStatusSegments(session *ChatSession, s chatSurfaceStatus, i
 	// stage. Keep its compact ON/OFF state near the front so it remains visible
 	// in the fixed-bottom status bar even when optional diagnostics are dropped.
 	if planSeg := chatSurfacePlanModeStatusSegment(session); planSeg.full != "" {
-		segments = append(segments, presentChatStatusSegment(planSeg, style.StatusSegMode, style.RoleAccent))
+		// §4.6：该段是 Web「常驻模式标识」的 CLI/TUI 对应物，危险档（bypass_permissions）
+		// 自带告警角色，其余沿用强调色。
+		role := style.RoleAccent
+		if planSeg.role != "" {
+			role = planSeg.role
+		}
+		segments = append(segments, presentChatStatusSegment(planSeg, style.StatusSegMode, role))
 	}
 	// Codex-style goal indicator: keep near the front so residual active goals
 	// remain visible even when width drops optional diagnostics.
@@ -2830,14 +2836,48 @@ func chatPlanModeActive(session *ChatSession) bool {
 	return chatSessionPermissionMode(session) == runtimepolicy.ModePlan || planmode.IsActive(loadChatPlanMode(session))
 }
 
+// chatSurfacePlanModeStatusSegment 是 Web「常驻模式标识」（§4.6）的 CLI/TUI 对应物：
+// 段位保持在页脚最前部、窄宽度下也不被裁掉，因此它承担「当前权限模式常驻可见」的职责。
+// 口径与 Web 横幅（session-mode-banner-shared.ts）逐条对齐：
+//
+//   - tone：plan → 强调色，bypass_permissions → 告警色（角色由调用方尊重），其余中性；
+//   - plan active 的读法优先级：模型已请求裁决 > 计划正文可用（可评审）> 计划尚未写就
+//     （最后一档不占页脚空间，与 Web 只在 hint 行显示文案的做法等价）；
+//   - 未知枚举不写死文案，回落后端原文，避免枚举漂移时页脚空白。
+//
+// 纯展示：这里不承载任何裁决动作（裁决仍走 composer 卡片 / `/plan` 命令）。
 func chatSurfacePlanModeStatusSegment(session *ChatSession) chatStatusSegment {
 	if session == nil {
 		return chatStatusSegment{}
 	}
+	state := loadChatPlanMode(session)
 	if chatPlanModeActive(session) {
-		return chatStatusSegment{full: "Plan ON", compact: "Plan ON"}
+		switch {
+		case state.PendingExitRequest:
+			return chatStatusSegment{full: "Plan ON · 待裁决", compact: "Plan·待裁决"}
+		case planReviewReadyHint(session, state) != "":
+			return chatStatusSegment{full: "Plan ON · 已就绪", compact: "Plan·就绪"}
+		default:
+			return chatStatusSegment{full: "Plan ON", compact: "Plan ON"}
+		}
 	}
-	return chatStatusSegment{full: "Plan OFF", compact: "Plan OFF"}
+	switch chatSessionPermissionMode(session) {
+	case runtimepolicy.ModeBypassPermissions:
+		// Web 用 danger tone 突出「已跳权」；页脚同样常驻，别让用户忘了自己在全权模式。
+		return chatStatusSegment{full: "Full Access", compact: "Full Access", role: style.RoleWarning}
+	case runtimepolicy.ModeAcceptEdits:
+		return chatStatusSegment{full: "Accept edits", compact: "Accept edits"}
+	case runtimepolicy.ModePlan, runtimepolicy.ModeDefault, "":
+		// 已知的两种非 active 态保持既有文本（Plan ON/OFF 是页脚既有词表）；空值等同
+		// default——许多会话（以及测试夹具）从不显式设置该字段，不能因此把段位吞掉。
+		return chatStatusSegment{full: "Plan OFF", compact: "Plan OFF"}
+	default:
+		value := formatChatStatusModeValue(string(chatSessionPermissionMode(session)))
+		if value == "" {
+			return chatStatusSegment{full: "Plan OFF", compact: "Plan OFF"}
+		}
+		return chatStatusSegment{full: value, compact: value}
+	}
 }
 
 // chatSurfaceGoalStatusSegment mirrors Codex footer GoalStatusIndicator labels.
