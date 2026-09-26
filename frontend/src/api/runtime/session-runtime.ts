@@ -91,6 +91,7 @@ export function normalizeSessionApproval(
   if (!id) {
     return null;
   }
+  const rememberPattern = pickOptionalString(record, "remember_pattern", "rememberPattern");
   return {
     id,
     sessionId: pickString(record, "session_id", "sessionId"),
@@ -100,6 +101,7 @@ export function normalizeSessionApproval(
     ...(pickOptionalString(record, "expires_at", "expiresAt")
       ? { expiresAt: pickString(record, "expires_at", "expiresAt") }
       : {}),
+    ...(rememberPattern ? { rememberPattern } : {}),
   };
 }
 

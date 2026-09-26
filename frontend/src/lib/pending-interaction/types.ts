@@ -47,6 +47,11 @@ export type PendingApprovalInteraction = PendingInteractionBase & {
   toolCallId?: string;
   /** ISO 时间；后端 30min 超时终态的唯一依据。 */
   expiresAt?: string;
+  /**
+   * §4.8：后端派生的「记住」覆盖模式（如 `path:docs/a.md` / `cmd:git:*`）。
+   * 缺省表示该审批不可记忆（危险工具 / 硬问询 / 敏感写 / 外部目录准入）。
+   */
+  rememberPattern?: string;
 };
 
 export type PendingQuestionInteraction = PendingInteractionBase & {

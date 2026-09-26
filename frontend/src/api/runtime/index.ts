@@ -125,6 +125,10 @@ export {
   updateSessionPermissionMode,
   updateSessionPlanMode,
 } from "./sessions";
+export type {
+  ResolveSessionToolApprovalRequest,
+  SessionApprovalRememberScope,
+} from "./sessions";
 export { branchRuntimeSession } from "./session-branch";
 export {
   buildStoredPlanDiffPath,

@@ -11,7 +11,9 @@ import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import type { SessionApprovalRememberScope } from "@/api/runtime/sessions";
 import type {
+  PendingApprovalInteraction,
   PendingInteraction,
   PendingQuestionInteraction,
 } from "@/lib/pending-interaction";
@@ -21,7 +23,11 @@ import { cn } from "@/lib/utils";
 
 type PendingInteractionBarProps = {
   interaction: PendingInteraction | null;
-  onResolveApproval: (requestId: string, allow: boolean) => void;
+  onResolveApproval: (
+    requestId: string,
+    allow: boolean,
+    options?: { rememberScope?: SessionApprovalRememberScope; feedback?: string },
+  ) => void;
   onAnswerQuestion: (questionId: string, answer: string) => void;
   /** 计划评审决策（与 artifact 面板 plan surface 共用同一提交入口）。 */
   onPlanDecision?: (
@@ -89,6 +95,115 @@ function QuestionForm({
         {t("panels.interactions.question.submit")}
       </Button>
     </form>
+  );
+}
+
+/**
+ * §4.8：审批动作区（记住作用域 + 说明）。
+ *
+ * `rememberPattern` 只在后端允许记忆时下发（危险工具 / 硬问询 / 敏感写 /
+ * 外部目录准入为空）；「记住」默认关闭且仅在批准时提交——拒绝永远不产生授权。
+ * 说明文本批准与拒绝都会随决策送达后端（拒绝时并入模型可见的决策原因）。
+ */
+function ApprovalActions({
+  interaction,
+  disabled,
+  onResolve,
+}: {
+  interaction: PendingApprovalInteraction;
+  disabled: boolean;
+  onResolve: PendingInteractionBarProps["onResolveApproval"];
+}) {
+  const { t } = useTranslation("workspace");
+  // 由父级以 `key={interaction.id}` 挂载：身份切换即重建（草稿不串条目）。
+  const [remember, setRemember] = useState(false);
+  const [scope, setScope] =
+    useState<Exclude<SessionApprovalRememberScope, "once">>("session");
+  const [feedback, setFeedback] = useState("");
+  const rememberPattern = interaction.rememberPattern?.trim() ?? "";
+  const options = {
+    ...(feedback.trim() ? { feedback } : {}),
+    ...(remember && rememberPattern ? { rememberScope: scope } : {}),
+  };
+  const hasOptions = Object.keys(options).length > 0;
+  const decide = (allow: boolean) =>
+    hasOptions
+      ? onResolve(interaction.id, allow, options)
+      : onResolve(interaction.id, allow);
+
+  return (
+    <>
+      {rememberPattern ? (
+        <div className="mt-2 space-y-1.5 rounded-field border border-border/70 bg-surface-solid/60 px-2.5 py-2">
+          <label className="flex items-center gap-2 text-xs text-foreground">
+            <input
+              checked={remember}
+              className="size-3.5 accent-[var(--accent-primary)]"
+              disabled={disabled}
+              type="checkbox"
+              onChange={(event) => setRemember(event.target.checked)}
+            />
+            {t("panels.interactions.approval.remember")}
+          </label>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            {remember ? (
+              <select
+                aria-label={t("panels.interactions.approval.rememberScopeLabel")}
+                className="h-7 rounded-field border border-border bg-surface-solid px-1.5 text-xs text-foreground"
+                disabled={disabled}
+                value={scope}
+                onChange={(event) =>
+                  setScope(
+                    event.target.value === "project" ? "project" : "session",
+                  )
+                }
+              >
+                <option value="session">
+                  {t("panels.interactions.approval.rememberScopeSession")}
+                </option>
+                <option value="project">
+                  {t("panels.interactions.approval.rememberScopeProject")}
+                </option>
+              </select>
+            ) : null}
+            {/* 勾选前就展示将记住的模式：让「记住」是可核对的决定而不是盲选。 */}
+            <span className="font-mono text-[11px] break-all">
+              {t("panels.interactions.approval.rememberPattern", {
+                pattern: rememberPattern,
+              })}
+            </span>
+          </div>
+        </div>
+      ) : null}
+      <input
+        aria-label={t("panels.interactions.approval.feedbackPlaceholder")}
+        className="mt-2 h-8 w-full rounded-field border border-border bg-surface-solid px-2.5 text-xs text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+        disabled={disabled}
+        placeholder={t("panels.interactions.approval.feedbackPlaceholder")}
+        value={feedback}
+        onChange={(event) => setFeedback(event.target.value)}
+      />
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <Button
+          disabled={disabled}
+          size="sm"
+          variant="primary"
+          onClick={() => decide(true)}
+        >
+          <CheckIcon className="size-3.5" />
+          {t("panels.interactions.approval.approve")}
+        </Button>
+        <Button
+          disabled={disabled}
+          size="sm"
+          variant="destructive"
+          onClick={() => decide(false)}
+        >
+          <XIcon className="size-3.5" />
+          {t("panels.interactions.approval.deny")}
+        </Button>
+      </div>
+    </>
   );
 }
 
@@ -188,26 +303,12 @@ export function PendingInteractionBar({
       </div>
 
       {interaction.kind === "approval" ? (
-        <div className="mt-2 flex flex-wrap items-center gap-2">
-          <Button
-            disabled={isResolving}
-            size="sm"
-            variant="primary"
-            onClick={() => onResolveApproval(interaction.id, true)}
-          >
-            <CheckIcon className="size-3.5" />
-            {t("panels.interactions.approval.approve")}
-          </Button>
-          <Button
-            disabled={isResolving}
-            size="sm"
-            variant="destructive"
-            onClick={() => onResolveApproval(interaction.id, false)}
-          >
-            <XIcon className="size-3.5" />
-            {t("panels.interactions.approval.deny")}
-          </Button>
-        </div>
+        <ApprovalActions
+          key={interaction.id}
+          disabled={isResolving}
+          interaction={interaction}
+          onResolve={onResolveApproval}
+        />
       ) : null}
 
       {interaction.kind === "question" ? (

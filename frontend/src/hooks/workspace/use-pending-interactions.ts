@@ -20,8 +20,15 @@ import {
   resolveSessionToolApproval,
   type RuntimeSessionPlanMode,
   type RuntimeSessionState,
+  type SessionApprovalRememberScope,
   type SessionRuntimeEvent,
 } from "@/lib/runtime-api";
+
+/** §4.8：宿主 UI 可随审批决定提交的记忆作用域与说明。 */
+export type ResolveApprovalOptions = {
+  rememberScope?: SessionApprovalRememberScope;
+  feedback?: string;
+};
 
 type UsePendingInteractionsOptions = {
   /** 当前会话：事件归约全局累积，呈现按会话过滤（切换会话不误杀旧会话条目）。 */
@@ -120,7 +127,11 @@ export function usePendingInteractions({
   );
 
   const resolveApproval = useCallback(
-    async (requestId: string, allow: boolean): Promise<boolean> => {
+    async (
+      requestId: string,
+      allow: boolean,
+      options?: ResolveApprovalOptions,
+    ): Promise<boolean> => {
       const targetSessionId = resolveEntrySessionId(requestId);
       if (!targetSessionId || !requestId) {
         return false;
@@ -131,7 +142,15 @@ export function usePendingInteractions({
       try {
         await resolveSessionToolApproval(
           targetSessionId,
-          { requestId, allow },
+          {
+            requestId,
+            allow,
+            // 未提供选项时请求体保持逐字节等价（既有契约与测试依赖）。
+            ...(options?.rememberScope
+              ? { rememberScope: options.rememberScope }
+              : {}),
+            ...(options?.feedback?.trim() ? { feedback: options.feedback } : {}),
+          },
           { signal: controller.signal },
         );
         // 乐观收敛；随后到达的 `approval_resolved` 事件按 id 幂等覆盖。

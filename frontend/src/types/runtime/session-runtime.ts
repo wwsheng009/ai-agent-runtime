@@ -25,6 +25,8 @@ export type RuntimeSessionApproval = {
   riskLevel: string;
   /** ISO 时间；后端 30min 超时终态的唯一依据。 */
   expiresAt?: string;
+  /** §4.8：后端派生的「记住」覆盖模式；缺省 = 该审批不可记忆。 */
+  rememberPattern?: string;
 };
 
 export type RuntimeSessionQuestion = {

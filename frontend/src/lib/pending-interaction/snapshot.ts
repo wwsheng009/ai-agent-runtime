@@ -51,6 +51,7 @@ export function pendingInteractionsFromRuntimeState(
       reason: approval.reason,
       riskLevel: approval.riskLevel,
       ...(approval.expiresAt ? { expiresAt: approval.expiresAt } : {}),
+      ...(approval.rememberPattern ? { rememberPattern: approval.rememberPattern } : {}),
     };
     items.push(item);
   }

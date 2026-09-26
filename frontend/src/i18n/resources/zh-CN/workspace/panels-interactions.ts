@@ -5,6 +5,12 @@ export const zhWorkspacePanelsInteractions = {
     unknownTool: "未知工具",
     approve: "批准",
     deny: "拒绝",
+    remember: "记住此授权",
+    rememberScopeLabel: "记忆范围",
+    rememberScopeSession: "仅本会话",
+    rememberScopeProject: "本项目（新会话仍生效）",
+    rememberPattern: "将记住：{{pattern}}",
+    feedbackPlaceholder: "说明（可选，会转达给模型）",
   },
   question: {
     title: "需要你的回答",

@@ -20,6 +20,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   fetchSessionRuntimeEvents,
   resolveSessionToolApproval,
+  type SessionApprovalRememberScope,
 } from "@/api/runtime/sessions";
 import { streamSessionRuntime } from "@/api/runtime/sse";
 import {
@@ -53,7 +54,10 @@ export type SubagentSessionHandle = {
   /** 最近一次 inline 审批失败原因（成功或重连后清空）。 */
   approvalError: string | null;
   /** 提交审批决定；返回是否成功（失败原因见 `approvalError`）。 */
-  resolveApproval: (allow: boolean) => Promise<boolean>;
+  resolveApproval: (
+    allow: boolean,
+    options?: { rememberScope?: SessionApprovalRememberScope; feedback?: string },
+  ) => Promise<boolean>;
   /** 手动重连（closed / error 状态可用；沿用当前游标增量续传）。 */
   reconnect: () => void;
 };
@@ -65,6 +69,8 @@ export type PendingSubagentApproval = {
   toolCallId?: string;
   reason?: string;
   riskLevel?: string;
+  /** §4.8：后端派生的「记住」覆盖模式；缺省 = 该审批不可记忆。 */
+  rememberPattern?: string;
 };
 
 const DEFAULT_MAX_RECONNECTS = 3;
@@ -102,6 +108,7 @@ export function nextPendingApproval(
       toolCallId: readTrimmed(payload.tool_call_id),
       reason: readTrimmed(payload.reason),
       riskLevel: readTrimmed(payload.risk_level),
+      rememberPattern: readTrimmed(payload.remember_pattern),
     };
   }
   if (event.type === "approval_resolved") {
@@ -171,7 +178,10 @@ export function useSubagentSession(options: {
    * 到达时是 no-op），失败则保留入口并把原因交给 UI（刷新可重新同步）。
    */
   const resolveApproval = useCallback(
-    async (allow: boolean): Promise<boolean> => {
+    async (
+      allow: boolean,
+      options?: { rememberScope?: SessionApprovalRememberScope; feedback?: string },
+    ): Promise<boolean> => {
       const requestId = pendingApproval?.requestId ?? "";
       if (!sessionId || !requestId) {
         return false;
@@ -179,7 +189,12 @@ export function useSubagentSession(options: {
       setResolvingApproval(true);
       setApprovalError(null);
       try {
-        await resolveSessionToolApproval(sessionId, { requestId, allow });
+        await resolveSessionToolApproval(sessionId, {
+          requestId,
+          allow,
+          ...(options?.rememberScope ? { rememberScope: options.rememberScope } : {}),
+          ...(options?.feedback?.trim() ? { feedback: options.feedback } : {}),
+        });
         setPendingApproval((current) =>
           current?.requestId === requestId ? null : current,
         );

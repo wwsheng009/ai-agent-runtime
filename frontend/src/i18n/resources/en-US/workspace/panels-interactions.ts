@@ -5,6 +5,12 @@ export const enWorkspacePanelsInteractions = {
     unknownTool: "unknown tool",
     approve: "Approve",
     deny: "Deny",
+    remember: "Remember this approval",
+    rememberScopeLabel: "Remember scope",
+    rememberScopeSession: "This session only",
+    rememberScopeProject: "This project (survives new sessions)",
+    rememberPattern: "Will remember: {{pattern}}",
+    feedbackPlaceholder: "Note (optional, forwarded to the model)",
   },
   question: {
     title: "Answer needed",

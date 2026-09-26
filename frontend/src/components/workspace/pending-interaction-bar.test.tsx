@@ -7,7 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PendingInteraction } from "@/lib/pending-interaction";
 
 vi.mock("react-i18next", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  // 插值原样拼接，便于断言「将记住的模式」确实渲染到了 DOM。
+  useTranslation: () => ({
+    t: (key: string, options?: { pattern?: string }) =>
+      options?.pattern ? `${key}:${options.pattern}` : key,
+  }),
 }));
 
 import { PendingInteractionBar } from "./pending-interaction-bar";
@@ -90,7 +94,11 @@ describe("PendingInteractionBar", () => {
 
   function renderBar(props: {
     interaction: PendingInteraction | null;
-    onResolveApproval?: (requestId: string, allow: boolean) => void;
+    onResolveApproval?: (
+      requestId: string,
+      allow: boolean,
+      options?: { rememberScope?: string; feedback?: string },
+    ) => void;
     onAnswerQuestion?: (questionId: string, answer: string) => void;
     onPlanDecision?: (decision: string) => void;
     onPlanNotesChange?: (value: string) => void;
@@ -151,6 +159,53 @@ describe("PendingInteractionBar", () => {
     });
     expect(buttons()).toHaveLength(2);
     expect(buttons().every((button) => button.disabled)).toBe(true);
+  });
+
+  it("§4.8：可记忆的审批可勾选「记住」并附说明，不可记忆时不渲染入口", () => {
+    const onResolveApproval = vi.fn();
+    renderBar({
+      interaction: approvalInteraction({
+        rememberPattern: "path:docs/a.md",
+      } as Partial<PendingInteraction>),
+      onResolveApproval,
+    });
+
+    // 后端下发 rememberPattern 才出现「记住」；提示文案回显将记住的模式。
+    const remember = container.querySelector(
+      'input[type="checkbox"]',
+    ) as HTMLInputElement;
+    expect(remember).not.toBeNull();
+    expect(container.textContent).toContain("path:docs/a.md");
+
+    act(() => {
+      remember.click();
+    });
+
+    const feedback = Array.from(
+      container.querySelectorAll("input"),
+    ).find((input) => input.type !== "checkbox") as HTMLInputElement;
+    act(() => {
+      setNativeValue(feedback, "只改这一个文件");
+    });
+    act(() => {
+      buttons()[0].click();
+    });
+    expect(onResolveApproval).toHaveBeenCalledWith("req-1", true, {
+      rememberScope: "session",
+      feedback: "只改这一个文件",
+    });
+  });
+
+  it("§4.8：后端未给 rememberPattern（危险工具等）时不渲染「记住」", () => {
+    renderBar({ interaction: approvalInteraction() });
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    // 说明输入仍然可用，但空说明不产生第三个参数（请求体保持旧形状）。
+    const onResolveApproval = vi.fn();
+    renderBar({ interaction: approvalInteraction(), onResolveApproval });
+    act(() => {
+      buttons()[0].click();
+    });
+    expect(onResolveApproval).toHaveBeenCalledWith("req-1", true);
   });
 
   it("answers questions via suggestion or typed draft", () => {

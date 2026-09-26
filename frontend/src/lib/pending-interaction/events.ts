@@ -106,6 +106,8 @@ export function pendingApprovalFromRuntimeEvent(
   const toolCallId = readString(payload, "tool_call_id", "toolCallId");
   const expiresAt = readString(payload, "expires_at", "expiresAt");
   const turnId = readString(payload, "turn_id", "turnId");
+  // §4.8：后端给的「记住」覆盖模式；缺省 = 该审批不可记忆。
+  const rememberPattern = readString(payload, "remember_pattern", "rememberPattern");
   return {
     kind: "approval",
     id,
@@ -121,6 +123,7 @@ export function pendingApprovalFromRuntimeEvent(
     riskLevel: readString(payload, "risk_level", "riskLevel"),
     ...(toolCallId ? { toolCallId } : {}),
     ...(expiresAt ? { expiresAt } : {}),
+    ...(rememberPattern ? { rememberPattern } : {}),
   };
 }
 

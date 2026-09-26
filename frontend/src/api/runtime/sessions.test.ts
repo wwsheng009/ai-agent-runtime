@@ -85,6 +85,48 @@ describe("resolveSessionToolApproval", () => {
       }),
     ).rejects.toThrow(/approval expired \(request_id: trace_9\)/);
   });
+
+  it("§4.8：批准时映射 remember_scope，拒绝与 once 一律不发送", async () => {
+    await resolveSessionToolApproval("child-1", {
+      requestId: "approval-9",
+      allow: true,
+      rememberScope: "project",
+      feedback: "  只改这一个文件  ",
+    });
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      type: "approve_tool",
+      request_id: "approval-9",
+      allow: true,
+      remember_scope: "project",
+      feedback: "只改这一个文件",
+    });
+
+    calls = [];
+    await resolveSessionToolApproval("child-1", {
+      requestId: "approval-9",
+      allow: true,
+      rememberScope: "once",
+    });
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      type: "approve_tool",
+      request_id: "approval-9",
+      allow: true,
+    });
+
+    calls = [];
+    await resolveSessionToolApproval("child-1", {
+      requestId: "approval-9",
+      allow: false,
+      rememberScope: "project",
+      feedback: "不要动这个文件",
+    });
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      type: "approve_tool",
+      request_id: "approval-9",
+      allow: false,
+      feedback: "不要动这个文件",
+    });
+  });
 });
 
 describe("answerSessionQuestion", () => {
