@@ -46,6 +46,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
+	"github.com/wwsheng009/ai-agent-runtime/internal/planstore"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
@@ -110,6 +111,7 @@ type Handler struct {
 	mcpAdmin                       mcpadmin.AdminService
 	llmRuntime                     *llm.LLMRuntime
 	sessionManager                 *chat.SessionManager
+	plansStore                     *planstore.Store // overrides the process-wide plan artifact store (tests/hosts)
 	hotReload                      *skill.HotReload
 	embeddingRouter                *skill.SemanticEmbeddingRouter
 	embeddingHotReloadSyncAttached bool
@@ -977,6 +979,13 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/backtrack", h.ApplySessionBacktrack).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.GetSessionPlanMode).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/plan", h.UpdateSessionPlanMode).Methods(http.MethodPost)
+	// Archived plan artifacts (index + review-round snapshots, outside the
+	// workspace): list and by-id detail with the latest snapshot body.
+	runtimeRouter.HandleFunc("/plans", h.ListStoredPlans).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/plans/{id:.*}", h.GetStoredPlan).Methods(http.MethodGet)
+	// Explicit retention: hosts can drop one archived plan (record + snapshots).
+	// Automatic retention is bounded by AICLI_PLANS_MAX_VERSIONS at archive time.
+	runtimeRouter.HandleFunc("/plans/{id:.*}", h.DeleteStoredPlan).Methods(http.MethodDelete)
 	// 会话权限模式（composer 权限选择器）：运行中切换同样生效。
 	runtimeRouter.HandleFunc("/sessions/{id}/permission-mode", h.GetSessionPermissionMode).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/permission-mode", h.UpdateSessionPermissionMode).Methods(http.MethodPost)

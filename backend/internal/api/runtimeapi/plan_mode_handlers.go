@@ -35,6 +35,9 @@ type sessionPlanModeResponse struct {
 	PermissionMode       string   `json:"permission_mode"`
 	PendingExitRequest   bool     `json:"pending_exit_request,omitempty"`
 	ExitDecision         string   `json:"exit_decision,omitempty"`
+	ExitSource           string   `json:"exit_source,omitempty"`
+	ReviewRound          int      `json:"review_round,omitempty"`
+	PendingReviewNotes   string   `json:"pending_review_notes,omitempty"`
 	Notes                string   `json:"notes,omitempty"`
 	EnteredAt            string   `json:"entered_at,omitempty"`
 	ExitedAt             string   `json:"exited_at,omitempty"`
@@ -124,8 +127,40 @@ func (h *Handler) UpdateSessionPlanMode(w http.ResponseWriter, r *http.Request) 
 		writeSessionStoreError(w, err)
 		return
 	}
+	// Best-effort artifact archive for the no-actor path; the actor path
+	// archives inside ExitPlanMode/EnterPlanMode.
+	h.archiveSessionPlanArtifact(r.Context(), session, action, decision, req.Notes)
 
 	h.writeJSON(w, http.StatusOK, h.buildSessionPlanModeResponse(session, action))
+}
+
+// archiveSessionPlanArtifact persists the plan artifact index + review-round
+// snapshot for session-direct plan transitions. Failures are non-fatal: the
+// durable plan-mode state has already been written and stays authoritative.
+func (h *Handler) archiveSessionPlanArtifact(ctx context.Context, session *chat.Session, action string, decision planmode.ExitDecision, notes string) {
+	if session == nil {
+		return
+	}
+	state := planmode.Load(session)
+	workspace := sessionmeta.String(session.Metadata.Context, sessionmeta.WorkspacePath)
+	if workspace == "" {
+		if raw, ok := session.GetContext(sessionmeta.WorkspacePath); ok {
+			workspace = strings.TrimSpace(fmt.Sprint(raw))
+		}
+	}
+	decisionText := strings.TrimSpace(string(decision))
+	if decisionText == "" {
+		decisionText = strings.TrimSpace(action)
+	}
+	_, _ = planmode.ArchivePlan(ctx, planmode.ArchiveOptions{
+		Store:     h.planArtifactStore(),
+		SessionID: session.ID,
+		Workspace: workspace,
+		PlanPath:  state.PlanPath,
+		Decision:  decisionText,
+		Source:    string(planmode.ExitSourceUser),
+		Notes:     strings.TrimSpace(notes),
+	})
 }
 
 func (h *Handler) loadSessionForPlanMode(r *http.Request) (*chat.Session, error) {
@@ -181,6 +216,9 @@ func (h *Handler) applyPlanModeViaActor(
 		if _, err := actor.ExitPlanMode(ctx, sessionID, toolbroker.ExitPlanModeArgs{
 			Decision: string(decision),
 			Notes:    strings.TrimSpace(req.Notes),
+			// Host/API decisions are user verdicts; model tool calls are tagged
+			// by the broker and stay user-gated.
+			Source: string(planmode.ExitSourceUser),
 		}); err != nil {
 			return nil, err
 		}
@@ -192,6 +230,21 @@ func (h *Handler) applyPlanModeViaActor(
 		return nil, err
 	}
 	return session, nil
+}
+
+// planModeWorkspacePath resolves the session workspace root used to anchor
+// relative plan write paths and plan previews (report §4.7).
+func planModeWorkspacePath(session *chat.Session) string {
+	if session == nil {
+		return ""
+	}
+	if workspace := sessionmeta.String(session.Metadata.Context, sessionmeta.WorkspacePath); workspace != "" {
+		return workspace
+	}
+	if raw, ok := session.GetContext(sessionmeta.WorkspacePath); ok {
+		return strings.TrimSpace(fmt.Sprint(raw))
+	}
+	return ""
 }
 
 func applyPlanModeToSession(session *chat.Session, action string, decision planmode.ExitDecision, planPath string, planWritePaths []string, notes string) error {
@@ -209,7 +262,14 @@ func applyPlanModeToSession(session *chat.Session, action string, decision planm
 			(!planmode.IsActive(current) || strings.TrimSpace(current.PreviousMode) == "") {
 			previousMode = string(runtimepolicy.ModeDefault)
 		}
-		state := planmode.Enter(previousMode, planPath, planWritePaths...)
+		state := planmode.EnterPlan(planmode.EnterOptions{
+			PreviousMode:    previousMode,
+			PlanPath:        planPath,
+			WriteAllowPaths: planWritePaths,
+			// Anchor the write allowlist to the workspace so policy matching is
+			// exact even when the plan path is relative (report §4.7).
+			Workspace: planModeWorkspacePath(session),
+		})
 		planmode.Save(session, state)
 		applySessionPermissionMode(session, runtimepolicy.ModePlan)
 		return nil
@@ -227,11 +287,15 @@ func applyPlanModeToSession(session *chat.Session, action string, decision planm
 		if err != nil {
 			return errors.New(errors.ErrValidationFailed, err.Error())
 		}
+		exited.LastExitSource = planmode.ExitSourceUser
 		resume := planmode.ResumeModeAfterExit(exited)
 		mode := parseSessionPlanPermissionMode(resume)
 		if exited.ExitDecision == planmode.ExitRequestChanges {
 			exited.Status = planmode.StatusActive
 			exited.PendingExitRequest = false
+			if strings.TrimSpace(notes) != "" {
+				exited = planmode.RecordReviewNotes(exited, notes)
+			}
 			planmode.Save(session, exited)
 			applySessionPermissionMode(session, runtimepolicy.ModePlan)
 			return nil
@@ -254,15 +318,7 @@ func (h *Handler) buildSessionPlanModeResponse(session *chat.Session, action str
 		permissionMode = planmode.EffectivePermissionMode(state)
 	}
 
-	workspace := ""
-	if session != nil {
-		workspace = sessionmeta.String(session.Metadata.Context, sessionmeta.WorkspacePath)
-		if workspace == "" {
-			if raw, ok := session.GetContext(sessionmeta.WorkspacePath); ok {
-				workspace = strings.TrimSpace(fmt.Sprint(raw))
-			}
-		}
-	}
+	workspace := planModeWorkspacePath(session)
 
 	planPath := state.PlanPath
 	if planPath == "" && (planmode.IsActive(state) || strings.EqualFold(permissionMode, string(runtimepolicy.ModePlan))) {
@@ -285,6 +341,9 @@ func (h *Handler) buildSessionPlanModeResponse(session *chat.Session, action str
 		PermissionMode:       permissionMode,
 		PendingExitRequest:   state.PendingExitRequest,
 		ExitDecision:         string(state.ExitDecision),
+		ExitSource:           string(state.LastExitSource),
+		ReviewRound:          state.ReviewRound,
+		PendingReviewNotes:   state.PendingReviewNotes,
 		Notes:                state.Notes,
 		EnteredAt:            state.EnteredAt,
 		ExitedAt:             state.ExitedAt,
