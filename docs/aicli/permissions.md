@@ -110,6 +110,21 @@ CI 推荐组合：`dont_ask` + 项目 `permissions.yaml` 把需要的只读/白�
 
 适合把 `disable_bypass: true` 放在用户级 `~/.aicli/permissions.yaml`，让个人环境永远保留审批。
 
+### 1.4 谁能把会话切到 bypass（提权边界；复核细节见分析文档 §13）
+
+| 输入面 | 需要人类手势吗 |
+|--------|----------------|
+| 终端里输入 `/yolo` / `/permission-mode bypass_permissions` | 需要：必须在同一输入面敲 `bypass_permissions` 全文；非交互模式直接拒绝 |
+| 键位循环（`shift+tab` / `alt+m`） | 需要（同上确认） |
+| TUI 的 Web 注入面（`/web/api/input`、`/web/api/invoke`、网格 call） | **不需要**：注入的文本按用户输入路由（含命令），确认提示也能被后续注入满足；写操作需要 `X-AICLI-Token`，而该令牌按设计可由本机进程经 `GET /web/api/token` 读取 |
+| runtime API（`POST /api/runtime/sessions/{id}/permission-mode`） | **不需要**：无令牌、无确认，对运行中会话立即生效 |
+
+由此得出三条使用边界：
+
+1. **可信边界是「同一台机器上的进程」，不是写令牌**——写令牌防的是浏览器跨站与 DNS rebinding，不防同机进程（`web_auth.go` 的设计前提）。不要在跑着不可信本地代码的机器上依赖它。
+2. **模型要自我提权，得先说服你批准一次可疑调用**（或已经在放宽的模式里）：`shell`/网络/`aicli_exec`/`background_task` 都受同一引擎门控，`plan` 下直接拒绝。看到「请求本机 HTTP 端口 / 调用改权限模式的接口」这类命令请按高风险处理。
+3. **`disable_bypass: true` 是最后一道闸**：即使会话被切到 bypass，引擎求值也会降级为 `default`（该问的照问）。注意此时界面/元数据仍可能显示 `bypass_permissions`（接口不拒绝切换）——以实际审批行为为准。
+
 ---
 
 ## 2. 规则语法参考
