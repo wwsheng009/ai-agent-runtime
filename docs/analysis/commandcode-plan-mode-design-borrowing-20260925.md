@@ -651,6 +651,7 @@
 |---|---|
 | 干净检出 `8ec8f58b`：`go build ./internal/... ./cmd/...` | 仅 `internal/webui/assets.go: pattern dist` 缺失（历史现象），无其它错误 |
 | 干净检出：`go test ./internal/api/runtimeapi/ -run Plan -count=1` | ok（1.6s：plans 列表/详情/删除 + plan_mode 无 actor 归档与状态字段） |
+| 干净检出：`go test ./internal/api/runtimeapi/ -count=1`（整包） | ok（38.2s） |
 | `git show --stat 8ec8f58b` | 4 files changed, 474 insertions(+), 10 deletions(-)（handler.go 仅 +9 行） |
 
 至此报告 §11.5 记下的「`internal/api/**` 尚未提交」缺口已关闭；剩余未落地项仍是：§4.4 前端变更行高亮与行级评论、§4.6 常驻模式横幅、Web 面板的图形化 reopen、评审反馈的自动修订回合、profile→`Engine.PlanAutoEnterWithoutApproval` 接线。
