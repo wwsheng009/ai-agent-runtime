@@ -56,9 +56,10 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"decision": toolArgFieldString,
 	},
 	ToolPlanReview: {
-		"plan_id":   toolArgFieldString,
-		"plan_path": toolArgFieldString,
-		"version":   toolArgFieldNumber,
+		"plan_id":         toolArgFieldString,
+		"plan_path":       toolArgFieldString,
+		"version":         toolArgFieldNumber,
+		"compare_version": toolArgFieldNumber,
 	},
 	ToolBackgroundTask: {
 		"command":            toolArgFieldString,

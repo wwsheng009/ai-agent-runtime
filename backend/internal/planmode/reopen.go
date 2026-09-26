@@ -82,7 +82,7 @@ func ReopenPlan(opts ReopenOptions) (ReopenResult, error) {
 		return ReopenResult{}, fmt.Errorf("planmode: archived plan %s has no recorded plan path", record.ID)
 	}
 	if record.Version <= 0 {
-		return ReopenResult{}, fmt.Errorf("planmode: archived plan %s has no snapshot yet", record.ID)
+		return ReopenResult{}, fmt.Errorf("%w: archived plan %s has no snapshot yet", planstore.ErrNotFound, record.ID)
 	}
 	version := opts.Version
 	if version <= 0 {

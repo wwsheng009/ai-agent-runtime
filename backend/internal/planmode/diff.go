@@ -164,7 +164,7 @@ func DiffArchivedVersions(opts DiffVersionsOptions) (DiffResult, error) {
 		return DiffResult{}, fmt.Errorf("%w: %s", planstore.ErrNotFound, id)
 	}
 	if record.Version <= 0 {
-		return DiffResult{}, fmt.Errorf("planmode: archived plan %s has no snapshot yet", record.ID)
+		return DiffResult{}, fmt.Errorf("%w: archived plan %s has no snapshot yet", planstore.ErrNotFound, record.ID)
 	}
 
 	to := opts.To

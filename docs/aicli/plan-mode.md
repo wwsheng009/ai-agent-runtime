@@ -134,8 +134,9 @@
 | `plan_id` | 归档记录 id（可含 `/`，如 `ai-agent-runtime/plan`）；给了它就优先按归档读取 |
 | `plan_path` | 计划文件路径（工作区相对）；未归档的计划用它 |
 | `version` | 归档快照版本；0/省略 = 最新 |
+| `compare_version` | 可选：附上「从该版本到 `version`（默认最新）」的轮次 unified diff（与 CLI `/plans diff` 同一渲染器，含 `+A -R`/截断/`Coarse` 标记）。需要归档轮次；会话计划还没有归档轮次时**不报错**，返回正文并在 `hint` 里说明原因 |
 
-- 返回 `content`（正文，上限 64 KiB，超出置 `truncated`）、`status`、`version`、`review_round`、`source`（`session` / `archive`）、`verdict_options` 与一句可直接转述的 `hint`。
+- 返回 `content`（正文，上限 64 KiB，超出置 `truncated`）、`status`、`version`、`review_round`、`source`（`session` / `archive`）、`verdict_options` 与一句可直接转述的 `hint`；带 `compare_version` 时额外返回 `diff {from_version,to_version,text,added,removed,identical,truncated,coarse}`，工具元数据同时给出 `diff_*` 摘要供宿主渲染。
 - 会发布 `plan_review_requested` 事件，Web 面板据此聚焦/刷新；CLI 侧等价入口是 `/plan review` 与 `/plans <id>`。
 - 会话计划若已归档（同路径有记录），结果会带上 `plan_id` / `version`，便于后续按归档地址引用。
 - 归档记录不存在时返回错误（`plan ... not found in the plan archive`），不会静默降级。
@@ -293,7 +294,7 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 
 - §4.4 行级评论与轮次 diff：**CLI 侧轮次 diff 已落地**（`/plans diff <id> [vA [vB]]`，复用 `planmode.UnifiedDiff` / `planmode.DiffArchivedVersions`）；仍未做的是前端评审面的变更行高亮与行级评论。
 - §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具、run 结束兜底与 **CLI 的 `/plans reopen`（归档回灌重评审）**均已落地；仍是缺口的是 Web 面板里的图形化 reopen 入口。
-- §4.6 模式循环键位（`shift+tab`）与常驻模式横幅：模型自主进入的确认门控已落地，键位/横幅未做。
+- §4.6 模式循环键位（`shift+tab` / `alt+m`）已随并发的 CLI 改动落地（`chat_permission_mode.go`：`default → accept_edits → plan → bypass_permissions`，进入 bypass 仍二次确认，`/hotkeys` 可见；plan 档走 `/mode` 语义，见 §2.3）；模型自主进入的确认门控已落地；仍未做的是**常驻模式横幅**。
 - 评审反馈的**自动修订回合**：当前是「下一次用户输入时交付」，Web 裁决后主动 trigger-turn 未接入。
 
 ---

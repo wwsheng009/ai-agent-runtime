@@ -285,6 +285,10 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 							"type":        "integer",
 							"description": "Archived snapshot version to read; 0 or omitted means latest.",
 						},
+						"compare_version": map[string]interface{}{
+							"type":        "integer",
+							"description": "Add a round-to-round unified diff to the result: compare this archived version against \"version\" (0 or omitted = the previous round). Requires an archived plan; the diff is bounded and reports truncation/coarse flags.",
+						},
 					},
 				},
 			},
@@ -1356,6 +1360,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if value, ok := args["version"].(float64); ok && value > 0 {
 			req.Version = int(value)
 		}
+		if value, ok := args["compare_version"].(float64); ok && value > 0 {
+			req.CompareVersion = int(value)
+		}
 		result, err := b.PlanReview.ReviewPlan(ctx, sessionID, req)
 		if err != nil {
 			return nil, nil, err
@@ -1371,6 +1378,15 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			meta["version"] = result.Version
 			meta["review_round"] = result.ReviewRound
 			meta["source"] = result.Source
+			if result.Diff != nil {
+				meta["diff_from_version"] = result.Diff.FromVersion
+				meta["diff_to_version"] = result.Diff.ToVersion
+				meta["diff_added"] = result.Diff.Added
+				meta["diff_removed"] = result.Diff.Removed
+				if result.Diff.Truncated {
+					meta["diff_truncated"] = true
+				}
+			}
 			meta["truncated"] = result.Truncated
 		}
 		return result, meta, nil

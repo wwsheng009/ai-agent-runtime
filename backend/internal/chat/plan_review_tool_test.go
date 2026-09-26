@@ -168,3 +168,110 @@ func TestSessionActorWiresPlanReviewController(t *testing.T) {
 	}
 	require.Contains(t, names, toolbroker.ToolPlanReview)
 }
+
+// plan_review with compare_version attaches the round-to-round diff so a model
+// can see what moved between two archived rounds without re-reading both bodies.
+func TestSessionActorReviewPlanCompareVersionDiff(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	actor, _, _ := newPlanReviewBackstopActor(t, runtimepolicy.ModeDefault, workspace)
+
+	rec, err := planmode.ArchivePlan(ctx, planmode.ArchiveOptions{
+		Store:     actor.planArtifactStore(),
+		SessionID: actor.id,
+		Workspace: workspace,
+		PlanPath:  "docs/plan.md",
+		Decision:  "enter",
+		Source:    "user",
+		Content:   []byte("# 计划\n\n1. step one\n2. step two\n"),
+	})
+	require.NoError(t, err)
+	rec, err = planmode.ArchivePlan(ctx, planmode.ArchiveOptions{
+		Store:     actor.planArtifactStore(),
+		SessionID: actor.id,
+		Workspace: workspace,
+		PlanPath:  "docs/plan.md",
+		Decision:  "request_changes",
+		Source:    "user",
+		Content:   []byte("# 计划\n\n1. step one\n2. step two revised\n3. step three\n"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, rec.Version)
+
+	result, err := actor.ReviewPlan(ctx, "", toolbroker.PlanReviewArgs{PlanID: rec.ID, CompareVersion: 1})
+	require.NoError(t, err)
+	require.NotNil(t, result.Diff)
+	require.Equal(t, 1, result.Diff.FromVersion)
+	require.Equal(t, 2, result.Diff.ToVersion)
+	require.Equal(t, 2, result.Diff.Added)
+	require.Equal(t, 1, result.Diff.Removed)
+	require.False(t, result.Diff.Identical)
+	require.Contains(t, result.Diff.Text, "-2. step two")
+	require.Contains(t, result.Diff.Text, "+2. step two revised")
+	require.Contains(t, result.Diff.Text, "--- v1 enter (user, ")
+	require.Contains(t, result.Hint, "轮次对比已附")
+
+	// Comparing a round with itself is honest data, not an error.
+	same, err := actor.ReviewPlan(ctx, "", toolbroker.PlanReviewArgs{PlanID: rec.ID, Version: 2, CompareVersion: 2})
+	require.NoError(t, err)
+	require.NotNil(t, same.Diff)
+	require.True(t, same.Diff.Identical)
+
+	// A version the retention policy pruned (or that never existed) is an error.
+	_, err = actor.ReviewPlan(ctx, "", toolbroker.PlanReviewArgs{PlanID: rec.ID, CompareVersion: 9})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "compare_version v9")
+}
+
+// Asking for a round diff on a plan that has no archive record explains why it is
+// missing instead of failing the whole review payload.
+func TestSessionActorReviewPlanCompareVersionWithoutArchive(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	actor, _, _ := newPlanReviewBackstopActor(t, runtimepolicy.ModeDefault, workspace)
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "docs/plan.md"})
+	require.NoError(t, err)
+	writeBackstopPlanFile(t, workspace, "docs/plan.md", "# 计划\n\n1. 唯一一轮\n")
+
+	result, err := actor.ReviewPlan(ctx, "", toolbroker.PlanReviewArgs{CompareVersion: 1})
+	require.NoError(t, err)
+	require.Nil(t, result.Diff)
+	require.Contains(t, result.Hint, "未生成轮次 diff", "enter 只登记元数据，此时只有提示而不是错误")
+	require.Contains(t, result.Content, "唯一一轮", "the review payload must stay usable")
+
+	// A plan that was never registered at all is also explained, not failed.
+	writeBackstopPlanFile(t, workspace, "notes/unregistered.md", "# 未登记计划\n")
+	unregistered, err := actor.ReviewPlan(ctx, "", toolbroker.PlanReviewArgs{PlanPath: "notes/unregistered.md", CompareVersion: 1})
+	require.NoError(t, err)
+	require.Nil(t, unregistered.Diff)
+	require.Contains(t, unregistered.Hint, "还没有归档记录")
+
+	// Once the plan has archived rounds, the same call produces the comparison.
+	_, err = planmode.ArchivePlan(ctx, planmode.ArchiveOptions{
+		Store:     actor.planArtifactStore(),
+		SessionID: actor.id,
+		Workspace: workspace,
+		PlanPath:  "docs/plan.md",
+		Decision:  "request_changes",
+		Source:    "user",
+		Content:   []byte("# 计划\n\n1. 唯一一轮\n"),
+	})
+	require.NoError(t, err)
+	_, err = planmode.ArchivePlan(ctx, planmode.ArchiveOptions{
+		Store:     actor.planArtifactStore(),
+		SessionID: actor.id,
+		Workspace: workspace,
+		PlanPath:  "docs/plan.md",
+		Decision:  "request_changes",
+		Source:    "user",
+		Content:   []byte("# 计划\n\n1. 唯一一轮\n2. 追加一轮\n"),
+	})
+	require.NoError(t, err)
+	withArchive, err := actor.ReviewPlan(ctx, "", toolbroker.PlanReviewArgs{CompareVersion: 1})
+	require.NoError(t, err)
+	require.NotNil(t, withArchive.Diff)
+	require.Equal(t, 1, withArchive.Diff.FromVersion)
+	require.Equal(t, 2, withArchive.Diff.ToVersion)
+	require.Equal(t, 1, withArchive.Diff.Added)
+}

@@ -422,6 +422,10 @@ type PlanReviewArgs struct {
 	PlanPath string `json:"plan_path,omitempty"`
 	// Version selects an archived snapshot version; 0 means latest.
 	Version int `json:"version,omitempty"`
+	// CompareVersion adds a round-to-round unified diff to the result: the
+	// comparison runs from CompareVersion to Version (0 = the previous round).
+	// It requires an archived plan, because only the archive keeps prior rounds.
+	CompareVersion int `json:"compare_version,omitempty"`
 }
 
 // PlanReviewResult is the review payload returned by plan_review: the plan text
@@ -441,6 +445,22 @@ type PlanReviewResult struct {
 	VerdictOptions []string `json:"verdict_options,omitempty"`
 	// Hint is a ready-to-relay sentence the model can show the user.
 	Hint string `json:"hint,omitempty"`
+	// Diff is the requested round comparison (nil unless CompareVersion was set).
+	Diff *PlanReviewDiff `json:"diff,omitempty"`
+}
+
+// PlanReviewDiff is a bounded round-to-round comparison rendered for the review
+// surface. It reuses the same engine as the CLI (`planmode.UnifiedDiff`), so both
+// surfaces show identical output.
+type PlanReviewDiff struct {
+	FromVersion int    `json:"from_version"`
+	ToVersion   int    `json:"to_version"`
+	Text        string `json:"text,omitempty"`
+	Added       int    `json:"added,omitempty"`
+	Removed     int    `json:"removed,omitempty"`
+	Identical   bool   `json:"identical,omitempty"`
+	Truncated   bool   `json:"truncated,omitempty"`
+	Coarse      bool   `json:"coarse,omitempty"`
 }
 
 // PlanReviewController loads a plan (session or archived) for the review

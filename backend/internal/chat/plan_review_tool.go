@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -47,7 +48,7 @@ func (a *SessionActor) ReviewPlan(ctx context.Context, sessionID string, args to
 
 	planID := strings.TrimSpace(args.PlanID)
 	if planID != "" {
-		return a.reviewArchivedPlan(planID, args.Version)
+		return a.reviewArchivedPlan(planID, args.Version, args.CompareVersion)
 	}
 
 	state := planmode.Load(session)
@@ -77,23 +78,47 @@ func (a *SessionActor) ReviewPlan(ctx context.Context, sessionID string, args to
 			result.Status = string(rec.Status)
 		}
 	}
+	// A round diff only exists in the archive, and a session plan may not have
+	// any archived round yet (enter registers the record without a snapshot).
+	// Both are explained instead of failing: the caller still gets the plan body.
+	if args.CompareVersion > 0 {
+		if result.PlanID == "" {
+			result.Hint = fmt.Sprintf("未生成轮次 diff：计划 %s 还没有归档记录（完成一次评审后归档，或用 plan_id 指定归档记录）。", planPath)
+		} else if diff, diffErr := a.diffPlanRounds(result.PlanID, args.CompareVersion, args.Version); diffErr == nil {
+			result.Diff = diff
+		} else if errors.Is(diffErr, planstore.ErrNotFound) {
+			result.Hint = fmt.Sprintf("未生成轮次 diff：归档计划 %s 还没有可对比的快照轮次（enter 只登记元数据，完成一次评审后才有正文；或用 plan_id 指定归档记录）。", result.PlanID)
+		} else {
+			return nil, diffErr
+		}
+	}
 
 	content := planmode.ReadPlanArtifact(workspace, planPath)
 	if len(content) == 0 {
-		result.Hint = fmt.Sprintf("计划文件 %s 目前为空或不可读；请先写入计划，再让用户裁决（%s）。",
-			planPath, strings.Join(result.VerdictOptions, " / "))
+		if result.Hint == "" {
+			result.Hint = fmt.Sprintf("计划文件 %s 目前为空或不可读；请先写入计划，再让用户裁决（%s）。",
+				planPath, strings.Join(result.VerdictOptions, " / "))
+		}
 	} else {
 		body, truncated := clampPlanReviewContent(content)
 		result.Content = body
 		result.ContentSize = len(content)
 		result.Truncated = truncated
-		if result.Active {
+		switch {
+		case result.Hint != "":
+			// A diff request already produced the actionable sentence; adding a
+			// second hint would bury it.
+		case result.Active:
 			result.Hint = fmt.Sprintf("计划 %s（第 %d 轮）已打开供评审；等待用户裁决：%s。",
 				planPath, result.ReviewRound, strings.Join(result.VerdictOptions, " / "))
-		} else {
+		default:
 			result.Hint = fmt.Sprintf("计划 %s 已打开（状态 %s）；如需再次评审，请用户用 /plan enter 重新进入计划模式。",
 				planPath, firstNonEmptyString(result.Status, string(planstore.StatusPending)))
 		}
+	}
+	if result.Diff != nil && result.Hint == "" {
+		result.Hint = fmt.Sprintf("归档计划 %s：v%d -> v%d 的轮次对比已附（+%d -%d）。",
+			result.PlanID, result.Diff.FromVersion, result.Diff.ToVersion, result.Diff.Added, result.Diff.Removed)
 	}
 
 	a.publishPlanReviewRequested(result)
@@ -101,7 +126,7 @@ func (a *SessionActor) ReviewPlan(ctx context.Context, sessionID string, args to
 }
 
 // reviewArchivedPlan loads one archived snapshot by record id.
-func (a *SessionActor) reviewArchivedPlan(planID string, version int) (*toolbroker.PlanReviewResult, error) {
+func (a *SessionActor) reviewArchivedPlan(planID string, version, compareVersion int) (*toolbroker.PlanReviewResult, error) {
 	store := a.planArtifactStore()
 	rec, ok, err := store.Get(planID)
 	if err != nil {
@@ -136,8 +161,18 @@ func (a *SessionActor) reviewArchivedPlan(planID string, version int) (*toolbrok
 	body, truncated := clampPlanReviewContent(content)
 	result.Content = body
 	result.Truncated = truncated
+	if compareVersion > 0 {
+		diff, diffErr := a.diffPlanRounds(rec.ID, compareVersion, version)
+		if diffErr != nil {
+			return nil, diffErr
+		}
+		result.Diff = diff
+	}
 	if len(content) == 0 {
 		result.Hint = fmt.Sprintf("归档计划 %s 暂无快照正文；可用 /plans %s 查看元数据。", rec.ID, rec.ID)
+	} else if result.Diff != nil {
+		result.Hint = fmt.Sprintf("归档计划 %s（v%d，状态 %s）：v%d -> v%d 的轮次对比已附（+%d -%d）。",
+			rec.ID, version, rec.Status, result.Diff.FromVersion, result.Diff.ToVersion, result.Diff.Added, result.Diff.Removed)
 	} else {
 		result.Hint = fmt.Sprintf("归档计划 %s（v%d，状态 %s，%d 轮）已打开供阅读；归档评审面只读，重新评审请先 /plan enter。",
 			rec.ID, version, rec.Status, len(rec.Rounds))
@@ -145,6 +180,35 @@ func (a *SessionActor) reviewArchivedPlan(planID string, version int) (*toolbrok
 
 	a.publishPlanReviewRequested(result)
 	return result, nil
+}
+
+// diffPlanRounds renders a round-to-round comparison for the review surface,
+// reusing the same renderer as the CLI so both surfaces agree. compareTo == 0
+// means "latest".
+func (a *SessionActor) diffPlanRounds(recordID string, compareFrom, compareTo int) (*toolbroker.PlanReviewDiff, error) {
+	recordID = strings.TrimSpace(recordID)
+	if recordID == "" {
+		return nil, fmt.Errorf("plan round diff requires an archived plan id")
+	}
+	diff, err := planmode.DiffArchivedVersions(planmode.DiffVersionsOptions{
+		Store:    a.planArtifactStore(),
+		RecordID: recordID,
+		From:     compareFrom,
+		To:       compareTo,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("plan_review compare_version v%d: %w", compareFrom, err)
+	}
+	return &toolbroker.PlanReviewDiff{
+		FromVersion: diff.FromVersion,
+		ToVersion:   diff.ToVersion,
+		Text:        diff.Text,
+		Added:       diff.Added,
+		Removed:     diff.Removed,
+		Identical:   diff.Identical,
+		Truncated:   diff.Truncated,
+		Coarse:      diff.Coarse,
+	}, nil
 }
 
 // findArchivedPlan matches a session plan path against the archive index.

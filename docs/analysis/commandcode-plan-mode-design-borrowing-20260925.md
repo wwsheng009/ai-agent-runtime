@@ -568,3 +568,46 @@
 ### 12.4 环境提示
 
 本轮 `cmd/aicli/commands` 再次被并发会话的在建文件打断：新增的未跟踪文件 `chat_skill_tool_restriction.go` 引用了 `chat_skill_turn.go` 中尚未定义的 `skillTurnPin` 字段（`SkillModel`/`DisallowedFunctions` 等），该包测试二进制无法构建，与 plan 改动无关；`internal/planmode` 独立测试全程通过。上一轮已记录 `internal/api/**`（含 `/plans` 路由）仍被 staged 的包改名占用而未提交。
+
+---
+
+## 13. 实施记录：第六轮（2026-09-25，§4.4 后续：`plan_review` 支持轮次 diff）
+
+**状态**：模型侧只读工具 `plan_review` 新增 `compare_version`，把「这一轮相对上一轮改了什么」直接送进模型上下文；渲染复用 §12 的 `planmode.UnifiedDiff`。前端变更行高亮/行级评论仍未做。
+
+### 13.1 行为变更
+
+| 场景 | 变更前 | 变更后 |
+|------|--------|--------|
+| 模型想知道评审轮次间的改动 | 只能分别读两轮正文自行比对（或由用户转述） | `plan_review{plan_id, compare_version: 1}` 在返回正文的同时附 `diff{from_version,to_version,text,added,removed,identical,truncated,coarse}`（与 `/plans diff` 逐字节一致） |
+| 会话计划请求对比但尚无归档轮次 | — | **不报错**：正文照常返回，`hint` 说明「enter 只登记元数据，完成一次评审后才有正文」；一旦有归档轮次，同一调用返回 diff |
+| 显式归档桶上的非法版本 | — | 报错并带上下文（`plan_review compare_version v9: ...`），模型可用 `/plans` 纠正 |
+| 宿主渲染 | — | 工具元数据附带 `diff_from_version` / `diff_to_version` / `diff_added` / `diff_removed` / `diff_truncated`，宿主无需解析正文即可画摘要 |
+
+### 13.2 接线点
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 参数与结果 | `backend/internal/toolbroker/types.go` | `PlanReviewArgs.CompareVersion`、`PlanReviewResult.Diff`、`PlanReviewDiff`（含 `Identical`/`Truncated`/`Coarse`） |
+| 工具定义与路由 | `backend/internal/toolbroker/broker.go` | `compare_version` 的 JSON schema 描述、参数解析、`diff_*` 元数据 |
+| 参数审计/类型 | `backend/internal/toolbroker/broker_arg_audit.go`、`broker_arg_kinds.go` | 把 `compare_version` 纳入审计键与 number 类型校验 |
+| 执行端 | `backend/internal/chat/plan_review_tool.go` | `reviewArchivedPlan(…, compareVersion)`、新增 `diffPlanRounds`（复用 `planmode.DiffArchivedVersions`），会话路径对「无归档记录 / 无快照轮次」降级为 `hint` |
+| 错误语义 | `backend/internal/planmode/diff.go`、`planmode/reopen.go` | 「无快照轮次」改为 `%w` 包装 `planstore.ErrNotFound`，让调用方能区分「还没有轮次」与「版本不存在」 |
+| 文档 | `docs/aicli/plan-mode.md` | §3.3 参数表与返回值说明 |
+
+### 13.3 验证（第六轮）
+
+| 命令（cwd = `backend/`） | 结果 |
+|---|---|
+| `go build ./...` | exit 0 |
+| `go test ./internal/planmode/ ./internal/toolbroker/ ./internal/chat/ -count=1` | 全绿（2.3s / 16.1s / 39.7s） |
+| `go test ./internal/chat/ -run ReviewPlan -count=1` | ok（1.0s，含 2 组新增用例） |
+| `go test ./internal/toolbroker/ -run PlanReview -count=1` | ok（含 schema/参数路由/元数据断言） |
+| `gofmt -l <本轮改动文件>` | 无输出 |
+
+新增用例（要点）：`plan_review` 归档两轮后 `compare_version=1` 返回 `from=1,to=2,+2/-1` 的正文级 diff 与轮次头；同版本自比 `identical`；`compare_version=9`（保留策略外/不存在）报错；会话计划在 enter 后（无快照）与未登记计划两条路径都降级为 `hint` 且正文可用；归档后同一调用给出 diff。broker 侧断言 `compare_version` 出现在工具 schema、能被路由到控制器，且 `diff_*` 进入元数据。
+
+### 13.4 备注
+
+- 本轮另一会话已把 §4.6 的 **shift+tab 权限模式循环**做进 `cmd/aicli/commands/chat_permission_mode.go`（`default → accept_edits → plan → bypass_permissions`，进入 bypass 仍二次确认）；文档 §9 的「模式循环未做」已随之修正为「键位已落地，常驻横幅未做」。该循环的 plan 档走 `/mode` 语义（只翻 permission-mode，不建 durable plan 状态），与本仓库既有文档一致，未由本轮改动。
+- `internal/chat/integration_test.go`、`run_meta_test.go`、`session_runtime_store_test.go` 与 `internal/policy/permissions_file.go` 存在**既有** gofmt 偏差（`git status` 显示未修改，非本轮产物），未触碰。

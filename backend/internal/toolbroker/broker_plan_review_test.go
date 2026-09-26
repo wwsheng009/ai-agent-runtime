@@ -56,6 +56,7 @@ func TestBrokerPlanReviewDefinitionAndRouting(t *testing.T) {
 			require.Contains(t, props, "plan_id")
 			require.Contains(t, props, "plan_path")
 			require.Contains(t, props, "version")
+			require.Contains(t, props, "compare_version")
 		}
 	}
 	require.True(t, found, "plan_review definition missing")
@@ -68,9 +69,10 @@ func TestBrokerPlanReviewDefinitionAndRouting(t *testing.T) {
 		ID:   "call_plan_review",
 		Name: ToolPlanReview,
 		Args: map[string]interface{}{
-			"plan_id":   " proj/plan ",
-			"plan_path": " docs/plan.md ",
-			"version":   float64(2),
+			"plan_id":         " proj/plan ",
+			"plan_path":       " docs/plan.md ",
+			"version":         float64(2),
+			"compare_version": float64(1),
 		},
 	})
 	require.NoError(t, err)
@@ -81,8 +83,26 @@ func TestBrokerPlanReviewDefinitionAndRouting(t *testing.T) {
 	assert.Equal(t, "proj/plan", meta["plan_id"])
 	assert.Equal(t, 2, meta["version"])
 	require.Len(t, ctrl.calls, 1)
-	assert.Equal(t, PlanReviewArgs{PlanID: "proj/plan", PlanPath: "docs/plan.md", Version: 2}, ctrl.calls[0])
+	assert.Equal(t, PlanReviewArgs{PlanID: "proj/plan", PlanPath: "docs/plan.md", Version: 2, CompareVersion: 1}, ctrl.calls[0])
 	assert.Equal(t, []string{"session-review"}, ctrl.sessions)
+
+	// A diff payload is summarized into the tool metadata for hosts.
+	ctrl.result = &PlanReviewResult{
+		PlanID:  "proj/plan",
+		Version: 2,
+		Diff:    &PlanReviewDiff{FromVersion: 1, ToVersion: 2, Added: 2, Removed: 1, Truncated: true},
+	}
+	_, diffMeta, err := broker.ExecuteToolCall(context.Background(), "session-review", types.ToolCall{
+		ID:   "call_plan_review_diff",
+		Name: ToolPlanReview,
+		Args: map[string]interface{}{"plan_id": "proj/plan", "compare_version": float64(1)},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, diffMeta["diff_from_version"])
+	assert.Equal(t, 2, diffMeta["diff_to_version"])
+	assert.Equal(t, 2, diffMeta["diff_added"])
+	assert.Equal(t, 1, diffMeta["diff_removed"])
+	assert.Equal(t, true, diffMeta["diff_truncated"])
 }
 
 func TestBrokerPlanReviewRequiresController(t *testing.T) {
