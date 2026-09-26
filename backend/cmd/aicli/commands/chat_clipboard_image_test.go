@@ -162,12 +162,15 @@ func TestComposerActionKeyClipboardImage(t *testing.T) {
 
 	session := &ChatSession{}
 	controller := &chatComposerController{session: session}
-	claimed, exitEditor := controller.onActionKey(ui.LineEditorSnapshot{}, string(keymap.ActionClipboardImage))
-	if !claimed || exitEditor {
-		t.Fatalf("alt+v 动作应被认领且不退出编辑器: claimed=%v exit=%v", claimed, exitEditor)
+	actionResult := controller.onActionKey(ui.LineEditorSnapshot{}, string(keymap.ActionClipboardImage))
+	if !actionResult.Claimed || actionResult.ExitEditor {
+		t.Fatalf("alt+v 动作应被认领且不退出编辑器: claimed=%v exit=%v", actionResult.Claimed, actionResult.ExitEditor)
 	}
 	if len(session.ImagePaths) != 1 {
 		t.Fatalf("键位路径未写入附件: %+v", session.ImagePaths)
+	}
+	if actionResult.Replacement == nil || !strings.Contains(actionResult.Replacement.Text, "[Image #1]") {
+		t.Fatalf("alt+v 成功读取后应插入图片令牌: %+v", actionResult.Replacement)
 	}
 }
 

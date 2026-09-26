@@ -252,9 +252,24 @@ func (c *chatComposerController) onSubmit(snapshot ui.LineEditorSnapshot) (ui.Li
 	if c == nil || c.completion == nil {
 		return ui.LineEditorReplacement{}, false
 	}
+	before := 0
+	if c.session != nil {
+		before = len(c.session.ImagePaths)
+	}
 	nextText, nextCursor, ok := c.completion.ApplySubmission(snapshot.Text, snapshot.Cursor)
 	if !ok {
+		// 普通提交：按草稿里存活的 [Image #N] 令牌裁剪附件（删令牌即弃图）。
+		// 只约束由令牌引入的附件，其它来源（ACP/Web/resume）不受影响。
+		if c.session != nil {
+			c.session.ImagePaths = filterChatImagePathsByDraft(c.session, snapshot.Text)
+		}
 		return ui.LineEditorReplacement{}, false
+	}
+	// /attach ... 等命令成功时会新增附件：把对应令牌补进输入框，便于按令牌删图。
+	if c.session != nil && len(c.session.ImagePaths) > before {
+		index := len(c.session.ImagePaths)
+		markChatImageTokenPath(c.session, c.session.ImagePaths[index-1], index)
+		nextText, nextCursor = insertChatImageToken(nextText, nextCursor, index)
 	}
 	return ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor}, true
 }
@@ -276,27 +291,38 @@ func (c *chatComposerController) onTranscriptRequested(snapshot ui.LineEditorSna
 // onActionKey 分发 keymap 动作：claimed 决定编辑器是否吞掉该键，exitEditor
 // 表示需要把屏幕交给宿主（全屏 pager）。均未命中时按键回落到编辑器原有语义
 // （例如 ctrl+t 未被认领时仍是 transpose）。
-func (c *chatComposerController) onActionKey(snapshot ui.LineEditorSnapshot, action string) (bool, bool) {
+func (c *chatComposerController) onActionKey(snapshot ui.LineEditorSnapshot, action string) ui.LineEditorActionResult {
 	if c == nil || c.session == nil {
-		return false, false
+		return ui.LineEditorActionResult{}
 	}
 	switch keymap.Action(action) {
 	case keymap.ActionPermissionCycle:
-		return cycleChatPermissionMode(c.session), false
+		return ui.LineEditorActionResult{Claimed: cycleChatPermissionMode(c.session)}
 	case keymap.ActionTranscriptPager:
 		if c.onTranscriptRequested(snapshot) {
-			return true, true
+			return ui.LineEditorActionResult{Claimed: true, ExitEditor: true}
 		}
-		return false, false
+		return ui.LineEditorActionResult{}
 	case keymap.ActionClipboardImage:
+		before := len(c.session.ImagePaths)
 		message, err := attachClipboardImage(c.session, false)
 		if err != nil {
 			message = chatClipboardImageErrorMessage(err)
 		}
 		c.setStatusLine(message)
-		return true, false
+		if len(c.session.ImagePaths) <= before {
+			return ui.LineEditorActionResult{Claimed: true}
+		}
+		// 附件读入成功：把 [Image #N] 令牌插到光标处，删掉令牌即不再随消息发送。
+		index := len(c.session.ImagePaths)
+		markChatImageTokenPath(c.session, c.session.ImagePaths[index-1], index)
+		nextText, nextCursor := insertChatImageToken(snapshot.Text, snapshot.Cursor, index)
+		return ui.LineEditorActionResult{
+			Claimed:     true,
+			Replacement: &ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor},
+		}
 	}
-	return false, false
+	return ui.LineEditorActionResult{}
 }
 
 func normalizeChatComposerReadError(session *ChatSession, err error) error {

@@ -348,6 +348,7 @@ func rotateChatSessionDiagnostics(session *ChatSession) error {
 	session.lastLocalShellArtifactPath = ""
 	session.localShellArtifactMu.Unlock()
 	session.ImagePaths = nil
+	clearChatImageTokenMarks(session)
 	return nil
 }
 

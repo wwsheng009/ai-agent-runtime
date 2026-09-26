@@ -170,6 +170,7 @@ func finishSuccessfulChatSend(session *ChatSession, response string, noInteracti
 	}
 
 	session.ImagePaths = nil
+	clearChatImageTokenMarks(session)
 	refreshChatComposerContext(session)
 	flushChatSessionLog(session)
 }

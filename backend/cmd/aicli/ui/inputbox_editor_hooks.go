@@ -33,6 +33,18 @@ type LineEditorRenderSnapshot struct {
 	ViewportStart int
 }
 
+// LineEditorActionResult 描述一次动作键处理的结果。
+type LineEditorActionResult struct {
+	// Claimed 表示宿主认领该键（编辑器吞掉它，不再走原有语义）。
+	Claimed bool
+	// ExitEditor 表示宿主需要接管屏幕，编辑器以
+	// ErrInteractiveInputTranscriptRequested 退出（例如全屏 transcript pager）。
+	ExitEditor bool
+	// Replacement 非空时改写当前行（例如把 [Image #N] 令牌插到光标处）。
+	// 设置后编辑器同样视作已认领该键。
+	Replacement *LineEditorReplacement
+}
+
 // LineEditorHooks lets the caller observe and intercept editor actions.
 type LineEditorHooks struct {
 	InitialText   string
@@ -55,10 +67,8 @@ type LineEditorHooks struct {
 	// ActionForChord 把规范化 chord（如 "shift+tab"、"ctrl+t"）解析为已注册的
 	// keymap 动作 id；nil 表示不启用动作路由。
 	ActionForChord func(chord string) (string, bool)
-	// OnActionKey 在按键解析出已注册动作时调用。claimed 表示宿主认领该键
-	// （编辑器吞掉它）；exitEditor 表示宿主需要接管屏幕，编辑器以
-	// ErrInteractiveInputTranscriptRequested 退出（例如全屏 transcript pager）。
-	OnActionKey func(snapshot LineEditorSnapshot, action string) (claimed bool, exitEditor bool)
+	// OnActionKey 在按键解析出已注册动作时调用；返回结果见 LineEditorActionResult。
+	OnActionKey func(snapshot LineEditorSnapshot, action string) LineEditorActionResult
 	// CollapsePastedText 控制大段粘贴是否折叠为占位符（提交时仍发送全文）。
 	// nil 表示使用默认行为（折叠）。
 	CollapsePastedText *bool

@@ -1191,11 +1191,14 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 		// 宿主返回 false 时回落到编辑器原有语义（例如 ctrl+t 仍是 transpose）。
 		if key.chord != "" && hooks != nil && hooks.ActionForChord != nil && hooks.OnActionKey != nil {
 			if action, resolved := hooks.ActionForChord(key.chord); resolved {
-				claimed, exitEditor := hooks.OnActionKey(snapshot(), action)
-				if exitEditor {
+				result := hooks.OnActionKey(snapshot(), action)
+				if result.Replacement != nil {
+					applyReplacement(*result.Replacement)
+				}
+				if result.ExitEditor {
 					return "", ErrInteractiveInputTranscriptRequested
 				}
-				if claimed {
+				if result.Claimed || result.Replacement != nil {
 					continue
 				}
 			}

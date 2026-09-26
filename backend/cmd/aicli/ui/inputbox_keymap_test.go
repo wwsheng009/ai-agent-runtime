@@ -39,6 +39,39 @@ func TestDecodeInteractiveKeyAltVProducesChord(t *testing.T) {
 	}
 }
 
+func TestReadInteractiveLine_ActionKeyReplacementRewritesLine(t *testing.T) {
+	var output bytes.Buffer
+	hooks := &LineEditorHooks{
+		ActionForChord: func(chord string) (string, bool) {
+			if chord == "shift+tab" {
+				return "app.test.insert", true
+			}
+			return "", false
+		},
+		OnActionKey: func(_ LineEditorSnapshot, _ string) LineEditorActionResult {
+			replacement := LineEditorReplacement{Text: "[Image #1] ", Cursor: len([]rune("[Image #1] "))}
+			return LineEditorActionResult{Claimed: true, Replacement: &replacement}
+		},
+	}
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("ab\x1b[Zcd\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		hooks,
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks: %v", err)
+	}
+	// 动作键改写当前行（已输入 "ab" 被替换为令牌），随后的输入继续追加。
+	if line != "[Image #1] cd" {
+		t.Fatalf("动作替换未生效，got %q", line)
+	}
+}
+
 func TestReadInteractiveLine_ActionKeyClaimConsumesShiftTab(t *testing.T) {
 	var output bytes.Buffer
 	var actions []string
@@ -49,9 +82,9 @@ func TestReadInteractiveLine_ActionKeyClaimConsumesShiftTab(t *testing.T) {
 			}
 			return "", false
 		},
-		OnActionKey: func(_ LineEditorSnapshot, action string) (bool, bool) {
+		OnActionKey: func(_ LineEditorSnapshot, action string) LineEditorActionResult {
 			actions = append(actions, action)
-			return true, false
+			return LineEditorActionResult{Claimed: true}
 		},
 	}
 	line, err := readInteractiveLineWithHooks(
@@ -85,9 +118,9 @@ func TestReadInteractiveLine_ActionKeyExitEditorSignalPreservesDraft(t *testing.
 			}
 			return "", false
 		},
-		OnActionKey: func(value LineEditorSnapshot, _ string) (bool, bool) {
+		OnActionKey: func(value LineEditorSnapshot, _ string) LineEditorActionResult {
 			snapshot = value
-			return true, true
+			return LineEditorActionResult{Claimed: true, ExitEditor: true}
 		},
 	}
 	line, err := readInteractiveLineWithHooks(
@@ -117,7 +150,7 @@ func TestReadInteractiveLine_UnclaimedActionFallsBackToTranspose(t *testing.T) {
 			}
 			return "", false
 		},
-		OnActionKey: func(LineEditorSnapshot, string) (bool, bool) { return false, false },
+		OnActionKey: func(LineEditorSnapshot, string) LineEditorActionResult { return LineEditorActionResult{} },
 	}
 	line, err := readInteractiveLineWithHooks(
 		strings.NewReader("abc\x14\n"),

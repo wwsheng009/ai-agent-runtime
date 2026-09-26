@@ -271,11 +271,14 @@ type ChatSession struct {
 	// restoredPendingChecked records that the durable runtime state was already
 	// inspected for a restored pending request in this session epoch; it keeps
 	// the main loop from re-reading the session store on every iteration.
-	restoredPendingChecked bool
-	queuedInputDrain              bool           // suppress repeated queued-input notices while draining
-	queuedInputEchoed             bool           // queued input was already echoed in the fixed prompt while busy
-	lastInteractiveInputQueued    bool           // last chatInteractiveReadLine result came from InputQueue
-	ImagePaths                    []string       // explicit local image attachments for current turn
+	restoredPendingChecked     bool
+	queuedInputDrain           bool     // suppress repeated queued-input notices while draining
+	queuedInputEchoed          bool     // queued input was already echoed in the fixed prompt while busy
+	lastInteractiveInputQueued bool     // last chatInteractiveReadLine result came from InputQueue
+	ImagePaths                 []string // explicit local image attachments for current turn
+	// imageTokenPaths 记录"由输入框令牌引入"的附件（路径 → 令牌序号）。只有这些
+	// 附件受"删令牌即弃图"约束；ACP/Web/resume 等来源的附件不受令牌影响。
+	imageTokenPaths map[string]int
 
 	// accountListMu guards the /accounts async refresh state: the in-flight job,
 	// the per-provider snapshot cache it publishes, and the optional refresh
@@ -1718,9 +1721,16 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				}
 				continue
 			}
+			beforeAttachments := 0
+			if session != nil {
+				beforeAttachments = len(session.ImagePaths)
+			}
 			if dispatchChatCommand(session, input, noInteractive) {
 				break
 			}
+			// /attach <path> 这类命令在编辑器之外执行：新增附件后把 [Image #N]
+			// 令牌写回下一次输入框草稿，保持"删令牌即弃图"的同一套语义。
+			appendChatImageTokenForNewAttachments(session, beforeAttachments)
 			if noInteractive {
 				break
 			}

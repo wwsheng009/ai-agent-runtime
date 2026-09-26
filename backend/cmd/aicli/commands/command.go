@@ -740,6 +740,7 @@ func handleImageAttachmentCommand(session *ChatSession, command string) bool {
 		}
 		removed := session.ImagePaths[index-1]
 		session.ImagePaths = append(session.ImagePaths[:index-1], session.ImagePaths[index:]...)
+		clearChatImageTokenMark(session, removed)
 		refreshChatComposerContext(session)
 		printfChatCommandOutput(session, "已移除图片附件: %s (当前剩余 %d 个)", removed, len(session.ImagePaths))
 		return false
