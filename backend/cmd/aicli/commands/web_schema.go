@@ -46,6 +46,11 @@ const (
 	ChatWebAPIStatusBarPath = "/web/api/statusbar"
 	ChatWebAPIEventsPath    = "/web/api/events"
 	ChatWebAPIInputPath     = "/web/api/input"
+	// ChatWebAPIAttachmentsPath 是图片附件上传端点（POST，multipart/form-data，
+	// 字段名 file，可多份）：内容经 internal/imageattach 校验/压缩后落到会话
+	// images artifact 目录，返回的 path 由前端在 /web/api/input 的 image_paths
+	// 里回传。上传本身不改动会话附件列表，避免"上传了但没发"的图片粘在下一轮。
+	ChatWebAPIAttachmentsPath = "/web/api/attachments"
 	// ChatWebAPIInvokePath 是同步远程调用端点：一次请求内完成
 	// "注入 prompt → 等待 turn 结束 → 返回状态与渲染"，供脚本/外部 Agent
 	// 直接远程调用 aicli chat TUI（与异步的 /web/api/input 互补）。

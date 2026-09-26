@@ -890,6 +890,10 @@ type chatWebInputRequest struct {
 	// DiscardPending 控制中断时是否丢弃已排队的输入。缺省 false 与终端
 	// Esc 语义一致（保留排队输入）；显式 true 还原旧的“停止并清队”行为。
 	DiscardPending bool `json:"discard_pending"`
+	// ImagePaths 是本次输入携带的图片附件路径（来自 POST /web/api/attachments
+	// 的返回值）。缺省空表示纯文本输入；非空时先并入会话附件列表，再由下一回合
+	// 随文本一起发送（与 CLI 的 /attach 语义一致，见 attachChatWebImages）。
+	ImagePaths []string `json:"image_paths"`
 }
 
 // HandleChatWebAPIInput 注入用户输入（prompt / 审批决议 / 提问回答）。
@@ -938,7 +942,7 @@ func HandleChatWebAPIInput(w http.ResponseWriter, r *http.Request) {
 	case "interrupt":
 		handleWebInterrupt(w, session, req.DiscardPending)
 	default:
-		handleWebPrompt(w, session, req.Prompt)
+		handleWebPrompt(w, session, req.Prompt, req.ImagePaths)
 	}
 }
 
@@ -995,7 +999,9 @@ func injectChatWebPrompt(session *ChatSession, prompt string) (chatInputRouteRes
 }
 
 // handleWebPrompt 路由普通 prompt 到 InputQueue（§4.2.4 步骤 3-5）。
-func handleWebPrompt(w http.ResponseWriter, session *ChatSession, prompt string) {
+// 携带 imagePaths 时先把它们并入会话附件列表（见 attachChatWebImages），
+// 再由下一回合的 sendMessage 与文本一起发送并清空——与 CLI /attach 同一语义。
+func handleWebPrompt(w http.ResponseWriter, session *ChatSession, prompt string, imagePaths []string) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		writeWebAPIJSON(w, http.StatusBadRequest, map[string]string{
@@ -1004,6 +1010,7 @@ func handleWebPrompt(w http.ResponseWriter, session *ChatSession, prompt string)
 		})
 		return
 	}
+	attached, imageNotes := attachChatWebImages(session, imagePaths)
 	result, ok := injectChatWebPrompt(session, prompt)
 	if !ok {
 		writeWebAPIJSON(w, http.StatusInternalServerError, map[string]string{
@@ -1012,15 +1019,20 @@ func handleWebPrompt(w http.ResponseWriter, session *ChatSession, prompt string)
 		})
 		return
 	}
+	response := map[string]any{"status": "queued"}
+	if len(imagePaths) > 0 {
+		// 附加字段对旧客户端透明：不带 image_paths 的调用语义与响应完全不变。
+		response["attached_images"] = attached
+		if len(imageNotes) > 0 {
+			response["image_notes"] = imageNotes
+		}
+	}
 	switch {
 	case result.rejected():
-		writeWebAPIJSON(w, http.StatusOK, map[string]string{
-			"status": "rejected",
-			"reason": "input rejected by command gate",
-		})
-	default:
-		writeWebAPIJSON(w, http.StatusOK, map[string]string{"status": "queued"})
+		response["status"] = "rejected"
+		response["reason"] = "input rejected by command gate"
 	}
+	writeWebAPIJSON(w, http.StatusOK, response)
 }
 
 // handleWebApproval 提交审批决议（§4.2.4 步骤 6）。

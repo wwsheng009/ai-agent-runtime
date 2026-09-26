@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/imageattach"
 	"github.com/wwsheng009/ai-agent-runtime/internal/imageprep"
 )
 
@@ -36,17 +37,20 @@ type preparedChatImage struct {
 // 等比缩小（含透明通道保 PNG，其余转 JPEG），超过体积上限的直接跳过并给出原因。
 // 处理后的文件落在会话 artifact 目录（无会话目录时退回系统临时目录）。
 func prepareChatImageAttachment(session *ChatSession, path string) (preparedChatImage, error) {
-	result, err := imageprep.Prepare(path, chatImageArtifactDir(session), imageprep.Options{
-		MaxDimension: chatImageMaxDimension(session),
-		MaxBytes:     chatImageMaxBytes(session),
-	})
+	prepared, err := imageattach.PrepareLocal(path, chatImageArtifactDir(session), chatImageLimits(session))
 	if err != nil {
 		return preparedChatImage{}, err
 	}
-	if result.Skipped {
-		return preparedChatImage{Note: result.Note}, nil
+	return preparedChatImage{Path: prepared.Path, Note: prepared.Note}, nil
+}
+
+// chatImageLimits 把会话配置与环境变量解析成共享核心（internal/imageattach）的上限。
+// 解析规则仍留在 CLI：环境变量 > aicli.chat.* > 内置默认。
+func chatImageLimits(session *ChatSession) imageattach.Limits {
+	return imageattach.Limits{
+		MaxDimension: chatImageMaxDimension(session),
+		MaxBytes:     chatImageMaxBytes(session),
 	}
-	return preparedChatImage{Path: result.Path, Note: result.Note}, nil
 }
 
 // chatImageMaxDimension 解析发送前图片的长边上限，优先级：

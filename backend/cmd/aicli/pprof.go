@@ -405,6 +405,10 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	mux.HandleFunc(commands.ChatWebAPIRuntimePath, commands.HandleChatWebAPIRuntime)
 	mux.HandleFunc(commands.ChatWebAPIEventsPath, commands.HandleChatWebAPIEvents)
 	mux.HandleFunc(commands.ChatWebAPIInputPath, commands.HandleChatWebAPIInput)
+	// /web/api/attachments 图片附件上传：micro web client 的附件轨把用户选择的
+	// 图片/粘贴的位图/拖入的文件传到这里，拿到受校验与上限约束的本地路径后，
+	// 再随 /web/api/input 的 image_paths 一起发送。
+	mux.HandleFunc(commands.ChatWebAPIAttachmentsPath, commands.HandleChatWebAPIAttachments)
 	// /web/api/invoke 同步远程调用：一次请求内完成"注入 prompt → 等待 turn
 	// 结束 → 返回最终状态与 TUI 渲染"，供脚本/外部 Agent 远程控制会话。
 	mux.HandleFunc(commands.ChatWebAPIInvokePath, commands.HandleChatWebAPIInvoke)
