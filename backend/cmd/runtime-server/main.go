@@ -1242,6 +1242,12 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 				Roots:  roots,
 				Limits: filebrowse.DefaultLimits(),
 			}))
+			// 会话图片附件上传（frontend composer 的附件轨）：POST /api/runtime/uploads。
+			// 与 micro web client 的 /web/api/attachments 共用 internal/imageattach；
+			// 落盘目录在服务数据目录下，submit_prompt.images 只接受该目录内的路径。
+			runtimeapi.RegisterRuntimeUploadRoutes(runtimeRouter, runtimeapi.RuntimeUploadOptions{
+				RootDir: filepath.Join(filepath.Dir(config.DefaultAuthStorePath()), "data", "attachments"),
+			})
 			// 右侧栏「Git」面板（P3 只读 + P4-1 stage/unstage）：/git/status|diff|commits|stage。
 			// 与 /fs/* 共用同一个作用域解析器（gitbrowse.RootResolver 与 fsscope.RootResolver 同形）。
 			// git 不可用时由服务层返回 git_unavailable（503），不影响启动。

@@ -38,8 +38,11 @@ type sessionRuntimeSubmitOutcome struct {
 }
 
 type sessionRuntimeCommandRequest struct {
-	Type                 string                 `json:"type"`
-	Prompt               string                 `json:"prompt,omitempty"`
+	Type   string `json:"type"`
+	Prompt string `json:"prompt,omitempty"`
+	// Images 是本次 prompt 携带的图片附件路径（来自 POST /api/runtime/uploads）。
+	// 只有落在附件目录内的路径会被接受，见 resolveRuntimeUploadImages。
+	Images               []string               `json:"images,omitempty"`
 	ContinuationMetadata map[string]interface{} `json:"continuation_metadata,omitempty"`
 	StripMetadataKeys    []string               `json:"strip_metadata_keys,omitempty"`
 	RunMeta              *team.RunMeta          `json:"run_meta,omitempty"`
@@ -924,7 +927,18 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 			h.writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		result, state, err, completed := submitSessionPrompt(actor, r.Context(), prompt, req.RunMeta)
+		images, imageNotes := resolveRuntimeUploadImages(req.Images)
+		if len(req.Images) > 0 && len(images) == 0 {
+			// 带了图片却一张都不可用：明确报错，绝不静默降级成纯文本发送。
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+				"images rejected: "+strings.Join(imageNotes, "; ")))
+			return
+		}
+		result, state, err, completed := submitSessionPrompt(actor, r.Context(), prompt, req.RunMeta,
+			chat.SubmitPromptOption{
+				ImagePaths:       images,
+				ImageArtifactDir: RuntimeUploadRootDir(),
+			})
 		if err != nil {
 			if h.writeSessionLeaseConflict(w, err) {
 				return
@@ -938,12 +952,14 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 				"pending": true,
 				"state":   state,
 			}
+			attachRuntimeImageNotes(payload, images, imageNotes)
 			h.writeJSON(w, http.StatusAccepted, h.attachSessionExecutionRoute(r.Context(), sessionID, payload))
 			return
 		}
 		payload := map[string]interface{}{
 			"result": result,
 		}
+		attachRuntimeImageNotes(payload, images, imageNotes)
 		h.writeJSON(w, http.StatusOK, h.attachSessionExecutionRoute(r.Context(), sessionID, payload))
 		return
 
@@ -1204,7 +1220,7 @@ func sessionActorRunActive(actor *chat.SessionActor) bool {
 	}
 }
 
-func submitSessionPrompt(actor *chat.SessionActor, requestCtx context.Context, prompt string, runMeta *team.RunMeta) (*agent.Result, *chat.RuntimeState, error, bool) {
+func submitSessionPrompt(actor *chat.SessionActor, requestCtx context.Context, prompt string, runMeta *team.RunMeta, opts ...chat.SubmitPromptOption) (*agent.Result, *chat.RuntimeState, error, bool) {
 	if actor == nil {
 		return nil, nil, errors.New(errors.ErrConfigInvalid, "session actor not configured"), false
 	}
@@ -1212,7 +1228,7 @@ func submitSessionPrompt(actor *chat.SessionActor, requestCtx context.Context, p
 	runCtx := context.WithoutCancel(requestCtx)
 	resultCh := make(chan sessionRuntimeSubmitOutcome, 1)
 	go func() {
-		result, err := actor.SubmitPrompt(runCtx, prompt, runMeta)
+		result, err := actor.SubmitPrompt(runCtx, prompt, runMeta, opts...)
 		resultCh <- sessionRuntimeSubmitOutcome{result: result, err: err}
 	}()
 
