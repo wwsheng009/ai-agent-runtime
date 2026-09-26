@@ -153,6 +153,15 @@ aicli chat --pprof
       回归：`scripts/verify-micro-web-composer.mjs`（沙盒）+ 真实浏览器临时脚本
       `backend/cmd/aicli/commands/web/tmp/composer-embed-check.mjs`（7 个视口断言信息流让位、
       对话列居中、拖动 / 复位的几何与状态栏零变化）。
+ - [ ] **图片附件轨（`#attachment-track`，在 `#input-row` 上方）**：三入口——📎 选择（`accept=image/* multiple`）、
+        `#prompt` 粘贴剪贴板图片、`#composer-panel` 内拖放（拖入高亮、dragleave 收尾）；上传走
+        `POST /web/api/attachments`（multipart，字段 `file`，一次 ≤8 张），轨道条目显示文件名/尺寸/体积并可 `×` 移除。
+        **不伪造缩略图**（浏览器读不到服务端本地绝对路径，只显示元数据）；跳过项（超体积上限 / 不是可识别的图片）
+        与网络/HTTP 错误都写进 `#send-status` 并留失败行，不产生可用条目。发送时只在 prompt 请求里带
+        `image_paths`（`interrupt` / `approval` / `question_answer` 一律不带；无附件时不写该字段——旧契约不变），
+        `queued` 后清空轨道（上传了但没发出去的图片不粘下一轮，失败则保留可重试），响应里的 `image_notes`
+        如实并入状态行。回归：`scripts/verify-micro-web-attachments.mjs`（沙盒 9 组 28 项断言）
+        + 真实浏览器手工项：三入口各上传一张后发送，确认模型确实看到图；再删掉条目发送确认不再带图。
  - [ ] **任务列表浮层（贴在 composer 面板上沿）**：模型调用 `todos` 工具后，`#todo-panel`
        （`#composer-panel` 内的绝对定位子层，`bottom: calc(100% + 1px)`）在 composer **上面**
        展开，**底边与 composer 面板上沿严丝合缝**（左右各外扩 1px 对齐外边框、只有上圆角、
