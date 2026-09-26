@@ -604,6 +604,8 @@
 | `go test ./internal/chat/ -run ReviewPlan -count=1` | ok（1.0s，含 2 组新增用例） |
 | `go test ./internal/toolbroker/ -run PlanReview -count=1` | ok（含 schema/参数路由/元数据断言） |
 | `gofmt -l <本轮改动文件>` | 无输出 |
+| 干净检出 `a8e9679f`：`go build ./internal/... ./cmd/...` | 仅 `internal/webui/assets.go: pattern dist` 缺失（历史现象），无其它错误 |
+| 干净检出：`go test ./internal/planmode/ ./internal/toolbroker/ ./internal/chat/ -count=1` | 全绿（2.5s / 16.1s / 38.8s） |
 
 新增用例（要点）：`plan_review` 归档两轮后 `compare_version=1` 返回 `from=1,to=2,+2/-1` 的正文级 diff 与轮次头；同版本自比 `identical`；`compare_version=9`（保留策略外/不存在）报错；会话计划在 enter 后（无快照）与未登记计划两条路径都降级为 `hint` 且正文可用；归档后同一调用给出 diff。broker 侧断言 `compare_version` 出现在工具 schema、能被路由到控制器，且 `diff_*` 进入元数据。
 
