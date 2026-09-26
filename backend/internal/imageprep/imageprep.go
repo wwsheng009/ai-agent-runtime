@@ -131,6 +131,9 @@ func Prepare(srcPath, outDir string, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	// 坐标乘数披露：截图类工作流里模型常按"显示坐标"推算点击位置，只给前后
+	// 尺寸仍会让它自信地算错；比例直接给出来（article §9 / 分析 §3.11）。
+	scale := float64(cfg.Width) / float64(dstWidth)
 	return Result{
 		Path:      dstPath,
 		Width:     dstWidth,
@@ -138,9 +141,10 @@ func Prepare(srcPath, outDir string, opts Options) (Result, error) {
 		Bytes:     int64(payload.Len()),
 		Format:    outFormat,
 		Rewritten: true,
-		Note: fmt.Sprintf("已压缩 %dx%d → %dx%d（%s → %s，%s）",
+		Note: fmt.Sprintf("已压缩 %dx%d → %dx%d（%s → %s，%s；显示坐标 ×%.2f 得到原图坐标）",
 			cfg.Width, cfg.Height, dstWidth, dstHeight,
-			humanBytes(info.Size()), humanBytes(int64(payload.Len())), strings.ToUpper(outFormat)),
+			humanBytes(info.Size()), humanBytes(int64(payload.Len())), strings.ToUpper(outFormat),
+			scale),
 	}, nil
 }
 

@@ -410,8 +410,13 @@ func TestViewTool_OffsetBeyondEOFReturnsExplicitMessage(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("expected success, got error %v", result.Error)
 	}
-	if !strings.Contains(result.Content, "Reached end of file: offset 10 is beyond total lines 3.") {
-		t.Fatalf("expected explicit EOF message, got %q", result.Content)
+	// Dead-end contract (analysis §3.5): the note is a fact, not an error, and
+	// it must carry the recovery route (a smaller offset) instead of only
+	// stating the miss.
+	if !strings.Contains(result.Content, "beyond the end of the file (3 lines)") ||
+		!strings.Contains(result.Content, "retry with a smaller offset (0..2)") ||
+		strings.Contains(result.Content, "Error:") {
+		t.Fatalf("expected explicit EOF note with recovery hint, got %q", result.Content)
 	}
 	if result.Metadata["total_lines"] != 3 {
 		t.Fatalf("expected total_lines metadata 3, got %#v", result.Metadata["total_lines"])
@@ -520,8 +525,9 @@ func TestViewTool_OffsetAtEOFReturnsExplicitMessage(t *testing.T) {
 	if !result.Success {
 		t.Fatalf("expected success, got error %v", result.Error)
 	}
-	if !strings.Contains(result.Content, "Reached end of file: offset 3 equals total lines 3.") {
-		t.Fatalf("expected exact EOF message, got %q", result.Content)
+	if !strings.Contains(result.Content, "offset 3 equals total lines 3") ||
+		!strings.Contains(result.Content, "use offset 2 to read the last line") {
+		t.Fatalf("expected exact EOF note, got %q", result.Content)
 	}
 	if result.Metadata["total_lines"] != 3 {
 		t.Fatalf("expected total_lines metadata 3, got %#v", result.Metadata["total_lines"])
