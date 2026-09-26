@@ -5520,6 +5520,11 @@ func (h *Handler) handleBackgroundEvent(event background.JobEvent) {
 	if sessionID != "" && event.JobID != "" {
 		h.updateSessionActiveJobs(sessionID, event.JobID, event.Type)
 	}
+	// 终态 job 投影到 supervision inbox + 调度一次唤醒，让空闲的所属会话续跑并读取
+	// 结果（异步、best-effort）。output 等高频事件在此白名单之外，绝不触发调度。
+	if sessionID != "" && event.JobID != "" && isTerminalBackgroundJobEventType(event.Type) {
+		go h.projectBackgroundJobTerminal(context.Background(), event, sessionID)
+	}
 	runtimeEvent := runtimeevents.Event{
 		Type:      eventType,
 		AgentName: "background-manager",
