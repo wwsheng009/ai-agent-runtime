@@ -848,3 +848,54 @@
 - **归因（推断）**：两个会话并发使用「临时索引 + `git read-tree`」的提交技术；对方的临时索引生成于我这两次提交之前，收尾时覆盖了共享的 `.git/index`，于是索引快照早于我的提交，我的新增文件在其眼中就是「被删除」。
 - **处置**：只修我的路径——按 `HEAD:<path>` 的 blob 用 `git update-index --cacheinfo`（新增文件补 `--add`）把索引条目复位到 HEAD，**不碰对方任何路径**。修复后这批路径 `git status --short` 为空，全仓未提交项只剩对方的 MCP 改动（`chat_mcp_command.go` / `importers/*` 等）。
 - **教训**：共享索引下，「提交后把索引条目复位到 HEAD」不是一次性动作，**每次提交后都要复查**；复查的签名是 `git diff --cached --stat` 里出现「自家新文件被删 / 改动文件变 20/600 规模的删除」。
+
+---
+
+## 19. 实施记录：第十二轮（2026-09-25，评审反馈的自动修订回合）
+
+**状态**：报告 §8.5 的最后一处行为缺口「**评审反馈的自动修订回合**」**已落地**（`trigger_revision`，Web 面板默认走该路径）。§4.4 只剩**行级评论**，§4.6 只剩 **TUI/CLI 常驻横幅**。
+
+### 19.1 行为
+
+| 场景 | 变更前 | 变更后 |
+|------|--------|--------|
+| Web 面板「请求修改」+ 意见 | 裁决落地，notes 进 `pending_review_notes`，**等用户下一次输入**才送达模型 | 裁决落地后**立刻起一轮修订**（合成指令「按评审意见修订当前计划正文…」），notes 由该轮的一次性提醒通道注入并清除 —— 「一次提交即一轮修订」 |
+| CLI `/plan request_changes` | 同上（等下一次输入） | **不变**：CLI 未带 `trigger_revision`，保持原投递语义（§9 记档） |
+| `trigger_revision` 与 `approve`/`quit` 组合、或 notes 为空 | — | **400**：`trigger_revision is only supported with request_changes` / `trigger_revision requires non-empty notes`（避免语义矛盾与「盲改」） |
+| 会话没接入实时运行时（无 actor） | — | 决策**照常落地**，响应 `revision_triggered=false` + `revision_error`，notes 留在 durable 状态由下一轮交付；Web 把该说明显示在计划面板（不静默） |
+
+### 19.2 设计要点：不新增投递通道
+
+- 触发只是**起一轮**：`Handler.triggerPlanRevisionRound` 走 `actor.SubmitPromptAsync(agent.PlanRevisionPrompt(), h.apiSessionRunMeta(...))`（与 `supervision.AutoWakePrompt` 同款先例）。
+- **评审正文不重复传输**：合成指令刻意不带 notes，notes 仍由既有的 `chat.SessionActor.consumePlanReviewNotes` 在**该轮**注入（`Durable=false`，消费即清除）。两条通道因此不可能互相重复——测试直接断言了这一点（正文不进历史、durable 副本被消费）。
+- **失败不放大**：触发失败只写响应字段，不把已落地的裁决回滚；此时退回「下一次输入时交付」的旧路径，不会丢反馈。
+- **零 `internal/chat` 改动**：全部改动落在 `internal/agent`（常量）、`internal/api/runtimeapi`（接口层）与前端。
+
+### 19.3 落点与验证
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 常量 | `backend/internal/agent/system_reminder.go` | `PlanRevisionPrompt()`（与 `PlanReviewNotesBody` 同处定义，两条通道的文案放在一起） |
+| 接口层 | `backend/internal/api/runtimeapi/plan_mode_handlers.go` | 请求 `trigger_revision`、响应 `revision_triggered`/`revision_error`、`validatePlanRevisionRequest`、`applyRevisionTrigger`（两条裁决路径统一在响应组装后触发） |
+| 前端类型 | `frontend/src/types/runtime/plans.ts` | 请求/响应字段（含注释口径） |
+| 前端接线 | `frontend/src/hooks/workspace/use-runtime-plan-mode.ts` | 带意见的 `request_changes` 自动带 `trigger_revision`；**交付成功清空草稿**，**降级把 `revision_error` 挂到 `planError`**（面板已有呈现位） |
+
+| 命令（cwd 见备注） | 结果 |
+|---|---|
+| `go test ./internal/api/runtimeapi/ -run 'TestPlanRevisionTrigger' -count=1 -v`（backend） | 3/3 通过：无 actor 降级（含 durable notes 仍在）、两种 400 组合（且不改状态）、actor 在线触发一轮（历史里出现合成指令、durable notes 被消费、正文未进历史） |
+| `go test ./internal/api/runtimeapi/ -run 'Plan\|SessionPlanMode' -count=1`（backend） | ok（3.05s） |
+| `go test ./internal/api/runtimeapi/ -count=1`（backend，整包） | ok（41.97s，两次干净通过；见 19.5） |
+| `go vet ./internal/api/runtimeapi/ ./internal/agent/` | exit 0 |
+| `npx vitest run src/hooks/workspace/use-runtime-plan-mode-submit.test.tsx src/hooks/workspace/use-runtime-plan-mode.test.ts`（frontend） | 6/6（新增 3 例：传参、降级提示 + 保留草稿、空意见/其它裁决不带标志） |
+| `npx vitest run src/hooks/workspace src/components/workspace src/pages`（frontend，全量） | **208 文件 / 1500 用例全绿** |
+| `npx tsc -b` / `npx eslint <3 个改动文件>` | exit 0 / 0 告警 |
+| `node scripts/verify-frontend-i18n.ts` / `verify-max-lines.mjs` | scanned=915, violations=0 / 0 个 > 500 非空行（最大 500） |
+
+### 19.4 未实施
+
+- **CLI/TUI 侧自动触发**：`/plan request_changes` 携带 `trigger_revision` 需要动 `cmd/aicli/commands/chat_plan_command.go`，而该目录此刻正被并发会话改造（`ui/inputbox_editor*.go`、`chat_composer.go` 在途），本轮刻意不碰。
+- **行级评论**（§4.4 剩余项）与 **TUI 常驻横幅**（§4.6 剩余项）不变。
+
+### 19.5 环境提示（并发）
+
+本轮前半段 `internal/chat` 处于对方的 SQLite 存储重构中（`runtime_store_maintenance.go` 已删、新文件缺 import），`go vet/test` 一度整体 build failed；等其落地后恢复。整包测试有一次 FAIL 出现在该窗口内，随后**两次干净通过**，判定为并发窗口的瞬时状态、与本轮改动无关。

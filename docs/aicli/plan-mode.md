@@ -157,8 +157,8 @@
    - `approve`：退出 plan；恢复进入前模式，**但进入前是 `bypass_permissions` 时降级为 `accept_edits`**；
    - `request_changes`：保持 plan active；带 notes 时写入 `pending_review_notes`，评审轮次 +1；
    - `quit`：退出 plan 且不执行计划，归档状态 `not_implemented`。
-3. **notes 到达模型**：用户**下一次**发起模型回合时，运行时会消费 `pending_review_notes`，作为一次性系统提醒（kind `plan_review`，`Durable=false`）注入该回合并同时清除持久副本；清除写入失败会回滚，保证反馈「只送达一次、且不丢失」。提醒文案要求模型据此修订计划、再次总结并等待裁决。
-4. **不会自动新开回合**：批准或请求修改后，运行时不会自动触发模型回合——推进由用户的下一次输入驱动。评审反馈的「自动修订回合」属未实施范围（见 §9）。
+3. **notes 到达模型**：运行时在**送达回合**开始时消费 `pending_review_notes`，作为一次性系统提醒（kind `plan_review`，`Durable=false`）注入该回合并同时清除持久副本；清除写入失败会回滚，保证反馈「只送达一次、且不丢失」。提醒文案要求模型据此修订计划、再次总结并等待裁决。
+4. **自动修订回合（可选）**：默认仍由用户的下一次输入驱动；若调用方在裁决请求里带 `trigger_revision=true`（**仅** `request_changes` 且 notes 非空），运行时会在这条裁决**落地之后**立刻提交一条合成指令（「按评审意见修订当前计划正文…」）起一轮修订。评审正文不重复传输：它仍走第 3 条的一次性提醒通道，由该轮自己消费。触发失败（会话没接入实时运行时 / actor 拒绝）**不影响裁决**——响应里给 `revision_triggered=false` 与 `revision_error`，notes 留在 `pending_review_notes` 由下一轮输入交付。Web 面板的「请求修改」默认带该标志；CLI `/plan request_changes` 目前不带（见 §9）。
 5. **事件**：每次 plan 状态迁移发布 `plan_mode_changed`；归档失败额外发布 `plan_archive_failed`（不影响状态机）。
 6. **Run 结束兜底（自动呈现）**：一次 run 干净结束（`session_end` 为 idle、无错误）时，若 plan 仍 active、模型**尚未**请求裁决、当前模式是 `default`/`plan`、且计划文件有内容，运行时会发布一次 `plan_review_available`（payload 含 `plan_path`、`plan_hash`、`plan_bytes` 与三个裁决入口）。同一份正文只提示一次，计划被改写（哈希变化）后再次提示；`accept_edits`/`bypass_permissions` 按设计跳过。Web 收到该事件会刷新计划面板，CLI 侧对应 `/plan status` 的「计划已就绪待评审」提示与 `/plan review`。
 
@@ -228,6 +228,18 @@
 
 注意区分两套入口：会话内 plan 状态（进入/退出/预览计划文件）走 `GET|POST /api/runtime/sessions/{id}/plan`（回灌走 `POST .../plan/reopen`）；这里的 `/plans`、`/plans/{id}`、`/plans/{id}/diff` 只读归档索引 / 快照 / 轮次差异。Web 面板的「计划归档」面同样是只读浏览 + 轮次差异面板 + **唯一写动作「重新评审」**（等价于 reopen 端点，冲突时由用户确认后强制覆盖）；批准/请求修改/退出仍由会话内的评审入口负责。
 
+会话内裁决接口 `POST /api/runtime/sessions/{id}/plan` 的请求/响应字段（§4 第 4 条）：
+
+```jsonc
+// 请求
+{ "action": "request_changes", "notes": "补上回滚风险", "trigger_revision": true }
+// 响应（节选）
+{ "active": true, "pending_review_notes": "补上回滚风险", "revision_triggered": true }
+// 触发失败时：{"revision_triggered": false, "revision_error": "session is not attached to the live runtime; …"}
+```
+
+`trigger_revision` 与其它裁决组合（如 `approve`）或 notes 为空时返回 **400**（`trigger_revision is only supported with request_changes` / `trigger_revision requires non-empty notes`），避免出现「盲改」或语义矛盾的请求。
+
 **Web 的常驻模式标识**（§4.6）：聊天区顶部常显当前权限模式（`plan` 走强调色、`bypass_permissions` 走告警色，未知值原样呈现），plan active 时补计划状态、路径与一句读法（模型已请求裁决 / 计划已就绪 / 尚未写就）。它只消费与右侧「计划」面板同源的 `GET /sessions/{id}/plan` 快照，**不承载任何裁决动作** —— 批准 / 请求修改 / 退出仍由 composer 上沿的待交互卡片与右侧计划面板承担，避免出现第二套 pending 判定。
 
 ---
@@ -267,7 +279,7 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 
 **Q5：`/plan request_changes <notes>` 之后模型会马上改计划吗？**
 
-不会自动开新回合：notes 保存在 durable 状态的 `pending_review_notes`，在**下一次模型回合**作为一次性提醒注入并清除。你需要再发一条消息（例如「继续」或补充要求）来驱动修订。
+分两种走法。CLI `/plan request_changes`：notes 保存在 durable 状态的 `pending_review_notes`，在**下一次模型回合**作为一次性提醒注入并清除，你需要再发一条消息（例如「继续」或补充要求）来驱动修订（§9）。Web 面板的「请求修改」（以及任何带 `trigger_revision=true` 的调用）：裁决落地后运行时会**立刻**起一轮修订，notes 由该轮自己消费，不需要你再发消息；若会话没接入实时运行时，响应会给出 `revision_error` 并降级为「下一次输入时交付」。
 
 **Q6：计划被 `quit` 后还能找回吗？**
 
@@ -300,7 +312,7 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 - §4.4 行级评论与轮次 diff：**CLI 与 Web 都已落地轮次 diff**（`/plans diff <id> [vA [vB]]` + `GET /plans/{id}/diff` + 面板评审轮次行的「差异」展开，同一 `planmode.DiffArchivedVersions` 口径，新增行 teal / 删除行 orange，`identical` / `coarse` / `truncated` 有独立徽标）；仍未做的是**行级评论**（含 diff 内的锚点定位）。
 - §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具、run 结束兜底、**CLI 的 `/plans reopen`**、**HTTP 的 `POST /sessions/{id}/plan/reopen`** 与**面板「重新评审」按钮**（含 409 冲突 → 强制覆盖二次确认）均已落地；该小节的缺口已关闭。
 - §4.6 模式循环键位（`shift+tab` / `alt+m`）已随并发的 CLI 改动落地（`chat_permission_mode.go`：`default → accept_edits → plan → bypass_permissions`，进入 bypass 仍二次确认，`/hotkeys` 可见；plan 档走 `/mode` 语义，见 §2.3）；模型自主进入的确认门控已落地；**Web 的常驻模式标识已落地**（聊天区顶部，见 §6 末）；仍未做的是 **TUI/CLI 侧的常驻模式横幅**。
-- 评审反馈的**自动修订回合**：当前是「下一次用户输入时交付」，Web 裁决后主动 trigger-turn 未接入。
+- 评审反馈的**自动修订回合**：**已落地（§4 第 4 条）** —— `POST /sessions/{id}/plan` 带 `trigger_revision=true` 时裁决落地后立刻起一轮修订，Web 面板「请求修改」默认走该路径；CLI `/plan request_changes` 仍是「下一次用户输入时交付」（未带该标志），TUI 侧的自动触发与行级评论同属未做。
 
 ---
 
