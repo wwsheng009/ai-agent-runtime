@@ -142,14 +142,14 @@ func FormatPlanCommentsForReview(resolved []ResolvedComment) string {
 	var b strings.Builder
 	b.WriteString("行级评论（已按当前计划正文重放锚点）：\n")
 	for _, comment := range resolved {
-		rangeText := formatCommentRange(comment.StartLine, comment.EndLine)
+		rangeText := FormatCommentRange(comment.StartLine, comment.EndLine)
 		switch comment.Status {
 		case CommentMoved:
 			fmt.Fprintf(&b, "- %s（原文已移动，原锚定 %s）: %s\n",
-				rangeText, formatCommentRange(comment.Comment.StartLine, comment.Comment.EndLine), comment.Comment.Body)
+				rangeText, FormatCommentRange(comment.Comment.StartLine, comment.Comment.EndLine), comment.Comment.Body)
 		case CommentOrphaned:
 			fmt.Fprintf(&b, "- %s（锚点失效：该处正文已被改写；当时内容「%s」）: %s\n",
-				rangeText, compressCommentExcerpt(comment.Comment.Excerpt, 80), comment.Comment.Body)
+				rangeText, CompressCommentExcerpt(comment.Comment.Excerpt, 80), comment.Comment.Body)
 		default:
 			fmt.Fprintf(&b, "- %s: %s\n", rangeText, comment.Comment.Body)
 		}
@@ -214,16 +214,20 @@ func nearestWindow(lines []string, excerpt []string, preferLine int) (int, bool)
 	return best, best != 0
 }
 
-func formatCommentRange(start, end int) string {
+// FormatCommentRange renders a 1-based, inclusive line range as "L12" or
+// "L12-14"; surfaces (CLI, HTTP clients, panels) share it so the same anchor
+// reads identically everywhere.
+func FormatCommentRange(start, end int) string {
 	if end <= start {
 		return fmt.Sprintf("L%d", start)
 	}
 	return fmt.Sprintf("L%d-%d", start, end)
 }
 
-// compressCommentExcerpt flattens a (possibly multi-line) excerpt into one line
-// and truncates it on a rune boundary for the review text.
-func compressCommentExcerpt(excerpt string, limit int) string {
+// CompressCommentExcerpt flattens a (possibly multi-line) excerpt into one line
+// and truncates it on a rune boundary for single-line renders (review text,
+// CLI listings).
+func CompressCommentExcerpt(excerpt string, limit int) string {
 	flat := strings.Join(strings.Fields(strings.ReplaceAll(excerpt, "\n", " ")), " ")
 	runes := []rune(flat)
 	if len(runes) <= limit {

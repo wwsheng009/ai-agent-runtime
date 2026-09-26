@@ -32,6 +32,7 @@ var chatPlanArtifactStore *planstore.Store
 //	/plan exit <decision> [notes]  exit with approve|request_changes|quit
 //	/plan approve [notes]          exit approve
 //	/plan request_changes [notes]  exit request_changes (stay in plan)
+//	/plan comment <Lx[-Ly]> <正文> 留一条行级评论；/plan comments 查看
 //	/plan quit [notes]             exit quit
 //	/plan review                   show the plan revision and verdict hints
 //	/plan off                      alias of exit quit
@@ -88,6 +89,10 @@ func handlePlanCommand(session *ChatSession, command string) bool {
 		fmt.Println(planReviewText(session))
 		return false
 
+	case "comment", "annotate", "note", "comments", "annotations", "notes":
+		fmt.Println(chatPlanCommentsCommandText(session, verb, rest))
+		return false
+
 	default:
 		// Treat bare path as enter with that plan path.
 		if looksLikePlanPath(verb) && rest == "" {
@@ -102,7 +107,7 @@ func handlePlanCommand(session *ChatSession, command string) bool {
 			)
 			return false
 		}
-		fmt.Println("用法: /plan [status|enter [path]|exit <approve|request_changes|quit>]")
+		fmt.Println("用法: /plan [status|enter [path]|exit <approve|request_changes|quit>|comment <Lx[-Ly]> <正文>|comments]")
 		return false
 	}
 }
@@ -147,6 +152,8 @@ func executeStructuredPlanCommand(session *ChatSession, command string) CommandR
 		return executeStructuredPlanModeExit(session, "quit", rest)
 	case "review", "show":
 		return commandTextResult(planReviewText(session))
+	case "comment", "annotate", "note", "comments", "annotations", "notes":
+		return commandTextResult(chatPlanCommentsCommandText(session, verb, rest))
 	default:
 		if looksLikePlanPath(verb) && rest == "" {
 			result, err := enterChatPlanModeWithResult(session, verb)
@@ -155,7 +162,7 @@ func executeStructuredPlanCommand(session *ChatSession, command string) CommandR
 			}
 			return planModeMutationCommandResult(result, formatPlanModeEntered(result.State, false))
 		}
-		return commandTextResult("用法: /plan [status|enter [path]|exit <approve|request_changes|quit>]")
+		return commandTextResult("用法: /plan [status|enter [path]|exit <approve|request_changes|quit>|comment <Lx[-Ly]> <正文>|comments]")
 	}
 }
 
@@ -325,8 +332,10 @@ func exitChatPlanModeWithResult(session *ChatSession, decisionToken, notes strin
 		// Stay active for another revision pass while recording the decision.
 		exited.Status = planmode.StatusActive
 		exited.PendingExitRequest = false
-		if strings.TrimSpace(notes) != "" {
-			exited = planmode.RecordReviewNotes(exited, notes)
+		// 行级评论并入同一个一次性提醒通道；归档轮次里仍只存用户自己写的 notes，
+		// 评论有独立的日志（避免同一内容两处漂移）。
+		if merged := chatPlanReviewNotesWithComments(session, notes); merged != "" {
+			exited = planmode.RecordReviewNotes(exited, merged)
 		}
 		saveChatPlanMode(session, exited)
 		applyChatPlanPermissionMode(session, runtimepolicy.ModePlan)
@@ -460,7 +469,10 @@ func planModeStatusText(session *ChatSession) string {
 	} else if hint := planReviewReadyHint(session, state); hint != "" {
 		lines = append(lines, "  "+hint)
 	}
-	lines = append(lines, "用法: /plan enter [path] | /plan review | /plan exit <approve|request_changes|quit>")
+	lines = append(lines,
+		"用法: /plan enter [path] | /plan review | /plan exit <approve|request_changes|quit>",
+		"行级评论: /plan comment <Lx[-Ly]> <正文> | /plan comments",
+	)
 	return strings.Join(lines, "\n")
 }
 
@@ -508,6 +520,7 @@ func planReviewText(session *ChatSession) string {
 	lines = append(lines,
 		"",
 		"裁决: /plan approve [notes] | /plan request_changes <notes> | /plan quit [notes]",
+		"行级评论: /plan comment <Lx[-Ly]> <正文>（/plan comments 查看）",
 	)
 	return strings.Join(lines, "\n")
 }

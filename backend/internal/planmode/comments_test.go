@@ -165,10 +165,10 @@ func TestFormatPlanCommentsForReview(t *testing.T) {
 }
 
 func TestCompressCommentExcerptFlattensAndTruncatesOnRuneBoundary(t *testing.T) {
-	if got := compressCommentExcerpt("a\n  b\tc ", 80); got != "a b c" {
+	if got := CompressCommentExcerpt("a\n  b\tc ", 80); got != "a b c" {
 		t.Fatalf("unexpected flatten: %q", got)
 	}
-	got := compressCommentExcerpt(strings.Repeat("好", 10), 4)
+	got := CompressCommentExcerpt(strings.Repeat("好", 10), 4)
 	if got != "好好好好…" {
 		t.Fatalf("expected a rune-safe truncation, got %q", got)
 	}

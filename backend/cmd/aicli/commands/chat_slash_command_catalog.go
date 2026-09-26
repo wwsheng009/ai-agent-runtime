@@ -646,7 +646,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/plan",
-			Usage:       "/plan [status|enter [path]|exit <approve|request_changes|quit>]",
+			Usage:       "/plan [status|enter [path]|exit <approve|request_changes|quit>|comment <Lx[-Ly]> <正文>|comments]",
 			Summary:     "进入/退出 plan mode，或查看计划写路径状态",
 			Group:       string(chatSlashCommandGroupPermission),
 			AcceptsArgs: true,
@@ -658,6 +658,8 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 				{Token: "request_changes", Summary: "请求修改并保持 plan mode"},
 				{Token: "quit", Summary: "放弃计划并退出"},
 				{Token: "review", Summary: "查看当前计划正文与裁决方式"},
+				{Token: "comment", Summary: "留一条行级评论（Lx 或 Lx-Ly）"},
+				{Token: "comments", Summary: "列出行级评论（按最新归档轮重放锚点）"},
 			},
 		},
 		{

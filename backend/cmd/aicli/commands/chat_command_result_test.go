@@ -1118,7 +1118,7 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_model_switch.go", Func: "promptRuntimeModelSelectionLegacy", Kind: "fmt.Print", Count: 2},
 		{File: "chat_model_switch.go", Func: "selectRuntimeReasoningEffortLegacy", Kind: "fmt.Print", Count: 5},
 		{File: "chat_plan_command.go", Func: "exitChatPlanModeCommand", Kind: "fmt.Print", Count: 5},
-		{File: "chat_plan_command.go", Func: "handlePlanCommand", Kind: "fmt.Print", Count: 8},
+		{File: "chat_plan_command.go", Func: "handlePlanCommand", Kind: "fmt.Print", Count: 9},
 		{File: "chat_plan_command.go", Func: "printPlanModeStatus", Kind: "fmt.Print", Count: 1},
 		{File: "chat_plans_command.go", Func: "handlePlansCommand", Kind: "fmt.Print", Count: 1},
 		{File: "chat_preferences.go", Func: "persistChatPreferencesIfNeeded", Kind: "fmt.Fprint(os.Std*)", Count: 1},
