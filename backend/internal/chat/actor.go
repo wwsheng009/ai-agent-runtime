@@ -180,6 +180,11 @@ type SessionActor struct {
 	stateStore   RuntimeStateStore
 	eventStore   EventStore
 	eventBus     *runtimeevents.Bus
+	// §4.8：审批记忆 store（session 内存 + project durable），由
+	// permissionGrantStores 惰性创建并接到权限引擎。
+	grantsOnce    sync.Once
+	sessionGrants *runtimepolicy.MemoryGrantStore
+	projectGrants runtimepolicy.GrantStore
 	// replayedReceipts 记录本次进程内已从回执库回放并消费掉的 tool_call_id：
 	// 回执在消费后被删除是既有语义（避免陈旧结果被再次回放），因此终局补回执
 	// 时必须跳过这些调用，不能把已消费的回执重新写成"待回放"状态。
@@ -5381,6 +5386,10 @@ func (a *SessionActor) configureRuntime() {
 	}
 	runtimepolicy.EnsurePlanWriteAllowPaths(engine)
 	a.applyPlanModeToEngine(engine)
+	// §4.8：审批记忆——session 作用域写内存 store，project 作用域写工作区
+	// 的 durable grants.json；引擎 grants 阶段同时查询两者。
+	sessionGrants, projectGrants := a.permissionGrantStores()
+	attachPermissionGrantStores(engine, sessionGrants, projectGrants)
 
 	broker := a.agent.GetToolBroker()
 	if broker == nil {

@@ -255,8 +255,15 @@ func TestEngineApprovalRememberStoresGrantButNotDangerous(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, DecisionAllow, decision.Type)
-	_, ok := store.Find("write", nil)
+	// §4.8：remember 现在带派生的窄模式（这里是路径），不再退化为工具级授权。
+	grants := store.List()
+	require.Len(t, grants, 1)
+	assert.Equal(t, GrantPatternPath+"a.go", grants[0].Pattern)
+	assert.Equal(t, RememberScopeSession, grants[0].Scope)
+	_, ok := store.Find("write", map[string]interface{}{"file_path": "a.go"})
 	assert.True(t, ok)
+	_, ok = store.Find("write", map[string]interface{}{"file_path": "b.go"})
+	assert.False(t, ok, "a remembered path must not authorize other paths")
 
 	// Dangerous tools never remembered even if Remember=true.
 	store2 := &MemoryGrantStore{}

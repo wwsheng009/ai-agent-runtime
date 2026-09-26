@@ -62,25 +62,18 @@ type MemoryGrantStore struct {
 
 // Find returns the first matching grant.
 func (s *MemoryGrantStore) Find(toolName string, args map[string]interface{}) (Grant, bool) {
+	return s.FindWithRoot(toolName, args, "")
+}
+
+// FindWithRoot is Find with the workspace root available for "/"-anchored path
+// patterns (RootedGrantFinder).
+func (s *MemoryGrantStore) FindWithRoot(toolName string, args map[string]interface{}, root string) (Grant, bool) {
 	if s == nil {
 		return Grant{}, false
 	}
-	toolName = strings.ToLower(strings.TrimSpace(toolName))
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, grant := range s.grants {
-		if !strings.EqualFold(strings.TrimSpace(grant.Tool), toolName) {
-			continue
-		}
-		pattern := strings.TrimSpace(grant.Pattern)
-		if pattern == "" {
-			return grant, true
-		}
-		if argsMatchGrantPattern(args, pattern) {
-			return grant, true
-		}
-	}
-	return Grant{}, false
+	return findGrantIn(s.grants, toolName, args, root)
 }
 
 // Remember stores a grant unless the tool is dangerous.
@@ -189,24 +182,6 @@ func IsDangerousTool(toolName string) bool {
 	default:
 		return false
 	}
-}
-
-func argsMatchGrantPattern(args map[string]interface{}, pattern string) bool {
-	pattern = strings.TrimSpace(pattern)
-	if pattern == "" {
-		return true
-	}
-	if command, ok := firstStringArg(args, "command", "cmd"); ok {
-		if strings.Contains(strings.ToLower(command), strings.ToLower(pattern)) {
-			return true
-		}
-	}
-	if path, ok := firstStringArg(args, "file_path", "path"); ok {
-		if strings.EqualFold(path, pattern) || strings.Contains(strings.ToLower(path), strings.ToLower(pattern)) {
-			return true
-		}
-	}
-	return false
 }
 
 func firstStringArg(args map[string]interface{}, keys ...string) (string, bool) {

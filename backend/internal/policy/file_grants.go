@@ -63,29 +63,22 @@ func (s *FileGrantStore) Path() string {
 
 // Find returns the first matching grant (same semantics as MemoryGrantStore).
 func (s *FileGrantStore) Find(toolName string, args map[string]interface{}) (Grant, bool) {
+	return s.FindWithRoot(toolName, args, "")
+}
+
+// FindWithRoot is Find with the workspace root available for "/"-anchored path
+// patterns (RootedGrantFinder).
+func (s *FileGrantStore) FindWithRoot(toolName string, args map[string]interface{}, root string) (Grant, bool) {
 	if s == nil {
 		return Grant{}, false
 	}
-	toolName = strings.ToLower(strings.TrimSpace(toolName))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	file, err := s.loadLocked()
 	if err != nil || file == nil {
 		return Grant{}, false
 	}
-	for _, grant := range file.Grants {
-		if !strings.EqualFold(strings.TrimSpace(grant.Tool), toolName) {
-			continue
-		}
-		pattern := strings.TrimSpace(grant.Pattern)
-		if pattern == "" {
-			return grant, true
-		}
-		if argsMatchGrantPattern(args, pattern) {
-			return grant, true
-		}
-	}
-	return Grant{}, false
+	return findGrantIn(file.Grants, toolName, args, root)
 }
 
 // Remember stores a grant unless the tool is dangerous.

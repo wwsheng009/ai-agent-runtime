@@ -95,6 +95,10 @@ type Engine struct {
 	ApprovalTimeout    time.Duration
 	// Grants stores remembered allow decisions (optional).
 	Grants GrantStore
+	// ProjectGrants stores durable, project-scoped remembered allow decisions
+	// (optional; §4.8 RememberScope=project). Session-scoped grants stay in
+	// Grants; both are consulted for any call.
+	ProjectGrants GrantStore
 	// ReadOnlyAuto enables taxonomy/shell read-only auto-allow (default true when unset via nil pointer semantics: use EnableReadOnlyAuto).
 	DisableReadOnlyAuto bool
 	// PlanWriteAllowPaths restricts write tools under mode=plan to these path prefixes/names (optional).
@@ -344,9 +348,20 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	}
 
 	// 4) Remembered grants (skipped under bypass — bypass already allows without ask).
-	if decision.Type == "" && mode != ModeBypassPermissions && e.Grants != nil {
-		if grant, ok := e.Grants.Find(req.ToolName, req.Args); ok && !IsDangerousTool(req.ToolName) {
-			decision = withStage(Decision{Type: DecisionAllow, Reason: "remembered_grant"}, StageGrants, firstNonEmpty(grant.Pattern, grant.Tool, "remembered_grant"))
+	// Both the session store and the durable project store are consulted; the
+	// workspace root resolves "/"-anchored path patterns (§4.8).
+	if decision.Type == "" && mode != ModeBypassPermissions && !IsDangerousTool(req.ToolName) {
+		grantRoot := toolctx.WorkspaceRoot(ctx)
+		for _, store := range []GrantStore{e.Grants, e.ProjectGrants} {
+			if grant, ok := findRememberedGrant(store, req.ToolName, req.Args, grantRoot); ok {
+				// A grant runs before stages 5b/5c; never let it short-circuit the
+				// circuit breaker or the sensitive-write gate (§4.8).
+				if e.grantBlockedBySafetyGate(ctx, req) {
+					continue
+				}
+				decision = withStage(Decision{Type: DecisionAllow, Reason: "remembered_grant"}, StageGrants, firstNonEmpty(grant.Pattern, grant.Tool, "remembered_grant"))
+				break
+			}
 		}
 	}
 
@@ -1000,6 +1015,11 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 		if reason == "" {
 			reason = "approval_denied"
 		}
+		// §4.8：拒绝反馈进入决策原因（进而进入工具的 error/guidance），
+		// 让"拒绝并说明原因"能改变运行方向而不只是阻断。
+		if feedback := strings.TrimSpace(resp.Feedback); feedback != "" {
+			reason = reason + "; user feedback: " + feedback
+		}
 		return withStage(Decision{
 			Type:        DecisionDeny,
 			Reason:      reason,
@@ -1012,10 +1032,27 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 	if len(decision.ExternalDirs) > 0 {
 		e.approveExternalDirs(decision.ExternalDirs)
 	}
-	// Optionally remember grant when requested and not dangerous. Hard asks are
-	// one-shot by design: a breaker confirmation must never be remembered.
-	if resp.Remember && !decision.HardAsk && e.Grants != nil && !IsDangerousTool(req.ToolName) {
-		_ = e.Grants.Remember(Grant{Tool: req.ToolName, Scope: "session"})
+	// Optionally remember grant when requested and not dangerous (§4.8).
+	// Hard asks are one-shot by design: a breaker/sensitive confirmation must
+	// never be remembered, and an external-dir admission already has its own
+	// session-scoped memory.
+	// An allow may carry a feedback note as well; it is recorded on the grant
+	// decision reason so the model sees the user's constraint.
+	if resp.ShouldRemember() && !grantRememberForbidden(decision) && !IsDangerousTool(req.ToolName) {
+		scope := resp.NormalizedRememberScope()
+		pattern := strings.TrimSpace(resp.RememberPattern)
+		if pattern == "" {
+			pattern = DeriveGrantPattern(req.ToolName, req.Args)
+		}
+		store := e.Grants
+		if scope == RememberScopeProject {
+			store = firstNonNilGrantStore(e.ProjectGrants, e.Grants)
+		} else {
+			store = firstNonNilGrantStore(e.Grants, e.ProjectGrants)
+		}
+		if store != nil {
+			_ = store.Remember(Grant{Tool: req.ToolName, Pattern: pattern, Scope: scope})
+		}
 	}
 	// Preserve any hook/callback patch already carried on the decision; the
 	// approver may replace it, but a missing approval patch must not silently
@@ -1041,6 +1078,17 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 			patchedArgs = encoded
 		}
 	}
+	approvalReason := "approved"
+	if feedback := strings.TrimSpace(resp.Feedback); feedback != "" {
+		// An allow may still carry a constraint ("这次可以，但别动 X"): keep it on
+		// the decision so hosts can surface it to the model and the audit trail.
+		approvalReason = "approved; user feedback: " + feedback
+	}
+	if resp.ShouldRemember() && !grantRememberForbidden(decision) && !IsDangerousTool(req.ToolName) {
+		if scope := resp.NormalizedRememberScope(); scope != RememberScopeOnce {
+			approvalReason = approvalReason + "; remembered: " + scope
+		}
+	}
 	return withStage(Decision{
 		Type:        DecisionAllow,
 		PatchedArgs: patchedArgs,
@@ -1049,7 +1097,71 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 		// Carry the admitted directories so the caller can audit an
 		// external_dir:admit approval (§4.5).
 		ExternalDirs: decision.ExternalDirs,
-	}, StageAsk, "approved"), nil
+	}, StageAsk, approvalReason), nil
+}
+
+// grantRememberForbidden reports decisions whose approval must stay one-shot
+// (§4.8): hard asks (root/home breaker, plan enter), the sensitive-write gate,
+// and external-directory admissions (which have their own session memory).
+func grantRememberForbidden(decision Decision) bool {
+	if decision.HardAsk {
+		return true
+	}
+	if len(decision.ExternalDirs) > 0 {
+		return true
+	}
+	switch decision.Stage {
+	case StageShellBreaker, StageSensitiveWrite, StageExternalDir:
+		return true
+	default:
+		return false
+	}
+}
+
+// grantBlockedBySafetyGate reports whether a call that a remembered grant would
+// cover still has to clear the shell circuit breaker or the sensitive-write
+// gate. Grants are evaluated before those stages, so without this check a
+// remembered "exact:"/"cmd:" approval could auto-allow a destructive command or
+// a secret write.
+func (e *Engine) grantBlockedBySafetyGate(ctx context.Context, req EvalRequest) bool {
+	if e == nil {
+		return false
+	}
+	if !e.DisableShellBreaker {
+		commands := shellCommandCandidatesForGrant(req)
+		if len(commands) > 0 {
+			if _, risky := shellrisk.AssessCommands(commands).First(); risky {
+				return true
+			}
+		}
+	}
+	if targets := e.sensitiveWriteTargets(ctx, req); len(targets) > 0 {
+		return true
+	}
+	return false
+}
+
+// shellCommandCandidatesForGrant mirrors shellBreakerCommands without the
+// shell-like tool-name gate: any tool carrying a command argument is checked.
+func shellCommandCandidatesForGrant(req EvalRequest) []string {
+	var commands []string
+	if command := strings.TrimSpace(ExtractShellCommand(req.Args)); command != "" {
+		commands = append(commands, command)
+	}
+	if raw, ok := req.Args["commands"]; ok {
+		commands = append(commands, shellCommandList(raw)...)
+	}
+	return commands
+}
+
+// firstNonNilGrantStore returns the first non-nil store.
+func firstNonNilGrantStore(stores ...GrantStore) GrantStore {
+	for _, store := range stores {
+		if store != nil {
+			return store
+		}
+	}
+	return nil
 }
 
 func riskLevel(caps []Capability) string {
