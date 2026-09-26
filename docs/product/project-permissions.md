@@ -106,6 +106,31 @@ aicli exec --deny-tool download --enable-tools --prompt "..."
 
 CLI deny always wins over a project `allow` rule for the same tool.
 
+## 配置分层（§4.9）
+
+权限文件按以下顺序**累积**（缺失层跳过；后者更具体，规则的 first-match 顺序即
+此顺序，因此用户级 deny 规则先于项目级 allow 规则求值）：
+
+```text
+~/.aicli/permissions.yaml                  # 用户级（个人全局，建议放 disable_bypass）
+<project>/.aicli/permissions.yaml          # 项目共享（提交进仓库）
+<project>/.aicli/permissions.local.yaml    # 本地个人层（建议加入 .gitignore）
+```
+
+累积语义：
+
+- `rules`：按 `user → project → local` 顺序拼接，规则名前缀自动标注层
+  （如 `project/user-deny-network`）；first-match-wins 不变。
+- `deny_tools` / `allow_tools`：跨层**并集**，deny 单调不可撤销。
+- `disable_bypass`：任一层为 true 即生效（OR）。
+
+`disable_bypass: true` 表示进程级禁用 `bypass_permissions`：
+
+- engine 把以 bypass 进入的请求按 `default` 处理（该问的照问、headless 场景照拒），
+  `dont_ask` 与 `plan` 不受影响；
+- CLI `/permission-mode bypass_permissions`、shift+tab 循环、`/yolo` 等切换入口
+  会被拒绝（`--yolo` 启动参数在引擎侧同样被降级）。
+
 ## Wiring
 
 - Loaded after profile `ToolPolicy` in chat/exec session setup (cwd bootstrap).

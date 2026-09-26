@@ -8,8 +8,10 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
-// applyChatPermissionsOverlay loads project .aicli/permissions.yaml (when present)
-// and merges CLI --allow-tool / --deny-tool into session.ToolPolicy + PermissionsOverlay.
+// applyChatPermissionsOverlay loads the accumulated permission layers
+// (~/.aicli/permissions.yaml → <project>/.aicli/permissions.yaml →
+// <project>/.aicli/permissions.local.yaml, §4.9) and merges CLI
+// --allow-tool / --deny-tool into session.ToolPolicy + PermissionsOverlay.
 // Safe to call multiple times; later calls rebuild from BaseToolPolicy + CLI lists + project root.
 func applyChatPermissionsOverlay(session *ChatSession, projectRoot string) {
 	if session == nil {
@@ -28,17 +30,20 @@ func applyChatPermissionsOverlay(session *ChatSession, projectRoot string) {
 		}
 	}
 
-	var projectFile *runtimepolicy.PermissionsFile
+	var mergedFile *runtimepolicy.PermissionsFile
 	if projectRoot != "" {
-		file, err := runtimepolicy.LoadProjectPermissions(projectRoot)
+		file, layers, err := runtimepolicy.LoadLayeredPermissions(projectRoot)
 		if err != nil {
-			logpkg.Warnf("load project permissions failed (%s): %v", projectRoot, err)
+			logpkg.Warnf("load layered permissions failed (%s): %v", projectRoot, err)
 		} else {
-			projectFile = file
+			mergedFile = file
+			for _, layer := range layers {
+				logpkg.Debugf("permissions layer %s: %s", layer.Scope, layer.Path)
+			}
 		}
 	}
 
-	overlay := runtimepolicy.BuildPermissionsOverlay(projectFile, session.CLIAllowTools, session.CLIDenyTools)
+	overlay := runtimepolicy.BuildPermissionsOverlay(mergedFile, session.CLIAllowTools, session.CLIDenyTools)
 	session.PermissionsOverlay = overlay
 
 	if !chatPermissionsOverlayHasEffect(overlay) {
@@ -82,14 +87,19 @@ func applyChatPermissionsOverlayToAgent(apiAgent interface {
 		return
 	}
 	overlay := session.PermissionsOverlay
-	if len(overlay.Rules) == 0 {
+	engine := apiAgent.GetPermissionEngine()
+	if engine == nil && len(overlay.Rules) == 0 && !overlay.DisableBypass {
 		return
 	}
-	engine := apiAgent.GetPermissionEngine()
 	if engine == nil {
 		engine = &runtimepolicy.Engine{}
 		runtimepolicy.EnsurePlanWriteAllowPaths(engine)
 		apiAgent.SetPermissionEngine(engine)
+	}
+	// disable_bypass (§4.9) is a process-level policy independent of rules.
+	engine.DisableBypass = overlay.DisableBypass
+	if len(overlay.Rules) == 0 {
+		return
 	}
 	// Avoid double-prepending on repeated prepare hooks: strip prior cli:/project: names.
 	if len(engine.Rules) > 0 {

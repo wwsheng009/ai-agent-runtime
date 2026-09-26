@@ -46,7 +46,15 @@ type PermissionsFile struct {
 	DenyTools  []string              `yaml:"deny_tools,omitempty" json:"deny_tools,omitempty"`
 	AllowTools []string              `yaml:"allow_tools,omitempty" json:"allow_tools,omitempty"`
 	Rules      []PermissionsFileRule `yaml:"rules,omitempty" json:"rules,omitempty"`
-	SourcePath string                `yaml:"-" json:"source_path,omitempty"`
+	// DisableBypass is the process-level "no bypass_permissions" policy (§4.9):
+	// when any layer sets it, the engine treats bypass-mode requests as default
+	// mode and the CLI refuses to switch into bypass. Recommended in the user
+	// layer.
+	DisableBypass bool   `yaml:"disable_bypass,omitempty" json:"disable_bypass,omitempty"`
+	SourcePath    string `yaml:"-" json:"source_path,omitempty"`
+	// LayerPaths lists the resolved layer files of a merged file (user →
+	// project → local) for `/debug` and diagnostics.
+	LayerPaths []string `yaml:"-" json:"layer_paths,omitempty"`
 }
 
 // PermissionsFileRule is one static rule entry in permissions.yaml.
@@ -67,6 +75,9 @@ type PermissionsOverlay struct {
 	AllowTools []string
 	// SourcePath is the loaded project file path when present.
 	SourcePath string
+	// DisableBypass mirrors the merged permission layers' disable_bypass flag;
+	// hosts apply it to the engine and to their mode-switch entry points.
+	DisableBypass bool
 	// Sources lists human-readable origins (for /debug).
 	Sources []string
 }
@@ -280,7 +291,12 @@ func BuildPermissionsOverlay(project *PermissionsFile, cliAllowTools, cliDenyToo
 	overlay := PermissionsOverlay{}
 	if project != nil {
 		overlay.SourcePath = strings.TrimSpace(project.SourcePath)
-		if overlay.SourcePath != "" {
+		overlay.DisableBypass = project.DisableBypass
+		if len(project.LayerPaths) > 0 {
+			for _, path := range project.LayerPaths {
+				overlay.Sources = append(overlay.Sources, "permissions:"+path)
+			}
+		} else if overlay.SourcePath != "" {
 			overlay.Sources = append(overlay.Sources, "project:"+overlay.SourcePath)
 		} else {
 			overlay.Sources = append(overlay.Sources, "project")

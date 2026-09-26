@@ -133,6 +133,12 @@ type Engine struct {
 	// non-recursive rm when every target stays inside the workspace and is not
 	// sensitive. Zero value keeps it enabled.
 	DisableSafeFileFastPath bool
+	// DisableBypass is the process-level disable_bypass policy (§4.9): requests
+	// evaluated under bypass_permissions are downgraded to default mode, so
+	// they ask (or headless-deny) instead of running unattended. It is set from
+	// the merged permission layers and must also be enforced at mode-switch
+	// entry points by the host.
+	DisableBypass bool
 }
 
 const DefaultApprovalTimeout = 30 * time.Minute
@@ -236,11 +242,20 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	var finalPatchedArgs json.RawMessage
 	patchApplied := false
 
-	mode := req.Mode
-	if mode == "" && e != nil {
-		mode = e.Mode
+	requestedMode := req.Mode
+	if strings.TrimSpace(string(requestedMode)) == "" && e != nil {
+		requestedMode = e.Mode
 	}
-	mode = normalizeMode(mode)
+	// disable_bypass (§4.9): a bypass request never outranks a policy that
+	// forbids bypass — the request is evaluated as default mode instead.
+	mode := e.effectiveMode(req)
+	if autoCapabilities && normalizeMode(requestedMode) != mode {
+		// Capability resolution sees the request, and a bypass request may
+		// resolve to no capabilities; re-derive them under the effective
+		// (downgraded) mode.
+		req.Mode = mode
+		req.Capabilities = e.resolveCapabilities(req)
+	}
 	req.Mode = mode
 
 	// 1) Permission hook — hard deny always wins (including under bypass). An
@@ -501,6 +516,21 @@ func (e *Engine) resolveCapabilities(req EvalRequest) []Capability {
 		resolver = DefaultCapabilityResolver{}
 	}
 	return resolver.Resolve(req)
+}
+
+// effectiveMode returns the permission mode a request is actually evaluated
+// under: the request mode when set, otherwise the engine mode, with the
+// process-level disable_bypass policy (§4.9) downgrading bypass to default.
+func (e *Engine) effectiveMode(req EvalRequest) Mode {
+	mode := req.Mode
+	if strings.TrimSpace(string(mode)) == "" && e != nil {
+		mode = e.Mode
+	}
+	mode = normalizeMode(mode)
+	if e != nil && e.DisableBypass && mode == ModeBypassPermissions {
+		return ModeDefault
+	}
+	return mode
 }
 
 // validateStaticPolicy runs the non-negotiable static tool/capability policy
@@ -871,7 +901,8 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 	// (mode ask, ask rule, or the model plan-entry gate) is denied instead of
 	// prompting. Reads, read-only shell, grants, and allow rules never reach
 	// resolveAsk, so they keep running.
-	if normalizeMode(req.Mode) == ModeDontAsk || normalizeMode(e.Mode) == ModeDontAsk {
+	effectiveMode := e.effectiveMode(req)
+	if effectiveMode == ModeDontAsk {
 		return withStage(Decision{
 			Type:        DecisionDeny,
 			Reason:      "mode:dont_ask_denies_unapproved",
@@ -882,7 +913,7 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 	// bypass should not reach ask (modeDecision returns allow), but be defensive.
 	// A HardAsk (root/home removal breaker) is deliberately *not* resolvable by
 	// bypass_permissions: it still requires an explicit user decision.
-	if !decision.HardAsk && (normalizeMode(req.Mode) == ModeBypassPermissions || normalizeMode(e.Mode) == ModeBypassPermissions) {
+	if !decision.HardAsk && effectiveMode == ModeBypassPermissions {
 		return withStage(Decision{
 			Type:        DecisionAllow,
 			Reason:      "bypass_permissions",

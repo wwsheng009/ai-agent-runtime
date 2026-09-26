@@ -8,7 +8,17 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
+// isolatePermissionsUserLayer points the user permission layer at a temp dir so
+// a developer's real ~/.aicli/permissions.yaml cannot affect the test.
+func isolatePermissionsUserLayer(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+}
+
 func TestApplyChatPermissionsOverlayCLIDenyWinsOverProjectAllow(t *testing.T) {
+	isolatePermissionsUserLayer(t)
 	root := t.TempDir()
 	dir := filepath.Join(root, ".aicli")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -58,7 +68,52 @@ rules:
 	}
 }
 
+func TestApplyChatPermissionsOverlayWiresDisableBypass(t *testing.T) {
+	isolatePermissionsUserLayer(t)
+	root := t.TempDir()
+	dir := filepath.Join(root, ".aicli")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte(`
+version: 1
+disable_bypass: true
+rules:
+  - name: ask-writes
+    tools: [write]
+    decision: ask
+`)
+	if err := os.WriteFile(filepath.Join(dir, "permissions.yaml"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	session := &ChatSession{}
+	applyChatPermissionsOverlay(session, root)
+	if !session.PermissionsOverlay.DisableBypass {
+		t.Fatalf("expected disable_bypass in overlay: %+v", session.PermissionsOverlay)
+	}
+
+	engine := &runtimepolicy.Engine{Mode: runtimepolicy.ModeBypassPermissions}
+	applyChatPermissionsOverlayToAgent(&engineAdapter{engine: engine}, session)
+	if !engine.DisableBypass {
+		t.Fatal("expected engine.DisableBypass to be wired from the permission layers")
+	}
+
+	decision, err := engine.Evaluate(nil, runtimepolicy.EvalRequest{
+		ToolName: "write",
+		Mode:     runtimepolicy.ModeBypassPermissions,
+		Args:     map[string]interface{}{"file_path": "README.md"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Type != runtimepolicy.DecisionDeny || decision.Stage != runtimepolicy.StageHeadlessDeny {
+		t.Fatalf("bypass must be downgraded instead of silently allowing writes: %+v", decision)
+	}
+}
+
 func TestApplyChatPermissionsOverlayReapplyDoesNotDoubleIntersect(t *testing.T) {
+	isolatePermissionsUserLayer(t)
 	base := runtimepolicy.NewToolExecutionPolicy([]string{"view", "grep", "shell"}, false)
 	session := &ChatSession{
 		BaseToolPolicy: base.Clone(),

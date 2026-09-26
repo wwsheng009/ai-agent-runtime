@@ -479,3 +479,22 @@
 - **决策明细**：rules 阶段新增 `Decision.RuleDetail`（命中的 segment/path/host），便于审计与后续审批文案使用。
 - **已知限制（文档 §7 对齐）**：specifier 的读规则按"调用参数"匹配，不展开工具内部 glob；shell 命令内的绝对路径参数不做目录门；opaque 命令永不自动 allow。
 - **未实施（后续里程碑）**：4.5/4.9（M3）、4.8/4.12/4.13/4.14（M4）；CLI 审批"能否记住"分类器与 policy 的第二套实现仍待收敛（§4.6 长期项）；CLI `--deny-rule/--ask-rule/--allow-rule` 入口未加（可选）。
+
+---
+
+## 11. 落地状态（2026-09-26，M3 第一切片：配置分层 + disable_bypass）
+
+实施 §4.9 的配置分层与进程级 `disable_bypass`，CLI chat 已接线：
+
+| 项 | 状态 | 代码落点 | 验证 |
+|----|------|----------|------|
+| 三层权限文件累积 | ✅ | 新 `policy/permissions_layers.go`：`ResolvePermissionsLayerPaths` / `LoadLayeredPermissions` / `MergePermissionsLayers`，`~/.aicli/permissions.yaml` → `<project>/.aicli/permissions.yaml` → `<project>/.aicli/permissions.local.yaml`（`.yml` 兼容）；rules 按层拼接并加 `user/`、`project/`、`local/` 名称前缀，`deny_tools`/`allow_tools` 并集（deny 单调），`disable_bypass` OR | `permissions_layers_test.go`（三层累积、无项目层、空层、overlay 传播；测试用 `HOME`/`USERPROFILE` 隔离） |
+| `disable_bypass` 引擎语义 | ✅ | `Engine.DisableBypass` + `effectiveMode()`：bypass 请求按 `default` 求值（能力按降级后模式重新解析），`resolveAsk` 统一用有效模式判定 dont_ask/bypass；HardAsk 语义不变 | `decision_table_test.go:TestEngineDisableBypassDowngradesToDefault`（ask 而非静默 allow；headless deny） |
+| CLI 接线与切换入口 | ✅ | `chat_permissions_overlay.go` 改用分层加载并把 `DisableBypass` 写入引擎；`setChatPermissionMode` 拒绝切入 bypass 并提示 | `cmd/aicli/commands:TestApplyChatPermissionsOverlayWiresDisableBypass` |
+| 文档 | ✅ | `docs/product/project-permissions.md` 新增"配置分层（§4.9）"章节 | — |
+
+本切片明确**未做**（M3 剩余）：
+
+- `--yolo` / `--permission-mode bypass_permissions` 启动参数的 CLI 横幅与解析期拒绝（当前由引擎侧降级兜底，会话仍会显示 bypass 文案）；
+- ACP/Web 模式切换入口与 spawn 继承的 disable_bypass 处理；`harness` 权限读取接口仍只返回单层项目文件；
+- 4.5 外部目录门（`/add-dir`、会话 `AllowedRoots`、engine `external_dir:admit` 阶段、临时目录/skill 目录豁免、CLI chat 接 `sandbox_dirs`）整项待实施。

@@ -108,6 +108,12 @@ func setChatPermissionMode(session *ChatSession, mode runtimepolicy.Mode) {
 	if session == nil {
 		return
 	}
+	// disable_bypass (§4.9) is enforced here as well as in the engine so the
+	// session never reports a bypass mode the policy refuses to honor.
+	if mode == runtimepolicy.ModeBypassPermissions && session.PermissionsOverlay.DisableBypass {
+		printfChatCommandOutput(session, "提示: disable_bypass 已启用（permissions 分层），无法切换到 bypass_permissions")
+		return
+	}
 	session.runtimeCtxMu.Lock()
 	session.PermissionMode = mode
 	session.RequestedPermissionMode = string(mode)

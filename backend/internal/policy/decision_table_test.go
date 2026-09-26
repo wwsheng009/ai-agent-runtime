@@ -97,3 +97,33 @@ func TestDecisionTableHeadlessAndHardAsk(t *testing.T) {
 	assert.Equal(t, 1, handler.calls)
 	assert.Empty(t, bypass.Grants.(*MemoryGrantStore).List(), "a hard ask must never be remembered")
 }
+
+// TestEngineDisableBypassDowngradesToDefault pins §4.9: a disable_bypass policy
+// turns bypass-mode requests back into default mode.
+func TestEngineDisableBypassDowngradesToDefault(t *testing.T) {
+	handler := &recordingApprovalHandler{response: ApprovalResponse{Allowed: true}}
+	engine := &Engine{
+		Mode:          ModeBypassPermissions,
+		DisableBypass: true,
+		AskHandler:    handler,
+		Policy:        NewToolExecutionPolicy(nil, false),
+	}
+	decision, err := engine.Evaluate(context.Background(), EvalRequest{
+		ToolName: "write",
+		Mode:     ModeBypassPermissions,
+		Args:     map[string]interface{}{"file_path": "README.md"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionAllow, decision.Type)
+	assert.Equal(t, StageAsk, decision.Stage, "disable_bypass must not skip the approval flow")
+	assert.Equal(t, 1, handler.calls)
+
+	headless := &Engine{Mode: ModeBypassPermissions, DisableBypass: true, Policy: NewToolExecutionPolicy(nil, false)}
+	decision, err = headless.Evaluate(context.Background(), EvalRequest{
+		ToolName: "write",
+		Args:     map[string]interface{}{"file_path": "README.md"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionDeny, decision.Type)
+	assert.Equal(t, StageHeadlessDeny, decision.Stage)
+}
