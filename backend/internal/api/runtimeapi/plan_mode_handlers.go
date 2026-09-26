@@ -26,27 +26,31 @@ const (
 )
 
 type sessionPlanModeResponse struct {
-	SessionID            string   `json:"session_id"`
-	Active               bool     `json:"active"`
-	Status               string   `json:"status"`
-	PlanPath             string   `json:"plan_path,omitempty"`
-	WriteAllowPaths      []string `json:"write_allow_paths,omitempty"`
-	PreviousMode         string   `json:"previous_mode,omitempty"`
-	PermissionMode       string   `json:"permission_mode"`
-	PendingExitRequest   bool     `json:"pending_exit_request,omitempty"`
-	ExitDecision         string   `json:"exit_decision,omitempty"`
-	ExitSource           string   `json:"exit_source,omitempty"`
-	ReviewRound          int      `json:"review_round,omitempty"`
-	PendingReviewNotes   string   `json:"pending_review_notes,omitempty"`
-	Notes                string   `json:"notes,omitempty"`
-	EnteredAt            string   `json:"entered_at,omitempty"`
-	ExitedAt             string   `json:"exited_at,omitempty"`
-	WorkspacePath        string   `json:"workspace_path,omitempty"`
-	PlanContent          string   `json:"plan_content"`
-	PlanContentAvailable bool     `json:"plan_content_available"`
-	PlanContentTruncated bool     `json:"plan_content_truncated,omitempty"`
-	PlanContentError     string   `json:"plan_content_error,omitempty"`
-	Action               string   `json:"action,omitempty"`
+	SessionID          string   `json:"session_id"`
+	Active             bool     `json:"active"`
+	Status             string   `json:"status"`
+	PlanPath           string   `json:"plan_path,omitempty"`
+	WriteAllowPaths    []string `json:"write_allow_paths,omitempty"`
+	PreviousMode       string   `json:"previous_mode,omitempty"`
+	PermissionMode     string   `json:"permission_mode"`
+	PendingExitRequest bool     `json:"pending_exit_request,omitempty"`
+	ExitDecision       string   `json:"exit_decision,omitempty"`
+	ExitSource         string   `json:"exit_source,omitempty"`
+	ReviewRound        int      `json:"review_round,omitempty"`
+	PendingReviewNotes string   `json:"pending_review_notes,omitempty"`
+	// ReopenedFrom/ReopenedVersion report that the active plan body was restored
+	// from an archived round (report §4.5), mirroring `/plan status`.
+	ReopenedFrom         string `json:"reopened_from,omitempty"`
+	ReopenedVersion      int    `json:"reopened_version,omitempty"`
+	Notes                string `json:"notes,omitempty"`
+	EnteredAt            string `json:"entered_at,omitempty"`
+	ExitedAt             string `json:"exited_at,omitempty"`
+	WorkspacePath        string `json:"workspace_path,omitempty"`
+	PlanContent          string `json:"plan_content"`
+	PlanContentAvailable bool   `json:"plan_content_available"`
+	PlanContentTruncated bool   `json:"plan_content_truncated,omitempty"`
+	PlanContentError     string `json:"plan_content_error,omitempty"`
+	Action               string `json:"action,omitempty"`
 }
 
 type sessionPlanModeRequest struct {
@@ -344,6 +348,8 @@ func (h *Handler) buildSessionPlanModeResponse(session *chat.Session, action str
 		ExitSource:           string(state.LastExitSource),
 		ReviewRound:          state.ReviewRound,
 		PendingReviewNotes:   state.PendingReviewNotes,
+		ReopenedFrom:         state.ReopenedFrom,
+		ReopenedVersion:      state.ReopenedVersion,
 		Notes:                state.Notes,
 		EnteredAt:            state.EnteredAt,
 		ExitedAt:             state.ExitedAt,

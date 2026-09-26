@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planstore"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
@@ -202,4 +203,136 @@ func TestDeleteStoredPlanRequiresId(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.DeleteStoredPlan(rec, httptest.NewRequest(http.MethodDelete, "/api/runtime/plans/", nil))
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
+
+// newPlansReopenTestRig wires a session manager (with a workspace-scoped session)
+// plus a plan store holding one archived round for docs/plan.md.
+func newPlansReopenTestRig(t *testing.T, workspace string) (*mux.Router, *chat.Session, *planstore.Store) {
+	t.Helper()
+	ctx := context.Background()
+	storage := chat.NewInMemoryStorage()
+	manager := chat.NewSessionManager(storage, nil)
+	session, err := manager.Create(ctx, "user-1")
+	require.NoError(t, err)
+	session.SetContext(sessionmeta.WorkspacePath, workspace)
+	require.NoError(t, manager.Update(ctx, session))
+
+	store := planstore.NewStore(t.TempDir())
+	record, err := store.Record(planstore.RecordOptions{
+		SessionID:   session.ID,
+		ProjectPath: workspace,
+		PlanPath:    "docs/plan.md",
+		Title:       "reopen demo",
+	})
+	require.NoError(t, err)
+	_, err = store.Snapshot(planstore.SnapshotOptions{
+		ID:       record.ID,
+		Decision: "request_changes",
+		Source:   "user",
+		Content:  []byte("# Plan\n\n1. restored round\n"),
+		Status:   planstore.StatusPending,
+	})
+	require.NoError(t, err)
+
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetSessionManager(manager)
+	handler.plansStore = store
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	return router, session, store
+}
+
+func postPlanReopen(t *testing.T, router *mux.Router, sessionID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/runtime/sessions/"+sessionID+"/plan/reopen", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestReopenStoredPlanRestoresSnapshotAndEntersPlanMode(t *testing.T) {
+	workspace := t.TempDir()
+	router, session, store := newPlansReopenTestRig(t, workspace)
+	records, err := store.List()
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	rec := postPlanReopen(t, router, session.ID, `{"plan_id":"`+records[0].ID+`"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp storedPlanReopenResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.True(t, resp.Reopened)
+	require.Equal(t, records[0].ID, resp.PlanID)
+	require.Equal(t, "docs/plan.md", resp.DisplayPath)
+	require.Equal(t, 1, resp.Version)
+	require.True(t, resp.Created, "missing workspace file is created from the snapshot")
+	require.NotNil(t, resp.PlanMode)
+	require.True(t, resp.PlanMode.Active)
+	require.Equal(t, records[0].ID, resp.PlanMode.ReopenedFrom)
+	require.Equal(t, 1, resp.PlanMode.ReopenedVersion)
+	require.Equal(t, string(runtimepolicy.ModePlan), resp.PlanMode.PermissionMode)
+
+	written, err := os.ReadFile(filepath.Join(workspace, "docs", "plan.md"))
+	require.NoError(t, err)
+	require.Equal(t, "# Plan\n\n1. restored round\n", string(written))
+
+	// The durable session carries the same lineage for later GETs and /plan status.
+	detail := httptest.NewRequest(http.MethodGet, "/api/runtime/sessions/"+session.ID+"/plan", nil)
+	detailRec := httptest.NewRecorder()
+	router.ServeHTTP(detailRec, detail)
+	require.Equal(t, http.StatusOK, detailRec.Code)
+	var state sessionPlanModeResponse
+	require.NoError(t, json.NewDecoder(detailRec.Body).Decode(&state))
+	require.True(t, state.Active)
+	require.Equal(t, records[0].ID, state.ReopenedFrom)
+	require.Equal(t, 1, state.ReopenedVersion)
+}
+
+func TestReopenStoredPlanConflictNeedsForce(t *testing.T) {
+	workspace := t.TempDir()
+	router, session, store := newPlansReopenTestRig(t, workspace)
+	records, err := store.List()
+	require.NoError(t, err)
+	planAbs := filepath.Join(workspace, "docs", "plan.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(planAbs), 0o755))
+	require.NoError(t, os.WriteFile(planAbs, []byte("# Plan\n\n1. local work in progress\n"), 0o644))
+
+	rec := postPlanReopen(t, router, session.ID, `{"plan_id":"`+records[0].ID+`"}`)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var conflict map[string]interface{}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&conflict))
+	require.Equal(t, true, conflict["conflict"])
+	require.Contains(t, conflict["hint"], "force=true")
+
+	// A refused reopen never touches the workspace file.
+	kept, err := os.ReadFile(planAbs)
+	require.NoError(t, err)
+	require.Equal(t, "# Plan\n\n1. local work in progress\n", string(kept))
+
+	forced := postPlanReopen(t, router, session.ID, `{"plan_id":"`+records[0].ID+`","force":true,"version":1}`)
+	require.Equal(t, http.StatusOK, forced.Code, forced.Body.String())
+	var resp storedPlanReopenResponse
+	require.NoError(t, json.NewDecoder(forced.Body).Decode(&resp))
+	require.True(t, resp.Forced)
+	require.True(t, resp.Reopened)
+	overwritten, err := os.ReadFile(planAbs)
+	require.NoError(t, err)
+	require.Equal(t, "# Plan\n\n1. restored round\n", string(overwritten))
+}
+
+func TestReopenStoredPlanRejectsMissingRecordAndPlanID(t *testing.T) {
+	workspace := t.TempDir()
+	router, session, _ := newPlansReopenTestRig(t, workspace)
+
+	missing := postPlanReopen(t, router, session.ID, `{"plan_id":"demo/unknown"}`)
+	require.Equal(t, http.StatusNotFound, missing.Code, missing.Body.String())
+
+	empty := postPlanReopen(t, router, session.ID, `{}`)
+	require.Equal(t, http.StatusBadRequest, empty.Code, empty.Body.String())
+	require.Contains(t, empty.Body.String(), "plan_id is required")
+
+	unknownSession := postPlanReopen(t, router, "session-missing", `{"plan_id":"demo/plan"}`)
+	require.NotEqual(t, http.StatusOK, unknownSession.Code)
 }

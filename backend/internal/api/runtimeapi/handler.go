@@ -986,6 +986,9 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	// Explicit retention: hosts can drop one archived plan (record + snapshots).
 	// Automatic retention is bounded by AICLI_PLANS_MAX_VERSIONS at archive time.
 	runtimeRouter.HandleFunc("/plans/{id:.*}", h.DeleteStoredPlan).Methods(http.MethodDelete)
+	// Reopen one archived round into the workspace and enter plan mode on it
+	// (the HTTP twin of `/plans reopen`). The plan id travels in the body.
+	runtimeRouter.HandleFunc("/sessions/{id}/plan/reopen", h.ReopenStoredPlan).Methods(http.MethodPost)
 	// 会话权限模式（composer 权限选择器）：运行中切换同样生效。
 	runtimeRouter.HandleFunc("/sessions/{id}/permission-mode", h.GetSessionPermissionMode).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/permission-mode", h.UpdateSessionPermissionMode).Methods(http.MethodPost)

@@ -86,6 +86,40 @@ func (a *SessionActor) EnterPlanMode(ctx context.Context, sessionID string, args
 	return planModeResultFromState(state, string(runtimepolicy.ModePlan)), nil
 }
 
+// ReopenPlanModeArgs describes entering plan mode on a plan body that was
+// restored from the archive (report §4.5).
+type ReopenPlanModeArgs struct {
+	// RecordID is the archived plan record the body came from.
+	RecordID string
+	// Version is the restored snapshot version (0 = unknown/latest).
+	Version int
+	// PlanPath is the workspace-relative plan path to enter plan mode on.
+	PlanPath string
+}
+
+// ReopenPlanMode enters plan mode on a restored archived round and records the
+// lineage (planmode.MarkReopened) so hosts can show where the plan came from.
+// The caller restores the file first (planmode.ReopenPlan); this method only owns
+// the session-side transition, mirroring EnterPlanMode plus provenance.
+func (a *SessionActor) ReopenPlanMode(ctx context.Context, sessionID string, args ReopenPlanModeArgs) (*toolbroker.PlanModeResult, error) {
+	if _, err := a.EnterPlanMode(ctx, sessionID, toolbroker.EnterPlanModeArgs{PlanPath: args.PlanPath}); err != nil {
+		return nil, err
+	}
+	session, err := a.loadSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	state := planmode.MarkReopened(planmode.Load(session), strings.TrimSpace(args.RecordID), args.Version)
+	planmode.Save(session, state)
+	if err := a.persistSession(ctx, session); err != nil {
+		return nil, err
+	}
+	if engine := a.agentPermissionEngine(); engine != nil {
+		a.applyPlanModeStateToEngine(engine, state)
+	}
+	return planModeResultFromState(state, string(runtimepolicy.ModePlan)), nil
+}
+
 // ExitPlanMode implements toolbroker.PlanModeController for mid-turn plan exit.
 func (a *SessionActor) ExitPlanMode(ctx context.Context, sessionID string, args toolbroker.ExitPlanModeArgs) (*toolbroker.PlanModeResult, error) {
 	if a == nil {

@@ -577,3 +577,43 @@ func TestSessionActorConsumePlanReviewNotesDeliversOnce(t *testing.T) {
 	assert.Empty(t, planmode.Load(reloaded).PendingReviewNotes)
 	assert.Nil(t, actor.consumePlanReviewNotes(ctx, reloaded), "feedback must not be delivered twice")
 }
+
+// ReopenPlanMode is the session-side half of `/plans reopen` and the HTTP reopen
+// endpoint: enter plan mode on the restored body and record where it came from.
+func TestSessionActorReopenPlanModeRecordsLineage(t *testing.T) {
+	actor, _, engine := newPlanModeTestActor(t, "plan-reopen-1", runtimepolicy.ModeDefault)
+	ctx := context.Background()
+
+	result, err := actor.ReopenPlanMode(ctx, "", ReopenPlanModeArgs{
+		RecordID: " demo/plan ",
+		Version:  3,
+		PlanPath: "docs/plan.md",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.Active)
+	assert.Equal(t, "active", result.Status)
+	assert.Equal(t, "docs/plan.md", result.PlanPath)
+	assert.Equal(t, "demo/plan", result.ReopenedFrom)
+	assert.Equal(t, 3, result.ReopenedVersion)
+	assert.Equal(t, runtimepolicy.ModePlan, engine.Mode)
+
+	// The durable session carries the lineage so /plan status and the review
+	// surface can show "reopened from <id> vN".
+	session, err := actor.sessionStore.Load(ctx, actor.id)
+	require.NoError(t, err)
+	state := planmode.Load(session)
+	assert.True(t, planmode.IsActive(state))
+	assert.Equal(t, "demo/plan", state.ReopenedFrom)
+	assert.Equal(t, 3, state.ReopenedVersion)
+	assert.Equal(t, "demo/plan v3", planmode.ReopenProvenance(state))
+}
+
+func TestSessionActorReopenPlanModeRejectsStoppedActor(t *testing.T) {
+	actor, _, _ := newPlanModeTestActor(t, "plan-reopen-2", runtimepolicy.ModeDefault)
+	ctx := context.Background()
+	actor.Stop()
+
+	_, err := actor.ReopenPlanMode(ctx, "", ReopenPlanModeArgs{RecordID: "demo/plan", PlanPath: "docs/plan.md"})
+	require.ErrorIs(t, err, ErrSessionActorStopped)
+}
