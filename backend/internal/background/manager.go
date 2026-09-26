@@ -112,6 +112,10 @@ type Manager struct {
 	// during a wait can be recognized as "already observed" (see
 	// observation.go). Lazily created; nil is a valid "no waiters" state.
 	waiters *outputWaitRegistry
+	// monitorRegistry holds the per-job monitor timers (see monitor.go). It is
+	// lazily created for the same reason as waiters, and in-memory on purpose:
+	// a monitor only nudges a live session.
+	monitorRegistry *monitorRegistry
 }
 
 type managedJob struct {
@@ -411,6 +415,13 @@ func (m *Manager) GetJob(ctx context.Context, jobID string) (*Job, error) {
 
 // CancelJob requests cancellation of a background job.
 func (m *Manager) CancelJob(ctx context.Context, jobID string) (*Job, error) {
+	return m.cancelJobWithSource(ctx, jobID, "user_request")
+}
+
+// cancelJobWithSource is the shared cancellation path: callers tag why the job
+// was terminated (user request vs a monitor deadline) so the terminal evidence
+// can tell the two apart.
+func (m *Manager) cancelJobWithSource(ctx context.Context, jobID, cancelSource string) (*Job, error) {
 	if m == nil {
 		return nil, fmt.Errorf("background manager is nil")
 	}
@@ -438,7 +449,7 @@ func (m *Manager) CancelJob(ctx context.Context, jobID string) (*Job, error) {
 	if managed.info.Metadata == nil {
 		managed.info.Metadata = map[string]interface{}{}
 	}
-	managed.info.Metadata["cancel_source"] = "user_request"
+	managed.info.Metadata["cancel_source"] = cancelSource
 	managed.mu.Unlock()
 
 	if hasPID {
@@ -1131,6 +1142,9 @@ func (m *Manager) appendJobEvent(ctx context.Context, jobID, eventType string, p
 		// durable 记录、不再调度一次冗余的唤醒 turn（模型马上就能从
 		// task_output 的结果里读到同一份终态）。
 		m.markTerminalObservedByWaiter(jobID)
+		// 终态迁移后，该 job 的 monitor 计时器不再有意义：迟到的 check 只会在
+		// 终态唤醒之后再补一次重复提示。
+		m.cancelJobMonitors(jobID)
 	}
 	if m.eventHandler != nil {
 		m.eventHandler(event)
