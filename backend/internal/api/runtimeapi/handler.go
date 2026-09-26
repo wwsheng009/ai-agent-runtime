@@ -45,8 +45,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/model/entity"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
-	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planstore"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
@@ -105,13 +105,14 @@ const (
 
 // Handler Skills API 处理器
 type Handler struct {
-	skillRegistry                  *skill.Registry
-	skillLoader                    *skill.Loader
-	mcpManager                     skill.MCPManager
-	mcpAdmin                       mcpadmin.AdminService
-	llmRuntime                     *llm.LLMRuntime
-	sessionManager                 *chat.SessionManager
-	plansStore                     *planstore.Store // overrides the process-wide plan artifact store (tests/hosts)
+	skillRegistry  *skill.Registry
+	skillLoader    *skill.Loader
+	mcpManager     skill.MCPManager
+	mcpAdmin       mcpadmin.AdminService
+	llmRuntime     *llm.LLMRuntime
+	sessionManager *chat.SessionManager
+	// plansStore overrides the process-wide plan artifact store (tests/hosts).
+	plansStore                     *planstore.Store
 	hotReload                      *skill.HotReload
 	embeddingRouter                *skill.SemanticEmbeddingRouter
 	embeddingHotReloadSyncAttached bool
@@ -1692,7 +1693,10 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		// ExposeSkills：本回合显式暴露的 skill 名称列表。运行时把对应 skill 的说明与
 		// 程序清单注入模型上下文，由模型自行选择调用哪些程序（模型驱动），而不是由
 		// 后端确定性直执行。
-		ExposeSkills               []string             `json:"expose_skills,omitempty"`
+		ExposeSkills []string `json:"expose_skills,omitempty"`
+		// SkillArgs：与 ExposeSkills 配套的调用参数（Agent Skills 占位符语义），
+		// 用于替换 skill 文本中的 $ARGUMENTS / $ARGUMENTS[N] / 命名参数。
+		SkillArgs                  []string             `json:"skill_args,omitempty"`
 		PlanningMode               string               `json:"planning_mode,omitempty"`
 		ExecutePlannedSubagents    bool                 `json:"execute_planned_subagents,omitempty"`
 		AllowWritePlannedSubagents bool                 `json:"allow_write_planned_subagents,omitempty"`
@@ -2050,7 +2054,14 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			}
 			execSession = execSession.Clone()
 			contextMessages := buildAgentContextMessages(agentContext, workspaceCtx)
-			skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, h.skillsRuntimeConfigFor(profileState))
+			skillsCfg := h.skillsRuntimeConfigFor(profileState)
+			skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, skillsCfg, skillExposureOptions{
+				Args:                req.SkillArgs,
+				ProjectDir:          workspacePath,
+				SessionID:           sessionID(session),
+				Effort:              types.ResolveReasoningEffort(req.ReasoningEffort),
+				SubstitutionEnabled: skillsCfg.ArgumentSubstitutionEnabled(),
+			})
 			if skillErr != nil {
 				h.writeError(w, http.StatusBadRequest, skillErr)
 				return
@@ -2507,7 +2518,14 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 
 	if req.EnableReAct && h.llmRuntime != nil {
 		contextMessages := buildAgentContextMessages(agentContext, workspaceCtx)
-		skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, h.skillsRuntimeConfigFor(profileState))
+		skillsCfg := h.skillsRuntimeConfigFor(profileState)
+		skillMessages, skillErr := buildSkillExposureMessages(h.skillRegistry, req.ExposeSkills, skillsCfg, skillExposureOptions{
+			Args:                req.SkillArgs,
+			ProjectDir:          workspacePath,
+			SessionID:           sessionID(session),
+			Effort:              types.ResolveReasoningEffort(req.ReasoningEffort),
+			SubstitutionEnabled: skillsCfg.ArgumentSubstitutionEnabled(),
+		})
 		if skillErr != nil {
 			h.writeError(w, http.StatusBadRequest, skillErr)
 			return
@@ -8242,7 +8260,7 @@ func (h *Handler) writeJSON(w http.ResponseWriter, statusCode int, data interfac
 // 与纪律块，镜像 Codex 的常驻 directory；catalog 条目永不因预算消失，只裁剪描述。
 // SK-7：文档模式技能（显式 execution_mode: document，或 auto 配置下自动识别）不走
 // ProgramGuide，把 SKILL.md 正文注入上下文，由模型用既有工具自行完成任务。
-func buildSkillExposureMessages(registry *skill.Registry, names []string, cfg *agentconfig.SkillsRuntimeConfig) ([]types.Message, error) {
+func buildSkillExposureMessages(registry *skill.Registry, names []string, cfg *agentconfig.SkillsRuntimeConfig, opts skillExposureOptions) ([]types.Message, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
@@ -8278,18 +8296,44 @@ func buildSkillExposureMessages(registry *skill.Registry, names []string, cfg *a
 		if hydrated, hydrateErr := registry.Hydrate(item); hydrateErr == nil && hydrated != nil {
 			item = hydrated
 		}
+		// Agent Skills 占位符替换（单趟替换，插入内容不再解析）。
+		// 每个技能单独构造上下文：SkillDir 取该技能目录，命名参数按声明顺序绑定。
+		substitutionCtx := skill.NewSubstitutionContext(
+			item,
+			opts.Args,
+			opts.ProjectDir,
+			opts.SessionID,
+			opts.Effort,
+			opts.SubstitutionEnabled,
+		)
 		// SK-7：文档模式 → 正文注入上下文，不走 ProgramGuide/executeDefault。
 		if item.IsDocumentModeEnabled(cfg != nil && cfg.DocumentModeAuto()) {
 			if body := strings.TrimSpace(item.Body); body != "" {
+				if rendered, _ := skill.SubstituteSkillText(body, substitutionCtx); strings.TrimSpace(rendered) != "" {
+					body = rendered
+				}
 				messages = append(messages, *types.NewSystemMessage("## Skill instructions (document mode: " + name + ")\n" + body))
 				continue
 			}
 		}
-		if guide := skill.ProgramGuide(item); guide != "" {
+		guide, _ := skill.SubstituteSkillText(skill.ProgramGuide(item), substitutionCtx)
+		if guide != "" {
 			messages = append(messages, *types.NewSystemMessage(guide))
 		}
 	}
 	return messages, nil
+}
+
+// skillExposureOptions 携带 expose_skills 回合的占位符替换输入。
+type skillExposureOptions struct {
+	// Args 是 skill_args 请求参数（Agent Skills 0-based 参数列表）。
+	Args []string
+	// ProjectDir / SessionID / Effort 对应标准占位符。
+	ProjectDir string
+	SessionID  string
+	Effort     string
+	// SubstitutionEnabled 来自 skills_runtime.argument_substitution（默认 on）。
+	SubstitutionEnabled bool
 }
 
 // buildSkillCatalogMessages 把全量可用技能目录渲染为系统消息（SK-1/SK-2）。

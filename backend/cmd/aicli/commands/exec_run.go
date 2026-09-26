@@ -172,9 +172,13 @@ func parseExecOptionsInternal(cmd *cobra.Command, args []string, readPrompt bool
 	opts.DisableTools, _ = cmd.Flags().GetBool("disable-tools")
 	opts.EnableTools, _ = cmd.Flags().GetBool("enable-tools")
 	opts.CLISkillDirs, _ = cmd.Flags().GetStringSlice("skills-dir")
+	if flagSkillDirs, flagErr := cmd.Flags().GetStringSlice("skill"); flagErr == nil && len(flagSkillDirs) > 0 {
+		opts.CLISkillDirs = append(opts.CLISkillDirs, flagSkillDirs...)
+	}
 	opts.CLISkillsTopK, _ = cmd.Flags().GetInt("skills-top-k")
 	opts.CLISkillsMode, _ = cmd.Flags().GetString("skills-mode")
 	opts.CLISkillsDebug, _ = cmd.Flags().GetBool("skills-debug")
+	opts.NoSkills, _ = cmd.Flags().GetBool("no-skills")
 	if opts.DisableTools && opts.EnableTools {
 		return nil, newExecExitError(execExitUsage, "TOOL_FLAG_CONFLICT", fmt.Errorf("--disable-tools 与 --enable-tools 不能同时为 true"))
 	}
@@ -328,6 +332,7 @@ func buildExecChatOptions(opts *ExecOptions) *chatCommandOptions {
 		HTTPDebug:              opts.HTTPDebug,
 		FailFast:               opts.FailFast,
 		CLISkillDirs:           opts.CLISkillDirs,
+		NoSkills:               opts.NoSkills,
 		CLISkillsTopK:          opts.CLISkillsTopK,
 		CLISkillsMode:          opts.CLISkillsMode,
 		CLISkillsDebug:         opts.CLISkillsDebug,

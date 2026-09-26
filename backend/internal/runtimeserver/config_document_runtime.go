@@ -14,6 +14,7 @@ import (
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	profileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
@@ -52,6 +53,9 @@ var (
 		"skills_runtime.role_claims",
 		"skills_runtime.admin_roles",
 		"skills_runtime.api_key_scopes",
+		// SK-6：disabled_skills 支持热生效（ApplySkillNameFilter 重建注册表）。
+		"skills_runtime.disabled_skills",
+		"skills_runtime.disabledSkills",
 	}
 	restartRequiredSkillsRuntimePrefixes = []string{
 		"skills_runtime.config_file",
@@ -170,6 +174,16 @@ func (r *RuntimeConfigHotReloader) Apply(
 		} else {
 			skillsCfg := normalizeSkillsRuntimeConfigForHotReload(nextCfg)
 			applySkillsRuntimePoliciesToTarget(r.target, skillsCfg)
+			// SK-6：disabled_skills 在 loader 过滤器权威点热生效（清空并重建注册表，
+			// 保证解禁也能立即恢复）。bootstrap 未接入时仅提示，不改变既有 applied 语义。
+			if r.bootstrap != nil {
+				if err := r.bootstrap.ApplySkillNameFilter(
+					profileinput.WithDisabledSkills(nil, skillsCfg.DisabledSkillNames()),
+				); err != nil {
+					result.Warnings = append(result.Warnings,
+						fmt.Sprintf("skills_runtime.disabled_skills 热重载失败: %v", err))
+				}
+			}
 			addMatchingPathsForPrefixes(appliedSet, hotPaths, hotReloadSkillsRuntimePrefixes)
 		}
 	}

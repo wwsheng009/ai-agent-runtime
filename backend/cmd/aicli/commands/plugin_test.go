@@ -126,7 +126,7 @@ func TestResolveConfiguredSkillDirsMergesTrustedPlugins(t *testing.T) {
 	ClearPluginCatalogCache()
 
 	base := t.TempDir()
-	resolved := resolveConfiguredSkillDirs(nil, []string{base})
+	resolved := resolveConfiguredSkillDirs(nil, []string{base}, true)
 	if len(resolved) < 2 {
 		t.Fatalf("expected base + plugin skill dirs, got %#v", resolved)
 	}

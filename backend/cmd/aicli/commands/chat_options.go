@@ -22,13 +22,13 @@ type chatCommandOptions struct {
 	StreamChanged bool
 	// FastFlag / FastChanged mirror Stream: CLI override for Codex Fast mode.
 	// Effective only when the resolved provider protocol is codex.
-	FastFlag               bool
-	FastChanged            bool
+	FastFlag    bool
+	FastChanged bool
 	// Headless 是 --headless：无人值守启动。跳过所有启动期交互选择器
 	// (provider/model/reasoning/stream)，按 flag > 会话 > aicli.chat 配置 >
 	// providers 默认 > 第一个可用 provider 的顺序自动解析；没有任何可用
 	// provider 时直接报错退出而不是阻塞在交互选择器上。不影响 TUI/聊天循环。
-	Headless bool
+	Headless               bool
 	NoInteractive          bool
 	CompatMode             bool   // --compat-mode：强制无 ANSI 的兼容控制台输入路径
 	InputMode              string // --input-mode：auto|system|custom；system 保留 Win7 conhost IME
@@ -46,8 +46,11 @@ type chatCommandOptions struct {
 	CLISkillsTopK          int
 	CLISkillsMode          string
 	CLISkillsDebug         bool
-	PermissionMode         runtimepolicy.Mode
-	PermissionModeChanged  bool
+	// NoSkills 是 --no-skills：跳过 skill 自动发现（工作区/.agents、用户级与
+	// 配置目录），仅保留显式 --skill/--skills-dir 指定的目录。
+	NoSkills              bool
+	PermissionMode        runtimepolicy.Mode
+	PermissionModeChanged bool
 	// CLIAllowTools / CLIDenyTools are product-facing permission overlays
 	// (--allow-tool / --deny-tool). Applied after profile tool policy.
 	CLIAllowTools []string
@@ -177,9 +180,13 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	httpDebug, _ := cmd.Flags().GetBool("debug-http")
 	failFast, _ := cmd.Flags().GetBool("fail-fast")
 	cliSkillDirs, _ := cmd.Flags().GetStringSlice("skills-dir")
+	if flagSkillDirs, flagErr := cmd.Flags().GetStringSlice("skill"); flagErr == nil && len(flagSkillDirs) > 0 {
+		cliSkillDirs = append(cliSkillDirs, flagSkillDirs...)
+	}
 	cliSkillsTopK, _ := cmd.Flags().GetInt("skills-top-k")
 	cliSkillsMode, _ := cmd.Flags().GetString("skills-mode")
 	cliSkillsDebug, _ := cmd.Flags().GetBool("skills-debug")
+	cliNoSkills, _ := cmd.Flags().GetBool("no-skills")
 	permissionModeFlag, _ := cmd.Flags().GetString("permission-mode")
 	approvalReuseFlag, _ := cmd.Flags().GetString("approval-reuse")
 	cliAllowTools, _ := cmd.Flags().GetStringSlice("allow-tool")
@@ -277,6 +284,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		CLISkillsTopK:          cliSkillsTopK,
 		CLISkillsMode:          cliSkillsMode,
 		CLISkillsDebug:         cliSkillsDebug,
+		NoSkills:               cliNoSkills,
 		PermissionMode:         permissionMode,
 		PermissionModeChanged:  cmd.Flags().Changed("permission-mode") || yoloFlag,
 		CLIAllowTools:          append([]string(nil), cliAllowTools...),

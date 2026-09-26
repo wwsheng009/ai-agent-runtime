@@ -1154,10 +1154,14 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	runtimeMCP = wrapGoalToolSurface(session, runtimeMCP)
 
 	bootstrapManager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
-		Config:          runtimeConfig,
-		SkillDirs:       resolveChatSkillDirs(cfg, session, nil),
-		DiscoverOnly:    true,
-		SkillFilter:     runtimeprofileinput.BuildSkillFilter(session.ProfileSkillSelection),
+		Config:       runtimeConfig,
+		SkillDirs:    resolveChatSkillDirs(cfg, session, nil),
+		DiscoverOnly: true,
+		// SK-6：profile 选择与 skills_runtime.disabled_skills 取交集，禁用优先。
+		SkillFilter: runtimeprofileinput.WithDisabledSkills(
+			runtimeprofileinput.BuildSkillFilter(session.ProfileSkillSelection),
+			disabledSkillNames(cfg),
+		),
 		MCPManager:      runtimeMCP,
 		ProviderConfigs: buildSkillsProviderConfigs(cfg),
 	})

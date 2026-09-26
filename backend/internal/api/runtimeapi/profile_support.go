@@ -134,7 +134,11 @@ func (h *Handler) resolveProfileRuntimeState(ctx context.Context, profileRef, ag
 	loader := skill.NewLoader(mcpAdapter)
 	// FR-3 技能选择：过滤落在加载权威点（loader）；未声明时 filter 为 nil，
 	// 保持 profile 之前的全量行为（NFR-1）。
-	loader.SetNameFilter(runtimeprofileinput.BuildSkillFilter(toProfileInputSkillSelection(resolved.Skills)))
+	// SK-6：profile 选择与宿主 skills_runtime.disabled_skills 取交集，禁用优先。
+	loader.SetNameFilter(runtimeprofileinput.WithDisabledSkills(
+		runtimeprofileinput.BuildSkillFilter(toProfileInputSkillSelection(resolved.Skills)),
+		h.runtimeSkillsConfig().DisabledSkillNames(),
+	))
 	if len(resolved.SkillDirs) > 0 {
 		loader.SetSkillDirs(resolved.SkillDirs)
 		if err := loader.DiscoverAllWithRegistry(resolved.SkillDirs, registryInstance); err != nil {

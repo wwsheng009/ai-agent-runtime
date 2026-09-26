@@ -32,6 +32,7 @@ import (
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
+	profileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionruntime"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -1030,10 +1031,12 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	}
 
 	bootstrapManager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
-		Config:              runtimeConfig,
-		SkillDir:            skillsCfg.SkillDir,
-		SkillDirs:           resolvedExtraSkillDirs(skillsCfg),
-		DiscoverOnly:        true,
+		Config:       runtimeConfig,
+		SkillDir:     skillsCfg.SkillDir,
+		SkillDirs:    resolvedExtraSkillDirs(skillsCfg),
+		DiscoverOnly: true,
+		// SK-6：skills_runtime.disabled_skills 在 loader 过滤器权威点生效。
+		SkillFilter:         profileinput.WithDisabledSkills(nil, skillsCfg.DisabledSkillNames()),
 		MCPManager:          mcpAdapter,
 		GatewayProviderName: strings.TrimSpace(skillsCfg.GatewayProviderName),
 		ProviderConfigs:     buildSkillsProviderConfigs(cfg),

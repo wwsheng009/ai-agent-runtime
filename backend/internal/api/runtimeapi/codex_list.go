@@ -27,7 +27,9 @@ type codexSkillsListGroup struct {
 	Roots  []string                    `json:"roots,omitempty"`
 	Skills []*skill.CodexSkillMetadata `json:"skills,omitempty"`
 	Errors []skill.CodexSkillError     `json:"errors,omitempty"`
-	Count  int                         `json:"count"`
+	// Warnings 是"可加载但不符合 Agent Skills 标准"的诊断（见 SK-11）。
+	Warnings []skill.CodexSkillError `json:"warnings,omitempty"`
+	Count    int                     `json:"count"`
 }
 
 type codexSkillsListResponse struct {
@@ -41,6 +43,9 @@ type codexSkillsListResponse struct {
 	// 携带过期的诊断信息。
 	Unavailable      []skill.UnavailableSkill `json:"unavailable,omitempty"`
 	UnavailableCount int                      `json:"unavailable_count"`
+	// SK-6：生效的 per-skill 禁用名单（skills_runtime.disabled_skills）。
+	// 与 unavailable 一样属于加性诊断，实时读取生效配置。
+	DisabledSkills []string `json:"disabled_skills,omitempty"`
 	// SK-5：list 对"模型将看到的 catalog"的投影——与注入共用同一
 	// BuildCatalogEntries + RenderSkillCatalogWithOptions，口径不会漂移。
 	Catalog *skillCatalogProjection `json:"catalog,omitempty"`
@@ -97,6 +102,7 @@ func (h *Handler) ListCodexSkills(w http.ResponseWriter, r *http.Request) {
 			cached.ForceReload = false
 			cached.CacheHit = true
 			h.attachUnavailableSkills(&cached)
+			h.attachDisabledSkills(&cached)
 			h.attachCatalogProjection(&cached)
 			h.auditCodexSkillsList(r, cached)
 			h.writeJSON(w, http.StatusOK, cached)
@@ -109,11 +115,12 @@ func (h *Handler) ListCodexSkills(w http.ResponseWriter, r *http.Request) {
 	for _, plan := range plans {
 		outcome := skill.DiscoverCodexSkillLoadOutcome(plan.Cwd, configFile, plan.ExtraRoots)
 		group := codexSkillsListGroup{
-			Cwd:    plan.Cwd,
-			Roots:  plan.Roots,
-			Skills: outcome.Skills,
-			Errors: outcome.Errors,
-			Count:  len(outcome.Skills),
+			Cwd:      plan.Cwd,
+			Roots:    plan.Roots,
+			Skills:   outcome.Skills,
+			Errors:   outcome.Errors,
+			Warnings: outcome.Warnings,
+			Count:    len(outcome.Skills),
 		}
 		results = append(results, group)
 		total += len(outcome.Skills)
@@ -127,6 +134,7 @@ func (h *Handler) ListCodexSkills(w http.ResponseWriter, r *http.Request) {
 		CacheHit:    false,
 	}
 	h.attachUnavailableSkills(&response)
+	h.attachDisabledSkills(&response)
 	h.attachCatalogProjection(&response)
 	h.setCodexSkillsListCache(cacheKey, response, cacheVersion)
 	h.auditCodexSkillsList(r, response)

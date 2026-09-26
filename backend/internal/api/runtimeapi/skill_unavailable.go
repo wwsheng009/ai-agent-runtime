@@ -128,3 +128,18 @@ func (h *Handler) attachUnavailableSkills(response *codexSkillsListResponse) {
 	}
 	response.UnavailableCount = len(response.Unavailable)
 }
+
+// attachDisabledSkills 把 SK-6 的 per-skill 禁用名单挂到 Codex 兼容 list 响应。
+// 与 unavailable 一样实时读生效配置（缓存命中路径也调用），因此缓存不会让
+// 该诊断过期。
+func (h *Handler) attachDisabledSkills(response *codexSkillsListResponse) {
+	if h == nil || response == nil {
+		return
+	}
+	cfg := h.runtimeSkillsConfig()
+	if cfg == nil {
+		response.DisabledSkills = nil
+		return
+	}
+	response.DisabledSkills = cfg.DisabledSkillNames()
+}

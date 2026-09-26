@@ -50,9 +50,11 @@ type ExecOptions struct {
 	// TrustGrant is CLI --trust for folder trust durable grant (R2).
 	TrustGrant bool
 
-	DisableTools   bool
-	EnableTools    bool
-	CLISkillDirs   []string
+	DisableTools bool
+	EnableTools  bool
+	CLISkillDirs []string
+	// NoSkills 是 --no-skills：跳过 skill 自动发现，只保留显式目录。
+	NoSkills       bool
 	CLISkillsTopK  int
 	CLISkillsMode  string
 	CLISkillsDebug bool

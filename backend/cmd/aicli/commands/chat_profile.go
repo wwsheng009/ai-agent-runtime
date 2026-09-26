@@ -197,7 +197,7 @@ func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*cha
 		Agent:             strings.TrimSpace(opts.AgentFlag),
 		GlobalRuntimePath: resolveGlobalRuntimeConfigPath(cfg),
 		GlobalMCPPath:     resolveConfiguredMCPConfigPath(cfg),
-		GlobalSkillDirs:   resolveConfiguredSkillDirs(skillRuntimeConfig(cfg), nil),
+		GlobalSkillDirs:   resolveConfiguredSkillDirs(skillRuntimeConfig(cfg), nil, true),
 	}
 	resolved, err := profilesys.ResolveRef(registry, profileRef, resolveOptions)
 	if err != nil {
@@ -214,7 +214,7 @@ func resolveChatProfileState(cfg *config.Config, opts *chatCommandOptions) (*cha
 	if cfg != nil {
 		if overlay := newChatProfileConfigOverlay(resolved); overlay.Active() && overlayDeclaresSkillDirs(overlay.Keys) {
 			if effective, applyErr := overlay.Apply(cfg); applyErr == nil && effective != nil && effective != cfg {
-				resolveOptions.GlobalSkillDirs = resolveConfiguredSkillDirs(skillRuntimeConfig(effective), nil)
+				resolveOptions.GlobalSkillDirs = resolveConfiguredSkillDirs(skillRuntimeConfig(effective), nil, true)
 				if reResolved, reErr := profilesys.ResolveRef(registry, profileRef, resolveOptions); reErr == nil && reResolved != nil {
 					resolved = reResolved
 				}
@@ -440,12 +440,17 @@ func effectiveChatSkillConfig(cfg *config.Config, session *ChatSession) *config.
 }
 
 func resolveChatSkillDirs(cfg *config.Config, session *ChatSession, cliSkillDirs []string) []string {
+	includeDiscovered := session == nil || !session.NoSkills
 	if session != nil && len(session.ResolvedSkillDirs) > 0 {
 		// Profile/session skill dirs already include configured dirs; still append
 		// active plugin skill roots so trust→hot-load works mid-session after restart.
+		if !includeDiscovered {
+			// --no-skills：只保留 CLI 显式目录，不再并入会话解析出的自动发现结果。
+			return appendUniqueExistingDirs(nil, cliSkillDirs)
+		}
 		return mergeActivePluginSkillDirs(appendUniqueExistingDirs(session.ResolvedSkillDirs, cliSkillDirs))
 	}
-	return resolveConfiguredSkillDirs(skillRuntimeConfig(cfg), cliSkillDirs)
+	return resolveConfiguredSkillDirs(skillRuntimeConfig(cfg), cliSkillDirs, includeDiscovered)
 }
 
 func appendUniqueExistingDirs(base []string, extra []string) []string {

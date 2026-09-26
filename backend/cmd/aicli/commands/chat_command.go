@@ -119,6 +119,8 @@ func registerChatFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("debug-http", false, "记录 chat 请求的 HTTP 调试信息（重试尝试、状态码、最后响应预览）")
 	cmd.Flags().Bool("fail-fast", false, "调试模式：禁用自动重试，首次失败立即返回")
 	cmd.Flags().StringSlice("skills-dir", nil, "附加外部 skills 目录（可重复指定），与系统级 skills 一起加载")
+	cmd.Flags().StringSlice("skill", nil, "附加 skill 目录（可重复指定；等价 --skills-dir，Agent Skills 口径）")
+	cmd.Flags().Bool("no-skills", false, "跳过 skill 自动发现（工作区 .agents/skills、用户级目录与配置目录）；显式 --skill/--skills-dir 仍生效")
 	cmd.Flags().Int("skills-top-k", 0, "aicli chat 暴露给模型的候选 skills 数量（0=使用配置默认值）")
 	cmd.Flags().String("skills-mode", "auto", "aicli chat 的 skills 暴露模式（auto|prefer|only）")
 	cmd.Flags().Bool("skills-debug", false, "打印当前请求的 skill route 候选、暴露结果与模式")

@@ -142,17 +142,19 @@ type ChatSession struct {
 	MCPStatus                       *MCPStatus                   // MCP 状态
 	// ACPMCPSession 是 ACP 会话私有的 MCP 运行时（客户端下发来源）。
 	// 非 ACP 会话恒为 nil；会话关闭/删除时负责回收其子进程。
-	ACPMCPSession    *acpSessionMCP
-	SkillsBinding    *skillsRuntimeBinding // Skills 运行时绑定
-	SkillsMode       string                // Skills 暴露模式
-	SkillsDebug      bool                  // Skills 调试输出
-	Config           *config.Config        // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
-	RetryConfig      RetryConfig           // 重试配置
-	RequestTimeout   time.Duration         // 请求超时（0 表示不设置）
-	OutputFormat     string                // 输出格式（interactive|text|json）
-	InputReader      *bufio.Reader         // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
-	InputQueue       *chatInputQueue       // interactive line queue fed by stdin pump
-	ProfileReference string                // 用户指定或配置解析出的 profile 引用
+	ACPMCPSession *acpSessionMCP
+	SkillsBinding *skillsRuntimeBinding // Skills 运行时绑定
+	SkillsMode    string                // Skills 暴露模式
+	SkillsDebug   bool                  // Skills 调试输出
+	// NoSkills 是 --no-skills：跳过 skill 自动发现，只保留显式目录。
+	NoSkills         bool
+	Config           *config.Config  // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
+	RetryConfig      RetryConfig     // 重试配置
+	RequestTimeout   time.Duration   // 请求超时（0 表示不设置）
+	OutputFormat     string          // 输出格式（interactive|text|json）
+	InputReader      *bufio.Reader   // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
+	InputQueue       *chatInputQueue // interactive line queue fed by stdin pump
+	ProfileReference string          // 用户指定或配置解析出的 profile 引用
 	// ProfileAutoRoutedFrom 记录该绑定由哪个保留引用路由而来（FR-11：目前仅 "auto"；
 	// 空 = 非自动路由）。ProfileReference 始终是已解析的具体 profile，本字段只用于
 	// 归因展示（启动摘要 / /profile status），不参与任何解析。
@@ -197,7 +199,7 @@ type ChatSession struct {
 	// 由回合入口 reconcile 驱逐旧 actor，使新 profile 的工具策略在下一轮生效。
 	// 进程内字段：actor 本身就是进程内对象，重启后不存在旧 actor。
 	profileRebuildPending bool
-	PermissionMode runtimepolicy.Mode // actor/team run permission mode
+	PermissionMode        runtimepolicy.Mode // actor/team run permission mode
 	// CLIAllowTools / CLIDenyTools from --allow-tool / --deny-tool.
 	CLIAllowTools []string
 	CLIDenyTools  []string

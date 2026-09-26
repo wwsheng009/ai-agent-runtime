@@ -57,6 +57,8 @@ func registerExecSharedFlags(cmd *cobra.Command, exclude map[string]bool) {
 	flags.Bool("disable-tools", false, "禁用 tools/skills 暴露")
 	flags.Bool("enable-tools", false, "显式启用 tools/skills 暴露；aicli exec 默认关闭 tools 以避免 headless 审批阻塞，--yolo 会自动启用")
 	flags.StringSlice("skills-dir", nil, "附加外部 skills 目录（可重复指定）")
+	flags.StringSlice("skill", nil, "附加 skill 目录（可重复指定；等价 --skills-dir）")
+	flags.Bool("no-skills", false, "跳过 skill 自动发现（工作区 .agents/skills、用户级目录与配置目录）；显式 --skill/--skills-dir 仍生效")
 	flags.Int("skills-top-k", 0, "暴露给模型的候选 skills 数量（0=使用配置默认值）")
 	flags.String("skills-mode", "auto", "skills 暴露模式（auto|prefer|only）")
 	flags.Bool("skills-debug", false, "打印 skill route 候选和暴露结果")
