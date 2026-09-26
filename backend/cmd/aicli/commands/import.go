@@ -305,17 +305,17 @@ func importChatSessionFromExportFile(ctx context.Context, session *ChatSession, 
 	}
 
 	result := &importSessionResult{
-		SessionID:        targetSessionID,
-		SourceSessionID:  sourceSessionID,
-		Renamed:          renamed,
-		UserID:           userID,
-		UserOverridden:   userOverridden,
-		State:            string(state),
-		MessageCount:     len(history),
-		SourceFile:       absoluteSource,
-		SourceFormat:     strings.TrimSpace(envelope.Format),
-		StoreDir:         session.SessionDir,
-		DryRun:           req.DryRun,
+		SessionID:       targetSessionID,
+		SourceSessionID: sourceSessionID,
+		Renamed:         renamed,
+		UserID:          userID,
+		UserOverridden:  userOverridden,
+		State:           string(state),
+		MessageCount:    len(history),
+		SourceFile:      absoluteSource,
+		SourceFormat:    strings.TrimSpace(envelope.Format),
+		StoreDir:        session.SessionDir,
+		DryRun:          req.DryRun,
 	}
 	if !envelope.ExportedAt.IsZero() {
 		result.ExportedAt = envelope.ExportedAt.Format(time.RFC3339)

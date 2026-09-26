@@ -63,12 +63,12 @@ type sessionProfileSwitchChanged struct {
 // changed 的语义是「本次切换实际应用的生效面差异」：provider/model/permission
 // 只报告不隐式应用（D30），因此这三项恒为 false，差异以 warnings 呈现。
 type sessionProfileSwitchReport struct {
-	From        string                       `json:"from"`
-	To          string                       `json:"to"`
-	Changed     sessionProfileSwitchChanged  `json:"changed"`
-	EffectiveAt string                       `json:"effective_at"`
-	CacheNotice string                       `json:"cache_notice"`
-	Warnings    []string                     `json:"warnings,omitempty"`
+	From        string                      `json:"from"`
+	To          string                      `json:"to"`
+	Changed     sessionProfileSwitchChanged `json:"changed"`
+	EffectiveAt string                      `json:"effective_at"`
+	CacheNotice string                      `json:"cache_notice"`
+	Warnings    []string                    `json:"warnings,omitempty"`
 	// InFlightTurn 记录切换发生时是否有在途 turn；在途 turn 的冻结前缀由
 	// 存储层与活体 agent 配置保护（A3），切换本身仍然立即落地会话状态。
 	InFlightTurn bool `json:"in_flight_turn"`
@@ -346,7 +346,7 @@ func (h *Handler) sessionProfileTurnInFlight(sessionID string) bool {
 // invalidateSessionProfileRuntime 重置稳定工具面缓存并驱逐空闲 actor（②）。
 //
 // 返回值：scope（actor|none）、invalidated（稳定工具面是否真的清了）、evicted
-//（actor 是否已被驱逐，下一次 GetOrCreate 将按新 sessionmeta 重建）。
+// （actor 是否已被驱逐，下一次 GetOrCreate 将按新 sessionmeta 重建）。
 //
 // 为什么必须驱逐（V15/V19 核实结论）：server 的 agent / 系统提示词 / 工具策略在
 // `buildSessionActor` 构建期固化，`PrepareRun` 只做租约；hub 复用在位 actor，

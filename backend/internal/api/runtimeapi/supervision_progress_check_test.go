@@ -36,14 +36,14 @@ func runningAPIBatch(t *testing.T, store subagentbatch.BatchStore, batchID, pare
 		Status:          subagentbatch.BatchRunning,
 		// 计数以 task 行为单一事实源：这里只有 1 行 running 任务，
 		// 因此存储列也必须写成 0 完成 / 1 运行 / 2 待跑。
-		TaskCount:       3,
-		CompletedCount:  0,
-		RunningCount:    1,
-		QueuedCount:     2,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		HeartbeatAt:     now,
-		StartedAt:       &now,
+		TaskCount:      3,
+		CompletedCount: 0,
+		RunningCount:   1,
+		QueuedCount:    2,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		HeartbeatAt:    now,
+		StartedAt:      &now,
 	}, []subagentbatch.SubagentTaskRecord{
 		{
 			TaskID:         "task_1",

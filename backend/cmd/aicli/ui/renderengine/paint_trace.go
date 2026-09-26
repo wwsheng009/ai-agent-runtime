@@ -94,12 +94,12 @@ type PaintTrace struct {
 // RowPaintStat holds the per-row reconciliation counters for one 1-based
 // screen row.
 type RowPaintStat struct {
-	Row            int    // 1-based screen row
-	Emits          uint64 // frames in which this row was emitted
-	WhiteEmits     uint64 // emitted while content was identical to front buffer
-	MissingPaints  uint64 // content changed but row was not emitted
-	Changes        uint64 // frames in which content differed from front buffer
-	LastEmitFrame  uint64 // frame number of the most recent emit
+	Row             int    // 1-based screen row
+	Emits           uint64 // frames in which this row was emitted
+	WhiteEmits      uint64 // emitted while content was identical to front buffer
+	MissingPaints   uint64 // content changed but row was not emitted
+	Changes         uint64 // frames in which content differed from front buffer
+	LastEmitFrame   uint64 // frame number of the most recent emit
 	LastChangeFrame uint64 // frame number of the most recent content change
 }
 

@@ -105,7 +105,7 @@ func TestRunFullScreenListLoopIgnoresDeleteKeyWithoutOnDelete(t *testing.T) {
 func TestRunFullScreenListLoopReturnsDeleteRequestWithOnDelete(t *testing.T) {
 	delCalls := 0
 	result, _, err := runFullScreenListLoop(context.Background(), FullScreenListOptions{
-		Items:   []FullScreenListItem{{Title: "one"}, {Title: "two"}},
+		Items: []FullScreenListItem{{Title: "one"}, {Title: "two"}},
 		OnDelete: func(index int) error {
 			delCalls++
 			return nil

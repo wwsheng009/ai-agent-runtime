@@ -174,14 +174,14 @@ func publishCacheStarted(t *testing.T, bus *runtimeevents.Bus, sessionID, llmReq
 func publishCacheFinished(t *testing.T, bus *runtimeevents.Bus, sessionID, llmRequestID string, extra map[string]interface{}) {
 	t.Helper()
 	payload := map[string]interface{}{
-		"llm_request_id":     llmRequestID,
-		"trace_id":           "trace-" + llmRequestID,
-		"logical_turn_id":    "turn-" + llmRequestID,
-		"step":               1,
-		"provider":           "openai",
-		"model":              "gpt-4o",
-		"success":            true,
-		"usage_prompt_tokens": 200,
+		"llm_request_id":            llmRequestID,
+		"trace_id":                  "trace-" + llmRequestID,
+		"logical_turn_id":           "turn-" + llmRequestID,
+		"step":                      1,
+		"provider":                  "openai",
+		"model":                     "gpt-4o",
+		"success":                   true,
+		"usage_prompt_tokens":       200,
 		"usage_cache_read_reported": true,
 	}
 	for key, value := range extra {
@@ -251,7 +251,7 @@ func TestHandleChatWebAPICache_RequestsAndOverview(t *testing.T) {
 	// 请求 1：缓存命中（read=100/prompt=200 → hit_ratio 0.5）。
 	publishCacheStarted(t, bus, sessionID, "req-1", nil)
 	publishCacheFinished(t, bus, sessionID, "req-1", map[string]interface{}{
-		"usage_cache_read_tokens":    100,
+		"usage_cache_read_tokens":     100,
 		"usage_cache_creation_tokens": 0,
 	})
 	// 请求 2：缓存写入（creation=150/prompt=200 → write_ratio 0.75）。

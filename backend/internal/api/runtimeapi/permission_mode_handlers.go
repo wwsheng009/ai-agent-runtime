@@ -38,13 +38,13 @@ type sessionPermissionModeOption struct {
 }
 
 type sessionPermissionModeResponse struct {
-	SessionID    string                       `json:"session_id"`
-	Mode         string                       `json:"mode"`
-	Requested    string                       `json:"requested_mode,omitempty"`
-	PreviousMode string                       `json:"previous_mode,omitempty"`
-	PlanActive   bool                         `json:"plan_active,omitempty"`
-	PlanStatus   string                       `json:"plan_status,omitempty"`
-	Updated      bool                         `json:"updated,omitempty"`
+	SessionID    string                        `json:"session_id"`
+	Mode         string                        `json:"mode"`
+	Requested    string                        `json:"requested_mode,omitempty"`
+	PreviousMode string                        `json:"previous_mode,omitempty"`
+	PlanActive   bool                          `json:"plan_active,omitempty"`
+	PlanStatus   string                        `json:"plan_status,omitempty"`
+	Updated      bool                          `json:"updated,omitempty"`
 	Supported    []sessionPermissionModeOption `json:"supported_modes"`
 }
 

@@ -11,8 +11,8 @@ import (
 const ChatWebAPICachePath = "/web/api/cache"
 
 // HandleChatWebAPICache 缓存分析 HTTP 入口：复用 cacheanalytics.Handler
-//（同一契约单点定义），数据源优先为 usageanalytics 的数据库 Source
-//（usage_analytics.sqlite，与 TUI /usage、runtime server 同库同源）。
+// （同一契约单点定义），数据源优先为 usageanalytics 的数据库 Source
+// （usage_analytics.sqlite，与 TUI /usage、runtime server 同库同源）。
 // session_id 缺省为当前 runtime session id；服务不可用时返回稳定错误码
 // cache_analytics_disabled（503）。
 func HandleChatWebAPICache(w http.ResponseWriter, r *http.Request) {

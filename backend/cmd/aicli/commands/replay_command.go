@@ -130,6 +130,7 @@ func printReplayProjection(out io.Writer, proj outputpkg.VirtualProjectionSnapsh
 	}
 	fmt.Fprintln(out, "=== End Replay ===")
 }
+
 // readReplayInputFile 读取 replay 输入文件：
 //   - 若能解码为 JSON ReplayArchiveFile → 直接返回；
 //   - 否则视为裸 wire ANSI 字节（--render-output-file 产物），

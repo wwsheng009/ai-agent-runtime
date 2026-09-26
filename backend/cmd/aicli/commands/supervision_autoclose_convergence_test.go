@@ -43,7 +43,7 @@ func (e *recordingActionExecutor) snapshot() []supervision.ActionRecord {
 }
 
 // newAutoCloseTestHost 装配 P1-C 收敛钩子所需的全部依赖：监督控制面
-//（含 durable store 与 wake 调度）、subagent batch store，以及一个就绪的
+// （含 durable store 与 wake 调度）、subagent batch store，以及一个就绪的
 // 动作执行器。policy 即 agents.autoCloseCompleted。
 func newAutoCloseTestHost(t *testing.T, policy string) (*localChatRuntimeHost, *recordingActionExecutor, subagentbatch.BatchStore) {
 	t.Helper()

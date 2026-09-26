@@ -123,9 +123,9 @@ func (blockingReader) Read(p []byte) (int, error) {
 // deadlineReader implements SetReadDeadline and returns ErrDeadlineExceeded
 // after the deadline (or immediately if already expired).
 type deadlineReader struct {
-	deadline            time.Time
-	blockUntilDeadline  bool
-	setDeadlineCalls    int
+	deadline           time.Time
+	blockUntilDeadline bool
+	setDeadlineCalls   int
 }
 
 func (r *deadlineReader) SetReadDeadline(t time.Time) error {

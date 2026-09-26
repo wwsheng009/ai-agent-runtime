@@ -65,11 +65,11 @@ type SiteAccountFetchRequest struct {
 }
 
 type SiteAccountFetchResult struct {
-	Detect      *siteaccount.DetectResult  `json:"detect,omitempty"`
+	Detect      *siteaccount.DetectResult    `json:"detect,omitempty"`
 	Account     *siteaccount.AccountSnapshot `json:"account,omitempty"`
-	AccountView *siteaccount.AccountView   `json:"account_view,omitempty"`
-	BalanceLine string                     `json:"balance_line,omitempty"`
-	Warnings    []string                   `json:"warnings,omitempty"`
+	AccountView *siteaccount.AccountView     `json:"account_view,omitempty"`
+	BalanceLine string                       `json:"balance_line,omitempty"`
+	Warnings    []string                     `json:"warnings,omitempty"`
 }
 
 type SiteAccountRefreshRequest struct {
@@ -85,15 +85,15 @@ type SiteAccountRefreshRequest struct {
 }
 
 type SiteAccountRefreshResult struct {
-	Provider            string                               `json:"provider"`
+	Provider           string                               `json:"provider"`
 	SiteType           string                               `json:"site_type"`
 	SiteTypeConfidence string                               `json:"site_type_confidence,omitempty"`
 	SiteTypeDetectedAt string                               `json:"site_type_detected_at,omitempty"`
 	SiteTypeScores     map[string]int                       `json:"site_type_scores,omitempty"`
-	Detect             *siteaccount.DetectResult             `json:"detect,omitempty"`
-	Account            *siteaccount.AccountSnapshot          `json:"account,omitempty"`
-	AccountView        *siteaccount.AccountView              `json:"account_view,omitempty"`
-	AccountCache       *agentconfig.ProviderAccountSnapshot  `json:"account_cache,omitempty"`
+	Detect             *siteaccount.DetectResult            `json:"detect,omitempty"`
+	Account            *siteaccount.AccountSnapshot         `json:"account,omitempty"`
+	AccountView        *siteaccount.AccountView             `json:"account_view,omitempty"`
+	AccountCache       *agentconfig.ProviderAccountSnapshot `json:"account_cache,omitempty"`
 	AccountAuthRef     string                               `json:"account_auth_ref,omitempty"`
 	BalanceLine        string                               `json:"balance_line,omitempty"`
 	Warnings           []string                             `json:"warnings,omitempty"`

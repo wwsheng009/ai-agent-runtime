@@ -492,9 +492,9 @@ func (h *Handler) usageAnalyticsHealthSnapshot() map[string]interface{} {
 			"requests": int64(0), "sessions": int64(0), "tool_calls": int64(0),
 			"subagents": int64(0), "turns": int64(0),
 		},
-		"degraded": true,
-		"stats_ready":  false,
-		"stats_drift":  nil,
+		"degraded":    true,
+		"stats_ready": false,
+		"stats_drift": nil,
 	}
 	if h == nil {
 		return block

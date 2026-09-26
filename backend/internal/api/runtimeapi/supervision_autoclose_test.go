@@ -47,7 +47,7 @@ func (e *apiRecordingActionExecutor) snapshot() []supervision.ActionRecord {
 }
 
 // newAPIAutoCloseTestHandler 装配 P1-C 收敛钩子所需的全部依赖：监督控制面
-//（durable store + wake 调度 + 就绪的动作执行器）、共享 batch store，以及可选的
+// （durable store + wake 调度 + 就绪的动作执行器）、共享 batch store，以及可选的
 // agents.autoCloseCompleted 策略。
 func newAPIAutoCloseTestHandler(t *testing.T, policy string) (*Handler, *apiRecordingActionExecutor, subagentbatch.BatchStore) {
 	t.Helper()
@@ -241,7 +241,7 @@ func TestAPIConvergeTerminalBatchChildrenHonorsPolicy(t *testing.T) {
 }
 
 // TestAPIBatchLifecycleProjectorConvergesSucceededChildren 是接线断言：真实入口
-//（apiBatchLifecycleProjector）在 batch_terminal 策略下必须同时落批次终态行与子
+// （apiBatchLifecycleProjector）在 batch_terminal 策略下必须同时落批次终态行与子
 // 会话收敛动作，而 off 策略下逐字节保持仅投影行为。
 func TestAPIBatchLifecycleProjectorConvergesSucceededChildren(t *testing.T) {
 	ctx := context.Background()

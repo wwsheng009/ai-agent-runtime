@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
-	"github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	"github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
 // TestSceneEditRendersFullDiff is the end-to-end regression test for the

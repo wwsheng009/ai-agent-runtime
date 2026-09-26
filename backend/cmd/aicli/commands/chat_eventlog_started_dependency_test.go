@@ -358,7 +358,7 @@ func TestEventLogStartedFastMatchesFullDecode(t *testing.T) {
 		{"non-identity-keys-present", map[string]interface{}{
 			"step": 2, "stream_id": startedStreamID, "llm_request_id": startedReqID,
 			"turn_id": startedScopeID,
-			"model":    "gpt-5", "message_count": 42, "context_prompt_tokens": 12345,
+			"model":   "gpt-5", "message_count": 42, "context_prompt_tokens": 12345,
 			"messages": []interface{}{map[string]interface{}{"role": "user", "content": "x"}},
 			"tools":    []interface{}{map[string]interface{}{"name": "read_file"}},
 		}},

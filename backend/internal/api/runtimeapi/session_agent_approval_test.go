@@ -127,9 +127,9 @@ func TestAPIAgentQuestionSubscriptionProjectsDigestOnly(t *testing.T) {
 	require.Contains(t, digest.Text, "Which environment")
 
 	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{
-		RootScopeID:          parent.ID,
+		RootScopeID:           parent.ID,
 		TargetParentSessionID: parent.ID,
-		UnclaimedOnly:        true,
+		UnclaimedOnly:         true,
 	})
 	require.NoError(t, err)
 	require.Empty(t, pending, "questions stay digest-only")

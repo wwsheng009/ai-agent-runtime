@@ -369,8 +369,8 @@ func TestTTY_LiveLoop_ClearRequiresConfirmation(t *testing.T) {
 	}, nil)
 	for _, want := range []string{
 		"请输入 clear 确认清空", // 确认提示真实出现 → 说明会话已有消息（非空分支）
-		"已取消，会话历史未清空", // 取消路径
-		"当前会话历史已清空",     // 确认路径
+		"已取消，会话历史未清空",    // 取消路径
+		"当前会话历史已清空",      // 确认路径
 	} {
 		if !strings.Contains(run.raw, want) {
 			t.Errorf("渲染流中未找到 %q; raw=%q", want, run.raw)

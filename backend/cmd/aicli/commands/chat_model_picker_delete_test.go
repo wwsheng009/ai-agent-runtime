@@ -109,10 +109,10 @@ func TestChatModelRemovalGuard(t *testing.T) {
 		SupportedModels: []string{"m-a", "m-b"},
 	}
 	cases := []struct {
-		name         string
-		current      string
-		target       string
-		wantErr      string
+		name    string
+		current string
+		target  string
+		wantErr string
 	}{
 		{name: "in use", current: "m-b", target: "m-b", wantErr: "正在使用"},
 		{name: "not managed", current: "m-a", target: "m-c", wantErr: "受管模型列表"},

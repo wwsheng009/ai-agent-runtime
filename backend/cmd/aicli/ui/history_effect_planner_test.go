@@ -958,6 +958,7 @@ func TestSyncHistoryEffectsForActiveCellSkipsUnchangedInput(t *testing.T) {
 		}
 	})
 }
+
 // TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange is a
 // regression test for the high-CPU loop (185% sustained).  The loop was driven
 // by every streaming delta invalidating an in-flight Active-origin commit
@@ -1006,7 +1007,7 @@ func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *test
 	// when the active-only replan starts from the new Acked frontier and
 	// assigns displayRow=0 again.
 	candidate := inFlight
-	candidate.Token = 0       // auto-assigned on enqueue
+	candidate.Token = 0                                     // auto-assigned on enqueue
 	candidate.DisplayRange = DisplayRange{Start: 0, End: 1} // relative row
 
 	// Call syncHistoryEffectCandidates — the exact trigger path.
@@ -1036,6 +1037,7 @@ func TestSyncHistoryEffectCandidates_ActiveInFlightDifferentDisplayRange(t *test
 		t.Fatalf("expected 1 ledger entry, got %d: %#v", len(entries), entries)
 	}
 }
+
 // TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail 锁定截断规划的语义：被
 // historyCommitPlanningBudget 截断的规划结果只是完整规划的前缀，它缺少的尾部
 // cell 并不代表那些候选失效。若把前缀交给 syncHistoryEffectCandidates（它把输入

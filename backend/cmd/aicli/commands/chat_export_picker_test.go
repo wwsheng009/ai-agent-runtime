@@ -27,11 +27,11 @@ func TestExecuteStructuredExportCommandExplicitCurrentFull(t *testing.T) {
 
 	outputPath := filepath.Join(t.TempDir(), "export.json")
 	session := &ChatSession{
-		Model:           "gpt-test",
-		RuntimeSession:  runtimeSession,
-		SessionManager:  manager,
-		SessionDir:      sessionDir,
-		SessionUserID:   userID,
+		Model:          "gpt-test",
+		RuntimeSession: runtimeSession,
+		SessionManager: manager,
+		SessionDir:     sessionDir,
+		SessionUserID:  userID,
 	}
 	result, handled := executeStructuredExportCommand(session, "/export current --full --output "+outputPath)
 	if !handled {
@@ -83,11 +83,11 @@ func TestExecuteStructuredExportCommandBareWithDirDegradesToCurrent(t *testing.T
 
 	outDir := t.TempDir()
 	session := &ChatSession{
-		Model:           "gpt-test",
-		RuntimeSession:  runtimeSession,
-		SessionManager:  manager,
-		SessionDir:      sessionDir,
-		SessionUserID:   userID,
+		Model:          "gpt-test",
+		RuntimeSession: runtimeSession,
+		SessionManager: manager,
+		SessionDir:     sessionDir,
+		SessionUserID:  userID,
 	}
 	// Bare /export with an explicit --dir but no explicit target degrades to
 	// exporting the current session (no picker surface in this test session).

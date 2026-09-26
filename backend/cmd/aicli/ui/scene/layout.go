@@ -27,11 +27,11 @@ func (k BoundaryKey) String() string {
 // LayoutRow 是 LayoutTranscript 的输出行：要么是 cell 的语义行，要么是
 // boundary row（gap）。
 type LayoutRow struct {
-	CellID  CellID        // 归属 cell（gap row 归属后继 cell，§7.4）
-	Text    string        // cell 的 source 文本行；gap row 为 ""
-	Gap     boundary.GapRows // gap row 时为 gap 行数（1），否则 0
-	Boundary *BoundaryKey // 非 nil 表示这是 boundary row
-	Index   int           // 全局行序（从 0 起，便于测试断言）
+	CellID   CellID           // 归属 cell（gap row 归属后继 cell，§7.4）
+	Text     string           // cell 的 source 文本行；gap row 为 ""
+	Gap      boundary.GapRows // gap row 时为 gap 行数（1），否则 0
+	Boundary *BoundaryKey     // 非 nil 表示这是 boundary row
+	Index    int              // 全局行序（从 0 起，便于测试断言）
 }
 
 // LayoutTranscript 派生 transcript 的 boundary row 序列（§7.4 推荐方案：

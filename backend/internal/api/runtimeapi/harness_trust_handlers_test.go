@@ -149,4 +149,3 @@ prompts:
 		filepath.Join(root, "agents", "coder", "prompts", "system.md"),
 		[]byte("demo system prompt"), 0o644))
 }
-

@@ -27,10 +27,10 @@ func buildAgentContextMessages(contextValues map[string]interface{}, workspaceCt
 		messages = append(messages, *guidance)
 	}
 	if workspaceCtx != nil && strings.TrimSpace(workspaceCtx.Summary) != "" {
-		messages = append(messages, *types.NewSystemMessage("Workspace context: "+strings.TrimSpace(workspaceCtx.Summary)))
+		messages = append(messages, *types.NewSystemMessage("Workspace context: " + strings.TrimSpace(workspaceCtx.Summary)))
 	}
 	if summary := buildAgentContextSummary(contextValues); summary != "" {
-		messages = append(messages, *types.NewSystemMessage("Runtime context summary:\n"+summary))
+		messages = append(messages, *types.NewSystemMessage("Runtime context summary:\n" + summary))
 	}
 	return messages
 }

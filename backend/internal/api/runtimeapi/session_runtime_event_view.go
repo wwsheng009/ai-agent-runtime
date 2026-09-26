@@ -101,4 +101,3 @@ func provenanceValueIsZero(value interface{}) bool {
 		return value == nil
 	}
 }
-

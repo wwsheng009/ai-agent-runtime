@@ -15,6 +15,7 @@ package scene
 //   - 首 cell 前无 gap（transcript 不以空行开头）；
 //   - gap 决策全部来自 boundary.ResolveGap 规则表（INV-GAP-03），本层无特例；
 //   - 无状态纯函数：replay 与 live 复用同一投影（§2.3 不变量 9）。
+//
 // 注意：gap 位置判定请以 LayoutTranscript 的 LayoutRow.Gap 为准（本投影
 // 只把 gap 行投影为空字符串，语义上不与 cell 内部空行区分；内部空行属于
 // source，见 §7.2）。parity 测试与 /debug 审计对照旧路径空行时，应与

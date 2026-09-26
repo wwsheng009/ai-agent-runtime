@@ -270,10 +270,10 @@ func runUsageAnalyticsPrune(opts usageAnalyticsPruneOptions) int {
 
 	if opts.json {
 		payload := map[string]interface{}{
-			"db_path":           path,
-			"before":            cutoff.Format(time.RFC3339),
-			"deleted_requests":  deleted,
-			"vacuumed":          vacuumed,
+			"db_path":          path,
+			"before":           cutoff.Format(time.RFC3339),
+			"deleted_requests": deleted,
+			"vacuumed":         vacuumed,
 		}
 		encoded, err := json.MarshalIndent(payload, "", "  ")
 		if err != nil {

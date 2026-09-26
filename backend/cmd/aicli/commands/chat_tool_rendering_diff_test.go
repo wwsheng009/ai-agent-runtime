@@ -11,7 +11,8 @@ import (
 // TestRenderEditedDiffOutput_KeepsHeaderLikeAddedLines covers an added line
 // whose own text begins with "++ ". The local parser used to read the raw
 // "+++ ..." row as a file header and silently retargeted the whole diff.
-func TestRenderEditedDiffOutput_KeepsHeaderLikeAddedLines(t *testing.T) {	output := strings.Join([]string{
+func TestRenderEditedDiffOutput_KeepsHeaderLikeAddedLines(t *testing.T) {
+	output := strings.Join([]string{
 		"--- a/notes.md",
 		"+++ b/notes.md",
 		"@@ -1,2 +1,3 @@",

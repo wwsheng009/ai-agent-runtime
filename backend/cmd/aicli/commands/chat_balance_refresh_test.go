@@ -62,7 +62,7 @@ func TestPrepareProviderForPeriodicBalanceRefresh(t *testing.T) {
 		{
 			name: "unknown site type already probed once is not re-probed",
 			provider: config.Provider{
-				Protocol:          "openai",
+				Protocol:           "openai",
 				SiteTypeDetectedAt: "2026-01-01T00:00:00Z",
 			},
 			want: false,

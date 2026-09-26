@@ -18,7 +18,7 @@ import (
 //	GET /web/api/export[?format=full|body|tools|trace][&session_id=<id>]
 //
 // 会话解析、格式归一化与写出实现全部复用 CLI 同一份代码
-//（resolveChatExportRuntimeSession / writeChatSessionExportToPath），因此下载内容
+// （resolveChatExportRuntimeSession / writeChatSessionExportToPath），因此下载内容
 // 与 TUI `/export`、顶层 `aicli export` 的产物逐字节同源，不存在第二套格式实现。
 // 差别只在产物归属：命令行导出落盘到 exports 目录，web 导出把内容作为附件回传，
 // 用同机临时文件中转（写临时文件 → http.ServeContent → 删除），大 artifact 不会
@@ -117,7 +117,7 @@ func chatWebExportContentType(format chatExportFormat) string {
 }
 
 // chatWebExportFileName 复用 CLI 默认命名规则
-//（{session}_{YYYYMMDD_HHMMSS}_{format}{扩展名}，见 resolveChatExportOutputPath），
+// （{session}_{YYYYMMDD_HHMMSS}_{format}{扩展名}，见 resolveChatExportOutputPath），
 // 让浏览器下载的文件名与 `aicli export` 的落盘产物同名同序，便于对照排查。
 func chatWebExportFileName(runtimeSession *runtimechat.Session, format chatExportFormat, extension string) string {
 	sessionID := "session"

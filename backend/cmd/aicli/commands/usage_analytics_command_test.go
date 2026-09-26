@@ -21,10 +21,10 @@ func TestUsageAnalyticsRebuildStatsRepairsDrift(t *testing.T) {
 
 	var buf bytes.Buffer
 	code := runUsageAnalyticsRebuildStats(usageAnalyticsRebuildOptions{
-		dbPath:    path,
-		all:       true,
-		out:       &buf,
-		errOut:    &buf,
+		dbPath: path,
+		all:    true,
+		out:    &buf,
+		errOut: &buf,
 	})
 	if code != statsExitOK {
 		t.Fatalf("rebuild --all 退出码 = %d, want 0; output=%s", code, buf.String())

@@ -34,13 +34,13 @@ func TestEnsureSessionEnvironmentSnapshot_FreezeOnce(t *testing.T) {
 
 func TestBuildAgentContextMessages_UsesFrozenEnvironmentBlock(t *testing.T) {
 	contextValues := map[string]interface{}{
-		"workspace_path":                      `E:\projects\demo`,
-		sessionmeta.EnvironmentContextBlock:   "<environment_context>\n  <cwd>frozen</cwd>\n</environment_context>",
+		"workspace_path":                          `E:\projects\demo`,
+		sessionmeta.EnvironmentContextBlock:       "<environment_context>\n  <cwd>frozen</cwd>\n</environment_context>",
 		sessionmeta.EnvironmentCapabilityGuidance: "Measured capability guidance (frozen).",
-		"current_date":                        "2099-01-01",
-		"timezone":                            "FROZEN",
-		"os":                                  "frozen-os",
-		"shell":                               "frozen-shell",
+		"current_date":                            "2099-01-01",
+		"timezone":                                "FROZEN",
+		"os":                                      "frozen-os",
+		"shell":                                   "frozen-shell",
 	}
 	messages := buildAgentContextMessages(contextValues, &workspace.WorkspaceContext{Summary: "summary"})
 	if len(messages) == 0 {

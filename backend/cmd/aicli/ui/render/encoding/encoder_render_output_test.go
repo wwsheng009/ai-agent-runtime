@@ -27,13 +27,13 @@ func TestToolFinishedText_PrefersRenderOutput(t *testing.T) {
 	}, "\n")
 
 	ev := event("tool.completed", map[string]interface{}{
-		"tool_call_id":            "call_edit_1",
-		"logical_tool":            "edit",
-		"render_output":           fullOutput,
-		"render_output_format":    "markdown",
+		"tool_call_id":              "call_edit_1",
+		"logical_tool":              "edit",
+		"render_output":             fullOutput,
+		"render_output_format":      "markdown",
 		"render_output_untruncated": true,
-		"summary":                 "成功替换了 1 处匹配项\n文件差异:\n```diff",
-		"summary_lines":           []string{"成功替换了 1 处匹配项", "文件差异:", "```diff"},
+		"summary":                   "成功替换了 1 处匹配项\n文件差异:\n```diff",
+		"summary_lines":             []string{"成功替换了 1 处匹配项", "文件差异:", "```diff"},
 	})
 
 	if got := toolFinishedText(ev); got != fullOutput {

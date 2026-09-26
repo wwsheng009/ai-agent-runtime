@@ -451,17 +451,17 @@ func chatWebInvokeTimeout(ms int) time.Duration {
 // EventBus.Publish 在发布者 goroutine 内同步调用 handler，因此 observe 必须
 // 只做加锁计数，不能阻塞。
 type chatWebInvokeWatch struct {
-	mu           sync.Mutex
-	sessionID    string // 绑定的会话 ID；非空时忽略其他会话的事件
-	turnID       string // 最近一次 session_start/session_end 事件携带的 turn 身份（供终态回填）
+	mu        sync.Mutex
+	sessionID string // 绑定的会话 ID；非空时忽略其他会话的事件
+	turnID    string // 最近一次 session_start/session_end 事件携带的 turn 身份（供终态回填）
 	// baselineAssistantCount 是 invoke 起点会话内正文非空的 assistant 消息条数，
 	// 用于区分"本轮新回复"与"上一轮遗留的同文本回复"（见 finalize 的判定）。
 	baselineAssistantCount int
-	lastActivity time.Time
-	starts       int
-	finishes     int
-	interrupted  bool
-	assistant    string
+	lastActivity           time.Time
+	starts                 int
+	finishes               int
+	interrupted            bool
+	assistant              string
 	// onStream 是流式 invoke 的事件转发回调（非空时按需转发 delta/tool 事件）；
 	// 回调实现必须非阻塞（writeEvent 只做入队）。
 	onStream func(event string, data map[string]interface{}, sourceEvent string)

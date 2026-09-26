@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	adapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	adapter "github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
@@ -85,7 +85,6 @@ func TestApplyModelCommandSelectionPublishesModelChanged(t *testing.T) {
 		t.Fatalf("event reasoning_effort = %v, want medium", got[0].Payload["reasoning_effort"])
 	}
 }
-
 
 func TestHandleCommand_ReasoningTogglesReasoningOutput(t *testing.T) {
 	session := &ChatSession{}

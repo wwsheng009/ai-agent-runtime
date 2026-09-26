@@ -8,10 +8,10 @@ import (
 	"sync"
 	"testing"
 
-	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
-	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 )
 
 // TestRenderLayer_TextParity_LiveUserInputBlocks 固化切片 10 的核心等价：
@@ -233,6 +233,7 @@ func TestRenderLayer_UserInput_ReplayPathDoesNotInject(t *testing.T) {
 		t.Fatalf("live path: RenderText 缺少用户文本，rows=%q", rows)
 	}
 }
+
 // TestSubmitUserInputPublishesUserSubmittedBusEvent 固化"提交即刷新"优化：
 // submitUserInput 在用户 cell 成功注入渲染数据面后，向 EventBus 发布
 // aicli.chat.user_submitted 镜像事件（SSE 侧经 chatWebSSEMappings 映射为

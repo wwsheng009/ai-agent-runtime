@@ -83,9 +83,9 @@ func TestLocalAgentQuestionBridgeStaysDigestOnly(t *testing.T) {
 	require.Contains(t, digest.Text, "Which environment")
 
 	pending, err := host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{
-		RootScopeID:          "parent-cli-2",
+		RootScopeID:           "parent-cli-2",
 		TargetParentSessionID: "parent-cli-2",
-		UnclaimedOnly:        true,
+		UnclaimedOnly:         true,
 	})
 	require.NoError(t, err)
 	require.Empty(t, pending, "questions stay digest-only")

@@ -62,13 +62,13 @@ type activeTurnRegistry struct {
 
 // activeTurnSnapshot 是 `GET /runtime` 里 `active_turn` 字段的载荷形状。
 type activeTurnSnapshot struct {
-	SessionID string    `json:"session_id"`
-	TurnID    string    `json:"turn_id"`
+	SessionID string `json:"session_id"`
+	TurnID    string `json:"turn_id"`
 	// Source 标明回合来源（"agent_chat_stream" 等），便于前端区分 web 直连
 	// 回合与 durable actor 回合。
 	Source string `json:"source"`
 	// Detached 为 true 表示该回合在客户端断开后继续执行（刷新可续传）。
-	Detached bool      `json:"detached"`
+	Detached  bool      `json:"detached"`
 	StartedAt time.Time `json:"started_at"`
 	// CancelSource 非空表示该回合已被显式取消（值即取消来源，如 user_interrupt），
 	// 在 run 真正返回并 release 之前一直可见。刷新后的页面据此区分

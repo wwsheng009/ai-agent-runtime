@@ -186,6 +186,7 @@ func TestTranscriptReplacementInvalidatesAckedHistory_PrefixCorrection(t *testin
 		t.Fatal("acked prefix bytes changed; must invalidate history")
 	}
 }
+
 // TestTranscriptReplacementInvalidatesAckedHistory_PrefixPresentationChange
 // covers the resume scenario where a transcript contains multiple finalized
 // cells followed by a mutable active cell. If the runtime re-renders finalized
