@@ -48,6 +48,12 @@ const guardMaxCallerDepth = 6
 // 每一项都必须写明理由，并保持最小。
 var guardWriteExemptions = map[string]string{
 	"internal/agentconfig::EnsureUserPresetsFile": "create-once 的独立文件（~/.aicli/presets.yaml，方案 §12 已登记的例外），除首次创建外没有并发读-改-写写者",
+	// mesh 的三处写点都是「整体替换自己拥有的文件」：没有读取-合并-回写的语义，
+	// 并发正确性由各自的所有权/协议承担（见理由），因此显式登记而不是套一层锁
+	// ——守卫自己的口径也是「只锁写入等于没锁」，加了反而误导。
+	"internal/mesh::SaveBinding":     "会话绑定是提示性文件（sticky 端口 / 上次服务者），每次由服务进程整体重写、不读旧值；并发写即「最后写入者胜出」的既定语义",
+	"internal/mesh::WriteNodeRecord": "节点记录按 node_id 归属唯一写者（进程只写自己的记录，见函数注释的所有权约束），读者只读；不存在并发读-改-写",
+	"internal/mesh::writeLeaseFile":  "lease 的跨进程互斥由 lease 层自身协议承担（O_EXCL 独占创建 + rename 回收，§3.3，同一时刻只有一个 owner）；写前读取必须匹配自身 owner，另加配置锁既不覆盖回收方也与该协议重复",
 }
 
 // guardFuncInfo 是一个函数（或同目录同名函数集合）的守卫信息。

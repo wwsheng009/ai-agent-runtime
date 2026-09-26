@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
 // ErrInvalidComment reports a malformed review comment (empty body, bad line
@@ -74,6 +76,10 @@ func (s *Store) AppendComment(id string, comment ReviewComment) (ReviewComment, 
 		return ReviewComment{}, err
 	}
 
+	// 读-改-写整体持锁：评论日志是跨进程共享的可变文件（write_lock.go）。
+	unlock := agentconfig.LockConfigFileWriteAll(s.commentLogAbsPath(id))
+	defer unlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -107,6 +113,9 @@ func (s *Store) DeleteComment(id, commentID string) (bool, error) {
 	if commentID == "" {
 		return false, fmt.Errorf("%w: empty comment id", ErrInvalidComment)
 	}
+
+	unlock := agentconfig.LockConfigFileWriteAll(s.commentLogAbsPath(id))
+	defer unlock()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

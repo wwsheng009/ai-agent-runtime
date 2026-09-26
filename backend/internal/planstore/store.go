@@ -7,8 +7,10 @@
 //	index.json                                   {"version":1,"records":[...]}
 //	versions/<projectSlug>/<planName>-v<N>.md    one file per review round
 //
-// The package is deliberately self-contained: it depends only on the standard
-// library and never reads or writes the workspace copy of a plan file.
+// The package never reads or writes the workspace copy of a plan file. Its only
+// non-stdlib dependency is internal/agentconfig's cross-process write lock
+// (write_lock.go), which serializes the read-modify-write cycles of the shared
+// index and comment log across aicli processes.
 package planstore
 
 import (
@@ -20,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
 // Status is the review state of a stored plan.
@@ -113,6 +117,10 @@ func (s *Store) Record(opts RecordOptions) (Record, error) {
 		id = IDFor(opts.ProjectPath, opts.PlanPath)
 	}
 
+	// 读-改-写整体持锁：index.json 是所有进程共享的可变状态（write_lock.go）。
+	unlock := agentconfig.LockConfigFileWriteAll(s.indexPath())
+	defer unlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -183,6 +191,10 @@ type SnapshotOptions struct {
 func (s *Store) Snapshot(opts SnapshotOptions) (Record, error) {
 	id := strings.TrimSpace(opts.ID)
 
+	// 轮次号取自 index，必须与读取同一临界区；版本文件路径唯一，无需单独加锁。
+	unlock := agentconfig.LockConfigFileWriteAll(s.indexPath())
+	defer unlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -238,6 +250,9 @@ func (s *Store) Snapshot(opts SnapshotOptions) (Record, error) {
 // SetStatus updates the review status of a record.
 func (s *Store) SetStatus(id string, status Status) (Record, error) {
 	id = strings.TrimSpace(id)
+
+	unlock := agentconfig.LockConfigFileWriteAll(s.indexPath())
+	defer unlock()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

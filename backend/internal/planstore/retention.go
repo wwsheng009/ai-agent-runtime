@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 )
 
 // PruneOptions describes a retention pass over one record's snapshots.
@@ -44,6 +46,9 @@ func (s *Store) PruneVersions(opts PruneOptions) (PruneResult, error) {
 		}
 		return PruneResult{Record: rec, KeptRounds: len(rec.Rounds)}, nil
 	}
+
+	unlock := agentconfig.LockConfigFileWriteAll(s.indexPath())
+	defer unlock()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -100,6 +105,17 @@ func (s *Store) Delete(id string) error {
 	if id == "" {
 		return fmt.Errorf("%w: empty id", ErrNotFound)
 	}
+
+	// 一次事务涉及 index 与评论日志两份文件：必须用 LockConfigFileWriteAll
+	// （内部按归一化锁键去重 + 字典序取锁，避免与只锁评论的 AppendComment 交叉）。
+	lockPaths := []string{s.indexPath()}
+	if rel := commentsRelPath(id); rel != "" {
+		if abs, err := s.resolveSnapshotPath(rel); err == nil {
+			lockPaths = append(lockPaths, abs)
+		}
+	}
+	unlock := agentconfig.LockConfigFileWriteAll(lockPaths...)
+	defer unlock()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
