@@ -158,6 +158,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			if state.ExportPicker.Active && state.ExportPicker.LeaseID == a.LeaseID {
 				state.ExportPicker = ExportPickerState{}
 			}
+			if state.MCPPicker.Active && state.MCPPicker.LeaseID == a.LeaseID {
+				state.MCPPicker = MCPPickerState{}
+			}
 		}
 	case OpenTranscriptOverlay:
 		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
@@ -225,6 +228,14 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case CloseSkillPicker:
 		if a.LeaseID != 0 && state.SkillPicker.Active && state.SkillPicker.LeaseID == a.LeaseID {
 			state.SkillPicker = SkillPickerState{}
+		}
+	case OpenMCPPicker:
+		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
+			state.MCPPicker = MCPPickerState{Active: true, LeaseID: a.LeaseID}
+		}
+	case CloseMCPPicker:
+		if a.LeaseID != 0 && state.MCPPicker.Active && state.MCPPicker.LeaseID == a.LeaseID {
+			state.MCPPicker = MCPPickerState{}
 		}
 	case OpenExportPicker:
 		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {

@@ -217,6 +217,18 @@ aicli mcp add-json my-server '{"url":"https://example.com/mcp"}'   # 或直接�
 aicli mcp get my-server --json                # 导出单 server 配置（可直接复制到别的机器）
 ```
 
+在 chat 里直接敲 `/mcp` 会打开交互菜单：先选 server，再选动作（查看状态 / 启用停用 / 移除 / 热重载）；
+`/mcp list` 保持纯文本列表口径，非 TTY 或脚本场景自动降级为文本面板。
+
+从 Claude / Cursor / Gemini / OpenCode / Codex 迁移：
+
+```bash
+aicli mcp import --dry-run                    # 先看会导入什么（不写文件）
+aicli mcp import --from claude --scope user   # 从 Claude 配置导入到个人全局
+aicli mcp add-json my-server '{"url":"https://example.com/mcp"}'   # 或直接用一段 JSON 添加
+aicli mcp get my-server --json                # 导出单 server 配置（可直接复制到别的机器）
+```
+
 查看某个 MCP 当前暴露的工具：CLI 用 `aicli mcp tools <名称>`；微型 Web（`aicli chat --web`）与 console 设置页的 MCP 列表里都有「工具」按钮，
 分别读取 `GET /web/api/mcps/{name}/tools`（微 Web）与 `GET /api/runtime/mcps/{name}/tools`（runtime-server），
 返回 `{name,count,tools:[{name,description,enabled,inputSchema}]}`；未启用 / 未连接时返回空列表，由前端渲染空态。

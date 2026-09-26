@@ -38,6 +38,7 @@ type AppState struct {
 	ThemePicker                  ThemePickerState
 	SkillPicker                  SkillPickerState
 	ExportPicker                 ExportPickerState
+	MCPPicker                    MCPPickerState
 	LayoutGeneration             uint64
 }
 
@@ -267,6 +268,14 @@ type SkillPickerState struct {
 // Navigation, search and the selected row remain local to the fullscreen list;
 // the export runs only after lease release.
 type ExportPickerState struct {
+	Active  bool
+	LeaseID uint64
+}
+
+// MCPPickerState intentionally holds only alternate-screen ownership.
+// Navigation, search and the confirmed action (status/enable/disable/remove)
+// remain local to the fullscreen list and run only after lease release.
+type MCPPickerState struct {
 	Active  bool
 	LeaseID uint64
 }

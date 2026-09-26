@@ -1112,6 +1112,10 @@ func actionClassString(action UIAction) string {
 		return "OpenSkillPicker"
 	case CloseSkillPicker:
 		return "CloseSkillPicker"
+	case OpenMCPPicker:
+		return "OpenMCPPicker"
+	case CloseMCPPicker:
+		return "CloseMCPPicker"
 	case OpenExportPicker:
 		return "OpenExportPicker"
 	case CloseExportPicker:

@@ -89,6 +89,13 @@ type SkillPickerRequest struct{}
 // and the export runs only after alternate-screen ownership is released.
 type ExportPickerRequest struct{}
 
+// MCPPickerRequest marks the MCP server/action selection effect. It carries no
+// mutable state: the picker re-reads the layered MCP catalog after dispatch and
+// the confirmed action (status / enable / disable / remove / reload) is applied
+// through the existing /mcp text path only after alternate-screen ownership has
+// been released.
+type MCPPickerRequest struct{}
+
 // UsageScreenRequest is the immutable query carried by the typed /usage
 // alternate-screen effect. It captures the parsed subcommand before dispatch:
 // Mode selects the cache views (overview / requests / trace) or the batch 1.3
@@ -185,6 +192,11 @@ type CommandResult struct {
 	// It has no document payload: the export runs only after lease release and
 	// primary presenter recovery.
 	OpenExportPicker *ExportPickerRequest
+	// OpenMCPPicker requests the lease-bound MCP server/action selector. It has
+	// no document payload: the chosen action is applied through the /mcp text
+	// path only after lease release and primary presenter recovery, so no
+	// mutation can overlap the alternate-screen frame.
+	OpenMCPPicker *MCPPickerRequest
 	// ApplyBacktrack requests the direct destructive transaction. It has no
 	// document payload: the mutation must rebuild canonical history before its
 	// result cell is committed, and submit/draft effects run only afterwards.

@@ -13,7 +13,8 @@ import (
 const chatMCPCommandTimeout = 60 * time.Second
 
 const chatMCPCommandUsage = `用法:
-  /mcp                                    列出全部 MCP（同 /mcp list）
+  /mcp                                    交互菜单（选择 server → 查看状态/启停/移除/热重载）
+  /mcp select                             同上；无全屏界面时降级为 /mcp list
   /mcp list                               列出全部 MCP 与连接状态
   /mcp status <name>                      查看单个 MCP 的配置与运行状态
   /mcp add <name> <url> [options]         新增 URL 传输（http(s)→streamable，ws(s)→websocket）
@@ -73,6 +74,9 @@ func chatMCPCommandTextWithService(command string, service chatMCPService, onMut
 	case "help", "-h", "--help":
 		return chatMCPCommandUsage
 	case "list", "ls":
+		return chatMCPListText(service)
+	case "select", "pick", "menu", "choose":
+		// 无可用全屏表面时的降级：回到列表面板（与 bare /mcp 同口径）。
 		return chatMCPListText(service)
 	case "status", "show", "info":
 		if len(args) < 2 {
@@ -510,9 +514,33 @@ func chatMCPReloadText(service chatMCPService, onMutate func()) string {
 }
 
 // executeStructuredMCPCommand 把 /mcp 结果投影为统一的命令单元。
+//
+// bare /mcp（以及 /mcp select|pick|menu）在可交互屏幕上开 §4.8 的
+// server→动作选择器；其余子命令与无屏幕场景保持既有纯文本面板。
 func executeStructuredMCPCommand(session *ChatSession, command string) CommandResult {
+	if chatMCPPickerRequested(command) && canOpenChatMCPPicker(session) {
+		return CommandResult{
+			Action:        CommandContinue,
+			OpenMCPPicker: &MCPPickerRequest{},
+		}
+	}
 	text := chatMCPCommandTextWithService(command, newChatMCPService(), func() {
 		refreshChatMCPTools(session)
 	})
 	return commandTextResult(text)
+}
+
+// chatMCPPickerRequested 判定命令是否要求交互菜单：bare /mcp 与显式 select 别名。
+// `/mcp list`（显式列表）永不开选择器，保证脚本/非 TTY 口径稳定。
+func chatMCPPickerRequested(command string) bool {
+	args := splitChatCommandFields(extractCommandArgument(command))
+	if len(args) == 0 {
+		return true
+	}
+	switch strings.ToLower(args[0]) {
+	case "select", "pick", "menu", "choose":
+		return true
+	default:
+		return false
+	}
 }

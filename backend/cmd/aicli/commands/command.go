@@ -83,6 +83,13 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 				// recovery.
 				openChatExportPicker(session, *result.OpenExportPicker)
 			}
+			if renderErr == nil && result.OpenMCPPicker != nil && session != nil {
+				// bare /mcp is a typed server/action selector effect; the chosen
+				// action (status/enable/disable/remove/reload) runs through the
+				// /mcp text path only after ScreenLease release and primary
+				// presenter recovery.
+				openChatMCPPicker(session, *result.OpenMCPPicker)
+			}
 			if renderErr == nil && result.OpenDebugOverlay && session != nil {
 				// /debug display is a lease-bound alternate-screen viewer. Its
 				// snapshot is captured on the alternate screen and never

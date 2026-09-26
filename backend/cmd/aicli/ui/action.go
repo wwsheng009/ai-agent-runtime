@@ -311,6 +311,26 @@ func (CloseSkillPicker) isUIAction()         {}
 func (CloseSkillPicker) Class() ActionClass  { return ClassBarrier }
 func (CloseSkillPicker) CoalesceKey() string { return "" }
 
+// OpenMCPPicker and CloseMCPPicker bind the MCP server selector to its
+// ScreenLease. Like the other pickers the actor only tracks alternate-screen
+// ownership: server/action matching and the confirmed mutation stay local to
+// the list and are committed after lease release.
+type OpenMCPPicker struct {
+	LeaseID uint64
+}
+
+func (OpenMCPPicker) isUIAction()         {}
+func (OpenMCPPicker) Class() ActionClass  { return ClassBarrier }
+func (OpenMCPPicker) CoalesceKey() string { return "" }
+
+type CloseMCPPicker struct {
+	LeaseID uint64
+}
+
+func (CloseMCPPicker) isUIAction()         {}
+func (CloseMCPPicker) Class() ActionClass  { return ClassBarrier }
+func (CloseMCPPicker) CoalesceKey() string { return "" }
+
 // OpenExportPicker and CloseExportPicker bind the export session/format
 // selector to its ScreenLease. The picker owns only transient list state; the
 // actor retains the lease identity so stale lifecycle actions cannot clear a

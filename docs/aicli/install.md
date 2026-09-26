@@ -625,6 +625,28 @@ aicli mcp add-json local-fs '{"command":"npx","args":["-y","@modelcontextprotoco
 `add-json` 接受 `type` 别名（`http`/`sse`/`ws`/`stdio`）与 `get --json` 的 `.config` 片段，
 同样受 `--scope` 与项目级秘密剥离约束；`mcp get` 显示的是**分层合并后**生效的那一份配置（含 `configSource`）。
 
+chat 里的交互菜单（TUI）：
+
+```
+/mcp            # 打开选择器：选择 server → 选择动作
+/mcp select     # 同上（别名 pick / menu / choose）
+/mcp list       # 始终是纯文本列表（脚本口径，不开选择器）
+```
+
+选择器的第一层列出全部 MCP（行首状态标记 `●` 已连接 / `!` 需认证 / `◐` 已启用未连接 / `○` 已停用，
+详情行带 endpoint、分层来源与同名覆盖链），支持输入即时过滤；第二层是动作：
+
+| 动作 | 等价命令 |
+|---|---|
+| 查看状态 | `/mcp status <name>` |
+| 启用 / 停用 | `/mcp enable｜disable <name>` |
+| 热重载全部 MCP | `/mcp reload` |
+| 移除 | `/mcp remove <name>`（二次确认） |
+
+动作在选择器**释放备用屏之后**才执行，且复用同一套 `/mcp` 文本通道（唯一写路径）；
+非交互、非 ANSI TTY、`--output json` 或运行中有关键帧时，`/mcp` 自动降级为纯文本列表面板。
+OAuth 认证目前仍在 CLI（`aicli mcp auth login <name>`）与微型 Web 面板里完成，chat 选择器暂不提供「认证」动作。
+
 MCP 配置文件解析顺序（chat 会话、`aicli mcp *`、console / 微型 Web 面板、runtime-server 共用同一套）：
 
 | 优先级 | 路径 | 说明 |
