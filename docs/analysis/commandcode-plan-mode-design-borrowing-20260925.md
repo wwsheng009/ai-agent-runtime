@@ -703,3 +703,46 @@
 3. 该清理只动 index，不动工作区：他们未提交的 `handler.go`（SkillArgs 等）原样保留为 ` M`。
 
 若该模式再次出现（他们的流程可能重复从旧基线重建 index），恢复方式：`git checkout 9843c892 -- <path>`（本工作已在 main 历史中，不会丢）。
+
+---
+
+## 16. 实施记录：第九轮（2026-09-25，§4.5 收尾：Web 面板「重新评审」按钮）
+
+**状态**：面板的图形化 reopen 入口已落地（前端 8 个文件 + 两语词典）。至此 §4.5 的「归档回灌」在 CLI / HTTP / Web 三处齐平：同一个后端端点 `POST /api/runtime/sessions/{id}/plan/reopen`，同一套冲突语义（409 → 用户确认 → `force=true`）。
+
+### 16.1 交互
+
+| 场景 | 行为 |
+|------|------|
+| 详情里的写动作 | 「计划归档」面新增**唯一**写按钮「重新评审」：按当前会话把选中记录的最新快照写回工作区计划文件并进入 plan mode；无会话上下文时按钮禁用并给出原因（title） |
+| 成功 | 面板刷新列表与详情，显示「已从归档恢复 v{{version}}」+「已进入 plan mode，可继续评审这份计划」；快照与工作区一致时显示「工作区文件已与快照一致」 |
+| 冲突（409） | 显示后端 hint（「工作区计划文件与归档快照不一致，未改写」）+ 「强制覆盖并重新评审」按钮；**不刷新列表**（后端未写盘）；确认后带 `force=true` 重试 |
+| 其它失败 | 「重新评审失败」+ 后端错误文案；提示随返回列表清除 |
+
+### 16.2 接线点
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| API 客户端 | `frontend/src/api/runtime/plans.ts` | `buildStoredPlanReopenPath`、`reopenRuntimePlan`（POST，body `{plan_id,version,force}`）、`normalizePlanReopenResult`、`isStoredPlanReopenConflict`（409 + `conflict=true`）、`readStoredPlanReopenHint`（hint 优先，其次 error） |
+| barrel | `frontend/src/api/runtime/index.ts` | 显式具名导出以上 5 个符号（该 barrel 是白名单式，漏加会导致运行期 mock/undefined） |
+| hook | `frontend/src/hooks/workspace/use-runtime-plans.ts` | `reopen(sessionId, planId, {version,force})` → `RuntimePlanReopenOutcome`；进行态 `reopenState`（idle/running/succeeded/conflict/failed + planId/version/unchanged/forced/hint）；成功后 `refresh()`；`clearReopenState()`；无会话不发请求直接失败态 |
+| 渲染面 | `frontend/src/components/workspace/artifact-panel-plans-surface.tsx` | 头部「重新评审」按钮（busy/running/无会话时禁用）、成功/冲突/失败三类提示块（`data-testid` = `plans-reopen-notice` / `plans-reopen-conflict` / `plans-reopen-error`）；文件头注释更新为「阅读面 + 唯一写动作 reopen，裁决仍归会话内入口」 |
+| 词典 | `frontend/src/i18n/resources/{zh-CN,en-US}/workspace/panels-artifacts.ts` | `plans.reopen.*` 9 个键（action/running/noSession/succeeded/unchanged/enteredPlanMode/conflict/force/failed） |
+
+### 16.3 验证
+
+| 命令（cwd=frontend） | 结果 |
+|---|---|
+| `npx vitest run src/api/runtime/plans.test.ts src/hooks/workspace/use-runtime-plans.test.tsx src/components/workspace/artifact-panel-plans-surface.test.tsx` | 3 文件 / **28 用例全绿**（新增 3 + 4 + 2） |
+| `npx vitest run src/components/workspace src/hooks/workspace` | **193 文件 / 1413 用例全绿**（229s，含面板宿主与注册表回归） |
+| `npx tsc -b` | 0 错误（含 i18n 插值类型：`version` 必须传字符串） |
+| `npx eslint <8 个改动文件>` | 0 告警 |
+| `node scripts/verify-frontend-i18n.ts` | `scanned=911, violations=0`（两语键集一致） |
+| `node scripts/verify-max-lines.mjs` | 0 个 > 500 非空行（面文件 500 行以内） |
+
+新增用例要点：**API 层**——路径按会话 id 编码（`session/2` → `session%2F2`）、结果归一化保留 created/unchanged/forced、`409+conflict=true` 才算冲突且 hint 优先；**hook**——成功刷新列表（1→2 次）并记成功态、冲突保留 hint **不刷新**、`force` 重试成功、无会话不发请求、`clearReopenState` 复位；**渲染面**——无会话按钮禁用、有会话点击即回灌并显示成功文案、冲突显示 hint 且确认后以 `{force:true}` 复调、成功后 hint 消失。
+
+### 16.4 已知边界
+
+- 面板只回灌**最新快照**（`version=0`）；指定历史轮次的回灌目前只在 CLI（`/plans reopen <id> vN`）与 HTTP body（`version:N`）可用。
+- 无 actor 的 HTTP 路径不发布 `plan_mode_changed` 事件，面板靠 reopen 自身返回的 `plan_mode` 投影与主动 `refresh()` 收敛；CLI 侧不受影响。

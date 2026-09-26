@@ -224,7 +224,7 @@
 - 快照读取失败时返回 200，但把原因放进 `content_error`（记录元数据仍然可用）。
 - 记录不存在返回 404；`index.json` 损坏返回 500；store 未配置返回 503。
 
-注意区分两套入口：会话内 plan 状态（进入/退出/预览计划文件）走 `GET|POST /api/runtime/sessions/{id}/plan`；这里的 `/plans`、`/plans/{id}` 只读归档索引与快照。
+注意区分两套入口：会话内 plan 状态（进入/退出/预览计划文件）走 `GET|POST /api/runtime/sessions/{id}/plan`（回灌走 `POST .../plan/reopen`）；这里的 `/plans`、`/plans/{id}` 只读归档索引与快照。Web 面板的「计划归档」面同样是只读浏览 + **唯一写动作「重新评审」**（等价于 reopen 端点，冲突时由用户确认后强制覆盖）；批准/请求修改/退出仍由会话内的评审入口负责。
 
 ---
 
@@ -294,7 +294,7 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 以下能力在已落地范围（2026-09-25：报告 §8 + §9 + §10）之外，本文档不为它们承诺时间：
 
 - §4.4 行级评论与轮次 diff：**CLI 侧轮次 diff 已落地**（`/plans diff <id> [vA [vB]]`，复用 `planmode.UnifiedDiff` / `planmode.DiffArchivedVersions`）；仍未做的是前端评审面的变更行高亮与行级评论。
-- §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具、run 结束兜底、**CLI 的 `/plans reopen`（归档回灌重评审）**与 **HTTP 的 `POST /sessions/{id}/plan/reopen`** 均已落地；仍是缺口的是 Web 面板里的图形按钮（后端入口已就绪，面板 hook 仍只读）。
+- §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具、run 结束兜底、**CLI 的 `/plans reopen`**、**HTTP 的 `POST /sessions/{id}/plan/reopen`** 与**面板「重新评审」按钮**（含 409 冲突 → 强制覆盖二次确认）均已落地；该小节的缺口已关闭。
 - §4.6 模式循环键位（`shift+tab` / `alt+m`）已随并发的 CLI 改动落地（`chat_permission_mode.go`：`default → accept_edits → plan → bypass_permissions`，进入 bypass 仍二次确认，`/hotkeys` 可见；plan 档走 `/mode` 语义，见 §2.3）；模型自主进入的确认门控已落地；仍未做的是**常驻模式横幅**。
 - 评审反馈的**自动修订回合**：当前是「下一次用户输入时交付」，Web 裁决后主动 trigger-turn 未接入。
 
