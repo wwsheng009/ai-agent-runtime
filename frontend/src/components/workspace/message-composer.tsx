@@ -89,9 +89,12 @@ type MessageComposerProps = {
   onStop: () => void;
   /**
    * 提交回合；返回 false = 被拦下（草稿为空 / 会话未就绪 / 同会话仍有在途
-   * 回合）。composer 据此给出可见反馈，绝不静默吞掉一次点击。
+   * 回合 / 附件未上传完成）。composer 据此给出可见反馈，绝不静默吞掉一次点击。
+   *
+   * `images` 只包含**已上传成功**的服务端路径（S5）；调用方按
+   * `submit_prompt.images` 投递，绝不代发未上传项。
    */
-  onSubmit: () => boolean | void;
+  onSubmit: (options?: { images?: readonly string[] }) => boolean | void;
 };
 
 export function MessageComposer({
@@ -147,17 +150,17 @@ export function MessageComposer({
     : !showModelPicker && !runtimeModelsError
       ? t("composer.runtimeDefaultModel")
       : null;
-  // 上传接口未就绪（§6.3 P2-1C）：附件只能停留在「待发送」，此时禁止提交，
-  // 避免附件被静默丢弃。
-  const hasPendingAttachments = attachments.attachments.length > 0;
-
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // 提交被拦下的可见原因（见 handleSubmit）：静默 return false 会让按钮
   // 表现为「点了没反应」。按会话键记录而非布尔值：会话切换后提示自动失效，
   // 无需在 effect 里 setState（react-hooks/set-state-in-effect）。
-  const [submitBlockedFor, setSubmitBlockedFor] = useState<string | null>(null);
-  const submitBlocked = submitBlockedFor === (focusKey ?? "");
+  const [submitBlocked, setSubmitBlocked] = useState<{
+    key: string;
+    reason: "in-flight" | "attachments" | "no-session";
+  } | null>(null);
+  const submitBlockedHere =
+    submitBlocked !== null && submitBlocked.key === (focusKey ?? "");
 
   // P1-4 子片 3：`/` 命令、`@` 引用与 `+` 按钮共用同一份触发菜单。
   const menu = useComposerMenu({
@@ -210,7 +213,17 @@ export function MessageComposer({
   }
 
   function handleSubmit() {
-    if (attachments.attachments.length > 0) {
+    // S5 门禁：附件仍在途/失败 → 明确提示并按既有「拦下必须可见」语义呈现，
+    // 既不静默丢弃，也不把未上传项发出去。
+    if (attachments.unsettledCount > 0) {
+      setSubmitBlocked({ key: focusKey ?? "", reason: "attachments" });
+      focusInput();
+      return;
+    }
+    // 附件只挂在已落库会话上（submit_prompt.images 需要 session id）：
+    // 新线程先发一条文字消息创建会话，这里如实拦下而不是丢弃图片。
+    if (!hasSession && attachments.uploadedCount > 0) {
+      setSubmitBlocked({ key: focusKey ?? "", reason: "no-session" });
       focusInput();
       return;
     }
@@ -238,13 +251,15 @@ export function MessageComposer({
       focusInput();
       return;
     }
-    const started = onSubmit();
+    // 只投递已上传成功的服务端路径；无附件时保持 onSubmit() 的旧调用形态。
+    const images = attachments.uploadedPaths;
+    const started = onSubmit(images.length > 0 ? { images } : undefined);
     if (started === false && draft.trim()) {
       // 提交闸门（同会话单飞）等前置条件把这次提交拦下了：给出可见原因，
       // 让用户知道「不是按钮坏了」。
-      setSubmitBlockedFor(focusKey ?? "");
+      setSubmitBlocked({ key: focusKey ?? "", reason: "in-flight" });
     } else {
-      setSubmitBlockedFor(null);
+      setSubmitBlocked(null);
     }
     focusInput();
   }
@@ -262,10 +277,12 @@ export function MessageComposer({
         isCompact={isCompact}
         isResponding={isResponding}
         onAcknowledgeRejections={attachments.acknowledgeRejections}
-        pendingAttachmentCount={attachments.attachments.length}
         rejectedAttachmentCount={attachments.rejectedCount}
         selectedArtifactCount={selectedArtifactCount}
         transport={transport}
+        unsettledAttachmentCount={attachments.unsettledCount}
+        uploadedAttachmentCount={attachments.uploadedCount}
+        uploadingAttachmentCount={attachments.uploadingCount}
       />
 
       <div>
@@ -273,6 +290,7 @@ export function MessageComposer({
           attachments={attachments.attachments}
           isCompact={isCompact}
           onRemove={attachments.removeAttachment}
+          onRetry={attachments.retryAttachment}
         />
         {commandResultNotice ? (
           <ComposerCommandResultNoticeBar
@@ -298,17 +316,25 @@ export function MessageComposer({
             </button>
           </div>
         ) : null}
-        {submitBlocked ? (
+        {submitBlockedHere ? (
           <div
             role="alert"
-            data-composer-submit-blocked
+            data-composer-submit-blocked={submitBlocked?.reason}
             className="flex items-start justify-between gap-2 px-3 pt-2 app-text-10 text-accent-gold"
           >
-            <span>{t("composer.submit.blockedInFlight")}</span>
+            <span>
+              {submitBlocked?.reason === "attachments"
+                ? t("composer.attachments.blockedUnsettled", {
+                    count: attachments.unsettledCount,
+                  })
+                : submitBlocked?.reason === "no-session"
+                  ? t("composer.attachments.needsSession")
+                  : t("composer.submit.blockedInFlight")}
+            </span>
             <button
               type="button"
               data-composer-submit-blocked-dismiss
-              onClick={() => setSubmitBlockedFor(null)}
+              onClick={() => setSubmitBlocked(null)}
               className="shrink-0 underline-offset-2 hover:underline"
             >
               {t("composer.commands.dismiss")}
@@ -459,7 +485,7 @@ export function MessageComposer({
               }
               onClick={isResponding ? handleStop : handleSubmit}
               disabled={
-                isResponding ? false : !draft.trim() || hasPendingAttachments
+                isResponding ? false : !draft.trim() || attachments.unsettledCount > 0
               }
             >
               {isResponding ? <SquareIcon size={14} /> : <ArrowUpIcon size={14} />}

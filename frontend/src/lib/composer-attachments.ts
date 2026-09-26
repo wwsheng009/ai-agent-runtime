@@ -1,20 +1,31 @@
-// P1-4 子片 2：Composer 附件（本地草稿轨）——纯模型与校验，React/DOM 无关。
+// P1-4 子片 2 / S5：Composer 附件草稿轨——纯模型与校验，React/DOM 无关。
 //
 // 边界（方案 §2 P1-4 / §6.3 P2-1C）：
-// - 后端 `POST /runtime/uploads` 未就绪，本子片只做「本地预览 + 待发送」；
-// - 附件状态**恒为 `pending`**，接口就绪前不产生远端 URL、不伪造成已上传；
+// - 后端 `POST /api/runtime/uploads` 已就绪：新增附件即上传，成功后条目携带服务端 path；
+// - 状态机 `uploading → uploaded | error`；`remotePath` 只在 `uploaded` 有值，
+//   **绝不伪造「已上传」**（失败保留本地预览与可行动原因）；
 // - 对象 URL 的创建/回收由 owner hook 负责，这里只承载数据与纯决策。
 
 export const COMPOSER_ATTACHMENT_MAX_COUNT = 8;
 export const COMPOSER_ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
 
-/** 上传接口就绪后翻转为 true（届时附件可随消息发送）。 */
-export const COMPOSER_ATTACHMENT_UPLOAD_READY = false;
+/** 上传接口已就绪（§6.3 P2-1C 后端交付）：附件上传成功后可随消息发送。 */
+export const COMPOSER_ATTACHMENT_UPLOAD_READY = true;
 
 export type ComposerAttachmentKind = "image" | "file";
 
-/** 上传状态：接口就绪前恒为 `pending`（界面上的「待发送」）。 */
-export type ComposerAttachmentStatus = "pending";
+/** 上传状态：在途 / 已上传 / 失败（失败可重试或移除）。 */
+export type ComposerAttachmentStatus = "uploading" | "uploaded" | "error";
+
+/**
+ * 失败分类（与 api/runtime/uploads 的「不可用 / 校验失败 / 真实失败」三段对齐）：
+ * `rejected` 表示请求成功但该文件被后端跳过（超体积上限 / 不是可识别图片）。
+ */
+export type ComposerAttachmentErrorKind =
+  | "unavailable"
+  | "validation"
+  | "rejected"
+  | "failed";
 
 export type ComposerAttachment = {
   id: string;
@@ -25,6 +36,14 @@ export type ComposerAttachment = {
   /** 本地对象 URL（仅图片有值，由 owner hook 创建与回收）。 */
   previewUrl: string | null;
   status: ComposerAttachmentStatus;
+  /** 服务端落盘路径（`Uploaded` 时来自上传响应；其余状态恒为 null）。 */
+  remotePath: string | null;
+  /** 后端说明（跳过原因 / 压缩说明）；无说明为空串。 */
+  remoteNote: string;
+  /** 失败原因（可行动文案）；仅 `error` 有值。 */
+  error: string | null;
+  /** 失败分类；仅 `error` 有值（渲染层据此选本地化前缀）。 */
+  errorKind: ComposerAttachmentErrorKind | null;
   /** 原始文件（就绪前仅驻留内存，不做持久化）。 */
   file: File;
 };
@@ -129,9 +148,66 @@ export function createComposerAttachment(
     size: file.size,
     mimeType: file.type,
     previewUrl: options.previewUrl ?? null,
-    status: "pending",
+    // 新建即进入上传在途；上传结果只能来自服务端响应（见 hook）。
+    status: "uploading",
+    remotePath: null,
+    remoteNote: "",
+    error: null,
+    errorKind: null,
     file,
   };
+}
+
+/** 已上传成功的服务端路径（按轨内顺序；空串与未成功项一律剔除）。 */
+export function composerAttachmentUploadedPaths(
+  attachments: readonly ComposerAttachment[],
+): string[] {
+  return attachments
+    .filter((item) => item.status === "uploaded" && item.remotePath !== null)
+    .map((item) => item.remotePath as string)
+    .filter((path) => path !== "");
+}
+
+/** 仍有在途 / 失败附件：此时禁止发送（不静默丢弃，也不发送未上传项）。 */
+export function hasUnsettledComposerAttachments(
+  attachments: readonly ComposerAttachment[],
+): boolean {
+  return attachments.some((item) => item.status !== "uploaded");
+}
+
+export function countUnsettledComposerAttachments(
+  attachments: readonly ComposerAttachment[],
+): number {
+  return attachments.filter((item) => item.status !== "uploaded").length;
+}
+
+/** 单次上传响应落成条目状态；只认后端给出的 path，绝不从本地推断「已上传」。 */
+export type ComposerAttachmentUploadOutcome =
+  | { status: "uploaded"; remotePath: string; remoteNote: string }
+  | { status: "error"; errorKind: "rejected"; error: string };
+
+/**
+ * 把上传响应归一成单个附件的终态。
+ *
+ * 多份上传时后端按 `file` 顺序回条目；这里先按文件名匹配，再退化为
+ * 「只有一条时取该条」。被跳过（`skipped`）或没有路径一律判失败，
+ * 原因用后端 `note` 原文（为空则由渲染层给本地化兜底）。
+ */
+export function resolveComposerAttachmentUploadOutcome(
+  result: { attachments: readonly { name: string; path: string; note: string; skipped: boolean }[] },
+  fileName: string,
+): ComposerAttachmentUploadOutcome {
+  const entries = result.attachments;
+  const entry =
+    entries.find((item) => item.name === fileName) ??
+    (entries.length === 1 ? entries[0] : null);
+  if (!entry) {
+    return { status: "error", errorKind: "rejected", error: "" };
+  }
+  if (!entry.skipped && entry.path) {
+    return { status: "uploaded", remotePath: entry.path, remoteNote: entry.note };
+  }
+  return { status: "error", errorKind: "rejected", error: entry.note };
 }
 
 /** 展示用尺寸（与语言无关，不做本地化单位换行）。 */

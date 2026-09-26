@@ -3,6 +3,7 @@
 import { type Artifact, type Thread } from "@/data/mock";
 import type { ComposerAttachmentsController } from "@/hooks/workspace/composer/use-composer-attachments";
 import { type AgentChatSubmitOptions } from "@/hooks/workspace/agent-chat-turn/turn-bootstrap";
+import { type ComposerImageSubmitController } from "@/hooks/workspace/composer/use-composer-image-submit";
 import { type RuntimeSessionsSummary } from "@/hooks/workspace/use-runtime-sessions-data";
 import type { SessionBacktrackDialogState } from "@/hooks/workspace/use-session-backtrack";
 import { type ConnectionStatus } from "@/lib/connection-status";
@@ -145,6 +146,8 @@ export type WorkspaceShellProps = {
   onStopResponding: () => void;
   /** `options` 供 `/skill` 回合化覆盖 prompt / expose_skills；返回 false = 未启动。 */
   onSubmit: (options?: AgentChatSubmitOptions) => boolean | void;
+  /** S5：带图发送（`submit_prompt.images`）的控制器（回执 + 关闭 + 启动）。 */
+  imageSubmitFeedback?: ComposerImageSubmitController | null;
   /** P1-7：待交互统一呈现位（审批 / 提问 / 计划评审），null 时不渲染。 */
   pendingInteraction?: PendingInteraction | null;
   /** §4.6 常驻模式标识：页面既有的 `/plan` 快照（与右侧「计划」面板同源）。 */

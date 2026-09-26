@@ -465,13 +465,33 @@ export const enWorkspaceBase = {
     attachments: {
       attach: "add attachments",
       remove: "remove {{name}}",
+      retry: "retry {{name}}",
       previewAlt: "{{name}} preview",
-      pending: "pending",
-      pendingCount: "{{count}} attachments pending",
-      uploadUnavailable:
-        "attachment upload isn't available yet — remove them to send",
+      uploading: "uploading",
+      uploaded: "uploaded",
+      uploadFailed: "upload failed",
+      uploadingCount: "{{count}} attachment(s) uploading",
+      readyCount: "{{count}} attachment(s) uploaded — sent with the message",
+      unsettledBlocked:
+        "{{count}} attachment(s) still uploading or failed — can't send yet",
+      blockedUnsettled:
+        "{{count}} attachment(s) unfinished: retry or remove them before sending",
+      needsSession:
+        "start this session with a text message before sending image attachments",
+      sent: "sent {{count}} image(s)",
+      sentWithNotes: "sent {{count}} image(s); server notes: {{notes}}",
+      busyPending:
+        "session is busy — this turn was not submitted; attachments stay in the draft rail",
+      sendFailed: "image prompt failed: {{reason}}",
+      sendUnavailable: "image prompt endpoint unavailable: {{reason}}",
       rejected: "ignored {{count}} file(s) (duplicate, too large, or over limit)",
       dropInvitation: "drop to attach files",
+      error: {
+        unavailable: "attachment upload endpoint unavailable",
+        validation: "upload request rejected",
+        rejected: "server did not accept this image",
+        failed: "upload failed",
+      },
     },
     menu: {
       trigger: "input menu",

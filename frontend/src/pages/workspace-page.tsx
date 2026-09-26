@@ -126,6 +126,7 @@ export function WorkspacePage() {
     setSelectedProvider,
     stopResponding,
     clearStreamStall,
+    imageSubmitFeedback,
     submitPrompt,
   } = useWorkspaceAgentChatTurn({
     onSessionTouched: handleRefreshRuntimeSessions,
@@ -454,6 +455,7 @@ export function WorkspacePage() {
       onResetRuntimeClientIdentity={handleResetRuntimeClientIdentity}
       onStopResponding={handleStopResponding}
       onSubmit={submitPrompt}
+      imageSubmitFeedback={imageSubmitFeedback}
       onBacktrackToMessage={backtrackToMessage}
       backtrackDialog={backtrackDialog}
       backtrackError={backtrackError}
@@ -503,9 +505,7 @@ export function WorkspacePage() {
         notices={sessionRuntimeNotices.notices}
         onDismiss={sessionRuntimeNotices.dismiss}
         onOpenSession={handleOpenRuntimeNoticeSession}
-        resolveSessionTitle={(sessionId) =>
-          threadBySessionId.get(normalizeSessionId(sessionId))?.title
-        }
+        resolveSessionTitle={(sessionId) => threadBySessionId.get(normalizeSessionId(sessionId))?.title}
       />
     </>
   );

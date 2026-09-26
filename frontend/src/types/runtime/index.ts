@@ -14,6 +14,7 @@ export * from "./teams";
 export * from "./jobs";
 export * from "./usage";
 export * from "./files";
+export * from "./uploads";
 export * from "./skills";
 export * from "./agents";
 export * from "./config";

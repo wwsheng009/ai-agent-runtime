@@ -19,12 +19,20 @@ type ReactActEnvironmentGlobal = typeof globalThis & {
 function createAttachmentsStub(
   overrides: Partial<ComposerAttachmentsController> = {},
 ): ComposerAttachmentsController {
+  const attachments = overrides.attachments ?? [];
   return {
-    attachments: [],
+    attachments,
     isDragOver: false,
     rejectedCount: 0,
+    uploadingCount: attachments.filter((item) => item.status === "uploading").length,
+    uploadedCount: attachments.filter((item) => item.status === "uploaded").length,
+    unsettledCount: attachments.filter((item) => item.status !== "uploaded").length,
+    uploadedPaths: attachments
+      .filter((item) => item.status === "uploaded" && item.remotePath)
+      .map((item) => item.remotePath as string),
     addFiles: vi.fn(),
     removeAttachment: vi.fn(),
+    retryAttachment: vi.fn(),
     clearAttachments: vi.fn(),
     acknowledgeRejections: vi.fn(),
     ...overrides,
@@ -402,7 +410,7 @@ describe("MessageComposer", () => {
     expect(attachments.addFiles).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps pending attachments visible and blocks submit until they are removed", () => {
+  it("keeps unsettled attachments visible and blocks submit until they are settled", () => {
     const onSubmit = vi.fn();
     const removeAttachment = vi.fn();
     const attachment = createComposerAttachment(
@@ -422,13 +430,15 @@ describe("MessageComposer", () => {
       container.querySelector("[data-composer-attachment-rail]"),
     ).not.toBeNull();
     expect(
-      container.querySelector('[data-composer-attachment][data-attachment-status="pending"]'),
+      container.querySelector(
+        '[data-composer-attachment][data-attachment-status="uploading"]',
+      ),
     ).not.toBeNull();
     expect(
       container.querySelector("[data-composer-attachment-preview]"),
     ).not.toBeNull();
-    expect(container.textContent).toContain("1 个附件待发送");
-    expect(container.textContent).toContain("附件上传接口未就绪");
+    expect(container.textContent).toContain("1 个附件上传中");
+    expect(container.textContent).toContain("1 个附件未上传完成");
 
     const submitButton = container.querySelector(
       'button[aria-label="开始新线程"]',
@@ -438,6 +448,21 @@ describe("MessageComposer", () => {
       submitButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(onSubmit).not.toHaveBeenCalled();
+    // 键盘捷径也不能绕过闸门（按钮 disabled 之外还有一条提交路径）。
+    act(() => {
+      container.querySelector("textarea")?.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-composer-submit-blocked="attachments"]'),
+    ).not.toBeNull();
 
     act(() => {
       container
@@ -445,6 +470,60 @@ describe("MessageComposer", () => {
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(removeAttachment).toHaveBeenCalledWith("a-1");
+  });
+
+  it("sends only uploaded paths and never fabricates an images payload", () => {
+    const onSubmit = vi.fn(() => true);
+    const settled = {
+      ...createComposerAttachment(
+        new File([new Uint8Array(4)], "shot.png", { type: "image/png" }),
+        { id: "a-1" },
+      ),
+      status: "uploaded" as const,
+      remotePath: "/srv/uploads/shot.png",
+    };
+    const failed = {
+      ...createComposerAttachment(
+        new File([new Uint8Array(4)], "broken.png", { type: "image/png" }),
+        { id: "a-2" },
+      ),
+      status: "error" as const,
+      error: "不是可识别的图片",
+      errorKind: "rejected" as const,
+    };
+
+    // 有失败项：闸门拦下，一张图都不发。
+    renderComposer({
+      attachments: createAttachmentsStub({ attachments: [settled, failed] }),
+      draft: "ship it",
+      hasSession: true,
+      isNewThread: false,
+      onSubmit,
+    });
+    act(() => {
+      container
+        .querySelector('button[aria-label="发送"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-composer-attachment-error="rejected"]'),
+    ).not.toBeNull();
+
+    // 全部落定：只把服务端路径交给宿主。
+    renderComposer({
+      attachments: createAttachmentsStub({ attachments: [settled] }),
+      draft: "ship it",
+      hasSession: true,
+      isNewThread: false,
+      onSubmit,
+    });
+    act(() => {
+      container
+        .querySelector('button[aria-label="发送回合"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(onSubmit).toHaveBeenCalledWith({ images: ["/srv/uploads/shot.png"] });
   });
 
   it("announces rejected files and clears the notice on acknowledgement", () => {

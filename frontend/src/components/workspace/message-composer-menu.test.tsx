@@ -32,12 +32,18 @@ const REFERENCE_GROUPS: readonly ComposerReferenceGroup[] = [
 function createAttachmentsStub(
   overrides: Partial<ComposerAttachmentsController> = {},
 ): ComposerAttachmentsController {
+  const attachments = overrides.attachments ?? [];
   return {
-    attachments: [],
+    attachments,
     isDragOver: false,
     rejectedCount: 0,
+    uploadingCount: attachments.filter((item) => item.status === "uploading").length,
+    uploadedCount: attachments.filter((item) => item.status === "uploaded").length,
+    unsettledCount: attachments.filter((item) => item.status !== "uploaded").length,
+    uploadedPaths: [],
     addFiles: vi.fn(),
     removeAttachment: vi.fn(),
+    retryAttachment: vi.fn(),
     clearAttachments: vi.fn(),
     acknowledgeRejections: vi.fn(),
     ...overrides,

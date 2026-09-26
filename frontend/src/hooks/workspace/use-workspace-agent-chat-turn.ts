@@ -7,7 +7,7 @@ import {
 import { useNavigate } from "react-router-dom";
 
 import { useAppSettings } from "@/core/settings";
-import { type Artifact, type Thread } from "@/data/mock";
+import { type Thread } from "@/data/mock";
 import { createConnectTimeoutGuard } from "@/hooks/workspace/agent-chat-turn/connect-timeout";
 import { createTurnFinalizer } from "@/hooks/workspace/agent-chat-turn/finalize-turn";
 import { maybeShowDesktopNotification } from "@/hooks/workspace/agent-chat-turn/notifications";
@@ -18,6 +18,7 @@ import {
 import { applyChatStreamStall } from "@/hooks/workspace/agent-chat-turn/stall";
 import { useComposerAttachments } from "@/hooks/workspace/composer/use-composer-attachments";
 import { useComposerDraft } from "@/hooks/workspace/composer/use-composer-draft";
+import { useComposerImageSubmit } from "@/hooks/workspace/composer/use-composer-image-submit";
 import { createAgentChatStreamHandlers } from "@/hooks/workspace/agent-chat-turn/stream-handlers";
 import { createStreamingFrameScheduler, STRUCTURAL_COMMIT_INTERVAL_MS } from "@/hooks/workspace/agent-chat-turn/streaming-frame";
 import { createStreamingWriters } from "@/hooks/workspace/agent-chat-turn/streaming-writers";
@@ -25,6 +26,7 @@ import {
   bindSessionTurn,
 } from "@/hooks/workspace/agent-chat-turn/session-turn-registry";
 import { prepareAgentChatTurn, type AgentChatSubmitOptions } from "@/hooks/workspace/agent-chat-turn/turn-bootstrap";
+import { createTurnThreadBindings } from "@/hooks/workspace/agent-chat-turn/turn-bindings";
 import { useSessionTurnView } from "@/hooks/workspace/agent-chat-turn/use-session-turn-view";
 import { useChatTurnReasoningEffort } from "@/hooks/workspace/agent-chat-turn/use-reasoning-effort";
 import {
@@ -42,24 +44,17 @@ import {
 import { NEW_THREAD_ID } from "@/hooks/workspace/use-workspace-thread-selection";
 import {
   streamAgentChat,
+  normalizeRuntimePromptImages,
 } from "@/lib/runtime-api";
 import { isSseIdleTimeoutError } from "@/api/runtime/sse";
 import { getSessionLeaseConflictTitle } from "@/api/runtime/shared";
 import { requestSessionTurnInterrupt } from "@/api/runtime/session-turn-control";
 import { normalizeSessionId } from "@/lib/session-id";
 import { hasVisibleText } from "@/lib/chat-view/visible-text";
-import {
-  setLiveStreamReasoning,
-  setLiveStreamText,
-} from "@/lib/live-stream-text";
-import type { TrajectoryEventKind } from "@/lib/trajectory/types";
 import type { TrajectoryStorePool } from "@/lib/trajectory/store-pool";
 import {
-  appendArtifactToMessage,
-  buildAssistantMessageSegments,
   createStreamingAssistantMessage,
   getErrorMessage,
-  updateThreadMessage,
   upsertArtifact,
   type RuntimeDeltaCoordinator,
 } from "@/lib/workspace-thread-state";
@@ -154,7 +149,38 @@ export function useWorkspaceAgentChatTurn({
     };
   }, [turnRegistry]);
 
-  /** 提交回合；options 供 `/skill` 覆盖 prompt 与 expose_skills。返回是否已启动。 */
+  // S5：带图发送（submit_prompt.images）。回执与在途闸门都由该 hook 持有：
+  // 回合脚手架仍走同一份 prepareAgentChatTurn，保证身份 / 轨迹 / 停止语义一致。
+  const imageSubmit = useComposerImageSubmit({
+    clearAttachments: composerAttachments.clearAttachments,
+    deltaCoordinator,
+    onSessionTouched,
+    prepareTurn: (prompt, thread) =>
+      prepareAgentChatTurn({
+        deltaCoordinator,
+        prompt,
+        selectedModel,
+        selectedProvider,
+        selectedReasoningEffort,
+        selectedThread: thread,
+        settings,
+        trajectoryStore,
+        trajectoryStorePool,
+        userId,
+        workspacePath,
+      }),
+    selectedThread,
+    selectedTurnKey,
+    setDraft,
+    setSelectedArtifactId,
+    setThreads,
+    turnRegistry,
+  });
+
+  /**
+   * 提交回合；options 供 `/skill` 覆盖 prompt 与 expose_skills，
+   * `images`（S5）走运行时命令通道（`submit_prompt.images`）。返回是否已启动。
+   */
   function submitPrompt(options?: AgentChatSubmitOptions): boolean {
     const prompt = (options?.prompt ?? draft).trim();
     if (!prompt || !selectedThread) {
@@ -164,6 +190,10 @@ export function useWorkspaceAgentChatTurn({
     // 跨会话并行——A 在跑不再阻塞 B 的提交。
     if (turnRegistry.isBusy(selectedTurnKey)) {
       return false;
+    }
+    const images = normalizeRuntimePromptImages(options?.images);
+    if (images.length > 0) {
+      return imageSubmit.start(prompt, images);
     }
 
     const {
@@ -204,65 +234,19 @@ export function useWorkspaceAgentChatTurn({
     const { activeTurnIdRef, phaseRef, setActiveTurnId, setPhase } =
       bindSessionTurn(turnRegistry, turnId);
 
-    const updateCurrentThread = (updater: (thread: Thread) => Thread) => {
-      setThreads((current) => {
-        const existingIndex = current.findIndex((thread) => thread.id === threadId);
-        if (existingIndex === -1) {
-          return [updater(threadSnapshot), ...current];
-        }
-
-        return current.map((thread) =>
-          thread.id === threadId ? updater(thread) : thread,
-        );
-      });
-    };
-
-    const attachTurnArtifact = (artifact: Artifact) => {
-      updateCurrentThread((thread) =>
-        appendArtifactToMessage(thread, assistantMessageId, artifact),
-      );
-    };
-
-    /** 轨迹事件入口：SSE 回调 → 轨迹快照（reducer 幂等，记录失败不阻断转发）。 */
-    const pushTrajectory = (
-      kind: TrajectoryEventKind,
-      payload: Record<string, unknown> | null | undefined,
-    ) => {
-      turnTrajectoryStore.push(kind, payload);
-    };
-
-    const setStreamingMessage = (label: string, author: string, content: string) => {
-      // 结构快照落 store 的同时把 live 记录对齐到同一份正文/推理。live 记录是
-      // 「比 store 更新的那一份」，但并非所有文本来源都走 append 增量：`onResult`
-      // 的 output/reasoning 是**整体快照**（`reconcileRuntimeText` 取更长者），
-      // 只更新 canonical。渲染层优先用 live，若不在这里对齐，气泡会一直显示旧
-      // live 文本直到下一次快照或定稿。文本不变时 set* 是幂等的（不通知订阅方）。
-      setLiveStreamText(assistantMessageId, content);
-      // live 记录按块寻址：只对齐**当前块**（整轮拼接会让尾行把前面几块的内容也
-      // 显示出来——观感就是「所有推理并成一段」）。更早的块已定稿在各自的推理段里。
-      setLiveStreamReasoning(
-        assistantMessageId,
-        turnState.reasoningBlocks[turnState.reasoningBlocks.length - 1] ?? "",
-      );
-      updateCurrentThread((thread) =>
-        updateThreadMessage(thread, assistantMessageId, (message) => ({
-          ...message,
-          author,
-          label,
-          segments: buildAssistantMessageSegments(
-            content,
-            turnState.currentSource,
-            turnState.reasoningText,
-            {
-              reasoningRunning: turnState.reasoningRunning,
-              existingSegments: message.segments,
-              reasoningBlocks: turnState.reasoningBlocks,
-              reasoningBlockToolCounts: turnState.reasoningBlockToolCounts,
-            },
-          ),
-        })),
-      );
-    };
+    const {
+      attachTurnArtifact,
+      pushTrajectory,
+      setStreamingMessage,
+      updateCurrentThread,
+    } = createTurnThreadBindings({
+      assistantMessageId,
+      setThreads,
+      threadId,
+      threadSnapshot,
+      turnState,
+      turnTrajectoryStore,
+    });
 
     // 结构快照节流（见 streaming-frame.ts / lib/live-stream-text.ts）：正文与推理
     // 增量走 live 通道（stream-handlers 里按到达顺序 append），thread store 只按
@@ -496,6 +480,7 @@ export function useWorkspaceAgentChatTurn({
     activeSessionKeys,
     composerAttachments,
     draft,
+    imageSubmitFeedback: imageSubmit,
     isResponding,
     streamStalled,
     activeTurnId,

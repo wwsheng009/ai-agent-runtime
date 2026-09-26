@@ -64,6 +64,13 @@ const mockJobsBySession = new Map(); // sessionId -> [{...backend background.Job
 // P2-1A：运行时文件读取（`POST /api/runtime/fs/read-file`）的 mock 文件表。
 // path -> { dataBase64, byteCount }；由 `/api/_test/files` 注入，未登记即 404。
 const mockFiles = new Map();
+// S5：运行时图片附件（`POST /api/runtime/uploads`）的 mock 表。
+// path -> { name, bytes }；只登记「服务端已落盘」的路径，`submit_prompt.images`
+// 据此做与后端同形的目录边界校验。`/api/_test/uploads` 可切 503 降级。
+const mockUploads = new Map();
+/** path -> note：`submit_prompt` 响应里 image_notes 的注入源（如「已压缩」）。 */
+const mockUploadNotes = new Map();
+let mockUploadsUnavailable = false;
 
 // Batch 13 slice 9：profiles 域（列表 / 生命周期 / 导入导出 / 会话内切换）。
 // 契约与纪律见 mock-profiles.mjs 顶部注释；状态由 `/api/_test/profiles` 注入、
@@ -949,6 +956,49 @@ function readBody(req) {
   });
 }
 
+/** 原样读取请求体（multipart 不能被 JSON 解析）。 */
+function readRawBody(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+  });
+}
+
+/**
+ * 从 multipart 请求体里取出字段 `file` 的文件名与字节数。
+ * 只服务 mock 断言（前端按单文件逐个上传），不做完整 multipart 解析。
+ */
+function parseMultipartFile(raw, contentType) {
+  const boundaryMatch = /boundary=([^;]+)/i.exec(contentType ?? "");
+  if (!boundaryMatch || raw.length === 0) {
+    return null;
+  }
+  const boundary = `--${boundaryMatch[1].replace(/^"|"$/g, "")}`;
+  const text = raw.toString("latin1");
+  const start = text.indexOf(boundary);
+  if (start === -1) {
+    return null;
+  }
+  const headerEnd = text.indexOf("\r\n\r\n", start);
+  if (headerEnd === -1) {
+    return null;
+  }
+  const header = text.slice(start, headerEnd);
+  const nameMatch = /name="([^"]*)"/i.exec(header);
+  const fileMatch = /filename="([^"]*)"/i.exec(header);
+  if (!nameMatch || nameMatch[1] !== "file") {
+    return null;
+  }
+  const bodyStart = headerEnd + 4;
+  const nextBoundary = text.indexOf(`\r\n${boundary}`, bodyStart);
+  const bodyEnd = nextBoundary === -1 ? text.length : nextBoundary;
+  return {
+    filename: fileMatch ? Buffer.from(fileMatch[1], "latin1").toString("utf8") : "",
+    bytes: Math.max(0, bodyEnd - bodyStart),
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     await handleRequest(req, res);
@@ -1007,6 +1057,9 @@ async function handleRequest(req, res) {
     brokenEventsSessions.clear();
     mockJobsBySession.clear();
     mockFiles.clear();
+    mockUploads.clear();
+    mockUploadNotes.clear();
+    mockUploadsUnavailable = false;
     profilesMock.reset();
     mockRuntimeModelsCatalog = null;
     mockSkillsEmbeddingEnabled = false;
@@ -1106,6 +1159,25 @@ async function handleRequest(req, res) {
       mockFiles.set(file.path, { dataBase64, byteCount });
     }
     writeJson(res, 200, { ok: true, count: files.length });
+    return;
+  }
+
+  // 测试注入（S5）：POST /api/_test/uploads —— { unavailable?: boolean }
+  // 并支持 { imageNotes: { "<path>": "<note>" } } 注入 submit_prompt 的 image_notes
+  // （对齐后端「可发送但有说明」的条目，如压缩说明）。
+  if (path === "/api/_test/uploads" && req.method === "POST") {
+    const body = await readBody(req);
+    if (body?.unavailable !== undefined) {
+      mockUploadsUnavailable = body.unavailable === true;
+    }
+    if (body?.imageNotes && typeof body.imageNotes === "object") {
+      for (const [key, value] of Object.entries(body.imageNotes)) {
+        if (typeof value === "string") {
+          mockUploadNotes.set(key, value);
+        }
+      }
+    }
+    writeJson(res, 200, { ok: true, unavailable: mockUploadsUnavailable });
     return;
   }
 
@@ -1260,6 +1332,103 @@ async function handleRequest(req, res) {
     }
     writeJson(res, 405, { error: "method not allowed" });
     return;
+  }
+
+  // --- 运行时图片附件（S5：`POST /api/runtime/uploads` + `submit_prompt.images`）---
+  // 契约对齐 backend/internal/api/runtimeapi/attachment_upload_handlers.go：
+  //   上传只落盘（可识别的图片后缀才给 path，其余 skipped + note）；
+  //   submit_prompt.images 只接受本 mock 已登记的路径，否则逐条以 image_notes 回报，
+  //   全部不可用时 400（绝不静默降级成纯文本发送）。
+  if (path === "/api/runtime/uploads") {
+    if (req.method !== "POST") {
+      writeJson(res, 405, { error: "method not allowed" });
+      return;
+    }
+    if (mockUploadsUnavailable) {
+      writeJson(res, 503, {
+        ok: false,
+        error: "uploads_unavailable",
+        reason: "本服务未配置附件上传目录",
+      });
+      return;
+    }
+    const raw = await readRawBody(req);
+    const part = parseMultipartFile(raw, req.headers["content-type"]);
+    if (!part || !part.filename) {
+      writeJson(res, 400, {
+        ok: false,
+        error: "missing_file",
+        reason: "缺少 file 字段（multipart/form-data）",
+      });
+      return;
+    }
+    const target = `/mock/uploads/${part.filename}`;
+    if (!/\.(png|jpe?g|gif|webp)$/i.test(part.filename)) {
+      // 与后端一致：请求成功，但该条目被跳过并给出可行动说明。
+      writeJson(res, 200, {
+        ok: true,
+        accepted: 0,
+        attachments: [
+          { name: part.filename, note: "不是可识别的图片", skipped: true },
+        ],
+      });
+      return;
+    }
+    mockUploads.set(target, { name: part.filename, bytes: part.bytes });
+    writeJson(res, 200, {
+      ok: true,
+      accepted: 1,
+      attachments: [
+        {
+          name: part.filename,
+          path: target,
+          bytes: part.bytes,
+          width: 4,
+          height: 4,
+        },
+      ],
+    });
+    return;
+  }
+
+  const runtimeCommandsMatch =
+    /^\/api\/runtime\/sessions\/([^/]+)\/runtime\/commands$/.exec(path);
+  if (runtimeCommandsMatch && req.method === "POST") {
+    const body = await readBody(req);
+    if (body?.type === "submit_prompt" || body?.type === "submit") {
+      const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+      if (!prompt) {
+        writeJson(res, 400, { error: "prompt is required" });
+        return;
+      }
+      const images = Array.isArray(body.images)
+        ? body.images.filter((item) => typeof item === "string" && item.trim())
+        : [];
+      const allowed = [];
+      const notes = [];
+      for (const image of images) {
+        if (mockUploads.has(image)) {
+          allowed.push(image);
+          const note = mockUploadNotes.get(image);
+          if (note) {
+            notes.push(note);
+          }
+        } else {
+          notes.push(`${image} 不在附件目录内`);
+        }
+      }
+      if (images.length > 0 && allowed.length === 0) {
+        writeJson(res, 400, { error: `images rejected: ${notes.join("; ")}` });
+        return;
+      }
+      writeJson(res, 200, {
+        result: { output: `mock answer for: ${prompt}` },
+        ...(allowed.length > 0 ? { attached_images: allowed.length } : {}),
+        ...(notes.length > 0 ? { image_notes: notes } : {}),
+      });
+      return;
+    }
+    // 其余命令（interrupt / approve_tool / …）保持既有行为：回落给后续路由。
   }
 
   // --- 运行时文件读取（P2-1A：`POST /api/runtime/fs/read-file`）---

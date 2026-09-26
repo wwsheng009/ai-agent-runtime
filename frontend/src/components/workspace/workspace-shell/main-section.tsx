@@ -31,12 +31,12 @@ import { useBackgroundJobs } from "@/hooks/workspace/use-background-jobs";
 import { useComposerFileReferences } from "@/hooks/workspace/composer/use-composer-file-references";
 import { type ComposerMenuState } from "@/hooks/workspace/composer/use-composer-menu";
 import { useComposerCommandSurface } from "@/hooks/workspace/composer/use-composer-command-surface";
-import { type ComposerSkillTurnRunner } from "@/hooks/workspace/composer/use-composer-command-executor";
+import { createComposerSkillTurnRunner } from "@/hooks/workspace/composer/composer-skill-turn";
 import { useRuntimeProfileCatalog } from "@/hooks/workspace/composer/use-runtime-profile-catalog";
 import { useSessionAgents } from "@/hooks/use-session-agents";
 import { type ComposerReferenceGroup } from "@/lib/composer-menu";
 import { artifactReferenceGroup } from "@/lib/composer-references";
-import { composerSkillTurnPrompt } from "@/lib/composer-skill-options";
+import { imageSubmitNoticeBanner } from "@/hooks/workspace/agent-chat-turn/image-prompt-turn";
 import { cn } from "@/lib/utils";
 
 export function WorkspaceMainSection({
@@ -52,6 +52,7 @@ export function WorkspaceMainSection({
   connectionStatus,
   draft,
   earlierLoader,
+  imageSubmitFeedback,
   isResponding,
   modelOptions,
   onBacktrackToMessage,
@@ -191,20 +192,9 @@ export function WorkspaceMainSection({
   // P2-7：composer `/` 命令面（清单 / `/model` 候选与弹窗 / 执行器 / 回执文案）；`/export`、
   // `/rename`、`/model` 复用轨迹导出、侧栏重命名与常驻座位选择器的同一实现，`/feedback`
   // 写本地日志（log-only）。目录未就绪时菜单无候选、弹窗如实显示空/失败态，不伪造模型名。
-  // P2：`/skill` 回合化——把 skill 名与用户 prompt 转成普通回合提交（submitPrompt 的
-  // options 形态）并声明 expose_skills；用户消息写成 `/skill <name> <args>`，线程里
-  // 能直接看出这是一次 skill 调用。前置条件不满足时抛错，由执行器如实回执。
-  const handleRunSkillTurn = useCallback<ComposerSkillTurnRunner>(
-    (skillName, prompt) => {
-      if (
-        onSubmit({
-          prompt: composerSkillTurnPrompt(skillName, prompt),
-          exposeSkills: [skillName],
-        }) === false
-      ) {
-        throw new Error(`skill turn not started: ${skillName}`);
-      }
-    },
+  // P2：`/skill` 回合化（构造器已抽到 composer-skill-turn.ts，行数门禁）。
+  const handleRunSkillTurn = useMemo(
+    () => createComposerSkillTurnRunner(onSubmit),
     [onSubmit],
   );
 
@@ -237,6 +227,14 @@ export function WorkspaceMainSection({
     sessionId: selectedThread.sessionId,
     onRunSkillTurn: handleRunSkillTurn,
   });
+
+  // S5：带图发送（submit_prompt.images）回执与命令回执共用同一通知条，前者优先。
+  const composerNotice =
+    imageSubmitNoticeBanner(imageSubmitFeedback?.notice, t) ??
+    composerCommandSurface.commandResult;
+  const dismissComposerNotice = imageSubmitFeedback
+    ? imageSubmitFeedback.dismissNotice
+    : composerCommandSurface.onDismissCommandResult;
 
   // P2-1B：中部视图页签（对话 / 技能 / 轨迹）；技能与轨迹页签不承载输入框，只有对话面保留 composer。
   const skillsSurfaceVisible = !isNewThread && viewMode === "skills";
@@ -429,7 +427,7 @@ export function WorkspaceMainSection({
                   <MessageComposer
                     attachments={composerAttachments}
                     commands={composerCommandSurface.commands}
-                    commandResultNotice={composerCommandSurface.commandResult}
+                    commandResultNotice={composerNotice}
                     contextUsageControl={
                       <ComposerContextUsageControl
                         isResponding={isResponding}
@@ -469,9 +467,7 @@ export function WorkspaceMainSection({
                     selectedReasoningEffort={selectedReasoningEffort}
                     transport={selectedThread.transport}
                     onCommand={composerCommandSurface.onCommand}
-                    onDismissCommandResult={
-                      composerCommandSurface.onDismissCommandResult
-                    }
+                    onDismissCommandResult={dismissComposerNotice}
                     onDraftChange={onDraftChange}
                     onStop={onStopResponding}
                     onSubmit={onSubmit}

@@ -27,10 +27,15 @@ import {
 } from "@/lib/workspace-thread-state";
 import type { AgentChatRequest } from "@/types/runtime";
 
-/** 提交回合的可选覆盖：`/skill` 用 prompt 覆盖草稿并声明本轮 expose_skills。 */
+/**
+ * 提交回合的可选覆盖：`/skill` 用 prompt 覆盖草稿并声明本轮 expose_skills；
+ * `images`（S5）是已上传成功的服务端附件路径，走运行时命令通道投递
+ * （`submit_prompt.images`）——本结构仅承载入参，不进入 `/api/agent/chat` 载荷。
+ */
 export type AgentChatSubmitOptions = {
   prompt?: string;
   exposeSkills?: readonly string[];
+  images?: readonly string[];
 };
 
 export type AgentChatTurnBootstrapInput = {

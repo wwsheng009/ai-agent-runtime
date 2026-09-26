@@ -79,6 +79,7 @@ export function WorkspaceShell({
   composerAttachments,
   connectionStatus = null,
   draft,
+  imageSubmitFeedback = null,
   isResponding,
   modelOptions,
   phase,
@@ -379,6 +380,7 @@ export function WorkspaceShell({
           isCompact={isCompact}
           isNewThread={isNewThread}
           isResponding={isResponding}
+          imageSubmitFeedback={imageSubmitFeedback}
           liveTeamCount={liveTeamCount}
           messageListStyle={messageListStyle}
           modelOptions={modelOptions}

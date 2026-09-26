@@ -554,11 +554,10 @@ export function createProfilesMock() {
       );
       const body = await readBody(req);
       if (body?.type !== "set_profile") {
-        writeJson(res, 400, {
-          error: `unsupported mock command: ${String(body?.type)}`,
-          code: "unsupported_command",
-        });
-        return true;
+        // 非本域命令（例如 S5 的 `submit_prompt`，带 images 时由 mock-server 的附件
+        // 分支回执）必须交回调用方继续路由——见 mock-server.mjs「未命中即返回 false，
+        // 后续路由不受影响」的约定。在这里写 400 会把 submit_prompt 挡在附件分支之前。
+        return false;
       }
       const target = typeof body?.profile === "string" ? body.profile.trim() : "";
       const entry = [...entries.values()].find(

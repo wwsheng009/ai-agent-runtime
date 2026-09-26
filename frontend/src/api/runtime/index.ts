@@ -196,3 +196,22 @@ export {
   streamAgentChat,
   streamSessionRuntime,
 } from "./sse";
+export {
+  describeRuntimeUploadFailure,
+  isRuntimeUploadValidationError,
+  isRuntimeUploadsUnavailable,
+  normalizeRuntimeUploadAttachment,
+  normalizeRuntimeUploadPayload,
+  RUNTIME_UPLOAD_MAX_COUNT,
+  RUNTIME_UPLOAD_PATH,
+  uploadRuntimeAttachment,
+} from "./uploads";
+export {
+  isSessionPromptLeaseConflict,
+  isSessionPromptUnavailable,
+  isSessionPromptValidationError,
+  normalizeRuntimePromptImages,
+  normalizeRuntimeSessionPromptPayload,
+  sessionRuntimeCommandsPath,
+  submitRuntimeSessionPrompt,
+} from "./session-prompt";

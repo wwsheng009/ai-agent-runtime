@@ -3,10 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   classifyComposerAttachment,
   composerAttachmentIdentity,
+  composerAttachmentUploadedPaths,
+  countUnsettledComposerAttachments,
   createComposerAttachment,
   formatComposerAttachmentSize,
   hasComposerFilePayload,
+  hasUnsettledComposerAttachments,
   planComposerAttachmentAdd,
+  resolveComposerAttachmentUploadOutcome,
   type ComposerAttachment,
   type ComposerAttachmentCandidate,
 } from "./composer-attachments";
@@ -19,7 +23,11 @@ function attachment(name: string, size: number, type: string): ComposerAttachmen
     size,
     mimeType: type,
     previewUrl: null,
-    status: "pending",
+    status: "uploaded",
+    remotePath: `/srv/${name}`,
+    remoteNote: "",
+    error: null,
+    errorKind: null,
     file: new File([new Uint8Array(size)], name, { type }),
   };
 }
@@ -120,7 +128,7 @@ describe("planComposerAttachmentAdd", () => {
 });
 
 describe("createComposerAttachment", () => {
-  it("marks local drafts as pending and never fabricates an upload", () => {
+  it("starts in the uploading state and never fabricates an upload", () => {
     const file = new File([new Uint8Array(4)], "shot.png", { type: "image/png" });
     const created = createComposerAttachment(file, {
       id: "a-1",
@@ -134,7 +142,11 @@ describe("createComposerAttachment", () => {
       size: 4,
       mimeType: "image/png",
       previewUrl: "blob:preview",
-      status: "pending",
+      status: "uploading",
+      remotePath: null,
+      remoteNote: "",
+      error: null,
+      errorKind: null,
     });
     expect(created.file).toBe(file);
   });
@@ -142,6 +154,75 @@ describe("createComposerAttachment", () => {
   it("leaves non-image previews empty", () => {
     const file = new File([new Uint8Array(4)], "notes.txt", { type: "text/plain" });
     expect(createComposerAttachment(file, { id: "a-2" }).previewUrl).toBeNull();
+  });
+});
+
+describe("upload outcome resolution", () => {
+  function uploaded(
+    overrides: Partial<ComposerAttachment> = {},
+  ): ComposerAttachment {
+    return {
+      ...createComposerAttachment(
+        new File([new Uint8Array(4)], "shot.png", { type: "image/png" }),
+        { id: "a-1" },
+      ),
+      ...overrides,
+    };
+  }
+
+  function result(entries: Array<Partial<{ name: string; path: string; note: string; skipped: boolean }>>) {
+    return {
+      attachments: entries.map((entry) => ({
+        name: entry.name ?? "shot.png",
+        path: entry.path ?? "",
+        note: entry.note ?? "",
+        skipped: entry.skipped ?? false,
+      })),
+    };
+  }
+
+  it("only counts server-confirmed paths as uploaded", () => {
+    expect(
+      resolveComposerAttachmentUploadOutcome(
+        result([{ name: "shot.png", path: "/srv/a.png", note: "已压缩" }]),
+        "shot.png",
+      ),
+    ).toEqual({ status: "uploaded", remotePath: "/srv/a.png", remoteNote: "已压缩" });
+
+    expect(
+      resolveComposerAttachmentUploadOutcome(
+        result([{ name: "shot.png", skipped: true, note: "不是可识别的图片" }]),
+        "shot.png",
+      ),
+    ).toEqual({ status: "error", errorKind: "rejected", error: "不是可识别的图片" });
+  });
+
+  it("falls back to the single entry and reports missing entries honestly", () => {
+    expect(
+      resolveComposerAttachmentUploadOutcome(
+        result([{ name: "renamed.png", path: "/srv/b.png" }]),
+        "shot.png",
+      ),
+    ).toMatchObject({ status: "uploaded", remotePath: "/srv/b.png" });
+    expect(resolveComposerAttachmentUploadOutcome(result([]), "shot.png")).toEqual({
+      status: "error",
+      errorKind: "rejected",
+      error: "",
+    });
+  });
+
+  it("derives sendable paths and unsettled counts from status", () => {
+    const list = [
+      uploaded({ id: "a", status: "uploaded", remotePath: "/srv/a.png" }),
+      uploaded({ id: "b", status: "uploading" }),
+      uploaded({ id: "c", status: "error", error: "boom", errorKind: "failed" }),
+      uploaded({ id: "d", status: "uploaded", remotePath: "" }),
+    ];
+
+    expect(composerAttachmentUploadedPaths(list)).toEqual(["/srv/a.png"]);
+    expect(countUnsettledComposerAttachments(list)).toBe(2);
+    expect(hasUnsettledComposerAttachments(list)).toBe(true);
+    expect(hasUnsettledComposerAttachments([list[0]])).toBe(false);
   });
 });
 

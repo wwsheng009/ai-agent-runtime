@@ -137,7 +137,7 @@ test("P1-4c: the composer refocuses on load, session switch and submit", async (
   await expect(composer(page)).toHaveValue("");
 });
 
-test("P1-4d: picked attachments stay pending and block submit until removed", async ({
+test("P1-4d/S5: picked attachments upload on add and block submit until settled", async ({
   page,
 }) => {
   await composer(page).fill("ship the attachment");
@@ -150,14 +150,12 @@ test("P1-4d: picked attachments stay pending and block submit until removed", as
   });
 
   await expect(page.locator("[data-composer-attachment]")).toHaveCount(1);
+  // mock 与后端同形：非图片被跳过 → 条目如实落在 error（不伪造「已上传」）。
   await expect(
-    page.locator('[data-composer-attachment][data-attachment-status="pending"]'),
+    page.locator('[data-composer-attachment][data-attachment-status="error"]'),
   ).toHaveCount(1);
-  await expect(page.locator("[data-composer-attachments-pending]")).toContainText(
-    "attachments pending",
-  );
   await expect(page.locator("[data-composer-attachments-blocked]")).toContainText(
-    "attachment upload",
+    "can't send yet",
   );
   await expect(submit).toBeDisabled();
 

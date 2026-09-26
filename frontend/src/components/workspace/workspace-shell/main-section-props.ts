@@ -31,6 +31,7 @@ export type WorkspaceMainSectionProps = Pick<
   | "draft"
   | "earlierLoader"
   | "isResponding"
+  | "imageSubmitFeedback"
   | "modelOptions"
   | "onAnswerPendingQuestion"
   | "onBacktrackToMessage"

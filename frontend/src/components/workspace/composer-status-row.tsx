@@ -6,8 +6,10 @@ import { useTranslation } from "react-i18next";
 // 只做「渲染 + 触发动作」：附件/命令行/响应态的真值仍由 owner 持有并作为 props 传入。
 type ComposerStatusRowProps = {
   isCompact: boolean;
-  /** 附件草稿计数（上传接口未就绪时只能停留「待发送」）。 */
-  pendingAttachmentCount: number;
+  /** 附件草稿计数：在途 / 未落定 / 已上传（S5：新增即上传）。 */
+  uploadingAttachmentCount: number;
+  unsettledAttachmentCount: number;
+  uploadedAttachmentCount: number;
   rejectedAttachmentCount: number;
   onAcknowledgeRejections: () => void;
   isResponding: boolean;
@@ -21,7 +23,9 @@ type ComposerStatusRowProps = {
 
 export function ComposerStatusRow({
   isCompact,
-  pendingAttachmentCount,
+  uploadingAttachmentCount,
+  unsettledAttachmentCount,
+  uploadedAttachmentCount,
   rejectedAttachmentCount,
   onAcknowledgeRejections,
   isResponding,
@@ -31,12 +35,12 @@ export function ComposerStatusRow({
   transport,
 }: ComposerStatusRowProps) {
   const { t } = useTranslation("workspace");
-  const hasPendingAttachments = pendingAttachmentCount > 0;
+  const hasAttachments = uploadedAttachmentCount > 0 || unsettledAttachmentCount > 0;
   const visible =
     transport === "error" ||
     selectedArtifactCount > 0 ||
     isResponding ||
-    hasPendingAttachments ||
+    hasAttachments ||
     rejectedAttachmentCount > 0 ||
     isCommandLine ||
     hasCommandNotice;
@@ -61,17 +65,26 @@ export function ComposerStatusRow({
           {t("composer.responseActive")}
         </span>
       ) : null}
-      {hasPendingAttachments ? (
-        <>
-          <span data-composer-attachments-pending role="status">
-            {t("composer.attachments.pendingCount", {
-              count: pendingAttachmentCount,
-            })}
-          </span>
-          <span data-composer-attachments-blocked className="text-[#d8a66d]">
-            {t("composer.attachments.uploadUnavailable")}
-          </span>
-        </>
+      {uploadingAttachmentCount > 0 ? (
+        <span data-composer-attachments-uploading role="status">
+          {t("composer.attachments.uploadingCount", {
+            count: uploadingAttachmentCount,
+          })}
+        </span>
+      ) : null}
+      {unsettledAttachmentCount > 0 ? (
+        <span data-composer-attachments-blocked className="text-[#d8a66d]">
+          {t("composer.attachments.unsettledBlocked", {
+            count: unsettledAttachmentCount,
+          })}
+        </span>
+      ) : null}
+      {uploadedAttachmentCount > 0 && unsettledAttachmentCount === 0 ? (
+        <span data-composer-attachments-ready role="status">
+          {t("composer.attachments.readyCount", {
+            count: uploadedAttachmentCount,
+          })}
+        </span>
       ) : null}
       {rejectedAttachmentCount > 0 ? (
         <button
