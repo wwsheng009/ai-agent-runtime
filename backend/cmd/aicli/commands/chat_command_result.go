@@ -426,7 +426,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		!commandMatches(cmdLower, "/new") && cmdLower != "/session" && !commandMatches(cmdLower, "/history") && !commandMatches(cmdLower, "/h") &&
 		!commandMatches(cmdLower, "/queue") && !commandMatches(cmdLower, "/attach") &&
 		!commandMatches(cmdLower, "/permission-mode") && !commandMatches(cmdLower, "/mode") &&
-		!commandMatches(cmdLower, "/approval-reuse") && !commandMatches(cmdLower, "/plan") &&
+		!commandMatches(cmdLower, "/approval-reuse") && !commandMatches(cmdLower, "/plan") && !commandMatches(cmdLower, "/plans") &&
 		!commandMatches(cmdLower, "/timeline") && !commandMatches(cmdLower, "/collab") &&
 		!commandMatches(cmdLower, "/mcp") && !commandMatches(cmdLower, "/web") && !commandMatches(cmdLower, "/routing") &&
 		!commandMatches(cmdLower, "/profile") {

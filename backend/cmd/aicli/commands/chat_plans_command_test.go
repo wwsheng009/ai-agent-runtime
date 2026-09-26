@@ -1,11 +1,13 @@
 package commands
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planstore"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -391,5 +393,57 @@ func TestParsePlansDiffArgs(t *testing.T) {
 				t.Fatalf("got id=%q from=%d to=%d", id, from, to)
 			}
 		})
+	}
+}
+
+// TestDispatchChatCommandUnifiedPlansRendersDocumentNotGate 是迁移的端到端
+// 回归：统一渲染 interactive TTY 中 /plans 必须产出语义命令 cell（归档列表），
+// 不得落入 unified gate 的“尚未迁移”错误（dispatch 围栏白名单必须覆盖 /plans，
+// 因为 commandMatches 按词边界匹配，/plans 不会被 /plan 规则带走）。
+func TestDispatchChatCommandUnifiedPlansRendersDocumentNotGate(t *testing.T) {
+	store := withPlanStore(t)
+	record, err := store.Record(planstore.RecordOptions{
+		SessionID:   "session-1",
+		ProjectPath: "/work/demo",
+		PlanPath:    "docs/plan.md",
+	})
+	if err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newTestChatInteractionCoordinator(t, session)
+	t.Cleanup(coordinator.Shutdown)
+	session.Interaction = coordinator
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(72, 18)
+	coordinator.SetSurface(surface)
+
+	var presenterOutput bytes.Buffer
+	if !coordinator.enableUnifiedRendererWithWriter(&presenterOutput) {
+		t.Fatal("unified renderer did not attach")
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	presenterOutput.Reset()
+
+	dispatchChatCommand(session, "/plans", false)
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+
+	state := coordinator.uiActor.AppState()
+	var transcript strings.Builder
+	for _, cell := range state.Transcript.Cells {
+		transcript.WriteString(cell.Source)
+		transcript.WriteByte('\n')
+	}
+	if strings.Contains(transcript.String(), "/plans 尚未迁移到统一渲染命令通道") {
+		t.Fatalf("/plans fell through to the unified gate: %s", transcript.String())
+	}
+	if !strings.Contains(transcript.String(), "已归档计划: 1") || !strings.Contains(transcript.String(), record.ID) {
+		t.Fatalf("/plans archive list document missing: %s", transcript.String())
 	}
 }
