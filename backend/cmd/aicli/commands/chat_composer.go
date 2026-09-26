@@ -108,6 +108,7 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 		OnTranscriptRequested: c.onTranscriptRequested,
 		ActionForChord:        chatComposerActionForChord,
 		OnActionKey:           c.onActionKey,
+		OnClipboardTextEmpty:  c.onClipboardTextEmpty,
 		CollapsePastedText:    chatComposerCollapsePastedText(c.session),
 		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
 		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
@@ -304,25 +305,48 @@ func (c *chatComposerController) onActionKey(snapshot ui.LineEditorSnapshot, act
 		}
 		return ui.LineEditorActionResult{}
 	case keymap.ActionClipboardImage:
-		before := len(c.session.ImagePaths)
-		message, err := attachClipboardImage(c.session, false)
-		if err != nil {
-			message = chatClipboardImageErrorMessage(err)
-		}
-		c.setStatusLine(message)
-		if len(c.session.ImagePaths) <= before {
-			return ui.LineEditorActionResult{Claimed: true}
-		}
-		// 附件读入成功：把 [Image #N] 令牌插到光标处，删掉令牌即不再随消息发送。
-		index := len(c.session.ImagePaths)
-		markChatImageTokenPath(c.session, c.session.ImagePaths[index-1], index)
-		nextText, nextCursor := insertChatImageToken(snapshot.Text, snapshot.Cursor, index)
-		return ui.LineEditorActionResult{
-			Claimed:     true,
-			Replacement: &ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor},
-		}
+		return c.attachClipboardImageToLine(snapshot, false)
 	}
 	return ui.LineEditorActionResult{}
+}
+
+// onClipboardTextEmpty 是 ctrl+v 的图片兜底：剪贴板里没有文本时若存在图片，按 alt+v
+// 的同一套语义读图（落附件 + 插令牌）；没有图片时静默返回，不打扰"剪贴板为空"的普通按键。
+func (c *chatComposerController) onClipboardTextEmpty(snapshot ui.LineEditorSnapshot) ui.LineEditorActionResult {
+	return c.attachClipboardImageToLine(snapshot, true)
+}
+
+// attachClipboardImageToLine 读剪贴板图片并接线到当前输入行。quiet 为 true 时所有失败
+// 路径保持静默（ctrl+v 兜底不该在空白剪贴板上刷提示）；明确按下 alt+v（quiet=false）
+// 时才把错误/去重提示写到状态行。
+func (c *chatComposerController) attachClipboardImageToLine(snapshot ui.LineEditorSnapshot, quiet bool) ui.LineEditorActionResult {
+	if c == nil || c.session == nil {
+		return ui.LineEditorActionResult{}
+	}
+	before := len(c.session.ImagePaths)
+	message, err := attachClipboardImage(c.session, false)
+	if err != nil {
+		if quiet {
+			return ui.LineEditorActionResult{}
+		}
+		c.setStatusLine(chatClipboardImageErrorMessage(err))
+		return ui.LineEditorActionResult{Claimed: true}
+	}
+	c.setStatusLine(message)
+	if len(c.session.ImagePaths) <= before {
+		if quiet {
+			return ui.LineEditorActionResult{}
+		}
+		return ui.LineEditorActionResult{Claimed: true}
+	}
+	// 附件读入成功：把 [Image #N] 令牌插到光标处，删掉令牌即不再随消息发送。
+	index := len(c.session.ImagePaths)
+	markChatImageTokenPath(c.session, c.session.ImagePaths[index-1], index)
+	nextText, nextCursor := insertChatImageToken(snapshot.Text, snapshot.Cursor, index)
+	return ui.LineEditorActionResult{
+		Claimed:     true,
+		Replacement: &ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor},
+	}
 }
 
 func normalizeChatComposerReadError(session *ChatSession, err error) error {

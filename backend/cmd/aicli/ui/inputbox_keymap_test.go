@@ -212,3 +212,63 @@ func TestComposerStateLargePasteCollapseCanBeDisabled(t *testing.T) {
 		t.Fatalf("cursor = %d, want %d", cursor, len([]rune(large)))
 	}
 }
+
+// ctrl+v 剪贴板读不到文本时，宿主可以接管（例如读剪贴板图片并插入 [Image #N] 令牌）。
+func TestReadInteractiveLine_ClipboardTextEmptyHookRewritesLine(t *testing.T) {
+	oldClipboard := readInteractiveClipboardText
+	readInteractiveClipboardText = func() (string, error) { return "", nil }
+	t.Cleanup(func() { readInteractiveClipboardText = oldClipboard })
+
+	var output bytes.Buffer
+	hookCalls := 0
+	line, err := readInteractiveLineWithHooks(
+		strings.NewReader("\x16\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+		&LineEditorHooks{
+			OnClipboardTextEmpty: func(snapshot LineEditorSnapshot) LineEditorActionResult {
+				hookCalls++
+				next := snapshot.Text + "[Image #1] "
+				return LineEditorActionResult{
+					Claimed:     true,
+					Replacement: &LineEditorReplacement{Text: next, Cursor: len([]rune(next))},
+				}
+			},
+		},
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLineWithHooks returned error: %v", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("ctrl+v 无文本时应调用一次兜底钩子，实际 %d 次", hookCalls)
+	}
+	if strings.TrimSpace(line) != "[Image #1]" {
+		t.Fatalf("兜底替换未落到提交行: %q", line)
+	}
+}
+
+// 未接兜底钩子时保持原有静默行为：剪贴板没有文本就什么都不做。
+func TestReadInteractiveLine_ClipboardTextEmptyWithoutHookStaysSilent(t *testing.T) {
+	oldClipboard := readInteractiveClipboardText
+	readInteractiveClipboardText = func() (string, error) { return "", nil }
+	t.Cleanup(func() { readInteractiveClipboardText = oldClipboard })
+
+	var output bytes.Buffer
+	line, err := readInteractiveLine(
+		strings.NewReader("\x16\n"),
+		&output,
+		UserPromptText(0),
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("readInteractiveLine returned error: %v", err)
+	}
+	if strings.TrimSpace(line) != "" {
+		t.Fatalf("没有兜底钩子时不应改写输入行: %q", line)
+	}
+}

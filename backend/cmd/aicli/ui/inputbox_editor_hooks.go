@@ -69,6 +69,10 @@ type LineEditorHooks struct {
 	ActionForChord func(chord string) (string, bool)
 	// OnActionKey 在按键解析出已注册动作时调用；返回结果见 LineEditorActionResult。
 	OnActionKey func(snapshot LineEditorSnapshot, action string) LineEditorActionResult
+	// OnClipboardTextEmpty 在 ctrl+v 读不到剪贴板文本时调用（典型场景：剪贴板里只有
+	// 图片）。返回 Replacement 时编辑器改写当前行（例如插入 [Image #N] 令牌）；返回
+	// 零值表示不处理，保持编辑器原有的静默行为（不打扰"剪贴板为空"的普通按键）。
+	OnClipboardTextEmpty func(snapshot LineEditorSnapshot) LineEditorActionResult
 	// CollapsePastedText 控制大段粘贴是否折叠为占位符（提交时仍发送全文）。
 	// nil 表示使用默认行为（折叠）。
 	CollapsePastedText *bool

@@ -1214,6 +1214,12 @@ func readInteractiveLineWithHooksContext(ctx context.Context, reader io.Reader, 
 			}
 			if pasted, err := readInteractiveClipboardText(); err == nil && pasted != "" {
 				insertPastedText(pasted)
+			} else if hooks != nil && hooks.OnClipboardTextEmpty != nil {
+				// 剪贴板里没有文本（例如只有图片）：给宿主一次接管机会（ctrl+v 直接读图）。
+				// 宿主返回零值时保持原有的静默行为。
+				if result := hooks.OnClipboardTextEmpty(snapshot()); result.Replacement != nil {
+					applyReplacement(*result.Replacement)
+				}
 			}
 		case editorKeyRune:
 			clearReverseSearchState()

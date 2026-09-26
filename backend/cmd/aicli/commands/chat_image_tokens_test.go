@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -323,5 +324,43 @@ func TestNormalizeChatTurnImagePromptWithoutTokens(t *testing.T) {
 	}
 	if len(session.ImagePaths) != 1 {
 		t.Fatalf("无令牌时附件应原样: %+v", session.ImagePaths)
+	}
+}
+
+// ctrl+v 兜底：剪贴板里是图片时按 alt+v 的同一套语义读图（落附件 + 插令牌）。
+func TestComposerClipboardTextEmptyHookAttachesImage(t *testing.T) {
+	path := writeClipboardFixturePNG(t)
+	stubClipboardImageRead(t, clipboardimage.Result{Path: path, Width: 2, Height: 2}, nil)
+
+	session := &ChatSession{}
+	controller := &chatComposerController{session: session}
+	result := controller.onClipboardTextEmpty(ui.LineEditorSnapshot{Text: "看图 ", Cursor: 3})
+	if !result.Claimed || result.Replacement == nil {
+		t.Fatalf("ctrl+v 兜底读到图片后应认领并改写输入行: %+v", result)
+	}
+	if !strings.Contains(result.Replacement.Text, "[Image #1]") {
+		t.Fatalf("ctrl+v 兜底应插入图片令牌: %q", result.Replacement.Text)
+	}
+	if len(session.ImagePaths) != 1 {
+		t.Fatalf("ctrl+v 兜底未写入附件: %+v", session.ImagePaths)
+	}
+	if index := session.imageTokenPaths[session.ImagePaths[0]]; index != 1 {
+		t.Fatalf("令牌标记应为 1，得到 %d", index)
+	}
+}
+
+// 剪贴板里没有图片时必须保持静默：不认领、不改行、不写状态行（否则空白剪贴板上的
+// ctrl+v 会莫名其妙地刷提示）。
+func TestComposerClipboardTextEmptyHookStaysQuietWithoutImage(t *testing.T) {
+	stubClipboardImageRead(t, clipboardimage.Result{}, errors.New("剪贴板里没有图片"))
+
+	session := &ChatSession{}
+	controller := &chatComposerController{session: session}
+	result := controller.onClipboardTextEmpty(ui.LineEditorSnapshot{Text: "abc", Cursor: 3})
+	if result.Claimed || result.ExitEditor || result.Replacement != nil {
+		t.Fatalf("没有图片时应返回零值: %+v", result)
+	}
+	if len(session.ImagePaths) != 0 {
+		t.Fatalf("没有图片时不应新增附件: %+v", session.ImagePaths)
 	}
 }
