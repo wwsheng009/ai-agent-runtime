@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -118,8 +119,14 @@ func (h *Handler) summarizeApproval(ctx context.Context, sessionID string, pendi
 	if h.llmRuntime == nil {
 		return "", "", fmt.Errorf("llm runtime not configured")
 	}
-	provider := strings.TrimSpace(h.llmRuntime.DefaultProvider())
-	model := strings.TrimSpace(h.llmRuntime.DefaultModel())
+	// 解释跟随会话路由：会话已解析出 provider+model 时优先用它（与用户正在跑的
+	// 是同一个模型），否则退回运行时默认。只认「两者齐全」的会话路由——只有
+	// 模型名时不做猜测，避免把请求路由到不声明该模型的 provider。
+	provider, model := h.sessionRouteForApprovalExplain(ctx, sessionID)
+	if provider == "" || model == "" {
+		provider = strings.TrimSpace(h.llmRuntime.DefaultProvider())
+		model = strings.TrimSpace(h.llmRuntime.DefaultModel())
+	}
 	if model == "" {
 		return "", "", fmt.Errorf("llm runtime has no default model")
 	}
@@ -147,6 +154,42 @@ func (h *Handler) summarizeApproval(ctx context.Context, sessionID string, pendi
 		return "", "", fmt.Errorf("empty llm response")
 	}
 	return strings.TrimSpace(resp.Content), model, nil
+}
+
+// sessionRouteForApprovalExplain 读取会话已解析的路由（sessionmeta 的
+// effective/requested provider+model）。会话不存在 / 存储超时 / 只有半边信息
+// 时返回空值，由调用方退回运行时默认。读取失败不影响解释：与
+// /runtime 路由透传同一容忍策略，绝不让存储抖动变成解释失败。
+func (h *Handler) sessionRouteForApprovalExplain(ctx context.Context, sessionID string) (string, string) {
+	if h == nil || h.sessionManager == nil {
+		return "", ""
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", ""
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, sessionStoreQueryTimeout)
+	defer cancel()
+	session, err := h.sessionManager.Get(queryCtx, sessionID)
+	if err != nil || session == nil {
+		return "", ""
+	}
+	context := session.Metadata.Context
+	provider := firstNonEmptyString(
+		sessionmeta.String(context, sessionmeta.EffectiveProvider),
+		sessionmeta.String(context, sessionmeta.ProviderName),
+	)
+	model := firstNonEmptyString(
+		sessionmeta.String(context, sessionmeta.EffectiveModel),
+		sessionmeta.String(context, sessionmeta.Model),
+	)
+	if provider == "" || model == "" {
+		return "", ""
+	}
+	return provider, model
 }
 
 // publishApprovalExplainUsage 发布一次 `llm.request.finished`，让 usage 账本
