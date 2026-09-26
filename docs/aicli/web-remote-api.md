@@ -541,6 +541,26 @@ curl -N -X POST http://127.0.0.1:61772/web/api/invoke \
 - turn 记录只保留最近 128 条、30 分钟；服务重启后历史记录清空（持久用量查询请用
   `/web/api/analysis/*` 与 `/web/api/cache/*`）。
 
+### 8.1 远程调用者的能力边界（安全模型）
+
+写令牌挡的是「浏览器跨站 / DNS rebinding / 误配置客户端」，**不是同机进程**：`web_auth.go`
+的威胁模型明确把同机进程排除在防护之外——本机进程本来就能读启动行、页面 meta 与进程内存，
+`GET /web/api/token` 也能在回环上自举。因此要把调用方当成「坐在终端前的人」来对待：
+
+| 事实 | 含义 |
+|------|------|
+| `/web/api/input` 的 prompt 与 TUI 键盘输入走同一路由（含 slash 命令） | 持令牌的调用方能执行 `/` 命令、回答审批与提问 |
+| `/yolo` / `/permission-mode bypass_permissions` 的二次确认同样读输入队列 | 两条注入即可完成确认——确认只防误触，不防调用方 |
+| 审批决议（`type=approval`）与提问回答可注入 | 调用方能为 Agent 的任意审批放行 |
+| runtime API（`/api/runtime/*`）没有写令牌机制，部分端点显式信任回环来源 | 同机任意进程都能调用（权限模式切换见 [permissions.md](./permissions.md) §1.4） |
+
+实践建议：
+
+- 只在本机使用（不要端口转发）；非回环监听时务必 `--web-dev=false` 并守住令牌。
+- 令牌等同于**会话控制权**：不要写进日志或 CI 产物，不要交给不可信的自动化。
+- 需要「远程只能看不能动」时，只给只读端点（`screen` / `messages` / `events` / `turn`），不发放令牌。
+- 需要「Agent 不能自我提权」时，在权限文件放 `disable_bypass: true`（引擎求值期降级，见 [permissions.md](./permissions.md) §1.4）。
+
 ## 9. 网格控制面（`/web/api/mesh/*` + `/web/api/health`）
 
 多进程网格（`~/.aicli/mesh/`，设计见
