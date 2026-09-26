@@ -987,6 +987,11 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	// Must stay ahead of the greedy `/plans/{id:.*}` detail route: gorilla/mux
 	// matches in registration order, so a later registration would be shadowed.
 	runtimeRouter.HandleFunc("/plans/{id:.*}/diff", h.DiffStoredPlan).Methods(http.MethodGet)
+	// 行级评论（§4.4）：读侧附带「按目标修订重放后的当前位置」，写侧在创建时
+	// 从锚定轮次摘取正文。与 /diff 同理，必须注册在贪婪的明细路由之前。
+	runtimeRouter.HandleFunc("/plans/{id:.*}/comments", h.ListStoredPlanComments).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/plans/{id:.*}/comments", h.CreateStoredPlanComment).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/plans/{id:.*}/comments/{comment_id}", h.DeleteStoredPlanComment).Methods(http.MethodDelete)
 	runtimeRouter.HandleFunc("/plans/{id:.*}", h.GetStoredPlan).Methods(http.MethodGet)
 	// Explicit retention: hosts can drop one archived plan (record + snapshots).
 	// Automatic retention is bounded by AICLI_PLANS_MAX_VERSIONS at archive time.
