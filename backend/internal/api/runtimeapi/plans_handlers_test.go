@@ -336,3 +336,108 @@ func TestReopenStoredPlanRejectsMissingRecordAndPlanID(t *testing.T) {
 	unknownSession := postPlanReopen(t, router, "session-missing", `{"plan_id":"demo/plan"}`)
 	require.NotEqual(t, http.StatusOK, unknownSession.Code)
 }
+
+// seedStoredPlanRounds archives `contents` as successive review rounds and
+// returns the final record (one round per content, versions 1..N).
+func seedStoredPlanRounds(t *testing.T, store *planstore.Store, contents ...string) planstore.Record {
+	t.Helper()
+	record, err := store.Record(planstore.RecordOptions{
+		SessionID:   "session-1",
+		ProjectPath: "/work/demo",
+		PlanPath:    "docs/plan.md",
+		Title:       "demo plan",
+	})
+	require.NoError(t, err)
+	for index, content := range contents {
+		decision := "request_changes"
+		if index == len(contents)-1 {
+			decision = "approve"
+		}
+		record, err = store.Snapshot(planstore.SnapshotOptions{
+			ID:       record.ID,
+			Decision: decision,
+			Source:   "user",
+			Content:  []byte(content),
+			Status:   planstore.StatusPending,
+		})
+		require.NoError(t, err)
+	}
+	return record
+}
+
+func getStoredPlanDiff(t *testing.T, router *mux.Router, planID, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	url := "/api/runtime/plans/" + planID + "/diff"
+	if query != "" {
+		url += "?" + query
+	}
+	req := httptest.NewRequest(http.MethodGet, url, nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestDiffStoredPlanReturnsRoundDelta(t *testing.T) {
+	store := planstore.NewStore(t.TempDir())
+	record := seedStoredPlanRounds(t, store,
+		"# Plan\n\n1. ship it\n",
+		"# Plan\n\n1. ship it\n2. roll back\n3. document\n",
+	)
+	router := newPlansTestRouter(t, store)
+
+	// 默认口径：from=上一轮，to=最新轮；路由必须赢过贪婪的 /plans/{id:.*} 明细路由。
+	rec := getStoredPlanDiff(t, router, record.ID, "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp storedPlanDiffResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.Equal(t, record.ID, resp.PlanID)
+	require.Equal(t, 1, resp.FromVersion)
+	require.Equal(t, 2, resp.ToVersion)
+	require.False(t, resp.Identical)
+	require.Equal(t, 2, resp.Added)
+	require.Zero(t, resp.Removed)
+	require.False(t, resp.Truncated)
+	require.Contains(t, resp.Text, "--- v1 request_changes")
+	require.Contains(t, resp.Text, "+++ v2 approve")
+	require.Contains(t, resp.Text, "+2. roll back")
+	require.Contains(t, resp.Text, "@@")
+}
+
+func TestDiffStoredPlanHonoursKnobsAndErrors(t *testing.T) {
+	store := planstore.NewStore(t.TempDir())
+	record := seedStoredPlanRounds(t, store,
+		"# Plan\n\n1. ship it\n",
+		"# Plan\n\n1. ship it\n2. roll back\n",
+	)
+	router := newPlansTestRouter(t, store)
+
+	// 同一轮对比：Identical=true，正文只剩版本框架行。
+	same := getStoredPlanDiff(t, router, record.ID, "from=2&to=2")
+	require.Equal(t, http.StatusOK, same.Code, same.Body.String())
+	var sameResp storedPlanDiffResponse
+	require.NoError(t, json.NewDecoder(same.Body).Decode(&sameResp))
+	require.True(t, sameResp.Identical)
+	require.Zero(t, sameResp.Added)
+	require.NotContains(t, sameResp.Text, "@@")
+
+	// max_lines=1：正文被截断（计数仍按渲染部分给出）。
+	truncated := getStoredPlanDiff(t, router, record.ID, "max_lines=1")
+	require.Equal(t, http.StatusOK, truncated.Code, truncated.Body.String())
+	var truncatedResp storedPlanDiffResponse
+	require.NoError(t, json.NewDecoder(truncated.Body).Decode(&truncatedResp))
+	require.True(t, truncatedResp.Truncated)
+
+	// 参数校验：非整数 / 越界 → 400；未知记录与未知版本 → 404。
+	badQuery := getStoredPlanDiff(t, router, record.ID, "from=abc")
+	require.Equal(t, http.StatusBadRequest, badQuery.Code, badQuery.Body.String())
+	require.Contains(t, badQuery.Body.String(), "from must be an integer")
+
+	outOfRange := getStoredPlanDiff(t, router, record.ID, "context=99")
+	require.Equal(t, http.StatusBadRequest, outOfRange.Code, outOfRange.Body.String())
+
+	missingRecord := getStoredPlanDiff(t, router, "demo/ghost", "")
+	require.Equal(t, http.StatusNotFound, missingRecord.Code, missingRecord.Body.String())
+
+	missingVersion := getStoredPlanDiff(t, router, record.ID, "from=9&to=2")
+	require.Equal(t, http.StatusNotFound, missingVersion.Code, missingVersion.Body.String())
+}

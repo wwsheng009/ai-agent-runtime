@@ -3,8 +3,10 @@ package runtimeapi
 import (
 	"encoding/json"
 	stderrors "errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -50,6 +52,23 @@ type storedPlanResponse struct {
 type storedPlanListResponse struct {
 	Plans []storedPlanResponse `json:"plans"`
 	Count int                  `json:"count"`
+}
+
+// storedPlanDiffResponse is one rendered round-to-round comparison. Text is the
+// unified diff (framed with the two rounds' review metadata); Identical is the
+// source of truth when Text carries only the frame lines.
+type storedPlanDiffResponse struct {
+	PlanID      string `json:"plan_id"`
+	FromVersion int    `json:"from_version"`
+	ToVersion   int    `json:"to_version"`
+	Identical   bool   `json:"identical"`
+	Added       int    `json:"added"`
+	Removed     int    `json:"removed"`
+	OldLines    int    `json:"old_lines"`
+	NewLines    int    `json:"new_lines"`
+	Coarse      bool   `json:"coarse,omitempty"`
+	Truncated   bool   `json:"truncated,omitempty"`
+	Text        string `json:"text,omitempty"`
 }
 
 // planArtifactStore returns the handler's plan artifact store, falling back to
@@ -124,6 +143,105 @@ func (h *Handler) GetStoredPlan(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.writeJSON(w, http.StatusOK, resp)
+}
+
+// DiffStoredPlan compares two archived rounds of one plan and returns the
+// bounded unified diff text plus line counts (the HTTP twin of
+// `/plans diff <id> [vA [vB]]`).
+//
+// Query: from/to select versions (0/absent derives: to=latest, from=previous),
+// context (0..10) and max_lines (0..2000) tune the render. The id travels in
+// the path or as ?id= (legacy form). Unknown record/version → 404.
+func (h *Handler) DiffStoredPlan(w http.ResponseWriter, r *http.Request) {
+	store := h.planArtifactStore()
+	if store == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "plan store not configured"))
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		id = strings.Trim(strings.TrimSpace(mux.Vars(r)["id"]), "/")
+	}
+	if id == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "plan id is required"))
+		return
+	}
+	from, to, contextLines, maxLines, err := decodeStoredPlanDiffQuery(r)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	result, err := planmode.DiffArchivedVersions(planmode.DiffVersionsOptions{
+		Store:    store,
+		RecordID: id,
+		From:     from,
+		To:       to,
+		Options:  planmode.DiffOptions{ContextLines: contextLines, MaxLines: maxLines},
+	})
+	if err != nil {
+		h.writeStoredPlanDiffError(w, err)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, storedPlanDiffResponse{
+		PlanID:      result.RecordID,
+		FromVersion: result.FromVersion,
+		ToVersion:   result.ToVersion,
+		Identical:   result.Identical,
+		Added:       result.Added,
+		Removed:     result.Removed,
+		OldLines:    result.OldLines,
+		NewLines:    result.NewLines,
+		Coarse:      result.Coarse,
+		Truncated:   result.Truncated,
+		Text:        result.Text,
+	})
+}
+
+// decodeStoredPlanDiffQuery reads the optional knobs. Empty values keep the
+// planmode defaults (previous→latest, 3 context lines, 400 rendered lines);
+// out-of-range values are rejected so a scripted client gets a 400 instead of a
+// silently clamped diff.
+func decodeStoredPlanDiffQuery(r *http.Request) (from, to, contextLines, maxLines int, err error) {
+	query := r.URL.Query()
+	if from, err = parseStoredPlanDiffInt(query.Get("from"), "from", 0, 1_000_000); err != nil {
+		return 0, 0, 0, 0, err
+	}
+	if to, err = parseStoredPlanDiffInt(query.Get("to"), "to", 0, 1_000_000); err != nil {
+		return 0, 0, 0, 0, err
+	}
+	if contextLines, err = parseStoredPlanDiffInt(query.Get("context"), "context", 0, 10); err != nil {
+		return 0, 0, 0, 0, err
+	}
+	if maxLines, err = parseStoredPlanDiffInt(query.Get("max_lines"), "max_lines", 0, 2000); err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return from, to, contextLines, maxLines, nil
+}
+
+func parseStoredPlanDiffInt(raw, name string, minValue, maxValue int) (int, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %q", name, trimmed)
+	}
+	if value < minValue || value > maxValue {
+		return 0, fmt.Errorf("%s must be between %d and %d: %d", name, minValue, maxValue, value)
+	}
+	return value, nil
+}
+
+// writeStoredPlanDiffError maps store errors the same way the detail endpoint
+// does: a missing record or version is a client-visible 404, everything else is
+// a 500 (a corrupt or unreadable archive is not the caller's fault).
+func (h *Handler) writeStoredPlanDiffError(w http.ResponseWriter, err error) {
+	if stderrors.Is(err, planstore.ErrNotFound) {
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
+	h.writeError(w, http.StatusInternalServerError, errors.New(errors.ErrConfigInvalid, err.Error()))
 }
 
 // DeleteStoredPlan removes one archived plan (record + snapshot files).

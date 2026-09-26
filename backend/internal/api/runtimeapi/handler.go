@@ -982,6 +982,10 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	// Archived plan artifacts (index + review-round snapshots, outside the
 	// workspace): list and by-id detail with the latest snapshot body.
 	runtimeRouter.HandleFunc("/plans", h.ListStoredPlans).Methods(http.MethodGet)
+	// Round-to-round diff (the HTTP twin of `/plans diff <id> [vA [vB]]`).
+	// Must stay ahead of the greedy `/plans/{id:.*}` detail route: gorilla/mux
+	// matches in registration order, so a later registration would be shadowed.
+	runtimeRouter.HandleFunc("/plans/{id:.*}/diff", h.DiffStoredPlan).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/plans/{id:.*}", h.GetStoredPlan).Methods(http.MethodGet)
 	// Explicit retention: hosts can drop one archived plan (record + snapshots).
 	// Automatic retention is bounded by AICLI_PLANS_MAX_VERSIONS at archive time.
