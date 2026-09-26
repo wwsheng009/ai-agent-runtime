@@ -22,7 +22,7 @@ Migration notes:
 
 Main sections:
 
-- `aicli/` - CLI behavior, default `aicli` -> `chat` startup, headless exec, session export/import, portable agents, runtime profiles, image generation, tool output rendering, metadata propagation, and provider integration notes
+- `aicli/` - CLI behavior, default `aicli` -> `chat` startup, headless exec, session export/import, portable agents, runtime profiles, image generation, plan mode (review loop + plan artifact archive), tool output rendering, metadata propagation, and provider integration notes
 - `profile/` - profile 体系专题：架构与运行时、设计与决策、使用手册（CLI / TUI / Web）、配置参考（含项目绑定 FR-14 第一阶段与 D29 信任分级门控）
 - `aicli-mesh/` - 多进程网格运维专题（aicli-mesh）：快速上手、拉起与可执行文件解析、生命周期与租约、排障手册
 - `user-guide/` - 操作手册：安装部署、配置、启动、日常操作、构建、故障排查与升级
@@ -44,6 +44,7 @@ Recommended starting points:
 - `aicli/install.md`
 - `aicli/faq.md`
 - `aicli/exec.md`
+- `aicli/plan-mode.md`
 - `aicli/session-export-import.md`
 - `aicli/agents.md`
 - `aicli/profiles.md`
