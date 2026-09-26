@@ -16,6 +16,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
@@ -188,6 +189,27 @@ func toolMetadataDurationMS(metadata map[string]interface{}) int64 {
 	}
 }
 
+// executeLocalToolkitTool runs a built-in tool after argument normalization and
+// surfaces applied input repairs to the model as a <repair_note> prefix (rule +
+// key only, never values), so a rewritten call never looks like the model's own.
+func executeLocalToolkitTool(ctx context.Context, tool toolkit.Tool, toolName string, args map[string]interface{}) (string, map[string]interface{}, error) {
+	normalized := normalizeToolkitToolArgs(toolName, toolargs.Normalize(args))
+	notes := toolkitArgRepairNotes(toolName, args, normalized)
+	result, err := tool.Execute(ctx, normalized)
+	if err != nil {
+		return "", nil, err
+	}
+	output, metadata, err := formatToolkitResultWithSource(result, toolresult.SourceToolkit)
+	if len(notes) > 0 {
+		if metadata == nil {
+			metadata = map[string]interface{}{}
+		}
+		metadata["repair_notes"] = notes
+		output = "<repair_note>" + strings.Join(notes, "; ") + "</repair_note>\n" + output
+	}
+	return output, metadata, err
+}
+
 func (m *Manager) executeWithMeta(ctx context.Context, name string, args map[string]interface{}) (string, map[string]interface{}, error) {
 	if name == "list_mcp_resources" {
 		metadata := toolresult.WithSource(toolresult.WithKind(nil, toolresult.KindText), toolresult.SourceMeta)
@@ -219,11 +241,7 @@ func (m *Manager) executeWithMeta(ctx context.Context, name string, args map[str
 	if m.toolkit != nil {
 		if tool, ok := m.toolkit.Get(lookupName); ok {
 			if m.shouldPreferLocalToolkitTool(lookupName) {
-				result, err := tool.Execute(ctx, normalizeToolkitToolArgs(lookupName, args))
-				if err != nil {
-					return "", nil, err
-				}
-				return formatToolkitResultWithSource(result, toolresult.SourceToolkit)
+				return executeLocalToolkitTool(ctx, tool, lookupName, args)
 			}
 		}
 	}
@@ -236,11 +254,7 @@ func (m *Manager) executeWithMeta(ctx context.Context, name string, args map[str
 		if findErr == nil && info != nil && info.Tool != nil {
 			if m.shouldPreferLocalToolkit(info.MCPName, lookupName) && m.toolkit != nil {
 				if tool, ok := m.toolkit.Get(lookupName); ok {
-					result, execErr := tool.Execute(ctx, normalizeToolkitToolArgs(lookupName, args))
-					if execErr != nil {
-						return "", nil, execErr
-					}
-					return formatToolkitResultWithSource(result, toolresult.SourceToolkit)
+					return executeLocalToolkitTool(ctx, tool, lookupName, args)
 				}
 			}
 			if toolprotocol.HasReporter(ctx) {

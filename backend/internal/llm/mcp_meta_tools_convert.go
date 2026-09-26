@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
 )
 
 func buildMetaToolsForProtocol(protocol string) interface{} {
@@ -73,6 +74,14 @@ func prepareToolDefinitionForProtocol(tool map[string]interface{}, protocol stri
 		cloned[key] = value
 	}
 	cloned["parameters"] = normalizeRawToolParametersForRequest(cloned["parameters"])
+	// Provider-facing union squashing (analysis §3.12): Gemini-family providers
+	// reject properties that mix anyOf/oneOf with sibling keys. Codex keeps its
+	// own sanitizer and is intentionally excluded.
+	if normalizedProtocol != "codex" {
+		if params, ok := cloned["parameters"].(map[string]interface{}); ok {
+			cloned["parameters"] = toolschema.ScalarizeUnions(params)
+		}
+	}
 	return cloned
 }
 

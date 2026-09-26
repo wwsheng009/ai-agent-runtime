@@ -139,3 +139,38 @@ func sameToolArgsMap(left, right map[string]interface{}) bool {
 	}
 	return true
 }
+
+// toolkitArgRepairNotes reports which input repairs the executor applied so the
+// model can see what changed instead of silently relying on a rewritten call.
+// Notes carry rule + key only, never values.
+func toolkitArgRepairNotes(toolName string, raw, normalized map[string]interface{}) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	notes := make([]string, 0, 2)
+	if _, hadRaw := raw["_raw"]; hadRaw {
+		if _, stillRaw := normalized["_raw"]; !stillRaw {
+			notes = append(notes, "unwrap:_raw")
+		}
+	}
+	aliases, ok := toolargs.ToolkitArgAliasesFor(toolName)
+	if !ok {
+		return notes
+	}
+	for _, pair := range aliases.Args {
+		canonical := pair.Canonical
+		if _, canonicalInRaw := raw[canonical]; canonicalInRaw {
+			continue
+		}
+		if _, canonicalInNormalized := normalized[canonical]; !canonicalInNormalized {
+			continue
+		}
+		for _, alias := range pair.Aliases {
+			if _, ok := raw[alias]; ok {
+				notes = append(notes, "alias:"+alias+"→"+canonical)
+				break
+			}
+		}
+	}
+	return notes
+}
