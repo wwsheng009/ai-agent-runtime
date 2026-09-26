@@ -352,8 +352,8 @@ func TestChatImageMaxDimensionMapping(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(envChatImageMaxDimension, tc.env)
-			if got := chatImageMaxDimension(); got != tc.want {
-				t.Fatalf("chatImageMaxDimension() = %d, want %d", got, tc.want)
+			if got := chatImageMaxDimension(nil); got != tc.want {
+				t.Fatalf("chatImageMaxDimension(nil) = %d, want %d", got, tc.want)
 			}
 		})
 	}

@@ -621,6 +621,14 @@ type AICLIChatConfig struct {
 	// CollapsePastedText 控制大段粘贴是否折叠为输入框占位符（提交时仍发送
 	// 全文）。使用指针以便区分“未配置”（默认折叠）与显式 false（原样显示）。
 	CollapsePastedText *bool `yaml:"collapse_pasted_text,omitempty" mapstructure:"collapse_pasted_text"`
+	// MaxImageDimension 是发送前图片的长边上限（像素）。nil = 内置默认
+	// （imageprep.DefaultMaxDimension）；0 或负数 = 不做缩放（关闭压缩）。
+	// 环境变量 AICLI_IMAGE_MAX_DIMENSION 优先于本项。
+	MaxImageDimension *int `yaml:"max_image_dimension,omitempty" mapstructure:"max_image_dimension"`
+	// MaxImageMB 是单张图片的体积上限（MB）。nil 或 <=0 = 内置默认
+	// （imageprep.DefaultMaxBytes，32MB）；不提供“完全不限制体积”的取值。
+	// 环境变量 AICLI_IMAGE_MAX_MB 优先于本项。
+	MaxImageMB *int `yaml:"max_image_mb,omitempty" mapstructure:"max_image_mb"`
 	// Routing 仅在工作区偏好文件（chat-prefs.yaml）中有意义（方案 §3.3）。
 	// 全局配置中的 aicli.chat.routing 不参与解析——解析器只读
 	// aicli.main_agent.routing / aicli.subagents.routing（见 routing_resolution.go）。
