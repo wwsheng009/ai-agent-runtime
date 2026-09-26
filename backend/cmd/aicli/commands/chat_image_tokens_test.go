@@ -2,6 +2,10 @@ package commands
 
 import (
 	"errors"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -381,33 +385,46 @@ func writeImageFixtureNamed(t *testing.T, name string) string {
 	return path
 }
 
-// Windows Terminal 场景的判定：只有"整段就是一个图片路径"才命中。
-func TestChatPastedImagePath(t *testing.T) {
+// Windows Terminal 场景的判定：整段粘贴由"一个或多个图片路径"组成才命中。
+func TestChatPastedImagePaths(t *testing.T) {
 	cases := []struct {
 		name string
 		text string
-		want string
+		want []string
 		ok   bool
 	}{
-		{name: "双引号包裹的路径", text: `"C:\pics\a.png"`, want: `C:\pics\a.png`, ok: true},
-		{name: "单引号包裹的路径", text: `'C:\pics\a.PNG'`, want: `C:\pics\a.PNG`, ok: true},
-		{name: "无引号无空格的路径", text: `C:\pics\a.jpeg`, want: `C:\pics\a.jpeg`, ok: true},
-		{name: "前后有空白但整体仍是路径", text: "  \"C:\\pics\\a.webp\"  ", want: `C:\pics\a.webp`, ok: true},
+		{name: "双引号包裹的路径", text: `"C:\pics\a.png"`, want: []string{`C:\pics\a.png`}, ok: true},
+		{name: "单引号包裹的路径", text: `'C:\pics\a.PNG'`, want: []string{`C:\pics\a.PNG`}, ok: true},
+		{name: "无引号无空格的路径", text: `C:\pics\a.jpeg`, want: []string{`C:\pics\a.jpeg`}, ok: true},
+		{name: "前后有空白但整体仍是路径", text: "  \"C:\\pics\\a.webp\"  ", want: []string{`C:\pics\a.webp`}, ok: true},
+		{name: "同一行多个引号路径", text: `"C:\a.png" "C:\b.jpg"`, want: []string{`C:\a.png`, `C:\b.jpg`}, ok: true},
+		{name: "多行每行一个", text: `C:\a.png` + "\n" + `"C:\my pics\b.png"`, want: []string{`C:\a.png`, `C:\my pics\b.png`}, ok: true},
+		{name: "含空格路径必须加引号", text: `"C:\my pics\a.png"`, want: []string{`C:\my pics\a.png`}, ok: true},
+		{name: "重复路径去重", text: `"C:\a.png" "c:\A.PNG"`, want: []string{`C:\a.png`}, ok: true},
 		{name: "夹在句子里的路径不动", text: `请看 C:\pics\a.png 这张`, ok: false},
 		{name: "无引号但含空格更可能是句子", text: `C:\my pics\a.png`, ok: false},
-		{name: "多行粘贴不动", text: `"C:\pics\a.png"` + "\n" + `"C:\pics\b.png"`, ok: false},
-		{name: "多文件同一行不动", text: `"a.png" "b.png"`, ok: false},
+		{name: "混入非图片标记整体不命中", text: `"C:\a.png" C:\docs\a.txt`, ok: false},
+		{name: "引号未闭合不命中", text: `"C:\a.png`, ok: false},
+		{name: "引号后紧跟内容不命中", text: `"C:\a.png"x`, ok: false},
 		{name: "非图片扩展名不动", text: `C:\docs\a.txt`, ok: false},
 		{name: "空文本不动", text: "   ", ok: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := chatPastedImagePath(tc.text)
+			got, ok := chatPastedImagePaths(tc.text)
 			if ok != tc.ok {
 				t.Fatalf("ok = %v, want %v（text=%q）", ok, tc.ok, tc.text)
 			}
-			if ok && got != tc.want {
-				t.Fatalf("path = %q, want %q", got, tc.want)
+			if !ok {
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("paths = %#v, want %#v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("paths[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
 			}
 		})
 	}
@@ -468,7 +485,8 @@ func TestComposerOnPasteTextFallsBackToText(t *testing.T) {
 	}{
 		{name: "句子里的路径", text: `请看 C:\pics\a.png 这张`},
 		{name: "无引号含空格的路径", text: `C:\my pics\a.png`},
-		{name: "多行路径", text: `"C:\pics\a.png"` + "\n" + `"C:\pics\b.png"`},
+		{name: "多行里混入非图片", text: `"C:\pics\a.png"` + "\n" + `C:\docs\b.txt`},
+		{name: "多文件里有一个不存在（全有或全无）", text: `"` + missing + `" "C:\pics\b.png"`},
 		{name: "非图片扩展名", text: `C:\docs\a.txt`},
 		{name: "看起来是图片但文件不存在", text: `"` + missing + `"`},
 	}
@@ -484,5 +502,111 @@ func TestComposerOnPasteTextFallsBackToText(t *testing.T) {
 				t.Fatalf("不应新增附件: %+v", session.ImagePaths)
 			}
 		})
+	}
+}
+
+// writeImageFixtureRGB 生成指定颜色的 2x2 PNG：不同颜色 = 不同内容哈希，用于多图场景
+// （同名不同内容的图片不会被 artifact 内容寻址去重掉）。
+func writeImageFixtureRGB(t *testing.T, name string, r, g, b uint8) string {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	for x := 0; x < 2; x++ {
+		for y := 0; y < 2; y++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: r, G: g, B: b, A: 255})
+		}
+	}
+	path := filepath.Join(t.TempDir(), name)
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("创建测试 PNG 失败: %v", err)
+	}
+	if err := png.Encode(file, img); err != nil {
+		t.Fatalf("编码测试 PNG 失败: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("关闭测试 PNG 失败: %v", err)
+	}
+	return path
+}
+
+// 多文件/多行粘贴：一次粘贴两张图 → 两个附件 + 按顺序的两个令牌。
+func TestComposerOnPasteTextAttachesMultipleImages(t *testing.T) {
+	first := writeImageFixtureRGB(t, "第一 张.png", 200, 20, 20)
+	second := writeImageFixtureRGB(t, "第二 张.png", 20, 200, 20)
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{name: "同一行空格分隔", payload: `"` + first + `" "` + second + `"`},
+		{name: "每行一个", payload: `"` + first + `"` + "\n" + `"` + second + `"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			session := &ChatSession{}
+			controller := &chatComposerController{session: session}
+			result := controller.onPasteText(tc.payload, ui.LineEditorSnapshot{Text: "两张：", Cursor: 3})
+			if !result.Claimed || result.Replacement == nil {
+				t.Fatalf("应认领并改写输入行: %+v", result)
+			}
+			if !strings.HasPrefix(result.Replacement.Text, "两张：") {
+				t.Fatalf("应保留用户前缀: %q", result.Replacement.Text)
+			}
+			if len(session.ImagePaths) != 2 {
+				t.Fatalf("应落两个附件: %+v", session.ImagePaths)
+			}
+			firstAt := strings.Index(result.Replacement.Text, "[Image #1]")
+			secondAt := strings.Index(result.Replacement.Text, "[Image #2]")
+			if firstAt < 0 || secondAt < 0 || firstAt > secondAt {
+				t.Fatalf("令牌应按粘贴顺序插入: %q", result.Replacement.Text)
+			}
+			for index, path := range session.ImagePaths {
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("附件 %d 应真实存在: %v", index+1, err)
+				}
+				if got := session.imageTokenPaths[path]; got != index+1 {
+					t.Fatalf("附件 %d 的令牌标记应为 %d，得到 %d", index+1, index+1, got)
+				}
+			}
+		})
+	}
+}
+
+// 多图重复粘贴：不新增附件，编号复用。
+func TestComposerOnPasteTextMultiDedupes(t *testing.T) {
+	first := writeImageFixtureRGB(t, "a.png", 10, 10, 200)
+	second := writeImageFixtureRGB(t, "b.png", 200, 10, 10)
+	payload := `"` + first + `" "` + second + `"`
+	session := &ChatSession{}
+	controller := &chatComposerController{session: session}
+	if result := controller.onPasteText(payload, ui.LineEditorSnapshot{}); result.Replacement == nil {
+		t.Fatalf("首次粘贴应命中: %+v", result)
+	}
+	if len(session.ImagePaths) != 2 {
+		t.Fatalf("首次应落两个附件: %+v", session.ImagePaths)
+	}
+	before := append([]string(nil), session.ImagePaths...)
+	result := controller.onPasteText(payload, ui.LineEditorSnapshot{Text: "[Image #1] [Image #2] "})
+	if result.Replacement == nil {
+		t.Fatalf("重复粘贴应复用令牌: %+v", result)
+	}
+	if len(session.ImagePaths) != 2 || session.ImagePaths[0] != before[0] || session.ImagePaths[1] != before[1] {
+		t.Fatalf("重复粘贴不应改变附件列表: %+v", session.ImagePaths)
+	}
+}
+
+// 路径数量上限：超过上限时整体回落为文本粘贴（并提示），不做部分转换。
+func TestComposerOnPasteTextPathCountCap(t *testing.T) {
+	parts := make([]string, 0, maxChatPastedImagePaths+1)
+	for i := 0; i <= maxChatPastedImagePaths; i++ {
+		parts = append(parts, fmt.Sprintf(`"C:\pics\a%d.png"`, i))
+	}
+	session := &ChatSession{}
+	controller := &chatComposerController{session: session}
+	result := controller.onPasteText(strings.Join(parts, " "), ui.LineEditorSnapshot{Text: "abc", Cursor: 3})
+	if result.Claimed || result.Replacement != nil {
+		t.Fatalf("超过上限应回落到文本粘贴: %+v", result)
+	}
+	if len(session.ImagePaths) != 0 {
+		t.Fatalf("超过上限不应新增附件: %+v", session.ImagePaths)
 	}
 }
