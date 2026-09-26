@@ -27,6 +27,7 @@
 > 落地状态（2026-09-25）：上表 #1–#10 已按 §6 的最小切片全部实施完毕（M1 正确性 → M2 OAuth/scope CLI → M3 分层配置 → M4 导入导出 + `/mcp` 交互菜单 + quickstart 文档 + chat 内 OAuth）；
 > 各里程碑的实现细节、验证与遗留项见 §8–§11。§11 §4.8 记录的「chat 侧无认证动作」缺口已随 chat 内 OAuth 落地关闭，
 > `internal/mcp/config/types.go` 的 `RequiresAuth` 注释（「chat 内为 `/mcp auth <name>`」）随之成立。
+> JSON 输入闭环（§11 §4.7+）也已补齐：chat `/mcp add-json`、`add-json @文件/-`、`import --from json <文件>`（四种顶层形态）。
 
 ---
 
@@ -457,3 +458,26 @@ M1 交付清单：
 state 不匹配拒绝、过期提示与 Close 幂等）；`cmd/aicli/commands` 新增 `chat_mcp_auth_test.go`
 （空态 / 未配置 auth 用法提示、端到端起流程 + 粘贴回调 + 状态翻转 + 清除、state 不匹配、
 选择器动作随授权态变化），并更新 M4b 的选择器动作用例到新签名。
+
+**§4.7+ JSON 输入闭环（chat 直填 + 任意 JSON 文件导入）**
+
+§4.7 落地时 `add-json` 只吃「单对象字符串」、`import` 只认五个厂商的固定路径，
+用户手上现成的 JSON（自己的文件、`mcpServers` 容器、数组清单）还得手工拆。本轮补齐：
+
+- `aicli mcp add-json <name>` 的输入扩展为三态：内联 JSON、`@文件路径`、`-`（stdin，便于 `mcp get --json | jq -c .config | ... -`）；
+  文件与 stdin 都有 1MB 上限，UTF-8 BOM 自动剥离。解析结果新增**未映射字段告警**
+  （此前把 `headers` 写成 `header` 会静默丢配置），随 `mcpActionCommandResult.Warnings` 出现在文本与 `--output json` 里。
+- 新增 `aicli mcp import --from json <文件>`（位置参数或 `--file`，两者不一致直接报错）：显式文件必须存在，
+  与该来源的「缺失即跳过」语义区分开。顶层形态支持 `{"mcpServers":{...}}` / `{"servers":{...}}` / `{"projects":{...}}`
+  （复用外部配置解析）、单对象（`name` 必填，也接受 `mcp get --json` 的 `{name, config}` 导出）、对象数组（每项自带 `name`，
+  同名给出告警）。冲突策略 / 秘密剥离 / `--only` / `--scope` / `--dry-run` 与厂商来源完全共用。
+- `{"mcpServers":{...}}` 传给 `add-json` 会被明确拒绝并指向 `import --from json`（而不是含糊的「缺少 command/url」）。
+- chat 同口径：`/mcp add-json <name> <JSON|@文件>`（与 CLI 共用 `parseMCPAddJSONRequest`）。
+  这里同样踩到并规避了 §4.8+ 记录的 tokenizer 问题：JSON 里的空格 / 引号 / `&` 会被拆散，
+  因此按「子命令 + 名称」之后的**原文**取输入（`dropChatCommandWords`）；chat 不提供 stdin 形态（`-` 明确报错）。
+
+验证：`internal/mcp/importers` 新增 `json_test.go`（四种形态、BOM、数组序号错误、重复 name 告警、`--only` 过滤、
+`--from json` 缺路径报错）；`cmd/aicli/commands` 新增 `chat_mcp_add_json_test.go`
+（内联 JSON 含空格与 `&` 原样解析、`@file`、容器拒绝、未映射字段告警、六条错误路径、导出片段回填）
+与 `mcp_import_test.go` 的 `@file`/stdin/限长/路径冲突/`--from json` 用例；
+`scripts/mcp_import_e2e.go` 增加第 6 条链路（JSON 文件导入落盘、`add-json @file`、容器拒绝、路径冲突）。

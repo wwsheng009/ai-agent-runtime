@@ -175,6 +175,69 @@ http_headers = { "X-Api-Key" = "plain-codex-key" }
 	if readFile(projectFile) != before {
 		return fmt.Errorf("失败后不应改动项目文件")
 	}
+
+	// 6) 显式 JSON 文件：多 server 导入 + add-json @file + 容器/路径冲突报错。
+	jsonFile := filepath.Join(project, "team-mcp.json")
+	if err := os.WriteFile(jsonFile, []byte(`{"mcpServers": {
+  "json-a": {"url": "https://json-a.example.com/mcp"},
+  "json-b": {"command": "npx", "args": ["-y", "json-b-pkg"]}
+}}`), 0o644); err != nil {
+		return err
+	}
+	out, err = runCLI(env, project, binary, "mcp", "import", "--from", "json", jsonFile,
+		"--scope", "user", "--output", "json", "--envelope")
+	if err != nil {
+		return fmt.Errorf("import --from json: %v\n%s", err, out)
+	}
+	var jsonImport struct {
+		Data struct {
+			From     string `json:"from"`
+			Imported int    `json:"imported"`
+			Failed   int    `json:"failed"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(jsonPayload(out)), &jsonImport); err != nil {
+		return fmt.Errorf("解析 import json: %v\n%s", err, out)
+	}
+	if jsonImport.Data.From != "json" || jsonImport.Data.Imported != 2 || jsonImport.Data.Failed != 0 {
+		return fmt.Errorf("JSON 文件导入摘要错误: %#v", jsonImport.Data)
+	}
+	userText = readFile(userFile)
+	if !strings.Contains(userText, "json-a") || !strings.Contains(userText, "json-b-pkg") {
+		return fmt.Errorf("JSON 文件导入未落盘:\n%s", userText)
+	}
+
+	// add-json @file：整份 JSON 放文件里（避免 shell 引号地狱）。
+	singleFile := filepath.Join(project, "json-c.json")
+	if err := os.WriteFile(singleFile, []byte(`{"type":"sse","url":"https://json-c.example.com/sse"}`), 0o644); err != nil {
+		return err
+	}
+	if out, err = runCLI(env, project, binary, "mcp", "add-json", "json-c", "@"+singleFile, "--scope", "user"); err != nil {
+		return fmt.Errorf("add-json @file: %v\n%s", err, out)
+	}
+	if userText = readFile(userFile); !strings.Contains(userText, "json-c") {
+		return fmt.Errorf("add-json @file 未落盘:\n%s", userText)
+	}
+
+	// 多 server 容器：add-json 必须拒绝并指向 import --from json。
+	userBefore := readFile(userFile)
+	out, err = runCLI(env, project, binary, "mcp", "add-json", "container",
+		`{"mcpServers":{"x":{"url":"https://x.example.com/mcp"}}}`, "--scope", "user")
+	if err == nil {
+		return fmt.Errorf("容器形态应失败:\n%s", out)
+	}
+	if !strings.Contains(out, "import --from json") {
+		return fmt.Errorf("容器报错应指向 import --from json:\n%s", out)
+	}
+	if readFile(userFile) != userBefore {
+		return fmt.Errorf("容器导入失败后不应改动配置")
+	}
+
+	// 位置参数与 --file 不一致：直接报错。
+	out, err = runCLI(env, project, binary, "mcp", "import", "--from", "json", jsonFile, "--file", singleFile)
+	if err == nil || !strings.Contains(out, "不一致") {
+		return fmt.Errorf("路径冲突应报错:\n%s", out)
+	}
 	return nil
 }
 

@@ -77,9 +77,9 @@ chat 内可用的 `/mcp` 命令：
 | 子命令 | 用途 | 常用示例 |
 |---|---|---|
 | `add` | 新增 URL / stdio server | `aicli mcp add --transport sse legacy https://example.com/sse`<br>`aicli mcp add local-fs --command npx -y @modelcontextprotocol/server-filesystem /data` |
-| `add-json` | 用一段 JSON 新增/更新（脚本、跨机复制） | `aicli mcp add-json team '{"url":"https://team.example.com/mcp"}' --scope project` |
+| `add-json` | 用一段 JSON 新增/更新（脚本、跨机复制、`@文件`） | `aicli mcp add-json team '{"url":"https://team.example.com/mcp"}' --scope project`<br>`aicli mcp add-json team @./notion.json` |
 | `get` | 查看/导出单个 server 的规范化配置（含来源） | `aicli mcp get context7 --json \| jq -c .config` |
-| `import` | 从其它 agent 工具导入 | `aicli mcp import --dry-run`<br>`aicli mcp import --from codex --scope project` |
+| `import` | 从其它 agent 工具或任意 JSON 文件导入 | `aicli mcp import --dry-run`<br>`aicli mcp import --from codex --scope project`<br>`aicli mcp import --from json ./.mcp.json` |
 | `list` | 列出全部 server 与来源/覆盖 | `aicli mcp list --output json` |
 | `status` | 单个 server 的运行状态 | `aicli mcp status context7` |
 | `tools` | 列出某 server 的工具 | `aicli mcp tools chrome-devtools` |

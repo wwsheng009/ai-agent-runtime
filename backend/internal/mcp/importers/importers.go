@@ -28,13 +28,15 @@ const (
 	VendorCursor   = "cursor"
 	VendorGemini   = "gemini"
 	VendorOpenCode = "opencode"
+	// VendorJSON 读取显式指定的 JSON 文件（Options.JSONFile）。
+	VendorJSON = "json"
 	// VendorAll 扫描全部来源。
 	VendorAll = "all"
 )
 
 // SupportedVendors 返回可用于 --from 的取值（不含 all）。
 func SupportedVendors() []string {
-	return []string{VendorClaude, VendorCodex, VendorCursor, VendorGemini, VendorOpenCode}
+	return []string{VendorClaude, VendorCodex, VendorCursor, VendorGemini, VendorOpenCode, VendorJSON}
 }
 
 // Options 控制扫描范围。
@@ -45,6 +47,8 @@ type Options struct {
 	Home string
 	// Names 非空时只保留这些 server 名（大小写不敏感）。
 	Names []string
+	// JSONFile 是 --from json 要读取的显式 JSON 文件路径。
+	JSONFile string
 }
 
 // ScannedFile 记录一个候选来源文件的扫描结果。
@@ -98,6 +102,12 @@ func Import(vendor string, opts Options) ([]Result, error) {
 	vendors := SupportedVendors()
 	if normalized != VendorAll {
 		vendors = []string{normalized}
+		if normalized == VendorJSON {
+			var err error
+			if opts, err = normalizeJSONFile(opts); err != nil {
+				return nil, err
+			}
+		}
 	}
 	results := make([]Result, 0, len(vendors))
 	for _, name := range vendors {
@@ -113,6 +123,16 @@ func isSupportedVendor(vendor string) bool {
 		}
 	}
 	return false
+}
+
+// normalizeJSONFile 规整显式 JSON 文件路径；--from json 必须提供。
+func normalizeJSONFile(opts Options) (Options, error) {
+	path := strings.TrimSpace(opts.JSONFile)
+	if path == "" {
+		return opts, fmt.Errorf("导入 JSON 文件需要指定路径（--file <路径>）")
+	}
+	opts.JSONFile = path
+	return opts, nil
 }
 
 func normalizeOptions(opts Options) (Options, error) {
@@ -182,6 +202,11 @@ func scanVendor(vendor string, opts Options) Result {
 // vendorPaths 返回候选来源文件（用户级在前、项目级在后 → 后者覆盖）。
 func vendorPaths(vendor string, opts Options) []string {
 	switch vendor {
+	case VendorJSON:
+		if path := strings.TrimSpace(opts.JSONFile); path != "" {
+			return []string{path}
+		}
+		return nil
 	case VendorClaude:
 		return []string{
 			filepath.Join(opts.Home, ".claude.json"),
@@ -219,6 +244,9 @@ func parseVendorFile(vendor, path string) ([]Server, []string, error) {
 	}
 	if vendor == VendorCodex {
 		return parseCodexTOML(data, path)
+	}
+	if vendor == VendorJSON {
+		return parseJSONImportDocument(data, path)
 	}
 	return parseMCPServersJSON(data, path)
 }

@@ -24,6 +24,7 @@ const chatMCPCommandUsage = `用法:
        --env KEY=VALUE                    可重复
        --description <text> | --disabled
   /mcp add <name> --command <cmd> [--arg <arg>]...   新增 stdio 传输
+  /mcp add-json <name> <JSON|@文件>       用一段 JSON 新增/更新（可粘 Claude/Cursor 片段）
   /mcp enable <name> | disable <name>     启用/停用并热重载
   /mcp remove <name>                      删除并热重载
   /mcp reload                             重新加载配置并重连
@@ -90,6 +91,10 @@ func chatMCPCommandTextWithService(command string, service chatMCPService, onMut
 		return chatMCPStatusText(service, args[1])
 	case "add":
 		return chatMCPAddText(service, args[1:], onMutate)
+	case "add-json":
+		// JSON 含空格/引号/`&`，会 tokenizer 拆散：按原文取「子命令+名称」之后的内容。
+		remainder := dropChatCommandWords(extractCommandArgument(command), 2)
+		return chatMCPAddJSONText(service, args[1:], remainder, onMutate)
 	case "remove", "rm", "delete":
 		if len(args) < 2 {
 			return "错误: 需要指定 MCP 名称\n用法: /mcp remove <name>"

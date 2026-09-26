@@ -309,6 +309,8 @@ type mcpActionCommandResult struct {
 	Enabled    *bool             `json:"enabled,omitempty"`
 	Config     *config.MCPConfig `json:"config,omitempty"`
 	Status     *config.MCPStatus `json:"status,omitempty"`
+	// Warnings 是输入解析阶段的告警（如 add-json 的未映射字段）。
+	Warnings []string `json:"warnings,omitempty"`
 	// TransportInferred 表示本次 add 未显式指定 --transport，类型由目标推断。
 	TransportInferred bool `json:"transport_inferred,omitempty"`
 }
@@ -1124,6 +1126,9 @@ func renderMCPAddResult(action, description string, payload *mcpActionCommandRes
 		fmt.Printf("✅ 连接成功! 已加载 %d 个工具\n", status.ToolCount)
 	} else if status != nil && status.LastError != "" {
 		fmt.Printf("❌ 连接测试失败: %s\n", status.LastError)
+	}
+	for _, warning := range payload.Warnings {
+		fmt.Printf("   提示: %s\n", warning)
 	}
 }
 

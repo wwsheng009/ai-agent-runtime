@@ -629,10 +629,25 @@ aicli mcp get context7                       # 文本：类型/URL/命令/Header
 aicli mcp get context7 --json | jq -c .config   # 拿到可直接复制的 JSON
 aicli mcp add-json context7 '{"type":"http","url":"https://mcp.context7.com/mcp","headers":{"Authorization":"Bearer ${CONTEXT7_TOKEN}"}}'
 aicli mcp add-json local-fs '{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/data"]}'
+aicli mcp add-json notion '@./notion.json'   # 整份 JSON 放文件里（避免 shell 引号地狱）
+aicli mcp get context7 --json | jq -c .config | aicli mcp add-json context7 -   # 从管道读
 ```
 
 `add-json` 接受 `type` 别名（`http`/`sse`/`ws`/`stdio`）与 `get --json` 的 `.config` 片段，
 同样受 `--scope` 与项目级秘密剥离约束；`mcp get` 显示的是**分层合并后**生效的那一份配置（含 `configSource`）。
+未映射的字段会在输出末尾以「提示: 忽略未映射字段 …」列出，避免把 `headers` 写成 `header` 时静默丢配置。
+
+整份 JSON 文件（多 server）用 `mcp import --from json`，与厂商来源共用同一套冲突/秘密策略：
+
+```bash
+aicli mcp import --from json ./.mcp.json --dry-run          # 先看计划
+aicli mcp import --from json ./team-mcp.json --scope project --on-conflict rename
+```
+
+文件形态（顶层）支持四种：`{"mcpServers":{...}}`（Claude/Cursor/aicli 同构）、`{"servers":{...}}`（VS Code 风格）、
+单 server 对象（`{"name":"notion","url":"..."}`，也接受 `mcp get --json` 的 `{name, config}` 导出）、
+以及对象数组（每项自带 `name`）。路径可以写成位置参数或 `--file`（两者都给时必须一致）。
+只想加一个 server 时用 `add-json`；容器形态（`mcpServers`）交给 `import`，`add-json` 会拒绝并给出这条命令。
 
 chat 里的交互菜单（TUI）：
 
@@ -640,6 +655,7 @@ chat 里的交互菜单（TUI）：
 /mcp            # 打开选择器：选择 server → 选择动作
 /mcp select     # 同上（别名 pick / menu / choose）
 /mcp list       # 始终是纯文本列表（脚本口径，不开选择器）
+/mcp add-json notion '{"url":"https://mcp.notion.com/mcp"}'   # 也可 /mcp add-json notion @./notion.json
 ```
 
 选择器的第一层列出全部 MCP（行首状态标记 `●` 已连接 / `!` 需认证 / `◐` 已启用未连接 / `○` 已停用，

@@ -213,7 +213,9 @@ aicli mcp add private-tool https://x.example.com/mcp --scope local      # 写 ~/
 ```bash
 aicli mcp import --dry-run                    # 先看会导入什么（不写文件）
 aicli mcp import --from claude --scope user   # 从 Claude 配置导入到个人全局
+aicli mcp import --from json ./.mcp.json      # 任意 JSON 文件：mcpServers / servers / 单对象 / 数组
 aicli mcp add-json my-server '{"url":"https://example.com/mcp"}'   # 或直接用一段 JSON 添加
+aicli mcp add-json my-server '@./my-server.json'                   # 整份 JSON 放文件里（也可用 - 从管道读）
 aicli mcp get my-server --json                # 导出单 server 配置（可直接复制到别的机器）
 ```
 
@@ -225,6 +227,10 @@ OAuth 授权在 chat 内即可完成（与 CLI 共用 PKCE 流程与 `~/.aicli/m
 无桌面环境加 `--no-browser`），回调页面打不开时用 `/mcp auth <名称> <回调URL 或 code>` 粘贴完成，
 `/mcp auth <名称> --clear` 清除令牌；完成后自动热重载并刷新会话工具面。
 选择器对 OAuth server 相应给出「认证 / 重新认证 / 完成授权 / 清除授权（二次确认）」动作，走同一 `/mcp` 文本通道。
+
+配置本身也能直接粘 JSON：`/mcp add-json <名称> '{"url":"https://example.com/mcp"}'`（或 `@文件路径`），
+与 `aicli mcp add-json` 共用同一套解析（type 别名、url/command 推断、`mcp get --json` 的 `.config` 片段、
+未映射字段告警）；`{"mcpServers":{...}}` 这类多 server 容器会用 `aicli mcp import --from json <文件>` 导入。
 
 查看某个 MCP 当前暴露的工具：CLI 用 `aicli mcp tools <名称>`；微型 Web（`aicli chat --web`）与 console 设置页的 MCP 列表里都有「工具」按钮，
 分别读取 `GET /web/api/mcps/{name}/tools`（微 Web）与 `GET /api/runtime/mcps/{name}/tools`（runtime-server），

@@ -1,9 +1,11 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -34,6 +36,7 @@ var (
 	importOnConflict string
 	importOnSecrets  string
 	importOnly       []string
+	importFile       string
 	getJSON          bool
 	addJSONScope     string
 )
@@ -50,6 +53,7 @@ func newMCPImportCommand() *cobra.Command {
   gemini    ~/.gemini/settings.json、<项目>/.gemini/settings.json
   opencode  ~/.config/opencode/opencode.json、<项目>/opencode.json
   codex     ~/.codex/config.toml 的 [mcp_servers.*]
+  json      显式 JSON 文件（需给路径：位置参数或 --file）
   all       扫描全部来源（默认）
 
 写入层级 (--scope，默认 local，即 ~/.aicli/projects/<项目>/mcp.yaml)：
@@ -59,16 +63,18 @@ func newMCPImportCommand() *cobra.Command {
 示例:
   aicli mcp import --dry-run                          # 预览将导入什么
   aicli mcp import --from claude --scope user          # 从 Claude 导入到个人全局
+  aicli mcp import --from json ./.mcp.json             # 从任意 JSON 文件导入（可以粘多 server）
   aicli mcp import --on-conflict rename --only context7`,
-		Args: cobra.NoArgs,
+		Args: cobra.MaximumNArgs(1),
 		Run:  importMCP,
 	}
-	cmd.Flags().StringVar(&importFrom, "from", importers.VendorAll, "来源: claude|cursor|gemini|opencode|codex|all")
+	cmd.Flags().StringVar(&importFrom, "from", importers.VendorAll, "来源: claude|cursor|gemini|opencode|codex|json|all")
 	cmd.Flags().StringVar(&importScope, "scope", mcpWriteScopeLocal, "写入层级: user|local|project")
 	cmd.Flags().BoolVar(&importDryRun, "dry-run", false, "只预览，不写配置")
 	cmd.Flags().StringVar(&importOnConflict, "on-conflict", mcpImportConflictSkip, "同名冲突策略: skip|overwrite|rename")
 	cmd.Flags().StringVar(&importOnSecrets, "on-secrets", mcpImportSecretsMask, "明文凭证处理（project 层生效）: mask|reject|keep")
 	cmd.Flags().StringArrayVar(&importOnly, "only", nil, "只导入指定 server（可重复）")
+	cmd.Flags().StringVar(&importFile, "file", "", "--from json 的 JSON 文件路径（同位置参数）")
 	return cmd
 }
 
@@ -94,10 +100,15 @@ func newMCPAddJSONCommand() *cobra.Command {
 		Short: "用一段 JSON 直接添加/更新 MCP（脚本与跨机复制）",
 		Long: `接受与配置文件同构的 JSON（type 可用 http/sse/ws 等别名）。
 
+输入可以是：
+  直接 JSON 字符串、@文件路径（把整份 JSON 放文件里）、-（从 stdin 读，便于管道）。
+  多 server 容器（{"mcpServers":{...}}）请用 aicli mcp import --from json <文件>。
+
 示例:
   aicli mcp add-json context7 '{"type":"http","url":"https://mcp.context7.com/mcp","headers":{"Authorization":"Bearer ${CONTEXT7_TOKEN}"}}'
   aicli mcp add-json local-fs '{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/data"]}'
-  aicli mcp add-json team '{"url":"https://team.example.com/mcp"}' --scope project`,
+  aicli mcp add-json team '@./notion.json' --scope project
+  aicli mcp get context7 --json | jq -c .config | aicli mcp add-json context7 -`,
 		Args: cobra.ExactArgs(2),
 		Run:  addJSONMCP,
 	}
@@ -152,12 +163,32 @@ func runMCPImportCommand(opts mcpImportOptions) (*mcpImportResult, error) {
 		return nil, err
 	}
 
+	vendor := normalizedImportVendor(opts.From)
+	jsonFile := strings.TrimSpace(opts.File)
+	if vendor != importers.VendorJSON && jsonFile != "" {
+		return nil, fmt.Errorf("--file 仅适用于 --from json（当前 --from %s）", vendor)
+	}
+	if vendor == importers.VendorJSON {
+		// 显式指定的文件必须存在：与厂商扫描「缺失即跳过」不同，
+		// 用户既然点名了这份文件，找不到就该报错。
+		if jsonFile == "" {
+			return nil, fmt.Errorf("--from json 需要指定 JSON 文件（位置参数或 --file <路径>）")
+		}
+		info, err := os.Stat(jsonFile)
+		if err != nil {
+			return nil, fmt.Errorf("读取 JSON 文件失败: %w", err)
+		}
+		if info.IsDir() {
+			return nil, fmt.Errorf("JSON 路径是目录: %s", jsonFile)
+		}
+	}
+
 	targetPath, err := resolveMCPWritePathForScope(scope)
 	if err != nil {
 		return nil, err
 	}
 
-	results, err := importers.Import(opts.From, importers.Options{Names: opts.Only})
+	results, err := importers.Import(opts.From, importers.Options{Names: opts.Only, JSONFile: jsonFile})
 	if err != nil {
 		return nil, err
 	}
@@ -621,6 +652,16 @@ func formatKeyValuePairs(values map[string]string) string {
 
 func importMCP(cmd *cobra.Command, args []string) {
 	withMCPCommand(cmd, func(options mcpCommandOptions) {
+		pathArg := ""
+		if len(args) > 0 {
+			pathArg = strings.TrimSpace(args[0])
+		}
+		// `--from json` 的文件可以写成位置参数或 --file；两者都给时必须一致。
+		file, resolveErr := resolveMCPImportFilePath(pathArg, importFile)
+		if resolveErr != nil {
+			exitCommandError("mcp", options.OutputFormat, resolveErr,
+				map[string]interface{}{"subcommand": "import"})
+		}
 		payload, err := runMCPImportCommand(mcpImportOptions{
 			From:       importFrom,
 			Scope:      importScope,
@@ -628,6 +669,7 @@ func importMCP(cmd *cobra.Command, args []string) {
 			OnConflict: importOnConflict,
 			OnSecrets:  importOnSecrets,
 			Only:       importOnly,
+			File:       file,
 		})
 		if err != nil {
 			exitCommandError("mcp", options.OutputFormat, err, map[string]interface{}{"subcommand": "import"})
@@ -658,7 +700,11 @@ func addJSONMCP(cmd *cobra.Command, args []string) {
 	withMCPCommand(cmd, func(options mcpCommandOptions) {
 		name := strings.TrimSpace(args[0])
 		raw := strings.TrimSpace(args[1])
-		request, err := parseMCPAddJSONRequest(name, raw)
+		input, err := resolveMCPAddJSONInput(raw, true)
+		if err != nil {
+			exitCommandError("mcp", options.OutputFormat, err, map[string]interface{}{"subcommand": "add-json", "mcpName": name})
+		}
+		request, warnings, err := parseMCPAddJSONRequest(name, input)
 		if err != nil {
 			exitCommandError("mcp", options.OutputFormat, err, map[string]interface{}{"subcommand": "add-json", "mcpName": name})
 		}
@@ -666,18 +712,102 @@ func addJSONMCP(cmd *cobra.Command, args []string) {
 		if err != nil {
 			exitCommandError("mcp", options.OutputFormat, err, map[string]interface{}{"subcommand": "add-json", "mcpName": name})
 		}
+		payload.Warnings = append(payload.Warnings, warnings...)
 		renderMCPAddResult("add-json", "", payload, options)
 	})
 }
 
+// resolveMCPAddJSONInput 解析 add-json 的输入：
+//   - 空串 → 报错；
+//   - `@<路径>` → 读文件（UTF-8 BOM 会被剥掉）；
+//   - `-`（仅 CLI，allowStdin=true）→ 从 stdin 读，便于 `... | aicli mcp add-json x -`；
+//   - 其它 → 原样当作 JSON 文本。
+//
+// 文件与 stdin 都有 1MB 上限：MCP server 配置不该这么大，防止误传大文件把会话拖死。
+func resolveMCPAddJSONInput(raw string, allowStdin bool) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	switch {
+	case trimmed == "":
+		return "", fmt.Errorf("JSON 不能为空")
+	case trimmed == "-":
+		if !allowStdin {
+			return "", fmt.Errorf("不支持从 stdin 读取（此上下文）")
+		}
+		data, err := readLimited(os.Stdin, mcpAddJSONMaxBytes)
+		if err != nil {
+			return "", fmt.Errorf("读取 stdin 失败: %w", err)
+		}
+		return normalizeJSONInput(data)
+	case strings.HasPrefix(trimmed, "@"):
+		path := strings.TrimSpace(strings.TrimPrefix(trimmed, "@"))
+		if path == "" {
+			return "", fmt.Errorf("@ 后面需要文件路径（示例: aicli mcp add-json notion '@notion.json'）")
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return "", fmt.Errorf("读取 JSON 文件失败: %w", err)
+		}
+		defer func() { _ = file.Close() }()
+		data, err := readLimited(file, mcpAddJSONMaxBytes)
+		if err != nil {
+			return "", fmt.Errorf("读取 JSON 文件失败: %w", err)
+		}
+		return normalizeJSONInput(data)
+	default:
+		return trimmed, nil
+	}
+}
+
+// mcpAddJSONMaxBytes 是 @文件 / stdin 输入的大小上限（1MB）。
+const mcpAddJSONMaxBytes = 1 << 20
+
+func readLimited(reader io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("内容超过 %d 字节上限", limit)
+	}
+	return data, nil
+}
+
+func normalizeJSONInput(data []byte) (string, error) {
+	trimmed := strings.TrimSpace(string(bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})))
+	if trimmed == "" {
+		return "", fmt.Errorf("JSON 不能为空")
+	}
+	return trimmed, nil
+}
+
+// mcpAddJSONKnownKeys 是 add-json 已映射的字段（小写、去分隔符）；其余字段回告警，
+// 避免用户把 headers 写成 header 之类时静默丢失。
+var mcpAddJSONKnownKeys = map[string]struct{}{
+	"config": {}, "name": {},
+	"type": {}, "transport": {}, "url": {}, "command": {}, "args": {}, "env": {},
+	"headers": {}, "httpheaders": {}, "trustlevel": {}, "trust": {}, "description": {},
+	"enabled": {}, "disabled": {}, "timeoutseconds": {}, "timeoutsec": {},
+	"maxparallelcalls": {},
+}
+
+// mcpAddJSONMultiServerKeys 是多 server 容器的顶层键：add-json 只收单 server，
+// 命中时给出改用 import --from json 的提示。
+var mcpAddJSONMultiServerKeys = []string{"mcpServers", "servers", "projects"}
+
 // parseMCPAddJSONRequest 解析 add-json 的 JSON 输入（宽松：接受 type 别名与 transport）。
-func parseMCPAddJSONRequest(name, raw string) (mcpadmin.UpsertRequest, error) {
+// 第二个返回值是告警（未映射字段、疑似多 server 容器等），供 CLI/chat 回显。
+func parseMCPAddJSONRequest(name, raw string) (mcpadmin.UpsertRequest, []string, error) {
 	if raw == "" {
-		return mcpadmin.UpsertRequest{}, fmt.Errorf("JSON 不能为空")
+		return mcpadmin.UpsertRequest{}, nil, fmt.Errorf("JSON 不能为空")
 	}
 	var fields map[string]interface{}
 	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
-		return mcpadmin.UpsertRequest{}, fmt.Errorf("解析 JSON 失败: %w", err)
+		return mcpadmin.UpsertRequest{}, nil, fmt.Errorf("解析 JSON 失败: %w", err)
+	}
+	if container := mcpAddJSONContainerKey(fields); container != "" {
+		return mcpadmin.UpsertRequest{}, nil, fmt.Errorf(
+			"这是多 server 容器（含 %q）；add-json 一次只收一个 server。"+
+				"整份导入请用: aicli mcp import --from json <文件>（chat 内可先写到文件再 reload）", container)
 	}
 	if inner, ok := fields["config"].(map[string]interface{}); ok {
 		fields = inner // 接受 `aicli mcp get --json` 的 .config 片段
@@ -718,9 +848,36 @@ func parseMCPAddJSONRequest(name, raw string) (mcpadmin.UpsertRequest, error) {
 		request.MaxParallelCalls = &maxParallel
 	}
 	if request.Command == "" && request.URL == "" {
-		return mcpadmin.UpsertRequest{}, fmt.Errorf("JSON 需要提供 command（stdio）或 url（远程）")
+		return mcpadmin.UpsertRequest{}, nil, fmt.Errorf("JSON 需要提供 command（stdio）或 url（远程）")
 	}
-	return request, nil
+	return request, mcpAddJSONUnknownKeys(fields), nil
+}
+
+func mcpAddJSONContainerKey(fields map[string]interface{}) string {
+	for _, key := range mcpAddJSONMultiServerKeys {
+		if _, ok := fields[key]; ok {
+			return key
+		}
+	}
+	return ""
+}
+
+// mcpAddJSONUnknownKeys 返回未映射字段（保持输入顺序无关的排序，输出稳定）。
+func mcpAddJSONUnknownKeys(fields map[string]interface{}) []string {
+	unknown := make([]string, 0)
+	for key := range fields {
+		normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(key))
+		if _, known := mcpAddJSONKnownKeys[normalized]; known {
+			continue
+		}
+		unknown = append(unknown, key)
+	}
+	sort.Strings(unknown)
+	warnings := make([]string, 0, len(unknown))
+	for _, key := range unknown {
+		warnings = append(warnings, fmt.Sprintf("忽略未映射字段 %q", key))
+	}
+	return warnings
 }
 
 func runMCPAddJSONCommand(name string, request mcpadmin.UpsertRequest, scope string) (*mcpActionCommandResult, error) {
@@ -863,4 +1020,21 @@ type mcpImportOptions struct {
 	OnConflict string
 	OnSecrets  string
 	Only       []string
+	// File 是 --from json 的输入文件（位置参数或 --file）。
+	File string
+}
+
+// resolveMCPImportFilePath 合并 `--from json` 的位置参数与 --file：
+// 只给一个时用它；两个都给且不一致时直接报错（不猜用户意图）。
+func resolveMCPImportFilePath(pathArg, file string) (string, error) {
+	pathArg = strings.TrimSpace(pathArg)
+	file = strings.TrimSpace(file)
+	switch {
+	case pathArg != "" && file != "" && pathArg != file:
+		return "", fmt.Errorf("位置参数 %q 与 --file %q 不一致（--from json 只能指定一份文件）", pathArg, file)
+	case pathArg != "":
+		return pathArg, nil
+	default:
+		return file, nil
+	}
 }

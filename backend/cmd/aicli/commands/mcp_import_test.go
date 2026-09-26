@@ -251,7 +251,7 @@ func TestSecretMaskerReusesVariableForSameValue(t *testing.T) {
 }
 
 func TestParseMCPAddJSONRequest(t *testing.T) {
-	request, err := parseMCPAddJSONRequest("context7",
+	request, _, err := parseMCPAddJSONRequest("context7",
 		`{"type":"http","url":"https://mcp.context7.com/mcp","headers":{"Authorization":"Bearer ${T}"},"timeoutSeconds":45,"enabled":false}`)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -267,7 +267,7 @@ func TestParseMCPAddJSONRequest(t *testing.T) {
 	}
 
 	// 接受 `mcp get --json` 的 .config 片段。
-	wrapped, err := parseMCPAddJSONRequest("files",
+	wrapped, _, err := parseMCPAddJSONRequest("files",
 		`{"config":{"command":"npx","args":["-y","pkg"],"env":{"A":"1"}}}`)
 	if err != nil {
 		t.Fatalf("parse wrapped: %v", err)
@@ -279,7 +279,7 @@ func TestParseMCPAddJSONRequest(t *testing.T) {
 	if wrapped.Type != "stdio" {
 		t.Fatalf("仅 command 应推断为 stdio: %q", wrapped.Type)
 	}
-	urlOnly, err := parseMCPAddJSONRequest("remote-only", `{"url":"https://x.example.com/mcp"}`)
+	urlOnly, _, err := parseMCPAddJSONRequest("remote-only", `{"url":"https://x.example.com/mcp"}`)
 	if err != nil {
 		t.Fatalf("parse url-only: %v", err)
 	}
@@ -288,16 +288,16 @@ func TestParseMCPAddJSONRequest(t *testing.T) {
 	}
 
 	// 缺 url/command 报错；非法 JSON 报错。
-	if _, err := parseMCPAddJSONRequest("empty", `{"type":"http"}`); err == nil ||
+	if _, _, err := parseMCPAddJSONRequest("empty", `{"type":"http"}`); err == nil ||
 		!strings.Contains(err.Error(), "command") {
 		t.Fatalf("缺少 url/command 应报错: %v", err)
 	}
-	if _, err := parseMCPAddJSONRequest("bad", `{`); err == nil {
+	if _, _, err := parseMCPAddJSONRequest("bad", `{`); err == nil {
 		t.Fatal("非法 JSON 应报错")
 	}
 
 	// disabled: true 等价于 enabled=false。
-	disabled, err := parseMCPAddJSONRequest("d", `{"command":"x","disabled":true}`)
+	disabled, _, err := parseMCPAddJSONRequest("d", `{"command":"x","disabled":true}`)
 	if err != nil {
 		t.Fatalf("parse disabled: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestMCPGetJSONRoundTripsIntoAddJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	request, err := parseMCPAddJSONRequest("context7", string(payload))
+	request, _, err := parseMCPAddJSONRequest("context7", string(payload))
 	if err != nil {
 		t.Fatalf("round-trip parse: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestRunMCPAddJSONCommandProjectScopeRejectsPlaintext(t *testing.T) {
 	mcpConfigFile = ""
 	t.Cleanup(func() { mcpConfigFile = previousConfigFile })
 
-	request, err := parseMCPAddJSONRequest("team",
+	request, _, err := parseMCPAddJSONRequest("team",
 		`{"url":"https://team.example.com/mcp","headers":{"Authorization":"Bearer sk-live"}}`)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -387,4 +387,152 @@ func loadMCPStatusNamesForTest(t *testing.T, path string) map[string]struct{} {
 		names[name] = struct{}{}
 	}
 	return names
+}
+
+// ---- M6：JSON 输入（add-json @file / import --from json） ----
+
+func TestResolveMCPAddJSONInput(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notion.json")
+	writeMCPImportFile(t, path, "\uFEFF"+`{"url":"https://mcp.notion.com/mcp"}`+"\n")
+
+	inline, err := resolveMCPAddJSONInput(`  {"url":"https://x.example.com/mcp"}  `, false)
+	if err != nil || inline != `{"url":"https://x.example.com/mcp"}` {
+		t.Fatalf("内联 JSON 应原样返回: %q, %v", inline, err)
+	}
+
+	fromFile, err := resolveMCPAddJSONInput("@"+path, false)
+	if err != nil {
+		t.Fatalf("@file: %v", err)
+	}
+	if !strings.HasPrefix(fromFile, `{"url":"https://mcp.notion.com/mcp"}`) {
+		t.Fatalf("@file 应剥掉 BOM 并 trim: %q", fromFile)
+	}
+
+	if _, err := resolveMCPAddJSONInput("", false); err == nil || !strings.Contains(err.Error(), "不能为空") {
+		t.Fatalf("空输入应报错: %v", err)
+	}
+	if _, err := resolveMCPAddJSONInput("@", false); err == nil || !strings.Contains(err.Error(), "文件路径") {
+		t.Fatalf("@ 后缺路径应报错: %v", err)
+	}
+	if _, err := resolveMCPAddJSONInput("@"+filepath.Join(dir, "missing.json"), false); err == nil ||
+		!strings.Contains(err.Error(), "读取 JSON 文件失败") {
+		t.Fatalf("文件不存在应报错: %v", err)
+	}
+	// chat 不能读 stdin：`-` 必须被拒绝。
+	if _, err := resolveMCPAddJSONInput("-", false); err == nil || !strings.Contains(err.Error(), "stdin") {
+		t.Fatalf("chat 上下文应拒绝 stdin: %v", err)
+	}
+}
+
+func TestResolveMCPAddJSONInputFromStdin(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "stdin-*.json")
+	if err != nil {
+		t.Fatalf("temp: %v", err)
+	}
+	if _, err := file.WriteString(`{"command":"npx","args":["-y","pkg"]}`); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := file.Seek(0, 0); err != nil {
+		t.Fatalf("seek: %v", err)
+	}
+	previous := os.Stdin
+	os.Stdin = file
+	t.Cleanup(func() {
+		os.Stdin = previous
+		_ = file.Close()
+	})
+
+	input, err := resolveMCPAddJSONInput("-", true)
+	if err != nil {
+		t.Fatalf("stdin: %v", err)
+	}
+	if input != `{"command":"npx","args":["-y","pkg"]}` {
+		t.Fatalf("stdin 内容 = %q", input)
+	}
+}
+
+func TestReadLimitedRejectsOversize(t *testing.T) {
+	if _, err := readLimited(strings.NewReader(strings.Repeat("x", 32)), 16); err == nil ||
+		!strings.Contains(err.Error(), "上限") {
+		t.Fatalf("超限应报错: %v", err)
+	}
+}
+
+func TestResolveMCPImportFilePath(t *testing.T) {
+	if got, err := resolveMCPImportFilePath(" a.json ", ""); err != nil || got != "a.json" {
+		t.Fatalf("位置参数优先: %q, %v", got, err)
+	}
+	if got, err := resolveMCPImportFilePath("", " b.json "); err != nil || got != "b.json" {
+		t.Fatalf("--file 生效: %q, %v", got, err)
+	}
+	if got, err := resolveMCPImportFilePath("same.json", "same.json"); err != nil || got != "same.json" {
+		t.Fatalf("两者相同应通过: %q, %v", got, err)
+	}
+	if _, err := resolveMCPImportFilePath("a.json", "b.json"); err == nil || !strings.Contains(err.Error(), "不一致") {
+		t.Fatalf("两者不一致应报错: %v", err)
+	}
+}
+
+func TestRunMCPImportCommandFromJSONFile(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	isolateMCPCommandHome(t, home)
+	project := t.TempDir()
+	t.Chdir(project)
+
+	previousConfigFile := mcpConfigFile
+	mcpConfigFile = ""
+	t.Cleanup(func() { mcpConfigFile = previousConfigFile })
+
+	jsonPath := filepath.Join(project, "mcp.json")
+	writeMCPImportFile(t, jsonPath, `{"mcpServers":{
+	  "context7": {"type":"http","url":"https://mcp.context7.com/mcp"},
+	  "local-fs": {"command":"npx","args":["-y","server-filesystem","/data"]}
+	}}`)
+
+	// 缺路径：必须在最前面报错，而不是静默「扫到 0 个」。
+	if _, err := runMCPImportCommand(mcpImportOptions{From: "json", Scope: mcpWriteScopeUser}); err == nil ||
+		!strings.Contains(err.Error(), "--file") {
+		t.Fatalf("缺少 JSON 路径应报错: %v", err)
+	}
+	// 路径不存在：显式点名的文件必须存在。
+	if _, err := runMCPImportCommand(mcpImportOptions{
+		From: "json", Scope: mcpWriteScopeUser, File: filepath.Join(project, "nope.json"),
+	}); err == nil || !strings.Contains(err.Error(), "读取 JSON 文件失败") {
+		t.Fatalf("不存在的文件应报错: %v", err)
+	}
+	// --file 只属于 --from json。
+	if _, err := runMCPImportCommand(mcpImportOptions{
+		From: "claude", Scope: mcpWriteScopeUser, File: jsonPath,
+	}); err == nil || !strings.Contains(err.Error(), "仅适用于 --from json") {
+		t.Fatalf("非 json 来源带 --file 应报错: %v", err)
+	}
+
+	target := filepath.Join(home, ".aicli", "mcp.yaml")
+	preview, err := runMCPImportCommand(mcpImportOptions{
+		From: "json", Scope: mcpWriteScopeUser, DryRun: true, File: jsonPath,
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if preview.Imported != 2 || preview.Failed != 0 || preview.DryRun != true {
+		t.Fatalf("预览计数错误: %#v", preview)
+	}
+	if _, statErr := os.Stat(target); statErr == nil {
+		t.Fatalf("--dry-run 不应写文件: %s", target)
+	}
+
+	applied, err := runMCPImportCommand(mcpImportOptions{
+		From: "json", Scope: mcpWriteScopeUser, File: jsonPath, Only: []string{"context7"},
+	})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if applied.Imported != 1 {
+		t.Fatalf("--only 过滤后应导入 1 个: %#v", applied)
+	}
+	content := readFileForTest(t, target)
+	if !strings.Contains(content, "context7") || strings.Contains(content, "server-filesystem") {
+		t.Fatalf("落盘内容不符:\n%s", content)
+	}
 }
