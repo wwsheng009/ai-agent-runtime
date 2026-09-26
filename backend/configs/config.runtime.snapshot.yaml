@@ -54,19 +54,6 @@ database:
     max_idle_conns: 10
     max_open_conns: 100
     prefix: ""
-    sqlite:
-        auto_vacuum: ${SQLITE_AUTO_VACUUM:-incremental}
-        bootstrap_auto_vacuum: ${SQLITE_BOOTSTRAP_AUTO_VACUUM:-false}
-        busy_timeout_ms: ${SQLITE_BUSY_TIMEOUT_MS:-5000}
-        checkpoint_on_maintenance: ${SQLITE_CHECKPOINT_ON_MAINTENANCE:-true}
-        foreign_keys: ${SQLITE_FOREIGN_KEYS:-true}
-        incremental_vacuum_min_free_pages: ${SQLITE_INCREMENTAL_VACUUM_MIN_FREE_PAGES:-1024}
-        incremental_vacuum_min_free_ratio: ${SQLITE_INCREMENTAL_VACUUM_MIN_FREE_RATIO:-0.10}
-        incremental_vacuum_pages: ${SQLITE_INCREMENTAL_VACUUM_PAGES:-4096}
-        journal_mode: ${SQLITE_JOURNAL_MODE:-WAL}
-        maintenance_interval: ${SQLITE_MAINTENANCE_INTERVAL:-10m}
-        synchronous: ${SQLITE_SYNCHRONOUS:-NORMAL}
-        wal_auto_checkpoint_pages: ${SQLITE_WAL_AUTO_CHECKPOINT_PAGES:-1000}
 log:
     compress: true
     enabled: ${LOG_ENABLED:-true}

@@ -8,7 +8,10 @@ import (
 
 // ============================================================================
 // 保留期清理（方案 §10 / §13 Phase 4）：usage_requests 与 turn 去重键按时间窗
-// 清理，并重建受影响会话的预聚合统计；可选 VACUUM 回收文件空间。
+// 清理，并重建受影响会话的预聚合统计。
+//
+// 空间回收：本包不提供在线文件级压缩（2026-09 数据库损坏事故后整体移除）；
+// 需要时请先退出使用进程，再执行 `aicli storage compact --target analytics`。
 //
 // 语义边界：
 //   - 只删 usage_requests（原始明细）与不再引用的 turn 去重键；
@@ -42,15 +45,4 @@ WHERE started_at_unix_nano > 0 AND started_at_unix_nano < ?`, cutoff.UnixNano())
 	}
 	s.statsGen.Add(1)
 	return deleted, nil
-}
-
-// Vacuum 执行 VACUUM 回收已删除数据占用的文件空间（不能在事务内执行）。
-func (s *Store) Vacuum() error {
-	if s == nil || s.db == nil || s.empty || s.readOnly {
-		return nil
-	}
-	if _, err := s.db.Exec("VACUUM"); err != nil {
-		return fmt.Errorf("vacuum usage analytics db: %w", err)
-	}
-	return nil
 }

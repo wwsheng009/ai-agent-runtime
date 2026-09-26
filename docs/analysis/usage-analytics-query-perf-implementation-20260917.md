@@ -37,6 +37,10 @@
 - 错误模式部分索引：`idx_usage_requests_error_category ... WHERE error_category <> ''`（旧库缺列时自动跳过）。
 - 保留期清理：`Store.PruneBefore` + `Store.Vacuum`；`aicli usage-analytics prune --before <date> [--vacuum]`（删旧请求明细 + 重建统计，会话元数据保留）。
 
+  > 后续变更（2026-09-26，SQLite 损坏事故后）：`Store.Vacuum` 与 `prune --vacuum` 已移除，
+  > `--vacuum` 停用并以用法错误退出；分析库空间回收改为离线 `aicli storage compact --target analytics`。
+  > 本文下文出现的所有 `--vacuum` 用法均已失效，仅作历史记录。
+
 ## 2. 实测结果（真实库快照，35,996 请求 / 386 会话）
 
 方法：复制运行库（含 WAL）→ 新代码可写打开（含 v3 迁移 + 回填）→ 同一进程内对同一库分别测量新路径与旧路径（`AICLI_USAGE_ANALYTICS_DISABLE_STATS=1`），每项预热 1 次后取多次最优/均值。

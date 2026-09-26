@@ -166,6 +166,8 @@ func runUsageAnalyticsRebuildStats(opts usageAnalyticsRebuildOptions) int {
 type usageAnalyticsPruneOptions struct {
 	dbPath string
 	before string
+	// vacuum 仅用于解析已停用的 --vacuum flag：命中即刻以用法错误拒绝，
+	// 保证不存在任何在线文件级压缩路径。
 	vacuum bool
 	json   bool
 	out    io.Writer
@@ -180,11 +182,13 @@ func newUsageAnalyticsPruneCommand() *cobra.Command {
 并重建全库预聚合统计；会话元数据保留（列表仍可见历史会话）。
 
 --before 按请求 started_at 比较（started_at=0 的行不清理）。
---vacuum 在清理后执行 VACUUM 回收文件空间（大库耗时较长，默认关闭）。
+空间回收不在本命令执行：在线压缩/页回收已在 2026-09 的数据库损坏事故后
+整体移除。需要压缩分析库请先退出使用进程，再离线执行：
+  aicli storage compact --target analytics
 
 示例：
   aicli usage-analytics prune --before 2026-01-01
-  aicli usage-analytics prune --before 2026-01-01T00:00:00+08:00 --vacuum --json`,
+  aicli usage-analytics prune --before 2026-01-01T00:00:00+08:00 --json`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			statsExit(runUsageAnalyticsPrune(usageAnalyticsPruneOptions{
@@ -198,7 +202,9 @@ func newUsageAnalyticsPruneCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("before", "", "保留边界：此时间之前的请求明细将被删除（RFC3339 或 2006-01-02）")
-	cmd.Flags().Bool("vacuum", false, "清理后执行 VACUUM 回收文件空间")
+	// --vacuum 已停用：保留解析面以便给出明确迁移提示；MarkDeprecated 会隐藏该 flag。
+	cmd.Flags().Bool("vacuum", false, "已停用：在线压缩已移除；请使用 aicli storage compact --target analytics")
+	_ = cmd.Flags().MarkDeprecated("vacuum", "在线压缩已移除；请使用 aicli storage compact --target analytics")
 	return cmd
 }
 
@@ -231,6 +237,10 @@ func runUsageAnalyticsPrune(opts usageAnalyticsPruneOptions) int {
 	if errOut == nil {
 		errOut = io.Discard
 	}
+	if opts.vacuum {
+		fmt.Fprintln(errOut, "错误：prune --vacuum 已停用（2026-09 数据库损坏事故后禁止在线数据库文件维护）；请使用 aicli storage compact --target analytics 离线压缩")
+		return statsExitUsage
+	}
 	cutoff, err := parseUsageAnalyticsCutoff(opts.before)
 	if err != nil {
 		fmt.Fprintf(errOut, "参数错误：%v\n", err)
@@ -259,21 +269,12 @@ func runUsageAnalyticsPrune(opts usageAnalyticsPruneOptions) int {
 		fmt.Fprintf(errOut, "清理历史请求失败：%v\n", err)
 		return statsExitDeterministic
 	}
-	vacuumed := false
-	if opts.vacuum {
-		if err := store.Vacuum(); err != nil {
-			fmt.Fprintf(errOut, "VACUUM 失败：%v\n", err)
-			return statsExitDeterministic
-		}
-		vacuumed = true
-	}
 
 	if opts.json {
 		payload := map[string]interface{}{
 			"db_path":          path,
 			"before":           cutoff.Format(time.RFC3339),
 			"deleted_requests": deleted,
-			"vacuumed":         vacuumed,
 		}
 		encoded, err := json.MarshalIndent(payload, "", "  ")
 		if err != nil {
@@ -283,7 +284,7 @@ func runUsageAnalyticsPrune(opts usageAnalyticsPruneOptions) int {
 		fmt.Fprintln(out, string(encoded))
 		return statsExitOK
 	}
-	fmt.Fprintf(out, "清理完成：%s（删除 %d 条请求明细，before=%s，vacuum=%v）\n",
-		path, deleted, cutoff.Format(time.RFC3339), vacuumed)
+	fmt.Fprintf(out, "清理完成：%s（删除 %d 条请求明细，before=%s）\n",
+		path, deleted, cutoff.Format(time.RFC3339))
 	return statsExitOK
 }

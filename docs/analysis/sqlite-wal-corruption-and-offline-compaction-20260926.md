@@ -69,6 +69,10 @@ aicli storage compact --db <path> --json
   明细截断到前 6 行 + 总行数）；
 - 短 `busy_timeout`（默认 3s，`--busy-timeout` 可调）：库里还有活跃写事务/快照读者时
   立刻 `in_use` 退出（退出码 2），不排队、不长时间持锁；
+- `--require-exclusive`：打开前做操作系统句柄级独占探测——Windows 上以零共享方式
+  打开主库文件，任何其它进程/连接（含空闲句柄）存在即判定 `in_use`（退出码 2）；
+  非 Windows 平台没有等价可靠实现，会显式报不支持。默认只靠 BUSY 锁冲突判断，
+  覆盖不了"其它进程打开着库但空闲"的形态。
 - 退出码沿用 stats 约定：`0` 成功（含 `absent`/`skipped`）、`1` 参数错误、
   `2` 确定性错误（占用/损坏/不可读）。
 
@@ -77,3 +81,20 @@ aicli storage compact --db <path> --json
 - 对 745MB 的损坏副本执行：`quick_check` 直接给出上文的 ptrmap 明细，`VACUUM` 被跳过，
   文件哈希前后完全一致（**未改坏库**）；
 - 对 96MB 的真实库副本执行：`24644→24538` 页、回收 424KiB、`quick_check=ok`，退出码 0。
+
+## 5. 打开前健康探测（可选，2026-09-26 追加）
+
+> **默认关闭**：不设置任何环境变量时与从前行为完全一致，探测零开销跳过。
+
+设置环境变量 `AICLI_SQLITE_HEALTH_PROBE=quick` 后，runtime store 会在第一次打开、
+执行迁移之前运行只读 `PRAGMA quick_check`：
+
+- 返回 `ok` → 正常继续；
+- 非 `ok` 或探测执行失败 → 打开直接失败（fail-closed），进程以可见错误退出，
+  不再在损坏库上继续写入；
+- 未设置或其它值 → **完全跳过（零开销，默认关闭）**；只有显式设置 `quick` 才开启。
+
+默认关闭的原因：`quick_check` 需要全量扫描库文件（807MB 库实测约 3s，数 GB 库可达
+分钟级），不适合每次 CLI 启动都做；建议在 runtime-server、维护脚本或排障会话中
+显式开启。一次性只读体检也可以直接用 `aicli storage compact --dry-run`
+（quick_check 前置、损坏库退出码 2、不改写主库；打开前仍会做陈旧 wal-index 对账）。

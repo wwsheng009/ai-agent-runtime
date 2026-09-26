@@ -166,3 +166,16 @@ func TestUsageAnalyticsPruneRequiresBefore(t *testing.T) {
 		t.Fatalf("缺少 --before 的退出码 = %d, want %d", code, statsExitUsage)
 	}
 }
+
+// TestUsageAnalyticsPruneRejectsVacuumFlag 锁定：在线文件级压缩已移除，
+// --vacuum 只保留迁移提示并以用法错误退出。
+func TestUsageAnalyticsPruneRejectsVacuumFlag(t *testing.T) {
+	var buf bytes.Buffer
+	code := runUsageAnalyticsPrune(usageAnalyticsPruneOptions{vacuum: true, out: &buf, errOut: &buf})
+	if code != statsExitUsage {
+		t.Fatalf("prune --vacuum 退出码 = %d, want %d", code, statsExitUsage)
+	}
+	if !strings.Contains(buf.String(), "storage compact") {
+		t.Fatalf("拒绝提示应指向 storage compact: %s", buf.String())
+	}
+}

@@ -4578,6 +4578,12 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 		}
 	}
 
+	// 可选（AICLI_SQLITE_HEALTH_PROBE=quick）：迁移前做只读 quick_check，
+	// 损坏库直接 fail-closed，避免在坏库上继续写入。默认关闭、零开销。
+	if err := s.probeRuntimeStoreHealth(ctx); err != nil {
+		return err
+	}
+
 	migrations := []migrate.Migration{
 		{
 			Version: 1,

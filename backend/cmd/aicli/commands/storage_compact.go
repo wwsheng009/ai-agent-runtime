@@ -76,16 +76,17 @@ type storageCompactReport struct {
 }
 
 type storageCompactOptions struct {
-	out           io.Writer
-	errOut        io.Writer
-	json          bool
-	dbPath        string
-	target        string
-	dryRun        bool
-	force         bool
-	skipIntegrity bool
-	busyTimeout   time.Duration
-	timeout       time.Duration
+	out              io.Writer
+	errOut           io.Writer
+	json             bool
+	dbPath           string
+	target           string
+	dryRun           bool
+	force            bool
+	requireExclusive bool
+	skipIntegrity    bool
+	busyTimeout      time.Duration
+	timeout          time.Duration
 }
 
 // NewStorageCommand 创建 `aicli storage`：本地 SQLite 库的离线维护入口。
@@ -126,7 +127,10 @@ func newStorageCompactCommand() *cobra.Command {
   - 仅做 VACUUM（不触碰 auto_vacuum/incremental_vacuum/wal_checkpoint(TRUNCATE)）；
   - 打开前后各做一次 PRAGMA quick_check，损坏库只报告不重建；
   - busy_timeout 很短：库里还有活跃写事务或未释放的快照读者时立刻 BUSY 退出，
-    不会排队等待、也不会长时间持锁。
+    不会排队等待、也不会长时间持锁；
+  - 默认只靠 BUSY 判断“被占用”：其它进程打开着库但空闲时不一定触发。需要强保证时
+    加 --require-exclusive：Windows 上以零共享方式打开库文件，任何其它进程（含空闲
+    连接）持有句柄都会判定 in_use（退出码 2）；非 Windows 平台该开关明确报不支持。
 
 建议先退出所有正在使用这些库的进程（aicli / runtime-server）再执行。
 
@@ -134,20 +138,22 @@ func newStorageCompactCommand() *cobra.Command {
   aicli storage compact
   aicli storage compact --target runtime
   aicli storage compact --db ~/.aicli/sessions/runtime/session_runtime.sqlite --json
+  aicli storage compact --target runtime --require-exclusive
   aicli storage compact --dry-run`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			statsExit(runStorageCompact(storageCompactOptions{
-				out:           cmd.OutOrStdout(),
-				errOut:        cmd.ErrOrStderr(),
-				json:          boolFlag(cmd, "json"),
-				dbPath:        strings.TrimSpace(stringFlag(cmd, "db")),
-				target:        strings.TrimSpace(stringFlag(cmd, "target")),
-				dryRun:        boolFlag(cmd, "dry-run"),
-				force:         boolFlag(cmd, "force"),
-				skipIntegrity: boolFlag(cmd, "no-integrity-check"),
-				busyTimeout:   time.Duration(intFlag(cmd, "busy-timeout")) * time.Second,
-				timeout:       time.Duration(intFlag(cmd, "timeout")) * time.Second,
+				out:              cmd.OutOrStdout(),
+				errOut:           cmd.ErrOrStderr(),
+				json:             boolFlag(cmd, "json"),
+				dbPath:           strings.TrimSpace(stringFlag(cmd, "db")),
+				target:           strings.TrimSpace(stringFlag(cmd, "target")),
+				dryRun:           boolFlag(cmd, "dry-run"),
+				force:            boolFlag(cmd, "force"),
+				requireExclusive: boolFlag(cmd, "require-exclusive"),
+				skipIntegrity:    boolFlag(cmd, "no-integrity-check"),
+				busyTimeout:      time.Duration(intFlag(cmd, "busy-timeout")) * time.Second,
+				timeout:          time.Duration(intFlag(cmd, "timeout")) * time.Second,
 			}))
 		},
 	}
@@ -155,6 +161,7 @@ func newStorageCompactCommand() *cobra.Command {
 	cmd.Flags().String("db", "", "显式指定单个库文件（与 --target 互斥）")
 	cmd.Flags().Bool("dry-run", false, "只体检与预估，不执行 VACUUM")
 	cmd.Flags().Bool("force", false, "即使没有空闲页也执行 VACUUM")
+	cmd.Flags().Bool("require-exclusive", false, "严格独占门：打开前做句柄级探测（Windows 零共享打开主库），任何其它句柄存在即判定 in_use（退出码 2）")
 	cmd.Flags().Bool("no-integrity-check", false, "跳过 quick_check 体检（更快，但可能对损坏库执行 VACUUM）")
 	cmd.Flags().Int("busy-timeout", int(storageCompactDefaultBusyTimeout/time.Second), "锁等待上限（秒）：超时即判定库被占用")
 	cmd.Flags().Int("timeout", int(storageCompactDefaultTimeout/time.Second), "单库总超时（秒）")
@@ -349,6 +356,28 @@ func storageCompactOne(target storageCompactTarget, opts storageCompactOptions) 
 	// （见 sqliteutil.ReconcileOrphanedSidecars）。残留 sidecar 被活跃会话映射时
 	// 删除失败，这里不当作错误。
 	_, _ = sqliteutil.ReconcileOrphanedSidecarsDSN(target.Path)
+
+	// 严格独占门（--require-exclusive）：在打开库之前做操作系统句柄级探测。
+	// 默认的 BUSY 判定覆盖不了“其它进程打开着库但空闲”的形态；Windows 上以零共享
+	// 方式打开主库文件，任何其它句柄（含空闲连接）都会让探测失败。
+	if opts.requireExclusive {
+		switch probeErr := storageExclusiveProbe(target.Path); {
+		case probeErr == nil:
+		case errors.Is(probeErr, errStorageExclusiveBusy):
+			report.Status = "in_use"
+			report.Error = "--require-exclusive：库文件仍被其它进程持有句柄（含空闲连接）：请先退出所有使用该库的 aicli/runtime-server 后重试"
+		case errors.Is(probeErr, errStorageExclusiveUnsupported):
+			report.Status = "failed"
+			report.Error = "--require-exclusive：当前平台未实现句柄级独占探测；请退出所有使用进程后去掉该开关重试"
+		default:
+			report.Status = "failed"
+			report.Error = fmt.Sprintf("--require-exclusive 独占探测失败：%v", probeErr)
+		}
+		if report.Status != "" {
+			report.DurationMs = time.Since(started).Milliseconds()
+			return report
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
 	defer cancel()

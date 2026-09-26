@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -191,4 +192,48 @@ func TestStorageResolveTargetsDefaults(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, history, 1)
 	require.Equal(t, "history", history[0].Name)
+}
+
+// TestStorageCompactRequireExclusiveRefusesWhileHandleOpen 锁定严格独占门：
+// 任何其它连接仍持有库文件句柄（即使空闲、没有活动事务）时，--require-exclusive
+// 必须判 in_use，不进入 VACUUM。
+func TestStorageCompactRequireExclusiveRefusesWhileHandleOpen(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("句柄级独占探测当前仅 Windows 实现")
+	}
+	path := filepath.Join(t.TempDir(), "runtime.sqlite")
+	// seed 放在子测试里，确保它的连接随子测试结束关闭。
+	t.Run("seed", func(t *testing.T) { storageTestSeedDB(t, path, "NONE") })
+
+	holder := storageTestOpen(t, path)
+	var rows int
+	require.NoError(t, holder.QueryRow(`SELECT COUNT(*) FROM payload`).Scan(&rows))
+
+	out, code := storageTestRun(t, "compact", "--db", path, "--require-exclusive", "--json")
+	require.Equal(t, statsExitDeterministic, code, out)
+	var payload storageCompactJSON
+	require.NoError(t, json.Unmarshal([]byte(out), &payload), out)
+	require.Equal(t, "in_use", payload.Reports[0].Status, out)
+	require.Contains(t, payload.Reports[0].Error, "句柄", out)
+}
+
+// TestStorageCompactRequireExclusivePassesAfterLastHandleClosed：所有句柄释放后
+// 严格门放行并正常压缩。
+func TestStorageCompactRequireExclusivePassesAfterLastHandleClosed(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("句柄级独占探测当前仅 Windows 实现")
+	}
+	path := filepath.Join(t.TempDir(), "runtime.sqlite")
+	t.Run("seed", func(t *testing.T) { storageTestSeedDB(t, path, "NONE") })
+
+	holder := storageTestOpen(t, path)
+	var rows int
+	require.NoError(t, holder.QueryRow(`SELECT COUNT(*) FROM payload`).Scan(&rows))
+	require.NoError(t, holder.Close())
+
+	out, code := storageTestRun(t, "compact", "--db", path, "--require-exclusive", "--json")
+	require.Equal(t, statsExitOK, code, out)
+	var payload storageCompactJSON
+	require.NoError(t, json.Unmarshal([]byte(out), &payload), out)
+	require.Equal(t, "compacted", payload.Reports[0].Status, out)
 }
