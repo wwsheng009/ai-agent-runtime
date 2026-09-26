@@ -126,6 +126,15 @@ func (s *Store) Delete(id string) error {
 			return fmt.Errorf("planstore: remove snapshot %s: %w", rel, err)
 		}
 	}
+	// 行级评论随记录一起删除（§4.4）：版本可被 retention 裁剪，但评论不单独裁剪——
+	// 它们自带当时的正文摘录，即使锚定的修订已不在库里也仍然可读、可交付。
+	if rel := commentsRelPath(rec.ID); rel != "" {
+		if abs, err := s.resolveSnapshotPath(rel); err == nil {
+			if err := os.Remove(abs); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("planstore: remove comments %s: %w", rel, err)
+			}
+		}
+	}
 	idx.Records = append(idx.Records[:i], idx.Records[i+1:]...)
 	return s.saveIndex(idx)
 }
