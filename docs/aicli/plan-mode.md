@@ -43,14 +43,14 @@
 | `/plan on [path]`、`/plan start [path]` | `enter` 的别名 |
 | `/plan exit <approve\|request_changes\|quit> [notes]` | 按决策退出或保留；缺决策时打印用法；非法决策直接报错（`approve\|request_changes\|quit`）。决策 token 也接受别名：`approved/yes/y`、`request-changes/changes/revise`、`cancel/abort/no/n` |
 | `/plan approve [notes]`、`/plan approved / yes / y [notes]` | 批准计划并退出 plan 模式，随后按 §1 的规则恢复模式 |
-| `/plan request_changes <notes>`、`/plan request-changes / changes / revise <notes>` | **不退出**：保持 plan 模式，把 notes 记为待交付评审反馈（下一回合一次性送达模型） |
+| `/plan request_changes <notes>`、`/plan request-changes / changes / revise <notes>` | **不退出**：保持 plan 模式，把 notes 记为待交付评审反馈。交互式（统一 TTY 与纯文本 REPL）下会**立刻起一轮修订**（§4 第 4 条）；脚本 / JSON 下留待下一回合一次性送达模型 |
 | `/plan quit [notes]`、`/plan cancel / abort / off / no / n [notes]` | 关闭 plan 模式且不执行计划（归档状态为 `not_implemented`） |
 | `/plan review`（别名 `/plan show`） | 打印当前计划正文、状态、轮次与三种裁决入口；plan 未生效时提示改用 `/plan enter` 或 `/plans` |
 | `/plan <看起来像路径的 token>` | 直接以该路径进入 plan 模式（识别规则：`.md`/`.txt` 后缀，或含 `/`、`\` 等路径分隔符；无扩展名的裸词会打印用法） |
 
 说明：
 
-- `/plan request_changes` 与 `/plan approve`/`quit` 的差别是「留在 plan 继续修订」还是「离开 plan」。带 notes 的 `request_changes` 才会把反馈写入待交付队列并让评审轮次 +1。
+- `/plan request_changes` 与 `/plan approve`/`quit` 的差别是「留在 plan 继续修订」还是「离开 plan」。带 notes 的 `request_changes` 才会把反馈写入待交付队列并让评审轮次 +1；交互式下还会紧接着起一轮修订（§4 第 4 条）。
 - 命令执行后会尽量同步会话记录；同步失败不影响 plan 状态本身，只是提示告警。
 - 在非 plan 状态下执行 `/plan exit ...`：只要当前 permission-mode 是 `plan` 仍可退出（会按「previous=default」补一个临时状态）；否则提示先执行 `/plan enter`。
 - `/plan status` 在「plan active + 计划文件已有内容 + 模型尚未请求裁决」时会额外提示「计划已就绪待评审」；模型已请求裁决时改为提示「待裁决」。
@@ -158,7 +158,7 @@
    - `request_changes`：保持 plan active；带 notes 时写入 `pending_review_notes`，评审轮次 +1；
    - `quit`：退出 plan 且不执行计划，归档状态 `not_implemented`。
 3. **notes 到达模型**：运行时在**送达回合**开始时消费 `pending_review_notes`，作为一次性系统提醒（kind `plan_review`，`Durable=false`）注入该回合并同时清除持久副本；清除写入失败会回滚，保证反馈「只送达一次、且不丢失」。提醒文案要求模型据此修订计划、再次总结并等待裁决。
-4. **自动修订回合（可选）**：默认仍由用户的下一次输入驱动；若调用方在裁决请求里带 `trigger_revision=true`（**仅** `request_changes` 且 notes 非空），运行时会在这条裁决**落地之后**立刻提交一条合成指令（「按评审意见修订当前计划正文…」）起一轮修订。评审正文不重复传输：它仍走第 3 条的一次性提醒通道，由该轮自己消费。触发失败（会话没接入实时运行时 / actor 拒绝）**不影响裁决**——响应里给 `revision_triggered=false` 与 `revision_error`，notes 留在 `pending_review_notes` 由下一轮输入交付。Web 面板的「请求修改」默认带该标志；CLI `/plan request_changes` 目前不带（见 §9）。
+4. **自动修订回合（可选）**：默认仍由用户的下一次输入驱动；若调用方在裁决请求里带 `trigger_revision=true`（**仅** `request_changes` 且 notes 非空），运行时会在这条裁决**落地之后**立刻提交一条合成指令（「按评审意见修订当前计划正文…」）起一轮修订。评审正文不重复传输：它仍走第 3 条的一次性提醒通道，由该轮自己消费。触发失败（会话没接入实时运行时 / actor 拒绝）**不影响裁决**——响应里给 `revision_triggered=false` 与 `revision_error`，notes 留在 `pending_review_notes` 由下一轮输入交付。Web 面板的「请求修改」默认带该标志；CLI 的交互式 `/plan request_changes <notes>` 同样默认立刻起一轮（统一 TTY 复用 post-commit send 效果，与 `/shell`、`/cmd` 同一条 `SendMessageAfterCommit` 边界；纯文本 REPL 在裁决行打印后直接提交），脚本 / JSON（`--no-interactive`）保持「下一次输入时交付」。
 5. **事件**：每次 plan 状态迁移发布 `plan_mode_changed`；归档失败额外发布 `plan_archive_failed`（不影响状态机）。
 6. **Run 结束兜底（自动呈现）**：一次 run 干净结束（`session_end` 为 idle、无错误）时，若 plan 仍 active、模型**尚未**请求裁决、当前模式是 `default`/`plan`、且计划文件有内容，运行时会发布一次 `plan_review_available`（payload 含 `plan_path`、`plan_hash`、`plan_bytes` 与三个裁决入口）。同一份正文只提示一次，计划被改写（哈希变化）后再次提示；`accept_edits`/`bypass_permissions` 按设计跳过。Web 收到该事件会刷新计划面板，CLI 侧对应 `/plan status` 的「计划已就绪待评审」提示与 `/plan review`。
 
@@ -279,7 +279,7 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 
 **Q5：`/plan request_changes <notes>` 之后模型会马上改计划吗？**
 
-分两种走法。CLI `/plan request_changes`：notes 保存在 durable 状态的 `pending_review_notes`，在**下一次模型回合**作为一次性提醒注入并清除，你需要再发一条消息（例如「继续」或补充要求）来驱动修订（§9）。Web 面板的「请求修改」（以及任何带 `trigger_revision=true` 的调用）：裁决落地后运行时会**立刻**起一轮修订，notes 由该轮自己消费，不需要你再发消息；若会话没接入实时运行时，响应会给出 `revision_error` 并降级为「下一次输入时交付」。
+交互式下都会**马上改**。Web 面板的「请求修改」（任何带 `trigger_revision=true` 的调用）与交互式 CLI 的 `/plan request_changes <notes>`（统一 TTY / 纯文本 REPL）都在裁决落地后立刻起一轮修订，notes 由该轮自己消费，不需要你再发消息。脚本 / JSON（`--no-interactive`）保持旧语义：notes 存在 durable 的 `pending_review_notes`，在**下一次模型回合**作为一次性提醒注入并清除，你需要再发一条消息（例如「继续」或补充要求）来驱动修订。若会话没接入实时运行时，会给出降级提示（HTTP 侧 `revision_error`）并退回「下一次输入时交付」。
 
 **Q6：计划被 `quit` 后还能找回吗？**
 
@@ -312,7 +312,7 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 - §4.4 行级评论与轮次 diff：**CLI 与 Web 都已落地轮次 diff**（`/plans diff <id> [vA [vB]]` + `GET /plans/{id}/diff` + 面板评审轮次行的「差异」展开，同一 `planmode.DiffArchivedVersions` 口径，新增行 teal / 删除行 orange，`identical` / `coarse` / `truncated` 有独立徽标）；仍未做的是**行级评论**（含 diff 内的锚点定位）。
 - §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具、run 结束兜底、**CLI 的 `/plans reopen`**、**HTTP 的 `POST /sessions/{id}/plan/reopen`** 与**面板「重新评审」按钮**（含 409 冲突 → 强制覆盖二次确认）均已落地；该小节的缺口已关闭。
 - §4.6 模式循环键位（`shift+tab` / `alt+m`）已随并发的 CLI 改动落地（`chat_permission_mode.go`：`default → accept_edits → plan → bypass_permissions`，进入 bypass 仍二次确认，`/hotkeys` 可见；plan 档走 `/mode` 语义，见 §2.3）；模型自主进入的确认门控已落地；**Web 的常驻模式标识已落地**（聊天区顶部，见 §6 末）；仍未做的是 **TUI/CLI 侧的常驻模式横幅**。
-- 评审反馈的**自动修订回合**：**已落地（§4 第 4 条）** —— `POST /sessions/{id}/plan` 带 `trigger_revision=true` 时裁决落地后立刻起一轮修订，Web 面板「请求修改」默认走该路径；CLI `/plan request_changes` 仍是「下一次用户输入时交付」（未带该标志），TUI 侧的自动触发与行级评论同属未做。
+- 评审反馈的**自动修订回合**：**已落地（§4 第 4 条）** —— HTTP `trigger_revision=true`、Web 面板「请求修改」、交互式 CLI `/plan request_changes <notes>`（统一 TTY 走 `SendMessageAfterCommit` post-commit 边界，纯文本 REPL 在裁决行后直接提交）都在裁决落地后立刻起一轮；脚本 / JSON 仍是「下一次用户输入时交付」。该小节只剩**行级评论**，§4.6 只剩 **TUI/CLI 常驻模式横幅**。
 
 ---
 

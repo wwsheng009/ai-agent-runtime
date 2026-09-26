@@ -899,3 +899,58 @@
 ### 19.5 环境提示（并发）
 
 本轮前半段 `internal/chat` 处于对方的 SQLite 存储重构中（`runtime_store_maintenance.go` 已删、新文件缺 import），`go vet/test` 一度整体 build failed；等其落地后恢复。整包测试有一次 FAIL 出现在该窗口内，随后**两次干净通过**，判定为并发窗口的瞬时状态、与本轮改动无关。
+
+---
+
+## 20. 实施记录：第十三轮（2026-09-25，自动修订回合的 CLI 半程）
+
+**状态**：上一轮（§19）把「一次提交即一轮修订」落在 HTTP 与 Web；本轮补齐 **CLI 交互式**，§4.4 的行为缺口到此在三个入口上口径一致（HTTP / Web / CLI 交互式），只剩**行级评论**与 §4.6 的 **TUI 常驻横幅**。
+
+### 20.1 行为
+
+| 场景 | 变更前 | 变更后 |
+|------|--------|--------|
+| 统一 TTY：`/plan request_changes <notes>` | 裁决单元落盘，notes 等下一次输入 | 裁决单元先落盘，随后经**正常 send 管线**起一轮修订（合成指令；notes 由该轮一次性提醒通道消费） |
+| 纯文本 REPL：`/plan request_changes <notes>` | 同上 | 裁决行打印后直接提交修订轮；提交失败只提示、不回滚裁决，并明说「评审意见仍在待交付状态，下一次输入时送达模型」 |
+| 脚本 / JSON（`--no-interactive`） | 等下一次输入 | **不变**：不给自动化流程塞一轮意外的模型回合 |
+| 空 notes 的 `request_changes`、`approve`/`quit` | — | 不触发（与 HTTP 侧 `trigger_revision` 的 400 规则同源：无意见即无修订） |
+
+### 20.2 设计要点：复用既有的 post-commit send 边界
+
+- **零新机制**：统一 TTY 侧复用 `CommandResult.SendMessageAfterCommit`（原本只服务 `/shell`、`/cmd`）——`command.go` 在命令单元落盘后经 `sendChatMessageAfterCommit → sendMessage` 提交，与用户输入同一条管线（审批、事件、历史、run epoch 全部照旧）。`chat_command_result.go` 的字段注释已补上第三个使用者。
+- 纯文本 REPL 侧复用同一个 `sendChatMessageAfterCommit`，因此两条投影共用一份「要不要触发」判定（`chat_plan_revision.go: planRevisionAfterCommitEffect`），不会出现第二套口径。
+- **正文不重复传输**：合成指令仍然只有一句「按评审意见修订当前计划正文…」，评审意见由该轮通过 `planmode` 的一次性提醒通道交付并清除（与 §19 的 HTTP 侧完全一致）。
+- **降级不噪音**：提交失败打印一行错误 + 一行「下一次输入时交付」提示，裁决与 notes 保持 durable（测试断言了这一点）。
+
+### 20.3 落点与验证
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 辅助 | `backend/cmd/aicli/commands/chat_plan_revision.go`（新） | `planRevisionAfterCommitEffect`（判定 + 合成指令）、`startChatPlanRevisionRound`（纯文本路径执行 + 降级提示） |
+| 结构化路径 | `backend/cmd/aicli/commands/chat_plan_command.go` | `executeStructuredPlanModeExit` 挂 `SendMessageAfterCommit`；`exitChatPlanModeCommand` 在裁决行之后调用修订轮 |
+| 契约注释 | `backend/cmd/aicli/commands/chat_command_result.go` | `SendMessageAfterCommit` 注释补第三个使用者与语义边界 |
+
+| 命令（cwd=backend） | 结果 |
+|---|---|
+| `go test ./cmd/aicli/commands/ -run 'TestPlanRevisionAfterCommitEffectGating\|TestStructuredPlanExitCarriesRevisionTurn\|TestPlainPlanExitPrintsVerdictThenRevisionHint' -count=1` | 3/3 通过（判定矩阵：request_changes+notes ✓ / 空 notes ✗ / approve ✗ / quit ✗ / NoInteractive ✗ / JSON ✗ / nil ✗；结构化投影带上效果且裁决单元保持；纯文本路径打印裁决行 + 降级提示且 notes 仍 durable） |
+| `gofmt -l`（4 个改动文件） | 空（已格式化） |
+
+**环境提示**：本轮的整包 `go vet ./cmd/aicli/commands/` 与整包测试被并发会话在 `internal/policy`（`specifier.go` 引用尚未落地的 `shellrisk.ResolveSegment`）的中间态挡住，定向用例先跑通；该包落地后再补整包回归（结果见 §21 或本条后续修订）。
+
+### 20.4 未实施
+
+- **行级评论**（§4.4 最后一项，需要先定「行锚点 + 备注」的存储与投影契约）。
+- **TUI/CLI 常驻模式横幅**（§4.6 最后一项）。
+- `internal/policy` 的 `dont_ask` 模式与计划模式的交互（对方在途，暂不碰）。
+
+### 20.5 整包回归与失败归属（补充）
+
+| 命令（cwd=backend） | 结果 |
+|---|---|
+| `go test ./cmd/aicli/commands/ -run 'TestChatInteractiveDirectWriterInventory\|TestPlanRevision*\|TestStructuredPlanExit*\|TestPlainPlanExit*' -count=1 -v` | 4/4 通过——含 **P0 直写清单门禁** |
+| `go test ./cmd/aicli/commands/ -count=1 -json`（整包，两次） | 失败集合 = `{TestChatDebugDisplayShowsStorageSection}` + 包级 FAIL；`TestAICLIActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled` 首次红、复跑转绿（并发窗口 flaky）；**没有任何 /plan 或本轮改动的用例失败** |
+| `go vet ./cmd/aicli/commands/` | exit 0 |
+
+**唯一残留红的归属**：`TestChatDebugDisplayShowsStorageSection` 断言 `/debug` 输出含 `Maintenance: runs=`，而并发会话正在拆除 `internal/chat` 的 maintenance 机制（`runtime_store_maintenance.go` 已删、`chat_debug_storage.go` 在途）。该文件不在本轮落点内，未改动。
+
+**踩到的门禁与修法**（值得记一笔）：首轮整包跑出 `TestChatInteractiveDirectWriterInventory` 失败——它是「交互式命令面不得出现新的直接终端写入」的 P0 债务基线，报出 `chat_plan_revision.go startChatPlanRevisionRound fmt.Print want=0 got=2`。修法不是登记豁免（门禁明确禁止为新特性加条目），而是改用既有合法通道 `printfDirectInteractiveOutput`（`chat_surface_output.go`：统一会话走 semantic supplement、纯文本回退 `beginDirectInteractiveOutput`），新文件因此零直接写入；降级提示在纯文本 REPL 仍可见（用例断言了打印内容）。
