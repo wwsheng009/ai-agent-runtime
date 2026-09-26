@@ -207,3 +207,121 @@ func TestAppendChatImageTokenAfterCommandAddsAttachment(t *testing.T) {
 		t.Fatalf("草稿不应被改写: %q → %q", draft, again)
 	}
 }
+
+func TestNormalizeChatImageTokenPrompt(t *testing.T) {
+	pathA, pathB := "C:/img/a.png", "C:/img/b.png"
+	external := "C:/acp/c.png"
+	marks := map[string]int{pathA: 1, pathB: 2}
+	cases := []struct {
+		name      string
+		text      string
+		paths     []string
+		wantText  string
+		wantPaths []string
+	}{
+		{
+			name:      "无令牌不改写也不重排",
+			text:      "只有文字",
+			paths:     []string{pathA, pathB},
+			wantText:  "只有文字",
+			wantPaths: []string{pathA, pathB},
+		},
+		{
+			name:      "顺序一致时原样",
+			text:      "[Image #1] 与 [Image #2] 对比",
+			paths:     []string{pathA, pathB},
+			wantText:  "[Image #1] 与 [Image #2] 对比",
+			wantPaths: []string{pathA, pathB},
+		},
+		{
+			name:      "文本顺序决定发送顺序并重编号",
+			text:      "[Image #2] 先看，再看 [Image #1]",
+			paths:     []string{pathA, pathB},
+			wantText:  "[Image #1] 先看，再看 [Image #2]",
+			wantPaths: []string{pathB, pathA},
+		},
+		{
+			name:      "悬空令牌被丢弃并收拢空格",
+			text:      "[Image #1] [Image #7] 尾巴",
+			paths:     []string{pathA},
+			wantText:  "[Image #1] 尾巴",
+			wantPaths: []string{pathA},
+		},
+		{
+			name:      "未被引用的令牌附件不发送",
+			text:      "[Image #1] 只留第一张",
+			paths:     []string{pathA, pathB},
+			wantText:  "[Image #1] 只留第一张",
+			wantPaths: []string{pathA},
+		},
+		{
+			name:      "非令牌来源附件追加在末尾且不补写令牌",
+			text:      "[Image #2] 看图",
+			paths:     []string{pathA, pathB, external},
+			wantText:  "[Image #1] 看图",
+			wantPaths: []string{pathB, external},
+		},
+		{
+			name:      "令牌全悬空时保守返回原文本",
+			text:      "[Image #9] 没有对应附件",
+			paths:     []string{pathA},
+			wantText:  "[Image #9] 没有对应附件",
+			wantPaths: []string{pathA},
+		},
+		{
+			name:      "重复引用同一令牌保留同一编号",
+			text:      "[Image #2] 和 [Image #2] 是同一张",
+			paths:     []string{pathA, pathB},
+			wantText:  "[Image #1] 和 [Image #1] 是同一张",
+			wantPaths: []string{pathB},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotText, gotPaths := normalizeChatImageTokenPrompt(tc.text, tc.paths, marks)
+			if gotText != tc.wantText {
+				t.Fatalf("text = %q, want %q", gotText, tc.wantText)
+			}
+			if len(gotPaths) != len(tc.wantPaths) {
+				t.Fatalf("paths = %+v, want %+v", gotPaths, tc.wantPaths)
+			}
+			for i := range gotPaths {
+				if gotPaths[i] != tc.wantPaths[i] {
+					t.Fatalf("paths = %+v, want %+v", gotPaths, tc.wantPaths)
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeChatTurnImagePromptRebuildsMarks(t *testing.T) {
+	pathA, pathB, external := "C:/img/a.png", "C:/img/b.png", "C:/acp/c.png"
+	session := &ChatSession{
+		ImagePaths:      []string{pathA, pathB, external},
+		imageTokenPaths: map[string]int{pathA: 1, pathB: 2},
+	}
+	text := normalizeChatTurnImagePrompt(session, "[Image #2] 只看第二张")
+	if text != "[Image #1] 只看第二张" {
+		t.Fatalf("文本未按发送顺序重编号: %q", text)
+	}
+	if len(session.ImagePaths) != 2 || session.ImagePaths[0] != pathB || session.ImagePaths[1] != external {
+		t.Fatalf("附件顺序/存活不对: %+v", session.ImagePaths)
+	}
+	if index, ok := session.imageTokenPaths[pathB]; !ok || index != 1 {
+		t.Fatalf("令牌标记应重编号为 1: %+v", session.imageTokenPaths)
+	}
+	if _, ok := session.imageTokenPaths[pathA]; ok {
+		t.Fatalf("未被引用的附件不应保留标记: %+v", session.imageTokenPaths)
+	}
+}
+
+// 非交互/旧草稿路径不应被令牌对齐影响。
+func TestNormalizeChatTurnImagePromptWithoutTokens(t *testing.T) {
+	session := &ChatSession{ImagePaths: []string{"C:/acp/c.png"}}
+	if got := normalizeChatTurnImagePrompt(session, "普通提问"); got != "普通提问" {
+		t.Fatalf("无令牌时文本应原样: %q", got)
+	}
+	if len(session.ImagePaths) != 1 {
+		t.Fatalf("无令牌时附件应原样: %+v", session.ImagePaths)
+	}
+}

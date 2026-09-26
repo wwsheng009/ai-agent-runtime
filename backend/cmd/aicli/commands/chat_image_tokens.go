@@ -158,3 +158,141 @@ func filterChatImagePathsByDraft(session *ChatSession, text string) []string {
 	}
 	return survivors
 }
+
+// normalizeChatImageTokenPrompt 把用户文本里的 [Image #N] 令牌与待发送附件对齐：
+//   - 按令牌在文本里的出现顺序重排附件，并把令牌重编号为 1..k（文本顺序 == 发送顺序）；
+//   - 丢弃没有对应附件的悬空令牌，避免模型看到不存在的图片编号；
+//   - 非令牌来源的附件（ACP/Web/resume）保持原顺序追加在末尾，且**不**替用户补写令牌；
+//   - 文本里一个令牌都没有时原样返回（不猜意图、不重排）。
+func normalizeChatImageTokenPrompt(text string, paths []string, marks map[string]int) (string, []string) {
+	if len(paths) == 0 {
+		return text, nil
+	}
+	matches := chatImageTokenPattern.FindAllStringSubmatchIndex(text, -1)
+	if len(matches) == 0 {
+		return text, paths
+	}
+	byToken := make(map[int]string, len(paths))
+	for _, path := range paths {
+		if index, ok := marks[path]; ok && index > 0 {
+			byToken[index] = path
+		}
+	}
+	order := make([]int, 0, len(matches))
+	seen := make(map[int]struct{}, len(matches))
+	for _, match := range matches {
+		index, ok := chatImageTokenIndexAt(text, match[2], match[3])
+		if !ok {
+			continue
+		}
+		if _, dup := seen[index]; dup {
+			continue
+		}
+		seen[index] = struct{}{}
+		order = append(order, index)
+	}
+	survivors := make([]string, 0, len(paths))
+	renumber := make(map[int]int, len(order))
+	for _, index := range order {
+		path, ok := byToken[index]
+		if !ok {
+			continue
+		}
+		renumber[index] = len(survivors) + 1
+		survivors = append(survivors, path)
+	}
+	if len(renumber) == 0 {
+		// 文本里的令牌都不对应附件：不做改写（保守，避免误删用户文字）。
+		return text, paths
+	}
+	for _, path := range paths {
+		if _, tokenized := marks[path]; !tokenized {
+			survivors = append(survivors, path)
+		}
+	}
+	var builder strings.Builder
+	last := 0
+	dropped := false
+	for _, match := range matches {
+		index, ok := chatImageTokenIndexAt(text, match[2], match[3])
+		builder.WriteString(text[last:match[0]])
+		newIndex, referenced := 0, false
+		if ok {
+			newIndex, referenced = renumber[index]
+		}
+		if referenced {
+			builder.WriteString(chatImageToken(newIndex))
+		} else {
+			// 悬空令牌（没有对应附件）直接丢弃，避免模型看到不存在的图片编号。
+			dropped = true
+		}
+		last = match[1]
+	}
+	builder.WriteString(text[last:])
+	result := builder.String()
+	if dropped {
+		result = collapseChatImageTokenSpaces(result)
+	}
+	return result, survivors
+}
+
+// normalizeChatTurnImagePrompt 在 turn 入口对会话做一次对齐：重排/重编号附件并
+// 同步令牌标记，返回改写后的用户文本。之后记录的用户消息、模型 prompt 与附件列表
+// 都基于同一份对齐结果，避免"文本编号与图片顺序不一致"。
+func normalizeChatTurnImagePrompt(session *ChatSession, text string) string {
+	if session == nil || len(session.ImagePaths) == 0 {
+		return text
+	}
+	normalizedText, survivors := normalizeChatImageTokenPrompt(text, session.ImagePaths, session.imageTokenPaths)
+	if len(survivors) == 0 {
+		// 理论不可达（对齐函数只在有命中时裁剪）；保守起见不改会话状态。
+		return normalizedText
+	}
+	session.ImagePaths = survivors
+	if len(session.imageTokenPaths) > 0 {
+		marks := make(map[string]int, len(survivors))
+		for position, path := range survivors {
+			if _, tokenized := session.imageTokenPaths[path]; tokenized {
+				marks[path] = position + 1
+			}
+		}
+		if len(marks) == 0 {
+			marks = nil
+		}
+		session.imageTokenPaths = marks
+	}
+	return normalizedText
+}
+
+// chatImageTokenIndexAt 解析令牌捕获组的字节区间。
+func chatImageTokenIndexAt(text string, start, end int) (int, bool) {
+	if start < 0 || end > len(text) || start >= end {
+		return 0, false
+	}
+	var index int
+	if _, err := fmt.Sscanf(text[start:end], "%d", &index); err != nil || index < 1 {
+		return 0, false
+	}
+	return index, true
+}
+
+// collapseChatImageTokenSpaces 在丢弃悬空令牌后收拢遗留的连续空格（只处理空格/制表符，
+// 不动换行，避免破坏用户排版）。
+func collapseChatImageTokenSpaces(text string) string {
+	var builder strings.Builder
+	builder.Grow(len(text))
+	pendingSpace := false
+	for _, r := range text {
+		if r == ' ' || r == '\t' {
+			if pendingSpace {
+				continue
+			}
+			pendingSpace = true
+			builder.WriteRune(r)
+			continue
+		}
+		pendingSpace = false
+		builder.WriteRune(r)
+	}
+	return builder.String()
+}

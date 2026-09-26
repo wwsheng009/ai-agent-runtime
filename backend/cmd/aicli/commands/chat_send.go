@@ -15,6 +15,9 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	if session == nil {
 		return "", fmt.Errorf("chat session is nil")
 	}
+	// turn 入口做一次令牌/附件对齐：之后记录的用户消息、模型 prompt 与附件列表都基于
+	// 同一份结果（按令牌出现顺序重排附件、令牌重编号 1..k、丢弃悬空令牌）。
+	userMessage = normalizeChatTurnImagePrompt(session, userMessage)
 	// SK-3：每回合重置技能调用事件的回合内去重（显式 pin 与点名函数只发一条）。
 	session.resetSkillInvocationObservation()
 	if session.IsInterrupted() {
