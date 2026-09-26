@@ -407,6 +407,15 @@ export const zhWorkspaceBase = {
         },
       },
     },
+    // §4.6 常驻模式标识（聊天区顶部）：模式名 + plan 上下文，不含裁决动作。
+    modeBanner: {
+      title: "模式",
+      hint: {
+        modelRequested: "模型已请求裁决，待你批准或请求修改。",
+        ready: "计划已就绪，可评审。",
+        waiting: "计划尚未写就，等待模型产出。",
+      },
+    },
     loadingModels: "正在加载模型",
     modelCatalogUnavailable: "模型目录不可用",
     runtimeDefaultModel: "运行时默认模型",

@@ -200,6 +200,7 @@ export function WorkspacePage() {
     onNotesDraftChange: onPlanNotesChange,
     plan: runtimePlanMode,
     planActionPending,
+    planStatusLabel,
     submitDecision: submitPlanDecision,
   } = useRuntimePlanMode({
     lastRuntimeEventType: selectedThread?.lastRuntimeEventType,
@@ -480,8 +481,10 @@ export function WorkspacePage() {
       pendingInteraction={pendingInteraction}
       onResolvePendingApproval={resolvePendingApproval}
       onAnswerPendingQuestion={answerPendingQuestion}
+      plan={runtimePlanMode}
       planActionPending={planActionPending}
       planNotesDraft={planNotesDraft}
+      planStatusLabel={planStatusLabel}
       onPlanNotesChange={onPlanNotesChange}
       onPlanDecision={submitPlanDecision}
     />

@@ -107,6 +107,8 @@ export function WorkspaceShell({
   onAnswerPendingQuestion,
   planActionPending,
   planNotesDraft,
+  plan = null,
+  planStatusLabel,
   onPlanNotesChange,
   onPlanDecision,
   onBacktrackToMessage,
@@ -405,8 +407,10 @@ export function WorkspaceShell({
           onToggleRightRail={() => setRightRailManualOpen((current) => !current)}
           openSettings={openSettings}
           pendingInteraction={pendingInteraction}
+          plan={plan}
           planActionPending={planActionPending}
           planNotesDraft={planNotesDraft}
+          planStatusLabel={planStatusLabel}
           phase={phase}
           providerOptions={providerOptions}
           reasoningEffortDefault={reasoningEffortDefault}

@@ -10,6 +10,7 @@ import type { PendingInteraction } from "@/lib/pending-interaction";
 import { type RuntimeClientIdentity } from "@/lib/runtime-client";
 import {
   type RuntimeSessionBacktrackMode,
+  type RuntimeSessionPlanMode,
   type RuntimeSessionPlanModeExitDecision,
   type RuntimeSessionRecord,
   type RuntimeSessionUserSummary,
@@ -146,6 +147,9 @@ export type WorkspaceShellProps = {
   onSubmit: (options?: AgentChatSubmitOptions) => boolean | void;
   /** P1-7：待交互统一呈现位（审批 / 提问 / 计划评审），null 时不渲染。 */
   pendingInteraction?: PendingInteraction | null;
+  /** §4.6 常驻模式标识：页面既有的 `/plan` 快照（与右侧「计划」面板同源）。 */
+  plan?: RuntimeSessionPlanMode | null;
+  planStatusLabel?: string;
   onResolvePendingApproval?: (requestId: string, allow: boolean) => void;
   onAnswerPendingQuestion?: (questionId: string, answer: string) => void;
   /** P1-7：计划评审与既有 artifact 面板决策入口共用同一状态（notes / 提交中）。 */

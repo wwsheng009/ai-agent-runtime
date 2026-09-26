@@ -7,7 +7,6 @@ import { MessageComposer } from "@/components/workspace/message-composer";
 import { ComposerContextUsageControl } from "@/components/workspace/composer-context-usage-control";
 import { ComposerPermissionModeControl } from "@/components/workspace/composer-permission-mode-control";
 import { MessageList } from "@/components/workspace/message-list";
-import { PendingInteractionBar } from "@/components/workspace/pending-interaction-bar";
 import { TodoPanel } from "@/components/workspace/task-panel";
 import { ComposerModelDialog } from "@/components/workspace/composer-model-dialog";
 import { ComposerProfileDialog } from "@/components/workspace/composer-profile-dialog";
@@ -23,6 +22,7 @@ import {
   WorkspaceSkillsSurface,
 } from "@/components/workspace/workspace-shell/lazy-surfaces";
 import { type WorkspaceMainSectionProps } from "@/components/workspace/workspace-shell/main-section-props";
+import { SessionInteractionDock } from "@/components/workspace/workspace-shell/session-interaction-dock";
 import { NewThreadPlaceholder } from "@/components/workspace/workspace-shell/new-thread-placeholder";
 import { WorkspaceViewTabBar } from "@/components/workspace/workspace-shell/view-tab-bar";
 import { WorkspaceShellTopbar } from "@/components/workspace/workspace-shell-topbar";
@@ -71,8 +71,10 @@ export function WorkspaceMainSection({
   onAnswerPendingQuestion,
   onPlanDecision,
   onPlanNotesChange,
+  plan,
   planActionPending,
   planNotesDraft,
+  planStatusLabel,
   phase,
   providerOptions,
   reasoningEffortDefault,
@@ -409,22 +411,19 @@ export function WorkspaceMainSection({
                   sessionId={selectedThread.sessionId}
                   snapshot={selectedThread.todoSnapshot}
                 />
-                {/* 批次 F2：停靠卡 = W − 32px（与转录列同一宽度轴）。 */}
-                <div className="pointer-events-auto mx-auto w-full max-w-[var(--app-chat-content-width-dock)]">
-                  <PendingInteractionBar
-                    interaction={pendingInteraction ?? null}
-                    onAnswerQuestion={(questionId, answer) =>
-                      onAnswerPendingQuestion?.(questionId, answer)
-                    }
-                    onResolveApproval={(requestId, allow) =>
-                      onResolvePendingApproval?.(requestId, allow)
-                    }
-                    onPlanDecision={onPlanDecision}
-                    onPlanNotesChange={onPlanNotesChange}
-                    planActionPending={planActionPending}
-                    planNotesDraft={planNotesDraft}
-                  />
-                </div>
+                {/* 批次 F2 + §4.6：停靠卡 = W − 32px（模式标识 + 待交互卡片，同一条宽度轴）。 */}
+                <SessionInteractionDock
+                  interaction={pendingInteraction ?? null}
+                  onAnswerQuestion={onAnswerPendingQuestion}
+                  onPlanDecision={onPlanDecision}
+                  onPlanNotesChange={onPlanNotesChange}
+                  onResolveApproval={onResolvePendingApproval}
+                  plan={plan ?? null}
+                  planActionPending={planActionPending}
+                  planNotesDraft={planNotesDraft}
+                  planStatusLabel={planStatusLabel}
+                  sessionId={selectedThread.sessionId}
+                />
                 {/* 批次 F2：输入卡 = W + 32px（比转录列宽一档）。 */}
                 <div className="pointer-events-auto mx-auto w-full max-w-[var(--app-chat-content-width-composer)]">
                   <MessageComposer

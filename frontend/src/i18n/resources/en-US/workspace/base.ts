@@ -429,6 +429,15 @@ export const enWorkspaceBase = {
         },
       },
     },
+    // §4.6 persistent mode indicator (top of the chat area): mode + plan context, no verdict actions.
+    modeBanner: {
+      title: "Mode",
+      hint: {
+        modelRequested: "The model asked for a verdict — approve or request changes.",
+        ready: "The plan is ready to review.",
+        waiting: "No plan text yet; waiting for the model.",
+      },
+    },
     loadingModels: "loading models",
     modelCatalogUnavailable: "model catalog unavailable",
     runtimeDefaultModel: "runtime default model",
