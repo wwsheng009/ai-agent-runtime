@@ -746,3 +746,47 @@
 
 - 面板只回灌**最新快照**（`version=0`）；指定历史轮次的回灌目前只在 CLI（`/plans reopen <id> vN`）与 HTTP body（`version:N`）可用。
 - 无 actor 的 HTTP 路径不发布 `plan_mode_changed` 事件，面板靠 reopen 自身返回的 `plan_mode` 投影与主动 `refresh()` 收敛；CLI 侧不受影响。
+
+---
+
+## 17. 实施记录：第十轮（2026-09-25，§4.4 轮次 diff 的 HTTP + Web 双端落地）
+
+**状态**：轮次 diff 现在三处齐平——CLI `/plans diff <id> [vA [vB]]`、`GET /api/runtime/plans/{id}/diff`、面板「计划归档」评审轮次行的「差异」展开。三者共用同一渲染器（`planmode.DiffArchivedVersions`），§4.4 只剩**行级评论**未做。
+
+### 17.1 后端：`GET /api/runtime/plans/{id}/diff`
+
+| 项 | 内容 |
+|---|---|
+| 处理函数 | `runtimeapi.Handler.DiffStoredPlan`（`plans_handlers.go`）：复用 `planmode.DiffArchivedVersions`，不另写第二套 diff 算法 |
+| 查询参数 | `from`/`to`（0/缺省 → 上一轮 / 最新轮）、`context`（0..10，默认 3）、`max_lines`（0..2000，默认 400）；非法/越界一律 400（不做静默 clamp）；未知记录或未知轮次 404（`planstore.ErrNotFound`）；store 未配置 503 |
+| 响应 | `{plan_id, from_version, to_version, identical, added, removed, old_lines, new_lines, coarse, truncated, text}`；`text` 是带 `--- v1 <decision> (source, time)` / `+++ vN …` 框架行的统一 diff |
+| 路由顺序陷阱 | 必须注册在 `GET /plans/{id:.*}` **之前**：gorilla/mux 按注册顺序匹配，贪婪明细路由会把 `foo/diff` 当成 id 吞掉。已在 `handler.go` 注释与文档 §6 双处写明，并有回归测试钉住 |
+| 错误映射 | 新增 `writeStoredPlanDiffError`：`planstore.ErrNotFound` → 404，其余 → 500 |
+
+### 17.2 前端：面板的轮次差异
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 类型 | `frontend/src/types/runtime/plans.ts` | `RuntimePlanDiffOptions` / `RuntimePlanDiffResult` / `RuntimePlanDiffLine(Kind)`（沿用 plans 类型集中定义，`RuntimePlanDiffResult` 不再散落在 api 模块） |
+| API | `frontend/src/api/runtime/plans.ts` | `buildStoredPlanDiffPath`、`getRuntimePlanDiff`（`buildRuntimeUrlWithQuery` 拼 `from/to/context/max_lines`）、`normalizePlanDiffResult`；barrel 白名单同步补 3 个具名导出 |
+| 视图辅助 | `artifact-panel-plans-shared.ts` | `classifyPlanDiffLines`（**只按前两行识别框架行**，避免把以 `--` 开头的删除行误判）+ `planDiffLineClass`（add=teal / del=orange / hunk / meta / context） |
+| 新组件 | `artifact-panel-plans-diff.tsx` | `ArtifactPlanDiffBlock`：只读展示组件（loading / error+重试 / identical 提示 / `<pre>` 逐行着色），计数徽标 + `identical`/`coarse`/`truncated` 徽标 + 收起按钮；自包含、不取数 |
+| 取数 | `use-runtime-plans.ts` | `diffState`（idle/loading/ready/error + planId/from/to/result/error）、`loadDiff(planId,{from,to})`（请求序号防乱序，失败只落在 diffState，不进列表/详情错误态）、`clearDiff` |
+| 渲染面 | `artifact-panel-plans-surface.tsx` | 评审轮次每行加「差异」按钮（`data-testid=plan-round-diff-{from}-{to}`，展开态变「收起差异」）；pair 口径与 CLI 一致（`from=max(1,version-1)`，单轮快照回退到自身）；切换计划 / 返回列表时 `clearDiff()` |
+| 词典 | 两语 `panels-artifacts.ts` | `plans.diff.*` 10 个键（title/show/hide/collapse/loading/failed/identical/identicalHint/coarse/truncated） |
+
+### 17.3 验证
+
+| 命令（cwd 见备注） | 结果 |
+|---|---|
+| `go test ./internal/api/runtimeapi/ -run 'DiffStoredPlan' -count=1`（backend） | ok（新增 2 个用例：默认口径 + 路由不被贪婪路由吞掉；单轮 identical、`max_lines` 截断、参数 400、未知记录/轮次 404） |
+| `go test ./internal/api/runtimeapi/ -count=1`（backend） | ok（整包 44s，路由注册变更无回归） |
+| `npx vitest run src/api/runtime/plans.test.ts src/components/workspace/artifact-panel-plans-shared.test.ts`（frontend） | 2 文件 / **15 用例全绿** |
+| `npx vitest run src/hooks/workspace/use-runtime-plans.test.tsx src/components/workspace/artifact-panel-plans-surface.test.tsx`（frontend） | 2 文件 / **24 用例全绿**（含 3 个差异渲染面用例 + 2 个取数用例） |
+| `npx tsc -b` / `npx eslint <8 个改动文件>` | 0 错 / 0 告警 |
+| `node scripts/verify-frontend-i18n.ts` / `verify-max-lines.mjs` | 见交付提交说明（两语键集一致、面文件仍在 500 非空行内 —— 差异面板拆成独立组件文件正是为此） |
+
+### 17.4 已知边界
+
+- 面板只做**相邻轮次**对比（`vN-1 → vN`）；任意两轮对比（`vA → vB`）目前只有 CLI 与 HTTP 查询参数支持，UI 未给版本选择器。
+- 行级评论仍缺：diff 面板是纯展示，不能在某一行挂评论；后续需要“行锚点 + 备注”的存储契约（§4.4 剩余项）。

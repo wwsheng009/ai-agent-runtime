@@ -215,6 +215,7 @@
 | `GET /api/runtime/plans/{id}` | 单条记录 + **最新快照正文**；`id` 允许包含 `/`（如 `ai-agent-runtime/plan`）；兼容旧写法 `?id=<id>` |
 | `DELETE /api/runtime/plans/{id}` | 删除一条归档记录及其全部快照（保留策略见 §5.1）；幂等：不存在时返回 200 + `{"deleted":false}`，存在时 `{"deleted":true}` |
 | `POST /api/runtime/sessions/{id}/plan/reopen` | 把某条归档记录的快照写回工作区计划文件并进入 plan mode（`/plans reopen` 的 HTTP 孪生）。body：`{"plan_id":"<id>","version":0,"force":false}`；冲突（文件与快照不一致）返回 **409** + `conflict/hint` 且不写盘，确认后带 `force=true` 重试；未知记录 404。响应含 `plan_mode` 投影（`reopened_from`/`reopened_version` 与 `/plan status` 一致） |
+| `GET /api/runtime/plans/{id}/diff` | 轮次对比（`/plans diff <id> [vA [vB]]` 的 HTTP 孪生）。查询参数 `from`/`to`（0/缺省 = 上一轮 → 最新轮）、`context`（0..10，默认 3）、`max_lines`（0..2000，默认 400）；响应 `{"plan_id","from_version","to_version","identical","added","removed","old_lines","new_lines","coarse","truncated","text"}`，`text` 是带 `--- v1 <decision> (source, time)` / `+++ vN …` 框架行的统一 diff。参数非法 400，未知记录/轮次 404。**路由必须注册在 `GET /plans/{id:.*}` 之前**（gorilla/mux 按注册顺序匹配，贪婪明细路由会吞掉 `/diff` 后缀） |
 
 列表项与详情条目字段一致（详情多出正文相关字段）：
 
@@ -223,8 +224,9 @@
 - `content` 只在该记录 `version > 0` 时读取最新快照；超过 200,000 个 rune 会截断并置 `content_truncated=true`。
 - 快照读取失败时返回 200，但把原因放进 `content_error`（记录元数据仍然可用）。
 - 记录不存在返回 404；`index.json` 损坏返回 500；store 未配置返回 503。
+- `identical=true` 时 `text` 只剩两行版本框架，判等以该字段为准（不要用文本判空）。
 
-注意区分两套入口：会话内 plan 状态（进入/退出/预览计划文件）走 `GET|POST /api/runtime/sessions/{id}/plan`（回灌走 `POST .../plan/reopen`）；这里的 `/plans`、`/plans/{id}` 只读归档索引与快照。Web 面板的「计划归档」面同样是只读浏览 + **唯一写动作「重新评审」**（等价于 reopen 端点，冲突时由用户确认后强制覆盖）；批准/请求修改/退出仍由会话内的评审入口负责。
+注意区分两套入口：会话内 plan 状态（进入/退出/预览计划文件）走 `GET|POST /api/runtime/sessions/{id}/plan`（回灌走 `POST .../plan/reopen`）；这里的 `/plans`、`/plans/{id}`、`/plans/{id}/diff` 只读归档索引 / 快照 / 轮次差异。Web 面板的「计划归档」面同样是只读浏览 + 轮次差异面板 + **唯一写动作「重新评审」**（等价于 reopen 端点，冲突时由用户确认后强制覆盖）；批准/请求修改/退出仍由会话内的评审入口负责。
 
 ---
 
@@ -293,7 +295,7 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 
 以下能力在已落地范围（2026-09-25：报告 §8 + §9 + §10）之外，本文档不为它们承诺时间：
 
-- §4.4 行级评论与轮次 diff：**CLI 侧轮次 diff 已落地**（`/plans diff <id> [vA [vB]]`，复用 `planmode.UnifiedDiff` / `planmode.DiffArchivedVersions`）；仍未做的是前端评审面的变更行高亮与行级评论。
+- §4.4 行级评论与轮次 diff：**CLI 与 Web 都已落地轮次 diff**（`/plans diff <id> [vA [vB]]` + `GET /plans/{id}/diff` + 面板评审轮次行的「差异」展开，同一 `planmode.DiffArchivedVersions` 口径，新增行 teal / 删除行 orange，`identical` / `coarse` / `truncated` 有独立徽标）；仍未做的是**行级评论**（含 diff 内的锚点定位）。
 - §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具、run 结束兜底、**CLI 的 `/plans reopen`**、**HTTP 的 `POST /sessions/{id}/plan/reopen`** 与**面板「重新评审」按钮**（含 409 冲突 → 强制覆盖二次确认）均已落地；该小节的缺口已关闭。
 - §4.6 模式循环键位（`shift+tab` / `alt+m`）已随并发的 CLI 改动落地（`chat_permission_mode.go`：`default → accept_edits → plan → bypass_permissions`，进入 bypass 仍二次确认，`/hotkeys` 可见；plan 档走 `/mode` 语义，见 §2.3）；模型自主进入的确认门控已落地；仍未做的是**常驻模式横幅**。
 - 评审反馈的**自动修订回合**：当前是「下一次用户输入时交付」，Web 裁决后主动 trigger-turn 未接入。
