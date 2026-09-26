@@ -2933,6 +2933,29 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 							"task_count":     batch.TaskCount,
 							"parent_action":  "continue_parent_turn; lifecycle_updates_will_be_delivered_by_supervision",
 						}
+						// G4/H7 真机 E2E 补：回执必须给出**可寻址的身份**。此前只有
+						// batch_id，父代理拿它去 wait_agent 只会得到 agent=missing；
+						// 这里带上每个任务行的 task_id（+ 已早绑定的 child_session_id），
+						// 让 `wait_agent(task_id)` / `read_agent_events(task_id)` 从回执
+						// 就能直达子会话。
+						if coordinator := loop.agent.GetSubagentBatchCoordinator(); coordinator != nil {
+							if store := coordinator.Store(); store != nil {
+								if tasks, listErr := store.ListTasks(ctx, batch.BatchID); listErr == nil && len(tasks) > 0 {
+									rows := make([]map[string]interface{}, 0, len(tasks))
+									for _, task := range tasks {
+										row := map[string]interface{}{
+											"task_id": strings.TrimSpace(task.TaskID),
+											"status":  string(task.Status),
+										}
+										if childSessionID := strings.TrimSpace(task.ChildSessionID); childSessionID != "" {
+											row["child_session_id"] = childSessionID
+										}
+										rows = append(rows, row)
+									}
+									handlePayload["tasks"] = rows
+								}
+							}
+						}
 						if deprecationNotice != "" {
 							handlePayload["execution_mode_deprecated"] = deprecationNotice
 						}
@@ -6675,9 +6698,25 @@ func (loop *ReActLoop) parkBackgroundTurn(ctx context.Context, batch *subagentba
 		// record that the resume path could never match.
 		return
 	}
+	// §6.8 / 审计 G3：挂起是**边沿**状态——只在记录从"不存在"变成"存在"时发一次
+	// turn.suspended（同一 turn 内派发第二个批次不重复发）。读失败时不发：宁可少
+	// 一次状态跃迁信号，也不能把"无法判定是否首次挂起"猜成首次而重复播报。
+	_, alreadyParked, readErr := store.GetTurnSuspension(ctx, sessionID, record.TurnID)
 	if err := store.ParkTurnSuspension(ctx, record); err != nil {
 		loop.agent.reportSuspensionDegraded(ctx, sessionID, "parked-state write failed: "+err.Error())
+		return
 	}
+	// 发射严格晚于 durable 写入成功：降级宿主与写失败路径都不会出现"已挂起"的假
+	// 信号（AC-C0-1d：两条降级路径均不出现 turn.suspended）。
+	if readErr != nil || alreadyParked {
+		return
+	}
+	loop.emitRuntimeEvent(events.EventTurnSuspended, sessionID, "", map[string]interface{}{
+		"batch_id":           batch.BatchID,
+		"obligation_count":   len(obligations),
+		"resume_queue_count": len(record.ResumeQueue),
+		"parked_at":          record.ParkedAt.Format(time.RFC3339Nano),
+	})
 }
 
 // settleParkedTurnOnRunEnd is the clear half of the §6.12 parked-turn lifecycle:
@@ -6727,7 +6766,20 @@ func (loop *ReActLoop) settleParkedTurnOnRunEnd(ctx context.Context, sessionID, 
 	}
 	if err := store.ClearTurnSuspension(settleCtx, sessionID, turnID); err != nil {
 		loop.agent.reportSuspensionDegraded(settleCtx, sessionID, "parked-state clear failed: "+err.Error())
+		return
 	}
+	// §6.8 / G3 闭合半边：义务全部终态 ⇒ 挂起态在**同一 run 内**闭合（没有、也不
+	// 会有 resume episode）。结清若静默清记录，则只有 turn.suspended 会到达消费者，
+	// 而前端契约是"只有 turn.resumed 清除挂起态"，挂起横幅会永久卡住（2026-09-26
+	// 真机 E2E：后台批次在父 turn 结束前就完成 ⇒ 永不出现 resume episode）。
+	// 因此补发一次非 wake 的闭合事件：trigger=settled，身份字段与 wake 版一致。
+	loop.emitRuntimeEvent(events.EventTurnResumed, sessionID, "", map[string]interface{}{
+		"turn_id":          turnID,
+		"session_id":       sessionID,
+		"trigger":          events.TurnResumedTriggerSettled,
+		"settled":          true,
+		"obligation_count": len(record.ObligationIDs),
+	})
 }
 
 // startBackgroundSubagentBatch persists a background batch and launches its

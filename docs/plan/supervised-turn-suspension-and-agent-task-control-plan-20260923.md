@@ -1062,7 +1062,10 @@ UI 要求：挂起期间明确显示"托管中：N 个任务运行中（M 完成
 - 两者可自由往返：`running` --（无事可做/试图收尾）--> `awaiting_obligations` --（terminal/progress/deadline 事件）--> `running`；
 - runtime **不强制**父立刻挂起（派发后父可以先干自己的活）；
 - 但 runtime **强制**"账本非空不得收尾"——模型想结束也结束不了，只能挂起或继续；
-- active wait 期间父会话仍 `Busy()` ⇒ 用户消息按 Q1 排队；passive wait 不 `Busy()` ⇒ 用户可插话（Q10）。
+- **（2026-09-26 口径修正，G6）** active wait 与 passive wait 期间父会话**都**计入 `Busy()`
+  （passive wait 是 `awaiting_obligations`：不接受**并发新 turn**，见 Q10），但两者都接受用户
+  插话/steer——插话以同一 `turn_id` 起新 episode（`AcceptsResume()`）。原句"passive wait 不
+  `Busy()`"与 Q10 及实现（`runtime_state.go` 的 `AwaitingObligations()`）冲突，作废。
 
 **成本口径**：active wait 是"用 token/并发位换低延迟"；passive wait 是"用一次挂起/恢复换零成本长等待"。默认策略建议：`wait_agent` 单次 ≤ 60s，连续 active wait 超过 2 次且无进展 ⇒ 提示模型改用挂起（`next_action=suspend`）。
 
@@ -1072,7 +1075,7 @@ UI 要求：挂起期间明确显示"托管中：N 个任务运行中（M 完成
 
 | # | 约束 | 具体口径 | 反例（现状/错误实现） |
 | --- | --- | --- | --- |
-| 1 | **区间钳制** | min 10s / default 30s / max 1h；越界返回**模型可见错误**，不静默截断 | 无界或静默 clamp |
+| 1 | **区间钳制** | min 10s / default 30s / **max 2m**（2026-09-26 口径修正，G6：`wait-budget-and-max-window-hardening-plan-20260926.md` 把上界从 1h 收窄到 2 分钟，避免长 active wait 烧回合预算；`agentcontrol.MaxWaitTimeoutMs = 120000`）；越界按宿主策略钳制/报错，不静默截断 | 无界或静默 clamp |
 | 2 | **活动驱动** | 挂在"账本事件 + 输入队列活动"上，事件到达立即返回；**禁止轮询** | 定时 sleep 轮询 |
 | 3 | **可被打断** | 用户 steer / ESC / 新输入立即结束等待段并返回 | 等待期间用户输入被吞 |
 | 4 | **超时即观测** | `timed_out=true` 是**成功**返回（附账本摘要 + `next_action`），不是错误、不是任务失败 | 超时抛错或超时即取消子任务 |

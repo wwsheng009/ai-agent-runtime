@@ -1194,7 +1194,7 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 | 幂等 / 有界 | 已终态行不再出现在 `ListActiveExecutionRuns`；第二次 pass 的 `Scanned` 不含它，`FencingToken` / `Version` 各只 +1（不会因重复启动反复围栏） |
 | 告警契约 | `projectRestartOrphan`（`:1141`）投影 `run_orphaned` + `SeverityCritical` + `SupervisionOrphaned` + `next_action = inspect run and decide cancel/retry`：重启判决不只在账本里，父会话的决策面看得到（与其它非健康判定同契约） |
 | 挂起 turn 的重启读回（AC-P3-3a） | 账本（`turn_suspensions` 表）与 resume 队列是 durable 真源：新进程用**新句柄**打开同一份文件即可读回 `ObligationIDs` / `ResumeQueue`；actor 的解析顺序＝内存缓存 → durable 状态 → **账本验证记录仍在**（`actor_resume_episode.go:40-64`），因此重启后仍复用挂起 `turn_id`（与 AC-P1-1a 同口径），episode 不触碰账本 |
-| `awaiting_obligations` 与 `Busy()`（AC-P3-3c） | `RuntimeStateSummary` 增加 `SuspendedTurnID`（来自 durable 状态，`runtime_state.go:130-133`）；`Busy() = statusBusy() 或 AwaitingObligations()`（`:168`，Q10「托管 turn 期间不允许并发新 turn」），`AcceptsResume() = 非 statusBusy()`（`:176`）—— 挂起 turn **不是空闲**，但同一 turn 的 resume episode（steer / wake resume / 巡检投递）仍放行。三个宿主调用点按语义分流：`chat_actor_host.go:816`、`chat_actor_progress_check.go:262` 用 `AcceptsResume()`，其余 Busy 语义点不变 |
+| `awaiting_obligations` 与 `Busy()`（AC-P3-3c） | `RuntimeStateSummary` 增加 `SuspendedTurnID`（来自 durable 状态，`runtime_state.go:130-133`）；`Busy() = statusBusy() 或 AwaitingObligations()`（`:168`，Q10「托管 turn 期间不允许并发新 turn」），`AcceptsResume() = 非 statusBusy()`（`:176`）—— 挂起 turn **不是空闲**，但同一 turn 的 resume episode（steer / wake resume / 巡检投递）仍放行。CLI 两个调用点（`chat_actor_host.go:816`、`chat_actor_progress_check.go:262`）用 `AcceptsResume()`。API 宿主 2026-09-26 补齐同口径（见下方"G1 补证"）：`supervision_batch_projector.go` 的 wake `Runnable` 与 `supervision_progress_check.go` 的巡查预检改为 `AcceptsResume()` |
 
 **改动清单**
 
@@ -1206,6 +1206,19 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 | `backend/cmd/aicli/commands/chat_actor_progress_check.go` | 巡检投递的父会话空闲判定改为 `AcceptsResume()`（`:262`） |
 | `backend/internal/chat/runtime_state.go` | `RuntimeStateSummary.SuspendedTurnID` + `AwaitingObligations()` + `Busy()` 纳入挂起 turn + `AcceptsResume()`；原 `Busy()` 更名 `statusBusy()`（`:145-178`） |
 | `backend/internal/chat/actor_resume_episode_test.go` | 测试夹具暴露 `apiAgent` / `llmRuntime` / `batchesPath`：重启用例需要"新进程用新句柄打开同一份账本" |
+| `backend/internal/api/runtimeapi/supervision_batch_projector.go` | **2026-09-26（G1 修复）**：wake consumer 的 `Runnable` 由 `!Busy()` 改为 `AcceptsResume()`——挂起 turn 必须接受同一 turn 的 resume，否则 critical 终态 wake 被自家门挡成 durable 滞留 |
+| `backend/internal/api/runtimeapi/supervision_progress_check.go` | **2026-09-26（G1 修复）**：巡查投递的父会话可运行预检（快照 + durable 回退）改用 `AcceptsResume()`，与 CLI 巡检（`chat_actor_progress_check.go:262`）同口径 |
+| `backend/internal/runtimeserver/supervision.go` | **2026-09-26（G2 修复）**：控制面装配时若 `hooks.SubagentBatchStore != nil`，同点接 `SetObligationSource` + host-neutral `SetProgressSource`（宿主可再用 live 镜像覆盖进度源） |
+| `backend/internal/api/runtimeapi/supervision_batch_projector.go`（G2） | 新增 `DeliverResume`（投递 `AutoWakePromptFor(resume)`）与共用提交口 `submitSupervisionWakePrompt`；`Deliver` 保留为 legacy 回落 |
+| `backend/internal/api/runtimeapi/supervision_progress_check.go` / `supervision_batch_store.go` / `supervision_handlers.go`（G2） | `wireSupervisionProgressSource` → `wireSupervisionSources`（进度 + 账本一次接好），并在 `SetSubagentBatchStore` / `SetSupervisionWakeScheduler` 补接线（抵消装配顺序差异） |
+| `backend/cmd/aicli/commands/chat_actor_host.go`（G2） | `Deliver` 闭包体抽成 `deliverSupervisionWake(..., prompt)`；新增 `DeliverResume`；`beginWakeTurnRun`/`submitParentWakeTurn` 接受 prompt；宿主启动即 `wireLocalSupervisionSources()` |
+| `backend/cmd/aicli/commands/chat_actor_progress_check.go`（G2） | `wireLocalSupervisionProgressSource` → `wireLocalSupervisionSources`：加接 `SetObligationSource` |
+| `backend/internal/events/turn_events.go`（G3 新增） | `EventTurnSuspended` / `EventTurnResumed` 常量 + 语义边界（`agent.turn.finished` = 本次 run 结束） |
+| `backend/internal/events/contract.go` / `runtimeobserve/known_types.go`（G3） | 两事件登记 A+D + PersistCritical 并进已知目录；4 个 plan-* 常量按 0 通道登记 |
+| `backend/internal/agent/loop.go`（G3） | `parkBackgroundTurn` durable 首次挂起后发 `turn.suspended`（边沿一次；降级/写失败不发） |
+| `backend/internal/supervision/resume_announce.go` + `wake_consumer.go`（G3） | `Announce` 钩子 + `ResumeTriggerForReasons` + `EventPayload()`；仅投递成功后播报 |
+| `backend/internal/api/runtimeapi/supervision_turn_events.go` / `supervision_batch_projector.go` / `cmd/aicli/commands/chat_turn_events.go` / `chat_actor_host.go`（G3） | 两宿主把播报翻成总线上的 `turn.resumed`（A+D 契约） |
+| `backend/cmd/contractgen`（G3 再生成） | `frontend/src/types/runtime/event-contract.ts` 增补两事件（99 类型） |
 
 **测试落点（L1）**
 
@@ -1216,6 +1229,11 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 | `TestReconcileRestartObserveModeRecordsWithoutWriting`（`:167`） | `Mode = observe` ⇒ `Observed = 1`、账本零写入 |
 | `TestRestartedActorResumesParkedTurnFromDurableLedger`（`chat/actor_restart_recovery_test.go:22`） | 重启现场（actor 停掉 + 账本句柄关闭 → 新句柄打开同一文件）：§6.12 记录逐字段读回（`obligation_ids` / `resume_queue` / `parked_at`）；重建 actor 冷缓存解析出挂起 `turn_id`、`Busy()` 与 `AcceptsResume()` 同时成立、提交复用同一 `turn_id`，episode 收尾后账本与挂起标记不变（AC-P3-3a + AC-P3-3c 的宿主面） |
 | `TestRuntimeStateSummaryBusyCoversParkedTurn`（`chat/runtime_state_test.go:144`） | 挂起 turn ⇒ `AwaitingObligations()` / `Busy()` 为真且 `AcceptsResume()` 为真；纯空闲、执行中两态语义不变；状态 JSON 往返（durable 读回的等价物）后语义还原（AC-P3-3c） |
+| `TestAPIBatchLifecycleProjector_ResumesParkedTurnOnCriticalTerminal`（`api/runtimeapi/supervision_batch_projector_test.go`） | **G1 补证（2026-09-26）**：parked actor（`Busy()==true` 且 `AcceptsResume()==true`）+ durable §6.12 挂起记录 + failed batch 终态投影 ⇒ 走生产 `Runnable` 闭包投递 1 次、wake 离开 pending；反证：`Runnable` 临时改回 `!Busy()` 时该用例失败（deliveries=0） |
+| `TestLocalHostWiresResumeDelivery` / `TestLocalSupervisionSourcesBuildResumeContextWithVerdict`（`cmd/aicli/commands/chat_actor_resume_delivery_test.go`） | **G2 补证（2026-09-26）**：CLI 宿主必须接 `DeliverResume`（legacy `Deliver` 保留）；账本投影接上后 `BuildResumeContext` 给出 pending=0 / `turn_id=turn_parked` / 终态 rollup，`AutoWakePromptFor` 产出 `[supervision] resume` + 终局判据。反证：去掉账本接线 ⇒ pending=-1（用例失败） |
+| `TestDurableParkAnnouncesTurnSuspendedOnce`（`agent/turn_suspension_events_test.go`） | **G3 补证（2026-09-26）**：durable 首次挂起发一次 `turn.suspended`（turn_id/batch_id/obligation_count/resume_queue_count/parked_at），同 turn 重复挂起不重复播报。反证：去掉边沿判定 ⇒ 播报 2 次 |
+| `TestResumeTriggerForReasons` / `TestWakeConsumerAnnouncesResumeOnlyAfterDelivery`（`supervision/resume_announce_test.go`） | **G3 补证**：触发映射（terminal/approval 优先于 progress）与"仅投递成功后播报"；投递失败不播报、未接线账本时 pending=-1/unknown 的降级口径、观察者 panic 不影响投递。反证：移除 announce ⇒ 成功路径 0 播报 |
+| API G1 用例扩展（`api/runtimeapi/supervision_batch_projector_test.go`）/ `TestLocalTurnResumedEventPayload`（`cmd/aicli/commands/chat_actor_resume_delivery_test.go`） | **G3 补证**：两宿主把播报发到总线（turn_id/trigger/pending_count/status/terminal/wake_reasons/summary 键契约）。反证：去掉 API `Announce` 接线 ⇒ 总线 0 事件 |
 
 **验证证据（2026-09-23 实测）**
 
@@ -1224,6 +1242,53 @@ P3: C4-1(#5 移除) ─► C4-2(#16 GC/保留) ─► C4-3(重启恢复) ─► 
 - `go test ./internal/chat/ -count=1` **ok**（37.907s）；`go test ./cmd/aicli/commands/ -count=1` **ok**（154.788s）—— 三处宿主接线（Busy 语义分流 + 启动对账）未回归。
 - 定向复跑：`go test ./internal/supervision/ -run TestReconcileRestart -v` 3/3 PASS（1.040s）；`go test ./internal/chat/ -run 'TestRestartedActor…|TestSubmitPromptOnSuspendedTurn…|TestSubmitPromptClearsStale…|TestRunEndStamps…' -v` 4/4 PASS（1.264s）。
 - `gofmt -l`（本轮 9 个改动文件）无输出。
+
+**G1 补证（2026-09-26，API 宿主 resume 门控）**
+
+- 缺口：`supervision_batch_projector.go` / `supervision_progress_check.go` 沿用 `Busy()`；挂起 turn
+  `Busy()==true` ⇒ API 五条入口（batch 终态桥 / controller wake / progress check / self-check /
+  手动 flush）全被 `ErrWakeParentBusy` 挡住，critical 终态 wake 只能滞留 durable 等自然输入。
+- 修复：两处改 `AcceptsResume()`（挂起 turn 接受同一 turn 的 resume episode，仍拒绝并发新 turn）。
+- 验证：`go test ./internal/api/runtimeapi/ -count=1` **ok**（41.254s，全包）；新增用例反证见上表；
+  `go build ./...` exit 0；`gofmt -l` 无输出。审计与证据见
+  `docs/plan/spawn-subagent-same-turn-loop-gap-audit-20260926.md`。
+
+**G2 补证（2026-09-26，resume 上下文接线）**
+
+- 缺口：C2-1 的 `DeliverResume` 与 `SetObligationSource` 在**生产零命中**（只有 supervisor 包
+  单测调用），resume 只能拿到 `pending=-1` / `status=unknown` 的降级上下文，实际投递的仍是
+  legacy `AutoWakePrompt`——§6.1 步骤 3 的"rollup digest + 可用动作清单"没有进入父 turn。
+- 修复：`BuildSupervisionControlPlane`/两宿主在 batch 控制面可见处接 `SetObligationSource`
+  （进度投影同点接好）；CLI/API 的 `WakeConsumer` 接 `DeliverResume`，投递
+  `AutoWakePromptFor(resume)`（`resume==nil` 或未接线时逐字节回落 legacy 提示）。
+- 验证：`go test ./internal/api/runtimeapi/ -count=1` **ok**（34.2s 全包）；
+  `go test ./cmd/aicli/commands/ -run "TestLocalSupervision|TestLocalHostWires|TestLocalHostWakeConsumer|TestLocalHostTurnEndCheck|TestLocalSupervisionSources|TestLocalHostWiresResumeDelivery" -count=1` **ok**；
+  `go test ./internal/supervision/ ./internal/runtimeserver/ -count=1` ok；反证两处见上表与审计文档 §7.2。
+- 残留：真机 LLM 端到端未跑；`Deliver`（legacy）保留作降级路径，未删除。
+
+**G3 补证（2026-09-26，挂起/恢复可观测性）**
+
+- 缺口：§6.8 的 `turn.suspended` 在生产**零发射点**（唯一引用是 `suspension_gate_test.go`
+  的"降级宿主不得发"断言）；`turn.resumed` 完全不存在；`agent.turn.finished` 在挂起期照发，
+  观察面把"托管挂起"误读成"回合结束"。
+- 修复：`EventTurnSuspended` / `EventTurnResumed` 常量 + **A+D 通道 + PersistCritical** 契约
+  （事件注册表与 runtimeobserve 目录三方一致，`cmd/contractgen` 同步生成前端契约）；
+  `parkBackgroundTurn` 在 durable 首次挂起后发 `turn.suspended`（边沿一次；写失败/降级不发，
+  AC-C0-1d）；`WakeConsumer.Announce` 在 resume **投递成功后**播报 `turn.resumed`
+  （trigger=terminal/progress/approval/other + 有界 digest 摘要），两宿主接到各自事件总线。
+- 验证：`go test ./internal/agent/ ./internal/events/ ./internal/runtimeobserve/ ./internal/supervision/ -count=1` ok；
+  `go test ./internal/api/runtimeapi/ -run TestAPIBatchLifecycleProjector -count=1` ok；
+  `go test ./cmd/aicli/commands/ -run "TestLocalHostWiresResumeDelivery|TestLocalTurnResumedEventPayload|TestLocalSupervisionSourcesBuildResumeContextWithVerdict" -count=1` ok；
+  `go test ./cmd/contractgen/ -count=1` ok；反证三处见审计文档 §7.3。
+- 顺带修复（使 events 门禁从恒红转绿）：`contract_test.go` 跟进 `internal/api/skills` →
+  `internal/api/runtimeapi` 改名；`chat/events.go` 的 4 个 plan-* 常量按 0 通道登记 +
+  进已知目录（不改变任何投递行为）。
+- 前端"托管中"表达（同批交付）：`frontend/src/lib/parked-turn/events.ts` 归约 +
+  `use-parked-turns` hook + `session-mode-banner` 常驻段（"托管中：N 个任务运行中（M 完成 / K 异常）"，
+  目录投影为空时回落"等待 N 个义务"）；定向 67 tests / 工作区扩面 1483 tests 全绿，
+  `tsc -b` exit 0。落点与边界见审计文档 §7.5。
+- 残留：真机端到端未跑；设计表的 `next_check_at` 不进 agent 事件（宿主巡检间隔属宿主知识）；
+  前端 M/K 计数来自目录投影（非权威账本）、仅接前台事件流（刷新后不自愈重建）。
 
 **AC 判定**
 

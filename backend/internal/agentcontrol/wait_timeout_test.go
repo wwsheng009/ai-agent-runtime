@@ -6,7 +6,7 @@ import (
 )
 
 func TestResolveWaitTimeoutZeroUsesConfiguredDefault(t *testing.T) {
-	policy := WaitTimeoutPolicy{DefaultMs: 30000, MinMs: 10000, MaxMs: 3600000}
+	policy := WaitTimeoutPolicy{DefaultMs: 30000, MinMs: 10000, MaxMs: 120000}
 
 	resolution, err := ResolveWaitTimeout(0, policy)
 	if err != nil {
@@ -21,7 +21,7 @@ func TestResolveWaitTimeoutZeroUsesConfiguredDefault(t *testing.T) {
 }
 
 func TestResolveWaitTimeoutClampsToBounds(t *testing.T) {
-	policy := WaitTimeoutPolicy{DefaultMs: 30000, MinMs: 10000, MaxMs: 3600000}
+	policy := WaitTimeoutPolicy{DefaultMs: 30000, MinMs: 10000, MaxMs: 120000}
 	cases := []struct {
 		name        string
 		requested   int
@@ -32,8 +32,8 @@ func TestResolveWaitTimeoutClampsToBounds(t *testing.T) {
 		{name: "just below min", requested: 9999, wantMs: 10000, wantClamped: true},
 		{name: "exact min", requested: 10000, wantMs: 10000},
 		{name: "in range", requested: 20000, wantMs: 20000},
-		{name: "exact max", requested: 3600000, wantMs: 3600000},
-		{name: "above max", requested: 7200000, wantMs: 3600000, wantClamped: true},
+		{name: "exact max", requested: 120000, wantMs: 120000},
+		{name: "above max", requested: 2400000, wantMs: 120000, wantClamped: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -55,14 +55,14 @@ func TestResolveWaitTimeoutClampsToBounds(t *testing.T) {
 }
 
 func TestResolveWaitTimeoutErrorModeRejectsOutOfRange(t *testing.T) {
-	policy := WaitTimeoutPolicy{DefaultMs: 30000, MinMs: 10000, MaxMs: 3600000, Mode: WaitTimeoutModeError}
+	policy := WaitTimeoutPolicy{DefaultMs: 30000, MinMs: 10000, MaxMs: 120000, Mode: WaitTimeoutModeError}
 
 	_, err := ResolveWaitTimeout(1, policy)
 	if err == nil || !strings.Contains(err.Error(), "minWaitTimeoutMs") {
 		t.Fatalf("expected min-bound error, got %v", err)
 	}
 
-	_, err = ResolveWaitTimeout(7200000, policy)
+	_, err = ResolveWaitTimeout(2400000, policy)
 	if err == nil || !strings.Contains(err.Error(), "maxWaitTimeoutMs") {
 		t.Fatalf("expected max-bound error, got %v", err)
 	}
@@ -95,7 +95,7 @@ func TestResolveWaitTimeoutNormalizesZeroValuePolicy(t *testing.T) {
 }
 
 func TestResolveWaitTimeoutClampsMisconfiguredDefault(t *testing.T) {
-	policy := WaitTimeoutPolicy{DefaultMs: 1000, MinMs: 10000, MaxMs: 3600000}
+	policy := WaitTimeoutPolicy{DefaultMs: 1000, MinMs: 10000, MaxMs: 120000}
 
 	resolution, err := ResolveWaitTimeout(0, policy)
 	if err != nil {

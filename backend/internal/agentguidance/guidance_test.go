@@ -6,11 +6,11 @@ import (
 )
 
 func TestWaitTimeoutArgTextDocumentsBoundsAndEcho(t *testing.T) {
-	got := WaitTimeoutArgText(30000, 10000, 3600000)
+	got := WaitTimeoutArgText(30000, 10000, 120000)
 	for _, want := range []string{
 		"host default (30000ms)",
 		"agents.minWaitTimeoutMs (10000ms)",
-		"agents.maxWaitTimeoutMs (3600000ms)",
+		"agents.maxWaitTimeoutMs (120000ms)",
 		"agents.waitTimeoutMode=error",
 		"agents.waitTimeoutMode=clamp",
 		"wait_timeout_requested_ms",
@@ -23,11 +23,11 @@ func TestWaitTimeoutArgTextDocumentsBoundsAndEcho(t *testing.T) {
 }
 
 func TestEventsWaitArgTextKeepsNonBlockingSemantics(t *testing.T) {
-	got := EventsWaitArgText(10000, 3600000)
+	got := EventsWaitArgText(10000, 120000)
 	for _, want := range []string{
 		"non-blocking read",
 		"agents.minWaitTimeoutMs (10000ms)",
-		"agents.maxWaitTimeoutMs (3600000ms)",
+		"agents.maxWaitTimeoutMs (120000ms)",
 		"agents.waitTimeoutMode=error",
 		"agents.waitTimeoutMode=clamp",
 	} {

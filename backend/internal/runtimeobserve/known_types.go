@@ -73,6 +73,11 @@ import "strings"
 //     无 chat 侧交付通道」，不改变任何投递行为），否则三分法无法把「已知但无
 //     通道」与「完全未知」区分开。收编范围由 internal/events/contract_test.go
 //     的扫描门禁锁定：新增未登记的裸字面量发射点即测试失败。
+// 10. 会话级路由管理事件（internal/events/session_routing_events.go）。
+// 11. 托管 turn 生命周期里程碑（internal/events/turn_events.go；方案 §6.8 / 审计
+//    缺口 G3）：turn.suspended / turn.resumed。发射点分别是 internal/agent/loop.go
+//    的 parkBackgroundTurn（durable 首次挂起）与 internal/supervision 的
+//    WakeConsumer.Announce（宿主投递 resume 成功后转发到事件总线）。
 //
 // 匹配规则与 Projector 保持一致：TrimSpace 后精确匹配；仅大小写不同按未知处理，
 // 以保留异常语义（见 normalizeEventType）。
@@ -134,6 +139,10 @@ func buildKnownEventTypes() map[string]bool {
 		"question_asked",            // :24
 		"question_answered",         // :25
 		"checkpoint_created",        // :26
+		"plan_mode_changed",         // :30（计划模式状态变更；宿主接线在 plan 方案里推进）
+		"plan_archive_failed",       // :33
+		"plan_review_available",     // :38（run 结束时的复核入口兜底信号）
+		"plan_review_requested",     // :42
 		"session_compact_started",   // :27
 		"session_compact_completed", // :28
 		"session_compact_skipped",   // :29
@@ -250,6 +259,15 @@ func buildKnownEventTypes() map[string]bool {
 	// 由 internal/events/contract_test.go 的三方一致门禁断言不漂移。
 	add(
 		"session.routing_changed", // events.EventSessionRoutingChanged
+	)
+
+	// 来源 11：托管 turn 生命周期里程碑（见文件头说明）。常量定义在
+	// internal/events/turn_events.go；turn.suspended 由 agent/loop.go 的
+	// parkBackgroundTurn 在 durable 挂起记录写入后发射；turn.resumed 由
+	// supervision.WakeConsumer 在宿主投递回调成功后经 Announce 转发。
+	add(
+		"turn.suspended", // events.EventTurnSuspended（agent/loop.go parkBackgroundTurn）
+		"turn.resumed",   // events.EventTurnResumed（supervision/wake_consumer.go → 宿主总线）
 	)
 
 	return out

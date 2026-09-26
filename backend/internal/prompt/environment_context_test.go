@@ -133,7 +133,7 @@ func TestRenderMultiAgentCollaborationGuidance_KeepsParentWorkingAndReadsIncreme
 		"Multi-agent collaboration guidance:",
 		"continue meaningful non-overlapping work in the same turn",
 		"read_agent_events using after_seq",
-		"prefer the longest timeout you can afford",
+		"returns next_action=suspend",
 		"follow next_action",
 		"check list_agents for the slots in use",
 		"instead of retrying the same spawn_agent unchanged",

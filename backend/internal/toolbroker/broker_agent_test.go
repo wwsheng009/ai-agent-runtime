@@ -1134,6 +1134,33 @@ func TestAgentWaitResultMarshalJSONAvoidsDuplicateAgentOutputs(t *testing.T) {
 	}
 }
 
+// TestFinalizeAgentWaitResultMissingTargetGuidesToReceiptTaskID 钉住 2026-09-26
+// 真机 E2E 的修复：wait_agent 收到不存在的目标（典型来源：把派发回执的 batch_id
+// 当 id）不得再回 "consume_ready_outputs"（既没有输出也没有可寻址目标），必须
+// 指向"从回执 tasks[] 取 task_id"这条可执行路径；真正存在的子会话保持原指引。
+func TestFinalizeAgentWaitResultMissingTargetGuidesToReceiptTaskID(t *testing.T) {
+	missing := FinalizeAgentWaitResult(&AgentWaitResult{
+		Agent:      &AgentStatusResult{ID: "batch_x", SessionID: "batch_x", Status: "missing"},
+		ReadyCount: 1,
+		ReadyIDs:   []string{"batch_x"},
+	}, time.Now())
+	if !strings.HasPrefix(missing.NextAction, "target_not_found") {
+		t.Fatalf("missing target must not look ready: %#v", missing.NextAction)
+	}
+	if !strings.Contains(missing.NextAction, "task_id") {
+		t.Fatalf("missing target guidance must point at the receipt task ids: %q", missing.NextAction)
+	}
+
+	existing := FinalizeAgentWaitResult(&AgentWaitResult{
+		Agent:      &AgentStatusResult{ID: "child-1", SessionID: "child-1", Status: "idle", Exists: true},
+		ReadyCount: 1,
+		ReadyIDs:   []string{"child-1"},
+	}, time.Now())
+	if !strings.HasPrefix(existing.NextAction, "consume_ready_outputs") {
+		t.Fatalf("existing ready child keeps the consume guidance: %q", existing.NextAction)
+	}
+}
+
 func TestFinalizeAgentWaitResultProvidesSchedulingGuidance(t *testing.T) {
 	result := FinalizeAgentWaitResult(&AgentWaitResult{
 		Agents:       []AgentStatusResult{{ID: "child-1", Status: "running"}},

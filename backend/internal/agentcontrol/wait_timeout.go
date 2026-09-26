@@ -7,11 +7,19 @@ import (
 
 // Wait observation defaults shared by every host (API runtime and CLI local
 // runtime). They mirror the reference implementation: default 30s, minimum
-// 10s, maximum 1h.
+// 10s, maximum 2m.
+//
+// The maximum was lowered from 1h to 2m (2026-09-26, wait-budget hardening):
+// a single active wait window that long lets one model call occupy the parent
+// turn for most of an hour, which is exactly the session-blocking symptom the
+// supervised-suspension design (§16.2) answers with passive wait. Long waits
+// must go through the turn-suspension path, where they cost zero goroutines
+// and zero tokens; operators who really need a wider active window can still
+// raise agents.maxWaitTimeoutMs explicitly.
 const (
 	DefaultWaitTimeoutMs = 30000
 	MinWaitTimeoutMs     = 10000
-	MaxWaitTimeoutMs     = 3600000
+	MaxWaitTimeoutMs     = 120000
 )
 
 // WaitTimeoutMode selects how out-of-range wait requests are handled.

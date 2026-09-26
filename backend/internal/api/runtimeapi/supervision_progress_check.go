@@ -61,15 +61,24 @@ type apiProgressCheckParent struct {
 	ParentSessionID string
 }
 
-// wireSupervisionProgressSource 把只读的 P0-B batch 投影接到 wake scheduler 上。
+// wireSupervisionSources 把只读的 batch 控制面接到 wake scheduler 上：
 //
-// progress wake 不带生命周期通知，rollup 就是它唯一的 digest 内容：没有这条
-// 投影，digest 会被判成"无内容"而不投递（见 supervision.digestDeliverable），
-// 巡查就永远产生不了汇报 turn。只读、幂等，可在每次巡查前重复调用。
-func (h *Handler) wireSupervisionProgressSource() {
+//   - progress 投影：progress wake 不带生命周期通知，rollup 就是它唯一的
+//     digest 内容；没有这条投影，digest 会被判成"无内容"而不投递（见
+//     supervision.digestDeliverable），巡查就永远产生不了汇报 turn。
+//   - 账本投影（G2）：resume 上下文要回答 pending_count（I1 收尾判据）与终态
+//     rollup / 失败清单（§16.4）；没有它，DeliverResume 只能拿到 pending=-1、
+//     status=unknown 的降级上下文。
+//
+// 只读、幂等，可在巡查前 / 控制面装配点重复调用；store 未装配时不做任何接线
+// （peek 不触发懒加载，避免为一次接线凭空虚建 store）。
+func (h *Handler) wireSupervisionSources() {
 	scheduler := h.getSupervisionWakeScheduler()
 	if scheduler == nil {
 		return
+	}
+	if store := h.peekSubagentBatchStore(); store != nil {
+		scheduler.SetObligationSource(supervision.NewBatchObligationSource(store))
 	}
 	scheduler.SetProgressSource(h.supervisionProgressSource())
 }
@@ -193,7 +202,7 @@ func (h *Handler) runSupervisionProgressCheckOnce(ctx context.Context) (int, err
 	}
 	// progress wake 没有生命周期行可依赖，所以必须在调度前保证 scheduler 能看到
 	// rollup；接线幂等，重复调用只是重新指向同一个只读投影。
-	h.wireSupervisionProgressSource()
+	h.wireSupervisionSources()
 
 	var (
 		delivered int
@@ -353,7 +362,10 @@ func (h *Handler) supervisionProgressCheckParents(ctx context.Context) ([]apiPro
 }
 
 // supervisionProgressParentRunnable 与 wake consumer 的 Runnable 门同口径
-// （actor 存在且不忙，见 supervisionWakeConsumer）。两点差别都是巡查语境决定的：
+// （actor 存在且接受同一 turn 的 resume episode，见 supervisionWakeConsumer）：
+// 挂起 turn（awaiting_obligations）允许注入进度汇报——汇报就是同一 turn 的新
+// episode（Q10：不允许并发新 turn，但不阻塞 resume/steer）；执行中 / 等待审批 /
+// 等待回答 / 回滚仍拒绝。两点差别都是巡查语境决定的：
 //
 //  1. 这里**不创建** actor：巡查是周期性提示，不该为历史/孤儿 batch 行凭空造
 //     actor；未命中时父会话的下一轮自然 turn 仍会从 preflight digest 看到进度。
@@ -378,7 +390,7 @@ func (h *Handler) supervisionProgressParentRunnable(ctx context.Context, session
 		return false
 	}
 	snapshot, hasSnapshot := actor.StateSummary()
-	if hasSnapshot && snapshot.Busy() {
+	if hasSnapshot && !snapshot.AcceptsResume() {
 		return false
 	}
 	store := h.getSessionRuntimeStore()
@@ -389,7 +401,7 @@ func (h *Handler) supervisionProgressParentRunnable(ctx context.Context, session
 	if err != nil || state == nil {
 		return hasSnapshot
 	}
-	return !state.Summary().Busy()
+	return state.Summary().AcceptsResume()
 }
 
 // apiBatchProgressTime 取下 batch 行自带的最新时间戳（心跳优先，与

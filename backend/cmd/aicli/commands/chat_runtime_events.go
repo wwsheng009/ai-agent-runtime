@@ -31,6 +31,7 @@ import (
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -7934,6 +7935,47 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 			Tag:    "[subagents]",
 			Title:  title,
 		}, "")
+	case runtimeevents.EventTurnSuspended:
+		// §6.8 / G3：托管挂起必须在时间线上可见。挂起期仍会收到
+		// `agent.turn.finished`（那是"本次 run 结束"），没有这一行，用户无法在
+		// 对话流里把"等待子任务"与"卡死"区分开（设计 §6.8）。
+		title := "托管挂起：等待"
+		if count, ok := payloadIntValue(event.Payload["obligation_count"]); ok {
+			title += fmt.Sprintf(" %d 个义务", count)
+		} else {
+			title += " 义务终态"
+		}
+		if batchID := strings.TrimSpace(payloadStringValue(event.Payload["batch_id"])); batchID != "" {
+			title += "（batch " + batchID + "）"
+		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind:   cell.TimelineTeam,
+			Status: cell.StatusInfo,
+			Tag:    "[subagents]",
+			Title:  title,
+		}, firstNonEmptyChatValue(payloadStringValue(event.Payload["batch_id"]), event.Type))
+	case runtimeevents.EventTurnResumed:
+		// 恢复 = 宿主把 wake 真正投递成一次 resume episode（同一 turn_id）。
+		// terminal=true 时账本已全终态：本回合应直接产出终局报告（§16.4）。
+		trigger := strings.TrimSpace(payloadStringValue(event.Payload["trigger"]))
+		if trigger == "" {
+			trigger = supervision.ResumeTriggerOther
+		}
+		title := "托管恢复：触发 " + trigger
+		if count, ok := payloadIntValue(event.Payload["pending_count"]); ok {
+			title += fmt.Sprintf("，pending=%d", count)
+		}
+		status := cell.StatusInfo
+		if payloadBoolValue(event.Payload, "terminal") {
+			title += "（全部终态，可产出终局报告）"
+			status = cell.StatusSuccess
+		}
+		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
+			Kind:   cell.TimelineTeam,
+			Status: status,
+			Tag:    "[subagents]",
+			Title:  title,
+		}, firstNonEmptyChatValue(payloadStringValue(event.Payload["turn_id"]), event.Type))
 	case agentcontrol.EventAgentReclaimed:
 		// P2-8 方案 4 的人读面：配额驱逐在时间线上留一行中文说明，操作者不必自己
 		// 翻译 `session_terminal` 之类的契约值；机器可读计数仍在 payload 的

@@ -55,8 +55,11 @@ func (h *Handler) apiBatchLifecycleProjector() agent.BatchLifecycleProjector {
 			batchID, terminal.Status, terminal.CompletedCount, terminal.TaskCount)
 		switch terminal.Status {
 		case subagentbatch.BatchFailed:
+			// 与 CLI 宿主同语义（2026-09-26 真机）：终态失败不是 blocked
+			// （blocked = 等外部裁决），用 terminated；critical + unresolved
+			// 保证失败仍进入父代理的必读清单。
 			severity = supervision.SeverityCritical
-			supervisionState = supervision.SupervisionBlocked
+			supervisionState = supervision.SupervisionTerminated
 			resolution = supervision.ResolutionUnresolved
 		case subagentbatch.BatchTimedOut:
 			severity = supervision.SeverityCritical
@@ -164,23 +167,52 @@ func (h *Handler) supervisionWakeConsumer(scheduler *supervision.WakeScheduler) 
 			supervision.NewSubagentCapacityProbe(h.subagentCapacityView),
 			supervision.NewResumePolicyGate(h.resumePolicyView),
 		),
+		// C4-3 / AC-P3-3c：挂起 turn（awaiting_obligations）不是空闲——它不接受
+		// 并发新 turn——但它接受**同一 turn** 的 resume episode（wake / steer /
+		// 巡检投递）。这正是"子任务全部终态后父 turn 自动续跑产出终局报告"的投递
+		// 口：若沿用 Busy()，parked 父会话会被判成"不可运行"，critical 终态 wake
+		// 只能滞留在 durable 队列里等下一次自然输入（CLI 宿主同口径用
+		// AcceptsResume()，见 chat_actor_host.go 的父会话可运行判定）。
 		Runnable: func(_ context.Context, _, parentSessionID, _ string) bool {
 			actor := h.apiSessionActor(parentSessionID)
 			if actor == nil {
 				return false
 			}
 			state, ok := actor.StateSummary()
-			return ok && !state.Busy()
+			return ok && state.AcceptsResume()
 		},
 		Deliver: func(ctx context.Context, parentSessionID, _ string, _ *supervision.Digest, _ []string) error {
-			actor := h.apiSessionActor(parentSessionID)
-			if actor == nil {
-				return fmt.Errorf("parent actor not found")
-			}
-			return actor.SubmitPromptAsync(ctx, supervision.AutoWakePrompt, h.apiSessionRunMeta(ctx, parentSessionID))
+			return h.submitSupervisionWakePrompt(ctx, parentSessionID, supervision.AutoWakePrompt)
+		},
+		// C2-1（改动 #4）/ G2：wake 升级为 resume——投递的不再是"去看摘要"的固定
+		// 提示，而是同一 turn 的 resume 上下文（turn_id + rollup + I1 终局判据 +
+		// 可用动作清单，见 ResumePrompt）。resume 为 nil（投影未接线）时
+		// AutoWakePromptFor 逐字节回落 AutoWakePrompt，接线本身不改变旧行为。
+		DeliverResume: func(ctx context.Context, parentSessionID, _ string, _ *supervision.Digest, _ []string, resume *supervision.ResumeContext) error {
+			return h.submitSupervisionWakePrompt(ctx, parentSessionID, supervision.AutoWakePromptFor(resume))
+		},
+		// G3：挂起 → 恢复的对外闭环。投递成功后把 §6.8 的 turn.resumed 发到宿主
+		// 事件总线（A+D 契约：落盘 + 回合末尾巴帧），UI/审计据此结束"托管中"表达；
+		// 投递失败不发（wake 仍在 durable 队列里，播报会与事实相反）。
+		Announce: func(_ context.Context, announcement supervision.ResumeAnnouncement) {
+			h.publishTurnResumed(announcement)
 		},
 	}
 	return h.supervisionWake
+}
+
+// submitSupervisionWakePrompt 是 API 宿主 wake/resume 的唯一提交通道：Deliver 与
+// DeliverResume 共用它，避免两条投递路径的 actor 解析 / RunMeta 漂移。异步提交
+// （SubmitPromptAsync）保持既有契约：投递回调不阻塞投影方。
+func (h *Handler) submitSupervisionWakePrompt(ctx context.Context, parentSessionID, prompt string) error {
+	if h != nil && h.supervisionWakeSubmit != nil {
+		return h.supervisionWakeSubmit(ctx, parentSessionID, prompt)
+	}
+	actor := h.apiSessionActor(parentSessionID)
+	if actor == nil {
+		return fmt.Errorf("parent actor not found")
+	}
+	return actor.SubmitPromptAsync(ctx, prompt, h.apiSessionRunMeta(ctx, parentSessionID))
 }
 
 // resumePolicyView 返回 A6 的**静态**派发门控视图（深度）。口径与

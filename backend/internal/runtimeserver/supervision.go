@@ -119,6 +119,15 @@ func BuildSupervisionControlPlane(dataDir string, cfg supervision.Config, hooks 
 		return &caps
 	}
 	wakes := supervision.NewWakeScheduler(store, wakeConfig)
+	// C2-1（改动 #4）/ G2：durable batch 控制面存在时，把它接成 resume 上下文的
+	// 账本投影与进度投影——resume 必须回答 pending_count（I1 收尾判据）与 rollup
+	// （§16.4），否则 DeliverResume 拿到的只是"unknown"降级上下文。宿主之后可用
+	// 自己的富化实现覆盖 progress source（CLI/API 的 live 进度镜像）；账本投影
+	// 没有宿主差异。store 未装配时保持 legacy new-turn wake 行为。
+	if hooks.SubagentBatchStore != nil {
+		wakes.SetObligationSource(supervision.NewBatchObligationSource(hooks.SubagentBatchStore))
+		wakes.SetProgressSource(supervision.NewBatchProgressSource(hooks.SubagentBatchStore))
+	}
 	provider := &supervisionDescendantProvider{
 		store:       store,
 		agents:      hooks.AgentRegistry,

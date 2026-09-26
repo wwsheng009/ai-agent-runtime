@@ -70,6 +70,12 @@ type WakeConsumer struct {
 	// surface the queue position in its digest/UI (A6: digest 显示排队位次).
 	// A nil hook is a no-op and panics are contained.
 	OnResumeDeferred func(ctx context.Context, state ResumeQueueState)
+	// Announce optionally publishes the §6.8 turn.resumed milestone after the
+	// host actually delivered the resume (G3: 挂起 → 恢复的可观测闭环). It is
+	// called only on the success path — a failed delivery keeps the wake durable
+	// and must not announce a resume that never started. Like the other hooks it
+	// is best-effort: a nil hook is a no-op and panics are contained.
+	Announce func(ctx context.Context, announcement ResumeAnnouncement)
 }
 
 // MaybeWakeParent is called at every parent runnable state-transition point:
@@ -142,6 +148,7 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 	// authoritative identity is the ledger's ParentTurnID, which the builder
 	// prefers when it is present (I3 保底).
 	resume := c.buildResume(ctx, parentSessionID, rootScopeID, deliverable, digest)
+	delivered := false
 	if c.DeliverResume != nil {
 		if err := c.DeliverResume(ctx, parentSessionID, rootScopeID, digest, wakeIDs, resume); err != nil {
 			// Delivery failed: release the claims anyway. The notification
@@ -151,6 +158,7 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 			c.release(ctx, wakeIDs)
 			return err
 		}
+		delivered = true
 	} else if c.Deliver != nil {
 		if err := c.Deliver(ctx, parentSessionID, rootScopeID, digest, wakeIDs); err != nil {
 			// Delivery failed: release the claims anyway. The notification
@@ -160,6 +168,12 @@ func (c *WakeConsumer) MaybeWakeParent(ctx context.Context, parentSessionID, par
 			c.release(ctx, wakeIDs)
 			return err
 		}
+		delivered = true
+	}
+	// §6.8 / 审计 G3：投递成功即"恢复已发生"。只在成功分支播报；失败分支的 wake
+	// 仍留在 durable 队列里等下一次可运行窗口，播报会与事实相反。
+	if delivered {
+		c.announceResume(ctx, parentSessionID, rootScopeID, deliverable, resume)
 	}
 	// The delivery ledger is written only after a delivery actually happened
 	// (AC-P1-4b): a failed delivery is never recorded, so the retry reuses the
@@ -292,6 +306,48 @@ func (c *WakeConsumer) buildResume(ctx context.Context, parentSessionID, rootSco
 		return nil
 	}
 	return resume
+}
+
+// announceResume forwards one bounded resume milestone to the host hook. The
+// supervision package never knows how the host renders it; the trigger class
+// and the ledger verdict are what make it useful (UI: "托管挂起 → 恢复";
+// 审计: 这次恢复消费了哪些 wake、当时账本是否全终态).
+func (c *WakeConsumer) announceResume(ctx context.Context, parentSessionID, rootScopeID string, claimed []WakePending, resume *ResumeContext) {
+	if c == nil || c.Announce == nil {
+		return
+	}
+	reasons := make([]string, 0, len(claimed))
+	ann := ResumeAnnouncement{
+		TurnID:          claimedTurnID(claimed),
+		ParentSessionID: parentSessionID,
+		RootScopeID:     rootScopeID,
+		WakeIDs:         make([]string, 0, len(claimed)),
+		PendingCount:    -1,
+		Status:          "unknown",
+	}
+	for _, w := range claimed {
+		ann.WakeIDs = append(ann.WakeIDs, w.WakeID)
+		if reason := strings.TrimSpace(w.WakeReason); reason != "" {
+			reasons = append(reasons, reason)
+		}
+	}
+	ann.WakeReasons = reasons
+	ann.Trigger = ResumeTriggerForReasons(reasons)
+	if resume != nil {
+		if turnID := strings.TrimSpace(resume.TurnID); turnID != "" {
+			ann.TurnID = turnID
+		}
+		ann.PendingCount = resume.PendingCount
+		if status := strings.TrimSpace(resume.Status); status != "" {
+			ann.Status = status
+		}
+		ann.Terminal = resume.Terminal
+		ann.Summary = boundedResumeSummary(resume.DigestText)
+	}
+	func() {
+		defer func() { _ = recover() }()
+		c.Announce(ctx, ann)
+	}()
 }
 
 // claimedTurnID returns the scheduling-time turn hint of the claimed wakes.

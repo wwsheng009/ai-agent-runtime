@@ -24,6 +24,9 @@ func (h *Handler) SetSubagentBatchStore(store subagentbatch.BatchStore) {
 	h.subagentBatchStore = store
 	h.subagentBatchTried = true
 	h.subagentBatchMu.Unlock()
+	// G2：控制面一旦可见就把它接成 wake 的账本/进度投影（resume 上下文的数据源）。
+	// 锁已释放后再接线，避免与 wireSupervisionSources 里的另一把读锁互相阻塞。
+	h.wireSupervisionSources()
 }
 
 // getSubagentBatchStore 返回宿主级 batch store，第一次调用时创建进程内默认值。

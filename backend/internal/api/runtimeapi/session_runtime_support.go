@@ -2083,12 +2083,24 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 // 批次库、或任一步判读失败，一律退化为旧语义（plan §13.8：判读失败 fail-open，
 // 绝不丢输入也绝不谎报账本）。
 func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
-	obligations, baseline, pending := c.waitLedger(ctx)
+	obligations, baseline, pending, budgetKey := c.waitLedger(ctx)
+	waitBudgetLimit := c.agentsConfig().MaxConsecutiveWaitWithoutProgress
 	if len(obligations) > 0 && !pending {
+		c.waitBudget().Reset(budgetKey)
 		return toolbroker.ApplyAgentWaitLedger(
 			toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{}, time.Now()),
 			obligations, baseline,
 		), nil
+	}
+	if len(obligations) > 0 && pending && budgetKey != "" {
+		// 等待预算已耗尽：不再打开新的活动等待窗口（§16.2/§16.3 把「连续 2 次
+		// 无进展 ⇒ 改用挂起」从建议变成判据）。账本视图照常返回，I1 仍由
+		// 收尾门兜底——wait_agent 自身不挂起 turn。
+		if consecutive, exhausted := c.waitBudget().Exhausted(budgetKey, waitBudgetLimit); exhausted {
+			result := toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{}, time.Now())
+			result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
+			return toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit), nil
+		}
 	}
 	var result *toolbroker.AgentWaitResult
 	var err error
@@ -2100,44 +2112,69 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 	if err != nil || result == nil {
 		return result, err
 	}
-	return toolbroker.ApplyAgentWaitLedger(result, obligations, baseline), nil
+	result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
+	if len(obligations) > 0 {
+		switch {
+		case !pending:
+			c.waitBudget().Reset(budgetKey)
+		case result.Interrupted:
+			// steer/ESC 提前结束的等待段不是"花掉的窗口"，不计入预算。
+		default:
+			consecutive, exhausted := c.waitBudget().Observe(budgetKey, len(result.TerminalDelta) > 0, waitBudgetLimit)
+			if exhausted {
+				result = toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit)
+			}
+		}
+	}
+	return result, nil
+}
+
+// waitBudget returns the Handler-owned active-wait budget. A nil handler keeps
+// the budget disarmed (fail-open), matching the ledger's fail-open direction.
+func (c *sessionAgentController) waitBudget() *agentcontrol.WaitBudget {
+	if c == nil || c.handler == nil {
+		return nil
+	}
+	return &c.handler.waitBudget
 }
 
 // waitLedger 读回调用方（父会话）本 turn 的 obligation 账本视图（plan §C3-4）：
 // 模型可见的行、等待段开始时的终态基线（terminal_delta 只报等待期间完成的
 // obligation）、以及账本是否仍有非终态行。数据面与 CLI 宿主同源——运行态库里的
 // SuspendedTurnID 加批次库里的挂起记录，不新增存储。
-func (c *sessionAgentController) waitLedger(ctx context.Context) ([]toolbroker.AgentWaitObligation, []string, bool) {
+// 第四个返回值是等待预算键（会话 + 挂起 turn id）；账本读不到时为空串，
+// 预算随即保持未武装（fail-open，不引入新的阻塞面）。
+func (c *sessionAgentController) waitLedger(ctx context.Context) ([]toolbroker.AgentWaitObligation, []string, bool, string) {
 	if c == nil || c.handler == nil {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	sessionID := strings.TrimSpace(toolctx.SessionID(ctx))
 	if sessionID == "" {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	store := c.handler.getSessionRuntimeStore()
 	if store == nil {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	state, err := store.LoadState(ctx, sessionID)
 	if err != nil || state == nil {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	turnID := strings.TrimSpace(state.SuspendedTurnID)
 	if turnID == "" {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	batches := c.handler.peekSubagentBatchStore()
 	if batches == nil {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	record, ok, err := batches.GetTurnSuspension(ctx, sessionID, turnID)
 	if err != nil || !ok || record == nil {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	rows, err := subagentbatch.BuildWaitLedger(ctx, batches, record)
 	if err != nil || len(rows) == 0 {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	obligations := make([]toolbroker.AgentWaitObligation, 0, len(rows))
 	baseline := make([]string, 0, len(rows))
@@ -2160,7 +2197,7 @@ func (c *sessionAgentController) waitLedger(ctx context.Context) ([]toolbroker.A
 			pending = true
 		}
 	}
-	return obligations, baseline, pending
+	return obligations, baseline, pending, sessionID + "|" + turnID
 }
 
 func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
@@ -2181,7 +2218,9 @@ func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args to
 		return nil, err
 	}
 	timeout := time.Duration(resolution.EffectiveMs) * time.Millisecond
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	// 与 CLI 宿主同修（2026-09-26 真机）：窗口锚点必须与 waited_ms 的起点
+	// 一致，否则解析/订阅耗时会变成请求窗口之外的"超调"（90000 → 92617）。
+	waitCtx, cancel := context.WithDeadline(ctx, startedAt.Add(timeout))
 	defer cancel()
 	wakeCh, unsubscribe := c.subscribeWaitEvents(waitCtx, sessionIDs)
 	defer unsubscribe()
@@ -2279,7 +2318,8 @@ func (c *sessionAgentController) waitForMailboxEventResolved(ctx context.Context
 		}
 		timeout = time.Duration(defaultWaitMs) * time.Millisecond
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	// 与主等待段同锚点（见 waitForAgentStatus）：waited_ms 与窗口同一把尺。
+	waitCtx, cancel := context.WithDeadline(ctx, startedAt.Add(timeout))
 	defer cancel()
 	wakeCh, unsubscribe := c.subscribeMailboxEvents(waitCtx, store, sessionID)
 	defer unsubscribe()
@@ -2881,6 +2921,16 @@ func (c *sessionAgentController) resolveTargetSessionID(ctx context.Context, tar
 			return sessionID, nil
 		}
 	}
+	// G4 / H7（解析侧）：批任务 id 不是会话 id，但它是父代理在运行期唯一握有的
+	// 身份（派发回执只给 task id）。生产侧已在派发时把 child_session_id 早绑定写进
+	// task 行，这里把 task id 映射回子会话，让 wait_agent(task_id) /
+	// read_agent_events(task_id) 在运行期可用，而不是报 missing / 0 events。
+	if childSessionID, ok, err := c.resolveTaskChildSessionID(ctx, target); err != nil || ok {
+		if err != nil {
+			return "", err
+		}
+		return childSessionID, nil
+	}
 	if !strings.HasPrefix(target, "/") {
 		return target, nil
 	}
@@ -2939,6 +2989,100 @@ func (c *sessionAgentController) resolveAgentRecord(ctx context.Context, target 
 	return records[0].Normalize(), true, nil
 }
 
+// resolveTaskChildSessionID 把 durable 批任务 id 解析成子会话 id（G4 / H7）。
+// 作用域只限调用方自己的父会话（模型不能借 task id 跨会话取身份）；任务已派发但
+// 尚未绑定子会话时返回**可执行错误**，而不是让上游把它当"未知会话"报 missing——
+// 后者会把"身份未就绪"与"这个 id 根本不存在"混为一谈。
+func (c *sessionAgentController) resolveTaskChildSessionID(ctx context.Context, taskID string) (string, bool, error) {
+	if c == nil || c.handler == nil {
+		return "", false, nil
+	}
+	store := c.handler.peekSubagentBatchStore()
+	if store == nil {
+		return "", false, nil
+	}
+	parentSessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+	if parentSessionID == "" {
+		return "", false, nil
+	}
+	task, batchID, ok, err := subagentbatch.FindTaskByIDInParentSession(ctx, store, parentSessionID, taskID)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	childSessionID := strings.TrimSpace(task.ChildSessionID)
+	if childSessionID == "" {
+		return "", false, fmt.Errorf(
+			"batch task %s is %s but has no child session bound yet (batch %s); retry shortly or pass the child session id",
+			taskID, task.Status, batchID,
+		)
+	}
+	return childSessionID, true, nil
+}
+
+// batchTaskSnapshot 把「子代理会话 id」投影成可等待 / 可读的状态行
+// （2026-09-26 真机 E2E）：生产里子代理运行**不落 SessionStore**——身份
+// （child_session_id 早绑定）与结果只写在批任务行上，因此 wait_agent(task_id)
+// 解析出的子会话 id 在会话库里永远是 missing。回退到账本行才是权威。
+func (c *sessionAgentController) batchTaskSnapshot(ctx context.Context, childSessionID string) (*toolbroker.AgentStatusResult, bool, error) {
+	if c == nil || c.handler == nil {
+		return nil, false, nil
+	}
+	store := c.handler.peekSubagentBatchStore()
+	if store == nil {
+		return nil, false, nil
+	}
+	parentSessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+	if parentSessionID == "" {
+		return nil, false, nil
+	}
+	task, batchID, ok, err := subagentbatch.FindTaskByChildSessionIDInParentSession(ctx, store, parentSessionID, childSessionID)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	return apiBatchTaskStatusResult(childSessionID, batchID, task), true, nil
+}
+
+// apiBatchTaskStatusResult 把账本行映射成 AgentStatusResult：终态任务映射到
+// idle/stopped（wait 的就绪集合据此判定），非终态映射 running（继续等待）。
+// 结果摘要走 Output，失败原因走 Error——与真实子会话快照的读取口径一致。
+func apiBatchTaskStatusResult(childSessionID, batchID string, task subagentbatch.SubagentTaskRecord) *toolbroker.AgentStatusResult {
+	status := string(chat.SessionRunning)
+	switch task.Status {
+	case subagentbatch.TaskSucceeded:
+		status = string(chat.SessionIdle)
+	case subagentbatch.TaskFailed, subagentbatch.TaskFailedWithResult, subagentbatch.TaskCanceled,
+		subagentbatch.TaskTimedOut, subagentbatch.TaskSkipped:
+		status = string(chat.SessionStopped)
+	}
+	result := &toolbroker.AgentStatusResult{
+		ID:                childSessionID,
+		SessionID:         childSessionID,
+		Status:            status,
+		Exists:            true,
+		AgentType:         "subagent",
+		TaskType:          strings.TrimSpace(task.TaskType),
+		TaskSubject:       strings.TrimSpace(task.TaskSubject),
+		CurrentTaskID:     strings.TrimSpace(task.TaskID),
+		CurrentTaskStatus: string(task.Status),
+		Attempt:           task.Attempt,
+		ReadOnly:          task.ReadOnly,
+	}
+	if summary := strings.TrimSpace(string(task.ResultSummary)); summary != "" {
+		result.Output = summary
+	}
+	parts := make([]string, 0, 2)
+	if class := strings.TrimSpace(task.ErrorClass); class != "" {
+		parts = append(parts, class)
+	}
+	if code := strings.TrimSpace(task.ErrorCode); code != "" {
+		parts = append(parts, code)
+	}
+	if len(parts) > 0 {
+		result.Error = strings.Join(parts, ": ")
+	}
+	return result
+}
+
 func (c *sessionAgentController) Resume(ctx context.Context, sessionID string) (*toolbroker.AgentStatusResult, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -2967,6 +3111,12 @@ func (c *sessionAgentController) snapshot(ctx context.Context, sessionID string)
 	session, err := c.handler.sessionManager.Get(ctx, sessionID)
 	if err != nil {
 		if stderrors.Is(err, chat.ErrSessionNotFound) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+			// 子代理会话不落 SessionStore：先回退到批任务账本行（真机 E2E 缺口）。
+			if taskResult, ok, taskErr := c.batchTaskSnapshot(ctx, sessionID); taskErr != nil {
+				return nil, taskErr
+			} else if ok {
+				return taskResult, nil
+			}
 			return result, nil
 		}
 		return nil, err

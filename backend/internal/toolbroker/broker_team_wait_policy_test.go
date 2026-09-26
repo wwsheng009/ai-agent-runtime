@@ -143,7 +143,7 @@ func TestBrokerExecuteWaitTeamErrorModeRejectsOutOfRangeWindow(t *testing.T) {
 
 	_, _, err = executeWaitTeamPolicyCall(t, broker, teamID, map[string]interface{}{"timeout_ms": 7200000})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "agents.maxWaitTimeoutMs=3600000")
+	assert.Contains(t, err.Error(), "agents.maxWaitTimeoutMs=120000")
 	assert.Contains(t, err.Error(), "agents.waitTimeoutMode=clamp")
 
 	// A zero request is never out of range: error mode only rejects explicit

@@ -291,6 +291,10 @@ func TestSpawnSubagentsLargeResultStaysOutOfParentContext(t *testing.T) {
 	require.LessOrEqual(t, len(toolMessage.Content), 12*1024)
 	require.Contains(t, toolMessage.Content, `"batch_id"`)
 	require.Contains(t, toolMessage.Content, "continue_parent_turn")
+	// G4/H7 真机 E2E 补：回执必须携带可寻址的任务身份（task_id），父代理据此
+	// 才能在运行期 wait_agent(task_id) / read_agent_events(task_id) 直达子会话。
+	require.Contains(t, toolMessage.Content, `"tasks"`)
+	require.Contains(t, toolMessage.Content, `"large-child"`)
 	require.NotContains(t, toolMessage.Content, "CHILD_OUTPUT_END")
 	require.NotContains(t, toolMessage.Content, "evidence line with detailed context")
 	require.NotContains(t, toolMessage.Metadata, "subagent_reports")

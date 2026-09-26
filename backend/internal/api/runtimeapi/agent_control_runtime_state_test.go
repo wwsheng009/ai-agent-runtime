@@ -63,8 +63,32 @@ func TestListAgentControlAgentsReportsRunningRuntimeStateFromDurableStore(t *tes
 	payload := requestAgentControlAgents(t, handler, root.ID, "/root/busy-child")
 	require.Len(t, payload.Agents, 1)
 	require.Equal(t, "active", payload.Agents[0].Status)
-	// 等待审批仍算「容器在跑」，不能因为会话行不是 running 就当作已结束。
-	require.Equal(t, AgentRuntimeStateRunning, payload.Agents[0].RuntimeState)
+	// G5：等待审批不再与 running 折叠——父平面必须能看出「谁在等审批」，
+	// 否则审批入口只存在于已打开的下钻里。
+	require.Equal(t, AgentRuntimeStateWaitingApproval, payload.Agents[0].RuntimeState)
+}
+
+// TestListAgentControlAgentsReportsWaitingInputRuntimeState 钉住另一档阻塞态：
+// waiting_input 同样必须与 running 区分（子代理在提问，等的是父代理/用户）。
+func TestListAgentControlAgentsReportsWaitingInputRuntimeState(t *testing.T) {
+	ctx := context.Background()
+	handler, sessionManager := newAgentRuntimeStateHandler(t)
+	runtimeStore := chat.NewInMemoryRuntimeStore(64)
+	handler.sessionRuntimeStore = runtimeStore
+	handler.sessionRuntimeStoreKey = "test-runtime.sqlite|"
+
+	root, err := sessionManager.Create(ctx, "user-runtime-state")
+	require.NoError(t, err)
+	child := newRuntimeStateTestChild(t, sessionManager, root.ID, "asking-child", "/root/asking-child")
+	require.NoError(t, runtimeStore.SaveState(ctx, &chat.RuntimeState{
+		SessionID: child.ID,
+		Status:    chat.SessionWaitingInput,
+		UpdatedAt: time.Now().UTC(),
+	}))
+
+	payload := requestAgentControlAgents(t, handler, root.ID, "/root/asking-child")
+	require.Len(t, payload.Agents, 1)
+	require.Equal(t, AgentRuntimeStateWaitingInput, payload.Agents[0].RuntimeState)
 }
 
 func TestListAgentControlAgentsOmitsRuntimeStateWithoutDurableStore(t *testing.T) {

@@ -161,8 +161,14 @@ type Handler struct {
 	//（P1-4/H12）：与 CLI 宿主同口径——agents.maxThreads > 0 时本进程构建的
 	// 全部 scheduler 共用同一 limiter；≤0（含 -1 显式不限）时为 nil，只保留
 	// 每批 agents.maxConcurrent。首次构建后不再重建（见 subagentGlobalLimiter）。
-	subagentLimiterMu           sync.Mutex
-	subagentLimiter             *agent.SubagentConcurrencyLimiter
+	subagentLimiterMu sync.Mutex
+	subagentLimiter   *agent.SubagentConcurrencyLimiter
+	// waitBudget bounds consecutive no-progress active wait segments per parent
+	// turn (design §16.2/§16.3): once spent, the host refuses to open a new
+	// wait_agent window and returns next_action=suspend. It lives on the
+	// long-lived Handler because sessionAgentController instances are built per
+	// broker/request, while the budget must survive them.
+	waitBudget                  agentcontrol.WaitBudget
 	aicliConfigMu               sync.RWMutex
 	aicliConfig                 *agentconfig.Config
 	siteAccountService          SiteAccountService
@@ -204,6 +210,10 @@ type Handler struct {
 	// 门，宿主与测试也据此覆盖投递实现（与 CLI 的 host.supervisionWake 同形）。
 	supervisionWakeMu sync.Mutex
 	supervisionWake   *supervision.WakeConsumer
+	// supervisionWakeSubmit 是 wake/resume 提示词真正落到父会话上的提交口（默认
+	// 异步提交给父 actor）。测试可覆盖它观察"实际投递的 prompt"——这是有意的
+	// 测试缝（与 supervisionWake 同形）；生产路径保持 nil。
+	supervisionWakeSubmit func(ctx context.Context, parentSessionID, prompt string) error
 
 	executionSupervisorMu   sync.RWMutex
 	executionSupervisor     *supervision.ExecutionSupervisor

@@ -524,8 +524,14 @@ func localSubagentBatchLifecycleProjectorWithWakeDrain(host *localChatRuntimeHos
 		reason := fmt.Sprintf("subagent batch %s finished with status %s (%d/%d completed)", terminal.BatchID, terminal.Status, terminal.CompletedCount, terminal.TaskCount)
 		switch terminal.Status {
 		case subagentbatch.BatchFailed:
+			// 2026-09-26 真机回归：批次已终态（reason 就是 "finished with status
+			// failed"），supervision_state 落 terminated；blocked 的语义是"等外部
+			// 裁决/审批"，会让 digest 与矩阵把它读成"待决策卡住"，与 Reason 自相
+			// 矛盾（见 §7.9 的 subagent_status 复现）。severity/resolution 保持
+			// critical + unresolved：父代理仍必须看到失败并汇报，只是不再谎称
+			// "有可裁决的行"。
 			severity = supervision.SeverityCritical
-			supervisionState = supervision.SupervisionBlocked
+			supervisionState = supervision.SupervisionTerminated
 			resolution = supervision.ResolutionUnresolved
 			recommended = string(supervision.ActionInspect)
 		case subagentbatch.BatchTimedOut:
@@ -849,41 +855,20 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 			return state.Summary().AcceptsResume()
 		},
 		Deliver: func(ctx context.Context, parentSessionID, rootScopeID string, digest *supervision.Digest, wakeIDs []string) error {
-			if h == nil || h.ActorRegistry == nil {
-				return fmt.Errorf("actor registry is not ready")
-			}
-			// Deliver asynchronously: the caller is a projection / event
-			// handler and must not block on a full parent turn. The wake
-			// prompt only references the lifecycle digest; the digest itself
-			// is injected by the turn preflight (doc 6.5 rule 5).
-			go func() {
-				// The wake turn must never wedge the parent UI into a
-				// non-interruptible state: bind its ctx to the host lifecycle
-				// so close/exit cancels it immediately instead of waiting out
-				// the 30m cap, and mark it as an internal bypass run so tool
-				// approvals / user questions cannot park the actor in
-				// SessionWaitingApproval / SessionWaitingInput with no UI
-				// responder attached to this background turn.
-				baseCtx := context.Background()
-				if h.lifecycleCtx != nil {
-					baseCtx = h.lifecycleCtx
-				}
-				runCtx, cancel := context.WithTimeout(baseCtx, 30*time.Minute)
-				defer cancel()
-				releaseTurn, err := h.acquireActorTurnGate(runCtx, parentSessionID)
-				if err != nil {
-					// Plan §6-F: the claimed wake rows are resolved as soon as
-					// this callback returns, so a failure that is only logged
-					// would silently consume the parent's only auto-wake.
-					h.requeueSupervisionWake(parentSessionID, rootScopeID, wakeIDs, err)
-					return
-				}
-				defer releaseTurn()
-				if err := h.submitParentWakeTurn(runCtx, parentSessionID); err != nil {
-					h.requeueSupervisionWake(parentSessionID, rootScopeID, wakeIDs, err)
-				}
-			}()
-			return nil
+			return h.deliverSupervisionWake(ctx, parentSessionID, rootScopeID, wakeIDs, supervision.AutoWakePrompt)
+		},
+		// C2-1（改动 #4）/ G2：wake 升级为 resume——投递的 prompt 携带同一 turn 的
+		// resume 上下文（turn_id + rollup + I1 终局判据 + 可用动作清单，见
+		// ResumePrompt），父会话不必回溯历史。resume 为 nil（账本/进度投影未接线）
+		// 时 AutoWakePromptFor 逐字节回落 AutoWakePrompt，接线不改变旧行为。
+		DeliverResume: func(ctx context.Context, parentSessionID, rootScopeID string, digest *supervision.Digest, wakeIDs []string, resume *supervision.ResumeContext) error {
+			return h.deliverSupervisionWake(ctx, parentSessionID, rootScopeID, wakeIDs, supervision.AutoWakePromptFor(resume))
+		},
+		// G3：挂起 → 恢复的对外闭环。投递成功后把 §6.8 的 turn.resumed 发到宿主
+		// 事件总线（A+D 契约：落盘 + 回合末尾巴帧），UI/审计据此结束"托管中"表达；
+		// 投递失败不发（wake 仍在 durable 队列里，播报会与事实相反）。
+		Announce: func(_ context.Context, announcement supervision.ResumeAnnouncement) {
+			h.publishLocalTurnResumed(announcement)
 		},
 	}
 	h.bindSupervisionWakeConsumer()
@@ -910,6 +895,49 @@ func (h *localChatRuntimeHost) wireLocalSupervisionWakeConsumer() {
 	}
 }
 
+// deliverSupervisionWake 是本地宿主的 wake/resume 投递通道：异步起一轮父 turn
+// （调用方是投影/事件回调，不得阻塞在一整轮父 turn 上），prompt 由调用方按是否
+// 携带 resume 上下文选择（AutoWakePrompt / ResumePrompt）。失败路径必须把已认领
+// 的 wake 行重新排队（plan §6-F：只记日志会静默吃掉父会话唯一一次自动唤醒）。
+func (h *localChatRuntimeHost) deliverSupervisionWake(ctx context.Context, parentSessionID, rootScopeID string, wakeIDs []string, prompt string) error {
+	if h == nil || h.ActorRegistry == nil {
+		return fmt.Errorf("actor registry is not ready")
+	}
+	if strings.TrimSpace(prompt) == "" {
+		prompt = supervision.AutoWakePrompt
+	}
+	// Deliver asynchronously: the caller is a projection / event handler and
+	// must not block on a full parent turn.
+	go func() {
+		// The wake turn must never wedge the parent UI into a
+		// non-interruptible state: bind its ctx to the host lifecycle so
+		// close/exit cancels it immediately instead of waiting out the 30m
+		// cap, and mark it as an internal bypass run so tool approvals / user
+		// questions cannot park the actor in SessionWaitingApproval /
+		// SessionWaitingInput with no UI responder attached to this
+		// background turn.
+		baseCtx := context.Background()
+		if h.lifecycleCtx != nil {
+			baseCtx = h.lifecycleCtx
+		}
+		runCtx, cancel := context.WithTimeout(baseCtx, 30*time.Minute)
+		defer cancel()
+		releaseTurn, err := h.acquireActorTurnGate(runCtx, parentSessionID)
+		if err != nil {
+			// Plan §6-F: the claimed wake rows are resolved as soon as this
+			// callback returns, so a failure that is only logged would
+			// silently consume the parent's only auto-wake.
+			h.requeueSupervisionWake(parentSessionID, rootScopeID, wakeIDs, err)
+			return
+		}
+		defer releaseTurn()
+		if err := h.submitParentWakeTurn(runCtx, parentSessionID, prompt); err != nil {
+			h.requeueSupervisionWake(parentSessionID, rootScopeID, wakeIDs, err)
+		}
+	}()
+	return nil
+}
+
 // chatHostSessionInteractive reports whether the local host base session is
 // attached to an interactive foreground prompt (the resume/chat TTY path).
 // Headless and JSON runs keep the original startup wake-drain semantics.
@@ -924,12 +952,15 @@ func chatHostSessionInteractive(session *ChatSession) bool {
 // fence (chatRuntimeEventBridge.isRunEpochCurrent) as targeting a closed
 // run epoch — observed as a fully blank parent UI for the entire wake turn
 // while the log fills with "render suppressed reason=... closed run epoch".
-func (h *localChatRuntimeHost) beginWakeTurnRun() func() {
+func (h *localChatRuntimeHost) beginWakeTurnRun(prompt string) func() {
 	if h == nil {
 		return func() {}
 	}
 	if bridge := ensureChatRuntimeEventBridge(h.BaseSession); bridge != nil {
-		bridge.PrepareRunPrompt(supervision.AutoWakePrompt)
+		if strings.TrimSpace(prompt) == "" {
+			prompt = supervision.AutoWakePrompt
+		}
+		bridge.PrepareRunPrompt(prompt)
 		// 内部轮次：直接经 ActorRegistry 提交，不经过 sendMessage 的
 		// StartWaiting/CompleteWaiting 协议。必须按 internal 归属启动，
 		// 否则会继承前台 turn 冻结的 "Worked for" 完成摘要，状态行在整个
@@ -947,13 +978,16 @@ func (h *localChatRuntimeHost) beginWakeTurnRun() func() {
 
 // submitParentWakeTurn delivers one supervision wake turn on the parent
 // actor, wrapped in the UI run-epoch protocol (BeginRun/EndRun).
-func (h *localChatRuntimeHost) submitParentWakeTurn(ctx context.Context, parentSessionID string) error {
+func (h *localChatRuntimeHost) submitParentWakeTurn(ctx context.Context, parentSessionID, prompt string) error {
 	if h == nil || h.ActorRegistry == nil {
 		return fmt.Errorf("actor registry is not ready")
 	}
-	endRun := h.beginWakeTurnRun()
+	if strings.TrimSpace(prompt) == "" {
+		prompt = supervision.AutoWakePrompt
+	}
+	endRun := h.beginWakeTurnRun(prompt)
 	defer endRun()
-	_, err := h.ActorRegistry.SubmitPrompt(ctx, parentSessionID, supervision.AutoWakePrompt, &team.RunMeta{PermissionMode: "bypass_permissions"})
+	_, err := h.ActorRegistry.SubmitPrompt(ctx, parentSessionID, prompt, &team.RunMeta{PermissionMode: "bypass_permissions"})
 	return err
 }
 
@@ -1291,6 +1325,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	}
 	host.ActorRegistry = newLocalActorRegistry(host)
 	host.wireLocalSupervisionExecutor()
+	// G2：控制面就绪后立刻把 batch 账本/进度投影接到 wake scheduler，保证第一次
+	// resume 投递就带上 pending_count 与 rollup（不依赖 opt-in 的周期巡查）。
+	host.wireLocalSupervisionSources()
 	// P2-9：宿主启动时即开启低频一致性对账（默认 observe，10 分钟），
 	// 让上一次进程崩溃/TTL 清理留下的 active 漂移在首个 pass 就被发现。
 	host.startLocalRegistryReconcile()

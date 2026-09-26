@@ -59,6 +59,38 @@ func AgentWaitSteerInterruptNextAction() string {
 	return "steer_pending: the wait segment ended early because the caller was interrupted or received new input (steer/ESC); handle the pending input now instead of re-waiting — the observed children keep running"
 }
 
+// AgentWaitSuspendNextAction is the design §16.3 `next_action=suspend` verdict:
+// the turn spent its active-wait budget without any obligation making progress,
+// so the host stops granting new observation windows. It tells the model how to
+// leave the active-wait loop without inventing a way around I1: do independent
+// parent work, inspect the children once through the read-only primitives, or
+// finish the turn — a premature finalize is converted into a turn suspension
+// (awaiting_obligations) and a resume episode fires when an obligation reaches
+// a terminal state.
+func AgentWaitSuspendNextAction(consecutive, limit int) string {
+	return fmt.Sprintf(
+		"suspend: %d consecutive active waits observed no obligation progress (agents.maxConsecutiveWaitWithoutProgress=%d). Stop opening active waiting windows on this turn: do independent parent work without waiting, inspect the children once (subagent_status / read_agent_events with view=tool_progress / subagent_inspect_task), or finish your turn — I1 converts a premature finalize into a turn suspension (awaiting_obligations) and the same turn resumes on a terminal/decision event. Do not call wait_agent again with the same ids",
+		consecutive, limit,
+	)
+}
+
+// SuspendAgentWaitResultForBudget stamps the exhausted-wait-budget verdict onto
+// an already-built wait result. The ledger view (obligations / terminal_delta /
+// counts) is preserved, and a "finalize" verdict is never overridden: when the
+// ledger is drained there is nothing to suspend for.
+func SuspendAgentWaitResultForBudget(result *AgentWaitResult, consecutive, limit int) *AgentWaitResult {
+	if result == nil {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(result.NextAction), "finalize") {
+		return result
+	}
+	result.WaitBudgetExhausted = true
+	result.ExecutionContinues = true
+	result.NextAction = AgentWaitSuspendNextAction(consecutive, limit)
+	return result
+}
+
 // UserQuestionRequest captures a prompt that needs user input.
 type UserQuestionRequest struct {
 	ID          string     `json:"id"`
@@ -691,6 +723,12 @@ type AgentWaitResult struct {
 	Obligations   []AgentWaitObligation `json:"obligations,omitempty"`
 	TerminalCount int                   `json:"terminal_count,omitempty"`
 	TerminalDelta []string              `json:"terminal_delta,omitempty"`
+	// WaitBudgetExhausted reports that the active-wait budget for this turn was
+	// spent (agents.maxConsecutiveWaitWithoutProgress consecutive waits without
+	// any terminal_delta) and the host refused to open another observation
+	// window. next_action carries the suspend verdict; the ledger rows still
+	// gate the turn (I1), so this is not a failure and not an end-of-turn.
+	WaitBudgetExhausted bool `json:"wait_budget_exhausted,omitempty"`
 }
 
 // AgentWaitObligation is one row of the wait-time obligation ledger view
@@ -947,6 +985,12 @@ func FinalizeAgentWaitResult(result *AgentWaitResult, startedAt time.Time) *Agen
 		result.NextAction = "consume_mailbox_events"
 	} else if agentWaitHasPendingApproval(result) {
 		result.NextAction = agentWaitPendingApprovalNextAction(result)
+	} else if agentWaitMatchedTargetMissing(result) {
+		// 2026-09-26 真机 E2E：把派发回执的 batch_id 直接喂给 wait_agent 时，旧行为
+		// 把不存在的目标计成 ready 并回 "consume_ready_outputs"——既没有可消费输出，
+		// 也没有可寻址目标。这里给出诚实且可执行的指引：回执的 tasks[] 里取 task_id
+		// 再等（G4 解析侧已支持 task_id → child session）。
+		result.NextAction = "target_not_found: the requested id does not exist as an agent session. If it is a dispatch batch id, take a task_id from the receipt tasks[] and wait on that (or read the child session directly); do not re-wait on the same id"
 	} else if result.TimedOut && result.PendingCount > 0 {
 		result.ExecutionContinues = true
 		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; pending child execution continues. Do not immediately re-call wait_agent with the same ids/timeout while independent parent work remains; consume any ready outputs first, then wait only for still-pending children"
@@ -973,6 +1017,17 @@ func agentWaitHasPendingApproval(result *AgentWaitResult) bool {
 		}
 	}
 	return false
+}
+
+// agentWaitMatchedTargetMissing reports a matched subject that does not exist as an
+// agent session (session store returned "missing"). Such a target must never be
+// advertised as "ready output" — 2026-09-26 真机 E2E：把派发回执的 batch_id 直接
+// 喂给 wait_agent 时，目标不存在却被计成 ready。
+func agentWaitMatchedTargetMissing(result *AgentWaitResult) bool {
+	if result == nil || result.Agent == nil || result.Agent.Exists {
+		return false
+	}
+	return strings.TrimSpace(result.Agent.Status) == "missing"
 }
 
 // agentWaitPendingApprovalNextAction steers parents toward resolve_agent_approval

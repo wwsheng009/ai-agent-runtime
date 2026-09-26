@@ -82,6 +82,9 @@ func (h *Handler) SetSupervisionWakeScheduler(scheduler *supervision.WakeSchedul
 	h.supervisionWakes = scheduler
 	h.supervisionStoreMu.Unlock()
 	if scheduler != nil {
+		// G2：scheduler 可能晚于 batch store 到达（runtime-server 是先 store 后
+		// scheduler），这里补一次接线，保证 resume 上下文有账本/进度投影。
+		h.wireSupervisionSources()
 		h.bindSupervisionTurnEndConsumer()
 	}
 }

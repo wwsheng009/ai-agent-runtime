@@ -497,7 +497,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":          map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"id":          map[string]interface{}{"type": "string", "description": "Child agent session id, agent path such as /root/worker, or a batch task id from a dispatch receipt (a task id resolves to its child session inside your own session scope while the task is running)."},
 						"session_id":  map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Child ids or paths. Returns when any becomes ready and reports all current ready/pending ids."},
 						"session_ids": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Alias for ids."},
@@ -512,7 +512,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker. Omit to read parent mailbox/collab events."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id, agent path such as /root/worker, or a batch task id from a dispatch receipt (a task id resolves to its child session inside your own session scope while the task is running). Omit to read parent mailbox/collab events."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
 						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
@@ -684,7 +684,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":          map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"id":          map[string]interface{}{"type": "string", "description": "Child agent session id, agent path such as /root/worker, or a batch task id from a dispatch receipt (a task id resolves to its child session inside your own session scope while the task is running)."},
 						"session_id":  map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"ids":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Child ids or paths. Returns when any becomes ready and reports all current ready/pending ids."},
 						"session_ids": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Alias for ids."},
@@ -698,7 +698,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker. Omit to read parent mailbox/collab events."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id, agent path such as /root/worker, or a batch task id from a dispatch receipt (a task id resolves to its child session inside your own session scope while the task is running). Omit to read parent mailbox/collab events."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
 						"after_seq":  map[string]interface{}{"type": "integer", "description": "Only return events after this sequence number."},
 						"limit":      map[string]interface{}{"type": "integer", "description": "Maximum number of events to return."},
@@ -2163,6 +2163,8 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"waited_ms":     valueOrZeroWaitedMs(result),
 			"next_action":   valueOrEmptyWaitNextAction(result),
 			"latest_seq":    valueOrZeroWaitSeq(result),
+			// 等待预算耗尽 ⇒ 宿主不再开窗，next_action=suspend（§16.2/§16.3）。
+			"wait_budget_exhausted": result != nil && result.WaitBudgetExhausted,
 		}, agentWaitCacheSafeSummary(aliasedResult)), nil
 
 	case ToolReadAgentEvents:

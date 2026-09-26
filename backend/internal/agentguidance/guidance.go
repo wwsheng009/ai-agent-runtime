@@ -19,8 +19,12 @@ import (
 
 const (
 	// WaitBudgetRule is the wait discipline shared by the parent guidance and
-	// the wait_agent tool description.
-	WaitBudgetRule = "When you must wait, wait for all children you still need in one call and prefer the longest timeout you can afford; if the wait times out, follow next_action, use any ready outputs, and only wait again after the remaining independent work is done."
+	// the wait_agent tool description. It states both the bounded-window rule
+	// and the runtime's wait budget (§16.2/§16.3): after
+	// agents.maxConsecutiveWaitWithoutProgress consecutive waits without
+	// obligation progress the host stops granting active windows and returns
+	// next_action=suspend.
+	WaitBudgetRule = "When you must wait, wait for all children you still need in one call and use a bounded window; if the wait times out, follow next_action, use any ready outputs, and only wait again after the remaining independent work is done. The host counts consecutive waits without obligation progress (no terminal_delta): once agents.maxConsecutiveWaitWithoutProgress is spent it refuses to open another window and returns next_action=suspend — then do independent work, inspect the children once, or end your turn instead of re-waiting."
 
 	// WaitEscalationRule states that timing-only changes are not progress. The
 	// polling guard ignores timing-only arguments when it counts repeated

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
@@ -86,8 +87,10 @@ func TestSessionAgentControllerWaitLedgerKeepsPendingRows(t *testing.T) {
 	controller, batchID := newAPIWaitLedgerFixture(t, subagentbatch.BatchRunning, "turn-parked")
 	ctx := toolctx.WithSessionID(context.Background(), apiWaitLedgerTestSession)
 
-	obligations, baseline, pending := controller.waitLedger(ctx)
+	obligations, baseline, pending, key := controller.waitLedger(ctx)
 	require.True(t, pending)
+	require.Equal(t, apiWaitLedgerTestSession+"|turn-parked", key,
+		"the wait budget key is session + parked turn id")
 	require.Empty(t, baseline, "a running obligation is not part of the terminal baseline")
 	require.Len(t, obligations, 1)
 	require.Equal(t, batchID, obligations[0].ObligationID)
@@ -106,10 +109,11 @@ func TestSessionAgentControllerWaitLedgerFailsOpen(t *testing.T) {
 	controller, _ := newAPIWaitLedgerFixture(t, subagentbatch.BatchCompleted, "turn-parked")
 
 	// 1) 未注入调用方会话（toolctx 缺失）⇒ 空账本。
-	obligations, baseline, pending := controller.waitLedger(context.Background())
+	obligations, baseline, pending, key := controller.waitLedger(context.Background())
 	require.Empty(t, obligations)
 	require.Empty(t, baseline)
 	require.False(t, pending)
+	require.Empty(t, key, "an unreadable ledger must leave the wait budget disarmed")
 
 	ctx := toolctx.WithSessionID(context.Background(), apiWaitLedgerTestSession)
 
@@ -118,10 +122,11 @@ func TestSessionAgentControllerWaitLedgerFailsOpen(t *testing.T) {
 		SessionID: apiWaitLedgerTestSession,
 		Status:    chat.SessionIdle,
 	}))
-	obligations, baseline, pending = controller.waitLedger(ctx)
+	obligations, baseline, pending, key = controller.waitLedger(ctx)
 	require.Empty(t, obligations)
 	require.Empty(t, baseline)
 	require.False(t, pending)
+	require.Empty(t, key)
 
 	// 3) 宿主没有可读的 batch 控制面 ⇒ 空账本（只读探测不得触发懒加载建库）。
 	controller.handler.SetSubagentBatchStore(nil)
@@ -131,10 +136,11 @@ func TestSessionAgentControllerWaitLedgerFailsOpen(t *testing.T) {
 		SuspendedTurnID: "turn-parked",
 	}))
 	require.Nil(t, controller.handler.peekSubagentBatchStore())
-	obligations, baseline, pending = controller.waitLedger(ctx)
+	obligations, baseline, pending, key = controller.waitLedger(ctx)
 	require.Empty(t, obligations)
 	require.Empty(t, baseline)
 	require.False(t, pending)
+	require.Empty(t, key)
 }
 
 // TestPeekSubagentBatchStoreDoesNotLazyCreate 钉住只读探测与惰性访问器的分工：账本
@@ -144,4 +150,33 @@ func TestPeekSubagentBatchStoreDoesNotLazyCreate(t *testing.T) {
 	require.Nil(t, handler.peekSubagentBatchStore(), "the read path must not create a store")
 	require.NotNil(t, handler.getSubagentBatchStore())
 	require.NotNil(t, handler.peekSubagentBatchStore())
+}
+
+// TestSessionAgentControllerWaitBudgetStopsActiveWindows 钉住 API 宿主的同一判据：
+// 预算耗尽后 wait_agent 不再打开观测窗口，立即返回 next_action=suspend 且账本视图
+// 完整（供模型巡检/收尾决策）。
+func TestSessionAgentControllerWaitBudgetStopsActiveWindows(t *testing.T) {
+	controller, batchID := newAPIWaitLedgerFixture(t, subagentbatch.BatchRunning, "turn-parked")
+	ctx := toolctx.WithSessionID(context.Background(), apiWaitLedgerTestSession)
+
+	key := apiWaitLedgerTestSession + "|turn-parked"
+	limit := controller.agentsConfig().MaxConsecutiveWaitWithoutProgress
+	require.Equal(t, agentcontrol.DefaultMaxConsecutiveWaitWithoutProgress, limit,
+		"the fixture runs on the shared defaults")
+	controller.handler.waitBudget.Observe(key, false, limit)
+	if _, exhausted := controller.handler.waitBudget.Observe(key, false, limit); !exhausted {
+		t.Fatal("pre-spending the budget must exhaust it")
+	}
+
+	startedAt := time.Now()
+	result, err := controller.Wait(ctx, toolbroker.WaitAgentArgs{ID: "api-child", TimeoutMs: 30000})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.WaitBudgetExhausted)
+	require.False(t, result.TimedOut, "no observation window was opened, so nothing timed out")
+	require.Contains(t, result.NextAction, "suspend:")
+	require.Len(t, result.Obligations, 1)
+	require.Equal(t, batchID, result.Obligations[0].ObligationID)
+	require.Less(t, time.Since(startedAt), time.Second,
+		"an exhausted wait budget must return immediately instead of blocking")
 }

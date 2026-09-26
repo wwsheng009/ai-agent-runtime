@@ -812,10 +812,22 @@ func supervisionDescendantsSummary(snapshot *supervision.Snapshot) string {
 // supervisionDescendantsNextAction states the single next step for a matrix,
 // empty when the rows need no decision.
 func supervisionDescendantsNextAction(snapshot *supervision.Snapshot) string {
+	return supervisionDescendantsNextActionExcluding(snapshot, nil)
+}
+
+// supervisionDescendantsNextActionExcluding is the stale-aware variant: subject
+// keys in `stale` (digest verdict: absent from the control plane) must not drive
+// "go decide" instructions, because the model has no allowed action to take on
+// them (2026-09-26 真机：digest 说 0 action_required，矩阵行却让模型去裁决)。
+func supervisionDescendantsNextActionExcluding(snapshot *supervision.Snapshot, stale map[string]bool) string {
 	if snapshot == nil {
 		return ""
 	}
-	if snapshot.Summary.ActionRequired > 0 {
+	// 2026-09-26 真机：Summary.ActionRequired 会把"subject 已不在控制面"的
+	// 陈旧行（AllowedActions 为空、模型无从下手）也算进去，于是模型收到
+	// "decide the action_required rows"的指令却找不到可裁决的行（与 digest 的
+	// 0 action_required 自相矛盾）。只有真正带动作的行才值得让模型去裁决。
+	if supervisionDescendantsActionableRows(snapshot, stale) > 0 {
 		return "decide the action_required rows (notification_id + allowed_actions) with " + ToolControlDescendant + " or " + ToolAckLifecycle
 	}
 	if snapshot.Summary.TerminalUnacknowledged > 0 {
@@ -825,6 +837,43 @@ func supervisionDescendantsNextAction(snapshot *supervision.Snapshot) string {
 		return "children still running: continue independent work; re-read this matrix instead of polling wait_agent"
 	}
 	return ""
+}
+
+// supervisionDescendantsActionableRows counts rows the model can actually act on:
+// action-required rows that still expose allowed actions. Stale subjects (no live
+// row, no allowed actions) must not produce a "go decide something" instruction.
+func supervisionDescendantsActionableRows(snapshot *supervision.Snapshot, stale map[string]bool) int {
+	if snapshot == nil {
+		return 0
+	}
+	count := 0
+	for _, row := range snapshot.Descendants {
+		if row.ActionRequired && len(row.AllowedActions) > 0 && !stale[supervisionSubjectKey(row.Kind, row.ID)] {
+			count++
+		}
+	}
+	return count
+}
+
+// supervisionSubjectKey mirrors the snapshot/digest join key (kind|id).
+func supervisionSubjectKey(kind supervision.SubjectKind, id string) string {
+	return string(kind) + "|" + strings.TrimSpace(id)
+}
+
+// staleSubjectKeys maps a digest's stale rows to matrix row keys so the matrix
+// guidance can exclude exactly the subjects the digest already wrote off.
+func staleSubjectKeys(digest *supervision.Digest) map[string]bool {
+	if digest == nil {
+		return nil
+	}
+	keys := make(map[string]bool, len(digest.Items))
+	for _, item := range digest.Items {
+		if !item.Stale {
+			continue
+		}
+		keys[supervisionSubjectKey(item.SubjectKind, item.SubjectID)] = true
+	}
+	return keys
 }
 
 // readAgentResultSummary renders the one-line cache-safe summary of a
@@ -1167,6 +1216,17 @@ func (b *Broker) executeSupervisionTool(ctx context.Context, toolName, sessionID
 		payload := subagentStatusPayload(snapshot, request.AfterSeq)
 		if request.IncludeDigest {
 			attachSubagentStatusDigest(ctx, b.Supervision, sessionID, request, payload)
+			// digest 是 stale 规则的权威（2026-09-26 真机）：矩阵行里"subject 已不在
+			// 控制面"的陈旧行不能再驱动"去裁决 action_required 行"的指令，否则
+			// cache_safe_summary 会与它自己的 digest 计数（0 action_required）矛盾，
+			// 模型也会去找一个它无从下手的行。无可用指引时回落到 digest 的下一步。
+			if digest, ok := payload["digest"].(*supervision.Digest); ok && digest != nil {
+				if next := supervisionDescendantsNextActionExcluding(snapshot, staleSubjectKeys(digest)); next != "" {
+					payload["next_action"] = next
+				} else if next, _ := payload["digest_next_action"].(string); strings.TrimSpace(next) != "" {
+					payload["next_action"] = strings.TrimSpace(next)
+				}
+			}
 		}
 		return payload, attachCacheSafeSummary(payload, subagentStatusSummary(snapshot, payload)), nil
 

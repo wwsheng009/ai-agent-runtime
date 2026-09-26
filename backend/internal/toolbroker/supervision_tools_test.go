@@ -232,7 +232,8 @@ func TestBroker_Execute_SupervisionDescendants(t *testing.T) {
 			Descendants: []supervision.SnapshotItem{
 				{Kind: supervision.SubjectAgentSession, ID: "child-1", SupervisionState: supervision.SupervisionRunning},
 				{Kind: supervision.SubjectAgentSession, ID: "child-2", SupervisionState: supervision.SupervisionRunning},
-				{Kind: supervision.SubjectAgentSession, ID: "child-3", SupervisionState: supervision.SupervisionStalled, NotificationID: "n-3", ActionRequired: true},
+				{Kind: supervision.SubjectAgentSession, ID: "child-3", SupervisionState: supervision.SupervisionStalled, NotificationID: "n-3", ActionRequired: true,
+					AllowedActions: []string{string(supervision.ActionInspect), string(supervision.ActionCancel)}},
 			},
 			Truncated: true,
 			NextSeq:   9,
@@ -275,6 +276,53 @@ func TestBroker_Execute_SupervisionDescendants(t *testing.T) {
 		require.Error(t, err)
 	}
 	require.Equal(t, 1, controller.calls, "invalid filters never reach the controller")
+}
+
+// TestBroker_Execute_SupervisionDescendantsStaleRowDoesNotAskForDecision pins the
+// 2026-09-26 真机 gap: Summary.ActionRequired can count rows whose subject is gone
+// from the live control plane (no allowed_actions the model could use). Telling the
+// parent to "decide the action_required rows" then contradicts the digest (0 rows)
+// and leaves the model without an executable next step; the matrix must fall through
+// to the running/monitoring guidance instead.
+func TestBroker_Execute_SupervisionDescendantsStaleRowDoesNotAskForDecision(t *testing.T) {
+	controller := &fakeSupervisionController{
+		snapshot: &supervision.Snapshot{
+			Summary: supervision.SnapshotSummary{Running: 1, ActionRequired: 1},
+			Descendants: []supervision.SnapshotItem{
+				{Kind: supervision.SubjectAgentSession, ID: "child-live", SupervisionState: supervision.SupervisionRunning},
+				{Kind: supervision.SubjectAgentRun, ID: "batch-failed", SupervisionState: supervision.SupervisionTerminated,
+					NotificationID: "n-batch", ActionRequired: true},
+			},
+		},
+	}
+	broker := &Broker{Supervision: controller}
+
+	_, meta, err := broker.Execute(context.Background(), "parent-session", ToolSupervisionDescendants, map[string]interface{}{})
+	require.NoError(t, err)
+	require.Contains(t, meta["next_action"], "still running")
+	require.NotContains(t, meta["next_action"], "action_required rows")
+}
+
+// TestSupervisionDescendantsNextActionExcludingSkipsStaleSubjects pins the second
+// half of the 2026-09-26 真机 gap: even when a stale row still advertises allowed
+// actions in the matrix, the digest's stale verdict must win, so the model is not
+// sent to "decide" a subject that no longer exists in the control plane (stale rows
+// are informational only, per supervision.DigestItem).
+func TestSupervisionDescendantsNextActionExcludingSkipsStaleSubjects(t *testing.T) {
+	snapshot := &supervision.Snapshot{
+		Summary: supervision.SnapshotSummary{ActionRequired: 1},
+		Descendants: []supervision.SnapshotItem{
+			{Kind: supervision.SubjectAgentRun, ID: "batch-x", SupervisionState: supervision.SupervisionTerminated,
+				NotificationID: "n-x", ActionRequired: true,
+				AllowedActions: []string{string(supervision.ActionInspect), string(supervision.ActionClose)}},
+		},
+	}
+	require.Contains(t, supervisionDescendantsNextActionExcluding(snapshot, nil), "action_required rows")
+
+	digest := &supervision.Digest{Items: []supervision.DigestItem{
+		{SubjectKind: supervision.SubjectAgentRun, SubjectID: "batch-x", Stale: true},
+	}}
+	require.NotContains(t, supervisionDescendantsNextActionExcluding(snapshot, staleSubjectKeys(digest)), "action_required rows")
 }
 
 // TestBroker_Execute_SupervisionDescendantsIncludeResultsDefaultsFalse pins the

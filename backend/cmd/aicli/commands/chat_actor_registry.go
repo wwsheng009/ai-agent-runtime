@@ -45,6 +45,12 @@ type localActorRegistry struct {
 	// so the spawn gate, list reads and the periodic reconcile must not overlap
 	// (see materializeLocalAgentRegistry).
 	materializeMu sync.Mutex
+	// localWaitBudget bounds consecutive no-progress active wait segments per
+	// parent turn (design §16.2/§16.3): once spent, the host refuses to open a
+	// new wait window and returns next_action=suspend. The zero value is a
+	// ready-to-use in-memory budget, so registries built directly in tests keep
+	// working.
+	localWaitBudget agentcontrol.WaitBudget
 }
 
 func newLocalActorRegistry(host *localChatRuntimeHost) *localActorRegistry {
@@ -2779,18 +2785,44 @@ func (r *localActorRegistry) ResolveApproval(ctx context.Context, args toolbroke
 // （AC-P2-4e，不空等）；否则按旧语义等待，并在返回结果上附账本视图与
 // terminal_delta。mailbox-only 与状态快照两条分支共用这一外壳，返回契约一致。
 func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
-	obligations, baseline, pending := r.localWaitLedger(ctx)
+	obligations, baseline, pending, budgetKey := r.localWaitLedger(ctx)
+	waitBudgetLimit := r.localAgentsConfig().MaxConsecutiveWaitWithoutProgress
 	if len(obligations) > 0 && !pending {
+		r.localWaitBudget.Reset(budgetKey)
 		return toolbroker.ApplyAgentWaitLedger(
 			toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{}, time.Now()),
 			obligations, baseline,
 		), nil
 	}
+	if len(obligations) > 0 && pending && budgetKey != "" {
+		// 等待预算已耗尽：不再打开新的活动等待窗口（§16.2/§16.3 把「连续 2 次
+		// 无进展 ⇒ 改用挂起」从建议变成判据）。账本视图照常返回，I1 仍由
+		// 收尾门兜底——wait_agent 自身不挂起 turn。
+		if consecutive, exhausted := r.localWaitBudget.Exhausted(budgetKey, waitBudgetLimit); exhausted {
+			result := toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{}, time.Now())
+			result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
+			return toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit), nil
+		}
+	}
 	result, err := r.waitForLocalAgentObserved(ctx, args)
 	if err != nil || result == nil {
 		return result, err
 	}
-	return toolbroker.ApplyAgentWaitLedger(result, obligations, baseline), nil
+	result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
+	if len(obligations) > 0 {
+		switch {
+		case !pending:
+			r.localWaitBudget.Reset(budgetKey)
+		case result.Interrupted:
+			// steer/ESC 提前结束的等待段不是"花掉的窗口"，不计入预算。
+		default:
+			consecutive, exhausted := r.localWaitBudget.Observe(budgetKey, len(result.TerminalDelta) > 0, waitBudgetLimit)
+			if exhausted {
+				result = toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit)
+			}
+		}
+	}
+	return result, nil
 }
 
 func (r *localActorRegistry) waitForLocalAgentObserved(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
@@ -2814,7 +2846,10 @@ func (r *localActorRegistry) waitForLocalAgentObserved(ctx context.Context, args
 		return nil, err
 	}
 	timeout := time.Duration(resolution.EffectiveMs) * time.Millisecond
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	// 2026-09-26 真机：startedAt 在入口就打，而窗口从 WithTimeout 起算，目标解析/
+	// 订阅的 ~2.6s 被算进 waited_ms（请求 90000 → waited_ms 92617）。以 startedAt
+	// 作 deadline 锚点：观测窗口与 waited_ms 同一把尺，"最多等 timeout_ms" 真实成立。
+	waitCtx, cancel := context.WithDeadline(ctx, startedAt.Add(timeout))
 	defer cancel()
 	wakeCh, unsubscribe := r.subscribeLocalAgentWaitEvents(waitCtx, sessionIDs)
 	defer unsubscribe()
@@ -2913,29 +2948,32 @@ func (r *localActorRegistry) waitForLocalAgentMailbox(ctx context.Context, args 
 // 不能用等待参数里的 id——那是被等待的子会话。没有挂起记录、宿主未装配 durable
 // 批次库或状态库、或读失败时一律返回空账本，等待退化为旧 mailbox 语义
 // （plan §13.8：判读失败 fail-open，按"未挂起"处理，绝不丢输入也绝不谎报账本）。
-func (r *localActorRegistry) localWaitLedger(ctx context.Context) ([]toolbroker.AgentWaitObligation, []string, bool) {
+// The fourth return value is the wait-budget key (session + parked turn id);
+// it is empty whenever the ledger could not be read, in which case the budget
+// stays disarmed (fail-open, same as the legacy mailbox semantics).
+func (r *localActorRegistry) localWaitLedger(ctx context.Context) ([]toolbroker.AgentWaitObligation, []string, bool, string) {
 	if r == nil || r.Host == nil || r.Host.SubagentBatches == nil || r.Host.RuntimeStore == nil {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	sessionID := strings.TrimSpace(r.Host.baseRuntimeSessionID())
 	if sessionID == "" {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	state, err := r.Host.RuntimeStore.LoadState(ctx, sessionID)
 	if err != nil || state == nil {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	turnID := strings.TrimSpace(state.SuspendedTurnID)
 	if turnID == "" {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	record, ok, err := r.Host.SubagentBatches.GetTurnSuspension(ctx, sessionID, turnID)
 	if err != nil || !ok || record == nil {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	rows, err := subagentbatch.BuildWaitLedger(ctx, r.Host.SubagentBatches, record)
 	if err != nil || len(rows) == 0 {
-		return nil, nil, false
+		return nil, nil, false, ""
 	}
 	obligations := make([]toolbroker.AgentWaitObligation, 0, len(rows))
 	baseline := make([]string, 0, len(rows))
@@ -2958,7 +2996,7 @@ func (r *localActorRegistry) localWaitLedger(ctx context.Context) ([]toolbroker.
 			pending = true
 		}
 	}
-	return obligations, baseline, pending
+	return obligations, baseline, pending, sessionID + "|" + turnID
 }
 
 func (r *localActorRegistry) waitForLocalAgentMailboxResolved(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
@@ -2978,7 +3016,8 @@ func (r *localActorRegistry) waitForLocalAgentMailboxResolved(ctx context.Contex
 		}
 		timeout = time.Duration(defaultWaitMs) * time.Millisecond
 	}
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	// 与主等待段同锚点（见 waitForLocalAgentObserved）：waited_ms 与窗口同一把尺。
+	waitCtx, cancel := context.WithDeadline(ctx, startedAt.Add(timeout))
 	defer cancel()
 	wakeCh, unsubscribe := r.subscribeLocalAgentMailboxEvents(waitCtx, sessionID)
 	defer unsubscribe()
@@ -3641,6 +3680,15 @@ func (r *localActorRegistry) resolveLocalAgentTargetSessionID(ctx context.Contex
 			}
 		}
 	}
+	// G4 / H7（解析侧）：批任务 id → 子会话。派发回执只给 task id，生产侧已在运行期
+	// 把 child_session_id 早绑定写进 task 行；没有这一步，`wait_agent(task_id)` /
+	// `read_agent_events(task_id)` 在运行期只能报 missing / 0 events。
+	if childSessionID, ok, err := r.resolveLocalTaskChildSessionID(ctx, target); err != nil || ok {
+		if err != nil {
+			return "", err
+		}
+		return childSessionID, nil
+	}
 	if !strings.HasPrefix(target, "/") {
 		return target, nil
 	}
@@ -3670,6 +3718,91 @@ func (r *localActorRegistry) resolveLocalAgentTargetSessionID(ctx context.Contex
 		}
 	}
 	return "", fmt.Errorf("unknown agent path: %s", target)
+}
+
+// resolveLocalTaskChildSessionID 把 durable 批任务 id 解析成子会话 id（G4 / H7）。
+// 只查调用方父会话自己的批次（不得由模型指定会话、不得跨会话取身份）；任务已派发
+// 但尚未绑定子会话时返回可执行错误，而不是让上游把它当"未知会话"报 missing。
+func (r *localActorRegistry) resolveLocalTaskChildSessionID(ctx context.Context, taskID string) (string, bool, error) {
+	if r == nil || r.Host == nil || r.Host.SubagentBatches == nil {
+		return "", false, nil
+	}
+	parentSessionID := strings.TrimSpace(r.Host.baseRuntimeSessionID())
+	if parentSessionID == "" {
+		return "", false, nil
+	}
+	task, batchID, ok, err := subagentbatch.FindTaskByIDInParentSession(ctx, r.Host.SubagentBatches, parentSessionID, taskID)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	childSessionID := strings.TrimSpace(task.ChildSessionID)
+	if childSessionID == "" {
+		return "", false, fmt.Errorf(
+			"batch task %s is %s but has no child session bound yet (batch %s); retry shortly or pass the child session id",
+			taskID, task.Status, batchID,
+		)
+	}
+	return childSessionID, true, nil
+}
+
+// batchTaskSnapshot 把「子代理会话 id」投影成可等待 / 可读的状态行
+// （2026-09-26 真机 E2E）：生产里子代理运行**不落 SessionStore**——身份
+// （child_session_id 早绑定）与结果只写在批任务行上，因此 wait_agent(task_id)
+// 解析出的子会话 id 在会话库里永远是 missing。回退到账本行才是权威。
+func (r *localActorRegistry) batchTaskSnapshot(ctx context.Context, childSessionID string) (*toolbroker.AgentStatusResult, bool, error) {
+	if r == nil || r.Host == nil || r.Host.SubagentBatches == nil {
+		return nil, false, nil
+	}
+	parentSessionID := strings.TrimSpace(r.Host.baseRuntimeSessionID())
+	if parentSessionID == "" {
+		return nil, false, nil
+	}
+	task, batchID, ok, err := subagentbatch.FindTaskByChildSessionIDInParentSession(ctx, r.Host.SubagentBatches, parentSessionID, childSessionID)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	return localBatchTaskStatusResult(childSessionID, batchID, task), true, nil
+}
+
+// localBatchTaskStatusResult 把账本行映射成 AgentStatusResult：终态任务映射到
+// idle/stopped（wait 的就绪集合据此判定），非终态映射 running（继续等待）。
+// 结果摘要走 Output，失败原因走 Error——与真实子会话快照的读取口径一致。
+func localBatchTaskStatusResult(childSessionID, batchID string, task subagentbatch.SubagentTaskRecord) *toolbroker.AgentStatusResult {
+	status := string(runtimechat.SessionRunning)
+	switch task.Status {
+	case subagentbatch.TaskSucceeded:
+		status = string(runtimechat.SessionIdle)
+	case subagentbatch.TaskFailed, subagentbatch.TaskFailedWithResult, subagentbatch.TaskCanceled,
+		subagentbatch.TaskTimedOut, subagentbatch.TaskSkipped:
+		status = string(runtimechat.SessionStopped)
+	}
+	result := &toolbroker.AgentStatusResult{
+		ID:                childSessionID,
+		SessionID:         childSessionID,
+		Status:            status,
+		Exists:            true,
+		AgentType:         "subagent",
+		TaskType:          strings.TrimSpace(task.TaskType),
+		TaskSubject:       strings.TrimSpace(task.TaskSubject),
+		CurrentTaskID:     strings.TrimSpace(task.TaskID),
+		CurrentTaskStatus: string(task.Status),
+		Attempt:           task.Attempt,
+		ReadOnly:          task.ReadOnly,
+	}
+	if summary := strings.TrimSpace(string(task.ResultSummary)); summary != "" {
+		result.Output = summary
+	}
+	parts := make([]string, 0, 2)
+	if class := strings.TrimSpace(task.ErrorClass); class != "" {
+		parts = append(parts, class)
+	}
+	if code := strings.TrimSpace(task.ErrorCode); code != "" {
+		parts = append(parts, code)
+	}
+	if len(parts) > 0 {
+		result.Error = strings.Join(parts, ": ")
+	}
+	return result
 }
 
 func (r *localActorRegistry) Resume(ctx context.Context, sessionID string) (*toolbroker.AgentStatusResult, error) {
@@ -3703,6 +3836,12 @@ func (r *localActorRegistry) agentSnapshot(ctx context.Context, sessionID string
 	session, err := r.Host.SessionStore.Load(ctx, sessionID)
 	if err != nil {
 		if err == runtimechat.ErrSessionNotFound {
+			// 子代理会话不落 SessionStore：先回退到批任务账本行（真机 E2E 缺口）。
+			if taskResult, ok, taskErr := r.batchTaskSnapshot(ctx, sessionID); taskErr != nil {
+				return nil, taskErr
+			} else if ok {
+				return taskResult, nil
+			}
 			return result, nil
 		}
 		return nil, err

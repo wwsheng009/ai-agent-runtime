@@ -23,6 +23,7 @@ func DefaultAgentsConfig() AgentsConfig {
 // 有意保留的语义（不被默认值覆盖）：
 //   - MaxThreads == -1 仍是「显式不限」（agentcontrol.MaxThreadsUnlimited），只有 0 是未设置；
 //   - RegistryTerminalRetention < 0 仍是「永不清除」的显式退出；
+//   - MaxConsecutiveWaitWithoutProgress < 0 仍是「关闭等待预算」的显式退出，只有 0 是未设置；
 //   - ReclaimIdleMs 的默认值本身就是 0（保守回收：只回收可证明已死/终态的子会话），
 //     因此 0 归一化后仍是 0，不会把保守策略变成 TTL 驱逐。
 func NormalizeAgentsConfig(cfg AgentsConfig) AgentsConfig {
@@ -53,6 +54,9 @@ func NormalizeAgentsConfig(cfg AgentsConfig) AgentsConfig {
 	}
 	if cfg.MaxWaitTimeoutMs == 0 {
 		cfg.MaxWaitTimeoutMs = defaults.MaxWaitTimeoutMs
+	}
+	if cfg.MaxConsecutiveWaitWithoutProgress == 0 {
+		cfg.MaxConsecutiveWaitWithoutProgress = defaults.MaxConsecutiveWaitWithoutProgress
 	}
 	if strings.TrimSpace(cfg.WaitTimeoutMode) == "" {
 		cfg.WaitTimeoutMode = defaults.WaitTimeoutMode

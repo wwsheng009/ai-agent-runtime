@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	runtimecontext "github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
@@ -88,8 +89,8 @@ type AgentConfig struct {
 
 // AgentsConfig controls lightweight multi-agent collaboration limits.
 type AgentsConfig struct {
-	MaxThreads           int `yaml:"maxThreads" json:"maxThreads"`
-	MaxDepth             int `yaml:"maxDepth" json:"maxDepth"`
+	MaxThreads int `yaml:"maxThreads" json:"maxThreads"`
+	MaxDepth   int `yaml:"maxDepth" json:"maxDepth"`
 	// MaxConcurrent caps how many child agents one subagent batch may execute
 	// at the same time (the per-batch ceiling handed to
 	// agent.SubagentSchedulerConfig.MaxConcurrent). 0 = unset → the built-in
@@ -120,8 +121,16 @@ type AgentsConfig struct {
 	// WaitTimeoutMode selects the out-of-range behavior: "clamp" (default)
 	// pins the request to the nearest bound, "error" rejects it with an
 	// actionable message.
-	WaitTimeoutMode  string `yaml:"waitTimeoutMode,omitempty" json:"waitTimeoutMode,omitempty"`
-	DefaultForkTurns string `yaml:"defaultForkTurns,omitempty" json:"defaultForkTurns,omitempty"`
+	WaitTimeoutMode string `yaml:"waitTimeoutMode,omitempty" json:"waitTimeoutMode,omitempty"`
+	// MaxConsecutiveWaitWithoutProgress bounds how many consecutive active
+	// wait segments on one parent turn may observe zero obligation progress
+	// (no terminal_delta) before the host stops granting new wait windows and
+	// returns next_action=suspend (design §16.2/§16.3). 0 uses the shared
+	// default (2); a negative value disables the budget. The enforcement never
+	// parks a turn by itself: the parent either does independent work or ends
+	// the turn, and I1 converts a premature finalize into a turn suspension.
+	MaxConsecutiveWaitWithoutProgress int    `yaml:"maxConsecutiveWaitWithoutProgress,omitempty" json:"maxConsecutiveWaitWithoutProgress,omitempty"`
+	DefaultForkTurns                  string `yaml:"defaultForkTurns,omitempty" json:"defaultForkTurns,omitempty"`
 	// RegistryReconcileInterval is the P2-9 low-frequency consistency sweep
 	// cadence for the durable agent registry. 0 uses the shared default (10m);
 	// values below 1m are floored by the reconciler so a typo cannot turn the
@@ -436,17 +445,22 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			DefaultPlanningMode:  "",
 		},
 		Agents: AgentsConfig{
-			MaxThreads:           6,
-			MaxDepth:             1,
+			MaxThreads: 6,
+			MaxDepth:   1,
 			// P1-4/H12: the per-batch subagent ceiling keeps its historical
 			// scheduler default (4) so an absent config changes nothing. The
 			// queue knobs stay 0 = backpressure disabled (fail-fast default).
 			MaxConcurrent:        4,
 			DefaultWaitTimeoutMs: int((30 * time.Second).Milliseconds()),
 			MinWaitTimeoutMs:     int((10 * time.Second).Milliseconds()),
-			MaxWaitTimeoutMs:     int(time.Hour.Milliseconds()),
-			WaitTimeoutMode:      "clamp",
-			DefaultForkTurns:     "none",
+			// Wait-budget hardening (2026-09-26): the built-in active-wait
+			// ceiling is 2m, not 1h — a single wait window must not be able to
+			// occupy the parent turn for most of an hour. Long waits belong to
+			// the suspension path (zero goroutine / zero token).
+			MaxWaitTimeoutMs:                  int((2 * time.Minute).Milliseconds()),
+			WaitTimeoutMode:                   "clamp",
+			MaxConsecutiveWaitWithoutProgress: agentcontrol.DefaultMaxConsecutiveWaitWithoutProgress,
+			DefaultForkTurns:                  "none",
 			// P1-C: the built-in default stays "off" — closing a child session
 			// is a user-visible convergence decision, not a silent cleanup.
 			AutoCloseCompleted: AutoClosePolicyOff,

@@ -162,6 +162,19 @@ var runtimeEventContracts = []Contract{
 	// 每次 (session, reason) 只发一次，落盘量有上界。
 	{Type: EventSubagentSuspensionUnavailable, Channels: ChannelSessionStore | ChannelTailOnly},
 
+	// ---- A+D 通道：托管 turn 生命周期里程碑（方案 §6.8 / 审计 G3；常量见 turn_events.go）----
+	// 两个事件都是**边沿触发**的状态跃迁（挂起一次、恢复一次），落盘量有天然上界：
+	//   turn.suspended：durable 宿主首次为某 turn 写挂起记录（降级宿主永不发射，
+	//   AC-C0-1d），是"父回合没结束、只是挂起等 obligation"的唯一正面信号；
+	//   turn.resumed：wake 投递成 resume episode 成功之后，携带触发类型与 digest
+	//   摘要，让"挂起等待 → 恢复"在 UI/分析面闭环。
+	// 走 A+D 与批次失败态同理：既要事后可追责（"这个 turn 为什么停在这里"），
+	// 也要在回合末尾巴帧里让晚挂载的 UI 看到状态跃迁。PersistCritical 使落盘桥
+	// 立即 flush：这两个事件是状态机坐标，晚一拍落盘会与 agent.turn.finished 的
+	// 顺序在崩溃窗口里错乱。
+	{Type: EventTurnSuspended, Channels: ChannelSessionStore | ChannelTailOnly, PersistCritical: true},
+	{Type: EventTurnResumed, Channels: ChannelSessionStore | ChannelTailOnly, PersistCritical: true},
+
 	// ---- 已登记、当前无 chat 侧通道 ----
 	// chat/events.go 常量（其中 tool_started/tool_finished 是 tool.requested/
 	// tool.completed 落库时的映射结果，作为「入站类型」没有自己的通道）。
@@ -174,6 +187,13 @@ var runtimeEventContracts = []Contract{
 	{Type: "tool_receipt_replayed"},
 	{Type: "question_asked"},
 	{Type: "question_answered"},
+	// 计划模式事件常量（chat/events.go:30-42）。当前**没有 emit 点**（常量先落地、
+	// 宿主接线在 plan-mode 方案里推进），因此按 0 通道登记 = 显式表态"当前无 chat
+	// 侧交付通道"，不改变任何投递行为；通道归属由该方案单独评审后在此补位。
+	{Type: "plan_mode_changed"},
+	{Type: "plan_archive_failed"},
+	{Type: "plan_review_available"},
+	{Type: "plan_review_requested"},
 	{Type: "rewind_started"},
 	{Type: "rewind_finished"},
 	{Type: "backtrack_started"},

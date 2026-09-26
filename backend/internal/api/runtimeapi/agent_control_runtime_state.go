@@ -24,8 +24,16 @@ import (
 // 由前端回退到身份状态。**「读不到」不等于「已结束」**：把存储故障或未配置的
 // 数据源渲染成「子代理已结束」会比原来的假运行中更难排查。
 const (
-	// AgentRuntimeStateRunning 容器正在执行（含等待审批 / 等待输入 / 回滚）。
+	// AgentRuntimeStateRunning 容器正在执行（回滚等内部阶段同样计入）。
 	AgentRuntimeStateRunning = "running"
+	// AgentRuntimeStateWaitingApproval 容器仍在跑，但阻塞在**人的审批决定**上。
+	//
+	// G5：等待审批曾与 running 折叠为一档，父平面（agent 面板 / 控制面）因此看不出
+	// 「谁在等审批」——审批入口只存在于已打开的下钻里，而未打开下钻的人无法知道
+	// 子代理需要自己。拆成独立档后，前端可把该行标成「等待审批」并给出下钻入口。
+	AgentRuntimeStateWaitingApproval = "waiting_approval"
+	// AgentRuntimeStateWaitingInput 容器仍在跑，但阻塞在输入（提问 / 澄清）上。
+	AgentRuntimeStateWaitingInput = "waiting_input"
 	// AgentRuntimeStateIdle 容器存在且当前没有在跑（回合之间 / 已跑完）。
 	AgentRuntimeStateIdle = "idle"
 	// AgentRuntimeStateStopped 容器已被显式停止。
@@ -135,9 +143,12 @@ func (h *Handler) peekDurableSessionRuntimeStore() (chat.RuntimeStateStore, bool
 // 状态）一律返回空串 —— 未知不得被当作「已结束」。
 func normalizeAgentRuntimeState(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case string(chat.SessionRunning), string(chat.SessionWaitingApproval),
-		string(chat.SessionWaitingInput), string(chat.SessionRewinding):
+	case string(chat.SessionRunning), string(chat.SessionRewinding):
 		return AgentRuntimeStateRunning
+	case string(chat.SessionWaitingApproval):
+		return AgentRuntimeStateWaitingApproval
+	case string(chat.SessionWaitingInput):
+		return AgentRuntimeStateWaitingInput
 	case string(chat.SessionIdle):
 		return AgentRuntimeStateIdle
 	case string(chat.SessionStopped):

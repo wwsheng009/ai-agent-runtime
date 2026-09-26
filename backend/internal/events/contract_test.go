@@ -49,16 +49,18 @@ func repoRoot(t *testing.T) string {
 }
 
 // TestChatSSEPrefixMatchesSkillsConstant：chat SSE 前缀是「字面量 + 门禁」策略的第二处
-// 落点——contract.ChatSSEEventPrefix 必须与 api/skills 侧下帧用的 chatSSEStreamEventPrefix
+// 落点——contract.ChatSSEEventPrefix 必须与 api/runtimeapi 侧下帧用的 chatSSEStreamEventPrefix
 // 同值，否则前端按生成物解析帧名、后端按自家常量下帧，两边会静默错位。
 func TestChatSSEPrefixMatchesSkillsConstant(t *testing.T) {
-	path := filepath.Join(repoRoot(t), "internal", "api", "skills", "trajectory_events.go")
+	// 2026-09：internal/api/skills 已重命名为 internal/api/runtimeapi（提交 8e3744c2），
+	// 本门禁的取样路径同步跟进——否则门禁会因路径不存在而恒红，失去把关作用。
+	path := filepath.Join(repoRoot(t), "internal", "api", "runtimeapi", "trajectory_events.go")
 	value, ok := namedStringConstInFile(t, path, "chatSSEStreamEventPrefix")
 	if !ok {
 		t.Fatalf("%s 中未找到字符串常量 chatSSEStreamEventPrefix（被改名或删除？）", path)
 	}
 	if value != events.ChatSSEEventPrefix {
-		t.Fatalf("chat SSE 前缀漂移：api/skills=%q，contract=%q", value, events.ChatSSEEventPrefix)
+		t.Fatalf("chat SSE 前缀漂移：api/runtimeapi=%q，contract=%q", value, events.ChatSSEEventPrefix)
 	}
 }
 
@@ -181,6 +183,11 @@ func TestExternalEventFamilyConstantsAreRegistered(t *testing.T) {
 		{chat.EventAssistantDelta, events.ChannelSessionStore},
 		{chat.EventAssistantReasoningDelta, events.ChannelSessionStore},
 		{chat.EventSessionCompactFailed, events.ChannelSessionStore},
+		// 托管 turn 生命周期里程碑（方案 §6.8 / 审计 G3）：A+D，边沿触发。
+		// 与 TestSubagentAuditEventChannelRegistrations 同口径地断言"已知目录"三
+		// 方一致，避免只改注册表忘了 runtimeobserve 目录。
+		{events.EventTurnSuspended, events.ChannelSessionStore | events.ChannelTailOnly},
+		{events.EventTurnResumed, events.ChannelSessionStore | events.ChannelTailOnly},
 	}
 	for _, tc := range cases {
 		if !events.IsRegisteredEventType(tc.eventType) {
@@ -189,6 +196,9 @@ func TestExternalEventFamilyConstantsAreRegistered(t *testing.T) {
 		}
 		if got := events.ChannelsFor(tc.eventType); got != tc.channel {
 			t.Errorf("%q 通道 = %d，期望 %d", tc.eventType, got, tc.channel)
+		}
+		if !runtimeobserve.IsKnownEventType(tc.eventType) {
+			t.Errorf("%q 不在 runtimeobserve 已知类型目录内（三分法会把它当未知类型）", tc.eventType)
 		}
 	}
 }
@@ -283,7 +293,7 @@ func TestEmitRuntimeEventLiteralsAreRegistered(t *testing.T) {
 	}
 	var sites []site
 	fileCount := 0
-	for _, dir := range []string{"agent", "api/skills", "toolbroker"} {
+	for _, dir := range []string{"agent", "api/runtimeapi", "toolbroker"} {
 		base := filepath.Join(root, "internal", filepath.FromSlash(dir))
 		walkErr := filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
 			if err != nil {

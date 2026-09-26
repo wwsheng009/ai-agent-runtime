@@ -285,7 +285,7 @@ func TestLocalHostWakeConsumer_WakeTurnAppliesRunEpochProtocol(t *testing.T) {
 	require.False(t, bridge.isRunEpochCurrent(1))
 
 	// Engaging the wake-turn run protocol advances the epoch.
-	endRun := host.beginWakeTurnRun()
+	endRun := host.beginWakeTurnRun(supervision.AutoWakePrompt)
 	require.Equal(t, uint64(1), bridge.currentRunEpoch())
 	require.True(t, bridge.isRunEpochCurrent(1), "wake turn events must clear the epoch fence")
 
@@ -319,7 +319,7 @@ func TestLocalHostWakeConsumer_WakeTurnOwnsComposerStatus(t *testing.T) {
 	interaction.mu.Unlock()
 
 	// The wake wins the released gate and starts its internal run.
-	endRun := host.beginWakeTurnRun()
+	endRun := host.beginWakeTurnRun(supervision.AutoWakePrompt)
 
 	// sendMessage now reaches its deferred CompleteWaiting.
 	interaction.CompleteWaiting()

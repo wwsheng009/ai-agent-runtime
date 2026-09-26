@@ -17,16 +17,24 @@ import (
 // 不需要新建通知类别或第二套限流（P2-D 的"复用既有 wake admission"）。
 const localSupervisionProgressCheckReason = supervision.WakeReasonProgressCheck
 
-// wireLocalSupervisionProgressSource 把只读的 P0-B batch 投影接到 wake
-// scheduler 上。progress wake 不带生命周期通知，rollup 就是它唯一的 digest
-// 内容：没有这条投影，wake 会被判成"无内容"而不投递（见 supervision.
-// digestDeliverable），巡查就永远不会产生汇报 turn。只读、幂等，可在每次
-// 巡查前重复调用。
-func (h *localChatRuntimeHost) wireLocalSupervisionProgressSource() {
+// wireLocalSupervisionSources 把只读的 batch 控制面接到 wake scheduler 上：
+//
+//   - progress 投影：progress wake 不带生命周期通知，rollup 就是它唯一的 digest
+//     内容；没有这条投影，wake 会被判成"无内容"而不投递（见 supervision.
+//     digestDeliverable），巡查就永远不会产生汇报 turn。
+//   - 账本投影（G2）：resume 上下文要回答 pending_count（I1 收尾判据）与终态
+//     rollup / 失败清单（§16.4）；没有它，DeliverResume 只能拿到 pending=-1、
+//     status=unknown 的降级上下文。
+//
+// 只读、幂等，可在宿主启动与每次巡查前重复调用。
+func (h *localChatRuntimeHost) wireLocalSupervisionSources() {
 	if h == nil || h.Supervision == nil || h.Supervision.Wakes == nil || h.SubagentBatches == nil {
 		return
 	}
 	h.Supervision.Wakes.SetProgressSource(h.newLocalBatchProgressSource())
+	if source := supervision.NewBatchObligationSource(h.SubagentBatches); source != nil {
+		h.Supervision.Wakes.SetObligationSource(source)
+	}
 }
 
 // newLocalBatchProgressSource 构造 CLI 的只读 batch 进度投影，并把 per-host
@@ -138,7 +146,7 @@ func (h *localChatRuntimeHost) runLocalSupervisionProgressCheckOnce(ctx context.
 	if parentSessionID == "" {
 		return false, nil
 	}
-	h.wireLocalSupervisionProgressSource()
+	h.wireLocalSupervisionSources()
 	active, err := h.localSupervisionHasActiveProgress(ctx, parentSessionID)
 	if err != nil {
 		return false, err

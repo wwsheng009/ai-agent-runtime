@@ -66,7 +66,9 @@ func TestLocalSubagentBatchLifecycleProjectorPersistsAndDeduplicates(t *testing.
 	require.NoError(t, err)
 	require.Len(t, notifications, 1)
 	require.Equal(t, supervision.SeverityCritical, notifications[0].Severity)
-	require.Equal(t, supervision.SupervisionBlocked, notifications[0].SupervisionState)
+	// 2026-09-26 真机：批次已终态失败 ⇒ terminated（blocked 只留给"等外部裁决"
+	// 的行；否则 digest/矩阵会把失败读成"待决策卡住"，与 reason 自相矛盾）。
+	require.Equal(t, supervision.SupervisionTerminated, notifications[0].SupervisionState)
 	require.Equal(t, supervision.ResolutionUnresolved, notifications[0].ResolutionState)
 }
 
