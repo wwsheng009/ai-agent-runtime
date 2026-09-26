@@ -140,13 +140,15 @@ describe("PendingInteractionBar", () => {
 
   /** 卡片内的全部按钮（提问 / 计划评审用；审批断言请用 buttons()）。 */
   function allButtons() {
-    return Array.from(container.querySelectorAll("button"));
+    // 显式收窄为 HTMLButtonElement[]：querySelectorAll 的 Element 类型没有
+    // click()/disabled，测试里要按真实按钮用（tsc -b 门禁要求）。
+    return Array.from(container.querySelectorAll<HTMLButtonElement>("button"));
   }
 
   function buttons() {
     // 只取批准/拒绝：解释按钮是只读动作，不参与决定断言。
     return Array.from(
-      container.querySelectorAll(
+      container.querySelectorAll<HTMLButtonElement>(
         "button[data-approval-approve], button[data-approval-deny]",
       ),
     );
