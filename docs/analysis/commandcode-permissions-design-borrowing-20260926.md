@@ -590,6 +590,8 @@
 | F3 | Web 注入面可承载命令并可满足 yolo 确认 | 低-中 | 至少让 `/yolo` 的确认**不接受** web/external 捕获来源的输入（或要求两个来源各确认一次），使确认真正等于「终端前的人」 |
 | F4 | 文档未集中写「谁能提权」 | 低 | 手册补「提权边界」小节（本次已补，§1.4）；`docs/aicli/web-remote-api.md` 补「远程调用者能力边界」 |
 
-F2 已按上面的约定收口（只做 fail-loud，不含 confirm 语义，因此不改变正常路径的 API 契约）。F1（`confirm=true`/令牌）与 F3（yolo 确认拒收 web 注入来源）的收敛点在 `cmd/aicli/commands` 与 runtimeapi 的请求契约上，与当前并发会话的工作面重叠，且需要前端选择器同步，因此仍只落**复核结论 + 文档边界**，代码收口排到 4.12 实施时。
+F2 已按上面的约定收口（只做 fail-loud，不含 confirm 语义，因此不改变正常路径的 API 契约）：这一层在 **host 之外**，因此即使某个 host 忘了装配权限层，API 也不会放行 bypass。F1（`confirm=true`/令牌）与 F3（yolo 确认拒收 web 注入来源）的收敛点在 `cmd/aicli/commands` 与 runtimeapi 的请求契约上，与当前并发会话的工作面重叠，且需要前端选择器同步，因此仍只落**复核结论 + 文档边界**，代码收口排到 4.12 实施时。
+
+顺带核到的装配事实（供后续排查用，不是结论性缺陷）：权限文件的分层装配点只有 `cmd/aicli/commands`（`applyChatPermissionsOverlay` → `ApplyPermissionsOverlayToEngine/ToPolicy`，`LoadLayeredPermissions` 的唯一生产调用方），`internal/runtimeserver` 是纯控制面、不建引擎；runtimeapi 只在 harness 展示/评测里读 `LoadProjectPermissions`。也就是说 `disable_bypass`/项目规则是否生效取决于**运行 actor 的 host 是否装配了 overlay**；若将来出现 runtime 侧自执行 host，需要补同等装配（登记为验证项，避免 silently 少一层保护）。
 
 ACP 模式的补充说明：与 CLI 的「全文确认」不同，ACP 的 `bypass_permissions` 由客户端点选即生效——这是 `agent_stdio_mode.go:137-147` 的**显式设计**（ACP 没有确认通道，且请求来自用户自己的 IDE）。因此它不被列为待收口项；需要硬约束时用部署侧 `disable_bypass: true`，覆盖全部输入面。完整入口表见 [`docs/acp/README.md`](../acp/README.md) §6「权限入口对照表」。
