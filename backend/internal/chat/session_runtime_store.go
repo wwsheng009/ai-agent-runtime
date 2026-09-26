@@ -272,8 +272,9 @@ type RuntimeStoreConfig struct {
 	// 回退到 legacy 两条语句实现（P1.6/D1）。零值=false 表示默认启用；
 	// 能力探测失败时无论该开关如何都会自动回退。
 	DisableSQLiteReturning bool
-	// DisableBackgroundMaintenance 关闭后台 incremental_vacuum 维护（P1.6/D4）。
-	// 零值=false 表示默认启用；关闭后 prune 只置 pending，不做页回收。
+	// DisableBackgroundMaintenance 已废弃：后台 incremental_vacuum 维护（P1.6/D4）
+	// 因在线搬页的高风险已整体移除（见 runtime_store_append_stats.go 的文件头说明）。
+	// 保留字段仅为兼容既有调用方，设置与否都不再改变行为。
 	DisableBackgroundMaintenance bool
 	// DisableReadPool 关闭读写双池拆分（P1.7 回滚开关）：读走写池，
 	// 行为与拆分前逐字节一致。零值=false 表示按 ReadPoolSize 启用。
@@ -1653,7 +1654,6 @@ type SQLiteRuntimeStore struct {
 	sqliteVersion     string
 	supportsReturning bool
 	appendCounters    runtimeAppendCounters
-	maintenance       *runtimeStoreMaintenance
 
 	// P1.7 读池：readDB 为 nil 时读走写池（未拆分/已降级/内存库）。
 	readPoolMu             sync.Mutex
@@ -1799,7 +1799,6 @@ func NewSQLiteRuntimeStore(cfg *RuntimeStoreConfig) (*SQLiteRuntimeStore, error)
 		mailboxRetention: mailboxRetention,
 		pruneInterval:    pruneInterval,
 		opTimeout:        opTimeout,
-		maintenance:      newRuntimeStoreMaintenance(),
 		readDSN:          readDSN,
 		readPoolSize:     readPoolSize,
 		readBusyTimeout:  readBusyTimeout,
@@ -1861,6 +1860,15 @@ func (s *SQLiteRuntimeStore) ensureCtx(ctx context.Context) error {
 		s.openErr = err
 		return err
 	}
+	if s.fileBacked {
+		// 打开前对账 -wal/-shm：主库被带外替换或 WAL 被截断后，残留的陈旧
+		// -shm（wal-index）会被 SQLite 采信为权威索引，首次写入即可能撕裂 B 树
+		// （见 internal/sqliteutil 的 ReconcileOrphanedSidecars 文档）。删除
+		// 失败说明该 sidecar 仍被活跃会话映射，属于正常形态，不做任何处理。
+		if _, err := sqliteutil.ReconcileOrphanedSidecarsDSN(s.dsn); err != nil {
+			logpkg.Debugf("[runtime-store] reconcile sidecars failed: %v", err)
+		}
+	}
 	db, err := sql.Open("sqlite3", s.dsn)
 	if err != nil {
 		s.openErr = fmt.Errorf("open runtime db: %w", err)
@@ -1885,7 +1893,7 @@ func (s *SQLiteRuntimeStore) ensureCtx(ctx context.Context) error {
 	// P1.7：写池重开（锁竞争重建连接）后，旧读池句柄可能指向旧文件/旧 schema，
 	// 作废并由下一次读惰性重建。
 	s.closeReadPool()
-	// P1.6：探测 RETURNING 能力（失败自动回退 legacy），并按需启动后台维护。
+	// P1.6：探测 RETURNING 能力（失败自动回退 legacy）。
 	if version, supports := probeSQLiteReturningSupport(ctx, s.db); supports {
 		s.sqliteVersion, s.supportsReturning = version, true
 	} else {
@@ -1894,9 +1902,6 @@ func (s *SQLiteRuntimeStore) ensureCtx(ctx context.Context) error {
 		if version != "" {
 			logpkg.Warnf("[runtime-store] sqlite %s does not support INSERT ... RETURNING (requires >= %s); using legacy append path", version, runtimeReturningMinVersion)
 		}
-	}
-	if s.fileBacked && !s.cfg.DisableBackgroundMaintenance {
-		s.maintenance.start(s)
 	}
 	return nil
 }
@@ -1950,10 +1955,8 @@ func (s *SQLiteRuntimeStore) Close() error {
 	s.openMu.Lock()
 	defer s.openMu.Unlock()
 	s.closed = true
-	// P1.6/D4：先停止后台维护（它不持 s.mu，但会占用池连接），再走 checkpoint/close。
-	s.maintenance.stop(runtimeMaintenanceStopTimeout)
-	// P1.7/D5：先关读池——空闲读连接持有的 WAL 读标记会让 TRUNCATE checkpoint
-	// 降级为 PASSIVE。读操作有界（readOpTimeout），Close 等待有界。
+	// P1.7/D5：先关读池，再走 checkpoint/close。读操作有界（readOpTimeout），
+	// Close 等待有界。
 	s.closeReadPool()
 	if s.db == nil {
 		return nil
@@ -1961,19 +1964,20 @@ func (s *SQLiteRuntimeStore) Close() error {
 	db := s.db
 	s.db = nil
 	if s.fileBacked {
-		ctx, cancel := context.WithTimeout(context.Background(), s.busyTimeout)
-		_, checkpointErr := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
-		cancel()
-		if checkpointErr != nil {
-			// 拿不到写锁（并发 aicli/runtime 进程正在写库）时，TRUNCATE
-			// checkpoint 会失败。降级为 PASSIVE：尽力冲刷 WAL，绝不因此
-			// 阻塞或失败关闭流程。
-			if _, passiveErr := db.ExecContext(context.Background(), "PRAGMA wal_checkpoint(PASSIVE)"); passiveErr != nil {
-				checkpointErr = fmt.Errorf("checkpoint runtime sqlite WAL: %w", passiveErr)
-			} else {
-				checkpointErr = nil
-			}
+		if !runtimeJournalUsesWAL() {
+			return db.Close()
 		}
+		// 关闭路径只做 PASSIVE checkpoint：冲刷 WAL 但不申请独占、不截断
+		// wal-index。历史实现用 wal_checkpoint(TRUNCATE)（“关一次库就把 WAL
+		// 截断、把 -shm 推到新一代”），它既是驱动层并发缺陷的高发点，也没有
+		// 任何持久性收益；WAL 长度由 wal_autocheckpoint + journal_size_limit
+		// 控制，失败也不影响关闭。
+		ctx, cancel := context.WithTimeout(context.Background(), s.busyTimeout)
+		checkpointErr := error(nil)
+		if _, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)"); err != nil {
+			checkpointErr = fmt.Errorf("checkpoint runtime sqlite WAL: %w", err)
+		}
+		cancel()
 		closeErr := db.Close()
 		if closeErr != nil {
 			return closeErr
@@ -2610,7 +2614,6 @@ func (s *SQLiteRuntimeStore) AppendEvent(ctx context.Context, event runtimeevent
 	if err := s.checkPoolReentry("AppendEvent"); err != nil {
 		return 0, err
 	}
-	s.maintenance.touchWrite()
 	if strings.TrimSpace(event.SessionID) == "" {
 		return 0, fmt.Errorf("event requires session id")
 	}
@@ -2763,13 +2766,8 @@ func (s *SQLiteRuntimeStore) pruneRuntimeRowsTx(ctx context.Context, tx *sql.Tx,
 	}
 	if pruned {
 		s.appendCounters.pruneRuns.Add(1)
-		// P1.6/G2/D3：页回收（最贵部分）移出写事务，交给后台单飞维护；
-		// DELETE 仍留在事务内，保证 mailbox 恢复查询依赖的记录可见性。
-		// DisableBackgroundMaintenance 只阻止启动 worker，pending 仍会被置位
-		//（关闭维护时页回收延后，由后续进程或重新启用后处理）。
-		if s.fileBacked {
-			s.maintenance.markPending()
-		}
+		// 只保留 DELETE：页回收（incremental_vacuum）已整体移除，释放出的页
+		// 留在 freelist，由离线 compaction 回收（aicli storage compact）。
 	}
 	return nil
 }
@@ -2780,7 +2778,6 @@ func (s *SQLiteRuntimeStore) AppendMailbox(ctx context.Context, sessionID string
 	if s == nil {
 		return runtimeevents.Event{}, 0, fmt.Errorf("runtime store is not initialized")
 	}
-	s.maintenance.touchWrite()
 	if err := s.ensureCtx(ctx); err != nil {
 		return runtimeevents.Event{}, 0, err
 	}
@@ -4547,11 +4544,15 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("runtime store is not initialized")
 	}
-	// busy_timeout must come FIRST: this driver (ncruces/go-sqlite3) uses a
-	// 60s default lock wait when busy_timeout is unset, so any pragma touching
-	// the database lock (auto_vacuum, journal_mode=WAL) would block for a
-	// minute per open attempt while a concurrent process holds the write lock,
-	// instead of failing fast into the retry loop.
+	// busy_timeout must come FIRST: when it is unset the driver falls back to a
+	// 60s default lock wait, so any pragma touching the database lock
+	// (journal_mode) would block for a minute per open attempt while another
+	// process holds the write lock, instead of failing fast into the retry loop.
+	//
+	// 这里不再设置 auto_vacuum：在线自回收（auto_vacuum=INCREMENTAL +
+	// PRAGMA incremental_vacuum）会移动页并重写 ptrmap，是历史上异常退出/并发
+	// 写后出现 bad ptr map entry / freelist 错乱的高风险操作。文件空间回收改为
+	// 离线 compaction（独占、无其它进程时执行），见 docs/analysis 中的说明。
 	pragmas := []string{
 		fmt.Sprintf("PRAGMA busy_timeout=%d", s.busyTimeout.Milliseconds()),
 		"PRAGMA synchronous=NORMAL",
@@ -4561,12 +4562,15 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 		"PRAGMA foreign_keys=ON",
 	}
 	if s.fileBacked {
-		pragmas = append(pragmas,
-			"PRAGMA auto_vacuum=INCREMENTAL",
-			"PRAGMA journal_mode=WAL",
-			"PRAGMA wal_autocheckpoint=256",
-			"PRAGMA journal_size_limit=16777216",
-		)
+		pragmas = append(pragmas, "PRAGMA journal_mode="+runtimeJournalMode())
+		if runtimeJournalUsesWAL() {
+			// WAL 专属：自动 checkpoint 保持 WAL 有界；journal_size_limit 让
+			// checkpoint 后回收文件长度，替代过去 Close 时的 TRUNCATE。
+			pragmas = append(pragmas,
+				"PRAGMA wal_autocheckpoint=256",
+				"PRAGMA journal_size_limit=16777216",
+			)
+		}
 	}
 	for _, statement := range pragmas {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {

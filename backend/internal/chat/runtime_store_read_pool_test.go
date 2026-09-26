@@ -60,7 +60,12 @@ func TestReadPoolDSNPragmasApply(t *testing.T) {
 		require.Equal(t, defaultRuntimeBusyTimeout.Milliseconds(), busyTimeout, "conn %d busy_timeout", index)
 		require.NoError(t, conn.QueryRowContext(ctx, "PRAGMA cache_size").Scan(&cacheSize))
 		require.Equal(t, int64(-runtimeReadPoolCacheKiB), cacheSize, "conn %d cache_size", index)
-		require.NoError(t, conn.QueryRowContext(ctx, "PRAGMA mmap_size").Scan(&mmapSize))
+		// 新版驱动的 VFS 不支持 mmap 时 `PRAGMA mmap_size` 返回零行：与“值为 0”
+		// 等价，读池不得因此降级（见 runtime_store_read_pool.go 的校验注释）。
+		if err := conn.QueryRowContext(ctx, "PRAGMA mmap_size").Scan(&mmapSize); err != nil {
+			require.ErrorIs(t, err, sql.ErrNoRows, "conn %d mmap_size", index)
+			mmapSize = 0
+		}
 		require.Equal(t, int64(0), mmapSize, "conn %d mmap_size", index)
 	}
 }

@@ -3,6 +3,7 @@ package chat
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -262,8 +263,14 @@ func verifyRuntimeReadPoolPragmas(ctx context.Context, db *sql.DB, busyTimeoutMs
 		return fmt.Errorf("read pool cache_size = %d, want %d", cacheKiB, -runtimeReadPoolCacheKiB)
 	}
 	var mmap int64
+	// 新版驱动（ncruces/go-sqlite3 v0.35+，纯 Go VFS）在 VFS 不支持 mmap 时
+	// `PRAGMA mmap_size` 会返回零行；对我们而言“没有行”与“值为 0”等价，都是
+	// “未启用 mmap”，不能因此把读池降级掉。
 	if err := db.QueryRowContext(ctx, "PRAGMA mmap_size").Scan(&mmap); err != nil {
-		return fmt.Errorf("verify mmap_size: %w", err)
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("verify mmap_size: %w", err)
+		}
+		mmap = 0
 	}
 	if mmap != 0 {
 		return fmt.Errorf("read pool mmap_size = %d, want 0", mmap)

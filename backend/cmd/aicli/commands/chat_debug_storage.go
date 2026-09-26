@@ -125,11 +125,9 @@ func appendChatDebugStorageLines(builder *chatDebugDocumentBuilder, session *Cha
 			chatDebugNanosText(avg), chatDebugNanosText(appendStats.MaxNs), chatDebugNanosText(lockAvg),
 			appendStats.Batches, appendStats.BatchedEvents,
 			chatDebugRatio(float64(appendStats.BatchedEvents), float64(appendStats.Batches))))
-		builder.meta("Maintenance:", fmt.Sprintf(
-			"runs=%d skipped=%d busy=%d failures=%d pending=%t prune=%d vacuum=%d(%s)",
-			appendStats.MaintenanceRuns, appendStats.MaintenanceSkipped, appendStats.MaintenanceBusy,
-			appendStats.MaintenanceFailures, appendStats.MaintenancePending,
-			appendStats.PruneRuns, appendStats.VacuumRuns, chatDebugNanosText(appendStats.VacuumTotalNs)))
+		// 页回收（incremental_vacuum）已整体移除：这里只报告 prune 次数，
+		// 文件空间回收改为离线 compaction（独占访问时手动 VACUUM）。
+		builder.meta("Maintenance:", fmt.Sprintf("prune=%d vacuum=disabled", appendStats.PruneRuns))
 		builder.meta("SQLite:", fmt.Sprintf("%s supports_returning=%t",
 			chatDebugValueOrNone(appendStats.SQLiteVersion), appendStats.SupportsReturning))
 	}

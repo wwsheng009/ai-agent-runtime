@@ -147,6 +147,13 @@ func NewSQLiteSessionStorageContext(ctx context.Context, cfg PersistentSessionSt
 // session history database. The single connection guarantees that connection
 // scoped PRAGMAs (busy_timeout, ...) applied in init apply to every query.
 func openSQLiteSessionStorageDB(cfg PersistentSessionStorageConfig) (*SQLiteSessionStorage, error) {
+	// 打开前对账 -wal/-shm：主库被带外替换或 WAL 被截断后，残留的陈旧 -shm
+	// 会被 SQLite 采信为权威 wal-index，首次写入即可能撕裂 B 树（见
+	// internal/sqliteutil 的 ReconcileOrphanedSidecars 文档）。删除失败说明
+	// sidecar 仍被活跃会话映射，属于正常形态。
+	if _, err := sqliteutil.ReconcileOrphanedSidecarsDSN(cfg.Path); err != nil {
+		logpkg.Debugf("[session-storage] reconcile sidecars failed: %v", err)
+	}
 	db, err := sql.Open("sqlite3", cfg.Path)
 	if err != nil {
 		return nil, err
@@ -159,7 +166,7 @@ func openSQLiteSessionStorageDB(cfg PersistentSessionStorageConfig) (*SQLiteSess
 // openSQLiteSessionStorageWithLockRetry runs init, retrying transient
 // "database is locked" failures with backoff. A concurrent aicli/runtime
 // process can hold the write lock longer than busy_timeout (migration, large
-// session flush, wal_checkpoint(TRUNCATE)); without retry this makes a whole
+// session flush, WAL checkpoint); without retry this makes a whole
 // startup fail. A failed connection is replaced with a fresh one per attempt.
 func openSQLiteSessionStorageWithLockRetry(ctx context.Context, store *SQLiteSessionStorage) (*SQLiteSessionStorage, error) {
 	var lastLockErr error
@@ -380,28 +387,28 @@ func (s *SQLiteSessionStorage) CloseStorage() error {
 	// 再关读池：读池连接同样是 WAL 读者，不释放会让下面的 TRUNCATE
 	// checkpoint 拿不到独占窗口（与快照池同一理由）。
 	s.closeReadPool()
-	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.BusyTimeout)
-	defer cancel()
-	// TRUNCATE checkpoint 会返回 (busy, log, checkpointed) 行：跨进程快照
-	// 读事务未释放时 busy=1（不一定报错），此时降级 PASSIVE 并计数。
-	// 关闭路径上用短 busy_timeout，避免为了一次 TRUNCATE 等待整个写锁预算。
-	shortWait := s.cfg.BusyTimeout
-	if shortWait > time.Second {
-		shortWait = time.Second
-	}
-	if shortWait > 0 {
-		_, _ = s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", shortWait.Milliseconds()))
-	}
-	var busy, logFrames, checkpointed int
-	checkpointErr := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed)
-	if checkpointErr != nil {
-		// TRUNCATE 需要所有读者释放（含尚未提交的跨进程快照读事务）。
-		// 降级 PASSIVE 仍推进 WAL；这是预期分支而非故障（计数供排障）。
-		s.snapshotStats.checkpointBlocked.Add(1)
-		_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
-	} else if busy != 0 {
-		s.snapshotStats.checkpointBlocked.Add(1)
-		_, _ = s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
+	if runtimeJournalUsesWAL() {
+		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.BusyTimeout)
+		defer cancel()
+		// 关闭路径只做 PASSIVE checkpoint：冲刷 WAL 但不申请独占、不截断
+		// wal-index。TRUNCATE（“关库即截断 WAL”）没有持久性收益，却是驱动层
+		// 并发缺陷的高发点，已整体移除。
+		// 关闭路径上用短 busy_timeout，避免为了一次 checkpoint 等待整个写锁预算。
+		shortWait := s.cfg.BusyTimeout
+		if shortWait > time.Second {
+			shortWait = time.Second
+		}
+		if shortWait > 0 {
+			_, _ = s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", shortWait.Milliseconds()))
+		}
+		var busy, logFrames, checkpointed int
+		// PASSIVE 返回 (busy, log, checkpointed)：读者未释放时 busy=1（不算故障，
+		// 只是没能推进到最新帧），计数供排障。
+		if err := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+			s.snapshotStats.checkpointBlocked.Add(1)
+		} else if busy != 0 {
+			s.snapshotStats.checkpointBlocked.Add(1)
+		}
 	}
 	closeErr := s.db.Close()
 	if closeErr != nil {
@@ -466,17 +473,25 @@ func (s *SQLiteSessionStorage) applyConnectionPRAGMAs(ctx context.Context) error
 func (s *SQLiteSessionStorage) applyBootstrapPRAGMAs(ctx context.Context) error {
 	// Full setup used for first open / schema migration. Durable settings are
 	// persisted on the file; subsequent opens use applyConnectionPRAGMAs.
+	//
+	// 不再设置 auto_vacuum：在线页回收（incremental_vacuum）会移动页并重写
+	// ptrmap，是异常退出/并发写后 ptrmap、freelist 错乱的高风险来源；文件空间
+	// 回收改为离线 compaction（独占访问时手动 VACUUM）。win7compat 构建下
+	// journal_mode 退回回滚日志（见 sqlite_journal_policy_win7.go）。
 	pragmas := []string{
-		"PRAGMA auto_vacuum=INCREMENTAL",
-		"PRAGMA journal_mode=WAL",
+		"PRAGMA journal_mode=" + runtimeJournalMode(),
 		"PRAGMA synchronous=NORMAL",
 		fmt.Sprintf("PRAGMA busy_timeout=%d", s.cfg.BusyTimeout.Milliseconds()),
 		fmt.Sprintf("PRAGMA cache_size=-%d", s.cfg.SQLiteCacheKiB),
 		"PRAGMA temp_store=FILE",
 		"PRAGMA mmap_size=0",
-		"PRAGMA wal_autocheckpoint=256",
-		"PRAGMA journal_size_limit=16777216",
 		"PRAGMA foreign_keys=ON",
+	}
+	if runtimeJournalUsesWAL() {
+		pragmas = append(pragmas,
+			"PRAGMA wal_autocheckpoint=256",
+			"PRAGMA journal_size_limit=16777216",
+		)
 	}
 	return execSQLitePRAGMAs(ctx, s.db, pragmas)
 }
@@ -2577,9 +2592,10 @@ func (s *SQLiteSessionStorage) deleteSession(ctx context.Context, sessionID stri
 	if err := os.RemoveAll(artifactDir); err != nil {
 		return fmt.Errorf("remove session artifacts: %w", err)
 	}
-	if reclaim {
-		s.reclaimFreePages(ctx)
-	}
+	// reclaim 保留参数语义（调用方用于“删除后回收空间”的意图），但在线页回收
+	// （incremental_vacuum）已整体移除：空闲页留在 freelist，由离线 compaction
+	// （独占访问时手动 VACUUM）回收。
+	_ = reclaim
 	return nil
 }
 
@@ -2621,15 +2637,7 @@ func (s *SQLiteSessionStorage) ClearMessages(ctx context.Context, sessionID stri
 	if pathWithin(root, target) {
 		_ = os.RemoveAll(target)
 	}
-	s.reclaimFreePages(ctx)
 	return nil
-}
-
-func (s *SQLiteSessionStorage) reclaimFreePages(ctx context.Context) {
-	if s == nil || s.db == nil {
-		return
-	}
-	_, _ = s.db.ExecContext(ctx, "PRAGMA incremental_vacuum(256)")
 }
 
 func pathWithin(root, target string) bool {
@@ -2694,9 +2702,8 @@ func (s *SQLiteSessionStorage) Cleanup(ctx context.Context, after time.Time) (in
 			removed++
 		}
 	}
-	if removed > 0 {
-		s.reclaimFreePages(ctx)
-	}
+	// 在线页回收已移除（见 applyBootstrapPRAGMAs 注释）：删除后的空闲页留在
+	// freelist，由离线 compaction 回收。
 	return removed, nil
 }
 

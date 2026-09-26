@@ -79,7 +79,6 @@ func (s *SQLiteRuntimeStore) AppendEvents(ctx context.Context, events []runtimee
 		prepared[index] = preparedAppendEvent{event: event, payloadJSON: payloadJSON}
 	}
 
-	s.maintenance.touchWrite()
 	start := time.Now()
 	var seqs []int64
 	err := sqliteutil.RetryWriteTx(ctx, s.trackWriteRetry, func(attemptCtx context.Context) error {

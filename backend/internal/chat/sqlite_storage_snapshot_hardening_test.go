@@ -278,6 +278,13 @@ func TestSnapshotSessionDoesNotBlockCheckpoint(t *testing.T) {
 		t.Fatal("CloseStorage blocked behind a snapshot read transaction")
 	}
 
-	require.GreaterOrEqual(t, store.SnapshotStats().CheckpointBlocked, int64(1),
-		"TRUNCATE 被快照读者阻塞时应降级 PASSIVE 并计数")
+	// 关闭路径现在只做 PASSIVE checkpoint（TRUNCATE 已整体移除，见
+	// sqlite_storage.go 的 Close 注释）：即使快照读者还在，关闭也必须正常返回。
+	// 剩下的可观测约束是磁盘上的 WAL 长度仍受 journal_size_limit 约束
+	// （CheckpointBlocked 只是诊断计数，不作为功能断言）。
+	if info, statErr := os.Stat(store.cfg.Path + "-wal"); statErr == nil {
+		require.LessOrEqual(t, info.Size(), int64(16<<20))
+	} else {
+		require.True(t, os.IsNotExist(statErr), "stat WAL: %v", statErr)
+	}
 }

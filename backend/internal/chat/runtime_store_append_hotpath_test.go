@@ -2,12 +2,10 @@ package chat
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
@@ -142,12 +140,11 @@ func TestSQLiteVersionAtLeast(t *testing.T) {
 	require.False(t, sqliteVersionAtLeast("garbage", "3.35.0"))
 }
 
-func TestPruneRuntimeRowsNoInlineVacuum(t *testing.T) {
+func TestPruneRuntimeRowsKeepsDeleteInTransaction(t *testing.T) {
 	ctx := context.Background()
 	store := newHotpathTestStore(t, &RuntimeStoreConfig{
-		EventRetention:               2,
-		PruneInterval:                2,
-		DisableBackgroundMaintenance: true,
+		EventRetention: 2,
+		PruneInterval:  2,
 	})
 	for index := 1; index <= 4; index++ {
 		seq, err := store.AppendEvent(ctx, runtimeevents.Event{
@@ -161,86 +158,12 @@ func TestPruneRuntimeRowsNoInlineVacuum(t *testing.T) {
 
 	stats := store.AppendTimingStats()
 	require.GreaterOrEqual(t, stats.PruneRuns, int64(1))
-	require.True(t, stats.MaintenancePending, "prune 必须把页回收置为后台 pending")
-	require.Zero(t, stats.VacuumRuns, "写事务内不得再执行 incremental_vacuum")
-}
-
-func TestMaintenanceSingleFlightAndThrottle(t *testing.T) {
-	store := newHotpathTestStore(t, &RuntimeStoreConfig{DisableBackgroundMaintenance: true})
-	require.NoError(t, store.ensure())
-	store.maintenance.lastWriteAt.Store(0)
-
-	entered := make(chan struct{}, 1)
-	block := make(chan struct{})
-	runtimeMaintenanceBeforeVacuumHook = func(ctx context.Context) error {
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
-		select {
-		case <-block:
-		case <-ctx.Done():
-		}
-		return nil
-	}
-	t.Cleanup(func() { runtimeMaintenanceBeforeVacuumHook = nil })
-
-	store.maintenance.pendingVacuum.Store(true)
-	var wait sync.WaitGroup
-	for index := 0; index < 4; index++ {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			store.runMaintenanceOnceForTest(context.Background())
-		}()
-	}
-	<-entered
-	require.Eventually(t, func() bool { return store.maintenance.skippedBusy.Load() == 3 }, 2*time.Second, 5*time.Millisecond)
-	close(block)
-	wait.Wait()
-	require.Equal(t, int64(1), store.maintenance.runs.Load(), "single-flight 只允许一轮执行")
-
-	// 节流：5s 内的第二次触发必须被跳过。
-	store.maintenance.pendingVacuum.Store(true)
-	store.runMaintenanceOnceForTest(context.Background())
-	require.Equal(t, int64(1), store.maintenance.runs.Load())
-	require.GreaterOrEqual(t, store.maintenance.skippedThrottle.Load(), int64(1))
-}
-
-func TestMaintenanceBoundedDeadline(t *testing.T) {
-	store := newHotpathTestStore(t, &RuntimeStoreConfig{DisableBackgroundMaintenance: true})
-	require.NoError(t, store.ensure())
-	store.maintenance.lastWriteAt.Store(0)
-	store.maintenance.testDeadline = 100 * time.Millisecond
-	runtimeMaintenanceBeforeVacuumHook = func(ctx context.Context) error {
-		time.Sleep(300 * time.Millisecond)
-		return nil
-	}
-	t.Cleanup(func() { runtimeMaintenanceBeforeVacuumHook = nil })
-
-	store.maintenance.pendingVacuum.Store(true)
-	start := time.Now()
-	store.runMaintenanceOnceForTest(context.Background())
-	require.Less(t, time.Since(start), 2*time.Second, "维护必须受 deadline 约束")
-}
-
-func TestMaintenanceFailureDoesNotAffectAppend(t *testing.T) {
-	ctx := context.Background()
-	store := newHotpathTestStore(t, &RuntimeStoreConfig{DisableBackgroundMaintenance: true})
-	require.NoError(t, store.ensure())
-	store.maintenance.lastWriteAt.Store(0)
-	runtimeMaintenanceBeforeVacuumHook = func(context.Context) error {
-		return fmt.Errorf("injected vacuum failure")
-	}
-	t.Cleanup(func() { runtimeMaintenanceBeforeVacuumHook = nil })
-
-	store.maintenance.pendingVacuum.Store(true)
-	store.runMaintenanceOnceForTest(ctx)
-	require.Equal(t, int64(1), store.maintenance.failures.Load())
-
-	seq, err := store.AppendEvent(ctx, runtimeevents.Event{Type: "after-failure", SessionID: "maintenance-failure"})
-	require.NoError(t, err)
-	require.Equal(t, int64(1), seq)
+	// 页回收（incremental_vacuum）已整体移除：prune 只做 DELETE，写事务内
+	// 不再有任何在线页回收，删掉的行留在 freelist 由离线 compaction 回收。
+	var remaining int64
+	require.NoError(t, store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM session_events WHERE session_id = ?`, "prune-session").Scan(&remaining))
+	require.Equal(t, int64(2), remaining)
 }
 
 func TestAppendTimingStats(t *testing.T) {
@@ -288,70 +211,6 @@ func TestAppendSQLPathGolden(t *testing.T) {
 	mu.Lock()
 	require.Equal(t, []string{"legacy-select", "legacy-insert"}, paths)
 	mu.Unlock()
-}
-
-func TestMaintenanceDoesNotHoldStoreMutex(t *testing.T) {
-	ctx := context.Background()
-	store := newHotpathTestStore(t, &RuntimeStoreConfig{DisableBackgroundMaintenance: true})
-	require.NoError(t, store.ensure())
-	store.maintenance.lastWriteAt.Store(0)
-
-	entered := make(chan struct{}, 1)
-	block := make(chan struct{})
-	runtimeMaintenanceBeforeVacuumHook = func(ctx context.Context) error {
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
-		<-block
-		return nil
-	}
-	t.Cleanup(func() { runtimeMaintenanceBeforeVacuumHook = nil })
-
-	store.maintenance.pendingVacuum.Store(true)
-	done := make(chan struct{})
-	go func() {
-		store.runMaintenanceOnceForTest(context.Background())
-		close(done)
-	}()
-	<-entered
-
-	start := time.Now()
-	seq, err := store.AppendEvent(ctx, runtimeevents.Event{Type: "concurrent-append", SessionID: "maintenance-concurrency"})
-	require.NoError(t, err)
-	require.Equal(t, int64(1), seq)
-	require.Less(t, time.Since(start), time.Second, "后台维护不得持 s.mu 阻塞 append")
-
-	close(block)
-	<-done
-}
-
-func TestMaintenanceStopOnCloseBounded(t *testing.T) {
-	store := newHotpathTestStore(t, &RuntimeStoreConfig{DisableBackgroundMaintenance: true})
-	require.NoError(t, store.ensure())
-	store.maintenance.lastWriteAt.Store(0)
-	store.maintenance.testDeadline = 2 * time.Second
-
-	entered := make(chan struct{}, 1)
-	release := make(chan struct{})
-	runtimeMaintenanceBeforeVacuumHook = func(ctx context.Context) error {
-		select {
-		case entered <- struct{}{}:
-		default:
-		}
-		<-release
-		return nil
-	}
-	t.Cleanup(func() { runtimeMaintenanceBeforeVacuumHook = nil })
-
-	store.maintenance.pendingVacuum.Store(true)
-	go store.runMaintenanceOnceForTest(context.Background())
-	<-entered
-
-	start := time.Now()
-	require.NoError(t, store.Close())
-	require.Less(t, time.Since(start), 2*time.Second, "Close 对维护的等待必须有界")
-	close(release)
 }
 
 func BenchmarkAppendEventReturning(b *testing.B) {

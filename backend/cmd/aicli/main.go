@@ -431,6 +431,9 @@ func main() {
 	// usage-analytics 分析库维护子命令（rebuild-stats 对账/修复漂移）
 	rootCmd.AddCommand(commands.NewUsageAnalyticsCommand())
 
+	// storage 本地 SQLite 存储维护（离线压缩：独占访问时 VACUUM）
+	rootCmd.AddCommand(commands.NewStorageCommand())
+
 	// balance 账户余额子命令
 	rootCmd.AddCommand(commands.NewBalanceCommand(func() *config.Config {
 		return cfg

@@ -314,22 +314,31 @@ func TestSQLiteRuntimeStoreConfiguresLowMemoryFileConnection(t *testing.T) {
 	assert.Equal(t, 1, store.db.Stats().MaxOpenConnections)
 	var journalMode string
 	require.NoError(t, store.db.QueryRow("PRAGMA journal_mode").Scan(&journalMode))
-	assert.Equal(t, "wal", strings.ToLower(journalMode))
+	assert.Equal(t, strings.ToLower(runtimeJournalMode()), strings.ToLower(journalMode))
 	var cacheSize, mmapSize, tempStore, busyTimeout, autoCheckpoint, journalLimit, autoVacuum int64
 	require.NoError(t, store.db.QueryRow("PRAGMA cache_size").Scan(&cacheSize))
-	require.NoError(t, store.db.QueryRow("PRAGMA mmap_size").Scan(&mmapSize))
+	if err := store.db.QueryRow("PRAGMA mmap_size").Scan(&mmapSize); err != nil {
+		// 新版驱动的 VFS 不支持 mmap 时该 PRAGMA 返回零行，语义等同“未启用”。
+		require.ErrorIs(t, err, sql.ErrNoRows)
+		mmapSize = 0
+	}
 	require.NoError(t, store.db.QueryRow("PRAGMA temp_store").Scan(&tempStore))
 	require.NoError(t, store.db.QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout))
-	require.NoError(t, store.db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&autoCheckpoint))
-	require.NoError(t, store.db.QueryRow("PRAGMA journal_size_limit").Scan(&journalLimit))
+	if runtimeJournalUsesWAL() {
+		require.NoError(t, store.db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&autoCheckpoint))
+		require.NoError(t, store.db.QueryRow("PRAGMA journal_size_limit").Scan(&journalLimit))
+	}
 	require.NoError(t, store.db.QueryRow("PRAGMA auto_vacuum").Scan(&autoVacuum))
 	assert.Equal(t, int64(-768), cacheSize)
 	assert.Zero(t, mmapSize)
 	assert.Equal(t, int64(1), tempStore)
 	assert.Equal(t, int64(2000), busyTimeout)
-	assert.Equal(t, int64(256), autoCheckpoint)
-	assert.Equal(t, int64(16<<20), journalLimit)
-	assert.Equal(t, int64(2), autoVacuum)
+	if runtimeJournalUsesWAL() {
+		assert.Equal(t, int64(256), autoCheckpoint)
+		assert.Equal(t, int64(16<<20), journalLimit)
+	}
+	// 新建库不再启用 auto_vacuum：在线页回收（incremental_vacuum）已整体移除。
+	assert.Zero(t, autoVacuum)
 
 	_, err = store.AppendEvent(context.Background(), runtimeevents.Event{
 		Type:      "wal-test",
@@ -338,8 +347,13 @@ func TestSQLiteRuntimeStoreConfiguresLowMemoryFileConnection(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, store.Close())
+	if !runtimeJournalUsesWAL() {
+		return
+	}
+	// 关闭只做 PASSIVE checkpoint：最后一个连接退出时 SQLite 通常会删除 -wal；
+	// 若因其它读者仍存在而保留，长度也受 journal_size_limit 约束（不再 TRUNCATE）。
 	if info, statErr := os.Stat(dbPath + "-wal"); statErr == nil {
-		assert.Zero(t, info.Size())
+		assert.LessOrEqual(t, info.Size(), int64(16<<20))
 	} else {
 		require.True(t, os.IsNotExist(statErr), "stat WAL: %v", statErr)
 	}
