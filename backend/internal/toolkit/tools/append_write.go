@@ -66,10 +66,10 @@ func NewAppendWriteTool() *AppendWriteTool {
 
 func (w *AppendWriteTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
-		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindEdit,
-		runtimetypes.ToolMetadataReadOnlyKey:        false,
-		runtimetypes.ToolMetadataMutatesFSKey:       true,
-		runtimetypes.ToolMetadataRequiresNetKey:     false,
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindEdit,
+		runtimetypes.ToolMetadataReadOnlyKey:         false,
+		runtimetypes.ToolMetadataMutatesFSKey:        true,
+		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassIdempotencyKeyRequired,
 	}
@@ -141,6 +141,9 @@ func (w *AppendWriteTool) Execute(ctx context.Context, params map[string]interfa
 			OutputKind: toolresult.KindText,
 			Error:      fmt.Errorf("解析文件路径失败: %w", err),
 		}, nil
+	}
+	if ext := documentExtensionRefusal(absPath); ext != "" {
+		return documentRefusalResult("append_write", "以文本追加到", absPath, ext), nil
 	}
 
 	oldContentBytes, readErr := os.ReadFile(absPath)

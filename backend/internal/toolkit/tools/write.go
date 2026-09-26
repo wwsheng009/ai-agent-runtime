@@ -53,10 +53,10 @@ func NewWriteTool() *WriteTool {
 
 func (w *WriteTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
-		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindEdit,
-		runtimetypes.ToolMetadataReadOnlyKey:        false,
-		runtimetypes.ToolMetadataMutatesFSKey:       true,
-		runtimetypes.ToolMetadataRequiresNetKey:     false,
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindEdit,
+		runtimetypes.ToolMetadataReadOnlyKey:         false,
+		runtimetypes.ToolMetadataMutatesFSKey:        true,
+		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassIdempotencyKeyRequired,
 	}
@@ -133,9 +133,28 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 	}
 
 	// 检查文件是否已存在
+	// 设备/FIFO/保留名在任何 I/O 之前拒绝：写 FIFO 会阻塞、写设备会命中
+	// 平台特殊语义；这类目标永远不是普通文件（analysis §3.2）。
+	if reason := unsupportedPathNameReason(absPath); reason != "" {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("不支持的特殊文件（%s）: %s；write 拒绝写入。", reason, absPath),
+			Metadata: map[string]interface{}{
+				"file_path":      absPath,
+				"path_refused":   true,
+				"refusal_reason": reason,
+			},
+		}, nil
+	}
+	if ext := documentExtensionRefusal(absPath); ext != "" {
+		return documentRefusalResult("write", "以文本覆盖", absPath, ext), nil
+	}
 	fileExists := false
 	var oldSize int64 = 0
 	oldContent := ""
+	oldEncoding := fileEncodingUTF8
+	var oldRaw []byte
 	if fileInfo, err := os.Stat(absPath); err == nil {
 		fileExists = true
 		oldSize = fileInfo.Size()
@@ -146,15 +165,26 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 				Error:      w.buildPathKindMismatchError(ctx, "路径是目录，不是文件", p.FilePath),
 			}, nil
 		}
-		if !fileInfo.Mode().IsRegular() {
+		if reason := unsupportedFileModeReason(fileInfo.Mode()); reason != "" {
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
-				Error:      fmt.Errorf("路径已存在但不是常规文件: %s", absPath),
+				Error:      fmt.Errorf("路径已存在但不是常规文件（%s）: %s", reason, absPath),
 			}, nil
 		}
-		if content, readErr := os.ReadFile(absPath); readErr == nil {
-			oldContent = string(content)
+		if raw, readErr := os.ReadFile(absPath); readErr == nil {
+			oldRaw = raw
+			if len(raw) > 0 {
+				oldEncoding, _ = detectFileEncoding(raw)
+				if oldEncoding == fileEncodingUTF8 && isBinaryBytes(raw) {
+					return &toolkit.ToolResult{
+						Success:    false,
+						OutputKind: toolresult.KindText,
+						Error:      fmt.Errorf("目标文件疑似二进制内容，write 拒绝覆盖: %s", absPath),
+					}, nil
+				}
+			}
+			oldContent, oldEncoding = decodeFileBytes(raw)
 		}
 	}
 	currentRevision := writeContentRevision(fileExists, oldContent)
@@ -169,6 +199,13 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 			p.ExpectedSHA256,
 		), nil
 	}
+	staleVerdict := staleWriteVerdict{State: staleWriteStateUnread}
+	if fileExists {
+		staleVerdict = evaluateStaleWrite(ctx, absPath, oldRaw)
+		if p.ExpectedSHA256 == "" && shouldRefuseStaleWrite(staleVerdict) {
+			return staleWriteFailure(absPath, staleVerdict.CurrentSHA, staleVerdict.LastRecord, true), nil
+		}
+	}
 
 	// 创建父目录
 	dir := filepath.Dir(absPath)
@@ -180,8 +217,12 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 		}, nil
 	}
 
-	// 写入文件
-	err = os.WriteFile(absPath, []byte(p.Content), 0644)
+	// 写入文件：按原编码回写（BOM/UTF-16 保真）并原子替换，避免半截文件。
+	encodedContent := []byte(p.Content)
+	if fileExists {
+		encodedContent = encodeFileText(p.Content, oldEncoding)
+	}
+	err = writeFileAtomic(absPath, encodedContent, writeFileModeDefault)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -189,6 +230,7 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 			Error:      fmt.Errorf("写入文件失败: %w", err),
 		}, nil
 	}
+	recordFileWrite(ctx, absPath, encodedContent, "write")
 
 	// 获取新文件信息
 	newInfo, err := os.Stat(absPath)
@@ -205,22 +247,28 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 		action = "覆盖"
 	}
 
+	metadata := map[string]interface{}{
+		"file_path":     absPath,
+		"action":        action,
+		"old_existed":   fileExists,
+		"old_size":      oldSize,
+		"new_size":      newInfo.Size(),
+		"size_changed":  int64(len(encodedContent)) - oldSize,
+		"patch":         buildUnifiedPatch(absPath, oldContent, p.Content),
+		"mutated_paths": []string{absPath},
+		"old_sha256":    currentRevision,
+		"new_sha256":    desiredRevision,
+		"retry_class":   runtimetypes.ToolRetryClassIdempotencyKeyRequired,
+		"encoding":      oldEncoding.String(),
+	}
+	for key, value := range staleWriteMetadata(staleVerdict) {
+		metadata[key] = value
+	}
+
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content:    fmt.Sprintf("成功%s文件: %s\n文件大小: %d 字节", action, absPath, newInfo.Size()),
-		Metadata: map[string]interface{}{
-			"file_path":     absPath,
-			"action":        action,
-			"old_existed":   fileExists,
-			"old_size":      oldSize,
-			"new_size":      newInfo.Size(),
-			"size_changed":  int64(len(p.Content)) - oldSize,
-			"patch":         buildUnifiedPatch(absPath, oldContent, p.Content),
-			"mutated_paths": []string{absPath},
-			"old_sha256":    currentRevision,
-			"new_sha256":    desiredRevision,
-			"retry_class":   runtimetypes.ToolRetryClassIdempotencyKeyRequired,
-		},
+		Metadata:   metadata,
 	}, nil
 }

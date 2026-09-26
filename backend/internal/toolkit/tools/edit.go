@@ -44,7 +44,11 @@ func NewEditTool() *EditTool {
 			},
 			"replace_all": map[string]interface{}{
 				"type":        "boolean",
-				"description": "是否替换所有匹配项（默认为 false，只替换第一处）",
+				"description": "是否替换所有匹配项（默认为 false）。非 replace_all 且 old_string 精确命中多处时会拒绝并回报命中数量/行号，不再静默替换第一处；与 replacement_count 互斥。",
+			},
+			"replacement_count": map[string]interface{}{
+				"type":        "integer",
+				"description": "只替换前 N 处匹配（必须 > 0）；与 replace_all 互斥。仅在同一片段多次出现且确实要改动前 N 处时使用。",
 			},
 		},
 		"required": []string{"file_path", "old_string", "new_string"},
@@ -53,7 +57,7 @@ func NewEditTool() *EditTool {
 	return &EditTool{
 		BaseTool: toolkit.NewBaseTool(
 			"edit",
-			"编辑单个文件：使用 new_string 替换文件中的 old_string；只适合刚确认存在的小范围精确替换，不做模糊匹配。代码编辑、多行替换或上下文可能变化时优先使用 apply_patch。若要改写多个文件或大段内容，请拆分为多个更小的 edit/write 调用，每次只聚焦一个文件和一个替换目标，按章节或按块逐步处理，避免单次参数过大导致截断。",
+			"编辑单个文件：使用 new_string 替换文件中的 old_string；只适合刚确认存在的小范围精确替换，不做语义模糊改写。old_string 命中多处且未显式指定 replace_all/replacement_count 时会拒绝并回报数量与行号。代码编辑、多行替换或上下文可能变化时优先使用 apply_patch。若要改写多个文件或大段内容，请拆分为多个更小的 edit/write 调用，每次只聚焦一个文件和一个替换目标，按章节或按块逐步处理，避免单次参数过大导致截断。",
 			"1.0.0",
 			parameters,
 			true,
@@ -75,11 +79,15 @@ func (e *EditTool) DefinitionMetadata() map[string]interface{} {
 }
 
 type EditParams struct {
-	FilePath   string `json:"file_path"`
-	OldString  string `json:"old_string"`
-	NewString  string `json:"new_string"`
-	ReplaceAll bool   `json:"replace_all,omitempty"`
+	FilePath         string `json:"file_path"`
+	OldString        string `json:"old_string"`
+	NewString        string `json:"new_string"`
+	ReplaceAll       bool   `json:"replace_all,omitempty"`
+	ReplacementCount int    `json:"replacement_count,omitempty"`
 }
+
+// editMaxFileBytes 是 edit 愿意读取/改写的大小上限：超过即拒绝（不做半截编辑）。
+const editMaxFileBytes = 10 * 1024 * 1024
 
 // Execute 实现 Tool 接口
 func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
@@ -134,6 +142,27 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 	if replaceAll, ok := params["replace_all"].(bool); ok {
 		p.ReplaceAll = replaceAll
 	}
+	replacementCountSet := false
+	if count, ok := resolveIntParam(params, "replacement_count"); ok {
+		p.ReplacementCount = count
+		replacementCountSet = true
+	}
+	if replacementCountSet {
+		if p.ReplaceAll {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("replace_all 与 replacement_count 互斥：请二选一（replace_all=true 替换全部，或 replacement_count=N 只替换前 N 处）"),
+			}, nil
+		}
+		if p.ReplacementCount <= 0 {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("replacement_count 必须大于 0（收到 %d）", p.ReplacementCount),
+			}, nil
+		}
+	}
 	resolvedPath := e.resolvePathWithContext(ctx, p.FilePath)
 
 	if err := e.checkPath(runtimeexecutor.OpWrite, resolvedPath); err != nil {
@@ -176,6 +205,22 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 			Error:      e.buildPathKindMismatchError(ctx, "路径是目录，不是文件", p.FilePath),
 		}, nil
 	}
+	if fileInfo.Size() > editMaxFileBytes {
+		return toolResultFailureWithCode(
+			fmt.Errorf("文件大小 %d 字节超过 edit 上限 %d 字节（10 MB）：请改用 shell（sed/python）处理，或先拆分文件", fileInfo.Size(), editMaxFileBytes),
+			string(runtimeerrors.ErrToolInvalidArgs),
+			"edit 只处理不超过 10 MB 的文本文件：请用 shell（sed/python）或拆分文件后再编辑；不要原样重试同一文件。",
+			map[string]interface{}{
+				"file_path":      absPath,
+				"file_size":      fileInfo.Size(),
+				"failure_class":  "file_too_large",
+				"max_file_bytes": int64(editMaxFileBytes),
+			},
+		), nil
+	}
+	if ext := documentExtensionRefusal(absPath); ext != "" {
+		return documentRefusalResult("edit", "以文本编辑", absPath, ext), nil
+	}
 
 	content, err := os.ReadFile(absPath)
 	if err != nil {
@@ -193,7 +238,19 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 
-	contentStr := string(content)
+	if enc, _ := detectFileEncoding(content); enc == fileEncodingUTF8 && isBinaryBytes(content) {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("目标文件疑似二进制内容，edit 拒绝修改: %s", absPath),
+		}, nil
+	}
+	staleVerdict := evaluateStaleWrite(ctx, absPath, content)
+	if shouldRefuseStaleWrite(staleVerdict) {
+		return staleWriteFailure(absPath, staleVerdict.CurrentSHA, staleVerdict.LastRecord, false), nil
+	}
+
+	contentStr, fileEnc := decodeFileBytes(content)
 
 	// 检查 old_string 是否存在
 	// Auto-heal common CRLF/LF mismatches so models do not need a retry
@@ -235,22 +292,56 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 		// 备份失败不阻止编辑，只记录警告（backupPath 保持为空）
 	}
 
+	occurrences := strings.Count(contentStr, matchedOld)
+
+	// 非 replace_all 且精确命中多处：拒绝并回报数量/行号，不再静默替换第一处。
+	if !p.ReplaceAll && !replacementCountSet && occurrences > 1 {
+		lines := editOccurrenceLineNumbers(contentStr, matchedOld, editAmbiguousLineSample)
+		extra := map[string]interface{}{
+			"file_path":     absPath,
+			"failure_class": "ambiguous_edit",
+			"occurrences":   occurrences,
+		}
+		if len(lines) > 0 {
+			extra["occurrence_lines"] = lines
+		}
+		return toolResultFailureWithCode(
+			fmt.Errorf(
+				"ambiguous edit: old_string 命中 %d 处（行 %s），未做替换。请增加上下文让 old_string 唯一，或显式传 replace_all=true / replacement_count=N。",
+				occurrences,
+				formatEditOccurrenceLines(lines, occurrences),
+			),
+			string(runtimeerrors.ErrToolInvalidArgs),
+			"ambiguous old_string: extend old_string with surrounding context until it is unique, or pass replace_all=true / replacement_count=N explicitly. Do not retry the same ambiguous old_string unchanged.",
+			extra,
+		), nil
+	}
+
 	// 执行替换
 	var newContent string
 	var count int
 
-	if p.ReplaceAll {
+	switch {
+	case p.ReplaceAll:
 		// 替换所有匹配项
 		newContent = strings.ReplaceAll(contentStr, matchedOld, matchedNew)
-		count = strings.Count(contentStr, matchedOld)
-	} else {
-		// 只替换第一处
+		count = occurrences
+	case replacementCountSet:
+		// 只替换前 N 处（N 超过命中数时按实际命中数处理）
+		count = p.ReplacementCount
+		if occurrences < count {
+			count = occurrences
+		}
+		newContent = replaceFirstEditOccurrences(contentStr, matchedOld, matchedNew, count)
+	default:
+		// 命中唯一（歧义已在上面拦截）：只替换第一处
 		newContent = strings.Replace(contentStr, matchedOld, matchedNew, 1)
 		count = 1
 	}
 
-	// 写入文件
-	err = os.WriteFile(absPath, []byte(newContent), 0644)
+	// 写入文件：按原编码回写（BOM/UTF-16 保真）并原子替换。
+	encodedContent := encodeFileText(newContent, fileEnc)
+	err = writeFileAtomic(absPath, encodedContent, writeFileModeDefault)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -258,6 +349,7 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 			Error:      fmt.Errorf("写入文件失败: %w", err),
 		}, nil
 	}
+	recordFileWrite(ctx, absPath, encodedContent, "edit")
 
 	// 计算差异
 	oldLen := len(contentStr)
@@ -279,17 +371,30 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 		Metadata: map[string]interface{}{
 			"file_path":     absPath,
 			"replacements":  count,
+			"occurrences":   occurrences,
+			"replace_all":   p.ReplaceAll,
 			"additions":     additions,
 			"removals":      removals,
 			"old_size":      oldLen,
 			"new_size":      newLen,
 			"patch":         patch,
 			"mutated_paths": []string{absPath},
+			"encoding":      fileEnc.String(),
 		},
+	}
+	if replacementCountSet {
+		result.Metadata["replacement_count"] = p.ReplacementCount
+	}
+	if snippet, startLine := findClosestEditSnippetWithLine(newContent, matchedNew); snippet != "" && startLine > 0 {
+		result.Metadata["edited_snippet"] = formatEditClosestLines(snippet, startLine)
+		result.Metadata["edited_snippet_start_line"] = startLine
 	}
 
 	if backupPath != "" {
 		result.Metadata["backup_path"] = backupPath
+	}
+	for key, value := range staleWriteMetadata(staleVerdict) {
+		result.Metadata[key] = value
 	}
 
 	return &result, nil
@@ -418,6 +523,70 @@ func formatEditClosestLines(snippet string, startLine int) string {
 
 func staleEditContextNextAction() string {
 	return "STALE_CONTEXT: copy exact lines from current_snippet / “最接近的当前内容” (or re-view with suggested_view_offset), rebuild a short confirmed old_string from that text, then retry; for multi-line or drifting context prefer apply_patch. Do not retry the same stale old_string unchanged."
+}
+
+// editAmbiguousLineSample 是歧义报错里列出的命中行号上限：只做定位提示，
+// 命中数量本身仍按实际计数完整回报。
+const editAmbiguousLineSample = 20
+
+// editOccurrenceLineNumbers 返回 oldString 每处命中所在的 1-based 行号（最多 max 个）。
+func editOccurrenceLineNumbers(content, oldString string, max int) []int {
+	if oldString == "" {
+		return nil
+	}
+	lines := make([]int, 0, 4)
+	offset := 0
+	for {
+		index := strings.Index(content[offset:], oldString)
+		if index < 0 {
+			break
+		}
+		absolute := offset + index
+		lines = append(lines, 1+strings.Count(content[:absolute], "\n"))
+		if max > 0 && len(lines) >= max {
+			break
+		}
+		offset = absolute + len(oldString)
+	}
+	return lines
+}
+
+// formatEditOccurrenceLines 渲染命中行号列表；样本被截断时补省略号。
+func formatEditOccurrenceLines(lines []int, total int) string {
+	if len(lines) == 0 {
+		return "未知"
+	}
+	parts := make([]string, 0, len(lines)+1)
+	for _, line := range lines {
+		parts = append(parts, fmt.Sprintf("%d", line))
+	}
+	if total > len(lines) {
+		parts = append(parts, "…")
+	}
+	return strings.Join(parts, "、")
+}
+
+// replaceFirstEditOccurrences 只替换前 count 处命中（count <= 0 时原样返回）。
+func replaceFirstEditOccurrences(content, oldString, newString string, count int) string {
+	if count <= 0 || oldString == "" {
+		return content
+	}
+	var builder strings.Builder
+	remaining := count
+	offset := 0
+	for remaining > 0 {
+		index := strings.Index(content[offset:], oldString)
+		if index < 0 {
+			break
+		}
+		absolute := offset + index
+		builder.WriteString(content[offset:absolute])
+		builder.WriteString(newString)
+		offset = absolute + len(oldString)
+		remaining--
+	}
+	builder.WriteString(content[offset:])
+	return builder.String()
 }
 
 // matchEditStrings tries exact then line-ending-normalized matches so models

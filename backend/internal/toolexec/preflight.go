@@ -12,6 +12,7 @@ import (
 
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pathrepair"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -1983,6 +1984,11 @@ func rankNearbyPathCandidates(missing string) []nearbyPathScore {
 
 		score := 0
 		switch {
+		case pathrepair.NormalizeNameForSpelling(nameLower) == pathrepair.NormalizeNameForSpelling(wantLower):
+			// Invisible Unicode spelling mismatch (narrow no-break space, curly
+			// quotes, ...): folded equality is as confident as a case-only
+			// mismatch, so a unique match may be auto-healed (analysis §3.7).
+			score = 100
 		case nameLower == wantLower:
 			// Case-only mismatch is the strongest correction signal.
 			score = 100

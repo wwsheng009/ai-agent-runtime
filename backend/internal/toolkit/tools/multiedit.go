@@ -75,10 +75,10 @@ func NewMultieditTool() *MultieditTool {
 
 func (m *MultieditTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
-		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindEdit,
-		runtimetypes.ToolMetadataReadOnlyKey:        false,
-		runtimetypes.ToolMetadataMutatesFSKey:       true,
-		runtimetypes.ToolMetadataRequiresNetKey:     false,
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindEdit,
+		runtimetypes.ToolMetadataReadOnlyKey:         false,
+		runtimetypes.ToolMetadataMutatesFSKey:        true,
+		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
 	}
@@ -202,6 +202,9 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 			Error:      m.buildPathKindMismatchError(ctx, "路径是目录，不是文件", filePath),
 		}, nil
 	}
+	if ext := documentExtensionRefusal(absPath); ext != "" {
+		return documentRefusalResult("multiedit", "以文本批量编辑", absPath, ext), nil
+	}
 
 	content, err := os.ReadFile(absPath)
 	if err != nil {
@@ -219,7 +222,19 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		}, nil
 	}
 
-	originalContent := string(content)
+	if enc, _ := detectFileEncoding(content); enc == fileEncodingUTF8 && isBinaryBytes(content) {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("目标文件疑似二进制内容，multiedit 拒绝修改: %s", absPath),
+		}, nil
+	}
+	staleVerdict := evaluateStaleWrite(ctx, absPath, content)
+	if shouldRefuseStaleWrite(staleVerdict) {
+		return staleWriteFailure(absPath, staleVerdict.CurrentSHA, staleVerdict.LastRecord, false), nil
+	}
+
+	originalContent, fileEnc := decodeFileBytes(content)
 	result := originalContent
 	appliedEdits := 0
 	failedEdits := make([]string, 0)
@@ -296,14 +311,16 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		return toolResultFailureWithCode(fmt.Errorf("%s", detail), "", "", meta), nil
 	}
 
-	// 写回文件
-	if err := os.WriteFile(absPath, []byte(result), 0644); err != nil {
+	// 写回文件：按原编码回写并原子替换。
+	encodedResult := encodeFileText(result, fileEnc)
+	if err := writeFileAtomic(absPath, encodedResult, writeFileModeDefault); err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
 			Error:      fmt.Errorf("无法写入文件: %w", err),
 		}, nil
 	}
+	recordFileWrite(ctx, absPath, encodedResult, "multiedit")
 
 	// 计算统计信息
 	linesBefore := len(strings.Split(originalContent, "\n"))
@@ -330,9 +347,13 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		"size_difference": len(result) - len(originalContent),
 		"patch":           buildUnifiedPatch(absPath, originalContent, result),
 		"mutated_paths":   []string{absPath},
+		"encoding":        fileEnc.String(),
 	}
 	if len(failedItems) > 0 {
 		meta[toolresult.MetadataFailedItemsKey] = failedItems
+	}
+	for key, value := range staleWriteMetadata(staleVerdict) {
+		meta[key] = value
 	}
 
 	return &toolkit.ToolResult{

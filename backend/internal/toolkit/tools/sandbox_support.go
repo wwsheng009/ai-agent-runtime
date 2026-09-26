@@ -133,6 +133,14 @@ func (p *sandboxPolicy) buildPathKindMismatchError(ctx context.Context, prefix, 
 }
 
 func (p *sandboxPolicy) checkPath(op runtimeexecutor.PermissionOp, targetPath string) error {
+	// 设备/流路径（NUL/CON/COM1、\\.\、\\?\GLOBALROOT、/dev/null、
+	// /proc/<pid>/fd/*）在任何文件工具里都不是常规文件：写 NUL 会静默成功、
+	// 读 /dev/zero 永不结束。该拒绝是路径形状不变量，与 sandbox 是否激活无关，
+	// 因此放在 sandbox 早退之前，让 view/write/edit/glob/grep 等所有文件工具
+	// 共用同一道门（view 在此之上还保留了 path_refused 结果元数据）。
+	if reason := unsupportedPathNameReason(targetPath); reason != "" {
+		return devicePathRefusalError(targetPath, reason)
+	}
 	if p == nil || p.sandbox == nil {
 		return nil
 	}
