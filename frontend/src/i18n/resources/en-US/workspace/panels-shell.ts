@@ -105,6 +105,12 @@ export const enWorkspacePanelsShell = {
         approve: "Approve",
         reject: "Reject",
         resolving: "Submitting…",
+        remember: "Remember this approval",
+        rememberScopeLabel: "Remember scope",
+        rememberScopeSession: "This session only",
+        rememberScopeProject: "This project (survives new sessions)",
+        rememberPattern: "Will remember: {{pattern}}",
+        feedbackPlaceholder: "Note (optional, forwarded to the model)",
       },
     },
     fields: {

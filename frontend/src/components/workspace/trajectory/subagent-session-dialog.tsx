@@ -11,6 +11,7 @@ import { RefreshCwIcon, XIcon } from "lucide-react";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
+import { ApprovalDecisionControls } from "@/components/workspace/approval-decision-controls";
 import {
   useSubagentSession,
   type SubagentSessionStatus,
@@ -207,55 +208,74 @@ export function SubagentSessionDialog({
         */}
         {pendingApproval ? (
           <div
-            className="flex flex-wrap items-center gap-2 border-b border-border bg-surface-soft px-3 py-2"
+            className="space-y-1.5 border-b border-border bg-surface-soft px-3 py-2"
             data-subagent-session-approval
           >
-            <span className="app-text-12 font-medium text-foreground">
-              {t("panels.shell.trajectory.subagentSession.approval.title", {
-                tool:
-                  pendingApproval.toolName ??
-                  t(
-                    "panels.shell.trajectory.subagentSession.approval.unknownTool",
-                  ),
-              })}
-            </span>
-            {pendingApproval.riskLevel ? (
-              <span className="shrink-0 rounded-full border border-border bg-surface-solid px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
-                {t("panels.shell.trajectory.subagentSession.approval.risk", {
-                  level: pendingApproval.riskLevel,
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="app-text-12 font-medium text-foreground">
+                {t("panels.shell.trajectory.subagentSession.approval.title", {
+                  tool:
+                    pendingApproval.toolName ??
+                    t(
+                      "panels.shell.trajectory.subagentSession.approval.unknownTool",
+                    ),
                 })}
               </span>
-            ) : null}
-            {pendingApproval.reason ? (
-              <span
-                className="min-w-0 flex-1 truncate app-text-11 text-muted-foreground"
-                title={pendingApproval.reason}
-              >
-                {pendingApproval.reason}
-              </span>
-            ) : (
-              <span className="min-w-0 flex-1" />
-            )}
-            <button
-              className="shrink-0 rounded-md border border-accent-teal/60 bg-accent-teal/10 px-2.5 py-1 app-text-11 font-medium text-accent-teal transition hover:bg-accent-teal/20 disabled:cursor-not-allowed disabled:opacity-60"
-              data-subagent-session-approval-approve
+              {pendingApproval.riskLevel ? (
+                <span className="shrink-0 rounded-full border border-border bg-surface-solid px-2 py-0.5 app-text-10 uppercase tracking-[0.12em] text-muted-foreground">
+                  {t("panels.shell.trajectory.subagentSession.approval.risk", {
+                    level: pendingApproval.riskLevel,
+                  })}
+                </span>
+              ) : null}
+              {pendingApproval.reason ? (
+                <span
+                  className="min-w-0 flex-1 truncate app-text-11 text-muted-foreground"
+                  title={pendingApproval.reason}
+                >
+                  {pendingApproval.reason}
+                </span>
+              ) : null}
+            </div>
+            {/* §4.8：子会话审批与主会话共用同一决定控件（记住作用域 + 说明）。 */}
+            <ApprovalDecisionControls
+              key={pendingApproval.requestId}
+              approveAttrs={{ "data-subagent-session-approval-approve": "" }}
               disabled={resolvingApproval}
-              onClick={() => void resolveApproval(true)}
-              type="button"
-            >
-              {resolvingApproval
-                ? t("panels.shell.trajectory.subagentSession.approval.resolving")
-                : t("panels.shell.trajectory.subagentSession.approval.approve")}
-            </button>
-            <button
-              className="shrink-0 rounded-md border border-border bg-surface-solid px-2.5 py-1 app-text-11 text-muted-foreground transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
-              data-subagent-session-approval-reject
-              disabled={resolvingApproval}
-              onClick={() => void resolveApproval(false)}
-              type="button"
-            >
-              {t("panels.shell.trajectory.subagentSession.approval.reject")}
-            </button>
+              labels={{
+                busyApprove: t(
+                  "panels.shell.trajectory.subagentSession.approval.resolving",
+                ),
+                remember: t(
+                  "panels.shell.trajectory.subagentSession.approval.remember",
+                ),
+                rememberScopeLabel: t(
+                  "panels.shell.trajectory.subagentSession.approval.rememberScopeLabel",
+                ),
+                rememberScopeSession: t(
+                  "panels.shell.trajectory.subagentSession.approval.rememberScopeSession",
+                ),
+                rememberScopeProject: t(
+                  "panels.shell.trajectory.subagentSession.approval.rememberScopeProject",
+                ),
+                rememberPattern: t(
+                  "panels.shell.trajectory.subagentSession.approval.rememberPattern",
+                  { pattern: pendingApproval.rememberPattern ?? "" },
+                ),
+                feedbackPlaceholder: t(
+                  "panels.shell.trajectory.subagentSession.approval.feedbackPlaceholder",
+                ),
+                approve: t(
+                  "panels.shell.trajectory.subagentSession.approval.approve",
+                ),
+                deny: t(
+                  "panels.shell.trajectory.subagentSession.approval.reject",
+                ),
+              }}
+              rejectAttrs={{ "data-subagent-session-approval-reject": "" }}
+              rememberPattern={pendingApproval.rememberPattern}
+              onDecide={(allow, options) => void resolveApproval(allow, options)}
+            />
           </div>
         ) : null}
 

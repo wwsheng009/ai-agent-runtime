@@ -104,6 +104,12 @@ export const zhWorkspacePanelsShell = {
         approve: "批准",
         reject: "拒绝",
         resolving: "提交中…",
+        remember: "记住此授权",
+        rememberScopeLabel: "记忆范围",
+        rememberScopeSession: "仅本会话",
+        rememberScopeProject: "本项目（新会话仍生效）",
+        rememberPattern: "将记住：{{pattern}}",
+        feedbackPlaceholder: "说明（可选，会转达给模型）",
       },
     },
     fields: {

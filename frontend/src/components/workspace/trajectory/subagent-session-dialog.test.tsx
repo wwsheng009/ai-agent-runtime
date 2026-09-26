@@ -241,6 +241,70 @@ describe("SubagentSessionDialog", () => {
     expect(container.querySelector("[data-subagent-session-approval-error]")).toBeNull();
   });
 
+  it("§4.8：子会话审批支持记住作用域与说明（记住只在批准时提交）", async () => {
+    const stream = captureStream();
+
+    await act(async () => {
+      renderDialog({ sessionId: "child-1" });
+    });
+    await flush();
+
+    await act(async () => {
+      stream.emit(
+        approvalEvent(1, "approval-42", { remember_pattern: "cmd:git:*" }),
+      );
+    });
+
+    // 后端下发的建议记忆模式：勾选前即可核对。
+    const bar = container.querySelector("[data-subagent-session-approval]");
+    expect(bar?.textContent).toContain("cmd:git:*");
+
+    const remember = container.querySelector<HTMLInputElement>(
+      'input[type="checkbox"]',
+    );
+    expect(remember).not.toBeNull();
+    act(() => {
+      remember?.click();
+    });
+
+    const select = container.querySelector<HTMLSelectElement>("select");
+    expect(select).not.toBeNull();
+    act(() => {
+      if (select) {
+        select.value = "project";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    const feedback = container.querySelector<HTMLInputElement>(
+      'input:not([type="checkbox"])',
+    );
+    expect(feedback).not.toBeNull();
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(feedback, "别动 lockfile");
+      feedback?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const approve = container.querySelector<HTMLButtonElement>(
+      "[data-subagent-session-approval-approve]",
+    );
+    await act(async () => {
+      approve?.click();
+    });
+    await flush();
+
+    expect(resolveSessionToolApproval).toHaveBeenCalledWith("child-1", {
+      requestId: "approval-42",
+      allow: true,
+      rememberScope: "project",
+      feedback: "别动 lockfile",
+    });
+  });
+
   it("inline 审批：提交失败保留入口并显示原因，approval_resolved 只清除匹配请求", async () => {
     const stream = captureStream();
     resolveSessionToolApproval.mockRejectedValue(new Error("network down"));
