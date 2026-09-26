@@ -7,7 +7,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
@@ -19,6 +21,12 @@ import (
 const (
 	defaultGlobLimit = 100
 	maxGlobLimit     = 1000
+	// globFetchHardCap 限制「offset+limit」一次抓取的候选量：分页是给模型
+	// 翻页用的，不应该变成把整棵目录树读进内存的借口。
+	globFetchHardCap = 5000
+	// globSearchBudget 是单次 glob 的搜索预算：超时返回已收集结果
+	// （timed_out=true），而不是让整次调用失败。
+	globSearchBudget = 20 * time.Second
 )
 
 // GlobTool 文件名模式匹配工具
@@ -55,9 +63,15 @@ func NewGlobTool() *GlobTool {
 			},
 			"limit": map[string]interface{}{
 				"type":        "integer",
-				"description": "最多返回的匹配数量（默认为 100，最大 1000）",
+				"description": "最多返回的匹配数量（默认为 100，最大 1000）。结果按 mtime 从新到旧排序，可用 offset/limit 分页。",
 				"default":     defaultGlobLimit,
 				"maximum":     maxGlobLimit,
+			},
+			"offset": map[string]interface{}{
+				"type":        "integer",
+				"description": "跳过按 mtime 排序后的前 N 个匹配（默认 0），配合 limit 翻页；返回的 next_offset 可直接用于下一页。",
+				"default":     0,
+				"minimum":     0,
 			},
 		},
 		"required": []string{"pattern"},
@@ -66,7 +80,7 @@ func NewGlobTool() *GlobTool {
 	return &GlobTool{
 		BaseTool: toolkit.NewBaseTool(
 			"glob",
-			"文件名/路径模式匹配搜索，不搜索文件内容。支持 * ? [] **；常见 shell brace（*.{go,ts}）会自动展开。递归文件匹配优先用 rg --files；目录匹配、单层匹配或 rg 不可用时回退内置遍历。大小写不确定时用 case_insensitive=true。",
+			"文件名/路径模式匹配搜索，不搜索文件内容。支持 * ? [] **；常见 shell brace（*.{go,ts}）会自动展开。结果按 mtime 从新到旧排序，可用 offset/limit 分页（next_offset 续读）。递归文件匹配优先用 rg --files；目录匹配、单层匹配或 rg 不可用时回退内置遍历；20s 预算内未完成会返回已收集的部分结果（timed_out=true）。大小写不确定时用 case_insensitive=true。",
 			"1.0.0",
 			parameters,
 			true,
@@ -149,6 +163,18 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}
 		limit = parsedLimit
 	}
+	offset := 0
+	if rawOffset, ok := params["offset"]; ok && rawOffset != nil {
+		parsedOffset, err := parseGlobOffset(rawOffset)
+		if err != nil {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      err,
+			}, nil
+		}
+		offset = parsedOffset
+	}
 	caseInsensitive, _ := resolveBoolParam(params, "case_insensitive", "ignore_case")
 
 	expandedPatterns := expandShellBraceGlobs(pattern)
@@ -160,7 +186,22 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// Residual brace that could not be expanded still needs recovery guidance.
 	braceUnsupported := looksLikeUnsupportedBraceGlob(pattern) && !braceExpanded
 
-	matches, truncated, engine, err := g.findMatchesMulti(ctx, resolvedSearchPath, expandedPatterns, searchPathInfo.IsDir(), limit, caseInsensitive)
+	// 抓取 offset+limit 个候选（硬上限 globFetchHardCap）：排序后分页，早停
+	// 只会丢「更旧」的匹配，不会让下一页缺项。
+	fetchLimit := limit
+	if offset > 0 {
+		fetchLimit = offset + limit
+	}
+	fetchClipped := false
+	if fetchLimit > globFetchHardCap {
+		fetchLimit = globFetchHardCap
+		fetchClipped = offset+limit > globFetchHardCap
+	}
+
+	// 搜索预算：超时返回已收集结果（timed_out=true），而不是整体失败。
+	searchCtx, cancelSearch := context.WithTimeout(ctx, globSearchBudget)
+	defer cancelSearch()
+	matches, truncated, timedOut, engine, err := g.findMatchesMulti(searchCtx, resolvedSearchPath, expandedPatterns, searchPathInfo.IsDir(), fetchLimit, caseInsensitive)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
@@ -168,6 +209,21 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 			Error:      fmt.Errorf("glob 匹配失败: %w", err),
 		}, nil
 	}
+	// mtime 从新到旧（同 mtime 按路径）→ offset/limit 分页。
+	ordered := sortGlobMatchesByModTime(resolvedSearchPath, matches)
+	pageStart := offset
+	if pageStart > len(ordered) {
+		pageStart = len(ordered)
+	}
+	page := ordered[pageStart:]
+	if len(page) > limit {
+		page = page[:limit]
+		truncated = true
+	}
+	if fetchClipped {
+		truncated = true
+	}
+	hasMore := truncated || len(ordered) > pageStart+len(page)
 
 	// 格式化输出。结果集同时受 limit 与 glob 自身字节预算约束：预算内截断
 	// 同样标记 truncated，绝不把已定形的列表交给 L4 二次折叠。
@@ -176,19 +232,24 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	if braceUnsupported {
 		braceHint = "（检测到无法安全展开的 shell brace 语法如 *.{a,b}；请拆成多次 pattern 调用，或改用 grep include/glob 数组。）"
 	}
-	rendered := matches
-	if len(matches) == 0 {
+	rendered := page
+	if len(page) == 0 {
 		output = "未找到匹配项" + braceHint
+		if hasMore {
+			output += globPaginationNotice(offset, offset, offset)
+		}
 	} else {
 		// 截断提示与文件列表同属 glob 的字节预算：先按最坏情况预留提示长度，
 		// 列表只在剩余额度内写入，payload 才真正不超过 globOutputBudgetBytes。
-		listingBudget := globOutputBudgetBytes - len(globTruncationNotice(len(matches)))
+		noticeReserve := len(globTruncationNotice(pageStart+len(page))) +
+			len(globPaginationNotice(offset, offset+len(page), offset+len(page)))
+		listingBudget := globOutputBudgetBytes - noticeReserve
 		if listingBudget < 0 {
 			listingBudget = 0
 		}
 		used := 0
 		kept := 0
-		for _, match := range matches {
+		for _, match := range page {
 			lineBytes := len(match) + 1
 			if kept > 0 && used+lineBytes > listingBudget {
 				break
@@ -196,27 +257,41 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 			used += lineBytes
 			kept++
 		}
-		if kept < len(matches) {
-			rendered = matches[:kept]
+		if kept < len(page) {
+			rendered = page[:kept]
 			truncated = true
 		}
 		output = strings.Join(rendered, "\n")
 		if truncated {
-			output += globTruncationNotice(len(rendered))
+			output += globTruncationNotice(pageStart + len(rendered))
 		}
+		if hasMore {
+			nextOffset := offset + len(rendered)
+			output += globPaginationNotice(offset, nextOffset, nextOffset)
+		}
+	}
+	if timedOut {
+		output += globTimeoutNotice()
 	}
 
 	metadata := map[string]interface{}{
 		"pattern":          pattern,
 		"path":             searchPath,
 		"limit":            limit,
+		"offset":           offset,
 		"case_insensitive": caseInsensitive,
 		"count":            len(rendered), // 兼容字段：返回数量
 		"returned_count":   len(rendered),
 		"files":            append([]string(nil), rendered...),
 		"truncated":        truncated, // 兼容字段：是否被截断
 		"limit_hit":        truncated,
+		"has_more":         hasMore,
+		"next_offset":      offset + len(rendered),
 		"engine":           engine,
+	}
+	if timedOut {
+		metadata["timed_out"] = true
+		metadata[toolresult.MetadataNextActionKey] = "glob 在 20s 搜索预算内未完成：以上是已收集的部分结果。请收窄 path 或 pattern 后重试，或改用 shell 运行 rg --files 直接列出文件；不要原样重试同一调用。"
 	}
 	backendCommand := "builtin-walker"
 	backendPath := ""
@@ -239,10 +314,14 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	}
 	// True no-match success: stamp empty disposition for model recovery
 	// (broaden pattern / change path) without treating as hard failure.
-	if len(matches) == 0 && !truncated {
-		toolresult.MarkEmptySuccess(metadata)
-		if braceUnsupported {
-			metadata[toolresult.MetadataNextActionKey] = "glob 无法安全展开该 shell brace pattern（如过大或畸形 *.{go,ts}）。请拆成多次 pattern 调用（*.go、*.ts），或改用 toolkit grep 的 include/glob 数组。不要原样重试同一 brace pattern。"
+	if len(page) == 0 && !truncated && !timedOut {
+		if offset > 0 && len(ordered) > 0 {
+			metadata[toolresult.MetadataNextActionKey] = "offset 超出本次抓取的结果窗口：请减小 offset，或收窄 pattern/path 后重新分页（深分页受 5000 条硬上限保护）。"
+		} else {
+			toolresult.MarkEmptySuccess(metadata)
+			if braceUnsupported {
+				metadata[toolresult.MetadataNextActionKey] = "glob 无法安全展开该 shell brace pattern（如过大或畸形 *.{go,ts}）。请拆成多次 pattern 调用（*.go、*.ts），或改用 toolkit grep 的 include/glob 数组。不要原样重试同一 brace pattern。"
+			}
 		}
 	}
 
@@ -262,11 +341,88 @@ func globTruncationNotice(total int) string {
 	return fmt.Sprintf("\n\n(结果已截断，显示前 %d 个文件)", total)
 }
 
+// globPaginationNotice 告诉模型当前页在排序后结果中的位置与下一页 offset。
+func globPaginationNotice(start, end, next int) string {
+	return fmt.Sprintf("\n(显示第 %d-%d 个文件；next_offset=%d 可继续分页)", start+1, end, next)
+}
+
+// globTimeoutNotice 标记「预算耗尽、结果是部分结果」，避免模型把它当成完整列表。
+func globTimeoutNotice() string {
+	return "\n(搜索预算 20s 内未完成：以上是已收集的部分结果；请收窄 path/pattern 后重试，或改用 shell 运行 rg --files)"
+}
+
+// parseGlobOffset 解析 offset：非负整数，0 表示不跳过。
+func parseGlobOffset(raw interface{}) (int, error) {
+	var offset int64
+	switch v := raw.(type) {
+	case int:
+		offset = int64(v)
+	case int8:
+		offset = int64(v)
+	case int16:
+		offset = int64(v)
+	case int32:
+		offset = int64(v)
+	case int64:
+		offset = v
+	case float32:
+		offset = int64(v)
+	case float64:
+		offset = int64(v)
+	case json.Number:
+		parsed, err := v.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("offset 参数无效")
+		}
+		offset = parsed
+	default:
+		return 0, fmt.Errorf("offset 参数无效")
+	}
+	if offset < 0 {
+		return 0, fmt.Errorf("offset 参数不能为负数")
+	}
+	if offset > globFetchHardCap {
+		offset = globFetchHardCap
+	}
+	return int(offset), nil
+}
+
+// sortGlobMatchesByModTime 按 mtime 从新到旧排序（同 mtime 按路径升序）。
+// 匹配项是相对 resolvedSearchPath 的路径；stat 失败按零值时间处理（排在最后）。
+func sortGlobMatchesByModTime(root string, matches []string) []string {
+	if len(matches) == 0 {
+		return nil
+	}
+	type globModEntry struct {
+		rel string
+		mod time.Time
+	}
+	entries := make([]globModEntry, len(matches))
+	for index, match := range matches {
+		mod := time.Time{}
+		if info, err := os.Stat(filepath.Join(root, match)); err == nil {
+			mod = info.ModTime()
+		}
+		entries[index] = globModEntry{rel: match, mod: mod}
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if !entries[i].mod.Equal(entries[j].mod) {
+			return entries[i].mod.After(entries[j].mod)
+		}
+		return entries[i].rel < entries[j].rel
+	})
+	ordered := make([]string, len(entries))
+	for index := range entries {
+		ordered[index] = entries[index].rel
+	}
+	return ordered
+}
+
 // findMatchesMulti unions results across expanded brace patterns while
 // respecting the shared limit and de-duplicating paths.
-func (g *GlobTool) findMatchesMulti(ctx context.Context, resolvedSearchPath string, patterns []string, rootIsDir bool, limit int, caseInsensitive bool) ([]string, bool, string, error) {
+func (g *GlobTool) findMatchesMulti(ctx context.Context, resolvedSearchPath string, patterns []string, rootIsDir bool, limit int, caseInsensitive bool) ([]string, bool, bool, string, error) {
 	if len(patterns) == 0 {
-		return nil, false, "builtin", nil
+		return nil, false, false, "builtin", nil
 	}
 	if len(patterns) == 1 {
 		return g.findMatches(ctx, resolvedSearchPath, patterns[0], rootIsDir, limit, caseInsensitive)
@@ -275,6 +431,7 @@ func (g *GlobTool) findMatchesMulti(ctx context.Context, resolvedSearchPath stri
 	matches := make([]string, 0, 16)
 	seen := make(map[string]struct{}, 16)
 	engine := "builtin"
+	timedOut := false
 	for _, pattern := range patterns {
 		// Request one extra across every alternative so an exact limit from an
 		// early pattern does not falsely imply truncation when later patterns are empty.
@@ -282,9 +439,12 @@ func (g *GlobTool) findMatchesMulti(ctx context.Context, resolvedSearchPath stri
 		if limit > 0 {
 			requestLimit = limit + 1
 		}
-		part, partTruncated, partEngine, err := g.findMatches(ctx, resolvedSearchPath, pattern, rootIsDir, requestLimit, caseInsensitive)
+		part, partTruncated, partTimedOut, partEngine, err := g.findMatches(ctx, resolvedSearchPath, pattern, rootIsDir, requestLimit, caseInsensitive)
 		if err != nil {
-			return nil, false, partEngine, err
+			return nil, false, false, partEngine, err
+		}
+		if partTimedOut {
+			timedOut = true
 		}
 		if partEngine != "" {
 			engine = partEngine
@@ -296,37 +456,41 @@ func (g *GlobTool) findMatchesMulti(ctx context.Context, resolvedSearchPath stri
 			seen[match] = struct{}{}
 			matches = append(matches, match)
 			if limit > 0 && len(matches) > limit {
-				return matches[:limit], true, engine, nil
+				return matches[:limit], true, timedOut, engine, nil
 			}
 		}
 		if partTruncated {
 			// The child search omitted results. Ordinarily requestLimit guarantees
 			// enough returned rows to hit the shared limit; keep the flag defensive.
 			if limit > 0 && len(matches) >= limit {
-				return matches[:limit], true, engine, nil
+				return matches[:limit], true, timedOut, engine, nil
 			}
-			return matches, true, engine, nil
+			return matches, true, timedOut, engine, nil
+		}
+		if timedOut {
+			// 预算已耗尽：不再尝试其余 brace 变体，返回并集的部分结果。
+			return matches, false, true, engine, nil
 		}
 	}
-	return matches, false, engine, nil
+	return matches, false, timedOut, engine, nil
 }
 
-func (g *GlobTool) findMatches(ctx context.Context, resolvedSearchPath, pattern string, rootIsDir bool, limit int, caseInsensitive bool) ([]string, bool, string, error) {
+func (g *GlobTool) findMatches(ctx context.Context, resolvedSearchPath, pattern string, rootIsDir bool, limit int, caseInsensitive bool) ([]string, bool, bool, string, error) {
 	compiled := compileGlobPattern(pattern)
 	if compiled.normalized == "" {
-		return nil, false, "builtin", nil
+		return nil, false, false, "builtin", nil
 	}
 	if matches, handled, err := g.findExactMatches(resolvedSearchPath, compiled, rootIsDir, caseInsensitive); handled || err != nil {
-		return matches, false, "builtin", err
+		return matches, false, false, "builtin", err
 	}
-	if matches, truncated, used, err := g.findMatchesWithRipgrep(ctx, resolvedSearchPath, compiled, rootIsDir, limit, caseInsensitive); err != nil {
-		return nil, false, "rg", err
+	if matches, truncated, timedOut, used, err := g.findMatchesWithRipgrep(ctx, resolvedSearchPath, compiled, rootIsDir, limit, caseInsensitive); err != nil {
+		return nil, false, false, "rg", err
 	} else if used {
-		return matches, truncated, "rg", nil
+		return matches, truncated, timedOut, "rg", nil
 	}
 	if rootIsDir && len(compiled.parts) == 1 && compiled.parts[0] != "**" {
-		matches, truncated, err := g.findMatchesInCurrentDir(resolvedSearchPath, compiled, limit, caseInsensitive)
-		return matches, truncated, "builtin", err
+		matches, truncated, timedOut, err := g.findMatchesInCurrentDir(ctx, resolvedSearchPath, compiled, limit, caseInsensitive)
+		return matches, truncated, timedOut, "builtin", err
 	}
 	walkRoot := resolvedSearchPath
 	walkPrefixParts := make([]string, 0, len(compiled.parts))
@@ -335,32 +499,32 @@ func (g *GlobTool) findMatches(ctx context.Context, resolvedSearchPath, pattern 
 			candidateRoot := filepath.Join(resolvedSearchPath, filepath.FromSlash(prefix))
 			if _, err := os.Stat(candidateRoot); err != nil {
 				if os.IsNotExist(err) {
-					return nil, false, "builtin", nil
+					return nil, false, false, "builtin", nil
 				}
-				return nil, false, "builtin", err
+				return nil, false, false, "builtin", err
 			}
 			walkRoot = candidateRoot
 			walkPrefixParts = splitGlobSegments(prefix)
 		}
 	}
 	matches := make([]string, 0, 16)
-	truncated, err := g.walkGlobTree(walkRoot, walkPrefixParts, compiled, &matches, limit, caseInsensitive)
+	truncated, timedOut, err := g.walkGlobTree(ctx, walkRoot, walkPrefixParts, compiled, &matches, limit, caseInsensitive)
 	if err != nil {
-		return nil, false, "builtin", err
+		return nil, false, false, "builtin", err
 	}
-	return matches, truncated, "builtin", nil
+	return matches, truncated, timedOut, "builtin", nil
 }
 
-func (g *GlobTool) findMatchesWithRipgrep(ctx context.Context, resolvedSearchPath string, compiled compiledGlobPattern, rootIsDir bool, limit int, caseInsensitive bool) ([]string, bool, bool, error) {
+func (g *GlobTool) findMatchesWithRipgrep(ctx context.Context, resolvedSearchPath string, compiled compiledGlobPattern, rootIsDir bool, limit int, caseInsensitive bool) ([]string, bool, bool, bool, error) {
 	if !shouldUseRipgrepGlob(rootIsDir, compiled) {
-		return nil, false, false, nil
+		return nil, false, false, false, nil
 	}
 	if g == nil || g.lookPath == nil || g.runCommand == nil {
-		return nil, false, false, nil
+		return nil, false, false, false, nil
 	}
 	rgPath, err := g.lookPath("rg")
 	if err != nil || strings.TrimSpace(rgPath) == "" {
-		return nil, false, false, nil
+		return nil, false, false, false, nil
 	}
 
 	globFlag := "--glob"
@@ -371,14 +535,28 @@ func (g *GlobTool) findMatchesWithRipgrep(ctx context.Context, resolvedSearchPat
 	output, err := g.runCommand(ctx, rgPath, resolvedSearchPath, args)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, false, true, ctxErr
+			// 预算/取消：已产出的 stdout 当作部分结果返回（truncated+timedOut），
+			// 完全没有产出时才如实返回错误。
+			if len(strings.TrimSpace(string(output))) > 0 {
+				matches, _ := collectRipgrepGlobMatches(output, compiled, limit, caseInsensitive)
+				return matches, true, true, true, nil
+			}
+			return nil, false, false, true, ctxErr
 		}
 		if isRipgrepNoMatch(err) {
-			return nil, false, true, nil
+			return nil, false, false, true, nil
 		}
-		return nil, false, false, nil
+		return nil, false, false, false, nil
 	}
 
+	matches, truncated := collectRipgrepGlobMatches(output, compiled, limit, caseInsensitive)
+	return matches, truncated, false, true, nil
+}
+
+// collectRipgrepGlobMatches 解析 rg --files 输出并套用 glob 匹配与上限。
+// 部分输出可能截断在半个路径/半个 UTF-8 字符上：这里跳过无法解析的行，
+// 而不是让整次搜索失败（预算耗尽的场景由调用方标记 timed_out）。
+func collectRipgrepGlobMatches(output []byte, compiled compiledGlobPattern, limit int, caseInsensitive bool) ([]string, bool) {
 	matches := make([]string, 0, 16)
 	truncated := false
 	for _, rawLine := range strings.Split(string(output), "\n") {
@@ -389,7 +567,7 @@ func (g *GlobTool) findMatchesWithRipgrep(ctx context.Context, resolvedSearchPat
 		normalized := normalizeGlobPattern(line)
 		matched, err := compiled.matchCandidate(splitGlobSegments(normalized), caseInsensitive)
 		if err != nil {
-			return nil, false, true, err
+			continue
 		}
 		if !matched {
 			continue
@@ -400,51 +578,64 @@ func (g *GlobTool) findMatchesWithRipgrep(ctx context.Context, resolvedSearchPat
 		}
 		matches = append(matches, filepath.FromSlash(normalized))
 	}
-	return matches, truncated, true, nil
+	return matches, truncated
 }
 
-func (g *GlobTool) walkGlobTree(absDir string, relParts []string, compiled compiledGlobPattern, matches *[]string, limit int, caseInsensitive bool) (bool, error) {
+func (g *GlobTool) walkGlobTree(ctx context.Context, absDir string, relParts []string, compiled compiledGlobPattern, matches *[]string, limit int, caseInsensitive bool) (bool, bool, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return len(*matches) > 0, true, nil
+		}
+	}
 	if limit > 0 && len(*matches) >= limit {
-		return true, nil
+		return true, false, nil
 	}
 	entries, err := os.ReadDir(absDir)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	for _, entry := range entries {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return true, true, nil
+			}
+		}
 		if limit > 0 && len(*matches) >= limit {
-			return true, nil
+			return true, false, nil
 		}
 		name := entry.Name()
 		relParts = append(relParts, name)
 		matched, err := compiled.matchCandidate(relParts, caseInsensitive)
 		if err != nil {
 			relParts = relParts[:len(relParts)-1]
-			return false, err
+			return false, false, err
 		}
 		canDescend := entry.IsDir() && canDescendGlobParts(compiled, relParts, caseInsensitive)
 		if matched {
 			*matches = append(*matches, filepath.Join(relParts...))
 			if limit > 0 && len(*matches) >= limit {
 				relParts = relParts[:len(relParts)-1]
-				return true, nil
+				return true, false, nil
 			}
 		}
 		if entry.IsDir() && canDescend {
 			nextDir := filepath.Join(absDir, name)
-			truncated, err := g.walkGlobTree(nextDir, relParts, compiled, matches, limit, caseInsensitive)
+			truncated, timedOut, err := g.walkGlobTree(ctx, nextDir, relParts, compiled, matches, limit, caseInsensitive)
 			relParts = relParts[:len(relParts)-1]
 			if err != nil {
-				return false, err
+				return false, false, err
+			}
+			if timedOut {
+				return true, true, nil
 			}
 			if truncated {
-				return true, nil
+				return true, false, nil
 			}
 			continue
 		}
 		relParts = relParts[:len(relParts)-1]
 	}
-	return false, nil
+	return false, false, nil
 }
 
 func (c compiledGlobPattern) matchCandidate(pathParts []string, caseInsensitive bool) (bool, error) {
@@ -454,25 +645,30 @@ func (c compiledGlobPattern) matchCandidate(pathParts []string, caseInsensitive 
 	return matchGlobSegmentsWithCase(c.parts, pathParts, caseInsensitive)
 }
 
-func (g *GlobTool) findMatchesInCurrentDir(resolvedSearchPath string, compiled compiledGlobPattern, limit int, caseInsensitive bool) ([]string, bool, error) {
+func (g *GlobTool) findMatchesInCurrentDir(ctx context.Context, resolvedSearchPath string, compiled compiledGlobPattern, limit int, caseInsensitive bool) ([]string, bool, bool, error) {
 	entries, err := os.ReadDir(resolvedSearchPath)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	matches := make([]string, 0, 16)
 	for _, entry := range entries {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return matches, true, true, nil
+			}
+		}
 		matched, err := matchGlobPart(compiled.parts[0], entry.Name(), caseInsensitive)
 		if err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 		if matched {
 			matches = append(matches, entry.Name())
 			if limit > 0 && len(matches) >= limit {
-				return matches, true, nil
+				return matches, true, false, nil
 			}
 		}
 	}
-	return matches, false, nil
+	return matches, false, false, nil
 }
 
 func (g *GlobTool) findExactMatches(resolvedSearchPath string, compiled compiledGlobPattern, rootIsDir bool, caseInsensitive bool) ([]string, bool, error) {

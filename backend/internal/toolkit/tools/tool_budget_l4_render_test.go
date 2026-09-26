@@ -238,15 +238,25 @@ func TestShellToolsOwnTheirOutputWindow(t *testing.T) {
 				"shell output must opt out of render-layer folding: %#v", result.Metadata)
 			require.Equal(t, shellOutputBudgetBytes, result.Metadata[toolresult.MetadataModelVisibleBudgetKey])
 
-			// The tool folded head-only at its own window...
+			// The tool folded head+tail at its own window: the tail is what
+			// carries failures/verdicts, so it must survive the fold...
 			require.LessOrEqual(t, len(result.Content), shellOutputBudgetBytes)
 			require.Greater(t, len(result.Content), renderBudgetForBudgetTests)
 			require.True(t, strings.HasPrefix(result.Content, full[:1024]),
 				"the folded body must start with the head of the capture")
-			require.Contains(t, result.Content, "[output window: showing the first ")
+			require.True(t, strings.HasSuffix(result.Content, full[len(full)-1024:]),
+				"the folded body must end with the tail of the capture")
+			require.Contains(t, result.Content, "[output window: showing head ")
 			require.Contains(t, result.Content, "of "+strconv.Itoa(len(full))+" bytes of the captured output")
+			// ...and told the model how to reach the omitted middle.
+			require.Contains(t, result.Content, "artifact_read")
+			require.Contains(t, result.Content, "bisect from offset=")
 			require.Equal(t, true, result.Metadata["truncated"])
 			require.Equal(t, len(full), result.Metadata["output_window_total_bytes"])
+			require.Greater(t, result.Metadata["output_window_head_bytes"], 0)
+			require.Greater(t, result.Metadata["output_window_tail_bytes"], 0)
+			require.Greater(t, result.Metadata["output_window_omitted_bytes"], 0)
+			require.GreaterOrEqual(t, result.Metadata["output_window_middle_pages"], 1)
 
 			// ...and published the record that holds the rest.
 			id, _ := result.Metadata["artifact_id"].(string)

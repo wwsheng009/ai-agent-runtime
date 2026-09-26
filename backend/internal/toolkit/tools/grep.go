@@ -168,6 +168,9 @@ type grepOptions struct {
 	maxDepthSet                  bool
 	maxCount                     int
 	maxCountSet                  bool
+	headLimit                    int
+	headLimitSet                 bool
+	offset                       int
 	maxFilesize                  string
 	maxFilesizeSet               bool
 	maxFileBytes                 int64
@@ -544,6 +547,14 @@ func NewGrepTool() *GrepTool {
 			"max_count": map[string]interface{}{
 				"type":        "integer",
 				"description": "兼容 rg 的 --max-count/-m。使用 rg 引擎时为每文件上限；内置回退引擎会尽量模拟这一行为。",
+			},
+			"head_limit": map[string]interface{}{
+				"type":        "integer",
+				"description": "本次返回的匹配行上限（分页页大小）。缺省沿用内置上限（100）；0 表示不限（仍受 5000 条抓取安全上限与字节预算保护）。配合 offset 翻页，响应里带 next_offset/has_more。",
+			},
+			"offset": map[string]interface{}{
+				"type":        "integer",
+				"description": "跳过前 N 个匹配（默认 0），配合 head_limit 翻页；返回 next_offset 可直接用于下一页。",
 			},
 			"max_filesize": stringOrIntegerSchema("兼容 rg 的 --max-filesize。可传字节整数，或如 10K/2M/1G 这类大小字符串；内置回退引擎会跳过超出大小限制的文件。"),
 			"mode": map[string]interface{}{
@@ -1478,6 +1489,23 @@ func (g *GrepTool) parseOptions(ctx context.Context, params map[string]interface
 		maxCount = 0
 	}
 
+	headLimit := 0
+	headLimitSet := false
+	if value, ok := resolveIntParam(params, "head_limit"); ok {
+		headLimit = value
+		headLimitSet = true
+	}
+	if headLimit < 0 {
+		headLimit = 0
+	}
+	offset := 0
+	if value, ok := resolveIntParam(params, "offset"); ok {
+		offset = value
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
 	maxFilesize := strings.TrimSpace(compat.maxFilesize)
 	if value, ok, err := resolveSizeParam(params, "max_filesize"); err != nil {
 		return nil, err
@@ -1679,6 +1707,9 @@ func (g *GrepTool) parseOptions(ctx context.Context, params map[string]interface
 		maxDepthSet:                  maxDepthSet,
 		maxCount:                     maxCount,
 		maxCountSet:                  maxCountSet,
+		headLimit:                    headLimit,
+		headLimitSet:                 headLimitSet,
+		offset:                       offset,
 		maxFilesize:                  maxFilesize,
 		maxFilesizeSet:               maxFilesizeSet,
 		maxFileBytes:                 maxFileBytes,
@@ -3317,22 +3348,40 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 	truncated := false
 	var aggregatedStats *grepStats
 
+	collectLimit := g.grepCollectLimit(opts)
+	// stopErr records the first early stop (timeout/cancel, or an rg error that
+	// still produced output). Collected matches then stay as partial evidence
+	// instead of being thrown away with the process.
+	stopErr := error(nil)
 	for _, scope := range opts.searchScopes {
-		args := buildRipgrepArgs(opts, scope, g.maxMatches)
+		args := buildRipgrepArgs(opts, scope, collectLimit)
 		output, err := g.runCommand(ctx, rgPath, scope.workingDir, args)
-		if opts.jsonOutput {
-			if err != nil {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					return nil, false, ctxErr
+		hasOutput := len(strings.TrimSpace(string(output))) > 0
+		if err != nil {
+			switch {
+			case ctx.Err() != nil && !hasOutput:
+				// 超时/取消且 rg 没有任何产出：无可用证据，如实返回 ctx 错误。
+				return nil, false, ctx.Err()
+			case ctx.Err() != nil:
+				// 超时/取消但 rg 被杀前已打印匹配：保全为部分结果。
+				if stopErr == nil {
+					stopErr = ctx.Err()
 				}
-				if !isRipgrepNoMatch(err) {
-					if opts.requiresRipgrep {
-						return nil, false, fmt.Errorf("ripgrep/rg 执行失败: %w", err)
-					}
-					return nil, false, nil
+			case isRipgrepNoMatch(err):
+				// exit 1 = 无匹配：继续解析（stats 模式仍需读取已产出内容）。
+			case hasOutput:
+				// rg 报错（坏 glob/权限/路径等）但仍产出匹配：保全为部分结果，
+				// 错误细节留在 metadata，模型拿到证据而不是空失败。
+				if stopErr == nil {
+					stopErr = err
 				}
+			case opts.requiresRipgrep:
+				return nil, false, fmt.Errorf("ripgrep/rg 执行失败: %w", err)
+			default:
+				return nil, false, nil
 			}
-
+		}
+		if opts.jsonOutput {
 			lines, stats := normalizeRipgrepJSONOutput(output, scope, opts.mode)
 			if stats != nil {
 				if aggregatedStats == nil {
@@ -3343,8 +3392,8 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 			if stats != nil {
 				totalMatchCount += stats.Matches
 			}
-			if len(allLines) < g.maxMatches {
-				remaining := g.maxMatches - len(allLines)
+			if len(allLines) < collectLimit {
+				remaining := collectLimit - len(allLines)
 				if len(lines) > remaining {
 					allLines = append(allLines, lines[:remaining]...)
 					truncated = true
@@ -3354,58 +3403,87 @@ func (g *GrepTool) searchWithRipgrep(ctx context.Context, opts *grepOptions) (*t
 			} else if len(lines) > 0 {
 				truncated = true
 			}
-			continue
-		}
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, false, ctxErr
-			}
-			if isRipgrepNoMatch(err) {
-				if opts.stats && len(output) > 0 {
-					lines, stats := normalizeRipgrepOutputWithStats(output)
-					lines = prefixRipgrepLinesForScope(scope, opts.mode, lines)
-					totalMatchCount += countRipgrepResults(opts.mode, lines)
-					if stats != nil {
-						if aggregatedStats == nil {
-							aggregatedStats = &grepStats{}
-						}
-						aggregatedStats.add(stats)
-					}
+		} else {
+			lines, stats := normalizeRipgrepOutputWithStats(output)
+			lines = prefixRipgrepLinesForScope(scope, opts.mode, lines)
+			totalMatchCount += countRipgrepResults(opts.mode, lines)
+			if stats != nil {
+				if aggregatedStats == nil {
+					aggregatedStats = &grepStats{}
 				}
-				continue
+				aggregatedStats.add(stats)
 			}
-			if opts.requiresRipgrep {
-				return nil, false, fmt.Errorf("ripgrep/rg 执行失败: %w", err)
-			}
-			return nil, false, nil
-		}
-
-		lines, stats := normalizeRipgrepOutputWithStats(output)
-		lines = prefixRipgrepLinesForScope(scope, opts.mode, lines)
-		totalMatchCount += countRipgrepResults(opts.mode, lines)
-		if stats != nil {
-			if aggregatedStats == nil {
-				aggregatedStats = &grepStats{}
-			}
-			aggregatedStats.add(stats)
-		}
-		if len(allLines) < g.maxMatches {
-			remaining := g.maxMatches - len(allLines)
-			if len(lines) > remaining {
-				allLines = append(allLines, lines[:remaining]...)
+			if len(allLines) < collectLimit {
+				remaining := collectLimit - len(allLines)
+				if len(lines) > remaining {
+					allLines = append(allLines, lines[:remaining]...)
+					truncated = true
+				} else {
+					allLines = append(allLines, lines...)
+				}
+			} else if len(lines) > 0 {
 				truncated = true
-			} else {
-				allLines = append(allLines, lines...)
 			}
-		} else if len(lines) > 0 {
-			truncated = true
+		}
+		if stopErr != nil {
+			// 已提前停止：ctx 已取消或 rg 已报错，后续 scope 不再执行。
+			break
 		}
 	}
 
 	if totalMatchCount == 0 && len(allLines) == 0 {
+		if stopErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, false, ctxErr
+			}
+			if opts.requiresRipgrep {
+				return nil, false, fmt.Errorf("ripgrep/rg 执行失败: %w", stopErr)
+			}
+			return nil, false, nil
+		}
 		return buildGrepResultWithEngine(opts, nil, 0, false, aggregatedStats, "rg", rgPath), true, nil
 	}
+	if stopErr != nil {
+		reason := grepInterruptionReason(stopErr, ctx)
+		result := buildGrepResultWithEngine(
+			opts, allLines, totalMatchCount, truncated, aggregatedStats, "rg", rgPath,
+			grepPartialNotice(reason, len(allLines)),
+		)
+		return markGrepPartial(result, reason, grepInterruptionTimedOut(stopErr, ctx)), true, nil
+	}
 	return buildGrepResultWithEngine(opts, allLines, totalMatchCount, truncated, aggregatedStats, "rg", rgPath), true, nil
+}
+
+// grepCollectHardCap 是分页抓取的安全上限：head_limit=0（不限）或深分页也不会
+// 无限收集；输出侧另有 grepOutputBudgetBytes 字节预算兜底。
+const grepCollectHardCap = 5000
+
+// grepCollectLimit 返回本次调用抓取的匹配上限：显式 head_limit 决定页大小，
+// offset 决定需要跳过多少（因此要多抓 offset 条）；未显式分页时沿用内置上限。
+func (g *GrepTool) grepCollectLimit(opts *grepOptions) int {
+	fallback := g.maxMatches
+	if fallback <= 0 {
+		fallback = 100
+	}
+	if opts == nil {
+		return fallback
+	}
+	pageSize := fallback
+	if opts.headLimitSet {
+		if opts.headLimit <= 0 {
+			pageSize = grepCollectHardCap
+		} else {
+			pageSize = opts.headLimit
+		}
+	}
+	limit := pageSize
+	if opts.offset > 0 {
+		limit = opts.offset + pageSize
+	}
+	if limit > grepCollectHardCap {
+		limit = grepCollectHardCap
+	}
+	return limit
 }
 
 func buildRipgrepArgs(opts *grepOptions, scope grepSearchScope, maxMatches int) []string {
@@ -3998,6 +4076,81 @@ func isRipgrepNoMatch(err error) bool {
 	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
 }
 
+// grepInterruptionTimedOut reports whether an early stop was a deadline (tool
+// or turn timeout) rather than an explicit cancellation.
+func grepInterruptionTimedOut(err error, ctx context.Context) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
+// grepIsInterruption reports whether an early stop is a cancellation/timeout -
+// the class where already collected matches are honest partial evidence rather
+// than a hard failure.
+func grepIsInterruption(err error, ctx context.Context) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return ctx != nil && ctx.Err() != nil
+}
+
+// grepInterruptionReason renders the user-facing reason for a partial result.
+func grepInterruptionReason(err error, ctx context.Context) string {
+	if grepInterruptionTimedOut(err, ctx) {
+		return "搜索超时"
+	}
+	if errors.Is(err, context.Canceled) || (ctx != nil && errors.Is(ctx.Err(), context.Canceled)) {
+		return "搜索被取消"
+	}
+	return "搜索提前停止（rg/遍历报错）"
+}
+
+// grepPartialNotice is appended to a partially collected search. The builder
+// charges its length against the same byte budget as the match listing, so the
+// payload still fits grepOutputBudgetBytes.
+func grepPartialNotice(reason string, kept int) string {
+	return fmt.Sprintf(
+		"\n\n(结果不完整：%s，搜索提前停止；以上为已收集的 %d 条结果，不代表全量。next_step: 收窄 pattern/paths、减小 max_count 或缩小范围后重试；不要原样重试同一查询。)",
+		reason, kept,
+	)
+}
+
+// markGrepPartial stamps a partial result: partial=true plus (for deadlines)
+// timed_out=true, and a next_action that forbids the dead retry.
+func markGrepPartial(result *toolkit.ToolResult, reason string, timedOut bool) *toolkit.ToolResult {
+	if result == nil {
+		return nil
+	}
+	if result.Metadata == nil {
+		result.Metadata = map[string]interface{}{}
+	}
+	result.Metadata["partial"] = true
+	if timedOut {
+		result.Metadata["timed_out"] = true
+	}
+	result.Metadata[toolresult.MetadataNextActionKey] = fmt.Sprintf(
+		"grep 结果不完整（%s）：收窄 pattern/paths 或减小范围后重试，不要原样重试同一查询。", reason,
+	)
+	return result
+}
+
+// grepWalkerPartialResult surfaces already collected builtin-walker results as
+// partial evidence when the walk stopped early on a cancellation/timeout.
+// Returns nil when the stop must stay a hard failure (nothing collected, or a
+// stop that is not an interruption).
+func grepWalkerPartialResult(opts *grepOptions, results []string, matchCount int, stats *grepStats, err error, ctx context.Context) *toolkit.ToolResult {
+	if len(results) == 0 || !grepIsInterruption(err, ctx) {
+		return nil
+	}
+	reason := grepInterruptionReason(err, ctx)
+	result := buildGrepResult(opts, results, matchCount, true, stats, grepPartialNotice(reason, len(results)))
+	return markGrepPartial(result, reason, grepInterruptionTimedOut(err, ctx))
+}
+
 func runGrepCommand(ctx context.Context, binaryPath, workingDir string, args []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, binaryPath, args...)
 	cmd.Dir = workingDir
@@ -4039,6 +4192,7 @@ func (g *GrepTool) searchWithWalker(ctx context.Context, opts *grepOptions, re *
 func (g *GrepTool) walkerSearchContent(ctx context.Context, opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
 	matches := make([]grepMatch, 0, 16)
 	matchCount := 0
+	collectLimit := g.grepCollectLimit(opts)
 	var stats *grepStats
 	if opts.stats {
 		stats = &grepStats{}
@@ -4093,14 +4247,14 @@ func (g *GrepTool) walkerSearchContent(ctx context.Context, opts *grepOptions, r
 				})
 				matchCount++
 				perFileCount++
-				if matchCount >= g.maxMatches {
+				if collectLimit > 0 && matchCount >= collectLimit {
 					return errGrepLimitReached
 				}
 				if hasReachedMaxCount(opts, perFileCount) {
 					break
 				}
 			}
-			if matchCount >= g.maxMatches {
+			if collectLimit > 0 && matchCount >= collectLimit {
 				return errGrepLimitReached
 			}
 			if hasReachedMaxCount(opts, perFileCount) {
@@ -4115,7 +4269,9 @@ func (g *GrepTool) walkerSearchContent(ctx context.Context, opts *grepOptions, r
 		return nil
 	})
 
-	if err != nil && !errors.Is(err, errGrepLimitReached) {
+	limitReached := errors.Is(err, errGrepLimitReached)
+	walkerInterrupted := err != nil && !limitReached && grepIsInterruption(err, ctx)
+	if err != nil && !limitReached && !walkerInterrupted {
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
@@ -4128,23 +4284,44 @@ func (g *GrepTool) walkerSearchContent(ctx context.Context, opts *grepOptions, r
 	if (opts.beforeContext > 0 || opts.afterContext > 0) && len(matches) > 0 && !opts.onlyMatching {
 		var contextErr error
 		results, contextErr = g.buildContextOutput(ctx, opts, matches)
-		if contextErr != nil {
+		if contextErr != nil && !(grepIsInterruption(contextErr, ctx) && len(matches) > 0) {
 			return &toolkit.ToolResult{
 				Success:    false,
 				OutputKind: toolresult.KindText,
 				Error:      fmt.Errorf("搜索失败: %w", contextErr),
 			}
 		}
+		if contextErr != nil {
+			// 取消/超时：放弃上下文渲染，退回无上下文的部分结果。
+			results = renderGrepContentMatches(opts, matches)
+		}
 	} else {
-		results = make([]string, len(matches))
-		for i, m := range matches {
-			renderedLine := applyMaxColumnsToRenderedText(opts, m.line)
-			results[i] = formatGrepContentLine(m.filePath, m.lineNum, m.column, renderedLine, opts.column)
+		results = renderGrepContentMatches(opts, matches)
+	}
+
+	if walkerInterrupted {
+		if partial := grepWalkerPartialResult(opts, results, matchCount, stats, err, ctx); partial != nil {
+			return partial
+		}
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("搜索失败: %w", err),
 		}
 	}
 
-	truncated := errors.Is(err, errGrepLimitReached)
+	truncated := limitReached
 	return buildGrepResult(opts, results, matchCount, truncated, stats)
+}
+
+// renderGrepContentMatches renders collected matches without file context.
+func renderGrepContentMatches(opts *grepOptions, matches []grepMatch) []string {
+	results := make([]string, len(matches))
+	for i, m := range matches {
+		renderedLine := applyMaxColumnsToRenderedText(opts, m.line)
+		results[i] = formatGrepContentLine(m.filePath, m.lineNum, m.column, renderedLine, opts.column)
+	}
+	return results
 }
 
 func (g *GrepTool) walkerSearchFiles(ctx context.Context, opts *grepOptions, re *regexp.Regexp) *toolkit.ToolResult {
@@ -4209,6 +4386,10 @@ func (g *GrepTool) walkerSearchFiles(ctx context.Context, opts *grepOptions, re 
 	})
 
 	if err != nil {
+		// 取消/超时：保留已收集结果作为部分证据（无产出时才整体失败）。
+		if partial := grepWalkerPartialResult(opts, results, len(results), stats, err, ctx); partial != nil {
+			return partial
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
@@ -4289,6 +4470,10 @@ func (g *GrepTool) walkerSearchFilesWithout(ctx context.Context, opts *grepOptio
 	})
 
 	if err != nil {
+		// 取消/超时：保留已收集结果作为部分证据（无产出时才整体失败）。
+		if partial := grepWalkerPartialResult(opts, results, len(results), stats, err, ctx); partial != nil {
+			return partial
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
@@ -4364,7 +4549,12 @@ func (g *GrepTool) walkerSearchCount(ctx context.Context, opts *grepOptions, re 
 		return nil
 	})
 
+	results, totalMatches := grepCountResults(counts)
 	if err != nil {
+		// 取消/超时：保留已收集的计数结果作为部分证据。
+		if partial := grepWalkerPartialResult(opts, results, totalMatches, stats, err, ctx); partial != nil {
+			return partial
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
@@ -4372,14 +4562,19 @@ func (g *GrepTool) walkerSearchCount(ctx context.Context, opts *grepOptions, re 
 		}
 	}
 
+	return buildGrepResult(opts, results, totalMatches, false, stats)
+}
+
+// grepCountResults renders per-file match counts as "path:count" lines and
+// reports the summed match count.
+func grepCountResults(counts []fileMatchCount) ([]string, int) {
 	results := make([]string, len(counts))
-	totalMatches := 0
+	total := 0
 	for i, fc := range counts {
 		results[i] = fmt.Sprintf("%s:%d", fc.filePath, fc.count)
-		totalMatches += fc.count
+		total += fc.count
 	}
-
-	return buildGrepResult(opts, results, totalMatches, false, stats)
+	return results, total
 }
 
 // buildContextOutput produces output with context lines around each match.
@@ -5282,10 +5477,15 @@ func grepTruncationNoticeReserve(total, budget int) int {
 		len(fmt.Sprintf("\n(输出超过 grep 字节预算 %d 字节，提前停止；next_step: 收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数)", budget))
 }
 
-func buildGrepResult(opts *grepOptions, results []string, matchCount int, truncated bool, stats *grepStats) *toolkit.ToolResult {
+// buildGrepResult renders a grep result. extraNotices (e.g. the partial-result
+// notice) are charged against the same byte budget as the match listing and
+// appended after the truncation notices, so the payload still fits
+// grepOutputBudgetBytes.
+func buildGrepResult(opts *grepOptions, results []string, matchCount int, truncated bool, stats *grepStats, extraNotices ...string) *toolkit.ToolResult {
 	if truncated {
 		observability.RecordToolOutputTruncation(observability.TruncationLayerGrep, observability.TruncatedByLines)
 	}
+	extraNotice := strings.Join(extraNotices, "")
 	byteTruncated := false
 	output := "未找到匹配的内容"
 	if opts != nil && opts.jsonOutput {
@@ -5298,12 +5498,29 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 			output = output + braceHint
 		}
 	}
+	// 分页：offset 跳过前 N 个匹配；head_limit 决定本页大小。抓取上限已包含
+	// offset（见 grepCollectLimit），因此这里只做切片，不需要重新搜索。
+	collectedCount := len(results)
+	pageStart := 0
+	if opts != nil && opts.offset > 0 {
+		pageStart = opts.offset
+		if pageStart > len(results) {
+			pageStart = len(results)
+		}
+		results = results[pageStart:]
+	}
+	if opts != nil && opts.headLimitSet && opts.headLimit > 0 && len(results) > opts.headLimit {
+		results = results[:opts.headLimit]
+		truncated = true
+	}
+	hasMore := truncated || collectedCount > pageStart+len(results)
+
 	if len(results) > 0 {
 		joined := strings.Join(results, "\n")
 		// 截断提示与匹配行同属 grep 的字节预算：先按最坏情况预留提示长度，
 		// 匹配行只在剩余额度内保留，payload 才真正不超过 grepOutputBudgetBytes。
 		budget := grepByteBudgetBytes()
-		listingBudget := budget - grepTruncationNoticeReserve(len(results), budget)
+		listingBudget := budget - grepTruncationNoticeReserve(len(results), budget) - len(extraNotice)
 		if listingBudget < 0 {
 			listingBudget = 0
 		}
@@ -5332,10 +5549,22 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		}
 		output = strings.Join(results, "\n")
 		if truncated && (opts == nil || !opts.jsonOutput) {
-			output += fmt.Sprintf("\n\n(结果已截断，显示前 %d 个匹配)", len(results))
+			if opts != nil && (opts.offset > 0 || opts.headLimitSet) {
+				nextOffset := pageStart + len(results)
+				output += fmt.Sprintf("\n\n(结果已截断，显示第 %d-%d 个匹配；next_offset=%d 可继续分页)", pageStart+1, pageStart+len(results), nextOffset)
+			} else {
+				output += fmt.Sprintf("\n\n(结果已截断，显示前 %d 个匹配)", len(results))
+			}
 			if byteTruncated {
 				output += fmt.Sprintf("\n(输出超过 grep 字节预算 %d 字节，提前停止；next_step: 收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数)", grepByteBudgetBytes())
 			}
+		}
+	}
+	if extraNotice != "" {
+		if strings.TrimSpace(output) == "" {
+			output = strings.TrimSpace(extraNotice)
+		} else {
+			output += extraNotice
 		}
 	}
 	if opts != nil && opts.stats && stats != nil && !opts.jsonOutput {
@@ -5442,6 +5671,11 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		"mode":                             string(opts.mode),
 		"match_count":                      matchCount,
 		"truncated":                        truncated,
+		"offset":                           pageStart,
+		"head_limit":                       opts.headLimit,
+		"head_limit_explicit":              opts.headLimitSet,
+		"next_offset":                      pageStart + len(results),
+		"has_more":                         hasMore,
 		"engine":                           engine,
 	}
 	// grep owns its own byte/line window and publishes its own truncation and
@@ -5455,6 +5689,9 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		metadata["results_truncated"] = true
 		metadata["truncation_reason"] = "byte_budget"
 		metadata[toolresult.MetadataNextActionKey] = "输出超过 grep 字节预算已提前停止；请收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数。不要原样重试同一查询。"
+	}
+	if pageStart > 0 && collectedCount <= pageStart {
+		metadata[toolresult.MetadataNextActionKey] = "offset 超出本次抓取窗口（抓取上限 5000 条）：请减小 offset，或先收窄 pattern/paths 再分页。不要原样重试同一查询。"
 	}
 	annotateSearchBackend(metadata, engine, "builtin-walker", "")
 	if stats != nil {
@@ -5479,8 +5716,8 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 	}
 }
 
-func buildGrepResultWithEngine(opts *grepOptions, results []string, matchCount int, truncated bool, stats *grepStats, engine, binaryPath string) *toolkit.ToolResult {
-	result := buildGrepResult(opts, results, matchCount, truncated, stats)
+func buildGrepResultWithEngine(opts *grepOptions, results []string, matchCount int, truncated bool, stats *grepStats, engine, binaryPath string, extraNotices ...string) *toolkit.ToolResult {
+	result := buildGrepResult(opts, results, matchCount, truncated, stats, extraNotices...)
 	annotateSearchBackend(result.Metadata, engine, "rg", binaryPath)
 	return result
 }
