@@ -170,3 +170,49 @@ func TestProjectBackgroundJobTerminal_ZeroEpochStaysIdempotent(t *testing.T) {
 	require.Greater(t, notification.SubjectVersion, int64(0))
 	require.True(t, notification.SubjectVersion <= time.Now().UTC().UnixNano())
 }
+
+// TestProjectBackgroundJobTerminal_ObservedJobSkipsTheWake pins the
+// suppression semantics: the durable inbox item is still recorded (the job
+// outcome must never be lost), but no wake is scheduled because the model
+// already holds the same evidence from a task_output wait.
+func TestProjectBackgroundJobTerminal_ObservedJobSkipsTheWake(t *testing.T) {
+	store := newTestStore(t, "background-job-observed")
+	ctx := context.Background()
+	scheduler := NewWakeScheduler(store, WakeSchedulerConfig{})
+	in := BackgroundJobTerminalInput{
+		RootScopeID:           "root-1",
+		TargetParentSessionID: "parent-1",
+		JobID:                 "job-observed",
+		Status:                "failed",
+		Command:               "go test ./...",
+		ExitCode:              "1",
+		Observed:              true,
+		Epoch:                 1700000000000000123,
+	}
+
+	notification, err := ProjectBackgroundJobTerminal(ctx, store, scheduler, in)
+	require.NoError(t, err)
+	require.Equal(t, SubjectJob, notification.SubjectKind)
+	require.Equal(t, "background_job_failed", notification.EventType)
+	require.Equal(t, SeverityCritical, notification.Severity)
+	require.Equal(t, ResolutionUnresolved, notification.ResolutionState,
+		"the item stays unresolved so the next natural turn still shows the job outcome")
+
+	pending, err := store.ListWakePending(ctx, WakeFilter{
+		RootScopeID:           "root-1",
+		TargetParentSessionID: "parent-1",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, pending, "an already observed terminal state must not force a wake turn")
+
+	// The digest must still carry the item: suppression only skips the turn,
+	// never the evidence.
+	digest, err := BuildDigest(ctx, store, DigestRequest{
+		RootScopeID:           "root-1",
+		TargetParentSessionID: "parent-1",
+	})
+	require.NoError(t, err)
+	require.Len(t, digest.Items, 1)
+	require.Equal(t, "job-observed", digest.Items[0].SubjectID)
+}

@@ -46,16 +46,18 @@ func (h *Handler) projectBackgroundJobTerminal(parent context.Context, event bac
 	ctx, cancel := context.WithTimeout(ctx, backgroundJobTerminalProjectionTimeout)
 	defer cancel()
 
+	command, observed := h.backgroundJobDigestInfo(ctx, jobID)
 	_, _ = supervision.ProjectBackgroundJobTerminal(ctx, store, h.getSupervisionWakeScheduler(), supervision.BackgroundJobTerminalInput{
 		RootScopeID:           h.backgroundJobRootScope(ctx, sessionID),
 		TargetParentSessionID: sessionID,
 		JobID:                 jobID,
 		Status:                event.Type,
-		Command:               h.backgroundJobCommand(ctx, jobID),
+		Command:               command,
 		ExitCode:              backgroundJobPayloadString(event.Payload["exit_code"]),
 		ErrorCode:             backgroundJobPayloadString(event.Payload["error_code"]),
 		Message:               backgroundJobPayloadString(event.Payload["message"]),
 		CancelSource:          backgroundJobPayloadString(event.Payload["cancel_source"]),
+		Observed:              observed,
 		Epoch:                 backgroundJobTerminalEpoch(event),
 	})
 }
@@ -87,24 +89,27 @@ func backgroundJobTerminalEpoch(event background.JobEvent) int64 {
 	return time.Now().UTC().UnixNano()
 }
 
-// backgroundJobCommand reads the job's command for the digest reason. The
-// manager is cached on the handler and may not exist yet (or at all) in tests
-// and embedded hosts; a missing manager just yields an empty command.
-func (h *Handler) backgroundJobCommand(ctx context.Context, jobID string) string {
+// backgroundJobDigestInfo reads the job's command for the digest reason plus
+// whether the terminal state was already observed by an in-flight task_output
+// wait (in which case the projection records the inbox item without scheduling
+// a redundant wake). The manager is cached on the handler and may not exist yet
+// (or at all) in tests and embedded hosts; a missing manager yields no digest
+// info at all.
+func (h *Handler) backgroundJobDigestInfo(ctx context.Context, jobID string) (string, bool) {
 	if h == nil {
-		return ""
+		return "", false
 	}
 	h.backgroundMu.Lock()
 	manager := h.backgroundManager
 	h.backgroundMu.Unlock()
 	if manager == nil {
-		return ""
+		return "", false
 	}
 	job, err := manager.GetJob(ctx, jobID)
 	if err != nil || job == nil {
-		return ""
+		return "", false
 	}
-	return job.Command
+	return job.Command, background.TerminalObserved(job)
 }
 
 func backgroundJobPayloadString(value interface{}) string {

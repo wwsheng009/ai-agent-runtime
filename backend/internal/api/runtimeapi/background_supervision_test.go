@@ -2,6 +2,7 @@ package runtimeapi
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -230,4 +231,52 @@ func TestProjectBackgroundJobTerminal_CancelledReasonWithoutManager(t *testing.T
 	require.Equal(t, supervision.SeverityWarning, notifications[0].Severity)
 	require.Equal(t, "background_job_cancelled", notifications[0].EventType)
 	require.Equal(t, supervision.WakeBudgetClassOther, supervision.WakeBudgetClassOf(notifications[0].EventType))
+}
+
+// newObservedBackgroundManager seeds a job whose terminal state was already
+// surfaced to the model through a task_output wait, which is what the broker's
+// in-flight waiter leaves behind.
+func newObservedBackgroundManager(t *testing.T, jobID string) *background.Manager {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "background.sqlite")
+	seed, err := background.NewSQLiteStore(&background.StoreConfig{Path: path})
+	require.NoError(t, err)
+	require.NoError(t, seed.SaveJob(context.Background(), background.Job{
+		ID:        jobID,
+		SessionID: "sess-1",
+		Kind:      "shell",
+		Status:    background.StatusCompleted,
+		Command:   "go test ./...",
+		CreatedAt: time.Now().UTC(),
+		Metadata:  map[string]interface{}{background.MetadataTerminalObserved: true},
+	}))
+	require.NoError(t, seed.Close())
+	manager := background.NewManager(background.Config{StorePath: path})
+	t.Cleanup(func() { _ = manager.Close() })
+	return manager
+}
+
+// TestProjectBackgroundJobTerminal_ObservedJobSkipsTheWake pins the API host's
+// suppression wiring: the inbox item is recorded (with its command excerpt) but
+// no wake is scheduled for a terminal state the model already read.
+func TestProjectBackgroundJobTerminal_ObservedJobSkipsTheWake(t *testing.T) {
+	handler, store, _ := newAPIWakeTestHandler(t, "api-bg-job-observed")
+	ctx := context.Background()
+	manager := newObservedBackgroundManager(t, "job-observed")
+	handler.backgroundMu.Lock()
+	handler.backgroundManager = manager
+	handler.backgroundMu.Unlock()
+
+	handler.projectBackgroundJobTerminal(ctx, terminalJobEvent("job-observed", "completed", "sess-1", map[string]interface{}{
+		"status":    "completed",
+		"exit_code": 0,
+	}), "sess-1")
+
+	notifications, err := store.ListNotifications(ctx, supervision.NotificationFilter{RootScopeID: "sess-1"})
+	require.NoError(t, err)
+	require.Len(t, notifications, 1)
+	require.Contains(t, notifications[0].Reason, "command: go test ./...")
+	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{RootScopeID: "sess-1", UnclaimedOnly: true})
+	require.NoError(t, err)
+	require.Empty(t, pending, "an observed terminal state must not schedule a wake")
 }

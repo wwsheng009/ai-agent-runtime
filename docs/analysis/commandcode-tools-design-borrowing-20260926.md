@@ -551,3 +551,18 @@
 ② 会话关闭时 resolve 该 session 的待投递 wake（避免永久 pending 与后续会话复用时的陈旧投递）；
 ③ `monitor_command`/`task_monitor`：timer 用 `time.AfterFunc` 只做计时，到点仍走 `ScheduleWake`（progress 类预算）+ 宿主 drain；`maxDurationMs` 复用 `CancelJob`；registry 随 job 终态/会话关闭清理；注意 progress wake 必须携带通知内容（`digestDeliverable` 判空会静默 release）。
 ④ 预算可配置（保留项，待确认配置面：env + `Resolve*` 还是配置文件）。
+
+### 9.18 已观察终态抑制重复唤醒（2026:09: 26 续做，§9.17 未做①收口）
+
+**问题**：`task_output(wait=exit)` 命中终态时所属 turn 仍在跑；终态事件同时触发宿主的唤醒投影，于是 turn 结束后会再补一轮「你已经看过的终态」digest，白耗 other/failure 预算。仅靠 broker 事后打标记会晚于投影（等待循环 250ms tick + SQLite 写），**必然输掉竞态**，所以标记必须由 manager 在终态事件发射前完成。
+
+- **manager（`internal/background/observation.go`）**：
+  - `outputWaitRegistry`：按 job 计数的 in-flight waiter 表（`BeginOutputWait`/`EndOutputWait`，`sync.Mutex`，惰性创建 → 直接字面量构造的 `Manager` 仍然可用，nil 全安全）；
+  - `appendJobEvent` 在**调用 EventHandler 之前**，若事件类型是终态且该 job 有活跃 waiter，就写 job metadata `terminal_observed=true`（`MetadataTerminalObserved` 导出，读侧用 `TerminalObserved(job)`）；manager 内部快照优先，投影侧 `GetJob` 立刻可见；
+  - 泄漏保护：超过 5 分钟未释放的登记按不存在处理（最长支持的 wait 是 2 分钟），多余 `End` 是 no-op。
+- **broker（`broker_task_wait.go`）**：`wait=output|exit` 时 `BeginOutputWait` + `defer EndOutputWait`（取消/超时也必然释放）；`wait=none` 不登记。
+- **supervision**：`BackgroundJobTerminalInput.Observed` → **照常落 durable 通知（保持 unresolved，证据不丢）但不调度 ScheduleWake**；digest 仍携带该 job（测试钉住），因此「抑制」只抑制多余 turn，不抑制证据。
+- **宿主**：API 的 `backgroundJobDigestInfo`（原 `backgroundJobCommand`）与 CLI 的投影都从同一份 job 快照读 command + 观察标记；CLI 在 observed 时直接跳过即时投递。
+- **测试**（新增 10 例）：manager 层「终态事件在 handler 前打标记」「无 waiter 不打」「End 后不打」「output/running 不打」「registry 计数/TTL/多余 End」「nil 安全」；broker 层「wait=exit 终态 → 标记置位」「wait=none 立即读 → 不置位」；supervision「Observed → 有通知无 wake，digest 仍含该 job」；API/CLI 宿主「observed job → 有通知（带 command 摘要）无 wake」。
+- **验证**：`go test ./internal/background/ ./internal/supervision/ ./internal/toolbroker/` 全绿；`./internal/api/runtimeapi/` 全绿（并行会话把 `approval_explain_settings_test.go` 写成 `undefined: mux` 的半成品时用 `-overlay` 完成等价验证）；CLI 侧 4 例全绿。
+- **残留（下一批）**：①「wake 已先于观察登记落库」的窗口（投影先跑完、waiter 稍后才观察到）仍会投递一轮冗余 digest ——彻底解决要在投递回调里按 job 标记做二次抑制并 resolve 已认领 wake，收益有限（仅该窗口内），暂不引入投递侧耦合；② 会话关闭时 resolve pending wake；③ `monitor_command`；④ 预算可配置。

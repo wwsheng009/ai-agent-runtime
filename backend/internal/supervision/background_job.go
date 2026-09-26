@@ -63,6 +63,12 @@ type BackgroundJobTerminalInput struct {
 	ErrorCode    string
 	Message      string
 	CancelSource string
+	// Observed marks a terminal transition the model already saw (or is about
+	// to see) through a task_output wait. The durable inbox item is still
+	// recorded, but no wake is scheduled: forcing a new turn would only replay
+	// evidence the model already has, and it would spend wake budget that a
+	// genuinely unnoticed transition needs.
+	Observed bool
 	// Epoch is the stable per-transition identity (normally the event
 	// timestamp in unix nanos). Replays of the same transition must reuse it so
 	// the notification row and the wake notify key stay idempotent; a rerun
@@ -120,6 +126,9 @@ func ProjectBackgroundJobTerminal(ctx context.Context, store Store, wakes *WakeS
 		return Notification{}, fmt.Errorf("supervision: persist background job projection: %w", err)
 	}
 	if wakes == nil || strings.TrimSpace(notification.NotificationID) == "" {
+		return notification, nil
+	}
+	if in.Observed {
 		return notification, nil
 	}
 	// Schedule regardless of severity: a completed job is exactly the async

@@ -108,6 +108,10 @@ type Manager struct {
 	// breaker, so allowing equal timestamps would make insertion order depend
 	// on the random UUID tie breaker.
 	lastCreatedAt time.Time
+	// waiters counts in-flight task_output long-polls so a terminal transition
+	// during a wait can be recognized as "already observed" (see
+	// observation.go). Lazily created; nil is a valid "no waiters" state.
+	waiters *outputWaitRegistry
 }
 
 type managedJob struct {
@@ -1121,6 +1125,12 @@ func (m *Manager) appendJobEvent(ctx context.Context, jobID, eventType string, p
 		Type:      eventType,
 		Payload:   normalizedPayload,
 		CreatedAt: time.Now().UTC(),
+	}
+	if IsTerminalStatus(JobStatus(eventType)) {
+		// 终态事件先打「已被 in-flight wait 观察」标记：宿主投影据此只落
+		// durable 记录、不再调度一次冗余的唤醒 turn（模型马上就能从
+		// task_output 的结果里读到同一份终态）。
+		m.markTerminalObservedByWaiter(jobID)
 	}
 	if m.eventHandler != nil {
 		m.eventHandler(event)

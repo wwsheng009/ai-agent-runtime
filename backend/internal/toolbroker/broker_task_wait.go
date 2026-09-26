@@ -67,6 +67,14 @@ func effectiveTaskOutputWaitTimeout(timeoutMs int64) time.Duration {
 // 轮询，避免 polling guard 软刹车与多余回合。
 func (b *Broker) readTaskOutputWithWait(ctx context.Context, jobID string, offset int64, limit int, waitMode string, timeoutMs int64) (background.TaskOutputResult, string, int64, error) {
 	startedAt := time.Now()
+	if waitMode != "none" && b != nil && b.Background != nil {
+		// 等待期间登记 in-flight waiter：若 job 在此期间进入终态，manager 会把
+		// 终态标记为「模型即将从本次 wait 结果读到」，终态唤醒因此不再补一轮
+		// 冗余 turn（终态证据仍在 wait 的结果里）。defer 保证登记必然释放，
+		// 取消/超时路径也不例外。
+		b.Background.BeginOutputWait(jobID)
+		defer b.Background.EndOutputWait(jobID)
+	}
 	read := func() (background.TaskOutputResult, error) {
 		return b.Background.ReadOutput(ctx, background.TaskOutputArgs{JobID: jobID, Offset: offset, Limit: limit})
 	}

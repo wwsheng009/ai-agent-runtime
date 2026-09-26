@@ -80,9 +80,11 @@ func (h *localChatRuntimeHost) projectLocalBackgroundJobTerminal(event backgroun
 	defer cancel()
 
 	command := ""
+	observed := false
 	if h.Background != nil {
 		if job, err := h.Background.GetJob(ctx, strings.TrimSpace(event.JobID)); err == nil && job != nil {
 			command = job.Command
+			observed = background.TerminalObserved(job)
 		}
 	}
 	rootScopeID := h.localBackgroundJobRootScope(sessionID)
@@ -96,10 +98,16 @@ func (h *localChatRuntimeHost) projectLocalBackgroundJobTerminal(event backgroun
 		ErrorCode:             localBackgroundJobEventString(event.Payload["error_code"]),
 		Message:               localBackgroundJobEventString(event.Payload["message"]),
 		CancelSource:          localBackgroundJobEventString(event.Payload["cancel_source"]),
+		Observed:              observed,
 		Epoch:                 localBackgroundJobEventEpoch(event),
 	})
 	if err != nil {
 		// 投影失败不改变 job 终态；下一次 turn 的 preflight 仍能读到 job store。
+		return
+	}
+	if observed {
+		// 终态证据已由 wait 结果送达模型：不再补一次投递；其他待投递 wake
+		// 仍由 turn 边界 / preflight 负责。
 		return
 	}
 	// busy/rate-limited 都是既有 durable 语义，不作为错误上报。

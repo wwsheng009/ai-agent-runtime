@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,6 +39,64 @@ func backgroundSleeperCommand() string {
 		return "powershell -NoProfile -Command \"Start-Sleep -Seconds 30\""
 	}
 	return "sleep 30"
+}
+
+// backgroundBriefCommand 跑一小段但一定活到 wait 登记之后：用于验证「等待期间
+// 进入终态」的观察标记，命令本身不能快到抢在登记前结束。
+func backgroundBriefCommand() string {
+	if runtime.GOOS == "windows" {
+		return "powershell -NoProfile -Command \"Start-Sleep -Milliseconds 800; Write-Output done\""
+	}
+	return "sleep 0.8; echo done"
+}
+
+// TestTaskOutputWaitExitMarksTerminalObserved 钉住抑制链路的起点：wait=exit
+// 期间 job 进入终态时，manager 把终态标成「模型即将从本次 wait 读到」，宿主
+// 终态投影据此不再补一轮冗余唤醒。
+func TestTaskOutputWaitExitMarksTerminalObserved(t *testing.T) {
+	broker := newBackgroundTestBroker(t)
+	jobID := submitTestJob(t, broker, backgroundBriefCommand())
+
+	raw, metadata, err := broker.Execute(context.Background(), "session-wait", ToolTaskOutput, map[string]interface{}{
+		"job_id":     jobID,
+		"wait":       "exit",
+		"timeout_ms": 15000,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "exit", metadata["wait_condition"])
+	result, ok := raw.(TaskOutputResult)
+	require.True(t, ok)
+	require.True(t, background.IsTerminalStatus(background.JobStatus(result.Status)))
+
+	job, err := broker.Background.GetJob(context.Background(), jobID)
+	require.NoError(t, err)
+	assert.True(t, background.TerminalObserved(job),
+		"a terminal transition observed through wait=exit must be flagged")
+}
+
+// TestTaskOutputImmediateReadDoesNotMarkObserved 是反向保证：wait=none 从不登记
+// waiter，因此读到一个已经结束的 job 不会抑制它本应产生的终态唤醒。
+func TestTaskOutputImmediateReadDoesNotMarkObserved(t *testing.T) {
+	broker := newBackgroundTestBroker(t)
+	jobID := submitTestJob(t, broker, "echo ok")
+
+	_, metadata, err := broker.Execute(context.Background(), "session-wait", ToolTaskOutput, map[string]interface{}{
+		"job_id": jobID,
+		"wait":   "none",
+	})
+	require.NoError(t, err)
+	// wait=none 不报「等待条件」（本来就没有等）：与既有语义一致。
+	require.Nil(t, metadata["wait_condition"])
+
+	require.Eventually(t, func() bool {
+		job, err := broker.Background.GetJob(context.Background(), jobID)
+		return err == nil && job != nil && background.IsTerminalStatus(job.Status)
+	}, 15*time.Second, 50*time.Millisecond, "job should finish")
+
+	job, err := broker.Background.GetJob(context.Background(), jobID)
+	require.NoError(t, err)
+	assert.False(t, background.TerminalObserved(job),
+		"an immediate read must not suppress the terminal wake")
 }
 
 func TestTaskOutputWaitExitReturnsOnTerminalState(t *testing.T) {

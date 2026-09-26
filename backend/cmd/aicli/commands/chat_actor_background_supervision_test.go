@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -108,4 +109,45 @@ func TestLocalBackgroundJobHelpers(t *testing.T) {
 	require.Equal(t, "137", localBackgroundJobEventString(float64(137)))
 	require.Equal(t, "TOOL_TIMEOUT", localBackgroundJobEventString("TOOL_TIMEOUT"))
 	require.Equal(t, "", localBackgroundJobEventString(nil))
+}
+
+// newObservedLocalBackgroundManager 造一个「终态已由 task_output wait 送达」
+// 的 job：CLI 宿主通过 manager.GetJob 读到标记后不再补一次冗余唤醒。
+func newObservedLocalBackgroundManager(t *testing.T, jobID string) *background.Manager {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "background.sqlite")
+	seed, err := background.NewSQLiteStore(&background.StoreConfig{Path: path})
+	require.NoError(t, err)
+	require.NoError(t, seed.SaveJob(context.Background(), background.Job{
+		ID:        jobID,
+		SessionID: "sess-cli-1",
+		Kind:      "shell",
+		Status:    background.StatusCompleted,
+		Command:   "go test ./...",
+		CreatedAt: time.Now().UTC(),
+		Metadata:  map[string]interface{}{background.MetadataTerminalObserved: true},
+	}))
+	require.NoError(t, seed.Close())
+	manager := background.NewManager(background.Config{StorePath: path})
+	t.Cleanup(func() { _ = manager.Close() })
+	return manager
+}
+
+func TestProjectLocalBackgroundJobTerminal_ObservedJobSkipsTheWake(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	ctx := context.Background()
+	host.Background = newObservedLocalBackgroundManager(t, "job-observed")
+
+	host.projectLocalBackgroundJobTerminal(
+		localBackgroundJobTestEvent("job-observed", "completed", "sess-cli-1", map[string]interface{}{"status": "completed"}),
+		"sess-cli-1",
+	)
+
+	rows, err := host.Supervision.Store.ListNotifications(ctx, supervision.NotificationFilter{RootScopeID: "sess-cli-1"})
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Contains(t, rows[0].Reason, "command: go test ./...")
+	pending, err := host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{RootScopeID: "sess-cli-1", UnclaimedOnly: true})
+	require.NoError(t, err)
+	require.Empty(t, pending, "an observed terminal state must not schedule a wake")
 }
