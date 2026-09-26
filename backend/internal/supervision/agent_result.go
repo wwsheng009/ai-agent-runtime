@@ -3,6 +3,7 @@ package supervision
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -184,9 +185,10 @@ type ReadResultArgs struct {
 	MaxChars  int
 	// Offset/Limit page the summary text in runes, with artifact_read's
 	// offset/limit/eof semantics (H4). Both zero keeps the bounded default
-	// view (MaxSnapshotResultSummaryRunes) but still reports how to page the
-	// remainder, so the 512-rune cap is a default view instead of the only
-	// exit.
+	// view sized by max_chars (ReadResultMaxChars), not by the per-snapshot-row
+	// cap, and still reports how to page the remainder. MaxSnapshotResultSummaryRunes
+	// stays the bound for one snapshot row; it must not cap a single-subject
+	// deliverable read.
 	Offset int
 	Limit  int
 }
@@ -343,6 +345,7 @@ func BuildReadResultPayload(record AgentResultRecord, args ReadResultArgs) ReadR
 		TaskID:    strings.TrimSpace(firstNonEmpty(record.TaskID, args.TaskID)),
 		Source:    normalizeResultSource(record.Source),
 	}
+	maxChars := ReadResultMaxChars(args.MaxChars)
 	if record.FinishedAt != nil {
 		finished := record.FinishedAt.UTC()
 		payload.FinishedAt = &finished
@@ -369,7 +372,7 @@ func BuildReadResultPayload(record AgentResultRecord, args ReadResultArgs) ReadR
 	}
 
 	if wants(ReadResultSectionSummary) {
-		applyReadResultSummaryPage(&payload, record.Summary, args)
+		applyReadResultSummaryPage(&payload, record.Summary, args, maxChars)
 	}
 	if wants(ReadResultSectionFindings) {
 		for _, finding := range record.Findings {
@@ -440,38 +443,44 @@ func BuildReadResultPayload(record AgentResultRecord, args ReadResultArgs) ReadR
 		}
 	}
 	applyFailedWithResultGuidance(&payload, record)
-	enforceReadResultBudget(&payload, ReadResultMaxChars(args.MaxChars))
+	enforceReadResultBudget(&payload, maxChars)
+	syncSummaryPageAfterBudget(&payload)
+	if payload.NextAction == "" && payload.Truncated && payload.EOF != nil && !*payload.EOF {
+		payload.NextAction = fmt.Sprintf(
+			"summary continues at offset=%d (total_runes=%d); call again with offset=%d limit=%d to read on",
+			payload.NextOffset, payload.TotalRunes, payload.NextOffset, maxChars)
+	}
 	return payload
 }
 
 // applyReadResultSummaryPage renders the summary either as the bounded default
-// view or as one explicit offset/limit page. Both modes report eof/next_offset
-// so the caller always learns how to reach the rest of the deliverable (H4:
-// the 512-rune cap used to be the only exit and the remainder was unreachable).
-func applyReadResultSummaryPage(payload *ReadResultPayload, summary string, args ReadResultArgs) {
+// view or as one explicit offset/limit page. The default view is sized by the
+// resolved max_chars budget (budget), not by MaxSnapshotResultSummaryRunes:
+// the 512-rune value bounds one supervision snapshot row, and using it here
+// made a 12k-rune deliverable look unreadable while the tool description
+// promised up to max_chars. Both modes report eof/next_offset so the caller
+// always learns how to reach the rest of the deliverable (H4).
+func applyReadResultSummaryPage(payload *ReadResultPayload, summary string, args ReadResultArgs, budget int) {
 	if payload == nil {
 		return
 	}
 	summary = strings.TrimSpace(summary)
 	total := utf8.RuneCountInString(summary)
 	payload.TotalRunes = total
-	paging := args.Offset > 0 || args.Limit > 0
-	if !paging {
-		payload.Summary, payload.Truncated = truncateReadResultText(summary, MaxSnapshotResultSummaryRunes, payload.Truncated)
-		eof := total <= MaxSnapshotResultSummaryRunes
-		payload.EOF = &eof
-		payload.Offset = 0
-		payload.Limit = MaxSnapshotResultSummaryRunes
-		if !eof {
-			payload.NextOffset = MaxSnapshotResultSummaryRunes
-		}
-		return
-	}
 	offset := args.Offset
 	if offset < 0 {
 		offset = 0
 	}
 	limit := args.Limit
+	paging := args.Offset > 0 || args.Limit > 0
+	if limit <= 0 {
+		if paging {
+			limit = DefaultReadResultMaxChars
+		} else {
+			// Default view: one page sized by the caller's max_chars budget.
+			limit = budget
+		}
+	}
 	if limit <= 0 {
 		limit = DefaultReadResultMaxChars
 	}
@@ -489,6 +498,25 @@ func applyReadResultSummaryPage(payload *ReadResultPayload, summary string, args
 	eof := end >= len(runes)
 	payload.EOF = &eof
 	if !eof {
+		payload.NextOffset = end
+		payload.Truncated = true
+	}
+}
+
+// syncSummaryPageAfterBudget keeps summary pagination consistent after
+// enforceReadResultBudget may have trimmed the returned page: next_offset must
+// advance by exactly the runes handed to the caller, otherwise the next page
+// would silently skip the tail the budget removed. A page trimmed to nothing
+// keeps the cursor at the page start instead of fabricating progress.
+func syncSummaryPageAfterBudget(payload *ReadResultPayload) {
+	if payload == nil || payload.EOF == nil || *payload.EOF {
+		return
+	}
+	returned := utf8.RuneCountInString(strings.TrimSpace(payload.Summary))
+	if returned <= 0 {
+		return
+	}
+	if end := payload.Offset + returned; end < payload.NextOffset {
 		payload.NextOffset = end
 		payload.Truncated = true
 	}

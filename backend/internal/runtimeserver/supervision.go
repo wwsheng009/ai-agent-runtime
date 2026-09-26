@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentcontrol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
@@ -134,6 +135,7 @@ func BuildSupervisionControlPlane(dataDir string, cfg supervision.Config, hooks 
 		teams:       hooks.TeamStore,
 		agentStates: hooks.ListAgentDescendants,
 		teamStates:  hooks.ListTeamDescendants,
+		batches:     hooks.SubagentBatchStore,
 	}
 	results := NewSupervisionResultSource(hooks.SubagentBatchStore, hooks.CompletionMailboxReader)
 	resultProvider := NewDescendantResultProvider(provider, results, store, hooks.AgentRegistry)
@@ -314,6 +316,11 @@ type supervisionDescendantProvider struct {
 	teams       team.Store
 	agentStates func(ctx context.Context, scope supervision.Scope) ([]supervision.DescendantState, error)
 	teamStates  func(ctx context.Context, scope supervision.Scope) ([]supervision.DescendantState, error)
+	// batches projects the durable subagent batch control plane into running
+	// descendants. Without it the parent can see a batch only after its
+	// terminal notification exists, so subagent_status reports "0 row(s)" and
+	// "next_action=finalize" while three children are still working.
+	batches subagentbatch.BatchStore
 }
 
 func (p *supervisionDescendantProvider) ListDescendants(ctx context.Context, scope supervision.Scope) ([]supervision.DescendantState, error) {
@@ -339,6 +346,13 @@ func (p *supervisionDescendantProvider) ListDescendants(ctx context.Context, sco
 			}
 			out = append(out, descendantStateFromAgentRecord(record))
 		}
+	}
+	if p.batches != nil && strings.TrimSpace(scope.RootSessionID) != "" {
+		states, err := listBatchTaskDescendants(ctx, p.batches, scope.RootSessionID)
+		if err != nil {
+			return nil, fmt.Errorf("supervision: list subagent batch descendants: %w", err)
+		}
+		out = append(out, states...)
 	}
 	if p.teamStates != nil {
 		states, err := p.teamStates(ctx, scope)
@@ -382,6 +396,68 @@ func (p *supervisionDescendantProvider) ListDescendants(ctx context.Context, sco
 		}
 	}
 	return dedupeDescendantStates(out), nil
+}
+
+// activeBatchDescendantStatuses mirrors supervision.BatchProgressSource: a
+// batch still producing work must surface its non-terminal tasks, while
+// terminal batches stay owned by their terminal notification (no duplicate
+// rows).
+var activeBatchDescendantStatuses = []subagentbatch.BatchStatus{
+	subagentbatch.BatchQueued,
+	subagentbatch.BatchRunning,
+	subagentbatch.BatchPartiallyCompleted,
+}
+
+// listBatchTaskDescendants turns the durable batch/task rows of one parent
+// session into descendant states. It is intentionally read-only and bounded;
+// a task without a child session id or an unreadable task list degrades to
+// fewer rows instead of failing the whole snapshot.
+func listBatchTaskDescendants(ctx context.Context, store subagentbatch.BatchStore, parentSessionID string) ([]supervision.DescendantState, error) {
+	if store == nil || strings.TrimSpace(parentSessionID) == "" {
+		return nil, nil
+	}
+	batches, err := store.ListBatches(ctx, subagentbatch.BatchFilter{
+		ParentSessionID: strings.TrimSpace(parentSessionID),
+		Status:          activeBatchDescendantStatuses,
+		Limit:           32,
+	})
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	var out []supervision.DescendantState
+	for _, batch := range batches {
+		tasks, err := store.ListTasks(ctx, batch.BatchID)
+		if err != nil {
+			continue
+		}
+		for _, task := range tasks {
+			if task.Status.Terminal() {
+				continue
+			}
+			childSessionID := strings.TrimSpace(task.ChildSessionID)
+			if childSessionID == "" {
+				continue
+			}
+			state := supervision.DescendantState{
+				Kind:             supervision.SubjectAgentSession,
+				ID:               childSessionID,
+				ParentPath:       []string{strings.TrimSpace(parentSessionID)},
+				ExecutionStatus:  string(task.Status),
+				SupervisionState: supervision.SupervisionRunning,
+				Reason:           fmt.Sprintf("batch %s task %s is %s", batch.BatchID, task.TaskID, task.Status),
+			}
+			if task.LastProgressAt != nil && !task.LastProgressAt.IsZero() {
+				age := now.Sub(task.LastProgressAt.UTC()).Milliseconds()
+				if age < 0 {
+					age = 0
+				}
+				state.ProgressAgeMs = age
+			}
+			out = append(out, state)
+		}
+	}
+	return out, nil
 }
 
 func descendantStateFromAgentRecord(record agentcontrol.AgentRecord) supervision.DescendantState {

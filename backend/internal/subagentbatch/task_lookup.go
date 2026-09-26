@@ -97,3 +97,29 @@ func FindTaskByChildSessionIDInParentSession(ctx context.Context, store BatchSto
 	}
 	return SubagentTaskRecord{}, "", false, nil
 }
+
+// FindBatchByIDInParentSession 按 batch id 在**一个父会话的**批次里定位批次。
+// 作用域纪律与两个 task 查找一致：只扫该父会话自己的批次（ListBatches 按
+// ParentSessionID 过滤），调用方必须先取得调用者会话 id，不得由模型指定。
+//
+// 为什么需要它（2026-09-26 真机 E2E 缺口）：派发回执里最显眼的 id 是 batch id，
+// 父模型会直接 `wait_agent(batch_id)`；batch id 既不是 agent session 也不是
+// task id，解析层只能报 target_not_found。把 batch 映射到它的 task 行之后，
+// 调用方才能把 batch id 展开成可寻址的子会话。
+func FindBatchByIDInParentSession(ctx context.Context, store BatchStore, parentSessionID, batchID string) (SubagentBatch, bool, error) {
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	batchID = strings.TrimSpace(batchID)
+	if store == nil || parentSessionID == "" || batchID == "" {
+		return SubagentBatch{}, false, nil
+	}
+	batches, err := store.ListBatches(ctx, BatchFilter{ParentSessionID: parentSessionID})
+	if err != nil {
+		return SubagentBatch{}, false, err
+	}
+	for _, batch := range batches {
+		if strings.TrimSpace(batch.BatchID) == batchID {
+			return batch, true, nil
+		}
+	}
+	return SubagentBatch{}, false, nil
+}

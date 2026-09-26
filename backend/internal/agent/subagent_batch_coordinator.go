@@ -71,6 +71,9 @@ type BatchTerminalDelivery struct {
 	DeliveryKey      string
 	AlreadyDelivered bool
 	Err              error
+	// Attempts is how many times the sink was invoked before this outcome
+	// (0 for an in-memory duplicate that never called the sink).
+	Attempts int
 }
 
 // BatchTerminalReplayResult summarizes one durable recovery scan. Failed
@@ -96,7 +99,15 @@ type SubagentBatchCoordinatorConfig struct {
 	LifecycleProjector      BatchLifecycleProjector
 	DefaultDeadline         time.Duration // applied when a request carries no deadline
 	TerminalDeliveryTimeout time.Duration
-	HeartbeatInterval       time.Duration
+	// TerminalDeliveryAttempts bounds sink retries for one terminal
+	// notification (default 3). A malformed mailbox database still fails fast;
+	// a transient lock/IO hiccup no longer drops the only durable
+	// "batch finished" notification.
+	TerminalDeliveryAttempts int
+	// TerminalDeliveryRetryDelay is the first backoff between attempts
+	// (default 250ms, doubling per attempt).
+	TerminalDeliveryRetryDelay time.Duration
+	HeartbeatInterval          time.Duration
 	// TaskProgressInterval enables throttled LastProgressAt write-back for
 	// running background batches. Zero (the default) disables write-back
 	// entirely, preserving the pre-M1 behavior of never touching
@@ -120,6 +131,8 @@ type SubagentBatchCoordinator struct {
 	lifecycleProjector BatchLifecycleProjector
 	deadline           time.Duration
 	deliveryTimeout    time.Duration
+	deliveryAttempts   int
+	deliveryRetryBase  time.Duration
 	heartbeatEvery     time.Duration
 	taskProgressEvery  time.Duration
 
@@ -178,6 +191,14 @@ type subagentTaskProgressStats struct {
 // produce an event storm from the refresh ticker.
 const taskProgressErrorEmitMinInterval = time.Second
 
+// Terminal delivery retry policy (see TerminalDeliveryAttempts). The whole
+// retry sequence stays inside TerminalDeliveryTimeout, so a hung sink cannot
+// extend a worker's terminal path beyond the configured budget.
+const (
+	defaultTerminalDeliveryAttempts   = 3
+	defaultTerminalDeliveryRetryDelay = 250 * time.Millisecond
+)
+
 // NewSubagentBatchCoordinator constructs a coordinator from a config. The
 // store must be non-nil for StartBackground to work.
 func NewSubagentBatchCoordinator(cfg SubagentBatchCoordinatorConfig) *SubagentBatchCoordinator {
@@ -186,6 +207,12 @@ func NewSubagentBatchCoordinator(cfg SubagentBatchCoordinatorConfig) *SubagentBa
 	}
 	if cfg.TerminalDeliveryTimeout <= 0 {
 		cfg.TerminalDeliveryTimeout = 5 * time.Second
+	}
+	if cfg.TerminalDeliveryAttempts <= 0 {
+		cfg.TerminalDeliveryAttempts = defaultTerminalDeliveryAttempts
+	}
+	if cfg.TerminalDeliveryRetryDelay <= 0 {
+		cfg.TerminalDeliveryRetryDelay = defaultTerminalDeliveryRetryDelay
 	}
 	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = time.Minute
@@ -199,6 +226,8 @@ func NewSubagentBatchCoordinator(cfg SubagentBatchCoordinatorConfig) *SubagentBa
 		lifecycleProjector: cfg.LifecycleProjector,
 		deadline:           cfg.DefaultDeadline,
 		deliveryTimeout:    cfg.TerminalDeliveryTimeout,
+		deliveryAttempts:   cfg.TerminalDeliveryAttempts,
+		deliveryRetryBase:  cfg.TerminalDeliveryRetryDelay,
 		heartbeatEvery:     cfg.HeartbeatInterval,
 		taskProgressEvery:  cfg.TaskProgressInterval,
 		cancels:            make(map[string]context.CancelFunc),
@@ -382,10 +411,7 @@ func (c *SubagentBatchCoordinator) ReplayTerminalDeliveries(ctx context.Context,
 			continue
 		}
 		result.Delivered++
-		if strings.TrimSpace(delivery.DeliveryKey) != "" {
-			payload["delivery_key"] = strings.TrimSpace(delivery.DeliveryKey)
-		}
-		payload["mailbox_delivery_status"] = string(delivery.Status)
+		c.recordTerminalDelivery(batch.BatchID, eventType, deliveryKey, delivery, payload)
 		payload["replayed"] = true
 		c.emit(eventType, payload)
 	}
@@ -805,13 +831,7 @@ func (c *SubagentBatchCoordinator) finalizeUnownedCanceledBatch(ctx context.Cont
 		payload["supervision_projection_error"] = projectionErr.Error()
 	}
 	delivery := c.deliverTerminalOnce(ctx, updated, eventType, deliveryKey, payload)
-	if strings.TrimSpace(delivery.DeliveryKey) != "" {
-		payload["delivery_key"] = strings.TrimSpace(delivery.DeliveryKey)
-	}
-	payload["mailbox_delivery_status"] = string(delivery.Status)
-	if delivery.Err != nil {
-		payload["mailbox_delivery_error"] = delivery.Err.Error()
-	}
+	c.recordTerminalDelivery(updated.BatchID, eventType, deliveryKey, delivery, payload)
 	if !delivery.AlreadyDelivered {
 		c.emit(eventType, payload)
 	}
@@ -973,16 +993,13 @@ func (c *SubagentBatchCoordinator) convergeBatchTerminal(ctx context.Context, ba
 		payload["supervision_projection_error"] = projectionErr.Error()
 	}
 	delivery := c.deliverTerminalOnce(ctx, updated, eventType, deliveryKey, payload)
+	c.recordTerminalDelivery(updated.BatchID, eventType, deliveryKey, delivery, payload)
 	if delivery.Err != nil {
 		return delivery.Err
 	}
 	if delivery.AlreadyDelivered {
 		return nil
 	}
-	if strings.TrimSpace(delivery.DeliveryKey) != "" {
-		payload["delivery_key"] = strings.TrimSpace(delivery.DeliveryKey)
-	}
-	payload["mailbox_delivery_status"] = string(delivery.Status)
 	payload["recovered"] = true
 	c.emit(eventType, payload)
 	return nil
@@ -1975,13 +1992,7 @@ func (c *SubagentBatchCoordinator) emitTerminalEvent(ctx context.Context, batch 
 		payload["supervision_projection_error"] = projectionErr.Error()
 	}
 	delivery := c.deliverTerminalOnce(ctx, batch, eventType, deliveryKey, payload)
-	if strings.TrimSpace(delivery.DeliveryKey) != "" {
-		payload["delivery_key"] = strings.TrimSpace(delivery.DeliveryKey)
-	}
-	payload["mailbox_delivery_status"] = string(delivery.Status)
-	if delivery.Err != nil {
-		payload["mailbox_delivery_error"] = delivery.Err.Error()
-	}
+	c.recordTerminalDelivery(batchID, eventType, deliveryKey, delivery, payload)
 	if delivery.AlreadyDelivered {
 		return
 	}
@@ -2207,24 +2218,98 @@ func (c *SubagentBatchCoordinator) deliverTerminalOnce(ctx context.Context, batc
 	}
 	deliveryCtx, cancel := context.WithTimeout(deliveryCtx, timeout)
 	defer cancel()
-	delivery := c.sink(deliveryCtx, BatchTerminalNotification{
-		Batch:       *batch,
-		EventType:   eventType,
-		DeliveryKey: deliveryKey,
-		Payload:     cloneBatchPayload(payload),
-	})
-	if strings.TrimSpace(delivery.DeliveryKey) == "" {
-		delivery.DeliveryKey = deliveryKey
+	attempts := c.deliveryAttempts
+	if attempts <= 0 {
+		attempts = defaultTerminalDeliveryAttempts
+	}
+	retryBase := c.deliveryRetryBase
+	if retryBase <= 0 {
+		retryBase = defaultTerminalDeliveryRetryDelay
+	}
+	// Bounded retry: a transient mailbox lock/IO hiccup must not drop the only
+	// durable "batch finished" notification. The in-memory duplicate marker is
+	// only set on success, so a failed sequence stays recoverable through the
+	// startup replay as before. The terminal lock is held across the retries
+	// (bounded by deliveryTimeout); this keeps the duplicate check atomic.
+	var delivery BatchTerminalDelivery
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if attempt > 1 {
+			delay := retryBase * time.Duration(1<<uint(attempt-2))
+			select {
+			case <-deliveryCtx.Done():
+				return BatchTerminalDelivery{
+					Status:      BatchTerminalDeliveryFailed,
+					DeliveryKey: deliveryKey,
+					Attempts:    attempt - 1,
+					Err:         fmt.Errorf("terminal delivery retry canceled after %d attempt(s): %w", attempt-1, deliveryCtx.Err()),
+				}
+			case <-time.After(delay):
+			}
+		}
+		delivery = c.sink(deliveryCtx, BatchTerminalNotification{
+			Batch:       *batch,
+			EventType:   eventType,
+			DeliveryKey: deliveryKey,
+			Payload:     cloneBatchPayload(payload),
+		})
+		delivery.Attempts = attempt
+		if strings.TrimSpace(delivery.DeliveryKey) == "" {
+			delivery.DeliveryKey = deliveryKey
+		}
+		if delivery.Err == nil && (delivery.Status == BatchTerminalDeliveryPersisted || delivery.Status == BatchTerminalDeliveryFallback) {
+			c.terminalDelivered[deliveryKey] = struct{}{}
+			return delivery
+		}
+		if delivery.Err == nil {
+			// An invalid status is a wiring error, not a transient failure:
+			// retrying would hide it.
+			status := delivery.Status
+			delivery.Status = BatchTerminalDeliveryFailed
+			delivery.Err = fmt.Errorf("subagent batch terminal sink returned invalid delivery status %q", status)
+			return delivery
+		}
+		delivery.Status = BatchTerminalDeliveryFailed
+	}
+	return delivery
+}
+
+// recordTerminalDelivery annotates the terminal event payload with the durable
+// delivery outcome and emits the companion delivery-failed alert. It must be
+// called without terminalMu held: the alert travels through the same display
+// emitter as the terminal event, and calling host code while holding the
+// delivery lock would invite a lock-order inversion.
+func (c *SubagentBatchCoordinator) recordTerminalDelivery(batchID, eventType, deliveryKey string, delivery BatchTerminalDelivery, payload map[string]interface{}) {
+	if c == nil {
+		return
+	}
+	if payload != nil {
+		if key := strings.TrimSpace(delivery.DeliveryKey); key != "" {
+			payload["delivery_key"] = key
+		}
+		payload["mailbox_delivery_status"] = string(delivery.Status)
+		if delivery.Err != nil {
+			payload["mailbox_delivery_error"] = delivery.Err.Error()
+		}
+		if delivery.Attempts > 0 {
+			payload["mailbox_delivery_attempts"] = delivery.Attempts
+		}
+	}
+	if delivery.AlreadyDelivered || delivery.Status != BatchTerminalDeliveryFailed {
+		return
+	}
+	alert := map[string]interface{}{
+		"batch_id":                  batchID,
+		"terminal_event_type":       eventType,
+		"delivery_key":              firstNonEmptyString(strings.TrimSpace(delivery.DeliveryKey), deliveryKey),
+		"mailbox_delivery_status":   string(delivery.Status),
+		"mailbox_delivery_attempts": delivery.Attempts,
+		"display_mirror":            true,
+		"mirror_source":             "subagent_batch_terminal_delivery",
 	}
 	if delivery.Err != nil {
-		delivery.Status = BatchTerminalDeliveryFailed
-		return delivery
+		alert["mailbox_delivery_error"] = delivery.Err.Error()
 	}
-	if delivery.Status != BatchTerminalDeliveryPersisted && delivery.Status != BatchTerminalDeliveryFallback {
-		return failed(fmt.Errorf("subagent batch terminal sink returned invalid delivery status %q", delivery.Status))
-	}
-	c.terminalDelivered[deliveryKey] = struct{}{}
-	return delivery
+	c.emit(runtimeevents.EventSubagentBatchDeliveryFailed, alert)
 }
 
 func cloneBatchPayload(payload map[string]interface{}) map[string]interface{} {

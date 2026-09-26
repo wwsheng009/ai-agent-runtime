@@ -2206,6 +2206,15 @@ func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args to
 	if len(sessionIDs) == 0 {
 		return nil, fmt.Errorf("id is required")
 	}
+	// 2026-09-26 真机 E2E（与 CLI 宿主对齐）：派发回执里最显眼的 id 是 batch id，
+	// 父模型会直接 wait_agent(batch_id)。batch id 既不是 agent session 也不是
+	// task id，旧路径只能报 target_not_found；先把它展开成已早绑定
+	// child_session_id 的 task 子会话，再走既有解析/快照路径。
+	expandedIDs, err := c.expandBatchWaitTargets(ctx, sessionIDs)
+	if err != nil {
+		return nil, err
+	}
+	sessionIDs = expandedIDs
 	for index, sessionID := range sessionIDs {
 		resolvedSessionID, err := c.resolveTargetSessionID(ctx, sessionID)
 		if err != nil {
@@ -3017,6 +3026,63 @@ func (c *sessionAgentController) resolveTaskChildSessionID(ctx context.Context, 
 		)
 	}
 	return childSessionID, true, nil
+}
+
+// expandBatchWaitTargets 把 dispatch batch id 展开为其 task 的 child session，
+// 与 CLI 宿主的 expandLocalBatchWaitTargets 同语义：非 batch id 原样保留（未知
+// id 仍由 target_not_found 指引兜底）；批次已建但尚无任务绑定子会话时保留
+// batch id，让上游给出"身份未就绪"的诚实状态而不是静默空等。只读取调用方父
+// 会话自己的批次（作用域纪律与 resolveTaskChildSessionID 一致）。
+func (c *sessionAgentController) expandBatchWaitTargets(ctx context.Context, ids []string) ([]string, error) {
+	if c == nil || c.handler == nil || len(ids) == 0 {
+		return ids, nil
+	}
+	store := c.handler.peekSubagentBatchStore()
+	if store == nil {
+		return ids, nil
+	}
+	parentSessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+	if parentSessionID == "" {
+		return ids, nil
+	}
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, exists := seen[value]; exists {
+			return
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	for _, id := range ids {
+		batch, ok, err := subagentbatch.FindBatchByIDInParentSession(ctx, store, parentSessionID, id)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			add(id)
+			continue
+		}
+		tasks, err := store.ListTasks(ctx, batch.BatchID)
+		if err != nil {
+			return nil, err
+		}
+		bound := 0
+		for _, task := range tasks {
+			if childSessionID := strings.TrimSpace(task.ChildSessionID); childSessionID != "" {
+				add(childSessionID)
+				bound++
+			}
+		}
+		if bound == 0 {
+			add(batch.BatchID)
+		}
+	}
+	return out, nil
 }
 
 // batchTaskSnapshot 把「子代理会话 id」投影成可等待 / 可读的状态行

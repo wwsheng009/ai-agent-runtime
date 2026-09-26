@@ -121,6 +121,54 @@ func TestResultBounds(t *testing.T) {
 	require.Equal(t, 1234, ReadResultMaxChars(1234))
 }
 
+// 默认视图必须按 max_chars 预算分页，而不是按快照行的 512-rune 上限：
+// 一次 12k-rune 的交付物读取不应看起来“只有 512 rune 可用”。
+func TestBuildReadResultPayloadDefaultSummaryPageUsesMaxChars(t *testing.T) {
+	summary := strings.Repeat("x", 9000)
+	record := AgentResultRecord{
+		Source:    ResultSourceTaskResult,
+		SessionID: "child-1",
+		TaskID:    "task-1",
+		Status:    "succeeded",
+		Summary:   summary,
+	}
+	payload := BuildReadResultPayload(record, ReadResultArgs{
+		SessionID: "child-1",
+		Sections:  []string{ReadResultSectionSummary},
+	})
+	require.NotNil(t, payload.EOF)
+	require.False(t, *payload.EOF)
+	require.True(t, payload.Truncated)
+	require.Equal(t, DefaultReadResultMaxChars, payload.Limit)
+	require.Greater(t, len([]rune(payload.Summary)), MaxSnapshotResultSummaryRunes,
+		"the default page must not be capped at the per-snapshot-row bound")
+	require.Equal(t, 9000, payload.TotalRunes)
+	// next_offset must name the exact rune the returned page ends at: the
+	// serialized payload budget may trim the requested page, and a stale
+	// page boundary would make the next page skip text.
+	require.Equal(t, len([]rune(payload.Summary)), payload.NextOffset)
+
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	require.LessOrEqual(t, utf8.RuneCount(raw), DefaultReadResultMaxChars,
+		"the default page still respects the max_chars budget")
+
+	next := BuildReadResultPayload(record, ReadResultArgs{
+		SessionID: "child-1",
+		Sections:  []string{ReadResultSectionSummary},
+		Offset:    payload.NextOffset,
+		Limit:     2000,
+	})
+	require.Equal(t, payload.NextOffset, next.Offset)
+	require.Len(t, []rune(next.Summary), 2000)
+	require.Equal(t, payload.NextOffset+2000, next.NextOffset)
+	require.False(t, *next.EOF)
+
+	// Two adjacent pages must reconstruct the summary head without a gap.
+	combined := payload.Summary + next.Summary
+	require.Equal(t, strings.Repeat("x", payload.NextOffset+2000), combined)
+}
+
 // sampleAgentResultRecord produces a record that exceeds every count cap so
 // the truncation flags are exercised deterministically.
 func sampleAgentResultRecord() AgentResultRecord {

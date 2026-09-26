@@ -119,14 +119,50 @@ var writeIntentChineseSignals = []string{
 	"写文件", "写入", "创建", "修改", "生成文件", "保存为", "删除文件", "实现功能", "打补丁", "写代码", "改动",
 }
 
+// readOnlyIntentSignals 标记「目标是只读核验」的措辞。M5 的误报形态
+// （2026-09-26 真机）："复查工作区未提交改动"/"review uncommitted changes" 这类
+// 目标只是核对现状，却命中弱写意图词（改动）而收到 goal_appears_to_require_writes，
+// 父模型据此怀疑 read_only 设置错误。只读措辞在场且没有强写意图短语时不再告警。
+var readOnlyIntentSignals = []string{
+	"检查", "复查", "查看", "分析", "审查", "审计", "核对", "验证", "只读",
+	"不修改", "不改动", "无需修改", "请勿修改",
+	"read-only", "read only", "inspect", "review", "analyze", "analyse",
+	"audit", "verify", "check", "do not modify", "do not write",
+	"without modifying", "without writing", "no changes",
+}
+
+// strongWriteIntentPattern / strongWriteIntentChinesePattern 是「动词+对象」
+// 级别的强写意图短语：命中即视为确实要产出/修改工件，即使目标同时提到检查、
+// 验证（例如 "检查并修改 X 的代码"）。对象白名单刻意收窄——"create a report"
+// 这类只产出文字、只读子代理也能完成的目标不算。
+var strongWriteIntentPattern = regexp.MustCompile(`(?i)\b(?:write|create|modify|edit|implement|apply|delete|remove|save|refactor|patch)\b[\s_-]+(?:the\s+|a\s+|an\s+)?(?:files?|code|patch|patches|modules?|functions?|tests?|config(?:uration)?|scripts?|packages?|changes?)\b`)
+
+var strongWriteIntentChinesePattern = regexp.MustCompile(`(?:写文件|写入文件|创建文件|新建文件|生成文件|删除文件|修改文件|编辑文件|修改代码|改写代码|写代码|实现功能|打补丁|保存为|重构代码|(?:修改|编辑|更新|调整)[^,。;；]{0,12}?(?:代码|文件|模块|配置))`)
+
 // goalHasWriteIntent 对子代理 goal 做启发式写意图检测（M5）。只用于非阻断的
 // route_warnings 提示，允许少量误报；命中并不改变 spawn 行为。
 func goalHasWriteIntent(goal string) bool {
+	if strongWriteIntentPattern.MatchString(goal) || strongWriteIntentChinesePattern.MatchString(goal) {
+		return true
+	}
+	if goalHasReadOnlyIntent(goal) {
+		return false
+	}
 	if writeIntentPattern.MatchString(goal) {
 		return true
 	}
 	lower := strings.ToLower(goal)
 	for _, signal := range writeIntentChineseSignals {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func goalHasReadOnlyIntent(goal string) bool {
+	lower := strings.ToLower(goal)
+	for _, signal := range readOnlyIntentSignals {
 		if strings.Contains(lower, signal) {
 			return true
 		}

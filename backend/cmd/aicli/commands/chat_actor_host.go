@@ -1218,7 +1218,10 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		return nil, fmt.Errorf("initialize subagent batch store: %w", err)
 	}
 	agentControlRegistry := buildLocalChatAgentControlRegistryService(runtimeConfig)
-	backgroundManager := buildLocalChatBackgroundManager(runtimeConfig)
+	// background 事件回调需要 host 上的 supervision 控制面，而 host 在 manager
+	// 之后装配：用 relay 延迟绑定，避免为了回调改 background 包的构造顺序。
+	backgroundEvents := &localBackgroundJobEventRelay{}
+	backgroundManager := buildLocalChatBackgroundManager(runtimeConfig, backgroundEvents.handle)
 	var globalMailboxStore agentcontrol.GlobalMailboxRegistryStore
 	var globalAgentStore agentcontrol.AgentRegistryStore
 	if agentControlRegistry != nil {
@@ -1235,6 +1238,10 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		runtimeserver.SupervisionRuntimeHooks{
 			AgentRegistry: globalAgentStore,
 			TeamStore:     bootstrapManager.TeamStore(),
+			// Durable batch 控制面是运行期 descendants/obligation/progress 的
+			// 唯一数据源：不传它，subagent_status 在批次运行期间只能看到 0 行
+			// 并给出 next_action=finalize（2026-09-26 会话 postmortem）。
+			SubagentBatchStore: batchStore,
 		},
 	)
 	if err != nil {
@@ -1274,6 +1281,8 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		ledgerEnabled:      cfg.SkillsRuntime != nil && cfg.SkillsRuntime.UsageLedgerEnabled,
 	}
 	host.lifecycleCtx, host.lifecycleCancel = context.WithCancel(context.Background())
+	// 绑定完成后 manager 的终态事件就能投影到 supervision inbox 并唤醒所属会话。
+	backgroundEvents.bind(host)
 	// Recover only rows whose heartbeat is older than the restart grace period.
 	// Run a second pass after that grace expires: rows written immediately before
 	// the previous process died are intentionally too fresh for the first pass,
@@ -2793,7 +2802,9 @@ func buildLocalChatRuntimeStores(session *ChatSession, runtimeConfig *runtimecfg
 	return memoryStore, memoryStore
 }
 
-func buildLocalChatBackgroundManager(runtimeConfig *runtimecfg.RuntimeConfig) *background.Manager {
+// buildLocalChatBackgroundManager 构造后台任务管理器。onEvent 可为 nil（无
+// supervision 控制面的宿主）；非 nil 时调用方通常传延迟绑定的 relay。
+func buildLocalChatBackgroundManager(runtimeConfig *runtimecfg.RuntimeConfig, onEvent func(background.JobEvent)) *background.Manager {
 	if runtimeConfig == nil {
 		return nil
 	}
@@ -2814,6 +2825,7 @@ func buildLocalChatBackgroundManager(runtimeConfig *runtimecfg.RuntimeConfig) *b
 		StoreDSN:                strings.TrimSpace(cfg.StoreDSN),
 		LogDir:                  strings.TrimSpace(cfg.LogDir),
 		MaxConcurrentJobs:       cfg.MaxConcurrentJobs,
+		EventHandler:            onEvent,
 	})
 }
 

@@ -39,6 +39,16 @@ const (
 	EventSubagentBatchTimedOut = "subagent.batch.timed_out"
 	EventSubagentBatchOrphaned = "subagent.batch.orphaned"
 
+	// EventSubagentBatchDeliveryFailed：批次终态通知的 durable mailbox 投递在
+	// 重试后仍失败时的独立可见告警（2026-09-26 会话 postmortem：宿主 session
+	// runtime 库损坏，投递错误只落在终态事件的 payload 字段里，父会话与 UI 都
+	// 没有把它当作告警消费）。
+	//
+	// 终态 subagent.batch.* 事件仍照常发出（display mirror）；本事件把
+	// "批次的持久通知丢了" 变成可检索、可渲染的独立信号，配合启动期
+	// ReplayTerminalDeliveries 在恢复后重放。
+	EventSubagentBatchDeliveryFailed = "subagent.batch.delivery_failed"
+
 	// EventSubagentSuspensionUnavailable：挂起不可用的降级告警（方案 §6.13 / I9）。
 	//
 	// 派发 background 子任务时若探测不到 durable store（进程内 store / nil），

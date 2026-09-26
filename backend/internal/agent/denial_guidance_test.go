@@ -177,3 +177,17 @@ func TestDecodeSubagentTasksWriteIntentWarning(t *testing.T) {
 	require.Equal(t, "spawn_subagents.read_only", tasks[0].ReadOnlySource)
 	require.False(t, routeWarningsContain(tasks[1].RouteWarnings, "goal_appears_to_require_writes"))
 }
+
+// M5 误报修复（2026-09-26 真机）：只读核验目标里的"改动/uncommitted changes"
+// 这类弱写词不再触发目标需要写权限的告警；强写意图短语仍然触发。
+func TestGoalHasWriteIntentSkipsReadOnlyVerificationGoals(t *testing.T) {
+	require.True(t, goalHasWriteIntent("Modify the config file"))
+	require.True(t, goalHasWriteIntent("创建文件并写入结果"))
+	require.True(t, goalHasWriteIntent("检查并修改 X 的代码"))
+
+	require.False(t, goalHasWriteIntent("复查工作区未提交改动，列出可疑点"),
+		"a read-only verification goal that mentions changes must not claim write intent")
+	require.False(t, goalHasWriteIntent("Review the uncommitted changes and report risky spots"))
+	require.False(t, goalHasWriteIntent("Inspect the config file and summarize"))
+	require.False(t, goalHasWriteIntent("检查 create_patch 工具的实现现状并报告"))
+}

@@ -587,6 +587,10 @@ func TestReplayTerminalDeliveryRetriesAfterSinkFailure(t *testing.T) {
 	var attempts int
 	c := NewSubagentBatchCoordinator(SubagentBatchCoordinatorConfig{
 		Store: store,
+		// 本用例固定的是 durable replay 契约：投递失败必须留在账本里、由下一次
+		// replay 重试。进程内重试由 subagent_batch_terminal_delivery_test.go
+		// 覆盖，这里显式只允许一次尝试，让 replay 边界保持可观测。
+		TerminalDeliveryAttempts: 1,
 		TerminalSink: func(_ context.Context, _ BatchTerminalNotification) BatchTerminalDelivery {
 			attempts++
 			if attempts == 1 {
