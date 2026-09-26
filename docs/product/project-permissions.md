@@ -163,6 +163,8 @@ CLI deny always wins over a project `allow` rule for the same tool.
 - Engine rules applied in `buildLocalChatAgent` and after plan-mode prepare hooks.
 - Direct `/call` `/tool` `/skill` uses the same overlay rules.
 - Session banner + `/debug` show permission sources / summary.
+- **审批记忆（§4.8）**：`ApprovalResponse.RememberScope` 决定记忆去处——`session` 写会话内存 store，`project` 写 `<workspace>/.aicli/grants.json`（新会话仍生效），`once`（默认）不写。记忆模式以 specifier 形态存储：`cmd:<base>:*`（仅整条命令单一基命令且非高风险时泛化）、`path:`、`host:`、`exact:`；未带前缀的旧模式按历史子串语义兼容。危险工具（shell/bash 等）、硬问询（根/主目录断路器）、敏感写与外部目录准入一律不可 remember；记忆授权在求值时仍要先过断路器与敏感写门。
+- **拒绝反馈（§4.8）**：审批响应可携带 `Feedback`，拒绝时并入决策 reason（`…; user feedback: <文本>`）随工具错误回到模型上下文。
 
 ## Notes
 
