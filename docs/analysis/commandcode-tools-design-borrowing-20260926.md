@@ -566,3 +566,13 @@
 - **测试**（新增 10 例）：manager 层「终态事件在 handler 前打标记」「无 waiter 不打」「End 后不打」「output/running 不打」「registry 计数/TTL/多余 End」「nil 安全」；broker 层「wait=exit 终态 → 标记置位」「wait=none 立即读 → 不置位」；supervision「Observed → 有通知无 wake，digest 仍含该 job」；API/CLI 宿主「observed job → 有通知（带 command 摘要）无 wake」。
 - **验证**：`go test ./internal/background/ ./internal/supervision/ ./internal/toolbroker/` 全绿；`./internal/api/runtimeapi/` 全绿（并行会话把 `approval_explain_settings_test.go` 写成 `undefined: mux` 的半成品时用 `-overlay` 完成等价验证）；CLI 侧 4 例全绿。
 - **残留（下一批）**：①「wake 已先于观察登记落库」的窗口（投影先跑完、waiter 稍后才观察到）仍会投递一轮冗余 digest ——彻底解决要在投递回调里按 job 标记做二次抑制并 resolve 已认领 wake，收益有限（仅该窗口内），暂不引入投递侧耦合；② 会话关闭时 resolve pending wake；③ `monitor_command`；④ 预算可配置。
+
+### 9.19 会话关闭作废本会话待投递 wake（§9.18 残留②收口）
+
+**问题**：CLI 退出时，本会话的 pending wake（含已认领未投递）仍留在 ledger；下次 resume 同一会话后，turn 结束的 drain 会再补投一轮「平轮前 preflight 已经展示过」的过时 digest，白耗一次投递与 wake 预算。
+
+- **supervision（`internal/supervision/session_close.go`）**：`ResolvePendingWakesForSession(ctx, store, rootScopeID, sessionID)` —— 按 (root scope, target session) 列出 pending wake（**不筛 claim 状态**：会话没了，认领与否都无投递对象）后逐条 `ResolveWakePending`；返回清理条数。**只删 wake 义务，不删 notification**：证据仍在 inbox（unresolved）与 job store，由 resume 后首个自然 turn 的 preflight digest 呈现。
+- **CLI（`finalizeChatSessionWithError`）**：新增 `resolveLocalChatSessionPendingWakes(session)`，best-effort（退出路径绝不因监督面失败而卡住），并保持既有「退出不冷开存储」约定——store 暴露 `Opened()` 且为冷时直接跳过（复用 `SQLiteSupervisionStore.Opened`），nil/空会话/空 store 全安全。
+- **测试（3 例新增）**：supervision 侧「只清本会话、其他会话与其他 root scope 不受影响」「空 session/nil store 是 no-op 且 ledger 不动」；CLI 侧「关掉本会话 1 条、其他会话 1 条保留、重复调用与 nil 幂等」（复用巡检测试的监督控制面 fixture）。
+- **验证**：`go test ./internal/supervision/ -run ResolvePendingWakesForSession` 2 例全绿；CLI 侧 5 例全绿（本轮又遇并行会话把 `cmd/aicli/commands` 写成半成品导致一次 `[build failed]`，重跑即恢复——非本改动）。
+- **残留**：API 侧 `DeleteSession` / `CloseSession` / `CloseSessionAgent` 尚未接同一清理（需要该侧 root scope 口径与 store accessor，且 `internal/api/runtimeapi/handler.go` 当前有并行会话写入；接入点已定位，留待并入该侧改动时一起做）。

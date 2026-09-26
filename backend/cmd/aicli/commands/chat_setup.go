@@ -935,6 +935,10 @@ func finalizeChatSessionWithError(session *ChatSession, terminalErr error) {
 	}
 
 	awaitNoInteractiveLocalTeamDrain(session)
+	// 会话关闭：本会话的待投递 wake 义务随之作废（证据仍在 notification/job store，
+	// 由 resume 后首个自然 turn 的 preflight digest 呈现），避免恢复后再补投一轮
+	// 过时 digest。
+	resolveLocalChatSessionPendingWakes(session)
 	// Skip durable flush for brand-new shells that never left memory. Writing
 	// an empty system-prompt-only session only pollutes history and forces a
 	// late session-history SQLite open during shutdown.

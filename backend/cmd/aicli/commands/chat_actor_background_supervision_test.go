@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/background"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -150,4 +151,41 @@ func TestProjectLocalBackgroundJobTerminal_ObservedJobSkipsTheWake(t *testing.T)
 	pending, err := host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{RootScopeID: "sess-cli-1", UnclaimedOnly: true})
 	require.NoError(t, err)
 	require.Empty(t, pending, "an observed terminal state must not schedule a wake")
+}
+
+// TestResolveLocalChatSessionPendingWakes 覆盖退出路径清理：本会话的待投递 wake
+// 在关闭时作废，其他会话不受影响，重复调用/nil 安全。
+func TestResolveLocalChatSessionPendingWakes(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	session := &ChatSession{
+		LocalRuntimeHost: host,
+		RuntimeSession:   &runtimechat.Session{ID: "sess-close"},
+	}
+	ctx := context.Background()
+	scheduler := supervision.NewWakeScheduler(host.Supervision.Store, supervision.WakeSchedulerConfig{})
+	_, err := scheduler.ScheduleWake(ctx, supervision.WakeRequest{
+		RootScopeID:           "sess-close",
+		TargetParentSessionID: "sess-close",
+		WakeReason:            "background_job_completed",
+	})
+	require.NoError(t, err)
+	_, err = scheduler.ScheduleWake(ctx, supervision.WakeRequest{
+		RootScopeID:           "sess-other",
+		TargetParentSessionID: "sess-other",
+		WakeReason:            "child_failed",
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, 1, resolveLocalChatSessionPendingWakes(session))
+
+	left, err := host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{RootScopeID: "sess-close"})
+	require.NoError(t, err)
+	require.Empty(t, left, "the closing session must leave no pending wake behind")
+	other, err := host.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{RootScopeID: "sess-other"})
+	require.NoError(t, err)
+	require.Len(t, other, 1, "another session's durable wake must survive")
+
+	require.Zero(t, resolveLocalChatSessionPendingWakes(session), "cleanup must be idempotent")
+	require.Zero(t, resolveLocalChatSessionPendingWakes(nil))
+	require.Zero(t, resolveLocalChatSessionPendingWakes(&ChatSession{}))
 }

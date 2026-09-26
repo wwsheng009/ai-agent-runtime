@@ -123,6 +123,38 @@ func (h *localChatRuntimeHost) localBackgroundJobRootScope(sessionID string) str
 	return strings.TrimSpace(sessionID)
 }
 
+// resolveLocalChatSessionPendingWakes 在会话关闭时作废本会话的待投递 wake 义务：
+// 投递目标（本会话的下一轮 turn）已不存在，而证据仍在 notification / job store 里，
+// 由 resume 后首个自然 turn 的 preflight digest 呈现。不清理的话，恢复会话后
+// turn 结束会再补投一轮已经过时的 digest。
+//
+// best-effort：退出路径上的失败只影响一次冗余投递，绝不能让会话关不掉。
+func resolveLocalChatSessionPendingWakes(session *ChatSession) int {
+	if session == nil || session.RuntimeSession == nil {
+		return 0
+	}
+	host := session.LocalRuntimeHost
+	if host == nil || host.Supervision == nil || host.Supervision.Store == nil {
+		return 0
+	}
+	// 冷 store 不在退出路径上打开：本进程从未写过监督面时，与既有「退出不冷开
+	// 存储」的约定保持一致（上一进程的遗留 wake 由下次真正使用监督面时再过期）。
+	if opened, ok := host.Supervision.Store.(interface{ Opened() bool }); ok && !opened.Opened() {
+		return 0
+	}
+	sessionID := strings.TrimSpace(session.RuntimeSession.ID)
+	if sessionID == "" {
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), localBackgroundJobProjectionTimeout)
+	defer cancel()
+	resolved, err := supervision.ResolvePendingWakesForSession(ctx, host.Supervision.Store, host.localBackgroundJobRootScope(sessionID), sessionID)
+	if err != nil {
+		return resolved
+	}
+	return resolved
+}
+
 // localBackgroundJobEventEpoch 与 API 宿主同口径：事件时间戳即「本次终态」的
 // 稳定身份，重放不复发、重跑换 epoch 可再唤一次。
 func localBackgroundJobEventEpoch(event background.JobEvent) int64 {
