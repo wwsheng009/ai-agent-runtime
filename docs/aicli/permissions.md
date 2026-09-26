@@ -430,6 +430,7 @@ disable_bypass: true         # 我的机器上永不开 yolo
 - 审批界面上的「解释」是**只读**动作：调用一次后台模型对命令/补丁做摘要（成本、影响、风险点），**不进入决策链**、不写状态。
 - 模型不可用/超时会退回规则摘要（工具、原因、风险、参数摘要、可否记忆），界面会标注解释来源（模型名 / 规则）。
 - 解释的每次调用都计入 usage 账本（`origin=approval_explain`）。
+- 生成策略可切换：`off`（只用规则摘要）/ `on_demand`（默认，点「解释」才调用）/ `pre_generate`（读路径后台预热）。运行时用 `AICLI_APPROVAL_EXPLAIN_MODE` 或 Web 设置页「审批解释模式」切换；设置页是**进程级临时开关**（`GET/PUT /api/runtime/config/approval-explain`），不写配置文件，重启后回到 env / 默认值。
 
 ---
 

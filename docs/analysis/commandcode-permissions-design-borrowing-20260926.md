@@ -550,6 +550,7 @@
 | 4.13 按需解释（Web UI） | ✅ | 审批控件新增「解释」按钮（`data-approval-explain`）：点击 → `useApprovalExplanation` → 只读展示正文 + 来源（`由 {model} 生成` / `规则解释（未调用模型）`）；失败就地提示可重试；解释期间不阻塞批准/拒绝 | `pending-interaction-bar.test.tsx`、`sessions.test.ts` |
 | 4.13 解释模式与缓存（后端收尾） | ✅ | `ApprovalExplainMode`：`off`（只用规则）/`on_demand`（默认）/`pre_generate`；`SetApprovalExplainMode` 非法值报错不改状态，响应带 `mode`/`cached`。**单飞 + 缓存**：按「会话+审批 ID」缓存 10min/256 条，并发重复点击只触发一次模型调用，失败不缓存（一次抖动不会永久降级），换下一条审批 ID 不匹配即失效；`MaybeWarmApprovalExplanation` 在 `pre_generate` 下由 `GET /runtime` 读路径后台预热（状态先复制）。**调用跟随会话路由**：`summarizeApproval` 优先用会话 `sessionmeta` 的 effective/requested provider+model（两者齐全时），否则退回运行时默认。接线：runtime-server 读 `AICLI_APPROVAL_EXPLAIN_MODE`（非法值告警不阻断） | `session_approval_explain_mode.go`、`session_approval_explain_route_test.go`、`TestApprovalExplain*`、`TestExplainSessionApprovalSingleFlight*`、`TestParseApprovalExplainMode`（整包 + 隔离 worktree 全绿） |
 | 4.14 文档 IA | ✅ 首版 | 新增 [`docs/aicli/permissions.md`](../aicli/permissions.md)：一分钟快速版（五种模式含 `dont_ask` + 最常用 5 条规则）→ 规则语法（`Shell(...)`/路径锚点/域名/参数/工具名 glob 的合法与非法形态）→ 决策阶梯（11 级、逐级 reason 码、规则管不到的断路器/敏感写/外部目录门）→ recipes（只读 git、推送前确认、lockfile、`.git/`、CI `dont_ask`、`--add-dir`、三层分层）→ 审批与记忆（作用域/grants/反馈/解释）→ 已知限制 10 条；互链 `docs/product/project-permissions.md` 与 `folder-trust.md`，并在 `docs/aicli/README.md` 登记；**示例由 `permissions_doc_examples_test.go` 用真实 loader 校验**（13 个 yaml 块全可装载，首轮即抓出占位 `[...]` 示例）。另经只读子代理 as-built 交叉核对修正 4 处：工作区根锚点是单个 `/`；yolo 下普通 `ask` 规则被解析为放行、敏感写门会被跳过（只有断路器 HardAsk 拦得住）；命令 specifier 的 allow 折叠/deny·ask 精确；权限文件解析失败是整文件丢弃（warning 后继续）而非 fail closed | `permissions_doc_examples_test.go`、`internal/policy` 全量回归、只读侦察参考卡 |
+| 4.13 解释模式设置面（Web 开关） | ✅ | 新增 `GET/PUT /api/runtime/config/approval-explain`：GET 回显当前模式 + 与后端枚举同源的 `supported_modes`；PUT 接受 `ParseApprovalExplainMode` 的规范值与别名，非法值 400 且不改状态；**不落 runtime.yaml**（进程级临时开关，重启回到 `AICLI_APPROVAL_EXPLAIN_MODE`/默认 `on_demand`）。Web 设置页新增「审批解释模式」卡片：读取回显 / 切换保存 / 保存状态 / 端点不可用（旧 runtime 404）与 400 的降级提示；i18n 双语；全量前端 348 文件 2910 用例 + lint + `tsc -b` 通过 | `approval_explain_settings.go`、`approval-explain-settings-card.tsx`、`use-runtime-approval-explain.ts`、`chat-settings-page.test.tsx`、`permissions.md` §5.4 |
 
 验证说明：`internal/policy`、`internal/chat` 全绿。`internal/chat` 的 `TestAppendEventsLockHoldBudget`（锁持有时长预算）在并发构建负载下出现过一次失败，单跑 `-count=3` 3/3 通过，属既存时序敏感用例，与本次改动无关。
 
@@ -558,7 +559,7 @@
 - CLI `[5] 拒绝并说明原因`（自由文本 → `Feedback`）与 `[4]` 复用经由同一 `ApprovalResponse.Remember + Scope`（CLI 现有 10 分钟 TTL 复用仍是独立轨道，未合并；`cmd/aicli/commands` 与并发会话的工作面重叠，排在后面做）；
 - ACP `reject_always`（`acp/types.go` 已定义未启用）与 `allow-always` → policy 记忆库（`RememberScope=session/project`）的映射——当前 `allow-always` 走的是 CLI 侧进程内授权族复用（10 分钟 TTL）；现状已写入 ACP 手册「权限入口对照表」；
 - `/grants` 命令面展示新 specifier 形态（durable store 读写已通，展示层待跟进）；
-- 4.13 剩余：CLI/ACP 面的「解释」入口；**Web 设置页开关**（当前经 `AICLI_APPROVAL_EXPLAIN_MODE` 或 `SetApprovalExplainMode` 配置，尚无 UI）；宿主若注入 `ApprovalSummarizer` 需自担记账。
+- 4.13 剩余：CLI/ACP 面的「解释」入口；宿主若注入 `ApprovalSummarizer` 需自担记账。（**Web 设置页开关已落地**：`GET/PUT /api/runtime/config/approval-explain` + 设置页卡片，进程级不落盘。）
 - 4.12 的**入口简写（`--accept-edits`/`--plan`、`/mode:<name>`）与 CLI 常驻模式 banner 未做**（集中在 `cmd/aicli/commands`，与并发工作面重叠，排后）；安全复核已完成（§13：四类输入面的 bypass 可达性、F1–F4 定级与建议，已写入手册 §1.4）。4.14 的后续项：示例工程/截图未开始（ACP 侧入口表本次已落地，见 ACP 手册 §6）。
 
 ---
@@ -588,7 +589,7 @@
 | F1 | runtime API 切 bypass 无确认、无令牌，对运行中会话即时生效 | 中 | `UpdateSessionPermissionMode` 对 `bypass_permissions` 复用「危险动作」语义（要求显式 `confirm=true` 或写令牌）；`disable_bypass` 生效时直接 403，而不是静默降级 |
 | F2 | `disable_bypass` 只降级求值、不拒绝切换 | 低 | **已收口**：`UpdateSessionPermissionMode` 在目标模式为 `bypass_permissions` 时解析会话工作区的 permissions 分层（用户/项目/本地 OR），命中 `disable_bypass` 直接 `403 AGENT_PERMISSION`，不再写入一个求值期会被降级回 default 的 bypass 元数据；解析失败的层按「未启用」处理，与引擎的整文件丢弃语义一致（判定收敛到 `policy.BypassDisabledForWorkspace`）。**还原路径同样收口**：plan 退出（`quit`）时 `internal/chat` 与 runtimeapi 离线分支都把 bypass 降为 default，避免「元数据说 bypass、引擎按 default」。见 `permission_mode_handlers.go`、`plan_mode_tools.go`、`plan_mode_handlers.go` 与同名 `*_test.go` |
 | F3 | Web 注入面可承载命令并可满足 yolo 确认 | 低-中 | 至少让 `/yolo` 的确认**不接受** web/external 捕获来源的输入（或要求两个来源各确认一次），使确认真正等于「终端前的人」 |
-| F4 | 文档未集中写「谁能提权」 | 低 | 手册补「提权边界」小节（本次已补，§1.4）；`docs/aicli/web-remote-api.md` 补「远程调用者能力边界」 |
+| F4 | 文档未集中写「谁能提权」 | 低 | **已补**：手册「提权边界」§1.4；`docs/aicli/web-remote-api.md` §8.1「远程调用者的能力边界（安全模型）」（含「两条注入即可满足 yolo 确认」与令牌=会话控制权）。本次把 F2 收口后的语义同步进 §8.1（切换接口 403、还原路径不还原 bypass） |
 
 F2 已按上面的约定收口（只做 fail-loud，不含 confirm 语义，因此不改变正常路径的 API 契约）：这一层在 **host 之外**，因此即使某个 host 忘了装配权限层，API 也不会放行 bypass。F1（`confirm=true`/令牌）与 F3（yolo 确认拒收 web 注入来源）的收敛点在 `cmd/aicli/commands` 与 runtimeapi 的请求契约上，与当前并发会话的工作面重叠，且需要前端选择器同步，因此仍只落**复核结论 + 文档边界**，代码收口排到 4.12 实施时。
 

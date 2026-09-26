@@ -552,14 +552,14 @@ curl -N -X POST http://127.0.0.1:61772/web/api/invoke \
 | `/web/api/input` 的 prompt 与 TUI 键盘输入走同一路由（含 slash 命令） | 持令牌的调用方能执行 `/` 命令、回答审批与提问 |
 | `/yolo` / `/permission-mode bypass_permissions` 的二次确认同样读输入队列 | 两条注入即可完成确认——确认只防误触，不防调用方 |
 | 审批决议（`type=approval`）与提问回答可注入 | 调用方能为 Agent 的任意审批放行 |
-| runtime API（`/api/runtime/*`）没有写令牌机制，部分端点显式信任回环来源 | 同机任意进程都能调用（权限模式切换见 [permissions.md](./permissions.md) §1.4） |
+| runtime API（`/api/runtime/*`）没有写令牌机制，部分端点显式信任回环来源 | 同机任意进程都能调用（权限模式切换见 [permissions.md](./permissions.md) §1.4；`disable_bypass` 生效时该切换接口返回 **403**，plan 退出等还原路径也不会把 bypass 带回来） |
 
 实践建议：
 
 - 只在本机使用（不要端口转发）；非回环监听时务必 `--web-dev=false` 并守住令牌。
 - 令牌等同于**会话控制权**：不要写进日志或 CI 产物，不要交给不可信的自动化。
 - 需要「远程只能看不能动」时，只给只读端点（`screen` / `messages` / `events` / `turn`），不发放令牌。
-- 需要「Agent 不能自我提权」时，在权限文件放 `disable_bypass: true`（引擎求值期降级，见 [permissions.md](./permissions.md) §1.4）。
+- 需要「Agent 不能自我提权」时，在权限文件放 `disable_bypass: true`：切换入口被拒（CLI 提示 / runtime API 403）、plan 退出不还原 bypass，引擎求值期再降级兜底（见 [permissions.md](./permissions.md) §1.3/§1.4）。
 
 ## 9. 网格控制面（`/web/api/mesh/*` + `/web/api/health`）
 
