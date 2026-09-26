@@ -60,7 +60,13 @@ func (c *chatInteractionCoordinator) ensureUIActor() *ui.UIController {
 		// only after the legacy surface writer has been fenced. Starting with a
 		// nil consumer makes actor construction incapable of creating a second
 		// terminal writer.
-		c.uiActor = ui.NewUIController(ui.UIControllerConfig{}, ui.ContextualReducerFunc(c.reduceUIActionWithContext), nil)
+		//
+		// ReserveDynamicStatusRow 是 composer 的稳定性前提：动态状态行常驻预留，
+		// band 高度/OutputBottomRow/历史容量不随瞬时模型变化，历史渲染无法接管
+		// 该行（用户可见症状：动态状态栏被历史消息覆盖冲刷）。
+		c.uiActor = ui.NewUIController(ui.UIControllerConfig{
+			ReserveDynamicStatusRow: true,
+		}, ui.ContextualReducerFunc(c.reduceUIActionWithContext), nil)
 		go c.uiActor.Run()
 	})
 	return c.uiActor

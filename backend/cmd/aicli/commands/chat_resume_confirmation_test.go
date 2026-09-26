@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -107,11 +109,19 @@ func TestPrintResumeSuccessUnifiedOmitsSessionMetaBlock(t *testing.T) {
 		transcript.WriteByte('\n')
 	}
 	text := transcript.String()
-	if !strings.Contains(text, "已恢复历史会话") {
-		t.Fatalf("unified resume confirmation missing from transcript:\n%s", text)
+	// 恢复汇总（结束事件）只出现在动态栏：文档流只承载会话语义，恢复进度/
+	// 汇总这类瞬时事件不得进入 transcript（用户明确要求，见 queueResumeSummaryNotice）。
+	if strings.Contains(text, "已恢复历史会话") {
+		t.Fatalf("resume summary must stay out of the transcript stream:\n%s", text)
 	}
 	if !strings.Contains(text, "继续上次任务") {
 		t.Fatalf("unified resume did not replay history:\n%s", text)
 	}
 	assertSessionConfirmationStreamClean(t, text)
+
+	require.Eventually(t, func() bool {
+		row := chatDynamicStatusRowText(interaction, 88)
+		return strings.Contains(row, "已恢复历史会话") && strings.Contains(row, "1轮/2条消息")
+	}, 5*time.Second, 20*time.Millisecond,
+		"恢复汇总必须作为结束事件显示在动态状态栏上")
 }

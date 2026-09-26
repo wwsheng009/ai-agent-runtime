@@ -210,6 +210,15 @@ type chatInteractionCoordinator struct {
 	diagnosticNotice      string
 	diagnosticNoticeUntil time.Time
 	diagnosticNoticeSeq   uint64
+	// resumeSummaryNotice / resumeSummaryStartedAt 是排队中的恢复「结束」事件：
+	// 进度行（加载/恢复/装载）全部退场后才投递到动态栏；耗时从整段恢复的起点
+	// （进度状态的 started）算起，而不是从加载结束之后算起。
+	resumeSummaryNotice    string
+	resumeSummaryStartedAt time.Time
+	// resumeProgress 是会话恢复（启动补齐较早页 / 会话内 /resume、/load）在
+	// 动态栏上的进度行：单行、临时、结束即清除，绝不进入 transcript。前台
+	// 活动存在时让位（见 applyResumeProgressLocked）。
+	resumeProgress *chatResumeProgressState
 	// internalRunSeq 记录内部轮次（supervision auto-wake 等不经过
 	// sendMessage/StartWaiting 协议的 run）的启动次数；waitingInternalRunSeq
 	// 在 StartWaiting 时快照。CompleteWaiting 只有在两者相等时才允许冻结
@@ -916,20 +925,35 @@ var diagnosticNoticeTTL = 6 * time.Second
 // 可被后台 goroutine 调用：内部只持 c.mu 更新缓存模型并投递 surface action，
 // 不产生裸终端字节；连续告警在同一个动态栏上 latest-wins，不会堆叠。
 func (c *chatInteractionCoordinator) ShowDiagnosticNotice(line string) bool {
-	if c == nil {
+	return c.showTransientStatusNotice(formatChatDiagnosticNoticeLine(line, ui.GetTerminalWidth()), diagnosticNoticeTTL)
+}
+
+// ShowResumeSummaryNotice 把会话恢复的「结束」事件（恢复汇总：轮数/条数/耗时、
+// 必要时含停放团队提示）投递到动态栏。它与后台诊断共用同一条瞬时通道（整行、
+// 临时、绝不进入 transcript 历史），只是驻留更久：这是本轮恢复的结论行，用户
+// 需要来得及看到；顺序上必须在进度行（加载/恢复/装载）退场之后显现，由
+// queueResumeSummaryNotice 负责排队与时机。
+func (c *chatInteractionCoordinator) ShowResumeSummaryNotice(text string) bool {
+	return c.showTransientStatusNotice(text, resumeSummaryNoticeTTL)
+}
+
+// showTransientStatusNotice 是动态栏瞬时提示的唯一落点：整行覆盖活动行、到期
+// 由 refreshDiagnosticNoticeTick 清除并恢复正常活动行。formatted 为空（被宽度
+// 压掉或没有可展示内容）时返回 false，调用方应回退到其它通道。
+func (c *chatInteractionCoordinator) showTransientStatusNotice(formatted string, ttl time.Duration) bool {
+	if c == nil || formatted == "" {
 		return false
 	}
-	text := formatChatDiagnosticNoticeLine(line, ui.GetTerminalWidth())
-	if text == "" {
-		return false
+	if ttl <= 0 {
+		ttl = diagnosticNoticeTTL
 	}
 	c.mu.Lock()
 	if c.shutdown || c.session == nil || c.session.NoInteractive || c.session.JSONOutput {
 		c.mu.Unlock()
 		return false
 	}
-	c.diagnosticNotice = text
-	c.diagnosticNoticeUntil = time.Now().Add(diagnosticNoticeTTL)
+	c.diagnosticNotice = formatted
+	c.diagnosticNoticeUntil = time.Now().Add(ttl)
 	c.repaintStatusModelsLocked()
 	c.scheduleDiagnosticNoticeExpiryLocked()
 	c.mu.Unlock()
@@ -1261,11 +1285,15 @@ func (c *chatInteractionCoordinator) dynamicStatusElapsedLocked(now time.Time) t
 }
 
 func (c *chatInteractionCoordinator) scheduleDynamicStatusTickLocked(now time.Time) {
-	if c == nil || c.shutdown || c.dynamicStatusStarted.IsZero() || !c.surfaceOutputActiveLocked() || !c.surface.DynamicStatusTicksEnabled() || c.renderIntentPending(renderengine.FrameKeyDynamicStatus) {
+	if c == nil || c.shutdown || (c.dynamicStatusStarted.IsZero() && !c.resumeProgressActiveLocked()) || !c.surfaceOutputActiveLocked() || !c.surface.DynamicStatusTicksEnabled() || c.renderIntentPending(renderengine.FrameKeyDynamicStatus) {
 		return
 	}
 	elapsed := c.dynamicStatusElapsedLocked(now)
 	delay := time.Second - elapsed%time.Second
+	if c.dynamicStatusStarted.IsZero() {
+		// 只有恢复进度在展示（没有真实 run 时钟）：按整秒推进进度行秒表。
+		delay = time.Second
+	}
 	if delay < 10*time.Millisecond {
 		delay = time.Second
 	}
@@ -1286,7 +1314,7 @@ func (c *chatInteractionCoordinator) refreshDynamicStatusTick(sequence uint64) {
 	if sequence != c.dynamicStatusTimerSeq {
 		return
 	}
-	if c.shutdown || c.dynamicStatusStarted.IsZero() || !c.surfaceOutputActiveLocked() {
+	if c.shutdown || (c.dynamicStatusStarted.IsZero() && !c.resumeProgressActiveLocked()) || !c.surfaceOutputActiveLocked() {
 		return
 	}
 	now := time.Now()
@@ -1336,6 +1364,9 @@ func (c *chatInteractionCoordinator) appendEventDegradationHintLocked(model *sty
 // appendStatusHintsLocked 依次追加状态行的附加提示（事件桥降级、turn 预算水位）。
 // 它们都只读桥发布的原子快照，不获取桥的互斥量，也不改变状态行业务语义。
 func (c *chatInteractionCoordinator) appendStatusHintsLocked(model *style.StatusLineModel) *style.StatusLineModel {
+	// 恢复进度先于其它附加提示：进度行是整行替换，先落地才能让事件降级 /
+	// turn 预算等尾部提示追加在同一行上，而不是被替换掉。
+	model = c.applyResumeProgressLocked(model)
 	model = c.appendEventDegradationHintLocked(model)
 	model = c.appendTurnBudgetHintLocked(model)
 	return c.applyDiagnosticNoticeLocked(model)
@@ -4287,6 +4318,18 @@ func (c *chatInteractionCoordinator) RenderAsyncLine(line string) {
 // 和 legacy 兼容调用；两者不能混用，否则同一 timeline event 会产生重复
 // Scene cell。该方法只在 coordinator 解锁后发布 Scene snapshot。
 func (c *chatInteractionCoordinator) RenderLocalSupplement(line string) {
+	c.renderLocalSupplement(line, true)
+}
+
+// RenderEphemeralSupplement 与 RenderLocalSupplement 的画面语义完全一致
+// （同一个 Scene cell、同一套分隔与快照发布），但不把这条补充写进会话事件
+// 日志：恢复摘要 / 退出提示 / 系统(MCP)状态这类瞬时通知只属于当前运行，
+// 下一次 resume 不得重放它们（否则历次通知会逐代累积）。
+func (c *chatInteractionCoordinator) RenderEphemeralSupplement(line string) {
+	c.renderLocalSupplement(line, false)
+}
+
+func (c *chatInteractionCoordinator) renderLocalSupplement(line string, persist bool) {
 	if c == nil || c.session == nil || c.session.NoInteractive || c.session.JSONOutput || strings.TrimSpace(line) == "" {
 		return
 	}
@@ -4297,7 +4340,11 @@ func (c *chatInteractionCoordinator) RenderLocalSupplement(line string) {
 	}
 	bridge := c.session.RuntimeEventBridge
 	if bridge != nil {
-		bridge.submitSupplement(line)
+		if persist {
+			bridge.submitSupplement(line)
+		} else {
+			bridge.submitEphemeralSupplement(line)
+		}
 	}
 	suppCell := newSupplementLineCell(line)
 	c.commitHistoryCellLocked(suppCell, c.gapBeforeBlockLocked(cellBoundaryMeta(suppCell)), cellBoundaryMeta(suppCell))

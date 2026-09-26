@@ -735,8 +735,14 @@ func printResumeSuccess(session *ChatSession) {
 		}
 		// Prefer surface WriteOutput so ClearPrompt shrink debt flushes here
 		// instead of attaching to the first history content block.
-		if !writeDirectInteractiveOutput(session, line) {
-			fmt.Print(line)
+		// 恢复摘要是「结束」事件：交互式会话投递到动态栏（单行、临时、绝不进入
+		// 文档流/事件日志），与开始（恢复历史会话…）、进度（N/M）、装载历史
+		// 组成同一条生命周期；plain/JSON/无动态栏的路径回退到原有直写
+		//（仍是同一个直接写入者：printResumeSuccess 的 inventory 基线不扩张）。
+		if session.Interaction == nil || !session.Interaction.queueResumeSummaryNotice(line) {
+			if !writeEphemeralDirectInteractiveOutput(session, line) {
+				fmt.Print(line)
+			}
 		}
 	}
 	// TUI（统一渲染器）信息流只保留上面的单行恢复摘要：会话/日志/产物路径

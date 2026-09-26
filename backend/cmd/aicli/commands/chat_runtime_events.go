@@ -2891,13 +2891,29 @@ func (b *chatRuntimeEventBridge) submitError(text string) {
 // 数据面。runtime event bridge 已经先 Encode 的事件不得走此入口，否则会
 // 在 Scene 中产生第二个 semantic cell。
 func (b *chatRuntimeEventBridge) submitSupplement(text string) {
+	b.submitSupplementWithPersistence(text, true)
+}
+
+// submitEphemeralSupplement 与 submitSupplement 的画面语义完全一致，但不把
+// 这条补充写进会话事件日志：它只属于当前这次运行的屏幕。恢复摘要 / 退出提示 /
+// 系统(MCP)状态这类瞬时通知必须走这里——一旦落日志，每次 resume 都会重放
+// 历次运行累积的通知（实测同一会话日志里 18 份"已恢复历史会话"、16 份
+// "正在退出"、12 份"[Manager] MCP 已启动"），恢复出来的历史被旧通知淹没，
+// 且通知里的计数是旧代际（例如"（0轮/713条消息）"），看起来就像内容缺失。
+func (b *chatRuntimeEventBridge) submitEphemeralSupplement(text string) {
+	b.submitSupplementWithPersistence(text, false)
+}
+
+func (b *chatRuntimeEventBridge) submitSupplementWithPersistence(text string, persist bool) {
 	if b == nil || b.renderEncoder == nil || strings.TrimSpace(text) == "" {
 		return
 	}
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
 	b.applyChangeSet(b.renderEncoder.SubmitSupplement(text))
-	b.appendSupplementLog(text)
+	if persist {
+		b.appendSupplementLog(text)
+	}
 }
 
 func (b *chatRuntimeEventBridge) sessionInteractionSnapshot() {
@@ -3281,6 +3297,29 @@ func (b *chatRuntimeEventBridge) appendSupplementLog(text string) {
 	b.appendInjectionLog(eventLogInjection{Supplement: text})
 }
 
+// chatTransientSupplementNotice 判定一条补充记录是否是"瞬时通知"。瞬时通知
+// 现在由 submitEphemeralSupplement 保证不落日志；但旧日志里已经写着它们
+// （每个历史运行各一份），重放必须显式丢弃，否则每次 resume 都会把历次通知
+// 重新塞回历史。判别按通知前缀而不是整串相等：通知文本里带代际计数
+// （"（0轮/713条消息）"），整串匹配会漏掉旧代际。
+func chatTransientSupplementNotice(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	for _, prefix := range []string{
+		"已恢复历史会话",
+		"正在退出",
+		"已中断 - ",
+		"[Manager] MCP",
+	} {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // appendPriorityTranscriptLog records completion of the already-encoded
 // approval/question item. Replay uses the request identity to update that
 // item rather than append a duplicate transcript cell.
@@ -3496,6 +3535,12 @@ func (b *chatRuntimeEventBridge) replayEventLogWithLoadAuthorization(sessionLoad
 			case inj.Error != "":
 				entries = append(entries, entry{err: inj.Error})
 			case inj.Supplement != "":
+				// 瞬时通知（恢复摘要 / 退出提示 / 系统状态）不参与重放：
+				// 新日志里它们根本不会写入（submitEphemeralSupplement），
+				// 旧日志里已写入的在这里丢弃，避免历次通知重新进场。
+				if chatTransientSupplementNotice(inj.Supplement) {
+					continue
+				}
 				entries = append(entries, entry{supplement: inj.Supplement})
 			case inj.PriorityKind != "" && inj.PriorityKey != "" && inj.PriorityTranscript != "":
 				entries = append(entries, entry{

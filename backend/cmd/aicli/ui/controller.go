@@ -13,6 +13,11 @@ import (
 // MailboxSize <= 0 时使用默认值 256。
 type UIControllerConfig struct {
 	MailboxSize int
+	// ReserveDynamicStatusRow 让 unified composer 常驻预留动态状态行：该行的占位
+	// 不随模型内容（nil/blank/有文本）变化，因此 band 高度、OutputBottomRow 与
+	// 历史容量在同一会话内保持恒定，历史渲染无法接管动态状态栏所在行。
+	// 只应由统一渲染器 owner（TerminalSessionPresenter 路径）开启。
+	ReserveDynamicStatusRow bool
 }
 
 // EffectConsumer receives effects after the reducer has published the
@@ -276,6 +281,9 @@ func NewUIController(cfg UIControllerConfig, reducer Reducer, onEffect func(Effe
 		onEffect: onEffect,
 	}
 	c.cond = sync.NewCond(&c.mu)
+	// 初始状态就带上常驻预留：任何一帧（包括第一帧、无动态模型的空闲帧）都不得
+	// 因为动态行占位变化而移动 band 边界。
+	c.state.Bottom.ReserveDynamicStatusRow = cfg.ReserveDynamicStatusRow
 	return c
 }
 

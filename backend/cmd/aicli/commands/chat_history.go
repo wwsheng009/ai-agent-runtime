@@ -258,6 +258,10 @@ func renderResumeHistoryPageIncremental(session *ChatSession, page []runtimetype
 // 单元提交之后回放已装载的展示历史，并启动窗口化装载的较早页后台补齐。两者必须
 // 保持这个顺序：先画出用户最关心的尾部，再逐页往前补齐。
 func replayLoadedSessionHistory(session *ChatSession, header string) int {
+	// 同步回放（canonical seed + 统一帧）是恢复过程中最可见的一段：动态栏亮出
+	// 进度，startDeferredResumeHistoryLoad 随后接手（有较早页时更新「已加载
+	// N/M」计数，没有时立即清除并恢复空闲状态行）。
+	showChatResumeProgress(session, chatResumeProgressPhaseRestore, 0, 0)
 	count := printVisibleChatHistory(session, header)
 	startDeferredResumeHistoryLoad(session)
 	return count

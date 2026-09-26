@@ -84,6 +84,11 @@ type ChatSession struct {
 	// BeforeSeq > 0 表示最新页已同步装载、更早的页仍待后台补齐。
 	resumeHistoryDeferredSessionID string
 	resumeHistoryDeferredBeforeSeq int
+	// resumeHistoryDeferredTotal/Loaded 记录待补齐任务的规模与已完成量
+	// （canonical 消息条数），供动态栏展示「已加载 N/M」进度。Total<=0 表示
+	// 存储未给出总数，此时只展示已加载条数。
+	resumeHistoryDeferredTotal  int
+	resumeHistoryDeferredLoaded int
 	// resumeHistoryGeneration 在展示历史被整体替换/清空时递增，使在途的
 	// 后台补齐任务放弃写入已经失效的旧快照。
 	resumeHistoryGeneration   uint64
@@ -1372,6 +1377,10 @@ func presentChatStartupSession(session *ChatSession, opts *chatCommandOptions, l
 		beginDirectInteractiveOutput(session)
 		// 主界面优先：composer 先于 resume 历史/状态投递落地。
 		presentStartupInteractiveComposer(session)
+		// 同步装载/回放历史可能持续数百毫秒到数秒：先在动态栏展示恢复进度，
+		// 待 chat.go 的 startDeferredResumeHistoryLoad 接手（有较早页时更新
+		// 计数、没有时立即清除），用户不会在恢复期间看到无反馈的空白。
+		showChatResumeProgress(session, chatResumeProgressPhaseRestore, 0, 0)
 		printResumeSuccess(session)
 		// printResumeSuccess 内部会 seed 历史（同一次 ReplaceTranscript 投递），
 		// 因此这里同样需要重新钉住 composer。
@@ -1621,7 +1630,12 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 					continue
 				}
 				if errors.Is(err, ui.ErrInteractiveInputExitRequested) {
-					printDirectInteractiveOutput(session, "正在退出...\n")
+					// 瞬时通知：退出提示属于当前运行的画面，不写会话事件日志，
+					// 否则历次运行的「正在退出...」会在下一次 resume 时被重放
+					//（/exit 与 Ctrl+C 必须走同一条瞬时入口，见 chat_exit.go）。
+					writeEphemeralDirectInteractiveOutput(session, "正在退出...\n")
+					// 瞬时通知不落日志，退出前必须有界推完，否则这一行不会被补画。
+					flushEphemeralDirectInteractiveOutput(session)
 					break
 				}
 				// Bare Esc on empty composer: open user-turn backtrack picker (Codex-style).

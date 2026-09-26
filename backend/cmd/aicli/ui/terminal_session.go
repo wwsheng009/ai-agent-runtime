@@ -955,16 +955,6 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		}
 		historyResult = &result
 	}
-	viewportBytes := ""
-	if area.Height > 0 {
-		candidateScreen.StageFrame(rows)
-		prepared := candidateScreen.PrepareFlush()
-		viewportBytes, err = terminalOffsetViewportANSI(prepared, area)
-		if err != nil {
-			result := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: err}
-			return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
-		}
-	}
 	// Reconcile the boundary before history insertion. Expansion scrolls the
 	// old history region only when semantic rows actually overflow the smaller
 	// capacity; contraction clears former viewport rows so prompt/status can
@@ -989,6 +979,12 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		transitionBytes, nextHistoryTopAligned = terminalViewportTransitionANSI(
 			s.viewport, area, frame.Geometry.Height, s.historyTailRows, nextHistoryTopAligned,
 		)
+	} else if s.viewport.validFor(frame.Geometry) && area.Top > s.viewport.Top {
+		// 完整的边界转换被跳过（历史投影/边界未知，或几何高度刚变化）：至少要清掉
+		// 「刚离开 band、开始属于历史」的行。它们此前画的是 composer/prompt，如果
+		// 不清，就会以旧 band 残影留在历史区里——历史区的行被 band 内容占据，或
+		// 主题行/动态行错位到历史区（与「历史渲染冲掉 composer」是同一族的边界缺陷）。
+		transitionBytes = terminalClearHistoryRegionRowsANSI(s.viewport.Top, area.Top-1)
 	}
 	// After expansion the history region may have less capacity. Retain its
 	// semantic suffix before appending new commits. History insertion itself is
@@ -1017,6 +1013,24 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		historyBytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
 			frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload, nextHistoryTopAligned,
 		)
+	}
+	// composer band 是本事务的最后一个写入段，而且只要本事务在其上方写过任何字节
+	// （重置 / 边界重排 / 历史插入），band 就必须整段重写：写在上方的字节可能经由
+	// 终端的滚动与区域语义影响保留区，而差分器只描述上一帧的应然模型，不描述承载
+	// 这些字节之后屏幕上的真实像素。动态状态栏是 composer 的一行，不能靠“差分认为
+	// 它没变”存活。写入次序固定为 transition → history → composer → cursor。
+	viewportBytes := ""
+	if area.Height > 0 {
+		if transitionBytes != "" || historyBytes != "" {
+			candidateScreen.Invalidate()
+		}
+		candidateScreen.StageFrame(rows)
+		prepared := candidateScreen.PrepareFlush()
+		viewportBytes, err = terminalOffsetViewportANSI(prepared, area)
+		if err != nil {
+			result := TerminalFrameResult{Frame: s.frame, FullRepaint: fullRepaint, Err: err}
+			return terminalTransactionWithHistory(result, plan.History, HistoryCommitResult{Deferred: true})
+		}
 	}
 	bytes := transitionBytes + historyBytes + viewportBytes
 	if cursor := terminalCursorSequence(frame.Cursor, frame.Geometry.Width, frame.Geometry.Height); cursor != "" {
@@ -1607,6 +1621,21 @@ func terminalClearHistoryRegionANSI(capacity int) string {
 		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
 	}
 	output.WriteString("\x1b[u")
+	return output.String()
+}
+
+// terminalClearHistoryRegionRowsANSI 只清指定行区间（不做整区重画、不碰光标/滚动区）。
+// 用于「边界转换被跳过」时补清刚离开 band、变成历史的行：那些行此前承载的是
+// composer/prompt 内容，必须被抹掉，否则它们会以旧 band 残影的形式留在历史区里
+// （用户可见：历史消息被旧 composer 行占据，或动态状态行残影错位）。
+func terminalClearHistoryRegionRowsANSI(first, last int) string {
+	if first < 1 || last < first {
+		return ""
+	}
+	var output strings.Builder
+	for row := first; row <= last; row++ {
+		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
+	}
 	return output.String()
 }
 

@@ -93,6 +93,14 @@ func (r *aicliTranscriptRenderer) RenderSupplement(content string) bool {
 	if r == nil || !shouldRenderInteractiveOutput(r.session) || strings.TrimSpace(content) == "" {
 		return false
 	}
+	// 瞬时通知（恢复摘要 / 退出提示 / 系统状态）只属于打印它的那一次运行。
+	// 它们是当前运行的"画面"，不是历史内容；任何重放/补投来源（事件日志
+	// 回放、runtime 事件补投、遗留呈现器）都不得把它们重新打进终端。当前
+	// 运行的通知不走本方法（见 renderChatInterruptNotice / printResumeSuccess
+	// / 系统输出 writer 的瞬时入口），因此这里丢弃不会隐藏本次通知。
+	if chatTransientSupplementNotice(content) {
+		return true
+	}
 	if r.session.Interaction != nil {
 		if r.replay {
 			r.session.Interaction.RenderAsyncLine(content)

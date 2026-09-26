@@ -81,6 +81,27 @@ type chatSupplementSink interface {
 	RenderLocalSupplement(line string)
 }
 
+// chatEphemeralSupplementSink is the optional extension of chatSupplementSink
+// for screen-only notices. System/MCP status lines belong to the run that
+// printed them: journaling them makes every later resume replay the notices of
+// all previous runs.
+type chatEphemeralSupplementSink interface {
+	RenderEphemeralSupplement(line string)
+}
+
+// submitSystemNoticeLocked routes one completed system/MCP status line to the
+// semantic sink, preferring the ephemeral (non-journaled) entry point.
+func (w *chatSystemOutputWriter) submitSystemNoticeLocked(line string) {
+	if w == nil || w.semanticSink == nil {
+		return
+	}
+	if ephemeral, ok := w.semanticSink.(chatEphemeralSupplementSink); ok {
+		ephemeral.RenderEphemeralSupplement(line)
+		return
+	}
+	w.semanticSink.RenderLocalSupplement(line)
+}
+
 type chatAtomicOutputSurface interface {
 	WriteOutput(io.Writer, string) (int, error, bool)
 }
@@ -209,7 +230,7 @@ func (w *chatSystemOutputWriter) Write(p []byte) (int, error) {
 				continue
 			}
 			w.lastBlank = false
-			w.semanticSink.RenderLocalSupplement(line)
+			w.submitSystemNoticeLocked(line)
 			renderedAny = true
 			continue
 		}
@@ -444,7 +465,7 @@ func (w *chatSystemOutputWriter) flushPartialLocked() error {
 	}
 	w.lastBlank = false
 	if w.semanticSink != nil {
-		w.semanticSink.RenderLocalSupplement(line)
+		w.submitSystemNoticeLocked(line)
 		return nil
 	}
 	if err := w.writeOutputTextLocked(ui.FormatAssistantSupplementBlock(line) + "\n"); err != nil {
@@ -458,7 +479,7 @@ func (w *chatSystemOutputWriter) writeOutputTextLocked(text string) error {
 		return nil
 	}
 	if w.semanticSink != nil {
-		w.semanticSink.RenderLocalSupplement(text)
+		w.submitSystemNoticeLocked(text)
 		return nil
 	}
 	if atomicSurface, ok := w.surface.(chatAtomicOutputSurface); ok {

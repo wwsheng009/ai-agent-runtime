@@ -73,6 +73,8 @@ func renderChatInterruptExitHint(session *ChatSession) {
 
 func renderChatInterruptExitNotice(session *ChatSession) {
 	renderChatInterruptNotice(session, "正在退出...")
+	// 退出前有界推完：瞬时通知不写事件日志，没有后续重放可以补画这一行。
+	flushEphemeralDirectInteractiveOutput(session)
 }
 
 func renderChatInterruptNotice(session *ChatSession, message string) {
@@ -80,7 +82,9 @@ func renderChatInterruptNotice(session *ChatSession, message string) {
 		return
 	}
 	if session.Interaction != nil {
-		session.Interaction.RenderLocalSupplement(message)
+		// 退出/中断提示属于当前这一次运行的画面，不写入会话事件日志：
+		// 否则历次运行的"正在退出..."会在下一次 resume 时被重放。
+		session.Interaction.RenderEphemeralSupplement(message)
 		return
 	}
 	printDirectInteractiveOutput(session, fmt.Sprintln(ui.NewStatus(ui.StatusInfo, message).Build()))

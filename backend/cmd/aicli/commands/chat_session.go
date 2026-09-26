@@ -481,31 +481,51 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 	if session == nil || session.SessionManager == nil {
 		return fmt.Errorf("会话管理未启用")
 	}
+	// 同步装载阶段（读取会话元数据 + 恢复 canonical 展示历史）先亮出恢复进度：
+	// 这一段的耗时完全发生在命令返回之前，动态栏是唯一可见的反馈通道。
+	//
+	// 成功路径不在这里清除：后续阶段（replayLoadedSessionHistory 的回放、后台
+	// 补齐的收尾）会接手进度行。提前清除会让底部保留区先收缩一行——历史区域
+	// 随即多出一行，正好落进进度行原来的位置（用户看到「历史覆盖状态栏」，而
+	// 且恰恰发生在最重的那次渲染之前）。只有确定没有后续阶段（空会话）时才在
+	// 本函数内收尾。
+	showChatResumeProgress(session, chatResumeProgressPhaseLoad, 0, 0)
+	failLoad := func(err error) error {
+		clearChatResumeProgress(session)
+		return err
+	}
 
 	runtimeSession, err := session.SessionManager.Get(context.Background(), sessionID)
 	if err != nil {
-		return err
+		return failLoad(err)
 	}
 	// 与 loadRequestedRuntimeSessionWithFilter 保持一致：/resume、/load 按显式
 	// ID 切换时不校验用户归属，否则 web/server 平面创建的会话在 CLI 无法续接。
 	if err := applyRuntimeSessionExecutionContext(session, runtimeSession); err != nil {
-		return err
+		return failLoad(err)
 	}
 	if err := ensureRuntimeSessionCompatible(session, runtimeSession); err != nil {
-		return err
+		return failLoad(err)
 	}
 	if err := restoreChatStateFromRuntimeSession(session, runtimeSession); err != nil {
-		return err
+		return failLoad(err)
 	}
 	ensureChatSystemPromptMessage(session)
 	if err := syncRuntimeSessionFromChatPreservingUpdatedAt(session); err != nil {
-		return err
+		return failLoad(err)
 	}
 	// Phase 1: 恢复后回放 canonical 完整转录（session_messages），而不是
 	// 压缩/截断后的热上下文投影（session_prompt_messages）。best-effort：
 	// 后端不支持分页或加载失败时保持投影展示，不阻塞恢复流程。
+	showChatResumeProgress(session, chatResumeProgressPhaseRestore, 0, 0)
 	loadResumeCanonicalHistory(session, sessionID)
 	parkRestoredTeamAfterInteractiveResume(session)
+	// 只有统一渲染会话才有「回放 + 后台补齐」的接手链（replayLoadedSessionHistory
+	// 会刷新并最终清除进度行）；legacy/plain 的 printResumeSuccess 是一次性直写，
+	// 没有接手者，必须在本函数内收尾，否则进度行会永久留在状态栏上。
+	if !unifiedDirectInteractiveOutput(session) || (!hasVisibleChatHistory(session) && !session.resumeHistoryDeferredPending()) {
+		clearChatResumeProgress(session)
+	}
 	return nil
 }
 
@@ -523,8 +543,11 @@ func loadResumeCanonicalHistory(session *ChatSession, sessionID string) {
 	if !ok || !first.HasMore {
 		return
 	}
+	// 更早的页仍待装载：动态栏亮出恢复阶段行（具体计数在后台补齐任务读到
+	// 首页 Total 后更新；这里先覆盖窗口化之前的同步装载窗口）。
+	showChatResumeProgress(session, chatResumeProgressPhaseRestore, len(first.Messages), first.Total)
 	if chatWindowedResumeHistoryEnabled(session) {
-		session.deferResumeHistoryCompletion(sessionID, first.NextBeforeSeq)
+		session.deferResumeHistoryCompletionWithProgress(sessionID, first.NextBeforeSeq, first.Total, len(first.Messages))
 		return
 	}
 	pages := fetchOlderResumeHistoryPages(context.Background(), session.SessionManager, sessionID, first.NextBeforeSeq)
@@ -544,6 +567,8 @@ func loadResumeCanonicalHistoryForStartup(session *ChatSession, sessionID string
 	if !ok || !first.HasMore {
 		return
 	}
+	// 与 loadResumeCanonicalHistory 相同：先亮出阶段行，后台补齐任务接手。
+	showChatResumeProgress(session, chatResumeProgressPhaseRestore, len(first.Messages), first.Total)
 	if !chatWindowedResumeHistoryEnabled(session) {
 		pages := fetchOlderResumeHistoryPages(context.Background(), session.SessionManager, sessionID, first.NextBeforeSeq)
 		if len(pages) > 0 {
@@ -551,7 +576,7 @@ func loadResumeCanonicalHistoryForStartup(session *ChatSession, sessionID string
 		}
 		return
 	}
-	session.deferResumeHistoryCompletion(sessionID, first.NextBeforeSeq)
+	session.deferResumeHistoryCompletionWithProgress(sessionID, first.NextBeforeSeq, first.Total, len(first.Messages))
 }
 
 // loadNewestResumeHistoryPage 同步装载最新一页 canonical 转录（页内按 seq
@@ -712,6 +737,24 @@ func (s *ChatSession) prependResumeHistoryPage(generation uint64, page *runtimec
 
 // deferResumeHistoryCompletion 登记「较早页待补齐」游标，供首帧之后启动后台任务。
 func (s *ChatSession) deferResumeHistoryCompletion(sessionID string, beforeSeq int) {
+	s.deferResumeHistoryCompletionWithProgress(sessionID, beforeSeq, 0, 0)
+}
+
+// resumeHistoryDeferredPending 报告是否登记了「较早页待补齐」任务（尚未被
+// startDeferredResumeHistoryLoad 取走）。装载阶段用它判断后续是否还有阶段会
+// 接手进度行：有则不能提前清除（见 loadRuntimeConversation 的顺序契约）。
+func (s *ChatSession) resumeHistoryDeferredPending() bool {
+	if s == nil {
+		return false
+	}
+	s.resumeHistoryMu.Lock()
+	defer s.resumeHistoryMu.Unlock()
+	return s.resumeHistoryDeferredSessionID != "" && s.resumeHistoryDeferredBeforeSeq > 0
+}
+
+// deferResumeHistoryCompletionWithProgress 额外登记恢复进度所需的规模与已装载量
+// （canonical 消息条数）：total<=0 表示存储未给出总数，只展示已加载条数。
+func (s *ChatSession) deferResumeHistoryCompletionWithProgress(sessionID string, beforeSeq, total, loaded int) {
 	if s == nil || beforeSeq <= 0 {
 		return
 	}
@@ -719,6 +762,8 @@ func (s *ChatSession) deferResumeHistoryCompletion(sessionID string, beforeSeq i
 	defer s.resumeHistoryMu.Unlock()
 	s.resumeHistoryDeferredSessionID = sessionID
 	s.resumeHistoryDeferredBeforeSeq = beforeSeq
+	s.resumeHistoryDeferredTotal = total
+	s.resumeHistoryDeferredLoaded = loaded
 }
 
 // 补齐较早页时「画几次」是这一段的成本杠杆。读取、前插与 reconcile 都必须逐页
@@ -816,25 +861,42 @@ func shouldPublishResumeHistoryIncrementalPage(pages, stride int) bool {
 //
 // 未登记补齐任务时是 no-op，因此可以无条件在首帧之后调用。
 func startDeferredResumeHistoryLoad(session *ChatSession) {
-	if session == nil || session.SessionManager == nil {
+	if session == nil {
+		return
+	}
+	if session.SessionManager == nil {
+		// 没有会话管理器就不可能有待补齐任务；清掉调用方在同步回放期间展示的
+		// 进度行，避免无持久化会话把「恢复历史会话…」永久留在动态栏。
+		clearChatResumeProgress(session)
 		return
 	}
 	session.resumeHistoryMu.Lock()
 	sessionID := session.resumeHistoryDeferredSessionID
 	beforeSeq := session.resumeHistoryDeferredBeforeSeq
+	totalMessages := session.resumeHistoryDeferredTotal
+	loadedMessages := session.resumeHistoryDeferredLoaded
 	generation := session.resumeHistoryGeneration
 	session.resumeHistoryDeferredSessionID = ""
 	session.resumeHistoryDeferredBeforeSeq = 0
+	session.resumeHistoryDeferredTotal = 0
+	session.resumeHistoryDeferredLoaded = 0
 	session.resumeHistoryMu.Unlock()
 	if sessionID == "" || beforeSeq <= 0 {
+		// 没有待补齐任务：清掉调用方在同步回放期间展示的恢复进度
+		// （replayLoadedSessionHistory / presentChatStartupSession 的 best-effort 收尾）。
+		clearChatResumeProgress(session)
 		return
 	}
+	// 较早页补齐是首帧之后仍在进行的恢复工作：先在动态栏亮出进度，随后每读回
+	// 一页更新已加载条数，全部完成后清除（收尾帧不再被进度行覆盖）。
+	showChatResumeProgress(session, chatResumeProgressPhaseRestore, loadedMessages, totalMessages)
 	go func() {
 		// aborted 表示展示快照在补齐途中被整体替换（切换会话/压缩）：此时
 		// 必须原地放弃——收官那一次 seed 针对的是新快照，不能拿旧会话的补齐
 		// 去替它铸造一次授权式装载。
 		aborted := false
 		visited := 0
+		loaded := loadedMessages
 		// 步长在首页（唯一能读到 Total 的地方）确定一次：历史规模越大，发布次数
 		// 越要压低（见 resumeHistoryIncrementalPublishStride 的成本说明）。
 		publishStride := 0
@@ -848,6 +910,7 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 					return false
 				}
 				visited++
+				loaded += len(page.Messages)
 				if publishStride == 0 {
 					publishStride = resumeHistoryIncrementalPublishStride(page)
 					estimatedPages = resumeHistoryEstimatedPageCount(page)
@@ -855,6 +918,8 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 				// 逐页读取单独记一个标记：发布被合并后，恢复过程的阶段表仍要能
 				// 区分「读了多少页」与「画了多少次」，否则观测面会以为页变少了。
 				markChatStartup("resume_history_page")
+				// 进度按条数走：页大小由存储决定，条数才是用户理解历史的量纲。
+				showChatResumeProgress(session, chatResumeProgressPhaseRestore, loaded, totalMessages)
 				if shouldPublishResumeHistoryIncrementalPage(visited, publishStride) {
 					// 非授权快照是逐页补齐段里最贵的一段，且成本在**投递**而非构造
 					// （实测构造 0-134ms、post 74ms-1.12s）。因此按步子分三档：首步
@@ -866,35 +931,64 @@ func startDeferredResumeHistoryLoad(session *ChatSession) {
 				return true
 			})
 		if aborted {
+			// 本次补齐被整体替换：清除自己登记的进度；接手的恢复操作会在自己的
+			// 下一次更新里重新亮出进度行。
+			clearChatResumeProgress(session)
 			return
 		}
 		if pages == 0 {
 			// 游标表明仍有较早页，因此「一页都没取到」只可能是存储读取失败。
 			// 静默放弃会让用户以为会话只恢复了最新一页，必须显式提示。
+			clearChatResumeProgress(session)
 			notifyDeferredResumeHistoryFailure(session)
 			return
 		}
-		if err != nil {
-			// 已经补回一部分：已装载的页保留，明确告诉用户后面还有没补上的。
-			notifyDeferredResumeHistoryPartialFailure(session, pages)
-		}
-		markChatStartup("resume_history_deferred")
-		// 补齐较早页会触发全量 seed + 统一帧，是 ready 之后最贵的一段；立刻补
-		// 一次 flush，否则这段耗时只能靠 500ms 采样间接推断。
-		flushChatStartupTiming()
-		// 幂等重放：较早 unit 由 reconcile 的锚点插入 Scene，再请求统一帧；
-		// bridge 持有稳定身份，已经 seed 过的最新页不会重复渲染。
-		// 补齐同样属于「会话装载」：较早页即便全部命中已重放的事件日志
-		// （seeded=false），装载好的生成也必须替换原生 scrollback，否则补回的
-		// 历史只停留在 Scene 里，用户滚不到。
-		printVisibleSessionLoadHistory(session, "")
-		// 收官这一次全量 seed + 授权式快照是 ready 之后最后的固定成本，单独打点，
-		// 否则它只能从 chat_loop_exit 里反推（补齐段的打点在它之前）。
-		markChatStartup("resume_history_complete")
-		// 后台补页同样经 ReplaceTranscriptAction 投递，且发生在启动关键路径
-		// 之外；补帧后重新钉住 composer，避免补页把主界面输入行挤掉。
-		presentStartupInteractiveComposer(session)
+		completeDeferredResumeHistoryLoad(session, pages, err, func() {
+			// 幂等重放：较早 unit 由 reconcile 的锚点插入 Scene，再请求统一帧；
+			// bridge 持有稳定身份，已经 seed 过的最新页不会重复渲染。
+			// 补齐同样属于「会话装载」：较早页即便全部命中已重放的事件日志
+			// （seeded=false），装载好的生成也必须替换原生 scrollback，否则补回的
+			// 历史只停留在 Scene 里，用户滚不到。
+			printVisibleSessionLoadHistory(session, "")
+		})
 	}()
+}
+
+// completeDeferredResumeHistoryLoad 是较早页补齐段的收尾序列：
+//  1. 部分失败提示（若读取中途出错）；
+//  2. 全量 seed + 授权式原生 scrollback 替换 + 统一帧（renderFinal）；
+//  3. composer 重钉；
+//  4. 最后才撤掉进度行。
+//
+// 顺序是契约：收尾这次全量渲染是补齐段最贵的一次，进度行的底部保留区与它同帧
+// 重排；若提前清除，历史区域立刻多出一行并占掉进度行原来的位置（用户看到的
+// 就是「历史消息渲染覆盖动态状态栏」）。renderFinal 由调用方注入，测试据此
+// 固化这条顺序。
+func completeDeferredResumeHistoryLoad(session *ChatSession, pages int, err error, renderFinal func()) {
+	if err != nil {
+		// 已经补回一部分：已装载的页保留，明确告诉用户后面还有没补上的。
+		notifyDeferredResumeHistoryPartialFailure(session, pages)
+	}
+	markChatStartup("resume_history_deferred")
+	// 补齐较早页会触发全量 seed + 统一帧，是 ready 之后最贵的一段；立刻补
+	// 一次 flush，否则这段耗时只能靠 500ms 采样间接推断。
+	flushChatStartupTiming()
+	if renderFinal != nil {
+		renderFinal()
+	}
+	// 收官这一次全量 seed + 授权式快照是 ready 之后最后的固定成本，单独打点，
+	// 否则它只能从 chat_loop_exit 里反推（补齐段的打点在它之前）。
+	markChatStartup("resume_history_complete")
+	// 补帧后重新钉住 composer，避免补页把主界面输入行挤掉。
+	presentStartupInteractiveComposer(session)
+	// 收尾的全量 seed 只是登记了原生 scrollback 重投递：真正的字节由统一渲染器
+	// 在后续几十个批次里异步写向终端（大会话可达数 MB）。这里必须把动态行交给
+	// 「装载历史」而不是就地清除，否则进度行正好在最长的阶段消失，用户看到动态
+	// 状态栏整段空白、只剩历史消息在滚。
+	markChatHistoryLoadPending(session)
+	// 但「装载历史」是兜底提示，不是固定 30s 的秒表：重投递真正落地后立即撤行
+	// （有界窗口仅在投递失败/挂起时生效，见 settleChatHistoryLoadWhenDelivered）。
+	settleChatHistoryLoadWhenDelivered(session)
 }
 
 // streamOlderResumeHistoryPagesWithRetry 是后台补齐较早页的有界重试版本。
@@ -948,25 +1042,38 @@ func resumeLatestRuntimeConversation(session *ChatSession) error {
 	if session == nil || session.SessionManager == nil {
 		return fmt.Errorf("会话管理未启用")
 	}
+	// 最近会话的筛选需要分页扫描 metadata；同样在动态栏给出反馈。
+	// 成功路径与 loadRuntimeConversation 相同：把进度行交给后续的回放/补齐阶段，
+	// 避免在重渲染之前先收缩底部保留区（历史会占掉进度行的位置）。
+	showChatResumeProgress(session, chatResumeProgressPhaseLoad, 0, 0)
+	failResume := func(err error) error {
+		clearChatResumeProgress(session)
+		return err
+	}
 
 	runtimeSession, err := loadLatestResumableRuntimeSessionExcludingWithFilter(context.Background(), session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session), session.SessionFilter)
 	if err != nil {
-		return err
+		return failResume(err)
 	}
 	if err := applyRuntimeSessionExecutionContext(session, runtimeSession); err != nil {
-		return err
+		return failResume(err)
 	}
 	if err := ensureRuntimeSessionCompatible(session, runtimeSession); err != nil {
-		return err
+		return failResume(err)
 	}
 	if err := restoreChatStateFromRuntimeSession(session, runtimeSession); err != nil {
-		return err
+		return failResume(err)
 	}
 	ensureChatSystemPromptMessage(session)
 	if err := syncRuntimeSessionFromChatPreservingUpdatedAt(session); err != nil {
-		return err
+		return failResume(err)
 	}
 	parkRestoredTeamAfterInteractiveResume(session)
+	// 与 loadRuntimeConversation 相同的交接规则：非统一会话没有接手链，
+	// 由本函数直接收尾。
+	if !unifiedDirectInteractiveOutput(session) || (!hasVisibleChatHistory(session) && !session.resumeHistoryDeferredPending()) {
+		clearChatResumeProgress(session)
+	}
 	return nil
 }
 

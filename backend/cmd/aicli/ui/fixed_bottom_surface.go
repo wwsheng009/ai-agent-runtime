@@ -4234,6 +4234,14 @@ func (s *FixedBottomSurface) clearPopupAreaLocked(rows int, gapRows int) {
 type BottomPaneState struct {
 	StatusModel        *style.StatusLineModel
 	DynamicStatusModel *style.StatusLineModel
+	// ReserveDynamicStatusRow pins the dynamic status row into the composer band
+	// independently of the current model content. The unified composer must keep
+	// that row stable: if the reservation follows "model is non-nil and non-blank",
+	// the band height — and with it OutputBottomRow and the history capacity —
+	// changes with transient content, the history region takes over the boundary
+	// row, and the dynamic status row is washed out by history rendering.
+	// Legacy surface layouts leave this false and keep their historical behavior.
+	ReserveDynamicStatusRow bool
 	// SessionIDLine is the plain text shown on the second status row (directly
 	// above the persistent status row). It is hidden while a popup or composer
 	// is active so those overlays keep the same reserved bottom area.
@@ -4369,11 +4377,18 @@ func (s BottomPaneState) promptNoticeLinesRowCount() int {
 }
 
 func (s BottomPaneState) dynamicStatusVisibleRowCount() int {
-	if s.composerVisibleRowCount() > 0 || s.DynamicStatusModel == nil {
+	if s.composerVisibleRowCount() > 0 {
 		return 0
 	}
-	if style.StatusLineBlank(*s.DynamicStatusModel) {
-		return 0
+	if s.DynamicStatusModel == nil || style.StatusLineBlank(*s.DynamicStatusModel) {
+		// 常驻预留（统一 composer）：模型为空/blank 时该行仍然占位并渲染为空行。
+		// 预留一旦跟随内容变化，band 高度就会抖动，OutputBottomRow 与历史容量随之
+		// 变化，边界行在「历史」与「composer」之间来回切换——用户看到的就是动态状态
+		// 栏被历史消息覆盖冲刷（现场字节流里 band 高度在 38/39 间漂移）。
+		// Clone/DeriveBottomPaneState 按值复制标量字段，因此该标记会随状态快照传播。
+		if !s.ReserveDynamicStatusRow {
+			return 0
+		}
 	}
 	return 1
 }

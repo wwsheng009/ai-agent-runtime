@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
@@ -510,6 +511,34 @@ func writeDirectInteractiveOutput(session *ChatSession, text string) bool {
 // is fail-closed. Reporting success prevents every legacy caller from using
 // its stdout fallback and creating a competing writer during shutdown races.
 func submitUnifiedDirectInteractiveOutput(session *ChatSession, text string) bool {
+	return submitUnifiedDirectInteractiveOutputMode(session, text, true)
+}
+
+// writeEphemeralDirectInteractiveOutput 与 writeDirectInteractiveOutput 同路，
+// 但在统一渲染器下把内容登记为瞬时补充（只进当前画面、不写会话事件日志）。
+// 恢复摘要这类"属于本次运行"的直写必须走这里：写入事件日志会让历次 resume
+// 的通知在后续恢复中反复重放。plain/legacy 路径本就不落日志，直接复用。
+func writeEphemeralDirectInteractiveOutput(session *ChatSession, text string) bool {
+	if session == nil || session.NoInteractive || session.JSONOutput {
+		return false
+	}
+	if unifiedDirectInteractiveOutput(session) {
+		return submitUnifiedDirectInteractiveOutputMode(session, text, false)
+	}
+	return writeDirectInteractiveOutput(session, text)
+}
+
+// flushEphemeralDirectInteractiveOutput 有界等待 UI actor 排空，让刚登记的瞬时
+// 通知在退出/拆帧之前真正落屏一次。瞬时通知不写事件日志，不能像持久通知那样
+// 依赖后续重放补画，所以退出路径必须在 break 之前把它推完（有界，不阻塞退出）。
+func flushEphemeralDirectInteractiveOutput(session *ChatSession) {
+	if session == nil || session.Interaction == nil {
+		return
+	}
+	session.Interaction.waitUIActorIdleTimeout(300 * time.Millisecond)
+}
+
+func submitUnifiedDirectInteractiveOutputMode(session *ChatSession, text string, persist bool) bool {
 	if session == nil {
 		return false
 	}
@@ -528,7 +557,11 @@ func submitUnifiedDirectInteractiveOutput(session *ChatSession, text string) boo
 		return true
 	}
 	interaction.ClearPrompt()
-	interaction.RenderLocalSupplement(content)
+	if persist {
+		interaction.RenderLocalSupplement(content)
+	} else {
+		interaction.RenderEphemeralSupplement(content)
+	}
 	return true
 }
 
