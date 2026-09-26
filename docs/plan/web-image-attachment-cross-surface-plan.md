@@ -12,9 +12,14 @@ S5 React 前端接线进行中）。日期：2026-09-26。负责范围：`backen
 |---|---|---|
 | S1 共享核心 `internal/imageattach` + CLI 薄封装 | ✅ 已提交 `b9cb78b9` | 核心 10 例（含「限制内上传必须返回持久 artifact」回归）；CLI 图片链路广域全绿 |
 | S2 micro web 后端 `POST /web/api/attachments` + `/web/api/input.image_paths` | ✅ 已提交 `b9cb78b9` | 8 例（上传落盘、非图片单条跳过、409/400/405、带图发送入列并去重、不可用路径给原因、纯文本契约不变） |
-| S3 micro web 前端（粘贴/选择/拖拽 + 附件轨 + verify 脚本） | 🚧 进行中 | 待 `scripts/verify-micro-web-attachments.mjs` |
+| S3 micro web 前端（粘贴/选择/拖拽 + 附件轨 + verify 脚本） | ✅ 已提交 `4dcbd8ee` | `scripts/verify-micro-web-attachments.mjs` 9 组 28 项全过；composer / question-answer / msg-filter / todos 无回归（`verify-micro-web-skills-tab.mjs` 在干净主树同 commit 上本就失败，属既有问题） |
 | S4 runtime `POST /api/runtime/uploads` + `submit_prompt.images` | ✅ 已提交 `24e27cca` | 9 例（落盘缩放、超限/非图片逐条跳过、503 降级、目录外路径拒绝含兄弟目录陷阱、附加字段透明） |
-| S5 React 前端接线（上传 → 发送带 images + i18n + 测试） | 🚧 进行中 | 待 vitest/e2e |
+| S5 React 前端接线（上传 → 发送带 images + i18n + 测试） | ✅ 已由并发会话提交 `beaef01c` | 与本文档的 S5 同题：composer 附件轨接入 `/api/runtime/uploads` + `submit_prompt.images`。**本文档所属执行线在同一时间也做到同一阶段**（worktree `aicli/agent/react-attachments`，子代理在 e2e 门禁前被超时取消）；为避免与并发会话在 `frontend/` 的进行中重写（索引里已有 staged 删除）互相踩踏，该线产出**未落主树**（本文件记录这一事实，供后续去重参考） |
+
+> 并发说明：S5 是本次唯一出现「两条执行线同时做同一子片」的阶段。判定依据是 `git log -- frontend` 出现
+> `beaef01c`（提交信息自述「e2e 成功路径待修」）且其索引暂存区正处于重写中间态。S1/S2/S3/S4 的提交在
+> `frontend/` 之外，未受影响；本文档所属执行线对 `frontend/` 的临时副本已全部撤消（存在 HEAD 的还原为
+> HEAD 内容，HEAD 没有的删除），未改动对方暂存区。
 
 ## 1. 结论：核心**半独立**
 
