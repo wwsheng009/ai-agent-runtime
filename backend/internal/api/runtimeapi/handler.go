@@ -901,6 +901,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/skills/config/write", h.WriteConfigDocument).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/config/agent/max-steps", h.UpdateAgentMaxSteps).Methods(http.MethodPut)
 	runtimeRouter.HandleFunc("/config/agent/max-steps", h.GetAgentMaxSteps).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/config/approval-explain", h.UpdateApprovalExplainSettings).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/config/approval-explain", h.GetApprovalExplainSettings).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/service", h.GetRuntimeServiceStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/service/restart", h.RestartRuntimeService).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/fs/read-file", h.ReadRuntimeFile).Methods(http.MethodPost)
