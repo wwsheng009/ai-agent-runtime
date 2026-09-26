@@ -69,7 +69,7 @@ agent 会先通过 `session/update` 通知流式返回消息/工具事件，最�
 | `--model` / `-m` | 配置解析链 | 指定模型名称 |
 | `--profile` | — | profile 名称或目录路径 |
 | `--agent` | — | profile 内 agent 标识 |
-| `--permission-mode` | `default` | `default\|accept_edits\|plan\|bypass_permissions` |
+| `--permission-mode` | `default` | `default\|accept_edits\|plan\|bypass_permissions\|dont_ask` |
 | `--yolo` | false | 等价 `--permission-mode bypass_permissions`（自动启用 tools） |
 | `--enable-tools` / `--disable-tools` | **默认启用 tools** | 工具审批经 `session/request_permission` RPC 走 ACP 客户端 |
 | `--ephemeral` | **true**（agent stdio 专属默认） | 不持久化会话文件；需 session/load 恢复时改用 `--session-dir` |
@@ -187,17 +187,68 @@ todos 快照重建任务列表，重复快照不再重发。
 // agent → client
 {"jsonrpc":"2.0","id":10,"method":"session/request_permission",
  "params":{"sessionId":"...","toolCallId":"...","options":[
-   {"optionId":"allow_once","name":"Allow once","kind":"allow_once"},
-   {"optionId":"reject_once","name":"Reject once","kind":"reject_once"}]}}
+   {"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+   {"optionId":"allow-always","name":"Allow always","kind":"allow_always"},
+   {"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}
 
 // client → agent（响应）
-{"jsonrpc":"2.0","id":10,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}}
+{"jsonrpc":"2.0","id":10,"result":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}
 ```
 
-- option `kind`：`allow_once` / `allow_always` / `reject_once` / `reject_always`
+- **`optionId` 用连字符**（`allow-once` / `allow-always` / `reject-once`），**`kind` 用下划线**
+  （`allow_once` / `allow_always` / `reject_once` / `reject_always`，ACP 规范枚举）。
+  回传的 `optionId` 必须与下发的字符串逐字一致，否则按拒绝处理。
 - 客户端关闭选择器时应返回 `{"outcome":{"outcome":"cancelled"}}`
 - prompt 被取消时，挂起的权限请求会随 promptCtx 一起中止
 - 想完全不弹审批：启动时用 `--yolo`（bypass_permissions）或 `--disable-tools`
+
+### 权限入口对照表
+
+**一、权限模式（模式切换不经过审批通道）**
+
+| 入口 | 取值 | 生效范围 | 现状 |
+|---|---|---|---|
+| 启动 flag `--permission-mode` | `default\|accept_edits\|plan\|dont_ask\|bypass_permissions` | 整个宿主进程的默认模式 | ✅ |
+| 启动 flag `--yolo` | 等价 `bypass_permissions`（并自动启用 tools） | 同上 | ✅ |
+| `session/new` 的 `configOptions`（`id="mode"`, `category="mode"`） | 会话当前值 + 5 个可选值（含 `bypass_permissions`、`dont_ask`） | 单个会话 | ✅ |
+| `session/new` 的 legacy `modes` 字段 | 同上（`currentModeId` + `availableModes`） | 单个会话 | ✅ 双通道并存，同一会话状态驱动 |
+| `session/set_config_option`（`configId:"mode"`） | 上述 5 值 | 单个会话；非 plan 模式 **prompt 在途也可切** | ✅ |
+| `session/set_mode`（legacy 扩展） | 同上 | 同上 | ✅ |
+
+模式切换的语义要点：
+
+- 未知 `modeId` **报错拒绝**，不会静默回落 `default`（`acpModeOptionAllowed` 与策略层
+  `ParseMode` 同源）。
+- 切到 `plan` 走与 `/plan` 相同的进入路径（plan 工件 + `exit_plan_mode` 生命周期）；
+  从 `plan` 切出会关闭该生命周期，再把客户端选的新模式落到会话上。
+- **plan 不能在 prompt 在途时进出**（会返回「retry after it completes」错误）；其它模式
+  在途切换立即可见——引擎每次工具求值都会重读会话模式。
+- 与交互式 `/yolo` 不同，**ACP 通道的 `bypass_permissions` 没有二次确认**：ACP 没有
+  确认通道，而这个选择始终来自用户自己的客户端 UI（`agent_stdio_mode.go` 的显式设计
+  决定）。要达到交互式确认的效果，用 `--permission-mode` 以外的部署侧办法：
+  权限文件写 `disable_bypass: true`（引擎求值期把 bypass 降级为 `default`，见
+  [../aicli/permissions.md](../aicli/permissions.md) §1.3）。
+- 模式是**会话级**的，绝不写回全局配置；每次工具求值都会重读会话模式。
+
+**二、审批选项（`session/request_permission` → 引擎决策）**
+
+| 客户端选项 | aicli 决策 | 记忆行为 | 现状 |
+|---|---|---|---|
+| `allow-once` | 允许一次 | 不记忆 | ✅ |
+| `allow-always` | 允许 | **CLI 侧进程内授权族复用**（默认 10 分钟 TTL，按工具+参数族去重；`chat_runtime_events.go`） | ✅（注意：**不是** policy 的 `RememberScope=session/project` 记忆库） |
+| `reject-once` | 拒绝一次 | —— | ✅ |
+| `reject_always` | —— | —— | 类型已定义（`PermissionKindRejectAlways`），**未出现在默认选项里、未接线** |
+| `outcome:"cancelled"` | 拒绝（等价中断） | —— | ✅ |
+
+**三、与其它入口的边界**
+
+- **规则/断路器优先于审批**：权限文件的 `deny`、根/主目录断路器、只读机密参数过滤、
+  外部目录门在引擎内直接给出结论——被硬拒绝的调用**不会**发出 `session/request_permission`
+  （客户端只会看到工具失败），命中 `allow` 的调用也不会弹审批。
+- `--disable-tools`：完全不执行工具，审批通道用不到。
+- 提问面：`ask_user_question` 经 `session/request_question` 扩展走同一客户端面板 ✅。
+- 解释与反馈：`session/request_permission` 只承载「选哪个选项」，**没有**审批解释、
+  拒绝原因文本、`remember_scope` 选择通道（这些目前只在 CLI/Web 面提供）。
 
 ## 取消语义
 

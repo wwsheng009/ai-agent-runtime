@@ -47,7 +47,7 @@ func registerExecSharedFlags(cmd *cobra.Command, exclude map[string]bool) {
 	flags.String("request-timeout", "", "单次 LLM 请求超时（如 60s, 2m）")
 	flags.Duration("timeout", 0, "整次 exec 执行超时时间（如 5m, 30s），0 表示无限制")
 
-	flags.String("permission-mode", "default", "权限模式（default|accept_edits|plan|bypass_permissions）")
+	flags.String("permission-mode", "default", "权限模式（default|accept_edits|plan|bypass_permissions|dont_ask）")
 	flags.StringSlice("allow-tool", nil, "允许指定工具（可重复；写入权限规则 allow，并参与工具 allowlist）")
 	flags.StringSlice("deny-tool", nil, "拒绝指定工具（可重复；硬拒绝，优先于项目 allow 规则）")
 	flags.Bool("trust", false, "信任当前工作区并允许项目级 plugins/hooks/MCP（写入 durable store；需 AICLI_FOLDER_TRUST=1）")
