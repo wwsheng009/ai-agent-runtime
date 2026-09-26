@@ -662,12 +662,13 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/plans",
-			Usage:       "/plans [id | reopen <id> [vN] [--force]]",
-			Summary:     "浏览已归档的计划工件（状态/轮次/正文），或把某轮快照回灌并继续评审",
+			Usage:       "/plans [id | diff <id> [vA [vB]] | reopen <id> [vN] [--force]]",
+			Summary:     "浏览已归档的计划工件（状态/轮次/正文）、对比两轮正文，或把某轮快照回灌并继续评审",
 			Group:       string(chatSlashCommandGroupPermission),
 			AcceptsArgs: true,
 			Args: []chatSlashCommandArgSpec{
 				{Token: "<id>", Summary: "查看某个已归档计划的详情与最新正文"},
+				{Token: "diff", Summary: "对比归档的两轮正文（默认最近两轮，vA vB 指定轮次）"},
 				{Token: "reopen", Summary: "把归档快照写回工作区计划文件并进入 plan mode（vN 选版本，--force 覆盖已改动的文件）"},
 			},
 		},

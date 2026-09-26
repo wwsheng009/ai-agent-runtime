@@ -525,3 +525,42 @@
 | `go test ./cmd/aicli/commands/` | 被上述他人提交的签名不一致阻塞（主工作树内该包全绿：202.6s） |
 
 另外，`internal/api/**` 的 `/plans` 路由、`DELETE /api/runtime/plans/{id}`（第三轮）与 `plan_mode_handlers.go` 的改动**仍未提交**：这些文件位于另一会话正在进行的 `internal/api/skills → internal/api/runtimeapi` 包改名路径下（该改名已 staged 204 条），单独提交会产生编译不过的中间态。待对方改名落地后需要补一次提交。
+
+---
+
+## 12. 实施记录：第五轮（2026-09-25，§4.4 轮次 diff，CLI 侧）
+
+**状态**：`planmode.UnifiedDiff` / `planmode.DiffArchivedVersions` 与 CLI `/plans diff <id> [vA [vB]]` **已落地**；前端评审面的变更行高亮与行级评论仍未做（与 §4.4 剩余部分一致）。
+
+### 12.1 行为变更
+
+| 场景 | 变更前 | 变更后 |
+|------|--------|--------|
+| 想知道「这一轮模型改了什么」 | 只能分别 `/plans <id>` 看最新正文，或凭记忆对比 | `/plans diff <id>`：对比最近两轮的 unified diff，带 `+A -R` 与行数统计；`vA` 单给 = `vA → 最新`，`vA vB` = 指定区间（`compare` 是别名） |
+| 轮次元信息 | — | diff 头部带 `--- v1 <decision> (<source>, <time>)` / `+++ v2 ...`，读者知道每一侧是哪次裁决产生的 |
+| 大改动/极端输入 | — | 输出上限 400 行并附截断提示；两侧改动各 > 600 行时退化为整块删除+插入并标注 `Coarse`（不做二次方内存分配）；同一版本自比返回「内容完全相同」而非错误 |
+| 无会话场景 | — | diff 是纯读操作，`/plans diff` 不要求活动会话（与 `reopen` 不同） |
+
+### 12.2 接线点
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 渲染引擎 | `backend/internal/planmode/diff.go`（新增） | `DiffOptions`/`DiffResult`（`Added`/`Removed`/`Identical`/`Truncated`/`Coarse`/`OldLines`/`NewLines`/`FromVersion`/`ToVersion`/`RecordID`）、`UnifiedDiff`（前后缀裁剪 + LCS）、`DiffArchivedVersions`（带轮次元信息头）、`describeRound`、`hunkGroups`/`hunkRange`、`\ No newline at end of file` 标记 |
+| CLI | `backend/cmd/aicli/commands/chat_plans_command.go` | `/plans diff` 关键字分发、`parsePlansDiffArgs`（`vN` 位置自由：`v1 v4 <id>` 亦可）、`diffStoredPlan` 渲染与错误文案；列表页脚补 diff/reopen 用法 |
+| 命令目录 | `backend/cmd/aicli/commands/chat_slash_command_catalog.go` | `/plans` 的 Usage/参数补 `diff` |
+| 文档 | `docs/aicli/plan-mode.md` | §2.2 diff 用法与边界、§9 未实施清单、§0 代码清单 |
+
+### 12.3 验证（第五轮）
+
+| 命令（cwd = `backend/`） | 结果 |
+|---|---|
+| `go build ./...` | exit 0 |
+| `go test ./internal/planmode/ -count=1` | ok（2.8s，含 7 组新增 diff 用例） |
+| `go test ./cmd/aicli/commands/ -run 'Plans\|ParsePlans' -count=1` | 见 §12.4（本轮期间该包被并发改动打断，最终以独立包 + 干净检出复核） |
+| `gofmt -l cmd/aicli/commands internal/planmode` | 无输出 |
+
+新增用例（要点）：`planmode/diff_test.go` —— 相同文本、`空→新`（`@@ -1,0 +1,2 @@`）、带上下文的单行替换、相距较远的两处改动拆成两个 hunk、900 行整文重写的 `Coarse`+截断（计数仍准确）、无换行结尾标记、`DiffArchivedVersions` 的轮次标签与区间推导（隐式 = 显式）、同版本自比、未知 id / 空 id / 越界版本 / 无快照四类错误；CLI —— `/plans diff <id>` 输出各要素、`v2 v2` 相同提示、缺 id 的用法提示、未知 id 错误，以及 `parsePlansDiffArgs` 参数表（含「三个版本报错」「`vX` 留在 id 里」）。
+
+### 12.4 环境提示
+
+本轮 `cmd/aicli/commands` 再次被并发会话的在建文件打断：新增的未跟踪文件 `chat_skill_tool_restriction.go` 引用了 `chat_skill_turn.go` 中尚未定义的 `skillTurnPin` 字段（`SkillModel`/`DisallowedFunctions` 等），该包测试二进制无法构建，与 plan 改动无关；`internal/planmode` 独立测试全程通过。上一轮已记录 `internal/api/**`（含 `/plans` 路由）仍被 staged 的包改名占用而未提交。

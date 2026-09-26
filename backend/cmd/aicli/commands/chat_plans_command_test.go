@@ -251,10 +251,11 @@ func TestPlansReopenSelectsVersionAndNeedsSession(t *testing.T) {
 		t.Fatalf("expected a session hint, got %q", sessionless)
 	}
 
-	// A bare keyword stays a usage hint, and browsing still works.
+	// A lone keyword is always the action (ids are "<slug>/<name>", so a bare
+	// keyword cannot be a real id): it prints usage instead of a lookup miss.
 	usage := captureStdout(t, func() { handlePlansCommand(nil, "/plans reopen") })
-	if !strings.Contains(usage, "未找到计划") {
-		t.Fatalf("a lone keyword must fall back to the id lookup path, got %q", usage)
+	if !strings.Contains(usage, "用法: /plans reopen") {
+		t.Fatalf("expected the reopen usage hint, got %q", usage)
 	}
 }
 
@@ -290,6 +291,104 @@ func TestParsePlansReopenArgs(t *testing.T) {
 			}
 			if id != test.wantID || version != test.wantVersion || force != test.wantForce {
 				t.Fatalf("got id=%q version=%d force=%v", id, version, force)
+			}
+		})
+	}
+}
+
+func diffFixtureRecord(t *testing.T, store *planstore.Store) planstore.Record {
+	t.Helper()
+	record, err := store.Record(planstore.RecordOptions{
+		SessionID:   "session-1",
+		ProjectPath: "/work/demo",
+		PlanPath:    "docs/plan.md",
+	})
+	if err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	for _, body := range []string{
+		"# Plan\n\nstep one\nstep two\n",
+		"# Plan\n\nstep one\nstep two revised\nstep three\n",
+	} {
+		record, err = store.Snapshot(planstore.SnapshotOptions{
+			ID:       record.ID,
+			Decision: "request_changes",
+			Source:   "user",
+			Content:  []byte(body),
+		})
+		if err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+	}
+	return record
+}
+
+func TestPlansDiffShowsRoundChanges(t *testing.T) {
+	store := withPlanStore(t)
+	record := diffFixtureRecord(t, store)
+
+	out := captureStdout(t, func() { handlePlansCommand(nil, "/plans diff "+record.ID) })
+	for _, expected := range []string{
+		"计划 diff: " + record.ID,
+		"rounds: v1 -> v2",
+		"changes: +2 -1",
+		"--- v1 request_changes",
+		"+++ v2 request_changes",
+		"-step two",
+		"+step two revised",
+		"+step three",
+	} {
+		if !strings.Contains(out, expected) {
+			t.Fatalf("diff output missing %q: %q", expected, out)
+		}
+	}
+
+	explicit := captureStdout(t, func() { handlePlansCommand(nil, "/plans diff "+record.ID+" v2 v2") })
+	if !strings.Contains(explicit, "内容完全相同") {
+		t.Fatalf("expected an identical-round note, got %q", explicit)
+	}
+
+	usage := captureStdout(t, func() { handlePlansCommand(nil, "/plans diff") })
+	if !strings.Contains(usage, "用法: /plans diff") {
+		t.Fatalf("expected the diff usage hint, got %q", usage)
+	}
+
+	missing := captureStdout(t, func() { handlePlansCommand(nil, "/plans diff demo/ghost") })
+	if !strings.Contains(missing, "读取归档 diff 失败") {
+		t.Fatalf("expected a read failure hint, got %q", missing)
+	}
+}
+
+func TestParsePlansDiffArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantID   string
+		wantFrom int
+		wantTo   int
+		wantErr  bool
+	}{
+		{name: "id only", args: []string{"demo/plan"}, wantID: "demo/plan"},
+		{name: "from only", args: []string{"demo/plan", "v2"}, wantID: "demo/plan", wantFrom: 2},
+		{name: "explicit pair", args: []string{"demo/plan", "v1", "v4"}, wantID: "demo/plan", wantFrom: 1, wantTo: 4},
+		{name: "pair before id", args: []string{"v1", "v4", "demo/plan"}, wantID: "demo/plan", wantFrom: 1, wantTo: 4},
+		{name: "too many versions", args: []string{"demo/plan", "v1", "v2", "v3"}, wantErr: true},
+		{name: "non-version token stays in the id", args: []string{"demo/plan", "vX"}, wantID: "demo/plan vX"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			id, from, to, err := parsePlansDiffArgs(test.args)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got id=%q from=%d to=%d", id, from, to)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if id != test.wantID || from != test.wantFrom || to != test.wantTo {
+				t.Fatalf("got id=%q from=%d to=%d", id, from, to)
 			}
 		})
 	}

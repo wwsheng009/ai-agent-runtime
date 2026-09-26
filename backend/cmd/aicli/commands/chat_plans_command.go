@@ -55,8 +55,13 @@ func plansCommandTextForSession(session *ChatSession, command string) string {
 	if rest == "" {
 		return renderStoredPlanList(store)
 	}
-	if tokens := strings.Fields(rest); len(tokens) > 1 && isPlansReopenKeyword(tokens[0]) {
-		return reopenStoredPlan(session, store, tokens[1:])
+	if tokens := strings.Fields(rest); len(tokens) > 0 {
+		switch {
+		case isPlansReopenKeyword(tokens[0]):
+			return reopenStoredPlan(session, store, tokens[1:])
+		case isPlansDiffKeyword(tokens[0]):
+			return diffStoredPlan(store, tokens[1:])
+		}
 	}
 	return renderStoredPlanDetail(store, rest)
 }
@@ -82,7 +87,7 @@ func renderStoredPlanList(store *planstore.Store) string {
 			truncatePlanCell(record.PlanPath, 48),
 		))
 	}
-	lines = append(lines, "用法: /plans <id> 查看某个计划的详情与最新正文")
+	lines = append(lines, "用法: /plans <id> 查看详情与最新正文；/plans diff <id> [vA [vB]] 对比两轮正文；/plans reopen <id> [vN] [--force] 回灌并继续评审")
 	return strings.Join(lines, "\n")
 }
 
@@ -221,15 +226,15 @@ func isPlanVersionToken(token string) bool {
 // later session. Content safety lives in planmode.ReopenPlan: an identical file
 // is left alone, a missing one is created, and a diverged one needs --force.
 func reopenStoredPlan(session *ChatSession, store *planstore.Store, args []string) string {
-	if session == nil {
-		return "错误: 重新评审归档计划需要活动会话"
-	}
 	id, version, force, err := parsePlansReopenArgs(args)
 	if err != nil {
 		return fmt.Sprintf("错误: %v", err)
 	}
 	if id == "" {
 		return "用法: /plans reopen <id> [vN] [--force]（用 /plans 列出全部计划）"
+	}
+	if session == nil {
+		return "错误: 重新评审归档计划需要活动会话"
 	}
 	result, err := planmode.ReopenPlan(planmode.ReopenOptions{
 		Store:     store,
@@ -273,4 +278,86 @@ func reopenStoredPlan(session *ChatSession, store *planstore.Store, args []strin
 		lines = append(lines, fmt.Sprintf("  提示: 运行时同步失败（状态已保存）: %v", mutation.SyncErr))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// isPlansDiffKeyword reports whether the first /plans argument selects the
+// round-to-round diff action.
+func isPlansDiffKeyword(token string) bool {
+	switch strings.ToLower(strings.TrimSpace(token)) {
+	case "diff", "compare":
+		return true
+	default:
+		return false
+	}
+}
+
+// parsePlansDiffArgs splits `<id> [vA [vB]]`.
+//
+// One version means "vA -> latest" (the usual "what changed in the last round
+// since vA"), two mean "vA -> vB" in the given order. 0 keeps the derived
+// default (latest vs its predecessor).
+func parsePlansDiffArgs(args []string) (id string, from, to int, err error) {
+	idParts := make([]string, 0, len(args))
+	versions := make([]int, 0, 2)
+	for _, arg := range args {
+		token := strings.TrimSpace(arg)
+		if token == "" {
+			continue
+		}
+		if !isPlanVersionToken(token) {
+			idParts = append(idParts, token)
+			continue
+		}
+		value, convErr := strconv.Atoi(strings.TrimPrefix(strings.ToLower(token), "v"))
+		if convErr != nil || value <= 0 {
+			return "", 0, 0, fmt.Errorf("版本号必须是正整数: %s", token)
+		}
+		if len(versions) >= 2 {
+			return "", 0, 0, fmt.Errorf("最多指定两个版本（vA vB）")
+		}
+		versions = append(versions, value)
+	}
+	id = strings.Join(idParts, " ")
+	if len(versions) > 0 {
+		from = versions[0]
+	}
+	if len(versions) > 1 {
+		to = versions[1]
+	}
+	return id, from, to, nil
+}
+
+// diffStoredPlan renders the change between two archived rounds so a reviewer can
+// see what moved since the previous verdict (the archive's whole point).
+func diffStoredPlan(store *planstore.Store, args []string) string {
+	id, from, to, err := parsePlansDiffArgs(args)
+	if err != nil {
+		return fmt.Sprintf("错误: %v", err)
+	}
+	if id == "" {
+		return "用法: /plans diff <id> [vA [vB]]（默认对比最近两轮）"
+	}
+	result, err := planmode.DiffArchivedVersions(planmode.DiffVersionsOptions{
+		Store:    store,
+		RecordID: id,
+		From:     from,
+		To:       to,
+	})
+	if err != nil {
+		return fmt.Sprintf("错误: 读取归档 diff 失败: %v", err)
+	}
+	if result.Identical {
+		return fmt.Sprintf("计划 diff: %s\n  v%d 与 v%d 内容完全相同（归档无变更）",
+			result.RecordID, result.FromVersion, result.ToVersion)
+	}
+	lines := []string{
+		fmt.Sprintf("计划 diff: %s", result.RecordID),
+		fmt.Sprintf("  rounds: v%d -> v%d", result.FromVersion, result.ToVersion),
+		fmt.Sprintf("  changes: +%d -%d（old %d 行 -> new %d 行）",
+			result.Added, result.Removed, result.OldLines, result.NewLines),
+	}
+	if result.Coarse {
+		lines = append(lines, "  提示: 改动面过大，按整块替换呈现（未做逐行匹配）")
+	}
+	return strings.Join(lines, "\n") + "\n" + result.Text
 }
