@@ -48,9 +48,9 @@ func TestExecuteStructuredMCPCommandDegradesWithoutSurface(t *testing.T) {
 	}
 }
 
-// 动作集合必须覆盖状态/启停/移除/热重载，且全部落在既有 /mcp 子命令上。
+// 动作集合必须覆盖状态/启停/移除/热重载，且全部落在既有 /mcp 子命令上（非 OAuth server）。
 func TestChatMCPPickerActionsMapToExistingSubcommands(t *testing.T) {
-	enabled := chatMCPPickerActions("context7", true)
+	enabled := chatMCPPickerActions("context7", true, chatMCPPickerAuthState{})
 	labels := make([]string, 0, len(enabled))
 	byLabel := map[string]mcpPickerAction{}
 	for _, action := range enabled {
@@ -75,7 +75,7 @@ func TestChatMCPPickerActionsMapToExistingSubcommands(t *testing.T) {
 	}
 
 	// 停用的 server：动作变为"启用"。
-	disabled := chatMCPPickerActions("local-fs", false)
+	disabled := chatMCPPickerActions("local-fs", false, chatMCPPickerAuthState{})
 	found := ""
 	for _, action := range disabled {
 		if action.Label == "启用" {
@@ -116,7 +116,7 @@ func TestBuildChatMCPPickerServerItemsReusesListProjection(t *testing.T) {
 }
 
 func TestBuildChatMCPPickerActionItems(t *testing.T) {
-	rows := buildChatMCPPickerActionItems(chatMCPPickerActions("x", true))
+	rows := buildChatMCPPickerActionItems(chatMCPPickerActions("x", true, chatMCPPickerAuthState{}))
 	if len(rows) != 5 {
 		t.Fatalf("动作行数 = %d", len(rows))
 	}

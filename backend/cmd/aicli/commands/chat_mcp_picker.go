@@ -19,9 +19,10 @@ import (
 // 非 TTY / JSON 输出降级为现有纯文本面板（/mcp list），行为不退化。
 
 const (
-	chatMCPPickerActionStatus = "查看状态"
-	chatMCPPickerActionReload = "热重载全部 MCP"
-	chatMCPPickerActionRemove = "移除"
+	chatMCPPickerActionStatus    = "查看状态"
+	chatMCPPickerActionReload    = "热重载全部 MCP"
+	chatMCPPickerActionRemove    = "移除"
+	chatMCPPickerActionClearAuth = "清除授权"
 
 	chatMCPPickerCancelLabel = "返回上一层"
 )
@@ -89,7 +90,7 @@ func openChatMCPPickerWithService(session *ChatSession, service chatMCPService) 
 
 		selected := items[picked.Index]
 		name := strings.TrimSpace(selected.Config.Name)
-		actions := chatMCPPickerActions(name, selected.Config.IsEnabled())
+		actions := chatMCPPickerActions(name, selected.Config.IsEnabled(), chatMCPPickerAuthStateOf(selected))
 
 		actionPicked, err := selectChatMCPPickerList(session, "MCP: "+name,
 			"Enter 执行 · Esc 返回", buildChatMCPPickerActionItems(actions))
@@ -170,9 +171,37 @@ func buildChatMCPPickerActionItems(actions []mcpPickerAction) []ui.FullScreenLis
 	return rows
 }
 
+// chatMCPPickerAuthState 是选择器需要的一行授权态：是否配置 OAuth、是否已有令牌、
+// 是否有未完成流程、当前是否被要求认证。
+type chatMCPPickerAuthState struct {
+	Configured bool
+	Authorized bool
+	Pending    bool
+	NeedsAuth  bool
+}
+
+// chatMCPPickerAuthStateOf 从列表项推导授权态（令牌状态直接读本地令牌存储，零网络开销）。
+func chatMCPPickerAuthStateOf(item mcpadmin.Item) chatMCPPickerAuthState {
+	state := chatMCPPickerAuthState{Configured: item.Config.Auth != nil}
+	if item.Status != nil {
+		state.NeedsAuth = item.Status.RequiresAuth
+	}
+	if !state.Configured {
+		return state
+	}
+	state.Pending = chatMCPAuthPendingActive(item.Config.Name)
+	if status, ok := chatMCPAuthStatusFor(item.Config); ok {
+		state.Authorized = status.Authenticated
+		if status.NeedsAuth {
+			state.NeedsAuth = true
+		}
+	}
+	return state
+}
+
 // chatMCPPickerActions 按 server 当前状态给出动作集合。命令字符串全部落在既有
-// /mcp 子命令上，选择器不新增写路径。
-func chatMCPPickerActions(name string, enabled bool) []mcpPickerAction {
+// /mcp 子命令上，选择器不新增写路径；OAuth 相关动作同样转交 /mcp auth 文本通道。
+func chatMCPPickerActions(name string, enabled bool, authState chatMCPPickerAuthState) []mcpPickerAction {
 	name = strings.TrimSpace(name)
 	toggleLabel := "停用"
 	toggleSub := "disable"
@@ -180,13 +209,34 @@ func chatMCPPickerActions(name string, enabled bool) []mcpPickerAction {
 		toggleLabel = "启用"
 		toggleSub = "enable"
 	}
-	return []mcpPickerAction{
+	actions := []mcpPickerAction{
 		{Label: chatMCPPickerActionStatus, Command: "/mcp status " + name, ReopenAt: 0},
-		{Label: toggleLabel, Command: "/mcp " + toggleSub + " " + name, ReopenAt: 0},
-		{Label: chatMCPPickerActionReload, Command: "/mcp reload", ReopenAt: -1},
-		{Label: chatMCPPickerActionRemove, Command: "/mcp remove " + name, Confirm: true, ReopenAt: 0},
-		{Label: chatMCPPickerCancelLabel, Command: "", ReopenAt: -1},
 	}
+	if authState.Configured {
+		authLabel := "认证"
+		switch {
+		case authState.Pending:
+			authLabel = "完成授权"
+		case authState.Authorized && !authState.NeedsAuth:
+			authLabel = "重新认证"
+		}
+		actions = append(actions, mcpPickerAction{Label: authLabel, Command: "/mcp auth " + name, ReopenAt: 0})
+		if authState.Authorized {
+			actions = append(actions, mcpPickerAction{
+				Label:    chatMCPPickerActionClearAuth,
+				Command:  "/mcp auth " + name + " --clear",
+				Confirm:  true,
+				ReopenAt: 0,
+			})
+		}
+	}
+	actions = append(actions,
+		mcpPickerAction{Label: toggleLabel, Command: "/mcp " + toggleSub + " " + name, ReopenAt: 0},
+		mcpPickerAction{Label: chatMCPPickerActionReload, Command: "/mcp reload", ReopenAt: -1},
+		mcpPickerAction{Label: chatMCPPickerActionRemove, Command: "/mcp remove " + name, Confirm: true, ReopenAt: 0},
+		mcpPickerAction{Label: chatMCPPickerCancelLabel, Command: "", ReopenAt: -1},
+	)
+	return actions
 }
 
 // confirmChatMCPPickerAction 是破坏性动作的二次确认（同一套全屏列表交互）。

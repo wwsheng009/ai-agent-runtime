@@ -27,6 +27,11 @@ const chatMCPCommandUsage = `用法:
   /mcp enable <name> | disable <name>     启用/停用并热重载
   /mcp remove <name>                      删除并热重载
   /mcp reload                             重新加载配置并重连
+  /mcp auth                               查看各 OAuth server 的授权状态
+  /mcp auth <name>                        发起/继续授权（给出授权链接；已回调则直接完成）
+  /mcp auth <name> <回调URL|code>          用回调 URL 或裸 code 完成授权
+  /mcp auth <name> --clear                清除该 server 的 OAuth 令牌
+  /mcp auth <name> --status               查看单个 server 的授权状态
   /mcp help                               显示本帮助`
 
 // chatMCPService 抽象 /mcp 需要的管理能力，便于测试注入替身。
@@ -107,6 +112,10 @@ func chatMCPCommandTextWithService(command string, service chatMCPService, onMut
 		})
 	case "reload":
 		return chatMCPReloadText(service, onMutate)
+	case "auth", "login":
+		// 粘贴的回调 URL 含 `&`，会被 tokenizer 拆散：按原文取「子命令+名称」之后的内容。
+		remainder := dropChatCommandWords(extractCommandArgument(command), 2)
+		return chatMCPAuthText(service, args[1:], remainder, onMutate)
 	default:
 		return fmt.Sprintf("错误: 未知子命令 %q\n%s", args[0], chatMCPCommandUsage)
 	}

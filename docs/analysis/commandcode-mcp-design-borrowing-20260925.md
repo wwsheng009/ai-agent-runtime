@@ -24,9 +24,9 @@
 
 > 已有且**明显强于** CommandCode、不应回退的能力：trust level（`local/trusted_remote/untrusted_remote`）、工具级启停、health check（tools/resources/toolArgs）、`test`/`test-server`/`tools` 子命令、stdio stderr 诊断、Windows 进程树治理、`mcp__<server>__<tool>` 规范名与重名隔离、ACP 客户端下发 `mcpServers`（merge/local/client/off）、profile 分层与 MCP diff、热重载与三端（CLI `/mcp`/console/web）共用同一 Service。
 
-> 落地状态（2026-09-25）：上表 #1–#10 已按 §6 的最小切片全部实施完毕（M1 正确性 → M2 OAuth/scope CLI → M3 分层配置 → M4 导入导出 + `/mcp` 交互菜单 + quickstart 文档）；
-> 各里程碑的实现细节、验证与遗留项见 §8–§11。尚存的两处缺口：chat 侧无「认证」动作（§11 §4.8）、
-> `types.go` 的 `RequiresAuth` 注释仍按 CLI 口径描述（§11 §4.9）。
+> 落地状态（2026-09-25）：上表 #1–#10 已按 §6 的最小切片全部实施完毕（M1 正确性 → M2 OAuth/scope CLI → M3 分层配置 → M4 导入导出 + `/mcp` 交互菜单 + quickstart 文档 + chat 内 OAuth）；
+> 各里程碑的实现细节、验证与遗留项见 §8–§11。§11 §4.8 记录的「chat 侧无认证动作」缺口已随 chat 内 OAuth 落地关闭，
+> `internal/mcp/config/types.go` 的 `RequiresAuth` 注释（「chat 内为 `/mcp auth <name>`」）随之成立。
 
 ---
 
@@ -404,8 +404,10 @@ M1 交付清单：
 - 屏障语义：新增 `ui.OpenMCPPicker` / `ui.CloseMCPPicker`（`ClassBarrier`）与 `MCPPickerState`
   （只记租约所有权）；`LeaseReleased` 兜底清理状态。动作只在租约释放、主呈现器恢复之后执行。
 - 降级：非交互 / 非 ANSI TTY / `--output json` / 有关键帧时不进选择器，`/mcp` 回到列表面板。
-- 缺口（有意保留）：chat 侧暂无「认证」动作 —— OAuth 登录仍是 CLI（`aicli mcp auth login <name>`）
-  与微型 Web 面板的职责，`chatMCPService` 未暴露 auth 能力；后续若把 auth 抽象进服务接口，可在动作列表里补一项。
+- 缺口（已关闭，见本节末尾「§4.8+ chat 内 OAuth」）：当时 chat 侧暂无「认证」动作 —— OAuth 登录只在 CLI
+  （`aicli mcp auth <name>`）与微型 Web 面板可用。后续以 `BeginAuth`/`PendingAuth` 分段授权把认证接进了
+  chat 文本通道与选择器，因此未把 auth 抽象进 `chatMCPService`：授权会话是进程内的临时状态，
+  由 `chat_mcp_auth.go` 的注册表管理，`chatMCPService` 仍只管配置读写。
 
 验证：`cmd/aicli/ui` 的屏障生命周期与屏障类别断言（陈旧租约 Open 不生效、不匹配 Close 不清理、
 `LeaseReleased` 兜底清理）；`cmd/aicli/commands` 的入口判定、无表面降级（含 `/mcp select` 不得报未知子命令）、
@@ -431,5 +433,27 @@ M1 交付清单：
 - 防漂移回归：`cmd/aicli/commands/docs_mcp_layering_regression_test.go` 钉住
   「三份文档的分层说明必须按低→高列出四层」与「quickstart 入口可达 + 四块内容齐备」。
 
-剩余（未做，非本套 P2 范围）：`internal/mcp/config/types.go` 的 `RequiresAuth` 注释写着「chat 内为 `/mcp auth <name>`」，
-但 chat 文本通道与选择器都还没有 auth 动作 —— 要么把 auth 抽象进 `chatMCPService` 后补上，要么把该注释改回 CLI 口径。
+**§4.8+ chat 内 OAuth（缺口关闭）**
+
+§4.8 曾把「认证」留给 CLI 与微型 Web 面板（chat 不能阻塞终端读 stdin）。本次以
+「分段授权」把流程拆到多个用户回合，缺口关闭；`types.go` 的 `RequiresAuth` 注释（「chat 内为 `/mcp auth <name>`」）就此成立：
+
+- `internal/mcp/auth`：把原 `Authenticate` 拆成 `BeginAuth`（发现授权服务器 / 客户端凭据 / 监听回调端口 /
+  PKCE+state / 授权 URL，不打印不读 stdin，仅按 `NoBrowser` 决定是否开浏览器）与 `PendingAuth`
+  （`AuthURL/RedirectURI/Scopes/ExpiresAt/Expired/BrowserErr` + `Wait`（CLI 阻塞等待）/
+  `TakeCallback`（非阻塞取浏览器回调）/ `Complete`（用粘贴的回调 URL 或裸 code 兑换）/ `Close`）。
+  `Authenticate` 退化为「BeginAuth + 打印 + 读 stdin + Wait」的薄包装，CLI 输出与既有测试逐字不变（M2 全部用例保持绿）。
+- chat（`cmd/aicli/commands/chat_mcp_auth.go`）：`/mcp auth`（状态）/ `/mcp auth <name>`（发起；已有回调直接兑换，
+  已有流程则回放链接）/ `/mcp auth <name> <回调URL|code>` / `/mcp auth <name> --clear` / `--no-browser`；
+  未完成的 `PendingAuth` 存进程内注册表（按 server 名，TTL 与 `auth.DefaultFlowTimeout` 对齐，超时释放回调端口）。
+  成功后自动 `service.Reload` + `refreshChatMCPTools`，无需手动 `/mcp reload`。选择器动作随授权态变化：
+  认证 / 重新认证 / 完成授权 / 清除授权（二次确认），全部转交同一 `/mcp auth` 文本通道（单一写路径）。
+- **实测发现的真问题（已修）**：chat 命令参数 tokenizer 会把回调 URL 里的 `&` 拆成独立 token
+  （`...?code=x` / `&` / `state=y`），按 token 还原会丢 `state`、使 CSRF 校验形同虚设。
+  完成路径改为按「子命令 + 名称」之后的**原文**取粘贴内容（`dropChatCommandWords`），测试覆盖
+  `state` 不匹配必须拒绝、失败后清理流程。
+
+验证：`internal/mcp/auth` 新增 `pending_test.go`（TakeCallback 完成、粘贴 URL / 裸 code 两种完成方式、
+state 不匹配拒绝、过期提示与 Close 幂等）；`cmd/aicli/commands` 新增 `chat_mcp_auth_test.go`
+（空态 / 未配置 auth 用法提示、端到端起流程 + 粘贴回调 + 状态翻转 + 清除、state 不匹配、
+选择器动作随授权态变化），并更新 M4b 的选择器动作用例到新签名。

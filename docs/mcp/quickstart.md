@@ -53,6 +53,10 @@ chat 内可用的 `/mcp` 命令：
 /mcp select             同上（别名 pick / menu / choose）
 /mcp list               纯文本列表（脚本口径，不开菜单）
 /mcp status <name>      单 server 详情：配置、来源、最近错误与工具状态
+/mcp auth               查看各 OAuth server 的授权状态
+/mcp auth <name>        发起/继续授权（给出授权链接；浏览器回调已到达时直接完成）
+/mcp auth <name> <回调URL|code>   回调页面打不开时，粘贴完成授权
+/mcp auth <name> --clear          清除该 server 的令牌
 /mcp enable|disable <name>   启停并热重载
 /mcp remove <name>      删除并热重载
 /mcp reload             重新加载配置并重连
@@ -60,6 +64,8 @@ chat 内可用的 `/mcp` 命令：
 ```
 
 修改配置后不必重启：chat 内用 `/mcp reload`，命令行用 `aicli mcp reload`。
+选择器里同样可以完成授权：选中 OAuth server → 「认证 / 重新认证 / 完成授权」（按当前状态变化），
+需要清除令牌时选「清除授权」（二次确认）。
 
 ---
 
@@ -116,6 +122,11 @@ aicli mcp auth notion                  # 浏览器授权
 aicli mcp auth notion --no-browser     # 无桌面 / Win7：打印链接，手动粘贴回调 URL 或 code
 aicli mcp auth --status                # 查看各 server 授权状态（不打印令牌明文）
 ```
+
+**在 chat 里同样可以授权**（不必切到终端）：`/mcp auth notion` 起流程并打印授权链接，
+浏览器回调到达后再执行一次 `/mcp auth notion` 即完成；回调页面打不开时，把地址栏里的完整
+回调 URL（或 code）粘贴回来：`/mcp auth notion <回调URL 或 code>`。
+两边共用同一套 PKCE 流程与 `~/.aicli/mcp-tokens.json`，谁先完成都生效。
 
 未登录或刷新失败时该 server 显示为「需认证」（`!`），不影响其它 server；
 `401/403` 会用 refresh token 自动刷新并重试一次。`websocket` / `stdio` 暂不支持自动 OAuth，请用 `headers` 配置静态凭证。
@@ -191,7 +202,7 @@ mcpServers:
 | 症状 | 先跑 | 常见原因与处理 |
 |---|---|---|
 | 一直是 `◐ 已启用未连接` / 连接失败 | `aicli mcp status <名称>`<br>`aicli mcp test-server <名称> --show-stderr` | URL/传输类型不匹配（`/sse` 端点需 `--transport sse`）；本地 stdio 子进程启动失败（看 stderr 尾部）；网络/代理问题 |
-| `! 需认证`（401/403） | `aicli mcp auth --status`<br>`aicli mcp auth <名称>` | 未授权：完成 OAuth；自动 OAuth 不支持的 transport 用 `--header`/`--env` 配静态凭证；刷新失败会回到「需认证」 |
+| `! 需认证`（401/403） | `aicli mcp auth --status`<br>`aicli mcp auth <名称>`<br>chat 内 `/mcp auth <名称>` | 未授权：完成 OAuth（chat 内可分段完成：起流程 → 粘贴回调 URL/code）；自动 OAuth 不支持的 transport 用 `--header`/`--env` 配静态凭证；刷新失败会回到「需认证」 |
 | 工具不出现 / 数量为 0 | `aicli mcp tools <名称>`<br>`aicli mcp test <名称> <工具> '{}'` | server 未连接（先看状态）；工具被**工具级启停**关闭（微型 Web / console 的工具弹窗，`tools` 的 `configured_enabled` 字段）；部分 server 延迟注册工具 |
 | server 被隔离，提示「引用未设置的环境变量」 | `aicli mcp status <名称>`<br>`echo $env:MY_TOKEN`（PowerShell） | `${NAME}` 是严格语义：未设置即隔离该 server（不影响其它 server）。设置变量后 `aicli mcp reload`；或改用 `${NAME:-default}` |
 | 改了配置却不生效 | `aicli mcp list`<br>`aicli mcp get <名称> --json` | 被更高优先级同名定义覆盖：看 `覆盖:` 行与 `configSource`；`enable/disable/remove` 作用在定义处，删项目级定义后用户级自动生效 |
@@ -211,6 +222,7 @@ mcpServers:
 | `aicli mcp reload` / chat `/mcp reload` | 重新读取分层配置并重连（配置文件被外部工具改动后用） |
 | 直接编辑配置文件 | 下一次 `reload`，或新会话启动时 |
 | chat 会话内工具面 | 管理动作会触发会话内刷新；进行中的回合可能仍持有旧快照，下一回合生效 |
+| 完成 OAuth 授权（`/mcp auth <名称> <回调URL\|code>`） | 立即热重载并刷新工具面；无需手动 `/mcp reload` |
 | runtime-server / 微型 Web / console | 三端与 CLI 共用同一份分层配置与管理服务，状态与来源展示一致（Web 侧见 [web-remote-api.md](../aicli/web-remote-api.md) 的 `/api/runtime/mcps`） |
 
 ---

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -53,167 +52,36 @@ type callbackResult struct {
 	err   error
 }
 
-// Authenticate 执行 Authorization Code + PKCE 流程并持久化令牌。
+// Authenticate 是阻塞式一步完成的授权入口（CLI 行为）：
+// BeginAuth 起流程 → 打印授权 URL / 尝试打开浏览器 → 等浏览器回调或 stdin 粘贴 →
+// 兑换并持久化令牌。需要在自己的交互节奏里分段完成（chat TUI / Web）请直接用
+// BeginAuth + PendingAuth.Wait/TakeCallback/Complete。
 func (s *Session) Authenticate(ctx context.Context, opts AuthorizeOptions) (*Token, error) {
-	if s == nil {
-		return nil, fmt.Errorf("OAuth 会话不可用")
-	}
-	overrideAuthServer := firstNonEmpty(opts.AuthServer, s.cfg.AuthorizationServer)
-	discovery, err := Discover(ctx, s.client, s.serverURL, overrideAuthServer)
+	pending, err := s.BeginAuth(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = pending.Close() }()
 
-	scopes := selectScopes(opts.Scopes, s.cfg.Scopes, discovery)
-	clientID := firstNonEmpty(opts.ClientID, s.cfg.ClientID)
-	clientSecret := firstNonEmpty(opts.ClientSecret, s.cfg.ClientSecret)
-
-	host := strings.TrimSpace(opts.Host)
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	port := opts.Port
-	if port == 0 {
-		port = s.cfg.CallbackPort
-	}
-	if port < 0 || port > 65535 {
-		return nil, fmt.Errorf("回调端口无效: %d", port)
-	}
-	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, port))
-	if err != nil {
-		return nil, fmt.Errorf("无法启动本地回调服务器 (%s:%d): %w。可用 --no-browser 手动粘贴回调地址，或在 headers 中配置静态凭证", host, port, err)
-	}
-	defer func() { _ = listener.Close() }()
-	redirectURI := "http://" + listener.Addr().String() + callbackPath
-
-	if clientID == "" {
-		if stored, ok := s.storeTokenClient(); ok {
-			clientID, clientSecret = stored.ClientID, stored.ClientSecret
-		} else if registration := strings.TrimSpace(discovery.AuthServer.RegistrationEndpoint); registration != "" {
-			clientID, clientSecret, err = registerClient(ctx, s.client, registration, redirectURI)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			return nil, fmt.Errorf("授权服务器未提供动态注册端点（registration_endpoint）且未配置 auth.clientId。%s", manualFallbackHint)
-		}
-	}
-
-	pkce, err := NewPKCE()
-	if err != nil {
-		return nil, err
-	}
-	state, err := NewState()
-	if err != nil {
-		return nil, err
-	}
-	resource := firstNonEmpty(s.cfg.Resource, s.serverURL)
-	authURL := buildAuthorizeURL(discovery.AuthServer.AuthorizationEndpoint, map[string]string{
-		"response_type":         "code",
-		"client_id":             clientID,
-		"redirect_uri":          redirectURI,
-		"code_challenge":        pkce.Challenge,
-		"code_challenge_method": pkce.Method,
-		"state":                 state,
-		"scope":                 strings.Join(scopes, " "),
-		"resource":              resource,
-	})
-
-	results := make(chan callbackResult, 2)
-	mux := http.NewServeMux()
-	mux.HandleFunc(callbackPath, func(w http.ResponseWriter, r *http.Request) {
-		result := parseCallbackQuery(r.URL.Query())
-		select {
-		case results <- result:
-		default:
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if result.err != nil {
-			_, _ = io.WriteString(w, failurePage(result.err.Error()))
-			return
-		}
-		_, _ = io.WriteString(w, successPage())
-	})
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	go func() { _ = server.Serve(listener) }()
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
-
-	fmt.Fprintf(s.stdout, "OAuth 授权：%s\n授权服务器：%s\n", s.serverURL, discovery.AuthServerURL)
+	fmt.Fprintf(s.stdout, "OAuth 授权：%s\n授权服务器：%s\n", s.serverURL, pending.discovery.AuthServerURL)
 	if !opts.NoBrowser {
-		if err := s.openBrowser(authURL); err != nil {
-			fmt.Fprintf(s.stdout, "自动打开浏览器失败（%v），请手动打开以下链接：\n  %s\n", err, authURL)
+		if browserErr := pending.BrowserErr(); browserErr != nil {
+			fmt.Fprintf(s.stdout, "自动打开浏览器失败（%v），请手动打开以下链接：\n  %s\n", browserErr, pending.AuthURL())
 		} else {
-			fmt.Fprintf(s.stdout, "已尝试打开浏览器；若未自动跳转，请手动访问：\n  %s\n", authURL)
+			fmt.Fprintf(s.stdout, "已尝试打开浏览器；若未自动跳转，请手动访问：\n  %s\n", pending.AuthURL())
 		}
 	} else {
-		fmt.Fprintf(s.stdout, "请手动打开以下链接完成授权：\n  %s\n", authURL)
+		fmt.Fprintf(s.stdout, "请手动打开以下链接完成授权：\n  %s\n", pending.AuthURL())
 	}
 	fmt.Fprintf(s.stdout, "若回调页面无法自动返回，可把完整的回调 URL（或其中的 code）粘贴到此处后回车：\n")
-	go readManualInput(s.stdin, results)
+	go readManualInput(s.stdin, pending.results)
 
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = s.flowTimeout
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	var result callbackResult
-	select {
-	case result = <-results:
-	case <-timer.C:
-		return nil, fmt.Errorf("授权超时（%s）。%s", timeout.Round(time.Second), manualFallbackHint)
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	if result.err != nil {
-		return nil, result.err
-	}
-	if result.state != "" && result.state != state {
-		return nil, fmt.Errorf("state 校验失败（可能遭遇 CSRF），请重试")
-	}
-	if strings.TrimSpace(result.code) == "" {
-		return nil, fmt.Errorf("未取得授权码，请重试")
-	}
-
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("code", result.code)
-	form.Set("redirect_uri", redirectURI)
-	form.Set("client_id", clientID)
-	form.Set("code_verifier", pkce.Verifier)
-	form.Set("resource", resource)
-	response, err := requestToken(ctx, s.client, discovery.AuthServer.TokenEndpoint, form, clientSecret)
+	token, err := pending.Wait(ctx, opts.Timeout)
 	if err != nil {
 		return nil, err
 	}
-
-	s.mu.Lock()
-	s.token = &Token{
-		ServerName:   s.name,
-		ServerURL:    s.serverURL,
-		Resource:     resource,
-		AuthServer:   discovery.AuthServerURL,
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		RedirectURI:  redirectURI,
-	}
-	s.applyTokenResponseLocked(response, discovery.AuthServerURL, discovery.AuthServer.TokenEndpoint, false)
-	if err := s.persistLocked(); err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-	s.needsAuth = false
-	s.reason = ""
-	out := *s.token
-	s.mu.Unlock()
-
-	fmt.Fprintf(s.stdout, "✅ 授权成功：%s（scope: %s）\n", s.name, firstNonEmpty(out.Scope, "(默认)"))
-	return &out, nil
+	fmt.Fprintf(s.stdout, "✅ 授权成功：%s（scope: %s）\n", s.name, firstNonEmpty(token.Scope, "(默认)"))
+	return token, nil
 }
 
 // storeTokenClient 复用上次注册/配置的客户端凭据，避免重复注册。

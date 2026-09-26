@@ -220,6 +220,13 @@ aicli mcp get my-server --json                # 导出单 server 配置（可直
 在 chat 里直接敲 `/mcp` 会打开交互菜单：先选 server，再选动作（查看状态 / 启用停用 / 移除 / 热重载）；
 `/mcp list` 保持纯文本列表口径，非 TTY 或脚本场景自动降级为文本面板。
 
+OAuth 授权在 chat 内即可完成（与 CLI 共用 PKCE 流程与 `~/.aicli/mcp-tokens.json`）：
+`/mcp auth` 查看各 server 授权状态，`/mcp auth <名称>` 发起并打印授权链接（浏览器回调到达后再执行一次即兑换，
+无桌面环境加 `--no-browser`），回调页面打不开时用 `/mcp auth <名称> <回调URL 或 code>` 粘贴完成，
+`/mcp auth <名称> --clear` 清除令牌；完成后自动热重载并刷新会话工具面。
+选择器对 OAuth server 相应给出「认证 / 重新认证 / 完成授权 / 清除授权（二次确认）」动作，走同一 `/mcp` 文本通道。
+
+
 从 Claude / Cursor / Gemini / OpenCode / Codex 迁移：
 
 ```bash

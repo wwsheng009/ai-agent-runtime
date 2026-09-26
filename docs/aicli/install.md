@@ -561,6 +561,11 @@ MCP OAuth（`--auth oauth` + `aicli mcp auth`）：
   浏览器打不开/无桌面环境时用 `aicli mcp auth <名称> --no-browser`：复制打印的授权 URL 手动访问，再把回调 URL（或 code）粘贴回终端。
 - 查看与清理：`aicli mcp auth --status`、`aicli mcp auth --list`（只输出元数据，绝不打印令牌明文）、
   `aicli mcp auth --clear <名称>` / `aicli mcp auth --clear --all`，或 `aicli mcp logout <名称> [--all]`。
+- chat 内同口径可用：`/mcp auth`（状态）、`/mcp auth <名称>`（发起，无桌面时加 `--no-browser`）、
+  `/mcp auth <名称> <回调URL|code>`（回调页面打不开时粘贴完成）、`/mcp auth <名称> --clear`。
+  chat 不能阻塞终端读 stdin，因此把流程拆成多个用户回合：起流程打印授权链接，浏览器回调到达后再执行
+  一次 `/mcp auth <名称>` 即兑换；或直接粘贴回调 URL/code。与 CLI 共用同一套 PKCE 流程与 `~/.aicli/mcp-tokens.json`，
+  完成后自动热重载并刷新会话工具面；选择器的「认证 / 重新认证 / 完成授权 / 清除授权」动作走同一文本通道。
 - 令牌存 `~/.aicli/mcp-tokens.json`（写入为 0600 且原子替换，目录 0700），可用 `AICLI_MCP_TOKENS_FILE` 覆盖路径；
   server URL 变化时同名旧令牌会被忽略，避免把旧站令牌发给新站。
 - 401/403 时会用 refresh_token 自动刷新并重试一次；未登录或刷新失败时该 server 被隔离为「需认证」
