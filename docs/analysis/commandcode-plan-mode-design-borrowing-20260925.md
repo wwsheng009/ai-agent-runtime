@@ -790,3 +790,52 @@
 
 - 面板只做**相邻轮次**对比（`vN-1 → vN`）；任意两轮对比（`vA → vB`）目前只有 CLI 与 HTTP 查询参数支持，UI 未给版本选择器。
 - 行级评论仍缺：diff 面板是纯展示，不能在某一行挂评论；后续需要“行锚点 + 备注”的存储契约（§4.4 剩余项）。
+
+---
+
+## 18. 实施记录：第十一轮（2026-09-25，§4.6 Web 常驻模式标识）
+
+**状态**：§4.6 的 **Web 侧「当前模式常驻标识」已落地**（聊天区顶部：模式徽标 + plan 状态/路径/读法）。§4.6 只剩 **TUI/CLI 侧的常驻横幅**；§4.4 只剩行级评论；自动修订回合仍待做（见 18.4 的取舍）。
+
+### 18.1 为什么这一轮选它
+
+另一会话此刻正在 `internal/api/runtimeapi/**` 深度改造（`handler.go`、`session_active_turn.go` 等多文件在途，索引里已有暂存改动）。**评审反馈的自动修订回合**必须落在该链路上（触发一轮 run 要走 chat actor / trigger-turn 通道），此时动手等于和对方抢同一批文件。§4.6 的常驻标识是**纯前端**切片：与后端零交叉，且是报告里明确的 §4.6 剩余项（"Web 已有 composer 控件，补「当前模式」常驻标识即可"）。
+
+### 18.2 行为
+
+| 场景 | 变更前 | 变更后 |
+|------|--------|--------|
+| 会话处于任意权限模式 | 模式只在 composer 的权限下拉里可见（要先看输入卡） | 聊天区顶部**常驻一条模式标识**：`模式 + 徽标`；`plan` 走强调色、`bypass_permissions` 走告警色、其余中性；未知模式值原样呈现（不写死枚举、不出现空徽标） |
+| plan active | 需要打开右侧「计划」面板才知道计划是否就绪 | 标识追加**计划状态徽标 + 计划路径 + 一句读法**：模型已请求裁决 > 计划已就绪 > 尚未写就（读法与右侧面板同源，不新增判定） |
+| 无会话 / 快照未到位 / 模式字段为空 | — | 标识**不占位**（自渲染为 null，不影响既有布局） |
+| 裁决动作 | composer 上沿的待交互卡片 + 右侧计划面板 | **不变**：标识是只读的，不承载批准/请求修改/退出，避免出现第二套 pending 判定（P1-7 口径） |
+
+### 18.3 落点与验证
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 纯函数 | `frontend/src/components/workspace/session-mode-banner-shared.ts` | `sessionModeBannerTone`（plan/danger/neutral）、`sessionModeBannerLabelKey`（已知模式映射词典键、未知返回 null）、`sessionModeBannerHintLeaf`（裁决请求 > 正文可用 > 等待产出）、`sessionModeBannerToneClass` |
+| 组件 | `frontend/src/components/workspace/session-mode-banner.tsx` | `SessionModeBanner`：只读展示组件，消费页面既有的 `/plan` 快照（不新增 hook/请求） |
+| 停靠列 | `frontend/src/components/workspace/workspace-shell/session-interaction-dock.tsx` | 把「模式标识 + 审批/提问/计划评审卡片」抽成同一条宽度轴上的整体：一是两者本就同宽同列，二是 `main-section.tsx` 已顶到 500 非空行上限（抽取后净减 7 行，仍然合规） |
+| 透传 | `workspace-page.tsx` → `workspace-shell.tsx` → `main-section-props.ts` → `main-section.tsx` | `plan`（页面既有 `useRuntimePlanMode` 实例）与 `planStatusLabel` 两个可选 props，不新增取数 |
+| 词典 | 两语 `base.ts` | `composer.modeBanner.title` + `composer.modeBanner.hint.{modelRequested,ready,waiting}` |
+
+| 命令（cwd 见备注） | 结果 |
+|---|---|
+| `npx vitest run src/components/workspace/session-mode-banner.test.tsx src/components/workspace/session-mode-banner-shared.test.ts src/components/workspace/workspace-shell/session-interaction-dock.test.tsx`（frontend） | 3 文件 / **14 用例全绿**（常显/隐藏、三档 tone、未知模式回落、裁决读法优先、停靠列同框 + 裁决回抛） |
+| `npx vitest run src/components/workspace/workspace-shell src/components/workspace/session-mode-banner*.test.* src/pages`（frontend） | 19 文件 / 111 用例全绿 |
+| `npx vitest run src/components/workspace src/hooks/workspace src/pages`（frontend，全量） | **207 文件 / 1497 用例全绿** |
+| `npx tsc -b` | exit 0 |
+| `npx eslint <13 个改动文件>` | 0 告警 |
+| `node scripts/verify-frontend-i18n.ts` | scanned=915，violations=0（两语键集一致） |
+| `node scripts/verify-max-lines.mjs` | OK（0 个 > 500 非空行；`main-section.tsx` 抽取后脱离顶格） |
+
+### 18.4 未实施与取舍
+
+- **TUI/CLI 常驻模式横幅**：§4.6 剩下的那一半，在 `backend/cmd/aicli/ui/**` 与键位同族，属 CLI 侧。
+- **评审反馈的自动修订回合**：本轮刻意避开（见 18.1）；落点已记在 §8.5，等 `runtimeapi` 的在途重构落地后再取。
+- **行级评论**（§4.4 剩余项）：需要先定「行锚点 + 备注」的存储契约。
+
+### 18.5 顺带修的文档漂移
+
+`docs/aicli/plan-mode.md` 里两处过时表述——§3「Web 面板的图形入口尚未接入」与 Q6「仍缺 Web 面板里的图形按钮」——都与上一轮已落地的「重新评审」按钮矛盾，本轮一并更正；§6 末补「Web 的常驻模式标识」小节，§9 的 §4.6 条目改为「Web 已落地 / TUI 未落地」。
