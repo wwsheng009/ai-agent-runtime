@@ -34,6 +34,9 @@ type Decision struct {
 	// RuleDetail carries the matching specifier detail of a rules-stage
 	// decision (e.g. the matched command segment or path) for diagnostics.
 	RuleDetail string
+	// ExternalDirs carries the directories of an external_dir:admit decision
+	// (§4.5) so an approving host can widen the session root set.
+	ExternalDirs []string
 	// HardAsk marks an ask that bypass_permissions must not resolve: the
 	// root/home removal circuit breaker still requires an explicit user
 	// decision (or the usual headless deny when no AskHandler exists). Host
@@ -139,6 +142,25 @@ type Engine struct {
 	// the merged permission layers and must also be enforced at mode-switch
 	// entry points by the host.
 	DisableBypass bool
+	// DisableExternalDirGate turns off the external-directory gate (§4.5), which
+	// admits path arguments outside the workspace / admitted roots. Zero value
+	// keeps it enabled.
+	DisableExternalDirGate bool
+	// ExternalAllowedRoots statically widens the admitted root set when the host
+	// cannot carry them per run; sessions normally pass roots via
+	// toolctx.WithAllowedRoots.
+	ExternalAllowedRoots []string
+	// ExternalReadOnlyRoots lists externally admitted roots whose *reads* are
+	// exempt (registered skill/plugin directories). Writes under them still go
+	// through the gate.
+	ExternalReadOnlyRoots []string
+	// ExternalDirTempRoots overrides the silent temp-directory exemption roots
+	// of the external-directory gate (§4.5). Nil means the OS temp directory;
+	// hosts may append artifact/output roots too.
+	ExternalDirTempRoots []string
+	// ApproveExternalDir is called with the directories of an approved
+	// external_dir:admit decision so the host can add them to the session roots.
+	ApproveExternalDir func(dirs []string)
 }
 
 const DefaultApprovalTimeout = 30 * time.Minute
@@ -325,6 +347,20 @@ func (e *Engine) Evaluate(ctx context.Context, req EvalRequest) (Decision, error
 	if decision.Type == "" && mode != ModeBypassPermissions && e.Grants != nil {
 		if grant, ok := e.Grants.Find(req.ToolName, req.Args); ok && !IsDangerousTool(req.ToolName) {
 			decision = withStage(Decision{Type: DecisionAllow, Reason: "remembered_grant"}, StageGrants, firstNonEmpty(grant.Pattern, grant.Tool, "remembered_grant"))
+		}
+	}
+
+	// 4b) External-directory gate (§4.5): a path argument (or shell cwd) outside
+	// the workspace and the session's admitted roots is admitted once before the
+	// call runs. It sits before the read-only fast lane so external reads are
+	// admitted too, and before the mode stage so bypass silently admits while
+	// dont_ask stays fail-closed.
+	if decision.Type == "" {
+		if gate := e.externalDirGate(ctx, req, mode); gate != nil {
+			if gate.Type == DecisionDeny {
+				return *gate, nil
+			}
+			decision = *gate
 		}
 	}
 
@@ -971,6 +1007,11 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 			HookContext: cloneStringMap(decision.HookContext),
 		}, StageAsk, reason), nil
 	}
+	// An approved external-directory ask admits the directories into the session
+	// root set (§4.5) before the call continues.
+	if len(decision.ExternalDirs) > 0 {
+		e.approveExternalDirs(decision.ExternalDirs)
+	}
 	// Optionally remember grant when requested and not dangerous. Hard asks are
 	// one-shot by design: a breaker confirmation must never be remembered.
 	if resp.Remember && !decision.HardAsk && e.Grants != nil && !IsDangerousTool(req.ToolName) {
@@ -1005,6 +1046,9 @@ func (e *Engine) resolveAsk(ctx context.Context, decision Decision, req EvalRequ
 		PatchedArgs: patchedArgs,
 		HookMessage: decision.HookMessage,
 		HookContext: cloneStringMap(decision.HookContext),
+		// Carry the admitted directories so the caller can audit an
+		// external_dir:admit approval (§4.5).
+		ExternalDirs: decision.ExternalDirs,
 	}, StageAsk, "approved"), nil
 }
 

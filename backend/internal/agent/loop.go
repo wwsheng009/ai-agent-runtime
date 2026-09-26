@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -4676,6 +4677,9 @@ func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToo
 	if workspaceRoot := toolWorkspaceRootForAgent(agent); strings.TrimSpace(workspaceRoot) != "" {
 		ctx = toolctx.WithWorkspaceRoot(ctx, workspaceRoot)
 	}
+	if allowedRoots := toolAllowedRootsForAgent(agent); len(allowedRoots) > 0 {
+		ctx = toolctx.WithAllowedRoots(ctx, allowedRoots)
+	}
 	if outputDir := generatedImageOutputDirForAgentSession(agent, sessionID); strings.TrimSpace(outputDir) != "" {
 		ctx = toolctx.WithGeneratedImageOutputDir(ctx, outputDir)
 	}
@@ -6894,6 +6898,55 @@ func optionString(options map[string]interface{}, key string) string {
 	default:
 		return ""
 	}
+}
+
+// optionStringList reads a string-list option. Accepted shapes: []string,
+// []interface{} of strings, or a comma/space separated string (so config files
+// and CLI flags can share the key). Empty entries are dropped.
+func optionStringList(options map[string]interface{}, keys ...string) []string {
+	if len(options) == 0 || len(keys) == 0 {
+		return nil
+	}
+	var raw interface{}
+	for _, key := range keys {
+		if value, ok := options[key]; ok {
+			raw = value
+			break
+		}
+	}
+	var values []string
+	switch typed := raw.(type) {
+	case nil:
+		return nil
+	case []string:
+		values = append(values, typed...)
+	case []interface{}:
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				values = append(values, text)
+			}
+		}
+	case string:
+		values = append(values, strings.FieldsFunc(typed, func(r rune) bool {
+			return r == ',' || r == ';' || unicode.IsSpace(r)
+		})...)
+	default:
+		return nil
+	}
+	cleaned := make([]string, 0, len(values))
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		cleaned = append(cleaned, trimmed)
+	}
+	if len(cleaned) == 0 {
+		return nil
+	}
+	return cleaned
 }
 
 func optionMap(options map[string]interface{}, key string) map[string]interface{} {

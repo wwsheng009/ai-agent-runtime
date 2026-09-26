@@ -56,6 +56,9 @@ func approvedToolCallContext(ctx context.Context, agent *Agent) context.Context 
 	if workspaceRoot := toolWorkspaceRootForAgent(agent); strings.TrimSpace(workspaceRoot) != "" {
 		ctx = toolctx.WithWorkspaceRoot(ctx, workspaceRoot)
 	}
+	if allowedRoots := toolAllowedRootsForAgent(agent); len(allowedRoots) > 0 {
+		ctx = toolctx.WithAllowedRoots(ctx, allowedRoots)
+	}
 	return ctx
 }
 

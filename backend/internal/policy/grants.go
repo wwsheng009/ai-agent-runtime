@@ -20,10 +20,13 @@ const (
 	// 5b/5c).
 	StageShellBreaker   = "shell_breaker"
 	StageSensitiveWrite = "sensitive_write"
-	StageMode           = "mode"
-	StageCallback       = "callback"
-	StageAsk            = "ask"
-	StageHeadlessDeny   = "headless_deny"
+	// StageExternalDir marks the external-directory gate (§4.5): a path outside
+	// the workspace / admitted roots is admitted before the call runs.
+	StageExternalDir  = "external_dir"
+	StageMode         = "mode"
+	StageCallback     = "callback"
+	StageAsk          = "ask"
+	StageHeadlessDeny = "headless_deny"
 )
 
 // Grant records a remembered allow decision for a tool (and optional pattern).

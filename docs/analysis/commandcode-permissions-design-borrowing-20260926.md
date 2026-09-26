@@ -497,4 +497,23 @@
 
 - `--yolo` / `--permission-mode bypass_permissions` 启动参数的 CLI 横幅与解析期拒绝（当前由引擎侧降级兜底，会话仍会显示 bypass 文案）；
 - ACP/Web 模式切换入口与 spawn 继承的 disable_bypass 处理；`harness` 权限读取接口仍只返回单层项目文件；
-- 4.5 外部目录门（`/add-dir`、会话 `AllowedRoots`、engine `external_dir:admit` 阶段、临时目录/skill 目录豁免、CLI chat 接 `sandbox_dirs`）整项待实施。
+- 4.5 外部目录门的**策略侧**已落地（见 §12）；CLI `/add-dir`、会话状态持久化与 ACP `additionalDirectories` 接线仍待实施。
+
+---
+
+## 12. 落地状态（2026-09-26，M3 第二切片：外部目录门 policy/toolctx 侧，§4.5）
+
+| 项 | 状态 | 代码落点 | 验证 |
+|----|------|----------|------|
+| 会话根集合 | ✅ | `toolctx.WithAllowedRoots/AllowedRoots`（工作区根之外的已准入目录，含去重与返回值拷贝隔离） | `toolctx/allowed_roots_test.go` |
+| 外部目录门阶段 | ✅ | `policy/external_dirs.go` + `Engine` 4b 阶段（rules/grants 之后、只读快车道之前）：按 `policyArgKeysForTool` 抽取路径参数（含 shell `cwd/workdir/working_dir`），相对路径按工作区根锚定、`~` 展开、符号链接与大小写（Windows）归一；目录外 → `external_dir:admit`，`RuleDetail` 记录目录集合 | `policy/external_dirs_test.go`（10 例） |
+| 模式语义 | ✅ | default/accept_edits/plan → ask；bypass → 静默准入（`admit_bypass`，不弹窗）；dont_ask → deny；批准后经 `Engine.ApproveExternalDir` 回写会话根集合；`Decision.ExternalDirs` 供审计 | 同上（批准回写、静默准入、fail-closed 各有断言） |
+| 豁免 | ✅ | OS 临时目录全模式静默（读写都免门，写仍走普通模式规则；`Engine.ExternalDirTempRoots` 可覆盖/追加）；plan 模式下 plan 文件写豁免；`Engine.ExternalReadOnlyRoots`（skill/plugin 目录）**只读**豁免，写仍需准入；shell 命令串内的绝对路径不做门（与 §7 契约一致） | 同上（临时目录、只读根读/写、命令内路径各一例） |
+| 随 run 下发 | ✅ | `internal/agent`：`toolCallContext` / `approvedToolCallContext` 绑定 `toolctx.WithAllowedRoots`，来源为 agent options（`allowed_roots` → `additional_directories` → ACP 风格 `additionalDirectories`，支持 []string / []interface{} / 逗号分号空格分隔字符串） | `agent/allowed_roots_binding_test.go` |
+
+本切片明确**未做**（4.5 剩余）：
+
+- CLI `/add-dir` 与会话状态持久化（把准入目录写回 session runtime state 并由 CLI 侧再下发）、`--add-dir` 启动参数、`sandbox_dirs` 接线；
+- ACP `additionalDirectories`（`internal/acp/types.go` 已解析）到 `allowed_roots` 的映射；
+- CLI chat 生产路径的 `Sandbox` 接线与「已注册 skill 目录」的实际填充（`ExternalReadOnlyRoots` 已留好挂点）；
+- 审批文案（`chat_approval_explain.go`）对 `external_dir:admit` 的中文解释与 deny guidance 条目。

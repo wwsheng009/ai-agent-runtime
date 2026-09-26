@@ -131,6 +131,24 @@ CLI deny always wins over a project `allow` rule for the same tool.
 - CLI `/permission-mode bypass_permissions`、shift+tab 循环、`/yolo` 等切换入口
   会被拒绝（`--yolo` 启动参数在引擎侧同样被降级）。
 
+## 外部目录门（§4.5）
+
+工具调用里的**路径参数**（含 shell 的 `cwd`/`workdir`/`working_dir`）与
+`apply_patch` 补丁文本中的路径，如果落在会话工作区之外，会先要求一次准入：
+
+| 场景 | 行为 |
+|------|------|
+| 工作区内 / 已准入目录 / OS 临时目录 | 不触发门（临时目录读写都免门，写仍按普通模式规则） |
+| 工作区外的读写、外部 shell cwd | `default` / `accept_edits` / `plan` → ask（`external_dir:admit`）；批准后**目录**加入本次会话根集合 |
+| `bypass_permissions` | 静默准入，不弹窗 |
+| `dont_ask` | deny（只允许预准入目录） |
+| 已注册 skill/plugin 目录（`ExternalReadOnlyRoots`） | 读免门，写仍需准入 |
+| shell 命令**字符串内部**的绝对路径（如 `cat /etc/hosts`） | 不做此门（与 specifier 读规则一致，见 §7 已知限制） |
+
+预准入方式：agent 选项 `allowed_roots`（也接受 `additional_directories` /
+`additionalDirectories`，支持数组或逗号分隔字符串）。CLI `/add-dir` 与
+ACP `additionalDirectories` 的接线见分析文档 §12 的剩余项。
+
 ## Wiring
 
 - Loaded after profile `ToolPolicy` in chat/exec session setup (cwd bootstrap).

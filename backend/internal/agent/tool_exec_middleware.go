@@ -111,6 +111,16 @@ func toolWorkspaceRootForAgent(agent *Agent) string {
 	return ""
 }
 
+// toolAllowedRootsForAgent returns the session's admitted external roots
+// (`/add-dir` / additionalDirectories, §4.5) stored on the agent options so
+// every tool-call context carries them next to the workspace root.
+func toolAllowedRootsForAgent(agent *Agent) []string {
+	if agent == nil || agent.config == nil {
+		return nil
+	}
+	return optionStringList(agent.config.Options, "allowed_roots", "additional_directories", "additionalDirectories")
+}
+
 func (loop *ReActLoop) finishToolExecutionOutcome(metadata map[string]interface{}, toolName, digest, toolErr string) {
 	if loop == nil {
 		return

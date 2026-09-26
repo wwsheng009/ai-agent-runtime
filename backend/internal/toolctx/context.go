@@ -18,6 +18,7 @@ const (
 	generatedImageOutputDirKey contextKey = "generated_image_output_dir"
 	shellOutputArtifactDirKey  contextKey = "shell_output_artifact_dir"
 	workspaceRootKey           contextKey = "tool_workspace_root"
+	allowedRootsKey            contextKey = "tool_allowed_roots"
 	artifactStoreKey           contextKey = "tool_artifact_store"
 )
 
@@ -149,6 +150,43 @@ func WorkspaceRoot(ctx context.Context) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
+}
+
+// WithAllowedRoots stores the session's externally admitted filesystem roots
+// (the `/add-dir` set, §4.5) in ctx. The workspace root itself is carried by
+// WithWorkspaceRoot and does not need to be repeated here. Empty entries are
+// dropped; an empty set leaves ctx unchanged.
+func WithAllowedRoots(ctx context.Context, roots []string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cleaned := make([]string, 0, len(roots))
+	seen := make(map[string]bool, len(roots))
+	for _, root := range roots {
+		trimmed := strings.TrimSpace(root)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		cleaned = append(cleaned, trimmed)
+	}
+	if len(cleaned) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, allowedRootsKey, cleaned)
+}
+
+// AllowedRoots returns the session's admitted external roots in insertion
+// order. A missing set returns nil.
+func AllowedRoots(ctx context.Context) []string {
+	if ctx == nil {
+		return nil
+	}
+	value, ok := ctx.Value(allowedRootsKey).([]string)
+	if !ok || len(value) == 0 {
+		return nil
+	}
+	return append([]string(nil), value...)
 }
 
 // WithArtifactStore stores the active artifact store in ctx so tools can
