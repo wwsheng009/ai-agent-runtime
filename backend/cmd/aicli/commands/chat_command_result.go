@@ -462,6 +462,10 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		return executeStructuredApprovalReuseCommand(session, command), true, nil
 	}
 
+	if commandMatches(cmdLower, "/plans") {
+		return executeStructuredPlansCommand(session, command), true, nil
+	}
+
 	if commandMatches(cmdLower, "/plan") {
 		return executeStructuredPlanCommand(session, command), true, nil
 	}
