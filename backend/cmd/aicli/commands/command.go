@@ -750,6 +750,16 @@ func handleImageAttachmentCommand(session *ChatSession, command string) bool {
 		printfChatCommandOutput(session, "错误: 无法添加图片附件 %q；请确认文件存在、可读且为支持的非 SVG 图片", path)
 		return false
 	}
+	prepared, err := prepareChatImageAttachment(session, path)
+	if err != nil {
+		printfChatCommandOutput(session, "错误: 图片预处理失败: %v", err)
+		return false
+	}
+	if prepared.Path == "" {
+		printfChatCommandOutput(session, "提示: %s", prepared.Note)
+		return false
+	}
+	path = prepared.Path
 	for _, existing := range session.ImagePaths {
 		if strings.EqualFold(strings.TrimSpace(existing), path) {
 			printfChatCommandOutput(session, "提示: 图片附件已存在: %s", path)
@@ -758,6 +768,9 @@ func handleImageAttachmentCommand(session *ChatSession, command string) bool {
 	}
 	session.ImagePaths = append(session.ImagePaths, path)
 	refreshChatComposerContext(session)
+	if prepared.Note != "" {
+		printfChatCommandOutput(session, "%s", prepared.Note)
+	}
 	printfChatCommandOutput(session, "已添加图片附件: %s (当前共 %d 个)", path, len(session.ImagePaths))
 	return false
 }

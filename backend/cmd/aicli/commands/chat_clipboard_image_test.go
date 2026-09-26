@@ -14,6 +14,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/keymap"
 	"github.com/wwsheng009/ai-agent-runtime/internal/clipboardimage"
+	"github.com/wwsheng009/ai-agent-runtime/internal/imageprep"
 )
 
 // writeClipboardFixturePNG 写一张 2x2 PNG，作为剪贴板读取结果的替身。
@@ -187,4 +188,170 @@ func TestKeymapCatalogDeclaresClipboardImageAction(t *testing.T) {
 		return
 	}
 	t.Fatal("keymap catalog 缺少 app.attach.clipboard_image")
+}
+
+// writeLargeClipboardPNG 写出一张指定尺寸的实心 PNG，用于验证发送前压缩。
+func writeLargeClipboardPNG(t *testing.T, width, height int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "big-shot.png")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("创建大图失败: %v", err)
+	}
+	img := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: uint8(x % 251), G: uint8(y % 241), B: 180, A: 255})
+		}
+	}
+	if err := png.Encode(file, img); err != nil {
+		t.Fatalf("编码大图失败: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("关闭大图失败: %v", err)
+	}
+	return path
+}
+
+func decodeImageSize(t *testing.T, path string) (int, int) {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("打开图片失败: %v", err)
+	}
+	defer file.Close()
+	cfg, _, err := image.DecodeConfig(file)
+	if err != nil {
+		t.Fatalf("读取图片尺寸失败: %v", err)
+	}
+	return cfg.Width, cfg.Height
+}
+
+func TestAttachClipboardImageCompressesLargeImage(t *testing.T) {
+	source := writeLargeClipboardPNG(t, 2000, 1000)
+	stubClipboardImageRead(t, clipboardimage.Result{Path: source, Width: 2000, Height: 1000, Source: "test"}, nil)
+
+	session := &ChatSession{SessionDir: t.TempDir()}
+	message, err := attachClipboardImage(session, false)
+	if err != nil {
+		t.Fatalf("attachClipboardImage 失败: %v", err)
+	}
+	if len(session.ImagePaths) != 1 {
+		t.Fatalf("附件数量错误: %+v", session.ImagePaths)
+	}
+	attached := session.ImagePaths[0]
+	if attached == source {
+		t.Fatalf("超过长边上限的图片应被压缩到新文件: %s", attached)
+	}
+	if !strings.Contains(attached, filepath.Join(session.SessionDir, "images")) {
+		t.Fatalf("压缩结果应落在会话 artifact 目录: %s", attached)
+	}
+	width, height := decodeImageSize(t, attached)
+	if width > imageprep.DefaultMaxDimension || height > imageprep.DefaultMaxDimension {
+		t.Fatalf("压缩后长边应在上限内: %dx%d", width, height)
+	}
+	if width != imageprep.DefaultMaxDimension {
+		t.Fatalf("长边应缩到上限: %dx%d", width, height)
+	}
+	if !strings.Contains(message, "已压缩") || !strings.Contains(message, "已从剪贴板添加图片附件") {
+		t.Fatalf("提示应包含压缩说明: %q", message)
+	}
+
+	// 同一张剪贴板图（内容相同、临时文件名不同）再次粘贴：按内容哈希落到同一
+	// 产物路径，因此只提示"已在附件中"，不会重复入列。
+	secondSource := writeLargeClipboardPNG(t, 2000, 1000)
+	stubClipboardImageRead(t, clipboardimage.Result{Path: secondSource, Width: 2000, Height: 1000, Source: "test"}, nil)
+	again, err := attachClipboardImage(session, false)
+	if err != nil {
+		t.Fatalf("第二次 attachClipboardImage 失败: %v", err)
+	}
+	if len(session.ImagePaths) != 1 || session.ImagePaths[0] != attached {
+		t.Fatalf("同内容重复粘贴不应新增附件: %+v", session.ImagePaths)
+	}
+	if !strings.Contains(again, "已在附件中") {
+		t.Fatalf("重复粘贴应给出提示: %q", again)
+	}
+}
+
+func TestAttachClipboardImageSkipsOversizeFile(t *testing.T) {
+	huge := filepath.Join(t.TempDir(), "huge.png")
+	if err := os.WriteFile(huge, []byte("x"), 0o644); err != nil {
+		t.Fatalf("创建超限文件失败: %v", err)
+	}
+	if err := os.Truncate(huge, (32<<20)+1); err != nil {
+		t.Fatalf("扩展超限文件失败: %v", err)
+	}
+	stubClipboardImageRead(t, clipboardimage.Result{Path: huge, Width: 10, Height: 10}, nil)
+
+	session := &ChatSession{}
+	message, err := attachClipboardImage(session, false)
+	if err != nil {
+		t.Fatalf("超限应只提示、不报错: %v", err)
+	}
+	if len(session.ImagePaths) != 0 {
+		t.Fatalf("超限图片不应进入附件: %+v", session.ImagePaths)
+	}
+	if !strings.Contains(message, "已跳过") || !strings.Contains(message, "上限") {
+		t.Fatalf("超限提示不符: %q", message)
+	}
+}
+
+func TestAttachClipboardImageCanDisableCompression(t *testing.T) {
+	t.Setenv(envChatImageMaxDimension, "0")
+	source := writeLargeClipboardPNG(t, 2000, 1000)
+	stubClipboardImageRead(t, clipboardimage.Result{Path: source, Width: 2000, Height: 1000}, nil)
+
+	session := &ChatSession{SessionDir: t.TempDir()}
+	message, err := attachClipboardImage(session, false)
+	if err != nil {
+		t.Fatalf("attachClipboardImage 失败: %v", err)
+	}
+	if len(session.ImagePaths) != 1 || session.ImagePaths[0] != source {
+		t.Fatalf("关闭压缩后应原样入附件: %+v", session.ImagePaths)
+	}
+	if strings.Contains(message, "已压缩") {
+		t.Fatalf("关闭压缩后不应出现压缩说明: %q", message)
+	}
+}
+
+func TestStructuredAttachCompressesLargeFile(t *testing.T) {
+	source := writeLargeClipboardPNG(t, 2400, 1200)
+	session := &ChatSession{SessionDir: t.TempDir()}
+
+	result := executeStructuredAttachmentCommand(session, "/attach "+source)
+	if len(session.ImagePaths) != 1 {
+		t.Fatalf("/attach 未写入附件: %+v", session.ImagePaths)
+	}
+	if session.ImagePaths[0] == source {
+		t.Fatal("/attach 大图应被压缩")
+	}
+	width, height := decodeImageSize(t, session.ImagePaths[0])
+	if width > imageprep.DefaultMaxDimension || height > imageprep.DefaultMaxDimension {
+		t.Fatalf("压缩后长边应在上限内: %dx%d", width, height)
+	}
+	if len(result.Blocks) == 0 {
+		t.Fatalf("/attach 应返回文本结果: %+v", result)
+	}
+}
+
+func TestChatImageMaxDimensionMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		want int
+	}{
+		{name: "未配置", env: "", want: defaultChatImageMaxDimension},
+		{name: "自定义", env: "512", want: 512},
+		{name: "关闭压缩", env: "0", want: -1},
+		{name: "负数表示不缩放", env: "-5", want: -5},
+		{name: "非法值回退默认", env: "abc", want: defaultChatImageMaxDimension},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envChatImageMaxDimension, tc.env)
+			if got := chatImageMaxDimension(); got != tc.want {
+				t.Fatalf("chatImageMaxDimension() = %d, want %d", got, tc.want)
+			}
+		})
+	}
 }

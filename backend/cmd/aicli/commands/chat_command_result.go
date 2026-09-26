@@ -981,6 +981,14 @@ func executeStructuredAttachmentCommand(session *ChatSession, command string) Co
 	if warnings := llm.ValidateLocalInputImagePaths([]string{path}); len(warnings) > 0 {
 		return commandTextResult(fmt.Sprintf("错误: 无法添加图片附件 %q；请确认文件存在、可读且为支持的非 SVG 图片", path))
 	}
+	prepared, err := prepareChatImageAttachment(session, path)
+	if err != nil {
+		return commandTextResult(fmt.Sprintf("错误: 图片预处理失败: %v", err))
+	}
+	if prepared.Path == "" {
+		return commandTextResult("提示: " + prepared.Note)
+	}
+	path = prepared.Path
 	for _, existing := range session.ImagePaths {
 		if strings.EqualFold(strings.TrimSpace(existing), path) {
 			return commandTextResult(fmt.Sprintf("提示: 图片附件已存在: %s", path))
@@ -988,7 +996,11 @@ func executeStructuredAttachmentCommand(session *ChatSession, command string) Co
 	}
 	session.ImagePaths = append(session.ImagePaths, path)
 	refreshChatComposerContext(session)
-	return commandTextResult(fmt.Sprintf("已添加图片附件: %s (当前共 %d 个)", path, len(session.ImagePaths)))
+	message := fmt.Sprintf("已添加图片附件: %s (当前共 %d 个)", path, len(session.ImagePaths))
+	if prepared.Note != "" {
+		message = prepared.Note + "；" + message
+	}
+	return commandTextResult(message)
 }
 
 // executeStructuredCompactCommand keeps the synchronous compact mutation and

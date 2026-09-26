@@ -33,16 +33,29 @@ func attachClipboardImage(session *ChatSession, refresh bool) (string, error) {
 	if warnings := llm.ValidateLocalInputImagePaths([]string{result.Path}); len(warnings) > 0 {
 		return "", fmt.Errorf("剪贴板图片无法作为附件（%s）: %s", result.Path, warnings[0])
 	}
+	prepared, err := prepareChatImageAttachment(session, result.Path)
+	if err != nil {
+		return "", fmt.Errorf("剪贴板图片无法作为附件（%s）: %w", result.Path, err)
+	}
+	if prepared.Path == "" {
+		// 超过体积上限：只提示，不加附件（绝不静默发送原图）。
+		return prepared.Note, nil
+	}
+	attachPath := prepared.Path
 	for _, existing := range session.ImagePaths {
-		if strings.EqualFold(strings.TrimSpace(existing), result.Path) {
-			return fmt.Sprintf("提示: 剪贴板图片已在附件中: %s", result.Path), nil
+		if strings.EqualFold(strings.TrimSpace(existing), attachPath) {
+			return fmt.Sprintf("提示: 剪贴板图片已在附件中: %s", attachPath), nil
 		}
 	}
-	session.ImagePaths = append(session.ImagePaths, result.Path)
+	session.ImagePaths = append(session.ImagePaths, attachPath)
 	if refresh {
 		refreshChatComposerContext(session)
 	}
-	return fmt.Sprintf("已从剪贴板添加图片附件: %s (%dx%d, 当前共 %d 个)", result.Path, result.Width, result.Height, len(session.ImagePaths)), nil
+	if prepared.Note != "" {
+		// 压缩说明里已含前后尺寸与体积，比重复一次原始尺寸更有用。
+		return fmt.Sprintf("已从剪贴板添加图片附件: %s（%s；当前共 %d 个）", attachPath, prepared.Note, len(session.ImagePaths)), nil
+	}
+	return fmt.Sprintf("已从剪贴板添加图片附件: %s (%dx%d, 当前共 %d 个)", attachPath, result.Width, result.Height, len(session.ImagePaths)), nil
 }
 
 // chatClipboardImageErrorMessage 把底层错误翻译成用户能直接行动的一句话。
