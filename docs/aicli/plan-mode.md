@@ -244,6 +244,13 @@
 
 **CLI/TUI 的对应物**：页脚最前部的模式段（`chatSurfacePlanModeStatusSegment`）——它与 Web 横幅共用同一份口径：tone 映射（`plan` 强调色、`bypass_permissions` 告警色、其余中性）与读法优先级（模型已请求裁决 > 计划正文可用 > 计划尚未写就，最后一档在页脚不占位）。段位本就位于页脚最前且窄宽度下不被裁掉，因此窄屏只牺牲细节：`Plan·待裁决` / `Plan·就绪`。计划路径不进页脚（`/plan status`、`/plans` 负责），两处都只做展示、不承载裁决动作。
 
+**行级评论的锚点契约**（§4.4；存储与重放已落地）：
+
+1. **存储**：`comments/<projectSlug>/<planName>.jsonl`（与 `versions/` 同构，随记录 `Delete` 一起删除；**不随轮次裁剪**——评论自带当时的正文摘录，锚定的修订被 retention 裁掉后依然可读、可交付）。每行一条：`id` / `revision`（锚定的轮次）/ `start_line` / `end_line`（1-based，闭区间）/ `excerpt`（锚定时的正文）/ `body` / `author` / `created_at`。日志按追加语义维护，重写走原子替换。
+2. **重放**（`planmode.ResolvePlanComments`）：对目标正文逐条判定——原区间仍是原文（`anchored`）> 原文仍存在但已移动（`moved`，取与原始行号**最近**的匹配，避免同名标题抢走锚点）> 原文已改写/删除（`orphaned`，保留原锚点与当时内容，**绝不丢弃、也不猜测新位置**）。重放只报告当前位置，不改写存储里的历史锚点。
+3. **交付**：`planmode.FormatPlanCommentsForReview` 渲染成带定位与状态的文本（`- L7-8: …` / `- L6（原文已移动，原锚定 L3）: …` / `- L8（锚点失效：该处正文已被改写；当时内容「…」）: …`），并入既有的 `pending_review_notes` **一次性提醒通道**（§4 第 3 条）交付给修订轮——不新开通道，因此「只送达一次、且不丢失」的既有保障自动生效。
+4. **未接线**：CLI/HTTP 的新增入口与 Web diff 视图内的锚点定位仍待接（见 §9）。
+
 ---
 
 ## 7. 与 checkpoint / 回滚的关系
@@ -311,10 +318,10 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 
 以下能力在已落地范围（2026-09-25：报告 §8 + §9 + §10）之外，本文档不为它们承诺时间：
 
-- §4.4 行级评论与轮次 diff：**CLI 与 Web 都已落地轮次 diff**（`/plans diff <id> [vA [vB]]` + `GET /plans/{id}/diff` + 面板评审轮次行的「差异」展开，同一 `planmode.DiffArchivedVersions` 口径，新增行 teal / 删除行 orange，`identical` / `coarse` / `truncated` 有独立徽标）；仍未做的是**行级评论**（含 diff 内的锚点定位）。
+- §4.4 行级评论与轮次 diff：**CLI 与 Web 都已落地轮次 diff**（`/plans diff <id> [vA [vB]]` + `GET /plans/{id}/diff` + 面板评审轮次行的「差异」展开，同一 `planmode.DiffArchivedVersions` 口径，新增行 teal / 删除行 orange，`identical` / `coarse` / `truncated` 有独立徽标）。**行级评论的存储与锚点重放已落地**（§4 契约块：`planstore` 的 `comments/` 日志 + `planmode` 的创建/重放/渲染，含测试）；剩余是接线——CLI/HTTP 入口与 Web diff 视图内的锚点定位。
 - §4.5 的 `/plans` 浏览器（Web 面板）、`plan_review` 工具、run 结束兜底、**CLI 的 `/plans reopen`**、**HTTP 的 `POST /sessions/{id}/plan/reopen`** 与**面板「重新评审」按钮**（含 409 冲突 → 强制覆盖二次确认）均已落地；该小节的缺口已关闭。
 - §4.6 模式循环键位（`shift+tab` / `alt+m`）已随并发的 CLI 改动落地（`chat_permission_mode.go`：`default → accept_edits → plan → bypass_permissions`，进入 bypass 仍二次确认，`/hotkeys` 可见；plan 档走 `/mode` 语义，见 §2.3）；模型自主进入的确认门控已落地；**Web 的常驻模式标识已落地**（聊天区顶部，见 §6 末），**CLI/TUI 的对应物也已落地**——页脚最前部的模式段常驻显示当前模式与计划状态（`Plan ON · 待裁决` / `Plan ON · 已就绪` / `Plan ON` / `Plan OFF`，`bypass_permissions` 显示 `Full Access` 并走告警色，`accept_edits` 显示 `Accept edits`，未知枚举回落原文），口径与 Web 横幅逐条对齐。**§4.6 至此关闭**。
-- 评审反馈的**自动修订回合**：**已落地（§4 第 4 条）** —— HTTP `trigger_revision=true`、Web 面板「请求修改」、交互式 CLI `/plan request_changes <notes>`（统一 TTY 走 `SendMessageAfterCommit` post-commit 边界，纯文本 REPL 在裁决行后直接提交）都在裁决落地后立刻起一轮；脚本 / JSON 仍是「下一次用户输入时交付」。**§4.6 已全部关闭**；§4.4 只剩**行级评论**。
+- 评审反馈的**自动修订回合**：**已落地（§4 第 4 条）** —— HTTP `trigger_revision=true`、Web 面板「请求修改」、交互式 CLI `/plan request_changes <notes>`（统一 TTY 走 `SendMessageAfterCommit` post-commit 边界，纯文本 REPL 在裁决行后直接提交）都在裁决落地后立刻起一轮；脚本 / JSON 仍是「下一次用户输入时交付」。**§4.6 已全部关闭**；§4.4 只剩**行级评论的接线**（存储与锚点重放已落地，见 §4 契约块）。
 
 ---
 

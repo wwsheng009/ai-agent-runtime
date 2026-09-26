@@ -993,3 +993,44 @@ Web 横幅位于聊天区顶部、可换行、能放「模式 + 状态 + 路径 
 ### 21.4 未实施
 
 - **行级评论**（§4.4 最后一项）：需要先定「行锚点 + 备注」的存储与投影契约（锚点随正文重写的漂移策略是核心决策）。
+
+---
+
+## 22. 实施记录：第十五轮（2026-09-25，行级评论：契约 + 存储 + 锚点重放）
+
+**状态**：§4.4 的最后一项开工。本轮只做**不接线**的那一半——契约、存储层、锚点重放与交付文本；CLI/HTTP 入口与 Web diff 视图内的锚点定位留给下一轮（接线面涉及 `internal/api/runtimeapi`、`cmd/aicli/commands` 与前端，跨面较大，先钉契约再铺面）。
+
+### 22.1 契约（v1）
+
+| 维度 | 决策 | 理由 |
+|------|------|------|
+| 锚点 | `revision` + `start_line`/`end_line`（1-based 闭区间）+ **当时的正文摘录** | 只存行号必然在正文重写后指向错误的行；摘录是重放的唯一证据 |
+| 存储 | `comments/<projectSlug>/<planName>.jsonl`，JSON Lines，原子重写 | 与 `versions/` 同构、随记录 `Delete` 删除；评论体量小，重写换崩溃安全 |
+| 轮次裁剪 | 评论**不随版本裁剪**（`PruneVersions` 不动它们） | 评论自带摘录，锚定版本被裁掉后仍可读、可交付；只有整条记录删除才清理 |
+| 重放优先级 | `anchored`（原区间仍是原文）> `moved`（原文仍在，取与原始行号最近的匹配）> `orphaned`（原文已改写/删除） | 与 Web/CLI 的「读法优先级」同风格：先宣称最保守的结论；同名小节重复时「就近」而不是「第一个匹配」 |
+| 失效处理 | orphaned 保留原锚点 + 当时摘录，**不猜测新位置、不丢弃** | 评审意见是用户的输入，任何「自动吞掉」都是数据丢失 |
+| 交付 | `FormatPlanCommentsForReview` → 并进既有 `pending_review_notes` 一次性通道 | 复用「只送达一次、且不丢失」的既有保障，不新开通道 |
+| 越界选择 | `NewLineComment` 对越界区间**报错而非夹取** | 评论必须指向评审者真正看到的正文 |
+
+### 22.2 落点与验证
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 存储 | `backend/internal/planstore/comments.go`（新） | `ReviewComment` 类型、`AppendComment`/`Comments`/`DeleteComment`、ID 生成与去重、按行号报错的解码、`commentsRelPath` |
+| 清理 | `backend/internal/planstore/retention.go` | `Delete(id)` 连带删除评论日志；注释说明「版本可裁剪、评论不裁剪」 |
+| 重放 | `backend/internal/planmode/comments.go`（新） | `NewLineComment`（摘录创建 + 越界拒绝）、`ResolvePlanComments`（anchored/moved/orphaned）、`FormatPlanCommentsForReview`、行归一化与就近匹配 |
+| 测试 | `planstore/comments_test.go`、`planmode/comments_test.go`（新） | 存储 5 例（默认值/顺序/校验/幂等删除/记录删除清理/坏行报行号）+ 重放 6 例（摘录与越界、anchored/moved/orphaned、就近匹配、无摘录退化、交付文本、摘录压缩按 rune 截断） |
+
+| 命令（cwd=backend） | 结果 |
+|---|---|
+| `go test ./internal/planstore/ ./internal/planmode/ -count=1` | 全绿 |
+| `go test ./internal/chat/ ./internal/api/runtimeapi/ -run 'Plan' -count=1` | 全绿（既有 plan 链路未受影响） |
+| `go vet ./internal/planmode/ ./internal/planstore/`、`gofmt -l`（5 文件） | exit 0 / 空 |
+
+**回归中修掉的一处自伤**：`ResolvedComment` 最初**内嵌** `planstore.ReviewComment`，于是「当前定位」与「原始锚点」是同一批字段——`moved` 时重放把原锚点覆盖成了新行号，测试因此暴露出「原文已移动」无从对照。改为具名字段 `Comment`（原始锚点）+ `StartLine`/`EndLine`（当前定位），重放只报告当前位置、绝不改写历史。另有两处是我测试用例的前提写错（把「原位置仍相同」当成「已移动」、以及重复窗口没有构造出两个候选），修的是用例不是实现。
+
+### 22.3 下一轮（接线）
+
+1. **HTTP**：`GET/POST/DELETE /api/runtime/plans/{id}/comments`（含按最新轮次重放的 `status/start_line/end_line` 投影），路由注册在 `GET /plans/{id:.*}` 之前。
+2. **CLI**：`/plan comment <Lx[-Ly]> <正文>`、`/plan comments [--all]`（默认只列当前轮），`/plan request_changes` 时把重放后的评论并入 notes。
+3. **Web**：diff 视图内按行选择 + 评论列表（与面板轮次 diff 同一 `planmode` 口径）。
