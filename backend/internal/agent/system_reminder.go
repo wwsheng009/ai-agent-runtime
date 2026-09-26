@@ -241,6 +241,16 @@ func PlanReviewNotesBody(notes string) string {
 	}, "\n")
 }
 
+// PlanRevisionPrompt is the synthetic user instruction submitted when a client
+// asks the runtime to start a revision round right after request_changes
+// (report §4.4 / §8.5 "一次提交即一轮修订").
+//
+// It intentionally carries no review text: the notes travel on the same turn
+// through PlanReviewNotesBody, so the two channels never duplicate each other.
+func PlanRevisionPrompt() string {
+	return "按评审意见修订当前计划正文，修订完成后简要说明改动并等待下一步裁决。"
+}
+
 // planModeSystemReminder returns a one-shot plan-mode reminder when the
 // permission engine is currently in mode=plan. Nil when not in plan mode or
 // when the current prompt already carries a plan_mode reminder.

@@ -40,6 +40,10 @@ export type RuntimeSessionPlanMode = {
   plan_content_truncated?: boolean;
   plan_content_error?: string;
   action?: string;
+  /** 触发轮结果（§4.4 自动修订回合）：true 表示已起一轮修订。 */
+  revision_triggered?: boolean;
+  /** 触发失败的说明；决策已落地，评审意见仍在下一轮输入时交付。 */
+  revision_error?: string;
 };
 
 export type RuntimeSessionPlanModeUpdateRequest = {
@@ -47,6 +51,11 @@ export type RuntimeSessionPlanModeUpdateRequest = {
   decision?: RuntimeSessionPlanModeExitDecision | string;
   plan_path?: string;
   notes?: string;
+  /**
+   * 仅与 `request_changes` 搭配：请求后端在裁决落地后立刻起一轮修订
+   * （要求 notes 非空），实现「一次提交即一轮修订」。
+   */
+  trigger_revision?: boolean;
 };
 
 // --- 归档计划（planstore）阅读面：GET /api/runtime/plans 系列端点 -------------

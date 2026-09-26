@@ -203,14 +203,25 @@ export function useRuntimePlanMode({
       setPlanActionPending(true);
       setPlanError(null);
 
+      const trimmedNotes = notesDraft.trim();
+      // §4.4 自动修订回合：带意见的「请求修改」请后端在裁决落地后立刻起一轮修订，
+      // 实现「一次提交即一轮修订」；意见为空时不带该标志（后端会拒绝，盲改也无意义）。
+      const triggerRevision = decision === "request_changes" && trimmedNotes.length > 0;
+
       try {
         const response = await updateSessionPlanMode(sessionId, {
           action: decision,
-          notes: notesDraft.trim() || undefined,
+          notes: trimmedNotes || undefined,
+          trigger_revision: triggerRevision || undefined,
         });
         setPlan(response);
         setLoadedPlanSessionId(sessionId);
-        setNotesDraft(response.notes ?? notesDraft);
+        const deliveredByRevision = triggerRevision && response.revision_triggered === true;
+        if (triggerRevision && !deliveredByRevision && response.revision_error) {
+          // 降级：裁决已落地，只是没能立刻起修订轮——意见仍会在下一次输入时交付。
+          setPlanError(response.revision_error);
+        }
+        setNotesDraft(deliveredByRevision ? "" : (response.notes ?? notesDraft));
       } catch (error) {
         setPlanError(
           error instanceof Error ? error.message : "failed to update plan mode",

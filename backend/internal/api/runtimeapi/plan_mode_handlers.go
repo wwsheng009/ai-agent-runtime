@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gorilla/mux"
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	errors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
@@ -51,6 +52,12 @@ type sessionPlanModeResponse struct {
 	PlanContentTruncated bool   `json:"plan_content_truncated,omitempty"`
 	PlanContentError     string `json:"plan_content_error,omitempty"`
 	Action               string `json:"action,omitempty"`
+	// RevisionTriggered / RevisionError report the outcome of an explicitly
+	// requested revision round (TriggerRevision). A false + non-empty error
+	// means the decision was still applied durably and the notes stay pending
+	// for the next turn.
+	RevisionTriggered bool   `json:"revision_triggered,omitempty"`
+	RevisionError     string `json:"revision_error,omitempty"`
 }
 
 type sessionPlanModeRequest struct {
@@ -61,6 +68,10 @@ type sessionPlanModeRequest struct {
 	// active (union with PlanPath), mirroring the enter_plan_mode tool contract.
 	PlanWritePaths []string `json:"plan_write_paths,omitempty"`
 	Notes          string   `json:"notes"`
+	// TriggerRevision asks the runtime to start a revision round right after a
+	// request_changes decision (report §4.4 / §8.5): the recorded notes are
+	// delivered to the model by the triggered turn itself.
+	TriggerRevision bool `json:"trigger_revision,omitempty"`
 }
 
 // GetSessionPlanMode returns durable plan-mode state and a path-safe plan file preview.
@@ -103,6 +114,10 @@ func (h *Handler) UpdateSessionPlanMode(w http.ResponseWriter, r *http.Request) 
 		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
 		return
 	}
+	if err := validatePlanRevisionRequest(action, req); err != nil {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, err.Error()))
+		return
+	}
 
 	// Prefer live actor so mid-turn permission engine/run-meta stay in sync.
 	if actor, ok := h.sessionPlanModeActor(sessionID); ok && actor != nil {
@@ -111,7 +126,9 @@ func (h *Handler) UpdateSessionPlanMode(w http.ResponseWriter, r *http.Request) 
 			h.writePlanModeError(w, applyErr)
 			return
 		}
-		h.writeJSON(w, http.StatusOK, h.buildSessionPlanModeResponse(session, action))
+		resp := h.buildSessionPlanModeResponse(session, action)
+		h.applyRevisionTrigger(r.Context(), sessionID, action, req, &resp)
+		h.writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
@@ -135,7 +152,54 @@ func (h *Handler) UpdateSessionPlanMode(w http.ResponseWriter, r *http.Request) 
 	// archives inside ExitPlanMode/EnterPlanMode.
 	h.archiveSessionPlanArtifact(r.Context(), session, action, decision, req.Notes)
 
-	h.writeJSON(w, http.StatusOK, h.buildSessionPlanModeResponse(session, action))
+	resp := h.buildSessionPlanModeResponse(session, action)
+	h.applyRevisionTrigger(r.Context(), sessionID, action, req, &resp)
+	h.writeJSON(w, http.StatusOK, resp)
+}
+
+// validatePlanRevisionRequest keeps the opt-in revision round honest: it only
+// makes sense for request_changes, and it needs notes — the triggered turn
+// delivers exactly those notes to the model, so an empty request would ask for
+// a blind rewrite.
+func validatePlanRevisionRequest(action string, req sessionPlanModeRequest) error {
+	if !req.TriggerRevision {
+		return nil
+	}
+	if action != string(planmode.ExitRequestChanges) {
+		return fmt.Errorf("trigger_revision is only supported with request_changes")
+	}
+	if strings.TrimSpace(req.Notes) == "" {
+		return fmt.Errorf("trigger_revision requires non-empty notes")
+	}
+	return nil
+}
+
+// applyRevisionTrigger starts a revision round after a durably applied
+// request_changes decision. Failures are reported in the response instead of
+// failing the request: the decision already landed and the notes stay pending
+// for the next turn (the pre-existing delivery path), so nothing is lost.
+func (h *Handler) applyRevisionTrigger(ctx context.Context, sessionID, action string, req sessionPlanModeRequest, resp *sessionPlanModeResponse) {
+	if resp == nil || !req.TriggerRevision || action != string(planmode.ExitRequestChanges) {
+		return
+	}
+	triggered, revisionErr := h.triggerPlanRevisionRound(ctx, sessionID)
+	resp.RevisionTriggered = triggered
+	resp.RevisionError = revisionErr
+}
+
+// triggerPlanRevisionRound submits the revision instruction to the live session
+// actor. The review notes are not passed here: the triggered turn consumes the
+// pending notes through PlanReviewNotesBody (chat.SessionActor.
+// consumePlanReviewNotes), so the two channels cannot duplicate.
+func (h *Handler) triggerPlanRevisionRound(ctx context.Context, sessionID string) (bool, string) {
+	actor, ok := h.sessionPlanModeActor(sessionID)
+	if !ok || actor == nil {
+		return false, "session is not attached to the live runtime; review notes will be delivered on the next turn"
+	}
+	if err := actor.SubmitPromptAsync(ctx, agent.PlanRevisionPrompt(), h.apiSessionRunMeta(ctx, sessionID)); err != nil {
+		return false, err.Error()
+	}
+	return true, ""
 }
 
 // archiveSessionPlanArtifact persists the plan artifact index + review-round
