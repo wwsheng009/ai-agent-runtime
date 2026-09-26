@@ -19,7 +19,8 @@ import (
 //
 // 设计约束（与设计文档 §4.13 对齐）：
 //   - 纯 UI：解释文本不进入工具调用决策链，端点不写任何状态、不解析决定；
-//   - 按需：只有用户点「解释」才调用一次模型，不给每条审批预生成（省 token）；
+//   - 可配：off / on_demand（默认）/ pre_generate 三种模式，见
+//     session_approval_explain_mode.go；重复点击命中缓存，同一审批只计费一次；
 //   - 降级：模型不可用 / 未配置 / 超时 / 报错，一律回退规则摘要（200 + rules），
 //     让 UI 永远拿得到「这条命令在做什么」的结构化答案；
 //   - 预算：一次调用有独立超时与 max_tokens 上限，参数与补丁按需截断。
@@ -42,6 +43,10 @@ type sessionApprovalExplanationPayload struct {
 	Explanation string `json:"explanation"`
 	Source      string `json:"source"`
 	Model       string `json:"model,omitempty"`
+	// Mode 是生成这条解释时的模式（off 时不会出现 model 来源）。
+	Mode string `json:"mode,omitempty"`
+	// Cached 表示直接命中了缓存（未重复调用模型）。
+	Cached bool `json:"cached,omitempty"`
 }
 
 // ApprovalSummarizer 允许宿主自定义「审批解释」的模型调用（可选）。
@@ -86,20 +91,7 @@ func (h *Handler) ExplainSessionApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	fallback := ruleBasedApprovalExplanation(pending)
-	explanation, model, callErr := h.summarizeApproval(r.Context(), sessionID, pending)
-	if callErr != nil || strings.TrimSpace(explanation) == "" {
-		h.writeJSON(w, http.StatusOK, sessionApprovalExplanationPayload{
-			Explanation: fallback,
-			Source:      approvalExplainSourceRules,
-		})
-		return
-	}
-	h.writeJSON(w, http.StatusOK, sessionApprovalExplanationPayload{
-		Explanation: strings.TrimSpace(explanation),
-		Source:      approvalExplainSourceModel,
-		Model:       model,
-	})
+	h.writeJSON(w, http.StatusOK, h.approvalExplanationForRequest(r.Context(), sessionID, pending))
 }
 
 // pendingApprovalForExplain 只认「当前 pending 且 request_id 匹配」的那一条：

@@ -105,15 +105,21 @@ const (
 
 // Handler Skills API 处理器
 type Handler struct {
-	skillRegistry  *skill.Registry
-	skillLoader    *skill.Loader
-	mcpManager     skill.MCPManager
-	mcpAdmin       mcpadmin.AdminService
-	llmRuntime     *llm.LLMRuntime
+	skillRegistry *skill.Registry
+	skillLoader   *skill.Loader
+	mcpManager    skill.MCPManager
+	mcpAdmin      mcpadmin.AdminService
+	llmRuntime    *llm.LLMRuntime
 	// §4.13 审批解释（可选注入）：nil 时用 llmRuntime 的内建一次性调用；
 	// 两者都不可用则端点降级为规则摘要（永不把模型故障变成 5xx）。
 	approvalSummarizer ApprovalSummarizer
-	sessionManager *chat.SessionManager
+	// §4.13 解释模式（off|on_demand|pre_generate，默认 on_demand）与结果缓存
+	// （同一审批只计费一次；pre_generate 模式下由读路径预热）。
+	approvalExplainModeMu    sync.RWMutex
+	approvalExplainMode      ApprovalExplainMode
+	approvalExplainCacheOnce sync.Once
+	approvalExplainCache     *approvalExplainCache
+	sessionManager           *chat.SessionManager
 	// plansStore overrides the process-wide plan artifact store (tests/hosts).
 	plansStore                     *planstore.Store
 	hotReload                      *skill.HotReload

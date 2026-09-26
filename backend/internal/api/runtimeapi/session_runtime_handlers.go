@@ -474,6 +474,9 @@ func (h *Handler) GetSessionRuntimeState(w http.ResponseWriter, r *http.Request)
 	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("view")), "light") {
 		projectedState = state.CloneForInspection()
 	}
+	// §4.13 pre_generate：读路径一看到 pending 审批就后台预生成解释
+	// （非阻塞、按会话去重；off/on_demand 模式下是空操作）。
+	h.MaybeWarmApprovalExplanation(state)
 	payload := map[string]interface{}{
 		"state":       projectedState,
 		"active_turn": h.activeTurnSnapshotPayload(sessionID),

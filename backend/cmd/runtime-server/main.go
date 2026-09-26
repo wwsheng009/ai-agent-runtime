@@ -44,6 +44,10 @@ import (
 
 const runtimeServerDefaultConfigName = aiclipaths.DefaultConfigFileName
 
+// approvalExplainModeEnv 控制 §4.13 审批解释的生成策略：
+// off（只用规则摘要）| on_demand（默认，点击才调用模型）| pre_generate（审批露面即预生成）。
+const approvalExplainModeEnv = "AICLI_APPROVAL_EXPLAIN_MODE"
+
 type runtimeServerCommandOptions struct {
 	ConfigPath string
 	ListenAddr string
@@ -1147,6 +1151,19 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		handler.SetMutationPolicyPersister(persister.PersistMutationPolicy)
 	}
 	applySkillsRuntimePolicies(handler, skillsCfg)
+	// §4.13：审批解释模式（off|on_demand|pre_generate）。未设置时保持默认
+	// （按需）；非法取值只告警不阻断启动，避免一个笔误让服务起不来。
+	if rawMode := strings.TrimSpace(os.Getenv(approvalExplainModeEnv)); rawMode != "" {
+		if err := handler.SetApprovalExplainMode(rawMode); err != nil {
+			logger.Warn("Invalid approval explain mode env; keeping default",
+				logger.String("env", approvalExplainModeEnv),
+				logger.String("value", rawMode),
+				logger.Err(err))
+		} else {
+			logger.Info("Approval explanation mode configured",
+				logger.String("mode", string(handler.ApprovalExplainMode())))
+		}
+	}
 	// usage ledger 是可选的观测 / 治理能力，不是服务可用性的前置依赖：
 	// 配置启用了账本但初始化失败（database.dsn 为空、驱动不是 sqlite、建表失败或
 	// 目录不可写等）时，这里降级为「启动告警 + 账本接口 503」，不再让整个
