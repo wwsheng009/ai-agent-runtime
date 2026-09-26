@@ -518,6 +518,8 @@ sessions:
 
 `aicli mcp` 支持常用管理动作：
 
+> 只想尽快跑通？见 [docs/mcp/quickstart.md](../mcp/quickstart.md)（一分钟 quickstart + 复制即用 recipes + 症状式排错表）。
+
 - `add`
 - `remove`
 - `list`
@@ -540,7 +542,8 @@ sessions:
   `aicli mcp add chrome-devtools -- npx -y chrome-devtools-mcp@latest`；
   `--command <cmd>` 是保留的兼容写法。
 - `--env KEY=VALUE` 与 `--header "Key: Value"` 均可重复；header 会镜像为 `HEADER_*` 环境变量（与 console / 微型 Web 面板同一约定）。
-- `--auth` 目前是占位参数：MCP OAuth 尚未实现，传值会直接报错并提示改用 `--header` / `--env`（后续计划见 `docs/analysis/commandcode-mcp-design-borrowing-20260925.md` 的 M2）。
+- `--auth oauth` 启用 OAuth（`--oauth-scope` / `--oauth-client-id` / `--oauth-callback-port` 详见下文「MCP OAuth」）；`--auth none` 清除认证；
+  服务只接受静态凭证时用 `--header` / `--env` 传入。
 
 MCP 配置中的环境变量插值（作用于 `url` / `command` / `env` 与 `args` / `headers`）：
 
@@ -568,7 +571,8 @@ MCP OAuth（`--auth oauth` + `aicli mcp auth`）：
 配置分层与写入层级（`--scope`）：
 
 - **同名覆盖**：解析链上的所有已存在文件按「低 → 高」合并，低优先级提供基础项，高优先级**整体覆盖**同名 server（不做字段级合并）。
-  层级顺序（低→高）：`configs/mcp.yaml`（向上搜索 / 默认） < `~/.aicli/mcp.yaml`（user） < `./.aicli/mcp.yaml`（project）。
+  层级顺序（低→高）：`configs/mcp.yaml`（向上搜索 / 默认） < `~/.aicli/mcp.yaml`（user） < `./.aicli/mcp.yaml`（project）
+  < `~/.aicli/projects/<项目标识>/mcp.yaml`（local，项目私有，优先级最高）。
   `--config-file` / `MCP_CONFIG_FILE` 指定**真实覆盖**路径时退化为「只加载该文件」，不合并。
 - 合并结果可见：`aicli mcp list` / `mcp status` 会打印 `来源: <层级> (<文件>)`；被覆盖的低优先级定义打印 `覆盖: <层级> (<文件>)`。
   `--output json` 的 `configSource` / `configPath` / `shadowedSources` 字段、chat `/mcp` 面板与微型 Web 面板同源展示。

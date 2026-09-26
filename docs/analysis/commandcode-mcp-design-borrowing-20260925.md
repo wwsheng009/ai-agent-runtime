@@ -24,6 +24,10 @@
 
 > 已有且**明显强于** CommandCode、不应回退的能力：trust level（`local/trusted_remote/untrusted_remote`）、工具级启停、health check（tools/resources/toolArgs）、`test`/`test-server`/`tools` 子命令、stdio stderr 诊断、Windows 进程树治理、`mcp__<server>__<tool>` 规范名与重名隔离、ACP 客户端下发 `mcpServers`（merge/local/client/off）、profile 分层与 MCP diff、热重载与三端（CLI `/mcp`/console/web）共用同一 Service。
 
+> 落地状态（2026-09-25）：上表 #1–#10 已按 §6 的最小切片全部实施完毕（M1 正确性 → M2 OAuth/scope CLI → M3 分层配置 → M4 导入导出 + `/mcp` 交互菜单 + quickstart 文档）；
+> 各里程碑的实现细节、验证与遗留项见 §8–§11。尚存的两处缺口：chat 侧无「认证」动作（§11 §4.8）、
+> `types.go` 的 `RequiresAuth` 注释仍按 CLI 口径描述（§11 §4.9）。
+
 ---
 
 ## 2. CommandCode 文档的设计要点提炼
@@ -408,56 +412,24 @@ M1 交付清单：
 动作映射（启停标签随状态切换、移除需确认、取消项不带命令）、以及 server 行复用 list 投影。
 真实 TTY 下的按键交互沿用既有 picker 基建，未新增终端读写路径。
 
----
+**§4.9 文档信息架构（已交付）**
 
-## 11. M4 实施备注（跨 agent 导入 + 单 server 导出，2026-09-25）
+按 CommandCode 的三段式补齐新用户入口，并顺手修掉两处文档与代码不一致：
 
-对齐 §4.6 / §4.7 的落地结果；§4.8（`/mcp` 交互菜单）另行说明。
+- 新增 `docs/mcp/quickstart.md`：① 一分钟跑通（加 server → 验证 → 用起来，含 chat 内 `/mcp` 一览）；
+  ② 命令参考表（16 个子命令 × 用途 × 示例 + `--scope` 写入层级表 + 全局 flag 约定）；
+  ③ 复制即用 recipes（远端无凭证 / 远端 OAuth / 远端静态令牌 + `${VAR}` / 本地 stdio（chrome-devtools、filesystem）/
+  从 Claude·Cursor·Gemini·OpenCode·Codex 迁移 / 直接写配置文件）；④ 症状 → 命令排错表
+  （连不上 / 需认证 / 工具不出现 / 变量未插值隔离 / 分层覆盖困惑 / 项目级秘密剥离报错 / 菜单降级 / Windows npx）；
+  ⑤ 生效时机表；⑥ 相关文档。
+- 入口可达：`docs/mcp/README.md` 表格首行 + `docs/aicli/install.md` 概览处 + `docs/README.md` 目录说明均已链接。
+- 修正文档与代码不一致（本次实测发现）：
+  1. `install.md` 的分层顺序漏写 `local` 层 —— 代码里候选链为 `explicit > local > project > user > upward > executable > default`，
+     `LoadLayered` 反转后按「低→高」合并，即 `configs/mcp.yaml` < `~/.aicli/mcp.yaml` < `./.aicli/mcp.yaml`
+     < `~/.aicli/projects/<项目>/mcp.yaml`（user-guide 本就写对，install.md 补齐）。
+  2. `install.md` 仍称 `--auth` 是占位参数（M1 时期的状态），改为指向已交付的 OAuth 语义。
+- 防漂移回归：`cmd/aicli/commands/docs_mcp_layering_regression_test.go` 钉住
+  「三份文档的分层说明必须按低→高列出四层」与「quickstart 入口可达 + 四块内容齐备」。
 
-**新增 `internal/mcp/importers` 包（纯解析，可单测）**
-
-- `Import(vendor, Options{Root,Home,Names})` 返回按来源分组的 `Result`；来源：`claude` / `cursor` / `gemini` /
-  `opencode` / `codex` / `all`。候选文件按「用户级 → 项目级」排序，后者覆盖前者并在告警里记录覆盖关系。
-- JSON 解析兼容 `mcpServers`（Claude/Cursor/Gemini/OpenCode）与 `servers`（VS Code 风格）两种容器键，
-  以及 `~/.claude.json` 的 `projects.<path>.mcpServers`；`env: ["K=V"]` 数组形态也接受。
-- 映射规则集中在 `mapServerEntry`：`http/streamable*` → `streamable`、`sse` → `sse`、`ws/websocket` → `websocket`、
-  `stdio/local` → `stdio`；缺 `type` 按 `url`/`command` 推断；`headers/http_headers` → `headers`；
-  `timeout`/`timeout_sec`/`startup_timeout_ms`/`tool_timeout_sec` → 秒；`enabled`/`disabled` 各自保留语义；
-  `oauth: true | {...}` / `scopes: [...]` → `auth`。
-- **未知字段与不支持的构造只告警、不失败**：`knownEntryKeys` 之外记 `忽略未映射字段`；Codex TOML 的数组表
-  与嵌套子表记 `不支持…（已跳过）`。单个来源文件解析失败只影响该文件（`ScannedFile.Err`），其余来源照常。
-- `codex.go` 自带 TOML 子集解析器（仓库无 TOML 依赖）：表头（含引号键 `"odd.name"`）、基本/字面字符串、
-  数字、布尔、跨行字符串数组、内联表 `env = { K = "v" }`；行尾注释与引号内的 `#` 都正确处理。
-
-**CLI：`mcp import` / `mcp get` / `mcp add-json`（`cmd/aicli/commands/mcp_import.go`）**
-
-- `mcp import`：`--from`、`--scope`（默认 `local`）、`--dry-run`、`--on-conflict skip|overwrite|rename`、
-  `--on-secrets mask|reject|keep`、`--only`；文本摘要 + `--output json --envelope` 双形态。
-- **dry-run 零副作用**：规划阶段改用只读的 `loadMCPTargetFile`（文件不存在返回空配置），不再调用会
-  `EnsureFile` 的 `admin.LoadFile` —— 这一点是 e2e 断言「--dry-run 不创建文件」时发现的真问题。
-- 冲突处理：`skip` 不动；`rename` 生成 `<name>-imported(-N)`；`overwrite` 走 `Service.Update`
-  （`admin.Add` 对已存在名字直接报错，实测踩到过）。
-- 秘密策略（仅 `--scope project` 生效，因为 user/local 是个人配置）：`mask`（默认）把明文改写为 `${VAR}`，
-  变量名形如 `CODEX_REMOTE_X_API_KEY`，**相同明文复用同一个变量名**，摘要里列出需要设置的环境变量；
-  `reject` 跳过该 server 并标记原因；`keep` 原样写入（兼容显式选择）。
-- `mcp get <name> [--json]`：输出分层合并后**生效**的那份配置与 `configSource/configPath`；
-  `--json` 的 `.config` 片段可直接喂回 `add-json`（e2e 里做了往返验证）。
-- `mcp add-json <name> <JSON>`：接受 `type` 别名、`headers/http_headers`、`timeoutSeconds`、`maxParallelCalls`、
-  `enabled/disabled`，以及 `get --json` 的 `.config` 包装；未声明 `type` 时按 `url`/`command` 推断
-  （否则 admin 会把纯 url 请求当 stdio 并要求 command）。同样受 `--scope` 与项目级秘密剥离约束。
-
-**验证**
-
-- 单测：`importers`（Claude 映射与 projects 段、项目级覆盖用户级、Codex TOML 含跨行数组与不支持构造、
-  非法来源/缺失文件、`all` 与 `--only` 过滤、坏文件隔离）；`commands`（dry-run 无副作用、local 层落盘并生效、
-  project 层 mask/reject、冲突三策略、`--only` 未命中、秘密变量复用、add-json 解析与类型推断、
-  项目级拒绝明文、`get --json` → `add-json` 往返）。
-- 真实二进制端到端：`go run ./scripts/mcp_import_e2e.go` —— 隔离 HOME + 临时项目，覆盖五条断言链
-  （dry-run 不落盘 / local 层生效并显示来源 / project 层 ${VAR} 化并提示变量名 / get→add-json 往返 /
-  非法输入报错且不改文件）。
-
-**§4.8 `/mcp` 交互菜单的现状**
-
-文本面板已具备状态标记、工具数、trust、来源/覆盖与「需认证」提示（M2/M3 已交付），
-但**可交互选择器（动作：状态 / 认证 / 启停 / 移除）尚未实现**：`chat_*_picker.go` 一族正在被并行的
-会话改造，此刻接入会与在制品冲突。下一步单独切片：先在 picker 稳定后接入，非 TTY 保持现有纯文本输出。
+剩余（未做，非本套 P2 范围）：`internal/mcp/config/types.go` 的 `RequiresAuth` 注释写着「chat 内为 `/mcp auth <name>`」，
+但 chat 文本通道与选择器都还没有 auth 动作 —— 要么把 auth 抽象进 `chatMCPService` 后补上，要么把该注释改回 CLI 口径。

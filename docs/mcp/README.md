@@ -4,6 +4,7 @@
 
 | 文档 | 说明 |
 |------|------|
+| [quickstart.md](quickstart.md) | **先看这个**：一分钟 quickstart（加 server → 验证 → 用起来）、命令参考表、复制即用 recipes、症状式排错表 |
 | [mcp-tool-llm-integration.md](mcp-tool-llm-integration.md) | MCP 工具如何以原生 `tools` 暴露给 LLM API（含多服务重名隔离机制与验证） |
 | [chrome-devtools.md](chrome-devtools.md) | Google 官方 `chrome-devtools-mcp`：浏览器自动化/调试（支持连接已打开的 Chrome/Edge） |
 | [chrome-devtools.mcp.yaml.example](chrome-devtools.mcp.yaml.example) | 可直接拷贝的 `chrome-devtools` MCP 配置模板（attach / launch / browser-url 三种模式） |
