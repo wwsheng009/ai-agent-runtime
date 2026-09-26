@@ -72,6 +72,30 @@ export type RuntimeAgentMaxStepsResponse = {
   layers?: RuntimeConfigLayer[];
 };
 
+/**
+ * 审批解释模式：进程级临时开关，决定审批「解释」按钮是否/何时真的调用模型。
+ *
+ * - off：只用规则摘要，永不调用模型；
+ * - on_demand（默认）：用户点「解释」时才调用一次模型；
+ * - pre_generate：审批出现时后台预生成，点击「解释」直接命中缓存。
+ */
+export type RuntimeApprovalExplainMode = "off" | "on_demand" | "pre_generate";
+
+/**
+ * GET/PUT `/api/runtime/config/approval-explain` 的响应。
+ *
+ * 该开关**不持久化**：runtime 重启后回到环境变量或默认值；PUT 响应带 `updated: true`。
+ */
+export type RuntimeApprovalExplainSettingsResponse = {
+  mode: RuntimeApprovalExplainMode;
+  supported_modes: RuntimeApprovalExplainMode[];
+  updated?: boolean;
+};
+
+export type RuntimeApprovalExplainSettingsSaveRequest = {
+  mode: RuntimeApprovalExplainMode;
+};
+
 export type RuntimeAgentRoutePreviewParent = {
   provider?: string;
   model?: string;

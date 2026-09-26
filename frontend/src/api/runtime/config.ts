@@ -4,6 +4,8 @@ import type {
   RuntimeAgentMaxStepsResponse,
   RuntimeAgentMaxStepsSaveRequest,
   RuntimeAgentMaxStepsSaveResponse,
+  RuntimeApprovalExplainSettingsResponse,
+  RuntimeApprovalExplainSettingsSaveRequest,
   RuntimeConfigDocumentResponse,
   RuntimeConfigDocumentSaveRequest,
   RuntimeConfigDocumentSaveResponse,
@@ -21,6 +23,9 @@ const runtimeAgentRoutePreviewUrl = buildRuntimeUrl(
 const runtimeSkillsConfigWriteUrl = buildRuntimeUrl("/api/runtime/skills/config/write");
 const runtimeAgentMaxStepsUrl = buildRuntimeUrl(
   "/api/runtime/config/agent/max-steps",
+);
+const runtimeApprovalExplainUrl = buildRuntimeUrl(
+  "/api/runtime/config/approval-explain",
 );
 const runtimeServiceUrl = buildRuntimeUrl("/api/runtime/service");
 const runtimeServiceRestartUrl = buildRuntimeUrl("/api/runtime/service/restart");
@@ -109,6 +114,38 @@ export async function saveRuntimeAgentMaxSteps(
  */
 export async function getRuntimeAgentMaxSteps() {
   return fetchRuntimeJson<RuntimeAgentMaxStepsResponse>(runtimeAgentMaxStepsUrl);
+}
+
+/**
+ * 读取审批解释模式（进程级开关）：GET `/api/runtime/config/approval-explain`。
+ *
+ * `supported_modes` 由后端下发，前端只负责渲染，不写死枚举。
+ */
+export async function getRuntimeApprovalExplainSettings() {
+  return fetchRuntimeJson<RuntimeApprovalExplainSettingsResponse>(
+    runtimeApprovalExplainUrl,
+  );
+}
+
+/**
+ * 切换审批解释模式：PUT `/api/runtime/config/approval-explain`。
+ *
+ * 改动对后续解释立即生效，但**不持久化**（runtime 重启后回到环境变量或默认值）；
+ * 非法取值由后端返回 400，前端只做失败提示，不自行校验枚举。
+ */
+export async function saveRuntimeApprovalExplainSettings(
+  request: RuntimeApprovalExplainSettingsSaveRequest,
+) {
+  return fetchRuntimeJson<RuntimeApprovalExplainSettingsResponse>(
+    runtimeApprovalExplainUrl,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    },
+  );
 }
 
 export async function previewRuntimeAgentRoute(

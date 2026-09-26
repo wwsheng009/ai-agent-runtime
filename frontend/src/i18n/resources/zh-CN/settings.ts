@@ -249,6 +249,39 @@ export const zhSettings = {
       "后端缺省 {{count}} 超出工作区上限 20，采用后取 {{applied}}。",
     backendMaxStepsShadowed:
       "当前每轮值为 0（不限制），会覆盖后端缺省 {{count}}；如需跟随服务端缺省请点「采用后端缺省」。",
+    approvalExplain: "审批解释模式",
+    approvalExplainDescription:
+      "控制审批「解释」按钮是否、以及何时真的调用模型。这是进程级临时开关：修改对后续解释立即生效，但不会写入配置文件，runtime 重启后回到环境变量（AICLI_APPROVAL_EXPLAIN_MODE）或默认值 on_demand。",
+    approvalExplainCurrent: "当前模式：{{mode}}",
+    approvalExplainLoading: "正在读取解释模式…",
+    approvalExplainUnavailableShort: "暂不可用",
+    approvalExplainUnavailable: "未能读取解释模式：{{message}}",
+    approvalExplainUnavailableHint:
+      "若当前 runtime 较旧、没有该端点，开关会保持不可用；升级 runtime 后重试即可，聊天与其他设置不受影响。",
+    approvalExplainModes: {
+      off: {
+        label: "关闭",
+        description:
+          "永不调用模型：「解释」只返回本地规则摘要，适合对成本敏感或不需要模型解释的场景。",
+      },
+      onDemand: {
+        label: "按需生成",
+        description:
+          "点击「解释」时才调用一次模型；同一审批重复点击命中缓存，只计费一次。",
+      },
+      preGenerate: {
+        label: "预生成",
+        description:
+          "审批出现时后台预生成解释；点击「解释」直接命中缓存，预生成失败不影响审批本身。",
+      },
+    },
+    approvalExplainSave: "保存解释模式",
+    approvalExplainSaving: "保存中…",
+    approvalExplainPersistenceHint:
+      "该开关不持久化：runtime 重启后会回到 AICLI_APPROVAL_EXPLAIN_MODE 或默认值 on_demand。",
+    approvalExplainSaved:
+      "已切换为「{{mode}}」：对后续解释立即生效；该开关不持久化，runtime 重启后恢复默认。",
+    approvalExplainSaveFailed: "切换失败：{{message}}",
   },
   notifications: {
     title: "工作区通知",

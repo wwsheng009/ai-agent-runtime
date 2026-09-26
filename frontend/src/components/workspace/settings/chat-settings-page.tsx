@@ -11,6 +11,7 @@ import { useRuntimeAgentMaxSteps } from "@/hooks/workspace/use-runtime-agent-max
 import { saveRuntimeAgentMaxSteps } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
 
+import { ApprovalExplainSettingsCard } from "./approval-explain-settings-card";
 import { SettingsChoiceCard } from "./settings-choice-card";
 import { editorControlClassName } from "./editor-control-class";
 import { SettingsFieldCard } from "./settings-field-card";
@@ -376,6 +377,8 @@ export function ChatSettingsPage({
           ) : null}
         </SettingsPanelCard>
       </SettingsSection>
+
+      <ApprovalExplainSettingsCard />
     </div>
   );
 }

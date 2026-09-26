@@ -253,6 +253,40 @@ export const enSettings = {
       "Backend default {{count}} exceeds the workspace limit of 20; adopting it uses {{applied}}.",
     backendMaxStepsShadowed:
       "The per-turn value is 0 (no limit), which overrides the backend default {{count}}; click “Use backend default” to follow the server default.",
+    approvalExplain: "Approval explanation mode",
+    approvalExplainDescription:
+      "Controls whether and when the approval “Explain” button actually calls a model. This is a process-level temporary switch: changes apply immediately to subsequent explanations but are never written to a config file, so a runtime restart falls back to the environment variable (AICLI_APPROVAL_EXPLAIN_MODE) or the on_demand default.",
+    approvalExplainCurrent: "Current mode: {{mode}}",
+    approvalExplainLoading: "Loading explanation mode…",
+    approvalExplainUnavailableShort: "Unavailable",
+    approvalExplainUnavailable:
+      "Could not load the explanation mode: {{message}}",
+    approvalExplainUnavailableHint:
+      "If the connected runtime predates this endpoint, the switch stays unavailable; upgrade the runtime and retry. Chat and other settings are unaffected.",
+    approvalExplainModes: {
+      off: {
+        label: "Off",
+        description:
+          "Never calls a model: “Explain” only returns the local rule summary. Suited to cost-sensitive deployments or setups that do not need model explanations.",
+      },
+      onDemand: {
+        label: "On demand",
+        description:
+          "Calls the model once when you click “Explain”; repeated clicks on the same approval hit the cache and are billed once.",
+      },
+      preGenerate: {
+        label: "Pre-generate",
+        description:
+          "Pre-generates the explanation in the background as soon as an approval appears; “Explain” then hits the cache, and a failed pre-generation never affects the approval itself.",
+      },
+    },
+    approvalExplainSave: "Save explanation mode",
+    approvalExplainSaving: "Saving…",
+    approvalExplainPersistenceHint:
+      "This switch is not persisted: after a runtime restart it returns to AICLI_APPROVAL_EXPLAIN_MODE or the on_demand default.",
+    approvalExplainSaved:
+      "Switched to “{{mode}}”: applies to subsequent explanations immediately; the switch is not persisted, so a runtime restart restores the default.",
+    approvalExplainSaveFailed: "Switch failed: {{message}}",
   },
   notifications: {
     title: "Workspace notifications",
