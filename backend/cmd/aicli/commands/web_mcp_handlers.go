@@ -18,6 +18,7 @@ import (
 	mcpconfig "github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
+	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
 
@@ -293,7 +294,8 @@ func chatWebMCPAdminService() (mcpadmin.AdminService, error) {
 	if err := mcpadmin.EnsureFile(configPath); err != nil {
 		return nil, err
 	}
-	if err := initMCPManager(configPath); err != nil {
+	if err := initMCPManagerWithSelectionOverride(configPath, resolveChatMCPConfigOverride(cfg, chatWebSession()),
+		runtimeprofileinput.ResolvedMCPSelection{}, false); err != nil {
 		return nil, err
 	}
 	options := []mcpadmin.Option{
