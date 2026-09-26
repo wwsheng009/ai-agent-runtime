@@ -545,7 +545,7 @@
 | 拒绝反馈通路 | ✅ | 拒绝时 `reason + "; user feedback: <文本>"` 进入决策 reason（进而进入工具 error/guidance）；允许时可携带约束说明（`approved; user feedback: …`） | `TestEngineApprovalFeedbackEntersDenyReason` |
 | 宿主接线（store 侧） | ✅ | `internal/chat` actor：每会话内存 store + 工作区 `.aicli/grants.json`（惰性创建、不覆盖宿主已设 store；root 取 tool policy anchor 再回退进程 CWD）。CLI/Web/ACP 共用该 actor，`harness_handlers.go` 的 grant 管理 API 与运行时读写同一文件 | `actor_grants_test.go` |
 | Web API（HTTP 面） | ✅ | `approve_tool` 命令新增 `remember_scope`/`feedback`（未知 scope 400，feedback 上限 2000 字符；**不暴露 remember_pattern**，模式恒由引擎派生）；`approval_requested` 事件携带 `remember_pattern` 供 UI 展示；`approval_resolved` 回执带 `feedback`/生效 scope；拒绝且无 waiter 时 `approval_denied; user feedback: …` 回到模型 | `session_approval_validation_test.go`、`actor_approval_decision_test.go` |
-| Web UI | ✅ | 审批弹层 `PendingInteractionBar`：后端下发 `remember_pattern` 时才出现「记住」勾选，勾选前即展示将记住的模式，作用域可选仅本会话/本项目；可选说明输入（批准/拒绝都随决策送达）。事件/快照/类型三层透传，`usePendingInteractions` 与 `useSubagentSession` 的 `resolveApproval` 接受可选 options（缺省请求体逐字节不变） | `pending-interaction-bar.test.tsx`、`sessions.test.ts` |
+| Web UI | ✅ | 共用控件 `ApprovalDecisionControls` 覆盖主会话待办条与子代理下钻弹层：后端下发 `remember_pattern` 时才出现「记住」勾选，勾选前即展示将记住的模式，作用域可选仅本会话/本项目；可选说明输入（批准/拒绝都随决策送达）。事件/快照/类型三层透传，`usePendingInteractions` 与 `useSubagentSession` 的 `resolveApproval` 接受可选 options（缺省请求体逐字节不变） | `pending-interaction-bar.test.tsx`、`subagent-session-dialog.test.tsx`、`sessions.test.ts` |
 
 验证说明：`internal/policy`、`internal/chat` 全绿。`internal/chat` 的 `TestAppendEventsLockHoldBudget`（锁持有时长预算）在并发构建负载下出现过一次失败，单跑 `-count=3` 3/3 通过，属既存时序敏感用例，与本次改动无关。
 
@@ -553,6 +553,5 @@
 
 - CLI `[5] 拒绝并说明原因`（自由文本 → `Feedback`）与 `[4]` 复用经由同一 `ApprovalResponse.Remember + Scope`（CLI 现有 10 分钟 TTL 复用仍是独立轨道，未合并；`cmd/aicli/commands` 与并发会话的工作面重叠，排在后面做）；
 - ACP `reject_always`（`acp/types.go` 已定义未启用）与 `allow-always` → `RememberScope=project` 的映射；
-- 子代理下钻弹层的记住/说明 UI（hook 与类型已支持 `options`，弹层组件未加控件）；
 - `/grants` 命令面展示新 specifier 形态（durable store 读写已通，展示层待跟进）；
 - 4.12/4.13/4.14（模式入口与 banner、按需解释、文档 IA）整体未开始。
