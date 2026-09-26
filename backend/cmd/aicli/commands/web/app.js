@@ -33,7 +33,7 @@ initMenu(); // 顶部菜单栏（文件/视图/帮助 下拉 + 会话导出下�
 initStatusBar();
 initStream();
 initChat();
-initComposerPanel(); // 浮动 composer 面板（输入 + provider/model/reasoning + 动态状态条，任意页签可用）
+initComposerPanel(); // composer 面板（首行动态状态条；正文 = 输入 + provider/model/reasoning 选择器）
 initTodoPanel(); // 任务列表浮动面板（贴在 composer 上沿；SSE tool_end 实时 + screen 回放）
 initMsgFilter(); // 对话区消息过滤面板（角色多选 + 正文搜索，服务端过滤）
 initRuntimeBar();

@@ -22,7 +22,6 @@ function cfgEls() {
     modelCount: document.getElementById("cfg-model-count"),
     reasoning: document.getElementById("cfg-reasoning"),
     toggleValue: document.getElementById("cfg-toggle-value"),
-    summary: document.getElementById("composer-summary"),
     status: document.getElementById("cfg-status")
   };
 }
@@ -260,10 +259,10 @@ export function loadRuntimeMeta() {
         els.reasoning.value = keepReasoning;
       }
       var currentText = (cfg.provider || "?") + " · " + (cfg.model || "?") + (cfg.reasoning ? " · " + cfg.reasoning : "");
-      // 这份配置文案只出现两处：窄屏的 ⚙ 触发按钮（选择框收进弹出面板）与面板标题行
-      // （折叠后只剩标题行）。桌面配置栏底部不再重复一份——三个选择框已经显示全了。
+      // 这份配置文案只出现在窄屏的 ⚙ 触发按钮上（选择框收进弹出面板）：桌面由三个
+      // 选择框直接呈现；面板首行原有的 #composer-summary 摘要已随「两行合一」删除
+      // （用户要求取消「输入 provider/model/reasoning」文案）。
       if (els.toggleValue) { els.toggleValue.textContent = currentText; }
-      if (els.summary) { els.summary.textContent = currentText; els.summary.title = "当前生效配置: " + currentText; }
     })
     .catch(function (err) { console.error("runtime meta fetch failed:", err); });
 }

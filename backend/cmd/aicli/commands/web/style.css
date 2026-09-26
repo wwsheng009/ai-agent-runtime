@@ -774,11 +774,14 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 #session-conflict-footer button.primary-btn:hover { background: var(--accent2); }
 #session-conflict-footer button:disabled { opacity: .5; cursor: not-allowed; }
 
-/* ---- 动态状态栏（与 aicli chat 底部活动状态行同步显示） ---- */
+/* ---- 动态状态栏（与 aicli chat 底部活动状态行同步显示） ----
+   2026-09 起并入 composer 首行（#composer-header，用户要求两行合一）：不再单独成行、
+   不再画独立卡片（无边框 / 无背景），随标题行一起显示；无状态时由 sse.js 置
+   display:none，该行只剩拖动把手与右侧按钮。宽度走 flex:0 1 auto + min-width:0：
+   状态文字按内容占宽、超长时收缩截断，剩余空间由 .composer-spacer 吸收，按钮始终贴右。 */
 #dynamic-status {
   display: flex; align-items: center; gap: 6px;
-  margin: 0 0 6px 0; padding: 5px 10px;
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  flex: 0 1 auto; min-width: 0; padding: 0;
   font-family: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
   font-size: 12px; line-height: 1.4; color: var(--fg2);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -928,7 +931,7 @@ button.sending-btn:not(.stop-btn) { animation: pulse 1.2s ease-in-out infinite; 
 #footer a:hover { text-decoration: underline; color: var(--accent2); }
 #footer .sep { color: var(--fg4); }
 
-/* ---- 嵌入对话页底部的 composer 面板（输入 + provider/model/reasoning + 动态状态条） ----
+/* ---- 嵌入对话页底部的 composer 面板（首行：动态状态条 + 拖动 / 折叠；正文：输入 + 配置栏） ----
    结构见 index.html #composer-panel：#tab-main（「对话」页签）的最后一个子节点，与
    #conversation 同列。状态由 js/composer.js 写进 data-composer-mode / class：
      [data-composer-mode="dock"]（默认）嵌入对话页底部：常规流里的一行，#conversation
@@ -974,7 +977,6 @@ body.composer-dragging * { cursor: grabbing !important; user-select: none !impor
   padding: 2px 0 4px; margin-bottom: 6px;
   border-bottom: 1px solid var(--border);
 }
-#composer-panel .composer-title { font-size: 11px; font-weight: 600; color: var(--fg3); }
 #composer-panel .composer-spacer { flex: 1 1 auto; }
 #composer-grip {
   padding: 2px 6px; line-height: 1.2; font-size: 12px;
@@ -985,11 +987,6 @@ body.composer-dragging * { cursor: grabbing !important; user-select: none !impor
 }
 #composer-grip:hover { color: var(--fg); background: var(--hoverBg); }
 #composer-grip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-#composer-panel .composer-summary {
-  min-width: 0; font-size: 11px; color: var(--fg4);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-#composer-panel .composer-summary:empty { display: none; }
 #composer-panel .composer-icon-btn {
   padding: 2px 8px; line-height: 1.2; font-size: 12px;
   background: transparent; color: var(--fg3);
@@ -999,13 +996,18 @@ body.composer-dragging * { cursor: grabbing !important; user-select: none !impor
 #composer-panel .composer-body { display: flex; flex-direction: column; gap: 6px; }
 /* 面板内的既有控件：外边距归零，行距交给 .composer-body 的 gap 统一控制 */
 #composer-panel #cfg-bar { margin: 0; }
-#composer-panel #dynamic-status { margin: 0 0 6px 0; background: var(--bg3); }
-/* 折叠态：只留标题行（高度约 34px），正文与状态条一并收起 */
-#composer-panel.composer-collapsed .composer-body,
-#composer-panel.composer-collapsed #dynamic-status { display: none !important; }
+/* 折叠态：只收起正文（输入区 + 配置栏），首行保留——动态状态条已是标题行的一部分，
+   随它一起可见（隐藏它并不省高度，状态还看得见更符合两行合一的用意）。
+   卡片自身的内边距沿用展开态（不缩卡片，只把与聊天区的间距交给下面的 :has() 规则收）。 */
+#composer-panel.composer-collapsed .composer-body { display: none !important; }
 #composer-panel.composer-collapsed .composer-header {
   margin-bottom: 0; padding-bottom: 2px; border-bottom: none;
 }
+/* 折叠态还有一处要跟着收：面板与聊天区之间的间距。这段间距挂在 #conversation 的
+   下边距上（基础 8px），面板缩成一条后它不会自动变小，细条上方就会空出一段与体积
+   不相称的留白。用 :has() 让间距直接跟面板自己的折叠 class 走（Zero-JS，面板仍是唯一
+   状态源）：折叠时 8px → 2px；不支持 :has() 的浏览器保持 8px，只是间距略大，功能不受影响。 */
+#tab-main:has(#composer-panel.composer-collapsed) #conversation { margin-bottom: 2px; }
 
 /* ---- 任务列表浮动面板（todo，贴在 composer 面板上沿） ----
    结构见 index.html #todo-panel（#composer-panel 的子节点，位于标题行之前）。
@@ -1080,11 +1082,10 @@ body.composer-dragging * { cursor: grabbing !important; user-select: none !impor
 /* 面板占用的高度由 #conversation（flex:1）自动让出：没有页面级留白、没有占位变量，
    body 保持基础内边距；状态栏在 .layout 之外，与面板互不影响。 */
 
-/* 窄屏：配置摘要隐藏（同一份文案已由 #cfg-toggle 承载），z-index 降到会话抽屉（30）
-   之下——抽屉是临时覆盖层，打开时应当盖住面板。宽度与停靠位置沿用基础规则。 */
+/* 窄屏：z-index 降到会话抽屉（30）之下——抽屉是临时覆盖层，打开时应当盖住面板。
+   宽度与停靠位置沿用基础规则。 */
 @media (max-width: 767px) {
   #composer-panel { z-index: 20; padding: 4px 8px 8px; }
-  #composer-panel .composer-summary { display: none; }
   #composer-panel .composer-icon-btn { padding: 4px 10px; }
   /* 任务列表：窄屏不显示「当前任务」短语（同一份信息已在列表首行），
      列表高度收紧，避免浮层在矮屏上盖住正文 */

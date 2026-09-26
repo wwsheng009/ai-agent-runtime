@@ -126,7 +126,8 @@ aicli chat --pprof
       生成中的流式气泡右上角同样有复制图标，复制的是**已累积的完整**助手文本（不是打字机
       当前已揭示的部分）。会话复制（⧉ 复制）行为不变，两者共存。
 
-- [ ] Provider / Reasoning 原生 `<select>` 可切换，当前生效配置（`openai · gpt-4o`）随之更新。
+- [ ] Provider / Reasoning 原生 `<select>` 可切换，当前生效配置（`openai · gpt-4o`）随之更新
+      （窄屏由 ⚙ 触发按钮显示；桌面由三个选择框自身显示，首行不再有摘要文案）。
 - [ ] **底部 composer 面板（嵌入「对话」页底部）**：输入区 / 配置栏 / 动态状态条在
       `#composer-panel`——`#tab-main`（「对话」页签）内排在 `#conversation` 之后的**常规流一行**
       （见 `js/composer.js`）。`#conversation` 是 `flex:1 + min-height:0 + overflow:auto` 的滚动区，
@@ -134,11 +135,17 @@ aicli chat --pprof
       嵌入对话页底部」；旧实现挂在 `.layout` 下做 `position:absolute` 浮层，停靠时盖住内容区底部
       ——实测 1280×800 盖住 131.6px）。**代价（已确认）**：面板随「对话」页签显隐，切到技能 /
       文件 / GIT / MCP / 日志 / 配置 / 缓存 / 分析 / 调试 / 关于页签时输入区整块收起
-      （回到旧结构语义）。标题行左侧把手 `⠿` 可拖动（自由位置落盘、改 `position:fixed` 跟手）、
-      `⇲` 复位回停靠位——**`⇲` 只在面板离开原位（自由拖动后）时出现**，停靠态它无事可做、由
-      CSS 按 `data-composer-mode` 隐藏（键盘仍可用把手 `Home` / 双击复位）；折叠按钮或
-      `Ctrl+J`（macOS `Cmd+J`）收起为单行，「视图」菜单同一入口；折叠 / 展开 / 拖动 / 复位都会
-      改变信息流高度，「最新」按钮由 `ResizeObserver`（观察 `#conversation` 与面板子块）重锚。
+       （回到旧结构语义）。**首行（2026-09 两行合一，用户要求）**：拖动把手 `⠿` + 动态状态条
+       （与 aicli chat 底部活动状态行同步）+ `⇲` / `▾` 按钮同行；无动态状态时状态条
+       `display:none`，该行只剩把手与右侧按钮；原「输入」标题与 `#composer-summary`
+       配置摘要（provider · model · reasoning）已移除——这份文案只在窄屏 ⚙ 按钮上出现。
+       把手可拖动（自由位置落盘、改 `position:fixed` 跟手）、`⇲` 复位回停靠位——**`⇲` 只在
+       面板离开原位（自由拖动后）时出现**，停靠态它无事可做、由 CSS 按 `data-composer-mode`
+       隐藏（键盘仍可用把手 `Home` / 双击复位）；折叠按钮或 `Ctrl+J`（macOS `Cmd+J`）收起为
+       单行（只收正文，首行与动态状态保留；**卡片自身内边距不变**，只把与聊天区的间距随折叠
+       一起收——`#conversation` 下边距经 `:has()` 从 8px 收到 2px，避免卡片缩小后上方仍留一段
+       与体积不相称的空档），「视图」菜单同一入口；折叠 / 展开 / 拖动 / 复位都会改变信息流高度，
+       「最新」按钮由 `ResizeObserver`（观察 `#conversation` 与面板子块）重锚。
       **面板与状态栏依旧互不影响**：`#footer` 在 `.layout` 之外、整条路径上坐标零变化；
       也没有 `--composer-reserve` / `body padding` 之类的占位机制（让位由 flex 自动完成）。
       位置与折叠态记在 `localStorage`（`aicli.web.composer.v1`，隐私模式静默降级）；
@@ -166,9 +173,9 @@ aicli chat --pprof
       手机键盘回车键显示「发送」）；底部按 `env(safe-area-inset-bottom)` 让出手势条；
       配置栏窄屏折叠为单行按钮 + 向上弹出的面板（面板绝对定位覆盖在正文之上，不挤压正文、
       不触发 ResizeObserver 重排；三个选择器在面板内各占一行，模型输入框解除桌面 150px 上限）；
-       配置文案（provider · model · reasoning）在窄屏由 ⚙ 触发按钮承载（超长省略号），
-       桌面**不在配置栏底部重复**（原 `#cfg-current` 已删除：三个选择框已经把它显示全了，
-       只保留标题行 `#composer-summary` 供折叠后查看）；
+       配置文案（provider · model · reasoning）只在窄屏由 ⚙ 触发按钮承载（超长省略号）：
+       桌面不在配置栏底部重复（原 `#cfg-current` 已删除：三个选择框已经把它显示全了），
+       首行的 `#composer-summary` 摘要也已随「两行合一」删除（用户要求取消该文案）；
       点面板外或按 Esc 收起，`aria-expanded` 同步；面板内模型列表限高 `min(240px, 40vh)`
       避免顶部越出视口；横屏矮视口（高 ≤480px）只收紧输入框上限与页脚留白。
 - [ ] **桌面（>767px）不受上述折叠影响**：`.cfg-controls{display:contents}`、`#cfg-toggle{display:none}`，
@@ -575,7 +582,7 @@ node scripts/verify-micro-web-copy-msg.mjs     # 单条消息复制：所有角�
 node scripts/verify-micro-web-question-answer.mjs # 提问回答写入：建议项 / 自由回答（Enter、提交按钮、Shift+Enter、IME、空答案）→ question_answer payload、收起对话框保留 composer 答案路由、服务端回执分支（stale 未送达告警 / resolved 不误报）、审批语义不变、index.html/style.css 静态不变量
 node scripts/verify-micro-web-pane-split.mjs   # 左右分栏助手（文件 / GIT 页签共用）：折叠 class 只在大屏生效、宽度写 CSS 变量并夹进可用范围（容器变窄时上限自己降）、端点空操作不抹记忆值、←→/Home/End 与落盘、拖拽（pane-resizing / 松手才落盘 / 折叠与非主键不起拖 / 失焦兜底）、双击复位、跨断点 onApply 与 onBreakpoint、记忆恢复与隐私模式降级、matchMedia 缺失按窄屏降级、元素缺失静默降级
 node scripts/verify-micro-web-git-diff.mjs     # GIT 页签 diff 行渲染（单列行号）：每行只有一个行号格（回归：曾把老/新行号拼成「老 新」两列）、add→新侧 / del→老侧 / context→新侧 / nonewline→空、两侧不同时只出现该侧数字、null 缺字段不补 0（0 是合法行号保留）、文本转义、renderDiff 复用同一行构造器、style.css 行号列宽度按单列给
-node scripts/verify-micro-web-composer.mjs     # 底部 composer 面板：面板是 #tab-main 内、排在 #conversation 之后的常规流一行（祖先链 html/body/.layout/#main-col/#tab-main）、必需元素与既有 cfg-* id 全保留、菜单与 Ctrl+J 折叠入口接线（无第二份折叠逻辑）、style.css 几何（停靠 relative + flex:0 0 auto + margin:0 auto 居中且底部不留外边距 / 自由位置改 fixed 且清 margin / z-index 低于模态框 / 折叠规则）、**让位靠 flex**（#conversation 是 flex:1+min-height:0+overflow:auto；没有 --composer-reserve、body 不为面板留白、#footer 规则无 composer 耦合）、「最新」按钮按信息流下沿锚定且 ResizeObserver 观察 #conversation、模式切换不搬 DOM、行为（拖动跟随与夹取、键盘微调与 Home 复位、**全程不写页面级 CSS 变量**、Ctrl+J、localStorage 回放）
+node scripts/verify-micro-web-composer.mjs     # 底部 composer 面板：面板是 #tab-main 内、排在 #conversation 之后的常规流一行（祖先链 html/body/.layout/#main-col/#tab-main）、**首行合并**（#dynamic-status 在 #composer-header 内；原「输入」标题与 #composer-summary 配置摘要已移除）、必需元素与既有 cfg-* id 全保留、菜单与 Ctrl+J 折叠入口接线（无第二份折叠逻辑）、style.css 几何（停靠 relative + flex:0 0 auto + margin:0 auto 居中且底部不留外边距 / 自由位置改 fixed 且清 margin / z-index 低于模态框 / 折叠只收正文、动态状态随首行保留、折叠态不缩卡片内边距、折叠态聊天区间距 8px→2px（:has() 随面板 class））、**让位靠 flex**（#conversation 是 flex:1+min-height:0+overflow:auto；没有 --composer-reserve、body 不为面板留白、#footer 规则无 composer 耦合）、「最新」按钮按信息流下沿锚定且 ResizeObserver 观察 #conversation、模式切换不搬 DOM、行为（拖动跟随与夹取、键盘微调与 Home 复位、**全程不写页面级 CSS 变量**、Ctrl+J、localStorage 回放）
 node scripts/verify-micro-web-todos.mjs        # 任务列表浮层（贴在 composer 上沿）：结构（#todo-panel 在 #composer-panel 内且在标题行之前）与样式不变量（bottom:calc(100% + 1px) 衔接、[hidden] 不占位、折叠只收 .todo-body、进行中加粗 / 已完成删除线）；接线（sse.js 在 switch 前分流 tool_end / 会话边界、chat.js 应用 screen 回放、app.js 初始化、后端 web_schema.go 与 chat_debug_screen_http.go 两个字段名）；纯函数（解析裁剪：坏条目丢弃 / 整组不可用 → null、计数与进度、当前项、快照合并：runtime 按 seq 单调 / history 只兜底）；面板行为（无快照隐藏、回放恢复计数与逐项状态、实时旧序号不回退、会话切换清空、折叠与 localStorage 记忆、面板缺失静默降级）
 ```
 

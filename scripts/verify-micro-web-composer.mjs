@@ -3,7 +3,9 @@
 // 覆盖：
 //   1. index.html 结构：面板是 #tab-main（「对话」页签）内、排在 #conversation 之后的
 //      常规流一行（= 对话页底部），输入区 / 配置栏 / 动态状态条都在面板内
-//   2. 面板必需元素齐全（拖动把手 / 折叠 / 复位 / 摘要 + 既有输入与选择器 id 不变）
+//   2. 面板必需元素齐全（拖动把手 / 折叠 / 复位 + 既有输入与选择器 id 不变）；
+//      首行合并（2026-09）：动态状态条在 #composer-header 内，「输入」标题与
+//      #composer-summary 配置摘要已移除
 //   3. 「视图」菜单与快捷键表都提供折叠入口，且转发到同一实现（无第二份折叠逻辑）
 //   4. style.css：让位靠 flex 常规流（#conversation flex:1 + min-height:0 + overflow:auto
 //      自己收缩）——没有 --composer-reserve / body padding 之类的占位机制；自由位置改
@@ -99,9 +101,9 @@ check("输入区 / 配置栏 / 动态状态条都在面板内，且面板在 #ta
     assert.ok(chain.indexOf("#tab-main") >= 0, "#" + id + " 不在 #tab-main 内（面板应嵌在对话页底部）");
   });
 });
-check("面板必需元素齐全（把手 / 折叠 / 复位 / 摘要 / 面板体）", () => {
+check("面板必需元素齐全（把手 / 折叠 / 复位 / 面板体）", () => {
   ["composer-header", "composer-grip", "composer-collapse-btn", "composer-reset-btn",
-    "composer-summary", "composer-body"].forEach((id) => {
+    "composer-body"].forEach((id) => {
     assert.ok(INDEX_HTML.indexOf('id="' + id + '"') >= 0, "缺少 #" + id);
   });
   assert.ok(/id="composer-panel"[^>]*role="region"/.test(INDEX_HTML), "面板缺少 role=region");
@@ -117,13 +119,26 @@ check("既有选择器 id 全部保留（runtime.js 按 id 取元素，改结构
   });
 });
 // 面板底部曾再显示一份「provider · model · reasoning」，与三个选择框完全重复（用户要求去掉）。
-// 现在这份文案只出现在标题行（折叠后可见）与窄屏 ⚙ 触发按钮上。
+// 2026-09 进一步要求「两行合一」：动态状态条进入标题行，原首行「输入」标题与配置摘要
+// #composer-summary 一并移除；这份文案只剩窄屏 ⚙ 触发按钮一处承载。
 check("配置文案不重复：底部 #cfg-current 已移除", () => {
   assert.ok(INDEX_HTML.indexOf('id="cfg-current"') < 0, "index.html 仍存在 #cfg-current（底部重复文案）");
   assert.ok(!/cfg-current/.test(STYLE_CSS), "style.css 仍存在 .cfg-current 规则");
   assert.ok(!/getElementById\("cfg-current"\)/.test(RUNTIME_JS), "runtime.js 仍在取 #cfg-current");
-  assert.ok(/els\.summary/.test(RUNTIME_JS) && /els\.toggleValue/.test(RUNTIME_JS),
-    "标题行 / 窄屏按钮的配置文案不应一起被删掉");
+});
+check("首行合并：动态状态条进入 #composer-header，原「输入 + 配置摘要」已移除", () => {
+  const chain = ancestorsOf(INDEX_HTML, "dynamic-status");
+  assert.ok(chain, "index.html 缺少 #dynamic-status");
+  assert.ok(chain.indexOf("#composer-header") >= 0,
+    "#dynamic-status 必须在 #composer-header 内（两行合一），实际祖先链 " + JSON.stringify(chain));
+  assert.ok(INDEX_HTML.indexOf('id="composer-summary"') < 0,
+    "index.html 仍存在 #composer-summary（用户要求取消 provider/model/reasoning 文案）");
+  assert.ok(INDEX_HTML.indexOf('class="composer-title"') < 0, "index.html 仍存在「输入」标题");
+  assert.ok(!/composer-summary/.test(STYLE_CSS), "style.css 仍存在 .composer-summary 规则");
+  assert.ok(!/composer-title/.test(STYLE_CSS), "style.css 仍存在 .composer-title 规则");
+  assert.ok(!/getElementById\("composer-summary"\)/.test(RUNTIME_JS) && !/els\.summary/.test(RUNTIME_JS),
+    "runtime.js 仍在取 #composer-summary");
+  assert.ok(/els\.toggleValue/.test(RUNTIME_JS), "窄屏 ⚙ 按钮的配置文案不应一起被删掉");
 });
 
 console.log("[2] 折叠入口（菜单 / 快捷键表 / 模块接线）");
@@ -191,9 +206,26 @@ check("面板 z-index 低于模态框（审批 / 会话切换浮层优先）", (
   const maxModal = Math.max.apply(null, modalZ.filter((z) => z >= 999));
   assert.ok(maxModal > panelZ, "面板 z-index(" + panelZ + ") 不应高于模态框(" + maxModal + ")");
 });
-check("折叠态收起正文与状态条（只留标题行）", () => {
+check("折叠态：只收起正文（输入区 + 配置栏），动态状态条随标题行保留", () => {
   assert.ok(/#composer-panel\.composer-collapsed \.composer-body/.test(STYLE_CSS), "缺少折叠态规则");
-  assert.ok(/\.composer-collapsed #dynamic-status \{ display: none !important/.test(STYLE_CSS), "折叠态未收起动态状态条");
+  assert.ok(!/composer-collapsed #dynamic-status/.test(STYLE_CSS),
+    "折叠态不应再隐藏动态状态条（它已是标题行的一部分，隐藏并不省高度）");
+});
+// 折叠只收正文，卡片自身的内边距沿用展开态（用户口径：卡片高度不缩，只收与聊天区的间距）。
+check("折叠态不缩卡片内边距（只收正文，卡片高度沿用展开态口径）", () => {
+  assert.ok(!/#composer-panel\.composer-collapsed \{[^}]*padding/.test(STYLE_CSS),
+    "折叠态不应再覆盖面板内边距（会改动卡片高度）");
+  const headerRule = (STYLE_CSS.match(/#composer-panel\.composer-collapsed \.composer-header \{[^}]*\}/) || [""])[0];
+  assert.ok(/padding-bottom:\s*2px/.test(headerRule), "折叠态标题行应保留原有 padding-bottom: 2px: " + headerRule);
+});
+// 面板与聊天区的间距挂在 #conversation 的下边距上（基础 8px）。面板折叠成一条后这段
+// 间距必须跟着收（8px → 2px），否则细条上方会留出一段与体积不相称的空档。
+check("折叠态收紧面板与聊天区的间距（#conversation 下边距随折叠 class 收缩）", () => {
+  const rule = (STYLE_CSS.match(/#tab-main:has\(#composer-panel\.composer-collapsed\) #conversation \{[^}]*\}/) || [""])[0];
+  assert.ok(rule.length > 0, "缺少 :has() 规则：折叠态应把 #conversation 下边距收紧（面板缩小后不应保留 8px 空档）");
+  assert.ok(/margin-bottom:\s*2px/.test(rule), "折叠态 #conversation 下边距未收紧到 2px: " + rule);
+  const convRule = (STYLE_CSS.match(/#conversation \{[^}]*\}/) || [""])[0];
+  assert.ok(/margin:\s*8px 0;/.test(convRule), "展开态 #conversation 的 8px 间距契约被改动: " + convRule);
 });
 // 「⇲ 复位」只在面板离开原位（自由拖动后）时显示：停靠态它无事可做。
 // 显隐跟 data-composer-mode 走（纯 CSS），避免又多一条 JS 状态。
@@ -283,7 +315,7 @@ const DOCK_LEFT = (VIEWPORT.w - PANEL_W) / 2;   // 200
 const DOCK_TOP = VIEWPORT.h - 8 - PANEL_H;      // 672
 
 const ids = ["composer-panel", "composer-header", "composer-grip", "composer-collapse-btn",
-  "composer-reset-btn", "composer-summary", "composer-body"];
+  "composer-reset-btn", "composer-body"];
 const elements = {};
 ids.forEach((id) => { elements[id] = makeEl(id); });
 

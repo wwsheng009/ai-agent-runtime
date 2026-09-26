@@ -217,10 +217,11 @@
            ④ 记忆：位置与折叠态由 js/composer.js 落 localStorage（隐私模式静默降级）。
            ⑤ 按钮显隐：⇲「复位到底部居中停靠」只在面板离开原位（自由拖动后）时出现——停靠态
               它无事可做，显隐由 CSS 按 data-composer-mode 控制，不做 JS 状态判断。
-           ⑥ 无障碍：role=region + 头部把手（可聚焦，方向键微调、Home 复位）+
-              折叠按钮 aria-expanded；快捷键 Ctrl+J（与「视图」菜单同一入口）。
-              配置文案只在标题行 #composer-summary 与窄屏 ⚙ 触发按钮上出现：面板底部不再重复
-              一份 provider · model · reasoning（与三个选择框完全重复）。 -->
+            ⑥ 无障碍：role=region + 头部把手（可聚焦，方向键微调、Home 复位）+
+               折叠按钮 aria-expanded；快捷键 Ctrl+J（与「视图」菜单同一入口）。
+            ⑦ 首行合并（2026-09，用户要求）：动态状态条进入标题行，原「输入」标题与
+               #composer-summary 配置摘要（provider · model · reasoning）已移除——配置文案
+               只在窄屏 ⚙ 触发按钮上出现，桌面由三个选择框直接呈现。 -->
       <div id="composer-panel" class="composer-panel" role="region" aria-label="输入与模型配置（停靠 / 可拖动面板）">
         <!-- 任务列表浮动面板（todo）：底边与 composer 面板上沿衔接——style.css 用
               bottom:calc(100% + 1px) 把它贴在 #composer-panel 顶部（左/右各外扩 1px 对齐
@@ -244,20 +245,20 @@
              <ul id="todo-list" class="todo-list"></ul>
            </div>
          </div>
+         <!-- 首行（2026-09 两行合一，用户要求）：拖动把手 + 动态状态条 + 复位 / 折叠按钮同行。
+              动态状态条（与 aicli chat 底部活动状态行同步）即原第二行：无状态时由 sse.js 置
+              display:none，该行只剩把手与右侧按钮；原「输入」标题与 provider · model ·
+              reasoning 摘要（#composer-summary）已移除，配置文案只在窄屏 ⚙ 按钮上出现。 -->
          <div id="composer-header" class="composer-header">
           <button id="composer-grip" class="composer-grip" type="button"
             title="拖动移动面板（方向键微调，Home 复位）" aria-label="移动浮动输入面板">⠿</button>
-          <span class="composer-title">输入</span>
-          <span id="composer-summary" class="composer-summary" title="当前生效配置"></span>
+          <div id="dynamic-status" class="dynamic-status" style="display:none" aria-live="polite"></div>
           <span class="composer-spacer"></span>
           <button id="composer-reset-btn" class="composer-icon-btn" type="button"
             title="复位到底部居中停靠">⇲</button>
           <button id="composer-collapse-btn" class="composer-icon-btn" type="button"
             aria-expanded="true" aria-controls="composer-body" title="折叠/展开浮动输入面板（Ctrl+J）">▾</button>
         </div>
-        <!-- 动态状态条（与 aicli chat 底部活动状态行同步）：随面板一起浮动，
-             非「对话」页签下也能看到「正在思考 / 调用工具 / 等待审批」等实时状态。 -->
-        <div id="dynamic-status" class="dynamic-status" style="display:none" aria-live="polite"></div>
         <div id="composer-body" class="composer-body">
           <div id="input-row">
             <textarea id="prompt" rows="1" placeholder="输入消息后回车发送，Shift+Enter 换行…" autocomplete="off" enterkeyhint="send"></textarea>
