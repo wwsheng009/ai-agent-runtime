@@ -260,6 +260,17 @@ func (m *Manager) cancelJobMonitors(jobID string) int {
 	return len(entries)
 }
 
+// CancelJobMonitors disarms every monitor armed on the job and reports how many
+// were stopped. It is idempotent: a job with no monitors (already terminal, or
+// never armed) reports zero. The job itself is untouched — use task_kill when
+// the goal is to end the work rather than the nudge.
+func (m *Manager) CancelJobMonitors(jobID string) int {
+	if m == nil {
+		return 0
+	}
+	return m.cancelJobMonitors(strings.TrimSpace(jobID))
+}
+
 // CancelSessionMonitors stops every monitor belonging to the session; hosts call
 // it when a session closes, where a later check would only deliver a nudge to a
 // session that no longer exists.

@@ -158,6 +158,40 @@ func TestCancelSessionMonitorsOnlyTouchesThatSession(t *testing.T) {
 	_, _ = manager.CancelJob(ctx, second.ID)
 }
 
+// TestCancelJobMonitorsIsIdempotentAndJobScoped 钉住工具面撤单依赖的语义：按 job
+// 解除（不动其他 job）、幂等、nil/空输入安全，且 job 本身不受影响。
+func TestCancelJobMonitorsIsIdempotentAndJobScoped(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(Config{})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	first, err := manager.SubmitShell(ctx, "session-monitor", BackgroundTaskArgs{Command: shellDelayCommand(30*time.Second, "a")})
+	require.NoError(t, err)
+	second, err := manager.SubmitShell(ctx, "session-monitor", BackgroundTaskArgs{Command: shellDelayCommand(30*time.Second, "b")})
+	require.NoError(t, err)
+	_, err = manager.ScheduleMonitor(first.ID, MonitorOptions{CheckAfter: 20 * time.Second})
+	require.NoError(t, err)
+	_, err = manager.ScheduleMonitor(second.ID, MonitorOptions{CheckAfter: 20 * time.Second})
+	require.NoError(t, err)
+
+	require.Equal(t, 1, manager.CancelJobMonitors(first.ID))
+	require.Zero(t, manager.CancelJobMonitors(first.ID), "disarming twice must stay quiet")
+	require.Zero(t, manager.CancelJobMonitors("job-missing"))
+	require.Zero(t, manager.CancelJobMonitors("  "))
+	require.Equal(t, 1, manager.ActiveMonitorCount(), "other jobs keep their monitors")
+
+	var nilManager *Manager
+	require.Zero(t, nilManager.CancelJobMonitors(first.ID))
+
+	// job 不受撤单影响，仍在运行。
+	job, err := manager.GetJob(ctx, first.ID)
+	require.NoError(t, err)
+	require.False(t, IsTerminalStatus(job.Status))
+
+	_, _ = manager.CancelJob(ctx, first.ID)
+	_, _ = manager.CancelJob(ctx, second.ID)
+}
+
 func TestScheduleMonitorNilAndEmptyInputs(t *testing.T) {
 	var nilManager *Manager
 	_, err := nilManager.ScheduleMonitor("job", MonitorOptions{})

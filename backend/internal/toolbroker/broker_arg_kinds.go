@@ -82,6 +82,7 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"reason":  toolArgFieldString,
 	},
 	ToolTaskMonitor: {
+		"cancel":          toolArgFieldBool,
 		"job_id":          toolArgFieldString,
 		"task_id":         toolArgFieldString,
 		"check_after_ms":  toolArgFieldNumber,

@@ -96,3 +96,58 @@ func TestTaskMonitorRepairHints(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exact job_id")
 }
+
+// TestTaskMonitorCancelDisarmsWithoutTouchingTheJob 覆盖撤单面：cancel=true 只解除
+// 巡检（幂等），job 继续跑；与排期参数混用则明确报错而不是猜语义。
+func TestTaskMonitorCancelDisarmsWithoutTouchingTheJob(t *testing.T) {
+	broker := newBackgroundTestBroker(t)
+	jobID := submitTestJob(t, broker, backgroundSleeperCommand())
+	ctx := context.Background()
+
+	_, _, err := broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{
+		"job_id":         jobID,
+		"check_after_ms": 600000,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, broker.Background.ActiveMonitorCount())
+
+	raw, metadata, err := broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{
+		"job_id": jobID,
+		"cancel": true,
+	})
+	require.NoError(t, err)
+	result, ok := raw.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, 1, result["cancelled_monitors"])
+	assert.Equal(t, false, result["scheduled"])
+	assert.Contains(t, result["message"], "terminal transition still wakes")
+	assert.Equal(t, 1, metadata["cancelled_monitors"])
+	assert.Zero(t, broker.Background.ActiveMonitorCount())
+
+	// 幂等：再撤一次是 0，而不是错误。
+	raw, _, err = broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{
+		"job_id": jobID,
+		"cancel": true,
+	})
+	require.NoError(t, err)
+	result, ok = raw.(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, 0, result["cancelled_monitors"])
+
+	// 混用排期参数：明确拒绝，避免「替换还是追加」的歧义。
+	_, _, err = broker.Execute(ctx, "session-wait", ToolTaskMonitor, map[string]interface{}{
+		"job_id":         jobID,
+		"cancel":         true,
+		"check_after_ms": 60000,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot be combined")
+
+	// job 仍在跑（撤单不等于 kill）。
+	job, err := broker.Background.GetJob(ctx, jobID)
+	require.NoError(t, err)
+	assert.False(t, background.IsTerminalStatus(job.Status))
+
+	_, _, err = broker.Execute(ctx, "session-wait", ToolTaskKill, map[string]interface{}{"job_id": jobID})
+	require.NoError(t, err)
+}

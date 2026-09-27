@@ -52,6 +52,28 @@ func (b *Broker) monitorBackgroundTask(ctx context.Context, resolvedJobID, displ
 		return nil, nil, err
 	}
 
+	// 撤单与排期互斥：含糊的组合（是替换还是两次动作？）会让模型难以从结果推断
+	// 生效状态，因此明确要求分两次调用。
+	if brokerTaskBoolArg(args, "cancel") {
+		if hasCheck || hasMaxDuration {
+			return nil, nil, fmt.Errorf("cancel=true cannot be combined with check_after_ms/max_duration_ms; disarm first, then arm a new check")
+		}
+		cancelled := b.Background.CancelJobMonitors(resolvedJobID)
+		metadata := map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindStructured,
+			"job_id":               displayJobID,
+			"job_alias":            displayJobID,
+			"cancelled_monitors":   cancelled,
+			"scheduled":            false,
+		}
+		return map[string]interface{}{
+			"job_id":             displayJobID,
+			"cancelled_monitors": cancelled,
+			"scheduled":          false,
+			"message":            fmt.Sprintf("%d monitor(s) disarmed; the job keeps running and its terminal transition still wakes the session", cancelled),
+		}, metadata, nil
+	}
+
 	options := background.MonitorOptions{CheckAfter: time.Duration(checkAfterMs) * time.Millisecond}
 	if hasMaxDuration && maxDurationMs > 0 {
 		options.MaxDuration = time.Duration(clampMonitorMs(maxDurationMs, taskMonitorMaxDurationMinMs, taskMonitorMaxDurationMaxMs)) * time.Millisecond
@@ -114,4 +136,19 @@ func monitorJobIDArg(args map[string]interface{}) string {
 		jobID = strings.TrimSpace(brokerTaskStringArg(args, "task_id"))
 	}
 	return jobID
+}
+
+// brokerTaskBoolArg 读取布尔参数；kinds 表已保证类型正确，字符串分支只是容错
+// （历史会话里模型可能把 "true" 塞进 JSON）。
+func brokerTaskBoolArg(args map[string]interface{}, key string) bool {
+	switch typed := args[key].(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "true", "1", "yes":
+			return true
+		}
+	}
+	return false
 }

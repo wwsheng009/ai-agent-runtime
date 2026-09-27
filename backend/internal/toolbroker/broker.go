@@ -437,6 +437,10 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 						"minimum":     5000,
 						"description": "Optional auto-termination deadline in milliseconds, clamped to 5000..3600000, for jobs that must not run forever.",
 					},
+					"cancel": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Disarm every check armed on the job without touching the job itself (the terminal transition still wakes the session). Cannot be combined with check_after_ms/max_duration_ms.",
+					},
 				},
 				"required": []string{},
 			},
