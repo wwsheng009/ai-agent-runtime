@@ -1042,10 +1042,14 @@ func trimDiagnosticNoticePrefix(text string) (string, bool) {
 const webDynamicStatusLaneCapacity = 16
 
 // webDynamicStatusMessage 是移出 c.mu 的 web 动态状态发布快照。
+// sessionID / eventBus 在入队时（持 c.mu）快照，发布 goroutine 不再触碰
+// *ChatSession：回合中的 syncRuntimeSessionFromChatMode 会替换
+// session.RuntimeSession，锁外读该指针与写方构成数据竞争（-race 实证）。
 type webDynamicStatusMessage struct {
-	session *ChatSession
-	payload map[string]interface{}
-	at      time.Time
+	sessionID string
+	eventBus  *runtimeevents.Bus
+	payload   map[string]interface{}
+	at        time.Time
 }
 
 // webDynamicStatusPayloadLocked 在 TUI 动态状态行变化（开始/切换/结束）时构建
@@ -1099,9 +1103,10 @@ func (c *chatInteractionCoordinator) enqueueWebDynamicStatusLocked(s chatSurface
 		return
 	}
 	msg := webDynamicStatusMessage{
-		session: c.session,
-		payload: c.webDynamicStatusPayloadLocked(s, now),
-		at:      now,
+		sessionID: chatDebugSessionID(c.session),
+		eventBus:  c.session.LocalRuntimeHost.EventBus,
+		payload:   c.webDynamicStatusPayloadLocked(s, now),
+		at:        now,
 	}
 	c.webStatusLaneOnce.Do(func() {
 		c.webStatusLane = make(chan webDynamicStatusMessage, webDynamicStatusLaneCapacity)
@@ -1143,12 +1148,12 @@ func (c *chatInteractionCoordinator) webDynamicStatusPublisher() {
 
 // publishWebDynamicStatusEvent 把快照发布到会话 EventBus（锁外）。
 func (c *chatInteractionCoordinator) publishWebDynamicStatusEvent(msg webDynamicStatusMessage) {
-	if msg.session == nil || msg.session.LocalRuntimeHost == nil || msg.session.LocalRuntimeHost.EventBus == nil {
+	if msg.eventBus == nil {
 		return
 	}
-	msg.session.LocalRuntimeHost.EventBus.Publish(runtimeevents.Event{
+	msg.eventBus.Publish(runtimeevents.Event{
 		Type:      chatWebDynamicStatusBusEvent,
-		SessionID: chatDebugSessionID(msg.session),
+		SessionID: msg.sessionID,
 		Timestamp: msg.at.UTC(),
 		Payload:   msg.payload,
 	})

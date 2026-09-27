@@ -182,9 +182,9 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 - ~~P1-2~~：已落地（见 §6.4 / §6.5）。等待态时钟、`/debug` 时长展示与
   「脱离 run 的等待态」看门狗自愈（清态 + 动态栏提示）全部就位。
 - P2：`actorGeneration/refreshing` 标记 + refresh/submit 互斥（submit gate）。
-- P3：用户消息提交即入库；evict(`runtime_refresh:model`)×submit 并发回归与
-  e2e「无活动 run 不得出现 Analyzing 帧」断言（需要完整 host 脚手架，见
-  `chat_local_orchestration_integration_test.go` / `chat_runtime_refresh_actor_test.go`）。
+- P3：部分落地（见 §6.6）。evict(`runtime_refresh:model`)×submit 并发回归已在完整
+  host 脚手架下落盘；「提交即入库」与 e2e「无活动 run 不得出现 Analyzing 帧」
+  断言仍待办。
 
 ### 6.4 第二轮实施（P0-2 + P1-2 诊断）
 
@@ -219,3 +219,23 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 | 13 例 P0-1/P0-2/P1-2 回归 `-count=1` | 13/13 PASS |
 | 看门狗/时钟 4 例 `-race -count=1` | PASS（首轮暴露"清态先于提示可见"的断言时序问题，已改为有界轮询） |
 | `go test ./cmd/aicli/commands/ -run 'TestRuntimeRefresh\|TestActorExecutor\|TestSuccessfulSend\|TestDebug\|Waiting\|TestChatRuntimeEvents_NextRunEpoch\|TestChatInteraction' -count=1` | PASS |
+
+### 6.6 第四轮实施（P3 evict×submit 回归 + 既有数据竞争修复）
+
+| 文件 | 改动 |
+| --- | --- |
+| `backend/cmd/aicli/commands/chat_submit_evict_regression_test.go`（新增） | 完整 host 脚手架（`newLocalOrchestrationTestHost` + 真实 `SessionManager`）复刻事故序列：空闲 actor 被 `runtime_refresh:model` 驱逐 → `sendMessage` 提交；断言重建 actor、开启新 run epoch、turn 结束后 run 关闭且等待态无残留 |
+| `backend/cmd/aicli/commands/chat_interaction.go` | web 动态状态发布快照改为在入队（持 `c.mu`）时快照 `sessionID` / `eventBus`，发布 goroutine 不再触碰 `*ChatSession`。`-race` 实证：回合中 `syncRuntimeSessionFromChatMode` 会替换 `session.RuntimeSession`（`chat_session.go:1355`），与发布 goroutine 锁外 `chatDebugSessionID` 读同一指针构成既有数据竞争（非本方案引入，被新回归暴露） |
+
+验证（2026-09-27 第四轮）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `go build ./cmd/aicli/commands/` / `go vet ./cmd/aicli/commands/` / `gofmt -l` | PASS |
+| `TestSubmitAfterIdleRuntimeRefreshEvictStartsFreshRun -count=1 -v` | PASS（日志可见 `actor stopped … reason=runtime_refresh:model` → 重建 actor → 正常回答） |
+| 该用例 + 看门狗 3 例 `-race -count=1` | PASS（修复竞争前该用例在 `-race` 下失败，报告指向既有发布路径） |
+| wedge/refresh/send/debug/epoch 全量回归 `-count=1` | PASS |
+
+备注：`chat_actor_host_test.go` 中并行 WIP 的新用例存在笔误
+`state.PendingQuestion = false`（该字段已为指针类型），导致包级测试无法编译；
+本轮仅修正这一行为 `nil`，该文件其余改动不属于本方案。
