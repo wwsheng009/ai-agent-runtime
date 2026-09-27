@@ -97,9 +97,10 @@ func TestPendingBatchRecoveryPayloadCarriesPartialProduct(t *testing.T) {
 	require.NotContains(t, empty, "partial_steps")
 }
 
-// TestEnrichSessionInterruptedPayloadAttachesPartialProduct 钉住中断型终态的部分
-// 产物接入：存储里有快照时带上 partial_*；快照缺失/存储未接时保持原样且快速返回
-// （fail-open，中断路径绝不被拖住）。
+// TestEnrichSessionInterruptedPayloadAttachesPartialProduct 钉住中断型终态的两条
+// 产物取源：主取源是 run 自己的快照（运行期存储里还没有产物，且无需任何 I/O）；
+// 仅当没有活动 run 时才兜底读存储；有活动 run 但尚无产物时以 run 为准，不回退。
+// 两条取源都 fail-open，取不到就保持原样且快速返回。
 func TestEnrichSessionInterruptedPayloadAttachesPartialProduct(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()
@@ -113,27 +114,81 @@ func TestEnrichSessionInterruptedPayloadAttachesPartialProduct(t *testing.T) {
 	})
 	require.NoError(t, storage.Save(ctx, session))
 
+	// 主取源：run 快照；actor 故意不接 sessionStore，证明运行期不依赖存储。
+	liveRun := &sessionRunControl{turnID: "turn-live"}
+	liveRun.notePartialProduct(session)
+	liveActor := &SessionActor{id: session.ID}
+	livePayload := map[string]interface{}{"reason": "interrupt"}
+	start := time.Now()
+	liveActor.enrichSessionInterruptedPayload(livePayload, liveRun)
+	require.Less(t, time.Since(start), 50*time.Millisecond, "run 快照取源不得有任何 I/O")
+	require.Equal(t, "interrupted run deliverable", livePayload["partial_summary"])
+	require.Equal(t, "last_assistant_message", livePayload["partial_source"])
+	require.Equal(t, 1, livePayload["partial_steps"])
+	require.Equal(t, "interrupt", livePayload["reason"], "既有字段不得被改写")
+
+	// 兜底取源：没有活动 run（会话已挂起/已终态）时读存储快照，仍带时间上限。
 	actor := &SessionActor{id: session.ID, sessionStore: storage}
 	payload := map[string]interface{}{"reason": "interrupt"}
-	start := time.Now()
-	actor.enrichSessionInterruptedPayload(payload)
-	require.Less(t, time.Since(start), time.Second, "补产物必须有硬性时间上限")
+	start = time.Now()
+	actor.enrichSessionInterruptedPayload(payload, nil)
+	require.Less(t, time.Since(start), time.Second, "兜底补产物必须有硬性时间上限")
 	require.Equal(t, "interrupted run deliverable", payload["partial_summary"])
 	require.Equal(t, "last_assistant_message", payload["partial_source"])
 	require.Equal(t, 1, payload["partial_steps"])
-	require.Equal(t, "interrupt", payload["reason"], "既有字段不得被改写")
 
 	// 快照不存在：fail-open，不加 partial_* 键。
 	missing := &SessionActor{id: "session_missing_snapshot", sessionStore: storage}
 	missingPayload := map[string]interface{}{"reason": "stall_timeout"}
-	missing.enrichSessionInterruptedPayload(missingPayload)
+	missing.enrichSessionInterruptedPayload(missingPayload, nil)
 	require.NotContains(t, missingPayload, "partial_summary")
 
-	// 未接存储（既有测试的构造方式）：直接返回，不 panic。
+	// 未接存储、也没有 run 快照：直接返回，不 panic。
 	noStore := &SessionActor{id: session.ID}
 	noStorePayload := map[string]interface{}{"reason": "interrupt"}
-	noStore.enrichSessionInterruptedPayload(noStorePayload)
+	noStore.enrichSessionInterruptedPayload(noStorePayload, nil)
 	require.NotContains(t, noStorePayload, "partial_summary")
+
+	// 有活动 run 但尚无产物：run 是权威，不回退到存储（否则会把上一轮的旧产物
+	// 当作本轮中断产物上报）。
+	emptyRun := &sessionRunControl{turnID: "turn-empty"}
+	emptyRunPayload := map[string]interface{}{"reason": "interrupt"}
+	actor.enrichSessionInterruptedPayload(emptyRunPayload, emptyRun)
+	require.NotContains(t, emptyRunPayload, "partial_summary")
+}
+
+// TestHistoryCheckpointCallbackNotesPartialProductForInterrupt 钉住运行期接线：
+// 每个 durable 历史提交点的回调都必须刷新 run 的产物快照（与落库节流/禁用无关），
+// 使中断路径拿到的是**运行中**的产物，而不是滞后的存储快照。
+func TestHistoryCheckpointCallbackNotesPartialProductForInterrupt(t *testing.T) {
+	ctx := context.Background()
+	session := NewSession("checkpoint-partial-note")
+	session.ReplaceHistory([]types.Message{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", Content: "mid-run deliverable"},
+		{Role: "tool", Content: "step output"},
+	})
+	// 中途落库显式禁用：快照仍必须刷新（该路径零 I/O，不受节流影响）。
+	actor := &SessionActor{id: session.ID, checkpointInterval: -1 * time.Second}
+	run := &sessionRunControl{sessionID: session.ID, turnID: "turn-live"}
+	runCtx := withSessionRunControl(ctx, run)
+
+	cfg := actor.historyCheckpointLoopConfig(nil, nil, session)
+	require.NotNil(t, cfg.OnHistoryCheckpoint, "A5 起回调必须挂载（快照刷新不依赖落库开关）")
+	cfg.OnHistoryCheckpoint(runCtx, nil)
+
+	product := run.partialProductSnapshot()
+	require.NotNil(t, product, "历史提交点必须刷新 run 产物快照")
+	require.Equal(t, "mid-run deliverable", product.summary)
+	require.Equal(t, "last_assistant_message", product.source)
+	require.Equal(t, 1, product.steps)
+
+	// 端到端（运行中）：中断载荷直接取快照，无需存储。
+	payload := map[string]interface{}{"reason": "interrupt"}
+	actor.enrichSessionInterruptedPayload(payload, run)
+	require.Equal(t, "mid-run deliverable", payload["partial_summary"])
+	require.Equal(t, "last_assistant_message", payload["partial_source"])
+	require.Equal(t, 1, payload["partial_steps"])
 }
 
 // TestSessionActorInterruptEventCarriesPartialProduct 是中断路径的端到端回归：

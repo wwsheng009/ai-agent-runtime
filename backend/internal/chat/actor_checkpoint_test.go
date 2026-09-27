@@ -163,10 +163,13 @@ func TestSessionActorCheckpointIntervalSemantics(t *testing.T) {
 	actor := newCheckpointTestActor(t, session.ID, recorder, nil, -1*time.Second)
 	baseline := recorder.updateCalls.Load()
 	require.Equal(t, -1*time.Second, actor.checkpointInterval)
-	require.Nil(t, actor.historyCheckpointLoopConfig(nil, nil, session).OnHistoryCheckpoint,
-		"禁用中途落库时不得挂载 checkpoint 回调")
+	// A5 起回调始终挂载（运行中产物快照需要每个历史提交点刷新），但禁用中途落库
+	// 时它不得写库。
+	disabledCfg := actor.historyCheckpointLoopConfig(nil, nil, session)
+	require.NotNil(t, disabledCfg.OnHistoryCheckpoint, "禁用中途落库时回调仍用于刷新 A5 产物快照")
 
 	session.ReplaceHistory(checkpointTestHistory("disabled checkpoint"))
+	disabledCfg.OnHistoryCheckpoint(ctx, nil)
 	actor.checkpointSessionHistory(ctx, session)
 	require.Equal(t, baseline, recorder.updateCalls.Load(), "禁用后不得中途写库")
 }

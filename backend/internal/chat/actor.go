@@ -110,6 +110,39 @@ type sessionRunControl struct {
 	abandoned    atomic.Bool
 	finalizing   atomic.Bool
 	lastActivity atomic.Int64
+	// partialProduct 是 A5 的中断产物快照：run 自身在每个 durable 历史提交点
+	// （OnHistoryCheckpoint）刷新，中断/停摆路径零 I/O 读取。之所以不读会话存储：
+	// 运行期只有节流 checkpoint 落库（权威落库在 turn 结束），中断时存储快照可能
+	// 还停在用户 prompt（真机实测）。
+	partialProduct atomic.Pointer[runPartialProduct]
+}
+
+// runPartialProduct 是一份不可变的有界产物快照（整体替换，读取无需加锁）。
+type runPartialProduct struct {
+	summary string
+	source  string
+	steps   int
+}
+
+// notePartialProduct 在 run goroutine 上按当前会话历史刷新产物快照；暂无产物时
+// 保留上一份好快照（它仍然可救）。只做字符串拷贝，无 I/O。
+func (r *sessionRunControl) notePartialProduct(session *Session) {
+	if r == nil || session == nil {
+		return
+	}
+	summary, source, steps := partialRunProduct(nil, session)
+	if strings.TrimSpace(summary) == "" {
+		return
+	}
+	r.partialProduct.Store(&runPartialProduct{summary: summary, source: source, steps: steps})
+}
+
+// partialProductSnapshot 供中断/停摆线程读取；nil 表示尚无产物快照。
+func (r *sessionRunControl) partialProductSnapshot() *runPartialProduct {
+	if r == nil {
+		return nil
+	}
+	return r.partialProduct.Load()
 }
 
 // SessionActorConfig configures a SessionActor instance.
@@ -1349,7 +1382,7 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 	}
 	// A4：中断型终态同样尽力带出已产出的部分产物（fail-open、有硬性时间上限，
 	// 见 enrichSessionInterruptedPayload）；存储不可用时行为与原先完全一致。
-	a.enrichSessionInterruptedPayload(payload)
+	a.enrichSessionInterruptedPayload(payload, run)
 	a.publish(runtimeevents.Event{
 		Type:      EventSessionInterrupted,
 		SessionID: a.id,
@@ -1501,7 +1534,7 @@ func (a *SessionActor) abortStalledRun(run *sessionRunControl) {
 		"timeout_ns": a.runStallTimeout,
 	}
 	// A4：停摆强杀同样是"真实取消"，同样尽力带出部分产物（fail-open）。
-	a.enrichSessionInterruptedPayload(stalledPayload)
+	a.enrichSessionInterruptedPayload(stalledPayload, run)
 	a.publish(runtimeevents.Event{
 		Type:      EventSessionInterrupted,
 		SessionID: a.id,
@@ -3386,11 +3419,19 @@ func (a *SessionActor) historyCheckpointLoopConfig(routeOverride *RunRouteOverri
 	if cfg == nil {
 		cfg = agent.DefaultLoopReActConfig()
 	}
-	if session == nil || a.checkpointInterval <= 0 {
+	if session == nil {
 		return cfg
 	}
+	// A5：该回调与落库节流解耦——即使中途落库被禁用（interval<0），也要在每个
+	// durable 历史提交点维护运行中的产物快照，供中断/停摆路径零 I/O 读取；
+	// 快照更新只有字符串拷贝，不产生任何 I/O。
 	cfg.OnHistoryCheckpoint = func(ctx context.Context, _ []runtimetypes.Message) {
-		a.checkpointSessionHistory(ctx, session)
+		if run, ok := sessionRunControlFromContext(ctx); ok && run != nil {
+			run.notePartialProduct(session)
+		}
+		if a.checkpointInterval > 0 {
+			a.checkpointSessionHistory(ctx, session)
+		}
 	}
 	return cfg
 }

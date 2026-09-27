@@ -31,16 +31,36 @@ const partialProductSummaryRunes = 2000
 const interruptedRunPartialProductWait = 200 * time.Millisecond
 
 // enrichSessionInterruptedPayload 尽力为中断型终态（用户中断/停摆超时）补一份
-// 有界产物：只读地加载最近一次持久化的会话快照，取最后一条 assistant 消息与工具
-// 结果计数。该动作 fail-open——会话存储缺失、加载失败或超时都静默跳过，绝不阻塞
-// 中断路径，也不改变事件既有形状（仅在确有产物时新增 partial_* 键）。
+// 有界产物。取源优先级：
+//  1. run 自己维护的产物快照（notePartialProduct）——运行期会话尚未权威落库，
+//     存储快照在中断时可能只有用户 prompt（真机实测），因此它是主取源；
+//  2. 最近一次持久化快照——仅当**没有活动 run**（会话已挂起/已终态时收到 ESC）时
+//     兜底；有活动 run 时以 run 快照为准（其权威性高于可能滞后的存储快照）。
 //
-// 取源与 A4 主路径一致（历史优先，见 partialRunProduct）。区别：中断路径既没有
-// 本轮的 agent.Result，也没有会话句柄（SessionActor 不缓存会话），因此只能读存储
-// 快照；快照即当前 run 最近一次持久化的产物，语义与 session_end 路径相同。
-func (a *SessionActor) enrichSessionInterruptedPayload(payload map[string]interface{}) {
-	if a == nil || payload == nil || a.sessionStore == nil {
+// 两条取源都 fail-open，绝不阻塞中断路径；仅确有产物时新增 partial_* 键。
+func (a *SessionActor) enrichSessionInterruptedPayload(payload map[string]interface{}, run *sessionRunControl) {
+	if payload == nil {
 		return
+	}
+	summary, source, steps := "", "", 0
+	if product := run.partialProductSnapshot(); product != nil {
+		summary, source, steps = product.summary, product.source, product.steps
+	} else if run == nil && a != nil {
+		summary, source, steps = a.loadStoredPartialProduct()
+	}
+	if strings.TrimSpace(summary) == "" {
+		return
+	}
+	payload["partial_summary"] = summary
+	payload["partial_source"] = source
+	payload["partial_steps"] = steps
+}
+
+// loadStoredPartialProduct 是中断路径的兜底取源：只读加载最近一次持久化快照，
+// 带硬性时间上限（interruptedRunPartialProductWait），失败/超时返回空。
+func (a *SessionActor) loadStoredPartialProduct() (summary, source string, steps int) {
+	if a == nil || a.sessionStore == nil {
+		return "", "", 0
 	}
 	type partialProduct struct {
 		summary string
@@ -56,19 +76,15 @@ func (a *SessionActor) enrichSessionInterruptedPayload(payload map[string]interf
 			done <- partialProduct{}
 			return
 		}
-		summary, source, steps := partialRunProduct(nil, session)
-		done <- partialProduct{summary: summary, source: source, steps: steps}
+		loadedSummary, loadedSource, loadedSteps := partialRunProduct(nil, session)
+		done <- partialProduct{summary: loadedSummary, source: loadedSource, steps: loadedSteps}
 	}()
 	select {
 	case product := <-done:
-		if strings.TrimSpace(product.summary) == "" {
-			return
-		}
-		payload["partial_summary"] = product.summary
-		payload["partial_source"] = product.source
-		payload["partial_steps"] = product.steps
+		return product.summary, product.source, product.steps
 	case <-time.After(interruptedRunPartialProductWait):
-		// 加载比中断本身还慢：放弃补产物，中断路径优先。
+		// 加载比中断本身还慢：放弃兜底产物，中断路径优先。
+		return "", "", 0
 	}
 }
 
