@@ -1,8 +1,12 @@
 # Go
 backend/bin/
 backend/aicli
+backend/aicli-console
+backend/aicli-mesh
 /aicli
 /aicli.exe
+/aicli-console
+/aicli-mesh
 backend/*.exe
 backend/**/*.exe
 backend/*.exe~
