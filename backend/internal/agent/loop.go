@@ -100,6 +100,10 @@ type LoopReActConfig struct {
 	// 文本、tool 结果、预算/压缩改写等所有历史变更点都会经过它。宿主用它把
 	// 长 turn 的历史增量中途落库，避免 turn 结束前权威会话长时间缺失。
 	//
+	// 工具执行前还会先通知一次（此时 tool 结果尚未产生）：assistant 文本可能
+	// 长时间处于「已产出但未提交」状态，宿主的中断/停摆路径需要据此救出产物。
+	// 该通知不改变落库语义——是否写库仍由宿主按自己的节流决定，实现必须幂等。
+	//
 	// 契约：尽力而为。回调只读 messages（不得修改、不得长期持有）；其耗时
 	// 计入 step 尾部，实现必须自带节流；失败不得冒泡为 turn 失败，由实现方
 	// 自行记录/上报。
@@ -1190,6 +1194,10 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// 2. Act: 执行工具调用
 		normalizedCalls := builder.AppendAssistantAction(action.Content, action.ToolCalls, action.Reasoning, action.MessageMetadata)
 		promptBuilder.AppendAssistantAction(action.Content, normalizedCalls, action.Reasoning, action.MessageMetadata)
+		// A5：工具执行前先通知一次"durable 历史已变化"。工具可能长时间运行，
+		// 期间被中断/停摆时，宿主的中断路径必须能救出刚产出的 assistant 文本；
+		// 这里只做通知（不触发额外的落库语义，落库仍由宿主按自己的节流决定）。
+		loop.notifyHistoryCheckpoint(currentCtx, builder.Messages())
 		historySnapshot := builder.Messages()
 		toolResults, err := loop.act(currentCtx, traceID, sessionID, step, options.Depth, historySnapshot, normalizedCalls, options.ToolWhitelist)
 		if err != nil {

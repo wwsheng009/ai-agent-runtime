@@ -124,13 +124,20 @@ type runPartialProduct struct {
 	steps   int
 }
 
-// notePartialProduct 在 run goroutine 上按当前会话历史刷新产物快照；暂无产物时
-// 保留上一份好快照（它仍然可救）。只做字符串拷贝，无 I/O。
-func (r *sessionRunControl) notePartialProduct(session *Session) {
-	if r == nil || session == nil {
+// notePartialProduct 在 run goroutine 上刷新产物快照。优先用回调携带的 messages：
+// 工具执行前的通知发生时会话对象还没同步，"已产出但未提交"的 assistant 文本只在
+// messages 里。messages 为空时退回会话历史。暂无产物时保留上一份好快照（仍然可救）。
+// 只做字符串拷贝，无 I/O。
+func (r *sessionRunControl) notePartialProduct(messages []runtimetypes.Message, session *Session) {
+	if r == nil {
 		return
 	}
-	summary, source, steps := partialRunProduct(nil, session)
+	summary, source, steps := "", "", 0
+	if len(messages) > 0 {
+		summary, source, steps = partialProductFromMessages(messages)
+	} else if session != nil {
+		summary, source, steps = partialRunProduct(nil, session)
+	}
 	if strings.TrimSpace(summary) == "" {
 		return
 	}
@@ -3425,9 +3432,9 @@ func (a *SessionActor) historyCheckpointLoopConfig(routeOverride *RunRouteOverri
 	// A5：该回调与落库节流解耦——即使中途落库被禁用（interval<0），也要在每个
 	// durable 历史提交点维护运行中的产物快照，供中断/停摆路径零 I/O 读取；
 	// 快照更新只有字符串拷贝，不产生任何 I/O。
-	cfg.OnHistoryCheckpoint = func(ctx context.Context, _ []runtimetypes.Message) {
+	cfg.OnHistoryCheckpoint = func(ctx context.Context, messages []runtimetypes.Message) {
 		if run, ok := sessionRunControlFromContext(ctx); ok && run != nil {
-			run.notePartialProduct(session)
+			run.notePartialProduct(messages, session)
 		}
 		if a.checkpointInterval > 0 {
 			a.checkpointSessionHistory(ctx, session)

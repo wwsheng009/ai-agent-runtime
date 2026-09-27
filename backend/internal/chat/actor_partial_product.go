@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // A4（2026-09-27）：被真实取消（用户中断/显式停止/父被取消）或失败的 run，其终态
@@ -98,6 +99,28 @@ func partialRunProduct(result *agent.Result, session *Session) (summary string, 
 	if result != nil {
 		if content := strings.TrimSpace(result.Output); content != "" {
 			return clipPartialProduct(content), "result_output", steps
+		}
+	}
+	return "", "", steps
+}
+
+// partialProductFromMessages 从 durable 消息视图取产物，规则与 partialRunProduct
+// 一致（最后一条非空 assistant 消息 + 全部工具结果计数）。工具执行前的快照通知
+// 只能用这份视图：此时会话对象还没同步，"已产出但未提交"的 assistant 文本只在
+// messages 里。
+func partialProductFromMessages(messages []runtimetypes.Message) (summary string, source string, steps int) {
+	for index := range messages {
+		if messages[index].Role == "tool" {
+			steps++
+		}
+	}
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
+		if message.Role != "assistant" {
+			continue
+		}
+		if content := strings.TrimSpace(message.Content); content != "" {
+			return clipPartialProduct(content), "last_assistant_message", steps
 		}
 	}
 	return "", "", steps

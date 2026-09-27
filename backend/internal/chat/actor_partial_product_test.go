@@ -116,7 +116,7 @@ func TestEnrichSessionInterruptedPayloadAttachesPartialProduct(t *testing.T) {
 
 	// 主取源：run 快照；actor 故意不接 sessionStore，证明运行期不依赖存储。
 	liveRun := &sessionRunControl{turnID: "turn-live"}
-	liveRun.notePartialProduct(session)
+	liveRun.notePartialProduct(nil, session)
 	liveActor := &SessionActor{id: session.ID}
 	livePayload := map[string]interface{}{"reason": "interrupt"}
 	start := time.Now()
@@ -189,6 +189,25 @@ func TestHistoryCheckpointCallbackNotesPartialProductForInterrupt(t *testing.T) 
 	require.Equal(t, "mid-run deliverable", payload["partial_summary"])
 	require.Equal(t, "last_assistant_message", payload["partial_source"])
 	require.Equal(t, 1, payload["partial_steps"])
+
+	// 工具执行前的通知：会话对象尚未同步，"已产出但未提交"的 assistant 文本只在
+	// 回调携带的 messages 里——这是"长工具运行中被中断"的主场景。
+	preToolRun := &sessionRunControl{sessionID: session.ID, turnID: "turn-pretool"}
+	preToolCfg := actor.historyCheckpointLoopConfig(nil, nil, NewSession("checkpoint-pretool"))
+	preToolCfg.OnHistoryCheckpoint(withSessionRunControl(ctx, preToolRun), []types.Message{
+		{Role: "user", Content: "go"},
+		{Role: "assistant", Content: "produced before a long tool"},
+	})
+	preToolProduct := preToolRun.partialProductSnapshot()
+	require.NotNil(t, preToolProduct, "工具执行前的通知也必须刷新快照（此时会话尚未同步）")
+	require.Equal(t, "produced before a long tool", preToolProduct.summary)
+	require.Equal(t, 0, preToolProduct.steps, "工具还没执行完，步数应为 0")
+
+	preToolPayload := map[string]interface{}{"reason": "interrupt"}
+	actor.enrichSessionInterruptedPayload(preToolPayload, preToolRun)
+	require.Equal(t, "produced before a long tool", preToolPayload["partial_summary"])
+	require.Equal(t, "last_assistant_message", preToolPayload["partial_source"])
+	require.Equal(t, 0, preToolPayload["partial_steps"])
 }
 
 // TestSessionActorInterruptEventCarriesPartialProduct 是中断路径的端到端回归：
