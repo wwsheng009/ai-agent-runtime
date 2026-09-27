@@ -202,7 +202,7 @@
 | Web 选项 | 仅 Approve/Deny 两个按钮；请求体支持可选 `patched_args`；**不发送 Remember** | `pending-interaction-bar.tsx:190-211`；`sessions.ts:442-477` |
 | 拒绝反馈 | **无"拒绝并附自由文本反馈"**：CLI 固定串 `approval_denied`，Web 只有布尔值 | `actor.go:1157-1158`；`chat_runtime_events.go:5617-5633` |
 | 记忆存储 | `MemoryGrantStore`（默认 session）与 `FileGrantStore`（`<project>/.aicli/grants.json`，默认 project，原子写、去重、可撤销）；危险工具（shell/bash/aicli_exec/background_task）永不记住；引擎只写 tool 级 session grant | `policy/grants.go:22-97,174-182`；`policy/file_grants.go:13-35,105-107,144-190,219-251`；`policy/engine.go:717-720` |
-| grants 管理面 | Web harness `GET/POST /harness/grants`；设置页可查看/新增；`/approval-reuse` 可清本地复用 | `api/runtimeapi/handler.go:1019-1020`；`harness_handlers.go:171-247`；`chat_command_result.go:1085-1120` |
+| grants 管理面 | Web harness `GET/POST /harness/grants`；设置页可查看/新增；CLI `/grants [list\|status\|revoke <tool> [pattern]]` 查看/撤销 durable grants（§12.4）；`/approval-reuse` 可清进程内复用 | `api/runtimeapi/handler.go:1019-1020`；`harness_handlers.go:171-247`；`cmd/aicli/commands/chat_grants_command.go`；`chat_command_result.go:1085-1120` |
 | 拒绝指导 | 只读边界有可操作 guidance（错误码+fix 文案）；连续 3 次升级、5 次硬停本轮 | `agent/denial_guidance.go:15-43,64-75,96-109` |
 | turn 影响 | 策略拒绝：工具记失败结果、turn 继续；人类拒绝：写入 `approval_denied` 工具结果并 resume，turn 继续 | `agent/loop.go:2656-2660`；`chat/actor.go:1157-1158,3589-3623` |
 | 并发/恢复 | waiter 按 requestID 存 map（可多 waiter），但 RuntimeState 仅单个 `PendingApproval` 投影槽（后到覆盖）；进程重启可恢复 pending 审批 | `chat/actor.go:242,4434-4439,4724-4736`；`chat/runtime_state.go:109`；`chat_restored_pending.go:299-307,413-432` |
@@ -313,6 +313,7 @@
   2. 引擎把 `RememberScope=project` 写 `FileGrantStore`（`<project>/.aicli/grants.json`），`session` 写内存 store；CLI `[4]` 改为走同一 `ApprovalResponse.Remember + Scope`，TTL map 仅保留为纯 UI 提示缓存。
    3. 各宿主选项对齐：CLI `[5] 拒绝并说明原因` **已落地**（2026-09-26；本地 actor + runtime-server 两条路径，含恢复态/直接函数审批，见 §12.3）——自由文本进入 `Feedback`，作为 tool error/guidance 的一部分回给模型；Web 增加 remember 勾选与反馈输入框（§12.2 已落地）；ACP 可映射到 `reject_always`（已定义未启用，`acp/types.go:173-179`；**本次未动，ACP 仍无自由文本拒绝**）。
   4. `grant Pattern` 目前只有子串匹配实现（`policy/grants.go:184-200`），配合 4.1 升级为 specifier 存储格式，避免"记住 `git *`"退化为字符串包含。
+  5. CLI 命令面 `/grants [list|status|revoke <tool> [pattern]]` **已落地**（2026-09-26，见 §12.4）：展示 durable `grants.json` 的 `tool · pattern · scope`（空 pattern 显示「全部」、空 scope 回落 `project`），`revoke` 按 `GrantRevoker` 契约收窄权限（省略 pattern 仅撤销该 tool 的 tool-wide 授权，撤销只收窄权限、无需二次确认）；**Web/API `GET/POST /harness/grants` 仍是 durable 写（remember）入口**，CLI 暂无 `remember` 写入面。
 - **验证**：三宿主一致性的 handler/组件测试；"remember project → 新会话仍生效"的 e2e；危险工具 remember 被拒测试；拒绝反馈进入模型上下文的测试。
 
 ### 4.9 【P1】配置分层累积 + disableBypass
@@ -376,7 +377,7 @@
 | 1 | **应用层 + OS 级沙箱** | `SandboxConfig` 含路径/命令/主机白黑名单、`BlockNetwork`、`EnvWhitelist`、超时；profile `off/workspace/read-only/strict`；`OSSandbox=off/auto/require` 支持 OS 隔离并 fail-closed | 文档未描述 OS 级隔离与命令/主机白名单；这是 aicli 更强的一层，不要为对齐而弱化 |
 | 2 | **capability scope 与只读子代理硬边界** | 能力域独立于 permission_mode；`read_only` 子代理移除写型工具与 `background_task` 并在执行时硬拒，approval/bypass 均不能放宽（`policy/capability_scope.go:23-31,43`；`policy/tool_policy.go:120-147`） | CommandCode 子代理在"主循环会 ask"处 **auto-allow**；aicli 是硬边界 + 父级裁决（更严格） |
 | 3 | **审批补丁参数（PatchedArgs）与硬约束重验** | hook/callback/审批三处补丁都必须重过静态策略+硬 deny 规则（`policy/engine.go:361-371,450-483,725-744`）；Web 已支持改参批准 | 文档未描述"改参批准"；保留 |
-| 4 | **durable grants 与可管理面** | `<project>/.aicli/grants.json` 原子写、去重、可撤销；Web harness `GET/POST /harness/grants`；`/approval-reuse` 清本地复用 | CommandCode 把记忆写进 settings 规则（同样 durable）；aicli 的独立 grants 文件 + 撤销/查看面是补充优势 |
+| 4 | **durable grants 与可管理面** | `<project>/.aicli/grants.json` 原子写、去重、可撤销；Web harness `GET/POST /harness/grants`；CLI `/grants` 查看/撤销 durable grants（§12.4）；`/approval-reuse` 清进程内复用 | CommandCode 把记忆写进 settings 规则（同样 durable）；aicli 的独立 grants 文件 + 撤销/查看面是补充优势 |
 | 5 | **MCP trust level 三档 + 默认阻断** | `local/trusted_remote/untrusted_remote`；默认 `BlockUntrustedMCP`/`BlockRemoteWrites`，untrusted/remote 写型工具直接拒；规范名 `mcp__server__tool` | 文档只描述 MCP 命名与规则 key，未描述信任分级；保留并保持默认安全 |
 | 6 | **多宿主同构与审批恢复** | CLI/TUI、Web、ACP、console 共用同一 engine/审批协议；进程重启可恢复 pending 审批（`chat_restored_pending.go`）；运行终态时迟到审批只记录不重放（`actor.go:1077-1106`） | 文档偏 TUI；aicli 的跨宿主一致性更强 |
 | 7 | **denial guidance + 只读熔断** | 只读拒绝渲染 `[TOOL_DENIED:code] + boundary + rule + fix`；连续 3 次升级、5 次硬停（`agent/denial_guidance.go:15-43,96-109`） | 文档原则（"策略拒绝给模型可执行指导"）一致，且 aicli 有熔断上限 |
@@ -395,7 +396,7 @@
 | **M1 安全护栏（P0）** | 4.3 根/主目录断路器（+共享 shell 解析层）、4.4 敏感写保护、4.7 只读机密参数过滤、4.2 dont-ask 模式 | 无（可与规则重构解耦） | 防欺骗矩阵、敏感路径分类表驱动、5 模式决策矩阵、`aicli exec --permission-mode dont-ask` 冒烟 |
 | **M2 规则引擎（P0/P1）** | 4.1 specifier（命令/路径/域名/MCP）、4.6 复合命令逐段匹配与不对称、4.10 参数匹配+工具名通配、4.11 accept-edits 安全命令快车道 | M1 的解析层 | specifier 单测矩阵、旧 permissions.yaml 全量回归、`git status && rm -rf x` 反例 |
 | **M3 边界与配置（P0/P1）** | 4.5 外部目录门（/add-dir、additionalDirectories 生效、temp/skill/plan 例外）、4.9 分层配置累积 + disableBypass、CLI chat 的 sandbox/policy 接线 | M2（豁免规则用到 specifier） | 外部路径矩阵、分层合并单测、disableBypass 四层拒绝、ACP e2e |
-| **M4 体验与文档（P1/P2）** | 4.8 审批选项统一（反馈+remember 作用域）**Web 面已落地（§12.2）；CLI 面已落地（§12.3）；ACP 面待做（无自由文本拒绝）**、4.13 按需解释**已落地且已加模式/缓存**（`off`/`on_demand`/`pre_generate` + 单飞缓存，Web UI 已接线；CLI/ACP 入口与设置页开关待做）**、4.14 文档 IA**首版 + ACP 侧入口表已落地**（`docs/aicli/permissions.md`；`docs/acp/README.md` §6 权限入口对照表 + option id 勘误）**、4.12 安全复核已落地（§13：slash/接口/ACP→bypass 可达性 + 手册 §1.4 提权边界）；入口简写与 banner 待做** | M1–M3 | policy/chat/runtimeapi 全绿、Web 前端 lint + 全量用例通过；CLI/ACP UI 一致性、新会话 grant 生效 e2e 待补 |
+| **M4 体验与文档（P1/P2）** | 4.8 审批选项统一（反馈+remember 作用域）**Web 面已落地（§12.2）；CLI 面已落地（§12.3）；CLI `/grants` 展示/撤销面已落地（§12.4）；ACP 面待做（无自由文本拒绝）**、4.13 按需解释**已落地且已加模式/缓存**（`off`/`on_demand`/`pre_generate` + 单飞缓存，Web UI 已接线；CLI/ACP 入口与设置页开关待做）**、4.14 文档 IA**首版 + ACP 侧入口表已落地**（`docs/aicli/permissions.md`；`docs/acp/README.md` §6 权限入口对照表 + option id 勘误）**、4.12 安全复核已落地（§13：slash/接口/ACP→bypass 可达性 + 手册 §1.4 提权边界）；入口简写与 banner 待做** | M1–M3 | policy/chat/runtimeapi 全绿、Web 前端 lint + 全量用例通过；CLI/ACP UI 一致性、新会话 grant 生效 e2e 待补 |
 
 分阶段风险控制：
 
@@ -565,7 +566,7 @@
 
 - ~~CLI `[5] 拒绝并说明原因`（自由文本 → `Feedback`）~~ **已完成（§12.3）**：本地 actor + runtime-server 两条路径（含恢复态与 `/call` 直接函数审批）都会把自由文本作为 `Feedback` 下发；空理由等同普通拒绝，超长不截断；仍未做的是 `[4]` 复用与 `ApprovalResponse.Remember + Scope` 的合并（CLI 现有 10 分钟 TTL 复用仍是独立轨道）；
 - ACP `reject_always`（`acp/types.go` 已定义未启用）与 `allow-always` → policy 记忆库（`RememberScope=session/project`）的映射——当前 `allow-always` 走的是 CLI 侧进程内授权族复用（10 分钟 TTL）；现状已写入 ACP 手册「权限入口对照表」；
-- `/grants` 命令面展示新 specifier 形态（durable store 读写已通，展示层待跟进）；
+- ~~`/grants` 命令面展示新 specifier 形态（durable store 读写已通，展示层待跟进）~~ **已完成（§12.4）**：CLI `/grants`、`/grants list|status` 展示 `<project>/.aicli/grants.json` 的 `tool · pattern · scope`（空 pattern 显示「全部」、空 scope 回落 `project`），`/grants revoke <tool> [pattern]` 调 `FileGrantStore.Revoke`（省略 pattern 仅撤销该 tool 的 tool-wide 授权；撤销只收窄权限、无需二次确认）；**Web/API `GET/POST /harness/grants` 仍是 durable 写（remember）入口**，CLI 暂无 `remember` 写入面；
 - 4.13 剩余：CLI/ACP 面的「解释」入口；宿主若注入 `ApprovalSummarizer` 需自担记账。（**Web 设置页开关已落地**：`GET/PUT /api/runtime/config/approval-explain` + 设置页卡片，进程级不落盘。）
 - 4.12：**已完成**（入口简写/别名/`/mode:<name>` 见 §4.12「本轮收口」；CLI 常驻模式 banner 经核对为既有实现（§4.6），Web/CLI tone 与回落口径一致）。安全复核已完成（§13：四类输入面的 bypass 可达性、F1–F4 定级与建议，已写入手册 §1.4）。4.14 的后续项：示例工程/截图未开始（ACP 侧入口表本次已落地，见 ACP 手册 §6）。
 
@@ -580,6 +581,17 @@
 | ACP 面 | ⏸ 未做 | ACP v1 权限选项没有自由文本拒绝，`acpEventBridge.AskApproval` 的 `Feedback` 保持为空；`reject_always` 仍未接线 | —— |
 
 边界说明：CLI 的 `[5]` 只影响宿主侧输入与决策下发，不改变 `ApprovalResponse`/`ApproveToolDecision` 契约（runtimeapi 的 feedback ≤ 2000 runes、超长 400 校验保持原样）。ACP 仍无自由文本拒绝，`docs/acp/README.md` 的选项表无需更新。
+
+### 12.4 落地状态（2026-09-26，M4：CLI `/grants` 命令面）
+
+| 项 | 状态 | 代码落点 | 验证 |
+|----|------|----------|------|
+| 数据展示（新 specifier 形态） | ✅ | `cmd/aicli/commands/chat_grants_command.go`：`/grants`、`/grants list`、`/grants status` 读 `<project>/.aicli/grants.json`（`policy.OpenProjectGrantStore`，project root 复用 `/trust` 的 `folderTrustProjectRoot` 口径），每行 `tool · pattern · scope`；空 pattern 显示「全部」、空 scope 回落 `project`；空 store 是成功读取（文件不存在不报错、读取不建文件） | `chat_grants_command_test.go`（有数据 / 空 store / 只读不建文件） |
+| `revoke`（只收窄） | ✅ | `/grants revoke <tool> [pattern]` 调 `FileGrantStore.Revoke(tool, pattern, pattern=="")`：省略 pattern 仅撤销该 tool 的 tool-wide 授权，指定 pattern 精确匹配；撤销只收窄权限集，因此不加二次确认；未知子命令/缺参数 fail-loud 并回显用法，不静默降级成 list | `TestChatGrantsCommandRevokeToolWideAndPattern`、`TestChatGrantsCommandFailsLoudOnBadInput` |
+| 命令登记点 | ✅ | catalog / 参数补全 / 结构化 fence+dispatch / legacy 路由四处同步（`/grants` 路由保持字面量）。`/approval-reuse` 仍是进程内 10 分钟 TTL 复用（非 grants.json），语义与文案不变 | `TestChatSlashCommandCatalogMatchesHandleCommandRoutes`；`chat_grants_command_test.go` 断言结构化 `handled=true` 且不落 legacy stdout |
+| 文档 | ✅ | `docs/aicli/install.md` 命令表、`docs/aicli/permissions.md` §5.2 管理入口、本节 | —— |
+
+边界：CLI 面**只读 + revoke**，不提供 `remember` 写入（新增 durable 授权仍走审批「记住」选择或 Web 设置页 `GET/POST /harness/grants`，CLI 无法凭命令放宽权限）；`scope=session` 条目在本文件中没有独立生命周期语义（`FileGrantStore.Remember` 会把空 scope 默认成 `project`），展示/撤销按存储值原样处理。
 
 ---
 

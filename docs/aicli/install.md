@@ -799,6 +799,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | `/queue [status|clear]` | 查看或清空排队输入 |
 | `/permission-mode [default|accept_edits|plan|bypass_permissions|dont_ask]`、`/mode` | 查看或切换权限模式（`dont_ask` 为 fail-closed 无人值守模式：不弹审批，仅运行已允许的调用） |
 | `/approval-reuse [off|session_readonly_shell|team_readonly_shell]` | 查看或切换审批复用策略 |
+| `/grants [list\|status\|revoke <tool> [pattern]]` | 查看或撤销 durable remembered grants（`<project>/.aicli/grants.json`）：展示每条授权的 tool/pattern/scope，`revoke` 只收窄权限、无需二次确认；与进程内 10 分钟 TTL 的 `/approval-reuse` 是两条轨道 |
 | `/yolo` | 切换到 `bypass_permissions` |
 | `/functions <prompt>` | 预览当前 prompt 会暴露哪些 builtin tools / skill functions |
 | `/function <name>` | 查看单个 function 描述 |

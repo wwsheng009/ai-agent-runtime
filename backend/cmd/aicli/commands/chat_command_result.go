@@ -429,7 +429,8 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		!commandMatches(cmdLower, "/new") && cmdLower != "/session" && !commandMatches(cmdLower, "/history") && !commandMatches(cmdLower, "/h") &&
 		!commandMatches(cmdLower, "/queue") && !commandMatches(cmdLower, "/attach") &&
 		!commandMatches(cmdLower, "/permission-mode") && !commandMatches(cmdLower, "/mode") && !permissionModeColonShorthand(cmdLower) &&
-		!commandMatches(cmdLower, "/approval-reuse") && !commandMatches(cmdLower, "/plan") && !commandMatches(cmdLower, "/plans") &&
+		!commandMatches(cmdLower, "/approval-reuse") && !commandMatches(cmdLower, "/grants") &&
+		!commandMatches(cmdLower, "/plan") && !commandMatches(cmdLower, "/plans") &&
 		!commandMatches(cmdLower, "/timeline") && !commandMatches(cmdLower, "/collab") &&
 		!commandMatches(cmdLower, "/mcp") && !commandMatches(cmdLower, "/web") && !commandMatches(cmdLower, "/routing") &&
 		!commandMatches(cmdLower, "/profile") {
@@ -464,6 +465,10 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 
 	if commandMatches(cmdLower, "/approval-reuse") {
 		return executeStructuredApprovalReuseCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/grants") {
+		return executeStructuredGrantsCommand(session, command), true, nil
 	}
 
 	if commandMatches(cmdLower, "/plans") {

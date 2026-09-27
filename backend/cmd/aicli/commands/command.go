@@ -396,6 +396,9 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/approval-reuse") {
 		return handleApprovalReuseCommand(session, command)
 	}
+	if commandMatches(cmdLower, "/grants") {
+		return handleGrantsCommand(session, command)
+	}
 	if commandMatches(cmdLower, "/agents") {
 		handleChatAgentsCommand(session, command)
 		return false

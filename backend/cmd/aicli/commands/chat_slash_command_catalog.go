@@ -701,6 +701,18 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			},
 		},
 		{
+			Name:        "/grants",
+			Usage:       "/grants [list|status|revoke <tool> [pattern]]",
+			Summary:     "查看或撤销 durable remembered grants（<project>/.aicli/grants.json）",
+			Group:       string(chatSlashCommandGroupPermission),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "list", Summary: "列出 durable 授权（默认）"},
+				{Token: "status", Summary: "查看 durable 授权状态（同 list）"},
+				{Token: "revoke", Summary: "撤销授权：revoke <tool> [pattern]"},
+			},
+		},
+		{
 			Name:        "/yolo",
 			Usage:       "/yolo",
 			Summary:     "切换到 bypass_permissions",

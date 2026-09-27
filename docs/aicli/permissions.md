@@ -420,7 +420,7 @@ disable_bypass: true         # 我的机器上永不开 yolo
 - 记忆模式以 specifier 形态存储：`cmd:<base>:*`（仅当整条命令是单一基命令且非高风险时才泛化）、`path:`、`host:`、`exact:`；旧的无前缀模式按历史子串语义兼容。
 - **不可记忆**：危险工具（`shell`/`bash`/`aicli_exec`/`background_task`）、根/主目录断路器、敏感写、外部目录准入——每次都需要人工确认。
 - 记忆授权在求值时仍要先过断路器、敏感写与外部目录门，不会「一记了之」。
-- 管理入口：CLI `/approval-reuse`（查看/清理本地复用）、`aicli exec --approval-reuse off|session_readonly_shell|team_readonly_shell`、Web 设置页（`GET/POST /harness/grants`）。
+- 管理入口：CLI `/grants [list|status|revoke <tool> [pattern]]`（查看/撤销 durable grants；`revoke` 只收窄权限，无需二次确认）、CLI `/approval-reuse`（查看/清理进程内 10 分钟复用授权，**不写 grants 文件**）、`aicli exec --approval-reuse off|session_readonly_shell|team_readonly_shell`、Web 设置页（`GET/POST /harness/grants`，durable 授权的写入面）。
 - **project 记忆会写进工作区**：请把 `.aicli/grants.json` 视作个人授权文件（建议加入 `.gitignore`，不要提交）。
 
 ### 5.3 拒绝反馈

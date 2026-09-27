@@ -136,6 +136,12 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 			{Command: "session_readonly_shell", Summary: "会话只读 shell", Group: string(chatSlashCommandGroupPermission)},
 			{Command: "team_readonly_shell", Summary: "团队只读 shell", Group: string(chatSlashCommandGroupPermission)},
 		})
+	case "/grants":
+		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
+			{Command: "list", Summary: "列出 durable 授权", Group: string(chatSlashCommandGroupPermission)},
+			{Command: "status", Summary: "查看 durable 授权状态", Group: string(chatSlashCommandGroupPermission)},
+			{Command: "revoke", Summary: "撤销授权：revoke <tool> [pattern]", Group: string(chatSlashCommandGroupPermission), AcceptsArgs: true},
+		})
 	case "/attach":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "clear", Summary: "清空待发送图片附件", Group: string(chatSlashCommandGroupContext)},

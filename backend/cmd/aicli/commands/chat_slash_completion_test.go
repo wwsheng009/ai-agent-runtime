@@ -474,6 +474,7 @@ func TestChatSlashCommandCatalogMatchesHandleCommandRoutes(t *testing.T) {
 		{canonical: "/plan", forms: []string{"/plan"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/plans", forms: []string{"/plans"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/approval-reuse", forms: []string{"/approval-reuse"}, acceptsArgs: true, requiresArgs: false},
+		{canonical: "/grants", forms: []string{"/grants"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/yolo", forms: []string{"/yolo"}, acceptsArgs: false, requiresArgs: false},
 		{canonical: "/functions", forms: []string{"/functions", "/catalog"}, acceptsArgs: true, requiresArgs: false},
 		{canonical: "/function", forms: []string{"/function", "/describe"}, acceptsArgs: true, requiresArgs: true},
