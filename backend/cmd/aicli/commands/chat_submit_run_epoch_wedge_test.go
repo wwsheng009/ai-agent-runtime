@@ -12,9 +12,11 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -130,11 +132,84 @@ func TestDebugReportsWedgeSuspected(t *testing.T) {
 		"Run Epoch:",
 		"Run Active:",
 		"Waiting Armed:",
+		"Waiting For:",
 		"Late Action Drops:",
 		"Wedge Suspected:",
 	} {
 		if !strings.Contains(plain, marker) {
 			t.Fatalf("debug turn 区块缺少撕裂检测锚点 %q\n---\n%s", marker, plain)
 		}
+	}
+}
+
+// TestWaitingArmedSinceTracksLifecycle 锁定 P1-2 的等待态时钟：
+// 重复置位不得刷新起始时间，清态必须复位。
+func TestWaitingArmedSinceTracksLifecycle(t *testing.T) {
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "waiting-since"}}
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+
+	if armed, _ := coord.WaitingArmedSince(); armed {
+		t.Fatal("fresh coordinator must not report an armed waiting state")
+	}
+	coord.StartWaiting()
+	armed, since := coord.WaitingArmedSince()
+	if !armed || since.IsZero() {
+		t.Fatalf("StartWaiting must record the waiting clock (armed=%v since=%v)", armed, since)
+	}
+	coord.StartWaiting()
+	if _, again := coord.WaitingArmedSince(); !again.Equal(since) {
+		t.Fatalf("re-arming must keep the original waiting clock: %v -> %v", since, again)
+	}
+	coord.ClearWaiting()
+	if armed, since := coord.WaitingArmedSince(); armed || !since.IsZero() {
+		t.Fatalf("ClearWaiting must reset the waiting clock (armed=%v since=%v)", armed, since)
+	}
+}
+
+// TestChatActorBuildContextBoundsBootstrap 锁定 P0-2：actor 构建预算必须真的
+// 生效（超时返回 DeadlineExceeded），否则提交仍可能静默卡在构建阶段。
+func TestChatActorBuildContextBoundsBootstrap(t *testing.T) {
+	old := chatActorBuildBudget
+	chatActorBuildBudget = 25 * time.Millisecond
+	t.Cleanup(func() { chatActorBuildBudget = old })
+
+	ctx, cancel := chatActorBuildContext(context.Background())
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("build ctx err = %v, want DeadlineExceeded", ctx.Err())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("actor build context was not bounded by chatActorBuildBudget")
+	}
+}
+
+// TestChatActorBuildContextDisabledReturnsParent 锁定关闭语义：预算为 0 时
+// 必须原样返回父 ctx（不引入额外取消源）。
+func TestChatActorBuildContextDisabledReturnsParent(t *testing.T) {
+	old := chatActorBuildBudget
+	chatActorBuildBudget = 0
+	t.Cleanup(func() { chatActorBuildBudget = old })
+
+	parent := context.Background()
+	ctx, cancel := chatActorBuildContext(parent)
+	defer cancel()
+	if ctx != parent {
+		t.Fatal("disabled budget must return the parent context unchanged")
+	}
+}
+
+// TestChatActorForSessionBoundedPassesThroughNonTimeoutError 保证预算层不吞掉
+// 可归因的构建错误（只把超时翻译成可读文案）。
+func TestChatActorForSessionBoundedPassesThroughNonTimeoutError(t *testing.T) {
+	old := chatActorBuildBudget
+	chatActorBuildBudget = time.Second
+	t.Cleanup(func() { chatActorBuildBudget = old })
+
+	_, err := chatActorForSessionBounded(context.Background(), &ChatSession{})
+	if err == nil || !strings.Contains(err.Error(), "local runtime host is not configured") {
+		t.Fatalf("expected the original build error to pass through, got %v", err)
 	}
 }

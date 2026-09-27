@@ -46,10 +46,16 @@ func appendChatDebugTurnMetricsLines(builder *chatDebugDocumentBuilder, session 
 		bridge := session.RuntimeEventBridge
 		epoch := bridge.RunEpoch()
 		active := bridge.RunActive()
-		waiting := session.Interaction != nil && session.Interaction.WaitingArmed()
+		waiting, waitingSince := false, time.Time{}
+		if session.Interaction != nil {
+			waiting, waitingSince = session.Interaction.WaitingArmedSince()
+		}
 		builder.meta("Run Epoch:", strconv.FormatUint(epoch, 10))
 		builder.meta("Run Active:", strconv.FormatBool(active))
 		builder.meta("Waiting Armed:", strconv.FormatBool(waiting))
+		if waiting && !waitingSince.IsZero() {
+			builder.meta("Waiting For:", time.Since(waitingSince).Truncate(time.Second).String())
+		}
 		total, closedEpoch, lastType, lastReason, lastAt := bridge.LateRuntimeDropStats()
 		builder.meta("Late Action Drops:", fmt.Sprintf("%d (closed-epoch %d)", total, closedEpoch))
 		if lastType != "" {

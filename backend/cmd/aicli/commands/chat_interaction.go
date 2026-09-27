@@ -2387,6 +2387,22 @@ func (c *chatInteractionCoordinator) WaitingArmed() bool {
 	return c.waitingActive
 }
 
+// WaitingArmedSince 报告等待态及其起始时钟（沿用 Running 状态的
+// dynamicStatusStarted；未置位时返回零值）。诊断用：配合 RunEpoch==0 可算出
+// "脱离 run 的等待"已持续多久（docs/plan/aicli-chat-submit-run-epoch-wedge-hardening.md
+// P1-2）。
+func (c *chatInteractionCoordinator) WaitingArmedSince() (bool, time.Time) {
+	if c == nil {
+		return false, time.Time{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.waitingActive {
+		return false, time.Time{}
+	}
+	return true, c.dynamicStatusStarted
+}
+
 func (c *chatInteractionCoordinator) IsReady() bool {
 	if c == nil {
 		return true

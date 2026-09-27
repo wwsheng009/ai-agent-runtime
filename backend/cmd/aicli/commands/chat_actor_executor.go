@@ -31,6 +31,38 @@ const aicliActorReadyPollInterval = 20 * time.Millisecond
 // run is followed instead of failed; see waitForAICLIActorReady.
 var aicliActorReadyWaitTimeout = 30 * time.Second
 
+// chatActorBuildBudget 限制一次提交里的 actor 构建（warmup / 驱逐后重建）。
+// 0 表示不设上限（测试或极慢冷启动）。刻意只覆盖构建阶段：turn gate 等待与
+// 具体 run 有自己的 ctx/生命周期语义，不属于"预跑卡死"的范畴。
+// 见 docs/plan/aicli-chat-submit-run-epoch-wedge-hardening.md（P0-2）。
+var chatActorBuildBudget = 5 * time.Minute
+
+// chatActorBuildContext 为 actor 构建派生有界上下文；预算关闭时原样返回父 ctx
+// （返回值恒非 nil 可供调用方安全使用）。
+func chatActorBuildContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if chatActorBuildBudget <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, chatActorBuildBudget)
+}
+
+// chatActorForSessionBounded 给 actor 构建套上构建预算：超时返回可诊断错误
+// （提示重试 / 检查 runtime、MCP 配置），避免提交静默卡在构建阶段而用户只看到
+// 空转或什么都没有。
+func chatActorForSessionBounded(ctx context.Context, session *ChatSession) (*runtimechat.SessionActor, error) {
+	buildCtx, cancel := chatActorBuildContext(ctx)
+	defer cancel()
+	actor, err := chatActorForSession(buildCtx, session)
+	if err != nil && errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("runtime actor 构建超过 %s 未就绪（可重试；若持续出现请检查 runtime/MCP 配置）: %w",
+			chatActorBuildBudget, err)
+	}
+	return actor, err
+}
+
 // submitAICLIActorPrompt serializes an interactive user turn behind an
 // internally-triggered parent turn (for example a supervision auto-wake).
 // SessionActor still rejects concurrent control-plane submissions; only the
@@ -174,7 +206,7 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	reconcilePendingChatActorRebuild(session)
 	ctx = prepareAICLIActorRuntimeContext(ctx, session)
 
-	actor, err := chatActorForSession(ctx, session)
+	actor, err := chatActorForSessionBounded(ctx, session)
 	if err != nil {
 		return "", err
 	}
@@ -299,7 +331,7 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 	reconcilePendingChatActorRebuild(session)
 	ctx = prepareAICLIActorRuntimeContext(ctx, session)
 
-	actor, err := chatActorForSession(ctx, session)
+	actor, err := chatActorForSessionBounded(ctx, session)
 	if err != nil {
 		return "", err
 	}
