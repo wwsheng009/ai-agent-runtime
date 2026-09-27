@@ -85,7 +85,8 @@ rules:
 | 写文件（`write`/`edit`/`apply_patch`） | 询问 | 放行 | 仅白名单路径 | 拒绝 | 放行 |
 | 安全文件命令（`mv`/`cp`/`mkdir` 等，见 §3.4） | 询问 | **快车道放行** | 拒绝 | 拒绝 | 放行 |
 | 非只读 shell | 询问 | 询问 | 拒绝 | 拒绝 | 放行 |
-| 网络（`web_search`/`fetch`/`download`） | 询问 | 询问 | 拒绝 | 拒绝 | 放行 |
+| 网络只读（`web_search`/`fetch`，taxonomy 只读） | 放行（`readonly_auto`） | 放行 | 放行 | 放行 | 放行 |
+| 网络写盘（`download`） | 询问 | 询问 | 拒绝 | 拒绝 | 放行 |
 | 后台任务（`background_task`） | 询问 | 询问 | 拒绝 | 拒绝 | 放行 |
 | `ask_user_question` / 计划工具 / 协作控制面 | 放行 | 放行 | 放行 | 放行 | 放行 |
 | 显式 `deny` 规则 / 硬 deny 名单 | 拒绝 | 拒绝 | 拒绝 | 拒绝 | **拒绝** |
@@ -278,6 +279,8 @@ aicli exec --deny-tool download --enable-tools --prompt "..."
 
 ## 4. 常用 recipes（可直接抄）
 
+> 可执行样例：[`backend/examples/permissions-walkthrough/`](../../backend/examples/permissions-walkthrough/) —— 用真实 `internal/policy.Engine` 装载示例 `permissions.yaml` 并逐条断言决策（`Type`/`Stage`/`Reason`）；在 `backend/` 下运行 `go test ./examples/permissions-walkthrough/ -count=1`。
+
 ### 4.1 只读 git 不再逐条问
 
 ```yaml
@@ -288,7 +291,9 @@ rules:
     decision: allow
 ```
 
-复合命令要**每段都命中**才放行：`git status && git log` 需要两条规则都覆盖（这里已覆盖）；`git status && npm test` 会整条掉回询问。未覆盖的其余 `git` 子命令（`checkout`/`reset`/…）仍按模式询问。
+复合命令的 allow 判定是**逐 specifier** 的：每条 specifier 都要求整条命令的**全部段**命中它自己（`internal/policy/specifier.go` 的 `matchShellCommand`），规则级的多条 specifier 不会拼起来覆盖一条复合命令。所以**上面的写法不能放行 `git status && git diff`**——每个 specifier 单独看都覆盖不了全部段；这类整体只读的复合命令实际是走只读快车道放行（reason `readonly_auto:shell_readonly`），而不是命中 allow 规则。要覆盖复合命令，只能写一条能覆盖全部段的 specifier（代价是把该基命令下更多子命令一起放宽）；含非只读段（如 `git status && npm test`）则整条掉回询问。未覆盖的其余 `git` 子命令（`checkout`/`reset`/…）仍按模式询问。
+
+> 最新实测与断言见示例工程 [`backend/examples/permissions-walkthrough/`](../../backend/examples/permissions-walkthrough/README.md)（`go test ./examples/permissions-walkthrough/`，在 `backend/` 下执行）。
 
 ### 4.2 推送前必须人工确认
 

@@ -396,7 +396,7 @@
 | **M1 安全护栏（P0）** | 4.3 根/主目录断路器（+共享 shell 解析层）、4.4 敏感写保护、4.7 只读机密参数过滤、4.2 dont-ask 模式 | 无（可与规则重构解耦） | 防欺骗矩阵、敏感路径分类表驱动、5 模式决策矩阵、`aicli exec --permission-mode dont-ask` 冒烟 |
 | **M2 规则引擎（P0/P1）** | 4.1 specifier（命令/路径/域名/MCP）、4.6 复合命令逐段匹配与不对称、4.10 参数匹配+工具名通配、4.11 accept-edits 安全命令快车道 | M1 的解析层 | specifier 单测矩阵、旧 permissions.yaml 全量回归、`git status && rm -rf x` 反例 |
 | **M3 边界与配置（P0/P1）** | 4.5 外部目录门（/add-dir、additionalDirectories 生效、temp/skill/plan 例外）、4.9 分层配置累积 + disableBypass、CLI chat 的 sandbox/policy 接线 | M2（豁免规则用到 specifier） | 外部路径矩阵、分层合并单测、disableBypass 四层拒绝、ACP e2e |
-| **M4 体验与文档（P1/P2）** | 4.8 审批选项统一（反馈+remember 作用域）**Web 面已落地（§12.2）；CLI 面已落地（§12.3）；CLI `/grants` 展示/撤销面已落地（§12.4）；ACP 面待做（无自由文本拒绝）**、4.13 按需解释**已落地且已加模式/缓存**（`off`/`on_demand`/`pre_generate` + 单飞缓存，Web UI 已接线、设置页开关已落地；**CLI 入口已落地（§12.6），本地模式模型解释已接（共享包预算/提示词 + 本地 `EventBus` 账本）**；ACP 无 `_meta` 字段未做）**、4.14 文档 IA**首版 + ACP 侧入口表已落地**（`docs/aicli/permissions.md`；`docs/acp/README.md` §6 权限入口对照表 + option id 勘误）**、4.12 安全复核已落地（§13：slash/接口/ACP→bypass 可达性 + 手册 §1.4 提权边界）；入口简写与 banner 待做** | M1–M3 | policy/chat/runtimeapi 全绿、Web 前端 lint + 全量用例通过；CLI/ACP UI 一致性（4.13 的 ACP 无入口已有记录）；新会话 grant 生效已由 `internal/policy/approval_scope_test.go`（freshSession:201）覆盖，不再是待补项 |
+| **M4 体验与文档（P1/P2）** | 4.8 审批选项统一（反馈+remember 作用域）**Web 面已落地（§12.2）；CLI 面已落地（§12.3）；CLI `/grants` 展示/撤销面已落地（§12.4）；ACP 面待做（无自由文本拒绝）**、4.13 按需解释**已落地且已加模式/缓存**（`off`/`on_demand`/`pre_generate` + 单飞缓存，Web UI 已接线、设置页开关已落地；**CLI 入口已落地（§12.6），本地模式模型解释已接（共享包预算/提示词 + 本地 `EventBus` 账本）**；ACP 无 `_meta` 字段未做）**、4.14 文档 IA**首版 + ACP 侧入口表已落地**（`docs/aicli/permissions.md`；`docs/acp/README.md` §6 权限入口对照表 + option id 勘误）**、4.12 安全复核已落地（§13：slash/接口/ACP→bypass 可达性 + 手册 §1.4 提权边界）；入口简写/别名与常驻 banner 已完成（见下文本轮收口与 §4.6）** | M1–M3 | policy/chat/runtimeapi 全绿、Web 前端 lint + 全量用例通过；CLI/ACP UI 一致性（4.13 的 ACP 无入口已有记录）；新会话 grant 生效已由 `internal/policy/approval_scope_test.go`（freshSession:201）覆盖，不再是待补项 |
 
 分阶段风险控制：
 
@@ -569,7 +569,7 @@
 - ~~ACP `allow-always` → policy 记忆库映射~~ **已完成（session 作用域，2026-09-26）**：`allow-always` 且服务端派生 `RememberPattern` 非空时，`chatApprovalAnswer.RememberScope="session"` → `resolveApproval` → 本地 `actor.ApproveToolWithDecision` / runtime-server `remember_scope` 字段；范围恒由引擎按调用参数派生（进程内记忆，不写 `grants.json`），危险工具等仍被服务端守卫与 `IsDangerousTool` 拦截。`reject_always` 仍不提供：policy 只有 allow 记忆、没有 deny-memory 语义，接线需要先定义"记住拒绝"对 deny 规则/断路器/敏感写门的影响面，留作独立议题。
 - ~~`/grants` 命令面展示新 specifier 形态（durable store 读写已通，展示层待跟进）~~ **已完成（§12.4）**：CLI `/grants`、`/grants list|status` 展示 `<project>/.aicli/grants.json` 的 `tool · pattern · scope`（空 pattern 显示「全部」、空 scope 回落 `project`），`/grants revoke <tool> [pattern]` 调 `FileGrantStore.Revoke`（省略 pattern 仅撤销该 tool 的 tool-wide 授权；撤销只收窄权限、无需二次确认）；**Web/API `GET/POST /harness/grants` 仍是 durable 写（remember）入口**，CLI 暂无 `remember` 写入面；
 - 4.13 剩余（本地模型解释落地后更新）：~~CLI~~ 已落地 `[6] 解释这次调用`（live + 恢复态）；**本地模式已接模型解释**（共享包预算/提示词 + 本地 `EventBus` 的 `origin=approval_explain` 账本，`AICLI_APPROVAL_EXPLAIN_MODE=off` 关闭；`pre_generate` 本地无预热通路，按 `on_demand` 处理；服务端摘要仍按 `approval-explain` 模式/缓存/降级语义，见 §12.6）；**ACP 面无入口**——`RequestPermissionParams` 没有 `_meta` 字段，本轮不新增协议字段（见 §12.6 与 `docs/acp/README.md`）；宿主若注入 `ApprovalSummarizer` 需自担记账。（**Web 设置页开关已落地**：`GET/PUT /api/runtime/config/approval-explain` + 设置页卡片，进程级不落盘。）
-- 4.12：**已完成**（入口简写/别名/`/mode:<name>` 见 §4.12「本轮收口」；CLI 常驻模式 banner 经核对为既有实现（§4.6），Web/CLI tone 与回落口径一致）。安全复核已完成（§13：四类输入面的 bypass 可达性、F1–F4 定级与建议，已写入手册 §1.4）。4.14 的后续项：示例工程/截图未开始（ACP 侧入口表本次已落地，见 ACP 手册 §6）。
+- 4.12：**已完成**（入口简写/别名/`/mode:<name>` 见 §4.12「本轮收口」；CLI 常驻模式 banner 经核对为既有实现（§4.6），Web/CLI tone 与回落口径一致）。安全复核已完成（§13：四类输入面的 bypass 可达性、F1–F4 定级与建议，已写入手册 §1.4）。4.14：示例工程已落地（`backend/examples/permissions-walkthrough/` 自验证决策表 + README，见 §12.7）；截图仍不在仓库内，按示例 README 的采集步骤在真实终端出图（不伪造）。
 
 ### 12.3 落地状态（2026-09-26，M4 第二切片：CLI `[5] 拒绝并说明原因`）
 
@@ -621,6 +621,16 @@
 记账信封的已知差异：runtimeapi 通过 `publishSessionRuntimeEvent` 发出的事件带 `agent_name=runtime-admin`，本地 `EventBus.Publish` 不带该字段——本地**刻意不冒名**：usage ledger / cache analytics / usage analytics 只读 payload 与 session id，账本语义一致，差异只体现在持久化事件视图的 `agent_name` 列。
 
 未决边界：本地模式已按「同一预算 + 本地 EventBus 记账」接入模型解释（见上表），`pre_generate` 在本地没有 /runtime 读路径可预热，按 `on_demand` 处理；解释缓存跨重绘的行为仍由 live/恢复态各自的 `explainShown` 固定为「一次投影一次调用」，是否需要更长的跨恢复缓存留待有真实成本数据后再评估。
+
+### 12.7 落地状态（2026-09-26，M4 收尾：4.14 示例工程 + 手册↔实现偏差修正）
+
+| 项 | 状态 | 落点 | 验证 |
+|----|------|------|------|
+| 可执行示例工程 | ✅ | `backend/examples/permissions-walkthrough/`（`.aicli/permissions.yaml` + `walkthrough_test.go` + `README.md` + `doc.go`）。落在 `backend/` 模块内是 **Go internal 可见性**的硬约束（`internal/policy` 只能被同模块导入），所以路径不是仓库根的 `examples/` | `go test ./examples/permissions-walkthrough/`（27 个子测试：15 行决策表 + 硬门/对照组；在 `backend/` 下执行） |
+| 手册↔实现偏差 ①：`§1.1` 模式矩阵「网络」行 | ✅ 已按实测修手册 | `web_search`/`fetch` 在 taxonomy 里只读（`taxonomy.go:28-31`），未命中规则时走第 5 阶 `readonly_auto`（与模式无关），**不询问**；会写盘的 `download` 才询问。手册该行已拆成「网络只读 / 网络写盘」两行 | 示例断言 `taxonomy_readonly:fetch`；`engine.go:743-762`、`engine.go:382-392` |
+| 手册↔实现偏差 ②：`§4.1` 复合 allow 粒度 | ✅ 已按实测修手册；**实现留作产品决策** | allow 的「每段都命中」只在**单个 specifier** 内判定（`specifier.go:352-395`），规则级多条 specifier 不组合覆盖 → `git status && git diff` 命中的是只读快车道（`readonly_auto`）而非 allow 规则 | 示例断言 `Stage=readonly_auto`（`compound_across_specifiers_not_covered_by_allow`） |
+| 截图 | ⏸ 不入库 | 示例 README 给真实终端采集步骤与引用建议（`docs/aicli/assets/*.png`、宽 ≤1280px、单图 <300KB）；**不提交伪造截图** | —— |
+| 待决策（放权类） | —— | 是否让 allow 支持「同一规则内多条 specifier 组合覆盖一条复合命令」（`Shell(git status:*)` + `Shell(git diff:*)` 放行 `git status && git diff`）：属于**放宽权限**的语义变更，需要专门切片 + 反例矩阵（opaque/包装器/跨规则混用/非只读段混入），本轮不做 | —— |
 
 ---
 
