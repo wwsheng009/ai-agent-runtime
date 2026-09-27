@@ -113,6 +113,13 @@ func TestBridgeLateRuntimeDropStatsRecorded(t *testing.T) {
 	if lastAt.IsZero() {
 		t.Fatal("last late drop timestamp must be recorded")
 	}
+	if idleNoRun, closedAfterRun, activeMismatch := bridge.LateRuntimeDropBreakdown(); idleNoRun != 1 || closedAfterRun != 0 || activeMismatch != 0 {
+		t.Fatalf("fresh-bridge drop breakdown = (idle=%d closed=%d active-mismatch=%d), want (1, 0, 0)",
+			idleNoRun, closedAfterRun, activeMismatch)
+	}
+	if state := bridge.RunState(); state != chatRunStateIdle {
+		t.Fatalf("fresh bridge run state = %q, want %q", state, chatRunStateIdle)
+	}
 	if bridge.RunEpoch() != 0 || bridge.RunActive() {
 		t.Fatalf("fresh bridge run state = (epoch=%d active=%v), want (0, false)", bridge.RunEpoch(), bridge.RunActive())
 	}
@@ -130,6 +137,7 @@ func TestDebugReportsWedgeSuspected(t *testing.T) {
 	plain := renderDocPlainText(buildChatDebugDisplayDocument(session))
 	for _, marker := range []string{
 		"Run Epoch:",
+		"Run State:",
 		"Run Active:",
 		"Waiting Armed:",
 		"Waiting For:",
@@ -331,4 +339,60 @@ func TestWaitingWatchdogSkipsNonActorExecutor(t *testing.T) {
 	if armed, _ := coord.WaitingArmedSince(); !armed {
 		t.Fatal("watchdog must not clear waiting states on non-actor executors")
 	}
+}
+
+// TestChatRuntimeEventBridgeRunStateLifecycle 锁定 P1-1：显式 run 状态必须与
+// BeginRun/EndRun 一一对应，且"从未 BeginRun 的防御性 EndRun"不得把 idle 误标
+// 成 closed（这正是 epoch 0 双关需要被取代的前提）。
+func TestChatRuntimeEventBridgeRunStateLifecycle(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{RuntimeSession: &runtimechat.Session{ID: "run-state"}})
+	if state := bridge.RunState(); state != chatRunStateIdle {
+		t.Fatalf("fresh bridge run state = %q, want idle", state)
+	}
+	bridge.EndRun() // 防御性调用：从未 BeginRun
+	if state := bridge.RunState(); state != chatRunStateIdle {
+		t.Fatalf("defensive EndRun must keep idle, got %q", state)
+	}
+	bridge.BeginRun()
+	if state := bridge.RunState(); state != chatRunStateRunning {
+		t.Fatalf("state after BeginRun = %q, want running", state)
+	}
+	bridge.EndRun()
+	if state := bridge.RunState(); state != chatRunStateClosed {
+		t.Fatalf("state after EndRun = %q, want closed", state)
+	}
+	bridge.BeginRun()
+	if state := bridge.RunState(); state != chatRunStateRunning {
+		t.Fatalf("state after re-BeginRun = %q, want running", state)
+	}
+	bridge.EndRun()
+}
+
+// TestLateRuntimeDropBreakdownClassifiesRunState 锁定 P1-1 的归因细分：同样一条
+// "closed run epoch" 拒绝，在 idle / closed / running 三种状态下落进不同桶——
+// 修复前它们都只记作 closed-epoch。
+func TestLateRuntimeDropBreakdownClassifiesRunState(t *testing.T) {
+	event := runtimeevents.Event{Type: chatWebDynamicStatusBusEvent, SessionID: "late-drop-class"}
+
+	idleBridge := newChatRuntimeEventBridge(&ChatSession{RuntimeSession: &runtimechat.Session{ID: "late-drop-class"}})
+	idleBridge.logLateRuntimeEvent(event, chatRuntimeLateReasonClosedRunEpoch)
+	if idle, closed, active := idleBridge.LateRuntimeDropBreakdown(); idle != 1 || closed != 0 || active != 0 {
+		t.Fatalf("idle breakdown = (idle=%d closed=%d active-mismatch=%d), want (1, 0, 0)", idle, closed, active)
+	}
+
+	closedBridge := newChatRuntimeEventBridge(&ChatSession{RuntimeSession: &runtimechat.Session{ID: "late-drop-class"}})
+	closedBridge.BeginRun()
+	closedBridge.EndRun()
+	closedBridge.logLateRuntimeEvent(event, chatRuntimeLateReasonClosedRunEpoch)
+	if idle, closed, active := closedBridge.LateRuntimeDropBreakdown(); idle != 0 || closed != 1 || active != 0 {
+		t.Fatalf("closed breakdown = (idle=%d closed=%d active-mismatch=%d), want (0, 1, 0)", idle, closed, active)
+	}
+
+	activeBridge := newChatRuntimeEventBridge(&ChatSession{RuntimeSession: &runtimechat.Session{ID: "late-drop-class"}})
+	activeBridge.BeginRun()
+	activeBridge.logLateRuntimeEvent(event, chatRuntimeLateReasonClosedRunEpoch)
+	if idle, closed, active := activeBridge.LateRuntimeDropBreakdown(); idle != 0 || closed != 0 || active != 1 {
+		t.Fatalf("active breakdown = (idle=%d closed=%d active-mismatch=%d), want (0, 0, 1)", idle, closed, active)
+	}
+	activeBridge.EndRun()
 }

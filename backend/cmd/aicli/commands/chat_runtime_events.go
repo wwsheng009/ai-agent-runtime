@@ -116,7 +116,12 @@ type chatRuntimeEventBridge struct {
 	runStarted                      bool
 	runActive                       bool
 	runEpoch                        uint64
-	activeTurnID                    string
+	// runState 是 run 生命周期的显式投影（见 chatRunState）：runEpoch==0 既表示
+	// "本会话尚未开启任何 run"，又被围栏当作"无效"哨兵，late-drop 归因必须区分
+	// 二者。用原子存储，使 recordLateRuntimeDrop 等热路径无需取 renderMu
+	//（该函数存在重入风险，见其注释）。
+	runState     atomic.Int32
+	activeTurnID string
 	// adoptedTurnID marks a primary turn that this bridge auto-adopted from
 	// the event stream (session_start opens / session_end closes) because the
 	// submitting side (sidecar/background auto-recovery wake turns) never
@@ -979,6 +984,7 @@ func (b *chatRuntimeEventBridge) BeginRunKind(kind chatRunKind) {
 	b.runStarted = true
 	b.runActive = true
 	b.runEpoch++
+	b.setRunState(chatRunStateRunning)
 	b.activeTurnID = ""
 	b.executorTurnID = ""
 	b.activeAssistantStreamID = ""
@@ -1119,6 +1125,7 @@ func (b *chatRuntimeEventBridge) EndRun() {
 		b.retireTurnLocked(b.activeTurnID)
 	}
 	b.runActive = false
+	b.markRunClosed()
 	b.renderMu.Unlock()
 	b.finalizeOpenUnifiedStreamsAtRunEnd()
 	b.logRunEndFallback()
@@ -4258,9 +4265,16 @@ const chatRuntimeLateReasonClosedRunEpoch = "runtime event action targets closed
 type chatRuntimeLateDropStats struct {
 	Total       uint64
 	ClosedEpoch uint64
-	LastType    string
-	LastReason  string
-	LastAt      time.Time
+	// IdleNoRun / ClosedAfterRun / ActiveMismatch 把 ClosedEpoch 按显式 run 状态
+	// 细分（P1-1）：idle=本会话尚未开启任何 run（epoch 0 哨兵误报），
+	// closed=上一个 run 已结束的迟到事件，activeMismatch=有活动 run 但 epoch
+	// 不匹配（跨 run 混入）。修复前三者都被记为同一个 "closed run epoch"。
+	IdleNoRun      uint64
+	ClosedAfterRun uint64
+	ActiveMismatch uint64
+	LastType       string
+	LastReason     string
+	LastAt         time.Time
 }
 
 func (b *chatRuntimeEventBridge) logLateRuntimeEvent(event runtimeevents.Event, reason string) {
@@ -4283,6 +4297,14 @@ func (b *chatRuntimeEventBridge) recordLateRuntimeDrop(event runtimeevents.Event
 	b.lateDropStats.Total++
 	if reason == chatRuntimeLateReasonClosedRunEpoch {
 		b.lateDropStats.ClosedEpoch++
+		switch b.RunState() {
+		case chatRunStateClosed:
+			b.lateDropStats.ClosedAfterRun++
+		case chatRunStateRunning:
+			b.lateDropStats.ActiveMismatch++
+		default:
+			b.lateDropStats.IdleNoRun++
+		}
 	}
 	b.lateDropStats.LastType = event.Type
 	b.lateDropStats.LastReason = reason
@@ -4290,7 +4312,65 @@ func (b *chatRuntimeEventBridge) recordLateRuntimeDrop(event runtimeevents.Event
 	b.lateDropMu.Unlock()
 }
 
-// RunEpoch 报告事件桥当前 run epoch（0 = 本会话尚未开启任何 run）。
+// chatRunState 是事件桥 run 生命周期的显式状态，取代 "epoch 0" 的双关语义：
+// epoch 0 既表示"本会话尚未开启任何 run"，又被围栏当作"无效/已关闭"哨兵。
+type chatRunState string
+
+const (
+	chatRunStateIdle    chatRunState = "idle"
+	chatRunStateRunning chatRunState = "running"
+	chatRunStateClosed  chatRunState = "closed"
+)
+
+func chatRunStateFromInt(v int32) chatRunState {
+	switch v {
+	case 1:
+		return chatRunStateRunning
+	case 2:
+		return chatRunStateClosed
+	default:
+		return chatRunStateIdle
+	}
+}
+
+// setRunState 写入显式 run 状态（原子，调用方可持 renderMu）。
+func (b *chatRuntimeEventBridge) setRunState(state chatRunState) {
+	if b == nil {
+		return
+	}
+	switch state {
+	case chatRunStateRunning:
+		b.runState.Store(1)
+	case chatRunStateClosed:
+		b.runState.Store(2)
+	default:
+		b.runState.Store(0)
+	}
+}
+
+// markRunClosed 只在确有 run 进行时把状态推进到 closed：EndRun 可能被防御性
+// 调用（从未 BeginRun 的路径），那不应把 idle 误标成 closed。
+func (b *chatRuntimeEventBridge) markRunClosed() {
+	if b == nil {
+		return
+	}
+	if b.RunState() == chatRunStateRunning {
+		b.setRunState(chatRunStateClosed)
+	}
+}
+
+// RunState 报告当前 run 生命周期状态（idle/running/closed）；零值即 idle。
+// 与 RunEpoch 的区别：epoch 只在 run 开始时自增（0 无法区分"没跑过"与
+// "跑完又回到零"），显式状态是诊断与归因的唯一事实来源。
+func (b *chatRuntimeEventBridge) RunState() chatRunState {
+	if b == nil {
+		return chatRunStateIdle
+	}
+	return chatRunStateFromInt(b.runState.Load())
+}
+
+// RunEpoch 报告事件桥当前 run epoch（0 = 本会话尚未开启任何 run；是否已跑完
+// 请用 RunState）。
 func (b *chatRuntimeEventBridge) RunEpoch() uint64 { return b.currentRunEpoch() }
 
 // RunActive 报告事件桥当前是否有活动 run。
@@ -4306,6 +4386,17 @@ func (b *chatRuntimeEventBridge) LateRuntimeDropStats() (total, closedEpoch uint
 	defer b.lateDropMu.Unlock()
 	s := b.lateDropStats
 	return s.Total, s.ClosedEpoch, s.LastType, s.LastReason, s.LastAt
+}
+
+// LateRuntimeDropBreakdown 返回 "closed run epoch" 类拒绝按显式 run 状态的细分。
+func (b *chatRuntimeEventBridge) LateRuntimeDropBreakdown() (idleNoRun, closedAfterRun, activeMismatch uint64) {
+	if b == nil {
+		return 0, 0, 0
+	}
+	b.lateDropMu.Lock()
+	defer b.lateDropMu.Unlock()
+	s := b.lateDropStats
+	return s.IdleNoRun, s.ClosedAfterRun, s.ActiveMismatch
 }
 
 func (b *chatRuntimeEventBridge) writeLateRuntimeDebug(event runtimeevents.Event, reason string) {
@@ -5315,6 +5406,7 @@ func (b *chatRuntimeEventBridge) maybeAdoptPrimaryRunTurn(event runtimeevents.Ev
 	b.runStarted = true
 	b.runActive = true
 	b.runEpoch++
+	b.setRunState(chatRunStateRunning)
 	b.activeTurnID = turnID
 	b.adoptedTurnID = turnID
 	b.adoptedRunEpoch = b.runEpoch
@@ -5385,6 +5477,7 @@ func (b *chatRuntimeEventBridge) maybeAdoptResumedPrimaryTurn(event runtimeevent
 	b.runStarted = true
 	b.runActive = true
 	b.runEpoch++
+	b.setRunState(chatRunStateRunning)
 	b.activeTurnID = turnID
 	b.adoptedTurnID = turnID
 	b.adoptedRunEpoch = b.runEpoch
@@ -5424,6 +5517,7 @@ func (b *chatRuntimeEventBridge) endAdoptedRun(event runtimeevents.Event) {
 		b.activeTurnID = ""
 		b.retireTurnLocked(turnID)
 		b.runActive = false
+		b.markRunClosed()
 	}
 	b.adoptedTurnID = ""
 	b.adoptedRunEpoch = 0

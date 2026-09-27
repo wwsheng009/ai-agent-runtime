@@ -178,7 +178,9 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 
 - ~~P0-2~~：已落地（见 §6.4）。收敛为 `chatActorBuildBudget`，只覆盖 actor 构建；
   turn gate 等待与 run 本身由各自 ctx/生命周期约束，不纳入"预跑卡死"预算。
-- P1-1：显式 `RunState` 取代 epoch 0 双关；丢弃指标接入 `/web/api/analysis/errors`。
+- P1-1：部分落地（见 §6.9）。显式 `RunState`（idle/running/closed）已取代 epoch 0
+  在诊断与撕裂判定中的双关；丢弃指标接入 `/web/api/analysis/errors` 仍待办
+  （usageanalytics 摄取管线 + 跨端点契约，建议与相关 WIP 串行）。
 - ~~P1-2~~：已落地（见 §6.4 / §6.5）。等待态时钟、`/debug` 时长展示与
   「脱离 run 的等待态」看门狗自愈（清态 + 动态栏提示）全部就位。
 - ~~P2~~：已落地（见 §6.7）。交互提交（`Execute`/`ContinueGoal`）与内部提交
@@ -295,3 +297,28 @@ P3 两项收尾：
 | `TestPreRunFailureNeverRendersAnalyzingFrame -count=1 -v` | PASS |
 | `TestSendMessagePersistsUserPromptAtInputTime -count=1 -v` | PASS（P3-1 复核） |
 | `gofmt -l` | PASS |
+
+### 6.9 第八轮实施（P1-1a——显式 RunState 取代 epoch 0 双关）
+
+问题：`runEpoch == 0` 同时承担两个语义——「本会话尚未开启任何 run」与围栏的
+「无效/已关闭」哨兵。后果之一在事故诊断里可见：late action 拒绝一律记作
+`closed-epoch`，其中相当一部分其实是「从未开启 run」的日常噪声。
+
+| 文件 | 改动 |
+| --- | --- |
+| `backend/cmd/aicli/commands/chat_runtime_events.go` | 新增 `chatRunState`（idle/running/closed）与桥上的**原子**状态 `runState`（读路径不取 `renderMu`，规避 `recordLateRuntimeDrop` 的既有重入约束）；`BeginRun/BeginRunKind`、adopt（`maybeAdoptPrimaryRunTurn`）、revive（`expectResumedTurnAfterAnswer`）三处开启点置 `running`；`EndRun` 与 adopted-run 结束置 `closed`，且 `markRunClosed` 只在确有 run 时推进——防御性 `EndRun` 不会把 `idle` 误标成 `closed`；新增 `RunState()`；`chatRuntimeLateDropStats` 增 `IdleNoRun/ClosedAfterRun/ActiveMismatch` 细分与 `LateRuntimeDropBreakdown()` |
+| `backend/cmd/aicli/commands/chat_interaction.go` | `chatWaitingDetachedFromRun` 改用 `RunState()==idle`（与 `epoch==0` 等价，语义显式） |
+| `backend/cmd/aicli/commands/chat_debug_turn_metrics.go` | `/debug` 撕裂区块新增 `Run State:`；`Late Action Drops` 展示 `idle/closed/active-mismatch` 三段细分；楔子指纹判定改用显式状态 |
+| `backend/cmd/aicli/commands/chat_submit_run_epoch_wedge_test.go` | 新增状态生命周期用例（idle→running→closed→running；防御性 EndRun 保持 idle）与三态归因细分用例；既有 late-drop / wedge 用例补断言 |
+
+范围声明：围栏判定本身（`isRunEpochCurrent`）**未改动**，本轮只把状态与归因
+显式化，避免在渲染闸门上引入行为变化。
+
+验证（2026-09-27 第八轮）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `go build ./cmd/aicli/commands/` / `go vet` / `gofmt -l`（改动文件） | PASS |
+| `-run 'TestChatRuntimeEvent' -count=1`（桥全族回归） | PASS |
+| 新状态用例 + 归因细分 + 看门狗 + late-drop `-race -count=1` | PASS |
+| wedge/refresh/claim/evict×submit/pre-run 全量回归 `-count=1` | PASS |

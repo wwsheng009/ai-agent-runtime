@@ -2433,7 +2433,9 @@ func chatWaitingDetachedFromRun(session *ChatSession) bool {
 	if bridge == nil {
 		return false
 	}
-	return bridge.RunEpoch() == 0 && !bridge.RunActive()
+	// P1-1：用显式 RunState 取代 "epoch 0" 双关——只有"从未开启任何 run"（idle）
+	// 才可能是幽灵等待态；closed 表示上一个 run 已结束，其残留由 turn 收尾负责。
+	return bridge.RunState() == chatRunStateIdle && !bridge.RunActive()
 }
 
 // armWaitingWithoutRunWatchdogLocked 为本次等待态安排一次性看门狗：新序号使旧

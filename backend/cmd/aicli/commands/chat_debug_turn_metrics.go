@@ -51,18 +51,21 @@ func appendChatDebugTurnMetricsLines(builder *chatDebugDocumentBuilder, session 
 			waiting, waitingSince = session.Interaction.WaitingArmedSince()
 		}
 		builder.meta("Run Epoch:", strconv.FormatUint(epoch, 10))
+		builder.meta("Run State:", string(bridge.RunState()))
 		builder.meta("Run Active:", strconv.FormatBool(active))
 		builder.meta("Waiting Armed:", strconv.FormatBool(waiting))
 		if waiting && !waitingSince.IsZero() {
 			builder.meta("Waiting For:", time.Since(waitingSince).Truncate(time.Second).String())
 		}
 		total, closedEpoch, lastType, lastReason, lastAt := bridge.LateRuntimeDropStats()
-		builder.meta("Late Action Drops:", fmt.Sprintf("%d (closed-epoch %d)", total, closedEpoch))
+		idleNoRun, closedAfterRun, activeMismatch := bridge.LateRuntimeDropBreakdown()
+		builder.meta("Late Action Drops:", fmt.Sprintf("%d (closed-epoch %d: idle %d / closed %d / active-mismatch %d)",
+			total, closedEpoch, idleNoRun, closedAfterRun, activeMismatch))
 		if lastType != "" {
 			builder.meta("Last Late Action:", fmt.Sprintf("%s reason=%q at=%s",
 				lastType, lastReason, lastAt.UTC().Format(time.RFC3339)))
 		}
-		if waiting && !active && epoch == 0 {
+		if waiting && !active && bridge.RunState() == chatRunStateIdle {
 			builder.meta("Wedge Suspected:", "yes (waiting armed without an open run epoch)")
 		}
 	}
