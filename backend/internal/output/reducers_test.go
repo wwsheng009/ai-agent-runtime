@@ -73,6 +73,63 @@ func TestGoTestTextReducer_ReportsSuccessfulTarget(t *testing.T) {
 	}
 }
 
+func TestGoTestTextReducer_TimeoutReportsBudgetAndMissingOutput(t *testing.T) {
+	env, ok, err := (&GoTestTextReducer{}).Reduce(context.Background(), ReducedInput{
+		Raw: RawToolResult{
+			ToolName: "bash", ToolCallID: "call-timeout",
+			Error: "[TOOL_TIMEOUT] execution timed out after 1m30s: context deadline exceeded",
+			Metadata: map[string]interface{}{
+				"command":              "cd backend && go test ./cmd/aicli/commands/ -run TestX -v -count=1 | tail -20",
+				"timeout_source":       "tool_argument",
+				"timeout_effective_ms": int64(90_000),
+				"timeout_requested_ms": int64(90_000),
+			},
+		},
+	})
+	if err != nil || !ok {
+		t.Fatalf("expected go test text reducer, ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(env.Summary, "Parsed go test output: timed out.") {
+		t.Fatalf("expected timed out status, got %q", env.Summary)
+	}
+	if !strings.Contains(env.Summary, "source=tool_argument") || !strings.Contains(env.Summary, "effective=1m30s") {
+		t.Fatalf("expected timeout budget attribution, got %q", env.Summary)
+	}
+	if !strings.Contains(env.Summary, "No output was captured before the timeout") {
+		t.Fatalf("expected missing-output hint, got %q", env.Summary)
+	}
+}
+
+func TestGoTestTextReducer_TimeoutWithOutputKeepsRecentOutput(t *testing.T) {
+	env, ok, err := (&GoTestTextReducer{}).Reduce(context.Background(), ReducedInput{
+		Raw: RawToolResult{
+			ToolName: "bash", ToolCallID: "call-timeout-2",
+			Error: "[TURN_DEADLINE_EXCEEDED] execution timed out after 1m0s: context deadline exceeded",
+			Metadata: map[string]interface{}{
+				"command":              "go test ./internal/agent",
+				"timeout_source":       "chat_turn_deadline",
+				"timeout_effective_ms": 60_000,
+				"timeout_requested_ms": 300_000,
+			},
+		},
+		Text: "compile: still building ./internal/agent",
+	})
+	if err != nil || !ok {
+		t.Fatalf("expected go test text reducer, ok=%v err=%v", ok, err)
+	}
+	if !strings.Contains(env.Summary, "source=chat_turn_deadline") ||
+		!strings.Contains(env.Summary, "effective=1m0s") ||
+		!strings.Contains(env.Summary, "requested=5m0s") {
+		t.Fatalf("expected resolved budget attribution, got %q", env.Summary)
+	}
+	if !strings.Contains(env.Summary, "Recent output: compile: still building") {
+		t.Fatalf("expected recent output to survive, got %q", env.Summary)
+	}
+	if strings.Contains(env.Summary, "No output was captured") {
+		t.Fatalf("did not expect missing-output hint when output exists, got %q", env.Summary)
+	}
+}
+
 func TestPlaywrightSnapshotReducer_Reduce(t *testing.T) {
 	reducer := &PlaywrightSnapshotReducer{}
 	text := strings.Join([]string{

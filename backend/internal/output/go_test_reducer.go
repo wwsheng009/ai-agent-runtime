@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // GoTestJSONReducer 压缩 `go test -json` 输出。
@@ -132,6 +133,11 @@ func (r *GoTestTextReducer) Reduce(_ context.Context, input ReducedInput) (*Enve
 	}
 
 	parts := []string{fmt.Sprintf("Parsed go test output: %s.", status)}
+	if status == "timed out" {
+		if budget := goTestTimeoutBudget(input.Raw.Metadata); budget != "" {
+			parts = append(parts, budget)
+		}
+	}
 	if len(failedTests) > 0 {
 		parts = append(parts, "Failed tests: "+strings.Join(failedTests, "; "))
 	}
@@ -142,6 +148,9 @@ func (r *GoTestTextReducer) Reduce(_ context.Context, input ReducedInput) (*Enve
 		parts = append(parts, "Failure signals: "+strings.Join(signals, " | "))
 	} else if status != "passed" && len(lines) > 0 {
 		parts = append(parts, "Recent output: "+strings.Join(lastStrings(lines, 3), " | "))
+	}
+	if status == "timed out" && len(lines) == 0 {
+		parts = append(parts, goTestTimeoutWithoutOutputHint)
 	}
 	if status == "passed" && len(passedTargets) > 0 {
 		parts = append(parts, "Passed targets: "+strings.Join(passedTargets, "; "))
@@ -193,4 +202,50 @@ func lastStrings(values []string, limit int) []string {
 		return append([]string(nil), values...)
 	}
 	return append([]string(nil), values[len(values)-limit:]...)
+}
+
+// goTestTimeoutWithoutOutputHint is appended when a timed-out go test run has
+// no captured output at all. In that shape the kill almost always happened
+// before the test binary printed anything (build/compile), or a output-slicing
+// pipeline swallowed it; misreading it as a hung test sends the next attempt
+// down the wrong path (chasing a stack dump that never existed).
+const goTestTimeoutWithoutOutputHint = "No output was captured before the timeout: the process was most likely killed during build/compile, or a `| tail`/`| head` pipeline swallowed the output. This is not a Go test hang (a hung test prints a panic/stack dump); re-run without the pipe and pass an explicit timeout if the build needs longer."
+
+// goTestTimeoutBudget attributes a timed-out run to the timeout layer that
+// actually owned the budget. Shell results record the resolved budget
+// (timeout_source/timeout_effective_ms/timeout_requested_ms) in metadata, so a
+// timeout can be explained instead of only reported.
+func goTestTimeoutBudget(metadata map[string]interface{}) string {
+	source := strings.TrimSpace(metadataString(metadata, "timeout_source"))
+	effectiveMs := goTestMetadataInt(metadata, "timeout_effective_ms")
+	requestedMs := goTestMetadataInt(metadata, "timeout_requested_ms")
+	if source == "" && effectiveMs <= 0 {
+		return ""
+	}
+	fields := make([]string, 0, 3)
+	if source != "" {
+		fields = append(fields, "source="+source)
+	}
+	if effectiveMs > 0 {
+		fields = append(fields, "effective="+(time.Duration(effectiveMs)*time.Millisecond).String())
+	}
+	if requestedMs > 0 && requestedMs != effectiveMs {
+		fields = append(fields, "requested="+(time.Duration(requestedMs)*time.Millisecond).String())
+	}
+	return "Timeout budget: " + strings.Join(fields, " ")
+}
+
+// goTestMetadataInt is metadataInt plus the nested "tool_metadata" fallback
+// that metadataString already applies for shell emitters.
+func goTestMetadataInt(metadata map[string]interface{}, key string) int {
+	if len(metadata) == 0 {
+		return 0
+	}
+	if value := metadataInt(metadata, key); value != 0 {
+		return value
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		return metadataInt(nested, key)
+	}
+	return 0
 }
