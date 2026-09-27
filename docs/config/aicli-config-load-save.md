@@ -8,7 +8,7 @@
 | 位置 | 角色 | 典型内容 |
 |---|---|---|
 | `~/.aicli/`（用户层，decision D4 默认写目标） | 全局用户配置 + 运行数据 | `config.yaml`、`runtime.yaml`、`.env`、`auth.json`、`presets.yaml`、`model_cards.yaml`、`workspace_directories.yaml` |
-| `./.aicli/`（项目层，最高优先级） | 项目级覆盖，仅显式创建（`aicli init --project`）才出现 | `config.yaml`、`runtime.yaml`、`mcp.yaml`、`agent-worktrees/`、`memory/` |
+| `./.aicli/`（项目层，最高优先级） | 项目级覆盖，仅显式创建（`aicli init --project`）才出现 | `config.yaml`、`runtime.yaml`、`mcp.yaml`、`model_cards.yaml`、`agent-worktrees/`、`memory/` |
 | `~/.aicli/workspace/<hash>/`（D5 workspace 层） | 按 cwd 哈希隔离的 chat 偏好 | `chat-prefs.yaml` |
 | `~/.aicli/sessions/`、`chat-logs/`、`cache/`、`data/`、`logs/`、`.backups/` | 运行时数据，非配置 | `session_history.sqlite` 等 |
 
@@ -37,6 +37,32 @@
 `runtime.yaml` 有独立层栈（`RuntimeConfigLayerStack()`）：`~/.aicli/runtime.yaml`（user）→ `./.aicli/runtime.yaml`（project，最高）。两层**合并**读取（`LoadMergedRuntimeConfigDocument`）：高层只覆盖其显式写的 key，低层其余设置保留；生效来源 = 最高存在层，写回落在最高可写层（全新安装创建 user 层）。
 
 `configs/runtime.yaml` / `backend/configs/runtime.yaml` 是**开发目录布局，不再是隐式配置层**：CLI 解析顺序为「显式非约定覆盖 → `./.aicli/runtime.yaml` → `~/.aicli/runtime.yaml` → 空」，空表示使用内置默认值且不告警。只有调用方显式传入该文件时才读取（例如 runtime-server 的 `--config`）；旧模板里遗留的这两个约定值会被识别并忽略，不会报"未找到配置文件"。
+
+### 模型卡片目录 `model_cards.yaml`（provider 元数据）
+
+模型卡片目录独立于上面的 bootstrap 层栈，按**低 → 高**五层加载
+（`internal/providerops/catalog.go`）：
+
+1. 内嵌 builtin（`go:embed configs/model_cards.yaml`）
+2. `aicli.model_cards.builtin_path`
+3. `~/.aicli/model_cards.yaml`（`aicli.model_cards.user_path` 可覆盖）
+4. `./.aicli/model_cards.yaml`（`aicli.model_cards.workspace_path` 可覆盖）
+5. `--model-cards <path>`（请求级附加，最高）
+
+合并维度（`internal/modelcard/layers.go`）：
+
+- `provider_templates` / `cards` 以 `id`（大小写不敏感）为身份做字段级深合并：
+  高层覆盖同名标量与数组（列表整体替换、不拼接），低层独有字段保留；
+- 不同 id 的卡片并集保留，匹配阶段按 `priority` → 匹配分 → 层序
+  （工作区 > 用户 > builtin_path > 内置）排序后逐字段补齐；
+- 同一文件内重复 id 视为错误：strict 中止，非 strict 丢弃该层并记 warning；
+- 某层读取/解析/校验失败在非 strict 下只 warning 并跳过该层，低层结果不受影响。
+
+开关：`aicli.model_cards.enabled=false` 关闭整条链（显式 `--model-cards` 例外）；
+`aicli provider refresh-model-cards` 提供 `--no-user-cards` /
+`--no-workspace-cards` 跳过对应层。探测结论（`provider model-probe`）仍只写
+用户层 `~/.aicli/model_cards.yaml`，用户层或工作区层已有同 id / 同
+template × model 手工卡时跳过不写。
 
 ### `.env` 发现（`bootstrap.go`）
 

@@ -529,7 +529,7 @@ func providerProbeCardExistsFor(catalog *modelcard.Catalog, modelID, templateID 
 //   - 只写 supported 结论（unknown/unsupported 不落卡——负向与不定性结论
 //     都可能是暂时性的，如区域/配额）；
 //   - 已有同 ID 卡片或同 template × model 的非 fallback 卡片时跳过（幂等，
-//     手工卡优先）；
+//     手工卡优先；用户级与工作区级卡片都算"已有"）；
 //   - 已有文件先备份为 <path>.bak 再整体重写（yaml 重写会丢注释，备份兜底）；
 //   - 现有文件解析失败时拒绝写入并保留原文件，绝不覆盖用户手工内容。
 func appendProviderModelProbeCards(
@@ -559,6 +559,21 @@ func appendProviderModelProbeCards(
 		}
 	}
 
+	// 工作区级卡片是只读参考：探测写回仍只落用户级文件，但若工作区已经手工
+	// 覆盖了同一卡片 / 同一 template × model，就不应再写一张会被工作区覆盖的
+	// 用户卡。解析失败的工作区文件由目录加载链路报警告，这里只跳过参考。
+	workspacePath := DefaultModelCardWorkspacePath
+	if cfg != nil && cfg.AICLI != nil && cfg.AICLI.ModelCards != nil && strings.TrimSpace(cfg.AICLI.ModelCards.WorkspacePath) != "" {
+		workspacePath = cfg.AICLI.ModelCards.WorkspacePath
+	}
+	var workspaceCatalog *modelcard.Catalog
+	if data, readErr := os.ReadFile(resolveProviderLoginModelCardPath(workspacePath)); readErr == nil && len(strings.TrimSpace(string(data))) > 0 {
+		parsed := &modelcard.Catalog{}
+		if unmarshalErr := yaml.Unmarshal(data, parsed); unmarshalErr == nil {
+			workspaceCatalog = parsed
+		}
+	}
+
 	// 模板 ID 用内置目录解析（codex→codex.responses 等），不依赖用户文件。
 	builtin, _, loadErr := modelcard.LoadSources([]modelcard.Source{modelcard.BuiltinSource()}, false)
 	if loadErr != nil || builtin == nil {
@@ -566,8 +581,13 @@ func appendProviderModelProbeCards(
 	}
 	host := providerProbeBaseURLHost(provider.BaseURL)
 	existingIDs := make(map[string]struct{}, len(catalog.Cards))
-	for _, card := range catalog.Cards {
-		existingIDs[strings.ToLower(strings.TrimSpace(card.ID))] = struct{}{}
+	for _, source := range []*modelcard.Catalog{catalog, workspaceCatalog} {
+		if source == nil {
+			continue
+		}
+		for _, card := range source.Cards {
+			existingIDs[strings.ToLower(strings.TrimSpace(card.ID))] = struct{}{}
+		}
 	}
 	for _, result := range results {
 		for _, probe := range result.Probes {
@@ -582,7 +602,8 @@ func appendProviderModelProbeCards(
 			if _, exists := existingIDs[strings.ToLower(cardID)]; exists {
 				continue
 			}
-			if providerProbeCardExistsFor(catalog, result.Model, template.ID) {
+			if providerProbeCardExistsFor(catalog, result.Model, template.ID) ||
+				providerProbeCardExistsFor(workspaceCatalog, result.Model, template.ID) {
 				continue
 			}
 			card := modelcard.Card{

@@ -7,7 +7,6 @@ import (
 
 	configassets "github.com/wwsheng009/ai-agent-runtime/configs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	"gopkg.in/yaml.v3"
 )
 
 const BuiltinSourceName = "embedded:model_cards.yaml"
@@ -38,6 +37,9 @@ type Card struct {
 	ProviderTemplate string                          `yaml:"provider_template,omitempty" json:"provider_template,omitempty"`
 	Match            MatchSpec                       `yaml:"match" json:"match"`
 	Capability       agentconfig.ModelCapabilitySpec `yaml:"capability" json:"capability"`
+	// layerRank 记录贡献过该卡片的最高层序号（0 = 最低层），由 LoadSources
+	// 的分层合并回填；只用于同优先级/同匹配分卡片的层序兜底，不参与序列化。
+	layerRank int
 }
 
 type ProviderTemplate struct {
@@ -83,10 +85,18 @@ func BuiltinSource() Source {
 	return Source{Name: BuiltinSourceName, Data: configassets.BuiltinModelCardsYAML}
 }
 
+// LoadSources 按"低层在前、高层在后"的顺序合并多个目录来源。
+//
+// 合并维度见 layers.go：同 id（provider_templates / cards）字段级合并、高层
+// 覆盖同名标量与数组；不同 id 并集保留，由 Resolve 按 priority → 匹配分 →
+// 层序做逐字段补齐。
+//
+// strict=false 时单个来源的读取 / 解析 / 校验失败只记 warning 并跳过该层，
+// 已合并的低层结果不受影响；strict=true 时直接返回错误。
 func LoadSources(sources []Source, strict bool) (*Catalog, []Warning, error) {
-	merged := &Catalog{Version: 1}
+	accumulated := newLayerCatalog()
 	var warnings []Warning
-	for _, source := range sources {
+	for rank, source := range sources {
 		name := strings.TrimSpace(source.Name)
 		if name == "" {
 			name = "model_cards.yaml"
@@ -102,7 +112,7 @@ func LoadSources(sources []Source, strict bool) (*Catalog, []Warning, error) {
 		if len(source.Data) == 0 {
 			continue
 		}
-		catalog, err := parseSource(source)
+		doc, err := parseLayerSource(name, source.Data)
 		if err != nil {
 			if strict {
 				return nil, warnings, err
@@ -110,8 +120,16 @@ func LoadSources(sources []Source, strict bool) (*Catalog, []Warning, error) {
 			warnings = append(warnings, Warning{Source: name, Code: "parse_failed", Message: err.Error()})
 			continue
 		}
-		if catalog.Version != 1 {
-			err := fmt.Errorf("unsupported version %d", catalog.Version)
+		if doc.Version != 1 {
+			err := fmt.Errorf("validate model card catalog %s: unsupported version %d", name, doc.Version)
+			if strict {
+				return nil, warnings, err
+			}
+			warnings = append(warnings, Warning{Source: name, Code: "validate_failed", Message: err.Error()})
+			continue
+		}
+		next := accumulated.clone()
+		if err := next.mergeSource(doc, rank); err != nil {
 			wrapped := fmt.Errorf("validate model card catalog %s: %w", name, err)
 			if strict {
 				return nil, warnings, wrapped
@@ -119,12 +137,7 @@ func LoadSources(sources []Source, strict bool) (*Catalog, []Warning, error) {
 			warnings = append(warnings, Warning{Source: name, Code: "validate_failed", Message: wrapped.Error()})
 			continue
 		}
-		candidate := &Catalog{
-			Version:           1,
-			ProviderTemplates: mergeProviderTemplates(merged.ProviderTemplates, catalog.ProviderTemplates),
-			Cards:             append(append([]Card(nil), merged.Cards...), catalog.Cards...),
-		}
-		if err := candidate.Validate(); err != nil {
+		if _, err := next.catalog(); err != nil {
 			wrapped := fmt.Errorf("validate model card catalog %s: %w", name, err)
 			if strict {
 				return nil, warnings, wrapped
@@ -132,43 +145,19 @@ func LoadSources(sources []Source, strict bool) (*Catalog, []Warning, error) {
 			warnings = append(warnings, Warning{Source: name, Code: "validate_failed", Message: wrapped.Error()})
 			continue
 		}
-		merged = candidate
+		accumulated = next
+	}
+	merged, err := accumulated.catalog()
+	if err != nil {
+		// 空累积目录本身合法（version=1、无条目）；走到这里说明内部状态异常。
+		wrapped := fmt.Errorf("validate model card catalog: %w", err)
+		if strict {
+			return nil, warnings, wrapped
+		}
+		warnings = append(warnings, Warning{Source: "model_cards.yaml", Code: "validate_failed", Message: wrapped.Error()})
+		return &Catalog{Version: 1}, warnings, nil
 	}
 	return merged, warnings, nil
-}
-
-func mergeProviderTemplates(base, updates []ProviderTemplate) []ProviderTemplate {
-	out := make([]ProviderTemplate, 0, len(base)+len(updates))
-	indexByID := make(map[string]int, len(base)+len(updates))
-	add := func(template ProviderTemplate) {
-		id := strings.TrimSpace(template.ID)
-		if id == "" {
-			out = append(out, cloneProviderTemplate(template))
-			return
-		}
-		key := strings.ToLower(id)
-		if index, ok := indexByID[key]; ok {
-			out[index] = cloneProviderTemplate(template)
-			return
-		}
-		indexByID[key] = len(out)
-		out = append(out, cloneProviderTemplate(template))
-	}
-	for _, template := range base {
-		add(template)
-	}
-	for _, template := range updates {
-		add(template)
-	}
-	return out
-}
-
-func parseSource(source Source) (*Catalog, error) {
-	catalog := &Catalog{}
-	if err := yaml.Unmarshal(source.Data, catalog); err != nil {
-		return nil, fmt.Errorf("parse model card catalog %s: %w", source.Name, err)
-	}
-	return catalog, nil
 }
 
 func (c *Catalog) Validate() error {
@@ -404,6 +393,9 @@ func sortMatchedCards(matches []matchedCard) {
 		}
 		if matches[i].Score != matches[j].Score {
 			return matches[i].Score > matches[j].Score
+		}
+		if matches[i].Card.layerRank != matches[j].Card.layerRank {
+			return matches[i].Card.layerRank > matches[j].Card.layerRank
 		}
 		return strings.TrimSpace(matches[i].Card.ID) < strings.TrimSpace(matches[j].Card.ID)
 	})

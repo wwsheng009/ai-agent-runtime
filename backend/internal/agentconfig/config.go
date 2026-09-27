@@ -664,11 +664,23 @@ type AICLIRuntimeConfig struct {
 }
 
 // AICLIModelCardsConfig controls model card catalog loading for provider login.
+//
+// 模型卡片目录按层合并，优先级从低到高：
+//
+//	内嵌 builtin → BuiltinPath → UserPath（默认 ~/.aicli/model_cards.yaml）
+//	→ WorkspacePath（默认 ./.aicli/model_cards.yaml）→ 请求级 --model-cards
+//
+// 同 id 的 provider_template / card 做字段级合并，高层覆盖同名标量与数组、
+// 保留低层独有的字段；不同 id 的卡片在匹配阶段按 priority → 匹配分 → 层序
+// 逐字段补齐。详细维度见 internal/modelcard/layers.go。
 type AICLIModelCardsConfig struct {
 	Enabled     *bool  `yaml:"enabled" mapstructure:"enabled"`
 	BuiltinPath string `yaml:"builtin_path" mapstructure:"builtin_path"`
 	UserPath    string `yaml:"user_path" mapstructure:"user_path"`
-	Strict      bool   `yaml:"strict" mapstructure:"strict"`
+	// WorkspacePath 是工作区级卡片目录（项目覆盖），默认
+	// ./.aicli/model_cards.yaml；只在文件存在时参与合并。
+	WorkspacePath string `yaml:"workspace_path" mapstructure:"workspace_path"`
+	Strict        bool   `yaml:"strict" mapstructure:"strict"`
 }
 
 // AICLISubagentsConfig holds subagent execution preferences.

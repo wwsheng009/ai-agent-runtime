@@ -170,7 +170,31 @@ func BuildModelCapabilities(req MetadataRequest) map[string]agentconfig.ModelCap
 
 ### model card 目录与模板默认值
 
+目录按层合并（低 → 高）：
+
+1. 内嵌 builtin（`configs/model_cards.yaml`，`go:embed`）
+2. `aicli.model_cards.builtin_path`
+3. `aicli.model_cards.user_path`（默认 `~/.aicli/model_cards.yaml`）
+4. `aicli.model_cards.workspace_path`（默认 `./.aicli/model_cards.yaml`）
+5. 请求级 `--model-cards`（`CatalogOptions.CatalogPath`）
+
+同 id 的 `provider_templates` / `cards` 做字段级合并：高层覆盖同名标量与数组
+（列表整体替换、不拼接），低层独有字段保留；不同 id 并集保留，匹配阶段按
+priority → 匹配分 → 层序（工作区 > 用户 > builtin_path > 内置）逐字段补齐。
+同一文件内重复 id 视为错误（strict 中止；非 strict 丢弃该层并给 warning）。
+
 ```go
+type CatalogOptions struct {
+	Disable          bool
+	CatalogPath      string
+	Strict           bool
+	NoUserCards      bool // 跳过用户层（CLI --no-user-cards）
+	NoWorkspaceCards bool // 跳过工作区层（CLI --no-workspace-cards）
+}
+
+// LoadModelCardCatalogRaw 是分层加载入口（保留 Source/Code/Message 全量警告）。
+func LoadModelCardCatalogRaw(cfg *agentconfig.Config, opts CatalogOptions) (*modelcard.Catalog, []modelcard.Warning, error)
+
 type ModelCardWarning struct {
 	ProviderTemplate string `json:"provider_template,omitempty"`
 	Message          string `json:"message,omitempty"`

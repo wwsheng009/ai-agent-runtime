@@ -10,9 +10,23 @@ import (
 
 // ---------------------------------------------------------------------------
 // model card 目录加载：login / fetch-models / runtime server 共用同一目录
-// 解析顺序（内置目录 → 配置内置路径 → 用户 ~/.aicli/model_cards.yaml → 请求
-// 级附加目录），以及同一 strict / disable 语义。
+// 解析顺序（低 → 高）：
+//
+//	内嵌 builtin → 配置 builtin_path → 用户 ~/.aicli/model_cards.yaml
+//	→ 工作区 ./.aicli/model_cards.yaml → 请求级附加目录
+//
+// 各层按 id 做字段级合并（工作区 > 用户 > builtin），以及同一 strict /
+// disable 语义。合并维度见 internal/modelcard/layers.go。
 // ---------------------------------------------------------------------------
+
+const (
+	// DefaultModelCardUserPath 是用户级模型卡片目录，可由
+	// aicli.model_cards.user_path 覆盖；文件不存在时跳过。
+	DefaultModelCardUserPath = "~/.aicli/model_cards.yaml"
+	// DefaultModelCardWorkspacePath 是工作区级模型卡片目录（项目覆盖），
+	// 可由 aicli.model_cards.workspace_path 覆盖；文件不存在时跳过。
+	DefaultModelCardWorkspacePath = ".aicli/model_cards.yaml"
+)
 
 // ModelCardWarning 是卡片目录加载警告的契约投影（runtime server 直接序列化）。
 type ModelCardWarning struct {
@@ -23,9 +37,11 @@ type ModelCardWarning struct {
 // CatalogOptions 是目录加载的请求级开关：CLI login 请求可禁用目录、追加
 // 临时目录或强制 strict；runtime server 走默认（全部由配置文件决定）。
 type CatalogOptions struct {
-	Disable     bool
-	CatalogPath string
-	Strict      bool
+	Disable          bool
+	CatalogPath      string
+	Strict           bool
+	NoUserCards      bool
+	NoWorkspaceCards bool
 }
 
 // LoadModelCardCatalog 按默认选项加载卡片目录（契约入口）。
@@ -62,12 +78,23 @@ func LoadModelCardCatalogRaw(cfg *config.Config, opts CatalogOptions) (*modelcar
 	if modelCardsConfig != nil && strings.TrimSpace(modelCardsConfig.BuiltinPath) != "" {
 		sources = append(sources, readProviderLoginModelCardFile(modelCardsConfig.BuiltinPath))
 	}
-	userPath := "~/.aicli/model_cards.yaml"
-	if modelCardsConfig != nil && strings.TrimSpace(modelCardsConfig.UserPath) != "" {
-		userPath = modelCardsConfig.UserPath
+	if !opts.NoUserCards {
+		userPath := DefaultModelCardUserPath
+		if modelCardsConfig != nil && strings.TrimSpace(modelCardsConfig.UserPath) != "" {
+			userPath = modelCardsConfig.UserPath
+		}
+		if source, ok := readExistingProviderLoginModelCardFile(userPath); ok {
+			sources = append(sources, source)
+		}
 	}
-	if source, ok := readExistingProviderLoginModelCardFile(userPath); ok {
-		sources = append(sources, source)
+	if !opts.NoWorkspaceCards {
+		workspacePath := DefaultModelCardWorkspacePath
+		if modelCardsConfig != nil && strings.TrimSpace(modelCardsConfig.WorkspacePath) != "" {
+			workspacePath = modelCardsConfig.WorkspacePath
+		}
+		if source, ok := readExistingProviderLoginModelCardFile(workspacePath); ok {
+			sources = append(sources, source)
+		}
 	}
 	if strings.TrimSpace(opts.CatalogPath) != "" {
 		sources = append(sources, readProviderLoginModelCardFile(opts.CatalogPath))

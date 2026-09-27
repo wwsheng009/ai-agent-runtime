@@ -6,7 +6,8 @@
 
 - `backend/configs/config.yaml`：主配置
 - `backend/configs/config.runtime.snapshot.yaml`：运行时快照
-- `backend/configs/model_cards.yaml`：模型卡片能力模板
+- `backend/configs/model_cards.yaml`：模型卡片能力模板（内嵌 builtin 层的维护入口）
+- `~/.aicli/model_cards.yaml`（用户层）/ `./.aicli/model_cards.yaml`（工作区层）：模型卡片覆盖层，同 `id` 字段级合并，工作区 > 用户 > builtin（见 `docs/config/aicli-config-load-save.md`）
 - `~/.aicli/config.yaml` 或用户本地覆盖配置
 
 ## 文档索引

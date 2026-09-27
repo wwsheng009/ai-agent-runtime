@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelcard"
+	"github.com/wwsheng009/ai-agent-runtime/internal/providerops"
 )
 
 type providerRefreshModelCardsRequest struct {
@@ -17,6 +18,7 @@ type providerRefreshModelCardsRequest struct {
 	DryRun               bool
 	ModelCardCatalogPath string
 	NoUserCards          bool
+	NoWorkspaceCards     bool
 	Strict               bool
 }
 
@@ -64,6 +66,9 @@ func newProviderRefreshModelCardsCommand(configProvider func() *config.Config) *
 与 login 不同：本命令以 model card 字段为权威来源，会覆盖已有但过期的 card 管理字段
 （例如 max_context_tokens、reasoning_efforts），同时保留 card 未声明的本地字段。
 
+卡片目录按「内置 → builtin_path → 用户 ~/.aicli → 工作区 ./.aicli → --model-cards」
+分层合并，同 id 字段级覆盖（工作区 > 用户 > 内置）。
+
 未指定 provider 名称时，默认处理全部 providers（等价于 --all）。
 `),
 		Example: strings.TrimSpace(`
@@ -81,7 +86,8 @@ func newProviderRefreshModelCardsCommand(configProvider func() *config.Config) *
 	cmd.Flags().Bool("dry-run", false, "只预览变更，不写配置")
 	cmd.Flags().String("protocol", "", "按协议过滤（openai|anthropic|gemini|codex 等）")
 	cmd.Flags().String("model-cards", "", "额外模型卡片 catalog 文件路径")
-	cmd.Flags().Bool("no-user-cards", false, "忽略用户目录下的 model_cards.yaml")
+	cmd.Flags().Bool("no-user-cards", false, "忽略用户目录 ~/.aicli/model_cards.yaml")
+	cmd.Flags().Bool("no-workspace-cards", false, "忽略工作区目录 ./.aicli/model_cards.yaml")
 	cmd.Flags().Bool("strict", false, "模型卡片加载或校验失败时中止")
 	addProviderOutputFlags(cmd)
 	return cmd
@@ -99,6 +105,7 @@ func HandleProviderRefreshModelCards(cmd *cobra.Command, configProvider func() *
 		DryRun:               boolFlag(cmd, "dry-run"),
 		ModelCardCatalogPath: stringFlag(cmd, "model-cards"),
 		NoUserCards:          boolFlag(cmd, "no-user-cards"),
+		NoWorkspaceCards:     boolFlag(cmd, "no-workspace-cards"),
 		Strict:               boolFlag(cmd, "strict"),
 	}
 	executeCommand("provider refresh-model-cards", outputOptions, func() (*providerRefreshModelCardsResult, map[string]interface{}, error) {
@@ -264,36 +271,14 @@ func selectProvidersForRefresh(cfg *config.Config, names []string, all bool, pro
 }
 
 func loadProviderRefreshModelCardCatalog(req providerRefreshModelCardsRequest, cfg *config.Config) (*modelcard.Catalog, []providerLoginModelCardWarning, error) {
-	modelCardsConfig := (*config.AICLIModelCardsConfig)(nil)
-	if cfg != nil && cfg.AICLI != nil {
-		modelCardsConfig = cfg.AICLI.ModelCards
-	}
-	if modelCardsConfig != nil && modelCardsConfig.Enabled != nil && !*modelCardsConfig.Enabled && strings.TrimSpace(req.ModelCardCatalogPath) == "" {
-		return nil, nil, nil
-	}
-
-	strict := req.Strict
-	if modelCardsConfig != nil && modelCardsConfig.Strict {
-		strict = true
-	}
-	sources := []modelcard.Source{modelcard.BuiltinSource()}
-	if modelCardsConfig != nil && strings.TrimSpace(modelCardsConfig.BuiltinPath) != "" {
-		sources = append(sources, readProviderLoginModelCardFile(modelCardsConfig.BuiltinPath))
-	}
-	if !req.NoUserCards {
-		userPath := "~/.aicli/model_cards.yaml"
-		if modelCardsConfig != nil && strings.TrimSpace(modelCardsConfig.UserPath) != "" {
-			userPath = modelCardsConfig.UserPath
-		}
-		if source, ok := readExistingProviderLoginModelCardFile(userPath); ok {
-			sources = append(sources, source)
-		}
-	}
-	if strings.TrimSpace(req.ModelCardCatalogPath) != "" {
-		sources = append(sources, readProviderLoginModelCardFile(req.ModelCardCatalogPath))
-	}
-
-	catalog, warnings, err := modelcard.LoadSources(sources, strict)
+	// 分层加载：内置 → builtin_path → 用户目录 → 工作区目录 → 请求级目录；
+	// 后层同 id 字段覆盖前层（合并维度见 internal/modelcard/layers.go）。
+	catalog, warnings, err := providerops.LoadModelCardCatalogRaw(cfg, providerops.CatalogOptions{
+		CatalogPath:      req.ModelCardCatalogPath,
+		Strict:           req.Strict,
+		NoUserCards:      req.NoUserCards,
+		NoWorkspaceCards: req.NoWorkspaceCards,
+	})
 	if err != nil {
 		return nil, providerLoginModelCardWarnings(warnings), err
 	}

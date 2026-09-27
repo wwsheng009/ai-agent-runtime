@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +14,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/providercompat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelcard"
+	"github.com/wwsheng009/ai-agent-runtime/internal/providerops"
 	"github.com/wwsheng009/ai-agent-runtime/internal/siteaccount"
 )
 
@@ -1030,81 +1029,17 @@ func resolveLoginDefaultModel(req providerLoginRequest, provider config.Provider
 }
 
 func loadProviderLoginModelCardCatalog(req providerLoginRequest, cfg *config.Config) (*modelcard.Catalog, []providerLoginModelCardWarning, error) {
-	if req.DisableModelCards {
-		return nil, nil, nil
-	}
-	modelCardsConfig := (*config.AICLIModelCardsConfig)(nil)
-	if cfg != nil && cfg.AICLI != nil {
-		modelCardsConfig = cfg.AICLI.ModelCards
-	}
-	if modelCardsConfig != nil && modelCardsConfig.Enabled != nil && !*modelCardsConfig.Enabled && strings.TrimSpace(req.ModelCardCatalogPath) == "" {
-		return nil, nil, nil
-	}
-
-	strict := req.ModelCardsStrict
-	if modelCardsConfig != nil && modelCardsConfig.Strict {
-		strict = true
-	}
-	sources := []modelcard.Source{modelcard.BuiltinSource()}
-	if modelCardsConfig != nil && strings.TrimSpace(modelCardsConfig.BuiltinPath) != "" {
-		sources = append(sources, readProviderLoginModelCardFile(modelCardsConfig.BuiltinPath))
-	}
-	userPath := "~/.aicli/model_cards.yaml"
-	if modelCardsConfig != nil && strings.TrimSpace(modelCardsConfig.UserPath) != "" {
-		userPath = modelCardsConfig.UserPath
-	}
-	if source, ok := readExistingProviderLoginModelCardFile(userPath); ok {
-		sources = append(sources, source)
-	}
-	if strings.TrimSpace(req.ModelCardCatalogPath) != "" {
-		sources = append(sources, readProviderLoginModelCardFile(req.ModelCardCatalogPath))
-	}
-
-	catalog, warnings, err := modelcard.LoadSources(sources, strict)
+	// 与 runtime server / refresh-model-cards 共用同一分层加载实现（内置 →
+	// builtin_path → 用户目录 → 工作区目录 → 请求级目录）。
+	catalog, warnings, err := providerops.LoadModelCardCatalogRaw(cfg, providerops.CatalogOptions{
+		Disable:     req.DisableModelCards,
+		CatalogPath: req.ModelCardCatalogPath,
+		Strict:      req.ModelCardsStrict,
+	})
 	if err != nil {
 		return nil, providerLoginModelCardWarnings(warnings), err
 	}
 	return catalog, providerLoginModelCardWarnings(warnings), nil
-}
-
-func readProviderLoginModelCardFile(path string) modelcard.Source {
-	resolved := resolveProviderLoginModelCardPath(path)
-	data, err := os.ReadFile(resolved)
-	if err != nil {
-		return modelcard.Source{Name: resolved, Err: err}
-	}
-	return modelcard.Source{Name: resolved, Data: data}
-}
-
-func readExistingProviderLoginModelCardFile(path string) (modelcard.Source, bool) {
-	resolved := resolveProviderLoginModelCardPath(path)
-	if info, err := os.Stat(resolved); err != nil || info.IsDir() {
-		return modelcard.Source{}, false
-	}
-	data, err := os.ReadFile(resolved)
-	if err != nil {
-		return modelcard.Source{Name: resolved, Err: err}, true
-	}
-	return modelcard.Source{Name: resolved, Data: data}, true
-}
-
-func resolveProviderLoginModelCardPath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	if path == "~" {
-		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-			return home
-		}
-		return path
-	}
-	if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, "~\\") {
-		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-			return filepath.Join(home, strings.TrimLeft(path[2:], "/\\"))
-		}
-	}
-	return filepath.Clean(path)
 }
 
 func providerLoginModelCardWarnings(input []modelcard.Warning) []providerLoginModelCardWarning {
