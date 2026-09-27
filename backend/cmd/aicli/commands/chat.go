@@ -1717,6 +1717,11 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 				if session.IsInterrupted() {
 					continue
 				}
+				// 宿主/运行时停止的轮次不是操作失败：停止说明已由 session_end
+				// 与停止摘要给出，这里不再重复渲染 "操作错误: context canceled"。
+				if isChatTurnStopError(err) {
+					continue
+				}
 				if session != nil && session.NoInteractive {
 					exitCommandError("chat", session.OutputFormat, fmt.Errorf("操作错误: %w", err), nil)
 				}
@@ -1732,6 +1737,9 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			aiInput := buildShellCommandAIInput(result)
 			response, err := sendMessage(session, aiInput)
 			if err != nil {
+				if !session.IsInterrupted() && isChatTurnStopError(err) {
+					continue
+				}
 				if session != nil && session.NoInteractive {
 					exitCommandError("chat", session.OutputFormat, fmt.Errorf("操作错误: %w", err), nil)
 				}
@@ -1796,6 +1804,13 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			// 检查是否是用户中断
 			if interrupted {
 				// 用户中断，直接继续到下一次循环（不打印错误）
+				renderChatTurnRecoveryHintForError(session, err)
+				continue
+			}
+			if isChatTurnStopError(err) {
+				// 运行时/宿主停止或顶替了本轮（actor_stop、run released、会话切换）：
+				// session_end(status=stopped) 已经给出用户可见说明，这里只保留
+				// 恢复建议，避免把一次正常停止显示成 "操作错误: context canceled"。
 				renderChatTurnRecoveryHintForError(session, err)
 				continue
 			}
