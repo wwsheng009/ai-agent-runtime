@@ -96,6 +96,9 @@ backend/data/
 backend/aicli_x_fix4_stdout.txt
 backend/aicli_x_fix4_stderr.txt
 
+# config.yaml 写锁（空文件，运行时产物，不应入库）
+backend/configs/config.yaml.lock
+
 # Debug / scratch artifacts (not source)
 _tmp_*
 tmp_*
