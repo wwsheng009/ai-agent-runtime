@@ -78,7 +78,14 @@ func (r *localActorRegistry) submitPrompt(ctx context.Context, sessionID, prompt
 	if err := r.ensureSession(ctx, sessionID); err != nil {
 		return nil, err
 	}
-	actor, err := r.Host.SessionHub.GetOrCreate(strings.TrimSpace(sessionID))
+	// P2（docs/plan/aicli-chat-submit-run-epoch-wedge-hardening.md §6.7）：
+	// 从取 actor 到本回合返回持有会话级提交认领——运行期刷新遇到认领会登记
+	// 延迟重建而不是驱逐，否则刚 GetOrCreate 的 actor 可能在 SubmitPrompt 前被
+	// Stop（内部唤醒/子代理提交会拿到显式失败，但同样不该被刷新打断）。
+	sessionID = strings.TrimSpace(sessionID)
+	releaseSubmitClaim := r.Host.beginActorSubmitClaim(sessionID)
+	defer releaseSubmitClaim()
+	actor, err := r.Host.SessionHub.GetOrCreate(sessionID)
 	if err != nil {
 		return nil, err
 	}

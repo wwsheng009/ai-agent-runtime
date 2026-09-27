@@ -181,9 +181,8 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 - P1-1：显式 `RunState` 取代 epoch 0 双关；丢弃指标接入 `/web/api/analysis/errors`。
 - ~~P1-2~~：已落地（见 §6.4 / §6.5）。等待态时钟、`/debug` 时长展示与
   「脱离 run 的等待态」看门狗自愈（清态 + 动态栏提示）全部就位。
-- ~~P2~~：已落地（见 §6.7）。提交认领（submit claim）覆盖交互提交的预跑窗口；
-  内部触发的 supervision auto-wake 提交待复用同一认领 API（当前由 `RunInFlight`
-  保护，失败显式记录、不静默丢输入）。
+- ~~P2~~：已落地（见 §6.7）。交互提交（`Execute`/`ContinueGoal`）与内部提交
+  （`localActorRegistry.submitPrompt`：监督唤醒 / 团队派发）持有同一会话级提交认领。
 - P3：部分落地（见 §6.6）。evict(`runtime_refresh:model`)×submit 并发回归已在完整
   host 脚手架下落盘；「提交即入库」与 e2e「无活动 run 不得出现 Analyzing 帧」
   断言仍待办。
@@ -248,6 +247,7 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 | --- | --- |
 | `backend/cmd/aicli/commands/chat_actor_host.go` | host 新增会话级提交认领（`actorClaimMu` / `actorClaims`，map 惰性创建以兼容大量结构体字面量构造的测试）；`beginActorSubmitClaim`（计数 + 幂等释放）、`actorSubmitClaimed`、session 级包装 `beginChatActorSubmitClaim` / `chatActorSubmitClaimed`；`refreshLocalRuntimeAfterSelection` 在认领期间改为 `markPendingChatActorRebuild` + 归因日志，不再驱逐 actor |
 | `backend/cmd/aicli/commands/chat_actor_executor.go` | `Execute` 与 `ContinueGoal` 在 `reconcilePendingChatActorRebuild` 之后认领、`defer` 到本回合返回——覆盖「已取得 actor、尚未 BeginRun」的预跑窗口（新增 P0-2 预算之外的另一处提交护栏） |
+| `backend/cmd/aicli/commands/chat_actor_registry.go` | `submitPrompt`（监督唤醒、团队派发等内部提交入口）在 `ensureSession` 之后、`GetOrCreate` 之前认领——补齐「刚取到 actor → SubmitPrompt」之间的空窗。唤醒路径 `beginWakeTurnRun` 本身先开 run 再取 actor（驱逐后重建即新配置），此认领覆盖的是注册表内部那一段 |
 | `backend/cmd/aicli/commands/chat_actor_submit_claim_test.go`（新增） | 2 例：认领生命周期（叠加计数、幂等释放、nil 安全）；认领期间刷新只登记延迟重建且不驱逐，释放后 `reconcilePendingChatActorRebuild` 在下一轮兑现驱逐 |
 
 语义：与既有「运行时切换从下一个 turn 生效」契约一致——刷新既不打断在途 turn，
@@ -263,7 +263,8 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 | 新增 2 例 + 既有 `TestRuntimeRefresh*`（3 例）`-count=1` | PASS |
 | 上述 4 例 `-race -count=1` | PASS |
 | wedge/refresh/evict×submit/waiting/epoch/send/debug 全量回归 `-count=1` | PASS（两轮） |
+| 注册表/监督路径回归（`TestLocalActorRegistry_SubmitPromptUsesSessionHub`、`TestLocalActorRegistry_TriggerTask*`、`TestLocalSupervisionProgressCheck*`）`-count=1` | PASS（含 `-race` 复跑） |
 
-遗留：内部触发的 supervision auto-wake 提交不经 `Execute`，其预跑窗口仍只由
-`RunInFlight` 保护（唤醒失败会显式记录，不会静默丢用户输入）；如需同等强度，
-在唤醒提交点复用同一认领 API 即可。
+反向（提交等待进行中的刷新）未实现：CLI 平面命令与提交在同一 TUI 线程串行，
+且刷新自身有界（actor Stop 带超时）；若未来出现 web/API 并发的刷新入口，
+再引入 `actorGeneration` 等待语义。
