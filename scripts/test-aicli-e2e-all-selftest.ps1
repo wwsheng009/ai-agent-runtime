@@ -118,9 +118,53 @@ Write-Host "stub02 ok artifact=$ArtifactDir"
 exit 0
 '@
 
+# ---- 桩 harness：03（多进程网格，字段 pass/fail/skip）---------------------
+$stub03 = @'
+[CmdletBinding()]
+param(
+    [string]$ArtifactDir,
+    [string]$ExePath,
+    [switch]$SkipBuild
+)
+$ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($ArtifactDir)) { throw 'stub03: 需要 -ArtifactDir' }
+New-Item -ItemType Directory -Path $ArtifactDir -Force | Out-Null
+
+$results = @(
+    [pscustomobject]@{ name = 'stub03/a'; passed = $true; detail = 'ok' }
+)
+$doc = [ordered]@{ pass = 1; fail = 0; skip = 0; results = $results }
+[System.IO.File]::WriteAllText((Join-Path $ArtifactDir 'summary.json'), ($doc | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "stub03 ok artifact=$ArtifactDir"
+exit 0
+'@
+
+# ---- 桩 harness：TOOLS-01（工具链 e2e，字段 pass/fail/skip）---------------
+$stubTools = @'
+[CmdletBinding()]
+param(
+    [string]$ArtifactDir,
+    [string]$ExePath,
+    [switch]$SkipBuild
+)
+$ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($ArtifactDir)) { throw 'stubTools: 需要 -ArtifactDir' }
+New-Item -ItemType Directory -Path $ArtifactDir -Force | Out-Null
+
+$results = @(
+    [pscustomobject]@{ name = 'stubTools/a'; passed = $true; detail = 'ok' }
+)
+$doc = [ordered]@{ pass = 1; fail = 0; skip = 0; results = $results }
+[System.IO.File]::WriteAllText((Join-Path $ArtifactDir 'summary.json'), ($doc | ConvertTo-Json -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "stubTools ok artifact=$ArtifactDir"
+exit 0
+'@
+
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText((Join-Path $sandboxScripts 'test-aicli-debug-endpoints-e2e.ps1'), $stub01, $utf8)
 [System.IO.File]::WriteAllText((Join-Path $sandboxScripts 'test-aicli-debug-endpoints-e2e-nonloopback.ps1'), $stub02, $utf8)
+[System.IO.File]::WriteAllText((Join-Path $sandboxScripts 'test-aicli-debug-endpoints-e2e-mesh.ps1'), $stub03, $utf8)
+[System.IO.File]::WriteAllText((Join-Path $sandboxScripts 'test-aicli-tools-e2e.ps1'), $stubTools, $utf8)
 
 # ---- 用例表 ---------------------------------------------------------------
 # 每条：stub 模式 / 期望聚合退出码 / 必须出现的日志片段（正则）
@@ -129,25 +173,25 @@ $cases = @(
         name    = 'ok：01(passed/failed) + 02(pass/fail/skip) 均正常'
         mode    = 'ok'
         exit    = 0
-        expect  = @('scenario/E2E-DEBUG-01 .*PASS=2 FAIL=0 SKIP=0 results=2', '总结: PASS=4 FAIL=0')
+        expect  = @('scenario/E2E-DEBUG-01 .*PASS=2 FAIL=0 SKIP=0 results=2', 'scenario/E2E-TOOLS-01 .*PASS=1 FAIL=0 SKIP=0 results=1', '总结: PASS=8 FAIL=0')
     },
     [pscustomobject]@{
         name    = 'schema：01 字段被改名 -> 必须 FAIL（不能记 0 后通过）'
         mode    = 'schema'
         exit    = 1
-        expect  = @('scenario/E2E-DEBUG-01 .*schema 漂移', '总结: PASS=3 FAIL=1')
+        expect  = @('scenario/E2E-DEBUG-01 .*schema 漂移', '总结: PASS=7 FAIL=1')
     },
     [pscustomobject]@{
         name    = 'count：results 条数与 PASS+FAIL 对不上 -> 必须 FAIL'
         mode    = 'count'
         exit    = 1
-        expect  = @('scenario/E2E-DEBUG-01 .*PASS=1 FAIL=0 SKIP=0 results=2', '总结: PASS=3 FAIL=1')
+        expect  = @('scenario/E2E-DEBUG-01 .*PASS=1 FAIL=0 SKIP=0 results=2', '总结: PASS=7 FAIL=1')
     },
     [pscustomobject]@{
         name    = 'fail：子场景退出码 1 且 FAIL=1 -> 必须拉红'
         mode    = 'fail'
         exit    = 1
-        expect  = @('scenario/E2E-DEBUG-01 .*exit=1 PASS=1 FAIL=1', '总结: PASS=3 FAIL=1')
+        expect  = @('scenario/E2E-DEBUG-01 .*exit=1 PASS=1 FAIL=1', '总结: PASS=7 FAIL=1')
     }
 )
 

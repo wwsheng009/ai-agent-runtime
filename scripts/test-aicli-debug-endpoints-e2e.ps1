@@ -61,6 +61,9 @@
   `/debug/chat/status` 全量响应的延迟预算（毫秒），缺省 5000。
   饱和主机上排队延迟会整体抬高（实测空载 3~7ms、满载 2.9~11.9s），
   阈值用于区分「端点回归」与「机器正在跑别的重负载」。
+.PARAMETER TurnRecordWaitMs
+  turn 后验记录的有界等待窗口（毫秒），缺省 5000：invoke 返回与事件订阅者
+  落账之间存在毫秒级窗口，读不到按 ms 级重试；超时仍无记录才判 FAIL。
 .PARAMETER ArtifactDir
   证据目录；缺省 artifacts/aicli-debug-endpoints-e2e/<yyyyMMdd-HHmmss>。
 
@@ -85,6 +88,7 @@ param(
     [switch]$NoTimeline,
     [ValidateRange(100, 60000)][int]$TimelineIntervalMs = 500,
     [ValidateRange(50, 600000)][int]$LatencyBudgetMs = 5000,
+    [ValidateRange(0, 60000)][int]$TurnRecordWaitMs = 5000,
     [string]$ArtifactDir
 )
 
@@ -595,7 +599,7 @@ try {
     $inlineTurnId = [string]$invoke.Json.turn_id
     $turnProbe = $null
     $latest = $null
-    $turnDeadline = (Get-Date).AddSeconds(5)
+    $turnDeadline = (Get-Date).AddMilliseconds($TurnRecordWaitMs)
     do {
         $turnProbe = Invoke-JsonHttp -Method GET -Url $turnUrl -TimeoutSec 15
         $terminal = @($turnProbe.Json.recent) | Where-Object { $_.status -in @('completed', 'failed') }
@@ -618,6 +622,23 @@ try {
         (($assistantTrimmed -eq $previewTrimmed) -or $assistantTrimmed.StartsWith($previewTrimmed) -or $previewTrimmed.StartsWith($assistantTrimmed))
     Add-Result 'invoke/turn-resolved' (($null -ne $latest) -and $previewMatches) `
         "turn_id=$($latest.turn_id) status=$($latest.status) preview='$preview'"
+    # 预览与完整字符数自洽（产品契约：>200 rune 截断为 200 + 省略号，
+    # assistant_chars 为完整 rune 数）：截断时必须大于上限，未截断时必须逐字相等。
+    # 该条不依赖 invoke 文案，能独立抓住「预览/字符数不同步」的记录器回归。
+    $previewRunCount = 0
+    $charsConsistent = $false
+    if ($null -ne $latest) {
+        # 代码点计数：先把 UTF-16 代理对折叠成一个字符再取长度（rune ≈ 代码点）。
+        $previewRunCount = ($previewTrimmed -replace '[\uD800-\uDBFF][\uDC00-\uDFFF]', 'X').Length
+        $chars = [int]$latest.assistant_chars
+        if ($preview.EndsWith('…')) {
+            $charsConsistent = ($chars -gt 200)
+        } else {
+            $charsConsistent = ($chars -eq $previewRunCount)
+        }
+    }
+    Add-Result 'turn/preview-chars-consistent' $charsConsistent `
+        "assistant_chars=$($latest.assistant_chars) preview_runes=$previewRunCount truncated=$($preview.EndsWith('…'))"
     $latestTurnId = ''
     if ($null -ne $latest) { $latestTurnId = [string]$latest.turn_id }
     Add-Result 'invoke/turn-id-inline' `

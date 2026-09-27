@@ -24,10 +24,13 @@ pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e.ps1
 
 # 非回环鉴权（--web-host 0.0.0.0 + --web-token）：LAN 令牌必需 / 豁免红线 / 清单不泄露令牌
 pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1
+
+# 工具链端到端（E2E-TOOLS-01，需真实 provider；三轮 invoke 驱动 view/write/edit）
+pwsh -NoProfile -File scripts/test-aicli-tools-e2e.ps1
 ```
 
 ```powershell
-# 一键回归（提交前推荐）：断言基线校验 → 01 → 02 → 03 → 聚合结论（artifacts/aicli-e2e-all/<stamp>/summary.json）
+# 一键回归（提交前推荐）：断言基线校验 → 01 → 02 → 03 → TOOLS-01 → 聚合结论（artifacts/aicli-e2e-all/<stamp>/summary.json）
 pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1
 
 # 只做断言基线门禁（秒级，不跑 E2E；CI 上跑这条）：断言被删/改名立刻变红
@@ -139,6 +142,7 @@ aicli --yolo --web-port 9999          # 等价 aicli chat --yolo --web-port 9999
 | S5 | 读屏 | `GET /debug/chat/screen` → `available=true`；`GET /web/api/screen?view=tui&format=json` → `available=true` 且 `text`/`lines` 非空 | 渲染未安装 / 会话未就绪 |
 | S6 | `POST /web/api/invoke`（带 `client_request_id`） | `status=completed`；`assistant.content` 非空；`llm_observed=true`、`busy=false`、`pending_inputs=0`；`usage.total_tokens>0`；`screen.available=true` | 无可用 provider、模型报错、超时（`-InvokeTimeoutMs`） |
 | S6b | `GET /web/api/turn` 定位本轮记录 | `recent` 中存在**终态**记录（`status ∈ {completed, failed}`；工具调用失败会让该轮记为 `failed`，见 §6），有 `invoke.turn_id` 时优先按 id 选中本轮，且其 `assistant_preview` 与本轮回复一致（预览 >200 rune 时按前缀比对，自动忽略截断省略号） | turn 记录未落 / 记录器未安装 |
+| S6b2 | 预览/字符数自洽 | 记录的 `assistant_preview` 未截断时 `assistant_chars` == 预览 rune 数；以 `…` 截断时 `assistant_chars > 200`（`chatWebTurnAssistantPreviewRunes`） | 记录器预览/字符数不同步（读屏摘要失真，消费者按 chars 判断长短会误判） |
 | S6c | invoke 响应自带 `turn_id` | `invoke.turn_id` 非空且等于 S6b 记录的 `turn_id`（终态回填，见 §7） | 回填回归（字段再次缺失/不一致） |
 | S7 | 回读屏幕 | `?view=tui&format=json` 的合成帧文本包含回复首个非空行前 40 字符（needle） | 渲染未提交该轮（渲染回归） |
 | S8 | 幂等回放 | 同 `client_request_id` 重发 → `duplicate=true`、`assistant.content` 与 `elapsed_ms` 与首次一致；`/web/api/turn` 的 `recent` 条数不增加 | 幂等键被忽略（会重复注入，回归红线） |
@@ -239,10 +243,10 @@ pwsh -NoProfile -File scripts/test-aicli-debug-endpoints-e2e.ps1 -Headless -Arti
 ### 5.1 一键回归：聚合入口 + 断言基线（提交前 / 发布前推荐）
 
 ```powershell
-# 基线门禁 → 顺序跑 01 → 02 → 03（02/03 恒 -SkipBuild 复用 01 的二进制）→ 聚合 summary.json
+# 基线门禁 → 顺序跑 01 → 02 → 03 → TOOLS-01（后三者恒 -SkipBuild 复用 01 的二进制）→ 聚合 summary.json
 pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1
 
-# 复用已有二进制（三个场景都不 go build）
+# 复用已有二进制（四个场景都不 go build）
 pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -SkipBuild
 
 # 只做基线门禁（秒级；断言被删/改名就红，不跑 E2E）
@@ -255,19 +259,19 @@ pwsh -NoProfile -File scripts/test-aicli-e2e-all.ps1 -UpdateBaseline
 | 项 | 说明 |
 |----|------|
 | 入口 | `scripts/test-aicli-e2e-all.ps1`；聚合证据在 `artifacts/aicli-e2e-all/<yyyyMMdd-HHmmss>/`（`run.log` + `summary.json` + 各子场景目录 + 各自 stdout/stderr） |
-| 断言基线 | `scripts/e2e-assertion-baseline.json`：静态抽取三个 harness 的 `Add-Result` / `Add-Skip` 调用点。**缺失 = FAIL**（防"悄悄删断言换绿"），**新增 = 提示**（用 `-UpdateBaseline` 固化） |
-| 字段归一化 | 01 的 `summary.json` 用 `passed` / `failed`，02/03 用 `pass` / `fail` / `skip`；聚合脚本统一归一化。两套字段都读不到 = schema 漂移 → **直接 FAIL**（不是"读不到就记 0"）；`results` 条数还会与 `PASS+FAIL` 交叉校验 |
+| 断言基线 | `scripts/e2e-assertion-baseline.json`：静态抽取四个 harness 的 `Add-Result` / `Add-Skip` 调用点。**缺失 = FAIL**（防"悄悄删断言换绿"），**新增 = 提示**（用 `-UpdateBaseline` 固化） |
+| 字段归一化 | 01 的 `summary.json` 用 `passed` / `failed`，02/03/TOOLS-01 用 `pass` / `fail` / `skip`；聚合脚本统一归一化。两套字段都读不到 = schema 漂移 → **直接 FAIL**（不是"读不到就记 0"）；`results` 条数还会与 `PASS+FAIL` 交叉校验 |
 | 聚合退出码 | `0` = 无 FAIL；`1` = 有 FAIL（基线缺失断言 / 场景 FAIL / 缺 `summary.json` / 计数对不上） |
-| 自测 | `scripts/test-aicli-e2e-all-selftest.ps1`：在 `%TEMP%` 沙箱里用**桩 harness** 跑真聚合脚本，验证 4 个分支（ok / schema 漂移 / 计数不符 / 子场景 FAIL）；不碰 provider、终端、端口 |
+| 自测 | `scripts/test-aicli-e2e-all-selftest.ps1`：在 `%TEMP%` 沙箱里用**四类桩 harness** 跑真聚合脚本，验证 4 个分支（ok / schema 漂移 / 计数不符 / 子场景 FAIL）；不碰 provider、终端、端口 |
 
-> 全量回归需要真实 provider（01/03 要注入 prompt）与一块非回环 IPv4（02），因此无 provider 的 CI
+> 全量回归需要真实 provider（01/03/TOOLS-01 要注入 prompt）与一块非回环 IPv4（02），因此无 provider 的 CI
 > 上建议只跑 `-BaselineOnly` 这条秒级门禁；有 provider 的环境（本机 / 发布前）再跑全量。
 
 ### 5.2 观测与取证工具集
 
 已独立成文：[harness-observability.md](./harness-observability.md) —— `scripts/aicli-e2e-harness.ps1`
 提供的 HTTP 原语 / A1 时序采样 / A2 失败诊断包 / A3 稳态判据 / B4 清单覆盖门禁 / C4 双通道取证，
-三个 harness 共同 dot-source。
+四个 harness（01 / 02 / 03 / TOOLS-01）共同 dot-source。
 
 独立取证入口（C4 的单文件形态，用于 **aicli 进程已退出、只剩终端窗口** 的现场）：
 
@@ -280,6 +284,42 @@ pwsh -File scripts/read-terminal-buffer.ps1 -WindowTitle 'ai-agent-runtime' -Pat
 判读口径不变：`/debug/chat/screen` 是"应然帧"，UIA 读到的才是"物理帧"；两者不一致
 才说明渲染/终端链路丢了内容。**该脚本不向窗口发送任何输入**（不写 console input、
 不 PostMessage），因此可以对用户正在使用的会话做只读取证。
+
+### 5.3 工具链端到端（E2E-TOOLS-01）
+
+```powershell
+pwsh -NoProfile -File scripts/test-aicli-tools-e2e.ps1
+# 复用已有二进制 / 指定二进制 / 固定证据目录
+pwsh -NoProfile -File scripts/test-aicli-tools-e2e.ps1 -SkipBuild -ExePath backend/.tmp/aicli-debug-e2e.exe -ArtifactDir artifacts/tools-e2e
+# 慢 provider：加大单轮等待与轮间排空（缺省 300000ms / 120s）
+pwsh -NoProfile -File scripts/test-aicli-tools-e2e.ps1 -InvokeTimeoutMs 420000 -DrainTimeoutSec 180
+```
+
+被测二进制与 01 相同（缺省 `<repo>/backend/.tmp/aicli-debug-e2e.exe`）；**单个进程、三个轮次**
+（同一 session，读账本/去重状态跨轮共享），每轮一个 `client_request_id`：
+
+| 轮 | prompt 目标（模型驱动） | 断言（机器可判） |
+|----|------------------------|------------------|
+| R1 | 对同一文件以 `offset=10, limit=10` 连读两次 | `tools/read-dedup-first-read`（第一次返回真实内容）+ `tools/read-dedup-stub`（第二次命中 `unchanged:` 去重 stub） |
+| R2 | write 新文件 →（不 view）edit → view → edit → view | `tools/write-edit-recovery`（两次成功编辑）+ `tools/write-edit-final`（磁盘最终内容 = 期望值） |
+| R3 | view → `bash` 外部改文件 → edit | `tools/stale-refusal`（`WRITE_PRECONDITION_FAILED`）+ `tools/stale-untouched`（磁盘保持外部版本，拒绝是真拒绝）+ `tools/turn-tool-errors`（该轮记录 `status=failed` 且 `tool_error_count>=1`，见 §6 两个口径） |
+
+通用断言：`build/go-build`（`-SkipBuild` 时不注册）、`startup/endpoints-ready`、
+`discovery/urls-from-catalog`、`tools/turn-terminal`（每轮 `turn_id` 可在 `/web/api/turn`
+按 id 找到且为终态）、`tools/invoke-status`（三轮 invoke 均 `completed`）、`tools/exit-graceful`
+（`/exit` → 退出码 0 + 端口释放）。
+
+> 多步 prompt 在慢 provider 下单轮可能到分钟级：`-InvokeTimeoutMs` 缺省 300000，
+> 且每轮注入前先等上一轮终态（`-DrainTimeoutSec`，缺省 120s）——避免下一轮 prompt
+> 被排队到同一 turn，让判据互相污染（实测踩到过：R2 超时导致 R3 复用同一 `turn_id`）。
+
+证据目录 `artifacts/aicli-tools-e2e/<stamp>/`：`run.log` / `summary.json`（`pass`/`fail`/`skip` +
+`results[]` + `skipped[]` + `evidence.rounds/turns`）/ `aicli.stdout.log`（工具调用与结果的判据来源）/
+`aicli.stderr.log` / `timeline.jsonl` / `diag/`（失败时）/ `roundN-*.json`。
+
+> **模型驱动的前提**：断言的前提是模型按 prompt 调用指定工具。模型跑偏时按证据如实 FAIL
+> （不自动改写判据）；要提稳定性就加强 prompt 约束，不要放宽断言。演示文件只写
+> `backend/.tmp/`（`.gitignore` 的 `.tmp*` 覆盖）。
 
 ## 6. 失败模式与排查
 
@@ -358,7 +398,8 @@ pwsh -File scripts/read-terminal-buffer.ps1 -WindowTitle 'ai-agent-runtime' -Pat
 | **E2E-DEBUG-01**（本文） | `scripts/test-aicli-debug-endpoints-e2e.ps1` | 独立进程启动、`/debug/endpoints` 入口发现、读屏、同步 invoke、幂等回放、turn 后验、`/exit` 优雅退出（HTTP 控制面） | 真实 provider（第 4 步）；无交互桌面要求 |
 | **E2E-DEBUG-02**（[手册](./nonloopback-auth-e2e.md)） | `scripts/test-aicli-debug-endpoints-e2e-nonloopback.ps1` | 非回环（`--web-host 0.0.0.0` + `--web-token`）鉴权契约：LAN 令牌必需、`?token=`、错误令牌、页面/SSE/`/debug/*` 同权、回环与静态资产豁免、清单不泄露令牌、`/exit` 收尾 | 真实 provider（只走 interrupt 与 `/exit`，不注入 prompt）；需非回环 IPv4（无则相关断言 SKIP） |
 | **E2E-DEBUG-03**（[手册](./mesh-e2e.md)，已落地） | `scripts/test-aicli-debug-endpoints-e2e-mesh.ps1` | 多进程网格控制面：两节点互发现、CLI/HTTP 视图同源、会话租约互斥、跨进程定向调用、实时扇入、崩溃对账与 GC、令牌不泄露、旧目录清理、无进程时仍可读、跨工作区默认可显示可操作 | 真实 provider（跨进程 invoke）；无交互桌面要求；需 `aicli-mesh` 工具已构建 |
-| **一键回归**（§5.1） | `scripts/test-aicli-e2e-all.ps1` | 断言基线门禁 + 顺序跑 01 → 02 → 03 + 聚合结论（`artifacts/aicli-e2e-all/<stamp>/summary.json`） | 01/02/03 依赖的并集（真实 provider；02 需非回环 IPv4；03 需 `aicli-mesh`） |
+| **E2E-TOOLS-01**（本文 §5.3） | `scripts/test-aicli-tools-e2e.ps1` | 真实 provider 下驱动工具链：同一窗口重复 `view` → 去重 stub（`unchanged:`）；write 后紧随 edit 属 `fresh` 不被拒；外部改动后 edit 被拒（`WRITE_PRECONDITION_FAILED`，文件保持外部版本）；轮次记录的 `status`/`tool_error_count` 自解释 | 真实 provider（三轮 invoke，模型需按 prompt 调用指定工具）；无交互桌面要求 |
+| **一键回归**（§5.1） | `scripts/test-aicli-e2e-all.ps1` | 断言基线门禁 + 顺序跑 01 → 02 → 03 → TOOLS-01 + 聚合结论（`artifacts/aicli-e2e-all/<stamp>/summary.json`） | 各场景依赖的并集（真实 provider：01/03/TOOLS-01；02 需非回环 IPv4；03 需 `aicli-mesh`） |
 | 聚合逻辑自测（§5.1） | `scripts/test-aicli-e2e-all-selftest.ps1` | 桩 harness 验证聚合脚本的 4 个分支（字段归一化 / 计数交叉校验 / schema 漂移 / 子场景 FAIL） | 无（不碰 provider、终端、端口） |
 | 统一渲染 + marker exactly-once | `scripts/test-aicli-opencode-windows-terminal-e2e.ps1` | 真实 provider + Windows Terminal（UI Automation）下的渲染/历史/退出；`-Provider` / `-Model` / `-ReasoningEffort` 可覆盖（默认 `opencode.ai` / `deepseek-v4-flash` / `max`），某个模型额度耗尽时可用本机可用模型复跑**同一套**断言。**2026-09-24 已转全绿**（`opencode-wt-3c82e753…`、`opencode-wt-7f825835…` 两轮 `status=passed`、`failures=[]`、marker exactly-once 违例 0）；`manifest.json` 的 `reasoning_projection_skipped` 非空 = 该 provider 本次没返回带签名的 reasoning summary，投影断言按 §6 显式跳过（记录见 [debug-guide-evidence.md](./debug-guide-evidence.md)） | 交互桌面 |
 | 终端渲染基线 | `scripts/test-aicli-windows-terminal-e2e.ps1` | 合成数据在真实宿主终端中的渲染 | 交互桌面 |

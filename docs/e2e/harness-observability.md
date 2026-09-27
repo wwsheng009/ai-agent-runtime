@@ -1,6 +1,6 @@
 # aicli E2E harness：观测与取证工具集
 
-> 归属：`scripts/aicli-e2e-harness.ps1`，由 01 / 02 / 03 三个 harness dot-source 复用。
+> 归属：`scripts/aicli-e2e-harness.ps1`，由 01 / 02 / 03 / TOOLS-01 四个 harness dot-source 复用。
 > 本文即原 `debug-guide.md` §5.2 的独立成文（2026-09-24 文档整理）。
 > 相关：[debug-guide.md](./debug-guide.md)（E2E-DEBUG-01 主线，失败判读见其 §6）、
 > [nonloopback-auth-e2e.md](./nonloopback-auth-e2e.md)（E2E-DEBUG-02）、

@@ -286,3 +286,42 @@ provider 下的端到端行为。harness 语义未放宽，仅按下表实测修
 
 **边界**：B/C/D 属一次性人工复跑（不在默认断言集内），断言链本身与 prompt 无关；
 演示文件写在 `backend/.tmp/`，被 `.gitignore` 的 `.tmp*` 覆盖，不进入版本库。
+
+### 7.1 三场景升级为常驻 harness：E2E-TOOLS-01（同上日期，当日收口）
+
+B/C/D 的手工复跑已固化为独立场景 `scripts/test-aicli-tools-e2e.ps1`（单进程、三轮、
+每轮一个 `client_request_id`），断言名与 §7 表一一对应，并接入聚合入口
+`scripts/test-aicli-e2e-all.ps1`（`04-tools-e2e/`，恒 `-SkipBuild` 复用 01 的二进制）。
+
+| 验证 | 结果 | 证据目录 |
+|------|------|----------|
+| E2E-TOOLS-01 单跑（构建路径） | PASS=15 / FAIL=0 / SKIP=0，exit 0；`summary.json` 含 `pass`/`fail`/`skip` + `results[]` + `evidence.rounds/turns`；终态文件 `stale=external-change`、`ledger=ledger-ok` | `artifacts/aicli-tools-e2e/manual-r1/` |
+| E2E-TOOLS-01 单跑（`-SkipBuild`） | exit 0 | `artifacts/aicli-tools-e2e/manual-r2/`、`manual-r3/` |
+| 聚合四场景（baseline 4/4 + 01 + 02 + 03 + TOOLS-01） | **PASS=8 FAIL=0**，exit 0；01=42（新增 `turn/preview-chars-consistent`）、02=28、03=16、TOOLS-01=14，总耗时 137s | `artifacts/aicli-e2e-all/20260927-101448/` |
+
+**本轮 harness/门禁加固**（产品侧仅 §7.2 一处新字段）：
+
+| # | 现象 | 根因 | 修复 |
+|---|------|------|------|
+| 1 | 单跑 `PASS=14 FAIL=0` 但退出码 1、`summary.json` 缺失 | 摘要构建在 `@($invokeRecords)` 处抛 `System.ArgumentException: Argument types do not match`（`PSToObjectArrayBinder` 的 `Expression.Condition` 路径，PS 7.6.6） | 摘要一律用 `OrderedDictionary` 索引器赋值 + 直接传 `List[object]`（不 `@()` 包装）；并加兜底摘要（写入 `summary_error` 后仍退出码 1，不伪装通过） |
+| 2 | 聚合串跑时 TOOLS-01 `PASS=5 FAIL=8`：R2/R3 `status=timeout`、R3 复用 R2 的 `turn_id` | 慢 provider 下单轮 >180s（多步 prompt），下一轮 prompt 被排队到同一 turn，判据互相污染 | `-InvokeTimeoutMs` 缺省 180000 → **300000**；新增 `-DrainTimeoutSec`（缺省 120）轮间先等上一轮终态（尽力而为，不断言放宽） |
+| 3 | 聚合自测 4 个用例全红（**既有破损**，与本次改动无关） | 聚合早已有 3 个场景，自测只桩了 2 个 harness → `harness 不存在：…-mesh.ps1` | 补 03 与 TOOLS-01 桩；期望值更新为四场景；自测恢复 4/4 PASS、exit 0 |
+
+### 7.2 轮次记录补工具失败计数（产品侧）
+
+§7 第 3 条的消费者痛点（`status=failed` + `error=""` 无法区分"工具失败已恢复"与"上游失败"）
+按建议落到记录字段：`chatWebTurnRecord` 增 `tool_error_count` / `recovered_tool_error_count` /
+`unrecovered_tool_error_count`（与 `session_end` 载荷同名，omitempty）。
+
+实测证据（E2E-TOOLS-01 R3，`turn_tool_errors` 断言通过）：
+
+```json
+{ "status": "failed", "steps": 4,
+  "error": "[WRITE_PRECONDITION_FAILED] 文件自本会话上次读取（8s 前，来源 view）后已被修改，已拒绝覆盖以防丢失他人改动。…",
+  "tool_error_count": 1, "unrecovered_tool_error_count": 1 }
+```
+
+> 与预期略有差异、已按实测修正：本例 `error` 并非空（拒绝原因原文即错误文本），
+> 因此断言写成「`status=failed` 且 `tool_error_count>=1` 且（`error` 非空 **或**
+> `recovered_tool_error_count>=1`）」——覆盖"已恢复（error 空 + recovered 计数）"与
+> "未恢复（error 文本）"两种自解释形态。

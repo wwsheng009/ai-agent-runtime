@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-  aicli E2E 全量入口（聚合）：E2E-DEBUG-01 → 02 → 03 顺序执行 + 断言基线校验。
+  aicli E2E 全量入口（聚合）：E2E-DEBUG-01 → 02 → 03 → E2E-TOOLS-01 顺序执行 + 断言基线校验。
 
 .DESCRIPTION
   为什么需要它：
-    - 三个场景共用同一构建产物（01 构建，02/03 -SkipBuild 复用），分开跑容易漂移；
+    - 四个场景共用同一构建产物（01 构建，02/03/TOOLS-01 -SkipBuild 复用），分开跑容易漂移；
     - "断言只增不减"必须机器校验：基线文件 scripts/e2e-assertion-baseline.json
       记录各 harness 源码里的 Add-Result / Add-Skip 调用点，任何断言被删除或
       改名都会让本脚本 FAIL（防止"悄悄删断言换绿"）。
@@ -12,19 +12,22 @@
   本脚本做三件事：
     1. 基线校验：静态抽取各 harness 源码的断言名，与基线对比——
        缺失 = FAIL（断言被删/改名），新增 = 提示（用 -UpdateBaseline 固化）；
-    2. 顺序执行 01 → 02 → 03：02/03 始终带 -SkipBuild 复用 01 的二进制（-SkipBuild 时三者
-      都复用已有产物）；各自写自己的证据目录，stdout/stderr 分别落盘；
-    3. 聚合结论：读各场景 summary.json（字段名不同：01 = passed/failed，02/03 = pass/fail/skip，
+    2. 顺序执行 01 → 02 → 03 → TOOLS-01：02/03/TOOLS-01 始终带 -SkipBuild 复用 01 的二进制
+       （-SkipBuild 时四者都复用已有产物）；各自写自己的证据目录，stdout/stderr 分别落盘；
+    3. 聚合结论：读各场景 summary.json（字段名不同：01 = passed/failed，02/03/TOOLS-01 = pass/fail/skip，
        本脚本统一归一化；两套字段都没有 = schema 漂移，直接 FAIL 而不是记 0），
        并把 results 条数与 PASS+FAIL 交叉校验，产出 artifacts/aicli-e2e-all/<stamp>/summary.json
        与 run.log；任一场景 FAIL、缺 summary.json、计数对不上或基线缺失断言 → 退出码 1。
 
   退出码：0 = 无 FAIL；1 = 有 FAIL（明细同时打印并写入 summary.json）。
 
+  注意：01 与 TOOLS-01 都需要真实 provider（都要注入 prompt）；无 provider 的环境请只跑
+  `-BaselineOnly`（秒级门禁）。
+
 .PARAMETER ExePath
-  被测二进制；缺省 <repo>/backend/.tmp/aicli-debug-e2e.exe（两个场景共用）。
+  被测二进制；缺省 <repo>/backend/.tmp/aicli-debug-e2e.exe（四个场景共用）。
 .PARAMETER Port01 / Port02
-  两个场景各自的监听端口；缺省 0 = 自动挑空闲端口。
+  01/02 各自的监听端口；缺省 0 = 自动挑空闲端口（03/TOOLS-01 自行挑端口）。
 .PARAMETER LanIp
   传给 02 的非回环请求源 IP；缺省由 02 自动探测。
 .PARAMETER WebToken
@@ -32,10 +35,10 @@
 .PARAMETER Headless
   仅传给 01：启动参数追加 --headless（无人值守；02 不需要 provider，无此参数）。
 .PARAMETER SkipBuild
-  传给 01：跳过 go build 复用 ExePath（02 恒为 -SkipBuild）。
+  传给 01：跳过 go build 复用 ExePath（02/03/TOOLS-01 恒为 -SkipBuild）。
 .PARAMETER ArtifactDir
   聚合证据目录；缺省 artifacts/aicli-e2e-all/<yyyyMMdd-HHmmss>。
-  两个场景分别落在其下的 01-debug-endpoints/ 与 02-nonloopback-auth/。
+  各场景分别落在其下的 01-debug-endpoints/、02-nonloopback-auth/、03-mesh/、04-tools-e2e/。
 .PARAMETER BaselinePath
   断言基线文件；缺省 scripts/e2e-assertion-baseline.json（相对仓库根）。
 .PARAMETER UpdateBaseline
@@ -138,6 +141,17 @@ $script:scenarios = @(
         fail     = 0
         skip     = 0
         summary  = $null
+    },
+    [pscustomobject]@{
+        id       = 'E2E-TOOLS-01'
+        script   = 'scripts/test-aicli-tools-e2e.ps1'
+        dirName  = '04-tools-e2e'
+        artifact = $null
+        exitCode = $null
+        pass     = 0
+        fail     = 0
+        skip     = 0
+        summary  = $null
     }
 )
 
@@ -234,7 +248,7 @@ if ($UpdateBaseline) {
 }
 
 # ------------------------------------------------------------------
-# 1. 顺序执行 01 → 02 → 03（02/03 恒为 -SkipBuild，复用 01 的二进制）
+# 1. 顺序执行 01 → 02 → 03 → TOOLS-01（后三者恒为 -SkipBuild，复用 01 的二进制）
 # ------------------------------------------------------------------
 if (-not $BaselineOnly) {
     foreach ($sc in $script:scenarios) {
@@ -252,6 +266,9 @@ if (-not $BaselineOnly) {
             if ($Port02 -gt 0) { $childArgs += @('-Port', "$Port02") }
             if (-not [string]::IsNullOrWhiteSpace($LanIp)) { $childArgs += @('-LanIp', (Quote-Arg $LanIp)) }
             if (-not [string]::IsNullOrWhiteSpace($WebToken)) { $childArgs += @('-WebToken', (Quote-Arg $WebToken)) }
+            $childArgs += '-SkipBuild'
+        } elseif ($sc.id -eq 'E2E-TOOLS-01') {
+            # 工具链场景：复用 01 的二进制；端口由其自行自动挑选（不占固定端口）。
             $childArgs += '-SkipBuild'
         } else {
             # 03（多进程网格）：不占固定端口（--pprof 随机端口，端口从节点档案读），
@@ -305,7 +322,7 @@ $passCount = @($script:results | Where-Object { $_.passed }).Count
 $failCount = @($script:results | Where-Object { -not $_.passed }).Count
 
 $summary = [ordered]@{
-    scenario         = 'E2E-ALL (debug endpoints + non-loopback auth)'
+    scenario         = 'E2E-ALL (debug endpoints + non-loopback auth + mesh + tools)'
     started_at       = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     exe_path         = $ExePath
     artifact_dir     = $ArtifactDir

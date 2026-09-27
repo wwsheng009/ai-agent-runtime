@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "generated_at": "2026-09-24T12:37:54Z",
+  "generated_at": "2026-09-27T02:00:54Z",
   "note": "断言只增不减：删除或改名断言会让 scripts/test-aicli-e2e-all.ps1 失败；新增用 -UpdateBaseline 固化。",
   "scenarios": [
     {
@@ -46,7 +46,8 @@
         "screen/web-screen-tui",
         "startup/endpoints-ready",
         "turn/current-idle",
-        "turn/found-by-id"
+        "turn/found-by-id",
+        "turn/preview-chars-consistent"
       ]
     },
     {
@@ -106,6 +107,26 @@
         "mesh/session-lease-exclusive",
         "startup/build-artifacts",
         "startup/endpoints-ready"
+      ]
+    },
+    {
+      "id": "E2E-TOOLS-01",
+      "script": "scripts/test-aicli-tools-e2e.ps1",
+      "assertions": [
+        "build/go-build",
+        "discovery/urls-from-catalog",
+        "harness/aborted",
+        "startup/endpoints-ready",
+        "tools/exit-graceful",
+        "tools/invoke-status",
+        "tools/read-dedup-first-read",
+        "tools/read-dedup-stub",
+        "tools/stale-refusal",
+        "tools/stale-untouched",
+        "tools/turn-terminal",
+        "tools/turn-tool-errors",
+        "tools/write-edit-final",
+        "tools/write-edit-recovery"
       ]
     }
   ]
