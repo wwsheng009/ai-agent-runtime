@@ -108,6 +108,26 @@ func TestDetectZipSubtypes(t *testing.T) {
 			wantMIME: "application/vnd.oasis.opendocument.text",
 		},
 		{
+			// 三种 ODF 家族成员曾一律判成 odt：表格/幻灯片先是走错转换器，
+			// 再让 pandoc 报"不是文本文档"（2026-09-27 review）。
+			name: "ods",
+			entries: [][2]string{
+				{"mimetype", "application/vnd.oasis.opendocument.spreadsheet"},
+				{"content.xml", "<office:document-content/>"},
+			},
+			want:     "ods",
+			wantMIME: "application/vnd.oasis.opendocument.spreadsheet",
+		},
+		{
+			name: "odp",
+			entries: [][2]string{
+				{"mimetype", "application/vnd.oasis.opendocument.presentation"},
+				{"content.xml", "<office:document-content/>"},
+			},
+			want:     "odp",
+			wantMIME: "application/vnd.oasis.opendocument.presentation",
+		},
+		{
 			name: "epub",
 			entries: [][2]string{
 				{"META-INF/container.xml", "<container/>"},

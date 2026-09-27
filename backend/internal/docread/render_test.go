@@ -30,8 +30,19 @@ func docreadTestLookPath(t *testing.T, available ...string) {
 // docreadTestRunCommand 覆写包级 runCommand，注入确定性输出。
 func docreadTestRunCommand(t *testing.T, fn func(name string, args []string) (stdout, stderr []byte, err error)) {
 	t.Helper()
+	docreadTestRunCommandWithTruncation(t, func(name string, args []string) (stdout, stderr []byte, truncated bool, err error) {
+		stdout, stderr, err = fn(name, args)
+		return stdout, stderr, false, err
+	})
+}
+
+// docreadTestRunCommandWithTruncation additionally reports the capture-limit
+// signal so the truncated-stream disclosure can be tested without a real
+// converter.
+func docreadTestRunCommandWithTruncation(t *testing.T, fn func(name string, args []string) (stdout, stderr []byte, truncated bool, err error)) {
+	t.Helper()
 	previous := runCommand
-	runCommand = func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
+	runCommand = func(_ context.Context, name string, args ...string) ([]byte, []byte, bool, error) {
 		return fn(name, args)
 	}
 	t.Cleanup(func() { runCommand = previous })
@@ -242,6 +253,70 @@ func TestRenderSofficeFakeConverter(t *testing.T) {
 	}
 }
 
+// TestRenderSofficeFakeConverterForOpenDocumentFamily: ODS 走 csv、ODP 走 txt，
+// 且 doc_kind 如实报告真实格式（此前两者都按 odt→pandoc 处理并失败）。
+func TestRenderSofficeFakeConverterForOpenDocumentFamily(t *testing.T) {
+	cases := []struct {
+		fileName string
+		mime     string
+		wantKind string
+		wantArg  string
+		outName  string
+		payload  string
+	}{
+		{"table.ods", "application/vnd.oasis.opendocument.spreadsheet", "ods", "csv", "table.csv", "a,b\n1,2\n"},
+		{"slides.odp", "application/vnd.oasis.opendocument.presentation", "odp", "txt", "slides.txt", "slide one\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.wantKind, func(t *testing.T) {
+			path := docreadTestZip(t, t.TempDir(), tc.fileName, [][2]string{
+				{"mimetype", tc.mime},
+				{"content.xml", "<office:document-content/>"},
+			})
+			docreadTestLookPath(t, "soffice")
+			var gotFilter string
+			docreadTestRunCommand(t, func(name string, args []string) ([]byte, []byte, error) {
+				if name != "soffice" {
+					return nil, nil, errors.New("unexpected command " + name)
+				}
+				outDir := ""
+				for index, arg := range args {
+					if arg == "--convert-to" && index+1 < len(args) {
+						gotFilter = args[index+1]
+					}
+					if arg == "--outdir" && index+1 < len(args) {
+						outDir = args[index+1]
+					}
+				}
+				if outDir == "" {
+					return nil, []byte("soffice: missing --outdir"), errors.New("exit status 1")
+				}
+				if err := os.WriteFile(filepath.Join(outDir, tc.outName), []byte(tc.payload), 0o644); err != nil {
+					return nil, nil, err
+				}
+				return nil, nil, nil
+			})
+
+			result, err := Render(context.Background(), path)
+			if err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if gotFilter != tc.wantArg {
+				t.Fatalf("filter = %q, want %q", gotFilter, tc.wantArg)
+			}
+			if result.Markdown != tc.payload {
+				t.Fatalf("Markdown = %q, want %q", result.Markdown, tc.payload)
+			}
+			if got := result.Metadata["doc_kind"]; got != tc.wantKind {
+				t.Fatalf("doc_kind = %#v, want %s", got, tc.wantKind)
+			}
+			if got := result.Metadata["doc_converter"]; got != "soffice" {
+				t.Fatalf("doc_converter = %#v, want soffice", got)
+			}
+		})
+	}
+}
+
 func TestRenderNoConverterUnsupported(t *testing.T) {
 	dir := t.TempDir()
 	docxPath := docreadTestDocx(t, dir, "contract.docx")
@@ -438,12 +513,12 @@ func TestRunCommandDefaultHonorsContextAndMissingBinary(t *testing.T) {
 	// ctx 已取消：错误必须能被 errors.Is 命中 context.Canceled。
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := runCommandDefault(ctx, "docread-no-such-command-xyz"); !errors.Is(err, context.Canceled) {
+	if _, _, _, err := runCommandDefault(ctx, "docread-no-such-command-xyz"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled ctx err = %v, want context.Canceled", err)
 	}
 
 	// 不存在的可执行文件：返回错误而不是 panic。
-	if _, _, err := runCommandDefault(context.Background(), "docread-no-such-command-xyz"); err == nil {
+	if _, _, _, err := runCommandDefault(context.Background(), "docread-no-such-command-xyz"); err == nil {
 		t.Fatal("missing binary: want error")
 	}
 }

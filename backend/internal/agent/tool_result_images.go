@@ -71,8 +71,7 @@ func collectImagePassthroughs(results []ToolResultPayload) ([]string, []string) 
 	}
 	for _, result := range results {
 		meta := map[string]interface{}(result.Metadata)
-		collect(meta)
-		collectImagePassthroughsFromItems(meta["items"], collect)
+		walkImagePassthroughMetadata(meta, 0, collect)
 	}
 	if len(paths) == 0 {
 		return nil, nil
@@ -80,6 +79,26 @@ func collectImagePassthroughs(results []ToolResultPayload) ([]string, []string) 
 	// 顺序即声明顺序（顶层优先、随后 items）：paths/notes 保持同一遍历
 	// 次序，消费者不应再按下标把它们当作严格配对（note 可缺省）。
 	return paths, notes
+}
+
+// imagePassthroughMetadataDepth bounds the nested walk: the runtime wraps
+// tool-authored metadata under tool_metadata, and message history can nest the
+// same map one hop deeper after a JSON round trip.
+const imagePassthroughMetadataDepth = 3
+
+// walkImagePassthroughMetadata collects image declarations from one tool result
+// metadata map, including the real runtime shape where a files[] batch lives at
+// tool_metadata.items instead of top-level items. The flat walk alone dropped
+// every batch image attachment on the production path (2026-09-27 review).
+func walkImagePassthroughMetadata(meta map[string]interface{}, depth int, collect func(map[string]interface{})) {
+	if len(meta) == 0 || depth > imagePassthroughMetadataDepth {
+		return
+	}
+	collect(meta)
+	collectImagePassthroughsFromItems(meta["items"], collect)
+	if nested, ok := meta["tool_metadata"].(map[string]interface{}); ok && len(nested) > 0 {
+		walkImagePassthroughMetadata(nested, depth+1, collect)
+	}
 }
 
 // collectImagePassthroughsFromItems 兼容 items 在 JSON 往返前后的两种形状：

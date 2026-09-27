@@ -32,8 +32,8 @@ var extKinds = map[string]string{
 	".xlsx": "xlsx",
 	".xlsm": "xlsx",
 	".odt":  "odt",
-	".ods":  "odt",
-	".odp":  "odt",
+	".ods":  "ods",
+	".odp":  "odp",
 	".epub": "epub",
 	".rtf":  "rtf",
 	".svg":  "svg",
@@ -47,6 +47,8 @@ var kindMIMEs = map[string]string{
 	"pptx":   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 	"xlsx":   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 	"odt":    "application/vnd.oasis.opendocument.text",
+	"ods":    "application/vnd.oasis.opendocument.spreadsheet",
+	"odp":    "application/vnd.oasis.opendocument.presentation",
 	"epub":   "application/epub+zip",
 	"rtf":    "application/rtf",
 	"svg":    "image/svg+xml",
@@ -154,6 +156,14 @@ func classifyZip(path string) (string, bool) {
 		switch content := readZipEntryText(mimeEntry, 128); {
 		case strings.HasPrefix(content, "application/epub+zip"):
 			return "epub", true
+		// Specific ODF flavours first: the generic prefix below would otherwise
+		// report a spreadsheet or presentation as a text document, and the
+		// converter then produced a confusing "not a text document" failure or
+		// silently wrong output (2026-09-27 review).
+		case strings.HasPrefix(content, "application/vnd.oasis.opendocument.spreadsheet"):
+			return "ods", true
+		case strings.HasPrefix(content, "application/vnd.oasis.opendocument.presentation"):
+			return "odp", true
 		case strings.HasPrefix(content, "application/vnd.oasis.opendocument"):
 			return "odt", true
 		}

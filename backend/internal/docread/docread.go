@@ -71,7 +71,7 @@ func Detect(path string, head []byte) Probe {
 	switch kind {
 	case "svg", "text":
 		probe.Supported = true
-	case "pdf", "docx", "odt", "rtf", "epub", "pptx", "xlsx":
+	case "pdf", "docx", "odt", "ods", "odp", "rtf", "epub", "pptx", "xlsx":
 		if tool := converterForKind(kind); tool != "" {
 			if _, err := lookPath(tool); err == nil {
 				probe.Converter = tool
@@ -139,7 +139,18 @@ func Render(ctx context.Context, path string) (DocumentRender, error) {
 		meta["doc_reason"] = "convert_failed"
 		return DocumentRender{Metadata: meta}, err
 	}
-	meta["doc_degraded"] = false
+	if converted.Truncated {
+		// The converter hit the capture limit: the retained prefix is not the
+		// whole document, so the window/EOF/page numbers below describe the
+		// prefix. Say so instead of reporting a complete render (2026-09-27
+		// review).
+		meta["doc_degraded"] = true
+		meta["doc_reason"] = "output_truncated"
+		meta["doc_output_truncated"] = true
+		meta["doc_truncated_at_bytes"] = maxConverterOutputBytes
+	} else {
+		meta["doc_degraded"] = false
+	}
 
 	if probe.Kind == "pdf" {
 		// 页码信息只放元数据，正文保持纯 Markdown。

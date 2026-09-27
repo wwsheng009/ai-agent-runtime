@@ -227,7 +227,9 @@ func TestRenderBytesEnforcesTotalImageBudget(t *testing.T) {
 	maxImageBytes, maxTotalImageBytes = 1<<20, 10
 	t.Cleanup(func() { maxImageBytes, maxTotalImageBytes = originalSingle, originalTotal })
 
-	payload := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x01}, 8))
+	// A real container signature keeps the fixture representative: the renderer
+	// now validates decoded bytes against the declared MIME.
+	payload := base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
 	raw := notebookJSON(t, []map[string]interface{}{
 		{"cell_type": "code", "source": "a", "outputs": []map[string]interface{}{
 			{"output_type": "display_data", "data": map[string]interface{}{"image/png": payload}},

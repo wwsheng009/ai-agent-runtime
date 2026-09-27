@@ -127,3 +127,40 @@ func TestCollectImagePassthroughsReadsExtraPaths(t *testing.T) {
 		t.Fatalf("expected the primary note only, got %#v", notes)
 	}
 }
+
+// TestCollectImagePassthroughsReadsNestedToolMetadataItems covers the real
+// runtime shape: recordToolExecutionOutcome wraps tool-authored metadata under
+// tool_metadata, so a files[] batch declares its images at tool_metadata.items.
+// The flat walk returned zero attachments there (2026-09-27 review).
+func TestCollectImagePassthroughsReadsNestedToolMetadataItems(t *testing.T) {
+	dir := t.TempDir()
+	imagePath := filepath.Join(dir, "nested.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o644); err != nil {
+		t.Fatalf("seed image: %v", err)
+	}
+	nested := map[string]interface{}{
+		"items": []map[string]interface{}{
+			{
+				toolresult.MetadataImagePassthroughKey: true,
+				toolresult.MetadataImagePathKey:        imagePath,
+			},
+		},
+	}
+	paths, _ := collectImagePassthroughs([]ToolResultPayload{{Metadata: types.Metadata{"tool_metadata": nested}}})
+	if len(paths) != 1 || paths[0] != imagePath {
+		t.Fatalf("expected the wrapped batch image, got %#v", paths)
+	}
+	// The decoded shape must work too: []interface{} items one hop deeper.
+	decoded := map[string]interface{}{
+		"tool_metadata": map[string]interface{}{
+			"items": []interface{}{map[string]interface{}{
+				toolresult.MetadataImagePassthroughKey: true,
+				toolresult.MetadataImagePathKey:        imagePath,
+			}},
+		},
+	}
+	paths, _ = collectImagePassthroughs([]ToolResultPayload{{Metadata: types.Metadata(decoded)}})
+	if len(paths) != 1 || paths[0] != imagePath {
+		t.Fatalf("expected the decoded nested image, got %#v", paths)
+	}
+}

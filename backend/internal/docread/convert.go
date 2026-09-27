@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -29,8 +30,9 @@ var (
 	runCommand = runCommandDefault
 )
 
-// runCommandDefault 绑定 ctx 并设 60s 超时执行命令，返回 stdout/stderr 与错误。
-func runCommandDefault(ctx context.Context, name string, args ...string) (stdout, stderr []byte, err error) {
+// runCommandDefault 绑定 ctx 并设 60s 超时执行命令，返回 stdout/stderr、
+// "抓取量是否触顶"与错误。
+func runCommandDefault(ctx context.Context, name string, args ...string) (stdout, stderr []byte, truncated bool, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -47,14 +49,15 @@ func runCommandDefault(ctx context.Context, name string, args ...string) (stdout
 	if err != nil && runCtx.Err() != nil {
 		err = fmt.Errorf("%w: %w", err, runCtx.Err())
 	}
-	return stdoutBuf.Bytes(), stderrBuf.Bytes(), err
+	return stdoutBuf.Bytes(), stderrBuf.Bytes(), stdoutBuf.Truncated() || stderrBuf.Truncated(), err
 }
 
 // boundedBuffer 是带上限的 io.Writer：超限后继续"消费"写入（返回成功）
 // 以免子进程因 EPIPE 提前退出，但只保留前 limit 字节。
 type boundedBuffer struct {
-	buf   bytes.Buffer
-	limit int
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
@@ -66,12 +69,26 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 			b.buf.Write(p)
 		} else {
 			b.buf.Write(p[:remaining])
+			b.truncated = true
 		}
+	} else {
+		b.truncated = true
 	}
 	return len(p), nil
 }
 
 func (b *boundedBuffer) Bytes() []byte { return b.buf.Bytes() }
+
+// Truncated reports whether any bytes were dropped after the limit was reached.
+// Dropping silently used to let a prefix masquerade as the complete converter
+// output, with doc_degraded=false and EOF/page counts computed from the prefix
+// (2026-09-27 review).
+func (b *boundedBuffer) Truncated() bool {
+	if b == nil {
+		return false
+	}
+	return b.truncated || (b.limit > 0 && b.buf.Len() >= b.limit)
+}
 
 // converterForKind 返回该类型所需的转换器；svg/text 走内建，返回空串。
 func converterForKind(kind string) string {
@@ -80,7 +97,7 @@ func converterForKind(kind string) string {
 		return "pdftotext"
 	case "docx", "odt", "rtf", "epub":
 		return "pandoc"
-	case "pptx", "xlsx":
+	case "pptx", "xlsx", "ods", "odp":
 		return "soffice"
 	default:
 		return ""
@@ -91,25 +108,28 @@ func converterForKind(kind string) string {
 type convertResult struct {
 	Markdown string
 	Raw      string
+	// Truncated reports that the converter stream hit the capture limit: the
+	// retained prefix is not the whole document.
+	Truncated bool
 }
 
 // convertDocument 按类型选择转换命令并返回渲染结果。
 func convertDocument(ctx context.Context, probe Probe, path string) (convertResult, error) {
 	switch probe.Kind {
 	case "pdf":
-		out, err := runConverter(ctx, "pdftotext", path, "-")
+		out, truncated, err := runConverter(ctx, "pdftotext", path, "-")
 		if err != nil {
 			return convertResult{}, err
 		}
 		raw := string(out)
-		return convertResult{Markdown: pdfMarkdown(raw), Raw: raw}, nil
+		return convertResult{Markdown: pdfMarkdown(raw), Raw: raw, Truncated: truncated}, nil
 	case "docx", "odt", "rtf", "epub":
-		out, err := runConverter(ctx, "pandoc", "-f", probe.Kind, "-t", "gfm", path)
+		out, truncated, err := runConverter(ctx, "pandoc", "-f", probe.Kind, "-t", "gfm", path)
 		if err != nil {
 			return convertResult{}, err
 		}
-		return convertResult{Markdown: string(out), Raw: string(out)}, nil
-	case "pptx", "xlsx":
+		return convertResult{Markdown: string(out), Raw: string(out), Truncated: truncated}, nil
+	case "pptx", "xlsx", "ods", "odp":
 		return convertWithSoffice(ctx, probe.Kind, path)
 	default:
 		return convertResult{}, fmt.Errorf("docread: no converter for kind %q", probe.Kind)
@@ -117,12 +137,12 @@ func convertDocument(ctx context.Context, probe Probe, path string) (convertResu
 }
 
 // runConverter 执行外部命令；非零退出码返回带 stderr 摘要的错误。
-func runConverter(ctx context.Context, name string, args ...string) ([]byte, error) {
-	stdout, stderr, err := runCommand(ctx, name, args...)
+func runConverter(ctx context.Context, name string, args ...string) ([]byte, bool, error) {
+	stdout, stderr, truncated, err := runCommand(ctx, name, args...)
 	if err != nil {
-		return nil, commandError(name, stderr, err)
+		return nil, false, commandError(name, stderr, err)
 	}
-	return stdout, nil
+	return stdout, truncated, nil
 }
 
 // commandError 把命令失败与 stderr 摘要包装成一个错误。
@@ -150,7 +170,8 @@ func stderrSummary(stderr []byte) string {
 	return strings.TrimSpace(text)
 }
 
-// convertWithSoffice 通过 soffice 把 xlsx 转 csv、pptx 转 txt，输出到临时目录再读回。
+// convertWithSoffice 通过 soffice 把表格（xlsx/ods）转 csv、幻灯片（pptx/odp）转
+// txt，输出到临时目录再读回。
 func convertWithSoffice(ctx context.Context, kind, path string) (convertResult, error) {
 	dir, err := os.MkdirTemp("", "docread-soffice-*")
 	if err != nil {
@@ -159,7 +180,8 @@ func convertWithSoffice(ctx context.Context, kind, path string) (convertResult, 
 	defer os.RemoveAll(dir)
 
 	filter, outExt := "csv", ".csv"
-	if kind == "pptx" {
+	switch kind {
+	case "pptx", "odp":
 		filter, outExt = "txt", ".txt"
 	}
 	args := []string{
@@ -171,7 +193,8 @@ func convertWithSoffice(ctx context.Context, kind, path string) (convertResult, 
 		"--outdir", dir,
 		path,
 	}
-	if _, err := runConverter(ctx, "soffice", args...); err != nil {
+	_, truncated, err := runConverter(ctx, "soffice", args...)
+	if err != nil {
 		return convertResult{}, err
 	}
 
@@ -180,7 +203,7 @@ func convertWithSoffice(ctx context.Context, kind, path string) (convertResult, 
 	if err != nil {
 		return convertResult{}, err
 	}
-	return convertResult{Markdown: string(data), Raw: string(data)}, nil
+	return convertResult{Markdown: string(data), Raw: string(data), Truncated: truncated}, nil
 }
 
 // fileURL 把本地路径转成 file:// URL（soffice 的 UserInstallation 需要）。
@@ -193,22 +216,59 @@ func fileURL(path string) string {
 }
 
 // readConvertedOutput 读取 soffice 的输出文件；导出的扩展名与预期不一致时兜底扫描目录。
+// 进程 stdout/stderr 的上限管不到这个文件产物，因此两条回读路径都必须限幅：
+// 无界 os.ReadFile 会让任意大的 CSV/TXT 在窗口化之前整体驻留内存
+// （2026-09-27 review: 32 MiB+1 字节产物被完整读入）。
 func readConvertedOutput(dir, base, wantExt string) ([]byte, error) {
-	if data, err := os.ReadFile(filepath.Join(dir, base+wantExt)); err == nil {
+	if data, err := readConvertedFile(filepath.Join(dir, base+wantExt)); err == nil {
 		return data, nil
+	} else if !os.IsNotExist(err) {
+		// A real read failure (including the size ceiling) must not be masked by
+		// the extension fallback as "no output produced".
+		return nil, err
 	}
 	entries, err := os.ReadDir(dir)
 	if err == nil {
+		var firstErr error
 		for _, entry := range entries {
 			if entry.IsDir() || !strings.HasPrefix(entry.Name(), base+".") {
 				continue
 			}
-			if data, err := os.ReadFile(filepath.Join(dir, entry.Name())); err == nil {
+			data, readErr := readConvertedFile(filepath.Join(dir, entry.Name()))
+			if readErr == nil {
 				return data, nil
 			}
+			if firstErr == nil && !os.IsNotExist(readErr) {
+				firstErr = readErr
+			}
+		}
+		if firstErr != nil {
+			return nil, firstErr
 		}
 	}
 	return nil, fmt.Errorf("docread: soffice produced no %s output", wantExt)
+}
+
+// readConvertedFile reads one converter product with the same byte ceiling as
+// the process streams. Oversize output fails loudly instead of silently keeping
+// a prefix the caller would present as the complete document.
+func readConvertedFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxConverterOutputBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxConverterOutputBytes {
+		return nil, fmt.Errorf(
+			"docread: converted output %s exceeds the %d-byte limit; narrow the source or inspect it with shell/jq",
+			path, maxConverterOutputBytes,
+		)
+	}
+	return data, nil
 }
 
 // summarizePDFPages 依据 pdftotext 输出的 \f 分页符统计页数与缺文本层页。

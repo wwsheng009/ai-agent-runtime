@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -41,6 +42,10 @@ type Image struct {
 	Output int
 	MIME   string
 	Data   []byte
+	// Line is the 0-based line of Render.Markdown that carries this image's
+	// placeholder, so a windowed reader can attach only the images it actually
+	// delivered instead of the whole notebook's (2026-09-27 review).
+	Line int
 }
 
 // Render is the Markdown projection plus structured metadata.
@@ -156,10 +161,7 @@ func RenderBytes(raw []byte) (Render, error) {
 				}
 			}
 		case "code":
-			fence := "```"
-			for strings.Contains(source, fence) {
-				fence += "`"
-			}
+			fence := notebookFenceFor(source)
 			fmt.Fprintf(&builder, "%spython\n", fence)
 			builder.WriteString(source)
 			if source != "" && !strings.HasSuffix(source, "\n") {
@@ -179,6 +181,33 @@ func RenderBytes(raw []byte) (Render, error) {
 	return render, nil
 }
 
+// notebookFenceFor returns a code fence that no backtick run inside source can
+// close. The previous loop grew the fence one character at a time and re-scanned
+// the whole source on every iteration, so a cell with a long backtick run cost
+// Θ(N²) time and allocations while the notebook itself stayed far below the file
+// size cap (2026-09-27 review: 4 KiB of backticks allocated ~9 MB, 8 KiB ~36 MB).
+func notebookFenceFor(source string) string {
+	longest := 0
+	run := 0
+	for i := 0; i < len(source); i++ {
+		if source[i] != '`' {
+			run = 0
+			continue
+		}
+		run++
+		if run > longest {
+			longest = run
+		}
+	}
+	if longest < 3 {
+		return "```"
+	}
+	// A fence of length L is closable by the source exactly when the source
+	// contains a backtick run of at least L; longest+1 is therefore minimal and
+	// sufficient.
+	return strings.Repeat("`", longest+1)
+}
+
 func renderOutputs(builder *strings.Builder, render *Render, cellIndex int, outputs []output) int {
 	omitted := 0
 	for outputIndex, out := range outputs {
@@ -186,6 +215,15 @@ func renderOutputs(builder *strings.Builder, render *Render, cellIndex int, outp
 		case "stream", "execute_result", "display_data", "update_display_data":
 			text, pointer := outputTextAndPointer(out, cellIndex, outputIndex)
 			if strings.TrimSpace(text) == "" && !hasImage(out) {
+				// A display output can carry only representations this renderer
+				// cannot attach (image/svg+xml is the common one). Dropping it
+				// silently hid the output entirely, with doc_degraded left false
+				// (2026-09-27 review): leave a recovery pointer and count it.
+				if mime := unsupportedImageMIME(out); mime != "" {
+					fmt.Fprintf(builder, "# output omitted: {\"jq\": %q, \"note\": \"unsupported image MIME %s; use shell/jq to inspect\"}\n",
+						pointer, mime)
+					omitted++
+				}
 				continue
 			}
 			if utf8.RuneCountInString(text) > maxOutputChars {
@@ -261,6 +299,49 @@ func hasImage(out output) bool {
 	return false
 }
 
+// unsupportedImageMIME names the first image representation this renderer cannot
+// attach, so the omitted-output note can say why the output disappeared.
+func unsupportedImageMIME(out output) string {
+	if len(out.Data) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(out.Data))
+	for key := range out.Data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if strings.HasPrefix(key, "image/") && !supportedImageMIME(key) {
+			return key
+		}
+	}
+	return ""
+}
+
+func supportedImageMIME(mime string) bool {
+	switch mime {
+	case "image/png", "image/jpeg", "image/gif":
+		return true
+	}
+	return false
+}
+
+// imageMagicMatches reports whether the decoded bytes really start with the
+// container signature the declared MIME promises. A successful base64 decode is
+// not a valid image: "eA==" decodes to the single byte 'x' and used to be
+// persisted as a .png with image_passthrough=true (2026-09-27 review).
+func imageMagicMatches(data []byte, mime string) bool {
+	switch mime {
+	case "image/png":
+		return len(data) >= 8 && bytes.Equal(data[:8], []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	case "image/jpeg":
+		return len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF
+	case "image/gif":
+		return len(data) >= 6 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a")
+	}
+	return false
+}
+
 func appendImages(builder *strings.Builder, render *Render, cellIndex, outputIndex int, out output) int {
 	skipped := 0
 	for _, mime := range []string{"image/png", "image/jpeg", "image/gif"} {
@@ -288,6 +369,12 @@ func appendImages(builder *strings.Builder, render *Render, cellIndex, outputInd
 			skipped++
 			continue
 		}
+		if !imageMagicMatches(data, mime) {
+			fmt.Fprintf(builder, "# [image] cell %d output %d: %s (解码结果不是有效图片，未附加)\n",
+				cellIndex+1, outputIndex, mime)
+			skipped++
+			continue
+		}
 		if render.imageBytes+len(data) > maxTotalImageBytes {
 			fmt.Fprintf(builder, "# [image] cell %d output %d: %s (notebook 图片总量超过 %d 字节上限未附加)\n",
 				cellIndex+1, outputIndex, mime, maxTotalImageBytes)
@@ -295,7 +382,13 @@ func appendImages(builder *strings.Builder, render *Render, cellIndex, outputInd
 			continue
 		}
 		render.imageBytes += len(data)
-		render.Images = append(render.Images, Image{Cell: cellIndex, Output: outputIndex, MIME: mime, Data: data})
+		render.Images = append(render.Images, Image{
+			Cell:   cellIndex,
+			Output: outputIndex,
+			MIME:   mime,
+			Data:   data,
+			Line:   strings.Count(builder.String(), "\n"),
+		})
 		fmt.Fprintf(builder, "# [image] cell %d output %d: %s (%d bytes)\n", cellIndex+1, outputIndex, mime, len(data))
 	}
 	return skipped

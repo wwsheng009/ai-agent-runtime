@@ -37,6 +37,11 @@ const (
 	DefaultMaxBytes = 32 << 20
 	// DefaultJPEGQuality 是无透明通道图片的重新编码质量。
 	DefaultJPEGQuality = 85
+	// DefaultMaxPixels 是解码前的像素总量上限（约 64 MP，RGBA 位图约 256 MiB）。
+	// 体积上限拦不住"小文件、巨大尺寸"的高压缩图片：32 KiB 的 PNG 可以是
+	// 32768×32768，解码后仅原图缓存就约 4 GiB，而缩放在完整解码之后才发生
+	// （2026-09-27 review）。
+	DefaultMaxPixels = 64 << 20
 )
 
 // Options 控制一次预处理；零值即默认策略。
@@ -66,6 +71,21 @@ type Result struct {
 	Skipped bool
 	// Note 是一行中文说明，可直接展示给用户；无需处理时为空。
 	Note string
+}
+
+// oversizePixelNote returns a one-line refusal note when the decoded bitmap
+// would exceed the pixel budget. Scaling happens after a full decode, so the
+// only safe place to enforce this is on the header dimensions.
+func oversizePixelNote(srcPath string, width, height int, bytes int64, format string) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	pixels := int64(width) * int64(height)
+	if pixels <= DefaultMaxPixels {
+		return ""
+	}
+	return fmt.Sprintf("已跳过 %s：%dx%d（%d 像素，%s）超过解码像素上限 %d；请先缩小图片再发送",
+		filepath.Base(srcPath), width, height, pixels, humanBytes(bytes), int64(DefaultMaxPixels))
 }
 
 // Prepare 按 opts 处理 srcPath，必要时把结果写入 outDir（为空则用系统临时目录）。
@@ -101,6 +121,16 @@ func Prepare(srcPath, outDir string, opts Options) (Result, error) {
 		return Result{}, err
 	}
 	format = normalizeFormat(format)
+	if reason := oversizePixelNote(srcPath, cfg.Width, cfg.Height, info.Size(), format); reason != "" {
+		return Result{
+			Bytes:   info.Size(),
+			Width:   cfg.Width,
+			Height:  cfg.Height,
+			Format:  format,
+			Skipped: true,
+			Note:    reason,
+		}, nil
+	}
 
 	unchanged := Result{Path: srcPath, Width: cfg.Width, Height: cfg.Height, Bytes: info.Size(), Format: format}
 	maxDimension := opts.MaxDimension
