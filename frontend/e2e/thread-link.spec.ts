@@ -140,6 +140,21 @@ test("后端连接失败（events 500）时页面显示可见错误提示", asyn
   });
   expect(broken.ok()).toBe(true);
 
+  // 断线窗口内权威历史一并不可达：只断 events 时，应用会用**成功的**历史探活
+  // 自动收敛掉 transport 降级态（P1-4 断流收敛），composer 状态行于是时有时无
+  // ——「已恢复」并不等于「没断过」，但断言会因此变成竞态。「后台服务断开」本
+  // 就是多端点同时不可达：events 500 的归属断言（下方 eventsStatuses）保持不变。
+  await page.route(
+    "**/api/runtime/sessions/e2e-session-1/history*",
+    async (route) => {
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "runtime backend offline" }),
+      });
+    },
+  );
+
   // 重启页面：事件端点 500 → thread 必须降级为**正文可见**的错误状态，不再静默。
   await page.reload();
   await waitForPromptVisible(page);

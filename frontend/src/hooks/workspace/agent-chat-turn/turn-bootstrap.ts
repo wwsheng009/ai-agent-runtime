@@ -86,8 +86,12 @@ export function prepareAgentChatTurn(
     threadSnapshot.sessionId,
     threadSnapshot.id,
   );
+  // 回合账目按**发起线程身份**登记：新会话首轮时 sessionId 还没落库，键只能是
+  // 线程 id；页面稍后带着 sessionId 解析同一线程时，池按这条身份记忆迁移 store
+  // （与 `useSelectedTrajectoryStore` 的 acquireForThread 口径一致），避免视图切到
+  // 另一个空快照、实时增量落在旧 store 上。
   const turnTrajectoryStore = input.trajectoryStorePool
-    ? input.trajectoryStorePool.acquire(turnKey)
+    ? input.trajectoryStorePool.acquireForThread(threadId, turnKey)
     : input.trajectoryStore;
   const sessionIdBeforeTurn = normalizeSessionId(threadSnapshot.sessionId ?? "");
   const turnId = crypto.randomUUID();

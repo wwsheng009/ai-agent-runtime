@@ -150,6 +150,36 @@ describe("createTrajectoryStorePool（轨迹 store 池）", () => {
     expect(pool.peek("session-b")).toBe(second);
   });
 
+  it("acquireForThread：新会话首轮——回合已按线程键建 store 时补一次迁移", () => {
+    const pool = createTrajectoryStorePool({ maxStores: 3 });
+    // 回合 bootstrap：服务端 sessionId 尚未落库，只能按当时的线程 id 解析并登记
+    // 线程身份（`acquireForThread`）；store 从这里开始收 SSE 增量。
+    const turnStore = pool.acquireForThread("thread-new-chat", "thread-new-chat");
+    turnStore.advanceCursor(3);
+    turnStore.flush();
+
+    // 页面随后解析同一线程（此时已带 sessionId）：按登记的身份先迁移再取，
+    // 否则视图切到空快照、回合增量成孤儿（轨迹只剩流早期的一两行）。
+    const resolved = pool.acquireForThread("thread-new-chat", "session-1");
+    expect(resolved).toBe(turnStore);
+    expect(resolved.getSnapshot().lastEventSeq).toBe(3);
+    expect(pool.peek("thread-new-chat")).toBeUndefined();
+    expect(pool.peek("session-1")).toBe(turnStore);
+
+    // 之后再解析（同线程、同键）仍是同一实例。
+    expect(pool.acquireForThread("thread-new-chat", "session-1")).toBe(turnStore);
+  });
+
+  it("acquireForThread：首次解析时目标键已占用则不迁移（真切换语义不变）", () => {
+    const pool = createTrajectoryStorePool({ maxStores: 3 });
+    const occupied = pool.acquire("session-1");
+    const turnStore = pool.acquire("thread-other");
+
+    expect(pool.acquireForThread("thread-other", "session-1")).toBe(occupied);
+    expect(pool.peek("thread-other")).toBe(turnStore);
+    expect(pool.peek("session-1")).toBe(occupied);
+  });
+
   it("reset 只作用于驻留 store，不创建新条目", () => {
     const { createStore } = createFakeFactory();
     const pool = createTrajectoryStorePool({ createStore });

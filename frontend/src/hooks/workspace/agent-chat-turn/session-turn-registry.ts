@@ -154,6 +154,14 @@ export function createSessionTurnRegistry(): SessionTurnRegistry {
         activeTurnId: init.turnId,
         phase: null,
       };
+      // 登记「线程身份 → 本次解析出的键」：新会话首轮时服务端 sessionId 还没落库，
+      // 键只能是线程 id；页面稍后带着 sessionId 解析同一线程时，resolveThreadKey
+      // 靠这条记忆先迁移条目再读快照，否则选中会话读不到在途回合
+      // （isResponding 恒 false：阶段条消失、停止入口也不出现）。
+      const threadId = (init.threadId ?? "").trim();
+      if (threadId) {
+        threadKeys.set(threadId, init.key);
+      }
       store(entry);
       return entry;
     },

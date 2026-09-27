@@ -143,6 +143,24 @@ describe("createSessionTurnRegistry（回合状态注册表）", () => {
     expect(registry.resolveThreadKey("", "session-1")).toBe("session-1");
   });
 
+  it("resolveThreadKey：新会话首轮——回合已按线程 id 注册时补一次迁移", () => {
+    const registry = createSessionTurnRegistry();
+    // 回合 bootstrap：服务端 sessionId 尚未落库，条目按当时的线程 id 注册，
+    // 同时登记「线程身份 → 键」（beginTurn）。
+    beginTurn(registry, "thread-new-chat", {
+      threadId: "thread-new-chat",
+      turnId: "turn-1",
+    });
+
+    // 页面随后解析同一线程（已带 sessionId）：必须迁移，否则选中会话读不到
+    // 在途回合（isResponding 恒 false：阶段条消失、停止入口不出现）。
+    expect(registry.resolveThreadKey("thread-new-chat", "session-1")).toBe("session-1");
+    expect(registry.isBusy("session-1")).toBe(true);
+    expect(registry.isTurnRunning("turn-1")).toBe(true);
+    expect(registry.getSnapshot("thread-new-chat").entry).toBeNull();
+    expect(registry.activeKeys()).toEqual(["session-1"]);
+  });
+
   it("bindSessionTurn：phaseRef / activeTurnIdRef 与 setter 桥接到本回合条目", () => {
     const registry = createSessionTurnRegistry();
     beginTurn(registry, "session-a");

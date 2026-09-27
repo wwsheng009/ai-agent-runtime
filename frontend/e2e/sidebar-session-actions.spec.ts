@@ -96,7 +96,9 @@ test("Fork 生成带分支后缀的独立新会话", async ({ page }) => {
 
   await gotoWorkspace(page);
   await openSessionRowMenu(page, SOURCE_ID);
-  await page.getByRole("menuitem", { name: "Fork session" }).click();
+  // 2026-09-18 样式优化（2c05eaac）：行菜单文案简化为动词本身（'Fork session' →
+  // 'Fork'），图标补足语义；断言口径随之更新。
+  await page.getByRole("menuitem", { name: "Fork" }).click();
 
   await expect.poll(() => branchBodies.length).toBe(1);
   expect(String(branchBodies[0].title)).toContain("(branch)");
@@ -126,7 +128,7 @@ test("删除会话后该行从侧栏列表消失", async ({ page }) => {
 
   await gotoWorkspace(page);
   await openSessionRowMenu(page, SOURCE_ID);
-  await page.getByRole("menuitem", { name: "Delete session" }).click();
+  await page.getByRole("menuitem", { name: "Delete" }).click();
 
   await expect.poll(() => deleteCalls.length).toBe(1);
   expect(decodeURIComponent(deleteCalls[0])).toContain(`/sessions/${SOURCE_ID}`);
@@ -153,7 +155,7 @@ test("归档会话后从默认列表隐藏，可从归档区恢复", async ({ pa
 
   await gotoWorkspace(page);
   await openSessionRowMenu(page, SOURCE_ID);
-  await page.getByRole("menuitem", { name: "Archive session" }).click();
+  await page.getByRole("menuitem", { name: "Archive" }).click();
 
   await expect.poll(() => archiveCalls.length).toBe(1);
   expect(decodeURIComponent(archiveCalls[0])).toContain(
@@ -177,9 +179,7 @@ test("归档会话后从默认列表隐藏，可从归档区恢复", async ({ pa
   await closeSectionMenu(page);
   await expect(sessionsSection.getByRole("button", { name: rowName })).toBeVisible();
   await openSessionRowMenu(page, SOURCE_ID);
-  await page
-    .getByRole("menuitem", { name: "Restore archived session" })
-    .click();
+  await page.getByRole("menuitem", { name: "Restore" }).click();
 
   await expect.poll(() => restoreCalls.length).toBe(1);
   expect(decodeURIComponent(restoreCalls[0])).toContain(
@@ -219,9 +219,10 @@ test("菜单重命名：单一入口进入编辑态、提交后再次进入并 E
 
   const workspace = workspaceSection(page);
   await openSessionRowMenu(page, SOURCE_ID);
-  await page.getByRole("menuitem", { name: "Rename session" }).click();
+  await page.getByRole("menuitem", { name: "Rename" }).click();
 
-  const editor = page.getByRole("textbox", { name: "Rename session" });
+  // 编辑框的可访问名同样走 `sidebar.sessions.actions.rename`（现为 'Rename'）。
+  const editor = page.getByRole("textbox", { name: "Rename" });
   await expect(editor).toBeVisible();
   // 跨帧存活：编辑器不会被同帧的条件渲染 / 焦点转移卸载（缺陷期的表现就是这里挂掉）。
   await page.waitForTimeout(300);
@@ -243,7 +244,7 @@ test("菜单重命名：单一入口进入编辑态、提交后再次进入并 E
     .locator("xpath=..")
     .getByRole("button", { name: "Session actions" })
     .click();
-  await page.getByRole("menuitem", { name: "Rename session" }).click();
+  await page.getByRole("menuitem", { name: "Rename" }).click();
   await expect(editor).toBeVisible();
   await page.waitForTimeout(300);
   await expect(editor).toHaveCount(1);

@@ -45,6 +45,26 @@ test("直连 chat 流失败可见断线状态，手动重试不产生重复请�
     },
   );
 
+  // 权威历史：断线窗口内一并失败。只断 chat、其余健康时，应用会**自动**用
+  // 成功的权威历史收敛掉降级态（P1-4 断流收敛），离线徽标一帧即逝——手动重试
+  // 入口在用户点得到之前就没了。真实断线（chat + history 同时不可用）才留得住
+  // 这个窗口；恢复交给「重试」自带的历史探活来收口（见用例末尾断言）。
+  let historyBroken = true;
+  await page.route(
+    "**/api/runtime/sessions/e2e-session-1/history*",
+    async (route) => {
+      if (historyBroken) {
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "runtime backend offline" }),
+        });
+        return;
+      }
+      await route.continue();
+    },
+  );
+
   await page.goto("/workspace/chats/e2e-session-1");
   await expect(composer(page)).toBeVisible({ timeout: 30_000 });
 
@@ -58,6 +78,8 @@ test("直连 chat 流失败可见断线状态，手动重试不产生重复请�
   const retry = badge.locator("button");
   await expect(retry).toBeVisible();
 
+  // 后台恢复：重试的历史探活应当成功，降级随之收敛回在线。
+  historyBroken = false;
   const streamsBeforeRetry = streamRequests;
   await retry.click();
 

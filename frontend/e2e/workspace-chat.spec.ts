@@ -206,13 +206,19 @@ test("P1-3a: reading position holds while the answer keeps streaming", async ({
   page,
 }) => {
   await sendPrompt(page, "scroll long answer");
-  await expect(page.getByText(/part 4/)).toBeVisible({ timeout: 15_000 });
+  // 前提：内容要有足够高度才能「真的离开底部」。过程行收敛为 24px 紧凑行之后，
+  // 只等到 part 4 时内容还不足一屏多，列表贴底并继续跟随才是正确行为——
+  // 此时谈「读位保持」无从谈起（与 G5 同口径：等到 part 8 再上滚）。
+  await expect(page.getByText(/part 8/)).toBeVisible({ timeout: 15_000 });
 
   // 上滚离开底部：语义锚点定在 reading-line 命中的那一行。
   const list = page.locator('[role="log"]').locator("..");
   await list.hover();
   await page.mouse.wheel(0, -2400);
   await page.waitForTimeout(300);
+  // 前提断言：确实离开了底部（否则下面的「原地不动」会退化成跟随行为的假绿）。
+  const scrolled = await scrollMetrics(page);
+  expect(scrolled.max - scrolled.top).toBeGreaterThan(150);
   const before = await readingState(page);
   expect(before?.id).toBeTruthy();
   expect(before?.top).not.toBeNull();

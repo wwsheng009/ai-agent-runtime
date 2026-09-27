@@ -185,6 +185,11 @@ export function createStreamingWriters(
           ...currentMessage,
           author: "Runtime error",
           label: "error",
+          // 错误定稿 = 被中断的本地消息：半截正文只存在于本页（服务端不会落盘），
+          // 因此必须打上 live-only 标记（与 `finalizeTurn` 的中止路径同口径）。
+          // 否则降级收敛按「权威历史覆盖」时会把半截回答连同告警行一起吞掉——
+          // 用户看到的是「点了发送、报错后消息凭空消失」（G8a）。
+          interrupted: true,
           streaming: false,
           segments,
         };
