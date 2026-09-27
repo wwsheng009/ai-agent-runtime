@@ -30,7 +30,7 @@ export const enWorkspaceFilePreview = {
     binaryNul: "NUL byte present",
     binaryUtf8: "not UTF-8 text",
     markdownTooLarge:
-      "The document is {{size}} characters, above the {{limit}}-character in-dialog Markdown render limit; the preview is not rendered — switch to Raw to read the full text.",
+      "The document is {{size}} characters, above the {{limit}}-character Markdown render limit; the preview is not rendered — switch to Raw / Text to read the full text.",
     tooLarge:
       "The file is {{size}}, above the {{limit}} preview limit; content is not rendered to keep the page responsive.",
   },

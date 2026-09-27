@@ -122,6 +122,11 @@ export const zhWorkspacePanelsFileBrowser = {
     retry: "重试",
     truncated: "预览已截断：仅显示前 {{size}}。",
     markdown: "Markdown 预览",
+    viewMode: {
+      ariaLabel: "预览视图切换",
+      markdown: "Markdown",
+      text: "文本",
+    },
     image: "图片预览",
     svgAsText: "SVG 以文本方式显示（不内联注入，避免脚本执行）。",
     binary: "二进制文件，无法按文本预览。",

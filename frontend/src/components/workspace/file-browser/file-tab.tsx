@@ -8,19 +8,19 @@
 //   * 结果与「请求身份」绑定（requestKey 校验），陈旧结果不写状态。
 //
 // 降级判据（分流，禁止类型伪装）：
-//   * text + .md → react-markdown（`img` 改写为 alt 文本，不加载外部资源）；
+//   * text + .md → 与聊天/文件预览弹层共用 MessageMarkdown 渲染（同一套标题/列表/表格/代码块样式，
+//     图片与链接沿用白名单策略），并提供「Markdown / 文本」切换开关；默认渲染，可切回带行号的原文；
 //   * text 其它 → TextViewer（行号 + 仅可视行高亮）；**SVG 不内联注入**，改为文本视图；
 //   * image → `data:${mime};base64,…`；binary / too_large / unknown → 只给大小、原因与下载入口。
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangleIcon, DownloadIcon, FileWarningIcon, ImageIcon, LoaderCircleIcon, RotateCwIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 import { fetchFsPreview, isFsPreviewUnavailable } from "@/api/runtime/fs-preview";
 import { RuntimeApiError } from "@/api/runtime/shared";
 import { ExpandedPreviewDialog, ExpandPreviewButton } from "@/components/workspace/expanded-preview";
+import { FilePreviewMarkdownBody } from "@/components/workspace/file-preview/tabbed-body";
 import { TextViewer } from "@/components/workspace/file-browser/text-viewer";
 import { countPreviewLines, decodeFilePreview, formatByteSize } from "@/lib/file-preview/decode";
 import { formatEntryMtime, guessPrismLanguage, isMarkdownPath, isSvgPath } from "@/lib/file-browser/path-utils";
@@ -34,6 +34,9 @@ export type FilePreviewState =
   | { status: "ready"; preview: FsPreview }
   | { status: "error"; error: unknown };
 
+/** Markdown 文件的正文视图：渲染后的 Markdown 与带行号的原始文本。 */
+type FileTabViewMode = "markdown" | "text";
+
 export type FileTabPaneProps = {
   /** 文件页签（含 scope/path 快照；正文按快照取数，不受外部作用域变化影响）。 */
   tab: FileManagerFileTab;
@@ -46,6 +49,17 @@ export function FileTabPane({ className, onDownload, tab }: FileTabPaneProps) {
   const { t } = useTranslation("workspace");
   const [reloadToken, setReloadToken] = useState(0);
   const [expanded, setExpanded] = useState(false);
+  /**
+   * Markdown 文件的正文视图（默认渲染 Markdown，可切回原始文本）。视图跟随页签：
+   * 换文件（tab.id 变化）时同步回到默认，避免上一份文件的「文本」态串到下一份。
+   * 渲染期纠正而不是放进 effect：换页签后不能先按上一份文件的视图渲染一帧。
+   */
+  const [viewMode, setViewMode] = useState<FileTabViewMode>("markdown");
+  const [viewModeTabId, setViewModeTabId] = useState(tab.id);
+  if (viewModeTabId !== tab.id) {
+    setViewModeTabId(tab.id);
+    setViewMode("markdown");
+  }
   // 结果与「请求身份」绑定：key 不匹配即视为陈旧结果（竞态与取消都不再写状态）。
   const [result, setResult] = useState<{ key: string; state: FilePreviewState } | null>(null);
   const activeRequestRef = useRef("");
@@ -87,6 +101,10 @@ export function FileTabPane({ className, onDownload, tab }: FileTabPaneProps) {
   }, [state]);
 
   const activePreview = state.status === "ready" ? state.preview : null;
+  /** 只有「Markdown 文本」给出视图切换：其余分支（图片/二进制/超限/非 Markdown 文本）没有第二种视图。 */
+  const markdownFile =
+    activePreview?.kind === "text" &&
+    isMarkdownPath(activePreview.path || tab.path);
   const meta = tab.entry;
   // 页签里没有打开的条目可能已变化：大小/修改时间以「打开时的快照」为准，正文始终重新取数。
   const metaFacts = [
@@ -123,6 +141,7 @@ export function FileTabPane({ className, onDownload, tab }: FileTabPaneProps) {
           onDownload={onDownload}
           preview={activePreview}
           tabPath={tab.path}
+          viewMode={viewMode}
         />
       ) : null}
     </div>
@@ -140,6 +159,13 @@ export function FileTabPane({ className, onDownload, tab }: FileTabPaneProps) {
         </span>
         {metaFacts ? <span>{metaFacts}</span> : null}
         <span className="ml-auto flex shrink-0 items-center gap-1">
+          {markdownFile ? (
+            <MarkdownViewToggle
+              onChange={setViewMode}
+              testId="file-browser-preview-view"
+              value={viewMode}
+            />
+          ) : null}
           {state.status === "error" ? (
             <button
               aria-label={t("panels.fileBrowser.preview.retry")}
@@ -166,6 +192,15 @@ export function FileTabPane({ className, onDownload, tab }: FileTabPaneProps) {
       {renderBody("min-h-0 flex-1 overflow-hidden")}
 
       <ExpandedPreviewDialog
+        actions={
+          markdownFile ? (
+            <MarkdownViewToggle
+              onChange={setViewMode}
+              testId="file-preview-expanded-view"
+              value={viewMode}
+            />
+          ) : undefined
+        }
         ariaLabel={t("panels.fileBrowser.preview.expand")}
         closeLabel={t("panels.preview.close")}
         eyebrow={t("panels.preview.eyebrow")}
@@ -187,11 +222,13 @@ function PreviewBody({
   onDownload,
   preview,
   tabPath,
+  viewMode,
 }: {
   entry: FsEntry;
   onDownload?: (entry: FsEntry) => void;
   preview: FsPreview;
   tabPath: string;
+  viewMode: FileTabViewMode;
 }) {
   const { t } = useTranslation("workspace");
   const truncatedNote = t("panels.fileBrowser.preview.truncated", {
@@ -207,22 +244,14 @@ function PreviewBody({
     return body.kind === "text" ? body.text : null;
   }, [preview.dataBase64, svgAsText]);
 
-  if (preview.kind === "text" && markdown) {
+  if (preview.kind === "text" && markdown && viewMode === "markdown") {
     return (
-      <div className="app-scrollbar h-full overflow-auto px-3 py-2 text-xs leading-5" data-testid="file-browser-preview-markdown">
-        <ReactMarkdown
-          components={{
-            a: ({ children, ...anchorProps }) => (
-              <a {...anchorProps} rel="noreferrer noopener" target="_blank">
-                {children}
-              </a>
-            ),
-            img: ({ alt }) => <span className="text-muted-foreground">{alt ?? ""}</span>,
-          }}
-          remarkPlugins={[remarkGfm]}
-        >
-          {preview.text ?? ""}
-        </ReactMarkdown>
+      <div
+        className="app-scrollbar h-full overflow-auto px-3 py-2.5 text-sm leading-6"
+        data-testid="file-browser-preview-markdown"
+      >
+        {/* 与聊天 / 文件预览弹层共用同一份 Markdown 渲染（标题、列表、表格、代码块样式一致）。 */}
+        <FilePreviewMarkdownBody text={preview.text ?? ""} />
         {preview.truncated ? <p className="mt-2 text-accent-gold">{truncatedNote}</p> : null}
       </div>
     );
@@ -314,6 +343,59 @@ function DownloadEntryButton({ entry, onDownload }: { entry: FsEntry; onDownload
       <DownloadIcon aria-hidden className="size-3.5" />
       {label}
     </button>
+  );
+}
+
+/**
+ * 「Markdown / 文本」切换开关（只有 Markdown 文本预览出现）。
+ *
+ * 形态取分段按钮而不是页签：它切换的是**同一份正文的两种视图**，不新增面板，
+ * 也不占用 aria tablist（页签条已经属于文件管理器）。
+ * testId 由调用方给出：同一份视图在页签头部与放大面板头部各挂一次，
+ * 两个实例需要可区分的定位锚点（行为与状态完全一致，切换即两边同步）。
+ */
+function MarkdownViewToggle({
+  onChange,
+  testId,
+  value,
+}: {
+  onChange: (mode: FileTabViewMode) => void;
+  testId: string;
+  value: FileTabViewMode;
+}) {
+  const { t } = useTranslation("workspace");
+  const options: Array<{ label: string; mode: FileTabViewMode }> = [
+    { label: t("panels.fileBrowser.preview.viewMode.markdown"), mode: "markdown" },
+    { label: t("panels.fileBrowser.preview.viewMode.text"), mode: "text" },
+  ];
+  return (
+    <span
+      aria-label={t("panels.fileBrowser.preview.viewMode.ariaLabel")}
+      className="inline-flex shrink-0 items-center gap-0.5 rounded-control border border-border/60 p-0.5"
+      data-testid={testId}
+      role="group"
+    >
+      {options.map((option) => {
+        const active = value === option.mode;
+        return (
+          <button
+            aria-pressed={active}
+            className={cn(
+              "rounded-[4px] px-1.5 py-0.5 app-text-11 transition",
+              active
+                ? "bg-accent-gold/12 text-accent-gold"
+                : "text-muted-foreground hover:bg-white/5 hover:text-foreground",
+            )}
+            data-testid={`${testId}-${option.mode}`}
+            key={option.mode}
+            onClick={() => onChange(option.mode)}
+            type="button"
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </span>
   );
 }
 

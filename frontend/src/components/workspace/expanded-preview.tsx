@@ -52,6 +52,8 @@ export function ExpandPreviewButton({
 export type ExpandedPreviewDialogProps = {
   /** 面板 aria-label（读屏入口，通常是「放大视图 + 当前文件」）。 */
   ariaLabel: string;
+  /** 头部右侧的附加操作（如文件预览的 md/文本 切换）；关闭按钮始终在最右。 */
+  actions?: ReactNode;
   /** 正文：调用方复用小窗口那套渲染（同一份实现，放大只换容器尺寸）。 */
   children: ReactNode;
   closeLabel: string;
@@ -69,6 +71,7 @@ export type ExpandedPreviewDialogProps = {
 };
 
 export function ExpandedPreviewDialog({
+  actions,
   ariaLabel,
   children,
   closeLabel,
@@ -122,16 +125,19 @@ export function ExpandedPreviewDialog({
               <p className="mt-0.5 truncate app-text-11 text-muted-foreground">{subtitle}</p>
             ) : null}
           </div>
-          <Button
-            aria-label={closeLabel}
-            data-testid={testId ? `${testId}-close` : undefined}
-            onClick={onClose}
-            size="icon"
-            title={closeLabel}
-            variant="ghost"
-          >
-            <XIcon size={16} />
-          </Button>
+          <div className="flex shrink-0 items-center gap-1">
+            {actions}
+            <Button
+              aria-label={closeLabel}
+              data-testid={testId ? `${testId}-close` : undefined}
+              onClick={onClose}
+              size="icon"
+              title={closeLabel}
+              variant="ghost"
+            >
+              <XIcon size={16} />
+            </Button>
+          </div>
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
         {hint ? (

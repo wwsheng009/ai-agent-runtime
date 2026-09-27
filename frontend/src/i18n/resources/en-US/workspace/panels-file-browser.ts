@@ -119,6 +119,11 @@ export const enWorkspacePanelsFileBrowser = {
     retry: "Retry",
     truncated: "Preview truncated: showing the first {{size}} only.",
     markdown: "Markdown preview",
+    viewMode: {
+      ariaLabel: "Preview view",
+      markdown: "Markdown",
+      text: "Text",
+    },
     image: "Image preview",
     svgAsText: "SVG is shown as text (never inlined, so scripts cannot execute).",
     binary: "Binary file; cannot preview as text.",

@@ -26,7 +26,7 @@ export const zhWorkspaceFilePreview = {
     binaryNul: "含 NUL 字节",
     binaryUtf8: "非 UTF-8 文本",
     markdownTooLarge:
-      "文档 {{size}} 字符，超过弹层内 Markdown 渲染上限（{{limit}} 字符），未渲染预览；请切到「原始」查看全文。",
+      "文档 {{size}} 字符，超过 Markdown 渲染上限（{{limit}} 字符），未渲染预览；请切换到「原始 / 文本」查看全文。",
     tooLarge:
       "文件 {{size}} 超过预览上限 {{limit}}，未渲染内容（避免拖垮页面）。",
   },

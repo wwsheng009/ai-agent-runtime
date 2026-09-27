@@ -30,6 +30,7 @@ function Host() {
       <ExpandPreviewButton label="放大文件预览" onClick={() => setOpen(true)} testId="host-expand" />
       <ExpandedPreviewDialog
         ariaLabel="放大视图"
+        actions={<button data-testid="host-action" type="button">切换视图</button>}
         closeLabel="关闭放大面板"
         eyebrow="放大视图"
         hint="Esc 或点击遮罩关闭"
@@ -101,6 +102,22 @@ describe("ExpandedPreviewDialog", () => {
     expect(opened?.querySelector('[data-testid="host-content"]')?.textContent).toBe("正文内容");
     // 面板挂在 body 上（portal），不挤在宿主容器里。
     expect(container.querySelector('[data-testid="host-expanded"]')).toBeNull();
+  });
+
+  it("头部 actions 槽渲染在关闭按钮旁：与正文一样只在打开时出现", () => {
+    expect(document.body.querySelector('[data-testid="host-action"]')).toBeNull();
+
+    click(trigger());
+
+    const action = document.body.querySelector<HTMLElement>('[data-testid="host-action"]');
+    const close = document.body.querySelector<HTMLElement>('[data-testid="host-expanded-close"]');
+    expect(action?.textContent).toBe("切换视图");
+    expect(action).not.toBeNull();
+    expect(close).not.toBeNull();
+    if (action && close) {
+      // 关闭按钮仍在 actions 右侧（顺序断言用 DOM 比较）。
+      expect(action.compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
   });
 
   it("关闭路径一：面板右上角关闭按钮", () => {

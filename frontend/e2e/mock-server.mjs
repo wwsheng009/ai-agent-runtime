@@ -83,6 +83,18 @@ const profilesMock = createProfilesMock();
 const E2E_FS_SCOPE = "session:e2e-workspace";
 const E2E_FS_ROOT_PATH = "E:/workspace/e2e";
 const E2E_PREVIEW_MARKER = "E2E_PREVIEW_TEXT_OK";
+// Markdown 预览夹具（README.md）：文件页签的 Markdown 渲染与 md/文本 切换在真实浏览器里的回归面。
+const E2E_MARKDOWN_MARKER = "E2E_MARKDOWN_HEADING";
+const E2E_MARKDOWN_PREVIEW = [
+  `# ${E2E_MARKDOWN_MARKER}`,
+  "",
+  "- 列表项 A",
+  "- 列表项 B",
+  "",
+  "| 列1 | 列2 |",
+  "| --- | --- |",
+  "| a | b |",
+].join("\n");
 // mtime 一律 Unix 秒（后端 `info.ModTime().Unix()`）：前端曾把秒当毫秒 → 恒显示 1970-01-21。
 const E2E_MTIME_SECONDS = 1758000000;
 const E2E_TREE_ENTRY_COUNT = 80;
@@ -1536,8 +1548,23 @@ async function handleRequest(req, res) {
 
   if (path === "/api/runtime/fs/preview" && req.method === "GET") {
     const target = (url.searchParams.get("path") ?? "").trim();
-    if (target !== "notes.txt") {
+    if (target !== "notes.txt" && target !== "README.md") {
       writeJson(res, 404, { error: `path does not exist: ${target}` });
+      return;
+    }
+    if (target === "README.md") {
+      writeJson(res, 200, {
+        kind: "text",
+        path: target,
+        abs_path: `${E2E_FS_ROOT_PATH}/README.md`,
+        size: 512,
+        mtime: E2E_MTIME_SECONDS,
+        mime: "text/markdown",
+        text: E2E_MARKDOWN_PREVIEW,
+        truncated: false,
+        line_count: E2E_MARKDOWN_PREVIEW.split("\n").length,
+        encoding: "utf-8",
+      });
       return;
     }
     const text = [

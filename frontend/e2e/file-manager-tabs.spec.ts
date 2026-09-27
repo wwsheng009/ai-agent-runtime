@@ -151,6 +151,42 @@ test("多页签文件管理器：打开 / 去重 / 切回根页签 / 关闭按�
   await expect(tree(page)).toBeVisible();
 });
 
+test("Markdown 页签：默认渲染 Markdown，md/文本 开关可切回原文再切回渲染", async ({ page }) => {
+  await openFilesSurface(page);
+
+  // README.md 在根层靠前（无需滚动），预览夹具见 mock-server 的 E2E_MARKDOWN_PREVIEW。
+  await clickTreeRow(page, "README.md");
+  const markdownTab = fileTab(page, "README.md");
+  await expect(markdownTab).toHaveAttribute("aria-selected", "true", { timeout: 15_000 });
+
+  // 默认 Markdown 渲染：标题 / 列表 / 表格是真实结构，记号本身不再出现。
+  const rendered = page.getByTestId("file-browser-preview-markdown");
+  await expect(rendered).toBeVisible({ timeout: 15_000 });
+  await expect(rendered.getByRole("heading", { level: 1 })).toHaveText("E2E_MARKDOWN_HEADING");
+  await expect(rendered.locator("table")).toBeVisible();
+  await expect(rendered).not.toContainText("# E2E_MARKDOWN_HEADING");
+  await expect(page.getByTestId("text-viewer")).toHaveCount(0);
+
+  const markdownButton = page.getByTestId("file-browser-preview-view-markdown");
+  const textButton = page.getByTestId("file-browser-preview-view-text");
+  await expect(markdownButton).toHaveAttribute("aria-pressed", "true");
+  await expect(textButton).toHaveAttribute("aria-pressed", "false");
+
+  // 切到「文本」：带行号的原始源码，Markdown 渲染退场。
+  await textButton.click();
+  const viewer = page.getByTestId("text-viewer");
+  await expect(viewer).toBeVisible();
+  await expect(viewer).toContainText("# E2E_MARKDOWN_HEADING");
+  await expect(page.getByTestId("file-browser-preview-markdown")).toHaveCount(0);
+  await expect(textButton).toHaveAttribute("aria-pressed", "true");
+
+  // 切回 Markdown：渲染恢复。
+  await markdownButton.click();
+  await expect(page.getByTestId("file-browser-preview-markdown")).toBeVisible();
+  await expect(page.getByTestId("text-viewer")).toHaveCount(0);
+  await expect(markdownButton).toHaveAttribute("aria-pressed", "true");
+});
+
 test("页签条与预览区：高度链与横向裁切不变量", async ({ page }) => {
   await openFilesSurface(page);
   await clickTreeRow(page, "notes.txt");
