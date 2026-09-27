@@ -506,7 +506,15 @@ func (a *SessionActor) Continue(ctx context.Context, runMeta *team.RunMeta, opts
 
 // SubmitPromptAsync submits a prompt without waiting for the final result.
 func (a *SessionActor) SubmitPromptAsync(ctx context.Context, prompt string, runMeta *team.RunMeta, opts ...SubmitPromptOption) error {
+	return a.submitPromptAsync(ctx, ctx, nil, prompt, runMeta, opts...)
+}
+
+func (a *SessionActor) submitPromptAsync(submitCtx, runCtx context.Context, release func(), prompt string, runMeta *team.RunMeta, opts ...SubmitPromptOption) error {
+	if release == nil {
+		release = func() {}
+	}
 	if a == nil {
+		release()
 		return fmt.Errorf("session actor is nil")
 	}
 	a.Start()
@@ -516,7 +524,7 @@ func (a *SessionActor) SubmitPromptAsync(ctx context.Context, prompt string, run
 		opt = opts[0]
 	}
 	cmd := SubmitPrompt{
-		Ctx:                ctx,
+		Ctx:                runCtx,
 		Prompt:             prompt,
 		ImagePaths:         opt.ImagePaths,
 		ImageArtifactDir:   opt.ImageArtifactDir,
@@ -527,10 +535,12 @@ func (a *SessionActor) SubmitPromptAsync(ctx context.Context, prompt string, run
 		TriggerTurnAuto:    opt.TriggerTurnAuto,
 		Reply:              reply,
 	}
-	if err := a.send(ctx, cmd); err != nil {
+	if err := a.send(submitCtx, cmd); err != nil {
+		release()
 		return err
 	}
 	go func() {
+		defer release()
 		select {
 		case <-reply:
 		case <-a.done:
@@ -2833,7 +2843,14 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		// The execution loop has returned. Stop supervision before durable tail
 		// cleanup so a slow store write cannot be misclassified as an LLM stall.
 		stopStallWatchdog()
-		cancel()
+		// Clean completion/parking disposes this run, not the independent child
+		// executions it submitted. Explicit cancellation/deadlines keep their
+		// original cause (WithCancelCause is first-wins).
+		if execErr == nil && ctx.Err() == nil && !run.interrupted.Load() {
+			cancelCause(errSessionRunFinished)
+		} else {
+			cancel()
+		}
 		a.clearSessionRunCancel(run)
 		approvalDetached := approvalDetach.detached.Load()
 		interrupted := run.interrupted.Load()

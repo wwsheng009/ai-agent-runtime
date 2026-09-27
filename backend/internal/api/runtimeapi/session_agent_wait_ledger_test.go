@@ -163,9 +163,14 @@ func TestSessionAgentControllerWaitBudgetStopsActiveWindows(t *testing.T) {
 	limit := controller.agentsConfig().MaxConsecutiveWaitWithoutProgress
 	require.Equal(t, agentcontrol.DefaultMaxConsecutiveWaitWithoutProgress, limit,
 		"the fixture runs on the shared defaults")
-	controller.handler.waitBudget.Observe(key, false, limit)
-	if _, exhausted := controller.handler.waitBudget.Observe(key, false, limit); !exhausted {
-		t.Fatal("pre-spending the budget must exhaust it")
+	// Spend the whole budget without pinning a specific default value: the
+	// exhaustion contract is "limit consecutive no-progress waits", not "2".
+	var exhausted bool
+	for i := 0; i < limit; i++ {
+		_, exhausted = controller.handler.waitBudget.Observe(key, false, limit)
+	}
+	if !exhausted {
+		t.Fatalf("pre-spending %d no-progress waits must exhaust the budget (limit=%d)", limit, limit)
 	}
 
 	startedAt := time.Now()

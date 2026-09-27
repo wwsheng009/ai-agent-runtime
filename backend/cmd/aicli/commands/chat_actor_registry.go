@@ -763,7 +763,11 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 	}
 	queued := false
 	if message := strings.TrimSpace(args.Message); message != "" {
-		if err := actor.SubmitPromptAsync(ctx, message, toolbroker.SpawnAgentRunMetaFromContext(childSession)); err != nil {
+		// Delegated spawn runs are independent of this turn's clean completion:
+		// otherwise a parent that finishes (or parks) while its child is still
+		// working cancels the child via the inherited run context. Explicit
+		// interrupts, failures and deadlines still propagate.
+		if err := actor.SubmitChildPromptAsync(ctx, message, toolbroker.SpawnAgentRunMetaFromContext(childSession)); err != nil {
 			return nil, rollbackSpawnFailure(fmt.Errorf("queue child prompt: %w", err))
 		}
 		queued = true
