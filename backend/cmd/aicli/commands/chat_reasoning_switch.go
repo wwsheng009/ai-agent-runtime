@@ -31,6 +31,7 @@ func applyRuntimeReasoningEffortSwitch(session *ChatSession, raw string) (string
 	if strings.EqualFold(requested, acpReasoningEffortDefaultValue) {
 		requested = ""
 	}
+	before := snapshotChatRuntimeSelection(session)
 
 	resolved := runtimetypes.NormalizeReasoningEffort(requested)
 	if resolved != "" {
@@ -48,7 +49,7 @@ func applyRuntimeReasoningEffortSwitch(session *ChatSession, raw string) (string
 	session.RequestedReasoningEffort = resolved
 	session.EffectiveReasoningEffort = resolved
 	warnIfChatSessionSyncFails(session, "switch reasoning_effort", syncRuntimeSessionFromChat(session))
-	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+	if err := refreshLocalRuntimeAfterSelection(session, before.changed(session), chatActorRebuildReasonReasoningSelection); err != nil {
 		warnIfChatSessionSyncFails(session, "refresh local runtime after reasoning_effort switch", err)
 	}
 	if session.Interaction != nil {

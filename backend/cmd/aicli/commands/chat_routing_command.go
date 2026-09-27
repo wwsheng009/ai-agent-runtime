@@ -507,15 +507,19 @@ func chatRoutingWithRuntimeRefreshText(session *ChatSession, text string) string
 	return text
 }
 
-// chatRoutingRefreshRuntimeAfterWrite 复用模型切换的本地 runtime 刷新路径
-// （`refreshLocalRuntimeAfterModelSelection`）：停掉缓存 actor、重载 provider
-// 配置并重新预热，使下一次 turn 用新路由配置构建 loop。返回非空即警告文案。
+// chatRoutingRefreshRuntimeAfterWrite 复用运行时选择的刷新路径
+// （`refreshLocalRuntimeAfterSelection`）：空闲时停掉缓存 actor、重载 provider
+// 配置并重新预热；有在途 turn 时整包延迟到回合入口，绝不打断本轮。
+// 使下一次 turn 用新路由配置构建 loop。返回非空即警告文案。
 func chatRoutingRefreshRuntimeAfterWrite(session *ChatSession) string {
 	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.SessionHub == nil {
 		return ""
 	}
-	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+	if err := refreshLocalRuntimeAfterSelection(session, true, chatActorRebuildReasonRoutingWrite); err != nil {
 		return "警告: 路由写入已落盘，但刷新本地 runtime 失败（旧 actor 可能仍用旧配置）: " + err.Error()
+	}
+	if session.actorRebuildPending {
+		return chatActorRebuildDeferredNote
 	}
 	return ""
 }

@@ -909,7 +909,7 @@ func (h *Handler) SubmitSessionRuntimeCommand(w http.ResponseWriter, r *http.Req
 
 	// 延迟重建兑现（Batch 12）：上一次切换撞上在途 turn 时留下的标记，在 actor
 	// 空闲的命令入口驱逐旧 actor，使紧随其后的 GetOrCreate 取新 profile。
-	h.reconcilePendingProfileSwitch(sessionID)
+	h.reconcilePendingActorRebuild(sessionID)
 
 	hub := h.getSessionHub()
 	if hub == nil {

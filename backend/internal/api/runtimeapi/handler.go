@@ -286,11 +286,12 @@ type Handler struct {
 	sessionEventStore      chat.EventStore
 	sessionRuntimeStoreKey string
 
-	// Batch 12（V15/V19 延迟收敛）：切换撞上在途 turn 时的会话级重建标记。
-	// 只记进程内状态——actor 是进程内对象，重启后不存在旧 actor，下一次构建
-	// 本就会读到已落地的 sessionmeta（见 session_profile_switch.go）。
-	profileSwitchMu      sync.Mutex
-	profileSwitchPending map[string]string
+	// Batch 12（V15/V19 延迟收敛）+ A6：运行时刷新（profile 切换、路由写入）
+	// 撞上在途 turn 时的会话级重建标记（值=原因）。只记进程内状态——actor 是
+	// 进程内对象，重启后不存在旧 actor，下一次构建本就会读到已落地的配置
+	// （见 session_actor_rebuild.go）。
+	actorRebuildMu      sync.Mutex
+	actorRebuildPending map[string]string
 
 	backgroundMu        sync.Mutex
 	backgroundManager   *background.Manager

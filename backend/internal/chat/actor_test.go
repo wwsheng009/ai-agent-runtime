@@ -1835,6 +1835,75 @@ func TestSessionActorMarkUserInterruptBeforeStopKeepsUserInterruptSource(t *test
 	require.Equal(t, "user_interrupt", sessionEnd["cancel_cause"])
 }
 
+// A6：宿主硬停 actor（StopAsync/StopContext）时登记的停因必须落到
+// session_end.cancel_reason。事故复盘（2026-09-27 会话 session_20260927073805_QbWBceF5）：
+// 运行时刷新停 actor 时现场只有 actor_stop + context canceled，无法定位发起者。
+func TestSessionActorHostStopReasonLandsInSessionEnd(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-host-stop-reason")
+	require.NoError(t, err)
+
+	provider := &cancelBlockingLLMProvider{
+		name:    "host-stop-blocking-provider",
+		entered: make(chan struct{}, 1),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-host-stop-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 3,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	responseCh := make(chan error, 1)
+	go func() {
+		_, submitErr := actor.SubmitPrompt(ctx, "wait until the host stops the actor", nil)
+		responseCh <- submitErr
+	}()
+	select {
+	case <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not start")
+	}
+	time.Sleep(20 * time.Millisecond)
+	actor.SetNextStopReason("runtime_refresh:model")
+	actor.StopAsync()
+
+	select {
+	case submitErr := <-responseCh:
+		require.ErrorIs(t, submitErr, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("SubmitPrompt did not return after StopAsync")
+	}
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	var sessionEnd map[string]interface{}
+	for _, event := range events {
+		if event.Type == EventSessionEnd {
+			sessionEnd = event.Payload
+		}
+	}
+	require.NotNil(t, sessionEnd)
+	require.Equal(t, "execution_context", sessionEnd["cancel_source"])
+	require.Equal(t, "actor_stop", sessionEnd["cancel_cause"])
+	require.Equal(t, "runtime_refresh:model", sessionEnd["cancel_reason"])
+}
+
 func TestSessionActorInterruptDuringPrepareRunDoesNotStartProvider(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()

@@ -282,7 +282,8 @@ func TestSessionProfileSwitch_InFlightTurnIsNotInterruptedAndConvergesAtNextBoun
 	assert.False(t, report.ActorEvicted, "在途 turn 绝不打断（A3）")
 	assert.Equal(t, sessionProfileSwitchScopeActor, report.ToolSurfaceScope)
 	assert.True(t, report.ToolSurfaceInvalidated)
-	assert.True(t, handler.hasPendingProfileSwitch(session.ID), "在途切换必须留下重建标记")
+	assert.True(t, handler.hasPendingActorRebuild(session.ID), "在途切换必须留下重建标记")
+	assert.Equal(t, sessionActorRebuildReasonProfileSwitch, handler.pendingActorRebuildReason(session.ID))
 	if _, ok := hub.Get(session.ID); !ok {
 		t.Fatal("在途 actor 不得被驱逐")
 	}
@@ -296,9 +297,9 @@ func TestSessionProfileSwitch_InFlightTurnIsNotInterruptedAndConvergesAtNextBoun
 	}
 	require.False(t, actor.RunInFlight(), "回合必须正常结束，不能被切换打断")
 
-	handler.reconcilePendingProfileSwitch(session.ID)
+	handler.reconcilePendingActorRebuild(session.ID)
 	if _, ok := hub.Get(session.ID); ok {
 		t.Fatal("边界兑现后旧 actor 必须被驱逐，使下一次构建取新 profile")
 	}
-	assert.False(t, handler.hasPendingProfileSwitch(session.ID), "兑现后标记必须清除")
+	assert.False(t, handler.hasPendingActorRebuild(session.ID), "兑现后标记必须清除")
 }

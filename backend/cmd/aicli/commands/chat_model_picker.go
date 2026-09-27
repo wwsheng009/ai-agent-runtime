@@ -381,6 +381,7 @@ func applyUnifiedModelCommandSelection(session *ChatSession, providerCtx *provid
 	if session == nil || providerCtx == nil {
 		return []error{fmt.Errorf("当前没有活动会话")}
 	}
+	before := snapshotChatRuntimeSelection(session)
 	if err := applyChatExecutionContext(session, providerCtx, reasoning); err != nil {
 		return []error{err}
 	}
@@ -396,7 +397,7 @@ func applyUnifiedModelCommandSelection(session *ChatSession, providerCtx *provid
 	if err := syncRuntimeSessionFromChat(session); err != nil {
 		warnings = append(warnings, fmt.Errorf("切换模型后同步会话失败: %w", err))
 	}
-	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+	if err := refreshLocalRuntimeAfterSelection(session, before.changed(session), chatActorRebuildReasonModelSelection); err != nil {
 		warnings = append(warnings, fmt.Errorf("切换模型后刷新本地运行时失败: %w", err))
 	}
 	if session.Interaction != nil {

@@ -2145,7 +2145,7 @@ func applyRuntimeSessionExecutionContext(session *ChatSession, runtimeSession *r
 		return err
 	}
 	restoreChatRouteTransparency(session, runtimeSession)
-	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+	if err := refreshLocalRuntimeAfterSelection(session, true, chatActorRebuildReasonSessionRestore); err != nil {
 		warnIfChatSessionSyncFails(session, "refresh local runtime after resume", err)
 	}
 	if session.Interaction != nil {

@@ -346,6 +346,7 @@ func applyModelCommandSelection(session *ChatSession, providerCtx *providerExecu
 		return fmt.Errorf("当前没有活动会话")
 	}
 
+	before := snapshotChatRuntimeSelection(session)
 	if err := applyChatExecutionContext(session, providerCtx, reasoning); err != nil {
 		return err
 	}
@@ -359,7 +360,7 @@ func applyModelCommandSelection(session *ChatSession, providerCtx *providerExecu
 	// 而会话缓存的旧窗口值优先级更高，不对账就会继续显示旧值。
 	reconcileChatSessionAfterConfigReload(session)
 	warnIfChatSessionSyncFails(session, "toggle model", syncRuntimeSessionFromChat(session))
-	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+	if err := refreshLocalRuntimeAfterSelection(session, before.changed(session), chatActorRebuildReasonModelSelection); err != nil {
 		warnIfChatSessionSyncFails(session, "refresh local runtime after model switch", err)
 	}
 	if session.Interaction != nil {

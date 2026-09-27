@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 )
@@ -19,8 +19,6 @@ const (
 	// profileSwitchDeferredActorWarning：切换撞上在途 turn 时，旧 actor 必须留到该
 	// turn 结束才驱逐（D18 绝不打断）；延迟兑现由回合入口的 reconcile 完成。
 	profileSwitchDeferredActorWarning = "检测到在途 turn：旧 actor 保留到本轮结束，下一轮入口重建（新工具面自下一轮起生效）"
-	// profileSwitchActorEvictTimeout 是驱逐空闲 actor 的等待上限（与 server 侧同量级）。
-	profileSwitchActorEvictTimeout = 5 * time.Second
 )
 
 // ProfileSwitchChanged 是切换报告的 changed 投影（D23）。TUI 与前端渲染同一份
@@ -270,12 +268,12 @@ func clearFrozenChatSystemPromptAnchor(session *ChatSession) bool {
 // → SetToolExecutionPolicy）。只清稳定工具面缓存不会让 agent 换策略——下一个 turn
 // 的 provider 请求仍带着切换前的工具面（`/profile use` 后 45 → 45，启动路径同
 // profile 是 26）。在途 turn 绝不打断：此时只登记延迟重建标记，由回合入口的
-// reconcilePendingChatProfileRebuild 在 actor 空闲时兑现。
+// reconcilePendingChatActorRebuild 在 actor 空闲时兑现。
 func invalidateChatProfileRuntime(session *ChatSession, inFlight bool) (scope string, invalidated bool, evicted bool) {
 	resetStableSharedToolSurface(session)
 	hub := chatSessionRuntimeHub(session)
 	if hub == nil {
-		clearPendingChatProfileRebuild(session)
+		clearPendingChatActorRebuild(session)
 		return profileSwitchSurfaceScopeNone, false, false
 	}
 	ctx := context.Background()
@@ -284,10 +282,10 @@ func invalidateChatProfileRuntime(session *ChatSession, inFlight bool) (scope st
 	if !ok || actor == nil {
 		// 无活体 actor：下一次 GetOrCreate 本就会按新会话状态重建，天然取新面。
 		if hub.InvalidateStableToolSurfaces(ctx) > 0 {
-			clearPendingChatProfileRebuild(session)
+			clearPendingChatActorRebuild(session)
 			return profileSwitchSurfaceScopeHub, true, false
 		}
-		clearPendingChatProfileRebuild(session)
+		clearPendingChatActorRebuild(session)
 		return profileSwitchSurfaceScopeNone, false, false
 	}
 	if err := actor.InvalidateStableToolSurface(ctx); err == nil {
@@ -295,59 +293,77 @@ func invalidateChatProfileRuntime(session *ChatSession, inFlight bool) (scope st
 	}
 	if inFlight || actor.RunInFlight() {
 		// 二次确认在途（判定与动作之间可能刚起跑）：登记延迟重建，不驱逐。
-		markPendingChatProfileRebuild(session)
+		markPendingChatActorRebuild(session, chatActorRebuildReasonProfileSwitch)
 		return profileSwitchSurfaceScopeActor, invalidated, false
 	}
-	stopCtx, cancel := context.WithTimeout(context.Background(), profileSwitchActorEvictTimeout)
-	defer cancel()
-	_ = hub.StopContext(stopCtx, sessionID)
-	clearPendingChatProfileRebuild(session)
-	return profileSwitchSurfaceScopeActor, invalidated, true
+	evicted = stopChatSessionActor(session, chatActorRebuildReasonProfileSwitch)
+	clearPendingChatActorRebuild(session)
+	return profileSwitchSurfaceScopeActor, invalidated, evicted
 }
 
-// reconcilePendingChatProfileRebuild 在回合入口兑现"切换撞上在途 turn"的延迟重建：
-// 旧 turn 结束、actor 空闲后驱逐它，让本轮 GetOrCreate 按新会话状态重建 agent
-// （工具策略、系统提示词、provider/model 一并取新值）。
+// reconcilePendingChatActorRebuild 在回合入口兑现"切换撞上在途 turn"的延迟重建：
+// 旧 turn 结束、actor 空闲后执行整包运行时刷新（重载 provider 配置 + 驱逐旧 actor +
+// 预热），让本轮 GetOrCreate 按新会话状态重建 agent（工具策略、系统提示词、
+// provider/model/reasoning 一并取新值）。
 //
 // 标记是会话级进程内字段：actor 也是进程内对象，进程重启后不存在旧 actor，
 // 下一次构建本就会读到已落地的会话状态。
-func reconcilePendingChatProfileRebuild(session *ChatSession) {
-	if session == nil || !session.profileRebuildPending {
+func reconcilePendingChatActorRebuild(session *ChatSession) {
+	if session == nil || !session.actorRebuildPending {
 		return
 	}
 	hub := chatSessionRuntimeHub(session)
 	if hub == nil {
-		clearPendingChatProfileRebuild(session)
+		clearPendingChatActorRebuild(session)
 		return
 	}
 	sessionID := currentRuntimeSessionID(session)
 	actor, ok := hub.Get(sessionID)
 	if !ok || actor == nil {
-		clearPendingChatProfileRebuild(session)
+		// 无活体 actor：下一次 GetOrCreate 本就会按新会话状态重建；仍要补做
+		// 配置级刷新，否则本轮切换会静默丢失（假开关）。
+		reason := consumePendingChatActorRebuild(session)
+		if err := applyLocalRuntimeSelectionRefresh(session, reason, false); err != nil {
+			logpkg.Warnf("deferred runtime refresh failed: session=%s reason=%s err=%v", sessionID, reason, err)
+		}
 		return
 	}
 	if actor.RunInFlight() {
 		// 仍然忙（例如后台唤醒的回合）：留到下一个边界再兑现。
 		return
 	}
-	stopCtx, cancel := context.WithTimeout(context.Background(), profileSwitchActorEvictTimeout)
-	defer cancel()
-	_ = hub.StopContext(stopCtx, sessionID)
-	clearPendingChatProfileRebuild(session)
+	reason := consumePendingChatActorRebuild(session)
+	if err := applyLocalRuntimeSelectionRefresh(session, reason, false); err != nil {
+		logpkg.Warnf("deferred runtime refresh failed: session=%s reason=%s err=%v", sessionID, reason, err)
+	}
 }
 
-func markPendingChatProfileRebuild(session *ChatSession) {
+// markPendingChatActorRebuild 登记"运行时切换撞上在途 turn"的延迟重建与停因标签。
+func markPendingChatActorRebuild(session *ChatSession, reason string) {
 	if session == nil {
 		return
 	}
-	session.profileRebuildPending = true
+	session.actorRebuildPending = true
+	session.actorRebuildReason = strings.TrimSpace(reason)
 }
 
-func clearPendingChatProfileRebuild(session *ChatSession) {
+// clearPendingChatActorRebuild 清除延迟重建标记（兑现或路径失效时调用）。
+func clearPendingChatActorRebuild(session *ChatSession) {
 	if session == nil {
 		return
 	}
-	session.profileRebuildPending = false
+	session.actorRebuildPending = false
+	session.actorRebuildReason = ""
+}
+
+// consumePendingChatActorRebuild 取走停因并清除标记（幂等：无标记时返回空串）。
+func consumePendingChatActorRebuild(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	reason := session.actorRebuildReason
+	clearPendingChatActorRebuild(session)
+	return reason
 }
 
 // chatSessionRuntimeHub 返回会话的本地运行时 hub（未装配时 nil）。

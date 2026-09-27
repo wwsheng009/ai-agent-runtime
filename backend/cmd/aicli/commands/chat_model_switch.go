@@ -168,11 +168,43 @@ func runtimeModelStateText(session *ChatSession) string {
 	)
 }
 
+// chatRuntimeSelectionSnapshot 捕捉模型选择族（provider/model/reasoning）在切换前
+// 的生效值，用于判定本次切换是否真的改变了 actor 的构建输入。
+//
+// 用途（A6）：同值重选（例如为了让缓存窗口与最新配置能力对账而重选同一模型）
+// 只需要配置级刷新，不该驱逐/重建 agent——既省掉一次昂贵的 actor 重建，也避免
+// 在途 turn 被误伤。
+type chatRuntimeSelectionSnapshot struct {
+	provider  string
+	model     string
+	reasoning string
+}
+
+func snapshotChatRuntimeSelection(session *ChatSession) chatRuntimeSelectionSnapshot {
+	if session == nil {
+		return chatRuntimeSelectionSnapshot{}
+	}
+	return chatRuntimeSelectionSnapshot{
+		provider:  strings.TrimSpace(session.ProviderName),
+		model:     strings.TrimSpace(session.Model),
+		reasoning: runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort),
+	}
+}
+
+// changed 报告会话现值相对快照是否发生了变化（大小写不敏感，空值等价）。
+func (s chatRuntimeSelectionSnapshot) changed(session *ChatSession) bool {
+	next := snapshotChatRuntimeSelection(session)
+	return !strings.EqualFold(s.provider, next.provider) ||
+		!strings.EqualFold(s.model, next.model) ||
+		!strings.EqualFold(s.reasoning, next.reasoning)
+}
+
 func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, interactive bool) (bool, error) {
 	if session == nil {
 		return false, fmt.Errorf("当前没有活动会话")
 	}
 
+	before := snapshotChatRuntimeSelection(session)
 	requestedModel = strings.TrimSpace(requestedModel)
 	if requestedModel == "" {
 		requestedModel = effectiveRuntimeModel(session)
@@ -217,7 +249,7 @@ func applyRuntimeModelSwitch(session *ChatSession, requestedModel string, intera
 	syncChatLoggerModelState(session)
 	refreshChatTitleMetadata(session)
 	warnIfChatSessionSyncFails(session, "toggle model", syncRuntimeSessionFromChat(session))
-	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+	if err := refreshLocalRuntimeAfterSelection(session, before.changed(session), chatActorRebuildReasonModelSelection); err != nil {
 		warnIfChatSessionSyncFails(session, "refresh local runtime after model switch", err)
 	}
 	if session.Interaction != nil {
@@ -245,6 +277,7 @@ func applyRuntimeProviderSwitch(session *ChatSession, requestedProvider string) 
 	}
 
 	previous := strings.TrimSpace(session.ProviderName)
+	before := snapshotChatRuntimeSelection(session)
 	providerCtx, _, err := resolveModelCommandExecutionContext(session, requestedProvider, "")
 	if err != nil {
 		return false, err
@@ -267,7 +300,7 @@ func applyRuntimeProviderSwitch(session *ChatSession, requestedProvider string) 
 	session.ContextWindowTokenCount = 0
 	resetStableSharedToolSurface(session)
 	warnIfChatSessionSyncFails(session, "switch provider", syncRuntimeSessionFromChat(session))
-	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+	if err := refreshLocalRuntimeAfterSelection(session, before.changed(session), chatActorRebuildReasonProviderSelection); err != nil {
 		warnIfChatSessionSyncFails(session, "refresh local runtime after provider switch", err)
 	}
 	if session.Interaction != nil {

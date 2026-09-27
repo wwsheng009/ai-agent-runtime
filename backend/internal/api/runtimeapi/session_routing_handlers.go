@@ -14,6 +14,7 @@ import (
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
@@ -36,8 +37,10 @@ const (
 	sessionRoutingLayerWorkspace = "workspace"
 	sessionRoutingLayerConfig    = "config"
 
-	// sessionRoutingActorStopTimeout 限制失效等待，避免慢 actor 拖住 API。
-	sessionRoutingActorStopTimeout = 5 * time.Second
+	// sessionRoutingDeferredActorWarning：路由写入撞上在途 turn 时，旧 actor 保留
+	// 到本轮结束（A6：绝不打断），由命令入口兑现重建后自下一轮生效——必须如实
+	// 说明，否则调用方会以为本轮已按新路由重建。
+	sessionRoutingDeferredActorWarning = "检测到在途 turn：旧 actor 保留到本轮结束，路由写入自下一轮入口重建后生效"
 
 	// sessionRoutingMaxBodyBytes 限制 PATCH /routing 请求体（补丁是小对象）。
 	sessionRoutingMaxBodyBytes = 64 << 10
@@ -223,10 +226,15 @@ func (h *Handler) UpdateSessionRouting(w http.ResponseWriter, r *http.Request) {
 		targetPath = path
 	}
 
-	actorInvalidated := h.invalidateSessionRoutingActor(sessionID)
+	actorInvalidated, actorRebuildDeferred := h.invalidateSessionRoutingActor(sessionID)
 
 	// 事件顺序（§7.1）：落盘 → 发布 → 失效已在上一步完成。
 	response := h.buildSessionRoutingResponse(session, layer, true, actorInvalidated)
+	if actorRebuildDeferred {
+		// A6：撞上在途 turn 时不打断，但必须如实说明"自下一轮生效"，
+		// 否则调用方会以为本轮已按新路由重建（假开关）。
+		response.Warnings = append(response.Warnings, sessionRoutingDeferredActorWarning)
+	}
 	response.TargetPath = targetPath
 	h.publishSessionRoutingChanged(sessionID, response)
 	h.writeJSON(w, http.StatusOK, response)
@@ -425,18 +433,37 @@ func (h *Handler) syncAICLIRoutingSnapshot(main *agentconfig.AICLIMainAgentRouti
 
 // invalidateSessionRoutingActor 失效会话 actor（§4.5）。
 //
-// 返回 true 表示「已无陈旧 actor」：hub 未持有 actor（冷会话）或成功停止。
-// 停止超时/失败时返回 false，但**不回滚**已落盘的写入（§4.4）。
-// hub 未接线（nil）时同样返回 false：这表示「无法证明已无陈旧 actor」，
-// 与上面「hub 已确认无 actor」不是一回事。
-func (h *Handler) invalidateSessionRoutingActor(sessionID string) bool {
+// 返回 (invalidated, deferred)：
+//   - invalidated=true 表示「下一次 turn 必然按新路由构建」：hub 未持有 actor
+//     （冷会话）、actor 已被驱逐，或撞上在途 turn 已登记延迟重建；
+//   - deferred=true 只与第三种情况配对：本次在途 turn 绝不打断（A6），旧 actor
+//     保留到本轮结束，由命令入口 reconcilePendingActorRebuild 兑现重建；
+//   - invalidated=false 表示 hub 未接线（nil）或停止失败：**无法证明**已无陈旧
+//     actor（与「hub 已确认无 actor」不是一回事），但都不回滚已落盘的写入（§4.4）。
+func (h *Handler) invalidateSessionRoutingActor(sessionID string) (invalidated bool, deferred bool) {
 	hub := h.getSessionHub()
 	if hub == nil {
-		return false
+		return false, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), sessionRoutingActorStopTimeout)
-	defer cancel()
-	return hub.StopContext(ctx, sessionID) == nil
+	actor, ok := hub.Get(sessionID)
+	if !ok || actor == nil {
+		// 冷会话：hub 未持有 actor，下一次 GetOrCreate 本就会按新路由重建。
+		h.clearPendingActorRebuild(sessionID)
+		return true, false
+	}
+	if actor.RunInFlight() {
+		// A6：actor 正是在途 run 的所有者，StopContext 会经 cancelActive 以
+		// actor_stop 取消本轮（用户只看到 context canceled）。改为登记延迟重建。
+		h.markPendingActorRebuild(sessionID, sessionActorRebuildReasonRoutingWrite)
+		logger.Warnf("routing write deferred: session=%s reason=%s turn=in_flight (never interrupt an in-flight turn)",
+			sessionID, sessionActorRebuildReasonRoutingWrite)
+		return true, true
+	}
+	if !stopSessionActorForRebuild(hub, sessionID, sessionActorRebuildReasonRoutingWrite) {
+		return false, false
+	}
+	h.clearPendingActorRebuild(sessionID)
+	return true, false
 }
 
 // publishSessionRoutingChanged 发布 §7.1 事件（失效信号 + 摘要，权威仍是 GET /routing）。

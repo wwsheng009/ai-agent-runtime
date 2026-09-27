@@ -1429,33 +1429,130 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	return host, nil
 }
 
+// chatActorRebuildReason* 是宿主驱逐/延迟重建 actor 的原因标签。标签随
+// SessionActor.SetNextStopReason 落到 session_end.cancel_reason 并写进会话日志，
+// 用于把"回合被宿主停掉"从裸 context canceled 细化到具体调用点（A6 归因）。
+const (
+	chatActorRebuildReasonModelSelection     = "runtime_refresh:model"
+	chatActorRebuildReasonProviderSelection  = "runtime_refresh:provider"
+	chatActorRebuildReasonReasoningSelection = "runtime_refresh:reasoning"
+	chatActorRebuildReasonRoutingWrite       = "runtime_refresh:routing"
+	chatActorRebuildReasonWorkspaceWrite     = "runtime_refresh:workspace"
+	chatActorRebuildReasonSessionRestore     = "runtime_refresh:session_restore"
+	chatActorRebuildReasonProfileSwitch      = "profile_switch"
+	// chatActorEvictTimeout 是驱逐空闲 actor 的等待上限（与 server 侧同量级）。
+	chatActorEvictTimeout = 5 * time.Second
+	// chatActorRebuildDeferredNote：运行时刷新撞上在途 turn 时向调用方如实说明
+	// "自下一轮生效"（A6；与 server 平面 sessionRoutingDeferredActorWarning 同义），
+	// 否则调用方会把"已登记延迟重建"误读成"本轮已刷新"。
+	chatActorRebuildDeferredNote = "检测到在途 turn：旧 actor 保留到本轮结束，刷新自下一轮入口生效"
+)
+
+// refreshLocalRuntimeAfterModelSelection 是模型选择族（/model、模型选择器、
+// provider/reasoning 切换）的刷新入口：默认按"选择已变化"处理。
 func refreshLocalRuntimeAfterModelSelection(session *ChatSession) error {
+	return refreshLocalRuntimeAfterSelection(session, true, chatActorRebuildReasonModelSelection)
+}
+
+// refreshLocalRuntimeAfterSelection 是运行时选择变化后的统一失效入口（A6 根因修复）。
+//
+// 契约：宿主侧运行时切换**永不打断在途 turn**。
+//   - actor 有在途 run → 整包刷新（provider 配置重载 + actor 驱逐 + 预热）登记为
+//     延迟重建，由回合入口 reconcilePendingChatActorRebuild 在 actor 空闲后一次性
+//     兑现，下一轮生效；本轮继续用旧 agent 跑完（与"从下一个 turn 生效"的文档一致）；
+//   - actor 空闲且选择确实变化 → 立即执行整包刷新；
+//   - actor 空闲且同值重选（selectionChanged=false）→ 只重载 provider 配置，不驱逐
+//     actor：重选同一模型/推理档不该重建 agent。
+//
+// 为什么必须这样（根因）：旧实现无条件 StopContext → cancelActive 以 actor_stop
+// 取消在途 run，用户只看到 context canceled，且 go 侧没有任何发起者记录。
+func refreshLocalRuntimeAfterSelection(session *ChatSession, selectionChanged bool, reason string) error {
 	if session == nil {
 		return nil
 	}
-
-	setChatActorWarmup(session, nil)
-	var errs []string
-	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.SessionHub != nil && session.RuntimeSession != nil {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), chatInterruptCleanupTimeout)
-		_ = session.LocalRuntimeHost.SessionHub.StopContext(stopCtx, session.RuntimeSession.ID)
-		stopCancel()
+	hub := chatSessionRuntimeHub(session)
+	sessionID := currentRuntimeSessionID(session)
+	if hub != nil && sessionID != "" {
+		if actor, ok := hub.Get(sessionID); ok && actor != nil {
+			if actor.RunInFlight() {
+				markPendingChatActorRebuild(session, reason)
+				logpkg.Warnf("runtime refresh deferred: session=%s reason=%s turn=in_flight (never interrupt an in-flight turn)",
+					sessionID, reason)
+				return nil
+			}
+			if !selectionChanged {
+				logpkg.Infof("runtime refresh: session=%s reason=%s selection=unchanged actor=kept", sessionID, reason)
+				return refreshLocalRuntimeProviderConfigs(session)
+			}
+		}
 	}
-	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.Bootstrap != nil && session.Config != nil {
+	return applyLocalRuntimeSelectionRefresh(session, reason, true)
+}
+
+// applyLocalRuntimeSelectionRefresh 立即执行整包运行时刷新：驱逐旧 actor（带停因）、
+// 重载 provider 配置、确保会话 provider 已注册、预热新 actor。
+// 调用方必须已确认没有在途 turn（否则会打断它）。
+// warmup=false 供回合入口的延迟兑现使用：调用方紧接着就会 GetOrCreate，
+// 不需要额外预热一个 actor。
+func applyLocalRuntimeSelectionRefresh(session *ChatSession, reason string, warmup bool) error {
+	if session == nil {
+		return nil
+	}
+	setChatActorWarmup(session, nil)
+	stopChatSessionActor(session, reason)
+	if err := refreshLocalRuntimeProviderConfigs(session); err != nil {
+		return err
+	}
+	if warmup {
+		startChatActorWarmup(session)
+	}
+	return nil
+}
+
+// refreshLocalRuntimeProviderConfigs 只做配置级刷新（不动 actor 生命周期）：
+// provider 配置重载 + 会话 provider 注册。凭据/窗口以磁盘配置为准。
+func refreshLocalRuntimeProviderConfigs(session *ChatSession) error {
+	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.Bootstrap == nil {
+		return nil
+	}
+	var errs []string
+	if session.Config != nil {
 		if err := session.LocalRuntimeHost.Bootstrap.ReloadProviderConfigs(buildSkillsProviderConfigs(session.Config)); err != nil {
 			errs = append(errs, fmt.Sprintf("reload providers: %v", err))
 		}
 	}
-	if session.LocalRuntimeHost != nil && session.LocalRuntimeHost.Bootstrap != nil {
-		if err := ensureLocalRuntimeProvider(session.LocalRuntimeHost.Bootstrap.LLMRuntime(), session); err != nil {
-			errs = append(errs, fmt.Sprintf("ensure session provider: %v", err))
-		}
+	if err := ensureLocalRuntimeProvider(session.LocalRuntimeHost.Bootstrap.LLMRuntime(), session); err != nil {
+		errs = append(errs, fmt.Sprintf("ensure session provider: %v", err))
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
-	startChatActorWarmup(session)
 	return nil
+}
+
+// stopChatSessionActor 立即驱逐当前会话 actor（有界等待），并把停因先写到 actor 上，
+// 使被取消的 run 在 session_end.cancel_reason 里可归因。
+// 契约：调用方必须先确认没有在途 run（在途场景请走 markPendingChatActorRebuild）。
+func stopChatSessionActor(session *ChatSession, reason string) bool {
+	hub := chatSessionRuntimeHub(session)
+	if hub == nil {
+		return false
+	}
+	sessionID := currentRuntimeSessionID(session)
+	if sessionID == "" {
+		return false
+	}
+	if actor, ok := hub.Get(sessionID); ok && actor != nil {
+		actor.SetNextStopReason(reason)
+	}
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), chatActorEvictTimeout)
+	defer stopCancel()
+	if err := hub.StopContext(stopCtx, sessionID); err != nil {
+		logpkg.Warnf("actor stop failed: session=%s reason=%s err=%v", sessionID, reason, err)
+		return false
+	}
+	logpkg.Warnf("actor stopped: session=%s reason=%s", sessionID, reason)
+	return true
 }
 
 func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *ChatSession, sessionStore runtimechat.SessionStorage, runtimeConfig *runtimecfg.RuntimeConfig, workspaceRoot string) (*runtimechat.SessionActor, error) {

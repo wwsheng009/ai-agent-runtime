@@ -186,6 +186,7 @@ func applyReasoningEffortCommandSelection(session *ChatSession, raw string, expl
 	if session == nil {
 		return fmt.Errorf("当前没有活动会话")
 	}
+	before := snapshotChatRuntimeSelection(session)
 	reasoning := runtimetypes.NormalizeReasoningEffort(raw)
 	if reasoning != "" {
 		resolved, warning, err := resolveChatReasoningEffort(session.Provider, effectiveRuntimeModel(session), reasoning, explicit)
@@ -200,7 +201,7 @@ func applyReasoningEffortCommandSelection(session *ChatSession, raw string, expl
 
 	session.ReasoningEffort = reasoning
 	warnIfChatSessionSyncFails(session, "toggle reasoning_effort", syncRuntimeSessionFromChat(session))
-	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+	if err := refreshLocalRuntimeAfterSelection(session, before.changed(session), chatActorRebuildReasonReasoningSelection); err != nil {
 		warnIfChatSessionSyncFails(session, "refresh local runtime after reasoning_effort switch", err)
 	}
 	if session.Interaction != nil {

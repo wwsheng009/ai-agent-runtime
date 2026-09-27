@@ -48,7 +48,7 @@ func TestProfileSwitchEvictsIdleActorSoNextTurnRebuildsAgent(t *testing.T) {
 	if _, ok := hub.Get("session-1"); ok {
 		t.Fatal("evicted actor must be gone so the next GetOrCreate rebuilds it")
 	}
-	if session.profileRebuildPending {
+	if session.actorRebuildPending {
 		t.Fatal("a fulfilled eviction must not leave a pending rebuild marker")
 	}
 	if actor, err := hub.GetOrCreate("session-1"); err != nil || actor == nil {
@@ -73,7 +73,7 @@ func TestProfileSwitchInFlightActorDefersRebuildToTurnEntry(t *testing.T) {
 	if evicted {
 		t.Fatal("an in-flight turn must never be interrupted by actor eviction (D18/A3)")
 	}
-	if !session.profileRebuildPending {
+	if !session.actorRebuildPending {
 		t.Fatal("in-flight switch must leave a pending rebuild marker")
 	}
 	if _, ok := hub.Get("session-1"); !ok {
@@ -81,8 +81,8 @@ func TestProfileSwitchInFlightActorDefersRebuildToTurnEntry(t *testing.T) {
 	}
 
 	// 回合入口兑现：本轮结束（actor 空闲）后驱逐，让本轮的 GetOrCreate 重建。
-	reconcilePendingChatProfileRebuild(session)
-	if session.profileRebuildPending {
+	reconcilePendingChatActorRebuild(session)
+	if session.actorRebuildPending {
 		t.Fatal("reconcile must consume the pending marker")
 	}
 	if _, ok := hub.Get("session-1"); ok {

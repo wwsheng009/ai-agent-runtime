@@ -213,10 +213,14 @@ type ChatSession struct {
 	// BaseToolPolicy is the pre-overlay policy (profile / session base) so
 	// project-root reloads can re-apply permissions without double-intersecting.
 	BaseToolPolicy *runtimepolicy.ToolExecutionPolicy
-	// profileRebuildPending 记录"切换撞上在途 turn"的延迟重建标记：本轮结束时
-	// 由回合入口 reconcile 驱逐旧 actor，使新 profile 的工具策略在下一轮生效。
+	// actorRebuildPending 记录"运行时切换撞上在途 turn"的延迟重建标记：本轮结束时
+	// 由回合入口 reconcile 驱逐旧 actor 并重载 provider 配置，使新 profile/模型/
+	// provider/reasoning/路由在下一轮生效。契约：宿主切换**永不打断在途 turn**
+	// （否则本轮被以 actor_stop 取消，用户只看到 context canceled）。
+	// actorRebuildReason 是停因标签，落到 session_end.cancel_reason 便于归因。
 	// 进程内字段：actor 本身就是进程内对象，重启后不存在旧 actor。
-	profileRebuildPending bool
+	actorRebuildPending bool
+	actorRebuildReason  string
 	PermissionMode        runtimepolicy.Mode // actor/team run permission mode
 	// CLIAllowTools / CLIDenyTools from --allow-tool / --deny-tool.
 	CLIAllowTools []string

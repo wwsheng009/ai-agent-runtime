@@ -255,12 +255,13 @@ func insideChatWorkspace(workspaceRoot, path string) bool {
 
 // refreshChatRuntimeForAllowedRoots rebuilds the local runtime actor so the new
 // allowed_roots reach the next tool call instead of waiting for a restart.
+// 有在途 turn 时整包刷新延迟到回合入口（绝不打断本轮）。
 func refreshChatRuntimeForAllowedRoots(session *ChatSession) error {
 	if session == nil {
 		return nil
 	}
 	warnIfChatSessionSyncFails(session, "sync allowed roots", syncRuntimeSessionFromChat(session))
-	return refreshLocalRuntimeAfterModelSelection(session)
+	return refreshLocalRuntimeAfterSelection(session, true, chatActorRebuildReasonWorkspaceWrite)
 }
 
 // handleAddDirCommand implements /add-dir [list|remove <路径>|<路径> ...].

@@ -110,6 +110,10 @@ type sessionRunControl struct {
 	abandoned    atomic.Bool
 	finalizing   atomic.Bool
 	lastActivity atomic.Int64
+	// stopReason 记录本 run 被宿主停止的原因标签（由 cancelActive 在取消前写入）。
+	// 取消发生在 actor 命令环 goroutine，payload 由 run goroutine 在 ctx 取消后读取；
+	// 用原子指针避免任何数据竞争。空值表示非宿主停 actor 的取消。
+	stopReason atomic.Pointer[string]
 	// partialProduct 是 A5 的中断产物快照：run 自身在每个 durable 历史提交点
 	// （OnHistoryCheckpoint）刷新，中断/停摆路径零 I/O 读取。之所以不读会话存储：
 	// 运行期只有节流 checkpoint 落库（权威落库在 turn 结束），中断时存储快照可能
@@ -284,6 +288,11 @@ type SessionActor struct {
 	mu        sync.RWMutex
 	state     *RuntimeState
 	activeRun *sessionRunControl
+	// pendingStopReason 是下一次"宿主停 actor"（StopAsync/StopContext → cancelActive）
+	// 的原因标签，由 SetNextStopReason 登记、cancelActive 消费。事故复盘（本地实测）：
+	// 运行时刷新硬停 actor 时 session_end 只能给出裸 "actor_stop + context canceled"，
+	// 现场无法定位是谁停的；带上原因后 payload.cancel_reason 可直接指认调用点。
+	pendingStopReason string
 
 	runLifecycleMu   sync.Mutex
 	statePersistMu   sync.Mutex
@@ -3020,8 +3029,14 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		}
 		if cancelDetail != "" {
 			payload["cancel_cause"] = cancelDetail
-			logpkg.Warnf("session run canceled: session=%s turn=%s source=%s cause=%s interrupted=%t exec_err=%v",
-				a.id, turnID, cancelSource, cancelDetail, interrupted, execErr)
+			// A6：宿主停 actor 时带上原因标签（如 runtime_refresh:model），
+			// 让"是谁停了这一轮"在终态事件与日志里可归因，而不是只剩 context canceled。
+			hostedStopReason := run.hostedStopReason()
+			if hostedStopReason != "" {
+				payload["cancel_reason"] = hostedStopReason
+			}
+			logpkg.Warnf("session run canceled: session=%s turn=%s source=%s cause=%s reason=%s interrupted=%t exec_err=%v",
+				a.id, turnID, cancelSource, cancelDetail, hostedStopReason, interrupted, execErr)
 		}
 		appendStructuredRunErrorPayload(payload, execErr)
 		// A4：非成功终态（取消/中断/失败）也带上已产出的部分产物，避免
@@ -4627,17 +4642,63 @@ func (a *SessionActor) cancelActive() {
 	var (
 		cancel      context.CancelFunc
 		cancelCause context.CancelCauseFunc
+		run         *sessionRunControl
 	)
 	if a.activeRun != nil {
-		cancel = a.activeRun.cancel
-		cancelCause = a.activeRun.cancelCause
-		a.activeRun.cancel = nil
-		a.activeRun.cancelCause = nil
+		run = a.activeRun
+		cancel = run.cancel
+		cancelCause = run.cancelCause
+		run.cancel = nil
+		run.cancelCause = nil
 	}
+	reason := a.pendingStopReason
+	a.pendingStopReason = ""
 	a.mu.Unlock()
+	if run != nil && reason != "" {
+		run.setStopReason(reason)
+	}
 	if cancel != nil || cancelCause != nil {
 		cancelSessionRunCause(cancelCause, cancel, runCancelCauseActorStop)
 	}
+}
+
+// SetNextStopReason 登记下一次宿主停 actor 的原因标签，供 session_end 归因。
+// 只影响随后由 StopAsync/StopContext 触发的取消；被 cancelActive 消费后即清空，
+// 因此不会污染后续与本次停止无关的取消（用户中断/父上下文取消/顶替）。
+func (a *SessionActor) SetNextStopReason(reason string) {
+	if a == nil {
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return
+	}
+	a.mu.Lock()
+	a.pendingStopReason = reason
+	a.mu.Unlock()
+}
+
+// setStopReason 记录本 run 被宿主停止的原因标签（原子写，读侧见 stopReason）。
+func (r *sessionRunControl) setStopReason(reason string) {
+	if r == nil {
+		return
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return
+	}
+	r.stopReason.Store(&reason)
+}
+
+// hostedStopReason 返回本 run 被宿主停止的原因标签；非宿主停 actor 的取消返回空串。
+func (r *sessionRunControl) hostedStopReason() string {
+	if r == nil {
+		return ""
+	}
+	if value := r.stopReason.Load(); value != nil {
+		return strings.TrimSpace(*value)
+	}
+	return ""
 }
 
 // RequestApproval implements runtimepolicy.ApprovalHandler for interactive approvals.

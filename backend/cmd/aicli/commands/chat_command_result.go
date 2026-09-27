@@ -1274,6 +1274,7 @@ func applyStructuredReasoningEffortSelection(session *ChatSession, raw string, e
 	if session == nil {
 		return nil, fmt.Errorf("当前没有活动会话")
 	}
+	before := snapshotChatRuntimeSelection(session)
 	reasoning := runtimetypes.NormalizeReasoningEffort(raw)
 	var warnings []error
 	if reasoning != "" {
@@ -1291,7 +1292,7 @@ func applyStructuredReasoningEffortSelection(session *ChatSession, raw string, e
 	if err := syncRuntimeSessionFromChat(session); err != nil {
 		warnings = append(warnings, fmt.Errorf("切换 reasoning_effort 后同步会话失败: %w", err))
 	}
-	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
+	if err := refreshLocalRuntimeAfterSelection(session, before.changed(session), chatActorRebuildReasonReasoningSelection); err != nil {
 		warnings = append(warnings, fmt.Errorf("切换 reasoning_effort 后刷新本地 runtime 失败: %w", err))
 	}
 	if session.Interaction != nil {

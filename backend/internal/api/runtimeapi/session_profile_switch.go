@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sessionmeta"
@@ -38,10 +37,6 @@ const (
 	// 失效始终是精确的，拿不到句柄时下一次 GetOrCreate 本就会重建）。
 	sessionProfileSwitchScopeActor = "actor"
 	sessionProfileSwitchScopeNone  = "none"
-
-	// sessionProfileActorEvictTimeout 是驱逐空闲 actor 的等待上限：驱逐失败也
-	// 不阻塞命令返回——actor 已从 hub 摘除，后台停止完成后下一次构建同样取新面。
-	sessionProfileActorEvictTimeout = 5 * time.Second
 )
 
 // sessionProfileSwitchChanged 是切换报告的 changed 投影（D23）。与 CLI 侧
@@ -360,7 +355,7 @@ func (h *Handler) invalidateSessionProfileRuntime(ctx context.Context, sessionID
 	actor, ok := hub.Get(sessionID)
 	if !ok || actor == nil {
 		// 无活体 actor：下一次 GetOrCreate 本就会按新 sessionmeta 重建，天然取新面。
-		h.clearPendingProfileSwitch(sessionID)
+		h.clearPendingActorRebuild(sessionID)
 		return sessionProfileSwitchScopeNone, false, false
 	}
 	// ②稳定工具面：清空会话级缓存，使后续 turn 重新冻结工具前缀。在途 turn 的
@@ -371,88 +366,13 @@ func (h *Handler) invalidateSessionProfileRuntime(ctx context.Context, sessionID
 	scope = sessionProfileSwitchScopeActor
 	if inFlight || actor.RunInFlight() {
 		// 二次确认在途（判定与动作之间可能刚起跑）：登记重建标记，不驱逐。
-		h.markPendingProfileSwitch(sessionID)
+		h.markPendingActorRebuild(sessionID, sessionActorRebuildReasonProfileSwitch)
 		return scope, invalidated, false
 	}
-	stopCtx, cancel := context.WithTimeout(context.Background(), sessionProfileActorEvictTimeout)
-	defer cancel()
-	_ = hub.StopContext(stopCtx, sessionID)
-	h.clearPendingProfileSwitch(sessionID)
-	return scope, invalidated, true
-}
-
-// markPendingProfileSwitch / clearPendingProfileSwitch / takePendingProfileSwitch 维护
-// 「切换撞上在途 turn」的延迟重建标记。标记只在进程内有效：actor 是进程内对象，
-// 重启后不存在旧 actor，下一次构建本就会读到已落地的 sessionmeta。
-func (h *Handler) markPendingProfileSwitch(sessionID string) {
-	if h == nil {
-		return
-	}
-	sessionID = chat.NormalizeSessionID(sessionID)
-	if sessionID == "" {
-		return
-	}
-	h.profileSwitchMu.Lock()
-	defer h.profileSwitchMu.Unlock()
-	if h.profileSwitchPending == nil {
-		h.profileSwitchPending = make(map[string]string)
-	}
-	h.profileSwitchPending[sessionID] = sessionID
-}
-
-func (h *Handler) clearPendingProfileSwitch(sessionID string) {
-	if h == nil {
-		return
-	}
-	sessionID = chat.NormalizeSessionID(sessionID)
-	if sessionID == "" {
-		return
-	}
-	h.profileSwitchMu.Lock()
-	defer h.profileSwitchMu.Unlock()
-	delete(h.profileSwitchPending, sessionID)
-}
-
-func (h *Handler) hasPendingProfileSwitch(sessionID string) bool {
-	if h == nil {
-		return false
-	}
-	sessionID = chat.NormalizeSessionID(sessionID)
-	if sessionID == "" {
-		return false
-	}
-	h.profileSwitchMu.Lock()
-	defer h.profileSwitchMu.Unlock()
-	_, ok := h.profileSwitchPending[sessionID]
-	return ok
-}
-
-// reconcilePendingProfileSwitch 在命令入口兑现延迟重建：actor 已空闲（或已不在
-// 位）时清除标记并驱逐旧 actor，使紧随其后的 GetOrCreate 按新 profile 重建。
-// 它只做一次进程内 map 查询，不给命令热路径增加存储读取。
-func (h *Handler) reconcilePendingProfileSwitch(sessionID string) {
-	if h == nil || !h.hasPendingProfileSwitch(sessionID) {
-		return
-	}
-	hub := h.peekSessionHub()
-	if hub == nil {
-		h.clearPendingProfileSwitch(sessionID)
-		return
-	}
-	actor, ok := hub.Get(sessionID)
-	if !ok || actor == nil {
-		// 旧 actor 已经不在位（空闲驱逐/进程重启）：下一次构建天然取新 profile。
-		h.clearPendingProfileSwitch(sessionID)
-		return
-	}
-	if actor.RunInFlight() {
-		// 仍在途：保持标记，等下一个边界。
-		return
-	}
-	stopCtx, cancel := context.WithTimeout(context.Background(), sessionProfileActorEvictTimeout)
-	defer cancel()
-	_ = hub.StopContext(stopCtx, sessionID)
-	h.clearPendingProfileSwitch(sessionID)
+	// 空闲：立即驱逐，使下一次 GetOrCreate 按新 profile 重建（A6：停因可归因）。
+	evicted = stopSessionActorForRebuild(hub, sessionID, sessionActorRebuildReasonProfileSwitch)
+	h.clearPendingActorRebuild(sessionID)
+	return scope, invalidated, evicted
 }
 
 // clearSessionFrozenPromptAnchor 删除会话级 prompt 冻结锚点，使下一次 compose
