@@ -1,6 +1,6 @@
 # 子 Agent 工具面实测与优化清单（2026-09-27）
 
-- 版本：v1.6（2026-09-27：F1–F8 全部落地，实施记录见 §6）
+- 版本：v1.7（2026-09-27：F1–F8 全部落地，实施记录见 §6；复核修正见 §6.19）
 - 状态：P1 已实施（F1/F2）；P2 已实施（F3/F4/F5）；P3 已实施（F6/F7/F8）
 - 日期：2026-09-27
 - 输入：本轮对 18 个 agent 生命周期工具的端到端实测（父会话 `session_20260927131313_GoMfCkG1`，本地 `aicli` CLI 宿主）
@@ -472,6 +472,21 @@ this observation; pending child execution continues. Do not immediately re-call 
   1. `TestBrokerExecuteSpawnTeamNormalizesExistingReadPathsAgainstWorkspaceRoot`：`resolveSpawnTaskPath` / `normalizeSpawnPaths` 统一 `\` → `/`，`.\docs\aicli` 在 Linux 上不再退化为字面文件名；
   2. `TestResolvePlanPreviewPathRejectsTraversal`：`resolvePlanPreviewPath` 先归一分隔符，`..\secret.md` 正确命中「escapes workspace」（安全侧收益）；
   3. `TestHandleChatWebAPISessions_ScopeAllMergesPeers`：`chatWebWorkspaceName` 改为分隔符无关取末段（`E:\ws\one` → `one`），测试种子与产品同口径。
-- 剩余 5 个红灯同样在 HEAD 基线复现（**既有**，Linux 平台性期望差异，建议独立工作流处理，不在本清单范围）：
-  - `internal/toolbroker`：`TestTaskMonitorReportsFinishedJobAsContent`（后台 `echo ok` 任务在本机终态 failed，用例期望 completed）；
+- 剩余 7 个红灯同样在 HEAD 基线复现（**既有**，Linux 平台性期望差异，建议独立工作流处理，不在本清单范围）：
+  - `internal/toolbroker`：`TestTaskMonitorReportsFinishedJobAsContent`（后台 `echo ok` 任务在本机终态 failed，用例期望 completed）、`TestReliabilityEvalBrokerTimeoutRetryUsesNewInvocationWithoutDuplicateSideEffect`、`TestBrokerBackgroundAliasSurvivesManagerRestart`（后两者为本机后台任务生命周期环境差异，已在 HEAD 基线复现）；
   - `cmd/aicli/commands`：`TestRunChatLoopInteractiveInitialPromptSubmitsOnceAndStaysInteractive`、`TestRunChatLoop_DrainsQueuedLinesAfterTeamSettlesBeforePrompt`、`TestBuildChatSurfaceStatusLine_DedupesProjectWhenSameAsDirectory`、`TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance`（Windows 路径/交互终端相关期望在 Linux 上不成立）。
+
+### 6.19 复核修正（2026-09-27 复核批次）
+
+复核（工作区逐项核验 + 完整 `go test ./internal/toolbroker/` + HEAD 基线对照）发现并修复 1 个本清单引入的红灯与 1 处格式漂移：
+
+1. **F6 参数面漂移（本清单引入的红灯）**：`close_agent` 的 schema/描述宣传 `batch_id`（`broker.go`），执行分支也读取（`broker.go:2489`），但参数审计表遗漏——`TestBrokerToolArgKeys_MatchToolDefinitions` 失败（`advertises "batch_id" ... but the broker never reads it`），且 live 注记逻辑会把 `batch_id` 误报为 ignored argument。修复：`broker_arg_audit.go` 的 `ToolCloseAgent` allowlist 与 `broker_arg_kinds.go` 的 kind 表补入 `batch_id`（string），并在 `TestBroker_Execute_SupportedArgumentsAreNotReported` 增加 `batch_id` 断言（不再被视为 unsupported）。
+2. **gofmt 漂移**：`internal/supervision/agent_result.go`（F3 新增字段破坏结构体对齐）已恢复 gofmt 干净。
+3. **§6.18 红灯清单勘误**：toolbroker 的既有红灯实为 3 个（已更新该清单），其中 2 个后台任务用例在 HEAD `e03123c8` 基线同样失败。
+
+**复核验证（2026-09-27）**：
+
+- `go test ./internal/toolbroker/ -run 'TestBrokerToolArgKeys|TestBrokerToolArgKinds|TestBrokerCloseAgentAcceptsBatchID|TestBroker_Execute_SupportedArgumentsAreNotReported|TestBroker_Execute_ReportsIgnoredArguments|TestAnnotateIgnoredBrokerToolArgs|TestBrokerSendMessageSummaryStatesNoTurn|TestStampAgentWaitBudgetExposesObservedBudget|TestFinalizeAgentWaitResultTimedOutNamesCheapProbes|TestBrokerApplyAgentWorktree' -count=1` → 全 PASS；
+- `go test ./internal/toolbroker/ -count=1` → 仅剩 3 个已在 HEAD 基线复现的既有红灯，无新增；
+- `go test ./internal/supervision/ -count=1` → ok；
+- `go vet ./internal/toolbroker/ ./internal/supervision/` → 干净；计划相关改动文件 `gofmt -l` → 干净。

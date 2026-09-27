@@ -35,7 +35,7 @@ var brokerToolArgKeys = map[string][]string{
 	ToolResolveAgentApproval: {"allow", "id", "patched_args", "request_id", "session_id"},
 	ToolWaitAgent:            {"after_seq", "id", "ids", "session_id", "session_ids", "timeout_ms"},
 	ToolReadAgentEvents:      {"after_seq", "id", "limit", "session_id", "view", "wait_ms"},
-	ToolCloseAgent:           {"id", "session_id"},
+	ToolCloseAgent:           {"batch_id", "id", "session_id"},
 	ToolResumeAgent:          {"id", "session_id"},
 	ToolApplyAgentWorktree:   {"force", "id", "keep", "paths", "session_id"},
 	ToolDiscardAgentWorktree: {"id", "session_id"},

@@ -210,25 +210,25 @@ const (
 // ReadResultPayload is the bounded, model-facing read_agent_result output
 // (plan §3.4 改动 2). Sections not requested by the caller are omitted.
 type ReadResultPayload struct {
-	SessionID  string              `json:"session_id,omitempty"`
-	TaskID     string              `json:"task_id,omitempty"`
-	Status     string              `json:"status,omitempty"`
-	Summary    string              `json:"summary,omitempty"`
-	Findings   []string            `json:"findings,omitempty"`
-	Changes    []AgentResultChange `json:"changes,omitempty"`
-	Artifacts  []string            `json:"artifacts,omitempty"`
-	Errors     []AgentResultError  `json:"errors,omitempty"`
-	Usage      *AgentResultUsage   `json:"usage,omitempty"`
-	Truncated  bool                `json:"truncated,omitempty"`
-	Source     string              `json:"source"`
-	ErrorCode  string              `json:"error_code,omitempty"`
+	SessionID string              `json:"session_id,omitempty"`
+	TaskID    string              `json:"task_id,omitempty"`
+	Status    string              `json:"status,omitempty"`
+	Summary   string              `json:"summary,omitempty"`
+	Findings  []string            `json:"findings,omitempty"`
+	Changes   []AgentResultChange `json:"changes,omitempty"`
+	Artifacts []string            `json:"artifacts,omitempty"`
+	Errors    []AgentResultError  `json:"errors,omitempty"`
+	Usage     *AgentResultUsage   `json:"usage,omitempty"`
+	Truncated bool                `json:"truncated,omitempty"`
+	Source    string              `json:"source"`
+	ErrorCode string              `json:"error_code,omitempty"`
 	// FailureKind classifies why a failed/canceled task did not succeed (F3):
 	// canceled | timeout | tool_error | provider_error | policy_refused |
 	// failed | unknown. Empty for successes. A parent can then tell "the run
 	// was interrupted" apart from "a tool hard-failed" or "the provider broke"
 	// before deciding whether to re-dispatch.
 	FailureKind string `json:"failure_kind,omitempty"`
-	NextAction string              `json:"next_action,omitempty"`
+	NextAction  string `json:"next_action,omitempty"`
 	// ArtifactNextActions carries one artifact_read(id=...) dereference per
 	// entry in Artifacts, so an artifacts-only read is actionable instead of
 	// a list of opaque refs (H4).

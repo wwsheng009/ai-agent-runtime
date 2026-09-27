@@ -125,6 +125,7 @@ var brokerToolArgKinds = map[string]map[string]string{
 		"wait_ms":    toolArgFieldNumber,
 	},
 	ToolCloseAgent: {
+		"batch_id":   toolArgFieldString,
 		"id":         toolArgFieldString,
 		"session_id": toolArgFieldString,
 	},

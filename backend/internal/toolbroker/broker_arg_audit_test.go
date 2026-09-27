@@ -137,6 +137,7 @@ func TestBroker_Execute_SupportedArgumentsAreNotReported(t *testing.T) {
 	}{
 		{ToolResumeAgent, map[string]interface{}{"id": "child-1"}},
 		{ToolCloseAgent, map[string]interface{}{"session_id": "child-1"}},
+		{ToolCloseAgent, map[string]interface{}{"batch_id": "batch-1"}},
 		{ToolListAgents, map[string]interface{}{"include_closed": true}},
 		{ToolSpawnAgent, map[string]interface{}{"message": "inspect", "read_only": true, "difficulty": "normal"}},
 		{ToolApplyAgentWorktree, map[string]interface{}{"id": "child-1", "paths": []interface{}{"a.go"}, "keep": true}},
