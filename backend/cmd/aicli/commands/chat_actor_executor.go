@@ -204,6 +204,10 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	// 上一轮切换撞上在途 turn 时留下的延迟重建：actor 此刻已空闲，先驱逐再
 	// GetOrCreate，否则本回合仍会用到旧 agent 的工具策略（A1 的假开关失效模式）。
 	reconcilePendingChatActorRebuild(session)
+	// P2：从此刻到本回合返回，本会话存在"在途提交"；运行期刷新必须让路（登记
+	// 延迟重建），否则可能把 actor 从提交脚下驱逐，形成静默撕裂。
+	releaseSubmitClaim := beginChatActorSubmitClaim(session)
+	defer releaseSubmitClaim()
 	ctx = prepareAICLIActorRuntimeContext(ctx, session)
 
 	actor, err := chatActorForSessionBounded(ctx, session)
@@ -329,6 +333,8 @@ func (e *aicliActorChatExecutor) ContinueGoal(ctx context.Context, session *Chat
 		return "", fmt.Errorf("local runtime host is not configured")
 	}
 	reconcilePendingChatActorRebuild(session)
+	releaseSubmitClaim := beginChatActorSubmitClaim(session)
+	defer releaseSubmitClaim()
 	ctx = prepareAICLIActorRuntimeContext(ctx, session)
 
 	actor, err := chatActorForSessionBounded(ctx, session)

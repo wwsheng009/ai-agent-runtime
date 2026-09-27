@@ -172,12 +172,19 @@ type localChatRuntimeHost struct {
 	SessionStore       runtimechat.SessionStorage
 	SessionUser        string
 	BaseSession        *ChatSession
-	TeamLifecycle      teamLifecycleService
-	ActorRegistry      *localActorRegistry
-	Supervision        *runtimeserver.SupervisionControlPlane
-	SubagentBatches    subagentbatch.BatchStore
-	supervisionWake    *supervision.WakeConsumer
-	supervisionConfig  supervision.Config
+	// actorClaimMu / actorClaims 是 P2 的"提交认领"计数（会话级）：一次提交从
+	// 延迟重建兑现之后、取 actor 之前开始持有，直到该次 Execute 返回。运行期刷新
+	// 遇到认领时改为登记延迟重建（下一轮兑现），绝不把 actor 从提交脚下驱逐
+	//（否则提交拿到的 actor 可能在 BeginRun 前被 Stop，形成静默撕裂）。
+	// map 惰性创建：大量测试以结构体字面量构造 host，不要求构造器参与。
+	actorClaimMu      sync.Mutex
+	actorClaims       map[string]int
+	TeamLifecycle     teamLifecycleService
+	ActorRegistry     *localActorRegistry
+	Supervision       *runtimeserver.SupervisionControlPlane
+	SubagentBatches   subagentbatch.BatchStore
+	supervisionWake   *supervision.WakeConsumer
+	supervisionConfig supervision.Config
 	// executionSupervisor / executionSupervisorStop 是 P0-4 的 CLI 本地
 	// child-run 看门狗：与 API 侧共用 supervision.ExecutionRunStore，惰性构建，
 	// 关闭 host 时随 lifecycleCtx 一起停止。
@@ -1473,6 +1480,12 @@ func refreshLocalRuntimeAfterSelection(session *ChatSession, selectionChanged bo
 	}
 	hub := chatSessionRuntimeHub(session)
 	sessionID := currentRuntimeSessionID(session)
+	if hub != nil && sessionID != "" && chatActorSubmitClaimed(session) {
+		markPendingChatActorRebuild(session, reason)
+		logpkg.Warnf("runtime refresh deferred: session=%s reason=%s turn=submit_in_flight (never evict the actor from under a submit)",
+			sessionID, reason)
+		return nil
+	}
 	if hub != nil && sessionID != "" {
 		if actor, ok := hub.Get(sessionID); ok && actor != nil {
 			if actor.RunInFlight() {
@@ -1488,6 +1501,59 @@ func refreshLocalRuntimeAfterSelection(session *ChatSession, selectionChanged bo
 		}
 	}
 	return applyLocalRuntimeSelectionRefresh(session, reason, true)
+}
+
+// beginActorSubmitClaim 声明"本会话有一次提交正在进行"，返回幂等的释放函数。
+// 计数语义支持叠加（例如 sendMessage 与内部续跑路径各持一份）。
+func (h *localChatRuntimeHost) beginActorSubmitClaim(sessionID string) func() {
+	if h == nil || strings.TrimSpace(sessionID) == "" {
+		return func() {}
+	}
+	h.actorClaimMu.Lock()
+	if h.actorClaims == nil {
+		h.actorClaims = make(map[string]int)
+	}
+	h.actorClaims[sessionID]++
+	h.actorClaimMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			h.actorClaimMu.Lock()
+			if remaining := h.actorClaims[sessionID]; remaining > 1 {
+				h.actorClaims[sessionID] = remaining - 1
+			} else {
+				delete(h.actorClaims, sessionID)
+			}
+			h.actorClaimMu.Unlock()
+		})
+	}
+}
+
+// actorSubmitClaimed 报告该会话当前是否有在途提交认领。
+func (h *localChatRuntimeHost) actorSubmitClaimed(sessionID string) bool {
+	if h == nil || sessionID == "" {
+		return false
+	}
+	h.actorClaimMu.Lock()
+	defer h.actorClaimMu.Unlock()
+	return h.actorClaims[sessionID] > 0
+}
+
+// beginChatActorSubmitClaim / chatActorSubmitClaimed 是 session 级包装：
+// host 或 runtime session 缺失时退化为"无认领"（不影响任何既有路径）。
+func beginChatActorSubmitClaim(session *ChatSession) func() {
+	if session == nil || session.LocalRuntimeHost == nil || session.RuntimeSession == nil {
+		return func() {}
+	}
+	return session.LocalRuntimeHost.beginActorSubmitClaim(session.RuntimeSession.ID)
+}
+
+func chatActorSubmitClaimed(session *ChatSession) bool {
+	if session == nil || session.LocalRuntimeHost == nil || session.RuntimeSession == nil {
+		return false
+	}
+	return session.LocalRuntimeHost.actorSubmitClaimed(session.RuntimeSession.ID)
 }
 
 // applyLocalRuntimeSelectionRefresh 立即执行整包运行时刷新：驱逐旧 actor（带停因）、

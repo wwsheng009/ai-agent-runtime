@@ -181,7 +181,9 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 - P1-1：显式 `RunState` 取代 epoch 0 双关；丢弃指标接入 `/web/api/analysis/errors`。
 - ~~P1-2~~：已落地（见 §6.4 / §6.5）。等待态时钟、`/debug` 时长展示与
   「脱离 run 的等待态」看门狗自愈（清态 + 动态栏提示）全部就位。
-- P2：`actorGeneration/refreshing` 标记 + refresh/submit 互斥（submit gate）。
+- ~~P2~~：已落地（见 §6.7）。提交认领（submit claim）覆盖交互提交的预跑窗口；
+  内部触发的 supervision auto-wake 提交待复用同一认领 API（当前由 `RunInFlight`
+  保护，失败显式记录、不静默丢输入）。
 - P3：部分落地（见 §6.6）。evict(`runtime_refresh:model`)×submit 并发回归已在完整
   host 脚手架下落盘；「提交即入库」与 e2e「无活动 run 不得出现 Analyzing 帧」
   断言仍待办。
@@ -239,3 +241,29 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 备注：`chat_actor_host_test.go` 中并行 WIP 的新用例存在笔误
 `state.PendingQuestion = false`（该字段已为指针类型），导致包级测试无法编译；
 本轮仅修正这一行为 `nil`，该文件其余改动不属于本方案。
+
+### 6.7 第五轮实施（P2 refresh/submit 互斥——提交认领）
+
+| 文件 | 改动 |
+| --- | --- |
+| `backend/cmd/aicli/commands/chat_actor_host.go` | host 新增会话级提交认领（`actorClaimMu` / `actorClaims`，map 惰性创建以兼容大量结构体字面量构造的测试）；`beginActorSubmitClaim`（计数 + 幂等释放）、`actorSubmitClaimed`、session 级包装 `beginChatActorSubmitClaim` / `chatActorSubmitClaimed`；`refreshLocalRuntimeAfterSelection` 在认领期间改为 `markPendingChatActorRebuild` + 归因日志，不再驱逐 actor |
+| `backend/cmd/aicli/commands/chat_actor_executor.go` | `Execute` 与 `ContinueGoal` 在 `reconcilePendingChatActorRebuild` 之后认领、`defer` 到本回合返回——覆盖「已取得 actor、尚未 BeginRun」的预跑窗口（新增 P0-2 预算之外的另一处提交护栏） |
+| `backend/cmd/aicli/commands/chat_actor_submit_claim_test.go`（新增） | 2 例：认领生命周期（叠加计数、幂等释放、nil 安全）；认领期间刷新只登记延迟重建且不驱逐，释放后 `reconcilePendingChatActorRebuild` 在下一轮兑现驱逐 |
+
+语义：与既有「运行时切换从下一个 turn 生效」契约一致——刷新既不打断在途 turn，
+也不再把 actor 从提交脚下驱逐（后者正是「已取 actor → 被 Stop → BeginRun 落在
+已停 actor 上」的候选撕裂机制）。`/model`、`/add-dir`、reasoning 切换、routing 写入
+在认领期间会命中既有的「旧 actor 可能仍用旧配置」提示（语义准确）。
+
+验证（2026-09-27 第五轮）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `go build ./cmd/aicli/commands/` / `go vet` / `gofmt -l` | PASS |
+| 新增 2 例 + 既有 `TestRuntimeRefresh*`（3 例）`-count=1` | PASS |
+| 上述 4 例 `-race -count=1` | PASS |
+| wedge/refresh/evict×submit/waiting/epoch/send/debug 全量回归 `-count=1` | PASS（两轮） |
+
+遗留：内部触发的 supervision auto-wake 提交不经 `Execute`，其预跑窗口仍只由
+`RunInFlight` 保护（唤醒失败会显式记录，不会静默丢用户输入）；如需同等强度，
+在唤醒提交点复用同一认领 API 即可。
