@@ -7,7 +7,7 @@ import (
 
 // DefaultMaxConsecutiveWaitWithoutProgress is the built-in budget for
 // consecutive no-progress active wait segments on one parent turn (design
-// §16.2 成本口径："连续 active wait 超过 2 次且无进展 ⇒ 提示模型改用挂起").
+// §16.2 成本口径："连续 active wait 超过 N 次且无进展 ⇒ 提示模型改用挂起").
 //
 // A "segment" is one wait_agent observation window. Progress means the ledger
 // reported at least one terminal_delta during the segment. Once the budget is
@@ -16,7 +16,21 @@ import (
 // from parking a turn, so the enforcement is "no more active waiting" plus
 // next_action=suspend — a parent that then tries to finish is caught by I1,
 // which converts the premature finalize into a turn suspension.
-const DefaultMaxConsecutiveWaitWithoutProgress = 2
+//
+// The default is 6 (≈12 minutes at the default 120s wait cap), not 2: with a
+// 2-segment budget the parent gets only ≈4 minutes of patience, which is
+// shorter than almost every research/implementation child (5–60 minutes), so
+// healthy children were driven into the suspension path before they could
+// finish (observed 2026-09-27; see
+// docs/analysis/session-20260926205017-subagent-runtime-postmortem-20260926.md
+// for the same session family's supervision-chain findings). The budget still
+// bounds wall-clock/token burn; hosts that genuinely want the old aggressive
+// steering can set agents.maxConsecutiveWaitWithoutProgress explicitly, and
+// long-task hosts should also raise agents.maxWaitTimeoutMs (per-window cap).
+// NOTE: this constant is a mitigation — it does not fix the two unrelated
+// defects that made the 4-minute budget fatal (suspension must not cancel live
+// children; child progress should reset the counter instead of terminal-only).
+const DefaultMaxConsecutiveWaitWithoutProgress = 6
 
 // WaitBudget tracks consecutive no-progress active wait segments per parent
 // turn. It is deliberately in-memory and host-local: the durable truth of a

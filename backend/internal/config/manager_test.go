@@ -129,7 +129,7 @@ func TestValidateAgentsConfig_DefaultsAndValidation(t *testing.T) {
 	require.Equal(t, int((30 * time.Second).Milliseconds()), cfg.Agents.DefaultWaitTimeoutMs)
 	require.Equal(t, int((10 * time.Second).Milliseconds()), cfg.Agents.MinWaitTimeoutMs)
 	require.Equal(t, int((2 * time.Minute).Milliseconds()), cfg.Agents.MaxWaitTimeoutMs)
-	require.Equal(t, 2, cfg.Agents.MaxConsecutiveWaitWithoutProgress)
+	require.Equal(t, 6, cfg.Agents.MaxConsecutiveWaitWithoutProgress)
 	require.Equal(t, "clamp", cfg.Agents.WaitTimeoutMode)
 	require.Equal(t, "none", cfg.Agents.DefaultForkTurns)
 	require.NoError(t, ValidateRuntimeConfig(cfg))

@@ -478,7 +478,7 @@ read_only 子代理的执行面限制（管道/命令替换一律拒绝）属策
 **巡检/等待节奏（默认值 = 你本机生效值，`C:\Users\vince\.aicli\config.yaml` 未覆盖任何相关键）**
 
 - `wait_agent` 窗口：默认 **30s**、最小 **10s**、**上限 2min**（`WaitTimeoutMode=clamp`，超限被钳制并回显 `wait_timeout_clamped`）。窗口结束即一次巡检机会；窗口内 turn 被同步工具调用占住，不能做别的事。
-- 等待预算：`maxConsecutiveWaitWithoutProgress=2` —— 连续 2 个无 `terminal_delta` 的等待段后宿主**不再开新窗口**，返回 `next_action=suspend`（`wait_budget_exhausted=true`）；I1 把提前收尾转成 turn 挂起（零 goroutine/零 token）。
+- 等待预算：`maxConsecutiveWaitWithoutProgress=6`（2026-09-27 起；原为 2，仅 4 分钟耐心）——连续 6 个无 `terminal_delta` 的等待段后宿主**不再开新窗口**，返回 `next_action=suspend`（`wait_budget_exhausted=true`）；I1 把提前收尾转成 turn 挂起（零 goroutine/零 token）。
 - 事件驱动：子代理 ready 时等待立即返回（实测 2786ms / 3691ms，而非等满窗口）；steer/ESC 立即打断；子代理终态经 wake 在 turn 边界 resume（`resume_queue` 可见）。
 - 宿主后台（模型不可见）：等待循环 500ms 轮询；执行监督者 **5s** 扫描（deadline/stall/approval）；批次协调器 1min 心跳；周期巡检 `progress_check_interval` **默认关闭**（开启下限 30s），且父会话忙时跳过；每个父 turn 开头必有一次 preflight digest（always-on）。
 - 真实限制：监督 wake **不会打断正在进行的 wait**，只在当前等待段返回后投递 ⇒ "截止触发"到"父代理处理"最坏晚一个窗口（默认 ≤2min）。
