@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -23,12 +22,22 @@ func waitAgentCall(id, timeoutMs string) types.ToolCall {
 	}
 }
 
+// waitAgentResults builds one executed wait_agent batch: the requested window is
+// deliberately separate from the waited_ms the host actually reports, mirroring
+// the production clamp (a 40m request can complete in 2m).
+func waitAgentResults(timeoutMs, waitedMs string) []toolExecutionResult {
+	return []toolExecutionResult{{
+		Call:   waitAgentCall("call", timeoutMs),
+		Output: map[string]interface{}{"ok": true, "waited_ms": waitedMs},
+	}}
+}
+
 func TestPollingBackoffTracker_NotifiesAfterThreshold(t *testing.T) {
 	tracker := NewPollingBackoffTracker(0)
 	require.Equal(t, PollingBackoffNoticeThreshold, tracker.Threshold())
 
 	for i := 1; i <= PollingBackoffNoticeThreshold; i++ {
-		obs := tracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("call", "1000")})
+		obs := tracker.ObserveToolResults(waitAgentResults("600000", "1000"))
 		require.Equal(t, i, obs.RepeatCount)
 		require.Equal(t, []string{"wait_agent"}, obs.Tools)
 		if i < PollingBackoffNoticeThreshold {
@@ -39,20 +48,21 @@ func TestPollingBackoffTracker_NotifiesAfterThreshold(t *testing.T) {
 		require.Contains(t, obs.Advisory, "polling/control request")
 		require.Contains(t, obs.Advisory, "wait_agent")
 		require.Contains(t, obs.Advisory, "Execution was not blocked")
+		require.Contains(t, obs.Advisory, "not a context/token budget")
 		require.True(t, obs.EmitNotice, "crossing the threshold emits the product event once")
 	}
 
 	// Past the threshold the advisory keeps guiding the model, but the event
 	// must not repeat for the same streak.
-	again := tracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("call", "1000")})
+	again := tracker.ObserveToolResults(waitAgentResults("600000", "1000"))
 	require.Equal(t, PollingBackoffNoticeThreshold+1, again.RepeatCount)
 	require.NotEmpty(t, again.Advisory)
 	require.False(t, again.EmitNotice)
 
 	// Mixed polling tools in one batch still count as a polling streak.
-	mixed := tracker.ObserveToolBatch([]types.ToolCall{
-		waitAgentCall("call-a", "1000"),
-		{ID: "call-b", Name: "read_agent_events", Args: map[string]interface{}{"id": "child-1", "after_seq": 3}},
+	mixed := tracker.ObserveToolResults([]toolExecutionResult{
+		{Call: waitAgentCall("call-a", "1000")},
+		{Call: types.ToolCall{ID: "call-b", Name: "read_agent_events", Args: map[string]interface{}{"id": "child-1", "after_seq": 3}}},
 	})
 	require.Equal(t, 1, mixed.RepeatCount, "a different polling batch restarts the streak")
 }
@@ -63,17 +73,17 @@ func TestPollingBackoffTracker_NotifiesAfterThreshold(t *testing.T) {
 // existing wait/read polling brake is untouched.
 func TestPollingBackoffTracker_SupervisionInspectIsNotPolling(t *testing.T) {
 	tracker := NewPollingBackoffTracker(0)
-	inspect := []types.ToolCall{{
+	inspect := []toolExecutionResult{{Call: types.ToolCall{
 		ID:   "call-1",
 		Name: "supervision_descendants",
 		Args: map[string]interface{}{"mode": "children"},
-	}}
-	fingerprint, tools := pollingBatchFingerprint(inspect)
+	}}}
+	fingerprint, tools := pollingBatchFingerprint([]types.ToolCall{inspect[0].Call})
 	require.Empty(t, fingerprint)
 	require.Empty(t, tools)
 
 	for i := 0; i < PollingBackoffNoticeThreshold+2; i++ {
-		obs := tracker.ObserveToolBatch(inspect)
+		obs := tracker.ObserveToolResults(inspect)
 		require.Empty(t, obs.Fingerprint)
 		require.Zero(t, obs.RepeatCount)
 		require.Empty(t, obs.Advisory)
@@ -83,14 +93,14 @@ func TestPollingBackoffTracker_SupervisionInspectIsNotPolling(t *testing.T) {
 	// The brake itself is unchanged: a wait_agent streak still crosses the
 	// threshold after the inspection reset.
 	for i := 1; i <= PollingBackoffNoticeThreshold; i++ {
-		obs := tracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("wait", "1000")})
+		obs := tracker.ObserveToolResults(waitAgentResults("600000", "1000"))
 		require.Equal(t, i, obs.RepeatCount)
 	}
 
 	// Mixing inspection with a blocking wait resets like real work.
-	mixed := tracker.ObserveToolBatch([]types.ToolCall{
-		waitAgentCall("wait-2", "1000"),
-		{ID: "call-2", Name: "supervision_snapshot", Args: map[string]interface{}{"mode": "descendants"}},
+	mixed := tracker.ObserveToolResults([]toolExecutionResult{
+		{Call: waitAgentCall("wait-2", "1000")},
+		{Call: types.ToolCall{ID: "call-2", Name: "supervision_snapshot", Args: map[string]interface{}{"mode": "descendants"}}},
 	})
 	require.Zero(t, mixed.RepeatCount)
 }
@@ -99,126 +109,156 @@ func TestPollingBackoffTracker_ResetsOnRealWork(t *testing.T) {
 	tracker := NewPollingBackoffTracker(2)
 	require.Equal(t, 2, tracker.Threshold())
 
-	first := tracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("call", "1000")})
+	first := tracker.ObserveToolResults(waitAgentResults("600000", "1000"))
 	require.Equal(t, 1, first.RepeatCount)
-	second := tracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("call", "1000")})
+	second := tracker.ObserveToolResults(waitAgentResults("600000", "1000"))
 	require.Equal(t, 2, second.RepeatCount)
 	require.NotEmpty(t, second.Advisory)
 
 	// Real work in the batch resets the streak (polling guard must not nag
 	// while the model makes progress).
-	work := tracker.ObserveToolBatch([]types.ToolCall{{ID: "call-3", Name: "view", Args: map[string]interface{}{"file_path": "a.go"}}})
+	work := tracker.ObserveToolResults([]toolExecutionResult{{
+		Call:   types.ToolCall{ID: "call-3", Name: "view", Args: map[string]interface{}{"file_path": "a.go"}},
+		Output: map[string]interface{}{"ok": true},
+	}})
 	require.Zero(t, work.RepeatCount)
 	require.Empty(t, work.Advisory)
 	require.Zero(t, tracker.RepeatCount())
 
 	// A mixed batch (polling + real work) also resets instead of counting.
-	mixed := tracker.ObserveToolBatch([]types.ToolCall{
-		waitAgentCall("call-4", "1000"),
-		{ID: "call-5", Name: "view", Args: map[string]interface{}{"file_path": "a.go"}},
+	mixed := tracker.ObserveToolResults([]toolExecutionResult{
+		{Call: waitAgentCall("call-4", "1000")},
+		{Call: types.ToolCall{ID: "call-5", Name: "view", Args: map[string]interface{}{"file_path": "a.go"}}},
 	})
 	require.Zero(t, mixed.RepeatCount)
 
 	// After the reset, a fresh streak starts from 1 and only crosses at the
 	// threshold again.
-	restart := tracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("call", "1000")})
+	restart := tracker.ObserveToolResults(waitAgentResults("600000", "1000"))
 	require.Equal(t, 1, restart.RepeatCount)
 	require.Empty(t, restart.Advisory)
 }
 
 func TestPollingBackoffTracker_TimingArgsDoNotBreakStreak(t *testing.T) {
 	tracker := NewPollingBackoffTracker(2)
-	require.Equal(t, 1, tracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("call", "1000")}).RepeatCount)
-	changed := tracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("call", "60000")})
+	require.Equal(t, 1, tracker.ObserveToolResults(waitAgentResults("1000", "1000")).RepeatCount)
+	changed := tracker.ObserveToolResults(waitAgentResults("60000", "1000"))
 	require.Equal(t, 2, changed.RepeatCount, "a larger timeout_ms is the same wait intent, not a new request")
 	require.NotEmpty(t, changed.Advisory)
 
 	// The observation target stays semantic: a different child id is a new request.
-	otherTarget := tracker.ObserveToolBatch([]types.ToolCall{{
-		ID:   "call-2",
-		Name: "wait_agent",
-		Args: map[string]interface{}{"ids": []string{"child-2"}, "timeout_ms": "60000"},
+	otherTarget := tracker.ObserveToolResults([]toolExecutionResult{{
+		Call: types.ToolCall{
+			ID:   "call-2",
+			Name: "wait_agent",
+			Args: map[string]interface{}{"ids": []string{"child-2"}, "timeout_ms": "60000"},
+		},
+		Output: map[string]interface{}{"ok": true, "waited_ms": "1000"},
 	}})
 	require.Equal(t, 1, otherTarget.RepeatCount, "waiting on a different target starts a new streak")
 	require.Empty(t, otherTarget.Advisory)
 }
 
-// TestPollingBackoffTracker_EscalatingTimeoutsStillTripWaitBudget is the
-// incident contract: 5m -> 7m -> 10m waits are three different argument sets
-// but one uninterrupted blocking wait. The repeat threshold alone never fires
-// there (threshold 5 here, exactly as a model that always escalates avoids
-// it), so the accumulated wait window is what must surface.
-func TestPollingBackoffTracker_EscalatingTimeoutsStillTripWaitBudget(t *testing.T) {
-	tracker := NewPollingBackoffTracker(5)
-	waits := []string{"300000", "420000", "600000"}
-	var obs PollingBackoffObservation
-	notices := 0
-	for _, wait := range waits {
-		obs = tracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("call", wait)})
-		if obs.EmitNotice {
-			notices++
-		}
-	}
+// TestPollingBackoffTracker_WaitBudgetUsesActualWaitedMs is the incident
+// contract: the guard must never bill the requested timeout_ms. In the observed
+// session a 40m request was clamped to a 120s window, yet the pre-execution
+// accounting reported "40m of blocking wait" before the window had even opened.
+func TestPollingBackoffTracker_WaitBudgetUsesActualWaitedMs(t *testing.T) {
+	tracker := NewPollingBackoffTracker(5) // threshold high: only the wait budget can fire
 
-	require.Equal(t, 3, obs.RepeatCount)
-	require.Equal(t, 22*time.Minute, obs.CumulativeWait)
-	require.True(t, obs.WaitBudgetExceeded)
-	require.Equal(t, 1, notices, "crossing the wait budget emits the product event once per streak")
-	require.Contains(t, obs.Advisory, "22m0s")
-	require.Contains(t, obs.Advisory, "Execution was not blocked")
-	require.Equal(t, ReminderKindPollingBackoff, inferAdvisoryReminderKind(obs.Advisory))
-	require.Equal(t, obs.CumulativeWait, tracker.CumulativeWait())
+	first := tracker.ObserveToolResults(waitAgentResults("2400000", "120000"))
+	require.Equal(t, 2*time.Minute, first.CumulativeWait,
+		"requested timeout_ms must never be counted as elapsed waiting")
+	require.False(t, first.WaitBudgetExceeded)
+	require.Empty(t, first.Advisory, "a 40m request completed in 2m must not trip the 5m notice")
+	require.False(t, first.EmitNotice)
+
+	second := tracker.ObserveToolResults(waitAgentResults("2400000", "120000"))
+	require.Equal(t, 4*time.Minute, second.CumulativeWait)
+	require.False(t, second.WaitBudgetExceeded)
+
+	third := tracker.ObserveToolResults(waitAgentResults("2400000", "60000"))
+	require.Equal(t, 5*time.Minute, third.CumulativeWait)
+	require.True(t, third.WaitBudgetExceeded)
+	require.True(t, third.EmitNotice, "crossing the actual-wait threshold notifies once")
+	require.Contains(t, third.Advisory, "actual waiting")
+	require.Contains(t, third.Advisory, "not a context/token budget")
+	require.Contains(t, third.Advisory, "does not authorize finalizing")
+
+	fourth := tracker.ObserveToolResults(waitAgentResults("2400000", "60000"))
+	require.False(t, fourth.EmitNotice, "the budget notice fires once per streak")
 
 	// Real work resets the accumulated window along with the streak.
-	work := tracker.ObserveToolBatch([]types.ToolCall{{ID: "call-3", Name: "view", Args: map[string]interface{}{"file_path": "a.go"}}})
+	work := tracker.ObserveToolResults([]toolExecutionResult{{
+		Call:   types.ToolCall{ID: "call-3", Name: "view", Args: map[string]interface{}{"file_path": "a.go"}},
+		Output: map[string]interface{}{"ok": true},
+	}})
 	require.False(t, work.WaitBudgetExceeded)
 	require.Zero(t, tracker.CumulativeWait())
 }
 
-// TestPollingBackoffTracker_WaitBudgetReadsArgumentVariants locks the argument
-// surface of the wait budget: provider casing variants and UseNumber-decoded
-// values must count, while a bare unit-agnostic "timeout" must not.
-func TestPollingBackoffTracker_WaitBudgetReadsArgumentVariants(t *testing.T) {
-	tracker := NewPollingBackoffTracker(5)
+// TestPollingBackoffTracker_ReadyAndTerminalResetStreak keeps the guard from
+// nagging a parent whose child actually reached a terminal state or produced a
+// ready output — those are progress, not polling.
+func TestPollingBackoffTracker_ReadyAndTerminalResetStreak(t *testing.T) {
+	tracker := NewPollingBackoffTracker(0)
+	require.Equal(t, 1, tracker.ObserveToolResults(waitAgentResults("600000", "120000")).RepeatCount)
 
-	camel := tracker.ObserveToolBatch([]types.ToolCall{{
-		ID:   "call-1",
-		Name: "wait_agent",
-		Args: map[string]interface{}{"ids": []string{"child-1"}, "timeoutMs": json.Number("300000")},
-	}})
-	require.Equal(t, 5*time.Minute, camel.CumulativeWait, "camelCase + UseNumber wait must count")
-	require.True(t, camel.WaitBudgetExceeded)
-	require.True(t, camel.EmitNotice, "crossing the budget notifies once")
-
-	// A bare "timeout" keeps its unit-agnostic meaning: it stays out of the
-	// millisecond budget, so the accumulated window does not move.
-	bare := tracker.ObserveToolBatch([]types.ToolCall{{
-		ID:   "call-2",
-		Name: "wait_agent",
-		Args: map[string]interface{}{"ids": []string{"child-1"}, "timeout": 600},
-	}})
-	require.Equal(t, 5*time.Minute, bare.CumulativeWait)
-	require.False(t, bare.EmitNotice, "the window already notified for this streak")
-
-	// Duplicate alias spellings inside one call take the largest value instead
-	// of summing (1000 vs 600000 -> 600000).
-	alias := tracker.ObserveToolBatch([]types.ToolCall{{
-		ID:   "call-3",
-		Name: "wait_agent",
-		Args: map[string]interface{}{
-			"ids":        []string{"child-1"},
-			"timeout_ms": "1000",
-			"wait_ms":    600000,
+	ready := tracker.ObserveToolResults([]toolExecutionResult{{
+		Call: waitAgentCall("call", "600000"),
+		Output: map[string]interface{}{
+			"ok": true, "waited_ms": "120000", "ready_count": 1,
+			"terminal_delta": []string{"child-1"},
 		},
 	}})
-	require.Equal(t, 15*time.Minute, alias.CumulativeWait)
+	require.Zero(t, ready.RepeatCount, "a ready/terminal result ends the wait streak")
+	require.Zero(t, tracker.CumulativeWait())
+
+	// The next wait is a fresh streak, not a continuation.
+	restart := tracker.ObserveToolResults(waitAgentResults("600000", "120000"))
+	require.Equal(t, 1, restart.RepeatCount)
+	require.Equal(t, 2*time.Minute, restart.CumulativeWait)
+}
+
+func TestPollingBackoffTracker_ErrorsAndInterruptsResetStreak(t *testing.T) {
+	tracker := NewPollingBackoffTracker(0)
+	require.Equal(t, 1, tracker.ObserveToolResults(waitAgentResults("600000", "120000")).RepeatCount)
+
+	failed := tracker.ObserveToolResults([]toolExecutionResult{{
+		Call:  waitAgentCall("call", "600000"),
+		Error: "context canceled",
+	}})
+	require.Zero(t, failed.RepeatCount, "a failed/interrupted wait is not a polling repeat")
+	require.Zero(t, tracker.CumulativeWait())
+
+	interrupted := tracker.ObserveToolResults([]toolExecutionResult{{
+		Call:   waitAgentCall("call", "600000"),
+		Output: map[string]interface{}{"ok": true, "interrupted": true, "waited_ms": "120000"},
+	}})
+	require.Zero(t, interrupted.RepeatCount)
+	require.Zero(t, tracker.CumulativeWait())
+}
+
+// TestPollingBackoffTracker_MissingWaitedMsContributesZero locks the evidence
+// discipline: without an executed waited_ms value the guard contributes zero
+// instead of guessing from the request.
+func TestPollingBackoffTracker_MissingWaitedMsContributesZero(t *testing.T) {
+	tracker := NewPollingBackoffTracker(5)
+	obs := tracker.ObserveToolResults([]toolExecutionResult{{
+		Call:   waitAgentCall("call", "2400000"),
+		Output: "child still running",
+	}})
+	require.Equal(t, 1, obs.RepeatCount)
+	require.Zero(t, obs.CumulativeWait)
+	require.False(t, obs.WaitBudgetExceeded)
+	require.Empty(t, obs.Advisory)
 }
 
 func TestPollingBackoffTracker_DisabledWithNegativeThreshold(t *testing.T) {
 	tracker := NewPollingBackoffTracker(-1)
 	require.Zero(t, tracker.Threshold())
 	for i := 0; i < 5; i++ {
-		obs := tracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("call", "1000")})
+		obs := tracker.ObserveToolResults(waitAgentResults("600000", "1000"))
 		require.Empty(t, obs.Advisory)
 		require.False(t, obs.EmitNotice)
 		require.Zero(t, obs.RepeatCount)
@@ -226,7 +266,7 @@ func TestPollingBackoffTracker_DisabledWithNegativeThreshold(t *testing.T) {
 
 	var nilTracker *PollingBackoffTracker
 	require.Zero(t, nilTracker.Threshold())
-	require.Zero(t, nilTracker.ObserveToolBatch([]types.ToolCall{waitAgentCall("call", "1000")}).RepeatCount)
+	require.Zero(t, nilTracker.ObserveToolResults(waitAgentResults("600000", "1000")).RepeatCount)
 }
 
 func TestPollingBackoffAdvisory_ReminderKindWiring(t *testing.T) {
@@ -240,7 +280,8 @@ func TestPollingBackoffAdvisory_ReminderKindWiring(t *testing.T) {
 // TestReActLoop_InjectsPollingBackoffAdvisoryWithoutStopping is the loop-level
 // contract for P1-7: identical repeated wait_agent calls stay exempt from the
 // doom loop, receive non-blocking backoff guidance, and emit the product event
-// once per streak.
+// once per streak. The event is measured from executed results, not requested
+// windows.
 func TestReActLoop_InjectsPollingBackoffAdvisoryWithoutStopping(t *testing.T) {
 	manager := &MockSequenceMCPManager{output: "child still running"}
 	llmRuntime := llm.NewLLMRuntime(nil)
@@ -288,6 +329,8 @@ func TestReActLoop_InjectsPollingBackoffAdvisoryWithoutStopping(t *testing.T) {
 	require.Len(t, backoffEvents, 1)
 	require.Equal(t, PollingBackoffNoticeThreshold, backoffEvents[0].Payload["repeat_count"])
 	require.Equal(t, []string{"wait_agent"}, backoffEvents[0].Payload["tools"])
+	require.Equal(t, "tool_result.waited_ms", backoffEvents[0].Payload["wait_measurement"])
+	require.Equal(t, "current_run_polling_streak", backoffEvents[0].Payload["scope"])
 	require.Empty(t, doomWarnings, "polling/control tools stay doom-loop exempt")
 
 	advisoryFound := false

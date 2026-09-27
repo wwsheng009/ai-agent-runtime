@@ -1316,8 +1316,12 @@ func TestBroker_Execute_ReadAgentEventsAppliesToolProgressView(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read_agent_events failed: %v", err)
 	}
-	if controller.lastRead.View != AgentEventsViewToolProgress {
-		t.Fatalf("expected view to reach the controller, got %#v", controller.lastRead)
+	// The broker now performs the tool_progress projection itself: the host read
+	// must stay raw (view=all) so the bounded scan can see past reasoning-only
+	// pages, keep the high-water cursor moving and never claim visible events it
+	// did not return.
+	if controller.lastRead.View != AgentEventsViewAll {
+		t.Fatalf("expected the raw read to reach the controller, got %#v", controller.lastRead)
 	}
 	result, ok := rawResult.(*AgentEventsResult)
 	if !ok || result == nil || result.View != AgentEventsViewToolProgress {
