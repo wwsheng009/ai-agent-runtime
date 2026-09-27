@@ -23,7 +23,9 @@
 
 - `dont_ask` 是 fail-closed 的无人值守模式：**该问的一律拒绝**（`mode:dont_ask_denies_unapproved`），但读、只读 shell、allow 规则与已记忆授权照常生效——它是 CI 里比 `--yolo` 更该用的那个。
 - `bypass_permissions` 不能越过：硬 deny 名单与显式 deny 规则、hook 的 `block`、根/主目录断路器（HardAsk）；但它**会跳过**敏感写保护与外部目录门的询问（敏感写在 yolo 下直接放行）——需要更强保证就别开 yolo，或用 `disable_bypass` 关掉它。
-- 取值只有这五个（无 `yolo` 字面值）：`--yolo` ≡ `--permission-mode bypass_permissions`。
+- 取值只有这五个，没有 `yolo` 字面值；`--yolo` / `--accept-edits` / `--plan` 是简写，分别等价于 `--permission-mode bypass_permissions` / `accept_edits` / `plan`（同时给出会**报错**，不静默取一个）。
+- 兼容别名（§4.12；CLI、runtime API、ACP 走同一解析）：`manual`/`standard` → `default`，`auto-accept`/`acceptEdits` → `accept_edits`，`bypass` → `bypass_permissions`，`dontAsk` → `dont_ask`。未知值一律拒绝，别名不会让拼错的值静默降级。
+- 会话内入口：`/mode`（与 `/permission-mode` 同义）查看或切换，支持冒号简写 `/mode:accept_edits`、`/permission-mode:plan`；切 `bypass_permissions` 仍要过 §1.4 的终端确认门。
 
 ### 0.2 最常用的 5 条规则
 

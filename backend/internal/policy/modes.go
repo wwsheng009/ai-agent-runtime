@@ -18,15 +18,23 @@ const (
 	ModeDontAsk Mode = "dont_ask"
 )
 
+// permissionModeAliases 是 CommandCode / Claude Code 的兼容别名表（§4.12）。
+// 只做「名字 → canonical 值」映射：解析出的模式仍走同一套判定，未知值依旧由
+// ParseMode 拒绝（ok=false），不会因为别名而静默降级或放宽。
+var permissionModeAliases = map[string]Mode{
+	"manual":      ModeDefault,
+	"standard":    ModeDefault,
+	"auto-accept": ModeAcceptEdits,
+	"acceptedits": ModeAcceptEdits, // Claude Code 的 camelCase 写法
+	"bypass":      ModeBypassPermissions,
+	"dontask":     ModeDontAsk, // Claude Code 的 camelCase 写法
+}
+
 func normalizeMode(mode Mode) Mode {
-	switch Mode(strings.ToLower(strings.TrimSpace(string(mode)))) {
-	case ModeAcceptEdits, ModePlan, ModeBypassPermissions:
-		return Mode(strings.ToLower(strings.TrimSpace(string(mode))))
-	case ModeDontAsk, "dont-ask":
-		return ModeDontAsk
-	default:
-		return ModeDefault
+	if parsed, ok := ParseMode(string(mode)); ok {
+		return parsed
 	}
+	return ModeDefault
 }
 
 // SupportedModes returns the backend-supported permission modes in display order.
@@ -44,9 +52,11 @@ func ParseMode(raw string) (Mode, bool) {
 		return normalized, true
 	case ModeDontAsk, "dont-ask":
 		return ModeDontAsk, true
-	default:
-		return ModeDefault, false
 	}
+	if alias, ok := permissionModeAliases[string(normalized)]; ok {
+		return alias, true
+	}
+	return ModeDefault, false
 }
 
 func modeDecision(mode Mode, caps []Capability) DecisionType {

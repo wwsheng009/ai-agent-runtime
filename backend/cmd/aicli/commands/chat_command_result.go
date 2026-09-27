@@ -428,7 +428,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		!commandMatches(cmdLower, "/sessions") && !commandMatches(cmdLower, "/help") && !commandMatches(cmdLower, "/?") &&
 		!commandMatches(cmdLower, "/new") && cmdLower != "/session" && !commandMatches(cmdLower, "/history") && !commandMatches(cmdLower, "/h") &&
 		!commandMatches(cmdLower, "/queue") && !commandMatches(cmdLower, "/attach") &&
-		!commandMatches(cmdLower, "/permission-mode") && !commandMatches(cmdLower, "/mode") &&
+		!commandMatches(cmdLower, "/permission-mode") && !commandMatches(cmdLower, "/mode") && !permissionModeColonShorthand(cmdLower) &&
 		!commandMatches(cmdLower, "/approval-reuse") && !commandMatches(cmdLower, "/plan") && !commandMatches(cmdLower, "/plans") &&
 		!commandMatches(cmdLower, "/timeline") && !commandMatches(cmdLower, "/collab") &&
 		!commandMatches(cmdLower, "/mcp") && !commandMatches(cmdLower, "/web") && !commandMatches(cmdLower, "/routing") &&
@@ -458,7 +458,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		return executeStructuredAttachmentCommand(session, command), true, nil
 	}
 
-	if commandMatches(cmdLower, "/permission-mode") || commandMatches(cmdLower, "/mode") {
+	if commandMatches(cmdLower, "/permission-mode") || commandMatches(cmdLower, "/mode") || permissionModeColonShorthand(cmdLower) {
 		return executeStructuredPermissionModeCommand(session, command), true, nil
 	}
 
@@ -1056,7 +1056,7 @@ func executeStructuredPermissionModeCommand(session *ChatSession, command string
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
 	}
-	value := strings.TrimSpace(extractCommandArgument(command))
+	value := permissionModeCommandArgument(command)
 	if value == "" {
 		mode := chatSessionPermissionMode(session)
 		if chatPlanModeActive(session) {

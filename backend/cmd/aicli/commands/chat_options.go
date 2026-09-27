@@ -203,6 +203,8 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		trustGrant, _ = cmd.Flags().GetBool("trust")
 	}
 	yoloFlag, _ := cmd.Flags().GetBool("yolo")
+	acceptEditsFlag, _ := cmd.Flags().GetBool("accept-edits")
+	planModeFlag, _ := cmd.Flags().GetBool("plan")
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	outputFlag, _ := cmd.Flags().GetString("output")
 	sessionIDFlag, _ := cmd.Flags().GetString("session")
@@ -230,7 +232,8 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	if err != nil {
 		return nil, err
 	}
-	permissionMode, err := parseChatPermissionMode(permissionModeFlag, yoloFlag)
+	permissionMode, err := resolveChatPermissionModeFlags(
+		permissionModeFlag, cmd.Flags().Changed("permission-mode"), yoloFlag, acceptEditsFlag, planModeFlag)
 	if err != nil {
 		return nil, err
 	}

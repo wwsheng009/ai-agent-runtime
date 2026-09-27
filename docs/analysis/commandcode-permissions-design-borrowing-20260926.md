@@ -351,6 +351,13 @@
 - CLI 增加常驻模式标识（banner/状态行），ACM/Web 已有控件；`/mode` 统一入口（含 `/mode:<name>` 简写）。
 - **安全复核**：CommandCode 刻意不提供 slash→yolo（slash 可能被 agent 调用）；aicli 存在 `/yolo`。当前证据显示 slash 由用户输入解析，但建议核实模型工具面是否可达（如 skill/`aicli_exec` 路径），若可达则隐藏/要求二次确认并在文档中明确边界。
 
+- **本轮收口（4.12 第一批，已完成）**：
+  1. `--accept-edits` / `--plan` 与 `--yolo` 并列注册（`registerChatFlags`，chat/resume 共享同一 flag 面）；三个简写互斥、与 `--permission-mode` 不一致时报错（`resolveChatPermissionModeFlags`），**不静默取一个**——权限模式是安全语义。
+  2. `policy.ParseMode` 收编兼容别名（`manual`/`standard`→`default`、`auto-accept`/`acceptEdits`→`accept_edits`、`bypass`→`bypass_permissions`、`dontAsk`→`dont_ask`），CLI / runtime API / ACP 同一解析；未知值仍然拒绝（别名不会让拼错值静默降级），`normalizeMode` 与 `ParseMode` 保持同源。
+  3. `/mode`（与 `/permission-mode` 同义，ACP 侧早先已接 `configOptions`）新增冒号简写 `/mode:<name>`、`/permission-mode:<name>`；命令名字面量保留在分发点，供 slash catalog 源码扫描护栏继续识别。
+  4. 测试：`internal/policy/modes_alias_test.go`、`cmd/aicli/commands/chat_permission_mode_entry_test.go`（解析表 / 冲突 / 冒号形 / 非法值拒绝 / 裸命令查询）。
+  **仍未做**：CLI 常驻模式 banner/状态行（见文末未做清单）。
+
 ### 4.13 【P2】按需命令解释（模型摘要）
 
 - 现状已有规则模板解释（`chat_approval_explain.go:82-146`，覆盖 shell/路径/MCP 前缀）；建议在审批提示增加"解释"动作：调用一次后台模型对完整命令/补丁做摘要（显示成本/风险点），并用设置项控制 on-demand（默认按需）与预生成两种模式；解释结果不进入工具调用决策链（纯 UI）。
@@ -560,7 +567,7 @@
 - ACP `reject_always`（`acp/types.go` 已定义未启用）与 `allow-always` → policy 记忆库（`RememberScope=session/project`）的映射——当前 `allow-always` 走的是 CLI 侧进程内授权族复用（10 分钟 TTL）；现状已写入 ACP 手册「权限入口对照表」；
 - `/grants` 命令面展示新 specifier 形态（durable store 读写已通，展示层待跟进）；
 - 4.13 剩余：CLI/ACP 面的「解释」入口；宿主若注入 `ApprovalSummarizer` 需自担记账。（**Web 设置页开关已落地**：`GET/PUT /api/runtime/config/approval-explain` + 设置页卡片，进程级不落盘。）
-- 4.12 的**入口简写（`--accept-edits`/`--plan`、`/mode:<name>`）与 CLI 常驻模式 banner 未做**（集中在 `cmd/aicli/commands`，与并发工作面重叠，排后）；安全复核已完成（§13：四类输入面的 bypass 可达性、F1–F4 定级与建议，已写入手册 §1.4）。4.14 的后续项：示例工程/截图未开始（ACP 侧入口表本次已落地，见 ACP 手册 §6）。
+- 4.12：**入口简写与兼容别名已完成**（`--accept-edits`/`--plan`、别名表、`/mode:<name>`，见 §4.12「本轮收口」）；**CLI 常驻模式 banner 仍未做**（渲染面集中在 `cmd/aicli/commands`，与并发工作面重叠，排后）。安全复核已完成（§13：四类输入面的 bypass 可达性、F1–F4 定级与建议，已写入手册 §1.4）。4.14 的后续项：示例工程/截图未开始（ACP 侧入口表本次已落地，见 ACP 手册 §6）。
 
 ---
 

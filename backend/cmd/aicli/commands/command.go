@@ -372,7 +372,7 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/resume") {
 		return handleResumeCommand(session, command)
 	}
-	if commandMatches(cmdLower, "/permission-mode") || commandMatches(cmdLower, "/mode") {
+	if commandMatches(cmdLower, "/permission-mode") || commandMatches(cmdLower, "/mode") || permissionModeColonShorthand(cmdLower) {
 		return handlePermissionModeCommand(session, command)
 	}
 	if commandMatches(cmdLower, "/hotkeys") {
@@ -618,7 +618,7 @@ func handlePermissionModeCommand(session *ChatSession, command string) bool {
 		printChatCommandOutput(session, "错误: 当前没有活动会话")
 		return false
 	}
-	value := extractCommandArgument(command)
+	value := permissionModeCommandArgument(command)
 	if strings.TrimSpace(value) == "" {
 		printfChatCommandOutput(session, "当前 permission-mode: %s", chatSessionPermissionMode(session))
 		return false

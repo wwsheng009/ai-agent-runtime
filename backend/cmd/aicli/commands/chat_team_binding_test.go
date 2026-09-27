@@ -303,6 +303,8 @@ func newChatOptionsTestCommand() *cobra.Command {
 	cmd.Flags().Bool("skills-debug", false, "")
 	cmd.Flags().String("permission-mode", "default", "")
 	cmd.Flags().Bool("yolo", false, "")
+	cmd.Flags().Bool("accept-edits", false, "")
+	cmd.Flags().Bool("plan", false, "")
 	cmd.Flags().String("output", "", "")
 	cmd.Flags().Bool("json", false, "")
 	cmd.Flags().Bool("envelope", false, "")
