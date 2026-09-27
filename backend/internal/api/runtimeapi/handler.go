@@ -5322,6 +5322,10 @@ func (h *Handler) applyAgentRuntimeServices(a *agent.Agent, runtimeConfig *runti
 	defer func() {
 		if broker := a.GetToolBroker(); broker != nil {
 			broker.WaitTimeoutPolicy = h.brokerWaitTimeoutPolicy
+			// wait_team resolves its window inside the broker, so the caller-turn
+			// wait budget has to be injected here too — same key/counter as this
+			// host's wait_agent shell (plan §16.3 "两者共享实现").
+			broker.WaitBudget = &sessionAgentController{handler: h}
 		}
 	}()
 	config := runtimeConfig

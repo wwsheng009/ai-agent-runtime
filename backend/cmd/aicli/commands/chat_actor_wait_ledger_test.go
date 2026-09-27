@@ -245,3 +245,67 @@ func TestWaitAgentCreditsProgressCompletedDuringWait(t *testing.T) {
 		"the refreshed ledger has no pending row, so the parent may finalize")
 	require.True(t, result.Obligations[0].Terminal)
 }
+
+// TestLocalActorRegistryWaitBudgetSharedWithTeamWait 钉住 plan §16.3"两者共享实现"：
+// wait_team 走 broker 直连路径，但预算键/计数器与 wait_agent 完全同一把（宿主通过
+// toolbroker.WaitSegmentBudget 注入），任一等待的进展都会清零同一个计数器。
+func TestLocalActorRegistryWaitBudgetSharedWithTeamWait(t *testing.T) {
+	host, _ := newLocalWaitLedgerHost(t, subagentbatch.BatchRunning, "turn-parked")
+	host.RuntimeConfig = &runtimecfg.RuntimeConfig{Agents: runtimecfg.AgentsConfig{
+		MaxConsecutiveWaitWithoutProgress: 2,
+	}}
+	registry := newLocalActorRegistry(host)
+	ctx := context.Background()
+
+	consecutive, limit, active, exhausted := registry.BudgetVerdict(ctx)
+	require.True(t, active, "a parked turn owns a wait budget key before any wait")
+	require.Equal(t, 2, limit)
+	require.Equal(t, 0, consecutive)
+	require.False(t, exhausted)
+
+	// wait_agent 记一次无进展 → 同一计数器对 wait_team 立即可见。
+	registry.localWaitBudget.Observe(localWaitLedgerTestSession+"|turn-parked", false, limit)
+	consecutive, _, _, exhausted = registry.BudgetVerdict(ctx)
+	require.Equal(t, 1, consecutive)
+	require.False(t, exhausted)
+
+	// wait_team 再记一次无进展 → 触发耗尽判据（同一预算）。
+	consecutive, _, active, exhausted = registry.ObserveWaitSegment(ctx, false)
+	require.True(t, active)
+	require.Equal(t, 2, consecutive)
+	require.True(t, exhausted, "both wait tools draw from one consecutive no-progress counter")
+
+	// 任一等待看到进展即清零。
+	_, _, _, exhausted = registry.ObserveWaitSegment(ctx, true)
+	require.False(t, exhausted)
+	consecutive, _, _, exhausted = registry.BudgetVerdict(ctx)
+	require.Equal(t, 0, consecutive)
+	require.False(t, exhausted)
+}
+
+// TestLocalActorRegistryWaitBudgetKeyWithoutBatchSuspension 钉住 team-only 挂起：
+// 挂起 turn 上没有 batch 义务记录时，wait_agent 账本照旧为空（fail-open 旧语义），
+// 但 wait_team 仍必须拿到预算键，否则团队等待永远不会被预算设防。
+func TestLocalActorRegistryWaitBudgetKeyWithoutBatchSuspension(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	host.BaseSession = &ChatSession{RuntimeSession: &runtimechat.Session{ID: localWaitLedgerTestSession}}
+	host.SubagentBatches = newTestSubagentBatchStore(t)
+	host.RuntimeStore = runtimechat.NewInMemoryRuntimeStore(16)
+	host.EventStore = runtimechat.NewInMemoryRuntimeStore(16)
+	ctx := context.Background()
+	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID:       localWaitLedgerTestSession,
+		Status:          runtimechat.SessionIdle,
+		SuspendedTurnID: "turn-team-only",
+	}))
+	registry := newLocalActorRegistry(host)
+
+	obligations, _, _, ledgerKey := registry.localWaitLedger(ctx)
+	require.Empty(t, obligations)
+	require.Empty(t, ledgerKey, "without a batch suspension row the wait_agent ledger stays empty")
+
+	key, _ := registry.localWaitBudgetKey(ctx)
+	require.Equal(t, localWaitLedgerTestSession+"|turn-team-only", key)
+	_, _, active, _ := registry.BudgetVerdict(ctx)
+	require.True(t, active, "a turn parked on team obligations still owns a wait budget")
+}

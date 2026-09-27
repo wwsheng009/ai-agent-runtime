@@ -3029,6 +3029,52 @@ func (r *localActorRegistry) localWaitLedger(ctx context.Context) ([]toolbroker.
 	return obligations, baseline, pending, sessionID + "|" + turnID
 }
 
+// localWaitBudgetKey returns the calling turn's active-wait budget key (session
+// + parked turn id). Unlike localWaitLedger it does not require a batch
+// suspension record: the key belongs to the parked turn, and a turn can be
+// parked on team obligations as well — wait_team shares this counter and key
+// with wait_agent (plan §16.3 同口径). Fail-open: an unreadable store or an
+// unparked turn yields an empty key, which leaves the budget disarmed.
+func (r *localActorRegistry) localWaitBudgetKey(ctx context.Context) (string, int) {
+	if r == nil || r.Host == nil || r.Host.RuntimeStore == nil {
+		return "", 0
+	}
+	sessionID := strings.TrimSpace(r.Host.baseRuntimeSessionID())
+	if sessionID == "" {
+		return "", 0
+	}
+	state, err := r.Host.RuntimeStore.LoadState(ctx, sessionID)
+	if err != nil || state == nil {
+		return "", 0
+	}
+	turnID := strings.TrimSpace(state.SuspendedTurnID)
+	if turnID == "" {
+		return "", 0
+	}
+	return sessionID + "|" + turnID, r.localAgentsConfig().MaxConsecutiveWaitWithoutProgress
+}
+
+// BudgetVerdict implements toolbroker.WaitSegmentBudget for the broker-side
+// wait_team path: same key and counter as the wait_agent ledger shell above.
+func (r *localActorRegistry) BudgetVerdict(ctx context.Context) (consecutive, limit int, active, exhausted bool) {
+	key, limit := r.localWaitBudgetKey(ctx)
+	if key == "" {
+		return 0, limit, false, false
+	}
+	consecutive, exhausted = r.localWaitBudget.Exhausted(key, limit)
+	return consecutive, limit, true, exhausted
+}
+
+// ObserveWaitSegment implements toolbroker.WaitSegmentBudget for wait_team.
+func (r *localActorRegistry) ObserveWaitSegment(ctx context.Context, progress bool) (consecutive, limit int, active, exhausted bool) {
+	key, limit := r.localWaitBudgetKey(ctx)
+	if key == "" {
+		return 0, limit, false, false
+	}
+	consecutive, exhausted = r.localWaitBudget.Observe(key, progress, limit)
+	return consecutive, limit, true, exhausted
+}
+
 func (r *localActorRegistry) waitForLocalAgentMailboxResolved(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
 	if r == nil || r.Host == nil || r.Host.EventStore == nil {
 		return nil, fmt.Errorf("event store not configured")

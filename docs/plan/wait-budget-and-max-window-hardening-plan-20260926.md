@@ -90,9 +90,17 @@
 
 ## 5. 留白与后续
 
-1. `wait_team`（broker 直连路径）尚未接入等待预算——本次只覆盖 `wait_agent`；
+1. ~~`wait_team`（broker 直连路径）尚未接入等待预算——本次只覆盖 `wait_agent`；
    `wait_team` 仍受 `maxWaitTimeoutMs=2m` 约束。接入需要 broker 侧的 caller-turn 键，
-   建议与 §16.3"两者共享实现"一并收口。
+   建议与 §16.3"两者共享实现"一并收口。~~
+   **已收口（2026-09-27）**：新增 `toolbroker.WaitSegmentBudget` 宿主注入缝；
+   `executeWaitTeam` 开窗前查预算、开窗后按段内 `terminal_delta`／团队转终态记进展，
+   预算耗尽时不再开窗并返回 `wait_budget_exhausted=true` + `next_action=suspend`
+   （任务账本视图保留，不谎报超时）；两个宿主各自实现该接口，键 = 会话|挂起 turn
+   （不依赖 batch 挂起记录，team-only 挂起同样武装），与 `wait_agent` 共用同一计数器
+   （任一义务的进展清零）。`wait_team` 仍受 `agents.maxWaitTimeoutMs`（默认 2m）窗口上界。
+   回归：`internal/toolbroker/broker_team_wait_budget_test.go` 4 条 +
+   CLI/API 各 2 条 `*WaitBudget*` 用例。
 2. P1-5 四项已实施，残留项是加固稿 H7 的运行期身份缺失与真机 probe（见 §2.3）；
    本轮未触碰。
 3. 现场 51m 的具体 run 未逐一回放；按代码路径，其成因是"多次大窗口等待段聚合"，

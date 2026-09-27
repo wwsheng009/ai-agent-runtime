@@ -236,6 +236,12 @@ type WaitTeamResult struct {
 	TerminalCount int                   `json:"terminal_count,omitempty"`
 	TerminalDelta []string              `json:"terminal_delta,omitempty"`
 	PendingCount  int                   `json:"pending_count,omitempty"`
+	// WaitBudgetExhausted mirrors AgentWaitResult.WaitBudgetExhausted for the
+	// team wait (plan §16.3 "wait_team 同口径"): the calling turn spent its
+	// consecutive no-progress active-wait budget, so the broker stops opening
+	// new observation windows and returns next_action=suspend instead. The
+	// task-ledger view is preserved either way.
+	WaitBudgetExhausted bool `json:"wait_budget_exhausted,omitempty"`
 }
 
 // TeamMailboxDispatcher delivers mailbox events to active team sessions.
@@ -947,6 +953,33 @@ func ApplyWaitTeamTimeout(result *WaitTeamResult, requestedMs, effectiveMs int, 
 		result.WaitTimeoutMs = effectiveMs
 	}
 	result.WaitTimeoutClamped = clamped
+	return result
+}
+
+// WaitTeamSuspendNextAction is the team-scoped §16.3 verdict text: the same
+// budget judgement as wait_agent, with the team-side inspection primitives
+// spelled out instead of the subagent ones.
+func WaitTeamSuspendNextAction(consecutive, limit int) string {
+	return fmt.Sprintf(
+		"suspend: %d consecutive active waits observed no team-task progress (agents.maxConsecutiveWaitWithoutProgress=%d). Stop opening active waiting windows on this turn: do independent parent work without waiting, inspect the team once (read_mailbox_digest / task_output / subagent_status), or finish your turn — I1 converts a premature finalize into a turn suspension (awaiting_obligations) and the same turn resumes on a terminal/decision event. Do not call wait_team again with the same team_id",
+		consecutive, limit,
+	)
+}
+
+// SuspendWaitTeamResultForBudget stamps the exhausted-wait-budget verdict onto
+// an already-built wait_team result, preserving the task-ledger view. A
+// "finalize" verdict is never overridden: a drained ledger has nothing to
+// suspend for.
+func SuspendWaitTeamResultForBudget(result *WaitTeamResult, consecutive, limit int) *WaitTeamResult {
+	if result == nil {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(result.NextAction), "finalize") {
+		return result
+	}
+	result.WaitBudgetExhausted = true
+	result.ExecutionContinues = true
+	result.NextAction = WaitTeamSuspendNextAction(consecutive, limit)
 	return result
 }
 

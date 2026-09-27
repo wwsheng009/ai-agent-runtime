@@ -77,6 +77,25 @@ const (
 	ToolSubagentInspectTask = "subagent_inspect_task"
 )
 
+// WaitSegmentBudget is the host-provided accounting for consecutive no-progress
+// active wait segments on the calling turn (design §16.2/§16.3). It was
+// introduced for wait_agent and is shared with wait_team (2026-09-26 hardening
+// plan §5）：两个等待工具的预算键都是"调用方当前挂起 turn"，因此任一义务的终态
+// 进展都会清零同一个计数器。
+//
+// Both methods are fail-open by construction: active=false means the host has no
+// budget key for this call (turn not parked / no durable store / policy
+// disabled) and the wait stays unbounded by this judgement.
+type WaitSegmentBudget interface {
+	// BudgetVerdict reports the caller's current budget state without consuming
+	// anything; exhausted=true forbids opening another observation window.
+	BudgetVerdict(ctx context.Context) (consecutive, limit int, active, exhausted bool)
+	// ObserveWaitSegment records one closed window. progress=true (an obligation
+	// reached a terminal state / the awaited entity became terminal during the
+	// window) resets the counter.
+	ObserveWaitSegment(ctx context.Context, progress bool) (consecutive, limit int, active, exhausted bool)
+}
+
 // Broker provides synthetic tools backed by runtime services.
 type Broker struct {
 	UserInput UserInputHandler
@@ -109,6 +128,11 @@ type Broker struct {
 	// update still takes effect. nil falls back to the shared defaults, never to
 	// an unbounded wait.
 	WaitTimeoutPolicy func() agentcontrol.WaitTimeoutPolicy
+	// WaitBudget optionally bounds active wait windows for the calling turn.
+	// wait_agent resolves its budget in the session host; wait_team resolves its
+	// window inside the broker, so the host injects the same per-turn budget here
+	// (plan §16.3 同口径). nil keeps team waits unbounded by this judgement.
+	WaitBudget  WaitSegmentBudget
 	Supervision       AgentSupervisionController
 	// agentEventsReads remembers the last read_agent_events window per
 	// caller/target cursor so an identical repeated read can answer with an
@@ -4066,12 +4090,45 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 			}
 		}
 	}
-	attachLedger := func(result WaitTeamResult) WaitTeamResult {
+	attachLedger := func(result WaitTeamResult) (WaitTeamResult, bool) {
 		rows, ledgerErr := b.readWaitTeamTaskLedger(ctx, teamID)
 		if ledgerErr != nil {
+			return result, false
+		}
+		return *ApplyWaitTeamLedger(&result, rows, baselineTerminal), true
+	}
+	// Active-wait budget (plan §16.2/§16.3, shared with wait_agent since the
+	// 2026-09-26 hardening plan §5): the host injects the caller-turn budget, so
+	// both wait tools draw from one counter keyed by the parked turn. A window
+	// this call never opened (team already terminal+ready on entry) must not
+	// consume budget; an opened window counts as progress iff a task reached a
+	// terminal state during it — or the team itself became terminal — mirroring
+	// wait_agent's terminal_delta rule.
+	budget := b.WaitBudget
+	budgetConsecutive, budgetLimit := 0, 0
+	budgetActive, budgetExhausted := false, false
+	if budget != nil {
+		budgetConsecutive, budgetLimit, budgetActive, budgetExhausted = budget.BudgetVerdict(ctx)
+	}
+	teamWasTerminal := false
+	if current, teamErr := b.TeamStore.GetTeam(ctx, teamID); teamErr == nil && current != nil {
+		teamWasTerminal = team.IsTerminalTeamStatus(current.Status)
+	}
+	windowOpened := false
+	observeBudget := func(result WaitTeamResult, ledgerOK bool) WaitTeamResult {
+		if budget == nil || !budgetActive || !windowOpened {
 			return result
 		}
-		return *ApplyWaitTeamLedger(&result, rows, baselineTerminal)
+		if !ledgerOK {
+			// 账本复读失败：fail-open——不把读不到账本谎报成"无进展"。
+			return result
+		}
+		progress := len(result.TerminalDelta) > 0 || (result.Terminal && !teamWasTerminal)
+		consecutive, limit, _, exhausted := budget.ObserveWaitSegment(ctx, progress)
+		if exhausted {
+			result = *SuspendWaitTeamResultForBudget(&result, consecutive, limit)
+		}
+		return result
 	}
 	// waited_ms is measured from the start of the observation loop, not from the
 	// call entry, so it reports the window actually spent waiting (AC-P2-4b) and
@@ -4080,6 +4137,17 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 	stampWaited := func(result WaitTeamResult) WaitTeamResult {
 		result.WaitedMs = time.Since(started).Milliseconds()
 		return result
+	}
+	if budgetActive && budgetExhausted {
+		// 预算耗尽：不再打开新的活动等待窗口（与 wait_agent 同判据）。账本视图
+		// 照旧返回，I1 继续兜底收尾；没有开窗就不谎报超时。
+		result, snapshotErr := b.readWaitTeamSnapshot(ctx, teamID, request)
+		if snapshotErr != nil {
+			result = WaitTeamResult{TeamID: teamID}
+		}
+		withLedger, _ := attachLedger(result)
+		stamped := stampWaited(withLedger)
+		return *SuspendWaitTeamResultForBudget(&stamped, budgetConsecutive, budgetLimit), nil
 	}
 	// request.TimeoutMs is already the effective window (see ResolveWaitTimeout
 	// above): a zero/negative request became agents.defaultWaitTimeoutMs and an
@@ -4119,7 +4187,8 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 			if snapshotErr != nil {
 				result = WaitTeamResult{TeamID: teamID}
 			}
-			return stampWaited(attachLedger(finalizeWaitTeamTimeout(result, resolution))), nil
+			withLedger, ledgerOK := attachLedger(finalizeWaitTeamTimeout(result, resolution))
+			return stampWaited(observeBudget(withLedger, ledgerOK)), nil
 		default:
 		}
 		result, err := b.readWaitTeamSnapshot(ctx, teamID, request)
@@ -4128,14 +4197,19 @@ func (b *Broker) executeWaitTeam(ctx context.Context, sessionID string, request 
 		}
 		if result.Terminal && (!b.waitTeamRequiresSummary(request) || result.SummaryReady) {
 			result = *ApplyWaitTeamTimeout(&result, resolution.RequestedMs, request.TimeoutMs, resolution.Clamped)
-			return stampWaited(attachLedger(result)), nil
+			withLedger, ledgerOK := attachLedger(result)
+			return stampWaited(observeBudget(withLedger, ledgerOK)), nil
 		}
+		// The loop is about to block: this call now owns an observation window,
+		// so a budget-armed turn pays for it whether or not it sees progress.
+		windowOpened = true
 		select {
 		case <-waitCtx.Done():
 			if ctx.Err() != nil {
 				return WaitTeamResult{}, ctx.Err()
 			}
-			return stampWaited(attachLedger(finalizeWaitTeamTimeout(result, resolution))), nil
+			withLedger, ledgerOK := attachLedger(finalizeWaitTeamTimeout(result, resolution))
+			return stampWaited(observeBudget(withLedger, ledgerOK)), nil
 		case wake, ok := <-wakeCh:
 			if !ok {
 				wakeCh = nil

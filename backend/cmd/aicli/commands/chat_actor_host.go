@@ -2126,6 +2126,9 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 	// (P2-11 目标：任何路径的等待时长都落在 [minWaitTimeoutMs, maxWaitTimeoutMs]).
 	if broker := apiAgent.GetToolBroker(); broker != nil && host.ActorRegistry != nil {
 		broker.WaitTimeoutPolicy = host.ActorRegistry.localWaitTimeoutPolicy
+		// wait_team 的等待预算与 wait_agent 共用同一把键与计数器（plan §16.3
+		// "两者共享实现"）：broker 直连路径拿不到 caller-turn 键，所以由宿主注入。
+		broker.WaitBudget = host.ActorRegistry
 	}
 	if host.Background != nil {
 		broker := apiAgent.GetToolBroker()

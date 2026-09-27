@@ -2159,6 +2159,56 @@ func (c *sessionAgentController) waitBudget() *agentcontrol.WaitBudget {
 	return &c.handler.waitBudget
 }
 
+// waitBudgetKey returns the calling turn's active-wait budget key (session +
+// parked turn id) for the caller session injected by the agent loop. It is
+// deliberately independent of waitLedger's batch suspension row: the key
+// belongs to the parked turn, and a turn can be parked on team obligations too
+// — wait_team shares this counter/key with wait_agent (plan §16.3 同口径).
+// Fail-open: an unreadable store or an unparked turn yields an empty key.
+func (c *sessionAgentController) waitBudgetKey(ctx context.Context) (string, int) {
+	if c == nil || c.handler == nil {
+		return "", 0
+	}
+	sessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+	if sessionID == "" {
+		return "", 0
+	}
+	store := c.handler.getSessionRuntimeStore()
+	if store == nil {
+		return "", 0
+	}
+	state, err := store.LoadState(ctx, sessionID)
+	if err != nil || state == nil {
+		return "", 0
+	}
+	turnID := strings.TrimSpace(state.SuspendedTurnID)
+	if turnID == "" {
+		return "", 0
+	}
+	return sessionID + "|" + turnID, c.agentsConfig().MaxConsecutiveWaitWithoutProgress
+}
+
+// BudgetVerdict implements toolbroker.WaitSegmentBudget for the broker-side
+// wait_team path: same key and counter as this host's wait_agent shell above.
+func (c *sessionAgentController) BudgetVerdict(ctx context.Context) (consecutive, limit int, active, exhausted bool) {
+	key, limit := c.waitBudgetKey(ctx)
+	if key == "" {
+		return 0, limit, false, false
+	}
+	consecutive, exhausted = c.waitBudget().Exhausted(key, limit)
+	return consecutive, limit, true, exhausted
+}
+
+// ObserveWaitSegment implements toolbroker.WaitSegmentBudget for wait_team.
+func (c *sessionAgentController) ObserveWaitSegment(ctx context.Context, progress bool) (consecutive, limit int, active, exhausted bool) {
+	key, limit := c.waitBudgetKey(ctx)
+	if key == "" {
+		return 0, limit, false, false
+	}
+	consecutive, exhausted = c.waitBudget().Observe(key, progress, limit)
+	return consecutive, limit, true, exhausted
+}
+
 // waitLedger 读回调用方（父会话）本 turn 的 obligation 账本视图（plan §C3-4）：
 // 模型可见的行、等待段开始时的终态基线（terminal_delta 只报等待期间完成的
 // obligation）、以及账本是否仍有非终态行。数据面与 CLI 宿主同源——运行态库里的

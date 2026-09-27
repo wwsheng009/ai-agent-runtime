@@ -230,3 +230,55 @@ func TestSessionAgentControllerWaitCreditsProgressCompletedDuringWait(t *testing
 	require.Equal(t, "finalize", result.NextAction)
 	require.True(t, result.Obligations[0].Terminal)
 }
+
+// TestSessionAgentControllerWaitBudgetSharedWithTeamWait 与 CLI 宿主同口径：
+// wait_team 的 broker 直连路径通过 WaitSegmentBudget 读写同一把预算键/计数器。
+func TestSessionAgentControllerWaitBudgetSharedWithTeamWait(t *testing.T) {
+	controller, _ := newAPIWaitLedgerFixture(t, subagentbatch.BatchRunning, "turn-parked")
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Agents.MaxConsecutiveWaitWithoutProgress = 2
+	controller.handler.SetRuntimeConfig(cfg, "")
+	ctx := toolctx.WithSessionID(context.Background(), apiWaitLedgerTestSession)
+
+	consecutive, limit, active, exhausted := controller.BudgetVerdict(ctx)
+	require.True(t, active, "a parked turn owns a wait budget key before any wait")
+	require.Equal(t, 2, limit)
+	require.Equal(t, 0, consecutive)
+	require.False(t, exhausted)
+
+	controller.handler.waitBudget.Observe(apiWaitLedgerTestSession+"|turn-parked", false, limit)
+	consecutive, _, _, exhausted = controller.BudgetVerdict(ctx)
+	require.Equal(t, 1, consecutive)
+	require.False(t, exhausted)
+
+	consecutive, _, active, exhausted = controller.ObserveWaitSegment(ctx, false)
+	require.True(t, active)
+	require.Equal(t, 2, consecutive)
+	require.True(t, exhausted, "both wait tools draw from one consecutive no-progress counter")
+
+	_, _, _, exhausted = controller.ObserveWaitSegment(ctx, true)
+	require.False(t, exhausted)
+	consecutive, _, _, exhausted = controller.BudgetVerdict(ctx)
+	require.Equal(t, 0, consecutive)
+	require.False(t, exhausted)
+}
+
+// TestSessionAgentControllerWaitBudgetKeyWithoutBatchSuspension 钉住 team-only
+// 挂起：batch 账本为空（wait_agent fail-open 旧语义），wait_team 仍拿到预算键。
+func TestSessionAgentControllerWaitBudgetKeyWithoutBatchSuspension(t *testing.T) {
+	controller, _ := newAPIWaitLedgerFixture(t, subagentbatch.BatchRunning, "turn-parked")
+	ctx := toolctx.WithSessionID(context.Background(), apiWaitLedgerTestSession)
+	require.NoError(t, controller.handler.getSessionRuntimeStore().SaveState(ctx, &chat.RuntimeState{
+		SessionID:       apiWaitLedgerTestSession,
+		Status:          chat.SessionIdle,
+		SuspendedTurnID: "turn-team-only",
+	}))
+
+	_, _, _, ledgerKey := controller.waitLedger(ctx)
+	require.Empty(t, ledgerKey, "without a batch suspension row the wait_agent ledger stays empty")
+
+	key, _ := controller.waitBudgetKey(ctx)
+	require.Equal(t, apiWaitLedgerTestSession+"|turn-team-only", key)
+	_, _, active, _ := controller.BudgetVerdict(ctx)
+	require.True(t, active, "a turn parked on team obligations still owns a wait budget")
+}
