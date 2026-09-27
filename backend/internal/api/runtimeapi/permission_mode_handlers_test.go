@@ -130,7 +130,7 @@ func TestUpdateSessionPermissionModeClosesActivePlanState(t *testing.T) {
 	router.ServeHTTP(enterRec, enter)
 	require.Equal(t, http.StatusOK, enterRec.Code, enterRec.Body.String())
 
-	rec := postPermissionMode(t, router, session.ID, `{"mode":"bypass_permissions"}`)
+	rec := postPermissionMode(t, router, session.ID, `{"mode":"bypass_permissions","confirm":true}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	var resp sessionPermissionModeResponse

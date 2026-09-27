@@ -50,6 +50,10 @@ type sessionPermissionModeResponse struct {
 
 type sessionPermissionModeRequest struct {
 	Mode string `json:"mode"`
+	// Confirm 是危险模式（bypass_permissions）的显式确认位（§13 F1）：缺省时
+	// 拒绝切换，避免同机任意调用方仅靠一个 POST 就把运行中会话提权。语义与
+	// §5.4/I-2 的 config 层写入确认一致（复用 confirm=true 先例）。
+	Confirm bool `json:"confirm,omitempty"`
 }
 
 // GetSessionPermissionMode 返回当前会话权限模式与后端支持的模式清单。
@@ -110,6 +114,12 @@ func (h *Handler) UpdateSessionPermissionMode(w http.ResponseWriter, r *http.Req
 		if sessionBypassDisabled(session) {
 			h.writeError(w, http.StatusForbidden, errors.New(errors.ErrAgentPermission,
 				"disable_bypass 已启用（permissions 分层），无法切换到 bypass_permissions"))
+			return
+		}
+		// §13 F1：bypass 是提权动作，必须由调用方显式确认，不能靠一次 POST 完成。
+		if !req.Confirm {
+			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed,
+				"switching to bypass_permissions requires confirm=true (该会话后续所有工具调用将被放行)"))
 			return
 		}
 	}

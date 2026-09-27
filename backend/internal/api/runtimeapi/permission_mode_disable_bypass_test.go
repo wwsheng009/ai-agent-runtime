@@ -79,7 +79,7 @@ func TestUpdateSessionPermissionModeAllowsBypassWithoutDisableBypass(t *testing.
 	session.SetContext(sessionmeta.WorkspacePath, workspace)
 	require.NoError(t, manager.Update(ctx, session))
 
-	rec := postPermissionMode(t, router, session.ID, `{"mode":"bypass_permissions"}`)
+	rec := postPermissionMode(t, router, session.ID, `{"mode":"bypass_permissions","confirm":true}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	stored, err := manager.GetSession(ctx, session.ID)
