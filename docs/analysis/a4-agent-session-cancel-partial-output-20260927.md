@@ -97,16 +97,24 @@
 
 ## 7. 残余与判断（2026-09-27 收尾）
 
-- **`session_interrupted` 型终态已接入**（`0b3c76b8`）：中断路径（用户中断
-  `handleInterrupt`，`actor.go:1317`；停摆超时 `abortStalledRun`，`actor.go:1495`）
-  以 `session_interrupted` 作为该 turn 的终态（被中断的 turn 不会再发 `session_end`，
-  见 `actor_test.go` 的终态序列断言），此前载荷只有 `reason/turn` 信息。现由
-  `enrichSessionInterruptedPayload`（`actor_partial_product.go`）补 `partial_*`：
-  `SessionActor` 不缓存会话，故**只读加载最近一次持久化快照**并复用 `partialRunProduct`
-  的取源规则；该动作 **fail-open + 200ms 硬上限**（存储缺失/加载失败/超时一律静默
-  跳过，绝不阻塞 ESC/停摆），仅在有产物时新增键，既有字段与事件形状不变。测试：
-  `TestEnrichSessionInterruptedPayloadAttachesPartialProduct`（三态 + 时间上限）、
-  `TestSessionActorInterruptEventCarriesPartialProduct`（端到端）；`-race` 干净。
+- **`session_interrupted` 型终态已接入（两阶段：`0b3c76b8` 首版 → `8a9d17fe` +
+  `87d0b0d8` 修正；真机验证通过）**：中断路径（用户中断 `handleInterrupt`；停摆超时
+  `abortStalledRun`）以 `session_interrupted` 作为该 turn 的终态，现带 `partial_*`。
+  1. **首版为何不够**：`0b3c76b8` 从会话存储读产物；真机复验（node-32004/59920）显示
+     ESC 后该事件仍为空——运行期只有按 `checkpointInterval` 节流的中途落库，权威落库在
+     turn 结束（`actor.go:2896`），中断时存储快照可能只有用户 prompt。
+  2. **修正**：产物快照挂到 run 上（`runPartialProduct`，atomic 整体替换）并在每个
+     durable 历史提交点刷新；`8a9d17fe` 后真机仍失败，原因是 loop 在
+     `AppendAssistantAction`（`loop.go:1191`）后**直接执行工具**、中间无 checkpoint 通知，
+     工具运行期间 assistant 文本"已产出但未提交"——`87d0b0d8` 让 loop 在工具执行前补发一次
+     **只通知不落库**的 checkpoint（契约要求宿主实现幂等），chat 侧改为优先用回调携带的
+     `messages` 取产物。取源优先级：run 快照（零 I/O）→ **没有活动 run 时**兜底读存储
+     （fail-open + 200ms 上限）；有 run 但尚无产物时不回退存储（避免把上一轮旧产物当本轮）。
+  3. **真机证据（node-29052/64090，二进制含 `87d0b0d8`；A7）**：长工具
+     （`Start-Sleep -Seconds 120`）运行中 ESC，`session_interrupted` 载荷
+     `{"turn_id":…,"reason":"interrupt","partial_summary":"A7-PROOF 我准备执行一条休眠 120 秒
+     …","partial_source":"last_assistant_message","partial_steps":0}`；30ms 后 `session_end`
+     同样带产物（`steps:1`）。停摆路径没有 `session_end` 兜底，故该修复对 stall 尤为关键。
 - **"难度路由 disabled + permission 告警"不是缺陷**：`route_source=disabled` 是"未配置
   difficulty→模型映射"的如实上报（子代理走默认模型）；`permission_mode_inherited_from_parent`
   是 `internal/toolbroker/spawn_agent_permission.go:15-18` 的有意设计（让父代理能解释子代理
