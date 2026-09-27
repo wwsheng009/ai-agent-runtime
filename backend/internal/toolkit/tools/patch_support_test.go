@@ -411,7 +411,9 @@ func TestMultieditTool_DescriptionGuidesChunkedWrites(t *testing.T) {
 }
 
 func TestAppendWriteTool_AppendsChunks(t *testing.T) {
-	path := os.TempDir() + "\\append-write-tool.txt"
+	// 用 filepath.Join 而不是硬编码反斜杠：在 Linux 上 os.TempDir()+"\\name"
+	// 会得到 "/tmp\name" 这种根目录下的畸形文件名（backslash 不是分隔符）。
+	path := filepath.Join(os.TempDir(), "append-write-tool.txt")
 	_ = os.Remove(path)
 	defer os.Remove(path)
 

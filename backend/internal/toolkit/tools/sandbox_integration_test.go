@@ -248,10 +248,17 @@ func TestBashTool_ReadOnlySandboxBlocksShellLauncher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
 	}
+	// 拒绝清单必须包含本机实际使用的 shell 启动器：Linux 上
+	// DefaultUserShell 解析到 bash/zsh（不是 "sh"），只写 Windows/cmd 名字
+	// 会放行启动器、让用例在非 Windows 平台上失去覆盖意义。
+	deniedCommands := []string{"sh", "cmd", "powershell", "pwsh"}
+	if launcher := strings.TrimSpace(filepath.Base(runtimeexecutor.DefaultUserShell().Path)); launcher != "" && launcher != "." {
+		deniedCommands = append(deniedCommands, launcher)
+	}
 	sandbox := runtimeexecutor.NewSandbox(&runtimeexecutor.SandboxConfig{
 		AllowedPaths:    []string{wd},
 		AllowedCommands: []string{"echo"},
-		DeniedCommands:  []string{"sh", "cmd", "powershell", "pwsh"},
+		DeniedCommands:  deniedCommands,
 		EnvWhitelist:    []string{"PATH", "SystemRoot", "ComSpec"},
 	})
 

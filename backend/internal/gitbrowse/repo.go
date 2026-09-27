@@ -185,11 +185,15 @@ func (s *Service) resolveScopedPath(root, rel string) (string, error) {
 	if strings.ContainsRune(value, 0) {
 		return "", newError(CodePathInvalid, "path must not contain NUL bytes")
 	}
-	if filepath.IsAbs(value) || filepath.VolumeName(value) != "" ||
-		strings.HasPrefix(value, "/") || strings.HasPrefix(value, `\`) {
+	if isAbsoluteScopedPath(value) {
 		return "", errorf(CodePathMustBeRelative, "path must be relative to the selected root: %q", rel)
 	}
-	clean := filepath.Clean(filepath.FromSlash(value))
+	// 反斜杠在 Windows 上是分隔符，在 Linux 上却是普通文件名字符：不归一化
+	// 会让 "..\\.." 之类的输入绕过越界检查（被当成一个文件名而不是向上两级）。
+	// 这里把两种分隔符统一成 '/' 再做词法规范化，保证同一份请求在 Windows 与
+	// Linux 上得到一致的拒绝/放行语义。
+	normalized := strings.ReplaceAll(value, `\`, "/")
+	clean := filepath.Clean(filepath.FromSlash(normalized))
 	if clean == "." {
 		clean = ""
 	}
@@ -205,6 +209,27 @@ func (s *Service) resolveScopedPath(root, rel string) (string, error) {
 		return filepath.Clean(resolved), nil
 	}
 	return target, nil
+}
+
+// isAbsoluteScopedPath 判断作用域相对路径是否绝对或带盘符（与宿主平台无关）。
+//
+// 除宿主平台自身的 filepath 语义外，还显式识别 Windows 形态的盘符前缀
+// （C:、C:\、C:/）：Linux 上 filepath.VolumeName 不解析盘符，"C:\Windows"
+// 会被误当作合法相对路径交给后续解析。
+func isAbsoluteScopedPath(value string) bool {
+	if filepath.IsAbs(value) || filepath.VolumeName(value) != "" {
+		return true
+	}
+	if strings.HasPrefix(value, "/") || strings.HasPrefix(value, `\`) {
+		return true
+	}
+	// 单 ASCII 字母 + ':' 即盘符（含 "C:tmp" 这种盘符相对形态）。
+	return len(value) >= 2 && value[1] == ':' && isASCIILetter(value[0])
+}
+
+// isASCIILetter 报告 b 是否为 ASCII 字母。
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // withinRoot 判断 target 是否位于 root 之内：Windows 大小写不敏感，分隔符严格比较（§5.2 步骤 4）。

@@ -203,7 +203,7 @@ func (m *ModuleManager) SyncAll() error {
 
 	var lastErr error
 	for _, logger := range m.loggers {
-		if err := logger.Sync(); err != nil {
+		if err := logger.Sync(); err != nil && !isIgnorableSyncError(err) {
 			lastErr = err
 		}
 	}

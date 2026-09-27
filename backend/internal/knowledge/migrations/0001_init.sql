@@ -229,26 +229,10 @@ CREATE TABLE index_jobs (
 );
 CREATE INDEX idx_index_jobs_ws ON index_jobs(workspace_id, status);
 
--- 11. FTS5（多语言检索，与 symbols 同步）
-CREATE VIRTUAL TABLE symbols_fts USING fts5(
-    name, qualified_name, signature,
-    content='symbols', content_rowid='rowid',
-    tokenize='unicode61'
-);
-
--- FTS5 external-content 同步触发器：symbols 的任何写入都必须同步到 symbols_fts，
--- 否则检索结果会静默失真（§4.3 要求"与 symbols 同步"）。
-CREATE TRIGGER symbols_fts_ai AFTER INSERT ON symbols BEGIN
-    INSERT INTO symbols_fts(rowid, name, qualified_name, signature)
-    VALUES (new.rowid, new.name, new.qualified_name, COALESCE(new.signature, ''));
-END;
-CREATE TRIGGER symbols_fts_ad AFTER DELETE ON symbols BEGIN
-    INSERT INTO symbols_fts(symbols_fts, rowid, name, qualified_name, signature)
-    VALUES ('delete', old.rowid, old.name, old.qualified_name, COALESCE(old.signature, ''));
-END;
-CREATE TRIGGER symbols_fts_au AFTER UPDATE ON symbols BEGIN
-    INSERT INTO symbols_fts(symbols_fts, rowid, name, qualified_name, signature)
-    VALUES ('delete', old.rowid, old.name, old.qualified_name, COALESCE(old.signature, ''));
-    INSERT INTO symbols_fts(rowid, name, qualified_name, signature)
-    VALUES (new.rowid, new.name, new.qualified_name, COALESCE(new.signature, ''));
-END;
+-- 11. FTS5 不在此迁移中建表。
+--
+-- FTS5 是 SQLite 的可选模块：部分构建（如纯 Go 的 ncruces/go-sqlite3）不带
+-- fts5，此时 `CREATE VIRTUAL TABLE ... USING fts5` 会让整个迁移失败、连带
+-- knowledge.db 无法打开。检索是可选索引，真相仍在 symbols 表，因此
+-- symbols_fts 与同步触发器由 store 在迁移之后尽力创建（见
+-- store_sqlite_fts.go 的 ensureFTS）；FTS5 不可用时 Search 退化为 LIKE 扫描。

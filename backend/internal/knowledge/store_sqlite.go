@@ -29,6 +29,9 @@ type sqliteStore struct {
 	db       *sql.DB
 	path     string
 	readOnly bool
+	// ftsEnabled 表示当前连接可用的检索后端：true 走 symbols_fts 的 FTS5，
+	// false 退化为 LIKE 扫描（FTS5 是可选模块，见 store_sqlite_fts.go）。
+	ftsEnabled bool
 
 	closeOnce sync.Once
 	closeErr  error
@@ -81,6 +84,7 @@ func openReadOnlyStore(ctx context.Context, dsn string) (Store, error) {
 				_ = db.Close()
 				return nil, err
 			}
+			store.ftsEnabled = store.probeFTS(ctx)
 			return store, nil
 		}
 	}
@@ -93,6 +97,7 @@ func openReadOnlyStore(ctx context.Context, dsn string) (Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	store.ftsEnabled = store.probeFTS(ctx)
 	return store, nil
 }
 
@@ -107,6 +112,9 @@ func (s *sqliteStore) init(ctx context.Context) error {
 	}
 	if err := migrate.Apply(ctx, s.db, migrations); err != nil {
 		return fmt.Errorf("knowledge: apply migrations: %w", err)
+	}
+	if err := s.ensureFTS(ctx); err != nil {
+		return err
 	}
 	return nil
 }

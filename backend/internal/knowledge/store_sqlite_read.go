@@ -176,11 +176,16 @@ func (s *sqliteStore) symbolIDsByName(ctx context.Context, name string) ([]strin
 	return ids, rows.Err()
 }
 
-// Search 在 symbols_fts 上做全文检索。
+// Search 做全文检索。
 //
-// 查询串按 token 引号化后做前缀匹配，因此用户输入的 FTS 语法字符
-// （-、"、* 等）不会引发语法错误，只会被当作普通字符。
+// FTS5 可用时在 symbols_fts 上检索：查询串按 token 引号化后做前缀匹配，
+// 因此用户输入的 FTS 语法字符（-、"、* 等）不会引发语法错误，只会被当作
+// 普通字符。FTS5 不可用（纯 Go SQLite 构建未编译该模块）时退化为 LIKE 扫描，
+// 见 searchLike。
 func (s *sqliteStore) Search(ctx context.Context, q SearchQuery) ([]SearchHit, error) {
+	if !s.ftsEnabled {
+		return s.searchLike(ctx, q)
+	}
 	match := ftsMatchQuery(q.Text)
 	if match == "" {
 		return nil, nil
@@ -230,6 +235,84 @@ func (s *sqliteStore) Search(ctx context.Context, q SearchQuery) ([]SearchHit, e
 		out = append(out, hit)
 	}
 	return out, rows.Err()
+}
+
+// searchLike 是 FTS5 不可用时的降级检索。
+//
+// 语义与 FTS 路径对齐：token 之间 AND、大小写不敏感的子串匹配、同样的
+// 语言/路径前缀/删除位过滤；排序退化为"名字、路径、行号"，Score 按命中列
+// （name > qualified_name > 仅签名）给出，仍只在本次结果集内具备相对意义。
+// 与 unicode61 的差别：LIKE 的 ASCII 大小写不折叠在非 ASCII 文本上退化为
+// 精确子串匹配。
+func (s *sqliteStore) searchLike(ctx context.Context, q SearchQuery) ([]SearchHit, error) {
+	tokens := searchTokens(q.Text)
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+	limit := q.Limit
+	if limit <= 0 {
+		limit = defaultQueryLimit
+	}
+	where := []string{"s.deleted_at IS NULL"}
+	args := make([]any, 0, len(tokens)*3+3)
+	for _, token := range tokens {
+		pattern := "%" + escapeLike(token) + "%"
+		where = append(where,
+			`(s.name LIKE ? ESCAPE '\' OR COALESCE(s.qualified_name, '') LIKE ? ESCAPE '\' OR COALESCE(s.signature, '') LIKE ? ESCAPE '\')`)
+		args = append(args, pattern, pattern, pattern)
+	}
+	if q.Lang != "" {
+		where = append(where, "s.language = ?")
+		args = append(args, q.Lang)
+	}
+	if q.PathPrefix != "" {
+		where = append(where, `f.path LIKE ? ESCAPE '\'`)
+		args = append(args, escapeLike(normalizeRelPath(q.PathPrefix))+"%")
+	}
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.id, s.name, COALESCE(s.qualified_name, ''), s.kind, f.path, s.language, s.start_line,
+		       COALESCE(s.signature, '')
+		FROM symbols s
+		JOIN files f ON f.id = s.file_id
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY s.name, f.path, s.start_line
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("knowledge: search symbols (like fallback): %w", err)
+	}
+	defer rows.Close()
+	var out []SearchHit
+	for rows.Next() {
+		var (
+			hit  SearchHit
+			kind string
+		)
+		if err := rows.Scan(&hit.SymbolID, &hit.Name, &hit.QualifiedName, &kind, &hit.Path,
+			&hit.Language, &hit.Line, &hit.Signature); err != nil {
+			return nil, fmt.Errorf("knowledge: scan search hit: %w", err)
+		}
+		hit.Kind = SymbolKind(kind)
+		hit.Score = likeHitScore(hit, tokens)
+		out = append(out, hit)
+	}
+	return out, rows.Err()
+}
+
+// likeHitScore 给出降级检索的命中分：name 命中 > qualified_name 命中 > 其他列
+// 命中。只用于同一结果集内的相对排序，不可跨实现比较。
+func likeHitScore(hit SearchHit, tokens []string) float64 {
+	for _, token := range tokens {
+		needle := strings.ToLower(token)
+		if strings.Contains(strings.ToLower(hit.Name), needle) {
+			return 1.0
+		}
+		if strings.Contains(strings.ToLower(hit.QualifiedName), needle) {
+			return 0.5
+		}
+	}
+	return 0.25
 }
 
 // RecordInvalidation 记录一次索引失效事件。
@@ -355,6 +438,17 @@ func placeholders(n int) string {
 // 每个 token 用双引号包裹（FTS5 的字符串字面量），再追加 * 做前缀匹配；
 // 引号本身被剥离，因此不存在注入 FTS 语法的可能。返回空串表示无有效 token。
 func ftsMatchQuery(text string) string {
+	tokens := searchTokens(text)
+	quoted := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		quoted = append(quoted, `"`+token+`"*`)
+	}
+	return strings.Join(quoted, " ")
+}
+
+// searchTokens 把自由文本切成检索 token：去掉纯语法字符，保留其余原文。
+// FTS 与 LIKE 两条检索路径共用，保证两者对同一输入的切分一致。
+func searchTokens(text string) []string {
 	fields := strings.Fields(text)
 	tokens := make([]string, 0, len(fields))
 	for _, field := range fields {
@@ -362,9 +456,9 @@ func ftsMatchQuery(text string) string {
 		if cleaned == "" {
 			continue
 		}
-		tokens = append(tokens, `"`+cleaned+`"*`)
+		tokens = append(tokens, cleaned)
 	}
-	return strings.Join(tokens, " ")
+	return tokens
 }
 
 // isMissingTable 判断错误是否为"表不存在"（未迁移的库）。

@@ -1896,7 +1896,9 @@ func terminationFromError(err error) (termination string, signalName string) {
 // annotateTerminationMetadata stamps the signal-death classification onto a
 // result's metadata: the guard's own termination reason (e.g. timeout) wins
 // when present, because "we killed it after the timeout" is more actionable
-// than the bare signal that reached the process.
+// than the bare signal that reached the process. The generic "error" placeholder
+// that applyProcessGuardResult stamps on ordinary failures is not a reason and
+// must not mask a specific signal classification.
 func annotateTerminationMetadata(metadata map[string]interface{}, err error) {
 	if metadata == nil {
 		return
@@ -1905,12 +1907,20 @@ func annotateTerminationMetadata(metadata map[string]interface{}, err error) {
 	if termination == "" {
 		return
 	}
-	if existing, _ := metadata["termination"].(string); strings.TrimSpace(existing) == "" {
+	if existing, _ := metadata["termination"].(string); isGenericTerminationPlaceholder(existing) {
 		metadata["termination"] = termination
 	}
 	if signalName != "" {
 		metadata["signal"] = signalName
 	}
+}
+
+// isGenericTerminationPlaceholder 报告 termination 值是否只是占位而没有给出
+// 具体原因：空串，或 applyProcessGuardResult 在普通失败路径写入的 "error"。
+// timeout/cancel 等具体原因不在此列，它们优先于信号分类保留。
+func isGenericTerminationPlaceholder(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return trimmed == "" || trimmed == "error"
 }
 
 // isHardShellExecutionError reports true only for control-plane / launch failures

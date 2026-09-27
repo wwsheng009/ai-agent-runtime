@@ -32,8 +32,11 @@ func TestRenderShellExecutionGuidance_PrefersDedicatedSearchTools(t *testing.T) 
 	if !strings.Contains(got, "-g") && !strings.Contains(got, "path argument") {
 		t.Fatalf("expected path-glob guidance for shell rg, got:\n%s", got)
 	}
-	gotLower := strings.ToLower(got)
-	if strings.Contains(gotLower, "powershell") || strings.Contains(gotLower, "pwsh") {
+	// 以渲染结果里的 PowerShell 专用标记判定分支：不能用 "powershell"/"pwsh"
+	// 子串判定——Linux 的通用条目也提到 "avoid bash heredoc on Windows
+	// PowerShell/cmd"，会把非 Windows 输出误判成 Windows 分支。
+	if strings.Contains(got, "Treat the current shell as PowerShell-compatible") {
+		gotLower := strings.ToLower(got)
 		if !strings.Contains(got, "heredoc") {
 			t.Fatalf("expected Windows heredoc guidance, got:\n%s", got)
 		}

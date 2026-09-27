@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -295,9 +296,28 @@ func Sync() error {
 	logger := globalLogger
 	loggerMu.RUnlock()
 	if logger != nil {
-		return logger.Sync()
+		if err := logger.Sync(); err != nil && !isIgnorableSyncError(err) {
+			return err
+		}
 	}
 	return nil
+}
+
+// isIgnorableSyncError 报告 Sync 错误是否只是"目标不支持刷新"。
+//
+// zap 在 stdout/stderr、管道以及部分容器文件系统上 Sync 会返回 EINVAL
+// （Linux 上表现为 "sync /dev/stderr: invalid argument"），Windows 控制台则
+// 可能返回 "Incorrect function"。这些目标本就没有可刷新的持久缓冲，把它们
+// 当错误上报只会让正常的关闭/退出流程失败，因此予以忽略。
+func isIgnorableSyncError(err error) bool {
+	if err == nil || errors.Is(err, os.ErrInvalid) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "invalid argument") ||
+		strings.Contains(msg, "inappropriate ioctl") ||
+		strings.Contains(msg, "incorrect function") ||
+		strings.Contains(msg, "not supported")
 }
 
 // Named returns a named logger

@@ -70,6 +70,9 @@ var windowsReservedDeviceNames = func() map[string]struct{} {
 //     only (review M3) and covering their superscript digits and alternate-data-
 //     stream spellings (review m9). On Unix "aux/" and "con.txt" are ordinary
 //     file names and are allowed.
+//   - Windows console device aliases CONIN$/CONOUT$ on every host: these are
+//     console handles rather than DOS reserved base names, and their '$'
+//     spelling has no plausible ordinary-file use on Unix.
 //
 // Path separators and case follow the host platform's habits: Windows matches
 // case-insensitively, Unix stays case-sensitive.
@@ -231,10 +234,10 @@ func devicePathRefusalError(targetPath, reason string) error {
 // stripped by the filesystem; a colon starts an alternate data stream on the
 // same device ("NUL:stream" addresses NUL); superscript digits normalize to
 // ASCII (COM¹ == COM1).
+//
+// CONIN$/CONOUT$ are refused on every host; the remaining reserved base names
+// stay Windows-only so legitimate Unix trees such as src/aux/ keep working.
 func windowsReservedDeviceNameInPath(path string) string {
-	if runtime.GOOS != "windows" {
-		return ""
-	}
 	segments := strings.FieldsFunc(path, func(r rune) bool {
 		return r == '/' || r == '\\'
 	})
@@ -259,8 +262,22 @@ func windowsReservedDeviceNameInPath(path string) string {
 		upper := strings.ToUpper(name)
 		upper = strings.NewReplacer("\u00b9", "1", "\u00b2", "2", "\u00b3", "3").Replace(upper)
 		if _, ok := windowsReservedDeviceNames[upper]; ok {
-			return upper
+			if runtime.GOOS == "windows" || isWindowsConsoleAliasName(upper) {
+				return upper
+			}
 		}
 	}
 	return ""
+}
+
+// isWindowsConsoleAliasName 报告规范化后的名字是否为 Windows 控制台设备别名
+// （CONIN$/CONOUT$）。它们在所有平台拒绝：控制台句柄在所有宿主上都不是常规
+// 文件，而 '$' 结尾的拼写也不像 Unix 上的普通文件名。
+func isWindowsConsoleAliasName(name string) bool {
+	switch name {
+	case "CONIN$", "CONOUT$":
+		return true
+	default:
+		return false
+	}
 }

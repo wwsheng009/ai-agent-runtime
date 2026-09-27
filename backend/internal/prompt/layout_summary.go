@@ -2,7 +2,6 @@ package prompt
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -65,12 +64,12 @@ func SummarizeInstructionMessages(messages []types.Message) InstructionMessagesS
 
 		if msg.Metadata != nil {
 			if v, ok := msg.Metadata["prompt_source"].(string); ok && strings.TrimSpace(v) != "" {
-				sources = appendUniqueRenderedLayoutValue(sources, filepath.Base(strings.TrimSpace(v)))
+				sources = appendUniqueRenderedLayoutValue(sources, sourceBaseName(v))
 			}
 			if v, ok := msg.Metadata["prompt_sources"].([]string); ok {
 				for _, s := range v {
 					if s = strings.TrimSpace(s); s != "" {
-						sources = appendUniqueRenderedLayoutValue(sources, filepath.Base(s))
+						sources = appendUniqueRenderedLayoutValue(sources, sourceBaseName(s))
 					}
 				}
 			}
@@ -149,12 +148,25 @@ func SummarizeRenderedLayout(layout string) RenderedLayoutSummary {
 			if source == "" {
 				continue
 			}
-			result.Sources = appendUniqueRenderedLayoutValue(result.Sources, filepath.Base(source))
+			result.Sources = appendUniqueRenderedLayoutValue(result.Sources, sourceBaseName(source))
 		}
 	}
 
 	result.Summary = buildRenderedLayoutSummaryTextFromParts(result.Layers, result.Sources)
 	return result
+}
+
+// sourceBaseName 取路径的最后一段，同时把 '/' 与 '\' 视为分隔符。
+//
+// 不用 filepath.Base 的原因：渲染布局或消息元数据可能携带另一平台的路径
+// （例如在 Linux 上回放 Windows 工作区的布局），而 filepath.Base 只认宿主
+// 平台的分隔符，会把整条 "E:\...\AGENTS.md" 当成一个文件名。
+func sourceBaseName(source string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(source), `/\`)
+	if idx := strings.LastIndexAny(trimmed, `/\`); idx >= 0 {
+		return trimmed[idx+1:]
+	}
+	return trimmed
 }
 
 func buildRenderedLayoutSummaryTextFromParts(layers, sources []string) string {
