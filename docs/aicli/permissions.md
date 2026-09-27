@@ -430,11 +430,11 @@ disable_bypass: true         # 我的机器上永不开 yolo
 
 ### 5.4 按需解释（模型摘要）
 
-- 审批界面上的「解释」是**只读**动作：调用一次后台模型对命令/补丁做摘要（成本、影响、风险点），**不进入决策链**、不写状态。
+- 审批界面上的「解释」是**只读**动作：调用一次模型对命令/补丁做摘要（成本、影响、风险点），**不进入决策链**、不写状态。runtime-server 模式用服务端会话路由，本地模式用会话自身的 provider/model；两端的预算（`max_tokens=320`、20s 超时、参数截断）、提示词与记账 payload 由共享包 `internal/approvalexplain` 统一。
 - 模型不可用/超时会退回规则摘要（工具、原因、风险、参数摘要、可否记忆），界面会标注解释来源（模型名 / 规则）。
 - 解释的每次调用都计入 usage 账本（`origin=approval_explain`）。
-- 生成策略可切换：`off`（只用规则摘要）/ `on_demand`（默认，点「解释」才调用）/ `pre_generate`（读路径后台预热）。运行时用 `AICLI_APPROVAL_EXPLAIN_MODE` 或 Web 设置页「审批解释模式」切换；设置页是**进程级临时开关**（`GET/PUT /api/runtime/config/approval-explain`），不写配置文件，重启后回到 env / 默认值。
-- **CLI 入口**：审批提示的 `[6] 解释这次调用`（live 审批环与恢复态都支持；`/invoke` 的直接调用审批同样支持）。runtime-server 模式把规则解释与服务端摘要一起展示，并交代来源：`[解释] 来源：模型 <model>（已缓存）` 或 `[解释] 来源：规则模板`（服务端 `source=rules` / `off` / 模型不可用时不伪装成模型）；本地模式没有 runtime-server，只有规则解释 + `[解释] 模型解释需要 runtime-server 连接（本地模式仅规则说明）`。
+- 生成策略可切换：`off`（只用规则摘要）/ `on_demand`（默认，点「解释」才调用）/ `pre_generate`（读路径后台预热，仅 runtime-server 有该读路径；本地模式无预热通路，按 `on_demand` 处理）。运行时用 `AICLI_APPROVAL_EXPLAIN_MODE` 或 Web 设置页「审批解释模式」切换；设置页是**进程级临时开关**（`GET/PUT /api/runtime/config/approval-explain`），不写配置文件，重启后回到 env / 默认值。
+- **CLI 入口**：审批提示的 `[6] 解释这次调用`（live 审批环与恢复态都支持；`/invoke` 的直接调用审批同样支持）。runtime-server 模式把规则解释与服务端摘要一起展示，并交代来源：`[解释] 来源：模型 <model>（已缓存）` 或 `[解释] 来源：规则模板`（服务端 `source=rules` / `off` / 模型不可用时不伪装成模型）。**本地也可用模型解释**：无 runtime-server 时用会话自身的 provider/model 做同预算只读摘要，同一账本口径（`origin=approval_explain`），`AICLI_APPROVAL_EXPLAIN_MODE=off` 关闭；无 provider / 建 runtime 失败 / 模型报错时保留规则解释并追加 `[解释] 模型解释未启用或不可用（仅规则说明）` 或 `[解释] 模型解释不可用：<原因>`，绝不伪造模型结果。
 - **同一审批只调一次模型**：CLI 侧按提示投影守卫 `explainShown`，重复按 `[6]` 只重绘不重发；服务端仍有 10 分钟单飞缓存兜底（`cached` 会在来源行显示）。解释失败（409 审批已不 pending / 503 / 超时）保留规则解释并追加 `[解释] 模型解释不可用：<原因>`，**绝不阻塞或代替你的批准/拒绝**。
 
 ---

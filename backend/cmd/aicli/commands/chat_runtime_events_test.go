@@ -3646,7 +3646,9 @@ func TestChatRuntimeEvents_ApprovalExplainLocalModeUsesRulesOnly(t *testing.T) {
 		NoInteractive: true,
 	}
 	bridge := newChatRuntimeEventBridge(session)
-	require.Nil(t, bridge.explainApproval, "a local bridge must not install an explain hook")
+	// 该会话没有 provider：本地钩子按新语义不注入，[6] 仍只有规则解释 +
+	// 「模型解释未启用或不可用」的如实降级行（不是「需要 runtime-server」）。
+	require.Nil(t, bridge.explainApproval, "a provider-less session must not install an explain hook")
 	approval := &runtimechat.ApprovalRequest{
 		ID:       "req-local",
 		ToolName: "execute_shell_command",
@@ -3663,7 +3665,7 @@ func TestChatRuntimeEvents_ApprovalExplainLocalModeUsesRulesOnly(t *testing.T) {
 	// 本轮接线后规则解释器必须真正出现在 [6] 路径上（此前该路径为零调用）。
 	require.Contains(t, output, "[解释] 动作：删除文件或目录（递归）")
 	require.Contains(t, output, "[解释] 来源：规则模板")
-	require.Contains(t, output, "[解释] 模型解释需要 runtime-server 连接（本地模式仅规则说明）")
+	require.Contains(t, output, "[解释] 模型解释未启用或不可用（仅规则说明）")
 }
 
 func TestChatRuntimeEvents_ApprovalExplainHookFailureKeepsDecisionOpen(t *testing.T) {

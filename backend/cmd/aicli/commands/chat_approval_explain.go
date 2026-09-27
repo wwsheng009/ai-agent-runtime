@@ -5,9 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/approvalexplain"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // chatApprovalExplanation 是一条审批请求的「人话」解释。
@@ -101,14 +107,16 @@ func approvalExplanationLines(approval *runtimechat.ApprovalRequest) []string {
 	return lines
 }
 
-// approvalExplainHook 是 [6]「解释这次调用」的可选服务端钩子。runtime-server
-// 宿主把它接到 §4.13 的只读解释端点（见 chat_runtime_server.go 的
-// explainRuntimeServerApproval）；nil = 本地模式，只用规则解释、不发网络请求。
+// approvalExplainHook 是 [6]「解释这次调用」的可选模型解释钩子：
+// runtime-server 宿主接入 §4.13 的只读解释端点（见 chat_runtime_server.go 的
+// explainRuntimeServerApproval），本地模式接入 newLocalApprovalExplainHook；
+// nil = 模型解释未启用或不可用（off / 无 provider / 建 runtime 失败），
+// [6] 只输出规则解释加一行降级说明，不发网络请求。
 type approvalExplainHook func(ctx context.Context, requestID string) (runtimeServerApprovalExplanation, error)
 
 // approvalExplainBlockLines 生成 [6] 触发的解释块：
 //  1. 规则解释（零成本；[说明] 前缀改为 [解释]，与 [6] 的语义一致）；
-//  2. 服务端/模型摘要（钩子可用且成功时）；
+//  2. 模型摘要（本地或服务端钩子可用且成功时）；
 //  3. 来源行（模型 <model>（已缓存）/ 规则模板）或降级行。
 //
 // 同一个审批的「只调一次模型」由调用方用 explainShown 守卫保证；本函数只负责
@@ -122,7 +130,7 @@ func approvalExplainBlockLines(approval *runtimechat.ApprovalRequest, explain ap
 
 	if explain == nil {
 		lines = append(lines, "[解释] 来源：规则模板",
-			"[解释] 模型解释需要 runtime-server 连接（本地模式仅规则说明）")
+			"[解释] 模型解释未启用或不可用（仅规则说明）")
 		return lines
 	}
 
@@ -320,4 +328,170 @@ func containsAny(haystack string, needles ...string) bool {
 		}
 	}
 	return false
+}
+
+// localApprovalExplainSourceModel 与 runtimeapi 的 source 取值保持一致
+// （`model`）；本地模式不引入自己的来源词汇。
+const localApprovalExplainSourceModel = "model"
+
+// localApprovalExplainMode 解析本地解释模式，取值与别名语义完全复用共享包
+// （与 runtimeapi.ParseApprovalExplainMode 同源）。pre_generate 在本地没有预热
+// 通路——本地审批只会经由交互面板出现，没有服务端 /runtime 读路径可供预生成，
+// 因此按 on_demand 处理（首次按 [6] 时调用一次，调用方仍有 explainShown 去重）。
+func localApprovalExplainMode() approvalexplain.Mode {
+	mode, ok := approvalexplain.ParseMode(os.Getenv(approvalexplain.ModeEnv))
+	if !ok || mode == approvalexplain.ModePreGenerate {
+		return approvalexplain.ModeOnDemand
+	}
+	return mode
+}
+
+// newLocalApprovalExplainHook 为本地模式（无 runtime-server）安装 [6] 的模型
+// 解释钩子；不满足可用性时返回 nil，[6] 保持规则解释 + 一行降级说明。
+//
+// 可用性判定：
+//   - AICLI_APPROVAL_EXPLAIN_MODE=off（或 none/disabled 等别名）→ 不注入；
+//   - 会话没有 provider（session.Provider.GetType() 为空）→ 不注入；
+//   - 用会话自身 provider/model 装配一次性 runtime 失败 → 不注入。
+//
+// 钩子每次调用都重新装配 runtime 并重新解析 provider/model，跟随会话中途的
+// provider/model 切换；runtime-server 执行器仍会在自己的 run 内临时覆盖该默认
+// 值并在 defer 中恢复（见 chat_runtime_server.go），语义不变。
+func newLocalApprovalExplainHook(session *ChatSession) approvalExplainHook {
+	if session == nil || localApprovalExplainMode() == approvalexplain.ModeOff {
+		return nil
+	}
+	if strings.TrimSpace(session.Provider.GetType()) == "" {
+		return nil
+	}
+	// 装配 runtime 只做本地校验（不发网络请求）；失败说明当前会话配置不足以
+	// 解释，宁可保持可见的降级行，也不把失败推迟到用户点击 [6] 时。
+	if runtime, err := buildSharedChatAutoCompactRuntime(session); err != nil || runtime == nil {
+		return nil
+	}
+	return func(ctx context.Context, requestID string) (runtimeServerApprovalExplanation, error) {
+		return explainApprovalLocally(ctx, session, requestID)
+	}
+}
+
+// explainApprovalLocally 执行一次 §4.13 只读本地解释：
+// 读当前 pending 审批 → 一次小预算模型调用（共享包 prompt/预算）→ 记账。
+// 任何失败都返回 error，由 approvalExplainBlockLines 降级为「规则 + 一行可读
+// 原因」；本路径不写任何决策状态，也绝不代替批准/拒绝。
+func explainApprovalLocally(ctx context.Context, session *ChatSession, requestID string) (runtimeServerApprovalExplanation, error) {
+	var empty runtimeServerApprovalExplanation
+	if session == nil {
+		return empty, fmt.Errorf("chat session is unavailable")
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return empty, fmt.Errorf("审批请求缺少 request id")
+	}
+	if session.LocalRuntimeHost == nil {
+		// runtime-server 会话或 headless 宿主没有本地状态源：本地解释不可用，
+		// 如实降级（runtime-server 执行器会在 run 内改用服务端端点钩子）。
+		return empty, fmt.Errorf("本地会话状态不可用")
+	}
+	pending := localPendingApprovalForExplain(session, requestID)
+	if pending == nil {
+		// 与 runtime-server 端点 409 同义：审批已被裁决 / 过期 / 从未存在。
+		return empty, fmt.Errorf("审批已不在等待中")
+	}
+	llmRuntime, err := buildSharedChatAutoCompactRuntime(session)
+	if err != nil {
+		return empty, fmt.Errorf("解释运行时不可用：%w", err)
+	}
+	if llmRuntime == nil {
+		return empty, fmt.Errorf("当前会话没有可用的 provider")
+	}
+	// 与 auto-compact 相同的解析口径：provider 名优先会话声明，缺 model 时
+	// 回落到 provider 默认模型，最后才是 runtime 默认（buildSharedChat… 的解析）。
+	provider := strings.TrimSpace(session.ProviderName)
+	if provider == "" {
+		provider = strings.TrimSpace(llmRuntime.DefaultProvider())
+	}
+	model := strings.TrimSpace(session.Model)
+	if model == "" {
+		model = strings.TrimSpace(session.Provider.DefaultModel)
+	}
+	if model == "" {
+		model = strings.TrimSpace(llmRuntime.DefaultModel())
+	}
+	if model == "" {
+		return empty, fmt.Errorf("当前会话没有可用的模型")
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	callCtx, cancel := context.WithTimeout(ctx, approvalexplain.Timeout)
+	defer cancel()
+	sessionID := currentRuntimeSessionID(session)
+	llmRequestID := fmt.Sprintf("approval-explain-%s-%d", sessionID, time.Now().UnixNano())
+	resp, callErr := llmRuntime.Call(callCtx, &runtimellm.LLMRequest{
+		Provider:  provider,
+		Model:     model,
+		MaxTokens: approvalexplain.MaxTokens,
+		Messages: []runtimetypes.Message{
+			{Role: "system", Content: approvalexplain.SystemPrompt},
+			{Role: "user", Content: approvalexplain.UserPrompt(pending)},
+		},
+	})
+	// 成功与失败都记账（与 runtimeapi 同形同义），bus 拿不到时静默跳过。
+	publishLocalApprovalExplainUsage(session, sessionID, llmRequestID, provider, model, resp, callErr)
+	if callErr != nil {
+		return empty, callErr
+	}
+	if resp == nil {
+		return empty, fmt.Errorf("模型返回为空")
+	}
+	text := strings.TrimSpace(resp.Content)
+	if text == "" {
+		return empty, fmt.Errorf("模型返回为空")
+	}
+	return runtimeServerApprovalExplanation{
+		Explanation: text,
+		Source:      localApprovalExplainSourceModel,
+		Model:       model,
+	}, nil
+}
+
+// localPendingApprovalForExplain 读取本地 durable runtime state 里与 requestID
+// 匹配的 pending 审批；不匹配（已被裁决 / 换了下一条）返回 nil，避免解释错对象。
+func localPendingApprovalForExplain(session *ChatSession, requestID string) *runtimechat.ApprovalRequest {
+	state := loadRestoredPendingRuntimeState(session)
+	if state == nil || state.PendingApproval == nil {
+		return nil
+	}
+	if strings.TrimSpace(state.PendingApproval.ID) != requestID {
+		return nil
+	}
+	return state.PendingApproval
+}
+
+// publishLocalApprovalExplainUsage 把本地解释调用发布到本地 EventBus 的
+// `llm.request.finished`（usageledger / usageanalytics 的既有订阅点）：
+// payload 由共享包构造，与 runtimeapi.publishApprovalExplainUsage 同形同义
+// （origin/source=approval_explain、provider/model、成功带 usage_*、失败带 error）。
+//
+// host 或 bus 缺失（headless / 测试 / 未绑定本地宿主的会话）时静默跳过——
+// 记账是 best-effort，绝不 panic、绝不改变解释结果。
+func publishLocalApprovalExplainUsage(
+	session *ChatSession,
+	sessionID, requestID, provider, model string,
+	resp *runtimellm.LLMResponse,
+	callErr error,
+) {
+	if session == nil {
+		return
+	}
+	host := session.LocalRuntimeHost
+	if host == nil || host.EventBus == nil {
+		return
+	}
+	host.EventBus.Publish(runtimeevents.Event{
+		Type:      "llm.request.finished",
+		SessionID: sessionID,
+		Payload:   approvalexplain.UsagePayload(requestID, provider, model, resp, callErr),
+	})
 }

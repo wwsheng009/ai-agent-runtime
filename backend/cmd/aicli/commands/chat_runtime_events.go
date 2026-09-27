@@ -615,14 +615,18 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 		eventQueue:          make(chan chatRuntimeQueuedEvent, chatRuntimeEventQueueNormalCapacity+chatRuntimeEventQueueCriticalReserve),
 		eventQueueByteLimit: chatRuntimeEventQueueByteLimit,
 		uiActionPostTimeout: uiActionPostBudget,
-		rendered:            make(map[string]struct{}),
-		historySeedSeen:     make(map[string]struct{}),
-		renderEncoder:       encoding.NewEventEncoder(),
-		renderScene:         renderScene,
-		renderMapper:        scene.NewChangeSetMapper(renderScene),
-		scenePresenterMode:  scenePresenterModeFromEnv(),
-		classifyMode:        chatEventBridgeClassifyModeFromEnv(),
-		deferredIndex:       make(map[string]*chatRuntimeQueuedEvent),
+		// 默认安装本地模式（无 runtime-server）的 [6] 模型解释钩子；不可用时
+		// 为 nil，保持规则解释 + 一行降级说明。runtime-server 执行器在自己的
+		// run 内覆盖并在 defer 恢复该字段（见 chat_runtime_server.go）。
+		explainApproval:    newLocalApprovalExplainHook(session),
+		rendered:           make(map[string]struct{}),
+		historySeedSeen:    make(map[string]struct{}),
+		renderEncoder:      encoding.NewEventEncoder(),
+		renderScene:        renderScene,
+		renderMapper:       scene.NewChangeSetMapper(renderScene),
+		scenePresenterMode: scenePresenterModeFromEnv(),
+		classifyMode:       chatEventBridgeClassifyModeFromEnv(),
+		deferredIndex:      make(map[string]*chatRuntimeQueuedEvent),
 		writeLine: func(line string) {
 			if strings.TrimSpace(line) == "" {
 				return

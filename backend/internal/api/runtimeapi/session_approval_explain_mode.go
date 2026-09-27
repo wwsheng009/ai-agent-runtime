@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/approvalexplain"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 )
 
@@ -22,13 +23,15 @@ import (
 // 同一审批重复点击只计费一次；审批被裁决后换上下一条时，ID 不匹配即视为未命中。
 // 失败结果**不缓存**，避免把一次网络抖动钉死成永远降级。
 
-// ApprovalExplainMode 是审批解释的生成策略。
-type ApprovalExplainMode string
+// ApprovalExplainMode 是审批解释的生成策略。取值与解析语义由共享包
+// internal/approvalexplain 定义（本地模式与 runtime-server 必须一致）；
+// 这里的别名只保持 runtimeapi 既有 API 面不变。
+type ApprovalExplainMode = approvalexplain.Mode
 
 const (
-	ApprovalExplainModeOff         ApprovalExplainMode = "off"
-	ApprovalExplainModeOnDemand    ApprovalExplainMode = "on_demand"
-	ApprovalExplainModePreGenerate ApprovalExplainMode = "pre_generate"
+	ApprovalExplainModeOff         = approvalexplain.ModeOff
+	ApprovalExplainModeOnDemand    = approvalexplain.ModeOnDemand
+	ApprovalExplainModePreGenerate = approvalexplain.ModePreGenerate
 
 	// 缓存寿命：审批本身是短生命周期对象；过期即失效，长会话不会无限增长。
 	approvalExplainCacheTTL = 10 * time.Minute
@@ -37,17 +40,9 @@ const (
 )
 
 // ParseApprovalExplainMode 解析模式取值；空串表示默认（on_demand）。
-// 未知取值返回 ok=false，由调用方决定是报错还是保持默认。
+// 未知取值返回 ok=false，由调用方决定是报错还是保持默认。实现委托共享包。
 func ParseApprovalExplainMode(raw string) (ApprovalExplainMode, bool) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "on_demand", "on-demand", "ondemand", "on":
-		return ApprovalExplainModeOnDemand, true
-	case "off", "none", "disabled", "disable":
-		return ApprovalExplainModeOff, true
-	case "pre_generate", "pre-generate", "pregenerate", "pre":
-		return ApprovalExplainModePreGenerate, true
-	}
-	return ApprovalExplainModeOnDemand, false
+	return approvalexplain.ParseMode(raw)
 }
 
 // SetApprovalExplainMode 设置解释模式；空值回到默认（on_demand）。

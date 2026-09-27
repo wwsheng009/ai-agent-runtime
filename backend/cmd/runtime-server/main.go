@@ -20,6 +20,7 @@ import (
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
+	"github.com/wwsheng009/ai-agent-runtime/internal/approvalexplain"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -46,7 +47,8 @@ const runtimeServerDefaultConfigName = aiclipaths.DefaultConfigFileName
 
 // approvalExplainModeEnv 控制 §4.13 审批解释的生成策略：
 // off（只用规则摘要）| on_demand（默认，点击才调用模型）| pre_generate（审批露面即预生成）。
-const approvalExplainModeEnv = "AICLI_APPROVAL_EXPLAIN_MODE"
+// 变量名与 aicli 本地模式共用共享包常量，避免两端读不同的 env。
+const approvalExplainModeEnv = approvalexplain.ModeEnv
 
 type runtimeServerCommandOptions struct {
 	ConfigPath string

@@ -170,7 +170,9 @@ func TestApprovalExplainBlockLinesLocalModeUsesRules(t *testing.T) {
 	joined := strings.Join(lines, "\n")
 	require.Contains(t, joined, "[解释] 动作：删除文件或目录（递归）")
 	require.Contains(t, joined, "[解释] 来源：规则模板")
-	require.Contains(t, joined, "[解释] 模型解释需要 runtime-server 连接（本地模式仅规则说明）")
+	// 无钩子 = 模型解释未启用/不可用（off、无 provider、建 runtime 失败）：
+	// 文案不再声称「需要 runtime-server」，因为本地模式现在也可能有能力。
+	require.Contains(t, joined, "[解释] 模型解释未启用或不可用（仅规则说明）")
 	require.NotContains(t, joined, "[说明] ", "[6] 的解释块应统一使用 [解释] 前缀")
 }
 
