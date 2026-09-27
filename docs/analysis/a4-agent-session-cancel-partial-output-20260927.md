@@ -1,5 +1,26 @@
 # A4 定位：会话型子代理被取消时的部分产物缺口（2026-09-27）
 
+## 真机端到端验证（2026-09-27，远程 web API）
+
+- **环境**：node `node-17180` @ `http://127.0.0.1:52607`，会话 `session_20260927130357_TH4YuaUl`；运行二进制 `backend/aicli-2x.exe`（`go version -m` 读出 `vcs.revision=b74cc097`，为 `f4cd672e`/`11e499e5` 的后代，即包含 A3+A4）。
+- **方法**：`POST /web/api/invoke` 远程注入 prompt 并等 turn 结束（`client_request_id` 幂等）；证据取自本机事件库 `~/.aicli/sessions/runtime/session_runtime.sqlite` 的 `session_events.payload`。
+- **A3 通过（两个触发场景）**：
+  1. 子代理 `session_20260927131033_zEWajnFb` 在**父回合结束**（13:10:31）后继续运行，心跳首行 13:11:18，12 轮跑到 13:12:22 自然完成；
+  2. 子代理运行中给父会话**注入新消息**（13:11:42 的 `ACK2` turn）后，子代理仍持续写入心跳直到 13:12:22。
+- **A4 通过**：对运行中的子代理 `session_20260927131714_t2qLAQJ7` 执行 `close_agent`（中途取消，取消时仍处于第 2 步长工具调用），其 `session_end` 载荷：
+
+```json
+{"cancel_source":"execution_context","cancel_cause":"actor_stop","success":false,"status":"stopped",
+ "error":"context canceled","steps":2,"partial_source":"last_assistant_message","partial_steps":2,
+ "partial_summary":"Step 1 complete (`backend/.tmp/a4b-start.txt` contains `started`).\n\n**Step 2** — single `Start-Sleep -Seconds 150` call (no splitting, no polling; long timeout to cover the full 150s):"}
+```
+
+  对照修复前：同类取消的 durable result 只有 16 runes 的 `"context canceled"`，零产物。
+- **附带观察（建议单独跟进）**：
+  1. `difficulty=easy/normal` 的子代理均报 `route_source=disabled` + `route_warnings=["permission_mode_inherited_from_parent"]`；不阻断执行（走默认模型），但难度路由在这套配置下实际未生效；
+  2. 子代理从 `spawn_agent` 返回（queued）到会话真正创建/启动的延迟波动大（实测约 45s / ~3min / ~30s），值得作为独立课题（调度/线程上限）；
+  3. `/web/api/invoke` 幂等语义实测正确：同一 `client_request_id` 重放返回 `duplicate=true` 且不重跑（token 无增长）。
+
 - **状态**：**已实施**（`11e499e5`，2026-09-27；A3 见 `f4cd672e`）
 - **实施摘要**：
   - 新增 `backend/internal/chat/actor_partial_product.go`：`partialRunProduct(result, session)` 产出有界（2,000 runes + 省略号）部分产物；取源优先级 = 历史里最后一条非空 assistant 消息 → `result.Output` 兜底；`partial_steps` = 历史中已完成的工具结果条数。
