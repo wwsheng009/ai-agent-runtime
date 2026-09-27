@@ -24,6 +24,19 @@ export function getStreamTextDelta(payload: AgentChatStreamChunkPayload) {
   return "";
 }
 
+/**
+ * 文本帧是否携带「权威全文替换」语义（`mode=replace|snapshot`）。
+ *
+ * 静态分支（非 ReAct 的 skill-route / fallback 收口）现在也会开流：增量先经
+ * runtime 通道逐步渲染，回合末再由 `streamStaticResult` 下发同一段全文。该帧
+ * 必须覆盖而不是追加，否则整段正文会被拼接两遍。缺省/未知 mode 保持历史
+ * append 语义（旧后端兼容）。
+ */
+export function isReplaceStreamChunk(payload: AgentChatStreamChunkPayload) {
+  const mode = payload.mode?.trim().toLowerCase();
+  return mode === "replace" || mode === "snapshot";
+}
+
 export function getToolName(payload: AgentChatStreamChunkPayload) {
   if (payload.tool && typeof payload.tool.name === "string") {
     return payload.tool.name;

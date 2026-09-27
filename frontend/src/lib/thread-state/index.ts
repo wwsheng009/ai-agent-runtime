@@ -10,4 +10,4 @@ export { applyRuntimeDeltaToThread, getRuntimeEventTurnId } from "./events-live"
 export type { RuntimeLiveDelta, RuntimeLiveDeltaSink } from "./events-live";
 export { getToolCallId, getToolArgumentsSummary, getToolResultSummary, getToolErrorMessage, buildToolSegmentFromPayload, getToolSegmentKey, upsertToolSegment } from "./tools";
 export { mergeRuntimeSessionsIntoThreads, getRuntimeEventSeq } from "./sessions";
-export { getErrorMessage, getFirstArtifactId, getStreamTextDelta, getToolName, mergeUniqueStrings, upsertArtifact, upsertArtifacts } from "./shared";
+export { getErrorMessage, getFirstArtifactId, getStreamTextDelta, getToolName, isReplaceStreamChunk, mergeUniqueStrings, upsertArtifact, upsertArtifacts } from "./shared";

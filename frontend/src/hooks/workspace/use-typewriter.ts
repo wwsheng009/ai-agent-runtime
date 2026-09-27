@@ -86,7 +86,9 @@ export function useTypewriter(
       return;
     }
     let disposed = false;
-    let lastTick = nowMs();
+    // 起点回拨一个提交间隔：流刚开始后的第一帧就允许提交（首字不再等满
+    // REVEAL_COMMIT_INTERVAL_MS）；之后仍按真实经过时间推进，节奏不变。
+    let lastTick = nowMs() - REVEAL_COMMIT_INTERVAL_MS;
     let frame: { cancel: () => void } | null = null;
 
     const tick = () => {

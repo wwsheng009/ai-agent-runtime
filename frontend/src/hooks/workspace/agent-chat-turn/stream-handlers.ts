@@ -9,6 +9,7 @@ import {
   appendLiveStreamReasoning,
   appendLiveStreamText,
   setLiveStreamReasoning,
+  setLiveStreamText,
 } from "@/lib/live-stream-text";
 import {
   appendArtifactToMessage,
@@ -16,6 +17,7 @@ import {
   buildTurnJsonArtifact,
   getRuntimeDeltaKey,
   getStreamTextDelta,
+  isReplaceStreamChunk,
   isRuntimePayload,
   reconcileRuntimeText,
   updateThreadMessage,
@@ -205,13 +207,23 @@ export function createAgentChatStreamHandlers(
         payload as unknown as Record<string, unknown>,
         "text",
       );
-      if (deltaCoordinator && !deltaCoordinator.claim(textKey)) {
+      const replace = isReplaceStreamChunk(payload);
+      // 权威全文帧不参与两通道 claim：它是对既有文本的覆盖（没有、也不该有
+      // 流式去重键），claim("") 是空操作，这里显式跳过以免表达错意图。
+      if (!replace && deltaCoordinator && !deltaCoordinator.claim(textKey)) {
         return;
       }
-      turnState.streamedText += delta;
-      // live 通道：增量先入外部 store（只惊动流式气泡），thread store 的正文
-      // 改为低频结构快照（见 streaming-frame.ts 的 STRUCTURAL_COMMIT_INTERVAL_MS）。
-      appendLiveStreamText(assistantMessageId, delta);
+      if (replace) {
+        // 回合末静态快照（mode=replace）：增量可能已经走 runtime 通道渲染过，
+        // 这里用权威全文覆盖，避免重复拼接（见 shared.ts isReplaceStreamChunk）。
+        turnState.streamedText = delta;
+        setLiveStreamText(assistantMessageId, delta);
+      } else {
+        turnState.streamedText += delta;
+        // live 通道：增量先入外部 store（只惊动流式气泡），thread store 的正文
+        // 改为低频结构快照（见 streaming-frame.ts 的 STRUCTURAL_COMMIT_INTERVAL_MS）。
+        appendLiveStreamText(assistantMessageId, delta);
+      }
       // 正文开始 = 推理阶段结束，推理行不再显示运行态。
       turnState.reasoningRunning = false;
       setPhaseAndRef("streaming");

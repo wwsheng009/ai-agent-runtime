@@ -128,6 +128,10 @@ export type AgentChatStreamChunkPayload = {
   tool_call?: Record<string, unknown> | null;
   delta?: Record<string, unknown> | null;
   metadata?: Record<string, unknown>;
+  // 文本写入语义：`replace` 表示 content 是权威全文（回合末静态快照），
+  // 消费方必须覆盖而不是追加；缺省/`append` 为逐段增量。
+  // 见 backend/internal/api/runtimeapi/handler.go 的 streamStaticResult。
+  mode?: string;
   // 运行时工具生命周期帧（`tool.requested` / `tool.completed`，见
   // backend/internal/agent/tool_runtime_events.go）在结构化入参之外下发的定位字段：
   // 实时帧只有 `arg_preview` 键值文本（无 arguments），`display_file_path` 仅在路径
