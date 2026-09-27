@@ -179,8 +179,8 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 - ~~P0-2~~：已落地（见 §6.4）。收敛为 `chatActorBuildBudget`，只覆盖 actor 构建；
   turn gate 等待与 run 本身由各自 ctx/生命周期约束，不纳入"预跑卡死"预算。
 - P1-1：显式 `RunState` 取代 epoch 0 双关；丢弃指标接入 `/web/api/analysis/errors`。
-- P1-2：部分落地（见 §6.4）。等待态时钟与 `/debug` 时长展示已就位；
-  超时自动清态 / 提示重发仍待办。
+- ~~P1-2~~：已落地（见 §6.4 / §6.5）。等待态时钟、`/debug` 时长展示与
+  「脱离 run 的等待态」看门狗自愈（清态 + 动态栏提示）全部就位。
 - P2：`actorGeneration/refreshing` 标记 + refresh/submit 互斥（submit gate）。
 - P3：用户消息提交即入库；evict(`runtime_refresh:model`)×submit 并发回归与
   e2e「无活动 run 不得出现 Analyzing 帧」断言（需要完整 host 脚手架，见
@@ -203,3 +203,19 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 | 9 例 P0-1/P0-2/P1-2 回归 `-count=1 -v` | 9/9 PASS |
 | 其中 4 例 `-race -count=1` | PASS |
 | `go test ./cmd/aicli/commands/ -run 'TestRuntimeRefresh\|TestActorExecutor\|TestSuccessfulSend\|TestDebug\|Waiting\|TestChatRuntimeEvents_NextRunEpoch' -count=1` | PASS（runtime refresh 驱逐链路无回退） |
+
+### 6.5 第三轮实施（P1-2 看门狗自愈）
+
+| 文件 | 改动 |
+| --- | --- |
+| `backend/cmd/aicli/commands/chat_interaction.go` | `chatWaitingWithoutRunWatchdogBudget`（默认 60s，0=关闭）；判据 `chatWaitingDetachedFromRun`（仅进程内 actor 协议 + 事件桥存在 + `RunEpoch==0` 且无活动 run）；`armWaitingWithoutRunWatchdogLocked`（序号代数，旧定时器自然失效，无需保存/停止）；`onWaitingWithoutRunWatchdog`（清态 + debug 打点 + 动态栏 10s 提示）；`StartWaiting` 首次置位时布防 |
+| `backend/cmd/aicli/commands/chat_submit_run_epoch_wedge_test.go` | 追加 4 例：判据真值表、撕裂自愈（必须出现可见提示）、有 run epoch 时不误清、非 actor executor 不误清 |
+
+验证（2026-09-27 第三轮）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `go build ./cmd/aicli/commands/` / `go vet ./cmd/aicli/commands/` | PASS |
+| 13 例 P0-1/P0-2/P1-2 回归 `-count=1` | 13/13 PASS |
+| 看门狗/时钟 4 例 `-race -count=1` | PASS（首轮暴露"清态先于提示可见"的断言时序问题，已改为有界轮询） |
+| `go test ./cmd/aicli/commands/ -run 'TestRuntimeRefresh\|TestActorExecutor\|TestSuccessfulSend\|TestDebug\|Waiting\|TestChatRuntimeEvents_NextRunEpoch\|TestChatInteraction' -count=1` | PASS |

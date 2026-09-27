@@ -96,6 +96,9 @@ type chatInteractionCoordinator struct {
 	promptAdvanceFn    func() bool
 	liveStreamFn       func() bool
 	waitingActive      bool
+	// waitingWatchdogSeq 是"等待态脱离 run"看门狗的代数：闭包校验序号，旧定时器
+	// 自然失效（重复置位/清态后无需手动停止）。
+	waitingWatchdogSeq uint64
 	agentStage         chatAgentStage
 	agentStageDetail   string
 	inputMode          chatInputMode
@@ -2309,7 +2312,13 @@ func (c *chatInteractionCoordinator) StartWaiting() {
 		cursorRow, cursorCol := c.currentPromptCursorPositionLocked()
 		c.surface.SetPromptInputStateVersioned(formatSessionUserPrompt(c.session), draft.text, rows, cursorRow, cursorCol, draft.sequence)
 	}
+	wasWaiting := c.waitingActive
 	c.waitingActive = true
+	if !wasWaiting {
+		// P1-2：等待态若在预算内仍未与任何 run 挂钩（actor 协议下 run epoch 恒为
+		// 0），由看门狗清态 + 可见提示，而不是让"幽灵 Analyzing"永久停留。
+		c.armWaitingWithoutRunWatchdogLocked()
+	}
 	// 快照内部轮次计数：若本 turn 的 deferred CompleteWaiting 到达之前已有
 	// supervision auto-wake 接管 actor，完成摘要必须让位给内部轮次的实时
 	// 状态（见 finishWaiting）。
@@ -2401,6 +2410,60 @@ func (c *chatInteractionCoordinator) WaitingArmedSince() (bool, time.Time) {
 		return false, time.Time{}
 	}
 	return true, c.dynamicStatusStarted
+}
+
+// chatWaitingWithoutRunWatchdogBudget 是"等待态脱离 run"看门狗的预算；0 关闭。
+// 正常提交在 BeginRun 之后才置位等待态，不会命中；只有状态撕裂（等待态没有对应
+// 的 run epoch）才会触发（docs/plan/aicli-chat-submit-run-epoch-wedge-hardening.md P1-2）。
+var chatWaitingWithoutRunWatchdogBudget = 60 * time.Second
+
+// chatWaitingDetachedFromRun 判定等待态是否与 run 脱钩：只对进程内 actor 协议
+// （等待态由 BeginRun 之后置位）且事件桥存在、尚未开启任何 run epoch 的会话成立，
+// 避免误伤 legacy/shared 路径（它们的等待态本就不依赖 run epoch）。
+func chatWaitingDetachedFromRun(session *ChatSession) bool {
+	if session == nil || !chatExecutorArmsWaitingAfterBeginRun(session.ChatExecutor) {
+		return false
+	}
+	bridge := session.RuntimeEventBridge
+	if bridge == nil {
+		return false
+	}
+	return bridge.RunEpoch() == 0 && !bridge.RunActive()
+}
+
+// armWaitingWithoutRunWatchdogLocked 为本次等待态安排一次性看门狗：新序号使旧
+// 定时器失效，因此无需保存/停止计时器。
+func (c *chatInteractionCoordinator) armWaitingWithoutRunWatchdogLocked() {
+	if c == nil || c.shutdown || chatWaitingWithoutRunWatchdogBudget <= 0 {
+		return
+	}
+	c.waitingWatchdogSeq++
+	seq := c.waitingWatchdogSeq
+	time.AfterFunc(chatWaitingWithoutRunWatchdogBudget, func() {
+		c.onWaitingWithoutRunWatchdog(seq)
+	})
+}
+
+// onWaitingWithoutRunWatchdog 是撕裂自愈：等待态持续超过预算且无 run 背书时，
+// 清态 + 打点 + 动态栏提示，让用户重发而不是对着假忙等待。
+func (c *chatInteractionCoordinator) onWaitingWithoutRunWatchdog(seq uint64) {
+	if c == nil || c.session == nil {
+		return
+	}
+	c.mu.Lock()
+	stale := c.waitingWatchdogSeq != seq || c.shutdown || !c.waitingActive
+	c.mu.Unlock()
+	if stale || !chatWaitingDetachedFromRun(c.session) {
+		return
+	}
+	session := c.session
+	c.ClearWaiting()
+	writeSessionDebugInfo(session, fmt.Sprintf(
+		"[watchdog] waiting state cleared after %s: no open run epoch (chat-submit-run-epoch wedge guard)",
+		chatWaitingWithoutRunWatchdogBudget), false)
+	c.showTransientStatusNotice(fmt.Sprintf(
+		"等待状态超时已清理（%s 内未开启运行），请重试本次输入",
+		chatWaitingWithoutRunWatchdogBudget), 10*time.Second)
 }
 
 func (c *chatInteractionCoordinator) IsReady() bool {

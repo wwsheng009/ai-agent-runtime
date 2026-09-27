@@ -213,3 +213,122 @@ func TestChatActorForSessionBoundedPassesThroughNonTimeoutError(t *testing.T) {
 		t.Fatalf("expected the original build error to pass through, got %v", err)
 	}
 }
+
+// TestWaitingDetachedFromRunPredicate 直接锁定看门狗判据：只有 actor 协议 +
+// 已存在事件桥 + run epoch 为 0 且无活动 run 才算"等待态脱离 run"。
+func TestWaitingDetachedFromRunPredicate(t *testing.T) {
+	if chatWaitingDetachedFromRun(nil) {
+		t.Fatal("nil session must not be reported as detached")
+	}
+	legacy := &ChatSession{ChatExecutor: newAICLISharedChatExecutor()}
+	legacy.RuntimeEventBridge = newChatRuntimeEventBridge(legacy)
+	if chatWaitingDetachedFromRun(legacy) {
+		t.Fatal("non-actor executor must never be reported as detached")
+	}
+	actor := &ChatSession{ChatExecutor: newAICLIActorChatExecutor()}
+	if chatWaitingDetachedFromRun(actor) {
+		t.Fatal("actor session without a bridge must not be reported as detached")
+	}
+	actor.RuntimeEventBridge = newChatRuntimeEventBridge(actor)
+	if !chatWaitingDetachedFromRun(actor) {
+		t.Fatal("actor session with a fresh (epoch 0) bridge is detached")
+	}
+	actor.RuntimeEventBridge.BeginRun()
+	defer actor.RuntimeEventBridge.EndRun()
+	if chatWaitingDetachedFromRun(actor) {
+		t.Fatal("actor session with an open run epoch must not be reported as detached")
+	}
+}
+
+// TestWaitingWatchdogClearsDetachedWaiting 锁定 P1-2 自愈：actor 协议下等待态
+// 超过预算仍未开启任何 run epoch（事故形态）时必须自动清态并留下可见提示。
+func TestWaitingWatchdogClearsDetachedWaiting(t *testing.T) {
+	old := chatWaitingWithoutRunWatchdogBudget
+	chatWaitingWithoutRunWatchdogBudget = 20 * time.Millisecond
+	t.Cleanup(func() { chatWaitingWithoutRunWatchdogBudget = old })
+
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "watchdog-detached"},
+		ChatExecutor:   newAICLIActorChatExecutor(),
+	}
+	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+
+	coord.StartWaiting()
+	if armed, _ := coord.WaitingArmedSince(); !armed {
+		t.Fatal("sanity: StartWaiting must arm the waiting state")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	cleared := false
+	for time.Now().Before(deadline) {
+		if armed, _ := coord.WaitingArmedSince(); !armed {
+			cleared = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !cleared {
+		t.Fatal("watchdog must clear a waiting state that never opened a run epoch")
+	}
+	// 清态与提示发布在同一回调里先后完成：这里按有界窗口等待提示落地，避免
+	// 把"清态先可见"误判成"没有可见提示"。
+	noticeDeadline := time.Now().Add(time.Second)
+	for time.Now().Before(noticeDeadline) {
+		coord.mu.Lock()
+		notice := coord.diagnosticNotice
+		coord.mu.Unlock()
+		if notice != "" {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("watchdog must publish a visible notice when it clears a wedged waiting state")
+}
+
+// TestWaitingWatchdogKeepsWaitingWithOpenRun 保证看门狗不误伤：run epoch 已开启
+// 的等待态（正常 in-flight 回合）不得被清理。
+func TestWaitingWatchdogKeepsWaitingWithOpenRun(t *testing.T) {
+	old := chatWaitingWithoutRunWatchdogBudget
+	chatWaitingWithoutRunWatchdogBudget = 20 * time.Millisecond
+	t.Cleanup(func() { chatWaitingWithoutRunWatchdogBudget = old })
+
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "watchdog-running"},
+		ChatExecutor:   newAICLIActorChatExecutor(),
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	bridge.BeginRun()
+	t.Cleanup(bridge.EndRun)
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+
+	coord.StartWaiting()
+	time.Sleep(5 * chatWaitingWithoutRunWatchdogBudget)
+	if armed, _ := coord.WaitingArmedSince(); !armed {
+		t.Fatal("watchdog must not clear a waiting state backed by an open run epoch")
+	}
+}
+
+// TestWaitingWatchdogSkipsNonActorExecutor 保证 legacy/shared 路径不被误清：
+// 它们的等待态本就不依赖 run epoch。
+func TestWaitingWatchdogSkipsNonActorExecutor(t *testing.T) {
+	old := chatWaitingWithoutRunWatchdogBudget
+	chatWaitingWithoutRunWatchdogBudget = 20 * time.Millisecond
+	t.Cleanup(func() { chatWaitingWithoutRunWatchdogBudget = old })
+
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "watchdog-legacy"},
+		ChatExecutor:   newAICLISharedChatExecutor(),
+	}
+	session.RuntimeEventBridge = newChatRuntimeEventBridge(session)
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+
+	coord.StartWaiting()
+	time.Sleep(5 * chatWaitingWithoutRunWatchdogBudget)
+	if armed, _ := coord.WaitingArmedSince(); !armed {
+		t.Fatal("watchdog must not clear waiting states on non-actor executors")
+	}
+}
