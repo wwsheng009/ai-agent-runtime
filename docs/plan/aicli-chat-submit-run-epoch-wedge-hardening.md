@@ -176,9 +176,30 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 
 ### 6.3 后续（未完成项）
 
-- P0-2：`chatActorBeginRunBudget`（预跑阶段预算，需可配置以免冷启动误伤）。
+- ~~P0-2~~：已落地（见 §6.4）。收敛为 `chatActorBuildBudget`，只覆盖 actor 构建；
+  turn gate 等待与 run 本身由各自 ctx/生命周期约束，不纳入"预跑卡死"预算。
 - P1-1：显式 `RunState` 取代 epoch 0 双关；丢弃指标接入 `/web/api/analysis/errors`。
-- P1-2：状态行真值化 + 看门狗（等待态超时自动清态 / 提示重发）。
+- P1-2：部分落地（见 §6.4）。等待态时钟与 `/debug` 时长展示已就位；
+  超时自动清态 / 提示重发仍待办。
 - P2：`actorGeneration/refreshing` 标记 + refresh/submit 互斥（submit gate）。
 - P3：用户消息提交即入库；evict(`runtime_refresh:model`)×submit 并发回归与
-  e2e「无活动 run 不得出现 Analyzing 帧」断言。
+  e2e「无活动 run 不得出现 Analyzing 帧」断言（需要完整 host 脚手架，见
+  `chat_local_orchestration_integration_test.go` / `chat_runtime_refresh_actor_test.go`）。
+
+### 6.4 第二轮实施（P0-2 + P1-2 诊断）
+
+| 文件 | 改动 |
+| --- | --- |
+| `backend/cmd/aicli/commands/chat_actor_executor.go` | 新增 `chatActorBuildBudget`（默认 5m，0=关闭）、`chatActorBuildContext`、`chatActorForSessionBounded`；`Execute` 与 `ContinueGoal` 的 actor 构建改走有界路径，超时返回可诊断错误 |
+| `backend/cmd/aicli/commands/chat_interaction.go` | 新增 `WaitingArmedSince()`（复用 `dynamicStatusStarted` 作为等待起始时钟） |
+| `backend/cmd/aicli/commands/chat_debug_turn_metrics.go` | 新增 `Waiting For:`（等待态持续时长），供撕裂判定与事故复盘 |
+| `backend/cmd/aicli/commands/chat_submit_run_epoch_wedge_test.go` | 追加 4 例：等待态时钟生命周期、构建预算生效、预算关闭语义、非超时错误透传 |
+
+验证（2026-09-27 第二轮）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `go build ./cmd/aicli/commands/` | PASS |
+| 9 例 P0-1/P0-2/P1-2 回归 `-count=1 -v` | 9/9 PASS |
+| 其中 4 例 `-race -count=1` | PASS |
+| `go test ./cmd/aicli/commands/ -run 'TestRuntimeRefresh\|TestActorExecutor\|TestSuccessfulSend\|TestDebug\|Waiting\|TestChatRuntimeEvents_NextRunEpoch' -count=1` | PASS（runtime refresh 驱逐链路无回退） |
