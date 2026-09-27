@@ -575,7 +575,7 @@
 - **CLI（`finalizeChatSessionWithError`）**：新增 `resolveLocalChatSessionPendingWakes(session)`，best-effort（退出路径绝不因监督面失败而卡住），并保持既有「退出不冷开存储」约定——store 暴露 `Opened()` 且为冷时直接跳过（复用 `SQLiteSupervisionStore.Opened`），nil/空会话/空 store 全安全。
 - **测试（3 例新增）**：supervision 侧「只清本会话、其他会话与其他 root scope 不受影响」「空 session/nil store 是 no-op 且 ledger 不动」；CLI 侧「关掉本会话 1 条、其他会话 1 条保留、重复调用与 nil 幂等」（复用巡检测试的监督控制面 fixture）。
 - **验证**：`go test ./internal/supervision/ -run ResolvePendingWakesForSession` 2 例全绿；CLI 侧 5 例全绿（本轮又遇并行会话把 `cmd/aicli/commands` 写成半成品导致一次 `[build failed]`，重跑即恢复——非本改动）。
-- **残留**：API 侧 `DeleteSession` / `CloseSession` / `CloseSessionAgent` 尚未接同一清理（需要该侧 root scope 口径与 store accessor，且 `internal/api/runtimeapi/handler.go` 当前有并行会话写入；接入点已定位，留待并入该侧改动时一起做）。
+- **残留**：API 侧 `DeleteSession` / `CloseSession` / `CloseSessionAgent` 当时尚未接同一清理（需要该侧 root scope 口径与 store accessor）——已在 §9.21 收口。
 
 ### 9.20 `task_monitor` 定时巡检唤醒（§9.17 未做③ / §4.4 落地 3 收口）
 
@@ -592,7 +592,23 @@
 - **模型面（`ToolTaskMonitor` = `task_monitor`）**：`job_id`（别名 `task_id`）、`check_after_ms`（默认 45000、夹取 5000..600000）、`max_duration_ms`（可选，夹取 5000..3600000）、`cancel`（撤单，幂等）；结果区分四分支：已登记（`scheduled=true` + monitor_id + 生效的毫秒值）、已结束（内容结果 `scheduled=false` + 终态 + exit_code）、**撤单（`cancelled_monitors=N`，job 继续跑，终态唤醒不受影响）**、未知 id（可修复错误 + 「用 background_task 返回的 id」提示）。越界值夹取后回带生效值（与 `task_output.timeout_ms` 同惯例）。
   - `cancel=true` 与排期参数**互斥**（明确报错而非猜「替换还是追加」）：撤单由 `Manager.CancelJobMonitors(jobID)` 提供（按 job、幂等、nil/空输入安全）。
 - **策略面**：`taxonomy` 记 control；`capability` 映射 `CapBackgroundTask`（`max_duration_ms` 能杀进程，故不开只读后门）；`grants` 列 dangerous（不可 always-allow）；`tool_policy` read-only 拦截；`broker_arg_kinds`/`broker_arg_audit` 契约表补齐（契约测试全绿）。
-- **宿主接线**：API `handleBackgroundEvent` 与 CLI relay 改走共享分类器，monitor 族走新适配器（读 job 补 command）；CLI 投影后尝试一次即时投递（busy/限流保持 durable）；会话关闭额外 `disarmLocalChatSessionMonitors`。
+- **宿主接线**：API `handleBackgroundEvent` 与 CLI relay 改走共享分类器，monitor 族走新适配器（读 job 补 command）；CLI 投影后尝试一次即时投递（busy/限流保持 durable）；会话关闭额外 `disarmLocalChatSessionMonitors`；API 侧关闭/删除经 §9.21 的 `releaseSessionSupervisionObligations` 收口 wake+monitor。
 - **测试（13 例新增）**：manager 6（到点只发一次且报当前状态、终态/未知 id 拒绝、终态自动解除、max duration 终止且 `cancel_source=monitor_max_duration`、按会话清理、nil/空输入）；supervision 3（progress 唤醒 + 合并/消费语义、非法身份、事件词表镜像）；broker 4（夹取与登记、max duration 看门狗、已结束是内容结果、修复提示）；CLI 2（relay 投影 monitor_check、关闭清理）；API 1（适配器落库 + 唤醒）。
 - **验证**：`internal/background`、`internal/supervision`、`internal/toolbroker`、`internal/policy`、`internal/tools`、`internal/api/runtimeapi` 全绿；CLI 相关用例 7 例全绿。
-- **残留**：① 巡检不跨进程恢复（重启丢计时器，证据仍在 job store）；② API 侧会话删除/关闭仍未接 wake/monitor 清理（同 §9.19 残留①；CLI 侧已接 `disarmLocalChatSessionMonitors`）。
+- **残留**：巡检不跨进程恢复（重启丢计时器，证据仍在 job store）。
+
+### 9.21 API 侧会话关闭/删除收口（§9.19 残留 / §9.20 残留②收口）
+
+**问题**：CLI 早就在会话结束时作废本会话的待投递 wake 并解除巡检，但 API 宿主（长驻 server）没有对应动作：被关闭/删除的会话若留有 pending wake，恢复同 id 会话后 turn 结束会补投一轮过时 digest；其巡检计时器到点也只会给不存在的投递目标记一条记录。
+
+- **单点收口**：`Handler.releaseSessionSupervisionObligations(ctx, sessionID)`（`api/runtimeapi/background_supervision.go`）
+  - 先解除进程内巡检计时器（`manager.CancelSessionMonitors(sessionID)`，无需 store 在场）；
+  - 再作废待投递 wake（复用 supervision 的 `ResolvePendingWakesForSession(ctx, store, rootScope, sessionID)`，root scope 走既有 `backgroundJobRootScope` 口径）；
+  - best-effort：store 未注入/未接线/清理失败都不改变会话的关闭或删除结果；空 id、nil handler 全安全。
+- **接入点**（`releaseSupervision` 布尔量显式控制，避免用状态字符串猜语义）：
+  - `CloseSession` → `changeSessionState(..., "closed", true)`；`DeleteSession`、`BatchDeleteSessions` → 成功路径收口；
+  - `CloseSessionAgent` → 子会话关闭后按该会话 id 收口（子会话的 job 以其 id 为投递目标）；
+  - `ArchiveSession` / `ActivateSession` / `BatchArchiveSessions` **故意不清理**：归档与激活都可能在 resume 后继续交付，保留待投递 wake 才有意义。
+- **不需要「不冷开存储」守卫**：与 CLI 不同，API 侧 `getSupervisionStore()` 只返回已注入的 store（不做惰性打开），因此关闭/删除路径不会为了清理而新建监督面数据库。
+- **测试（1 例新增）**：API 侧「待投递 wake 被清空 + 巡检计时器归零 + 重复调用/空 id/nil handler 安全」；`./internal/api/runtimeapi/` 全量绿（37.5s），确认 `changeSessionState`/`batchSessionAction` 签名变更无遗漏调用点。
+- **残留**：Agent 侧 `CancelSessionMonitors` 只覆盖本进程 manager；跨进程（另一端 aicli 进程持有同一会话的 job）的计时器仍需各自进程自行收口（与本文件「巡检不跨进程恢复」一致）。

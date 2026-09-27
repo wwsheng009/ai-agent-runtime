@@ -367,6 +367,8 @@ func (h *Handler) CloseSessionAgent(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	// 子会话已关闭：它的待投递 wake 与巡检计时器同样失去投递目标。
+	h.releaseSessionSupervisionObligations(context.Background(), agentID)
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"agent": result,
 	})

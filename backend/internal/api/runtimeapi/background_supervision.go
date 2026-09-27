@@ -118,6 +118,38 @@ func backgroundJobPayloadDuration(value interface{}) time.Duration {
 	}
 }
 
+// releaseSessionSupervisionObligations 在会话关闭/删除时收口监督面：作废本会话的
+// 待投递 wake 义务（投递目标已不存在；证据仍在 notification / job store，由恢复后
+// 首个 turn 的 preflight digest 呈现），并解除该会话的巡检计时器。不清理的话，
+// 会话恢复后 turn 结束会补投一轮已经过时的 digest，而巡检到点只会给不存在的会话
+// 记一条记录。
+//
+// best-effort：监督面未接线、store 未注入或清理失败都不改变会话的关闭/删除结果。
+func (h *Handler) releaseSessionSupervisionObligations(parent context.Context, sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if h == nil || sessionID == "" {
+		return
+	}
+	// 巡检计时器是纯进程内资源：监督面没落库也要解除。
+	h.backgroundMu.Lock()
+	manager := h.backgroundManager
+	h.backgroundMu.Unlock()
+	if manager != nil {
+		manager.CancelSessionMonitors(sessionID)
+	}
+	store := h.getSupervisionStore()
+	if store == nil {
+		return
+	}
+	ctx := parent
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, backgroundJobTerminalProjectionTimeout)
+	defer cancel()
+	_, _ = supervision.ResolvePendingWakesForSession(ctx, store, h.backgroundJobRootScope(ctx, sessionID), sessionID)
+}
+
 // backgroundJobRootScope resolves the budget/inbox root for the owning
 // session. A session lookup failure degrades to the session id itself, which
 // keeps the projection usable in hosts without a session manager.

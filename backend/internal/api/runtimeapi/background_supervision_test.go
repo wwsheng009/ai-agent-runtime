@@ -3,6 +3,7 @@ package runtimeapi
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -325,4 +326,62 @@ func TestProjectBackgroundJobMonitor_ProjectsItemAndProgressWake(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pending, 1, "a check must schedule exactly one wake")
 	require.Equal(t, supervision.EventBackgroundJobMonitor, pending[0].WakeReason)
+}
+
+// releaseSessionTestSleeperCommand 造一个跨平台的长睡命令（Windows 的 pwsh 与
+// POSIX shell 都认）。
+func releaseSessionTestSleeperCommand() string {
+	if runtime.GOOS == "windows" {
+		return "powershell -NoProfile -Command \"Start-Sleep -Seconds 20\""
+	}
+	return "sleep 20"
+}
+
+// TestReleaseSessionSupervisionObligations 覆盖会话关闭/删除的收口：待投递 wake
+// 作废、巡检计时器解除，且两条路径都 best-effort。
+func TestReleaseSessionSupervisionObligations(t *testing.T) {
+	handler, store, scheduler := newAPIWakeTestHandler(t, "api-bg-release")
+	ctx := context.Background()
+
+	// 一条待投递 wake：走生产同一条终态投影路径。
+	_, err := supervision.ProjectBackgroundJobTerminal(ctx, store, scheduler, supervision.BackgroundJobTerminalInput{
+		RootScopeID:           "sess-1",
+		TargetParentSessionID: "sess-1",
+		JobID:                 "job-terminal",
+		Status:                "completed",
+		Epoch:                 1,
+	})
+	require.NoError(t, err)
+	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{RootScopeID: "sess-1", UnclaimedOnly: true})
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+
+	// 一个挂在运行中 job 上的巡检。
+	manager := background.NewManager(background.Config{})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	job, err := manager.SubmitShell(ctx, "sess-1", background.BackgroundTaskArgs{Command: releaseSessionTestSleeperCommand()})
+	require.NoError(t, err)
+	_, err = manager.ScheduleMonitor(job.ID, background.MonitorOptions{CheckAfter: 20 * time.Second})
+	require.NoError(t, err)
+	require.Equal(t, 1, manager.ActiveMonitorCount())
+	handler.backgroundMu.Lock()
+	handler.backgroundManager = manager
+	handler.backgroundMu.Unlock()
+
+	handler.releaseSessionSupervisionObligations(ctx, "sess-1")
+
+	pending, err = store.ListWakePending(ctx, supervision.WakeFilter{RootScopeID: "sess-1", UnclaimedOnly: true})
+	require.NoError(t, err)
+	require.Empty(t, pending, "a closed session must not keep a wake obligation")
+	require.Zero(t, manager.ActiveMonitorCount(), "a closed session must not keep monitor timers")
+
+	// 幂等 + 空输入安全：清理路径不能成为新的错误来源。
+	handler.releaseSessionSupervisionObligations(ctx, "sess-1")
+	handler.releaseSessionSupervisionObligations(ctx, "   ")
+	handler.releaseSessionSupervisionObligations(ctx, "sess-1")
+	var nilHandler *Handler
+	nilHandler.releaseSessionSupervisionObligations(ctx, "sess-1")
+	require.Zero(t, manager.ActiveMonitorCount())
+
+	_, _ = manager.CancelJob(ctx, job.ID)
 }

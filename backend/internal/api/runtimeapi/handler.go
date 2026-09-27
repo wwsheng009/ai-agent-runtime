@@ -3059,6 +3059,8 @@ func (h *Handler) DeleteSession(w http.ResponseWriter, r *http.Request) {
 		writeSessionStoreError(w, err)
 		return
 	}
+	// 会话已删除：作废其待投递 wake 并解除巡检（best-effort，不影响删除结果）。
+	h.releaseSessionSupervisionObligations(context.Background(), sessionID)
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"deleted": true,
@@ -3284,21 +3286,21 @@ func (h *Handler) UpdateSession(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ArchiveSession(w http.ResponseWriter, r *http.Request) {
 	h.changeSessionState(w, r, func(ctx context.Context, sessionID string) error {
 		return h.sessionManager.ArchiveSession(ctx, sessionID)
-	}, "archived")
+	}, "archived", false)
 }
 
 // ActivateSession 激活会话
 func (h *Handler) ActivateSession(w http.ResponseWriter, r *http.Request) {
 	h.changeSessionState(w, r, func(ctx context.Context, sessionID string) error {
 		return h.sessionManager.Activate(ctx, sessionID)
-	}, "active")
+	}, "active", false)
 }
 
 // CloseSession 关闭会话
 func (h *Handler) CloseSession(w http.ResponseWriter, r *http.Request) {
 	h.changeSessionState(w, r, func(ctx context.Context, sessionID string) error {
 		return h.sessionManager.Close(ctx, sessionID)
-	}, "closed")
+	}, "closed", true)
 }
 
 // ClearSessionHistory 清空会话历史
@@ -3327,17 +3329,20 @@ func (h *Handler) ClearSessionHistory(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) BatchDeleteSessions(w http.ResponseWriter, r *http.Request) {
 	h.batchSessionAction(w, r, func(ctx context.Context, sessionID string) error {
 		return h.sessionManager.Delete(ctx, sessionID)
-	}, "deleted")
+	}, "deleted", true)
 }
 
 // BatchArchiveSessions 批量归档会话
 func (h *Handler) BatchArchiveSessions(w http.ResponseWriter, r *http.Request) {
 	h.batchSessionAction(w, r, func(ctx context.Context, sessionID string) error {
 		return h.sessionManager.ArchiveSession(ctx, sessionID)
-	}, "archived")
+	}, "archived", false)
 }
 
-func (h *Handler) changeSessionState(w http.ResponseWriter, r *http.Request, action func(context.Context, string) error, state string) {
+// changeSessionState 是所有会话状态迁移的公共入口。releaseSupervision 只在「迁移后
+// 没有下一轮 turn」的状态上为 true（关闭/删除）：归档与激活都可能在 resume 后继续
+// 交付，保留待投递 wake 才有意义。
+func (h *Handler) changeSessionState(w http.ResponseWriter, r *http.Request, action func(context.Context, string) error, state string, releaseSupervision bool) {
 	if h.sessionManager == nil {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
 			"session manager not configured"))
@@ -3350,6 +3355,9 @@ func (h *Handler) changeSessionState(w http.ResponseWriter, r *http.Request, act
 	if err := action(ctx, sessionID); err != nil {
 		writeSessionStoreError(w, err)
 		return
+	}
+	if releaseSupervision {
+		h.releaseSessionSupervisionObligations(context.Background(), sessionID)
 	}
 
 	session, err := h.sessionManager.GetSession(ctx, sessionID)
@@ -3364,7 +3372,7 @@ func (h *Handler) changeSessionState(w http.ResponseWriter, r *http.Request, act
 	})
 }
 
-func (h *Handler) batchSessionAction(w http.ResponseWriter, r *http.Request, action func(context.Context, string) error, actionName string) {
+func (h *Handler) batchSessionAction(w http.ResponseWriter, r *http.Request, action func(context.Context, string) error, actionName string, releaseSupervision bool) {
 	if h.sessionManager == nil {
 		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid,
 			"session manager not configured"))
@@ -3393,6 +3401,9 @@ func (h *Handler) batchSessionAction(w http.ResponseWriter, r *http.Request, act
 		if err := action(ctx, sessionID); err != nil {
 			failures[sessionID] = err.Error()
 			continue
+		}
+		if releaseSupervision {
+			h.releaseSessionSupervisionObligations(context.Background(), sessionID)
 		}
 		processed = append(processed, sessionID)
 	}
