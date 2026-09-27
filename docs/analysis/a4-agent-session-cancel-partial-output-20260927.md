@@ -29,7 +29,7 @@
   - **实施中实测到的两条语义教训**（已写进实现与测试）：
     1. 取消路径上 agent 可能把 `success` 记为 `true`（带部分结果的"优雅停止"），因此触发条件不能只看 `!success`；
     2. 取消时 `result.Output` 常是宿主罐头停止提示（"当前运行已停止；已保留 N 条工具观察…"），绝不能优先于历史产物——否则真正的产物会被提示语盖住。
-  - 未接入：`actor.go` 约 4140 行的 `resume` 型终态发射点（如需覆盖再补）。
+  - **已接入 resume 型终态**（`7f7927da`）：`finishPendingBatchRecovery`（恢复未完成工具批失败/被取代）此前只有 `status/error/steps=0`，现复用 `pendingBatchRecoveryPayload` 带出同样的 `partial_*` 字段；`steps` 语义不变，仅在有产物时新增键。
 - **关联**：
   - 复盘 `docs/analysis/session-20260926205017-subagent-runtime-postmortem-20260926.md`
   - A3 提交 `f4cd672e`（子代理执行脱离父 run 的干净结束/挂起）
