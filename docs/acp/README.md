@@ -201,6 +201,8 @@ todos 快照重建任务列表，重复快照不再重发。
 - 客户端关闭选择器时应返回 `{"outcome":{"outcome":"cancelled"}}`
 - prompt 被取消时，挂起的权限请求会随 promptCtx 一起中止
 - 想完全不弹审批：启动时用 `--yolo`（bypass_permissions）或 `--disable-tools`
+- `allow-always` **不会**产生 durable（`project`）授权：跨会话的 `grants.json` 只从用户显式入口
+  产生（Web 设置页、审批里的「记住」），远端客户端无法把权限写成新会话默认。
 
 ### 权限入口对照表
 
@@ -235,7 +237,7 @@ todos 快照重建任务列表，重复快照不再重发。
 | 客户端选项 | aicli 决策 | 记忆行为 | 现状 |
 |---|---|---|---|
 | `allow-once` | 允许一次 | 不记忆 | ✅ |
-| `allow-always` | 允许 | **CLI 侧进程内授权族复用**（默认 10 分钟 TTL，按工具+参数族去重；`chat_runtime_events.go`） | ✅（注意：**不是** policy 的 `RememberScope=session/project` 记忆库） |
+| `allow-always` | 允许 | **会话作用域记忆**（`RememberScope=session`，进程内 store，**不写** `.aicli/grants.json`）：仅当服务端派生 `remember_pattern` 非空时才请求（危险工具/硬询问/敏感写/外部目录时为空，引擎还会再查一次 `IsDangerousTool`）；不可记忆的场景（如 shell 只读族）仍回落到 CLI 侧进程内授权族复用（10 分钟 TTL） | ✅ |
 | `reject-once` | 拒绝一次 | —— | ✅ |
 | `reject_always` | —— | —— | 类型已定义（`PermissionKindRejectAlways`），**未出现在默认选项里、未接线** |
 | `outcome:"cancelled"` | 拒绝（等价中断） | —— | ✅ |

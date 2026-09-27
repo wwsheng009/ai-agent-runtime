@@ -625,8 +625,9 @@ func TestAICLIRuntimeServerChatExecutorApprovesRuntimeServerToolRequest(t *testi
 }
 
 // TestApproveRuntimeServerToolPostsFeedback 固化 §4.8 的 server 路径请求体：
-// 拒绝理由必须作为 `feedback` 与 allow=false 一起下发（runtimeapi 的
-// approve_tool 已接受并校验该字段）；普通决策保持原请求体不变。
+// 拒绝理由作为 `feedback` 与 allow=false 一起下发，remember_scope 只在允许且
+// 非空时下发（runtimeapi 的 approve_tool 已接受并校验这两个字段）；普通决策与
+// 拒绝都保持原请求体不变。
 func TestApproveRuntimeServerToolPostsFeedback(t *testing.T) {
 	var mu sync.Mutex
 	bodies := make([]map[string]interface{}, 0, 2)
@@ -644,16 +645,23 @@ func TestApproveRuntimeServerToolPostsFeedback(t *testing.T) {
 
 	session := &ChatSession{HTTPClient: server.Client()}
 	executor := &aicliRuntimeServerChatExecutor{serverURL: server.URL}
-	require.NoError(t, executor.approveRuntimeServerTool(context.Background(), session, "session-1", "request-1", false, "不要动这个文件"))
-	require.NoError(t, executor.approveRuntimeServerTool(context.Background(), session, "session-1", "request-2", true, ""))
+	require.NoError(t, executor.approveRuntimeServerTool(context.Background(), session, "session-1", "request-1", false, "不要动这个文件", ""))
+	require.NoError(t, executor.approveRuntimeServerTool(context.Background(), session, "session-1", "request-2", true, "", ""))
+	require.NoError(t, executor.approveRuntimeServerTool(context.Background(), session, "session-1", "request-3", true, "", " SESSION "))
+	require.NoError(t, executor.approveRuntimeServerTool(context.Background(), session, "session-1", "request-4", false, "", "project"))
 
-	require.Len(t, bodies, 2)
+	require.Len(t, bodies, 4)
 	require.Equal(t, "approve_tool", bodies[0]["type"])
 	require.Equal(t, "request-1", bodies[0]["request_id"])
 	require.Equal(t, false, bodies[0]["allow"])
 	require.Equal(t, "不要动这个文件", bodies[0]["feedback"])
 	_, hasFeedback := bodies[1]["feedback"]
 	require.False(t, hasFeedback, "an ordinary allow must keep the request body unchanged")
+	_, hasScope := bodies[1]["remember_scope"]
+	require.False(t, hasScope, "an ordinary allow must not carry a remember scope")
+	require.Equal(t, "session", bodies[2]["remember_scope"], "an allow-always style decision forwards the normalized scope")
+	_, denyScope := bodies[3]["remember_scope"]
+	require.False(t, denyScope, "a denial must not carry a remember scope")
 }
 
 func TestAICLIRuntimeServerChatExecutorAnswersRuntimeServerQuestion(t *testing.T) {

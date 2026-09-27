@@ -568,8 +568,8 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeCommand(ctx context.Conte
 		bridge.startProcessor()
 		previousApprove := bridge.approveTool
 		previousAnswer := bridge.answerQuestion
-		bridge.approveTool = func(ctx context.Context, eventSessionID, requestID string, allow bool, feedback string) error {
-			return e.approveRuntimeServerTool(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), requestID, allow, feedback)
+		bridge.approveTool = func(ctx context.Context, eventSessionID, requestID string, allow bool, feedback, rememberScope string) error {
+			return e.approveRuntimeServerTool(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), requestID, allow, feedback, rememberScope)
 		}
 		bridge.answerQuestion = func(ctx context.Context, eventSessionID, questionID, answer string) error {
 			return e.answerRuntimeServerQuestion(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), questionID, answer)
@@ -628,8 +628,8 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeContinuation(ctx context.
 		bridge.startProcessor()
 		previousApprove := bridge.approveTool
 		previousAnswer := bridge.answerQuestion
-		bridge.approveTool = func(ctx context.Context, eventSessionID, requestID string, allow bool, feedback string) error {
-			return e.approveRuntimeServerTool(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), requestID, allow, feedback)
+		bridge.approveTool = func(ctx context.Context, eventSessionID, requestID string, allow bool, feedback, rememberScope string) error {
+			return e.approveRuntimeServerTool(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), requestID, allow, feedback, rememberScope)
 		}
 		bridge.answerQuestion = func(ctx context.Context, eventSessionID, questionID, answer string) error {
 			return e.answerRuntimeServerQuestion(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), questionID, answer)
@@ -821,7 +821,7 @@ func (e *aicliRuntimeServerChatExecutor) submitRuntimeServerContinue(ctx context
 	return &decoded, statusCode, nil
 }
 
-func (e *aicliRuntimeServerChatExecutor) approveRuntimeServerTool(ctx context.Context, session *ChatSession, sessionID, requestID string, allow bool, feedback string) error {
+func (e *aicliRuntimeServerChatExecutor) approveRuntimeServerTool(ctx context.Context, session *ChatSession, sessionID, requestID string, allow bool, feedback, rememberScope string) error {
 	payload := map[string]interface{}{
 		"type":       "approve_tool",
 		"request_id": requestID,
@@ -831,6 +831,11 @@ func (e *aicliRuntimeServerChatExecutor) approveRuntimeServerTool(ctx context.Co
 	// 普通允许/拒绝保持请求体逐字节不变，仅非空理由才追加。
 	if feedback = strings.TrimSpace(feedback); feedback != "" {
 		payload["feedback"] = feedback
+	}
+	// §4.8：remember_scope 只在允许且非空时下发（服务端校验 once|session|project，
+	// 未知值 400；具体能记住什么仍由引擎按调用参数派生，宿主无法放宽范围）。
+	if rememberScope = strings.ToLower(strings.TrimSpace(rememberScope)); allow && rememberScope != "" {
+		payload["remember_scope"] = rememberScope
 	}
 	_, err := e.doRuntimeServerJSON(ctx, session, http.MethodPost, runtimeServerCommandPath(sessionID), "", payload, nil)
 	return err

@@ -14,6 +14,7 @@ import (
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -606,6 +607,43 @@ func TestACPEventBridge_AskApprovalAllowAlwaysRemember(t *testing.T) {
 	}
 	if !answer.Allowed || !answer.Reuse {
 		t.Fatalf("answer = %+v, want Allowed+Reuse", answer)
+	}
+	// §4.8：服务端没给 RememberPattern（危险工具/硬询问/敏感写/外部目录），
+	// 宿主不得自行推断可记忆，故不发 remember scope。
+	if answer.RememberScope != "" {
+		t.Fatalf("RememberScope = %q, want empty without a server-derived pattern", answer.RememberScope)
+	}
+}
+
+// TestACPEventBridge_AskApprovalAllowAlwaysRemembersSession 固化 §4.8 的 ACP 映射：
+// allow-always 且服务端派生了 RememberPattern 时，请求 session 作用域记忆
+// （进程内，不写 .aicli/grants.json）；拒绝档不带 scope。
+func TestACPEventBridge_AskApprovalAllowAlwaysRemembersSession(t *testing.T) {
+	t.Parallel()
+
+	bridge := newACPEventBridge("sess_1")
+	req := &fixedPermissionRequester{
+		result: acp.RequestPermissionResult{
+			Outcome: acp.PermissionOutcome{
+				Outcome:  acp.PermissionOutcomeSelected,
+				OptionID: "allow-always",
+			},
+		},
+	}
+	bridge.SetPermissionRequester(req)
+
+	answer, err := bridge.AskApproval(&runtimechat.ApprovalRequest{
+		ToolName:        "write",
+		RememberPattern: "path:README.md",
+	}, nil)
+	if err != nil {
+		t.Fatalf("AskApproval: %v", err)
+	}
+	if !answer.Allowed || !answer.Reuse {
+		t.Fatalf("answer = %+v, want Allowed+Reuse", answer)
+	}
+	if answer.RememberScope != runtimepolicy.RememberScopeSession {
+		t.Fatalf("RememberScope = %q, want %q", answer.RememberScope, runtimepolicy.RememberScopeSession)
 	}
 }
 

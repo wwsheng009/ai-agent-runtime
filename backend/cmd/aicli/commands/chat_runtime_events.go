@@ -191,7 +191,7 @@ type chatRuntimeEventBridge struct {
 	// reports that no panel is available, the run keeps the historical
 	// fail-closed behavior instead of silently inventing an answer.
 	askQuestionHeadless func(prompt string, suggestions []string, required bool) (string, error)
-	approveTool         func(ctx context.Context, sessionID, requestID string, allow bool, feedback string) error
+	approveTool         func(ctx context.Context, sessionID, requestID string, allow bool, feedback, rememberScope string) error
 	answerQuestion      func(ctx context.Context, sessionID, questionID, answer string) error
 	// preferInteractiveApprovals keeps NoInteractive headless hosts (ACP stdio)
 	// from auto-denying tools so askApproval can RPC to an external client.
@@ -315,6 +315,13 @@ type chatApprovalAnswer struct {
 	// `5` + reason prompt land here; a bare/empty reason stays an ordinary
 	// denial with no feedback.
 	Feedback string
+	// RememberScope asks the engine to remember this allow (§4.8), e.g. the ACP
+	// `allow-always` option maps to "session". Hosts do not re-implement the
+	// eligibility rules: the request carries ApprovalRequest.RememberPattern,
+	// which the server leaves empty for dangerous tools, hard asks, sensitive
+	// writes and external-dir admissions, and the engine re-checks
+	// IsDangerousTool before storing anything.
+	RememberScope string
 }
 
 // chatRuntimePriorityTranscriptTarget carries the identity of the control
@@ -5066,14 +5073,14 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		approval := b.approvalRequestForEvent(event)
 		approvalContextLines := approvalRequestContextLines(event.Payload)
 		if grantKey := b.autoApprovalGrantKey(event.SessionID, approval); grantKey != "" && b.hasApprovalGrant(grantKey) {
-			if err := b.resolveApproval(context.Background(), event.SessionID, requestID, true, ""); err != nil {
+			if err := b.resolveApproval(context.Background(), event.SessionID, requestID, true, "", ""); err != nil {
 				b.setRunError(err)
 			}
 			return
 		}
 		if b.session.NoInteractive && !b.preferInteractiveApprovals {
 			b.setRunError(b.nonInteractiveApprovalError(approval))
-			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false, "")
+			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false, "", "")
 			return
 		}
 		reason, _ := event.Payload["reason"].(string)
@@ -5115,14 +5122,14 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 				return
 			}
 			b.setRunError(askErr)
-			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false, "")
+			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false, "", "")
 			return
 		}
 		b.renderApprovalDecision(approval, answer.Allowed)
 		if answer.Allowed && answer.Reuse {
 			b.rememberApprovalGrant(b.autoApprovalGrantKey(event.SessionID, approval))
 		}
-		if err := b.resolveApproval(context.Background(), event.SessionID, requestID, answer.Allowed, answer.Feedback); err != nil {
+		if err := b.resolveApproval(context.Background(), event.SessionID, requestID, answer.Allowed, answer.Feedback, answer.RememberScope); err != nil {
 			b.setRunError(err)
 		}
 	case runtimechat.EventQuestionAsked:
@@ -7835,24 +7842,31 @@ func (b *chatRuntimeEventBridge) questionStillPending(sessionID, questionID stri
 }
 
 // resolveApproval routes an approval decision (plus the optional §4.8
-// free-text rejection reason) to the server hook when one is installed, and
-// otherwise to the local session actor through ApproveToolWithDecision so the
-// feedback is not lost on the local path.
-func (b *chatRuntimeEventBridge) resolveApproval(ctx context.Context, sessionID, requestID string, allow bool, feedback string) error {
+// free-text rejection reason and remember scope) to the server hook when one is
+// installed, and otherwise to the local session actor through
+// ApproveToolWithDecision so neither field is lost on the local path.
+//
+// The scope is forwarded verbatim (lower-cased); eligibility is not
+// re-implemented here: the actor/engine coerce unknown scopes to once and
+// refuse to remember dangerous tools, so a host cannot widen permissions by
+// asking for a bigger scope than the ask allows.
+func (b *chatRuntimeEventBridge) resolveApproval(ctx context.Context, sessionID, requestID string, allow bool, feedback, rememberScope string) error {
 	if b == nil {
 		return nil
 	}
 	feedback = strings.TrimSpace(feedback)
+	rememberScope = strings.ToLower(strings.TrimSpace(rememberScope))
 	if b.approveTool != nil {
-		return b.approveTool(ctx, sessionID, requestID, allow, feedback)
+		return b.approveTool(ctx, sessionID, requestID, allow, feedback, rememberScope)
 	}
 	actor, err := b.lookupActor(sessionID)
 	if err != nil {
 		return err
 	}
 	return actor.ApproveToolWithDecision(ctx, requestID, runtimechat.ApproveToolDecision{
-		Allow:    allow,
-		Feedback: feedback,
+		Allow:         allow,
+		Feedback:      feedback,
+		RememberScope: rememberScope,
 	})
 }
 

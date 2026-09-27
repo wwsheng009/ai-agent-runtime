@@ -411,7 +411,7 @@ disable_bypass: true         # 我的机器上永不开 yolo
 |------|------|------|
 | CLI chat | `[1] 仅本次允许` `[2] 拒绝` `[3] 查看完整参数`（只读场景另有 `[4] 复用 10 分钟`） | `[4]` 是进程内 TTL 复用，不写 grants 文件 |
 | Web | 批准 / 拒绝 + 可选「记住」（作用域 `仅本会话` / `本项目`）+ 可选说明 | 后端下发 `remember_pattern` 时才出现勾选，勾选前即展示将记住什么 |
-| ACP | `allow-once` / `allow-always` / `reject-once` | —— |
+| ACP | `allow-once` / `allow-always` / `reject-once` | `allow-always` → 会话作用域记忆（需服务端 `remember_pattern` 非空；进程内，**不写** grants.json）；不可记忆的场景回落到进程内授权族复用 |
 | 子代理 | 父会话侧 `resolve_agent_approval` 决策 | 子代理无独立审批 UI |
 
 ### 5.2 记忆（grants）
@@ -420,6 +420,7 @@ disable_bypass: true         # 我的机器上永不开 yolo
 - 记忆模式以 specifier 形态存储：`cmd:<base>:*`（仅当整条命令是单一基命令且非高风险时才泛化）、`path:`、`host:`、`exact:`；旧的无前缀模式按历史子串语义兼容。
 - **不可记忆**：危险工具（`shell`/`bash`/`aicli_exec`/`background_task`）、根/主目录断路器、敏感写、外部目录准入——每次都需要人工确认。
 - 记忆授权在求值时仍要先过断路器、敏感写与外部目录门，不会「一记了之」。
+- 作用域由**服务端数据**决定：`remember_pattern` 为空即不可记忆，宿主（CLI `[5]`、Web 勾选、ACP `allow-always`）都不自行推断。`project`（durable）只从用户显式入口产生——ACP 客户端最高只能拿到 `session`，无法把权限写成新会话默认。
 - 管理入口：CLI `/grants [list|status|revoke <tool> [pattern]]`（查看/撤销 durable grants；`revoke` 只收窄权限，无需二次确认）、CLI `/approval-reuse`（查看/清理进程内 10 分钟复用授权，**不写 grants 文件**）、`aicli exec --approval-reuse off|session_readonly_shell|team_readonly_shell`、Web 设置页（`GET/POST /harness/grants`，durable 授权的写入面）。
 - **project 记忆会写进工作区**：请把 `.aicli/grants.json` 视作个人授权文件（建议加入 `.gitignore`，不要提交）。
 

@@ -252,7 +252,7 @@ func TestRestoredPendingApprovalRoutesDecisionAndClears(t *testing.T) {
 		allow     bool
 	}
 	calls := make(chan approvalCall, 1)
-	bridge.approveTool = func(_ context.Context, _, requestID string, allow bool, _ string) error {
+	bridge.approveTool = func(_ context.Context, _, requestID string, allow bool, _, _ string) error {
 		calls <- approvalCall{requestID: requestID, allow: allow}
 		return nil
 	}
@@ -298,7 +298,7 @@ func TestRestoredPendingApprovalDenyWithReasonCarriesFeedback(t *testing.T) {
 			},
 		})
 		calls := make(chan approvalCall, 1)
-		bridge.approveTool = func(_ context.Context, _, _ string, allow bool, feedback string) error {
+		bridge.approveTool = func(_ context.Context, _, _ string, allow bool, feedback, _ string) error {
 			calls <- approvalCall{allow: allow, feedback: feedback}
 			return nil
 		}
@@ -360,7 +360,7 @@ func TestRestoredPendingApprovalAutoResolvesUnderYolo(t *testing.T) {
 	session.PermissionMode = runtimepolicy.ModeBypassPermissions
 
 	allowed := make(chan bool, 1)
-	bridge.approveTool = func(_ context.Context, _, _ string, allow bool, _ string) error {
+	bridge.approveTool = func(_ context.Context, _, _ string, allow bool, _, _ string) error {
 		allowed <- allow
 		return nil
 	}

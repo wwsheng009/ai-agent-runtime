@@ -3532,20 +3532,24 @@ func TestReadApprovalDenyReasonRepromptsOverlongWithoutTruncating(t *testing.T) 
 func TestChatRuntimeEvents_ResolveApprovalForwardsFeedbackToHook(t *testing.T) {
 	bridge := newChatRuntimeEventBridge(&ChatSession{})
 	type approvalCall struct {
-		allow    bool
-		feedback string
+		allow         bool
+		feedback      string
+		rememberScope string
 	}
 	calls := make(chan approvalCall, 1)
-	bridge.approveTool = func(_ context.Context, _, _ string, allow bool, feedback string) error {
-		calls <- approvalCall{allow: allow, feedback: feedback}
+	bridge.approveTool = func(_ context.Context, _, _ string, allow bool, feedback, rememberScope string) error {
+		calls <- approvalCall{allow: allow, feedback: feedback, rememberScope: rememberScope}
 		return nil
 	}
 
-	require.NoError(t, bridge.resolveApproval(context.Background(), "session-1", "request-1", false, "  先看 README  "))
+	// §4.8：自由文本理由与 remember scope 都按 trim/lower 原样到钩子；
+	// 范围裁剪不是宿主职责（actor/引擎会把未知 scope 收敛为 once）。
+	require.NoError(t, bridge.resolveApproval(context.Background(), "session-1", "request-1", false, "  先看 README  ", " SESSION "))
 	select {
 	case call := <-calls:
 		require.False(t, call.allow)
 		require.Equal(t, "先看 README", call.feedback)
+		require.Equal(t, "session", call.rememberScope)
 	default:
 		t.Fatal("the approveTool hook did not receive the decision")
 	}

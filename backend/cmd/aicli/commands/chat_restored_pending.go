@@ -417,7 +417,7 @@ func handleRestoredPendingAnswerLine(session *ChatSession, input string) bool {
 				return true
 			}
 			renderChatRuntimePriorityPromptTranscript(session, pending.lines, pending.promptLine, text)
-			if err := bridge.resolveApproval(context.Background(), pending.sessionID, pending.requestID, false, text); err != nil {
+			if err := bridge.resolveApproval(context.Background(), pending.sessionID, pending.requestID, false, text, ""); err != nil {
 				renderRestoredPendingError(session, err)
 			} else {
 				bridge.renderApprovalDecision(pending.approval, false)
@@ -453,7 +453,7 @@ func handleRestoredPendingAnswerLine(session *ChatSession, input string) bool {
 				return true
 			}
 			renderChatRuntimePriorityPromptTranscript(session, pending.lines, pending.promptLine, text)
-			if err := bridge.resolveApproval(context.Background(), pending.sessionID, pending.requestID, false, feedback); err != nil {
+			if err := bridge.resolveApproval(context.Background(), pending.sessionID, pending.requestID, false, feedback, ""); err != nil {
 				renderRestoredPendingError(session, err)
 			} else {
 				bridge.renderApprovalDecision(pending.approval, false)
@@ -464,7 +464,7 @@ func handleRestoredPendingAnswerLine(session *ChatSession, input string) bool {
 		allowed := decision == approvalPromptAllowOnce || decision == approvalPromptAllowReuse
 		reuse := decision == approvalPromptAllowReuse
 		renderChatRuntimePriorityPromptTranscript(session, pending.lines, pending.promptLine, text)
-		if err := bridge.resolveApproval(context.Background(), pending.sessionID, pending.requestID, allowed, ""); err != nil {
+		if err := bridge.resolveApproval(context.Background(), pending.sessionID, pending.requestID, allowed, "", ""); err != nil {
 			renderRestoredPendingError(session, err)
 		} else {
 			bridge.renderApprovalDecision(pending.approval, allowed)
@@ -502,7 +502,7 @@ func resolveRestoredPendingApprovalWithoutPrompt(
 	if bridge == nil {
 		return
 	}
-	if err := bridge.resolveApproval(context.Background(), sessionID, strings.TrimSpace(approval.ID), allow, ""); err != nil {
+	if err := bridge.resolveApproval(context.Background(), sessionID, strings.TrimSpace(approval.ID), allow, "", ""); err != nil {
 		renderRestoredPendingError(session, err)
 		return
 	}

@@ -564,8 +564,9 @@
 
 本切片明确**未做**（4.8 剩余：宿主 UI/桥接面）。其中 CLI `[5]` 已由后续切片落地（§12.3），下列为剩余项：
 
-- ~~CLI `[5] 拒绝并说明原因`（自由文本 → `Feedback`）~~ **已完成（§12.3）**：本地 actor + runtime-server 两条路径（含恢复态与 `/call` 直接函数审批）都会把自由文本作为 `Feedback` 下发；空理由等同普通拒绝，超长不截断；仍未做的是 `[4]` 复用与 `ApprovalResponse.Remember + Scope` 的合并（CLI 现有 10 分钟 TTL 复用仍是独立轨道）；
-- ACP `reject_always`（`acp/types.go` 已定义未启用）与 `allow-always` → policy 记忆库（`RememberScope=session/project`）的映射——当前 `allow-always` 走的是 CLI 侧进程内授权族复用（10 分钟 TTL）；现状已写入 ACP 手册「权限入口对照表」；
+- ~~CLI `[5] 拒绝并说明原因`（自由文本 → `Feedback`）~~ **已完成（§12.3）**：本地 actor + runtime-server 两条路径（含恢复态与 `/call` 直接函数审批）都会把自由文本作为 `Feedback` 下发；空理由等同普通拒绝，超长不截断；
+- ~~`[4]` 复用与 `ApprovalResponse.Remember + Scope` 的合并~~ **结论：不合并（设计决策，2026-09-26）**。引擎的记忆写入有两道服务端守卫：`ApprovalRequest.RememberPattern` 在危险工具/硬询问/敏感写/外部目录时为空（`policy/approval.go:20-26`），`engine.go:1046` 还会再查一次 `IsDangerousTool` 直接跳过；而 CLI `[4]` 的存在场景恰好是 **shell 只读族**（`approvalGrantFamily`）——正是引擎拒绝记忆的那一类。要"合并"只能弱化"危险工具永不可记忆"这条手册级不变量（§5.2），代价不可接受。**两条轨道各就各位**：`[4]` 保持宿主侧、10 分钟、只读族的窄轨道（严格窄于任何引擎授权）；引擎授权只从显式「记住」入口产生（CLI 其余档 / Web 勾选 / ACP `allow-always`）。
+- ~~ACP `allow-always` → policy 记忆库映射~~ **已完成（session 作用域，2026-09-26）**：`allow-always` 且服务端派生 `RememberPattern` 非空时，`chatApprovalAnswer.RememberScope="session"` → `resolveApproval` → 本地 `actor.ApproveToolWithDecision` / runtime-server `remember_scope` 字段；范围恒由引擎按调用参数派生（进程内记忆，不写 `grants.json`），危险工具等仍被服务端守卫与 `IsDangerousTool` 拦截。`reject_always` 仍不提供：policy 只有 allow 记忆、没有 deny-memory 语义，接线需要先定义"记住拒绝"对 deny 规则/断路器/敏感写门的影响面，留作独立议题。
 - ~~`/grants` 命令面展示新 specifier 形态（durable store 读写已通，展示层待跟进）~~ **已完成（§12.4）**：CLI `/grants`、`/grants list|status` 展示 `<project>/.aicli/grants.json` 的 `tool · pattern · scope`（空 pattern 显示「全部」、空 scope 回落 `project`），`/grants revoke <tool> [pattern]` 调 `FileGrantStore.Revoke`（省略 pattern 仅撤销该 tool 的 tool-wide 授权；撤销只收窄权限、无需二次确认）；**Web/API `GET/POST /harness/grants` 仍是 durable 写（remember）入口**，CLI 暂无 `remember` 写入面；
 - 4.13 剩余：CLI/ACP 面的「解释」入口；宿主若注入 `ApprovalSummarizer` 需自担记账。（**Web 设置页开关已落地**：`GET/PUT /api/runtime/config/approval-explain` + 设置页卡片，进程级不落盘。）
 - 4.12：**已完成**（入口简写/别名/`/mode:<name>` 见 §4.12「本轮收口」；CLI 常驻模式 banner 经核对为既有实现（§4.6），Web/CLI tone 与回落口径一致）。安全复核已完成（§13：四类输入面的 bypass 可达性、F1–F4 定级与建议，已写入手册 §1.4）。4.14 的后续项：示例工程/截图未开始（ACP 侧入口表本次已落地，见 ACP 手册 §6）。
@@ -592,6 +593,17 @@
 | 文档 | ✅ | `docs/aicli/install.md` 命令表、`docs/aicli/permissions.md` §5.2 管理入口、本节 | —— |
 
 边界：CLI 面**只读 + revoke**，不提供 `remember` 写入（新增 durable 授权仍走审批「记住」选择或 Web 设置页 `GET/POST /harness/grants`，CLI 无法凭命令放宽权限）；`scope=session` 条目在本文件中没有独立生命周期语义（`FileGrantStore.Remember` 会把空 scope 默认成 `project`），展示/撤销按存储值原样处理。
+
+### 12.5 落地状态（2026-09-26，M4：Remember + Scope 的宿主透传）
+
+| 项 | 状态 | 代码落点 | 验证 |
+|----|------|----------|------|
+| `RememberScope` 透传 | ✅ | `chatApprovalAnswer.RememberScope` → `resolveApproval(..., feedback, rememberScope)`（trim/lower 后原样下发）：本地走 `actor.ApproveToolWithDecision`，runtime-server 走 `approve_tool` 的 `remember_scope`（仅允许且非空时携带；普通决策与拒绝请求体不变） | `TestChatRuntimeEvents_ResolveApprovalForwardsFeedbackToHook`、`TestApproveRuntimeServerToolPostsFeedback` |
+| ACP `allow-always` → `session` | ✅ | `agent_stdio_bridge.go`：`allow-always` 且 `ApprovalRequest.RememberPattern` 非空 → `RememberScope=session`；范围恒由引擎按调用参数派生，危险工具/硬询问/敏感写/外部目录（pattern 为空）不发请求，引擎还会再查一次 `IsDangerousTool` | `TestACPEventBridge_AskApprovalAllowAlwaysRemembersSession`、`...AllowAlwaysRemember`（无 pattern 时必须为空） |
+| CLI `[4]` 轨道 | ✅（不合并） | 见文末未做清单的设计决策：`[4]` 是宿主侧 10 分钟只读族 TTL，严格窄于任何引擎授权；合并需要弱化「危险工具永不可记忆」不变量，不做 | 既有 `[4]`/复用用例保持绿 |
+| `reject_always` | ⏸ 不做 | policy 只有 allow 记忆、无 deny-memory 语义；接线前需先定义它对 deny 规则/断路器/敏感写门的影响面 | —— |
+
+边界：宿主只声明「要记住」，**能不能记、记成什么形态**全在服务端（`remember_pattern`）与引擎（`IsDangerousTool` + 派生 specifier）；ACP 客户端最高只能拿到 `session`，durable `project` 仍只从用户显式入口产生。
 
 ---
 

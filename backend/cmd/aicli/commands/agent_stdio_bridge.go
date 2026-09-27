@@ -206,9 +206,19 @@ func (b *acpEventBridge) AskApproval(approval *runtimechat.ApprovalRequest, cont
 		return chatApprovalAnswer{Allowed: false}, nil
 	}
 	optionID := strings.TrimSpace(result.Outcome.OptionID)
+	allowed := acp.IsAllowOption(optionID)
+	rememberScope := ""
+	// §4.8：ACP 只有 allow-always 一档「记住」。映射为 session 作用域（进程内记忆，
+	// 不写 .aicli/grants.json）；是否真的可记以服务端派生的 RememberPattern 为准——
+	// 危险工具/硬询问/敏感写/外部目录时它为空，此时不发记忆请求（引擎还会再查一次
+	// IsDangerousTool），宿主不自行放宽。durable project 授权仍只从用户显式入口产生。
+	if allowed && acp.IsRememberOption(optionID) && approval != nil && strings.TrimSpace(approval.RememberPattern) != "" {
+		rememberScope = runtimepolicy.RememberScopeSession
+	}
 	return chatApprovalAnswer{
-		Allowed: acp.IsAllowOption(optionID),
-		Reuse:   acp.IsRememberOption(optionID),
+		Allowed:       allowed,
+		Reuse:         acp.IsRememberOption(optionID),
+		RememberScope: rememberScope,
 	}, nil
 }
 
