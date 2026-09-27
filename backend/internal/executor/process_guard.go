@@ -158,7 +158,7 @@ func (g *ProcessGuard) Leftovers() []int {
 // leftoverPIDsLocked must be called with g.mu held: it queries the platform
 // process-tree handle, which is also touched by Terminate/Close.
 func (g *ProcessGuard) leftoverPIDsLocked() []int {
-	pids := g.platform.livePIDs()
+	pids := g.platform.livePIDs(g.pid)
 	out := make([]int, 0, len(pids))
 	for _, pid := range pids {
 		if pid > 0 && pid != g.pid {

@@ -87,7 +87,7 @@ func (p *platformGuard) attach(proc *os.Process) error {
 func (p *platformGuard) terminate(pid int) TerminationReport {
 	rep := TerminationReport{}
 	if p.job != 0 && p.assigned {
-		rep.Killed = p.livePIDs()
+		rep.Killed = p.livePIDs(pid)
 		if err := windows.TerminateJobObject(p.job, 1); err == nil {
 			rep.TreeKill = true
 			rep.Mode = "job_object"
@@ -127,7 +127,7 @@ func terminateWindowsFallback(pid int, rep TerminationReport) TerminationReport 
 	return rep
 }
 
-func (p *platformGuard) livePIDs() []int {
+func (p *platformGuard) livePIDs(_ int) []int {
 	if p.job == 0 {
 		return nil
 	}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,6 +40,14 @@ const (
 	// (`rename` then delete). It deliberately does not end in `.lock`, so a
 	// leftover from a crash is never mistaken for a live lease.
 	staleLeaseSuffix = ".stale-"
+	// leaseClaimSuffix names the per-lease mutex file that serializes the
+	// create-or-reclaim transition among contenders. Like staleLeaseSuffix it
+	// deliberately does not end in `.lock`, so views/listing never mistake a
+	// claim for a lease; the file lives only for a few file operations.
+	leaseClaimSuffix = ".claim"
+	// leaseClaimDeadAfter is the fallback age after which a claim whose holder
+	// pid cannot be read is considered abandoned.
+	leaseClaimDeadAfter = 30 * time.Second
 )
 
 // Reason values reported by LeaseOutcome. They are journal/log vocabulary, not
@@ -163,7 +172,10 @@ func (l Lease) OwnedBy(owner LeaseOwner) bool {
 // The algorithm is the documented create-or-reclaim loop: an exclusive create
 // (`O_CREATE|O_EXCL`) wins outright; an existing lease is read and, when its
 // owner is dead or its TTL lapsed, reclaimed with an atomic rename before the
-// create is retried. A live, fresh lease is never stolen unless Takeover is set.
+// create is retried. Every attempt runs under a per-lease claim file that
+// serializes contenders, so the read-decide-rename-create sequence cannot
+// interleave into two winners. A live, fresh lease is never stolen unless
+// Takeover is set.
 func Acquire(paths Paths, purpose, key string, owner LeaseOwner, opts AcquireOptions) LeaseOutcome {
 	if opts.Now.IsZero() {
 		opts.Now = NowUTC()
@@ -190,11 +202,28 @@ func Acquire(paths Paths, purpose, key string, owner LeaseOwner, opts AcquireOpt
 	}
 	reclaimed := false
 	for attempt := 0; attempt < leaseAcquireAttempts; attempt++ {
+		release, claimErr := acquireLeaseClaim(path)
+		if claimErr != nil {
+			return LeaseOutcome{Reason: LeaseReasonDegraded, Degraded: true, Err: claimErr}
+		}
+		if release == nil {
+			// Another process is mid-create-or-reclaim for this path. The
+			// holder only publishes complete lease files, so a visible fresh
+			// lease is the answer; otherwise back off and retry.
+			if existing, ok := ReadLease(path); ok && !opts.Takeover && !existing.Stale(opts.Now) {
+				holder := existing
+				return LeaseOutcome{Reason: LeaseReasonHeld, Holder: &holder}
+			}
+			time.Sleep(time.Duration(attempt+1) * time.Millisecond)
+			continue
+		}
 		err := createLeaseFile(path, lease)
 		if err == nil {
+			release()
 			return LeaseOutcome{Acquired: true, Reclaimed: reclaimed, Reason: LeaseReasonAcquired}
 		}
 		if !errors.Is(err, fs.ErrExist) {
+			release()
 			return LeaseOutcome{Reason: LeaseReasonDegraded, Degraded: true, Err: err}
 		}
 		existing, ok := ReadLease(path)
@@ -202,6 +231,7 @@ func Acquire(paths Paths, purpose, key string, owner LeaseOwner, opts AcquireOpt
 			// The file exists but is not a lease this build understands. The
 			// conservative answer is "somebody holds it": readers never rewrite
 			// what they cannot parse (architecture §3.6).
+			release()
 			return LeaseOutcome{Reason: LeaseReasonUnreadable}
 		}
 		if existing.OwnedBy(owner) {
@@ -209,19 +239,34 @@ func Acquire(paths Paths, purpose, key string, owner LeaseOwner, opts AcquireOpt
 			// process): keep the original acquisition time, refresh the rest.
 			lease.AcquiredAt = existing.AcquiredAt
 			if err := writeLeaseFile(path, lease); err != nil {
+				release()
 				return LeaseOutcome{Reason: LeaseReasonDegraded, Degraded: true, Err: err}
 			}
+			release()
 			return LeaseOutcome{Acquired: true, Reclaimed: reclaimed, Reason: LeaseReasonAcquired}
 		}
 		if !opts.Takeover && !existing.Stale(opts.Now) {
 			holder := existing
+			release()
 			return LeaseOutcome{Reason: LeaseReasonHeld, Holder: &holder}
 		}
 		if !reclaimLease(path, opts.Now) {
 			// Another process reclaimed it first: retry the exclusive create.
+			release()
 			continue
 		}
 		reclaimed = true
+		// Publish the new lease while still holding the claim: no contender can
+		// slip a create into the window between reclaim and create.
+		if err := createLeaseFile(path, lease); err != nil {
+			release()
+			if errors.Is(err, fs.ErrExist) {
+				continue
+			}
+			return LeaseOutcome{Reason: LeaseReasonDegraded, Degraded: true, Err: err}
+		}
+		release()
+		return LeaseOutcome{Acquired: true, Reclaimed: true, Reason: LeaseReasonAcquired}
 	}
 	return LeaseOutcome{Reason: LeaseReasonContended}
 }
@@ -374,4 +419,72 @@ func reclaimLease(path string, now time.Time) bool {
 	}
 	_ = os.Remove(stalePath)
 	return true
+}
+
+// acquireLeaseClaim takes the exclusive per-lease claim that serializes the
+// create-or-reclaim transition. It returns a release func and nil error when
+// the claim is held; (nil, nil) when a live contender holds it (the caller
+// should back off); and (nil, err) for an unusable lease directory.
+//
+// Reclaim is a read-decide-rename-create sequence, which is not atomic on its
+// own: without serialization a delayed contender can decide to reclaim the
+// stale lease it read earlier, then rename away and delete the fresh lease a
+// faster contender just published, and finally create its own - two winners
+// for one key. The claim closes that window. It is best-effort like every
+// other lease primitive: a claim whose holder died is detected by pid (or,
+// failing that, by age) and removed.
+func acquireLeaseClaim(path string) (func(), error) {
+	claim := path + leaseClaimSuffix
+	if err := os.MkdirAll(filepath.Dir(claim), 0o700); err != nil {
+		return nil, err
+	}
+	create := func() (func(), error) {
+		file, err := os.OpenFile(claim, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		_, writeErr := fmt.Fprintf(file, "%d\n", os.Getpid())
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			_ = os.Remove(claim)
+			if writeErr != nil {
+				return nil, writeErr
+			}
+			return nil, closeErr
+		}
+		return func() { _ = os.Remove(claim) }, nil
+	}
+	release, err := create()
+	if err == nil || !errors.Is(err, fs.ErrExist) {
+		return release, err
+	}
+	if !leaseClaimHolderDead(claim) {
+		return nil, nil
+	}
+	if err := os.Remove(claim); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	release, err = create()
+	if err != nil && !errors.Is(err, fs.ErrExist) {
+		return nil, err
+	}
+	return release, nil
+}
+
+// leaseClaimHolderDead reports whether a claim file may be removed: either the
+// process that created it is gone, or the claim is older than the age bound.
+// A live holder keeps the claim for a few file operations only, far below the
+// threshold, so the age bound only ever reclaims a leaked claim (for example
+// when removing it failed).
+func leaseClaimHolderDead(claim string) bool {
+	expired := false
+	if info, err := os.Stat(claim); err == nil {
+		expired = time.Since(info.ModTime()) > leaseClaimDeadAfter
+	}
+	if data, err := os.ReadFile(claim); err == nil {
+		if pid, convErr := strconv.Atoi(strings.TrimSpace(string(data))); convErr == nil && pid > 0 {
+			return !processAlive(pid) || expired
+		}
+	}
+	return expired
 }
