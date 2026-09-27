@@ -1,5 +1,7 @@
 package toolschema
 
+import "math"
+
 // Provider-facing union squashing (analysis §3.12).
 //
 // The runtime advertises a handful of `string|array` (and `string|integer`)
@@ -122,7 +124,7 @@ func scalarizeNodeUnion(node map[string]interface{}) {
 		}
 		branches, _ := raw.([]interface{})
 		branch := preferredUnionBranch(branches)
-		if branch == nil {
+		if branch == nil || !unionBranchCompatibleWithSiblings(node, branch) {
 			continue
 		}
 		delete(node, unionKey)
@@ -162,4 +164,106 @@ func preferredUnionBranch(branches []interface{}) map[string]interface{} {
 		return stringBranch
 	}
 	return first
+}
+
+// unionBranchCompatibleWithSiblings reports whether folding branch into node
+// (where existing sibling keys win) can still accept every value the original
+// constraints allowed.
+//
+// Folding used to copy the branch's `type` next to an existing sibling `enum`/
+// `const` without looking at either: `enum:[1,2]` + `anyOf:[integer,string]`
+// became `enum:[1,2], type:string`, a property with no legal value, while the
+// original accepted 1 and 2 (2026-09-27 review). An incompatible branch is left
+// in place: providers lose the scalar shorthand for that corner, but the
+// advertised tool can still be called.
+func unionBranchCompatibleWithSiblings(node, branch map[string]interface{}) bool {
+	if node == nil || branch == nil {
+		return false
+	}
+	branchType, _ := branch["type"].(string)
+	nodeType, _ := node["type"].(string)
+	if branchType != "" && nodeType != "" && branchType != nodeType {
+		return false
+	}
+	// A sibling enum/const restricts the values the folded type must accept.
+	for _, key := range []string{"enum", "const"} {
+		raw, ok := node[key]
+		if !ok || branchType == "" {
+			continue
+		}
+		values := []interface{}{raw}
+		if key == "enum" {
+			list, ok := raw.([]interface{})
+			if !ok {
+				continue
+			}
+			values = list
+		}
+		for _, value := range values {
+			if !jsonValueFitsSchemaType(value, branchType) {
+				return false
+			}
+		}
+	}
+	// The branch's own enum/const is copied only when the sibling does not
+	// already define the key; it must still fit the surviving sibling type.
+	if nodeType != "" {
+		for _, key := range []string{"enum", "const"} {
+			raw, ok := branch[key]
+			if !ok {
+				continue
+			}
+			values := []interface{}{raw}
+			if key == "enum" {
+				list, ok := raw.([]interface{})
+				if !ok {
+					continue
+				}
+				values = list
+			}
+			for _, value := range values {
+				if !jsonValueFitsSchemaType(value, nodeType) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// jsonValueFitsSchemaType reports whether a decoded JSON value satisfies a
+// single JSON Schema type keyword. Unknown keywords are treated as compatible so
+// provider-specific extensions never block the rewrite.
+func jsonValueFitsSchemaType(value interface{}, typ string) bool {
+	switch typ {
+	case "string":
+		_, ok := value.(string)
+		return ok
+	case "integer":
+		switch number := value.(type) {
+		case float64:
+			return !math.IsNaN(number) && !math.IsInf(number, 0) && number == math.Trunc(number)
+		case int, int64:
+			return true
+		}
+		return false
+	case "number":
+		switch value.(type) {
+		case float64, int, int64:
+			return true
+		}
+		return false
+	case "boolean":
+		_, ok := value.(bool)
+		return ok
+	case "array":
+		_, ok := value.([]interface{})
+		return ok
+	case "object":
+		_, ok := value.(map[string]interface{})
+		return ok
+	case "null":
+		return value == nil
+	}
+	return true
 }

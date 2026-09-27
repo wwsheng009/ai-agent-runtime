@@ -110,7 +110,26 @@ func (s *Sandbox) CheckPermission(op PermissionOp, targetPath string) error {
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
 	}
+	if err := s.checkPathPolicy(op, absPath); err != nil {
+		return err
+	}
+	// The lexical check only sees the path as written; os.Stat/ReadFile then
+	// follow symlinks. A link inside an allowed directory could therefore reach
+	// outside the allowlist (or into a denied/read-only root): the Unicode
+	// path-healing candidate check made that concrete — the candidate passed the
+	// string containment test and the link target was read (2026-09-27 review).
+	// Re-check the resolved target, comparing resolved policy roots so a
+	// symlinked allowlist entry keeps working.
+	if resolved, ok := resolveExistingAncestors(absPath); ok && resolved != absPath {
+		if err := s.checkResolvedPathPolicy(op, resolved); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+// checkPathPolicy applies the lexically configured roots to one path.
+func (s *Sandbox) checkPathPolicy(op PermissionOp, absPath string) error {
 	for _, denied := range s.config.DeniedPaths {
 		if pathWithinBase(absPath, denied) {
 			return fmt.Errorf("path denied by sandbox policy: %s", absPath)
@@ -118,14 +137,7 @@ func (s *Sandbox) CheckPermission(op PermissionOp, targetPath string) error {
 	}
 
 	if len(s.config.AllowedPaths) > 0 {
-		allowed := false
-		for _, allowedPath := range s.config.AllowedPaths {
-			if pathWithinBase(absPath, allowedPath) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
+		if !pathWithinAnyBase(absPath, s.config.AllowedPaths) {
 			return fmt.Errorf("path outside sandbox allowlist: %s", absPath)
 		}
 	}
@@ -139,6 +151,81 @@ func (s *Sandbox) CheckPermission(op PermissionOp, targetPath string) error {
 	}
 
 	return nil
+}
+
+// checkResolvedPathPolicy applies the same policy to a symlink-resolved target.
+// Policy roots are resolved the same way, so a symlinked workspace root does not
+// turn every legitimate access into a denial.
+func (s *Sandbox) checkResolvedPathPolicy(op PermissionOp, resolved string) error {
+	for _, denied := range resolveRoots(s.config.DeniedPaths) {
+		if pathWithinBase(resolved, denied) {
+			return fmt.Errorf("path resolves into a sandbox-denied location: %s", resolved)
+		}
+	}
+	if len(s.config.AllowedPaths) > 0 && !pathWithinAnyBase(resolved, resolveRoots(s.config.AllowedPaths)) {
+		return fmt.Errorf("path resolves outside the sandbox allowlist: %s", resolved)
+	}
+	if op == OpWrite || op == OpDelete {
+		for _, readOnly := range resolveRoots(s.config.ReadOnlyPaths) {
+			if pathWithinBase(resolved, readOnly) {
+				return fmt.Errorf("path resolves into a read-only location: %s", resolved)
+			}
+		}
+	}
+	return nil
+}
+
+func pathWithinAnyBase(target string, roots []string) bool {
+	for _, root := range roots {
+		if pathWithinBase(target, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveRoots resolves policy roots so resolved targets are compared against
+// the same physical form. A root that cannot be resolved (missing, permission
+// denied) keeps its lexical value.
+func resolveRoots(roots []string) []string {
+	resolved := make([]string, 0, len(roots))
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		if target, err := filepath.EvalSymlinks(root); err == nil && strings.TrimSpace(target) != "" {
+			root = target
+		}
+		resolved = append(resolved, root)
+	}
+	return resolved
+}
+
+// resolveExistingAncestors resolves the longest existing prefix of absPath and
+// rejoins the not-yet-existing tail: a create path must follow links in its
+// parent directories (that is where the file will actually land), while a
+// lexical leaf name that does not exist yet stays lexical.
+func resolveExistingAncestors(absPath string) (string, bool) {
+	current := absPath
+	var tail []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			resolved = filepath.Clean(resolved)
+			if len(tail) == 0 {
+				return resolved, true
+			}
+			parts := append([]string{resolved}, tail...)
+			return filepath.Join(parts...), true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false
+		}
+		tail = append([]string{filepath.Base(current)}, tail...)
+		current = parent
+	}
 }
 
 // ValidateCommand validates the executable name against the configured policy.
