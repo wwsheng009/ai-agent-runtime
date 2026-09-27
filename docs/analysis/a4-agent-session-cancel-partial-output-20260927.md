@@ -18,7 +18,13 @@
   对照修复前：同类取消的 durable result 只有 16 runes 的 `"context canceled"`，零产物。
 - **附带观察（建议单独跟进）**：
   1. `difficulty=easy/normal` 的子代理均报 `route_source=disabled` + `route_warnings=["permission_mode_inherited_from_parent"]`；不阻断执行（走默认模型），但难度路由在这套配置下实际未生效；
-  2. 子代理从 `spawn_agent` 返回（queued）到会话真正创建/启动的延迟波动大（实测约 45s / ~3min / ~30s），值得作为独立课题（调度/线程上限）；
+  2. **子代理 `queued` 语义澄清（原观察作废）**：子会话在 `Spawn` 内**同步创建**
+     （CLI `chat_actor_registry.go:697`、API `session_runtime_support.go:558`），首轮
+     prompt 由 `SubmitChildPromptAsync` **立即异步提交**（CLI 同文件 770 行；该处注释
+     即 A3 的"子代理执行脱离父 run"取消隔离）；spawn 回执的 `Flags: created, queued`
+     只是 `result.Created/Queued`（787-788 行），**不是调度积压**。实测 spawn→子代理
+     首次工具执行 30–45s 是**首次 LLM 往返**（大 prompt）耗时；此前记录的 ~3min 系
+     时间线推断错误（叠加轮询了错误路径），已在 §7 更正；
   3. `/web/api/invoke` 幂等语义实测正确：同一 `client_request_id` 重放返回 `duplicate=true` 且不重跑（token 无增长）。
 
 - **状态**：**已实施**（`11e499e5`，2026-09-27；A3 见 `f4cd672e`）
@@ -105,6 +111,9 @@
   difficulty→模型映射"的如实上报（子代理走默认模型）；`permission_mode_inherited_from_parent`
   是 `internal/toolbroker/spawn_agent_permission.go:15-18` 的有意设计（让父代理能解释子代理
   实际采用的权限模式），并有意进入路由回执/统计。
-- **子代理 `queued`→启动延迟（实测 45s / ~3min / ~30s）**：走 supervision wake + resume
-  容量门控（`internal/supervision/resume_capacity.go`、`wake_consumer.go`，已有队列位次
-  digest）。不是单点参数可安全调整的路径；若要压延迟应做容量窗口的专项设计（本切片不动）。
+- **子代理 `queued`→启动延迟：查证为非问题（原观察作废）**：子会话在 `Spawn` 内同步
+  创建（`chat_actor_registry.go:697` / `session_runtime_support.go:558`），首轮 prompt
+  立即异步提交（`chat_actor_registry.go:770`，其注释即 A3 修复），`queued` 仅表示
+  "已提交首轮 prompt"（787-788 行）。spawn→首次工具执行的 30–45s 属首次 LLM 往返
+  耗时，非调度积压；~3min 的说法是时间线推断错误。**无需改动**（supervision 的
+  wake/resume 容量门控只影响**父会话**的自动唤醒，与子代理启动无关）。
