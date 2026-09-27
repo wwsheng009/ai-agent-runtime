@@ -683,23 +683,45 @@ func evalBypassPermissionModeConfirmation(session *ChatSession, source string) (
 	defer restoreInputMode()
 	prompt := "[权限] 请输入 bypass_permissions 确认切换（其他输入取消）： "
 	readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(session, lines, prompt)
-	text, err := func() (string, error) {
+	item, err := func() (chatQueuedInput, error) {
 		endAction := beginChatTitleAction(session, "Permission Mode Confirmation Required")
 		defer endAction()
-		return chatInteractiveReadPriorityLineWithPrompt(session, context.Background(), readPrompt)
+		return chatInteractiveReadPriorityItemWithPrompt(session, context.Background(), readPrompt)
 	}()
 	cleanupPrompt()
 	if err != nil {
 		return false, fmt.Sprintf("已取消，permission-mode 保持为 %s", currentMode)
 	}
-	text = strings.TrimSpace(normalizeQueuedInputLine(text))
+	text := strings.TrimSpace(normalizeQueuedInputLine(item.Text))
 	if transientPrompt {
 		renderChatRuntimePriorityPromptTranscript(session, lines, prompt, text)
+	}
+	if !chatInputSourceIsLocalTerminal(item.Source) {
+		// §13 F3：bypass 确认的语义是「终端前的人确认」。Web/外部注入的行不能
+		// 充当这个手势，否则调用方「两条注入」即可提权（分析文档 §13 F3）。
+		// 拒绝时尽量不丢输入：普通文本按原顺序回填队列（它不是确认，也不会被
+		// 当成命令执行）；slash 命令不回填，避免反复触发确认提示的循环。
+		refusal := fmt.Sprintf(
+			"错误: bypass_permissions 确认必须来自本机终端输入（检测到来源=%s，已拒绝）",
+			displayChatInputSource(item.Source))
+		if session.InputQueue != nil && !isSlashCommandInput(text) {
+			session.InputQueue.requeueFront(item)
+			return false, refusal + "；该行已作为普通输入重新排队，不产生确认效果"
+		}
+		return false, refusal + "；该行已忽略，如需继续请重新发送"
 	}
 	if text != "bypass_permissions" {
 		return false, fmt.Sprintf("已取消，permission-mode 保持为 %s", currentMode)
 	}
 	return true, ""
+}
+
+// displayChatInputSource 把空来源渲染成可读占位，便于拒绝消息说明原因。
+func displayChatInputSource(source string) string {
+	if trimmed := strings.TrimSpace(source); trimmed != "" {
+		return trimmed
+	}
+	return "<unknown>"
 }
 
 func handleImageAttachmentCommand(session *ChatSession, command string) bool {

@@ -117,7 +117,8 @@ func TestTryExecuteStructuredChatCommandMigratesFiniteComposerCommands(t *testin
 		bypassDone <- bypassOutcome{result: result, handled: handled, err: err}
 	}()
 	requireEventuallyPriorityMode(t, session.InputQueue)
-	session.InputQueue.routeLine(chatQueuedInput{Text: "cancel", Source: "test"})
+	// 本地终端的取消答案（来源必须是终端，Web/外部来源会被确认门拒绝，见 §13 F3）。
+	session.InputQueue.routeLine(chatQueuedInput{Text: "cancel", Source: chatInputSourceStdin})
 	outcome := <-bypassDone
 	if outcome.err != nil || !outcome.handled {
 		t.Fatalf("bypass confirm match=(%t, %v), want handled", outcome.handled, outcome.err)

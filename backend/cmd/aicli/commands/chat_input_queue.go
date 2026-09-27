@@ -469,16 +469,56 @@ func (q *chatInputQueue) stdinReadLoop(events chan<- stdinLineEvent) {
 	}
 }
 
+// 输入来源：终端 stdin 与 Web/外部注入共用同一条队列，来源是两者唯一的区分
+// 维度（见 evalBypassPermissionModeConfirmation 的确认门，§13 F3）。
+const (
+	chatInputSourceStdin = "stdin"
+	chatInputSourceWeb   = "web"
+)
+
+// chatInputSourceIsLocalTerminal 报告某来源是否等价于「终端前的人」。
+// 只放行终端/控制台来源：Web、外部注入与**未知来源**一律不放行（fail-closed），
+// 因为未知来源可能来自被转发的远程调用方，而这类确认的语义就是「人类手势」。
+func chatInputSourceIsLocalTerminal(source string) bool {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case chatInputSourceStdin, "console", "tui", "editor", "keyboard", "local":
+		return true
+	default:
+		return false
+	}
+}
+
 func (q *chatInputQueue) routeInputText(text string) chatInputRouteResult {
-	result := q.routeLineWithCommandGate(chatQueuedInput{
+	return q.routeInputTextFromSource(text, chatInputSourceStdin)
+}
+
+// routeInputTextFromSource 与 routeInputText 相同，但显式标注输入来源：
+// Web/远程注入必须传 chatInputSourceWeb，否则优先级确认门会把转发输入误当成
+// 终端人手势。空来源按未知处理（确认门会拒绝）。
+func (q *chatInputQueue) routeInputTextFromSource(text string, source string) chatInputRouteResult {
+	item := chatQueuedInput{
 		Text:       text,
-		Source:     "stdin",
+		Source:     strings.TrimSpace(source),
 		EnqueuedAt: time.Now().UTC(),
-	}, true)
+	}
+	result := q.routeLineWithCommandGate(item, true)
 	if result.rejected() {
 		q.notifyRouteFeedback(text, result)
 	}
 	return result
+}
+
+// requeueFront 把一行放回队列最前（优先级读取被拒绝后的无损回填，保持原始
+// 顺序与来源；不能让它阻塞在已满的 lines 通道上）。
+func (q *chatInputQueue) requeueFront(item chatQueuedInput) {
+	if q == nil {
+		return
+	}
+	q.ensureChannels()
+	q.queuedMu.Lock()
+	defer q.queuedMu.Unlock()
+	q.queuedFront = append([]chatQueuedInput{item}, q.queuedFront...)
+	q.queuedPreview = append([]chatQueuedInput{item}, q.queuedPreview...)
 }
 
 func (q *chatInputQueue) stageDraft(text string) {
@@ -883,8 +923,20 @@ func (q *chatInputQueue) readPriorityLine(ctx context.Context) (string, error) {
 // readPriorityLineWithPrompt 等待一行优先级输入，并在等待期间可被外部信号
 // （priorityResolvedElsewhere）中断。调用方负责在哨兵错误上重试/跳过。
 func (q *chatInputQueue) readPriorityLineWithPrompt(ctx context.Context, prompt string) (string, error) {
+	item, err := q.readPriorityItemWithPrompt(ctx, prompt)
+	if err != nil {
+		return "", err
+	}
+	return item.Text, nil
+}
+
+// readPriorityItemWithPrompt 与 readPriorityLineWithPrompt 同语义，但把整条
+// chatQueuedInput（含 Source）交回调用方：终端 stdin 与 Web/外部注入共用同一
+// 条优先级队列，只有来源能区分「终端前的人」与「被转发的调用方」——bypass
+// 确认门（§13 F3）依赖它。
+func (q *chatInputQueue) readPriorityItemWithPrompt(ctx context.Context, prompt string) (chatQueuedInput, error) {
 	if q == nil {
-		return "", io.EOF
+		return chatQueuedInput{}, io.EOF
 	}
 	q.setPriorityCapture(true, prompt)
 	defer q.setPriorityCapture(false, "")
@@ -894,32 +946,32 @@ func (q *chatInputQueue) readPriorityLineWithPrompt(ctx context.Context, prompt 
 	for {
 		select {
 		case item := <-q.priorityLines:
-			return item.Text, nil
+			return item, nil
 		case <-q.priorityResolvedElsewhere:
-			return "", errChatInteractivePromptResolvedElsewhere
+			return chatQueuedInput{}, errChatInteractivePromptResolvedElsewhere
 		default:
 		}
 		if terminalErr := q.terminalError(); terminalErr != nil {
-			return "", terminalErr
+			return chatQueuedInput{}, terminalErr
 		}
 		select {
 		case item := <-q.priorityLines:
-			return item.Text, nil
+			return item, nil
 		case <-q.priorityResolvedElsewhere:
-			return "", errChatInteractivePromptResolvedElsewhere
+			return chatQueuedInput{}, errChatInteractivePromptResolvedElsewhere
 		case err := <-q.errs:
 			select {
 			case item := <-q.priorityLines:
-				return item.Text, nil
+				return item, nil
 			case <-q.priorityResolvedElsewhere:
-				return "", errChatInteractivePromptResolvedElsewhere
+				return chatQueuedInput{}, errChatInteractivePromptResolvedElsewhere
 			default:
 			}
-			return "", err
+			return chatQueuedInput{}, err
 		case <-q.readySignal:
 			continue
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return chatQueuedInput{}, ctx.Err()
 		}
 	}
 }
@@ -1269,21 +1321,34 @@ func chatInteractiveReadTransientLine(session *ChatSession, ctx context.Context)
 }
 
 func chatInteractiveReadPriorityLineWithPrompt(session *ChatSession, ctx context.Context, prompt string) (string, error) {
+	item, err := chatInteractiveReadPriorityItemWithPrompt(session, ctx, prompt)
+	if err != nil {
+		return "", err
+	}
+	return item.Text, nil
+}
+
+// chatInteractiveReadPriorityItemWithPrompt 与 PriorityLineWithPrompt 同语义，
+// 但把来源一并交回：队列路径保留 chatQueuedInput.Source，控制台/编辑器的直读
+// 路径天然是本机终端，标为 stdin。
+func chatInteractiveReadPriorityItemWithPrompt(session *ChatSession, ctx context.Context, prompt string) (chatQueuedInput, error) {
 	if shouldRoutePriorityPromptThroughQueue(session) {
-		line, err := session.InputQueue.readPriorityLineWithPrompt(ctx, prompt)
+		item, err := session.InputQueue.readPriorityItemWithPrompt(ctx, prompt)
 		newChatInputReadLifecycle(session).finishQueuedPriorityRead(err)
-		return line, err
+		return item, err
+	}
+	local := func(line string, err error) (chatQueuedInput, error) {
+		return chatQueuedInput{Text: line, Source: chatInputSourceStdin}, err
 	}
 	if session != nil && session.InputBox != nil {
-		return newChatModalComposerPrompt(session, prompt).ReadLine()
+		line, err := newChatModalComposerPrompt(session, prompt).ReadLine()
+		return local(line, err)
 	}
 	if line, ok, err := readConfiguredChatConsoleLine(ctx); ok {
-		if err != nil {
-			return "", err
-		}
-		return line, nil
+		return local(line, err)
 	}
-	return chatInteractiveReadTransientLine(session, ctx)
+	line, err := chatInteractiveReadTransientLine(session, ctx)
+	return local(line, err)
 }
 
 // chatSignalPriorityResolvedElsewhere 通知 console 端的优先级读取（如提问/审批等待）

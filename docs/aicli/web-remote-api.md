@@ -550,7 +550,7 @@ curl -N -X POST http://127.0.0.1:61772/web/api/invoke \
 | 事实 | 含义 |
 |------|------|
 | `/web/api/input` 的 prompt 与 TUI 键盘输入走同一路由（含 slash 命令） | 持令牌的调用方能执行 `/` 命令、回答审批与提问 |
-| `/yolo` / `/permission-mode bypass_permissions` 的二次确认同样读输入队列 | 两条注入即可完成确认——确认只防误触，不防调用方 |
+| `/yolo` / `/permission-mode bypass_permissions` 的二次确认只接受**本机终端来源**的输入 | 注入 `bypass_permissions` 不再能完成确认：确认门按来源判定（`cmd/aicli/commands` 的 `chatInputSourceIsLocalTerminal`），注入的普通文本会按原顺序回填队列、`/` 命令直接忽略——Web 面无法把会话切到 bypass（审批/提问回答不受影响） |
 | 审批决议（`type=approval`）与提问回答可注入 | 调用方能为 Agent 的任意审批放行 |
 | runtime API（`/api/runtime/*`）没有写令牌机制，部分端点显式信任回环来源 | 同机任意进程都能调用（权限模式切换见 [permissions.md](./permissions.md) §1.4；`disable_bypass` 生效时该切换接口返回 **403**，plan 退出等还原路径也不会把 bypass 带回来） |
 

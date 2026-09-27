@@ -985,7 +985,9 @@ func injectChatWebPrompt(session *ChatSession, prompt string) (chatInputRouteRes
 	// busy capture 混用同一标志——后者在 TUI 里每个回合都会置真，若共用会让
 	// 控制台提问/审批面板被静默跳过（§4.2.4 步骤 4）。
 	queue.setWebInputCaptureActive(true)
-	result := queue.routeInputText(prompt)
+	// 来源必须显式标 web：bypass 确认门（§13 F3）只接受本机终端来源的行，
+	// 否则转发调用方「两条注入」即可满足 yolo 的二次确认。
+	result := queue.routeInputTextFromSource(prompt, chatInputSourceWeb)
 	switch {
 	case result.queued():
 		// 交互式 TTY 模式下主循环阻塞在 composer 读取中；唤醒它，

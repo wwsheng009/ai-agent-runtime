@@ -117,9 +117,9 @@ CI 推荐组合：`dont_ask` + 项目 `permissions.yaml` 把需要的只读/白�
 
 | 输入面 | 需要人类手势吗 |
 |--------|----------------|
-| 终端里输入 `/yolo` / `/permission-mode bypass_permissions` | 需要：必须在同一输入面敲 `bypass_permissions` 全文；非交互模式直接拒绝 |
+| 终端里输入 `/yolo` / `/permission-mode bypass_permissions` | 需要：必须在**本机终端**敲 `bypass_permissions` 全文；非交互模式直接拒绝（确认门按输入来源判定，Web/外部注入的行不生效，见下行） |
 | 键位循环（`shift+tab` / `alt+m`） | 需要（同上确认） |
-| TUI 的 Web 注入面（`/web/api/input`、`/web/api/invoke`、网格 call） | **不需要**：注入的文本按用户输入路由（含命令），确认提示也能被后续注入满足；写操作需要 `X-AICLI-Token`，而该令牌按设计可由本机进程经 `GET /web/api/token` 读取 |
+| TUI 的 Web 注入面（`/web/api/input`、`/web/api/invoke`、网格 call） | **不能提权**：注入的文本按用户输入路由（含命令），但 bypass 的确认门只接受本机终端来源——注入 `bypass_permissions` 会被拒绝（普通文本按原顺序回填队列，`/` 命令直接忽略，见 §13 F3 收口）；写操作需要 `X-AICLI-Token`，而该令牌按设计可由本机进程经 `GET /web/api/token` 读取（审批/提问回答仍可注入，那是 Web 的正规交互面） |
 | runtime API（`POST /api/runtime/sessions/{id}/permission-mode`） | **不需要**：无令牌、无确认，对运行中会话立即生效（`disable_bypass` 生效时返回 403） |
 
 由此得出三条使用边界：
