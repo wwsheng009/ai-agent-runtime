@@ -15,7 +15,7 @@ type MockProvider struct {
 	name           string
 	delay          time.Duration
 	responses      map[string]string
-	shouldFail    bool
+	shouldFail     bool
 	failureMessage string
 }
 

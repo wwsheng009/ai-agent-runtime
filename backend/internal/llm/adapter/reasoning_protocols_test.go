@@ -678,7 +678,7 @@ func TestCodexHandleResponseSummaryPartsIsolatedPerItem(t *testing.T) {
 	}, "\n")
 
 	msg, err := adapter.HandleResponse(true, strings.NewReader(ss), StreamCallbacks{
-		OnText:     func(text string) {},
+		OnText: func(text string) {},
 		OnReasoning: func(reasoning string) {
 			reasoningParts = append(reasoningParts, reasoning)
 		},

@@ -73,8 +73,8 @@ type ProviderHealth struct {
 
 // ProviderHealthTracker 跟踪 Provider 健康状态
 type ProviderHealthTracker struct {
-	mu       sync.RWMutex
-	config   HealthCheckConfig
+	mu        sync.RWMutex
+	config    HealthCheckConfig
 	providers map[string]*ProviderHealth
 }
 
@@ -82,7 +82,7 @@ type ProviderHealthTracker struct {
 func NewProviderHealthTracker(config HealthCheckConfig) *ProviderHealthTracker {
 	normalized := normalizeHealthCheckConfig(config)
 	return &ProviderHealthTracker{
-		config:   normalized,
+		config:    normalized,
 		providers: make(map[string]*ProviderHealth),
 	}
 }

@@ -48,7 +48,7 @@ func TestNormalizeStreamChunk_StripsReasoningContentMarkers(t *testing.T) {
 				"index": 0,
 				"delta": map[string]interface{}{
 					"reasoning_content": "a]<]minimax[>[b",
-					"content":          "plain",
+					"content":           "plain",
 				},
 			},
 		},

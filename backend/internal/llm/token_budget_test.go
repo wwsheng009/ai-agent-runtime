@@ -116,9 +116,9 @@ func TestTokenBudgetManager_CanFit(t *testing.T) {
 	manager := NewTokenBudgetManager(config)
 
 	tests := []struct {
-		name      string
-		messages  []map[string]string
-		wantFits  bool
+		name     string
+		messages []map[string]string
+		wantFits bool
 	}{
 		{
 			name:     "empty messages",
@@ -205,7 +205,7 @@ func TestTokenBudgetManager_Allocate_Truncate(t *testing.T) {
 	config := &TokenBudgetConfig{
 		MaxTotalTokens: 1000,
 		ReservedTokens: 200,
-		Strategy:      StrategyTruncate,
+		Strategy:       StrategyTruncate,
 		Tokenizer:      NewDefaultEstimator(),
 	}
 
@@ -237,7 +237,7 @@ func TestTokenBudgetManager_Allocate_Prioritize(t *testing.T) {
 	config := &TokenBudgetConfig{
 		MaxTotalTokens: 500,
 		ReservedTokens: 100,
-		Strategy:      StrategyPrioritize,
+		Strategy:       StrategyPrioritize,
 		Tokenizer:      NewDefaultEstimator(),
 	}
 

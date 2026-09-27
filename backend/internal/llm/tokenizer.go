@@ -35,8 +35,8 @@ func (t *Tokenizer) Count(text string) int {
 
 // MessagesTokenCount 计算消息的 Token 数量（包括元数据）
 const (
-	TokenPerMessage = 4      // 每条消息的元数据开销
-	TokenPerName    = 1      // 每个名称字段的 Token 开销
+	TokenPerMessage = 4 // 每条消息的元数据开销
+	TokenPerName    = 1 // 每个名称字段的 Token 开销
 )
 
 // CountMessages 计算消息列表的 Token 数量

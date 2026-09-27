@@ -46,10 +46,10 @@ func (t *DefaultEstimator) EstimateTokensFromMessages(messages []map[string]stri
 type AllocationStrategy int
 
 const (
-	StrategyTruncate AllocationStrategy = iota // 截断策略
-	StrategySummarize                          // 摘要策略
-	StrategyPrioritize                         // 优先级策略
-	StrategyWindow                             // 滑动窗口策略
+	StrategyTruncate   AllocationStrategy = iota // 截断策略
+	StrategySummarize                            // 摘要策略
+	StrategyPrioritize                           // 优先级策略
+	StrategyWindow                               // 滑动窗口策略
 )
 
 // AllocationResult 分配结果
@@ -62,12 +62,12 @@ type AllocationResult struct {
 
 // TokenBudgetConfig Token 预算配置
 type TokenBudgetConfig struct {
-	MaxTotalTokens      int                    // 最大 Token 总数
-	ReservedTokens      int                    // 预留 Token 数（用于输出）
-	Strategy            AllocationStrategy     // 分配策略
-	Tokenizer           TokenEstimator         // Token 估算器
-	WindowOverlapTokens int                    // 滑动窗口的 Token 重叠数（仅用于 Window 策略）
-	SummaryThreshold    int                    // 摘要阈值，超过此值触发摘要（仅用于 Summarize 策略）
+	MaxTotalTokens      int                // 最大 Token 总数
+	ReservedTokens      int                // 预留 Token 数（用于输出）
+	Strategy            AllocationStrategy // 分配策略
+	Tokenizer           TokenEstimator     // Token 估算器
+	WindowOverlapTokens int                // 滑动窗口的 Token 重叠数（仅用于 Window 策略）
+	SummaryThreshold    int                // 摘要阈值，超过此值触发摘要（仅用于 Summarize 策略）
 }
 
 // TokenBudgetManager Token 预算管理器
@@ -215,7 +215,7 @@ func (tbm *TokenBudgetManager) allocateTruncate(messages []map[string]string, to
 		Remaining: available - current,
 		Content:   final,
 		Metadata: map[string]any{
-			"truncated":      true,
+			"truncated":       true,
 			"original_tokens": totalTokens,
 		},
 	}, nil
@@ -280,9 +280,9 @@ func (tbm *TokenBudgetManager) allocateSummarize(messages []map[string]string, t
 func (tbm *TokenBudgetManager) allocatePrioritize(messages []map[string]string, totalTokens, available int) (*AllocationResult, error) {
 	// 定义优先级顺序
 	priority := map[string]int{
-		"system":  4,
-		"user":    3,
-		"tool":    2,
+		"system":    4,
+		"user":      3,
+		"tool":      2,
 		"assistant": 1,
 	}
 
@@ -438,9 +438,9 @@ func (tbm *TokenBudgetManager) OptimizeContext(messages []map[string]string, key
 		Remaining: available - current,
 		Content:   result,
 		Metadata: map[string]any{
-			"optimized":      true,
-			"keywords":       keywords,
-			"matched_count":  len(priorityMessages),
+			"optimized":     true,
+			"keywords":      keywords,
+			"matched_count": len(priorityMessages),
 		},
 	}, nil
 }
