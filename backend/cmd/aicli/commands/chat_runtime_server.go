@@ -568,8 +568,8 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeCommand(ctx context.Conte
 		bridge.startProcessor()
 		previousApprove := bridge.approveTool
 		previousAnswer := bridge.answerQuestion
-		bridge.approveTool = func(ctx context.Context, eventSessionID, requestID string, allow bool) error {
-			return e.approveRuntimeServerTool(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), requestID, allow)
+		bridge.approveTool = func(ctx context.Context, eventSessionID, requestID string, allow bool, feedback string) error {
+			return e.approveRuntimeServerTool(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), requestID, allow, feedback)
 		}
 		bridge.answerQuestion = func(ctx context.Context, eventSessionID, questionID, answer string) error {
 			return e.answerRuntimeServerQuestion(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), questionID, answer)
@@ -628,8 +628,8 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeContinuation(ctx context.
 		bridge.startProcessor()
 		previousApprove := bridge.approveTool
 		previousAnswer := bridge.answerQuestion
-		bridge.approveTool = func(ctx context.Context, eventSessionID, requestID string, allow bool) error {
-			return e.approveRuntimeServerTool(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), requestID, allow)
+		bridge.approveTool = func(ctx context.Context, eventSessionID, requestID string, allow bool, feedback string) error {
+			return e.approveRuntimeServerTool(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), requestID, allow, feedback)
 		}
 		bridge.answerQuestion = func(ctx context.Context, eventSessionID, questionID, answer string) error {
 			return e.answerRuntimeServerQuestion(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), questionID, answer)
@@ -821,11 +821,16 @@ func (e *aicliRuntimeServerChatExecutor) submitRuntimeServerContinue(ctx context
 	return &decoded, statusCode, nil
 }
 
-func (e *aicliRuntimeServerChatExecutor) approveRuntimeServerTool(ctx context.Context, session *ChatSession, sessionID, requestID string, allow bool) error {
+func (e *aicliRuntimeServerChatExecutor) approveRuntimeServerTool(ctx context.Context, session *ChatSession, sessionID, requestID string, allow bool, feedback string) error {
 	payload := map[string]interface{}{
 		"type":       "approve_tool",
 		"request_id": requestID,
 		"allow":      allow,
+	}
+	// feedback 与 runtimeapi 的 approve_tool 请求体同名字段（json:"feedback"）。
+	// 普通允许/拒绝保持请求体逐字节不变，仅非空理由才追加。
+	if feedback = strings.TrimSpace(feedback); feedback != "" {
+		payload["feedback"] = feedback
 	}
 	_, err := e.doRuntimeServerJSON(ctx, session, http.MethodPost, runtimeServerCommandPath(sessionID), "", payload, nil)
 	return err

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/formatter"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -190,7 +191,7 @@ type chatRuntimeEventBridge struct {
 	// reports that no panel is available, the run keeps the historical
 	// fail-closed behavior instead of silently inventing an answer.
 	askQuestionHeadless func(prompt string, suggestions []string, required bool) (string, error)
-	approveTool         func(ctx context.Context, sessionID, requestID string, allow bool) error
+	approveTool         func(ctx context.Context, sessionID, requestID string, allow bool, feedback string) error
 	answerQuestion      func(ctx context.Context, sessionID, questionID, answer string) error
 	// preferInteractiveApprovals keeps NoInteractive headless hosts (ACP stdio)
 	// from auto-denying tools so askApproval can RPC to an external client.
@@ -309,6 +310,11 @@ type chatRuntimeRequestLogState struct {
 type chatApprovalAnswer struct {
 	Allowed bool
 	Reuse   bool
+	// Feedback is the free-text rejection reason (§4.8). Only meaningful when
+	// Allowed is false: both the inline `5 <reason>` form and the two-step
+	// `5` + reason prompt land here; a bare/empty reason stays an ordinary
+	// denial with no feedback.
+	Feedback string
 }
 
 // chatRuntimePriorityTranscriptTarget carries the identity of the control
@@ -742,10 +748,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			reuseScope := approvalReusePromptScope(session, approval)
 			approvalLines := approvalPriorityPromptLines(approval, contextLines)
 			if reuseScope != "" && len(approvalLines) > 0 {
-				approvalLines[len(approvalLines)-1] = fmt.Sprintf(
-					"[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [4] 允许并在%s复用同类只读审批 10 分钟",
-					reuseScope,
-				)
+				approvalLines[len(approvalLines)-1] = approvalPromptOptionsLine(reuseScope)
 			}
 			lines = append(lines, approvalLines...)
 			promptLine := approvalDecisionPromptWithReuse(reuseScope)
@@ -756,7 +759,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 					return chatApprovalAnswer{}, err
 				}
 				text = strings.TrimSpace(normalizeQueuedInputLine(text))
-				decision := parseApprovalPromptDecisionWithReuse(text, reuseScope != "")
+				decision, feedback := parseApprovalPromptDecisionInput(text, reuseScope != "")
 				if decision == approvalPromptShowDetails {
 					if !detailsShown {
 						lines = append(lines, approvalFullParameterLines(approval)...)
@@ -765,19 +768,39 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 					continue
 				}
 				if decision == approvalPromptInvalid {
-					validOptions := "1、2、3，或 y/n"
-					if reuseScope != "" {
-						validOptions = "1、2、3、4，或 y/n"
+					lines = upsertPriorityPromptValidationLine(lines, "[审批] 无效选项",
+						"[审批] 无效选项，请输入 "+approvalValidOptionsText(reuseScope != "")+"。")
+					continue
+				}
+				if decision == approvalPromptDenyWithReason && feedback == "" {
+					// 裸 `5`：读第二行自由文本。读取复用与决策相同的
+					// prompt/queue 机制（合并输入通道或专用输入行）。
+					reason, reasonLines, err := readApprovalDenyReason(lines, func(reasonLines []string, reasonPrompt string) (string, bool, error) {
+						return readChatRuntimeApprovalAnswer(session, reasonLines, reasonPrompt)
+					})
+					if err != nil {
+						return chatApprovalAnswer{}, err
 					}
-					lines = upsertPriorityPromptValidationLine(lines, "[审批] 无效选项", "[审批] 无效选项，请输入 "+validOptions+"。")
+					lines = reasonLines
+					if transientPrompt {
+						// 转录需同时保留第一行 `5` 与第二行理由：沿用
+						// “一张最终卡片”的既有回显口径。
+						composed := append(append([]string(nil), lines...), promptLine+text)
+						renderChatRuntimePriorityPromptTranscript(session, composed, approvalDenyReasonPrompt(), reason)
+					}
+					return chatApprovalAnswer{Allowed: false, Feedback: reason}, nil
+				}
+				if decision == approvalPromptDenyWithReason && approvalDenyReasonTooLong(feedback) {
+					lines = upsertPriorityPromptValidationLine(lines, approvalDenyReasonTooLongPrefix, approvalDenyReasonTooLongLine())
 					continue
 				}
 				if transientPrompt {
 					renderChatRuntimePriorityPromptTranscript(session, lines, promptLine, text)
 				}
 				return chatApprovalAnswer{
-					Allowed: decision == approvalPromptAllowOnce || decision == approvalPromptAllowReuse,
-					Reuse:   decision == approvalPromptAllowReuse,
+					Allowed:  decision == approvalPromptAllowOnce || decision == approvalPromptAllowReuse,
+					Reuse:    decision == approvalPromptAllowReuse,
+					Feedback: feedback,
 				}, nil
 			}
 		},
@@ -5043,14 +5066,14 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 		approval := b.approvalRequestForEvent(event)
 		approvalContextLines := approvalRequestContextLines(event.Payload)
 		if grantKey := b.autoApprovalGrantKey(event.SessionID, approval); grantKey != "" && b.hasApprovalGrant(grantKey) {
-			if err := b.resolveApproval(context.Background(), event.SessionID, requestID, true); err != nil {
+			if err := b.resolveApproval(context.Background(), event.SessionID, requestID, true, ""); err != nil {
 				b.setRunError(err)
 			}
 			return
 		}
 		if b.session.NoInteractive && !b.preferInteractiveApprovals {
 			b.setRunError(b.nonInteractiveApprovalError(approval))
-			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false)
+			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false, "")
 			return
 		}
 		reason, _ := event.Payload["reason"].(string)
@@ -5092,14 +5115,14 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 				return
 			}
 			b.setRunError(askErr)
-			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false)
+			_ = b.resolveApproval(context.Background(), event.SessionID, requestID, false, "")
 			return
 		}
 		b.renderApprovalDecision(approval, answer.Allowed)
 		if answer.Allowed && answer.Reuse {
 			b.rememberApprovalGrant(b.autoApprovalGrantKey(event.SessionID, approval))
 		}
-		if err := b.resolveApproval(context.Background(), event.SessionID, requestID, answer.Allowed); err != nil {
+		if err := b.resolveApproval(context.Background(), event.SessionID, requestID, answer.Allowed, answer.Feedback); err != nil {
 			b.setRunError(err)
 		}
 	case runtimechat.EventQuestionAsked:
@@ -5642,10 +5665,11 @@ const (
 	approvalPromptAllowReuse
 	approvalPromptDeny
 	approvalPromptShowDetails
+	approvalPromptDenyWithReason
 )
 
 func approvalDecisionPrompt() string {
-	return "[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数（兼容 y/n）： "
+	return "[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [5] 拒绝并说明原因（兼容 y/n）： "
 }
 
 func approvalDecisionPromptWithReuse(scope string) string {
@@ -5653,29 +5677,122 @@ func approvalDecisionPromptWithReuse(scope string) string {
 	if scope == "" {
 		return approvalDecisionPrompt()
 	}
-	return fmt.Sprintf("[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [4] 允许并在%s复用同类只读审批 10 分钟： ", scope)
+	return fmt.Sprintf("[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [4] 允许并在%s复用同类只读审批 10 分钟  [5] 拒绝并说明原因： ", scope)
+}
+
+// approvalPromptOptionsLine 构建卡片内的操作摘要行。base 与带复用的形态
+// 保持同一列序，避免恢复态与 live 路径出现两种选项表。
+func approvalPromptOptionsLine(reuseScope string) string {
+	scope := strings.TrimSpace(reuseScope)
+	if scope == "" {
+		return "[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [5] 拒绝并说明原因"
+	}
+	return fmt.Sprintf("[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [4] 允许并在%s复用同类只读审批 10 分钟  [5] 拒绝并说明原因", scope)
+}
+
+// approvalValidOptionsText 是无效选项校验行的单一来源（live / 恢复态 /
+// 直接函数调用三条路径共用）。
+func approvalValidOptionsText(reuseAvailable bool) string {
+	if reuseAvailable {
+		return "1、2、3、4、5，或 y/n"
+	}
+	return "1、2、3、5，或 y/n"
+}
+
+// chatApprovalFeedbackMaxRunes mirrors runtimeapi.approvalFeedbackMaxRunes
+// (internal/api/runtimeapi/session_approval_validation.go): the runtime API
+// rejects longer feedback with 400. The CLI must not silently truncate the
+// user's words and must not build a request the server would refuse, so an
+// over-long reason is re-prompted (shorten, or Enter for a plain denial)
+// instead of being cut or forwarded.
+const chatApprovalFeedbackMaxRunes = 2000
+
+const approvalDenyReasonTooLongPrefix = "[审批] 拒绝原因过长"
+
+func approvalDenyReasonPrompt() string {
+	return "[审批] 请输入拒绝原因（直接 Enter 表示普通拒绝）： "
+}
+
+func approvalDenyReasonTooLongLine() string {
+	return fmt.Sprintf("%s（超过 %d 字符），请缩短后重试，或直接 Enter 按普通拒绝处理。",
+		approvalDenyReasonTooLongPrefix, chatApprovalFeedbackMaxRunes)
+}
+
+func approvalDenyReasonTooLong(reason string) bool {
+	return len([]rune(strings.TrimSpace(reason))) > chatApprovalFeedbackMaxRunes
+}
+
+// approvalDenyReasonReader 读取一行理由；实现必须复用与决策读取相同的
+// prompt/queue 机制（合并输入通道或专用输入行）。
+type approvalDenyReasonReader func(lines []string, prompt string) (string, bool, error)
+
+// readApprovalDenyReason 读取裸 `5` 之后第二行的自由文本理由。空行 =
+// 普通拒绝（反馈为空）；超长不截断（见 chatApprovalFeedbackMaxRunes），
+// 重绘提示要求缩短或直接 Enter。
+func readApprovalDenyReason(lines []string, read approvalDenyReasonReader) (string, []string, error) {
+	reasonLines := append([]string(nil), lines...)
+	promptLine := approvalDenyReasonPrompt()
+	for {
+		text, _, err := read(reasonLines, promptLine)
+		if err != nil {
+			return "", reasonLines, err
+		}
+		reason := strings.TrimSpace(normalizeQueuedInputLine(text))
+		if approvalDenyReasonTooLong(reason) {
+			reasonLines = upsertPriorityPromptValidationLine(reasonLines, approvalDenyReasonTooLongPrefix, approvalDenyReasonTooLongLine())
+			continue
+		}
+		return reason, reasonLines, nil
+	}
 }
 
 func parseApprovalPromptDecision(input string) approvalPromptDecision {
-	return parseApprovalPromptDecisionWithReuse(input, false)
+	decision, _ := parseApprovalPromptDecisionInput(input, false)
+	return decision
 }
 
 func parseApprovalPromptDecisionWithReuse(input string, reuseAvailable bool) approvalPromptDecision {
-	switch strings.ToLower(strings.TrimSpace(input)) {
+	decision, _ := parseApprovalPromptDecisionInput(input, reuseAvailable)
+	return decision
+}
+
+// parseApprovalPromptDecisionInput 是带反馈的解析器：除决策外还返回
+// `5 <理由>` 的内联理由。裸 `5` 返回 approvalPromptDenyWithReason + 空
+// 理由，调用方需读第二行（见 readApprovalDenyReason）。
+func parseApprovalPromptDecisionInput(input string, reuseAvailable bool) (approvalPromptDecision, string) {
+	trimmed := strings.TrimSpace(input)
+	switch strings.ToLower(trimmed) {
 	case "1", "y", "yes", "允许", "同意":
-		return approvalPromptAllowOnce
+		return approvalPromptAllowOnce, ""
 	case "4":
 		if reuseAvailable {
-			return approvalPromptAllowReuse
+			return approvalPromptAllowReuse, ""
 		}
-		return approvalPromptInvalid
+		return approvalPromptInvalid, ""
 	case "", "2", "n", "no", "拒绝", "deny":
-		return approvalPromptDeny
+		return approvalPromptDeny, ""
 	case "3":
-		return approvalPromptShowDetails
-	default:
-		return approvalPromptInvalid
+		return approvalPromptShowDetails, ""
+	case "5":
+		return approvalPromptDenyWithReason, ""
 	}
+	if reason, ok := cutApprovalDenyWithReasonPrefix(trimmed); ok {
+		return approvalPromptDenyWithReason, strings.TrimSpace(reason)
+	}
+	return approvalPromptInvalid, ""
+}
+
+// cutApprovalDenyWithReasonPrefix 接受 `5 <理由>`、`5:<理由>`、`5：<理由>`。
+// 分隔符必须存在：`55` 之类保持 invalid，避免被误吞成拒绝理由。
+func cutApprovalDenyWithReasonPrefix(input string) (string, bool) {
+	if !strings.HasPrefix(input, "5") || len(input) < 2 {
+		return "", false
+	}
+	rest := []rune(input[1:])
+	if !unicode.IsSpace(rest[0]) && rest[0] != ':' && rest[0] != '：' {
+		return "", false
+	}
+	return string(rest[1:]), true
 }
 
 func approvalReusePromptScope(session *ChatSession, approval *runtimechat.ApprovalRequest) string {
@@ -5741,7 +5858,7 @@ func approvalPriorityPromptLines(approval *runtimechat.ApprovalRequest, contextL
 			lines = append(lines, localizeApprovalPreviewLine(line))
 		}
 	}
-	lines = append(lines, "[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数")
+	lines = append(lines, approvalPromptOptionsLine(""))
 	return lines
 }
 
@@ -7717,18 +7834,26 @@ func (b *chatRuntimeEventBridge) questionStillPending(sessionID, questionID stri
 	return state == nil || state.PendingQuestion == nil || state.PendingQuestion.ID == questionID
 }
 
-func (b *chatRuntimeEventBridge) resolveApproval(ctx context.Context, sessionID, requestID string, allow bool) error {
+// resolveApproval routes an approval decision (plus the optional §4.8
+// free-text rejection reason) to the server hook when one is installed, and
+// otherwise to the local session actor through ApproveToolWithDecision so the
+// feedback is not lost on the local path.
+func (b *chatRuntimeEventBridge) resolveApproval(ctx context.Context, sessionID, requestID string, allow bool, feedback string) error {
 	if b == nil {
 		return nil
 	}
+	feedback = strings.TrimSpace(feedback)
 	if b.approveTool != nil {
-		return b.approveTool(ctx, sessionID, requestID, allow)
+		return b.approveTool(ctx, sessionID, requestID, allow, feedback)
 	}
 	actor, err := b.lookupActor(sessionID)
 	if err != nil {
 		return err
 	}
-	return actor.ApproveTool(ctx, requestID, allow)
+	return actor.ApproveToolWithDecision(ctx, requestID, runtimechat.ApproveToolDecision{
+		Allow:    allow,
+		Feedback: feedback,
+	})
 }
 
 func (b *chatRuntimeEventBridge) renderApprovalDecision(approval *runtimechat.ApprovalRequest, allowed bool) {

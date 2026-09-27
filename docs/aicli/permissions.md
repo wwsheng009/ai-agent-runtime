@@ -269,10 +269,10 @@ aicli exec --deny-tool download --enable-tools --prompt "..."
 
 ### 3.3 审批阶段
 
-- 需要询问时，宿主（CLI/Web/ACP/子代理）接管：CLI 面板给出 `[1] 仅本次允许 [2] 拒绝 [3] 查看完整参数`（只读场景另有 `[4] 会话/团队内复用 10 分钟`）；Web 为批准 / 拒绝 + 可选「记住」与说明；ACP 为 `allow-once / allow-always / reject-once`。
+- 需要询问时，宿主（CLI/Web/ACP/子代理）接管：CLI 面板给出 `[1] 仅本次允许 [2] 拒绝 [3] 查看完整参数 [5] 拒绝并说明原因`（只读场景另有 `[4] 会话/团队内复用 10 分钟`）；`[5]` 支持同行 `5 <理由>` 或下一行输入理由，空理由等同普通拒绝，超过 2000 字符不截断（提示缩短或按普通拒绝）；Web 为批准 / 拒绝 + 可选「记住」与说明；ACP 为 `allow-once / allow-always / reject-once`（协议无自由文本拒绝）。
 - **无 AskHandler 的宿主**（headless、无 TTY 的 `exec`、未挂审批的子代理）一律 **fail closed**：reason `headless_deny:approval_required`。
 - 批准可以携带**记忆**（`once` / `session` / `project`，见 §5）；也可以携带**补丁参数**，但补丁会重新过 1–4 的硬约束。
-- 拒绝可附**自由文本反馈**：会并入决策 reason（`…; user feedback: <文本>`）随工具错误回到模型上下文，模型据此换方案而不是重试原命令。
+- 拒绝可附**自由文本反馈**（CLI 入口即 `[5] 拒绝并说明原因`；本地模式经 actor 的 `ApproveToolWithDecision`，runtime-server 模式经 `approve_tool` 请求的 `feedback` 字段）：会并入决策 reason（`…; user feedback: <文本>`）随工具错误回到模型上下文，模型据此换方案而不是重试原命令。
 
 ---
 

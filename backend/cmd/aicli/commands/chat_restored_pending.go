@@ -2,7 +2,6 @@ package commands
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -66,6 +65,10 @@ type chatRestoredPendingPrompt struct {
 	lines        []string
 	promptLine   string
 	detailsShown bool
+	// awaitingDenyReason 标记「已选 [5]、正在等第二行拒绝理由」的两步态。
+	// 恢复态的每次输入是一行，理由在下一行走，因此该状态必须挂在投影上
+	// 跨输入行保持；空行按普通拒绝处理（Feedback 为空）。
+	awaitingDenyReason bool
 
 	cleanupBody func()
 	restoreFan  func()
@@ -299,10 +302,7 @@ func projectRestoredPendingApproval(session *ChatSession, approval *runtimechat.
 	reuseScope := approvalReusePromptScope(session, &snapshot)
 	approvalLines := approvalPriorityPromptLines(&snapshot, nil)
 	if reuseScope != "" && len(approvalLines) > 0 {
-		approvalLines[len(approvalLines)-1] = fmt.Sprintf(
-			"[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [4] 允许并在%s复用同类只读审批 10 分钟",
-			reuseScope,
-		)
+		approvalLines[len(approvalLines)-1] = approvalPromptOptionsLine(reuseScope)
 	}
 	promptLine := approvalDecisionPromptWithReuse(reuseScope)
 	lines, suspension := beginRestoredPendingPromptLines(session, "审批提示", approvalLines)
@@ -410,7 +410,22 @@ func handleRestoredPendingAnswerLine(session *ChatSession, input string) bool {
 			clearRestoredPendingPrompt(session)
 			return false
 		}
-		decision := parseApprovalPromptDecisionWithReuse(text, pending.reuseScope != "")
+		if pending.awaitingDenyReason {
+			// 两步拒绝的第二个输入行：整行都是理由，空行 = 普通拒绝。
+			if approvalDenyReasonTooLong(text) {
+				rerenderRestoredPendingPrompt(session, pending, approvalDenyReasonTooLongPrefix, approvalDenyReasonTooLongLine())
+				return true
+			}
+			renderChatRuntimePriorityPromptTranscript(session, pending.lines, pending.promptLine, text)
+			if err := bridge.resolveApproval(context.Background(), pending.sessionID, pending.requestID, false, text); err != nil {
+				renderRestoredPendingError(session, err)
+			} else {
+				bridge.renderApprovalDecision(pending.approval, false)
+			}
+			clearRestoredPendingPrompt(session)
+			return true
+		}
+		decision, feedback := parseApprovalPromptDecisionInput(text, pending.reuseScope != "")
 		switch decision {
 		case approvalPromptShowDetails:
 			if !pending.detailsShown {
@@ -420,18 +435,36 @@ func handleRestoredPendingAnswerLine(session *ChatSession, input string) bool {
 			rerenderRestoredPendingPrompt(session, pending, "", "")
 			return true
 		case approvalPromptInvalid:
-			validOptions := "1、2、3，或 y/n"
-			if pending.reuseScope != "" {
-				validOptions = "1、2、3、4，或 y/n"
-			}
 			rerenderRestoredPendingPrompt(session, pending,
-				"[审批] 无效选项", "[审批] 无效选项，请输入 "+validOptions+"。")
+				"[审批] 无效选项", "[审批] 无效选项，请输入 "+approvalValidOptionsText(pending.reuseScope != "")+"。")
+			return true
+		case approvalPromptDenyWithReason:
+			if feedback == "" {
+				// 裸 `5`：切到两步态，理由由下一行输入提供。
+				pending.awaitingDenyReason = true
+				pending.promptLine = approvalDenyReasonPrompt()
+				pending.lines = upsertPriorityPromptValidationLine(pending.lines, "[审批] 已选择",
+					"[审批] 已选择 [5] 拒绝并说明原因")
+				rerenderRestoredPendingPrompt(session, pending, "", "")
+				return true
+			}
+			if approvalDenyReasonTooLong(feedback) {
+				rerenderRestoredPendingPrompt(session, pending, approvalDenyReasonTooLongPrefix, approvalDenyReasonTooLongLine())
+				return true
+			}
+			renderChatRuntimePriorityPromptTranscript(session, pending.lines, pending.promptLine, text)
+			if err := bridge.resolveApproval(context.Background(), pending.sessionID, pending.requestID, false, feedback); err != nil {
+				renderRestoredPendingError(session, err)
+			} else {
+				bridge.renderApprovalDecision(pending.approval, false)
+			}
+			clearRestoredPendingPrompt(session)
 			return true
 		}
 		allowed := decision == approvalPromptAllowOnce || decision == approvalPromptAllowReuse
 		reuse := decision == approvalPromptAllowReuse
 		renderChatRuntimePriorityPromptTranscript(session, pending.lines, pending.promptLine, text)
-		if err := bridge.resolveApproval(context.Background(), pending.sessionID, pending.requestID, allowed); err != nil {
+		if err := bridge.resolveApproval(context.Background(), pending.sessionID, pending.requestID, allowed, ""); err != nil {
 			renderRestoredPendingError(session, err)
 		} else {
 			bridge.renderApprovalDecision(pending.approval, allowed)
@@ -469,7 +502,7 @@ func resolveRestoredPendingApprovalWithoutPrompt(
 	if bridge == nil {
 		return
 	}
-	if err := bridge.resolveApproval(context.Background(), sessionID, strings.TrimSpace(approval.ID), allow); err != nil {
+	if err := bridge.resolveApproval(context.Background(), sessionID, strings.TrimSpace(approval.ID), allow, ""); err != nil {
 		renderRestoredPendingError(session, err)
 		return
 	}

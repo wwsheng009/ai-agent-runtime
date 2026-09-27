@@ -3412,7 +3412,7 @@ func TestApprovalPriorityPromptLines_ShowActionContextAndOptions(t *testing.T) {
 		"[审批] 上下文：team=team-1 permission_mode=default",
 		"[审批] 命令：git commit -m test",
 		"[审批] 工作目录：E:/projects/ai/ai-agent-runtime",
-		"[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数",
+		"[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [5] 拒绝并说明原因",
 	} {
 		require.Contains(t, rendered, want)
 	}
@@ -3428,12 +3428,126 @@ func TestParseApprovalPromptDecisionSupportsNumberedAndLegacyAnswers(t *testing.
 		"":    approvalPromptDeny,
 		"3":   approvalPromptShowDetails,
 		"4":   approvalPromptInvalid,
+		"5":   approvalPromptDenyWithReason,
 		"x":   approvalPromptInvalid,
 	}
 	for input, want := range tests {
 		t.Run(fmt.Sprintf("input_%q", input), func(t *testing.T) {
 			require.Equal(t, want, parseApprovalPromptDecision(input))
 		})
+	}
+}
+
+func TestParseApprovalPromptDecisionInputCarriesInlineRejectionReason(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		reuse        bool
+		wantDecision approvalPromptDecision
+		wantFeedback string
+	}{
+		{name: "bare_five_waits_for_reason", input: "5", wantDecision: approvalPromptDenyWithReason},
+		{name: "inline_reason", input: "5 不要动这个文件", wantDecision: approvalPromptDenyWithReason, wantFeedback: "不要动这个文件"},
+		{name: "inline_reason_colon", input: "5:先看 README", wantDecision: approvalPromptDenyWithReason, wantFeedback: "先看 README"},
+		{name: "inline_reason_fullwidth_colon", input: "5：先看 README", wantDecision: approvalPromptDenyWithReason, wantFeedback: "先看 README"},
+		{name: "five_five_stays_invalid", input: "55", wantDecision: approvalPromptInvalid},
+		{name: "reuse_five", input: "5", reuse: true, wantDecision: approvalPromptDenyWithReason},
+		{name: "plain_deny_has_no_feedback", input: "2", wantDecision: approvalPromptDeny},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			decision, feedback := parseApprovalPromptDecisionInput(testCase.input, testCase.reuse)
+			require.Equal(t, testCase.wantDecision, decision)
+			require.Equal(t, testCase.wantFeedback, feedback)
+		})
+	}
+}
+
+func TestChatRuntimeEvents_ApprovalDenyWithReasonCarriesFeedback(t *testing.T) {
+	newBridge := func(input string) *chatRuntimeEventBridge {
+		session := &ChatSession{
+			InputReader:   bufio.NewReader(strings.NewReader(input)),
+			NoInteractive: true,
+		}
+		return newChatRuntimeEventBridge(session)
+	}
+	approval := &runtimechat.ApprovalRequest{
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"git push","workdir":"C:/work"}`),
+	}
+
+	readAnswer := func(t *testing.T, bridge *chatRuntimeEventBridge) chatApprovalAnswer {
+		t.Helper()
+		var answer chatApprovalAnswer
+		var askErr error
+		_ = captureStdout(t, func() {
+			answer, askErr = bridge.askApproval(approval, nil)
+		})
+		require.NoError(t, askErr)
+		return answer
+	}
+
+	t.Run("two_step", func(t *testing.T) {
+		answer := readAnswer(t, newBridge("5\n先看 README 再推\n"))
+		require.False(t, answer.Allowed)
+		require.False(t, answer.Reuse)
+		require.Equal(t, "先看 README 再推", answer.Feedback)
+	})
+
+	t.Run("inline", func(t *testing.T) {
+		answer := readAnswer(t, newBridge("5 内联理由\n"))
+		require.False(t, answer.Allowed)
+		require.Equal(t, "内联理由", answer.Feedback)
+	})
+
+	t.Run("empty_reason_is_plain_deny", func(t *testing.T) {
+		answer := readAnswer(t, newBridge("5\n\n"))
+		require.False(t, answer.Allowed)
+		require.Empty(t, answer.Feedback)
+	})
+
+	t.Run("overlong_reason_is_not_forwarded", func(t *testing.T) {
+		// 理由步骤里空行 = 普通拒绝；超长的那行必须被拒绝并要求重输，
+		// 不能被截断后当作 Feedback 下发。
+		answer := readAnswer(t, newBridge("5\n"+strings.Repeat("x", chatApprovalFeedbackMaxRunes+1)+"\n\n"))
+		require.False(t, answer.Allowed)
+		require.Empty(t, answer.Feedback, "an over-long reason must not be truncated into Feedback")
+	})
+}
+
+func TestReadApprovalDenyReasonRepromptsOverlongWithoutTruncating(t *testing.T) {
+	inputs := []string{strings.Repeat("x", chatApprovalFeedbackMaxRunes+1), "  缩短后的理由  "}
+	readIndex := 0
+	reason, lines, err := readApprovalDenyReason([]string{"[审批] 卡片正文"}, func(_ []string, _ string) (string, bool, error) {
+		value := inputs[readIndex]
+		readIndex++
+		return value, false, nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, readIndex, "the over-long reason must be re-prompted")
+	require.Equal(t, "缩短后的理由", reason)
+	require.Contains(t, strings.Join(lines, "\n"), approvalDenyReasonTooLongPrefix)
+}
+
+func TestChatRuntimeEvents_ResolveApprovalForwardsFeedbackToHook(t *testing.T) {
+	bridge := newChatRuntimeEventBridge(&ChatSession{})
+	type approvalCall struct {
+		allow    bool
+		feedback string
+	}
+	calls := make(chan approvalCall, 1)
+	bridge.approveTool = func(_ context.Context, _, _ string, allow bool, feedback string) error {
+		calls <- approvalCall{allow: allow, feedback: feedback}
+		return nil
+	}
+
+	require.NoError(t, bridge.resolveApproval(context.Background(), "session-1", "request-1", false, "  先看 README  "))
+	select {
+	case call := <-calls:
+		require.False(t, call.allow)
+		require.Equal(t, "先看 README", call.feedback)
+	default:
+		t.Fatal("the approveTool hook did not receive the decision")
 	}
 }
 

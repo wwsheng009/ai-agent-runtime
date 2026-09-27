@@ -252,7 +252,7 @@ func TestRestoredPendingApprovalRoutesDecisionAndClears(t *testing.T) {
 		allow     bool
 	}
 	calls := make(chan approvalCall, 1)
-	bridge.approveTool = func(_ context.Context, _, requestID string, allow bool) error {
+	bridge.approveTool = func(_ context.Context, _, requestID string, allow bool, _ string) error {
 		calls <- approvalCall{requestID: requestID, allow: allow}
 		return nil
 	}
@@ -279,6 +279,75 @@ func TestRestoredPendingApprovalRoutesDecisionAndClears(t *testing.T) {
 	}
 }
 
+// TestRestoredPendingApprovalDenyWithReasonCarriesFeedback 覆盖 §4.8 恢复态
+// 的两步/内联拒绝：Feedback 必须随 allow=false 路由到 approveTool 钩子。
+func TestRestoredPendingApprovalDenyWithReasonCarriesFeedback(t *testing.T) {
+	type approvalCall struct {
+		allow    bool
+		feedback string
+	}
+	newHarness := func(t *testing.T) (*ChatSession, chan approvalCall) {
+		t.Helper()
+		session, bridge, _ := newRestoredPendingHarness(t, &runtimechat.RuntimeState{
+			Status: runtimechat.SessionWaitingApproval,
+			PendingApproval: &runtimechat.ApprovalRequest{
+				ID:        "apr-restored-feedback",
+				SessionID: restoredPendingTestSessionID,
+				ToolName:  "shell",
+				Reason:    "需要执行命令",
+			},
+		})
+		calls := make(chan approvalCall, 1)
+		bridge.approveTool = func(_ context.Context, _, _ string, allow bool, feedback string) error {
+			calls <- approvalCall{allow: allow, feedback: feedback}
+			return nil
+		}
+		if !ensureRestoredPendingInteractivePrompt(session) {
+			t.Fatal("expected the restored pending approval to be projected")
+		}
+		return session, calls
+	}
+
+	t.Run("two_step", func(t *testing.T) {
+		session, calls := newHarness(t)
+		if !handleRestoredPendingAnswerLine(session, "5") {
+			t.Fatal("bare 5 must switch the restored approval into the two-step deny flow")
+		}
+		if currentRestoredPendingPrompt(session) == nil {
+			t.Fatal("the projection must stay alive while waiting for the reason")
+		}
+		if !handleRestoredPendingAnswerLine(session, "先看 README") {
+			t.Fatal("the reason line must be consumed by the restored pending approval")
+		}
+		select {
+		case call := <-calls:
+			if call.allow || call.feedback != "先看 README" {
+				t.Fatalf("unexpected approval routing: %#v", call)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("the deny-with-reason decision was not routed to the actor")
+		}
+		if currentRestoredPendingPrompt(session) != nil {
+			t.Fatal("the approval projection must be cleared once resolved")
+		}
+	})
+
+	t.Run("inline", func(t *testing.T) {
+		session, calls := newHarness(t)
+		if !handleRestoredPendingAnswerLine(session, "5 内联理由") {
+			t.Fatal("the inline deny-with-reason must be consumed by the restored pending approval")
+		}
+		select {
+		case call := <-calls:
+			if call.allow || call.feedback != "内联理由" {
+				t.Fatalf("unexpected approval routing: %#v", call)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("the inline deny-with-reason decision was not routed to the actor")
+		}
+	})
+}
+
 // TestRestoredPendingApprovalAutoResolvesUnderYolo 与 ACP 恢复审批同口径：
 // yolo 下审批本不该出现，直接放行而不是重新问一遍。
 func TestRestoredPendingApprovalAutoResolvesUnderYolo(t *testing.T) {
@@ -291,7 +360,7 @@ func TestRestoredPendingApprovalAutoResolvesUnderYolo(t *testing.T) {
 	session.PermissionMode = runtimepolicy.ModeBypassPermissions
 
 	allowed := make(chan bool, 1)
-	bridge.approveTool = func(_ context.Context, _, _ string, allow bool) error {
+	bridge.approveTool = func(_ context.Context, _, _ string, allow bool, _ string) error {
 		allowed <- allow
 		return nil
 	}

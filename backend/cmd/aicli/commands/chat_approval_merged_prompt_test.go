@@ -91,7 +91,7 @@ func TestChatApprovalAnswerMergedIntoBottomPromptReadsThroughPromptRow(t *testin
 		"[审批] 工具：write",
 		"[审批] 风险等级：高（high）",
 		"[审批] 上下文：permission_mode=default",
-		"[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数（兼容 y/n）：",
+		"[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [5] 拒绝并说明原因（兼容 y/n）：",
 	} {
 		if !strings.Contains(popupText, want) {
 			t.Fatalf("expected approval panel to carry %q in popup rows: %#v", want, state.Bottom.PopupLines)
@@ -180,7 +180,7 @@ func TestApprovalDecisionPromptStaysVisibleInPanelBody(t *testing.T) {
 	if len(body) != 1 {
 		t.Fatalf("approval decision hint body lines = %#v", body)
 	}
-	for _, want := range []string{"[1] 仅本次允许", "[2] 拒绝", "[3] 查看完整参数"} {
+	for _, want := range []string{"[1] 仅本次允许", "[2] 拒绝", "[3] 查看完整参数", "[5] 拒绝并说明原因"} {
 		if !strings.Contains(body[0], want) {
 			t.Fatalf("approval decision hint %q missing %q", body[0], want)
 		}

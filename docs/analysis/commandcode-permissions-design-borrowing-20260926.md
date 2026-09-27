@@ -311,7 +311,7 @@
 - **设计映射**：
   1. `ApprovalResponse` 增加 `Feedback string`、`RememberScope`（`once|session|project`）、可选 `RememberPattern`（命令/路径片段）；`IsDangerousTool` 仍禁 remember；破坏性/敏感提示强制 once-only（拒绝 remember）。
   2. 引擎把 `RememberScope=project` 写 `FileGrantStore`（`<project>/.aicli/grants.json`），`session` 写内存 store；CLI `[4]` 改为走同一 `ApprovalResponse.Remember + Scope`，TTL map 仅保留为纯 UI 提示缓存。
-  3. 各宿主选项对齐：CLI 增 `[5] 拒绝并说明原因`（自由文本进入 `Feedback`，作为 tool error/guidance 的一部分回给模型）；Web 增加 remember 勾选与反馈输入框；ACP 可映射到 `reject_always`（已定义未启用，`acp/types.go:173-179`）。
+   3. 各宿主选项对齐：CLI `[5] 拒绝并说明原因` **已落地**（2026-09-26；本地 actor + runtime-server 两条路径，含恢复态/直接函数审批，见 §12.3）——自由文本进入 `Feedback`，作为 tool error/guidance 的一部分回给模型；Web 增加 remember 勾选与反馈输入框（§12.2 已落地）；ACP 可映射到 `reject_always`（已定义未启用，`acp/types.go:173-179`；**本次未动，ACP 仍无自由文本拒绝**）。
   4. `grant Pattern` 目前只有子串匹配实现（`policy/grants.go:184-200`），配合 4.1 升级为 specifier 存储格式，避免"记住 `git *`"退化为字符串包含。
 - **验证**：三宿主一致性的 handler/组件测试；"remember project → 新会话仍生效"的 e2e；危险工具 remember 被拒测试；拒绝反馈进入模型上下文的测试。
 
@@ -395,7 +395,7 @@
 | **M1 安全护栏（P0）** | 4.3 根/主目录断路器（+共享 shell 解析层）、4.4 敏感写保护、4.7 只读机密参数过滤、4.2 dont-ask 模式 | 无（可与规则重构解耦） | 防欺骗矩阵、敏感路径分类表驱动、5 模式决策矩阵、`aicli exec --permission-mode dont-ask` 冒烟 |
 | **M2 规则引擎（P0/P1）** | 4.1 specifier（命令/路径/域名/MCP）、4.6 复合命令逐段匹配与不对称、4.10 参数匹配+工具名通配、4.11 accept-edits 安全命令快车道 | M1 的解析层 | specifier 单测矩阵、旧 permissions.yaml 全量回归、`git status && rm -rf x` 反例 |
 | **M3 边界与配置（P0/P1）** | 4.5 外部目录门（/add-dir、additionalDirectories 生效、temp/skill/plan 例外）、4.9 分层配置累积 + disableBypass、CLI chat 的 sandbox/policy 接线 | M2（豁免规则用到 specifier） | 外部路径矩阵、分层合并单测、disableBypass 四层拒绝、ACP e2e |
-| **M4 体验与文档（P1/P2）** | 4.8 审批选项统一（反馈+remember 作用域）**Web 面已落地（§12.2）；CLI/ACP 面待做**、4.13 按需解释**已落地且已加模式/缓存**（`off`/`on_demand`/`pre_generate` + 单飞缓存，Web UI 已接线；CLI/ACP 入口与设置页开关待做）**、4.14 文档 IA**首版 + ACP 侧入口表已落地**（`docs/aicli/permissions.md`；`docs/acp/README.md` §6 权限入口对照表 + option id 勘误）**、4.12 安全复核已落地（§13：slash/接口/ACP→bypass 可达性 + 手册 §1.4 提权边界）；入口简写与 banner 待做** | M1–M3 | policy/chat/runtimeapi 全绿、Web 前端 lint + 全量用例通过；CLI/ACP UI 一致性、新会话 grant 生效 e2e 待补 |
+| **M4 体验与文档（P1/P2）** | 4.8 审批选项统一（反馈+remember 作用域）**Web 面已落地（§12.2）；CLI 面已落地（§12.3）；ACP 面待做（无自由文本拒绝）**、4.13 按需解释**已落地且已加模式/缓存**（`off`/`on_demand`/`pre_generate` + 单飞缓存，Web UI 已接线；CLI/ACP 入口与设置页开关待做）**、4.14 文档 IA**首版 + ACP 侧入口表已落地**（`docs/aicli/permissions.md`；`docs/acp/README.md` §6 权限入口对照表 + option id 勘误）**、4.12 安全复核已落地（§13：slash/接口/ACP→bypass 可达性 + 手册 §1.4 提权边界）；入口简写与 banner 待做** | M1–M3 | policy/chat/runtimeapi 全绿、Web 前端 lint + 全量用例通过；CLI/ACP UI 一致性、新会话 grant 生效 e2e 待补 |
 
 分阶段风险控制：
 
@@ -561,13 +561,25 @@
 
 验证说明：`internal/policy`、`internal/chat` 全绿。`internal/chat` 的 `TestAppendEventsLockHoldBudget`（锁持有时长预算）在并发构建负载下出现过一次失败，单跑 `-count=3` 3/3 通过，属既存时序敏感用例，与本次改动无关。
 
-本切片明确**未做**（4.8 剩余：宿主 UI/桥接面）：
+本切片明确**未做**（4.8 剩余：宿主 UI/桥接面）。其中 CLI `[5]` 已由后续切片落地（§12.3），下列为剩余项：
 
-- CLI `[5] 拒绝并说明原因`（自由文本 → `Feedback`）与 `[4]` 复用经由同一 `ApprovalResponse.Remember + Scope`（CLI 现有 10 分钟 TTL 复用仍是独立轨道，未合并；`cmd/aicli/commands` 与并发会话的工作面重叠，排在后面做）；
+- ~~CLI `[5] 拒绝并说明原因`（自由文本 → `Feedback`）~~ **已完成（§12.3）**：本地 actor + runtime-server 两条路径（含恢复态与 `/call` 直接函数审批）都会把自由文本作为 `Feedback` 下发；空理由等同普通拒绝，超长不截断；仍未做的是 `[4]` 复用与 `ApprovalResponse.Remember + Scope` 的合并（CLI 现有 10 分钟 TTL 复用仍是独立轨道）；
 - ACP `reject_always`（`acp/types.go` 已定义未启用）与 `allow-always` → policy 记忆库（`RememberScope=session/project`）的映射——当前 `allow-always` 走的是 CLI 侧进程内授权族复用（10 分钟 TTL）；现状已写入 ACP 手册「权限入口对照表」；
 - `/grants` 命令面展示新 specifier 形态（durable store 读写已通，展示层待跟进）；
 - 4.13 剩余：CLI/ACP 面的「解释」入口；宿主若注入 `ApprovalSummarizer` 需自担记账。（**Web 设置页开关已落地**：`GET/PUT /api/runtime/config/approval-explain` + 设置页卡片，进程级不落盘。）
 - 4.12：**已完成**（入口简写/别名/`/mode:<name>` 见 §4.12「本轮收口」；CLI 常驻模式 banner 经核对为既有实现（§4.6），Web/CLI tone 与回落口径一致）。安全复核已完成（§13：四类输入面的 bypass 可达性、F1–F4 定级与建议，已写入手册 §1.4）。4.14 的后续项：示例工程/截图未开始（ACP 侧入口表本次已落地，见 ACP 手册 §6）。
+
+### 12.3 落地状态（2026-09-26，M4 第二切片：CLI `[5] 拒绝并说明原因`）
+
+| 项 | 状态 | 代码落点 | 验证 |
+|----|------|----------|------|
+| CLI 审批选项 | ✅ | `chat_runtime_events.go`：提示/卡片选项行统一新增 `[5] 拒绝并说明原因`（`approvalPromptOptionsLine` / `approvalDecisionPromptWithReuse` / `approvalValidOptionsText`）；`parseApprovalPromptDecisionInput` 支持内联 `5 <理由>`（含 `5:` / `5：`），裸 `5` 走第二行读取（复用与决策相同的 prompt/queue 机制） | `TestParseApprovalPromptDecisionInputCarriesInlineRejectionReason` |
+| 决策透传（本地 + server） | ✅ | `resolveApproval(…, allow, feedback)`：无钩子时走 `actor.ApproveToolWithDecision(ApproveToolDecision{Allow, Feedback})`；server 路径 `approveRuntimeServerTool` 在理由非空时向 `approve_tool` 请求体追加 `feedback`（与 runtimeapi handler 的 `json:"feedback"` 对齐；普通决策请求体不变） | `TestChatRuntimeEvents_ApprovalDenyWithReasonCarriesFeedback`、`TestChatRuntimeEvents_ResolveApprovalForwardsFeedbackToHook`、`TestApproveRuntimeServerToolPostsFeedback` |
+| 恢复态与直接函数审批 | ✅ | `chat_restored_pending.go` 新增跨输入行的 `awaitingDenyReason` 两步态；`command_invoke.go` 的 `/call`、`/tool`、`/skill` 直接函数审批同样支持 `[5]`（理由进入 `runtimepolicy.ApprovalResponse.Feedback`） | `TestRestoredPendingApprovalDenyWithReasonCarriesFeedback` |
+| 超长理由 | ✅（不截断） | 与 runtimeapi 的 2000 rune 上限对齐（`chatApprovalFeedbackMaxRunes`）：超限重绘提示要求缩短或直接 Enter 按普通拒绝，绝不静默截断后透传 | 同上「overlong_reason_reprompts_without_truncating」用例 |
+| ACP 面 | ⏸ 未做 | ACP v1 权限选项没有自由文本拒绝，`acpEventBridge.AskApproval` 的 `Feedback` 保持为空；`reject_always` 仍未接线 | —— |
+
+边界说明：CLI 的 `[5]` 只影响宿主侧输入与决策下发，不改变 `ApprovalResponse`/`ApproveToolDecision` 契约（runtimeapi 的 feedback ≤ 2000 runes、超长 400 校验保持原样）。ACP 仍无自由文本拒绝，`docs/acp/README.md` 的选项表无需更新。
 
 ---
 
@@ -598,7 +610,7 @@
 | F3 | Web 注入面可承载命令并可满足 yolo 确认 | 低-中 | **已收口**：来源显式化——`routeInputTextFromSource`（Web 注入标 `web`，stdin 标 `stdin`），优先级读取改为返回整条 `chatQueuedInput`（`readPriorityItemWithPrompt`），`evalBypassPermissionModeConfirmation` 用 `chatInputSourceIsLocalTerminal` 判定（**未知来源 fail-closed**），非终端来源的确认行被拒绝且**无损回填**（普通文本按原顺序回队列，`/` 命令不回填以免确认提示被循环触发）。审批/提问的 Web 回答不受影响（那是 Web 的正规交互面）。测试：`chat_yolo_confirm_source_test.go`（拒绝+回填 / 终端来源通过 / slash 不回填 / 来源保留）+ 既有确认用例改为终端来源 |
 | F4 | 文档未集中写「谁能提权」 | 低 | **已补**：手册「提权边界」§1.4；`docs/aicli/web-remote-api.md` §8.1「远程调用者的能力边界（安全模型）」（含「两条注入即可满足 yolo 确认」与令牌=会话控制权）。本次把 F2 收口后的语义同步进 §8.1（切换接口 403、还原路径不还原 bypass） |
 
-F2 已按上面的约定收口（只做 fail-loud，不含 confirm 语义，因此不改变正常路径的 API 契约）：这一层在 **host 之外**，因此即使某个 host 忘了装配权限层，API 也不会放行 bypass。F3 在 `cmd/aicli/commands` 收口（来源门 + 无损回填，见上表），F1 随后在 runtimeapi 请求契约 + 前端选择器同步后收口。**至此 §13 的 F1–F4 全部有代码或文档落点**；仍未做的是 4.12 的入口简写/常驻 banner 与 4.8 的 CLI/ACP 审批 UI 条目，它们不属于本次安全发现的收敛范围。
+F2 已按上面的约定收口（只做 fail-loud，不含 confirm 语义，因此不改变正常路径的 API 契约）：这一层在 **host 之外**，因此即使某个 host 忘了装配权限层，API 也不会放行 bypass。F3 在 `cmd/aicli/commands` 收口（来源门 + 无损回填，见上表），F1 随后在 runtimeapi 请求契约 + 前端选择器同步后收口。**至此 §13 的 F1–F4 全部有代码或文档落点**；4.12 的入口简写已完成，4.8 的 CLI `[5]` 已完成（§12.3），仍未做的是 4.8 的 ACP 面（协议无自由文本拒绝），它们不属于本次安全发现的收敛范围。
 
 顺带核到的装配事实（供后续排查用，不是结论性缺陷）：权限文件的分层装配点只有 `cmd/aicli/commands`（`applyChatPermissionsOverlay` → `ApplyPermissionsOverlayToEngine/ToPolicy`，`LoadLayeredPermissions` 的唯一生产调用方），`internal/runtimeserver` 是纯控制面、不建引擎；runtimeapi 只在 harness 展示/评测里读 `LoadProjectPermissions`。也就是说 `disable_bypass`/项目规则是否生效取决于**运行 actor 的 host 是否装配了 overlay**；若将来出现 runtime 侧自执行 host，需要补同等装配（登记为验证项，避免 silently 少一层保护）。
 

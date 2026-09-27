@@ -435,7 +435,7 @@ func (h directFunctionApprovalHandler) RequestApproval(ctx context.Context, req 
 			return runtimepolicy.ApprovalResponse{}, err
 		}
 		text = strings.TrimSpace(normalizeQueuedInputLine(text))
-		decision := parseApprovalPromptDecision(text)
+		decision, feedback := parseApprovalPromptDecisionInput(text, false)
 		if decision == approvalPromptShowDetails {
 			if !detailsShown {
 				lines = append(lines, approvalFullParameterLines(approval)...)
@@ -444,7 +444,30 @@ func (h directFunctionApprovalHandler) RequestApproval(ctx context.Context, req 
 			continue
 		}
 		if decision == approvalPromptInvalid {
-			lines = upsertPriorityPromptValidationLine(lines, "[审批] 无效选项", "[审批] 无效选项，请输入 1、2、3，或 y/n。")
+			lines = upsertPriorityPromptValidationLine(lines, "[审批] 无效选项",
+				"[审批] 无效选项，请输入 "+approvalValidOptionsText(false)+"。")
+			continue
+		}
+		if decision == approvalPromptDenyWithReason && feedback == "" {
+			// 裸 `5`：用与决策相同的弹层读取机制读第二行理由。
+			reason, reasonLines, err := readApprovalDenyReason(lines, func(reasonLines []string, reasonPrompt string) (string, bool, error) {
+				readPrompt, cleanupPrompt, transientPrompt := showChatRuntimePriorityPrompt(h.session, reasonLines, reasonPrompt)
+				reasonText, readErr := chatInteractiveReadPriorityLineWithPrompt(h.session, ctx, readPrompt)
+				cleanupPrompt()
+				return reasonText, transientPrompt, readErr
+			})
+			if err != nil {
+				return runtimepolicy.ApprovalResponse{}, err
+			}
+			lines = reasonLines
+			if transientPrompt {
+				composed := append(append([]string(nil), lines...), promptLine+text)
+				renderChatRuntimePriorityPromptTranscript(h.session, composed, approvalDenyReasonPrompt(), reason)
+			}
+			return runtimepolicy.ApprovalResponse{Allowed: false, Feedback: reason}, nil
+		}
+		if decision == approvalPromptDenyWithReason && approvalDenyReasonTooLong(feedback) {
+			lines = upsertPriorityPromptValidationLine(lines, approvalDenyReasonTooLongPrefix, approvalDenyReasonTooLongLine())
 			continue
 		}
 		if transientPrompt {
@@ -454,7 +477,7 @@ func (h directFunctionApprovalHandler) RequestApproval(ctx context.Context, req 
 		if allowed {
 			fmt.Printf("[审批] 已允许本次直接调用：%s\n", strings.TrimSpace(req.ToolName))
 		}
-		return runtimepolicy.ApprovalResponse{Allowed: allowed}, nil
+		return runtimepolicy.ApprovalResponse{Allowed: allowed, Feedback: feedback}, nil
 	}
 }
 
