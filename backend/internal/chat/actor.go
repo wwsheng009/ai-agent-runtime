@@ -19,9 +19,11 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/compactruntime"
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	runtimeoutput "github.com/wwsheng009/ai-agent-runtime/internal/output"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planstore"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -100,10 +102,14 @@ type sessionRunControl struct {
 	runWaitDetached       bool
 	runWaitReleasePending bool
 	cancel                context.CancelFunc
-	interrupted           atomic.Bool
-	abandoned             atomic.Bool
-	finalizing            atomic.Bool
-	lastActivity          atomic.Int64
+	// cancelCause 与 cancel 同源，携带取消来源标记（sessionRunCancelCause）。
+	// session_end 的 cancel_cause 与告警日志据此把 execution_context 细化到
+	// 具体调用点；旧路径只调用 cancel，cause 退化为 context.Canceled。
+	cancelCause  context.CancelCauseFunc
+	interrupted  atomic.Bool
+	abandoned    atomic.Bool
+	finalizing   atomic.Bool
+	lastActivity atomic.Int64
 }
 
 // SessionActorConfig configures a SessionActor instance.
@@ -1448,7 +1454,7 @@ func (a *SessionActor) startRunStallWatchdog(runCtx context.Context, run *sessio
 // It mirrors the interrupt path: mark interrupted, cancel the run context,
 // write back stopped, publish the event and notify the host (lease release).
 func (a *SessionActor) abortStalledRun(run *sessionRunControl) {
-	if !a.abandonSessionRun(run) {
+	if !a.abandonSessionRun(run, runCancelCauseStallTimeout) {
 		return
 	}
 	_ = a.updateStateConvergent(context.Background(), func(state *RuntimeState) error {
@@ -2692,7 +2698,8 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		run = a.claimSessionRun(turnID, nil, reply)
 	}
 	ctx = withSessionRunControl(ctx, run)
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancelCause := context.WithCancelCause(ctx)
+	cancel := func() { cancelCause(context.Canceled) }
 	approvalDetach := &approvalDetachState{}
 	runCtx = context.WithValue(runCtx, approvalDetachContextKey{}, approvalDetach)
 	runCtx = team.WithRunMeta(runCtx, runMeta)
@@ -2702,7 +2709,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		runCtx = agent.WithTurnSystemMessages(runCtx, injection.systemMessages)
 		runCtx = agent.WithTurnPinnedTools(runCtx, injection.pinnedTools)
 	}
-	if !a.installSessionRunCancel(run, cancel) {
+	if !a.installSessionRunCancel(run, cancel, cancelCause) {
 		cancel()
 		a.releaseSessionRun(run)
 		run.complete(SubmitResult{Err: context.Canceled})
@@ -2831,6 +2838,7 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		approvalDetached := approvalDetach.detached.Load()
 		interrupted := run.interrupted.Load()
 		cancelSource := sessionRunCancelSource(ctx, execErr, interrupted, result)
+		cancelDetail := sessionRunCancelDetail(runCtx, ctx, cancelSource)
 		// P0-4: a deadline/cancel-class run must not leave a resumable approval
 		// behind. Once the execution deadline fired, a late decision must never
 		// restart the run, so the approval is terminated with the run instead of
@@ -2945,6 +2953,11 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		}
 		if cancelSource != "" {
 			payload["cancel_source"] = cancelSource
+		}
+		if cancelDetail != "" {
+			payload["cancel_cause"] = cancelDetail
+			logpkg.Warnf("session run canceled: session=%s turn=%s source=%s cause=%s interrupted=%t exec_err=%v",
+				a.id, turnID, cancelSource, cancelDetail, interrupted, execErr)
 		}
 		appendStructuredRunErrorPayload(payload, execErr)
 		if result != nil {
@@ -3531,6 +3544,64 @@ func sessionRunCancelSource(ctx context.Context, execErr error, interrupted bool
 	return ""
 }
 
+// sessionRunCancelCause 是 run 内部取消的带标记 cause，让 session_end 的
+// cancel_cause 与告警日志把兜底的 execution_context 细化到具体调用点。
+type sessionRunCancelCause string
+
+func (c sessionRunCancelCause) Error() string { return string(c) }
+
+const (
+	runCancelCauseSuperseded     = "superseded_by_new_run"
+	runCancelCauseStallTimeout   = "stall_timeout"
+	runCancelCauseInterruptGrace = "interrupt_grace"
+	runCancelCauseActorStop      = "actor_stop"
+	runCancelCauseRelease        = "run_released"
+)
+
+// cancelSessionRunCause 用带 cause 的取消函数中止 run；两个函数都缺失时静默返回。
+// 旧路径若只调用普通 cancel，cause 退化为 context.Canceled（等价于父上下文取消）。
+func cancelSessionRunCause(cancelCause context.CancelCauseFunc, cancel context.CancelFunc, source string) {
+	if cancelCause != nil {
+		cancelCause(sessionRunCancelCause(source))
+		return
+	}
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// sessionRunCancelDetail 细化取消来源：
+//   - 内部取消（superseded_by_new_run / stall_timeout / interrupt_grace /
+//     actor_stop / explicit_cancel / run_released）→ 直接返回该 source；
+//   - 父上下文取消（CLI/web 的 turn ctx 被 cancel）→ parent_context(<caller source>)，
+//     caller source 取 runtimeexecution.CancelSource(ctx)（CLI turn ctx 标记为
+//     user_interrupt）；
+//   - 非取消类（成功、deadline/timeout 已有专门分类）→ 返回空串，不写入 payload。
+func sessionRunCancelDetail(runCtx, submitCtx context.Context, cancelSource string) string {
+	if cancelSource != runCancelSourceExecutionContext && cancelSource != runCancelSourceUserInterrupt {
+		return ""
+	}
+	if runCtx != nil {
+		if cause := context.Cause(runCtx); cause != nil {
+			var typed sessionRunCancelCause
+			if errors.As(cause, &typed) && typed != "" {
+				return string(typed)
+			}
+			if !errors.Is(cause, context.Canceled) {
+				return "parent_context(" + cause.Error() + ")"
+			}
+		}
+	}
+	if submitCtx != nil {
+		// CancelSource 未显式标记时返回默认值 parent_context；只有调用方显式
+		// 标记过（如 CLI turn ctx 的 user_interrupt）才值得写进括号里。
+		if source := strings.TrimSpace(runtimeexecution.CancelSource(submitCtx)); source != "" && source != runCancelSourceParentContext {
+			return "parent_context(" + source + ")"
+		}
+	}
+	return "parent_context"
+}
+
 func (a *SessionActor) updateState(ctx context.Context, mutate func(*RuntimeState) error) error {
 	if a == nil {
 		return nil
@@ -3943,10 +4014,11 @@ func (a *SessionActor) startPendingBatchRecoveryRun(ctx context.Context, session
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancelCause := context.WithCancelCause(ctx)
+	cancel := func() { cancelCause(context.Canceled) }
 	runCtx = team.WithRunMeta(runCtx, runMeta)
 	runCtx = agent.WithTurnToolSurfaceSnapshot(runCtx, a.turnToolSurfaceSnapshot(turnID))
-	if !a.installSessionRunCancel(run, cancel) {
+	if !a.installSessionRunCancel(run, cancel, cancelCause) {
 		cancel()
 		a.releaseSessionRun(run)
 		return
@@ -4147,7 +4219,7 @@ func (a *SessionActor) retireInterruptedSessionRunAfter(run *sessionRunControl, 
 		if run.finalizing.Load() {
 			return
 		}
-		if a.abandonSessionRun(run) {
+		if a.abandonSessionRun(run, runCancelCauseInterruptGrace) {
 			a.releaseDetachedSessionRunWait(run)
 			run.complete(SubmitResult{Err: context.Canceled})
 			return
@@ -4261,9 +4333,10 @@ func (a *SessionActor) claimSessionRun(turnID string, stripMetadataKeys []string
 	run.lastActivity.Store(time.Now().UnixNano())
 
 	var (
-		previous         *sessionRunControl
-		superseded       *sessionRunControl
-		supersededCancel context.CancelFunc
+		previous              *sessionRunControl
+		superseded            *sessionRunControl
+		supersededCancel      context.CancelFunc
+		supersededCancelCause context.CancelCauseFunc
 	)
 	a.mu.Lock()
 	if previous = a.activeRun; previous != nil {
@@ -4276,12 +4349,14 @@ func (a *SessionActor) claimSessionRun(turnID string, stripMetadataKeys []string
 			previous.interrupted.Store(true)
 			previous.abandoned.Store(true)
 			supersededCancel = previous.cancel
+			supersededCancelCause = previous.cancelCause
 			previous.cancel = nil
+			previous.cancelCause = nil
 		}
 	}
 	a.mu.Unlock()
-	if supersededCancel != nil {
-		supersededCancel()
+	if supersededCancel != nil || supersededCancelCause != nil {
+		cancelSessionRunCause(supersededCancelCause, supersededCancel, runCancelCauseSuperseded)
 	}
 	if superseded != nil {
 		superseded.complete(SubmitResult{Err: context.Canceled})
@@ -4301,7 +4376,7 @@ func (a *SessionActor) claimSessionRun(turnID string, stripMetadataKeys []string
 	return run
 }
 
-func (a *SessionActor) installSessionRunCancel(run *sessionRunControl, cancel context.CancelFunc) bool {
+func (a *SessionActor) installSessionRunCancel(run *sessionRunControl, cancel context.CancelFunc, cancelCause context.CancelCauseFunc) bool {
 	if a == nil || run == nil || cancel == nil {
 		return false
 	}
@@ -4311,6 +4386,7 @@ func (a *SessionActor) installSessionRunCancel(run *sessionRunControl, cancel co
 		return false
 	}
 	run.cancel = cancel
+	run.cancelCause = cancelCause
 	return true
 }
 
@@ -4322,6 +4398,7 @@ func (a *SessionActor) clearSessionRunCancel(run *sessionRunControl) {
 	defer a.mu.Unlock()
 	if a.activeRun == run {
 		run.cancel = nil
+		run.cancelCause = nil
 	}
 }
 
@@ -4363,18 +4440,23 @@ func (a *SessionActor) releaseSessionRun(run *sessionRunControl) {
 	if a == nil || run == nil {
 		return
 	}
-	var cancel context.CancelFunc
+	var (
+		cancel      context.CancelFunc
+		cancelCause context.CancelCauseFunc
+	)
 	finished := false
 	a.mu.Lock()
 	if a.activeRun == run {
 		cancel = run.cancel
+		cancelCause = run.cancelCause
 		run.cancel = nil
+		run.cancelCause = nil
 		a.activeRun = nil
 		finished = true
 	}
 	a.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if cancel != nil || cancelCause != nil {
+		cancelSessionRunCause(cancelCause, cancel, runCancelCauseRelease)
 	}
 	// The run that owned the actor slot has fully ended (or was superseded by
 	// a newer run, in which case the newer run owns the slot and will trigger
@@ -4385,14 +4467,17 @@ func (a *SessionActor) releaseSessionRun(run *sessionRunControl) {
 	}
 }
 
-func (a *SessionActor) abandonSessionRun(run *sessionRunControl) bool {
+func (a *SessionActor) abandonSessionRun(run *sessionRunControl, source string) bool {
 	if a == nil || run == nil {
 		return false
 	}
 	a.runLifecycleMu.Lock()
 	defer a.runLifecycleMu.Unlock()
 
-	var cancel context.CancelFunc
+	var (
+		cancel      context.CancelFunc
+		cancelCause context.CancelCauseFunc
+	)
 	a.mu.Lock()
 	if a.activeRun != run || run.abandoned.Load() || run.finalizing.Load() {
 		a.mu.Unlock()
@@ -4402,11 +4487,13 @@ func (a *SessionActor) abandonSessionRun(run *sessionRunControl) bool {
 	run.interrupted.Store(true)
 	run.abandoned.Store(true)
 	cancel = run.cancel
+	cancelCause = run.cancelCause
 	run.cancel = nil
+	run.cancelCause = nil
 	a.activeRun = nil
 	a.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if cancel != nil || cancelCause != nil {
+		cancelSessionRunCause(cancelCause, cancel, source)
 	}
 
 	// A persist that passed its ownership check before abandonment may still be
@@ -4423,15 +4510,20 @@ func (a *SessionActor) interruptActiveSessionRun() *sessionRunControl {
 	}
 	a.mu.Lock()
 	run := a.activeRun
-	var cancel context.CancelFunc
+	var (
+		cancel      context.CancelFunc
+		cancelCause context.CancelCauseFunc
+	)
 	if run != nil {
 		run.interrupted.Store(true)
 		cancel = run.cancel
+		cancelCause = run.cancelCause
 		run.cancel = nil
+		run.cancelCause = nil
 	}
 	a.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if cancel != nil || cancelCause != nil {
+		cancelSessionRunCause(cancelCause, cancel, runCancelSourceUserInterrupt)
 	}
 	return run
 }
@@ -4441,14 +4533,19 @@ func (a *SessionActor) cancelActive() {
 		return
 	}
 	a.mu.Lock()
-	var cancel context.CancelFunc
+	var (
+		cancel      context.CancelFunc
+		cancelCause context.CancelCauseFunc
+	)
 	if a.activeRun != nil {
 		cancel = a.activeRun.cancel
+		cancelCause = a.activeRun.cancelCause
 		a.activeRun.cancel = nil
+		a.activeRun.cancelCause = nil
 	}
 	a.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if cancel != nil || cancelCause != nil {
+		cancelSessionRunCause(cancelCause, cancel, runCancelCauseActorStop)
 	}
 }
 

@@ -99,6 +99,7 @@ type ChatSession struct {
 	HTTPClient                *http.Client
 	cancelCtx                 context.Context                      // 可取消的上下文
 	cancelFunc                context.CancelFunc                   // 取消函数
+	cancelCause               context.CancelCauseFunc              // 与 cancelFunc 同源：记录取消原因（user_interrupt / new_input_cycle）
 	composerWakeMu            sync.Mutex                           // 保护 composer 读取唤醒取消
 	composerWakeCancel        context.CancelFunc                   // 当前 composer 读取的唤醒取消
 	interrupted               atomic.Bool                          // 是否被中断（原子操作，避免竞态）
@@ -372,7 +373,9 @@ func (s *ChatSession) interrupt(preservePendingInput bool) {
 		s.Interaction.SetAgentStage(chatAgentStageStopping)
 	}
 	s.startInterruptCleanup()
-	if s.cancelFunc != nil {
+	if s.cancelCause != nil {
+		s.cancelCause(chatTurnCancelCause(chatTurnCancelReasonUserInterrupt))
+	} else if s.cancelFunc != nil {
 		s.cancelFunc()
 	}
 	// 中断语义是“取消当前输入/当前轮次”，因此需要同时清掉尚未提交的输入草稿
@@ -1560,10 +1563,12 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		// 重置中断状态（新的输入开始）
 		session.ResetInterrupt()
 		// 创建新的可取消上下文用于本次操作
-		if session.cancelFunc != nil {
+		if session.cancelCause != nil {
+			session.cancelCause(chatTurnCancelCause(chatTurnCancelReasonNewInputCycle))
+		} else if session.cancelFunc != nil {
 			session.cancelFunc()
 		}
-		session.cancelCtx, session.cancelFunc = newChatCancelContext()
+		session.cancelCtx, session.cancelFunc, session.cancelCause = newChatCancelContext()
 		if shouldExit.Load() {
 			printDirectInteractiveOutput(session, "\n")
 			break

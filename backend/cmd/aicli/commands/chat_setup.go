@@ -40,7 +40,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		return nil, nil, fmt.Errorf("chat setup requires options and runtime state")
 	}
 
-	cancelCtx, cancelFunc := newChatCancelContext()
+	cancelCtx, cancelFunc, cancelCause := newChatCancelContext()
 	registry := functions.NewFunctionRegistry()
 	functionCatalog := newAICLIFunctionCatalog(runtimeState.provider.GetProtocol(), registry)
 
@@ -162,6 +162,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		HTTPClient:               httpclient.GetHTTPClientWithProvider(cfg, &runtimeState.provider),
 		cancelCtx:                cancelCtx,
 		cancelFunc:               cancelFunc,
+		cancelCause:              cancelCause,
 		interrupted:              atomic.Bool{},
 		FunctionCatalog:          functionCatalog,
 		FunctionRegistry:         registry,
@@ -285,9 +286,24 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 	return session, cleanup, nil
 }
 
-func newChatCancelContext() (context.Context, context.CancelFunc) {
-	base := runtimeexecution.WithCancelSource(context.Background(), "user_interrupt")
-	return context.WithCancel(base)
+// chatTurnCancelCause 标记 CLI 侧 turn ctx 被取消的原因。actor 侧会把它汇总成
+// session_end 的 cancel_cause=parent_context(<reason>)，用于区分「用户中断」
+// 与「新一轮输入顶替上一轮 ctx」；见 internal/chat/actor.go 的
+// sessionRunCancelDetail。
+type chatTurnCancelCause string
+
+func (c chatTurnCancelCause) Error() string { return string(c) }
+
+const (
+	chatTurnCancelReasonUserInterrupt = "user_interrupt"
+	chatTurnCancelReasonNewInputCycle = "new_input_cycle"
+)
+
+func newChatCancelContext() (context.Context, context.CancelFunc, context.CancelCauseFunc) {
+	base := runtimeexecution.WithCancelSource(context.Background(), chatTurnCancelReasonUserInterrupt)
+	ctx, cancelCause := context.WithCancelCause(base)
+	cancel := func() { cancelCause(chatTurnCancelCause(chatTurnCancelReasonUserInterrupt)) }
+	return ctx, cancel, cancelCause
 }
 
 func shouldInitializeChatKeyHandler(opts *chatCommandOptions) bool {

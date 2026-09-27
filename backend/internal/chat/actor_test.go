@@ -1679,8 +1679,84 @@ func TestSessionActorInterruptConvergesStoppedStateAndTelemetry(t *testing.T) {
 	require.NotNil(t, sessionEnd)
 	require.Equal(t, SessionStopped, sessionEnd["status"])
 	require.Equal(t, "user_interrupt", sessionEnd["cancel_source"])
+	require.Equal(t, "user_interrupt", sessionEnd["cancel_cause"])
 	require.GreaterOrEqual(t, sessionEnd["steps"].(int), 1)
 	require.Greater(t, sessionEnd["duration"].(int64), int64(0))
+}
+
+// 父上下文（CLI/web 的 turn ctx）被取消时，session_end 仍按既有契约记
+// execution_context，但 cancel_cause 必须指出取消来自父侧，便于定位
+// 「工具执行中被取消」的真实来源。
+func TestSessionActorParentContextCancelRecordsCancelCause(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-parent-cancel-user")
+	require.NoError(t, err)
+
+	provider := &cancelBlockingLLMProvider{
+		name:    "parent-cancel-blocking-provider",
+		entered: make(chan struct{}, 1),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-parent-cancel-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 3,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	type submitResponse struct {
+		result *agent.Result
+		err    error
+	}
+	responseCh := make(chan submitResponse, 1)
+	submitCtx, cancelSubmit := context.WithCancel(ctx)
+	go func() {
+		result, submitErr := actor.SubmitPrompt(submitCtx, "wait for parent cancel", nil)
+		responseCh <- submitResponse{result: result, err: submitErr}
+	}()
+
+	select {
+	case <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not start")
+	}
+	cancelSubmit()
+
+	var response submitResponse
+	select {
+	case response = <-responseCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SubmitPrompt did not return after parent ctx cancel")
+	}
+	require.ErrorIs(t, response.err, context.Canceled)
+	require.Eventually(t, func() bool { return actor.State().Status == SessionStopped },
+		2*time.Second, 20*time.Millisecond, "session state must converge to stopped")
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	var sessionEnd map[string]interface{}
+	for _, event := range events {
+		if event.Type == EventSessionEnd {
+			sessionEnd = event.Payload
+		}
+	}
+	require.NotNil(t, sessionEnd)
+	require.Equal(t, "execution_context", sessionEnd["cancel_source"])
+	require.Equal(t, "parent_context", sessionEnd["cancel_cause"])
 }
 
 func TestSessionActorInterruptDuringPrepareRunDoesNotStartProvider(t *testing.T) {
