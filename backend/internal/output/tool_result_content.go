@@ -160,7 +160,13 @@ func RenderToolResultContentForModel(content interface{}, toolErr string, envelo
 			}
 		}
 	}
-	return renderToolResultContract(body, diagnostic)
+	// The tool's own declared window is the model-visible cap for this result;
+	// the contract header must be budgeted against that same window instead of
+	// the layer backstop. Otherwise a tool that legitimately owns a 32/64 KiB
+	// payload (view batch, shell) is folded back to 12 KiB here after the text
+	// layer already passed it through (2026-09-27 review: a mixed
+	// success/failure files[] batch lost its tail at the model boundary).
+	return renderToolResultContract(body, diagnostic, effectiveModelToolTextBudget(metadata))
 }
 
 func renderToolResultBodyForModel(content interface{}, toolErr string, envelope *Envelope) string {
@@ -223,7 +229,10 @@ func envelopeToolCallID(envelope *Envelope) string {
 	return envelope.ToolCallID
 }
 
-func renderToolResultContract(body string, diagnostic toolresult.Diagnostic) string {
+func renderToolResultContract(body string, diagnostic toolresult.Diagnostic, budget int) string {
+	if budget <= 0 {
+		budget = modelToolTextByteBudget
+	}
 	type modelContract struct {
 		OK                      bool                    `json:"ok"`
 		Outcome                 string                  `json:"outcome,omitempty"`
@@ -319,9 +328,9 @@ func renderToolResultContract(body string, diagnostic toolresult.Diagnostic) str
 		return header
 	}
 	separator := "\n\n"
-	remaining := modelToolTextByteBudget - len(header) - len(separator)
+	remaining := budget - len(header) - len(separator)
 	if remaining <= 0 {
-		return safePrefixByBytes(header, modelToolTextByteBudget)
+		return safePrefixByBytes(header, budget)
 	}
 	// Prefer keeping the trailing artifact notice outside truncation so empty/
 	// partial/failure contracts never drop the pointer to full raw output.

@@ -137,7 +137,12 @@ func (l *sessionReadLedger) lookup(path string) (fileReadRecord, bool) {
 // window; the sweeper drops such buckets so a long-lived process does not
 // accumulate per-session state (review m8).
 func (l *sessionReadLedger) idleSince(now time.Time, ttl time.Duration) bool {
-	l.mu.Lock()
+	// Same contract as the view-dedup sweep: skip busy buckets instead of
+	// blocking on them, so an amortized sweep can never deadlock a caller that
+	// already holds the bucket (2026-09-27 review).
+	if !l.mu.TryLock() {
+		return false
+	}
 	defer l.mu.Unlock()
 	if l.touched.IsZero() {
 		return false

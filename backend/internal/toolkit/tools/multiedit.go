@@ -202,6 +202,14 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 			Error:      m.buildPathKindMismatchError(ctx, "路径是目录，不是文件", filePath),
 		}, nil
 	}
+	// 与 edit 同一道门：首次读取之前拒绝 FIFO/设备等特殊文件，避免阻塞在 open。
+	if reason := unsupportedFileModeReason(fileInfo.Mode()); reason != "" {
+		return &toolkit.ToolResult{
+			Success:    false,
+			OutputKind: toolresult.KindText,
+			Error:      fmt.Errorf("路径不是普通文件（%s），multiedit 已拒绝读取以免阻塞或误写", reason),
+		}, nil
+	}
 	if ext := documentExtensionRefusal(absPath); ext != "" {
 		return documentRefusalResult("multiedit", "以文本批量编辑", absPath, ext), nil
 	}

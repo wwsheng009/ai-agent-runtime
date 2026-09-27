@@ -157,6 +157,11 @@ type ViewFileRequest struct {
 	// aggregate cap does not burn the entry (review m13). Unexported: JSON
 	// neither sets nor serializes it.
 	dedupDefer func(viewDedupCommit)
+	// dedupRecordDefer, when set, receives the dedup-registration closure instead
+	// of running it immediately. The batch path defers it so an item dropped by
+	// the aggregate cap does not leave a window in the "already delivered"
+	// cache that the model never saw (2026-09-27 review).
+	dedupRecordDefer func(func())
 }
 
 // Execute 实现 Tool 接口
@@ -442,7 +447,17 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 	// Dedup only remembers complete text windows: a byte-budget stop or a line
 	// clamp means a stub would hide content the model never saw.
 	if !readMeta.Tail && readMeta.LinesRead > 0 && !readMeta.ByteBudgetApplied && readMeta.LongLinesTruncated == 0 && !readMeta.EmptyFile {
-		recordViewWindowRead(ctx, resolvedPath, fileInfo, p.Offset, p.Limit, readMeta.LinesRead, totalLines, readMeta.EOF)
+		recordWindow := func() {
+			recordViewWindowRead(ctx, resolvedPath, fileInfo, p.Offset, p.Limit, readMeta.LinesRead, totalLines, readMeta.EOF)
+		}
+		// A batch registers the window only after the section is really
+		// delivered: registering here would let a cap-dropped item stub a later
+		// single read with content the model never received.
+		if p.dedupRecordDefer != nil {
+			p.dedupRecordDefer(recordWindow)
+		} else {
+			recordWindow()
+		}
 	}
 	// §10.6 honest-truncation contract: surface in-line loss instead of a
 	// silent "...", so the model knows what it did not see and can decide
@@ -640,16 +655,27 @@ func (v *ViewTool) recordDerivedRender(ctx context.Context, resolvedPath string,
 	truncated, _ := metadata["is_truncated"].(bool)
 	tail, _ := metadata["tail"].(bool)
 	empty, _ := metadata["empty"].(bool)
-	fullRead := !tail && offset == 0 && !truncated && linesRead > 0 && !empty
+	// A reader-clamped line is hidden content: a derived render that folded a
+	// long line must not be remembered as a complete window, or the next read
+	// returns a stub for material the model never saw (2026-09-27 review).
+	longLines := viewMetadataInt(metadata, "long_lines_truncated", 0)
+	fullRead := !tail && offset == 0 && !truncated && linesRead > 0 && !empty && longLines == 0
 	recordFileReadFromDisk(ctx, resolvedPath, fullRead, "view", fileReadWindow{
 		Offset:     offset,
 		Limit:      limit,
 		LinesRead:  linesRead,
 		TotalLines: totalLines,
-		Truncated:  truncated || tail,
+		Truncated:  truncated || tail || longLines > 0,
 	})
-	if !tail && linesRead > 0 && !truncated && !empty {
-		recordViewWindowRead(ctx, resolvedPath, info, offset, limit, linesRead, totalLines, true)
+	if !tail && linesRead > 0 && !truncated && !empty && longLines == 0 {
+		recordWindow := func() {
+			recordViewWindowRead(ctx, resolvedPath, info, offset, limit, linesRead, totalLines, true)
+		}
+		if p.dedupRecordDefer != nil {
+			p.dedupRecordDefer(recordWindow)
+		} else {
+			recordWindow()
+		}
 	}
 	return result
 }
@@ -668,11 +694,45 @@ func viewMetadataInt(metadata map[string]interface{}, key string, fallback int) 
 	return fallback
 }
 
+// viewBatchFailureDetailLimit bounds how many per-item failures a batch lists
+// in full. Without it, 400 unreadable files print into the errors block and the
+// failed_items contract, pushing the delivered payload past the aggregate
+// budget the tool declared (2026-09-27 review).
+const viewBatchFailureDetailLimit = 20
+
+// appendBatchFailure records one failure line while the detail budget lasts and
+// counts the rest as omitted.
+func appendBatchFailure(failures *[]string, omitted *int, line string) {
+	if failures == nil || omitted == nil {
+		return
+	}
+	if len(*failures) < viewBatchFailureDetailLimit {
+		*failures = append(*failures, line)
+		return
+	}
+	*omitted++
+}
+
+// appendBatchFailedItem records one structured failed-item row under the same
+// detail budget. A nil row is ignored and does not consume budget.
+func appendBatchFailedItem(items *[]map[string]interface{}, omitted *int, row map[string]interface{}) {
+	if items == nil || omitted == nil || row == nil {
+		return
+	}
+	if len(*items) < viewBatchFailureDetailLimit {
+		*items = append(*items, row)
+		return
+	}
+	*omitted++
+}
+
 func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest, compact bool) (*toolkit.ToolResult, error) {
 	sections := make([]string, 0, len(requests))
 	items := make([]map[string]interface{}, 0, len(requests))
 	failures := make([]string, 0)
 	failedItems := make([]map[string]interface{}, 0)
+	failuresOmitted := 0
+	failedItemsOmitted := 0
 	succeeded := 0
 	defaulted := make([]int, 0, len(requests))
 	// Aggregate window: per-item byte budgets do not bound the combined
@@ -704,12 +764,13 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 		// an item dropped by the cap below must keep its entry (review m13).
 		var pendingDedup viewDedupCommit
 		request.dedupDefer = func(commit viewDedupCommit) { pendingDedup = commit }
+		var pendingRecord func()
+		request.dedupRecordDefer = func(record func()) { pendingRecord = record }
 		result, err := v.executeSingle(ctx, request)
 		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", request.FilePath, err))
-			if row := toolresult.FailedItemMap(toolresult.IntPtr(index), request.FilePath, request.FilePath, err.Error()); row != nil {
-				failedItems = append(failedItems, row)
-			}
+			appendBatchFailure(&failures, &failuresOmitted, fmt.Sprintf("%s: %v", request.FilePath, err))
+			appendBatchFailedItem(&failedItems, &failedItemsOmitted,
+				toolresult.FailedItemMap(toolresult.IntPtr(index), request.FilePath, request.FilePath, err.Error()))
 			continue
 		}
 		if result == nil || !result.Success {
@@ -717,10 +778,9 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 			if result != nil && result.Error != nil {
 				message = result.Error.Error()
 			}
-			failures = append(failures, fmt.Sprintf("%s: %s", request.FilePath, message))
-			if row := toolresult.FailedItemMap(toolresult.IntPtr(index), request.FilePath, request.FilePath, message); row != nil {
-				failedItems = append(failedItems, row)
-			}
+			appendBatchFailure(&failures, &failuresOmitted, fmt.Sprintf("%s: %s", request.FilePath, message))
+			appendBatchFailedItem(&failedItems, &failedItemsOmitted,
+				toolresult.FailedItemMap(toolresult.IntPtr(index), request.FilePath, request.FilePath, message))
 			continue
 		}
 		section := fmt.Sprintf("===== %s =====\n%s", request.FilePath, result.Content)
@@ -744,6 +804,9 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 		if pendingDedup != nil {
 			pendingDedup()
 		}
+		if pendingRecord != nil {
+			pendingRecord()
+		}
 	}
 	if len(skippedFiles) > 0 {
 		sections = append(sections, fmt.Sprintf(
@@ -751,8 +814,20 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 			viewBatchAggregateBudgetBytes, succeeded, len(requests), len(skippedFiles),
 		))
 	}
-	if len(failures) > 0 {
-		sections = append(sections, "===== errors =====\n"+strings.Join(failures, "\n"))
+	if len(failures) > 0 || failuresOmitted > 0 {
+		// The errors block is part of the same aggregate window as the file
+		// sections: letting every failure print in full made 400 unreadable
+		// files deliver ~95 KiB against a 64 KiB declaration (2026-09-27 review).
+		var errSection strings.Builder
+		errSection.WriteString("===== errors =====\n")
+		errSection.WriteString(strings.Join(failures, "\n"))
+		if failuresOmitted > 0 {
+			if errSection.Len() > len("===== errors =====\n") {
+				errSection.WriteString("\n")
+			}
+			fmt.Fprintf(&errSection, "... 另有 %d 个失败未逐条列出（总数见 failed_count）", failuresOmitted)
+		}
+		sections = append(sections, errSection.String())
 	}
 	if succeeded == 0 {
 		meta := map[string]interface{}{
@@ -765,11 +840,25 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 		if len(failedItems) > 0 {
 			meta[toolresult.MetadataFailedItemsKey] = failedItems
 		}
+		if failuresOmitted > 0 {
+			meta["failures_omitted"] = failuresOmitted
+			meta["failed_items_omitted"] = failedItemsOmitted
+		}
 		attachBatchWindowMetadata(meta, emittedBytes, skippedFiles)
+		summary := strings.Join(failures, "; ")
+		if failuresOmitted > 0 {
+			if summary != "" {
+				summary += "; "
+			}
+			summary += fmt.Sprintf("另有 %d 个失败未逐条列出", failuresOmitted)
+		}
+		if strings.TrimSpace(summary) == "" {
+			summary = "没有可读取的条目"
+		}
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("批量读取失败: %s", strings.Join(failures, "; ")),
+			Error:      fmt.Errorf("批量读取失败: %s", summary),
 			Metadata:   meta,
 		}, nil
 	}
@@ -785,6 +874,10 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 	}
 	if len(failedItems) > 0 {
 		meta[toolresult.MetadataFailedItemsKey] = failedItems
+	}
+	if failuresOmitted > 0 {
+		meta["failures_omitted"] = failuresOmitted
+		meta["failed_items_omitted"] = failedItemsOmitted
 	}
 	attachBatchWindowMetadata(meta, emittedBytes, skippedFiles)
 	return &toolkit.ToolResult{

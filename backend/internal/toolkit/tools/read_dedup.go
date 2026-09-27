@@ -83,7 +83,12 @@ func viewDedupDisabled() bool {
 // idleSince reports whether this session bucket was last used before the TTL
 // window (review m8).
 func (s *sessionViewDedup) idleSince(now time.Time, ttl time.Duration) bool {
-	s.mu.Lock()
+	// The sweep is opportunistic: a bucket another goroutine is actively using
+	// must be skipped, never waited on. A blocking Lock here could re-enter a
+	// mutex the caller already holds (2026-09-27 review).
+	if !s.mu.TryLock() {
+		return false
+	}
 	defer s.mu.Unlock()
 	if s.touched.IsZero() {
 		return false
@@ -117,6 +122,10 @@ func viewDedupPeek(ctx context.Context, path string, info os.FileInfo, offset, l
 		// 没有会话标识时直接不做去重。
 		return nil, false, nil
 	}
+	// sessionHasFullRead 会走 ledgerForSession → 摊销清扫；清扫会 Range 所有桶
+	// 并调用 idleSince（需要同一把 state.mu）。在持锁状态下调用它会自我死锁：
+	// 第 512 次读取会稳定挂住（2026-09-27 review）。因此在加锁之前求值。
+	hasFullRead := offset != 0 || sessionHasFullRead(ctx, ledgerPath)
 	state := viewDedupForSession(sessionID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -130,28 +139,49 @@ func viewDedupPeek(ctx context.Context, path string, info os.FileInfo, offset, l
 		delete(state.entries, key)
 		return nil, false, nil
 	}
-	if offset == 0 && !sessionHasFullRead(ctx, ledgerPath) {
+	if offset == 0 && !hasFullRead {
 		return nil, false, nil
+	}
+	metadata := map[string]interface{}{
+		"file_path":      ledgerPath,
+		"dedup_hit":      true,
+		"dedup_consumed": true,
+		"offset":         offset,
+		"limit":          limit,
+		"lines_read":     entry.LinesRead,
+		"file_size":      entry.Size,
+		"eof":            entry.EOF,
+		"is_truncated":   !entry.EOF,
+	}
+	if entry.TotalLines > 0 {
+		metadata["total_lines"] = entry.TotalLines
+	}
+	// A stub replaces the delivery, so it must keep the continuation contract of
+	// the window it stands in for: reporting is_truncated=false without a
+	// suggested_next_offset made a repeat read of a truncated window look like a
+	// complete one and removed the only route to the rest (2026-09-27 review).
+	if !entry.EOF && entry.LinesRead > 0 {
+		metadata["suggested_next_offset"] = offset + entry.LinesRead
+	}
+	// Metadata alone does not reach the model for a successful tool result (the
+	// body is passed through as-is), so the continuation must also be stated in
+	// the stub text.
+	continuation := ""
+	if !entry.EOF && entry.LinesRead > 0 {
+		continuation = fmt.Sprintf(
+			" The window is truncated (is_truncated=true); continue with view offset=%d limit<=%d.",
+			offset+entry.LinesRead, viewDefaultLimit,
+		)
 	}
 	stub := &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content: fmt.Sprintf(
 			"unchanged: %s offset %d limit %d (lines_read=%d) was already returned in this session and the file has not changed since. "+
-				"The content is still in the conversation; if it is no longer visible (e.g. after context compaction), call view again and the next call returns the full content.",
-			path, offset, limit, entry.LinesRead,
+				"The content is still in the conversation; if it is no longer visible (e.g. after context compaction), call view again and the next call returns the full content.%s",
+			path, offset, limit, entry.LinesRead, continuation,
 		),
-		Metadata: map[string]interface{}{
-			"file_path":      ledgerPath,
-			"dedup_hit":      true,
-			"dedup_consumed": true,
-			"offset":         offset,
-			"limit":          limit,
-			"lines_read":     entry.LinesRead,
-			"file_size":      entry.Size,
-			"eof":            entry.EOF,
-			"is_truncated":   false,
-		},
+		Metadata: metadata,
 	}
 	modTimeNano := entry.ModTimeNano
 	size := entry.Size

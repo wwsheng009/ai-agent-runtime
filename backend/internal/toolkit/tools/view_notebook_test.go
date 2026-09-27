@@ -175,7 +175,9 @@ func TestViewNotebookWindowMetadataParity(t *testing.T) {
 func TestViewNotebookDeduplicatesIdenticalImages(t *testing.T) {
 	t.Setenv("AICLI_VIEW_DEDUP", "")
 	root := t.TempDir()
-	payload := base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', 0x01, 0x02})
+	// 完整 8 字节 PNG 签名：渲染层现在会校验"解码结果确实是所声明 MIME 的容器"，
+	// 截断的伪签名只是夹具问题，不是去重语义。
+	payload := base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
 	writeNotebook(t, filepath.Join(root, "dup.ipynb"), []map[string]interface{}{
 		{"cell_type": "code", "source": "a", "outputs": []map[string]interface{}{
 			{"output_type": "display_data", "data": map[string]interface{}{"image/png": payload}},
@@ -190,6 +192,55 @@ func TestViewNotebookDeduplicatesIdenticalImages(t *testing.T) {
 	}
 	if note, _ := result.Metadata[toolresult.MetadataImageNoteKey].(string); !strings.Contains(note, "1 张") {
 		t.Fatalf("expected an honest attachment count, got %q", note)
+	}
+}
+
+// TestViewNotebookAttachesOnlyDeliveredWindowImages: an image far below the
+// window used to be attached anyway, so the model received bytes with no
+// corresponding text in the window (2026-09-27 review).
+func TestViewNotebookAttachesOnlyDeliveredWindowImages(t *testing.T) {
+	t.Setenv("AICLI_VIEW_DEDUP", "")
+	root := t.TempDir()
+	payload := base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	cells := []map[string]interface{}{
+		{"cell_type": "markdown", "source": []string{"# head\n"}},
+	}
+	for i := 0; i < 40; i++ {
+		cells = append(cells, map[string]interface{}{
+			"cell_type": "code",
+			"source":    fmt.Sprintf("step_%d()\n", i),
+		})
+	}
+	cells = append(cells, map[string]interface{}{
+		"cell_type": "code",
+		"source":    "plot()\n",
+		"outputs": []map[string]interface{}{
+			{"output_type": "display_data", "data": map[string]interface{}{"image/png": payload}},
+		},
+	})
+	writeNotebook(t, filepath.Join(root, "tail-image.ipynb"), cells)
+
+	tool := newViewToolAt(t, root)
+	result := executeViewParams(t, tool, context.Background(), map[string]interface{}{
+		"file_path": "tail-image.ipynb",
+		"offset":    0,
+		"limit":     20,
+	})
+	if _, ok := result.Metadata[toolresult.MetadataImagePathsKey]; ok {
+		t.Fatalf("an image outside the window must not be attached, got %#v", result.Metadata[toolresult.MetadataImagePathsKey])
+	}
+	if result.Metadata["notebook_images_outside_window"] == nil {
+		t.Fatalf("expected the outside-window image count, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, "不在本次窗口内") {
+		t.Fatalf("expected an honest outside-window note, got %q", result.Content)
+	}
+
+	// 同一张图在完整窗口下仍然附加（防止过度收紧）。
+	full := executeViewParams(t, tool, context.Background(), map[string]interface{}{"file_path": "tail-image.ipynb"})
+	paths, ok := full.Metadata[toolresult.MetadataImagePathsKey].([]string)
+	if !ok || len(paths) != 1 {
+		t.Fatalf("the full window must attach the image, got %#v", full.Metadata[toolresult.MetadataImagePathsKey])
 	}
 }
 

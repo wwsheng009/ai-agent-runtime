@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"runtime"
 	"strings"
 
@@ -116,32 +117,46 @@ func unsupportedFileModeReason(mode os.FileMode) string {
 // literal path string. Backslashes are folded to slashes first so Windows
 // style spellings are still caught when the check runs on Unix.
 func unixDeviceNameReason(path string) string {
-	compare := strings.ReplaceAll(path, `\`, "/")
+	for _, compare := range devicePathSpellings(path) {
+		if compare == "/dev/fd" || strings.HasPrefix(compare, "/dev/fd/") {
+			return `unsupported device path "/dev/fd/*"`
+		}
+		if strings.HasPrefix(compare, "/dev/") {
+			rest := strings.TrimPrefix(compare, "/dev/")
+			name := rest
+			if idx := strings.IndexByte(rest, '/'); idx >= 0 {
+				name = rest[:idx]
+			}
+			// /dev/std* covers stdin/stdout/stderr and any alias in that family.
+			if strings.HasPrefix(name, "std") {
+				return fmt.Sprintf("unsupported device path %q", "/dev/"+name)
+			}
+			if _, ok := unixDeviceBaseNames[name]; ok {
+				return fmt.Sprintf("unsupported device path %q", "/dev/"+name)
+			}
+		}
+		if isProcFDPath(compare) {
+			return `unsupported process file-descriptor path "/proc/<pid>/fd/*"`
+		}
+	}
+	return ""
+}
+
+// devicePathSpellings returns the literal slash-normalized spelling plus its
+// lexical cleaning. "." segments and repeated separators name the same kernel
+// object, so a guard that matches only the canonical spelling lets
+// /proc/self/./fd/3 through the name layer while os.Stat still resolves it
+// (2026-09-27 review).
+func devicePathSpellings(raw string) []string {
+	compare := strings.ReplaceAll(raw, `\`, "/")
 	if runtime.GOOS == "windows" {
 		compare = strings.ToLower(compare)
 	}
-
-	if compare == "/dev/fd" || strings.HasPrefix(compare, "/dev/fd/") {
-		return `unsupported device path "/dev/fd/*"`
+	spellings := []string{compare}
+	if cleaned := path.Clean(compare); cleaned != compare {
+		spellings = append(spellings, cleaned)
 	}
-	if strings.HasPrefix(compare, "/dev/") {
-		rest := strings.TrimPrefix(compare, "/dev/")
-		name := rest
-		if idx := strings.IndexByte(rest, '/'); idx >= 0 {
-			name = rest[:idx]
-		}
-		// /dev/std* covers stdin/stdout/stderr and any alias in that family.
-		if strings.HasPrefix(name, "std") {
-			return fmt.Sprintf("unsupported device path %q", "/dev/"+name)
-		}
-		if _, ok := unixDeviceBaseNames[name]; ok {
-			return fmt.Sprintf("unsupported device path %q", "/dev/"+name)
-		}
-	}
-	if isProcFDPath(compare) {
-		return `unsupported process file-descriptor path "/proc/<pid>/fd/*"`
-	}
-	return ""
+	return spellings
 }
 
 // isProcFDPath recognizes /proc/<pid>/fd[/...] (including /proc/self/fd/*)

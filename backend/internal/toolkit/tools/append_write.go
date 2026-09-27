@@ -146,6 +146,17 @@ func (w *AppendWriteTool) Execute(ctx context.Context, params map[string]interfa
 		return documentRefusalResult("append_write", "以文本追加到", absPath, ext), nil
 	}
 
+	// 首次读取之前先拒绝特殊文件：FIFO 无写端时会阻塞打开，设备链接可能无限读取。
+	// os.Stat 跟随链接，保持“链接到普通文件”的既有保真行为。
+	if info, statErr := os.Stat(absPath); statErr == nil {
+		if reason := unsupportedFileModeReason(info.Mode()); reason != "" {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("路径不是普通文件（%s），append_write 已拒绝读取以免阻塞或误写", reason),
+			}, nil
+		}
+	}
 	oldContentBytes, readErr := os.ReadFile(absPath)
 	if readErr != nil && !os.IsNotExist(readErr) {
 		return &toolkit.ToolResult{

@@ -205,6 +205,20 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 			Error:      e.buildPathKindMismatchError(ctx, "路径是目录，不是文件", p.FilePath),
 		}, nil
 	}
+	// 首次读取之前先拒绝特殊文件：FIFO 在无写端时会阻塞打开，设备链接可能无限读取
+	// （2026-09-27 review）。os.Stat 跟随链接，指向普通文件的链接保持可用。
+	if reason := unsupportedFileModeReason(fileInfo.Mode()); reason != "" {
+		return toolResultFailureWithCode(
+			fmt.Errorf("路径不是普通文件（%s），edit 已拒绝读取以免阻塞或误写", reason),
+			string(runtimeerrors.ErrToolInvalidArgs),
+			"edit 只处理普通文本文件；请更换目标路径或先用合适的工具转换。",
+			map[string]interface{}{
+				"file_path":     absPath,
+				"failure_class": "unsupported_file_type",
+				"file_type":     reason,
+			},
+		), nil
+	}
 	if fileInfo.Size() > editMaxFileBytes {
 		return toolResultFailureWithCode(
 			fmt.Errorf("文件大小 %d 字节超过 edit 上限 %d 字节（10 MB）：请改用 shell（sed/python）处理，或先拆分文件", fileInfo.Size(), editMaxFileBytes),

@@ -127,7 +127,11 @@ func (v *ViewTool) viewNotebookResult(absPath, displayPath string, p ViewFileReq
 		result.Content = strings.TrimSpace(result.Content + "\n\n[note] notebook 没有可渲染的 cell（cells: []）。")
 	}
 
-	if attachments := v.persistNotebookImages(render.Images); len(attachments) > 0 {
+	// 只附加本次窗口真正投递的图片：整本附加会让 400 行窗口带上第 5000 行的
+	// 图像，模型拿到正文里从未出现过的字节，也无法把它们对回 cell
+	// （2026-09-27 review）。
+	delivered := deliveredNotebookImages(render.Images, readMeta)
+	if attachments := v.persistNotebookImages(delivered.images); len(attachments) > 0 {
 		paths := make([]string, 0, len(attachments))
 		for _, attachment := range attachments {
 			paths = append(paths, attachment.Path)
@@ -137,13 +141,43 @@ func (v *ViewTool) viewNotebookResult(absPath, displayPath string, p ViewFileReq
 		result.Metadata[toolresult.MetadataImagePathKey] = paths[0]
 		result.Metadata[toolresult.MetadataImageMimeTypeKey] = attachments[0].MIME
 		result.Metadata[toolresult.MetadataImagePathsKey] = paths
-		result.Metadata[toolresult.MetadataImageNoteKey] = fmt.Sprintf("notebook 图片输出 %d 张，已随消息附加", len(paths))
+		result.Metadata[toolresult.MetadataImageNoteKey] = fmt.Sprintf("notebook 本窗口内的 %d 张图片输出，已随消息附加", len(paths))
 		result.Content = strings.TrimRight(result.Content, "\n") +
-			fmt.Sprintf("\n\n[note] notebook 的 %d 张图片输出已作为图像输入附加到下一轮对话。", len(paths))
+			fmt.Sprintf("\n\n[note] notebook 本窗口内的 %d 张图片输出已作为图像输入附加到下一轮对话。", len(paths))
+	}
+	if delivered.skipped > 0 {
+		result.Metadata["notebook_images_outside_window"] = delivered.skipped
+		result.Content = strings.TrimRight(result.Content, "\n") +
+			fmt.Sprintf("\n\n[note] 另有 %d 张图片输出不在本次窗口内，未附加；读取其所在行区间后重试即可获取。", delivered.skipped)
 	}
 
 	attachViewEfficiencyHints(result, p, readMeta)
 	return result, true
+}
+
+// notebookImageWindow 是窗口过滤后的图片集合：images 为本窗口投递的图片，
+// skipped 为落在窗口之外、本次未附加的数量。
+type notebookImageWindow struct {
+	images  []ipynb.Image
+	skipped int
+}
+
+// deliveredNotebookImages keeps only the images whose placeholder line belongs to
+// the window that was actually returned to the model.
+func deliveredNotebookImages(images []ipynb.Image, readMeta viewReadResult) notebookImageWindow {
+	if len(images) == 0 {
+		return notebookImageWindow{}
+	}
+	end := readMeta.WindowStart + readMeta.LinesRead
+	var window notebookImageWindow
+	for _, image := range images {
+		if image.Line >= readMeta.WindowStart && image.Line < end {
+			window.images = append(window.images, image)
+			continue
+		}
+		window.skipped++
+	}
+	return window
 }
 
 // notebookImageAttachment pairs a persisted path with the MIME of exactly that
