@@ -2959,10 +2959,11 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 		if duration <= 0 {
 			duration = time.Since(runStartedAt).Milliseconds()
 		}
+		success := execErr == nil && result != nil && result.Success
 		payload := map[string]interface{}{
 			"turn_id":  turnID,
 			"resume":   resume,
-			"success":  execErr == nil && result != nil && result.Success,
+			"success":  success,
 			"steps":    resultSteps(result),
 			"error":    firstNonEmptyError(execErr, result),
 			"duration": duration,
@@ -2977,6 +2978,17 @@ func (a *SessionActor) startSessionRun(ctx context.Context, session *Session, pr
 				a.id, turnID, cancelSource, cancelDetail, interrupted, execErr)
 		}
 		appendStructuredRunErrorPayload(payload, execErr)
+		// A4：非成功终态（取消/中断/失败）也带上已产出的部分产物，避免
+		// "取消 = 零产出"。字段有界，取源见 actor_partial_product.go。
+		// 取消路径上 agent 可能带着部分结果把 success 记为 true，因此只要带取消
+		// 来源（用户中断/父取消/停止）也要落部分产物——这正是 A4 的主场景。
+		if !success || cancelSource != "" {
+			if partial, partialSource, partialSteps := partialRunProduct(result, session); partial != "" {
+				payload["partial_summary"] = partial
+				payload["partial_source"] = partialSource
+				payload["partial_steps"] = partialSteps
+			}
+		}
 		if result != nil {
 			payload["trace_id"] = result.TraceID
 			appendSessionActorUsagePayload(payload, result.Usage)
