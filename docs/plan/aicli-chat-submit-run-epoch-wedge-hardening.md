@@ -183,9 +183,10 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
   「脱离 run 的等待态」看门狗自愈（清态 + 动态栏提示）全部就位。
 - ~~P2~~：已落地（见 §6.7）。交互提交（`Execute`/`ContinueGoal`）与内部提交
   （`localActorRegistry.submitPrompt`：监督唤醒 / 团队派发）持有同一会话级提交认领。
-- P3：部分落地（见 §6.6）。evict(`runtime_refresh:model`)×submit 并发回归已在完整
-  host 脚手架下落盘；「提交即入库」与 e2e「无活动 run 不得出现 Analyzing 帧」
-  断言仍待办。
+- ~~P3~~：已落地（见 §6.6 / §6.8）。evict×submit 并发回归；「提交即入库」由
+  `TestSendMessagePersistsUserPromptAtInputTime` 固化（`appendChatTurnUserMessage`
+  在 `ensureChatExecutor` 之前调用）；e2e「无活动 run 不得出现 Analyzing 帧」由
+  `TestPreRunFailureNeverRendersAnalyzingFrame` 覆盖。
 
 ### 6.4 第二轮实施（P0-2 + P1-2 诊断）
 
@@ -268,3 +269,29 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 反向（提交等待进行中的刷新）未实现：CLI 平面命令与提交在同一 TUI 线程串行，
 且刷新自身有界（actor Stop 带超时）；若未来出现 web/API 并发的刷新入口，
 再引入 `actorGeneration` 等待语义。
+
+### 6.8 第七轮实施（P3 尾部——e2e 无 run 不出 Analyzing 帧）
+
+P3 两项收尾：
+
+- 「提交即入库」已是既有实现并有回归（`chat_exit_resume_repro_test.go:131`
+  `TestSendMessagePersistsUserPromptAtInputTime`：`appendChatTurnUserMessage` 在
+  `ensureChatExecutor` 之前把用户消息落进 `session.Messages` + 存储）。本轮仅复核通过。
+- 新增 `backend/cmd/aicli/commands/chat_prerun_no_analyzing_test.go`：
+  `TestPreRunFailureNeverRendersAnalyzingFrame` 走完整 `sendMessage`（真实
+  `SessionManager` + `ui.NewFixedBottomSurface` 帧捕获），把 host 构造成
+  SessionHub 缺失使 `chatActorForSession` 在预跑阶段失败（永远到不了 `BeginRun`），
+  断言四件事：提交返回错误；`WaitingArmed()==false`；run epoch 仍为 0；捕获帧中
+  无 `Analyzing`（帧内含已提交的 `hello` 行作为"捕获非空"的正面控制）。
+
+为什么值得单独钉：`chatSurfaceStatusWaiting/Thinking/Planning` 三种状态在状态行上
+都渲染为 `Analyzing`（`chat_interaction.go`），所以任何绕过 `BeginRun` 的提前置位
+都会以事故指纹的形式出现在帧里；该用例是 P0-1 在渲染层的端到端反面契约。
+
+验证（2026-09-27 第七轮）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `TestPreRunFailureNeverRendersAnalyzingFrame -count=1 -v` | PASS |
+| `TestSendMessagePersistsUserPromptAtInputTime -count=1 -v` | PASS（P3-1 复核） |
+| `gofmt -l` | PASS |
