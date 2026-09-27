@@ -103,14 +103,10 @@ func (h *Handler) StreamSessionRuntimeEvents(w http.ResponseWriter, r *http.Requ
 	// 一条普通回复放大成数百次 socket 写；合并窗口把出站压到 ≤20 次/s，而帧内容、
 	// 顺序、游标都不变（只改「什么时候把攒好的字节推出去」）。显式传 0 退回旧行为
 	// （每次 Flush 立即出站），这就是灰度/回滚面。
-	flushInterval := streamFlushTickInterval
-	if raw := strings.TrimSpace(r.URL.Query().Get("flush_ms")); raw != "" {
-		parsed, err := time.ParseDuration(raw + "ms")
-		if err != nil || parsed < streamFlushTickMin || parsed > streamFlushTickMax {
-			h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "invalid flush_ms value"))
-			return
-		}
-		flushInterval = parsed
+	flushInterval, flushErr := resolveStreamFlushInterval(r)
+	if flushErr != nil {
+		h.writeError(w, http.StatusBadRequest, flushErr)
+		return
 	}
 
 	includeLive := parseTruthyQueryFlag(r.URL.Query().Get("live")) ||
@@ -424,6 +420,27 @@ const (
 	// 上界 1s：再长就会让人误判「流卡住」，也失去渐进渲染的意义。
 	streamFlushTickMax = time.Second
 )
+
+// resolveStreamFlushInterval 解析本连接的出站合并窗口（`flush_ms` 查询参数，毫秒）。
+//
+// 两个 SSE 入口（会话运行时流 StreamSessionRuntimeEvents 与直连回合流
+// /api/agent/chat）共用同一口径：缺省/空串返回 streamFlushTickInterval；
+// 显式 0 关闭合并（退化为「写即 flush」的旧行为，回滚面）；非法值或越界
+// （<0 或 >1s）返回校验错误，由调用方按 400 处理。
+func resolveStreamFlushInterval(r *http.Request) (time.Duration, error) {
+	if r == nil {
+		return streamFlushTickInterval, nil
+	}
+	raw := strings.TrimSpace(r.URL.Query().Get("flush_ms"))
+	if raw == "" {
+		return streamFlushTickInterval, nil
+	}
+	parsed, err := time.ParseDuration(raw + "ms")
+	if err != nil || parsed < streamFlushTickMin || parsed > streamFlushTickMax {
+		return 0, errors.New(errors.ErrValidationFailed, "invalid flush_ms value")
+	}
+	return parsed, nil
+}
 
 // streamQueryTimeout 是单次 ListEvents 的最长等待。取 10s 而非更短：正常分页查询
 // 在毫秒级，只有唯一连接被写事务占住时才会触顶；而它必须明显小于代理的 idle

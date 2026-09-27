@@ -2041,7 +2041,14 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	// reads this option from the agent configuration when each provider request
 	// is assembled; setting it only after construction makes custom agent
 	// implementations that snapshot options miss the reporter opt-in.
-	if (req.Stream || wantsEventStream(r)) && req.EnableReAct {
+	//
+	// 2026-09-27（SSE 缓冲审计）：此前仅 EnableReAct 分支开流，非 ReAct 的
+	// skill-route / 静态分支整轮非流式——本轮模型全部生成完才由
+	// streamStaticResult 一次性下发，观感即「LLM 早已响应、UI 不输出」。
+	// 现在所有流式请求统一开流：静态分支的增量经 runtime 通道实时可见，
+	// 回合末的静态快照帧以 mode=replace 收口（见 streamStaticResult），
+	// 不会与已渲染的增量文本重复。
+	if req.Stream || wantsEventStream(r) {
 		if agentConfig.Options == nil {
 			agentConfig.Options = make(map[string]interface{})
 		}
@@ -2109,9 +2116,15 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			// （默认 50ms，见 pacedFlushWriter）。帧内容/顺序/seq 都不变，只改出站
 			// 时刻；收尾 Close 与在途回合释放的先后由下方 releaseActiveTurn 旁的
 			// 同一个 defer 固定（先 flush 再释放，见 2026-09-18 时序修正）。
+			// flush_ms 与会话运行时流同源（缺省 50ms；显式 0 = 写即 flush）。
+			chatFlushInterval, flushErr := resolveStreamFlushInterval(r)
+			if flushErr != nil {
+				h.writeError(w, http.StatusBadRequest, flushErr)
+				return
+			}
 			h.prepareSSEHeaders(w)
 			chatFlusher, _ := w.(http.Flusher)
-			pacedChat := newPacedFlushWriter(w, chatFlusher, streamWriteBufferSize, streamFlushTickInterval)
+			pacedChat := newPacedFlushWriter(w, chatFlusher, streamWriteBufferSize, chatFlushInterval)
 			emitter := h.newTrajectoryEmitter(pacedChat, session, turnID)
 			emitter.Emit("meta", map[string]interface{}{
 				"session_id": sessionID(session),
@@ -8688,9 +8701,14 @@ func (h *Handler) streamStaticResult(w http.ResponseWriter, session *chat.Sessio
 		emitter.Emit("subagent", subagentPayload)
 	}
 	emitter.Emit("result", resultPayload)
+	// mode=replace：静态分支现在也会开流（见 agentConfig.Options["stream"]），
+	// 增量文本可能已经通过 runtime 通道逐段渲染。这一帧是回合末的权威全文，
+	// 必须按「替换」而非「追加」应用，否则整段正文会被再拼一遍。
+	// 无增量时等价于此前的一次性下发（内容不变，只是语义显式化）。
 	emitter.Emit("chunk", map[string]interface{}{
 		"type":    "text",
 		"content": output,
+		"mode":    "replace",
 	})
 	emitter.Emit("done", map[string]interface{}{
 		"session_id": sessionID(session),
