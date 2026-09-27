@@ -1072,6 +1072,44 @@ func TestBroker_Execute_AgentToolsDelegateToController(t *testing.T) {
 	}
 }
 
+// 2026-09-27 incident: a child landed its own worktree mid-turn and wiped
+// unrelated uncommitted main-tree changes. Applying or discarding a worktree is
+// a parent-side review action; the broker must refuse a self-target before the
+// host controller is reached.
+func TestBroker_Execute_RejectsSelfWorktreeOperation(t *testing.T) {
+	controller := &fakeAgentSessionController{}
+	broker := &Broker{AgentSessions: controller}
+	ctx := context.Background()
+
+	_, _, err := broker.Execute(ctx, "child-1", ToolApplyAgentWorktree, map[string]interface{}{"id": "child-1"})
+	if err == nil || !strings.Contains(err.Error(), "parent-side operation") {
+		t.Fatalf("expected self-apply rejection, got %v", err)
+	}
+	if controller.lastApply.ID != "" || controller.lastApply.SessionID != "" {
+		t.Fatalf("self-apply must not reach the controller, got %#v", controller.lastApply)
+	}
+
+	_, _, err = broker.Execute(ctx, "child-1", ToolDiscardAgentWorktree, map[string]interface{}{"id": "child-1"})
+	if err == nil || !strings.Contains(err.Error(), "parent-side operation") {
+		t.Fatalf("expected self-discard rejection, got %v", err)
+	}
+	if controller.lastDiscard.ID != "" || controller.lastDiscard.SessionID != "" {
+		t.Fatalf("self-discard must not reach the controller, got %#v", controller.lastDiscard)
+	}
+
+	// The parent/orchestrator flow still works.
+	rawApply, _, err := broker.Execute(ctx, "parent-session", ToolApplyAgentWorktree, map[string]interface{}{"id": "child-1"})
+	if err != nil {
+		t.Fatalf("parent apply failed: %v", err)
+	}
+	if controller.lastApply.ID != "child-1" {
+		t.Fatalf("unexpected apply args: %#v", controller.lastApply)
+	}
+	if result, ok := rawApply.(*AgentWorktreeResult); !ok || result == nil || !result.Applied {
+		t.Fatalf("unexpected apply result: %#v", rawApply)
+	}
+}
+
 func TestBroker_Execute_WaitAgentAcceptsBatchIDs(t *testing.T) {
 	controller := &fakeAgentSessionController{}
 	broker := &Broker{AgentSessions: controller}

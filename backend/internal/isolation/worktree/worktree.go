@@ -270,6 +270,11 @@ type ApplyReport struct {
 	// are never part of the apply set; they are reported so the caller stops
 	// expecting them (untracked worktree files included).
 	SkippedPaths []string `json:"skipped_paths,omitempty"`
+	// DeferredDeletions are branch paths that no longer exist at the branch tip.
+	// A path checkout cannot express a deletion (the missing pathspec would fail
+	// the whole command), so they are excluded from the apply set and reported
+	// instead of being silently ignored.
+	DeferredDeletions []string `json:"deferred_deletions,omitempty"`
 	// Applied reports whether the checkout ran.
 	Applied bool `json:"applied,omitempty"`
 	// Forced reports whether local main-tree changes were overwritten on purpose.
@@ -325,7 +330,10 @@ func (h *Handle) CheckApply(ctx context.Context, opts ApplyOptions) (ApplyReport
 }
 
 // Apply copies committed or staged changes from the worktree branch into the main tree
-// via `git checkout <branch> -- <paths>`. Untracked files are not applied.
+// via `git checkout <branch> -- <paths>`, scoped to the branch's changed paths.
+// The main tree is never rewritten wholesale and untracked files are not applied.
+// Branch-side deletions cannot be expressed by a path checkout; they are reported
+// via ApplyReport.DeferredDeletions instead of being applied or silently ignored.
 // This never runs when isolation creation failed (caller must only apply a live Handle).
 func (h *Handle) Apply(ctx context.Context, opts ApplyOptions) error {
 	_, err := h.ApplyWithReport(ctx, opts)
@@ -335,7 +343,10 @@ func (h *Handle) Apply(ctx context.Context, opts ApplyOptions) error {
 // ApplyWithReport applies the worktree branch into the main tree and returns
 // what happened. By default (Force=false) it refuses to overwrite main-tree
 // local modifications and returns *ApplyConflictError; the report is still
-// returned so the caller can render the conflicts and next_action.
+// returned so the caller can render the conflicts and next_action. The checkout
+// is scoped to the branch's changed paths: unrelated main-tree work is never
+// touched, and branch deletions are reported (DeferredDeletions) instead of
+// being applied.
 func (h *Handle) ApplyWithReport(ctx context.Context, opts ApplyOptions) (ApplyReport, error) {
 	if h == nil {
 		return ApplyReport{}, errors.New("nil worktree handle")
@@ -366,13 +377,28 @@ func (h *Handle) ApplyWithReport(ctx context.Context, opts ApplyOptions) (ApplyR
 	if len(report.Conflicts) > 0 && !opts.Force {
 		return report, h.applyConflictError(report)
 	}
-	paths := normalizeApplyPaths(opts.Paths)
-	args := []string{"checkout", branch, "--"}
-	if len(paths) == 0 {
-		args = append(args, ".")
-	} else {
-		args = append(args, paths...)
+	if len(report.CandidatePaths) == 0 {
+		// Nothing to land (clean worktree, or a paths filter that excludes every
+		// branch change). Return before any git command: applying must never
+		// fall back to a whole-tree checkout of HEAD content.
+		return report, nil
 	}
+	// Bound the checkout to exactly the paths the branch changes. A
+	// `git checkout <branch> -- .` rewrites every tracked path — wiping
+	// main-tree work outside the apply set with no conflict and no reflog entry
+	// (2026-09-27 incident). normalizeApplyPaths is already folded into
+	// report.CandidatePaths by CheckApply.
+	writePaths, deferred, err := h.branchExistingPaths(ctx, report.CandidatePaths)
+	if err != nil {
+		return report, err
+	}
+	report.DeferredDeletions = deferred
+	if len(writePaths) == 0 {
+		// Every branch change is a deletion, and a path checkout has no target
+		// for those. Report the deferred deletions instead of guessing.
+		return report, nil
+	}
+	args := append([]string{"checkout", branch, "--"}, writePaths...)
 	if err := runGit(ctx, repoRoot, args...); err != nil {
 		return report, fmt.Errorf("apply worktree changes to main tree: %w", err)
 	}
@@ -457,6 +483,36 @@ func (h *Handle) applyCandidatePaths(ctx context.Context, paths []string) ([]str
 	}
 	sort.Strings(candidates)
 	return candidates, nil
+}
+
+// branchExistingPaths splits candidate paths into the ones that exist at the
+// branch tip (safe to pass to `git checkout <branch> --`) and the ones the
+// branch deleted. A deleted path has no checkout target: passing it makes git
+// fail the entire pathspec list, so deletions are deferred and reported.
+func (h *Handle) branchExistingPaths(ctx context.Context, candidates []string) (existing, deferred []string, err error) {
+	if len(candidates) == 0 {
+		return nil, nil, nil
+	}
+	args := []string{"ls-tree", "-r", "-z", "--name-only", strings.TrimSpace(h.Branch), "--"}
+	args = append(args, candidates...)
+	out, err := runGitOutput(ctx, h.RepoRoot, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("worktree apply preflight (ls-tree): %w", err)
+	}
+	present := make(map[string]bool, len(candidates))
+	for _, path := range splitNULPaths(out) {
+		if path != "" {
+			present[path] = true
+		}
+	}
+	for _, path := range candidates {
+		if present[path] {
+			existing = append(existing, path)
+		} else {
+			deferred = append(deferred, path)
+		}
+	}
+	return existing, deferred, nil
 }
 
 // mainTreeDirtyPaths maps repo-relative path to porcelain status for every

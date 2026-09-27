@@ -234,6 +234,189 @@ func TestApplyRefusesMainTreeConflicts(t *testing.T) {
 	}
 }
 
+// runGitTest runs git with a deterministic identity for test commits.
+func runGitTest(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// seedTrackedFile commits one extra tracked file into the test repo.
+func seedTrackedFile(t *testing.T, repo, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repo, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, repo, "add", name)
+	runGitTest(t, repo, "commit", "-m", "seed "+name)
+}
+
+// localStatus returns the trimmed porcelain status of one path.
+func localStatus(t *testing.T, repo, path string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repo, "status", "--porcelain", "--", path).Output()
+	if err != nil {
+		t.Fatalf("git status %s: %v", path, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Incident regression (2026-09-27): an apply without a paths filter ran
+// `git checkout <branch> -- .`, which rewrote every tracked path in the main
+// tree and silently wiped uncommitted WIP the worktree never touched. The
+// checkout must stay inside the branch's apply set.
+func TestApplyWithoutPathsLeavesUnrelatedMainTreeChangesAlone(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := initTestRepo(t)
+	seedTrackedFile(t, repo, "notes.txt", "seed-notes\n")
+	ctx := context.Background()
+	handle, err := Create(ctx, Options{
+		RepoRoot:  repo,
+		SessionID: "child-out-of-scope",
+		BaseDir:   filepath.Join(repo, ".aicli", "agent-worktrees"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer func() { _ = handle.Remove(context.Background()) }()
+
+	// The child changes README.md only.
+	if err := os.WriteFile(filepath.Join(handle.Path, "README.md"), []byte("child-version\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The main tree carries unrelated uncommitted WIP on notes.txt.
+	if err := os.WriteFile(filepath.Join(repo, "notes.txt"), []byte("MAIN-WIP\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := handle.ApplyWithReport(ctx, ApplyOptions{})
+	if err != nil {
+		t.Fatalf("ApplyWithReport: %v", err)
+	}
+	if !report.Applied {
+		t.Fatalf("expected applied report, got %+v", report)
+	}
+	if len(report.CandidatePaths) != 1 || report.CandidatePaths[0] != "README.md" {
+		t.Fatalf("expected only README.md in the apply set, got %+v", report.CandidatePaths)
+	}
+	readme, err := os.ReadFile(filepath.Join(repo, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(readme) != "child-version\n" {
+		t.Fatalf("README.md content=%q want child-version", readme)
+	}
+	notes, err := os.ReadFile(filepath.Join(repo, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(notes) != "MAIN-WIP\n" {
+		t.Fatalf("unrelated main-tree WIP was overwritten: %q", notes)
+	}
+	if got := localStatus(t, repo, "notes.txt"); got != "M notes.txt" {
+		t.Fatalf("notes.txt must stay an unstaged local modification, got %q", got)
+	}
+}
+
+// A clean worktree has nothing to land: an apply must not run any main-tree
+// checkout. (`checkout <branch> -- .` of HEAD content previously reset the
+// whole tree even when the branch had no changes.)
+func TestApplyCleanWorktreeDoesNotTouchMainTree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := initTestRepo(t)
+	seedTrackedFile(t, repo, "notes.txt", "seed-notes\n")
+	ctx := context.Background()
+	handle, err := Create(ctx, Options{
+		RepoRoot:  repo,
+		SessionID: "child-clean",
+		BaseDir:   filepath.Join(repo, ".aicli", "agent-worktrees"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer func() { _ = handle.Remove(context.Background()) }()
+
+	if err := os.WriteFile(filepath.Join(repo, "notes.txt"), []byte("MAIN-WIP\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := handle.ApplyWithReport(ctx, ApplyOptions{})
+	if err != nil {
+		t.Fatalf("ApplyWithReport: %v", err)
+	}
+	if report.Applied {
+		t.Fatalf("a clean worktree must not report Applied: %+v", report)
+	}
+	if len(report.CandidatePaths) != 0 {
+		t.Fatalf("expected an empty apply set, got %+v", report.CandidatePaths)
+	}
+	notes, err := os.ReadFile(filepath.Join(repo, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(notes) != "MAIN-WIP\n" {
+		t.Fatalf("main-tree WIP was overwritten: %q", notes)
+	}
+	if got := localStatus(t, repo, "notes.txt"); got != "M notes.txt" {
+		t.Fatalf("notes.txt must stay an unstaged local modification, got %q", got)
+	}
+}
+
+// A branch-side deletion cannot be expressed by a path checkout; it must be
+// reported (deferred_deletions) instead of silently ignored or failing the
+// whole apply.
+func TestApplyReportsDeferredBranchDeletions(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := initTestRepo(t)
+	seedTrackedFile(t, repo, "notes.txt", "seed-notes\n")
+	ctx := context.Background()
+	handle, err := Create(ctx, Options{
+		RepoRoot:  repo,
+		SessionID: "child-delete",
+		BaseDir:   filepath.Join(repo, ".aicli", "agent-worktrees"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer func() { _ = handle.Remove(context.Background()) }()
+
+	if err := os.Remove(filepath.Join(handle.Path, "notes.txt")); err != nil {
+		t.Fatal(err)
+	}
+	report, err := handle.ApplyWithReport(ctx, ApplyOptions{})
+	if err != nil {
+		t.Fatalf("ApplyWithReport: %v", err)
+	}
+	if report.Applied {
+		t.Fatalf("nothing landable, got %+v", report)
+	}
+	if len(report.DeferredDeletions) != 1 || report.DeferredDeletions[0] != "notes.txt" {
+		t.Fatalf("expected notes.txt to be reported as a deferred deletion, got %+v", report.DeferredDeletions)
+	}
+	notes, err := os.ReadFile(filepath.Join(repo, "notes.txt"))
+	if err != nil {
+		t.Fatalf("deferred deletion must leave the file in place: %v", err)
+	}
+	if string(notes) != "seed-notes\n" {
+		t.Fatalf("notes.txt content=%q want seed-notes", notes)
+	}
+}
+
 // H14: a paths-filtered apply reports the branch changes it left behind.
 func TestApplyReportsOutOfScopePaths(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {

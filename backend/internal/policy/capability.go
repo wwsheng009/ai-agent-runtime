@@ -112,6 +112,14 @@ func controlPlaneToolCapabilities(normalizedToolName string) ([]Capability, bool
 		// Writes to the durable supervision control plane: audit + CAS still
 		// apply, and they are never satisfied by a read-only session.
 		return []Capability{CapReadOnly, CapAgentManagement}, true
+	case "apply_agent_worktree", "discard_agent_worktree":
+		// Landing (or dropping) an isolated child's worktree mutates the main
+		// repository and the child's lifecycle: a control-plane write, not a
+		// plain filesystem write. A capability-scoped policy must grant both
+		// write_fs and agent_management explicitly, so neither a write-only nor
+		// a read-only (even one that holds agent_management) scope can land or
+		// destroy a worktree by inheriting the requirement from the tool name.
+		return []Capability{CapWriteFS, CapAgentManagement}, true
 	default:
 		return nil, false
 	}
