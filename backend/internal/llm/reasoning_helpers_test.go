@@ -413,8 +413,11 @@ func TestRuntimeMessagesToProtocolMessages_CodexStripsVolatileReplayFields(t *te
 		t.Fatalf("expected 3 response_output_items, got %#v", messages[0]["response_output_items"])
 	}
 
-	if _, exists := outputItems[0]["id"]; exists {
-		t.Fatalf("did not expect reasoning item id after canonicalization: %#v", outputItems[0])
+	// The upstream binds encrypted_content to its reasoning item id, so the id
+	// must survive canonicalization whenever the blob does; dropping it makes
+	// replay fail with invalid_encrypted_content.
+	if outputItems[0]["id"] != "rs_123" {
+		t.Fatalf("expected encrypted reasoning item id preserved, got %#v", outputItems[0])
 	}
 	if _, exists := outputItems[0]["status"]; exists {
 		t.Fatalf("did not expect reasoning item status after canonicalization: %#v", outputItems[0])
@@ -463,6 +466,7 @@ func TestRuntimeMessagesToProtocolMessages_CodexPreservesEmptyReasoningSummaryFo
 			"response_output_items": []map[string]interface{}{
 				{
 					"type":              "reasoning",
+					"id":                "rs_opaque_1",
 					"encrypted_content": "opaque-token",
 					"summary":           []map[string]interface{}{},
 				},
@@ -482,6 +486,9 @@ func TestRuntimeMessagesToProtocolMessages_CodexPreservesEmptyReasoningSummaryFo
 	if outputItems[0]["encrypted_content"] != "opaque-token" {
 		t.Fatalf("expected encrypted_content to be preserved, got %#v", outputItems[0]["encrypted_content"])
 	}
+	if outputItems[0]["id"] != "rs_opaque_1" {
+		t.Fatalf("expected encrypted reasoning item id preserved, got %#v", outputItems[0])
+	}
 
 	summary, ok := outputItems[0]["summary"].([]map[string]interface{})
 	if !ok {
@@ -489,6 +496,46 @@ func TestRuntimeMessagesToProtocolMessages_CodexPreservesEmptyReasoningSummaryFo
 	}
 	if len(summary) != 0 {
 		t.Fatalf("expected empty reasoning summary array, got %#v", summary)
+	}
+}
+
+// TestRuntimeMessagesToProtocolMessages_CodexDropsUnverifiableEncryptedReasoning
+// locks the fallback for history that lost the upstream item id (legacy
+// canonicalization): an encrypted blob without its id can never be verified by
+// the upstream, so it must be dropped instead of being sent under a derived id
+// (which the gateway rejects with invalid_encrypted_content).
+func TestRuntimeMessagesToProtocolMessages_CodexDropsUnverifiableEncryptedReasoning(t *testing.T) {
+	assistant := types.Message{
+		Role:     "assistant",
+		Metadata: types.NewMetadata(),
+	}
+	types.SetReasoningBlock(assistant.Metadata, &types.ReasoningBlock{
+		Format:     "openai_responses",
+		Visibility: types.ReasoningVisibilityOpaque,
+		Metadata: map[string]interface{}{
+			"response_output_items": []map[string]interface{}{
+				{
+					"type":              "reasoning",
+					"encrypted_content": "opaque-token",
+					"summary":           []map[string]interface{}{},
+				},
+			},
+		},
+	})
+
+	messages := RuntimeMessagesToProtocolMessages([]types.Message{assistant}, "codex")
+	if len(messages) != 1 {
+		t.Fatalf("expected 1 protocol message, got %d", len(messages))
+	}
+	outputItems, ok := messages[0]["response_output_items"].([]map[string]interface{})
+	if !ok || len(outputItems) != 1 {
+		t.Fatalf("expected 1 response_output_item, got %#v", messages[0]["response_output_items"])
+	}
+	if _, exists := outputItems[0]["encrypted_content"]; exists {
+		t.Fatalf("did not expect unverifiable encrypted_content after canonicalization: %#v", outputItems[0])
+	}
+	if _, exists := outputItems[0]["id"]; exists {
+		t.Fatalf("did not expect an id on a summary-only reasoning item: %#v", outputItems[0])
 	}
 }
 

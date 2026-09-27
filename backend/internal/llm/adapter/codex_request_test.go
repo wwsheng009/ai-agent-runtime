@@ -1499,32 +1499,31 @@ func TestCodexBuildRequest_FollowUpToolCallUsesOutputItems(t *testing.T) {
 	})
 
 	input := req["input"].([]map[string]interface{})
-	if len(input) != 4 {
-		t.Fatalf("expected 4 input items, got %d: %#v", len(input), input)
+	if len(input) != 3 {
+		t.Fatalf("expected 3 input items, got %d: %#v", len(input), input)
+	}
+	// The assistant reasoning summary is display-only (no upstream id or
+	// encrypted_content), so a store=false request must not replay it as a
+	// reasoning item; only the tool-call chain is sent back.
+	for i, item := range input {
+		if item["type"] == "reasoning" {
+			t.Fatalf("did not expect a reasoning item on the wire (input[%d]): %#v", i, item)
+		}
 	}
 	if input[0]["type"] != "message" || input[0]["role"] != "user" {
 		t.Fatalf("unexpected first input item: %#v", input[0])
 	}
-	if input[1]["type"] != "reasoning" {
-		t.Fatalf("expected reasoning item, got %#v", input[1])
+	if input[1]["type"] != "function_call" || input[1]["name"] != "execute_shell_command" || input[1]["call_id"] != "call_1" {
+		t.Fatalf("unexpected function_call item: %#v", input[1])
 	}
-	if _, exists := input[1]["role"]; exists {
-		t.Fatalf("reasoning item should not be a message: %#v", input[1])
+	if id, _ := input[1]["id"].(string); id != "fc_1" {
+		t.Fatalf("expected function_call item to carry id=fc_1, got %#v", input[1])
 	}
-	if id, _ := input[1]["id"].(string); id == "" {
-		t.Fatalf("expected reasoning item to carry a wire id, got %#v", input[1])
-	}
-	if input[2]["type"] != "function_call" || input[2]["name"] != "execute_shell_command" || input[2]["call_id"] != "call_1" {
-		t.Fatalf("unexpected function_call item: %#v", input[2])
+	if input[2]["type"] != "function_call_output" || input[2]["call_id"] != "call_1" {
+		t.Fatalf("unexpected function_call_output item: %#v", input[2])
 	}
 	if id, _ := input[2]["id"].(string); id != "fc_1" {
-		t.Fatalf("expected function_call item to carry id=fc_1, got %#v", input[2])
-	}
-	if input[3]["type"] != "function_call_output" || input[3]["call_id"] != "call_1" {
-		t.Fatalf("unexpected function_call_output item: %#v", input[3])
-	}
-	if id, _ := input[3]["id"].(string); id != "fc_1" {
-		t.Fatalf("expected function_call_output item to carry id=fc_1, got %#v", input[3])
+		t.Fatalf("expected function_call_output item to carry id=fc_1, got %#v", input[2])
 	}
 }
 
@@ -1567,8 +1566,10 @@ func TestCodexBuildRequest_FollowUpCustomToolCallUsesCustomOutputItems(t *testin
 	if input[2]["type"] != "custom_tool_call_output" || input[2]["call_id"] != "call_patch_1" {
 		t.Fatalf("unexpected custom tool output item: %#v", input[2])
 	}
-	if id, _ := input[2]["id"].(string); id != "ctc_patch_1" {
-		t.Fatalf("expected custom_tool_call_output item to carry id=ctc_patch_1, got %#v", input[2])
+	// Custom tool OUTPUT items use their own ctco_ prefix (codex-rs
+	// ResponseItem::id_prefix); the paired call item keeps ctc_.
+	if id, _ := input[2]["id"].(string); id != "ctco_patch_1" {
+		t.Fatalf("expected custom_tool_call_output item to carry id=ctco_patch_1, got %#v", input[2])
 	}
 }
 
@@ -1657,17 +1658,19 @@ func TestCodexBuildRequest_ReplaysCanonicalizedOutputItemsWithIDs(t *testing.T) 
 	})
 
 	input := req["input"].([]map[string]interface{})
-	if len(input) != 5 {
-		t.Fatalf("expected 5 input items, got %d: %#v", len(input), input)
+	if len(input) != 4 {
+		t.Fatalf("expected 4 input items, got %d: %#v", len(input), input)
 	}
-	if id, _ := input[1]["id"].(string); id == "" {
-		t.Fatalf("expected replayed reasoning item to carry an id, got %#v", input[1])
+	for i, item := range input {
+		if item["type"] == "reasoning" {
+			t.Fatalf("did not expect a summary-only reasoning item on the wire (input[%d]): %#v", i, item)
+		}
+	}
+	if id, _ := input[2]["id"].(string); id != "fc_1" {
+		t.Fatalf("expected replayed function_call item to carry id=fc_1, got %#v", input[2])
 	}
 	if id, _ := input[3]["id"].(string); id != "fc_1" {
-		t.Fatalf("expected replayed function_call item to carry id=fc_1, got %#v", input[3])
-	}
-	if id, _ := input[4]["id"].(string); id != "fc_1" {
-		t.Fatalf("expected replayed function_call_output item to carry id=fc_1, got %#v", input[4])
+		t.Fatalf("expected replayed function_call_output item to carry id=fc_1, got %#v", input[3])
 	}
 
 	// Stability: rebuilding the same history twice must produce identical ids
@@ -1681,11 +1684,11 @@ func TestCodexBuildRequest_ReplaysCanonicalizedOutputItemsWithIDs(t *testing.T) 
 		Stream: false,
 	})
 	secondInput := second["input"].([]map[string]interface{})
-	if id, _ := input[1]["id"].(string); id != secondInput[1]["id"] {
-		t.Fatalf("expected stable reasoning id across rebuilds, got %#v vs %#v", input[1]["id"], secondInput[1]["id"])
+	if id, _ := input[2]["id"].(string); id != secondInput[2]["id"] {
+		t.Fatalf("expected stable function_call id across rebuilds, got %#v vs %#v", input[2]["id"], secondInput[2]["id"])
 	}
 	if id, _ := input[3]["id"].(string); id != secondInput[3]["id"] {
-		t.Fatalf("expected stable function_call id across rebuilds, got %#v vs %#v", input[3]["id"], secondInput[3]["id"])
+		t.Fatalf("expected stable function_call_output id across rebuilds, got %#v vs %#v", input[3]["id"], secondInput[3]["id"])
 	}
 }
 
@@ -2450,7 +2453,8 @@ func TestCodexEnsureInputItemID_NormalizesToolCallIDPrefix(t *testing.T) {
 		{"function_call_output", "function_call_output", "call_1", "fc_"},
 		{"function_call realistic", "function_call", "call_P4QjA9D8eJJwmXp9ImxEMtRg", "fc_"},
 		{"custom_tool_call", "custom_tool_call", "call_patch_1", "ctc_"},
-		{"custom_tool_call_output", "custom_tool_call_output", "call_patch_1", "ctc_"},
+		{"custom_tool_call_output", "custom_tool_call_output", "call_patch_1", "ctco_"},
+		{"custom_tool_call_output realistic", "custom_tool_call_output", "call_N6Xt7rrBhQLUCcgCX0zSkzxa", "ctco_"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2484,6 +2488,199 @@ func TestCodexEnsureInputItemID_NormalizesToolCallIDPrefix(t *testing.T) {
 	}
 	if got := ensureCodexInputItemID(legacy); got["id"] != "fc_P4QjA9D8eJJwmXp9ImxEMtRg" {
 		t.Fatalf("expected call_ item id rewritten to fc_P4QjA9D8eJJwmXp9ImxEMtRg, got %#v", got)
+	}
+}
+
+// TestCodexEnsureInputItemID_NormalizesReasoningIDPrefix locks the Responses
+// wire contract that reasoning item ids must begin with rs_: cnsai.cn rejects
+// a replayed synthetic "reasoning_<hash>" id with HTTP 400 ("Invalid
+// 'input[N].id' ... Expected an ID that begins with 'rs'").
+func TestCodexEnsureInputItemID_NormalizesReasoningIDPrefix(t *testing.T) {
+	// Missing id: derived id must use the rs_ prefix and stay stable across
+	// replay so prompt-cache prefixes remain byte-identical.
+	base := map[string]interface{}{
+		"type": "reasoning",
+		"summary": []map[string]interface{}{
+			{"type": "summary_text", "text": "先查看仓库结构。"},
+		},
+	}
+	first := ensureCodexInputItemID(base)
+	derived, _ := first["id"].(string)
+	if !strings.HasPrefix(derived, "rs_") || len(derived) <= len("rs_") {
+		t.Fatalf("expected derived reasoning item id with rs_ prefix, got %#v", first)
+	}
+	if again := ensureCodexInputItemID(base); again["id"] != derived {
+		t.Fatalf("expected stable derived reasoning id, got %#v vs %#v", again["id"], derived)
+	}
+	if _, exists := base["id"]; exists {
+		t.Fatalf("normalization must not mutate the canonical item: %#v", base)
+	}
+
+	// Legacy synthetic id: prefix is rewritten, suffix (content hash) preserved.
+	legacy := map[string]interface{}{
+		"type": "reasoning",
+		"id":   "reasoning_c53dbfb5e51ae127",
+	}
+	if got := ensureCodexInputItemID(legacy); got["id"] != "rs_c53dbfb5e51ae127" {
+		t.Fatalf("expected reasoning_ item id rewritten to rs_c53dbfb5e51ae127, got %#v", got)
+	}
+
+	// Canonical upstream id is preserved untouched.
+	valid := map[string]interface{}{"type": "reasoning", "id": "rs_abc123"}
+	if got := ensureCodexInputItemID(valid); got["id"] != "rs_abc123" {
+		t.Fatalf("expected valid rs_ item id preserved, got %#v", got)
+	}
+
+	// Encrypted content is bound to its upstream reasoning item id: the
+	// id/blob pair is replayed verbatim...
+	encrypted := map[string]interface{}{
+		"type":              "reasoning",
+		"id":                "rs_0e95f418e06e09fc016ab87c4d9d30819490ff2307ff47d2da",
+		"encrypted_content": "gAAAAABopaque",
+		"summary":           []map[string]interface{}{},
+	}
+	gotEncrypted := ensureCodexInputItemID(encrypted)
+	if gotEncrypted["id"] != encrypted["id"] || gotEncrypted["encrypted_content"] != "gAAAAABopaque" {
+		t.Fatalf("expected encrypted reasoning id/blob pair preserved, got %#v", gotEncrypted)
+	}
+
+	// ...while a blob without an rs_ id can never verify and is dropped.
+	orphan := map[string]interface{}{
+		"type":              "reasoning",
+		"encrypted_content": "gAAAAABopaque",
+		"summary": []map[string]interface{}{
+			{"type": "summary_text", "text": "先查看仓库结构。"},
+		},
+	}
+	gotOrphan := ensureCodexInputItemID(orphan)
+	if _, exists := gotOrphan["encrypted_content"]; exists {
+		t.Fatalf("did not expect encrypted_content without an rs_ id on the wire: %#v", gotOrphan)
+	}
+	if id, _ := gotOrphan["id"].(string); !strings.HasPrefix(id, "rs_") {
+		t.Fatalf("expected derived rs_ id for orphaned reasoning item, got %#v", gotOrphan)
+	}
+}
+
+// TestCodexBuildRequest_ReplaysEncryptedReasoningWithOriginalID locks the
+// stateless Responses replay contract observed on cnsai.cn: the encrypted
+// reasoning blob must travel with the upstream item id it was issued for, or
+// the upstream rejects the request with invalid_encrypted_content.
+func TestCodexBuildRequest_ReplaysEncryptedReasoningWithOriginalID(t *testing.T) {
+	a := &CodexAdapter{}
+	const originalID = "rs_0e95f418e06e09fc016ab87c4d9d30819490ff2307ff47d2da"
+	assistant := map[string]interface{}{
+		"role":    "assistant",
+		"content": "inspect done",
+		"response_output_items": []map[string]interface{}{
+			{
+				"type": "reasoning",
+				"id":   originalID,
+				"summary": []map[string]interface{}{
+					{"type": "summary_text", "text": "先检查最近的工具输出。"},
+				},
+				"encrypted_content": "gAAAAABopaque",
+			},
+		},
+	}
+
+	req := a.BuildRequest(RequestConfig{
+		Model: "gpt-6-astra",
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "继续"},
+			assistant,
+		},
+		Stream: false,
+	})
+
+	input := req["input"].([]map[string]interface{})
+	if len(input) != 2 {
+		t.Fatalf("expected 2 input items, got %d: %#v", len(input), input)
+	}
+	item := input[1]
+	if item["type"] != "reasoning" {
+		t.Fatalf("expected reasoning replay item, got %#v", item)
+	}
+	if item["id"] != originalID {
+		t.Fatalf("expected original reasoning id preserved, got %#v", item["id"])
+	}
+	if item["encrypted_content"] != "gAAAAABopaque" {
+		t.Fatalf("expected encrypted_content preserved with its id, got %#v", item)
+	}
+}
+
+// TestCodexBuildRequest_OmitsEncryptedReasoningWithoutOriginalID covers legacy
+// history that lost the upstream reasoning id: the blob cannot be verified and a
+// summary-only fallback cannot be resolved either (store=false), so the item is
+// omitted instead of failing the request with invalid_encrypted_content or
+// "Item with id 'rs_...' not found".
+func TestCodexBuildRequest_OmitsEncryptedReasoningWithoutOriginalID(t *testing.T) {
+	a := &CodexAdapter{}
+	assistant := map[string]interface{}{
+		"role":    "assistant",
+		"content": "inspect done",
+		"response_output_items": []map[string]interface{}{
+			{
+				"type": "reasoning",
+				"summary": []map[string]interface{}{
+					{"type": "summary_text", "text": "先检查最近的工具输出。"},
+				},
+				"encrypted_content": "gAAAAABopaque",
+			},
+		},
+	}
+
+	req := a.BuildRequest(RequestConfig{
+		Model: "gpt-6-astra",
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "继续"},
+			assistant,
+		},
+		Stream: false,
+	})
+
+	input := req["input"].([]map[string]interface{})
+	if len(input) != 1 {
+		t.Fatalf("expected only the user message on the wire, got %d: %#v", len(input), input)
+	}
+	if input[0]["type"] != "message" || input[0]["role"] != "user" {
+		t.Fatalf("unexpected wire input: %#v", input[0])
+	}
+}
+
+// TestCodexBuildRequest_DropsTextOnlyReasoningAcrossModelSwitch reproduces the
+// model-switch failure from session_20260927103300_Sm3lRk90: history recorded
+// while a text-only reasoning model was active (deepseek reasoning_content) is
+// replayed into a codex request. The reasoning text carries no upstream id or
+// encrypted_content, so it must not be turned into a reasoning input item -
+// store=false upstreams answer with "Item with id 'rs_...' not found".
+func TestCodexBuildRequest_DropsTextOnlyReasoningAcrossModelSwitch(t *testing.T) {
+	a := &CodexAdapter{}
+	assistant := map[string]interface{}{
+		"role":              "assistant",
+		"content":           `当前工作目录是 E:\projects\ai\ai-agent-runtime。`,
+		"reasoning_content": `The user just typed "pwd". They want the current working directory printed.`,
+	}
+
+	req := a.BuildRequest(RequestConfig{
+		Model: "gpt-6-astra",
+		Messages: []map[string]interface{}{
+			{"role": "user", "content": "pwd"},
+			assistant,
+		},
+		Stream: false,
+	})
+
+	input := req["input"].([]map[string]interface{})
+	if len(input) != 2 {
+		t.Fatalf("expected 2 input items, got %d: %#v", len(input), input)
+	}
+	for i, item := range input {
+		if item["type"] == "reasoning" {
+			t.Fatalf("did not expect replayed text-only reasoning (input[%d]): %#v", i, item)
+		}
+	}
+	if input[1]["type"] != "message" || input[1]["role"] != "assistant" {
+		t.Fatalf("expected assistant message item, got %#v", input[1])
 	}
 }
 

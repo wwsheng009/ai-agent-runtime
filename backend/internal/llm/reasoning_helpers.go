@@ -210,7 +210,15 @@ func canonicalizeCodexReasoningOutputItem(item map[string]interface{}) map[strin
 		out["summary"] = []map[string]interface{}{}
 	}
 	if encrypted, _ := item["encrypted_content"].(string); strings.TrimSpace(encrypted) != "" {
-		out["encrypted_content"] = encrypted
+		// The upstream binds encrypted_content to the reasoning item id it was
+		// issued for and rejects a replayed blob whose id does not match with
+		// HTTP 400 invalid_encrypted_content. Preserve the id together with the
+		// blob; without an id the blob can never be verified, so drop it and
+		// replay the summary only (the wire layer derives a stable rs_ id).
+		if id, _ := item["id"].(string); strings.TrimSpace(id) != "" {
+			out["id"] = strings.TrimSpace(id)
+			out["encrypted_content"] = encrypted
+		}
 		// Responses replay still expects reasoning.summary, even when the provider
 		// only returned opaque encrypted_content and an empty summary array.
 		if _, exists := out["summary"]; !exists {

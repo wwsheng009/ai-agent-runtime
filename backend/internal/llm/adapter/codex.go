@@ -675,7 +675,16 @@ func (a *CodexAdapter) convertMessagesToCodexInputWithOptions(messages []map[str
 					strings.EqualFold(strings.TrimSpace(asCodexString(item["type"])), "reasoning") {
 					continue
 				}
-				input = append(input, ensureCodexInputItemID(item))
+				replay := ensureCodexInputItemID(item)
+				if !isReplayableCodexReasoningItem(replay) {
+					// store=false: the upstream only accepts the exact
+					// id/encrypted_content pair it issued. Summary-only reasoning
+					// items (derived ids, or blobs whose original id was lost)
+					// fail the whole request with "Item with id 'rs_...' not
+					// found", so omit them instead.
+					continue
+				}
+				input = append(input, replay)
 			}
 			continue
 		}
@@ -690,12 +699,14 @@ func (a *CodexAdapter) convertMessagesToCodexInputWithOptions(messages []map[str
 			input = append(input, pendingCalls...)
 			pendingCalls = pendingCalls[:0]
 			content := extractCodexMessageText(msg)
-			reasoning := extractCodexReasoningText(msg)
 			name := strings.TrimSpace(asCodexString(msg["name"]))
 			if role == "assistant" {
-				if reasoning != "" {
-					input = append(input, buildCodexReasoningItem(reasoning))
-				}
+				// Display-only reasoning text is never replayed as an input
+				// item: it carries no upstream id or encrypted_content, so a
+				// stateless (store=false) request cannot resolve it. This also
+				// covers model switches that fold text-only reasoning from
+				// another protocol (for example deepseek reasoning_content)
+				// into a Responses transcript.
 				if parts := extractCodexUserInputParts(msg); len(parts) > 0 {
 					item := map[string]interface{}{
 						"type":    "message",
@@ -4206,16 +4217,6 @@ func (a *CodexAdapter) BuildAssistantMessage(content string, toolCalls []map[str
 	return msg
 }
 
-func extractCodexReasoningText(msg map[string]interface{}) string {
-	if reasoning, ok := msg["reasoning_content"].(string); ok && reasoning != "" {
-		return reasoning
-	}
-	if reasoning, ok := msg["reasoning"].(string); ok && reasoning != "" {
-		return reasoning
-	}
-	return ""
-}
-
 func extractCodexMessageText(msg map[string]interface{}) string {
 	if msg == nil {
 		return ""
@@ -4498,10 +4499,14 @@ func buildCodexReasoningItem(reasoning string) map[string]interface{} {
 
 // stableCodexReasoningTextID derives a deterministic id from the reasoning
 // text so rebuilt reasoning items keep a stable wire id across steps.
+// The Responses protocol validates the reasoning item id prefix: reasoning
+// items use rs_ (tool-call items use fc_/ctc_). Any other prefix is rejected
+// by the upstream validator with HTTP 400 ("Invalid 'input[N].id' ...
+// Expected an ID that begins with 'rs'"), so the derived id must be rs_.
 func stableCodexReasoningTextID(reasoning string) string {
 	hasher := fnv.New64a()
 	hasher.Write([]byte(reasoning))
-	return fmt.Sprintf("reasoning_%x", hasher.Sum64())
+	return fmt.Sprintf("rs_%x", hasher.Sum64())
 }
 
 // stableCodexCallID derives a deterministic call id from the tool name and
@@ -4518,18 +4523,14 @@ func stableCodexCallID(name, arguments string) string {
 }
 
 // codexToolCallItemID derives the Responses input item id for a tool-call
-// item. The Console Go gateway validates the item id prefix: function calls
-// use fc_ and custom tool calls use ctc_. call_id stays the tool call id, so
-// the derived item id is stable across replay and keeps call/output pairing.
+// item. call_id stays the tool call id, so the derived item id is stable across
+// replay and keeps call/output pairing.
 func codexToolCallItemID(itemType, callID string) string {
 	callID = strings.TrimSpace(callID)
 	if callID == "" {
 		return ""
 	}
-	prefix := "fc_"
-	if itemType == "custom_tool_call" || itemType == "custom_tool_call_output" {
-		prefix = "ctc_"
-	}
+	prefix := codexToolCallItemIDPrefix(itemType)
 	if strings.HasPrefix(callID, prefix) {
 		return callID
 	}
@@ -4537,6 +4538,27 @@ func codexToolCallItemID(itemType, callID string) string {
 		return prefix + strings.TrimPrefix(callID, "call_")
 	}
 	return prefix + callID
+}
+
+// codexToolCallItemIDPrefix returns the Responses input item id prefix the
+// upstream validates per item type, mirroring codex-rs
+// ResponseItem::id_prefix (codex-rs/protocol/src/models.rs): function_call and
+// function_call_output use fc_, custom_tool_call uses ctc_, and
+// custom_tool_call_output uses ctco_. cnsai.cn enforces the custom-output
+// prefix: replaying a custom_tool_call_output under the paired ctc_ id fails
+// with HTTP 400 "Invalid 'input[102].id': 'ctc_...'. Expected an ID that begins
+// with 'ctco'". function_call_output keeps the paired fc_ id, which the same
+// gateway accepts (24 fc_-prefixed outputs passed validation in the failing
+// request before it stopped at the custom output item).
+func codexToolCallItemIDPrefix(itemType string) string {
+	switch strings.TrimSpace(itemType) {
+	case "custom_tool_call":
+		return "ctc_"
+	case "custom_tool_call_output":
+		return "ctco_"
+	default:
+		return "fc_"
+	}
 }
 
 func buildCodexAssistantMessageItem(content string) map[string]interface{} {
@@ -4618,8 +4640,31 @@ func buildCodexFunctionCallItem(raw map[string]interface{}) map[string]interface
 // that lack one with HTTP 400. Canonicalized history (which intentionally
 // drops id/status/phase) is replayed through this helper so the wire format
 // always satisfies the upstream contract. Tool-call items derive an fc_/ctc_
-// item id from call_id; reasoning items derive a content-stable id so
-// prompt-cache prefixes stay byte-identical across steps.
+// item id from call_id; reasoning items derive (or normalize to) an rs_-prefixed
+// content-stable id so prompt-cache prefixes stay byte-identical across steps.
+// Reasoning items carrying encrypted_content are the exception: the upstream
+// binds the blob to the reasoning item id it was issued for, so an id that is
+// already rs_-prefixed is replayed verbatim and a blob without such an id is
+// dropped (it could never verify).
+//
+// Whether a reasoning item may appear in input at all is decided by
+// isReplayableCodexReasoningItem: because the runtime always sends store=false,
+// the upstream rejects any reasoning item id it never persisted ("Item with id
+// 'rs_...' not found. Items are not persisted when `store` is set to false"), so
+// only the exact upstream-issued id/encrypted_content pair is replayable.
+func isReplayableCodexReasoningItem(item map[string]interface{}) bool {
+	if len(item) == 0 {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(asCodexString(item["type"]))) != "reasoning" {
+		return true
+	}
+	if strings.TrimSpace(asCodexString(item["encrypted_content"])) == "" {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimSpace(asCodexString(item["id"])), "rs_")
+}
+
 func ensureCodexInputItemID(item map[string]interface{}) map[string]interface{} {
 	if len(item) == 0 {
 		return item
@@ -4642,20 +4687,57 @@ func ensureCodexInputItemID(item map[string]interface{}) map[string]interface{} 
 		cloned["id"] = wantID
 		return cloned
 	case "reasoning":
-		if strings.TrimSpace(asCodexString(item["id"])) != "" {
+		id := strings.TrimSpace(asCodexString(item["id"]))
+		encrypted := strings.TrimSpace(asCodexString(item["encrypted_content"])) != ""
+		if encrypted && strings.HasPrefix(id, "rs_") {
+			// Replay the original id/blob pair verbatim; renaming the id breaks
+			// the upstream encrypted-content verification.
 			return item
 		}
-		cloned := cloneInterfaceMap(item)
-		cloned["id"] = stableCodexReasoningItemID(item)
+		base := item
+		if encrypted {
+			// No verifiable upstream id: never send the blob under a derived id.
+			base = cloneInterfaceMap(item)
+			delete(base, "encrypted_content")
+		}
+		wantID := codexReasoningItemID(base)
+		if wantID == "" || strings.TrimSpace(asCodexString(base["id"])) == wantID {
+			return base
+		}
+		cloned := cloneInterfaceMap(base)
+		cloned["id"] = wantID
 		return cloned
 	default:
 		return item
 	}
 }
 
+// codexReasoningItemID derives the Responses input item id for a reasoning
+// item. The upstream validates the prefix exactly like fc_/ctc_ for tool-call
+// items: reasoning item ids must begin with rs_. Canonicalized or legacy
+// history may carry a synthetic "reasoning_<hash>" id (or another non-rs
+// value), so the prefix is normalized instead of forwarded verbatim; the
+// suffix is preserved to keep the derived id byte-stable across replay steps
+// (prompt-cache prefixes stay identical). Items without an id derive one from
+// the payload.
+func codexReasoningItemID(item map[string]interface{}) string {
+	id := strings.TrimSpace(asCodexString(item["id"]))
+	if strings.HasPrefix(id, "rs_") {
+		return id
+	}
+	if strings.HasPrefix(id, "reasoning_") {
+		return "rs_" + strings.TrimPrefix(id, "reasoning_")
+	}
+	if id != "" {
+		return "rs_" + id
+	}
+	return stableCodexReasoningItemID(item)
+}
+
 // stableCodexReasoningItemID derives a deterministic id from the reasoning
 // item payload (summary + encrypted_content) so replayed reasoning items keep
-// a stable wire id without perturbing prompt-cache prefix continuity.
+// a stable rs_-prefixed wire id without perturbing prompt-cache prefix
+// continuity.
 func stableCodexReasoningItemID(item map[string]interface{}) string {
 	hasher := fnv.New64a()
 	if summary, ok := item["summary"]; ok {
@@ -4666,7 +4748,7 @@ func stableCodexReasoningItemID(item map[string]interface{}) string {
 	if encrypted, ok := item["encrypted_content"].(string); ok {
 		hasher.Write([]byte(encrypted))
 	}
-	return fmt.Sprintf("reasoning_%x", hasher.Sum64())
+	return fmt.Sprintf("rs_%x", hasher.Sum64())
 }
 
 // AccumulateStreamData 累积流式数据块
