@@ -583,16 +583,41 @@ try {
     # P0 改进后：invoke 终态响应的 turn_id 由观察器从 session_start/session_end
     # 事件回填（actor 收尾后会清空 state.CurrentTurnID），应与 /web/api/turn 的
     # 最近一条 completed 记录一致（见 docs/e2e/debug-guide.md §7）。
-    $turnProbe = Invoke-JsonHttp -Method GET -Url $turnUrl -TimeoutSec 15
-    $latest = @($turnProbe.Json.recent) | Where-Object { $_.status -eq 'completed' } | Select-Object -Last 1
+    # turn 记录由事件订阅者异步落账：invoke 返回与 recorder 处理 session_end 之间
+    # 存在毫秒级窗口（2026-09-27 实测：一次「工具失败」的 turn 命中该窗口，
+    # 稍后重读即出现）。有界重试后再判定——既不放宽「记录必须落」，也不把
+    # 「记录稍晚到」误判成回归。
+    # 终态口径：工具调用失败会让该轮记为 failed（internal/chat/actor.go：
+    # success = execErr==nil && result.Success），而 /web/api/invoke 仍报
+    # completed（invoke 只表示调用本身完成，与轮的成败是两个口径）。
+    # 两者都算「本轮已有终态记录」；有 turn_id 时优先按 id 选中本轮，
+    # 避免把更早的终态记录当成后验对象。
+    $inlineTurnId = [string]$invoke.Json.turn_id
+    $turnProbe = $null
+    $latest = $null
+    $turnDeadline = (Get-Date).AddSeconds(5)
+    do {
+        $turnProbe = Invoke-JsonHttp -Method GET -Url $turnUrl -TimeoutSec 15
+        $terminal = @($turnProbe.Json.recent) | Where-Object { $_.status -in @('completed', 'failed') }
+        if (-not [string]::IsNullOrWhiteSpace($inlineTurnId)) {
+            $latest = @($terminal) | Where-Object { [string]$_.turn_id -eq $inlineTurnId } | Select-Object -Last 1
+        }
+        if ($null -eq $latest) { $latest = @($terminal) | Select-Object -Last 1 }
+        if ($null -ne $latest) { break }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $turnDeadline)
     $preview = ''
     if ($null -ne $latest) { $preview = [string]$latest.assistant_preview }
+    # 预览超过 200 rune 时产品侧以「…」截断（web_turn_handlers.go 的
+    # chatWebTurnAssistantPreview），直接拿它做前缀比对会被省略号破坏，
+    # 让长回复（如带工具执行细节的回复）误报 FAIL——2026-09-27 实测。
+    # 比对前先摘掉末尾省略号：截断预览仍是原文前缀。
+    $previewTrimmed = $preview.Trim().TrimEnd([char]0x2026).TrimEnd()
     $assistantTrimmed = $assistantContent.Trim()
-    $previewMatches = ($preview.Trim().Length -gt 0) -and `
-        (($assistantTrimmed -eq $preview.Trim()) -or $assistantTrimmed.StartsWith($preview.Trim()) -or $preview.Trim().StartsWith($assistantTrimmed))
+    $previewMatches = ($previewTrimmed.Length -gt 0) -and `
+        (($assistantTrimmed -eq $previewTrimmed) -or $assistantTrimmed.StartsWith($previewTrimmed) -or $previewTrimmed.StartsWith($assistantTrimmed))
     Add-Result 'invoke/turn-resolved' (($null -ne $latest) -and $previewMatches) `
         "turn_id=$($latest.turn_id) status=$($latest.status) preview='$preview'"
-    $inlineTurnId = [string]$invoke.Json.turn_id
     $latestTurnId = ''
     if ($null -ne $latest) { $latestTurnId = [string]$latest.turn_id }
     Add-Result 'invoke/turn-id-inline' `
@@ -637,10 +662,13 @@ try {
     # 6. turn 后验
     # ------------------------------------------------------------------
     $turnId = [string]$latest.turn_id
+    # 上一步兜底：读不到 post-hoc 记录时退回 invoke 自带的 turn_id，
+    # 让 found-by-id 独立判定，而不是因为 id 为空级联 FAIL。
+    if ([string]::IsNullOrWhiteSpace($turnId)) { $turnId = [string]$invoke.Json.turn_id }
     $turnById = Invoke-JsonHttp -Method GET -Url "${turnUrl}?id=$([uri]::EscapeDataString($turnId))" -TimeoutSec 15
     $rec = $turnById.Json.turn
     $turnOk = ([bool]$turnById.Json.found) -and ($null -ne $rec) -and ([string]$rec.turn_id -eq $turnId) -and `
-        ([string]$rec.status -eq 'completed') -and ([int64]$rec.duration_ms -gt 0) -and ([int]$rec.steps -ge 1) -and `
+        (@('completed', 'failed') -contains [string]$rec.status) -and ([int64]$rec.duration_ms -gt 0) -and ([int]$rec.steps -ge 1) -and `
         (-not [string]::IsNullOrWhiteSpace([string]$rec.assistant_preview))
     Add-Result 'turn/found-by-id' $turnOk `
         "found=$($turnById.Json.found) status=$($rec.status) duration_ms=$($rec.duration_ms) steps=$($rec.steps) usage_scope=$($rec.usage_scope)"

@@ -260,3 +260,29 @@ pwsh -NoProfile -File scripts/test-aicli-opencode-windows-terminal-e2e.ps1 `
 若用户报的某一次"答案消失"发生在别的会话/窗口状态下，按 §5 的证据链顺序再取一次现场
 （`chat.json` 看内容 → `agent.turn.finished` 看时序 → `read-terminal-buffer.ps1` 看物理缓冲区），
 不要用"E2E 绿了"直接反推那一次没问题。
+
+## 7. 工具驱动复跑与 harness 加固（2026-09-27）
+
+目的：把"只回一句话"的默认 prompt 换成**会触发真实工具调用**的 prompt，用同一套
+E2E-DEBUG-01 断言链验证本仓库读写工具（view 去重、write→edit 记账、stale 拒绝）在真实
+provider 下的端到端行为。harness 语义未放宽，仅按下表实测修掉三处误报。
+
+| # | prompt 场景 | 结果 | 证据目录 |
+|---|-------------|------|----------|
+| B | 同一文件以 `offset=10, limit=10` 连续读两次 | PASS=41 / FAIL=0；第二次返回 `unchanged: … offset 10 limit 10 (lines_read=10) was already returned in this session and the file has not changed since.`——去重 stub 按设计生效。（对比：`offset=0` 的部分窗口**不**去重，先有整文件读记录后才会 stub，见 `read_dedup.go` 注释。） | `artifacts/e2e-tools-read-dedup2/` |
+| C | write 新文件 →（不 view）edit → view → edit → view | PASS=41 / FAIL=0；write 自己记账（`recordFileWrite`）所以紧随其后的 edit 属 `read_before_write=fresh`，**不被拒**；两次 edit 均成功，最终内容 `ledger-ok` | `artifacts/e2e-tools-write-ledger/` |
+| D | view → `bash` 外部改文件 → edit | PASS=41 / FAIL=0；edit 被拒：`WRITE_PRECONDITION_FAILED`「文件自本会话上次读取（7s 前，来源 view）后已被修改，已拒绝覆盖以防丢失他人改动。请先 view …」——stale 防线端到端成立 | `artifacts/e2e-tools-stale-guard/` |
+
+默认 prompt 的 E2E-DEBUG-01 与聚合入口在 harness 修改后复跑仍全绿：
+`artifacts/aicli-e2e-all/20260927-085002/`（baseline 3/3、01=41、02=28、03=16，exit 0）。
+
+**本轮修掉的三处 harness 误报**（产品代码未改）：
+
+| # | 现象 | 根因 | 修复 |
+|---|------|------|------|
+| 1 | `invoke/turn-resolved` FAIL，detail 里 `preview` 以 `…` 结尾 | `assistant_preview` 按 rune 截断到 200 + 省略号（`web_turn_handlers.go`），长回复必然破坏前缀比对 | 比对前摘掉末尾省略号 |
+| 2 | `invoke/turn-resolved` / `turn/found-by-id` FAIL 且 `recent` 为空，随后重读有记录 | turn 记录由事件订阅者**异步落账**，invoke 返回早于 recorder 处理 `session_end`（毫秒窗口；`web_invoke.go` 在注入前已安装 recorder） | 后验读取 ≤5s 有界重试；`turn/found-by-id` 在 id 缺失时回退 `invoke.turn_id`，消除级联 FAIL |
+| 3 | `turn/found-by-id` FAIL（`status=failed`），但 `invoke/status-completed` 通过 | 轮次成败与调用状态是两个口径：工具调用失败 → 轮次 `failed`（`internal/chat/actor.go` 的 `success = execErr==nil && result.Success`），invoke 仍 `completed` | 断言按终态 `status ∈ {completed, failed}` 归一，并优先按 `invoke.turn_id` 选中本轮 |
+
+**边界**：B/C/D 属一次性人工复跑（不在默认断言集内），断言链本身与 prompt 无关；
+演示文件写在 `backend/.tmp/`，被 `.gitignore` 的 `.tmp*` 覆盖，不进入版本库。
