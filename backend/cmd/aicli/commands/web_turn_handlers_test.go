@@ -159,6 +159,52 @@ func TestHandleChatWebAPITurnGuards(t *testing.T) {
 	}
 }
 
+// TestChatWebTurnRecorder_ToolErrorCounts 锁定工具失败计数透传：status=failed
+// 而 Error 为空（工具失败但模型已恢复）的轮次必须能自解释，消费方不至于把
+// 「工具失败已恢复」误读成「上游/模型失败」。
+func TestChatWebTurnRecorder_ToolErrorCounts(t *testing.T) {
+	session, bus := newTurnRecorderTestSession(t)
+	ensureChatWebTurnRecorder(session)
+
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionStart, SessionID: "session_t",
+		Payload: map[string]interface{}{"turn_id": "turn_tool_err"},
+	})
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd, SessionID: "session_t",
+		Payload: map[string]interface{}{
+			"turn_id":                    "turn_tool_err",
+			"success":                    false,
+			"tool_error_count":           2,
+			"recovered_tool_error_count": 2,
+		},
+	})
+
+	record := recorderForSession(session).lookup("turn_tool_err")
+	if record == nil || record.Status != "failed" {
+		t.Fatalf("record = %+v", record)
+	}
+	if record.ToolErrorCount != 2 || record.RecoveredToolErrorCount != 2 || record.UnrecoveredToolErrorCount != 0 {
+		t.Fatalf("tool error counts = %+v", record)
+	}
+	if record.Error != "" {
+		t.Fatalf("可自愈的工具失败不得伪造错误文本: %q", record.Error)
+	}
+
+	// 线级契约：字段名稳定；可自愈场景 error 保持缺省（omitempty）。
+	body := httptest.NewRecorder()
+	HandleChatWebAPITurn(body, httptest.NewRequest(http.MethodGet, "/web/api/turn?id=turn_tool_err", nil))
+	raw := body.Body.String()
+	for _, want := range []string{`"status":"failed"`, `"tool_error_count":2`, `"recovered_tool_error_count":2`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("turn 响应缺少 %s: %s", want, raw)
+		}
+	}
+	if strings.Contains(raw, `"error":`) {
+		t.Fatalf("可自愈的工具失败不应伪造 error 字段: %s", raw)
+	}
+}
+
 // TestChatWebTurnRecorder_AssistantPreview 锁定 assistant 预览：
 // 按 rune 截断（≤200 + 省略号）并记录完整字符数。
 func TestChatWebTurnRecorder_AssistantPreview(t *testing.T) {

@@ -37,15 +37,22 @@ const (
 
 // chatWebTurnRecord 是单个 turn 的终态/进行态记录。
 type chatWebTurnRecord struct {
-	TurnID     string              `json:"turn_id"`
-	SessionID  string              `json:"session_id,omitempty"`
-	Status     string              `json:"status"` // running | completed | failed | interrupted
-	StartedAt  string              `json:"started_at,omitempty"`
-	FinishedAt string              `json:"finished_at,omitempty"`
-	DurationMs int64               `json:"duration_ms,omitempty"`
-	Steps      int                 `json:"steps,omitempty"`
-	Error      string              `json:"error,omitempty"`
-	Usage      *chatWebInvokeUsage `json:"usage,omitempty"`
+	TurnID     string `json:"turn_id"`
+	SessionID  string `json:"session_id,omitempty"`
+	Status     string `json:"status"` // running | completed | failed | interrupted
+	StartedAt  string `json:"started_at,omitempty"`
+	FinishedAt string `json:"finished_at,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+	Steps      int    `json:"steps,omitempty"`
+	Error      string `json:"error,omitempty"`
+	// 工具失败计数（与 session_end 载荷同名，见 internal/chat/actor.go 的
+	// appendSessionActorToolErrorPayload）。status=failed 而 Error 为空时，
+	// 消费方靠它们区分「工具失败但模型已恢复」（recovered 非零）与
+	// 「上游/模型失败」（Error 非空），不必去猜。
+	ToolErrorCount            int                 `json:"tool_error_count,omitempty"`
+	RecoveredToolErrorCount   int                 `json:"recovered_tool_error_count,omitempty"`
+	UnrecoveredToolErrorCount int                 `json:"unrecovered_tool_error_count,omitempty"`
+	Usage                     *chatWebInvokeUsage `json:"usage,omitempty"`
 	// UsageScope 说明 Usage 的口径：turn=本轮增量（优先取 session_end /
 	// session_interrupted 事件载荷里的 usage_*，其次取会话计数器差值）；
 	// session=本轮增量不可得（事件未携带 usage 且计数器未变化）时回退为会话
@@ -216,6 +223,7 @@ func (r *chatWebTurnRecorder) finish(turnID, sessionID, status, errText string, 
 	record.finishedAt = now
 	record.Error = errText
 	record.Steps = steps
+	record.ToolErrorCount, record.RecoveredToolErrorCount, record.UnrecoveredToolErrorCount = chatWebTurnToolErrorCounts(payload)
 	if !record.startedAt.IsZero() {
 		record.DurationMs = now.Sub(record.startedAt).Milliseconds()
 	}
@@ -229,6 +237,18 @@ func (r *chatWebTurnRecorder) finish(turnID, sessionID, status, errText string, 
 			record.UsageSource = source
 		}
 	}
+}
+
+// chatWebTurnToolErrorCounts 提取终态载荷里的工具失败计数；载荷缺失/类型不符时
+// 返回全零（与 actor 的 omitempty 口径一致：0 表示没发生，不写字段）。
+func chatWebTurnToolErrorCounts(payload map[string]interface{}) (int, int, int) {
+	if payload == nil {
+		return 0, 0, 0
+	}
+	total, _ := payloadIntValue(payload["tool_error_count"])
+	recovered, _ := payloadIntValue(payload["recovered_tool_error_count"])
+	unrecovered, _ := payloadIntValue(payload["unrecovered_tool_error_count"])
+	return total, recovered, unrecovered
 }
 
 // chatWebTurnResolveUsage 按确定性从高到低解析本轮 usage：

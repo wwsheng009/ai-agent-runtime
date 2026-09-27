@@ -300,7 +300,8 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 > `turn_id` 由 turn 生命周期事件（`session_start` / `session_end`）回填：turn 结束后
 > actor 已清空 `CurrentTurnID`，但响应仍会带上本轮的 turn 身份（turn 运行中以实时探测
 > 为准；`wait_only` 空闲短路等"无 turn 可归属"时缺省）。可直接用它走 `?id=<turn_id>`
-> 后验；需要交叉核对时用 `GET /web/api/turn` 的 `recent` 中 `status=completed` 记录的
+> 后验；需要交叉核对时用 `GET /web/api/turn` 的 `recent` 中**终态**记录
+> （`status ∈ {completed, failed}`：工具失败会让该轮记 `failed`，见下文"两个口径"）的
 > `assistant_preview`（实测见 [../e2e/debug-guide.md §7](../e2e/debug-guide.md)）。
 
 `screen` 与 `/debug/chat/screen`、`/web/api/screen?view=tui` 同源，是"用户当前实际看到的 TUI 界面渲染"（合成帧文本），不是 web 页的完整 transcript。
@@ -356,12 +357,21 @@ curl -s 'http://127.0.0.1:61772/web/api/turn' | jq '.current, .recent[0]'
 ```
 
 `/web/api/turn` 返回：`found` / `turn`（`status` = running|completed|failed|interrupted，
-`started_at` / `finished_at` / `duration_ms` / `steps` / `error` / `usage` + `usage_scope` + `usage_source`）/
+`started_at` / `finished_at` / `duration_ms` / `steps` / `error` / `tool_error_count` +
+`recovered_tool_error_count` + `unrecovered_tool_error_count` / `usage` + `usage_scope` + `usage_source`）/
 `current`（活动 turn 实时探测：`turn_id` / `busy` / `pending_inputs` / `pending_approval` / `pending_question`）/
 `recent`（最近 20 条，最新在前）。记录上限 128 条、保留 30 分钟。
 
 - `assistant_preview`（≤200 rune，超出以 `…` 结尾）/ `assistant_chars`：本轮最后一条
   assistant 消息的预览与完整字符数——查“这轮回了什么”不必再拉整份 transcript。
+- `status` 与 `/web/api/invoke` 的 `status` 是**两个口径**：轮次 `success = 无致命错误 &&
+  本轮成功`，任何一次工具调用失败（即使模型随后自愈并给出答复）都会把该轮记为 `failed`；
+  invoke 的 `completed` 只表示这次调用本身跑完。`failed` 且 `error` 为空时看
+  `tool_error_count` / `recovered_tool_error_count`：前者非零而后者等于前者 = 工具失败但已恢复，
+  `unrecovered_tool_error_count` 非零或 `error` 非空 = 需要人看的失败。
+- 记录由事件订阅者**异步落账**：`POST /web/api/invoke` 返回与记录在 `/web/api/turn` 可见之间
+  可能有毫秒级窗口（实测见 [../e2e/debug-guide.md §6](../e2e/debug-guide.md)）。按 turn_id 后验时
+  做**有界重试**（几百毫秒级）再判缺失，不要把“稍晚到”当成“未落账”。
 - `usage` 的口径由 `usage_scope` 标注：
   - `turn` = **本轮增量**。优先取 session_end / session_interrupted 事件载荷里的
     `usage_prompt_tokens` / `usage_completion_tokens` / `usage_total_tokens`（actor 在结算时刻
