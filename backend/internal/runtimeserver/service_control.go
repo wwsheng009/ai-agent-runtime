@@ -13,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/sys/windows"
 )
 
 const DefaultPIDFile = "./logs/runtime-server.pid"
@@ -106,10 +104,7 @@ func ProcessRunning(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	if runtime.GOOS == "windows" {
-		return processRunningWindows(uint32(pid))
-	}
-	return exec.Command("/bin/sh", "-c", fmt.Sprintf("kill -0 %d 2>/dev/null", pid)).Run() == nil
+	return processRunningOS(pid)
 }
 
 // ResolveInstancePID 交叉验证 PID 文件记录与监听端口，返回实际活跃的服务 PID。
@@ -122,6 +117,7 @@ func ProcessRunning(pid int) bool {
 //     哪怕还"存在"，也只是被复用的无关进程，按未运行处理。
 //   - 端口探测不可用（如 Linux 无 lsof）：退回进程存在性判断，保持旧行为。
 //   - listenAddr 为空（旧格式 PID 文件或手动调用）：退回进程存在性判断。
+//
 // 注意：本函数用于状态类判断（status/start 冲突），不作进程身份核验；
 // 终止进程请用 ResolveStopTarget（含身份确认，拒绝误杀陌生进程）。
 func ResolveInstancePID(recordedPID int, listenAddr string) (targetPID int, alive bool) {
@@ -188,23 +184,6 @@ func ResolveStopTarget(recordedPID int, listenAddr string) (targetPID int, alive
 	return 0, false, fmt.Errorf(
 		"端口 %s 的监听进程 pid=%d 不是 runtime-server（PID 文件记录 pid=%d 已失效），拒绝自动终止；请人工确认后用 --pid %d 显式指定",
 		listenAddr, listeningPID, recordedPID, listeningPID)
-}
-
-// processRunningWindows 用 Windows API OpenProcess 探测进程是否存在，
-// 不依赖外部 PowerShell。此前用 powershell.exe -Command "if (Get-Process ...)"
-// 检查：在无 PowerShell（或被裁剪/禁用）的 Win7 工控机上恒失败，导致
-// start 命令在 serve 进程已写好 PID 文件的正常启动情况下空转 30s，
-// 误报"未写入 PID 文件"。
-func processRunningWindows(pid uint32) bool {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-	if err != nil {
-		// Vista+ 语义：进程不存在返回 ERROR_INVALID_PARAMETER；
-		// 其他错误（如 ERROR_ACCESS_DENIED）表示进程存在但权限不足，
-		// 此时按"存在"处理，避免误判。
-		return err != windows.ERROR_INVALID_PARAMETER
-	}
-	_ = windows.CloseHandle(h)
-	return true
 }
 
 func StartDetachedProcess(executable string, args []string, env []string) (*exec.Cmd, error) {
@@ -321,7 +300,6 @@ func windowsPowerShellHost() string {
 	return "powershell"
 }
 
-
 // looksLikeRuntimeServerProcess 判断进程的可执行文件名是否像是 runtime-server
 // 构建（覆盖 runtime-server.exe、runtime-server-managed.exe、runtime-server-win7-*.exe 等）。
 // 用于 stop 的身份核验：端口被非服务进程接管时拒绝自动终止。
@@ -341,28 +319,7 @@ func processImagePath(pid int) (string, error) {
 	if pid <= 0 {
 		return "", fmt.Errorf("invalid pid %d", pid)
 	}
-	if runtime.GOOS == "windows" {
-		return processImagePathWindows(uint32(pid))
-	}
-	target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
-	if err != nil {
-		return "", err
-	}
-	return target, nil
-}
-
-func processImagePathWindows(pid uint32) (string, error) {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-	if err != nil {
-		return "", err
-	}
-	defer windows.CloseHandle(h)
-	var buf [1024]uint16
-	size := uint32(len(buf))
-	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &size); err != nil {
-		return "", err
-	}
-	return windows.UTF16ToString(buf[:size]), nil
+	return processImagePathOS(pid)
 }
 
 // terminationTargetAlive 判定"目标服务进程是否还活着"。
