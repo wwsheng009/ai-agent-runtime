@@ -2,6 +2,7 @@ package runtimeapi
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -42,6 +43,10 @@ func TestSessionAgentControllerApplyWorktreeRefusesWhileSessionExecuting(t *test
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "still executing")
 
+	_, err = controller.DiscardWorktree(ctx, toolbroker.DiscardAgentWorktreeArgs{ID: session.ID})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "still executing")
+
 	// Idle again: the guard no longer blocks (the apply itself may still fail
 	// on the fake worktree path, but it must not fail on the running check).
 	require.NoError(t, actor.UpdateStateForTest(ctx, func(state *chat.RuntimeState) error {
@@ -51,4 +56,8 @@ func TestSessionAgentControllerApplyWorktreeRefusesWhileSessionExecuting(t *test
 	_, err = controller.ApplyWorktree(ctx, toolbroker.ApplyAgentWorktreeArgs{ID: session.ID})
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "still executing")
+	_, err = controller.DiscardWorktree(ctx, toolbroker.DiscardAgentWorktreeArgs{ID: session.ID})
+	// A discard may legitimately succeed here (the fake worktree path is not a
+	// registered git worktree); the point is that the running guard is gone.
+	require.NotContains(t, fmt.Sprint(err), "still executing")
 }

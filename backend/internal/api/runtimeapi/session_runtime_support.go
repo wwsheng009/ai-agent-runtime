@@ -942,6 +942,14 @@ func (c *sessionAgentController) DiscardWorktree(ctx context.Context, args toolb
 	if err != nil {
 		return nil, err
 	}
+	if state := c.handler.resolveAgentRuntimeState(ctx, sessionID); apiAgentRuntimeStateExecuting(state) {
+		// Removing a worktree under a session that still holds a turn deletes
+		// the child's workspace while it may still be writing.
+		return nil, fmt.Errorf(
+			"discard refused: session %s is still executing (runtime_state=%s); wait for it to finish (wait_agent) or close it (close_agent) before discarding its worktree",
+			sessionID, state,
+		)
+	}
 	diffStat, _ := handle.DiffStat(ctx)
 	if err := handle.Remove(ctx); err != nil {
 		return nil, err

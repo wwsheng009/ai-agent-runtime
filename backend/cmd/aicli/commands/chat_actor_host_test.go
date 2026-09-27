@@ -1397,6 +1397,84 @@ func TestLocalActorRegistryApplyWorktreeRefusesWhileChildRunning(t *testing.T) {
 	}
 }
 
+// Discarding a worktree under a running child deletes its workspace while it
+// may still be writing; the parent has to wait or close first.
+func TestLocalActorRegistryDiscardWorktreeRefusesWhileChildRunning(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := initLocalIsolationTestRepo(t)
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.RuntimeConfig.Workspace.Root = repo
+	host.BaseSession = &ChatSession{
+		RuntimeSession:   rootSession,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+	}
+
+	child, err := host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:        "wt-busy-discard-child",
+		Isolation: "worktree",
+	})
+	if err != nil {
+		t.Fatalf("Spawn busy discard child: %v", err)
+	}
+
+	markLocalAgentBusy(t, host, "wt-busy-discard-child")
+	_, err = host.ActorRegistry.DiscardWorktree(ctx, toolbroker.DiscardAgentWorktreeArgs{ID: "wt-busy-discard-child"})
+	if err == nil || !strings.Contains(err.Error(), "still executing") {
+		t.Fatalf("expected running-child discard refusal, got %v", err)
+	}
+	if _, statErr := os.Stat(child.WorktreePath); statErr != nil {
+		t.Fatalf("refused discard must keep the worktree, err=%v", statErr)
+	}
+
+	// Once the child goes idle the same discard removes the worktree.
+	actor, err := host.SessionHub.GetOrCreate("wt-busy-discard-child")
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	if err := actor.UpdateStateForTest(ctx, func(state *runtimechat.RuntimeState) error {
+		state.Status = runtimechat.SessionIdle
+		state.PendingApproval = nil
+		state.PendingQuestion = nil
+		state.CurrentTurnID = ""
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	}); err != nil {
+		t.Fatalf("UpdateStateForTest: %v", err)
+	}
+	result, err := host.ActorRegistry.DiscardWorktree(ctx, toolbroker.DiscardAgentWorktreeArgs{ID: "wt-busy-discard-child"})
+	if err != nil {
+		t.Fatalf("DiscardWorktree after idle: %v", err)
+	}
+	if result == nil || !result.Discarded || !result.Removed {
+		t.Fatalf("unexpected discard result: %#v", result)
+	}
+	if _, statErr := os.Stat(child.WorktreePath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected discard to remove the worktree, err=%v", statErr)
+	}
+}
+
 func TestLocalActorRegistrySpawnWorktreeFailsClosedOutsideGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

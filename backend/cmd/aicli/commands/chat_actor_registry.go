@@ -1031,6 +1031,14 @@ func (r *localActorRegistry) DiscardWorktree(ctx context.Context, args toolbroke
 	if err != nil {
 		return nil, err
 	}
+	if r.localAgentSessionBusy(ctx, sessionID) {
+		// Removing a worktree under a session that still holds a turn deletes
+		// the child's workspace while it may still be writing.
+		return nil, fmt.Errorf(
+			"discard refused: session %s is still executing; wait for it to finish (wait_agent) or close it (close_agent) before discarding its worktree",
+			sessionID,
+		)
+	}
 	diffStat, _ := handle.DiffStat(ctx)
 	if err := handle.Remove(ctx); err != nil {
 		return nil, err
