@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
@@ -276,4 +278,81 @@ func TestLocalSupervisionToolController_TeamLeadUsesTeamScope(t *testing.T) {
 func TestLocalSupervisionToolController_RequiresStore(t *testing.T) {
 	host := &localChatRuntimeHost{}
 	require.Nil(t, newLocalSupervisionToolController(host, nil))
+}
+
+// F2 回归：close_agent 取消的子会话在终态事件里同时携带 success=false 与
+// status=stopped。分类必须以 stop 状态为准，否则"请求的关闭"会被上报为
+// critical 子会话失败（实测现场：run_status=failed, error_class=context canceled）。
+func TestLocalAgentCompletionStatus_StopStatusWinsOverFailureHeuristic(t *testing.T) {
+	stopped := runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd,
+		Payload: map[string]interface{}{
+			"success": false,
+			"status":  string(runtimechat.SessionStopped),
+			"error":   "context canceled",
+		},
+	}
+	require.Equal(t, string(runtimechat.SessionStopped), localAgentCompletionStatus(stopped))
+
+	failed := runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd,
+		Payload: map[string]interface{}{
+			"success": false,
+			"status":  string(runtimechat.SessionIdle),
+			"error":   "provider unavailable",
+		},
+	}
+	require.Equal(t, "failed", localAgentCompletionStatus(failed),
+		"a genuine failure keeps the failed classification")
+
+	completed := runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd,
+		Payload: map[string]interface{}{
+			"success": true,
+			"status":  string(runtimechat.SessionIdle),
+		},
+	}
+	require.Equal(t, string(runtimechat.SessionIdle), localAgentCompletionStatus(completed))
+
+	interrupted := runtimeevents.Event{Type: runtimechat.EventSessionInterrupted}
+	require.Equal(t, string(runtimechat.SessionStopped), localAgentCompletionStatus(interrupted))
+}
+
+// F1 回归：spawn_team 之后会话成为 team lead，写面 scope 必须同时覆盖会话域与
+// 团队域。旧实现把 scope 整体切换成 team，导致直接子代理（会话域）的通知在
+// digest 里照常建议处置、实际调用却报 "outside the caller scope"。
+func TestLocalSupervisionToolController_DecisionScopesCoverSessionAndTeam(t *testing.T) {
+	host := newLocalSupervisionTestHost(t)
+	session := newChatDebugSupervisionSession(host, "parent-session")
+	teamID, err := host.TeamStore.CreateTeam(context.Background(), team.Team{
+		ID:            "team-scope-union",
+		LeadSessionID: "parent-session",
+		Status:        team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+	session.ActiveTeam = &chatTeamBinding{TeamID: teamID, AgentID: "lead"}
+
+	controller := newLocalSupervisionToolController(host, session)
+	require.NotNil(t, controller)
+
+	require.Equal(t, []string{"parent-session", teamID}, controller.decisionScopes(context.Background(), "parent-session"),
+		"a team lead must retain its own session scope alongside the team scope")
+
+	notification := upsertChatDebugSupervisionNotification(t, host, "parent-session", "session-scope-child", supervision.SeverityCritical, 1)
+	seedSupervisionExecutionRun(t, host, "session-scope-child")
+
+	updated, err := controller.AckLifecycle(context.Background(), "parent-session", toolbroker.AckLifecycleArgs{
+		NotificationID: notification.NotificationID,
+		Decision:       "acknowledge",
+		Note:           "lead handles its own direct child",
+	})
+	require.NoError(t, err, "the live regression: a session-scope row must stay actionable for the lead")
+	require.Equal(t, supervision.DecisionAcknowledged, updated.DecisionState)
+
+	_, err = controller.AckLifecycle(context.Background(), "other-session", toolbroker.AckLifecycleArgs{
+		NotificationID: notification.NotificationID,
+		Decision:       "acknowledge",
+		Note:           "foreign caller",
+	})
+	require.ErrorIs(t, err, supervision.ErrActionNotAllowed, "scope stays enforced for everyone else")
 }

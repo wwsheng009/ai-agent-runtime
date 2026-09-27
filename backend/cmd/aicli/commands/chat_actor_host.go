@@ -24,6 +24,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
@@ -2076,6 +2077,10 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 		if len(allowedRoots) > 0 {
 			agentConfig.Options["allowed_roots"] = allowedRoots
 		}
+		// F5：worktree 子代理把主仓库登记为只读外部根，读主仓库不再逐次审批。
+		if readOnlyRoots := chatReadOnlyRoots(session); len(readOnlyRoots) > 0 {
+			agentConfig.Options["read_only_roots"] = readOnlyRoots
+		}
 		if len(profileContext) > 0 {
 			agentConfig.Options["profile_context"] = cloneSkillContextMap(profileContext)
 		}
@@ -2308,6 +2313,13 @@ func localChatPrepareRunHook(apiAgent *agent.Agent, session *ChatSession, worksp
 				cfg.Options["allowed_roots"] = roots
 			} else {
 				delete(cfg.Options, "allowed_roots")
+			}
+			// F5：只读外部根与 allowed_roots 同口径每轮同步，worktree 子代理
+			// 读主仓库不再逐次审批（写路径仍受门控）。
+			if roots := chatReadOnlyRoots(session); len(roots) > 0 {
+				cfg.Options["read_only_roots"] = roots
+			} else {
+				delete(cfg.Options, "read_only_roots")
 			}
 		}
 		// Plan mode may recreate/mutate the engine; re-apply product overlay after it.
@@ -2765,6 +2777,24 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 	if dsn := strings.TrimSpace(runtimeConfig.Artifact.StoreDSN); dsn != "" {
 		agentConfig.Options["artifact_store_dsn"] = dsn
 	}
+}
+
+// chatReadOnlyRoots returns the session's read-only exempt external roots (F5):
+// a worktree-isolated child names its main repo so reading it (view/grep/glob)
+// skips the external_dir:admit approval; writes under the repo still go
+// through the gate (the policy checks CapWriteFS before exempting).
+func chatReadOnlyRoots(session *ChatSession) []string {
+	if session == nil || session.RuntimeSession == nil {
+		return nil
+	}
+	if agentcontrol.ContextString(session.RuntimeSession, toolbroker.AgentSessionContextIsolation) != worktree.ModeWorktree {
+		return nil
+	}
+	repoRoot := strings.TrimSpace(agentcontrol.ContextString(session.RuntimeSession, toolbroker.AgentSessionContextWorktreeRepoRoot))
+	if repoRoot == "" {
+		return nil
+	}
+	return []string{repoRoot}
 }
 
 func loadLocalChatRuntimeConfig(cfg *config.Config, session *ChatSession) (*runtimecfg.RuntimeConfig, error) {

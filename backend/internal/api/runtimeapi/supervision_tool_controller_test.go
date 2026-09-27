@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	runtimeagent "github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	chat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -269,4 +271,86 @@ func TestSupervisionBudgets_ComeFromHostConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, prompt, "USER PROMPT")
 	require.Equal(t, 1, strings.Count(prompt, "- agent_run "), "DigestMaxItems caps the injected rows")
+}
+
+// F1 回归（HTTP 宿主）：team lead 的 ack/control 必须同时接受会话域与团队域
+// 通知，与 /supervision 命令的 chatDebugSupervisionScopes 并集口径一致。
+func TestHandlerSupervisionToolController_TeamLeadRetainsSessionScopeForAck(t *testing.T) {
+	handler, store := newAPISupervisionToolTestHandler(t, "api-supervision-scope-union")
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = teamStore.Close() })
+	handler.SetTeamStore(teamStore)
+
+	teamID, err := teamStore.CreateTeam(context.Background(), team.Team{
+		ID:            "team-scope-union",
+		LeadSessionID: "lead-session",
+		Status:        team.TeamStatusActive,
+	})
+	require.NoError(t, err)
+
+	controller := newHandlerSupervisionToolController(handler)
+	require.NotNil(t, controller)
+	require.Equal(t, []string{"lead-session", teamID}, controller.decisionScopes(context.Background(), "lead-session"))
+
+	// A direct spawn_agent child of the lead: the durable row is rooted at the
+	// session, not the team. The digest advertises it; ack must accept it.
+	record, err := store.UpsertNotification(context.Background(), supervision.Notification{
+		RootScopeID:           "lead-session",
+		TargetParentSessionID: "lead-session",
+		SubjectKind:           supervision.SubjectAgentRun,
+		SubjectID:             "session-scope-child",
+		SubjectVersion:        1,
+		EventSeq:              3,
+		EventType:             "exception",
+		Severity:              supervision.SeverityCritical,
+		SupervisionState:      supervision.SupervisionBlocked,
+		Reason:                "child failed before the team existed",
+		DecisionState:         supervision.DecisionUnacknowledged,
+		ResolutionState:       supervision.ResolutionUnresolved,
+	})
+	require.NoError(t, err)
+
+	updated, err := controller.AckLifecycle(context.Background(), "lead-session", toolbroker.AckLifecycleArgs{
+		NotificationID: record.NotificationID,
+		Decision:       "acknowledge",
+		Note:           "lead handles its own direct child",
+	})
+	require.NoError(t, err, "the live regression: a session-scope row must stay actionable for the lead")
+	require.Equal(t, supervision.DecisionAcknowledged, updated.DecisionState)
+
+	_, err = controller.AckLifecycle(context.Background(), "other-session", toolbroker.AckLifecycleArgs{
+		NotificationID: record.NotificationID,
+		Decision:       "acknowledge",
+		Note:           "foreign caller",
+	})
+	require.ErrorIs(t, err, supervision.ErrActionNotAllowed, "scope stays enforced for everyone else")
+}
+
+// F2 回归（HTTP 宿主）：与 CLI 宿主保持同一口径 —— stop 状态优先于
+// success=false 的失败启发式。
+func TestAgentCompletionStatus_StopStatusWinsOverFailureHeuristic(t *testing.T) {
+	stopped := runtimeevents.Event{
+		Type: chat.EventSessionEnd,
+		Payload: map[string]interface{}{
+			"success": false,
+			"status":  string(chat.SessionStopped),
+			"error":   "context canceled",
+		},
+	}
+	require.Equal(t, string(chat.SessionStopped), agentCompletionStatus(stopped))
+
+	failed := runtimeevents.Event{
+		Type: chat.EventSessionEnd,
+		Payload: map[string]interface{}{
+			"success": false,
+			"status":  string(chat.SessionIdle),
+			"error":   "provider unavailable",
+		},
+	}
+	require.Equal(t, "failed", agentCompletionStatus(failed),
+		"a genuine failure keeps the failed classification")
+
+	interrupted := runtimeevents.Event{Type: chat.EventSessionInterrupted}
+	require.Equal(t, string(chat.SessionStopped), agentCompletionStatus(interrupted))
 }

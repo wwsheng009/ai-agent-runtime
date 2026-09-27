@@ -59,6 +59,9 @@ func approvedToolCallContext(ctx context.Context, agent *Agent) context.Context 
 	if allowedRoots := toolAllowedRootsForAgent(agent); len(allowedRoots) > 0 {
 		ctx = toolctx.WithAllowedRoots(ctx, allowedRoots)
 	}
+	if readOnlyRoots := toolReadOnlyRootsForAgent(agent); len(readOnlyRoots) > 0 {
+		ctx = toolctx.WithReadOnlyRoots(ctx, readOnlyRoots)
+	}
 	return ctx
 }
 

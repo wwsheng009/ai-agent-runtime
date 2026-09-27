@@ -222,6 +222,12 @@ type ReadResultPayload struct {
 	Truncated  bool                `json:"truncated,omitempty"`
 	Source     string              `json:"source"`
 	ErrorCode  string              `json:"error_code,omitempty"`
+	// FailureKind classifies why a failed/canceled task did not succeed (F3):
+	// canceled | timeout | tool_error | provider_error | policy_refused |
+	// failed | unknown. Empty for successes. A parent can then tell "the run
+	// was interrupted" apart from "a tool hard-failed" or "the provider broke"
+	// before deciding whether to re-dispatch.
+	FailureKind string `json:"failure_kind,omitempty"`
 	NextAction string              `json:"next_action,omitempty"`
 	// ArtifactNextActions carries one artifact_read(id=...) dereference per
 	// entry in Artifacts, so an artifacts-only read is actionable instead of
@@ -334,6 +340,67 @@ func NoResultRecordedPayload(sessionID, taskID string) ReadResultPayload {
 	}
 }
 
+// ReadResultFailureKind vocabulary (F3): the category of a failed task, so the
+// parent can tell "the run was interrupted" apart from "a tool hard-failed",
+// "the provider broke" or "a policy refused the command" before deciding
+// whether to re-dispatch.
+const (
+	ReadResultFailureCanceled      = "canceled"
+	ReadResultFailureTimeout       = "timeout"
+	ReadResultFailureToolError     = "tool_error"
+	ReadResultFailureProviderError = "provider_error"
+	ReadResultFailurePolicyRefused = "policy_refused"
+	ReadResultFailureFailed        = "failed"
+	ReadResultFailureUnknown       = "unknown"
+)
+
+// ClassifyReadResultFailure derives the failure kind from the normalized
+// record. It is deliberately conservative: an unrecognized non-success
+// reports "unknown" instead of guessing, a bare failed run reports "failed",
+// and a successful record reports "".
+func ClassifyReadResultFailure(record AgentResultRecord) string {
+	if record.Success {
+		return ""
+	}
+	status := strings.ToLower(strings.TrimSpace(record.Status))
+	haystack := status
+	for _, item := range record.Errors {
+		haystack += " " + strings.ToLower(strings.TrimSpace(item.Code)) +
+			" " + strings.ToLower(strings.TrimSpace(item.Message))
+	}
+	switch {
+	case strings.Contains(haystack, "context canceled"),
+		strings.Contains(haystack, "context cancelled"),
+		strings.Contains(status, "canceled"),
+		strings.Contains(status, "cancelled"),
+		strings.Contains(status, "interrupted"),
+		strings.Contains(status, "stopped"):
+		return ReadResultFailureCanceled
+	case strings.Contains(haystack, "timeout"),
+		strings.Contains(haystack, "timed out"),
+		strings.Contains(haystack, "deadline"):
+		return ReadResultFailureTimeout
+	case strings.Contains(haystack, "policy"),
+		strings.Contains(haystack, "refused"),
+		strings.Contains(haystack, "permission denied"),
+		strings.Contains(haystack, "read-only"):
+		return ReadResultFailurePolicyRefused
+	case strings.Contains(haystack, "path not found"),
+		strings.Contains(haystack, "tool"),
+		strings.Contains(haystack, "command"),
+		strings.Contains(haystack, "shell"):
+		return ReadResultFailureToolError
+	case strings.Contains(haystack, "provider"),
+		strings.Contains(haystack, "upstream"),
+		strings.Contains(haystack, "rate limit"):
+		return ReadResultFailureProviderError
+	case status == "failed", status == "error":
+		return ReadResultFailureFailed
+	default:
+		return ReadResultFailureUnknown
+	}
+}
+
 // BuildReadResultPayload renders one normalized record into the bounded
 // read_agent_result payload: section selection, count caps and a total
 // max_chars budget, with truncated=true whenever anything was cut.
@@ -341,9 +408,10 @@ func BuildReadResultPayload(record AgentResultRecord, args ReadResultArgs) ReadR
 	sections := sectionSet(args.Sections)
 	wants := func(name string) bool { return sections[""] || sections[name] }
 	payload := ReadResultPayload{
-		SessionID: strings.TrimSpace(firstNonEmpty(record.SessionID, args.SessionID)),
-		TaskID:    strings.TrimSpace(firstNonEmpty(record.TaskID, args.TaskID)),
-		Source:    normalizeResultSource(record.Source),
+		SessionID:   strings.TrimSpace(firstNonEmpty(record.SessionID, args.SessionID)),
+		TaskID:      strings.TrimSpace(firstNonEmpty(record.TaskID, args.TaskID)),
+		Source:      normalizeResultSource(record.Source),
+		FailureKind: ClassifyReadResultFailure(record),
 	}
 	maxChars := ReadResultMaxChars(args.MaxChars)
 	if record.FinishedAt != nil {
@@ -649,7 +717,9 @@ func truncateReadResultText(text string, limit int, truncated bool) (string, boo
 
 // enforceReadResultBudget keeps the serialized payload within max_chars. It
 // trims the summary first (the dominant field) and then drops trailing list
-// entries; the status/source/next_action skeleton is never dropped.
+// entries; the status/source/next_action skeleton is never dropped, while the
+// optional failure classifier is shed last (status/errors still describe the
+// failure).
 func enforceReadResultBudget(payload *ReadResultPayload, maxChars int) {
 	if payload == nil || maxChars <= 0 {
 		return
@@ -692,6 +762,8 @@ func dropTrailingReadResultEntry(payload *ReadResultPayload) bool {
 		payload.Errors = payload.Errors[:len(payload.Errors)-1]
 	case payload.Usage != nil:
 		payload.Usage = nil
+	case payload.FailureKind != "":
+		payload.FailureKind = ""
 	default:
 		return false
 	}

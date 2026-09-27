@@ -109,6 +109,24 @@ func (c *localSupervisionToolController) resolution(ctx context.Context, parentS
 	return teamID, teamID
 }
 
+// decisionScopes is the write-side scope set for ack/control. It mirrors the
+// /debug supervision command (chatDebugSupervisionScopes): the caller's own
+// session is always a root scope and a bound team adds its scope. Restricting
+// writes to the single switched scope made session-scope notifications
+// (direct spawn_agent children) unactionable for a team lead while the digest
+// still advertised them as action_required.
+func (c *localSupervisionToolController) decisionScopes(ctx context.Context, parentSessionID string) []string {
+	sessionID := c.callerSessionID(parentSessionID)
+	if sessionID == "" {
+		return nil
+	}
+	scopes := []string{sessionID}
+	if teamID, _ := c.resolution(ctx, parentSessionID); teamID != "" && teamID != sessionID {
+		scopes = append(scopes, teamID)
+	}
+	return scopes
+}
+
 // callerSessionID is the identity the tool entry acts as: the tool call's own
 // parent session, falling back to the rendered session when the broker passes
 // an empty id.
@@ -220,13 +238,13 @@ func (c *localSupervisionToolController) ReadAgentResult(ctx context.Context, pa
 }
 
 func (c *localSupervisionToolController) AckLifecycle(ctx context.Context, parentSessionID string, args toolbroker.AckLifecycleArgs) (*supervision.Notification, error) {
-	rootScopeID, _ := c.resolution(ctx, parentSessionID)
-	if rootScopeID == "" {
+	scopes := c.decisionScopes(ctx, parentSessionID)
+	if len(scopes) == 0 {
 		return nil, fmt.Errorf("supervision scope is required")
 	}
 	request := supervision.LifecycleDecisionRequest{
 		NotificationID:     args.NotificationID,
-		Scopes:             []string{rootScopeID},
+		Scopes:             scopes,
 		ExpectedVersion:    args.ExpectedVersion,
 		HasExpectedVersion: args.HasExpectedVersion,
 		Note:               args.Note,
@@ -247,8 +265,8 @@ func (c *localSupervisionToolController) AckLifecycle(ctx context.Context, paren
 }
 
 func (c *localSupervisionToolController) ControlDescendant(ctx context.Context, parentSessionID string, args toolbroker.ControlDescendantArgs) (supervision.ActionRecord, error) {
-	rootScopeID, _ := c.resolution(ctx, parentSessionID)
-	if rootScopeID == "" {
+	scopes := c.decisionScopes(ctx, parentSessionID)
+	if len(scopes) == 0 {
 		return supervision.ActionRecord{}, fmt.Errorf("supervision scope is required")
 	}
 	cascade := supervision.CascadeNone
@@ -257,7 +275,7 @@ func (c *localSupervisionToolController) ControlDescendant(ctx context.Context, 
 	}
 	return c.service.Control(ctx, supervision.ControlRequest{
 		NotificationID:     args.NotificationID,
-		Scopes:             []string{rootScopeID},
+		Scopes:             scopes,
 		RequestedByID:      strings.TrimSpace(parentSessionID),
 		Action:             supervision.ActionKind(args.Action),
 		Reason:             args.Reason,

@@ -470,9 +470,20 @@ func readPlanPreviewContent(workspacePath, planPath string) (content string, ava
 	return text, true, truncated, ""
 }
 
+// normalizePlanPathSeparators accepts Windows-style separators on every host so
+// `docs\plan.md` resolves like `docs/plan.md`, and traversal spellings such as
+// `..\secret.md` still hit the workspace escape check instead of degrading to a
+// literal file name on Linux.
+func normalizePlanPathSeparators(path string) string {
+	if !strings.Contains(path, `\`) {
+		return path
+	}
+	return strings.ReplaceAll(path, `\`, "/")
+}
+
 func resolvePlanPreviewPath(workspacePath, planPath string) (string, error) {
 	workspacePath = strings.TrimSpace(workspacePath)
-	planPath = planmode.NormalizePlanPath(planPath)
+	planPath = planmode.NormalizePlanPath(normalizePlanPathSeparators(planPath))
 	if workspacePath == "" {
 		return "", fmt.Errorf("workspace path is not set on session")
 	}

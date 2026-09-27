@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -140,13 +141,15 @@ func TestLocalBatchConvergeHintRendersToolAndChildSessions(t *testing.T) {
 
 	hint := localBatchConvergeHint(ctx, host, batchID)
 	require.Contains(t, hint, "close_agent")
+	require.Contains(t, hint, fmt.Sprintf("close_agent(batch_id=%q)", batchID),
+		"the one-call batch form is the primary convergence path (F6)")
 	require.Contains(t, hint, "child-1")
 	require.Contains(t, hint, "child-2")
 	require.Equal(t, 1, strings.Count(hint, "child-1"), "child sessions are deduplicated")
 	require.NotContains(t, hint, "task-3", "tasks without a child session must not leak task ids")
 
 	require.Equal(t,
-		"converge by closing the finished child sessions with close_agent",
+		fmt.Sprintf("converge with one close_agent call on the batch: close_agent(batch_id=%q)", batchID),
 		localBatchConvergeHint(ctx, nil, batchID),
 		"an unwired host still gets the executable instruction")
 	require.Equal(t,
@@ -208,4 +211,21 @@ func TestLocalConvergeTerminalBatchChildrenHonorsPolicy(t *testing.T) {
 		require.Equal(t, []string{"child-1"}, executor.closedIDs(),
 			"the batch_terminal policy converges succeeded children even when the batch itself failed")
 	})
+}
+
+// F6：批次 id 必须在 close 目标解析里展开为全部子会话（一次 close_agent 调用
+// 收敛整批）；无子会话的任务不得泄漏，重复子会话去重，未知 id 回落到普通路径。
+func TestLocalAgentCloseTargetsResolveBatchID(t *testing.T) {
+	ctx := context.Background()
+	host, _, batchID := newLocalBatchConvergeHost(t, runtimecfg.AutoClosePolicyOff, convergingBatchTasks())
+	registry := newLocalActorRegistry(host)
+
+	targetSessionID, closeIDs, err := registry.resolveLocalAgentCloseTargets(ctx, batchID)
+	require.NoError(t, err)
+	require.Equal(t, "child-1", targetSessionID, "the first child session is the primary close target")
+	require.Equal(t, []string{"child-1", "child-2"}, closeIDs,
+		"every child session of the batch is closed; task-4 (duplicate child-1) and task-3 (no child) do not add entries")
+
+	_, _, ok := registry.resolveLocalAgentCloseTargetsFromBatch(ctx, "batch_unknown")
+	require.False(t, ok, "an unknown id is not treated as a batch")
 }

@@ -140,6 +140,17 @@ func toolAllowedRootsForAgent(agent *Agent) []string {
 	return optionStringList(agent.config.Options, "allowed_roots", "additional_directories", "additionalDirectories")
 }
 
+// toolReadOnlyRootsForAgent returns the run's read-only exempt roots (F5):
+// paths outside the workspace whose reads skip the external-directory gate
+// (writes under them still ask). A worktree-isolated child names the main repo
+// here so reading it is not an approval hotspot.
+func toolReadOnlyRootsForAgent(agent *Agent) []string {
+	if agent == nil || agent.config == nil {
+		return nil
+	}
+	return optionStringList(agent.config.Options, "read_only_roots")
+}
+
 func (loop *ReActLoop) finishToolExecutionOutcome(metadata map[string]interface{}, toolName, digest, toolErr string) {
 	if loop == nil {
 		return

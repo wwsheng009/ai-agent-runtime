@@ -2026,6 +2026,15 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		}
 		agentConfig.Options["workspace_path"] = workspacePath
 	}
+	// F5: a worktree-isolated child gets its main repo as a read-only exempt
+	// root so browsing the repo is not an external_dir approval hotspot; writes
+	// under the repo still go through the gate.
+	if readOnlyRoots := apiSessionReadOnlyRoots(session); len(readOnlyRoots) > 0 {
+		if agentConfig.Options == nil {
+			agentConfig.Options = make(map[string]interface{})
+		}
+		agentConfig.Options["read_only_roots"] = readOnlyRoots
+	}
 	if profilePack := buildProfileContextPack(profileState); len(profilePack) > 0 {
 		if agentConfig.Options == nil {
 			agentConfig.Options = make(map[string]interface{})

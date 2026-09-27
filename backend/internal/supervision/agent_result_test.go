@@ -201,3 +201,41 @@ func sampleAgentResultRecord() AgentResultRecord {
 	}
 	return record
 }
+
+// F3：失败任务必须能按类别读——父代理据此区分"被中断/超时/工具失败/供应商失败"，
+// 而不是把一切都读成同一个 failed。分类保持保守：无法归类记 unknown。
+func TestClassifyReadResultFailure(t *testing.T) {
+	cases := []struct {
+		name   string
+		record AgentResultRecord
+		want   string
+	}{
+		{name: "success", record: AgentResultRecord{Success: true, Status: "completed"}, want: ""},
+		{name: "canceled run", record: AgentResultRecord{Status: "failed", Errors: []AgentResultError{{Message: "context canceled"}}}, want: ReadResultFailureCanceled},
+		{name: "stopped status", record: AgentResultRecord{Status: "stopped"}, want: ReadResultFailureCanceled},
+		{name: "timeout", record: AgentResultRecord{Status: "failed", Errors: []AgentResultError{{Message: "execution deadline exceeded"}}}, want: ReadResultFailureTimeout},
+		{name: "tool error", record: AgentResultRecord{Status: "failed", Errors: []AgentResultError{{Code: "TOOL_PATH_NOT_FOUND", Message: "path not found: /nope"}}}, want: ReadResultFailureToolError},
+		{name: "policy refusal", record: AgentResultRecord{Status: "failed", Errors: []AgentResultError{{Message: "policy: read-only mode refused compound shell command"}}}, want: ReadResultFailurePolicyRefused},
+		{name: "provider error", record: AgentResultRecord{Status: "failed", Errors: []AgentResultError{{Message: "provider unavailable"}}}, want: ReadResultFailureProviderError},
+		{name: "bare failure", record: AgentResultRecord{Status: "failed"}, want: ReadResultFailureFailed},
+		{name: "unrecognized", record: AgentResultRecord{Status: "weird"}, want: ReadResultFailureUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, ClassifyReadResultFailure(tc.record))
+		})
+	}
+}
+
+// F3 接线：payload 必须带上 failure_kind；成功记录保持为空（omitempty）。
+func TestBuildReadResultPayloadCarriesFailureKind(t *testing.T) {
+	payload := BuildReadResultPayload(AgentResultRecord{
+		Success: false,
+		Status:  "failed",
+		Errors:  []AgentResultError{{Code: "TOOL_PATH_NOT_FOUND", Message: "path not found: /nope"}},
+	}, ReadResultArgs{})
+	require.Equal(t, ReadResultFailureToolError, payload.FailureKind)
+
+	ok := BuildReadResultPayload(AgentResultRecord{Success: true, Status: "completed", Summary: "done"}, ReadResultArgs{})
+	require.Empty(t, ok.FailureKind)
+}

@@ -777,6 +777,24 @@ func clearAPISpawnWorktreeContext(session *chat.Session, disposition string) {
 	}
 }
 
+// apiSessionReadOnlyRoots returns the session's read-only exempt external roots
+// (F5): a worktree-isolated child names its main repo so reading it (view/grep)
+// skips the external_dir:admit approval; writes under the repo still go
+// through the gate.
+func apiSessionReadOnlyRoots(session *chat.Session) []string {
+	if session == nil {
+		return nil
+	}
+	if agentcontrol.ContextString(session, toolbroker.AgentSessionContextIsolation) != worktree.ModeWorktree {
+		return nil
+	}
+	repoRoot := strings.TrimSpace(agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot))
+	if repoRoot == "" {
+		return nil
+	}
+	return []string{repoRoot}
+}
+
 func apiSpawnWorktreeHandle(session *chat.Session) (*worktree.Handle, error) {
 	if session == nil {
 		return nil, fmt.Errorf("session is required")
@@ -841,24 +859,32 @@ func (c *sessionAgentController) ApplyWorktree(ctx context.Context, args toolbro
 		return nil, err
 	}
 	result := &toolbroker.AgentWorktreeResult{
-		ID:             sessionID,
-		SessionID:      sessionID,
-		Action:         "apply",
-		Isolation:      worktree.ModeWorktree,
-		WorktreePath:   handle.Path,
-		WorktreeBranch: handle.Branch,
-		RepoRoot:       handle.RepoRoot,
-		DiffStat:       diffStat,
-		Paths:          append([]string(nil), args.Paths...),
-		Applied:        true,
-		Kept:           args.Keep,
-		SkippedPaths:   append([]string(nil), report.SkippedPaths...),
+		ID:                sessionID,
+		SessionID:         sessionID,
+		Action:            "apply",
+		Isolation:         worktree.ModeWorktree,
+		WorktreePath:      handle.Path,
+		WorktreeBranch:    handle.Branch,
+		RepoRoot:          handle.RepoRoot,
+		DiffStat:          diffStat,
+		Paths:             append([]string(nil), args.Paths...),
+		Applied:           report.Applied,
+		Kept:              args.Keep,
+		SkippedPaths:      append([]string(nil), report.SkippedPaths...),
+		DeferredDeletions: append([]string(nil), report.DeferredDeletions...),
 	}
+	notes := make([]string, 0, 2)
 	if len(report.SkippedPaths) > 0 {
-		result.NextAction = fmt.Sprintf(
+		notes = append(notes, fmt.Sprintf(
 			"%d worktree path(s) are outside the requested paths filter and were not applied: %s",
-			len(report.SkippedPaths), strings.Join(report.SkippedPaths, ", "))
+			len(report.SkippedPaths), strings.Join(report.SkippedPaths, ", ")))
 	}
+	if len(report.DeferredDeletions) > 0 {
+		notes = append(notes, fmt.Sprintf(
+			"%d path(s) deleted in the worktree branch were left in place (a path checkout cannot express deletions): %s",
+			len(report.DeferredDeletions), strings.Join(report.DeferredDeletions, ", ")))
+	}
+	result.NextAction = strings.Join(notes, "; ")
 	if !args.Keep {
 		if err := handle.Remove(ctx); err != nil {
 			return nil, fmt.Errorf("apply succeeded but worktree remove failed: %w", err)
@@ -2141,6 +2167,8 @@ func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitA
 				// steer/ESC 提前结束的等待段不是"花掉的窗口"，不计入预算。
 			default:
 				consecutive, exhausted := c.waitBudget().Observe(budgetKey, len(result.TerminalDelta) > 0, waitBudgetLimit)
+				// F7: always expose the observed budget, not only the exhausted verdict.
+				result = toolbroker.StampAgentWaitBudget(result, consecutive, waitBudgetLimit)
 				if exhausted {
 					result = toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit)
 				}
@@ -2850,6 +2878,9 @@ func (c *sessionAgentController) resolveCloseTargets(ctx context.Context, target
 	if targetSessionID, closeIDs, ok, err := c.resolveCloseTargetsFromRegistry(ctx, target); err != nil || ok {
 		return targetSessionID, closeIDs, err
 	}
+	if targetSessionID, closeIDs, ok := c.resolveCloseTargetsFromBatch(ctx, target); ok {
+		return targetSessionID, closeIDs, nil
+	}
 	sessions, err := c.listSessions(ctx, target)
 	if err != nil {
 		return "", nil, err
@@ -2921,6 +2952,50 @@ func (c *sessionAgentController) resolveCloseTargets(ctx context.Context, target
 		return closeIDs[i] < closeIDs[j]
 	})
 	return targetSessionID, closeIDs, nil
+}
+
+// resolveCloseTargetsFromBatch resolves a spawn_subagents batch id to every
+// child session of that batch, so one close_agent call converges the whole
+// batch instead of N calls (F6). Best-effort: an unwired/unreadable batch
+// store or an unknown id falls through to the regular session resolution.
+// Running children are included on purpose — closing a batch is an explicit
+// request to stop it. peekSubagentBatchStore is intentional: a resolution
+// lookup must not lazily create a batch database (a batch id can only exist
+// once some batch path already created the store).
+func (c *sessionAgentController) resolveCloseTargetsFromBatch(ctx context.Context, target string) (string, []string, bool) {
+	if c == nil || c.handler == nil {
+		return "", nil, false
+	}
+	store := c.handler.peekSubagentBatchStore()
+	if store == nil {
+		return "", nil, false
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", nil, false
+	}
+	tasks, err := store.ListTasks(ctx, target)
+	if err != nil || len(tasks) == 0 {
+		return "", nil, false
+	}
+	seen := make(map[string]struct{}, len(tasks))
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		id := strings.TrimSpace(task.ChildSessionID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return "", nil, false
+	}
+	return ids[0], ids, true
 }
 
 func (c *sessionAgentController) resolveCloseTargetsFromRegistry(ctx context.Context, target string) (string, []string, bool, error) {
@@ -3974,6 +4049,14 @@ func agentCompletionStatus(event runtimeevents.Event) string {
 		return string(chat.SessionStopped)
 	}
 	if event.Payload != nil {
+		// A cancelled run (close_agent / interrupt / deadline) reports
+		// success=false together with status=stopped. The stop status is
+		// authoritative for that case and must win over the failure
+		// heuristic, or a requested close surfaces as a critical child
+		// failure (F2: close_agent interruption classification).
+		if text, ok := event.Payload["status"].(string); ok && isStoppedSessionStatusText(text) {
+			return string(chat.SessionStopped)
+		}
 		if success, ok := event.Payload["success"].(bool); ok && !success {
 			return "failed"
 		}
@@ -3982,6 +4065,17 @@ func agentCompletionStatus(event runtimeevents.Event) string {
 		}
 	}
 	return string(chat.SessionIdle)
+}
+
+// isStoppedSessionStatusText reports whether a terminal payload status denotes
+// a requested stop/interruption rather than a failure.
+func isStoppedSessionStatusText(text string) bool {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "stopped", "interrupted", "canceled", "cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func copyAgentCompletionPayload(target map[string]interface{}, payload map[string]interface{}) {

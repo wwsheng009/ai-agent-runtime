@@ -245,3 +245,34 @@ func TestPathInsideRoot(t *testing.T) {
 			"Windows containment must be case-insensitive")
 	}
 }
+
+// F5：按 run 下发的只读外部根（worktree 子代理的主仓库）豁免读取，不豁免写入。
+// 这是「读主仓库不再逐次审批，写路径仍受门控」的核心契约。
+func TestExternalDirGateContextReadOnlyRootsExemptReadsOnly(t *testing.T) {
+	workspace := t.TempDir()
+	repoRoot := t.TempDir()
+	target := filepath.Join(repoRoot, "README.md")
+
+	engine, handler, admitted := externalDirTestEngine(t, ModeDefault)
+	ctx := toolctx.WithWorkspaceRoot(context.Background(), workspace)
+	ctx = toolctx.WithReadOnlyRoots(ctx, []string{repoRoot})
+
+	read, err := engine.Evaluate(ctx, EvalRequest{
+		ToolName: "view",
+		Args:     map[string]interface{}{"file_path": target},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionAllow, read.Type)
+	assert.Equal(t, StageReadonlyAuto, read.Stage, "a per-run read-only root exempts reads")
+	assert.Equal(t, 0, handler.calls, "reading the main repo must not ask")
+
+	write, err := engine.Evaluate(ctx, EvalRequest{
+		ToolName: "write",
+		Args:     map[string]interface{}{"file_path": target, "content": "x"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, DecisionAllow, write.Type)
+	assert.Equal(t, 1, handler.calls, "writes under a read-only root still ask once")
+	assert.Equal(t, []string{canonicalExternalPath(repoRoot)}, *admitted,
+		"the write admission still widens the session roots")
+}

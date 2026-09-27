@@ -55,6 +55,24 @@ func (c *handlerSupervisionToolController) resolution(ctx context.Context, paren
 	return rootScopeID, targetTeamID
 }
 
+// decisionScopes is the write-side scope set for ack/control, mirroring the
+// /supervision command's chatDebugSupervisionScopes union: the caller's own
+// session is always a root scope and a led team adds its scope. Restricting
+// writes to the single switched scope made session-scope notifications
+// (direct spawn_agent children) unactionable for a team lead while the digest
+// still advertised them as action_required.
+func (c *handlerSupervisionToolController) decisionScopes(ctx context.Context, parentSessionID string) []string {
+	sessionID := strings.TrimSpace(parentSessionID)
+	if sessionID == "" {
+		return nil
+	}
+	scopes := []string{sessionID}
+	if _, teamID := c.resolution(ctx, parentSessionID); teamID != "" && teamID != sessionID {
+		scopes = append(scopes, teamID)
+	}
+	return scopes
+}
+
 // leadTeamID returns the id of the team this session leads, preferring an
 // active team. It is the HTTP counterpart of the CLI's ActiveTeam check: a
 // child task's run meta also carries a team id, so only the registered lead may
@@ -148,13 +166,13 @@ func (c *handlerSupervisionToolController) SupervisionDescendants(ctx context.Co
 }
 
 func (c *handlerSupervisionToolController) AckLifecycle(ctx context.Context, parentSessionID string, args toolbroker.AckLifecycleArgs) (*supervision.Notification, error) {
-	rootScopeID, _ := c.resolution(ctx, parentSessionID)
-	if rootScopeID == "" {
+	scopes := c.decisionScopes(ctx, parentSessionID)
+	if len(scopes) == 0 {
 		return nil, fmt.Errorf("supervision scope is required")
 	}
 	request := supervision.LifecycleDecisionRequest{
 		NotificationID:     args.NotificationID,
-		Scopes:             []string{rootScopeID},
+		Scopes:             scopes,
 		ExpectedVersion:    args.ExpectedVersion,
 		HasExpectedVersion: args.HasExpectedVersion,
 		Note:               args.Note,
@@ -175,8 +193,8 @@ func (c *handlerSupervisionToolController) AckLifecycle(ctx context.Context, par
 }
 
 func (c *handlerSupervisionToolController) ControlDescendant(ctx context.Context, parentSessionID string, args toolbroker.ControlDescendantArgs) (supervision.ActionRecord, error) {
-	rootScopeID, _ := c.resolution(ctx, parentSessionID)
-	if rootScopeID == "" {
+	scopes := c.decisionScopes(ctx, parentSessionID)
+	if len(scopes) == 0 {
 		return supervision.ActionRecord{}, fmt.Errorf("supervision scope is required")
 	}
 	cascade := supervision.CascadeNone
@@ -185,7 +203,7 @@ func (c *handlerSupervisionToolController) ControlDescendant(ctx context.Context
 	}
 	return c.service.Control(ctx, supervision.ControlRequest{
 		NotificationID:     args.NotificationID,
-		Scopes:             []string{rootScopeID},
+		Scopes:             scopes,
 		RequestedByID:      strings.TrimSpace(parentSessionID),
 		Action:             supervision.ActionKind(args.Action),
 		Reason:             args.Reason,

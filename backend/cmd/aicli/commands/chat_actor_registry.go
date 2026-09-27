@@ -941,24 +941,32 @@ func (r *localActorRegistry) ApplyWorktree(ctx context.Context, args toolbroker.
 		return nil, err
 	}
 	result := &toolbroker.AgentWorktreeResult{
-		ID:             sessionID,
-		SessionID:      sessionID,
-		Action:         "apply",
-		Isolation:      worktree.ModeWorktree,
-		WorktreePath:   handle.Path,
-		WorktreeBranch: handle.Branch,
-		RepoRoot:       handle.RepoRoot,
-		DiffStat:       diffStat,
-		Paths:          append([]string(nil), args.Paths...),
-		Applied:        true,
-		Kept:           args.Keep,
-		SkippedPaths:   append([]string(nil), report.SkippedPaths...),
+		ID:                sessionID,
+		SessionID:         sessionID,
+		Action:            "apply",
+		Isolation:         worktree.ModeWorktree,
+		WorktreePath:      handle.Path,
+		WorktreeBranch:    handle.Branch,
+		RepoRoot:          handle.RepoRoot,
+		DiffStat:          diffStat,
+		Paths:             append([]string(nil), args.Paths...),
+		Applied:           report.Applied,
+		Kept:              args.Keep,
+		SkippedPaths:      append([]string(nil), report.SkippedPaths...),
+		DeferredDeletions: append([]string(nil), report.DeferredDeletions...),
 	}
+	notes := make([]string, 0, 2)
 	if len(report.SkippedPaths) > 0 {
-		result.NextAction = fmt.Sprintf(
+		notes = append(notes, fmt.Sprintf(
 			"%d worktree path(s) are outside the requested paths filter and were not applied: %s",
-			len(report.SkippedPaths), strings.Join(report.SkippedPaths, ", "))
+			len(report.SkippedPaths), strings.Join(report.SkippedPaths, ", ")))
 	}
+	if len(report.DeferredDeletions) > 0 {
+		notes = append(notes, fmt.Sprintf(
+			"%d path(s) deleted in the worktree branch were left in place (a path checkout cannot express deletions): %s",
+			len(report.DeferredDeletions), strings.Join(report.DeferredDeletions, ", ")))
+	}
+	result.NextAction = strings.Join(notes, "; ")
 	if !args.Keep {
 		if err := handle.Remove(ctx); err != nil {
 			return nil, fmt.Errorf("apply succeeded but worktree remove failed: %w", err)
@@ -2837,6 +2845,8 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 				// steer/ESC 提前结束的等待段不是"花掉的窗口"，不计入预算。
 			default:
 				consecutive, exhausted := r.localWaitBudget.Observe(budgetKey, len(result.TerminalDelta) > 0, waitBudgetLimit)
+				// F7: always expose the observed budget, not only the exhausted verdict.
+				result = toolbroker.StampAgentWaitBudget(result, consecutive, waitBudgetLimit)
 				if exhausted {
 					result = toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit)
 				}
@@ -3550,6 +3560,9 @@ func (r *localActorRegistry) resolveLocalAgentCloseTargets(ctx context.Context, 
 	if targetSessionID, closeIDs, ok, err := r.resolveLocalAgentCloseTargetsFromRegistry(ctx, target); err != nil || ok {
 		return targetSessionID, closeIDs, err
 	}
+	if targetSessionID, closeIDs, ok := r.resolveLocalAgentCloseTargetsFromBatch(ctx, target); ok {
+		return targetSessionID, closeIDs, nil
+	}
 	sessions, err := r.listLocalAgentSessions(ctx)
 	if err != nil {
 		return "", nil, err
@@ -3693,6 +3706,45 @@ func (r *localActorRegistry) resolveLocalAgentCloseTargetsFromRegistry(ctx conte
 		closeIDs = append(closeIDs, targetSessionID)
 	}
 	return targetSessionID, closeIDs, true, nil
+}
+
+// resolveLocalAgentCloseTargetsFromBatch resolves a spawn_subagents batch id
+// (the `batch_*` receipt) to every child session of that batch, so one
+// close_agent call converges the whole batch instead of N calls (F6).
+//
+// Best-effort lookup: an unwired/unreadable batch store or an unknown id
+// falls through to the regular session resolution. Running children are
+// included on purpose — closing a batch is an explicit request to stop it.
+func (r *localActorRegistry) resolveLocalAgentCloseTargetsFromBatch(ctx context.Context, target string) (string, []string, bool) {
+	if r == nil || r.Host == nil || r.Host.SubagentBatches == nil {
+		return "", nil, false
+	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", nil, false
+	}
+	tasks, err := r.Host.SubagentBatches.ListTasks(ctx, target)
+	if err != nil || len(tasks) == 0 {
+		return "", nil, false
+	}
+	seen := make(map[string]struct{}, len(tasks))
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		id := strings.TrimSpace(task.ChildSessionID)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return "", nil, false
+	}
+	return ids[0], ids, true
 }
 
 func (r *localActorRegistry) closeTargetLocalRegistryRootAndPath(ctx context.Context, target, targetSessionID string) (string, string, error) {
@@ -4589,6 +4641,14 @@ func localAgentCompletionStatus(event runtimeevents.Event) string {
 		return string(runtimechat.SessionStopped)
 	}
 	if event.Payload != nil {
+		// A cancelled run (close_agent / interrupt / deadline) reports
+		// success=false together with status=stopped. The stop status is
+		// authoritative for that case and must win over the failure
+		// heuristic, or a requested close surfaces as a critical child
+		// failure (F2: close_agent interruption classification).
+		if text, ok := event.Payload["status"].(string); ok && isStoppedSessionStatusText(text) {
+			return string(runtimechat.SessionStopped)
+		}
 		if success, ok := event.Payload["success"].(bool); ok && !success {
 			return "failed"
 		}
@@ -4597,6 +4657,17 @@ func localAgentCompletionStatus(event runtimeevents.Event) string {
 		}
 	}
 	return string(runtimechat.SessionIdle)
+}
+
+// isStoppedSessionStatusText reports whether a terminal payload status denotes
+// a requested stop/interruption rather than a failure.
+func isStoppedSessionStatusText(text string) bool {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "stopped", "interrupted", "canceled", "cancelled":
+		return true
+	default:
+		return false
+	}
 }
 
 func copyLocalAgentCompletionPayload(target map[string]interface{}, payload map[string]interface{}) {

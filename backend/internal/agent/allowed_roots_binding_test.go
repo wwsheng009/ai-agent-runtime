@@ -67,3 +67,27 @@ func TestOptionStringList(t *testing.T) {
 		})
 	}
 }
+
+// F5：agent 选项 read_only_roots 必须落到每次工具调用的 toolctx 上（与其
+// workspace/allowed roots 同路径），策略门才能按 run 豁免读取。
+func TestToolCallContextBindsReadOnlyRoots(t *testing.T) {
+	agent := &Agent{config: &Config{Options: map[string]interface{}{
+		"workspace_path":  "/workspace",
+		"read_only_roots": []string{"/repo-a", " /repo-a ", "", "/repo-b"},
+	}}}
+
+	ctx := toolCallContext(context.Background(), []types.ToolCall{}, "", nil, agent, "session-1", 0)
+	want := []string{"/repo-a", "/repo-b"}
+	if got := toolctx.ReadOnlyRoots(ctx); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ReadOnlyRoots = %#v, want %#v", got, want)
+	}
+	// 只读根不得混入准入根：写路径仍要过外部目录门。
+	if got := toolctx.AllowedRoots(ctx); got != nil {
+		t.Fatalf("AllowedRoots = %#v, want nil", got)
+	}
+
+	replay := approvedToolCallContext(context.Background(), agent)
+	if got := toolctx.ReadOnlyRoots(replay); !reflect.DeepEqual(got, want) {
+		t.Fatalf("approved replay ReadOnlyRoots = %#v, want %#v", got, want)
+	}
+}

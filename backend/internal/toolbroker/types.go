@@ -87,7 +87,25 @@ func SuspendAgentWaitResultForBudget(result *AgentWaitResult, consecutive, limit
 	}
 	result.WaitBudgetExhausted = true
 	result.ExecutionContinues = true
+	result = StampAgentWaitBudget(result, consecutive, limit)
 	result.NextAction = AgentWaitSuspendNextAction(consecutive, limit)
+	return result
+}
+
+// StampAgentWaitBudget records the observed active-wait budget on a wait
+// result without changing its verdict. Hosts call it after every observed
+// segment (exhausted or not), so the remaining budget is model-visible before
+// the suspension path kicks in (F7). limit<=0 (budget disarmed or keyless
+// turn) and a nil result are no-ops.
+func StampAgentWaitBudget(result *AgentWaitResult, consecutive, limit int) *AgentWaitResult {
+	if result == nil || limit <= 0 {
+		return result
+	}
+	if consecutive < 0 {
+		consecutive = 0
+	}
+	result.WaitBudgetConsecutive = consecutive
+	result.WaitBudgetLimit = limit
 	return result
 }
 
@@ -735,6 +753,12 @@ type AgentWaitResult struct {
 	// window. next_action carries the suspend verdict; the ledger rows still
 	// gate the turn (I1), so this is not a failure and not an end-of-turn.
 	WaitBudgetExhausted bool `json:"wait_budget_exhausted,omitempty"`
+	// WaitBudgetConsecutive / WaitBudgetLimit expose the observed active-wait
+	// budget (consecutive no-progress segments vs. the configured limit) so a
+	// parent can see how much waiting remains instead of discovering the
+	// suspension verdict only when it is already exhausted (F7).
+	WaitBudgetConsecutive int `json:"wait_budget_consecutive,omitempty"`
+	WaitBudgetLimit       int `json:"wait_budget_limit,omitempty"`
 }
 
 // AgentWaitObligation is one row of the wait-time obligation ledger view
@@ -1015,13 +1039,13 @@ func FinalizeAgentWaitResult(result *AgentWaitResult, startedAt time.Time) *Agen
 		result.NextAction = "target_not_found: the requested id does not exist as an agent session. If it is a dispatch batch id, take a task_id from the receipt tasks[] and wait on that (or read the child session directly); do not re-wait on the same id"
 	} else if result.TimedOut && result.PendingCount > 0 {
 		result.ExecutionContinues = true
-		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; pending child execution continues. Do not immediately re-call wait_agent with the same ids/timeout while independent parent work remains; consume any ready outputs first, then wait only for still-pending children"
+		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; pending child execution continues. Do not immediately re-call wait_agent with the same ids/timeout while independent parent work remains; consume any ready outputs first, then wait only for still-pending children. Cheap non-blocking evidence before the next window: read_agent_events(view=tool_progress, after_seq=<last seen>) or subagent_status"
 	} else if result.ReadyCount > 0 && result.PendingCount > 0 {
 		result.NextAction = "consume_ready_outputs_and_continue_independent_work: use ready child outputs now; keep other independent work moving instead of blocking only on pending agents"
 	} else if result.ReadyCount > 0 {
 		result.NextAction = "consume_ready_outputs: use the returned ready outputs and do not re-wait for already-ready agents"
 	} else if result.TimedOut {
-		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; do other work or inspect child status before waiting again"
+		result.NextAction = "continue_independent_work_before_waiting_again: wait timeout only ended this observation; do other work or inspect child status before waiting again. Cheap non-blocking evidence: read_agent_events(view=tool_progress) or subagent_status"
 	}
 	return result
 }
@@ -1401,6 +1425,10 @@ type AgentWorktreeResult struct {
 	// SkippedPaths lists worktree changes outside the requested paths filter,
 	// which this call did not apply.
 	SkippedPaths []string `json:"skipped_paths,omitempty"`
+	// DeferredDeletions lists worktree paths deleted at the branch tip; a path
+	// checkout cannot express a deletion, so they stayed in place and need an
+	// explicit removal if that is what the caller wants.
+	DeferredDeletions []string `json:"deferred_deletions,omitempty"`
 	// NextAction carries the actionable guidance for a refused apply.
 	NextAction string             `json:"next_action,omitempty"`
 	Status     *AgentStatusResult `json:"status,omitempty"`

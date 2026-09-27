@@ -89,8 +89,15 @@ func (e *Engine) externalPathExempt(ctx context.Context, req EvalRequest, target
 		return true
 	}
 	// Registered skill/plugin roots are read-only exempt; writes keep the gate.
+	// Per-run read-only roots (F5: the main repo of a worktree-isolated child)
+	// are exempt the same way — reads only, never writes.
 	if !hasCapability(req.Capabilities, CapWriteFS) {
 		for _, root := range e.ExternalReadOnlyRoots {
+			if pathInsideRoot(canonicalExternalPath(root), target) {
+				return true
+			}
+		}
+		for _, root := range toolctx.ReadOnlyRoots(ctx) {
 			if pathInsideRoot(canonicalExternalPath(root), target) {
 				return true
 			}

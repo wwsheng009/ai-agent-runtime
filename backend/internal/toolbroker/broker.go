@@ -133,7 +133,7 @@ type Broker struct {
 	// window inside the broker, so the host injects the same per-turn budget here
 	// (plan §16.3 同口径). nil keeps team waits unbounded by this judgement.
 	WaitBudget  WaitSegmentBudget
-	Supervision       AgentSupervisionController
+	Supervision AgentSupervisionController
 	// agentEventsReads remembers the last read_agent_events window per
 	// caller/target cursor so an identical repeated read can answer with an
 	// explicit unchanged/repeat_count signal (plan P1-7 待补) instead of a
@@ -618,12 +618,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolCloseAgent,
-				Description: "Stop and close a child agent session or agent path. Closing a parent path also closes its descendant child sessions.",
+				Description: "Stop and close a child agent session, agent path, or a spawn_subagents batch. Closing a parent path also closes its descendant child sessions; closing a batch (batch_id) closes every child session of that batch in one call.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id, agent path such as /root/worker, or a spawn_subagents batch id."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"batch_id":   map[string]interface{}{"type": "string", "description": "spawn_subagents batch id from the dispatch receipt; closes every child session of the batch in one call (equivalent to passing the batch id as id)."},
 					},
 				},
 			},
@@ -640,7 +641,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolApplyAgentWorktree,
-				Description: "Apply a spawn_agent child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply. Applies only tracked changes reachable from the isolation branch and, when paths is set, only those paths (the rest are reported as skipped_paths); refuses to overwrite local main-tree changes unless force=true.",
+				Description: "Apply a spawn_agent child's worktree isolation changes into the main repository. Default removes the worktree after apply; set keep=true to preserve it. Call this from the parent after reviewing child output; completion does not auto-apply and a session cannot apply or discard its own worktree. Applies only tracked changes reachable from the isolation branch and, when paths is set, only those paths (the rest are reported as skipped_paths); unrelated main-tree paths are never touched, branch-side deletions are reported as deferred_deletions instead of being applied, and local main-tree changes in the applied paths are refused unless force=true.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -654,7 +655,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolDiscardAgentWorktree,
-				Description: "Discard a spawn_agent child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; close_agent also cleans up remaining worktrees.",
+				Description: "Discard a spawn_agent child's worktree isolation without applying changes to the main repository. Use when rejecting isolated work; only the parent/orchestrator can discard a child's worktree (a session cannot discard its own), and close_agent also cleans up remaining worktrees.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -809,12 +810,13 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolCloseAgent,
-				Description: "Stop and close a child agent session or agent path. Closing a parent path also closes its descendant child sessions.",
+				Description: "Stop and close a child agent session, agent path, or a spawn_subagents batch. Closing a parent path also closes its descendant child sessions; closing a batch (batch_id) closes every child session of that batch in one call.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id or path such as /root/worker."},
+						"id":         map[string]interface{}{"type": "string", "description": "Child agent session id, agent path such as /root/worker, or a spawn_subagents batch id."},
 						"session_id": map[string]interface{}{"type": "string", "description": "Alias for id."},
+						"batch_id":   map[string]interface{}{"type": "string", "description": "spawn_subagents batch id from the dispatch receipt; closes every child session of the batch in one call (equivalent to passing the batch id as id)."},
 					},
 				},
 			},
@@ -2145,6 +2147,18 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if result != nil && result.Duplicate {
 			summary["duplicate"] = true
 		}
+		// F4: send_message never starts a turn. Surface that in the delivery
+		// receipt (and point an idle child at followup_task) so "delivered"
+		// cannot be mistaken for "the child will act on this".
+		if toolName == ToolSendMessage && result != nil && !result.Triggered {
+			summary["turn_started"] = false
+			nextAction := "message_queued_no_turn: send_message never starts a turn; the child reads it on its next natural turn. Use followup_task if the child must act now."
+			if result.Status != nil && strings.EqualFold(strings.TrimSpace(result.Status.Status), "idle") {
+				summary["no_turn_expected"] = true
+				nextAction = "idle_child_message_queued: send_message never starts a turn and this child is idle, so the message is read only when something else wakes the child. Use followup_task to start a turn now, or send_input to interrupt/steer."
+			}
+			summary["next_action"] = nextAction
+		}
 		return aliasedResult, attachCacheSafeSummary(summary, agentMessageCacheSafeSummary(aliasedResult)), nil
 
 	case ToolSendInput:
@@ -2349,7 +2363,7 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if aliasedResult != nil {
 			aliasedMatchedSessionID = strings.TrimSpace(aliasedResult.MatchedSessionID)
 		}
-		return aliasedResult, attachCacheSafeSummary(map[string]interface{}{
+		summary := map[string]interface{}{
 			"session_id":    valueOrEmptyWaitMatchedSession(result),
 			"session_alias": aliasedMatchedSessionID,
 			"status":        waitResultStatus(result),
@@ -2361,7 +2375,14 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"latest_seq":    valueOrZeroWaitSeq(result),
 			// 等待预算耗尽 ⇒ 宿主不再开窗，next_action=suspend（§16.2/§16.3）。
 			"wait_budget_exhausted": result != nil && result.WaitBudgetExhausted,
-		}, agentWaitCacheSafeSummary(aliasedResult)), nil
+		}
+		// F7: expose the observed budget before it is spent, not only the
+		// exhausted verdict.
+		if result != nil && result.WaitBudgetLimit > 0 {
+			summary["wait_budget_consecutive"] = result.WaitBudgetConsecutive
+			summary["wait_budget_limit"] = result.WaitBudgetLimit
+		}
+		return aliasedResult, attachCacheSafeSummary(summary, agentWaitCacheSafeSummary(aliasedResult)), nil
 
 	case ToolReadAgentEvents:
 		if b.AgentSessions == nil {
@@ -2463,6 +2484,11 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			sessionKey = agentSessionRefArgValue(args["session_id"])
 		}
 		if sessionKey == "" {
+			// F6: a spawn_subagents batch id converges the whole batch — the
+			// host resolves it to every child session, so one call replaces N.
+			sessionKey = agentSessionRefArgValue(args["batch_id"])
+		}
+		if sessionKey == "" {
 			return nil, nil, fmt.Errorf("id is required")
 		}
 		actualSessionID := sessionKey
@@ -2555,6 +2581,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolApplyAgentWorktree, actualSessionID); err != nil {
 			return nil, nil, err
 		}
+		if err := b.rejectSelfWorktreeOperation(sessionID, actualSessionID, ToolApplyAgentWorktree); err != nil {
+			return nil, nil, err
+		}
 		if strings.TrimSpace(request.ID) != "" {
 			request.ID = actualSessionID
 		} else {
@@ -2602,6 +2631,9 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			}
 		}
 		if err := b.rejectTeamTeammateAgentRefs(ctx, sessionID, ToolDiscardAgentWorktree, actualSessionID); err != nil {
+			return nil, nil, err
+		}
+		if err := b.rejectSelfWorktreeOperation(sessionID, actualSessionID, ToolDiscardAgentWorktree); err != nil {
 			return nil, nil, err
 		}
 		if strings.TrimSpace(request.ID) != "" {
@@ -3667,7 +3699,7 @@ func (b *Broker) normalizeSpawnPaths(root string, spec SpawnTaskSpec, paths []st
 			if statErr != nil {
 				return nil, fmt.Errorf("task %s read_path %q not found under workspace root %s", spawnTaskLabel(spec), rawPath, root)
 			}
-			if !info.IsDir() && strings.HasSuffix(strings.TrimSpace(rawPath), string(filepath.Separator)) {
+			if !info.IsDir() && strings.HasSuffix(normalizeSpawnPathSeparators(strings.TrimSpace(rawPath)), "/") {
 				return nil, fmt.Errorf("task %s read_path %q expected directory under workspace root %s", spawnTaskLabel(spec), rawPath, root)
 			}
 		}
@@ -3676,9 +3708,20 @@ func (b *Broker) normalizeSpawnPaths(root string, spec SpawnTaskSpec, paths []st
 	return normalized, nil
 }
 
+// normalizeSpawnPathSeparators accepts Windows-style separators on every host:
+// spawn specs routinely carry `.\docs\aicli` even when the runtime runs on
+// Linux, where literal backslashes would be treated as file-name characters and
+// every such read_path would fail as "not found".
+func normalizeSpawnPathSeparators(path string) string {
+	if !strings.Contains(path, `\`) {
+		return path
+	}
+	return strings.ReplaceAll(path, `\`, "/")
+}
+
 func resolveSpawnTaskPath(root string, rawPath string) (string, string, error) {
 	root = strings.TrimSpace(root)
-	rawPath = strings.TrimSpace(rawPath)
+	rawPath = normalizeSpawnPathSeparators(strings.TrimSpace(rawPath))
 	if rawPath == "" {
 		return "", "", fmt.Errorf("path is empty")
 	}
@@ -4728,6 +4771,24 @@ func (b *Broker) rejectTeamTeammateAgentRefs(ctx context.Context, parentSessionI
 		return fmt.Errorf("%s is a spawn_agent child-session tool, but %q is a spawn_team teammate id in team %q; use spawn_agent child session ids/paths with this tool, or call wait_team with team_id %q for spawn_team progress", toolName, ref, strings.TrimSpace(teammate.TeamID), strings.TrimSpace(teammate.TeamID))
 	}
 	return nil
+}
+
+// rejectSelfWorktreeOperation blocks a session from applying or discarding its
+// own worktree. Both are parent-side review actions: a self-apply bypasses the
+// isolation sign-off — and can overwrite the main tree while the session is
+// still running, as in the 2026-09-27 incident where a child applied its own
+// worktree mid-turn and wiped unrelated uncommitted changes — while a
+// self-discard destroys the only copy of unreviewed work.
+func (b *Broker) rejectSelfWorktreeOperation(callerSessionID, targetSessionID, toolName string) error {
+	caller := strings.TrimSpace(callerSessionID)
+	target := strings.TrimSpace(targetSessionID)
+	if caller == "" || target == "" || caller != target {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s is a parent-side operation: session %s cannot target its own worktree; finish and report, and let the parent/orchestrator act on it (close_agent also cleans remaining worktrees)",
+		toolName, target,
+	)
 }
 
 func (b *Broker) currentSpawnAgentRefs(ctx context.Context, parentSessionID string) map[string]struct{} {

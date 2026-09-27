@@ -5024,6 +5024,9 @@ func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToo
 	if allowedRoots := toolAllowedRootsForAgent(agent); len(allowedRoots) > 0 {
 		ctx = toolctx.WithAllowedRoots(ctx, allowedRoots)
 	}
+	if readOnlyRoots := toolReadOnlyRootsForAgent(agent); len(readOnlyRoots) > 0 {
+		ctx = toolctx.WithReadOnlyRoots(ctx, readOnlyRoots)
+	}
 	if outputDir := generatedImageOutputDirForAgentSession(agent, sessionID); strings.TrimSpace(outputDir) != "" {
 		ctx = toolctx.WithGeneratedImageOutputDir(ctx, outputDir)
 	}

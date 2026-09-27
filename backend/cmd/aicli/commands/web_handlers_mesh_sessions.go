@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -475,14 +476,17 @@ func chatWebSessionWorkspacePath(session *runtimechat.Session) string {
 }
 
 // chatWebWorkspaceName 是工作区的展示名（路径末段）。
-func chatWebWorkspaceName(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
+func chatWebWorkspaceName(workspacePath string) string {
+	raw := strings.TrimSpace(workspacePath)
+	if raw == "" {
 		return ""
 	}
-	name := filepath.Base(filepath.Clean(path))
-	if name == "" || name == "." || name == string(filepath.Separator) {
-		return path
+	// Windows 风格路径在 Linux 上也要取到末段名（`E:\ws\one` → `one`）：
+	// 先统一分隔符再取 base，两个平台同解。
+	normalized := filepath.ToSlash(strings.ReplaceAll(raw, `\`, "/"))
+	name := path.Base(normalized)
+	if name == "" || name == "." || name == ".." || name == "/" || name == string(filepath.Separator) {
+		return raw
 	}
 	return name
 }

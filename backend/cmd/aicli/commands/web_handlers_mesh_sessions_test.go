@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -68,7 +67,9 @@ func seedMeshSessionsTestNode(t *testing.T, paths mesh.Paths, nodeID, sessionID,
 		Auth:    &mesh.AuthInfo{Mode: "loopback", Required: authRequired, Token: "peer-token-" + nodeID},
 	}
 	if workspacePath != "" {
-		record.Workspace = &mesh.WorkspaceInfo{Path: workspacePath, Name: filepath.Base(workspacePath)}
+		// 用与产品同口径的展示名派生：Windows peer 记录的 Name 是 `two`，
+		// 而不是让 Linux 宿主上的 filepath.Base(`E:\ws\two`) 退化成整串。
+		record.Workspace = &mesh.WorkspaceInfo{Path: workspacePath, Name: chatWebWorkspaceName(workspacePath)}
 	}
 	if err := mesh.WriteNodeRecord(paths, record); err != nil {
 		t.Fatalf("write node record %s: %v", nodeID, err)

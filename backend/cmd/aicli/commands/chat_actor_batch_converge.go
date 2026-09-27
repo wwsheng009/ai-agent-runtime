@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"strings"
 )
 
@@ -58,9 +59,16 @@ func localFinishedChildSessionIDs(ctx context.Context, host *localChatRuntimeHos
 // and the /debug view carry it.
 func localBatchConvergeHint(ctx context.Context, host *localChatRuntimeHost, batchID string) string {
 	const instruction = "converge by closing the finished child sessions with close_agent"
-	ids := localFinishedChildSessionIDs(ctx, host, batchID)
-	if len(ids) == 0 {
+	batchID = strings.TrimSpace(batchID)
+	if batchID == "" {
 		return instruction
 	}
-	return instruction + ": " + strings.Join(ids, ", ")
+	// F6: one call converges the whole batch; the per-child list stays as a
+	// fallback for hosts that cannot resolve a batch id.
+	hint := fmt.Sprintf("converge with one close_agent call on the batch: close_agent(batch_id=%q)", batchID)
+	ids := localFinishedChildSessionIDs(ctx, host, batchID)
+	if len(ids) == 0 {
+		return hint
+	}
+	return hint + "; fallback per child session: " + strings.Join(ids, ", ")
 }
