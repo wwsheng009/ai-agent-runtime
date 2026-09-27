@@ -2867,13 +2867,23 @@ func chatPlanModeActive(session *ChatSession) bool {
 	return chatSessionPermissionMode(session) == runtimepolicy.ModePlan || planmode.IsActive(loadChatPlanMode(session))
 }
 
+// chatSurfacePlanStatusPathMaxWidth 是页脚计划路径的显示上限：与 provider(16)/branch(18)
+// 同一套「短段固宽 + 省略号」惯例，宽一点是因为路径本身是识别信息。
+const chatSurfacePlanStatusPathMaxWidth = 40
+
 // chatSurfacePlanModeStatusSegment 是 Web「常驻模式标识」（§4.6）的 CLI/TUI 对应物：
 // 段位保持在页脚最前部、窄宽度下也不被裁掉，因此它承担「当前权限模式常驻可见」的职责。
 // 口径与 Web 横幅（session-mode-banner-shared.ts）逐条对齐：
 //
 //   - tone：plan → 强调色，bypass_permissions → 告警色（角色由调用方尊重），其余中性；
-//   - plan active 的读法优先级：模型已请求裁决 > 计划正文可用（可评审）> 计划尚未写就
-//     （最后一档不占页脚空间，与 Web 只在 hint 行显示文案的做法等价）；
+//   - plan active 的三要素：状态词 + 计划路径 + 读法（/plan review 查看正文）。状态优先级：
+//     模型已请求裁决 > 计划正文可用（可评审）> 计划尚未写就；
+//   - 计划路径取会话已有的 display path（state.PlanPath，与 Web 的 plan_path 同源），不在这里
+//     拼绝对路径；active 且未记录路径时按默认 plan 文件名展示，与 /plan status 和 runtimeapi
+//     的 plan 快照（plan_mode_handlers.go:396-399）同口径；
+//   - 上屏形态遵循页脚既有 compact/full 规则：compact 保「状态 + 路径 + /plan」（命令枢纽，
+//     窄宽度下不退化成只有状态），full 才展开成「/plan review 查看正文」；路径超长按
+//     compactStatusValue 截断（与 provider/branch 段同一套省略号惯例）；
 //   - 未知枚举不写死文案，回落后端原文，避免枚举漂移时页脚空白。
 //
 // 纯展示：这里不承载任何裁决动作（裁决仍走 composer 卡片 / `/plan` 命令）。
@@ -2883,13 +2893,31 @@ func chatSurfacePlanModeStatusSegment(session *ChatSession) chatStatusSegment {
 	}
 	state := loadChatPlanMode(session)
 	if chatPlanModeActive(session) {
+		planPath := strings.TrimSpace(state.PlanPath)
+		if planPath == "" {
+			planPath = planmode.DefaultPlanPath
+		}
+		planPath = compactStatusValue(planPath, chatSurfacePlanStatusPathMaxWidth)
+		const (
+			readHintCompact = "/plan"
+			readHintFull    = "/plan review 查看正文"
+		)
 		switch {
 		case state.PendingExitRequest:
-			return chatStatusSegment{full: "Plan ON · 待裁决", compact: "Plan·待裁决"}
+			return chatStatusSegment{
+				full:    "Plan ON · 待裁决 · " + planPath + " · " + readHintFull,
+				compact: "Plan·待裁决 · " + planPath + " · " + readHintCompact,
+			}
 		case planReviewReadyHint(session, state) != "":
-			return chatStatusSegment{full: "Plan ON · 已就绪", compact: "Plan·就绪"}
+			return chatStatusSegment{
+				full:    "Plan ON · 已就绪 · " + planPath + " · " + readHintFull,
+				compact: "Plan·就绪 · " + planPath + " · " + readHintCompact,
+			}
 		default:
-			return chatStatusSegment{full: "Plan ON", compact: "Plan ON"}
+			return chatStatusSegment{
+				full:    "Plan ON · " + planPath + " · " + readHintFull,
+				compact: "Plan ON · " + planPath + " · " + readHintCompact,
+			}
 		}
 	}
 	switch chatSessionPermissionMode(session) {

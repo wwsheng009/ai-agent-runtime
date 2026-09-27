@@ -795,7 +795,7 @@
 
 ## 18. 实施记录：第十一轮（2026-09-25，§4.6 Web 常驻模式标识）
 
-**状态**：§4.6 的 **Web 侧「当前模式常驻标识」已落地**（聊天区顶部：模式徽标 + plan 状态/路径/读法）。§4.6 只剩 **TUI/CLI 侧的常驻横幅**；§4.4 只剩行级评论；自动修订回合仍待做（见 18.4 的取舍）。
+**状态**：§4.6 的 **Web 侧「当前模式常驻标识」已落地**（聊天区顶部：模式徽标 + plan 状态/路径/读法）。§4.6 只剩 **TUI/CLI 侧的常驻横幅**；§4.4 只剩行级评论；自动修订回合仍待做（见 18.4 的取舍）。**（2026-09-26 修订：TUI/CLI 侧已在既有页脚状态行补齐状态/路径/读法三要素，见 §26；自动修订回合见 §19/§20。）**
 
 ### 18.1 为什么这一轮选它
 
@@ -832,7 +832,7 @@
 
 ### 18.4 未实施与取舍
 
-- **TUI/CLI 常驻模式横幅**：§4.6 剩下的那一半，在 `backend/cmd/aicli/ui/**` 与键位同族，属 CLI 侧。
+- **TUI/CLI 常驻模式横幅**：§4.6 剩下的那一半，在 `backend/cmd/aicli/ui/**` 与键位同族，属 CLI 侧。**（2026-09-26 修订：已在既有页脚状态行收口，见 §26；未新增 `ui/**` 文件或键位。）**
 - **评审反馈的自动修订回合**：本轮刻意避开（见 18.1）；落点已记在 §8.5，等 `runtimeapi` 的在途重构落地后再取。
 - **行级评论**（§4.4 剩余项）：需要先定「行锚点 + 备注」的存储契约。
 
@@ -959,7 +959,7 @@
 
 ## 21. 实施记录：第十四轮（2026-09-25，CLI/TUI 常驻模式标识）
 
-**状态**：§4.6 的最后一项落地并关闭。至此 §4.4 只剩**行级评论**，其余 §4.x 缺口均已闭合。
+**状态**：§4.6 的最后一项落地并关闭。至此 §4.4 只剩**行级评论**，其余 §4.x 缺口均已闭合。**（2026-09-26 修订：本轮只到「状态词」口径；计划路径与读法随后按 §4.6 验收补齐，见 §26。）**
 
 ### 21.1 载体选择：不新开横幅，用页脚既有模式段
 
@@ -972,7 +972,7 @@ Web 横幅位于聊天区顶部、可换行、能放「模式 + 状态 + 路径 
 | tone | `plan` → plan、`bypass_permissions` → danger、其余 neutral；未知值回落原文 | `Plan*` → `RoleAccent`；`Full Access` → `RoleWarning`；`Accept edits` → 中性；未知枚举 → `formatChatStatusModeValue` 回落原文 |
 | 读法优先级 | 模型已请求裁决 > 计划正文可用（可评审）> 计划尚未写就 | 同优先级：`Plan ON · 待裁决` > `Plan ON · 已就绪` > `Plan ON`（最后一档在页脚不占位，相当于 Web 只在 hint 行显示整句） |
 | 裁决动作 | 不承载（仍由 composer 卡片/计划面板） | 不承载（仍由 `/plan` 命令与 composer 卡片） |
-| 计划路径 | 横幅内展示 | 不进页脚（`/plan status`、`/plans`）；页脚宽度敏感 |
+| 计划路径 | 横幅内展示 | 不进页脚（`/plan status`、`/plans`）；页脚宽度敏感（**2026-09-26 修订：路径与短读法已进页脚 compact 段，见 §26**） |
 | 窄屏 | 换行 | 紧凑态 `Plan·待裁决` / `Plan·就绪` |
 
 ### 21.3 落点与验证
@@ -1155,3 +1155,43 @@ Web 横幅位于聊天区顶部、可换行、能放「模式 + 状态 + 路径 
 - 评论锚点是**行区间**，不跟随正文重排自动改锚——`moved`/`orphaned` 如实报告，宁可显示「锚点失效」也不猜新位置。
 - 列表的重放目标是**最新归档轮**；某条评论锚在旧轮时，展示的位置就是它在当前轮的位置（这正是评审时要看的）。
 - 尚未做（不在本轮承诺内）：评论的编辑（只有新增/删除）、评论线程回复、按评论过滤 diff。
+
+---
+
+## 26. 实施记录：第十九轮（2026-09-26，CLI/TUI 常驻标识补齐 plan 路径与读法）
+
+**状态**：§4.6 在 CLI/TUI 侧的收口完成。§21 把页脚模式段落成「状态词」一档；本轮按 §4.6 的验收口径（状态 / 路径 / 读法）在**同一段位**内补齐后两项，未新增面板、横幅或键位。
+
+### 26.1 现状核对与口径
+
+| 维度 | 本轮前（§21） | 本轮后 |
+|------|---------------|--------|
+| 状态词 | `Plan ON · 待裁决` / `Plan ON · 已就绪` / `Plan ON` | 不变（优先级不变） |
+| 计划路径 | 不进页脚（只在 `/plan status` / `/plans` 可见） | 进页脚：取会话既有 display path（`planmode.State.PlanPath`，与 Web 的 `plan_path` 同源），**不拼绝对路径**；active 且未记录路径时回落默认 `plan.md`（与 `/plan status`、runtimeapi 的 `plan_mode_handlers.go:396-399` 同口径）；超长按 `compactStatusValue` 截断到 40 列并带省略号 |
+| 读法 | 无 | compact 保 `/plan`（命令枢纽），full 展开 `/plan review 查看正文` |
+| plan OFF | `Plan OFF`（逐字） | 逐字不变；新增内容只在 plan ON 时出现 |
+
+上屏遵循页脚既有 compact/full 规则（`fitChatSurfaceStatusSegments`）：宽终端 full 形态一次给全三要素；80 列等常见宽度走 compact，仍保「状态 + 路径 + /plan」，尾部诊断段按既有规则被裁。不变量：`[1]-[6]` 审批、`/mode`、`/plan`、`/plans` 语义与段序均未动。
+
+### 26.2 落点与验证
+
+| 模块 | 文件 | 内容 |
+|------|------|------|
+| 段位 | `backend/cmd/aicli/commands/chat_interaction.go` | `chatSurfacePlanModeStatusSegment` 补路径与读法（compact/full 两档）；新增 `chatSurfacePlanStatusPathMaxWidth = 40` |
+| 测试 | `backend/cmd/aicli/commands/chat_plan_mode_status_segment_test.go` | 三要素（空正文 / 已就绪 / 待裁决）、Plan OFF 逐字不变、裸 plan 权限模式的默认路径回落、超长路径截断（≤40 且带省略号）、80/200 列的上屏形态 |
+
+| 命令（cwd=backend） | 结果 |
+|---|---|
+| `gofmt -l`（2 文件） | 空 |
+| `go build ./...` | exit 0 |
+| `go test ./cmd/aicli/commands/ -run 'TestChatSurfacePlanMode\|TestChatSurfacePlanStatusLine\|TestBuildChatSurfaceStatusLine\|Status\|Plan' -count=1` | ok（7.06s，含既有页脚家族与 plan 链路） |
+
+真实文案（取样自测试，`docs/status-plan.md` 为样例计划路径）：
+- 已就绪 full：`Plan ON · 已就绪 · docs/status-plan.md · /plan review 查看正文`
+- 已就绪 compact：`Plan·就绪 · docs/status-plan.md · /plan`
+- 待裁决 full：`Plan ON · 待裁决 · docs/status-plan.md · /plan review 查看正文`
+- 待裁决 compact：`Plan·待裁决 · docs/status-plan.md · /plan`
+- 80 列实渲染：`Plan·就绪 · docs/status-plan.md · /plan · Ctx 0% · commands`
+- plan OFF：`Plan OFF`（full/compact 均为原文）
+
+**与 Web 的已知差异（如实记录，不拉平语义）**：Web 横幅可换行，构造上始终同时展示完整路径与整句 hint（如 `计划已就绪，可评审。`）；页脚是单行、宽度敏感，compact 只保留 `/plan` 命令指针，整句读法（`/plan review 查看正文`）仅在 full 形态出现。两边的状态优先级、tone 及未知枚举回落口径一致。

@@ -357,7 +357,7 @@
   2. `policy.ParseMode` 收编兼容别名（`manual`/`standard`→`default`、`auto-accept`/`acceptEdits`→`accept_edits`、`bypass`→`bypass_permissions`、`dontAsk`→`dont_ask`），CLI / runtime API / ACP 同一解析；未知值仍然拒绝（别名不会让拼错值静默降级），`normalizeMode` 与 `ParseMode` 保持同源。
   3. `/mode`（与 `/permission-mode` 同义，ACP 侧早先已接 `configOptions`）新增冒号简写 `/mode:<name>`、`/permission-mode:<name>`；命令名字面量保留在分发点，供 slash catalog 源码扫描护栏继续识别。
   4. 测试：`internal/policy/modes_alias_test.go`、`cmd/aicli/commands/chat_permission_mode_entry_test.go`（解析表 / 冲突 / 冒号形 / 非法值拒绝 / 裸命令查询）。
-  5. **常驻模式标识（banner）核对**：CLI/TUI 页脚早已落地（§4.6 的 `chatSurfacePlanModeStatusSegment`：plan 各档 / `bypass_permissions`→「Full Access」并带告警角色 / `accept_edits`→中性 / 未知值回落后端原文；窄宽度优先保留），测试见 `chat_plan_mode_status_segment_test.go`；与 Web 横幅（`session-mode-banner-shared.ts`）tone 与回落口径逐条对齐。本项**无需新代码**——`dont_ask` 两侧同样走「未知值→原文」口径（该模式刻意不进 shift+tab 循环，必须显式选择）。
+  5. **常驻模式标识（banner）核对**：CLI/TUI 页脚早已落地（§4.6 的 `chatSurfacePlanModeStatusSegment`：plan 各档 / `bypass_permissions`→「Full Access」并带告警角色 / `accept_edits`→中性 / 未知值回落后端原文；窄宽度优先保留），测试见 `chat_plan_mode_status_segment_test.go`；与 Web 横幅（`session-mode-banner-shared.ts`）tone 与回落口径逐条对齐。本项**无需新代码**——`dont_ask` 两侧同样走「未知值→原文」口径（该模式刻意不进 shift+tab 循环，必须显式选择）。**（2026-09-26 补充：plan 档随后在同一状态行内补齐了计划路径与读法，口径与证据见 plan-mode 文档 §4.6 / 分析文档 §26；权限模式的 tone 口径不变。）**
 
 ### 4.13 【P2】按需命令解释（模型摘要）
 
