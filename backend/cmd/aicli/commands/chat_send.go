@@ -23,6 +23,13 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	if session.IsInterrupted() {
 		return "", userInterruptError()
 	}
+	// 配置文件可能在进程运行期间被编辑（例如上调 max_context_tokens、增删
+	// provider）。turn 入口按指纹检查一次：变化则按与启动相同的加载顺序重载
+	// 并与会话视图对账，保证本轮的 prompt 预算与状态栏都基于最新配置，而不是
+	// 进程启动时的内存快照。
+	if _, err := refreshChatConfigIfChanged(session); err != nil {
+		warnChatConfigRefreshFailure(session, err)
+	}
 	// Codex-aligned: only notify when the agent is truly waiting for the user.
 	// Queued follow-up input starts the next turn immediately, so a completion
 	// bell at that boundary would feel like false attention.

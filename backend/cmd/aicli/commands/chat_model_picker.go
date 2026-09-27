@@ -390,6 +390,9 @@ func applyUnifiedModelCommandSelection(session *ChatSession, providerCtx *provid
 	session.RouteWarnings = nil
 	session.FallbackUsed = false
 	session.FallbackReason = ""
+	// 与 applyModelCommandSelection 一致：同目标重选也要让缓存窗口与最新配置
+	// 能力对账（例如配置从 128K 上调到 1M 后重选同一模型）。
+	reconcileChatSessionAfterConfigReload(session)
 	if err := syncRuntimeSessionFromChat(session); err != nil {
 		warnings = append(warnings, fmt.Errorf("切换模型后同步会话失败: %w", err))
 	}

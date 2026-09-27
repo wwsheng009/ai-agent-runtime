@@ -56,6 +56,12 @@ func printChatStatus(session *ChatSession) {
 		return
 	}
 
+	// /status 是显式的状态查询：先检查磁盘配置是否已变化，避免 Limits /
+	// provider 信息停留在进程启动时的快照。
+	if _, err := refreshChatConfigIfChanged(session); err != nil {
+		warnChatConfigRefreshFailure(session, err)
+	}
+
 	contentWidth := resolveChatStatusBoxContentWidth()
 	lines := buildChatStatusBoxLines(session, contentWidth)
 	text := strings.Join(lines, "\n") + "\n"

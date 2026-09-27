@@ -200,6 +200,11 @@ func restoreChatStateFromRuntimeSession(session *ChatSession, runtimeSession *ru
 	}
 	restoreChatRouteTransparency(session, session.RuntimeSession)
 	restoreChatContextTokenUsage(session, session.RuntimeSession)
+	// 持久化的窗口值可能来自旧配置（例如 max_context_tokens 上调前），而窗口
+	// 解析优先取该缓存。恢复时用当前配置能力对账一次，让 /resume 不必依赖
+	// 新建会话或 /model 重选就能显示正确窗口；此时 Interaction 可能尚未就绪，
+	// 这里只做静默对齐，由后续状态渲染展示新值。
+	reconcileChatContextWindowWithConfig(session, false)
 	restoreChatTokenCount(session, session.RuntimeSession)
 	refreshChatTitleMetadata(session)
 	syncChatLoggerSessionMetadata(session)

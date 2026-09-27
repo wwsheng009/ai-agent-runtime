@@ -125,6 +125,7 @@ func applyProfileConfigOverlay(session *ChatSession, overlay *chatProfileConfigO
 	}
 	session.Config = merged
 	session.ProfileConfigOverlayApplied = merged
+	session.ProfileConfigOverlay = overlay
 	session.ProfileConfigOverlayKeys = append([]string(nil), overlay.Keys...)
 	session.ProfileConfigOverlayOrigins = cloneStringMap(overlay.Origins)
 	return nil
@@ -147,6 +148,7 @@ func restoreProfileConfigBase(session *ChatSession) {
 		session.Config = session.ProfileConfigBase
 	}
 	session.ProfileConfigOverlayApplied = nil
+	session.ProfileConfigOverlay = nil
 	session.ProfileConfigOverlayKeys = nil
 	session.ProfileConfigOverlayOrigins = nil
 }

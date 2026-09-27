@@ -184,6 +184,7 @@ func reloadChatConfigForModelCommand(session *ChatSession) error {
 		return fmt.Errorf("重新读取本地配置文件 %s 失败: 配置为空", configPath)
 	}
 	session.Config = reloaded
+	rememberChatConfigFingerprint(session, configPath)
 	return nil
 }
 
@@ -354,6 +355,9 @@ func applyModelCommandSelection(session *ChatSession, providerCtx *providerExecu
 	session.RouteWarnings = nil
 	session.FallbackUsed = false
 	session.FallbackReason = ""
+	// 同目标重选也要与最新配置能力对账：配置可能在会话运行期间被调大窗口，
+	// 而会话缓存的旧窗口值优先级更高，不对账就会继续显示旧值。
+	reconcileChatSessionAfterConfigReload(session)
 	warnIfChatSessionSyncFails(session, "toggle model", syncRuntimeSessionFromChat(session))
 	if err := refreshLocalRuntimeAfterModelSelection(session); err != nil {
 		warnIfChatSessionSyncFails(session, "refresh local runtime after model switch", err)
@@ -367,6 +371,17 @@ func applyModelCommandSelection(session *ChatSession, providerCtx *providerExecu
 func applyChatExecutionContext(session *ChatSession, providerCtx *providerExecutionContext, reasoning string) error {
 	if session == nil || providerCtx == nil {
 		return fmt.Errorf("当前没有活动会话")
+	}
+
+	// provider/model 实际变化时，旧目标的上下文窗口快照必须作废：窗口解析优先
+	// 取 session.ContextWindowTokenCount，残留的旧值会让状态栏继续显示上一个
+	// 模型的窗口（例如配置从 128K 上调到 1M 后仍然显示 128K）。同一目标的重复
+	// 选择不清空，保证 provider 上报的窗口快照不被误删。
+	if !strings.EqualFold(strings.TrimSpace(session.ProviderName), strings.TrimSpace(providerCtx.ProviderName)) ||
+		!strings.EqualFold(strings.TrimSpace(session.Model), strings.TrimSpace(providerCtx.Model)) {
+		session.ContextWindowTokenCount = 0
+		session.providerContextTokenCount = 0
+		session.providerContextWindowTokenCount = 0
 	}
 
 	session.ProviderName = providerCtx.ProviderName

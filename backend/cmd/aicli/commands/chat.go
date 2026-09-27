@@ -157,14 +157,18 @@ type ChatSession struct {
 	SkillsMode    string                // Skills 暴露模式
 	SkillsDebug   bool                  // Skills 调试输出
 	// NoSkills 是 --no-skills：跳过 skill 自动发现，只保留显式目录。
-	NoSkills         bool
-	Config           *config.Config  // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
-	RetryConfig      RetryConfig     // 重试配置
-	RequestTimeout   time.Duration   // 请求超时（0 表示不设置）
-	OutputFormat     string          // 输出格式（interactive|text|json）
-	InputReader      *bufio.Reader   // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
-	InputQueue       *chatInputQueue // interactive line queue fed by stdin pump
-	ProfileReference string          // 用户指定或配置解析出的 profile 引用
+	NoSkills bool
+	Config   *config.Config // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
+	// configFingerprint 记录 Config 最近一次加载时配置源文件的指纹
+	// （path+mtime+size；分层加载开启时覆盖所有层）。turn 入口 / 状态查询据此
+	// 发现磁盘配置变化并重载，无需重启进程。
+	configFingerprint string
+	RetryConfig       RetryConfig     // 重试配置
+	RequestTimeout    time.Duration   // 请求超时（0 表示不设置）
+	OutputFormat      string          // 输出格式（interactive|text|json）
+	InputReader       *bufio.Reader   // 共享 stdin reader，避免交互阶段重复缓冲吞掉后续输入
+	InputQueue        *chatInputQueue // interactive line queue fed by stdin pump
+	ProfileReference  string          // 用户指定或配置解析出的 profile 引用
 	// ProfileAutoRoutedFrom 记录该绑定由哪个保留引用路由而来（FR-11：目前仅 "auto"；
 	// 空 = 非自动路由）。ProfileReference 始终是已解析的具体 profile，本字段只用于
 	// 归因展示（启动摘要 / /profile status），不参与任何解析。
@@ -200,6 +204,10 @@ type ChatSession struct {
 	// 两者一起保证热切换/解除覆盖时精确还原基线，避免覆盖层层叠加。
 	ProfileConfigBase           *config.Config
 	ProfileConfigOverlayApplied *config.Config
+	// ProfileConfigOverlay 是当前绑定 profile 的 runtime.overrides 视图
+	// （未绑定/无覆盖为 nil）。配置热重载会整体替换 session.Config，之后据此
+	// 在新基线上重建覆盖，避免自动重载静默丢弃 profile 覆盖。
+	ProfileConfigOverlay        *chatProfileConfigOverlay
 	ProfileConfigOverlayKeys    []string
 	ProfileConfigOverlayOrigins map[string]string
 	// BaseToolPolicy is the pre-overlay policy (profile / session base) so
