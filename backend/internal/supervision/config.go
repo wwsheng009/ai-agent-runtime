@@ -215,6 +215,11 @@ func (c Config) WithDefaults() Config {
 	if strings.EqualFold(strings.TrimSpace(c.WakeBudgetMode), string(WakeBudgetModeDurable)) {
 		d.WakeBudgetMode = string(WakeBudgetModeDurable)
 	}
+	// WakeSelfCheckPerWindow 是显式 opt-in 的窗口配额（默认 0 = 关闭）：此前漏在
+	// 合并链之外，用户按文档设置它会被 WithDefaults 静默丢弃、看起来「配了没生效」。
+	if c.WakeSelfCheckPerWindow > 0 {
+		d.WakeSelfCheckPerWindow = c.WakeSelfCheckPerWindow
+	}
 	// ProgressCheckInterval 没有默认值：它是显式 opt-in，0 必须保持 0。
 	if c.ProgressCheckInterval > 0 {
 		d.ProgressCheckInterval = c.ProgressCheckInterval

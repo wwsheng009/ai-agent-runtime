@@ -550,7 +550,7 @@
 ① 「模型已经看过终态」的重复唤醒抑制：`wait=exit` 返回终态时所属 turn 仍在跑，wake 会等 turn 结束再补一轮冗余 turn（digest 只是重复信息，但会消耗 other/failure 预算）。设计取向：manager 记 in-flight waiter（`BeginOutputWait/EndOutputWait`，broker 的 `readTaskOutputWithWait` defer 收尾），终态事件发射前若 waiter 活跃就把「终态将被读取」写进 job metadata；宿主投影看到该标记时只落已 resolved 的 inbox 记录、跳过 ScheduleWake（`SuppressWake`）；
 ② 会话关闭时 resolve 该 session 的待投递 wake（避免永久 pending 与后续会话复用时的陈旧投递）；
 ③ `monitor_command`/`task_monitor`：timer 用 `time.AfterFunc` 只做计时，到点仍走 `ScheduleWake`（progress 类预算）+ 宿主 drain；`maxDurationMs` 复用 `CancelJob`；registry 随 job 终态/会话关闭清理；注意 progress wake 必须携带通知内容（`digestDeliverable` 判空会静默 release）。
-④ 预算可配置（保留项，待确认配置面：env + `Resolve*` 还是配置文件）。
+④ 预算可配置：已收口（配置面即配置文件 `supervision:` 块，两宿主共用同一装配；见 §9.22）。
 
 ### 9.18 已观察终态抑制重复唤醒（2026:09: 26 续做，§9.17 未做①收口）
 
@@ -612,3 +612,18 @@
 - **不需要「不冷开存储」守卫**：与 CLI 不同，API 侧 `getSupervisionStore()` 只返回已注入的 store（不做惰性打开），因此关闭/删除路径不会为了清理而新建监督面数据库。
 - **测试（1 例新增）**：API 侧「待投递 wake 被清空 + 巡检计时器归零 + 重复调用/空 id/nil handler 安全」；`./internal/api/runtimeapi/` 全量绿（37.5s），确认 `changeSessionState`/`batchSessionAction` 签名变更无遗漏调用点。
 - **残留**：Agent 侧 `CancelSessionMonitors` 只覆盖本进程 manager；跨进程（另一端 aicli 进程持有同一会话的 job）的计时器仍需各自进程自行收口（与本文件「巡检不跨进程恢复」一致）。
+
+### 9.22 唤醒预算配置面核查与 `wake_self_check_per_window` 静默失效修复（§9.17 残留④收口）
+
+**结论先说**：预算「可配置」这件事**早已存在**，配置面就是**用户配置文件**的 `supervision:` 块（snake_case 键），不需要新增 env 通道；核查中发现并修掉了一个「文档说能配、实际被静默丢弃」的旋钮。
+
+- **既有配置面（核查证据）**：
+  - 键位与语义：`internal/supervision/config.go` 的 `wake_rate_window`（默认 1h）、`wake_max_auto_wake`（failure/other 共用，默认 5/窗口，负数=不设硬上限）、`wake_max_approval_wake`（默认 0=unlimited，显式正数才封顶）、`wake_max_progress_wake`（默认 6，独立于 critical 预算）、`wake_budget_mode`（memory|durable）、`wake_self_check_per_window`。
+  - 装配链路只此一条，两宿主共用：`agentconfig.Config.Supervision`（yaml `supervision:`）→ CLI `chat_actor_host.go:1231` 与 API `runtime-server/main.go:1230` 都取 `cfg.Supervision.WithDefaults()` → `runtimeserver.BuildSupervisionControlPlane` 内 `cfg.WakeSchedulerConfig()`（`internal/runtimeserver/supervision.go:116`）→ `WakeScheduler`。不存在 CLI/API 漂移面。
+  - 用户文档：`docs/plan/supervision-operator-runbook.md`（`supervision.wake_max_progress_wake` 等逐个键位表）与 `multi-agent-execution-optimization-plan.md` §P1-6 行为口径。
+  - 可见性：`/supervision/digest`、`/supervision/snapshot` 的 `wake_budget` 字段与 CLI `/debug supervision list`、以及模型可见的 preflight 预算行（三处同源同序），调完能看到用量与上限。
+  - **env 不参与**：本仓这些键没有环境变量覆盖通道，配置面即文件（本轮据此放弃「加 env」的方案，避免出现两套真相）。
+- **顺带修复的真实缺陷（静默失效）**：`wake_self_check_per_window`（P1-6 方案 4 的父回合自检配额）**漏在 `Config.WithDefaults()` 的合并链之外**：用户按文档写 `wake_self_check_per_window: 1`，`WithDefaults()` 返回的默认结构把该字段归零，而 `WakeSchedulerConfig()` 又在 `WithDefaults()` 之后读取它 —— 于是「配了完全没生效」，且没有任何告警。修复：在 `WakeBudgetMode` 合并之后补 `if c.WakeSelfCheckPerWindow > 0 { d.WakeSelfCheckPerWindow = c.WakeSelfCheckPerWindow }`（0 保持关闭的历史语义，负数不启用）。
+  - 影响面：此前该旋钮只在「直接构造 `WakeSchedulerConfig`」的测试/嵌入宿主里生效；配置文件路径（两宿主）在修复后才真正可用。`wake_self_check` 仍需 `turn_end_check: true` 才挂载（见 manual-audit 计划 §67）。
+- **测试（1 例新增，即回归钉子）**：`TestWakeBudgetYAMLBinding` —— YAML 一次写入六个预算键 → 断言 `WakeSchedulerConfig()` 逐项生效（含 `SelfCheckPerWindow`）、未配置时回落默认（1h/5/memory/自检 0），并钉住 0/负数不打开自检。修前该用例在 self-check 断言处失败（expected 1 / actual 0），修后全绿；`internal/supervision` 全包绿。
+- **残留**：无（④ 关闭）。§9.18 残留①（「wake 先于观察登记落库」的窗口）仍是刻意不做的项，与预算配置无关。

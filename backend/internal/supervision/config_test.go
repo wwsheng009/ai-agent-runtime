@@ -9,6 +9,41 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// TestWakeBudgetYAMLBinding pins the user-facing surface of the auto-wake budget
+// (§9.17 残留④「预算可配置」): the keys live in the user config file's
+// `supervision:` block and reach the scheduler without extra plumbing, so an
+// operator can widen/narrow the failure/other allowance without a code change.
+func TestWakeBudgetYAMLBinding(t *testing.T) {
+	yamlDoc := "wake_rate_window: 30m\n" +
+		"wake_max_auto_wake: 9\n" +
+		"wake_max_approval_wake: 2\n" +
+		"wake_max_progress_wake: 3\n" +
+		"wake_budget_mode: durable\n" +
+		"wake_self_check_per_window: 1\n"
+	var cfg Config
+	require.NoError(t, yaml.Unmarshal([]byte(yamlDoc), &cfg))
+
+	scheduler := cfg.WakeSchedulerConfig()
+	assert.Equal(t, 30*time.Minute, scheduler.RateWindow)
+	assert.Equal(t, 9, scheduler.MaxAutoWakePerWindow, "failure/other 预算必须来自用户配置")
+	assert.Equal(t, 2, scheduler.MaxApprovalWakePerWindow)
+	assert.Equal(t, 3, scheduler.MaxProgressWakePerWindow)
+	assert.Equal(t, WakeBudgetModeDurable, scheduler.BudgetMode)
+	assert.Equal(t, 1, scheduler.SelfCheckPerWindow)
+
+	// 未配置时沿用默认：1h / 5（负数仍是「不设硬上限」的既有逃生口）。
+	var untouched Config
+	defaults := untouched.WakeSchedulerConfig()
+	assert.Equal(t, time.Hour, defaults.RateWindow)
+	assert.Equal(t, 5, defaults.MaxAutoWakePerWindow)
+	assert.Equal(t, WakeBudgetModeMemory, defaults.BudgetMode)
+	assert.Zero(t, defaults.SelfCheckPerWindow, "父回合自检默认关闭，0 必须保持 0")
+
+	// 0/负数都不打开自检（默认关闭是历史语义，只有正数才是显式配额）。
+	assert.Zero(t, Config{WakeSelfCheckPerWindow: 0}.WithDefaults().WakeSelfCheckPerWindow)
+	assert.Zero(t, Config{WakeSelfCheckPerWindow: -1}.WithDefaults().WakeSelfCheckPerWindow)
+}
+
 // TestApprovalTerminalGuardDefaultsEnabled pins the gray-release switch
 // semantics (docs/plan/supervision-approval-resume-past-deadline-fix-plan.md §8):
 // the guard is on unless it is explicitly turned off, so a zero-valued or
