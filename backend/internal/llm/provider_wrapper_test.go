@@ -2508,3 +2508,116 @@ func TestProviderWrapper_OpenAICall_PropagatesExplicitThinking(t *testing.T) {
 	assert.Equal(t, float64(32000), rawThinking["budget_tokens"])
 	assert.Nil(t, capturedBody["reasoning_effort"])
 }
+
+func TestProviderWrapper_CodexCall_RecoversFromInvalidEncryptedContentOnce(t *testing.T) {
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(raw))
+		if len(bodies) == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"message":"The encrypted content for item rs_0d80d06281e34ae1016ab895fba8148190b1357911c4ad8bcc could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error","param":"","code":"invalid_encrypted_content"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, strings.Join([]string{
+			"event: response.created",
+			`data: {"type":"response.created","response":{"id":"resp_2","model":"gpt-6-astra"}}`,
+			"",
+			"event: response.output_text.delta",
+			`data: {"type":"response.output_text.delta","output_index":0,"delta":"ok"}`,
+			"",
+			"event: response.completed",
+			`data: {"type":"response.completed","response":{"id":"resp_2","status":"completed","stop_reason":"end_turn"}}`,
+			"",
+		}, "\n"))
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:         "codex",
+		BaseURL:      server.URL,
+		DefaultModel: "gpt-6-astra",
+		RetryRules: []RetryRule{{
+			Name:       "invalid_encrypted_content_strip_client_state",
+			Enabled:    true,
+			Action:     RetryRuleActionStripClientState,
+			MaxRetries: 1,
+			ErrorCode:  RetryErrorCodeMatcher{Codes: []string{"invalid_encrypted_content"}},
+		}},
+	})
+	require.NoError(t, err)
+
+	replayedBlob := "gAAAAABquJYDGUPdW66iUaQWDlGBD3aiZMIvQkluj4lUQpMin3Dbqxvx"
+	metadata := types.NewMetadata()
+	metadata["reasoning_details"] = (&types.ReasoningBlock{
+		Format:     "openai_responses",
+		Streamable: true,
+		Visibility: types.ReasoningVisibilityOpaque,
+		Metadata: map[string]interface{}{
+			"response_output_items": []map[string]interface{}{
+				{
+					"id":                "rs_0d80d06281e34ae1016ab895fba8148190b1357911c4ad8bcc",
+					"type":              "reasoning",
+					"summary":           []map[string]interface{}{},
+					"encrypted_content": replayedBlob,
+				},
+				{
+					"type": "message",
+					"role": "assistant",
+					"content": []map[string]interface{}{{
+						"type": "output_text",
+						"text": "继续执行。",
+					}},
+				},
+			},
+		},
+	}).ToMap()
+
+	resp, err := provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-6-astra",
+		Messages: []types.Message{
+			{Role: "user", Content: "继续"},
+			{Role: "assistant", Content: "继续执行。", Metadata: metadata},
+		},
+		Stream: true,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "ok", resp.Content)
+
+	require.Len(t, bodies, 2, "recovery must retry exactly once")
+	assert.Contains(t, bodies[0], `"encrypted_content":"`+replayedBlob)
+	assert.NotContains(t, bodies[1], `"encrypted_content":"`+replayedBlob,
+		"the retry must not resend the unverifiable ciphertext")
+	assert.Contains(t, bodies[1], "继续执行。",
+		"the rest of the transcript must survive the client-state strip")
+}
+
+func TestProviderWrapper_CodexCall_InvalidEncryptedContentWithoutRecoveryIsTerminal(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":{"message":"The encrypted content for item rs_1 could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error","param":"","code":"invalid_encrypted_content"}}`)
+	}))
+	defer server.Close()
+
+	provider, err := NewProvider(&ProviderConfig{
+		Type:         "codex",
+		BaseURL:      server.URL,
+		DefaultModel: "gpt-6-astra",
+	})
+	require.NoError(t, err)
+
+	_, err = provider.Call(context.Background(), &LLMRequest{
+		Model: "gpt-6-astra",
+		Messages: []types.Message{{
+			Role:    "user",
+			Content: "hello",
+		}},
+		Stream: true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid_encrypted_content")
+	assert.Equal(t, 1, requests, "without the recovery rule the error stays terminal")
+}

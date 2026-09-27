@@ -63,3 +63,37 @@ func TestProviderMaxTransportRetriesFromAgentConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestRetryRulesFromAgentConfigArmsInvalidEncryptedContentRecovery(t *testing.T) {
+	cfg := &agentconfig.Config{
+		Retry: &agentconfig.RetryConfig{
+			Enabled: true,
+			InvalidEncryptedContentRecovery: agentconfig.InvalidEncryptedContentRecoveryConfig{
+				StripClientStateOnce: true,
+			},
+		},
+	}
+	rules := RetryRulesFromAgentConfig(cfg)
+	require.Len(t, rules, 1)
+	require.Equal(t, "invalid_encrypted_content_strip_client_state", rules[0].Name)
+	require.Equal(t, RetryRuleActionStripClientState, rules[0].Action)
+	require.Contains(t, rules[0].ErrorCode.Codes, "invalid_encrypted_content")
+
+	policy := newProviderRetryPolicy(-1, 0, RetryTuning{}, rules)
+	require.True(t, policy.StripClientStateOnInvalidEncryptedContent)
+
+	// 未开启开关时不得凭空注入恢复规则（其余规则照旧）。
+	off := RetryRulesFromAgentConfig(&agentconfig.Config{Retry: &agentconfig.RetryConfig{Enabled: true}})
+	require.Empty(t, off)
+
+	existing := RetryRulesFromAgentConfig(&agentconfig.Config{Retry: &agentconfig.RetryConfig{
+		Enabled: true,
+		Rules: []agentconfig.RetryRuleConfig{{
+			Name:    "http_5xx_retry",
+			Enabled: true,
+			Keyword: agentconfig.RetryKeywordConfig{Values: []string{"internal server error"}},
+		}},
+	}})
+	require.Len(t, existing, 1)
+	require.False(t, newProviderRetryPolicy(-1, 0, RetryTuning{}, existing).StripClientStateOnInvalidEncryptedContent)
+}

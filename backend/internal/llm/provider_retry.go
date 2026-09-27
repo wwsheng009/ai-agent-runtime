@@ -190,6 +190,53 @@ func IsMaxTokensLimitError(err error) bool {
 	return ok
 }
 
+// MetadataKeyStripReasoningClientState asks protocol adapters to omit replayed
+// client-side reasoning state (Codex reasoning items carrying
+// encrypted_content) from this request. It is set internally by the one-shot
+// invalid-encrypted-content recovery; adapter/codex.go mirrors the literal.
+const MetadataKeyStripReasoningClientState = "strip_reasoning_client_state"
+
+// isInvalidEncryptedContentError reports the deterministic upstream rejection
+// of a replayed reasoning item whose encrypted_content the provider cannot
+// verify: HTTP 400 with code invalid_encrypted_content ("The encrypted content
+// for item rs_... could not be verified. Reason: Encrypted content could not be
+// decrypted or parsed.").
+func isInvalidEncryptedContentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if statusCode, ok := providerCallHTTPStatus(err); ok && statusCode != http.StatusBadRequest {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "invalid_encrypted_content") ||
+		(strings.Contains(lower, "encrypted content") && strings.Contains(lower, "could not be verified"))
+}
+
+// applyInvalidEncryptedContentRecovery reports whether the caller should rebuild
+// the request with client-side reasoning replay stripped and try once more.
+// stripped is the one-shot latch: after the first recovery the same error is
+// terminal again, so an unverifiable transcript cannot be replayed forever.
+func applyInvalidEncryptedContentRecovery(stripped *bool, enabled bool, err error) bool {
+	if stripped == nil || *stripped || !enabled || err == nil {
+		return false
+	}
+	if !isInvalidEncryptedContentError(err) {
+		return false
+	}
+	*stripped = true
+	return true
+}
+
+// withStrippedReasoningClientState clones request metadata with the client-state
+// strip flag set. The clone keeps the caller's metadata map untouched, so the
+// flag cannot leak into the session history or a later request.
+func withStrippedReasoningClientState(metadata map[string]interface{}) map[string]interface{} {
+	clone := cloneMapStringAny(metadata)
+	clone[MetadataKeyStripReasoningClientState] = true
+	return clone
+}
+
 const (
 	// outputBudgetEscalationMaxCount bounds how many times a single request may
 	// widen its output budget after a completion-budget-bound degenerate reply

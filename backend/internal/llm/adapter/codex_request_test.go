@@ -3202,3 +3202,59 @@ func TestCodexStream_CustomToolCallObjectInput(t *testing.T) {
 		t.Fatalf("expected no arguments key for streamed custom_tool_call, got %#v", toolCalls[0])
 	}
 }
+
+func TestCodexBuildRequest_StripReasoningClientStateDropsReplayedReasoningItems(t *testing.T) {
+	a := &CodexAdapter{}
+	reasoningItem := map[string]interface{}{
+		"type":              "reasoning",
+		"id":                "rs_0d80d06281e34ae1016ab895fba8148190b1357911c4ad8bcc",
+		"encrypted_content": "gAAAAABquJYDGUPdW66iUaQWDlGBD3aiZMIvQkluj4lUQpMin3Dbqxvx",
+		"summary":           []map[string]interface{}{},
+	}
+	functionCall := map[string]interface{}{
+		"type":      "function_call",
+		"call_id":   "call_strip_1",
+		"name":      "shell",
+		"arguments": `{"command":"git status"}`,
+	}
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "继续"},
+		{
+			"role":                  "assistant",
+			"response_output_items": []map[string]interface{}{reasoningItem, functionCall},
+		},
+	}
+
+	replayed := a.BuildRequest(RequestConfig{Model: "gpt-6-astra", Messages: messages})
+	if !codexInputHasItemType(replayed["input"], "reasoning") {
+		t.Fatalf("control: expected replayed reasoning item, got %#v", replayed["input"])
+	}
+
+	stripped := a.BuildRequest(RequestConfig{
+		Model:    "gpt-6-astra",
+		Messages: messages,
+		Metadata: map[string]interface{}{"strip_reasoning_client_state": true},
+	})
+	if codexInputHasItemType(stripped["input"], "reasoning") {
+		t.Fatalf("expected reasoning items stripped, got %#v", stripped["input"])
+	}
+	if !codexInputHasItemType(stripped["input"], "function_call") {
+		t.Fatalf("expected function_call replay preserved, got %#v", stripped["input"])
+	}
+}
+
+func codexInputHasItemType(input interface{}, itemType string) bool {
+	items, ok := input.([]map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if value, _ := item["type"].(string); strings.EqualFold(strings.TrimSpace(value), itemType) {
+			return true
+		}
+	}
+	return false
+}

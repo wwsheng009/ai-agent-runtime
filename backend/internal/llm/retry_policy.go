@@ -79,6 +79,10 @@ type RetryRuleAction string
 const (
 	RetryRuleActionRetry RetryRuleAction = "retry"
 	RetryRuleActionStop  RetryRuleAction = "stop"
+	// RetryRuleActionStripClientState 不是通用重试：它标记一种定向恢复——
+	// 上游拒绝回放的加密推理内容时，剥离客户端推理回放状态后重试一次。
+	// 该动作本身不把错误分类为可重试，避免同一份坏密文被反复重放。
+	RetryRuleActionStripClientState RetryRuleAction = "strip_client_state"
 )
 
 type RetryKeywordMatcher struct {
@@ -111,6 +115,10 @@ type retryPolicy struct {
 	Randomization               float64
 	Schedule                    []time.Duration
 	Rules                       []RetryRule
+	// StripClientStateOnInvalidEncryptedContent enables the one-shot recovery
+	// for HTTP 400 invalid_encrypted_content: rebuild the request without
+	// replayed reasoning items and retry once.
+	StripClientStateOnInvalidEncryptedContent bool
 }
 
 type retryExhaustedError struct {
@@ -314,6 +322,7 @@ func newRuntimeRetryPolicy(maxRetries int, transportMaxRetries int, tuning Retry
 		Randomization:               tuning.Randomization,
 		Schedule:                    append([]time.Duration(nil), tuning.Schedule...),
 		Rules:                       rules,
+		StripClientStateOnInvalidEncryptedContent: retryRulesStripClientState(rules),
 	}
 }
 
@@ -346,6 +355,7 @@ func newProviderRetryPolicy(maxRetries int, transportMaxRetries int, tuning Retr
 		Randomization:               tuning.Randomization,
 		Schedule:                    append([]time.Duration(nil), tuning.Schedule...),
 		Rules:                       rules,
+		StripClientStateOnInvalidEncryptedContent: retryRulesStripClientState(rules),
 	}
 }
 
@@ -428,6 +438,9 @@ func applyRequestRetryPolicy(policy retryPolicy, metadata map[string]interface{}
 	policy.MaxTransportAttempts = 1
 	policy.DefaultMaxTransportAttempts = 1
 	policy.Rules = nil
+	// 显式关闭重试时，一次性恢复也必须停用：否则它会在用户要求"不重试"的
+	// 请求上多发一次上游调用。
+	policy.StripClientStateOnInvalidEncryptedContent = false
 	return policy
 }
 
@@ -1450,8 +1463,9 @@ func decisionFromRetryRules(err error, rules []RetryRule) (retryDecision, bool) 
 		if !retryRuleMatches(rule, statusCode, errorCode, message) {
 			continue
 		}
+		action := normalizeRetryRuleAction(rule.Action)
 		decision := retryDecision{
-			Retryable:   normalizeRetryRuleAction(rule.Action) != RetryRuleActionStop,
+			Retryable:   action != RetryRuleActionStop && action != RetryRuleActionStripClientState,
 			Delay:       decisionDelayFromServerHint(err),
 			BaseDelay:   rule.RetryDelay,
 			Reason:      strings.TrimSpace(rule.Name),
@@ -1459,10 +1473,13 @@ func decisionFromRetryRules(err error, rules []RetryRule) (retryDecision, bool) 
 			Multiplier:  rule.BackoffMultiplier,
 		}
 		if decision.Reason == "" {
-			if decision.Retryable {
-				decision.Reason = "configured_retry_rule"
-			} else {
+			switch action {
+			case RetryRuleActionStop:
 				decision.Reason = "configured_stop_rule"
+			case RetryRuleActionStripClientState:
+				decision.Reason = "configured_strip_client_state_rule"
+			default:
+				decision.Reason = "configured_retry_rule"
 			}
 		}
 		return decision, true
@@ -1475,9 +1492,28 @@ func normalizeRetryRuleAction(action RetryRuleAction) RetryRuleAction {
 	switch RetryRuleAction(strings.ToLower(strings.TrimSpace(string(action)))) {
 	case RetryRuleActionStop:
 		return RetryRuleActionStop
+	case RetryRuleActionStripClientState:
+		return RetryRuleActionStripClientState
 	default:
 		return RetryRuleActionRetry
 	}
+}
+
+// retryRulesStripClientState reports whether an enabled rule asks the provider
+// retry loop for the one-shot client-state strip recovery. The rule only
+// enables that recovery; it never makes the matched error generically
+// retryable, so a still-failing request surfaces as a terminal 400 instead of
+// replaying the same unverifiable ciphertext.
+func retryRulesStripClientState(rules []RetryRule) bool {
+	for _, rule := range rules {
+		if !rule.Enabled {
+			continue
+		}
+		if normalizeRetryRuleAction(rule.Action) == RetryRuleActionStripClientState {
+			return true
+		}
+	}
+	return false
 }
 
 func decisionDelayFromServerHint(err error) time.Duration {

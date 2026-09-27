@@ -1197,3 +1197,51 @@ func TestIsEmptyReplyError(t *testing.T) {
 	require.False(t, IsEmptyReplyError(fmt.Errorf("stream_interrupted: stream disconnected before completion")))
 	require.False(t, IsEmptyReplyError(fmt.Errorf("provider http error: 429 too many requests")))
 }
+
+func TestIsInvalidEncryptedContentError(t *testing.T) {
+	body := `{"error":{"message":"The encrypted content for item rs_0d80d06281e34ae1016ab895fba8148190b1357911c4ad8bcc could not be verified. Reason: Encrypted content could not be decrypted or parsed.","type":"invalid_request_error","param":"","code":"invalid_encrypted_content"}}`
+	err := newProviderHTTPError(http.StatusBadRequest, body, nil)
+	require.True(t, isInvalidEncryptedContentError(err))
+	require.True(t, isInvalidEncryptedContentError(fmt.Errorf("streaming aggregate call failed after retries: %w", err)))
+
+	require.False(t, isInvalidEncryptedContentError(nil))
+	require.False(t, isInvalidEncryptedContentError(newProviderHTTPError(http.StatusTooManyRequests, body, nil)))
+	require.False(t, isInvalidEncryptedContentError(newProviderHTTPError(http.StatusBadRequest, `{"error":{"message":"Unsupported parameter: metadata"}}`, nil)))
+}
+
+func TestApplyInvalidEncryptedContentRecoveryIsOneShot(t *testing.T) {
+	err := newProviderHTTPError(http.StatusBadRequest, `{"error":{"code":"invalid_encrypted_content"}}`, nil)
+
+	var missingLatch *bool
+	require.False(t, applyInvalidEncryptedContentRecovery(missingLatch, true, err))
+
+	stripped := false
+	require.False(t, applyInvalidEncryptedContentRecovery(&stripped, false, err), "disabled recovery must not fire")
+	require.False(t, stripped)
+
+	require.True(t, applyInvalidEncryptedContentRecovery(&stripped, true, err))
+	require.True(t, stripped)
+	require.False(t, applyInvalidEncryptedContentRecovery(&stripped, true, err), "recovery is one-shot")
+}
+
+func TestRetryPolicyStripClientStateRuleArmsOneShotRecoveryOnly(t *testing.T) {
+	rules := []RetryRule{{
+		Name:       "invalid_encrypted_content_strip_client_state",
+		Enabled:    true,
+		Action:     RetryRuleActionStripClientState,
+		MaxRetries: 1,
+		ErrorCode:  RetryErrorCodeMatcher{Codes: []string{"invalid_encrypted_content"}},
+	}}
+	policy := newProviderRetryPolicy(-1, 0, RetryTuning{}, rules)
+	require.True(t, policy.StripClientStateOnInvalidEncryptedContent)
+
+	// The rule arms the targeted recovery; it must not turn the same 400 into a
+	// generic retry (that would replay the unverifiable ciphertext forever).
+	err := newProviderHTTPError(http.StatusBadRequest, `{"error":{"code":"invalid_encrypted_content"}}`, nil)
+	decision := policy.decisionForError(err)
+	require.False(t, decision.Retryable)
+
+	// Disabling retries for one request must disable the recovery too.
+	disabled := applyRequestRetryPolicy(policy, map[string]interface{}{MetadataKeyDisableRetries: true})
+	require.False(t, disabled.StripClientStateOnInvalidEncryptedContent)
+}

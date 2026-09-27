@@ -32,10 +32,10 @@ func RetryTuningFromAgentConfig(cfg *agentconfig.Config) RetryTuning {
 
 // RetryRulesFromAgentConfig converts configured retry rules into llm retry rules.
 func RetryRulesFromAgentConfig(cfg *agentconfig.Config) []RetryRule {
-	if cfg == nil || cfg.Retry == nil || !cfg.Retry.Enabled || len(cfg.Retry.Rules) == 0 {
+	if cfg == nil || cfg.Retry == nil || !cfg.Retry.Enabled {
 		return nil
 	}
-	result := make([]RetryRule, 0, len(cfg.Retry.Rules))
+	result := make([]RetryRule, 0, len(cfg.Retry.Rules)+1)
 	for _, rule := range cfg.Retry.Rules {
 		result = append(result, RetryRule{
 			Name:              rule.Name,
@@ -59,6 +59,25 @@ func RetryRulesFromAgentConfig(cfg *agentconfig.Config) []RetryRule {
 				Range: rule.StatusCode.Range,
 			},
 		})
+	}
+	if cfg.Retry.InvalidEncryptedContentRecovery.StripClientStateOnce {
+		// Encrypted reasoning content is bound to the request context that
+		// issued it. When a replay lands on an upstream that cannot decrypt the
+		// blob the provider rejects the whole request with HTTP 400
+		// invalid_encrypted_content. The rule below arms a one-shot recovery in
+		// the provider loop: drop replayed reasoning items, keep the rest of the
+		// transcript, and try the request once more.
+		result = append(result, RetryRule{
+			Name:        "invalid_encrypted_content_strip_client_state",
+			Description: "上游无法校验回放的加密推理内容时，剥离客户端推理状态并重试一次",
+			Enabled:     true,
+			Action:      RetryRuleActionStripClientState,
+			MaxRetries:  1,
+			ErrorCode:   RetryErrorCodeMatcher{Codes: []string{"invalid_encrypted_content"}},
+		})
+	}
+	if len(result) == 0 {
+		return nil
 	}
 	return result
 }

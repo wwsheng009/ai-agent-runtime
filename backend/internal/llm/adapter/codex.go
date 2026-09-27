@@ -42,8 +42,12 @@ const (
 	// 仅当上游确认支持(metadata supports_sampling=true)时才透传,避免破坏
 	// 严格校验请求体的 Codex 兼容上游。
 	codexSupportsSamplingMetadataKey = "supports_sampling"
-	codexToolSchemaCompactBytes      = 5000
-	codexToolSchemaCompactDepth      = 3
+	// codexStripReasoningClientStateMetadataKey mirrors
+	// llm.MetadataKeyStripReasoningClientState: drop replayed reasoning items
+	// for this request only.
+	codexStripReasoningClientStateMetadataKey = "strip_reasoning_client_state"
+	codexToolSchemaCompactBytes               = 5000
+	codexToolSchemaCompactDepth               = 3
 )
 
 // Name 返回适配器名称
@@ -145,7 +149,8 @@ func NewCodexStreamState() *CodexStreamState {
 // 需要将 OpenAI 格式的 messages 转换为 Codex 格式的 input 数组
 func (a *CodexAdapter) BuildRequest(config RequestConfig) map[string]interface{} {
 	// Responses API prefers system/developer guidance in top-level instructions.
-	instructions, input := a.buildCodexInstructionsAndInput(config.Messages)
+	stripReasoningItems, _ := requestMetadataBool(config.Metadata, codexStripReasoningClientStateMetadataKey)
+	instructions, input := a.buildCodexInstructionsAndInput(config.Messages, stripReasoningItems)
 	promptCacheKey := a.resolvePromptCacheKey(config)
 
 	request := map[string]interface{}{
@@ -584,7 +589,7 @@ func codexExplicitMaxOutputTokens(metadata map[string]interface{}) (interface{},
 	return nil, false
 }
 
-func (a *CodexAdapter) buildCodexInstructionsAndInput(messages []map[string]interface{}) (string, []map[string]interface{}) {
+func (a *CodexAdapter) buildCodexInstructionsAndInput(messages []map[string]interface{}, stripReasoningItems bool) (string, []map[string]interface{}) {
 	if len(messages) == 0 {
 		return "", nil
 	}
@@ -621,7 +626,9 @@ func (a *CodexAdapter) buildCodexInstructionsAndInput(messages []map[string]inte
 		}
 	}
 
-	return strings.Join(instructionParts, "\n\n"), a.convertMessagesToCodexInput(inputMessages)
+	return strings.Join(instructionParts, "\n\n"), a.convertMessagesToCodexInputWithOptions(inputMessages, codexInputOptions{
+		StripReasoningItems: stripReasoningItems,
+	})
 }
 
 // NormalizeCodexReasoningEffort 仅去除 Codex reasoning effort 的首尾空白。
@@ -638,6 +645,20 @@ func NormalizeCodexReasoningEffort(effort string) string {
 //	或 {"type": "function_call", "call_id": "...", "name": "...", "arguments": "..."}
 //	或 {"type": "function_call_output", "call_id": "...", "output": "..."}
 func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interface{}) []map[string]interface{} {
+	return a.convertMessagesToCodexInputWithOptions(messages, codexInputOptions{})
+}
+
+// codexInputOptions carries per-request input assembly switches.
+type codexInputOptions struct {
+	// StripReasoningItems drops replayed reasoning items, which are the items
+	// carrying upstream-issued encrypted_content. The one-shot recovery for
+	// HTTP 400 invalid_encrypted_content sets it so the next attempt does not
+	// resend a blob the upstream cannot verify. Function calls, their outputs
+	// and messages still replay, so tool continuity is preserved.
+	StripReasoningItems bool
+}
+
+func (a *CodexAdapter) convertMessagesToCodexInputWithOptions(messages []map[string]interface{}, options codexInputOptions) []map[string]interface{} {
 	input := make([]map[string]interface{}, 0, len(messages))
 	toolCallKinds := make(map[string]string)
 	pendingCalls := make([]map[string]interface{}, 0)
@@ -650,6 +671,10 @@ func (a *CodexAdapter) convertMessagesToCodexInput(messages []map[string]interfa
 			pendingCalls = pendingCalls[:0]
 			registerCodexToolKindsFromOutputItems(toolCallKinds, outputItems)
 			for _, item := range outputItems {
+				if options.StripReasoningItems &&
+					strings.EqualFold(strings.TrimSpace(asCodexString(item["type"])), "reasoning") {
+					continue
+				}
 				input = append(input, ensureCodexInputItemID(item))
 			}
 			continue

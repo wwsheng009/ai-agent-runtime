@@ -108,11 +108,26 @@ type BackoffConfig struct {
 
 // RetryConfig holds fine-grained retry rule configuration.
 type RetryConfig struct {
-	Enabled                  bool              `yaml:"enabled" mapstructure:"enabled"`
-	DefaultBackoffMultiplier float64           `yaml:"default_backoff_multiplier" mapstructure:"default_backoff_multiplier"`
-	DefaultMaxRetries        int               `yaml:"default_max_retries" mapstructure:"default_max_retries"`
-	DefaultRetryDelayMS      int               `yaml:"default_retry_delay_ms" mapstructure:"default_retry_delay_ms"`
-	Rules                    []RetryRuleConfig `yaml:"rules" mapstructure:"rules"`
+	Enabled                  bool    `yaml:"enabled" mapstructure:"enabled"`
+	DefaultBackoffMultiplier float64 `yaml:"default_backoff_multiplier" mapstructure:"default_backoff_multiplier"`
+	DefaultMaxRetries        int     `yaml:"default_max_retries" mapstructure:"default_max_retries"`
+	DefaultRetryDelayMS      int     `yaml:"default_retry_delay_ms" mapstructure:"default_retry_delay_ms"`
+	// InvalidEncryptedContentRecovery repairs the deterministic upstream
+	// rejection of a replayed reasoning item whose encrypted_content cannot be
+	// verified (HTTP 400 invalid_encrypted_content).
+	InvalidEncryptedContentRecovery InvalidEncryptedContentRecoveryConfig `yaml:"invalid_encrypted_content_recovery" mapstructure:"invalid_encrypted_content_recovery"`
+	Rules                           []RetryRuleConfig                     `yaml:"rules" mapstructure:"rules"`
+}
+
+// InvalidEncryptedContentRecoveryConfig 控制 invalid_encrypted_content 的一次性恢复。
+//
+// 上游会把加密推理内容绑定到发放它的那条请求上下文（同账户/路由）；当回放
+// 落在无法解密该密文的后端时，整个请求会以 HTTP 400 失败且不可重试。这里
+// 提供显式开关：剥离客户端推理回放状态后重试一次，用推理连续性换取请求成功。
+type InvalidEncryptedContentRecoveryConfig struct {
+	// StripClientStateOnce 为 true 时，遇到该错误会丢掉回放的加密推理项
+	// （保留 tool call / message 等其余回放项）并重试一次。默认 false。
+	StripClientStateOnce bool `yaml:"strip_client_state_once" mapstructure:"strip_client_state_once"`
 }
 
 type RetryRuleConfig struct {

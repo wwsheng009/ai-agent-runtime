@@ -1086,6 +1086,7 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	resolvedModel := p.resolveModel(chatReq.Model)
 	activeMaxAttempts := policy.initialMaxAttempts()
 	maxTokensRecovered := false
+	clientStateStripped := false
 	outputBudgetEscalations := 0
 	var consecutiveHeaderTimeouts int
 	var transportAttempts int
@@ -1129,6 +1130,31 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 			// retry burst. Hand the transient transport failure to the
 			// enclosing runtime retry loop instead of making it terminal.
 			return nil, markRetryExhaustedForNextLayer("provider call failed after retries", attempt, err)
+		}
+		// A replayed reasoning item whose encrypted_content the upstream cannot
+		// verify fails the whole request deterministically. When the recovery is
+		// configured, rebuild once without replayed reasoning items instead of
+		// resending the same unverifiable ciphertext.
+		if applyInvalidEncryptedContentRecovery(&clientStateStripped, policy.StripClientStateOnInvalidEncryptedContent, err) {
+			chatReq.Metadata = withStrippedReasoningClientState(chatReq.Metadata)
+			reportHTTPDebug(attemptCtx, HTTPDebugEvent{
+				Source:      "provider_wrapper",
+				Phase:       "response",
+				Protocol:    p.config.Type,
+				Model:       resolvedModel,
+				Method:      http.MethodPost,
+				URL:         p.buildURL(p.adapter.GetAPIPath()),
+				Attempt:     attempt,
+				MaxAttempts: activeMaxAttempts,
+				Error:       "invalid_encrypted_content: stripped replayed reasoning client state for the next attempt",
+			})
+			if activeMaxAttempts < attempt+1 {
+				activeMaxAttempts = attempt + 1
+			}
+			if policy.MaxAttempts > 0 && policy.MaxAttempts < activeMaxAttempts {
+				policy.MaxAttempts = activeMaxAttempts
+			}
+			continue
 		}
 		// Deterministic max_tokens ceiling rejections can be repaired once by
 		// lowering the request budget to the provider-reported limit.
@@ -1398,6 +1424,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	startedAt := time.Now()
 	activeMaxAttempts := policy.initialMaxAttempts()
 	maxTokensRecovered := false
+	clientStateStripped := false
 	outputBudgetEscalations := 0
 	var consecutiveHeaderTimeouts int
 	var transportAttempts int
@@ -1515,6 +1542,39 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				Error:               fmt.Sprintf("HTTP %d", resp.StatusCode),
 			})
 			lastErr = newProviderHTTPError(resp.StatusCode, string(responseBody), resp.Header)
+			// A replayed reasoning item whose encrypted_content the upstream
+			// cannot verify fails the whole request deterministically. When the
+			// recovery is configured, rebuild once without replayed reasoning
+			// items instead of resending the same unverifiable ciphertext.
+			if applyInvalidEncryptedContentRecovery(&clientStateStripped, policy.StripClientStateOnInvalidEncryptedContent, lastErr) {
+				request.Metadata = withStrippedReasoningClientState(request.Metadata)
+				rebuiltAdapterRequest, rebuiltBody, rebuiltBytes, rebuiltHeaders, rebuildErr := buildStreamingBody(request)
+				if rebuildErr != nil {
+					return nil, rebuildErr
+				}
+				adapterRequest = rebuiltAdapterRequest
+				requestBody = rebuiltBody
+				bodyBytes = rebuiltBytes
+				headers = rebuiltHeaders
+				reportHTTPDebug(attemptCtx, HTTPDebugEvent{
+					Source:      "provider_wrapper",
+					Phase:       "response",
+					Protocol:    p.config.Type,
+					Model:       adapterRequest.Model,
+					Method:      http.MethodPost,
+					URL:         url,
+					Attempt:     attempt,
+					MaxAttempts: activeMaxAttempts,
+					Error:       "invalid_encrypted_content: stripped replayed reasoning client state for the next attempt",
+				})
+				if activeMaxAttempts < attempt+1 {
+					activeMaxAttempts = attempt + 1
+				}
+				if policy.MaxAttempts > 0 && policy.MaxAttempts < activeMaxAttempts {
+					policy.MaxAttempts = activeMaxAttempts
+				}
+				continue
+			}
 			if !maxTokensRecovered && applyMaxTokensLimitRecovery(&request.MaxTokens, lastErr) {
 				rebuiltAdapterRequest, rebuiltBody, rebuiltBytes, rebuiltHeaders, rebuildErr := buildStreamingBody(request)
 				if rebuildErr != nil {

@@ -328,6 +328,10 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 - `ProviderMaxRetriesFromAgentConfig`：`providers.max_retries` <0 直接返回；<=0 用 `retry.default_max_retries`；仍 <=0 用 10
 - `ProviderMaxTransportRetriesFromAgentConfig`：<0 无限；<=0 用 `DefaultTransportMaxRetries=4`
 - `RetryTuningFromAgentConfig` / `RetryRulesFromAgentConfig`：从 `agentconfig.Config` 转换
+- `retry.invalid_encrypted_content_recovery.strip_client_state_once`（默认 false，环境变量
+  `RETRY_INVALID_ENCRYPTED_CONTENT_STRIP_CLIENT_STATE_ONCE`）：为 true 时
+  `RetryRulesFromAgentConfig` 追加一条 `action=strip_client_state` 的规则，把一次性恢复
+  挂到 provider 重试循环上（见 §8 场景 E）。
 
 ---
 
@@ -360,6 +364,17 @@ for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 - 内层立即终态；`isHandoffEligibleError` 未命中 → 外层也终态
 - `DiagnoseFailure` 给出 `UPSTREAM_QUOTA_EXHAUSTED` / `UPSTREAM_INVALID_REQUEST` 等错误码与 `NextAction`
 - `invalid_tool_arguments` 自 2026-09-14 起**不**属于本场景（见场景 D2）
+
+### 场景 E：回放的加密推理内容无法被上游校验（HTTP 400 `invalid_encrypted_content`）
+1. 该错误本身是不可重试的确定性 400，默认内层立即终态
+2. 开启 `invalid_encrypted_content_recovery.strip_client_state_once` 后：
+   内层识别该错误 → 给本次请求打上 `strip_reasoning_client_state`（不修改请求对象与
+   会话历史）→ 重建请求体，Codex 适配器不再回放 reasoning item（`function_call` /
+   `function_call_output` / `message` 照旧）→ 同一次 `Call` 内重试一次
+3. 一次性闩锁：重试若再次返回同一错误则直接终态，不会反复重放同一份密文；
+   请求 metadata `disableRetries=true` 会同时关闭该恢复
+4. 适用场景：网关/代理按路由或缓存世代绑定密钥，压缩（prompt-cache epoch break）
+   或跨会话回放落在无法解密旧密文的后端
 
 ### 场景 D2：非法工具参数（`invalid_tool_arguments`，2026-09-14 起可重试）
 1. 适配器聚合 `tool_calls` 时发现参数不是合法 JSON 对象 → `MalformedToolCallError`（`code=invalid_tool_arguments`），并在丢弃响应前带上本响应的 `finish_reason`（`FinishReason` / `Truncated`），把两类成因分开处置：
