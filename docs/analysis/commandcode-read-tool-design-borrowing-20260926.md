@@ -898,3 +898,110 @@ go test ./internal/... -count=1                                        仅 inter
 - 通过：`go test ./internal/toolkit/tools ./internal/output ./internal/ipynb ./internal/docread ./internal/executor ./internal/toolschema ./internal/tools ./internal/imageprep ./internal/agent -count=1`（9/9 ok）；`go build ./...` ok。图片签名校验上线后同步规范了两处伪 PNG 夹具（`ipynb_test.go` 总量预算、`view_notebook_test.go` 去重），去重/预算语义不变。
 - `cmd/aicli/commands`：`go build ./...` 与 `TestIsChatTurnStopErrorClassification` 通过；全量包仍有 5 个失败（`TestChatDebugDisplayShowsStorageSection`、`TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsideActiveReasoning`、`TestAICLIChatActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled`、`TestRuntimeMessageFromAICLIMessage_PreservesCodexOutputItems`、`TestChatWebInvalidateRuntimeProviderRebuildsActiveProvider`），全部落在并行会话正在改动的显示 / 团队 / codex / provider 区域，与本轮改动无交集。
 - 子代理生命周期修复需重新构建 `aicli` 才在运行会话生效；FIFO 用例需在 Unix CI 执行；`stat→open` 竞态与真实 soffice/pandoc 端到端冒烟仍未覆盖（ODS/ODP 的转换路由由假转换器断言 `--convert-to` 过滤参数，未跑真实 LibreOffice）。
+
+## 附录 H：第三轮审查记录（2026-09-27，read-tool Wave 1–3 收口复核）
+
+**审查方式**：三路只读审查子代理（① 读账本/dedup/写侧关系不变量；② 路径与特殊文件安全边界；③ docread/notebook/图片/schema 格式面）分别静态审查；父会话随后用 Go `-overlay` 注入临时探针**动态复现**（探针文件只存在于系统临时目录 `%TEMP%\aicli-read-review-20260927-182353`，未写入工作区；`git status` 中不含本次任何文件），Windows 宿主 + WSL Ubuntu 交叉编译二进制复核 Unix 语义，并复跑相关包测试基线。**本轮只审查、未修复、未改实现代码。**
+
+### H-A 已动态复现的问题（证据为探针实测输出）
+
+| 编号 | 级别 | 位置 | 机制与影响 | 实测证据 | 建议方向 |
+|---|---|---|---|---|---|
+| H1 | **P0** | `executor/sandbox.go` `resolveExistingAncestors`（:209-229）+ `tools/atomic_write.go:27-29` | 悬空叶子 symlink：`EvalSymlinks` 失败后退回词法叶子，授权看到 `W/link.txt`，但 `writeFileInPlace` 以 `O_CREATE` 跟随链接写到 `O/new.txt` —— 无需竞态即可在 allowlist 外建文件 | Windows：`write_success=true error=<nil> outside_created=true bytes="OUTSIDE-WRITE"` | 叶子链接解析失败时读取链接文本继续授权（或直接拒绝无法解析的目标）；原子写前对最终目标做一次解析后复检 |
+| H2 | **P0** | `executor/sandbox.go:109-114`（`filepath.Abs` 词法清理 `..`）+ `tools/sandbox_support.go:87-90`（绝对路径原样返回）+ `view.go` 的 `os.Open` | Unix 内核先跟随 symlink 再处理 `..`，与授权层的词法清理语义不同：授权/预检看到 `W/secret.txt`，实际读到 `O/secret.txt` | WSL Linux 二进制：`success=true content="1: OUTSIDE-PRIVATE"` | 授权与 I/O 必须使用同一解析语义：打开前对含链接路径统一 `EvalSymlinks`（含 `..`）后再做策略判定，或拒绝同时含链接与 `..` 的路径 |
+| H3 | **P0** | `executor/sandbox.go:123-126`（`resolved != absPath` 才复检） | `DeniedPaths`/`ReadOnlyPaths` 自身是链接时，直接访问其物理目标 → `resolved == absPath` → 整段解析后策略检查被跳过（读禁目录、写只读目录都放行） | Windows：`op=read linked_policy=…\alias physical_target=…\physical\secret.txt refusal=<nil>`；`op=write` 同样放行 | 无论请求路径是否变化，都拿“解析后的目标”与“解析后的策略根”比较，不能再以 `resolved != absPath` 作为前置条件 |
+| H4 | **P1** | `tools/view.go` `executeSingle`（:440 `recordFileReadFromDisk`）vs `executeBatch`（:790-809 的 cap 丢弃） | 批量聚合 cap 丢弃的条目虽不追加 section（dedup 登记已延后），但**读账本已在 `executeSingle` 内刷新**；随后写入被判 `fresh`，静默覆盖模型从未看到的外部修改 | `stale_before=true write_after_success=true read_before_write=fresh external_change_preserved=false`（外部新增行被写掉） | 账本登记同样走 defer，仅在 section 真正投递后提交；被跳过条目不得刷新“本会话已读该版本”的事实 |
+| H5 | **P1** | `tools/view_notebook.go:139-146`（有图即 `KindStructured`）+ `output/tool_result_content.go:188-205` | 带图片的 notebook 结果被模型侧契约折叠为通用 envelope 摘要：**正文窗口（cell 文本）整体不进上下文**，只剩 meta 行 + 图片附件；而该窗口同时被记为“已投递”（账本/dedup/图片声明） | `output_kind=structured raw=3605 model=472 marker_present=false`（120 行窗口 + 末行标记全部丢失） | 结构化不等于可丢弃正文：为带附件的 view 结果保留文本正文（如 `summary + 正文`），或让图片声明与文本正文分离、正文仍按 text 预算传递 |
+| H6 | **P1** | `tools/append_write.go:160-239`（全函数无 `evaluateStaleWrite`/`recordFileWrite`） | ① `truncate_first=true` 覆盖无 stale 检查 → `view(A) → 外部改 B → append(覆盖)` 直接丢掉 B；② 正常追加不写账本 → 同会话随后的 `edit` 把本次追加当成外部修改并拒绝（写读死循环的另一半） | ① `success=true disk="replacement\n"`（外部改动被覆盖）；② `edit_success=false stale=true`（错误拒绝同会话追加） | 覆盖分支接 `evaluateStaleWrite`（与 write 同口径）；成功追加/覆盖后 `recordFileWrite` |
+| H7 | **P2** | `tools/read_ledger.go:376-381` + `write.go:190-206` | BOM/UTF-16 文件的 stale 提示 `expected_sha256` 来自**原始磁盘字节**，write 的前置条件比较的是**解码去 BOM 后文本**的 revision → 照提示重试必然再次失败，显式确认恢复路径不可用 | UTF-8 BOM：`suggested_hash=be2654… second_success=false second_hash=c0cd94…` | 统一提示/失败 metadata/write 前置条件的 revision 口径（提示里直接用 `writeContentRevision`） |
+| H8 | **P2** | `tools/view.go:817-831,865-881`（失败明细 20 条上限）+ `toolresult/diagnostic.go:836-850`（推断 succeeded） | 60 个失败条目：`failed_count=20`（仅明细条数）+ `failures_omitted=40`，全失败分支不发布 `succeeded_count` → `ExtractBatchStats` 推断 `Succeeded=40`、`Partial=true`，模型侧诊断把“全失败”说成“40 成功 20 失败” | `failed_count=20 failures_omitted=40 inferred_succeeded=40 partial=true` | 全失败分支发布 `succeeded_count=0` 与真实失败总数（或让 `ExtractBatchStats` 把 `failures_omitted` 计入失败） |
+| H9 | **P2** | `tools/view.go:811-831`（errors/footer 在预算检查之后追加）+ 契约层二次截断 | 聚合声明 64 KiB，但 errors/footer 追加后正文可达 66 KB；`renderToolResultContract` 再折叠并丢掉整个 section（含末行标记），而该 section 的 dedup 已提交 → 复查返回 stub，模型永远看不到被丢正文 | `raw=66418 rendered=65368 budget=65536 rawMarkers=2 renderedMarkers=1 dedup_on_reread=true` | 所有尾部段落计入同一聚合预算（或预算内先扣预留）；dedup 提交必须发生在最终模型可见截断之后（跨层契约需对齐） |
+| H10 | **P2** | `internal/ipynb/ipynb.go:372-390`（只验容器签名）+ `internal/imageprep/imageprep.go:119-141`（只验 `DecodeConfig` 头） | 8 字节签名（`iVBORw0KGgo=`）或 1×1 无 IDAT 的坏 PNG 仍被声明为可发送图片；严格校验的 provider 会整请求 400，而不是得到工具侧降级 | notebook：`attached_images=1 image_decode_error=unexpected EOF`；普通图片：`passthrough=true decode_error=png: invalid format: chunk out of order` | 在字节/像素预算内做一次完整解码校验（或校验关键 chunk 结构），失败则走“未附加 + 文字说明”降级 |
+| H11 | **P2** | `tools/read_dedup.go:188-197`（commit 只删 `entries`，不删 `order`；:219-238 重复 key 继续 append） | 同窗口“真实读→stub 消费→重新登记”循环把同一 key 反复压入 `order`；达到 2048 后逐出逻辑弹出旧 key 时删掉的正是刚登记的活动条目 → 每次登记立即被逐出，**同窗口去重静默失效**（读到第 ~4100 次调用后不再有 stub） | `after_churn first_hit=<nil> first_len=49 second_hit=<nil>` | 消费时同步从 `order` 移除该 key，或给队列项加代次/版本号 |
+| H12 | **P2**（潜在） | `internal/toolschema/unions.go` `ScalarizeUnions` | 折叠时未求“兄弟约束 ∩ 选中分支约束”：`const:"second"` + 分支 `enum:["first"]` 被折成 `const+enum` 互斥；`maxLength:1` + 分支 `minLength:2` 被折成 `minLength=2,maxLength=1` —— 原本可满足的参数变成永远无法通过校验（provider 侧整工具不可用） | ① `{"const":"second","enum":["first"],"type":"string"}` → `value must be "first"`；② `{"maxLength":1,"minLength":2}` → `length must be >= 2, but got 1` | 折叠前计算交集，无交集时保留 union 或选可满足分支；把可满足性探针纳入 `toolschema` 回归 |
+
+### H-B 静态高置信、本轮未动态复现（子代理审查，需后续验证）
+
+| 编号 | 级别 | 位置 | 问题 | 建议 |
+|---|---|---|---|---|
+| H13 | P2 | `docread/convert.go:182-204` | PPTX/ODP 固定走 `soffice --convert-to txt`，而 Impress 没有 TXT 导出过滤器 → 真实 LibreOffice 下该路径必然失败（现有测试用假转换器直接造 `.txt`，掩盖了过滤器错误） | 改用 Impress 实际支持的导出格式（或先 `--convert-to pdf`）再抽正文；补一条真实转换器冒烟 |
+| H14 | P2 | `docread/convert.go:182-206,222-224`；完整性声明 `docread/docread.go:142-153` | XLSX/ODS 裸 `--convert-to csv` 只导出一张工作表（默认活动表），回读只消费一个文件，且 `doc_degraded=false` → 其余工作表数据静默丢失、无法翻页取回 | 显式逐表导出并有界聚合；只支持单表时必须 `doc_degraded=true` 并说明遗漏与恢复办法 |
+| H15 | P2 | `toolexec/preflight.go:1738-1742,1873-1880`（目录枚举 :1945-1950） | 已绑定 `WorkspaceRoot` 时，workspace 内无候选仍回退用原始相对路径扫描**进程 CWD**，并把界外文件名作为候选返回（呈现为 workspace 相对路径），预检未对该目录做授权 | 绑定 workspace 后停止 CWD 回退；所有候选枚举统一受同一根与授权边界约束 |
+| H16 | P2 | `tools/document_guard.go:46-54` + `tools/atomic_write.go:27-29` | 文档扩展名守卫只看调用路径；`.txt` 别名链接指向 `.rtf` 等文档时，原地写跟随链接替换真实文档（RTF 是文本，二进制启发式兜不住） | 对已授权的最终链接目标补做文档格式拒绝 |
+| H17 | P2 | `tools/read_ledger.go:260-265,283-289` | `recordFileWrite` 恒存全量 SHA+`HashScope=full`；>8 MiB 文件的后续局部 view 存采样摘要 → `FullRead` 单调继承直接比较两个摘要域字符串必然不等，自身写入建立的“已全读”事实被清除（dedup 守卫与写侧降级） | 继承判断改用可比较的同域指纹（大小+域+摘要），或写入时按同一 `ledgerHashScope` 记录 |
+| H18 | P2 | `internal/ipynb/ipynb.go:390` | 每张图片都 `strings.Count(builder.String(), "\n")` 重扫全部前缀 → 多图 notebook 的渲染复杂度 Θ(N²)（分页发生在渲染之后，读一个小窗口也承担全部开销） | 维护增量行计数，只统计新写入片段 |
+| H19 | P3 | `tools/session_state_gc.go:38-48` + `read_ledger.go:255-265` | TTL 清扫与桶使用未构成原子生命周期协议：桶获取不更新 `touched`，`idleSince` 检查后先解锁再按 key 删除 → 调用方可向“已被逐出的桶”登记最新记录，或清扫删掉并发刷新过的桶；后续写检查退化为 `unread` 而非 `stale`（子代理指出，未动态复现） | 桶取得/触达/删除/提交有效性统一同步（`TryLock` 只防死锁，不保证生命周期） |
+| H20 | P3 | `tools/read_ledger.go:228-253` + `view.go` 对接待确认 | view 内容读取与账本摘要读取是两次独立读盘：两次之间被外部改写时，正文是 A、账本登记 B（且窗口完整性标记取自 A）→ 基于 A 的覆盖被判 `fresh`（属 `stat→open` 之外的“内容↔指纹”交错） | 窗口与指纹绑定同一次受验证的读取；读取期间变化则不登记为新版本 |
+
+> 备注：H13/H14 依赖真实 LibreOffice，H15–H20 为静态可达结论；本机（Windows）与 WSL 均无 `pdftotext/pandoc/soffice`，Docker 守护进程不可用，无法在本轮补冒烟。
+
+### H-C 本轮复核确认仍有效的既有保证（回归实测）
+
+- Unix FIFO 前置门：`TestWriteToolsRejectFIFOBeforeReading`（edit/multiedit/append_write 三子用例）在 WSL Linux 二进制下 **PASS**；
+- Unicode 拼写自愈的 symlink 目标复检：`TestViewSpellingHealRespectsSymlinkTargetPolicy` 在 WSL Linux 二进制下 **PASS**；
+- `internal/toolkit/tools`、`executor`、`ipynb`、`docread`、`imageprep`、`toolresult`、`toolschema`、`tools`、`output`、`toolexec`、`llm` 相关用例复跑全绿（`-run 'View|Ledger|Dedup|Image|Notebook|Sandbox|Scalarize|Spelling'` 及整包 `docread/output/toolexec/tools/llm`）；
+- 批量 m5（只计真正投递）、m6（声明 64 KiB）、m13（dedup 延后消费/登记）的既有用例仍通过——H4/H9 是它们未覆盖的**跨层**残余（账本提交点与最终渲染截断点）。
+
+### H-D 修复优先级建议（下一轮）
+
+1. **H1–H3**：路径授权与真实 I/O 语义统一（安全边界，可越 allowlist 建/读文件）；
+2. **H4**：批量丢弃项不得刷新读账本（数据丢失）；
+3. **H5/H6**：notebook 正文送达 + append_write 账本接入（功能不可用/读写死循环）；
+4. **H7–H12、H13–H18**：恢复路径、统计口径、去重生命周期、schema 可满足性、文档转换正确性；
+5. **H19/H20**：并发/交错类不变量，建议配 `-race` 与压力用例。
+
+审查方法说明：动态证据均由临时 overlay 探针产生，探针文件与编译产物位于系统临时目录，工作区未被修改；行号以 `a0939422` 为基线，后续实现漂移请以符号名/小节为准。
+
+### H-E 第二轮修复（2026-09-27，H1–H20 收口）
+
+**方式**：父会话按 H-A/H-B 清单逐项修复，每项带回归测试；动态证据沿用 `-overlay` 临时探针（未落入工作区）与 WSL Linux 二进制复核。**本轮只改实现与测试**，文档追加本节。
+
+| 编号 | 状态 | 代码落点 | 回归测试 |
+|---|---|---|---|
+| H1 | ✅ | `executor/sandbox.go`：新增 `resolvePhysicalPath`（逐组件解析，悬空叶子链接经 `Readlink` 继续解析，256 步上限、失败即拒）替换 `resolveExistingAncestors`；`CheckPermission` 改为无条件复检物理目标 | `TestCheckPermissionResolvesDanglingSymlinkTarget`（Windows/Linux 双跑）；原探针 `write_success=false outside_created=false` |
+| H2 | ✅ | 同上：`absolutePathKeepingDotDot` 取代 `filepath.Abs`（不再提前 Clean 掉 `..`），解析器按内核顺序"先跟链接再 `..`" | `TestCheckPermissionSymlinkDotDot`（Linux PASS）；WSL 探针由读出界外内容改为 `success=false` |
+| H3 | ✅ | 同上：解析后策略比较不再以 `resolved != absPath` 为前提（策略根本身是链接也能命中） | `TestCheckPermissionLinkedPolicyRoots`；探针拒绝含明确原因 |
+| H4 | ✅ | `view.go`：`ViewFileRequest.ledgerDefer`，账本登记与 dedup 登记一样延迟到 section 真正投递之后（文本路径与派生渲染路径都接） | `TestBatchDroppedSectionDoesNotRefreshLedger`；探针 `external_change_preserved=true` |
+| H5 | ✅ | `view_notebook.go`/`view_image.go`：结果类型回到 `KindText`（图片声明仍走 metadata），模型侧不再折叠成 envelope 摘要 | `TestNotebookWithImageKeepsTextAtModelBoundary`；探针 `model=3605 marker_present=true` |
+| H6 | ✅ | `append_write.go`：`truncate_first` 覆盖前接 `evaluateStaleWrite`；成功追加/覆盖与幂等分支统一 `recordFileWrite(..., "append_write")` | `TestAppendWriteLedgerIntegration`（覆盖拒绝 + 同会话 append 后 edit 成功） |
+| H7 | ✅ | `write.go`：stale 提示与 `actual_revision` 改用 write 侧 revision（解码去 BOM 口径），不再给原始字节哈希 | `TestBOMStaleRecoveryHashMatchesPrecondition`；探针 `second_success=true` |
+| H8 | ✅ | `view.go`：`failed_count` 发布真实失败总数（明细行数 + omitted），错误文案给"失败合计 N/M"；`toolresult.ExtractBatchStats` 不再把 `requested-failed` 推成成功 | `TestExtractBatchStatsDoesNotInventSuccessesForAllFailed`（更新语义）；探针 `failed_count=60 inferred_succeeded=0 partial=false` |
+| H9 | ✅ | `tool_output_budget.go`：新增 `viewBatchTailReserveBytes=4KiB`；`view.go`：section 预算 = 声明上限 − 预留，errors/footer 统一并入预留窗口并按 UTF-8 截断；`output/tool_result_content.go`：工具自声明窗口时正文独占预算，契约头不再吃正文 | `review_h9_budget_test.go`（声明窗口完整送达 + 未声明仍受 12 KiB 兜底）；既有批量用例全绿 |
+| H10 | ✅ | 新 `imageprep/validate.go`：`ValidateImageData/ValidateImageFile` 结构化校验（PNG 需 IHDR+IDAT+IEND、JPEG 需 SOI+SOF+EOI、GIF 需头+图像块+trailer，零分配）；`Prepare` 在像素预算后校验；`ipynb` 以它替换 `imageMagicMatches` | `validate_test.go`、`TestRenderBytesSkipsInvalidImagePayload`（8 字节签名）、`TestHeaderOnlyImageIsNotAttached`；探针坏图不再附加 |
+| H11 | ✅ | `read_dedup.go`：队列项带 generation，消费只删 entry，逐出仅在代次匹配时生效；桶加 `evicted` 标志 | `TestDedupEvictionKeepsLiveEntryAcrossChurn`；探针 churn 后 `second_hit=true` |
+| H12 | ✅ | `toolschema/unions.go`：`compatibleUnionBranch` 逐分支校验（string 优先），新增 const/enum 交集与 min/maxLength、min/maxItems、数值上下界合并冲突检测；`json.Number`（`Clone` 用 `UseNumber`）纳入数值解析 | `review_h12_satisfiability_test.go` + 更新 `union_satisfiability_test.go`；探针两个 wire schema 均可满足 |
+| H13 | ✅ | 新 `docread/office_native.go`：pptx 按 `ppt/slides/slideN.xml` 数字序抽 `<a:t>`；odp 抽 `draw:page` 内 `text:p`；`converterForKind` 不再要求 soffice，`Detect` 直接标记 supported | `office_native_test.go`、`render_test.go` ods/odp 用例（odp 在无转换器环境渲染） |
+| H14 | ✅ | `docread/convert.go`：新增 `convertWorkbookWithSoffice` —— 先请求 all-sheets CSV 过滤器，失败/无产物回退普通 csv；聚合目录内全部 CSV 并加 `## Sheet:` 标题；`declaredSheetNames` 读容器声明；`docread.go` 在缺表时 `doc_degraded=true` + `doc_reason=partial_sheets` + 缺失表明细 | `TestRenderWorkbookDisclosesMissingSheets`、更新 `TestRenderSofficeFakeConverter*` |
+| H15 | ✅ | `toolexec/preflight.go`：绑定 workspace 时不再回退用原始相对路径扫描进程 CWD | `TestPathCandidatesDoNotScanProcessCwdUnderWorkspace`（含无 workspace 时仍可用的反向断言） |
+| H16 | ✅ | `document_guard.go`：扩展名守卫先查拼写，再对 `EvalSymlinks` 后的真实目标复检 | `TestWriteRefusesDocumentReachedThroughSymlinkAlias`（.txt→.rtf 拒绝，.txt→.txt 可写） |
+| H17 | ✅ | `read_ledger.go`：`recordFileWrite` 按文件大小选 `ledgerHashScope` 并用同域摘要（全量 SHA / 头尾采样 / unverified）；FullRead 继承要求同 scope 且非 Suspect | `TestRecordFileWriteMatchesReadDigestScopeForLargeFile` |
+| H18 | ✅ | `ipynb/ipynb.go`：`appendImages` 改为"进入时一次前缀计数 + 本次写入行增量"，图片占位行号不再逐图重扫全文 | `TestRenderBytesRecordsDistinctPlaceholderLines`（3 图行号严格递增） |
+| H19 | ✅ | 两个 per-session 桶加 `evicted` 标志（清扫在 TryLock 内置位），`ledgerForSession`/`viewDedupForSession` 跳过并重取；`sessionReadLedger.record/lookup` 在锁内发现逐出即重取重试 | `TestLedgerEvictionDoesNotDropConcurrentRecord` |
+| H20 | ✅ | `read_ledger.go`：`recordFileReadFromDiskObserved` 比较读取前 FileInfo 与记账时 stat，不一致即标 `Suspect`；`evaluateStaleWrite` 对 Suspect 直接判 stale，write 拒绝并给 `read_race_detected` | `TestSuspectLedgerRecordRefusesWrite` |
+
+#### 修复后的验证基线（本轮实测）
+
+```text
+go test ./internal/toolkit/tools/ ./internal/executor/ ./internal/ipynb/ -count=1        ok
+go test ./internal/imageprep/ ./internal/docread/ ./internal/toolschema/ \
+         ./internal/toolresult/ ./internal/output/ ./internal/toolexec/ -count=1          ok
+go test ./internal/tools/ ./internal/agent/ -count=1                                      ok
+go vet ./internal/toolkit/tools/ ./internal/executor/ ./internal/imageprep/ \
+       ./internal/docread/ ./internal/toolschema/ ./internal/toolresult/ \
+       ./internal/output/ ./internal/toolexec/ ./internal/ipynb/                          ok（无输出）
+WSL Linux 复核：executor 权限用例 4/4 PASS；tools 探针 symlink/.. 由"读界外"变为拒绝
+探针复验：H1/H2/H3/H4/H5/H6/H7/H8/H10/H11/H12 全部通过（19 项探针中 17 项 PASS）
+```
+
+**两条"探针不复现"说明（预期变化，不是回归）**：
+
+1. 批量预算探针原来期望"两个文件都出现在模型可见正文里"，现在 section 预算为 60 KiB（64 KiB 声明 − 4 KiB 保留），第二个 ~30 KiB section 会被**如实跳过**并写入 `batch_skipped_files`，同时不再为被丢内容登记 dedup（`dedup_on_reread=<nil>`）——这正是 H9 要的"要么完整送达、要么明说跳过"。
+2. dedup churn 探针原本断言"churn 后第一次读取就应命中"，但 churn 循环的最后一步已经消费了条目，因此正确行为是"下一次真实读取、再下一次命中"（`first_hit=nil second_hit=true`）；仓库内的定式用例 `TestDedupEvictionKeepsLiveEntryAcrossChurn` 直接断言活动条目不被陈旧队列槽逐出。
+
+#### 仍未覆盖 / 残余风险（如实登记）
+
+- 真实 LibreOffice 冒烟仍缺：all-sheets CSV 过滤器 token（LO ≥ 7.2）与 pandoc 路径只由假转换器验证；本机与 WSL 均无 `soffice/pandoc/pdftotext`。
+- H13 的 pptx 抽取覆盖幻灯片正文，不含演讲者备注（CC 对照表中的 speaker notes 仍为差距）。
+- H19/H20 属并发/交错类不变量：窗口已收窄（逐出桶不可再写、读↔指纹不一致即拒绝），但未做 `-race`/压力验证。
+- 本轮结束时 `go build ./...` 在 `internal/llm/providercompat` 失败（另一并行会话正在改的 `response.go`，与本轮文件无交集）；本轮涉及的包均单独编译/测试通过。
+- `git status` 中 `toolkit/tools/{bash,grep,execute_shell_command}.go` 等改动来自其他并行会话，不在本轮范围。

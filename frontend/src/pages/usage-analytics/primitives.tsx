@@ -19,6 +19,10 @@ export function AnalyticsHeader({ onRefresh, refreshing }: { onRefresh: () => vo
   const [searchParams] = useSearchParams();
   const listSearch = new URLSearchParams(searchParams);
   listSearch.delete("tab");
+  if (sessionId) {
+    listSearch.set("view", "sessions");
+    listSearch.delete("error_category");
+  }
   const backTo = sessionId
     ? `/usage${listSearch.size > 0 ? `?${listSearch.toString()}` : ""}`
     : "/workspace/chats/new";
@@ -145,41 +149,64 @@ export function QualityNotice({ coverage, partial, reasons }: {
   );
 }
 
-export function FilterInput({ label, value, placeholder, onChange, icon, type = "text" }: {
+export function FilterInput({ label, value, placeholder, onChange, icon, type = "text", compact = false, autoComplete }: {
   label: string;
   value: string;
   placeholder: string;
   onChange: (value: string) => void;
   icon?: ReactNode;
-  type?: "text" | "date";
+  type?: "text" | "date" | "password";
+  compact?: boolean;
+  autoComplete?: string;
 }) {
   return (
-    <label className={cn("min-w-0", icon && "2xl:col-span-2")}>
-      <span className="mb-1 block text-xs text-muted-foreground">{label}</span>
-      <div className="relative">
-        {icon ? <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground">{icon}</span> : null}
-        <input type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className={cn("h-9 w-full rounded-field border border-border bg-surface-softer px-3 text-sm outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring", icon && "pl-8")} />
+    <label className={cn(
+      "min-w-0",
+      compact
+        ? "flex h-8 items-center gap-1.5 rounded-field border border-border bg-surface-softer px-2 focus-within:border-accent-primary-border focus-within:ring-1 focus-within:ring-ring"
+        : icon && "2xl:col-span-2",
+    )}>
+      <span className={cn("text-xs text-muted-foreground", compact ? "shrink-0" : "mb-1 block")}>{label}</span>
+      <div className={cn("relative", compact && "h-full min-w-0 flex-1")}>
+        {icon ? <span aria-hidden="true" className={cn("pointer-events-none absolute top-1/2 -translate-y-1/2 text-muted-foreground", compact ? "left-0" : "left-2.5")}>{icon}</span> : null}
+        <input
+          type={type}
+          value={value}
+          autoComplete={autoComplete}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+          className={cn(
+            compact
+              ? "h-full min-w-0 w-full border-0 bg-transparent p-0 text-xs outline-none"
+              : "h-9 w-full rounded-field border border-border bg-surface-softer px-3 text-sm outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring",
+            icon && (compact ? "pl-5" : "pl-8"),
+          )}
+        />
       </div>
     </label>
   );
 }
 
-export function FilterSelect({ label, value, options, onChange }: {
+export function FilterSelect({ label, value, options, onChange, compact = false }: {
   label: string;
   value: string;
   options: readonly { value: string; label: string }[];
   onChange: (value: string) => void;
+  compact?: boolean;
 }) {
   return (
-    <label className="min-w-0">
-      <span className="mb-1 block text-xs text-muted-foreground">{label}</span>
+    <label className={cn("min-w-0", compact && "flex h-8 items-center gap-1.5 rounded-field border border-border bg-surface-softer px-2 focus-within:border-accent-primary-border focus-within:ring-1 focus-within:ring-ring")}>
+      <span className={cn("text-xs text-muted-foreground", compact ? "shrink-0" : "mb-1 block")}>{label}</span>
       <Select
         ariaLabel={label}
+        align={compact ? "auto" : "start"}
         value={value}
         options={options}
         onChange={onChange}
-        className="w-full min-w-0 max-w-full"
-        triggerClassName="h-9 w-full min-w-0 max-w-full overflow-hidden rounded-field"
+        className={compact ? "h-full min-w-0 flex-1" : "w-full min-w-0 max-w-full"}
+        triggerClassName={compact
+          ? "h-full min-w-0 gap-1 overflow-hidden rounded-none border-0 bg-transparent p-0 text-xs hover:bg-transparent focus-visible:ring-0"
+          : "h-9 w-full min-w-0 max-w-full overflow-hidden rounded-field"}
         menuClassName="max-w-[min(92vw,560px)]"
         optionClassName="truncate"
       />

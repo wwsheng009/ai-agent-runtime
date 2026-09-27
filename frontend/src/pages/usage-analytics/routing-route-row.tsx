@@ -1,110 +1,96 @@
-// P0-2 拆分：路由事件明细行（原 routing-observability-panel.tsx L476-L566）。
+// 路由事件仅在表格内展示单行摘要，完整信息由明细面板承载。
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import type { AnalyticsRouteEvent } from "@/types/runtime";
 import { useTranslation } from "react-i18next";
 
-import { formatNumber, formatTimestamp, shortID } from "./format";
+import { formatTimestamp, shortID } from "./format";
 import {
-  difficultySourceLabel,
   kindLabel,
   kindTone,
-  reasonLabel,
   routeFlagKeys,
   scopeLabel,
-  sourceLabel,
   taskTypeLabel,
   triStateLabel,
-  warningLabel,
 } from "./routing-labels";
 
-export function RouteRow({ event }: { event: AnalyticsRouteEvent }) {
+export function RouteRow({
+  event,
+  onViewDetails,
+}: {
+  event: AnalyticsRouteEvent;
+  onViewDetails: (event: AnalyticsRouteEvent) => void;
+}) {
   const { t } = useTranslation("usageAnalytics");
   const routeText = [event.provider, event.model].filter(Boolean).join(" / ") || t("observability.routing.flags.notRecorded");
   const warnings = event.warnings ?? [];
+  const openDetails = (target: HTMLElement) => {
+    // 行点击也以明细按钮为焦点锚点，关闭面板后可继续使用键盘浏览表格。
+    target.closest("tr")?.querySelector("button")?.focus({ preventScroll: true });
+    onViewDetails(event);
+  };
+
   return (
-    <tr className="border-b border-border/70 last:border-b-0 hover:bg-surface-soft-hover">
-      <td className="px-3 py-2.5 text-xs text-muted-foreground">{formatTimestamp(event.recorded_at)}</td>
-      <td className="px-3 py-2.5">{scopeLabel(t, event.scope)}</td>
-      <td className="px-3 py-2.5">
-        <Badge className={kindTone(event.kind)}>{kindLabel(t, event.kind)}</Badge>
+    <tr
+      className="cursor-pointer border-b border-border/70 text-xs last:border-b-0 hover:bg-surface-soft-hover focus-within:bg-surface-soft-hover"
+      onClick={(click) => openDetails(click.currentTarget)}
+    >
+      <td className="px-3 py-2.5 text-muted-foreground">
+        <div className="truncate">{formatTimestamp(event.recorded_at)}</div>
       </td>
       <td className="px-3 py-2.5">
-        <div className="font-mono text-xs" title={event.agent_id}>
-          {event.agent_id ? shortID(event.agent_id) : "-"}
-        </div>
-        <div className="mt-0.5 text-xs text-muted-foreground">
-          {event.role || sourceLabel(t, event.source)}
-        </div>
-        {event.child_session_id ? (
-          <div className="mt-0.5 font-mono text-xs text-muted-foreground" title={event.child_session_id}>
-            {shortID(event.child_session_id)}
-          </div>
-        ) : null}
+        <div className="truncate">{scopeLabel(t, event.scope)}</div>
       </td>
       <td className="px-3 py-2.5">
-        <div>{event.task_type ? taskTypeLabel(t, event.task_type) : "-"}</div>
-        {event.task_subject ? (
-          <div
-            className="mt-0.5 max-w-[16rem] truncate text-xs text-muted-foreground"
-            title={event.task_subject}
-          >
-            {event.task_subject}
-          </div>
-        ) : null}
+        <Badge className={`max-w-full ${kindTone(event.kind)}`}>
+          <span className="truncate">{kindLabel(t, event.kind)}</span>
+        </Badge>
       </td>
       <td className="px-3 py-2.5">
-        <div className="max-w-[16rem] truncate text-xs" title={event.goal || undefined}>
-          {event.goal || "-"}
+        <div className="truncate font-mono">
+          {event.agent_id ? shortID(event.agent_id) : event.role || "-"}
         </div>
       </td>
       <td className="px-3 py-2.5">
-        <div>{reasonLabel(t, event.reason)}</div>
-        <div className="mt-0.5 text-xs text-muted-foreground">{sourceLabel(t, event.source)}</div>
+        <div className="truncate">{event.task_type ? taskTypeLabel(t, event.task_type) : "-"}</div>
       </td>
       <td className="px-3 py-2.5">
-        <div>{(event.difficulty ?? "").trim() || t("observability.routing.flags.notRecorded")}</div>
-        {event.difficulty_source ? (
-          <div className="mt-0.5 text-xs text-muted-foreground">{difficultySourceLabel(t, event.difficulty_source)}</div>
-        ) : null}
-        {event.reasoning_effort ? (
-          <div className="mt-0.5 text-xs text-muted-foreground">{`effort=${event.reasoning_effort}`}</div>
-        ) : null}
+        <div className="truncate">{event.difficulty?.trim() || t("observability.routing.flags.notRecorded")}</div>
       </td>
       <td className="px-3 py-2.5">
-        <div className="text-xs">{routeText}</div>
-        {typeof event.candidate_count === "number" && event.candidate_count > 0 ? (
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            {t("observability.routing.metricDetail.candidateTotal", { count: event.candidate_count })}
-          </div>
-        ) : null}
+        <div className="truncate">{routeText}</div>
       </td>
-      <td className="px-3 py-2.5 text-xs">
-        <div>{triStateLabel(t, event.route_changed, routeFlagKeys.routeChanged, routeFlagKeys.routeUnchanged)}</div>
-        <div className="mt-0.5 text-muted-foreground">
+      <td className="px-3 py-2.5">
+        <div className="truncate">
+          {triStateLabel(t, event.route_changed, routeFlagKeys.routeChanged, routeFlagKeys.routeUnchanged)}
+          {" / "}
           {triStateLabel(t, event.fallback_used, routeFlagKeys.fallbackUsed, routeFlagKeys.fallbackUnused)}
-          {event.fallback_reason ? ` · ${event.fallback_reason}` : ""}
         </div>
       </td>
-      <td className="px-3 py-2.5 text-xs">
+      <td className="whitespace-nowrap px-3 py-2.5">
         {warnings.length > 0 ? (
-          <div title={warnings.join("\n")} className="text-analytics-warning">
+          <Badge className="border-analytics-warning-border bg-analytics-warning-soft text-analytics-warning">
             {t("observability.routing.warningCount", { count: warnings.length })}
-            <div className="mt-0.5 font-mono text-[0.7rem] break-all text-muted-foreground">
-              {warningLabel(t, warnings[0])}
-            </div>
-          </div>
+          </Badge>
         ) : (
           "-"
         )}
       </td>
-      <td className="px-3 py-2.5 tabular-nums text-xs">
-        {event.max_attempts && event.max_attempts > 1
-          ? t("observability.routing.attemptBadge", {
-              attempt: String(event.attempt ?? 0),
-              max: String(event.max_attempts),
-            })
-          : formatNumber(event.attempt ?? 0)}
+      <td className="px-3 py-2.5">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs"
+          aria-label={t("observability.routing.details.open")}
+          aria-haspopup="dialog"
+          onClick={(click) => {
+            click.stopPropagation();
+            openDetails(click.currentTarget);
+          }}
+        >
+          {t("observability.routing.columns.details")}
+        </Button>
       </td>
     </tr>
   );

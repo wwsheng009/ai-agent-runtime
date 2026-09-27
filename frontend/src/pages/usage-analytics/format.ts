@@ -4,6 +4,22 @@ import type { AnalyticsDimensionsResponse, AnalyticsGroupBy } from "@/types/runt
 
 export const analyticsFilterKeys = ["from", "to", "q", "provider", "model", "directory", "project", "status"] as const;
 
+/**
+ * 取出已生效的筛选参数（键名与 URL 一致，未设置的键不出现）。
+ *
+ * 供分析类端点透传过滤条件：概览的主查询与「失败分类分布」必须共用同一份筛选语义，
+ * 否则同页会出现"卡片按筛选、图表按全局"的口径分裂。
+ */
+export function analyticsFilterParams(search: URLSearchParams | string): Partial<Record<(typeof analyticsFilterKeys)[number], string>> {
+  const params = typeof search === "string" ? new URLSearchParams(search) : search;
+  const result: Partial<Record<(typeof analyticsFilterKeys)[number], string>> = {};
+  for (const key of analyticsFilterKeys) {
+    const value = params.get(key)?.trim();
+    if (value) result[key] = value;
+  }
+  return result;
+}
+
 // 存储键与读取实现由 @/lib/admin-token 提供，页面继续从此处导入以保持既有调用方零改动。
 export { adminTokenStorageKey, readAdminToken } from "@/lib/admin-token";
 

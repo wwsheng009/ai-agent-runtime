@@ -158,7 +158,7 @@ export async function getAnalyticsSessionUsage(
 // 端点（backend/internal/api/skills/handler.go:770-772，实现 analytics_handlers.go）：
 //   GET /api/runtime/analytics/tools?session=&tool=&outcome=&from=&to=&limit=
 //   GET /api/runtime/analytics/subagents?session=&failure_category=&failed_only=&from=&to=&limit=
-//   GET /api/runtime/analytics/errors?session=&source=&top=
+//   GET /api/runtime/analytics/errors?session=&source=&top=&from=&to=&q=&provider=&model=&directory=&project=&status=
 // 三个端点均受 authorizeUsageAdmin 限制（Bearer admin token），空库返回空数组。
 // ============================================================================
 
@@ -199,6 +199,11 @@ export async function getAnalyticsSubagents(
   );
 }
 
+/**
+ * 失败模式 Top-N。会话级过滤（from/to/q/provider/model/directory/project/status）
+ * 与 /analytics/sessions 同口径：命中所属会话的失败事件才参与聚合，
+ * 供概览页「失败分类分布」跟随页面筛选。
+ */
 export async function listAnalyticsErrors(
   options: AnalyticsErrorPatternsQuery & AnalyticsRequestOptions = {},
 ): Promise<AnalyticsErrorPatternsResponse> {
@@ -207,6 +212,14 @@ export async function listAnalyticsErrors(
       session: options.session,
       source: options.source,
       top: options.top,
+      from: options.from,
+      to: options.to,
+      q: options.q,
+      provider: options.provider,
+      model: options.model,
+      directory: options.directory,
+      project: options.project,
+      status: options.status,
     }),
     {
       headers: buildAnalyticsHeaders(options.adminToken),

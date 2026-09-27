@@ -22,6 +22,7 @@ import { useTranslation } from "react-i18next";
 import { formatNumber } from "./format";
 import { Metric } from "./primitives";
 import { DistributionList } from "./routing-distribution-list";
+import { RoutingEventDetailsPanel } from "./routing-event-details-panel";
 import {
   bucketsToEntries,
   difficultySourceLabel,
@@ -47,17 +48,20 @@ export function RoutingObservabilityPanel({
   const { t } = useTranslation("usageAnalytics");
   const [stats, setStats] = useState<AnalyticsRouteStatsResponse | null>(null);
   const [events, setEvents] = useState<AnalyticsRouteEvent[]>([]);
+  const [selectedEvent, setSelectedEvent] = useState<AnalyticsRouteEvent | null>(null);
   const [total, setTotal] = useState(0);
   const [scope, setScope] = useState("");
   const [warningsOnly, setWarningsOnly] = useState(false);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const closeDetails = useCallback(() => setSelectedEvent(null), []);
 
   const load = useCallback(
     async (nextOffset: number, append: boolean) => {
       setLoading(true);
       setError(null);
+      if (!append) setSelectedEvent(null);
       try {
         const query = {
           session: sessionId,
@@ -217,9 +221,12 @@ export function RoutingObservabilityPanel({
         </div>
       ) : null}
 
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <h4 className="text-xs font-medium text-muted-foreground">{t("observability.routing.eventsTitle")}</h4>
-        <span className="text-xs text-muted-foreground">
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div>
+          <h4 className="text-xs font-medium text-muted-foreground">{t("observability.routing.eventsTitle")}</h4>
+          <p className="mt-1 text-xs text-muted-foreground">{t("observability.routing.eventsHint")}</p>
+        </div>
+        <span className="shrink-0 text-xs text-muted-foreground">
           {t("observability.routing.eventsShown", {
             shown: formatNumber(events.length),
             total: formatNumber(total),
@@ -241,26 +248,28 @@ export function RoutingObservabilityPanel({
         </div>
       ) : (
         <div className="w-full max-w-full overflow-x-auto rounded-card border border-border">
-          <table className="w-full min-w-[1440px] border-collapse text-left text-sm">
-            <thead className="bg-surface-softer text-xs text-muted-foreground">
+          <table className="w-full min-w-[1200px] table-fixed border-collapse text-left text-sm">
+            <thead className="whitespace-nowrap bg-surface-softer text-xs text-muted-foreground">
               <tr className="border-b border-border">
-                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.time")}</th>
-                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.scope")}</th>
-                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.kind")}</th>
-                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.agent")}</th>
-                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.taskType")}</th>
-                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.goal")}</th>
-                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.reason")}</th>
-                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.difficulty")}</th>
+                <th className="w-[168px] px-3 py-2 font-medium">{t("observability.routing.columns.time")}</th>
+                <th className="w-[96px] px-3 py-2 font-medium">{t("observability.routing.columns.scope")}</th>
+                <th className="w-[128px] px-3 py-2 font-medium">{t("observability.routing.columns.kind")}</th>
+                <th className="w-[144px] px-3 py-2 font-medium">{t("observability.routing.columns.agent")}</th>
+                <th className="w-[88px] px-3 py-2 font-medium">{t("observability.routing.columns.taskType")}</th>
+                <th className="w-[80px] px-3 py-2 font-medium">{t("observability.routing.columns.difficulty")}</th>
                 <th className="px-3 py-2 font-medium">{t("observability.routing.columns.route")}</th>
-                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.flags")}</th>
-                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.warnings")}</th>
-                <th className="px-3 py-2 font-medium">{t("observability.routing.columns.attempt")}</th>
+                <th className="w-[160px] px-3 py-2 font-medium">{t("observability.routing.columns.flags")}</th>
+                <th className="w-[88px] px-3 py-2 font-medium">{t("observability.routing.columns.warnings")}</th>
+                <th className="w-[88px] px-3 py-2 font-medium">{t("observability.routing.columns.details")}</th>
               </tr>
             </thead>
             <tbody>
               {events.map((event, index) => (
-                <RouteRow key={`${event.recorded_at}-${event.agent_id ?? index}-${index}`} event={event} />
+                <RouteRow
+                  key={`${event.recorded_at}-${event.agent_id ?? index}-${index}`}
+                  event={event}
+                  onViewDetails={setSelectedEvent}
+                />
               ))}
             </tbody>
           </table>
@@ -279,6 +288,7 @@ export function RoutingObservabilityPanel({
           </Button>
         </div>
       ) : null}
+      {selectedEvent ? <RoutingEventDetailsPanel event={selectedEvent} onClose={closeDetails} /> : null}
     </section>
   );
 }

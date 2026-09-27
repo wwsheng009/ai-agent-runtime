@@ -179,12 +179,15 @@ export function ErrorPatternsPanel({
           {t("observability.loading")}
         </div>
       ) : patterns.length === 0 ? (
-        <div
-          data-testid="error-patterns-empty"
-          className="rounded-card border border-border bg-surface-softer px-3 py-8 text-center text-sm text-muted-foreground"
-        >
-          {t("observability.errors.empty")}
-        </div>
+        // 与工具面板同口径：加载失败只保留 role=alert，不渲染「暂无数据」伪造成空库。
+        error ? null : (
+          <div
+            data-testid="error-patterns-empty"
+            className="rounded-card border border-border bg-surface-softer px-3 py-8 text-center text-sm text-muted-foreground"
+          >
+            {t("observability.errors.empty")}
+          </div>
+        )
       ) : (
         <div className="w-full max-w-full overflow-x-auto rounded-card border border-border">
           <table className="w-full min-w-[560px] border-collapse text-left text-sm">

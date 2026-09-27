@@ -22,6 +22,7 @@ import { useWorkspaceAgentChatTurn } from "@/hooks/workspace/use-workspace-agent
 import { useWorkspaceLive } from "@/hooks/workspace/use-workspace-live";
 import { useWorkspaceSessionActions } from "@/hooks/workspace/use-workspace-session-actions";
 import { useWorkspaceThreadSelection } from "@/hooks/workspace/use-workspace-thread-selection";
+import { useTrajectoryEarlierEntry } from "@/hooks/workspace/use-trajectory-earlier-entry";
 import { getErrorMessage } from "@/hooks/workspace/thread-runtime";
 import { withTransportDegradation } from "@/lib/connection-status";
 import {
@@ -348,20 +349,8 @@ export function WorkspacePage() {
       refreshRuntimeState: refreshSessionRuntimeState,
       responding: currentSessionResponding,
     });
-  // 轨迹视图的「加载更早」入口（尾部优先窗口）：对象引用保持稳定，避免下游
-  // 每次 render 收到新 prop（`window` 状态不变时不必重建）。
-  const trajectoryEarlier = useMemo(
-    () => ({
-      hasEarlier: trajectoryReplay.window.hasMore,
-      loading: trajectoryReplay.loadingEarlier,
-      onLoad: trajectoryReplay.loadEarlier,
-    }),
-    [
-      trajectoryReplay.loadEarlier,
-      trajectoryReplay.loadingEarlier,
-      trajectoryReplay.window.hasMore,
-    ],
-  );
+  // 轨迹视图的「加载更早」入口（尾部优先窗口）：稳定引用的 memo 收口在 hooks/workspace。
+  const trajectoryEarlier = useTrajectoryEarlierEntry(trajectoryReplay);
   const {
     backtrackDialog,
     backtrackError,

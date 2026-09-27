@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures";
-import { resetMockState } from "./support";
+import { resetMockState, seedLanguage } from "./support";
 
 // 批次 7.2 e2e：/usage 三处观测视图（不新增路由，全部在既有页面内）。
 //   1) 会话详情 tab：overview/tokens/tools/subagents/diagnostics —— 切 tab 只改 URL，
@@ -132,11 +132,28 @@ function sessionDetail() {
 type StubOptions = {
   toolsForbidden?: boolean;
   errorPatterns?: { error_code: string; failure_category: string; source: string; count: number }[];
+  /** 按 /errors 的请求 query 回放不同失败模式（用于断言「失败分类分布跟随筛选」）。 */
+  errorPatternsForQuery?: (
+    params: URLSearchParams,
+  ) => { error_code: string; failure_category: string; source: string; count: number }[] | undefined;
+  /** 收集 /errors 请求的 query 字符串（断言参数透传）。 */
+  errorQueries?: string[];
 };
 
 async function stubAnalytics(page: Page, options: StubOptions = {}) {
+  const meta = { ...ANALYTICS_META, coverage: EMPTY_COVERAGE, partial: false, partial_reasons: [] };
+  const sessions = {
+    ...meta, sessions: [], count: 0, total: 0, limit: 50, offset: 0, scanned: 0, totals: EMPTY_TOTALS,
+  };
+  const summary = {
+    ...meta, group_by: "day", totals: EMPTY_TOTALS, groups: [], scanned: 0, matched: 0,
+  };
+  const dimensions = {
+    ...ANALYTICS_META, providers: [], models: [], directories: [], projects: [], statuses: [],
+  };
   await page.route("**/api/runtime/analytics/**", async (route) => {
-    const path = new URL(route.request().url()).pathname;
+    const requestUrl = new URL(route.request().url());
+    const path = requestUrl.pathname;
     if (options.toolsForbidden && path.endsWith("/tools")) {
       await route.fulfill({
         status: 403,
@@ -145,48 +162,27 @@ async function stubAnalytics(page: Page, options: StubOptions = {}) {
       });
       return;
     }
+    let errorPatterns = options.errorPatterns ?? [];
+    if (path.endsWith("/errors")) {
+      options.errorQueries?.push(requestUrl.searchParams.toString());
+      errorPatterns = options.errorPatternsForQuery?.(requestUrl.searchParams) ?? errorPatterns;
+    }
     const body = path.endsWith("/tools")
       ? { ...ANALYTICS_META, tools: [], totals: EMPTY_TOOL_STAT }
       : path.endsWith("/subagents")
         ? { ...ANALYTICS_META, summary: EMPTY_SUBAGENT_SUMMARY, subagents: [] }
         : path.endsWith("/errors")
-          ? { ...ANALYTICS_META, patterns: options.errorPatterns ?? [] }
+          ? { ...ANALYTICS_META, patterns: errorPatterns }
           : path.endsWith("/sessions")
-            ? {
-                ...ANALYTICS_META,
-                coverage: EMPTY_COVERAGE,
-                partial: false,
-                partial_reasons: [],
-                sessions: [],
-                count: 0,
-                total: 0,
-                limit: 50,
-                offset: 0,
-                scanned: 0,
-                totals: EMPTY_TOTALS,
-              }
+            ? sessions
             : path.endsWith("/overview")
-              ? {
-                  ...ANALYTICS_META,
-                  coverage: EMPTY_COVERAGE,
-                  partial: false,
-                  partial_reasons: [],
-                  group_by: "day",
-                  totals: EMPTY_TOTALS,
-                  groups: [],
-                  scanned: 0,
-                  matched: 0,
-                }
-              : path.includes("/sessions/")
-                ? sessionDetail()
-                : {
-                    ...ANALYTICS_META,
-                    providers: [],
-                    models: [],
-                    directories: [],
-                    projects: [],
-                    statuses: [],
-                  };
+              // 首屏端点已合并为 sessions / summary / dimensions，不再是 summary 本身。
+              ? { ...ANALYTICS_META, sessions, summary, dimensions, matched: 0 }
+              : path.endsWith("/summary")
+                ? summary
+                : path.includes("/sessions/")
+                  ? sessionDetail()
+                  : dimensions;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -385,9 +381,274 @@ test("Overview：attached=false 显示采集健康横幅并链到 /logs", async 
 test("鉴权失败：观测面板以 role=alert 呈现 403，不伪造空数据", async ({ page }) => {
   await gotoSession(page, { toolsForbidden: true });
 
+  const response = page.waitForResponse((result) =>
+    new URL(result.url()).pathname === "/api/runtime/analytics/tools",
+  );
   await page.getByRole("tab", { name: /^(Tools|工具)$/ }).click();
+  expect((await response).status()).toBe(403);
   const alert = page.getByRole("alert").first();
   await expect(alert).toBeVisible();
-  await expect(alert).toContainText("403");
+  await expect(alert).toContainText("admin token required");
   await expect(page.getByTestId("tool-stats-empty")).toHaveCount(0);
+});
+
+for (const locale of ["zh-CN", "en-US"]) {
+  test(`路由事件明细：长护栏保持紧凑，完整内容在右侧面板展示（${locale}）`, async ({ page }) => {
+    await stubAnalytics(page);
+    await seedLanguage(page, locale);
+    const warnings = [
+      `difficulty_promoted_by_keyword:${"long-keyword-".repeat(40)}`,
+      "difficulty_floor_by_task_type:security",
+      `unknown_guardrail:${"x".repeat(800)}`,
+    ];
+    const longEvent = {
+      recorded_at: "2026-09-27T08:00:00Z",
+      session_id: SESSION_ID,
+      parent_session_id: "parent-session-full-id",
+      child_session_id: "child-session-full-id",
+      agent_id: `agent-${"long-identifier-".repeat(10)}`,
+      scope: "subagent",
+      kind: "warning",
+      role: "verifier",
+      task_type: "verify",
+      task_subject: "Task subject that belongs in the details panel",
+      goal: "Full task goal: ".repeat(60),
+      step: 1,
+      reason: "resolved",
+      source: "explicit_promoted",
+      difficulty: "hard",
+      difficulty_source: "explicit_promoted",
+      provider: "mock-provider",
+      model: `model-${"long-name-".repeat(20)}`,
+      reasoning_effort: "high",
+      route_changed: true,
+      fallback_used: true,
+      fallback_reason: "Full fallback reason: ".repeat(60),
+      candidate_count: 2,
+      warnings,
+      attempt: 1,
+      max_attempts: 2,
+    };
+    let routingReads = 0;
+    await page.route("**/api/runtime/analytics/routing**", async (route) => {
+      routingReads += 1;
+      const body = new URL(route.request().url()).pathname.endsWith("/events")
+        ? {
+            ...ANALYTICS_META,
+            events: [
+              { ...longEvent, agent_id: "short-agent", kind: "applied", model: "short-model", warnings: [], fallback_used: false },
+              longEvent,
+            ],
+            count: 2,
+            limit: 50,
+            offset: 0,
+          }
+        : {
+            ...ANALYTICS_META,
+            totals: { total: 2, main_agent: 0, subagent: 2, applied: 1, cleared: 0, warnings: 1, route_changed: 2, fallback_used: 1, candidate_total: 4, distinct_sessions: 1, distinct_models: 2 },
+            by_scope: [], by_kind: [], by_reason: [], by_source: [], by_provider: [], by_model: [],
+            by_difficulty: [], by_difficulty_source: [], by_task_type: [], by_role: [], warnings: [],
+            sampled: false, sample_size: 2,
+          };
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    });
+    await page.goto("/usage");
+    await expect(page.getByTestId("usage-analytics-health-banner")).toBeVisible();
+    expect(routingReads).toBe(0);
+    await page.getByRole("tab", { name: /^(Routing|路由观测)$/ }).click();
+    await expect(page).toHaveURL(/[?&]view=routing/);
+    const panel = page.getByTestId("routing-observability-panel");
+    const rows = panel.locator("tbody tr");
+    await expect(rows).toHaveCount(2);
+    await rows.last().scrollIntoViewIfNeeded();
+
+    const heights = await rows.evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().height));
+    expect(heights[1]).toBeGreaterThan(0);
+    expect(heights[1]).toBeLessThanOrEqual(52);
+    expect(Math.abs(heights[1]! - heights[0]!)).toBeLessThanOrEqual(1);
+    const longRow = rows.last();
+    await expect(longRow.locator("td").nth(8)).toHaveText(locale === "zh-CN" ? "3 条" : "3");
+    for (const warning of warnings) await expect(longRow).not.toContainText(warning);
+    await expect(longRow).not.toContainText(longEvent.task_subject);
+    await expect(longRow).not.toContainText(longEvent.goal.trim());
+    await expect(longRow).not.toContainText(longEvent.fallback_reason.trim());
+
+    const details = longRow.getByRole("button", { name: /View event details|查看事件明细/ });
+    await details.focus();
+    await details.press("Enter");
+    const dialog = page.getByRole("dialog", { name: /Route event details|路由事件明细/ });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator("li")).toHaveCount(warnings.length);
+    for (const warning of warnings) await expect(dialog).toContainText(warning);
+    for (const field of [longEvent.agent_id, longEvent.task_subject, longEvent.goal.trim(), longEvent.fallback_reason.trim(), longEvent.model, longEvent.child_session_id]) {
+      await expect(dialog).toContainText(field);
+    }
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(details).toBeFocused();
+
+    // Clicking the compact warning count opens the same event without needing the action column.
+    await longRow.locator("td").nth(8).click();
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: /Close details|关闭明细/ }).click();
+    await expect(dialog).toHaveCount(0);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await details.click();
+    await expect(dialog).toBeVisible();
+    const bounds = await dialog.boundingBox();
+    expect(bounds?.width).toBeLessThanOrEqual(390);
+    expect(bounds?.height).toBeLessThanOrEqual(844);
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    const content = dialog.locator('[tabindex="0"]');
+    expect(await content.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+    expect(await content.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    await dialog.getByRole("button", { name: /Close details|关闭明细/ }).click();
+    await expect(dialog).toHaveCount(0);
+  });
+}
+
+for (const locale of ["zh-CN", "en-US"]) {
+  test(`用量分类 Tab：过滤器外置、URL 恢复与窄屏布局（${locale}）`, async ({ page }) => {
+    await stubAnalytics(page);
+    await seedLanguage(page, locale);
+    let overviewReads = 0;
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/runtime/analytics/overview") overviewReads += 1;
+    });
+    await page.goto("/usage?provider=openai&q=sample&from=2026-09-01&offset=50");
+    await expect(page.getByTestId("usage-analytics-health-banner")).toBeVisible();
+    const filters = page.getByRole("form", { name: /Analytics scope and filters|分析范围与筛选/ });
+    const tabs = page.getByRole("tablist", { name: /Usage categories|用量信息分类/ });
+    await expect(tabs.getByRole("tab")).toHaveCount(6);
+    expect(await filters.evaluate((element) => element.closest('[role="tabpanel"]') === null)).toBe(true);
+
+    for (const view of ["overview", "models", "sessions", "quota", "routing", "artifacts"]) {
+      const tab = page.locator(`#usage-view-${view}-tab`);
+      await tab.click();
+      await expect(tab).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByRole("tabpanel")).toHaveCount(1);
+      await expect(page.getByRole("tabpanel")).toHaveAttribute("id", `usage-view-${view}-panel`);
+      await expect(filters).toBeVisible();
+      await expect(filters.getByRole("textbox", { name: /^(Search|搜索)$/ })).toHaveValue("sample");
+      const query = new URL(page.url()).searchParams;
+      expect(query.get("provider")).toBe("openai");
+      expect(query.get("from")).toBe("2026-09-01");
+      expect(query.get("offset")).toBe("50");
+      expect(overviewReads).toBe(1);
+    }
+    await expect(page.getByRole("tabpanel")).toContainText(/snapshot is unavailable|暂时无法读取工件流快照/);
+
+    await page.locator("#usage-view-models-tab").click();
+    await filters.getByRole("button", { name: /Reset filters|重置筛选/ }).click();
+    await expect(page).toHaveURL(/\/usage\?view=models$/);
+    await expect(filters.getByRole("textbox", { name: /^(Search|搜索)$/ })).toHaveValue("");
+    await expect.poll(() => overviewReads).toBe(2);
+    await page.locator("#usage-view-routing-tab").click();
+    await page.goBack();
+    await expect(page.locator("#usage-view-models-tab")).toHaveAttribute("aria-selected", "true");
+
+    await page.reload();
+    await expect(page.locator("#usage-view-models-tab")).toHaveAttribute("aria-selected", "true");
+    await expect(filters).toBeVisible();
+    const filterBounds = await filters.boundingBox();
+    const tabBounds = await tabs.boundingBox();
+    expect(filterBounds!.y + filterBounds!.height).toBeLessThanOrEqual(tabBounds!.y);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator("#usage-view-artifacts-tab").click();
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("id", "usage-view-artifacts-panel");
+    expect(await tabs.evaluate((element) => getComputedStyle(element).overflowX)).toBe("auto");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+    await expect(filters).toBeVisible();
+  });
+}
+
+for (const locale of ["zh-CN", "en-US"]) {
+  test(`紧凑过滤器：高度预算、日期范围与筛选操作（${locale}）`, async ({ page }) => {
+    await stubAnalytics(page);
+    await seedLanguage(page, locale);
+    await page.goto("/usage?view=models&provider=openai&model=long-model-name-for-layout&q=needle&from=2026-09-01&to=2026-09-30&offset=50");
+    await expect(page.getByTestId("usage-analytics-health-banner")).toBeVisible();
+    const filters = page.getByRole("form", { name: /Analytics scope and filters|分析范围与筛选/ });
+    const measurements: { width: number; height: number; budget: number }[] = [];
+    for (const [width, budget] of [[1440, 128], [1024, 128], [768, 166], [390, 280], [320, 280]]) {
+      await page.setViewportSize({ width, height: 900 });
+      const bounds = await filters.boundingBox();
+      measurements.push({ width, height: bounds!.height, budget });
+      expect(await filters.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+      const dateWidths = await filters.locator('input[type="date"]').evaluateAll((inputs) => inputs.map((input) => input.getBoundingClientRect().width));
+      expect(dateWidths.every((value) => value >= 110)).toBe(true);
+    }
+    console.info(`[compact-filters/${locale}] ${JSON.stringify(measurements)}`);
+    expect(measurements.filter(({ height, budget }) => height > budget)).toEqual([]);
+    await expect(filters.locator('input, button[aria-haspopup="listbox"]')).toHaveCount(10);
+
+    // 右列的长选项菜单也必须留在窄视口内，不能因触发器变窄而溢出。
+    await filters.getByRole("button", { name: "Model", exact: true }).click();
+    const modelMenu = page.getByRole("listbox", { name: "Model", exact: true });
+    await expect(modelMenu).toBeVisible();
+    const menuBounds = await modelMenu.boundingBox();
+    expect(menuBounds!.x).toBeGreaterThanOrEqual(0);
+    expect(menuBounds!.x + menuBounds!.width).toBeLessThanOrEqual(320);
+    await page.keyboard.press("Escape");
+    await filters.getByRole("button", { name: "Provider", exact: true }).click();
+    await page.getByRole("option", { name: /^(All|全部)$/ }).click();
+    await expect.poll(() => new URL(page.url()).searchParams.has("provider")).toBe(false);
+    await filters.getByLabel(/^(Start date|开始日期)$/).fill("2026-09-02");
+    await filters.getByLabel(/^(End date|结束日期)$/).fill("2026-09-28");
+    await expect.poll(() => new URL(page.url()).searchParams.get("from")).toBe("2026-09-02");
+    await expect.poll(() => new URL(page.url()).searchParams.get("to")).toBe("2026-09-28");
+    await expect.poll(() => new URL(page.url()).searchParams.has("offset")).toBe(false);
+    await filters.getByRole("button", { name: /^(Group by|分组)$/ }).click();
+    await page.getByRole("option", { name: /^(Model|模型)$/ }).click();
+    await expect.poll(() => new URL(page.url()).searchParams.get("group_by")).toBe("model");
+    const token = filters.getByLabel("Admin token", { exact: true });
+    await expect(token).toHaveAttribute("type", "password");
+    await token.fill("e2e-layout-token");
+    await filters.getByRole("button", { name: /Reset filters|重置筛选/ }).click();
+    await expect(page).toHaveURL(/\/usage\?view=models$/);
+    await expect(filters.getByRole("textbox", { name: /^(Search|搜索)$/ })).toHaveValue("");
+    await expect(token).toHaveValue("e2e-layout-token");
+  });
+}
+
+test("失败分类分布跟随筛选：参数透传且数据随筛选变化", async ({ page }) => {
+  const errorQueries: string[] = [];
+  await stubAnalytics(page, {
+    errorQueries,
+    // 按 provider 回放不同失败模式：只有带上筛选才会出现 openai 会话的分类。
+    errorPatternsForQuery: (params) =>
+      params.get("provider") === "openai"
+        ? [{ error_code: "UPSTREAM_TIMEOUT", failure_category: "timeout", source: "requests", count: 7 }]
+        : [{ error_code: "TOOL_DENIED", failure_category: "tool_error", source: "tools", count: 3 }],
+  });
+  await page.goto("/usage?provider=openai&from=2026-09-01&to=2026-09-30");
+  await expect(page.getByTestId("usage-analytics-health-banner")).toBeVisible();
+  const filters = page.getByRole("form", { name: /Analytics scope and filters|分析范围与筛选/ });
+  const failureChart = page.getByTestId("analytics-failure-chart");
+
+  // 概览的失败分类分布来自 /errors，且必须带上页面筛选（会话级口径）。
+  await expect(failureChart).toBeVisible();
+  // 用图表柱条的 aria-label（role=button）定位：Y 轴刻度里的同名 <title> 是隐藏节点。
+  await expect(page.getByRole("button", { name: /UPSTREAM_TIMEOUT/ })).toBeVisible();
+  await expect.poll(() => errorQueries.length).toBeGreaterThan(0);
+  const first = new URLSearchParams(errorQueries[0]);
+  expect(first.get("provider")).toBe("openai");
+  expect(first.get("from")).toBe("2026-09-01");
+  expect(first.get("to")).toBe("2026-09-30");
+  expect(first.get("top")).toBe("10");
+
+  // 清掉 provider：图表必须重取，且不再包含 openai 会话的失败分类。
+  const before = errorQueries.length;
+  await filters.getByRole("button", { name: "Provider", exact: true }).click();
+  await page.getByRole("option", { name: /^(All|全部)$/ }).click();
+  await expect(page.getByRole("button", { name: /TOOL_DENIED/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /UPSTREAM_TIMEOUT/ })).toHaveCount(0);
+  await expect.poll(() => errorQueries.length).toBeGreaterThan(before);
+  const last = new URLSearchParams(errorQueries[errorQueries.length - 1]);
+  expect(last.has("provider")).toBe(false);
+  expect(last.get("from")).toBe("2026-09-01");
 });

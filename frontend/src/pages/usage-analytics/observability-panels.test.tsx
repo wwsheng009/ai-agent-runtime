@@ -129,6 +129,35 @@ describe("usage analytics observability panels", () => {
 
     const alert = container.querySelector('[role="alert"]');
     expect(alert?.textContent).toContain("403 forbidden");
+    // 鉴权失败不是空库：不得再渲染「暂无数据」把失败伪装成没有数据。
+    expect(container.querySelector('[data-testid="tool-stats-empty"]')).toBeNull();
+  });
+
+  it("子代理面板：加载失败只渲染 role=alert，不渲染「暂无数据」", async () => {
+    getAnalyticsSubagentsMock.mockRejectedValue(new Error("403 forbidden"));
+    act(() => {
+      root.render(<SubagentStatsPanel sessionId="session-1" />);
+    });
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("403 forbidden");
+    expect(container.querySelector('[data-testid="subagent-stats-empty"]')).toBeNull();
+  });
+
+  it("失败模式面板：加载失败只渲染 role=alert，不渲染「暂无数据」", async () => {
+    listAnalyticsErrorsMock.mockRejectedValue(new Error("403 forbidden"));
+    act(() => {
+      root.render(
+        <ErrorPatternsPanel
+          sessionId="session-1"
+          onDrilldown={() => {}}
+        />,
+      );
+    });
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("403 forbidden");
+    expect(container.querySelector('[data-testid="error-patterns-empty"]')).toBeNull();
   });
 
   it("子代理面板：空数组渲染「暂无数据」并展示零值摘要", async () => {
@@ -268,14 +297,49 @@ describe("usage analytics observability panels", () => {
     expect(container.textContent).toContain("安全");
     expect(container.textContent).toContain("researcher");
     expect(container.textContent).toContain("任务类型");
-    // 明细行：task_type 归一为标签，task_subject 落到次行。
-    expect(container.textContent).toContain("核对 P4 契约");
-    // 新 warning token 前缀（prefix:value）按 {{value}} 插值出标签。
+    // 分布桶仍展示完整标签；明细行只保留摘要，不将长文案堆在表格中。
     expect(container.textContent).toContain("任务类型下限：security");
-    // 子代理任务目标（goal）落到明细列。
-    expect(container.textContent).toContain("改一个文件");
     expect(container.textContent).toContain("已显示 1 / 1");
     expect(container.textContent).toContain("1 条");
+    const table = container.querySelector("table");
+    expect(table?.classList.contains("table-fixed")).toBe(true);
+    expect(table?.textContent).not.toContain("核对 P4 契约");
+    expect(table?.textContent).not.toContain("改一个文件");
+    expect(table?.textContent).not.toContain("任务类型下限：security");
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    act(() => {
+      table?.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.getAttribute("aria-modal")).toBe("true");
+    expect(dialog?.textContent).toContain("核对 P4 契约");
+    expect(dialog?.textContent).toContain("改一个文件");
+    expect(dialog?.textContent).toContain("任务类型下限：security");
+    expect(dialog?.textContent).toContain("difficulty_floor_by_task_type:security");
+    expect(dialog?.textContent).toContain("child-route-1");
+    // 使用事件已携带的数据展开，不额外请求或重置表格。
+    expect(listAnalyticsRoutingEventsMock).toHaveBeenCalledTimes(1);
+    expect(container.querySelector("table")).toBe(table);
+  });
+
+  it("路由面板：切换会话时关闭旧事件明细", async () => {
+    getAnalyticsRoutingStatsMock.mockResolvedValue(routeStatsResponse());
+    listAnalyticsRoutingEventsMock.mockResolvedValue(routeEventsResponse());
+    act(() => root.render(<RoutingObservabilityPanel sessionId="session-1" />));
+    await flush();
+    act(() => {
+      container.querySelector("tbody tr")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+    act(() => root.render(<RoutingObservabilityPanel sessionId="session-2" />));
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(listAnalyticsRoutingEventsMock).toHaveBeenLastCalledWith(expect.objectContaining({
+      session: "session-2",
+      offset: 0,
+    }));
   });
 
   it("路由面板：加载失败渲染 role=alert", async () => {

@@ -134,6 +134,8 @@ describe("UsageAnalyticsPage", () => {
     expect(markup).toContain('aria-label="刷新"');
     expect(markup).toContain('href="/workspace/chats/new"');
     expect(markup).toContain("surface-panel");
+    expect(markup).toContain('aria-label="用量信息分类"');
+    expect(markup).toContain('id="usage-view-overview-panel"');
     // 契约：/usage/cache 已删除，页面不再暴露缓存 tab/链接。
     expect(markup).not.toContain('href="/usage/cache"');
     expect(markup).not.toContain("分析视图");
@@ -389,7 +391,7 @@ describe("UsageAnalyticsPage session list pagination", () => {
       await act(async () => {
         root = createRoot(container);
         root.render(
-          <MemoryRouter initialEntries={["/usage"]}>
+          <MemoryRouter initialEntries={["/usage?view=sessions"]}>
             <Routes>
               <Route path="/usage" element={<UsageAnalyticsPage />} />
             </Routes>

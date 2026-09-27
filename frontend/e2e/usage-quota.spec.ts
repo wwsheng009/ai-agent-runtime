@@ -3,7 +3,7 @@ import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
 import { resetMockState } from "./support";
 
-// P2-1A e2e：/analytics 页「用量与配额」面板 → GET /api/runtime/usage/{stats,policy,ledger}。
+// P2-1A e2e：/usage「用量配额」分类 → GET /api/runtime/usage/{stats,policy,ledger}。
 // 覆盖真实响应链路：全局聚合（无配额快照）→ 账本筛选重取 → 切具体作用域（余量 + 生效来源）
 // → 未配置上限的作用域如实显示「无配额快照」→ 403 时提示补 admin token（不伪造数据）。
 
@@ -53,37 +53,23 @@ const analyticsMeta = {
 };
 
 async function stubAnalytics(page: Page) {
+  const sessions = {
+    ...analyticsMeta, sessions: [], count: 0, total: 0, limit: 50, offset: 0, scanned: 0, totals: emptyTotals,
+  };
+  const summary = {
+    ...analyticsMeta, group_by: "day", totals: emptyTotals, groups: [], scanned: 0, matched: 0,
+  };
+  const dimensions = {
+    schema_version: analyticsMeta.schema_version, generated_at: analyticsMeta.generated_at,
+    providers: [], models: [], directories: [], projects: [], statuses: [],
+  };
   await page.route("**/api/runtime/analytics/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     const body = path.endsWith("/sessions")
-      ? {
-          ...analyticsMeta,
-          sessions: [],
-          count: 0,
-          total: 0,
-          limit: 50,
-          offset: 0,
-          scanned: 0,
-          totals: emptyTotals,
-        }
+      ? sessions
       : path.endsWith("/overview")
-        ? {
-            ...analyticsMeta,
-            group_by: "day",
-            totals: emptyTotals,
-            groups: [],
-            scanned: 0,
-            matched: 0,
-          }
-        : {
-            schema_version: "runtime.analytics.v1",
-            generated_at: "2026-09-13T10:00:00Z",
-            providers: [],
-            models: [],
-            directories: [],
-            projects: [],
-            statuses: [],
-          };
+        ? { ...analyticsMeta, sessions, summary, dimensions, matched: 0 }
+        : path.endsWith("/summary") ? summary : dimensions;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -94,7 +80,8 @@ async function stubAnalytics(page: Page) {
 
 async function gotoAnalytics(page: Page) {
   await stubAnalytics(page);
-  await page.goto("/analytics");
+  await page.goto("/usage?view=quota");
+  await expect(page.getByRole("tab", { name: "Usage and quota" })).toHaveAttribute("aria-selected", "true");
   const panel = page.getByRole("region", { name: "Usage and quota" });
   await expect(panel).toBeVisible({ timeout: 30_000 });
   return panel;

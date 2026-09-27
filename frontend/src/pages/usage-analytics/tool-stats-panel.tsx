@@ -193,12 +193,16 @@ export function ToolStatsPanel({
           {t("observability.loading")}
         </div>
       ) : tools.length === 0 ? (
-        <div
-          data-testid="tool-stats-empty"
-          className="rounded-card border border-border bg-surface-softer px-3 py-8 text-center text-sm text-muted-foreground"
-        >
-          {t("observability.tools.empty")}
-        </div>
+        // 失败（如 403 缺 admin token）只保留上方 role=alert：渲染「暂无数据」会把鉴权失败
+        // 伪装成空库，误导排查方向。
+        error ? null : (
+          <div
+            data-testid="tool-stats-empty"
+            className="rounded-card border border-border bg-surface-softer px-3 py-8 text-center text-sm text-muted-foreground"
+          >
+            {t("observability.tools.empty")}
+          </div>
+        )
       ) : (
         <div className="w-full max-w-full overflow-x-auto rounded-card border border-border">
           <table className="w-full min-w-[1080px] border-collapse text-left text-sm">

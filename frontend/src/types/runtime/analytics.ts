@@ -358,6 +358,16 @@ export type AnalyticsErrorPatternsQuery = {
   session?: string;
   source?: string;
   top?: number;
+  /** 会话级时间窗（按会话开始时间，to 右开），与 /analytics/sessions 同口径。 */
+  from?: string;
+  to?: string;
+  /** 会话维度过滤：均取自 usage_sessions，命中会话的失败事件才参与聚合。 */
+  q?: string;
+  provider?: string;
+  model?: string;
+  directory?: string;
+  project?: string;
+  status?: string;
 };
 
 export type AnalyticsErrorPatternsResponse = {

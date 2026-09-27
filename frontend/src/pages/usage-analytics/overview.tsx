@@ -1,7 +1,6 @@
 // 由 pages/usage-analytics-page.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
 
 import { Button } from "@/components/ui/button";
-import { Select } from "@/components/ui/select";
 import {
   getAnalyticsSubagents,
   getToolEfficiencySnapshot,
@@ -24,13 +23,15 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react
 import { useTranslation } from "react-i18next";
 import { Link, useSearchParams } from "react-router-dom";
 
-import { adminTokenStorageKey, analyticsFilterKeys, dimensionOptions, errorRate, formatFirstToken, formatNumber, formatPercent, formatTimestamp, normalizeDimensions, readAdminToken } from "./format";
+import { adminTokenStorageKey, analyticsFilterKeys, analyticsFilterParams, dimensionOptions, errorRate, formatFirstToken, formatNumber, formatPercent, formatTimestamp, normalizeDimensions, readAdminToken } from "./format";
 import { ArtifactFlowPanel } from "./artifact-flow-panel";
 import { emptyCoverage, emptyDimensions, emptyTotals } from "./defaults";
 import { AnalyticsHeader, FilterInput, FilterSelect, Metric, QualityNotice, UsageAnalyticsChartsFallback } from "./primitives";
 import { UsageQuotaPanel } from "./quota";
 import { RoutingObservabilityPanel } from "./routing-observability-panel";
 import { SessionTable } from "./sessions";
+import { resetOverviewFilters, resolveOverviewView, selectOverviewView, type OverviewView } from "./overview-navigation";
+import { OverviewTabs } from "./overview-tabs";
 
 const UsageAnalyticsCharts = lazy(() =>
   import("@/pages/usage-analytics-charts").then((module) => ({
@@ -64,6 +65,7 @@ export function UsageOverview() {
   const [failurePatterns, setFailurePatterns] = useState<AnalyticsErrorPattern[]>([]);
   const [failureFilter, setFailureFilter] = useState<string | null>(null);
   const [observabilityError, setObservabilityError] = useState<string | null>(null);
+  const [observabilityLoading, setObservabilityLoading] = useState(true);
   const [health, setHealth] = useState<AnalyticsUsageHealth | null>(null);
   // F-4：Artifact Flow 观测快照（runtime.tool_efficiency，静默降级 null）。
   const [toolEfficiency, setToolEfficiency] = useState<AnalyticsToolEfficiencySnapshot | null>(null);
@@ -71,21 +73,32 @@ export function UsageOverview() {
   const [providerGroups, setProviderGroups] = useState<AnalyticsGroupBucket[]>([]);
   const [modelGroups, setModelGroups] = useState<AnalyticsGroupBucket[]>([]);
 
+  const view = resolveOverviewView(searchParams.get("view"));
   const groupBy = (searchParams.get("group_by") || "day") as AnalyticsGroupBy;
   const pageOffset = Math.max(0, Number.parseInt(searchParams.get("offset") || "0", 10) || 0);
   const hasActiveFilters = analyticsFilterKeys.some((key) => searchParams.has(key)) || groupBy !== "day" || pageOffset > 0;
+  // view 只控制呈现，不进入请求依赖；切换分类不能重取主分析数据。
+  const filterParams = new URLSearchParams();
+  for (const key of analyticsFilterKeys) {
+    const value = searchParams.get(key);
+    if (value) filterParams.set(key, value);
+  }
+  const filterKey = filterParams.toString();
+  const filters = useMemo(() => analyticsFilterParams(filterKey), [filterKey]);
+  // 键集保持显式（缺省为 undefined）：请求参数形状稳定，调用方/测试无需感知
+  // "有筛选" 与 "无筛选" 两种对象形态。
   const query = useMemo(() => ({
-    from: searchParams.get("from") || undefined,
-    to: searchParams.get("to") || undefined,
-    q: searchParams.get("q") || undefined,
-    provider: searchParams.get("provider") || undefined,
-    model: searchParams.get("model") || undefined,
-    directory: searchParams.get("directory") || undefined,
-    project: searchParams.get("project") || undefined,
-    status: searchParams.get("status") || undefined,
+    from: filters.from,
+    to: filters.to,
+    q: filters.q,
+    provider: filters.provider,
+    model: filters.model,
+    directory: filters.directory,
+    project: filters.project,
+    status: filters.status,
     limit: 50,
     offset: pageOffset,
-  }), [pageOffset, searchParams]);
+  }), [filters, pageOffset]);
 
   const updateFilter = useCallback((key: string, value: string) => {
     setSearchParams((current) => {
@@ -99,21 +112,22 @@ export function UsageOverview() {
   }, [setSearchParams]);
 
   const resetFilters = useCallback(() => {
-    setSearchParams(new URLSearchParams(), { replace: true });
+    setSearchParams(resetOverviewFilters, { replace: true });
+  }, [setSearchParams]);
+
+  const changeView = useCallback((next: OverviewView) => {
+    setSearchParams((current) => selectOverviewView(current, next));
   }, [setSearchParams]);
 
   // 观测区块（子代理 / 失败模式 / 采集健康）：不进首屏 Promise.all，
   // 由独立 effect 延迟加载（Phase 4 首屏瘦身）。
   const loadObservability = useCallback(async () => {
     setObservabilityError(null);
-    const [subagents, errors, usageHealth, toolEfficiency] = await Promise.all([
+    setObservabilityLoading(true);
+    const [subagents, usageHealth, toolEfficiency] = await Promise.all([
       // 子代理摘要用于「子代理失败率」指标卡：summary 由后端按 limit 内记录聚合，
       // 取最大行数（200）保证全局口径，而不是只取 1 行的假摘要。
       getAnalyticsSubagents({ adminToken, limit: 200 }).catch((caught) => {
-        setObservabilityError(caught instanceof Error ? caught.message : String(caught));
-        return null;
-      }),
-      listAnalyticsErrors({ adminToken, top: 10 }).catch((caught) => {
         setObservabilityError(caught instanceof Error ? caught.message : String(caught));
         return null;
       }),
@@ -121,10 +135,27 @@ export function UsageOverview() {
       getToolEfficiencySnapshot({ adminToken }),
     ]);
     setSubagentSummary(subagents?.summary ?? null);
-    setFailurePatterns(errors?.patterns ?? []);
     setHealth(usageHealth);
     setToolEfficiency(toolEfficiency);
+    setObservabilityLoading(false);
   }, [adminToken]);
+
+  // 失败分类分布跟随页面筛选：与主查询共用同一份过滤参数（会话级口径，
+  // 见 api/runtime/analytics.ts 的 listAnalyticsErrors）；筛选变化即重取，
+  // 因此它不再是与页面无关的全局快照。子代理摘要/采集健康仍是全局观测。
+  const loadFailurePatterns = useCallback(async () => {
+    try {
+      const errors = await listAnalyticsErrors({
+        ...analyticsFilterParams(filterKey),
+        top: 10,
+        adminToken,
+      });
+      setFailurePatterns(errors?.patterns ?? []);
+    } catch (caught) {
+      setObservabilityError(caught instanceof Error ? caught.message : String(caught));
+      setFailurePatterns([]);
+    }
+  }, [adminToken, filterKey]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -163,6 +194,11 @@ export function UsageOverview() {
     const timer = window.setTimeout(() => { void loadObservability(); }, 300);
     return () => window.clearTimeout(timer);
   }, [loadObservability]);
+  // 与观测块同策略延迟 300ms：输入框连续按键只发一次请求（筛选变化即重取）。
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void loadFailurePatterns(); }, 300);
+    return () => window.clearTimeout(timer);
+  }, [loadFailurePatterns]);
   useEffect(() => {
     if (adminToken.trim()) window.localStorage.setItem(adminTokenStorageKey, adminToken.trim());
     else window.localStorage.removeItem(adminTokenStorageKey);
@@ -186,17 +222,17 @@ export function UsageOverview() {
   return (
     <div className="min-h-screen min-w-0 overflow-x-hidden bg-[var(--workspace-shell-bg)] text-foreground">
       <div className="mx-auto flex min-h-screen w-full max-w-[1760px] flex-col gap-2 px-2.5 py-2.5 sm:px-3">
-        <AnalyticsHeader onRefresh={() => void load()} refreshing={loading} />
+        <AnalyticsHeader onRefresh={() => { void load(); void loadObservability(); void loadFailurePatterns(); }} refreshing={loading || observabilityLoading} />
         <main className="flex min-w-0 flex-1 flex-col gap-2">
           <form
             aria-label={t("filters.title")}
-            className="surface-panel rounded-panel-lg p-3 sm:p-4"
+            className="surface-panel rounded-panel-lg p-2 sm:px-3"
             onSubmit={(event) => event.preventDefault()}
           >
-            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <h2 className="text-sm font-semibold">{t("filters.title")}</h2>
-                <p className="mt-0.5 text-xs text-muted-foreground">
+            <div className="mb-1.5 flex h-6 min-w-0 items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <h2 className="shrink-0 text-xs font-semibold">{t("filters.compactTitle")}</h2>
+                <p className="min-w-0 truncate text-xs text-muted-foreground" title={t("meta.scannedMatched", { scanned: String(scanned), matched: String(matched) })}>
                   {t("meta.scannedMatched", { scanned: String(scanned), matched: String(matched) })}
                 </p>
               </div>
@@ -204,35 +240,39 @@ export function UsageOverview() {
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="self-start sm:self-auto"
+                className="h-6 shrink-0 gap-1 px-1.5 text-xs"
                 onClick={resetFilters}
                 disabled={!hasActiveFilters}
               >
-                <RotateCcwIcon size={14} />
+                <RotateCcwIcon size={12} />
                 {t("actions.resetFilters")}
               </Button>
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-9">
-              <FilterInput icon={<SearchIcon size={14} />} label={t("filters.search")} value={query.q ?? ""} placeholder={t("filters.searchPlaceholder")} onChange={(value) => updateFilter("q", value)} />
-              <FilterSelect label={t("filters.provider")} value={query.provider ?? ""} options={dimensionOptions(dimensions.providers, query.provider ?? "", t("filters.allProviders"))} onChange={(value) => updateFilter("provider", value)} />
-              <FilterSelect label={t("filters.model")} value={query.model ?? ""} options={dimensionOptions(dimensions.models, query.model ?? "", t("filters.allModels"))} onChange={(value) => updateFilter("model", value)} />
-              <FilterSelect label={t("filters.directory")} value={query.directory ?? ""} options={dimensionOptions(dimensions.directories, query.directory ?? "", t("filters.allDirectories"))} onChange={(value) => updateFilter("directory", value)} />
-              <FilterSelect label={t("filters.project")} value={query.project ?? ""} options={dimensionOptions(dimensions.projects, query.project ?? "", t("filters.allProjects"))} onChange={(value) => updateFilter("project", value)} />
-              <FilterSelect label={t("filters.status")} value={query.status ?? ""} options={dimensionOptions(dimensions.statuses, query.status ?? "", t("filters.allStatuses"))} onChange={(value) => updateFilter("status", value)} />
-              <FilterInput type="date" label={t("filters.from")} value={query.from ?? ""} placeholder="" onChange={(value) => updateFilter("from", value)} />
-              <FilterInput type="date" label={t("filters.to")} value={query.to ?? ""} placeholder="" onChange={(value) => updateFilter("to", value)} />
-            </div>
-
-            <div className="mt-3 grid gap-2 md:grid-cols-[11rem_minmax(0,20rem)]">
-              <label className="min-w-0">
-                <span className="mb-1 block text-xs text-muted-foreground">{t("filters.groupBy")}</span>
-                <Select ariaLabel={t("filters.groupBy")} value={groupBy} options={groupOptions} onChange={(value) => updateFilter("group_by", value)} triggerClassName="h-9 rounded-field" />
-              </label>
-              <label className="min-w-0">
-                <span className="mb-1 flex items-center gap-1 text-xs text-muted-foreground"><ShieldIcon size={12} />{t("filters.token")}</span>
-                <input type="password" autoComplete="off" value={adminToken} onChange={(event) => setAdminToken(event.target.value)} placeholder={t("filters.tokenPlaceholder")} className="h-9 w-full rounded-field border border-border bg-surface-softer px-3 text-sm outline-none transition focus:border-accent-primary-border focus:ring-2 focus:ring-ring" />
-              </label>
+            <div className="grid grid-cols-2 gap-1.5 md:grid-cols-4 lg:grid-cols-6">
+              <div className="col-span-2 min-w-0">
+                <FilterInput compact icon={<SearchIcon size={13} />} label={t("filters.search")} value={query.q ?? ""} placeholder={t("filters.searchPlaceholder")} onChange={(value) => updateFilter("q", value)} />
+              </div>
+              <FilterSelect compact label={t("filters.provider")} value={query.provider ?? ""} options={dimensionOptions(dimensions.providers, query.provider ?? "", t("filters.all"))} onChange={(value) => updateFilter("provider", value)} />
+              <FilterSelect compact label={t("filters.model")} value={query.model ?? ""} options={dimensionOptions(dimensions.models, query.model ?? "", t("filters.all"))} onChange={(value) => updateFilter("model", value)} />
+              <div role="group" aria-label={t("filters.dateRange")} className="col-span-2 flex h-8 min-w-0 items-center gap-1 rounded-field border border-border bg-surface-softer px-1.5">
+                <label className="min-w-0 flex-1">
+                  <span className="sr-only">{t("filters.from")}</span>
+                  <input type="date" title={t("filters.from")} value={query.from ?? ""} onChange={(event) => updateFilter("from", event.target.value)} className="h-7 min-w-0 w-full rounded-sm border-0 bg-transparent px-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+                </label>
+                <span aria-hidden="true" className="shrink-0 text-xs text-muted-foreground">—</span>
+                <label className="min-w-0 flex-1">
+                  <span className="sr-only">{t("filters.to")}</span>
+                  <input type="date" title={t("filters.to")} value={query.to ?? ""} onChange={(event) => updateFilter("to", event.target.value)} className="h-7 min-w-0 w-full rounded-sm border-0 bg-transparent px-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+                </label>
+              </div>
+              <FilterSelect compact label={t("filters.directory")} value={query.directory ?? ""} options={dimensionOptions(dimensions.directories, query.directory ?? "", t("filters.all"))} onChange={(value) => updateFilter("directory", value)} />
+              <FilterSelect compact label={t("filters.project")} value={query.project ?? ""} options={dimensionOptions(dimensions.projects, query.project ?? "", t("filters.all"))} onChange={(value) => updateFilter("project", value)} />
+              <FilterSelect compact label={t("filters.status")} value={query.status ?? ""} options={dimensionOptions(dimensions.statuses, query.status ?? "", t("filters.all"))} onChange={(value) => updateFilter("status", value)} />
+              <FilterSelect compact label={t("filters.groupBy")} value={groupBy} options={groupOptions} onChange={(value) => updateFilter("group_by", value)} />
+              <div className="col-span-2 min-w-0">
+                <FilterInput compact type="password" autoComplete="off" icon={<ShieldIcon size={12} />} label={t("filters.token")} value={adminToken} onChange={setAdminToken} placeholder={t("filters.tokenPlaceholder")} />
+              </div>
             </div>
           </form>
 
@@ -246,64 +286,88 @@ export function UsageOverview() {
             <QualityNotice coverage={coverage} partial={partial} reasons={partialReasons} />
           )}
 
-          {observabilityError ? (
+          {observabilityError && view === "overview" ? (
             <div role="alert" className="rounded-panel border border-analytics-warning-border bg-analytics-warning-soft px-3 py-2 text-xs text-analytics-warning">
               {t("observability.errors.title")}: {observabilityError}
             </div>
           ) : null}
 
-          <section aria-label={t("metrics.title")} className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-8">
-            <Metric label={t("metrics.sessions")} value={formatNumber(totals.sessions)} detail={t("metrics.turns", { count: totals.turns })} />
-            <Metric label={t("metrics.tokens")} value={formatNumber(totals.total_tokens)} detail={t("metrics.tokenBreakdown", { prompt: formatNumber(totals.prompt_tokens), completion: formatNumber(totals.completion_tokens) })} />
-            <Metric label={t("metrics.requests")} value={formatNumber(totals.llm_requests || totals.total_requests)} detail={t("metrics.coveredRequests", { count: coverage.llm_requests_with_usage })} />
-            <Metric label={t("metrics.llmErrorRate")} value={formatPercent(errorRate(totals.llm_errors, totals.llm_requests))} detail={t("metrics.llmErrors", { count: totals.llm_errors })} tone={totals.llm_errors > 0 ? "warning" : "default"} />
-            <Metric label={t("metrics.failedTurns")} value={formatNumber(totals.failed_turns)} detail={t("metrics.recoveredTurns", { count: totals.recovered_turns })} tone={totals.failed_turns > 0 ? "danger" : "default"} />
-            <Metric label={t("metrics.toolErrorRate")} value={formatPercent(errorRate(totals.tool_errors, totals.tool_results_observed))} detail={t("metrics.observedTools", { count: totals.tool_results_observed })} tone={totals.tool_errors > 0 ? "warning" : "default"} />
-            <Metric label={t("metrics.firstToken")} value={formatFirstToken(totals.average_first_token_ms) ?? t("metrics.notCollected")} detail={t("metrics.firstTokenDetail", { count: totals.first_token_samples ?? 0 })} />
-            <Metric
-              label={t("metrics.subagentFailureRate")}
-              value={subagentSummary ? formatPercent(subagentSummary.failure_rate) : "--"}
-              detail={
-                subagentSummary
-                  ? t("metrics.subagentFailureDetail", {
-                      failed: formatNumber(subagentSummary.failed),
-                      total: formatNumber(subagentSummary.succeeded + subagentSummary.failed),
-                    })
-                  : t("unavailable")
-              }
-              tone={(subagentSummary?.failed ?? 0) > 0 ? "warning" : "default"}
-            />
-          </section>
+          <OverviewTabs view={view} onChange={changeView} />
+          <div
+            role="tabpanel"
+            id={`usage-view-${view}-panel`}
+            aria-labelledby={`usage-view-${view}-tab`}
+            tabIndex={0}
+            className="flex min-w-0 flex-col gap-2"
+          >
+            <p className="px-1 text-xs leading-5 text-muted-foreground">{t(`overviewTabs.descriptions.${view}`)}</p>
 
-          <UsageQuotaPanel adminToken={adminToken} />
+            {view === "overview" ? (
+              <>
+                <section aria-label={t("metrics.title")} className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-8">
+                  <Metric label={t("metrics.sessions")} value={formatNumber(totals.sessions)} detail={t("metrics.turns", { count: totals.turns })} />
+                  <Metric label={t("metrics.tokens")} value={formatNumber(totals.total_tokens)} detail={t("metrics.tokenBreakdown", { prompt: formatNumber(totals.prompt_tokens), completion: formatNumber(totals.completion_tokens) })} />
+                  <Metric label={t("metrics.requests")} value={formatNumber(totals.llm_requests || totals.total_requests)} detail={t("metrics.coveredRequests", { count: coverage.llm_requests_with_usage })} />
+                  <Metric label={t("metrics.llmErrorRate")} value={formatPercent(errorRate(totals.llm_errors, totals.llm_requests))} detail={t("metrics.llmErrors", { count: totals.llm_errors })} tone={totals.llm_errors > 0 ? "warning" : "default"} />
+                  <Metric label={t("metrics.failedTurns")} value={formatNumber(totals.failed_turns)} detail={t("metrics.recoveredTurns", { count: totals.recovered_turns })} tone={totals.failed_turns > 0 ? "danger" : "default"} />
+                  <Metric label={t("metrics.toolErrorRate")} value={formatPercent(errorRate(totals.tool_errors, totals.tool_results_observed))} detail={t("metrics.observedTools", { count: totals.tool_results_observed })} tone={totals.tool_errors > 0 ? "warning" : "default"} />
+                  <Metric label={t("metrics.firstToken")} value={formatFirstToken(totals.average_first_token_ms) ?? t("metrics.notCollected")} detail={t("metrics.firstTokenDetail", { count: totals.first_token_samples ?? 0 })} />
+                  <Metric
+                    label={t("metrics.subagentFailureRate")}
+                    value={subagentSummary ? formatPercent(subagentSummary.failure_rate) : "--"}
+                    detail={
+                      subagentSummary
+                        ? t("metrics.subagentFailureDetail", {
+                            failed: formatNumber(subagentSummary.failed),
+                            total: formatNumber(subagentSummary.succeeded + subagentSummary.failed),
+                          })
+                        : t("unavailable")
+                    }
+                    tone={(subagentSummary?.failed ?? 0) > 0 ? "warning" : "default"}
+                  />
+                </section>
 
-          <ArtifactFlowPanel snapshot={toolEfficiency} loading={false} />
+                <Suspense fallback={<UsageAnalyticsChartsFallback />}>
+                  <UsageAnalyticsCharts
+                    totals={totals}
+                    groups={groups}
+                    groupBy={groupBy}
+                    onSelect={selectGroup}
+                    failurePatterns={failurePatterns}
+                    selectedFailure={failureFilter}
+                    onSelectFailure={(key) => setFailureFilter((current) => (current === key ? null : key))}
+                  />
+                </Suspense>
+              </>
+            ) : null}
 
-          {/* 路由切换观测（主/子 Agent）：全局视图，独立拉取，不阻塞首屏。 */}
-          <RoutingObservabilityPanel adminToken={adminToken} />
+            {view === "models" ? (
+              <Suspense fallback={<UsageAnalyticsChartsFallback />}>
+                <ProviderModelAnalysis
+                  providerGroups={providerGroups}
+                  modelGroups={modelGroups}
+                  onSelectProvider={(key) => updateFilter("provider", key)}
+                  onSelectModel={(key) => updateFilter("model", key)}
+                />
+              </Suspense>
+            ) : null}
 
-          <Suspense fallback={<UsageAnalyticsChartsFallback />}>
-            <UsageAnalyticsCharts
-              totals={totals}
-              groups={groups}
-              groupBy={groupBy}
-              onSelect={selectGroup}
-              failurePatterns={failurePatterns}
-              selectedFailure={failureFilter}
-              onSelectFailure={(key) => setFailureFilter((current) => (current === key ? null : key))}
-            />
-          </Suspense>
-
-           <Suspense fallback={<UsageAnalyticsChartsFallback />}>
-             <ProviderModelAnalysis
-               providerGroups={providerGroups}
-               modelGroups={modelGroups}
-               onSelectProvider={(key) => updateFilter("provider", key)}
-               onSelectModel={(key) => updateFilter("model", key)}
-             />
-           </Suspense>
-
-          <SessionTable sessions={sessions} total={matched} loading={loading} search={searchParams.toString()} offset={pageOffset} pageSize={50} onPage={(offset) => updateFilter("offset", String(offset))} />
+            {view === "sessions" ? (
+              <SessionTable sessions={sessions} total={matched} loading={loading} search={searchParams.toString()} offset={pageOffset} pageSize={50} onPage={(offset) => updateFilter("offset", String(offset))} />
+            ) : null}
+            {view === "quota" ? <UsageQuotaPanel adminToken={adminToken} /> : null}
+            {view === "routing" ? <RoutingObservabilityPanel adminToken={adminToken} /> : null}
+            {view === "artifacts" ? (
+              <>
+                <ArtifactFlowPanel snapshot={toolEfficiency} loading={observabilityLoading} />
+                {!observabilityLoading && !toolEfficiency ? (
+                  <div role="status" className="surface-panel rounded-panel-lg p-6 text-center text-sm text-muted-foreground">
+                    {t("overviewTabs.artifactsUnavailable")}
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+          </div>
         </main>
       </div>
     </div>

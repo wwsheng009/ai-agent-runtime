@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Select } from "./select";
 
 type RenderSelectOptions = {
-  align?: "start" | "end";
+  align?: "start" | "end" | "auto";
   onChange?: (value: string) => void;
   side?: "top" | "bottom";
   value?: string;
@@ -115,6 +115,7 @@ describe("Select", () => {
     const listbox = document.body.querySelector('[role="listbox"]');
     expect(listbox).toBeInstanceOf(HTMLDivElement);
     expect((listbox as HTMLDivElement).style.position).toBe("fixed");
+    expect((listbox as HTMLDivElement).style.maxWidth).toBe("");
 
     dispatchPointerDown(document.body);
 
@@ -158,6 +159,19 @@ describe("Select", () => {
 
     expect(onChange).toHaveBeenCalledWith("gpt-5.4-mini");
     expect(document.body.querySelector('[role="listbox"]')).toBeNull();
+  });
+
+  it.each([
+    { left: 24, edge: "left" as const },
+    { left: 216, edge: "right" as const },
+  ])("fits auto-aligned compact menus within the viewport ($edge)", ({ left, edge }) => {
+    window.innerWidth = 320;
+    const { trigger } = renderSelect({ align: "auto" });
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(new DOMRect(left, 120, 80, 30));
+    dispatchClick(trigger);
+    const listbox = document.body.querySelector<HTMLDivElement>('[role="listbox"]');
+    expect(listbox?.style[edge]).toBe("24px");
+    expect(listbox?.style.maxWidth).toContain("288px");
   });
 
   it("positions the menu above the trigger when side is top and align is end", () => {

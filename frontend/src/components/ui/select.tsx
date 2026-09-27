@@ -13,6 +13,7 @@ import { CheckIcon, ChevronDownIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 import {
+  POPOVER_VIEWPORT_PADDING,
   resolvePopoverPosition,
   type PopoverPosition,
 } from "./popover-position";
@@ -30,7 +31,7 @@ type SelectProps = {
   onChange: (value: string) => void;
   placeholder?: string;
   disabled?: boolean;
-  align?: "start" | "end";
+  align?: "start" | "end" | "auto";
   side?: "top" | "bottom";
   className?: string;
   triggerClassName?: string;
@@ -97,7 +98,7 @@ export function Select({
   const listboxRef = useRef<HTMLDivElement | null>(null);
   const listboxId = useId();
   const [open, setOpen] = useState(false);
-  const [menuPosition, setMenuPosition] = useState<PopoverPosition | null>(null);
+  const [menuPosition, setMenuPosition] = useState<(PopoverPosition & { maxWidth?: string }) | null>(null);
   const selectedIndex = options.findIndex((option) => option.value === value);
   const selectedOption = selectedIndex >= 0 ? options[selectedIndex] : undefined;
   const triggerLabel = selectedOption?.label ?? (value || placeholder);
@@ -128,7 +129,18 @@ export function Select({
       return;
     }
 
-    setMenuPosition(resolvePopoverPosition(triggerRect, { align, side }));
+    const resolvedAlign = align === "auto"
+      ? (triggerRect.left + triggerRect.width / 2 > window.innerWidth / 2 ? "end" : "start")
+      : align;
+    const position = resolvePopoverPosition(triggerRect, { align: resolvedAlign, side });
+    if (align === "auto") {
+      // 紧凑筛选的触发器可能很窄；候选面向空间较多的一侧展开并限制在视口内。
+      const edge = Number(resolvedAlign === "start" ? position.left : position.right);
+      const availableWidth = Math.max(0, window.innerWidth - edge - POPOVER_VIEWPORT_PADDING);
+      setMenuPosition({ ...position, maxWidth: `min(${availableWidth}px, 92vw, 560px)` });
+    } else {
+      setMenuPosition(position);
+    }
   }, [align, side]);
 
   function closeMenu() {
@@ -333,6 +345,7 @@ export function Select({
               bottom: menuPosition.bottom,
               left: menuPosition.left,
               minWidth: menuPosition.minWidth,
+              maxWidth: menuPosition.maxWidth,
               maxHeight: menuPosition.maxHeight,
               position: "fixed",
               right: menuPosition.right,
