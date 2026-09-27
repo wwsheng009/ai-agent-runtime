@@ -88,3 +88,20 @@
 - A3 已修复"父回合干净结束/挂起"导致的取消；**A4 只覆盖真实取消**（用户中断、显式停止、超时/父被显式取消）。
 - 大小上限必须由宿主强制（否则大 transcript 会反噬历史预算，与 `output/tool_result_content.go` 的折叠策略一致即可）。
 - 若未来要覆盖"任务中途崩溃"（非取消），同一 payload 字段可直接复用。
+
+## 7. 残余与判断（2026-09-27 收尾）
+
+- **`session_interrupted` 型终态未带产物（有意留待设计）**：中断路径（用户中断
+  `handleInterrupt`，`actor.go:1317`；停摆超时 `actor.go:1495`）以 `session_interrupted`
+  作为该 turn 的终态，载荷不含 `partial_*`；被中断的 turn 不会再有 `session_end`
+  （见 `actor_test.go` 的终态序列断言：只允许后继 turn 发 `assistant_message`+`session_end`）。
+  补齐需要在该路径拿到会话历史，而 `SessionActor` 不缓存会话（只有 `sessionStore`）；
+  在 ESC/停摆路径引入一次受控 Load 属设计决策（必须 fail-open、不阻塞中断、不与 A3
+  的取消语义冲突），故本轮不盲改。
+- **"难度路由 disabled + permission 告警"不是缺陷**：`route_source=disabled` 是"未配置
+  difficulty→模型映射"的如实上报（子代理走默认模型）；`permission_mode_inherited_from_parent`
+  是 `internal/toolbroker/spawn_agent_permission.go:15-18` 的有意设计（让父代理能解释子代理
+  实际采用的权限模式），并有意进入路由回执/统计。
+- **子代理 `queued`→启动延迟（实测 45s / ~3min / ~30s）**：走 supervision wake + resume
+  容量门控（`internal/supervision/resume_capacity.go`、`wake_consumer.go`，已有队列位次
+  digest）。不是单点参数可安全调整的路径；若要压延迟应做容量窗口的专项设计（本切片不动）。
