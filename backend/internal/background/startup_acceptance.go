@@ -2,6 +2,7 @@ package background
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -26,7 +27,11 @@ const (
 	launchStateProcessCreated = "process_created"
 	launchStateAccepting      = "accepting"
 	launchStateAccepted       = "accepted"
-	launchStateFailed         = "failed"
+	// launchStateExitedBeforeAcceptance: the process was already gone when the
+	// process probe looked at it. That is "finished", not "broken" — the job
+	// continues to the normal wait path, which reports the real exit code.
+	launchStateExitedBeforeAcceptance = "exited_before_acceptance"
+	launchStateFailed                 = "failed"
 
 	healthcheckStateNotConfigured = "not_configured"
 	healthcheckStatePending       = "pending"
@@ -43,6 +48,13 @@ const (
 type startupProbeFunc func(context.Context, StartupAcceptance, func() bool) error
 
 var executeStartupProbe startupProbeFunc = runStartupProbe
+
+// errProcessExitedBeforeAcceptance reports that the process was no longer alive
+// when the startup probe checked it. The probe cannot judge whether that means
+// a crash (a service died before becoming healthy) or success (a one-shot
+// command simply finished quickly) — the exit code does. Callers that can see
+// the finished process treat it as "finished"; the probe itself stays strict.
+var errProcessExitedBeforeAcceptance = errors.New("process exited before startup acceptance")
 
 func normalizeStartupAcceptance(startup *StartupAcceptance) StartupAcceptance {
 	if startup == nil {
@@ -113,7 +125,7 @@ func runStartupProbe(ctx context.Context, startup StartupAcceptance, processAliv
 	var lastErr error
 	for {
 		if !processAlive() {
-			return fmt.Errorf("process exited before startup acceptance")
+			return errProcessExitedBeforeAcceptance
 		}
 		if time.Now().Before(graceDeadline) {
 			if err := waitStartupProbeInterval(ctx, graceDeadline); err != nil {

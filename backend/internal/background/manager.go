@@ -2,6 +2,7 @@ package background
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -452,13 +453,19 @@ func (m *Manager) cancelJobWithSource(ctx context.Context, jobID, cancelSource s
 	managed.info.Metadata["cancel_source"] = cancelSource
 	managed.mu.Unlock()
 
+	// Mark the job terminal *before* killing the process: once the signal
+	// lands, the wait path may return immediately and try to finalize the job
+	// from the signal exit code, racing this cancellation into a spurious
+	// "completed with exit -1" (2026-09-27: TestMonitorMaxDurationCancelsJob).
+	// Every completion path checks isTerminalStatus, so the terminal write
+	// wins regardless of which goroutine gets there first.
+	m.markCancelled(ctx, managed, "cancelled")
 	if hasPID {
-		_ = terminateProcess(pid)
+		_ = terminateJobProcess(pid)
 	}
 	if cancel != nil {
 		cancel()
 	}
-	m.markCancelled(ctx, managed, "cancelled")
 	return managed.snapshot(), nil
 }
 
@@ -693,10 +700,26 @@ func (m *Manager) runJob(managed *managedJob) {
 		cmd.Dir = managed.info.Cwd
 	}
 
-	stdout, _ := cmd.StdoutPipe()
-	stderr, _ := cmd.StderrPipe()
+	// Wire the output sinks before Start and let os/exec drive them: with
+	// StdoutPipe/StderrPipe, Wait closes the read end as soon as the process
+	// exits, so a fast command's buffered output could be dropped before the
+	// reader goroutines drained it (2026-09-27: `echo retry-succeeded` came
+	// back with empty output while its status was already completed).
+	var (
+		logFile *os.File
+	)
+	if managed.logPath != "" {
+		if file, err := os.OpenFile(managed.logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			logFile = file
+		}
+	}
+	cmd.Stdout = m.newJobOutputWriter(ctx, managed, logFile, "stdout")
+	cmd.Stderr = m.newJobOutputWriter(ctx, managed, logFile, "stderr")
 
 	if err := cmd.Start(); err != nil {
+		if logFile != nil {
+			_ = logFile.Close()
+		}
 		if ctx.Err() == context.Canceled {
 			m.markCancelled(ctx, managed, "cancelled")
 			return
@@ -713,33 +736,7 @@ func (m *Manager) runJob(managed *managedJob) {
 		return
 	}
 
-	var (
-		logFile *os.File
-	)
-	if managed.logPath != "" {
-		if file, err := os.OpenFile(managed.logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
-			logFile = file
-		}
-	}
-	writer := m.newJobOutputWriter(ctx, managed, logFile, "stdout")
-	errWriter := m.newJobOutputWriter(ctx, managed, logFile, "stderr")
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		if stdout != nil {
-			_, _ = io.Copy(writer, stdout)
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		if stderr != nil {
-			_, _ = io.Copy(errWriter, stderr)
-		}
-	}()
-
 	waitErr := cmd.Wait()
-	wg.Wait()
 
 	if logFile != nil {
 		_ = logFile.Close()
@@ -828,6 +825,31 @@ func (m *Manager) acceptStartedProcess(ctx context.Context, managed *managedJob,
 				m.markCancelled(ctx, managed, "cancelled")
 			}
 			return false
+		}
+		if errors.Is(err, errProcessExitedBeforeAcceptance) && startup.Probe == StartupProbeProcess {
+			// A one-shot command that finished inside its process-probe window is
+			// done, not broken: `echo ok` must complete with its real exit code
+			// instead of failing the healthcheck (2026-09-27: every fast
+			// background command was reported failed here). Hand it to the
+			// normal wait path as running so the wait decides the outcome and
+			// the dispatch/event contract still sees it.
+			managed.mu.Lock()
+			managed.info.Status = StatusRunning
+			managed.info.Metadata[backgroundMetaLaunchState] = launchStateExitedBeforeAcceptance
+			managed.info.Metadata[backgroundMetaHealthcheckState] = healthcheckStateNotConfigured
+			delete(managed.info.Metadata, backgroundMetaHealthcheckError)
+			managed.scheduled = false
+			managed.mu.Unlock()
+			m.persistManagedJob(managed)
+			m.appendJobEvent(context.Background(), managed.info.ID, "startup_exited_before_acceptance", map[string]interface{}{
+				"status": StatusRunning,
+				"pid":    pid,
+			})
+			m.appendJobEvent(context.Background(), managed.info.ID, "running", map[string]interface{}{
+				"status": StatusRunning,
+				"pid":    pid,
+			})
+			return true
 		}
 		m.failStartupAcceptance(managed, err)
 		return false

@@ -128,6 +128,37 @@ func TestMonitorMaxDurationCancelsJob(t *testing.T) {
 	require.Empty(t, fixture.monitorCheckEvents(), "a kill deadline must not also emit a check")
 }
 
+// The cancellation must be terminal before the kill: once the signal lands the
+// wait path can return immediately and finalize the job from the signal exit
+// code, which used to race the cancellation into "completed with exit -1"
+// instead of "cancelled".
+func TestCancelJobMarksTerminalBeforeProcessKill(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(Config{})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+
+	job, err := manager.SubmitShell(ctx, "session-cancel-order", BackgroundTaskArgs{Command: shellDelayCommand(30*time.Second, "hold")})
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.NoError(t, waitForJobStatus(ctx, manager, job.ID, StatusRunning, backgroundTestTimeout(10*time.Second)))
+
+	original := terminateJobProcess
+	defer func() { terminateJobProcess = original }()
+	var statusAtKill JobStatus
+	terminateJobProcess = func(pid int) error {
+		if snapshot, getErr := manager.GetJob(ctx, job.ID); getErr == nil && snapshot != nil {
+			statusAtKill = snapshot.Status
+		}
+		return original(pid)
+	}
+
+	cancelled, err := manager.CancelJob(ctx, job.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusCancelled, cancelled.Status)
+	require.Equal(t, StatusCancelled, statusAtKill,
+		"the job must be terminal before the kill so a racing wait path cannot finalize it as completed")
+}
+
 func TestCancelSessionMonitorsOnlyTouchesThatSession(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(Config{})

@@ -751,6 +751,12 @@ func terminateProcess(pid int) error {
 	return exec.Command("/bin/sh", "-c", script).Run()
 }
 
+// terminateJobProcess is the cancellation kill hook. It is a variable so tests
+// can pin the ordering contract: the job must already be terminal when its
+// process is killed, otherwise a racing wait path can finalize the job as
+// "completed" with a signal exit code instead of "cancelled".
+var terminateJobProcess = terminateProcess
+
 func shellQuote(text string) string {
 	return "'" + strings.ReplaceAll(text, "'", `'\''`) + "'"
 }

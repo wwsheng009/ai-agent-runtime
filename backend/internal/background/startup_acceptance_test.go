@@ -37,6 +37,65 @@ func TestStartupAcceptanceRejectsProcessThatExitsDuringGrace(t *testing.T) {
 	require.ErrorContains(t, err, "process exited before startup acceptance")
 }
 
+// A one-shot command that finishes inside its process-probe window is done,
+// not broken: the job must continue to the normal wait path, which reports its
+// real exit code (2026-09-27: fast background commands were failed by the
+// healthcheck gate).
+func TestStartupAcceptanceProcessProbeAllowsFinishedCommand(t *testing.T) {
+	original := executeStartupProbe
+	defer func() { executeStartupProbe = original }()
+	executeStartupProbe = func(context.Context, StartupAcceptance, func() bool) error {
+		return errProcessExitedBeforeAcceptance
+	}
+
+	manager := NewManager(Config{})
+	defer func() { require.NoError(t, manager.Close()) }()
+	managed := &managedJob{
+		ctx: context.Background(),
+		info: Job{
+			ID:       "job-finished-before-acceptance",
+			Status:   StatusPending,
+			Metadata: metadataFromRequest(BackgroundTaskArgs{}, 0),
+		},
+		request: BackgroundTaskArgs{Startup: &StartupAcceptance{Probe: StartupProbeProcess}},
+		output:  newOutputBuffer(1024),
+	}
+
+	require.True(t, manager.acceptStartedProcess(context.Background(), managed, time.Now().UTC(), 42, func() bool { return false }))
+	snapshot := managed.snapshot()
+	require.Equal(t, StatusRunning, snapshot.Status, "the wait path decides the outcome from here")
+	require.Equal(t, launchStateExitedBeforeAcceptance, snapshot.Metadata[backgroundMetaLaunchState])
+	require.Equal(t, healthcheckStateNotConfigured, snapshot.Metadata[backgroundMetaHealthcheckState])
+	require.NotContains(t, snapshot.Metadata, backgroundMetaHealthcheckError)
+}
+
+// A service probe (tcp) whose process died before coming up is still a hard
+// startup failure: only the process probe can delegate the verdict to the
+// exit code.
+func TestStartupAcceptanceServiceProbeStillFailsWhenProcessDied(t *testing.T) {
+	original := executeStartupProbe
+	defer func() { executeStartupProbe = original }()
+	executeStartupProbe = func(context.Context, StartupAcceptance, func() bool) error {
+		return errProcessExitedBeforeAcceptance
+	}
+
+	manager := NewManager(Config{})
+	defer func() { require.NoError(t, manager.Close()) }()
+	managed := &managedJob{
+		ctx: context.Background(),
+		info: Job{
+			ID:       "job-service-died",
+			Status:   StatusPending,
+			Metadata: metadataFromRequest(BackgroundTaskArgs{}, 0),
+		},
+		request: BackgroundTaskArgs{Startup: &StartupAcceptance{Probe: StartupProbeTCP, Address: "127.0.0.1:1"}},
+		output:  newOutputBuffer(1024),
+	}
+
+	require.False(t, manager.acceptStartedProcess(context.Background(), managed, time.Now().UTC(), 42, func() bool { return false }))
+	require.Equal(t, StatusFailed, managed.snapshot().Status)
+}
+
 func TestStartupAcceptanceFailureSetsStableStateAndCode(t *testing.T) {
 	manager := NewManager(Config{})
 	defer func() { require.NoError(t, manager.Close()) }()
