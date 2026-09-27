@@ -1,6 +1,14 @@
 # A4 定位：会话型子代理被取消时的部分产物缺口（2026-09-27）
 
-- **状态**：已定位，未实施（A3 已修复并入库，见 `f4cd672e`）
+- **状态**：**已实施**（`11e499e5`，2026-09-27；A3 见 `f4cd672e`）
+- **实施摘要**：
+  - 新增 `backend/internal/chat/actor_partial_product.go`：`partialRunProduct(result, session)` 产出有界（2,000 runes + 省略号）部分产物；取源优先级 = 历史里最后一条非空 assistant 消息 → `result.Output` 兜底；`partial_steps` = 历史中已完成的工具结果条数。
+  - 接线：`backend/internal/chat/actor.go` 终态 payload（`session_end` 与 hook 共用），触发条件 `!success || cancelSource != ""`。
+  - 测试：`TestPartialRunProductPrefersResultOutputThenHistory`、`TestClipPartialProductBoundsRunawayTranscripts`、`TestSessionActorCanceledRunCarriesPartialProduct`（端到端，取消后载荷带 `partial_summary/partial_source/partial_steps`）；`internal/chat` 全包 ok(35.5s)。
+  - **实施中实测到的两条语义教训**（已写进实现与测试）：
+    1. 取消路径上 agent 可能把 `success` 记为 `true`（带部分结果的"优雅停止"），因此触发条件不能只看 `!success`；
+    2. 取消时 `result.Output` 常是宿主罐头停止提示（"当前运行已停止；已保留 N 条工具观察…"），绝不能优先于历史产物——否则真正的产物会被提示语盖住。
+  - 未接入：`actor.go` 约 4140 行的 `resume` 型终态发射点（如需覆盖再补）。
 - **关联**：
   - 复盘 `docs/analysis/session-20260926205017-subagent-runtime-postmortem-20260926.md`
   - A3 提交 `f4cd672e`（子代理执行脱离父 run 的干净结束/挂起）
