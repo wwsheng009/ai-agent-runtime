@@ -222,7 +222,7 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		}, nil
 	}
 
-	if enc, _ := detectFileEncoding(content); enc == fileEncodingUTF8 && isBinaryBytes(content) {
+	if looksBinaryFileBytes(content) {
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
@@ -313,7 +313,7 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 
 	// 写回文件：按原编码回写并原子替换。
 	encodedResult := encodeFileText(result, fileEnc)
-	if err := writeFileAtomic(absPath, encodedResult, writeFileModeDefault); err != nil {
+	if err := writeFileAtomicLocal(absPath, encodedResult, writeFileModeDefault); err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,

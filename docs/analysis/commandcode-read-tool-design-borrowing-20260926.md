@@ -783,3 +783,62 @@ go vet ./internal/toolkit/tools/                                        ok
 - 两个审查子代理均以**只读**方式工作（不写工作区、不跑测试）；所有修复与验证由父会话执行，避免与并行实现冲突。
 - 残余风险：真实 `pdftotext/pandoc/soffice` 端到端冒烟仍缺（本机 PATH 无转换器，全部以注入假实现验证）；M2–M4 与 m5–m11、m13 未修；工作区仍在并行演进，引用请以符号名而非行号为准。
 - 明确未审：`internal/toolbroker`、`internal/supervision`、`internal/runtimeserver`、`internal/background`、`internal/policy` 等属于其他报告线的改动。
+
+### 附录 F 续：缺口修复（第二轮，2026-09-26）
+
+范围：把本附录中列出的"未修复/待排期"项与测试弱点全部关闭，并顺带清掉两处由并行实现引入的仓库级红项。子代理只读边界不再适用——本轮由父会话与两个**实现型**子代理分区完成（互不重叠：toolschema/llm、docread），父会话负责 toolkit 读写语义主战场。
+
+#### Wave 1/2 未修项（全部关闭）
+
+| 编号 | 修复内容 | 关键证据 |
+|---|---|---|
+| M2 | 账本分层：≤8 MiB 全量 SHA；8 MiB–512 MiB 采样摘要（大小 + 头/尾各 1 MiB）；>512 MiB 记 `unverified` 只警告不硬拒。写侧按同一采样方案比对（拿全量 SHA 比对会让 re-view 后永远 stale），未验证记录只给 `read_before_write=unverified` 提示 | `read_ledger.go`：`ledgerHashScope`/`hashFileSample`/`hashSampleBytes`；测试 `TestReviewLedgerHashScopeSelection`、`TestReviewSampledHashBytesMatchesStreamingDigest`、`TestReviewLargeFileStaleWriteRecoversAfterReView`（9 MiB：外部改动被拒 → re-view → 同 edit 成功）、`TestReviewUnverifiedRecordHardRefusesNothing` |
+| M3 | 保留名判定加 `runtime.GOOS == "windows"` 门：Unix 上 `src/aux/notes.md`、`con.txt` 恢复可用；`\\.\`/GLOBALROOT 与 `/dev/*` 仍按各平台拦截 | `path_guard.go`；`path_guard_test.go` 用例加 `windowsOnly` 维度，按宿主断言 |
+| M4 | 原子写分流：目标是 symlink 或硬链接数 >1 时改为原地写（保留链接语义），其余仍走临时文件 + rename；平台差异收敛在 `hasMultipleHardLinks`（`!windows` 用 `Stat_t.Nlink`，Windows 返回 false） | `atomic_write.go` + `atomic_write_links_{unix,windows}.go`；`TestReviewAtomicWritePreservesSymlink`（Windows 可跳过）、`TestReviewAtomicWritePreservesHardLink` |
+| m5 | 只统计真正追加进 sections 的条目（`succeeded = len(items)`），摘要与 metadata 自洽；测试同时断言 `succeeded + skipped == request_count`、`batch_skipped_count` 一致 | `view.go` executeBatch；`TestReviewBatchAccountingMatchesDeliveredSections` |
+| m6 | 批量聚合上限 96 KiB → 64 KiB（对齐 `output.modelToolTextBudgetCeilingBytes`），批量结果按该值声明 `model_visible_budget_bytes`；测试断言声明值等于常量且 ≤ 64 KiB | `tool_output_budget.go`、`view.go` Execute；同上测试 |
+| m7 | `FullRead` 单调：局部窗口不降级全读记录（仅当新旧哈希一致时继承），dedup 守卫与写侧不再被反转 | `recordFileReadFromDisk`；`TestReviewFullReadSurvivesPartialWindow` |
+| m8 | 两张 per-session map 加 `touched` + 30 分钟空闲清扫（每 256 次访问摊还一轮），并提供 `ForgetSessionReadState(sessionID)` 供会话生命周期调用 | `session_state_gc.go`；`TestReviewSessionReadStateForgetAndSweep` |
+| m9 | 保留名解析补 ADS（`NUL:stream`）、扩展名前空格（`NUL .txt`）、上标数字（`COM¹`≡`COM1`） | `path_guard.go`；`path_guard_test.go` 新增 4 例（Windows 断言） |
+| m10 | 写侧二进制判定独立于编码：BOM 载荷先解码再判（NUL rune 或 >5% 控制字符即拒绝），UTF-16 文本仍可编辑，UTF-16 开头的二进制不再被当文本重编码 | `file_encoding.go`：`looksBinaryFileBytes`/`isBinaryDecodedText`；write/edit/multiedit 改调用；`TestReviewBinaryGateHandlesBOMEncodings` + 既有 `TestEditToolPreservesUTF16LE` |
+| m11 | tail 窗口：显式 `limit` 生效（丢最旧行）、发布 `offset_resolved`、clamp/裁剪时给 `tail_clamped`/`tail_lines_dropped_*`/`tail_window_start` 与 `suggested_earlier_offset` + 续读提示 | `readTailLines`/`attachViewEfficiencyHints`；`TestReviewTailWindowHonorsLimitAndPublishesResolvedOffset` |
+| m13 | dedup 改为 peek/commit：命中先登记，section 真正投递后才消费（批量经 `ViewFileRequest.dedupDefer` 回调），被 cap 丢弃的条目不燃烧条目 | `read_dedup.go`/`view.go`；`TestReviewDedupEntrySurvivesUntilCommitted` |
+
+#### Wave 3 未修项（全部关闭）
+
+| 编号 | 修复内容 | 关键证据 |
+|---|---|---|
+| F1 残余 | docread 原生 `svg`/`text` 路径不再 `os.ReadFile` 全量：`maxDocSourceBytes = 64 MiB`（变量，测试可覆写），stat 预检 + `LimitReader(limit+1)` 兜住增长竞态，错误含路径/大小/上限 | 子代理实现；`docread/source_limit_test.go`（边界 `size==limit` 放行、`+1` 拒绝、竞态、默认值合理性） |
+| F11 | notebook/document 渲染结果接入读账本与 dedup（用统一窗口 metadata 回填），`doc_degraded` 与 `outputs_omitted`/`cells_omitted` 联动；`.ipynb` 全读后二次读取返回 dedup stub | `view.go`：`recordDerivedRender`；`TestReviewNotebookReadFeedsLedgerAndDedup`、`TestReviewNotebookDegradedWhenOutputsOmitted`、`TestReviewDerivedRenderPublishesByteBudgetFlag` |
+| n1 | `buildMetaToolsForProtocol` 确认为死代码并删除（实际位于 `internal/llm/mcp_meta_tools_convert.go`）；契约测试参数化覆盖 `includeMeta=true`，断言 meta 广告真实注入且整包无 union | 子代理实现；`internal/tools/union_contract_test.go`、`internal/llm/mcp_meta_tools_convert.go` |
+| F3 追加 | `ScalarizeUnions` 补 draft-07 tuple 形态 `items: [ {...} ]` 遍历（list 不被改成 map） | 子代理实现；`TestScalarizeUnionsDescendsIntoTupleItems` |
+
+#### Q5 测试弱点（全部补强）
+
+- `tool_result_images_batch_test`：夹具改成"字典序 ≠ 声明顺序"（`zeta-item.png` 先于 `alpha-top.png`），断言 paths 保持声明顺序且 note 与图片配对。
+- `imageprep`：非整数缩放改为**双轴披露**（3000x2000 → 200x133：横向 ×15.00、纵向 ×15.04；正比缩放仍单值）——这不只是测试，修正了会让纵向点击坐标算偏的提示；新增精确比例对照用例。
+- `union_contract` includeMeta / tuple-form / `view_document` 非 PDF 空正文 / 派生渲染 `byte_budget_applied` / `ipynb` `cells:null` 与 `maxCells` 截断：均已加断言（见上表与 `review_gap_fixes_test.go`、`ipynb_test.go`、`view_document_test.go`）。
+
+#### 本轮顺带修复（超出原审查清单）
+
+- **`configwriteguard` 仓库级红项**：源码级守卫按名字把任何 `writeFileAtomic` 调用当作 agentconfig/runtime-server 的共享写通道，而 toolkit 自 2.x 起有自己的同名本地助手，导致 guard 把 edit/write/multiedit/view_image/view_notebook 判为"未持锁的配置写点"。修复：toolkit 助手改名 `writeFileAtomicLocal` 并注释同名缘由；`go test ./internal/configwriteguard` 恢复绿色（其余写点仍受原判据约束，未放宽守卫）。
+
+#### 仍未覆盖 / 环境性红项（如实登记）
+
+- 真实 `pdftotext/pandoc/soffice` 端到端冒烟仍缺（本机 PATH 无转换器），全部以注入实现验证；docread 的转换器路径上限 32 MiB 已有单测，但真实进程行为未验。
+- `go test ./internal/...` 全量扫描（第二轮收尾复跑）**只剩一个失败包**：`internal/knowledge`（本机 SQLite 构建无 `fts5` 模块，`no such module: fts5`），属环境问题；此前并行负载下偶发的 `internal/api/runtimeapi` "database is locked" 与 `internal/configwriteguard` 同名误报均已消失（后者由本轮改名修复）。
+
+#### 验证基线（第二轮结束后）
+
+```text
+go build ./...                                                          ok
+go vet ./internal/toolkit/tools/ ./internal/docread/ ./internal/toolschema/ \
+       ./internal/imageprep/ ./internal/llm/                            ok
+go test ./internal/toolkit/tools/  ./internal/ipynb/ ./internal/imageprep/ \
+       ./internal/docread/ ./internal/toolschema/ ./internal/tools/ \
+       ./internal/llm/ ./internal/agent/ ./internal/toolresult/ -count=1  ok
+go test ./internal/configwriteguard/ -count=1                           ok（修复同名冲突后）
+go test ./internal/... -count=1                                        仅 internal/knowledge 失败（环境缺 fts5）
+```
+
+新增测试约 20 例（`review_gap_fixes_test.go` 13 例、`docread/source_limit_test.go` 3 例、`toolschema` tuple 1 例、`toolresult` 图片清单 1 例、`ipynb` 2 例、`imageprep` 1 例、`path_guard` 8 例扩充、`view_document` 1 例）。所有测试在 Windows 宿主执行；`windowsOnly`/`hasMultipleHardLinks` 分支在 Unix 宿主上由同一套用例的另一侧覆盖（本次未在 Linux 实机运行，属残余风险）。

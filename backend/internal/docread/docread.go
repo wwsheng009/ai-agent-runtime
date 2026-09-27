@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -46,6 +47,13 @@ type Probe struct {
 // 或所需转换器不在 PATH 上。此时 Render 返回的 Metadata 仍带
 // doc_kind/doc_mime/doc_size/doc_degraded/doc_reason，调用方据此输出 MIMENote。
 var ErrUnsupported = errors.New("docread: no extractor available for this document")
+
+// maxDocSourceBytes 是 svg/text 原生渲染路径单次读入内存的源文件上限。
+// 这两条路径要把源文件整体物化后交给窗口读取，没有转换器路径那样的流式
+// 机会（转换器路径由 maxConverterOutputBytes 限幅），超过上限直接返回错误，
+// 而不是把整个超大文件读进内存。与 viewNotebookMaxBytes 一致，允许包内测试
+// 覆写成小上限验证边界；生产路径只读，不要在 goroutine 里改写。
+var maxDocSourceBytes int64 = 64 << 20
 
 // Detect 识别文档类型并探测可用转换器。
 //
@@ -79,7 +87,8 @@ func Detect(path string, head []byte) Probe {
 // 错误语义：
 //   - ErrUnsupported：zip/binary 没有抽取器，或 pdf/docx/... 探测不到转换器；
 //     此时 Metadata 的 doc_reason 为 unsupported_kind / no_converter；
-//   - 其它错误：读取失败或外部命令执行失败（错误里带转换器与 stderr 摘要）。
+//   - 其它错误：读取失败、svg/text 源文件超过 maxDocSourceBytes，或外部命令
+//     执行失败（错误里带转换器与 stderr 摘要）。
 func Render(ctx context.Context, path string) (DocumentRender, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -101,12 +110,13 @@ func Render(ctx context.Context, path string) (DocumentRender, error) {
 
 	switch probe.Kind {
 	case "svg", "text":
-		// 内建通道：svg / 纯文本原样返回，不做任何改写。
-		data, err := os.ReadFile(path)
+		// 内建通道：svg / 纯文本原样返回，不做任何改写；源文件要整体驻留
+		// 内存，按 maxDocSourceBytes 限幅读取（转换器路径由 maxConverterOutputBytes 限幅）。
+		data, err := readDocSource(path, info.Size())
 		if err != nil {
 			meta["doc_degraded"] = true
 			meta["doc_reason"] = "read_error"
-			return DocumentRender{Metadata: meta}, fmt.Errorf("docread: read %s: %w", path, err)
+			return DocumentRender{Metadata: meta}, err
 		}
 		meta["doc_degraded"] = false
 		return DocumentRender{Markdown: string(data), Metadata: meta}, nil
@@ -142,6 +152,33 @@ func Render(ctx context.Context, path string) (DocumentRender, error) {
 	}
 
 	return DocumentRender{Markdown: converted.Markdown, Metadata: meta}, nil
+}
+
+// readDocSource 读取 svg/text 原生路径的源文件，并保证驻留内存不超过
+// maxDocSourceBytes：先用调用方 stat 得到的 size 预检（错误带路径/大小/上限，
+// 且不打开文件），再用 io.LimitReader 多读 1 字节兜住 stat 之后文件继续增长的
+// 竞态，超限错误同样带路径与上限。
+func readDocSource(path string, size int64) ([]byte, error) {
+	limit := maxDocSourceBytes
+	if size > limit {
+		return nil, fmt.Errorf("docread: %s is %d bytes, exceeds the %d-byte limit for svg/text rendering",
+			path, size, limit)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("docread: read %s: %w", path, err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("docread: read %s: %w", path, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("docread: %s grew beyond the %d-byte limit for svg/text rendering",
+			path, limit)
+	}
+	return data, nil
 }
 
 // MIMENote 生成一行降级提示（不含换行），供调用方在 ErrUnsupported 时输出。

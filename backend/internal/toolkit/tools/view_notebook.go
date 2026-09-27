@@ -106,6 +106,16 @@ func (v *ViewTool) viewNotebookResult(absPath, displayPath string, p ViewFileReq
 			metadata[target] = value
 		}
 	}
+	// doc_degraded 不再恒为 false：被折叠的输出/超上限的图片意味着模型看到
+	// 的正文不是全部（review F11）。
+	if omitted := viewMetadataInt(metadata, "notebook_outputs_omitted", 0); omitted > 0 {
+		metadata["doc_degraded"] = true
+		metadata["doc_reason"] = "notebook_outputs_omitted"
+	}
+	if omittedCells := viewMetadataInt(metadata, "notebook_cells_omitted", 0); omittedCells > 0 {
+		metadata["doc_degraded"] = true
+		metadata["doc_reason"] = "notebook_cells_omitted"
+	}
 
 	result := &toolkit.ToolResult{
 		Success:    true,
@@ -188,7 +198,7 @@ func persistRenderedImage(data []byte, ext string) string {
 	if _, err := os.Stat(dst); err == nil {
 		return dst
 	}
-	if err := writeFileAtomic(dst, data, writeFileModeDefault); err != nil {
+	if err := writeFileAtomicLocal(dst, data, writeFileModeDefault); err != nil {
 		return ""
 	}
 	return dst

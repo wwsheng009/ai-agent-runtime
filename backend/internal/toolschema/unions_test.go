@@ -88,6 +88,53 @@ func TestScalarizeUnionsDescendsIntoNestedSchemas(t *testing.T) {
 	}
 }
 
+// TestScalarizeUnionsDescendsIntoTupleItems: draft-07 keeps tuple-form items as
+// `items: [ {...}, {...} ]`. Every entry is a schema and must be walked, while
+// the list shape itself must survive (it cannot be represented as a map).
+func TestScalarizeUnionsDescendsIntoTupleItems(t *testing.T) {
+	schema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"pair": map[string]interface{}{
+				"type": "array",
+				"items": []interface{}{
+					anyOfStringArray("元组第一项"),
+					map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"nested": anyOfStringArray("元组第二项 union"),
+						},
+					},
+				},
+			},
+		},
+	}
+	got := ScalarizeUnions(schema)
+	pair, _ := got["properties"].(map[string]interface{})["pair"].(map[string]interface{})
+	items, ok := pair["items"].([]interface{})
+	if !ok {
+		t.Fatalf("tuple items must stay a list, got %#v", pair["items"])
+	}
+	if len(items) != 2 {
+		t.Fatalf("tuple items must keep both entries, got %#v", items)
+	}
+	first, _ := items[0].(map[string]interface{})
+	if _, exists := first["anyOf"]; exists {
+		t.Fatalf("first tuple entry union must be folded, got %#v", first)
+	}
+	if first["type"] != "string" || first["description"] != "元组第一项" {
+		t.Fatalf("expected the scalar branch with description in the first entry, got %#v", first)
+	}
+	second, _ := items[1].(map[string]interface{})
+	nested, _ := second["properties"].(map[string]interface{})["nested"].(map[string]interface{})
+	if _, exists := nested["anyOf"]; exists {
+		t.Fatalf("union nested in the second tuple entry must be folded, got %#v", nested)
+	}
+	if nested["type"] != "string" {
+		t.Fatalf("expected the scalar branch in the nested union, got %#v", nested)
+	}
+}
+
 func TestScalarizeUnionsLeavesUnsafeUnionsAlone(t *testing.T) {
 	schema := map[string]interface{}{
 		"type": "object",

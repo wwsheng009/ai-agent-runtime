@@ -65,12 +65,13 @@ var windowsReservedDeviceNames = func() map[string]struct{} {
 //     /dev/fd/* and /proc/<pid>/fd/* (including /proc/self/fd/*).
 //   - Windows device namespace prefixes: \\.\ and \\?\GLOBALROOT.
 //   - Windows reserved device names (CON, PRN, AUX, NUL, COM1..COM9,
-//     LPT1..LPT9), checked case-insensitively per path segment, ignoring the
-//     extension and tolerating trailing dots/spaces ("NUL ", "nul.txt").
+//     LPT1..LPT9), checked case-insensitively per path segment on Windows hosts
+//     only (review M3) and covering their superscript digits and alternate-data-
+//     stream spellings (review m9). On Unix "aux/" and "con.txt" are ordinary
+//     file names and are allowed.
 //
 // Path separators and case follow the host platform's habits: Windows matches
-// case-insensitively, Unix stays case-sensitive. Windows-style segments are
-// still detected on Unix so a path such as C:\src\nul is refused everywhere.
+// case-insensitively, Unix stays case-sensitive.
 func unsupportedPathNameReason(path string) string {
 	if path == "" {
 		return ""
@@ -206,25 +207,42 @@ func devicePathRefusalError(targetPath, reason string) error {
 }
 
 // windowsReservedDeviceNameInPath scans every path segment (split on both '/'
-// and '\\' so Windows-style paths are checked on any host) and returns the
-// canonical reserved name when one is found. Trailing dots/spaces are ignored,
-// as is the extension, matching how Windows resolves these names.
+// and '\\' so both separator spellings are recognized) and returns the
+// canonical reserved name when one is found. It applies on Windows only: on
+// Unix these are ordinary names, and refusing them made legitimate trees such
+// as src/aux/ unreadable (review M3).
+//
+// Windows resolution details handled here (review m9): trailing dots/spaces are
+// stripped by the filesystem; a colon starts an alternate data stream on the
+// same device ("NUL:stream" addresses NUL); superscript digits normalize to
+// ASCII (COM¹ == COM1).
 func windowsReservedDeviceNameInPath(path string) string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
 	segments := strings.FieldsFunc(path, func(r rune) bool {
 		return r == '/' || r == '\\'
 	})
 	for _, segment := range segments {
-		name := strings.Trim(segment, " .")
+		name := segment
+		if idx := strings.IndexByte(name, ':'); idx >= 0 {
+			name = name[:idx]
+		}
+		name = strings.Trim(name, " .")
 		if name == "" {
 			continue
 		}
 		if idx := strings.IndexByte(name, '.'); idx >= 0 {
 			name = name[:idx]
 		}
+		// "NUL .txt" resolves to the device too: Windows drops spaces that
+		// precede the extension.
+		name = strings.TrimRight(strings.TrimSpace(name), " ")
 		if name == "" {
 			continue
 		}
 		upper := strings.ToUpper(name)
+		upper = strings.NewReplacer("\u00b9", "1", "\u00b2", "2", "\u00b3", "3").Replace(upper)
 		if _, ok := windowsReservedDeviceNames[upper]; ok {
 			return upper
 		}

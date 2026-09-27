@@ -176,7 +176,7 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 			oldRaw = raw
 			if len(raw) > 0 {
 				oldEncoding, _ = detectFileEncoding(raw)
-				if oldEncoding == fileEncodingUTF8 && isBinaryBytes(raw) {
+				if looksBinaryFileBytes(raw) {
 					return &toolkit.ToolResult{
 						Success:    false,
 						OutputKind: toolresult.KindText,
@@ -222,7 +222,7 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 	if fileExists {
 		encodedContent = encodeFileText(p.Content, oldEncoding)
 	}
-	err = writeFileAtomic(absPath, encodedContent, writeFileModeDefault)
+	err = writeFileAtomicLocal(absPath, encodedContent, writeFileModeDefault)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,

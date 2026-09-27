@@ -7,20 +7,6 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolschema"
 )
 
-func buildMetaToolsForProtocol(protocol string) interface{} {
-	meta := adapter.BuildMCPMetaTools()
-	switch protocol {
-	case "codex":
-		return convertNamedToolsToCodex(meta)
-	case "anthropic":
-		return convertNamedToolsToAnthropic(meta)
-	case "gemini":
-		return convertNamedToolsToGemini(meta)
-	default:
-		return convertNamedToolsToOpenAI(meta)
-	}
-}
-
 func buildToolDefinitionsForProtocol(tools []map[string]interface{}, protocol string, includeMeta bool) interface{} {
 	if len(tools) == 0 && !includeMeta {
 		return nil

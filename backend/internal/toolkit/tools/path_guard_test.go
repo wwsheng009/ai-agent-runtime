@@ -12,21 +12,32 @@ import (
 
 func TestPathGuardUnsupportedPathNameReason(t *testing.T) {
 	cases := []struct {
-		name   string
-		path   string
-		reject bool
-		expect string // optional substring that must appear in the reason
+		name string
+		path string
+		// windowsOnly cases are the Windows reserved-name family: on Unix those
+		// spellings are ordinary file names and must stay usable (review M3).
+		windowsOnly bool
+		reject      bool
+		expect      string // optional substring that must appear in the reason
 	}{
 		// Windows reserved device names, in the spellings models emit.
-		{name: "windows nul lowercase", path: "nul", reject: true, expect: "NUL"},
-		{name: "windows nul uppercase", path: "NUL", reject: true, expect: "NUL"},
-		{name: "windows nul with extension", path: "NUL.txt", reject: true, expect: "NUL"},
-		{name: "windows nul trailing space", path: "NUL ", reject: true, expect: "NUL"},
-		{name: "windows nul trailing dot", path: "NUL.", reject: true, expect: "NUL"},
-		{name: "windows com1", path: "COM1", reject: true, expect: "COM1"},
-		{name: "windows lpt9", path: "LPT9", reject: true, expect: "LPT9"},
-		{name: "windows path segment nul", path: `C:\src\nul`, reject: true, expect: "NUL"},
-		{name: "windows slash segment con", path: "src/con/readme.txt", reject: true, expect: "CON"},
+		{name: "windows nul lowercase", path: "nul", windowsOnly: true, reject: true, expect: "NUL"},
+		{name: "windows nul uppercase", path: "NUL", windowsOnly: true, reject: true, expect: "NUL"},
+		{name: "windows nul with extension", path: "NUL.txt", windowsOnly: true, reject: true, expect: "NUL"},
+		{name: "windows nul trailing space", path: "NUL ", windowsOnly: true, reject: true, expect: "NUL"},
+		{name: "windows nul trailing dot", path: "NUL.", windowsOnly: true, reject: true, expect: "NUL"},
+		{name: "windows com1", path: "COM1", windowsOnly: true, reject: true, expect: "COM1"},
+		{name: "windows lpt9", path: "LPT9", windowsOnly: true, reject: true, expect: "LPT9"},
+		{name: "windows path segment nul", path: `C:\src\nul`, windowsOnly: true, reject: true, expect: "NUL"},
+		{name: "windows slash segment con", path: "src/con/readme.txt", windowsOnly: true, reject: true, expect: "CON"},
+		// ADS, inner-space and superscript spellings (review m9).
+		{name: "windows nul ads", path: "NUL:stream", windowsOnly: true, reject: true, expect: "NUL"},
+		{name: "windows nul inner space", path: "NUL .txt", windowsOnly: true, reject: true, expect: "NUL"},
+		{name: "windows com superscript", path: "COM\u00b9", windowsOnly: true, reject: true, expect: "COM1"},
+		{name: "windows lpt superscript ext", path: "LPT\u00b2.txt", windowsOnly: true, reject: true, expect: "LPT2"},
+		// 这些拼写在 Windows 上仍是保留名，只有 Unix 宿主才当普通名字放行。
+		{name: "unix aux directory segment", path: "src/aux/notes.md", windowsOnly: true, reject: true, expect: "AUX"},
+		{name: "unix con file", path: "con.txt", windowsOnly: true, reject: true, expect: "CON"},
 		{name: "windows device namespace", path: `\\.\PhysicalDrive0`, reject: true, expect: "device namespace"},
 		{name: "windows globalroot namespace", path: `\\?\GLOBALROOT\Device\HarddiskVolume1`, reject: true, expect: "GLOBALROOT"},
 		{name: "windows device namespace slash spelling", path: "//./PhysicalDrive0", reject: true, expect: "device namespace"},
@@ -68,8 +79,12 @@ func TestPathGuardUnsupportedPathNameReason(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			reject := tc.reject
+			if tc.windowsOnly && runtime.GOOS != "windows" {
+				reject = false
+			}
 			reason := unsupportedPathNameReason(tc.path)
-			if !tc.reject {
+			if !reject {
 				require.Equal(t, "", reason, "path %q must stay usable", tc.path)
 				return
 			}

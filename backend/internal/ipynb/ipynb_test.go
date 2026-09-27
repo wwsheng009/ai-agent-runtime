@@ -280,3 +280,28 @@ func TestRenderBytesHandlesUpdateDisplayDataAndGIF(t *testing.T) {
 		t.Fatalf("update_display_data text must render, got %q", render.Markdown)
 	}
 }
+
+// TestRenderBytesRejectsNullCells: an explicit null must fail with the missing
+// field diagnosis rather than rendering an empty notebook.
+func TestRenderBytesRejectsNullCells(t *testing.T) {
+	_, err := RenderBytes([]byte(`{"nbformat":4,"cells":null}`))
+	if err == nil || !strings.Contains(err.Error(), "cells") {
+		t.Fatalf("expected a cells-field error, got %v", err)
+	}
+}
+
+// TestRenderBytesBoundsCellWork: rendering work is capped and the omission is
+// reported in metadata instead of silently dropping cells.
+func TestRenderBytesBoundsCellWork(t *testing.T) {
+	cells := make([]map[string]interface{}, 0, maxCells+1)
+	for i := 0; i <= maxCells; i++ {
+		cells = append(cells, map[string]interface{}{"cell_type": "code", "source": "x\n"})
+	}
+	render, err := RenderBytes(notebookJSON(t, cells))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if got := render.Metadata["notebook_cells_omitted"]; got != 1 {
+		t.Fatalf("expected one omitted cell, got %#v", got)
+	}
+}

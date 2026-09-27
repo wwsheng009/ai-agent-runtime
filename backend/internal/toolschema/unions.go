@@ -85,8 +85,17 @@ func scalarizeUnionsNode(node map[string]interface{}) {
 		}
 	}
 	for _, key := range unionChildKeys {
-		if childNode, ok := node[key].(map[string]interface{}); ok {
-			scalarizeUnionsNode(childNode)
+		switch child := node[key].(type) {
+		case map[string]interface{}:
+			scalarizeUnionsNode(child)
+		case []interface{}:
+			// draft-07 tuple 形态（items: [ {...}, {...} ]）每个元素都是 schema，
+			// 必须逐元素下钻，否则元组里的 anyOf/oneOf 会原样发往 provider。
+			for _, entry := range child {
+				if childNode, ok := entry.(map[string]interface{}); ok {
+					scalarizeUnionsNode(childNode)
+				}
+			}
 		}
 	}
 	for _, key := range unionListKeys {

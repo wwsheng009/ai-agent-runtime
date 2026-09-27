@@ -210,7 +210,7 @@ func persistViewImage(srcPath string) (string, error) {
 	if _, statErr := os.Stat(dst); statErr == nil {
 		return dst, nil
 	}
-	if err := writeFileAtomic(dst, data, writeFileModeDefault); err != nil {
+	if err := writeFileAtomicLocal(dst, data, writeFileModeDefault); err != nil {
 		return "", err
 	}
 	return dst, nil

@@ -151,6 +151,12 @@ type ViewFileRequest struct {
 	FilePath string `json:"file_path"`
 	Offset   int    `json:"offset,omitempty"`
 	Limit    int    `json:"limit,omitempty"`
+
+	// dedupDefer, when set, receives a dedup hit's consume closure instead of
+	// running it immediately. The batch path uses it so an item dropped by the
+	// aggregate cap does not burn the entry (review m13). Unexported: JSON
+	// neither sets nor serializes it.
+	dedupDefer func(viewDedupCommit)
 }
 
 // Execute 实现 Tool 接口
@@ -184,6 +190,7 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	)
 	if len(requests) == 1 && len(p.Files) == 0 {
 		result, execErr = v.executeSingle(ctx, requests[0])
+		return stampToolOwnsOutputWithBudget(result, viewOutputBudgetBytes), execErr
 	} else {
 		result, execErr = v.executeBatch(ctx, requests, p.Compact)
 		// A files[]-only call cannot honor top-level offset/limit (only
@@ -194,7 +201,9 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 			result = annotateIgnoredBatchWindow(result, p.Offset, p.Limit)
 		}
 	}
-	return stampToolOwnsOutputWithBudget(result, viewOutputBudgetBytes), execErr
+	// 批量结果按聚合上限声明自己的可见窗口：声明 32 KiB 而实际交付到
+	// 64 KiB 会让 gateway 把模型本可读全的正文错误归档（review m6）。
+	return stampToolOwnsOutputWithBudget(result, viewBatchAggregateBudgetBytes), execErr
 }
 
 // annotateIgnoredBatchWindow tells the model that a batch call carried a
@@ -326,17 +335,23 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 	}
 	// notebook：渲染为带标签 Markdown 后复用同一窗口管线（analysis §3.10）。
 	if notebookResult, handled := v.viewNotebookResult(resolvedPath, p.FilePath, p, fileInfo); handled {
-		return notebookResult, nil
+		return v.recordDerivedRender(ctx, resolvedPath, notebookResult, p, fileInfo), nil
 	}
 	// 文档容器：渲染为 Markdown 后复用同一窗口；无转换器时降级为 MIME note
 	// （analysis §3.9）。
 	if documentResult, handled := v.viewDocumentResult(ctx, resolvedPath, p.FilePath, p, fileInfo); handled {
-		return documentResult, nil
+		return v.recordDerivedRender(ctx, resolvedPath, documentResult, p, fileInfo), nil
 	}
 	// Unchanged-window dedup: an exact repeat of a complete, unchanged window
-	// returns a consumed stub instead of paying for the same content twice
-	// (analysis §3.6).
-	if stub, hit := viewDedupStub(ctx, resolvedPath, fileInfo, p.Offset, p.Limit); hit {
+	// returns a stub instead of paying for the same content twice
+	// (analysis §3.6). The entry is consumed only once the stub is really
+	// delivered: a batch item dropped by the aggregate cap must not burn it.
+	if stub, hit, commit := viewDedupPeek(ctx, resolvedPath, fileInfo, p.Offset, p.Limit); hit {
+		if p.dedupDefer != nil {
+			p.dedupDefer(commit)
+		} else {
+			commit()
+		}
 		return stub, nil
 	}
 	content, readMeta, err := v.readFile(resolvedPath, p.Offset, p.Limit)
@@ -528,9 +543,42 @@ func attachViewEfficiencyHints(result *toolkit.ToolResult, request ViewFileReque
 	if result == nil || result.Metadata == nil {
 		return
 	}
-	// Tail windows are already the cheapest way to read a file's end; there is
-	// nothing to continue and no leading-window advisory to give.
+	// offset_resolved publishes the window the reader actually opened; for a
+	// tail read that is the resolved absolute line, not the negative request
+	// (review m11).
+	result.Metadata["offset_resolved"] = readMeta.WindowStart
 	if readMeta.Tail {
+		// Tail windows are already the cheapest way to read a file's end, but a
+		// clamped/cropped tail still needs the "read earlier" route: otherwise
+		// the model has no way back into the part it never saw (review m11).
+		if readMeta.TailClamped || readMeta.TailDroppedByBudget > 0 || readMeta.TailDroppedByLimit > 0 {
+			if readMeta.TailClamped {
+				result.Metadata["tail_clamped"] = true
+			}
+			if readMeta.TailDroppedByBudget > 0 {
+				result.Metadata["tail_lines_dropped_by_budget"] = readMeta.TailDroppedByBudget
+			}
+			if readMeta.TailDroppedByLimit > 0 {
+				result.Metadata["tail_lines_dropped_by_limit"] = readMeta.TailDroppedByLimit
+			}
+			result.Metadata["tail_window_start"] = readMeta.WindowStart
+			if readMeta.WindowStart > 0 {
+				earlier := readMeta.WindowStart - viewDefaultLimit
+				if earlier < 0 {
+					earlier = 0
+				}
+				result.Metadata["suggested_earlier_offset"] = earlier
+				advisory := fmt.Sprintf(
+					"[efficiency] tail window starts at line %d (lines_read=%d); for earlier content use offset=%d limit<=%d.",
+					readMeta.WindowStart+1, readMeta.LinesRead, earlier, viewDefaultLimit,
+				)
+				if strings.TrimSpace(result.Content) == "" {
+					result.Content = advisory
+				} else {
+					result.Content = strings.TrimRight(result.Content, "\n") + "\n\n" + advisory
+				}
+			}
+		}
 		return
 	}
 	if readMeta.HasMore {
@@ -562,6 +610,62 @@ func attachViewEfficiencyHints(result *toolkit.ToolResult, request ViewFileReque
 		return
 	}
 	result.Content = strings.TrimRight(result.Content, "\n") + "\n\n" + advisory
+}
+
+// recordDerivedRender closes the read-side bookkeeping for renders that do not
+// travel through the text window path (notebook/document). Both renderers
+// publish the same window metadata the text path uses, so the ledger and the
+// dedup cache can be fed from it — without this, a write after viewing a
+// document found no record and from-line-1 re-reads were never stubbed
+// (review F11).
+func (v *ViewTool) recordDerivedRender(ctx context.Context, resolvedPath string, result *toolkit.ToolResult, p ViewFileRequest, info os.FileInfo) *toolkit.ToolResult {
+	if result == nil || !result.Success || info == nil || result.Metadata == nil {
+		return result
+	}
+	metadata := result.Metadata
+	// Same contract as the text path: consume only once the stub is delivered
+	// (a batch item dropped by the aggregate cap must keep its entry).
+	if stub, hit, commit := viewDedupPeek(ctx, resolvedPath, info, p.Offset, p.Limit); hit {
+		if p.dedupDefer != nil {
+			p.dedupDefer(commit)
+		} else {
+			commit()
+		}
+		return stub
+	}
+	offset := viewMetadataInt(metadata, "offset", p.Offset)
+	limit := viewMetadataInt(metadata, "limit", p.Limit)
+	linesRead := viewMetadataInt(metadata, "lines_read", 0)
+	totalLines := viewMetadataInt(metadata, "total_lines", 0)
+	truncated, _ := metadata["is_truncated"].(bool)
+	tail, _ := metadata["tail"].(bool)
+	empty, _ := metadata["empty"].(bool)
+	fullRead := !tail && offset == 0 && !truncated && linesRead > 0 && !empty
+	recordFileReadFromDisk(ctx, resolvedPath, fullRead, "view", fileReadWindow{
+		Offset:     offset,
+		Limit:      limit,
+		LinesRead:  linesRead,
+		TotalLines: totalLines,
+		Truncated:  truncated || tail,
+	})
+	if !tail && linesRead > 0 && !truncated && !empty {
+		recordViewWindowRead(ctx, resolvedPath, info, offset, limit, linesRead, totalLines, true)
+	}
+	return result
+}
+
+// viewMetadataInt reads an integer-like metadata value; derived renders build
+// the numbers in-process, but a round trip through JSON would make them float64.
+func viewMetadataInt(metadata map[string]interface{}, key string, fallback int) int {
+	switch value := metadata[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	}
+	return fallback
 }
 
 func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest, compact bool) (*toolkit.ToolResult, error) {
@@ -596,6 +700,10 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 		if compact && request.Limit > viewCompactHeadLines {
 			request.Limit = viewCompactHeadLines
 		}
+		// Dedup hits are consumed only after the section is really appended:
+		// an item dropped by the cap below must keep its entry (review m13).
+		var pendingDedup viewDedupCommit
+		request.dedupDefer = func(commit viewDedupCommit) { pendingDedup = commit }
 		result, err := v.executeSingle(ctx, request)
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", request.FilePath, err))
@@ -615,7 +723,6 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 			}
 			continue
 		}
-		succeeded++
 		section := fmt.Sprintf("===== %s =====\n%s", request.FilePath, result.Content)
 		if compact {
 			section += "\n" + compactViewSummary(result.Metadata)
@@ -631,6 +738,12 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 		sections = append(sections, section)
 		emittedBytes += len(section)
 		items = append(items, result.Metadata)
+		// Count only sections that are actually delivered: a cap-dropped item
+		// must not be reported as read (review m5).
+		succeeded = len(items)
+		if pendingDedup != nil {
+			pendingDedup()
+		}
 	}
 	if len(skippedFiles) > 0 {
 		sections = append(sections, fmt.Sprintf(
@@ -742,6 +855,15 @@ type viewReadResult struct {
 	// set, WindowStart holds the resolved absolute first line and the reader
 	// function already consumed the whole stream.
 	Tail bool
+	// TailRequested is the requested tail length before clamping.
+	TailRequested int
+	// TailClamped marks a tail request clamped to viewMaxLimit.
+	TailClamped bool
+	// TailDroppedByBudget / TailDroppedByLimit count kept lines the byte budget
+	// or the explicit limit removed from the front of the tail window
+	// (review m11).
+	TailDroppedByBudget int
+	TailDroppedByLimit  int
 	// WindowStart is the resolved 0-based first line of the returned window
 	// (equal to the requested offset for normal reads).
 	WindowStart int
@@ -830,7 +952,7 @@ func (v *ViewTool) readLines(reader io.Reader, offset, limit int) (string, viewR
 	br := bufio.NewReaderSize(reader, 64*1024)
 	meta := viewReadResult{}
 	if offset < 0 {
-		return v.readTailLines(br, -offset, meta)
+		return v.readTailLines(br, -offset, limit, meta)
 	}
 
 	// 跳过 offset 行
@@ -918,10 +1040,12 @@ func (v *ViewTool) readLines(reader io.Reader, offset, limit int) (string, viewR
 // keeping only the last N lines (bounded memory), then trims the kept window
 // from the front until it fits the byte budget - the tail must stay the true
 // tail, so the oldest kept lines are the ones dropped.
-func (v *ViewTool) readTailLines(br *bufio.Reader, requested int, meta viewReadResult) (string, viewReadResult, error) {
+func (v *ViewTool) readTailLines(br *bufio.Reader, requested, limit int, meta viewReadResult) (string, viewReadResult, error) {
+	meta.TailRequested = requested
 	tailLines := requested
 	if tailLines > viewMaxLimit {
 		tailLines = viewMaxLimit
+		meta.TailClamped = true
 	}
 	if tailLines < 1 {
 		// -MinInt 取负仍为负数（溢出），0/负值会让 make() panic；尾部读取
@@ -949,7 +1073,18 @@ func (v *ViewTool) readTailLines(br *bufio.Reader, requested int, meta viewReadR
 	meta.TotalLinesKnown = true
 	meta.EOF = true
 	meta.Tail = true
-	kept := trimTailToByteBudget(orderedTailLines(ring, count), viewByteBudgetBytes())
+	ordered := orderedTailLines(ring, count)
+	kept := ordered
+	if len(ordered) > 0 {
+		kept = trimTailToByteBudget(ordered, viewByteBudgetBytes())
+		meta.TailDroppedByBudget = len(ordered) - len(kept)
+	}
+	// An explicit limit also bounds a tail window: the newest lines are the
+	// recovery-relevant ones, so the oldest kept lines are dropped (review m11).
+	if limit > 0 && len(kept) > limit {
+		meta.TailDroppedByLimit = len(kept) - limit
+		kept = kept[len(kept)-limit:]
+	}
 	meta.WindowStart = count - len(kept)
 	meta.LinesRead = len(kept)
 	if len(kept) == 0 {

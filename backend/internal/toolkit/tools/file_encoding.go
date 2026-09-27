@@ -136,3 +136,40 @@ func isBinaryBytes(data []byte) bool {
 	}
 	return float64(nulls)/float64(len(probe)) > binaryBytesRatioThreshold
 }
+
+// looksBinaryFileBytes is the write-side binary gate. The NUL-byte heuristic is
+// only meaningful for BOM-less UTF-8: UTF-16 text is full of NUL bytes, so
+// BOM-marked payloads are decoded first and the decoded text is judged instead.
+// A binary blob that merely starts with FF FE / FE FF is still refused, which
+// the old "encoding == utf-8 &&" short circuit missed (review m10).
+func looksBinaryFileBytes(data []byte) bool {
+	enc, _ := detectFileEncoding(data)
+	if !enc.hasBOM() {
+		return isBinaryBytes(data)
+	}
+	text, _ := decodeFileBytes(data)
+	return isBinaryDecodedText(text)
+}
+
+// isBinaryDecodedText flags decoded payloads dominated by control characters: a
+// file that claims UTF-16 but decodes into NUL runes or control soup is binary.
+func isBinaryDecodedText(text string) bool {
+	probed, control := 0, 0
+	for _, r := range text {
+		probed++
+		switch {
+		case r == 0:
+			return true
+		case r == '\n' || r == '\r' || r == '\t':
+		case r < 0x20:
+			control++
+		}
+		if probed >= 8192 {
+			break
+		}
+	}
+	if probed == 0 {
+		return false
+	}
+	return control*20 > probed
+}

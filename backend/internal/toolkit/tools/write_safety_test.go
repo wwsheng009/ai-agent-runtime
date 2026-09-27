@@ -21,8 +21,8 @@ func TestWriteFileAtomicPreservesExistingMode(t *testing.T) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
-	if err := writeFileAtomic(path, []byte("new"), writeFileModeDefault); err != nil {
-		t.Fatalf("writeFileAtomic: %v", err)
+	if err := writeFileAtomicLocal(path, []byte("new"), writeFileModeDefault); err != nil {
+		t.Fatalf("writeFileAtomicLocal: %v", err)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil || string(raw) != "new" {

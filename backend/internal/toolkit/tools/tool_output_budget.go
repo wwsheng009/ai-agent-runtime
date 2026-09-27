@@ -37,7 +37,14 @@ const (
 	// wide batch rides the exemption past the render-layer backstop. The cap is
 	// enforced in view.executeBatch and the result carries the skipped count so
 	// the model can re-read omitted files individually (analysis §3.1).
-	viewBatchAggregateBudgetBytes = 96 * 1024
+	//
+	// It must equal output.modelToolTextBudgetCeilingBytes (64 KiB), not exceed
+	// it: a wider aggregate can never be model-visible in one piece, and the
+	// gateway's archive tier follows the *declared* budget, so declaring 32 KiB
+	// while really delivering up to 96 KiB archived bodies the model could read
+	// end to end (review m6). Batch results declare this constant as their
+	// model-visible window.
+	viewBatchAggregateBudgetBytes = 64 * 1024
 	// grepOutputBudgetBytes: one match list; wide enough for a useful first
 	// pass before the model narrows the pattern.
 	grepOutputBudgetBytes = 32 * 1024

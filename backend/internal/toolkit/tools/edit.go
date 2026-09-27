@@ -238,7 +238,7 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 
-	if enc, _ := detectFileEncoding(content); enc == fileEncodingUTF8 && isBinaryBytes(content) {
+	if looksBinaryFileBytes(content) {
 		return &toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
@@ -341,7 +341,7 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 
 	// 写入文件：按原编码回写（BOM/UTF-16 保真）并原子替换。
 	encodedContent := encodeFileText(newContent, fileEnc)
-	err = writeFileAtomic(absPath, encodedContent, writeFileModeDefault)
+	err = writeFileAtomicLocal(absPath, encodedContent, writeFileModeDefault)
 	if err != nil {
 		return &toolkit.ToolResult{
 			Success:    false,

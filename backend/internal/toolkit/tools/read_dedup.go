@@ -51,11 +51,13 @@ type sessionViewDedup struct {
 	mu      sync.Mutex
 	entries map[string]viewDedupEntry
 	order   []string
+	touched time.Time
 }
 
 var sessionViewDedups sync.Map // sessionID -> *sessionViewDedup
 
 func viewDedupForSession(sessionID string) *sessionViewDedup {
+	maybeSweepSessionReadState()
 	if existing, ok := sessionViewDedups.Load(sessionID); ok {
 		return existing.(*sessionViewDedup)
 	}
@@ -78,40 +80,59 @@ func viewDedupDisabled() bool {
 	return false
 }
 
-// viewDedupStub returns a consumed stub when the exact same complete window of
-// an unchanged file was already returned to this session. The entry is deleted
-// on hit (consume-on-hit), so a retry after context compaction gets the real
-// content instead of a second stub.
-func viewDedupStub(ctx context.Context, path string, info os.FileInfo, offset, limit int) (*toolkit.ToolResult, bool) {
+// idleSince reports whether this session bucket was last used before the TTL
+// window (review m8).
+func (s *sessionViewDedup) idleSince(now time.Time, ttl time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.touched.IsZero() {
+		return false
+	}
+	return now.Sub(s.touched) > ttl
+}
+
+// viewDedupCommit deletes a peeked dedup entry once the stub is really
+// delivered. It is nil-safe and re-checks identity, so a stale commit after the
+// file changed (or the entry was evicted) is a no-op.
+type viewDedupCommit func()
+
+// viewDedupPeek returns a stub when the exact same complete window of an
+// unchanged file was already returned to this session. It does NOT consume the
+// entry: the caller must run the returned commit after actually handing the
+// stub to the model, so a batch item dropped by the aggregate cap does not burn
+// the entry (review m13). Consume-on-delivery still preserves the §3.6
+// guarantee: the stub tells the model to call again, and the next call returns
+// the real content.
+func viewDedupPeek(ctx context.Context, path string, info os.FileInfo, offset, limit int) (*toolkit.ToolResult, bool, viewDedupCommit) {
 	if viewDedupDisabled() || info == nil || offset < 0 {
-		return nil, false
+		return nil, false, nil
 	}
 	ledgerPath := normalizeLedgerPath(path)
 	if ledgerPath == "" {
-		return nil, false
+		return nil, false, nil
 	}
 	sessionID := toolctx.SessionID(ctx)
 	if sessionID == "" {
 		// 空串桶会把"已读"状态跨调用共享，把模型从未见过的窗口 stub 掉；
 		// 没有会话标识时直接不做去重。
-		return nil, false
+		return nil, false, nil
 	}
 	state := viewDedupForSession(sessionID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	state.touched = time.Now()
 	key := viewDedupKey(ledgerPath, offset, limit)
 	entry, ok := state.entries[key]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
 	if entry.ModTimeNano != info.ModTime().UnixNano() || entry.Size != info.Size() {
 		delete(state.entries, key)
-		return nil, false
+		return nil, false, nil
 	}
 	if offset == 0 && !sessionHasFullRead(ctx, ledgerPath) {
-		return nil, false
+		return nil, false, nil
 	}
-	delete(state.entries, key)
 	stub := &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
@@ -132,7 +153,18 @@ func viewDedupStub(ctx context.Context, path string, info os.FileInfo, offset, l
 			"is_truncated":   false,
 		},
 	}
-	return stub, true
+	modTimeNano := entry.ModTimeNano
+	size := entry.Size
+	commit := func() {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		current, exists := state.entries[key]
+		if !exists || current.ModTimeNano != modTimeNano || current.Size != size {
+			return
+		}
+		delete(state.entries, key)
+	}
+	return stub, true, commit
 }
 
 // recordViewWindowRead remembers one complete text window so a later identical
@@ -153,6 +185,7 @@ func recordViewWindowRead(ctx context.Context, path string, info os.FileInfo, of
 	state := viewDedupForSession(sessionID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	state.touched = time.Now()
 	key := viewDedupKey(ledgerPath, offset, limit)
 	if _, exists := state.entries[key]; !exists {
 		state.order = append(state.order, key)

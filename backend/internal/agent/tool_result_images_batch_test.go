@@ -15,11 +15,13 @@ import (
 // paths.
 func TestCollectImagePassthroughsReadsBatchItems(t *testing.T) {
 	dir := t.TempDir()
-	batchImage := filepath.Join(dir, "batch.png")
+	// 名字刻意让"声明顺序"与"字典序"相反：排序实现会把 paths 换成另一个
+	// 顺序并让 notes 与路径脱钩（review Q5）。
+	batchImage := filepath.Join(dir, "zeta-item.png")
 	if err := os.WriteFile(batchImage, []byte("png"), 0o644); err != nil {
 		t.Fatalf("seed batch image: %v", err)
 	}
-	topImage := filepath.Join(dir, "top.png")
+	topImage := filepath.Join(dir, "alpha-top.png")
 	if err := os.WriteFile(topImage, []byte("png"), 0o644); err != nil {
 		t.Fatalf("seed top image: %v", err)
 	}
@@ -31,7 +33,7 @@ func TestCollectImagePassthroughsReadsBatchItems(t *testing.T) {
 					{
 						toolresult.MetadataImagePassthroughKey: true,
 						toolresult.MetadataImagePathKey:        batchImage,
-						toolresult.MetadataImageNoteKey:        "已压缩 100x100 → 50x50；显示坐标 ×2.00 得到原图坐标",
+						toolresult.MetadataImageNoteKey:        "已压缩 100x100 → 50x50；显示坐标横向 ×2.00、纵向 ×2.02 得到原图坐标",
 					},
 					{"file_path": "notes.txt"},
 					{
@@ -61,10 +63,10 @@ func TestCollectImagePassthroughsReadsBatchItems(t *testing.T) {
 		t.Fatalf("expected the batch image and the top-level image, got %#v", paths)
 	}
 	if paths[0] != batchImage || paths[1] != topImage {
-		t.Fatalf("expected sorted deduplicated paths, got %#v", paths)
+		t.Fatalf("expected declaration order (batch item first), got %#v", paths)
 	}
-	if len(notes) != 1 {
-		t.Fatalf("expected the batch image note, got %#v", notes)
+	if len(notes) != 1 || notes[0] != "已压缩 100x100 → 50x50；显示坐标横向 ×2.00、纵向 ×2.02 得到原图坐标" {
+		t.Fatalf("expected the batch image note to stay paired, got %#v", notes)
 	}
 }
 

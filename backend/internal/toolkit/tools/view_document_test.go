@@ -258,3 +258,39 @@ func TestViewDocumentTailReportsAbsoluteOffset(t *testing.T) {
 		t.Fatalf("expected the file tail, got %q", result.Content)
 	}
 }
+
+// TestViewNonPDFEmptyDocumentGetsExplicitNote: the empty-body note must not be
+// PDF-specific — a docx whose converter returns nothing still owes the model an
+// explanation plus the download route (review Q5 uncovered branch).
+func TestViewNonPDFEmptyDocumentGetsExplicitNote(t *testing.T) {
+	t.Setenv("AICLI_VIEW_DEDUP", "")
+	root := t.TempDir()
+	path := filepath.Join(root, "empty.docx")
+	if err := os.WriteFile(path, []byte("PK\x03\x04stub"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	withDocreadOverrides(t,
+		func(string, []byte) docread.Probe {
+			return docread.Probe{Kind: "docx", MIME: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", Converter: "pandoc", Supported: true}
+		},
+		func(context.Context, string) (docread.DocumentRender, error) {
+			return docread.DocumentRender{
+				Markdown: "",
+				Metadata: map[string]interface{}{
+					"doc_kind":      "docx",
+					"doc_mime":      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+					"doc_degraded":  false,
+					"doc_converter": "pandoc",
+				},
+			}, nil
+		})
+
+	tool := newViewToolAt(t, root)
+	result := executeViewParams(t, tool, context.Background(), map[string]interface{}{"file_path": "empty.docx"})
+	if result.Metadata["doc_kind"] != "docx" {
+		t.Fatalf("expected doc_kind metadata, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, "没有可抽取的正文") || !strings.Contains(result.Content, "download") {
+		t.Fatalf("expected the explicit empty-document note with a recovery route, got %q", result.Content)
+	}
+}

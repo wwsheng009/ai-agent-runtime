@@ -6,14 +6,28 @@ import (
 	"path/filepath"
 )
 
-// writeFileAtomic replaces path with data through a sibling temp file followed
-// by a rename, so concurrent readers never observe a half-written file. The
-// existing file permissions are preserved; fallbackMode applies only when the
-// target does not exist yet (0 means "no explicit chmod").
-func writeFileAtomic(path string, data []byte, fallbackMode os.FileMode) error {
+// writeFileAtomicLocal replaces path with data through a sibling temp file
+// followed by a rename, so concurrent readers never observe a half-written
+// file. The existing file permissions are preserved; fallbackMode applies only
+// when the target does not exist yet (0 means "no explicit chmod").
+//
+// The Local suffix is deliberate: agentconfig / runtimeserver / planstore /
+// mesh each have their own `writeFileAtomic` implementing the shared config
+// write channel, and the config-write guard walks the tree by name. This helper
+// is a package-local atomic write for arbitrary user files, not that channel.
+func writeFileAtomicLocal(path string, data []byte, fallbackMode os.FileMode) error {
 	mode := fallbackMode
 	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
 		mode = info.Mode().Perm()
+	}
+	// A rename replaces the directory entry: it would turn a symlink into a
+	// regular file (the link target keeps the old bytes) and split a hard-link
+	// set. The pre-atomic implementation wrote through both, so link-bearing
+	// targets keep that behavior (review M4).
+	if linkInfo, err := os.Lstat(path); err == nil {
+		if linkInfo.Mode()&os.ModeSymlink != 0 || hasMultipleHardLinks(linkInfo) {
+			return writeFileInPlace(path, data, mode)
+		}
 	}
 
 	dir := filepath.Dir(path)
@@ -51,6 +65,29 @@ func writeFileAtomic(path string, data []byte, fallbackMode os.FileMode) error {
 		return fmt.Errorf("原子替换文件失败: %w", err)
 	}
 	return nil
+}
+
+// writeFileInPlace truncates and rewrites the file through its path: symlinks
+// keep pointing at their target and every hard link keeps sharing the inode.
+// It trades atomic replacement for link fidelity, matching the write-through
+// semantics callers had before the atomic path was introduced.
+func writeFileInPlace(path string, data []byte, mode os.FileMode) error {
+	if mode == 0 {
+		mode = writeFileModeDefault
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("写入文件失败: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("写入文件失败: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("同步文件失败: %w", err)
+	}
+	return file.Close()
 }
 
 // writeFileModeDefault is used when a brand-new file is created without an
