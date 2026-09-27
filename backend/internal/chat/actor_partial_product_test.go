@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -94,6 +95,94 @@ func TestPendingBatchRecoveryPayloadCarriesPartialProduct(t *testing.T) {
 	require.NotContains(t, empty, "partial_summary")
 	require.NotContains(t, empty, "partial_source")
 	require.NotContains(t, empty, "partial_steps")
+}
+
+// TestEnrichSessionInterruptedPayloadAttachesPartialProduct 钉住中断型终态的部分
+// 产物接入：存储里有快照时带上 partial_*；快照缺失/存储未接时保持原样且快速返回
+// （fail-open，中断路径绝不被拖住）。
+func TestEnrichSessionInterruptedPayloadAttachesPartialProduct(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "interrupted-partial-product-user")
+	require.NoError(t, err)
+	session.ReplaceHistory([]types.Message{
+		{Role: "user", Content: "long running task"},
+		{Role: "assistant", Content: "interrupted run deliverable"},
+		{Role: "tool", Content: "step output"},
+	})
+	require.NoError(t, storage.Save(ctx, session))
+
+	actor := &SessionActor{id: session.ID, sessionStore: storage}
+	payload := map[string]interface{}{"reason": "interrupt"}
+	start := time.Now()
+	actor.enrichSessionInterruptedPayload(payload)
+	require.Less(t, time.Since(start), time.Second, "补产物必须有硬性时间上限")
+	require.Equal(t, "interrupted run deliverable", payload["partial_summary"])
+	require.Equal(t, "last_assistant_message", payload["partial_source"])
+	require.Equal(t, 1, payload["partial_steps"])
+	require.Equal(t, "interrupt", payload["reason"], "既有字段不得被改写")
+
+	// 快照不存在：fail-open，不加 partial_* 键。
+	missing := &SessionActor{id: "session_missing_snapshot", sessionStore: storage}
+	missingPayload := map[string]interface{}{"reason": "stall_timeout"}
+	missing.enrichSessionInterruptedPayload(missingPayload)
+	require.NotContains(t, missingPayload, "partial_summary")
+
+	// 未接存储（既有测试的构造方式）：直接返回，不 panic。
+	noStore := &SessionActor{id: session.ID}
+	noStorePayload := map[string]interface{}{"reason": "interrupt"}
+	noStore.enrichSessionInterruptedPayload(noStorePayload)
+	require.NotContains(t, noStorePayload, "partial_summary")
+}
+
+// TestSessionActorInterruptEventCarriesPartialProduct 是中断路径的端到端回归：
+// handleInterrupt 发布的 session_interrupted 必须带上已产出的部分产物，而不是只有
+// reason/turn 信息。
+func TestSessionActorInterruptEventCarriesPartialProduct(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "interrupt-event-partial-user")
+	require.NoError(t, err)
+	session.ReplaceHistory([]types.Message{
+		{Role: "user", Content: "do a long task"},
+		{Role: "assistant", Content: "halfway deliverable before ESC"},
+		{Role: "tool", Content: "tool output"},
+	})
+	require.NoError(t, storage.Save(ctx, session))
+
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	require.NoError(t, runtimeStore.SaveState(ctx, &RuntimeState{
+		SessionID: session.ID,
+		Status:    SessionRunning,
+	}))
+	actor := &SessionActor{
+		id:           session.ID,
+		stateStore:   runtimeStore,
+		eventStore:   runtimeStore,
+		eventBus:     runtimeevents.NewBus(),
+		sessionStore: storage,
+	}
+	require.NoError(t, actor.loadState(ctx))
+
+	reply := make(chan error, 1)
+	actor.handleInterrupt(Interrupt{Reply: reply})
+	require.NoError(t, <-reply)
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	var interrupted map[string]interface{}
+	for _, event := range events {
+		if event.Type == EventSessionInterrupted {
+			interrupted = event.Payload
+		}
+	}
+	require.NotNil(t, interrupted, "handleInterrupt 必须发布 session_interrupted")
+	require.Equal(t, "interrupt", interrupted["reason"])
+	require.Equal(t, "halfway deliverable before ESC", interrupted["partial_summary"])
+	require.Equal(t, "last_assistant_message", interrupted["partial_source"])
+	require.Equal(t, 1, interrupted["partial_steps"])
 }
 
 // TestSessionActorCanceledRunCarriesPartialProduct 是 A4 的端到端回归：一个已经

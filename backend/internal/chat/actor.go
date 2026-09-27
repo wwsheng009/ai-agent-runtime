@@ -1347,6 +1347,9 @@ func (a *SessionActor) handleInterrupt(cmd Interrupt) {
 		// 放弃失败必须可见（I9 降级），但不得把 interrupt 本身变成失败。
 		payload["abandon_error"] = abandonErr.Error()
 	}
+	// A4：中断型终态同样尽力带出已产出的部分产物（fail-open、有硬性时间上限，
+	// 见 enrichSessionInterruptedPayload）；存储不可用时行为与原先完全一致。
+	a.enrichSessionInterruptedPayload(payload)
 	a.publish(runtimeevents.Event{
 		Type:      EventSessionInterrupted,
 		SessionID: a.id,
@@ -1492,15 +1495,18 @@ func (a *SessionActor) abortStalledRun(run *sessionRunControl) {
 	if a.onRunStalled != nil {
 		a.onRunStalled(run.turnID)
 	}
+	stalledPayload := map[string]interface{}{
+		"reason":     "stall_timeout",
+		"turn_id":    run.turnID,
+		"timeout_ns": a.runStallTimeout,
+	}
+	// A4：停摆强杀同样是"真实取消"，同样尽力带出部分产物（fail-open）。
+	a.enrichSessionInterruptedPayload(stalledPayload)
 	a.publish(runtimeevents.Event{
 		Type:      EventSessionInterrupted,
 		SessionID: a.id,
 		TraceID:   run.turnID,
-		Payload: map[string]interface{}{
-			"reason":     "stall_timeout",
-			"turn_id":    run.turnID,
-			"timeout_ns": a.runStallTimeout,
-		},
+		Payload:   stalledPayload,
 	})
 }
 
