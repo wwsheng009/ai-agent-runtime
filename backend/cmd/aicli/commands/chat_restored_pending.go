@@ -65,6 +65,9 @@ type chatRestoredPendingPrompt struct {
 	lines        []string
 	promptLine   string
 	detailsShown bool
+	// explainShown 标记 [6] 的按需解释是否已经生成：恢复态跨输入行保持，
+	// 重复按 [6] 只重绘、不重发模型请求（与 live 路径的 explainShown 同义）。
+	explainShown bool
 	// awaitingDenyReason 标记「已选 [5]、正在等第二行拒绝理由」的两步态。
 	// 恢复态的每次输入是一行，理由在下一行走，因此该状态必须挂在投影上
 	// 跨输入行保持；空行按普通拒绝处理（Feedback 为空）。
@@ -431,6 +434,13 @@ func handleRestoredPendingAnswerLine(session *ChatSession, input string) bool {
 			if !pending.detailsShown {
 				pending.detailsShown = true
 				pending.lines = append(pending.lines, approvalFullParameterLines(pending.approval)...)
+			}
+			rerenderRestoredPendingPrompt(session, pending, "", "")
+			return true
+		case approvalPromptExplain:
+			if !pending.explainShown {
+				pending.explainShown = true
+				pending.lines = append(pending.lines, approvalExplainBlockLines(pending.approval, bridge.explainApproval)...)
 			}
 			rerenderRestoredPendingPrompt(session, pending, "", "")
 			return true

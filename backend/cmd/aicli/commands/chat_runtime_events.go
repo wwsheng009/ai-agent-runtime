@@ -192,7 +192,10 @@ type chatRuntimeEventBridge struct {
 	// fail-closed behavior instead of silently inventing an answer.
 	askQuestionHeadless func(prompt string, suggestions []string, required bool) (string, error)
 	approveTool         func(ctx context.Context, sessionID, requestID string, allow bool, feedback, rememberScope string) error
-	answerQuestion      func(ctx context.Context, sessionID, questionID, answer string) error
+	// explainApproval 是 [6]「解释这次调用」的可选钩子：runtime-server 宿主注入
+	// 只读解释端点调用；nil = 本地模式（只有规则解释 + 降级说明，不发网络请求）。
+	explainApproval approvalExplainHook
+	answerQuestion  func(ctx context.Context, sessionID, questionID, answer string) error
 	// preferInteractiveApprovals keeps NoInteractive headless hosts (ACP stdio)
 	// from auto-denying tools so askApproval can RPC to an external client.
 	preferInteractiveApprovals bool
@@ -603,7 +606,10 @@ func scenePresenterModeFromEnv() bool {
 
 func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 	renderScene := scene.New()
-	bridge := &chatRuntimeEventBridge{
+	// 先声明再赋值：闭包（askApproval 等）需要引用 bridge 上的可选钩子，
+	// 而 ShortVarDecl 的 RHS 里 bridge 尚不在作用域内。
+	var bridge *chatRuntimeEventBridge
+	bridge = &chatRuntimeEventBridge{
 		session:             session,
 		primarySessionID:    currentRuntimeSessionID(session),
 		eventQueue:          make(chan chatRuntimeQueuedEvent, chatRuntimeEventQueueNormalCapacity+chatRuntimeEventQueueCriticalReserve),
@@ -760,6 +766,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 			lines = append(lines, approvalLines...)
 			promptLine := approvalDecisionPromptWithReuse(reuseScope)
 			detailsShown := false
+			explainShown := false
 			for {
 				text, transientPrompt, err := readChatRuntimeApprovalAnswer(session, lines, promptLine)
 				if err != nil {
@@ -771,6 +778,14 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 					if !detailsShown {
 						lines = append(lines, approvalFullParameterLines(approval)...)
 						detailsShown = true
+					}
+					continue
+				}
+				if decision == approvalPromptExplain {
+					// 同一审批只调一次模型：重复按 [6] 只重绘既有解释行。
+					if !explainShown {
+						explainShown = true
+						lines = append(lines, approvalExplainBlockLines(approval, bridge.explainApproval)...)
 					}
 					continue
 				}
@@ -5673,10 +5688,11 @@ const (
 	approvalPromptDeny
 	approvalPromptShowDetails
 	approvalPromptDenyWithReason
+	approvalPromptExplain
 )
 
 func approvalDecisionPrompt() string {
-	return "[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [5] 拒绝并说明原因（兼容 y/n）： "
+	return "[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [5] 拒绝并说明原因（兼容 y/n）  [6] 解释这次调用： "
 }
 
 func approvalDecisionPromptWithReuse(scope string) string {
@@ -5684,7 +5700,7 @@ func approvalDecisionPromptWithReuse(scope string) string {
 	if scope == "" {
 		return approvalDecisionPrompt()
 	}
-	return fmt.Sprintf("[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [4] 允许并在%s复用同类只读审批 10 分钟  [5] 拒绝并说明原因： ", scope)
+	return fmt.Sprintf("[审批] 请选择 [1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [4] 允许并在%s复用同类只读审批 10 分钟  [5] 拒绝并说明原因  [6] 解释这次调用： ", scope)
 }
 
 // approvalPromptOptionsLine 构建卡片内的操作摘要行。base 与带复用的形态
@@ -5692,18 +5708,18 @@ func approvalDecisionPromptWithReuse(scope string) string {
 func approvalPromptOptionsLine(reuseScope string) string {
 	scope := strings.TrimSpace(reuseScope)
 	if scope == "" {
-		return "[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [5] 拒绝并说明原因"
+		return "[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [5] 拒绝并说明原因  [6] 解释这次调用"
 	}
-	return fmt.Sprintf("[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [4] 允许并在%s复用同类只读审批 10 分钟  [5] 拒绝并说明原因", scope)
+	return fmt.Sprintf("[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [4] 允许并在%s复用同类只读审批 10 分钟  [5] 拒绝并说明原因  [6] 解释这次调用", scope)
 }
 
 // approvalValidOptionsText 是无效选项校验行的单一来源（live / 恢复态 /
 // 直接函数调用三条路径共用）。
 func approvalValidOptionsText(reuseAvailable bool) string {
 	if reuseAvailable {
-		return "1、2、3、4、5，或 y/n"
+		return "1、2、3、4、5、6，或 y/n"
 	}
-	return "1、2、3、5，或 y/n"
+	return "1、2、3、5、6，或 y/n"
 }
 
 // chatApprovalFeedbackMaxRunes mirrors runtimeapi.approvalFeedbackMaxRunes
@@ -5780,6 +5796,8 @@ func parseApprovalPromptDecisionInput(input string, reuseAvailable bool) (approv
 		return approvalPromptDeny, ""
 	case "3":
 		return approvalPromptShowDetails, ""
+	case "6", "explain", "解释":
+		return approvalPromptExplain, ""
 	case "5":
 		return approvalPromptDenyWithReason, ""
 	}

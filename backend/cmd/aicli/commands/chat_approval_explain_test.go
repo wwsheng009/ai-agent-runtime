@@ -1,9 +1,12 @@
 package commands
 
 import (
+	"context"
+	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 )
 
@@ -160,4 +163,50 @@ func indexOfLinePrefix(lines []string, prefix string) int {
 		}
 	}
 	return -1
+}
+
+func TestApprovalExplainBlockLinesLocalModeUsesRules(t *testing.T) {
+	lines := approvalExplainBlockLines(approvalWithArgs("execute_shell_command", `{"command":"rm -rf build/"}`), nil)
+	joined := strings.Join(lines, "\n")
+	require.Contains(t, joined, "[解释] 动作：删除文件或目录（递归）")
+	require.Contains(t, joined, "[解释] 来源：规则模板")
+	require.Contains(t, joined, "[解释] 模型解释需要 runtime-server 连接（本地模式仅规则说明）")
+	require.NotContains(t, joined, "[说明] ", "[6] 的解释块应统一使用 [解释] 前缀")
+}
+
+func TestApprovalExplainBlockLinesServerRulesFallback(t *testing.T) {
+	approval := approvalWithArgs("some_unknown_tool", `{"x":1}`)
+	approval.ID = "req-rules"
+	lines := approvalExplainBlockLines(
+		approval,
+		func(context.Context, string) (runtimeServerApprovalExplanation, error) {
+			return runtimeServerApprovalExplanation{Explanation: "工具：some_unknown_tool", Source: "rules"}, nil
+		},
+	)
+	joined := strings.Join(lines, "\n")
+	require.Contains(t, joined, "[解释] 来源：规则模板")
+	require.Contains(t, joined, "[解释] 服务端规则说明：工具：some_unknown_tool")
+}
+
+func TestApprovalExplainBlockLinesHookErrorFallsBackToRules(t *testing.T) {
+	approval := approvalWithArgs("execute_shell_command", `{"command":"git push origin main"}`)
+	approval.ID = "req-error"
+	lines := approvalExplainBlockLines(
+		approval,
+		func(context.Context, string) (runtimeServerApprovalExplanation, error) {
+			return runtimeServerApprovalExplanation{}, &runtimeServerHTTPError{
+				Method: http.MethodPost, Status: "503 Service Unavailable", StatusCode: http.StatusServiceUnavailable,
+			}
+		},
+	)
+	joined := strings.Join(lines, "\n")
+	require.Contains(t, joined, "[解释] 动作：推送到远端仓库")
+	require.Contains(t, joined, "[解释] 来源：规则模板")
+	require.Contains(t, joined, "[解释] 模型解释不可用：503 Service Unavailable")
+}
+
+func TestShortApprovalExplainError(t *testing.T) {
+	require.Equal(t, "请求超时", shortApprovalExplainError(context.DeadlineExceeded))
+	require.Equal(t, "请求已取消", shortApprovalExplainError(context.Canceled))
+	require.Equal(t, "409 Conflict", shortApprovalExplainError(&runtimeServerHTTPError{Status: "409 Conflict", StatusCode: http.StatusConflict}))
 }

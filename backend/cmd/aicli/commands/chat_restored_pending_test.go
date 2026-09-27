@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -273,6 +274,67 @@ func TestRestoredPendingApprovalRoutesDecisionAndClears(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("approval decision was not routed to the actor")
+	}
+	if currentRestoredPendingPrompt(session) != nil {
+		t.Fatal("the approval projection must be cleared once resolved")
+	}
+}
+
+// TestRestoredPendingApprovalExplainKeepsDecisionFlow 覆盖恢复态 [6]：
+// 规则解释 + 服务端摘要只生成一次（重复按 [6] 不重发请求），且不改变
+// [1]-[5] 的既有裁决语义（随后按 2 仍然正常拒绝）。
+func TestRestoredPendingApprovalExplainKeepsDecisionFlow(t *testing.T) {
+	session, bridge, coord := newRestoredPendingHarness(t, &runtimechat.RuntimeState{
+		Status: runtimechat.SessionWaitingApproval,
+		PendingApproval: &runtimechat.ApprovalRequest{
+			ID:        "apr-restored-explain",
+			SessionID: restoredPendingTestSessionID,
+			ToolName:  "execute_shell_command",
+			ArgsJSON:  []byte(`{"command":"rm -rf build/"}`),
+		},
+	})
+
+	calls := 0
+	bridge.explainApproval = func(_ context.Context, requestID string) (runtimeServerApprovalExplanation, error) {
+		calls++
+		if requestID != "apr-restored-explain" {
+			t.Fatalf("unexpected explain request id: %q", requestID)
+		}
+		return runtimeServerApprovalExplanation{Explanation: "会删除构建目录", Source: "model", Model: "gpt-test"}, nil
+	}
+	decisions := make(chan bool, 1)
+	bridge.approveTool = func(_ context.Context, _, _ string, allow bool, _, _ string) error {
+		decisions <- allow
+		return nil
+	}
+
+	if !ensureRestoredPendingInteractivePrompt(session) {
+		t.Fatal("expected the restored pending approval to be projected")
+	}
+	if !handleRestoredPendingAnswerLine(session, "6") {
+		t.Fatal("[6] must be consumed by the restored pending approval")
+	}
+	coord.waitUIActorIdle()
+	card := restoredPendingPopupText(coord.uiActor.AppState())
+	require.Contains(t, card, "[解释] 动作：删除文件或目录（递归）")
+	require.Contains(t, card, "[解释] 模型补充（gpt-test）：会删除构建目录")
+	require.Contains(t, card, "[解释] 来源：模型 gpt-test")
+	if !handleRestoredPendingAnswerLine(session, "6") {
+		t.Fatal("repeated [6] must stay in the restored approval flow")
+	}
+	require.Equal(t, 1, calls, "repeated [6] must not re-call the explain hook")
+	if currentRestoredPendingPrompt(session) == nil {
+		t.Fatal("the projection must stay alive after an explain step")
+	}
+
+	if !handleRestoredPendingAnswerLine(session, "2") {
+		t.Fatal("the deny decision must be consumed by the restored pending approval")
+	}
+	select {
+	case allow := <-decisions:
+		require.False(t, allow)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the deny decision was not routed to the hook")
 	}
 	if currentRestoredPendingPrompt(session) != nil {
 		t.Fatal("the approval projection must be cleared once resolved")

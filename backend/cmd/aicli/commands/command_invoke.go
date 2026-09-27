@@ -424,6 +424,7 @@ func (h directFunctionApprovalHandler) RequestApproval(ctx context.Context, req 
 	lines = append(lines, approvalPriorityPromptLines(approval, contextLines)...)
 	promptLine := approvalDecisionPrompt()
 	detailsShown := false
+	explainShown := false
 
 	endAction := beginChatTitleAction(h.session, "Direct Function Approval Required")
 	defer endAction()
@@ -440,6 +441,19 @@ func (h directFunctionApprovalHandler) RequestApproval(ctx context.Context, req 
 			if !detailsShown {
 				lines = append(lines, approvalFullParameterLines(approval)...)
 				detailsShown = true
+			}
+			continue
+		}
+		if decision == approvalPromptExplain {
+			// 与 live 审批环同语义：本地模式只有规则解释，服务端钩子可用时补一次
+			// §4.13 只读摘要；同一审批只调一次，重复按 [6] 只重绘。
+			if !explainShown {
+				explainShown = true
+				var explain approvalExplainHook
+				if h.session != nil && h.session.RuntimeEventBridge != nil {
+					explain = h.session.RuntimeEventBridge.explainApproval
+				}
+				lines = append(lines, approvalExplainBlockLines(approval, explain)...)
 			}
 			continue
 		}

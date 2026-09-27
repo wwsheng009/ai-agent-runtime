@@ -1,7 +1,9 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -97,6 +99,106 @@ func approvalExplanationLines(approval *runtimechat.ApprovalRequest) []string {
 		}
 	}
 	return lines
+}
+
+// approvalExplainHook 是 [6]「解释这次调用」的可选服务端钩子。runtime-server
+// 宿主把它接到 §4.13 的只读解释端点（见 chat_runtime_server.go 的
+// explainRuntimeServerApproval）；nil = 本地模式，只用规则解释、不发网络请求。
+type approvalExplainHook func(ctx context.Context, requestID string) (runtimeServerApprovalExplanation, error)
+
+// approvalExplainBlockLines 生成 [6] 触发的解释块：
+//  1. 规则解释（零成本；[说明] 前缀改为 [解释]，与 [6] 的语义一致）；
+//  2. 服务端/模型摘要（钩子可用且成功时）；
+//  3. 来源行（模型 <model>（已缓存）/ 规则模板）或降级行。
+//
+// 同一个审批的「只调一次模型」由调用方用 explainShown 守卫保证；本函数只负责
+// 生成一次内容。解释路径永不阻塞决策：任何失败都降级为可见的一行说明。
+func approvalExplainBlockLines(approval *runtimechat.ApprovalRequest, explain approvalExplainHook) []string {
+	rules := approvalExplanationLines(approval)
+	lines := make([]string, 0, len(rules)+3)
+	for _, line := range rules {
+		lines = append(lines, strings.Replace(line, "[说明] ", "[解释] ", 1))
+	}
+
+	if explain == nil {
+		lines = append(lines, "[解释] 来源：规则模板",
+			"[解释] 模型解释需要 runtime-server 连接（本地模式仅规则说明）")
+		return lines
+	}
+
+	requestID := ""
+	if approval != nil {
+		requestID = strings.TrimSpace(approval.ID)
+	}
+	if requestID == "" {
+		lines = append(lines, "[解释] 来源：规则模板", "[解释] 模型解释不可用：审批请求缺少 request id")
+		return lines
+	}
+
+	result, err := explain(context.Background(), requestID)
+	if err != nil {
+		lines = append(lines, "[解释] 来源：规则模板", "[解释] 模型解释不可用："+shortApprovalExplainError(err))
+		return lines
+	}
+	if strings.EqualFold(strings.TrimSpace(result.Source), "model") {
+		if text := flattenApprovalExplainText(result.Explanation); text != "" {
+			model := strings.TrimSpace(result.Model)
+			if model == "" {
+				model = "未知模型"
+			}
+			lines = append(lines, "[解释] 模型补充（"+model+"）："+text)
+			source := "[解释] 来源：模型 " + model
+			if result.Cached {
+				source += "（已缓存）"
+			}
+			lines = append(lines, source)
+			return lines
+		}
+	}
+	// 服务端也回退到 rules（或返回了空摘要）：规则解释之外如实交代来源；
+	// 本地规则解释不出来时，补上服务端给出的规则摘要，避免一无所获。
+	lines = append(lines, "[解释] 来源：规则模板")
+	if len(rules) == 0 {
+		if text := flattenApprovalExplainText(result.Explanation); text != "" {
+			lines = append(lines, "[解释] 服务端规则说明："+text)
+		}
+	}
+	return lines
+}
+
+// shortApprovalExplainError 把钩子错误折叠成一行可读原因：超时/取消优先，
+// HTTP 错误用状态行（例如 `409 Conflict`），其余截断原文，绝不把长栈刷进卡片。
+func shortApprovalExplainError(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "请求超时"
+	case errors.Is(err, context.Canceled):
+		return "请求已取消"
+	}
+	var httpErr *runtimeServerHTTPError
+	if errors.As(err, &httpErr) && strings.TrimSpace(httpErr.Status) != "" {
+		return strings.TrimSpace(httpErr.Status)
+	}
+	return truncateChatRuntimeText(strings.TrimSpace(err.Error()), 160)
+}
+
+// flattenApprovalExplainText 把模型返回的多行摘要压成单行（分号分隔），
+// 卡片不会因为解释换行而挤散审批选项。
+func flattenApprovalExplainText(text string) string {
+	parts := strings.FieldsFunc(text, func(r rune) bool { return r == '\n' || r == '\r' })
+	cleaned := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	if len(cleaned) == 0 {
+		return ""
+	}
+	return truncateChatRuntimeText(strings.Join(cleaned, "；"), 600)
 }
 
 func isShellApprovalTool(tool string) bool {

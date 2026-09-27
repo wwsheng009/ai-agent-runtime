@@ -241,6 +241,7 @@ todos 快照重建任务列表，重复快照不再重发。
 | `reject-once` | 拒绝一次 | —— | ✅ |
 | `reject_always` | —— | —— | 类型已定义（`PermissionKindRejectAlways`），**未出现在默认选项里、未接线** |
 | `outcome:"cancelled"` | 拒绝（等价中断） | —— | ✅ |
+| 审批解释（§4.13） | —— | —— | ⏸ **未提供**：`RequestPermissionParams`（`internal/acp/types.go:966`）只有 `sessionId/toolCall/options`，没有 `_meta`（或等价）字段，`session/request_permission` 无法携带 `aicli.explanation` / `aicli.remember_pattern`；本轮按「不新增协议字段」的边界跳过，CLI 侧的规则解释只在 CLI/Web 面渲染 |
 
 **三、与其它入口的边界**
 
@@ -250,7 +251,10 @@ todos 快照重建任务列表，重复快照不再重发。
 - `--disable-tools`：完全不执行工具，审批通道用不到。
 - 提问面：`ask_user_question` 经 `session/request_question` 扩展走同一客户端面板 ✅。
 - 解释与反馈：`session/request_permission` 只承载「选哪个选项」，**没有**审批解释、
-  拒绝原因文本、`remember_scope` 选择通道（这些目前只在 CLI/Web 面提供）。
+  拒绝原因文本、`remember_scope` 选择通道。`allow-always` 会按 `remember_pattern`
+  映射为 `session` 作用域记忆（见上表），但「解释」本身没有承载字段——协议里
+  `RequestPermissionParams` 没有 `_meta`（或等价）字段，本轮不新增协议类型；
+  CLI/Web 面的解释入口（CLI 为 `[6] 解释这次调用`）不适用于 ACP 客户端。
 
 ## 取消语义
 

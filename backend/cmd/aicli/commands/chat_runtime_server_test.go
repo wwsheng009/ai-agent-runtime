@@ -664,6 +664,79 @@ func TestApproveRuntimeServerToolPostsFeedback(t *testing.T) {
 	require.False(t, denyScope, "a denial must not carry a remember scope")
 }
 
+func TestExplainRuntimeServerApprovalPostsExplainPathAndDecodesPayload(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.EscapedPath()
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"explanation": "会删除 build 目录及其内容",
+			"source":      "model",
+			"model":       "gpt-test",
+			"mode":        "on_demand",
+			"cached":      true,
+		})
+	}))
+	defer server.Close()
+
+	session := &ChatSession{HTTPClient: server.Client()}
+	executor := &aicliRuntimeServerChatExecutor{serverURL: server.URL}
+	explanation, err := executor.explainRuntimeServerApproval(context.Background(), session, "session/1", "req id#2")
+	require.NoError(t, err)
+	require.Equal(t, http.MethodPost, gotMethod)
+	require.Equal(t, "/api/runtime/sessions/session%2F1/runtime/approvals/req%20id%232/explain", gotPath)
+	require.Empty(t, gotBody, "the explain endpoint is a read-only POST without a request body")
+	require.Equal(t, "会删除 build 目录及其内容", explanation.Explanation)
+	require.Equal(t, "model", explanation.Source)
+	require.Equal(t, "gpt-test", explanation.Model)
+	require.Equal(t, "on_demand", explanation.Mode)
+	require.True(t, explanation.Cached)
+}
+
+func TestExplainRuntimeServerApprovalDecodesRulesFallbackAndHTTPErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"explanation": "工具：execute_shell_command",
+			"source":      "rules",
+			"mode":        "on_demand",
+		})
+	}))
+	defer server.Close()
+	session := &ChatSession{HTTPClient: server.Client()}
+	executor := &aicliRuntimeServerChatExecutor{serverURL: server.URL}
+
+	explanation, err := executor.explainRuntimeServerApproval(context.Background(), session, "s1", "r1")
+	require.NoError(t, err, "a 200 + source=rules fallback is a success, not an error")
+	require.Equal(t, "rules", explanation.Source)
+	require.Empty(t, explanation.Model)
+	require.False(t, explanation.Cached)
+
+	// 缺少 session/request id 时本地拒绝，不发请求。
+	_, err = executor.explainRuntimeServerApproval(context.Background(), session, " ", "r1")
+	require.Error(t, err)
+	_, err = executor.explainRuntimeServerApproval(context.Background(), session, "s1", " ")
+	require.Error(t, err)
+
+	for _, status := range []int{http.StatusConflict, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{"error":"approval is no longer pending"}`))
+			}))
+			defer failing.Close()
+
+			failingExecutor := &aicliRuntimeServerChatExecutor{serverURL: failing.URL}
+			_, err := failingExecutor.explainRuntimeServerApproval(context.Background(), &ChatSession{HTTPClient: failing.Client()}, "s1", "r1")
+			require.Error(t, err, "409/5xx must surface as an error instead of a panic")
+			var httpErr *runtimeServerHTTPError
+			require.ErrorAs(t, err, &httpErr)
+			require.Equal(t, status, httpErr.StatusCode)
+		})
+	}
+}
+
 func TestAICLIRuntimeServerChatExecutorAnswersRuntimeServerQuestion(t *testing.T) {
 	manager := runtimechat.NewSessionManager(runtimechat.NewInMemoryStorage(), runtimechat.DefaultSessionManagerConfig())
 	defer manager.Stop()

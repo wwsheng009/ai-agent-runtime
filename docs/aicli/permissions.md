@@ -269,7 +269,7 @@ aicli exec --deny-tool download --enable-tools --prompt "..."
 
 ### 3.3 审批阶段
 
-- 需要询问时，宿主（CLI/Web/ACP/子代理）接管：CLI 面板给出 `[1] 仅本次允许 [2] 拒绝 [3] 查看完整参数 [5] 拒绝并说明原因`（只读场景另有 `[4] 会话/团队内复用 10 分钟`）；`[5]` 支持同行 `5 <理由>` 或下一行输入理由，空理由等同普通拒绝，超过 2000 字符不截断（提示缩短或按普通拒绝）；Web 为批准 / 拒绝 + 可选「记住」与说明；ACP 为 `allow-once / allow-always / reject-once`（协议无自由文本拒绝）。
+- 需要询问时，宿主（CLI/Web/ACP/子代理）接管：CLI 面板给出 `[1] 仅本次允许 [2] 拒绝 [3] 查看完整参数 [5] 拒绝并说明原因 [6] 解释这次调用`（只读场景另有 `[4] 会话/团队内复用 10 分钟`）；`[5]` 支持同行 `5 <理由>` 或下一行输入理由，空理由等同普通拒绝，超过 2000 字符不截断（提示缩短或按普通拒绝）；`[6]`（或 `explain` / `解释`）是只读解释，见 §5.4；Web 为批准 / 拒绝 + 可选「记住」与说明；ACP 为 `allow-once / allow-always / reject-once`（协议无自由文本拒绝，也没有解释入口）。
 - **无 AskHandler 的宿主**（headless、无 TTY 的 `exec`、未挂审批的子代理）一律 **fail closed**：reason `headless_deny:approval_required`。
 - 批准可以携带**记忆**（`once` / `session` / `project`，见 §5）；也可以携带**补丁参数**，但补丁会重新过 1–4 的硬约束。
 - 拒绝可附**自由文本反馈**（CLI 入口即 `[5] 拒绝并说明原因`；本地模式经 actor 的 `ApproveToolWithDecision`，runtime-server 模式经 `approve_tool` 请求的 `feedback` 字段）：会并入决策 reason（`…; user feedback: <文本>`）随工具错误回到模型上下文，模型据此换方案而不是重试原命令。
@@ -434,6 +434,8 @@ disable_bypass: true         # 我的机器上永不开 yolo
 - 模型不可用/超时会退回规则摘要（工具、原因、风险、参数摘要、可否记忆），界面会标注解释来源（模型名 / 规则）。
 - 解释的每次调用都计入 usage 账本（`origin=approval_explain`）。
 - 生成策略可切换：`off`（只用规则摘要）/ `on_demand`（默认，点「解释」才调用）/ `pre_generate`（读路径后台预热）。运行时用 `AICLI_APPROVAL_EXPLAIN_MODE` 或 Web 设置页「审批解释模式」切换；设置页是**进程级临时开关**（`GET/PUT /api/runtime/config/approval-explain`），不写配置文件，重启后回到 env / 默认值。
+- **CLI 入口**：审批提示的 `[6] 解释这次调用`（live 审批环与恢复态都支持；`/invoke` 的直接调用审批同样支持）。runtime-server 模式把规则解释与服务端摘要一起展示，并交代来源：`[解释] 来源：模型 <model>（已缓存）` 或 `[解释] 来源：规则模板`（服务端 `source=rules` / `off` / 模型不可用时不伪装成模型）；本地模式没有 runtime-server，只有规则解释 + `[解释] 模型解释需要 runtime-server 连接（本地模式仅规则说明）`。
+- **同一审批只调一次模型**：CLI 侧按提示投影守卫 `explainShown`，重复按 `[6]` 只重绘不重发；服务端仍有 10 分钟单飞缓存兜底（`cached` 会在来源行显示）。解释失败（409 审批已不 pending / 503 / 超时）保留规则解释并追加 `[解释] 模型解释不可用：<原因>`，**绝不阻塞或代替你的批准/拒绝**。
 
 ---
 

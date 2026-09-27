@@ -26,6 +26,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -3412,7 +3413,7 @@ func TestApprovalPriorityPromptLines_ShowActionContextAndOptions(t *testing.T) {
 		"[审批] 上下文：team=team-1 permission_mode=default",
 		"[审批] 命令：git commit -m test",
 		"[审批] 工作目录：E:/projects/ai/ai-agent-runtime",
-		"[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [5] 拒绝并说明原因",
+		"[审批] 操作：[1] 仅本次允许  [2] 拒绝  [3] 查看完整参数  [5] 拒绝并说明原因  [6] 解释这次调用",
 	} {
 		require.Contains(t, rendered, want)
 	}
@@ -3453,6 +3454,10 @@ func TestParseApprovalPromptDecisionInputCarriesInlineRejectionReason(t *testing
 		{name: "five_five_stays_invalid", input: "55", wantDecision: approvalPromptInvalid},
 		{name: "reuse_five", input: "5", reuse: true, wantDecision: approvalPromptDenyWithReason},
 		{name: "plain_deny_has_no_feedback", input: "2", wantDecision: approvalPromptDeny},
+		{name: "explain_digit", input: "6", wantDecision: approvalPromptExplain},
+		{name: "explain_word", input: " EXPLAIN ", wantDecision: approvalPromptExplain},
+		{name: "explain_chinese", input: "解释", wantDecision: approvalPromptExplain},
+		{name: "explain_digit_with_reuse", input: "6", reuse: true, wantDecision: approvalPromptExplain},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -3586,6 +3591,110 @@ func TestChatRuntimeEvents_ApprovalDetailsExpandBeforeDecision(t *testing.T) {
 	require.Contains(t, output, "[审批] 完整参数：")
 	require.Contains(t, output, `"mutated_paths": []`)
 	require.GreaterOrEqual(t, strings.Count(output, "[审批] 请选择"), 2)
+}
+
+func TestApprovalPromptAdvertisesExplainOptionWithoutRenumbering(t *testing.T) {
+	require.Contains(t, approvalDecisionPrompt(), "[5] 拒绝并说明原因（兼容 y/n）")
+	require.Contains(t, approvalDecisionPrompt(), "[6] 解释这次调用")
+	require.NotContains(t, approvalDecisionPrompt(), "[6] 解释这次调用  [5]")
+	require.Contains(t, approvalDecisionPromptWithReuse("当前会话内"), "[6] 解释这次调用")
+	require.Contains(t, approvalPromptOptionsLine(""), "[6] 解释这次调用")
+	require.Contains(t, approvalPromptOptionsLine("当前团队内"), "[6] 解释这次调用")
+	require.Equal(t, "1、2、3、4、5、6，或 y/n", approvalValidOptionsText(true))
+	require.Equal(t, "1、2、3、5、6，或 y/n", approvalValidOptionsText(false))
+}
+
+func TestChatRuntimeEvents_ApprovalExplainCallsHookOnceAndKeepsDecisionFlow(t *testing.T) {
+	session := &ChatSession{
+		InputReader:   bufio.NewReader(strings.NewReader("6\n6\n2\n")),
+		NoInteractive: true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	calls := 0
+	bridge.explainApproval = func(_ context.Context, requestID string) (runtimeServerApprovalExplanation, error) {
+		calls++
+		require.Equal(t, "req-explain", requestID)
+		return runtimeServerApprovalExplanation{
+			Explanation: "删除 build 目录及其内容\n再生成新的构建产物",
+			Source:      "model",
+			Model:       "gpt-test",
+			Cached:      true,
+		}, nil
+	}
+	approval := &runtimechat.ApprovalRequest{
+		ID:       "req-explain",
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"rm -rf build/"}`),
+	}
+
+	var answer chatApprovalAnswer
+	var askErr error
+	output := captureStdout(t, func() {
+		answer, askErr = bridge.askApproval(approval, nil)
+	})
+	require.NoError(t, askErr)
+	require.False(t, answer.Allowed)
+	require.Equal(t, 1, calls, "repeated [6] must not re-call the explain hook")
+	require.Contains(t, output, "[解释] 动作：删除文件或目录（递归）")
+	require.Contains(t, output, "[解释] 模型补充（gpt-test）：删除 build 目录及其内容；再生成新的构建产物")
+	require.Contains(t, output, "[解释] 来源：模型 gpt-test（已缓存）")
+}
+
+func TestChatRuntimeEvents_ApprovalExplainLocalModeUsesRulesOnly(t *testing.T) {
+	session := &ChatSession{
+		InputReader:   bufio.NewReader(strings.NewReader("6\n2\n")),
+		NoInteractive: true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	require.Nil(t, bridge.explainApproval, "a local bridge must not install an explain hook")
+	approval := &runtimechat.ApprovalRequest{
+		ID:       "req-local",
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"rm -rf build/"}`),
+	}
+
+	var answer chatApprovalAnswer
+	var askErr error
+	output := captureStdout(t, func() {
+		answer, askErr = bridge.askApproval(approval, nil)
+	})
+	require.NoError(t, askErr)
+	require.False(t, answer.Allowed)
+	// 本轮接线后规则解释器必须真正出现在 [6] 路径上（此前该路径为零调用）。
+	require.Contains(t, output, "[解释] 动作：删除文件或目录（递归）")
+	require.Contains(t, output, "[解释] 来源：规则模板")
+	require.Contains(t, output, "[解释] 模型解释需要 runtime-server 连接（本地模式仅规则说明）")
+}
+
+func TestChatRuntimeEvents_ApprovalExplainHookFailureKeepsDecisionOpen(t *testing.T) {
+	session := &ChatSession{
+		InputReader:   bufio.NewReader(strings.NewReader("6\n1\n")),
+		NoInteractive: true,
+	}
+	bridge := newChatRuntimeEventBridge(session)
+	bridge.explainApproval = func(context.Context, string) (runtimeServerApprovalExplanation, error) {
+		return runtimeServerApprovalExplanation{}, &runtimeServerHTTPError{
+			Method:     http.MethodPost,
+			Path:       "/api/runtime/sessions/s1/runtime/approvals/r1/explain",
+			Status:     "409 Conflict",
+			StatusCode: http.StatusConflict,
+		}
+	}
+	approval := &runtimechat.ApprovalRequest{
+		ID:       "req-fail",
+		ToolName: "execute_shell_command",
+		ArgsJSON: []byte(`{"command":"git push origin main"}`),
+	}
+
+	var answer chatApprovalAnswer
+	var askErr error
+	output := captureStdout(t, func() {
+		answer, askErr = bridge.askApproval(approval, nil)
+	})
+	require.NoError(t, askErr)
+	require.True(t, answer.Allowed, "an explain failure must not consume the decision")
+	require.Contains(t, output, "[解释] 来源：规则模板")
+	require.Contains(t, output, "[解释] 模型解释不可用：409 Conflict")
 }
 
 func TestChatRuntimeEvents_ApprovalReuseRequiresExplicitOption(t *testing.T) {

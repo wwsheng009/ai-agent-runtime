@@ -568,15 +568,20 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeCommand(ctx context.Conte
 		bridge.startProcessor()
 		previousApprove := bridge.approveTool
 		previousAnswer := bridge.answerQuestion
+		previousExplain := bridge.explainApproval
 		bridge.approveTool = func(ctx context.Context, eventSessionID, requestID string, allow bool, feedback, rememberScope string) error {
 			return e.approveRuntimeServerTool(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), requestID, allow, feedback, rememberScope)
 		}
 		bridge.answerQuestion = func(ctx context.Context, eventSessionID, questionID, answer string) error {
 			return e.answerRuntimeServerQuestion(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), questionID, answer)
 		}
+		bridge.explainApproval = func(ctx context.Context, requestID string) (runtimeServerApprovalExplanation, error) {
+			return e.explainRuntimeServerApproval(ctx, session, sessionID, requestID)
+		}
 		defer func() {
 			bridge.approveTool = previousApprove
 			bridge.answerQuestion = previousAnswer
+			bridge.explainApproval = previousExplain
 		}()
 		bridge.PrepareRunPrompt(prompt)
 		bridge.BeginRun()
@@ -628,15 +633,20 @@ func (e *aicliRuntimeServerChatExecutor) executeRuntimeContinuation(ctx context.
 		bridge.startProcessor()
 		previousApprove := bridge.approveTool
 		previousAnswer := bridge.answerQuestion
+		previousExplain := bridge.explainApproval
 		bridge.approveTool = func(ctx context.Context, eventSessionID, requestID string, allow bool, feedback, rememberScope string) error {
 			return e.approveRuntimeServerTool(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), requestID, allow, feedback, rememberScope)
 		}
 		bridge.answerQuestion = func(ctx context.Context, eventSessionID, questionID, answer string) error {
 			return e.answerRuntimeServerQuestion(ctx, session, firstNonEmptyChatValue(eventSessionID, sessionID), questionID, answer)
 		}
+		bridge.explainApproval = func(ctx context.Context, requestID string) (runtimeServerApprovalExplanation, error) {
+			return e.explainRuntimeServerApproval(ctx, session, sessionID, requestID)
+		}
 		defer func() {
 			bridge.approveTool = previousApprove
 			bridge.answerQuestion = previousAnswer
+			bridge.explainApproval = previousExplain
 		}()
 		bridge.PrepareRunPrompt("")
 		bridge.BeginRun()
@@ -841,6 +851,37 @@ func (e *aicliRuntimeServerChatExecutor) approveRuntimeServerTool(ctx context.Co
 	return err
 }
 
+// runtimeServerApprovalExplanation 对齐 runtimeapi 的 explain 响应体
+// (internal/api/runtimeapi/session_approval_explain.go:43-51)：
+// explanation/source(model|rules)/model/mode/cached。
+type runtimeServerApprovalExplanation struct {
+	Explanation string `json:"explanation"`
+	Source      string `json:"source"`
+	Model       string `json:"model,omitempty"`
+	Mode        string `json:"mode,omitempty"`
+	Cached      bool   `json:"cached,omitempty"`
+}
+
+// explainRuntimeServerApproval 调用 §4.13 的按需解释端点（纯 UI、只读）：
+// POST /api/runtime/sessions/{id}/runtime/approvals/{request_id}/explain。
+// 语义与 runtimeapi 一致：审批已不 pending → 409；模型不可用 → 200 + rules。
+func (e *aicliRuntimeServerChatExecutor) explainRuntimeServerApproval(ctx context.Context, session *ChatSession, sessionID, requestID string) (runtimeServerApprovalExplanation, error) {
+	var decoded runtimeServerApprovalExplanation
+	sessionID = strings.TrimSpace(sessionID)
+	requestID = strings.TrimSpace(requestID)
+	if sessionID == "" {
+		return decoded, fmt.Errorf("runtime-server session id is required")
+	}
+	if requestID == "" {
+		return decoded, fmt.Errorf("runtime-server approval request id is required")
+	}
+	_, err := e.doRuntimeServerJSON(ctx, session, http.MethodPost, runtimeServerApprovalExplainPath(sessionID, requestID), "", nil, &decoded)
+	if err != nil {
+		return runtimeServerApprovalExplanation{}, err
+	}
+	return decoded, nil
+}
+
 func (e *aicliRuntimeServerChatExecutor) answerRuntimeServerQuestion(ctx context.Context, session *ChatSession, sessionID, questionID, answer string) error {
 	payload := map[string]interface{}{
 		"type":        "answer_question",
@@ -853,6 +894,11 @@ func (e *aicliRuntimeServerChatExecutor) answerRuntimeServerQuestion(ctx context
 
 func runtimeServerCommandPath(sessionID string) string {
 	return "/api/runtime/sessions/" + url.PathEscape(strings.TrimSpace(sessionID)) + "/runtime/commands"
+}
+
+func runtimeServerApprovalExplainPath(sessionID, requestID string) string {
+	return "/api/runtime/sessions/" + url.PathEscape(strings.TrimSpace(sessionID)) +
+		"/runtime/approvals/" + url.PathEscape(strings.TrimSpace(requestID)) + "/explain"
 }
 
 type runtimeServerEventPollResult struct {
