@@ -2394,13 +2394,12 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 		if strings.TrimSpace(actualSessionID) == "" {
 			return nil, nil, fmt.Errorf("id is required")
 		}
-		result, err := b.AgentSessions.ReadEvents(ctx, request)
+		result, err := b.readAgentEventsWithView(ctx, request)
 		if err != nil {
 			return nil, nil, err
 		}
-		result = ApplyAgentEventsView(result, request.View)
 		result = FinalizeAgentEventsResult(result)
-		if caller := strings.TrimSpace(sessionID); caller != "" {
+		if caller := strings.TrimSpace(sessionID); caller != "" && result != nil {
 			repeatCount, unchanged := b.agentEventsReadsMemo().observe(agentEventsReadKey{
 				callerSessionID: caller,
 				targetSessionID: actualSessionID,

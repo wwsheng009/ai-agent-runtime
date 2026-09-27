@@ -794,20 +794,9 @@ func FinalizeAgentEventsResult(result *AgentEventsResult) *AgentEventsResult {
 	}
 	hasApproval := false
 	for _, event := range result.Events {
-		eventType := strings.ToLower(strings.TrimSpace(event.Type))
-		if strings.Contains(eventType, "approval") || strings.Contains(eventType, "waiting_approval") {
+		if agentEventHasApproval(event) {
 			hasApproval = true
 			break
-		}
-		if payload := event.Payload; payload != nil {
-			if status, ok := payload["status"].(string); ok && strings.EqualFold(strings.TrimSpace(status), "waiting_approval") {
-				hasApproval = true
-				break
-			}
-			if pending, ok := payload["pending_approval"].(bool); ok && pending {
-				hasApproval = true
-				break
-			}
 		}
 	}
 	switch {
@@ -1221,13 +1210,16 @@ const (
 // would be worse than the tokens the projection saves, so they always survive
 // it (P1-5 测试与验收: 不丢终态).
 var agentEventsToolProgressSticky = map[string]bool{
-	"session_end":        true,
-	"agent.completed":    true,
-	"agent.failed":       true,
-	"agent.cancelled":    true,
-	"agent.reclaimed":    true,
-	"approval_requested": true,
-	"approval_resolved":  true,
+	"session_end":         true,
+	"session_interrupted": true,
+	"agent.completed":     true,
+	"agent.failed":        true,
+	"agent.cancelled":     true,
+	"agent.reclaimed":     true,
+	"agent.turn.finished": true,
+	"subagent.completed":  true,
+	"approval_requested":  true,
+	"approval_resolved":   true,
 }
 
 // NormalizeAgentEventsView canonicalizes a requested view. Unknown values
@@ -1261,9 +1253,9 @@ func KeepsAgentEventForView(view, eventType string) bool {
 // the canonical view plus how many events it dropped. `view=all`, unknown views
 // and nil results are no-ops, so callers that do not opt in see no shape change.
 //
-// Pagination metadata (has_more/unread_count/next_action) is intentionally left
-// alone: it describes the raw window, and after_seq=latest_seq still advances
-// past the filtered events, so the parent's cursor contract does not change.
+// Pagination cursors/counts still describe the consumed raw window. Guidance
+// is refreshed against the projected Count, including an empty projection with
+// more raw pages. Reapplying the projection never counts filtered rows twice.
 func ApplyAgentEventsView(result *AgentEventsResult, view string) *AgentEventsResult {
 	if result == nil {
 		return nil
@@ -1273,12 +1265,9 @@ func ApplyAgentEventsView(result *AgentEventsResult, view string) *AgentEventsRe
 		return result
 	}
 	result.View = canonical
-	if len(result.Events) == 0 {
-		return result
-	}
 	kept := make([]AgentEventItem, 0, len(result.Events))
 	for _, event := range result.Events {
-		if KeepsAgentEventForView(canonical, event.Type) {
+		if keepsAgentEventForToolProgress(event) {
 			kept = append(kept, event)
 			continue
 		}
@@ -1286,7 +1275,7 @@ func ApplyAgentEventsView(result *AgentEventsResult, view string) *AgentEventsRe
 	}
 	result.Events = kept
 	result.Count = len(kept)
-	return result
+	return refreshAgentEventsViewGuidance(result)
 }
 
 // ApplyAgentEventsPagination annotates a read window with has_more/unread_count
@@ -1325,6 +1314,15 @@ func MarkAgentEventsRepeatedRead(result *AgentEventsResult, afterSeq int64, repe
 	}
 	result.Unchanged = true
 	result.RepeatCount = repeatCount
+	if result.View == AgentEventsViewToolProgress {
+		// Repeating a bounded projection must not hide an approval or tell the
+		// caller to wait when unread raw pages are already available.
+		if strings.TrimSpace(result.NextAction) == "" {
+			refreshAgentEventsViewGuidance(result)
+		}
+		result.NextAction += fmt.Sprintf("; unchanged_window: identical read #%d with after_seq=%d; do not re-read this window", repeatCount, afterSeq)
+		return result
+	}
 	result.NextAction = fmt.Sprintf("unchanged_window: identical read #%d with after_seq=%d returned the same window (no new events); the payload adds no information — do other work, use wait_agent for readiness or a longer wait, and advance after_seq only once new events exist", repeatCount, afterSeq)
 	return result
 }

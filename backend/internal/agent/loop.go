@@ -1097,22 +1097,6 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 		}
 		consecutiveExplorationSteps = nextExplorationStallCount(consecutiveExplorationSteps, action.ToolCalls)
-		if pollObs := pollingBackoff.ObserveToolBatch(action.ToolCalls); pollObs.Advisory != "" {
-			repeatedSemanticAdvisory = joinRuntimeAdvisories(repeatedSemanticAdvisory, pollObs.Advisory)
-			if pollObs.EmitNotice {
-				loop.emitRuntimeEvent(EventPollingBackoffObserved, sessionID, "", map[string]interface{}{
-					"trace_id":             traceID,
-					"step":                 step,
-					"tools":                pollObs.Tools,
-					"repeat_count":         pollObs.RepeatCount,
-					"notice_threshold":     pollingBackoff.Threshold(),
-					"fingerprint":          pollObs.Fingerprint,
-					"cumulative_wait_ms":   pollObs.CumulativeWait.Milliseconds(),
-					"wait_budget_ms":       PollingWaitBudgetNoticeThreshold.Milliseconds(),
-					"wait_budget_exceeded": pollObs.WaitBudgetExceeded,
-				})
-			}
-		}
 		if consecutiveExplorationSteps == explorationStallNoticeThreshold {
 			loop.emitRuntimeEvent("tool_loop.exploration_stall_observed", sessionID, "", map[string]interface{}{
 				"trace_id":                   traceID,
@@ -1209,6 +1193,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		historySnapshot := builder.Messages()
 		toolResults, err := loop.act(currentCtx, traceID, sessionID, step, options.Depth, historySnapshot, normalizedCalls, options.ToolWhitelist)
 		if err != nil {
+			pollingBackoff.reset()
 			loop.agent.AddError(fmt.Sprintf("act failed: %v", err))
 			hadToolFailure = true
 			failureMessages = append(failureMessages, err.Error())
@@ -1232,6 +1217,30 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 
 			return result, err
+		}
+		// Observe completed results, not requested windows: the host may clamp a
+		// timeout or return ready immediately. Use this same observation for the
+		// runtime event and the advisory passed to toolResultsToPayloads below.
+		if currentCtx.Err() != nil {
+			pollingBackoff.reset()
+		} else if pollObs := pollingBackoff.ObserveToolResults(toolResults); pollObs.Advisory != "" {
+			repeatedSemanticAdvisory = joinRuntimeAdvisories(repeatedSemanticAdvisory, pollObs.Advisory)
+			if pollObs.EmitNotice {
+				loop.emitRuntimeEvent(EventPollingBackoffObserved, sessionID, "", map[string]interface{}{
+					"trace_id":             traceID,
+					"step":                 step,
+					"tools":                pollObs.Tools,
+					"repeat_count":         pollObs.RepeatCount,
+					"notice_threshold":     pollingBackoff.Threshold(),
+					"fingerprint":          pollObs.Fingerprint,
+					"cumulative_wait_ms":   pollObs.CumulativeWait.Milliseconds(),
+					"wait_budget_ms":       PollingWaitBudgetNoticeThreshold.Milliseconds(),
+					"wait_budget_exceeded": pollObs.WaitBudgetExceeded,
+					"wait_measurement":     "tool_result.waited_ms",
+					"scope":                "current_run_polling_streak",
+					"advisory":             pollObs.Advisory,
+				})
+			}
 		}
 		recordToolResultMetrics(toolResults)
 		for _, toolResult := range toolResults {
