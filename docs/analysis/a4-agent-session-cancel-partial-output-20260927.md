@@ -91,13 +91,16 @@
 
 ## 7. 残余与判断（2026-09-27 收尾）
 
-- **`session_interrupted` 型终态未带产物（有意留待设计）**：中断路径（用户中断
-  `handleInterrupt`，`actor.go:1317`；停摆超时 `actor.go:1495`）以 `session_interrupted`
-  作为该 turn 的终态，载荷不含 `partial_*`；被中断的 turn 不会再有 `session_end`
-  （见 `actor_test.go` 的终态序列断言：只允许后继 turn 发 `assistant_message`+`session_end`）。
-  补齐需要在该路径拿到会话历史，而 `SessionActor` 不缓存会话（只有 `sessionStore`）；
-  在 ESC/停摆路径引入一次受控 Load 属设计决策（必须 fail-open、不阻塞中断、不与 A3
-  的取消语义冲突），故本轮不盲改。
+- **`session_interrupted` 型终态已接入**（`0b3c76b8`）：中断路径（用户中断
+  `handleInterrupt`，`actor.go:1317`；停摆超时 `abortStalledRun`，`actor.go:1495`）
+  以 `session_interrupted` 作为该 turn 的终态（被中断的 turn 不会再发 `session_end`，
+  见 `actor_test.go` 的终态序列断言），此前载荷只有 `reason/turn` 信息。现由
+  `enrichSessionInterruptedPayload`（`actor_partial_product.go`）补 `partial_*`：
+  `SessionActor` 不缓存会话，故**只读加载最近一次持久化快照**并复用 `partialRunProduct`
+  的取源规则；该动作 **fail-open + 200ms 硬上限**（存储缺失/加载失败/超时一律静默
+  跳过，绝不阻塞 ESC/停摆），仅在有产物时新增键，既有字段与事件形状不变。测试：
+  `TestEnrichSessionInterruptedPayloadAttachesPartialProduct`（三态 + 时间上限）、
+  `TestSessionActorInterruptEventCarriesPartialProduct`（端到端）；`-race` 干净。
 - **"难度路由 disabled + permission 告警"不是缺陷**：`route_source=disabled` 是"未配置
   difficulty→模型映射"的如实上报（子代理走默认模型）；`permission_mode_inherited_from_parent`
   是 `internal/toolbroker/spawn_agent_permission.go:15-18` 的有意设计（让父代理能解释子代理
