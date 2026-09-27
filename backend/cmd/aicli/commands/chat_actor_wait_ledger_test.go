@@ -208,3 +208,40 @@ func TestWaitAgentWaitBudgetEnforcesSuspendAfterNoProgress(t *testing.T) {
 	require.Less(t, time.Since(startedAt), 500*time.Millisecond,
 		"an exhausted wait budget must return immediately instead of blocking")
 }
+
+// TestWaitAgentCreditsProgressCompletedDuringWait 钉住 §16.2 的"进展"口径：
+// 预读快照里仍是 running 的 obligation 在本等待段内完成时，段末复读必须把它
+// 记为 terminal_delta 的进展并清零预算，而不是记一次"无进展"。
+func TestWaitAgentCreditsProgressCompletedDuringWait(t *testing.T) {
+	host, batchID := newLocalWaitLedgerHost(t, subagentbatch.BatchRunning, "turn-parked")
+	host.RuntimeConfig = &runtimecfg.RuntimeConfig{Agents: runtimecfg.AgentsConfig{
+		DefaultWaitTimeoutMs:              80,
+		MinWaitTimeoutMs:                  40,
+		MaxWaitTimeoutMs:                  120,
+		MaxConsecutiveWaitWithoutProgress: 1,
+	}}
+	registry := newLocalActorRegistry(host)
+
+	// 观测窗口内把 batch 推到终态：只有段末复读才能看到这段进展。
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		current, err := host.SubagentBatches.GetBatch(context.Background(), batchID)
+		if err != nil || current == nil {
+			return
+		}
+		_, _ = host.SubagentBatches.UpdateBatch(context.Background(), batchID, current.Version, func(b *subagentbatch.SubagentBatch) {
+			b.Status = subagentbatch.BatchCompleted
+		})
+	}()
+
+	result, err := registry.Wait(context.Background(), toolbroker.WaitAgentArgs{MailboxOnly: true, TimeoutMs: 80})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.WaitBudgetExhausted,
+		"progress completed during the wait must not be billed as a no-progress window")
+	require.Contains(t, result.TerminalDelta, batchID,
+		"terminal_delta must report the obligation that finished during this wait segment")
+	require.Equal(t, "finalize", result.NextAction,
+		"the refreshed ledger has no pending row, so the parent may finalize")
+	require.True(t, result.Obligations[0].Terminal)
+}

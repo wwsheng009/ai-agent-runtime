@@ -2398,7 +2398,9 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 		if actor := r.localAgentActor(ctx, sessionID); actor != nil {
 			state, ok := actor.StateSummary()
 			if !ok || !state.Busy() {
-				if err := actor.SubmitPromptAsync(ctx, message, r.localAgentRunMeta(ctx, sessionID)); err != nil {
+				// 触发型投递同样是对目标会话的委派：调用方回合干净收尾（含挂起）
+				// 不应取消目标会话刚启动的 run；显式中断/失败/deadline 仍传播。
+				if err := actor.SubmitChildPromptAsync(ctx, message, r.localAgentRunMeta(ctx, sessionID)); err != nil {
 					if v2 {
 						r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
 							FromSessionID:   fromSessionID,
@@ -2705,7 +2707,8 @@ func (r *localActorRegistry) SendInput(ctx context.Context, args toolbroker.Send
 			}
 		}
 	}
-	if err := actor.SubmitPromptAsync(ctx, message, r.localAgentRunMeta(ctx, sessionID)); err != nil {
+	// 触发型 send_input/followup：目标会话的新 run 与调用方回合解耦，理由同上。
+	if err := actor.SubmitChildPromptAsync(ctx, message, r.localAgentRunMeta(ctx, sessionID)); err != nil {
 		if v2 {
 			r.recordLocalAgentMailboxDeliveryAudit(ctx, runtimechat.MailboxDeliveryAudit{
 				TargetSessionID: sessionID,
@@ -2814,15 +2817,29 @@ func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgent
 	}
 	result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
 	if len(obligations) > 0 {
+		// 等待段结束后复读账本：terminal_delta 的语义是"本段内新终态"，而预读
+		// 快照的行状态停留在等待前，不复读就永远是空的——这会把等待期间已经
+		// 完成的子任务记成"无进展"，连续几次后误触挂起判据（§16.2/§16.3）。
+		refreshed, _, refreshedPending, refreshedKey := r.localWaitLedger(ctx)
 		switch {
-		case !pending:
+		case refreshedKey == "":
+			// 复读失败：fail-open，本段不计入预算（不把读不到账本谎报成"无进展"）。
+		case len(refreshed) == 0:
+			// 挂起记录已消失 ⇒ 账本在本段内清空，同样属于进展。
 			r.localWaitBudget.Reset(budgetKey)
-		case result.Interrupted:
-			// steer/ESC 提前结束的等待段不是"花掉的窗口"，不计入预算。
 		default:
-			consecutive, exhausted := r.localWaitBudget.Observe(budgetKey, len(result.TerminalDelta) > 0, waitBudgetLimit)
-			if exhausted {
-				result = toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit)
+			obligations = refreshed
+			result = toolbroker.ApplyAgentWaitLedger(result, obligations, baseline)
+			switch {
+			case !refreshedPending:
+				r.localWaitBudget.Reset(budgetKey)
+			case result.Interrupted:
+				// steer/ESC 提前结束的等待段不是"花掉的窗口"，不计入预算。
+			default:
+				consecutive, exhausted := r.localWaitBudget.Observe(budgetKey, len(result.TerminalDelta) > 0, waitBudgetLimit)
+				if exhausted {
+					result = toolbroker.SuspendAgentWaitResultForBudget(result, consecutive, waitBudgetLimit)
+				}
 			}
 		}
 	}

@@ -185,3 +185,48 @@ func TestSessionAgentControllerWaitBudgetStopsActiveWindows(t *testing.T) {
 	require.Less(t, time.Since(startedAt), time.Second,
 		"an exhausted wait budget must return immediately instead of blocking")
 }
+
+// TestSessionAgentControllerWaitCreditsProgressCompletedDuringWait 与 CLI 宿主同口径：
+// 预读快照里仍是 running 的 obligation 在本等待段内完成时，段末复读必须把它记为
+// terminal_delta 的进展并清零预算，而不是记一次"无进展"。
+func TestSessionAgentControllerWaitCreditsProgressCompletedDuringWait(t *testing.T) {
+	controller, batchID := newAPIWaitLedgerFixture(t, subagentbatch.BatchRunning, "turn-parked")
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.Agents.DefaultWaitTimeoutMs = 80
+	cfg.Agents.MinWaitTimeoutMs = 40
+	cfg.Agents.MaxWaitTimeoutMs = 120
+	cfg.Agents.MaxConsecutiveWaitWithoutProgress = 1
+	controller.handler.SetRuntimeConfig(cfg, "")
+	ctx := toolctx.WithSessionID(context.Background(), apiWaitLedgerTestSession)
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		store := controller.handler.peekSubagentBatchStore()
+		if store == nil {
+			return
+		}
+		current, err := store.GetBatch(context.Background(), batchID)
+		if err != nil || current == nil {
+			return
+		}
+		_, _ = store.UpdateBatch(context.Background(), batchID, current.Version, func(b *subagentbatch.SubagentBatch) {
+			b.Status = subagentbatch.BatchCompleted
+		})
+	}()
+
+	result, err := controller.Wait(ctx, toolbroker.WaitAgentArgs{
+		// The API mailbox wait observes an explicit mailbox; use the caller's own
+		// (the ledger is keyed by the caller session, not by the waited target).
+		SessionID:   apiWaitLedgerTestSession,
+		MailboxOnly: true,
+		TimeoutMs:   80,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.WaitBudgetExhausted,
+		"progress completed during the wait must not be billed as a no-progress window")
+	require.Contains(t, result.TerminalDelta, batchID,
+		"terminal_delta must report the obligation that finished during this wait segment")
+	require.Equal(t, "finalize", result.NextAction)
+	require.True(t, result.Obligations[0].Terminal)
+}
