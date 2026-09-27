@@ -185,15 +185,6 @@ export function WorkspacePage() {
     );
   }
 
-  const { earlierLoader, recoverSessionHistory } = useSessionHistorySync({
-    applySessionHistoryToThread,
-    isResponding,
-    // 回滚（检查点还原 / 会话回溯）会重写服务端历史，事件到达后必须重新同步消息列表。
-    lastRuntimeEventType: selectedThread?.lastRuntimeEventType,
-    runtimeEventCount: selectedThread?.runtimeEventCount,
-    selectedThread,
-    setThreads,
-  });
   // P1-7：计划评审与 artifact 面板现有决策入口同源（同一 hook / 同一重载规则），
   // 仅把呈现位收敛到 composer 上沿，避免出现第二套 pending 判定。
   const {
@@ -271,6 +262,20 @@ export function WorkspacePage() {
       trajectoryReady: trajectoryReplay.ready,
       trajectoryStore,
     });
+  // 权威历史同步排在 live 通道之后：降级态收敛（断流自愈）必须等**服务端回合**
+  // 结束才允许对齐——chat POST 被掐断后本地立即空闲，而服务端回合仍在跑
+  // （resume_on_disconnect），此时拉到的历史不含最终消息，过早对齐会留下截断又
+  // 清掉降级标记。`currentSessionResponding` 是本会话「本地 ∪ 续传」在途回合，
+  // 与 `isResponding` 取并集后，两种回合都收尾才真正空闲。
+  const { earlierLoader, recoverSessionHistory } = useSessionHistorySync({
+    applySessionHistoryToThread,
+    isResponding: isResponding || currentSessionResponding,
+    // 回滚（检查点还原 / 会话回溯）会重写服务端历史，事件到达后必须重新同步消息列表。
+    lastRuntimeEventType: selectedThread?.lastRuntimeEventType,
+    runtimeEventCount: selectedThread?.runtimeEventCount,
+    selectedThread,
+    setThreads,
+  });
   // P1-7 + ESC 阶段 A：停止 = 收敛未决交互 +（刷新后）服务端 interrupt；Esc 与按钮等价。
   const handleStopResponding = useStopResponding({
     activeTurnId,
