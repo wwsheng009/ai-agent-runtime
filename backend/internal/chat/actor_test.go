@@ -1759,6 +1759,82 @@ func TestSessionActorParentContextCancelRecordsCancelCause(t *testing.T) {
 	require.Equal(t, "parent_context", sessionEnd["cancel_cause"])
 }
 
+// 用户中断路径会先同步打标（MarkUserInterrupt）再硬停 actor。即使命令式
+// Interrupt 没来得及处理，session_end 也必须记为 user_interrupt，而不是把
+// 硬停来源 actor_stop 暴露成 execution_context。
+func TestSessionActorMarkUserInterruptBeforeStopKeepsUserInterruptSource(t *testing.T) {
+	ctx := context.Background()
+	storage := NewInMemoryStorage()
+	manager := NewSessionManager(storage, nil)
+	session, err := manager.CreateSession(ctx, "actor-mark-interrupt-user")
+	require.NoError(t, err)
+
+	provider := &cancelBlockingLLMProvider{
+		name:    "mark-interrupt-blocking-provider",
+		entered: make(chan struct{}, 1),
+	}
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{DefaultModel: "test-model", MaxRetries: 1})
+	require.NoError(t, runtime.RegisterProvider(provider.Name(), provider))
+
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "actor-mark-interrupt-test",
+		Provider: provider.Name(),
+		Model:    "test-model",
+		MaxSteps: 3,
+	}, nil, runtime)
+	runtimeStore := NewInMemoryRuntimeStore(64)
+	actor, err := NewSessionActor(session.ID, SessionActorConfig{
+		Agent:        apiAgent,
+		LLMRuntime:   runtime,
+		SessionStore: storage,
+		StateStore:   runtimeStore,
+		EventStore:   runtimeStore,
+	})
+	require.NoError(t, err)
+	t.Cleanup(actor.Stop)
+
+	type submitResponse struct {
+		result *agent.Result
+		err    error
+	}
+	responseCh := make(chan submitResponse, 1)
+	go func() {
+		result, submitErr := actor.SubmitPrompt(ctx, "wait for interrupt then stop", nil)
+		responseCh <- submitResponse{result: result, err: submitErr}
+	}()
+
+	select {
+	case <-provider.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider did not start")
+	}
+	require.NotNil(t, actor.MarkUserInterrupt())
+
+	stopCtx, cancelStop := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelStop()
+	require.NoError(t, actor.StopContext(stopCtx))
+
+	var response submitResponse
+	select {
+	case response = <-responseCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SubmitPrompt did not return after stop")
+	}
+	require.ErrorIs(t, response.err, context.Canceled)
+
+	events, err := runtimeStore.ListEvents(ctx, session.ID, 0, 0)
+	require.NoError(t, err)
+	var sessionEnd map[string]interface{}
+	for _, event := range events {
+		if event.Type == EventSessionEnd {
+			sessionEnd = event.Payload
+		}
+	}
+	require.NotNil(t, sessionEnd)
+	require.Equal(t, "user_interrupt", sessionEnd["cancel_source"])
+	require.Equal(t, "user_interrupt", sessionEnd["cancel_cause"])
+}
+
 func TestSessionActorInterruptDuringPrepareRunDoesNotStartProvider(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()

@@ -237,6 +237,10 @@ func (h *localChatRuntimeHost) interruptActorRun(ctx context.Context, sessionID 
 	if !ok || actor == nil {
 		return true
 	}
+	// 先同步打标用户中断：命令环繁忙时下面的 Interrupt 命令可能 1.5s 内处理
+	// 不到，若只依赖它，随后的硬停会把本回合记成 execution_context（用户看到
+	// "context canceled"）。进程内先打标可保证 cancel_source=user_interrupt。
+	actor.MarkUserInterrupt()
 	interruptCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
 	_ = actor.Interrupt(interruptCtx)

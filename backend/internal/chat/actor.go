@@ -4528,6 +4528,20 @@ func (a *SessionActor) interruptActiveSessionRun() *sessionRunControl {
 	return run
 }
 
+// MarkUserInterrupt 以「用户中断」语义同步取消当前活动 run：标记 run.interrupted
+// 并以 user_interrupt cause 取消 run ctx，返回被中断的 run（无活动 run 时为 nil）。
+//
+// 宿主在硬停 actor（StopAsync/StopContext）之前调用它：命令环繁忙时
+// Interrupt 命令可能来不及处理，若只依赖命令路径，随后的硬停会把本回合记成
+// execution_context（用户看到 "context canceled"）。先打标可保证
+// session_end 的 cancel_source/cancel_cause 仍是 user_interrupt。
+func (a *SessionActor) MarkUserInterrupt() *sessionRunControl {
+	if a == nil {
+		return nil
+	}
+	return a.interruptActiveSessionRun()
+}
+
 func (a *SessionActor) cancelActive() {
 	if a == nil {
 		return
