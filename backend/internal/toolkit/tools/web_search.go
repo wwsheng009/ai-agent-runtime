@@ -43,12 +43,12 @@ const (
 	// 场景 cn.bing.com 可达），Bing 不可达时自动回退 DDG。
 	webSearchProvidersEnv     = "WEB_SEARCH_PROVIDERS"
 	defaultWebSearchProviders = "bing,duckduckgo"
-	bingSearchURLCN            = "https://cn.bing.com/search?q=%s&count=%d"
-	bingSearchURLWWW           = "https://www.bing.com/search?q=%s&count=%d"
-	webSearchConnectTimeout    = 5 * time.Second
-	webSearchTLSHandshakeTo    = 5 * time.Second
-	webSearchResponseHeaderTo  = 8 * time.Second
-	webSearchTotalTimeout      = 30 * time.Second
+	bingSearchURLCN           = "https://cn.bing.com/search?q=%s&count=%d"
+	bingSearchURLWWW          = "https://www.bing.com/search?q=%s&count=%d"
+	webSearchConnectTimeout   = 5 * time.Second
+	webSearchTLSHandshakeTo   = 5 * time.Second
+	webSearchResponseHeaderTo = 8 * time.Second
+	webSearchTotalTimeout     = 30 * time.Second
 )
 
 // NewWebSearchTool 创建网络搜索工具
@@ -65,6 +65,16 @@ func NewWebSearchTool() *WebSearchTool {
 				"description": "返回结果数量（默认 5，最大 10）",
 				"default":     5,
 			},
+			"allowed_domains": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "只保留这些域名（含子域）的结果，例如 [\"example.com\"]；与 blocked_domains 互斥。可传数组或逗号分隔字符串。",
+			},
+			"blocked_domains": map[string]interface{}{
+				"type":        "array",
+				"items":       map[string]interface{}{"type": "string"},
+				"description": "排除这些域名（含子域）的结果，例如 [\"pinterest.com\"]；与 allowed_domains 互斥。可传数组或逗号分隔字符串。",
+			},
 		},
 		"required": []string{"query"},
 	}
@@ -72,7 +82,7 @@ func NewWebSearchTool() *WebSearchTool {
 	tool := &WebSearchTool{
 		BaseTool: toolkit.NewBaseTool(
 			"web_search",
-			"使用网络搜索引擎（默认 DuckDuckGo，可配置 Bing）搜索网络信息，返回相关网页标题、链接和摘要。若有多个不同搜索意图，请拆分为多个更小的 web_search 调用，每次只聚焦一个搜索目标。",
+			"使用网络搜索引擎（默认 DuckDuckGo，可配置 Bing）搜索网络信息，返回相关网页标题、链接和摘要。若有多个不同搜索意图，请拆分为多个更小的 web_search 调用，每次只聚焦一个搜索目标。支持客户端域名过滤 allowed_domains/blocked_domains（互斥）。",
 			"1.1.0",
 			parameters,
 			true,
@@ -193,13 +203,29 @@ func (w *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 		}
 	}
 
+	// 客户端域名过滤：provider 侧没有同时适配 Bing/DDG 的域名过滤能力，
+	// 因此在解析出的结果 URL 上执行（互斥校验失败即拒绝，避免半配置歧义）。
+	filter, filterErr := parseWebSearchDomainFilter(params)
+	if filterErr != nil {
+		return toolResultFailureWithCode(
+			fmt.Errorf("web_search 域名过滤参数无效: %w", filterErr),
+			string(runtimeerrors.ErrToolInvalidArgs),
+			"allowed_domains 与 blocked_domains 互斥，且各自至少需要一个有效域名（可传数组或逗号分隔字符串）。请只保留一个过滤器后重试。",
+			map[string]interface{}{
+				"query":          query,
+				"failure_class":  "invalid_domain_filter",
+				"attempted_args": map[string]interface{}{"query": query},
+			},
+		), nil
+	}
+
 	// 按配置顺序尝试各搜索引擎：首个成功（含零结果）即返回；
 	// 前一个 provider 网络/传输失败时快速失败并回退到下一个。
 	var failures []providerFailure
 	for _, p := range w.providers {
 		source, results, err := p.search(ctx, query, count)
 		if err == nil {
-			return w.successSearchResult(query, results, source), nil
+			return w.successSearchResult(query, results, source, filter), nil
 		}
 		failures = append(failures, providerFailure{name: p.name, err: err})
 	}
@@ -378,11 +404,16 @@ func webSearchFailureNextAction(code, query string) string {
 }
 
 // successSearchResult builds a successful search ToolResult, stamping empty
-// disposition only when the provider returned a true zero-hit payload.
-func (w *WebSearchTool) successSearchResult(query string, results []DuckDuckGoResult, source string) *toolkit.ToolResult {
+// disposition only when the provider returned a true zero-hit payload. The
+// domain filter is applied here so the model sees exactly the returned set;
+// filtered-to-empty results stay a success (the search itself worked) but carry
+// a filter-specific next_action instead of the generic no-match wording.
+func (w *WebSearchTool) successSearchResult(query string, results []DuckDuckGoResult, source string, filter webSearchDomainFilter) *toolkit.ToolResult {
 	if results == nil {
 		results = []DuckDuckGoResult{}
 	}
+	providerCount := len(results)
+	results, dropped := filter.apply(results)
 	metadata := map[string]interface{}{
 		"query":          query,
 		"count":          len(results),
@@ -391,8 +422,27 @@ func (w *WebSearchTool) successSearchResult(query string, results []DuckDuckGoRe
 		"result_count":   len(results),
 		"source":         source,
 	}
+	if filter.active() {
+		metadata["provider_count"] = providerCount
+		metadata["filtered_out"] = dropped
+		for key, value := range filter.metadata() {
+			metadata[key] = value
+		}
+	}
 	content := w.formatResults(results)
-	if len(results) == 0 {
+	if len(results) == 0 && dropped > 0 {
+		// 搜索本身成功，但过滤器排除了全部结果：这是「过滤组合需要放宽」的
+		// 信号，不是查询无结果；给出过滤器专属 next_action。
+		content = fmt.Sprintf(
+			"未找到匹配的内容（搜索返回 %d 条结果，全部被域名过滤器排除）",
+			dropped,
+		)
+		toolresult.MarkEmptySuccess(metadata)
+		metadata[toolresult.MetadataNextActionKey] = fmt.Sprintf(
+			"域名过滤排除了全部 %d 条结果：放宽或移除 allowed_domains/blocked_domains，或改写查询；不要原样重试同一过滤组合。",
+			dropped,
+		)
+	} else if len(results) == 0 {
 		content = "未找到匹配的内容"
 		toolresult.MarkEmptySuccess(metadata)
 	}
