@@ -22,9 +22,13 @@ type malformedToolCallProvider struct {
 	// truncated 为 true 时把非法参数标记为「被输出预算切断」
 	// （finish_reason=length），用于区分语法退化与预算截断两条处置路径。
 	truncated bool
-	callCount int
-	requests  []*llm.LLMRequest
-	responses []*llm.LLMResponse
+	// arguments 覆盖默认的非法参数样本（P1-2 有界反馈测试注入大 payload）。
+	arguments string
+	// parseClass 覆盖默认解析分类，缺省 bare_literal。
+	parseClass string
+	callCount  int
+	requests   []*llm.LLMRequest
+	responses  []*llm.LLMResponse
 }
 
 func (p *malformedToolCallProvider) Name() string { return p.name }
@@ -39,6 +43,14 @@ func (p *malformedToolCallProvider) Call(ctx context.Context, req *llm.LLMReques
 		if p.truncated {
 			finishReason = "length"
 		}
+		arguments := p.arguments
+		if arguments == "" {
+			arguments = `{"path": "out.txt", "timeout": 60s}`
+		}
+		parseClass := p.parseClass
+		if parseClass == "" {
+			parseClass = llmadapter.MalformedArgumentsParseBareLiteral
+		}
 		return nil, &llmadapter.MalformedToolCallError{
 			Kind:         "openai_stream_protocol_error",
 			Code:         "invalid_tool_arguments",
@@ -46,10 +58,14 @@ func (p *malformedToolCallProvider) Call(ctx context.Context, req *llm.LLMReques
 			FinishReason: finishReason,
 			Truncated:    p.truncated,
 			ToolCalls: []llmadapter.MalformedToolCall{{
-				Index:     0,
-				ID:        "call-bad",
-				Name:      "write_file",
-				Arguments: `{"path": "out.txt", "timeout": 60s}`,
+				Index:          0,
+				ID:             "call-bad",
+				Name:           "write_file",
+				Arguments:      arguments,
+				ParseClass:     parseClass,
+				ParseOffset:    34,
+				ArgumentBytes:  len(arguments),
+				ArgumentSHA256: "0123456789abcdef",
 			}},
 		}
 	}
@@ -299,10 +315,14 @@ func (p *scriptedMalformedToolCallProvider) Call(ctx context.Context, req *llm.L
 			Code:    "invalid_tool_arguments",
 			Message: "openai_stream_protocol_error: code=invalid_tool_arguments: tool call 0 (write_file) has incomplete or non-object JSON arguments",
 			ToolCalls: []llmadapter.MalformedToolCall{{
-				Index:     0,
-				ID:        "call-bad",
-				Name:      "write_file",
-				Arguments: `{"path": "out.txt", "timeout": 60s}`,
+				Index:          0,
+				ID:             "call-bad",
+				Name:           "write_file",
+				Arguments:      `{"path": "out.txt", "timeout": 60s}`,
+				ParseClass:     llmadapter.MalformedArgumentsParseBareLiteral,
+				ParseOffset:    34,
+				ArgumentBytes:  len(`{"path": "out.txt", "timeout": 60s}`),
+				ArgumentSHA256: "0123456789abcdef",
 			}},
 		}
 	}
@@ -588,6 +608,17 @@ func TestReActLoop_MalformedToolCallEmitsLiveToolEvents(t *testing.T) {
 	require.NotEqual(t, requestedIDs[0], requestedIDs[1],
 		"同名工具的两次降级必须有不同的 call id（否则两次失败折叠成一行）")
 
+	// P0-2：降级事件必须携带脱敏解析证据（分类/哈希），且不得回灌原始参数文本。
+	evidence, ok := requested[0].Payload["argument_evidence"].(map[string]interface{})
+	require.True(t, ok, "降级事件必须携带 argument_evidence：离线要能按 parse_class 聚合")
+	require.Equal(t, llmadapter.MalformedArgumentsParseBareLiteral, evidence["parse_class"])
+	require.Equal(t, "0123456789abcdef", evidence["arg_sha256"])
+	require.Equal(t, true, evidence["not_executed"])
+	require.Equal(t, false, evidence["truncated"])
+	require.Equal(t, "tool_calls", evidence["finish_reason"])
+	require.NotContains(t, fmt.Sprint(evidence), "60s",
+		"解析证据只允许分类/长度/哈希，不得包含原始参数文本")
+
 	for i, event := range completed {
 		require.Equal(t, requestedIDs[i], event.Payload["tool_call_id"], "requested/completed 必须描述同一次调用")
 		require.NotEmpty(t, event.Payload["error"], "未执行的调用必须以失败态落终态（• Failed ...）")
@@ -609,4 +640,58 @@ func TestReActLoop_MalformedToolCallEmitsLiveToolEvents(t *testing.T) {
 		require.True(t, ok, "history must carry the synthetic tool_result for %s", id)
 		require.Contains(t, metadata["tool_error"], "not valid JSON")
 	}
+}
+
+// TestMalformedToolCallIDIsTurnScoped 锁定 P1-2：step 在每个 turn 都从 1 重新计数，
+// 只并入 step 会让跨 turn 的同类失败碰撞；turnID 参与派生保证跨 turn 唯一，
+// 同一 turn 内的重放/恢复仍派生同一 id。
+func TestMalformedToolCallIDIsTurnScoped(t *testing.T) {
+	first := malformedToolCallID(0, 1, "call-bad", "write_file", "turn_20260927_a")
+	replay := malformedToolCallID(0, 1, "call-bad", "write_file", "turn_20260927_a")
+	nextTurn := malformedToolCallID(0, 1, "call-bad", "write_file", "turn_20260927_b")
+	noTurn := malformedToolCallID(0, 1, "call-bad", "write_file", "")
+
+	require.NotEmpty(t, first)
+	require.Equal(t, first, replay, "同一 turn 的重放必须派生同一 call id")
+	require.NotEqual(t, first, nextTurn, "跨 turn 的同类失败不得碰撞")
+	require.NotEqual(t, first, noTurn, "无 turn 上下文也必须与有 turn 的调用区分")
+}
+
+// TestReActLoop_MalformedToolCallFeedbackIsBounded 锁定 P1-2：失败反馈只回贴有界
+// 头尾预览（≤2KiB）与出错位置，不再全文回贴坏参数。
+func TestReActLoop_MalformedToolCallFeedbackIsBounded(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(nil)
+	bigArguments := `{"content":"` + strings.Repeat("A", 8192) + strings.Repeat("Z", 128)
+	provider := &malformedToolCallProvider{
+		name:          "test-provider",
+		malformedRuns: 3,
+		arguments:     bigArguments,
+		parseClass:    llmadapter.MalformedArgumentsParseUnterminatedString,
+		responses: []*llm.LLMResponse{
+			{Content: "Recovered with a smaller payload.", Model: "test-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+	agent := NewAgentWithLLM(&Config{
+		Name: "malformed-bounded-feedback-agent", Provider: "test-provider", Model: "test-model", MaxSteps: 5,
+	}, &RecoveringMCPManager{}, llmRuntime)
+	loop := NewReActLoop(agent, llmRuntime, &LoopReActConfig{MaxSteps: 5, EnableToolCalls: true})
+
+	result, err := loop.Run(context.Background(), "write the file")
+
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Len(t, provider.requests, 4)
+	contents := findToolResultMessages(provider.requests[3])
+	require.NotEmpty(t, contents, "降级后的请求应包含注入的 tool_result 反馈")
+	feedback := contents[0]
+	require.Contains(t, feedback, "was NOT executed")
+	require.Contains(t, feedback, "parse_class=unterminated_string")
+	require.Contains(t, feedback, fmt.Sprintf("arg_bytes=%d", len(bigArguments)))
+	require.Contains(t, feedback, "bytes omitted", "超过上限的参数必须显示省略标记")
+	require.Contains(t, feedback, strings.Repeat("A", 64), "头部必须可见")
+	require.Contains(t, feedback, strings.Repeat("Z", 64), "尾部必须可见")
+	require.NotContains(t, feedback, strings.Repeat("A", 2048), "不得全文回贴坏参数")
+	require.Less(t, len(feedback), 8192,
+		"反馈必须显著小于原始参数（%d 字节），实际 %d 字节", len(bigArguments), len(feedback))
 }

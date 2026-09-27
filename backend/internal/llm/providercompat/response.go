@@ -109,24 +109,59 @@ func NormalizeStreamReadCloser(ctx Context, reader io.Reader) io.ReadCloser {
 	go func() {
 		scanner := bufio.NewScanner(reader)
 		scanner.Buffer(make([]byte, 0, 1024*1024), 20*1024*1024)
+		// P1-6：SSE 允许一个事件用多行 data:（以空行分隔事件，多行按规范用
+		// \n 拼接）。逐行归一化在多行事件上必然失效——每一行都不是完整 JSON，
+		// 兼容转换被跳过，原生对象参数随后在聚合层被丢弃成 {}。这里按「事件」
+		// 缓冲 data 行，只有确认整个事件后（空行/非 data 行/EOF）才尝试解析与
+		// 归一化，并把结果重新按单行 data: 发出，事件边界不变。
+		var dataLines []string
+		flushData := func() error {
+			if len(dataLines) == 0 {
+				return nil
+			}
+			// 首选：按 SSE 规范把同一事件的多行 data 用 \n 拼接后整体解析
+			// （多行 JSON / 被拆开的事件）。失败且确实有多行时，退回逐行解析
+			// ——部分中转省略空行分隔，多行其实是多个独立单行事件。
+			output := dataLines
+			if joined, ok := normalizeSSEDataPayload(&chain, strings.Join(dataLines, "\n")); ok {
+				output = []string{joined}
+			} else if len(dataLines) > 1 {
+				output = make([]string, 0, len(dataLines))
+				for _, data := range dataLines {
+					if normalized, ok := normalizeSSEDataPayload(&chain, data); ok {
+						output = append(output, normalized)
+					} else {
+						output = append(output, data)
+					}
+				}
+			}
+			for _, data := range output {
+				if _, err := fmt.Fprintln(pipeWriter, "data: "+data); err != nil {
+					return err
+				}
+			}
+			dataLines = dataLines[:0]
+			return nil
+		}
 		for scanner.Scan() {
 			line := scanner.Text()
 			if data, ok := strings.CutPrefix(line, "data:"); ok {
-				data = strings.TrimSpace(data)
-				if data != "" && data != "[DONE]" {
-					var chunk map[string]interface{}
-					if err := json.Unmarshal([]byte(data), &chunk); err == nil {
-						normalized := chain.NormalizeStreamChunk(chunk)
-						if payload, err := json.Marshal(normalized); err == nil {
-							line = "data: " + string(payload)
-						}
-					}
-				}
+				dataLines = append(dataLines, strings.TrimSpace(data))
+				continue
+			}
+			// 事件边界或其它 SSE 行（event:/id:/注释/空行）：先冲刷挂起的 data 行。
+			if err := flushData(); err != nil {
+				_ = pipeWriter.CloseWithError(err)
+				return
 			}
 			if _, err := fmt.Fprintln(pipeWriter, line); err != nil {
 				_ = pipeWriter.CloseWithError(err)
 				return
 			}
+		}
+		if err := flushData(); err != nil {
+			_ = pipeWriter.CloseWithError(err)
+			return
 		}
 		if err := scanner.Err(); err != nil {
 			_ = pipeWriter.CloseWithError(err)
@@ -135,6 +170,26 @@ func NormalizeStreamReadCloser(ctx Context, reader io.Reader) io.ReadCloser {
 		_ = pipeWriter.Close()
 	}()
 	return result
+}
+
+// normalizeSSEDataPayload 把一段 SSE data 载荷（已按事件拼接）解析为 JSON 对象
+// 并做兼容转换；不是 JSON 对象（含 [DONE]/空载荷）时返回 ok=false，调用方按原样
+// 透传，保证非 JSON 事件与未知事件不被改写。
+func normalizeSSEDataPayload(chain *Chain, raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "[DONE]" {
+		return "", false
+	}
+	var chunk map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &chunk); err != nil {
+		return "", false
+	}
+	normalized := chain.NormalizeStreamChunk(chunk)
+	payload, err := json.Marshal(normalized)
+	if err != nil {
+		return "", false
+	}
+	return string(payload), true
 }
 
 type passthroughReadCloser struct {

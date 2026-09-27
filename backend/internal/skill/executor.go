@@ -1331,13 +1331,19 @@ func (e *Executor) buildToolDefinitions(ctx context.Context, toolNames []string)
 			Description: toolInfo.Description,
 			Parameters:  normalizeToolParameters(toolInfo.InputSchema),
 		}
+		// MCP tool servers resolve their own filesystem paths (browser-backed
+		// tools may not touch this host at all). Declare the owner so the local
+		// read-path preflight never stats a server-relative path or enumerates
+		// local candidates for it (P1-4).
+		metadata := map[string]interface{}{
+			types.ToolMetadataFSOwnerKey: types.ToolFSOwnerToolServer,
+		}
 		if resolver, ok := e.mcpManager.(interface{ ResolveToolSource(string) string }); ok {
 			if source := toolresult.NormalizeSource(resolver.ResolveToolSource(toolInfo.Name)); source != "" {
-				tool.Metadata = map[string]interface{}{
-					toolresult.SourceKey: source,
-				}
+				metadata[toolresult.SourceKey] = source
 			}
 		}
+		tool.Metadata = metadata
 
 		tools = append(tools, tool)
 	}

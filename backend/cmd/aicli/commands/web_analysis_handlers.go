@@ -261,7 +261,9 @@ func chatWebAnalysisSubagentStatsQuery(values url.Values) (usageanalytics.Subage
 }
 
 // chatWebAnalysisErrorPatternsQuery 解析 /errors 参数
-// （session_id/session、source、top、from/to）。
+// （session_id/session、source、top、from/to、provider/model/directory/project/status/q）。
+// 与 runtime-server 的 /api/runtime/analytics/errors 共用同一份查询契约：
+// 时间窗与维度均为会话级语义（见 usageanalytics.ErrorPatternsQuery）。
 func chatWebAnalysisErrorPatternsQuery(values url.Values) (usageanalytics.ErrorPatternsQuery, error) {
 	query := usageanalytics.ErrorPatternsQuery{}
 	from, to, err := chatWebAnalysisTimeWindow(values)
@@ -272,6 +274,12 @@ func chatWebAnalysisErrorPatternsQuery(values url.Values) (usageanalytics.ErrorP
 	query.To = to
 	query.SessionID = chatWebAnalysisFirstValue(values, "session_id", "session")
 	query.Source = strings.TrimSpace(values.Get("source"))
+	query.Provider = strings.TrimSpace(values.Get("provider"))
+	query.Model = strings.TrimSpace(values.Get("model"))
+	query.Directory = strings.TrimSpace(values.Get("directory"))
+	query.Project = strings.TrimSpace(values.Get("project"))
+	query.Status = strings.TrimSpace(values.Get("status"))
+	query.Query = chatWebAnalysisFirstValue(values, "q", "query")
 	query.Top = chatWebAnalysisLimit(values.Get("top"))
 	return query, nil
 }

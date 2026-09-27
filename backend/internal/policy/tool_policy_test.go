@@ -13,6 +13,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestToolExecutionPolicy_AllowToolInfo_BlocksRemoteWrite(t *testing.T) {
@@ -1046,5 +1047,77 @@ func TestHasMutationHints_DetectsThirdPartyMutationNames(t *testing.T) {
 		if HasMutationHints(args) {
 			t.Fatalf("expected %#v to stay a read hint", args)
 		}
+	}
+}
+
+// TestToolExecutionPolicy_AllowToolCall_RemoteFSOwnerSkipsLocalPathChecks 锁定
+// P1-4：MCP 工具服务端/浏览器等非 runtime 归属的路径不参与本机 workspace 拼接
+// 与沙箱校验（远端自行解析），runtime 归属的同名参数仍保持拦截。
+func TestToolExecutionPolicy_AllowToolCall_RemoteFSOwnerSkipsLocalPathChecks(t *testing.T) {
+	root := t.TempDir()
+	policy := NewToolExecutionPolicy(nil, false)
+	policy.Sandbox = executor.NewSandbox(&executor.SandboxConfig{
+		Enabled:      true,
+		AllowedPaths: []string{root},
+	})
+	outside := filepath.Join(root, "..", "outside.txt")
+
+	// Baseline: runtime-owned (no fs_owner metadata) outside path stays blocked.
+	err := policy.AllowToolCall(skill.ToolInfo{
+		Name:          "read_file",
+		MCPTrustLevel: "local",
+		ExecutionMode: "local_mcp",
+	}, map[string]interface{}{"path": outside})
+	if err == nil {
+		t.Fatal("expected runtime-owned path outside the sandbox to be blocked")
+	}
+
+	// Same path name, remote-owned: the server resolves it, so no local check.
+	err = policy.AllowToolCall(skill.ToolInfo{
+		Name:          "browser_take_screenshot",
+		MCPTrustLevel: "local",
+		ExecutionMode: "local_mcp",
+		Metadata: map[string]interface{}{
+			runtimetypes.ToolMetadataFSOwnerKey: runtimetypes.ToolFSOwnerToolServer,
+		},
+	}, map[string]interface{}{"path": outside})
+	if err != nil {
+		t.Fatalf("remote-owned path must not be sandbox-checked locally: %v", err)
+	}
+}
+
+// TestToolExecutionPolicy_AllowToolCall_DeclaredOutputRoleUsesWriteChecks 锁定
+// P1-4 的共享契约：声明为 output 的路径按写校验，未声明的同名参数保持原有
+// 读校验，因此在只读子目录里读放行、写拦截。
+func TestToolExecutionPolicy_AllowToolCall_DeclaredOutputRoleUsesWriteChecks(t *testing.T) {
+	root := t.TempDir()
+	docs := filepath.Join(root, "docs")
+	policy := NewToolExecutionPolicy(nil, false)
+	policy.Sandbox = executor.NewSandbox(&executor.SandboxConfig{
+		Enabled:       true,
+		AllowedPaths:  []string{root},
+		ReadOnlyPaths: []string{docs},
+	})
+
+	if err := policy.AllowToolCall(skill.ToolInfo{
+		Name:          "read_file",
+		MCPTrustLevel: "local",
+		ExecutionMode: "local_mcp",
+	}, map[string]interface{}{"path": filepath.Join(docs, "a.txt")}); err != nil {
+		t.Fatalf("reading inside a read-only path must stay allowed: %v", err)
+	}
+
+	err := policy.AllowToolCall(skill.ToolInfo{
+		Name:          "export_tool",
+		MCPTrustLevel: "local",
+		ExecutionMode: "local_mcp",
+		Metadata: map[string]interface{}{
+			runtimetypes.ToolMetadataPathRolesKey: map[string]interface{}{
+				"path": runtimetypes.ToolPathRoleOutput,
+			},
+		},
+	}, map[string]interface{}{"path": filepath.Join(docs, "out.csv")})
+	if err == nil {
+		t.Fatal("declared output role must be validated as a write")
 	}
 }

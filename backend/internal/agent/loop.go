@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -135,6 +136,11 @@ type ReActLoop struct {
 	// malformedToolCallRecoveries 的「连续」语义一致。连续退化达到上限才放弃，
 	// 避免把 prompt 改写重试变成新的死循环。
 	reasoningOnlyRecoveries int
+	// degenerateRecoveryBudget 是本 run 内 provider 层重采样与 agent 层反馈回注
+	// 共享的退化恢复配额（P0-3 item 3）。两层的门控此前各自计数，同一次退化事件
+	// 会被相乘放大（单路径 9～18 次尝试）；共享后整 run 的退化重放总数只有单一
+	// 上限，且 provider 层通过 ctx 看到同一份实例。
+	degenerateRecoveryBudget *llm.DegenerateRecoveryBudget
 	// readOnlyDenyStreak 记录本 run 内「连续」被只读策略拒绝的次数；一旦某个
 	// 工具执行成功（说明模型已理解边界）即清零，防止跨阶段的累计误触熔断。
 	// M6 在 Escalate 阈值（3）时向父会话邮箱发 subagent.requires_write 事件，
@@ -817,6 +823,16 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			promptCacheEpoch = nextEpoch
 		}
 		if err != nil {
+			// P0-3 item 4：失败步骤里被重放/丢弃尝试的 provider 上报用量同样计入
+			// 本 run 的用量与预算；此前这些 token 完全丢失，预算与用量台账都低估
+			// 了真实消耗。
+			if usage != nil {
+				totalUsage.Add(usage)
+				result.Usage = totalUsage.Clone()
+				if options.BudgetTokens > 0 {
+					remainingBudget -= usage.TotalTokens
+				}
+			}
 			// 模型工具参数非法（invalid_tool_arguments）：不终止 turn，降级为
 			// 工具执行反馈回注（附 schema），让模型按 schema 重新输出参数。
 			if loop.tryRecoverMalformedToolCall(currentCtx, traceID, sessionID, step, prompt, builder, promptBuilder, options, err) {
@@ -1416,6 +1432,18 @@ func reasoningBlockHasPayload(block *types.ReasoningBlock) bool {
 // （参照 DeepSeek-Reasonix 的 repeat_failure_guard）。
 const maxMalformedToolCallRecoveries = 2
 
+// recoveryBudget 懒初始化本 run 的共享退化恢复配额（P0-3 item 3）。provider 层
+// 与 agent 层通过 ctx 读取同一份实例，任一层消耗后另一层立即看到剩余额度。
+func (loop *ReActLoop) recoveryBudget() *llm.DegenerateRecoveryBudget {
+	if loop == nil {
+		return nil
+	}
+	if loop.degenerateRecoveryBudget == nil {
+		loop.degenerateRecoveryBudget = llm.NewDegenerateRecoveryBudget(llm.DefaultDegenerateRecoveryBudget)
+	}
+	return loop.degenerateRecoveryBudget
+}
+
 // tryRecoverMalformedToolCall 处理模型工具参数非法（invalid_tool_arguments）：
 // 把「参数非法 + 工具 schema」作为工具执行反馈回注下一轮（re-prompt），
 // 让模型按 schema 重新输出参数，而不是终止整个 turn。
@@ -1455,6 +1483,21 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 		}
 	}
 
+	// P0-3 item 3：provider 层同预算重采样与这里的反馈回注共享同一份 per-run
+	// 退化恢复配额，避免两层计数相乘把同一退化样本放大成十几次 HTTP 尝试。
+	if budget := loop.recoveryBudget(); budget != nil && !budget.Allow() {
+		loop.emitRuntimeEvent("tool.malformed_arguments.guardrail_hit", sessionID, "", map[string]interface{}{
+			"trace_id":             traceID,
+			"step":                 step,
+			"tool_calls":           len(malformed.ToolCalls),
+			"reason":               "shared_recovery_budget_exhausted",
+			"recovery_budget_used": budget.Used(),
+			"recovery_budget_max":  budget.Max(),
+			"max_recoveries":       maxMalformedToolCallRecoveries,
+		})
+		return false
+	}
+
 	// 解析当前工具 surface，为每个非法调用找 schema。
 	availableTools, _, _, toolErr := loop.resolveAvailableTools(ctx, goal, options.ToolWhitelist)
 	if toolErr != nil {
@@ -1475,13 +1518,14 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 	toolCalls := make([]types.ToolCall, 0, len(malformed.ToolCalls))
 	feedbacks := make([]string, 0, len(malformed.ToolCalls))
 	reasons := make([]string, 0, len(malformed.ToolCalls))
+	evidences := make([]map[string]interface{}, 0, len(malformed.ToolCalls))
 	for _, call := range malformed.ToolCalls {
 		// call identity 必须稳定且互不冲突：失败调用的 Args 一律是空对象，沿用
 		// 「名称+参数」派生的确定性 id 会把同一回合里反复降级的同名调用折叠成同一个
 		// id（历史 tool_call/tool_result、durable 回执与 transcript 行互相覆盖）。
 		// 这里把 step 与模型给出的调用身份并入种子。
 		toolCalls = append(toolCalls, types.ToolCall{
-			ID:   malformedToolCallID(call.Index, step, call.ID, call.Name),
+			ID:   malformedToolCallID(call.Index, step, call.ID, call.Name, loop.turnID),
 			Name: call.Name,
 			Args: map[string]interface{}{},
 		})
@@ -1489,18 +1533,25 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 		if text, ok := schemaByTool[call.Name]; ok && text != "" {
 			schemaText = text
 		}
+		evidences = append(evidences, malformedToolCallEvidence(call, malformed.FinishReason, malformed.Truncated))
 		if malformed.Truncated {
 			// 预算截断不是 JSON 语法问题：让模型拆分 payload 重发，而不是
 			// 原样重发（同预算必然再次截断）。
 			feedbacks = append(feedbacks, fmt.Sprintf(
-				"Tool call %q was NOT executed because its arguments were cut off by the output budget (finish_reason=%s, received: %s). Re-emit the call with a smaller payload — split large writes into several calls — exactly per this schema:\n%s",
-				call.Name, malformed.FinishReason, call.Arguments, schemaText))
+				"Tool call %q was NOT executed because its arguments were cut off by the output budget (%s). %s Re-emit the call with a smaller payload — split large writes into several calls — exactly per this schema:\n%s",
+				call.Name,
+				malformedCallEvidenceLine(call, malformed.FinishReason, true),
+				malformedArgumentPreview(call),
+				schemaText))
 			reasons = append(reasons, "tool call arguments were cut off by the output budget")
 			continue
 		}
 		feedbacks = append(feedbacks, fmt.Sprintf(
-			"Tool call %q was NOT executed because its arguments were not valid JSON (received: %s). Re-emit the call exactly per this schema:\n%s",
-			call.Name, call.Arguments, schemaText))
+			"Tool call %q was NOT executed because its arguments were not valid JSON (%s). %s Re-emit the call exactly per this schema:\n%s",
+			call.Name,
+			malformedCallEvidenceLine(call, malformed.FinishReason, false),
+			malformedArgumentPreview(call),
+			schemaText))
 		reasons = append(reasons, "tool call arguments were not valid JSON")
 	}
 
@@ -1539,7 +1590,11 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 		if i < len(reasons) {
 			reason = reasons[i]
 		}
-		loop.emitMalformedToolCallOutcome(sessionID, call, step, traceID, reason, payloads[i].Content)
+		var evidence map[string]interface{}
+		if i < len(evidences) {
+			evidence = evidences[i]
+		}
+		loop.emitMalformedToolCallOutcome(sessionID, call, step, traceID, reason, payloads[i].Content, evidence)
 	}
 
 	for _, call := range malformed.ToolCalls {
@@ -1560,19 +1615,166 @@ func (loop *ReActLoop) tryRecoverMalformedToolCall(ctx context.Context, traceID,
 		"tool_calls":     len(malformed.ToolCalls),
 		"recoveries":     recoveries,
 		"max_recoveries": maxMalformedToolCallRecoveries,
+		// P0-2：把「什么形态、是否截断、finish_reason」和重试计数分开落库，
+		// 离线可按 parse_class 聚合而无需原始参数文本。
+		"evidence":      evidences,
+		"truncated":     malformed.Truncated,
+		"finish_reason": malformed.FinishReason,
 	})
 	return true
+}
+
+// malformedToolCallEvidence 把一次非法调用的解析证据投影成运行时事件字段。
+// 只含分类/偏移/长度/哈希等元数据，不含原始参数文本（P0-2 安全约束）。
+func malformedToolCallEvidence(call llmadapter.MalformedToolCall, finishReason string, truncated bool) map[string]interface{} {
+	evidence := map[string]interface{}{
+		"tool":          call.Name,
+		"parse_class":   call.ParseClass,
+		"arg_bytes":     call.ArgumentBytes,
+		"arg_sha256":    call.ArgumentSHA256,
+		"arg_fragments": call.ArgumentFragments,
+		"finish_reason": finishReason,
+		"truncated":     truncated,
+		"not_executed":  true,
+		"tool_call_id":  call.ID,
+	}
+	if call.ParseOffset > 0 {
+		evidence["parse_offset"] = call.ParseOffset
+	}
+	if evidence["parse_class"] == "" {
+		evidence["parse_class"] = "other"
+	}
+	return evidence
 }
 
 // malformedToolCallID 为「参数非法、未执行」的降级调用分配稳定且在会话内唯一的
 // call id。
 //
-// 种子并入 step 与模型给出的调用身份（providerID）：同名工具在同一回合里反复降级
-// 时 Args 都是空对象，若只按 index+name+args 派生，两次不同的失败会折叠成同一个
-// call identity。step 参与派生同时保证重放/恢复得到同一 id（同一回合里 step 单调）。
-func malformedToolCallID(index, step int, providerID, name string) string {
-	seed := fmt.Sprintf("%s#step=%d#provider_id=%s", strings.TrimSpace(name), step, strings.TrimSpace(providerID))
+// 种子并入 turnID、step 与模型给出的调用身份（providerID）：
+//   - 同一回合里反复降级时 Args 都是空对象，若只按 index+name+args 派生，两次不同
+//     的失败会折叠成同一个 call identity；
+//   - step 在每个 turn 都从 1 重新计数，provider 给出的 id 也可能是固定的
+//     "call-bad"；只并入 step 会让「上一 turn 的同类失败」和「本 turn 的失败」碰撞
+//     （P1-2）。turnID 由派发方在 run 开始时固定并持久化，因此同一回合的重放/恢复
+//     仍得到同一 id，跨 turn 不再碰撞。
+func malformedToolCallID(index, step int, providerID, name, turnID string) string {
+	seed := fmt.Sprintf("%s#step=%d#provider_id=%s#turn=%s",
+		strings.TrimSpace(name), step, strings.TrimSpace(providerID), strings.TrimSpace(turnID))
 	return types.DeterministicToolCallIDFromJSON("toolcall_", index, seed, json.RawMessage(`{}`))
+}
+
+// maxMalformedFeedbackArgumentBytes 是失败反馈中原始参数的最大展示字节数（P1-2）。
+// 全文回贴坏参数会把上下文和 token 预算一起拖大，也强化模型的错误续写；有界展示
+// 「头部 + 尾部 + 出错偏移窗口」，既保留定位信息又把反馈控制在 2KiB 级别。
+const maxMalformedFeedbackArgumentBytes = 2048
+
+// malformedCallEvidenceLine 渲染反馈里的紧凑证据行（分类/字节数/偏移/哈希/finish）。
+func malformedCallEvidenceLine(call llmadapter.MalformedToolCall, finishReason string, truncated bool) string {
+	class := strings.TrimSpace(call.ParseClass)
+	if class == "" {
+		class = "other"
+	}
+	parts := []string{
+		"parse_class=" + class,
+		fmt.Sprintf("arg_bytes=%d", call.ArgumentBytes),
+	}
+	if call.ParseOffset > 0 {
+		parts = append(parts, fmt.Sprintf("offset=%d", call.ParseOffset))
+	}
+	if hash := strings.TrimSpace(call.ArgumentSHA256); hash != "" {
+		parts = append(parts, "arg_sha256="+hash)
+	}
+	if reason := strings.TrimSpace(finishReason); reason != "" {
+		parts = append(parts, "finish_reason="+reason)
+	}
+	if truncated {
+		parts = append(parts, "truncated=true")
+	}
+	return strings.Join(parts, ", ")
+}
+
+// malformedArgumentPreview 渲染有界的坏参数展示（头部 + 尾部 + 出错偏移窗口）。
+func malformedArgumentPreview(call llmadapter.MalformedToolCall) string {
+	arguments := call.Arguments
+	total := len(arguments)
+	if total == 0 {
+		return "arguments: (empty)"
+	}
+	if total <= maxMalformedFeedbackArgumentBytes {
+		return fmt.Sprintf("arguments (%d bytes): %s", total, arguments)
+	}
+	half := maxMalformedFeedbackArgumentBytes / 2
+	head := utf8SafePrefix(arguments, half)
+	tail := utf8SafeSuffix(arguments, half)
+	preview := fmt.Sprintf(
+		"arguments (%d bytes total; first %d + last %d bytes): %s\n... (%d bytes omitted) ...\n%s",
+		total, len(head), len(tail), head, total-len(head)-len(tail), tail)
+	if window := malformedArgumentOffsetWindow(arguments, call.ParseOffset); window != "" {
+		preview += "\n" + window
+	}
+	return preview
+}
+
+// malformedArgumentOffsetWindow 给出 parse_offset 附近的局部窗口（≤256 字节）。
+func malformedArgumentOffsetWindow(arguments string, offset int64) string {
+	if offset <= 0 || offset > int64(len(arguments)) {
+		return ""
+	}
+	position := int(offset) - 1
+	const window = 256
+	start := position - window/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + window
+	if end > len(arguments) {
+		end = len(arguments)
+		start = end - window
+		if start < 0 {
+			start = 0
+		}
+	}
+	return fmt.Sprintf("near byte %d: %s", offset, utf8SafeSlice(arguments, start, end))
+}
+
+func utf8SafePrefix(text string, size int) string {
+	if len(text) <= size {
+		return text
+	}
+	for size > 0 && !utf8.RuneStart(text[size]) {
+		size--
+	}
+	return text[:size]
+}
+
+func utf8SafeSuffix(text string, size int) string {
+	if len(text) <= size {
+		return text
+	}
+	start := len(text) - size
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	return text[start:]
+}
+
+func utf8SafeSlice(text string, start, end int) string {
+	if start < 0 {
+		start = 0
+	}
+	if end > len(text) {
+		end = len(text)
+	}
+	for start < end && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	for end > start && end < len(text) && !utf8.RuneStart(text[end]) {
+		end--
+	}
+	if start >= end {
+		return ""
+	}
+	return text[start:end]
 }
 
 // emitMalformedToolCallOutcome 把一次「参数非法、未执行」的降级调用投影成与正常工具
@@ -1584,21 +1786,27 @@ func malformedToolCallID(index, step int, providerID, name string) string {
 // 只能命中「cell 缺失」的崩溃恢复重建分支，把工具行补在正文与 agent.turn.finished
 // 之后。补齐事件后，实时渲染在发生的 step 就内联出这一行，回执到达时命中的是既有
 // 终态 cell（幂等跳过），尾部不再多出一行。
-func (loop *ReActLoop) emitMalformedToolCallOutcome(sessionID string, call types.ToolCall, step int, traceID, reason, content string) {
+func (loop *ReActLoop) emitMalformedToolCallOutcome(sessionID string, call types.ToolCall, step int, traceID, reason, content string, argumentEvidence map[string]interface{}) {
 	if loop == nil || loop.agent == nil {
 		return
 	}
-	loop.emitRuntimeEvent("tool.requested", sessionID, call.Name, toolRequestedEventPayload(call, step, traceID, map[string]interface{}{
+	requestedExtra := map[string]interface{}{
 		"malformed_arguments": true,
 		"not_executed":        true,
-	}))
+	}
+	completedExtra := map[string]interface{}{
+		"awaiting_model":      false,
+		"malformed_arguments": true,
+		"not_executed":        true,
+	}
+	if len(argumentEvidence) > 0 {
+		requestedExtra["argument_evidence"] = argumentEvidence
+		completedExtra["argument_evidence"] = argumentEvidence
+	}
+	loop.emitRuntimeEvent("tool.requested", sessionID, call.Name, toolRequestedEventPayload(call, step, traceID, requestedExtra))
 	loop.emitRuntimeEvent("tool.completed", sessionID, call.Name, toolCompletedEventPayload(
 		toolExecutionResult{Call: call, Output: content, Error: reason},
-		step, traceID, map[string]interface{}{
-			"awaiting_model":      false,
-			"malformed_arguments": true,
-			"not_executed":        true,
-		},
+		step, traceID, completedExtra,
 	))
 }
 
@@ -1628,6 +1836,19 @@ func (loop *ReActLoop) tryRecoverReasoningOnlyReply(traceID, sessionID string, s
 		return false
 	}
 	finishReason := llm.ReasoningOnlyReplyFinishReason(err)
+	// P0-3 item 3：与 provider 层共享同一份 per-run 退化恢复配额。
+	if budget := loop.recoveryBudget(); budget != nil && !budget.Allow() {
+		loop.emitRuntimeEvent("llm.reasoning_only.guardrail_hit", sessionID, "", map[string]interface{}{
+			"trace_id":             traceID,
+			"step":                 step,
+			"finish_reason":        finishReason,
+			"reason":               "shared_recovery_budget_exhausted",
+			"recovery_budget_used": budget.Used(),
+			"recovery_budget_max":  budget.Max(),
+			"max_recoveries":       maxReasoningOnlyRecoveries,
+		})
+		return false
+	}
 	if loop.reasoningOnlyRecoveries >= maxReasoningOnlyRecoveries {
 		loop.emitRuntimeEvent("llm.reasoning_only.guardrail_hit", sessionID, "", map[string]interface{}{
 			"trace_id":       traceID,
@@ -2118,6 +2339,12 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	// 请求前退避共用同一实例，因此"计数"和"抑制"看到的是同一份连续失败历史。
 	cacheBreaker := promptCacheBreakerFromContext(ctx)
 	callCtx = llm.WithRetryEventReporter(callCtx, loop.runtimeRetryEventReporter(traceID, sessionID, step, req, cacheBreaker))
+	// P0-3：本 run 的退化恢复配额与「被丢弃尝试」用量账本挂到 ctx 上，provider /
+	// gateway 重试循环读取同一份实例；失败尝试的 provider 上报用量在这里累积，
+	// 由本函数与 run() 计入步骤用量、run 用量与预算。
+	discardedUsage := llm.NewAttemptUsageTracker()
+	callCtx = llm.WithAttemptUsageTracker(callCtx, discardedUsage)
+	callCtx = llm.WithDegenerateRecoveryBudget(callCtx, loop.recoveryBudget())
 
 	// 调用 LLM
 	requestPayload := map[string]interface{}{
@@ -2413,8 +2640,55 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				finishedPayload["context_window_tokens"] = value
 			}
 		}
+		discarded := discardedUsage.Usage()
+		if discarded != nil {
+			// 失败请求没有最终 usage：把被重放/丢弃尝试的 provider 上报用量作为
+			// 该请求的真实成本写入 event payload，用量台账不再把烧掉的 token 记成 0。
+			if discarded.PromptTokens > 0 {
+				finishedPayload["usage_prompt_tokens"] = discarded.PromptTokens
+			}
+			if discarded.CompletionTokens > 0 {
+				finishedPayload["usage_completion_tokens"] = discarded.CompletionTokens
+			}
+			if discarded.TotalTokens > 0 {
+				finishedPayload["usage_total_tokens"] = discarded.TotalTokens
+			}
+			if discarded.ReasoningTokens > 0 {
+				finishedPayload["usage_reasoning_tokens"] = discarded.ReasoningTokens
+			}
+			finishedPayload["usage_discarded_attempts"] = discardedUsage.Attempts()
+			finishedPayload["usage_scope"] = "discarded_attempts"
+			finishedPayload["usage_source"] = "provider_reported"
+		}
+		// P0-2 证据列：把「是否观测到上游终结信号」与「参数错误的结构化分类」写进
+		// finished payload，离线无需 HTTP 工件即可区分传输中断与模型退化：
+		// 无终结信号 + 参数非法 = 流被截断；有终结信号 + 参数非法 = 模型退化。
+		finishedPayload["terminal_seen"] = false
+		var malformedErr *llmadapter.MalformedToolCallError
+		switch {
+		case stderrors.As(err, &malformedErr):
+			finishReason := strings.TrimSpace(malformedErr.FinishReason)
+			finishedPayload["terminal_seen"] = finishReason != ""
+			if finishReason != "" {
+				finishedPayload["terminal_finish_reason"] = finishReason
+			}
+			// 参数错误分类挂在每个非法调用上（parse_class），取首个非空分类：
+			// 同一响应里的多个非法调用通常同退化形态，首个即可满足离线聚合。
+			for _, call := range malformedErr.ToolCalls {
+				if class := strings.TrimSpace(call.ParseClass); class != "" {
+					finishedPayload["arg_error_class"] = class
+					break
+				}
+			}
+		case llm.IsReasoningOnlyReplyError(err):
+			// reasoning-only 是「完整响应但内容退化」：终结信号一定观测到了。
+			finishedPayload["terminal_seen"] = true
+			if finishReason := strings.TrimSpace(llm.ReasoningOnlyReplyFinishReason(err)); finishReason != "" {
+				finishedPayload["terminal_finish_reason"] = finishReason
+			}
+		}
 		loop.emitRuntimeEvent("llm.request.finished", sessionID, "", finishedPayload)
-		return "", nil, nil, err
+		return "", nil, discarded, err
 	}
 	// 成功即恢复：该指纹的连续失败计数清零，历史抖动不会累积成熔断。
 	cacheBreaker.ObserveSuccess(promptFingerprintFromRequest(req))
@@ -2431,6 +2705,9 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		"provider":        req.Provider,
 		"success":         true,
 		"tool_call_count": len(response.ToolCalls),
+		// 成功响应必然观测到终结信号（finish_reason / 完成事件），与失败路径
+		// 的 terminal_seen 组成同一列证据（P0-2）。
+		"terminal_seen": true,
 	}
 	if streamID := strings.TrimSpace(stringValue(req.Metadata["stream_id"])); streamID != "" {
 		finishedPayload["stream_id"] = streamID
@@ -2513,6 +2790,23 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	if usageSource != "" {
 		finishedPayload["usage_source"] = usageSource
 	}
+	if discarded := discardedUsage.Usage(); discarded != nil {
+		// 本次调用内被重放/丢弃的尝试成本单独成列：缓存命中率仍以最终成功那次
+		// 的 usage_* 为口径，而 run 用量/预算在下方按真实总消耗合并。
+		finishedPayload["usage_discarded_attempts"] = discardedUsage.Attempts()
+		if discarded.PromptTokens > 0 {
+			finishedPayload["usage_discarded_prompt_tokens"] = discarded.PromptTokens
+		}
+		if discarded.CompletionTokens > 0 {
+			finishedPayload["usage_discarded_completion_tokens"] = discarded.CompletionTokens
+		}
+		if discarded.TotalTokens > 0 {
+			finishedPayload["usage_discarded_total_tokens"] = discarded.TotalTokens
+		}
+		if discarded.ReasoningTokens > 0 {
+			finishedPayload["usage_discarded_reasoning_tokens"] = discarded.ReasoningTokens
+		}
+	}
 	if response != nil {
 		// 每次模型响应的权威全文快照（含以 tool_calls 结束的中间步骤）。
 		// 中间步骤没有 run 级 assistant.message，流式 delta 一旦丢失/乱序，
@@ -2581,6 +2875,16 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 	usage = response.Usage.Clone()
 	if usage != nil {
 		usage.UsageSource = usageSource
+	}
+	if discarded := discardedUsage.Usage(); discarded != nil {
+		// P0-3 item 4：被重放/丢弃尝试的 token 计入本步骤真实消耗（run 用量与预算
+		// 按真实成本扣减）；payload 侧保留 usage_discarded_* 明细供离线区分。
+		if usage == nil {
+			usage = discarded
+			usage.UsageSource = usageSource
+		} else {
+			usage.Add(discarded)
+		}
 	}
 	return thought, action, usage, nil
 }
@@ -2737,7 +3041,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			}
 
 			preflightInfo := loop.lookupToolInfoForPreflight(callCtx, tc.Name, nil)
-			decision := loop.prepareToolExecution(metadata, tc.Name, tc.ID, tc.Args, preflightInfo)
+			decision := loop.prepareToolExecution(callCtx, metadata, tc.Name, tc.ID, tc.Args, preflightInfo)
 			if !decision.Allow {
 				if decision.SoftEmpty {
 					applySoftEmptyPreflightResult(&result, metadata, decision)
@@ -3113,7 +3417,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 		}
 
 		preflightInfo := loop.lookupToolInfoForPreflight(callCtx, tc.Name, &toolInfo)
-		decision := loop.prepareToolExecution(metadata, tc.Name, tc.ID, tc.Args, preflightInfo)
+		decision := loop.prepareToolExecution(callCtx, metadata, tc.Name, tc.ID, tc.Args, preflightInfo)
 		if !decision.Allow {
 			if decision.SoftEmpty {
 				applySoftEmptyPreflightResult(&result, metadata, decision)

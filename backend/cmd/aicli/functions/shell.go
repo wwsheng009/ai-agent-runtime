@@ -674,17 +674,17 @@ func (f *ShellFunction) Parameters() map[string]interface{} {
 				"type":        "string",
 				"description": "可选：命令执行的工作目录。绝对路径直接使用，相对路径基于当前工作目录解析。默认为当前工作目录。路径请使用正斜杠（如 E:/projects/foo）以兼容所有平台。",
 			},
-			"timeout": map[string]interface{}{
-				"type":        "string",
-				"description": "可选：命令超时，值必须是带引号的 JSON 字符串，例如 \"30s\"、\"2m\"、\"5m\"（裸写 30s 会让整个 arguments 变成非法 JSON）。默认 30s，可用 AICLI_SHELL_COMMAND_TIMEOUT 或 AICLI_SHELL_COMMAND_TIMEOUT_MS 调整全局默认；运行测试、构建、类型检查等可能超过默认值的命令时，应由模型显式设置更长超时。",
-			},
+			// 超时只对模型暴露整数字段：2026-09-27 证据显示字符串型超时会被
+			// 弱 JSON 模型写成裸值（"timeout": 60s）而破坏整个 arguments；
+			// 执行端仍兼容 timeout="2m"/"30ms" 字符串形式（见
+			// resolveShellFunctionTimeout），仅从模型可见工具面移除。
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
-				"description": "可选：命令超时毫秒数。小于 100 的数值会视为模型单位混淆并忽略；确需亚 100ms 时使用 timeout 字符串（如 \"30ms\"）。秒级超时优先只设 timeout_sec 或 timeout。",
+				"description": "可选：命令超时毫秒数。小于 100 的数值会视为模型单位混淆并忽略。",
 			},
 			"timeout_sec": map[string]interface{}{
 				"type":        "integer",
-				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。与 timeout_ms 二选一即可，不要同时填占位 1ms。",
+				"description": "可选：命令超时秒数（正整数，推荐）。默认 30s，可用 AICLI_SHELL_COMMAND_TIMEOUT 或 AICLI_SHELL_COMMAND_TIMEOUT_MS 调整全局默认；运行测试、构建、类型检查等可能超过默认值的命令时，请显式设置更长超时。优先级低于 timeout_ms。",
 			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",

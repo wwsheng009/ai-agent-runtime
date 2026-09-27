@@ -128,7 +128,7 @@ func TestPrepareToolExecution_MissingRequiredArgs(t *testing.T) {
 			},
 		},
 	}
-	decision := loop.prepareToolExecution(metadata, "glob", "tc-missing", map[string]interface{}{}, info)
+	decision := loop.prepareToolExecution(context.Background(), metadata, "glob", "tc-missing", map[string]interface{}{}, info)
 	if decision.Allow {
 		t.Fatal("expected missing required args to deny")
 	}

@@ -179,6 +179,47 @@ func TestDiagnoseReadOnlyCompoundCommandIsNonOverridable(t *testing.T) {
 	}
 }
 
+// TestDiagnoseReadOnlyAllowlistMissNextAction 锁定 P1-5：白名单未覆盖（未支持
+// 静态查询）与敏感路径/动态语法给不同的下一步建议，避免只读场景下误导模型
+// 盲目重试同一条命令。
+func TestDiagnoseReadOnlyAllowlistMissNextAction(t *testing.T) {
+	miss := Diagnose(
+		"shell",
+		"call-readonly-miss",
+		`read-only policy blocks non-readonly shell command (segment 3: "Remove-Item ."): Get-ChildItem . | Remove-Item .`,
+		map[string]interface{}{
+			"policy":        "read_only",
+			"policy_source": "spawn_subagents.read_only",
+			"overridable":   false,
+		},
+	)
+	if miss.ErrorCode != string(runtimeerrors.ErrAgentReadOnly) {
+		t.Fatalf("error_code=%q want %s", miss.ErrorCode, runtimeerrors.ErrAgentReadOnly)
+	}
+	if !strings.Contains(miss.NextAction, "grep") ||
+		!strings.Contains(miss.NextAction, "Select-Object -First") ||
+		!strings.Contains(miss.NextAction, "read_only=false") {
+		t.Fatalf("allowlist miss must suggest narrower read-only forms or a writable child, got %q", miss.NextAction)
+	}
+
+	sensitive := Diagnose(
+		"shell",
+		"call-readonly-sensitive",
+		"read-only policy blocks shell access to sensitive paths: cat .env",
+		map[string]interface{}{
+			"policy":        "read_only",
+			"policy_source": "spawn_subagents.read_only",
+			"overridable":   false,
+		},
+	)
+	if !strings.Contains(sensitive.NextAction, "out of scope") {
+		t.Fatalf("sensitive-path denial must explain the scope boundary, got %q", sensitive.NextAction)
+	}
+	if sensitive.NextAction == miss.NextAction {
+		t.Fatalf("allowlist miss and sensitive-path denial must not share a next_action")
+	}
+}
+
 func TestDiagnoseCapsOversizedCurrentSnippet(t *testing.T) {
 	// Oversized multi-line snippet must stay under contract budget and drop the
 	// tail on whole-line boundaries (no mid-line cut when multiple lines fit).

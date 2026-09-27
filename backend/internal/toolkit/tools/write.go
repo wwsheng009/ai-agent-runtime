@@ -59,6 +59,11 @@ func (w *WriteTool) DefinitionMetadata() map[string]interface{} {
 		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassIdempotencyKeyRequired,
+		// file_path is a local write target: the leaf may legitimately not exist
+		// yet, so the existence preflight must never deny it (P1-4 path roles).
+		runtimetypes.ToolMetadataPathRolesKey: map[string]interface{}{
+			"file_path": runtimetypes.ToolPathRoleOutput,
+		},
 	}
 }
 
@@ -203,7 +208,12 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 	if fileExists {
 		staleVerdict = evaluateStaleWrite(ctx, absPath, oldRaw)
 		if p.ExpectedSHA256 == "" && shouldRefuseStaleWrite(staleVerdict) {
-			return staleWriteFailure(absPath, staleVerdict.CurrentSHA, staleVerdict.LastRecord, true), nil
+			// The recovery hint must publish the revision write actually
+			// compares (decoded text, BOM stripped), not the raw-disk-byte
+			// digest the stale verdict uses: for BOM/UTF-16 files the raw
+			// digest could never pass the expected_sha256 precondition, so
+			// following the hint always failed again (2026-09-27 review H7).
+			return staleWriteFailure(absPath, currentRevision, staleVerdict.LastRecord, true), nil
 		}
 	}
 

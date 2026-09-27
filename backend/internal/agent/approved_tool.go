@@ -172,7 +172,7 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 			return finalize(), nil
 		}
 		result.Call.Args = call.Args
-		decision := loop.prepareToolExecution(metadata, call.Name, call.ID, call.Args, preflightInfo)
+		decision := loop.prepareToolExecution(ctx, metadata, call.Name, call.ID, call.Args, preflightInfo)
 		if !decision.Allow {
 			if decision.SoftEmpty {
 				applySoftEmptyPreflightResult(&result, metadata, decision)
@@ -213,7 +213,7 @@ func (a *Agent) ExecuteApprovedToolCall(ctx context.Context, sessionID string, c
 		return finalize(), nil
 	}
 	result.Call.Args = call.Args
-	decision := loop.prepareToolExecution(metadata, call.Name, call.ID, call.Args, preflightInfo)
+	decision := loop.prepareToolExecution(ctx, metadata, call.Name, call.ID, call.Args, preflightInfo)
 	if !decision.Allow {
 		if decision.SoftEmpty {
 			applySoftEmptyPreflightResult(&result, metadata, decision)

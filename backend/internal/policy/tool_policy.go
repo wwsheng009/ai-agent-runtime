@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
+	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // ToolExecutionPolicy constrains which runtime tools may execute.
@@ -337,19 +338,19 @@ func (p *ToolExecutionPolicy) allowToolCall(ctx context.Context, tool skill.Tool
 					continue
 				}
 				if assessment.Reason == ShellReadOnlyReasonCompound {
-					return fmt.Errorf("read-only policy blocks compound shell command; submit one command per shell.commands entry: %s", command)
+					return fmt.Errorf("read-only policy blocks compound shell command%s; submit one command per shell.commands entry: %s", shellReadOnlySegmentHint(assessment), command)
 				}
 				if assessment.Reason == ShellReadOnlyReasonDynamicSyntax {
-					return fmt.Errorf("read-only policy blocks shell redirection or dynamic command syntax: %s", command)
+					return fmt.Errorf("read-only policy blocks shell redirection or dynamic command syntax%s: %s", shellReadOnlySegmentHint(assessment), command)
 				}
 				if assessment.Reason == ShellReadOnlyReasonSensitiveArg {
-					return fmt.Errorf("read-only policy blocks shell access to sensitive paths: %s", command)
+					return fmt.Errorf("read-only policy blocks shell access to sensitive paths%s: %s", shellReadOnlySegmentHint(assessment), command)
 				}
 				if assessment.Reason == ShellReadOnlyReasonUnparsable {
-					return fmt.Errorf("read-only policy blocks a shell command that could not be parsed: %s", command)
+					return fmt.Errorf("read-only policy blocks a shell command that could not be parsed%s: %s", shellReadOnlySegmentHint(assessment), command)
 				}
 				if !assessment.Allowed {
-					return fmt.Errorf("read-only policy blocks non-readonly shell command: %s", command)
+					return fmt.Errorf("read-only policy blocks non-readonly shell command%s: %s", shellReadOnlySegmentHint(assessment), command)
 				}
 			}
 		} else {
@@ -385,6 +386,31 @@ func (p *ToolExecutionPolicy) allowToolCall(ctx context.Context, tool skill.Tool
 			return err
 		}
 	}
+	// P1-4: paths owned by a remote filesystem (MCP tool server, browser,
+	// opaque backend) are resolved on that side. Joining them to our workspace
+	// and checking them against our sandbox would validate a path this process
+	// never touches, so only runtime-owned tools take the local path checks.
+	if runtimetypes.FSOwnerFromMetadata(tool.Metadata) != runtimetypes.ToolFSOwnerRuntime {
+		return nil
+	}
+	// Declared path roles pin the per-argument operation (P1-4 shared contract):
+	// inputs are reads, outputs/workdirs are writes. Undeclared keys keep the
+	// historical tool-name classification below.
+	for key := range args {
+		role, declared := runtimetypes.PathRoleFromMetadata(tool.Metadata, key)
+		if !declared {
+			continue
+		}
+		roleOp := executor.OpRead
+		if role != runtimetypes.ToolPathRoleInput {
+			roleOp = executor.OpWrite
+		}
+		for _, path := range collectStringArgs(args, map[string]bool{key: true}) {
+			if err := p.Sandbox.CheckPermission(roleOp, p.resolvePolicyPath(ctx, path)); err != nil {
+				return err
+			}
+		}
+	}
 	for _, path := range collectPathArgs(args, argKeys) {
 		// Resolve exactly like the executor: a relative path means "inside the
 		// session workspace", not "inside the server process directory".
@@ -394,6 +420,25 @@ func (p *ToolExecutionPolicy) allowToolCall(ctx context.Context, tool skill.Tool
 	}
 
 	return nil
+}
+
+// shellReadOnlySegmentHint 渲染只读拒绝里失败段的位置与内容（P1-5）：
+// 让模型直接看到是哪一段超出了白名单，而不是对整条命令盲目重试。
+// 段文本只做有界回显（≤120 字符），不参与判定。
+func shellReadOnlySegmentHint(assessment ShellReadOnlyAssessment) string {
+	segment := strings.TrimSpace(assessment.Segment)
+	if segment == "" {
+		return ""
+	}
+	const maxSegmentHintRunes = 120
+	runes := []rune(segment)
+	if len(runes) > maxSegmentHintRunes {
+		segment = string(runes[:maxSegmentHintRunes]) + "…"
+	}
+	if assessment.SegmentIndex > 0 {
+		return fmt.Sprintf(" (segment %d: %q)", assessment.SegmentIndex, segment)
+	}
+	return fmt.Sprintf(" (%q)", segment)
 }
 
 // resolvePolicyPath anchors a relative path argument to the session-bound

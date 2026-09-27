@@ -72,6 +72,10 @@ func (d *DownloadTool) DefinitionMetadata() map[string]interface{} {
 		runtimetypes.ToolMetadataRequiresNetKey:     true,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
+		// file_path is the local save target written by download (P1-4).
+		runtimetypes.ToolMetadataPathRolesKey: map[string]interface{}{
+			"file_path": runtimetypes.ToolPathRoleOutput,
+		},
 	}
 }
 

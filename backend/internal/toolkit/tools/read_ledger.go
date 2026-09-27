@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
@@ -64,25 +65,50 @@ type fileReadRecord struct {
 	// sampled (size + head/tail slice) or unverified (file too large to hash).
 	// Only a full hash supports a hard stale refusal (review M2).
 	HashScope string
+	// Suspect marks a record whose content read and fingerprint read did not
+	// observe the same file state (the file changed in between). The record
+	// must never authorize a write: the model saw bytes that no longer match
+	// anything the ledger can verify (2026-09-27 review H20).
+	Suspect bool
 }
 
 type sessionReadLedger struct {
-	mu      sync.Mutex
-	entries map[string]fileReadRecord
-	order   []string
-	touched time.Time
+	sessionID string
+	mu        sync.Mutex
+	entries   map[string]fileReadRecord
+	order     []string
+	touched   time.Time
+	// evicted is set by the idle sweep under the bucket lock. A bucket marked
+	// evicted must not accept or serve records any more: callers re-fetch from
+	// the map so a sweep cannot silently drop the record a caller is about to
+	// write (2026-09-27 review H19).
+	evicted atomic.Bool
 }
 
 var sessionReadLedgers sync.Map // sessionID -> *sessionReadLedger
 
 func ledgerForSession(sessionID string) *sessionReadLedger {
 	maybeSweepSessionReadState()
-	if existing, ok := sessionReadLedgers.Load(sessionID); ok {
-		return existing.(*sessionReadLedger)
+	for attempt := 0; attempt < 8; attempt++ {
+		if existing, ok := sessionReadLedgers.Load(sessionID); ok {
+			ledger := existing.(*sessionReadLedger)
+			if !ledger.evicted.Load() {
+				return ledger
+			}
+			sessionReadLedgers.CompareAndDelete(sessionID, existing)
+			continue
+		}
+		created := &sessionReadLedger{sessionID: sessionID, entries: make(map[string]fileReadRecord)}
+		actual, _ := sessionReadLedgers.LoadOrStore(sessionID, created)
+		ledger := actual.(*sessionReadLedger)
+		if !ledger.evicted.Load() {
+			return ledger
+		}
 	}
-	created := &sessionReadLedger{entries: make(map[string]fileReadRecord)}
-	actual, _ := sessionReadLedgers.LoadOrStore(sessionID, created)
-	return actual.(*sessionReadLedger)
+	// Degenerate contention (the same bucket was evicted on every attempt):
+	// hand back an unstored bucket so this call stays correct even if its
+	// record is not shared with concurrent calls.
+	return &sessionReadLedger{sessionID: sessionID, entries: make(map[string]fileReadRecord)}
 }
 
 func normalizeLedgerPath(path string) string {
@@ -107,17 +133,27 @@ func (l *sessionReadLedger) record(path string, record fileReadRecord) {
 	if path == "" {
 		return
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.touched = time.Now()
-	if _, exists := l.entries[path]; !exists {
-		l.order = append(l.order, path)
-	}
-	l.entries[path] = record
-	for len(l.order) > readLedgerMaxEntries {
-		oldest := l.order[0]
-		l.order = l.order[1:]
-		delete(l.entries, oldest)
+	for attempt := 0; ; attempt++ {
+		l.mu.Lock()
+		if !l.evicted.Load() {
+			l.touched = time.Now()
+			if _, exists := l.entries[path]; !exists {
+				l.order = append(l.order, path)
+			}
+			l.entries[path] = record
+			for len(l.order) > readLedgerMaxEntries {
+				oldest := l.order[0]
+				l.order = l.order[1:]
+				delete(l.entries, oldest)
+			}
+			l.mu.Unlock()
+			return
+		}
+		l.mu.Unlock()
+		if attempt >= 2 || l.sessionID == "" {
+			return
+		}
+		l = ledgerForSession(l.sessionID)
 	}
 }
 
@@ -126,11 +162,20 @@ func (l *sessionReadLedger) lookup(path string) (fileReadRecord, bool) {
 	if path == "" {
 		return fileReadRecord{}, false
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.touched = time.Now()
-	record, ok := l.entries[path]
-	return record, ok
+	for attempt := 0; ; attempt++ {
+		l.mu.Lock()
+		if !l.evicted.Load() {
+			l.touched = time.Now()
+			record, ok := l.entries[path]
+			l.mu.Unlock()
+			return record, ok
+		}
+		l.mu.Unlock()
+		if attempt >= 2 || l.sessionID == "" {
+			return fileReadRecord{}, false
+		}
+		l = ledgerForSession(l.sessionID)
+	}
 }
 
 // idleSince reports whether this session bucket was last used before the TTL
@@ -147,7 +192,13 @@ func (l *sessionReadLedger) idleSince(now time.Time, ttl time.Duration) bool {
 	if l.touched.IsZero() {
 		return false
 	}
-	return now.Sub(l.touched) > ttl
+	if now.Sub(l.touched) <= ttl {
+		return false
+	}
+	// Mark under the lock so concurrent users re-fetch a fresh bucket instead
+	// of writing a record the sweep is about to drop (2026-09-27 review H19).
+	l.evicted.Store(true)
+	return true
 }
 
 // ledgerHashScope decides how much of a file the ledger can verify.
@@ -222,6 +273,15 @@ func hashSampleBytes(data []byte) string {
 // digest, and files above readLedgerSampleHashMaxBytes are recorded with an
 // explicitly unverified hash instead of being skipped (review M2).
 func recordFileReadFromDisk(ctx context.Context, path string, fullRead bool, source string, window fileReadWindow) {
+	recordFileReadFromDiskObserved(ctx, path, fullRead, source, window, nil)
+}
+
+// recordFileReadFromDiskObserved is recordFileReadFromDisk with the FileInfo
+// the caller sampled before reading the content. When the file changed between
+// that observation and the fingerprint read, the record is marked Suspect so
+// it can never authorize an overwrite of content the model never saw (review
+// H20).
+func recordFileReadFromDiskObserved(ctx context.Context, path string, fullRead bool, source string, window fileReadWindow, observed os.FileInfo) {
 	if strings.TrimSpace(path) == "" {
 		return
 	}
@@ -236,6 +296,9 @@ func recordFileReadFromDisk(ctx context.Context, path string, fullRead bool, sou
 		Source:    source,
 		Window:    window,
 		HashScope: ledgerHashScope(info.Size()),
+	}
+	if observed != nil && (observed.Size() != info.Size() || !observed.ModTime().Equal(info.ModTime())) {
+		record.Suspect = true
 	}
 	switch record.HashScope {
 	case readLedgerHashFull:
@@ -256,9 +319,13 @@ func recordFileReadFromDisk(ctx context.Context, path string, fullRead bool, sou
 	// FullRead is monotonic: a full read followed by a partial window must not
 	// demote the record, or the dedup guard and the write side lose the
 	// "session has seen the whole file" fact (review m7). The older full read
-	// only counts while it still describes the same bytes.
+	// only counts while it still describes the same bytes under the same
+	// digest scheme: comparing a full SHA with a sampled digest across scopes
+	// always differs and used to clear the flag on every partial view of a
+	// large file (review H17).
 	if !record.FullRead && record.SHA256 != "" {
-		if existing, ok := ledger.lookup(path); ok && existing.FullRead && existing.SHA256 == record.SHA256 {
+		if existing, ok := ledger.lookup(path); ok && existing.FullRead &&
+			existing.HashScope == record.HashScope && existing.SHA256 == record.SHA256 && !existing.Suspect {
 			record.FullRead = true
 		}
 	}
@@ -280,14 +347,26 @@ func recordFileWrite(ctx context.Context, path string, data []byte, source strin
 	if strings.TrimSpace(path) == "" {
 		return
 	}
-	ledgerForSession(toolctx.SessionID(ctx)).record(path, fileReadRecord{
-		SHA256:    fileBytesSHA256(data),
-		Size:      int64(len(data)),
+	size := int64(len(data))
+	scope := ledgerHashScope(size)
+	record := fileReadRecord{
+		Size:      size,
 		FullRead:  true,
 		ReadAt:    time.Now(),
 		Source:    source,
-		HashScope: readLedgerHashFull,
-	})
+		HashScope: scope,
+	}
+	// The digest must use the same scheme a later view will use for this file
+	// size, otherwise the FullRead inheritance compares a full SHA with a
+	// sampled digest, always finds them different and demotes the record
+	// (review H17).
+	switch scope {
+	case readLedgerHashFull:
+		record.SHA256 = fileBytesSHA256(data)
+	case readLedgerHashSampled:
+		record.SHA256 = hashSampleBytes(data)
+	}
+	ledgerForSession(toolctx.SessionID(ctx)).record(path, record)
 }
 
 // staleWriteVerdict describes whether an existing file changed since the
@@ -338,6 +417,13 @@ func evaluateStaleWrite(ctx context.Context, path string, current []byte) staleW
 	verdict.HasRecord = true
 	verdict.LastRecord = record
 	verdict.LastReadAgo = time.Since(record.ReadAt).Round(time.Second).String()
+	if record.Suspect {
+		// The content read and the fingerprint read observed different file
+		// states: the model's view cannot be matched against disk, so never
+		// treat this record as fresh (review H20).
+		verdict.State = staleWriteStateStale
+		return verdict
+	}
 	if record.SHA256 == "" {
 		// 超大文件账本只记录窗口、不做内容哈希：既不能宣称 fresh，也不能把
 		// 重新 view 之后的写入永久拒掉（review M2）。
@@ -386,6 +472,10 @@ func staleWriteFailure(path, currentSHA string, record fileReadRecord, expectedS
 	result.Metadata["last_read_at"] = record.ReadAt.UTC().Format(time.RFC3339)
 	if record.Source != "" {
 		result.Metadata["last_read_source"] = record.Source
+	}
+	if record.Suspect {
+		result.Metadata["read_race_detected"] = true
+		result.Metadata["read_race_note"] = "该文件在内容读取与指纹记录之间发生了变化，本会话看到的正文可能已不是磁盘当前版本；请重新 view 后再写。"
 	}
 	return result
 }

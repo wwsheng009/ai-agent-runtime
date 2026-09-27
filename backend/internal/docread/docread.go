@@ -69,9 +69,11 @@ func Detect(path string, head []byte) Probe {
 	kind := detectKind(path, head)
 	probe := Probe{Kind: kind, MIME: mimeForKind(kind)}
 	switch kind {
-	case "svg", "text":
+	case "svg", "text", "pptx", "odp":
+		// pptx/odp render from their own zip+XML container; no external
+		// converter is involved (2026-09-27 review H13).
 		probe.Supported = true
-	case "pdf", "docx", "odt", "ods", "odp", "rtf", "epub", "pptx", "xlsx":
+	case "pdf", "docx", "odt", "ods", "rtf", "epub", "xlsx":
 		if tool := converterForKind(kind); tool != "" {
 			if _, err := lookPath(tool); err == nil {
 				probe.Converter = tool
@@ -148,8 +150,23 @@ func Render(ctx context.Context, path string) (DocumentRender, error) {
 		meta["doc_reason"] = "output_truncated"
 		meta["doc_output_truncated"] = true
 		meta["doc_truncated_at_bytes"] = maxConverterOutputBytes
+	} else if converted.SheetTotal > converted.SheetsDelivered {
+		// A CSV conversion that delivered fewer sheets than the container
+		// declares used to return doc_degraded=false, so the missing worksheets
+		// were invisible and unrecoverable (2026-09-27 review H14).
+		meta["doc_degraded"] = true
+		meta["doc_reason"] = "partial_sheets"
+		meta["doc_sheets_total"] = converted.SheetTotal
+		meta["doc_sheets_delivered"] = converted.SheetsDelivered
+		if len(converted.SheetsMissing) > 0 {
+			meta["doc_sheets_missing"] = converted.SheetsMissing
+		}
 	} else {
 		meta["doc_degraded"] = false
+	}
+	if converted.SheetTotal > 0 {
+		meta["doc_sheets_total"] = converted.SheetTotal
+		meta["doc_sheets_delivered"] = converted.SheetsDelivered
 	}
 
 	if probe.Kind == "pdf" {

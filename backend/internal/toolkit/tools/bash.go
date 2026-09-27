@@ -92,15 +92,14 @@ func NewBashTool() *BashTool {
 			},
 			"commands": map[string]interface{}{
 				"type":        "array",
-				"description": "命令批次（对象数组，也可容忍 JSON 字符串数组）。默认顺序执行；仅当各命令互不依赖且只读时可设置 parallel=true。每项可覆盖 workdir 和 timeout。",
+				"description": "命令批次（对象数组，也可容忍 JSON 字符串数组）。默认顺序执行；仅当各命令互不依赖且只读时可设置 parallel=true。每项可覆盖 workdir 与 timeout_sec/timeout_ms。",
 				"items": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"command":     map[string]interface{}{"type": "string"},
 						"workdir":     map[string]interface{}{"type": "string"},
-						"timeout":     map[string]interface{}{"type": "string"},
-						"timeout_ms":  map[string]interface{}{"type": "integer", "minimum": 1, "description": "毫秒超时；小于 100 的数值会按模型占位噪声忽略。确需亚 100ms 时使用 timeout 字符串（如 \"30ms\"）。"},
-						"timeout_sec": map[string]interface{}{"type": "integer", "minimum": 1},
+						"timeout_ms":  map[string]interface{}{"type": "integer", "minimum": 1, "description": "毫秒超时；小于 100 的数值会按模型占位噪声忽略。"},
+						"timeout_sec": map[string]interface{}{"type": "integer", "minimum": 1, "description": "秒级超时；普通命令默认 30s，测试/构建等长命令请显式设置。"},
 					},
 					"required":             []string{"command"},
 					"additionalProperties": false,
@@ -123,19 +122,21 @@ func NewBashTool() *BashTool {
 				"type":        "string",
 				"description": "可选：命令执行的工作目录。绝对路径直接使用，相对路径基于当前工作目录解析。默认为当前工作目录。",
 			},
-			"timeout": map[string]interface{}{
-				"type":        "string",
-				"description": "可选：命令超时，值必须是带引号的 JSON 字符串，例如 \"30s\"、\"2m\"、\"5m\"（裸写 30s 会让整个 arguments 变成非法 JSON）。普通命令默认 30s；go test 未显式设置时自动使用至少 5m；shell 代码搜索（rg/grep/findstr）未显式设置时默认更短（约 12s）以促使改用 toolkit grep；环境变量和显式参数仍可覆盖。",
-			},
+			// 超时只对模型暴露整数字段：2026-09-27 证据显示 65/66 条
+			// invalid_tool_arguments 是字符串型超时被写成裸值（"timeout": 60s），
+			// 而裸数字 60 是合法 JSON，模型很难把它写坏。
+			// 执行端仍兼容旧的 timeout="2m"/"30ms" 字符串形式（见
+			// resolveShellCommandTimeout），以兼容历史会话与其它客户端调用，
+			// 但不再把它放进模型可见的工具面。
 			"timeout_ms": map[string]interface{}{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "可选：命令超时毫秒数。小于 100 的数值会视为模型单位混淆并忽略；确需亚 100ms 时使用 timeout 字符串（如 \"30ms\"）。秒级超时优先只设 timeout_sec 或 timeout。",
+				"description": "可选：命令超时毫秒数。小于 100 的数值会视为模型单位混淆并忽略。",
 			},
 			"timeout_sec": map[string]interface{}{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "可选：命令超时秒数，必须为正整数。优先级低于 timeout_ms，高于 timeout。与 timeout_ms 二选一即可，不要同时填占位 1ms。",
+				"description": "可选：命令超时秒数（正整数，推荐）。普通命令默认 30s；go test 未显式设置时自动使用至少 5m；shell 代码搜索（rg/grep/findstr）未显式设置时默认更短（约 12s）以促使改用 toolkit grep；环境变量和显式参数仍可覆盖。优先级低于 timeout_ms，与 timeout_ms 二选一即可。",
 			},
 			"output_bytes_cap": map[string]interface{}{
 				"type":        "integer",

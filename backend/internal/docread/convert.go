@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -97,8 +98,11 @@ func converterForKind(kind string) string {
 		return "pdftotext"
 	case "docx", "odt", "rtf", "epub":
 		return "pandoc"
-	case "pptx", "xlsx", "ods", "odp":
+	case "xlsx", "ods":
 		return "soffice"
+	// pptx/odp are extracted natively (Impress has no TXT export filter), so
+	// they need no converter and must render even on a converter-less host
+	// (2026-09-27 review H13).
 	default:
 		return ""
 	}
@@ -111,6 +115,12 @@ type convertResult struct {
 	// Truncated reports that the converter stream hit the capture limit: the
 	// retained prefix is not the whole document.
 	Truncated bool
+	// SheetTotal / SheetsDelivered / SheetsMissing describe workbook coverage:
+	// a CSV conversion that silently delivered only the active sheet used to
+	// look like a complete render (2026-09-27 review H14).
+	SheetTotal       int
+	SheetsDelivered  int
+	SheetsMissing    []string
 }
 
 // convertDocument 按类型选择转换命令并返回渲染结果。
@@ -129,8 +139,16 @@ func convertDocument(ctx context.Context, probe Probe, path string) (convertResu
 			return convertResult{}, err
 		}
 		return convertResult{Markdown: string(out), Raw: string(out), Truncated: truncated}, nil
-	case "pptx", "xlsx", "ods", "odp":
-		return convertWithSoffice(ctx, probe.Kind, path)
+	case "pptx", "odp":
+		// Impress has no TXT export filter: extract the slide text natively
+		// (2026-09-27 review H13).
+		text, err := extractPresentationText(path, probe.Kind)
+		if err != nil {
+			return convertResult{}, err
+		}
+		return convertResult{Markdown: text, Raw: text}, nil
+	case "xlsx", "ods":
+		return convertWorkbookWithSoffice(ctx, probe.Kind, path)
 	default:
 		return convertResult{}, fmt.Errorf("docread: no converter for kind %q", probe.Kind)
 	}
@@ -170,20 +188,72 @@ func stderrSummary(stderr []byte) string {
 	return strings.TrimSpace(text)
 }
 
-// convertWithSoffice 通过 soffice 把表格（xlsx/ods）转 csv、幻灯片（pptx/odp）转
-// txt，输出到临时目录再读回。
-func convertWithSoffice(ctx context.Context, kind, path string) (convertResult, error) {
+// sofficeCSVAllSheets asks LibreOffice for one CSV per worksheet: the trailing
+// ExportSheets=-1 token (LO >= 7.2) exports every sheet instead of only the
+// active one. Older builds reject or ignore it, so the caller falls back to the
+// plain filter and the coverage accounting below still discloses the sheets it
+// could not deliver (2026-09-27 review H14).
+const sofficeCSVAllSheetsFilter = "csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,true,false,false,-1"
+
+// convertWorkbookWithSoffice converts a spreadsheet to CSV and aggregates every
+// sheet file the converter produced, instead of silently consuming a single
+// file while the metadata claimed a complete render.
+func convertWorkbookWithSoffice(ctx context.Context, kind, path string) (convertResult, error) {
 	dir, err := os.MkdirTemp("", "docread-soffice-*")
 	if err != nil {
 		return convertResult{}, fmt.Errorf("docread: temp dir for soffice: %w", err)
 	}
 	defer os.RemoveAll(dir)
 
-	filter, outExt := "csv", ".csv"
-	switch kind {
-	case "pptx", "odp":
-		filter, outExt = "txt", ".txt"
+	declared := declaredSheetNames(path, kind)
+	csvFiles, truncated, err := runSofficeCSV(ctx, dir, sofficeCSVAllSheetsFilter, path)
+	if err != nil || len(csvFiles) == 0 {
+		// Retry with the plain filter: keep the previous single-sheet
+		// capability on converters without the all-sheets token.
+		csvFiles, truncated, err = runSofficeCSV(ctx, dir, "csv", path)
+		if err != nil {
+			return convertResult{}, err
+		}
 	}
+	if len(csvFiles) == 0 {
+		return convertResult{}, fmt.Errorf("docread: soffice produced no .csv output for %s", filepath.Base(path))
+	}
+
+	var out strings.Builder
+	total := 0
+	delivered := 0
+	deliveredNames := make([]string, 0, len(csvFiles))
+	for _, file := range csvFiles {
+		data, readErr := readConvertedFile(file)
+		if readErr != nil {
+			return convertResult{}, readErr
+		}
+		name := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
+		section := fmt.Sprintf("## Sheet: %s\n%s\n", name, strings.TrimRight(string(data), "\n"))
+		if total+len(section) > maxConverterOutputBytes {
+			truncated = true
+			break
+		}
+		out.WriteString(section)
+		out.WriteString("\n")
+		total += len(section)
+		delivered++
+		deliveredNames = append(deliveredNames, name)
+	}
+	missing := missingSheetNames(declared, deliveredNames)
+	return convertResult{
+		Markdown:        strings.TrimRight(out.String(), "\n") + "\n",
+		Raw:             out.String(),
+		Truncated:       truncated,
+		SheetTotal:      len(declared),
+		SheetsDelivered: delivered,
+		SheetsMissing:   missing,
+	}, nil
+}
+
+// runSofficeCSV runs one soffice conversion and returns the produced CSV files
+// in name order.
+func runSofficeCSV(ctx context.Context, dir, filter, path string) ([]string, bool, error) {
 	args := []string{
 		"--headless",
 		"--norestore",
@@ -195,15 +265,43 @@ func convertWithSoffice(ctx context.Context, kind, path string) (convertResult, 
 	}
 	_, truncated, err := runConverter(ctx, "soffice", args...)
 	if err != nil {
-		return convertResult{}, err
+		return nil, false, err
 	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		return nil, truncated, nil
+	}
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".csv") {
+			continue
+		}
+		files = append(files, filepath.Join(dir, entry.Name()))
+	}
+	sort.Strings(files)
+	return files, truncated, nil
+}
 
-	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	data, err := readConvertedOutput(dir, base, outExt)
-	if err != nil {
-		return convertResult{}, err
+// missingSheetNames matches declared sheet names against the converter's output
+// file stems (LibreOffice may prefix them with the workbook base name).
+func missingSheetNames(declared, delivered []string) []string {
+	if len(declared) == 0 || len(delivered) == 0 {
+		return nil
 	}
-	return convertResult{Markdown: string(data), Raw: string(data), Truncated: truncated}, nil
+	missing := make([]string, 0)
+	for _, sheet := range declared {
+		found := false
+		for _, name := range delivered {
+			if strings.Contains(strings.ToLower(name), strings.ToLower(sheet)) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, sheet)
+		}
+	}
+	return missing
 }
 
 // fileURL 把本地路径转成 file:// URL（soffice 的 UserInstallation 需要）。

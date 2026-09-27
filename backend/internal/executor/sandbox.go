@@ -106,26 +106,54 @@ func (s *Sandbox) CheckPermission(op PermissionOp, targetPath string) error {
 	if s == nil || !s.active() {
 		return nil
 	}
-	absPath, err := filepath.Abs(strings.TrimSpace(targetPath))
-	if err != nil {
-		return fmt.Errorf("resolve path: %w", err)
+	absPath, ok := absolutePathKeepingDotDot(strings.TrimSpace(targetPath))
+	if !ok {
+		return fmt.Errorf("resolve path: %s", strings.TrimSpace(targetPath))
 	}
-	if err := s.checkPathPolicy(op, absPath); err != nil {
+	// The lexical check sees the path as Clean would spell it (the same form
+	// tools pass to os.Stat/os.Open), so an ordinary spelling stays a cheap
+	// prefix test.
+	if err := s.checkPathPolicy(op, filepath.Clean(absPath)); err != nil {
 		return err
 	}
 	// The lexical check only sees the path as written; os.Stat/ReadFile then
-	// follow symlinks. A link inside an allowed directory could therefore reach
-	// outside the allowlist (or into a denied/read-only root): the Unicode
-	// path-healing candidate check made that concrete — the candidate passed the
-	// string containment test and the link target was read (2026-09-27 review).
-	// Re-check the resolved target, comparing resolved policy roots so a
-	// symlinked allowlist entry keeps working.
-	if resolved, ok := resolveExistingAncestors(absPath); ok && resolved != absPath {
-		if err := s.checkResolvedPathPolicy(op, resolved); err != nil {
-			return err
-		}
+	// follow symlinks (and apply ".." after them, not before). Re-check the
+	// physical target, comparing resolved policy roots so a symlinked allowlist
+	// entry keeps working. The check must run even when the resolution equals
+	// the written path: a symlinked DeniedPaths/ReadOnlyPaths root would
+	// otherwise be skipped entirely (2026-09-27 review H3), and the link/..
+	// spelling only survives if the ".." reaches the resolver (H2) — hence
+	// absolutePathKeepingDotDot instead of filepath.Abs, which would Clean the
+	// ".." away before the kernel-order resolution below can see it.
+	resolved, ok := resolvePhysicalPath(absPath)
+	if !ok {
+		return fmt.Errorf("path cannot be resolved to a physical location, denied by sandbox policy: %s", absPath)
+	}
+	if err := s.checkResolvedPathPolicy(op, resolved); err != nil {
+		return err
 	}
 	return nil
+}
+
+// absolutePathKeepingDotDot makes path absolute without the lexical Clean that
+// filepath.Abs performs, so the kernel-order resolver can still tell
+// "link/../x" apart from "x". Returns false when the working directory is
+// unavailable.
+func absolutePathKeepingDotDot(path string) (string, bool) {
+	if filepath.IsAbs(path) {
+		return path, true
+	}
+	cwd, err := os.Getwd()
+	if err != nil || strings.TrimSpace(cwd) == "" {
+		return "", false
+	}
+	for len(path) > 0 && os.IsPathSeparator(path[0]) {
+		path = path[1:]
+	}
+	if path == "" {
+		return cwd, true
+	}
+	return cwd + string(os.PathSeparator) + path, true
 }
 
 // checkPathPolicy applies the lexically configured roots to one path.
@@ -202,30 +230,96 @@ func resolveRoots(roots []string) []string {
 	return resolved
 }
 
-// resolveExistingAncestors resolves the longest existing prefix of absPath and
-// rejoins the not-yet-existing tail: a create path must follow links in its
-// parent directories (that is where the file will actually land), while a
-// lexical leaf name that does not exist yet stays lexical.
-func resolveExistingAncestors(absPath string) (string, bool) {
-	current := absPath
-	var tail []string
-	for {
-		resolved, err := filepath.EvalSymlinks(current)
-		if err == nil {
-			resolved = filepath.Clean(resolved)
-			if len(tail) == 0 {
-				return resolved, true
-			}
-			parts := append([]string{resolved}, tail...)
-			return filepath.Join(parts...), true
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
+// maxSymlinkResolutionSteps bounds link chasing so a symlink loop cannot make
+// permission checks hang.
+const maxSymlinkResolutionSteps = 256
+
+// resolvePhysicalPath returns the path the operating system will actually act
+// on for absPath. Every existing component is followed through symlinks —
+// including a dangling leaf link whose target does not exist yet, where
+// filepath.EvalSymlinks gives up — and ".." is applied to the already-resolved
+// prefix, matching kernel order (follow the link, then go up). Resolution stops
+// at the first component that does not exist; the remaining components are
+// rejoined lexically, because nothing below a missing entry can be a link the
+// OS would follow.
+//
+// The second result is false when the path cannot be resolved safely (symlink
+// loop, unreadable link target); callers must fail closed.
+func resolvePhysicalPath(absPath string) (string, bool) {
+	absPath = strings.TrimSpace(absPath)
+	if absPath == "" {
+		return "", false
+	}
+	volume := filepath.VolumeName(absPath)
+	root := volume + string(os.PathSeparator)
+	if root == string(os.PathSeparator) && !filepath.IsAbs(absPath) {
+		return "", false
+	}
+	resolved := root
+	pending := splitPathComponents(absPath[len(volume):])
+	for steps := 0; len(pending) > 0; steps++ {
+		if steps > maxSymlinkResolutionSteps {
 			return "", false
 		}
-		tail = append([]string{filepath.Base(current)}, tail...)
-		current = parent
+		component := pending[0]
+		pending = pending[1:]
+		switch component {
+		case "", ".":
+			continue
+		case "..":
+			// Kernel order: pop from the resolved prefix, not from the
+			// lexical spelling. filepath.Dir keeps a volume root in place.
+			if parent := filepath.Dir(resolved); parent != "" {
+				resolved = parent
+			}
+			continue
+		}
+		candidate := filepath.Join(resolved, component)
+		info, err := os.Lstat(candidate)
+		if err != nil {
+			// First missing component: rejoin the tail lexically.
+			parts := append([]string{candidate}, pending...)
+			return filepath.Join(parts...), true
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			resolved = candidate
+			continue
+		}
+		target, err := os.Readlink(candidate)
+		if err != nil || strings.TrimSpace(target) == "" {
+			return "", false
+		}
+		if filepath.IsAbs(target) {
+			targetVolume := filepath.VolumeName(target)
+			resolved = targetVolume + string(os.PathSeparator)
+			pending = append(splitPathComponents(target[len(targetVolume):]), pending...)
+			continue
+		}
+		// A relative target is relative to the directory holding the link,
+		// which is exactly the resolved prefix built so far.
+		pending = append(splitPathComponents(target), pending...)
 	}
+	return filepath.Clean(resolved), true
+}
+
+// splitPathComponents splits a slash- or backslash-separated path on the
+// host's separator rules. On Unix a backslash is an ordinary filename byte, so
+// os.IsPathSeparator (not a hard-coded set) decides.
+func splitPathComponents(path string) []string {
+	parts := make([]string, 0, 8)
+	start := 0
+	for i := 0; i < len(path); i++ {
+		if os.IsPathSeparator(path[i]) {
+			if i > start {
+				parts = append(parts, path[start:i])
+			}
+			start = i + 1
+		}
+	}
+	if start < len(path) {
+		parts = append(parts, path[start:])
+	}
+	return parts
 }
 
 // ValidateCommand validates the executable name against the configured policy.

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -772,6 +773,23 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 		return buildGrepResult(opts, nil, 0, false, nil), nil
 	}
 
+	// 显式要求 ripgrep 的请求（rg_args / --engine / PCRE2 等）必须先把模式原样
+	// 交给 rg：Go regexp 不支持 lookaround、反向引用等 PCRE 语法，若先编译，
+	// 这些在 rg 上完全合法的模式会在到达 rg 之前就被拒绝（2026-09-27 证据：
+	// 104 条非法正则落在 TOOL_EXECUTION 泛码）。rg 自身仍是权威引擎，失败即
+	// 如实返回，不静默退回内置引擎。
+	if opts.requiresRipgrep {
+		if result, used, rgErr := g.searchWithRipgrep(ctx, opts); rgErr != nil {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      rgErr,
+			}, nil
+		} else if used {
+			return result, nil
+		}
+	}
+
 	// Compile regex for builtin engine (rg engine handles pattern natively)
 	re, err := compileGrepPattern(opts.patterns, opts.literal, opts.ignoreCase, opts.word, opts.lineRegexp)
 	if err != nil {
@@ -782,14 +800,18 @@ func (g *GrepTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 
-	if result, used, rgErr := g.searchWithRipgrep(ctx, opts); rgErr != nil {
-		return &toolkit.ToolResult{
-			Success:    false,
-			OutputKind: toolresult.KindText,
-			Error:      rgErr,
-		}, nil
-	} else if used {
-		return result, nil
+	// 普通请求保持既有顺序：rg 可用时优先用其原生解析，rg 不可用或明确
+	// 不适用时回退到内置 walker（已经显式要求 rg 的请求在上面处理过）。
+	if !opts.requiresRipgrep {
+		if result, used, rgErr := g.searchWithRipgrep(ctx, opts); rgErr != nil {
+			return &toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      rgErr,
+			}, nil
+		} else if used {
+			return result, nil
+		}
 	}
 
 	return g.searchWithWalker(ctx, opts, re), nil
@@ -1751,9 +1773,9 @@ func compileGrepPattern(patterns []string, literal, ignoreCase, word, lineRegexp
 	}
 	re, err := regexp.Compile(expr)
 	if err != nil {
-		msg := fmt.Sprintf("正则表达式无效: %v。若要搜索字面文本请设置 literal=true（或 fixed_strings=true）；复杂正则可改用 rg_args 并启用 pcre2=true（需本机 rg）", err)
+		msg := fmt.Sprintf("正则表达式无效: %v。若要搜索字面文本请设置 literal=true（或 fixed_strings=true）；PCRE 语法可改用 rg_args:[\"-P\"]（需本机 rg）", err)
 		if looksLikePCREOnlyPattern(expr) || looksLikePCREOnlyPatterns(patterns) {
-			msg += "。检测到 lookaround/后行断言等 PCRE 语法（如 (?! / (?= / (?<= / (?<!），Go 内置 regexp 不支持；请设置 pcre2=true（需本机 rg），或改写为不含 lookaround 的模式 / 改用 literal=true"
+			msg += "。检测到 lookaround/后行断言等 PCRE 语法（如 (?! / (?= / (?<= / (?<!），Go 内置 regexp 不支持；请设置 rg_args:[\"-P\"]（需本机 rg），或改写为不含 lookaround 的模式 / 改用 literal=true"
 		}
 		return nil, fmt.Errorf("%s", msg)
 	}
@@ -4158,7 +4180,21 @@ func runGrepCommand(ctx context.Context, binaryPath, workingDir string, args []s
 	// os/exec connects the child to the null device, so ripgrep searches the
 	// requested paths instead of switching to piped-stdin mode or waiting.
 	cmd.Stdin = nil
-	return cmd.CombinedOutput()
+	// stdout 是唯一证据来源，stderr 只进错误诊断：合并两者会让 rg 的用法/权限
+	// 报错在 0 匹配时被当作「有输出」，被 searchWithRipgrep 误判为 partial
+	// success（2026-09-27 证据：stderr 伪成功）。exit 1（无匹配）仍由包装后的
+	// *exec.ExitError 识别。
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		if message := strings.TrimSpace(stderr.String()); message != "" {
+			return stdout.Bytes(), fmt.Errorf("%w: %s", err, message)
+		}
+		return stdout.Bytes(), err
+	}
+	return stdout.Bytes(), nil
 }
 
 // --- Builtin walker engine ---

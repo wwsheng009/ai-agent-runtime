@@ -1091,6 +1091,7 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 	var consecutiveHeaderTimeouts int
 	var transportAttempts int
 	var degenerateReplies int
+	var malformedSyntaxResamples int
 
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt) && transportAttemptAllowed(policy.MaxTransportAttempts, transportAttempts); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -1108,6 +1109,10 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		}
 
 		lastErr = err
+		// P0-3 item 4：被判失败/重放的尝试同样消耗了 provider 预算。把已解码响应
+		// 里 provider 上报的 usage 记入 ctx 账本，由 agent 层计入 run 用量与预算，
+		// 而不是只给最终成功的那一次记账。
+		RecordDiscardedChatUsage(attemptCtx, chatResp)
 		// A finite provider or transport budget is the configured retry
 		// phase: response-header failures must be allowed to consume that
 		// budget instead of being stopped by the unlimited-loop guard. Only
@@ -1198,9 +1203,19 @@ func (p *ProviderWrapper) Call(ctx context.Context, req *LLMRequest) (*LLMRespon
 		// only lever that changes the next sample; once it is exhausted the loop
 		// stops here with a terminal exhaustion error instead of replaying the
 		// identical request until the attempt budget is gone.
+		if trackMalformedSyntaxResample(&malformedSyntaxResamples, err) {
+			return nil, markRetryExhausted(
+				"provider call aborted after replaying a syntax-degenerate tool-arguments request", attempt, err)
+		}
 		if trackDegenerateOutputReply(&degenerateReplies, err) {
 			return nil, markRetryExhausted(
 				"provider call aborted after repeated degenerate replies", attempt, err)
+		}
+		// P0-3 item 3：provider 层重采样与 agent 层反馈回注共享同一份 per-run
+		// 退化恢复配额，避免两层计数相乘。
+		if !consumeDegenerateRecoveryBudget(attemptCtx, err) {
+			return nil, markRetryExhausted(
+				"provider call aborted after the shared degenerate-recovery budget was exhausted", attempt, err)
 		}
 		// Charge a transport failure to the transport budget immediately after
 		// the failed call.  prepareRetry waits for the backoff delay, so counting
@@ -1429,6 +1444,7 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 	var consecutiveHeaderTimeouts int
 	var transportAttempts int
 	var degenerateReplies int
+	var malformedSyntaxResamples int
 
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt) && transportAttemptAllowed(policy.MaxTransportAttempts, transportAttempts); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
@@ -1685,6 +1701,10 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 
 		if handleErr != nil {
 			lastErr = fmt.Errorf("failed to handle stream response: %w", handleErr)
+			// P0-3 item 4：退化重放（reasoning-only 烧满预算、参数非法、聚合校验
+			// 失败）这一次尝试已经真实消耗了 token，但响应体带着 provider 上报的
+			// usage。记入 ctx 账本，由 agent 层计入 run 用量与预算。
+			RecordDiscardedAttemptUsage(attemptCtx, responseBody)
 			// Partial-output replay policy: transient failures (SSE EOF,
 			// connection reset, idle timeout, 5xx/429, stream interruption)
 			// keep retrying even when partial text was already emitted — the
@@ -1746,12 +1766,27 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 			// Same bound as the non-streaming wrapper loop: once the budget
 			// widenings are spent, repeated degenerate replies get a terminal
 			// exhaustion error instead of another identical replay.
+			if trackMalformedSyntaxResample(&malformedSyntaxResamples, lastErr) {
+				if emissionState.emittedAnything() {
+					lastErr = withPartialOutputMarker(lastErr)
+				}
+				return nil, markRetryExhausted(
+					"streaming aggregate call aborted after replaying a syntax-degenerate tool-arguments request", attempt, lastErr)
+			}
 			if trackDegenerateOutputReply(&degenerateReplies, lastErr) {
 				if emissionState.emittedAnything() {
 					lastErr = withPartialOutputMarker(lastErr)
 				}
 				return nil, markRetryExhausted(
 					"streaming aggregate call aborted after repeated degenerate replies", attempt, lastErr)
+			}
+			// P0-3 item 3：与 agent 层共享同一份 per-run 退化恢复配额。
+			if !consumeDegenerateRecoveryBudget(attemptCtx, lastErr) {
+				if emissionState.emittedAnything() {
+					lastErr = withPartialOutputMarker(lastErr)
+				}
+				return nil, markRetryExhausted(
+					"streaming aggregate call aborted after the shared degenerate-recovery budget was exhausted", attempt, lastErr)
 			}
 			retryResult, retryErr := prepareRetry(attemptCtx, policy, startedAt, attempt, lastErr, retryExecutionMeta{
 				Source:        "provider_wrapper",

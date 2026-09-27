@@ -65,3 +65,52 @@ func TestBuildTerminalRecordWithoutContextFacts(t *testing.T) {
 		t.Fatalf("context facts = %+v, want zero", record)
 	}
 }
+
+// TestBuildTerminalRecordCapturesEvidenceColumns 锁定 P0-2 证据列：终态记录携带
+// 终结信号、参数错误分类与取消归因，离线无需 HTTP 工件即可区分退化形态。
+func TestBuildTerminalRecordCapturesEvidenceColumns(t *testing.T) {
+	finishedAt := time.Date(2026, 9, 28, 1, 10, 0, 0, time.UTC)
+	record := BuildTerminalRecord(TerminalRecordInput{
+		LLMRequestID: "req-evidence",
+		SessionID:    "sess-evidence",
+		StartedAt:    finishedAt.Add(-2 * time.Second),
+		FinishedAt:   finishedAt,
+		Payload: map[string]interface{}{
+			"success":         false,
+			"error_code":      "upstream_invalid_response",
+			"terminal_seen":   true,
+			"arg_error_class": "bare_literal",
+			"cancel_source":   "user_interrupt",
+			"cancel_cause":    "session_end",
+			"cancel_reason":   "user pressed Esc",
+		},
+	})
+	if !record.TerminalSeen {
+		t.Fatalf("terminal_seen must be captured: %+v", record)
+	}
+	if record.ArgErrorClass != "bare_literal" {
+		t.Fatalf("arg_error_class=%q", record.ArgErrorClass)
+	}
+	if record.CancelSource != "user_interrupt" || record.CancelCause != "session_end" || record.CancelReason != "user pressed Esc" {
+		t.Fatalf("cancel attribution = %q/%q/%q", record.CancelSource, record.CancelCause, record.CancelReason)
+	}
+}
+
+// TestBuildTerminalRecordOmitsUnobservedEvidence 锁定缺失语义：载荷未带证据列时
+// 保持零值（未观测），不得由状态/错误码推断出 terminal_seen=true。
+func TestBuildTerminalRecordOmitsUnobservedEvidence(t *testing.T) {
+	finishedAt := time.Date(2026, 9, 28, 1, 12, 0, 0, time.UTC)
+	record := BuildTerminalRecord(TerminalRecordInput{
+		LLMRequestID: "req-legacy-evidence",
+		SessionID:    "sess-legacy-evidence",
+		StartedAt:    finishedAt.Add(-time.Second),
+		FinishedAt:   finishedAt,
+		Payload: map[string]interface{}{
+			"success":    false,
+			"error_code": "upstream_invalid_response",
+		},
+	})
+	if record.TerminalSeen || record.ArgErrorClass != "" || record.CancelSource != "" || record.CancelCause != "" || record.CancelReason != "" {
+		t.Fatalf("unobserved evidence must stay zero-valued: %+v", record)
+	}
+}

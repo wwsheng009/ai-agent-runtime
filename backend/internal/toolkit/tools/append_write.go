@@ -72,6 +72,10 @@ func (w *AppendWriteTool) DefinitionMetadata() map[string]interface{} {
 		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassIdempotencyKeyRequired,
+		// file_path is a local write target that may not exist yet (P1-4).
+		runtimetypes.ToolMetadataPathRolesKey: map[string]interface{}{
+			"file_path": runtimetypes.ToolPathRoleOutput,
+		},
 	}
 }
 
@@ -169,12 +173,23 @@ func (w *AppendWriteTool) Execute(ctx context.Context, params map[string]interfa
 	actualOffset := int64(len(oldContentBytes))
 	chunkBytes := []byte(content)
 	if truncateFirst && readErr == nil && oldContent == content {
+		recordFileWrite(ctx, absPath, oldContentBytes, "append_write")
 		return idempotentAppendWriteResult(absPath, actualOffset, content, expectedOffset, hasExpectedOffset, true), nil
+	}
+	if truncateFirst && readErr == nil {
+		// A truncating first chunk overwrites whatever is on disk: apply the
+		// same stale-write guard as write, or an external edit is silently
+		// lost (2026-09-27 review H6).
+		verdict := evaluateStaleWrite(ctx, absPath, oldContentBytes)
+		if shouldRefuseStaleWrite(verdict) {
+			return staleWriteFailure(absPath, verdict.CurrentSHA, verdict.LastRecord, false), nil
+		}
 	}
 	if !truncateFirst && hasExpectedOffset {
 		replayedSize := expectedOffset + int64(len(chunkBytes))
 		if actualOffset == replayedSize && expectedOffset <= actualOffset &&
 			string(oldContentBytes[int(expectedOffset):]) == content {
+			recordFileWrite(ctx, absPath, oldContentBytes, "append_write")
 			return idempotentAppendWriteResult(absPath, actualOffset, content, expectedOffset, true, false), nil
 		}
 		if actualOffset != expectedOffset {
@@ -209,6 +224,11 @@ func (w *AppendWriteTool) Execute(ctx context.Context, params map[string]interfa
 		}, nil
 	}
 	newContent := string(newContentBytes)
+	// Record the session's own append/overwrite: without it, the next edit or
+	// multiedit mistakes this session's append for an external change and
+	// refuses, and a truncating overwrite bypasses read-before-write entirely
+	// (2026-09-27 review H6).
+	recordFileWrite(ctx, absPath, newContentBytes, "append_write")
 
 	action := transferResult.Action
 	if truncateFirst && transferResult.Created {

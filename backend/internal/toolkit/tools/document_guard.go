@@ -44,6 +44,22 @@ var documentOverwriteExtensions = map[string]struct{}{
 // An NTFS alternate-data-stream spelling ("report.docx::$DATA") addresses the
 // same file content, so the stream suffix is cut before the extension lookup.
 func documentExtensionRefusal(path string) string {
+	if ext := documentExtensionRefusalForSpelling(path); ext != "" {
+		return ext
+	}
+	// The write lands on the link target: a ".txt" alias pointing at
+	// report.rtf would pass an extension-only check while the in-place write
+	// replaces the real document (2026-09-27 review H16). Missing paths keep
+	// the lexical verdict (nothing to resolve yet).
+	if resolved, err := filepath.EvalSymlinks(strings.TrimSpace(path)); err == nil && strings.TrimSpace(resolved) != "" {
+		return documentExtensionRefusalForSpelling(resolved)
+	}
+	return ""
+}
+
+// documentExtensionRefusalForSpelling applies the extension check to one path
+// spelling (no link resolution).
+func documentExtensionRefusalForSpelling(path string) string {
 	name := filepath.Base(strings.TrimSpace(path))
 	if idx := strings.Index(name, ":"); idx >= 0 {
 		name = name[:idx]

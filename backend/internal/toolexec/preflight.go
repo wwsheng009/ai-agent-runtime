@@ -2,7 +2,9 @@ package toolexec
 
 import (
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,7 +33,32 @@ type PreflightRequest struct {
 	// PathExists optionally overrides filesystem checks (tests).
 	// It receives the resolved absolute/candidate path after WorkspaceRoot join.
 	PathExists func(path string) bool
+	// PathProbe optionally overrides the richer filesystem probe used to tell
+	// "missing" apart from "cannot inspect" (permission/I/O). It receives the
+	// same resolved path as PathExists. When nil, PathExists (or os.Stat) is
+	// used and only existence/missing can be reported.
+	PathProbe func(path string) PathProbeResult
+	// PathRewriteValidator, when set, re-validates the arguments after an
+	// auto-heal path rewrite. A non-nil error cancels the rewrite (arguments are
+	// restored) so a healed path can never skip the policy/sandbox checks the
+	// original call had to pass (P1-4 item 5).
+	PathRewriteValidator func(args map[string]interface{}) error
 }
+
+// PathProbeResult classifies one filesystem probe (P1-4 item 4): a missing leaf
+// is an input error, while a permission/I/O failure must not be reported as
+// TOOL_PATH_NOT_FOUND.
+type PathProbeResult int
+
+const (
+	// PathProbeMissing: the path was inspected and does not exist.
+	PathProbeMissing PathProbeResult = iota
+	// PathProbeExists: the path exists and could be stat'ed.
+	PathProbeExists
+	// PathProbeIndeterminate: the path could not be inspected (permission or
+	// I/O error). Callers must not treat it as a plain missing path.
+	PathProbeIndeterminate
+)
 
 // PreflightDecision describes whether execution should proceed.
 type PreflightDecision struct {
@@ -206,6 +233,22 @@ func ApplyPreflight(memory *Memory, req PreflightRequest) PreflightDecision {
 	}
 
 	if pathErr, pathValue := preflightMissingReadPath(req); pathErr != "" {
+		if pathErr == PreflightPathIndeterminateReason {
+			// Permission/I/O failures are not typos: the same path cannot be fixed
+			// by picking a nearby candidate, and a blind retry cannot succeed.
+			// Report the dedicated code instead of TOOL_PATH_NOT_FOUND (P1-4).
+			decision.Allow = false
+			decision.ErrorCode = string(runtimeerrors.ErrToolPathAccessFailed)
+			decision.Error = fmt.Sprintf("%s: %s", pathErr, pathValue)
+			decision.Retryable = false
+			decision.Preflight = "path_access"
+			decision.NextAction = fmt.Sprintf(
+				"Path could not be inspected (permission or I/O error): %s. Fix permissions/ownership or choose a readable path, then retry. Do not retry the same path unchanged.",
+				pathValue,
+			)
+			observability.RecordToolPreflight(decision.Preflight, false)
+			return decision
+		}
 		// Unique high-confidence sibling (case / extension / close typo): rewrite
 		// the single missing content path and allow the read-like tool to run.
 		// Multi-path batches stay on the deny/partial path to avoid silent wrong-file reads.
@@ -214,7 +257,29 @@ func ApplyPreflight(memory *Memory, req PreflightRequest) PreflightDecision {
 				// Honor PathExists hooks (tests / virtual FS). Only rewrite when the
 				// healed candidate is considered present by the same checker used for
 				// the original miss — never invent a path that still fails existence.
-				if pathExistsChecker(req)(healedPath) && rewritePathLikeArgs(req.Args, pathValue, healedPath) {
+				if pathExistsChecker(req)(healedPath) && rewritePathLikeArgs(req.Args, req.Metadata, pathValue, healedPath) {
+					if validator := req.PathRewriteValidator; validator != nil {
+						if verifyErr := validator(req.Args); verifyErr != nil {
+							// The healed path must pass the same policy/sandbox checks as
+							// a fresh call: revert the rewrite and deny with miss guidance
+							// instead of silently executing an unvalidated path.
+							rewritePathLikeArgs(req.Args, req.Metadata, healedPath, pathValue)
+							decision.Allow = false
+							decision.ErrorCode = string(runtimeerrors.ErrToolPathNotFound)
+							decision.Error = fmt.Sprintf("%s: %s (auto-heal rejected by policy: %s)", pathErr, pathValue, verifyErr.Error())
+							decision.Retryable = false
+							decision.PathCandidates = hints
+							decision.Preflight = "path_existence"
+							decision.NextAction = fmt.Sprintf(
+								"Path not found: %s. The nearby candidate %q exists but is outside the execution boundary (%s). Pick a path inside the allowed scope (or ls/glob under the parent), then call the tool again. Do not retry the same missing path unchanged.",
+								pathValue,
+								healedPath,
+								verifyErr.Error(),
+							)
+							observability.RecordToolPreflight(decision.Preflight, false)
+							return decision
+						}
+					}
 					decision.Allow = true
 					decision.PathAutoHealed = true
 					decision.OriginalPath = pathValue
@@ -519,9 +584,9 @@ func strengthenEmptyReplayAction(existing string, count int) string {
 // firstMissingPathHint extracts the first content path from args for circuit-open
 // candidate recomputation when stored candidates are missing.
 func firstMissingPathHint(req PreflightRequest) string {
-	candidates := collectContentReadPathCandidates(req.InputSchema, req.Args)
+	candidates := collectContentReadPathCandidates(req.Metadata, req.InputSchema, req.Args)
 	if len(candidates) == 0 {
-		candidates = collectReadPathCandidates(req.InputSchema, req.Args)
+		candidates = collectReadPathCandidates(req.Metadata, req.InputSchema, req.Args)
 	}
 	exists := pathExistsChecker(req)
 	for _, candidate := range candidates {
@@ -1300,14 +1365,15 @@ func preflightMissingReadPath(req PreflightRequest) (string, string) {
 	if !shouldPreflightPaths(req.Metadata, req.InputSchema, req.Args) {
 		return "", ""
 	}
-	exists := pathExistsChecker(req)
+	probe := pathProbeChecker(req)
 	// Prefer content targets (file_path / paths / files[]) over execution roots
 	// (cwd/workdir). A present workdir must not soft-allow a missing single file.
-	candidates := collectContentReadPathCandidates(req.InputSchema, req.Args)
+	candidates := collectContentReadPathCandidates(req.Metadata, req.InputSchema, req.Args)
 	if len(candidates) == 0 {
-		candidates = collectReadPathCandidates(req.InputSchema, req.Args)
+		candidates = collectReadPathCandidates(req.Metadata, req.InputSchema, req.Args)
 	}
 	var firstMissing string
+	var firstIndeterminate string
 	existing := 0
 	checked := 0
 	for _, candidate := range candidates {
@@ -1320,15 +1386,20 @@ func preflightMissingReadPath(req PreflightRequest) (string, string) {
 			continue
 		}
 		checked++
-		if !exists(path) {
+		switch probe(path) {
+		case PathProbeExists:
+			existing++
+		case PathProbeIndeterminate:
+			if firstIndeterminate == "" {
+				firstIndeterminate = path
+			}
+		default:
 			if firstMissing == "" {
 				firstMissing = path
 			}
-			continue
 		}
-		existing++
 	}
-	if firstMissing == "" || checked == 0 {
+	if checked == 0 {
 		return "", ""
 	}
 	// Multi-path batches: when at least one content target exists, allow the tool
@@ -1337,10 +1408,34 @@ func preflightMissingReadPath(req PreflightRequest) (string, string) {
 	if existing > 0 {
 		return "", ""
 	}
-	return "path not found", firstMissing
+	// Report a plain miss first (backward compatible, most actionable), then the
+	// permission/I/O class which must not be mislabeled as "not found".
+	if firstMissing != "" {
+		return PreflightPathMissingReason, firstMissing
+	}
+	if firstIndeterminate != "" {
+		return PreflightPathIndeterminateReason, firstIndeterminate
+	}
+	return "", ""
 }
 
+// PreflightPathMissingReason / PreflightPathIndeterminateReason are the stable
+// reasons returned by the path preflight. The indeterminate class (permission
+// or I/O error) gets its own error code so a retry with the same path is not
+// encouraged the way a plain typo fix is (P1-4 item 4).
+const (
+	PreflightPathMissingReason       = "path not found"
+	PreflightPathIndeterminateReason = "path not inspectable"
+)
+
 func shouldPreflightPaths(metadata, schema, args map[string]interface{}) bool {
+	// P1-4: only runtime-owned paths are probed on this host. MCP tool servers,
+	// browser tools and opaque remote backends resolve their own paths, so a
+	// local stat (or local candidate enumeration) would only produce false
+	// denials for paths that never existed on this filesystem.
+	if runtimetypes.FSOwnerFromMetadata(metadata) != runtimetypes.ToolFSOwnerRuntime {
+		return false
+	}
 	// Explicit opt-out / opt-in via definition metadata.
 	if enabled, ok := runtimetypes.BoolMetadataValue(metadata, runtimetypes.ToolMetadataPathPreflightKey); ok {
 		return enabled
@@ -1441,7 +1536,7 @@ func schemaPropertyNames(schema map[string]interface{}) []string {
 	return names
 }
 
-func collectReadPathCandidates(schema map[string]interface{}, args map[string]interface{}) []string {
+func collectReadPathCandidates(metadata, schema, args map[string]interface{}) []string {
 	if len(args) == 0 {
 		return nil
 	}
@@ -1456,6 +1551,9 @@ func collectReadPathCandidates(schema map[string]interface{}, args map[string]in
 	seen := map[string]struct{}{}
 	for _, key := range keys {
 		if !isPathLikeKey(key) {
+			continue
+		}
+		if pathRoleSkipsExistencePreflight(metadata, key) {
 			continue
 		}
 		for _, path := range stringValues(args[key]) {
@@ -1474,6 +1572,9 @@ func collectReadPathCandidates(schema map[string]interface{}, args map[string]in
 	if rawFiles, ok := args["files"]; ok {
 		for _, item := range asObjectSlice(rawFiles) {
 			for _, key := range []string{"file_path", "path", "filepath"} {
+				if pathRoleSkipsExistencePreflight(metadata, key) {
+					continue
+				}
 				if path := normalizePathArgPlaceholder(fmt.Sprint(item[key])); path != "" && path != "<nil>" {
 					if _, ok := seen[path]; ok {
 						continue
@@ -1491,7 +1592,7 @@ func collectReadPathCandidates(schema map[string]interface{}, args map[string]in
 // content inputs (file_path / paths / files[]), excluding execution roots such as
 // cwd/workdir. Used by multi-path soft-allow so a present workdir never masks a
 // missing single-file target.
-func collectContentReadPathCandidates(schema map[string]interface{}, args map[string]interface{}) []string {
+func collectContentReadPathCandidates(metadata, schema, args map[string]interface{}) []string {
 	if len(args) == 0 {
 		return nil
 	}
@@ -1505,6 +1606,9 @@ func collectContentReadPathCandidates(schema map[string]interface{}, args map[st
 	seen := map[string]struct{}{}
 	for _, key := range keys {
 		if !isPathLikeKey(key) || isExecutionRootPathKey(key) {
+			continue
+		}
+		if pathRoleSkipsExistencePreflight(metadata, key) {
 			continue
 		}
 		for _, path := range stringValues(args[key]) {
@@ -1522,6 +1626,9 @@ func collectContentReadPathCandidates(schema map[string]interface{}, args map[st
 	if rawFiles, ok := args["files"]; ok {
 		for _, item := range asObjectSlice(rawFiles) {
 			for _, key := range []string{"file_path", "path", "filepath"} {
+				if pathRoleSkipsExistencePreflight(metadata, key) {
+					continue
+				}
 				if path := normalizePathArgPlaceholder(fmt.Sprint(item[key])); path != "" && path != "<nil>" {
 					if _, ok := seen[path]; ok {
 						continue
@@ -1619,28 +1726,83 @@ func isMutationLikeKey(key string) bool {
 	}
 }
 
+// pathRoleSkipsExistencePreflight reports whether a declared path role never
+// requires the leaf to exist before execution (output / inout / workdir, or an
+// unrecognized declared role). Undeclared keys keep the legacy name-based
+// heuristic and are treated as inputs.
+func pathRoleSkipsExistencePreflight(metadata map[string]interface{}, key string) bool {
+	role, declared := runtimetypes.PathRoleFromMetadata(metadata, key)
+	if !declared {
+		return false
+	}
+	return role != runtimetypes.ToolPathRoleInput
+}
+
+// rewriteSafeForPathRole reports whether auto-heal may rewrite a declared path
+// argument: only runtime-owned inputs qualify. Output/workdir/unrecognized
+// roles and remote-owned tools must never be silently rewritten (P1-4 item 5).
+func rewriteSafeForPathRole(metadata map[string]interface{}, key string) bool {
+	if runtimetypes.FSOwnerFromMetadata(metadata) != runtimetypes.ToolFSOwnerRuntime {
+		return false
+	}
+	role, declared := runtimetypes.PathRoleFromMetadata(metadata, key)
+	return !declared || role == runtimetypes.ToolPathRoleInput
+}
+
 // pathExistsChecker returns a function that checks path existence using the
 // request's WorkspaceRoot for relative paths (matching toolkit SetBasePath).
 // Custom PathExists hooks still receive the resolved path.
 func pathExistsChecker(req PreflightRequest) func(path string) bool {
+	probe := pathProbeChecker(req)
+	return func(path string) bool {
+		return probe(path) == PathProbeExists
+	}
+}
+
+// pathProbeChecker returns the filesystem probe for one request, resolving
+// relative targets exactly like pathExistsChecker (workspace root first).
+func pathProbeChecker(req PreflightRequest) func(path string) PathProbeResult {
 	root := strings.TrimSpace(req.WorkspaceRoot)
 	if root != "" && !filepath.IsAbs(root) {
 		if abs, err := filepath.Abs(root); err == nil {
 			root = abs
 		}
 	}
-	hook := req.PathExists
-	return func(path string) bool {
+	probeHook := req.PathProbe
+	existsHook := req.PathExists
+	return func(path string) PathProbeResult {
 		resolved := resolvePreflightPath(path, root)
-		if hook != nil {
+		if probeHook != nil {
+			return probeHook(resolved)
+		}
+		if existsHook != nil {
 			// Prefer hook on resolved path; also accept original relative form so
 			// existing unit tests that stub by logical path keep working.
-			if hook(resolved) || (resolved != path && hook(path)) {
-				return true
+			if existsHook(resolved) || (resolved != path && existsHook(path)) {
+				return PathProbeExists
 			}
-			return false
+			return PathProbeMissing
 		}
-		return defaultPathExists(resolved)
+		return statPathProbe(resolved)
+	}
+}
+
+// statPathProbe classifies os.Stat. Only fs.ErrNotExist is "missing"; every
+// other failure (permission denied, I/O error, ENOTDIR) is indeterminate so the
+// caller can report a distinct code instead of TOOL_PATH_NOT_FOUND.
+func statPathProbe(path string) PathProbeResult {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return PathProbeMissing
+	}
+	_, err := os.Stat(trimmed)
+	switch {
+	case err == nil:
+		return PathProbeExists
+	case stderrors.Is(err, fs.ErrNotExist):
+		return PathProbeMissing
+	default:
+		return PathProbeIndeterminate
 	}
 }
 
@@ -1662,19 +1824,16 @@ func resolvePreflightPath(path, workspaceRoot string) string {
 }
 
 func defaultPathExists(path string) bool {
-	trimmed := strings.TrimSpace(path)
-	if trimmed == "" {
-		return false
-	}
 	// Prefer the path as given (already workspace-resolved when applicable).
-	if _, err := os.Stat(trimmed); err == nil {
+	if statPathProbe(path) == PathProbeExists {
 		return true
 	}
 	// Fall back to process-cwd absolute form for bare relative paths when no
 	// workspace root was supplied.
-	if !filepath.IsAbs(trimmed) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed != "" && !filepath.IsAbs(trimmed) {
 		if abs, err := filepath.Abs(trimmed); err == nil {
-			if _, err := os.Stat(abs); err == nil {
+			if statPathProbe(abs) == PathProbeExists {
 				return true
 			}
 		}
@@ -1699,9 +1858,9 @@ func canAutoHealSingleMissingContentPath(req PreflightRequest) bool {
 	if hasMutationLikeArgs(req.Args) || schemaHasMutationLikeProperty(req.InputSchema) {
 		return false
 	}
-	candidates := collectContentReadPathCandidates(req.InputSchema, req.Args)
+	candidates := collectContentReadPathCandidates(req.Metadata, req.InputSchema, req.Args)
 	if len(candidates) == 0 {
-		candidates = collectReadPathCandidates(req.InputSchema, req.Args)
+		candidates = collectReadPathCandidates(req.Metadata, req.InputSchema, req.Args)
 	}
 	// Only auto-heal when exactly one content path is present (after trim).
 	count := 0
@@ -1737,7 +1896,11 @@ func uniqueHighConfidencePathCandidate(missing string, req PreflightRequest) (he
 	}
 	resolved := resolvePreflightPath(missing, root)
 	scored := rankNearbyPathCandidates(resolved)
-	if len(scored) == 0 && resolved != missing {
+	// The raw-relative fallback only makes sense when relative paths really are
+	// CWD-anchored (no workspace root). With a bound workspace it ranked the
+	// process CWD and surfaced out-of-workspace file names as candidates
+	// (2026-09-27 review H15).
+	if len(scored) == 0 && resolved != missing && strings.TrimSpace(root) == "" {
 		scored = rankNearbyPathCandidates(missing)
 	}
 	if len(scored) == 0 {
@@ -1782,8 +1945,15 @@ func presentPathCandidate(candidate, originalMissing, workspaceRoot string) stri
 
 // rewritePathLikeArgs replaces exact path occurrences in path-like args.
 // Mutates args in place and returns whether any rewrite happened.
-func rewritePathLikeArgs(args map[string]interface{}, from, to string) bool {
+//
+// Auto-heal only ever corrects runtime-owned read inputs (P1-4 item 5):
+// declared output/inout/workdir roles and remote-owned tools are skipped so a
+// silent rewrite can never redirect a write target or a server-side path.
+func rewritePathLikeArgs(args map[string]interface{}, metadata map[string]interface{}, from, to string) bool {
 	if len(args) == 0 {
+		return false
+	}
+	if runtimetypes.FSOwnerFromMetadata(metadata) != runtimetypes.ToolFSOwnerRuntime {
 		return false
 	}
 	from = strings.TrimSpace(from)
@@ -1806,6 +1976,8 @@ func rewritePathLikeArgs(args map[string]interface{}, from, to string) bool {
 			if key != "files" {
 				continue
 			}
+		} else if !rewriteSafeForPathRole(metadata, key) {
+			continue
 		}
 		switch typed := raw.(type) {
 		case string:
@@ -1836,6 +2008,9 @@ func rewritePathLikeArgs(args map[string]interface{}, from, to string) bool {
 					}
 				case map[string]interface{}:
 					for _, nk := range []string{"file_path", "path", "filepath"} {
+						if !rewriteSafeForPathRole(metadata, nk) {
+							continue
+						}
 						if v, exists := nested[nk]; exists {
 							if s, ok := v.(string); ok {
 								if next, ok := rewriteString(s); ok {

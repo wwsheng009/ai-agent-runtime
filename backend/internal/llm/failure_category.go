@@ -75,6 +75,21 @@ func FailureCategoryFromErrorCode(code string) string {
 		return FailureCategoryInterrupted
 	case "PERMISSION_DENIED", "TOOL_ERROR", "TOOL_DENIED", "HOOK_BLOCKED":
 		return FailureCategoryToolError
+	// STALE_CONTEXT 是编辑/补丁的旧内容失配（apply_patch/edit 的 old_string、
+	// @@ 上下文不再匹配），与「模型窗口超限」是两件不同的事。它必须先于下面
+	// 的 CONTEXT 子串兜底命中，否则会被误报成 context_overflow，把排查方向
+	// 引向「压缩对话/扩大窗口」。（2026-09-27 证据：139 条 STALE_CONTEXT 被
+	// 展示为上下文超限。）
+	case "STALE_CONTEXT", "STALE_EDIT", "STALE_PATCH_CONTEXT":
+		return FailureCategoryToolError
+	// AGENT_READ_ONLY 是只读执行边界的策略拒绝（不可被审批/bypass 覆盖）。
+	// 它既不是未知错误，也不是模型上下文问题；归类为工具侧失败，具体语义由
+	// 错误码本身与 next_action 表达。
+	case "AGENT_READ_ONLY", "AGENT_PERMISSION_DENIED":
+		return FailureCategoryToolError
+	// 会话租约/状态冲突是监督状态机语义，不是「未知」。
+	case "SESSION_LEASE_CONFLICT", "AGENT_RUN_SUPERSEDED", "AGENT_BUSY":
+		return FailureCategoryToolError
 	}
 	// 子串兜底：错误码来自多个包（llm / toolresult / runtimeerrors），
 	// 前缀不统一，但语义关键词是稳定的。

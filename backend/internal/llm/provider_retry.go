@@ -266,18 +266,44 @@ const (
 // exhausted completion budget, where doubling max_tokens is what changes the
 // next sample: reasoning_only_empty_reply spends the whole budget on reasoning
 // and returns neither content nor a tool call, while truncated_tool_call cuts a
-// tool call mid-markup (typically finish_reason=length). invalid_tool_arguments
-// joins them because the aggregated arguments were cut off mid-JSON often enough
-// (finish_reason=length) that a wider budget changes the next sample. Other
-// degenerate reasons (empty_reply) are not budget-bound and must not widen the
-// request.
+// tool call mid-markup (typically finish_reason=length). Other degenerate
+// reasons (empty_reply) are not budget-bound and must not widen the request.
+//
+// invalid_tool_arguments is deliberately NOT listed here: the retry reason only
+// says the aggregated arguments failed to parse as a JSON object, which covers
+// both budget cut-offs and plain JSON syntax degeneration (e.g. `{"timeout":
+// 60s}` with finish_reason=tool_calls). Escalation for that class requires
+// truncation evidence, see escalateOutputBudgetForDegenerateReply.
 func isOutputBudgetEscalationReason(reason string) bool {
 	switch strings.TrimSpace(reason) {
-	case "reasoning_only_empty_reply", "truncated_tool_call", "invalid_tool_arguments":
+	case "reasoning_only_empty_reply", "truncated_tool_call":
 		return true
 	default:
 		return false
 	}
+}
+
+// toolCallTruncationEvidence is implemented by adapter.MalformedToolCallError:
+// it reports whether the malformed arguments were cut off by the completion
+// budget (finish_reason=length/max_tokens) rather than being a JSON syntax
+// degeneration. Declared as a narrow interface here so the retry policy does
+// not depend on adapter error construction details.
+type toolCallTruncationEvidence interface {
+	ToolCallArgumentsTruncated() bool
+}
+
+// hasToolCallTruncationEvidence reports whether err carries positive evidence
+// that the tool-call arguments were truncated by the output budget. Wrapped
+// errors are supported via errors.As.
+func hasToolCallTruncationEvidence(err error) bool {
+	if err == nil {
+		return false
+	}
+	var evidence toolCallTruncationEvidence
+	if stderrs.As(err, &evidence) {
+		return evidence.ToolCallArgumentsTruncated()
+	}
+	return false
 }
 
 // escalateOutputBudgetForDegenerateReply widens max_tokens after a degenerate
@@ -296,8 +322,15 @@ func escalateOutputBudgetForDegenerateReply(currentMaxTokens *int, escalations i
 	if currentMaxTokens == nil || err == nil || escalations >= outputBudgetEscalationMaxCount {
 		return false
 	}
-	if !isOutputBudgetEscalationReason(classifyRetryableLLMError(err).Reason) {
-		return false
+	reason := classifyRetryableLLMError(err).Reason
+	if !isOutputBudgetEscalationReason(reason) {
+		// invalid_tool_arguments 只有确认被 completion 预算截断时才扩大预算；
+		// 裸 duration / 双重字符串等语法退化与预算无关，翻倍只会用同样的
+		// prompt 重复采样（2026-09-27 证据：同参数哈希连续 3 次 attempt
+		// 完全相同，max_tokens 32000→64000，completion_tokens 仅 98/259）。
+		if reason != "invalid_tool_arguments" || !hasToolCallTruncationEvidence(err) {
+			return false
+		}
 	}
 	current := *currentMaxTokens
 	if current <= 0 {
@@ -338,6 +371,32 @@ func trackDegenerateOutputReply(consecutive *int, err error) (exhausted bool) {
 	}
 	*consecutive++
 	return *consecutive >= degenerateOutputReplyMaxStreak
+}
+
+// malformedSyntaxResampleLimit 是「语法类 invalid_tool_arguments」在 provider 层
+// 允许的同预算重采样次数上限：首败后只允许 1 次换采样（温度随机性仍可能恢复），
+// 再失败就停止重放。
+//
+// 依据（2026-09-27）：同一参数哈希的连续 attempt 完全相同，max_tokens
+// 32000→64000 而 completion_tokens 仅 98/259；继续重放只烧预算，真正的恢复杠杆
+// 是 agent 层把「参数非法 + schema」回注给模型（prompt 改变 → 请求 hash 改变）。
+// 真截断（有截断证据）走预算扩容路径，不计入该上限，也不受其约束。
+const malformedSyntaxResampleLimit = 1
+
+// trackMalformedSyntaxResample 统计同一调用内语法类 malformed 参数的重采样次数，
+// 达到上限时报告 true（重试循环必须停止并交回上层）。
+func trackMalformedSyntaxResample(count *int, err error) bool {
+	if count == nil || err == nil {
+		return false
+	}
+	if classifyRetryableLLMError(err).Reason != "invalid_tool_arguments" {
+		return false
+	}
+	if hasToolCallTruncationEvidence(err) {
+		return false
+	}
+	*count++
+	return *count > malformedSyntaxResampleLimit
 }
 
 // isHandoffEligibleError reports whether an inner-loop exhaustion should hand

@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
@@ -45,25 +46,53 @@ type viewDedupEntry struct {
 	ModTimeNano int64
 	Size        int64
 	ReadAt      time.Time
+	// Gen is the registration generation; the eviction queue only drops an
+	// entry when the queued generation still matches (2026-09-27 review H11).
+	Gen uint64
+}
+
+// viewDedupOrderItem is one registration in the eviction queue. Keeping the
+// generation means a consumed-then-re-registered key cannot be dropped from
+// under the new entry by its own stale queue slot.
+type viewDedupOrderItem struct {
+	key string
+	gen uint64
 }
 
 type sessionViewDedup struct {
-	mu      sync.Mutex
-	entries map[string]viewDedupEntry
-	order   []string
-	touched time.Time
+	sessionID string
+	mu        sync.Mutex
+	entries   map[string]viewDedupEntry
+	order     []viewDedupOrderItem
+	touched   time.Time
+	gen       uint64
+	// evicted mirrors the read ledger's flag: the idle sweep marks the bucket,
+	// and users re-fetch instead of operating on a bucket that is being
+	// dropped (2026-09-27 review H19).
+	evicted atomic.Bool
 }
 
 var sessionViewDedups sync.Map // sessionID -> *sessionViewDedup
 
 func viewDedupForSession(sessionID string) *sessionViewDedup {
 	maybeSweepSessionReadState()
-	if existing, ok := sessionViewDedups.Load(sessionID); ok {
-		return existing.(*sessionViewDedup)
+	for attempt := 0; attempt < 8; attempt++ {
+		if existing, ok := sessionViewDedups.Load(sessionID); ok {
+			state := existing.(*sessionViewDedup)
+			if !state.evicted.Load() {
+				return state
+			}
+			sessionViewDedups.CompareAndDelete(sessionID, existing)
+			continue
+		}
+		created := &sessionViewDedup{sessionID: sessionID, entries: make(map[string]viewDedupEntry)}
+		actual, _ := sessionViewDedups.LoadOrStore(sessionID, created)
+		state := actual.(*sessionViewDedup)
+		if !state.evicted.Load() {
+			return state
+		}
 	}
-	created := &sessionViewDedup{entries: make(map[string]viewDedupEntry)}
-	actual, _ := sessionViewDedups.LoadOrStore(sessionID, created)
-	return actual.(*sessionViewDedup)
+	return &sessionViewDedup{sessionID: sessionID, entries: make(map[string]viewDedupEntry)}
 }
 
 func viewDedupKey(path string, offset, limit int) string {
@@ -93,7 +122,13 @@ func (s *sessionViewDedup) idleSince(now time.Time, ttl time.Duration) bool {
 	if s.touched.IsZero() {
 		return false
 	}
-	return now.Sub(s.touched) > ttl
+	if now.Sub(s.touched) <= ttl {
+		return false
+	}
+	// Mark under the lock: a concurrent user either sees the flag and
+	// re-fetches, or has already finished (2026-09-27 review H19).
+	s.evicted.Store(true)
+	return true
 }
 
 // viewDedupCommit deletes a peeked dedup entry once the stub is really
@@ -129,6 +164,9 @@ func viewDedupPeek(ctx context.Context, path string, info os.FileInfo, offset, l
 	state := viewDedupForSession(sessionID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if state.evicted.Load() {
+		return nil, false, nil
+	}
 	state.touched = time.Now()
 	key := viewDedupKey(ledgerPath, offset, limit)
 	entry, ok := state.entries[key]
@@ -185,11 +223,12 @@ func viewDedupPeek(ctx context.Context, path string, info os.FileInfo, offset, l
 	}
 	modTimeNano := entry.ModTimeNano
 	size := entry.Size
+	gen := entry.Gen
 	commit := func() {
 		state.mu.Lock()
 		defer state.mu.Unlock()
 		current, exists := state.entries[key]
-		if !exists || current.ModTimeNano != modTimeNano || current.Size != size {
+		if !exists || current.Gen != gen || current.ModTimeNano != modTimeNano || current.Size != size {
 			return
 		}
 		delete(state.entries, key)
@@ -215,11 +254,12 @@ func recordViewWindowRead(ctx context.Context, path string, info os.FileInfo, of
 	state := viewDedupForSession(sessionID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if state.evicted.Load() {
+		return
+	}
 	state.touched = time.Now()
 	key := viewDedupKey(ledgerPath, offset, limit)
-	if _, exists := state.entries[key]; !exists {
-		state.order = append(state.order, key)
-	}
+	state.gen++
 	state.entries[key] = viewDedupEntry{
 		Path:        ledgerPath,
 		Offset:      offset,
@@ -230,10 +270,17 @@ func recordViewWindowRead(ctx context.Context, path string, info os.FileInfo, of
 		ModTimeNano: info.ModTime().UnixNano(),
 		Size:        info.Size(),
 		ReadAt:      time.Now(),
+		Gen:         state.gen,
 	}
+	state.order = append(state.order, viewDedupOrderItem{key: key, gen: state.gen})
 	for len(state.order) > viewDedupMaxEntries {
 		oldest := state.order[0]
 		state.order = state.order[1:]
-		delete(state.entries, oldest)
+		// Only drop the entry when the queued slot still describes it: a
+		// consumed-and-re-registered key must not have its fresh entry removed
+		// by a stale queue slot (2026-09-27 review H11).
+		if current, ok := state.entries[oldest.key]; ok && current.Gen == oldest.gen {
+			delete(state.entries, oldest.key)
+		}
 	}
 }

@@ -38,7 +38,7 @@ func (loop *ReActLoop) ensureToolExecMemory() *toolexec.Memory {
 // prepareToolExecution runs tool-agnostic preflight (schema required args,
 // terminal failure circuit, optional read-path existence, empty soft negative
 // cache) and attaches digest metadata.
-func (loop *ReActLoop) prepareToolExecution(metadata map[string]interface{}, toolName, toolCallID string, args map[string]interface{}, toolInfo *runtimeskill.ToolInfo) toolexec.PreflightDecision {
+func (loop *ReActLoop) prepareToolExecution(ctx context.Context, metadata map[string]interface{}, toolName, toolCallID string, args map[string]interface{}, toolInfo *runtimeskill.ToolInfo) toolexec.PreflightDecision {
 	var schema map[string]interface{}
 	var toolMeta map[string]interface{}
 	if toolInfo != nil {
@@ -46,15 +46,34 @@ func (loop *ReActLoop) prepareToolExecution(metadata map[string]interface{}, too
 		toolMeta = toolInfo.Metadata
 	}
 	decision := toolexec.ApplyPreflight(loop.ensureToolExecMemory(), toolexec.PreflightRequest{
-		ToolName:      toolName,
-		ToolCallID:    toolCallID,
-		Args:          args,
-		InputSchema:   schema,
-		Metadata:      toolMeta,
-		WorkspaceRoot: loop.preflightWorkspaceRoot(),
+		ToolName:             toolName,
+		ToolCallID:           toolCallID,
+		Args:                 args,
+		InputSchema:          schema,
+		Metadata:             toolMeta,
+		WorkspaceRoot:        loop.preflightWorkspaceRoot(),
+		PathRewriteValidator: loop.pathRewriteValidator(ctx, toolInfo),
 	})
 	toolexec.AttachPreflightMetadata(metadata, decision)
 	return decision
+}
+
+// pathRewriteValidator re-runs the policy/sandbox check on auto-healed
+// arguments so a silent path rewrite can never bypass the validation the
+// original call went through (P1-4 item 5). Returns nil when there is no tool
+// info or policy to validate with, which leaves the historical behavior.
+func (loop *ReActLoop) pathRewriteValidator(ctx context.Context, toolInfo *runtimeskill.ToolInfo) func(map[string]interface{}) error {
+	if loop == nil || loop.agent == nil || toolInfo == nil {
+		return nil
+	}
+	policy := loop.agent.GetToolExecutionPolicy()
+	if policy == nil {
+		return nil
+	}
+	info := *toolInfo
+	return func(args map[string]interface{}) error {
+		return policy.AllowToolCallWithContext(ctx, info, args)
+	}
 }
 
 // toolWorkspaceRoot returns the filesystem base path used by toolkit tools

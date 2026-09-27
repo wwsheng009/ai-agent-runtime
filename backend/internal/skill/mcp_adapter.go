@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 // MCPAdapter MCP 适配器
@@ -34,13 +35,26 @@ func (a *MCPAdapter) FindTool(toolName string) (ToolInfo, error) {
 		Name:             mcpregistry.CallableToolName(info, a.manager.ListTools()),
 		Description:      info.Tool.Description,
 		InputSchema:      cloneInputSchema(info.Tool.InputSchema),
-		Metadata:         cloneMeta(info.Metadata),
+		Metadata:         withRuntimeMCPMetadata(cloneMeta(info.Metadata)),
 		MCPName:          info.MCPName,
 		MaxParallelCalls: a.resolveMaxParallelCalls(info.MCPName),
 		MCPTrustLevel:    a.resolveTrustLevel(info.MCPName),
 		ExecutionMode:    a.resolveExecutionMode(info.MCPName),
 		Enabled:          info.Enabled,
 	}, nil
+}
+
+// withRuntimeMCPMetadata stamps the runtime-side filesystem owner on every MCP
+// tool definition (P1-4): the tool server resolves its own paths, so the local
+// read-path preflight must never stat them or enumerate local candidates. The
+// stamp is written by this host and never copied from server-provided metadata;
+// runtime-local tools keep the default (runtime) owner.
+func withRuntimeMCPMetadata(metadata map[string]interface{}) map[string]interface{} {
+	if metadata == nil {
+		metadata = map[string]interface{}{}
+	}
+	metadata[types.ToolMetadataFSOwnerKey] = types.ToolFSOwnerToolServer
+	return metadata
 }
 
 // CallTool 调用工具
@@ -150,7 +164,7 @@ func (a *MCPAdapter) ListTools() []ToolInfo {
 			Name:             callableNames[i],
 			Description:      t.Tool.Description,
 			InputSchema:      cloneInputSchema(t.Tool.InputSchema),
-			Metadata:         withMCPToolIdentity(cloneMeta(t.Metadata), t, callableNames[i]),
+			Metadata:         withRuntimeMCPMetadata(withMCPToolIdentity(cloneMeta(t.Metadata), t, callableNames[i])),
 			MCPName:          t.MCPName,
 			MaxParallelCalls: a.resolveMaxParallelCalls(t.MCPName),
 			MCPTrustLevel:    a.resolveTrustLevel(t.MCPName),

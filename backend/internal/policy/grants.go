@@ -218,6 +218,11 @@ const (
 type ShellReadOnlyAssessment struct {
 	Allowed bool
 	Reason  string
+	// Segment 是触发拒绝的具体命令段，SegmentIndex 是它在拆分结果中的序号
+	// （1 起，P1-5）。Reason 仍是稳定码：段信息只用于把失败位置回显给模型，
+	// 不参与判定，也不允许调用方据此放行。
+	Segment      string
+	SegmentIndex int
 }
 
 // AssessShellReadOnlyCommand validates one concrete shell command against the
@@ -252,9 +257,11 @@ func AssessShellReadOnlyCommand(command string) ShellReadOnlyAssessment {
 		return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonEmpty}
 	}
 
-	for _, segment := range segments {
+	for index, segment := range segments {
 		assessment := assessShellReadOnlySegment(segment)
 		if !assessment.Allowed {
+			assessment.Segment = strings.TrimSpace(segment)
+			assessment.SegmentIndex = index + 1
 			return assessment
 		}
 	}
@@ -286,6 +293,10 @@ func assessShellReadOnlySegment(segment string) ShellReadOnlyAssessment {
 		allowed = isReadOnlyGitCommand(fields[1:])
 	case "go":
 		allowed = isReadOnlyGoCommand(fields[1:])
+	case "select-object", "sort-object", "measure-object", "where-object":
+		// P1-5：只读流水后段的固定 cmdlet 形态（仅静态可验证的字面量参数）。
+		// 脚本块、计算属性、变量替换在命令级检查就会拒绝；这里再收紧参数形态。
+		allowed = isReadOnlyPipelineCmdlet(argv0, fields[1:])
 	case "npm", "pnpm", "yarn", "cargo", "python", "python3", "node", "pip", "pip3":
 		allowed = isReadOnlyVersionFlag(fields[1:])
 	}
@@ -322,6 +333,205 @@ func shellReadsFileContent(argv0 string) bool {
 	default:
 		return false
 	}
+}
+
+// isReadOnlyPipelineCmdlet 验证常用只读流水后段 cmdlet 的固定形态（P1-5）：
+// 只接受静态可验证的字面量参数。脚本块、计算属性、变量替换、类型转换与
+// 位置参数列表一律拒绝，宁可不放行也不做模糊归并。
+func isReadOnlyPipelineCmdlet(argv0 string, args []string) bool {
+	switch argv0 {
+	case "select-object":
+		return isReadOnlySelectObject(args)
+	case "sort-object":
+		return isReadOnlySortObject(args)
+	case "measure-object":
+		return isReadOnlyMeasureObject(args)
+	case "where-object":
+		return isReadOnlyWhereObject(args)
+	default:
+		return false
+	}
+}
+
+// isReadOnlySelectObject 只接受 `-First/-Skip <非负整数字面量>`（含
+// PowerShell 的 `-First:5` 形式）。Bare `Select-Object` 没有查询意义，同样拒绝。
+func isReadOnlySelectObject(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	seen := false
+	for i := 0; i < len(args); i++ {
+		token := strings.ToLower(strings.TrimSpace(args[i]))
+		switch {
+		case token == "-first" || token == "-skip":
+			if i+1 >= len(args) || !isNonNegativeIntLiteralToken(args[i+1]) {
+				return false
+			}
+			i++
+			seen = true
+		case strings.HasPrefix(token, "-first:"), strings.HasPrefix(token, "-skip:"):
+			if !isNonNegativeIntLiteralToken(token[strings.IndexByte(token, ':')+1:]) {
+				return false
+			}
+			seen = true
+		default:
+			return false
+		}
+	}
+	return seen
+}
+
+// isReadOnlySortObject 接受 bare `Sort-Object`、固定布尔开关、单个字面量属性名
+// （`-Property Name` / `-Property:Name` / 位置形式 `Sort-Object Name`）。
+func isReadOnlySortObject(args []string) bool {
+	positional := 0
+	for i := 0; i < len(args); i++ {
+		token := strings.ToLower(strings.TrimSpace(args[i]))
+		switch {
+		case token == "", token == "-descending", token == "-ascending", token == "-unique", token == "-casesensitive":
+			continue
+		case token == "-property":
+			if i+1 >= len(args) || !isReadOnlyPropertyName(args[i+1]) {
+				return false
+			}
+			i++
+		case strings.HasPrefix(token, "-property:"):
+			if !isReadOnlyPropertyName(token[len("-property:"):]) {
+				return false
+			}
+		case strings.HasPrefix(token, "-"):
+			return false
+		default:
+			positional++
+			if positional > 1 || !isReadOnlyPropertyName(args[i]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isReadOnlyMeasureObject 接受 bare `Measure-Object`、固定统计开关与单个字面量
+// 属性名；`-Line/-Word/-Character` 只作用于输入文本，没有副作用。
+func isReadOnlyMeasureObject(args []string) bool {
+	positional := 0
+	for i := 0; i < len(args); i++ {
+		token := strings.ToLower(strings.TrimSpace(args[i]))
+		switch token {
+		case "", "-sum", "-average", "-minimum", "-maximum", "-line", "-word", "-character", "-ignorewhitespace":
+			continue
+		case "-property":
+			if i+1 >= len(args) || !isReadOnlyPropertyName(args[i+1]) {
+				return false
+			}
+			i++
+		default:
+			if strings.HasPrefix(token, "-property:") && isReadOnlyPropertyName(token[len("-property:"):]) {
+				continue
+			}
+			if strings.HasPrefix(token, "-") {
+				return false
+			}
+			positional++
+			if positional > 1 || !isReadOnlyPropertyName(args[i]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isReadOnlyWhereObject 只接受字面量属性比较：
+//
+//	Where-Object -Property <Name> <Op> <Literal>
+//	Where-Object <Name> <Op> <Literal>
+//
+// 脚本块形式（`{ $_ ... }`）、计算属性、逻辑连接符与额外 token 全部拒绝。
+func isReadOnlyWhereObject(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	index := 0
+	if strings.EqualFold(strings.TrimSpace(args[0]), "-property") {
+		if len(args) < 4 || !isReadOnlyPropertyName(args[1]) {
+			return false
+		}
+		index = 2
+	} else if strings.HasPrefix(strings.TrimSpace(args[0]), "-") {
+		return false
+	} else if !isReadOnlyPropertyName(args[0]) {
+		return false
+	} else {
+		index = 1
+	}
+	if index+1 >= len(args) || index+2 != len(args) {
+		return false
+	}
+	if !isReadOnlyWhereOperator(args[index]) {
+		return false
+	}
+	return isReadOnlyWhereLiteral(args[index+1])
+}
+
+func isReadOnlyWhereOperator(token string) bool {
+	switch strings.ToLower(strings.TrimSpace(token)) {
+	case "-eq", "-ne", "-gt", "-ge", "-lt", "-le",
+		"-like", "-notlike", "-match", "-notmatch",
+		"-contains", "-notcontains":
+		return true
+	default:
+		return false
+	}
+}
+
+// isReadOnlyWhereLiteral 接受数字/单位字面量、引号字符串与普通词元；其余形态
+// （子表达式、类型转换、变量、属性解引用）一律拒绝。
+func isReadOnlyWhereLiteral(token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	if quote := token[:1]; quote == `"` || quote == `'` {
+		return len(token) >= 2 && strings.HasSuffix(token, quote)
+	}
+	return isReadOnlyWordToken(token)
+}
+
+// isReadOnlyPropertyName 接受属性名形态（字母数字开头，可含 . _ -）。
+func isReadOnlyPropertyName(token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" || strings.HasPrefix(token, "-") {
+		return false
+	}
+	return isReadOnlyWordToken(token)
+}
+
+// isReadOnlyWordToken 接受字母/数字与 . _ - / * 组成的普通词元（含 100kb 这类
+// PowerShell 字面量与 *.log 这类通配字面量）。
+func isReadOnlyWordToken(token string) bool {
+	for _, r := range token {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '-', r == '/', r == '*':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isNonNegativeIntLiteralToken 只接受纯十进制非负整数字面量。
+func isNonNegativeIntLiteralToken(token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	for _, r := range token {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func isReadOnlyRipgrepCommand(args []string) bool {
@@ -390,6 +600,33 @@ func IsShellReadOnlyCommand(command string) bool {
 func isReadOnlyGitCommand(args []string) bool {
 	if len(args) == 0 {
 		return false
+	}
+	// Leading global options that keep the following subcommand read-only:
+	// `-C <dir>` only changes the repository directory and `--no-pager` suppresses
+	// the pager. Every other leading option stays rejected: `-c`/`--config-env`
+	// can install hooks or a pager that executes code under a read-only-looking
+	// subcommand, so the classifier must not skip over them.
+	for len(args) > 0 {
+		raw := strings.TrimSpace(args[0])
+		token := strings.ToLower(raw)
+		if !strings.HasPrefix(token, "-") {
+			break // reached the subcommand
+		}
+		switch {
+		case token == "--no-pager", token == "--no-optional-locks":
+			args = args[1:]
+			continue
+		case raw == "-C":
+			// `-C <dir>` only changes the repository directory; the original case
+			// matters here because `-c key=value` (lowercase) stays rejected.
+			if len(args) < 2 {
+				return false
+			}
+			args = args[2:]
+			continue
+		default:
+			return false
+		}
 	}
 	sub := strings.ToLower(strings.TrimSpace(args[0]))
 	rest := args[1:]

@@ -131,6 +131,19 @@ type CacheRequestRecord struct {
 	ProviderRequestID   string      `json:"provider_request_id,omitempty"`
 	ErrorCategory       string      `json:"error_category,omitempty"`
 	CorrelationSource   string      `json:"correlation_source,omitempty"`
+	// TerminalSeen 标记本次请求是否观测到上游终结信号（finish_reason / 完成事件 /
+	// [DONE]）。与「是否被截断」分开记录（P0-2）：没有终结信号又拿到半截参数 =
+	// 传输中断；有终结信号但参数非法 = 模型退化，两者恢复路径不同。
+	TerminalSeen bool `json:"terminal_seen"`
+	// ArgErrorClass 是参数解析失败的结构化分类（bare_literal / unterminated_string /
+	// unterminated_container / not_object / invalid_escape / syntax_error / other），
+	// 无参数错误时为空。离线无需 HTTP 工件即可区分退化形态（P0-2 验收）。
+	ArgErrorClass string `json:"arg_error_class,omitempty"`
+	// CancelSource/CancelCause/CancelReason 记录请求被取消的来源与原因。进行中的
+	// 请求在中断兜底路径写入；会话结束由 chat actor 补齐（P0-2）。
+	CancelSource string `json:"cancel_source,omitempty"`
+	CancelCause  string `json:"cancel_cause,omitempty"`
+	CancelReason string `json:"cancel_reason,omitempty"`
 }
 
 // CacheStatusDistribution 缓存状态分布（overview 直接画饼）。

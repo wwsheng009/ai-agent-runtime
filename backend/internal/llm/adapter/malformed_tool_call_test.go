@@ -158,3 +158,58 @@ func TestMalformedToolCallError_DegenerateLiteralNotTruncated(t *testing.T) {
 		t.Fatalf("degenerate literal must not get a budget hint: %v", err)
 	}
 }
+
+// TestMalformedToolCallError_ParseEvidenceClassification 锁定 P0-2 的脱敏解析
+// 证据：每个非法调用都带 parse_class/长度/哈希，错误消息可直接离线聚合，
+// 且不落原始参数文本。
+func TestMalformedToolCallError_ParseEvidenceClassification(t *testing.T) {
+	cases := []struct {
+		name      string
+		arguments string
+		wantClass string
+	}{
+		{"bare literal", `{"command": "go test ./...", "timeout": 120s}`, MalformedArgumentsParseBareLiteral},
+		{"not object", `[1,2,3]`, MalformedArgumentsParseNotObject},
+		{"unterminated string", `{"text":"abc`, MalformedArgumentsParseUnterminatedString},
+		{"unterminated container", `{"a": 1`, MalformedArgumentsParseUnterminatedContainer},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"shell","arguments":` + strconv.Quote(tc.arguments) + `}}]},"finish_reason":"tool_calls"}]}`
+			_, err := (&OpenAIAdapter{}).HandleResponse(false, strings.NewReader(body), StreamCallbacks{})
+			if err == nil {
+				t.Fatalf("expected malformed-arguments error")
+			}
+			malformed, ok := err.(*MalformedToolCallError)
+			if !ok {
+				t.Fatalf("expected *MalformedToolCallError, got %T: %v", err, err)
+			}
+			if malformed.Truncated {
+				t.Fatalf("syntax degeneration must not be marked truncated: %#v", malformed)
+			}
+			if len(malformed.ToolCalls) != 1 {
+				t.Fatalf("expected 1 malformed call, got %#v", malformed.ToolCalls)
+			}
+			call := malformed.ToolCalls[0]
+			if call.ParseClass != tc.wantClass {
+				t.Fatalf("parse_class = %q, want %q (args %q)", call.ParseClass, tc.wantClass, call.Arguments)
+			}
+			if call.ArgumentBytes != len(tc.arguments) {
+				t.Fatalf("arg_bytes = %d, want %d", call.ArgumentBytes, len(tc.arguments))
+			}
+			if len(call.ArgumentSHA256) != 16 {
+				t.Fatalf("arg_sha256 must be a 16-hex prefix, got %q", call.ArgumentSHA256)
+			}
+			message := err.Error()
+			if !strings.Contains(message, "parse_class="+tc.wantClass) {
+				t.Fatalf("error message must carry parse_class evidence, got %q", message)
+			}
+			if !strings.Contains(message, "arg_sha256="+call.ArgumentSHA256) {
+				t.Fatalf("error message must carry only the argument hash, got %q", message)
+			}
+			if strings.Contains(message, tc.arguments) {
+				t.Fatalf("error message must not embed raw arguments: %q", message)
+			}
+		})
+	}
+}

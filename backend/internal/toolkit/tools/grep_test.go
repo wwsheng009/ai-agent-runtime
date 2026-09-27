@@ -5163,8 +5163,13 @@ func TestGrepTool_InvalidLookaroundRegexSuggestsPCRE2(t *testing.T) {
 	if !strings.Contains(message, "正则表达式无效") {
 		t.Fatalf("expected invalid-regex message, got %q", message)
 	}
-	if !strings.Contains(message, "pcre2=true") || !strings.Contains(message, "lookaround") {
-		t.Fatalf("expected PCRE/lookaround guidance, got %q", message)
+	// 恢复提示必须使用精简模型面里仍存在的 rg_args，而不是会被
+	// compactGrepParametersForModel 裁掉的 pcre2 字段（2026-09-27）。
+	if !strings.Contains(message, `rg_args`) || !strings.Contains(message, "lookaround") {
+		t.Fatalf("expected rg_args/lookaround guidance, got %q", message)
+	}
+	if strings.Contains(message, "pcre2=true") {
+		t.Fatalf("hint must not reference a field missing from the compact model surface: %q", message)
 	}
 }
 

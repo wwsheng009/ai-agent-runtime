@@ -107,12 +107,25 @@ type SubagentStatsResult struct {
 }
 
 // ErrorPatternsQuery 失败模式 Top-N 查询（来源：tools|subagents|requests|""）。
+//
+// 过滤口径与 /analytics/sessions 一致（见 Query/buildWhere）：from/to 按**会话开始时间**
+// 过滤且 to 右开，provider/model/status/directory/project/q 均取自 usage_sessions。
+// 即"失败分类分布"与同页的卡片/会话列表用同一套筛选语义，而不是各算各的。
+// 事件时间（工具开始 / 子代理完成）不参与过滤：概览页的筛选本来就是会话级的，
+// 若此处改按事件时间，会出现"选中的会话里有失败，图表却不统计"的口径分裂。
 type ErrorPatternsQuery struct {
 	SessionID string
 	Source    string
 	From      time.Time
 	To        time.Time
-	Top       int
+	Provider  string
+	Model     string
+	Directory string
+	Project   string
+	Status    string
+	// Query 为自由文本，匹配 session_id/title/provider/model/working_directory/project_path。
+	Query string
+	Top   int
 }
 
 // ErrorPattern 是一个错误码/失败分类的聚合行。
@@ -445,6 +458,9 @@ LIMIT ?`, taskTypeExpr, taskSubjectExpr, where), append(args, normalizeLimit(q.L
 }
 
 // ErrorPatterns 返回 error_code / failure_category Top-N（跨工具、子代理、LLM 请求）。
+//
+// 三个来源共用同一套会话级过滤（errorPatternSessionScope）：带过滤时只统计
+// "所属会话命中筛选"的事件，因此与 /analytics/sessions 的 matched/totals 同源同口径。
 func (s *Store) ErrorPatterns(q ErrorPatternsQuery) (ErrorPatternsResult, error) {
 	result := ErrorPatternsResult{SchemaVersion: SchemaVersion, GeneratedAt: time.Now().UTC(), Patterns: []ErrorPattern{}}
 	top := normalizeLimit(q.Top, 10, maxErrorPatternRows)
@@ -524,7 +540,10 @@ GROUP BY error_category`, where), args...)
 					rows.Close()
 					return result, fmt.Errorf("scan request error patterns: %w", err)
 				}
-				add(ErrorPattern{Source: "requests", FailureCategory: strings.TrimSpace(category), Count: count})
+				// 与 tools 来源共用同一份 D5 映射（FailureCategoryFromErrorCode），
+				// 避免 requests 面板直接展示 UPSTREAM_INVALID_RESPONSE 这类原始错误码、
+				// 而 tools 面板展示 provider_error 的口径分裂。
+				add(ErrorPattern{Source: "requests", FailureCategory: llm.FailureCategoryFromErrorCode(category), Count: count})
 			}
 			rows.Close()
 		}
@@ -753,58 +772,70 @@ func subagentStatsWhere(q SubagentStatsQuery) (string, []interface{}) {
 	return strings.Join(clauses, " AND "), args
 }
 
+// errorPatternSessionStartExpr 会话开始时间：优先会话行，其次首条请求，最后 0。
+// 语义与 query.go 的 sessionStartExpr 相同，但不依赖列表查询里的 req CTE，
+// 供 errorPatternSessionScope 的子查询单独使用。
+const errorPatternSessionStartExpr = `COALESCE(NULLIF(s.started_at_unix_nano, 0), ` +
+	`(SELECT MIN(NULLIF(r.started_at_unix_nano, 0)) FROM usage_requests r WHERE r.session_id = s.session_id), 0)`
+
 func errorPatternToolWhere(q ErrorPatternsQuery) (string, []interface{}) {
-	clauses := []string{"1=1"}
-	args := []interface{}{}
-	if sessionID := strings.TrimSpace(q.SessionID); sessionID != "" {
-		clauses = append(clauses, "session_id = ?")
-		args = append(args, sessionID)
-	}
-	if !q.From.IsZero() {
-		clauses = append(clauses, "started_at_unix_nano >= ?")
-		args = append(args, q.From.UnixNano())
-	}
-	if !q.To.IsZero() {
-		clauses = append(clauses, "started_at_unix_nano <= ?")
-		args = append(args, q.To.UnixNano())
-	}
-	return strings.Join(clauses, " AND "), args
+	return errorPatternWhere(q, "session_id")
 }
 
 func errorPatternSubagentWhere(q ErrorPatternsQuery) (string, []interface{}) {
+	return errorPatternWhere(q, "parent_session_id")
+}
+
+func errorPatternRequestWhere(q ErrorPatternsQuery) (string, []interface{}) {
+	return errorPatternWhere(q, "session_id")
+}
+
+// errorPatternWhere 组装单来源的 WHERE：会话 id 精确匹配 + 会话级筛选子查询。
+func errorPatternWhere(q ErrorPatternsQuery, sessionColumn string) (string, []interface{}) {
 	clauses := []string{"1=1"}
 	args := []interface{}{}
 	if sessionID := strings.TrimSpace(q.SessionID); sessionID != "" {
-		clauses = append(clauses, "parent_session_id = ?")
+		clauses = append(clauses, sessionColumn+" = ?")
 		args = append(args, sessionID)
 	}
-	if !q.From.IsZero() {
-		clauses = append(clauses, "completed_at_unix_nano >= ?")
-		args = append(args, q.From.UnixNano())
-	}
-	if !q.To.IsZero() {
-		clauses = append(clauses, "completed_at_unix_nano <= ?")
-		args = append(args, q.To.UnixNano())
+	if scope, scopeArgs := errorPatternSessionScope(q, sessionColumn); scope != "" {
+		clauses = append(clauses, scope)
+		args = append(args, scopeArgs...)
 	}
 	return strings.Join(clauses, " AND "), args
 }
 
-func errorPatternRequestWhere(q ErrorPatternsQuery) (string, []interface{}) {
-	clauses := []string{"1=1"}
-	args := []interface{}{}
-	if sessionID := strings.TrimSpace(q.SessionID); sessionID != "" {
-		clauses = append(clauses, "session_id = ?")
-		args = append(args, sessionID)
+// errorPatternSessionScope 把会话级过滤（provider/model/status/directory/project/q + 时间窗）
+// 编译成 usage_sessions 子查询，复用 buildWhere 以保证与 /analytics/sessions 完全同口径。
+//
+// 无任何会话级过滤时返回空串：此时不引入子查询，保持"不依赖会话行也能统计"的历史行为
+// （孤儿事件——会话行缺失但事件已入库——只在用户显式筛选时才被排除，因为此时
+// 它们的归属无法判定）。显式筛选时语义等同于 INNER JOIN：命中筛选的会话才参与聚合。
+func errorPatternSessionScope(q ErrorPatternsQuery, sessionColumn string) (string, []interface{}) {
+	if !errorPatternHasSessionFilter(q) {
+		return "", nil
 	}
-	if !q.From.IsZero() {
-		clauses = append(clauses, "started_at_unix_nano >= ?")
-		args = append(args, q.From.UnixNano())
-	}
-	if !q.To.IsZero() {
-		clauses = append(clauses, "started_at_unix_nano <= ?")
-		args = append(args, q.To.UnixNano())
-	}
-	return strings.Join(clauses, " AND "), args
+	clause := buildWhere(Query{
+		From:      q.From,
+		To:        q.To,
+		Provider:  q.Provider,
+		Model:     q.Model,
+		Directory: q.Directory,
+		Project:   q.Project,
+		Status:    q.Status,
+		Query:     q.Query,
+	}, errorPatternSessionStartExpr)
+	return sessionColumn + " IN (SELECT s.session_id FROM usage_sessions s WHERE " + clause.sql + ")", clause.args
+}
+
+func errorPatternHasSessionFilter(q ErrorPatternsQuery) bool {
+	return !q.From.IsZero() || !q.To.IsZero() ||
+		strings.TrimSpace(q.Provider) != "" ||
+		strings.TrimSpace(q.Model) != "" ||
+		strings.TrimSpace(q.Directory) != "" ||
+		strings.TrimSpace(q.Project) != "" ||
+		strings.TrimSpace(q.Status) != "" ||
+		strings.TrimSpace(q.Query) != ""
 }
 
 // toolDurations 读取某工具在过滤条件下的耗时样本（上限保护）。

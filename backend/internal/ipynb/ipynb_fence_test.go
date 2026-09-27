@@ -93,7 +93,7 @@ func TestRenderBytesNotesUnsupportedImageOutput(t *testing.T) {
 // which markdown line each image belongs to; without it, view had to attach the
 // whole notebook's images regardless of the delivered window (2026-09-27 review).
 func TestRenderBytesRecordsImagePlaceholderLine(t *testing.T) {
-	payload := base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	payload := base64.StdEncoding.EncodeToString(testImageBytes(t, "png"))
 	raw := notebookJSON(t, []map[string]interface{}{
 		{"cell_type": "markdown", "source": []string{"# head\n"}},
 		{"cell_type": "code", "source": "plot()", "outputs": []map[string]interface{}{
@@ -116,21 +116,67 @@ func TestRenderBytesRecordsImagePlaceholderLine(t *testing.T) {
 
 // TestRenderBytesSkipsInvalidImagePayload: a successful base64 decode is not a
 // valid image. "eA==" decodes to the single byte 'x' and used to be attached as
-// a .png with image_passthrough=true (2026-09-27 review).
+// a .png with image_passthrough=true (2026-09-27 review); a bare 8-byte PNG
+// signature passed the later signature check but is still not a complete image
+// (2026-09-27 review H10).
 func TestRenderBytesSkipsInvalidImagePayload(t *testing.T) {
+	for name, payload := range map[string]string{
+		"one_byte":       "eA==",
+		"signature_only": base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := notebookJSON(t, []map[string]interface{}{
+				{"cell_type": "code", "source": "plot()", "outputs": []map[string]interface{}{
+					{"output_type": "display_data", "data": map[string]interface{}{"image/png": payload}},
+				}},
+			})
+			render, err := RenderBytes(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(render.Images) != 0 {
+				t.Fatalf("an invalid PNG payload must not be attached, got %d", len(render.Images))
+			}
+			if !strings.Contains(render.Markdown, "未附加") {
+				t.Fatalf("expected an invalid-image note, got %q", render.Markdown)
+			}
+		})
+	}
+}
+
+// TestRenderBytesRecordsDistinctPlaceholderLines pins the incremental line
+// counting that replaced the per-image rescan of the whole markdown prefix
+// (2026-09-27 review H18): every image must still point at its own placeholder.
+func TestRenderBytesRecordsDistinctPlaceholderLines(t *testing.T) {
+	payload := base64.StdEncoding.EncodeToString(testImageBytes(t, "png"))
+	imageOutput := func() map[string]interface{} {
+		return map[string]interface{}{
+			"output_type": "display_data",
+			"data":        map[string]interface{}{"image/png": payload},
+		}
+	}
 	raw := notebookJSON(t, []map[string]interface{}{
-		{"cell_type": "code", "source": "plot()", "outputs": []map[string]interface{}{
-			{"output_type": "display_data", "data": map[string]interface{}{"image/png": "eA=="}},
-		}},
+		{"cell_type": "markdown", "source": []string{"# head\n", "intro\n"}},
+		{"cell_type": "code", "source": "a()", "outputs": []map[string]interface{}{imageOutput(), imageOutput()}},
+		{"cell_type": "markdown", "source": []string{"between\n"}},
+		{"cell_type": "code", "source": "b()", "outputs": []map[string]interface{}{imageOutput()}},
 	})
 	render, err := RenderBytes(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(render.Images) != 0 {
-		t.Fatalf("an invalid PNG payload must not be attached, got %d", len(render.Images))
+	if len(render.Images) != 3 {
+		t.Fatalf("expected three images, got %d", len(render.Images))
 	}
-	if !strings.Contains(render.Markdown, "不是有效图片") {
-		t.Fatalf("expected the invalid-image note, got %q", render.Markdown)
+	lines := strings.Split(render.Markdown, "\n")
+	previous := -1
+	for i, img := range render.Images {
+		if img.Line <= previous {
+			t.Fatalf("placeholder lines must strictly increase: %+v", render.Images)
+		}
+		if img.Line < 0 || img.Line >= len(lines) || !strings.Contains(lines[img.Line], "# [image]") {
+			t.Fatalf("image %d Line=%d does not point at its placeholder:\n%s", i, img.Line, render.Markdown)
+		}
+		previous = img.Line
 	}
 }

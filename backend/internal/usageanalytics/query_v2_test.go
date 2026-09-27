@@ -178,6 +178,211 @@ func TestStoreV2StatsQueries(t *testing.T) {
 	}
 }
 
+// errorScopeSeed 描述一个用于「失败分类分布跟随筛选」测试的会话（含可区分的失败码）。
+type errorScopeSeed struct {
+	sessionID      string
+	provider       string
+	model          string
+	status         string
+	project        string
+	directory      string
+	startedAt      time.Time
+	toolError      string
+	requestError   string
+	subagentFailed string
+}
+
+// seedErrorScopeSession 写入一个会话的三类失败事件（tools / requests / subagents），
+// 并把会话行元数据补齐到 seed 描述的值（provider/model 由 LLM 请求事件带入，
+// 其余字段模拟 host lookup 的补齐结果，直接落库）。
+func seedErrorScopeSession(t *testing.T, store *Store, seed errorScopeSeed) {
+	t.Helper()
+	bus := runtimeevents.NewBus()
+	collector := newCollector(store, nil, nil)
+	collector.subscribe(bus)
+	defer collector.close()
+
+	publish := func(eventType string, payload map[string]interface{}, at time.Time) {
+		bus.Publish(runtimeevents.Event{Type: eventType, SessionID: seed.sessionID, Payload: payload, Timestamp: at})
+	}
+	requestID := "req-" + seed.sessionID
+	publish(EventSessionStart, map[string]interface{}{"session_id": seed.sessionID, "turn_id": "turn-1"}, seed.startedAt)
+	publish(EventLLMRequestStarted, map[string]interface{}{
+		"llm_request_id": requestID, "trace_id": "trace-1", "turn_id": "turn-1", "step": 1,
+		"provider": seed.provider, "model": seed.model,
+	}, seed.startedAt.Add(time.Second))
+	publish(EventLLMRequestFinished, map[string]interface{}{
+		"llm_request_id": requestID, "trace_id": "trace-1", "turn_id": "turn-1", "step": 1,
+		"success": false, "error_code": seed.requestError, "duration_ms": 20,
+	}, seed.startedAt.Add(2*time.Second))
+	publish(EventToolRequested, map[string]interface{}{
+		"tool_call_id": "call-" + seed.sessionID, "logical_tool": "bash", "turn_id": "turn-1", "step": 1,
+	}, seed.startedAt.Add(3*time.Second))
+	publish(EventToolCompleted, map[string]interface{}{
+		"tool_call_id": "call-" + seed.sessionID, "logical_tool": "bash", "turn_id": "turn-1", "step": 1,
+		"ok": false, "outcome": "failed", "error_code": seed.toolError, "duration_ms": 30,
+	}, seed.startedAt.Add(4*time.Second))
+	publish(EventSubagentCompleted, map[string]interface{}{
+		"subagent_id": "sa-" + seed.sessionID, "parent_session_id": seed.sessionID, "role": "explore",
+		"success": false, "failure_category": seed.subagentFailed, "error_code": "subagent_timeout",
+	}, seed.startedAt.Add(5*time.Second))
+
+	if err := store.execWithLockRetry(
+		`UPDATE usage_sessions SET status = ?, project_path = ?, working_directory = ?, started_at_unix_nano = ? WHERE session_id = ?`,
+		seed.status, seed.project, seed.directory, seed.startedAt.UnixNano(), seed.sessionID,
+	); err != nil {
+		t.Fatalf("补齐会话元数据: %v", err)
+	}
+}
+
+// errorScopePatternCounts 把失败模式结果压成 "source\x00error_code\x00category" → count。
+func errorScopePatternCounts(patterns []ErrorPattern) map[string]int {
+	counts := map[string]int{}
+	for _, pattern := range patterns {
+		key := pattern.Source + "\x00" + pattern.ErrorCode + "\x00" + pattern.FailureCategory
+		counts[key] += pattern.Count
+	}
+	return counts
+}
+
+// TestStoreErrorPatternsFollowSessionScope 锁定「失败分类分布跟随会话级筛选」：
+// provider/model/status/directory/project/q 与时间窗都按事件所属会话判定，
+// 且与 /analytics/sessions 共用 buildWhere（同口径）；无筛选时保持全局聚合。
+func TestStoreErrorPatternsFollowSessionScope(t *testing.T) {
+	store, err := Open(Config{Path: filepath.Join(t.TempDir(), "usage_analytics.sqlite")})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	alpha := errorScopeSeed{
+		sessionID: "session-scope-alpha", provider: "provider-alpha", model: "model-alpha",
+		status: "completed", project: "E:/proj/alpha", directory: "E:/proj/alpha/src",
+		startedAt:      time.Date(2026, 9, 17, 8, 0, 0, 0, time.UTC),
+		toolError:      "TOOL_TIMEOUT",
+		requestError:   "UPSTREAM_TIMEOUT",
+		subagentFailed: "timeout",
+	}
+	beta := errorScopeSeed{
+		sessionID: "session-scope-beta", provider: "provider-beta", model: "model-beta",
+		status: "interrupted", project: "E:/proj/beta", directory: "E:/proj/beta/src",
+		startedAt:      time.Date(2026, 10, 2, 8, 0, 0, 0, time.UTC),
+		toolError:      "TOOL_PERMISSION_DENIED",
+		requestError:   "UPSTREAM_RATE_LIMITED",
+		subagentFailed: "cancelled",
+	}
+	seedErrorScopeSession(t, store, alpha)
+	seedErrorScopeSession(t, store, beta)
+
+	patterns := func(t *testing.T, query ErrorPatternsQuery) map[string]int {
+		t.Helper()
+		query.Top = 50
+		result, err := store.ErrorPatterns(query)
+		if err != nil {
+			t.Fatalf("ErrorPatterns(%+v): %v", query, err)
+		}
+		return errorScopePatternCounts(result.Patterns)
+	}
+	// ① 无筛选：两个会话的三类失败都参与聚合（全局口径不因新增字段而改变）。
+	all := patterns(t, ErrorPatternsQuery{})
+	for _, key := range []string{
+		"tools\x00TOOL_TIMEOUT\x00timeout",
+		"tools\x00TOOL_PERMISSION_DENIED\x00tool_error",
+		"subagents\x00subagent_timeout\x00timeout",
+		"subagents\x00subagent_timeout\x00cancelled",
+		"requests\x00\x00timeout",
+		"requests\x00\x00rate_limited",
+	} {
+		if all[key] != 1 {
+			t.Fatalf("无筛选时应统计两条会话的全部失败，缺 %q: %+v", key, all)
+		}
+	}
+	if len(all) != 6 {
+		t.Fatalf("无筛选应恰好 6 条模式（两会话 × 三来源），实际 %d: %+v", len(all), all)
+	}
+
+	cases := []struct {
+		name    string
+		query   ErrorPatternsQuery
+		present string
+		absent  string
+	}{
+		{
+			name:  "provider",
+			query: ErrorPatternsQuery{Provider: "provider-alpha"},
+			// tools 模式里只有 alpha 的失败码命中；beta 的同类错误码必须消失。
+			present: "tools\x00TOOL_TIMEOUT\x00timeout",
+			absent:  "tools\x00TOOL_PERMISSION_DENIED\x00tool_error",
+		},
+		{
+			name:    "model",
+			query:   ErrorPatternsQuery{Model: "model-beta"},
+			present: "tools\x00TOOL_PERMISSION_DENIED\x00tool_error",
+			absent:  "tools\x00TOOL_TIMEOUT\x00timeout",
+		},
+		{
+			name:    "status",
+			query:   ErrorPatternsQuery{Status: "interrupted"},
+			present: "subagents\x00subagent_timeout\x00cancelled",
+			absent:  "subagents\x00subagent_timeout\x00timeout",
+		},
+		{
+			name:    "directory",
+			query:   ErrorPatternsQuery{Directory: "E:/proj/alpha/src"},
+			present: "tools\x00TOOL_TIMEOUT\x00timeout",
+			absent:  "tools\x00TOOL_PERMISSION_DENIED\x00tool_error",
+		},
+		{
+			name:    "project",
+			query:   ErrorPatternsQuery{Project: "E:/proj/beta"},
+			present: "tools\x00TOOL_PERMISSION_DENIED\x00tool_error",
+			absent:  "tools\x00TOOL_TIMEOUT\x00timeout",
+		},
+		{
+			// 自由文本命中 working_directory/project_path。
+			name:    "query",
+			query:   ErrorPatternsQuery{Query: "alpha"},
+			present: "tools\x00TOOL_TIMEOUT\x00timeout",
+			absent:  "tools\x00TOOL_PERMISSION_DENIED\x00tool_error",
+		},
+		{
+			// 时间窗按会话开始时间右开：from=10-01 只保留 10-02 开始的 beta。
+			name:    "time window from",
+			query:   ErrorPatternsQuery{From: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)},
+			present: "tools\x00TOOL_PERMISSION_DENIED\x00tool_error",
+			absent:  "tools\x00TOOL_TIMEOUT\x00timeout",
+		},
+		{
+			name:    "time window to",
+			query:   ErrorPatternsQuery{To: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)},
+			present: "tools\x00TOOL_TIMEOUT\x00timeout",
+			absent:  "tools\x00TOOL_PERMISSION_DENIED\x00tool_error",
+		},
+	}
+	for _, testCase := range cases {
+		counts := patterns(t, testCase.query)
+		if counts[testCase.present] != 1 {
+			t.Fatalf("%s 过滤后应保留 %q: %+v", testCase.name, testCase.present, counts)
+		}
+		if _, exists := counts[testCase.absent]; exists {
+			t.Fatalf("%s 过滤后不得包含 %q: %+v", testCase.name, testCase.absent, counts)
+		}
+	}
+
+	// 会话 id 与维度过滤可叠加：命中会话但维度不符 → 空结果（而不是回退成全量）。
+	mismatch, err := store.ErrorPatterns(ErrorPatternsQuery{
+		SessionID: "session-scope-alpha",
+		Provider:  "provider-beta",
+		Top:       50,
+	})
+	if err != nil {
+		t.Fatalf("ErrorPatterns(叠加过滤): %v", err)
+	}
+	if len(mismatch.Patterns) != 0 {
+		t.Fatalf("会话与维度互斥时应为空: %+v", mismatch.Patterns)
+	}
+}
+
 // TestStoreToolStatsDurationFallsBackToEventTimestamps 锁定耗时兜底口径：
 // 工具未自报 duration_ms（如会话里的 ls）时，用 tool.requested/completed 的
 // 事件时间差参与 avg/min/max/百分位，历史行无需回填即可在分析页显示。

@@ -65,6 +65,13 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 	record.PromptBudget = payloadInt(payload, "prompt_budget")
 	// 首字时间与上下文事实同层：失败请求（首字后中断/超时）同样保留该观测。
 	record.FirstTokenMS = payloadInt64OrZero(payload, "first_token_ms")
+	// P0-2 证据列：终结信号、参数错误分类与取消归因来自 llm.request.finished 载荷；
+	// 缺省零值表示未观测（历史记录 / 载荷未带该字段）。
+	record.TerminalSeen = payloadBool(payload, "terminal_seen")
+	record.ArgErrorClass = payloadString(payload, "arg_error_class")
+	record.CancelSource = payloadString(payload, "cancel_source")
+	record.CancelCause = payloadString(payload, "cancel_cause")
+	record.CancelReason = payloadString(payload, "cancel_reason")
 
 	if in.Interrupted {
 		record.Status = RequestStatusError

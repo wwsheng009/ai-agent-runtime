@@ -11,6 +11,7 @@ import (
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 type fakeManager struct {
@@ -81,6 +82,22 @@ func TestMCPAdapter_CallToolWithMeta_PreservesMetadata(t *testing.T) {
 	}
 	if meta["action"] != "created" {
 		t.Fatalf("expected action metadata, got %#v", meta)
+	}
+}
+
+// TestMCPAdapter_FindToolStampsRuntimeFSOwner 锁定 P1-4：MCP 工具的路径归属由
+// 本机运行时标记为 tool_server（服务端自行解析路径），同时保留既有 metadata。
+func TestMCPAdapter_FindToolStampsRuntimeFSOwner(t *testing.T) {
+	adapter := NewMCPAdapter(&fakeManager{})
+	info, err := adapter.FindTool("browser_take_screenshot")
+	if err != nil {
+		t.Fatalf("FindTool returned error: %v", err)
+	}
+	if owner, _ := info.Metadata[types.ToolMetadataFSOwnerKey].(string); owner != types.ToolFSOwnerToolServer {
+		t.Fatalf("fs_owner=%v want %s", info.Metadata[types.ToolMetadataFSOwnerKey], types.ToolFSOwnerToolServer)
+	}
+	if info.Metadata["supports_parallel"] != true {
+		t.Fatalf("existing metadata must be preserved: %#v", info.Metadata)
 	}
 }
 

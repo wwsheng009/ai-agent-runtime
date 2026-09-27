@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -259,6 +260,9 @@ type StreamToolCall struct {
 	Type string
 	Name string
 	Args strings.Builder
+	// ArgFragments 是 arguments 增量片段数（P1-6）：用于离线区分「单个大 delta」
+	// 与「多片拼接」，并作为聚合证据随 malformed 调用落盘。
+	ArgFragments int
 }
 
 // StreamState 管理流式响应的累积状态
@@ -272,12 +276,20 @@ type StreamState struct {
 	MarkupCalls      []map[string]interface{}
 	FinishReason     string
 	ProtocolError    error
+	// ToolCallIndexByID 记录 id→index 的既有归属（P1-6）：同一 id 出现在不同
+	// index 时必须 fail-closed，不能把两次调用的参数拼进同一身份。
+	ToolCallIndexByID map[string]int
+	// SawModernToolCalls / SawLegacyFunctionCall 记录本流已出现过的协议形态；
+	// modern/legacy 混写同一槽属于身份不确定，必须拒绝（P1-6）。
+	SawModernToolCalls    bool
+	SawLegacyFunctionCall bool
 }
 
 // NewStreamState 创建新的累积器
 func NewStreamState() *StreamState {
 	return &StreamState{
-		ToolCalls: make(map[int]*StreamToolCall),
+		ToolCalls:         make(map[int]*StreamToolCall),
+		ToolCallIndexByID: make(map[string]int),
 	}
 }
 
@@ -703,13 +715,9 @@ func validateOpenAIStreamState(state *StreamState) error {
 			call.Args.WriteString(arguments)
 		}
 		var decoded map[string]interface{}
-		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded == nil {
-			malformed = append(malformed, MalformedToolCall{
-				Index:     index,
-				ID:        call.ID,
-				Name:      call.Name,
-				Arguments: arguments,
-			})
+		parseErr := json.Unmarshal([]byte(arguments), &decoded)
+		if parseErr != nil || decoded == nil {
+			malformed = append(malformed, newMalformedToolCall(index, call.ID, call.Name, arguments, call.ArgFragments, parseErr, decoded))
 		}
 	}
 	if len(malformed) > 0 {
@@ -749,13 +757,17 @@ func validateOpenAIRawToolCalls(finishReason string, toolCalls []map[string]inte
 			continue
 		}
 		var decoded map[string]interface{}
-		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded == nil {
-			malformed = append(malformed, MalformedToolCall{
-				Index:     index,
-				ID:        strings.TrimSpace(firstOpenAIErrorString(call["id"])),
-				Name:      name,
-				Arguments: arguments,
-			})
+		parseErr := json.Unmarshal([]byte(arguments), &decoded)
+		if parseErr != nil || decoded == nil {
+			malformed = append(malformed, newMalformedToolCall(
+				index,
+				strings.TrimSpace(firstOpenAIErrorString(call["id"])),
+				name,
+				arguments,
+				0,
+				parseErr,
+				decoded,
+			))
 		}
 	}
 	if len(malformed) > 0 {
@@ -851,6 +863,15 @@ func parseChunk(state *StreamState, chunk map[string]interface{}, callbacks Stre
 		return
 	}
 
+	// P1-6：请求从不设置 n（provider 默认 n=1），因此流式 chunk 里的 choice 必须
+	// 属于同一个槽。缺省 index 的旧协议形态保持兼容；但显式非 0 的 choice.index
+	// 说明这是另一个候选槽的输出，身份不确定时必须 fail-closed，不能把多个槽的
+	// 内容猜并进同一个 StreamState。
+	if err := validateOpenAIChoiceIdentity(choices); err != nil {
+		state.ProtocolError = err
+		return
+	}
+
 	choice, ok := choices[0].(map[string]interface{})
 	if !ok {
 		return
@@ -872,9 +893,133 @@ func parseChunk(state *StreamState, chunk map[string]interface{}, callbacks Stre
 	} else if refusal := openAIRefusalText(delta["refusal"]); refusal != "" {
 		state.Refusal.WriteString(refusal)
 	}
+	// P1-6：同一个 delta 同时携带现代 tool_calls 与 legacy function_call 属于
+	// 协议混写，身份不确定，必须 fail-closed（空占位 function_call 除外）。
+	if hasOpenAIToolCallDelta(delta) && hasOpenAILegacyFunctionCall(delta) {
+		state.ProtocolError = &openAIProtocolError{
+			code:    "mixed_tool_call_payload",
+			message: "chunk carried both tool_calls and a non-empty legacy function_call in one delta",
+		}
+		return
+	}
 	parseContent(state, delta, callbacks)
 	parseToolCalls(state, delta)
 	parseLegacyFunctionCall(state, delta)
+}
+
+// hasOpenAIToolCallDelta 判断 delta 是否携带有效的现代 tool_calls 载荷
+// （空数组或全空条目不算）。
+func hasOpenAIToolCallDelta(delta map[string]interface{}) bool {
+	arr, ok := delta["tool_calls"].([]interface{})
+	if !ok || len(arr) == 0 {
+		return false
+	}
+	for _, item := range arr {
+		tcMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if hasOpenAIToolCallFields(tcMap) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasOpenAIToolCallFields 判断单个 tool_calls 条目是否携带真实载荷
+// （只有 index 的占位条目不计数）。
+func hasOpenAIToolCallFields(tcMap map[string]interface{}) bool {
+	if strings.TrimSpace(firstOpenAIErrorString(tcMap["id"])) != "" {
+		return true
+	}
+	if strings.TrimSpace(firstOpenAIErrorString(tcMap["type"])) != "" {
+		return true
+	}
+	fn, ok := tcMap["function"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if strings.TrimSpace(firstOpenAIErrorString(fn["name"])) != "" {
+		return true
+	}
+	args, ok := fn["arguments"].(string)
+	return ok && args != ""
+}
+
+// hasOpenAILegacyFunctionCall 判断 delta 是否携带有效的 legacy function_call
+// 载荷（复用占位对象判定）。
+func hasOpenAILegacyFunctionCall(delta map[string]interface{}) bool {
+	functionCall, ok := delta["function_call"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	return !isEmptyLegacyFunctionCall(functionCall)
+}
+
+// validateOpenAIChoiceIdentity 校验一个流式 chunk 的 choice 身份。
+// 本 runtime 的请求从不设置 n，只有 index=0 的单一槽合法；显式非 0 索引
+// （含 choices[1..] 携带的非 0 索引）一律拒绝。index 缺失时保持旧行为。
+func validateOpenAIChoiceIdentity(choices []interface{}) error {
+	for position, raw := range choices {
+		choice, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		index, present, err := openAIChoiceIndex(choice)
+		if err != nil {
+			return &openAIProtocolError{
+				code:    "invalid_choice_index",
+				message: fmt.Sprintf("choice %d carries an unparsable index: %v", position, err),
+			}
+		}
+		if !present {
+			continue
+		}
+		if index != 0 {
+			return &openAIProtocolError{
+				code: "unexpected_choice_index",
+				message: fmt.Sprintf(
+					"choice %d carries index %d while the request did not ask for multiple choices",
+					position, index),
+			}
+		}
+	}
+	return nil
+}
+
+// openAIChoiceIndex 读取 choice.index，兼容 JSON 数字、json.Number 与数字字符串。
+func openAIChoiceIndex(choice map[string]interface{}) (int, bool, error) {
+	raw, ok := choice["index"]
+	if !ok || raw == nil {
+		return 0, false, nil
+	}
+	switch typed := raw.(type) {
+	case float64:
+		if typed != float64(int(typed)) {
+			return 0, true, fmt.Errorf("non-integer value %v", typed)
+		}
+		return int(typed), true, nil
+	case int:
+		return typed, true, nil
+	case json.Number:
+		value, err := typed.Int64()
+		if err != nil {
+			return 0, true, err
+		}
+		return int(value), true, nil
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return 0, false, nil
+		}
+		value, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return 0, true, err
+		}
+		return value, true, nil
+	default:
+		return 0, true, fmt.Errorf("unsupported index type %T", raw)
+	}
 }
 
 // parseContent 解析 delta 中的 content
@@ -936,7 +1081,15 @@ func parseToolCalls(state *StreamState, delta map[string]interface{}) {
 	}
 
 	arr, ok := raw.([]interface{})
-	if !ok {
+	if !ok || len(arr) == 0 {
+		return
+	}
+	// P1-6：同一流里 modern 与 legacy 混写同一槽属于身份不确定，拒绝聚合。
+	if state.SawLegacyFunctionCall {
+		state.ProtocolError = &openAIProtocolError{
+			code:    "mixed_tool_call_payload",
+			message: "stream mixed legacy function_call with modern tool_calls; refusing to merge the same slot",
+		}
 		return
 	}
 
@@ -955,13 +1108,55 @@ func parseToolCalls(state *StreamState, delta map[string]interface{}) {
 		tc := state.getToolCall(index)
 
 		if id, ok := tcMap["id"].(string); ok && id != "" {
+			// 同一 id 出现在不同 index：两次调用被折叠进一个身份（或反之），
+			// 继续合并会把参数拼到错误的调用上。fail-closed（P1-6）。
+			if existing, exists := state.ToolCallIndexByID[id]; exists && existing != index {
+				state.ProtocolError = &openAIProtocolError{
+					code: "tool_call_id_index_conflict",
+					message: fmt.Sprintf(
+						"tool call id %q appeared at index %d and index %d in the same stream",
+						id, existing, index),
+				}
+				return
+			}
+			if tc.ID != "" && tc.ID != id {
+				state.ProtocolError = &openAIProtocolError{
+					code: "tool_call_index_id_conflict",
+					message: fmt.Sprintf(
+						"tool call index %d changed its id from %q to %q mid-stream", index, tc.ID, id),
+				}
+				return
+			}
+			state.ToolCallIndexByID[id] = index
 			tc.ID = id
 		}
 		if typ, ok := tcMap["type"].(string); ok && typ != "" {
+			if tc.Type != "" && tc.Type != typ {
+				state.ProtocolError = &openAIProtocolError{
+					code: "tool_call_type_conflict",
+					message: fmt.Sprintf(
+						"tool call index %d changed its type from %q to %q mid-stream", index, tc.Type, typ),
+				}
+				return
+			}
 			tc.Type = typ
+		}
+		if fn, ok := tcMap["function"].(map[string]interface{}); ok {
+			if name := strings.TrimSpace(firstOpenAIErrorString(fn["name"])); name != "" &&
+				tc.Name != "" && tc.Name != name {
+				state.ProtocolError = &openAIProtocolError{
+					code: "tool_call_name_conflict",
+					message: fmt.Sprintf(
+						"tool call index %d changed its name from %q to %q mid-stream", index, tc.Name, name),
+				}
+				return
+			}
 		}
 
 		parseFunction(tc, tcMap)
+		if hasOpenAIToolCallFields(tcMap) {
+			state.SawModernToolCalls = true
+		}
 	}
 }
 
@@ -1009,6 +1204,15 @@ func parseLegacyFunctionCall(state *StreamState, delta map[string]interface{}) {
 	if isEmptyLegacyFunctionCall(functionCall) {
 		return
 	}
+	// P1-6：modern tool_calls 已经写过槽位时，legacy 载荷不得再写同一槽。
+	if state.SawModernToolCalls {
+		state.ProtocolError = &openAIProtocolError{
+			code:    "mixed_tool_call_payload",
+			message: "stream mixed modern tool_calls with legacy function_call; refusing to merge the same slot",
+		}
+		return
+	}
+	state.SawLegacyFunctionCall = true
 	tc := state.getToolCall(0)
 	if tc.ID == "" {
 		tc.ID = "legacy_function_call_1"
@@ -1019,8 +1223,9 @@ func parseLegacyFunctionCall(state *StreamState, delta map[string]interface{}) {
 	if name, ok := functionCall["name"].(string); ok && name != "" {
 		tc.Name = name
 	}
-	if arguments, ok := functionCall["arguments"].(string); ok {
+	if arguments, ok := functionCall["arguments"].(string); ok && arguments != "" {
 		tc.Args.WriteString(arguments)
+		tc.ArgFragments++
 	}
 }
 
@@ -1049,8 +1254,9 @@ func parseFunction(tc *StreamToolCall, tcMap map[string]interface{}) {
 	if name, ok := fn["name"].(string); ok && name != "" {
 		tc.Name = name
 	}
-	if args, ok := fn["arguments"].(string); ok {
+	if args, ok := fn["arguments"].(string); ok && args != "" {
 		tc.Args.WriteString(args)
+		tc.ArgFragments++
 	}
 }
 

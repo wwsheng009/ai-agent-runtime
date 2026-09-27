@@ -45,6 +45,13 @@ const (
 	// end to end (review m6). Batch results declare this constant as their
 	// model-visible window.
 	viewBatchAggregateBudgetBytes = 64 * 1024
+	// viewBatchTailReserveBytes is held back from the aggregate budget for the
+	// batch's trailing blocks (skipped-file summary, bounded errors) and for
+	// the render-layer contract header. Appending those after the per-section
+	// checks made the delivered body exceed the declared window, and the render
+	// contract then silently dropped a section the tool had already registered
+	// as delivered (2026-09-27 review H9).
+	viewBatchTailReserveBytes = 4 * 1024
 	// grepOutputBudgetBytes: one match list; wide enough for a useful first
 	// pass before the model narrows the pattern.
 	grepOutputBudgetBytes = 32 * 1024

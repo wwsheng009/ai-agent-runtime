@@ -136,7 +136,12 @@ func (v *ViewTool) viewNotebookResult(absPath, displayPath string, p ViewFileReq
 		for _, attachment := range attachments {
 			paths = append(paths, attachment.Path)
 		}
-		result.OutputKind = toolresult.KindStructured
+		// The render is text (tagged cells) plus image attachments. Marking it
+		// structured made the model-facing reducer replace the whole body with
+		// a generic envelope summary, so the model received the images but not
+		// the notebook text it was supposed to accompany (2026-09-27 review
+		// H5). Image declarations are metadata-driven; the kind stays text.
+		result.OutputKind = toolresult.KindText
 		result.Metadata[toolresult.MetadataImagePassthroughKey] = true
 		result.Metadata[toolresult.MetadataImagePathKey] = paths[0]
 		result.Metadata[toolresult.MetadataImageMimeTypeKey] = attachments[0].MIME

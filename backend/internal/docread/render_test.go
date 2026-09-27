@@ -216,7 +216,7 @@ func TestRenderPandocFakeConverter(t *testing.T) {
 func TestRenderSofficeFakeConverter(t *testing.T) {
 	path := docreadTestZip(t, t.TempDir(), "sheet.xlsx", [][2]string{
 		{"[Content_Types].xml", "<Types/>"},
-		{"xl/workbook.xml", "<workbook/>"},
+		{"xl/workbook.xml", `<workbook><sheets><sheet name="sheet" sheetId="1"/></sheets></workbook>`},
 	})
 	docreadTestLookPath(t, "soffice")
 	docreadTestRunCommand(t, func(name string, args []string) ([]byte, []byte, error) {
@@ -242,7 +242,7 @@ func TestRenderSofficeFakeConverter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render: %v", err)
 	}
-	if result.Markdown != "a,b\n1,2\n" {
+	if result.Markdown != "## Sheet: sheet\na,b\n1,2\n" {
 		t.Fatalf("Markdown = %q", result.Markdown)
 	}
 	if got := result.Metadata["doc_kind"]; got != "xlsx" {
@@ -251,69 +251,131 @@ func TestRenderSofficeFakeConverter(t *testing.T) {
 	if got := result.Metadata["doc_converter"]; got != "soffice" {
 		t.Fatalf("doc_converter = %#v, want soffice", got)
 	}
+	if result.Metadata["doc_sheets_total"] != 1 || result.Metadata["doc_sheets_delivered"] != 1 {
+		t.Fatalf("sheet coverage must be reported, got %#v", result.Metadata)
+	}
+	if degraded, _ := result.Metadata["doc_degraded"].(bool); degraded {
+		t.Fatalf("a fully delivered workbook must not be degraded: %#v", result.Metadata)
+	}
 }
 
-// TestRenderSofficeFakeConverterForOpenDocumentFamily: ODS 走 csv、ODP 走 txt，
-// 且 doc_kind 如实报告真实格式（此前两者都按 odt→pandoc 处理并失败）。
+// TestRenderSofficeFakeConverterForOpenDocumentFamily: ODS still goes through
+// soffice (now asking for every sheet first), while ODP renders from its own
+// container — Impress has no TXT export filter (2026-09-27 review H13/H14).
 func TestRenderSofficeFakeConverterForOpenDocumentFamily(t *testing.T) {
-	cases := []struct {
-		fileName string
-		mime     string
-		wantKind string
-		wantArg  string
-		outName  string
-		payload  string
-	}{
-		{"table.ods", "application/vnd.oasis.opendocument.spreadsheet", "ods", "csv", "table.csv", "a,b\n1,2\n"},
-		{"slides.odp", "application/vnd.oasis.opendocument.presentation", "odp", "txt", "slides.txt", "slide one\n"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.wantKind, func(t *testing.T) {
-			path := docreadTestZip(t, t.TempDir(), tc.fileName, [][2]string{
-				{"mimetype", tc.mime},
-				{"content.xml", "<office:document-content/>"},
-			})
-			docreadTestLookPath(t, "soffice")
-			var gotFilter string
-			docreadTestRunCommand(t, func(name string, args []string) ([]byte, []byte, error) {
-				if name != "soffice" {
-					return nil, nil, errors.New("unexpected command " + name)
-				}
-				outDir := ""
-				for index, arg := range args {
-					if arg == "--convert-to" && index+1 < len(args) {
-						gotFilter = args[index+1]
-					}
-					if arg == "--outdir" && index+1 < len(args) {
-						outDir = args[index+1]
-					}
-				}
-				if outDir == "" {
-					return nil, []byte("soffice: missing --outdir"), errors.New("exit status 1")
-				}
-				if err := os.WriteFile(filepath.Join(outDir, tc.outName), []byte(tc.payload), 0o644); err != nil {
-					return nil, nil, err
-				}
-				return nil, nil, nil
-			})
-
-			result, err := Render(context.Background(), path)
-			if err != nil {
-				t.Fatalf("Render: %v", err)
-			}
-			if gotFilter != tc.wantArg {
-				t.Fatalf("filter = %q, want %q", gotFilter, tc.wantArg)
-			}
-			if result.Markdown != tc.payload {
-				t.Fatalf("Markdown = %q, want %q", result.Markdown, tc.payload)
-			}
-			if got := result.Metadata["doc_kind"]; got != tc.wantKind {
-				t.Fatalf("doc_kind = %#v, want %s", got, tc.wantKind)
-			}
-			if got := result.Metadata["doc_converter"]; got != "soffice" {
-				t.Fatalf("doc_converter = %#v, want soffice", got)
-			}
+	t.Run("ods", func(t *testing.T) {
+		path := docreadTestZip(t, t.TempDir(), "table.ods", [][2]string{
+			{"mimetype", "application/vnd.oasis.opendocument.spreadsheet"},
+			{"content.xml", `<office:document-content><table:table table:name="Data"/></office:document-content>`},
 		})
+		docreadTestLookPath(t, "soffice")
+		var gotFilter string
+		docreadTestRunCommand(t, func(name string, args []string) ([]byte, []byte, error) {
+			if name != "soffice" {
+				return nil, nil, errors.New("unexpected command " + name)
+			}
+			outDir := ""
+			for index, arg := range args {
+				if arg == "--convert-to" && index+1 < len(args) {
+					gotFilter = args[index+1]
+				}
+				if arg == "--outdir" && index+1 < len(args) {
+					outDir = args[index+1]
+				}
+			}
+			if outDir == "" {
+				return nil, []byte("soffice: missing --outdir"), errors.New("exit status 1")
+			}
+			if err := os.WriteFile(filepath.Join(outDir, "table-Data.csv"), []byte("a,b\n1,2\n"), 0o644); err != nil {
+				return nil, nil, err
+			}
+			return nil, nil, nil
+		})
+
+		result, err := Render(context.Background(), path)
+		if err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		if gotFilter != sofficeCSVAllSheetsFilter {
+			t.Fatalf("filter = %q, want the all-sheets CSV filter", gotFilter)
+		}
+		if !strings.Contains(result.Markdown, "## Sheet: table-Data") || !strings.Contains(result.Markdown, "a,b\n1,2") {
+			t.Fatalf("Markdown = %q", result.Markdown)
+		}
+		if got := result.Metadata["doc_kind"]; got != "ods" {
+			t.Fatalf("doc_kind = %#v, want ods", got)
+		}
+		if got := result.Metadata["doc_converter"]; got != "soffice" {
+			t.Fatalf("doc_converter = %#v, want soffice", got)
+		}
+	})
+
+	t.Run("odp", func(t *testing.T) {
+		path := docreadTestZip(t, t.TempDir(), "slides.odp", [][2]string{
+			{"mimetype", "application/vnd.oasis.opendocument.presentation"},
+			{"content.xml", `<office:document-content xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">` +
+				`<draw:page><text:p>slide one</text:p><text:p>second line</text:p></draw:page>` +
+				`<draw:page><text:p>slide two</text:p></draw:page></office:document-content>`},
+		})
+		docreadTestLookPath(t) // 无任何外部转换器：native 抽取必须可用
+
+		result, err := Render(context.Background(), path)
+		if err != nil {
+			t.Fatalf("Render: %v", err)
+		}
+		for _, want := range []string{"## Slide 1", "slide one", "second line", "## Slide 2", "slide two"} {
+			if !strings.Contains(result.Markdown, want) {
+				t.Fatalf("Markdown must contain %q, got %q", want, result.Markdown)
+			}
+		}
+		if got := result.Metadata["doc_kind"]; got != "odp" {
+			t.Fatalf("doc_kind = %#v, want odp", got)
+		}
+	})
+}
+
+// TestRenderWorkbookDisclosesMissingSheets pins H14: a converter that only
+// delivers the active sheet must produce doc_degraded=true with the missing
+// sheet names instead of a silent, complete-looking render.
+func TestRenderWorkbookDisclosesMissingSheets(t *testing.T) {
+	path := docreadTestZip(t, t.TempDir(), "book.xlsx", [][2]string{
+		{"[Content_Types].xml", "<Types/>"},
+		{"xl/workbook.xml", `<workbook><sheets><sheet name="First" sheetId="1"/><sheet name="Second" sheetId="2"/></sheets></workbook>`},
+	})
+	docreadTestLookPath(t, "soffice")
+	docreadTestRunCommand(t, func(name string, args []string) ([]byte, []byte, error) {
+		if name != "soffice" {
+			return nil, nil, errors.New("unexpected command " + name)
+		}
+		outDir := ""
+		for index, arg := range args {
+			if arg == "--outdir" && index+1 < len(args) {
+				outDir = args[index+1]
+			}
+		}
+		if outDir == "" {
+			return nil, []byte("soffice: missing --outdir"), errors.New("exit status 1")
+		}
+		// Only the active sheet is produced, like a pre-7.2 LibreOffice.
+		if err := os.WriteFile(filepath.Join(outDir, "book-First.csv"), []byte("FIRST-SHEET\n"), 0o644); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, nil
+	})
+
+	result, err := Render(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if result.Metadata["doc_degraded"] != true || result.Metadata["doc_reason"] != "partial_sheets" {
+		t.Fatalf("missing sheets must degrade the render, got %#v", result.Metadata)
+	}
+	if result.Metadata["doc_sheets_total"] != 2 || result.Metadata["doc_sheets_delivered"] != 1 {
+		t.Fatalf("sheet coverage counts are wrong: %#v", result.Metadata)
+	}
+	missing, _ := result.Metadata["doc_sheets_missing"].([]string)
+	if len(missing) != 1 || missing[0] != "Second" {
+		t.Fatalf("missing sheet names must be disclosed, got %#v", result.Metadata["doc_sheets_missing"])
 	}
 }
 

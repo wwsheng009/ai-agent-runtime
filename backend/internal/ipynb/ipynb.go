@@ -16,6 +16,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/imageprep"
 )
 
 // maxOutputChars is the fold threshold for a single text output. Above it the
@@ -326,24 +328,18 @@ func supportedImageMIME(mime string) bool {
 	return false
 }
 
-// imageMagicMatches reports whether the decoded bytes really start with the
-// container signature the declared MIME promises. A successful base64 decode is
-// not a valid image: "eA==" decodes to the single byte 'x' and used to be
-// persisted as a .png with image_passthrough=true (2026-09-27 review).
-func imageMagicMatches(data []byte, mime string) bool {
-	switch mime {
-	case "image/png":
-		return len(data) >= 8 && bytes.Equal(data[:8], []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
-	case "image/jpeg":
-		return len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF
-	case "image/gif":
-		return len(data) >= 6 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a")
-	}
-	return false
-}
-
 func appendImages(builder *strings.Builder, render *Render, cellIndex, outputIndex int, out output) int {
 	skipped := 0
+	// Placeholder line numbers are needed for the window filter, but rescanning
+	// the whole markdown prefix for every image made a many-image notebook
+	// quadratic (2026-09-27 review H18). Every write below emits exactly one
+	// line, so counting the writes in this call is equivalent.
+	line := strings.Count(builder.String(), "\n")
+	lineOf := func() int { return line }
+	emit := func(format string, args ...interface{}) {
+		fmt.Fprintf(builder, format, args...)
+		line++
+	}
 	for _, mime := range []string{"image/png", "image/jpeg", "image/gif"} {
 		raw, ok := out.Data[mime]
 		if !ok {
@@ -352,31 +348,31 @@ func appendImages(builder *strings.Builder, render *Render, cellIndex, outputInd
 		// 先按 base64 长度估算解码后体积：超限时不必真正解码（解码结果本来
 		// 就要丢弃，先解码等于白白分配一块大内存）。
 		if encoded := encodedTextLength(raw); encoded > 0 && base64.StdEncoding.DecodedLen(encoded) > maxImageBytes {
-			fmt.Fprintf(builder, "# [image] cell %d output %d: %s (超过 %d 字节上限未附加)\n",
+			emit("# [image] cell %d output %d: %s (超过 %d 字节上限未附加)\n",
 				cellIndex+1, outputIndex, mime, maxImageBytes)
 			skipped++
 			continue
 		}
 		data, err := decodeBase64Output(raw)
 		if err != nil {
-			fmt.Fprintf(builder, "# [image] cell %d output %d: %s (base64 解码失败)\n", cellIndex+1, outputIndex, mime)
+			emit("# [image] cell %d output %d: %s (base64 解码失败)\n", cellIndex+1, outputIndex, mime)
 			skipped++
 			continue
 		}
 		if len(data) > maxImageBytes {
-			fmt.Fprintf(builder, "# [image] cell %d output %d: %s (%d bytes, 超过 %d 字节上限未附加)\n",
+			emit("# [image] cell %d output %d: %s (%d bytes, 超过 %d 字节上限未附加)\n",
 				cellIndex+1, outputIndex, mime, len(data), maxImageBytes)
 			skipped++
 			continue
 		}
-		if !imageMagicMatches(data, mime) {
-			fmt.Fprintf(builder, "# [image] cell %d output %d: %s (解码结果不是有效图片，未附加)\n",
-				cellIndex+1, outputIndex, mime)
+		if err := imageprep.ValidateImageData(data, mime); err != nil {
+			emit("# [image] cell %d output %d: %s (不是完整图片，未附加: %v)\n",
+				cellIndex+1, outputIndex, mime, err)
 			skipped++
 			continue
 		}
 		if render.imageBytes+len(data) > maxTotalImageBytes {
-			fmt.Fprintf(builder, "# [image] cell %d output %d: %s (notebook 图片总量超过 %d 字节上限未附加)\n",
+			emit("# [image] cell %d output %d: %s (notebook 图片总量超过 %d 字节上限未附加)\n",
 				cellIndex+1, outputIndex, mime, maxTotalImageBytes)
 			skipped++
 			continue
@@ -387,9 +383,9 @@ func appendImages(builder *strings.Builder, render *Render, cellIndex, outputInd
 			Output: outputIndex,
 			MIME:   mime,
 			Data:   data,
-			Line:   strings.Count(builder.String(), "\n"),
+			Line:   lineOf(),
 		})
-		fmt.Fprintf(builder, "# [image] cell %d output %d: %s (%d bytes)\n", cellIndex+1, outputIndex, mime, len(data))
+		emit("# [image] cell %d output %d: %s (%d bytes)\n", cellIndex+1, outputIndex, mime, len(data))
 	}
 	return skipped
 }

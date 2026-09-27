@@ -75,6 +75,12 @@ func (e *EditTool) DefinitionMetadata() map[string]interface{} {
 		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
+		// file_path is read for matching and written on success: an inout target
+		// that must already exist, but is still classified as a write for the
+		// sandbox check (P1-4).
+		runtimetypes.ToolMetadataPathRolesKey: map[string]interface{}{
+			"file_path": runtimetypes.ToolPathRoleInOut,
+		},
 	}
 }
 

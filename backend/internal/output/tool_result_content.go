@@ -166,7 +166,14 @@ func RenderToolResultContentForModel(content interface{}, toolErr string, envelo
 	// payload (view batch, shell) is folded back to 12 KiB here after the text
 	// layer already passed it through (2026-09-27 review: a mixed
 	// success/failure files[] batch lost its tail at the model boundary).
-	return renderToolResultContract(body, diagnostic, effectiveModelToolTextBudget(metadata))
+	//
+	// When the tool declared the window, the declaration is a promise about the
+	// payload: the contract header is control-plane text this layer adds and
+	// must not eat into the bytes the tool promised to deliver. Charging the
+	// header against the declared window let a batch lose a section whose
+	// ledger/dedup entries were already committed (2026-09-27 review H9).
+	declaredBudget := toolresult.ModelVisibleBudgetBytes(metadata)
+	return renderToolResultContract(body, diagnostic, effectiveModelToolTextBudget(metadata), declaredBudget > 0)
 }
 
 func renderToolResultBodyForModel(content interface{}, toolErr string, envelope *Envelope) string {
@@ -229,7 +236,7 @@ func envelopeToolCallID(envelope *Envelope) string {
 	return envelope.ToolCallID
 }
 
-func renderToolResultContract(body string, diagnostic toolresult.Diagnostic, budget int) string {
+func renderToolResultContract(body string, diagnostic toolresult.Diagnostic, budget int, bodyOwnsBudget bool) string {
 	if budget <= 0 {
 		budget = modelToolTextByteBudget
 	}
@@ -329,6 +336,9 @@ func renderToolResultContract(body string, diagnostic toolresult.Diagnostic, bud
 	}
 	separator := "\n\n"
 	remaining := budget - len(header) - len(separator)
+	if bodyOwnsBudget {
+		remaining = budget
+	}
 	if remaining <= 0 {
 		return safePrefixByBytes(header, budget)
 	}

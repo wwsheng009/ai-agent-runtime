@@ -1002,13 +1002,9 @@ func validateCodexToolCalls(result map[string]interface{}) error {
 			continue
 		}
 		var decoded map[string]interface{}
-		if err := json.Unmarshal([]byte(arguments), &decoded); err != nil || decoded == nil {
-			malformed = append(malformed, MalformedToolCall{
-				Index:     index,
-				ID:        callID,
-				Name:      name,
-				Arguments: arguments,
-			})
+		parseErr := json.Unmarshal([]byte(arguments), &decoded)
+		if parseErr != nil || decoded == nil {
+			malformed = append(malformed, newMalformedToolCall(index, callID, name, arguments, 0, parseErr, decoded))
 		}
 	}
 	if len(malformed) > 0 {

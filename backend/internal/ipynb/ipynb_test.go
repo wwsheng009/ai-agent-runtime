@@ -4,10 +4,39 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"image"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+// testImageBytes encodes a real 1x1 image: the renderer now validates that the
+// decoded bytes are a complete container of the declared MIME, so signature-only
+// fixtures are no longer representative (2026-09-27 review H10).
+func testImageBytes(t *testing.T, format string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	var err error
+	switch format {
+	case "png":
+		err = png.Encode(&buf, img)
+	case "gif":
+		err = gif.Encode(&buf, img, nil)
+	case "jpeg":
+		err = jpeg.Encode(&buf, img, nil)
+	default:
+		t.Fatalf("unsupported test image format %q", format)
+	}
+	if err != nil {
+		t.Fatalf("encode %s: %v", format, err)
+	}
+	return buf.Bytes()
+}
 
 func notebookJSON(t *testing.T, cells []map[string]interface{}) []byte {
 	t.Helper()
@@ -91,7 +120,7 @@ func TestRenderBytesFoldsLargeOutputToJQPointer(t *testing.T) {
 }
 
 func TestRenderBytesDecodesImageOutputs(t *testing.T) {
-	payload := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x01}
+	payload := testImageBytes(t, "png")
 	raw := notebookJSON(t, []map[string]interface{}{
 		{"cell_type": "code", "source": "plot()", "outputs": []map[string]interface{}{
 			{"output_type": "display_data", "data": map[string]interface{}{
@@ -112,7 +141,7 @@ func TestRenderBytesDecodesImageOutputs(t *testing.T) {
 	if image.MIME != "image/png" || image.Cell != 0 || image.Output != 0 || string(image.Data) != string(payload) {
 		t.Fatalf("unexpected image output: %+v", image)
 	}
-	if !strings.Contains(render.Markdown, "# [image] cell 1 output 0: image/png (9 bytes)") {
+	if !strings.Contains(render.Markdown, fmt.Sprintf("# [image] cell 1 output 0: image/png (%d bytes)", len(payload))) {
 		t.Fatalf("missing image marker:\n%s", render.Markdown)
 	}
 	if render.Metadata["images"] != 1 {
@@ -223,13 +252,12 @@ func TestRenderBytesSkipsOversizedImageBeforeDecoding(t *testing.T) {
 }
 
 func TestRenderBytesEnforcesTotalImageBudget(t *testing.T) {
+	payloadBytes := testImageBytes(t, "png")
 	originalSingle, originalTotal := maxImageBytes, maxTotalImageBytes
-	maxImageBytes, maxTotalImageBytes = 1<<20, 10
+	maxImageBytes, maxTotalImageBytes = 1<<20, len(payloadBytes)+1
 	t.Cleanup(func() { maxImageBytes, maxTotalImageBytes = originalSingle, originalTotal })
 
-	// A real container signature keeps the fixture representative: the renderer
-	// now validates decoded bytes against the declared MIME.
-	payload := base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	payload := base64.StdEncoding.EncodeToString(payloadBytes)
 	raw := notebookJSON(t, []map[string]interface{}{
 		{"cell_type": "code", "source": "a", "outputs": []map[string]interface{}{
 			{"output_type": "display_data", "data": map[string]interface{}{"image/png": payload}},
@@ -243,7 +271,7 @@ func TestRenderBytesEnforcesTotalImageBudget(t *testing.T) {
 	if len(render.Images) != 1 {
 		t.Fatalf("only the first image fits the total budget, got %d", len(render.Images))
 	}
-	if !strings.Contains(render.Markdown, "notebook 图片总量超过 10 字节上限未附加") {
+	if !strings.Contains(render.Markdown, fmt.Sprintf("notebook 图片总量超过 %d 字节上限未附加", len(payloadBytes)+1)) {
 		t.Fatalf("expected the total-budget note, got %q", render.Markdown)
 	}
 }
@@ -262,7 +290,7 @@ func TestTruncateRunesKeepsValidUTF8(t *testing.T) {
 // TestRenderBytesHandlesUpdateDisplayDataAndGIF: update_display_data is a legal
 // notebook output type, and the image channel supports gif.
 func TestRenderBytesHandlesUpdateDisplayDataAndGIF(t *testing.T) {
-	gifPayload := base64.StdEncoding.EncodeToString([]byte("GIF89a\x01\x00\x01\x00"))
+	gifPayload := base64.StdEncoding.EncodeToString(testImageBytes(t, "gif"))
 	raw := notebookJSON(t, []map[string]interface{}{
 		{"cell_type": "code", "source": "animate()", "outputs": []map[string]interface{}{
 			{"output_type": "update_display_data", "data": map[string]interface{}{

@@ -189,7 +189,10 @@ func (v *ViewTool) viewImageResult(absPath, displayPath string) (*toolkit.ToolRe
 	}
 	return &toolkit.ToolResult{
 		Success:    true,
-		OutputKind: toolresult.KindStructured,
+		// Text plus an image attachment: see view_notebook.go — a structured
+		// kind dropped the note (dimensions, scale multiplier) at the
+		// model-facing boundary (2026-09-27 review H5).
+		OutputKind: toolresult.KindText,
 		Content:    content,
 		Metadata:   metadata,
 	}, true

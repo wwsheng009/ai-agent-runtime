@@ -2182,6 +2182,15 @@ func nextActionForToolError(code string, message string) string {
 			return "Remove shell redirection, command substitution, or dynamic syntax. Use a dedicated read tool or a single allowlisted read-only command. Approval and bypass_permissions cannot override this boundary."
 		case strings.Contains(lower, "write-like tool"):
 			return "Use an allowed read-only tool, or have the parent create a writable child with read_only=false when mutation is actually required. Approval and bypass_permissions cannot override this boundary."
+		case strings.Contains(lower, "sensitive"):
+			return "The command targets a path that is out of scope for read-only access. Read an allowed path with the dedicated view/grep tools instead; approval and bypass_permissions cannot widen this boundary."
+		case strings.Contains(lower, "could not be parsed"):
+			return "The read-only classifier could not parse this command statically. Re-issue it as a single plainly-quoted read-only command (no nested quotes/substitutions); if it stays unparsable, prefer the dedicated view/grep/glob/ls tools."
+		case strings.Contains(lower, "non-readonly shell command"), strings.Contains(lower, "command_not_allowlisted"):
+			// 「未支持静态查询」与「明确副作用」要给不同的下一步：查询类优先
+			// 专用工具或收窄的只读形态（分页参数），只有确实需要变更时才升级
+			// 执行者；这里不能建议盲目重试同一命令。
+			return "This command is not covered by the read-only allowlist. For queries prefer the dedicated grep/glob/ls/view tools, or a narrower read-only form (for example `... | Select-Object -First 20`, `Sort-Object`, `Measure-Object`, `Where-Object -Property <name> <op> <literal>` with literal operands). If mutation is genuinely required, the parent must create a writable child with read_only=false."
 		default:
 			return "Use an allowed read-only tool or command. If mutation is required, the parent must create a writable child with read_only=false; approval and bypass_permissions cannot override this boundary."
 		}

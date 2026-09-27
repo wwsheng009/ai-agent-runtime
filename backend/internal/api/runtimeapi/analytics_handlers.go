@@ -277,6 +277,9 @@ func (h *Handler) ListAnalyticsSubagentStats(w http.ResponseWriter, r *http.Requ
 
 // ListAnalyticsErrorPatterns returns error_code / failure_category Top-N
 // （来源 tools|subagents|requests；空库返回空数组，不返回 500）。
+//
+// 维度过滤与会话端点同口径（provider/model/status/directory/project/q + 时间窗），
+// 供 /usage 概览的「失败分类分布」跟随页面筛选，与同页其它卡片保持一致。
 func (h *Handler) ListAnalyticsErrorPatterns(w http.ResponseWriter, r *http.Request) {
 	if err := h.authorizeUsageAdmin(r); err != nil {
 		h.writeError(w, http.StatusForbidden, err)
@@ -336,7 +339,8 @@ func parseSubagentStatsQuery(r *http.Request) (usageanalytics.SubagentStatsQuery
 }
 
 // parseErrorPatternsQuery 解析 /analytics/errors 参数
-// （session/source/top/from/to）。
+// （session/source/top/from/to/provider/model/directory/project/status/q）。
+// 时间窗与维度均为会话级语义（见 usageanalytics.ErrorPatternsQuery）。
 func parseErrorPatternsQuery(r *http.Request) (usageanalytics.ErrorPatternsQuery, error) {
 	query := usageanalytics.ErrorPatternsQuery{}
 	values := analyticsQueryValues(r)
@@ -348,6 +352,12 @@ func parseErrorPatternsQuery(r *http.Request) (usageanalytics.ErrorPatternsQuery
 	query.To = to
 	query.SessionID = firstAnalyticsValue(values, "session", "session_id")
 	query.Source = strings.TrimSpace(values.Get("source"))
+	query.Provider = strings.TrimSpace(values.Get("provider"))
+	query.Model = strings.TrimSpace(values.Get("model"))
+	query.Directory = strings.TrimSpace(values.Get("directory"))
+	query.Project = strings.TrimSpace(values.Get("project"))
+	query.Status = strings.TrimSpace(values.Get("status"))
+	query.Query = firstAnalyticsValue(values, "q", "query")
 	query.Top = parseAnalyticsLimit(values.Get("top"))
 	return query, nil
 }

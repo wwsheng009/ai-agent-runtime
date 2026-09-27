@@ -40,6 +40,30 @@ const (
 	ToolRetryClassSafe                   = "safe"
 	ToolRetryClassIdempotencyKeyRequired = "idempotency_key_required"
 	ToolRetryClassCompensatable          = "compensatable"
+
+	// ToolMetadataPathRolesKey declares the runtime-side filesystem role of
+	// individual path arguments, e.g. {"file_path": "input", "shot.png":
+	// "output"}. Roles: input | output | inout | workdir. Only "input" targets
+	// must exist before execution; undeclared keys keep the legacy name-based
+	// heuristic. This field is authored by tool registration on this host and is
+	// never taken from a remote tool server's self-description.
+	ToolMetadataPathRolesKey = "path_roles"
+	// ToolMetadataFSOwnerKey declares who resolves a tool's filesystem paths:
+	// runtime | tool_server | browser | opaque. Only owner=runtime paths are
+	// joined to the session workspace and probed on this host; remote/opaque
+	// owners (MCP tool servers, browser tools) are never stat'ed locally.
+	// Missing metadata defaults to runtime; unknown values fall back to opaque.
+	ToolMetadataFSOwnerKey = "fs_owner"
+
+	ToolFSOwnerRuntime    = "runtime"
+	ToolFSOwnerToolServer = "tool_server"
+	ToolFSOwnerBrowser    = "browser"
+	ToolFSOwnerOpaque     = "opaque"
+
+	ToolPathRoleInput   = "input"
+	ToolPathRoleOutput  = "output"
+	ToolPathRoleInOut   = "inout"
+	ToolPathRoleWorkdir = "workdir"
 )
 
 // BoolMetadataValue extracts a boolean metadata value from a generic tool
@@ -120,4 +144,93 @@ func BoolMetadataValue(metadata map[string]interface{}, key string) (bool, bool)
 		}
 		return value, true
 	}
+}
+
+// StringMetadataValue extracts a trimmed string metadata value. The second
+// return value reports whether the key existed as a non-empty string.
+func StringMetadataValue(metadata map[string]interface{}, key string) (string, bool) {
+	if len(metadata) == 0 {
+		return "", false
+	}
+	raw, ok := metadata[key]
+	if !ok {
+		return "", false
+	}
+	text, ok := raw.(string)
+	if !ok {
+		return "", false
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", false
+	}
+	return text, true
+}
+
+// FSOwnerFromMetadata resolves the declared filesystem owner for a tool
+// definition. Built-in tools default to runtime (the historical behavior);
+// unknown or malformed owners fall back to opaque so a typo can never enable
+// local path probing.
+func FSOwnerFromMetadata(metadata map[string]interface{}) string {
+	owner, ok := StringMetadataValue(metadata, ToolMetadataFSOwnerKey)
+	if !ok {
+		return ToolFSOwnerRuntime
+	}
+	switch strings.ToLower(owner) {
+	case ToolFSOwnerRuntime:
+		return ToolFSOwnerRuntime
+	case ToolFSOwnerToolServer:
+		return ToolFSOwnerToolServer
+	case ToolFSOwnerBrowser:
+		return ToolFSOwnerBrowser
+	case ToolFSOwnerOpaque:
+		return ToolFSOwnerOpaque
+	default:
+		return ToolFSOwnerOpaque
+	}
+}
+
+// PathRoleFromMetadata resolves the declared role of one path argument.
+// Matching is case-insensitive on the argument name. declared=false means the
+// key was not listed in path_roles (callers keep the legacy name heuristic);
+// declared=true with an empty role means the value was unrecognized, which
+// callers must treat conservatively as a non-input target.
+func PathRoleFromMetadata(metadata map[string]interface{}, argKey string) (role string, declared bool) {
+	if len(metadata) == 0 {
+		return "", false
+	}
+	raw, ok := metadata[ToolMetadataPathRolesKey]
+	if !ok {
+		return "", false
+	}
+	roles, ok := raw.(map[string]interface{})
+	if !ok || len(roles) == 0 {
+		return "", false
+	}
+	key := strings.ToLower(strings.TrimSpace(argKey))
+	if key == "" {
+		return "", false
+	}
+	for name, value := range roles {
+		if strings.ToLower(strings.TrimSpace(name)) != key {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok {
+			return "", true
+		}
+		switch strings.ToLower(strings.TrimSpace(text)) {
+		case ToolPathRoleInput:
+			return ToolPathRoleInput, true
+		case ToolPathRoleOutput:
+			return ToolPathRoleOutput, true
+		case ToolPathRoleInOut:
+			return ToolPathRoleInOut, true
+		case ToolPathRoleWorkdir:
+			return ToolPathRoleWorkdir, true
+		default:
+			return "", true
+		}
+	}
+	return "", false
 }

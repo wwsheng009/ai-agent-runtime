@@ -131,6 +131,14 @@ func Prepare(srcPath, outDir string, opts Options) (Result, error) {
 			Note:    reason,
 		}, nil
 	}
+	// A readable header is not a complete image: DecodeConfig accepts an
+	// IHDR+IEND PNG with no pixel data, and attaching those bytes made a strict
+	// provider reject the whole request instead of the tool degrading
+	// (2026-09-27 review H10). The structural walk allocates nothing and runs
+	// before either the unchanged return or the full decode.
+	if err := ValidateImageFile(srcPath, "image/"+format); err != nil {
+		return Result{}, fmt.Errorf("图片校验失败（%s）: %w", filepath.Base(srcPath), err)
+	}
 
 	unchanged := Result{Path: srcPath, Width: cfg.Width, Height: cfg.Height, Bytes: info.Size(), Format: format}
 	maxDimension := opts.MaxDimension

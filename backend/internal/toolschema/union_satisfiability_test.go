@@ -64,14 +64,18 @@ func TestScalarizeUnionsStillFoldsPlainStringUnion(t *testing.T) {
 }
 
 // TestScalarizeUnionsKeepsConflictingSiblingType: the preferred string branch
-// contradicts a sibling type of integer, so folding it in would reject the
-// integers the advertised property legitimately accepts.
+// contradicts a sibling type of integer, so it must not be folded in. A
+// compatible branch may still be folded (2026-09-27 review H12 prefers the
+// narrowest safe shorthand); what must never happen is rejecting the integers
+// the advertised property legitimately accepts.
 func TestScalarizeUnionsKeepsConflictingSiblingType(t *testing.T) {
 	out, compiled := scalarizedSchema(t,
 		`{"type":"object","properties":{"n":{"type":"integer","anyOf":[{"type":"string"},{"type":"integer"}]}}}`)
 	property := propertySchema(t, out, "n")
 	if _, exists := property["anyOf"]; !exists {
-		t.Fatalf("conflicting union must be preserved, got %s", mustJSON(t, out))
+		if property["type"] != "integer" {
+			t.Fatalf("only the integer branch is compatible with the sibling type, got %s", mustJSON(t, out))
+		}
 	}
 	if err := compiled.Validate(map[string]interface{}{"n": float64(3)}); err != nil {
 		t.Fatalf("integer sibling stopped validating: %v", err)
@@ -79,13 +83,16 @@ func TestScalarizeUnionsKeepsConflictingSiblingType(t *testing.T) {
 }
 
 // TestScalarizeUnionsKeepsConstConflict: const carries the same restriction as
-// enum and must be considered before folding.
+// enum and must be considered before folding; a branch consistent with the
+// const may be folded, a conflicting branch may not (2026-09-27 review H12).
 func TestScalarizeUnionsKeepsConstConflict(t *testing.T) {
 	out, compiled := scalarizedSchema(t,
 		`{"type":"object","required":["n"],"properties":{"n":{"const":1,"anyOf":[{"type":"integer"},{"type":"string"}]}}}`)
 	property := propertySchema(t, out, "n")
 	if _, exists := property["anyOf"]; !exists {
-		t.Fatalf("const-conflicting union must be preserved, got %s", mustJSON(t, out))
+		if property["type"] != "integer" {
+			t.Fatalf("only the integer branch is consistent with const 1, got %s", mustJSON(t, out))
+		}
 	}
 	if err := compiled.Validate(map[string]interface{}{"n": float64(1)}); err != nil {
 		t.Fatalf("const value stopped validating: %s (%v)", mustJSON(t, out), err)

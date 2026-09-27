@@ -516,6 +516,87 @@ func TestAnalyticsHandlersErrorPatterns(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, getAnalyticsResponse(router, "/api/runtime/analytics/errors?from=not-a-time").Code)
 }
 
+// TestAnalyticsHandlersErrorPatternsFollowFilters 覆盖 /analytics/errors 的维度过滤：
+// provider/model/status/q 与时间窗一律按事件所属会话判定（与 /analytics/sessions 同口径），
+// 供 /usage 概览的「失败分类分布」跟随页面筛选。
+func TestAnalyticsHandlersErrorPatternsFollowFilters(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage_analytics.sqlite")
+	handler := newRuntimeLogTestHandler()
+	handler.SetUsageAnalyticsDBPath(dbPath)
+	t.Cleanup(detachUsageAnalyticsService)
+
+	router := mux.NewRouter()
+	handler.RegisterRoutes(router)
+	bus := handler.getRuntimeEventBus()
+	require.NotNil(t, bus)
+
+	alpha := "20260917_120000.000_scope_alpha"
+	beta := "20261002_120000.000_scope_beta"
+	alphaStart := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	betaStart := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	// LLM 请求会把 provider/model 写回 usage_sessions（会话级过滤的事实来源）。
+	publishAnalyticsRequestStarted(bus, alpha, "req-alpha", "provider-alpha", "model-alpha", alphaStart)
+	publishAnalyticsRequestStarted(bus, beta, "req-beta", "provider-beta", "model-beta", betaStart)
+	publishAnalyticsToolCall(bus, alpha, "call-alpha", "bash", "failed", "TOOL_TIMEOUT", alphaStart, 1000)
+	publishAnalyticsToolCall(bus, beta, "call-beta", "bash", "failed", "TOOL_PERMISSION_DENIED", betaStart, 1000)
+
+	errorCodeOf := func(target string) string {
+		t.Helper()
+		rec := getAnalyticsResponse(router, target)
+		require.Equal(t, http.StatusOK, rec.Code, target)
+		rows := analyticsRows(t, decodeAnalyticsPayload(t, rec), "patterns")
+		if len(rows) != 1 {
+			t.Fatalf("%s 期望恰好 1 条模式，实际 %d: %+v", target, len(rows), rows)
+		}
+		code, _ := rows[0].(map[string]interface{})["error_code"].(string)
+		return code
+	}
+	// 无筛选：两个会话各一条工具失败模式（全局口径不被新增默认过滤改变）。
+	unfiltered := decodeAnalyticsPayload(t, getAnalyticsResponse(router, "/api/runtime/analytics/errors"))
+	require.Len(t, analyticsRows(t, unfiltered, "patterns"), 2)
+
+	require.Equal(t, "TOOL_TIMEOUT", errorCodeOf("/api/runtime/analytics/errors?provider=provider-alpha"))
+	require.Equal(t, "TOOL_PERMISSION_DENIED", errorCodeOf("/api/runtime/analytics/errors?provider=provider-beta"))
+	require.Equal(t, "TOOL_TIMEOUT", errorCodeOf("/api/runtime/analytics/errors?model=model-alpha"))
+	// q 命中会话 id/目录/项目等自由文本，与列表页同口径。
+	require.Equal(t, "TOOL_PERMISSION_DENIED", errorCodeOf("/api/runtime/analytics/errors?q=scope_beta"))
+	// 时间窗按会话开始时间右开：from=10-01 只保留 beta，to=10-01 只保留 alpha。
+	require.Equal(t, "TOOL_PERMISSION_DENIED", errorCodeOf("/api/runtime/analytics/errors?from=2026-10-01T00:00:00Z"))
+	require.Equal(t, "TOOL_TIMEOUT", errorCodeOf("/api/runtime/analytics/errors?to=2026-10-01T00:00:00Z"))
+
+	empty := decodeAnalyticsPayload(t, getAnalyticsResponse(router, "/api/runtime/analytics/errors?provider=no-such-provider"))
+	require.Len(t, analyticsRows(t, empty, "patterns"), 0)
+
+	// 会话 id 与维度叠加互斥时同样为空（不得回退成全量）。
+	mismatched := decodeAnalyticsPayload(t, getAnalyticsResponse(
+		router,
+		"/api/runtime/analytics/errors?session="+alpha+"&provider=provider-beta",
+	))
+	require.Len(t, analyticsRows(t, mismatched, "patterns"), 0)
+}
+
+// publishAnalyticsRequestStarted 写入一次 LLM 请求开始事件（仅用于把 provider/model
+// 落到 usage_sessions 行，制造可区分的会话维度）。
+func publishAnalyticsRequestStarted(
+	bus *runtimeevents.Bus,
+	sessionID, requestID, provider, model string,
+	startedAt time.Time,
+) {
+	bus.Publish(runtimeevents.Event{
+		Type:      usageanalytics.EventLLMRequestStarted,
+		SessionID: sessionID,
+		TraceID:   "trace-" + requestID,
+		Timestamp: startedAt,
+		Payload: map[string]interface{}{
+			"llm_request_id": requestID,
+			"turn_id":        "turn-scope",
+			"step":           1,
+			"provider":       provider,
+			"model":          model,
+		},
+	})
+}
+
 // TestAnalyticsHandlersUsageAnalyticsHealthBlock 覆盖批次 3.2：
 // runtimeStatusSnapshot 的 usage_analytics 健康块（未挂载/挂载两种形态字段齐全）。
 func TestAnalyticsHandlersUsageAnalyticsHealthBlock(t *testing.T) {

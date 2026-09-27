@@ -661,3 +661,52 @@ func TestLooksLikeOpenAIReasoningModel(t *testing.T) {
 		t.Fatal("expected deepseek model to be detected separately")
 	}
 }
+
+// TestNormalizeStreamReader_MultiLineDataEventNormalized 锁定 P1-6：SSE 允许同一
+// 事件用多行 data:（按规范以 \n 拼接）。逐行归一化在多行事件上必然失效——每行都
+// 不是完整 JSON，兼容转换被跳过，原生对象参数随后在聚合层被丢弃成 {}。按事件
+// 缓冲后必须整体归一化，且事件边界（空行/[DONE]）保持不变。
+func TestNormalizeStreamReader_MultiLineDataEventNormalized(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning":"think","tool_calls":[{"index":0,"function":{"name":"list_files","arguments":`,
+		`data: {"path":"."}}}]}}]}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	reader := NormalizeStreamReader(Context{Protocol: "openai"}, strings.NewReader(stream))
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read normalized stream: %v", err)
+	}
+	got := string(payload)
+	if !strings.Contains(got, `"arguments":"{\"path\":\".\"}"`) {
+		t.Fatalf("multi-line data event must be normalized as a whole, got %s", got)
+	}
+	if strings.Contains(got, `"arguments":{`) {
+		t.Fatalf("multi-line data event kept a native object argument, got %s", got)
+	}
+	if !strings.Contains(got, "data: [DONE]") {
+		t.Fatalf("event boundary [DONE] must be preserved, got %s", got)
+	}
+}
+
+// TestNormalizeStreamReader_ConsecutiveSingleLineEventsStillNormalized 锁定 P1-6 的
+// 兼容回退：部分中转省略空行分隔，多行 data: 实际是多个独立单行事件；拼接解析
+// 失败后必须退回逐行归一化，不能因此漏掉任何一行。
+func TestNormalizeStreamReader_ConsecutiveSingleLineEventsStillNormalized(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning":"first"}}]}`,
+		`data: {"choices":[{"delta":{"reasoning":"second"}}]}`,
+		"",
+	}, "\n")
+	reader := NormalizeStreamReader(Context{Protocol: "openai"}, strings.NewReader(stream))
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read normalized stream: %v", err)
+	}
+	got := string(payload)
+	if !strings.Contains(got, `"reasoning_content":"first"`) || !strings.Contains(got, `"reasoning_content":"second"`) {
+		t.Fatalf("consecutive single-line events must both be normalized, got %s", got)
+	}
+}

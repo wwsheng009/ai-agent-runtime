@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -280,4 +281,83 @@ func TestEngineApprovalRememberStoresGrantButNotDangerous(t *testing.T) {
 	assert.Equal(t, DecisionAllow, decision.Type)
 	_, ok = store2.Find("shell", nil)
 	assert.False(t, ok)
+}
+
+// TestAssessShellReadOnlyCommandAllowsStaticPipelineCmdlets 锁定 P1-5：常见只读
+// 流水后段 cmdlet 的固定字面量形态进入只读快路径（此前 `... | Select-Object
+// -First 5` 会被整条拒绝，造成只读场景误伤）。
+func TestAssessShellReadOnlyCommandAllowsStaticPipelineCmdlets(t *testing.T) {
+	allowed := []string{
+		"Get-ChildItem -LiteralPath . | Select-Object -First 5",
+		"Get-ChildItem . | Select-Object -First:10 -Skip 2",
+		"Get-Content app.log | Measure-Object -Line",
+		"Get-ChildItem . | Sort-Object -Property Length -Descending",
+		"Get-ChildItem . | Sort-Object Name",
+		"Get-ChildItem . | Where-Object -Property Length -GT 100",
+		"Get-ChildItem . | Where-Object Length -gt 1kb",
+		"rg -n TODO . | Measure-Object",
+		"git -C . status --short",
+		"git --no-pager log --oneline -5",
+	}
+	for _, command := range allowed {
+		assessment := AssessShellReadOnlyCommand(command)
+		assert.Truef(t, assessment.Allowed,
+			"expected read-only fast path for %q (reason=%s segment=%d)", command, assessment.Reason, assessment.SegmentIndex)
+	}
+}
+
+// TestAssessShellReadOnlyCommandRejectsNonLiteralPipelineCmdlets 锁定 P1-5 的安全
+// 侧：脚本块、计算属性、变量、类型转换、额外 token 与位置参数列表一律拒绝；
+// 「动态语法」与「未支持静态查询」保持不同稳定原因码。
+func TestAssessShellReadOnlyCommandRejectsNonLiteralPipelineCmdlets(t *testing.T) {
+	cases := []struct {
+		command string
+		reason  string
+	}{
+		{"Get-ChildItem . | Select-Object -Property Name,Length", ShellReadOnlyReasonNotAllowed},
+		{"Get-ChildItem . | Select-Object -First 5 -Last 3", ShellReadOnlyReasonNotAllowed},
+		{"Get-ChildItem . | Select-Object -First 5s", ShellReadOnlyReasonNotAllowed},
+		{"Get-ChildItem . | Select-Object -First -5", ShellReadOnlyReasonNotAllowed},
+		{"Get-ChildItem . | Where-Object { Length -gt 100 }", ShellReadOnlyReasonNotAllowed},
+		{"Get-ChildItem . | Where-Object -Property Length -GT 100 -And Name -eq \"x\"", ShellReadOnlyReasonNotAllowed},
+		{"Get-ChildItem . | Where-Object Length -gt (Get-Random)", ShellReadOnlyReasonNotAllowed},
+		{"Get-ChildItem . | Sort-Object -Property @{Expression={$_.Length}}", ShellReadOnlyReasonDynamicSyntax},
+		{"Get-ChildItem . | Select-Object -First $n", ShellReadOnlyReasonDynamicSyntax},
+		{"git -c core.pager=cat log", ShellReadOnlyReasonNotAllowed},
+		{"git -c core.hooksPath=/tmp/hooks status", ShellReadOnlyReasonNotAllowed},
+		{"git --config-env=core.pager=PAGER log", ShellReadOnlyReasonNotAllowed},
+	}
+	for _, tc := range cases {
+		assessment := AssessShellReadOnlyCommand(tc.command)
+		assert.Falsef(t, assessment.Allowed, "expected rejection for %q", tc.command)
+		assert.Equalf(t, tc.reason, assessment.Reason, "stable reason for %q", tc.command)
+	}
+}
+
+// TestAssessShellReadOnlyCommandReportsFailingSegment 锁定 P1-5：拒绝时带出失败段
+// 序号与内容；命令级（未分段）拒绝保持无段信息，避免误导。
+func TestAssessShellReadOnlyCommandReportsFailingSegment(t *testing.T) {
+	assessment := AssessShellReadOnlyCommand("Get-ChildItem . | Select-Object -First 5 | Remove-Item .")
+	assert.False(t, assessment.Allowed)
+	assert.Equal(t, ShellReadOnlyReasonNotAllowed, assessment.Reason)
+	assert.Equal(t, 3, assessment.SegmentIndex)
+	assert.Equal(t, "Remove-Item .", assessment.Segment)
+
+	dynamic := AssessShellReadOnlyCommand("Get-ChildItem . | Select-Object -First $n")
+	assert.Equal(t, ShellReadOnlyReasonDynamicSyntax, dynamic.Reason)
+	assert.Equal(t, 0, dynamic.SegmentIndex)
+	assert.Empty(t, dynamic.Segment)
+}
+
+// TestReadOnlyPolicyDenialReportsFailingSegment 锁定 P1-5：策略层拒绝信息包含
+// 失败段位置，便于模型直接定位而不是整条命令盲重试。
+func TestReadOnlyPolicyDenialReportsFailingSegment(t *testing.T) {
+	policy := NewToolExecutionPolicy(nil, true)
+	err := policy.AllowToolCallWithContext(context.Background(),
+		skill.ToolInfo{Name: "shell", MCPTrustLevel: "local", ExecutionMode: "local_mcp"},
+		map[string]interface{}{"command": "Get-ChildItem . | Select-Object -First 5 | Remove-Item ."})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "non-readonly shell command")
+	assert.Contains(t, err.Error(), "segment 3")
+	assert.Contains(t, err.Error(), "Remove-Item")
 }

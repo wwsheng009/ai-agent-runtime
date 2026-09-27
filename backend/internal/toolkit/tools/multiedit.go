@@ -81,6 +81,10 @@ func (m *MultieditTool) DefinitionMetadata() map[string]interface{} {
 		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: false,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassNever,
+		// file_path is read for matching and written on success (P1-4).
+		runtimetypes.ToolMetadataPathRolesKey: map[string]interface{}{
+			"file_path": runtimetypes.ToolPathRoleInOut,
+		},
 	}
 }
 

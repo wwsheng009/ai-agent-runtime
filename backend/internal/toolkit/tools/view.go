@@ -136,6 +136,14 @@ func (v *ViewTool) DefinitionMetadata() map[string]interface{} {
 		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: true,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
+		// view targets local read inputs: the existence preflight keeps applying
+		// (P1-4 path roles, declared explicitly so later changes cannot silently
+		// reclassify them).
+		runtimetypes.ToolMetadataPathRolesKey: map[string]interface{}{
+			"file_path": runtimetypes.ToolPathRoleInput,
+			"paths":     runtimetypes.ToolPathRoleInput,
+			"files":     runtimetypes.ToolPathRoleInput,
+		},
 	}
 }
 
@@ -162,6 +170,13 @@ type ViewFileRequest struct {
 	// the aggregate cap does not leave a window in the "already delivered"
 	// cache that the model never saw (2026-09-27 review).
 	dedupRecordDefer func(func())
+	// ledgerDefer, when set, receives the read-ledger closure instead of running
+	// it immediately. The batch path defers it for the same reason as the dedup
+	// registration: a cap-dropped section must not refresh the read-before-write
+	// ledger, or a later write would treat the file as freshly read and
+	// silently overwrite content the model never received (2026-09-27 review
+	// H4).
+	ledgerDefer func(func())
 }
 
 // Execute 实现 Tool 接口
@@ -437,13 +452,20 @@ func (v *ViewTool) executeSingle(ctx context.Context, p ViewFileRequest) (*toolk
 	if readMeta.TotalLinesKnown {
 		totalLines = readMeta.TotalLines
 	}
-	recordFileReadFromDisk(ctx, resolvedPath, fullRead, "view", fileReadWindow{
-		Offset:     windowOffset,
-		Limit:      windowLimit,
-		LinesRead:  readMeta.LinesRead,
-		TotalLines: totalLines,
-		Truncated:  readMeta.HasMore || readMeta.ByteBudgetApplied || readMeta.LongLinesTruncated > 0 || readMeta.Tail,
-	})
+	recordLedger := func() {
+		recordFileReadFromDiskObserved(ctx, resolvedPath, fullRead, "view", fileReadWindow{
+			Offset:     windowOffset,
+			Limit:      windowLimit,
+			LinesRead:  readMeta.LinesRead,
+			TotalLines: totalLines,
+			Truncated:  readMeta.HasMore || readMeta.ByteBudgetApplied || readMeta.LongLinesTruncated > 0 || readMeta.Tail,
+		}, fileInfo)
+	}
+	if p.ledgerDefer != nil {
+		p.ledgerDefer(recordLedger)
+	} else {
+		recordLedger()
+	}
 	// Dedup only remembers complete text windows: a byte-budget stop or a line
 	// clamp means a stub would hide content the model never saw.
 	if !readMeta.Tail && readMeta.LinesRead > 0 && !readMeta.ByteBudgetApplied && readMeta.LongLinesTruncated == 0 && !readMeta.EmptyFile {
@@ -660,13 +682,20 @@ func (v *ViewTool) recordDerivedRender(ctx context.Context, resolvedPath string,
 	// returns a stub for material the model never saw (2026-09-27 review).
 	longLines := viewMetadataInt(metadata, "long_lines_truncated", 0)
 	fullRead := !tail && offset == 0 && !truncated && linesRead > 0 && !empty && longLines == 0
-	recordFileReadFromDisk(ctx, resolvedPath, fullRead, "view", fileReadWindow{
-		Offset:     offset,
-		Limit:      limit,
-		LinesRead:  linesRead,
-		TotalLines: totalLines,
-		Truncated:  truncated || tail || longLines > 0,
-	})
+	recordLedger := func() {
+		recordFileReadFromDiskObserved(ctx, resolvedPath, fullRead, "view", fileReadWindow{
+			Offset:     offset,
+			Limit:      limit,
+			LinesRead:  linesRead,
+			TotalLines: totalLines,
+			Truncated:  truncated || tail || longLines > 0,
+		}, info)
+	}
+	if p.ledgerDefer != nil {
+		p.ledgerDefer(recordLedger)
+	} else {
+		recordLedger()
+	}
 	if !tail && linesRead > 0 && !truncated && !empty && longLines == 0 {
 		recordWindow := func() {
 			recordViewWindowRead(ctx, resolvedPath, info, offset, limit, linesRead, totalLines, true)
@@ -742,7 +771,7 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 	skippedFiles := make([]map[string]interface{}, 0)
 	emittedBytes := 0
 	for index, request := range requests {
-		if len(sections) > 0 && emittedBytes >= viewBatchAggregateBudgetBytes {
+		if len(sections) > 0 && emittedBytes >= viewBatchSectionBudgetBytes() {
 			skippedFiles = append(skippedFiles, map[string]interface{}{
 				"index":     index,
 				"file_path": request.FilePath,
@@ -766,6 +795,8 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 		request.dedupDefer = func(commit viewDedupCommit) { pendingDedup = commit }
 		var pendingRecord func()
 		request.dedupRecordDefer = func(record func()) { pendingRecord = record }
+		var pendingLedger func()
+		request.ledgerDefer = func(record func()) { pendingLedger = record }
 		result, err := v.executeSingle(ctx, request)
 		if err != nil {
 			appendBatchFailure(&failures, &failuresOmitted, fmt.Sprintf("%s: %v", request.FilePath, err))
@@ -787,7 +818,7 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 		if compact {
 			section += "\n" + compactViewSummary(result.Metadata)
 		}
-		if len(sections) > 0 && emittedBytes+len(section) > viewBatchAggregateBudgetBytes {
+		if len(sections) > 0 && emittedBytes+len(section) > viewBatchSectionBudgetBytes() {
 			skippedFiles = append(skippedFiles, map[string]interface{}{
 				"index":     index,
 				"file_path": request.FilePath,
@@ -801,6 +832,9 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 		// Count only sections that are actually delivered: a cap-dropped item
 		// must not be reported as read (review m5).
 		succeeded = len(items)
+		if pendingLedger != nil {
+			pendingLedger()
+		}
 		if pendingDedup != nil {
 			pendingDedup()
 		}
@@ -808,32 +842,48 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 			pendingRecord()
 		}
 	}
+	// The trailing blocks share one reserved window: appending them after the
+	// last per-section cap check let the body exceed its own declared budget,
+	// and the render contract then cut content whose ledger/dedup entries were
+	// already committed (2026-09-27 review H9).
+	var tail strings.Builder
 	if len(skippedFiles) > 0 {
-		sections = append(sections, fmt.Sprintf(
+		fmt.Fprintf(&tail,
 			"===== batch window =====\n本次批量输出受聚合上限 %d 字节保护：已读取 %d/%d 个文件，跳过 %d 个。请对跳过项单独调用 view（可先用 compact=true 扫描）。",
 			viewBatchAggregateBudgetBytes, succeeded, len(requests), len(skippedFiles),
-		))
+		)
 	}
 	if len(failures) > 0 || failuresOmitted > 0 {
 		// The errors block is part of the same aggregate window as the file
 		// sections: letting every failure print in full made 400 unreadable
 		// files deliver ~95 KiB against a 64 KiB declaration (2026-09-27 review).
-		var errSection strings.Builder
-		errSection.WriteString("===== errors =====\n")
-		errSection.WriteString(strings.Join(failures, "\n"))
-		if failuresOmitted > 0 {
-			if errSection.Len() > len("===== errors =====\n") {
-				errSection.WriteString("\n")
-			}
-			fmt.Fprintf(&errSection, "... 另有 %d 个失败未逐条列出（总数见 failed_count）", failuresOmitted)
+		if tail.Len() > 0 {
+			tail.WriteString("\n")
 		}
-		sections = append(sections, errSection.String())
+		tail.WriteString("===== errors =====\n")
+		tail.WriteString(strings.Join(failures, "\n"))
+		if failuresOmitted > 0 {
+			if len(failures) > 0 {
+				tail.WriteString("\n")
+			}
+			fmt.Fprintf(&tail, "... 另有 %d 个失败未逐条列出（失败合计 %d/%d）",
+				failuresOmitted, len(failures)+failuresOmitted, len(requests))
+		}
+	}
+	if tail.Len() > 0 {
+		tailText := trimBatchTail(tail.String(), viewBatchTailReserveBytes)
+		sections = append(sections, tailText)
+		emittedBytes += len(tailText)
 	}
 	if succeeded == 0 {
 		meta := map[string]interface{}{
 			"batch":                       true,
 			"request_count":               len(requests),
-			"failed_count":                len(failures),
+			// Total failures, not just the bounded detail rows: consumers
+			// derive success counts from requested-failed, so under-reporting
+			// failed_count invented successes for an all-failed batch
+			// (2026-09-27 review H8).
+			"failed_count":                len(failures) + failuresOmitted,
 			"batch_default_limit_applied": defaulted,
 			"compact":                     compact,
 		}
@@ -844,6 +894,7 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 			meta["failures_omitted"] = failuresOmitted
 			meta["failed_items_omitted"] = failedItemsOmitted
 		}
+		meta["batch_tail_reserve_bytes"] = viewBatchTailReserveBytes
 		attachBatchWindowMetadata(meta, emittedBytes, skippedFiles)
 		summary := strings.Join(failures, "; ")
 		if failuresOmitted > 0 {
@@ -866,7 +917,7 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 		"batch":                       true,
 		"request_count":               len(requests),
 		"succeeded_count":             succeeded,
-		"failed_count":                len(failures),
+		"failed_count":                len(failures) + failuresOmitted,
 		"partial_failure":             len(failures) > 0,
 		"items":                       items,
 		"batch_default_limit_applied": defaulted,
@@ -879,6 +930,7 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 		meta["failures_omitted"] = failuresOmitted
 		meta["failed_items_omitted"] = failedItemsOmitted
 	}
+	meta["batch_tail_reserve_bytes"] = viewBatchTailReserveBytes
 	attachBatchWindowMetadata(meta, emittedBytes, skippedFiles)
 	return &toolkit.ToolResult{
 		Success:    true,
@@ -899,6 +951,36 @@ func attachBatchWindowMetadata(meta map[string]interface{}, emittedBytes int, sk
 	meta["batch_bytes_emitted"] = emittedBytes
 	meta["batch_skipped_count"] = len(skipped)
 	meta["batch_skipped_files"] = skipped
+}
+
+// viewBatchSectionBudgetBytes is the aggregate budget available to file
+// sections: the declared window minus the reserve for the trailing blocks (and
+// the render-layer contract header). Sections decide admission against this,
+// so the assembled body — tail included — stays inside the declared window.
+func viewBatchSectionBudgetBytes() int {
+	budget := viewBatchAggregateBudgetBytes - viewBatchTailReserveBytes
+	if budget < viewOutputBudgetBytes {
+		budget = viewOutputBudgetBytes
+	}
+	return budget
+}
+
+// trimBatchTail keeps the trailing batch blocks inside their reserved window,
+// cutting on a UTF-8 boundary and stating that the details were trimmed so the
+// model is never silently missing the skipped-file/error accounting.
+func trimBatchTail(text string, limit int) string {
+	if limit <= 0 || len(text) <= limit {
+		return text
+	}
+	const marker = "\n... 尾部细节已按聚合预算截断（跳过项与失败数仍见 metadata）。"
+	cut := limit - len(marker)
+	if cut < 0 {
+		cut = 0
+	}
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return strings.TrimRight(text[:cut], "\n") + marker
 }
 
 // compactViewSummary renders a single-line metadata digest for compact batch

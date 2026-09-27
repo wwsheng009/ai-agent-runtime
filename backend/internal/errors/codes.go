@@ -33,6 +33,11 @@ const (
 	ErrSessionLeaseConflict ErrorCode = "SESSION_LEASE_CONFLICT"
 	ErrToolInvalidArgs      ErrorCode = "TOOL_INVALID_ARGS"
 	ErrToolPathNotFound     ErrorCode = "TOOL_PATH_NOT_FOUND"
+	// ErrToolPathAccessFailed marks a path that exists-or-not could not be
+	// determined because the stat failed with a permission or I/O error. It must
+	// stay distinct from TOOL_PATH_NOT_FOUND: a typo fix cannot help, and the
+	// model needs permission/ownership guidance instead of candidate retry.
+	ErrToolPathAccessFailed ErrorCode = "TOOL_PATH_ACCESS_FAILED"
 	// ErrToolStaleContext marks edit/apply_patch failures where the provided
 	// old_string / @@ context no longer matches the workspace. Models must
 	// re-view and rebuild rather than retry the same payload unchanged.
@@ -81,10 +86,10 @@ const (
 	// session store (deleted, expired, or never persisted). It is a host-side
 	// lifecycle failure, not a path/reference input error: replaying the same
 	// call cannot succeed, and it must never be classified as TOOL_PATH_NOT_FOUND.
-	ErrSessionNotFound ErrorCode = "SESSION_NOT_FOUND"
-	ErrContextBudget        ErrorCode = "CONTEXT_BUDGET_EXCEEDED"
-	ErrStreamInterrupted    ErrorCode = "STREAM_INTERRUPTED"
-	ErrUpstreamUnavailable  ErrorCode = "UPSTREAM_UNAVAILABLE"
+	ErrSessionNotFound     ErrorCode = "SESSION_NOT_FOUND"
+	ErrContextBudget       ErrorCode = "CONTEXT_BUDGET_EXCEEDED"
+	ErrStreamInterrupted   ErrorCode = "STREAM_INTERRUPTED"
+	ErrUpstreamUnavailable ErrorCode = "UPSTREAM_UNAVAILABLE"
 
 	// 内存错误
 	ErrMemoryFull ErrorCode = "MEMORY_FULL"

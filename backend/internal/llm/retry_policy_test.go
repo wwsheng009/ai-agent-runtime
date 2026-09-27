@@ -699,8 +699,9 @@ func TestValidateAssistantMessageSemanticsRejectsUnsafeToolCallsAndClassifiesFin
 	assert.Contains(t, err.Error(), "invalid_tool_arguments")
 	// invalid_tool_arguments 按退化采样重试：参数被 completion 预算截断或不是
 	// JSON 对象是模型输出的随机退化，重采样有机会拿到合法参数。走短退避
-	// （degenerateOutputRetryMaxDelay，2s 上限）并由 trackDegenerateOutputReply
-	// 连续 3 次收敛；重试耗尽后执行层 re-prompt（附 schema）仍是第二恢复通道。
+	// （degenerateOutputRetryMaxDelay，2s 上限）：语法类最多 1 次同预算重采样
+	// （trackMalformedSyntaxResample，P0-3b），真截断则走预算扩容；
+	// 重试耗尽后执行层 re-prompt（附 schema）仍是第二恢复通道。
 	malformedDecision := classifyRetryableLLMError(err)
 	assert.True(t, malformedDecision.Retryable)
 	assert.Equal(t, "invalid_tool_arguments", malformedDecision.Reason)
@@ -986,13 +987,24 @@ func TestEscalateOutputBudgetForDegenerateReply(t *testing.T) {
 		"the per-call escalation count bounds the widening")
 	require.Equal(t, EscalatedMaxTokens, explicitBudget)
 
-	// Malformed tool arguments are usually the same cut-off markup: the widened
-	// budget lets the next sample finish the JSON instead of replaying the same
-	// truncated completion.
-	malformedArgs := fmt.Errorf("openai_stream_protocol_error: code=invalid_tool_arguments: tool call 0 (write) has incomplete or non-object JSON arguments")
+	// Malformed tool arguments cut off by the completion budget stay
+	// budget-bound: the widened budget lets the next sample finish the JSON.
+	malformedTruncated := &testMalformedToolCallError{truncated: true}
 	malformedBudget := 4000
-	require.True(t, escalateOutputBudgetForDegenerateReply(&malformedBudget, 0, malformedArgs))
+	require.True(t, escalateOutputBudgetForDegenerateReply(&malformedBudget, 0, malformedTruncated))
 	require.Equal(t, 8000, malformedBudget)
+
+	// A JSON syntax degeneration (e.g. `{"timeout": 60s}` with
+	// finish_reason=tool_calls) carries no truncation evidence: widening
+	// max_tokens cannot change the sample, so escalation must not fire.
+	// 2026-09-27 evidence: 65/66 invalid_tool_arguments responses were bare
+	// durations with finish_reason=tool_calls and completion_tokens far below
+	// the budget, yet each retry doubled max_tokens anyway.
+	malformedSyntax := &testMalformedToolCallError{truncated: false}
+	syntaxBudget := 4000
+	require.False(t, escalateOutputBudgetForDegenerateReply(&syntaxBudget, 0, malformedSyntax),
+		"a syntax-only malformed tool call must not widen the output budget")
+	require.Equal(t, 4000, syntaxBudget)
 
 	// Only budget-bound classes are widened; other failure classes are untouched.
 	rateLimited := 8000
@@ -1018,6 +1030,55 @@ func TestEscalateOutputBudgetForDegenerateReply(t *testing.T) {
 
 	require.False(t, escalateOutputBudgetForDegenerateReply(nil, 0, reasoningOnly))
 	require.False(t, escalateOutputBudgetForDegenerateReply(&maxTokens, 0, nil))
+}
+
+// testMalformedToolCallError stands in for adapter.MalformedToolCallError so the
+// retry policy tests can exercise truncation-evidence gating without importing
+// the adapter package (which keeps the test focused on llm policy semantics).
+type testMalformedToolCallError struct {
+	truncated bool
+}
+
+func (e *testMalformedToolCallError) Error() string {
+	return "openai_stream_protocol_error: code=invalid_tool_arguments: " +
+		"tool call 0 (write) has incomplete or non-object JSON arguments"
+}
+
+func (e *testMalformedToolCallError) RetryErrorCode() string {
+	return "invalid_tool_arguments"
+}
+
+func (e *testMalformedToolCallError) ToolCallArgumentsTruncated() bool {
+	return e != nil && e.truncated
+}
+
+// TestTrackMalformedSyntaxResampleBoundsIdenticalReplays 锁定 P0-3b：
+// 语法类 invalid_tool_arguments 只允许 1 次同预算重采样；真截断走预算扩容路径
+// 不消耗该额度；其它错误不计数。
+func TestTrackMalformedSyntaxResampleBoundsIdenticalReplays(t *testing.T) {
+	syntax := &testMalformedToolCallError{truncated: false}
+	truncated := &testMalformedToolCallError{truncated: true}
+
+	count := 0
+	require.False(t, trackMalformedSyntaxResample(&count, syntax),
+		"first failure may be resampled once")
+	require.Equal(t, 1, count)
+	require.True(t, trackMalformedSyntaxResample(&count, syntax),
+		"a second identical syntax failure must stop the replay")
+	require.Equal(t, 2, count)
+
+	truncatedCount := 0
+	require.False(t, trackMalformedSyntaxResample(&truncatedCount, truncated))
+	require.False(t, trackMalformedSyntaxResample(&truncatedCount, truncated))
+	require.Equal(t, 0, truncatedCount,
+		"budget truncation escalates the budget instead of consuming the resample budget")
+
+	otherCount := 0
+	require.False(t, trackMalformedSyntaxResample(&otherCount, fmt.Errorf("rate_limit: too many requests")))
+	require.Equal(t, 0, otherCount)
+
+	require.False(t, trackMalformedSyntaxResample(nil, syntax))
+	require.False(t, trackMalformedSyntaxResample(&count, nil))
 }
 
 // TestIsTruncatedToolCallError pin 聚合校验层截断形态的可判定性：响应在到达

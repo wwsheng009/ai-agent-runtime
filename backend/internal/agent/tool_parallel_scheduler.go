@@ -251,7 +251,7 @@ func (loop *ReActLoop) executeParallelToolCall(ctx context.Context, gateway *out
 	}
 
 	preflightInfo := loop.lookupToolInfoForPreflight(callCtx, item.call.Name, &item.toolInfo)
-	decision := loop.prepareToolExecution(metadata, item.call.Name, item.call.ID, item.call.Args, preflightInfo)
+	decision := loop.prepareToolExecution(callCtx, metadata, item.call.Name, item.call.ID, item.call.Args, preflightInfo)
 	if !decision.Allow {
 		if decision.SoftEmpty {
 			applySoftEmptyPreflightResult(&result, metadata, decision)

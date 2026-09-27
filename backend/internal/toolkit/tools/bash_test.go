@@ -481,6 +481,54 @@ func TestBashTool_CommandDescriptionMentionsPowerShellHeadCompatibility(t *testi
 	}
 }
 
+// TestShellModelSurfaceExposesIntegerTimeoutsOnly 锁定 2026-09-27 的修复：
+// 模型可见的 shell/bash/execute_shell_command 工具面不再提供字符串型
+// timeout（弱 JSON 模型会把它写成裸值 "timeout": 60s，破坏整个 arguments），
+// 只保留整数字段 timeout_ms/timeout_sec。执行端仍兼容字符串形式，见
+// TestBashTool_PassesExplicitTimeoutToExecuter 与 bash_process_guard_test.go。
+func TestShellModelSurfaceExposesIntegerTimeoutsOnly(t *testing.T) {
+	surfaces := map[string]map[string]interface{}{
+		"bash":                  NewBashTool().Parameters(),
+		"execute_shell_command": NewExecuteShellCommandTool().Parameters(),
+	}
+	for name, params := range surfaces {
+		properties, ok := params["properties"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("%s: missing properties: %#v", name, params)
+		}
+		if _, exists := properties["timeout"]; exists {
+			t.Errorf("%s: string timeout must not be advertised to models: %#v", name, properties["timeout"])
+		}
+		for _, required := range []string{"timeout_ms", "timeout_sec"} {
+			schema, ok := properties[required].(map[string]interface{})
+			if !ok {
+				t.Fatalf("%s: missing %s schema: %#v", name, required, properties)
+			}
+			if schema["type"] != "integer" {
+				t.Errorf("%s: %s type = %v, want integer", name, required, schema["type"])
+			}
+		}
+		commands, ok := properties["commands"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		items, ok := commands["items"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		itemProperties, ok := items["properties"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if _, exists := itemProperties["timeout"]; exists {
+			t.Errorf("%s: per-command string timeout must not be advertised to models", name)
+		}
+		if _, ok := itemProperties["timeout_sec"]; !ok {
+			t.Errorf("%s: per-command timeout_sec missing: %#v", name, itemProperties)
+		}
+	}
+}
+
 func TestBashTool_PassesExplicitTimeoutToExecuter(t *testing.T) {
 	tool := NewBashTool()
 	inspector := &inspectExecuter{result: CommandExecutionResult{Output: "ok"}}

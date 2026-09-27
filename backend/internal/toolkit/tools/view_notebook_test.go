@@ -1,10 +1,13 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +15,18 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
+
+// viewTestPNG returns a real, complete 1x1 PNG. Signature-only fixtures are no
+// longer representative: the attach path now validates that the decoded bytes
+// form a complete container of the declared MIME (2026-09-27 review H10).
+func viewTestPNG(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
+}
 
 func writeNotebook(t *testing.T, path string, cells []map[string]interface{}) {
 	t.Helper()
@@ -30,7 +45,7 @@ func writeNotebook(t *testing.T, path string, cells []map[string]interface{}) {
 func TestViewNotebookRendersCellsAndImages(t *testing.T) {
 	t.Setenv("AICLI_VIEW_DEDUP", "")
 	root := t.TempDir()
-	pngPayload := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00}
+	pngPayload := viewTestPNG(t)
 	writeNotebook(t, filepath.Join(root, "analysis.ipynb"), []map[string]interface{}{
 		{"cell_type": "markdown", "source": []string{"# Results\n"}},
 		{"cell_type": "code", "source": "plot()", "outputs": []map[string]interface{}{
@@ -175,9 +190,8 @@ func TestViewNotebookWindowMetadataParity(t *testing.T) {
 func TestViewNotebookDeduplicatesIdenticalImages(t *testing.T) {
 	t.Setenv("AICLI_VIEW_DEDUP", "")
 	root := t.TempDir()
-	// 完整 8 字节 PNG 签名：渲染层现在会校验"解码结果确实是所声明 MIME 的容器"，
-	// 截断的伪签名只是夹具问题，不是去重语义。
-	payload := base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	// 真实完整的 PNG：附件链路现在校验容器完整性，伪签名只是夹具问题。
+	payload := base64.StdEncoding.EncodeToString(viewTestPNG(t))
 	writeNotebook(t, filepath.Join(root, "dup.ipynb"), []map[string]interface{}{
 		{"cell_type": "code", "source": "a", "outputs": []map[string]interface{}{
 			{"output_type": "display_data", "data": map[string]interface{}{"image/png": payload}},
@@ -201,7 +215,7 @@ func TestViewNotebookDeduplicatesIdenticalImages(t *testing.T) {
 func TestViewNotebookAttachesOnlyDeliveredWindowImages(t *testing.T) {
 	t.Setenv("AICLI_VIEW_DEDUP", "")
 	root := t.TempDir()
-	payload := base64.StdEncoding.EncodeToString([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	payload := base64.StdEncoding.EncodeToString(viewTestPNG(t))
 	cells := []map[string]interface{}{
 		{"cell_type": "markdown", "source": []string{"# head\n"}},
 	}

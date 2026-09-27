@@ -343,6 +343,7 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 	outputBudgetEscalations := 0
 	consecutiveHandoffs := 0
 	degenerateReplies := 0
+	malformedSyntaxResamples := 0
 	for attempt := 1; retryAttemptAllowed(policy.MaxAttempts, attempt); attempt++ {
 		attemptCtx := withHTTPDebugRetryAttempt(ctx, attempt, activeMaxAttempts)
 		retryInfo.Attempt = attempt
@@ -426,9 +427,19 @@ func (c *GatewayClient) Call(ctx context.Context, req *LLMRequest) (*LLMResponse
 			// widenings are spent: rotating providers or keys cannot fix a
 			// reply whose whole completion budget went to reasoning, and the
 			// attempt budget would otherwise be spent on identical requests.
+			if trackMalformedSyntaxResample(&malformedSyntaxResamples, err) {
+				return nil, markRetryExhausted(
+					"gateway call aborted after replaying a syntax-degenerate tool-arguments request", attempt, err)
+			}
 			if trackDegenerateOutputReply(&degenerateReplies, err) {
 				return nil, markRetryExhausted(
 					"gateway call aborted after repeated degenerate replies", attempt, err)
+			}
+			// P0-3 item 3：网关层与 provider/agent 层共享同一份 per-run 退化恢复
+			// 配额，避免每层各自重放把同一退化样本放大成十几次 HTTP 尝试。
+			if !consumeDegenerateRecoveryBudget(attemptCtx, err) {
+				return nil, markRetryExhausted(
+					"gateway call aborted after the shared degenerate-recovery budget was exhausted", attempt, err)
 			}
 			// 更新重试信息
 			if selected.GroupName != "" {
