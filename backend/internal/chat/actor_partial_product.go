@@ -38,6 +38,31 @@ func partialRunProduct(result *agent.Result, session *Session) (summary string, 
 	return "", "", steps
 }
 
+// pendingBatchRecoveryPayload 构造 resume 型终态（恢复未完成工具批）的载荷。
+// 这条路径同样会以取消/失败收场（context canceled / deadline exceeded / 恢复
+// 被取代），因此与常规终态一致地带上已产出的部分产物：键名与取值规则和
+// session_end 主路径完全相同。steps 保持既有语义（恢复路径恒为 0），仅在确有
+// 产物时新增 partial_* 键，不改动原有载荷形状。
+func pendingBatchRecoveryPayload(turnID string, execErr error, status SessionStatus, session *Session) map[string]interface{} {
+	payload := map[string]interface{}{
+		"turn_id":  strings.TrimSpace(turnID),
+		"resume":   true,
+		"success":  false,
+		"steps":    0,
+		"error":    errorString(execErr),
+		"duration": int64(0),
+		"status":   status,
+	}
+	// 该路径没有本轮的 agent.Result（恢复在工具批中途中断），产物只能来自历史；
+	// partialRunProduct 对 nil result 已做兜底。
+	if summary, source, partialSteps := partialRunProduct(nil, session); summary != "" {
+		payload["partial_summary"] = summary
+		payload["partial_source"] = source
+		payload["partial_steps"] = partialSteps
+	}
+	return payload
+}
+
 func sessionToolResultCount(session *Session) int {
 	if session == nil {
 		return 0

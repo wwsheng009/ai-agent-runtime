@@ -15,8 +15,9 @@ import (
 )
 
 // TestPartialRunProductPrefersResultOutputThenHistory 钉住 A4 的取源优先级：
-// 当前 run 的部分输出优先于历史里的最后一条 assistant 消息；两者都没有时返回空
-// summary，但 partial_steps 仍如实报告已完成步骤。
+// 历史里最后一条非空 assistant 消息优先于 result.Output（取消时 result.Output
+// 常是宿主罐头停止提示）；两者都没有时返回空 summary，但 partial_steps 仍如实
+// 报告已完成步骤。
 func TestPartialRunProductPrefersResultOutputThenHistory(t *testing.T) {
 	require.Empty(t, lastAssistantMessage(nil))
 
@@ -61,6 +62,38 @@ func TestClipPartialProductBoundsRunawayTranscripts(t *testing.T) {
 	require.True(t, strings.HasSuffix(clipped, "…"))
 
 	require.Equal(t, "ok", clipPartialProduct("ok"))
+}
+
+// TestPendingBatchRecoveryPayloadCarriesPartialProduct 钉住 resume 型终态（恢复
+// 未完成工具批）的部分产物接入：恢复中断时同样要带出历史里已产出的工作；没有
+// 产物时保持原有载荷形状（不新增 partial_* 键、steps 仍为 0）。
+func TestPendingBatchRecoveryPayloadCarriesPartialProduct(t *testing.T) {
+	session := NewSession("pending-batch-recovery")
+	session.ReplaceHistory([]types.Message{
+		{Role: "user", Content: "resume the interrupted batch"},
+		{Role: "assistant", Content: "batch step 2 running (tool call next)"},
+		{Role: "tool", Content: "step 1 ok"},
+	})
+
+	payload := pendingBatchRecoveryPayload("turn-recovery-1", context.Canceled, SessionStopped, session)
+	require.Equal(t, "turn-recovery-1", payload["turn_id"])
+	require.Equal(t, true, payload["resume"])
+	require.Equal(t, false, payload["success"])
+	require.Equal(t, 0, payload["steps"])
+	require.Equal(t, int64(0), payload["duration"])
+	require.Equal(t, "context canceled", payload["error"])
+	require.Equal(t, SessionStopped, payload["status"])
+	require.Equal(t, "batch step 2 running (tool call next)", payload["partial_summary"])
+	require.Equal(t, "last_assistant_message", payload["partial_source"])
+	require.Equal(t, 1, payload["partial_steps"])
+
+	// 无可救产物：原有形状不变（无 partial_* 键），error 为空串。
+	empty := pendingBatchRecoveryPayload("turn-recovery-2", nil, SessionIdle, NewSession("pending-batch-recovery-empty"))
+	require.Equal(t, "", empty["error"])
+	require.Equal(t, 0, empty["steps"])
+	require.NotContains(t, empty, "partial_summary")
+	require.NotContains(t, empty, "partial_source")
+	require.NotContains(t, empty, "partial_steps")
 }
 
 // TestSessionActorCanceledRunCarriesPartialProduct 是 A4 的端到端回归：一个已经

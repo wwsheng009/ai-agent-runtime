@@ -4145,15 +4145,9 @@ func (a *SessionActor) finishPendingBatchRecovery(session *Session, turnID strin
 			Type:      EventSessionEnd,
 			SessionID: a.id,
 			TraceID:   strings.TrimSpace(turnID),
-			Payload: map[string]interface{}{
-				"turn_id":  strings.TrimSpace(turnID),
-				"resume":   true,
-				"success":  false,
-				"steps":    0,
-				"error":    errorString(execErr),
-				"duration": int64(0),
-				"status":   status,
-			},
+			// A4：resume 型终态同样带出已产出的部分产物（取源与主路径一致，
+			// 见 actor_partial_product.go 的 pendingBatchRecoveryPayload）。
+			Payload: pendingBatchRecoveryPayload(turnID, execErr, status, session),
 		})
 	}
 	a.releaseSessionRun(run)
