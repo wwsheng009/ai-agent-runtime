@@ -394,5 +394,94 @@ describe("ArtifactPanelPlansSurface", () => {
     expect(container.textContent).toContain("已从归档恢复 v3");
     expect(container.textContent).not.toContain("确认覆盖后带 force=true 重试");
   });
+
+  it("重新评审一般失败：显示后端原因、按钮回到可用态并可重试", async () => {
+    listRuntimePlansMock.mockResolvedValue({
+      plans: [plan("proj/plan", { plan_path: "docs/plan.md" })],
+      count: 1,
+    });
+    getRuntimePlanMock.mockResolvedValue(
+      plan("proj/plan", { plan_path: "docs/plan.md", content: "# 计划", content_available: true }),
+    );
+    reopenRuntimePlanMock.mockRejectedValueOnce(
+      new RuntimeApiError(500, { error: "session store unavailable" } as never),
+    );
+
+    await renderSurface({ sessionId: "session-1" });
+    clickButtonByText("docs/plan.md");
+    await settle();
+    clickButtonByText("重新评审");
+    await settle();
+
+    expect(container.textContent).toContain("重新评审失败");
+    expect(container.textContent).toContain("session store unavailable");
+    // 失败不是进行态：按钮必须回到可用态，允许用户重试。
+    const failedButton = findButtonByText("重新评审");
+    expect(failedButton).toBeInstanceOf(HTMLButtonElement);
+    expect((failedButton as HTMLButtonElement).disabled).toBe(false);
+
+    reopenRuntimePlanMock.mockResolvedValueOnce({
+      plan_id: "proj/plan",
+      version: 3,
+      bytes: 12,
+      created: false,
+      unchanged: false,
+      forced: false,
+    });
+    clickButtonByText("重新评审");
+    await settle();
+
+    expect(reopenRuntimePlanMock).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("已从归档恢复 v3");
+  });
+
+  it("重新评审进行中：按钮禁用并显示进行态，完成后恢复可用", async () => {
+    listRuntimePlansMock.mockResolvedValue({
+      plans: [plan("proj/plan", { plan_path: "docs/plan.md" })],
+      count: 1,
+    });
+    getRuntimePlanMock.mockResolvedValue(
+      plan("proj/plan", { plan_path: "docs/plan.md", content: "# 计划", content_available: true }),
+    );
+
+    let resolveReopen: (value: unknown) => void = () => {};
+    reopenRuntimePlanMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveReopen = resolve;
+        }),
+    );
+
+    await renderSurface({ sessionId: "session-1" });
+    clickButtonByText("docs/plan.md");
+    await settle();
+    clickButtonByText("重新评审");
+    await act(async () => {
+      await flush();
+    });
+
+    // 请求进行中：同一个按钮变成进行态且不可重复点击（防重入）。
+    const runningButton = findButtonByText("正在回灌");
+    expect(runningButton).toBeInstanceOf(HTMLButtonElement);
+    expect((runningButton as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      resolveReopen({
+        plan_id: "proj/plan",
+        version: 3,
+        bytes: 12,
+        created: true,
+        unchanged: false,
+        forced: false,
+      });
+      await flush();
+    });
+    await settle();
+
+    const settledButton = findButtonByText("重新评审");
+    expect(settledButton).toBeInstanceOf(HTMLButtonElement);
+    expect((settledButton as HTMLButtonElement).disabled).toBe(false);
+    expect(container.textContent).toContain("已从归档恢复 v3");
+  });
 });
 

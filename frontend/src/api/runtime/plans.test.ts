@@ -1,6 +1,6 @@
 // 归档计划 API 客户端：URL 分段编码与形状归一化（不触网，纯函数断言）。
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildStoredPlanCommentsPath,
@@ -15,6 +15,7 @@ import {
   normalizeStoredPlanList,
   normalizePlanReopenResult,
   readStoredPlanReopenHint,
+  reopenRuntimePlan,
 } from "./plans";
 import { RuntimeApiError } from "./shared";
 
@@ -206,6 +207,100 @@ describe("reopenRuntimePlan helpers", () => {
     expect(isStoredPlanReopenConflict(notFound)).toBe(false);
     expect(readStoredPlanReopenHint(notFound)).toBe("missing");
     expect(isStoredPlanReopenConflict(new Error("network"))).toBe(false);
+  });
+});
+
+// reopen 请求形状（fetch 层，写法同 files.test.ts）：方法/路径/body 必须与 handler 契约一致。
+describe("reopenRuntimePlan", () => {
+  const originalFetch = globalThis.fetch;
+  let calls: Array<{ url: string; init?: RequestInit }> = [];
+
+  function respondWith(body: unknown, status = 200) {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+  }
+
+  beforeEach(() => {
+    calls = [];
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("POST /api/runtime/sessions/{id}/plan/reopen，body 为 {plan_id,version,force}", async () => {
+    respondWith({
+      reopened: true,
+      plan_id: "proj/plan",
+      plan_path: "docs/plan.md",
+      display_path: "docs/plan.md",
+      version: 4,
+      bytes: 128,
+      created: true,
+      unchanged: false,
+      forced: true,
+    });
+
+    const result = await reopenRuntimePlan(" session/2 ", "proj/plan", {
+      version: 2,
+      force: true,
+    });
+
+    expect(calls).toHaveLength(1);
+    const url = new URL(calls[0].url, "http://runtime.test");
+    expect(url.pathname).toBe("/api/runtime/sessions/session%2F2/plan/reopen");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      plan_id: "proj/plan",
+      version: 2,
+      force: true,
+    });
+    expect(result).toMatchObject({
+      plan_id: "proj/plan",
+      version: 4,
+      bytes: 128,
+      display_path: "docs/plan.md",
+      created: true,
+      forced: true,
+    });
+  });
+
+  it("未指定 options 时按契约下发 version=0 / force=false", async () => {
+    respondWith({ plan_id: "proj/plan", version: 1, bytes: 1 });
+
+    await reopenRuntimePlan("session-1", "proj/plan");
+
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(String(calls[0].init?.body))).toEqual({
+      plan_id: "proj/plan",
+      version: 0,
+      force: false,
+    });
+  });
+
+  it("409 冲突原样抛出 RuntimeApiError（conflict/hint 可供上层判定）", async () => {
+    respondWith(
+      {
+        conflict: true,
+        error: "planmode: plan file differs from the archived snapshot",
+        hint: "确认覆盖后带 force=true 重试",
+      },
+      409,
+    );
+
+    const error = await reopenRuntimePlan("session-1", "proj/plan").catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(RuntimeApiError);
+    expect((error as RuntimeApiError).status).toBe(409);
+    expect(isStoredPlanReopenConflict(error)).toBe(true);
+    expect(readStoredPlanReopenHint(error)).toBe("确认覆盖后带 force=true 重试");
   });
 });
 

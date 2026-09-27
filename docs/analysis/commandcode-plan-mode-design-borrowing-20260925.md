@@ -465,7 +465,7 @@
 
 ## 11. 实施记录：第四轮（2026-09-25，归档回灌 `reopen`）
 
-**状态**：`planmode.ReopenPlan` 与 CLI `/plans reopen` **已落地**（提交 `feat(plan): 归档回灌…`）；Web 面板里的图形化 reopen 入口未做（面板仍是只读阅读面）。
+**状态**：`planmode.ReopenPlan` 与 CLI `/plans reopen` **已落地**（提交 `feat(plan): 归档回灌…`）；Web 面板里的图形化 reopen 入口当时未做（面板当时仍是只读阅读面），后已于第九轮落地（见 §16）。
 
 ### 11.1 行为变更
 
@@ -654,13 +654,13 @@
 | 干净检出：`go test ./internal/api/runtimeapi/ -count=1`（整包） | ok（38.2s） |
 | `git show --stat 8ec8f58b` | 4 files changed, 474 insertions(+), 10 deletions(-)（handler.go 仅 +9 行） |
 
-至此报告 §11.5 记下的「`internal/api/**` 尚未提交」缺口已关闭；剩余未落地项仍是：§4.4 前端变更行高亮与行级评论、§4.6 常驻模式横幅、Web 面板的图形化 reopen、评审反馈的自动修订回合、profile→`Engine.PlanAutoEnterWithoutApproval` 接线。
+至此报告 §11.5 记下的「`internal/api/**` 尚未提交」缺口已关闭；剩余未落地项仍是：§4.4 前端变更行高亮与行级评论、§4.6 常驻模式横幅、评审反馈的自动修订回合、profile→`Engine.PlanAutoEnterWithoutApproval` 接线（Web 面板的图形化 reopen 已随后落地，见 §16）。
 
 ---
 
 ## 15. 实施记录：第八轮（2026-09-25，§4.5 收尾：HTTP 重新评审入口）
 
-**状态**：`/plans reopen` 的 HTTP 孪生已落地（`9843c892`）：`POST /api/runtime/sessions/{id}/plan/reopen`。Web 面板上的图形按钮仍待做（面板目前仍只读，`use-runtime-plans` 无写操作）。
+**状态**：`/plans reopen` 的 HTTP 孪生已落地（`9843c892`）：`POST /api/runtime/sessions/{id}/plan/reopen`。Web 面板上的图形按钮**已落地**（第九轮，`3623bf2b`，见 §16）：`frontend/src/components/workspace/artifact-panel-plans-surface.tsx`（「重新评审」按钮 + 冲突/失败提示）、`frontend/src/hooks/workspace/use-runtime-plans.ts`（reopen 写操作与刷新）、`frontend/src/api/runtime/plans.ts`（HTTP 客户端）+ vitest 用例（`plans.test.ts`、`use-runtime-plans.test.tsx`、`artifact-panel-plans-surface.test.tsx`）。
 
 ### 15.1 行为
 
