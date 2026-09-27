@@ -7,6 +7,7 @@ import {
   type RuntimePermissionMode,
   type RuntimePermissionModeOption,
   type RuntimeSessionPermissionMode,
+  type RuntimeSessionPermissionModeUpdateRequest,
 } from "@/lib/runtime-api";
 import { buildRuntimeEventReloadKey } from "@/hooks/workspace/use-runtime-checkpoints";
 
@@ -144,7 +145,7 @@ export function useSessionPermissionMode({
   ]);
 
   const setPermissionMode = useCallback(
-    async (mode: RuntimePermissionMode) => {
+    async (mode: RuntimePermissionMode, options?: { confirm?: boolean }) => {
       if (!sessionId) {
         return;
       }
@@ -160,7 +161,11 @@ export function useSessionPermissionMode({
           const response = await getSessionPermissionMode(sessionId);
           setState(response);
         } else {
-          const response = await updateSessionPermissionMode(sessionId, { mode });
+          // 只有显式 confirm: true 才把 confirm 放进请求体：后端仅对
+          // bypass_permissions 要求确认，其余模式保持 `{ mode }` 不变。
+          const body: RuntimeSessionPermissionModeUpdateRequest =
+            options?.confirm === true ? { mode, confirm: true } : { mode };
+          const response = await updateSessionPermissionMode(sessionId, body);
           setState(response);
         }
         setLoadedSessionId(sessionId);

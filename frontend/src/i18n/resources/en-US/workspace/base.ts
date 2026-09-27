@@ -428,6 +428,13 @@ export const enWorkspaceBase = {
           description: "Every tool call runs without asking — trusted workspaces only",
         },
       },
+      confirmDialog: {
+        title: "Switch to a dangerous permission mode?",
+        message:
+          '"{{mode}}" skips permission checks for every tool call. Use it only in trusted workspaces. Switch anyway?',
+        confirm: "Switch",
+        cancel: "Cancel",
+      },
     },
     // §4.6 persistent mode indicator (top of the chat area): mode + plan context, no verdict actions.
     modeBanner: {

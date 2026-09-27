@@ -119,6 +119,42 @@ describe("ComposerPermissionModeControl", () => {
       ?.getAttribute("data-composer-permission-mode");
   }
 
+  function dialog() {
+    return document.querySelector('[role="dialog"]');
+  }
+
+  async function selectMode(label: string) {
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="权限"]',
+    );
+    expect(trigger).not.toBeNull();
+    act(() => {
+      trigger?.click();
+    });
+
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((element) => element.textContent?.includes(label));
+    expect(option).toBeDefined();
+
+    await act(async () => {
+      option?.click();
+    });
+    await flush();
+  }
+
+  async function clickDialogButton(label: string) {
+    const button = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'),
+    ).find((element) => element.textContent?.includes(label));
+    expect(button).toBeDefined();
+
+    await act(async () => {
+      button?.click();
+    });
+    await flush();
+  }
+
   it("renders the backend-supported modes and the current mode label", async () => {
     await render();
 
@@ -162,6 +198,48 @@ describe("ComposerPermissionModeControl", () => {
       { mode: "accept_edits" },
     );
     expect(currentMode()).toBe("accept_edits");
+  });
+
+  it("asks for confirmation instead of calling the API when a dangerous mode is selected", async () => {
+    await render();
+
+    await selectMode("跳过权限校验");
+
+    expect(dialog()).not.toBeNull();
+    expect(dialog()?.textContent).toContain("切换到危险权限模式");
+    expect(dialog()?.textContent).toContain("跳过权限校验");
+    expect(apiMocks.updateSessionPermissionMode).not.toHaveBeenCalled();
+    expect(currentMode()).toBe("default");
+  });
+
+  it("sends confirm: true after the dangerous-mode confirmation is accepted", async () => {
+    await render();
+    apiMocks.updateSessionPermissionMode.mockResolvedValueOnce(
+      permissionModeResponse("bypass_permissions"),
+    );
+
+    await selectMode("跳过权限校验");
+    await clickDialogButton("确认切换");
+
+    expect(apiMocks.updateSessionPermissionMode).toHaveBeenCalledWith(
+      "session-1",
+      { mode: "bypass_permissions", confirm: true },
+    );
+    expect(dialog()).toBeNull();
+    expect(currentMode()).toBe("bypass_permissions");
+  });
+
+  it("cancels the confirmation without switching or calling the API", async () => {
+    await render();
+
+    await selectMode("跳过权限校验");
+    expect(dialog()).not.toBeNull();
+
+    await clickDialogButton("取消");
+
+    expect(dialog()).toBeNull();
+    expect(apiMocks.updateSessionPermissionMode).not.toHaveBeenCalled();
+    expect(currentMode()).toBe("default");
   });
 
   it("enters plan mode through the plan endpoint and reloads the mode", async () => {
@@ -213,6 +291,9 @@ describe("ComposerPermissionModeControl", () => {
       option?.click();
     });
     await flush();
+
+    // 危险模式现在先走二次确认，确认后才真正发请求。
+    await clickDialogButton("确认切换");
 
     expect(
       container.querySelector("[data-composer-permission-error]"),

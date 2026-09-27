@@ -586,12 +586,12 @@
 
 | # | 发现 | 定级 | 建议 |
 |---|------|------|------|
-| F1 | runtime API 切 bypass 无确认、无令牌，对运行中会话即时生效 | 中 | `UpdateSessionPermissionMode` 对 `bypass_permissions` 复用「危险动作」语义（要求显式 `confirm=true` 或写令牌）；`disable_bypass` 生效时直接 403，而不是静默降级 |
+| F1 | runtime API 切 bypass 无确认、无令牌，对运行中会话即时生效 | 中 | **已收口（confirm 分支；token 分支不适用）**：`sessionPermissionModeRequest` 新增 `confirm`，切 `bypass_permissions` 缺省返回 400（`ErrValidationFailed`，与 §5.4/I-2 的 config 层写入确认同源）且**不改写会话模式**；`disable_bypass` 的 403 优先于确认门。runtime API 没有令牌签发/校验机制，故取 `confirm=true` 分支——它是契约层的显式意图（防误触发与工具化提权），**不是**对同机进程的强隔离（该边界已写进手册 §1.4）。前端同步：composer 权限选择器选中危险模式先弹确认，确认后才带 `confirm:true` 调接口 |
 | F2 | `disable_bypass` 只降级求值、不拒绝切换 | 低 | **已收口**：`UpdateSessionPermissionMode` 在目标模式为 `bypass_permissions` 时解析会话工作区的 permissions 分层（用户/项目/本地 OR），命中 `disable_bypass` 直接 `403 AGENT_PERMISSION`，不再写入一个求值期会被降级回 default 的 bypass 元数据；解析失败的层按「未启用」处理，与引擎的整文件丢弃语义一致（判定收敛到 `policy.BypassDisabledForWorkspace`）。**还原路径同样收口**：plan 退出（`quit`）时 `internal/chat` 与 runtimeapi 离线分支都把 bypass 降为 default，避免「元数据说 bypass、引擎按 default」。见 `permission_mode_handlers.go`、`plan_mode_tools.go`、`plan_mode_handlers.go` 与同名 `*_test.go` |
 | F3 | Web 注入面可承载命令并可满足 yolo 确认 | 低-中 | **已收口**：来源显式化——`routeInputTextFromSource`（Web 注入标 `web`，stdin 标 `stdin`），优先级读取改为返回整条 `chatQueuedInput`（`readPriorityItemWithPrompt`），`evalBypassPermissionModeConfirmation` 用 `chatInputSourceIsLocalTerminal` 判定（**未知来源 fail-closed**），非终端来源的确认行被拒绝且**无损回填**（普通文本按原顺序回队列，`/` 命令不回填以免确认提示被循环触发）。审批/提问的 Web 回答不受影响（那是 Web 的正规交互面）。测试：`chat_yolo_confirm_source_test.go`（拒绝+回填 / 终端来源通过 / slash 不回填 / 来源保留）+ 既有确认用例改为终端来源 |
 | F4 | 文档未集中写「谁能提权」 | 低 | **已补**：手册「提权边界」§1.4；`docs/aicli/web-remote-api.md` §8.1「远程调用者的能力边界（安全模型）」（含「两条注入即可满足 yolo 确认」与令牌=会话控制权）。本次把 F2 收口后的语义同步进 §8.1（切换接口 403、还原路径不还原 bypass） |
 
-F2 已按上面的约定收口（只做 fail-loud，不含 confirm 语义，因此不改变正常路径的 API 契约）：这一层在 **host 之外**，因此即使某个 host 忘了装配权限层，API 也不会放行 bypass。F3 随后在 `cmd/aicli/commands` 收口（来源门 + 无损回填，见上表）。**F1 仍只有复核结论 + 文档边界**：`UpdateSessionPermissionMode` 的 `confirm=true`/令牌需要前端权限选择器同步改造，收敛点在 runtimeapi 请求契约与前端，排在 4.12 实施时。
+F2 已按上面的约定收口（只做 fail-loud，不含 confirm 语义，因此不改变正常路径的 API 契约）：这一层在 **host 之外**，因此即使某个 host 忘了装配权限层，API 也不会放行 bypass。F3 在 `cmd/aicli/commands` 收口（来源门 + 无损回填，见上表），F1 随后在 runtimeapi 请求契约 + 前端选择器同步后收口。**至此 §13 的 F1–F4 全部有代码或文档落点**；仍未做的是 4.12 的入口简写/常驻 banner 与 4.8 的 CLI/ACP 审批 UI 条目，它们不属于本次安全发现的收敛范围。
 
 顺带核到的装配事实（供后续排查用，不是结论性缺陷）：权限文件的分层装配点只有 `cmd/aicli/commands`（`applyChatPermissionsOverlay` → `ApplyPermissionsOverlayToEngine/ToPolicy`，`LoadLayeredPermissions` 的唯一生产调用方），`internal/runtimeserver` 是纯控制面、不建引擎；runtimeapi 只在 harness 展示/评测里读 `LoadProjectPermissions`。也就是说 `disable_bypass`/项目规则是否生效取决于**运行 actor 的 host 是否装配了 overlay**；若将来出现 runtime 侧自执行 host，需要补同等装配（登记为验证项，避免 silently 少一层保护）。
 

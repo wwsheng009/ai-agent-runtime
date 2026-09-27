@@ -406,6 +406,12 @@ export const zhWorkspaceBase = {
           description: "全部工具调用直接放行，仅在可信工作区使用",
         },
       },
+      confirmDialog: {
+        title: "切换到危险权限模式",
+        message: "「{{mode}}」会跳过全部工具调用的权限校验，仅在可信工作区使用。确认切换？",
+        confirm: "确认切换",
+        cancel: "取消",
+      },
     },
     // §4.6 常驻模式标识（聊天区顶部）：模式名 + plan 上下文，不含裁决动作。
     modeBanner: {

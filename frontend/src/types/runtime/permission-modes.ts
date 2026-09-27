@@ -35,4 +35,12 @@ export type RuntimeSessionPermissionMode = {
 
 export type RuntimeSessionPermissionModeUpdateRequest = {
   mode: RuntimePermissionMode;
+  /**
+   * 危险模式（如 bypass_permissions）的显式确认标记。
+   *
+   * 仅切到危险模式时需要：后端对 `mode=bypass_permissions` 且缺少
+   * `confirm: true` 的请求直接 400（ErrValidationFailed），不会静默放行；
+   * 其它模式无需携带，前端也应保持请求体为 `{ mode }`。
+   */
+  confirm?: boolean;
 };
