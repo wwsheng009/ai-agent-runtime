@@ -842,3 +842,59 @@ go test ./internal/... -count=1                                        仅 inter
 ```
 
 新增测试约 20 例（`review_gap_fixes_test.go` 13 例、`docread/source_limit_test.go` 3 例、`toolschema` tuple 1 例、`toolresult` 图片清单 1 例、`ipynb` 2 例、`imageprep` 1 例、`path_guard` 8 例扩充、`view_document` 1 例）。所有测试在 Windows 宿主执行；`windowsOnly`/`hasMultipleHardLinks` 分支在 Unix 宿主上由同一套用例的另一侧覆盖（本次未在 Linux 实机运行，属残余风险）。
+
+
+### 附录 G：第三轮修复（2026-09-27：并发/边界复核收口）
+
+范围：第二轮收尾后仍存在的缺口，以及 2026-09-27 会话中动态复现的问题。除标注"并行会话落地"的条目外，均由本轮改动完成，并带回归测试。
+
+#### 子代理被父回合连带取消（本次会话中断根因）
+
+- **根因**：`spawn_agent` 子会话 run 的 ctx 派生自父回合的 turn ctx。父回合结束（新输入顶替、上游 HTTP 400、actor_stop）会取消 turn ctx，子 run 随即被取消：本次三个实现子任务在 12:26:53 的 0.13s 内一起收到 `source=execution_context cause=parent_context(user_interrupt)`（`%USERPROFILE%\.aicli\logs\aicli.log` 202014–202016 行），而 `runtime-events.jsonl` 第 199 行的上游 `HTTP 400 invalid_encrypted_content` 才是父回合提前结束的触发器。取消原因还被误读成 `user_interrupt`。
+- **修复（并行会话落地，本轮复核）**：新增 `internal/chat/actor_child_execution.go` 的 `SubmitChildPromptAsync` / `childExecutionContext`：干净结束/挂起不再向子 run 传播取消，显式中断/失败仍传播；CLI 与 API 两处 spawn 改接该入口（`chat_actor_registry.go:766`、`session_runtime_support.go:653`）。`actor.go` 在干净完成时用 `errSessionRunFinished` 作为取消 cause。该修复已随 `b74cc097`（fix(chat): 触发型投递脱离调用方回合…）提交。
+- **CLI 呈现（本轮）**：`chat_cancel_error.go` 新增 `isChatTurnStopError`，把"运行时已停止本轮"的裸取消从 `操作错误: context canceled` 降级为静默 + 恢复建议；`chat.go` 三处 send/shell 错误分支接入；超时与提供商错误仍照常上浮。测试：`TestIsChatTurnStopErrorClassification`。
+- **残余**：运行中的 `aicli-5x.exe` 构建早于 `b74cc097`，仍是旧语义，需重新构建后生效。
+
+#### 读窗口与预算（toolkit / output）
+
+| 缺口 | 修复 | 证据 |
+|---|---|---|
+| dedup 清扫自死锁（顺序重读第 ~512 次稳定挂起） | `viewDedupPeek` 在加锁前求值 `sessionHasFullRead`；两个 `idleSince` 改 `TryLock`，清扫跳过忙桶 | `TestViewDedupPeekDoesNotDeadlockWithIdleSweep` |
+| 聚合 cap 丢弃的条目仍登记 dedup，后续单独读取被 stub | 批量把 dedup 注册延迟到 section 真正投递（`dedupRecordDefer`） | `TestViewBatchCapDoesNotStubDroppedItem` |
+| dedup stub 丢续读契约（`is_truncated=false`、无 `suggested_next_offset`） | stub 保留窗口续读字段并在正文给出继续读法 | `TestViewDedupStubKeepsContinuationContract` |
+| 批量失败输出不受聚合预算约束（400 个失败 → 95 KiB） | 错误行与 `failed_items` 各限 20 条 + `failures_omitted`/`failed_items_omitted` | `TestViewBatchFailureDetailBounded` |
+| 混合成功/失败批次被 contract 层二次折叠回 12 KiB | `renderToolResultContract` 按工具声明的 `model_visible_budget_bytes` 记账 | 复现用例：28,195 字节工具输出 → 模型 29,066 字节且尾部标记保留（修复前 12,245 且丢尾） |
+| 派生渲染的 clamp 窗口被当作完整窗口 | `recordDerivedRender` 纳入 `long_lines_truncated` 资格判断 | `TestDerivedRenderClampIsNotRememberedAsCompleteWindow` |
+
+#### 格式与多模态
+
+| 缺口 | 修复 | 证据 |
+|---|---|---|
+| notebook 围栏 Θ(N²)（4 KiB 反引号 → 9 MB 分配） | `notebookFenceFor` 单次扫描最长连续 run | `TestNotebookFenceForLongBacktickRuns`（4/8 KiB 分配 ≤64×输入） |
+| soffice 文件产物绕过 32 MiB 上限 | `readConvertedFile` 两条回读分支限幅并如实报错 | `TestReadConvertedOutputRejectsOversizeProduct` |
+| 转换器流触顶静默丢尾却报 `doc_degraded=false` | `boundedBuffer.Truncated` → `doc_reason=output_truncated` + `doc_output_truncated`/`doc_truncated_at_bytes` | `TestRenderDisclosesTruncatedConverterOutput` |
+| 真实运行时 `tool_metadata.items` 形状丢失批量图片 | `walkImagePassthroughMetadata` 兼容嵌套（含解码态） | `TestCollectImagePassthroughsReadsNestedToolMetadataItems` |
+| 图片仅在解码前检查体积，无像素预算 | `DecodeConfig` 后、完整解码前按 `DefaultMaxPixels`(64 MP) 判定并跳过 | `TestPrepareRefusesHugePixelDimensionsBeforeDecode` |
+| notebook 把"base64 解码成功"当作可发送图片（`eA==` → 'x' 也附加为 .png） | `imageMagicMatches` 按 MIME 校验容器签名，坏图跳过并在正文说明 | `TestRenderBytesSkipsInvalidImagePayload` |
+| 仅含 SVG 等未支持 MIME 的 notebook 输出被无提示删除 | 留 `output omitted` 说明 + jq 恢复指针，并计入 `outputs_omitted` | `TestRenderBytesNotesUnsupportedImageOutput` |
+| notebook 图片按整本附加，与已投递窗口无关 | `ipynb.Image` 记录占位行号，`view` 只附加窗口内的图片；窗口外图片在正文与 metadata 里如实计数 | `TestRenderBytesRecordsImagePlaceholderLine`、`TestViewNotebookAttachesOnlyDeliveredWindowImages` |
+| ODS/ODP 一律判成 odt（走 pandoc 失败或输出错位） | 检测按 ODF mimetype 细分 odt/ods/odp；转换路由为 soffice（ods→csv、odp→txt），`doc_kind` 报真实格式 | `TestDetectZipSubtypes`（ods/odp 用例）、`TestRenderSofficeFakeConverterForOpenDocumentFamily` |
+
+#### schema 可满足性
+
+- `ScalarizeUnions` 折叠前检查兄弟 `type`/`enum`/`const` 与分支类型的一致性；`enum:[1,2]` + `anyOf:[integer,string]` 不再折叠成无合法取值的 `type:string`。安全简写（`string|array`）仍折叠。
+- 证据：`internal/toolschema/union_satisfiability_test.go`（原始可满足值在转换后仍通过 JSON Schema 校验）。
+
+#### 路径与安全
+
+| 缺口 | 修复 | 证据 |
+|---|---|---|
+| Unicode 自愈候选只查链接路径，不查真实目标 | `Sandbox.CheckPermission` 增加 symlink 解析后的策略复检（含"新建路径的已存在父目录"），策略根同样解析 | `TestCheckPermissionResolvesSymlinkTargets`、`TestViewSpellingHealRespectsSymlinkTargetPolicy`（Windows 实测：修复前读出禁止目录内容） |
+| edit/multiedit/append_write 首次读取前无类型门（FIFO 阻塞 open） | 三处 `os.Stat` 后接 `unsupportedFileModeReason`（FIFO/设备/套接字拒绝；符号链接按目标判定） | `TestWriteToolsRejectFIFOBeforeReading`（Unix 执行；Windows skip） |
+| `/proc/self/./fd/N`、`/dev/./zero` 等价拼写绕过名字层 | `devicePathSpellings` 同时匹配字面与 `path.Clean` 形式 | `TestDeviceGuardCoversCleanedSpellings` |
+
+#### 本轮验证与未关闭项
+
+- 通过：`go test ./internal/toolkit/tools ./internal/output ./internal/ipynb ./internal/docread ./internal/executor ./internal/toolschema ./internal/tools ./internal/imageprep ./internal/agent -count=1`（9/9 ok）；`go build ./...` ok。图片签名校验上线后同步规范了两处伪 PNG 夹具（`ipynb_test.go` 总量预算、`view_notebook_test.go` 去重），去重/预算语义不变。
+- `cmd/aicli/commands`：`go build ./...` 与 `TestIsChatTurnStopErrorClassification` 通过；全量包仍有 5 个失败（`TestChatDebugDisplayShowsStorageSection`、`TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsideActiveReasoning`、`TestAICLIChatActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled`、`TestRuntimeMessageFromAICLIMessage_PreservesCodexOutputItems`、`TestChatWebInvalidateRuntimeProviderRebuildsActiveProvider`），全部落在并行会话正在改动的显示 / 团队 / codex / provider 区域，与本轮改动无交集。
+- 子代理生命周期修复需重新构建 `aicli` 才在运行会话生效；FIFO 用例需在 Unix CI 执行；`stat→open` 竞态与真实 soffice/pandoc 端到端冒烟仍未覆盖（ODS/ODP 的转换路由由假转换器断言 `--convert-to` 过滤参数，未跑真实 LibreOffice）。
