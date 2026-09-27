@@ -77,8 +77,12 @@ type chatRuntimeEventBridge struct {
 	renderMu                    sync.Mutex
 	progressMu                  sync.Mutex
 	runErr                      error
-	rendered                    map[string]struct{}
-	historySeedSeen             map[string]struct{}
+	// lateDropMu / lateDropStats 记录被围栏或归属守卫拒绝的 UI 动作（诊断用：
+	// 围栏此前只写 debug 日志，"等待态没有 run"的撕裂不可观测）。
+	lateDropMu      sync.Mutex
+	lateDropStats   chatRuntimeLateDropStats
+	rendered        map[string]struct{}
+	historySeedSeen map[string]struct{}
 	// historySeedClaimedItems / historySeedItemByIdentity / historySeedFrontItemID
 	// 是「按页增量装载」（resume 历史逐页读取 → 逐页绘制）的账本，与
 	// historySeedSeen 一样由 renderMu 保护：
@@ -4246,12 +4250,62 @@ func (b *chatRuntimeEventBridge) forwardLateRuntimeEvent(event runtimeevents.Eve
 	b.session.ExecEventBridge.HandleRuntimeEvent(event)
 }
 
+// chatRuntimeLateReasonClosedRunEpoch 是 UI 动作因 run epoch 未开启/已关闭而被
+// 围栏拒绝的原因标签；chat_ui_actor.go 与统计共用同一常量，避免字符串漂移。
+const chatRuntimeLateReasonClosedRunEpoch = "runtime event action targets closed run epoch"
+
+// chatRuntimeLateDropStats 是被拒 late runtime action 的只读诊断快照。
+type chatRuntimeLateDropStats struct {
+	Total       uint64
+	ClosedEpoch uint64
+	LastType    string
+	LastReason  string
+	LastAt      time.Time
+}
+
 func (b *chatRuntimeEventBridge) logLateRuntimeEvent(event runtimeevents.Event, reason string) {
 	if b == nil || b.session == nil {
 		return
 	}
+	b.recordLateRuntimeDrop(event, reason)
 	b.forwardLateRuntimeEvent(event)
 	b.writeLateRuntimeDebug(event, reason)
+}
+
+// recordLateRuntimeDrop 累计被拒动作。刻意不读取当前 epoch：本函数会被
+// coalesced stream / deferred 队列等调用点复用，读取 epoch 需要 renderMu，
+// 存在重入风险；当前 epoch 由 RunEpoch() / writeLateRuntimeDebug 单独给出。
+func (b *chatRuntimeEventBridge) recordLateRuntimeDrop(event runtimeevents.Event, reason string) {
+	if b == nil {
+		return
+	}
+	b.lateDropMu.Lock()
+	b.lateDropStats.Total++
+	if reason == chatRuntimeLateReasonClosedRunEpoch {
+		b.lateDropStats.ClosedEpoch++
+	}
+	b.lateDropStats.LastType = event.Type
+	b.lateDropStats.LastReason = reason
+	b.lateDropStats.LastAt = time.Now()
+	b.lateDropMu.Unlock()
+}
+
+// RunEpoch 报告事件桥当前 run epoch（0 = 本会话尚未开启任何 run）。
+func (b *chatRuntimeEventBridge) RunEpoch() uint64 { return b.currentRunEpoch() }
+
+// RunActive 报告事件桥当前是否有活动 run。
+func (b *chatRuntimeEventBridge) RunActive() bool { return b.isRunActive() }
+
+// LateRuntimeDropStats 返回被围栏/归属守卫拒绝的 late action 诊断计数
+// （总数、其中 closed-epoch 数、最后一条的类型/原因/时间）。
+func (b *chatRuntimeEventBridge) LateRuntimeDropStats() (total, closedEpoch uint64, lastType, lastReason string, lastAt time.Time) {
+	if b == nil {
+		return 0, 0, "", "", time.Time{}
+	}
+	b.lateDropMu.Lock()
+	defer b.lateDropMu.Unlock()
+	s := b.lateDropStats
+	return s.Total, s.ClosedEpoch, s.LastType, s.LastReason, s.LastAt
 }
 
 func (b *chatRuntimeEventBridge) writeLateRuntimeDebug(event runtimeevents.Event, reason string) {

@@ -1097,7 +1097,7 @@ func (c *chatInteractionCoordinator) applyRuntimeEventActionWithContext(action u
 		return
 	}
 	if !payload.bridge.isRunEpochCurrent(payload.epoch) && !isCriticalSubagentLifecycleEvent(payload.event.Type) {
-		payload.bridge.logLateRuntimeEvent(payload.event, "runtime event action targets closed run epoch")
+		payload.bridge.logLateRuntimeEvent(payload.event, chatRuntimeLateReasonClosedRunEpoch)
 		return
 	}
 	// A replaced interaction owns a different actor/surface. Do not let a

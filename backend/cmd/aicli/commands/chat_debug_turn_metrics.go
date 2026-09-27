@@ -39,6 +39,28 @@ func appendChatDebugTurnMetricsLines(builder *chatDebugDocumentBuilder, session 
 		builder.meta("Turn Budget:", "<none this run>")
 	}
 
+	// P0-3/P1-1（docs/plan/aicli-chat-submit-run-epoch-wedge-hardening.md）：
+	// 提交-运行协议撕裂检测。等待态由提交路径置位、run 协议由 BeginRun 开启；
+	// waiting=true 且 epoch==0 且无活动 run 就是"幽灵 Analyzing"的指纹。
+	if session != nil && session.RuntimeEventBridge != nil {
+		bridge := session.RuntimeEventBridge
+		epoch := bridge.RunEpoch()
+		active := bridge.RunActive()
+		waiting := session.Interaction != nil && session.Interaction.WaitingArmed()
+		builder.meta("Run Epoch:", strconv.FormatUint(epoch, 10))
+		builder.meta("Run Active:", strconv.FormatBool(active))
+		builder.meta("Waiting Armed:", strconv.FormatBool(waiting))
+		total, closedEpoch, lastType, lastReason, lastAt := bridge.LateRuntimeDropStats()
+		builder.meta("Late Action Drops:", fmt.Sprintf("%d (closed-epoch %d)", total, closedEpoch))
+		if lastType != "" {
+			builder.meta("Last Late Action:", fmt.Sprintf("%s reason=%q at=%s",
+				lastType, lastReason, lastAt.UTC().Format(time.RFC3339)))
+		}
+		if waiting && !active && epoch == 0 {
+			builder.meta("Wedge Suspected:", "yes (waiting armed without an open run epoch)")
+		}
+	}
+
 	// 用被渲染 session 自己的 host 建服务（而不是全局活动会话），这样
 	// /debug/chat/status 的 turn 区块与文档其余部分指向同一个会话。
 	svc := ensureLocalObserveService(session.LocalRuntimeHost)

@@ -2375,6 +2375,18 @@ func (c *chatInteractionCoordinator) finishWaiting(completed bool) {
 	refreshChatTitleMetadata(session)
 }
 
+// WaitingArmed 报告当前 coordinator 是否持有等待态（界面上的 "Analyzing"）。
+// 只读诊断接口：/debug/chat/status 的提交-运行撕裂检测使用
+// （docs/plan/aicli-chat-submit-run-epoch-wedge-hardening.md P0-3）。
+func (c *chatInteractionCoordinator) WaitingArmed() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.waitingActive
+}
+
 func (c *chatInteractionCoordinator) IsReady() bool {
 	if c == nil {
 		return true

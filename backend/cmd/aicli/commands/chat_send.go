@@ -10,6 +10,25 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+// chatExecutorArmsWaitingAfterBeginRun 报告 executor 是否自行负责等待态置位。
+// 进程内 actor executor 在 bridge.BeginRun() 成功之后才调用 StartWaiting（见
+// aicliActorChatExecutor.Execute）：没有开启 run 的提交永远不会显示 "Analyzing"，
+// 预跑阶段（actor 重建 / turn gate / 就绪等待）的失败也不会留下幽灵等待态。
+// 其余 executor（legacy/shared、runtime-server、测试替身）仍由 sendMessage 在
+// 提交入口置位，保持既有语义。
+// 详见 docs/plan/aicli-chat-submit-run-epoch-wedge-hardening.md（P0-1）。
+func chatExecutorArmsWaitingAfterBeginRun(executor aicliChatExecutor) bool {
+	_, ok := executor.(*aicliActorChatExecutor)
+	return ok
+}
+
+// chatSubmitArmsWaitingAtEntry 报告提交入口是否在本轮 executor 执行前置位等待态。
+// 仅用于把 P0-1 的判据收敛到一处，便于单测锁定（见
+// chat_submit_run_epoch_wedge_test.go）。
+func chatSubmitArmsWaitingAtEntry(session *ChatSession, executor aicliChatExecutor) bool {
+	return session != nil && session.Interaction != nil && !chatExecutorArmsWaitingAfterBeginRun(executor)
+}
+
 // sendMessage 发送消息
 func sendMessage(session *ChatSession, userMessage string) (string, error) {
 	if session == nil {
@@ -38,9 +57,6 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 			notifyChatSound(session, chatSoundTurnComplete)
 		}
 	}()
-	if session.Interaction != nil {
-		session.Interaction.StartWaiting()
-	}
 	turnSucceeded := false
 	defer func() {
 		if session.Interaction == nil {
@@ -68,6 +84,14 @@ func sendMessage(session *ChatSession, userMessage string) (string, error) {
 		logChatTurnFailureIfUnrecorded(session, userMessage, err)
 		flushChatSessionLog(session)
 		return "", err
+	}
+	// P0-1（docs/plan/aicli-chat-submit-run-epoch-wedge-hardening.md）：
+	// 进程内 actor executor 在 BeginRun 之后自行置位等待态（见
+	// chat_actor_executor.go），提交入口不再提前显示 "Analyzing"；这里只服务
+	// 其余 executor，保持既有提交侧等待语义。ClearWaiting/CompleteWaiting 对
+	// 未置位的等待态是 no-op，因此上面的 defer 两端复用。
+	if chatSubmitArmsWaitingAtEntry(session, executor) {
+		session.Interaction.StartWaiting()
 	}
 	resetChatTurnTokenUsage(session)
 	// turn 级自动重跑的前置条件依赖该计数：本 turn 一旦真正执行过工具，重放整轮

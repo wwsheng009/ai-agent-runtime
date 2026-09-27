@@ -199,6 +199,14 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 		bridge.BeginRun()
 		defer bridge.EndRun()
 	}
+	// P0-1（docs/plan/aicli-chat-submit-run-epoch-wedge-hardening.md）：
+	// run 协议（BeginRun）已开启，才把前台 UI 切到等待态；预跑阶段
+	// （chatActorForSession / acquireActorTurnGate / waitForAICLIActorReady）
+	// 的任何失败或停滞都不会留下幽灵 "Analyzing"。等待态的清理仍由
+	// sendMessage 的 defer（CompleteWaiting/ClearWaiting）负责。
+	if session.Interaction != nil {
+		session.Interaction.StartWaiting()
+	}
 	if session.runtimeHTTPCapture != nil {
 		session.runtimeHTTPCapture.Reset()
 	}
