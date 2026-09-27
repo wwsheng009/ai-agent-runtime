@@ -356,7 +356,7 @@
   2. `policy.ParseMode` 收编兼容别名（`manual`/`standard`→`default`、`auto-accept`/`acceptEdits`→`accept_edits`、`bypass`→`bypass_permissions`、`dontAsk`→`dont_ask`），CLI / runtime API / ACP 同一解析；未知值仍然拒绝（别名不会让拼错值静默降级），`normalizeMode` 与 `ParseMode` 保持同源。
   3. `/mode`（与 `/permission-mode` 同义，ACP 侧早先已接 `configOptions`）新增冒号简写 `/mode:<name>`、`/permission-mode:<name>`；命令名字面量保留在分发点，供 slash catalog 源码扫描护栏继续识别。
   4. 测试：`internal/policy/modes_alias_test.go`、`cmd/aicli/commands/chat_permission_mode_entry_test.go`（解析表 / 冲突 / 冒号形 / 非法值拒绝 / 裸命令查询）。
-  **仍未做**：CLI 常驻模式 banner/状态行（见文末未做清单）。
+  5. **常驻模式标识（banner）核对**：CLI/TUI 页脚早已落地（§4.6 的 `chatSurfacePlanModeStatusSegment`：plan 各档 / `bypass_permissions`→「Full Access」并带告警角色 / `accept_edits`→中性 / 未知值回落后端原文；窄宽度优先保留），测试见 `chat_plan_mode_status_segment_test.go`；与 Web 横幅（`session-mode-banner-shared.ts`）tone 与回落口径逐条对齐。本项**无需新代码**——`dont_ask` 两侧同样走「未知值→原文」口径（该模式刻意不进 shift+tab 循环，必须显式选择）。
 
 ### 4.13 【P2】按需命令解释（模型摘要）
 
@@ -567,7 +567,7 @@
 - ACP `reject_always`（`acp/types.go` 已定义未启用）与 `allow-always` → policy 记忆库（`RememberScope=session/project`）的映射——当前 `allow-always` 走的是 CLI 侧进程内授权族复用（10 分钟 TTL）；现状已写入 ACP 手册「权限入口对照表」；
 - `/grants` 命令面展示新 specifier 形态（durable store 读写已通，展示层待跟进）；
 - 4.13 剩余：CLI/ACP 面的「解释」入口；宿主若注入 `ApprovalSummarizer` 需自担记账。（**Web 设置页开关已落地**：`GET/PUT /api/runtime/config/approval-explain` + 设置页卡片，进程级不落盘。）
-- 4.12：**入口简写与兼容别名已完成**（`--accept-edits`/`--plan`、别名表、`/mode:<name>`，见 §4.12「本轮收口」）；**CLI 常驻模式 banner 仍未做**（渲染面集中在 `cmd/aicli/commands`，与并发工作面重叠，排后）。安全复核已完成（§13：四类输入面的 bypass 可达性、F1–F4 定级与建议，已写入手册 §1.4）。4.14 的后续项：示例工程/截图未开始（ACP 侧入口表本次已落地，见 ACP 手册 §6）。
+- 4.12：**已完成**（入口简写/别名/`/mode:<name>` 见 §4.12「本轮收口」；CLI 常驻模式 banner 经核对为既有实现（§4.6），Web/CLI tone 与回落口径一致）。安全复核已完成（§13：四类输入面的 bypass 可达性、F1–F4 定级与建议，已写入手册 §1.4）。4.14 的后续项：示例工程/截图未开始（ACP 侧入口表本次已落地，见 ACP 手册 §6）。
 
 ---
 
