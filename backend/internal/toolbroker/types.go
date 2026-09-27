@@ -1429,6 +1429,9 @@ type AgentWorktreeResult struct {
 	// checkout cannot express a deletion, so they stayed in place and need an
 	// explicit removal if that is what the caller wants.
 	DeferredDeletions []string `json:"deferred_deletions,omitempty"`
+	// ForceBackupCommit is the dangling stash commit taken before a forced apply
+	// overwrote tracked main-tree changes. Recover with `git stash apply <hash>`.
+	ForceBackupCommit string `json:"force_backup_commit,omitempty"`
 	// NextAction carries the actionable guidance for a refused apply.
 	NextAction string             `json:"next_action,omitempty"`
 	Status     *AgentStatusResult `json:"status,omitempty"`

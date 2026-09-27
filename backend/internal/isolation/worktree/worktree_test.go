@@ -417,6 +417,107 @@ func TestApplyReportsDeferredBranchDeletions(t *testing.T) {
 	}
 }
 
+// A forced apply overwrites tracked main-tree changes; it must keep a
+// recoverable snapshot (dangling stash commit) so force is never final.
+func TestForcedApplySnapshotsOverwrittenMainTreeChanges(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := initTestRepo(t)
+	ctx := context.Background()
+	handle, err := Create(ctx, Options{
+		RepoRoot:  repo,
+		SessionID: "child-force-backup",
+		BaseDir:   filepath.Join(repo, ".aicli", "agent-worktrees"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer func() { _ = handle.Remove(context.Background()) }()
+
+	if err := os.WriteFile(filepath.Join(handle.Path, "README.md"), []byte("child-version\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("main-local-edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := handle.ApplyWithReport(ctx, ApplyOptions{Force: true})
+	if err != nil {
+		t.Fatalf("forced apply: %v", err)
+	}
+	if !report.Applied || !report.Forced {
+		t.Fatalf("expected applied+forced report, got %+v", report)
+	}
+	if report.BackupCommit == "" {
+		t.Fatalf("forced apply must keep a backup commit, got %+v", report)
+	}
+	// The snapshot holds the overwritten main-tree version.
+	out, err := exec.Command("git", "-C", repo, "show", report.BackupCommit+":README.md").Output()
+	if err != nil {
+		t.Fatalf("read backup commit: %v", err)
+	}
+	if string(out) != "main-local-edit\n" {
+		t.Fatalf("backup content=%q want main-local-edit", out)
+	}
+	// stash create is side-effect free: no stash entry appears.
+	listOut, err := exec.Command("git", "-C", repo, "stash", "list").Output()
+	if err != nil {
+		t.Fatalf("git stash list: %v", err)
+	}
+	if strings.TrimSpace(string(listOut)) != "" {
+		t.Fatalf("stash create must not add a stash entry, got %q", listOut)
+	}
+	data, err := os.ReadFile(filepath.Join(repo, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "child-version\n" {
+		t.Fatalf("forced apply content=%q want child-version", data)
+	}
+}
+
+// An untracked main-tree file cannot be captured by `git stash create`, so a
+// forced apply that would overwrite one must refuse instead of destroying it.
+func TestForcedApplyRefusesUntrackedConflict(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := initTestRepo(t)
+	ctx := context.Background()
+	handle, err := Create(ctx, Options{
+		RepoRoot:  repo,
+		SessionID: "child-force-untracked",
+		BaseDir:   filepath.Join(repo, ".aicli", "agent-worktrees"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer func() { _ = handle.Remove(context.Background()) }()
+
+	if err := os.WriteFile(filepath.Join(handle.Path, "child-only.txt"), []byte("child-only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "child-only.txt"), []byte("main-untracked\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := handle.ApplyWithReport(ctx, ApplyOptions{Force: true})
+	if err == nil || !strings.Contains(err.Error(), "untracked") || !strings.Contains(err.Error(), "cannot be snapshotted") {
+		t.Fatalf("expected untracked-conflict refusal, got report=%+v err=%v", report, err)
+	}
+	if report.Applied {
+		t.Fatalf("refused forced apply must not report Applied: %+v", report)
+	}
+	data, readErr := os.ReadFile(filepath.Join(repo, "child-only.txt"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != "main-untracked\n" {
+		t.Fatalf("untracked main-tree file was overwritten: %q", data)
+	}
+}
+
 // H14: a paths-filtered apply reports the branch changes it left behind.
 func TestApplyReportsOutOfScopePaths(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {

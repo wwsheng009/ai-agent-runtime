@@ -275,6 +275,12 @@ type ApplyReport struct {
 	// the whole command), so they are excluded from the apply set and reported
 	// instead of being silently ignored.
 	DeferredDeletions []string `json:"deferred_deletions,omitempty"`
+	// BackupCommit is the dangling stash commit (`git stash create`) taken right
+	// before a forced apply overwrote tracked main-tree changes. Empty unless
+	// force actually overwrote something. Recover with
+	// `git stash apply <commit>` (or `git show <commit>:<path>`); stash create
+	// never touches the working tree or the stash list.
+	BackupCommit string `json:"backup_commit,omitempty"`
 	// Applied reports whether the checkout ran.
 	Applied bool `json:"applied,omitempty"`
 	// Forced reports whether local main-tree changes were overwritten on purpose.
@@ -376,6 +382,24 @@ func (h *Handle) ApplyWithReport(ctx context.Context, opts ApplyOptions) (ApplyR
 	}
 	if len(report.Conflicts) > 0 && !opts.Force {
 		return report, h.applyConflictError(report)
+	}
+	if opts.Force && len(report.Conflicts) > 0 {
+		// A forced apply is about to overwrite tracked main-tree changes. Keep a
+		// recoverable snapshot first so force is never final (2026-09-27
+		// incident lesson: an overwrite without a snapshot is unrecoverable).
+		for _, conflict := range report.Conflicts {
+			if strings.HasPrefix(strings.TrimSpace(conflict.Status), "??") {
+				return report, fmt.Errorf(
+					"forced apply refused: main-tree path %s is untracked and cannot be snapshotted; move or commit it before forcing",
+					conflict.Path,
+				)
+			}
+		}
+		backup, err := h.snapshotMainTree(ctx)
+		if err != nil {
+			return report, err
+		}
+		report.BackupCommit = backup
 	}
 	if len(report.CandidatePaths) == 0 {
 		// Nothing to land (clean worktree, or a paths filter that excludes every
@@ -513,6 +537,23 @@ func (h *Handle) branchExistingPaths(ctx context.Context, candidates []string) (
 		}
 	}
 	return existing, deferred, nil
+}
+
+// snapshotMainTree records the current tracked working-tree/index state of the
+// main repo as a dangling stash commit and returns its hash. `git stash create`
+// is side-effect free: unlike `stash push` it does not modify the working tree,
+// the index, or the stash list. An empty tree is reported as an error because
+// callers only snapshot when there is something to lose.
+func (h *Handle) snapshotMainTree(ctx context.Context) (string, error) {
+	out, err := runGitOutput(ctx, h.RepoRoot, "stash", "create", "aicli apply force backup")
+	if err != nil {
+		return "", fmt.Errorf("worktree apply backup (git stash create): %w", err)
+	}
+	commit := strings.TrimSpace(out)
+	if commit == "" {
+		return "", errors.New("worktree apply backup: git stash create produced no commit")
+	}
+	return commit, nil
 }
 
 // mainTreeDirtyPaths maps repo-relative path to porcelain status for every

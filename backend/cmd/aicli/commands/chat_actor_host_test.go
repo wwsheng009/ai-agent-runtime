@@ -1316,6 +1316,87 @@ func TestLocalActorRegistryApplyAndDiscardWorktree(t *testing.T) {
 	}
 }
 
+// 2026-09-27 incident hardening: a worktree whose session is still executing
+// must not be landed; the parent has to wait (wait_agent) or close first.
+func TestLocalActorRegistryApplyWorktreeRefusesWhileChildRunning(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	repo := initLocalIsolationTestRepo(t)
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create: %v", err)
+	}
+	teamStore, err := team.NewSQLiteStore(&team.StoreConfig{Path: filepath.Join(t.TempDir(), "team.db")})
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer teamStore.Close()
+
+	host := newLocalOrchestrationTestHost(t, manager, userID, runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{}), teamStore)
+	host.RuntimeConfig = runtimecfg.DefaultRuntimeConfig()
+	host.RuntimeConfig.Workspace.Root = repo
+	host.BaseSession = &ChatSession{
+		RuntimeSession:   rootSession,
+		SessionUserID:    userID,
+		LocalRuntimeHost: host,
+	}
+
+	child, err := host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:        "wt-busy-child",
+		Isolation: "worktree",
+	})
+	if err != nil {
+		t.Fatalf("Spawn busy child: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(child.WorktreePath, "landed.txt"), []byte("land-me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	markLocalAgentBusy(t, host, "wt-busy-child")
+	_, err = host.ActorRegistry.ApplyWorktree(ctx, toolbroker.ApplyAgentWorktreeArgs{ID: "wt-busy-child"})
+	if err == nil || !strings.Contains(err.Error(), "still executing") {
+		t.Fatalf("expected running-child apply refusal, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(repo, "landed.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("refused apply must not touch the main tree, err=%v", statErr)
+	}
+
+	// Once the child goes idle the same apply lands the file.
+	actor, err := host.SessionHub.GetOrCreate("wt-busy-child")
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	if err := actor.UpdateStateForTest(ctx, func(state *runtimechat.RuntimeState) error {
+		state.Status = runtimechat.SessionIdle
+		state.PendingApproval = nil
+		state.PendingQuestion = nil
+		state.CurrentTurnID = ""
+		state.UpdatedAt = time.Now().UTC()
+		return nil
+	}); err != nil {
+		t.Fatalf("UpdateStateForTest: %v", err)
+	}
+	result, err := host.ActorRegistry.ApplyWorktree(ctx, toolbroker.ApplyAgentWorktreeArgs{ID: "wt-busy-child"})
+	if err != nil {
+		t.Fatalf("ApplyWorktree after idle: %v", err)
+	}
+	if result == nil || !result.Applied {
+		t.Fatalf("unexpected apply result: %#v", result)
+	}
+	if data, readErr := os.ReadFile(filepath.Join(repo, "landed.txt")); readErr != nil || string(data) != "land-me\n" {
+		t.Fatalf("expected landed.txt applied, data=%q err=%v", data, readErr)
+	}
+}
+
 func TestLocalActorRegistrySpawnWorktreeFailsClosedOutsideGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

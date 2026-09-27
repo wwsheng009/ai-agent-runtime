@@ -157,3 +157,16 @@ func normalizeAgentRuntimeState(value string) string {
 		return ""
 	}
 }
+
+// apiAgentRuntimeStateExecuting reports whether a resolved runtime state means
+// the session still holds a turn: running (rewinding normalized into it),
+// waiting_approval, or waiting_input. Empty means "no evidence" and must not be
+// read as executing, or a storage outage would wedge every later apply.
+func apiAgentRuntimeStateExecuting(state string) bool {
+	switch state {
+	case AgentRuntimeStateRunning, AgentRuntimeStateWaitingApproval, AgentRuntimeStateWaitingInput:
+		return true
+	default:
+		return false
+	}
+}
