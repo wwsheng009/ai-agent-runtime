@@ -1,6 +1,6 @@
 # 前端万级流事件渲染性能方案（deepseek-harness 参考实现取证）
 
-> 状态：**P0-1 / P0-2 / P1-1 / P1-2 已实施并验证（2026-09-28，见 §11）；P2-1 渲染面逐项核对完成（无代码改动）；P2-2 基准方法论已固化（基线待空闲窗口复跑回填）；P2-3 性能决策记录已建立；P1-3 起待立项或按需推进**
+> 状态：**P0-1 / P0-2 / P1-1 / P1-2 已实施并验证（2026-09-28，见 §11）；P2-1 渲染面逐项核对完成（无代码改动）；P2-2 基准已锁定（40 轮场景，预算草案就绪；活跃重连与 CI 接线标注后续）；P2-3 性能决策记录已建立；P1-3 起待立项或按需推进**
 > 日期：2026-09-28
 > 参考仓库：`E:\projects\ai\deepseek-harness`（master @ `c291e7961a`，2026-09-10）
 > 目标仓库：本仓库 `frontend/`
@@ -557,11 +557,29 @@ Deque 不做背压、不做合并、不做丢弃——**容量、coalescing、�
   总时长）、掉帧率（帧间隔 >33ms 占比）、Script / Layout / RecalcStyle 单回合
   增量、提交:事件比（P1-2 验收延续）、Mutation 总量与 perFrame 峰值。
 
+**验证（基线已回填，2026-09-28，`PERF_ROUNDS=40` / 10s 流式窗口）**
+
+- 场景：80 行 / 2797 DOM 节点；探针输出 `[perf:baseline-40r]`（`staleBuild=no`，
+  报告 `.artifacts/perf/baseline-40r.json`）。
+- 基线实测：帧 p95=17ms（正常帧）、max=234ms、>100ms 共 13 帧；长任务 19 次
+  （max 189ms、合计 2258ms、>100ms 13 次）；CDP 单窗口 Script 2380.6ms /
+  RecalcStyle 2462.8ms / Layout 625.8ms（Layout 257 次）；Mutations 11409 次
+  （/frame p95=53、max=825），**目标集中在单行消息内容**
+  `div.app-chat-copy<msg:istant> 2935` 次——P1-1 切片生效的直接证据：颤动只在
+  增长行，不在整列；removals 3977 次 / 3977 节点（打字机逐字揭示替换文本节点，
+  每次 1 节点）。
+- 预算草案（先校准后收紧；基线 ×~2 为红灯线，后续每轮优化复测后下调）：
+  长任务 ≤ 40 次 / 最长 ≤ 250ms；帧 >100ms ≤ 30 次、p95 ≤ 20ms；Script /
+  RecalcStyle / Layout 各 ≤ 4000ms、LayoutCount ≤ 400；Mutations 总量 ≤ 20000、
+  /frame p95 ≤ 80；removals ≤ 8000。
+- 复跑命令：`PERF_TAG=baseline npm run test:manual -- e2e/zz-perf-probe.manual.ts`
+  （需先 `tsc -b && vite build` 刷新 dist）。
+
 **状态**
 
-- 2026-09-28 环境受限（物理空闲 3.6GB / 虚拟空闲 0.6GB，他任务构建进程
-  compile/link 占用；`tsc -b` 与 `vite build` 均 OOM 崩溃）——基准本体顺延至
-  空闲窗口复跑回填；CI 接线（release-aicli / build-aicli-win7 工作流）标注后续。
+- 基准已锁定（本机 40 轮场景）；两条场景中的「活跃重连」探针与 CI 接线
+  （release-aicli / build-aicli-win7 工作流）标注后续；「优化后重复测量再收紧」
+  的闭环从下次改动起生效。
 
 ### P2-3 性能决策记录（已实施，2026-09-28）
 
