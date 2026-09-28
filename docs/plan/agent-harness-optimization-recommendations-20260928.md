@@ -2,7 +2,7 @@
 
 更新时间：2026-09-28
 
-状态：**实施中**（2026-09-28 起）。§2.1 的 P0-1 进度埋点已完成 agent_run 主链路接线与双宿主验收（见该节实施记录）；其余条目仍为建议稿，不代表已排期。本文只给出优化建议、优先级依据与代码/日志证据索引；文中标注"建议"的均为目标设计。
+状态：**实施中**（2026-09-28 起）。§2.1 的 P0-1 进度埋点、§2.2/§2.3 的到期评估与无人应答安全默认均已落地（见各节实施记录）；其余条目仍为建议稿，不代表已排期。本文只给出优化建议、优先级依据与代码/日志证据索引；文中标注"建议"的均为目标设计。
 
 ## 0. 文档定位
 
@@ -71,6 +71,16 @@
 3. 真停滞 → 优雅取消（interrupt → cancel grace → fail），保留 partial 产物。
 4. 可续跑任务 `MaxAttempts` 默认大于 1，并让失败结果携带"可续跑基线"。
 
+**实施记录（2026-09-28，commit `f5e68752`）**：
+
+- ✅ 到期评估（本节第 2 条）：执行硬到期先做健康度评估（最近 progress 年龄在一个 soft 窗口内），健康 → 自动延长一次原始预算窗口（与 extend_deadline 同一 I5 预算/计数/事件契约：`obligation.deadline.extended`）；不健康 → 保持既有强制分支。
+- ✅ 真实活跃不报假 stall（本节验收第 1 条）：软阈值（progress deadline）到期时，仍在 tick 的 run 不再开新的 stall 上报/决策窗口；窗口已开时仍走既有 decide/fallback 时间线。
+- ✅ 无人应答安全默认（§2.3 关键补充）：决策窗口耗尽且无人应答时，健康 → 自动延长（而非放行到强杀）；不健康 → 既有兜底取消（保产物语义不变）。
+- ✅ 回退开关：`AutoExtendHealthy`（`supervision.Config` / `ExecutionSupervisorConfig`，nil/true=启用，显式 false 回退；与 `EscalateFirst` 同级）；自动延长共享 I5 上限（`MaxExtensions` / `MaxExtensionPerCall` / `MaxExtensionTotal`，零值取操作员默认）。
+- ✅ 验收：新增 8 个定向测试（健康延长 / 停滞仍杀 / 预算耗尽 / 回退开关 / observe 不落库 / 无人应答延长 / 延长不放宽 liveness / 真实活跃不报假 stall）；`internal/supervision` 全包回归通过。
+- ⏳ 健康度信号目前仅 progress 年龄；token 速率 / 工具错误率按本节第 2 条留作扩展点（`runHealthy` 单点可扩）。
+- ⏳ §2.3 第一段的分级 wake（durable `wake_pending` / debounce）属既有 WakeScheduler 工作流，本项未改动。
+
 ### 2.3 升级送达与"无人应答"的安全默认（P1）
 
 现象（本次取证）：stall 升级在父侧长期处于 delivery pending，`resume_queue` 积压最久约 1 小时 46 分；父会话长 turn 期间无人应答，子会话最终仍被强杀。
@@ -78,6 +88,8 @@
 建议：落地 `spawn-agent-team-supervision-timeout-recovery-plan.md` §6.5（第 711-730 行）的分级 wake——critical（timeout / stalled / orphaned / invalid）在父会话 idle 时调度 turn；busy 时写 durable `wake_pending`，turn 结束 drain；同 root debounce / batch，限制单位时间 auto turn 数。
 
 **关键补充**：当"无人应答"超过一个上界时，默认动作必须是安全动作（健康 → 延长；不健康 → 保产物取消），不能等价于"放行到 deadline 强杀"。
+
+> 实施（2026-09-28，commit `f5e68752`）：该安全默认已落在决策窗口耗尽处——健康 → 自动延长一次（I5 预算内），不健康 → 既有兜底取消；见 §2.2 实施记录。
 
 ### 2.4 失败收尾与产物保全制度化（P1）
 
@@ -122,7 +134,7 @@
 | 2 | 到期评估 / 自动延长 + 无人应答安全默认 | §2.2 / §2.3 | `execution_supervisor.go`、`action_service.go`、wake scheduler |
 | 3 | 失败收尾保全 + 账本收敛 | §2.4 / §2.5 | 失败路径 + supervision store |
 
-> 状态（2026-09-28）：第 1 项 agent_run 埋点已落地（commits `21a3bcff`、`a0481e00`、`97ab0258`，见 §2.1 实施记录）；batch `TaskProgressInterval` 维持出厂 `0`，按 20260917 计划 §4 灰度流程显式开启验证。第 2、3 项未开始。
+> 状态（2026-09-28）：第 1 项 agent_run 埋点已落地（commits `21a3bcff`、`a0481e00`、`97ab0258`）；第 2 项到期评估 / 自动延长 + 无人应答安全默认已落地（commit `f5e68752`，见 §2.2/§2.3 实施记录；§2.3 分级 wake 属既有工作流未改动）。batch `TaskProgressInterval` 维持出厂 `0`，按 20260917 计划 §4 灰度流程显式开启验证。第 3 项未开始。
 
 建议验收：
 
