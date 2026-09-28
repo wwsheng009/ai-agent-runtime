@@ -37,8 +37,8 @@ func TestExecuteStructuredExportCommandExplicitCurrentFull(t *testing.T) {
 	if !handled {
 		t.Fatal("/export current --full was not handled by the structured executor")
 	}
-	if result.OpenExportPicker != nil {
-		t.Fatalf("explicit /export must not open the picker, got %#v", result.OpenExportPicker)
+	if result.Screen != nil {
+		t.Fatalf("explicit /export must not open the picker, got %#v", result.Screen)
 	}
 	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 	if !strings.Contains(text, "会话已导出") {
@@ -59,8 +59,8 @@ func TestExecuteStructuredExportCommandInvalidArgsReportUsage(t *testing.T) {
 	if !handled {
 		t.Fatal("invalid /export args must be handled by the structured executor")
 	}
-	if result.OpenExportPicker != nil {
-		t.Fatalf("invalid args must not open the picker, got %#v", result.OpenExportPicker)
+	if result.Screen != nil {
+		t.Fatalf("invalid args must not open the picker, got %#v", result.Screen)
 	}
 	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 	if !strings.Contains(text, "用法: /export") {
@@ -95,8 +95,8 @@ func TestExecuteStructuredExportCommandBareWithDirDegradesToCurrent(t *testing.T
 	if !handled {
 		t.Fatal("bare /export with --dir was not handled by the structured executor")
 	}
-	if result.OpenExportPicker != nil {
-		t.Fatalf("bare /export without a picker-capable surface must not open the picker, got %#v", result.OpenExportPicker)
+	if result.Screen != nil {
+		t.Fatalf("bare /export without a picker-capable surface must not open the picker, got %#v", result.Screen)
 	}
 	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 	if !strings.Contains(text, "会话已导出") {

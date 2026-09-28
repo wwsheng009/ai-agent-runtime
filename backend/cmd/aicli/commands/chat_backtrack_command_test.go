@@ -36,8 +36,8 @@ func TestParseChatBacktrackArgsApplySubmit(t *testing.T) {
 
 func TestBacktrackPickerCommandResultHasNoTranscriptDocument(t *testing.T) {
 	result := newBacktrackPickerCommandResult()
-	if result.OpenBacktrackPicker == nil {
-		t.Fatal("backtrack picker result is missing its typed effect")
+	if result.Screen == nil || result.Screen.Effect == nil || result.Screen.ID != "backtrack.picker" {
+		t.Fatalf("backtrack picker result is missing its typed effect: %#v", result.Screen)
 	}
 	if result.Action != CommandContinue {
 		t.Fatalf("backtrack picker action=%v want CommandContinue", result.Action)

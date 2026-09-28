@@ -2,7 +2,6 @@ package commands
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -64,168 +63,177 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 	providerName := strings.TrimSpace(request.Provider)
 	modelName := strings.TrimSpace(request.Model)
 
-	lease, err := chatPickerOpen(session, "切换模型", modelPickerLeaseHooks())
-	if err != nil {
-		switch {
-		case errors.Is(err, errChatPickerStateUncommitted):
-			err = fmt.Errorf("模型选择器状态未提交")
-		case errors.Is(err, errChatPickerRenderNotReady):
-			err = fmt.Errorf("模型选择器渲染未就绪")
-		default:
-			err = fmt.Errorf("打开模型选择器失败: %w", err)
-		}
-		_ = renderChatCommandResult(session, commandErrorResult(err), false)
-		return
-	}
-
-	// Stage 1: provider. Only the typed /provider command runs it (bare
-	// form), and a request that pinned the provider explicitly skips it. The
-	// typed /model command never asks for a provider: it switches models
-	// within the current provider.
-	if request.ProviderPicker && providerName == "" {
-		providers := runtimeProviderSelectionOptions(session, currentModelCommandProvider(session))
-		if len(providers) == 0 {
-			closeModelPickerLease(session, lease)
-			_ = renderChatCommandResult(session, commandTextResult("没有可用的 provider 配置"), false)
-			return
-		}
-		index, cancelled, pickErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
-			Title:        "选择 Provider",
-			Subtitle:     "Enter 确认，Esc 取消",
-			EmptyMessage: "没有匹配的 provider",
-			ConfirmLabel: "使用选中 provider",
-			Items:        buildModelProviderFullScreenItems(providers, currentModelCommandProvider(session)),
-		})
-		if pickErr != nil {
-			closeModelPickerLease(session, lease)
-			_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择 provider 失败: %w", pickErr)), false)
-			return
-		}
-		if cancelled {
-			closeModelPickerLease(session, lease)
-			_ = renderChatCommandResult(session, commandTextResult("已取消切换模型"), false)
-			return
-		}
-		providerName = providers[index]
-	}
-
-	// /model never runs the provider stage (ProviderPicker is false), so a bare
-	// invocation leaves providerName empty. Resolve it against the session's
-	// current provider — the one selected by /provider or already active — so
-	// the model stage lists that provider's catalog instead of falling back to
-	// the config default provider.
-	if providerName == "" {
-		providerName = currentModelCommandProvider(session)
-	}
-
-	// Resolve the provider context so the model stage lists its real catalog.
-	providerCtx, _, err := resolveModelCommandExecutionContext(session, providerName, "")
-	if err != nil {
-		closeModelPickerLease(session, lease)
-		_ = renderChatCommandResult(session, commandErrorResult(err), false)
-		return
-	}
-
-	// Stage 2: model. Skipped when the request pinned one explicitly.
-	if modelName == "" {
-		for {
-			models := modelPickerModelOptions(providerCtx.Provider, currentModelForProvider(session, providerName))
-			if len(models) == 0 {
-				closeModelPickerLease(session, lease)
-				_ = renderChatCommandResult(session, commandTextResult(fmt.Sprintf("provider %s 没有可用的模型", providerName)), false)
-				return
-			}
-			currentModel := currentModelForProvider(session, providerName)
-			picked, pickErr := chatPickerStageResult(context.Background(), session, lease, ui.FullScreenListOptions{
-				Title:        "选择模型",
-				Subtitle:     fmt.Sprintf("provider: %s · Enter 确认，x/Delete 删除选中模型，Esc 取消", providerName),
-				EmptyMessage: "没有匹配的模型",
-				ConfirmLabel: "使用选中模型",
-				Items:        buildModelPickerModelItems(models, currentModel),
-				OnDelete:     func(int) error { return nil },
-			})
-			if pickErr != nil {
-				closeModelPickerLease(session, lease)
-				_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择模型失败: %w", pickErr)), false)
-				return
-			}
-			if picked.Cancelled {
-				closeModelPickerLease(session, lease)
-				_ = renderChatCommandResult(session, commandTextResult("已取消切换模型"), false)
-				return
-			}
-			if picked.DeleteRequested {
-				if picked.Index < 0 || picked.Index >= len(models) {
-					continue
-				}
-				target := models[picked.Index]
-				if guardErr := chatModelRemovalGuard(providerCtx.Provider, currentModel, target); guardErr != nil {
-					_ = renderChatCommandResult(session, commandTextResult(guardErr.Error()), false)
-					continue
-				}
-				if !confirmChatModelDeletion(session, lease, providerName, target) {
-					continue
-				}
-				if persistErr := persistChatModelRemoval(session.Config, providerName, target); persistErr != nil {
-					_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("删除模型 %s 失败: %w", target, persistErr)), false)
-					continue
-				}
-				_ = renderChatCommandResult(session, commandTextResult(fmt.Sprintf("已删除模型 %s（已保存到配置文件）", target)), false)
-				// Reload so the reopened stage lists the persisted catalog.
-				if reloadedCtx, _, reloadErr := resolveModelCommandExecutionContext(session, providerName, ""); reloadErr == nil {
-					providerCtx = reloadedCtx
-				} else {
-					providerCtx.Provider.SupportedModels = filterChatProviderModels(providerCtx.Provider.SupportedModels, target)
-				}
-				continue
-			}
-			if picked.Index < 0 || picked.Index >= len(models) {
-				continue
-			}
-			modelName = models[picked.Index]
-			break
-		}
-	}
-
-	// Stage 2 continued: the model stage may have removed the active session
-	// model indirectly; keep the resolved context in sync before reasoning.
-	if modelName == "" {
-		modelName = currentModelForProvider(session, providerName)
-	}
-
-	// Stage 3: reasoning effort. Only when the caller asked for it and the
-	// model card actually advertises a supported catalog.
 	reasoning := runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
-	if request.NeedReasoning {
-		catalog := reasoningEffortCatalogForModel(providerCtx.Provider, modelName)
-		if catalog.supported && len(catalog.options) > 0 {
-			index, cancelled, pickErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
-				Title:        "选择 reasoning effort",
-				Subtitle:     fmt.Sprintf("%s · Enter 确认，Esc 取消", modelName),
-				EmptyMessage: "没有可用的 reasoning effort",
-				ConfirmLabel: "使用选中值",
-				Items:        buildModelPickerReasoningItems(catalog.options, reasoning),
-			})
-			if pickErr != nil {
-				closeModelPickerLease(session, lease)
-				_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择 reasoning effort 失败: %w", pickErr)), false)
-				return
-			}
-			if cancelled {
-				closeModelPickerLease(session, lease)
-				_ = renderChatCommandResult(session, commandTextResult("已取消切换模型"), false)
-				return
-			}
-			reasoning = catalog.options[index]
-		}
-	}
 
-	if closeErr := chatPickerClose(session, lease, modelPickerLeaseHooks()); closeErr != nil {
-		if errors.Is(closeErr, errChatPickerActorNotIdle) {
-			_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("模型选择器关闭未就绪")), false)
-			return
-		}
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭模型选择器失败: %w", closeErr)), false)
+	// 批次 2：租约、open 屏障与 close 序列收敛到统一副屏框架；provider→model→
+	// reasoning 三级选择（含模型删除的确认与重开）仍在同一租约内推进，选择结果
+	// 与会话变更全部在租约释放后应用（I3）。
+	var early *CommandResult
+	res := runChatPickerScreen(session, chatPickerScreen{
+		ID:    "model.picker",
+		Title: "切换模型",
+		Hooks: modelPickerLeaseHooks(),
+		Run: func(session *ChatSession, lease ui.ScreenLease) error {
+
+			// Stage 1: provider. Only the typed /provider command runs it (bare
+			// form), and a request that pinned the provider explicitly skips it. The
+			// typed /model command never asks for a provider: it switches models
+			// within the current provider.
+			if request.ProviderPicker && providerName == "" {
+				providers := runtimeProviderSelectionOptions(session, currentModelCommandProvider(session))
+				if len(providers) == 0 {
+					result := commandTextResult("没有可用的 provider 配置")
+					early = &result
+					return nil
+				}
+				index, cancelled, pickErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
+					Title:        "选择 Provider",
+					Subtitle:     "Enter 确认，Esc 取消",
+					EmptyMessage: "没有匹配的 provider",
+					ConfirmLabel: "使用选中 provider",
+					Items:        buildModelProviderFullScreenItems(providers, currentModelCommandProvider(session)),
+				})
+				if pickErr != nil {
+					result := commandErrorResult(fmt.Errorf("选择 provider 失败: %w", pickErr))
+					early = &result
+					return nil
+				}
+				if cancelled {
+					result := commandTextResult("已取消切换模型")
+					early = &result
+					return nil
+				}
+				providerName = providers[index]
+			}
+
+			// /model never runs the provider stage (ProviderPicker is false), so a bare
+			// invocation leaves providerName empty. Resolve it against the session's
+			// current provider — the one selected by /provider or already active — so
+			// the model stage lists that provider's catalog instead of falling back to
+			// the config default provider.
+			if providerName == "" {
+				providerName = currentModelCommandProvider(session)
+			}
+
+			// Resolve the provider context so the model stage lists its real catalog.
+			providerCtx, _, err := resolveModelCommandExecutionContext(session, providerName, "")
+			if err != nil {
+				result := commandErrorResult(err)
+				early = &result
+				return nil
+			}
+
+			// Stage 2: model. Skipped when the request pinned one explicitly.
+			if modelName == "" {
+				for {
+					models := modelPickerModelOptions(providerCtx.Provider, currentModelForProvider(session, providerName))
+					if len(models) == 0 {
+						result := commandTextResult(fmt.Sprintf("provider %s 没有可用的模型", providerName))
+						early = &result
+						return nil
+					}
+					currentModel := currentModelForProvider(session, providerName)
+					picked, pickErr := chatPickerStageResult(context.Background(), session, lease, ui.FullScreenListOptions{
+						Title:        "选择模型",
+						Subtitle:     fmt.Sprintf("provider: %s · Enter 确认，x/Delete 删除选中模型，Esc 取消", providerName),
+						EmptyMessage: "没有匹配的模型",
+						ConfirmLabel: "使用选中模型",
+						Items:        buildModelPickerModelItems(models, currentModel),
+						OnDelete:     func(int) error { return nil },
+					})
+					if pickErr != nil {
+						result := commandErrorResult(fmt.Errorf("选择模型失败: %w", pickErr))
+						early = &result
+						return nil
+					}
+					if picked.Cancelled {
+						result := commandTextResult("已取消切换模型")
+						early = &result
+						return nil
+					}
+					if picked.DeleteRequested {
+						if picked.Index < 0 || picked.Index >= len(models) {
+							continue
+						}
+						target := models[picked.Index]
+						if guardErr := chatModelRemovalGuard(providerCtx.Provider, currentModel, target); guardErr != nil {
+							_ = renderChatCommandResult(session, commandTextResult(guardErr.Error()), false)
+							continue
+						}
+						if !confirmChatModelDeletion(session, lease, providerName, target) {
+							continue
+						}
+						if persistErr := persistChatModelRemoval(session.Config, providerName, target); persistErr != nil {
+							_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("删除模型 %s 失败: %w", target, persistErr)), false)
+							continue
+						}
+						_ = renderChatCommandResult(session, commandTextResult(fmt.Sprintf("已删除模型 %s（已保存到配置文件）", target)), false)
+						// Reload so the reopened stage lists the persisted catalog.
+						if reloadedCtx, _, reloadErr := resolveModelCommandExecutionContext(session, providerName, ""); reloadErr == nil {
+							providerCtx = reloadedCtx
+						} else {
+							providerCtx.Provider.SupportedModels = filterChatProviderModels(providerCtx.Provider.SupportedModels, target)
+						}
+						continue
+					}
+					if picked.Index < 0 || picked.Index >= len(models) {
+						continue
+					}
+					modelName = models[picked.Index]
+					break
+				}
+			}
+
+			// Stage 2 continued: the model stage may have removed the active session
+			// model indirectly; keep the resolved context in sync before reasoning.
+			if modelName == "" {
+				modelName = currentModelForProvider(session, providerName)
+			}
+
+			// Stage 3: reasoning effort. Only when the caller asked for it and the
+			// model card actually advertises a supported catalog.
+			reasoning = runtimetypes.NormalizeReasoningEffort(session.ReasoningEffort)
+			if request.NeedReasoning {
+				catalog := reasoningEffortCatalogForModel(providerCtx.Provider, modelName)
+				if catalog.supported && len(catalog.options) > 0 {
+					index, cancelled, pickErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
+						Title:        "选择 reasoning effort",
+						Subtitle:     fmt.Sprintf("%s · Enter 确认，Esc 取消", modelName),
+						EmptyMessage: "没有可用的 reasoning effort",
+						ConfirmLabel: "使用选中值",
+						Items:        buildModelPickerReasoningItems(catalog.options, reasoning),
+					})
+					if pickErr != nil {
+						result := commandErrorResult(fmt.Errorf("选择 reasoning effort 失败: %w", pickErr))
+						early = &result
+						return nil
+					}
+					if cancelled {
+						result := commandTextResult("已取消切换模型")
+						early = &result
+						return nil
+					}
+					reasoning = catalog.options[index]
+				}
+			}
+
+			return nil
+		},
+	})
+	if res.Degraded {
+		// 框架未进入副屏（能力不足/租约忙/嵌套）：与批次 2 之前取租约失败的
+		// 文案一致。
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开模型选择器失败: %w", errChatPickerScreenUnavailable)), false)
+		return
+	}
+	if early != nil {
+		// 取消/无候选/删除反馈等提前退出：与 legacy 一致，close 阶段错误不覆盖
+		// 用户可见结果；此时框架已释放租约。
+		_ = renderChatCommandResult(session, *early, false)
+		return
+	}
+	if res.Err != nil {
+		_ = renderChatCommandResult(session, commandErrorResult(chatPickerScreenErrorText("模型选择器", res)), false)
 		return
 	}
 
@@ -242,10 +250,6 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 	}
 	doc := buildChatPlainTextCommandDocument(strings.Join(lines, "\n"))
 	_ = renderChatCommandResult(session, commandResultWithWarnings(doc, warnings...), false)
-}
-
-func closeModelPickerLease(session *ChatSession, lease ui.ScreenLease) {
-	_ = chatPickerClose(session, lease, modelPickerLeaseHooks())
 }
 
 // currentModelForProvider returns the effective model to highlight when the
@@ -440,6 +444,15 @@ func needProviderPickerStage(variant modelCommandVariant, providerExplicit bool)
 	return variant == modelCommandVariantProvider && !providerExplicit
 }
 
+// modelStatusCommandResult 在统一出口把 /model|/provider 的只读状态页投影为
+// ScreenDocument（批次 3 尾批）；plain/JSON/legacy 出口保持原文本单元格。
+func modelStatusCommandResult(session *ChatSession, variant modelCommandVariant, text string) CommandResult {
+	if unifiedDirectInteractiveOutput(session) {
+		return chatScreenDocResult(chatScreenModelStatusSpec(variant, text))
+	}
+	return commandTextResult(text)
+}
+
 func executeStructuredModelCommandVariant(session *ChatSession, command string, variant modelCommandVariant) (CommandResult, bool) {
 	request, err := parseModelCommandRequest(command)
 	if err != nil {
@@ -447,19 +460,22 @@ func executeStructuredModelCommandVariant(session *ChatSession, command string, 
 	}
 	request.Provider = resolveModelPickerProvider(session, variant, request)
 	if request.ShowStatus && !request.HasMutation() {
-		return commandTextResult(runtimeModelStateText(session)), true
+		return modelStatusCommandResult(session, variant, runtimeModelStateText(session)), true
 	}
 	if !request.HasMutation() {
 		if !canOpenChatModelPicker(session) {
-			return commandTextResult(runtimeModelStateText(session)), true
+			return modelStatusCommandResult(session, variant, runtimeModelStateText(session)), true
+		}
+		pickerRequest := ModelPickerRequest{
+			Provider:       request.Provider,
+			NeedReasoning:  true,
+			ProviderPicker: needProviderPickerStage(variant, request.ProviderExplicit),
 		}
 		return CommandResult{
 			Action: CommandContinue,
-			OpenModelPicker: &ModelPickerRequest{
-				Provider:       request.Provider,
-				NeedReasoning:  true,
-				ProviderPicker: needProviderPickerStage(variant, request.ProviderExplicit),
-			},
+			Screen: chatScreenEffectSpec("model.picker", "切换模型", func(s *ChatSession) {
+				openChatModelPicker(s, pickerRequest)
+			}),
 		}, true
 	}
 
@@ -470,14 +486,17 @@ func executeStructuredModelCommandVariant(session *ChatSession, command string, 
 	needsReasoningInteraction := request.ModelExplicit && !request.ReasoningExplicit && !request.ClearReasoning &&
 		!request.DirectApply && canOpenChatModelPicker(session)
 	if needsReasoningInteraction {
+		pickerRequest := ModelPickerRequest{
+			Provider:       request.Provider,
+			Model:          request.Model,
+			NeedReasoning:  true,
+			ProviderPicker: needProviderPickerStage(variant, request.ProviderExplicit),
+		}
 		return CommandResult{
 			Action: CommandContinue,
-			OpenModelPicker: &ModelPickerRequest{
-				Provider:       request.Provider,
-				Model:          request.Model,
-				NeedReasoning:  true,
-				ProviderPicker: needProviderPickerStage(variant, request.ProviderExplicit),
-			},
+			Screen: chatScreenEffectSpec("model.picker", "切换模型", func(s *ChatSession) {
+				openChatModelPicker(s, pickerRequest)
+			}),
 		}, true
 	}
 	return executeStructuredModelMutation(session, request), true

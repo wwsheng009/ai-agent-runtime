@@ -29,8 +29,10 @@ func handleBacktrackCommand(session *ChatSession, command string) bool {
 	if unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredBacktrackQueryCommand(session, command); handled {
 			renderErr := renderChatCommandResult(session, result, false)
-			if renderErr == nil && result.OpenBacktrackPicker != nil {
-				openChatBacktrackPicker(session, *result.OpenBacktrackPicker)
+			if renderErr == nil {
+				// 批次 5（D-E）：picker 效应经 CommandResult.Screen（Effect Spec）
+				// 统一派发，opener 仍在命令提交后运行。
+				dispatchChatScreenEffects(session, result)
 			}
 			if renderErr == nil && result.ApplyBacktrack != nil {
 				applyUnifiedBacktrackRequest(session, result.ApplyBacktrack.Request)
@@ -250,8 +252,10 @@ func executeStructuredBacktrackQueryCommand(session *ChatSession, command string
 
 func newBacktrackPickerCommandResult() CommandResult {
 	return CommandResult{
-		Action:              CommandContinue,
-		OpenBacktrackPicker: &BacktrackPickerRequest{},
+		Action: CommandContinue,
+		Screen: chatScreenEffectSpec("backtrack.picker", "回退到历史 user turn", func(s *ChatSession) {
+			openChatBacktrackPicker(s, BacktrackPickerRequest{})
+		}),
 	}
 }
 

@@ -24,8 +24,8 @@ func TestExecuteStructuredModelCommandStatusStaysReadOnly(t *testing.T) {
 	if !strings.Contains(text, "当前 provider: alpha") || !strings.Contains(text, "当前模型: gpt-4.1") {
 		t.Fatalf("/model status document missing state, got:\n%s", text)
 	}
-	if result.OpenModelPicker != nil {
-		t.Fatalf("/model status must not open the picker: %#v", result.OpenModelPicker)
+	if result.Screen != nil {
+		t.Fatalf("/model status must not open the picker: %#v", result.Screen)
 	}
 }
 
@@ -44,8 +44,8 @@ func TestExecuteStructuredModelCommandBareWithoutSurfaceDegradesToStatus(t *test
 	if !handled {
 		t.Fatal("bare /model was not handled by the structured executor")
 	}
-	if result.OpenModelPicker != nil {
-		t.Fatalf("bare /model without a picker-capable surface must not request the typed picker, got %#v", result.OpenModelPicker)
+	if result.Screen != nil {
+		t.Fatalf("bare /model without a picker-capable surface must not request the typed picker, got %#v", result.Screen)
 	}
 	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 	if !strings.Contains(text, "当前 provider: alpha") || !strings.Contains(text, "当前模型: gpt-4.1") {
@@ -82,8 +82,8 @@ func TestExecuteStructuredModelCommandExplicitMutationAppliesDirectly(t *testing
 	if !handled {
 		t.Fatal("explicit mutation was not handled by the structured executor")
 	}
-	if result.OpenModelPicker != nil {
-		t.Fatalf("explicit mutation must not open the picker, got %#v", result.OpenModelPicker)
+	if result.Screen != nil {
+		t.Fatalf("explicit mutation must not open the picker, got %#v", result.Screen)
 	}
 	if session.Model != "gpt-4.1-mini" {
 		t.Fatalf("expected model switch to gpt-4.1-mini, got %q", session.Model)
@@ -123,8 +123,8 @@ func TestExecuteStructuredModelCommandDirectFlagSkipsReasoningPicker(t *testing.
 	if !handled {
 		t.Fatal("--direct mutation was not handled by the structured executor")
 	}
-	if result.OpenModelPicker != nil {
-		t.Fatalf("--direct must never open the picker, got %#v", result.OpenModelPicker)
+	if result.Screen != nil {
+		t.Fatalf("--direct must never open the picker, got %#v", result.Screen)
 	}
 	if session.Model != "gpt-4.1-mini" {
 		t.Fatalf("expected model switch to gpt-4.1-mini, got %q", session.Model)
@@ -149,8 +149,8 @@ func TestExecuteStructuredModelCommandModelPinnedWithoutReasoningDegradesWithout
 	if !handled {
 		t.Fatal("/model --model was not handled by the structured executor")
 	}
-	if result.OpenModelPicker != nil {
-		t.Fatalf("without a picker-capable surface the mutation must not open the picker, got %#v", result.OpenModelPicker)
+	if result.Screen != nil {
+		t.Fatalf("without a picker-capable surface the mutation must not open the picker, got %#v", result.Screen)
 	}
 	if session.Model != "gpt-4.1-mini" {
 		t.Fatalf("expected model switch to gpt-4.1-mini, got %q", session.Model)
@@ -172,8 +172,8 @@ func TestExecuteStructuredModelCommandClearReasoningAppliesDirectly(t *testing.T
 	if !handled {
 		t.Fatal("/model --clear-reasoning was not handled by the structured executor")
 	}
-	if result.OpenModelPicker != nil {
-		t.Fatalf("clear-reasoning must not open the picker, got %#v", result.OpenModelPicker)
+	if result.Screen != nil {
+		t.Fatalf("clear-reasoning must not open the picker, got %#v", result.Screen)
 	}
 	if session.ReasoningEffort != "" {
 		t.Fatalf("expected cleared reasoning effort, got %q", session.ReasoningEffort)
@@ -194,8 +194,8 @@ func TestExecuteStructuredModelCommandInvalidArgsReportError(t *testing.T) {
 	if !handled {
 		t.Fatal("invalid /model args must be handled by the structured executor")
 	}
-	if result.OpenModelPicker != nil {
-		t.Fatalf("invalid args must not open the picker, got %#v", result.OpenModelPicker)
+	if result.Screen != nil {
+		t.Fatalf("invalid args must not open the picker, got %#v", result.Screen)
 	}
 	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "未知的 /model 参数") {
 		t.Fatalf("invalid args must report the parse error, got:\n%s", ui.RenderDocumentPlain(result.Document()))
@@ -261,8 +261,8 @@ func TestExecuteStructuredProviderCommandBareWithoutSurfaceDegradesToStatus(t *t
 	if !handled {
 		t.Fatal("bare /provider without a surface was not handled")
 	}
-	if result.OpenModelPicker != nil {
-		t.Fatalf("bare /provider without a surface must not open the picker, got %#v", result.OpenModelPicker)
+	if result.Screen != nil {
+		t.Fatalf("bare /provider without a surface must not open the picker, got %#v", result.Screen)
 	}
 	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 	if !strings.Contains(text, "当前 provider: alpha") || !strings.Contains(text, "当前模型: gpt-4.1") {
@@ -298,7 +298,7 @@ func TestExecuteStructuredProviderCommandPinnedProviderSkipsPickerStage(t *testi
 	if !handled {
 		t.Fatal("/provider --provider --model was not handled")
 	}
-	if result.OpenModelPicker != nil {
+	if result.Screen != nil {
 		t.Fatal("explicit provider+model must apply directly, not open the picker")
 	}
 	if session.ProviderName != "beta" {
@@ -322,8 +322,8 @@ func TestExecuteStructuredModelCommandBareDoesNotRequestProviderPicker(t *testin
 	if !handled {
 		t.Fatal("bare /model was not handled by the structured executor")
 	}
-	if result.OpenModelPicker != nil {
-		t.Fatalf("bare /model without a surface must not open the picker, got %#v", result.OpenModelPicker)
+	if result.Screen != nil {
+		t.Fatalf("bare /model without a surface must not open the picker, got %#v", result.Screen)
 	}
 }
 

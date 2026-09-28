@@ -27,9 +27,9 @@ func handleResumeCommand(session *ChatSession, command string) bool {
 	if unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredResumeCommand(session, command); handled {
 			renderErr := renderChatCommandResult(session, result, false)
-			if renderErr == nil && result.OpenResumePicker != nil {
-				openChatResumePicker(session, *result.OpenResumePicker)
-				return false
+			if renderErr == nil {
+				// 批次 5（D-E）：picker 效应经 CommandResult.Screen 统一派发。
+				dispatchChatScreenEffects(session, result)
 			}
 			if renderErr == nil && result.ReplayHistory {
 				// 与 dispatch 同款：先画最新一页，再逐页补齐更早的页。
@@ -154,9 +154,17 @@ func executeStructuredResumeCommand(session *ChatSession, command string) (Comma
 
 func newResumePickerCommandResult(filter ChatSessionListFilter) CommandResult {
 	return CommandResult{
-		Action:           CommandContinue,
-		OpenResumePicker: &ResumePickerRequest{Filter: filter},
+		Action: CommandContinue,
+		Screen: chatScreenEffectSpec("resume.picker", "恢复历史会话", func(s *ChatSession) {
+			openChatResumePicker(s, ResumePickerRequest{Filter: filter})
+		}),
 	}
+}
+
+// resumePickerRequest 重建 /resume picker 的请求载荷（批次 5 守卫测试用），
+// 与 newResumePickerCommandResult 内闭包保持同一 Filter 语义。
+func resumePickerRequest(filter ChatSessionListFilter) ResumePickerRequest {
+	return ResumePickerRequest{Filter: filter}
 }
 
 // canOpenChatResumePicker keeps bare /resume strictly inside the unified
@@ -173,6 +181,13 @@ func canOpenChatResumePicker(session *ChatSession) bool {
 		return false
 	}
 	return ui.CanUseFullScreenList(resumeFullScreenTerminal(session))
+}
+
+// chatResumePickerLeaseHooks binds the shared lease lifecycle
+// (chat_picker_common.go) to this picker's UI-actor action identity.
+var chatResumePickerLeaseHooks = chatPickerLeaseHooks{
+	Open:  func(leaseID uint64) ui.UIAction { return ui.OpenResumePicker{LeaseID: leaseID} },
+	Close: func(leaseID uint64) ui.UIAction { return ui.CloseResumePicker{LeaseID: leaseID} },
 }
 
 // openChatResumePicker runs the lease-bound fullscreen selector after the
@@ -199,51 +214,32 @@ func openChatResumePicker(session *ChatSession, request ResumePickerRequest) {
 		return
 	}
 
-	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
+	// 批次 2：租约、open 屏障与 close 序列由统一框架承担；列表分页仍由
+	// window 自持，恢复动作仍在租约释放（主屏恢复屏障）之后执行。
+	var picked ui.FullScreenListResult
+	res := runChatPickerScreen(session, chatPickerScreen{
+		ID:    "resume.picker",
 		Title: "恢复历史会话",
+		Hooks: chatResumePickerLeaseHooks,
+		Run: func(s *ChatSession, lease ui.ScreenLease) error {
+			var pickErr error
+			picked, pickErr = ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(s), ui.FullScreenListOptions{
+				Title:        "恢复历史会话",
+				Subtitle:     window.subtitle(),
+				EmptyMessage: "没有匹配的历史会话",
+				ConfirmLabel: "恢复选中会话",
+				Items:        window.items,
+				PageLoader:   window.pageLoader(),
+			}, lease)
+			return pickErr
+		},
 	})
-	if err != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开会话选择器失败: %w", err)), false)
+	if res.Degraded {
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开会话选择器失败: %w", errChatPickerScreenUnavailable)), false)
 		return
 	}
-	if !session.Interaction.postUIAction(ui.OpenResumePicker{LeaseID: lease.ID()}) {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("会话选择器状态未提交")), false)
-		return
-	}
-	// The first fullscreen frame must observe its logical lease state. This is
-	// a modal lifecycle barrier, not a per-keystroke wait; list navigation reads
-	// raw input while the primary presenter remains suspended by the lease.
-	if !session.Interaction.waitUIActorIdleBounded("open resume picker") {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("会话选择器渲染未就绪")), false)
-		return
-	}
-
-	picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
-		Title:        "恢复历史会话",
-		Subtitle:     window.subtitle(),
-		EmptyMessage: "没有匹配的历史会话",
-		ConfirmLabel: "恢复选中会话",
-		Items:        window.items,
-		PageLoader:   window.pageLoader(),
-	}, lease)
-
-	_ = session.Interaction.postUIAction(ui.CloseResumePicker{LeaseID: lease.ID()})
-	releaseErr := lease.Release(context.Background())
-	// LeaseReleased is the ordering point for the primary recovery frame. Wait
-	// only for this one lifecycle transition before mounting restored history.
-	if !session.Interaction.waitUIActorIdleBounded("close resume picker") {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("会话选择器关闭未就绪")), false)
-		return
-	}
-
-	if releaseErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭会话选择器失败: %w", releaseErr)), false)
-		return
-	}
-	if pickErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("会话选择器失败: %w", pickErr)), false)
+	if res.Err != nil {
+		_ = renderChatCommandResult(session, commandErrorResult(chatPickerScreenErrorText("会话选择器", res)), false)
 		return
 	}
 	pickedSession := window.SessionAt(picked.Index)
@@ -396,45 +392,42 @@ func readResumeSessionPickFullScreen(session *ChatSession, terminal *ui.Terminal
 		return nil, nil
 	}
 
-	var lease ui.ScreenLease
-	if session != nil && session.Surface != nil && session.Surface.Enabled() {
-		// Suspend the primary presenter while the picker owns the alternate
-		// screen so status ticks / prompt repaints cannot interleave into it.
-		// Unlike the old Disable()/Enable() dance this preserves retained
-		// history and repaints from the retained scene on release.
-		lease, _ = session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
-			Title: "恢复历史会话",
-		})
+	// 批次 5（D-E）：内联租约收编到统一框架（A2/I1）。交互体仍原样运行，
+	// 租约获取/释放、open/close 屏障、嵌套检测与降级全部由 openChatScreen
+	// 承担；能力不足或租约忙时静默降级，调用方回退到逐行选择器（fail-closed）。
+	var picked *runtimechat.Session
+	outcome := openChatScreen(session, chatScreenSpec{
+		ID:            "resume.pick",
+		Title:         "恢复历史会话",
+		Kind:          chatScreenList,
+		Trigger:       "command",
+		SilentDegrade: true,
+		RunScreen: func(_ *ChatSession, lease ui.ScreenLease, _ chatScreenSpec) chatScreenOutcome {
+			result, err := ui.SelectFullScreenListWithLease(context.Background(), terminal, ui.FullScreenListOptions{
+				Title:        "恢复历史会话",
+				Subtitle:     window.subtitle(),
+				EmptyMessage: "没有匹配的历史会话",
+				ConfirmLabel: "恢复选中会话",
+				Items:        window.items,
+				PageLoader:   window.pageLoader(),
+			}, lease)
+			if err != nil {
+				return chatScreenOutcome{Result: chatScreenClosedError, Index: -1, Err: err}
+			}
+			if result.Cancelled {
+				return chatScreenOutcome{Result: chatScreenClosedEsc, Index: -1}
+			}
+			picked = window.SessionAt(result.Index)
+			return chatScreenOutcome{Result: chatScreenClosedConfirm, Index: result.Index}
+		},
+	})
+	if outcome.Degraded {
+		return nil, ui.ErrFullScreenUnavailable
 	}
-	if session != nil && session.Interaction != nil {
-		session.Interaction.ClearPrompt()
-		session.Interaction.ResetPromptState()
+	if outcome.Err != nil {
+		return nil, outcome.Err
 	}
-	defer func() {
-		if lease != nil {
-			_ = lease.Release(context.Background())
-		}
-		if session != nil && session.Interaction != nil {
-			session.Interaction.ResetPromptState()
-			session.Interaction.RefreshStatus("")
-		}
-	}()
-
-	result, err := ui.SelectFullScreenListWithLease(context.Background(), terminal, ui.FullScreenListOptions{
-		Title:        "恢复历史会话",
-		Subtitle:     window.subtitle(),
-		EmptyMessage: "没有匹配的历史会话",
-		ConfirmLabel: "恢复选中会话",
-		Items:        window.items,
-		PageLoader:   window.pageLoader(),
-	}, lease)
-	if err != nil {
-		return nil, err
-	}
-	if result.Cancelled {
-		return nil, nil
-	}
-	return window.SessionAt(result.Index), nil
+	return picked, nil
 }
 
 func chatResumePickerFilter(session *ChatSession) ChatSessionListFilter {

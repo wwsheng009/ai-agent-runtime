@@ -166,6 +166,13 @@ func canOpenChatBacktrackPicker(session *ChatSession) bool {
 	return ui.CanUseFullScreenList(resumeFullScreenTerminal(session))
 }
 
+// chatBacktrackPickerLeaseHooks binds the shared lease lifecycle
+// (chat_picker_common.go) to this picker's UI-actor action identity.
+var chatBacktrackPickerLeaseHooks = chatPickerLeaseHooks{
+	Open:  func(leaseID uint64) ui.UIAction { return ui.OpenBacktrackPicker{LeaseID: leaseID} },
+	Close: func(leaseID uint64) ui.UIAction { return ui.CloseBacktrackPicker{LeaseID: leaseID} },
+}
+
 // openChatBacktrackPicker executes the typed alternate-screen interaction.
 // The lease ends before actor.Backtrack, canonical Scene replacement, command
 // commit, or composer mutation. This gives the primary TerminalSession one
@@ -191,64 +198,45 @@ func openChatBacktrackPicker(session *ChatSession, _ BacktrackPickerRequest) {
 		return
 	}
 
-	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
+	// 批次 2：租约与 close 序列由统一框架承担；模式选择阶段仍在同一租约内
+	// 推进（I9），真正截断历史仍在租约释放（主屏恢复屏障）之后执行。
+	var (
+		picked   ui.FullScreenListResult
+		selected *runtimechat.UserTurn
+		mode     = runtimechat.BacktrackModeConversation
+	)
+	res := runChatPickerScreen(session, chatPickerScreen{
+		ID:    "backtrack.picker",
 		Title: "回退到历史 user turn",
-	})
-	if err != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开回退选择器失败: %w", err)), false)
-		return
-	}
-	if !session.Interaction.postUIAction(ui.OpenBacktrackPicker{LeaseID: lease.ID()}) {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("回退选择器状态未提交")), false)
-		return
-	}
-	// Lifecycle barrier only: the first list frame sees the matching actor
-	// state. Key navigation stays local to the fullscreen list and never waits
-	// on the primary renderer.
-	if !session.Interaction.waitUIActorIdleBounded("open backtrack picker") {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("回退选择器渲染未就绪")), false)
-		return
-	}
-
-	picked, pickErr := ui.SelectFullScreenListWithLease(ctx, resumeFullScreenTerminal(session), ui.FullScreenListOptions{
-		Title:        "回退到历史 user turn",
-		Subtitle:     formatBacktrackPickerSubtitle(len(turns)),
-		EmptyMessage: "没有匹配的 user turn",
-		ConfirmLabel: "回退到选中 turn（截断其后历史）",
-		Items:        buildBacktrackFullScreenItems(turns),
-	}, lease)
-
-	selected := (*runtimechat.UserTurn)(nil)
-	mode := runtimechat.BacktrackModeConversation
-	if pickErr == nil && !picked.Cancelled && picked.Index >= 0 && picked.Index < len(turns) {
-		turn := turns[picked.Index]
-		selected = &turn
-		if turn.HasLaterMutation && strings.TrimSpace(turn.BaseCheckpointID) != "" {
-			mode, pickErr = selectBacktrackModeWithLease(ctx, resumeFullScreenTerminal(session), lease, turn)
-			if pickErr == nil && mode == "" {
-				selected = nil
+		Hooks: chatBacktrackPickerLeaseHooks,
+		Run: func(s *ChatSession, lease ui.ScreenLease) error {
+			var pickErr error
+			picked, pickErr = ui.SelectFullScreenListWithLease(ctx, resumeFullScreenTerminal(s), ui.FullScreenListOptions{
+				Title:        "回退到历史 user turn",
+				Subtitle:     formatBacktrackPickerSubtitle(len(turns)),
+				EmptyMessage: "没有匹配的 user turn",
+				ConfirmLabel: "回退到选中 turn（截断其后历史）",
+				Items:        buildBacktrackFullScreenItems(turns),
+			}, lease)
+			if pickErr == nil && !picked.Cancelled && picked.Index >= 0 && picked.Index < len(turns) {
+				turn := turns[picked.Index]
+				selected = &turn
+				if turn.HasLaterMutation && strings.TrimSpace(turn.BaseCheckpointID) != "" {
+					mode, pickErr = selectBacktrackModeWithLease(ctx, resumeFullScreenTerminal(s), lease, turn)
+					if pickErr == nil && mode == "" {
+						selected = nil
+					}
+				}
 			}
-		}
-	}
-
-	_ = session.Interaction.postUIAction(ui.CloseBacktrackPicker{LeaseID: lease.ID()})
-	releaseErr := lease.Release(context.Background())
-	// LeaseReleased is the primary recovery barrier. Do not mutate the Scene
-	// until the actor has observed it, otherwise a replacement frame could race
-	// the final alternate-screen exit/recovery transaction.
-	if !session.Interaction.waitUIActorIdleBounded("close backtrack picker") {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("回退选择器关闭未就绪")), false)
+			return pickErr
+		},
+	})
+	if res.Degraded {
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开回退选择器失败: %w", errChatPickerScreenUnavailable)), false)
 		return
 	}
-
-	if releaseErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭回退选择器失败: %w", releaseErr)), false)
-		return
-	}
-	if pickErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("回退选择器失败: %w", pickErr)), false)
+	if res.Err != nil {
+		_ = renderChatCommandResult(session, commandErrorResult(chatPickerScreenErrorText("回退选择器", res)), false)
 		return
 	}
 	if selected == nil || picked.Cancelled {
@@ -460,47 +448,42 @@ func readBacktrackTurnPickFullScreen(session *ChatSession, terminal *ui.Terminal
 		return nil, nil
 	}
 
-	var lease ui.ScreenLease
-	if session != nil && session.Surface != nil && session.Surface.Enabled() {
-		// Suspend the primary presenter while the picker owns the alternate
-		// screen; release repaints from retained state.
-		var acquireErr error
-		lease, acquireErr = session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
-			Title: "回退到历史 user turn",
-		})
-		if acquireErr != nil && errors.Is(acquireErr, ui.ErrScreenLeaseBusy) {
-			return nil, acquireErr
-		}
+	// 批次 5（D-E）：内联租约收编到统一框架（A2/I1）。租约获取/释放、open/close
+	// 屏障、嵌套检测与降级全部由 openChatScreen 承担；能力不足或租约忙时静默
+	// 降级为 ErrFullScreenUnavailable，由 readBacktrackTurnPick 回退逐行选择器。
+	var picked *runtimechat.UserTurn
+	outcome := openChatScreen(session, chatScreenSpec{
+		ID:            "backtrack.pick",
+		Title:         "回退到历史 user turn",
+		Kind:          chatScreenList,
+		Trigger:       "command",
+		SilentDegrade: true,
+		RunScreen: func(_ *ChatSession, lease ui.ScreenLease, _ chatScreenSpec) chatScreenOutcome {
+			result, err := ui.SelectFullScreenListWithLease(context.Background(), terminal, ui.FullScreenListOptions{
+				Title:        "回退到历史 user turn",
+				Subtitle:     formatBacktrackPickerSubtitle(len(turns)),
+				EmptyMessage: "没有匹配的 user turn",
+				ConfirmLabel: "回退到选中 turn（截断其后历史）",
+				Items:        items,
+			}, lease)
+			if err != nil {
+				return chatScreenOutcome{Result: chatScreenClosedError, Index: -1, Err: err}
+			}
+			if result.Cancelled || result.Index < 0 || result.Index >= len(turns) {
+				return chatScreenOutcome{Result: chatScreenClosedEsc, Index: -1}
+			}
+			turn := turns[result.Index]
+			picked = &turn
+			return chatScreenOutcome{Result: chatScreenClosedConfirm, Index: result.Index}
+		},
+	})
+	if outcome.Degraded {
+		return nil, ui.ErrFullScreenUnavailable
 	}
-	if session != nil && session.Interaction != nil {
-		session.Interaction.ClearPrompt()
-		session.Interaction.ResetPromptState()
+	if outcome.Err != nil {
+		return nil, outcome.Err
 	}
-	defer func() {
-		if lease != nil {
-			_ = lease.Release(context.Background())
-		}
-		if session != nil && session.Interaction != nil {
-			session.Interaction.ResetPromptState()
-			session.Interaction.RefreshStatus("")
-		}
-	}()
-
-	result, err := ui.SelectFullScreenListWithLease(context.Background(), terminal, ui.FullScreenListOptions{
-		Title:        "回退到历史 user turn",
-		Subtitle:     formatBacktrackPickerSubtitle(len(turns)),
-		EmptyMessage: "没有匹配的 user turn",
-		ConfirmLabel: "回退到选中 turn（截断其后历史）",
-		Items:        items,
-	}, lease)
-	if err != nil {
-		return nil, err
-	}
-	if result.Cancelled || result.Index < 0 || result.Index >= len(turns) {
-		return nil, nil
-	}
-	turn := turns[result.Index]
-	return &turn, nil
+	return picked, nil
 }
 
 func buildBacktrackFullScreenItems(turns []runtimechat.UserTurn) []ui.FullScreenListItem {

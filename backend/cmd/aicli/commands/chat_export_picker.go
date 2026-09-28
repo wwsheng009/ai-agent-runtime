@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -27,6 +28,13 @@ func canOpenChatExportPicker(session *ChatSession) bool {
 		return false
 	}
 	return ui.CanUseFullScreenList(resumeFullScreenTerminal(session))
+}
+
+// chatExportPickerLeaseHooks binds the shared lease lifecycle
+// (chat_picker_common.go) to this picker's UI-actor action identity.
+var chatExportPickerLeaseHooks = chatPickerLeaseHooks{
+	Open:  func(leaseID uint64) ui.UIAction { return ui.OpenExportPicker{LeaseID: leaseID} },
+	Close: func(leaseID uint64) ui.UIAction { return ui.CloseExportPicker{LeaseID: leaseID} },
 }
 
 // openChatExportPicker executes the typed alternate-screen export selector.
@@ -72,83 +80,85 @@ func openChatExportPicker(session *ChatSession, _ ExportPickerRequest) {
 		return
 	}
 
-	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
+	// 批次 2：租约与 close 序列由统一框架承担；两阶段（会话 → 格式）在同一
+	// 租约内推进（与 backtrack 同型），文件写入仍在租约释放之后。
+	var (
+		pickedSession *runtimechat.Session
+		format        = chatExportFormatFull
+		stage         = 1
+		cancelled     bool
+	)
+	res := runChatPickerScreen(session, chatPickerScreen{
+		ID:    "export.picker",
 		Title: "导出会话",
+		Hooks: chatExportPickerLeaseHooks,
+		Run: func(s *ChatSession, lease ui.ScreenLease) error {
+			// Stage 1: pick the target session.
+			current := currentRuntimeSessionForResumeList(s)
+			sessionItems, sessionPicks := buildExportSessionFullScreenItems(candidates, current, time.Now())
+			sessionResult, sessionErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(s), ui.FullScreenListOptions{
+				Title:        "选择要导出的会话",
+				Subtitle:     formatResumePickerSubtitle(len(candidates), current != nil),
+				EmptyMessage: "没有可导出的会话",
+				ConfirmLabel: "使用选中会话",
+				Items:        sessionItems,
+			}, lease)
+			if sessionErr != nil {
+				return sessionErr
+			}
+			if sessionResult.Cancelled || sessionResult.Index < 0 || sessionResult.Index >= len(sessionPicks) || sessionPicks[sessionResult.Index] == nil {
+				cancelled = true
+				return nil
+			}
+			pickedSession = sessionPicks[sessionResult.Index]
+
+			// Stage 2: pick the export format (same lease, mirroring backtrack mode).
+			// 格式列表与 legacy 编号菜单共用 chatExportFormatOptions，顺序即索引。
+			stage = 2
+			formatOptions := chatExportFormatOptions()
+			formatItems := buildExportFormatFullScreenItems(formatOptions)
+			formatResult, formatErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(s), ui.FullScreenListOptions{
+				Title:        "选择导出格式",
+				Subtitle:     "Enter 确认 · Esc 取消",
+				EmptyMessage: "没有可用的格式",
+				ConfirmLabel: "使用选中格式",
+				Items:        formatItems,
+			}, lease)
+			if formatErr != nil {
+				return formatErr
+			}
+			if formatResult.Cancelled || formatResult.Index < 0 {
+				cancelled = true
+				return nil
+			}
+			if formatResult.Index < len(formatOptions) {
+				format = formatOptions[formatResult.Index].Format
+			}
+			return nil
+		},
 	})
-	if err != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开导出选择器失败: %w", err)), false)
+	if res.Degraded {
+		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开导出选择器失败: %w", errChatPickerScreenUnavailable)), false)
 		return
 	}
-	if !session.Interaction.postUIAction(ui.OpenExportPicker{LeaseID: lease.ID()}) {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("导出选择器状态未提交")), false)
+	if res.Err != nil {
+		switch {
+		case res.Phase == chatPickerPhaseClose:
+			if errors.Is(res.Err, errChatPickerActorNotIdle) {
+				_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("导出选择器关闭未就绪")), false)
+			} else {
+				_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭导出选择器失败: %w", res.Err)), false)
+			}
+		case stage == 1:
+			_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择导出会话失败: %w", res.Err)), false)
+		default:
+			_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择导出格式失败: %w", res.Err)), false)
+		}
 		return
 	}
-	// Lifecycle barrier only: the first list frame sees the matching actor
-	// state. Key navigation stays local to the fullscreen list.
-	if !session.Interaction.waitUIActorIdleBounded("open export picker") {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("导出选择器渲染未就绪")), false)
-		return
-	}
-
-	// Stage 1: pick the target session.
-	current := currentRuntimeSessionForResumeList(session)
-	sessionItems, sessionPicks := buildExportSessionFullScreenItems(candidates, current, time.Now())
-	sessionResult, sessionErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
-		Title:        "选择要导出的会话",
-		Subtitle:     formatResumePickerSubtitle(len(candidates), current != nil),
-		EmptyMessage: "没有可导出的会话",
-		ConfirmLabel: "使用选中会话",
-		Items:        sessionItems,
-	}, lease)
-	if sessionErr != nil {
-		closeExportPickerLease(session, lease)
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择导出会话失败: %w", sessionErr)), false)
-		return
-	}
-	if sessionResult.Cancelled || sessionResult.Index < 0 || sessionResult.Index >= len(sessionPicks) || sessionPicks[sessionResult.Index] == nil {
-		closeExportPickerLease(session, lease)
+	if cancelled || pickedSession == nil {
 		_ = renderChatCommandResult(session, commandTextResult("已取消导出"), false)
 		return
-	}
-	pickedSession := sessionPicks[sessionResult.Index]
-
-	// Stage 2: pick the export format (same lease, mirroring backtrack mode).
-	// 格式列表与 legacy 编号菜单共用 chatExportFormatOptions，顺序即索引。
-	formatOptions := chatExportFormatOptions()
-	formatItems := buildExportFormatFullScreenItems(formatOptions)
-	formatResult, formatErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
-		Title:        "选择导出格式",
-		Subtitle:     "Enter 确认 · Esc 取消",
-		EmptyMessage: "没有可用的格式",
-		ConfirmLabel: "使用选中格式",
-		Items:        formatItems,
-	}, lease)
-	_ = session.Interaction.postUIAction(ui.CloseExportPicker{LeaseID: lease.ID()})
-	releaseErr := lease.Release(context.Background())
-	// LeaseReleased is the primary recovery barrier. Do not write files until
-	// the actor has observed it.
-	if !session.Interaction.waitUIActorIdleBounded("close export picker") {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("导出选择器关闭未就绪")), false)
-		return
-	}
-
-	if releaseErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭导出选择器失败: %w", releaseErr)), false)
-		return
-	}
-	if formatErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("选择导出格式失败: %w", formatErr)), false)
-		return
-	}
-	if formatResult.Cancelled || formatResult.Index < 0 {
-		_ = renderChatCommandResult(session, commandTextResult("已取消导出"), false)
-		return
-	}
-	format := chatExportFormatFull
-	if formatResult.Index >= 0 && formatResult.Index < len(formatOptions) {
-		format = formatOptions[formatResult.Index].Format
 	}
 
 	opts := chatExportOptions{
@@ -163,12 +173,6 @@ func openChatExportPicker(session *ChatSession, _ ExportPickerRequest) {
 		return
 	}
 	_ = renderChatCommandResult(session, buildChatExportResultDocument(result), false)
-}
-
-func closeExportPickerLease(session *ChatSession, lease ui.ScreenLease) {
-	_ = session.Interaction.postUIAction(ui.CloseExportPicker{LeaseID: lease.ID()})
-	_ = lease.Release(context.Background())
-	session.Interaction.waitUIActorIdleBounded("close export picker")
 }
 
 // buildExportFormatFullScreenItems projects the shared format options into
@@ -242,8 +246,10 @@ func executeStructuredExportCommand(session *ChatSession, command string) (Comma
 	}
 	if !opts.ExplicitTarget && canOpenChatExportPicker(session) {
 		return CommandResult{
-			Action:           CommandContinue,
-			OpenExportPicker: &ExportPickerRequest{},
+			Action: CommandContinue,
+			Screen: chatScreenEffectSpec("export.picker", "导出会话", func(s *ChatSession) {
+				openChatExportPicker(s, ExportPickerRequest{})
+			}),
 		}, true
 	}
 	if !opts.ExplicitTarget {

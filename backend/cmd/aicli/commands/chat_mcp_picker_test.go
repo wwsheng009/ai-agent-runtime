@@ -34,8 +34,8 @@ func TestExecuteStructuredMCPCommandDegradesWithoutSurface(t *testing.T) {
 
 	for _, command := range []string{"/mcp", "/mcp select"} {
 		result := executeStructuredMCPCommand(session, command)
-		if result.OpenMCPPicker != nil {
-			t.Fatalf("%s 在无表面时不得请求选择器: %#v", command, result.OpenMCPPicker)
+		if result.Screen != nil {
+			t.Fatalf("%s 在无表面时不得请求选择器: %#v", command, result.Screen)
 		}
 		text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 		if text == "" {

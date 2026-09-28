@@ -73,20 +73,36 @@ func (p chatLoginPrompter) PromptSelect(label, kind string, options []string, cu
 
 	items, createIndex, optionIndexOffset := buildLoginPickerItems(options, current, kind, allowCreate)
 
-	lease, err := chatPickerOpen(session, "选择 "+label, loginPickerLeaseHooks())
-	if err != nil {
-		return "", false, err
-	}
-	index, cancelled, stageErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
-		Title:        "选择 " + label,
-		Subtitle:     "Enter 确认，Esc 取消",
-		EmptyMessage: fmt.Sprintf("没有匹配的 %s", kind),
-		ConfirmLabel: fmt.Sprintf("使用选中 %s", kind),
-		Items:        items,
+	// 批次 2：租约、open 屏障与 close 序列由统一副屏框架承担；stage 仍在
+	// 租约内运行，选择结果在租约释放后处理（新建 provider 的文本输入也在
+	// close 之后，仍不占用备用屏）。
+	var (
+		index     int
+		cancelled bool
+	)
+	res := runChatPickerScreen(session, chatPickerScreen{
+		ID:    "login.picker",
+		Title: "选择 " + label,
+		Hooks: loginPickerLeaseHooks(),
+		Run: func(s *ChatSession, lease ui.ScreenLease) error {
+			var stageErr error
+			index, cancelled, stageErr = chatPickerStage(context.Background(), s, lease, ui.FullScreenListOptions{
+				Title:        "选择 " + label,
+				Subtitle:     "Enter 确认，Esc 取消",
+				EmptyMessage: fmt.Sprintf("没有匹配的 %s", kind),
+				ConfirmLabel: fmt.Sprintf("使用选中 %s", kind),
+				Items:        items,
+			})
+			return stageErr
+		},
 	})
-	_ = chatPickerClose(session, lease, loginPickerLeaseHooks())
-	if stageErr != nil {
-		return "", false, stageErr
+	if res.Degraded {
+		// 统一框架未进入副屏（能力不足/租约忙/嵌套）：沿用 PromptSelect 的
+		// 既有契约，让登录流程回退编号文本选择器。
+		return "", false, ui.ErrFullScreenUnavailable
+	}
+	if res.Err != nil {
+		return "", false, res.Err
 	}
 	if cancelled {
 		return "", true, nil

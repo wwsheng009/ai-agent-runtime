@@ -26,8 +26,8 @@ func TestExecuteStructuredThemeCommandStatusListPreviewStayReadOnly(t *testing.T
 		if !handled {
 			t.Fatalf("%s was not handled by the structured executor", command)
 		}
-		if result.OpenThemePicker != nil {
-			t.Fatalf("%s must not open the picker: %#v", command, result.OpenThemePicker)
+		if result.Screen != nil {
+			t.Fatalf("%s must not open the picker: %#v", command, result.Screen)
 		}
 		text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 		if text == "" {
@@ -54,8 +54,8 @@ func TestExecuteStructuredThemeCommandSelectWithoutSurfaceDegradesToStatus(t *te
 	if !handled {
 		t.Fatal("/theme select was not handled by the structured executor")
 	}
-	if result.OpenThemePicker != nil {
-		t.Fatalf("/theme select without a picker-capable surface must not open the picker, got %#v", result.OpenThemePicker)
+	if result.Screen != nil {
+		t.Fatalf("/theme select without a picker-capable surface must not open the picker, got %#v", result.Screen)
 	}
 	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 	if !strings.Contains(text, "当前明暗: dark") {
@@ -78,8 +78,8 @@ func TestExecuteStructuredThemeCommandSetAppliesAndRendersStatus(t *testing.T) {
 	if !handled {
 		t.Fatal("/theme dark focus was not handled by the structured executor")
 	}
-	if result.OpenThemePicker != nil {
-		t.Fatalf("/theme set must not open the picker, got %#v", result.OpenThemePicker)
+	if result.Screen != nil {
+		t.Fatalf("/theme set must not open the picker, got %#v", result.Screen)
 	}
 	if ui.CurrentThemeModeName() != ui.ThemeModeDark {
 		t.Fatalf("expected dark mode, got %q", ui.CurrentThemeModeName())
@@ -128,8 +128,8 @@ func TestExecuteStructuredThemeCommandInvalidArgsReportUsage(t *testing.T) {
 	if !handled {
 		t.Fatal("invalid /theme args must be handled by the structured executor")
 	}
-	if result.OpenThemePicker != nil {
-		t.Fatalf("invalid args must not open the picker, got %#v", result.OpenThemePicker)
+	if result.Screen != nil {
+		t.Fatalf("invalid args must not open the picker, got %#v", result.Screen)
 	}
 	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "未知主题参数") {
 		t.Fatalf("invalid args must report the parse error, got:\n%s", ui.RenderDocumentPlain(result.Document()))

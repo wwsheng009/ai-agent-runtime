@@ -126,48 +126,43 @@ func buildSkillPickerFullScreenItems(skills []aicliFunctionDescriptorReport) []u
 	return items
 }
 
+// chatSkillPickerLeaseHooks binds the shared lease lifecycle
+// (chat_picker_common.go) to this picker's UI-actor action identity.
+var chatSkillPickerLeaseHooks = chatPickerLeaseHooks{
+	Open:  func(leaseID uint64) ui.UIAction { return ui.OpenSkillPicker{LeaseID: leaseID} },
+	Close: func(leaseID uint64) ui.UIAction { return ui.CloseSkillPicker{LeaseID: leaseID} },
+}
+
 // selectChatSkillPickerList 执行一次"接管备用屏 → 全屏列表 → 释放备用屏"的
 // 生命周期：返回结果前必须等 actor 观察到 LeaseReleased，调用方才能安全地
 // 碰 composer（或再次开列表）。onToggle 非 nil 时启用 x/X/Delete 键。
 func selectChatSkillPickerList(session *ChatSession, skills []aicliFunctionDescriptorReport, onToggle func(index int) error) (ui.FullScreenListResult, error) {
-	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
+	// 批次 2：租约、open 屏障与 close 序列由统一框架承担；键位导航仍留在全屏
+	// 列表原语内，选择结果在闭包中捕获、待租约释放后返回给调用方。
+	var picked ui.FullScreenListResult
+	res := runChatPickerScreen(session, chatPickerScreen{
+		ID:    "skill.picker",
 		Title: "选择 Skill",
+		Hooks: chatSkillPickerLeaseHooks,
+		Run: func(s *ChatSession, lease ui.ScreenLease) error {
+			var pickErr error
+			picked, pickErr = ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(s), ui.FullScreenListOptions{
+				Title:        "选择 Skill",
+				Subtitle:     "Enter 选择 · x 启用/停用 · Esc 取消",
+				EmptyMessage: "没有匹配的 skill",
+				ConfirmLabel: "使用选中 skill",
+				Items:        buildSkillPickerFullScreenItems(skills),
+				OnDelete:     onToggle,
+			}, lease)
+			return pickErr
+		},
 	})
-	if err != nil {
-		return ui.FullScreenListResult{}, fmt.Errorf("打开 skill 选择器失败: %w", err)
+	if res.Degraded {
+		// 与批次 2 之前 opener 取租约失败的文案一致（此时并未进入副屏）。
+		return ui.FullScreenListResult{}, fmt.Errorf("打开 skill 选择器失败: %w", errChatPickerScreenUnavailable)
 	}
-	if !session.Interaction.postUIAction(ui.OpenSkillPicker{LeaseID: lease.ID()}) {
-		_ = lease.Release(context.Background())
-		return ui.FullScreenListResult{}, fmt.Errorf("skill 选择器状态未提交")
-	}
-	// Lifecycle barrier only: the first list frame sees the matching actor
-	// state. Key navigation stays local to the fullscreen list.
-	if !session.Interaction.waitUIActorIdleBounded("open skill picker") {
-		_ = lease.Release(context.Background())
-		return ui.FullScreenListResult{}, fmt.Errorf("skill 选择器渲染未就绪")
-	}
-
-	picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
-		Title:        "选择 Skill",
-		Subtitle:     "Enter 选择 · x 启用/停用 · Esc 取消",
-		EmptyMessage: "没有匹配的 skill",
-		ConfirmLabel: "使用选中 skill",
-		Items:        buildSkillPickerFullScreenItems(skills),
-		OnDelete:     onToggle,
-	}, lease)
-
-	_ = session.Interaction.postUIAction(ui.CloseSkillPicker{LeaseID: lease.ID()})
-	releaseErr := lease.Release(context.Background())
-	// LeaseReleased is the primary recovery barrier. Do not touch the composer
-	// until the actor has observed it.
-	if !session.Interaction.waitUIActorIdleBounded("close skill picker") {
-		return ui.FullScreenListResult{}, fmt.Errorf("skill 选择器关闭未就绪")
-	}
-	if releaseErr != nil {
-		return ui.FullScreenListResult{}, fmt.Errorf("关闭 skill 选择器失败: %w", releaseErr)
-	}
-	if pickErr != nil {
-		return ui.FullScreenListResult{}, fmt.Errorf("skill 选择器失败: %w", pickErr)
+	if res.Err != nil {
+		return ui.FullScreenListResult{}, chatPickerScreenErrorText("skill 选择器", res)
 	}
 	return picked, nil
 }
@@ -292,15 +287,23 @@ func executeStructuredSkillsMenuCommand(session *ChatSession, command string) (C
 	if opensPicker {
 		if canOpenChatSkillPicker(session) {
 			return CommandResult{
-				Action:          CommandContinue,
-				OpenSkillPicker: &SkillPickerRequest{},
+				Action: CommandContinue,
+				Screen: chatScreenEffectSpec("skill.picker", "选择 Skill", func(s *ChatSession) {
+					openChatSkillPicker(s, SkillPickerRequest{})
+				}),
 			}, true
 		}
 		// No picker surface: degrade to the full catalog report.
 		query = ""
 	}
+	doc := buildChatSkillCatalogDocument(filterSkillCatalogEntries(report.Skills, query), query)
+	if unifiedDirectInteractiveOutput(session) && strings.TrimSpace(query) == "" {
+		// 批次 3 尾批：全量目录（list/status 与 picker 不可用降级）走副屏。
+		// 过滤查询仍是短结果，保持主屏内联单元格。
+		return chatScreenDocResult(chatScreenSkillsListSpec(doc)), true
+	}
 	return CommandResult{
-		Blocks: []RenderBlock{{Document: buildChatSkillCatalogDocument(filterSkillCatalogEntries(report.Skills, query), query)}},
+		Blocks: []RenderBlock{{Document: doc}},
 		Action: CommandContinue,
 	}, true
 }

@@ -54,8 +54,33 @@ func canOpenChatRoutingPanel(session *ChatSession) bool {
 	return chatPickerSurfaceReady(session)
 }
 
-func closeChatRoutingPanelLease(session *ChatSession, lease ui.ScreenLease) {
-	_ = chatPickerClose(session, lease, chatRoutingPanelLeaseHooks())
+// chatRoutingPanelScreen 把路由面板的一次副屏会话交给统一框架（批次 2）：
+// 租约、open/close 屏障与降级由 runChatPickerScreen 承担，面板自身的
+// 档位→字段→值→写入层导航仍在同一租约内推进。回调返回文本结果（含
+// "错误: ..." 前缀，与 legacy 逐字一致）；写入与只读摘要在回调返回后执行，
+// 此时框架已释放租约（I3）。
+func chatRoutingPanelScreen(session *ChatSession, title string, run func(*ChatSession, ui.ScreenLease) string) (string, chatPickerScreenResult) {
+	text := ""
+	res := runChatPickerScreen(session, chatPickerScreen{
+		ID:    "routing.panel",
+		Title: title,
+		Hooks: chatRoutingPanelLeaseHooks(),
+		Run: func(s *ChatSession, lease ui.ScreenLease) error {
+			text = run(s, lease)
+			return nil
+		},
+	})
+	return text, res
+}
+
+// chatRoutingPanelFrameworkFailure 把框架开门失败/降级映射回路由面板既有
+// 文案（legacy: "错误: 打开路由面板失败: <err>"）。close 阶段错误与 legacy
+// 一致不改变结果文本（legacy 忽略 close 失败）。
+func chatRoutingPanelFrameworkFailure(res chatPickerScreenResult) string {
+	if res.Err != nil {
+		return "错误: 打开路由面板失败: " + res.Err.Error()
+	}
+	return "错误: 打开路由面板失败: " + errChatPickerScreenUnavailable.Error()
 }
 
 // chatRoutingPanelLevelItems 产出第一级（Level）列表项（§5.3 建议值引擎）：
@@ -297,140 +322,138 @@ func chatRoutingPanelEntry(session *ChatSession, scope, level, keyPath string) s
 		return chatRoutingReadOnlyPanelEntry(session, scope, level, keyPath)
 	}
 
-	lease, err := chatPickerOpen(session, "会话路由", chatRoutingPanelLeaseHooks())
-	if err != nil {
-		return "错误: 打开路由面板失败: " + err.Error()
-	}
+	// 批次 2：租约、open/close 屏障与降级收敛到统一副屏框架；档位→字段→值→
+	// 写入层的导航仍在同一租约内推进，写入与只读摘要在租约释放后执行（I3）。
+	var (
+		panelLevel = level
+		panelField = keyPath
+		panelValue string
+		panelLayer string
+	)
+	text, res := chatRoutingPanelScreen(session, "会话路由", func(session *ChatSession, lease ui.ScreenLease) string {
+		if panelLevel == "" {
+			picked, cancelled, stageErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
+				Title:        "选择难度档位",
+				Subtitle:     fmt.Sprintf("scope: %s · Enter 进入字段列表，Esc 取消", scope),
+				EmptyMessage: "没有可用的档位",
+				ConfirmLabel: "选择该档位",
+				Items:        chatRoutingPanelLevelItems(session, scope),
+			})
+			if stageErr != nil {
+				return "错误: 选择档位失败: " + stageErr.Error()
+			}
+			if cancelled {
+				return "已取消（未写入）"
+			}
+			items := chatRoutingPanelLevelItems(session, scope)
+			if picked < 0 || picked >= len(items) {
+				return "已取消（未写入）"
+			}
+			panelLevel = items[picked].Title
+		}
 
-	if level == "" {
-		picked, cancelled, stageErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
-			Title:        "选择难度档位",
-			Subtitle:     fmt.Sprintf("scope: %s · Enter 进入字段列表，Esc 取消", scope),
-			EmptyMessage: "没有可用的档位",
-			ConfirmLabel: "选择该档位",
-			Items:        chatRoutingPanelLevelItems(session, scope),
-		})
-		if stageErr != nil {
-			closeChatRoutingPanelLease(session, lease)
-			return "错误: 选择档位失败: " + stageErr.Error()
+		if panelField == "" {
+			picked, cancelled, stageErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
+				Title:        "选择字段",
+				Subtitle:     fmt.Sprintf("scope: %s · level: %s · Enter 进入值列表，Esc 取消", scope, panelLevel),
+				EmptyMessage: "没有可编辑字段",
+				ConfirmLabel: "选择该字段",
+				Items:        chatRoutingPanelFieldItems(),
+			})
+			if stageErr != nil {
+				return "错误: 选择字段失败: " + stageErr.Error()
+			}
+			if cancelled {
+				return "已取消（未写入）"
+			}
+			panelField = chatRoutingPanelFields[picked].Key
 		}
-		if cancelled {
-			closeChatRoutingPanelLease(session, lease)
-			return "已取消（未写入）"
-		}
-		items := chatRoutingPanelLevelItems(session, scope)
-		if picked < 0 || picked >= len(items) {
-			closeChatRoutingPanelLease(session, lease)
-			return "已取消（未写入）"
-		}
-		level = items[picked].Title
-	}
 
-	field := keyPath
-	if field == "" {
-		picked, cancelled, stageErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
-			Title:        "选择字段",
-			Subtitle:     fmt.Sprintf("scope: %s · level: %s · Enter 进入值列表，Esc 取消", scope, level),
-			EmptyMessage: "没有可编辑字段",
-			ConfirmLabel: "选择该字段",
-			Items:        chatRoutingPanelFieldItems(),
-		})
-		if stageErr != nil {
-			closeChatRoutingPanelLease(session, lease)
-			return "错误: 选择字段失败: " + stageErr.Error()
-		}
-		if cancelled {
-			closeChatRoutingPanelLease(session, lease)
-			return "已取消（未写入）"
-		}
-		field = chatRoutingPanelFields[picked].Key
-	}
-
-	valueOptions := normalizeChatPickerOptions(chatRoutingPanelValueOptionsForLevel(session, scope, level, field))
-	value := ""
-	if len(valueOptions) == 0 {
-		// §5.3 数值/文本字段：本机没有目录候选（不伪造建议值），但也不能退化为
-		// 「请改用 /routing 命令直接写入」的假入口——面板自己收值，并用与写入
-		// 路径同源的校验做就地提示（§3.5）。
-		if !chatRoutingPanelFieldUsesFreeText(field) {
-			closeChatRoutingPanelLease(session, lease)
-			return fmt.Sprintf("没有可用的 %s 候选值；用 /routing %s %s <value> 直接写入", field, scope, chatRoutingPanelWriteKey(scope, level, field))
-		}
-		typed, cancelled, stageErr := chatPickerFreeTextStage(context.Background(), session, lease, ui.FullScreenListOptions{
-			Title:         fmt.Sprintf("输入 %s 值", field),
-			Subtitle:      fmt.Sprintf("scope: %s · level: %s · 写入键: %s · Enter 校验并继续，Esc 取消", scope, level, chatRoutingPanelWriteKey(scope, level, field)),
-			ConfirmLabel:  "校验并继续",
-			FreeTextValue: strings.TrimSpace(chatRoutingPanelCurrentValue(session, scope, level, field)),
-			FreeTextHint:  chatRoutingPanelFreeTextHint(field),
-			// 段内确认分两档：解析层错误（数值/非空/未知字段）与写入层无关，硬阻断；
-			// 候选校验按 session 层解析，而用户下一步才选写入层（workspace/config 以
-			// 各自配置校验，§3.5），因此第一次 Enter 给同源结论、第二次 Enter 继续。
-			OnConfirmText: func() func(string) error {
-				acknowledged := false
-				return func(text string) error {
-					parseErr, validateErr := chatRoutingPanelPreviewValue(session, scope, level, field, text)
-					if parseErr != nil {
-						return parseErr
+		valueOptions := normalizeChatPickerOptions(chatRoutingPanelValueOptionsForLevel(session, scope, panelLevel, panelField))
+		if len(valueOptions) == 0 {
+			// §5.3 数值/文本字段：本机没有目录候选（不伪造建议值），但也不能退化为
+			// 「请改用 /routing 命令直接写入」的假入口——面板自己收值，并用与写入
+			// 路径同源的校验做就地提示（§3.5）。
+			if !chatRoutingPanelFieldUsesFreeText(panelField) {
+				return fmt.Sprintf("没有可用的 %s 候选值；用 /routing %s %s <value> 直接写入", panelField, scope, chatRoutingPanelWriteKey(scope, panelLevel, panelField))
+			}
+			typed, cancelled, stageErr := chatPickerFreeTextStage(context.Background(), session, lease, ui.FullScreenListOptions{
+				Title:         fmt.Sprintf("输入 %s 值", panelField),
+				Subtitle:      fmt.Sprintf("scope: %s · level: %s · 写入键: %s · Enter 校验并继续，Esc 取消", scope, panelLevel, chatRoutingPanelWriteKey(scope, panelLevel, panelField)),
+				ConfirmLabel:  "校验并继续",
+				FreeTextValue: strings.TrimSpace(chatRoutingPanelCurrentValue(session, scope, panelLevel, panelField)),
+				FreeTextHint:  chatRoutingPanelFreeTextHint(panelField),
+				// 段内确认分两档：解析层错误（数值/非空/未知字段）与写入层无关，硬阻断；
+				// 候选校验按 session 层解析，而用户下一步才选写入层（workspace/config 以
+				// 各自配置校验，§3.5），因此第一次 Enter 给同源结论、第二次 Enter 继续。
+				OnConfirmText: func() func(string) error {
+					acknowledged := false
+					return func(text string) error {
+						parseErr, validateErr := chatRoutingPanelPreviewValue(session, scope, panelLevel, panelField, text)
+						if parseErr != nil {
+							return parseErr
+						}
+						if validateErr != nil && !acknowledged {
+							acknowledged = true
+							return fmt.Errorf("再按一次 Enter 继续（写入层各自校验）；当前 session 层结论: %v", validateErr)
+						}
+						return nil
 					}
-					if validateErr != nil && !acknowledged {
-						acknowledged = true
-						return fmt.Errorf("再按一次 Enter 继续（写入层各自校验）；当前 session 层结论: %v", validateErr)
-					}
-					return nil
-				}
-			}(),
-		})
-		if stageErr != nil {
-			closeChatRoutingPanelLease(session, lease)
-			return "错误: 输入值失败: " + stageErr.Error()
+				}(),
+			})
+			if stageErr != nil {
+				return "错误: 输入值失败: " + stageErr.Error()
+			}
+			if cancelled {
+				return "已取消（未写入）"
+			}
+			panelValue = typed
+		} else {
+			valueItems := chatRoutingPanelValueItems(valueOptions, scope, panelLevel, panelField, chatRoutingPanelCurrentValue(session, scope, panelLevel, panelField))
+			picked, cancelled, stageErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
+				Title:        "选择值",
+				Subtitle:     fmt.Sprintf("scope: %s · level: %s · field: %s · Enter 写入 session 层，Esc 取消", scope, panelLevel, panelField),
+				EmptyMessage: "没有匹配的值",
+				ConfirmLabel: "写入并生效（下一 turn）",
+				Items:        valueItems,
+			})
+			if stageErr != nil {
+				return "错误: 选择值失败: " + stageErr.Error()
+			}
+			if cancelled {
+				return "已取消（未写入）"
+			}
+			panelValue = valueOptions[picked]
 		}
-		if cancelled {
-			closeChatRoutingPanelLease(session, lease)
-			return "已取消（未写入）"
-		}
-		value = typed
-	} else {
-		valueItems := chatRoutingPanelValueItems(valueOptions, scope, level, field, chatRoutingPanelCurrentValue(session, scope, level, field))
-		picked, cancelled, stageErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
-			Title:        "选择值",
-			Subtitle:     fmt.Sprintf("scope: %s · level: %s · field: %s · Enter 写入 session 层，Esc 取消", scope, level, field),
-			EmptyMessage: "没有匹配的值",
-			ConfirmLabel: "写入并生效（下一 turn）",
-			Items:        valueItems,
-		})
-		if stageErr != nil {
-			closeChatRoutingPanelLease(session, lease)
-			return "错误: 选择值失败: " + stageErr.Error()
-		}
-		if cancelled {
-			closeChatRoutingPanelLease(session, lease)
-			return "已取消（未写入）"
-		}
-		value = valueOptions[picked]
-	}
 
-	// §5.4/I-2：写入层选择器（session/workspace/config）。选择 config 即二次确认，
-	// 目标文件路径在选择项与结果文本中回显。
-	layerItems := chatRoutingPanelLayerItems(session)
-	layerPicked, layerCancelled, layerErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
-		Title:        "选择写入层",
-		Subtitle:     fmt.Sprintf("scope: %s · level: %s · field: %s · 值: %s", scope, level, field, value),
-		EmptyMessage: "没有可写层",
-		ConfirmLabel: "写入该层（下一 turn 生效）",
-		Items:        layerItems,
+		// §5.4/I-2：写入层选择器（session/workspace/config）。选择 config 即二次确认，
+		// 目标文件路径在选择项与结果文本中回显。
+		layerItems := chatRoutingPanelLayerItems(session)
+		layerPicked, layerCancelled, layerErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
+			Title:        "选择写入层",
+			Subtitle:     fmt.Sprintf("scope: %s · level: %s · field: %s · 值: %s", scope, panelLevel, panelField, panelValue),
+			EmptyMessage: "没有可写层",
+			ConfirmLabel: "写入该层（下一 turn 生效）",
+			Items:        layerItems,
+		})
+		if layerErr != nil {
+			return "错误: 选择写入层失败: " + layerErr.Error()
+		}
+		if layerCancelled || layerPicked < 0 || layerPicked >= len(chatRoutingPanelLayerNames) {
+			return "已取消（未写入）"
+		}
+		panelLayer = chatRoutingPanelLayerNames[layerPicked]
+		return ""
 	})
-	if layerErr != nil {
-		closeChatRoutingPanelLease(session, lease)
-		return "错误: 选择写入层失败: " + layerErr.Error()
+	if res.Degraded || (res.Err != nil && res.Phase != chatPickerPhaseClose) {
+		return chatRoutingPanelFrameworkFailure(res)
 	}
-	if layerCancelled || layerPicked < 0 || layerPicked >= len(chatRoutingPanelLayerNames) {
-		closeChatRoutingPanelLease(session, lease)
-		return "已取消（未写入）"
+	if text != "" {
+		return text
 	}
-	layer := chatRoutingPanelLayerNames[layerPicked]
 
-	text, writeErr := chatRoutingWriteKey(session, scope, chatRoutingPanelWriteKey(scope, level, field), value, layer, layer == chatRoutingLayerConfig)
-	closeChatRoutingPanelLease(session, lease)
+	// 写入在租约释放后执行（I3）：legacy 也在 close 之后写入。
+	text, writeErr := chatRoutingWriteKey(session, scope, chatRoutingPanelWriteKey(scope, panelLevel, panelField), panelValue, panelLayer, panelLayer == chatRoutingLayerConfig)
 	if writeErr != nil {
 		return "错误: " + writeErr.Error()
 	}
@@ -442,49 +465,59 @@ func chatRoutingPanelEntry(session *ChatSession, scope, level, keyPath string) s
 // 不提供写入层选择器、不落盘，也不出现「能按 Enter 但必然失败」的假入口（I-11）；
 // 写入不会生效的原因统一复用 chatRoutingChildSessionReadOnlyNote。
 func chatRoutingReadOnlyPanelEntry(session *ChatSession, scope, level, keyPath string) string {
-	lease, err := chatPickerOpen(session, "会话路由（只读）", chatRoutingPanelLeaseHooks())
-	if err != nil {
-		return "错误: 打开路由面板失败: " + err.Error()
-	}
-	if level == "" {
-		items := chatRoutingPanelLevelItems(session, scope)
+	// 批次 2：与读写面板同一框架路径；只读摘要不产生写入，且在租约释放后
+	// 计算并返回。
+	panelLevel := level
+	summary := ""
+	text, res := chatRoutingPanelScreen(session, "会话路由（只读）", func(session *ChatSession, lease ui.ScreenLease) string {
+		if panelLevel == "" {
+			items := chatRoutingPanelLevelItems(session, scope)
+			picked, cancelled, stageErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
+				Title:        "选择难度档位（只读）",
+				Subtitle:     fmt.Sprintf("scope: %s · 子会话只读视图 · Enter 查看字段，Esc 退出", scope),
+				EmptyMessage: "没有可用的档位",
+				ConfirmLabel: "查看该档位",
+				Items:        items,
+			})
+			if stageErr != nil {
+				return "错误: 选择档位失败: " + stageErr.Error()
+			}
+			if cancelled || picked < 0 || picked >= len(items) {
+				return "已退出只读视图（未写入）"
+			}
+			panelLevel = strings.TrimSpace(items[picked].Title)
+		}
+		if field := strings.TrimSpace(keyPath); field != "" {
+			// 摘要留在租约释放后计算。
+			return ""
+		}
+		items := chatRoutingReadOnlyFieldItems(session, scope, panelLevel)
 		picked, cancelled, stageErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
-			Title:        "选择难度档位（只读）",
-			Subtitle:     fmt.Sprintf("scope: %s · 子会话只读视图 · Enter 查看字段，Esc 退出", scope),
-			EmptyMessage: "没有可用的档位",
-			ConfirmLabel: "查看该档位",
+			Title:        "查看字段（只读）",
+			Subtitle:     fmt.Sprintf("scope: %s · level: %s · 行内为当前生效值与候选；Enter 查看只读摘要，Esc 退出", scope, panelLevel),
+			EmptyMessage: "没有可查看字段",
+			ConfirmLabel: "查看只读摘要",
 			Items:        items,
 		})
 		if stageErr != nil {
-			closeChatRoutingPanelLease(session, lease)
-			return "错误: 选择档位失败: " + stageErr.Error()
+			return "错误: 查看字段失败: " + stageErr.Error()
 		}
 		if cancelled || picked < 0 || picked >= len(items) {
-			closeChatRoutingPanelLease(session, lease)
 			return "已退出只读视图（未写入）"
 		}
-		level = strings.TrimSpace(items[picked].Title)
+		summary = chatRoutingReadOnlyFieldSummary(session, scope, panelLevel, strings.TrimSpace(items[picked].Title))
+		return ""
+	})
+	if res.Degraded || (res.Err != nil && res.Phase != chatPickerPhaseClose) {
+		return chatRoutingPanelFrameworkFailure(res)
+	}
+	if text != "" {
+		return text
 	}
 	if field := strings.TrimSpace(keyPath); field != "" {
-		closeChatRoutingPanelLease(session, lease)
-		return chatRoutingReadOnlyFieldSummary(session, scope, level, field)
+		return chatRoutingReadOnlyFieldSummary(session, scope, panelLevel, field)
 	}
-	items := chatRoutingReadOnlyFieldItems(session, scope, level)
-	picked, cancelled, stageErr := chatPickerStage(context.Background(), session, lease, ui.FullScreenListOptions{
-		Title:        "查看字段（只读）",
-		Subtitle:     fmt.Sprintf("scope: %s · level: %s · 行内为当前生效值与候选；Enter 查看只读摘要，Esc 退出", scope, level),
-		EmptyMessage: "没有可查看字段",
-		ConfirmLabel: "查看只读摘要",
-		Items:        items,
-	})
-	closeChatRoutingPanelLease(session, lease)
-	if stageErr != nil {
-		return "错误: 查看字段失败: " + stageErr.Error()
-	}
-	if cancelled || picked < 0 || picked >= len(items) {
-		return "已退出只读视图（未写入）"
-	}
-	return chatRoutingReadOnlyFieldSummary(session, scope, level, strings.TrimSpace(items[picked].Title))
+	return summary
 }
 
 // chatRoutingReadOnlyFieldItems 为只读视图的字段行填入当前生效值与候选摘要，使只读

@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -255,40 +256,48 @@ func confirmChatMCPPickerAction(session *ChatSession, name, label string) (bool,
 	return true, nil
 }
 
+// chatMCPPickerLeaseHooks binds the shared lease lifecycle
+// (chat_picker_common.go) to this picker's UI-actor action identity.
+var chatMCPPickerLeaseHooks = chatPickerLeaseHooks{
+	Open:  func(leaseID uint64) ui.UIAction { return ui.OpenMCPPicker{LeaseID: leaseID} },
+	Close: func(leaseID uint64) ui.UIAction { return ui.CloseMCPPicker{LeaseID: leaseID} },
+}
+
 // selectChatMCPPickerList 执行一次「接管备用屏 → 全屏列表 → 释放备用屏」的生命
 // 周期：返回前必须等 actor 观察到 LeaseReleased，调用方才能继续碰终端或再开列表。
 func selectChatMCPPickerList(session *ChatSession, title, subtitle string, items []ui.FullScreenListItem) (ui.FullScreenListResult, error) {
-	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{Title: title})
-	if err != nil {
-		return ui.FullScreenListResult{}, fmt.Errorf("打开 MCP 选择器失败: %w", err)
+	// 批次 2：租约与 close 序列由统一框架承担；键位导航仍留在全屏列表原语内。
+	var picked ui.FullScreenListResult
+	res := runChatPickerScreen(session, chatPickerScreen{
+		ID:    "mcp.picker",
+		Title: title,
+		Hooks: chatMCPPickerLeaseHooks,
+		Run: func(s *ChatSession, lease ui.ScreenLease) error {
+			var pickErr error
+			picked, pickErr = ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(s), ui.FullScreenListOptions{
+				Title:        title,
+				Subtitle:     subtitle,
+				EmptyMessage: "没有可选项",
+				ConfirmLabel: "确认",
+				Items:        items,
+			}, lease)
+			return pickErr
+		},
+	})
+	if res.Degraded {
+		return ui.FullScreenListResult{}, fmt.Errorf("打开 MCP 选择器失败: %w", errChatPickerScreenUnavailable)
 	}
-	if !session.Interaction.postUIAction(ui.OpenMCPPicker{LeaseID: lease.ID()}) {
-		_ = lease.Release(context.Background())
-		return ui.FullScreenListResult{}, errChatPickerStateUncommitted
+	if res.Err == nil {
+		return picked, nil
 	}
-	if !session.Interaction.waitUIActorIdleBounded("open mcp picker") {
-		_ = lease.Release(context.Background())
-		return ui.FullScreenListResult{}, errChatPickerRenderNotReady
+	// 兼容映射：legacy 对 open 阶段的两个哨兵与 close 阶段的 actor 未就绪
+	// 原样透传（调用方按 errors.Is 判定），其余经统一文案映射。
+	if res.Phase == chatPickerPhaseOpen &&
+		(errors.Is(res.Err, errChatPickerStateUncommitted) || errors.Is(res.Err, errChatPickerRenderNotReady)) {
+		return ui.FullScreenListResult{}, res.Err
 	}
-
-	picked, pickErr := ui.SelectFullScreenListWithLease(context.Background(), resumeFullScreenTerminal(session), ui.FullScreenListOptions{
-		Title:        title,
-		Subtitle:     subtitle,
-		EmptyMessage: "没有可选项",
-		ConfirmLabel: "确认",
-		Items:        items,
-	}, lease)
-
-	_ = session.Interaction.postUIAction(ui.CloseMCPPicker{LeaseID: lease.ID()})
-	releaseErr := lease.Release(context.Background())
-	if !session.Interaction.waitUIActorIdleBounded("close mcp picker") {
+	if errors.Is(res.Err, errChatPickerActorNotIdle) {
 		return ui.FullScreenListResult{}, errChatPickerActorNotIdle
 	}
-	if releaseErr != nil {
-		return ui.FullScreenListResult{}, fmt.Errorf("关闭 MCP 选择器失败: %w", releaseErr)
-	}
-	if pickErr != nil {
-		return ui.FullScreenListResult{}, fmt.Errorf("MCP 选择器失败: %w", pickErr)
-	}
-	return picked, nil
+	return ui.FullScreenListResult{}, chatPickerScreenErrorText("MCP 选择器", res)
 }

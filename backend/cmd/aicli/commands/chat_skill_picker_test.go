@@ -30,8 +30,8 @@ func TestExecuteStructuredSkillsMenuListQueryStaysReadOnly(t *testing.T) {
 		if !handled {
 			t.Fatalf("%s was not handled by the structured executor", command)
 		}
-		if result.OpenSkillPicker != nil {
-			t.Fatalf("%s must not open the picker: %#v", command, result.OpenSkillPicker)
+		if result.Screen != nil {
+			t.Fatalf("%s must not open the picker: %#v", command, result.Screen)
 		}
 		text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 		if !strings.Contains(text, "Skill Catalog") {
@@ -47,8 +47,8 @@ func TestExecuteStructuredSkillsMenuBareWithoutSurfaceDegradesToCatalog(t *testi
 	if !handled {
 		t.Fatal("bare /skills was not handled by the structured executor")
 	}
-	if result.OpenSkillPicker != nil {
-		t.Fatalf("bare /skills without a picker-capable surface must not open the picker, got %#v", result.OpenSkillPicker)
+	if result.Screen != nil {
+		t.Fatalf("bare /skills without a picker-capable surface must not open the picker, got %#v", result.Screen)
 	}
 	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 	if !strings.Contains(text, "Skill Catalog: total=1") {
@@ -63,8 +63,8 @@ func TestExecuteStructuredSkillCommandInvalidArgsReportError(t *testing.T) {
 	if !handled {
 		t.Fatal("/skill without args was not handled by the structured executor")
 	}
-	if result.OpenSkillPicker != nil {
-		t.Fatalf("/skill must not open the picker, got %#v", result.OpenSkillPicker)
+	if result.Screen != nil {
+		t.Fatalf("/skill must not open the picker, got %#v", result.Screen)
 	}
 	if !strings.Contains(ui.RenderDocumentPlain(result.Document()), "需要指定 skill 名称") {
 		t.Fatalf("invalid /skill args must report the usage error, got:\n%s", ui.RenderDocumentPlain(result.Document()))
@@ -78,8 +78,8 @@ func TestExecuteStructuredSkillCommandUnknownSkillReportsError(t *testing.T) {
 	if !handled {
 		t.Fatal("/skill with unknown name was not handled by the structured executor")
 	}
-	if result.OpenSkillPicker != nil {
-		t.Fatalf("/skill must not open the picker, got %#v", result.OpenSkillPicker)
+	if result.Screen != nil {
+		t.Fatalf("/skill must not open the picker, got %#v", result.Screen)
 	}
 	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 	if !strings.Contains(text, "错误:") {
