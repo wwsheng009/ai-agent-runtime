@@ -285,8 +285,9 @@ func handleThemeCommand(session *ChatSession, command string, noInteractive bool
 	if unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredThemeCommand(session, command); handled {
 			renderErr := renderChatCommandResult(session, result, false)
-			if renderErr == nil && result.OpenThemePicker != nil {
-				openChatThemePicker(session, *result.OpenThemePicker)
+			if renderErr == nil {
+				// 批次 5（D-E）：picker 效应经 CommandResult.Screen 统一派发。
+				dispatchChatScreenEffects(session, result)
 			}
 			return false
 		}
@@ -569,81 +570,90 @@ func selectThemeFullScreen(session *ChatSession) (palette, mode, syntax string, 
 	workPalette, workMode, workSyntax := snapPalette, snapMode, snapSyntax
 	confirmed := false
 
-	var lease ui.ScreenLease
-	if session != nil && session.Surface != nil && session.Surface.Enabled() {
-		// Suspend the primary presenter while the picker owns the alternate
-		// screen; live previews render in the picker's own frame, and the
-		// surface repaints with the new theme on release.
-		lease, _ = session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
-			Title: "选择主题",
-		})
+	// 批次 5（D-E）：内联租约收编到统一框架（A2/I1/I3）。实时预览仍在租约内
+	// 由 OnSelectionChanged 应用；取消/错误的回滚与提示状态复位移到 AfterClose
+	// （close 序列完成后），不再在租约存续期 mutate 主题。
+	outcome := openChatScreen(session, chatScreenSpec{
+		ID:            "theme.pick",
+		Title:         "选择主题",
+		Kind:          chatScreenList,
+		Trigger:       "command",
+		SilentDegrade: true,
+		AfterClose: func(s *ChatSession, out chatScreenOutcome) {
+			if out.Result != chatScreenClosedConfirm || !confirmed {
+				_ = ui.ApplyThemeSelection(snapPalette, snapMode)
+				_ = ui.SetSyntaxTheme(snapSyntax)
+			}
+			if s != nil && s.Interaction != nil {
+				s.Interaction.ResetPromptState()
+				s.Interaction.RefreshStatus("")
+			}
+		},
+		RunScreen: func(s *ChatSession, lease ui.ScreenLease, _ chatScreenSpec) chatScreenOutcome {
+			result, err := ui.SelectFullScreenListWithLease(context.Background(), terminal, ui.FullScreenListOptions{
+				Title:        "选择主题",
+				Subtitle:     "上下移动实时预览 · Esc 取消恢复 · Enter 确认并保存",
+				ConfirmLabel: "应用主题",
+				EmptyMessage: "没有匹配的主题",
+				Items:        items,
+				OnSelectionChanged: func(index int) {
+					if index < 0 || index >= len(picks) {
+						return
+					}
+					p := picks[index]
+					switch p.kind {
+					case pickMode:
+						workMode = p.value
+						_ = ui.ApplyThemeSelection("", workMode)
+					case pickPalette:
+						workPalette = p.value
+						_ = ui.ApplyThemeSelection(workPalette, "")
+					case pickSyntax:
+						workSyntax = p.value
+						_ = ui.SetSyntaxTheme(workSyntax)
+					}
+					if s != nil && s.Interaction != nil {
+						s.Interaction.RefreshStatus("")
+					}
+				},
+				OnCancel: func() {
+					_ = ui.ApplyThemeSelection(snapPalette, snapMode)
+					_ = ui.SetSyntaxTheme(snapSyntax)
+				},
+				OnConfirm: func(index int) error {
+					if index < 0 || index >= len(picks) {
+						return fmt.Errorf("无效选择")
+					}
+					// Commit working axes (already applied by selection hooks).
+					confirmed = true
+					return nil
+				},
+				PreviewForItem: func(index int) string {
+					return ui.FormatThemePreviewRich(ui.ThemePreviewOptions{
+						Width:       72,
+						Palette:     workPalette,
+						Mode:        workMode,
+						SyntaxTheme: workSyntax,
+						Compact:     true,
+					})
+				},
+			}, lease)
+			if err != nil {
+				return chatScreenOutcome{Result: chatScreenClosedError, Index: -1, Err: err}
+			}
+			if result.Cancelled || !confirmed {
+				return chatScreenOutcome{Result: chatScreenClosedEsc, Index: -1}
+			}
+			return chatScreenOutcome{Result: chatScreenClosedConfirm, Index: result.Index}
+		},
+	})
+	if outcome.Degraded {
+		return "", "", "", false, ui.ErrFullScreenUnavailable
 	}
-	defer func() {
-		if lease != nil {
-			_ = lease.Release(context.Background())
-		}
-		if session != nil && session.Interaction != nil {
-			session.Interaction.ResetPromptState()
-			session.Interaction.RefreshStatus("")
-		}
-	}()
-
-	result, err := ui.SelectFullScreenListWithLease(context.Background(), terminal, ui.FullScreenListOptions{
-		Title:        "选择主题",
-		Subtitle:     "上下移动实时预览 · Esc 取消恢复 · Enter 确认并保存",
-		ConfirmLabel: "应用主题",
-		EmptyMessage: "没有匹配的主题",
-		Items:        items,
-		OnSelectionChanged: func(index int) {
-			if index < 0 || index >= len(picks) {
-				return
-			}
-			p := picks[index]
-			switch p.kind {
-			case pickMode:
-				workMode = p.value
-				_ = ui.ApplyThemeSelection("", workMode)
-			case pickPalette:
-				workPalette = p.value
-				_ = ui.ApplyThemeSelection(workPalette, "")
-			case pickSyntax:
-				workSyntax = p.value
-				_ = ui.SetSyntaxTheme(workSyntax)
-			}
-			if session != nil && session.Interaction != nil {
-				session.Interaction.RefreshStatus("")
-			}
-		},
-		OnCancel: func() {
-			_ = ui.ApplyThemeSelection(snapPalette, snapMode)
-			_ = ui.SetSyntaxTheme(snapSyntax)
-		},
-		OnConfirm: func(index int) error {
-			if index < 0 || index >= len(picks) {
-				return fmt.Errorf("无效选择")
-			}
-			// Commit working axes (already applied by selection hooks).
-			confirmed = true
-			return nil
-		},
-		PreviewForItem: func(index int) string {
-			return ui.FormatThemePreviewRich(ui.ThemePreviewOptions{
-				Width:       72,
-				Palette:     workPalette,
-				Mode:        workMode,
-				SyntaxTheme: workSyntax,
-				Compact:     true,
-			})
-		},
-	}, lease)
-	if err != nil {
-		_ = ui.ApplyThemeSelection(snapPalette, snapMode)
-		_ = ui.SetSyntaxTheme(snapSyntax)
-		return "", "", "", false, err
+	if outcome.Err != nil {
+		return "", "", "", false, outcome.Err
 	}
-	if result.Cancelled || !confirmed {
-		_ = ui.ApplyThemeSelection(snapPalette, snapMode)
-		_ = ui.SetSyntaxTheme(snapSyntax)
+	if outcome.Result != chatScreenClosedConfirm || !confirmed {
 		return "", "", "", false, nil
 	}
 	return workPalette, workMode, workSyntax, true, nil

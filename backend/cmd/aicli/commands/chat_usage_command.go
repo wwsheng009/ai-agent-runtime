@@ -207,9 +207,9 @@ func structuredUsageViewResult(session *ChatSession, req UsageScreenRequest) Com
 	}
 	if unifiedDirectInteractiveOutput(session) {
 		// The viewer captures its snapshot after the command result crosses
-		// the dispatch boundary (like OpenDebugOverlay); the command carries
+		// the dispatch boundary (like the debug viewer); the command carries
 		// no Scene-cell document.
-		return CommandResult{Action: CommandContinue, OpenUsageScreen: &req}
+		return CommandResult{Action: CommandContinue, Screen: chatScreenSpecRef(chatScreenUsageSpec(session, req))}
 	}
 	return commandTextResult(strings.Join(usageDocumentLines(src, analytics, sessionID, req), "\n"))
 }

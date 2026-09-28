@@ -433,7 +433,7 @@ func chatAccountViewResult(session *ChatSession, req chatAccountCommandRequest, 
 		return chatAccountJSONResult(report)
 	}
 	if unifiedDirectInteractiveOutput(session) {
-		return CommandResult{Action: CommandContinue, OpenAccountScreen: &AccountScreenRequest{Report: report}}
+		return CommandResult{Action: CommandContinue, Screen: chatScreenSpecRef(chatScreenAccountSpec(session, AccountScreenRequest{Report: report}))}
 	}
 	return commandTextResult(strings.Join(formatChatAccountReportLines(report), "\n"))
 }
@@ -446,13 +446,13 @@ func chatAccountsViewResult(session *ChatSession, req chatAccountCommandRequest,
 		return chatAccountJSONResult(list)
 	}
 	if unifiedDirectInteractiveOutput(session) {
-		return CommandResult{Action: CommandContinue, OpenAccountsScreen: &AccountListScreenRequest{
+		return CommandResult{Action: CommandContinue, Screen: chatScreenSpecRef(chatScreenAccountsSpec(session, AccountListScreenRequest{
 			List: list,
 			// 冻结「打开屏幕那一刻」的刷新参数：屏内 r 重新提交后台刷新时复用
 			// 它们（含 --enabled-only 过滤与单 provider 超时），屏幕因此不需要
 			// 读取任何可变的请求状态。
 			Refresh: chatAccountRefreshParams{EnabledOnly: req.EnabledOnly, Timeout: req.Timeout},
-		}}
+		}))}
 	}
 	return commandTextResult(strings.Join(formatChatAccountListLines(list), "\n"))
 }

@@ -820,10 +820,10 @@ func TestResumePickerRequestCarriesCwdFilter(t *testing.T) {
 	}
 
 	result := newResumePickerCommandResult(filter)
-	if result.OpenResumePicker == nil {
-		t.Fatalf("/resume --cwd did not produce a typed picker request: %#v", result)
+	if result.Screen == nil || result.Screen.ID != "resume.picker" {
+		t.Fatalf("/resume --cwd did not produce a typed picker spec: %#v", result)
 	}
-	if result.OpenResumePicker.Filter != filter {
-		t.Fatalf("picker request did not preserve parsed filter: got %#v want %#v", result.OpenResumePicker.Filter, filter)
+	if got := resumePickerRequest(filter).Filter; got != filter {
+		t.Fatalf("picker request did not preserve parsed filter: got %#v want %#v", got, filter)
 	}
 }

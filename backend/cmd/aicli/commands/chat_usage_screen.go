@@ -1,8 +1,6 @@
 package commands
 
 import (
-	"context"
-	"fmt"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
@@ -60,59 +58,6 @@ func canOpenChatUsageScreen(session *ChatSession) bool {
 		return false
 	}
 	return ui.CanUseFullScreenList(resumeFullScreenTerminal(session))
-}
-
-// openChatUsageScreen renders /usage on a dedicated alternate screen instead
-// of the main message stream. The overview and session cache request list are
-// captured once before the screen is entered, shown through the lease-bound
-// overlay viewer, and never committed as a Scene command cell: dismissal
-// restores the primary presenter from its retained state, exactly like /debug
-// display. When the alternate screen cannot be hosted the §6.4 document cell
-// is committed instead (same degrade-to-document contract as /model), so a
-// degraded TTY never silently swallows /usage.
-func openChatUsageScreen(session *ChatSession, req UsageScreenRequest) {
-	if !canOpenChatUsageScreen(session) {
-		_ = renderChatCommandResult(session, usageFallbackDocumentResult(session, req), false)
-		return
-	}
-	// Capture the snapshot before entering the alternate screen: if the cache
-	// source cannot be resolved we never flash an empty viewer and instead
-	// commit the stable degradation cell (same contract as the document path).
-	body, ok := buildUsageScreenBody(session, req)
-	if !ok {
-		_ = renderChatCommandResult(session, commandTextResult(body), false)
-		return
-	}
-	title := usageScreenTitleForMode(req.Mode)
-	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
-		Title: title,
-	})
-	if err != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开缓存用量界面失败: %w", err)), false)
-		return
-	}
-	// The surface posts LeaseAcquired as part of the acquire transaction. Wait
-	// for that lease barrier so the first overlay frame is never raced by a
-	// pending primary flush; the viewer itself owns no actor semantic state.
-	if !session.Interaction.waitUIActorIdleBounded("open usage screen") {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("缓存用量界面渲染未就绪")), false)
-		return
-	}
-
-	runErr := ui.RunDebugOverlayWithLease(context.Background(), resumeFullScreenTerminal(session), ui.DebugOverlayOptions{
-		Title: title,
-		Body:  body,
-	}, lease)
-	releaseErr := lease.Release(context.Background())
-	if runErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("缓存用量界面异常: %w", runErr)), false)
-		return
-	}
-	if releaseErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭缓存用量界面失败: %w", releaseErr)), false)
-		return
-	}
 }
 
 // usageFallbackDocumentResult rebuilds the §6.4 document cell for unified

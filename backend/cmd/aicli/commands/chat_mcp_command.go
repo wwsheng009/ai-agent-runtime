@@ -534,14 +534,39 @@ func chatMCPReloadText(service chatMCPService, onMutate func()) string {
 func executeStructuredMCPCommand(session *ChatSession, command string) CommandResult {
 	if chatMCPPickerRequested(command) && canOpenChatMCPPicker(session) {
 		return CommandResult{
-			Action:        CommandContinue,
-			OpenMCPPicker: &MCPPickerRequest{},
+			Action: CommandContinue,
+			Screen: chatScreenEffectSpec("mcp.picker", "MCP 服务器", func(s *ChatSession) {
+				openChatMCPPicker(s, MCPPickerRequest{})
+			}),
 		}
 	}
 	text := chatMCPCommandTextWithService(command, newChatMCPService(), func() {
 		refreshChatMCPTools(session)
 	})
+	if id, title, ok := chatMCPReadOnlyScreenIdentity(command); ok && unifiedDirectInteractiveOutput(session) {
+		// 批次 3 尾批：服务器清单/状态是有限只读页面，走 ScreenDocument；
+		// 启停与热重载回执保持主屏内联单元格。
+		return chatScreenDocResult(chatScreenMCPReadOnlySpec(id, title, text))
+	}
 	return commandTextResult(text)
+}
+
+// chatMCPReadOnlyScreenIdentity 判定 /mcp 的只读 list/status 子命令并给出副屏
+// 身份；bare /mcp 与 select 别名走 picker（见 chatMCPPickerRequested），
+// 动作回执与工具启停结果不进入副屏。
+func chatMCPReadOnlyScreenIdentity(command string) (string, string, bool) {
+	fields := strings.Fields(extractCommandArgument(command))
+	if len(fields) == 0 {
+		return "", "", false
+	}
+	switch strings.ToLower(fields[0]) {
+	case "list", "ls":
+		return "mcp.list", "MCP 服务器列表", true
+	case "status":
+		return "mcp.status", "MCP 服务器状态", true
+	default:
+		return "", "", false
+	}
 }
 
 // chatMCPPickerRequested 判定命令是否要求交互菜单：bare /mcp 与显式 select 别名。

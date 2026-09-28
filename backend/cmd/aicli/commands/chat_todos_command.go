@@ -46,9 +46,28 @@ func executeStructuredTodosCommand(session *ChatSession, command string) Command
 	if err != nil {
 		return commandTextResult(err.Error())
 	}
+	if unifiedDirectInteractiveOutput(session) {
+		// 批次 1：统一 TUI 出口把 /todos 收编为副屏只读页（方案 §5.2）。
+		// 能力不足/租约忙时框架按 D-F 降级，内联文本与收编前字符级一致
+		// （Doc 即 buildChatTodosDocument 的投影）。
+		spec := chatScreenTodosSpec(session, filter)
+		return CommandResult{Screen: &spec, Action: CommandContinue}
+	}
 	return CommandResult{
 		Blocks: []RenderBlock{{Document: buildChatTodosDocument(session, filter)}},
 		Action: CommandContinue,
+	}
+}
+
+// chatScreenTodosSpec 是 /todos 的只读 ScreenDocument Spec：数据面与行构造
+// 复用 legacy/plain 出口（buildChatTodosLines），屏内为纯只读快照。
+func chatScreenTodosSpec(session *ChatSession, filter chatTodosFilter) chatScreenSpec {
+	return chatScreenSpec{
+		ID:      "todos.screen",
+		Title:   "任务列表",
+		Kind:    chatScreenDocument,
+		Doc:     buildChatTodosDocument(session, filter),
+		Trigger: "command",
 	}
 }
 

@@ -1,14 +1,12 @@
 package commands
 
 import (
-	"context"
 	"fmt"
 	"net/url"
 	"os/exec"
 	"runtime"
 	"strings"
 
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 )
 
@@ -131,8 +129,8 @@ func executeStructuredWebEndpointsCommand(session *ChatSession) CommandResult {
 	if unifiedDirectInteractiveOutput(session) {
 		// 统一交互模式：在全屏覆盖层展示，避免污染消息流。
 		return CommandResult{
-			Action:                 CommandContinue,
-			OpenWebEndpointsScreen: true,
+			Action: CommandContinue,
+			Screen: chatScreenSpecRef(chatScreenWebEndpointsSpec(session)),
 		}
 	}
 
@@ -198,44 +196,9 @@ func openBrowser(url string) error {
 	return cmd.Start()
 }
 
-// canOpenChatWebEndpointsScreen 与 openChatWebEndpointsScreen 复用了
-// /debug display 的 overlay 能力门控：仅当终端支持全屏模式（TTY+ANSI+
-// 足够高度且无活跃的屏幕租约/弹窗）时才进入全屏；否则退回为
-// printChatCommandOutput 直接打印文本到终端。
+// canOpenChatWebEndpointsScreen 复用 /debug display 的 overlay 能力门控：
+// 仅当终端支持全屏模式（TTY+ANSI+足够高度且无活跃的屏幕租约/弹窗）时才进入
+// 全屏（批次 5 起租约获取统一由框架承担，本函数只保留能力判定）。
 func canOpenChatWebEndpointsScreen(session *ChatSession) bool {
 	return canOpenChatDebugOverlay(session)
-}
-
-// openChatWebEndpointsScreen 在独立的全屏覆盖层显示 Web 调试端点清单。
-// 与 /debug display 的 overlay 复用同一套租约管理与键位循环；
-// 进入失败时回退为直接打印纯文本。
-func openChatWebEndpointsScreen(session *ChatSession) {
-	if !canOpenChatWebEndpointsScreen(session) {
-		printChatCommandOutput(session, BuildChatDebugEndpointsText())
-		return
-	}
-	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{
-		Title: "Web 调试端点",
-	})
-	if err != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开调试信息界面失败: %w", err)), false)
-		return
-	}
-	if !session.Interaction.waitUIActorIdleBounded("open web endpoints screen") {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("界面渲染未就绪")), false)
-		return
-	}
-
-	body := BuildChatDebugEndpointsText()
-	runErr := ui.RunDebugOverlayWithLease(context.Background(), resumeFullScreenTerminal(session), ui.DebugOverlayOptions{
-		Title: "Web 调试端点",
-		Body:  body,
-	}, lease)
-	releaseErr := lease.Release(context.Background())
-	if runErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("界面异常: %w", runErr)), false)
-		return
-	}
-	_ = releaseErr
 }

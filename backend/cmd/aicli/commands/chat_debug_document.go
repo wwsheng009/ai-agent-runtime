@@ -313,6 +313,7 @@ func buildChatDebugDisplayDocumentWithOptions(session *ChatSession, opts ChatDeb
 	appendChatDebugUIActorLines(&builder, session)
 	appendChatDebugRenderEncoderLines(&builder, session)
 	appendChatDebugRenderOutputLines(&builder, session)
+	appendChatDebugScreenFrameworkLines(&builder, session)
 	return builder.document()
 }
 

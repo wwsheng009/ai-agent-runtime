@@ -46,7 +46,7 @@ func TestDebugDisplayUnifiedPresenterOpensOverlayInsteadOfSceneCell(t *testing.T
 	if err != nil || !handled {
 		t.Fatalf("/debug display structured match=(%t, %v), want handled", handled, err)
 	}
-	if !result.OpenDebugOverlay {
+	if result.Screen == nil || result.Screen.ID != "debug.display" {
 		t.Fatalf("/debug display did not request the alternate-screen overlay: %+v", result)
 	}
 	if got := ui.RenderDocumentPlain(result.Document()); strings.TrimSpace(got) != "" {

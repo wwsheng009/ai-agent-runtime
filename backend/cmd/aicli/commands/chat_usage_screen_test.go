@@ -1,8 +1,9 @@
 package commands
 
 // /usage 独立屏幕迁移回归：
-//  - 统一 interactive TTY 中 /usage 视图变体只携带 OpenUsageScreen 请求，
-//    不提交 Scene cell，也绝不再现 unified gate 的“尚未迁移”错误；
+//  - 统一 interactive TTY 中 /usage 视图变体只携带 CommandResult.Screen
+//    （usage.screen Spec），不提交 Scene cell（批次 5：旧 OpenUsageScreen
+//    字段已删除，请求载荷改由解析层断言）；
 //  - 查看器 body 必须包含缓存总览 + 会话缓存请求列表（§6.4 纯渲染函数）；
 //  - 备用屏不可用的统一会话降级为 §6.4 文档 cell，绝不静默吞掉 /usage。
 
@@ -62,73 +63,45 @@ func TestCanOpenChatUsageScreenGates(t *testing.T) {
 func TestExecuteStructuredUsageCommandUnifiedTTYRequestsUsageScreen(t *testing.T) {
 	session, _, _ := newUnifiedUsageCacheSession(t)
 
-	result, handled, err := tryExecuteStructuredChatCommand(session, "/usage")
-	if err != nil || !handled {
-		t.Fatalf("tryExecuteStructuredChatCommand(/usage) handled=%v err=%v", handled, err)
+	cases := []struct {
+		command string
+		mode    string
+		check   func(UsageScreenRequest) bool
+	}{
+		{"/usage", usageScreenModeOverview, func(req UsageScreenRequest) bool { return true }},
+		{"/usage cache requests 5", usageScreenModeRequests, func(req UsageScreenRequest) bool { return req.Limit == 5 }},
+		{"/usage cache trace msg-x", usageScreenModeTrace, func(req UsageScreenRequest) bool { return req.TraceID == "msg-x" }},
+		// 批次 7.3 聚合视图：同一 ScreenLease 契约（只携带请求，不提交 Scene cell）。
+		{"/usage tools 7", usageScreenModeTools, func(req UsageScreenRequest) bool { return req.Limit == 7 }},
+		{"/usage subagents --failed", usageScreenModeSubagents, func(req UsageScreenRequest) bool { return req.FailedOnly }},
+		{"/usage errors top 5", usageScreenModeErrors, func(req UsageScreenRequest) bool { return req.Top == 5 }},
 	}
-	if result.OpenUsageScreen == nil || result.OpenUsageScreen.Mode != usageScreenModeOverview {
-		t.Fatalf("unified /usage must request the usage screen, got %+v", result.OpenUsageScreen)
-	}
-	if got := ui.RenderDocumentPlain(result.Document()); strings.TrimSpace(got) != "" {
-		t.Fatalf("unified /usage must not carry a Scene-cell document, got %q", got)
-	}
+	for _, tc := range cases {
+		req, errText := resolveUsageViewRequest(parseUsageCommandArgs(tc.command))
+		if errText != "" {
+			t.Fatalf("%s parse error: %s", tc.command, errText)
+		}
+		if req.Mode != tc.mode || !tc.check(req) {
+			t.Fatalf("%s typed request = %+v，期望 mode=%s 且载荷满足断言", tc.command, req, tc.mode)
+		}
 
-	result, handled, err = tryExecuteStructuredChatCommand(session, "/usage cache requests 5")
-	if err != nil || !handled {
-		t.Fatalf("requests variant handled=%v err=%v", handled, err)
-	}
-	if result.OpenUsageScreen == nil || result.OpenUsageScreen.Mode != usageScreenModeRequests || result.OpenUsageScreen.Limit != 5 {
-		t.Fatalf("requests variant must carry the typed limit, got %+v", result.OpenUsageScreen)
-	}
-
-	result, handled, err = tryExecuteStructuredChatCommand(session, "/usage cache trace msg-x")
-	if err != nil || !handled {
-		t.Fatalf("trace variant handled=%v err=%v", handled, err)
-	}
-	if result.OpenUsageScreen == nil || result.OpenUsageScreen.Mode != usageScreenModeTrace || result.OpenUsageScreen.TraceID != "msg-x" {
-		t.Fatalf("trace variant must carry the message id, got %+v", result.OpenUsageScreen)
-	}
-
-	// 批次 7.3 聚合视图：同一 ScreenLease 契约（只携带请求，不提交 Scene cell）。
-	result, handled, err = tryExecuteStructuredChatCommand(session, "/usage tools 7")
-	if err != nil || !handled {
-		t.Fatalf("tools variant handled=%v err=%v", handled, err)
-	}
-	if result.OpenUsageScreen == nil || result.OpenUsageScreen.Mode != usageScreenModeTools || result.OpenUsageScreen.Limit != 7 {
-		t.Fatalf("tools variant must carry the typed limit, got %+v", result.OpenUsageScreen)
-	}
-
-	result, handled, err = tryExecuteStructuredChatCommand(session, "/usage subagents --failed")
-	if err != nil || !handled {
-		t.Fatalf("subagents variant handled=%v err=%v", handled, err)
-	}
-	if result.OpenUsageScreen == nil || result.OpenUsageScreen.Mode != usageScreenModeSubagents ||
-		!result.OpenUsageScreen.FailedOnly {
-		t.Fatalf("subagents variant must carry --failed, got %+v", result.OpenUsageScreen)
-	}
-
-	result, handled, err = tryExecuteStructuredChatCommand(session, "/usage errors top 5")
-	if err != nil || !handled {
-		t.Fatalf("errors variant handled=%v err=%v", handled, err)
-	}
-	if result.OpenUsageScreen == nil || result.OpenUsageScreen.Mode != usageScreenModeErrors || result.OpenUsageScreen.Top != 5 {
-		t.Fatalf("errors variant must carry the typed top, got %+v", result.OpenUsageScreen)
+		result, handled, err := tryExecuteStructuredChatCommand(session, tc.command)
+		if err != nil || !handled {
+			t.Fatalf("%s handled=%v err=%v", tc.command, handled, err)
+		}
+		if result.Screen == nil || result.Screen.ID != "usage.screen" {
+			t.Fatalf("%s must request the usage screen spec, got %+v", tc.command, result.Screen)
+		}
+		if got := ui.RenderDocumentPlain(result.Document()); strings.TrimSpace(got) != "" {
+			t.Fatalf("%s must not carry a Scene-cell document, got %q", tc.command, got)
+		}
 	}
 
 	// 参数错误仍是文档 cell（校验错误不属于视图内容，也不打开备用屏）。
-	result, _, _ = tryExecuteStructuredChatCommand(session, "/usage cache requests 0")
-	if result.OpenUsageScreen != nil {
-		t.Fatalf("invalid args must not open the usage screen, got %+v", result.OpenUsageScreen)
-	}
-	if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "数量非法") {
-		t.Fatalf("invalid args document = %q", plain)
-	}
-
-	// 聚合视图的非法数量同样留在文档 cell 内。
-	for _, command := range []string{"/usage tools 0", "/usage subagents --failed 0", "/usage errors top abc"} {
-		result, _, _ = tryExecuteStructuredChatCommand(session, command)
-		if result.OpenUsageScreen != nil {
-			t.Fatalf("%s must not open the usage screen, got %+v", command, result.OpenUsageScreen)
+	for _, command := range []string{"/usage cache requests 0", "/usage tools 0", "/usage subagents --failed 0", "/usage errors top abc"} {
+		result, _, _ := tryExecuteStructuredChatCommand(session, command)
+		if result.Screen != nil {
+			t.Fatalf("%s must not open the usage screen, got %+v", command, result.Screen)
 		}
 		if plain := ui.RenderDocumentPlain(result.Document()); !strings.Contains(plain, "非法") {
 			t.Fatalf("%s invalid args document = %q", command, plain)

@@ -124,6 +124,11 @@ func executeStructuredAgentTranscriptCommand(session *ChatSession, command strin
 	if opts.Follow {
 		lines = append(lines, "  follow=unavailable（一次性快照输出；交互式 popup 模式支持实时刷新）")
 	}
+	// 批次 3：子会话 transcript 是只读长文档（limit 默认 200），统一出口
+	// 迁入可滚动/搜索的只读副屏；错误与关闭回执仍走内联单元格。
+	if unifiedDirectInteractiveOutput(session) {
+		return chatScreenDocResult(chatScreenAgentTranscriptSpec(lines))
+	}
 	return commandTextResult(strings.Join(lines, "\n"))
 }
 

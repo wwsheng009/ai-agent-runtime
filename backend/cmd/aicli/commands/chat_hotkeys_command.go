@@ -39,7 +39,45 @@ func handleHotkeysCommand(session *ChatSession, command string) bool {
 		printChatCommandOutput(session, "错误: /hotkeys 仅支持空参数或 reload\n用法: /hotkeys 或 /hotkeys reload")
 		return false
 	}
+	printChatCommandOutput(session, strings.Join(buildChatHotkeysLines(session), "\n"))
+	return false
+}
 
+// executeStructuredHotkeysCommand 是统一出口（批次 3）：键位表迁入只读副屏；
+// reload 保留主屏短回执（§5.1 ≤3 行判据）并在其后打开同一副屏。
+func executeStructuredHotkeysCommand(session *ChatSession, command string) CommandResult {
+	argument := strings.TrimSpace(extractCommandArgument(command))
+	switch {
+	case argument == "":
+		if !unifiedDirectInteractiveOutput(session) {
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: chatScreenTextDoc(strings.Join(buildChatHotkeysLines(session), "\n"))}},
+				Action: CommandContinue,
+			}
+		}
+		return chatScreenDocResult(chatScreenHotkeysSpec())
+	case strings.EqualFold(argument, "reload"):
+		reloadChatKeymapRegistry()
+		if !unifiedDirectInteractiveOutput(session) {
+			return CommandResult{
+				Blocks: []RenderBlock{{Document: chatScreenTextDoc(strings.Join(buildChatHotkeysLines(session), "\n"))}},
+				Action: CommandContinue,
+			}
+		}
+		spec := chatScreenHotkeysSpec()
+		return CommandResult{
+			Blocks: []RenderBlock{{Document: buildChatPlainTextCommandDocument("已重新加载按键配置: " + chatKeybindingsPath())}},
+			Screen: &spec,
+			Action: CommandContinue,
+		}
+	default:
+		return commandTextResult("错误: /hotkeys 仅支持空参数或 reload\n用法: /hotkeys 或 /hotkeys reload")
+	}
+}
+
+// buildChatHotkeysLines 构建键位表正文；legacy 打印与副屏共享同一来源，
+// 保证迁入前后字符级一致。
+func buildChatHotkeysLines(session *ChatSession) []string {
 	registry := chatKeymapRegistry()
 	lines := []string{"快捷键（当前生效）"}
 	for _, binding := range registry.Effective() {
@@ -88,8 +126,7 @@ func handleHotkeysCommand(session *ChatSession, command string) bool {
 			lines = append(lines, "  - "+warning)
 		}
 	}
-	printChatCommandOutput(session, strings.Join(lines, "\n"))
-	return false
+	return lines
 }
 
 // chatHotkeysStdoutIsTTY 报告标准输出是否为终端；headless/JSON 输出下按键矩阵

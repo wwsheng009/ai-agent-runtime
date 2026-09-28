@@ -153,8 +153,8 @@ func TestTryExecuteStructuredChatCommandHistoryOpensUnifiedTranscriptView(t *tes
 	if err != nil || !handled {
 		t.Fatalf("/history structured match=(%t, %v), want handled", handled, err)
 	}
-	if !result.OpenTranscript {
-		t.Fatalf("unified /history did not request the transcript reader: %+v", result)
+	if result.Screen == nil || result.Screen.ID != "transcript.screen" {
+		t.Fatalf("unified /history did not request the transcript reader: %+v", result.Screen)
 	}
 	if strings.TrimSpace(ui.RenderDocumentPlain(result.Document())) != "" {
 		t.Fatalf("unified /history should open a reader, not append a duplicate command document: %q", ui.RenderDocumentPlain(result.Document()))

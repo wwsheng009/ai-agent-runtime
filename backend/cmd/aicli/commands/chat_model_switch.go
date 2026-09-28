@@ -38,8 +38,9 @@ func handleProviderCommand(session *ChatSession, command string, noInteractive b
 	if unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredProviderCommand(session, command); handled {
 			renderErr := renderChatCommandResult(session, result, false)
-			if renderErr == nil && result.OpenModelPicker != nil {
-				openChatModelPicker(session, *result.OpenModelPicker)
+			if renderErr == nil {
+				// 批次 5（D-E）：picker 效应经 CommandResult.Screen 统一派发。
+				dispatchChatScreenEffects(session, result)
 			}
 			return false
 		}
@@ -80,8 +81,9 @@ func handleModelCommand(session *ChatSession, command string, noInteractive bool
 	if unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredModelCommand(session, command); handled {
 			renderErr := renderChatCommandResult(session, result, false)
-			if renderErr == nil && result.OpenModelPicker != nil {
-				openChatModelPicker(session, *result.OpenModelPicker)
+			if renderErr == nil {
+				// 批次 5（D-E）：picker 效应经 CommandResult.Screen 统一派发。
+				dispatchChatScreenEffects(session, result)
 			}
 			return false
 		}

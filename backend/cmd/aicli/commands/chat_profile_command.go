@@ -51,6 +51,16 @@ func chatProfileUsageText() string {
 
 // tryExecuteStructuredProfileCommand 是 `/profile` 的结构化入口（与 /routing 同构）：
 // 无条件接管，返回统一渲染器的 CommandResult。
+//
+// 批次 3 尾批：status/list/show/diff 四个只读报告在统一出口投影为
+// ScreenDocument；use/reload/off/save/create 等写入类回执保持内联单元格。
+func chatProfileReadOnlyResult(session *ChatSession, id, title, text string) CommandResult {
+	if unifiedDirectInteractiveOutput(session) {
+		return chatScreenDocResult(chatScreenProfileReadOnlySpec(id, title, text))
+	}
+	return commandTextResult(text)
+}
+
 func tryExecuteStructuredProfileCommand(session *ChatSession, command string) (CommandResult, bool) {
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
@@ -66,13 +76,13 @@ func tryExecuteStructuredProfileCommand(session *ChatSession, command string) (C
 
 	switch sub {
 	case "", "status":
-		return commandTextResult(chatProfileStatusText(session)), true
+		return chatProfileReadOnlyResult(session, "profile.status", "Profile 状态", chatProfileStatusText(session)), true
 	case "list":
 		text, err := chatProfileListText(session)
 		if err != nil {
 			return commandErrorResult(err), true
 		}
-		return commandTextResult(text), true
+		return chatProfileReadOnlyResult(session, "profile.list", "Profile 列表", text), true
 	case "show":
 		if len(positional) == 0 {
 			return commandErrorResult(fmt.Errorf("用法: /profile show <name>")), true
@@ -81,13 +91,13 @@ func tryExecuteStructuredProfileCommand(session *ChatSession, command string) (C
 		if err != nil {
 			return commandErrorResult(err), true
 		}
-		return commandTextResult(text), true
+		return chatProfileReadOnlyResult(session, "profile.show", "Profile 详情", text), true
 	case "diff":
 		text, err := chatProfileDiffText(session, strings.Join(positional, " "))
 		if err != nil {
 			return commandErrorResult(err), true
 		}
-		return commandTextResult(text), true
+		return chatProfileReadOnlyResult(session, "profile.diff", "Profile 差异", text), true
 	case "use":
 		if len(positional) == 0 {
 			return commandErrorResult(fmt.Errorf("用法: /profile use <name>；交互选择用 /profile pick")), true

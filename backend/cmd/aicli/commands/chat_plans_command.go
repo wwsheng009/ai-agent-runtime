@@ -37,7 +37,25 @@ func handlePlansCommand(session *ChatSession, command string) bool {
 
 // executeStructuredPlansCommand is the unified-TTY projection of `/plans`.
 func executeStructuredPlansCommand(session *ChatSession, command string) CommandResult {
-	return commandTextResult(plansCommandTextForSession(session, command))
+	text := plansCommandTextForSession(session, command)
+	// 批次 3：`/plans <id>` 详情含最新正文快照，属于长文档 → 只读副屏；
+	// 列表/对比/回灌与错误文本保持主屏内联（§5.1 判据）。
+	if unifiedDirectInteractiveOutput(session) && isPlansDetailInvocation(command) &&
+		!strings.HasPrefix(text, "错误:") && !strings.HasPrefix(text, "未找到计划:") {
+		return chatScreenDocResult(chatScreenPlansDetailSpec(chatScreenTextDoc(text)))
+	}
+	return commandTextResult(text)
+}
+
+// isPlansDetailInvocation 判定 `/plans <id>` 详情形态：带参数且首 token 不是
+// reopen/diff 关键字（这两种形态各有自己的短回执/对比输出）。
+func isPlansDetailInvocation(command string) bool {
+	rest := strings.TrimSpace(extractCommandArgument(command))
+	tokens := strings.Fields(rest)
+	if len(tokens) == 0 {
+		return false
+	}
+	return !isPlansReopenKeyword(tokens[0]) && !isPlansDiffKeyword(tokens[0])
 }
 
 // plansCommandText is the session-less projection used by callers that only

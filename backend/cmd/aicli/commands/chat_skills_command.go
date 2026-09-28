@@ -23,8 +23,9 @@ func handleSkillsMenuCommand(session *ChatSession, command string) bool {
 	if unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredSkillsMenuCommand(session, command); handled {
 			renderErr := renderChatCommandResult(session, result, false)
-			if renderErr == nil && result.OpenSkillPicker != nil {
-				openChatSkillPicker(session, *result.OpenSkillPicker)
+			if renderErr == nil {
+				// 批次 5（D-E）：picker 效应经 CommandResult.Screen 统一派发。
+				dispatchChatScreenEffects(session, result)
 			}
 			if renderErr == nil && result.RestoreComposerDraft != "" {
 				_ = restoreChatRetryDraft(session, result.RestoreComposerDraft)

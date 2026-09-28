@@ -1,8 +1,8 @@
 package commands
 
 // /account 与 /accounts 独立屏幕迁移回归：
-//  - 统一 interactive TTY 中两条命令各自只携带 OpenAccountScreen / OpenAccountsScreen
-//    请求，不提交 Scene cell，也绝不共用同一块屏；
+//  - 统一 interactive TTY 中两条命令各自只携带 CommandResult.Screen
+//    （account.screen / accounts.screen），不提交 Scene cell，也绝不共用同一块屏；
 //  - 备用屏不可用时降级为与屏内正文同源的文档 cell，绝不静默吞掉命令；
 //  - 屏内正文是纯渲染：与 formatChatAccountReportLines / formatChatAccountListLines
 //    完全同源，因此备用屏与降级输出不会漂移。
@@ -129,13 +129,10 @@ func TestExecuteStructuredChatAccountCommandsOnUnifiedTTYRequestTheirOwnScreen(t
 	if err != nil || !handled {
 		t.Fatalf("tryExecuteStructuredChatCommand(/account show) handled=%v err=%v", handled, err)
 	}
-	if result.OpenAccountScreen == nil {
-		t.Fatalf("/account on a unified TTY must request the single-account screen: %+v", result)
+	if result.Screen == nil || result.Screen.ID != "account.screen" {
+		t.Fatalf("/account on a unified TTY must request the single-account screen: %+v", result.Screen)
 	}
-	if result.OpenAccountsScreen != nil {
-		t.Fatal("/account must never request the all-accounts screen")
-	}
-	if got := accountScreenTitle(result.OpenAccountScreen.Report); got != "账户余额 · alpha" {
+	if got := result.Screen.Title; got != "账户余额 · alpha" {
 		t.Fatalf("single-account screen title = %q", got)
 	}
 	if got := strings.TrimSpace(ui.RenderDocumentPlain(result.Document())); got != "" {
@@ -146,16 +143,11 @@ func TestExecuteStructuredChatAccountCommandsOnUnifiedTTYRequestTheirOwnScreen(t
 	if err != nil || !handled {
 		t.Fatalf("tryExecuteStructuredChatCommand(/accounts --no-refresh) handled=%v err=%v", handled, err)
 	}
-	if result.OpenAccountsScreen == nil {
-		t.Fatalf("/accounts on a unified TTY must request the all-accounts screen: %+v", result)
+	if result.Screen == nil || result.Screen.ID != "accounts.screen" {
+		t.Fatalf("/accounts on a unified TTY must request the all-accounts screen: %+v", result.Screen)
 	}
-	if result.OpenAccountScreen != nil {
-		t.Fatal("/accounts must never request the single-account screen")
-	}
-	if result.OpenAccountsScreen.List.Total == 0 {
-		t.Fatal("all-accounts screen request must carry the provider table")
-	}
-	if got := accountsScreenTitleFor(result.OpenAccountsScreen.List); got != "全部账户 · 2 provider" {
+	// 标题携带 provider 总数，同时证明请求里带着 provider 表（Total=2）。
+	if got := result.Screen.Title; got != "全部账户 · 2 provider" {
 		t.Fatalf("all-accounts screen title = %q", got)
 	}
 	if got := strings.TrimSpace(ui.RenderDocumentPlain(result.Document())); got != "" {
@@ -171,12 +163,22 @@ func TestOpenChatAccountScreensDegradeToDocumentCells(t *testing.T) {
 		t.Fatal("the fixture is expected to be a fail-closed TTY (no full-screen terminal)")
 	}
 	report := buildChatAccountReport("alpha", session.Provider)
-	openChatAccountScreen(session, AccountScreenRequest{Report: report})
-	openChatAccountsScreen(session, AccountListScreenRequest{List: chatAccountListReport{
-		Total:       1,
-		WithAccount: 1,
-		Providers:   []chatAccountReport{report},
-	}})
+	// 走与命令生产点同一条派发路径：不可承载备用屏时 Spec 带 ForceInline，
+	// openChatScreen 把内容降级为主屏内联文档单元格（行为与旧 opener 一致）。
+	dispatchChatScreenEffects(session, CommandResult{
+		Action: CommandContinue,
+		Screen: chatScreenSpecRef(chatScreenAccountSpec(session, AccountScreenRequest{Report: report})),
+	})
+	dispatchChatScreenEffects(session, CommandResult{
+		Action: CommandContinue,
+		Screen: chatScreenSpecRef(chatScreenAccountsSpec(session, AccountListScreenRequest{
+			List: chatAccountListReport{
+				Total:       1,
+				WithAccount: 1,
+				Providers:   []chatAccountReport{report},
+			},
+		})),
+	})
 	coordinator := session.Interaction
 	coordinator.waitUIActorIdle()
 	awaitUnifiedPresenterIdle(t, coordinator)
@@ -198,7 +200,7 @@ func TestAccountScreenFallbackMatchesPlainProjection(t *testing.T) {
 
 	plain := executeStructuredChatAccountCommand(session, "/account show")
 	fallback := accountScreenFallbackResult(AccountScreenRequest{Report: report})
-	if fallback.OpenAccountScreen != nil {
+	if fallback.Screen != nil {
 		t.Fatal("the fallback must not request a screen")
 	}
 	if got, want := chatAccountCommandText(t, fallback), chatAccountCommandText(t, plain); got != want {
@@ -207,7 +209,7 @@ func TestAccountScreenFallbackMatchesPlainProjection(t *testing.T) {
 
 	list := chatAccountListReport{Total: 1, WithAccount: 1, Providers: []chatAccountReport{report}}
 	listFallback := accountsScreenFallbackResult(AccountListScreenRequest{List: list})
-	if listFallback.OpenAccountsScreen != nil {
+	if listFallback.Screen != nil {
 		t.Fatal("the all-accounts fallback must not request a screen")
 	}
 	if got, want := chatAccountCommandText(t, listFallback), strings.Join(formatChatAccountListLines(list), "\n"); got != want {
@@ -228,35 +230,45 @@ func containsLine(lines []string, want string) bool {
 // 必须携带刷新回调与页脚提示，且冻结打开屏幕那一刻的请求参数（--enabled-only）。
 func TestChatAccountsScreenOptionsCarryRefreshKey(t *testing.T) {
 	session, _ := newUnifiedChatAccountSession(t)
+	// beta 置为未启用：--enabled-only 的冻结参数只有作用于真实 provider 集合
+	// 才能在屏内快照上被观测到（alpha 保持启用）。
+	beta := session.Config.Providers.Items["beta"]
+	beta.Enabled = false
+	session.Config.Providers.Items["beta"] = beta
 
 	result, handled, err := tryExecuteStructuredChatCommand(session, "/accounts display")
-	if err != nil || !handled || result.OpenAccountsScreen == nil {
-		t.Fatalf("/accounts display handled=%v err=%v result=%+v", handled, err, result)
+	if err != nil || !handled || result.Screen == nil || result.Screen.ID != "accounts.screen" {
+		t.Fatalf("/accounts display handled=%v err=%v result=%+v", handled, err, result.Screen)
 	}
-	options := chatAccountsScreenOptions(session, *result.OpenAccountsScreen)
-	if options.Refresh == nil {
+	spec := *result.Screen
+	if spec.Refresh == nil {
 		t.Fatal("全部账户屏必须携带屏内刷新回调")
 	}
-	if options.RefreshHint != accountsScreenRefreshHint {
-		t.Fatalf("刷新提示 = %q want %q", options.RefreshHint, accountsScreenRefreshHint)
+	if spec.RefreshHint != accountsScreenRefreshHint {
+		t.Fatalf("刷新提示 = %q want %q", spec.RefreshHint, accountsScreenRefreshHint)
 	}
-	if !strings.Contains(options.Title, accountsScreenTitle) {
-		t.Fatalf("屏标题 = %q", options.Title)
+	if !strings.Contains(spec.Title, accountsScreenTitle) {
+		t.Fatalf("屏标题 = %q", spec.Title)
 	}
-	if !containsLine(strings.Split(options.Body, "\n"), screenViewerFooter) {
-		t.Fatalf("第一帧必须是缓存快照正文:\n%s", options.Body)
+	body := ui.RenderDocumentPlain(spec.Doc)
+	if !containsLine(strings.Split(body, "\n"), screenViewerFooter) {
+		t.Fatalf("第一帧必须是缓存快照正文:\n%s", body)
 	}
-	if result.OpenAccountsScreen.Refresh.EnabledOnly {
-		t.Fatal("display 未带 --enabled-only，冻结参数不得为 true")
+	if !strings.Contains(body, "beta") {
+		t.Fatal("display 未带 --enabled-only，冻结快照必须包含未启用的 provider")
 	}
 
 	// 子命令必须排在标志之前（/accounts --enabled-only display 会被解析拒绝）。
 	result, handled, err = tryExecuteStructuredChatCommand(session, "/accounts display --enabled-only")
-	if err != nil || !handled || result.OpenAccountsScreen == nil {
-		t.Fatalf("/accounts display --enabled-only handled=%v err=%v result=%+v", handled, err, result)
+	if err != nil || !handled || result.Screen == nil || result.Screen.ID != "accounts.screen" {
+		t.Fatalf("/accounts display --enabled-only handled=%v err=%v result=%+v", handled, err, result.Screen)
 	}
-	if !result.OpenAccountsScreen.Refresh.EnabledOnly {
-		t.Fatal("屏内刷新必须复用打开屏幕时的 --enabled-only 过滤")
+	frozen := ui.RenderDocumentPlain(result.Screen.Doc)
+	if strings.Contains(frozen, "beta") {
+		t.Fatalf("屏内刷新必须复用打开屏幕时的 --enabled-only 过滤:\n%s", frozen)
+	}
+	if !strings.Contains(frozen, "alpha") {
+		t.Fatalf("--enabled-only 不得吞掉启用中的 provider:\n%s", frozen)
 	}
 }
 

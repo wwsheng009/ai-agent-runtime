@@ -1,7 +1,6 @@
 package commands
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -92,33 +91,6 @@ func canOpenChatAccountScreen(session *ChatSession) bool {
 	return ui.CanUseFullScreenList(resumeFullScreenTerminal(session))
 }
 
-// openChatAccountScreen renders the single-account report on its own screen.
-// The body is built from the already captured report; a lost prerequisite
-// degrades to the same document cell the plain projection uses.
-func openChatAccountScreen(session *ChatSession, req AccountScreenRequest) {
-	if !canOpenChatAccountScreen(session) {
-		_ = renderChatCommandResult(session, accountScreenFallbackResult(req), false)
-		return
-	}
-	openChatLeaseBoundTextViewer(session, ui.DebugOverlayOptions{
-		Title: accountScreenTitle(req.Report),
-		Body:  strings.Join(accountScreenBodyLines(req.Report), "\n"),
-	}, "账户界面")
-}
-
-// openChatAccountsScreen renders the whole-configuration provider table on its
-// own screen (distinct title from /account so the two views are never
-// confused). The screen is refreshable: `r` submits (or reuses) one background
-// refresh and immediately re-projects the cached snapshot, and the viewer keeps
-// polling so a finished refresh shows up without another key press.
-func openChatAccountsScreen(session *ChatSession, req AccountListScreenRequest) {
-	if !canOpenChatAccountScreen(session) {
-		_ = renderChatCommandResult(session, accountsScreenFallbackResult(req), false)
-		return
-	}
-	openChatLeaseBoundTextViewer(session, chatAccountsScreenOptions(session, req), "全部账户界面")
-}
-
 // chatAccountsScreenOptions 组装全部账户屏的渲染选项。正文与屏内刷新回调同源
 // （chatAccountsScreenRefresher.render），因此开屏第一帧与按 r 之后的帧不会漂移。
 func chatAccountsScreenOptions(session *ChatSession, req AccountListScreenRequest) ui.DebugOverlayOptions {
@@ -201,37 +173,6 @@ func (r *chatAccountsScreenRefresher) render() (string, string) {
 		list.RefreshDetail = r.submitError
 	}
 	return accountsScreenTitleFor(list), strings.Join(accountsScreenBodyLines(list), "\n")
-}
-
-// openChatLeaseBoundTextViewer publishes one already rendered frame through the
-// shared lease-bound overlay viewer: acquire → wait for the lease barrier →
-// run the read-only viewer → release. The caller owns the prerequisite check
-// (canOpenChatAccountScreen), the first frame capture and — for refreshable
-// screens — the refresh callback, so this helper never triggers I/O by itself.
-func openChatLeaseBoundTextViewer(session *ChatSession, options ui.DebugOverlayOptions, label string) {
-	lease, err := session.Surface.AcquireAlternateScreen(context.Background(), ui.FullscreenRequest{Title: options.Title})
-	if err != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("打开%s失败: %w", label, err)), false)
-		return
-	}
-	// The surface posts LeaseAcquired as part of the acquire transaction. Wait
-	// for that barrier so the first frame is never raced by a pending primary
-	// flush; the viewer itself owns no actor semantic state.
-	if !session.Interaction.waitUIActorIdleBounded("open " + label) {
-		_ = lease.Release(context.Background())
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("%s渲染未就绪", label)), false)
-		return
-	}
-
-	runErr := ui.RunDebugOverlayWithLease(context.Background(), resumeFullScreenTerminal(session), options, lease)
-	releaseErr := lease.Release(context.Background())
-	if runErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("%s异常: %w", label, runErr)), false)
-		return
-	}
-	if releaseErr != nil {
-		_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("关闭%s失败: %w", label, releaseErr)), false)
-	}
 }
 
 // accountScreenTitle 让单账户屏的标题始终带 provider 名：同一屏的重复打开与

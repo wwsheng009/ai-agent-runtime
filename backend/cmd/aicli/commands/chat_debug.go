@@ -715,6 +715,11 @@ func executeStructuredAgentPanelCommand(session *ChatSession, argument string) C
 	if opts.Follow {
 		lines = append(lines, chatAgentPanelFollowLines(session, opts)...)
 	}
+	// 批次 3：panel full（以及 follow 快照）是天然分页的长详情，统一出口
+	// 迁入只读副屏；默认 summary 形态仍是短表，保留主屏内联单元格。
+	if unifiedDirectInteractiveOutput(session) && (opts.Full || opts.Follow) {
+		return chatScreenDocResult(chatScreenAgentPanelSpec(lines))
+	}
 	return commandTextResult(strings.Join(lines, "\n"))
 }
 
@@ -2456,6 +2461,11 @@ func executeStructuredTimelineCommand(session *ChatSession, command string) Comm
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
 	}
+	// 批次 3：带 limit/filter 的事件流可能超过半屏，统一出口迁入只读副屏；
+	// 非统一会话（JSON 投影等）保持原单元格行为。
+	if unifiedDirectInteractiveOutput(session) {
+		return chatScreenDocResult(chatScreenTimelineSpec(session, command))
+	}
 	return commandTextResult(chatTimelineCommandText(session, command))
 }
 
@@ -2484,6 +2494,10 @@ func printChatCollab(session *ChatSession, command string) {
 func executeStructuredCollabCommand(session *ChatSession, command string) CommandResult {
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话"))
+	}
+	// 批次 3 同 /timeline：邮箱快照（含 follow 窗口行）迁入只读副屏。
+	if unifiedDirectInteractiveOutput(session) {
+		return chatScreenDocResult(chatScreenCollabSpec(session, command))
 	}
 	return commandTextResult(chatCollabCommandText(session, command))
 }

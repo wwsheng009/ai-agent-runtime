@@ -75,8 +75,9 @@ func handleExportCommand(session *ChatSession, command string) bool {
 	if unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredExportCommand(session, command); handled {
 			renderErr := renderChatCommandResult(session, result, false)
-			if renderErr == nil && result.OpenExportPicker != nil {
-				openChatExportPicker(session, *result.OpenExportPicker)
+			if renderErr == nil {
+				// 批次 5（D-E）：picker 效应经 CommandResult.Screen 统一派发。
+				dispatchChatScreenEffects(session, result)
 			}
 			return false
 		}

@@ -116,7 +116,7 @@ func TestChatAccountsRefreshSubmitsWithoutWaitingForNetwork(t *testing.T) {
 	if strings.Contains(text, "77.50") {
 		t.Fatalf("提交阶段不应包含本次刷新结果: %q", text)
 	}
-	if result.OpenAccountsScreen != nil {
+	if result.Screen != nil {
 		t.Fatal("/accounts refresh 不打开账户屏（没有新数据可看）")
 	}
 
