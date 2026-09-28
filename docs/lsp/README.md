@@ -12,7 +12,7 @@
 
 | 事实源 | 内容 | 位置 |
 | --- | --- | --- |
-| `03_agent_harness_supplement.md` §5 | LSP 工程化规格（生命周期、能力协商、位置编码、诊断表列） | §5.1 L491–508、§5.2 L512–560、§5.3 L562–568、§5.4 L674 |
+| `supplement/05_runtime_integration_project_detection_and_lsp.md` §10 | LSP 工程化规格（生命周期、能力协商、位置编码、诊断表列） | §10.1（原 `03` §5.1）、§10.2（原 §5.2）、§10.3（原 §5.3）；原写 `03` §5.4 的坐标实为 `03` §6.4（见 `supplement/06_cache_consistency.md` §6.4） |
 | `adr/0002-acp-lsp-ownership.md` | ACP 下 LSP 归属与能力面（谁 spawn、谁拥有、能力如何声明） | ADR-0002，Gate `Phase4-start` |
 | `adr/0006-lsp-position-encoding-boundary.md` | 位置编码转换边界与缓存键 | ADR-0006，Gate `Phase4-start` |
 | `supplement/05_runtime_integration_project_detection_and_lsp.md` | 知识层 × Runtime 集成、项目类型感知与 LSP 接入 | supplement/05 |
@@ -45,7 +45,7 @@
    本目录不是并列设计文档，是**下游参考实现分析与落地方案**。任何与规格冲突的内容，一律以 `knowledge_Layer` 为准，并通过 ADR 或 `supplement/*` 回灌，不在本目录"私自定稿"。
 
 2. **不复制 DDL。**
-   本目录不出现 `CREATE TABLE`。涉及 `lsp_diagnostics` / `lsp_servers` 等列与语义时，**只引用** `03_agent_harness_supplement.md` §5.2 与 ADR-0006 的结论，不复写定义。
+   本目录不出现 `CREATE TABLE`。涉及 `lsp_diagnostics` / `lsp_servers` 等列与语义时，**只引用** `supplement/05_runtime_integration_project_detection_and_lsp.md` §10.2 与 ADR-0006 的结论，不复写定义。
 
 3. **不写无基线的硬编码阈值。**
    本文中出现的所有数值型参数（超时、并发上限、缓存条目数等）都标注为**待基线标定**，并给出标定方法，不直接当成结论。
@@ -66,7 +66,11 @@
 | Phase 0 | **未开始** |
 | ADR-0002 / ADR-0006 | Proposed，Gate = `Phase4-start` |
 | 本目录文档 | 已完成（参考分析 + 实施方案） |
-| 代码实现 | 未开始 |
+| 代码实现（runtime 侧 W1–W7） | 已落地：`backend/internal/lsp/`（编码边界 / 传输 / 客户端池 / 归属路由 / 内联渲染）+ `backend/internal/tools/lsp_bridge.go`（`lsp_servers` / `lsp_diagnostics` / 编辑结果尾部追加）；配置入口 `lsp.*`（默认 `enabled=false`） |
+| W8 持久化 | 未动 schema：`lsp_servers` / `lsp_diagnostics` 表属 `knowledge_Layer`，随 `Phase4-start` 建表后接入（本目录不加表/列） |
+
+> 验收映射（本次实现）：A1/A2/A3/A5/A7/A8/A10/A11 已有自动化用例，入口 `go test ./internal/lsp/... ./internal/tools/...`；
+> A4 受上游建表 gating（无新表/新列）；A6/A9 的默认值与多 server 优先级裁定需真实 server 基线与规格回流（§7），尚未在代码中固化为结论。
 
 **结论：本目录文档可以先行交付与评审，但其描述的代码实现必须以 `Phase4-start` 为最早起点。**
 在 Phase 0–3 期间，本文档的唯一用途是：让后续实现者不必重新做一遍调研。

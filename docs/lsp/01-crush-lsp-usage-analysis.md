@@ -246,7 +246,7 @@ agent/tools/diagnostics.go:35  notifyLSPs(ctx, lspClients, ...)
 
 本文是 `docs/knowledge_Layer` 的**参考实现输入**，不产生新的规格：
 
-- 不定义 schema、不新增表列 → 数据只落入 `03_agent_harness_supplement.md` §5.2 的表（`lsp_diagnostics`、`lsp_servers`）；这两张表的列以上游为准，可能由 ADR 追加（如 ADR-0006 的 `position_encoding`）。
+- 不定义 schema、不新增表列 → 数据只落入 `supplement/05_runtime_integration_project_detection_and_lsp.md` §10.2 的表（`lsp_diagnostics`、`lsp_servers`）；这两张表的列以上游为准，可能由 ADR 追加（如 ADR-0006 的 `position_encoding`）。
 - 不覆盖归属决策 → 归属问题以 `adr/0002-acp-lsp-ownership.md` 为准。
 - 不覆盖位置编码 → 以 `adr/0006-lsp-position-encoding-boundary.md` 为准。
 - 本文发现的**待确认项**（§7）应在 `04` 的验收环节闭环，而不是在本目录里拍板。

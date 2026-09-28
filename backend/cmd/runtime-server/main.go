@@ -972,13 +972,16 @@ func runtimeServerHealthURL(listenAddr string) (string, bool) {
 }
 
 type runtimeServerApp struct {
-	router          *mux.Router
-	handler         *runtimeapi.Handler
-	cfg             *config.Config
-	skillsCfg       *config.SkillsRuntimeConfig
-	runtimeManager  *runtimecfg.RuntimeManager
-	bootstrap       *runtimebootstrap.Manager
-	mcpManager      mcpmanager.Manager
+	router         *mux.Router
+	handler        *runtimeapi.Handler
+	cfg            *config.Config
+	skillsCfg      *config.SkillsRuntimeConfig
+	runtimeManager *runtimecfg.RuntimeManager
+	bootstrap      *runtimebootstrap.Manager
+	mcpManager     mcpmanager.Manager
+	// toolAdapter 是技能/工具面适配器（内部持有工具 Manager，含 LSP 语言
+	// 服务器池）。close() 时释放，避免语言服务器进程悬挂（docs/lsp 03 W2）。
+	toolAdapter     io.Closer
 	ledgerStore     io.Closer
 	supervision     *runtimeserver.SupervisionControlPlane
 	subagentBatches io.Closer
@@ -1035,6 +1038,9 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	if err != nil {
 		return nil, err
 	}
+	// 工具面适配器自身（非底层 MCP manager）持有工具 Manager 与 LSP 池，
+	// 启动失败分支必须一并释放，否则语言服务器进程会残留。
+	toolAdapterCloser, _ := mcpAdapter.(io.Closer)
 
 	bootstrapManager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
 		Config:       runtimeConfig,
@@ -1051,11 +1057,17 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		if manager != nil {
 			_ = manager.Stop()
 		}
+		if toolAdapterCloser != nil {
+			_ = toolAdapterCloser.Close()
+		}
 		return nil, fmt.Errorf("failed to initialize runtime bootstrap: %w", err)
 	}
 	if err := bootstrapManager.Validate(); err != nil {
 		if manager != nil {
 			_ = manager.Stop()
+		}
+		if toolAdapterCloser != nil {
+			_ = toolAdapterCloser.Close()
 		}
 		_ = bootstrapManager.Stop()
 		return nil, fmt.Errorf("invalid runtime bootstrap: %w", err)
@@ -1287,6 +1299,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		runtimeManager:  runtimeManager,
 		bootstrap:       bootstrapManager,
 		mcpManager:      manager,
+		toolAdapter:     toolAdapterCloser,
 		ledgerStore:     ledgerStore,
 		supervision:     supervisionPlane,
 		subagentBatches: subagentBatches,
@@ -1344,6 +1357,11 @@ func (a *runtimeServerApp) close() {
 	if a.mcpManager != nil {
 		if err := a.mcpManager.Stop(); err != nil {
 			logger.Warn("Failed to stop MCP manager", logger.Err(err))
+		}
+	}
+	if a.toolAdapter != nil {
+		if err := a.toolAdapter.Close(); err != nil {
+			logger.Warn("Failed to close runtime tool adapter (LSP pool)", logger.Err(err))
 		}
 	}
 	if a.ledgerStore != nil {

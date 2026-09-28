@@ -21,7 +21,7 @@
 
 | 不做的事 | 事实源 / 理由 |
 | --- | --- |
-| 不定义 core schema、本目录不新增表列 | 落入 `03_agent_harness_supplement.md` §5.2 既有列 `lsp_diagnostics` / `lsp_servers`；上游已授权的列（ADR-0006 的编码列）按 Gate 生效，本文不自行增列 |
+| 不定义 core schema、本目录不新增表列 | 落入 `supplement/05_runtime_integration_project_detection_and_lsp.md` §10.2 既有列 `lsp_diagnostics` / `lsp_servers`；上游已授权的列（ADR-0006 的编码列）按 Gate 生效，本文不自行增列 |
 | 不定义位置编码转换规则 | `adr/0006-lsp-position-encoding-boundary.md` |
 | 不决定 LSP 进程归属模型 | `adr/0002-acp-lsp-ownership.md` |
 | 不拍板诊断数量上限等阈值 | 知识层禁止写死阈值 → 见 §6，转 `03` 验收 |
@@ -157,8 +157,8 @@ crush 在 `internal/agent/tools/diagnostics.md` 的 `<tips>` 里写了：
 
 | 需要承载的信息 | 落位（既有） | 说明 |
 | --- | --- | --- |
-| 文件级诊断快照 | `03_agent_harness_supplement.md` §5.2 → `lsp_diagnostics` | 已有列，直接复用；**不新增列** |
-| LSP 服务清单与状态 | `03_agent_harness_supplement.md` §5.2 → `lsp_servers` | 已有列，承载 server 名、状态、工作区根 |
+| 文件级诊断快照 | `supplement/05_runtime_integration_project_detection_and_lsp.md` §10.2 → `lsp_diagnostics` | 已有列，直接复用；**不新增列** |
+| LSP 服务清单与状态 | `supplement/05_runtime_integration_project_detection_and_lsp.md` §10.2 → `lsp_servers` | 已有列，承载 server 名、状态、工作区根 |
 | 运行时集成与项目探测 | `supplement/05_runtime_integration_project_detection_and_lsp.md` §2.3 | 探测到的语言/构建系统决定要不要起对应 server |
 | 归属边界（谁负责 LSP） | `adr/0002-acp-lsp-ownership.md` | 本项目不推翻该归属划分 |
 | 位置编码边界 | `adr/0006-lsp-position-encoding-boundary.md` | UTF-16 / UTF-8 / 行列基准不在本文决定 |

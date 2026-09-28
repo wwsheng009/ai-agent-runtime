@@ -16,6 +16,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
+	runtimelsp "github.com/wwsheng009/ai-agent-runtime/internal/lsp"
 	runtimeobserve "github.com/wwsheng009/ai-agent-runtime/internal/runtimeobserve"
 	"gopkg.in/yaml.v3"
 )
@@ -63,6 +64,11 @@ type RuntimeConfig struct {
 	// 存在，但完全不参与任何路径（04 §5 排期铁律 ③）。Workspace 由运行时按
 	// 当前工作区注入，不出现在配置文件里。
 	Knowledge knowledge.Config `yaml:"knowledge" json:"knowledge"`
+
+	// LSP 语言服务器接入（docs/lsp 02/03）。默认 enabled=false：不主动
+	// spawn 任何语言服务器；打开后编辑类工具会在返回文本尾部追加同一文件
+	// 的当前诊断（追加语义，见 docs/lsp 03 不变量 I1/I2）。
+	LSP runtimelsp.Config `yaml:"lsp" json:"lsp"`
 }
 
 // AgentConfig Agent 配置
@@ -576,6 +582,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		},
 		Observe:   runtimeobserve.DefaultConfig(),
 		Knowledge: knowledge.DefaultConfig(),
+		LSP:       runtimelsp.DefaultConfig(),
 	}
 }
 

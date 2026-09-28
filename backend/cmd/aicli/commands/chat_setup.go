@@ -528,6 +528,13 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 				fmt.Fprintf(os.Stderr, "Warning: 停止 Skills Runtime 失败: %v\n", stopErr)
 			}
 		}
+		// LSP 池归宿主所有（adr/0002）：会话退出时显式释放语言服务器进程，
+		// 不能依赖进程退出兜底（docs/lsp 03 W2）。
+		if toolManager != nil {
+			if closeErr := toolManager.Close(); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: 停止语言服务器池失败: %v\n", closeErr)
+			}
+		}
 	}
 
 	return skillsBinding, cleanup, nil

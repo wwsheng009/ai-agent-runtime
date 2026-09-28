@@ -145,7 +145,7 @@
 
 | 触发条件 | 动作 |
 | --- | --- |
-| A4 发现既有列语义不足（`lsp_diagnostics` / `lsp_servers`） | 回流 `docs/knowledge_Layer/03_agent_harness_supplement.md` §5.2 讨论，不在 `docs/lsp` 补表定义 |
+| A4 发现既有列语义不足（`lsp_diagnostics` / `lsp_servers`） | 回流 `docs/knowledge_Layer/supplement/05_runtime_integration_project_detection_and_lsp.md` §10.2 讨论，不在 `docs/lsp` 补表定义 |
 | A9 需要裁定多 server 优先级 | 回流规格侧（`lsp_servers` 语义解释权） |
 | A6/A8 发现需要 diff 语义或返回体规格支持 | 回流知识层；必要时新增 ADR |
 | 规格变更 | 本目录三篇文档随之修订（修订**不会**反向要求规格变更） |
