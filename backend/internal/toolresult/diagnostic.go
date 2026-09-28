@@ -2179,7 +2179,7 @@ func nextActionForToolError(code string, message string) string {
 		case strings.Contains(lower, "compound shell command"):
 			return "Read-only policy does not allow shell statement chaining. Put each read-only command in a separate shell.commands entry, or use dedicated view/grep/glob/ls tools. Approval and bypass_permissions cannot override this boundary."
 		case strings.Contains(lower, "redirection or dynamic command syntax"):
-			return "Remove shell redirection, command substitution, or dynamic syntax. Use a dedicated read tool or a single allowlisted read-only command. Approval and bypass_permissions cannot override this boundary."
+			return "Remove redirection to real targets, command substitution, or dynamic syntax; redirecting to the null device (/dev/null on POSIX, NUL on Windows) stays allowed. Use a dedicated read tool or a single allowlisted read-only command. Approval and bypass_permissions cannot override this boundary."
 		case strings.Contains(lower, "write-like tool"):
 			return "Use an allowed read-only tool, or have the parent create a writable child with read_only=false when mutation is actually required. Approval and bypass_permissions cannot override this boundary."
 		case strings.Contains(lower, "sensitive"):

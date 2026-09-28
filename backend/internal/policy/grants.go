@@ -236,7 +236,10 @@ func AssessShellReadOnlyCommand(command string) ShellReadOnlyAssessment {
 		return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonEmpty}
 	}
 	// Redirection and command substitution can smuggle side effects even when
-	// argv[0] itself is a read-only command.
+	// argv[0] itself is a read-only command. Null-device redirections are the
+	// exception: their target discards the stream, so they are stripped before
+	// the scan (see stripPlatformNullDeviceRedirections).
+	command = stripPlatformNullDeviceRedirections(command)
 	for _, bad := range []string{">", "<", "`", "$"} {
 		if strings.Contains(command, bad) {
 			return ShellReadOnlyAssessment{Reason: ShellReadOnlyReasonDynamicSyntax}

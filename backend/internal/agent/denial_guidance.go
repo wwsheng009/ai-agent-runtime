@@ -71,7 +71,7 @@ func denialFixForCode(code string) string {
 	case DenialCodeReadOnlyShellCompound:
 		return "Split the command: submit exactly one read-only command per shell.commands entry (chained/compound commands cannot be validated independently)."
 	case DenialCodeReadOnlyShellDynamic:
-		return "The read-only boundary rejects redirection, variable expansion, and command substitution; submit plain single commands only."
+		return "The read-only boundary rejects variable expansion, command substitution, and redirection to any target other than the null device (/dev/null on POSIX, NUL on Windows); submit plain single commands only."
 	case DenialCodeReadOnlyShellSecret:
 		return "Reading secret material (.env, keys, credential stores) is outside the read-only boundary. Report the need to the parent instead of retrying with another reader."
 	default:
@@ -183,7 +183,7 @@ func enrichReadOnlyToolDescriptions(tools []types.ToolDefinition, policy *runtim
 	if policy == nil || !policy.ReadOnly {
 		return tools
 	}
-	const readOnlyShellModeNote = "\n\nREAD-ONLY MODE: only read-only commands are allowed (git status/diff/log/show, rg, ls/glob, Get-Content, Select-Object, pwd, echo). Write, mutating, redirecting, or compound commands are hard-denied. If you need to change files, return the change to the parent instead."
+	const readOnlyShellModeNote = "\n\nREAD-ONLY MODE: only read-only commands are allowed (git status/diff/log/show, rg, ls/glob, Get-Content, Select-Object, pwd, echo). Write, mutating, compound, or file-redirecting commands are hard-denied; only redirection to the null device (2>/dev/null on POSIX, 2>NUL on Windows) stays allowed. If you need to change files, return the change to the parent instead."
 	changed := false
 	out := make([]types.ToolDefinition, 0, len(tools))
 	for _, def := range tools {

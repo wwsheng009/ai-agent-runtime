@@ -42,6 +42,10 @@ func AssessShellSafeFileCommand(command, workspaceRoot string) ShellSafeFileAsse
 	if command == "" {
 		return ShellSafeFileAssessment{Reason: ShellSafeFileReasonNotSafeCommand}
 	}
+	// Null-device redirections carry no observable side effect; strip them
+	// before the dynamic-syntax scan (same allowance as the read-only shell
+	// fast path). Every other redirection target stays rejected.
+	command = stripPlatformNullDeviceRedirections(command)
 	for _, bad := range []string{">", "<", "`", "$"} {
 		if strings.Contains(command, bad) {
 			return ShellSafeFileAssessment{Reason: ShellSafeFileReasonDynamicSyntax}

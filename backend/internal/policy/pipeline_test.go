@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -360,4 +361,25 @@ func TestReadOnlyPolicyDenialReportsFailingSegment(t *testing.T) {
 	assert.Contains(t, err.Error(), "non-readonly shell command")
 	assert.Contains(t, err.Error(), "segment 3")
 	assert.Contains(t, err.Error(), "Remove-Item")
+}
+
+// TestReadOnlyPolicyAllowsNullDeviceRedirection 锁定只读执行边界对空设备重定向
+// 的豁免：`cmd 2>/dev/null`（Windows `2>NUL`）不再整条拒绝；重定向到真实目标
+// 仍然返回同一稳定原因码。
+func TestReadOnlyPolicyAllowsNullDeviceRedirection(t *testing.T) {
+	policy := NewToolExecutionPolicy(nil, true)
+	command := `grep -rn "race" backend/Makefile Makefile 2>/dev/null | head -20`
+	if runtime.GOOS == "windows" {
+		command = `grep -rn "race" backend/Makefile Makefile 2>NUL | head -20`
+	}
+	err := policy.AllowToolCallWithContext(context.Background(),
+		skill.ToolInfo{Name: "shell", MCPTrustLevel: "local", ExecutionMode: "local_mcp"},
+		map[string]interface{}{"command": command})
+	require.NoError(t, err)
+
+	err = policy.AllowToolCallWithContext(context.Background(),
+		skill.ToolInfo{Name: "shell", MCPTrustLevel: "local", ExecutionMode: "local_mcp"},
+		map[string]interface{}{"command": `echo x > real.txt`})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "redirection or dynamic command syntax")
 }

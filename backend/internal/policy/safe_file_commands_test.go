@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -50,6 +51,22 @@ func TestAssessShellSafeFileCommandRequiresWorkspaceRoot(t *testing.T) {
 	assessment := AssessShellSafeFileCommand("mkdir dist", "")
 	assert.False(t, assessment.Allowed)
 	assert.Equal(t, ShellSafeFileReasonUnsafeTarget, assessment.Reason)
+}
+
+// TestAssessShellSafeFileCommandNullDeviceRedirection 锁定 accept-edits 快车道与
+// 只读快车道一致的空设备豁免：stderr 丢弃不改变可验证的写入目标；其他平台
+// 拼写与真实目标仍按动态语法拒绝。
+func TestAssessShellSafeFileCommandNullDeviceRedirection(t *testing.T) {
+	root := t.TempDir()
+	native, foreign := " 2>/dev/null", " 2>NUL"
+	if runtime.GOOS == "windows" {
+		native, foreign = foreign, native
+	}
+	assert.True(t, AssessShellSafeFileCommand("touch notes.txt"+native, root).Allowed)
+
+	assessment := AssessShellSafeFileCommand("touch notes.txt"+foreign, root)
+	assert.False(t, assessment.Allowed)
+	assert.Equal(t, ShellSafeFileReasonDynamicSyntax, assessment.Reason)
 }
 
 func TestAcceptEditsSafeFileAllowedAppliesToEveryCommand(t *testing.T) {
