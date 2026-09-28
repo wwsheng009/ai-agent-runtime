@@ -3911,6 +3911,12 @@ func (r *localActorRegistry) resolveLocalTaskChildSessionID(ctx context.Context,
 	}
 	childSessionID := strings.TrimSpace(task.ChildSessionID)
 	if childSessionID == "" {
+		if task.Status.Terminal() {
+			// 派发前失败（如 single-writer 策略拒绝）的任务永远不会绑定子会话。
+			// 硬错 "retry shortly" 会把模型推入无意义的重试；按"未知 id"原样透传，
+			// 让 snapshot 的账本投影给出可读的失败观测（与 API 宿主同口径）。
+			return "", false, nil
+		}
 		return "", false, fmt.Errorf(
 			"batch task %s is %s but has no child session bound yet (batch %s); retry shortly or pass the child session id",
 			taskID, task.Status, batchID,
@@ -3971,11 +3977,13 @@ func (r *localActorRegistry) expandLocalBatchWaitTargets(ctx context.Context, id
 	return out, nil
 }
 
-// batchTaskSnapshot 把「子代理会话 id」投影成可等待 / 可读的状态行
+// batchTaskSnapshot 把「子代理会话 id」或「批任务 id」投影成可等待 / 可读的状态行
 // （2026-09-26 真机 E2E）：生产里子代理运行**不落 SessionStore**——身份
 // （child_session_id 早绑定）与结果只写在批任务行上，因此 wait_agent(task_id)
-// 解析出的子会话 id 在会话库里永远是 missing。回退到账本行才是权威。
-func (r *localActorRegistry) batchTaskSnapshot(ctx context.Context, childSessionID string) (*toolbroker.AgentStatusResult, bool, error) {
+// 解析出的子会话 id 在会话库里永远是 missing。回退到账本行才是权威；派发前失败
+// （或无论何时都没有绑定）的任务没有 child_session_id，再按 task id 兜一次，
+// 让父代理拿到失败观测而不是 target_not_found。
+func (r *localActorRegistry) batchTaskSnapshot(ctx context.Context, id string) (*toolbroker.AgentStatusResult, bool, error) {
 	if r == nil || r.Host == nil || r.Host.SubagentBatches == nil {
 		return nil, false, nil
 	}
@@ -3983,11 +3991,17 @@ func (r *localActorRegistry) batchTaskSnapshot(ctx context.Context, childSession
 	if parentSessionID == "" {
 		return nil, false, nil
 	}
-	task, batchID, ok, err := subagentbatch.FindTaskByChildSessionIDInParentSession(ctx, r.Host.SubagentBatches, parentSessionID, childSessionID)
-	if err != nil || !ok {
+	task, batchID, ok, err := subagentbatch.FindTaskByChildSessionIDInParentSession(ctx, r.Host.SubagentBatches, parentSessionID, id)
+	if err != nil {
 		return nil, false, err
 	}
-	return localBatchTaskStatusResult(childSessionID, batchID, task), true, nil
+	if !ok {
+		task, batchID, ok, err = subagentbatch.FindTaskByIDInParentSession(ctx, r.Host.SubagentBatches, parentSessionID, id)
+		if err != nil || !ok {
+			return nil, false, err
+		}
+	}
+	return localBatchTaskStatusResult(id, batchID, task), true, nil
 }
 
 // localBatchTaskStatusResult 把账本行映射成 AgentStatusResult：终态任务映射到

@@ -11,6 +11,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 )
 
 const (
@@ -28,6 +29,8 @@ func newAPIBatchSnapshotFixture(t *testing.T) (*sessionAgentController, string) 
 	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
 	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
 	handler.SetSubagentBatchStore(newAPISupervisionBatchStore(t))
+	// 空会话库：批任务子会话不落 SessionStore，snapshot 才能走到账本回退分支。
+	handler.SetSessionManager(chat.NewSessionManager(chat.NewInMemoryStorage(), nil))
 
 	now := time.Now().UTC()
 	task := subagentbatch.SubagentTaskRecord{
@@ -128,4 +131,73 @@ func TestBatchTaskSnapshotKeepsFailureEvidence(t *testing.T) {
 	require.Equal(t, string(chat.SessionStopped), snapshot.Status)
 	require.Contains(t, snapshot.Output, "部分交付")
 	require.Equal(t, "provider: rate_limited", snapshot.Error)
+}
+
+// newAPIPreDispatchFailureFixture 组装 doc1 §7.10 新遗留① 的场景：批次在派发前
+// 就失败（如 single-writer 策略拒绝），任务行终态但没有、也永远不会有
+// child_session_id（与建批次时直接落终态行的生产形态一致）。
+func newAPIPreDispatchFailureFixture(t *testing.T) (*sessionAgentController, string) {
+	t.Helper()
+	ctx := context.Background()
+	handler := NewHandler(skill.NewRegistry(nil), nil, nil)
+	handler.SetRuntimeConfig(runtimecfg.DefaultRuntimeConfig(), "")
+	handler.SetSubagentBatchStore(newAPISupervisionBatchStore(t))
+	handler.SetSessionManager(chat.NewSessionManager(chat.NewInMemoryStorage(), nil))
+
+	now := time.Now().UTC()
+	task := subagentbatch.SubagentTaskRecord{
+		TaskID:      "t-predispatch",
+		Status:      subagentbatch.TaskFailed,
+		TaskType:    "implement",
+		TaskSubject: "single-writer 被拒",
+		ErrorClass:  "policy",
+		ErrorCode:   "single_writer_rejected",
+		OrderIndex:  1,
+		UpdatedAt:   now,
+		Version:     1,
+	}
+	batch := &subagentbatch.SubagentBatch{
+		BatchID:         subagentbatch.NewID("batch"),
+		RootScopeID:     apiBatchSnapshotParent,
+		ParentSessionID: apiBatchSnapshotParent,
+		ExecutionMode:   subagentbatch.ExecutionModeBackground,
+		Status:          subagentbatch.BatchFailed,
+		TaskCount:       1,
+		FailedCount:     1,
+		HeartbeatAt:     now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Version:         1,
+	}
+	created, err := handler.getSubagentBatchStore().CreateBatch(ctx, batch, []subagentbatch.SubagentTaskRecord{task})
+	require.NoError(t, err)
+	require.True(t, created)
+	return &sessionAgentController{handler: handler}, batch.BatchID
+}
+
+// TestWaitAgentTaskIDProducesPreDispatchFailureObservation 钉住 doc1 §7.10 新遗留①：
+// 派发前失败的终态任务（无子会话绑定）应当：
+//  1. 解析层不再返回 "retry shortly" 硬错，而是按可寻址 id 透传；
+//  2. wait_agent(task_id) 返回可读的失败观测（stopped + 错误分类 + 任务身份），
+//     让父代理直接读到批次失败原因，而不是无意义重试。
+func TestWaitAgentTaskIDProducesPreDispatchFailureObservation(t *testing.T) {
+	controller, _ := newAPIPreDispatchFailureFixture(t)
+	ctx := toolctx.WithSessionID(context.Background(), apiBatchSnapshotParent)
+
+	resolved, err := controller.resolveTargetSessionID(ctx, "t-predispatch")
+	require.NoError(t, err, "terminal unbound task must not surface an executable retry error")
+	require.Equal(t, "t-predispatch", resolved)
+
+	result, err := controller.Wait(ctx, toolbroker.WaitAgentArgs{ID: "t-predispatch"})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, 1, result.ReadyCount, "pre-dispatch failure is terminal, so wait must return it as ready")
+	require.NotContains(t, result.NextAction, "retry shortly")
+	require.Len(t, result.Agents, 1)
+	observation := result.Agents[0]
+	require.True(t, observation.Exists)
+	require.Equal(t, "t-predispatch", observation.ID)
+	require.Equal(t, string(chat.SessionStopped), observation.Status)
+	require.Equal(t, string(subagentbatch.TaskFailed), observation.CurrentTaskStatus)
+	require.Equal(t, "policy: single_writer_rejected", observation.Error)
 }

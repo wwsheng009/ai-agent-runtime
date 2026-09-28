@@ -459,9 +459,15 @@ goroutine 稳定 79–80；等待中抓的 62KB goroutine dump：`semacquire` 0�
 **证据**：`artifacts/remote-debug-51875/`（probe-longrun.log、goroutine-mid-wait.txt、session-trace.json、
 fix-trace.txt、fix/fix2 的 invoke 原文与响应）。
 
-**新遗留（诚实记录）**：① 批次在**派发前**失败（如 single-writer 策略拒绝）时，`wait_agent(task_id)`
+**新遗留（诚实记录）**：① ~~批次在**派发前**失败（如 single-writer 策略拒绝）时，`wait_agent(task_id)`
 返回硬错误 `TOOL_BROKER_FAILURE`（"batch task … is failed but has no child session bound yet; retry shortly"），
-应改为可读的缺失/失败观测并把父代理指向批次失败原因，而不是让它"稍后重试"；② `wait_agent` 对
+应改为可读的缺失/失败观测并把父代理指向批次失败原因，而不是让它"稍后重试"~~
+**已修（2026-09-28）**：终态未绑定任务不再返回硬错——解析层按可寻址 id 透传，snapshot 以 task id 兜底投影账本行，
+`wait_agent(task_id)` 得到 `stopped` + `ErrorClass: ErrorCode` 的失败观测；两宿主对称
+（`session_runtime_support.go` / `chat_actor_registry.go`），回归
+`TestWaitAgentTaskIDProducesPreDispatchFailureObservation`、
+`TestLocalWaitAgentTaskIDProducesPreDispatchFailureObservation`。非终态未绑定任务保留"身份未就绪"可执行错误
+（与"未知 id"不混同）；② `wait_agent` 对
 read_only 子代理的执行面限制（管道/命令替换一律拒绝）属策略设计，但**派发建议**上父代理应默认给
 "要跑命令"的子代理 `read_only=false`（本轮 pre-dispatch 失败即因两个任务都成了 writer）。
 
