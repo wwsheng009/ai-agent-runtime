@@ -96,6 +96,19 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			AcceptsArgs: false,
 		},
 		{
+			Name:    "/todos",
+			Usage:   "/todos [all|active|done|brief]",
+			Summary: "查看当前会话任务列表（支持按进行中/待办/已完成切换视图）",
+			Group:   string(chatSlashCommandGroupSession),
+			Args: []chatSlashCommandArgSpec{
+				{Token: "all", Summary: "全部任务（默认）"},
+				{Token: "active", Summary: "进行中与待办"},
+				{Token: "done", Summary: "仅已完成"},
+				{Token: "brief", Summary: "单行摘要"},
+			},
+			AcceptsArgs: true,
+		},
+		{
 			Name:        "/usage",
 			Usage:       "/usage [cache [requests [N] | trace <message_id>]] | tools [N] | subagents [N] [--failed] | errors [top N]",
 			Summary:     "显示会话用量、缓存与工具/子代理/失败分析",

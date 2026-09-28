@@ -427,7 +427,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		!commandMatches(cmdLower, "/describe") && !commandMatches(cmdLower, "/functions") && !commandMatches(cmdLower, "/catalog") &&
 		!commandMatches(cmdLower, "/sessions") && !commandMatches(cmdLower, "/help") && !commandMatches(cmdLower, "/?") &&
 		!commandMatches(cmdLower, "/new") && cmdLower != "/session" && !commandMatches(cmdLower, "/history") && !commandMatches(cmdLower, "/h") &&
-		!commandMatches(cmdLower, "/queue") && !commandMatches(cmdLower, "/attach") &&
+		!commandMatches(cmdLower, "/queue") && !commandMatches(cmdLower, chatTodosCommandName) && !commandMatches(cmdLower, "/attach") &&
 		!commandMatches(cmdLower, "/permission-mode") && !commandMatches(cmdLower, "/mode") && !permissionModeColonShorthand(cmdLower) &&
 		!commandMatches(cmdLower, "/approval-reuse") && !commandMatches(cmdLower, "/grants") &&
 		!commandMatches(cmdLower, "/plan") && !commandMatches(cmdLower, "/plans") &&
@@ -453,6 +453,13 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 
 	if commandMatches(cmdLower, "/queue") {
 		return executeStructuredQueueCommand(session, command), true, nil
+	}
+
+	// /todos（v1.3.1）：只读任务列表查看，数据面复用 web 任务列表面板的
+	// transcript 回放通道（web_todo_snapshot.go）。运行时交互注册声明见
+	// chat_todos_command.go 顶部注释（业务域 C12 / screen|inline / read）。
+	if commandMatches(cmdLower, chatTodosCommandName) {
+		return executeStructuredTodosCommand(session, command), true, nil
 	}
 
 	if commandMatches(cmdLower, "/attach") {

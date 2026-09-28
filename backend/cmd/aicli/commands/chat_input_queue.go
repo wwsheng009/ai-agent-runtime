@@ -1252,6 +1252,11 @@ func chatSlashCommandQueueSafe(text string) bool {
 		return len(fields) < 2 || !strings.EqualFold(fields[1], "clear")
 	case "provider", "model", "help", "?", "status", "session", "history", "h":
 		return true
+	case "todos":
+		// v1.3 §3.8 / 附录 F.7：目标是运行时只读任务面板（screen，无副屏降级
+		// inline）。统一 runtimeCommandHost 落地前先纳入排队白名单，保证忙时
+		// 输入不丢、回合结束后立即可查看（fail-safe，与 INV-6 一致）。
+		return true
 	case "debug":
 		// 只读诊断可排队；on/off/export 变更状态或写文件，忙时拒绝。
 		return chatDebugSubcommandQueueSafe(fields[1:])

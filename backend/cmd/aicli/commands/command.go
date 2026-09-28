@@ -303,6 +303,11 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	if commandMatches(cmdLower, "/queue") {
 		return handleQueueCommand(session, command)
 	}
+	// /todos 结构化路径在 tryExecuteStructuredChatCommand 中接管；这里保留
+	// legacy/plain 出口，同时让 handleCommand 的路由表与 catalog 保持一致。
+	if commandMatches(cmdLower, "/todos") {
+		return handleTodosCommand(session, command)
+	}
 	// /account 与 /accounts 与 `aicli balance` 同源（抓取/换算实现共用）：结构化
 	// 路径在 tryExecuteStructuredChatCommand 中接管，这里只保留 legacy/JSON 出口。
 	// 旧的 /balance 别名已移除。
