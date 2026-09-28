@@ -174,6 +174,9 @@
 | 进度诊断展示 | `backend/internal/api/runtimeapi/session_runtime_support.go:3442`；`cmd/aicli/commands/chat_debug.go:2173 / 2410` | 仅展示 `last_progress_at` |
 | progress 埋点清单（既有计划） | `docs/plan/spawn-agent-team-supervision-timeout-recovery-plan.md:406-431` | 落点 + `ProgressRecorder` 设计 |
 | 分级 wake（既有计划） | `docs/plan/spawn-agent-team-supervision-timeout-recovery-plan.md:711-730` | critical → 父 idle 调度；busy → durable `wake_pending` |
+| 工具错误级联（§3.1） | `backend/internal/usageanalytics/{ingest_v2,store,query_v2}.go` | `usage_turns.tool_failure_streak` / `last_tool_success`；rollup `MaxToolFailureStreak` |
+| wake 滞留告警（§2.5） | `backend/internal/supervision/snapshot.go` | `WakePendingLister` → `pending_wakes` / `wake_pending_overdue` / `oldest_wake_pending_age_ms`（阈值 10m） |
+| 子代理预算超支（§4.2） | `backend/internal/usageanalytics/{ingest_v2,store,query_v2,contracts}.go`；发射点 `backend/internal/agent/scheduler.go`、`subagent_retry.go` | `usage_subagents.budget_tokens`；`BudgetExceeded` / `SubagentBudgetExceeded` / 诊断码 `subagent_budget_exceeded` |
 
 > 路径注记：既有计划 §5.4 中引用的 `backend/internal/api/skills/session_runtime_support.go` 在当前仓库已迁移为 `backend/internal/api/runtimeapi/session_runtime_support.go`，实施时以现路径为准。
 

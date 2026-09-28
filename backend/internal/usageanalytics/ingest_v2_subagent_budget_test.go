@@ -105,6 +105,9 @@ func TestSubagentBudgetOverspendIsVisibleInLedgerAndDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubagentStats: %v", err)
 	}
+	if stats.Summary.BudgetedRuns != 1 || stats.Summary.BudgetExceeded != 1 {
+		t.Fatalf("子代理聚合预算计数不符: %+v", stats.Summary)
+	}
 	byID := map[string]SubagentStat{}
 	for _, stat := range stats.Subagents {
 		byID[stat.SubagentID] = stat

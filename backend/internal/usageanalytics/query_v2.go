@@ -98,6 +98,10 @@ type SubagentStatsSummary struct {
 	FailureRate       float64        `json:"failure_rate"`
 	Timeouts          int            `json:"timeouts"`
 	Retried           int            `json:"retried"`
+	// §4.2 超支告警：声明了任务预算的子代理数与其实际用量超预算的数
+	// （"1 exceeded of 3 budgeted" 比孤立计数可解释）。
+	BudgetedRuns      int            `json:"budgeted_runs,omitempty"`
+	BudgetExceeded    int            `json:"budget_exceeded,omitempty"`
 	FailureCategories map[string]int `json:"failure_categories"`
 	Sources           map[string]int `json:"sources"`
 }
@@ -453,6 +457,12 @@ LIMIT ?`, taskTypeExpr, taskSubjectExpr, where), append(args, normalizeLimit(q.L
 		}
 		if stat.Attempt > 1 {
 			result.Summary.Retried++
+		}
+		if stat.BudgetTokens > 0 {
+			result.Summary.BudgetedRuns++
+			if stat.BudgetExceeded {
+				result.Summary.BudgetExceeded++
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
