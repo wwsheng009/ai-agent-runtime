@@ -109,6 +109,11 @@ type FixedBottomSurface struct {
 	// primary flushing; leaseMode records the granted screen mode.
 	leaseID   uint64
 	leaseMode ScreenMode
+	// leaseWaitBudget 是「撞上在途租约时」的等待预算（P2-4b）：0 = 立即
+	// 返回 ErrScreenLeaseBusy（历史行为）；>0 = 在预算内轮询等待释放。
+	// 由忙时宿主在 S 档命令执行期间设置，使既有 AcquireAlternateScreen
+	// 调用点无需改动即可获得等待能力。
+	leaseWaitBudget time.Duration
 	// alternateWriter is the byte sink for the DEC 1049 enter/exit sequences
 	// the lease owns. nil means os.Stdout (production). Tests inject a buffer
 	// to assert the sequence boundary around the picker frame.

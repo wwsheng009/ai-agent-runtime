@@ -20,6 +20,29 @@ const (
 	alternateScreenWaitPollInterval = 10 * time.Millisecond
 )
 
+// SetAlternateScreenWaitBudget 配置「撞上在途租约时」的等待预算（P2-4b）。
+// 0（默认）保持历史语义：立即返回 ErrScreenLeaseBusy；>0 时
+// AcquireAlternateScreen 会在预算内轮询等待在途租约释放，使既有调用点
+// （各 S 档 screen handler）无需改动即可获得忙时等待能力。
+func (s *FixedBottomSurface) SetAlternateScreenWaitBudget(budget time.Duration) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.leaseWaitBudget = budget
+	s.mu.Unlock()
+}
+
+// AlternateScreenWaitBudget 返回当前配置的等待预算（只读，供测试/诊断）。
+func (s *FixedBottomSurface) AlternateScreenWaitBudget() time.Duration {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leaseWaitBudget
+}
+
 // AcquireAlternateScreenWait 在预算内等待在途租约释放后再获取副屏租约
 // （P2-4 前置①：租约等待）。与 AcquireAlternateScreen 的差异：
 //   - 撞上在途租约（ErrScreenLeaseBusy）时按 interval 轮询重试，直到 budget 用尽；
@@ -31,12 +54,21 @@ func (s *FixedBottomSurface) AcquireAlternateScreenWait(ctx context.Context, req
 	if budget <= 0 {
 		budget = DefaultAlternateScreenWaitBudget
 	}
+	return s.acquireAlternateScreenWithBudget(ctx, req, budget)
+}
+
+// acquireAlternateScreenWithBudget 是等待/立即两种语义的公共实现：
+// budget<=0 直接单次尝试；>0 时在预算内轮询重试。
+func (s *FixedBottomSurface) acquireAlternateScreenWithBudget(ctx context.Context, req FullscreenRequest, budget time.Duration) (ScreenLease, error) {
+	if budget <= 0 {
+		return s.acquireAlternateScreenOnce(ctx, req)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	deadline := time.Now().Add(budget)
 	for {
-		lease, err := s.AcquireAlternateScreen(ctx, req)
+		lease, err := s.acquireAlternateScreenOnce(ctx, req)
 		if err == nil {
 			return lease, nil
 		}
@@ -195,12 +227,26 @@ var leaseCounter atomic.Uint64
 // active at a time. The returned lease must be released (preferably with
 // defer) on every path, including error paths.
 //
+// 撞上在途租约时的行为由 SetAlternateScreenWaitBudget 决定：默认 0 = 立即
+// 返回 ErrScreenLeaseBusy（历史语义）；>0 = 在预算内等待释放后重试。
+func (s *FixedBottomSurface) AcquireAlternateScreen(ctx context.Context, req FullscreenRequest) (ScreenLease, error) {
+	budget := time.Duration(0)
+	if s != nil {
+		s.mu.Lock()
+		budget = s.leaseWaitBudget
+		s.mu.Unlock()
+	}
+	return s.acquireAlternateScreenWithBudget(ctx, req, budget)
+}
+
+// acquireAlternateScreenOnce 执行一次立即获取尝试（不等待在途租约）。
+//
 // Acquire performs the whole DEC 1049 enter sequence inside the same terminal
 // ownership transaction that marks the lease active, so no primary frame can
 // interleave between "alternate screen entered" and "primary flush
 // suspended". A failed enter rolls the sequence back and leaves no suspended
 // state behind.
-func (s *FixedBottomSurface) AcquireAlternateScreen(_ context.Context, req FullscreenRequest) (ScreenLease, error) {
+func (s *FixedBottomSurface) acquireAlternateScreenOnce(_ context.Context, req FullscreenRequest) (ScreenLease, error) {
 	if s == nil || s.terminal == nil {
 		return nil, fmt.Errorf("%w: no terminal", ErrFullScreenUnavailable)
 	}
