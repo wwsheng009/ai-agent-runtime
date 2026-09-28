@@ -365,3 +365,39 @@ run 零开销）；未走 SSE/web 通道，因此不触及 §8.5 的背压约束
 环境注记：`npm run lint:i18n` 在本机 Node v22.15 下直接执行 `.ts` 脚本会报
 `ERR_UNKNOWN_FILE_EXTENSION`（该版本未默认开启 type stripping），是环境问题而非
 脚本缺陷；同一脚本以 `node --experimental-strip-types` 运行即通过。
+
+---
+
+## 7. 收尾：链路、健康检查与残留风险（2026-09-27）
+
+### 7.1 四段链路（事故 → 修复 → 自愈 → 观测）
+
+| 环节 | 落点 |
+| --- | --- |
+| 事故指纹 | late action 携带 `targets closed run epoch`：提交/恢复/驱逐撞上在途 turn 时，UI 动作落到错误 run 或被丢弃，症状是「等待态没有 run」/面板撕裂 |
+| 修复 | 显式 `RunState`（idle/running/closed，P1-1a）+ 提交-运行 epoch 围栏（P0 系列）：等待态后置到 `BeginRun`、submit 与 evict 互斥、预跑预算、pre-run 不再渲染 analyzing 帧 |
+| 自愈 | 等待态时钟 + 「脱离 run 的等待态」看门狗：自动清态 + 动态栏提示（P1-2） |
+| 观测 | `/debug` late-drop 细分（idle/closed/active-mismatch）→ EventBus `runtime.render_fence_dropped` → `usage_render_fence_drops` → `/analytics/errors?source=fence` → `/usage` 失败模式面板（P1-1b） |
+
+### 7.2 健康检查（可照抄）
+
+1. TUI `/debug`：late action 细分应长期只有 idle 低水位；`closed` / `active-mismatch`
+   持续增长说明围栏仍拦到了真实撕裂。
+2. 端点：`curl -H "Authorization: Bearer $ADMIN" "<runtime>/api/runtime/analytics/errors?source=fence&top=10"`
+   → `render_fence_drop_closed` / `render_fence_drop_active_mismatch` 应为 0 或偶发；
+   面板中该来源行标记「不可下钻」。
+3. 看门狗：动态栏出现「等待态脱离 run」提示即状态机异常（已自愈清态），需查会话日志。
+
+### 7.3 残留风险与取舍
+
+1. 上报时点：计数在 `EndRun` 增量发布，进程被强杀时最后一个 run 的增量丢失
+   （与其它会话级事件同语义；零丢失需持久化队列，不在本方案范围）。
+2. idle 类噪声：resume/启动期的 idle 拒绝是设计内噪声（epoch 0 哨兵语义收敛后的
+   正常现象），看板需按类别区分，不应视为故障。
+3. 表增长：`usage_render_fence_drops` 每 `(session, turn, class)` 一行，目前无自动
+   清理策略；高 turn 量场景需要时再加保留窗口。
+4. 前端下钻：`fence` 行不参与诊断下钻（诊断 tab 的失败分类过滤面向 provider/tool
+   样本），面板显示「不可下钻」占位而非死链按钮。
+
+验证（前端收口变更）：`npx vitest run`（面板单文件 14 用例）PASS；`npx tsc -b` PASS；
+`verify-frontend-i18n` PASS（937/0）；`npx eslint` PASS。

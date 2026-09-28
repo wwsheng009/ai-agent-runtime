@@ -74,6 +74,12 @@ function analyticsSourceLabel(
   return (source ?? "").trim() || t("observability.errors.unknown");
 }
 
+// 渲染围栏丢弃（P1-1b）不是 provider/tool 失败：诊断 tab 的失败分类过滤只匹配
+// 工具/子代理样本，下钻必然空结果，因此该来源不给入口。
+function isFenceSource(source?: string): boolean {
+  return (source ?? "").trim().toLowerCase() === "fence";
+}
+
 function patternLabel(
   t: TFunction<"usageAnalytics">,
   pattern: AnalyticsErrorPattern,
@@ -230,15 +236,21 @@ export function ErrorPatternsPanel({
                     </td>
                     <td className="px-3 py-2.5 tabular-nums">{formatNumber(pattern.count)}</td>
                     <td className="px-3 py-2.5">
-                      <button
-                        type="button"
-                        aria-pressed={selected}
-                        aria-label={t("observability.errors.drilldown", { key: label })}
-                        onClick={() => onDrilldown(pattern)}
-                        className="rounded-field border border-border px-2 py-1 text-xs transition hover:bg-surface-soft hover:text-foreground"
-                      >
-                        {t("observability.errors.columns.action")}
-                      </button>
+                      {isFenceSource(pattern.source) ? (
+                        <span className="text-xs text-muted-foreground">
+                          {t("observability.errors.drilldownUnavailable")}
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          aria-pressed={selected}
+                          aria-label={t("observability.errors.drilldown", { key: label })}
+                          onClick={() => onDrilldown(pattern)}
+                          className="rounded-field border border-border px-2 py-1 text-xs transition hover:bg-surface-soft hover:text-foreground"
+                        >
+                          {t("observability.errors.columns.action")}
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );

@@ -534,6 +534,7 @@ export const enUsageAnalytics = {
         action: "Diagnostics",
       },
       drilldown: "Open diagnostics for {{key}}",
+      drilldownUnavailable: "No drilldown",
       filteredBy: "Filtered by {{key}}",
       clearFilter: "Clear filter",
       unknown: "Unclassified",

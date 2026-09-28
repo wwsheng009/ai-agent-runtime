@@ -532,6 +532,7 @@ export const zhUsageAnalytics = {
         action: "诊断",
       },
       drilldown: "查看 {{key}} 的诊断",
+      drilldownUnavailable: "不可下钻",
       filteredBy: "已按 {{key}} 过滤",
       clearFilter: "清除筛选",
       unknown: "未分类",

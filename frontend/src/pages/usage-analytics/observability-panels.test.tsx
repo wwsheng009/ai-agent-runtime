@@ -269,6 +269,11 @@ describe("usage analytics observability panels", () => {
     expect(container.textContent).toContain("围栏丢弃（run 已结束）");
     // 未命中标签表时会渲染成 "RENDER_FENCE_DROPPED_CLOSED · render_fence_drop_closed"。
     expect(container.textContent).not.toContain("· render_fence_drop_closed");
+    // 渲染围栏不是 provider/tool 失败：不下钻（诊断 tab 的失败分类过滤对它无意义）。
+    expect(
+      container.querySelector('button[aria-label*="RENDER_FENCE_DROPPED_CLOSED"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain("不可下钻");
   });
 
   it("路由面板：空数组渲染「暂无路由事件」并传会话过滤", async () => {
