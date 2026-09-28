@@ -127,6 +127,17 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 			"usage_cache_read_reported",
 			"usage_cache_status",
 			"usage_reasoning_tokens",
+			// §2.4-1 kill/cancel salvage: the chat actor attaches the bounded
+			// partial product (and the isolated worktree location) to the
+			// interrupted/stalled terminal payload. Without these keys the
+			// durable mailbox row would drop them, so read_agent_result could
+			// never show what a killed child had produced.
+			"partial_summary",
+			"partial_source",
+			"partial_steps",
+			"isolation",
+			"worktree_path",
+			"worktree_branch",
 		} {
 			if value, ok := payload[key]; ok {
 				metadata[key] = value

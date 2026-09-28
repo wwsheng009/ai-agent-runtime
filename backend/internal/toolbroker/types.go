@@ -1485,16 +1485,22 @@ const (
 	AgentSessionContextWorktreePath          = "worktree_path"
 	AgentSessionContextWorktreeBranch        = "worktree_branch"
 	AgentSessionContextWorktreeRepoRoot      = "worktree_repo_root"
-	// AgentSessionContextWorktreeDisposition records parent decision on isolation:
-	// applied | discarded. Empty means still pending explicit apply/discard/close.
+	// AgentSessionContextWorktreeDisposition records the disposition of an
+	// isolation worktree: applied | discarded | kept_uncommitted. Empty means
+	// still pending explicit apply/discard/close.
 	AgentSessionContextWorktreeDisposition = "worktree_disposition"
 	// AgentSessionContextWritePaths is the default write scope for a child
 	// session. Worktree isolation binds this to the isolation root so later
 	// claim/task code can inherit the isolated workspace as write_paths.
 	AgentSessionContextWritePaths = "write_paths"
 
-	WorktreeDispositionApplied                  = "applied"
-	WorktreeDispositionDiscarded                = "discarded"
+	WorktreeDispositionApplied   = "applied"
+	WorktreeDispositionDiscarded = "discarded"
+	// WorktreeDispositionKeptUncommitted records §2.4-1 产物保全: when a
+	// close / force-kill finds the worktree carrying uncommitted changes it is
+	// kept instead of silently removed, so the parent can still
+	// apply_agent_worktree / discard_agent_worktree explicitly.
+	WorktreeDispositionKeptUncommitted          = "kept_uncommitted"
 	AgentSessionContextRequestedProvider        = "agent_requested_provider"
 	AgentSessionContextRequestedReasoningEffort = "agent_requested_reasoning_effort"
 	AgentSessionContextRequestedPermissionMode  = "agent_requested_permission_mode"

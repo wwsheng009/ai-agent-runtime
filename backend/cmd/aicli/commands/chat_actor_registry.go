@@ -859,6 +859,22 @@ func (r *localActorRegistry) cleanupLocalSpawnIsolation(ctx context.Context, chi
 		RepoRoot:  agentcontrol.ContextString(session, toolbroker.AgentSessionContextWorktreeRepoRoot),
 		SessionID: strings.TrimSpace(session.ID),
 	}
+	// §2.4-1 产物保全：close / 强杀路径不得静默销毁未提交产物。脏 worktree
+	// 保留给父代理显式 apply_agent_worktree / discard_agent_worktree，并记录
+	// disposition；干净 worktree 照旧移除。脏检查失败按旧行为移除——worktree
+	// 已不存在时 git status 必然失败，此时删除是安全且必要的收尾。
+	if dirty, statusErr := handle.DiffStat(ctx); statusErr == nil && strings.TrimSpace(dirty) != "" {
+		// 同时写给调用方持有的对象：close 路径随后会用它整体写回 session 行，
+		// 只改重载副本会被那次写回覆盖。
+		if childSession != nil {
+			childSession.SetContext(toolbroker.AgentSessionContextWorktreeDisposition, toolbroker.WorktreeDispositionKeptUncommitted)
+		}
+		session.SetContext(toolbroker.AgentSessionContextWorktreeDisposition, toolbroker.WorktreeDispositionKeptUncommitted)
+		if r != nil && r.Host != nil && r.Host.SessionStore != nil {
+			_ = r.Host.SessionStore.Update(ctx, session)
+		}
+		return nil
+	}
 	if err := handle.Remove(ctx); err != nil {
 		return err
 	}
@@ -1105,7 +1121,7 @@ func annotateLocalSpawnWorktreeCompletion(ctx context.Context, r *localActorRegi
 		if diff, err := handle.DiffStat(ctx); err == nil && strings.TrimSpace(diff) != "" {
 			payload["worktree_diff_stat"] = diff
 		}
-		payload["next_action"] = "Call apply_agent_worktree to land changes in the main repo, or discard_agent_worktree to drop them. close_agent also cleans remaining worktrees."
+		payload["next_action"] = "Call apply_agent_worktree to land changes in the main repo, or discard_agent_worktree to drop them. close_agent removes a clean worktree; one with uncommitted changes is kept for this explicit choice."
 		return
 	}
 	if disposition != "" {

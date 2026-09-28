@@ -1155,8 +1155,32 @@ func TestLocalActorRegistrySpawnWorktreeIsolationBindsAndCleansUp(t *testing.T) 
 	if _, err := host.ActorRegistry.Close(ctx, "wt-child"); err != nil {
 		t.Fatalf("Close worktree child: %v", err)
 	}
-	if _, err := os.Stat(result.WorktreePath); !os.IsNotExist(err) {
-		t.Fatalf("expected worktree removed after close, err=%v path=%s", err, result.WorktreePath)
+	// §2.4-1 产物保全：close / 强杀路径不再静默销毁未提交产物——脏 worktree
+	// 保留给父代理显式 apply_agent_worktree / discard_agent_worktree。
+	if _, err := os.Stat(isolatedFile); err != nil {
+		t.Fatalf("dirty worktree must survive close for explicit apply/discard, err=%v path=%s", err, result.WorktreePath)
+	}
+	storedAfterClose, err := manager.Get(ctx, "wt-child")
+	if err != nil {
+		t.Fatalf("manager.Get after close: %v", err)
+	}
+	if got := agentcontrol.ContextString(storedAfterClose, toolbroker.AgentSessionContextWorktreeDisposition); got != toolbroker.WorktreeDispositionKeptUncommitted {
+		t.Fatalf("disposition after dirty close=%q want %q", got, toolbroker.WorktreeDispositionKeptUncommitted)
+	}
+
+	// 干净 worktree 照旧在 close 时移除：脏检查只在确有未提交改动时保留。
+	cleanResult, err := host.ActorRegistry.Spawn(ctx, rootSession.ID, toolbroker.SpawnAgentArgs{
+		ID:        "wt-clean-child",
+		Isolation: "worktree",
+	})
+	if err != nil {
+		t.Fatalf("Spawn clean worktree: %v", err)
+	}
+	if _, err := host.ActorRegistry.Close(ctx, "wt-clean-child"); err != nil {
+		t.Fatalf("Close clean worktree child: %v", err)
+	}
+	if _, err := os.Stat(cleanResult.WorktreePath); !os.IsNotExist(err) {
+		t.Fatalf("clean worktree must be removed on close, err=%v path=%s", err, cleanResult.WorktreePath)
 	}
 }
 

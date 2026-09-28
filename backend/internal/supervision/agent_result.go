@@ -106,6 +106,31 @@ type AgentResultRecord struct {
 	Errors     []AgentResultError
 	Usage      AgentResultUsage
 	FinishedAt *time.Time
+	// PartialProduct is the killed/cancelled child's salvage snapshot (actor
+	// A5): the bounded last product it had produced when the runtime stopped
+	// it, plus how far it got. Nil when the host recorded none.
+	PartialProduct *AgentResultPartial
+	// Workspace is the child's isolated workspace location when the completion
+	// payload recorded one: a killed child's uncommitted changes stay there
+	// until the parent applies or discards them.
+	Workspace *AgentResultWorkspace
+}
+
+// AgentResultPartial is the bounded salvage a killed/cancelled session left
+// behind (建议稿 §2.4-1 会话级产物清单): what it had produced and how many
+// completed tool results it got through.
+type AgentResultPartial struct {
+	Summary string
+	Source  string
+	Steps   int
+}
+
+// AgentResultWorkspace is the child's isolated workspace, recorded from the
+// completion payload (isolation / worktree_path / worktree_branch).
+type AgentResultWorkspace struct {
+	Isolation    string
+	WorktreePath string
+	Branch       string
 }
 
 // ResultSource reads bounded child results for one supervision scope (P0-4).
@@ -249,6 +274,14 @@ type ReadResultPayload struct {
 	// locations (建议稿 §2.4). Omitted for successful records and for failures
 	// that recorded no work state.
 	WrapUp *ResultWrapUp `json:"wrap_up,omitempty"`
+	// PartialProduct is the killed/cancelled session's salvage (建议稿 §2.4-1):
+	// the bounded last product the child had produced when the runtime stopped
+	// it — a killed child cannot be asked for it afterwards.
+	PartialProduct *ReadResultPartialProduct `json:"partial_product,omitempty"`
+	// Workspace points at the child's isolated workspace when the host
+	// recorded one, so uncommitted work from a killed run stays discoverable
+	// instead of being silently lost (建议稿 §2.4-1 工作区未提交变更提示).
+	Workspace *ReadResultWorkspace `json:"workspace,omitempty"`
 	// FinishedAt is the durable completion time when the source recorded one.
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
@@ -265,6 +298,26 @@ type ResultWrapUp struct {
 
 // MaxWrapUpEntries caps each wrap-up list so the digest stays bounded.
 const MaxWrapUpEntries = 8
+
+// MaxPartialProductSummaryRunes bounds the salvage summary in one read result.
+// It mirrors the actor-side snapshot bound (chat.partialProductSummaryRunes).
+const MaxPartialProductSummaryRunes = 2000
+
+// ReadResultPartialProduct renders AgentResultPartial for the model.
+type ReadResultPartialProduct struct {
+	Summary string `json:"summary,omitempty"`
+	Source  string `json:"source,omitempty"`
+	Steps   int    `json:"steps,omitempty"`
+}
+
+// ReadResultWorkspace renders the child's isolated workspace plus the rescue
+// hint for its uncommitted changes.
+type ReadResultWorkspace struct {
+	Isolation    string `json:"isolation,omitempty"`
+	WorktreePath string `json:"worktree_path,omitempty"`
+	Branch       string `json:"branch,omitempty"`
+	Hint         string `json:"hint,omitempty"`
+}
 
 // NormalizeReadResultSections validates and normalizes the sections argument.
 // Empty means "all sections" (the tool default). An unknown section is
@@ -529,6 +582,8 @@ func BuildReadResultPayload(record AgentResultRecord, args ReadResultArgs) ReadR
 	}
 	applyFailedWithResultGuidance(&payload, record)
 	applyFailedWrapUp(&payload, record)
+	applyPartialProduct(&payload, record)
+	applyWorkspaceHint(&payload, record)
 	enforceReadResultBudget(&payload, maxChars)
 	syncSummaryPageAfterBudget(&payload)
 	if payload.NextAction == "" && payload.Truncated && payload.EOF != nil && !*payload.EOF {
@@ -739,6 +794,53 @@ func wrapUpChangeLabel(change AgentResultChange) string {
 	}
 }
 
+// applyPartialProduct surfaces the killed/cancelled session's salvage snapshot
+// (建议稿 §2.4-1 会话级产物清单): the bounded last product the child had
+// produced. It is independent of the section filter — this is exactly the
+// record a killed child can no longer be asked for.
+func applyPartialProduct(payload *ReadResultPayload, record AgentResultRecord) {
+	if payload == nil || record.PartialProduct == nil {
+		return
+	}
+	partial := record.PartialProduct
+	summary, cut := truncateReadResultText(partial.Summary, MaxPartialProductSummaryRunes, false)
+	if summary == "" && partial.Steps <= 0 {
+		return
+	}
+	payload.PartialProduct = &ReadResultPartialProduct{
+		Summary: summary,
+		Source:  strings.TrimSpace(partial.Source),
+		Steps:   partial.Steps,
+	}
+	payload.Truncated = payload.Truncated || cut
+}
+
+// applyWorkspaceHint surfaces the child's isolated workspace and the rescue
+// hint for its uncommitted changes (建议稿 §2.4-1 工作区未提交变更提示). Only
+// hosts that recorded an isolation path emit it: a shared-workspace child has
+// nothing the parent could rescue separately.
+func applyWorkspaceHint(payload *ReadResultPayload, record AgentResultRecord) {
+	if payload == nil || record.Workspace == nil {
+		return
+	}
+	ws := record.Workspace
+	worktreePath := strings.TrimSpace(ws.WorktreePath)
+	isolation := strings.TrimSpace(ws.Isolation)
+	if worktreePath == "" && isolation == "" {
+		return
+	}
+	hint := ""
+	if worktreePath != "" {
+		hint = "uncommitted changes stay in the isolated worktree until the parent applies or discards it (apply_agent_worktree / discard_agent_worktree)"
+	}
+	payload.Workspace = &ReadResultWorkspace{
+		Isolation:    isolation,
+		WorktreePath: worktreePath,
+		Branch:       strings.TrimSpace(ws.Branch),
+		Hint:         hint,
+	}
+}
+
 // changeApplied mirrors the host's patch apply-status vocabulary
 // (agent/scheduler.go derivePatchApplyStatus records "applied" for landed
 // writes): empty or "applied" means the work landed; anything else
@@ -884,6 +986,21 @@ func dropTrailingReadResultEntry(payload *ReadResultPayload) bool {
 		default:
 			payload.WrapUp = nil
 		}
+	case payload.PartialProduct != nil:
+		// The salvage is the last thing a killed child left behind; shed its
+		// parts (summary → source → steps) before dropping the pointer.
+		switch {
+		case payload.PartialProduct.Summary != "":
+			payload.PartialProduct.Summary = ""
+		case payload.PartialProduct.Source != "":
+			payload.PartialProduct.Source = ""
+		case payload.PartialProduct.Steps > 0:
+			payload.PartialProduct.Steps = 0
+		default:
+			payload.PartialProduct = nil
+		}
+	case payload.Workspace != nil:
+		payload.Workspace = nil
 	case payload.Usage != nil:
 		payload.Usage = nil
 	case payload.FailureKind != "":

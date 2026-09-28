@@ -623,6 +623,25 @@ func completionRecord(message team.MailMessage) (supervision.AgentResultRecord, 
 	if usage != (supervision.AgentResultUsage{}) {
 		record.Usage = usage
 	}
+	// §2.4-1 kill/cancel salvage: the chat actor attaches the bounded partial
+	// product (and the isolated worktree location) to the interrupted/stalled
+	// terminal payload. Carrying them through the durable record is what lets
+	// read_agent_result show what a killed child had produced instead of a
+	// canned stop notice.
+	if summary := mailboxString(metadata, "partial_summary"); summary != "" || mailboxInt(metadata, "partial_steps") > 0 {
+		record.PartialProduct = &supervision.AgentResultPartial{
+			Summary: summary,
+			Source:  mailboxString(metadata, "partial_source"),
+			Steps:   mailboxInt(metadata, "partial_steps"),
+		}
+	}
+	if worktreePath := mailboxString(metadata, "worktree_path"); worktreePath != "" {
+		record.Workspace = &supervision.AgentResultWorkspace{
+			Isolation:    mailboxString(metadata, "isolation"),
+			WorktreePath: worktreePath,
+			Branch:       mailboxString(metadata, "worktree_branch"),
+		}
+	}
 	if !message.CreatedAt.IsZero() {
 		createdAt := message.CreatedAt.UTC()
 		record.FinishedAt = &createdAt

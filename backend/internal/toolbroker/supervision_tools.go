@@ -233,6 +233,7 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 			Description: "Read the bounded durable result of one child session or batch task (read-only, P0-4). Resolves id inside this session's own scope only (the model cannot widen the scope) and reads, in priority order: the batch task TaskResult (summary/findings/changes/artifacts/errors/usage) and then the terminal mailbox completion payload (status/success/error/usage). " +
 				"The output is bounded: findings <=3, changes <=8, artifacts <=8, errors <=3 and a total max_chars budget (default 4000); truncated=true reports any cut. source is task_result | completion_payload | none. " +
 				"A failed/canceled record also carries wrap_up (completed / unfinished / artifacts): what landed, what did not, and where the deliverables are — read it before deciding to re-dispatch, and honour result_available/do_not_retry. " +
+				"A killed/cancelled record may also carry partial_product (the bounded salvage the child had produced before it was stopped) and workspace (the isolated worktree still holding its uncommitted changes). " +
 				"When no durable record exists the call still succeeds with source=none and error_code=no_result_recorded plus a next_action: follow it (read_agent_events / wait_agent) instead of retrying the same read. Sections let you fetch only what you need (summary/findings/changes/artifacts/errors/usage).",
 			Parameters: map[string]interface{}{
 				"type": "object",
