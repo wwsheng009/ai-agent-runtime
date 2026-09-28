@@ -195,6 +195,11 @@ type localChatRuntimeHost struct {
 	executionSupervisor     *supervision.ExecutionSupervisor
 	executionSupervisorCtx  context.Context
 	executionSupervisorStop context.CancelFunc
+	// progressRunMu / progressRunIDs 缓存 session→ExecutionRun 映射（P0-1）：
+	// run 级进度回调据此把 loop tick 写回监督账本；TTL 到期后重查，避免长期
+	// 缓存陈旧 run。惰性创建（多数测试以结构体字面量构造 host）。
+	progressRunMu  sync.Mutex
+	progressRunIDs map[string]progressRunCacheEntry
 	// registryReconciler / registryReconcilerStop 是 P2-9 的周期一致性对账：
 	// 低频审计 durable registry 与实际会话的漂移，并按 observe/enforce 决定
 	// 是否收敛；同样随 lifecycleCtx 停止（见 chat_actor_reconcile.go）。
@@ -1705,6 +1710,9 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		EventStore:   h.EventStore,
 		EventBus:     h.EventBus,
 		LoopConfig:   loopConfig,
+		// P0-1：run 级进度 tick → 监督面 ExecutionRun 的 last_progress_at；
+		// 无监督 run（非 spawn 子会话 / 监督未启用）时回调为 nil，行为不变。
+		OnProgress: h.progressRecorderForSession(sessionID),
 		// 灰度开关（默认开）：run 终态后到达的审批决议零恢复；显式
 		// supervision.approval_terminal_guard=false 可回退旧行为。
 		ApprovalTerminalGuard: h.supervisionConfig.ApprovalTerminalGuard,
