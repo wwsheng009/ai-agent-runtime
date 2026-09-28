@@ -1,8 +1,8 @@
 # Code Knowledge Runtime（知识层）文档索引
 
-> 最后更新：2026-09-21
+> 最后更新：2026-09-28
 > 本目录描述"代码知识运行时"（Code Knowledge Runtime）的设计与落地计划。
-> 当前阶段：**Phase 0 核心 5 交付已完成**（2026-09-20）；**Phase 1 规划缺口 7 项已于 2026-09-21 修复**（`06` §9.2），待 ADR-0001 / 0003 / 0007 由 owner Accept 后开工。
+> 当前阶段：**Phase 0 已落地**（2026-09-20 核心 5 交付 + 2026-09-28 交付 7 `exploration_attribution` 建表）；**Phase 1 已开工**（2026-09-28：门禁 ADR-0001 / 0003（口径）/ 0007 已 Accept；交付 6「接入（激活）」完成，交付 4/5 未开始）。
 
 ---
 
@@ -10,18 +10,18 @@
 
 | 文档 | 定位 | 状态 | 事实源角色 |
 |---|---|---|---|
-| `00_Code_Intelligence_Project_Knowledge_Layer.md` | 早期对话记录合集 | **已归档（建议移入 `archive/`）** | 仅供追溯，不作规范 |
-| `01_low_token_multilanguage_ai_agent_harness_design.md` | 架构意图（原则、分层、目标、非目标） | 待去重重写 | 架构意图 |
+| [`archive/00_Code_Intelligence_Project_Knowledge_Layer.md`](archive/00_Code_Intelligence_Project_Knowledge_Layer.md) | 早期对话记录合集 | **已归档**（2026-09-28 移入 `archive/`） | 仅供追溯，不作规范 |
+| `01_low_token_multilanguage_ai_agent_harness_design.md` | 架构意图（原则、分层、目标、非目标） | **已加事实源边界**（2026-09-28，见其 §0；逐节删减未执行） | 架构意图 |
 | `02_agent_harness_technical_design_spec_sqlite.md` | 技术规格（SQLite DDL 最全） | 待补应用顺序声明 | **core schema 唯一事实源** |
-| `03_agent_harness_supplement.md` | 补充规格（稳定 ID、类型、LSP、安全、评估…） | 待拆分（`supplement/05` 已建立，其余待拆） | **extension schema 事实源** |
-| `supplement/` | `03` 拆分出的补充规格（当前仅 `05_runtime_integration_project_detection_and_lsp.md`） | **部分建立**（2026-09-20） | 集成 / 检测 / LSP 规格（不复制 DDL） |
+| `03_agent_harness_supplement.md` | **拆分索引**（原补充规格；正文已迁入 `supplement/*`） | **已拆分**（2026-09-28） | 历史引用映射；**extension schema 事实源 = `supplement/*`** |
+| `supplement/` | `03` 拆分出的补充规格（`01`–`16`，含既有的集成文档 `05`） | **已建立**（2026-09-28 拆分完成） | **extension schema 唯一事实源** + 集成 / 检测 / LSP 规格 |
 | `04_completeness_review_and_optimized_plan.md` | 完整性评审 + 优化落地计划 | **已完成，执行中** | 落地计划与验收事实源 |
 | `GLOSSARY.md` | 术语表 | **已建立**（2026-09-20） | **术语唯一事实源** |
 | `CHANGELOG.md` | 变更日志 | **已建立**（2026-09-20） | 变更历史 |
-| `adr/` | 决策记录（`0000` 模板 + `0001`–`0007`） | **已建立**（2026-09-20，全部 `Proposed`）；`0003` 于 2026-09-21 修订 Gate 与 D3（仍 `Proposed`，待 owner Accept） | **决策唯一事实源** |
+| `adr/` | 决策记录（`0000` 模板 + `0001`–`0007`） | **已建立**（2026-09-20）；`0001`/`0003`/`0007` 于 2026-09-28 Accept，`0002`/`0004`/`0005`/`0006` 仍 `Proposed` | **决策唯一事实源** |
 | `06_implementation_index_and_guidance.md` | 方案实施索引与指引（实施入口） | **已建立**（2026-09-20） | 实施索引（**非**事实源） |
 
-> **跨目录入口**：本目录 LSP 规格（`03_agent_harness_supplement.md` 的 LSP 章节、[`supplement/05_runtime_integration_project_detection_and_lsp.md`](supplement/05_runtime_integration_project_detection_and_lsp.md)）的**落地实施文档**位于 [`../lsp/`](../lsp/README.md)（参考实现分析 → runtime 集成设计 → 实施顺序与验收）。该目录仅为**实施方案**，不改变本目录的事实源边界。
+> **跨目录入口**：本目录 LSP 规格（[`supplement/05_runtime_integration_project_detection_and_lsp.md`](supplement/05_runtime_integration_project_detection_and_lsp.md) §1–§9 设计与接入、§10 extension schema）的**落地实施文档**位于 [`../lsp/`](../lsp/README.md)（参考实现分析 → runtime 集成设计 → 实施顺序与验收）。该目录仅为**实施方案**，不改变本目录的事实源边界。
 
 ---
 
@@ -42,12 +42,12 @@
 0. `06_implementation_index_and_guidance.md` —— 实施顺序、ADR 门禁、每 Phase 文件落点与验收
 1. `04` 的 §3（与仓库现状对齐）→ §4（v1 方案）→ §5（路线图）
 2. `02` 的 core schema（注意顶部“待补应用顺序声明”标注）
-3. `03` 的 §1（稳定符号 ID，待拆分为 `supplement/01`）、`supplement/05`（LSP 工程化）
+3. `supplement/01_symbol_identity.md`（稳定符号 ID）、`supplement/05`（集成 / 项目检测 / LSP 工程化，extension schema 见其 §10）
 4. `04` 的 §7（验收指标）
 
 **评审者（判断对不对）**
 1. `04` 的 §2（完整性问题）→ §6（风险登记）→ 附录 B（矛盾点）
-2. 对照 `01/02/03` 原文逐条裁决
+2. 对照 `01` / `02` 与 `supplement/*`（原 `03`）原文逐条裁决
 3. 在 `adr/` 记录裁决结果
 
 ---
@@ -57,12 +57,12 @@
 | 内容 | 唯一事实源 | 其他文档 |
 |---|---|---|
 | core 数据库 schema | `02` | 只引用，不复制 DDL |
-| extension schema | `03` 拆分后的 `supplement/*`，且必须在 `02` 顶部声明应用顺序 | — |
+| extension schema | `supplement/*`（2026-09-28 由 `03` 拆入；`03` 为拆分索引），且必须在 `02` 顶部声明应用顺序 | — |
 | 架构意图与原则 | `01` | 02/03 不重复原则性内容 |
 | 术语 | `GLOSSARY.md` | 所有文档使用规范名 |
 | 决策 | `adr/*.md` | 推翻既有设计必须先写 ADR |
 | 落地计划与验收 | `04` | Phase 状态与本 README 同步 |
-| LSP 落地实施方案 | [`../lsp/`](../lsp/README.md) | 只引用，不复制 LSP 规格；与 `03` / `supplement/05` 冲突时以本目录为准 |
+| LSP 落地实施方案 | [`../lsp/`](../lsp/README.md) | 只引用，不复制 LSP 规格；与 `supplement/*` 冲突时以本目录为准 |
 | 变更历史 | `CHANGELOG.md` | — |
 
 **已裁决的关键决策（决策唯一事实源：[`adr/`](adr/README.md)；下列为摘要，`04` 附录 B 已不再是决策依据）**
@@ -84,8 +84,8 @@
 
 | Phase | 内容 | 状态 | 验收门槛摘要 |
 |---|---|---|---|
-| 0 | 基线与契约 | **进行中**（4/5 交付） | 可测量、`mode=off` 行为不变 |
-| 1 | 索引 MVP（shadow） | 未开始 | 首次索引 ≤ 120s、差异率 < 15% |
+| 0 | 基线与契约 | **已完成**（2026-09-28） | 可测量、`mode=off` 行为不变 |
+| 1 | 索引 MVP（shadow） | **进行中**（交付 6 已完成；交付 4/5 未开始） | M1 调用级可用率（α 由 shadow 校准） |
 | 2 | Exploration Memory + Planner | 未开始 | 重复探索 ↓ ≥ 30%、`unsafe_reuse=0` |
 | 3 | Code API 与工具面收敛 | 未开始 | 探索 token ↓ ≥ 40%、fallback ≤ 30% |
 | 4 | Adapter SPI 与可选 LSP | 未开始 | 精度 ≥ 90%、召回 ≥ 85% |
@@ -132,7 +132,7 @@
 ## 7. 关键约束速查
 
 - 不要在本目录新增"第 5 份并列设计文档"；新内容应归入 `supplement/` 或 `adr/`。
-- 不要在 `02` 之外复制 DDL（extension schema 例外，落点是 `03`/`supplement/*`）。**`04` 不得含 `CREATE TABLE`**——见 ADR-0007 §4.3，现存 `index_jobs` DDL 待迁移。
+- 不要在 `02` 之外复制 DDL（extension schema 例外，落点是 `supplement/*`；`03` 为拆分索引）。**`04` 不得含 `CREATE TABLE`**——见 ADR-0007 §4.3；`index_jobs` DDL 已于 **2026-09-28 迁至 [`supplement/15`](supplement/15_change_management.md) §15.3**，`04` §4.3 其余 core 表 DDL 的引用化见 `06` §9 待办 **#19**。
 - 不要在没有基线的情况下写死阈值。
 - **阈值类 Gate 必须可达成**：α 与 Phase 1 门槛数值的 Gate 是 `Phase1-shadow`，**不是** `Phase0-baseline`（Phase 0 为 `mode=off`，结构上产不出 shadow 对比数据）——见 ADR-0003 §10。
 - 不要让 `knowledge.mode=off` 时的行为发生任何改变。

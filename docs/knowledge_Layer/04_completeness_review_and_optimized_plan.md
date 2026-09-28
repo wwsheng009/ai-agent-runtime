@@ -1,7 +1,7 @@
 # knowledge_Layer 方案完整性评审与优化落地计划
 
 > 日期：2026-09-20
-> 评审对象：`00_Code_Intelligence_Project_Knowledge_Layer.md`、`01_low_token_multilanguage_ai_agent_harness_design.md`、`02_agent_harness_technical_design_spec_sqlite.md`、`03_agent_harness_supplement.md`
+> 评审对象：`archive/00_Code_Intelligence_Project_Knowledge_Layer.md`（2026-09-28 归档）、`01_low_token_multilanguage_ai_agent_harness_design.md`、`02_agent_harness_technical_design_spec_sqlite.md`、`03_agent_harness_supplement.md`（2026-09-28 拆分为 `supplement/*`）
 > 结合基准：本仓库 `E:\projects\ai\ai-agent-runtime`（Go / SQLite / Windows 优先）
 > 难度评级：hard（架构 + 跨模块一致性 + 迁移风险，需要分阶段验证）
 > 结论一句话：**方向正确、分层合理，但当前四份文档尚不是"可执行方案"，而是"设计意图 + 规格草稿 + 补充清单"的混合体；必须补上置信度定义、单写者并发模型、与现有模块的落点映射、最小 v1 表集、可测验收口径和非目标清单，才具备开工条件。**
@@ -542,25 +542,16 @@ CREATE TABLE invalidation_events (
 );
 CREATE INDEX idx_invalidation_ws ON invalidation_events(workspace_id, created_at);
 
--- 10. 索引任务（可观测 + 可重试 + 串行化）
---
--- ⚠️ DDL 越位（ADR-0007 §4.3）：本段 `CREATE TABLE` 的落点应在 extension schema（`03` / `supplement/*`），
--- 不应在 `04`。`04` 是"落地计划与验收事实源"，不是 schema 事实源。
--- 在 ADR-0007 被 Accept 后迁移；迁移完成后本节只保留"用途 + 验收指标 + 表名引用"。
-CREATE TABLE index_jobs (
-    id            TEXT PRIMARY KEY,
-    workspace_id  TEXT NOT NULL,
-    kind          TEXT NOT NULL,           -- light|deep|full_rebuild|gc
-    status        TEXT NOT NULL,           -- queued|running|done|failed|cancelled
-    files_total   INTEGER NOT NULL DEFAULT 0,
-    files_done    INTEGER NOT NULL DEFAULT 0,
-    error         TEXT,
-    started_at    INTEGER,
-    finished_at   INTEGER,
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
-);
-CREATE INDEX idx_index_jobs_ws ON index_jobs(workspace_id, status);
+**10. 索引任务（`index_jobs`）：定义见 extension schema**
 
+> **2026-09-28 迁出**（ADR-0007 §4.3 / `06` §9 待办 #1）：本节原先内联 `CREATE TABLE`，违反"`04` 只引用表名"（ADR-0007 D5）。
+> 表 DDL 现落在 [`supplement/15_change_management.md`](supplement/15_change_management.md) §15.3；`04` 只保留用途与验收指标。
+> `04` §4.3 其余 15 张表的引用化见 `06` §9 待办 #19（依赖 I5 口径裁决）。
+
+- **用途**：owner（单写者）的持久化写队列——owner 内单 goroutine 串行消费；任何变更路径（agent 编辑钩子 / `git diff` / fsnotify）都必须**先写 `index_jobs` 再串行执行**，不得直接写 `symbols`（§4.1 / §4.7）。
+- **验收指标**：见 §7.4（首次全量索引、单文件增量 p95）与 §7.6（校准口径）；数据来源列 `started_at` / `finished_at` / `files_total` / `files_done`。
+
+```sql
 -- 11. FTS5（多语言检索，与 symbols 同步）
 CREATE VIRTUAL TABLE symbols_fts USING fts5(
     name, qualified_name, signature, summary,
@@ -831,8 +822,9 @@ knowledge:
 
 **状态**：**核心交付已完成**（2026-09-20）——`mode=off` 默认、`usageledger` 9 个归因字段、v1 DDL + 迁移骨架、基线报告（3 个仓库 + 5 个真实任务）、相邻计划交叉评审（详见 `06` §4 Phase 0 与 [`reports/phase0_baseline_report.md`](reports/phase0_baseline_report.md)）。
 **A/B（off vs shadow）延期至 Phase 1**——知识层未接入任何进程，shadow 为 no-op。
-**交付 7（`exploration_attribution`）为 2026-09-21 补入的归属，尚未落地**，与 Phase 1 的 shadow 一起实现。
-文档治理尾项（`06` §9 条目 8 / 9）仍挂起，属文档维护，不影响工程验收。
+**交付 7（`exploration_attribution`）已于 2026-09-28 落地**——`usageledger` `init()` 追加建表与 2 索引（只建表，不产生数据），见 `CHANGELOG.md`。
+**交付 2 的"`usageanalytics` 暴露 9 指标"已于 2026-09-28 落地**——聚合面在 `internal/api/runtimeapi/usage_ledger_group.go`（`group_by=profile`），SDK 类型见 `pkg/skillsapi`；`internal/usageanalytics` 不读 ledger，故落点与本节文字表述不同（见 `CHANGELOG.md`）。
+文档治理尾项（`06` §9 条目 8 / 9）已于 2026-09-28 完成（见 `06` §9.3），属文档维护，不影响工程验收。
 
 ### Phase 1 — 索引 MVP（只读，影子模式）
 
@@ -864,7 +856,7 @@ knowledge:
 
 **回滚**：`mode=off` + 删除 `knowledge.db`。
 
-**状态**：未开始
+**状态**：**进行中**（2026-09-28 开工）——交付 1–3 的代码已在 `internal/knowledge`（`indexer.go` / `store_sqlite.go` / `adapter_builtin.go` / `owner.go` / 增量 `content_hash`）；**交付 6「接入（激活）」已完成**（`internal/knowledge/activation.go` + `cmd/runtime-server` / `cmd/aicli` cmd+tui / `cmd/aicli` acp 三入口，见 `CHANGELOG.md`）；**交付 4（shadow 拦截 `grep` / `view`）与交付 5（`knowledge.status` 面）未开始**——在交付 4 落地前，`mode=shadow` 无落库数据，M1 无法复算，故本 Phase 尚未验收。
 
 ### Phase 2 — Exploration Memory + Context Planner
 

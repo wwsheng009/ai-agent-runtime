@@ -1,6 +1,7 @@
 # ADR-0007: 幽灵表清理与文档不变量
 
-- **Status**: Proposed
+- **Status**: Accepted
+- **Accepted**: 2026-09-28（项目 owner 授权代改并记录裁决，见 `../CHANGELOG.md` 的 2026-09-28 ADR 裁决条目）
 - **Date**: 2026-09-20
 - **Deciders**: 项目 owner
 - **Gate**: `Phase1-start`

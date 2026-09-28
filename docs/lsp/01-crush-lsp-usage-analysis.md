@@ -200,7 +200,7 @@ agent/tools/diagnostics.go:35  notifyLSPs(ctx, lspClients, ...)
 
 1. **`csync.Map[string, *lsp.Client]` 的并发模型**——本项目需要落到知识层的所有权模型上（见 ADR-0002：谁 spawn、谁拥有、跨 ACP 边界如何声明能力），不能只做一个进程内 map。
 2. **URI↔路径转换**——crush 散落在 `getDiagnostics` 内，本项目按 ADR-0006 要求收敛到**单一转换边界**，并作为缓存键的一部分。
-3. **诊断文本格式**——crush 直接拼字符串，本项目需要与 `03` §5.2 的 `lsp_diagnostics` 列约定对齐。
+3. **诊断文本格式**——crush 直接拼字符串，本项目需要与 `supplement/05_runtime_integration_project_detection_and_lsp.md` §10.2（原 `03` §5.2）的 `lsp_diagnostics` 列约定对齐。
 4. **重启工具**——crush 有 `lsp_restart.go`，本项目需要考虑 ACP 场景下客户端与后端的归属（后端重启 vs 客户端重启语义不同）。
 
 ### 不可照搬

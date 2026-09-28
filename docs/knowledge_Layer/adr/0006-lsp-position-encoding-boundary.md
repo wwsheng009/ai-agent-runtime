@@ -6,7 +6,7 @@
 - **Gate**: `Phase4-start`
 - **Reversibility**: moderate（新增一列 + 转换函数；无对外协议变更，无历史数据）
 - **Supersedes**: 澄清 `03` §5.3 的三条规则，并补齐 `03` §5.2 的 `lsp_diagnostics` / `lsp_servers` 列定义
-- **Related**: `03_agent_harness_supplement.md` §5.1（L491–508）、§5.2（L512–560）、§5.3（L562–568）、§5.4（L674）、L1275；`supplement/05` 附录 F；`04` §4.3 推迟清单
+- **Related**: `supplement/05_runtime_integration_project_detection_and_lsp.md` §10.1 / §10.2 / §10.3（2026-09-28 由 `03` §5 迁入）；原 `03` §5.4（L674）实为 `03` §6.4 → `supplement/06_cache_consistency.md` §6.4；原 `03` L1275 → `supplement/14_context_safety.md`；`supplement/05` 附录 F；`03` 拆分映射见 `03_agent_harness_supplement.md` §0；`04` §4.3 推迟清单
 
 ---
 

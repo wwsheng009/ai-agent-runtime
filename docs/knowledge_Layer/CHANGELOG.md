@@ -6,6 +6,106 @@
 
 ---
 
+## 2026-09-28 — 补记：ADR 0001/0003/0007 裁决为 Accepted、Phase 0 文档治理（#8 / #9）与 `index_jobs` DDL 迁移（#1）
+
+起因：Phase 0 文档治理收尾与 Phase 1 门禁解除。owner 授权代改 ADR 状态并记录裁决；随后按
+ADR-0007 §4.3 补做 `index_jobs` DDL 迁移。Phase 1 开工见下一条。
+
+### Changed
+
+- **ADR 裁决**：`adr/0001`、`adr/0003`（**仅口径**；§10 的 α 阈值仍受 `Phase1-shadow` 约束）、`adr/0007` 由 `Proposed` → `Accepted`（2026-09-28）；三项头部加 `Accepted` 记录行，`adr/README.md` §4 状态表 / §5 说明同步。**Phase 1 的 `Phase1-start` 门禁解除**。ADR 决策正文未改动（Accept 前已完成的 #11 / #16 修订见 2026-09-21 条目）。
+- **#8 归档**：`00_Code_Intelligence_Project_Knowledge_Layer.md` 以 `git mv` 移入 `archive/`，文首加"归档说明"（仅供追溯，不作事实源）；`README.md` §1、`04` 评审对象行、`06` §9 同步。
+- **#9a `03` 拆分**：`03_agent_harness_supplement.md` 拆为 `supplement/01`–`16`（正文逐段搬迁、章节号沿用原编号；`03` §5 并入既有 `supplement/05` §10），`03` 重写为**拆分索引 + 历史引用映射**（`03 §5.4(L674)` 更正为 `§6.4`）。引用同步：`README.md`、`04`、`06`、`adr/README.md`、`adr/0006`、`docs/lsp/*`（4 个文件）。
+- **#9b `01` 边界**：`01` 文首加 **§0 定位与事实源边界**（逐节指认权威落点；正文未删减）；逐节删减登记为 **#18**（Phase 1 开工前）。
+- **#1 `index_jobs` 迁移**：`04` §4.3 的 `CREATE TABLE index_jobs` + 索引**逐字节**迁至 [`supplement/15_change_management.md`](supplement/15_change_management.md) §15.3（extension schema）；`04` 只留用途 / 验收指标 / 引用（ADR-0007 §4.3）。
+
+### Notes
+
+- 本轮为**文档结构治理**：不改变设计决策、不改变 DDL 语义、不改动 `Accepted` ADR 的决策正文。
+- 仍未收敛（`06` §9）：**#2** `02` §8 三分组、**#3** I1–I5 不变量脚本、**#19** `04` §4.3 其余 15 张表 DDL 的引用化（依赖 **#7** 对 "v1 ≤ 16 张" 口径的裁决）、**#18** `01` 逐节删减。
+
+---
+
+## 2026-09-28 — Phase 1 交付 6（接入/激活）+ 探索归因 9 指标暴露
+
+起因：Phase 1 门禁（ADR-0001 / 0007 / 0003 口径）已解除，开工。本次关闭两项
+此前"只有文档、没有代码"的交付：`06` §4 Phase 1 交付 6「接入（激活）」与
+`06` §5.2 / 附录 A 步骤 6「`usageanalytics` 暴露 9 个探索归因指标」。
+
+### Added
+
+- **`backend/internal/knowledge/activation.go`（新增 `Activation` / `Activate` / `ActivationOptions`）** ——
+  三个入口共用的"接入"原语：打开 store → 判角色（owner/reader）→ owner 在后台跑首次全量索引。
+  `mode=off` 时在任何磁盘操作之前返回 `(nil, nil)`；`Close` 取消并**等待**后台索引退出（索引持写事务，
+  先关 store 会撞锁）。`Activation` 所有方法 nil-safe，接入方无需分支。
+- **`backend/cmd/aicli/commands/chat_knowledge.go`（新增）** —— `cmd/aicli`（chat/tui）与
+  `cmd/aicli agent stdio`（ACP）共用：按 workspace 引用计数的接入表 + 进程级一次性释放。
+  一个 ACP 宿主进程可服务多个 workspace，故不能"进程级单例 + 首次 Close 释放"。
+- **`backend/cmd/runtime-server/knowledge_boot.go`（新增）** —— `bootRuntimeServerKnowledge`：
+  workspace 锚点 = `runtime.yaml` 的 `workspace.root`（相对配置文件解析）→ 进程 cwd；
+  两者皆空则 warn + 降级为 off；`mode=off` 时不调用 `Activate`（零副作用）。
+
+### Changed
+
+- **`backend/cmd/aicli/commands/chat.go`** —— `ChatSession` 新增 `Knowledge *knowledge.Activation`；
+  `HandleChat` 在 exit-cleanup 注册处接入 `attachChatKnowledge` + `releaseAllChatKnowledge`。
+- **`backend/cmd/aicli/commands/chat_setup.go`** —— `buildChatFinalCleanup` 在 finalize 会话后
+  归还引用。
+- **`backend/cmd/aicli/commands/agent_stdio.go`** —— `acpHostSession` 新增 `knowledge` /
+  `knowledgeWorkspace`；`session/new` 在记录 workspace 之后接入；`closeSessionLocked` 归还引用。
+- **`backend/cmd/runtime-server/main.go`** —— `runtimeServerApp` 新增 `knowledge` 字段，启动阶段
+  （workspace 解析后、对外服务前）调用 `bootRuntimeServerKnowledge`；`close()` 最后释放知识层。
+- **`backend/internal/api/runtimeapi/usage_ledger_group.go`** —— `usageLedgerProfileGroup` 增加
+  9 个探索归因字段（**全部 `omitempty`**），`aggregateUsageLedgerByProfile` 按组求和。
+- **`backend/pkg/skillsapi/client.go`** —— `UsageLedgerRecord` 增加 9 字段；新增
+  `UsageLedgerProfileGroup`；`GetUsageLedgerResponse` 增加 `group_by` / `groups` / `grouped_total`
+  （`omitempty`）；`GetUsageLedgerParams` 增加 `GroupBy`，客户端在非空时才发 `group_by` 查询参数。
+
+### Notes
+
+- **`mode=off` 硬不变量**：三入口在 off 下不建库、不建锁文件、不起 goroutine，行为与"无知识层"
+  逐字节一致；9 个归因指标在 off 下恒为 0 且因 `omitempty` 不出现在任何响应里。
+- **刻意偏离 `06` §4 Phase 1 交付 6 的措辞**：计划写"向 `internal/background` 注册
+  `knowledge.index.initial` 任务"，但 `internal/background.Manager` 只有 shell 作业通道
+  （`SubmitShell`），进程内任务无公开注册口。把索引塞进 shell 作业会多起一个进程并重复打开同一个
+  store，反而破坏单写者不变量。因此首次全量索引由 `Activate` 内部后台 goroutine 承担
+  （同样不阻塞启动 / turn，Close 可取消并等待退出）。
+- **`06` §5.2 的路径近似**：该表把"暴露 9 指标"的落点写成 `internal/usageanalytics/*`，但该包不读
+  `usageledger`；ledger 的实际读取与聚合面在 `internal/api/runtimeapi`（`GetUsageLedger`）。
+  本次按实际落点实现，`06` 属索引文档、不构成决策依据。
+- 验证：`go build ./...` 干净；`go test ./internal/knowledge/ ./internal/usageledger/
+  ./internal/api/runtimeapi/ ./pkg/skillsapi/ -count=1` 全绿。
+
+---
+
+## 2026-09-28 — Phase 0 交付 7 落地：`exploration_attribution` 建表
+
+起因：核对"Phase 0 是否真的可验收"时发现，`04` §5 / `06` §4 的 Phase 0 交付 7
+（`exploration_attribution` 表 + 2 索引，2026-09-21 由 §9.2 #15 补入归属）**只有文档、没有代码**：
+`usageledger` 的 `init()` statements 里既无建表也无索引，
+Phase 0 验收门槛"可被 `sqliteutil.OpenFileCtx` 打开且重复 init 幂等"此前无法通过。
+
+### Changed
+
+- **`backend/internal/usageledger/sqlite_store.go`** —— `init()` 的 statements 追加
+  `CREATE TABLE IF NOT EXISTS exploration_attribution`（18 列，与 ADR-0003 §4.1 逐列对齐）
+  与两个索引 `idx_exploration_attribution_created_at` / `idx_exploration_attribution_tool_time`。
+  复用既有 `IF NOT EXISTS` 幂等语义（ADR-0003 D7），**只建表与索引，不产生数据**。
+- **`backend/internal/usageledger/sqlite_store_exploration_attribution_test.go`**（新增）——
+  4 个用例：①列集与两索引齐全且表为空；②同一 DSN 反复 init 幂等、`sqlite_master` 只登记 1 次；
+  ③可被 `sqliteutil.OpenFileCtx` 打开（验收门槛原文）；④D3 非污染——重新 init 后
+  `token_usage_history` 的行数与 token 聚合逐字节不变。
+
+### Notes
+
+- **`mode=off` 行为零变化**：只新增空表与索引，没有任何写入路径，ledger 记录与聚合结果与改动前一致。
+- 验证：`gofmt`/`go vet` 干净；`go test ./internal/usageledger/ ./internal/knowledge/ -count=1` 全绿。
+- 仍未落地（不属本次范围）：`06` §5.2 / 附录 A 步骤 6 提到的"`usageanalytics` 暴露 9 个新指标"
+  与 §9 文档治理尾项 #8 / #9；Phase 1 及之后仍受 ADR-0001 / 0003 / 0007 门禁约束。
+  （**2026-09-28 更新**：9 指标已在本文件"Phase 1 交付 6（接入/激活）+ 探索归因 9 指标暴露"条目中落地；#8 / #9 与 `index_jobs` 迁移已落地；ADR-0001 / 0003 / 0007 已 Accept、门禁解除——见顶部"补记"条目。）
+
+---
+
 ## 2026-09-21 — 修复规划缺口（#10–#16 关闭；修复中另发现并修复 #17）
 
 起因：owner 指示"针对缺口进行修复"。上一条（核查发现）登记的 7 项缺口**已全部修复**；
@@ -341,7 +441,7 @@ Deep Index 的内容放进了 Light Index，直接违反 `04` §2 的 Lazy 原�
 - **唯一例外**是 `supplement/05` §2.3 的 `external_preferred`：该表述所依赖的能力面
   在 `backend/internal/acp/types.go` 中**不存在**，属**事实错误**而非设计分歧，故直接修正。
 - **仍未执行（既有建议）**：`00_Code_Intelligence_Project_Knowledge_Layer.md` 移入 `archive/`
-  （`README.md` §1 已标注，涉及链接改写，未在本批处理）。
+  （`README.md` §1 已标注，涉及链接改写，未在本批处理）。**2026-09-28 已执行**：`git mv` → `archive/` + 文首归档说明，见顶部"补记"条目与 `06` §9.3。
 - **仍未解决（已知矛盾，待裁决）**：`04` §4.3 声明的 "v1 表集 ≤ 16 张" 与 `02` 实际的
   22 张 core DDL 疑为不自洽。ADR-0007 的不变量 **I5** 专门检测此项，由检查结果裁决，ADR 未预设结论。
 

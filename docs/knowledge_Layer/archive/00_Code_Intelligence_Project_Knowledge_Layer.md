@@ -1,3 +1,10 @@
+> **【归档说明】本文件已归档，不再作为事实源维护。**
+>
+> - 归档日期：2026-09-28（依据 `06_implementation_index_and_guidance.md` §9 待办 #8）。
+> - 内容性质：本文件是一次早期需求对话的**原文留存**，行文为会话体，包含当时的探索性结论、未收敛的方案与口语化表述。
+> - 事实源边界：本文件**不是**项目/模块/语言/数据结构/接口的事实源。所有设计口径以 `docs/knowledge_Layer/` 下现行文档为准：总览见 `../README.md`；核心 schema 见 `../02_agent_harness_technical_design_spec_sqlite.md`（引用表名请用概念名，见 ADR-0007）；扩展 schema 见 `../supplement/*`；决策见 `../adr/`。
+> - 保留原因：供追溯概念来源与早期动机。**请勿**依赖本文件中的路径、行号、表名或结论做实现。
+
 有，而且这是目前 **AI Coding Agent / LLM Agent Harness** 非常典型的成本问题。
 
 你描述的现象本质上是：

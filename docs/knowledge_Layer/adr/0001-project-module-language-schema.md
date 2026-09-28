@@ -1,6 +1,7 @@
 # ADR-0001: Project/Module/Language 模型收敛
 
-- **Status**: Proposed
+- **Status**: Accepted
+- **Accepted**: 2026-09-28（项目 owner 授权代改并记录裁决，见 `../CHANGELOG.md` 的 2026-09-28 ADR 裁决条目）
 - **Date**: 2026-09-20
 - **Deciders**: 项目 owner
 - **Gate**: `Phase1-start`（阻塞 Phase 1 开工）
