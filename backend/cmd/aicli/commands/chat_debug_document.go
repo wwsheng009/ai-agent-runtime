@@ -242,7 +242,7 @@ func buildChatDebugDisplayDocumentWithOptions(session *ChatSession, opts ChatDeb
 			builder.meta("Queued Input:", "0 pending")
 		}
 	}
-	if session.queuedInputDrain && session.InputQueue == nil {
+	if session.queuedInputDrainActive() && session.InputQueue == nil {
 		builder.meta("Queued Input:", "0 pending (draining)")
 	}
 	if session.Interaction != nil {

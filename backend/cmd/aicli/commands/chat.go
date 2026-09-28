@@ -221,7 +221,7 @@ type ChatSession struct {
 	// 进程内字段：actor 本身就是进程内对象，重启后不存在旧 actor。
 	actorRebuildPending bool
 	actorRebuildReason  string
-	PermissionMode        runtimepolicy.Mode // actor/team run permission mode
+	PermissionMode      runtimepolicy.Mode // actor/team run permission mode
 	// CLIAllowTools / CLIDenyTools from --allow-tool / --deny-tool.
 	CLIAllowTools []string
 	CLIDenyTools  []string
@@ -254,8 +254,13 @@ type ChatSession struct {
 	// DebugMode, PermissionMode, ApprovalReuseMode, SelectedAgentTarget,
 	// RequestedPermissionMode, EffectivePermissionMode and ActiveTeam.
 	runtimeCtxMu sync.RWMutex
-	Interaction  *chatInteractionCoordinator // unified interactive stdout/prompt coordinator
-	Surface      *ui.FixedBottomSurface      // optional fixed-bottom terminal surface
+	// commandMu serializes Phase A of chat command dispatch（方案 §3.3 两阶段锁）：
+	// 解析 + 会话/配置变更 + 命令结果渲染。Phase B 效应（send/picker/overlay/
+	// screen）必须在释放本锁之后应用；忙时 immediate 通道用 TryLock 探测占用，
+	// 失败即降级 deferred，capture 永不阻塞在锁上。
+	commandMu   sync.Mutex
+	Interaction *chatInteractionCoordinator // unified interactive stdout/prompt coordinator
+	Surface     *ui.FixedBottomSurface      // optional fixed-bottom terminal surface
 	// TerminalSession is the sole physical writer for the unified interactive
 	// renderer. Surface remains only as a compatibility state facade while the
 	// session is active; it must not emit terminal bytes in that mode.
@@ -296,10 +301,10 @@ type ChatSession struct {
 	// inspected for a restored pending request in this session epoch; it keeps
 	// the main loop from re-reading the session store on every iteration.
 	restoredPendingChecked     bool
-	queuedInputDrain           bool     // suppress repeated queued-input notices while draining
-	queuedInputEchoed          bool     // queued input was already echoed in the fixed prompt while busy
-	lastInteractiveInputQueued bool     // last chatInteractiveReadLine result came from InputQueue
-	ImagePaths                 []string // explicit local image attachments for current turn
+	queuedInputDrain           atomic.Bool // suppress repeated queued-input notices while draining
+	queuedInputEchoed          atomic.Bool // queued input was already echoed in the fixed prompt while busy
+	lastInteractiveInputQueued bool        // last chatInteractiveReadLine result came from InputQueue
+	ImagePaths                 []string    // explicit local image attachments for current turn
 	// imageTokenPaths 记录"由输入框令牌引入"的附件（路径 → 令牌序号）。只有这些
 	// 附件受"删令牌即弃图"约束；ACP/Web/resume 等来源的附件不受令牌影响。
 	imageTokenPaths map[string]int
@@ -312,6 +317,38 @@ type ChatSession struct {
 	accountListProviders map[string]config.Provider
 	accountListUpdatedAt time.Time
 	accountListRefresh   chatAccountBalanceRefreshFunc
+}
+
+// M4（方案 §3.5 队列状态）：queuedInputDrain / queuedInputEchoed 由 turn 结束的
+// 排空路径（chat_team_drain.go）写、由 /queue 快照、状态行与调试文档并发读；
+// 两个标志必须原子访问，否则忙时 immediate `/queue`（T9 `-race`）先红。
+
+func (s *ChatSession) queuedInputDrainActive() bool {
+	if s == nil {
+		return false
+	}
+	return s.queuedInputDrain.Load()
+}
+
+func (s *ChatSession) setQueuedInputDrainActive(active bool) {
+	if s == nil {
+		return
+	}
+	s.queuedInputDrain.Store(active)
+}
+
+func (s *ChatSession) queuedInputEchoedValue() bool {
+	if s == nil {
+		return false
+	}
+	return s.queuedInputEchoed.Load()
+}
+
+func (s *ChatSession) setQueuedInputEchoed(value bool) {
+	if s == nil {
+		return
+	}
+	s.queuedInputEchoed.Store(value)
 }
 
 type chatRuntimeHTTPCapture struct {

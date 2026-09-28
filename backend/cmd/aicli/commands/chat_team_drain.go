@@ -114,13 +114,13 @@ func prepareInteractiveRead(session *ChatSession) (bool, string, error) {
 		return false, "", nil
 	}
 	if pending := pendingInteractiveInputCount(session); pending > 0 {
-		if session.queuedInputEchoed {
-			session.queuedInputDrain = true
+		if session.queuedInputEchoedValue() {
+			session.setQueuedInputDrainActive(true)
 			return false, "", nil
 		}
 		notice := ""
-		if !session.queuedInputDrain {
-			session.queuedInputDrain = true
+		if !session.queuedInputDrainActive() {
+			session.setQueuedInputDrainActive(true)
 			publishLocalChatDiagnosticEvent(session, chatEventInputQueueDetected, map[string]interface{}{
 				"queued_input_count": pending,
 				"source":             "stdin",
@@ -129,13 +129,13 @@ func prepareInteractiveRead(session *ChatSession) (bool, string, error) {
 		}
 		return false, notice, nil
 	}
-	if session.queuedInputDrain && !session.queuedInputEchoed {
+	if session.queuedInputDrainActive() && !session.queuedInputEchoedValue() {
 		publishLocalChatDiagnosticEvent(session, chatEventInputQueueDrained, map[string]interface{}{
 			"queued_input_count": 0,
 		})
 	}
-	session.queuedInputDrain = false
-	session.queuedInputEchoed = false
+	session.setQueuedInputDrainActive(false)
+	session.setQueuedInputEchoed(false)
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}

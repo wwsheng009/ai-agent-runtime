@@ -123,17 +123,22 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 				continue
 			}
 			if result.immediate() || result.screen() {
-				// P1-5 执行器 / P2-4 副屏尚未接入本循环：I/S 路由结果不得静默
-				// 消失，显式回退入队（「占有后必达」的兜底，绝不丢输入）。
-				queue.requeueFront(chatQueuedInput{
+				item := chatQueuedInput{
 					Text:       line,
 					Source:     chatInputSourceStdin,
 					EnqueuedAt: time.Now().UTC(),
-				})
+				}
+				if queue.consumeBusyCommand(item) {
+					// 命令已由 busy 通道执行并渲染（P1-5）；不置 queued echo。
+					continue
+				}
+				// 未占有（消费方缺失、执行降级，或 P2-4 副屏未落地）：回退入队，
+				// 绝不丢输入（「占有后必达」兜底）。
+				queue.requeueFront(item)
 				result = chatInputRouteResult{Disposition: chatInputRouteQueued}
 			}
 			if result.queued() {
-				session.queuedInputEchoed = true
+				session.setQueuedInputEchoed(true)
 				if session.Interaction != nil {
 					session.Interaction.RefreshStatus("")
 				}
@@ -192,6 +197,9 @@ func ensureChatBufferedInputQueue(session *ChatSession) *chatInputQueue {
 	})
 	session.InputQueue.setCommandPolicyResolver(func(text string) chatBusyCommandPolicy {
 		return chatInputCommandBusyPolicy(session, text)
+	})
+	session.InputQueue.setBusyCommandExecutor(func(item chatQueuedInput) bool {
+		return executeBusySlashCommand(session, item.Text)
 	})
 	session.InputQueue.setRouteFeedback(func(text string, result chatInputRouteResult) {
 		renderBusyInputRouteFeedback(session, text, result)

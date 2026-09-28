@@ -215,8 +215,8 @@ func restoreChatPendingInputAfterInterrupt(session *ChatSession, composerText st
 	if session.InputQueue != nil {
 		suspension := session.InputQueue.suspendPendingInput()
 		suspension.RestoreToComposerWithComposerText(session, composerText)
-		session.queuedInputDrain = false
-		session.queuedInputEchoed = false
+		session.setQueuedInputDrainActive(false)
+		session.setQueuedInputEchoed(false)
 		return
 	}
 	composerText = strings.TrimSpace(normalizeQueuedInputLine(composerText))
@@ -303,6 +303,9 @@ func ensureChatInputQueue(session *ChatSession) *chatInputQueue {
 	})
 	session.InputQueue.setCommandPolicyResolver(func(text string) chatBusyCommandPolicy {
 		return chatInputCommandBusyPolicy(session, text)
+	})
+	session.InputQueue.setBusyCommandExecutor(func(item chatQueuedInput) bool {
+		return executeBusySlashCommand(session, item.Text)
 	})
 	session.InputQueue.setRouteFeedback(func(text string, result chatInputRouteResult) {
 		renderBusyInputRouteFeedback(session, text, result)
@@ -830,6 +833,21 @@ func (q *chatInputQueue) setBusyCommandExecutor(fn func(chatQueuedInput) bool) {
 	q.mu.Lock()
 	q.busyCommandExecutor = fn
 	q.mu.Unlock()
+}
+
+// consumeBusyCommand 把一条已判定为 I/S 档的输入交给已注册消费方（P1-5 执行器 /
+// P2-4 副屏）。返回 false 表示未占有（执行器缺失或降级），调用方必须回退入队。
+func (q *chatInputQueue) consumeBusyCommand(item chatQueuedInput) bool {
+	if q == nil {
+		return false
+	}
+	q.mu.RLock()
+	executor := q.busyCommandExecutor
+	q.mu.RUnlock()
+	if executor == nil {
+		return false
+	}
+	return executor(item)
 }
 
 func (q *chatInputQueue) setRouteFeedback(fn func(string, chatInputRouteResult)) {
@@ -1471,7 +1489,7 @@ func queuedInteractiveInputState(session *ChatSession) (int, bool) {
 	if session == nil {
 		return 0, false
 	}
-	return lenQueuedInteractiveInput(session), session.queuedInputDrain
+	return lenQueuedInteractiveInput(session), session.queuedInputDrainActive()
 }
 
 func discardQueuedInteractiveLines(session *ChatSession) int {

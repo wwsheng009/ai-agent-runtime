@@ -863,7 +863,7 @@ func TestBuildChatResponsePayload(t *testing.T) {
 	runtimeCapture.RecordArtifactPath("request", filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_request_gateway_client.json"))
 	runtimeCapture.RecordArtifactPath("response", filepath.Join(logger.RuntimeHTTPArtifactDir(), "001_response_gateway_client.json"))
 
-	payload := buildChatResponsePayload(&ChatSession{
+	session := &ChatSession{
 		ProviderName:               "codex_ee",
 		Provider:                   config.Provider{Protocol: "codex"},
 		Model:                      "gpt-5.2-code",
@@ -873,14 +873,16 @@ func TestBuildChatResponsePayload(t *testing.T) {
 		Logger:                     logger,
 		SessionDir:                 sessionDir,
 		InputQueue:                 queue,
-		queuedInputDrain:           true,
 		runtimeHTTPCapture:         runtimeCapture,
 		lastLocalShellArtifactPath: filepath.Join(logger.LocalShellArtifactDir(), "001_git.txt"),
 		RuntimeSession: &runtimechat.Session{
 			ID:    "session-123",
 			State: runtimechat.StateActive,
 		},
-	}, "hello")
+	}
+	session.setQueuedInputDrainActive(true)
+
+	payload := buildChatResponsePayload(session, "hello")
 
 	if payload.Response != "hello" || payload.Provider != "codex_ee" || payload.Protocol != "codex" {
 		t.Fatalf("unexpected payload core fields: %+v", payload)
@@ -1431,10 +1433,8 @@ func TestHandleCommand_QueueStatusAndClear(t *testing.T) {
 	}
 	queue.lines <- chatQueuedInput{Text: "queued-1\n", Source: "stdin"}
 	queue.lines <- chatQueuedInput{Text: "queued-2\n", Source: "stdin"}
-	session := &ChatSession{
-		InputQueue:       queue,
-		queuedInputDrain: true,
-	}
+	session := &ChatSession{InputQueue: queue}
+	session.setQueuedInputDrainActive(true)
 
 	output := captureStdout(t, func() {
 		if quit := handleCommand(session, "/queue", false); quit {

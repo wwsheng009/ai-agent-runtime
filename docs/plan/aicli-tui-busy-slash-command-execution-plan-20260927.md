@@ -462,11 +462,11 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 | P1-1 ✅ | `chatSlashCommandSpec` 增加 `BusyPolicy`；catalog 全量标注（首批 4 条已标注，其余 inherit） |
 | P1-2 ✅ | `chatSlashCommandBusyPolicyFor` 解析函数 + 单测（含别名、子命令、fail-closed、T18 等价） |
 | P1-3 ✅ | 路由新增 `chatInputRouteImmediate`/`chatInputRouteScreen`；`setCommandGate` → `setCommandPolicyResolver`（旧布尔门保留兼容包装）；`routeLineWithCommandGate` 四档分支 + INV-8 来源分流 + 消费方缺失回退排队 |
-| P1-4 | `dispatchChatCommand` 两阶段改造（Phase A 持锁 / Phase B 效应不持锁，§3.3）+ `ChatSession.commandMu`；新增「锁内无 send」静态检查/测试断言 |
-| P1-5 | `executeBusySlashCommand`（TryLock、统一面/仲裁/来源三道门、原子占有、渲染、历史、降级） |
-| P1-6 | 路由按来源分流（本地终端 vs web/远程，INV-8）；Web 回执与唤醒语义回归（T16） |
-| P1-7 | 灰度开关（复用阶段 F 模式，如 `AICLI_CHAT_BUSY_COMMAND`，默认关）：关闭时 immediate 一律回退为 deferred，resolver 与旧白名单逐条等价（T18） |
-| P1-8 | 首批 immediate 仅 §4.1 四条命令；测试矩阵 §6 全绿后进入 P2 |
+| P1-4 ✅ | `ChatSession.commandMu` + `lockChatCommandPhaseA`；`dispatchChatCommand` Phase A（解析/变更/渲染）持锁、Phase B 效应在 `unlockCommand()` 后锁外执行；`TestDispatchChatCommandReleasesCommandPhaseALock` 覆盖结构化/legacy 两条出口 |
+| P1-5 ✅ | `chat_busy_command_exec.go`：`executeBusySlashCommand`（策略再校验 → 统一面门 → 仲裁 L0 门 → TryLock → 解析 → 忙时安全断言 → 渲染 → 历史）；`consumeBusyCommand` 交接 + 捕获循环未占有回退入队 |
+| P1-6 ✅ | 来源分流随 P1-3 落地（`chatInputSourceIsLocalTerminal`，INV-8）；Web 回执/唤醒语义回归 `-run Web` 全绿 |
+| P1-7 ✅ | 灰度开关 `AICLI_CHAT_BUSY_COMMAND` 默认关；T18 等价在策略层与路由层双重断言 |
+| P1-8 ✅ | 首批 §4.1 四条（`/help` `/status` `/session` `/queue`）；M4 原子化完成，`/queue` 忙时读取无竞态前置 |
 
 **退出条件**：开关关闭 = 现行为逐条等价（现有测试零改动）；开关打开 = 首批命令忙时立即可见。
 
@@ -1020,3 +1020,23 @@ runtimeCommandSpec{
 - 验证：T18（关闭等价）已由单测覆盖；T9/T16 待 P1-5/P1-6。
 
 ---
+
+### G.4 P1-4 ~ P1-5 与 M4（已完成，2026-09-28）
+
+| 项 | 落地 |
+| --- | --- |
+| P1-4 | `ChatSession.commandMu`（`chat.go:256` 邻近）+ `lockChatCommandPhaseA`（`command.go`）；`dispatchChatCommand` 的 Phase A（解析 + 会话/配置变更 + 渲染）持锁，Phase B 效应块在 `unlockCommand()` 之后锁外执行（send/picker/screen 不再被锁跨住） |
+| P1-5 | `chat_busy_command_exec.go`：`executeBusySlashCommand`（策略再校验 → 统一渲染面门 → 仲裁 L0 门 → `TryLock` → 解析 → 忙时安全断言 → 渲染 → 历史记录）；降级路径输出可见提示；`consumeBusyCommand` 交接 + 捕获循环「未占有 → requeue」兜底 |
+| M4 | `queuedInputDrain` / `queuedInputEchoed` 改为 `atomic.Bool` + 会话访问器；全部读写点（含 6 处既有测试字面量，机械迁移）同步；`TestChatSessionQueuedInputFlagsConcurrentAccess` 供 `-race` 验证 |
+| P1-6 | INV-8 来源分流已在 P1-3 落地；Web 回执/唤醒语义回归（`-run Web`，15.3s）全绿 |
+| P1-7 | 灰度默认关；T18 等价在策略层（`TestChatBusyCommandPolicyGateOffMatchesLegacyWhitelist`）与路由层（`TestChatInputQueuePolicyRoutingGateOffMatchesLegacyGate`）双重断言 |
+| P1-8 | 首批 §4.1 四条；M4 完成后 `/queue` 忙时读取已无竞态前置 |
+
+**新增测试（8 项）**：`TestChatBusyCommandUnsafeEffect`、`TestLockChatCommandPhaseA`、`TestDispatchChatCommandReleasesCommandPhaseALock`、`TestChatBusyCommandArbitrationAllowsFailClosed`、`TestExecuteBusySlashCommandGuards`、`TestExecuteBusySlashCommandUnifiedSession`（统一渲染面 happy path，断言结果到达 presenter）、`TestChatSessionQueuedInputFlagsConcurrentAccess`、`TestChatInputQueueConsumeBusyCommand`。
+
+**验证**：`go build ./cmd/aicli/...` ✅；`gofmt` 干净；`-race`（ChatBusyCommand/ChatInputQueue/ChatTodos/执行器/锁语义）✅；整包回归仅剩 4 个已知基线失败（`TestRunChatLoopInteractiveInitialPromptSubmitsOnceAndStaysInteractive`、`TestRunChatLoop_DrainsQueuedLinesAfterTeamSettlesBeforePrompt`、`TestBuildChatSurfaceStatusLine_DedupesProjectWhenSameAsDirectory`、`TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance`，均已用 `git stash` 基线对照确认为既有环境问题），无新增失败。
+
+> 说明：「现有测试零改动」的 P1-7 退出条件针对**行为语义**；M4 因字段类型迁移对 6 处测试字面量做了机械改写（`queuedInputDrain: true` → `setQueuedInputDrainActive(true)`），不改变任何断言意图。
+> 灰度打开后的行为：`/help`、`/status`、`/session`、`/queue`（非 clear）在 turn 运行期间立即可见；`/queue clear` 保持拒绝；其余命令保持现状（queue/reject）。
+
+**P1 阶段收口结论**：P0（分类基线/快照设计）+ P1（元数据/解析器/四档路由/两阶段锁/执行器/M4/灰度）全部落地，下一步进入 **P2**（统一交互机制：注册表与解析器 P2-1 → 三级开关 P2-2 → 宿主与生效域执行器 P2-3 → 副屏与 prompt 载体 P2-4 → 生效域适配 P2-5）。

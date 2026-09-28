@@ -26,12 +26,18 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 	// output. Once matched, they own the command completely and never fall
 	// through to handleCommand or retry through raw stdout.
 	if session == nil || !session.JSONOutput {
+		// Phase A（§3.3 两阶段锁）：解析 + 会话/配置变更 + 命令结果渲染在
+		// commandMu 内；Phase B 效应（send/picker/screen，见下方 `unlockCommand()`
+		// 之后的块）必须在锁外应用，忙时 immediate 通道才能安全 TryLock。
+		unlockCommand := lockChatCommandPhaseA(session)
 		result, handled, err := tryExecuteStructuredChatCommand(session, command)
 		if handled {
 			if err != nil {
 				result = commandErrorResult(err)
 			}
 			renderErr := renderChatCommandResult(session, result, noInteractive)
+			// Phase A 结束；以下效应属于 Phase B。
+			unlockCommand()
 			if result.ReplayHistory && session != nil {
 				// /load: replay the loaded transcript after the confirmation
 				// cell. The replay renderer owns its cells (one per message)
@@ -163,6 +169,7 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 			}
 			return result.Action == CommandQuit
 		}
+		unlockCommand()
 	}
 	// TerminalSession ownership is a one-way renderer cutover. Do not route an
 	// unstructured command into handleCommand here: several retained handlers
@@ -176,6 +183,16 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 		beginDirectInteractiveOutput(session)
 	}
 	return handleCommand(session, command, noInteractive)
+}
+
+// lockChatCommandPhaseA 获取命令互斥锁（方案 §3.3 P1-4）。nil 会话返回空操作，
+// 保持 dispatchChatCommand 对 nil 会话的既有容错路径不变。
+func lockChatCommandPhaseA(session *ChatSession) func() {
+	if session == nil {
+		return func() {}
+	}
+	session.commandMu.Lock()
+	return session.commandMu.Unlock
 }
 
 // handleCommand 处理命令

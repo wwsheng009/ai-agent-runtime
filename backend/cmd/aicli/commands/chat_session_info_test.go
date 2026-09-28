@@ -250,7 +250,7 @@ func TestPrintSessionInfo_AlignsFollowupMetadataRows(t *testing.T) {
 	}
 	session.InputQueue.lines <- chatQueuedInput{Text: "queued-1\n", Source: "stdin"}
 	session.InputQueue.lines <- chatQueuedInput{Text: "queued-2\n", Source: "stdin"}
-	session.queuedInputDrain = true
+	session.setQueuedInputDrainActive(true)
 
 	output := captureStdout(t, func() {
 		printSessionInfo(session)

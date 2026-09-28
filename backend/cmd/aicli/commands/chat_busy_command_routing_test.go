@@ -109,3 +109,23 @@ func TestChatInputQueueLegacyCommandGateWrapper(t *testing.T) {
 		t.Fatalf("旧门 false 应映射为拒绝，实际 %+v", got)
 	}
 }
+
+// P1-5：I/S 档消费方经 consumeBusyCommand 交接；未注册时不得占有。
+func TestChatInputQueueConsumeBusyCommand(t *testing.T) {
+	queue := newBusyPolicyTestQueue()
+	if queue.consumeBusyCommand(chatQueuedInput{Text: "/status", Source: chatInputSourceStdin}) {
+		t.Fatal("未注册执行器时不得占有输入")
+	}
+
+	var consumed string
+	queue.setBusyCommandExecutor(func(item chatQueuedInput) bool {
+		consumed = item.Text
+		return true
+	})
+	if !queue.consumeBusyCommand(chatQueuedInput{Text: "/status", Source: chatInputSourceStdin}) {
+		t.Fatal("注册执行器后应占有输入")
+	}
+	if consumed != "/status" {
+		t.Fatalf("执行器收到 %q，期望 /status", consumed)
+	}
+}

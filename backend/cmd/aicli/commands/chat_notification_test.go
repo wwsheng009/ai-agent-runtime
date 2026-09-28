@@ -304,11 +304,11 @@ func TestShouldNotifyChatTurnComplete(t *testing.T) {
 		t.Fatal("idle session without queued input should notify")
 	}
 
-	session.queuedInputDrain = true
+	session.setQueuedInputDrainActive(true)
 	if shouldNotifyChatTurnComplete(session) {
 		t.Fatal("queued-input drain should suppress turn-complete notify")
 	}
-	session.queuedInputDrain = false
+	session.setQueuedInputDrainActive(false)
 
 	queue := newChatInputQueue(nil)
 	queue.routeInputText("queued follow-up\n")
