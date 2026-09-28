@@ -4628,6 +4628,10 @@ func (a *SessionActor) interruptActiveSessionRun() *sessionRunControl {
 	if cancel != nil || cancelCause != nil {
 		cancelSessionRunCause(cancelCause, cancel, runCancelSourceUserInterrupt)
 	}
+	// P0-1：中断是一次 run 级状态迁移（§5.4）；仅在实际中断了活动 run 时上报。
+	if run != nil {
+		a.noteProgress("interrupt")
+	}
 	return run
 }
 
@@ -5040,11 +5044,23 @@ func (a *SessionActor) AskUserQuestion(ctx context.Context, req toolbroker.UserQ
 	}
 }
 
+// noteProgress 上报一次 actor 级进度 tick（P0-1，§5.4 状态迁移：审批/输入
+// 等待进入与解除、中断）。nil-safe：未接线时完全 no-op；契约同
+// SessionActorConfig.OnProgress——必须快速返回、不得影响 run 结果。
+func (a *SessionActor) noteProgress(kind string) {
+	if a == nil || a.onProgress == nil {
+		return
+	}
+	a.onProgress(kind)
+}
+
 func (a *SessionActor) registerApprovalWaiter(requestID string) chan runtimepolicy.ApprovalResponse {
 	a.waiterMu.Lock()
-	defer a.waiterMu.Unlock()
 	ch := make(chan runtimepolicy.ApprovalResponse, 1)
 	a.approvalWaiters[requestID] = ch
+	a.waiterMu.Unlock()
+	// 进入审批等待 = 一次状态迁移；run 被阻塞但执行面仍在。
+	a.noteProgress("approval_requested")
 	return ch
 }
 
@@ -5062,6 +5078,8 @@ func (a *SessionActor) resolveApproval(requestID string, resp runtimepolicy.Appr
 	if ch == nil {
 		return false
 	}
+	// 解除审批等待 = 状态迁移（决定已送达阻塞中的 run）。
+	a.noteProgress("approval_resolved")
 	select {
 	case ch <- resp:
 	default:
@@ -5147,9 +5165,11 @@ func (a *SessionActor) pendingApprovalRunTerminal(state *RuntimeState, requestID
 
 func (a *SessionActor) registerQuestionWaiter(questionID string) chan string {
 	a.waiterMu.Lock()
-	defer a.waiterMu.Unlock()
 	ch := make(chan string, 1)
 	a.questionWaiters[questionID] = ch
+	a.waiterMu.Unlock()
+	// 进入输入等待 = 一次状态迁移。
+	a.noteProgress("input_requested")
 	return ch
 }
 
@@ -5167,6 +5187,8 @@ func (a *SessionActor) resolveQuestion(questionID, answer string) bool {
 	if ch == nil {
 		return false
 	}
+	// 解除输入等待 = 状态迁移（回答已送达阻塞中的 run）。
+	a.noteProgress("input_resolved")
 	select {
 	case ch <- answer:
 	default:
