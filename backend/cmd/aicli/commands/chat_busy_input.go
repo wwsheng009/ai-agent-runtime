@@ -122,6 +122,16 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 			if result.rejected() {
 				continue
 			}
+			if result.immediate() || result.screen() {
+				// P1-5 执行器 / P2-4 副屏尚未接入本循环：I/S 路由结果不得静默
+				// 消失，显式回退入队（「占有后必达」的兜底，绝不丢输入）。
+				queue.requeueFront(chatQueuedInput{
+					Text:       line,
+					Source:     chatInputSourceStdin,
+					EnqueuedAt: time.Now().UTC(),
+				})
+				result = chatInputRouteResult{Disposition: chatInputRouteQueued}
+			}
 			if result.queued() {
 				session.queuedInputEchoed = true
 				if session.Interaction != nil {
@@ -180,8 +190,8 @@ func ensureChatBufferedInputQueue(session *ChatSession) *chatInputQueue {
 	session.InputQueue.setDraftNotifier(func(active bool, lines int, text string) {
 		notifyChatInputDraftState(session, active, lines, text)
 	})
-	session.InputQueue.setCommandGate(func(text string) bool {
-		return chatInputCommandQueuable(session, text)
+	session.InputQueue.setCommandPolicyResolver(func(text string) chatBusyCommandPolicy {
+		return chatInputCommandBusyPolicy(session, text)
 	})
 	session.InputQueue.setRouteFeedback(func(text string, result chatInputRouteResult) {
 		renderBusyInputRouteFeedback(session, text, result)

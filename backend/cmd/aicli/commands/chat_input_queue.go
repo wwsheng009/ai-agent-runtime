@@ -38,6 +38,11 @@ const (
 	chatInputRouteQueued chatInputRouteDisposition = iota
 	chatInputRoutePriority
 	chatInputRouteRejectedCommand
+	// chatInputRouteImmediate / chatInputRouteScreen 是 P1 新增的两档（方案 §5 P1-3）：
+	// 仅本地终端来源可达（INV-8），且仅在对应消费方已注册时才会被路由返回；
+	// 消费方缺失（P1-5/P2-4 未落地）时回退 chatInputRouteQueued，保证不丢输入。
+	chatInputRouteImmediate
+	chatInputRouteScreen
 )
 
 type chatInputRouteResult struct {
@@ -50,6 +55,14 @@ func (r chatInputRouteResult) queued() bool {
 
 func (r chatInputRouteResult) rejected() bool {
 	return r.Disposition == chatInputRouteRejectedCommand
+}
+
+func (r chatInputRouteResult) immediate() bool {
+	return r.Disposition == chatInputRouteImmediate
+}
+
+func (r chatInputRouteResult) screen() bool {
+	return r.Disposition == chatInputRouteScreen
 }
 
 type chatPendingInputSuspension struct {
@@ -252,8 +265,13 @@ type chatInputQueue struct {
 	queuedFront   []chatQueuedInput
 	queuedPreview []chatQueuedInput
 
-	commandGate   func(string) bool
-	routeFeedback func(string, chatInputRouteResult)
+	// commandPolicy 是命令门（P1-3 起为策略解析器；旧布尔门经 setCommandGate
+	// 兼容包装换算为 deferred/reject，测试与既有调用点零改动）。
+	commandPolicy func(string) chatBusyCommandPolicy
+	// busyCommandExecutor 是 I/S 档消费方（P1-5/P2-4 注册）。未注册时路由把
+	// I/S 回退为排队——「占有后必达」，绝不丢输入。
+	busyCommandExecutor func(chatQueuedInput) bool
+	routeFeedback       func(string, chatInputRouteResult)
 
 	priorityResolvedElsewhere chan struct{}
 }
@@ -283,8 +301,8 @@ func ensureChatInputQueue(session *ChatSession) *chatInputQueue {
 	session.InputQueue.setDraftNotifier(func(active bool, lines int, text string) {
 		notifyChatInputDraftState(session, active, lines, text)
 	})
-	session.InputQueue.setCommandGate(func(text string) bool {
-		return chatInputCommandQueuable(session, text)
+	session.InputQueue.setCommandPolicyResolver(func(text string) chatBusyCommandPolicy {
+		return chatInputCommandBusyPolicy(session, text)
 	})
 	session.InputQueue.setRouteFeedback(func(text string, result chatInputRouteResult) {
 		renderBusyInputRouteFeedback(session, text, result)
@@ -777,12 +795,40 @@ func (q *chatInputQueue) setDraftNotifier(fn func(active bool, lines int, text s
 	q.draftMu.Unlock()
 }
 
+// setCommandGate 是旧布尔门的兼容包装：true→deferred（可排队），false→reject。
+// 生产接线已迁移到 setCommandPolicyResolver（P1-3），保留本函数使既有测试与
+// 外部调用点零改动（P1-7 退出条件）。
 func (q *chatInputQueue) setCommandGate(fn func(string) bool) {
+	if fn == nil {
+		q.setCommandPolicyResolver(nil)
+		return
+	}
+	q.setCommandPolicyResolver(func(text string) chatBusyCommandPolicy {
+		if fn(text) {
+			return chatBusyPolicyDeferred
+		}
+		return chatBusyPolicyReject
+	})
+}
+
+// setCommandPolicyResolver 安装忙时命令策略解析器（方案 §5 P1-3）。
+func (q *chatInputQueue) setCommandPolicyResolver(fn func(string) chatBusyCommandPolicy) {
 	if q == nil {
 		return
 	}
 	q.mu.Lock()
-	q.commandGate = fn
+	q.commandPolicy = fn
+	q.mu.Unlock()
+}
+
+// setBusyCommandExecutor 注册 I/S 档消费方（P1-5 执行器 / P2-4 副屏）。
+// 返回 true 表示该行已被消费方占有。
+func (q *chatInputQueue) setBusyCommandExecutor(fn func(chatQueuedInput) bool) {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	q.busyCommandExecutor = fn
 	q.mu.Unlock()
 }
 
@@ -812,9 +858,12 @@ func (q *chatInputQueue) rejectCommandInput(text string) bool {
 		return false
 	}
 	q.mu.RLock()
-	gate := q.commandGate
+	resolver := q.commandPolicy
 	q.mu.RUnlock()
-	return gate != nil && !gate(text)
+	if resolver == nil {
+		return false
+	}
+	return resolver(text) == chatBusyPolicyReject
 }
 
 func (q *chatInputQueue) shouldStageBufferedInput(text string, bufferedInput bool) bool {
@@ -1684,14 +1733,33 @@ func (q *chatInputQueue) routeLineWithCommandGate(item chatQueuedInput, enforceC
 	defer q.routeMu.Unlock()
 	q.mu.RLock()
 	priorityMode := q.priorityMode
-	gate := q.commandGate
+	resolver := q.commandPolicy
+	executor := q.busyCommandExecutor
 	q.mu.RUnlock()
 	if priorityMode {
 		q.priorityLines <- item
 		return chatInputRouteResult{Disposition: chatInputRoutePriority}
 	}
-	if enforceCommandGate && isSlashCommandInput(item.Text) && gate != nil && !gate(item.Text) {
-		return chatInputRouteResult{Disposition: chatInputRouteRejectedCommand}
+	if enforceCommandGate && isSlashCommandInput(item.Text) && resolver != nil {
+		policy := resolver(item.Text)
+		if policy == chatBusyPolicyImmediate || policy == chatBusyPolicyScreen {
+			if executor == nil || !chatInputSourceIsLocalTerminal(item.Source) {
+				// INV-8：web/远程/未知来源一律 deferred；消费方未注册
+				//（P1-5/P2-4 未落地）同样回退排队，保证输入不丢。
+				policy = chatBusyPolicyDeferred
+			}
+		}
+		switch policy {
+		case chatBusyPolicyImmediate:
+			return chatInputRouteResult{Disposition: chatInputRouteImmediate}
+		case chatBusyPolicyScreen:
+			return chatInputRouteResult{Disposition: chatInputRouteScreen}
+		case chatBusyPolicyDeferred:
+			// 落入下方入队路径
+		default:
+			// reject / inherit（解析器契约外取值）：fail-closed
+			return chatInputRouteResult{Disposition: chatInputRouteRejectedCommand}
+		}
 	}
 	q.queuedMu.Lock()
 	q.queuedPreview = append(q.queuedPreview, item)

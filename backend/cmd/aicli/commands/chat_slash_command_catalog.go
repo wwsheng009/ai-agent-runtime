@@ -28,6 +28,10 @@ type chatSlashCommandSpec struct {
 	AcceptsArgs  bool
 	RequiresArgs bool
 	ShortcutOf   string
+	// BusyPolicy 是忙时命令策略（方案 §5 P1-1）：零值 inherit 表示未标记，
+	// 路由按既有 chatSlashCommandQueueSafe 白名单派生（零行为差异）；
+	// 标记命令仅在灰度开关 AICLI_CHAT_BUSY_COMMAND 打开时生效。
+	BusyPolicy chatBusyCommandPolicy
 }
 
 type chatSlashCommandArgSpec struct {
@@ -44,6 +48,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			Summary:     "显示命令帮助",
 			Group:       string(chatSlashCommandGroupHelp),
 			AcceptsArgs: false,
+			BusyPolicy:  chatBusyPolicyImmediate, // P1 首批（§4.1）：零会话读取
 			Args: []chatSlashCommandArgSpec{
 				{Token: "/?", Summary: "显示命令帮助"},
 			},
@@ -87,6 +92,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			Summary:     "显示当前会话信息",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: false,
+			BusyPolicy:  chatBusyPolicyImmediate, // P1 首批（§4.1）：快照化后放行
 		},
 		{
 			Name:        "/status",
@@ -94,6 +100,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			Summary:     "显示当前会话状态",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: false,
+			BusyPolicy:  chatBusyPolicyImmediate, // P1 首批（§4.1）：快照化后放行
 		},
 		{
 			Name:    "/todos",
@@ -628,6 +635,7 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			Summary:     "查看或清空排队输入",
 			Group:       string(chatSlashCommandGroupContext),
 			AcceptsArgs: true,
+			BusyPolicy:  chatBusyPolicyImmediate, // P1 首批（§4.1）：clear 由子命令级覆盖排除
 			Args: []chatSlashCommandArgSpec{
 				{Token: "status", Summary: "查看当前状态"},
 				{Token: "clear", Summary: "清空排队输入"},

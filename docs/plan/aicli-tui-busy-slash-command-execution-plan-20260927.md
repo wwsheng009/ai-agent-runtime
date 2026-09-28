@@ -459,9 +459,9 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 
 | 步骤 | 内容 |
 | --- | --- |
-| P1-1 | `chatSlashCommandSpec` 增加 `BusyPolicy`；catalog 全量标注 |
-| P1-2 | `chatSlashCommandBusyPolicyFor` 解析函数 + 单测（含别名、子命令、fail-closed） |
-| P1-3 | 路由新增 `chatInputRouteImmediate`/`chatInputRouteScreen`；`setCommandGate` → `setCommandPolicyResolver`；`routeLineWithCommandGate` 四档分支 |
+| P1-1 ✅ | `chatSlashCommandSpec` 增加 `BusyPolicy`；catalog 全量标注（首批 4 条已标注，其余 inherit） |
+| P1-2 ✅ | `chatSlashCommandBusyPolicyFor` 解析函数 + 单测（含别名、子命令、fail-closed、T18 等价） |
+| P1-3 ✅ | 路由新增 `chatInputRouteImmediate`/`chatInputRouteScreen`；`setCommandGate` → `setCommandPolicyResolver`（旧布尔门保留兼容包装）；`routeLineWithCommandGate` 四档分支 + INV-8 来源分流 + 消费方缺失回退排队 |
 | P1-4 | `dispatchChatCommand` 两阶段改造（Phase A 持锁 / Phase B 效应不持锁，§3.3）+ `ChatSession.commandMu`；新增「锁内无 send」静态检查/测试断言 |
 | P1-5 | `executeBusySlashCommand`（TryLock、统一面/仲裁/来源三道门、原子占有、渲染、历史、降级） |
 | P1-6 | 路由按来源分流（本地终端 vs web/远程，INV-8）；Web 回执与唤醒语义回归（T16） |
@@ -990,5 +990,33 @@ runtimeCommandSpec{
   - **验证**：`go build ./cmd/aicli/...` ✅；`gofmt -l` ✅；`-race`（ChatTodos）✅；整包回归无新增失败——仅 2 个**基线既有**的环境相关失败（`TestHumanizeActorExecutorError_AppendsRuntimeHTTPPreview`、`TestChatDebugDisplayShowsStorageSection`），已用 `git stash` 基线对照确认与本改动无关。
 - ⏳ **待实现（P2-4）**：screen 任务面板（BusyScreen + 屏内切换/实时刷新）、`tool_end` 快照缓存（V12）、T38/T41。
 - 备注：当前忙时语义为「排队到回合结束」（不丢输入）；inline 运行时直读（`read` 生效域）随 `runtimeCommandHost` 一并开放（§3.8.4）。
+
+---
+
+## 附录 G：实施记录（v1.3.2，2026-09-27/28）
+
+### G.1 P1-1 ~ P1-3（已完成；灰度默认关闭 = 零行为差异）
+
+| 项 | 落地 |
+| --- | --- |
+| P1-1 | `chatSlashCommandSpec.BusyPolicy`（`chat_slash_command_catalog.go`）；首批 §4.1 四条（`/help`、`/status`、`/session`、`/queue`）标注 `chatBusyPolicyImmediate`，其余零值 inherit |
+| P1-2 | `chat_busy_command_policy.go`：`chatBusyCommandPolicy`（inherit/I/S/D/R）、`chatBusyCommandEnabled`（`AICLI_CHAT_BUSY_COMMAND`，默认关）、`chatSlashCommandBusyPolicyFor`（别名归一、参数守卫、`/queue clear` 子命令覆盖、fail-closed）、`chatInputCommandBusyPolicy`（Ready 语义等价包装） |
+| P1-3 | `chat_input_queue.go`：`chatInputRouteImmediate`/`chatInputRouteScreen` + 访问器；字段 `commandGate`→`commandPolicy`；新增 `setCommandPolicyResolver` / `setBusyCommandExecutor`（`setCommandGate` 保留兼容包装，既有测试零改动）；`routeLineWithCommandGate` 四档分支 + INV-8 来源分流 + 消费方未注册时回退排队；`chat_busy_input.go` 捕获循环对 I/S 兜底 requeue（绝不丢输入） |
+
+**测试**：`chat_busy_command_policy_test.go` 6 项（含 T18 关闭等价）＋ `chat_busy_command_routing_test.go` 5 项（I/S 路由、INV-8、无消费方回退、关闭等价、旧门包装）全绿；`-run 'ChatBusyCommand|ChatInputQueue'` 全量通过；`go build`/`gofmt` 干净。
+
+### G.2 独立勘查发现与方案修正（第三轮，2026-09-27）
+
+1. **§3.3 调用点偏差**：`agent_stdio_slash.go:94` 实际调用 `tryExecuteStructuredChatCommand`（`:93-104`），**不是** `dispatchChatCommand`；ACP 忙时命令不经本通道。`dispatchChatCommand` 生产调用点仅 `chat.go:1714/1773`（均不持会话锁）。
+2. **M4 范围扩大**：除 `queuedInputDrain`（`chat_input_queue.go:1425` 裸读，写方 `chat_team_drain.go:117-138`）外，`session.queuedInputEchoed` 亦为无锁读写（`chat.go:300`、`chat_busy_input.go:126/136`）。**P1-5 启用 `/queue` immediate 前必须先完成 M4**（否则 T9 `-race` 必红）；本轮不动（保持既有测试零改动），登记为 P1-5 前置阻断项。
+3. **行号漂移**：`routeLineWithCommandGate` 实际 `:1678-1701`；`queuedInputDrain` 读取在 `:1425`。
+4. `chatInputCommandQueuable`（忙时队列门）与 `chatInputCommandAllowed`（Ready 门，`chat.go:1763`）是两条语义；P1-3 只迁移前者，后者未动。
+5. 包内暂无队列/忙时 `-race` 用例（T9/T20/T27/T35 需新建；`-race ChatTodos` 已有）。
+
+### G.3 下一步（P1-4 → P1-5）
+
+- **P1-4**：新增 `ChatSession.commandMu`（建议置于 `chat.go:250-256` 邻近）+ `dispatchChatCommand` 两阶段切分（Phase A 以 `command.go:34` 渲染完成为界；pickers `:50-131`、sends `:132-163` 留在 Phase B 锁外）。
+- **P1-5**：`executeBusySlashCommand` 插入 `chat_busy_input.go:120-124`；三道门（`unifiedDirectInteractiveOutput` / `chatInputArbitrationSnapshotOf` 的 `ModalDepth` / 来源）+ TryLock 降级 + 忙时安全断言 + 历史记录；并完成 M4 原子化后方可让 `/queue` 在灰度打开时实际立即执行。
+- 验证：T18（关闭等价）已由单测覆盖；T9/T16 待 P1-5/P1-6。
 
 ---
