@@ -355,3 +355,30 @@ describe("createRuntimeDeltaCoordinator 多回合键控", () => {
     expect(coordinator.claim("plain-key")).toBe(false);
   });
 });
+
+describe("createRuntimeDeltaCoordinator 直连流占位（跨通道单写者选举）", () => {
+  it("持有时按会话生效，且按引用计数释放", () => {
+    const coordinator = createRuntimeDeltaCoordinator();
+    expect(coordinator.isDirectStreamActive("session-a")).toBe(false);
+
+    coordinator.holdDirectStream("session-a");
+    coordinator.holdDirectStream("session-a");
+    expect(coordinator.isDirectStreamActive("session-a")).toBe(true);
+    // 其它会话不受影响（多会话并发互不牵连）。
+    expect(coordinator.isDirectStreamActive("session-b")).toBe(false);
+
+    coordinator.releaseDirectStream("session-a");
+    // 引用计数未归零：仍然占位（嵌套直连流场景）。
+    expect(coordinator.isDirectStreamActive("session-a")).toBe(true);
+    coordinator.releaseDirectStream("session-a");
+    expect(coordinator.isDirectStreamActive("session-a")).toBe(false);
+  });
+
+  it("空身份（草稿/未知会话）不产生占位", () => {
+    const coordinator = createRuntimeDeltaCoordinator();
+    coordinator.holdDirectStream("");
+    coordinator.holdDirectStream(undefined);
+    expect(coordinator.isDirectStreamActive("")).toBe(false);
+    expect(coordinator.isDirectStreamActive(undefined)).toBe(false);
+  });
+});

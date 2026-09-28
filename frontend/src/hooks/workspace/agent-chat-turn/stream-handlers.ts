@@ -4,6 +4,10 @@
 // orchestration/route/observation/subagent/result/done/error）聚合为单个工厂；
 // 渲染与终态收敛回调由发送编排注入，本模块不持有 React 状态。
 
+import {
+  RuntimeApiError,
+  getSessionLeaseConflictTitle,
+} from "@/api/runtime/shared";
 import type { Artifact, Thread } from "@/data/mock";
 import {
   appendLiveStreamReasoning,
@@ -27,6 +31,7 @@ import {
 } from "@/lib/workspace-thread-state";
 import { recordGoalToolEnd } from "@/lib/session-goal/store";
 import type { TrajectoryEventKind } from "@/lib/trajectory/types";
+import { admitTransportFrame, readChatFrameSeq } from "@/hooks/workspace/frame-intake";
 import type {
   AgentChatResult,
   AgentChatStreamChunkPayload,
@@ -73,6 +78,35 @@ export type AgentChatStreamHandlersDeps = {
   ) => void;
 };
 
+/**
+ * 租约冲突的 SSE error 帧 → 与 CLI 路径（use-workspace-agent-chat-turn.ts 的
+ * getSessionLeaseConflictTitle）完全一致的短标题：文案单一真源在 api/runtime/
+ * shared，这里只把帧内的 lease 上下文投影成它认识的错误体，避免两处文案漂移。
+ */
+function getFrameLeaseConflictTitle(
+  payload: Record<string, unknown>,
+): string | undefined {
+  if (payload.error_type !== "session_lease_conflict") {
+    return undefined;
+  }
+  const lease =
+    asRecord(payload.lease) ?? asRecord(asRecord(payload.context)?.lease);
+  const ownerKind =
+    typeof lease?.owner_kind === "string" ? lease.owner_kind : "";
+  return getSessionLeaseConflictTitle(
+    new RuntimeApiError(409, {
+      code: "SESSION_LEASE_CONFLICT",
+      context: { lease: { owner_kind: ownerKind } },
+    }),
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 export function createAgentChatStreamHandlers(
   deps: AgentChatStreamHandlersDeps,
 ) {
@@ -94,6 +128,23 @@ export function createAgentChatStreamHandlers(
     updateStreamingError,
     upsertLiveToolSegment,
   } = deps;
+
+  // L3 帧闸门（@/hooks/workspace/frame-intake）：同一会话内带持久化 seq 的内容帧
+  // 跨通道（本 chat 流 + /runtime/stream）只放行一次。chat 流的 wire-only 帧
+  // （chunk/reasoning）不带 `_event.sequence`，seq=0 时闸门放行，保持既有
+  // deltaCoordinator 按 provider key 去重的行为——缺身份不等于重复。
+  const admitContentFrame = (
+    kind: "text" | "reasoning" | "image",
+    payload: unknown,
+  ): boolean =>
+    admitTransportFrame({
+      sessionId,
+      turnId,
+      kind,
+      seq: readChatFrameSeq(payload),
+      // 与 /runtime/stream 入口共享同一单写者作用域（页面级 deltaCoordinator）。
+      scope: deltaCoordinator ?? null,
+    });
 
   return {
     onMeta: (payload: AgentChatStreamMetaPayload) => {
@@ -165,6 +216,14 @@ export function createAgentChatStreamHandlers(
       });
     },
     onChunk: (payload: AgentChatStreamChunkPayload) => {
+      // 权威全文帧（mode=replace）不参与两通道 claim（见下方注释），同样不参与
+      // 闸门：它必须应用。其余内容帧先过闸门：被拒绝的重复帧整帧丢弃，且不消费
+      // delta key（claim 在下方，被拒的帧走不到那里）。
+      const replace = isReplaceStreamChunk(payload);
+      const frameKind = payload.type === "image" ? "image" : "text";
+      if (!replace && !admitContentFrame(frameKind, payload)) {
+        return;
+      }
       pushTrajectory("chunk", payload);
       turnState.receivedRuntimeActivity = true;
       if (payload.type === "image") {
@@ -207,7 +266,6 @@ export function createAgentChatStreamHandlers(
         payload as unknown as Record<string, unknown>,
         "text",
       );
-      const replace = isReplaceStreamChunk(payload);
       // 权威全文帧不参与两通道 claim：它是对既有文本的覆盖（没有、也不该有
       // 流式去重键），claim("") 是空操作，这里显式跳过以免表达错意图。
       if (!replace && deltaCoordinator && !deltaCoordinator.claim(textKey)) {
@@ -234,6 +292,9 @@ export function createAgentChatStreamHandlers(
       frameScheduler.schedule();
     },
     onReasoning: (payload: AgentChatStreamChunkPayload) => {
+      if (!admitContentFrame("reasoning", payload)) {
+        return;
+      }
       pushTrajectory("reasoning", payload);
       turnState.receivedRuntimeActivity = true;
       const delta =
@@ -422,7 +483,8 @@ export function createAgentChatStreamHandlers(
           : typeof payload.error === "string" && payload.error.trim()
             ? payload.error.trim()
             : "agent chat stream failed";
-      updateStreamingError(message);
+      // 会话租约冲突：附上与 CLI 路径一致的短标题（其余错误帧不带标题，行为不变）。
+      updateStreamingError(message, getFrameLeaseConflictTitle(payload));
       updateCurrentThread((thread) => ({
         ...thread,
         updatedAt: new Date().toISOString(),

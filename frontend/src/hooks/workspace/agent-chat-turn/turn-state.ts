@@ -51,6 +51,12 @@ export type ChatTurnRuntimeState = {
   finalResult: AgentChatResult | null;
   turnFinalized: boolean;
   receivedRuntimeActivity: boolean;
+  /**
+   * 已从 socket 读到任意字节（含 `: open`/`: keepalive` 注释帧）。
+   * 连接守卫的「连接成功」口径：服务端在请求入口即写 `: open`，因此注释帧
+   * 同样是「流已建立」的证据，而不是等到第一个业务事件。
+   */
+  receivedStreamBytes: boolean;
   receivedErrorEvent: boolean;
   connectTimedOut: boolean;
 };
@@ -79,6 +85,7 @@ export function createTurnRuntimeState(
     finalResult: null,
     turnFinalized: false,
     receivedRuntimeActivity: false,
+    receivedStreamBytes: false,
     receivedErrorEvent: false,
     connectTimedOut: false,
   };

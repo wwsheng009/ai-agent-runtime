@@ -1,18 +1,12 @@
 // 由 lib/workspace-thread-state.ts 机械拆分而来（P0-2），仅搬迁不改语义。
+//
+// 本文件保留历史消息行投影的原子能力（身份/推理/工具行读取、产物工厂）与公共
+// 入口 `mapSessionHistoryToMessages` 的 re-export；「渲染单元聚合 + 实时合并」
+// 见 ./history-units（P0-2 行数门禁拆分，调用方无需跟着搬家）。
 
-import { type Artifact, type ChatMessage, type MessageSegment } from "@/data/mock";
+import { type Artifact, type MessageSegment } from "@/data/mock";
 import { type SessionHistoryMessage, type SessionHistoryToolCall } from "@/types/runtime";
 import { parseToolDetailsFromArgsText, resolveToolSegmentDetails } from "@/lib/tool-row/details";
-
-import { extractGeneratedImagesFromAssistantMessage } from "./generated-images";
-import { buildHistoryArtifacts, normalizeSessionHistoryMessages } from "./history-artifacts";
-import { mergeUniqueStrings } from "./shared";
-import { getHistoryMessageAuthor, getPrimaryTextContent } from "./text-utils";
-
-type HistoryMessageMapping = {
-  artifacts: Artifact[];
-  message: ChatMessage;
-};
 
 export function readFirstTextValue(
   source: Record<string, unknown>,
@@ -112,7 +106,7 @@ export function createLazyJsonArtifact(
   };
 }
 
-function readHistoryMessageIdentity(
+export function readHistoryMessageIdentity(
   message: SessionHistoryMessage,
 ): string | undefined {
   const metadata =
@@ -142,7 +136,7 @@ const HISTORY_REASONING_METADATA_KEY = "reasoning_details";
  * - visibility="none"/"opaque" 时跳过；
  * - 优先 summary，其次 content。
  */
-function extractHistoryReasoningText(
+export function extractHistoryReasoningText(
   metadata: Record<string, unknown> | undefined,
 ): string {
   if (!metadata) return "";
@@ -205,7 +199,7 @@ function historyToolArgsText(call: SessionHistoryToolCall | undefined): string {
  * 历史 tool 回执行 → tool segment（B4/B5：折叠态 24px 单行的数据前提）。
  * 名称/入参优先取配对 `tool_calls`，缺失退回 metadata；明细复用 argsSummary 解析。
  */
-function buildHistoryToolSegment(
+export function buildHistoryToolSegment(
   message: SessionHistoryMessage,
   call: SessionHistoryToolCall | undefined,
 ): MessageSegment {
@@ -261,168 +255,5 @@ function buildHistoryToolSegment(
   return segment;
 }
 
-function buildHistoryMessage(
-  sessionId: string,
-  index: number,
-  message: SessionHistoryMessage,
-  artifacts: Artifact[],
-  generatedImageSegments: MessageSegment[],
-  toolCalls: ReadonlyMap<string, SessionHistoryToolCall>,
-): ChatMessage {
-  const relatedArtifactIds = artifacts.map((artifact) => artifact.id);
-  const stableId = readHistoryMessageIdentity(message);
-  const reasoningText = extractHistoryReasoningText(message.metadata);
-  const toolCallId =
-    typeof message.tool_call_id === "string" ? message.tool_call_id.trim() : "";
-  // 工具回执：历史里 role="tool" 独立成条，按其配对调用还原 tool segment，
-  // 由消息列表按 24px 工具行呈现（不再是通用「上下文注入」行）。
-  // 空消息不占位（§12.1.4）：工具回合 / 仅推理 / 仅附件的 assistant 消息 content
-  // 为空是正常协议形态，不能降级成 "[empty message]" 文本段顶到过程区上屏。
-  const contentText = message.content?.trim() ?? "";
-  const segments: MessageSegment[] =
-    message.role === "tool"
-      ? [
-          buildHistoryToolSegment(
-            message,
-            toolCallId ? toolCalls.get(toolCallId) : undefined,
-          ),
-        ]
-      : [
-          // 推理先于正文落位：思考过程在上、正式回答在下。历史条目只保存最终正文
-          // 与合并后的推理块（没有逐帧顺序信息），恢复时按固定顺序还原；
-          // 旧实现把正文放前，页面就成了「先正文、后推理过程」。
-          ...(reasoningText
-            ? [{ type: "reasoning" as const, content: reasoningText }]
-            : []),
-          ...(contentText
-            ? [{ type: "text" as const, content: contentText }]
-            : []),
-          ...generatedImageSegments,
-        ];
-  return {
-    id: stableId || `${sessionId}-history-${index}`,
-    role: message.role === "user" ? "user" : "assistant",
-    author: getHistoryMessageAuthor(message.role),
-    label: message.role || "runtime",
-    relatedArtifactIds:
-      relatedArtifactIds.length > 0 ? relatedArtifactIds : undefined,
-    segments,
-  };
-}
-
-export function mapSessionHistoryToMessages(
-  sessionId: string,
-  history: SessionHistoryMessage[] | null | undefined,
-  existingMessages: ChatMessage[],
-) {
-  const usedMessageIds = new Set<string>();
-  const normalizedHistory = normalizeSessionHistoryMessages(history);
-  const toolCalls = indexHistoryToolCalls(normalizedHistory);
-
-  return normalizedHistory.map((item, index) => {
-    const generatedImageAttachments =
-      extractGeneratedImagesFromAssistantMessage(item, sessionId);
-    const restoredArtifacts = buildHistoryArtifacts(
-      sessionId,
-      index,
-      item,
-      generatedImageAttachments.artifacts,
-    );
-    const fallback = buildHistoryMessage(
-      sessionId,
-      index,
-      item,
-      restoredArtifacts,
-      generatedImageAttachments.segments,
-      toolCalls,
-    );
-    const fallbackText = getPrimaryTextContent(fallback);
-
-    const stableId = readHistoryMessageIdentity(item);
-    const matched = existingMessages.find((message) => {
-      if (usedMessageIds.has(message.id)) {
-        return false;
-      }
-      if (stableId && message.id === stableId) {
-        return true;
-      }
-      // 文本兜底只在历史条目确有正文时生效：工具回执没有文本段（primary text 为空），
-      // 否则会被误并进任意同角色的空文本消息、从时间线上消失。
-      if (!fallbackText) {
-        return false;
-      }
-      return (
-        message.role === fallback.role &&
-        getPrimaryTextContent(message) === fallbackText
-      );
-    });
-
-    if (!matched) {
-      return {
-        artifacts: restoredArtifacts,
-        message: fallback,
-      } satisfies HistoryMessageMapping;
-    }
-
-    usedMessageIds.add(matched.id);
-    if (stableId) {
-      usedMessageIds.add(stableId);
-    }
-    // 过程区透传：推理分块 / 工具行位置 / 代码段由实时路径承载。历史条目只保存
-    // 「合并后的一块推理 + 最终正文」（没有逐帧顺序信息），用它覆盖会把
-    // 「推理 → 工具 → 推理」压成一段、并清掉正在增长块的 running 标记。
-    // 工具卡在历史里可能没有对应表达（工具回执的 tool segment 现在由 fallback
-    // 自带给历史条目），合并时按 toolCallId 去重，避免同一调用双份。
-    const fallbackToolCallIds = new Set(
-      fallback.segments
-        .filter(
-          (
-            segment,
-          ): segment is Extract<MessageSegment, { type: "tool" }> =>
-            segment.type === "tool",
-        )
-        .map((segment) => segment.toolCallId)
-        .filter((id): id is string => Boolean(id)),
-    );
-    const preservedSegments = matched.segments.filter((segment) => {
-      if (segment.type === "code" || segment.type === "reasoning") {
-        return true;
-      }
-      if (segment.type !== "tool") {
-        return false;
-      }
-      return !segment.toolCallId || !fallbackToolCallIds.has(segment.toolCallId);
-    });
-    const preservedHasReasoning = preservedSegments.some(
-      (segment) => segment.type === "reasoning",
-    );
-    // 实时过程区已有推理块时，历史的那块合并推理是同一段思考的降级表达：丢弃它，
-    // 否则同一段思考渲染两遍（只有实时侧没有推理时才用历史推理兜底）。
-    const durableSegments = preservedHasReasoning
-      ? fallback.segments.filter((segment) => segment.type !== "reasoning")
-      : fallback.segments;
-    const relatedArtifactIds = mergeUniqueStrings(
-      ...(matched.relatedArtifactIds ?? []),
-      ...(fallback.relatedArtifactIds ?? []),
-    );
-
-    return {
-      artifacts: restoredArtifacts,
-      message: {
-        ...matched,
-        // Prefer durable runtime message_id once history exposes it.
-        id: stableId || matched.id || fallback.id,
-        role: fallback.role,
-        author: matched.author || fallback.author,
-        label: matched.label || fallback.label,
-        relatedArtifactIds:
-          relatedArtifactIds.length > 0 ? relatedArtifactIds : undefined,
-        // 有实时过程区时按「过程区在前、历史正文在后」落位（与流式渲染的
-        // 「思考在上、回答在下」一致）；实时侧没有推理时才沿用历史段序前置。
-        segments: preservedHasReasoning
-          ? [...preservedSegments, ...durableSegments]
-          : [...durableSegments, ...preservedSegments],
-      },
-    } satisfies HistoryMessageMapping;
-  });
-}
+export { mapSessionHistoryToMessages } from "./history-units";
+export type { HistoryMessageMapping } from "./history-units";

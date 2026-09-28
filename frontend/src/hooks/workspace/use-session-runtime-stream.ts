@@ -23,6 +23,7 @@ import {
   type RuntimeLiveDeltaSink,
 } from "@/lib/workspace-thread-state";
 import { createStreamingFrameScheduler } from "./agent-chat-turn/streaming-frame";
+import { admitRuntimeFrame } from "./frame-intake";
 import { createStallGuard, RUNTIME_STREAM_IDLE_TIMEOUT_MS } from "./session-stream-stall";
 
 /** 方案B：重连循环连续失败达到该阈值才把 thread 标记为降级（防瞬断抖动）。 */
@@ -342,14 +343,28 @@ export function useSessionRuntimeStream({
               stallGuard.markAlive();
               consecutiveFailures = 0;
               setStreamStatus("online");
+
+              const nextSeq = getRuntimeEventSeqRef.current(event);
+              const deltaKind = getRuntimeDeltaKind(event.type);
+              // L3 帧闸门（见 frame-intake）：重复 seq 的内容帧整帧丢弃，且不消费
+              // delta key。作用域取与下方 claim 同一个协调器实例（ref 读取，与
+              // 依赖隔离口径一致）：chat 流入口传入同一实例，两路共享单写者水位。
+              if (
+                !admitRuntimeFrame({
+                  sessionId,
+                  event,
+                  seq: nextSeq,
+                  scope: deltaCoordinatorRef.current ?? null,
+                })
+              ) {
+                return;
+              }
+
               onTrajectoryEventRef.current?.(event);
               onRuntimeEventRef.current?.(event);
 
-              const nextSeq = getRuntimeEventSeqRef.current(event);
-              if (
-                nextSeq > 0 &&
-                nextSeq > (runtimeSeqRef.current[sessionId] ?? 0)
-              ) {
+              const runtimeSeq = runtimeSeqRef.current[sessionId] ?? 0;
+              if (nextSeq > 0 && nextSeq > runtimeSeq) {
                 runtimeSeqRef.current[sessionId] = nextSeq;
               }
 
@@ -363,15 +378,28 @@ export function useSessionRuntimeStream({
               // updater. Functional updaters may be replayed by StrictMode or
               // concurrent rendering; making the claim there would consume a
               // dedupe key even when React discards the update.
-              const deltaKind = getRuntimeDeltaKind(event.type);
               const activeTurn = activeTurnIdRef.current?.trim() ?? "";
               const eventTurn = getRuntimeEventTurnId(event);
               // 归属判定与 applyRuntimeDeltaToThread 共用同一语义（「未知」≠
               // 「其他 turn」）。严格相等会让缺 turn_id 的增量在 hook 层被整条
               // 丢弃——真后端 loop.go 仅在 turnID != "" 时注入 turn_id。
               const turnMatches = matchesActiveTurn(activeTurn, eventTurn);
+              // 直连 /api/agent/chat 流持有本会话占位时，runtime 通道只消费
+              // 不应用（也不消费 claim，交给直连流独占）：每帧 claim 只保证
+              // 增量应用一次，不保证同一推理块的增量落到同一个累加器
+              // （chat 写 turnState / runtime 写 message.segments），混合作者
+              // 会因提交合并「更长副本获胜」互相覆盖出丢词与重复
+              // （见 lib/thread-state/deltas.ts holdDirectStream）。
+              const directStreamHeld =
+                deltaCoordinatorRef.current?.isDirectStreamActive(sessionId) ===
+                true;
               let shouldApplyLiveDelta = false;
-              if (renderLiveDeltasRef.current && deltaKind && turnMatches) {
+              if (
+                renderLiveDeltasRef.current &&
+                deltaKind &&
+                turnMatches &&
+                !directStreamHeld
+              ) {
                 // 先判定「这条增量到底能不能落到消息上」，再决定是否消费去重 key。
                 // applyRuntimeDeltaToThread 在目标消息不是「当前正在 streaming 的
                 // 那条」时会原样返回 thread（turn 身份不足/已定稿/没有可写目标）。

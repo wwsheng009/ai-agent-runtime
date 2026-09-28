@@ -37,12 +37,13 @@ describe("history tool receipts", () => {
       },
     ];
 
-    const [, receipt] = mapSessionHistoryToMessages("session-1", history, []);
-    const segment = toolSegmentOf(receipt.message);
+    const [merged] = mapSessionHistoryToMessages("session-1", history, []);
+    const segment = toolSegmentOf(merged.message);
 
-    expect(receipt.message.label).toBe("tool");
-    expect(receipt.message.author).toBe("Tool receipt");
-    expect(receipt.message.role).toBe("assistant");
+    // 同一回合的 assistant 步与工具回执行聚合为一条消息：工具段进入过程区。
+    expect(merged.message.label).toBe("assistant");
+    expect(merged.message.author).toBe("Runtime assistant");
+    expect(merged.message.role).toBe("assistant");
     expect(segment.toolCallId).toBe("call-1");
     expect(segment.name).toBe("read_file");
     expect(segment.status).toBe("finished");
@@ -74,8 +75,8 @@ describe("history tool receipts", () => {
       { role: "tool", content: "package ui", tool_call_id: "call-view-batch" },
     ];
 
-    const [, receipt] = mapSessionHistoryToMessages("session-1", history, []);
-    const segment = toolSegmentOf(receipt.message);
+    const [merged] = mapSessionHistoryToMessages("session-1", history, []);
+    const segment = toolSegmentOf(merged.message);
 
     expect(segment.name).toBe("view");
     expect(segment.details?.filePath).toBe("backend/cmd/aicli/ui/screen.go");
@@ -105,8 +106,8 @@ describe("history tool receipts", () => {
       },
     ];
 
-    const [, receipt] = mapSessionHistoryToMessages("session-1", history, []);
-    const segment = toolSegmentOf(receipt.message);
+    const [merged] = mapSessionHistoryToMessages("session-1", history, []);
+    const segment = toolSegmentOf(merged.message);
 
     expect(segment.name).toBe("shell");
     expect(segment.status).toBe("error");
@@ -195,14 +196,16 @@ describe("历史空消息不占位", () => {
       { role: "tool", content: "42 行", tool_call_id: "call-1" },
     ];
 
-    const [assistant, receipt] = mapSessionHistoryToMessages("session-1", history, []);
+    const [merged] = mapSessionHistoryToMessages("session-1", history, []);
 
-    // 空正文的 assistant 步不产出行段（工具段挂在回执条目上）。
-    expect(assistant.message.segments).toEqual([]);
-    expect(toolSegmentOf(receipt.message).name).toBe("read_file");
+    // 空正文的 assistant 步不产出行段；工具回执聚合进同一条消息的过程区。
     expect(
-      JSON.stringify([assistant, receipt].map((entry) => entry.message.segments)),
-    ).not.toContain("[empty message]");
+      merged.message.segments.filter((segment) => segment.type === "text"),
+    ).toEqual([]);
+    expect(toolSegmentOf(merged.message).name).toBe("read_file");
+    expect(JSON.stringify(merged.message.segments)).not.toContain(
+      "[empty message]",
+    );
   });
 
   it("仅推理消息只保留推理段", () => {
@@ -385,5 +388,91 @@ describe("历史空消息不占位", () => {
       "reasoning",
       "text",
     ]);
+  });
+});
+
+// 回归（SSE live 拆分/重复 bug）：历史按「协议消息行」落库——仅推理的 assistant 行、
+// 工具回执行、最终 assistant 行各占一条。旧实现逐行投影，仅推理行与工具行因没有
+// 正文可比对永不匹配既有消息，于是同一回合被渲染成多条顶层消息，且同一份推理/工具
+// 在聚合消息里再出现一次。以下用例锁定「按回合聚合 + 靠身份合并」的新契约。
+describe("同回合历史行聚合（SSE live 回归）", () => {
+  const turnHistory: SessionHistoryMessage[] = [
+    { role: "user", content: "入口文件多少行？" },
+    {
+      role: "assistant",
+      content: "",
+      metadata: {
+        turn_id: "0bdf0f1c",
+        reasoning_details: { visibility: "visible", content: "先盘点入口文件" },
+      },
+    },
+    { role: "tool", content: "42 行", tool_call_id: "call-1" },
+    { role: "assistant", content: "结论：42 行。", metadata: { turn_id: "0bdf0f1c" } },
+  ];
+
+  it("仅推理行与工具行聚合进同一条消息，不再产出独立顶层消息", () => {
+    const mapped = mapSessionHistoryToMessages("session-1", turnHistory, []);
+
+    // user + 聚合 assistant，而不是 user + 推理 + 工具 + 终答四条。
+    expect(mapped).toHaveLength(2);
+    const aggregated = mapped[1].message;
+    expect(aggregated.runtimeTurnId).toBe("0bdf0f1c");
+    // 无上游 message_id 时用回合身份兜底，与实时占位消息同形。
+    expect(aggregated.id).toBe("turn-0bdf0f1c-assistant");
+    expect(aggregated.segments.map((segment) => segment.type)).toEqual([
+      "reasoning",
+      "tool",
+      "text",
+    ]);
+  });
+
+  it("按 turn_id 命中实时消息：工具/推理各只保留一份", () => {
+    const existing: ChatMessage[] = [
+      {
+        id: "turn-0bdf0f1c-assistant",
+        role: "assistant",
+        author: "Runtime stream",
+        label: "streaming",
+        runtimeTurnId: "0bdf0f1c",
+        segments: [
+          { type: "reasoning", content: "先盘点入口文件" },
+          {
+            type: "tool",
+            toolCallId: "call-1",
+            name: "read_file",
+            status: "finished",
+          },
+        ],
+      },
+    ];
+
+    const mapped = mapSessionHistoryToMessages("session-1", turnHistory, existing);
+
+    expect(mapped).toHaveLength(2);
+    const merged = mapped[1].message;
+    expect(merged.id).toBe("turn-0bdf0f1c-assistant");
+    expect(
+      merged.segments
+        .filter((segment) => segment.type === "tool")
+        .map((segment) => segment.toolCallId),
+    ).toEqual(["call-1"]);
+    expect(
+      merged.segments.filter((segment) => segment.type === "reasoning"),
+    ).toHaveLength(1);
+    expect(
+      merged.segments
+        .filter((segment) => segment.type === "text")
+        .map((segment) => segment.content),
+    ).toEqual(["结论：42 行。"]);
+  });
+
+  it("重复同步幂等：历史再次应用不追加第二份过程段", () => {
+    const first = mapSessionHistoryToMessages("session-1", turnHistory, []);
+    const second = mapSessionHistoryToMessages("session-1", turnHistory, [
+      first[1].message,
+    ]);
+
+    expect(second).toHaveLength(2);
+    expect(second[1].message.segments).toEqual(first[1].message.segments);
   });
 });

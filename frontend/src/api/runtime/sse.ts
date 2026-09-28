@@ -35,6 +35,11 @@ type SseConsumeHandlers = {
    */
   idleTimeoutMs?: number;
   /**
+   * 「收到任意字节」回调（含 `: keepalive`/`: open` 注释帧）：连接守卫据此把
+   * 「首字节」与「服务端前置步骤完成」分开计时（口径见 agent-chat-turn/shared.ts）。
+   */
+  onActivity?: () => void;
+  /**
    * 观测通道（右侧「会话详情 → 网络详情」）：把本次读取循环的字节数、keepalive、
    * 业务事件与静默超时写入 live-diagnostics store。缺省不观测——其它 SSE 消费方
    * 无需改动，也不承担任何额外开销。
@@ -128,6 +133,8 @@ type SessionRuntimeStreamHandlers = {
   onErrorEvent?: (payload: Record<string, unknown>) => void;
   onEvent?: (event: SessionRuntimeEvent) => void;
   onOpen?: () => void;
+  /** 收到任意字节（含注释帧）时回调；连接守卫的「连接成功」口径。 */
+  onActivity?: () => void;
   pollMs?: number;
   signal?: AbortSignal;
 };
@@ -142,6 +149,8 @@ type AgentChatStreamHandlers = {
   onMeta?: (payload: AgentChatStreamMetaPayload) => void;
   onObservation?: (payload: Record<string, unknown>) => void;
   onOpen?: () => void;
+  /** 收到任意字节（含注释帧）时回调；连接守卫的「连接成功」口径。 */
+  onActivity?: () => void;
   onOrchestration?: (payload: Record<string, unknown>) => void;
   onPlanning?: (payload: Record<string, unknown>) => void;
   onReasoning?: (payload: AgentChatStreamChunkPayload) => void;
@@ -288,6 +297,9 @@ export async function consumeSseResponse(
       }
 
       armIdleTimer();
+      // 任意字节（包括纯注释帧）都是「连接活着」的证据：连接守卫用它把
+      // 「连接成功」定义为收到首字节，而不是等到第一个业务事件。
+      handlers.onActivity?.();
       // 字节数按读取分片累加：keepalive 也算流量——「只剩 keepalive」与
       // 「完全没字节」是两种不同的故障，面板要能分开看。
       diagnostics?.bytes(value.byteLength);
@@ -381,6 +393,7 @@ export async function streamSessionRuntime(
     idleTimeoutMs: handlers.idleTimeoutMs,
     onClose: handlers.onClose,
     onOpen: handlers.onOpen,
+    onActivity: handlers.onActivity,
     onEvent: (eventName, payload) => {
       if (eventName === "runtime_event") {
         handlers.onEvent?.(payload as SessionRuntimeEvent);
