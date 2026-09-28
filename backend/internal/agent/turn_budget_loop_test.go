@@ -266,3 +266,40 @@ func TestReActLoop_Run_ExplicitBudgetOverridesLoopConfig(t *testing.T) {
 	require.Equal(t, TurnBudgetLevelSoft, result.TurnBudgetLevel)
 	require.Equal(t, "turn budget: step 2/10 · tokens 84%", result.TurnBudgetLine)
 }
+
+// TestReActLoop_Run_EmitsLiveBudgetEvents 钉住建议稿 §4.2 的"运行中实时超支告警"
+// 事件面：软着陆跨线发 budget_warning（一次性、独立可订阅事件名 + 水位载荷），
+// token 硬停发 budget_exhausted（此前该路径事件面完全静默，只能等终局 result）。
+func TestReActLoop_Run_EmitsLiveBudgetEvents(t *testing.T) {
+	loop, _ := newTurnBudgetTestLoop(t, 10, []*llm.LLMResponse{
+		turnBudgetToolCallResponse("先看目录。", 16800),
+		turnBudgetToolCallResponse("继续推进。", 20000),
+	})
+	bus := runtimeevents.NewBus()
+	var warnings, exhausted []runtimeevents.Event
+	bus.Subscribe(EventTurnBudgetWarning, func(event runtimeevents.Event) { warnings = append(warnings, event) })
+	bus.Subscribe(EventTurnBudgetExhausted, func(event runtimeevents.Event) { exhausted = append(exhausted, event) })
+	loop.agent.SetEventBus(bus)
+
+	result, err := loop.run(WithTurnID(context.Background(), "turn-budget-live"), "查看目录并总结。", loopRunOptions{
+		TraceID:       "trace_turn_budget_live",
+		IncludePrompt: true,
+		BudgetTokens:  20000,
+	})
+	require.NoError(t, err)
+	require.True(t, result.LimitReached)
+	require.Equal(t, "turn_budget", result.LimitReason)
+	require.Equal(t, TurnBudgetLevelHard, result.TurnBudgetLevel)
+
+	require.Len(t, warnings, 1, "soft crossing must emit exactly one live warning")
+	require.Equal(t, "turn-budget-live", warnings[0].Payload["turn_id"])
+	require.Equal(t, TurnBudgetLevelSoft, warnings[0].Payload["turn_budget_level"])
+	require.Equal(t, 20000, warnings[0].Payload["budget_tokens"])
+	require.Equal(t, 16800, warnings[0].Payload["tokens_spent"])
+	require.NotEmpty(t, warnings[0].Payload["turn_budget_line"])
+
+	require.Len(t, exhausted, 1, "hard token stop must emit exactly one exhausted event")
+	require.Equal(t, "turn-budget-live", exhausted[0].Payload["turn_id"])
+	require.Equal(t, TurnBudgetLevelHard, exhausted[0].Payload["turn_budget_level"])
+	require.Equal(t, 20000, exhausted[0].Payload["budget_tokens"])
+}

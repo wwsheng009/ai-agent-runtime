@@ -39,6 +39,16 @@ const (
 	// TurnBudgetSoftRatio 收尾水位：达到即注入一次收尾指令，避免在硬边界处
 	// 静默截断正在进行的工作。
 	TurnBudgetSoftRatio = 0.8
+
+	// EventTurnBudgetWarning 在 run 首次跨过收尾水位（软）时发出一次：父会话与
+	// 监督面据此在 **运行中** 就能订阅到"子代理已接近预算"，而不是等终局报告
+	// （建议稿 §4.2 运行中实时超支告警）。系统提醒事件是模型上下文渲染的副产物
+	// （kind 埋在 system_reminder 载荷里），不适合做宿主的订阅锚点，故单列。
+	EventTurnBudgetWarning = "agent.turn.budget_warning"
+	// EventTurnBudgetExhausted 在 token 硬边界终止 run 时发出：此前该停止路径
+	// 事件面完全静默（只有终局 result 的 LimitReached），监督面无法在停止时刻
+	// 归因到预算。
+	EventTurnBudgetExhausted = "agent.turn.budget_exhausted"
 )
 
 // TurnBudgetSpec 单轮预算上限（0 / 负数 = 不设限）。
@@ -146,6 +156,32 @@ func EvaluateTurnBudget(spec TurnBudgetSpec, usage TurnBudgetUsage) TurnBudgetSt
 		state.Line = "turn budget: " + strings.Join(segments, " · ")
 	}
 	return state
+}
+
+// TurnBudgetEventPayload 组装运行中预算事件（EventTurnBudgetWarning /
+// EventTurnBudgetExhausted）的载荷。事件里的水位行是 **通告时刻** 的取样；
+// result.TurnBudgetLine 是退出时刻的终局水位——两者口径同源（同一份
+// EvaluateTurnBudget），宿主不应把事件行当作终值使用。
+func TurnBudgetEventPayload(traceID string, step int, spec TurnBudgetSpec, usage TurnBudgetUsage, state TurnBudgetState) map[string]interface{} {
+	payload := map[string]interface{}{
+		"trace_id":            traceID,
+		"step":                step,
+		"turn_budget_level":   state.Level,
+		"turn_budget_line":    state.Line,
+		"turn_budget_ratio":   state.Ratio,
+		"turn_budget_reasons": state.Reasons,
+		"tokens_spent":        usage.TokensSpent,
+	}
+	if spec.MaxTokens > 0 {
+		payload["budget_tokens"] = spec.MaxTokens
+	}
+	if spec.MaxSteps > 0 {
+		payload["budget_steps"] = spec.MaxSteps
+	}
+	if spec.MaxWallClock > 0 {
+		payload["budget_wall_clock_ms"] = spec.MaxWallClock.Milliseconds()
+	}
+	return payload
 }
 
 // TokensSpentFromBudget 把 remaining-budget 计数换算成已消耗 token（clamp 到 >= 0）。

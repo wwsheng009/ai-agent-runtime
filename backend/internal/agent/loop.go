@@ -781,11 +781,20 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				// 宿主（TUI 状态行）因此能按 turn 归属决定是否展示进度，与 tool/llm 事件同一口径。
 				loop.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", payload)
 			}
+			// §4.2 运行中预算告警：同一份水位再发一条独立契约事件，父会话/监督面
+			// 可据此在 run 结束前订阅"接近预算"（reminder 事件是上下文渲染副产物，
+			// 不适合做订阅锚点）。一次性由 turnBudgetSoftAnnounced 门控。
+			loop.emitRuntimeEvent(EventTurnBudgetWarning, sessionID, "",
+				TurnBudgetEventPayload(traceID, step, turnBudgetSpec, turnBudgetUsage, turnBudgetState))
 			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
 				return nil, err
 			}
 		}
 		if options.BudgetTokens > 0 && remainingBudget <= 0 {
+			// §4.2：token 硬边界此前事件面静默（只有终局 result 的 LimitReached），
+			// 补一条 exhausted 事件，让停止时刻即可归因到预算。
+			loop.emitRuntimeEvent(EventTurnBudgetExhausted, sessionID, "",
+				TurnBudgetEventPayload(traceID, step, turnBudgetSpec, turnBudgetUsage, turnBudgetState))
 			result.Success = false
 			result.LimitReached = true
 			result.LimitReason = "turn_budget"
