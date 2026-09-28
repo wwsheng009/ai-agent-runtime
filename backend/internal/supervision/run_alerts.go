@@ -126,3 +126,53 @@ func resolveUnresolvedNotification(ctx context.Context, store Store, row Notific
 	}
 	return false, nil
 }
+
+// SupersedeRunAlerts closes a run's older live-condition rows once a newer one
+// is projected (建议稿 §2.5: 同一 run 产生多个通知（stalled → timed_out）).
+//
+// The notification idempotency key includes event_type
+// (Notification.IdempotencyKey), so an escalating run accumulates one
+// unresolved critical row per rung while only the newest describes the run's
+// current condition. Resolving the older rows keeps the parent inbox at one
+// current condition per run; ConvergeRunAlerts still closes whatever remains
+// open when the run itself finishes.
+//
+// ResolutionClosed is the honest state for a superseded row: the older
+// condition was not recovered (the run got worse) and did not fail on its own
+// — it simply stopped being the run's current condition. Rows someone else
+// already resolved are left alone, and a nil store or blank scope degrades to
+// a no-op so notification-only hosts keep their current behaviour.
+func SupersedeRunAlerts(ctx context.Context, store Store, rootScopeID, runID, keepEventType string, at time.Time) (int, error) {
+	if store == nil {
+		return 0, nil
+	}
+	rootScopeID = strings.TrimSpace(rootScopeID)
+	runID = strings.TrimSpace(runID)
+	keepEventType = strings.TrimSpace(keepEventType)
+	if rootScopeID == "" || runID == "" {
+		return 0, nil
+	}
+	rows, err := store.ListNotifications(ctx, NotificationFilter{
+		RootScopeID: rootScopeID,
+		SubjectKind: SubjectAgentRun,
+		SubjectID:   runID,
+		Limit:       runAlertConvergeLimit,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("supervision: list run alerts: %w", err)
+	}
+	superseded := 0
+	for _, row := range rows {
+		if !isRunAlertEventType(row.EventType) || row.EventType == keepEventType {
+			continue
+		}
+		ok, err := resolveUnresolvedNotification(ctx, store, row, ResolutionClosed, at)
+		if err != nil {
+			return superseded, fmt.Errorf("supervision: supersede run alert %s: %w", row.NotificationID, err)
+		}
+		if ok {
+			superseded++
+		}
+	}
+	return superseded, nil
+}

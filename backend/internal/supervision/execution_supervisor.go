@@ -1351,6 +1351,13 @@ func (s *ExecutionSupervisor) projectDecision(ctx context.Context, run *Executio
 		Reason:                decision.Reason,
 		RecommendedAction:     "inspect run and decide cancel/retry",
 	})
+	// §2.5 账本收敛: a newer live condition supersedes the run's older ones
+	// (stalled → timed_out), so the parent inbox keeps exactly one current
+	// condition per run. Informational projections (auto_extended) never
+	// supersede a live condition.
+	if isRunAlertEventType(decision.Decision) {
+		s.supersedeRunAlerts(ctx, run, decision.Decision)
+	}
 }
 
 // projectTerminal projects a terminal transition to the lifecycle inbox.
@@ -1403,6 +1410,17 @@ func (s *ExecutionSupervisor) convergeRunAlerts(ctx context.Context, run *Execut
 		return
 	}
 	_, _ = ConvergeRunAlerts(ctx, s.StoreFull, run.RootSessionID, run.RunID, status, s.now())
+}
+
+// supersedeRunAlerts is the best-effort hook that retires a run's older
+// live-condition alerts once a newer condition is projected (§2.5). A failure
+// only leaves the stale row behind for the next scan; the new projection is
+// already durable, so it must not fail the decision path.
+func (s *ExecutionSupervisor) supersedeRunAlerts(ctx context.Context, run *ExecutionRun, keepEventType string) {
+	if s == nil || s.StoreFull == nil || run == nil {
+		return
+	}
+	_, _ = SupersedeRunAlerts(ctx, s.StoreFull, run.RootSessionID, run.RunID, keepEventType, s.now())
 }
 
 func (s *ExecutionSupervisor) enforce() bool {
