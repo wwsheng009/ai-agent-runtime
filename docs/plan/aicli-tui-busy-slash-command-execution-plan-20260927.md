@@ -475,7 +475,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 - **P2-1 ✅ 注册表与解析器**：`runtimeCommandSpec`（Mode/Effect/Category/Confirm/Notice/SwitchKey）+ 附录 F.1 全量 59 条 + F.2 别名归并 + 子命令变体解析；未登记命令/未知子命令 → queue（INV-6）；T28 不变式与 T29 catalog 覆盖单测已绿（`chat_runtime_command_registry.go`，尚未被路由消费——按 P2-2/P2-3 接入）。
 - **P2-2 ✅ 三级开关**：`AICLI_CHAT_RUNTIME_INTERACTION`（auto/readonly/off）+ `..._CATEGORIES`（C#=mode）+ `..._COMMANDS`（命令=mode，键先别名归并）；优先级命令级 > 分类级 > 全局；block 不可被放宽；T31 单测已绿（`chat_runtime_command_switch.go`，消费接入见 P2-3）。
 - **P2-3 ✅ 宿主与生效域执行器**：`runtimeCommandHost.SubmitBusy`（注册表→三级开关→安全门→模式分发）+ 生效域守卫（session/process 不可达，block+process 例外只拒绝）+ 非 read 生效域执行后的 Notice 提示 + 统一审计事件 `aicli.chat.runtime_interaction`（命令/模式/生效域/结果/耗时，T32/T33）；路由由注册表接管（**双开关显式启用**才生效，P2 环境变量未设置时保持 P1 首批白名单行为）；screen/prompt 载体仍按 P2-4 降级。
-- **P2-4 副屏与 prompt 载体**：BusyScreen（§3.7 四项前置）+ priority prompt（确认/单选）复用；L0 输入移交（T20~T26、T34）。
+- **P2-4 🚧 副屏与 prompt 载体**：① 租约等待 ✅ `AcquireAlternateScreenWait`（预算≤2s，含超时/取消/致命错误语义 + 5 项单测）；② 流式缓冲 ✅ 核验（租约期 frame `Invalidate`+`Deferred`、释放后 `FullRepaint` 已由 `TestTerminalSessionLeaseReleaseForcesPrimaryRecovery` 锁定，**不新增冗余 StreamHold/StreamFlush API**；长租约 ledger 增长量化归 U1/P0-2）；待办：③ 输入所有权移交（`chatInputOwnerModal` + capture 让出/恢复 stdin）、④ `busyScreenActive` 门（主循环恢复读输入前等待副屏关闭）、⑤ 首批 S 档命令接入 host（`/history` `/usage` `/debug display` `/web endpoints` `/account --no-refresh` `/todos`）+ T20~T26/T34。
 - **P2-5 生效域适配**：`live`（显示/热刷新/投递/控制面写）直接接入；`next-turn` 复用 `actorRebuildPending`/`reconcilePendingChatActorRebuild`/`refreshLocalRuntimeAfterSelection`（模型/Provider/reasoning_effort/profile/routing/add-dir）；`next-call` 复用 `withLivePermissionModeSource`（permission-mode/yolo/trust/grants/approval-reuse）；缺适配器或未决项（V1/V2a/V10）先降 queue 兜底（D12）。
 - **P2-6 网络长任务**：C11 保持 queue；P3 评估「异步任务 + 进度副屏」。
 - 每个晋升命令必须附快照依赖清单 + 忙时专项测试。
@@ -1087,3 +1087,15 @@ runtimeCommandSpec{
 **验证**：`go build`/`gofmt` 干净；`-race`（host/registry/switch/queue/busy/executor 选择集）✅；整包回归仅剩 2 个 `RunChatLoop` 已知基线项（此前 4 项中 2 项已由并行工作流修复），无新增失败。
 
 **偏差与边界**：① `applyRuntimeEffect` 的 next-turn/next-call **适配器本体**属 P2-5，本步骤只做「生效域可达性守卫 + Notice + 审计」；当前 inline 集合中仅 `/title <text>` 为非 read 生效域，其写盘由既有 handler 完成。② P2 路由接管要求 P2 变量显式设置（而非 F.4 的默认 auto），作为分阶段灰度的过渡规则；P2-5 收口后可按 F.4 将默认切为 auto。③ `/clear` 等 C1 命令在 P2 显式启用后由「拒绝」变为「排队」，文案变更仍按 M5 留到 P3。
+
+### G.8 P2-4a 副屏前置①租约等待 + ②流式缓冲核验（部分完成，2026-09-28）
+
+| 项 | 结论 |
+| --- | --- |
+| ① 租约等待 | 新增 `FixedBottomSurface.AcquireAlternateScreenWait(ctx, req, budget)`（`ui/screen_lease.go`）：预算内轮询等待在途租约释放（默认 2s，10ms 间隔）；`budget<=0` 取默认；ctx 取消用 `errors.Join` 保留 `ErrScreenLeaseBusy`+`context.Canceled` 双语义；非租约类错误（surface 未启用/无统一 transport）立即返回不等待。 |
+| ① 测试 | `ui/screen_lease_wait_test.go` 5 项：空闲立即获取、等在途释放后获取（校验确实等待且 ID 更新）、预算耗尽（校验耗时下界与不返回 lease）、ctx 取消（双 `errors.Is` + 及时性）、致命错误不等待（含 nil surface）。 |
+| ② 流式缓冲 | **核验结论：无需新增 `StreamHold/StreamFlush` 契约**。租约期间主屏 frame 在 `terminal_session.go:904-906` 强制 `Invalidate()` + `projectionKnown=false`，`Flush` 返回 `Deferred` 且零字节写入；释放后首帧 `FullRepaint` 且 projection 确认。既有 `TestTerminalSessionLeaseReleaseForcesPrimaryRecovery` 已逐条锁定这些断言（本步骤复跑通过）。 |
+| ② 余量 | 「长租约期间 history-effect ledger 条目增长是否有界」属**量化问题**，计划本身已挂在 U1/P0-2 验证清单（`Summary().LedgerEntries`/`PlanCount`/`MaxPlanMs` 为现成读数），不在本步骤补 API。 |
+| 未完成 | ③ 输入所有权移交、④ `busyScreenActive` 门、⑤ 首批 S 档命令接入 host——三者耦合（只有真正打开副屏才需要 ③④），建议作为同一增量落地：先接一个白名单命令（推荐 `/todos` 或多页 `/history`）打通「租约→L0 移交→交互→关闭→恢复」全链路，再批量放量其余 5 条。 |
+
+**验证**：`go build`/`gofmt` 干净；`ui` 包租约相关回归子集 + 新增 5 项测试全绿。

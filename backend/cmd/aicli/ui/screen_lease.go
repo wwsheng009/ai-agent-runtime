@@ -8,7 +8,56 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+const (
+	// DefaultAlternateScreenWaitBudget 是等待在途副屏租约释放的默认预算
+	// （方案 §3.7.1 前置①，≤2s）。超时后调用方按 §3.7.3 降级 D/I。
+	DefaultAlternateScreenWaitBudget = 2 * time.Second
+	// alternateScreenWaitPollInterval 是等待轮询间隔；租约释放由用户交互驱动，
+	// 通常在毫秒级完成，10ms 轮询对首帧延迟的影响可忽略。
+	alternateScreenWaitPollInterval = 10 * time.Millisecond
+)
+
+// AcquireAlternateScreenWait 在预算内等待在途租约释放后再获取副屏租约
+// （P2-4 前置①：租约等待）。与 AcquireAlternateScreen 的差异：
+//   - 撞上在途租约（ErrScreenLeaseBusy）时按 interval 轮询重试，直到 budget 用尽；
+//   - 非租约类错误（surface 未启用 / 无统一 transport）立即返回，不做等待；
+//   - budget<=0 时使用 DefaultAlternateScreenWaitBudget；ctx 取消立即返回。
+//
+// 返回的 busy 错误保留底层原因，便于审计「谁占着租约/等了多久」。
+func (s *FixedBottomSurface) AcquireAlternateScreenWait(ctx context.Context, req FullscreenRequest, budget time.Duration) (ScreenLease, error) {
+	if budget <= 0 {
+		budget = DefaultAlternateScreenWaitBudget
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deadline := time.Now().Add(budget)
+	for {
+		lease, err := s.AcquireAlternateScreen(ctx, req)
+		if err == nil {
+			return lease, nil
+		}
+		if !errors.Is(err, ErrScreenLeaseBusy) {
+			return nil, err
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("%w: wait budget %s exhausted: %v", ErrScreenLeaseBusy, budget, err)
+		}
+		wait := alternateScreenWaitPollInterval
+		if remaining < wait {
+			wait = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return nil, errors.Join(fmt.Errorf("%w: wait cancelled", ErrScreenLeaseBusy), ctx.Err())
+		case <-time.After(wait):
+		}
+	}
+}
 
 // ScreenMode identifies which terminal buffer owns the physical screen while
 // an alternate-screen lease is active.
