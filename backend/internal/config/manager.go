@@ -539,7 +539,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 		},
 		Background: BackgroundConfig{
 			MaxOutputBytes:          1 * 1024 * 1024,
-			MaxConcurrentJobs:       2,
+			MaxConcurrentJobs:       4,
 			DefaultTimeout:          0,
 			MonitorInterval:         250 * time.Millisecond,
 			HeartbeatTimeout:        30 * time.Second,
