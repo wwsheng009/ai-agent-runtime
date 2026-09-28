@@ -118,6 +118,9 @@ func startBusyQueuedInputCapture(session *ChatSession) func() {
 					queue.signalReadError(errChatInteractivePromptCancelled)
 					return
 				}
+				// Esc cancelled the turn: PreserveDraft first restores the
+				// half-typed draft the editor cleared on cancel (D-C / T6a),
+				// then releases the painted prompt rows.
 				capture.PreserveDraft()
 				continue
 			}

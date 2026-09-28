@@ -27,6 +27,13 @@ type chatBusyComposerCapture struct {
 	answerPrompt bool
 	cancelled    bool
 	initial      ui.LineEditorSnapshot
+	// cancelDraft parks the text the editor is about to drop. The editor calls
+	// onChange("") right after OnCancel returns true (inputbox_editor.go Esc
+	// path), which would wipe the semantic draft before PreserveDraft runs; the
+	// cancel hook therefore snapshots the pre-cancel text here so the busy loop
+	// can hand it back (D-C / T6a).
+	cancelDraft    ui.LineEditorSnapshot
+	cancelDraftSet bool
 	// answerDraft parks the draft that lived in the prompt row so the merged
 	// answer can never be mistaken for it (see beginAnswerPrompt).
 	answerDraft    ui.LineEditorSnapshot
@@ -507,6 +514,12 @@ func (c *chatBusyComposerCapture) PreserveDraft() {
 	if !c.trackPrompt {
 		return
 	}
+	if c.cancelDraftSet {
+		// Restore the draft the editor cleared on Esc, then release the painted
+		// rows; ClearPrompt keeps the semantic draft on purpose.
+		c.cancelDraftSet = false
+		c.session.Interaction.SetPromptInputSnapshot(c.cancelDraft)
+	}
 	c.session.Interaction.ClearPrompt()
 }
 
@@ -540,9 +553,18 @@ func (c *chatBusyComposerCapture) onTerminalWrite(_ ui.LineEditorSnapshot, rende
 	return c.session.Interaction.WritePromptEditorText(writer, render.LastCursorRow, render.LastCursorCol, text)
 }
 
-func (c *chatBusyComposerCapture) onCancel(ui.LineEditorSnapshot) bool {
+func (c *chatBusyComposerCapture) onCancel(snapshot ui.LineEditorSnapshot) bool {
 	if c != nil {
 		c.cancelled = true
+		// The ordinary busy prompt row is cleared by the editor's onChange("")
+		// right after this hook; keep the pre-cancel snapshot so the interrupt
+		// path (PreserveDraft) can restore the half-typed follow-up. Merged
+		// answer rows hand their parked draft back via releaseAnswerPrompt and
+		// priority popups fold their own input, so neither is stashed here.
+		if c.trackPrompt && !c.answerPrompt {
+			c.cancelDraft = snapshot
+			c.cancelDraftSet = true
+		}
 	}
 	return true
 }
