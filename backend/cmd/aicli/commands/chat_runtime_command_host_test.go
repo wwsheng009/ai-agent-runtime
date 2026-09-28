@@ -206,9 +206,14 @@ func TestChatBusyPolicyRegistryMappingWhenP2Enabled(t *testing.T) {
 		"/model status": chatBusyPolicyImmediate,
 		"/debug status": chatBusyPolicyImmediate,
 		"/model":        chatBusyPolicyDeferred,
-		"/todos":        chatBusyPolicyDeferred,
-		"/exit":         chatBusyPolicyReject,
-		"/unknown-cmd":  chatBusyPolicyDeferred,
+		// P2-4b：首批白名单 S 档（screen+read）转由副屏通道消费；
+		// 非首批 screen 命令仍 deferred。
+		"/todos":         chatBusyPolicyScreen,
+		"/history":       chatBusyPolicyScreen,
+		"/debug display": chatBusyPolicyScreen,
+		"/skills":        chatBusyPolicyDeferred,
+		"/exit":          chatBusyPolicyReject,
+		"/unknown-cmd":   chatBusyPolicyDeferred,
 	}
 	for line, want := range cases {
 		if got := chatSlashCommandBusyPolicyFor(line); got != want {

@@ -475,7 +475,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 - **P2-1 ✅ 注册表与解析器**：`runtimeCommandSpec`（Mode/Effect/Category/Confirm/Notice/SwitchKey）+ 附录 F.1 全量 59 条 + F.2 别名归并 + 子命令变体解析；未登记命令/未知子命令 → queue（INV-6）；T28 不变式与 T29 catalog 覆盖单测已绿（`chat_runtime_command_registry.go`，尚未被路由消费——按 P2-2/P2-3 接入）。
 - **P2-2 ✅ 三级开关**：`AICLI_CHAT_RUNTIME_INTERACTION`（auto/readonly/off）+ `..._CATEGORIES`（C#=mode）+ `..._COMMANDS`（命令=mode，键先别名归并）；优先级命令级 > 分类级 > 全局；block 不可被放宽；T31 单测已绿（`chat_runtime_command_switch.go`，消费接入见 P2-3）。
 - **P2-3 ✅ 宿主与生效域执行器**：`runtimeCommandHost.SubmitBusy`（注册表→三级开关→安全门→模式分发）+ 生效域守卫（session/process 不可达，block+process 例外只拒绝）+ 非 read 生效域执行后的 Notice 提示 + 统一审计事件 `aicli.chat.runtime_interaction`（命令/模式/生效域/结果/耗时，T32/T33）；路由由注册表接管（**双开关显式启用**才生效，P2 环境变量未设置时保持 P1 首批白名单行为）；screen/prompt 载体仍按 P2-4 降级。
-- **P2-4 🚧 副屏与 prompt 载体**：① 租约等待 ✅ `AcquireAlternateScreenWait` + surface 级预算 `SetAlternateScreenWaitBudget`（既有 ~20 处 handler 调用点零改动继承等待能力；含超时/取消/致命错误/复位共 7 项单测，见 G.9）；② 流式缓冲 ✅ 核验（租约期 frame `Invalidate`+`Deferred`、释放后 `FullRepaint` 已由 `TestTerminalSessionLeaseReleaseForcesPrimaryRecovery` 锁定，**不新增冗余 StreamHold/StreamFlush API**；长租约 ledger 增长量化归 U1/P0-2）；④ 跨回合门 ✅ `prepareInteractiveRead` 入口 `waitForBusyScreenIdle`（以 surface 租约为事实源，含提示与中断；4 项单测，见 G.10）；剩余：③ modal 影子登记/恢复、⑤ 白名单 S 档接入 host（先 `/todos` 单条打通，再放量 `/history` `/usage` `/debug display` `/web endpoints` `/account`）+ T20~T26/T34。
+- **P2-4 🚧 副屏与 prompt 载体**：①②④ 见 G.9/G.10；③+⑤ ✅ **首批 S 档通道打通**（G.11）：策略映射 `screen→S`（仅白名单）+ 宿主 `case runtimeModeScreen` + `runBusyScreenCommand`（能力门 fail-closed / L0 仲裁 / modal 登记 / 租约预算 2s / 退出恢复），白名单 = `/todos` `/history` `/usage` `/debug display` `/web endpoints`；picker/写入类 screen 仍 Deferred。剩余：prompt 载体（确认/单选）与 T20~T26 TTY 真机验证、T34。
 - **P2-5 生效域适配**：`live`（显示/热刷新/投递/控制面写）直接接入；`next-turn` 复用 `actorRebuildPending`/`reconcilePendingChatActorRebuild`/`refreshLocalRuntimeAfterSelection`（模型/Provider/reasoning_effort/profile/routing/add-dir）；`next-call` 复用 `withLivePermissionModeSource`（permission-mode/yolo/trust/grants/approval-reuse）；缺适配器或未决项（V1/V2a/V10）先降 queue 兜底（D12）。
 - **P2-6 网络长任务**：C11 保持 queue；P3 评估「异步任务 + 进度副屏」。
 - 每个晋升命令必须附快照依赖清单 + 忙时专项测试。
@@ -1128,3 +1128,17 @@ runtimeCommandSpec{
 | 测试 | 4 项：租约活跃时阻塞、释放后放行、无租约立即返回（含 nil session/无 surface）、中断快速返回；外加 `prepareInteractiveRead` 集成项验证门确实被调用。`-race` 通过。 |
 
 **剩余（P2-4b-2b）**：③ `chatInputOwnerModal` 影子登记与恢复 + ⑤ `runtimeCommandHost.runScreen`（预算 + 能力门 + 白名单）+ `/todos` 单条打通；随后 T20~T26 TTY 行为验证。
+
+### G.11 P2-4b-2b 首批 S 档副屏通道打通（2026-09-28）
+
+| 项 | 结论 |
+| --- | --- |
+| 链路 | **原已预留**：`chatInputRouteScreen` 档位、`queue.consumeBusyCommand` → `runtimeCommandHost.SubmitBusy` 的消费路径、`chatBusyPolicyScreen` 常量都在 P1 阶段就位；本步骤只需补两处——策略映射与宿主执行。 |
+| 策略映射 | `chatBusyPolicyFromRuntimeSpec`：`runtimeModeScreen` 且命中首批白名单 → `chatBusyPolicyScreen`（S 档），否则仍 `Deferred`；未显式启用 P1 通道时 S 依旧回退 D（灰度契约不变）。 |
+| 白名单 | `busyScreenCommandFirstBatch`：**screen 档 + 只读生效域 + 命令名 ∈ {`/todos` `/history` `/usage` `/debug`(display 变体) `/web`(endpoints 变体)}**。picker/写入类 screen（`/model` `/theme` `/export` `/skills` `/mcp` `/agents` `/routing panel`…）继续 Deferred，待确认流/快照依赖清单在 P2-5/P3 补齐。 |
+| 宿主执行 | `chat_runtime_command_host.go` 新增 `case runtimeModeScreen`：白名单 + `runBusyScreenCommand` 失败即 `degraded`（不占有 → 调用方回退入队，不丢输入）。 |
+| 执行原语 | `runBusyScreenCommand`（`chat_busy_screen_exec.go`）：能力门（fail-closed，复用 `/debug display` 同款判定：统一渲染面 + surface 启用 + 无在途租约/弹层 + 终端支持全屏列表）→ L0 仲裁（modal/priority prompt 活跃即降级，INV-7）→ `commandMu.TryLock`（与 inline 同互斥）。执行期间：`beginChatInputShadowLevel(chatInputOwnerModal)`（副屏独占 stdin 与 ESC）+ `SetAlternateScreenWaitBudget(2s)`；退出时按 LIFO 释放并把预算复位 0。执行入口 `dispatchChatCommand`（含命令渲染与 Phase B 屏幕开启），生产路径不可注入，测试经 `chatBusyScreenDispatchOverride` 注入替身。 |
+| 实现约束 | 主分派器不能写进包级变量初始化式（`dispatchChatCommand → … → runBusyScreenCommand` 初始化环，编译器实测拦截），故改为「override + 惰性函数」形态。 |
+| 测试 | 新增 4 项：策略映射（含首批/非首批/P1 关闭回退）、白名单执行（校验执行期间 modal 属主、预算 2s、退出后预算复位/modal 释放/commandMu 释放、审计 `executed`）、非首批 screen 不进入副屏入口（审计 `degraded`）、能力门 fail-closed（无 surface 会话不通过）。既有 T6（`/todos` 降级）与 P2 开关映射用例同步更新为 S 档契约。 |
+
+**行为影响**：仅在 `AICLI_CHAT_BUSY_COMMAND` 开启 **且** `AICLI_CHAT_RUNTIME_INTERACTION` 显式设置（auto）时，首批 5 条只读 screen 命令在忙时改走副屏；否则逐条等价于改造前（deferred 入队）。真机 TTY 行为验证（T20~T26）仍待补。

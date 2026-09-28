@@ -93,8 +93,18 @@ func (h *runtimeCommandHost) submit(line string) runtimeHostOutcome {
 		outcome.Result = "executed"
 		outcome.Occupied = true
 		return outcome
+	case runtimeModeScreen:
+		// P2-4b：首批白名单 S 档走副屏通道；其余 screen 档（picker/写入类）
+		// 仍降级入队，待各自确认流在 P2-5/P3 落地。
+		if !busyScreenCommandFirstBatch(effective) || !runBusyScreenCommand(h.session, line) {
+			outcome.Result = "degraded"
+			return outcome
+		}
+		outcome.Result = "executed"
+		outcome.Occupied = true
+		return outcome
 	default:
-		// screen/prompt 载体见 P2-4；queue 本就要入队。
+		// prompt 载体与其余 screen 命令见后续增量；queue 本就要入队。
 		outcome.Result = "degraded"
 		return outcome
 	}

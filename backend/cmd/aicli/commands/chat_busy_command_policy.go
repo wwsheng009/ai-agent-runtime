@@ -107,17 +107,24 @@ func chatRuntimeInteractionRegistryActive() bool {
 }
 
 // chatBusyPolicyFromRuntimeSpec 把注册表声明（经三级开关降级后）映射到 P1 四档：
-// block→R；inline→I；screen/prompt/queue→D（副屏/prompt 载体见 P2-4）；未登记→D。
+// block→R；inline→I；screen→S（仅首批白名单，P2-4b）/其余 screen→D；
+// prompt/queue→D（prompt 载体见后续增量）；未登记→D。
 func chatBusyPolicyFromRuntimeSpec(text string) chatBusyCommandPolicy {
 	spec, registered := resolveRuntimeCommandSpec(text)
 	if !registered {
 		return chatBusyPolicyDeferred
 	}
-	switch runtimeCommandWithSwitch(spec, runtimeSwitchTableFromEnv()).Mode {
+	effective := runtimeCommandWithSwitch(spec, runtimeSwitchTableFromEnv())
+	switch effective.Mode {
 	case runtimeModeBlock:
 		return chatBusyPolicyReject
 	case runtimeModeInline:
 		return chatBusyPolicyImmediate
+	case runtimeModeScreen:
+		if busyScreenCommandFirstBatch(effective) {
+			return chatBusyPolicyScreen
+		}
+		return chatBusyPolicyDeferred
 	default:
 		return chatBusyPolicyDeferred
 	}
