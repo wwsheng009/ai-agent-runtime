@@ -131,6 +131,8 @@
 1. **压缩预检准确性 + 分层降级**：本会话出现 `compact skipped because estimated input 249873 > budget 125952` → 退化为本地 fallback 摘要。建议超预算时先裁工具输出 / artifact 化再摘要，并把"压缩失败 / 跳过"做成一等事件（参见 `context-preflight-budget-and-compaction-convergence-design-20260921.md`）。
 2. **子会话成本护栏**：本次子会话 6.14M tokens / 32 分钟，事前无预算告警。建议用 usage ledger 做单任务预算、超支告警，并把"成本消耗速率"纳入停滞判定（与 §2.2 的健康度评估共用）。
 
+> 实施（2026-09-28，commit `a2c0e598`）：第 2 条的**账本侧**已落地——子代理完成事件本就携带 `budget_tokens`（`agent/scheduler.go` 发射点）与 `usage_total_tokens`，采集侧此前只落后者；`usage_subagents` 补 `budget_tokens` 列（新库 DDL + 老库幂等迁移，MAX 合并），读取侧在 `SubagentStat` 呈现 `BudgetTokens` / `BudgetExceeded`（预算>0 且实际用量超预算，同 run 累计口径），会话 rollup 呈现 `SubagentBudgetExceeded` 计数，并新增 `subagent_budget_exceeded`（warning）诊断码。"6.14M tokens" 类事故由此在账本与诊断面板一等可见。**未覆盖**：运行中（事前）的实时超支告警与"成本消耗速率纳入停滞判定"——前者需把预算/用量接进 supervision 快照的宿主 provider，后者需 health 评估新增成本输入，均为后续条目。
+
 ## 5. 协作与观测面（P2）
 
 1. **子代理 / 批量报告归档**：调研类子任务的大报告（本次 3 份 ≈2.1M tokens）目前只存在于 task_result；建议落 notes / reports 并纳入 rollup 引用，避免重复调研。
