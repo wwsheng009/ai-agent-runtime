@@ -63,9 +63,8 @@ const maxIndexFiles = 20000
 //
 // 解析器当前是 regex_builtin（confidence=heuristic）；tree-sitter / LSP 通道
 // 属于后续阶段，接入时只替换 LanguageAdapter，本流程不变。
-func RunIndex(ctx context.Context, store Store, cfg Config) (IndexResult, error) {
+func RunIndex(ctx context.Context, store Store, cfg Config) (result IndexResult, err error) {
 	started := time.Now()
-	var result IndexResult
 	if store == nil {
 		return result, fmt.Errorf("knowledge: index requires a store")
 	}
@@ -78,6 +77,26 @@ func RunIndex(ctx context.Context, store Store, cfg Config) (IndexResult, error)
 	if err != nil {
 		return result, err
 	}
+
+	// 先写 index_jobs 再执行（ADR-0007 §4.3 / 04 §4.1）：状态面据此回答
+	// "最近一次索引跑没跑完"；失败路径也必须留下终态，否则会永远显示 running。
+	jobID, err := store.StartIndexJob(ctx, IndexJob{WorkspaceID: wsID, Kind: IndexJobKindLight})
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		status := IndexJobStatusDone
+		message := ""
+		if err != nil {
+			status, message = IndexJobStatusFailed, err.Error()
+		}
+		// 终态上报尽力而为且不依赖调用方 ctx：索引失败常伴随 ctx 取消，
+		// 而"这次运行失败了"恰恰是最需要落库的事实。账本写失败不改变索引结论。
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = store.FinishIndexJob(finishCtx, jobID, status, result.Scanned,
+			result.Indexed+result.Skipped+result.Errors, message)
+	}()
 
 	files, truncated, err := collectIndexableFiles(cfg)
 	if err != nil {
@@ -100,7 +119,11 @@ func RunIndex(ctx context.Context, store Store, cfg Config) (IndexResult, error)
 	}
 	var pending []pendingFile
 
-	for _, path := range files {
+	for i, path := range files {
+		if i > 0 && i%256 == 0 {
+			// 中途进度：长索引（万级文件）期间状态面不应只看到 0/总数。
+			_ = store.UpdateIndexJob(ctx, jobID, i)
+		}
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}

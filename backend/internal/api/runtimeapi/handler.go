@@ -113,6 +113,9 @@ type Handler struct {
 	// Phase 1 交付 4：知识层 shadow 拦截观察器（runtime-server 启动时经
 	// SetKnowledgeShadow 注入）；nil 时全部会话保持无知识层行为。
 	knowledgeShadow *knowledge.ShadowObserver
+	// Phase 1 交付 5：知识层状态面句柄（经 SetKnowledgeActivation 注入）；
+	// nil（mode=off / 启动期降级）时 /knowledge/status 返回 mode=off 而非 404。
+	knowledgeActivation *knowledge.Activation
 	llmRuntime      *llm.LLMRuntime
 	// §4.13 审批解释（可选注入）：nil 时用 llmRuntime 的内建一次性调用；
 	// 两者都不可用则端点降级为规则摘要（永不把模型故障变成 5xx）。
@@ -730,6 +733,15 @@ func (h *Handler) SetKnowledgeShadow(observer *knowledge.ShadowObserver) {
 	h.knowledgeShadow = observer
 }
 
+// SetKnowledgeActivation 注入知识层接入句柄（Phase 1 交付 5，runtime-server 启动时装配）。
+// 句柄为 nil（mode=off / 启动期降级）时 /knowledge/status 仍可用，返回 mode=off。
+func (h *Handler) SetKnowledgeActivation(activation *knowledge.Activation) {
+	if h == nil {
+		return
+	}
+	h.knowledgeActivation = activation
+}
+
 // SetMCPAdminService 注入 MCP 管理服务（runtime-server 启动时装配）。
 func (h *Handler) SetMCPAdminService(service mcpadmin.AdminService) {
 	if h == nil {
@@ -933,6 +945,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 		warning:             adminDebugRouteWarning(canonicalRuntimeEntrypoint+"/debug/prompt-layout", canonicalAgentChatEntrypoint),
 	})).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/status", h.GetRuntimeStatus).Methods(http.MethodGet)
+	// Phase 1 交付 5：知识层状态面（索引状态 / 行数 / DB 大小 / 最近 job / 锁等待 p95）。
+	runtimeRouter.HandleFunc("/knowledge/status", h.GetKnowledgeStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/health", h.GetRuntimeHealth).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/events", h.ListRuntimeEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/logs", h.ListRuntimeLogs).Methods(http.MethodGet)

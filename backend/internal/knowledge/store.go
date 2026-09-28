@@ -58,6 +58,23 @@ type Store interface {
 	// Stats 返回状态面与 shadow 差异率度量使用的行数汇总。
 	Stats(ctx context.Context, workspaceID string) (Stats, error)
 
+	// StartIndexJob 先落一条 index_jobs 运行记录并返回其 id。
+	//
+	// 契约（ADR-0007 §4.3 / 04 §4.1）：任何索引变更路径都必须**先写本表再执行**，
+	// 不得绕过本表直接写 symbols。status 缺省 running，kind 缺省 light。
+	StartIndexJob(ctx context.Context, job IndexJob) (string, error)
+
+	// UpdateIndexJob 刷新运行进度（files_done）；用于长索引的中途上报。
+	UpdateIndexJob(ctx context.Context, jobID string, filesDone int) error
+
+	// FinishIndexJob 终结一条运行记录（status ∈ done|failed|cancelled），
+	// 并写入 files_total / files_done / error 摘要 / finished_at。
+	FinishIndexJob(ctx context.Context, jobID, status string, filesTotal, filesDone int, errMsg string) error
+
+	// LatestIndexJob 返回该 workspace 最近一次运行记录；nil 表示从未跑过。
+	// 纯读：reader 角色也可用它支撑状态面。
+	LatestIndexJob(ctx context.Context, workspaceID string) (*IndexJob, error)
+
 	// Close 释放句柄；必须幂等。
 	Close() error
 }

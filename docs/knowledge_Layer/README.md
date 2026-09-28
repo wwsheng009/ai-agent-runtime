@@ -2,7 +2,7 @@
 
 > 最后更新：2026-09-28
 > 本目录描述"代码知识运行时"（Code Knowledge Runtime）的设计与落地计划。
-> 当前阶段：**Phase 0 已落地**（2026-09-20 核心 5 交付 + 2026-09-28 交付 7 `exploration_attribution` 建表）；**Phase 1 已开工**（2026-09-28：门禁 ADR-0001 / 0003（口径）/ 0007 已 Accept；交付 6「接入（激活）」与交付 4「shadow 拦截 `grep` / `view`」已完成，交付 5 `knowledge.status` 未开始）。
+> 当前阶段：**Phase 0 已落地**（2026-09-20 核心 5 交付 + 2026-09-28 交付 7 `exploration_attribution` 建表）；**Phase 1 已开工**（2026-09-28：门禁 ADR-0001 / 0003（口径）/ 0007 已 Accept；交付 4「shadow 拦截 `grep` / `view`」与交付 5「`knowledge.status` 状态面」已完成）。
 
 ---
 

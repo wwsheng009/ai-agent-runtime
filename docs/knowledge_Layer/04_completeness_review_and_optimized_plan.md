@@ -856,7 +856,7 @@ knowledge:
 
 **回滚**：`mode=off` + 删除 `knowledge.db`。
 
-**状态**：**进行中**（2026-09-28 开工）——交付 1–3 的代码已在 `internal/knowledge`（`indexer.go` / `store_sqlite.go` / `adapter_builtin.go` / `owner.go` / 增量 `content_hash`）；**交付 6「接入（激活）」已完成**（`internal/knowledge/activation.go` + `cmd/runtime-server` / `cmd/aicli` cmd+tui / `cmd/aicli` acp 三入口，见 `CHANGELOG.md`）；**交付 4（shadow 拦截 `grep` / `view`）已完成**（2026-09-28：三入口接线 + `exploration_attribution` 落库，见 `CHANGELOG.md`）；**交付 5（`knowledge.status` 面）未开始**——交付 4 已落地，`mode=shadow` 下 `exploration_attribution` 可产生数据；本 Phase 仍未验收，待 shadow 实测校准 α 并复算 M1。
+**状态**：**进行中**（2026-09-28 开工）——交付 1–3 的代码已在 `internal/knowledge`（`indexer.go` / `store_sqlite.go` / `adapter_builtin.go` / `owner.go` / 增量 `content_hash`）；**交付 6「接入（激活）」已完成**（`internal/knowledge/activation.go` + `cmd/runtime-server` / `cmd/aicli` cmd+tui / `cmd/aicli` acp 三入口，见 `CHANGELOG.md`）；**交付 4（shadow 拦截 `grep` / `view`）已完成**（2026-09-28：三入口接线 + `exploration_attribution` 落库，见 `CHANGELOG.md`）；**交付 5（`knowledge.status` 面）已完成**（2026-09-28：CLI + HTTP 状态面，见 `CHANGELOG.md`）——交付 4/5 均已落地，`mode=shadow` 下 `exploration_attribution` 可产生数据；本 Phase 仍未验收，待 shadow 实测校准 α 并复算 M1。
 
 ### Phase 2 — Exploration Memory + Context Planner
 

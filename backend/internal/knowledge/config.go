@@ -131,6 +131,12 @@ func (c Config) storePath() string {
 	return filepath.Join(c.Workspace, filepath.FromSlash(DefaultDBRelativePath))
 }
 
+// StorePathFor 返回配置对应的 knowledge.db 绝对路径（状态面 / 诊断用）。
+//
+// 与 Open 的落点逐字节一致（含 DBPath 覆盖与相对路径解析），因此 CLI 可以
+// 在不打开 store 的前提下回答"这个 workspace 有没有索引过"。
+func StorePathFor(cfg Config) string { return cfg.storePath() }
+
 // dirPath 返回知识库所在目录。
 func (c Config) dirPath() string { return filepath.Dir(c.storePath()) }
 

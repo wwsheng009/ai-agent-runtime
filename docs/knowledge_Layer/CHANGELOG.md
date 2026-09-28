@@ -6,6 +6,58 @@
 
 ---
 
+## 2026-09-28 — Phase 1 交付 5（`knowledge.status` CLI / HTTP 状态面）
+
+起因：关闭 `06` §4 Phase 1 交付 5 —— 把索引状态、文件数 / 符号数、DB 大小、最近 job、
+锁等待 p95 暴露为统一只读状态面（CLI `aicli knowledge status` + HTTP
+`GET /api/runtime/knowledge/status`），为 `Phase1-shadow` 实测与日常诊断提供观测入口。
+
+### Added
+
+- **`backend/internal/knowledge/status.go`（`StatusReport` / `Layer.Status` / `OwnerPID` / `lookupWorkspace`）** ——
+  统一只读载荷：mode / role / owner pid / workspace / db 路径与大小 / schema 版本 /
+  files / symbols / refs / indexed_at + staleness / index_running / last_job / lock_wait /
+  degraded_reason。不触发索引、不写库（`lookupWorkspace` 走 `FindWorkspace`，reader 也可用）；
+  `degraded_reason` 覆盖「未索引 / reader 降级 / 上次索引失败」，零值不静默。
+  `activation.go` 增加 `Activation.Status` / `IndexRunning` / `Stats`（合并本进程后台索引生命周期）。
+- **`backend/internal/knowledge/jobs.go`** —— `index_jobs` 运行账本：`StartIndexJob` /
+  `UpdateIndexJob` / `FinishIndexJob` / `LatestIndexJob`（ADR-0007 §4.3 / `04` §4.1 的
+  「先写表再执行」）；错误摘要截断到 512B、空串落 NULL。`indexer.go` 的 `RunIndex` 接入：
+  先落 running，每 256 个文件上报进度，结束落 done/failed + files_total/done + 时长
+  （终态上报用 `context.WithoutCancel` + 5s 超时——ctx 取消常伴随索引失败，「失败」恰是最该落库的事实）。
+- **`backend/internal/knowledge/lockwait.go`** —— 写路径锁等待采样（有界 128 环 + 最近秩分位，
+  `Samples` / `P50MS` / `P95MS` / `MaxMS` / `RetryFailures`）；进程内、无持久化，p95 为近似分位。
+- **`backend/internal/sqliteutil`（`RetryLockedCtxObserved`）** —— 与 `RetryLockedCtx` 同语义，
+  额外把单次调用累计退避上报给观察器；`RetryLockedCtx` 改为 nil-observer 包装。
+  `store_sqlite.execWrite` 接线，并在重试耗尽（最终锁错误）时记 `observeFailure`。
+- **HTTP 面（`runtimeapi/knowledge_handlers.go`）** —— `GET /api/runtime/knowledge/status`：
+  未接线 / mode=off 返回 200 + off 载荷（404/503 会迫使调用方猜状态）；内部错误 500 统一错误体；
+  路由注册于 `handler.go`，句柄经 `SetKnowledgeActivation` 注入（runtime-server 启动装配）。
+- **CLI 面（`cmd/aicli/commands/knowledge.go`）** —— `aicli knowledge status [--workspace] [--json] [--timeout]`：
+  工作区锚点与三入口同源（flag → runtime.yaml workspace.root → cwd）；`SkipInitialIndex`
+  保证查询不触发索引；默认人类可读快照，`--json` 与 HTTP 载荷同形；mode=off 时打印显式启用提示。
+- **测试**：`knowledge/status_test.go`（行数/job/锁等待/reader 降级/off 载荷/owner→reader）、
+  `sqliteutil/lock_wait_observe_test.go`（无等待不上报 / 累计 / 非锁错误 / 取消仍上报）、
+  `runtimeapi/knowledge_status_handler_test.go`（off / nil handler / 接线载荷 / nil 重置）、
+  `cmd/aicli/commands/knowledge_status_test.go`（字节格式化 / 文本面字段 / off 提示 / flag 契约）。
+
+### Changed
+
+- **`knowledge/config.go`**：新增 `StorePathFor`（与 `Open` 落点逐字节一致，状态面不打开 store 也能报路径）。
+- **`cmd/runtime-server/main.go`**：`handler.SetKnowledgeActivation(knowledgeActivation)`（与 shadow 观察器同源）。
+- **`06` §1.1 / §4 Phase 1、`04` §5 Phase 1、`README` 阶段行**：交付 5 由「未开始」改为
+  「已完成」，并登记落点与下一步（`Phase1-shadow` 实测：α 校准 + M1 复算）。
+
+### Notes
+
+- 锁等待口径：样本来自**本进程写路径**每次锁冲突的累计退避；进程重启清零（「当前进程经历过的
+  锁竞争」才是诊断所需语义）。单写者拓扑下稳态应接近全零；非零即提示并发写者或长事务。
+- 状态面契约：**只读**（不触发索引、不写库）、**nil-safe**（off / 未接线返回 off 载荷而非错误）、
+  **可解释**（degraded_reason）。验收口径「锁等待 p95 < 50ms」待 `Phase1-shadow` 实测。
+- 仍未收敛：`Phase1-shadow` 实测（α 校准 + M1 复算）——交付 5 是其观测入口。
+
+---
+
 ## 2026-09-28 — Phase 1 交付 4（shadow 拦截 `grep` / `view`）
 
 起因：关闭 `06` §4 Phase 1 交付 4 —— `mode=shadow` 下在既有 `grep` / `view` 执行路径上

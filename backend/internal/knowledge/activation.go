@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ActivationOptions 控制 Activate 的副作用。
@@ -138,6 +139,43 @@ func (a *Activation) Stats(ctx context.Context) (Stats, error) {
 		return Stats{}, nil
 	}
 	return a.layer.Stats(ctx)
+}
+
+// IndexRunning 报告后台首次索引是否仍在跑；off / reader / SkipInitialIndex 时为 false。
+func (a *Activation) IndexRunning() bool {
+	if a == nil {
+		return false
+	}
+	select {
+	case <-a.done:
+		return false
+	default:
+		return true
+	}
+}
+
+// Status 返回知识层状态快照（06 §4 Phase 1 交付 5 的统一载荷）。
+//
+// 它合并两类事实：Layer 的 store/行数/锁等待（落盘真相）与 Activation 的
+// 后台索引生命周期（本进程真相）。off（nil Activation）返回 mode=off 的最小
+// 载荷而不是错误——"off"是合法状态，状态面必须能如实回答它。
+func (a *Activation) Status(ctx context.Context) (StatusReport, error) {
+	if a == nil {
+		return StatusReport{Mode: ModeOff, Role: RoleNone, GeneratedAt: time.Now().UnixMilli()}, nil
+	}
+	report, err := a.layer.Status(ctx)
+	if err != nil {
+		return report, err
+	}
+	report.IndexRunning = a.IndexRunning()
+	a.mu.Lock()
+	ran, indexErr := a.ran, a.err
+	a.mu.Unlock()
+	if ran && indexErr != nil && report.DegradedReason == "" {
+		// 本进程刚跑完的索引失败优先展示：它比落库的 job 行更贴近"现在"。
+		report.DegradedReason = "last index failed: " + indexErr.Error()
+	}
+	return report, nil
 }
 
 // WaitIndex 等待后台首次索引结束并返回其结果。
