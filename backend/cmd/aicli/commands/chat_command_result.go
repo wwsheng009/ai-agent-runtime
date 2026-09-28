@@ -124,79 +124,13 @@ type CommandResult struct {
 	// Plain/JSON/noninteractive projections ignore the flag; the replay
 	// renderer falls back to plain output on its own.
 	ReplayHistory bool
-	// OpenTranscript opens the read-only semantic transcript pager after the
-	// command has reconciled canonical history into Scene/AppState. It is used
-	// only by the unified interactive /history command; replaying an already
-	// mounted transcript would duplicate rows instead of giving the user a
-	// navigable history view.
-	OpenTranscript bool
-	// OpenDebugOverlay requests the lease-bound alternate-screen debug viewer
-	// for /debug display. It has no document payload: the debug snapshot is
-	// captured once after the command result crosses the dispatch boundary and
-	// rendered on its own screen (like /resume list and /history), never as a
-	// Scene command cell in the main message stream.
-	OpenDebugOverlay bool
-	// OpenWebEndpointsScreen requests the lease-bound alternate-screen viewer
-	// for /web endpoints. Like OpenDebugOverlay it has no document payload in
-	// the unified interactive projection: the endpoint text is captured once
-	// after the command result crosses the dispatch boundary and rendered on
-	// its own screen (reusing the same debug overlay), never as a Scene command
-	// cell in the main message stream. Plain/JSON/noninteractive projections
-	// keep the §6.4 document cell as a fallback.
-	OpenWebEndpointsScreen bool
-	// OpenUsageScreen requests the lease-bound alternate-screen usage viewer
-	// for /usage. Like OpenDebugOverlay it has no document payload in the
-	// unified interactive projection: the cache overview and the session cache
-	// request list are captured once after the command result crosses the
-	// dispatch boundary and rendered on their own screen, never as a Scene
-	// command cell in the main message stream. Plain/JSON/noninteractive
-	// projections keep the §6.4 document cell.
-	OpenUsageScreen *UsageScreenRequest
-	// OpenAccountScreen requests the lease-bound alternate-screen single-account
-	// viewer for /account. The report (including the live balance fetch when the
-	// command ran in refresh mode) is captured before the command result crosses
-	// the dispatch boundary, so the screen only renders: it never performs I/O.
-	// Plain/JSON/noninteractive projections keep the §6.4 document cell.
-	OpenAccountScreen *AccountScreenRequest
-	// OpenAccountsScreen requests the lease-bound alternate-screen provider
-	// table for /accounts, the all-accounts counterpart of OpenAccountScreen.
-	// The two commands therefore never share a screen: /account shows one
-	// provider, /accounts shows the whole configuration.
-	OpenAccountsScreen *AccountListScreenRequest
-	// OpenResumePicker requests the typed alternate-screen session picker. It
-	// has no document payload: the picker borrows a ScreenLease, publishes its
-	// lease-bound state through the UI actor, and only its final result becomes
-	// a retained command/replay transaction. The request owns its parsed filter
-	// so `/resume --cwd` cannot fall back to a legacy line-reader path.
-	OpenResumePicker *ResumePickerRequest
-	// OpenBacktrackPicker requests the lease-bound user-turn picker. It has no
-	// rendered document because selection, cancellation and a destructive apply
-	// are committed only after the alternate screen is released and the primary
-	// presenter has recovered.
-	OpenBacktrackPicker *BacktrackPickerRequest
-	// OpenModelPicker requests the lease-bound provider→model→reasoning picker.
-	// It has no document payload: each stage borrows the same alternate screen,
-	// and the eventual mutation is applied only after lease release and primary
-	// presenter recovery, mirroring the backtrack picker contract.
-	OpenModelPicker *ModelPickerRequest
-	// OpenThemePicker requests the lease-bound live-preview theme selector. It
-	// has no document payload: browsing mutates only the working theme snapshot
-	// inside the picker, and the confirmed result is applied after lease release
-	// and primary presenter recovery.
-	OpenThemePicker *ThemePickerRequest
-	// OpenSkillPicker requests the lease-bound skill selector. It has no
-	// document payload: the confirmed skill becomes a composer draft
-	// (`/skill <name> `) only after lease release and primary presenter recovery.
-	OpenSkillPicker *SkillPickerRequest
-	// OpenExportPicker requests the lease-bound export session/format selector.
-	// It has no document payload: the export runs only after lease release and
-	// primary presenter recovery.
-	OpenExportPicker *ExportPickerRequest
-	// OpenMCPPicker requests the lease-bound MCP server/action selector. It has
-	// no document payload: the chosen action is applied through the /mcp text
-	// path only after lease release and primary presenter recovery, so no
-	// mutation can overlap the alternate-screen frame.
-	OpenMCPPicker *MCPPickerRequest
+	// Screen requests one unified alternate-screen interaction (framework
+	// §4.1: ScreenDocument / ScreenList / ScreenStages). 批次 5（D-E）起它是
+	// CommandResult 上唯一的副屏效应字段：命令生产点直接返回 Spec（或经
+	// dispatchChatScreenEffects 派发），框架是唯一获取/释放租约的地方；
+	// picker 的选中结果经 Spec.AfterClose 在 close 序列完成后应用（I3）。
+	// Nil means the result has no screen effect.
+	Screen *chatScreenSpec
 	// ApplyBacktrack requests the direct destructive transaction. It has no
 	// document payload: the mutation must rebuild canonical history before its
 	// result cell is committed, and submit/draft effects run only afterwards.
@@ -387,6 +321,13 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	if commandMatches(cmdLower, "/retry") && unifiedDirectInteractiveOutput(session) {
 		return executeStructuredRetryCommand(session, command), true, nil
 	}
+	// /hotkeys（批次 3）：键位表是典型分页器内容，统一出口迁入只读副屏；
+	// reload 保留主屏回执（短确认）并在其后打开同一副屏。plain 会话仍走
+	// 同一构建函数的行内文档（与 /help 同策略）；JSON 出口保留在
+	// handleCommand → handleHotkeysCommand。
+	if commandMatches(cmdLower, "/hotkeys") {
+		return executeStructuredHotkeysCommand(session, command), true, nil
+	}
 	// /shell and /cmd are fully migrated: the command runs captured and the
 	// result is rendered as one unified command cell, then the output is
 	// shared with the AI through the post-commit send effect. They must be
@@ -444,6 +385,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	if commandMatches(cmdLower, "/help") || commandMatches(cmdLower, "/?") {
 		if strings.TrimSpace(extractCommandArgument(command)) != "" {
 			return CommandResult{}, false, nil
+		}
+		if unifiedDirectInteractiveOutput(session) {
+			return chatScreenDocResult(chatScreenHelpSpec()), true, nil
 		}
 		return CommandResult{
 			Blocks: []RenderBlock{{Document: buildChatSlashHelpDocument()}},
@@ -519,6 +463,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 	if commandMatches(cmdLower, "/functions") || commandMatches(cmdLower, "/catalog") {
 		prompt, jsonOutput := extractCommandArgumentOptions(command)
 		if prompt == "" && jsonOutput {
+			if unifiedDirectInteractiveOutput(session) {
+				return chatScreenDocResult(chatScreenFunctionsSpec("函数目录", buildChatFunctionCatalogDocument(session, true))), true, nil
+			}
 			return CommandResult{
 				Blocks: []RenderBlock{{Document: buildChatFunctionCatalogDocument(session, true)}},
 				Action: CommandContinue,
@@ -529,6 +476,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 				Blocks: []RenderBlock{{Document: buildChatPlainTextCommandDocument("错误: 需要提供 prompt 预览最终暴露集合\n用法: /functions <prompt> [--json] 或 /catalog <prompt> [--json]")}},
 				Action: CommandContinue,
 			}, true, nil
+		}
+		if unifiedDirectInteractiveOutput(session) {
+			return chatScreenDocResult(chatScreenFunctionsSpec("函数暴露预览", buildChatFunctionExposureDocument(session, prompt, jsonOutput))), true, nil
 		}
 		return CommandResult{
 			Blocks: []RenderBlock{{Document: buildChatFunctionExposureDocument(session, prompt, jsonOutput)}},
@@ -545,6 +495,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		doc, err := buildChatSessionSummariesDocument(session.SessionManager, session.SessionUserID, currentRuntimeSessionID(session), filter)
 		if err != nil {
 			return CommandResult{}, true, err
+		}
+		if unifiedDirectInteractiveOutput(session) {
+			return chatScreenDocResult(chatScreenSessionsSpec(doc)), true, nil
 		}
 		return CommandResult{
 			Blocks: []RenderBlock{{Document: doc}},
@@ -588,7 +541,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		// reader rather than a one-time startup side effect.
 		if unifiedDirectInteractiveOutput(session) && hasVisibleChatHistory(session) {
 			printVisibleChatHistory(session, "")
-			return CommandResult{Action: CommandContinue, OpenTranscript: true}, true, nil
+			return CommandResult{Action: CommandContinue, Screen: chatScreenSpecRef(chatScreenTranscriptSpec("command"))}, true, nil
 		}
 		// Plain/noninteractive projections retain the established replay behavior.
 		// Claim it here so the unified command gate never sends /history to a
@@ -607,6 +560,9 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		// parameter error so the message stays visible in every mode.
 		if strings.TrimSpace(extractCommandArgument(command)) != "" {
 			return CommandResult{}, false, nil
+		}
+		if unifiedDirectInteractiveOutput(session) {
+			return chatScreenDocResult(chatScreenStatusSpec(session)), true, nil
 		}
 		return CommandResult{
 			Blocks: []RenderBlock{{Document: buildChatStatusDocument(session)}},
@@ -831,7 +787,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 // tryExecuteStructuredDebugCommand retains finite diagnostics, debug toggles,
 // and archive export as one semantic command transaction. None of these
 // variants owns a prompt or a background stream; /debug display is the sole
-// alternate-screen variant and commits no Scene cell (see OpenDebugOverlay).
+// alternate-screen variant and commits no Scene cell (see CommandResult.Screen).
 func tryExecuteStructuredDebugCommand(session *ChatSession, command string) (CommandResult, bool) {
 	// P2-12: the local supervision control entry is dispatched before the
 	// generic /debug parser, which only knows the original diagnostics verbs.
@@ -874,8 +830,8 @@ func tryExecuteStructuredDebugCommand(session *ChatSession, command string) (Com
 		// list and /history), never into the main message stream: no Scene cell
 		// is committed, and dispatch opens the lease-bound viewer instead.
 		return CommandResult{
-			Action:           CommandContinue,
-			OpenDebugOverlay: true,
+			Action: CommandContinue,
+			Screen: chatScreenSpecRef(chatScreenDebugDisplaySpec(session)),
 		}, true
 	case "export":
 		result, err := exportChatDebugArchive(session, opts)

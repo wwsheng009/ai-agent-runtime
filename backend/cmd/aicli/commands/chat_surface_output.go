@@ -587,6 +587,10 @@ func printfDirectInteractiveOutput(session *ChatSession, format string, args ...
 	printDirectInteractiveOutput(session, text)
 }
 
+// chatCommandOutputObserver 是测试观测点（批次 3 / A3）：仅在测试中设置，
+// 用于断言统一交互路径不再发生 legacy stdout 直写；生产环境恒为 nil。
+var chatCommandOutputObserver func(*ChatSession, string)
+
 // printChatCommandOutput is the compatibility boundary for finite slash-command
 // results. A unified session submits the whole document as one semantic
 // supplement, while plain and legacy sessions retain their existing terminal
@@ -596,6 +600,9 @@ func printfDirectInteractiveOutput(session *ChatSession, format string, args ...
 func printChatCommandOutput(session *ChatSession, text string) {
 	if text == "" {
 		return
+	}
+	if chatCommandOutputObserver != nil {
+		chatCommandOutputObserver(session, text)
 	}
 	if !strings.HasSuffix(text, "\n") {
 		text += "\n"

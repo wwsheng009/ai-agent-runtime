@@ -47,87 +47,12 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 				// 边读边补，会话装载不再等全量翻页。
 				replayLoadedSessionHistory(session, "已加载历史会话")
 			}
-			if result.OpenTranscript && session != nil {
-				// /history in the unified TUI is a view operation over the already
-				// canonical Scene transcript. The pager borrows TerminalSession's
-				// alternate-screen lease; it never replays duplicate terminal rows.
-				openChatTranscriptPager(session)
-			}
-			if renderErr == nil && result.OpenResumePicker != nil && session != nil {
-				// /resume is a typed alternate-screen picker effect. Its final
-				// selection is committed only after ScreenLease release, preserving
-				// one physical terminal owner throughout the modal lifecycle.
-				openChatResumePicker(session, *result.OpenResumePicker)
-			}
-			if renderErr == nil && result.OpenBacktrackPicker != nil && session != nil {
-				// The backtrack picker mutates canonical transcript state only after
-				// ScreenLease release. Its replacement transaction therefore never
-				// overlaps the alternate-screen frame or primary repaint recovery.
-				openChatBacktrackPicker(session, *result.OpenBacktrackPicker)
-			}
-			if renderErr == nil && result.OpenModelPicker != nil && session != nil {
-				// /model picker: provider→model→reasoning stages share one alternate
-				// screen; the apply step runs only after ScreenLease release, keeping
-				// one physical terminal owner throughout the modal lifecycle.
-				openChatModelPicker(session, *result.OpenModelPicker)
-			}
-			if renderErr == nil && result.OpenThemePicker != nil && session != nil {
-				// /theme select is a typed live-preview picker effect; the confirmed
-				// theme is applied only after ScreenLease release and primary
-				// presenter recovery.
-				openChatThemePicker(session, *result.OpenThemePicker)
-			}
-			if renderErr == nil && result.OpenSkillPicker != nil && session != nil {
-				// /skills select is a typed picker effect; the confirmed skill
-				// becomes a composer draft only after ScreenLease release and
-				// primary presenter recovery.
-				openChatSkillPicker(session, *result.OpenSkillPicker)
-			}
-			if renderErr == nil && result.OpenExportPicker != nil && session != nil {
-				// /export bare is a typed picker effect; the export file write
-				// runs only after ScreenLease release and primary presenter
-				// recovery.
-				openChatExportPicker(session, *result.OpenExportPicker)
-			}
-			if renderErr == nil && result.OpenMCPPicker != nil && session != nil {
-				// bare /mcp is a typed server/action selector effect; the chosen
-				// action (status/enable/disable/remove/reload) runs through the
-				// /mcp text path only after ScreenLease release and primary
-				// presenter recovery.
-				openChatMCPPicker(session, *result.OpenMCPPicker)
-			}
-			if renderErr == nil && result.OpenDebugOverlay && session != nil {
-				// /debug display is a lease-bound alternate-screen viewer. Its
-				// snapshot is captured on the alternate screen and never
-				// committed as a Scene command cell in the main message stream.
-				openChatDebugOverlay(session)
-			}
-			if renderErr == nil && result.OpenWebEndpointsScreen && session != nil {
-				// /web endpoints renders on a dedicated alternate screen
-				// (reusing the debug overlay viewer) instead of the main
-				// message stream: no Scene cell is committed, and the endpoint
-				// text is captured once before the lease-bound screen enters.
-				openChatWebEndpointsScreen(session)
-			}
-			if renderErr == nil && result.OpenUsageScreen != nil && session != nil {
-				// /usage is a lease-bound alternate-screen viewer (like /debug
-				// display): the cache overview and the session cache request
-				// list are captured on the alternate screen and never committed
-				// as a Scene command cell. When the alternate screen cannot be
-				// hosted the viewer degrades to the §6.4 document cell.
-				openChatUsageScreen(session, *result.OpenUsageScreen)
-			}
-			if renderErr == nil && result.OpenAccountScreen != nil && session != nil {
-				// /account owns its own alternate screen: the single-provider
-				// report (already fetched) is rendered there instead of being
-				// appended to the main message stream. When the alternate screen
-				// cannot be hosted the viewer degrades to the document cell.
-				openChatAccountScreen(session, *result.OpenAccountScreen)
-			}
-			if renderErr == nil && result.OpenAccountsScreen != nil && session != nil {
-				// /accounts owns a second, separate alternate screen (the whole
-				// provider table), so /account and /accounts never share a view.
-				openChatAccountsScreen(session, *result.OpenAccountsScreen)
+			if renderErr == nil {
+				// 批次 5（D-E）：副屏效应只保留 CommandResult.Screen 一条通道，
+				// 统一由 dispatchChatScreenEffects 派发。A 族 picker 的 Effect
+				// Spec 在命令提交后调用既有 opener（预检与多段交互时序不变），
+				// 每段交互的租约与 close 序列仍由 chatScreenAcquireLease 承担。
+				dispatchChatScreenEffects(session, result)
 			}
 			if renderErr == nil && result.ApplyBacktrack != nil && session != nil {
 				// Direct backtrack apply has no alternate screen, but it still owns
