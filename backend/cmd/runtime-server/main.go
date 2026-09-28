@@ -1311,6 +1311,10 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	// Phase 1 交付 6：workspace 解析之后、app 对外提供服务之前接入知识层。
 	// mode=off（默认）时不建库不建锁；失败只 warn，不让启动失败。
 	knowledgeActivation := bootRuntimeServerKnowledge(runtimeConfig, runtimeManager.GetFilePath())
+	// Phase 1 交付 4：shadow 拦截观察器（grep/view → exploration_attribution）。
+	// 与 CLI 宿主同口径（applyLocalChatToolObservation）：知识层 shadow 模式 +
+	// 账本可用才接线；否则观察器为 nil，全部会话保持无知识层行为。
+	handler.SetKnowledgeShadow(knowledge.ShadowObserverFor(knowledgeActivation, knowledgeAttributionSink(ledgerStore)))
 
 	return &runtimeServerApp{
 		router:          router,

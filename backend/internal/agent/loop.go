@@ -115,6 +115,13 @@ type LoopReActConfig struct {
 	//
 	// 契约：尽力而为、快速返回（建议非阻塞投递）；失败不得冒泡为 turn 失败。
 	OnProgress func(ctx context.Context, kind string) `yaml:"-"`
+	// OnToolObserved 在工具执行完成后回调一次，供只读观察（Phase 1 shadow 拦截
+	// grep/view）：参数是工具返回的原始文本（未经 history 截断；ADR-0003 的
+	// baseline_n 口径是「被拦截调用实际返回的条目数」）与错误文本。
+	//
+	// 契约：尽力而为、快速返回（建议非阻塞投递）；不得修改 result；失败不得
+	// 冒泡为 turn 失败。nil = 完全 no-op（mode=off / 未接入知识层的路径）。
+	OnToolObserved func(ctx context.Context, sessionID string, call types.ToolCall, output string, toolErr string) `yaml:"-"`
 }
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
@@ -218,6 +225,15 @@ func (loop *ReActLoop) noteProgress(ctx context.Context, kind string) {
 		return
 	}
 	loop.config.OnProgress(ctx, kind)
+}
+
+// observeToolResult 上报一次工具执行结果（Phase 1 shadow 拦截 grep/view）。
+// 契约同 LoopReActConfig.OnToolObserved：尽力而为、不得影响工具结果。
+func (loop *ReActLoop) observeToolResult(ctx context.Context, sessionID string, tc types.ToolCall, result toolExecutionResult) {
+	if loop == nil || loop.config == nil || loop.config.OnToolObserved == nil {
+		return
+	}
+	loop.config.OnToolObserved(ctx, sessionID, tc, output.RenderFullToolResultContent(result.Output, result.Error), result.Error)
 }
 
 // NewReActLoop 创建 ReAct 循环
@@ -2917,6 +2933,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 	if plan := loop.buildParallelToolBatchPlan(toolCalls, toolWhitelist); plan != nil {
 		parallelResults := loop.runParallelToolBatch(ctx, traceID, sessionID, step, depth, toolCalls, plan)
 		loop.resetMalformedToolCallRecoveriesOnSuccess(toolCalls, parallelResults)
+		for i := range parallelResults {
+			loop.observeToolResult(ctx, sessionID, parallelResults[i].Call, parallelResults[i])
+		}
 		return parallelResults, nil
 	}
 	gateway := loop.agent.GetOutputGateway()
@@ -3529,6 +3548,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			"mcp_name":       toolInfo.MCPName,
 			"execution_mode": toolInfo.ExecutionMode,
 		})
+		loop.observeToolResult(ctx, sessionID, tc, result)
 		results[i] = result
 		loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 	}

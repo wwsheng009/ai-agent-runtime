@@ -37,6 +37,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
 	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
@@ -109,7 +110,10 @@ type Handler struct {
 	skillLoader   *skill.Loader
 	mcpManager    skill.MCPManager
 	mcpAdmin      mcpadmin.AdminService
-	llmRuntime    *llm.LLMRuntime
+	// Phase 1 交付 4：知识层 shadow 拦截观察器（runtime-server 启动时经
+	// SetKnowledgeShadow 注入）；nil 时全部会话保持无知识层行为。
+	knowledgeShadow *knowledge.ShadowObserver
+	llmRuntime      *llm.LLMRuntime
 	// §4.13 审批解释（可选注入）：nil 时用 llmRuntime 的内建一次性调用；
 	// 两者都不可用则端点降级为规则摘要（永不把模型故障变成 5xx）。
 	approvalSummarizer ApprovalSummarizer
@@ -715,6 +719,15 @@ func (h *Handler) SetMutationPolicy(policy MutationPolicy) {
 	h.mutationPolicyMu.Lock()
 	defer h.mutationPolicyMu.Unlock()
 	h.mutationPolicy = policy
+}
+
+// SetKnowledgeShadow 注入 Phase 1 shadow 拦截观察器（runtime-server 启动时装配）。
+// 观察器为 nil（知识层 off / 账本不可用 / 未接线）时所有会话保持无知识层行为。
+func (h *Handler) SetKnowledgeShadow(observer *knowledge.ShadowObserver) {
+	if h == nil {
+		return
+	}
+	h.knowledgeShadow = observer
 }
 
 // SetMCPAdminService 注入 MCP 管理服务（runtime-server 启动时装配）。

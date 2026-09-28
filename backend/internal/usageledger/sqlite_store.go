@@ -345,6 +345,56 @@ func (s *SQLiteStore) ledgerColumns(ctx context.Context) (map[string]bool, error
 	return columns, nil
 }
 
+// AppendExplorationAttribution 追加一行 exploration_attribution（ADR-0003 §4.1）。
+//
+// 该表与 token_usage_history 完全隔离：追加本表数据不得以任何形式写入
+// token_usage_history（D3 第 1 条）。coverage / economy 允许 NULL
+// （baseline_n == 0 或 baseline_tokens == 0 时无定义）。
+func (s *SQLiteStore) AppendExplorationAttribution(ctx context.Context, rec *entity.ExplorationAttribution) error {
+	if rec == nil {
+		return nil
+	}
+	if s == nil || s.db == nil {
+		return fmt.Errorf("usageledger: append exploration attribution: store is not open")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO exploration_attribution (
+			id, session_id, turn_id, request_id, tool, query_hash, project_id,
+			baseline_n, candidate_n, overlap_n, baseline_tokens, candidate_tokens,
+			coverage, economy, usable, source, knowledge_mode, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID,
+		nullIfEmpty(rec.SessionID),
+		nullIfEmpty(rec.TurnID),
+		nullIfEmpty(rec.RequestID),
+		rec.Tool,
+		nullIfEmpty(rec.QueryHash),
+		nullIfEmpty(rec.ProjectID),
+		rec.BaselineN,
+		rec.CandidateN,
+		rec.OverlapN,
+		rec.BaselineTokens,
+		rec.CandidateTokens,
+		nullableFloat(rec.Coverage),
+		nullableFloat(rec.Economy),
+		boolToInt(rec.Usable),
+		nullIfEmpty(rec.Source),
+		rec.KnowledgeMode,
+		rec.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("usageledger: append exploration attribution: %w", err)
+	}
+	return nil
+}
+
+func nullableFloat(value *float64) interface{} {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
 func resolveSQLiteDSN(dsn string) (string, error) {
 	dsn = strings.TrimSpace(dsn)
 	if dsn == "" {

@@ -78,3 +78,11 @@ func isAbsWorkspaceRoot(path string) bool {
 	}
 	return os.IsPathSeparator(path[0]) || (len(path) > 1 && path[1] == ':')
 }
+
+// knowledgeAttributionSink 把 usage ledger store 折叠成 exploration_attribution
+// 落库口：store 未启用（nil）或具体类型未实现该接口时返回 nil，观察器随之整体
+// no-op（与 CLI 宿主 ledgerAttributionSink 同口径）。
+func knowledgeAttributionSink(store any) knowledge.AttributionSink {
+	sink, _ := store.(knowledge.AttributionSink)
+	return sink
+}

@@ -946,8 +946,12 @@ func (h *acpSessionHost) closeSessionLocked(s *acpHostSession) {
 		s.chat.ACPMCPSession.close()
 	}
 	// 归还知识层引用：引用归零才真正关 store。mode=off / 未接入时为 no-op。
+	// 句柄同时挂在 chat.Knowledge 上时，finalizeChatSession 已按 ChatSession
+	// 的所有权释放过一次，这里不得重复释放（refs 会少计）。
 	if s.knowledge != nil {
-		releaseChatKnowledge(s.knowledgeWorkspace, s.knowledge)
+		if s.chat == nil || s.chat.Knowledge != s.knowledge {
+			releaseChatKnowledge(s.knowledgeWorkspace, s.knowledge)
+		}
 		s.knowledge = nil
 		s.knowledgeWorkspace = ""
 	}
@@ -978,6 +982,12 @@ func (h *acpSessionHost) attachSessionKnowledge(hostSess *acpHostSession, worksp
 	}
 	if act == nil {
 		return
+	}
+	// 同一句柄挂到 ChatSession：SessionActor 构建时据此接线 Phase 1 shadow
+	// 拦截（与 TUI 同口径，见 applyLocalChatToolObservation）。mode=off 时上面
+	// 已提前返回 nil，行为与无知识层一致。
+	if hostSess.chat != nil {
+		hostSess.chat.Knowledge = act
 	}
 	hostSess.knowledge = act
 	hostSess.knowledgeWorkspace = ws

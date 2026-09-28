@@ -6,6 +6,50 @@
 
 ---
 
+## 2026-09-28 — Phase 1 交付 4（shadow 拦截 `grep` / `view`）
+
+起因：关闭 `06` §4 Phase 1 交付 4 —— `mode=shadow` 下在既有 `grep` / `view` 执行路径上
+拦截并旁路对比（ADR-0003 §4.3 / §4.4），使 `exploration_attribution` 开始产生数据、
+M1 可复算。
+
+### Added
+
+- **`backend/internal/knowledge/shadow.go`（新增 `ShadowObserver` / `ShadowObserverFor` / `ShadowConfig` / `ShadowIndex` / `AttributionSink` / `ObservedCall`）** ——
+  只读索引侧候选（`Search` / `FindSymbols`）与工具实际输出（baseline）逐调用对比，
+  计算 `baseline_n` / `candidate_n` / `overlap_n` / `coverage` / `economy` / `usable`
+  （ADR-0003 §4.2 口径；零结果 `coverage` 落 NULL，§4.5）；落库只写
+  `query_hash = sha256(tool + "\x00" + pattern + "\x00" + scope)` 与
+  `project_id = ProjectIDForWorkspace(ws)`（哈希短键，不含绝对路径，§4.6）。
+  `DefaultShadowAlpha = 0.8` 仅为联调初值，**不得**作为验收门槛（§4.2 / §10）。
+- **`usageledger.AppendExplorationAttribution`**（`sqlite_store.go`）—— 18 列插入，
+  浮点为 NULL 语义；**不写 `token_usage_history`**（D3 不变量，由测试钉住）。
+- **`agent.LoopReActConfig.OnToolObserved`**（`internal/agent/loop.go`）—— 在 MCP 分支
+  与并行批次出口上报工具最终结果；hook 为 nil 时零行为变化。
+- **三入口接线**：aicli cmd/tui（`applyLocalChatToolObservation`，`chat_actor_host.go`）、
+  aicli acp（`attachSessionKnowledge` 挂 `ChatSession.Knowledge`，`agent_stdio.go`）、
+  runtime-server（`Handler.SetKnowledgeShadow` + `applyAPISessionToolObservation`）。
+- **测试**：`knowledge/shadow_test.go`（grep 覆盖率 / 零结果落库 / view 区间覆盖 /
+  全覆盖可用 / 跳过与 mode=off / sink 错误语义 + 工厂与 project_id 契约）、
+  `usageledger/sqlite_store_exploration_attribution_write_test.go`（回读 + 零基线 NULL +
+  不污染 `token_usage_history`）、`agent/loop_observe_test.go`、
+  `runtimeapi/knowledge_shadow_wiring_test.go`。
+
+### Changed
+
+- **acp 引用计数修正**（`agent_stdio.go`）：`attachSessionKnowledge` 与 TUI 同口径把句柄挂到
+  `ChatSession.Knowledge`；`closeSessionLocked` 仅在句柄**未**挂在 chat 上时释放，
+  避免与 `finalizeChatSession` 双释放导致 refs 少计。
+- **`06` §1.1 / §4 Phase 1、`04` §5 Phase 1、`README` 阶段行**：交付 4 由「未开始」改为
+  「已完成」，并登记落点与下一步（交付 5 → `Phase1-shadow` 实测）。
+
+### Notes
+
+- 观察器契约：**尽力而为**（落库失败只 debug，不冒泡为 turn 失败）、**只读**（不改工具
+  结果）、`mode=off` / 未接线时 hook 为 nil，与无知识层逐字节一致。
+- 仍未收敛：**交付 5**（`knowledge.status`）；`Phase1-shadow` 实测（α 校准 + M1 复算）。
+
+---
+
 ## 2026-09-28 — 补记：ADR 0001/0003/0007 裁决为 Accepted、Phase 0 文档治理（#8 / #9）与 `index_jobs` DDL 迁移（#1）
 
 起因：Phase 0 文档治理收尾与 Phase 1 门禁解除。owner 授权代改 ADR 状态并记录裁决；随后按

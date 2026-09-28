@@ -25,6 +25,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/planmode"
@@ -1701,6 +1702,9 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	// §6.1 宿主接线：主 Agent 路由只接主会话。子会话走 aicli.subagents.routing
 	// （scheduler 侧），主 Agent 的开关不得改变子 Agent 行为（§6.3 配置隔离）。
 	applyLocalChatMainAgentRouting(loopConfig, session, isBaseSession)
+	// Phase 1 交付 4：知识层 shadow 拦截（grep/view → exploration_attribution）。
+	// 知识层 off / 账本未启用时 hook 为 nil，行为与无知识层一致（ADR-0003 §4.4）。
+	applyLocalChatToolObservation(loopConfig, session, h)
 	applyLocalChatCompletionRequirement(loopConfig, session, childAgentType, childCompletionRequirement, workspaceRoot)
 	actor, err := runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
 		Agent:        apiAgent,
@@ -2599,6 +2603,44 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 		policy.AllowedTools = map[string]bool{}
 	}
 	return policy
+}
+
+// applyLocalChatToolObservation 接线 Phase 1 shadow 拦截（ADR-0003）：
+// 知识层 shadow 模式下把 grep/view 的实际输出喂给 ShadowObserver，旁路写入
+// exploration_attribution（与 token_usage_history 同一账本 DB）。
+// 知识层 off / 账本未启用时 hook 为 nil——agent loop 与无知识层逐字节一致。
+func applyLocalChatToolObservation(config *agent.LoopReActConfig, session *ChatSession, host *localChatRuntimeHost) {
+	if config == nil || session == nil || host == nil {
+		return
+	}
+	observer := knowledge.ShadowObserverFor(session.Knowledge, ledgerAttributionSink(host.ledgerSvc))
+	if observer == nil {
+		return
+	}
+	config.OnToolObserved = func(ctx context.Context, sessionID string, call runtimetypes.ToolCall, output string, toolErr string) {
+		if _, err := observer.Observe(ctx, knowledge.ObservedCall{
+			SessionID: sessionID,
+			Tool:      call.Name,
+			Args:      call.Args,
+			Output:    output,
+			Err:       toolErr,
+		}); err != nil {
+			logpkg.Debugf("knowledge: shadow observe %s failed: %v", call.Name, err)
+		}
+	}
+}
+
+// ledgerAttributionSink 把本地账本服务折叠成 exploration_attribution 落库口；
+// 账本未启用（服务为 nil）时返回 nil，观察器随之整体 no-op。
+func ledgerAttributionSink(svc *usageledger.Service) knowledge.AttributionSink {
+	if svc == nil {
+		return nil
+	}
+	store := svc.Store()
+	if store == nil {
+		return nil
+	}
+	return store
 }
 
 func buildLocalChatLoopConfig(runtimeConfig *runtimecfg.RuntimeConfig, session *ChatSession, requestedReasoningEffort ...string) *agent.LoopReActConfig {
