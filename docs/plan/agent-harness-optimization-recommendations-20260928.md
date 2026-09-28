@@ -2,7 +2,7 @@
 
 更新时间：2026-09-28
 
-状态：**建议稿（未实施）**。本文只给出优化建议、优先级依据与代码/日志证据索引，不代表相关代码已实现或已排期；文中标注"建议"的均为目标设计。
+状态：**实施中**（2026-09-28 起）。§2.1 的 P0-1 进度埋点已完成 agent_run 主链路接线与双宿主验收（见该节实施记录）；其余条目仍为建议稿，不代表已排期。本文只给出优化建议、优先级依据与代码/日志证据索引；文中标注"建议"的均为目标设计。
 
 ## 0. 文档定位
 
@@ -37,7 +37,7 @@
 
 **事实（代码取证，2026-09-28 核对）**：
 
-- `ExecutionSupervisor.RecordProgress`（`backend/internal/supervision/execution_supervisor.go:307`）→ `Store.RecordExecutionProgress`（`backend/internal/supervision/execution_store.go:370`）在**生产代码中没有任何调用方**；全仓库仅测试引用（`backend/internal/api/runtimeapi/session_agent_controller_test.go:1338`、`backend/internal/supervision/execution_supervisor_test.go:148`）。
+- `ExecutionSupervisor.RecordProgress`（`backend/internal/supervision/execution_supervisor.go:307`）→ `Store.RecordExecutionProgress`（`backend/internal/supervision/execution_store.go:370`）在**生产代码中没有任何调用方**（2026-09-28 实施前取证；P0-1 接线后已有生产调用方）；全仓库此前仅测试引用（`backend/internal/api/runtimeapi/session_agent_controller_test.go:1338`、`backend/internal/supervision/execution_supervisor_test.go:148`）。
 - `last_progress_at` 只在建行（`execution_store.go:179`）与 `RecordExecutionProgress` 内部更新（`execution_store.go:383-403`）；supervisor 自身的 CAS 状态转换（`execution_supervisor.go:814 / 916 / 959 / 1007 / 1252`，均 `UpdateExecutionRunCAS`）**不更新进度时间戳**。
 - 因此对 `spawn_agent` 产生的 ExecutionRun，进度时间戳自建行起冻结；默认 5 分钟进度阈值（`execution_supervisor.go:96`）与 escalate-first 决策窗口（`execution_supervisor.go:102-105`）全部运行在冻结时间上。
 
@@ -49,6 +49,16 @@
 2. 统一走 `ProgressRecorder`（`Record(ctx, runID, kind, event)`），`progress_seq` 单调分配、乱序去重（store 已支持：`execution_store.go:367-399`）。
 3. 明确"非进度事件"（supervisor 扫描、无条件 heartbeat、UI 查询）不写 progress（同计划 §5.4 第 399-404 行）。
 4. **低成本先行项**：batch 路径（`spawn_subagents`）已有节流回写实现（`backend/internal/agent/subagent_batch_coordinator.go:1143 / 1246 / 1286`），且宿主已接线（`cmd/aicli/commands/chat_actor_host.go:2196`、`backend/internal/api/runtimeapi/supervision_batch_store.go:84`），但 `TaskProgressInterval` 灰度期默认 `0` = 完全关闭（`backend/internal/supervision/config.go:70-77`）。**先把该开关打开**，即可让 batch 任务的父侧 progress rollup 反映真实进度年龄，成本最低。
+
+**实施记录（2026-09-28）**：
+
+- ✅ `agent/loop.go`：LLM 响应完成、tool start/end、每步迭代结束（commit `21a3bcff`）。
+- ✅ `chat/actor.go`：loop tick 透传 + §5.4 状态迁移（审批/输入等待进入与解除、中断）（commits `21a3bcff`、`97ab0258`）。
+- ✅ 双宿主接线（session→run 解析 + 10s 缓存；best-effort、2s 超时）：`cmd/aicli/commands/chat_actor_progress.go`（commit `21a3bcff`）与 `internal/api/runtimeapi/session_progress_wiring.go`（commit `a0481e00`）。spawn run 以子会话 ID 挂载（`backend/internal/toolbroker/execution_run_hook.go`），子会话 loop tick 可直接命中；无 supervision store / 无 run 的会话回调为 nil，行为与接线前一致。
+- ✅ 验收：两宿主解析/缓存/未知会话/无 store no-op 单测、`internal/chat` 全包回归通过。
+- ⏳ batch `TaskProgressInterval`：**不改出厂默认**——按 `supervision-parent-child-control-optimization-plan-20260917.md` §4 灰度流程（先单会话显式开启验证，再按遥测决定是否转 5s）执行；操作键 `supervision.task_progress_interval`（runbook §4.4）。
+- ⏳ `toolbroker/broker.go`：现状不从 broker 写 progress（满足 wait 不更新 progress 的负面约束）；真实消息的 tick 已由 loop 覆盖，暂无独立埋点。
+- ⏳ `session_end`：终态 run 的 progress 写入被 store 忽略、会话结束已由 CompleteRun 收敛，暂不单独埋点。
 
 ### 2.2 超时策略：从"到期强杀"到"到期评估"
 
@@ -111,6 +121,8 @@
 | 1 | progress 埋点接线（含打开 batch `TaskProgressInterval`） | §2.1 | `agent/loop.go`、`chat/actor.go`、`toolbroker/broker.go`、`supervision/config.go` |
 | 2 | 到期评估 / 自动延长 + 无人应答安全默认 | §2.2 / §2.3 | `execution_supervisor.go`、`action_service.go`、wake scheduler |
 | 3 | 失败收尾保全 + 账本收敛 | §2.4 / §2.5 | 失败路径 + supervision store |
+
+> 状态（2026-09-28）：第 1 项 agent_run 埋点已落地（commits `21a3bcff`、`a0481e00`、`97ab0258`，见 §2.1 实施记录）；batch `TaskProgressInterval` 维持出厂 `0`，按 20260917 计划 §4 灰度流程显式开启验证。第 2、3 项未开始。
 
 建议验收：
 
