@@ -156,7 +156,16 @@ func buildKnownEventTypes() map[string]bool {
 		"job_output",                // :37
 		"job_cancelled",             // :38
 		"job_finished",              // :39
-		"mailbox_received",          // :40
+		// P3 控制面 / 队列终态：handler.go 的 job 事件映射默认分支产出
+		// job_<type>，这些名字不进目录就会被计成 unknown_events_dropped。
+		"job_paused",       // paused
+		"job_resumed",      // resumed
+		"job_requeued",     // requeued
+		"job_abandoned",    // abandoned
+		"job_expired",      // expired
+		"job_interrupted",  // interrupted
+		"job_adopted",      // adopted
+		"mailbox_received", // :40
 	)
 
 	// 来源 3：web_schema.go 映射表中额外的总线事件名。

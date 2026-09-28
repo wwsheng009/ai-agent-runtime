@@ -90,7 +90,7 @@ func controlPlaneToolCapabilities(normalizedToolName string) ([]Capability, bool
 		return []Capability{CapReadOnly, CapAskUser}, true
 	case "background_task":
 		return []Capability{CapBackgroundTask}, true
-	case "task_kill":
+	case "task_kill", "task_control":
 		// 终止后台进程与启动它同级：都要 background_task 能力，并在
 		// accept_edits/dont_ask 等模式下走 ask/deny。
 		return []Capability{CapBackgroundTask}, true
@@ -159,6 +159,8 @@ func normalizeToolName(name string) string {
 		return "task_kill"
 	case "taskmonitor":
 		return "task_monitor"
+	case "taskcontrol":
+		return "task_control"
 	case "spawnagent":
 		return "spawn_agent"
 	case "listagents":

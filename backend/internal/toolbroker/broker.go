@@ -39,6 +39,7 @@ const (
 	ToolTaskOutput             = "task_output"
 	ToolTaskKill               = "task_kill"
 	ToolTaskMonitor            = "task_monitor"
+	ToolTaskControl            = "task_control"
 	ToolSpawnAgent             = "spawn_agent"
 	ToolListAgents             = "list_agents"
 	ToolSendMessage            = "send_message"
@@ -203,7 +204,7 @@ func isVolatileEmptyReplayTool(name string) bool {
 // IsBrokerTool returns true if the tool is handled by the broker.
 func (b *Broker) IsBrokerTool(name string) bool {
 	switch normalizeToolName(name) {
-	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolBackgroundTask, ToolTaskOutput, ToolTaskKill, ToolTaskMonitor, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
+	case ToolAskUserQuestion, ToolEnterPlanMode, ToolExitPlanMode, ToolPlanReview, ToolBackgroundTask, ToolTaskOutput, ToolTaskKill, ToolTaskMonitor, ToolTaskControl, ToolSpawnAgent, ToolListAgents, ToolSendMessage, ToolFollowupTask, ToolSendInput, ToolResolveAgentApproval, ToolWaitAgent, ToolReadAgentEvents, ToolCloseAgent, ToolResumeAgent, ToolApplyAgentWorktree, ToolDiscardAgentWorktree, ToolSpawnTeam, ToolWaitTeam, ToolSendTeamMessage, ToolReadMailboxDigest, ToolReadTaskSpec, ToolReadTaskContext, ToolReportTaskOutcome, ToolBlockCurrentTask, ToolSupervisionSnapshot, ToolSupervisionDescendants, ToolSubagentStatus, ToolSubagentInspectTask, ToolReadAgentResult, ToolAckLifecycle, ToolControlDescendant:
 		return true
 	default:
 		return false
@@ -435,6 +436,33 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 					},
 				},
 				"required": []string{},
+			},
+		},
+		types.ToolDefinition{
+			Name:        ToolTaskControl,
+			Description: "Control a background task's lifecycle (alias: task_id). action=pause holds a queued job (running jobs cannot be paused), action=resume re-queues a paused job with a fresh queue window, action=abandon drops a queued/paused job as terminal 'abandoned', action=requeue creates a NEW job from a terminal one (same session/command; the new job records requeued_from). Use task_kill to cancel a running job.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"job_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Background job id returned by background_task.",
+					},
+					"task_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Alias for job_id.",
+					},
+					"action": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"pause", "resume", "abandon", "requeue"},
+						"description": "Lifecycle control to apply: pause | resume | abandon | requeue.",
+					},
+					"reason": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional audit note recorded with the control event.",
+					},
+				},
+				"required": []string{"action"},
 			},
 		},
 		types.ToolDefinition{
@@ -1747,6 +1775,93 @@ func (b *Broker) execute(ctx context.Context, sessionID, toolName string, args m
 			"message":   "cancel requested; process-tree termination may take a moment, re-read task_output for the final status",
 			"exit_code": exitCode,
 		}, killMetadata, nil
+
+	case ToolTaskControl:
+		if b.Background == nil {
+			return nil, nil, fmt.Errorf("background manager is not configured")
+		}
+		jobID := brokerTaskStringArg(args, "job_id")
+		if jobID == "" {
+			jobID = brokerTaskStringArg(args, "task_id")
+		}
+		if jobID == "" {
+			return nil, nil, fmt.Errorf("job_id is required (task_id is accepted as an alias)")
+		}
+		action := strings.ToLower(strings.TrimSpace(brokerTaskStringArg(args, "action")))
+		switch action {
+		case "pause", "resume", "abandon", "requeue":
+		default:
+			return nil, nil, fmt.Errorf("action must be one of pause, resume, abandon, requeue (got %q)", action)
+		}
+		resolvedJobID := jobID
+		displayJobID := jobID
+		if handleAliases != nil {
+			resolvedJobID, displayJobID, err = handleAliases.Jobs.resolve(jobID, backgroundJobAliasPrefix, "background job")
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		var (
+			controlled *background.Job
+			controlErr error
+		)
+		switch action {
+		case "pause":
+			controlled, controlErr = b.Background.PauseJob(ctx, resolvedJobID)
+		case "resume":
+			controlled, controlErr = b.Background.ResumeJob(ctx, resolvedJobID)
+		case "abandon":
+			controlled, controlErr = b.Background.AbandonJob(ctx, resolvedJobID)
+		case "requeue":
+			controlled, controlErr = b.Background.RequeueJob(ctx, resolvedJobID)
+		}
+		controlMetadata := map[string]interface{}{
+			toolresult.MetadataKey: toolresult.KindStructured,
+			"job_id":               strings.TrimSpace(jobIDValue(controlled, resolvedJobID)),
+			"job_alias":            displayJobID,
+			"action":               action,
+		}
+		if reason := brokerTaskStringArg(args, "reason"); reason != "" {
+			controlMetadata["reason"] = reason
+		}
+		if controlErr != nil {
+			if runtimeerrors.Is(controlErr, runtimeerrors.ErrJobNotFound) {
+				return nil, nil, fmt.Errorf("%w; use the exact job_id returned by background_task instead of guessing an id", controlErr)
+			}
+			// 状态冲突（已结束 / 运行中 / 未暂停 / 仍在进行）是内容结果：回报当前
+			// 状态让模型改走 task_kill 或先等待，而不是当成工具崩溃。
+			if controlled != nil {
+				status := string(controlled.Status)
+				controlMetadata["status"] = status
+				controlMetadata["applied"] = false
+				return map[string]interface{}{
+					"job_id":  displayJobID,
+					"action":  action,
+					"status":  status,
+					"applied": false,
+					"message": controlErr.Error(),
+				}, controlMetadata, nil
+			}
+			return nil, nil, controlErr
+		}
+		status := ""
+		if controlled != nil {
+			status = string(controlled.Status)
+		}
+		controlMetadata["status"] = status
+		controlMetadata["applied"] = true
+		result := map[string]interface{}{
+			"job_id":  displayJobID,
+			"action":  action,
+			"status":  status,
+			"applied": true,
+			"message": "control applied; re-read task_output for the current state",
+		}
+		if action == "requeue" && controlled != nil {
+			result["new_job_id"] = controlled.ID
+			controlMetadata["new_job_id"] = controlled.ID
+		}
+		return result, controlMetadata, nil
 
 	case ToolTaskMonitor:
 		if b.Background == nil {

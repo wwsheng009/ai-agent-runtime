@@ -41,6 +41,82 @@ func backgroundSleeperCommand() string {
 	return "sleep 30"
 }
 
+// TestTaskControlLifecycle covers the P3 lifecycle tool: requeue a terminal
+// job, abandon the queued replacement, and report running-job conflicts as
+// content results instead of tool crashes.
+func TestTaskControlLifecycle(t *testing.T) {
+	ctx := context.Background()
+	manager := background.NewManager(background.Config{
+		LogDir:            filepath.Join(t.TempDir(), "logs"),
+		MaxConcurrentJobs: 1,
+	})
+	t.Cleanup(func() { require.NoError(t, manager.Close()) })
+	broker := &Broker{Background: manager}
+
+	first := submitTestJob(t, broker, backgroundBriefCommand())
+	require.Eventually(t, func() bool {
+		job, err := manager.GetJob(ctx, first)
+		return err == nil && job != nil && background.IsTerminalStatus(job.Status)
+	}, 30*time.Second, 100*time.Millisecond)
+
+	blocker := submitTestJob(t, broker, backgroundSleeperCommand())
+	require.Eventually(t, func() bool {
+		job, err := manager.GetJob(ctx, blocker)
+		return err == nil && job != nil && job.Status == background.StatusRunning
+	}, 30*time.Second, 100*time.Millisecond)
+
+	raw, metadata, err := broker.Execute(ctx, "session-wait", ToolTaskControl, map[string]interface{}{
+		"job_id": first,
+		"action": "requeue",
+	})
+	require.NoError(t, err)
+	result, ok := raw.(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, true, result["applied"])
+	require.Equal(t, "requeue", metadata["action"])
+	newJobID, _ := result["new_job_id"].(string)
+	require.NotEmpty(t, newJobID)
+	require.NotEqual(t, first, newJobID)
+
+	// The requeued job is queued behind the blocker: abandon it.
+	raw, _, err = broker.Execute(ctx, "session-wait", ToolTaskControl, map[string]interface{}{
+		"job_id": newJobID,
+		"action": "abandon",
+	})
+	require.NoError(t, err)
+	result, ok = raw.(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, "abandoned", result["status"])
+
+	// Running jobs cannot be paused: content result with applied=false.
+	raw, _, err = broker.Execute(ctx, "session-wait", ToolTaskControl, map[string]interface{}{
+		"job_id": blocker,
+		"action": "pause",
+	})
+	require.NoError(t, err)
+	result, ok = raw.(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, false, result["applied"])
+	message, _ := result["message"].(string)
+	require.Contains(t, message, "cannot pause")
+
+	_, _, err = broker.Execute(ctx, "session-wait", ToolTaskControl, map[string]interface{}{
+		"job_id": "job_missing_control",
+		"action": "pause",
+	})
+	require.Error(t, err)
+	require.True(t, runtimeerrors.Is(err, runtimeerrors.ErrJobNotFound))
+
+	_, _, err = broker.Execute(ctx, "session-wait", ToolTaskControl, map[string]interface{}{
+		"job_id": blocker,
+		"action": "explode",
+	})
+	require.Error(t, err)
+
+	_, _, killErr := broker.Execute(ctx, "session-wait", ToolTaskKill, map[string]interface{}{"job_id": blocker})
+	require.NoError(t, killErr)
+}
+
 // backgroundBriefCommand 跑一小段但一定活到 wait 登记之后：用于验证「等待期间
 // 进入终态」的观察标记，命令本身不能快到抢在登记前结束。
 func backgroundBriefCommand() string {
