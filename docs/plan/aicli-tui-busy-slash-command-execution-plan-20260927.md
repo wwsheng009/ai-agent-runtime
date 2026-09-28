@@ -473,7 +473,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 ### P2：统一交互机制落地（注册表 / 宿主 / 模式与生效域）
 
 - **P2-1 ✅ 注册表与解析器**：`runtimeCommandSpec`（Mode/Effect/Category/Confirm/Notice/SwitchKey）+ 附录 F.1 全量 59 条 + F.2 别名归并 + 子命令变体解析；未登记命令/未知子命令 → queue（INV-6）；T28 不变式与 T29 catalog 覆盖单测已绿（`chat_runtime_command_registry.go`，尚未被路由消费——按 P2-2/P2-3 接入）。
-- **P2-2 三级开关**：`chat.runtime_interaction.mode`（auto/readonly/off）+ 分类级 + 命令级；env `AICLI_CHAT_RUNTIME_INTERACTION`；关闭时逐条等价 v1.0（T31）。
+- **P2-2 ✅ 三级开关**：`AICLI_CHAT_RUNTIME_INTERACTION`（auto/readonly/off）+ `..._CATEGORIES`（C#=mode）+ `..._COMMANDS`（命令=mode，键先别名归并）；优先级命令级 > 分类级 > 全局；block 不可被放宽；T31 单测已绿（`chat_runtime_command_switch.go`，消费接入见 P2-3）。
 - **P2-3 宿主与生效域执行器**：`runtimeCommandHost.Submit` + `applyRuntimeEffect`（read/next-turn/next-call 适配器；session/process 拒绝）；统一审计事件与 Notice 提示（T32/T33）。
 - **P2-4 副屏与 prompt 载体**：BusyScreen（§3.7 四项前置）+ priority prompt（确认/单选）复用；L0 输入移交（T20~T26、T34）。
 - **P2-5 生效域适配**：`live`（显示/热刷新/投递/控制面写）直接接入；`next-turn` 复用 `actorRebuildPending`/`reconcilePendingChatActorRebuild`/`refreshLocalRuntimeAfterSelection`（模型/Provider/reasoning_effort/profile/routing/add-dir）；`next-call` 复用 `withLivePermissionModeSource`（permission-mode/yolo/trust/grants/approval-reuse）；缺适配器或未决项（V1/V2a/V10）先降 queue 兜底（D12）。
@@ -1054,3 +1054,17 @@ runtimeCommandSpec{
 **测试（4 项）**：`TestRuntimeCommandRegistryCoversCatalog`（T29：catalog 主命令与别名全覆盖 + 非空条目）、`TestRuntimeCommandRegistryInvariants`（T28）、`TestResolveRuntimeCommandSpecVariants`（22 组变体/别名/未知兜底）、`TestResolveRuntimeCommandSpecSwitchKey`。
 
 **边界**：本步骤只做声明与解析，**尚未被路由消费**——消费路径将在 P2-2（三级开关）与 P2-3（宿主 + 生效域执行器）接入；接入前运行时行为仍由 P1 的 BusyPolicy 通道决定。
+
+### G.6 P2-2 三级开关（已完成，2026-09-28）
+
+| 项 | 落地 |
+| --- | --- |
+| 全局 | `AICLI_CHAT_RUNTIME_INTERACTION`：`auto`（默认）/`readonly`（仅 `effect=read` 可运行时执行）/`off`（除 block 外全部降级 queue） |
+| 分类级 | `AICLI_CHAT_RUNTIME_INTERACTION_CATEGORIES`，逗号分隔 `C5=off,C11=readonly`（键大小写不敏感） |
+| 命令级 | `AICLI_CHAT_RUNTIME_INTERACTION_COMMANDS`，`/model=off,/mode:yolo=readonly`（键先 `canonicalRuntimeCommandName` 别名归并；非法项忽略） |
+| 优先级 | 命令级 > 分类级 > 全局；`block` 只增不减、任何层级不可放宽 |
+| 降级语义 | 仅把 `Mode` 收敛为 `queue`，`Effect`/`Category`/`Notice` 保持声明值（宿主按 Notice 提示） |
+
+**测试（4 项）**：`TestRuntimeCommandSwitchOffDegradesAllToQueue`（T31：遍历注册表全集断言 off 降级且 block 不变）、`TestRuntimeCommandSwitchReadonlyKeepsReadEffects`、`TestRuntimeCommandSwitchPrecedence`（含命令级覆盖分类级与 read 变体保留）、`TestRuntimeSwitchTableFromEnv`（解析/别名归并/非法项）。
+
+**边界**：与 P2-1 相同，本步骤只提供解析与降级函数，**尚未被路由或宿主消费**；运行时行为在 P2-3 接入前仍由 P1 的 BusyPolicy 通道决定。
