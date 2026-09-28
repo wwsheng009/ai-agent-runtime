@@ -132,7 +132,7 @@ type AgentsConfig struct {
 	// wait segments on one parent turn may observe zero obligation progress
 	// (no terminal_delta) before the host stops granting new wait windows and
 	// returns next_action=suspend (design §16.2/§16.3). 0 uses the shared
-	// default (2); a negative value disables the budget. The enforcement never
+	// default (6); a negative value disables the budget. The enforcement never
 	// parks a turn by itself: the parent either does independent work or ends
 	// the turn, and I1 converts a premature finalize into a turn suspension.
 	MaxConsecutiveWaitWithoutProgress int    `yaml:"maxConsecutiveWaitWithoutProgress,omitempty" json:"maxConsecutiveWaitWithoutProgress,omitempty"`
@@ -359,6 +359,23 @@ type BackgroundConfig struct {
 	RetryBackoff            time.Duration   `yaml:"retryBackoff" json:"retryBackoff"`
 	RecoveryMaxAttempts     int             `yaml:"recoveryMaxAttempts" json:"recoveryMaxAttempts"`
 	RecoveryBackoffSchedule []time.Duration `yaml:"recoveryBackoffSchedule" json:"recoveryBackoffSchedule"`
+	// InstanceID overrides the per-process runtime instance id used for job
+	// ownership and leases. Empty generates a fresh id per process
+	// (2026-09-28).
+	InstanceID string `yaml:"instanceId" json:"instanceId"`
+	// LeaseTTL bounds how long jobs stay owned after their owner stops
+	// heartbeating (default 60s).
+	LeaseTTL time.Duration `yaml:"leaseTTL" json:"leaseTTL"`
+	// HeartbeatInterval is how often the owner refreshes its heartbeat and job
+	// leases (default 10s).
+	HeartbeatInterval time.Duration `yaml:"heartbeatInterval" json:"heartbeatInterval"`
+	// QueueTimeout bounds how long a job may stay pending before it becomes
+	// terminal "expired" (default 30m; negative disables expiry).
+	QueueTimeout time.Duration `yaml:"queueTimeout" json:"queueTimeout"`
+	// RecoverPendingOnStart re-queues persisted pending jobs when a runtime
+	// instance starts. Default false: startup marks them interrupted instead of
+	// resurrecting work whose owning process is gone (2026-09-28).
+	RecoverPendingOnStart bool `yaml:"recoverPendingOnStart" json:"recoverPendingOnStart"`
 }
 
 // ImagesConfig controls HTTP behavior for runtime-generated images.
@@ -545,8 +562,12 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			HeartbeatTimeout:        30 * time.Second,
 			LaunchMaxAttempts:       3,
 			RetryBackoff:            500 * time.Millisecond,
-			RecoveryMaxAttempts:     -1,
+			RecoveryMaxAttempts:     3,
 			RecoveryBackoffSchedule: []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute},
+			LeaseTTL:                60 * time.Second,
+			HeartbeatInterval:       10 * time.Second,
+			QueueTimeout:            30 * time.Minute,
+			RecoverPendingOnStart:   false,
 		},
 		Images: ImagesConfig{
 			CacheMaxAge: time.Hour,
