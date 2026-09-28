@@ -407,6 +407,34 @@ describe("assistant segments and generated images", () => {
       expect(segments[0]).toMatchObject({ content: "第一块" });
       expect(segments[2]).toMatchObject({ content: "第二块" });
     });
+
+    // 回归（2026:09: 28 页面 bug）：模型在一个工具区间里也能开口说正文——
+    // 「推理 → 正文 → 推理」两块的工具计数相同（都是 0），重建时后插入的块必须
+    // 落在前一块之后，否则同一锚点上会倒序。（正文段仍按既有不变量排在推理行之后。）
+    it("同锚点的多块推理保持到达顺序（推理 → 正文 → 推理）", () => {
+      const existing = [
+        { type: "reasoning" as const, content: "先说第一块。", running: true },
+      ];
+
+      const segments = buildAssistantMessageSegments(
+        "正文已先行输出。",
+        "runtime",
+        "先说第一块。正文之后再想。",
+        {
+          existingSegments: existing,
+          reasoningBlocks: ["先说第一块。", "正文之后再想。"],
+          reasoningBlockToolCounts: [0, 0],
+        },
+      );
+
+      expect(segments.map((segment) => segment.type)).toEqual([
+        "reasoning",
+        "reasoning",
+        "text",
+      ]);
+      expect(segments[0]).toMatchObject({ content: "先说第一块。" });
+      expect(segments[1]).toMatchObject({ content: "正文之后再想。" });
+    });
   });
 
 });

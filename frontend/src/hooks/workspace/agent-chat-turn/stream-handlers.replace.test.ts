@@ -67,6 +67,36 @@ describe("chat 流文本帧的写入语义", () => {
   });
 });
 
+describe("推理块边界：正文帧把当前块关上", () => {
+  it("正文帧同样把当前推理块关上（同一工具区间内新起一块）", () => {
+    const { handlers, turnState } = createHarness();
+    handlers.onReasoning({ content: "先想第一步。", type: "reasoning" });
+    handlers.onChunk({ content: "先说半句。", type: "text" });
+    handlers.onReasoning({ content: "再说第二步。", type: "reasoning" });
+
+    expect(turnState.reasoningBlocks).toEqual([
+      "先想第一步。",
+      "再说第二步。",
+    ]);
+    // 两块都没有工具行分隔：锚点相同，落位顺序由 messages.ts 的到达顺序保证。
+    expect(turnState.reasoningBlockToolCounts).toEqual([0, 0]);
+  });
+
+  it("工具帧与正文帧共用边界计数，块内增量仍逐段拼接", () => {
+    const { handlers, turnState } = createHarness();
+    handlers.onReasoning({ content: "块一", type: "reasoning" });
+    // 等价于 upsertLiveToolSegment 记下的一帧工具（见 streaming-writers）。
+    turnState.toolFrameCount += 1;
+    handlers.onReasoning({ content: "块二", type: "reasoning" });
+    handlers.onReasoning({ content: "-续写", type: "reasoning" });
+    handlers.onChunk({ content: "正文。", type: "text" });
+    handlers.onReasoning({ content: "块三", type: "reasoning" });
+
+    expect(turnState.reasoningBlocks).toEqual(["块一", "块二-续写", "块三"]);
+    expect(turnState.reasoningBlockToolCounts).toEqual([0, 1, 1]);
+  });
+});
+
 describe("isReplaceStreamChunk", () => {
   it("只认 replace/snapshot；未知或缺失 mode 保持追加兼容", () => {
     expect(

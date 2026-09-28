@@ -304,4 +304,86 @@ describe("历史空消息不占位", () => {
       { type: "text", content: "结论：42 行。" },
     ]);
   });
+
+  // 回归（§12.1.5）：快照重建命中在途消息时必须保留实时侧的逐块推理与工具行位置——
+  // 历史只有「合并后的一块推理」，用它覆盖会把「推理 → 工具 → 推理」压成一段，
+  // 并清掉正在增长块的 running 标记。
+  it("重建命中 live 消息时保留逐块推理与工具行位置", () => {
+    const existing: ChatMessage[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        author: "Runtime stream",
+        label: "streaming",
+        segments: [
+          { type: "reasoning", content: "先看入口。", running: true },
+          {
+            type: "tool",
+            toolCallId: "call-1",
+            name: "read_file",
+            status: "finished",
+          },
+          { type: "reasoning", content: "再看出口。" },
+          { type: "text", content: "结论：入口文件共 42 行。" },
+        ],
+      },
+    ];
+    const history: SessionHistoryMessage[] = [
+      {
+        role: "assistant",
+        content: "结论：入口文件共 42 行。",
+        metadata: {
+          message_id: "msg-1",
+          reasoning_details: {
+            visibility: "visible",
+            content: "先看入口。再看出口。",
+          },
+        },
+        tool_calls: [{ id: "call-1", name: "read_file" }],
+      },
+    ];
+
+    const [merged] = mapSessionHistoryToMessages("session-1", history, existing);
+
+    expect(merged.message.segments).toEqual([
+      { type: "reasoning", content: "先看入口。", running: true },
+      {
+        type: "tool",
+        toolCallId: "call-1",
+        name: "read_file",
+        status: "finished",
+      },
+      { type: "reasoning", content: "再看出口。" },
+      { type: "text", content: "结论：入口文件共 42 行。" },
+    ]);
+  });
+
+  it("实时侧没有推理段时由历史合并推理块兜底", () => {
+    const existing: ChatMessage[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        author: "Runtime stream",
+        label: "streaming",
+        segments: [{ type: "text", content: "结论：入口文件共 42 行。" }],
+      },
+    ];
+    const history: SessionHistoryMessage[] = [
+      {
+        role: "assistant",
+        content: "结论：入口文件共 42 行。",
+        metadata: {
+          message_id: "msg-1",
+          reasoning_details: { visibility: "visible", content: "先盘点入口文件" },
+        },
+      },
+    ];
+
+    const [merged] = mapSessionHistoryToMessages("session-1", history, existing);
+
+    expect(merged.message.segments.map((segment) => segment.type)).toEqual([
+      "reasoning",
+      "text",
+    ]);
+  });
 });

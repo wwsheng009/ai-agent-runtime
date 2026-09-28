@@ -224,6 +224,10 @@ export function createAgentChatStreamHandlers(
         // 改为低频结构快照（见 streaming-frame.ts 的 STRUCTURAL_COMMIT_INTERVAL_MS）。
         appendLiveStreamText(assistantMessageId, delta);
       }
+      // 正文帧 = 推理块边界（见 turn-state 的 appendReasoningDeltaToTurn）：模型已经开口
+      // 说正文之后又回来的推理属于新的一块，而不是并回上一行——「推理 → 正文 → 推理」
+      // 在页面上应当是三行，与本帧同时收尾旧推理行的运行态。
+      turnState.textFrameCount += 1;
       // 正文开始 = 推理阶段结束，推理行不再显示运行态。
       turnState.reasoningRunning = false;
       setPhaseAndRef("streaming");

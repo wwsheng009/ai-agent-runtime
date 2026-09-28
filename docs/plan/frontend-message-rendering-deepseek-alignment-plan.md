@@ -799,6 +799,25 @@ npm run test:e2e      # playwright
 >
 > **提交回填（2026-09-14）**：批次 A–F（含 §12.1 工具行 B4/B5、§12.1.1–§12.1.3 的代码与 e2e 选择器收窄）落在提交 **`9bd162e8`**（上表「提交」列已回填）；本轮收口（§12.1.4 全部改动 + §12.1.1–§12.1.3 的文档记录）落在提交 **`25e6c029`**（25 文件，`+1727/−977`）。**提交态独立核验**：在该提交的独立 worktree 上重跑四项脚本（备份 954 文件 0 残留 / 行数 903 文件最大 499 / i18n `scanned=649, violations=0` / 字面量 32 文件 0 命中）与目标 vitest（`src/lib/chat-view`、`src/lib/thread-state`、`message-list`、`message-reasoning-row`、`artifact-panel-shared` → **17 文件 / 113 用例通过**），未发生「工作区绿、提交态红」。
 
+### 12.1.5 过程区透传：快照重建不得压平逐块推理（2026-09-28）
+
+> 触发（用户实测反馈）：① 重载 / 切换进入会话后，推理行被整条消息的最终快照重建清掉；② 被工具行分隔的多段推理在界面上**并成一段**。根因：历史落盘只有「整轮合并后的一块推理」（`metadata.reasoning_details.content`，不含逐帧顺序与 `running` 标记），而 `mapSessionHistoryToMessages` 命中在途消息时用历史段整体覆盖实时段——实时路径（`events-live` / `turn-state` 的 `reasoningBlockToolCounts`）本来按「工具帧之后新推理块覆盖另起一行」正确分块，一次权威历史回写就把分块与工具行位置抹平。
+>
+> 目标口径（用户显式诉求）：**每个 provider reasoning block 渲染为一行**，位置相对工具行正确，且能在 snapshot 驱动的消息重建后存活。
+
+| 落点 | 条款 | 改动 | 证据 |
+|---|---|---|---|
+| `lib/thread-state/history-mapping.ts` | §12.1.5 | 合并分支改为「过程区透传」：`reasoning` 段与 `code` / `tool` 段一样保留（含 `running` 标记与相对工具行的次序）；实时侧已有推理段时丢弃历史那块**合并推理**（同一段思考的降级表达，否则同一段思考渲染两遍），并按「过程区在前、历史正文在后」落位；实时侧没有推理段时才用历史推理兜底（纯历史渲染不回退） | `history-mapping.test.ts`「重建命中 live 消息时保留逐块推理与工具行位置」「实时侧没有推理段时由历史合并推理块兜底」 |
+| `lib/thread-state/history-projection-live-reasoning.test.ts` | §12.1.5 | 投影层回归（从 `history-projection.test.ts` 拆出，守单文件 500 非空行门禁）：在途（`streaming`）消息被权威历史命中的场景下，`applySessionHistoryToThread` 后段落序列保持「推理(running) → 工具 → 推理 → 正文」 | 新文件 1 用例（原文件 13 用例不动） |
+| `hooks/workspace/agent-chat-turn/turn-state.ts`、`stream-handlers.ts` | §12.1.5 | 块边界从「只看工具帧」扩到「工具帧 + **正文帧**」（`textFrameCount` / `reasoningBlockBoundaryCount`）：模型在一个工具区间内也能开口说正文，「推理 → 正文 → 推理」此前两块计数相同（都是 0）被并回同一行，现在正文帧即关上当前块；落位锚点仍只记工具帧数（正文不占工具行） | `stream-handlers.replace.test.ts`「正文帧同样把当前推理块关上（同一工具区间内新起一块）」 |
+| `lib/thread-state/messages.ts` | §12.1.5 | 同锚点多块推理保序：`syncReasoningSegments` 新增 `insertFloor`，工具行不足以区分先后时（两块 `toolCount` 相同）后插入的块必须落在前一块之后，避免同锚点上倒序 | `assistant-segments.test.ts`「同锚点的多块推理保持到达顺序（推理 → 正文 → 推理）」 |
+
+> **边界**：历史本身没有任何逐帧顺序信息（后端未落盘块边界），纯历史渲染仍只能画「一块推理」——本批次保证的是**实时过程区不被快照回写压平**，不发明服务端没有的结构。
+>
+> **两条通道的落位口径**（实测比对，`runtime/events` 会话 `session_20260928112633_fL6FuYv3` 的 seq 8309–10356 有「同一步推理 → 8 帧正文 → 再推理」的实例）：逐帧通道（`events-live`）按到达顺序画成「推理 A → 正文 → 推理 B」；合帧结构快照（`buildAssistantMessageSegments`）的正文段不属于过程区，正文统一排在推理行之后，同一序列画成「推理 A → 推理 B → 正文」。两者都保证**一块一行、不合并**，差异仅在正文这一行落在两块之间还是之后；要收敛还需后端落盘块边界，不在本批次范围。
+>
+> **门禁（2026-09-28）**：`npx vitest run src/lib/thread-state src/hooks/workspace/agent-chat-turn` → **18 文件 / 164 用例通过**；`npx tsc -b` 无错；`npx eslint`（8 个改动文件）0 问题。
+
 ### 12.2 参考站 → 本地 token 映射（本方案实际采用项，2026-09-14）
 
 > 对应 §10.4(2) 的「逐条等价值」承诺：只登记**本方案实际采用**的项与证据来源；参考站 `--dsh-*` 字号轴未出现在浏览器快照（快照只含 `--dsw-*` 317 条），其值以 §13.4 源码标注为准，其余以实测报告行号为准。**本地一律走 primitive → semantic → `@theme` 三层，不搬参考站 CSS Modules / `--dsw-*` 命名，也不写字面色值。**
