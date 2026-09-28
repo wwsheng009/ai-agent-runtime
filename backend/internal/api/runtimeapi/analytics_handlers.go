@@ -276,7 +276,9 @@ func (h *Handler) ListAnalyticsSubagentStats(w http.ResponseWriter, r *http.Requ
 }
 
 // ListAnalyticsErrorPatterns returns error_code / failure_category Top-N
-// （来源 tools|subagents|requests；空库返回空数组，不返回 500）。
+// （来源 tools|subagents|requests|fence；空库返回空数组，不返回 500）。
+// fence 来源是 CLI 渲染围栏的 late action 拒绝诊断（P1-1b），按 idle/closed/
+// active-mismatch 三个类别呈现。
 //
 // 维度过滤与会话端点同口径（provider/model/status/directory/project/q + 时间窗），
 // 供 /usage 概览的「失败分类分布」跟随页面筛选，与同页其它卡片保持一致。

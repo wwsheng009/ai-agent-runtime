@@ -453,6 +453,20 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 		`CREATE INDEX IF NOT EXISTS idx_usage_routes_scope ON usage_routes(scope, kind, recorded_at_unix_nano DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_routes_route ON usage_routes(provider, model)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_routes_source ON usage_routes(source, difficulty)`,
+		// ---- 渲染围栏丢弃诊断（P1-1b）：/analytics/errors 的 "fence" 来源 ----
+		// 幂等 DDL：老库打开时自动补表（与 v2 三表 / usage_routes 同策略）。
+		`CREATE TABLE IF NOT EXISTS usage_render_fence_drops (
+  session_id             TEXT NOT NULL DEFAULT '',
+  turn_id                TEXT NOT NULL DEFAULT '',
+  dropped_class          TEXT NOT NULL,
+  reason                 TEXT NOT NULL DEFAULT '',
+  count                  INTEGER NOT NULL DEFAULT 0,
+  first_at_unix_nano     INTEGER NOT NULL DEFAULT 0,
+  last_at_unix_nano      INTEGER NOT NULL DEFAULT 0,
+  record_json            BLOB,
+  PRIMARY KEY (session_id, turn_id, dropped_class)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_render_fence_drops_time ON usage_render_fence_drops(last_at_unix_nano DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.Exec(statement); err != nil {

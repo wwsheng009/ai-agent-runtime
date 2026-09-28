@@ -117,6 +117,8 @@ func (c *collector) subscribe(bus *runtimeevents.Bus) {
 		runtimeevents.EventMainAgentRoutePredictionUnresolvable,
 		runtimeevents.EventMainAgentRouteDisabledForTurn,
 		runtimeevents.EventMainAgentRouteCostGuardTripped,
+		// 渲染围栏丢弃诊断（P1-1b）：CLI 在 EndRun 上报增量计数。
+		runtimeevents.EventRenderFenceDropped,
 	} {
 		c.unsubs = append(c.unsubs, bus.SubscribeCancelable(eventType, c.handleEvent))
 	}
@@ -170,6 +172,8 @@ func (c *collector) handleEvent(event runtimeevents.Event) {
 		if reason := mainAgentRouteWarningReason(event.Type); reason != "" {
 			c.onMainAgentRouteWarning(event, reason)
 		}
+	case runtimeevents.EventRenderFenceDropped:
+		c.onRenderFenceDropped(event)
 	}
 }
 

@@ -81,6 +81,9 @@ type chatRuntimeEventBridge struct {
 	// 围栏此前只写 debug 日志，"等待态没有 run"的撕裂不可观测）。
 	lateDropMu      sync.Mutex
 	lateDropStats   chatRuntimeLateDropStats
+	// publishedDrops 是已上报到 EventBus（→ usageanalytics "fence" 来源）的计数
+	// 水位；EndRun 只上报增量，避免同一批拒绝被每轮重复累加。
+	publishedDrops  chatRuntimeLateDropStats
 	rendered        map[string]struct{}
 	historySeedSeen map[string]struct{}
 	// historySeedClaimedItems / historySeedItemByIdentity / historySeedFrontItemID
@@ -1121,6 +1124,10 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	// open for ambient background events (for example async team orchestration)
 	// until the next BeginRun advances it.
 	b.renderMu.Lock()
+	turnID := b.activeTurnID
+	if turnID == "" {
+		turnID = b.executorTurnID
+	}
 	if b.activeTurnID != "" {
 		b.retireTurnLocked(b.activeTurnID)
 	}
@@ -1147,6 +1154,9 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	}
 	flushChatSessionLog(b.session)
 	b.writePromptIfIdle()
+	// P1-1b：把本轮新增的 late action 拒绝计数上报到 EventBus（→ usageanalytics
+	// "fence" 来源）。无增量 / 无宿主总线时静默跳过。
+	b.publishRenderFenceDrops(turnID)
 }
 
 func (b *chatRuntimeEventBridge) markEndRunDrainTimeout() {
@@ -4397,6 +4407,51 @@ func (b *chatRuntimeEventBridge) LateRuntimeDropBreakdown() (idleNoRun, closedAf
 	defer b.lateDropMu.Unlock()
 	s := b.lateDropStats
 	return s.IdleNoRun, s.ClosedAfterRun, s.ActiveMismatch
+}
+
+// publishRenderFenceDrops 把自上次上报以来新增的 late action 拒绝计数发给
+// EventBus（usageanalytics 落进 usage_render_fence_drops，/analytics/errors 以
+// source="fence" 呈现）。同步发布：只在确有增量时发生（每轮至多一次），与
+// 其它会话级事件（chat_turn_events / chat_input_events）的发布语义一致。
+func (b *chatRuntimeEventBridge) publishRenderFenceDrops(turnID string) {
+	if b == nil || b.session == nil {
+		return
+	}
+	host := b.session.LocalRuntimeHost
+	if host == nil || host.EventBus == nil {
+		return
+	}
+	b.lateDropMu.Lock()
+	stats := b.lateDropStats
+	published := b.publishedDrops
+	idle := stats.IdleNoRun - published.IdleNoRun
+	closed := stats.ClosedAfterRun - published.ClosedAfterRun
+	activeMismatch := stats.ActiveMismatch - published.ActiveMismatch
+	if idle == 0 && closed == 0 && activeMismatch == 0 {
+		b.lateDropMu.Unlock()
+		return
+	}
+	b.publishedDrops.IdleNoRun = stats.IdleNoRun
+	b.publishedDrops.ClosedAfterRun = stats.ClosedAfterRun
+	b.publishedDrops.ActiveMismatch = stats.ActiveMismatch
+	reason := stats.LastReason
+	b.lateDropMu.Unlock()
+
+	sessionID := currentRuntimeSessionID(b.session)
+	if sessionID == "" {
+		return
+	}
+	host.EventBus.Publish(runtimeevents.Event{
+		Type:      runtimeevents.EventRenderFenceDropped,
+		SessionID: sessionID,
+		Payload: map[string]interface{}{
+			"idle":            int(idle),
+			"closed":          int(closed),
+			"active_mismatch": int(activeMismatch),
+			"last_reason":     reason,
+			"turn_id":         strings.TrimSpace(turnID),
+		},
+	})
 }
 
 func (b *chatRuntimeEventBridge) writeLateRuntimeDebug(event runtimeevents.Event, reason string) {

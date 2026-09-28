@@ -396,3 +396,47 @@ func TestLateRuntimeDropBreakdownClassifiesRunState(t *testing.T) {
 	}
 	activeBridge.EndRun()
 }
+
+// TestBridgePublishesRenderFenceDropsAtEndRun 锁定 P1-1b 生产侧：EndRun 把本轮
+// 新增的 late action 拒绝计数（增量）上报到 EventBus，供 usageanalytics 落进
+// usage_render_fence_drops；无增量时不得重复上报。
+func TestBridgePublishesRenderFenceDropsAtEndRun(t *testing.T) {
+	bus := runtimeevents.NewBus()
+	var published []runtimeevents.Event
+	unsubscribe := bus.SubscribeCancelable(runtimeevents.EventRenderFenceDropped, func(event runtimeevents.Event) {
+		published = append(published, event)
+	})
+	defer unsubscribe()
+
+	session := &ChatSession{
+		RuntimeSession:   &runtimechat.Session{ID: "fence-publish"},
+		LocalRuntimeHost: &localChatRuntimeHost{EventBus: bus},
+	}
+	bridge := newChatRuntimeEventBridge(session)
+
+	drop := runtimeevents.Event{Type: chatWebDynamicStatusBusEvent, SessionID: "fence-publish"}
+	bridge.logLateRuntimeEvent(drop, chatRuntimeLateReasonClosedRunEpoch)
+	bridge.logLateRuntimeEvent(drop, chatRuntimeLateReasonClosedRunEpoch)
+	bridge.BeginRun()
+	bridge.EndRun()
+
+	if len(published) != 1 {
+		t.Fatalf("published fence-drop events = %d, want 1", len(published))
+	}
+	event := published[0]
+	if event.SessionID != "fence-publish" {
+		t.Fatalf("event session = %q, want fence-publish", event.SessionID)
+	}
+	if idle, _ := event.Payload["idle"].(int); idle != 2 {
+		t.Fatalf("published idle = %v, want 2", event.Payload["idle"])
+	}
+	if closed, _ := event.Payload["closed"].(int); closed != 0 {
+		t.Fatalf("published closed = %v, want 0", event.Payload["closed"])
+	}
+
+	bridge.BeginRun()
+	bridge.EndRun()
+	if len(published) != 1 {
+		t.Fatalf("increment-free run republished counts: %d events", len(published))
+	}
+}

@@ -178,9 +178,9 @@ run epoch 从未开启（恒为 0），而 UI 已进入等待态（Analyzing）�
 
 - ~~P0-2~~：已落地（见 §6.4）。收敛为 `chatActorBuildBudget`，只覆盖 actor 构建；
   turn gate 等待与 run 本身由各自 ctx/生命周期约束，不纳入"预跑卡死"预算。
-- P1-1：部分落地（见 §6.9）。显式 `RunState`（idle/running/closed）已取代 epoch 0
-  在诊断与撕裂判定中的双关；丢弃指标接入 `/web/api/analysis/errors` 仍待办
-  （usageanalytics 摄取管线 + 跨端点契约，建议与相关 WIP 串行）。
+- ~~P1-1~~：已落地（见 §6.9 / §6.10）。显式 `RunState` 取代 epoch 0 双关；
+  late action 丢弃计数经 EventBus 增量上报，落进 `usage_render_fence_drops`，
+  以 `/analytics/errors` 的第 4 个来源 `fence` 呈现。
 - ~~P1-2~~：已落地（见 §6.4 / §6.5）。等待态时钟、`/debug` 时长展示与
   「脱离 run 的等待态」看门狗自愈（清态 + 动态栏提示）全部就位。
 - ~~P2~~：已落地（见 §6.7）。交互提交（`Execute`/`ContinueGoal`）与内部提交
@@ -322,3 +322,34 @@ P3 两项收尾：
 | `-run 'TestChatRuntimeEvent' -count=1`（桥全族回归） | PASS |
 | 新状态用例 + 归因细分 + 看门狗 + late-drop `-race -count=1` | PASS |
 | wedge/refresh/claim/evict×submit/pre-run 全量回归 `-count=1` | PASS |
+
+### 6.10 第九轮实施（P1-1b——丢弃指标接入 `/web/api/analysis/errors`）
+
+数据面：CLI 桥在 `EndRun` 把**自上次上报以来的增量**（idle / closed /
+active-mismatch）经宿主 EventBus 发布为 `runtime.render_fence_dropped`；
+usageanalytics collector 按类别幂等累加进新表，`ErrorPatterns` 以第 4 个来源
+`fence` 输出，`/analytics/errors`（`/usage` 失败分类分布）随既有 source 过滤自动呈现。
+
+| 文件 | 改动 |
+| --- | --- |
+| `backend/internal/events/render_fence_events.go`（新增） | `EventRenderFenceDropped` 事件常量 + 载荷契约（idle/closed/active_mismatch/last_reason/turn_id） |
+| `backend/internal/usageanalytics/store.go` | 幂等 DDL：`usage_render_fence_drops`（PK `session_id,turn_id,dropped_class`）+ 时间索引（沿用"老库打开自动补表"策略，无版本迁移） |
+| `backend/internal/usageanalytics/ingest.go` | `handleEvent` 分支 + **显式订阅清单**加入新事件（订阅是白名单式的，漏加即静默不落行——本轮由测试暴露） |
+| `backend/internal/usageanalytics/ingest_render_fence.go`（新增） | 按类别 `UPSERT` 累加（`count = count + excluded.count`，`last_at = MAX(...)`，reason 非空覆盖），写失败走既有 `reportWriteFailure` |
+| `backend/internal/usageanalytics/query_v2.go` | `ErrorPatterns` 增 `fence` 来源分支（`SUM(count)` 为计数、`RENDER_FENCE_DROPPED_<CLASS>` 为稳定错误码、`render_fence_drop_<class>` 为展示分类）与会话口径 where 助手；`ErrorPatternsQuery` 来源注释更新 |
+| `backend/internal/api/runtimeapi/analytics_handlers.go` | 端点注释补 `fence` 来源（无行为改动：source 过滤参数自动支持新值） |
+| `backend/cmd/aicli/commands/chat_runtime_events.go` | `publishedDrops` 水位 + `publishRenderFenceDrops(turnID)`；`EndRun` 末段发布（仅在确有增量时，每轮至多一次；无宿主总线/无增量静默跳过） |
+| 测试 | `render_fence_ingest_test.go`：三类计数落表、重复投递幂等累加、source 过滤不串源、会话过滤生效；`chat_submit_run_epoch_wedge_test.go` 新增 `TestBridgePublishesRenderFenceDropsAtEndRun`：一轮上报增量、无增量轮不重复上报 |
+
+设计取舍：同步发布（不在 EndRun 起 goroutine）——与 `chat_turn_events` /
+`chat_input_events` 等既有会话级事件的发布语义一致，且只在有增量时发生（正常
+run 零开销）；未走 SSE/web 通道，因此不触及 §8.5 的背压约束。
+
+验证（2026-09-27 第九轮）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `go build` / `go vet`（events、usageanalytics、runtimeapi、commands） | PASS |
+| `go test ./internal/usageanalytics/ -count=1`（全包） | PASS |
+| `go test ./internal/api/runtimeapi/ -run 'ErrorPatterns\|Analytics'` | PASS |
+| 新 CLI 用例 + 桥全族 + wedge/refresh/claim/evict/pre-run 回归 `-count=1` | PASS |

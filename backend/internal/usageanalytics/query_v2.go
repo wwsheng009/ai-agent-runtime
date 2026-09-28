@@ -106,7 +106,7 @@ type SubagentStatsResult struct {
 	Subagents     []SubagentStat       `json:"subagents"`
 }
 
-// ErrorPatternsQuery 失败模式 Top-N 查询（来源：tools|subagents|requests|""）。
+// ErrorPatternsQuery 失败模式 Top-N 查询（来源：tools|subagents|requests|fence|""）。
 //
 // 过滤口径与 /analytics/sessions 一致（见 Query/buildWhere）：from/to 按**会话开始时间**
 // 过滤且 to 右开，provider/model/status/directory/project/q 均取自 usage_sessions。
@@ -548,6 +548,37 @@ GROUP BY error_category`, where), args...)
 			rows.Close()
 		}
 	}
+	if source == "" || source == "fence" {
+		where, args := errorPatternFenceWhere(q)
+		rows, ok, err := s.query(fmt.Sprintf(`
+SELECT dropped_class, COALESCE(SUM(count), COUNT(*)) FROM usage_render_fence_drops
+WHERE %s AND dropped_class <> ''
+GROUP BY dropped_class`, where), args...)
+		if err != nil {
+			return result, fmt.Errorf("query render fence drop patterns: %w", err)
+		}
+		if ok {
+			for rows.Next() {
+				var class string
+				var count int
+				if err := rows.Scan(&class, &count); err != nil {
+					rows.Close()
+					return result, fmt.Errorf("scan render fence drop patterns: %w", err)
+				}
+				class = strings.ToLower(strings.TrimSpace(class))
+				// 与 tools/requests 同口径：错误码给机器可读的稳定标识，
+				// 分类给前端直接展示的短标签（不经过 provider 错误码映射表，
+				// 因为这不是 provider/tool 失败，而是渲染围栏的诊断信号）。
+				add(ErrorPattern{
+					Source:          "fence",
+					ErrorCode:       "RENDER_FENCE_DROPPED_" + strings.ToUpper(strings.ReplaceAll(class, "-", "_")),
+					FailureCategory: "render_fence_drop_" + class,
+					Count:           count,
+				})
+			}
+			rows.Close()
+		}
+	}
 
 	patterns := make([]ErrorPattern, 0, len(counts))
 	for _, pattern := range counts {
@@ -787,6 +818,12 @@ func errorPatternSubagentWhere(q ErrorPatternsQuery) (string, []interface{}) {
 }
 
 func errorPatternRequestWhere(q ErrorPatternsQuery) (string, []interface{}) {
+	return errorPatternWhere(q, "session_id")
+}
+
+// errorPatternFenceWhere 的归属列与 tools/requests 相同（session_id）；
+// 行来自渲染围栏诊断表 usage_render_fence_drops（P1-1b）。
+func errorPatternFenceWhere(q ErrorPatternsQuery) (string, []interface{}) {
 	return errorPatternWhere(q, "session_id")
 }
 
