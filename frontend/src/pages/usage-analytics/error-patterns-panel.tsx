@@ -26,16 +26,21 @@ const failureCategoryKeys = {
   budget_exceeded: "observability.failureCategories.budgetExceeded",
   cancelled: "observability.failureCategories.cancelled",
   interrupted: "observability.failureCategories.interrupted",
+  // P1-1b：渲染围栏丢弃（backend usageanalytics ErrorPatterns source=fence）。
+  render_fence_drop_idle: "observability.failureCategories.renderFenceDropIdle",
+  render_fence_drop_closed: "observability.failureCategories.renderFenceDropClosed",
+  render_fence_drop_active_mismatch: "observability.failureCategories.renderFenceDropActiveMismatch",
   unknown: "observability.failureCategories.unknown",
 } as const;
 
 type FailureCategoryKey = (typeof failureCategoryKeys)[keyof typeof failureCategoryKeys];
 
-/** 失败模式来源 → i18n key（后端固定 tools|subagents|requests）。 */
+/** 失败模式来源 → i18n key（后端固定 tools|subagents|requests|fence）。 */
 const analyticsSourceKeys = {
   tools: "observability.errors.sourceLabels.tools",
   subagents: "observability.errors.sourceLabels.subagents",
   requests: "observability.errors.sourceLabels.requests",
+  fence: "observability.errors.sourceLabels.fence",
 } as const;
 
 type AnalyticsSourceKey = (typeof analyticsSourceKeys)[keyof typeof analyticsSourceKeys];
@@ -126,6 +131,7 @@ export function ErrorPatternsPanel({
     { value: "tools", label: t("observability.errors.sourceLabels.tools") },
     { value: "subagents", label: t("observability.errors.sourceLabels.subagents") },
     { value: "requests", label: t("observability.errors.sourceLabels.requests") },
+    { value: "fence", label: t("observability.errors.sourceLabels.fence") },
   ];
   const topOptions = [10, 20, 50].map((value) => ({
     value: String(value),

@@ -541,6 +541,7 @@ export const enUsageAnalytics = {
         tools: "Tools",
         subagents: "Subagents",
         requests: "Requests",
+        fence: "Render fence",
         unknown: "Unknown",
       },
     },
@@ -553,6 +554,9 @@ export const enUsageAnalytics = {
       budgetExceeded: "Budget exceeded",
       cancelled: "Cancelled",
       interrupted: "Interrupted",
+      renderFenceDropIdle: "Fence drop (no run)",
+      renderFenceDropClosed: "Fence drop (run closed)",
+      renderFenceDropActiveMismatch: "Fence drop (cross-run)",
       unknown: "Unknown",
     },
     routing: {

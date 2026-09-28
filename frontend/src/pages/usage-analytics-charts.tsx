@@ -239,6 +239,10 @@ const failureCategoryKeyMap = {
   budget_exceeded: "observability.failureCategories.budgetExceeded",
   cancelled: "observability.failureCategories.cancelled",
   interrupted: "observability.failureCategories.interrupted",
+  // P1-1b：渲染围栏丢弃（ErrorPatterns source=fence）跟随同一标签表。
+  render_fence_drop_idle: "observability.failureCategories.renderFenceDropIdle",
+  render_fence_drop_closed: "observability.failureCategories.renderFenceDropClosed",
+  render_fence_drop_active_mismatch: "observability.failureCategories.renderFenceDropActiveMismatch",
   unknown: "observability.failureCategories.unknown",
 } as const;
 

@@ -539,6 +539,7 @@ export const zhUsageAnalytics = {
         tools: "工具",
         subagents: "子代理",
         requests: "请求",
+        fence: "渲染围栏",
         unknown: "未知",
       },
     },
@@ -551,6 +552,9 @@ export const zhUsageAnalytics = {
       budgetExceeded: "预算超限",
       cancelled: "已取消",
       interrupted: "已中断",
+      renderFenceDropIdle: "围栏丢弃（无 run）",
+      renderFenceDropClosed: "围栏丢弃（run 已结束）",
+      renderFenceDropActiveMismatch: "围栏丢弃（跨 run 混入）",
       unknown: "未知",
     },
     routing: {

@@ -158,6 +158,14 @@ export const timeoutPattern: AnalyticsErrorPattern = {
   count: 2,
 };
 
+// P1-1b：渲染围栏丢弃模式（ErrorPatterns 第 4 个来源 fence）。
+export const fencePattern: AnalyticsErrorPattern = {
+  error_code: "RENDER_FENCE_DROPPED_CLOSED",
+  failure_category: "render_fence_drop_closed",
+  source: "fence",
+  count: 4,
+};
+
 export function routeStatsResponse(): AnalyticsRouteStatsResponse {
   return {
     schema_version: "usage.analytics.v2",

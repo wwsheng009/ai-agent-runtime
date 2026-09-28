@@ -339,6 +339,10 @@ usageanalytics collector 按类别幂等累加进新表，`ErrorPatterns` 以第
 | `backend/internal/usageanalytics/query_v2.go` | `ErrorPatterns` 增 `fence` 来源分支（`SUM(count)` 为计数、`RENDER_FENCE_DROPPED_<CLASS>` 为稳定错误码、`render_fence_drop_<class>` 为展示分类）与会话口径 where 助手；`ErrorPatternsQuery` 来源注释更新 |
 | `backend/internal/api/runtimeapi/analytics_handlers.go` | 端点注释补 `fence` 来源（无行为改动：source 过滤参数自动支持新值） |
 | `backend/cmd/aicli/commands/chat_runtime_events.go` | `publishedDrops` 水位 + `publishRenderFenceDrops(turnID)`；`EndRun` 末段发布（仅在确有增量时，每轮至多一次；无宿主总线/无增量静默跳过） |
+| `frontend/src/pages/usage-analytics/error-patterns-panel.tsx` | `fence` 来源标签与来源过滤项；三类围栏分类进入标签表（未命中仍优雅回退裸分类串） |
+| `frontend/src/pages/usage-analytics-charts.tsx` | 失败分类图表共用标签表同步补三类围栏分类 |
+| `frontend/src/i18n/resources/{zh-CN,en-US}/usage-analytics.ts` | `errors.sourceLabels.fence` + `failureCategories.renderFenceDrop{Idle,Closed,ActiveMismatch}`（`shape.ts` 在 `tsc -b` 编译期强制双语键对齐） |
+| `frontend/src/pages/usage-analytics/observability-panels.test-fixtures.ts` / `.test.tsx` | `fencePattern` fixture + 面板用例：来源渲染、本地化分类标签、非裸串回退断言 |
 | 测试 | `render_fence_ingest_test.go`：三类计数落表、重复投递幂等累加、source 过滤不串源、会话过滤生效；`chat_submit_run_epoch_wedge_test.go` 新增 `TestBridgePublishesRenderFenceDropsAtEndRun`：一轮上报增量、无增量轮不重复上报 |
 
 设计取舍：同步发布（不在 EndRun 起 goroutine）——与 `chat_turn_events` /
@@ -353,3 +357,11 @@ run 零开销）；未走 SSE/web 通道，因此不触及 §8.5 的背压约束
 | `go test ./internal/usageanalytics/ -count=1`（全包） | PASS |
 | `go test ./internal/api/runtimeapi/ -run 'ErrorPatterns\|Analytics'` | PASS |
 | 新 CLI 用例 + 桥全族 + wedge/refresh/claim/evict/pre-run 回归 `-count=1` | PASS |
+| `npx tsc -b`（含 en-US `satisfies` zh-CN 键形状） | PASS |
+| `node --experimental-strip-types scripts/verify-frontend-i18n.ts` | PASS（scanned=937, violations=0） |
+| `npx vitest run`（354 文件 / 2955 用例） | PASS |
+| `npx eslint`（改动 6 文件） | PASS |
+
+环境注记：`npm run lint:i18n` 在本机 Node v22.15 下直接执行 `.ts` 脚本会报
+`ERR_UNKNOWN_FILE_EXTENSION`（该版本未默认开启 type stripping），是环境问题而非
+脚本缺陷；同一脚本以 `node --experimental-strip-types` 运行即通过。

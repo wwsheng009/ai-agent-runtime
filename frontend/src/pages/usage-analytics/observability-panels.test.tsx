@@ -35,6 +35,7 @@ import {
   emptyRouteStatsResponse,
   emptySubagentResponse,
   emptyToolResponse,
+  fencePattern,
   routeEventsResponse,
   routeStatsResponse,
   subagentResponse,
@@ -244,6 +245,30 @@ describe("usage analytics observability panels", () => {
       drilldown?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(onDrilldown).toHaveBeenCalledWith(timeoutPattern);
+  });
+
+  // P1-1b：渲染围栏来源（source=fence）必须出现在失败模式面板，分类走 i18n
+  // 标签而不是裸字符串 render_fence_drop_closed。
+  it("失败模式面板：渲染围栏来源与本地化分类标签", async () => {
+    listAnalyticsErrorsMock.mockResolvedValue({
+      schema_version: "usage.analytics.v2",
+      generated_at: "2026-09-27T00:00:00Z",
+      patterns: [fencePattern],
+    });
+    act(() => {
+      root.render(
+        <ErrorPatternsPanel
+          sessionId="session-1"
+          onDrilldown={() => {}}
+        />,
+      );
+    });
+    await flush();
+
+    expect(container.textContent).toContain("RENDER_FENCE_DROPPED_CLOSED");
+    expect(container.textContent).toContain("围栏丢弃（run 已结束）");
+    // 未命中标签表时会渲染成 "RENDER_FENCE_DROPPED_CLOSED · render_fence_drop_closed"。
+    expect(container.textContent).not.toContain("· render_fence_drop_closed");
   });
 
   it("路由面板：空数组渲染「暂无路由事件」并传会话过滤", async () => {
