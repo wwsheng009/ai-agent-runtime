@@ -2,7 +2,9 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -428,39 +430,193 @@ func TestSessionActorPlanModeToolsRepublishLiveRunMeta(t *testing.T) {
 	assert.Equal(t, runtimepolicy.ModeAcceptEdits, engine.Mode)
 }
 
-// Model-authored approve/quit is a review request, not a verdict: the session
-// stays in plan mode until the host decides (S0 of
-// docs/analysis/commandcode-plan-mode-design-borrowing-20260925.md §4.1).
-func TestSessionActorModelApproveBecomesPendingExitRequest(t *testing.T) {
+// Model-authored approve/quit is a request, not a verdict: interactive hosts
+// raise the ordinary approval card (the channel the enter_plan_mode gate uses)
+// and the user's answer decides. A denial keeps plan mode active and hands the
+// user's feedback back to the model; an allow exits as the user's own verdict
+// (S0 of docs/analysis/commandcode-plan-mode-design-borrowing-20260925.md §4.1).
+func TestSessionActorModelApproveRaisesApprovalCard(t *testing.T) {
 	actor, _, engine := newPlanModeTestActor(t, "plan-model-approve-1", runtimepolicy.ModeDefault)
 	ctx := context.Background()
 
 	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "plan.md"})
 	require.NoError(t, err)
 
-	result, err := actor.ExitPlanMode(ctx, "", toolbroker.ExitPlanModeArgs{
-		Decision: "approve",
-		Notes:    "plan is ready",
-		Source:   "model",
+	// The user declines with feedback: plan mode stays active and the feedback
+	// reaches the model through the tool error.
+	outcome, pending := startModelPlanExit(t, actor, "approve", "plan is ready")
+	require.Equal(t, toolbroker.ToolExitPlanMode, pending.ToolName)
+	require.Equal(t, planmode.ExitApprovalReasonApprove, pending.Reason)
+	// The payload is the host contract for richer card copy: the TUI renders
+	// plan_path/decision/notes as readable lines (see humanApprovalReason).
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(pending.ArgsJSON, &payload))
+	assert.Equal(t, "approve", payload["decision"])
+	assert.Equal(t, "plan.md", payload["plan_path"])
+	assert.Equal(t, "plan is ready", payload["notes"])
+	resolvePlanExitApproval(t, actor, pending.ID, runtimepolicy.ApprovalResponse{
+		Allowed:  false,
+		Feedback: "tighten the rollback section",
 	})
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.True(t, result.Active, "model approve must not exit plan mode")
-	assert.Equal(t, "active", result.Status)
-	assert.True(t, result.PendingExitRequest)
-	assert.Equal(t, "model", result.ExitSource)
-	assert.Equal(t, "", result.ExitDecision)
-	assert.Equal(t, string(runtimepolicy.ModePlan), result.PermissionMode)
-	assert.Equal(t, runtimepolicy.ModePlan, engine.Mode, "engine must stay in plan mode")
+	denied := <-outcome
+	require.Error(t, denied.err)
+	require.Contains(t, denied.err.Error(), "user feedback: tighten the rollback section")
 
 	session, err := actor.sessionStore.Load(ctx, actor.id)
 	require.NoError(t, err)
 	state := planmode.Load(session)
-	assert.True(t, planmode.IsActive(state))
-	assert.True(t, state.PendingExitRequest)
-	assert.Equal(t, planmode.ExitSourceModel, state.LastExitSource)
+	assert.True(t, planmode.IsActive(state), "a denial must leave plan mode active")
+	assert.False(t, state.PendingExitRequest, "the card answer retires the request")
 	assert.Equal(t, planmode.ExitNone, state.ExitDecision)
-	assert.Equal(t, "plan is ready", state.Notes)
+	assert.Equal(t, runtimepolicy.ModePlan, engine.Mode)
+
+	// The user allows: the exit is applied as their verdict.
+	outcome, pending = startModelPlanExit(t, actor, "approve", "plan is ready")
+	resolvePlanExitApproval(t, actor, pending.ID, runtimepolicy.ApprovalResponse{Allowed: true})
+	accepted := <-outcome
+	require.NoError(t, accepted.err)
+	require.NotNil(t, accepted.result)
+	assert.False(t, accepted.result.Active)
+	assert.Equal(t, "approve", accepted.result.ExitDecision)
+	assert.Equal(t, string(planmode.ExitSourceUser), accepted.result.ExitSource)
+	assert.Equal(t, string(runtimepolicy.ModeDefault), accepted.result.PermissionMode)
+	assert.Equal(t, runtimepolicy.ModeDefault, engine.Mode)
+
+	session, err = actor.sessionStore.Load(ctx, actor.id)
+	require.NoError(t, err)
+	state = planmode.Load(session)
+	assert.Equal(t, planmode.StatusExited, state.Status)
+	assert.Equal(t, planmode.ExitApprove, state.ExitDecision)
+	assert.Equal(t, planmode.ExitSourceUser, state.LastExitSource)
+	assert.False(t, state.PendingExitRequest)
+}
+
+// quit carries its own reason key so hosts can render "close plan mode without
+// executing" copy for the confirmation.
+func TestSessionActorModelQuitRaisesApprovalCard(t *testing.T) {
+	actor, _, engine := newPlanModeTestActor(t, "plan-model-quit-1", runtimepolicy.ModeAcceptEdits)
+	ctx := context.Background()
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "plan.md"})
+	require.NoError(t, err)
+
+	outcome, pending := startModelPlanExit(t, actor, "quit", "")
+	require.Equal(t, planmode.ExitApprovalReasonQuit, pending.Reason)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal(pending.ArgsJSON, &payload))
+	assert.Equal(t, "quit", payload["decision"])
+	assert.Equal(t, "plan.md", payload["plan_path"])
+	_, hasNotes := payload["notes"]
+	assert.False(t, hasNotes, "empty notes must not add a notes field")
+	resolvePlanExitApproval(t, actor, pending.ID, runtimepolicy.ApprovalResponse{Allowed: true})
+
+	accepted := <-outcome
+	require.NoError(t, accepted.err)
+	require.NotNil(t, accepted.result)
+	assert.False(t, accepted.result.Active)
+	assert.Equal(t, "quit", accepted.result.ExitDecision)
+	assert.Equal(t, string(runtimepolicy.ModeAcceptEdits), accepted.result.PermissionMode, "quit restores the previous mode")
+	assert.Equal(t, runtimepolicy.ModeAcceptEdits, engine.Mode)
+}
+
+// A session entered from bypass_permissions (--yolo / Full Access) has already
+// answered the exit confirmation with its launch mode: the policy engine
+// resolves every non-HardAsk ask under bypass to allow, so the model-authored
+// approve must exit directly — no approval card — and the session must stay on
+// the Full Access surface it was launched with.
+func TestSessionActorYoloExitSkipsApprovalCardAndKeepsBypass(t *testing.T) {
+	isolateChatPermissionsHome(t)
+	actor, _, engine := newPlanModeTestActor(t, "plan-yolo-exit-1", runtimepolicy.ModeBypassPermissions)
+	ctx := context.Background()
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "plan.md"})
+	require.NoError(t, err)
+	require.Equal(t, runtimepolicy.ModePlan, engine.Mode)
+
+	// A blocking approval would keep ExitPlanMode parked until this deadline; a
+	// yolo direct exit returns immediately.
+	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result, err := actor.ExitPlanMode(bounded, "", toolbroker.ExitPlanModeArgs{
+		Decision: "approve",
+		Source:   "model",
+	})
+	require.NoError(t, err, "a bypass session must exit without raising an approval card")
+	require.NotNil(t, result)
+	assert.False(t, result.Active)
+	assert.Equal(t, "approve", result.ExitDecision)
+	assert.Equal(t, string(planmode.ExitSourceModel), result.ExitSource, "no user card answered this verdict")
+	assert.Equal(t, string(runtimepolicy.ModeBypassPermissions), result.PermissionMode)
+	assert.Equal(t, runtimepolicy.ModeBypassPermissions, engine.Mode)
+	assert.Nil(t, actor.PendingApproval(), "yolo must not park a pending approval")
+
+	session, err := actor.sessionStore.Load(ctx, actor.id)
+	require.NoError(t, err)
+	state := planmode.Load(session)
+	assert.Equal(t, planmode.StatusExited, state.Status)
+	assert.Equal(t, planmode.ExitApprove, state.ExitDecision)
+	assert.Equal(t, planmode.ExitSourceModel, state.LastExitSource)
+}
+
+// disable_bypass workspaces keep the card even for a session entered from
+// bypass (§4.9 F2): bypass is not in effect there, so the user still decides —
+// and the confirmed approve keeps F2's accept_edits downgrade.
+func TestSessionActorYoloExitKeepsApprovalCardWhenBypassDisabled(t *testing.T) {
+	isolateChatPermissionsHome(t)
+	actor, session, _ := newPlanModeTestActor(t, "plan-yolo-exit-disabled-1", runtimepolicy.ModeBypassPermissions)
+	ctx := context.Background()
+
+	workspace := t.TempDir()
+	writeChatWorkspacePermissions(t, workspace, "version: 1\ndisable_bypass: true\n")
+	session.SetContext(planModeWorkspacePathKey, workspace)
+	require.NoError(t, actor.sessionStore.Save(ctx, session))
+
+	_, err := actor.EnterPlanMode(ctx, "", toolbroker.EnterPlanModeArgs{PlanPath: "plan.md"})
+	require.NoError(t, err)
+
+	outcome, pending := startModelPlanExit(t, actor, "approve", "plan is ready")
+	require.Equal(t, planmode.ExitApprovalReasonApprove, pending.Reason)
+	resolvePlanExitApproval(t, actor, pending.ID, runtimepolicy.ApprovalResponse{Allowed: true})
+
+	accepted := <-outcome
+	require.NoError(t, accepted.err)
+	require.NotNil(t, accepted.result)
+	assert.Equal(t, string(planmode.ExitSourceUser), accepted.result.ExitSource)
+	assert.Equal(t, string(runtimepolicy.ModeAcceptEdits), accepted.result.PermissionMode)
+}
+
+type planExitOutcome struct {
+	result *toolbroker.PlanModeResult
+	err    error
+}
+
+// startModelPlanExit drives one model-authored exit request in the background
+// (ExitPlanMode blocks on the approval card) and returns the outcome channel
+// plus the pending card the host would render.
+func startModelPlanExit(t *testing.T, actor *SessionActor, decision, notes string) (chan planExitOutcome, *ApprovalRequest) {
+	t.Helper()
+	out := make(chan planExitOutcome, 1)
+	go func() {
+		result, err := actor.ExitPlanMode(context.Background(), "", toolbroker.ExitPlanModeArgs{
+			Decision: decision,
+			Notes:    notes,
+			Source:   "model",
+		})
+		out <- planExitOutcome{result: result, err: err}
+	}()
+	var pending *ApprovalRequest
+	require.Eventually(t, func() bool {
+		pending = actor.PendingApproval()
+		// The waiter is registered after the pending payload: waiting for both
+		// removes the resolve-before-wait race.
+		return pending != nil && actor.hasApprovalWaiter(pending.ID)
+	}, 5*time.Second, 10*time.Millisecond, "model plan exit did not raise an approval card")
+	return out, pending
+}
+
+func resolvePlanExitApproval(t *testing.T, actor *SessionActor, id string, resp runtimepolicy.ApprovalResponse) {
+	t.Helper()
+	require.True(t, actor.resolveApproval(id, resp), "approval %s must be resolvable", id)
 }
 
 // Headless/autonomous hosts opt back into direct model verdicts.

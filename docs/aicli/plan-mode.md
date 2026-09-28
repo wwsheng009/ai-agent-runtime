@@ -53,7 +53,7 @@
 - `/plan request_changes` 与 `/plan approve`/`quit` 的差别是「留在 plan 继续修订」还是「离开 plan」。带 notes 的 `request_changes` 才会把反馈写入待交付队列并让评审轮次 +1；交互式下还会紧接着起一轮修订（§4 第 4 条）。
 - 命令执行后会尽量同步会话记录；同步失败不影响 plan 状态本身，只是提示告警。
 - 在非 plan 状态下执行 `/plan exit ...`：只要当前 permission-mode 是 `plan` 仍可退出（会按「previous=default」补一个临时状态）；否则提示先执行 `/plan enter`。
-- `/plan status` 在「plan active + 计划文件已有内容 + 模型尚未请求裁决」时会额外提示「计划已就绪待评审」；模型已请求裁决时改为提示「待裁决」。
+- `/plan status` 在「plan active + 计划文件已有内容 + 模型尚未请求裁决」时会额外提示「计划已就绪待评审」；会话 durable 状态里存在待裁决标记（`pending_exit_request=true`，历史会话/外部写入）时改为提示「待裁决」。
 
 ### 2.2 `/plans [id]`：浏览与恢复已归档计划
 
@@ -120,7 +120,11 @@
 
 **关键语义：模型的 `approve` / `quit` 只是「请求裁决」，不是决定。**
 
-- 交互式宿主（默认，含 chat / TUI / Web）下，模型调用 `exit_plan_mode(decision=approve|quit)` 只会把状态记为**待裁决请求**（`pending_exit_request=true`，来源标注 `model`），会话**保持 plan 模式与写白名单**，发布 `plan_mode_changed`，等待用户/宿主裁决。工具返回与工具描述都按「已提交评审、等待用户裁决」表达。
+- 交互式宿主（默认，含 chat / TUI / Web）下，模型调用 `exit_plan_mode(decision=approve|quit)` 会像 `enter_plan_mode` 门控一样**当场弹出普通审批**（与权限引擎同一通道：`pending_approval`、`approval_requested` 事件、拒绝回执；reason 为 `plan_mode:model_auto_exit_approve` / `plan_mode:model_auto_exit_quit`，参数带 `decision` / `plan_path` / `notes`）：
+  - **允许** → 按用户裁决落地：`approve` 退出 plan（模式恢复规则见 §1），`quit` 退出且不执行计划；`last_exit_source` 标注 `user`；审批里附带的反馈在模型未填 `notes` 时作为本次裁决的 `notes` 记录。
+  - **拒绝** → 会话保持 plan 模式与写白名单，工具返回拒绝错误，并把你在审批里填写的拒绝意见回给模型（供其修订计划，而不是重试同一请求）。
+  该工具调用在等待审批期间阻塞；无审批通道的宿主（无 AskHandler）默认直接拒绝，需要自治时设置 `AICLI_PLAN_MODE_MODEL_AUTONOMY=1`（§3.4）。
+- 历史兼容：`pending_exit_request=true` 仍是 durable 状态字段（旧会话 / 外部写入可能落下）。带该标记的会话在 CLI/Web 按旧口径显示「待裁决」，可用 `/plan approve|quit|request_changes` 清除；新的模型请求流程不再产生该标记。
 - `decision=request_changes` 不受影响：模型可以继续留在 plan 模式做自我修订；模型自己填的 notes **不会**被当成用户评审反馈回灌给模型。
 - 用户裁决路径（Web 面板、`/plan approve|request_changes|quit`、`POST /api/runtime/sessions/{id}/plan`）写 `ExitDecision` 并把来源标注为 `user`。
 - 用户 `approve` 后退出 plan；`request_changes` 保持 active 并记录待交付 notes；`quit` 退出且不执行计划。批准时的模式恢复规则见 §1。
@@ -144,7 +148,7 @@
 ### 3.4 无头宿主开关：`AICLI_PLAN_MODE_MODEL_AUTONOMY`
 
 - 取值 `1 | true | yes | on`（大小写不敏感）= 恢复旧行为：模型自带 verdict 直接生效、模型可自主进入 plan 模式，不再等待裁决/确认。
-- 未设置或其他值 = 交互语义（默认收口）：`approve`/`quit` 等待用户裁决，`enter_plan_mode` 需要用户确认。
+- 未设置或其他值 = 交互语义（默认收口）：`approve`/`quit` 弹审批卡等待用户裁决（无审批通道的宿主直接拒绝），`enter_plan_mode` 需要用户确认。
 - 这是**进程级环境变量**：在交互宿主进程里同样生效，请只在确实需要自治的宿主（如 `aicli exec` / ACP）中设置。`request_changes` 的语义不变。
 - 无头入口仍是 `aicli exec --permission-mode plan "复杂任务"`（用户显式进入，不经确认门控）。
 
@@ -152,8 +156,8 @@
 
 ## 4. 评审闭环：模型请求 → 用户裁决 → notes 回流
 
-1. **模型提交**：模型在 plan 模式内写好计划后调用 `exit_plan_mode(decision=approve, notes=...)` → 记 `pending_exit_request=true`、`last_exit_source=model`，模式与写白名单保持不变。
-2. **用户裁决**（`/plan approve`、`/plan quit`、`/plan request_changes <notes>`、Web 面板或 HTTP 接口）：
+1. **模型提交**：模型在 plan 模式内写好计划后调用 `exit_plan_mode(decision=approve, notes=...)` → 交互式宿主当场弹出审批卡（reason `plan_mode:model_auto_exit_approve`，审批前模式与写白名单保持不变）；允许即按裁决落地并把来源标为 `user`，拒绝则模式不变、意见回给模型。
+2. **裁决落地**（审批卡允许、`/plan approve`、`/plan quit`、`/plan request_changes <notes>`、Web 面板或 HTTP 接口）：
    - `approve`：退出 plan；恢复进入前模式，**但进入前是 `bypass_permissions` 时降级为 `accept_edits`**；
    - `request_changes`：保持 plan active；带 notes 时写入 `pending_review_notes`，评审轮次 +1；
    - `quit`：退出 plan 且不执行计划，归档状态 `not_implemented`。
@@ -275,7 +279,7 @@ plan 模式与 checkpoint 是两条互补但独立的链路：
 
 **Q1：无头模式（`aicli exec`）下计划卡在「等待裁决」怎么办？**
 
-默认行为：模型的 `approve`/`quit` 只是请求，需要宿主裁决；无头场景没有交互用户，因此需要显式放开模型自治——设置环境变量 `AICLI_PLAN_MODE_MODEL_AUTONOMY=1`（`true|yes|on` 同义）。注意这是进程级开关，交互宿主进程也会受影响，请按宿主类型分别设置。
+默认行为：模型的 `approve`/`quit` 只是请求，需要宿主**当场**裁决——交互宿主弹审批卡，无审批通道的宿主则**直接拒绝**这次调用（工具返回 `plan exit denied ... plan mode stays active`，计划保持 active）。因此无头场景需要显式放开模型自治——设置环境变量 `AICLI_PLAN_MODE_MODEL_AUTONOMY=1`（`true|yes|on` 同义）。注意这是进程级开关，交互宿主进程也会受影响，请按宿主类型分别设置。历史会话里若已落下 `pending_exit_request=true`，仍可用 `/plan approve|quit|request_changes` 清除。
 
 **Q2：用 `--allow-tool` 给了很窄的名单，为什么能进 plan 模式却写不了计划文件？**
 

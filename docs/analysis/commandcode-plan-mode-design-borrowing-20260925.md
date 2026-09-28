@@ -292,6 +292,9 @@
 | 用户 `request_changes` 带 notes | notes 只写入 `state.Notes`，模型侧不可见 | notes 进入 `pending_review_notes`，**下一次模型回合**作为一次性 system reminder 注入并清除，同时发 `plan_mode_changed` |
 | 计划工件 | 仅工作区 `plan.md`（无索引/版本/状态） | 额外归档到 `$HOME/.aicli/plans`（`AICLI_PLANS_DIR` 可覆盖）：`index.json` + `versions/<project>/<plan>-v<N>.md`，状态 `pending/approved/not_implemented` |
 | 读取归档 | 无 | `GET /api/runtime/plans`、`GET /api/runtime/plans/{id}`（含最新快照正文） |
+> **2026-09-28 增量**：模型 `approve`/`quit` 不再落「待裁决请求」，改为在交互式宿主弹**普通审批卡**（与 `enter_plan_mode` 门控同通道；reason `plan_mode:model_auto_exit_approve|quit`，载荷带 `decision`/`plan_path`/`notes`）：允许=按用户裁决退出并标 `last_exit_source=user`，拒绝=保持 plan 并把审批反馈回给模型；无审批通道的宿主直接拒绝（`AICLI_PLAN_MODE_MODEL_AUTONOMY=1` 仍可放开）。`pending_exit_request` 保留为兼容字段，历史会话仍可用 `/plan approve|quit|request_changes` 清除。
+
+> **2026-09-28 追加（yolo 直通）**：若会话是从 `bypass_permissions`（`--yolo` / Full Access）进入 plan、且工作区未声明 `disable_bypass`，模型 `approve`/`quit` **不再弹卡**——旁路模式本就让策略引擎把非 HardAsk 的 ask 一律放行（`policy/engine.go` `resolveAsk`），退出闸门直接放行；approve 退出**保持 bypass**（跳过 F2 的 accept_edits 降级，否则 `--yolo` 会话离开计划后反而开始弹审批），quit 仍走既有还原路径。`disable_bypass` 工作区维持弹卡（§4.9 F2 不变）。实现：`chat/plan_mode_tools.go`（`planExitPreApprovedByBypass`、`yoloDirectExit`）；用例：`TestSessionActorYoloExitSkipsApprovalCardAndKeepsBypass` / `TestSessionActorYoloExitKeepsApprovalCardWhenBypassDisabled`。
 
 ### 8.2 接线点
 

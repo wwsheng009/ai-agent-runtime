@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -157,25 +158,41 @@ func (a *SessionActor) ExitPlanMode(ctx context.Context, sessionID string, args 
 	}
 	source := planmode.NormalizeExitSource(args.Source)
 
+	// A session entered from bypass_permissions (--yolo / Full Access) already
+	// carries the user's standing "do not ask" verdict: the policy engine
+	// resolves every non-HardAsk ask under bypass to allow (see Engine.resolveAsk),
+	// so the exit gate applies the same rule instead of raising a card the user
+	// asked never to see. disable_bypass workspaces keep the card (§4.9 F2),
+	// because bypass is not in effect there.
+	yoloDirectExit := source == planmode.ExitSourceModel && planExitPreApprovedByBypass(session, current)
+
 	// Model-authored verdicts are requests, not decisions: approve/quit must be
-	// confirmed by the host (Web panel / `/plan approve` / TUI) unless the host
-	// explicitly runs with model autonomy (headless exec/ACP).
+	// confirmed by the user unless the host explicitly runs with model autonomy
+	// (headless exec/ACP) or the standing bypass verdict above already answered
+	// it. Interactive hosts (TUI / web panel) confirm on the ordinary approval
+	// channel — the same one the enter_plan_mode gate uses — so the user answers
+	// a native approval card instead of having to discover a pending marker and
+	// type `/plan approve` by hand.
 	if source == planmode.ExitSourceModel && !planmode.ModelMayDecideExit() {
 		switch decision {
 		case planmode.ExitApprove, planmode.ExitQuit:
-			pending := planmode.RequestExitFrom(current, source, args.Notes)
-			planmode.Save(session, pending)
-			a.applySessionPermissionMode(session, runtimepolicy.ModePlan)
-			if err := a.persistSession(ctx, session); err != nil {
-				return nil, err
+			if !yoloDirectExit {
+				resp, err := a.confirmModelPlanExit(ctx, current, decision, args.Notes)
+				if err != nil {
+					return nil, err
+				}
+				if !resp.Allowed {
+					// The user declined: plan mode stays active and their verdict
+					// (plus feedback) travels back to the model as a denial.
+					return nil, planExitDeniedError(resp)
+				}
+				// The user authored this verdict; record it as theirs so durable
+				// provenance matches the `/plan approve` path.
+				source = planmode.ExitSourceUser
+				if feedback := strings.TrimSpace(resp.Feedback); feedback != "" && strings.TrimSpace(args.Notes) == "" {
+					args.Notes = feedback
+				}
 			}
-			if engine := a.agentPermissionEngine(); engine != nil {
-				a.applyPlanModeStateToEngine(engine, pending)
-			}
-			a.syncLivePermissionMode(ctx, string(runtimepolicy.ModePlan))
-			a.publishPlanModeChanged(pending, string(planmode.ExitSourceModel)+":request_exit")
-			a.archivePlanModeArtifact(ctx, session, pending, "request_exit", source)
-			return planModeResultFromState(pending, string(runtimepolicy.ModePlan)), nil
 		}
 	}
 
@@ -187,6 +204,14 @@ func (a *SessionActor) ExitPlanMode(ctx context.Context, sessionID string, args 
 
 	resume := planmode.ResumeModeAfterExit(exited)
 	mode := parsePlanPermissionMode(resume)
+	// A yolo direct exit is not "the user confirmed this exit": the standing
+	// bypass verdict already answered it, so the session must return to the Full
+	// Access surface it was launched with instead of F2's approve→accept_edits
+	// downgrade. Downgrading here would make a --yolo session start raising
+	// approval cards again right after it leaves plan mode.
+	if yoloDirectExit && exited.ExitDecision == planmode.ExitApprove {
+		mode = runtimepolicy.ModeBypassPermissions
+	}
 	// §4.9 F2：退出 plan 时不要把 disable_bypass 明令禁止的 bypass 还原回来。
 	// approve 路径已由 planmode.ResumeModeAfterExit 映射为 accept_edits，这里
 	// 兜住 quit（以及未来新增的还原路径）：它不经切换入口（CLI 提示 / runtime
@@ -237,6 +262,68 @@ func (a *SessionActor) ExitPlanMode(ctx context.Context, sessionID string, args 
 	a.publishPlanModeChanged(exited, "exit")
 	a.archivePlanModeArtifact(ctx, session, exited, string(exited.ExitDecision), source)
 	return planModeResultFromState(exited, string(mode)), nil
+}
+
+// planExitPreApprovedByBypass reports whether the session's standing permission
+// surface already answers the model plan-exit confirmation: the plan session was
+// entered from bypass_permissions (--yolo / Full Access) and the workspace does
+// not disable bypass (§4.9 F2). Under bypass the policy engine resolves every
+// non-HardAsk ask to allow, so raising the exit card would ask a question the
+// user already answered with their launch mode.
+func planExitPreApprovedByBypass(session *Session, state planmode.State) bool {
+	if session == nil {
+		return false
+	}
+	if parsePlanPermissionMode(strings.TrimSpace(state.PreviousMode)) != runtimepolicy.ModeBypassPermissions {
+		return false
+	}
+	return !runtimepolicy.BypassDisabledForWorkspace(planModeWorkspacePath(session))
+}
+
+// confirmModelPlanExit raises a model-authored approve/quit on the ordinary
+// interactive approval channel and waits for the user's answer. It calls the
+// same handler (SessionActor.RequestApproval) the permission engine uses for
+// the enter_plan_mode gate and every other ask, so interactive hosts render the
+// confirmation with the UI they already have: pending_approval state, an
+// approval_requested event, and the usual resolution path.
+//
+// The reason keys are the host contract (see planmode.ExitApprovalReason*); the
+// tool args additionally carry the decision, plan path and notes for richer copy.
+func (a *SessionActor) confirmModelPlanExit(ctx context.Context, state planmode.State, decision planmode.ExitDecision, notes string) (runtimepolicy.ApprovalResponse, error) {
+	if a == nil {
+		return runtimepolicy.ApprovalResponse{}, fmt.Errorf("session actor is not configured")
+	}
+	payload := map[string]interface{}{
+		"decision":  string(decision),
+		"plan_path": state.PlanPath,
+	}
+	if text := strings.TrimSpace(notes); text != "" {
+		payload["notes"] = text
+	}
+	var argsJSON json.RawMessage
+	if encoded, err := json.Marshal(payload); err == nil {
+		argsJSON = encoded
+	}
+	return a.RequestApproval(ctx, runtimepolicy.ApprovalRequest{
+		SessionID: a.id,
+		ToolName:  toolbroker.ToolExitPlanMode,
+		ArgsJSON:  argsJSON,
+		Reason:    planmode.ExitApprovalReason(decision),
+	})
+}
+
+// planExitDeniedError mirrors the engine's denial shape (§4.8): the user's
+// feedback rides along with the denial so the model can revise the plan instead
+// of retrying an unchanged request.
+func planExitDeniedError(resp runtimepolicy.ApprovalResponse) error {
+	reason := strings.TrimSpace(resp.Reason)
+	if reason == "" {
+		reason = "approval_denied"
+	}
+	if feedback := strings.TrimSpace(resp.Feedback); feedback != "" {
+		reason += "; user feedback: " + feedback
+	}
+	return fmt.Errorf("plan exit denied by user (%s); plan mode stays active — revise the plan before asking again", reason)
 }
 
 // archivePlanModeArtifact persists the plan artifact index + review-round

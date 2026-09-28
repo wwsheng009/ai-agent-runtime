@@ -272,7 +272,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolExitPlanMode,
-				Description: "Submit the plan for review or exit plan mode. decision=approve asks the user to approve and start implementation (the user decides unless the host runs with model autonomy); request_changes stays in plan mode for your own revision pass; quit asks the user to close plan mode without executing. A model-authored approve/quit is recorded as a pending exit request, so summarize the plan and stop instead of assuming approval.",
+				Description: "Submit the plan for review or exit plan mode. decision=approve asks the user to approve and start implementation: interactive hosts raise the ordinary approval prompt (allow = exit plan mode and implement; deny = stay in plan mode and the user's feedback comes back to you), while hosts running with model autonomy apply it directly. request_changes stays in plan mode for your own revision pass; quit asks the user to close plan mode without executing. After a denial, revise the plan instead of retrying the same request.",
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
