@@ -2,7 +2,7 @@
 
 更新时间：2026-09-28
 
-状态：**实施中**（2026-09-28 起）。§2.1 的 P0-1 进度埋点、§2.2/§2.3 的到期评估与无人应答安全默认、§2.4/§2.5 的失败收尾保全与账本收敛均已落地（见各节实施记录，最小起步三项完成）；其余条目仍为建议稿，不代表已排期。本文只给出优化建议、优先级依据与代码/日志证据索引；文中标注"建议"的均为目标设计。
+状态：**实施中**（2026-09-28 起）。§2.1 的 P0-1 进度埋点、§2.2/§2.3 的到期评估与无人应答安全默认、§2.4/§2.5 的失败收尾保全（含被杀/取消路径的 checkpoint/flush 可见化与 worktree 产物保全）与账本收敛均已落地（见各节实施记录，最小起步三项完成）；其余条目仍为建议稿，不代表已排期。本文只给出优化建议、优先级依据与代码/日志证据索引；文中标注"建议"的均为目标设计。
 
 ## 0. 文档定位
 
@@ -106,7 +106,8 @@
 - ✅ 失败结果显式附"已完成 / 未完成 + 产物位置"（本节第 2 条）：`read_agent_result` 对失败/取消记录附 `wrap_up`（completed / unfinished / artifacts），机械派生自 durable record（`agent_result.go` 的 `applyFailedWrapUp`）——被杀的子会话无法事后被追问，摘要不靠新模型 turn。
 - ✅ "有产物失败（不重派）"判定收紧（本节第 3 条）：deliverable = summary / findings / artifacts，或**已落库变更**（`applied`，或带 artifact ref 的未落库变更）；`skipped`-only 失败保持可重派（`hasLandedChange`）。`do_not_retry` / `result_available` 语义不变。
 - ✅ 预算口径：`wrap_up` 与 changes/artifacts 重叠，超 `max_chars` 时按 changes → unfinished → completed → wrap-up artifacts 顺序脱落，清空即整段消失。
-- ⏳ 本节第 1 条（被杀 / 取消路径强制 checkpoint / flush、工作区未提交变更提示）未实现：属宿主侧会话收尾机制，`wrap_up` 已覆盖"记录存在"的失败；无 durable record 时 read 仍走 `no_result_recorded` 指引。留作后续条目。
+- ✅ 被杀 / 取消路径的 checkpoint / flush 可见化与产物保全（本节第 1 条，commit `73017d02`）：中断/停摆终态 payload 的 A5 救助快照（`partial_summary` / `partial_steps`）与隔离信息此前在 completion 消息 allowlist 处被丢弃，现贯通到 `read_agent_result`（`partial_product` + `workspace` 含救援提示）；CLI close / 强杀路径不再对脏 worktree 执行 `git worktree remove --force`——有未提交改动的 worktree 保留并记 `disposition=kept_uncommitted`，干净 worktree 照旧移除。
+- ⏳ 残余：API 宿主 close 路径未发现同类 worktree 销毁挂点（未改动）；无任何终态记录的会话 read 仍走 `no_result_recorded` 指引。
 
 ### 2.5 账本收敛与队列卫生（P2）
 
@@ -143,7 +144,7 @@
 | 2 | 到期评估 / 自动延长 + 无人应答安全默认 | §2.2 / §2.3 | `execution_supervisor.go`、`action_service.go`、wake scheduler |
 | 3 | 失败收尾保全 + 账本收敛 | §2.4 / §2.5 | 失败路径 + supervision store |
 
-> 状态（2026-09-28）：第 1 项 agent_run 埋点已落地（commits `21a3bcff`、`a0481e00`、`97ab0258`）；第 2 项到期评估 / 自动延长 + 无人应答安全默认已落地（commit `f5e68752`）；第 3 项失败收尾保全 + 账本收敛已落地（commit `30c56769`，见 §2.4/§2.5 实施记录；§2.4-1 checkpoint/flush 与 §2.5 滞留告警为后续条目）。**最小起步三项完成**。batch `TaskProgressInterval` 维持出厂 `0`，按 20260917 计划 §4 灰度流程显式开启验证。
+> 状态（2026-09-28）：第 1 项 agent_run 埋点已落地（commits `21a3bcff`、`a0481e00`、`97ab0258`）；第 2 项到期评估 / 自动延长 + 无人应答安全默认已落地（commit `f5e68752`）；第 3 项失败收尾保全 + 账本收敛已落地（commits `30c56769`、`73017d02`，见 §2.4/§2.5 实施记录；§2.5 滞留告警为后续条目）。**最小起步三项完成**。batch `TaskProgressInterval` 维持出厂 `0`，按 20260917 计划 §4 灰度流程显式开启验证。
 
 建议验收：
 
