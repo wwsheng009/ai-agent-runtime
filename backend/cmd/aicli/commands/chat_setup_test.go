@@ -1742,7 +1742,12 @@ func TestComposeLocalChatSystemPrompt_IncludesWorkspaceGuidance(t *testing.T) {
 		}
 	}
 	gotLower := strings.ToLower(got)
-	if strings.Contains(gotLower, "powershell") || strings.Contains(gotLower, "pwsh") {
+	// PowerShell 专项建议只在 Windows 分支渲染（internal/prompt/environment_context.go
+	// 的 `runtime.GOOS == "windows"` 门槛），而平台说明本身在任何 OS 下都会提到
+	// pwsh/PowerShell。迁移自 gateway（Windows 开发机）时这里隐含了 GOOS=windows
+	// 假设，2026-09-27 改为按 <os> 判定，Windows 覆盖不变。
+	if strings.Contains(gotLower, "<os>windows</os>") &&
+		(strings.Contains(gotLower, "powershell") || strings.Contains(gotLower, "pwsh")) {
 		if !strings.Contains(got, "Select-Object -First 200") {
 			t.Fatalf("expected PowerShell guidance to mention Select-Object -First 200, got %q", got)
 		}

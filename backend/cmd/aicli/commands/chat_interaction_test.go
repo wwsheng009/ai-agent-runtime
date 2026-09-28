@@ -1296,8 +1296,8 @@ func TestPrepareInteractiveRead_SuppressesNoticeForEchoedQueuedInput(t *testing.
 			lines: make(chan chatQueuedInput, 4),
 			errs:  make(chan error, 1),
 		},
-		queuedInputEchoed: true,
 	}
+	session.setQueuedInputEchoed(true)
 	session.InputQueue.lines <- chatQueuedInput{Text: "queued line\n", Source: "stdin"}
 
 	showPrompt, notice, err := prepareInteractiveRead(session)
@@ -1322,7 +1322,7 @@ func TestPrepareInteractiveRead_SuppressesNoticeForEchoedQueuedInput(t *testing.
 	if !showPrompt {
 		t.Fatal("expected prompt to resume after echoed queue drains")
 	}
-	if session.queuedInputEchoed {
+	if session.queuedInputEchoedValue() {
 		t.Fatal("expected echoed queue marker to reset after drain")
 	}
 	if notice != "" {
@@ -1876,13 +1876,22 @@ func TestBuildChatSurfaceStatusLine_DedupesProjectWhenSameAsDirectory(t *testing
 	defer func() { chatStatusGitBranchLookup = previousLookup }()
 	resetChatStatusGitBranchCacheForTest()
 
-	root := filepath.Clean(`E:\projects\ai\ai-agent-runtime`)
+	// 平台中立的去重夹具：项目根 == git 根（同一目录）时状态行不得重复展示项目名。
+	// 迁移自 gateway 时这里用的是 Windows 绝对路径（E:\...），在 Linux 上 filepath
+	// 不识别反斜杠、去重条件永不成立（2026-09-27 修正）。
+	root := filepath.Join(t.TempDir(), "ai-agent-runtime")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("os.MkdirAll: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatalf("os.Mkdir .git: %v", err)
+	}
 	session := &ChatSession{
 		Model:       "gpt-5.4-code",
 		ProfileRoot: root,
 		ProfileName: "ai-agent-runtime",
 	}
-	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 200)
+	status := buildChatSurfaceStatusLineForWidth(session, "Ready", 240)
 
 	dup := "ai-agent-runtime" + chatSurfaceStatusSeparator + "ai-agent-runtime"
 	if strings.Contains(status, dup) {
@@ -2153,10 +2162,8 @@ func TestBuildChatSurfaceStatusLine_OmitsMessageCountFromComposer(t *testing.T) 
 func TestBuildChatPromptNoticeLine_IncludesQueuedInputState(t *testing.T) {
 	queue := newChatInputQueue(nil)
 	queue.routeLine(chatQueuedInput{Text: "queued\n", Source: "stdin"})
-	session := &ChatSession{
-		InputQueue:       queue,
-		queuedInputDrain: true,
-	}
+	session := &ChatSession{InputQueue: queue}
+	session.setQueuedInputDrainActive(true)
 
 	notice := buildChatPromptNoticeLineForWidth(session, chatSurfaceStatus{kind: chatSurfaceStatusThinking}, 80)
 	if !strings.Contains(notice, "队列 1") || !strings.Contains(notice, "就绪后 /queue") {
@@ -2187,7 +2194,8 @@ func TestBuildChatPromptNoticeLine_QueueWidthMatrix(t *testing.T) {
 	queue := newChatInputQueue(nil)
 	queue.routeLine(chatQueuedInput{Text: strings.Repeat("很长的排队消息", 12) + "\n", Source: "stdin"})
 	queue.routeLine(chatQueuedInput{Text: "second queued message\n", Source: "stdin"})
-	session := &ChatSession{InputQueue: queue, queuedInputDrain: true}
+	session := &ChatSession{InputQueue: queue}
+	session.setQueuedInputDrainActive(true)
 
 	for _, width := range []int{40, 80, 120} {
 		t.Run(strconv.Itoa(width), func(t *testing.T) {
