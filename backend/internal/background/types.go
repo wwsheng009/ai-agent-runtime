@@ -27,10 +27,14 @@ const (
 	// every manager start and ran days later).
 	StatusInterrupted JobStatus = "interrupted"
 	// StatusExpired marks a queued job that exceeded its queue deadline
-	// (reserved for the queue-TTL work in the P1 phase).
+	// (P1 queue TTL: expired jobs are terminal and never dispatched).
 	StatusExpired JobStatus = "expired"
 	// StatusAbandoned marks a job the user explicitly gave up on.
 	StatusAbandoned JobStatus = "abandoned"
+	// StatusPaused marks a queued job the user put on hold. Paused is the one
+	// non-terminal status that is not progressing: it is neither dispatched nor
+	// expired until it is resumed (2026-09-28, P3).
+	StatusPaused JobStatus = "paused"
 )
 
 // StartupProbeType identifies the generic probe used to accept a started process.

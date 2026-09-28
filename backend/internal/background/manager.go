@@ -47,6 +47,10 @@ type Config struct {
 	// QueueTimeout bounds how long a job may stay pending before it becomes
 	// terminal "expired". Default 30m; a negative value disables expiry.
 	QueueTimeout time.Duration
+	// OrphanReaperInterval is how often terminal jobs are checked for leftover
+	// process-tree members and cleaned up. Default 30s; non-positive disables
+	// the reaper (2026-09-28, P2).
+	OrphanReaperInterval time.Duration
 	// RecoverPendingOnStart re-queues persisted pending jobs when a manager
 	// starts. It defaults to false: startup recovery marks pending jobs as
 	// interrupted instead of resurrecting work whose owning process is gone
@@ -75,6 +79,7 @@ func DefaultConfig() Config {
 		LeaseTTL:                60 * time.Second,
 		HeartbeatInterval:       10 * time.Second,
 		QueueTimeout:            30 * time.Minute,
+		OrphanReaperInterval:    30 * time.Second,
 		RecoverPendingOnStart:   false,
 		EventHandler:            nil,
 	}
@@ -146,6 +151,11 @@ type Manager struct {
 	instanceStartedAt  time.Time
 	instanceMu         sync.Mutex
 	instanceRegistered bool
+	// killWatch tracks terminal jobs whose process tree still needs
+	// verification/cleanup by the reaper (P2). It is in-memory on purpose:
+	// only the instance that spawned a tree can terminate it as a unit.
+	killWatchMu sync.Mutex
+	killWatch   map[string]*killWatchEntry
 }
 
 type managedJob struct {
@@ -162,6 +172,9 @@ type managedJob struct {
 	// watchdog uses it to reclaim slots that never transition to running.
 	scheduledAt time.Time
 	cancel      context.CancelFunc
+	// tree groups the job's process tree (Windows Job Object / Unix pgid) so it
+	// can be killed as one unit (2026-09-28, P2).
+	tree *processTree
 }
 
 // NewManager creates a new background manager.
@@ -511,6 +524,7 @@ func (m *Manager) cancelJobWithSource(ctx context.Context, jobID, cancelSource s
 	managed.mu.Lock()
 	cancel := managed.cancel
 	pid, hasPID := detachedPID(managed.info.Metadata)
+	identity, _ := stringMetadataValue(managed.info.Metadata, backgroundMetaProcessIdentity)
 	if managed.info.Metadata == nil {
 		managed.info.Metadata = map[string]interface{}{}
 	}
@@ -524,8 +538,12 @@ func (m *Manager) cancelJobWithSource(ctx context.Context, jobID, cancelSource s
 	// Every completion path checks isTerminalStatus, so the terminal write
 	// wins regardless of which goroutine gets there first.
 	m.markCancelled(ctx, managed, "cancelled")
+	// Kill the process tree as one unit, then verify it is actually gone
+	// (2026-09-28, P2). The tree handle may be absent when this instance only
+	// adopted the job; the pid kill and reaper take over in that case.
+	m.releaseJobTree(managed)
 	if hasPID {
-		_ = terminateJobProcess(pid)
+		m.killAndVerifyJobProcess(ctx, managed.info.ID, pid, identity)
 	}
 	if cancel != nil {
 		cancel()
@@ -581,12 +599,8 @@ func (m *Manager) cancelStoredJob(ctx context.Context, jobID, cancelSource strin
 			"cancel_source": cancelSource,
 		})
 		if pid, ok := detachedPID(stored.Metadata); ok {
-			if killErr := terminateJobProcess(pid); killErr != nil {
-				m.appendJobEvent(ctx, jobID, "kill_failed", map[string]interface{}{
-					"pid":   pid,
-					"error": killErr.Error(),
-				})
-			}
+			identity, _ := stringMetadataValue(stored.Metadata, backgroundMetaProcessIdentity)
+			m.killAndVerifyJobProcess(ctx, jobID, pid, identity)
 		}
 		return stored, nil
 	}
@@ -595,6 +609,310 @@ func (m *Manager) cancelStoredJob(ctx context.Context, jobID, cancelSource strin
 		return current, fmt.Errorf("cancel raced with a concurrent update: %s", current.Status)
 	}
 	return nil, jobNotFoundError(jobID)
+}
+
+// errJobStateUnchanged lets a control transition report "already in the target
+// state" without writing a new version or recording a duplicate event
+// (2026-09-28, P3).
+var errJobStateUnchanged = errors.New("job state unchanged")
+
+func clearRecoveryPlanMetadata(metadata map[string]interface{}) {
+	for _, key := range []string{backgroundMetaRecoveryAttempt, backgroundMetaRecoveryMax, backgroundMetaNextRecoveryAt, "recovery_reason"} {
+		delete(metadata, key)
+	}
+}
+
+// updateStoredJobState runs a CAS loop for a non-terminal control transition
+// (pause / resume / abandon) and adopts the persisted outcome into the local
+// copy when this instance owns the job. Cross-instance callers mutate the
+// shared row; the owning instance converges through refreshFromStore and
+// reconcilePausedJobs (2026-09-28, P3).
+func (m *Manager) updateStoredJobState(ctx context.Context, jobID string, mutate func(stored *Job) error, eventType string, eventPayload func(stored Job) map[string]interface{}) (*Job, error) {
+	if m == nil {
+		return nil, jobNotFoundError(jobID)
+	}
+	jobID = strings.TrimSpace(jobID)
+	if m.store == nil {
+		managed := m.getJob(jobID)
+		if managed == nil {
+			return nil, jobNotFoundError(jobID)
+		}
+		managed.mu.Lock()
+		snapshot := managed.info
+		managed.mu.Unlock()
+		if err := mutate(&snapshot); err != nil {
+			if errors.Is(err, errJobStateUnchanged) {
+				return &snapshot, nil
+			}
+			return &snapshot, err
+		}
+		managed.mu.Lock()
+		snapshot.StateVersion = managed.info.StateVersion + 1
+		managed.info = snapshot
+		managed.mu.Unlock()
+		if eventType != "" {
+			m.appendJobEvent(ctx, jobID, eventType, controlEventPayload(snapshot, eventPayload))
+		}
+		m.notifyDispatcher()
+		return &snapshot, nil
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		stored, err := m.store.GetJob(ctx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if stored == nil {
+			return nil, jobNotFoundError(jobID)
+		}
+		if err := mutate(stored); err != nil {
+			if errors.Is(err, errJobStateUnchanged) {
+				return stored, nil
+			}
+			return stored, err
+		}
+		updated, err := m.updateStoredJobCAS(ctx, *stored, stored.StateVersion)
+		if err != nil {
+			return nil, err
+		}
+		if !updated {
+			continue
+		}
+		stored.StateVersion++
+		if managed := m.getJob(jobID); managed != nil {
+			m.adoptStoredJob(managed, *stored)
+		}
+		if eventType != "" {
+			m.appendJobEvent(ctx, jobID, eventType, controlEventPayload(*stored, eventPayload))
+		}
+		m.notifyDispatcher()
+		return stored, nil
+	}
+	current, readErr := m.store.GetJob(ctx, jobID)
+	if readErr == nil && current != nil {
+		return current, fmt.Errorf("job control raced with a concurrent update: %s", current.Status)
+	}
+	return nil, jobNotFoundError(jobID)
+}
+
+func controlEventPayload(job Job, extra func(stored Job) map[string]interface{}) map[string]interface{} {
+	payload := map[string]interface{}{"status": job.Status}
+	if extra == nil {
+		return payload
+	}
+	for key, value := range extra(job) {
+		payload[key] = value
+	}
+	return payload
+}
+
+// PauseJob holds a queued job: it keeps its place and payload but is not
+// dispatched (and no longer expires) until it is resumed. Running or already
+// dispatched jobs cannot be paused — cancel them instead (2026-09-28, P3).
+func (m *Manager) PauseJob(ctx context.Context, jobID string) (*Job, error) {
+	if m == nil {
+		return nil, jobNotFoundError(jobID)
+	}
+	jobID = strings.TrimSpace(jobID)
+	if managed := m.getJob(jobID); managed != nil {
+		managed.mu.RLock()
+		status := managed.info.Status
+		scheduled := managed.scheduled
+		managed.mu.RUnlock()
+		if isTerminalStatus(status) {
+			return managed.snapshot(), fmt.Errorf("job already finished: %s", status)
+		}
+		if status == StatusPaused {
+			return managed.snapshot(), nil
+		}
+		if status != StatusPending || scheduled {
+			return managed.snapshot(), fmt.Errorf("cannot pause a job that is %s", status)
+		}
+	}
+	return m.updateStoredJobState(ctx, jobID, func(stored *Job) error {
+		if isTerminalStatus(stored.Status) {
+			return fmt.Errorf("job already finished: %s", stored.Status)
+		}
+		if stored.Status == StatusPaused {
+			return errJobStateUnchanged
+		}
+		if stored.Status != StatusPending {
+			return fmt.Errorf("cannot pause a job that is %s", stored.Status)
+		}
+		stored.Status = StatusPaused
+		stored.Message = "paused by user"
+		// A paused job must not expire while it is held; resume starts a fresh
+		// queue window.
+		stored.DeadlineAt = nil
+		clearRecoveryPlanMetadata(stored.Metadata)
+		return nil
+	}, "paused", func(Job) map[string]interface{} {
+		return map[string]interface{}{"reason": "paused by user"}
+	})
+}
+
+// ResumeJob returns a paused job to the queue with a fresh queue window.
+func (m *Manager) ResumeJob(ctx context.Context, jobID string) (*Job, error) {
+	if m == nil {
+		return nil, jobNotFoundError(jobID)
+	}
+	return m.updateStoredJobState(ctx, strings.TrimSpace(jobID), func(stored *Job) error {
+		if isTerminalStatus(stored.Status) {
+			return fmt.Errorf("job already finished: %s", stored.Status)
+		}
+		if stored.Status != StatusPaused {
+			return fmt.Errorf("job is not paused: %s", stored.Status)
+		}
+		queuedAt := time.Now().UTC()
+		stored.Status = StatusPending
+		stored.Message = ""
+		stored.QueuedAt = &queuedAt
+		if m.config.QueueTimeout > 0 {
+			deadline := queuedAt.Add(m.config.QueueTimeout)
+			stored.DeadlineAt = &deadline
+		} else {
+			stored.DeadlineAt = nil
+		}
+		return nil
+	}, "resumed", func(Job) map[string]interface{} {
+		return map[string]interface{}{"reason": "resumed by user"}
+	})
+}
+
+// AbandonJob marks a queued or paused job as terminal "abandoned": the user
+// gave up on it, so it is dropped from the queue without ever running
+// (2026-09-28, P3).
+func (m *Manager) AbandonJob(ctx context.Context, jobID string) (*Job, error) {
+	if m == nil {
+		return nil, jobNotFoundError(jobID)
+	}
+	return m.updateStoredJobState(ctx, strings.TrimSpace(jobID), func(stored *Job) error {
+		if isTerminalStatus(stored.Status) {
+			return fmt.Errorf("job already finished: %s", stored.Status)
+		}
+		if stored.Status == StatusRunning {
+			return fmt.Errorf("cannot abandon a running job: %s; cancel it instead", stored.Status)
+		}
+		if stored.Status != StatusPending && stored.Status != StatusPaused {
+			return fmt.Errorf("cannot abandon a job that is %s", stored.Status)
+		}
+		finishedAt := time.Now().UTC()
+		stored.Status = StatusAbandoned
+		stored.Message = "abandoned by user"
+		stored.ExitCode = nil
+		stored.FinishedAt = &finishedAt
+		stored.DeadlineAt = nil
+		clearRecoveryPlanMetadata(stored.Metadata)
+		return nil
+	}, "abandoned", func(Job) map[string]interface{} {
+		return map[string]interface{}{"reason": "abandoned by user"}
+	})
+}
+
+// RequeueJob creates a new job from a terminal one (the design's "requeue = a
+// fresh job"): the new job runs in the same session and records
+// requeued_from, while the original job keeps its outcome and gets a
+// "requeued" event (2026-09-28, P3).
+func (m *Manager) RequeueJob(ctx context.Context, jobID string) (*Job, error) {
+	if m == nil {
+		return nil, jobNotFoundError(jobID)
+	}
+	stored, err := m.loadJobSnapshot(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if stored == nil {
+		return nil, jobNotFoundError(jobID)
+	}
+	if !isTerminalStatus(stored.Status) {
+		return stored, fmt.Errorf("job is still active: %s; cancel or abandon it before requeueing", stored.Status)
+	}
+	args := BackgroundTaskArgs{
+		Command:       stored.Command,
+		Cwd:           stored.Cwd,
+		Priority:      stored.Priority,
+		RestartPolicy: stored.RestartPolicy,
+	}
+	if timeout, ok := intMetadataValue(stored.Metadata, "timeout_sec"); ok && timeout > 0 {
+		args.TimeoutSec = timeout
+	}
+	newJob, err := m.SubmitShell(ctx, stored.SessionID, args)
+	if err != nil {
+		return nil, err
+	}
+	if managed := m.getJob(newJob.ID); managed != nil {
+		managed.mu.Lock()
+		if managed.info.Metadata == nil {
+			managed.info.Metadata = map[string]interface{}{}
+		}
+		managed.info.Metadata["requeued_from"] = stored.ID
+		managed.mu.Unlock()
+		m.persistManagedJob(managed)
+	}
+	m.appendJobEvent(ctx, stored.ID, "requeued", map[string]interface{}{
+		"status":     stored.Status,
+		"new_job_id": newJob.ID,
+	})
+	m.appendJobEvent(ctx, newJob.ID, "requeued_from", map[string]interface{}{
+		"job_id": stored.ID,
+	})
+	return newJob, nil
+}
+
+// loadJobSnapshot returns the freshest view of a job: the in-memory copy when
+// this instance owns it, otherwise the persisted row.
+func (m *Manager) loadJobSnapshot(ctx context.Context, jobID string) (*Job, error) {
+	jobID = strings.TrimSpace(jobID)
+	if managed := m.getJob(jobID); managed != nil {
+		return managed.snapshot(), nil
+	}
+	if m.store == nil {
+		return nil, jobNotFoundError(jobID)
+	}
+	stored, err := m.store.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if stored == nil {
+		return nil, jobNotFoundError(jobID)
+	}
+	return stored, nil
+}
+
+// reconcilePausedJobs picks up cross-instance pause/resume decisions: a paused
+// local job whose row was resumed (or abandoned/cancelled) converges here
+// (2026-09-28, P3).
+func (m *Manager) reconcilePausedJobs() {
+	if m == nil || m.store == nil {
+		return
+	}
+	candidates := make([]*managedJob, 0)
+	m.mu.RLock()
+	for _, managed := range m.jobs {
+		if managed == nil {
+			continue
+		}
+		managed.mu.RLock()
+		status := managed.info.Status
+		managed.mu.RUnlock()
+		if status == StatusPaused {
+			candidates = append(candidates, managed)
+		}
+	}
+	m.mu.RUnlock()
+	for _, managed := range candidates {
+		snapshot := managed.snapshot()
+		if snapshot == nil {
+			continue
+		}
+		stored, err := m.store.GetJob(context.Background(), snapshot.ID)
+		if err != nil || stored == nil || stored.Status == snapshot.Status {
+			continue
+		}
+		m.adoptStoredJob(managed, *stored)
+		if stored.Status == StatusPending {
+			m.notifyDispatcher()
+		}
+	}
 }
 
 // ListJobs returns jobs matching the filter.
@@ -827,6 +1145,9 @@ func (m *Manager) runJob(managed *managedJob) {
 	if managed.info.Cwd != "" {
 		cmd.Dir = managed.info.Cwd
 	}
+	// Put the child in its own process group on Unix so the whole tree can be
+	// signalled as a unit (2026-09-28, P2).
+	applyProcessGroup(cmd)
 
 	// Wire the output sinks before Start and let os/exec drive them: with
 	// StdoutPipe/StderrPipe, Wait closes the read end as soon as the process
@@ -856,6 +1177,15 @@ func (m *Manager) runJob(managed *managedJob) {
 		return
 	}
 
+	if tree, treeErr := attachProcessTree(cmd.Process.Pid, true); treeErr == nil {
+		managed.mu.Lock()
+		managed.tree = tree
+		if managed.info.Metadata == nil {
+			managed.info.Metadata = map[string]interface{}{}
+		}
+		managed.info.Metadata[backgroundMetaProcessGroup] = tree.GroupID()
+		managed.mu.Unlock()
+	}
 	startedAt := time.Now().UTC()
 	processAlive := func() bool { return processIsAlive(cmd.Process) }
 	if !m.acceptStartedProcess(ctx, managed, startedAt, cmd.Process.Pid, processAlive) {
@@ -1300,6 +1630,12 @@ func (m *Manager) refreshFromStore(managed *managedJob) bool {
 		m.adoptStoredJob(managed, *stored)
 		return false
 	}
+	if stored.Status != StatusPending {
+		// A peer paused the job after it was queued here: adopt the held state
+		// instead of dispatching it (2026-09-28, P3).
+		m.adoptStoredJob(managed, *stored)
+		return false
+	}
 	if owner := strings.TrimSpace(stored.OwnerInstanceID); owner != "" && owner != m.instanceID {
 		// Another instance owns this job (for example an opted-in recovery
 		// picked it up first): drop the local handle instead of racing it.
@@ -1353,6 +1689,8 @@ func (m *Manager) expireQueuedJob(managed *managedJob) {
 	managed.info.FinishedAt = &finishedAt
 	managed.mu.Unlock()
 	m.persistJobStateCAS(managed)
+	m.releaseJobTree(managed)
+	m.registerTerminalKillWatch(managed)
 	if !m.terminalTransitionVisible(managed, StatusExpired) {
 		m.notifyDispatcher()
 		return
@@ -1464,6 +1802,8 @@ func (m *Manager) completeJobWithMessage(managed *managedJob, exitCode int, mess
 	delete(managed.info.Metadata, "error_code")
 	managed.mu.Unlock()
 	m.persistJobStateCAS(managed)
+	m.releaseJobTree(managed)
+	m.registerTerminalKillWatch(managed)
 	if !m.terminalTransitionVisible(managed, StatusCompleted) {
 		m.notifyDispatcher()
 		return
@@ -1517,6 +1857,8 @@ func (m *Manager) failJobWithCodeAndError(managed *managedJob, exitCode int, cod
 	}
 	managed.mu.Unlock()
 	m.persistJobStateCAS(managed)
+	m.releaseJobTree(managed)
+	m.registerTerminalKillWatch(managed)
 	if !m.terminalTransitionVisible(managed, StatusFailed) {
 		m.notifyDispatcher()
 		return
@@ -1553,6 +1895,8 @@ func (m *Manager) markTimedOut(managed *managedJob, message string) {
 	managed.info.Metadata["error_code"] = string(runtimeerrors.ErrToolTimeout)
 	managed.mu.Unlock()
 	m.persistJobStateCAS(managed)
+	m.releaseJobTree(managed)
+	m.registerTerminalKillWatch(managed)
 	if !m.terminalTransitionVisible(managed, StatusTimedOut) {
 		m.notifyDispatcher()
 		return
@@ -1591,6 +1935,8 @@ func (m *Manager) orphanJob(managed *managedJob, message string) {
 	managed.info.Metadata["error_code"] = string(runtimeerrors.ErrProcessHealthcheck)
 	managed.mu.Unlock()
 	m.persistJobStateCAS(managed)
+	m.releaseJobTree(managed)
+	m.registerTerminalKillWatch(managed)
 	if !m.terminalTransitionVisible(managed, StatusOrphaned) {
 		m.notifyDispatcher()
 		return
@@ -1647,6 +1993,8 @@ func (m *Manager) markCancelled(ctx context.Context, managed *managedJob, reason
 	}
 	managed.mu.Unlock()
 	m.persistJobStateCAS(managed)
+	m.releaseJobTree(managed)
+	m.registerTerminalKillWatch(managed)
 	if !m.terminalTransitionVisible(managed, StatusCancelled) {
 		m.notifyDispatcher()
 		return
@@ -1737,6 +2085,13 @@ func (m *Manager) dispatchLoop() {
 		heartbeat = heartbeatTicker.C
 		defer heartbeatTicker.Stop()
 	}
+	var reaperTicker *time.Ticker
+	var reaper <-chan time.Time
+	if m.config.OrphanReaperInterval > 0 {
+		reaperTicker = time.NewTicker(m.config.OrphanReaperInterval)
+		reaper = reaperTicker.C
+		defer reaperTicker.Stop()
+	}
 	for {
 		select {
 		case <-m.stopCh:
@@ -1746,8 +2101,11 @@ func (m *Manager) dispatchLoop() {
 		case <-watchdog:
 			m.reclaimStuckScheduled()
 			m.expireOverdueQueuedJobs()
+			m.reconcilePausedJobs()
 		case <-heartbeat:
 			m.heartbeatInstance(context.Background())
+		case <-reaper:
+			m.runOrphanReaper()
 		case <-cleanup:
 			_, _ = m.Cleanup(context.Background())
 		}
@@ -2101,6 +2459,15 @@ func (m *Manager) recoverPersistedJobs(ctx context.Context) {
 			// Another runtime instance still heartbeats this job: leave it
 			// alone instead of racing it (2026-09-28).
 			continue
+		}
+		if owner := strings.TrimSpace(job.OwnerInstanceID); owner != "" && owner != m.instanceID {
+			// The owner is gone and its lease no longer protects the job:
+			// record the takeover reason before the job is interrupted or
+			// orphaned (2026-09-28, P3 observability).
+			m.appendJobEvent(ctx, job.ID, "lease_expired", map[string]interface{}{
+				"owner_instance_id": owner,
+				"status":            job.Status,
+			})
 		}
 		switch job.Status {
 		case StatusPending:

@@ -3075,6 +3075,7 @@ func buildLocalChatBackgroundManager(runtimeConfig *runtimecfg.RuntimeConfig, on
 		LeaseTTL:                cfg.LeaseTTL,
 		HeartbeatInterval:       cfg.HeartbeatInterval,
 		QueueTimeout:            cfg.QueueTimeout,
+		OrphanReaperInterval:    cfg.OrphanReaperInterval,
 		RecoverPendingOnStart:   cfg.RecoverPendingOnStart,
 		EventHandler:            onEvent,
 	})

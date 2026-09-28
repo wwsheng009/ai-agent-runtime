@@ -22,6 +22,7 @@ func TestDefaultConfigCapsRerunRecoveryAttempts(t *testing.T) {
 	require.Equal(t, 60*time.Second, cfg.LeaseTTL)
 	require.Equal(t, 10*time.Second, cfg.HeartbeatInterval)
 	require.Equal(t, 30*time.Minute, cfg.QueueTimeout)
+	require.Equal(t, 30*time.Second, cfg.OrphanReaperInterval)
 	require.Equal(t, []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}, cfg.RecoveryBackoffSchedule)
 }
 
@@ -674,6 +675,247 @@ func TestDispatchSkipsJobCancelledInStore(t *testing.T) {
 	events, err := manager.ListEvents(ctx, managed.info.ID, 0, 0)
 	require.NoError(t, err)
 	require.NotContains(t, eventTypes(events), "process_created")
+}
+
+func TestPauseAndResumeQueuedJob(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	manager := NewManager(Config{
+		StorePath:         filepath.Join(tempDir, "background.db"),
+		LogDir:            filepath.Join(tempDir, "logs"),
+		MaxConcurrentJobs: 1,
+		MonitorInterval:   50 * time.Millisecond,
+		QueueTimeout:      10 * time.Second,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	blocker, err := manager.SubmitShell(ctx, "session-pause", BackgroundTaskArgs{
+		Command: shellDelayCommand(3*time.Second, "blocker"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, blocker.ID, StatusRunning, backgroundTestTimeout(10*time.Second)))
+
+	queued, err := manager.SubmitShell(ctx, "session-pause", BackgroundTaskArgs{
+		Command: shellEchoCommand("held"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, queued.Status)
+	require.NotNil(t, queued.DeadlineAt)
+
+	paused, err := manager.PauseJob(ctx, queued.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusPaused, paused.Status)
+	require.Nil(t, paused.DeadlineAt, "a paused job must not keep its queue deadline")
+
+	// The slot frees while the job is paused: it must stay held, not dispatch.
+	time.Sleep(300 * time.Millisecond)
+	held, err := manager.GetJob(ctx, queued.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusPaused, held.Status)
+
+	resumed, err := manager.ResumeJob(ctx, queued.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, resumed.Status)
+	require.NotNil(t, resumed.DeadlineAt, "resume starts a fresh queue window")
+	require.NoError(t, waitForJobStatus(ctx, manager, queued.ID, StatusCompleted, backgroundTestTimeout(15*time.Second)))
+
+	events, err := manager.ListEvents(ctx, queued.ID, 0, 0)
+	require.NoError(t, err)
+	types := eventTypes(events)
+	require.Contains(t, types, "paused")
+	require.Contains(t, types, "resumed")
+}
+
+func TestPauseRunningJobIsRejected(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(Config{MaxConcurrentJobs: 1})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	job, err := manager.SubmitShell(ctx, "session-pause-running", BackgroundTaskArgs{
+		Command: shellDelayCommand(3*time.Second, "running"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, job.ID, StatusRunning, backgroundTestTimeout(10*time.Second)))
+
+	_, err = manager.PauseJob(ctx, job.ID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot pause")
+
+	current, err := manager.GetJob(ctx, job.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, current.Status)
+	_, _ = manager.CancelJob(ctx, job.ID)
+}
+
+func TestAbandonPausedJob(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	manager := NewManager(Config{
+		StorePath:         filepath.Join(tempDir, "background.db"),
+		LogDir:            filepath.Join(tempDir, "logs"),
+		MaxConcurrentJobs: 1,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	blocker, err := manager.SubmitShell(ctx, "session-abandon", BackgroundTaskArgs{
+		Command: shellDelayCommand(3*time.Second, "blocker"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, blocker.ID, StatusRunning, backgroundTestTimeout(10*time.Second)))
+
+	queued, err := manager.SubmitShell(ctx, "session-abandon", BackgroundTaskArgs{
+		Command: shellEchoCommand("never"),
+	})
+	require.NoError(t, err)
+	_, err = manager.PauseJob(ctx, queued.ID)
+	require.NoError(t, err)
+
+	abandoned, err := manager.AbandonJob(ctx, queued.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusAbandoned, abandoned.Status)
+	require.NotNil(t, abandoned.FinishedAt)
+	require.True(t, IsTerminalStatus(abandoned.Status))
+
+	_, err = manager.ResumeJob(ctx, queued.ID)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "already finished")
+
+	events, err := manager.ListEvents(ctx, queued.ID, 0, 0)
+	require.NoError(t, err)
+	require.Contains(t, eventTypes(events), "abandoned")
+	_, _ = manager.CancelJob(ctx, blocker.ID)
+}
+
+func TestRequeueTerminalJobCreatesNewJob(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	manager := NewManager(Config{
+		StorePath:         filepath.Join(tempDir, "background.db"),
+		LogDir:            filepath.Join(tempDir, "logs"),
+		MaxConcurrentJobs: 1,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	original, err := manager.SubmitShell(ctx, "session-requeue", BackgroundTaskArgs{
+		Command: shellEchoCommand("first"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, original.ID, StatusCompleted, backgroundTestTimeout(15*time.Second)))
+
+	requeued, err := manager.RequeueJob(ctx, original.ID)
+	require.NoError(t, err)
+	require.NotNil(t, requeued)
+	require.NotEqual(t, original.ID, requeued.ID)
+	require.Equal(t, original.SessionID, requeued.SessionID)
+
+	newJob, err := manager.GetJob(ctx, requeued.ID)
+	require.NoError(t, err)
+	require.NotNil(t, newJob)
+	from, ok := stringMetadataValue(newJob.Metadata, "requeued_from")
+	require.True(t, ok)
+	require.Equal(t, original.ID, from)
+
+	oldEvents, err := manager.ListEvents(ctx, original.ID, 0, 0)
+	require.NoError(t, err)
+	require.Contains(t, eventTypes(oldEvents), "requeued")
+	newEvents, err := manager.ListEvents(ctx, requeued.ID, 0, 0)
+	require.NoError(t, err)
+	require.Contains(t, eventTypes(newEvents), "requeued_from")
+	require.NoError(t, waitForJobStatus(ctx, manager, requeued.ID, StatusCompleted, backgroundTestTimeout(15*time.Second)))
+}
+
+func TestDispatchSkipsJobPausedByPeer(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	manager := NewManager(Config{
+		StorePath:         filepath.Join(tempDir, "background.db"),
+		LogDir:            filepath.Join(tempDir, "logs"),
+		MaxConcurrentJobs: 1,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	managed := &managedJob{
+		ctx: context.Background(),
+		info: Job{
+			ID:              "job_peer_paused",
+			SessionID:       "session-peer-paused",
+			Kind:            "shell",
+			Command:         shellEchoCommand("never"),
+			Status:          StatusPending,
+			CreatedAt:       time.Now().Add(-time.Second).UTC(),
+			OwnerInstanceID: manager.instanceID,
+		},
+		output: newOutputBuffer(1024),
+	}
+	require.NoError(t, manager.store.SaveJob(ctx, managed.info))
+	manager.mu.Lock()
+	manager.jobs[managed.info.ID] = managed
+	manager.mu.Unlock()
+
+	stored, err := manager.store.GetJob(ctx, managed.info.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	stored.Status = StatusPaused
+	stored.DeadlineAt = nil
+	updated, err := manager.updateStoredJobCAS(ctx, *stored, stored.StateVersion)
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	manager.dispatchPending()
+
+	snapshot := managed.snapshot()
+	require.NotNil(t, snapshot)
+	require.Equal(t, StatusPaused, snapshot.Status)
+	events, err := manager.ListEvents(ctx, managed.info.ID, 0, 0)
+	require.NoError(t, err)
+	require.NotContains(t, eventTypes(events), "process_created")
+}
+
+func TestReconcilePausedJobAfterPeerResume(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	manager := NewManager(Config{
+		StorePath:         filepath.Join(tempDir, "background.db"),
+		LogDir:            filepath.Join(tempDir, "logs"),
+		MaxConcurrentJobs: 1,
+		MonitorInterval:   50 * time.Millisecond,
+		QueueTimeout:      10 * time.Second,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	blocker, err := manager.SubmitShell(ctx, "session-reconcile", BackgroundTaskArgs{
+		Command: shellDelayCommand(3*time.Second, "blocker"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, blocker.ID, StatusRunning, backgroundTestTimeout(10*time.Second)))
+
+	queued, err := manager.SubmitShell(ctx, "session-reconcile", BackgroundTaskArgs{
+		Command: shellEchoCommand("resumed-by-peer"),
+	})
+	require.NoError(t, err)
+	_, err = manager.PauseJob(ctx, queued.ID)
+	require.NoError(t, err)
+
+	// A peer resumes the job straight in the store: the owner must converge on
+	// the next watchdog tick instead of holding the job forever (P3).
+	stored, err := manager.store.GetJob(ctx, queued.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	queuedAt := time.Now().UTC()
+	deadline := queuedAt.Add(10 * time.Second)
+	stored.Status = StatusPending
+	stored.QueuedAt = &queuedAt
+	stored.DeadlineAt = &deadline
+	updated, err := manager.updateStoredJobCAS(ctx, *stored, stored.StateVersion)
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	manager.reconcilePausedJobs()
+
+	current, err := manager.GetJob(ctx, queued.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, current.Status)
+	require.NoError(t, waitForJobStatus(ctx, manager, queued.ID, StatusCompleted, backgroundTestTimeout(15*time.Second)))
 }
 
 func TestManagerRecoversDetachedRunningJobAcrossRestart(t *testing.T) {

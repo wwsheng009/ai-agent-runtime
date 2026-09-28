@@ -109,6 +109,18 @@ func (m *Manager) runDetachedJob(managed *managedJob) {
 	}
 	managed.mu.Unlock()
 
+	// Group the runner and everything it spawns so cancel/reap can kill the
+	// whole tree as one unit (2026-09-28, P2). Detached jobs intentionally do
+	// not use kill-on-close: they must survive this runtime process.
+	if tree, treeErr := attachProcessTree(launch.PID, false); treeErr == nil {
+		managed.mu.Lock()
+		managed.tree = tree
+		if managed.info.Metadata == nil {
+			managed.info.Metadata = map[string]interface{}{}
+		}
+		managed.info.Metadata[backgroundMetaProcessGroup] = tree.GroupID()
+		managed.mu.Unlock()
+	}
 	processAlive := func() bool {
 		return managedDetachedProcessMatches(managed, inspectProcess(launch.PID))
 	}
@@ -171,7 +183,23 @@ func (m *Manager) recoverDetachedRunningJob(job Job) bool {
 		m.jobs[job.ID] = managed
 	}
 	m.mu.Unlock()
+	// Re-attach a process tree handle so this instance can group-kill the
+	// adopted runner (2026-09-28, P2).
+	if tree, treeErr := attachProcessTree(pid, false); treeErr == nil {
+		managed.mu.Lock()
+		managed.tree = tree
+		if managed.info.Metadata == nil {
+			managed.info.Metadata = map[string]interface{}{}
+		}
+		managed.info.Metadata[backgroundMetaProcessGroup] = tree.GroupID()
+		managed.mu.Unlock()
+	}
 	m.appendJobEvent(context.Background(), job.ID, "running", map[string]interface{}{
+		"status":    StatusRunning,
+		"pid":       pid,
+		"recovered": true,
+	})
+	m.appendJobEvent(context.Background(), job.ID, "adopted", map[string]interface{}{
 		"status":    StatusRunning,
 		"pid":       pid,
 		"recovered": true,

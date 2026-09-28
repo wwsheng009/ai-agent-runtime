@@ -119,6 +119,7 @@ func TestDefaultRuntimeConfigLeavesAgentCompletionToTheModel(t *testing.T) {
 	require.Equal(t, 60*time.Second, cfg.Background.LeaseTTL)
 	require.Equal(t, 10*time.Second, cfg.Background.HeartbeatInterval)
 	require.Equal(t, 30*time.Minute, cfg.Background.QueueTimeout)
+	require.Equal(t, 30*time.Second, cfg.Background.OrphanReaperInterval)
 	require.Equal(t, []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}, cfg.Background.RecoveryBackoffSchedule)
 	require.NoError(t, ValidateRuntimeConfig(cfg))
 

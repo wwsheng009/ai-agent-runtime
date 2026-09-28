@@ -372,6 +372,10 @@ type BackgroundConfig struct {
 	// QueueTimeout bounds how long a job may stay pending before it becomes
 	// terminal "expired" (default 30m; negative disables expiry).
 	QueueTimeout time.Duration `yaml:"queueTimeout" json:"queueTimeout"`
+	// OrphanReaperInterval is how often terminal jobs are checked for leftover
+	// process-tree members and cleaned up (default 30s; non-positive disables
+	// the reaper).
+	OrphanReaperInterval time.Duration `yaml:"orphanReaperInterval" json:"orphanReaperInterval"`
 	// RecoverPendingOnStart re-queues persisted pending jobs when a runtime
 	// instance starts. Default false: startup marks them interrupted instead of
 	// resurrecting work whose owning process is gone (2026-09-28).
@@ -567,6 +571,7 @@ func DefaultRuntimeConfig() *RuntimeConfig {
 			LeaseTTL:                60 * time.Second,
 			HeartbeatInterval:       10 * time.Second,
 			QueueTimeout:            30 * time.Minute,
+			OrphanReaperInterval:    30 * time.Second,
 			RecoverPendingOnStart:   false,
 		},
 		Images: ImagesConfig{
