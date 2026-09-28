@@ -368,8 +368,11 @@ export function mapSessionHistoryToMessages(
     if (stableId) {
       usedMessageIds.add(stableId);
     }
-    // 代码段透传；live 工具卡在历史里可能没有对应表达（工具回执的 tool segment
-    // 现在由 fallback 自带给历史条目），合并时按 toolCallId 去重，避免同一调用双份。
+    // 过程区透传：推理分块 / 工具行位置 / 代码段由实时路径承载。历史条目只保存
+    // 「合并后的一块推理 + 最终正文」（没有逐帧顺序信息），用它覆盖会把
+    // 「推理 → 工具 → 推理」压成一段、并清掉正在增长块的 running 标记。
+    // 工具卡在历史里可能没有对应表达（工具回执的 tool segment 现在由 fallback
+    // 自带给历史条目），合并时按 toolCallId 去重，避免同一调用双份。
     const fallbackToolCallIds = new Set(
       fallback.segments
         .filter(
@@ -382,7 +385,7 @@ export function mapSessionHistoryToMessages(
         .filter((id): id is string => Boolean(id)),
     );
     const preservedSegments = matched.segments.filter((segment) => {
-      if (segment.type === "code") {
+      if (segment.type === "code" || segment.type === "reasoning") {
         return true;
       }
       if (segment.type !== "tool") {
@@ -390,6 +393,14 @@ export function mapSessionHistoryToMessages(
       }
       return !segment.toolCallId || !fallbackToolCallIds.has(segment.toolCallId);
     });
+    const preservedHasReasoning = preservedSegments.some(
+      (segment) => segment.type === "reasoning",
+    );
+    // 实时过程区已有推理块时，历史的那块合并推理是同一段思考的降级表达：丢弃它，
+    // 否则同一段思考渲染两遍（只有实时侧没有推理时才用历史推理兜底）。
+    const durableSegments = preservedHasReasoning
+      ? fallback.segments.filter((segment) => segment.type !== "reasoning")
+      : fallback.segments;
     const relatedArtifactIds = mergeUniqueStrings(
       ...(matched.relatedArtifactIds ?? []),
       ...(fallback.relatedArtifactIds ?? []),
@@ -406,7 +417,11 @@ export function mapSessionHistoryToMessages(
         label: matched.label || fallback.label,
         relatedArtifactIds:
           relatedArtifactIds.length > 0 ? relatedArtifactIds : undefined,
-        segments: [...fallback.segments, ...preservedSegments],
+        // 有实时过程区时按「过程区在前、历史正文在后」落位（与流式渲染的
+        // 「思考在上、回答在下」一致）；实时侧没有推理时才沿用历史段序前置。
+        segments: preservedHasReasoning
+          ? [...preservedSegments, ...durableSegments]
+          : [...durableSegments, ...preservedSegments],
       },
     } satisfies HistoryMessageMapping;
   });

@@ -232,21 +232,27 @@ function syncReasoningSegments(
   }));
 
   const next = [...segments];
+  // 同一锚点上的多块推理必须保持到达顺序：工具行不足以彼此区分时（例如
+  // 「推理 → 正文 → 推理」两块的 toolCount 都是 0），后插入的块要落在前一块之后，
+  // 否则会顶到前一块上方、把时间顺序倒过来。`insertFloor` 记录前一块的落点。
+  let insertFloor = 0;
   for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
     const block = blocks[blockIndex];
     const targetIndex = findReasoningSegmentIndexes(next)[blockIndex];
     if (targetIndex === undefined) {
-      const insertAt = reasoningBlockInsertIndex(
-        next,
-        derived.blockToolCounts[blockIndex],
+      const insertAt = Math.max(
+        reasoningBlockInsertIndex(next, derived.blockToolCounts[blockIndex]),
+        insertFloor,
       );
       next.splice(insertAt, 0, {
         type: "reasoning",
         content: block.content,
         running: block.running,
       });
+      insertFloor = insertAt + 1;
       continue;
     }
+    insertFloor = targetIndex + 1;
     const current = next[targetIndex];
     if (current.type !== "reasoning") {
       continue;
