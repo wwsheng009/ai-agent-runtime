@@ -1192,17 +1192,30 @@ func shouldSkipRuntimeResumeSession(session *runtimechat.Session, excludedSessio
 }
 
 func syncRuntimeSessionFromChat(session *ChatSession) error {
-	return syncRuntimeSessionFromChatMode(session, false)
+	return syncRuntimeSessionFromChatMode(session, false, false)
 }
 
 // syncRuntimeSessionFromChatPreservingUpdatedAt 与 syncRuntimeSessionFromChat
 // 相同，但不会推进会话的 UpdatedAt：/resume、/load 只是切换查看目标，
 // 不应把"最后更新时间"顶到当前，导致按更新时间排序时列表跳动。
 func syncRuntimeSessionFromChatPreservingUpdatedAt(session *ChatSession) error {
-	return syncRuntimeSessionFromChatMode(session, true)
+	return syncRuntimeSessionFromChatMode(session, true, false)
 }
 
-func syncRuntimeSessionFromChatMode(session *ChatSession, preserveUpdatedAt bool) error {
+// syncRuntimeSessionFromChatAfterPlanMutation persists a deliberate plan-mode
+// transition performed by the CLI (/plan enter|exit|approve|quit|
+// request_changes). It differs from the routine sync in one point: it must not
+// restore the durable plan-mode context over the state the command just wrote
+// (see the merge note inside syncRuntimeSessionFromChatMode).
+func syncRuntimeSessionFromChatAfterPlanMutation(session *ChatSession) error {
+	return syncRuntimeSessionFromChatMode(session, false, true)
+}
+
+// syncRuntimeSessionFromChatMode writes the CLI snapshot back to the session
+// row. planMutated selects the write-through path used right after a
+// deliberate CLI-side plan transition; routine end-of-turn syncs always pass
+// false so the 2026-09-18 durable-plan protection stays in effect for them.
+func syncRuntimeSessionFromChatMode(session *ChatSession, preserveUpdatedAt, planMutated bool) error {
 	if session == nil || session.SessionManager == nil || session.RuntimeSession == nil {
 		return nil
 	}
@@ -1303,7 +1316,15 @@ func syncRuntimeSessionFromChatMode(session *ChatSession, preserveUpdatedAt bool
 	// the actor's state and the next turn silently loses plan-mode write gating
 	// (observed 2026-09-18: plan_mode=active in the store at 15:16:31, host
 	// clobbered to bypass_permissions at 15:16:32).
-	if !session.runtimeSessionUnpersisted {
+	//
+	// The restore is skipped for a deliberate CLI plan transition
+	// (planMutated): there the freshly computed local state is the newer
+	// truth, and copying the stored context back silently reverts the user's
+	// verdict (observed 2026-09-28: /plan approve computed
+	// exited+last_exit_source=user, this merge restored the stored
+	// active+pending_exit_request state, and the update kept plan mode active
+	// while the command still archived the approve round).
+	if !session.runtimeSessionUnpersisted && !planMutated {
 		if stored, loadErr := session.SessionManager.GetStorage().Load(context.Background(), runtimeSession.ID); loadErr == nil && stored != nil {
 			if value, ok := stored.GetContext(planmode.ContextKey); ok {
 				runtimeSession.SetContext(planmode.ContextKey, value)

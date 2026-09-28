@@ -267,7 +267,7 @@ func enterChatPlanModeWithResult(session *ChatSession, planPath string) (chatPla
 	state := planmode.Enter(previousMode, planPath)
 	saveChatPlanMode(session, state)
 	applyChatPlanPermissionMode(session, runtimepolicy.ModePlan)
-	syncErr := syncRuntimeSessionFromChat(session)
+	syncErr := syncRuntimeSessionFromChatAfterPlanMutation(session)
 	refreshChatComposerContext(session)
 	archiveChatPlanArtifact(session, "enter", "")
 	return chatPlanModeMutationResult{State: loadChatPlanMode(session), SyncErr: syncErr}, nil
@@ -344,7 +344,7 @@ func exitChatPlanModeWithResult(session *ChatSession, decisionToken, notes strin
 		applyChatPlanPermissionMode(session, mode)
 	}
 
-	syncErr := syncRuntimeSessionFromChat(session)
+	syncErr := syncRuntimeSessionFromChatAfterPlanMutation(session)
 	refreshChatComposerContext(session)
 	archiveChatPlanArtifact(session, string(exited.ExitDecision), notes)
 	return chatPlanModeMutationResult{State: loadChatPlanMode(session), SyncErr: syncErr}, nil

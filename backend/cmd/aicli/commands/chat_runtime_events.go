@@ -79,8 +79,8 @@ type chatRuntimeEventBridge struct {
 	runErr                      error
 	// lateDropMu / lateDropStats 记录被围栏或归属守卫拒绝的 UI 动作（诊断用：
 	// 围栏此前只写 debug 日志，"等待态没有 run"的撕裂不可观测）。
-	lateDropMu      sync.Mutex
-	lateDropStats   chatRuntimeLateDropStats
+	lateDropMu    sync.Mutex
+	lateDropStats chatRuntimeLateDropStats
 	// publishedDrops 是已上报到 EventBus（→ usageanalytics "fence" 来源）的计数
 	// 水位；EndRun 只上报增量，避免同一批拒绝被每轮重复累加。
 	publishedDrops  chatRuntimeLateDropStats
@@ -6102,6 +6102,10 @@ func humanApprovalReason(reason string) string {
 		return "该调用需要访问工作区外的目录/文件；批准后该目录加入本次会话（/add-dir 可预先准入），同目录后续不再重复询问（external_dir:admit）"
 	case "plan_mode:model_auto_enter":
 		return "模型请求进入计划模式：进入后会限制为只读探索、仅可写计划文件，需要你确认（plan_mode:model_auto_enter）"
+	case "plan_mode:model_auto_exit_approve":
+		return "模型请求批准计划并开始实现：允许=退出计划模式并恢复执行；拒绝=留在计划模式，你的意见会随拒绝回给模型（plan_mode:model_auto_exit_approve）"
+	case "plan_mode:model_auto_exit_quit":
+		return "模型请求关闭计划模式且不执行计划：允许=退出计划模式；拒绝=留在计划模式（plan_mode:model_auto_exit_quit）"
 	case "manual approval":
 		return "当前工具策略要求人工审批"
 	case "approval_required":
@@ -6140,6 +6144,9 @@ func localizeApprovalPreviewLine(line string) string {
 		{"query=", "查询"},
 		{"prompt=", "提示"},
 		{"args=", "参数摘要"},
+		{"decision=", "裁决"},
+		{"plan_path=", "计划文件"},
+		{"notes=", "说明"},
 	}
 	for _, item := range labels {
 		if strings.HasPrefix(line, item.prefix) {
@@ -9817,6 +9824,21 @@ func approvalRequestPreviewLines(approval *runtimechat.ApprovalRequest) []string
 			lines = append(lines, key+"="+value)
 			return lines
 		}
+	}
+	// Plan-mode control calls carry decision/plan_path/notes instead of the
+	// shell/file keys above; render those fields as readable lines instead of a
+	// raw JSON dump. Gate on plan_path so unrelated tools that happen to carry a
+	// `decision`/`notes` arg keep the generic preview.
+	if planPath := truncateChatRuntimeText(payloadStringValue(payload["plan_path"]), 160); planPath != "" {
+		planLines := make([]string, 0, 3)
+		if decision := truncateChatRuntimeText(payloadStringValue(payload["decision"]), 40); decision != "" {
+			planLines = append(planLines, "decision="+decision)
+		}
+		planLines = append(planLines, "plan_path="+planPath)
+		if notes := truncateChatRuntimeText(payloadStringValue(payload["notes"]), 160); notes != "" {
+			planLines = append(planLines, "notes="+notes)
+		}
+		return planLines
 	}
 	args := truncateChatRuntimeText(strings.TrimSpace(string(approval.ArgsJSON)), 200)
 	if args != "" {
