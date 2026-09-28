@@ -208,6 +208,9 @@ func (c *handlerSupervisionToolController) ControlDescendant(ctx context.Context
 		Action:             supervision.ActionKind(args.Action),
 		Reason:             args.Reason,
 		CascadeMode:        cascade,
+		ExtendBy:           args.ExtendBy,
+		NewDeadline:        args.NewDeadline,
+		ExtendWhich:        args.ExtendWhich,
 		ExpectedVersion:    args.ExpectedVersion,
 		HasExpectedVersion: args.HasExpectedVersion,
 	})

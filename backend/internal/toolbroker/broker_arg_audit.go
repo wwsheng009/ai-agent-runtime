@@ -27,6 +27,7 @@ var brokerToolArgKeys = map[string][]string{
 	ToolTaskOutput:           {"job_id", "limit", "offset", "timeout_ms", "wait"},
 	ToolTaskKill:             {"job_id", "reason", "task_id"},
 	ToolTaskMonitor:          {"cancel", "check_after_ms", "job_id", "max_duration_ms", "task_id"},
+	ToolTaskControl:          {"action", "job_id", "reason", "task_id"},
 	ToolSpawnAgent:           spawnAgentToolArgKeys,
 	ToolListAgents:           {"include_closed", "parent_session_id", "path_prefix"},
 	ToolSendMessage:          {"id", "message", "session_id", "target"},
@@ -65,7 +66,7 @@ var brokerToolArgKeys = map[string][]string{
 	ToolSubagentInspectTask:    {"agent", "child_session_id", "id", "include_status", "limit", "max_chars", "offset", "sections", "session_id", "target", "task_id"},
 	ToolReadAgentResult:        {"id", "limit", "max_chars", "offset", "sections", "task_id"},
 	ToolAckLifecycle:           {"notification_id", "decision", "note", "reason", "state", "until", "expected_version"},
-	ToolControlDescendant:      {"notification_id", "action", "reason", "cascade", "expected_version"},
+	ToolControlDescendant:      {"notification_id", "action", "reason", "cascade", "expected_version", "extend_by_ms", "new_deadline", "extend_which"},
 }
 
 // brokerIgnoredArgHint explains what to use instead of a key the addressed tool

@@ -113,6 +113,15 @@ type ControlDescendantArgs struct {
 	Action             string
 	Reason             string
 	Cascade            string
+	// ExtendBy / NewDeadline / ExtendWhich are the extend_deadline payload
+	// (doc 6.5): exactly one of ExtendBy / NewDeadline, and ExtendWhich selects
+	// execution|progress|both. The supervision layer re-validates the I5 budget
+	// and the I6 irreversible points at execute time; this parse layer only
+	// enforces the request shape so an action that would be rejected never
+	// lands an audit row.
+	ExtendBy    time.Duration
+	NewDeadline *time.Time
+	ExtendWhich string
 	ExpectedVersion    int64
 	HasExpectedVersion bool
 }
@@ -310,8 +319,9 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 		},
 		{
 			Name: ToolControlDescendant,
-			Description: "Execute a durable control action against the subject of a supervision notification: action=cancel|close|cancel_subtree|retry|reassign. Use action=close to converge a finished (terminal) child session that is no longer needed; the parent turn's progress block reminds you when a batch reached terminal. " +
-				"The subject is taken from the notification, so only rows inside this session's own scope can be controlled; the requested action is validated against the row's allowed_actions. reason is required (durable audit), expected_version is optional. The action is persisted before execution; the returned action_id can be re-read even when execution fails, and a successful mutation produces an ack-able receipt notification.",
+			Description: "Execute a durable control action against the subject of a supervision notification: action=cancel|close|cancel_subtree|retry|reassign|extend_deadline. Use action=close to converge a finished (terminal) child session that is no longer needed; the parent turn's progress block reminds you when a batch reached terminal. " +
+				"Use action=extend_deadline to move an agent run's deadline forward instead of ending it (the escalate-first window for a still-progressing long task): pass exactly one of extend_by_ms or new_deadline, plus optional extend_which=execution|progress|both (default execution); the I5 extension budget and the I6 irreversible points are re-validated when the action executes. " +
+				"The subject is taken from the notification, so only rows inside this session's own scope can be controlled; the requested action is validated against the row's allowed_actions (extend_deadline is announced only for agent-run rows). reason is required (durable audit), expected_version is optional. The action is persisted before execution; the returned action_id can be re-read even when execution fails, and a successful mutation produces an ack-able receipt notification.",
 			Parameters: map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -321,12 +331,25 @@ func allSupervisionToolDefinitions() []types.ToolDefinition {
 					},
 					"action": map[string]interface{}{
 						"type":        "string",
-						"enum":        []string{"cancel", "close", "cancel_subtree", "retry", "reassign"},
+						"enum":        []string{"cancel", "close", "cancel_subtree", "retry", "reassign", "extend_deadline"},
 						"description": "Required control action; validated against the notification's server-computed allowed_actions (a value outside that set is rejected).",
 					},
 					"reason": map[string]interface{}{
 						"type":        "string",
 						"description": "Required audit reason.",
+					},
+					"extend_by_ms": map[string]interface{}{
+						"type":        "integer",
+						"description": "extend_deadline payload: move the deadline forward by this many milliseconds (e.g. 1800000 = 30m). Exactly one of extend_by_ms / new_deadline is required.",
+					},
+					"new_deadline": map[string]interface{}{
+						"type":        "string",
+						"description": "extend_deadline payload: absolute new deadline as an RFC3339 timestamp (e.g. 2026-09-28T18:00:00Z). Exactly one of extend_by_ms / new_deadline is required.",
+					},
+					"extend_which": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"execution", "progress", "both"},
+						"description": "extend_deadline payload: which deadline to move (default execution).",
 					},
 					"cascade": map[string]interface{}{
 						"type":        "string",
@@ -692,12 +715,43 @@ func parseControlDescendantArgs(args map[string]interface{}) (ControlDescendantA
 	switch parsed.Action {
 	case "cancel", "close", "cancel_subtree", "retry", "reassign", "inspect":
 	default:
-		return parsed, fmt.Errorf("unsupported action %q (want cancel|close|cancel_subtree|retry|reassign)", parsed.Action)
+		if parsed.Action != "extend_deadline" {
+			return parsed, fmt.Errorf("unsupported action %q (want cancel|close|cancel_subtree|retry|reassign|extend_deadline)", parsed.Action)
+		}
 	}
 	switch parsed.Cascade {
 	case "", "target", "descendants":
 	default:
 		return parsed, fmt.Errorf("cascade must be target or descendants, got %q", parsed.Cascade)
+	}
+	// extend_deadline 载荷（doc 6.5）：请求形状在解析层先判，避免一次必然被
+	// 监督层拒绝的动作先落审计行；I5 预算 / I6 不可逆点仍在 execute 时复核。
+	hasExtendArgs := args["extend_by_ms"] != nil || args["new_deadline"] != nil || args["extend_which"] != nil
+	if parsed.Action == "extend_deadline" {
+		if ms, ok, err := toolArgInt64(ToolControlDescendant, args, "extend_by_ms"); err != nil {
+			return parsed, err
+		} else if ok {
+			parsed.ExtendBy = time.Duration(ms) * time.Millisecond
+		}
+		if raw := supervisionArgValue(args, "new_deadline"); raw != "" {
+			deadline, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				return parsed, fmt.Errorf("new_deadline %q is not RFC3339 (e.g. 2026-09-28T18:00:00Z)", raw)
+			}
+			deadline = deadline.UTC()
+			parsed.NewDeadline = &deadline
+		}
+		parsed.ExtendWhich = strings.ToLower(supervisionArgValue(args, "extend_which"))
+		switch parsed.ExtendWhich {
+		case "", "execution", "progress", "both":
+		default:
+			return parsed, fmt.Errorf("extend_which must be execution|progress|both, got %q", parsed.ExtendWhich)
+		}
+		if (parsed.ExtendBy != 0) == (parsed.NewDeadline != nil) {
+			return parsed, fmt.Errorf("extend_deadline requires exactly one of extend_by_ms or new_deadline")
+		}
+	} else if hasExtendArgs {
+		return parsed, fmt.Errorf("extend_by_ms/new_deadline/extend_which are only valid with action=extend_deadline")
 	}
 	if version, ok, err := toolArgInt64(ToolControlDescendant, args, "expected_version"); err != nil {
 		return parsed, err
