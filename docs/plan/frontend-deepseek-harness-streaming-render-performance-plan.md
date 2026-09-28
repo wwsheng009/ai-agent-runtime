@@ -1,6 +1,6 @@
 # 前端万级流事件渲染性能方案（deepseek-harness 参考实现取证）
 
-> 状态：**P0-1 / P0-2 / P1-1 / P1-2 已实施并验证（2026-09-28，见 §11）；P2-1 渲染面逐项核对完成（无代码改动）；P1-3 起待立项或按需推进**
+> 状态：**P0-1 / P0-2 / P1-1 / P1-2 已实施并验证（2026-09-28，见 §11）；P2-1 渲染面逐项核对完成（无代码改动）；P2-2 基准方法论已固化（基线待空闲窗口复跑回填）；P1-3 起待立项或按需推进**
 > 日期：2026-09-28
 > 参考仓库：`E:\projects\ai\deepseek-harness`（master @ `c291e7961a`，2026-09-10）
 > 目标仓库：本仓库 `frontend/`
@@ -532,10 +532,41 @@ Deque 不做背压、不做合并、不做丢弃——**容量、coalescing、�
   segment-rendering / collapse-rendering / live-stream-rendering 等既有用例全绿，
   全量运行即本组验证）。
 
+### P2-2 基准固化 + 预算制度（方法论已固化；基线复跑待内存空闲窗口）
+
+**问题**
+
+- P0-1 → P2-1 的收益（排空线性化、合帧频率预算、订阅切片、分级帧门）目前只有
+  定向实测数字（330ms/s、−67% 等），没有可重复的基准脚本与预算线，缺少
+  「优化后复测收紧」的落点。
+
+**改动（方法论与制度固化，无代码改动）**
+
+- 基准载体：`frontend/e2e/zz-perf-probe.manual.ts`（既有诊断探针）——采集
+  `PerformanceObserver("longtask")`（>50ms 阻塞）、rAF 帧间隔分布、CDP
+  `Performance.getMetrics` 增量（Script / Layout / RecalcStyle）、CPU profile
+  自耗时/包含耗时 Top-N + bundle 归因、Chrome trace（样式重算/布局波及节点数）、
+  MutationObserver 全量统计（total / byType / byTarget / perFrame 峰值）。
+  `PERF_ROUNDS`（默认 40 历史轮，0 = 空会话）区分「整列重渲染」与「流式行内」
+  开销；`PERF_TAG` 命名报告。
+- 复跑命令：`npm run test:manual -- e2e/zz-perf-probe.manual.ts`（探针自带 dist
+  新鲜度守卫——src 新于 dist 直接拒绝，需先 `tsc -b && vite build`）。
+- 两条基准场景（对齐 §8.2）：(a) 长会话冷开 → 翻旧页 → 回 Chat → 配速流 +
+  键盘输入；(b) 活跃重连（connection-recovery 流回放）。
+- 预算条目草案（先校准后收紧，具体阈值待基线回填后定）：长任务（数量 / 最长 /
+  总时长）、掉帧率（帧间隔 >33ms 占比）、Script / Layout / RecalcStyle 单回合
+  增量、提交:事件比（P1-2 验收延续）、Mutation 总量与 perFrame 峰值。
+
+**状态**
+
+- 2026-09-28 环境受限（物理空闲 3.6GB / 虚拟空闲 0.6GB，他任务构建进程
+  compile/link 占用；`tsc -b` 与 `vite build` 均 OOM 崩溃）——基准本体顺延至
+  空闲窗口复跑回填；CI 接线（release-aicli / build-aicli-win7 工作流）标注后续。
+
 ### 未实施（后续）
 
 - **P1-3 历史窗口评估**（按需）；
-- **P2-2 基准固化 + 预算制度**（需真实基准测量后再收紧）；**P2-3 性能决策记录**（本节为第一步留痕）。
+- **P2-2 基准固化 + 预算制度**（方法论已固化，基线待空闲窗口复跑回填；CI 接线标注后续）；**P2-3 性能决策记录**（本节为第一步留痕）。
 
 ---
 
