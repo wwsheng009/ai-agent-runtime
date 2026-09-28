@@ -365,6 +365,7 @@ export function WorkspaceMainSection({
                   scrollMemoryKey={selectedThread.sessionId ?? selectedThread.id}
                   streamStalled={streamStalled}
                   style={messageListStyle}
+                  threadId={selectedThread.id}
                 />
               ) : (
                 <Suspense fallback={null}>

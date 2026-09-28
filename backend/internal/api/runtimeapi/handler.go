@@ -116,7 +116,7 @@ type Handler struct {
 	// Phase 1 交付 5：知识层状态面句柄（经 SetKnowledgeActivation 注入）；
 	// nil（mode=off / 启动期降级）时 /knowledge/status 返回 mode=off 而非 404。
 	knowledgeActivation *knowledge.Activation
-	llmRuntime      *llm.LLMRuntime
+	llmRuntime          *llm.LLMRuntime
 	// §4.13 审批解释（可选注入）：nil 时用 llmRuntime 的内建一次性调用；
 	// 两者都不可用则端点降级为规则摘要（永不把模型故障变成 5xx）。
 	approvalSummarizer ApprovalSummarizer

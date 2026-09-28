@@ -51,7 +51,7 @@ func TestPrintKnowledgeStatusReport_TextSurface(t *testing.T) {
 			Kind: knowledge.IndexJobKindLight, Status: knowledge.IndexJobStatusDone,
 			FilesTotal: 12, FilesDone: 12, DurationMS: 146900, StartedAt: 1699999000000,
 		},
-		LockWait: knowledge.LockWaitStats{Samples: 3, P50MS: 1.5, P95MS: 7, MaxMS: 9, RetryFailures: 1},
+		LockWait:       knowledge.LockWaitStats{Samples: 3, P50MS: 1.5, P95MS: 7, MaxMS: 9, RetryFailures: 1},
 		DegradedReason: "read-only: store is owned by pid 999",
 		GeneratedAt:    1700000065000,
 	}

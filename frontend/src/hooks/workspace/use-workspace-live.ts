@@ -18,6 +18,7 @@ import {
 } from "@/lib/live-diagnostics/store";
 import type { ParkedTurnSnapshot } from "@/lib/parked-turn";
 import { normalizeSessionId } from "@/lib/session-id";
+import { type ThreadStoreUpdater } from "@/lib/thread-state/thread-store";
 import {
   type RuntimeSessionActiveTurn,
   type SessionRuntimeEvent,
@@ -67,6 +68,8 @@ export type UseWorkspaceLiveOptions = {
   sessionId?: string;
   selectedThread: Thread | undefined;
   setThreads: Dispatch<SetStateAction<Thread[]>>;
+  /** P1-1 内容提交结构门：透传给运行时流 hook（可选；缺省回落结构通道）。 */
+  setThreadsLive?: (updater: ThreadStoreUpdater) => void;
   /** 重新拉取 `/runtime` 快照（续传挂载期间的心跳）。 */
   refreshRuntimeState?: () => void;
   /** 与直连 chat 共享的增量认领协调器（两条流不重复渲染同一段增量）。 */
@@ -130,6 +133,7 @@ export function useWorkspaceLive({
   sessionActiveTurn,
   sessionId,
   setThreads,
+  setThreadsLive,
   trajectoryReady,
   trajectoryStore,
 }: UseWorkspaceLiveOptions): UseWorkspaceLiveResult {
@@ -292,6 +296,7 @@ export function useWorkspaceLive({
     renderLiveDeltas,
     selectedThread,
     setThreads,
+    setThreadsLive,
   });
 
   return {

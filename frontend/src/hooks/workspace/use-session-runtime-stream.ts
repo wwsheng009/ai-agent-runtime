@@ -15,6 +15,8 @@ import {
 } from "@/lib/runtime-api";
 import { matchesActiveTurn } from "@/lib/thread-state/deltas";
 import { applyLiveStreamDelta } from "@/lib/live-stream-text";
+import { getPublicationLevel } from "@/lib/thread-state/publication";
+import { type ThreadStoreUpdater } from "@/lib/thread-state/thread-store";
 import {
   getRuntimeDeltaKeyFromEvent,
   getRuntimeDeltaKind,
@@ -64,6 +66,12 @@ type SessionRuntimeStreamOptions = {
   selectedThread: Thread | undefined;
   setThreads: Dispatch<SetStateAction<Thread[]>>;
   /**
+   * P1-1 内容提交结构门：仅打字机增量（无持久事件）的合帧批走 live 通道
+   * （按会话订阅者 = 消息列），不推进页面级结构快照。缺省回落到 `setThreads`
+   * （未接双通道的调用方 / 测试环境保持原行为）。
+   */
+  setThreadsLive?: (updater: ThreadStoreUpdater) => void;
+  /**
    * 尾部优先回放（tail-first）的建连闸门：轨迹首屏窗口就绪前不建连。
    *
    * 后端 `/runtime/stream?after=0` 会把整份事件日志按 SSE dump 重放一遍，若在
@@ -94,6 +102,7 @@ export function useSessionRuntimeStream({
   deltaCoordinator,
   selectedThread,
   setThreads,
+  setThreadsLive,
   enabled = true,
   getReplayCursor,
 }: SessionRuntimeStreamOptions) {
@@ -167,6 +176,14 @@ export function useSessionRuntimeStream({
   useEffect(() => {
     setThreadsRef.current = setThreads;
   }, [setThreads]);
+  const setThreadsLiveRef = useRef(setThreadsLive);
+  useEffect(() => {
+    setThreadsLiveRef.current = setThreadsLive;
+  }, [setThreadsLive]);
+  const getPublicationLevelRef = useRef(getPublicationLevel);
+  useEffect(() => {
+    getPublicationLevelRef.current = getPublicationLevel;
+  }, []);
   // 目标线程最新值：判断「这条增量能否落到消息上」必须读线程状态（纯判定，
   // 不写状态）。经 ref 读取，避免把 selectedThread 放进订阅 effect 依赖——
   // 线程对象每次归并都是新引用，进依赖会掐断在途 SSE（见下方 sessionKey 注释）。
@@ -236,7 +253,21 @@ export function useSessionRuntimeStream({
       // 按到达顺序在同一次 reducer 里兑现：逐条 apply 的结果与「一条一次提交」
       // 完全一致（都是对最新 state 顺序应用），只是合并成一次页面级提交。
       const batch = pendingRuntimeCommits.splice(0, pendingRuntimeCommits.length);
-      setThreadsRef.current((current) => {
+      // P1-1 内容提交结构门：整批都是「已判定可渲染的打字机增量」且线程不在
+      // 降级态时，走 live 通道（按会话订阅者）——文本生成期的高频批（实测
+      // 59 次/秒）不再推进页面级结构快照；含任一持久事件（工具生命周期 /
+      // 回合终态 / 回滚信号，写 runtimeEventCount / transport / 消息骨架）的
+      // 批仍走结构通道，页面级判定（topbar / 侧栏 / 历史重写同步）不丢信号。
+      // 降级态下即使只剩增量也走结构通道：恢复分支（transport error → live）
+      // 是页面级状态，不能只落 live 视图。
+      const isContentOnlyBatch =
+        batch.every((item) => item.shouldApplyLiveDelta) &&
+        selectedThreadRef.current?.transport !== "error";
+      const commitThreads =
+        isContentOnlyBatch && setThreadsLiveRef.current
+          ? setThreadsLiveRef.current
+          : setThreadsRef.current;
+      commitThreads((current) => {
         // P0-2：整批都没有落点（重复帧 / 非当前线程 / 已定稿）时不产生新引用——
         // setState 收到相同引用直接旁路，React 不再重渲染整棵工作区树。
         let changed = false;
@@ -457,7 +488,19 @@ export function useSessionRuntimeStream({
                 nextEvents,
                 shouldApplyLiveDelta,
               });
-              runtimeCommitScheduler.schedule();
+              // P1-2 发布分级（lib/thread-state/publication.ts）决定提交节奏：
+              // - immediate（结算/工具生命周期/回滚等持久事件）：取消挂起帧
+              //   立即提交（对齐参考 notifier.notifyNow / assembly.cancelFrame）；
+              // - animation-frame（正文/推理/图片增量）：三帧门节奏
+              //   （≈20Hz 上限，对齐参考 assembly.ts 三帧门）；
+              // - none（live-only 节流镜像：tool/subagent.progress）：入队但
+              //   不主动调度，随下一次合帧批顺带兑现（状态不丢、不为此开提交）。
+              const publicationLevel = getPublicationLevelRef.current(event);
+              if (publicationLevel === "immediate") {
+                runtimeCommitScheduler.flush();
+              } else if (publicationLevel === "animation-frame") {
+                runtimeCommitScheduler.schedule({ pace: "animation-frame" });
+              }
             },
             onErrorEvent: (payload) => {
               streamFailed = true;

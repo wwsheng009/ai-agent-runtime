@@ -9,6 +9,7 @@ import { useConnectionStatusLabels } from "@/hooks/workspace/use-connection-stat
 import { useConversationScroll } from "@/hooks/workspace/use-conversation-scroll";
 import { hasVisibleMessageContent, isSystemPromptMessage } from "@/lib/chat-view";
 import { resolveBranchAnchors } from "@/lib/chat-view/branch-availability";
+import { useLiveThread } from "@/lib/thread-state/thread-store";
 import { isArtifactEvidence } from "@/lib/workspace-artifacts";
 import { cn } from "@/lib/utils";
 import { type ChatStreamPhase } from "@/types/runtime";
@@ -56,19 +57,27 @@ export function MessageList({
   scrollMemoryKey = null,
   streamStalled = false,
   style,
+  threadId,
 }: MessageListProps) {
   const { t } = useTranslation("workspace");
   const { labels: connectionLabels, retryLabel } = useConnectionStatusLabels();
+  // P1-1 会话级 live 分片：流式内容提交（打字机增量批）只推进 store 的 live 视图，
+  // 页面级结构快照不随之变化——本组件按会话订阅 live，从而在内容帧到达时只重渲染
+  // 消息列，不惊动侧栏 / topbar / 面板。live 无值（无 store / 该会话不在 store）时
+  // 回落 props（独立渲染与测试环境保持改造前行为）。
+  const liveThread = useLiveThread(threadId);
+  const renderedMessages = liveThread?.messages ?? messages;
+  const renderedArtifacts = liveThread?.artifacts ?? artifacts;
   // 产物索引：`artifacts` 身份在文本流式期间保持稳定，缓存后行组件可以安全 memo
   // （否则每帧新建的 Map 会让整列历史行全部重渲染）。
   const artifactMap = useMemo(
-    () => new Map(artifacts.map((artifact) => [artifact.id, artifact])),
-    [artifacts],
+    () => new Map(renderedArtifacts.map((artifact) => [artifact.id, artifact])),
+    [renderedArtifacts],
   );
   // §12.1.4：无可见内容的助手消息不产出 <article>。外层是 `flex flex-col gap-4`，
   // 空壳 article 自身高度为 0 却仍是一个 flex item，会在相邻消息间撑出一条空白行
   // （典型来源：回合开始到首块到达之间的流式空壳、纯工具回合）。
-  const visibleMessages = messages.filter((message) => {
+  const visibleMessages = renderedMessages.filter((message) => {
     if (message.role !== "assistant") {
       return true;
     }
@@ -86,15 +95,15 @@ export function MessageList({
   const hasConversationRows = visibleMessages.some(
     (message) => !isSystemPromptMessage(message),
   );
-  const lastMessage = messages[messages.length - 1];
+  const lastMessage = renderedMessages[renderedMessages.length - 1];
   const streamingMessageId =
     isResponding && lastMessage?.role === "assistant" ? lastMessage.id : null;
   // 批次 2（§5.4）：分支锚点在**整段历史**上求一次（O(n)）：每个已完成轮次的末条消息
   // 各自成锚点（对齐后端 `ListUserTurns` 的轮边界）；只有锚点会拿到 `onBranch`，
   // 非锚点（含只有推理的消息）不渲染按钮。
   const branchAnchors = useMemo(
-    () => resolveBranchAnchors(messages, { isResponding, hasPendingApproval }),
-    [messages, isResponding, hasPendingApproval],
+    () => resolveBranchAnchors(renderedMessages, { isResponding, hasPendingApproval }),
+    [renderedMessages, isResponding, hasPendingApproval],
   );
   const logLabel = hasConversationRows
     ? "Workspace conversation timeline"
@@ -121,7 +130,7 @@ export function MessageList({
   const { activeMessageId } = useConversationScroll({
     containerRef: scrollContainerRef,
     contentRef,
-    revision: messages,
+    revision: renderedMessages,
     suspended: backtrackNavigationActive,
     memoryKey: scrollMemoryKey,
   });
@@ -139,13 +148,13 @@ export function MessageList({
     if (!editingMessageId) {
       return;
     }
-    if (!messages.some((message) => message.id === editingMessageId)) {
+    if (!renderedMessages.some((message) => message.id === editingMessageId)) {
       // P0-2 机械搬迁：保留原「编辑目标不在列表时同步复位编辑态」语义。
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setEditingMessageId(null);
       setInlineEditDraft("");
     }
-  }, [editingMessageId, messages]);
+  }, [editingMessageId, renderedMessages]);
 
   useEffect(() => {
     if ((isResponding || backtrackNavigationActive) && editingMessageId) {
@@ -205,7 +214,7 @@ export function MessageList({
             <p className="max-w-[32rem] text-sm leading-6 text-muted-foreground">
               {t("panels.messages.messageList.emptyHint")}
             </p>
-            {messages.length > 0 ? (
+            {renderedMessages.length > 0 ? (
               <p className="max-w-[32rem] text-sm leading-6 text-muted-foreground">
                 {t("panels.messages.messageList.emptyInfraOnlyHint")}
               </p>

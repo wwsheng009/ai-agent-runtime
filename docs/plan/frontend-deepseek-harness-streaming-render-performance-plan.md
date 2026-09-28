@@ -1,6 +1,6 @@
 # 前端万级流事件渲染性能方案（deepseek-harness 参考实现取证）
 
-> 状态：**P0-1 / P0-2 已实施并验证（2026-09-28，见 §11）；P1/P2 待立项或按需推进**
+> 状态：**P0-1 / P0-2 / P1-1 / P1-2 已实施并验证（2026-09-28，见 §11）；P1-3 起待立项或按需推进**
 > 日期：2026-09-28
 > 参考仓库：`E:\projects\ai\deepseek-harness`（master @ `c291e7961a`，2026-09-10）
 > 目标仓库：本仓库 `frontend/`
@@ -407,9 +407,105 @@ Deque 不做背压、不做合并、不做丢弃——**容量、coalescing、�
 - 隐藏标签页流式期间 ≈0 工作（CPU 验收项待探针复测）；
 - no-op 批次不产生重渲染；读路径无陈旧快照，且不在 React 渲染期同步通知订阅方。
 
+### P1-1 订阅切片——会话级 live 分片 + 内容提交结构门（已实施）
+
+**问题**
+
+- 运行时通道的高帧率内容提交（打字机增量 / tool 进度，合帧节流后仍可达 ~8 次/秒，见
+  P0-2 记录 330ms/s）此前全部落页面级 thread state：一次提交触发
+  `WorkspacePage → WorkspaceShell → 侧栏 / topbar / 面板 / 消息列` 整树重渲染；
+- 参考仓库（§6）的粒度是「页面结构 / 会话 / 会话内节点」三级 observable，本仓库此前只有
+  页面级 thread state 一个粒度。
+
+**改动**
+
+- 新增 `frontend/src/lib/thread-state/thread-store.ts`：**live / 结构双通道**外部 store。
+  - 结构通道：多线程全量快照，页面级订阅（`useSyncExternalStore`），现有消费方语义不变；
+  - live 通道：按线程 id 的每会话分片 + 全局通知——结构提交同时推进两通道；live-only
+    提交只通知该会话订阅者；
+  - `update(updater, { live: true })` 即内容提交结构门；不传 `live` 时与改造前同语义；
+  - `useLiveThread(threadId)`：会话级 uSES 选择 hook，线程不存在时返回 undefined。
+- `hooks/workspace/use-workspace-thread-selection.ts`：thread state 收口到 store；
+  `writeThreads` 保持 `mergeRuntimeSessionsIntoThreads` 合并语义；新增 `setThreadsLive`
+  （live-only 写入器），`setThreads` 仍走结构通道。
+- `hooks/workspace/use-session-runtime-stream.ts`：**内容提交结构门**——整批
+  `batch.every(shouldApplyLiveDelta)` 且非 transport error 降级态时走 `setThreadsLive`
+  （消息列订阅）；任何含持久事件 / 降级恢复语义的批次回落结构通道；未接双通道的调用方
+  （测试 / 独立环境）回落 `setThreads`，行为不变。
+- `hooks/workspace/use-workspace-live.ts`：透传 `setThreadsLive`（可选）。
+- `components/workspace/message-list.tsx`（+ `types.ts`）：新增可选 `threadId` prop；
+  组件内按会话订阅 live 分片，live 无值（无 store / 该会话不在 store）时回落 props——
+  独立渲染与测试环境保持改造前行为。
+- `pages/workspace-page.tsx`、`workspace-shell/main-section.tsx`：接线（页面传
+  `setThreadsLive`；消息列传 `threadId={selectedThread.id}`）。
+
+**效果**
+
+- 流式内容帧只重渲染消息列子树（按会话订阅），侧栏 / topbar / 面板不再随高频内容提交重渲染；
+- 结构提交（新消息 / 回滚 / 会话状态 / 降级恢复）仍走结构通道，页面级语义零变化；
+- 消息列 props 回落保证测试与独立渲染路径完全兼容（全部既有 message-list 用例未改即绿）。
+
+**验证**
+
+- 全量前端测试 **358 文件 / 2996 测试全绿**（含 use-session-runtime-stream /
+  use-workspace-live / message-list / use-workspace-thread-selection / frame-intake /
+  history-sync 等 242 项流式路径定向用例）；`tsc -b` 干净；
+- 渲染性能验收（侧栏重渲染次数随内容帧下降）待 `zz-perf-probe` 或 React Profiler 复测留档。
+
+### P1-2 发布分级 + 帧门（已实施）
+
+**问题**
+
+- 流事件此前一律「入队 + 120ms 合帧提交」：低频持久信号（结算 / 工具生命周期 /
+  回滚）与高频内容增量同节奏，immediate 类事件的延迟被合帧窗口吞掉；
+- live-only 进度镜像（`tool.progress` / `subagent.progress`，P1-5 后端节流后仍按
+  节流窗口逐条投递）与正文增量同频竞争提交节奏，事件数 : 提交数不够「远小于 1:1」；
+- 参考实现（§5.2 / §5.3）对事件声明 publication 级别：usage/finish → `none`、
+  正文增量 → `animation-frame`（连跨三次绘制机会 ≈20Hz）、结算/工具 →
+  `immediate`（取消挂起帧立即发布）。
+
+**改动**
+
+- 新增 `lib/thread-state/publication.ts`：`getPublicationLevel(event)` 三档分级——
+  delta 家族（`getRuntimeDeltaKind` ≠ null：正文 / 推理 / 图片增量）+ live-only
+  节流镜像（`tool/subagent.progress`，有 UI 落点）→ `animation-frame`；其余持久
+  事件 → `immediate`；`none` 档保留类型（占位对齐参考 usage/finish——本仓库事件
+  契约暂无对应类型，usage 走 analytics REST，不在地图内伪造落点）。
+- `agent-chat-turn/streaming-frame.ts`：调度器增加 pace 参数（`StreamingPace`）：
+  - `animation-frame` 档 = **120ms 频率下界 + 三帧门**（`PUBLICATION_FRAME_GATE_FRAMES
+    = 3`，连跨三次绘制机会才提交；挂起帧门去重）——120ms 维持提交频率预算
+    （「提交:事件 远小于 1:1」验收不回归），三帧门保证帧节奏（两次提交至少隔
+    3 个绘制机会，突发多事件合帧、上屏平稳不抖动）；
+  - `structural` 档（默认）**逐字节不变**：既有 120ms 最小间隔 + 一帧 rAF 对齐
+    （chat 通道与 330ms/s、−67% 历史验证语义不动）；
+  - `flush()` 即 immediate：取消挂起帧门立即提交（对齐参考
+    `assembly.ts:145-146` 的 `cancelFrame(); flush()`）。
+- `hooks/workspace/use-session-runtime-stream.ts`：onEvent 尾部按分级调度——
+  `immediate` 事件 `flush()`（对齐参考 `notifier.notifyNow`）；`animation-frame`
+  事件 `schedule({ pace: "animation-frame" })`；`none` 事件入队不调度（随下一次
+  合帧批顺带兑现，状态不丢、不为此开提交）。
+
+**效果**
+
+- 持久信号（结算 / 工具生命周期 / 回滚 / recovery）不再等 120ms 合帧：立即上屏
+  并取消挂起的内容帧，终态延迟下降；
+- 正文 / 进度增量保持 120ms 频率下界 + 三帧帧节奏（线性抖动消除，突发有界）；
+- 分级判定是纯函数、只决定「是否触发提交 / 以什么节奏」，不改变入队与合并兑现
+  语义（线程状态推进与「一条一次提交」顺序一致，P0-2 无落点旁路不受影响）。
+
+**验证**
+
+- 新增 `publication.test.ts`（5 项：三档映射 + 契约代表性快照防漂移）；
+  `streaming-frame.test.ts` 追加 4 项（三帧门节奏 / 门内去重 / immediate 打断 /
+  隐藏零工作）；`use-session-runtime-stream.test.tsx` 既有 11 项全绿（含
+  live-only 镜像提交回归——progress 归 animation-frame 档后仍按时兑现）；
+- 全量前端测试 359 文件 / 3005 测试全绿（基线 358/2996 + 新增 publication 5 项 +
+  streaming-frame 4 项）；`tsc -b` 干净。全量验证以 `--maxWorkers=4` 低并发执行，
+  规避默认并发 spawn 的 ENOMEM（本机内存紧张，非代码问题）。
+
 ### 未实施（后续）
 
-- **P1-1 订阅切片**（需立项，中高风险）；**P1-2 发布分级 + 帧门**（依赖 P1-1）；**P1-3 历史窗口评估**（按需）；
+- **P1-3 历史窗口评估**（按需）；
 - **P2-1 渲染面逐项核对**（memo / 增量 mdast / 折叠边界）；**P2-2 基准固化 + 预算制度**（需真实基准测量后再收紧）；**P2-3 性能决策记录**（本节为第一步留痕）。
 
 ---
@@ -447,6 +543,8 @@ Deque 不做背压、不做合并、不做丢弃——**容量、coalescing、�
 | `frontend/src/hooks/workspace/agent-chat-turn/streaming-frame.ts` | rAF 合帧 + 后台兜底 + 可见性 flush；`MIN_COMMIT_INTERVAL_MS=120`；`STRUCTURAL_COMMIT_INTERVAL_MS=1000`；330ms/s、−67% 实测记录 |
 | `frontend/src/api/runtime/sse.ts`（+ `sse.test.ts`） | 自研 SSE 流解析器（P0-1 审计对象） |
 | `frontend/src/lib/live-stream-text.ts` | live 揭示文本通道（瞬态/持久分离雏形） |
+| `frontend/src/lib/thread-state/thread-store.ts` | live / 结构双通道线程 store；按会话 live 分片（P1-1） |
+| `frontend/src/lib/thread-state/publication.ts` | 发布分级 `none / animation-frame / immediate`（P1-2） |
 | `frontend/src/hooks/workspace/use-session-runtime-stream.ts` | 重连循环与 runtime 提交调度 |
 | `frontend/src/e2e/` 手动探针 `zz-perf-probe.manual.ts`（见 streaming-frame.ts 注释） | 现有性能探针 |
 | `frontend/src/components/workspace/trajectory/trajectory-virtual-rows.ts` 等 | 我们已有的虚拟化落点（轨迹/Diff/文件浏览器） |
@@ -464,4 +562,4 @@ Deque 不做背压、不做合并、不做丢弃——**容量、coalescing、�
 
 ---
 
-*取证部分为只读产物（参考仓库未发生任何改动）；P0-1 / P0-2 实施与验证记录见 §11。*
+*取证部分为只读产物（参考仓库未发生任何改动）；P0-1 / P0-2 / P1-1 / P1-2 实施与验证记录见 §11。*

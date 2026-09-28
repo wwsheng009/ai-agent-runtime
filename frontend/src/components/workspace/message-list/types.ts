@@ -66,4 +66,10 @@ export type MessageListProps = {
    */
   streamStalled?: boolean;
   style?: CSSProperties;
+  /**
+   * P1-1 会话级 live 分片：传入所选线程 id 后，消息列按会话订阅 thread store 的
+   * live 视图（流式内容提交只通知本会话订阅者）；缺省（独立渲染 / 无 store）时
+   * 回落 props 传入的 messages/artifacts，行为与改造前一致。
+   */
+  threadId?: string;
 };

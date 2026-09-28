@@ -20,6 +20,29 @@
 const MIN_COMMIT_INTERVAL_MS = 120;
 
 /**
+ * **三帧门**（P1-2 发布分级）：`animation-frame` 档的增量提交必须**连跨三次绘制
+ * 机会**（60fps 下 ≈20Hz 上限）后才上屏。
+ *
+ * 参考取证 `ui-conversation/.../assembly.ts:130-147`：高频流更新先挂起一个 rAF，
+ * 回调里再连排两次，第三次回调才 flush——挂起帧存在时再次调度直接去重
+ * （`if (this.frame !== undefined) return`）。我们不照抄其数字（§9.3.3），
+ * 3 帧 = 50ms 是有界节奏：P1-1 切片后 live 通道提交只打消息列，可放宽回帧对齐
+ * （计划书 P1-1 预期），同时突发发布频率 ≤ 帧门上限（计划书 P1-2 预期）。
+ *
+ * 与 `MIN_COMMIT_INTERVAL_MS` 的关系：**合并而非叠加**。
+ * - `animation-frame` 档：**120ms 下界 + 三帧门**——120ms 维持提交频率预算
+ *   （验收「提交次数:事件数 远小于 1:1」，P0-2 的 −67% 实测不回归）；三帧门保证
+ *   帧节奏（两次提交至少隔 3 个绘制机会，突发多事件合帧、上屏平稳不抖动）；
+ * - `structural` 档（默认 / 持久信号）：既有 120ms 最小间隔 + 一帧 rAF 对齐，
+ *   逐字节不变（chat 通道与历史验证语义不动）；
+ * - `immediate`（`flush({force:true})`）取消挂起帧立即提交，两档共用。
+ */
+export const PUBLICATION_FRAME_GATE_FRAMES = 3;
+
+/** 提交节奏档：`animation-frame` = 三帧门（内容增量）；`structural` = 既有最小间隔（含持久信号）。 */
+export type StreamingPace = "animation-frame" | "structural";
+
+/**
  * **结构快照**（thread store 里的正文副本）的最小间隔。
  *
  * live 通道（`lib/live-stream-text.ts`）接管了"正在揭示的文本"之后，store 里的正文
@@ -47,6 +70,12 @@ export function createStreamingFrameScheduler(
   let pendingStreamingFrame: number | null = null;
   let pendingStreamingTimeout: number | null = null;
   let lastCommitAt = 0;
+  /**
+   * P1-2 三帧门剩余帧数：`animation-frame` 档排帧时置 3，rAF 回调里递减，
+   * 减到 0 才提交（连跨三次绘制机会）；`structural` 档恒为 0/1（一帧即提交）。
+   * `flush`（immediate）/ 兜底定时器跳过剩余门数直接兑现（有界延迟）。
+   */
+  let frameGateRemaining = 0;
   /**
    * P0-2：自上次提交以来是否存在未兑现的渲染请求。
    * - `schedule()` 置脏，提交清脏；
@@ -81,6 +110,7 @@ export function createStreamingFrameScheduler(
     }
     pendingStreamingFrame = null;
     clearPendingStreamingTimeout();
+    frameGateRemaining = 0;
     dirty = false;
   };
 
@@ -103,12 +133,8 @@ export function createStreamingFrameScheduler(
     commitStreamingMessage(true);
   };
 
-  /** 帧对齐提交（rAF + 后台标签页 setTimeout 兜底，G3）。 */
-  const scheduleStreamingFrame = () => {
-    if (pendingStreamingFrame !== null) {
-      return;
-    }
-
+  /** 排一次 rAF；回调里按三帧门剩余帧数决定再排或提交。 */
+  const scheduleFrameOnce = () => {
     pendingStreamingFrame = window.requestAnimationFrame(() => {
       pendingStreamingFrame = null;
       clearPendingStreamingTimeout();
@@ -119,8 +145,25 @@ export function createStreamingFrameScheduler(
       if (!dirty) {
         return; // 无变化：不空提交
       }
+      // P1-2 三帧门：剩余门数未耗尽则连排下一帧（跨绘制机会），不提交。
+      frameGateRemaining -= 1;
+      if (frameGateRemaining > 0) {
+        scheduleFrameOnce();
+        return;
+      }
       commitStreamingMessage();
     });
+    return pendingStreamingFrame;
+  };
+
+  /** 帧对齐提交（rAF + 后台标签页 setTimeout 兜底，G3）。`gateFrames` = 三帧门门数。 */
+  const scheduleStreamingFrame = (gateFrames: number) => {
+    if (pendingStreamingFrame !== null) {
+      return;
+    }
+
+    frameGateRemaining = gateFrames;
+    scheduleFrameOnce();
 
     // 后台兜底（G3）只在可见时保留：隐藏标签页零工作（P0-2），恢复可见由
     // visibilitychange 一次冲刷；挂起事件已累积在 turnState / 挂起批次里，不丢。
@@ -143,11 +186,13 @@ export function createStreamingFrameScheduler(
       if (!dirty) {
         return;
       }
+      // 兜底不等满三帧门（100ms 已超过三帧 ≈50ms）：有界延迟直接兑现。
+      frameGateRemaining = 0;
       commitStreamingMessage();
     }, 100);
   };
 
-  const scheduleStreamingMessage = () => {
+  const scheduleStreamingMessage = (options?: { pace?: StreamingPace }) => {
     dirty = true;
     // P0-2：隐藏标签页零工作——不排 rAF / 不排兜底定时器；恢复可见时
     // visibilitychange 看到脏位并一次冲刷。
@@ -166,18 +211,25 @@ export function createStreamingFrameScheduler(
       return;
     }
 
-    // 距上次页面级提交不足最小间隔：先等满，再对齐到下一帧提交；
+    // P1-2 发布分级：animation-frame 档 = 120ms 下界 + 三帧门（帧节奏）；
+    // structural 档 = 既有 120ms + 一帧 rAF（逐字节不变）。
+    const gateFrames =
+      (options?.pace ?? "structural") === "animation-frame"
+        ? PUBLICATION_FRAME_GATE_FRAMES
+        : 1;
+
+    // 距上次页面级提交不足最小间隔：先等满，再按档位排帧；
     // 等待期间到达的 delta 已累积在 turnState 里，提交时一次性兑现。
     const waitMs = MIN_COMMIT_INTERVAL_MS - (now() - lastCommitAt);
     if (waitMs > 0) {
       pendingStreamingTimeout = window.setTimeout(() => {
         pendingStreamingTimeout = null;
-        scheduleStreamingFrame();
+        scheduleStreamingFrame(gateFrames);
       }, waitMs);
       return;
     }
 
-    scheduleStreamingFrame();
+    scheduleStreamingFrame(gateFrames);
   };
 
   const handleVisibilityChange = () => {

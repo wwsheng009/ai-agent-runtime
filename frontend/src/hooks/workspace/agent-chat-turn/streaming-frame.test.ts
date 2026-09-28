@@ -89,4 +89,76 @@ describe("createStreamingFrameScheduler（P0-2 惰性通知语义）", () => {
     frameCallback();
     expect(render).toHaveBeenCalledTimes(1);
   });
+
+  it("P1-2 三帧门：animation-frame 档 120ms 下界后连跨三次绘制机会才提交一次", () => {
+    const scheduler = createStreamingFrameScheduler(render);
+    scheduler.schedule({ pace: "animation-frame" });
+    // 120ms 频率下界仍生效（提交:事件 远小于 1:1 验收）：先等满再排帧。
+    expect(rafCallbacks).toHaveLength(0);
+    vi.advanceTimersByTime(120);
+    expect(rafCallbacks).toHaveLength(1);
+
+    rafCallbacks.shift()!();
+    expect(render).not.toHaveBeenCalled(); // 第 1 次绘制机会：再排
+    expect(rafCallbacks).toHaveLength(1);
+
+    rafCallbacks.shift()!();
+    expect(render).not.toHaveBeenCalled(); // 第 2 次绘制机会：再排
+    expect(rafCallbacks).toHaveLength(1);
+
+    rafCallbacks.shift()!();
+    expect(render).toHaveBeenCalledTimes(1); // 第 3 次绘制机会：提交
+    expect(render.mock.calls[0][0]).toEqual({ force: false });
+  });
+
+  it("P1-2 三帧门去重：门内重复调度并入同一次提交", () => {
+    const scheduler = createStreamingFrameScheduler(render);
+    scheduler.schedule({ pace: "animation-frame" });
+    scheduler.schedule({ pace: "animation-frame" });
+    scheduler.schedule(); // structural 档挂起期间也并入（脏位合一）
+    expect(rafCallbacks).toHaveLength(0);
+    vi.advanceTimersByTime(120);
+    expect(rafCallbacks).toHaveLength(1);
+
+    rafCallbacks.shift()!();
+    rafCallbacks.shift()!();
+    rafCallbacks.shift()!();
+    expect(render).toHaveBeenCalledTimes(1);
+  });
+
+  it("P1-2 immediate：flush 取消挂起帧门并立即提交，迟到帧不再提交", () => {
+    const scheduler = createStreamingFrameScheduler(render);
+    scheduler.schedule({ pace: "animation-frame" });
+    vi.advanceTimersByTime(120);
+    rafCallbacks.shift()!(); // 第 1 次绘制机会：挂起帧门
+    expect(rafCallbacks).toHaveLength(1);
+    expect(render).not.toHaveBeenCalled();
+
+    // 持久事件（immediate）：取消挂起帧，立即提交。
+    scheduler.flush();
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(render.mock.calls[0][0]).toEqual({ force: true });
+
+    // 已取消的帧门回调即使迟到也不再提交（脏位已被 flush 清掉）。
+    while (rafCallbacks.length > 0) {
+      rafCallbacks.shift()!();
+    }
+    expect(render).toHaveBeenCalledTimes(1);
+  });
+
+  it("P1-2 隐藏标签页：三帧门同样零工作，恢复可见一次冲刷", () => {
+    const scheduler = createStreamingFrameScheduler(render);
+    scheduler.attachVisibilityListener();
+    setVisibility("hidden");
+    scheduler.schedule({ pace: "animation-frame" });
+    vi.advanceTimersByTime(1000);
+    expect(rafMock).not.toHaveBeenCalled();
+    expect(render).not.toHaveBeenCalled();
+
+    setVisibility("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(render.mock.calls[0][0]).toEqual({ force: true });
+    scheduler.detachVisibilityListener();
+  });
 });
