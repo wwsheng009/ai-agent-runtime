@@ -28,6 +28,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/filebrowse"
 	"github.com/wwsheng009/ai-agent-runtime/internal/filetransport"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gitbrowse"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
@@ -355,6 +356,19 @@ func runServe(args []string) int {
 		return 1
 	}
 
+	// 落盘兜底（2026-09-28）：serve 缺省只写 stderr（LogConfig 缺省 output=stdout），
+	// 一旦进程以 nohup / 后台方式拉起，日志只剩重定向文件甚至丢失——backend/logs
+	// 下的 runtime-server 日志停在 9/16 就是证据。用户未显式配置输出目标时，这里
+	// 补一份 ~/.aicli/logs/runtime-server.log（与 aicli CLI 日志同目录，lumberjack
+	// 轮转），让 /api/agent/chat 的分段耗时与错误现场可事后复盘。
+	// 显式 output=file/both 或 enabled=false 的配置一律尊重，不覆盖。
+	serveLogOutput := strings.ToLower(strings.TrimSpace(cfg.Log.Output))
+	if serveLogOutput == "" || serveLogOutput == "stdout" {
+		cfg.Log.Output = "both"
+		if strings.TrimSpace(cfg.Log.FilePath) == "" {
+			cfg.Log.FilePath = "~/.aicli/logs/runtime-server.log"
+		}
+	}
 	if err := logger.InitLogger(&cfg.Log); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
 		return 1
@@ -985,6 +999,9 @@ type runtimeServerApp struct {
 	ledgerStore     io.Closer
 	supervision     *runtimeserver.SupervisionControlPlane
 	subagentBatches io.Closer
+	// knowledge 是本进程持有的知识层接入句柄（Phase 1 交付 6）。
+	// mode=off 时为 nil；close() 里释放并等待后台首次索引退出。
+	knowledge *knowledge.Activation
 }
 
 // loadRuntimeServerManager 通过分层栈加载 runtime.yaml（P2）：
@@ -1291,6 +1308,10 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		router.HandleFunc("/", runtimeInfoHandler).Methods(http.MethodGet)
 	}
 
+	// Phase 1 交付 6：workspace 解析之后、app 对外提供服务之前接入知识层。
+	// mode=off（默认）时不建库不建锁；失败只 warn，不让启动失败。
+	knowledgeActivation := bootRuntimeServerKnowledge(runtimeConfig, runtimeManager.GetFilePath())
+
 	return &runtimeServerApp{
 		router:          router,
 		handler:         handler,
@@ -1303,6 +1324,7 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		ledgerStore:     ledgerStore,
 		supervision:     supervisionPlane,
 		subagentBatches: subagentBatches,
+		knowledge:       knowledgeActivation,
 	}, nil
 }
 
@@ -1384,6 +1406,14 @@ func (a *runtimeServerApp) close() {
 		if err := a.supervision.Close(); err != nil {
 			logger.Warn("Failed to close supervision control plane", logger.Err(err))
 		}
+	}
+	// 知识层最后关：Close 会取消并等待后台首次索引退出（它持写事务），
+	// 放在其它组件之后可以保证退出阶段没有新的索引请求进来。
+	if a.knowledge != nil {
+		if err := a.knowledge.Close(); err != nil {
+			logger.Warn("Failed to close knowledge layer", logger.Err(err))
+		}
+		a.knowledge = nil
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -68,6 +69,10 @@ type ChatSession struct {
 	// 外部目录门批准结果的并集）。随会话元数据持久化，并按 run 下发到 agent
 	// options 的 allowed_roots。
 	AllowedRoots []string
+	// Knowledge 是本会话持有的知识层接入句柄（Phase 1 交付 6）。
+	// knowledge.mode=off（默认）时恒为 nil——所有消费点都必须接受 nil，
+	// 这条不变量是"off 与无知识层逐字节一致"的落点。
+	Knowledge *knowledge.Activation
 	HTTPDebug    bool
 	Stream       bool
 	// FastMode enables Codex service_tier=priority. Only meaningful when protocol is codex.
@@ -736,6 +741,11 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	persistChatStartupPreferences(cfg, opts, persistenceState.loadedRuntimeSession, runtimeState)
 	finalCleanup := buildChatFinalCleanup(session, cleanupSession)
 	registerExitCleanup(finalCleanup)
+	// Phase 1 交付 6：workspace 解析之后接入知识层（supplement/05 §2.2）。
+	// mode=off（默认）时本调用不碰磁盘、不建锁文件；激活失败只降级不改行为。
+	attachChatKnowledge(session)
+	// 进程收尾兜底：退出清理先于 finalCleanup 释放全部接入（含未挂到会话上的）。
+	registerExitCleanup(releaseAllChatKnowledge)
 	defer runExitCleanup()
 
 	// 注册渲染/显示状态 HTTP provider：/debug/chat/status 端点回调此函数

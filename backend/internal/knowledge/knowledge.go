@@ -122,6 +122,14 @@ func (l *Layer) Store() Store {
 	return l.store
 }
 
+// DBPath 返回 store 的落盘路径（禁用时为空）；状态面与诊断日志用它展示落点。
+func (l *Layer) DBPath() string {
+	if l == nil {
+		return ""
+	}
+	return l.cfg.storePath()
+}
+
 // Index 在需要时（重）建索引；只有 owner 会真正执行，reader 与禁用层是空操作。
 func (l *Layer) Index(ctx context.Context) (IndexResult, error) {
 	if l == nil || l.store == nil || l.role != RoleOwner {
@@ -130,12 +138,20 @@ func (l *Layer) Index(ctx context.Context) (IndexResult, error) {
 	return RunIndex(ctx, l.store, l.cfg)
 }
 
-// Stats 返回 store 的行数汇总；禁用或不可用时返回零值。
+// errWorkspaceNotIndexed 表示 store 已打开但该 workspace 尚无登记行
+// （owner 还没跑过索引）。它不是失败，而是 reader 的常见初始状态。
+var errWorkspaceNotIndexed = errors.New("knowledge: workspace is not indexed yet")
+
+// Stats 返回 store 的行数汇总；禁用、不可用或尚未索引时返回零值。
 func (l *Layer) Stats(ctx context.Context) (Stats, error) {
 	if l == nil || l.store == nil {
 		return Stats{}, nil
 	}
 	wsID, err := l.ensureWorkspace(ctx)
+	if errors.Is(err, errWorkspaceNotIndexed) {
+		// reader 看到"还没索引过"是正常状态（owner 尚未建行），不是错误。
+		return Stats{}, nil
+	}
 	if err != nil {
 		return Stats{}, err
 	}
@@ -171,6 +187,10 @@ func (l *Layer) RecordInvalidation(ctx context.Context, reason, scopeJSON string
 	if l == nil || l.store == nil {
 		return nil
 	}
+	if l.role != RoleOwner {
+		// 保持既有语义：写操作在 reader 上硬失败，不静默丢弃。
+		return ErrReadOnlyStore
+	}
 	wsID, err := l.ensureWorkspace(ctx)
 	if err != nil {
 		return err
@@ -183,12 +203,28 @@ func (l *Layer) RecordInvalidation(ctx context.Context, reason, scopeJSON string
 }
 
 // ensureWorkspace 登记（或读取）workspace 行并返回其 id。
+//
+// owner 走 upsert（登记并刷新 updated_at）；reader **只查不写**——最常见的接入
+// 形态是 aicli 作为 reader 挂在 runtime-server 后面，如果读状态也要写库，reader
+// 会直接拿到 ErrReadOnlyStore 而完全不可用（Phase 1 交付 5 的状态面依赖此路径）。
+// 尚未登记（owner 还没索引过）时返回 errWorkspaceNotIndexed。
 func (l *Layer) ensureWorkspace(ctx context.Context) (string, error) {
 	if l.workspaceID != "" {
 		return l.workspaceID, nil
 	}
 	if strings.TrimSpace(l.cfg.Workspace) == "" {
 		return "", errors.New("knowledge: workspace must be set")
+	}
+	if l.role != RoleOwner {
+		id, ok, err := l.store.FindWorkspace(ctx, l.cfg.Workspace)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "", errWorkspaceNotIndexed
+		}
+		l.workspaceID = id
+		return id, nil
 	}
 	id, err := l.store.EnsureWorkspace(ctx, Workspace{RootPath: l.cfg.Workspace})
 	if err != nil {

@@ -177,6 +177,23 @@ func (s *sqliteStore) EnsureWorkspace(ctx context.Context, ws Workspace) (string
 	return ws.ID, nil
 }
 
+// FindWorkspace 按 root_path 查既有工作区行；纯读，readOnly 句柄同样可用。
+func (s *sqliteStore) FindWorkspace(ctx context.Context, rootPath string) (string, bool, error) {
+	if strings.TrimSpace(rootPath) == "" {
+		return "", false, errors.New("knowledge: workspace root path is required")
+	}
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE root_path = ?`, rootPath).Scan(&id)
+	switch {
+	case err == nil:
+		return id, true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return "", false, nil
+	default:
+		return "", false, err
+	}
+}
+
 // UpsertFile 记录文件身份与内容哈希。
 func (s *sqliteStore) UpsertFile(ctx context.Context, rec FileRecord) (string, error) {
 	if rec.WorkspaceID == "" || strings.TrimSpace(rec.Path) == "" {

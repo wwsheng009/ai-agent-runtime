@@ -625,6 +625,13 @@ func buildChatFinalCleanup(session *ChatSession, cleanupSession func()) func() {
 	return func() {
 		once.Do(func() {
 			finalizeChatSession(session)
+			// 知识层接入（Phase 1 交付 6）：会话结束时释放本会话持有的引用；
+			// 引用归零才真正关 store。mode=off 时 session.Knowledge 为 nil，
+			// 这里是纯 no-op。
+			if session != nil && session.Knowledge != nil {
+				releaseChatKnowledge(session.Knowledge.Workspace(), session.Knowledge)
+				session.Knowledge = nil
+			}
 			if session != nil && session.TitleNotifier != nil {
 				session.TitleNotifier.Close()
 			}

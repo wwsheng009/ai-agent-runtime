@@ -20,6 +20,12 @@ type Store interface {
 	// EnsureWorkspace 以 upsert 语义登记工作区，返回其 id。
 	EnsureWorkspace(ctx context.Context, ws Workspace) (string, error)
 
+	// FindWorkspace 按 root_path 查既有工作区行；ok=false 表示尚未登记。
+	//
+	// 与 EnsureWorkspace 分离，是为了让 reader（只读角色）也能读状态面：
+	// 读者不得写库，但"这个 workspace 有没有被索引过"是纯读问题。
+	FindWorkspace(ctx context.Context, rootPath string) (string, bool, error)
+
 	// UpsertFile 记录文件的身份与内容哈希，返回稳定的文件 id。
 	// 调用方以 (workspace, path) 为键；重复调用是幂等的。
 	UpsertFile(ctx context.Context, rec FileRecord) (string, error)

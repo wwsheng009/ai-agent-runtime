@@ -245,6 +245,33 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_token_usage_history_created_at
 			ON token_usage_history(created_at DESC, id DESC)`,
+		// Phase 0 交付 7 / ADR-0003 §4.1：探索归因与 shadow 差异率度量。
+		// 只建表与索引，不产生数据（mode=off 下没有任何调用方会写入）。
+		// DDL 与 ADR-0003 §4.1 逐列对齐；追加语句复用 IF NOT EXISTS 幂等语义（D7）。
+		`CREATE TABLE IF NOT EXISTS exploration_attribution (
+			id TEXT PRIMARY KEY,
+			session_id TEXT,
+			turn_id TEXT,
+			request_id TEXT,
+			tool TEXT NOT NULL,
+			query_hash TEXT,
+			project_id TEXT,
+			baseline_n INTEGER NOT NULL DEFAULT 0,
+			candidate_n INTEGER NOT NULL DEFAULT 0,
+			overlap_n INTEGER NOT NULL DEFAULT 0,
+			baseline_tokens INTEGER NOT NULL DEFAULT 0,
+			candidate_tokens INTEGER NOT NULL DEFAULT 0,
+			coverage REAL,
+			economy REAL,
+			usable INTEGER NOT NULL DEFAULT 0,
+			source TEXT,
+			knowledge_mode TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_exploration_attribution_created_at
+			ON exploration_attribution(created_at DESC, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_exploration_attribution_tool_time
+			ON exploration_attribution(tool, created_at DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {

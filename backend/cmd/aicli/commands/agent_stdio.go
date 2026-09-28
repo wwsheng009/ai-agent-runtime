@@ -16,6 +16,8 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/buildinfo"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -170,6 +172,12 @@ type acpHostSession struct {
 	// ACP image blocks (guarded by mu; removed by closeSessionLocked).
 	imageDir string
 	imageSeq int
+	// knowledge 是本会话持有的知识层接入句柄（Phase 1 交付 6 / supplement/05 §2.3）。
+	// workspace 来自 `session/new` 的 roots/cwd，绝不用进程 cwd 兜底之外的猜测；
+	// client 不提供 root 且进程 cwd 不可用时为 nil（mode=off 优雅降级）。
+	knowledge *knowledge.Activation
+	// knowledgeWorkspace 记录接入时的 workspace，用于释放时按同一 key 归还引用。
+	knowledgeWorkspace string
 }
 
 func newACPSessionHost(cfg *config.Config, opts *agentStdioOptions) *acpSessionHost {
@@ -289,7 +297,11 @@ func (h *acpSessionHost) NewSession(ctx context.Context, req acp.NewSessionReque
 	h.sess[hostSess.id] = hostSess
 	// Record the workspace so session/list?cwd=<workspace> can narrow the
 	// history panel to this project. Best-effort: never fails session/new.
-	recordACPSessionWorkspace(ctx, hostSess, acpResolveSessionWorkspace(cwd))
+	sessionWorkspace := acpResolveSessionWorkspace(cwd)
+	recordACPSessionWorkspace(ctx, hostSess, sessionWorkspace)
+	// Phase 1 交付 6：workspace 锚点取 session/new 的 roots/cwd（supplement/05 §2.3）。
+	// 无 root 或激活失败都只降级为"无知识层"，绝不报错、绝不让 session/new 失败。
+	h.attachSessionKnowledge(hostSess, sessionWorkspace)
 	// §4.5：客户端下发的 additionalDirectories 直接作为会话准入目录。
 	applyACPAdditionalDirectories(hostSess.chat, req.AdditionalDirectories)
 	// Advertise the command catalog + initial session_info without waiting for
@@ -933,6 +945,42 @@ func (h *acpSessionHost) closeSessionLocked(s *acpHostSession) {
 	if s.chat != nil && s.chat.ACPMCPSession != nil {
 		s.chat.ACPMCPSession.close()
 	}
+	// 归还知识层引用：引用归零才真正关 store。mode=off / 未接入时为 no-op。
+	if s.knowledge != nil {
+		releaseChatKnowledge(s.knowledgeWorkspace, s.knowledge)
+		s.knowledge = nil
+		s.knowledgeWorkspace = ""
+	}
+}
+
+// attachSessionKnowledge 为 ACP 会话接入知识层（Phase 1 交付 6）。
+//
+// ACP 是 editor 通过 stdio 驱动的协议，一个进程可服务多个 workspace，因此：
+//   - workspace 只认 `session/new` 的 roots/cwd（客户端不提供时退化为进程 cwd，
+//     与 `acpResolveSessionWorkspace` 的记录口径一致）；
+//   - workspace 为空时不调用 Activate —— supplement/05 §2.3 要求"无 root 时
+//     mode=off 优雅降级"，而不是让配置错误冒泡成 session/new 失败；
+//   - 失败只记 debug 日志：知识层是内部能力，不得改变 ACP 既有行为。
+func (h *acpSessionHost) attachSessionKnowledge(hostSess *acpHostSession, workspace string) {
+	if h == nil || hostSess == nil || h.cfg == nil || hostSess.chat == nil {
+		return
+	}
+	ws := strings.TrimSpace(workspace)
+	if ws == "" {
+		return
+	}
+	// knowledge 段在 runtime.yaml（`runtimecfg.RuntimeConfig`）里，与工具层同源。
+	runtimeConfig := loadRuntimeToolConfig(h.cfg, hostSess.chat)
+	act, err := acquireChatKnowledge(&runtimeConfig.Knowledge, ws)
+	if err != nil {
+		logpkg.Debugf("knowledge: ACP activation for %q skipped: %v", ws, err)
+		return
+	}
+	if act == nil {
+		return
+	}
+	hostSess.knowledge = act
+	hostSess.knowledgeWorkspace = ws
 }
 
 // isACPCancelError reports whether err is a real cancellation. Detection is
