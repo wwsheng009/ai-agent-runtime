@@ -342,6 +342,23 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 
+	// Path-position globs only fail when the literal token reaches rg/grep:
+	// an unmatched glob, a quoted token, or a shell that never expands globs
+	// (PowerShell/cmd). A glob that really expands under effectiveWorkdir -
+	// e.g. `grep -rn x cmd/aicli/commands/*.go` on bash - is a legitimate
+	// search and must not be rejected for its syntax.
+	if globToken, blocked := searchPathGlobLiteralToken(command, effectiveWorkdir); blocked {
+		return toolResultFailureWithCode(
+			fmt.Errorf("检测到搜索命令的 path 参数 `%s` 会被原样传给 rg/grep（当前 shell 不展开该通配符，或它在 workdir 下没有任何匹配），将以路径错误失败。请改用 `rg -g \"*.go\" pattern backend`、换成真实存在的目录，或优先调用 toolkit `grep`（path + glob）。", globToken),
+			string(runtimeerrors.ErrToolShellCompat),
+			"Prefer toolkit `grep` with path and glob. If shell rg is required, use `-g \"*.go\"` / `--glob` and keep path as a real directory; do not pass a path glob that matches no existing path.",
+			map[string]interface{}{
+				"failure_class": "shell_preflight",
+				"path_glob":     globToken,
+			},
+		), nil
+	}
+
 	// detach=true: fire-and-forget launch outside the per-command job object.
 	// Opt-in per call, and refusable through AICLI_SHELL_ALLOW_DETACH=0.
 	if detachRequested, _ := resolveBoolParam(params, "detach"); detachRequested {
@@ -397,7 +414,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			if duration > 0 {
 				metadata["duration_ms"] = duration.Milliseconds()
 			}
-			if next := bashCommandFailureNextAction(command, execResult.Output, err); next != "" {
+			if next := bashCommandFailureNextAction(command, execResult.Output, err, effectiveWorkdir); next != "" {
 				metadata[toolresult.MetadataNextActionKey] = next
 			}
 			content := formatShellCommandContent(exitCode, execResult.ShellType, effectiveWorkdir, duration, false, execResult.Output)
@@ -419,7 +436,7 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 			failureMetadata["exit_code"] = code
 		}
 		annotateTerminationMetadata(failureMetadata, err)
-		if next := bashCommandFailureNextAction(command, execResult.Output, err); next != "" {
+		if next := bashCommandFailureNextAction(command, execResult.Output, err, effectiveWorkdir); next != "" {
 			failureMetadata[toolresult.MetadataNextActionKey] = next
 		}
 		recoveryHint := ""
@@ -1550,9 +1567,9 @@ func friendlyHintFor(command string, output string, err error, workdir string) s
 		return "提示: Windows 下请使用 `type` 查看文件内容"
 	case isRipgrepOrGrepTool(searchCmd) ||
 		strings.Contains(outputLower, "regex parse error") ||
-		looksLikeSearchPathShellGlob(command) ||
+		searchPathGlobReachesTool(command, workdir) ||
 		searchOutputLooksLikePathIOError(output):
-		if hint := friendlyHintForSearchTool(searchCmd, command, output, exitCode); hint != "" {
+		if hint := friendlyHintForSearchTool(searchCmd, command, output, exitCode, workdir); hint != "" {
 			return hint
 		}
 	case exitCode == 127:
@@ -1644,7 +1661,7 @@ func isRipgrepOrGrepTool(name string) bool {
 
 // friendlyHintForSearchTool explains common rg/grep failures that models treat
 // as hard errors (regex parse, exit 1 = no matches). Prefer the dedicated grep tool.
-func friendlyHintForSearchTool(toolName, command, output string, exitCode int) string {
+func friendlyHintForSearchTool(toolName, command, output string, exitCode int, workdir string) string {
 	// Classify against cleaned search body so PowerShell NativeCommandError chrome
 	// does not hide the "exit 1 == no matches" recovery path.
 	cleaned := stripPowerShellNoiseForSearchClassification(output)
@@ -1667,7 +1684,7 @@ func friendlyHintForSearchTool(toolName, command, output string, exitCode int) s
 			"提示: %s 正则解析失败（常见于 JSON 参数里对引号/`|`/`()` 转义不完整）。优先改用 toolkit `grep`（可设 literal=true 做字面搜索，或 pcre2=true）；若必须 shell 调用，请用单引号包裹 pattern，或改用 `rg -F` 字面匹配。",
 			toolName,
 		)
-	case looksLikeSearchPathShellGlob(command) ||
+	case searchPathGlobReachesTool(command, workdir) ||
 		searchOutputLooksLikePathIOError(output) ||
 		searchOutputLooksLikePathIOError(cleaned):
 		return fmt.Sprintf(
@@ -2407,7 +2424,7 @@ func bashSearchNoMatchNextAction() string {
 
 // bashCommandFailureNextAction returns structured recovery guidance for hard
 // shell failures. Search-like failures prefer the dedicated grep tool.
-func bashCommandFailureNextAction(command, output string, err error) string {
+func bashCommandFailureNextAction(command, output string, err error, workdir string) string {
 	if err == nil {
 		return ""
 	}
@@ -2425,7 +2442,7 @@ func bashCommandFailureNextAction(command, output string, err error) string {
 	if looksLikeGitIgnoredPathFailure(command, combined) {
 		return "Git refused a path that is ignored by .gitignore / exclude rules. Inspect with `git check-ignore -v <path>` or `git status --ignored`. Use a non-ignored path, update ignore rules, or `git add -f` only when force-adding is intentional. Do not retry the same ignored path unchanged."
 	}
-	if looksLikeSearchPathShellGlob(command) ||
+	if searchPathGlobReachesTool(command, workdir) ||
 		searchOutputLooksLikePathIOError(output) ||
 		searchOutputLooksLikePathIOError(err.Error()) {
 		return "Shell search path looks like an unexpanded glob or path IO error. Prefer toolkit `grep` with path + glob; if using shell rg, put filters in `-g \"*.go\"` and keep path as a real directory. Do not retry `rg pattern dir/**/*.go` on Windows."
@@ -2477,13 +2494,9 @@ func bashCommandPreflight(command string) (blocked bool, message, nextAction str
 			fmt.Sprintf("检测到在 shell 中调用 toolkit 命令风格参数（%s ...）。`%s`/`grep`/`ls`/`glob`/`view` 是专用工具，不是 shell 可执行文件。请直接调用 toolkit 工具，不要写成 `bash command=\"%s -path ...\"`。", toolName, toolName, toolName),
 			fmt.Sprintf("Call the dedicated toolkit `%s` tool directly with structured args (path/file_path/pattern/glob). Do not invoke toolkit tool names as shell commands.", toolName)
 	}
-	// Path-position shell globs are especially harmful on Windows (os error 123),
-	// but they are also a poor pattern on all shells versus -g / toolkit grep.
-	if looksLikeSearchPathShellGlob(command) {
-		return true,
-			"检测到搜索命令在 path 位置使用了 shell 通配符（如 `backend/**/*.go` 或 `internal/errors/*.go`）。请改用 `rg -g \"*.go\" pattern backend`，或优先调用 toolkit `grep`（path + glob）。",
-			"Prefer toolkit `grep` with path and glob. If shell rg is required, use `-g \"*.go\"` / `--glob` and keep path as a real directory; do not put `*` in the path argument."
-	}
+	// Path-position globs are checked by searchPathGlobLiteralToken after the
+	// effective workdir is resolved: a glob that really expands to existing
+	// files is a legitimate search, only a literal-reaching glob is blocked.
 	if !runtimeexecutor.IsWindows() {
 		return false, "", ""
 	}
@@ -2495,17 +2508,26 @@ func bashCommandPreflight(command string) (blocked bool, message, nextAction str
 	return false, "", ""
 }
 
-// looksLikeSearchPathShellGlob reports rg/grep commands that place shell glob
-// metacharacters in a path positional argument (after the pattern). Common
-// residual failure on Windows: `rg -n foo backend/internal/**/*.go`.
-func looksLikeSearchPathShellGlob(command string) bool {
+// searchPathGlobCandidate is one path-position token of an rg/grep command that
+// carries shell glob metacharacters.
+type searchPathGlobCandidate struct {
+	Token  string
+	Quoted bool // the whole token came from a quoted span, so the shell never expands it
+}
+
+// searchPathGlobCandidates returns every path-position glob token in an rg/grep
+// command, preserving whether the token was fully quoted. The first positional
+// after the search tool is the pattern (a regex may legally contain * ? []), so
+// only later positionals are candidates; -g/--glob values are legitimate and
+// were already consumed as flag values.
+func searchPathGlobCandidates(command string) []searchPathGlobCandidate {
 	if !looksLikeSearchShellCommand(command) {
-		return false
+		return nil
 	}
-	parts := runtimeexecutor.SplitCommandTokens(command)
+	tokens := runtimeexecutor.SplitCommandTokensDetailed(command)
 	searchIdx := -1
-	for i, part := range parts {
-		base := strings.ToLower(filepath.Base(strings.TrimSpace(part)))
+	for i, token := range tokens {
+		base := strings.ToLower(filepath.Base(strings.TrimSpace(token.Text)))
 		base = strings.TrimSuffix(base, ".exe")
 		if isRipgrepOrGrepTool(base) {
 			searchIdx = i
@@ -2513,11 +2535,12 @@ func looksLikeSearchPathShellGlob(command string) bool {
 		}
 	}
 	if searchIdx < 0 {
-		return false
+		return nil
 	}
+	var candidates []searchPathGlobCandidate
 	positional := 0
-	for i := searchIdx + 1; i < len(parts); i++ {
-		part := strings.TrimSpace(parts[i])
+	for i := searchIdx + 1; i < len(tokens); i++ {
+		part := strings.TrimSpace(tokens[i].Text)
 		if part == "" {
 			continue
 		}
@@ -2531,7 +2554,7 @@ func looksLikeSearchPathShellGlob(command string) bool {
 				if searchFlagHasInlineValue(part) {
 					continue
 				}
-				if i+1 < len(parts) && !strings.HasPrefix(strings.TrimSpace(parts[i+1]), "-") {
+				if i+1 < len(tokens) && !strings.HasPrefix(strings.TrimSpace(tokens[i+1].Text), "-") {
 					i++
 				}
 			}
@@ -2544,6 +2567,183 @@ func looksLikeSearchPathShellGlob(command string) bool {
 		}
 		// Later positionals are paths: globs here are the residual failure mode.
 		if pathTokenHasShellGlob(part) {
+			candidates = append(candidates, searchPathGlobCandidate{Token: part, Quoted: tokens[i].FullyQuoted})
+		}
+	}
+	return candidates
+}
+
+// pathGlobResolution classifies how the shell will treat a path-position glob.
+type pathGlobResolution int
+
+const (
+	// pathGlobExpands: the shell expands the token to at least one real path
+	// under the command's workdir, so the search tool receives valid paths.
+	pathGlobExpands pathGlobResolution = iota
+	// pathGlobLiteral: the literal glob (or a shell that never expands
+	// native-command arguments) reaches rg/grep and fails with a path error.
+	pathGlobLiteral
+	// pathGlobUnknown: the token depends on shell state the runtime cannot
+	// evaluate statically, so preflight must not block it.
+	pathGlobUnknown
+)
+
+// shellExpandsUnquotedGlobs reports whether the runtime's active shell performs
+// filename expansion on unquoted tokens. POSIX shells do; PowerShell/cmd pass
+// wildcards through to native commands untouched (rg then reports os error 123
+// on Windows), so globs there still need the -g / toolkit-grep rewrite.
+func shellExpandsUnquotedGlobs(shell runtimeexecutor.Shell) bool {
+	switch shell.Type {
+	case runtimeexecutor.ShellTypeBash, runtimeexecutor.ShellTypeZsh, runtimeexecutor.ShellTypeSh:
+		return true
+	default:
+		return false
+	}
+}
+
+// classifyPathGlobResolution decides whether a path-position glob would reach
+// rg/grep literally - the failure this guard exists for - or expand to real
+// files. The glob is evaluated against workdir, the same directory the shell
+// runs in.
+//
+// Unresolvable shell syntax deliberately yields pathGlobUnknown instead of a
+// block: brace expansion, $VAR/`command` substitution, ~user, zsh's recursive
+// ** (which can match deeper than filepath.Glob's shell-agnostic ** == *), and
+// commands that cd before searching. Post-execution diagnostics still explain
+// real path IO failures.
+func classifyPathGlobResolution(token string, quoted bool, workdir string, shell runtimeexecutor.Shell, shellExpandsGlobs bool) pathGlobResolution {
+	if !shellExpandsGlobs {
+		return pathGlobLiteral
+	}
+	if quoted {
+		return pathGlobLiteral
+	}
+	pattern, ok := resolvePathGlobPattern(token)
+	if !ok {
+		return pathGlobUnknown
+	}
+	if !filepath.IsAbs(pattern) {
+		base := strings.TrimSpace(workdir)
+		if base == "" {
+			base = "."
+		}
+		pattern = filepath.Join(base, pattern)
+	}
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		// Malformed patterns (e.g. an unclosed `[`) are passed through
+		// literally by POSIX shells as well.
+		return pathGlobLiteral
+	}
+	if len(shellVisibleGlobMatches(matches, pattern)) > 0 {
+		return pathGlobExpands
+	}
+	if shell.Type == runtimeexecutor.ShellTypeZsh && strings.Contains(token, "**") {
+		// zsh expands ** recursively by default, so a shallow filepath.Glob
+		// miss does not prove the token would reach the tool literally.
+		return pathGlobUnknown
+	}
+	return pathGlobLiteral
+}
+
+// resolvePathGlobPattern normalizes a leading ~ and rejects token syntax whose
+// expansion depends on shell state the runtime cannot evaluate statically.
+func resolvePathGlobPattern(token string) (string, bool) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", false
+	}
+	if strings.ContainsAny(token, "$`") {
+		return "", false
+	}
+	if strings.Contains(token, "{") && strings.Contains(token, "}") {
+		return "", false
+	}
+	switch {
+	case strings.HasPrefix(token, "~/"), strings.HasPrefix(token, `~\`):
+		home, err := os.UserHomeDir()
+		if err != nil || strings.TrimSpace(home) == "" {
+			return "", false
+		}
+		rest := strings.TrimLeft(strings.TrimPrefix(token, "~"), `/\`)
+		return filepath.Join(home, rest), true
+	case strings.HasPrefix(token, "~"):
+		// ~user depends on the user database.
+		return "", false
+	}
+	return token, true
+}
+
+// shellVisibleGlobMatches filters filepath.Glob output to what a POSIX shell
+// would actually produce: a wildcard never matches a leading dot. Only the
+// final component is modeled, which covers the common `dir/*.go` case; a match
+// reached through a dot-prefixed intermediate directory may still be counted as
+// visible, keeping the guard permissive rather than over-blocking.
+func shellVisibleGlobMatches(matches []string, pattern string) []string {
+	if len(matches) == 0 {
+		return nil
+	}
+	lastComponent := pattern
+	if idx := strings.LastIndexAny(lastComponent, `/\`); idx >= 0 {
+		lastComponent = lastComponent[idx+1:]
+	}
+	if strings.HasPrefix(lastComponent, ".") {
+		return matches
+	}
+	visible := matches[:0]
+	for _, match := range matches {
+		if strings.HasPrefix(filepath.Base(match), ".") {
+			continue
+		}
+		visible = append(visible, match)
+	}
+	return visible
+}
+
+// searchPathGlobLiteralToken returns the first path-position glob in command
+// that would reach rg/grep literally under workdir: the runtime shell never
+// expands it, the token is quoted, or no existing path matches. A glob that
+// really expands - e.g. `grep -rn x cmd/aicli/commands/*.go` on bash - returns
+// ok=false and runs normally.
+func searchPathGlobLiteralToken(command, workdir string) (string, bool) {
+	candidates := searchPathGlobCandidates(command)
+	if len(candidates) == 0 {
+		return "", false
+	}
+	if searchRunsAfterDirectoryChange(runtimeexecutor.SplitCommandTokens(command)) {
+		// `cd other/dir && rg foo *.go`: the glob resolves against the cd
+		// target, not the effective workdir, so do not guess.
+		return "", false
+	}
+	shell := runtimeexecutor.DefaultUserShell()
+	expandsGlobs := shellExpandsUnquotedGlobs(shell)
+	for _, candidate := range candidates {
+		if classifyPathGlobResolution(candidate.Token, candidate.Quoted, workdir, shell, expandsGlobs) == pathGlobLiteral {
+			return candidate.Token, true
+		}
+	}
+	return "", false
+}
+
+// searchPathGlobReachesTool reports whether command contains a path-position
+// glob that would reach rg/grep literally under workdir.
+func searchPathGlobReachesTool(command, workdir string) bool {
+	_, reaches := searchPathGlobLiteralToken(command, workdir)
+	return reaches
+}
+
+// searchRunsAfterDirectoryChange reports whether a cd/chdir/Set-Location token
+// appears before the rg/grep invocation; workdir-based glob resolution is
+// unreliable for those commands.
+func searchRunsAfterDirectoryChange(tokens []string) bool {
+	for _, token := range tokens {
+		lower := strings.ToLower(strings.TrimSpace(token))
+		lower = strings.TrimSuffix(lower, ".exe")
+		if isRipgrepOrGrepTool(lower) {
+			return false
+		}
+		switch lower {
+		case "cd", "chdir", "set-location":
 			return true
 		}
 	}

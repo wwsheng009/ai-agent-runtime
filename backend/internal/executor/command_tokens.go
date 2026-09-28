@@ -6,28 +6,60 @@ import (
 	"unicode/utf8"
 )
 
+// CommandToken is one shell command token. FullyQuoted reports whether the whole
+// token originated from quoted spans ('...' / "..."); a partially quoted token
+// such as "dir/"*.go keeps FullyQuoted=false because its unquoted remainder is
+// still subject to shell expansion.
+type CommandToken struct {
+	Text        string
+	FullyQuoted bool
+}
+
 // SplitCommandTokens tokenizes a shell command while preserving quoted spans and
 // common shell separators as standalone tokens.
 func SplitCommandTokens(command string) []string {
+	tokens := SplitCommandTokensDetailed(command)
+	if len(tokens) == 0 {
+		return nil
+	}
+	texts := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		texts = append(texts, token.Text)
+	}
+	return texts
+}
+
+// SplitCommandTokensDetailed is SplitCommandTokens plus per-token quote
+// provenance. Token text is identical to SplitCommandTokens; FullyQuoted is true
+// only when no unquoted character contributed to the token.
+func SplitCommandTokensDetailed(command string) []CommandToken {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil
 	}
 
-	tokens := make([]string, 0, 8)
+	tokens := make([]CommandToken, 0, 8)
 	var current strings.Builder
 	inQuote := rune(0)
+	quoted := false
+	unquoted := false
 
 	flush := func() {
 		if current.Len() == 0 {
+			quoted = false
+			unquoted = false
 			return
 		}
 		token := strings.TrimSpace(current.String())
 		current.Reset()
 		if token == "" {
+			quoted = false
+			unquoted = false
 			return
 		}
-		tokens = append(tokens, token)
+		tokens = append(tokens, CommandToken{Text: token, FullyQuoted: quoted && !unquoted})
+		quoted = false
+		unquoted = false
 	}
 
 	for i := 0; i < len(command); {
@@ -43,11 +75,13 @@ func SplitCommandTokens(command string) []string {
 				switch next {
 				case '\\', '"', '$', '`':
 					current.WriteRune(next)
+					quoted = true
 					i += size + nextSize
 					continue
 				}
 			}
 			current.WriteRune(r)
+			quoted = true
 			i += size
 			continue
 		}
@@ -64,35 +98,36 @@ func SplitCommandTokens(command string) []string {
 			if i+size < len(command) {
 				next, nextSize := utf8.DecodeRuneInString(command[i+size:])
 				if next == '|' {
-					tokens = append(tokens, "||")
+					tokens = append(tokens, CommandToken{Text: "||"})
 					i += size + nextSize
 					continue
 				}
 			}
-			tokens = append(tokens, "|")
+			tokens = append(tokens, CommandToken{Text: "|"})
 			i += size
 		case r == '&':
 			flush()
 			if i+size < len(command) {
 				next, nextSize := utf8.DecodeRuneInString(command[i+size:])
 				if next == '&' {
-					tokens = append(tokens, "&&")
+					tokens = append(tokens, CommandToken{Text: "&&"})
 					i += size + nextSize
 					continue
 				}
 			}
-			tokens = append(tokens, "&")
+			tokens = append(tokens, CommandToken{Text: "&"})
 			i += size
 		case r == ';':
 			flush()
-			tokens = append(tokens, ";")
+			tokens = append(tokens, CommandToken{Text: ";"})
 			i += size
 		case r == '>' || r == '<':
 			flush()
-			tokens = append(tokens, string(r))
+			tokens = append(tokens, CommandToken{Text: string(r)})
 			i += size
 		default:
 			current.WriteRune(r)
+			unquoted = true
 			i += size
 		}
 	}

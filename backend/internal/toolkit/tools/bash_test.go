@@ -1228,7 +1228,7 @@ func TestFriendlyHintFor_WindowsHeadPipeline(t *testing.T) {
 }
 
 func TestFriendlyHintFor_RipgrepRegexParseError(t *testing.T) {
-	hint := friendlyHintForSearchTool("rg", `rg -n "foo|\"bar\"" backend`, `rg: regex parse error:`, 2)
+	hint := friendlyHintForSearchTool("rg", `rg -n "foo|\"bar\"" backend`, `rg: regex parse error:`, 2, "")
 	if !strings.Contains(hint, "正则解析失败") {
 		t.Fatalf("expected regex parse guidance, got %q", hint)
 	}
@@ -1248,7 +1248,7 @@ func TestFriendlyHintFor_RipgrepRegexParseError(t *testing.T) {
 }
 
 func TestFriendlyHintFor_RipgrepExitOneNoMatches(t *testing.T) {
-	hint := friendlyHintForSearchTool("rg", `rg -n "DoesNotExistSymbolXYZ" backend`, "", 1)
+	hint := friendlyHintForSearchTool("rg", `rg -n "DoesNotExistSymbolXYZ" backend`, "", 1, "")
 	if !strings.Contains(hint, "未匹配到结果") {
 		t.Fatalf("expected no-match guidance, got %q", hint)
 	}
@@ -1704,6 +1704,7 @@ func TestBashCommandFailureNextAction_SearchRegex(t *testing.T) {
 		`rg -n "foo(" backend`,
 		"rg: regex parse error:",
 		fmt.Errorf("exit status 2"),
+		"",
 	)
 	if !strings.Contains(next, "grep") {
 		t.Fatalf("expected grep recovery next_action, got %q", next)
@@ -1762,42 +1763,180 @@ func TestBashTool_ShellToolkitCommandPreflight(t *testing.T) {
 	}
 }
 
-func TestLooksLikeSearchPathShellGlob(t *testing.T) {
+func TestSearchPathGlobCandidates(t *testing.T) {
 	// Residual Windows failure: globs in path position.
-	if !looksLikeSearchPathShellGlob(`rg -n "ErrToolTimeout|func Is\(" backend/internal/errors/*.go`) {
-		t.Fatal("expected path-position *.go to be detected")
+	candidates := searchPathGlobCandidates(`rg -n "ErrToolTimeout|func Is\(" backend/internal/errors/*.go`)
+	if len(candidates) != 1 || candidates[0].Token != "backend/internal/errors/*.go" || candidates[0].Quoted {
+		t.Fatalf("expected one unquoted path glob candidate, got %#v", candidates)
 	}
-	if !looksLikeSearchPathShellGlob(`rg -n foo backend/internal/toolkit/tools/*.go | Select-Object -First 20`) {
+	if len(searchPathGlobCandidates(`rg -n foo backend/internal/toolkit/tools/*.go | Select-Object -First 20`)) != 1 {
 		t.Fatal("expected piped path glob to be detected")
 	}
-	if !looksLikeSearchPathShellGlob(`rg -n pattern backend/**/*.go`) {
+	if len(searchPathGlobCandidates(`rg -n pattern backend/**/*.go`)) != 1 {
 		t.Fatal("expected **/*.go path glob to be detected")
 	}
-	// -g / --glob values are legitimate and must not preflight-block.
-	if looksLikeSearchPathShellGlob(`rg -n foo -g "*.go" backend`) {
+	// The reported regression: -A 40 consumes its value and the pipe ends the
+	// search command, so the glob after the pattern must still be found.
+	candidates = searchPathGlobCandidates(`grep -rn "func executeStructuredUsageCommand" -A 40 cmd/aicli/commands/*.go | head -60`)
+	if len(candidates) != 1 || candidates[0].Token != "cmd/aicli/commands/*.go" || candidates[0].Quoted {
+		t.Fatalf("expected the reported command to yield one path glob candidate, got %#v", candidates)
+	}
+	// Quote provenance survives tokenization: a fully quoted glob never expands.
+	candidates = searchPathGlobCandidates(`rg -n foo "backend/internal/toolkit/tools/*.go"`)
+	if len(candidates) != 1 || !candidates[0].Quoted {
+		t.Fatalf("expected quoted path glob candidate, got %#v", candidates)
+	}
+	// A partially quoted token still carries an unquoted, expandable part.
+	candidates = searchPathGlobCandidates(`rg -n foo "backend/internal/"*.go`)
+	if len(candidates) != 1 || candidates[0].Quoted {
+		t.Fatalf("expected partially quoted glob to stay expandable, got %#v", candidates)
+	}
+	// -g / --glob values are legitimate and must not become candidates.
+	if len(searchPathGlobCandidates(`rg -n foo -g "*.go" backend`)) != 0 {
 		t.Fatal("rg -g \"*.go\" path should not look like path shell glob")
 	}
-	if looksLikeSearchPathShellGlob(`rg -n foo --glob=*.go backend`) {
+	if len(searchPathGlobCandidates(`rg -n foo --glob=*.go backend`)) != 0 {
 		t.Fatal("rg --glob=*.go should not look like path shell glob")
 	}
-	if looksLikeSearchPathShellGlob(`rg -n "foo*" backend`) {
+	if len(searchPathGlobCandidates(`rg -n "foo*" backend`)) != 0 {
 		t.Fatal("glob metacharacters only in pattern must not be treated as path glob")
 	}
-	if looksLikeSearchPathShellGlob(`go test ./...`) {
+	if len(searchPathGlobCandidates(`go test ./...`)) != 0 {
 		t.Fatal("non-search commands must not match")
 	}
 }
 
+func TestClassifyPathGlobResolution(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "sample.go"), []byte("package sample"), 0o644); err != nil {
+		t.Fatalf("write sample.go: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatalf("mkdir pkg: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pkg", "pkg.go"), []byte("package pkg"), 0o644); err != nil {
+		t.Fatalf("write pkg.go: %v", err)
+	}
+	nested := filepath.Join(root, "pkg", "deep", "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "deep.go"), []byte("package nested"), 0o644); err != nil {
+		t.Fatalf("write deep.go: %v", err)
+	}
+
+	bashShell := runtimeexecutor.Shell{Type: runtimeexecutor.ShellTypeBash}
+	zshShell := runtimeexecutor.Shell{Type: runtimeexecutor.ShellTypeZsh}
+	powerShell := runtimeexecutor.Shell{Type: runtimeexecutor.ShellTypePowerShell}
+
+	// A glob that expands to existing files is a legitimate POSIX search.
+	if got := classifyPathGlobResolution("*.go", false, root, bashShell, true); got != pathGlobExpands {
+		t.Fatalf("matched *.go should expand, got %v", got)
+	}
+	if got := classifyPathGlobResolution("pkg/*.go", false, root, bashShell, true); got != pathGlobExpands {
+		t.Fatalf("matched pkg/*.go should expand, got %v", got)
+	}
+	// No match under the workdir means the literal glob reaches rg/grep.
+	if got := classifyPathGlobResolution("*.rs", false, root, bashShell, true); got != pathGlobLiteral {
+		t.Fatalf("unmatched glob should be literal, got %v", got)
+	}
+	// Quoted tokens are handed to the tool literally even when the glob matches.
+	if got := classifyPathGlobResolution("*.go", true, root, bashShell, true); got != pathGlobLiteral {
+		t.Fatalf("quoted glob should be literal, got %v", got)
+	}
+	// PowerShell/cmd never expand wildcards for native commands.
+	if got := classifyPathGlobResolution("*.go", false, root, powerShell, false); got != pathGlobLiteral {
+		t.Fatalf("PowerShell glob should be literal, got %v", got)
+	}
+	// Shell syntax we cannot evaluate statically must not be blocked up front.
+	if got := classifyPathGlobResolution("$SRC/*.go", false, root, bashShell, true); got != pathGlobUnknown {
+		t.Fatalf("$VAR glob should be unknown, got %v", got)
+	}
+	if got := classifyPathGlobResolution("{pkg,cmd}/*.go", false, root, bashShell, true); got != pathGlobUnknown {
+		t.Fatalf("brace glob should be unknown, got %v", got)
+	}
+	if got := classifyPathGlobResolution("pkg/**/*.go", false, root, zshShell, true); got != pathGlobUnknown {
+		t.Fatalf("zsh recursive ** miss should be unknown, got %v", got)
+	}
+	// bash keeps globstar off by default, where ** behaves like * and misses here.
+	if got := classifyPathGlobResolution("pkg/**/*.go", false, root, bashShell, true); got != pathGlobLiteral {
+		t.Fatalf("bash ** (globstar off) miss should be literal, got %v", got)
+	}
+	// A wildcard never matches a leading dot, so a dotfile-only match stays literal.
+	dotDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dotDir, ".hidden.go"), []byte("package hidden"), 0o644); err != nil {
+		t.Fatalf("write .hidden.go: %v", err)
+	}
+	if got := classifyPathGlobResolution("*.go", false, dotDir, bashShell, true); got != pathGlobLiteral {
+		t.Fatalf("dotfile-only match should be literal for POSIX globs, got %v", got)
+	}
+	// Malformed patterns reach the tool literally as well.
+	if got := classifyPathGlobResolution("[abc/*.go", false, root, bashShell, true); got != pathGlobLiteral {
+		t.Fatalf("malformed pattern should be literal, got %v", got)
+	}
+}
+
+func TestResolvePathGlobPattern(t *testing.T) {
+	if _, ok := resolvePathGlobPattern("$SRC/*.go"); ok {
+		t.Fatal("$VAR glob must be unresolvable")
+	}
+	if _, ok := resolvePathGlobPattern("`pwd`/*.go"); ok {
+		t.Fatal("command-substitution glob must be unresolvable")
+	}
+	if _, ok := resolvePathGlobPattern("{a,b}/*.go"); ok {
+		t.Fatal("brace glob must be unresolvable")
+	}
+	if _, ok := resolvePathGlobPattern("~user/*.go"); ok {
+		t.Fatal("~user glob must be unresolvable")
+	}
+	if pattern, ok := resolvePathGlobPattern("pkg/*.go"); !ok || pattern != "pkg/*.go" {
+		t.Fatalf("plain glob should pass through, got ok=%v pattern=%q", ok, pattern)
+	}
+	if _, err := os.UserHomeDir(); err == nil {
+		if pattern, ok := resolvePathGlobPattern("~/src/*.go"); !ok || strings.Contains(pattern, "~") {
+			t.Fatalf("expected ~ expansion, got ok=%v pattern=%q", ok, pattern)
+		}
+	}
+}
+
 func TestBashTool_SearchPathShellGlobPreflight(t *testing.T) {
+	if !shellExpandsUnquotedGlobs(runtimeexecutor.DefaultUserShell()) {
+		t.Skip("path-position globs are only expandable on POSIX shells")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sample.go"), []byte("package sample"), 0o644); err != nil {
+		t.Fatalf("write sample.go: %v", err)
+	}
+
+	// A glob that really expands runs instead of being rejected for its syntax.
 	tool := NewBashTool()
+	tool.SetBasePath(dir)
+	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "sample.go:1:func sample"}}
 	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"command": `rg -n "func toolResult" backend/internal/toolkit/tools/*.go`,
+		"command": `grep -rn "func sample" *.go | head -20`,
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expanding path glob should execute, got error: %v", result.Error)
+	}
+	if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code == "TOOL_SHELL_COMPAT" {
+		t.Fatalf("expanding path glob must not be preflight-blocked: %#v", result.Metadata)
+	}
+
+	// An unmatched glob would reach grep literally: block with actionable guidance.
+	tool = NewBashTool()
+	tool.SetBasePath(dir)
+	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "should-not-run"}}
+	result, err = tool.Execute(context.Background(), map[string]interface{}{
+		"command": `grep -rn "func sample" missing-dir/*.go`,
 	})
 	if err != nil {
 		t.Fatalf("unexpected outer error: %v", err)
 	}
 	if result.Success || result.Error == nil {
-		t.Fatalf("expected preflight block for path shell glob, got %#v", result)
+		t.Fatalf("expected preflight block for unmatched path glob, got %#v", result)
 	}
 	errText := result.Error.Error()
 	if !strings.Contains(errText, "通配符") && !strings.Contains(errText, "glob") && !strings.Contains(errText, "-g") {
@@ -1894,6 +2033,7 @@ func TestBashCommandFailureNextAction_PathGlob(t *testing.T) {
 		`rg -n foo backend/**/*.go`,
 		`rg: backend/**/*.go: IO error ... os error 123`,
 		fmt.Errorf("exit status 1"),
+		"",
 	)
 	if !strings.Contains(strings.ToLower(next), "glob") && !strings.Contains(next, "-g") {
 		t.Fatalf("expected path-glob next_action, got %q", next)
@@ -1905,6 +2045,7 @@ func TestBashCommandFailureNextAction_GitIgnoredPath(t *testing.T) {
 		`git add secrets/token.env`,
 		"The following paths are ignored by one of your .gitignore files:\nsecrets/token.env\nhint: Use -f if you really want to add them.",
 		fmt.Errorf("exit status 1"),
+		"",
 	)
 	if !strings.Contains(next, "git check-ignore") {
 		t.Fatalf("expected check-ignore guidance, got %q", next)
