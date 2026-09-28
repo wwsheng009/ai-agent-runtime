@@ -475,7 +475,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 - **P2-1 ✅ 注册表与解析器**：`runtimeCommandSpec`（Mode/Effect/Category/Confirm/Notice/SwitchKey）+ 附录 F.1 全量 59 条 + F.2 别名归并 + 子命令变体解析；未登记命令/未知子命令 → queue（INV-6）；T28 不变式与 T29 catalog 覆盖单测已绿（`chat_runtime_command_registry.go`，尚未被路由消费——按 P2-2/P2-3 接入）。
 - **P2-2 ✅ 三级开关**：`AICLI_CHAT_RUNTIME_INTERACTION`（auto/readonly/off）+ `..._CATEGORIES`（C#=mode）+ `..._COMMANDS`（命令=mode，键先别名归并）；优先级命令级 > 分类级 > 全局；block 不可被放宽；T31 单测已绿（`chat_runtime_command_switch.go`，消费接入见 P2-3）。
 - **P2-3 ✅ 宿主与生效域执行器**：`runtimeCommandHost.SubmitBusy`（注册表→三级开关→安全门→模式分发）+ 生效域守卫（session/process 不可达，block+process 例外只拒绝）+ 非 read 生效域执行后的 Notice 提示 + 统一审计事件 `aicli.chat.runtime_interaction`（命令/模式/生效域/结果/耗时，T32/T33）；路由由注册表接管（**双开关显式启用**才生效，P2 环境变量未设置时保持 P1 首批白名单行为）；screen/prompt 载体仍按 P2-4 降级。
-- **P2-4 🚧 副屏与 prompt 载体**：①②④ 见 G.9/G.10；③+⑤ ✅ 首批 S 档通道（G.11，白名单 `/todos` `/history` `/usage` `/debug display` `/web endpoints`）；**prompt 载体 ✅ 忙时确认门**（G.13：复用 priority prompt 通道 + modal 登记 + 三态语义「确认执行 / 拒绝消费 / 不可用降级」，首推 `/queue clear`）。picker/写入类 screen 与其余 prompt 命令仍 Deferred。剩余：T20~T26 TTY 真机验证（**物理层已闭环，见 G.14**；全链路交互演练与 T23~T26 真机矩阵待补）、T34（确认提示观感/ESC 中断）。
+- **P2-4 🚧 副屏与 prompt 载体**：①②④ 见 G.9/G.10；③+⑤ ✅ 首批 S 档通道（G.11，白名单 `/todos` `/history` `/usage` `/debug display` `/web endpoints`）；**prompt 载体 ✅ 忙时确认门**（G.13：复用 priority prompt 通道 + modal 登记 + 三态语义「确认执行 / 拒绝消费 / 不可用降级」，首推 `/queue clear`）；**降级显式提示 ✅**（G.15/INV-10：非首批 screen/prompt 与 prompt 能力门不可用均给出「已降级入队（原因）」，仲裁拦截时静默）。picker/写入类 screen 与其余 prompt 命令仍 Deferred。剩余：T20~T26 TTY 真机验证（**副屏租约生命周期与退出恢复物理层已闭环，见 G.14 ①~⑦**；全链路交互演练与 T23~T26 真机矩阵待补）、T34（确认提示观感/ESC 中断）。
 - **P2-5 🚧 生效域适配**：核验完成（G.12）——注册表中 `inline+非 read` 仅 `/title <text>`，其 next-turn 语义由 Phase A 会话写承载（已加断言）；`chatBusyCommandUnsafeEffect` 覆盖已迁移分支的全部 Phase B 效应，忙时 inline 执行无静默丢效应路径；新增 **T35 准入审计**（inline+非 read 必须显式登记，否则测试失败）。仍需 actor 重建/权限源切换的 next-turn/next-call 命令（模型/Provider/reasoning_effort/profile/routing/add-dir、permission-mode/yolo/trust/grants/approval-reuse）当前全部为 screen/prompt → deferred，适配器与 V1/V2a/V10 未决项按 D12 兜底，待晋升时补。
 - **P2-6 网络长任务**：C11 保持 queue；P3 评估「异步任务 + 进度副屏」。
 - 每个晋升命令必须附快照依赖清单 + 忙时专项测试。
@@ -1174,6 +1174,18 @@ runtimeCommandSpec{
 | --- | --- |
 | 证据载体 | 新增 `backend/cmd/aicli/ui/terminal_session_pty_test.go`（`//go:build linux`）：经 `/dev/ptmx` + `TIOCSPTLCK`/`TIOCGPTN` 分配**真实内核终端对**（非 bytes.Buffer 替身），`TerminalSession` 写 slave、测试从 master 读回物理字节；固定 80x24 几何。 |
 | 覆盖（T21/T22 物理层） | ① `EnterAlternateScreen(7)` 后 master 侧必须出现 `\x1b[?1049h`/`\x1b[?25l`/`\x1b[2J`/`\x1b[H`；② 第二租约被 `ErrTerminalAlternateScreenBusy` 拒绝且原租约不变；③ 副屏帧字节确实到达物理终端；④ 跨租约写入被 `ErrTerminalAlternateScreenLease` 拒绝且**零字节泄漏**（禁止裸 stdout 旁路）；⑤ `ExitAlternateScreen` 发出 `\x1b[?25h`/`\x1b[?1049l`、租约清零、投影置 `ProjectionUnknown`（主屏必须全量恢复重绘）；⑥ 退出后写入被拒绝且零字节泄漏。 |
+| 覆盖（T22 恢复性闭环） | ⑦ 仅断言 `ProjectionUnknown` 不足以证明「主屏真的恢复」：`TestTerminalSessionPTYPrimaryRepaintAfterAlternateExit` 在真机上先铺一帧主屏（可见带 `row-u`）→ 进出一次副屏（`TODOS-SCREEN`）→ 退出后 `Flush` 必须返回 `FullRepaint`，且**新增字节**必须包含可见带文本；slave 置 raw 以便字节断言不受 OPOST/ONLCR 改写影响。 |
 | 环境依赖 | 仅 `golang.org/x/sys/unix`（已是直接依赖，未引入新模块）；pty 不可用时 `t.Skip`，无 pty 的 CI 不会变红。 |
-| 尚未闭环 | 全链路「忙时输入 → 宿主 → 真实 handler → 副屏」仍需交互式 TTY + provider 的端到端演练（能力门依赖进程级 `IsInteractiveTerminal()`，在 `go test` 下不成立；需 `script(1)` 或真实终端手工/半自动跑批）；T23（Esc/q 关闭）、T24（L0 modal 降级）、T25（无备用屏/租约超时降级）、T26（winpty/SSH 管道）当前以单测锁定契约，真机观感矩阵待手工补。 |
+| 尚未闭环 | 全链路「忙时输入 → 宿主 → 真实 handler → 副屏」仍需交互式 TTY + provider 的端到端演练（能力门依赖进程级 `IsInteractiveTerminal()`，在 `go test` 下不成立；需 `script(1)` 或真实终端手工/半自动跑批）；T22 的物理层恢复性已闭环（⑦），其余 T23（Esc/q 关闭）、T24（L0 modal 降级）、T25（无备用屏/租约超时降级）、T26（winpty/SSH 管道）当前以单测锁定契约，真机观感矩阵待手工补。 |
 | 基线提示 | 本环境 `cmd/aicli/ui` 存在 1 项**既有失败** `TestReadInteractiveLineForcedReadWhenPeekAlwaysEmpty`（有/无本测试均 3/3 失败，与本步无关）；`cmd/aicli/commands` 既有 2 项基线失败见 G.11 说明。 |
+
+### G.15 P2-4b-4 忙时降级显式提示（INV-10；T25/T26 契约层，2026-09-28）
+
+| 项 | 结论 |
+| --- | --- |
+| 动机 | INV-10/§3.8.3 要求「降级必须给出显式提示」。此前宿主里 **非首批 screen**、**非首批 prompt** 两条降级路径静默入队，prompt 能力门不可用（非交互/JSON 输出/终端不支持）也只返回未占有而不提示——用户按了命令却看不到任何反馈。 |
+| 改动 | 新增 `notifyBusyCommandDegraded(session, line, reason)`（`chat_busy_command_exec.go`）：统一渲染 `[input] 忙时命令 %q 已降级入队（<原因>），将在当前回合结束后执行。`。**仅**在 `chatBusyCommandArbitrationAllows` 通过时渲染——L0 modal（审批/提问）活跃时静默（模态拥有画面，补充行会与其绘制竞争，且模态本身就是用户焦点；该场景由仲裁器拦截）。接入点：宿主 `runtimeModeScreen` 非首批、`runtimeModePrompt` 非首批、prompt 原语能力门不可用。 |
+| 测试 | ① `TestRuntimeCommandHostDegradesNonWhitelistedScreen`（扩展）：非首批 screen 降级后终端输出必须含「已降级入队」+「尚未开通忙时副屏通道」；② `TestRuntimeCommandHostDegradesNonWhitelistedPrompt`（扩展）：同断言 +「尚未开通忙时确认通道」；③ 新增 `TestBusyPromptChannelUnavailableEmitsNotice`：直接驱动 `runBusyPromptCommand` 并令能力门不可用，必须返回 `(false,false)` 且输出「已降级入队（当前终端不支持忙时确认通道）」。 |
+| 边界 | `commandMu` 争用与 unsafe 效应仍由各自分支给出更具体的通知，不重复调用本函数；降级提示是**补充行**（`RenderLocalSupplement`），不进入对话历史。 |
+| 关联条款 | T25（无备用屏能力/租约超时 → fail-closed 降级「有明确提示」）与 T26（非 TTY → 降级 D 且无 escape 泄漏）的**提示契约**由此闭环在单测层；真机观感（提示与流式内容交错、窄终端折行）仍待手工矩阵。 |
+| 验证 | `go test ./cmd/aicli/commands -run 'Busy\|RuntimeCommandHost' -count=1` 通过；全包回归与本步无关的 2 项基线失败保持一致。 |

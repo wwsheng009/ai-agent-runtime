@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 
 	renderengine "github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
 )
@@ -188,5 +189,59 @@ func TestTerminalSessionPTYAlternateScreenLeaseLifecycle(t *testing.T) {
 	}
 	if after := capture.settle(30 * time.Millisecond); strings.Contains(after, "AFTER-EXIT-BYTES") {
 		t.Fatalf("post-exit write leaked bytes to pty; captured=%q", after)
+	}
+}
+
+// TestTerminalSessionPTYPrimaryRepaintAfterAlternateExit 是 T22 的物理层闭环：
+// 只断言 ProjectionUnknown 并不能证明「退出副屏后主屏真的恢复」。这里在真实
+// pty 上先铺一帧主屏、再进出一次副屏，最后要求主屏全量重绘的字节确实到达
+// 终端（slave 置 raw，避免 OPOST/ONLCR 改写字节流使断言失真）。
+func TestTerminalSessionPTYPrimaryRepaintAfterAlternateExit(t *testing.T) {
+	pair := openPTYPair(t)
+	if _, err := term.MakeRaw(int(pair.slave.Fd())); err != nil {
+		t.Skipf("pty raw mode unavailable: %v", err)
+	}
+	capture := startPTYCapture(pair.master)
+	session := NewTerminalSession(pair.slave)
+
+	base := terminalSessionPlan(1, 80, 24, 20, LeaseState{})
+	if result := session.Flush(base); result.Err != nil || !result.FullRepaint {
+		t.Fatalf("initial primary frame = %#v", result)
+	}
+	// outputBottom=20 时只有 21..24 行属于可见 bottom band（row-u..row-x），
+	// 其余行按空白清除，因此只能断言可见带文本。
+	capture.waitFor(t, "row-u", 2*time.Second)
+
+	if err := session.EnterAlternateScreen(11); err != nil {
+		t.Fatalf("EnterAlternateScreen(11) error = %v", err)
+	}
+	if err := session.WriteAlternateScreen(11, "TODOS-SCREEN"); err != nil {
+		t.Fatalf("WriteAlternateScreen(11) error = %v", err)
+	}
+	capture.waitFor(t, "TODOS-SCREEN", 2*time.Second)
+	if err := session.ExitAlternateScreen(11); err != nil {
+		t.Fatalf("ExitAlternateScreen(11) error = %v", err)
+	}
+	capture.waitFor(t, "\x1b[?1049l", 2*time.Second)
+
+	before := capture.snapshot()
+	recovery := terminalSessionPlan(2, 80, 24, 20, LeaseState{})
+	result := session.Flush(recovery)
+	if result.Err != nil || !result.FullRepaint {
+		t.Fatalf("recovery frame = %#v, want full repaint", result)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := capture.snapshot()
+		if len(got) > len(before) && strings.Contains(got[len(before):], "row-u") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("primary recovery repaint missing on pty; before=%d after=%q", len(before), got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := session.AlternateScreenLeaseID(); got != 0 {
+		t.Fatalf("lease after recovery = %d, want 0", got)
 	}
 }
