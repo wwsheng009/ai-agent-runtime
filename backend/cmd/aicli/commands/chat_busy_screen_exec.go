@@ -82,6 +82,7 @@ func runBusyScreenCommand(session *ChatSession, line string) bool {
 		return false
 	}
 	if !chatBusyScreenCapability(session) {
+		notifyBusyCommandDegraded(session, line, "当前终端/渲染面不支持忙时副屏")
 		return false
 	}
 	if !chatBusyCommandArbitrationAllows(session) {

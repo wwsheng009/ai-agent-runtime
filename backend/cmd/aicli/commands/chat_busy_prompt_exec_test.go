@@ -131,7 +131,9 @@ func TestRuntimeCommandHostPromptUnavailableDegrades(t *testing.T) {
 func TestRuntimeCommandHostDegradesNonWhitelistedPrompt(t *testing.T) {
 	t.Setenv(chatBusyCommandEnv, "on")
 	t.Setenv(runtimeInteractionEnv, "auto")
-	session, _, _, store := newRuntimeHostTestSession(t)
+	session, coordinator, output, store := newRuntimeHostTestSession(t)
+	releaseCapture := beginChatInputShadowLevel(session, chatInputOwnerBusyCapture)
+	defer releaseCapture()
 
 	withChatBusyPromptTestHook(t, func(*ChatSession, string, []string) (bool, bool) {
 		t.Fatal("非首批 prompt 命令不得进入确认门")
@@ -143,5 +145,31 @@ func TestRuntimeCommandHostDegradesNonWhitelistedPrompt(t *testing.T) {
 	events := store.runtimeInteractions()
 	if len(events) != 1 || events[0].Payload["result"] != "degraded" {
 		t.Fatalf("降级审计内容不符：%+v", events)
+	}
+	// INV-10/T25：降级必须给出显式提示。
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if got := output.String(); !strings.Contains(got, "已降级入队") || !strings.Contains(got, "尚未开通忙时确认通道") {
+		t.Fatalf("非首批 prompt 降级提示缺失：%q", got)
+	}
+}
+
+// INV-10/T25：忙时确认通道结构性不可用（无交互面/终端不支持）必须降级并显式提示。
+func TestBusyPromptChannelUnavailableEmitsNotice(t *testing.T) {
+	session, coordinator, output, _ := newRuntimeHostTestSession(t)
+	releaseCapture := beginChatInputShadowLevel(session, chatInputOwnerBusyCapture)
+	defer releaseCapture()
+
+	prev := chatBusyPromptChannelAvailable
+	chatBusyPromptChannelAvailable = func(*ChatSession) bool { return false }
+	defer func() { chatBusyPromptChannelAvailable = prev }()
+
+	if occupied, executed := runBusyPromptCommand(session, "/queue clear"); occupied || executed {
+		t.Fatalf("通道不可用必须未占有，实际 occupied=%v executed=%v", occupied, executed)
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if got := output.String(); !strings.Contains(got, "已降级入队") || !strings.Contains(got, "不支持忙时确认通道") {
+		t.Fatalf("确认通道降级提示缺失：%q", got)
 	}
 }

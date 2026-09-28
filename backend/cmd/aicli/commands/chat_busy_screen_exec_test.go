@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -109,7 +110,9 @@ func TestRuntimeCommandHostRunsWhitelistedScreen(t *testing.T) {
 func TestRuntimeCommandHostDegradesNonWhitelistedScreen(t *testing.T) {
 	t.Setenv(chatBusyCommandEnv, "on")
 	t.Setenv(runtimeInteractionEnv, "auto")
-	session, _, _, store := newRuntimeHostTestSession(t)
+	session, coordinator, output, store := newRuntimeHostTestSession(t)
+	releaseCapture := beginChatInputShadowLevel(session, chatInputOwnerBusyCapture)
+	defer releaseCapture()
 
 	dispatched := false
 	withChatBusyScreenTestHooks(t, true, func(*ChatSession, string) bool {
@@ -126,6 +129,12 @@ func TestRuntimeCommandHostDegradesNonWhitelistedScreen(t *testing.T) {
 	if len(events) != 1 || events[0].Payload["result"] != "degraded" || events[0].Payload["mode"] != "screen" {
 		t.Fatalf("降级审计内容不符：%+v", events)
 	}
+	// INV-10/T25：降级必须给出显式提示。
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if got := output.String(); !strings.Contains(got, "已降级入队") || !strings.Contains(got, "尚未开通忙时副屏通道") {
+		t.Fatalf("非首批 screen 降级提示缺失：%q", got)
+	}
 }
 
 // 能力门 fail-closed：未注入替身时（无 surface/无 TTY）必须降级，
@@ -133,13 +142,63 @@ func TestRuntimeCommandHostDegradesNonWhitelistedScreen(t *testing.T) {
 func TestRuntimeCommandHostScreenCapabilityFailClosed(t *testing.T) {
 	t.Setenv(chatBusyCommandEnv, "on")
 	t.Setenv(runtimeInteractionEnv, "auto")
-	session, _, _, _ := newRuntimeHostTestSession(t)
+	session, coordinator, output, _ := newRuntimeHostTestSession(t)
+	releaseCapture := beginChatInputShadowLevel(session, chatInputOwnerBusyCapture)
+	defer releaseCapture()
 
 	if runtimeCommandHostFor(session).SubmitBusy("/todos") {
 		t.Fatal("无副屏能力时必须降级入队")
 	}
 	if chatBusyScreenCapability(session) {
 		t.Fatal("无 surface 的会话不应通过副屏能力门")
+	}
+	// INV-10/T25：无备用屏能力也必须显式提示。
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if got := output.String(); !strings.Contains(got, "已降级入队") || !strings.Contains(got, "不支持忙时副屏") {
+		t.Fatalf("能力门降级提示缺失：%q", got)
+	}
+}
+
+// T24：L0 modal（审批/提问等）活跃时请求 S 档必须降级 D，且**不发生租约获取**
+// ——能力门通过后由仲裁器拦截，副屏执行入口（租约获取发生地）必须完全不被
+// 调用，租约等待预算也不得被改写。
+func TestRuntimeCommandHostScreenDegradesWhenArbitrationBlocked(t *testing.T) {
+	t.Setenv(chatBusyCommandEnv, "on")
+	t.Setenv(runtimeInteractionEnv, "auto")
+	session, coordinator, output, store := newRuntimeHostTestSession(t)
+	surface := ui.NewFixedBottomSurface(nil)
+	surface.EnableForTest(80, 24)
+	session.Surface = surface
+
+	// L0 modal 活跃：与审批/提问复用同一属主。
+	releaseModal := beginChatInputShadowLevel(session, chatInputOwnerModal)
+	defer releaseModal()
+
+	dispatched := false
+	withChatBusyScreenTestHooks(t, true, func(*ChatSession, string) bool {
+		dispatched = true
+		return true
+	})
+
+	if runtimeCommandHostFor(session).SubmitBusy("/todos") {
+		t.Fatal("modal 活跃时 S 档必须降级入队，不得进入副屏")
+	}
+	if dispatched {
+		t.Fatal("modal 活跃时不得进入副屏执行入口（租约获取）")
+	}
+	if got := surface.AlternateScreenWaitBudget(); got != 0 {
+		t.Fatalf("降级路径不得改写租约等待预算，实际 %s", got)
+	}
+	events := store.runtimeInteractions()
+	if len(events) != 1 || events[0].Payload["result"] != "degraded" || events[0].Payload["mode"] != "screen" {
+		t.Fatalf("降级审计内容不符：%+v", events)
+	}
+	// 模态活跃时降级提示必须保持静默：补充行会与模态画面竞争绘制。
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if got := output.String(); strings.Contains(got, "已降级入队") {
+		t.Fatalf("modal 活跃时不应渲染降级提示：%q", got)
 	}
 }
 

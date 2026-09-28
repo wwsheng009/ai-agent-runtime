@@ -18,6 +18,25 @@ func executeBusySlashCommand(session *ChatSession, line string) bool {
 	return runBusyInlineCommand(session, line)
 }
 
+// notifyBusyCommandDegraded 渲染忙时降级提示（INV-10/§3.8.3：降级必须「给出
+// 显式提示」）。只用于「通道/能力结构性不可用」这一档降级原因：
+//
+//   - L0 modal（审批/提问）活跃时不渲染——模态拥有画面，补充行会与其绘制竞争，
+//     且模态本身就是用户焦点；该场景由仲裁器静默拦截；
+//   - Interaction 不可用时无处渲染；
+//   - commandMu 争用与 unsafe 效应由各自分支给出更具体的通知，不重复调用本函数。
+func notifyBusyCommandDegraded(session *ChatSession, line, reason string) {
+	if session == nil || session.Interaction == nil {
+		return
+	}
+	if !chatBusyCommandArbitrationAllows(session) {
+		return
+	}
+	session.Interaction.RenderLocalSupplement(fmt.Sprintf(
+		"[input] 忙时命令 %q 已降级入队（%s），将在当前回合结束后执行。",
+		strings.TrimSpace(line), reason))
+}
+
 // runBusyInlineCommand 是 inline 模式的执行原语（P2-3 起由 runtimeCommandHost
 // 复用）：不含策略判定，只做执行前的门禁与忙时安全断言。返回 true 表示命令已被
 // 本通道占有并完成渲染；false 表示未占有（调用方必须回退入队）。

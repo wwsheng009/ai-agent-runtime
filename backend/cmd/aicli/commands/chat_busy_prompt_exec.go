@@ -97,6 +97,7 @@ func runBusyPromptCommand(session *ChatSession, line string) (occupied bool, exe
 		return false, false
 	}
 	if !chatBusyPromptChannelAvailable(session) {
+		notifyBusyCommandDegraded(session, line, "当前终端不支持忙时确认通道")
 		return false, false
 	}
 	if !chatBusyCommandArbitrationAllows(session) {

@@ -95,8 +95,13 @@ func (h *runtimeCommandHost) submit(line string) runtimeHostOutcome {
 		return outcome
 	case runtimeModeScreen:
 		// P2-4b：首批白名单 S 档走副屏通道；其余 screen 档（picker/写入类）
-		// 仍降级入队，待各自确认流在 P2-5/P3 落地。
-		if !busyScreenCommandFirstBatch(effective) || !runBusyScreenCommand(h.session, line) {
+		// 仍降级入队，待各自确认流在 P2-5/P3 落地。降级必须显式提示（INV-10）。
+		if !busyScreenCommandFirstBatch(effective) {
+			notifyBusyCommandDegraded(h.session, line, "该命令尚未开通忙时副屏通道")
+			outcome.Result = "degraded"
+			return outcome
+		}
+		if !runBusyScreenCommand(h.session, line) {
 			outcome.Result = "degraded"
 			return outcome
 		}
@@ -105,8 +110,9 @@ func (h *runtimeCommandHost) submit(line string) runtimeHostOutcome {
 		return outcome
 	case runtimeModePrompt:
 		// P2-4b-3：首批 prompt 档经忙时确认门执行；未确认/通道不可用按契约
-		// 消费或降级。非首批 prompt 命令仍 deferred。
+		// 消费或降级。非首批 prompt 命令仍 deferred（显式提示，INV-10）。
 		if !busyPromptCommandWhitelisted(line) {
+			notifyBusyCommandDegraded(h.session, line, "该命令尚未开通忙时确认通道")
 			outcome.Result = "degraded"
 			return outcome
 		}
