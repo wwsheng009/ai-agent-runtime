@@ -29,8 +29,8 @@ type chatSlashCommandSpec struct {
 	RequiresArgs bool
 	ShortcutOf   string
 	// BusyPolicy 是忙时命令策略（方案 §5 P1-1）：零值 inherit 表示未标记，
-	// 路由按既有 chatSlashCommandQueueSafe 白名单派生（零行为差异）；
-	// 标记命令仅在灰度开关 AICLI_CHAT_BUSY_COMMAND 打开时生效。
+	// 默认由 P2 运行时注册表接管（§3.8.2）；仅当总闸 AICLI_CHAT_BUSY_COMMAND
+	// 显式关闭时回退既有 chatSlashCommandQueueSafe 白名单派生（零行为差异）。
 	BusyPolicy chatBusyCommandPolicy
 }
 

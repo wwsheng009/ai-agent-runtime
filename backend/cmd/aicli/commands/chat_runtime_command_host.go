@@ -8,9 +8,10 @@ import (
 // P2-3（方案 §3.8.4）：统一运行时交互宿主。忙时 capture 通道的唯一入口，
 // 串起「注册表解析 → 三级开关 → 安全门 → 模式分发 → 生效域守卫 → 审计事件」。
 //
-// 本步骤落地的模式：inline（复用 runBusyInlineCommand）、queue（降级入队）、
-// block（拒绝 + 提示）；screen/prompt 的载体属 P2-4，落地前一律降级 queue
-//（T6：裸 `/model` 等仍 deferred）。生效域 session/process 在宿主层不可达（T32）。
+// 模式载体：inline（复用 runBusyInlineCommand）、screen（首批白名单走副屏，
+// 其余降级，P2-4b）、prompt（首批白名单走确认门，P2-4b-3）、queue（降级入队）、
+// block（拒绝 + 提示）。生效域 session/process 在宿主层不可达（T32）。
+// D14（2026-09-28）：总闸默认启用，注册表即路由事实源；显式关闭时回退旧白名单。
 
 type runtimeHostOutcome struct {
 	Occupied   bool // true = 输入已被占有（执行/拒绝），调用方不得入队
@@ -58,7 +59,7 @@ func (h *runtimeCommandHost) submit(line string) runtimeHostOutcome {
 		return outcome
 	}
 
-	// 三级开关（§3.8.3）；P1 灰度未开启时一律排队（总闸优先，保证现行为等价）。
+	// 三级开关（§3.8.3）；总闸显式关闭时一律排队（总闸优先，保证一键回退等价）。
 	effective := runtimeCommandWithSwitch(spec, runtimeSwitchTableFromEnv())
 	if !chatBusyCommandEnabled() {
 		effective.Mode = runtimeModeQueue

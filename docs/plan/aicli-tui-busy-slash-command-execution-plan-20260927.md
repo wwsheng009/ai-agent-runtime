@@ -338,6 +338,8 @@ type runtimeCommandSpec struct {
 
 解析优先级：命令级 > 分类级 > 全局；任一级关闭按 INV-10 降级并记录诊断事件。`block` 集只增不减需评审。
 
+**总闸（D14）**：`AICLI_CHAT_BUSY_COMMAND` 默认启用（未设置或空值 = 启用）；显式设为非启用值（`0/false/off/no/disabled` 等，小写比较）时整体回退 P1 首批白名单（T18 等价），保留一键回退。
+
 #### 3.8.4 宿主执行流程
 
 ```go
@@ -455,7 +457,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 
 **退出条件**：§4 全部分类有依据；快照设计覆盖 P1 命令所需的全部字段。
 
-### P1：BusyPolicy 元数据 + immediate 通道骨架（默认关闭）
+### P1：BusyPolicy 元数据 + immediate 通道骨架（D14 后默认启用，可显式关闭）
 
 | 步骤 | 内容 |
 | --- | --- |
@@ -465,16 +467,16 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 | P1-4 ✅ | `ChatSession.commandMu` + `lockChatCommandPhaseA`；`dispatchChatCommand` Phase A（解析/变更/渲染）持锁、Phase B 效应在 `unlockCommand()` 后锁外执行；`TestDispatchChatCommandReleasesCommandPhaseALock` 覆盖结构化/legacy 两条出口 |
 | P1-5 ✅ | `chat_busy_command_exec.go`：`executeBusySlashCommand`（策略再校验 → 统一面门 → 仲裁 L0 门 → TryLock → 解析 → 忙时安全断言 → 渲染 → 历史）；`consumeBusyCommand` 交接 + 捕获循环未占有回退入队 |
 | P1-6 ✅ | 来源分流随 P1-3 落地（`chatInputSourceIsLocalTerminal`，INV-8）；Web 回执/唤醒语义回归 `-run Web` 全绿 |
-| P1-7 ✅ | 灰度开关 `AICLI_CHAT_BUSY_COMMAND` 默认关；T18 等价在策略层与路由层双重断言 |
+| P1-7 ✅ | 总闸 `AICLI_CHAT_BUSY_COMMAND` 默认启用（D14，原文为默认关，2026-09-28 决策变更）；T18 等价以「显式关闭」口径在策略层与路由层双重断言 |
 | P1-8 ✅ | 首批 §4.1 四条（`/help` `/status` `/session` `/queue`）；M4 原子化完成，`/queue` 忙时读取无竞态前置 |
 
-**退出条件**：开关关闭 = 现行为逐条等价（现有测试零改动）；开关打开 = 首批命令忙时立即可见。
+**退出条件**：显式关闭 = 现行为逐条等价；默认启用 = 首批命令忙时立即可见。
 
 ### P2：统一交互机制落地（注册表 / 宿主 / 模式与生效域）
 
 - **P2-1 ✅ 注册表与解析器**：`runtimeCommandSpec`（Mode/Effect/Category/Confirm/Notice/SwitchKey）+ 附录 F.1 全量 59 条 + F.2 别名归并 + 子命令变体解析；未登记命令/未知子命令 → queue（INV-6）；T28 不变式与 T29 catalog 覆盖单测已绿（`chat_runtime_command_registry.go`，尚未被路由消费——按 P2-2/P2-3 接入）。
 - **P2-2 ✅ 三级开关**：`AICLI_CHAT_RUNTIME_INTERACTION`（auto/readonly/off）+ `..._CATEGORIES`（C#=mode）+ `..._COMMANDS`（命令=mode，键先别名归并）；优先级命令级 > 分类级 > 全局；block 不可被放宽；T31 单测已绿（`chat_runtime_command_switch.go`，消费接入见 P2-3）。
-- **P2-3 ✅ 宿主与生效域执行器**：`runtimeCommandHost.SubmitBusy`（注册表→三级开关→安全门→模式分发）+ 生效域守卫（session/process 不可达，block+process 例外只拒绝）+ 非 read 生效域执行后的 Notice 提示 + 统一审计事件 `aicli.chat.runtime_interaction`（命令/模式/生效域/结果/耗时，T32/T33）；路由由注册表接管（**双开关显式启用**才生效，P2 环境变量未设置时保持 P1 首批白名单行为）；screen/prompt 载体仍按 P2-4 降级。
+- **P2-3 ✅ 宿主与生效域执行器**：`runtimeCommandHost.SubmitBusy`（注册表→三级开关→安全门→模式分发）+ 生效域守卫（session/process 不可达，block+process 例外只拒绝）+ 非 read 生效域执行后的 Notice 提示 + 统一审计事件 `aicli.chat.runtime_interaction`（命令/模式/生效域/结果/耗时，T32/T33）；路由默认由注册表接管（D14：总闸默认启用，无需额外环境变量；显式关闭总闸时保持 P1 首批白名单行为）；`AICLI_CHAT_RUNTIME_INTERACTION` 仅作全局档（auto/readonly/off）；screen/prompt 载体仍按 P2-4 降级。
 - **P2-4 🚧 副屏与 prompt 载体**：①②④ 见 G.9/G.10；③+⑤ ✅ 首批 S 档通道（G.11，白名单 `/todos` `/history` `/usage` `/debug display` `/web endpoints`）；**prompt 载体 ✅ 忙时确认门**（G.13：复用 priority prompt 通道 + modal 登记 + 三态语义「确认执行 / 拒绝消费 / 不可用降级」，首推 `/queue clear`）；**降级显式提示 ✅**（G.15/INV-10：非首批 screen/prompt 与 prompt 能力门不可用均给出「已降级入队（原因）」，仲裁拦截时静默）。picker/写入类 screen 与其余 prompt 命令仍 Deferred。剩余：T20~T26 TTY 真机验证（**副屏租约生命周期与退出恢复物理层已闭环，见 G.14 ①~⑦**；全链路交互演练与 T23~T26 真机矩阵待补）、T34（确认提示观感/ESC 中断）。
 - **P2-5 🚧 生效域适配**：核验完成（G.12）——注册表中 `inline+非 read` 仅 `/title <text>`，其 next-turn 语义由 Phase A 会话写承载（已加断言）；`chatBusyCommandUnsafeEffect` 覆盖已迁移分支的全部 Phase B 效应，忙时 inline 执行无静默丢效应路径；新增 **T35 准入审计**（inline+非 read 必须显式登记，否则测试失败）。仍需 actor 重建/权限源切换的 next-turn/next-call 命令（模型/Provider/reasoning_effort/profile/routing/add-dir、permission-mode/yolo/trust/grants/approval-reuse）当前全部为 screen/prompt → deferred，适配器与 V1/V2a/V10 未决项按 D12 兜底，待晋升时补。
 - **P2-6 网络长任务**：C11 保持 queue；P3 评估「异步任务 + 进度副屏」。
@@ -504,7 +506,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 | T5 | 忙时输入 `/model status`（P2 后） | immediate；裸 `/model` 仍 deferred | 单测 |
 | T6 | 忙时输入 `/model <x>`（P2/D2 决策后） | deferred + 「回合结束后执行」提示 | 单测 |
 | T7 | 既有白名单命令（`/history`、`/debug display` 等） | 行为与现状一致（deferred）；提示文案与现状逐字一致（M5） | 现有测试回归 |
-| T8 | 开启/关闭灰度开关 | 关闭 = 现行为等价；打开 = T1~T3 生效 | 单测 |
+| T8 | 总闸默认/显式关闭 | 默认（未设置）= T1~T3 生效；显式关闭 = 现行为逐条等价 | 单测 |
 | T9 | turn 运行中执行 immediate 命令（并发） | `-race` 无竞态；命令 cell 与流式 delta 的 Scene 顺序/背压正确、无交错损坏 | `-race` 并发测试 |
 | T10 | immediate 判定瞬间与 turn 结束重叠 | 原子占有后必达（至多执行一次且一定渲染）；未占有行由主循环执行 | 单测（交接协议） |
 | T11 | modal/priority prompt 活跃时输入 immediate 命令 | 降级 deferred，不抢占 L0 | 单测 |
@@ -514,7 +516,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 | T15 | Windows/winpty/SSH 真实终端 | P1/P2 命令忙时可用且无渲染错位 | 真实终端回归（与阶段 F P3 合并） |
 | T16 | 运行中 Web/远程注入 immediate 类命令 | 保持 queued + 唤醒主循环，回执 `{"status":"queued"}`；不出现静默吞命令（B1） | 单测（`web_handlers.go`/`web_invoke.go` 路径） |
 | T17 | 非统一渲染面（`!unifiedDirectInteractiveOutput`）忙时输入 immediate 类命令 | 降级 deferred，不落 legacy `handleCommand`、无 stdout 直写（M2） | 单测 |
-| T18 | resolver × 旧 `chatSlashCommandQueueSafe` 全命令对照（灰度关闭） | 逐条等价；例外清单显式登记 | 表驱动单测 |
+| T18 | resolver × 旧 `chatSlashCommandQueueSafe` 全命令对照（总闸显式关闭） | 逐条等价；例外清单显式登记 | 表驱动单测 |
 | T19 | immediate 命令的历史/echo/状态行行为 | 执行成功后入历史；不置 queued echo；状态行行为符合 §3.5 | 单测 |
 | T20 | 忙时 `/history` 打开副屏分页器 | 租约获取成功；turn 继续流式（主屏帧 Deferred）；退出后全量重绘、内容无丢失 | TTY 集成 + `-race` |
 | T21 | 忙时 `/usage`、`/debug display`、`/web endpoints` | 同 T20；关闭后 composer 与流式内容恢复 | TTY 集成 |
@@ -554,7 +556,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 | R7 | 用户对「为什么这条命令还要等」产生困惑 | 低 | P3 显式 deferred 提示 + 帮助标注策略 |
 | R8 | 命令输出被误当成模型输入 / 会话日志污染 | 中 | INV-5；不加消息、不写会话日志（只读命令的渲染走临时/命令 cell 语义） |
 | R9 | Web/远程来源被误放 immediate → 回执 queued 但无人执行（静默吞命令） | 高 | INV-8 来源隔离 + T16；路由按 `chatInputSourceIsLocalTerminal` 分流，fail-closed |
-| R10 | `dispatchChatCommand` 两阶段改造影响全部命令（含 Ready 路径） | 高 | Phase A/B 拆分保持效应顺序与语义不变；现有命令测试全量回归；灰度开关默认关；「锁内无 send」断言 |
+| R10 | `dispatchChatCommand` 两阶段改造影响全部命令（含 Ready 路径） | 高 | Phase A/B 拆分保持效应顺序与语义不变；现有命令测试全量回归；总闸默认启用（D14）且可一键显式关闭；「锁内无 send」断言 |
 | R11 | 副屏租约与流式/recovery 窗口竞争导致画面损坏 | 高 | `AcquireAlternateScreenWait` 有界等待 + fail-closed；复用 UI-actor barrier（`chat_picker_common.go:174-204`）；T20/T25 |
 | R12 | 租约期流式缓冲无界（长 turn 内存增长 / 恢复卡顿） | 高 | `StreamHold/StreamFlush` 有界契约；超限转全量重绘；T27 |
 | R13 | 输入所有权移交竞态：capture 与副屏同时消费按键 | 高 | L0 modal 登记 + capture 暂停读；跨 turn 边界 `busyScreenActive` 门；T22/T23 |
@@ -564,15 +566,15 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 
 ## §8 验收标准
 
-1. 灰度关闭时：`chat_input_queue_test.go`、`chat_debug_display_busy_repro_test.go` 等现有测试**零改动**通过。
-2. 灰度打开时：T1~T3 命令在 300s 长回合运行中 1s 内可见输出（TTY 实测）。
+1. 总闸显式关闭时：`chat_input_queue_test.go`、`chat_debug_display_busy_repro_test.go` 等现有测试**零改动**通过。
+2. 总闸启用（默认，D14）时：T1~T3 命令在 300s 长回合运行中 1s 内可见输出（TTY 实测）。
 3. `-race` 全量通过，含 T9 并发用例。
 4. 代码中不存在绕过 `commandMu` 的 `dispatchChatCommand` 调用点（含测试辅助入口白名单说明）。
 5. catalog 每个 spec 均声明 `BusyPolicy`，未声明默认 reject 的单测成立。
 6. INV-1~INV-7 每条有对应测试或静态断言。
 7. Web/远程注入路径行为与现状逐条一致（T16），不存在 immediate 导致的输入丢失。
 8. 「锁内无 send」静态检查/测试成立：`commandMu` 覆盖区内不存在 `sendMessage`/`send*` 调用（R10）。
-9. resolver 与旧白名单的逐条等价表（T18）通过，灰度关闭时零行为差异。
+9. resolver 与旧白名单的逐条等价表（T18，显式关闭口径）通过，显式关闭时零行为差异。
 10. S 档命令在租约失败/非 TTY 场景 100% fail-closed 降级，无 stdin 争用与画面损坏（T22~T26）。
 11. 租约期流式缓冲有界（T27），退出后全量重绘内容与 Scene 一致。
 12. 附录 E 的 58 条命令 + legacy 入口全部显式定级；`screen` 档只出现在只读交互白名单（§3.7.4）。
@@ -600,6 +602,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 | D11 | `/exit` 是否改为「回合后退出」 | (a) 保持 block；(b) queue 后退出 | (a) v1.3 默认；若需求明确再切 (b)，需显式提示 |
 | D12 | 缺少 next-turn/next-call 适配器的命令 | (a) 先降 queue 兜底；(b) 阻塞实现适配器 | (a) 保证 P2 可分期；适配器按命令优先级补齐 |
 | D13 | `/todos` 裸命令语义 | (a) 固定默认视图（全部）；(b) 每次调用循环切换（all→active→done） | 建议 (a) + 屏内按键切换；若偏好循环再开 (b) |
+| D14 | 忙时通道是否默认启用 | (a) 保持灰度默认关；(b) 默认启用、仅保留显式关闭回退 | **(b)**（2026-09-28 用户决策「默认启用」）：I/S/P 首批无需任何环境变量即可用；`AICLI_CHAT_BUSY_COMMAND` 显式设为非启用值（或 `AICLI_CHAT_RUNTIME_INTERACTION=off/readonly`）保留一键回退与分层收窄；T20~T26 物理层已闭环，真机观感矩阵待补 |
 
 ---
 
@@ -995,15 +998,15 @@ runtimeCommandSpec{
 
 ## 附录 G：实施记录（v1.3.2，2026-09-27/28）
 
-### G.1 P1-1 ~ P1-3（已完成；灰度默认关闭 = 零行为差异）
+### G.1 P1-1 ~ P1-3（已完成；总闸默认启用（D14）；显式关闭 = 零行为差异）
 
 | 项 | 落地 |
 | --- | --- |
 | P1-1 | `chatSlashCommandSpec.BusyPolicy`（`chat_slash_command_catalog.go`）；首批 §4.1 四条（`/help`、`/status`、`/session`、`/queue`）标注 `chatBusyPolicyImmediate`，其余零值 inherit |
-| P1-2 | `chat_busy_command_policy.go`：`chatBusyCommandPolicy`（inherit/I/S/D/R）、`chatBusyCommandEnabled`（`AICLI_CHAT_BUSY_COMMAND`，默认关）、`chatSlashCommandBusyPolicyFor`（别名归一、参数守卫、`/queue clear` 子命令覆盖、fail-closed）、`chatInputCommandBusyPolicy`（Ready 语义等价包装） |
+| P1-2 | `chat_busy_command_policy.go`：`chatBusyCommandPolicy`（inherit/I/S/D/R）、`chatBusyCommandEnabled`（`AICLI_CHAT_BUSY_COMMAND`，**D14 后默认启用**；显式非启用值回退旧行为）、`chatSlashCommandBusyPolicyFor`（别名归一、参数守卫、`/queue clear` 子命令覆盖、fail-closed）、`chatInputCommandBusyPolicy`（Ready 语义等价包装） |
 | P1-3 | `chat_input_queue.go`：`chatInputRouteImmediate`/`chatInputRouteScreen` + 访问器；字段 `commandGate`→`commandPolicy`；新增 `setCommandPolicyResolver` / `setBusyCommandExecutor`（`setCommandGate` 保留兼容包装，既有测试零改动）；`routeLineWithCommandGate` 四档分支 + INV-8 来源分流 + 消费方未注册时回退排队；`chat_busy_input.go` 捕获循环对 I/S 兜底 requeue（绝不丢输入） |
 
-**测试**：`chat_busy_command_policy_test.go` 6 项（含 T18 关闭等价）＋ `chat_busy_command_routing_test.go` 5 项（I/S 路由、INV-8、无消费方回退、关闭等价、旧门包装）全绿；`-run 'ChatBusyCommand|ChatInputQueue'` 全量通过；`go build`/`gofmt` 干净。
+**测试**：`chat_busy_command_policy_test.go`（默认启用矩阵 + T18 显式关闭等价）＋ `chat_busy_command_routing_test.go` 5 项（I/S 路由、INV-8、无消费方回退、显式关闭等价、旧门包装）全绿；`-run 'ChatBusyCommand|ChatInputQueue'` 全量通过；`go build`/`gofmt` 干净。
 
 ### G.2 独立勘查发现与方案修正（第三轮，2026-09-27）
 
@@ -1029,7 +1032,7 @@ runtimeCommandSpec{
 | P1-5 | `chat_busy_command_exec.go`：`executeBusySlashCommand`（策略再校验 → 统一渲染面门 → 仲裁 L0 门 → `TryLock` → 解析 → 忙时安全断言 → 渲染 → 历史记录）；降级路径输出可见提示；`consumeBusyCommand` 交接 + 捕获循环「未占有 → requeue」兜底 |
 | M4 | `queuedInputDrain` / `queuedInputEchoed` 改为 `atomic.Bool` + 会话访问器；全部读写点（含 6 处既有测试字面量，机械迁移）同步；`TestChatSessionQueuedInputFlagsConcurrentAccess` 供 `-race` 验证 |
 | P1-6 | INV-8 来源分流已在 P1-3 落地；Web 回执/唤醒语义回归（`-run Web`，15.3s）全绿 |
-| P1-7 | 灰度默认关；T18 等价在策略层（`TestChatBusyCommandPolicyGateOffMatchesLegacyWhitelist`）与路由层（`TestChatInputQueuePolicyRoutingGateOffMatchesLegacyGate`）双重断言 |
+| P1-7 | 总闸默认启用（D14，2026-09-28 决策，见 G.16）；T18 等价以「显式关闭」口径在策略层（`TestChatBusyCommandPolicyGateOffMatchesLegacyWhitelist`）与路由层（`TestChatInputQueuePolicyRoutingGateOffMatchesLegacyGate`）双重断言 |
 | P1-8 | 首批 §4.1 四条；M4 完成后 `/queue` 忙时读取已无竞态前置 |
 
 **新增测试（8 项）**：`TestChatBusyCommandUnsafeEffect`、`TestLockChatCommandPhaseA`、`TestDispatchChatCommandReleasesCommandPhaseALock`、`TestChatBusyCommandArbitrationAllowsFailClosed`、`TestExecuteBusySlashCommandGuards`、`TestExecuteBusySlashCommandUnifiedSession`（统一渲染面 happy path，断言结果到达 presenter）、`TestChatSessionQueuedInputFlagsConcurrentAccess`、`TestChatInputQueueConsumeBusyCommand`。
@@ -1078,15 +1081,15 @@ runtimeCommandSpec{
 | 生效域守卫（T32） | `runtimeHostEffectReachable`：`session`/`process` 在宿主层不可达；唯一合法组合是 `block+process`（`/exit`，只拒绝不执行）——该例外在守卫判定中显式放行 |
 | Notice（T32） | inline 且生效域非 `read` 的命令，执行后按 `spec.Notice` 给出生效提示（如 `/title <text>` → 「下一回合生效」） |
 | 审计（T33） | 事件 `aicli.chat.runtime_interaction`（payload：command/registered/mode/effect/result/occupied/duration_ms）；加入渲染数据面抑制清单（写入 eventLog/timeline/SSE，不产生 Scene 系统消息噪声） |
-| 路由接管 | `chatSlashCommandBusyPolicyFor` 在**双开关**下改由注册表映射：`block→R`、`inline→I`、`screen/prompt/queue→D`、未登记→D（T30）；映射发生在既有 catalog/子命令覆盖之后，保证 P1 已定级命令不回退 |
-| 灰度门（关键） | `chatRuntimeInteractionRegistryActive` = `AICLI_CHAT_BUSY_COMMAND` 打开 **且** `AICLI_CHAT_RUNTIME_INTERACTION` 被显式设置；P2 变量未设置时行为与 P1 首批白名单逐条一致（T18/T31 等价性保持） |
+| 路由接管 | `chatSlashCommandBusyPolicyFor` **默认**由注册表映射：`block→R`、`inline→I`、`screen/prompt/queue→D`、未登记→D（T30）；映射发生在既有 catalog/子命令覆盖之后，保证 P1 已定级命令不回退 |
+| 灰度门（关键，D14 更新） | `chatRuntimeInteractionRegistryActive` = 总闸启用（默认）即成立；`AICLI_CHAT_RUNTIME_INTERACTION` 只决定全局档（auto/readonly/off），不再充当第二道启用门。显式关闭总闸时行为与 P1 首批白名单逐条一致（T18/T31 等价性保持） |
 | 接线 | capture 循环的 busy 消费方由 `executeBusySlashCommand` 改为 `runtimeCommandHost.SubmitBusy`（未占有一律回退入队，不丢输入） |
 
-**新增测试（7 项）**：`TestRuntimeCommandHostInlinesRegisteredReadCommand`（非首批 read 命令立即执行 + 审计内容 + 锁释放）、`TestRuntimeCommandHostDegradesScreenMode`（T6）、`TestRuntimeCommandHostQueuesUnknownCommand`（T30）、`TestRuntimeCommandHostRejectsBlockCommand`（block 拒绝 + 提示）、`TestRuntimeCommandHostEmitsNoticeForNextTurnEffect`（T32 Notice）、`TestRuntimeCommandHostEffectReachability`（T32）、`TestChatBusyPolicyRegistryMappingWhenP2Enabled`（auto/readonly/off/未启用 四态路由映射）。
+**新增测试（7 项）**：`TestRuntimeCommandHostInlinesRegisteredReadCommand`（非首批 read 命令立即执行 + 审计内容 + 锁释放）、`TestRuntimeCommandHostDegradesScreenMode`（T6）、`TestRuntimeCommandHostQueuesUnknownCommand`（T30）、`TestRuntimeCommandHostRejectsBlockCommand`（block 拒绝 + 提示）、`TestRuntimeCommandHostEmitsNoticeForNextTurnEffect`（T32 Notice）、`TestRuntimeCommandHostEffectReachability`（T32）、`TestChatBusyPolicyRegistryMappingWhenP2Enabled`（auto/readonly/off/总闸显式关闭 四态路由映射）。
 
 **验证**：`go build`/`gofmt` 干净；`-race`（host/registry/switch/queue/busy/executor 选择集）✅；整包回归仅剩 2 个 `RunChatLoop` 已知基线项（此前 4 项中 2 项已由并行工作流修复），无新增失败。
 
-**偏差与边界**：① `applyRuntimeEffect` 的 next-turn/next-call **适配器本体**属 P2-5，本步骤只做「生效域可达性守卫 + Notice + 审计」；当前 inline 集合中仅 `/title <text>` 为非 read 生效域，其写盘由既有 handler 完成。② P2 路由接管要求 P2 变量显式设置（而非 F.4 的默认 auto），作为分阶段灰度的过渡规则；P2-5 收口后可按 F.4 将默认切为 auto。③ `/clear` 等 C1 命令在 P2 显式启用后由「拒绝」变为「排队」，文案变更仍按 M5 留到 P3。
+**偏差与边界**：① `applyRuntimeEffect` 的 next-turn/next-call **适配器本体**属 P2-5，本步骤只做「生效域可达性守卫 + Notice + 审计」；当前 inline 集合中仅 `/title <text>` 为非 read 生效域，其写盘由既有 handler 完成。② 原步骤把「P2 变量显式设置」作为分阶段灰度的过渡规则；**D14（2026-09-28）已按 F.4 将默认切为注册表接管**，P2 变量降为全局档。③ `/clear` 等 C1 命令默认启用后由「拒绝」变为「排队」，文案变更仍按 M5 留到 P3。
 
 ### G.8 P2-4a 副屏前置①租约等待 + ②流式缓冲核验（部分完成，2026-09-28）
 
@@ -1115,7 +1118,7 @@ runtimeCommandSpec{
 2. **④ 跨回合门**：`prepareInteractiveRead(session)`（`chat_team_drain.go:106`）是主循环读输入前的唯一入口，应在此加 `busyScreenActive` 等待（屏幕跨回合未关闭时不得开读）。
 3. **能力门（fail-closed）**：统一渲染面 + `session.Surface.Enabled()` + 全屏能力（`CanUseFullScreenList` / `canOpenChatDebugOverlay` 同款判定）+ 非 JSONOutput/NoInteractive + L0 无 priority prompt 待答；任一不满足 → 降级 queue（保持现状行为）。
 4. **放量顺序**：先 `/todos`（面板，§3.7.4 白名单）单条打通「租约（预算）→ modal 登记 → 只读交互 → Close → `Release` → `RequestPrimaryRecovery` → 恢复 capture」，再依次放 `/history`、`/usage`、`/debug display`、`/web endpoints`、`/account --no-refresh|show`；T20~T26 的 TTY 行为验证随后补齐。
-5. **灰度**：screen 档仅在 `AICLI_CHAT_RUNTIME_INTERACTION` 显式启用（auto）时生效；文档提示 T20~T26 未过前建议保持 `off`/`readonly`。
+5. **灰度**：screen 档默认（D14）生效；T20~T26 物理层闭环后已按用户决策默认启用，若需临时收紧可设 `AICLI_CHAT_RUNTIME_INTERACTION=off`（全排队）或 `readonly`（仅 read 档）。
 
 ### G.10 P2-4b-2a 跨回合副屏门（2026-09-28）
 
@@ -1134,14 +1137,14 @@ runtimeCommandSpec{
 | 项 | 结论 |
 | --- | --- |
 | 链路 | **原已预留**：`chatInputRouteScreen` 档位、`queue.consumeBusyCommand` → `runtimeCommandHost.SubmitBusy` 的消费路径、`chatBusyPolicyScreen` 常量都在 P1 阶段就位；本步骤只需补两处——策略映射与宿主执行。 |
-| 策略映射 | `chatBusyPolicyFromRuntimeSpec`：`runtimeModeScreen` 且命中首批白名单 → `chatBusyPolicyScreen`（S 档），否则仍 `Deferred`；未显式启用 P1 通道时 S 依旧回退 D（灰度契约不变）。 |
+| 策略映射 | `chatBusyPolicyFromRuntimeSpec`：`runtimeModeScreen` 且命中首批白名单 → `chatBusyPolicyScreen`（S 档），否则仍 `Deferred`；总闸显式关闭时 S 依旧回退 D（D14 后默认启用）。 |
 | 白名单 | `busyScreenCommandFirstBatch`：**screen 档 + 只读生效域 + 命令名 ∈ {`/todos` `/history` `/usage` `/debug`(display 变体) `/web`(endpoints 变体)}**。picker/写入类 screen（`/model` `/theme` `/export` `/skills` `/mcp` `/agents` `/routing panel`…）继续 Deferred，待确认流/快照依赖清单在 P2-5/P3 补齐。 |
 | 宿主执行 | `chat_runtime_command_host.go` 新增 `case runtimeModeScreen`：白名单 + `runBusyScreenCommand` 失败即 `degraded`（不占有 → 调用方回退入队，不丢输入）。 |
 | 执行原语 | `runBusyScreenCommand`（`chat_busy_screen_exec.go`）：能力门（fail-closed，复用 `/debug display` 同款判定：统一渲染面 + surface 启用 + 无在途租约/弹层 + 终端支持全屏列表）→ L0 仲裁（modal/priority prompt 活跃即降级，INV-7）→ `commandMu.TryLock`（与 inline 同互斥）。执行期间：`beginChatInputShadowLevel(chatInputOwnerModal)`（副屏独占 stdin 与 ESC）+ `SetAlternateScreenWaitBudget(2s)`；退出时按 LIFO 释放并把预算复位 0。执行入口 `dispatchChatCommand`（含命令渲染与 Phase B 屏幕开启），生产路径不可注入，测试经 `chatBusyScreenDispatchOverride` 注入替身。 |
 | 实现约束 | 主分派器不能写进包级变量初始化式（`dispatchChatCommand → … → runBusyScreenCommand` 初始化环，编译器实测拦截），故改为「override + 惰性函数」形态。 |
 | 测试 | 新增 4 项：策略映射（含首批/非首批/P1 关闭回退）、白名单执行（校验执行期间 modal 属主、预算 2s、退出后预算复位/modal 释放/commandMu 释放、审计 `executed`）、非首批 screen 不进入副屏入口（审计 `degraded`）、能力门 fail-closed（无 surface 会话不通过）。既有 T6（`/todos` 降级）与 P2 开关映射用例同步更新为 S 档契约。 |
 
-**行为影响**：仅在 `AICLI_CHAT_BUSY_COMMAND` 开启 **且** `AICLI_CHAT_RUNTIME_INTERACTION` 显式设置（auto）时，首批 5 条只读 screen 命令在忙时改走副屏；否则逐条等价于改造前（deferred 入队）。真机 TTY 行为验证（T20~T26）仍待补。
+**行为影响（D14 更新）**：默认（无环境变量）下首批 5 条只读 screen 命令在忙时改走副屏；显式关闭总闸时逐条等价于改造前（deferred 入队）。真机 TTY 观感矩阵（T20~T26 的手工部分）仍待补。
 
 ### G.12 P2-5a 生效域核验（inline 非 read 的准入审计，2026-09-28）
 
@@ -1189,3 +1192,17 @@ runtimeCommandSpec{
 | 边界 | `commandMu` 争用与 unsafe 效应仍由各自分支给出更具体的通知，不重复调用本函数；降级提示是**补充行**（`RenderLocalSupplement`），不进入对话历史。 |
 | 关联条款 | T25（无备用屏能力/租约超时 → fail-closed 降级「有明确提示」）与 T26（非 TTY → 降级 D 且无 escape 泄漏）的**提示契约**由此闭环在单测层；真机观感（提示与流式内容交错、窄终端折行）仍待手工矩阵。 |
 | 验证 | `go test ./cmd/aicli/commands -run 'Busy\|RuntimeCommandHost' -count=1` 通过；全包回归与本步无关的 2 项基线失败保持一致。 |
+
+### G.16 P2-6 忙时通道总闸默认启用（D14 决策落地，2026-09-28）
+
+| 项 | 结论 |
+| --- | --- |
+| 决策 | 用户指令「默认启用」：D14 选 (b)。无需任何环境变量，忙时通道与注册表路由默认生效；保留显式一键回退与分层收窄。 |
+| 语义 | `chatBusyCommandEnabled` 改为 `os.LookupEnv`：**未设置 → 启用**；已设置且归一后为 `""/1/true/on/yes/y/enabled/auto` → 启用；其余（`0/false/off/no/disable/disabled` 及未知值）→ 显式关闭（fail-closed 回旧行为）。`chatRuntimeInteractionRegistryActive` = 总闸启用即接管；`AICLI_CHAT_RUNTIME_INTERACTION` 降为全局档（auto/readonly/off），不再充当第二道启用门。 |
+| 回退能力 | `AICLI_CHAT_BUSY_COMMAND=off`：I/S 回退 D，inherit 按 `chatSlashCommandQueueSafe` 派生（T18 等价断言以「显式关闭」口径在策略层与路由层保留）；分层收窄仍可用：`AICLI_CHAT_RUNTIME_INTERACTION=readonly`（仅 read 档）/`off`（全排队）/分类与命令级覆盖。 |
+| 默认可见面（无 env） | S 副屏：`/todos` `/history` `/usage` `/debug display` `/web endpoints`；P 确认门：`/queue clear`；I 内联：`/help` `/?` `/status` `/session` `/queue [status]` `/theme` `/model status` `/reasoning status` `/agent` `/web status\|token` `/debug status\|routing\|state` 等注册表 inline+read 项（非 read 的 inline 仅 `/title <text>`，执行后给「下一回合生效」Notice）；D 入队：`/clear` `/new` `/model` `/export` 等 screen/queue 非首批；R 拒绝：`/exit`（block+process 例外，只拒绝不执行）。 |
+| 代码 | `chat_busy_command_policy.go`（总闸 + 注册表接管）、`chat_slash_command_catalog.go`（注释同步）；宿主与执行器代码不变。 |
+| 测试 | `TestChatBusyCommandPolicyGateDefaultOn`（未设置/启用字典/显式关闭三态）、`TestChatBusyCommandPolicyDefaultOnRegistryRouting`（新增：默认下 9 条命令映射）、`TestChatBusyCommandPolicyGateOffMatchesLegacyWhitelist`（T18 等价改写为显式关闭口径）、`TestChatBusyPolicyRegistryMappingWhenP2Enabled`（未设置全局档 = auto → `/model status` immediate、`/todos` screen）、`TestExecuteBusySlashCommandGuards`（显式 off 降级；`/model` 非 immediate）、`TestChatInputQueuePolicyRoutingImmediateAndScreen`（`/theme` 默认 immediate）同步。 |
+| 验证 | 聚焦：`go test ./cmd/aicli/commands -run 'ChatBusyCommand\|ChatBusyPolicy\|ChatInputQueuePolicyRouting\|ExecuteBusySlashCommand\|RuntimeCommandHost\|BusyScreen\|BusyPrompt' -count=1` ✅；整包：`go test ./cmd/aicli/... -count=1` 仅余 2 项既有 `TestRunChatLoop_*` 基线失败（见 G.11）。 |
+| 环境噪声 | `TestHandleImageAttachmentCommandValidatesAndRemovesAttachments` 在**单独 -run** 时复现 `command_test.go:77 expected validated attachment, got []string(nil)`，整包运行可通过；在会话前基线提交 `a9250339` 的干净工作树同样复现 → 既有测试隔离/时序问题，与 D14 无关，未修。 |
+| 遗留 | 真机 TTY 全链路（默认开关下 `/todos` 副屏、`/queue clear` 确认门、降级提示观感）仍需手工矩阵；T26 平台矩阵（winpty/SSH/非 TTY）待补。 |

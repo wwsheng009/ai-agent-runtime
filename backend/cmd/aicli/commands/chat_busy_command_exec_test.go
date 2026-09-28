@@ -90,13 +90,14 @@ func TestExecuteBusySlashCommandGuards(t *testing.T) {
 	}
 
 	session := &ChatSession{}
-	// 灰度关闭：即使首批命令也应降级。
+	// 总闸显式关闭：即使首批命令也应降级。
+	t.Setenv(chatBusyCommandEnv, "off")
 	if executeBusySlashCommand(session, "/help") {
-		t.Fatal("灰度关闭时必须降级")
+		t.Fatal("总闸显式关闭时必须降级")
 	}
 
 	t.Setenv(chatBusyCommandEnv, "on")
-	if executeBusySlashCommand(session, "/theme") {
+	if executeBusySlashCommand(session, "/model") {
 		t.Fatal("非 immediate 命令不得走忙时通道")
 	}
 	if executeBusySlashCommand(session, "/help") {

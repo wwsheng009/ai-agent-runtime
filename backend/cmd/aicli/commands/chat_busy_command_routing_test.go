@@ -34,8 +34,8 @@ func TestChatInputQueuePolicyRoutingImmediateAndScreen(t *testing.T) {
 	if got := queue.routeInputTextFromSource("/status", chatInputSourceStdin); !got.immediate() {
 		t.Fatalf("/status 应为 immediate，实际 %+v", got)
 	}
-	if got := queue.routeInputTextFromSource("/theme", chatInputSourceStdin); !got.rejected() {
-		t.Fatalf("/theme 应保持 rejected，实际 %+v", got)
+	if got := queue.routeInputTextFromSource("/theme", chatInputSourceStdin); !got.immediate() {
+		t.Fatalf("/theme 默认由注册表接管（inline+read）应为 immediate，实际 %+v", got)
 	}
 	if texts := drainBusyPolicyTestQueue(t, queue); len(texts) != 0 {
 		t.Fatalf("I/R 档不应入队，实际 %v", texts)

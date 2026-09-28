@@ -7,9 +7,10 @@ import (
 
 // 忙时命令策略（方案 §5 P1-1/P1-2；档位命名对齐 §3.7.3 降级矩阵 I/S/D/R）。
 //
-// 该策略描述的是**目标态**：目前只有 immediate 通道骨架（P1），S/D/R 的完整
-// 语义分别在 P2-4（副屏）与 P3（反馈文案）落地；灰度关闭时 I/S 一律回退 deferred，
-// 保证与既有 chatSlashCommandQueueSafe 白名单逐条等价（P1-7/T18）。
+// 该策略描述的是**目标态**：I（inline）/S（副屏与确认门，P2-4）/R（拒绝）均已落地，
+// D 的反馈文案仍按 P3 评审。**默认启用**（2026-09-28 决策 D14，见方案 G.16）：未设置
+// 总闸即启用；显式设置 AICLI_CHAT_BUSY_COMMAND 为非启用值时才回退旧行为（I/S→D），
+// 与既有 chatSlashCommandQueueSafe 白名单逐条等价（P1-7/T18 以显式关闭口径保留）。
 type chatBusyCommandPolicy uint8
 
 const (
@@ -35,15 +36,21 @@ func (p chatBusyCommandPolicy) String() string {
 	}
 }
 
-// chatBusyCommandEnv 是 P1 灰度开关（默认关闭）：关闭时 I/S 回退 deferred，
-// 路由行为与旧白名单逐条等价；打开后首批命令（§4.1）忙时立即可见。
+// chatBusyCommandEnv 是忙时通道总闸，**默认启用**：未设置或空值 = 启用；
+// 显式设置为非启用值（0/false/off/no/disable/disabled 等，含拼写错误）时回退旧行为
+// （I/S 回退 deferred，与 chatSlashCommandQueueSafe 逐条等价），保留一键回退能力。
 const chatBusyCommandEnv = "AICLI_CHAT_BUSY_COMMAND"
 
 func chatBusyCommandEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(chatBusyCommandEnv))) {
-	case "1", "true", "on", "yes", "y", "enabled":
+	raw, present := os.LookupEnv(chatBusyCommandEnv)
+	if !present {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "1", "true", "on", "yes", "y", "enabled", "auto":
 		return true
 	default:
+		// 显式 opt-out：未知值也按关闭处理（fail-closed，宁可回到旧行为）。
 		return false
 	}
 }
@@ -54,8 +61,9 @@ func chatBusyCommandEnabled() bool {
 //  2. 命令名含别名经 catalog 归一，取 spec.BusyPolicy；
 //  3. 不接受参数的命令携带参数 → inherit（只放行文档化的裸形式）；
 //  4. 子命令级覆盖：`/queue clear` 保持现状（状态变更，不得 immediate）；
-//  5. I/S 在灰度关闭时回退 D；D/R 直接返回；
-//  6. inherit → 由旧白名单派生：queue-safe→D，否则→R（保证关闭时零行为差异）。
+//  5. I/S 在总闸显式关闭时回退 D；D/R 直接返回；
+//  6. inherit → 默认由注册表接管（§3.8.2）；仅当总闸显式关闭时退回旧白名单派生：
+//     queue-safe→D，否则→R（保证显式关闭时零行为差异）。
 func chatSlashCommandBusyPolicyFor(text string) chatBusyCommandPolicy {
 	name, args, ok := chatBusyCommandNameAndArgs(text)
 	if !ok {
@@ -83,7 +91,7 @@ func chatSlashCommandBusyPolicyFor(text string) chatBusyCommandPolicy {
 		return policy
 	}
 
-	// P2-3：显式启用运行时交互开关后，注册表成为策略的单一事实源（§3.8.2）。
+	// D14：总闸开启（默认）时注册表即策略的单一事实源（§3.8.2）。
 	if chatRuntimeInteractionRegistryActive() {
 		return chatBusyPolicyFromRuntimeSpec(text)
 	}
@@ -95,15 +103,11 @@ func chatSlashCommandBusyPolicyFor(text string) chatBusyCommandPolicy {
 }
 
 // chatRuntimeInteractionRegistryActive 判定注册表是否接管路由策略（P2-3）。
-// 需要两个开关同时满足，保证灰度可回退：
-//   - P1 忙时通道开启（AICLI_CHAT_BUSY_COMMAND）；
-//   - P2 开关被**显式设置**（AICLI_CHAT_RUNTIME_INTERACTION 非空，
-//     auto/readonly/off 任一）。未显式设置时保持 P1 首批白名单行为（T18 等价）。
+// 默认启用：总闸开启（默认）即由注册表解析；AICLI_CHAT_RUNTIME_INTERACTION 只作为
+// 三级开关的全局档（auto/readonly/off），不再充当第二道启用门。显式关闭总闸时回退
+// P1 首批白名单（T18 等价），保证一键回退。
 func chatRuntimeInteractionRegistryActive() bool {
-	if !chatBusyCommandEnabled() {
-		return false
-	}
-	return strings.TrimSpace(os.Getenv(runtimeInteractionEnv)) != ""
+	return chatBusyCommandEnabled()
 }
 
 // chatBusyPolicyFromRuntimeSpec 把注册表声明（经三级开关降级后）映射到 P1 四档：

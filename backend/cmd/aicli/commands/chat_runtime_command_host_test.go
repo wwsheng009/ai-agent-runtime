@@ -205,7 +205,7 @@ func TestRuntimeCommandHostEffectReachability(t *testing.T) {
 	}
 }
 
-// T5/T6/T30/T31：P2 开关显式启用后注册表接管路由策略；未启用时保持 P1 行为。
+// T5/T6/T30/T31/D14：注册表默认接管路由策略；显式关闭总闸时才回退 P1 行为（T18）。
 func TestChatBusyPolicyRegistryMappingWhenP2Enabled(t *testing.T) {
 	t.Setenv(chatBusyCommandEnv, "on")
 
@@ -245,12 +245,15 @@ func TestChatBusyPolicyRegistryMappingWhenP2Enabled(t *testing.T) {
 		t.Fatalf("off 下 block 不受影响，实际 %s", got)
 	}
 
-	// P2 未显式设置：保持 P1 首批白名单行为（T18）。
+	// 全局档未显式设置 = auto（默认，D14）：注册表仍然接管。
 	t.Setenv(runtimeInteractionEnv, "")
-	if got := chatSlashCommandBusyPolicyFor("/model status"); got != chatBusyPolicyDeferred {
-		t.Fatalf("P2 未启用时 /model status 应维持 deferred，实际 %s", got)
+	if got := chatSlashCommandBusyPolicyFor("/model status"); got != chatBusyPolicyImmediate {
+		t.Fatalf("全局档未设置时 /model status 应走注册表 immediate，实际 %s", got)
+	}
+	if got := chatSlashCommandBusyPolicyFor("/todos"); got != chatBusyPolicyScreen {
+		t.Fatalf("全局档未设置时 /todos 应走注册表 screen，实际 %s", got)
 	}
 	if got := chatSlashCommandBusyPolicyFor("/help"); got != chatBusyPolicyImmediate {
-		t.Fatalf("P2 未启用时首批命令应保持 immediate，实际 %s", got)
+		t.Fatalf("全局档未设置时首批命令应保持 immediate，实际 %s", got)
 	}
 }
