@@ -169,6 +169,30 @@ func (CloseTranscriptOverlay) isUIAction()         {}
 func (CloseTranscriptOverlay) Class() ActionClass  { return ClassBarrier }
 func (CloseTranscriptOverlay) CoalesceKey() string { return "" }
 
+// OpenScreenOverlay and CloseScreenOverlay are the unified chat-screen
+// framework's explicit lifecycle barriers for generic (non-picker) alternate
+// screens such as read-only documents. They bind the semantic overlay to an
+// already acquired ScreenLease so primary/alternate ownership cannot be
+// reordered with resize or lease release. ScreenID is diagnostic identity
+// only; the lease id remains the stale-action guard.
+type OpenScreenOverlay struct {
+	LeaseID  uint64
+	ScreenID string
+}
+
+func (OpenScreenOverlay) isUIAction()         {}
+func (OpenScreenOverlay) Class() ActionClass  { return ClassBarrier }
+func (OpenScreenOverlay) CoalesceKey() string { return "" }
+
+type CloseScreenOverlay struct {
+	LeaseID  uint64
+	ScreenID string
+}
+
+func (CloseScreenOverlay) isUIAction()         {}
+func (CloseScreenOverlay) Class() ActionClass  { return ClassBarrier }
+func (CloseScreenOverlay) CoalesceKey() string { return "" }
+
 // OpenResumePicker and CloseResumePicker bind the session selector to an
 // already acquired ScreenLease. The fullscreen list keeps its navigation
 // state locally, while AppState records ownership so delayed close/release

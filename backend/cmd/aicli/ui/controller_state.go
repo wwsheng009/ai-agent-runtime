@@ -161,6 +161,9 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			if state.MCPPicker.Active && state.MCPPicker.LeaseID == a.LeaseID {
 				state.MCPPicker = MCPPickerState{}
 			}
+			if state.ScreenOverlay.Active && state.ScreenOverlay.LeaseID == a.LeaseID {
+				state.ScreenOverlay = ScreenOverlayState{}
+			}
 		}
 	case OpenTranscriptOverlay:
 		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
@@ -172,6 +175,14 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 	case CloseTranscriptOverlay:
 		if a.LeaseID != 0 && state.TranscriptOverlay.Active && state.TranscriptOverlay.LeaseID == a.LeaseID {
 			state.TranscriptOverlay = TranscriptOverlayState{}
+		}
+	case OpenScreenOverlay:
+		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {
+			state.ScreenOverlay = ScreenOverlayState{Active: true, LeaseID: a.LeaseID, ScreenID: a.ScreenID}
+		}
+	case CloseScreenOverlay:
+		if a.LeaseID != 0 && state.ScreenOverlay.Active && state.ScreenOverlay.LeaseID == a.LeaseID {
+			state.ScreenOverlay = ScreenOverlayState{}
 		}
 	case OpenResumePicker:
 		if a.LeaseID != 0 && state.Lease.Active && state.Lease.ID == a.LeaseID {

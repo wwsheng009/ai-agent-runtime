@@ -1092,6 +1092,10 @@ func actionClassString(action UIAction) string {
 		return "OpenTranscriptOverlay"
 	case CloseTranscriptOverlay:
 		return "CloseTranscriptOverlay"
+	case OpenScreenOverlay:
+		return "OpenScreenOverlay"
+	case CloseScreenOverlay:
+		return "CloseScreenOverlay"
 	case OpenResumePicker:
 		return "OpenResumePicker"
 	case CloseResumePicker:

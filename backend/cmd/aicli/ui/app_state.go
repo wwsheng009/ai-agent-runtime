@@ -30,6 +30,7 @@ type AppState struct {
 	Lease                        LeaseState
 	HistoryEffects               HistoryEffectQueueState
 	TranscriptOverlay            TranscriptOverlayState
+	ScreenOverlay                ScreenOverlayState
 	ResumePicker                 ResumePickerState
 	BacktrackPicker              BacktrackPickerState
 	ModelPicker                  ModelPickerState
@@ -206,6 +207,16 @@ type TranscriptOverlayState struct {
 	Active  bool
 	LeaseID uint64
 	Pager   TranscriptPagerState
+}
+
+// ScreenOverlayState records the unified chat-screen framework's generic
+// (non-picker) alternate-screen ownership: read-only documents and other
+// screens rendered through OpenScreenOverlay. ScreenID is diagnostic identity
+// only; the lease id is the stale-action guard, exactly like the pickers.
+type ScreenOverlayState struct {
+	Active   bool
+	LeaseID  uint64
+	ScreenID string
 }
 
 // ResumePickerState records only alternate-screen ownership. Item matching,
