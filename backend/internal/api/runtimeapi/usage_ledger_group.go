@@ -14,6 +14,15 @@ import (
 const usageLedgerGroupByProfile = "profile"
 
 // usageLedgerProfileGroup 是按 profile 聚合的一组用量。
+//
+// 除 token 三件套外，还汇总知识层探索归因的 9 个指标（Phase 0 交付 2 / `06`
+// §5.2："在 usageanalytics 暴露"）。聚合落点在 ledger 的读取路径（本文件），
+// 因为 `internal/usageanalytics` 不读 `usageledger`；口径与验收一致：
+// 9 个字段全部是**可加计数/token**，按组求和即可复算 "每个任务平均多少 token
+// 花在探索 / 重复读取"。
+//
+// 9 个新字段一律 `omitempty`：`mode=off`（默认）下所有归因字段为 0，序列化
+// 结果与新增前逐字节一致——保持硬不变量。
 type usageLedgerProfileGroup struct {
 	Profile      string `json:"profile"`
 	Requests     int    `json:"requests"`
@@ -21,6 +30,17 @@ type usageLedgerProfileGroup struct {
 	InputTokens  int    `json:"input_tokens"`
 	OutputTokens int    `json:"output_tokens"`
 	TotalTokens  int    `json:"total_tokens"`
+
+	// 探索归因 9 指标（ADR-0003 §4.1 的 ledger 列）。零值省略。
+	ExplorationTokens             int `json:"exploration_tokens,omitempty"`
+	ReuseTokens                   int `json:"reuse_tokens,omitempty"`
+	IndexLookupCount              int `json:"index_lookup_count,omitempty"`
+	IndexHit                      int `json:"index_hit,omitempty"`
+	FallbackCount                 int `json:"fallback_count,omitempty"`
+	UnsafeReuseCount              int `json:"unsafe_reuse_count,omitempty"`
+	ToolCallsPerTask              int `json:"tool_calls_per_task,omitempty"`
+	RepeatedReadCount             int `json:"repeated_read_count,omitempty"`
+	KnowledgeVersionMismatchCount int `json:"knowledge_version_mismatch_count,omitempty"`
 }
 
 // aggregateUsageLedgerByProfile 按记录元数据里的 profile 键聚合（FR-13）。
@@ -61,6 +81,16 @@ func aggregateUsageLedgerByProfile(records []*entity.TokenUsageHistory) []usageL
 		group.InputTokens += record.InputTokens
 		group.OutputTokens += record.OutputTokens
 		group.TotalTokens += record.TotalTokens
+		// 探索归因 9 指标：与 token 同口径按组求和（可加字段，无需去重）。
+		group.ExplorationTokens += record.ExplorationTokens
+		group.ReuseTokens += record.ReuseTokens
+		group.IndexLookupCount += record.IndexLookupCount
+		group.IndexHit += record.IndexHit
+		group.FallbackCount += record.FallbackCount
+		group.UnsafeReuseCount += record.UnsafeReuseCount
+		group.ToolCallsPerTask += record.ToolCallsPerTask
+		group.RepeatedReadCount += record.RepeatedReadCount
+		group.KnowledgeVersionMismatchCount += record.KnowledgeVersionMismatchCount
 	}
 	sort.SliceStable(groups, func(i, j int) bool {
 		if groups[i].TotalTokens != groups[j].TotalTokens {

@@ -245,6 +245,33 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_token_usage_history_created_at
 			ON token_usage_history(created_at DESC, id DESC)`,
+		// Phase 0 交付 7 / ADR-0003 §4.1：探索归因与 shadow 差异率度量。
+		// 只建表与索引，不产生数据（mode=off 下没有任何调用方会写入）。
+		// DDL 与 ADR-0003 §4.1 逐列对齐；追加语句复用 IF NOT EXISTS 幂等语义（D7）。
+		`CREATE TABLE IF NOT EXISTS exploration_attribution (
+			id TEXT PRIMARY KEY,
+			session_id TEXT,
+			turn_id TEXT,
+			request_id TEXT,
+			tool TEXT NOT NULL,
+			query_hash TEXT,
+			project_id TEXT,
+			baseline_n INTEGER NOT NULL DEFAULT 0,
+			candidate_n INTEGER NOT NULL DEFAULT 0,
+			overlap_n INTEGER NOT NULL DEFAULT 0,
+			baseline_tokens INTEGER NOT NULL DEFAULT 0,
+			candidate_tokens INTEGER NOT NULL DEFAULT 0,
+			coverage REAL,
+			economy REAL,
+			usable INTEGER NOT NULL DEFAULT 0,
+			source TEXT,
+			knowledge_mode TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_exploration_attribution_created_at
+			ON exploration_attribution(created_at DESC, id DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_exploration_attribution_tool_time
+			ON exploration_attribution(tool, created_at DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -316,6 +343,56 @@ func (s *SQLiteStore) ledgerColumns(ctx context.Context) (map[string]bool, error
 		return nil, err
 	}
 	return columns, nil
+}
+
+// AppendExplorationAttribution 追加一行 exploration_attribution（ADR-0003 §4.1）。
+//
+// 该表与 token_usage_history 完全隔离：追加本表数据不得以任何形式写入
+// token_usage_history（D3 第 1 条）。coverage / economy 允许 NULL
+// （baseline_n == 0 或 baseline_tokens == 0 时无定义）。
+func (s *SQLiteStore) AppendExplorationAttribution(ctx context.Context, rec *entity.ExplorationAttribution) error {
+	if rec == nil {
+		return nil
+	}
+	if s == nil || s.db == nil {
+		return fmt.Errorf("usageledger: append exploration attribution: store is not open")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO exploration_attribution (
+			id, session_id, turn_id, request_id, tool, query_hash, project_id,
+			baseline_n, candidate_n, overlap_n, baseline_tokens, candidate_tokens,
+			coverage, economy, usable, source, knowledge_mode, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID,
+		nullIfEmpty(rec.SessionID),
+		nullIfEmpty(rec.TurnID),
+		nullIfEmpty(rec.RequestID),
+		rec.Tool,
+		nullIfEmpty(rec.QueryHash),
+		nullIfEmpty(rec.ProjectID),
+		rec.BaselineN,
+		rec.CandidateN,
+		rec.OverlapN,
+		rec.BaselineTokens,
+		rec.CandidateTokens,
+		nullableFloat(rec.Coverage),
+		nullableFloat(rec.Economy),
+		boolToInt(rec.Usable),
+		nullIfEmpty(rec.Source),
+		rec.KnowledgeMode,
+		rec.CreatedAt.UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return fmt.Errorf("usageledger: append exploration attribution: %w", err)
+	}
+	return nil
+}
+
+func nullableFloat(value *float64) interface{} {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func resolveSQLiteDSN(dsn string) (string, error) {

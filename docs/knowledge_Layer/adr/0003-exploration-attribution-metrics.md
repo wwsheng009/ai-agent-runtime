@@ -1,6 +1,7 @@
 # ADR-0003: 探索归因与 shadow 差异率度量
 
-- **Status**: Proposed
+- **Status**: Accepted
+- **Accepted**: 2026-09-28（项目 owner 授权代改并记录裁决，见 `../CHANGELOG.md` 的 2026-09-28 ADR 裁决条目；§10 的 α 阈值仍受 `Phase1-shadow` 门禁约束，本次仅接受口径部分）
 - **Date**: 2026-09-20
 - **Deciders**: 项目 owner
 - **Gate**: `Phase1-start`（口径）/ **`Phase1-shadow`**（阈值：α 与 Phase 1 门槛数值，2026-09-21 由 `Phase0-baseline` 改，见 §10）

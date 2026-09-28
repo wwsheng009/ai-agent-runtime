@@ -37,6 +37,12 @@ func parseSSETestFrames(t *testing.T, body string) []sseTestFrame {
 		if block == "" {
 			continue
 		}
+		// SSE 注释帧（`: open` / `: keepalive` 等，P0 开流前移后入口即出站）
+		// 不是数据帧：既没有 event 行也没有 data 行。若参与下面的帧级契约
+		// 校验，会被当成「无 sequence 且非 wire-only」的异常帧误报。
+		if strings.HasPrefix(block, ":") {
+			continue
+		}
 		frame := sseTestFrame{}
 		for _, line := range strings.Split(block, "\n") {
 			line = strings.TrimSpace(line)

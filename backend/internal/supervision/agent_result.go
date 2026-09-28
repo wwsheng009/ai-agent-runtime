@@ -245,9 +245,26 @@ type ReadResultPayload struct {
 	// (H10).
 	ResultAvailable bool `json:"result_available,omitempty"`
 	DoNotRetry      bool `json:"do_not_retry,omitempty"`
+	// WrapUp is the failed/canceled task's 已完成 / 未完成 清单 plus artifact
+	// locations (建议稿 §2.4). Omitted for successful records and for failures
+	// that recorded no work state.
+	WrapUp *ResultWrapUp `json:"wrap_up,omitempty"`
 	// FinishedAt is the durable completion time when the source recorded one.
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
+
+// ResultWrapUp is the explicit 收尾摘要 of a failed/canceled task (建议稿
+// §2.4): what the child finished, what it did not, and where its deliverables
+// live. A killed child cannot be asked for it afterwards, so it is derived
+// mechanically from the durable record instead of from a fresh model turn.
+type ResultWrapUp struct {
+	Completed  []string `json:"completed,omitempty"`
+	Unfinished []string `json:"unfinished,omitempty"`
+	Artifacts  []string `json:"artifacts,omitempty"`
+}
+
+// MaxWrapUpEntries caps each wrap-up list so the digest stays bounded.
+const MaxWrapUpEntries = 8
 
 // NormalizeReadResultSections validates and normalizes the sections argument.
 // Empty means "all sections" (the tool default). An unknown section is
@@ -511,6 +528,7 @@ func BuildReadResultPayload(record AgentResultRecord, args ReadResultArgs) ReadR
 		}
 	}
 	applyFailedWithResultGuidance(&payload, record)
+	applyFailedWrapUp(&payload, record)
 	enforceReadResultBudget(&payload, maxChars)
 	syncSummaryPageAfterBudget(&payload)
 	if payload.NextAction == "" && payload.Truncated && payload.EOF != nil && !*payload.EOF {
@@ -622,7 +640,13 @@ func applyFailedWithResultGuidance(payload *ReadResultPayload, record AgentResul
 	if record.Success {
 		return
 	}
-	hasDeliverable := strings.TrimSpace(record.Summary) != "" || len(record.Findings) > 0 || len(record.Artifacts) > 0
+	// Landed changes count as work product too (§2.4-3): a run whose only
+	// deliverable is an applied patch was previously treated as "no result"
+	// and re-dispatched, duplicating work that already landed. An unlanded
+	// change (skipped / failed) only counts when it stored its diff as an
+	// artifact — otherwise retrying the patch stays the right move.
+	hasDeliverable := strings.TrimSpace(record.Summary) != "" || len(record.Findings) > 0 ||
+		len(record.Artifacts) > 0 || hasLandedChange(record.Changes)
 	if !hasDeliverable {
 		return
 	}
@@ -635,6 +659,93 @@ func applyFailedWithResultGuidance(payload *ReadResultPayload, record AgentResul
 	} else {
 		payload.NextAction = note + "; " + payload.NextAction
 	}
+}
+
+// hasLandedChange reports whether a failed record carries work the parent can
+// already use: an applied patch, or a change whose diff was stored as an
+// artifact even though the patch itself did not land.
+func hasLandedChange(changes []AgentResultChange) bool {
+	for _, change := range changes {
+		if changeApplied(change.Status) || len(change.ArtifactRefs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// applyFailedWrapUp renders the explicit 收尾摘要 of a failed/canceled record
+// (建议稿 §2.4 acceptance: 失败 run 的结果里能看到"已完成 / 未完成 + 产物位置").
+//
+// The derivation is mechanical, never editorialized:
+//   - Completed  <- changes whose apply status landed ("applied", or an empty
+//     status, the host's recorded-write fallback: agent/scheduler.go);
+//   - Unfinished <- changes whose status says the patch did not land
+//     (skipped / failed / ...), i.e. the work a re-dispatch would redo;
+//   - Artifacts  <- the record's artifact refs, the dereferenceable 产物位置
+//     (the artifacts section carries the matching artifact_read pointers).
+//
+// A successful record carries no wrap_up, and a failure that recorded no work
+// state stays silent instead of fabricating a "nothing was done" claim.
+func applyFailedWrapUp(payload *ReadResultPayload, record AgentResultRecord) {
+	if payload == nil || record.Success {
+		return
+	}
+	wrap := &ResultWrapUp{}
+	for _, change := range record.Changes {
+		label, cut := truncateReadResultText(wrapUpChangeLabel(change), MaxSnapshotResultSummaryRunes, false)
+		if label == "" {
+			continue
+		}
+		payload.Truncated = payload.Truncated || cut
+		if changeApplied(change.Status) {
+			if len(wrap.Completed) < MaxWrapUpEntries {
+				wrap.Completed = append(wrap.Completed, label)
+			} else {
+				payload.Truncated = true
+			}
+			continue
+		}
+		if status := strings.TrimSpace(change.Status); status != "" {
+			label = label + " (" + status + ")"
+		}
+		if len(wrap.Unfinished) < MaxWrapUpEntries {
+			wrap.Unfinished = append(wrap.Unfinished, label)
+		} else {
+			payload.Truncated = true
+		}
+	}
+	if refs := BoundReadResultArtifacts(record.Artifacts); len(refs) > 0 {
+		wrap.Artifacts = refs
+	}
+	if len(wrap.Completed) == 0 && len(wrap.Unfinished) == 0 && len(wrap.Artifacts) == 0 {
+		return
+	}
+	payload.WrapUp = wrap
+}
+
+// wrapUpChangeLabel names one change for the wrap-up digest: the path when the
+// record has one, otherwise the recorded summary, so a path-less change entry
+// still tells the parent what the work was.
+func wrapUpChangeLabel(change AgentResultChange) string {
+	path := strings.TrimSpace(change.Path)
+	summary := strings.TrimSpace(change.Summary)
+	switch {
+	case path == "":
+		return summary
+	case summary == "" || summary == path:
+		return path
+	default:
+		return path + " — " + summary
+	}
+}
+
+// changeApplied mirrors the host's patch apply-status vocabulary
+// (agent/scheduler.go derivePatchApplyStatus records "applied" for landed
+// writes): empty or "applied" means the work landed; anything else
+// (skipped / failed / ...) did not.
+func changeApplied(status string) bool {
+	status = strings.ToLower(strings.TrimSpace(status))
+	return status == "" || status == "applied"
 }
 
 // BoundReadResultArtifacts caps the read tool's artifacts list (≤8 items, each
@@ -760,6 +871,19 @@ func dropTrailingReadResultEntry(payload *ReadResultPayload) bool {
 		}
 	case len(payload.Errors) > 0:
 		payload.Errors = payload.Errors[:len(payload.Errors)-1]
+	case payload.WrapUp != nil:
+		// The wrap-up overlaps the changes/artifacts sections, so it is shed
+		// only after they are gone; an emptied wrap-up disappears entirely.
+		switch {
+		case len(payload.WrapUp.Unfinished) > 0:
+			payload.WrapUp.Unfinished = payload.WrapUp.Unfinished[:len(payload.WrapUp.Unfinished)-1]
+		case len(payload.WrapUp.Completed) > 0:
+			payload.WrapUp.Completed = payload.WrapUp.Completed[:len(payload.WrapUp.Completed)-1]
+		case len(payload.WrapUp.Artifacts) > 0:
+			payload.WrapUp.Artifacts = payload.WrapUp.Artifacts[:len(payload.WrapUp.Artifacts)-1]
+		default:
+			payload.WrapUp = nil
+		}
 	case payload.Usage != nil:
 		payload.Usage = nil
 	case payload.FailureKind != "":

@@ -60,9 +60,18 @@ export function applySessionHistoryToThread(
   // 中止流式回合时后端只持久化了用户消息，若此时用历史整体覆盖，刚渲染出的部分
   // 回答会连同“已停止”标记一起消失。这里保留历史未覆盖到的 live-only 消息，
   // 追加在权威历史之后（它们必然是最新的回合）。
+  // 命中并吸收了哪条在途消息（见 HistoryMessageMapping.matchedMessageId）：合并
+  // 后消息 id 可能换成持久化 message_id，只按 id 比较会把原在途消息当成「历史
+  // 未覆盖」再追加一份，因此被吸收的 id 也视为已覆盖。
+  const absorbedMessageIds = new Set(
+    mappedHistory
+      .map((item) => item.matchedMessageId)
+      .filter((id): id is string => Boolean(id)),
+  );
   const liveOnlyMessages = thread.messages.filter(
     (message) =>
       (message.streaming === true || message.interrupted === true) &&
+      !absorbedMessageIds.has(message.id) &&
       !mappedMessages.some((mapped) => mapped.id === message.id),
   );
   // `history: null` 与 `history: []` 是两种语义，不能都当成「没有权威历史」：
@@ -109,8 +118,13 @@ export function prependSessionHistoryToThread(
   );
   const existingIds = new Set(thread.messages.map((message) => message.id));
   const olderMessages = mappedHistory
-    .map((item) => item.message)
-    .filter((message) => !existingIds.has(message.id));
+    .filter(
+      (item) =>
+        // 已命中既有消息的单元（跨页/边界重叠）不再前插成第二份。
+        (!item.matchedMessageId || !existingIds.has(item.matchedMessageId)) &&
+        !existingIds.has(item.message.id),
+    )
+    .map((item) => item.message);
   if (olderMessages.length === 0) {
     return thread;
   }

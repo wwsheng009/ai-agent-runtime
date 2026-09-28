@@ -6,6 +6,35 @@
 
 ---
 
+## 0. 定位与事实源边界（2026-09-28 补，`06` §9 待办 #9b）
+
+> 本文的角色是**架构意图 / 设计理由**：回答"为什么这样设计、有哪些原则与反模式"。
+> 它**不定义** schema、不定义阈值、不定义 Phase 交付与验收——凡下表指认的权威落点，
+> 本文只保留理由与背景；**冲突时以权威落点的原文为准**。
+>
+> | 本文章节 | 权威落点（事实源） |
+> |---|---|
+> | §2 问题定义、§38 Token 优化目标 | 度量口径与阈值：`04` §7（阈值必须先由基线校准） |
+> | §7 语言适配器、§8 语言支持分级 | Adapter SPI 与能力位：`supplement/05` §4、ADR-0002；语言 / 项目模型：ADR-0001 |
+> | §9 动态语言与不确定性 | `supplement/09_dynamic_graph.md` |
+> | §10 Code Intelligence API | API 清单：`supplement/16_api_events_telemetry_and_rollout.md` 附录 B；工具命名与优先级：`docs/plan/aicli-tool-capability-convergence-plan.md` |
+> | §11–§17 上下文分层 / 探索记忆 / Planner / Compiler / 输出压缩 | Context 安全与可解释性：`supplement/14_context_safety.md`；工具输出归档与截断：`docs/plan/tool-output-artifact-cascade-audit-and-optimization-plan-20260919.md` |
+> | §18 Symbol 级代码读取 | 工具面与文件落点：`06` §5（本文只讲意图） |
+> | §19–§30 增量索引 / 文件版本 / Fresh-Stale / 缓存 / Context 版本 / Git | extension schema：`supplement/06_cache_consistency.md`、`supplement/15_change_management.md` |
+> | §31 Code Knowledge Storage、§32 Symbol 数据模型、§33 / §34 Exploration Node / Edge、§35 Code Graph | **core schema 唯一事实源是 `02`**（本文不复制 DDL） |
+> | §36 Semantic Search | FTS5 为主、embedding 默认关闭：`supplement/13_fts.md` |
+> | §39 Telemetry、§40 缓存层级、§41 Cache Key | Telemetry 补充：`supplement/16_api_events_telemetry_and_rollout.md` §18；prompt cache 与知识层 `cache_entries` 的边界：`06` §8 |
+> | §42 Project Map | `supplement/02_project_model.md`、`supplement/05` §3 |
+> | §43 推荐的核心模块、§44 不建议的架构、§45 推荐的最终架构 | 架构决策：`adr/*`（本文只给理由） |
+> | §46 分阶段实施路线、§51 推荐 MVP | **以 `04` §5 为准**（含 ADR 门禁与验收门槛）；Phase 状态与 `README.md` §4 同步 |
+> | §47 ABAP、§48 安全与可靠性 | 安全 extension schema：`supplement/07_security.md`；跨语言与 IDL：`supplement/11_cross_language.md` |
+>
+> 全文约束：**本文件不含 `CREATE TABLE`**（ADR-0007 不变量 I2）。
+> 残留工作：本文正文的**逐节删减**（把已被 `02` / `supplement/*` / `04` 拥有的正文改为指针）登记为 `06` §9 待办 **#18**，
+> 本轮只补边界声明，未删正文。
+
+---
+
 ## 1. 摘要
 
 当前 AI Coding Agent 的一个核心问题是：LLM 大量 token 消耗在项目探索，而不是消耗在真正的代码理解、推理和修改上。

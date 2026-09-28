@@ -290,7 +290,7 @@ PRAGMA busy_timeout = 5000;
 > - `language_projects` / `events` 的处置见 [ADR-0001](adr/0001-project-module-language-schema.md) §4.7；
 > - 其余 4 个见 [ADR-0007](adr/0007-phantom-tables-and-doc-invariants.md) §4.1，其中包含两处**命名漂移**
 >   （`inheritance` vs `03.inheritance_edges`、`dependencies` vs `03.dependency_versions`）
->   与一处 **DDL 越位**（`index_jobs` 的 DDL 在 `04` L546，而非本文件）。
+>   与一处 **DDL 越位**（`index_jobs` 的 DDL 原在 `04` L546，而非本文件；**2026-09-28 已按 ADR-0007 §4.3 迁至 `supplement/15_change_management.md` §15.3**）。
 > - [ADR-0007](adr/0007-phantom-tables-and-doc-invariants.md) §4.2 要求本块拆为
 >   **【v1 core】/【extension】/【deferred】三分组**，并配机械不变量检查（I1–I5）。
 >   **在 ADR-0007 被 Accept 之前不执行重组**，此处仅作标注。

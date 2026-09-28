@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +74,24 @@ type ExecutionSupervisorConfig struct {
 	// Zero derives 2 x DecisionWindow. It bounds the runnable-clock deferral of
 	// I8/EC-A3, so the fallback can never be postponed indefinitely.
 	DecisionWindowMax time.Duration
+	// --- healthy auto-extend (2026-09-28 建议稿 §2.2/§2.3) ---
+
+	// AutoExtendHealthy switches the deadline evaluation from "deadline
+	// reached ⇒ escalate/cancel" to "evaluate health first". nil/true (the
+	// default) means: a healthy run (progress within one soft window) is not
+	// stall-reported, and a healthy run at its hard deadline or an exhausted
+	// decision window is auto-extended once (bounded by the shared I5 budget)
+	// instead of cancelled. An explicit false restores the pre-change
+	// behavior for gray rollback.
+	AutoExtendHealthy *bool
+	// MaxExtensions / MaxExtensionPerCall / MaxExtensionTotal are the I5
+	// budget (doc 6.5 / Q4) the automatic extension shares with parent-driven
+	// extend_deadline. Zero values take the shared operator defaults (3 calls,
+	// 1x per call, 4x in total), so an unwired host still bounds automatic
+	// extensions.
+	MaxExtensions       int
+	MaxExtensionPerCall float64
+	MaxExtensionTotal   float64
 	// ExecutionRunRetention / ExecutionRunPruneLimit bound the retention GC
 	// (plan C4-2 / §6.12). Zero takes the shared operator defaults (7 days,
 	// 200 rows per pass) so an unwired host still prunes instead of growing the
@@ -103,6 +122,10 @@ func DefaultExecutionSupervisorConfig() ExecutionSupervisorConfig {
 		StallEscalationMultiplier: suspension.StallEscalationMultiplier,
 		DecisionWindow:            suspension.DecisionWindow,
 		DecisionWindowMax:         suspension.DecisionWindowMax,
+		AutoExtendHealthy:         suspension.AutoExtendHealthy,
+		MaxExtensions:             suspension.MaxExtensions,
+		MaxExtensionPerCall:       suspension.MaxExtensionPerCall,
+		MaxExtensionTotal:         suspension.MaxExtensionTotal,
 		ExecutionRunRetention:     suspension.ExecutionRunRetention,
 		ExecutionRunPruneLimit:    suspension.ExecutionRunPruneLimit,
 	}
@@ -658,6 +681,13 @@ func (s *ExecutionSupervisor) evaluateRunLadder(ctx context.Context, run *Execut
 	} else {
 		switch {
 		case run.ExecutionDeadlineAt != nil && !run.ExecutionDeadlineAt.IsZero() && !now.Before(*run.ExecutionDeadlineAt):
+			// §2.2 到期评估: before the hard cut, evaluate health. A run with
+			// recent meaningful progress gets a bounded automatic extension
+			// (charged to the same I5 budget as a parent-driven one); only a
+			// genuinely stalled run keeps the forced branch below.
+			if decision, handled := s.autoExtendRun(ctx, run, now, "execution_deadline"); handled {
+				return decision, true
+			}
 			decision.Decision = "execution_timed_out"
 			decision.Reason = "execution deadline expired"
 		case run.ProgressDeadlineAt != nil && !run.ProgressDeadlineAt.IsZero() && !now.Before(*run.ProgressDeadlineAt):
@@ -766,6 +796,15 @@ func (s *ExecutionSupervisor) evaluateProgressStall(ctx context.Context, run *Ex
 	if run.DecisionWindowUntil != nil && !run.DecisionWindowUntil.IsZero() {
 		return s.evaluateDecisionWindow(ctx, run, now)
 	}
+	// §2.3 真实活跃不报假 stall（验收 §2.2）: a run that is still ticking —
+	// meaningful progress within one soft window — must not open a new stall
+	// report just because the static progress deadline passed. Once the ticks
+	// stop for a full soft window this gate opens and the escalation below
+	// proceeds from the same anchor. An already-open window is handled above
+	// and keeps its own decide/fallback timeline.
+	if s.autoExtendEnabled() && runHealthy(run, now, cfg) {
+		return nil, true
+	}
 	return s.escalateProgressStall(ctx, run, now)
 }
 
@@ -858,6 +897,14 @@ func (s *ExecutionSupervisor) evaluateDecisionWindow(ctx context.Context, run *E
 	}
 	if s.deferDecisionWindow(ctx, run, now, cfg) {
 		return nil, true
+	}
+	// §2.3 无人应答安全默认: nobody answered and the window is exhausted. The
+	// safe default is not a blind cancel: a run that kept making progress
+	// while the window burned down (its "stall" was only the wall-clock
+	// deadline) is extended instead; only a run that is still quiet keeps
+	// the fallback cancel below.
+	if decision, handled := s.autoExtendRun(ctx, run, now, "decision_window"); handled {
+		return decision, true
 	}
 	decision := &RunDecision{
 		RunID:     run.RunID,
@@ -1286,6 +1333,10 @@ func (s *ExecutionSupervisor) projectDecision(ctx context.Context, run *Executio
 		state = SupervisionTimedOut
 	case "progress_stalled":
 		state = SupervisionStalled
+	case "auto_extended":
+		// §2.2 observe mode: the judgment the enforce pass would take.
+		state = SupervisionRunning
+		severity = SeverityInfo
 	case "cancel_grace_expired":
 		state = SupervisionOrphaned
 	}
@@ -1300,6 +1351,13 @@ func (s *ExecutionSupervisor) projectDecision(ctx context.Context, run *Executio
 		Reason:                decision.Reason,
 		RecommendedAction:     "inspect run and decide cancel/retry",
 	})
+	// §2.5 账本收敛: a newer live condition supersedes the run's older ones
+	// (stalled → timed_out), so the parent inbox keeps exactly one current
+	// condition per run. Informational projections (auto_extended) never
+	// supersede a live condition.
+	if isRunAlertEventType(decision.Decision) {
+		s.supersedeRunAlerts(ctx, run, decision.Decision)
+	}
 }
 
 // projectTerminal projects a terminal transition to the lifecycle inbox.
@@ -1354,6 +1412,17 @@ func (s *ExecutionSupervisor) convergeRunAlerts(ctx context.Context, run *Execut
 	_, _ = ConvergeRunAlerts(ctx, s.StoreFull, run.RootSessionID, run.RunID, status, s.now())
 }
 
+// supersedeRunAlerts is the best-effort hook that retires a run's older
+// live-condition alerts once a newer condition is projected (§2.5). A failure
+// only leaves the stale row behind for the next scan; the new projection is
+// already durable, so it must not fail the decision path.
+func (s *ExecutionSupervisor) supersedeRunAlerts(ctx context.Context, run *ExecutionRun, keepEventType string) {
+	if s == nil || s.StoreFull == nil || run == nil {
+		return
+	}
+	_, _ = SupersedeRunAlerts(ctx, s.StoreFull, run.RootSessionID, run.RunID, keepEventType, s.now())
+}
+
 func (s *ExecutionSupervisor) enforce() bool {
 	cfg := s.effectiveConfig()
 	return strings.EqualFold(strings.TrimSpace(cfg.Mode), "enforce")
@@ -1396,6 +1465,18 @@ func (s *ExecutionSupervisor) effectiveConfig() ExecutionSupervisorConfig {
 	if cfg.DecisionWindowMax <= 0 {
 		cfg.DecisionWindowMax = 2 * cfg.DecisionWindow
 	}
+	// Healthy auto-extend (2026-09-28 建议稿 §2.2/§2.3): the I5 numbers
+	// zero-fill from the shared operator defaults; the switch keeps its nil
+	// semantics (nil = enabled), so AutoExtendHealthy itself needs no fill.
+	if cfg.MaxExtensions <= 0 {
+		cfg.MaxExtensions = defaults.MaxExtensions
+	}
+	if cfg.MaxExtensionPerCall <= 0 {
+		cfg.MaxExtensionPerCall = defaults.MaxExtensionPerCall
+	}
+	if cfg.MaxExtensionTotal <= 0 {
+		cfg.MaxExtensionTotal = defaults.MaxExtensionTotal
+	}
 	// C4-2 retention GC: zero keeps the documented defaults so a host that
 	// never configures the knobs still prunes terminal rows.
 	if cfg.ExecutionRunRetention <= 0 {
@@ -1417,6 +1498,235 @@ func (s *ExecutionSupervisor) escalateFirstEnabled() bool {
 	}
 	cfg := s.effectiveConfig()
 	return cfg.EscalateFirst == nil || *cfg.EscalateFirst
+}
+
+// --- healthy auto-extend（2026-09-28 建议稿 §2.2 到期评估 / §2.3 无人应答安全默认） ---
+
+// autoExtendEnabled reports whether the healthy auto-extend safety net is
+// active. It rides the escalate-first ladder: when that ladder is explicitly
+// rolled back, the pre-#1 forced branch (and the pre-change hard deadline cut)
+// is restored as a whole, so the evaluation layer is off with it. The switch
+// itself is nil/true = on; only an explicit false turns it off.
+func (s *ExecutionSupervisor) autoExtendEnabled() bool {
+	if s == nil {
+		return false
+	}
+	cfg := s.effectiveConfig()
+	if cfg.AutoExtendHealthy != nil && !*cfg.AutoExtendHealthy {
+		return false
+	}
+	return s.escalateFirstEnabled()
+}
+
+// runProgressAge returns the age of the run's most recent meaningful progress,
+// falling back to StartedAt when no progress event was ever recorded (a run
+// that never ticked ages from admission). ok=false means the age cannot be
+// derived because both timestamps are unset.
+func runProgressAge(run *ExecutionRun, now time.Time) (time.Duration, bool) {
+	if run == nil {
+		return 0, false
+	}
+	baseline := run.StartedAt
+	if run.LastProgressAt.After(baseline) {
+		baseline = run.LastProgressAt
+	}
+	if baseline.IsZero() {
+		return 0, false
+	}
+	age := now.Sub(baseline)
+	if age < 0 {
+		age = 0
+	}
+	return age, true
+}
+
+// runHealthy reports whether the run shows recent meaningful progress: its
+// last progress event (or admission, when it never ticked) is within one soft
+// window. This is the first health signal of §2.2 (progress age); token burn
+// rate and tool error rate are documented follow-ups that would extend this
+// predicate rather than replace it.
+func runHealthy(run *ExecutionRun, now time.Time, cfg ExecutionSupervisorConfig) bool {
+	if run == nil {
+		return false
+	}
+	// The admission tick is not evidence of life: StartRun stamps
+	// LastProgressAt = StartedAt, so without a progress event after admission
+	// the run has shown nothing since it was admitted and can never be judged
+	// healthy (this also keeps runs whose only tick is "session_start" on the
+	// forced branch).
+	if !run.LastProgressAt.After(run.StartedAt) {
+		return false
+	}
+	age, ok := runProgressAge(run, now)
+	if !ok {
+		return false
+	}
+	soft := progressSoftThreshold(run, cfg)
+	// Parent-granted extensions lengthen ProgressDeadlineAt (and with it the
+	// derived soft threshold), but they must not loosen the liveness check:
+	// the yardstick is capped at the operator default so a run that has been
+	// quiet longer than the default window can never be auto-extended again.
+	if def := cfg.DefaultProgressTimeout; def > 0 && (soft <= 0 || def < soft) {
+		soft = def
+	}
+	if soft <= 0 {
+		return false
+	}
+	return age <= soft
+}
+
+// autoExtendRun applies the healthy branch of the deadline evaluation
+// (§2.2/§2.3): a run whose health check passes gets one automatic extension
+// instead of the forced cancel the ladder would apply. The execution deadline
+// is granted one original-budget window (the same per-call maximum a parent
+// could grant via extend_deadline) and the progress window re-opens by one
+// soft threshold, never by more than the granted budget; both are charged to
+// the shared I5 budget exactly like a parent-driven extension, so automatic
+// extensions can never outlive the documented envelope. It reports
+// handled=false when the run is not healthy, the safety net is off, or the
+// budget is spent - the caller then keeps its existing branch. source names
+// the trigger (execution_deadline / decision_window) for the ledger reason.
+func (s *ExecutionSupervisor) autoExtendRun(ctx context.Context, run *ExecutionRun, now time.Time, source string) (*RunDecision, bool) {
+	if s == nil || s.Store == nil || run == nil {
+		return nil, false
+	}
+	cfg := s.effectiveConfig()
+	if !s.autoExtendEnabled() || !runHealthy(run, now, cfg) {
+		return nil, false
+	}
+	if err := ensureExtendable(*run); err != nil {
+		return nil, false
+	}
+	limits := ExtensionLimits{
+		MaxExtensions:       cfg.MaxExtensions,
+		MaxExtensionPerCall: cfg.MaxExtensionPerCall,
+		MaxExtensionTotal:   cfg.MaxExtensionTotal,
+	}
+	if limits.MaxExtensions <= 0 {
+		limits = DefaultExtensionLimits()
+	}
+	if run.ExtensionCount >= limits.MaxExtensions {
+		return nil, false
+	}
+	soft := progressSoftThreshold(run, cfg)
+	if soft <= 0 {
+		return nil, false
+	}
+	grant := extensionBudget(*run)
+	if grant <= 0 {
+		grant = soft
+	}
+
+	updated := *run
+	var deltas []time.Duration
+	if run.ExecutionDeadlineAt != nil && !run.ExecutionDeadlineAt.IsZero() {
+		target, delta, err := extensionTarget(run.ExecutionDeadlineAt, now, grant, nil)
+		if err != nil {
+			return nil, false
+		}
+		updated.ExecutionDeadlineAt = &target
+		deltas = append(deltas, delta)
+	}
+	if run.ProgressDeadlineAt != nil && !run.ProgressDeadlineAt.IsZero() {
+		// Re-open the progress window by one soft threshold, but never by more
+		// than the granted budget: the I5 per-call cap is computed from the
+		// original budget, so a progress window longer than the budget must
+		// not push the charged amount past it.
+		reopen := soft
+		if reopen > grant {
+			reopen = grant
+		}
+		target, delta, err := extensionTarget(run.ProgressDeadlineAt, now, reopen, nil)
+		if err != nil {
+			return nil, false
+		}
+		updated.ProgressDeadlineAt = &target
+		deltas = append(deltas, delta)
+	}
+	if len(deltas) == 0 {
+		return nil, false
+	}
+	applied := maxDuration(deltas)
+	age, _ := runProgressAge(run, now)
+	detail := "healthy (last progress " + age.Round(time.Second).String() + " ago); auto-extended " +
+		source + " by " + applied.String()
+
+	if !s.enforce() {
+		// Observe mode never mutates: the operator sees the judgment the
+		// enforce pass would take instead.
+		decision := &RunDecision{
+			RunID:       run.RunID,
+			SessionID:   run.SessionID,
+			Status:      run.Status,
+			Decision:    "auto_extended",
+			ActionTaken: "none_observe",
+			Reason:      detail,
+		}
+		s.projectDecision(ctx, run, decision)
+		return decision, true
+	}
+	if err := enforceExtensionCaps(limits, extensionBudget(*run), run.ExtendedTotal, applied); err != nil {
+		// The I5 caps refused the automatic grant: the budget is effectively
+		// spent, so the caller keeps its existing (forced) branch.
+		return nil, false
+	}
+	updated.ExtensionCount = run.ExtensionCount + 1
+	updated.ExtendedTotal = run.ExtendedTotal + applied
+	// The healthy judgment replaces the parent decision for this episode, so
+	// any open escalation window is spent (same contract as extend_deadline).
+	updated.DecisionWindowUntil = nil
+	ok, err := s.Store.UpdateExecutionRunCAS(ctx, updated, run.Version)
+	if err != nil || !ok {
+		// Losing the CAS is not a reason to fire the fallback: stay quiet for
+		// this scan and let the next one re-evaluate.
+		return &RunDecision{
+			RunID:     run.RunID,
+			SessionID: run.SessionID,
+			Status:    run.Status,
+			Decision:  "auto_extended",
+			Reason:    "auto-extend deferred: run changed while extending",
+		}, true
+	}
+	run.ExecutionDeadlineAt = updated.ExecutionDeadlineAt
+	run.ProgressDeadlineAt = updated.ProgressDeadlineAt
+	run.ExtensionCount = updated.ExtensionCount
+	run.ExtendedTotal = updated.ExtendedTotal
+	run.DecisionWindowUntil = nil
+	run.Version = updated.Version
+	s.projectAutoExtension(ctx, run, source, age)
+	return &RunDecision{
+		RunID:       run.RunID,
+		SessionID:   run.SessionID,
+		Status:      run.Status,
+		Decision:    "auto_extended",
+		ActionTaken: "auto_extended",
+		Reason: detail + " (已延长 ×" + strconv.Itoa(run.ExtensionCount) +
+			", +" + run.ExtendedTotal.String() + ")",
+	}, true
+}
+
+// projectAutoExtension writes the parent-visible info event for one automatic
+// extension. It reuses the extend_deadline event type so digests and consumers
+// keep one contract; the reason marks the healthy automatic decision.
+func (s *ExecutionSupervisor) projectAutoExtension(ctx context.Context, run *ExecutionRun, source string, progressAge time.Duration) {
+	if s == nil || s.StoreFull == nil || run == nil {
+		return
+	}
+	reason := "deadline auto-extended (healthy: last progress " +
+		progressAge.Round(time.Second).String() + " ago; 已延长 ×" + strconv.Itoa(run.ExtensionCount) +
+		", +" + run.ExtendedTotal.String() + "): " + source
+	_, _ = ProjectLifecycle(ctx, s.StoreFull, s.Wakes, LifecycleProjection{
+		RootScopeID:           run.RootSessionID,
+		TargetParentSessionID: run.ParentSessionID,
+		SubjectKind:           SubjectAgentRun,
+		SubjectID:             run.RunID,
+		SubjectVersion:        run.Version,
+		EventType:             "obligation.deadline.extended",
+		Severity:              SeverityInfo,
+		SupervisionState:      SupervisionRunning,
+		Reason:                reason,
+		RecommendedAction:     string(ActionInspect),
+	})
 }
 
 // effectiveDecisionWindow returns the decision window actually used by the

@@ -436,7 +436,8 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 			mcpForTools = mcpmanager.NewMergedManager(sessionMCP.manager, globalMCP)
 		}
 
-		toolManager = runtimetools.NewDefaultManagerWithRuntimeConfig(mcpForTools, loadRuntimeToolConfig(cfg, session))
+		runtimeToolConfig := loadRuntimeToolConfig(cfg, session)
+		toolManager = runtimetools.NewDefaultManagerWithRuntimeConfig(mcpForTools, runtimeToolConfig)
 		toolDescs := toolManager.ListTools()
 		for _, desc := range toolDescs {
 			session.FunctionCatalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(toolManager, desc), desc)
@@ -461,6 +462,10 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 			refresher.invalidateSurface = func() int { return invalidateACPSessionToolSurface(session) }
 		}
 		session.ACPMCPSession = refresher
+		// 启动期 LSP 自动装配（异步）：轻量扫描项目类型 → 写工作区
+		// .aicli/runtime.yaml → 挂载 LSP 池；新工具在下一个 turn 边界登记。
+		// 不阻塞启动关键路径（见 chat_lsp_bootstrap.go）。
+		startChatLSPBootstrap(session, toolManager, runtimeToolConfig, resolveRuntimeToolConfigPath(cfg, session))
 		if MCPManagerInstance != nil {
 			session.MCPStatus = Status()
 			session.MCPEnabled = session.MCPStatus.Enabled
@@ -526,6 +531,13 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 		if skillsBinding != nil {
 			if stopErr := skillsBinding.Close(); stopErr != nil {
 				fmt.Fprintf(os.Stderr, "Warning: 停止 Skills Runtime 失败: %v\n", stopErr)
+			}
+		}
+		// LSP 池归宿主所有（adr/0002）：会话退出时显式释放语言服务器进程，
+		// 不能依赖进程退出兜底（docs/lsp 03 W2）。
+		if toolManager != nil {
+			if closeErr := toolManager.Close(); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: 停止语言服务器池失败: %v\n", closeErr)
 			}
 		}
 	}
@@ -618,6 +630,13 @@ func buildChatFinalCleanup(session *ChatSession, cleanupSession func()) func() {
 	return func() {
 		once.Do(func() {
 			finalizeChatSession(session)
+			// 知识层接入（Phase 1 交付 6）：会话结束时释放本会话持有的引用；
+			// 引用归零才真正关 store。mode=off 时 session.Knowledge 为 nil，
+			// 这里是纯 no-op。
+			if session != nil && session.Knowledge != nil {
+				releaseChatKnowledge(session.Knowledge.Workspace(), session.Knowledge)
+				session.Knowledge = nil
+			}
 			if session != nil && session.TitleNotifier != nil {
 				session.TitleNotifier.Close()
 			}

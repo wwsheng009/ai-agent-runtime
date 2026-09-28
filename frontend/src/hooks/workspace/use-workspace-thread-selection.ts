@@ -4,12 +4,17 @@ import {
   useEffect,
   useMemo,
   useState,
+  useSyncExternalStore,
   type Dispatch,
   type SetStateAction,
 } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { type Artifact, type Thread } from "@/data/mock";
+import {
+  createWorkspaceThreadStore,
+  type ThreadStoreUpdater,
+} from "@/lib/thread-state/thread-store";
 import {
   getFirstArtifactId,
   mergeRuntimeSessionsIntoThreads,
@@ -231,21 +236,41 @@ export function useWorkspaceThreadSelection({
     sessionId: routeSessionId,
     threadId: routeThreadId,
   } = useParams<{ sessionId?: string; threadId?: string }>();
-  const [threadState, setThreadState] = useState(initialThreads);
+  // P1-1：线程状态收口到 live / 结构双通道 store（见 lib/thread-state/thread-store.ts）。
+  // 页面级只订阅**结构快照**：流式内容提交（live）不再重渲染整棵工作区树；消息列
+  // 改为按会话订阅 live 分片（`useLiveThread`），段落骨架与页面级提交解耦。
+  const [threadStore] = useState(() =>
+    createWorkspaceThreadStore(initialThreads),
+  );
+  const threadState = useSyncExternalStore(
+    threadStore.subscribeStructural,
+    threadStore.getStructuralSnapshot,
+    threadStore.getStructuralSnapshot,
+  );
   const threads = useMemo(
     () => mergeRuntimeSessionsIntoThreads(threadState, runtimeSessions),
     [runtimeSessions, threadState],
   );
-  const setThreads = useCallback<Dispatch<SetStateAction<Thread[]>>>(
-    (nextState) => {
-      setThreadState((current) => {
+  const writeThreads = useCallback(
+    (nextState: SetStateAction<Thread[]>, options?: { live?: boolean }) => {
+      threadStore.update((current) => {
         const mergedCurrent = mergeRuntimeSessionsIntoThreads(current, runtimeSessions);
         return typeof nextState === "function"
           ? nextState(mergedCurrent)
           : nextState;
-      });
+      }, options);
     },
-    [runtimeSessions],
+    [runtimeSessions, threadStore],
+  );
+  const setThreads = useCallback<Dispatch<SetStateAction<Thread[]>>>(
+    (nextState) => writeThreads(nextState),
+    [writeThreads],
+  );
+  // 内容提交（流式正文 / 推理副本）：只通知按会话订阅者（消息列），不惊动页面级
+  // 结构订阅者。见 thread-store.ts 的通道口径。
+  const setThreadsLive = useCallback(
+    (updater: ThreadStoreUpdater) => writeThreads(updater, { live: true }),
+    [writeThreads],
   );
 
   const selectedThread = useMemo(
@@ -314,6 +339,8 @@ export function useWorkspaceThreadSelection({
     selectedThread,
     setSelectedArtifactId,
     setThreads,
+    setThreadsLive,
+    threadStore,
     threads,
   };
 }

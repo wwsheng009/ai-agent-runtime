@@ -20,6 +20,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
 	"github.com/wwsheng009/ai-agent-runtime/internal/isolation/worktree"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/modelrouting"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
@@ -4452,6 +4453,9 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	applyAPISessionMainAgentRouting(loopConfig, h.resolveMainAgentRoutingForSession(sessionRoutingOverrideRaw, workspacePath),
 		strings.TrimSpace(childAgentType) == "" && childDepth == 0 && !childReadOnly)
 	applyAPISessionCompletionRequirement(loopConfig, profileState, childAgentType, childCompletionRequirement, workspacePath)
+	// Phase 1 交付 4：知识层 shadow 拦截（grep/view → exploration_attribution）。
+	// 未注入观察器（知识层 off / 账本不可用）时 hook 为 nil，行为与无知识层一致。
+	applyAPISessionToolObservation(loopConfig, h, sessionID)
 
 	// The session lease is scoped to each run rather than to the actor
 	// lifetime. The initial acquisition above guards actor construction
@@ -4491,6 +4495,9 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		EventStore:   eventStore,
 		EventBus:     h.getRuntimeEventBus(),
 		LoopConfig:   loopConfig,
+		// P0-1：run 级进度 tick → 监督账本（LLM 响应完成、工具开始/结束、
+		// 每步迭代各一次）。无 supervision store 时返回 nil，循环行为不变。
+		OnProgress: h.progressRecorderForSession(sessionID),
 		// 灰度开关（默认开）：run 终态后到达的审批决议零恢复；显式
 		// supervision.approval_terminal_guard=false 可回退旧行为。
 		ApprovalTerminalGuard: h.supervisionConfig.ApprovalTerminalGuard,
@@ -4712,6 +4719,31 @@ func applyAPISessionCompletionRequirement(config *agent.LoopReActConfig, profile
 		requirement = resolveAPIAgentdefCompletionRequirement(agentType, profileRoot, workspacePath)
 	}
 	config.CompletionRequirement = agent.NormalizeCompletionRequirement(requirement)
+}
+
+// applyAPISessionToolObservation 接线 Phase 1 shadow 拦截（ADR-0003 §4.4）：
+// 宿主经 SetKnowledgeShadow 注入观察器时，把 grep/view 的最终结果旁路给
+// ShadowObserver（只读索引 + 旁路落库，不影响工具结果）；未注入时 hook 保持
+// nil，agent loop 行为与无知识层逐字节一致。
+func applyAPISessionToolObservation(config *agent.LoopReActConfig, h *Handler, sessionID string) {
+	if config == nil || h == nil || h.knowledgeShadow == nil {
+		return
+	}
+	observer := h.knowledgeShadow
+	config.OnToolObserved = func(ctx context.Context, sid string, call runtimetypes.ToolCall, output string, toolErr string) {
+		if strings.TrimSpace(sid) == "" {
+			sid = sessionID
+		}
+		if _, err := observer.Observe(ctx, knowledge.ObservedCall{
+			SessionID: sid,
+			Tool:      call.Name,
+			Args:      call.Args,
+			Output:    output,
+			Err:       toolErr,
+		}); err != nil {
+			logger.Debugf("knowledge: shadow observe %s failed: %v", call.Name, err)
+		}
+	}
 }
 
 func resolveAPIAgentdefCompletionRequirement(agentName, profileRoot, projectRoot string) string {

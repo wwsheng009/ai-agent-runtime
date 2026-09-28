@@ -28,6 +28,19 @@ export type RuntimeDeltaCoordinator = {
   claim: (key: string, turnId?: string) => boolean;
   /** 当前在途回合身份快照（诊断/测试可观测面）。 */
   activeTurnIds: () => string[];
+  /**
+   * 直连 `/api/agent/chat` 流的在途占位（引用计数，按会话）。
+   *
+   * 每帧 `claim` 只保证「同一条增量只应用一次」，不保证「同一推理块的增量
+   * 都落到同一个累加器」：直连 chat 写 `turnState` 的推理块，runtime/stream
+   * 直接写 `message.segments`。两条通道各自缺掉被对方赢走的片段，结构提交
+   * 再按「更长副本获胜」整段互相覆盖——实测推理丢词（`The`+`docs/`）与重复
+   * （同一句 `(from` 连出两行）。持有时 runtime 通道只消费、不应用（也不
+   * 消费 claim，交给直连流独占）；释放后 runtime 自然恢复。
+   */
+  holdDirectStream: (sessionId?: string) => void;
+  releaseDirectStream: (sessionId?: string) => void;
+  isDirectStreamActive: (sessionId?: string) => boolean;
 };
 
 /** 单个回合的去重账目上限（与去单例前的单会话语义一致）。 */
@@ -57,6 +70,8 @@ export function createRuntimeDeltaCoordinator(): RuntimeDeltaCoordinator {
   const seenKeys = new Map<string, string>();
   const turnKeys = new Map<string, Set<string>>();
   const activeTurns = new Set<string>();
+  // 直连 chat 流的在途占位：会话 → 引用计数（嵌套/并发直连流按次释放）。
+  const directStreams = new Map<string, number>();
 
   const dropKey = (key: string) => {
     const owner = seenKeys.get(key);
@@ -145,6 +160,30 @@ export function createRuntimeDeltaCoordinator(): RuntimeDeltaCoordinator {
     },
     activeTurnIds() {
       return [...activeTurns];
+    },
+    holdDirectStream(sessionId?: string) {
+      const normalized = normalizeTurnId(sessionId);
+      if (!normalized) {
+        // 草稿（尚无会话）没有 runtime 通道，无需占位。
+        return;
+      }
+      directStreams.set(normalized, (directStreams.get(normalized) ?? 0) + 1);
+    },
+    releaseDirectStream(sessionId?: string) {
+      const normalized = normalizeTurnId(sessionId);
+      if (!normalized) {
+        return;
+      }
+      const count = directStreams.get(normalized) ?? 0;
+      if (count <= 1) {
+        directStreams.delete(normalized);
+        return;
+      }
+      directStreams.set(normalized, count - 1);
+    },
+    isDirectStreamActive(sessionId?: string) {
+      const normalized = normalizeTurnId(sessionId);
+      return normalized ? (directStreams.get(normalized) ?? 0) > 0 : false;
     },
   };
 }

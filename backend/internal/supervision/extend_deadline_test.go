@@ -98,7 +98,6 @@ func extendExecuteAction(t *testing.T, svc *ActionService, actionID string) Acti
 func extendLifecycleEvent(t *testing.T, store Store, runID, eventType string) Notification {
 	t.Helper()
 	list, err := store.ListNotifications(context.Background(), NotificationFilter{
-		RootScopeID:     "root-session-1",
 		SubjectKind:     SubjectAgentRun,
 		SubjectID:       runID,
 		IncludeResolved: true,

@@ -21,7 +21,7 @@
 
 | 不做的事 | 事实源 / 理由 |
 | --- | --- |
-| 不定义 core schema、本目录不新增表列 | 落入 `03_agent_harness_supplement.md` §5.2 既有列 `lsp_diagnostics` / `lsp_servers`；上游已授权的列（ADR-0006 的编码列）按 Gate 生效，本文不自行增列 |
+| 不定义 core schema、本目录不新增表列 | 落入 `supplement/05_runtime_integration_project_detection_and_lsp.md` §10.2 既有列 `lsp_diagnostics` / `lsp_servers`；上游已授权的列（ADR-0006 的编码列）按 Gate 生效，本文不自行增列 |
 | 不定义位置编码转换规则 | `adr/0006-lsp-position-encoding-boundary.md` |
 | 不决定 LSP 进程归属模型 | `adr/0002-acp-lsp-ownership.md` |
 | 不拍板诊断数量上限等阈值 | 知识层禁止写死阈值 → 见 §6，转 `03` 验收 |
@@ -58,6 +58,11 @@ crush 是单进程 CLI，LSP client 集合在进程内共享，归属问题被"�
 - 启动失败 → 记录状态 + 日志，工具继续可用。
 - 运行中崩溃 → 标记该 server 为不可用，后续 `getDiagnostics` 跳过它。
 - 重启策略（自动/手动）属于实现细节，但**必须可观测**：`lsp_servers` 列要能表达"哪些 server 当前可用、哪些失败、失败原因"。
+
+> **实现注记（W2/W3 落地后）**：
+> - 自动恢复**有界**：同一 server 每个会话最多自动替换 `lsp.restartLimit` 次（默认 `1`；`0` 关闭自动恢复，手动重启不受限）。预算耗尽后仍按降级语义返回，不会无限重启。
+> - 生命周期事实（`starting`/`ready`/`unavailable`/`crashed`/`stopped` 与失败原因）与诊断发布（文件、条数）通过 `internal/lsp` 的事件缝（Observer）暴露，默认写入会话日志；`lsp_servers` 仍是面向模型的可观测面，事件缝不改变既有出口。
+> - `lsp.prewarm`（默认 `false`）可在池构建时预热全部成员，取代 W3 的首次使用懒启动；预热失败与懒启动失败同为"不可用"，不阻断会话。
 
 ### 2.3 L3 路由层
 
@@ -157,8 +162,8 @@ crush 在 `internal/agent/tools/diagnostics.md` 的 `<tips>` 里写了：
 
 | 需要承载的信息 | 落位（既有） | 说明 |
 | --- | --- | --- |
-| 文件级诊断快照 | `03_agent_harness_supplement.md` §5.2 → `lsp_diagnostics` | 已有列，直接复用；**不新增列** |
-| LSP 服务清单与状态 | `03_agent_harness_supplement.md` §5.2 → `lsp_servers` | 已有列，承载 server 名、状态、工作区根 |
+| 文件级诊断快照 | `supplement/05_runtime_integration_project_detection_and_lsp.md` §10.2 → `lsp_diagnostics` | 已有列，直接复用；**不新增列** |
+| LSP 服务清单与状态 | `supplement/05_runtime_integration_project_detection_and_lsp.md` §10.2 → `lsp_servers` | 已有列，承载 server 名、状态、工作区根 |
 | 运行时集成与项目探测 | `supplement/05_runtime_integration_project_detection_and_lsp.md` §2.3 | 探测到的语言/构建系统决定要不要起对应 server |
 | 归属边界（谁负责 LSP） | `adr/0002-acp-lsp-ownership.md` | 本项目不推翻该归属划分 |
 | 位置编码边界 | `adr/0006-lsp-position-encoding-boundary.md` | UTF-16 / UTF-8 / 行列基准不在本文决定 |

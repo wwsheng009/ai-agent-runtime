@@ -109,6 +109,19 @@ type LoopReActConfig struct {
 	// 计入 step 尾部，实现必须自带节流；失败不得冒泡为 turn 失败，由实现方
 	// 自行记录/上报。
 	OnHistoryCheckpoint func(ctx context.Context, messages []types.Message) `yaml:"-"`
+	// OnProgress 上报一次 run 级进度 tick（方案 §5.4 / P0-1）：LLM 响应完成、
+	// 工具调用开始/结束、每步迭代结束各触发一次。宿主据此推进监督面
+	// ExecutionRun 的 last_progress_at，避免长任务被误判为停滞。
+	//
+	// 契约：尽力而为、快速返回（建议非阻塞投递）；失败不得冒泡为 turn 失败。
+	OnProgress func(ctx context.Context, kind string) `yaml:"-"`
+	// OnToolObserved 在工具执行完成后回调一次，供只读观察（Phase 1 shadow 拦截
+	// grep/view）：参数是工具返回的原始文本（未经 history 截断；ADR-0003 的
+	// baseline_n 口径是「被拦截调用实际返回的条目数」）与错误文本。
+	//
+	// 契约：尽力而为、快速返回（建议非阻塞投递）；不得修改 result；失败不得
+	// 冒泡为 turn 失败。nil = 完全 no-op（mode=off / 未接入知识层的路径）。
+	OnToolObserved func(ctx context.Context, sessionID string, call types.ToolCall, output string, toolErr string) `yaml:"-"`
 }
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
@@ -204,6 +217,24 @@ type historySessionContextWriter interface {
 // example an explicit session compact command) must advance this value before
 // persisting the replacement history.
 const PromptCacheEpochSessionContextKey = "aicli.prompt_cache_epoch"
+
+// noteProgress 上报一次进度 tick（方案 §5.4 / P0-1）。契约：尽力而为、
+// 快速返回；回调失败不得冒泡为 turn 失败。
+func (loop *ReActLoop) noteProgress(ctx context.Context, kind string) {
+	if loop == nil || loop.config == nil || loop.config.OnProgress == nil {
+		return
+	}
+	loop.config.OnProgress(ctx, kind)
+}
+
+// observeToolResult 上报一次工具执行结果（Phase 1 shadow 拦截 grep/view）。
+// 契约同 LoopReActConfig.OnToolObserved：尽力而为、不得影响工具结果。
+func (loop *ReActLoop) observeToolResult(ctx context.Context, sessionID string, tc types.ToolCall, result toolExecutionResult) {
+	if loop == nil || loop.config == nil || loop.config.OnToolObserved == nil {
+		return
+	}
+	loop.config.OnToolObserved(ctx, sessionID, tc, output.RenderFullToolResultContent(result.Output, result.Error), result.Error)
+}
 
 // NewReActLoop 创建 ReAct 循环
 func NewReActLoop(agent *Agent, llmRuntime *llm.LLMRuntime, config *LoopReActConfig) *ReActLoop {
@@ -918,6 +949,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// 恢复的收敛规则一致，避免跨步骤的历史累计提前耗尽恢复预算。
 		loop.reasoningOnlyRecoveries = 0
 		totalUsage.Add(usage)
+		loop.noteProgress(currentCtx, "llm_response")
 		result.Usage = totalUsage.Clone()
 		if len(action.promptHistory) > 0 {
 			promptBuilder = NewMessageBuilder(action.promptHistory)
@@ -1214,6 +1246,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		// 期间被中断/停摆时，宿主的中断路径必须能救出刚产出的 assistant 文本；
 		// 这里只做通知（不触发额外的落库语义，落库仍由宿主按自己的节流决定）。
 		loop.notifyHistoryCheckpoint(currentCtx, builder.Messages())
+		loop.noteProgress(currentCtx, "tool_call_start")
 		historySnapshot := builder.Messages()
 		toolResults, err := loop.act(currentCtx, traceID, sessionID, step, options.Depth, historySnapshot, normalizedCalls, options.ToolWhitelist)
 		if err != nil {
@@ -1267,6 +1300,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			}
 		}
 		recordToolResultMetrics(toolResults)
+		loop.noteProgress(currentCtx, "tool_call_end")
 		for _, toolResult := range toolResults {
 			if strings.TrimSpace(toolResult.Error) == "" {
 				continue
@@ -1372,6 +1406,7 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		if loop.config.Verbose {
 			fmt.Printf("[Step %d] Completed %d tool calls\n", step, len(toolResults))
 		}
+		loop.noteProgress(currentCtx, "iteration_end")
 	}
 
 	result.Success = false
@@ -2898,6 +2933,9 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 	if plan := loop.buildParallelToolBatchPlan(toolCalls, toolWhitelist); plan != nil {
 		parallelResults := loop.runParallelToolBatch(ctx, traceID, sessionID, step, depth, toolCalls, plan)
 		loop.resetMalformedToolCallRecoveriesOnSuccess(toolCalls, parallelResults)
+		for i := range parallelResults {
+			loop.observeToolResult(ctx, sessionID, parallelResults[i].Call, parallelResults[i])
+		}
 		return parallelResults, nil
 	}
 	gateway := loop.agent.GetOutputGateway()
@@ -3510,6 +3548,7 @@ func (loop *ReActLoop) act(ctx context.Context, traceID, sessionID string, step 
 			"mcp_name":       toolInfo.MCPName,
 			"execution_mode": toolInfo.ExecutionMode,
 		})
+		loop.observeToolResult(ctx, sessionID, tc, result)
 		results[i] = result
 		loop.agent.runPostToolUseHooks(ctx, sessionID, result)
 	}

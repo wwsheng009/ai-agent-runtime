@@ -33,6 +33,10 @@ type sqliteStore struct {
 	// false 退化为 LIKE 扫描（FTS5 是可选模块，见 store_sqlite_fts.go）。
 	ftsEnabled bool
 
+	// lockWait 采样本进程写路径的锁等待（06 §4 Phase 1 交付 5 的"锁等待 p95"）。
+	// 只读角色不写库，因此其样本恒为零——这正是"读者不争锁"的可观测证据。
+	lockWait lockWaitRecorder
+
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -175,6 +179,23 @@ func (s *sqliteStore) EnsureWorkspace(ctx context.Context, ws Workspace) (string
 		return "", err
 	}
 	return ws.ID, nil
+}
+
+// FindWorkspace 按 root_path 查既有工作区行；纯读，readOnly 句柄同样可用。
+func (s *sqliteStore) FindWorkspace(ctx context.Context, rootPath string) (string, bool, error) {
+	if strings.TrimSpace(rootPath) == "" {
+		return "", false, errors.New("knowledge: workspace root path is required")
+	}
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE root_path = ?`, rootPath).Scan(&id)
+	switch {
+	case err == nil:
+		return id, true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return "", false, nil
+	default:
+		return "", false, err
+	}
 }
 
 // UpsertFile 记录文件身份与内容哈希。
@@ -413,7 +434,7 @@ func (s *sqliteStore) execWrite(ctx context.Context, fn func(context.Context, *s
 	if s.readOnly {
 		return ErrReadOnlyStore
 	}
-	return sqliteutil.RetryLockedCtx(ctx, func() error {
+	err := sqliteutil.RetryLockedCtxObserved(ctx, s.lockWait.observe, func() error {
 		tx, err := s.db.BeginTx(ctx, sqliteutil.WriteTxOptions)
 		if err != nil {
 			return err
@@ -424,6 +445,11 @@ func (s *sqliteStore) execWrite(ctx context.Context, fn func(context.Context, *s
 		}
 		return tx.Commit()
 	})
+	if err != nil && sqliteutil.IsLockedError(err) {
+		// 重试耗尽（写操作最终以锁冲突失败）：状态面必须能区分"等过但成功"与"等死"。
+		s.lockWait.observeFailure()
+	}
+	return err
 }
 
 // Close 释放句柄；幂等。

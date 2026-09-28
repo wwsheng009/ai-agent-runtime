@@ -434,6 +434,11 @@ func main() {
 	// storage 本地 SQLite 存储维护（离线压缩：独占访问时 VACUUM）
 	rootCmd.AddCommand(commands.NewStorageCommand())
 
+	// knowledge 知识层状态（Phase 1 交付 5：索引状态 / DB 大小 / 最近 job / 锁等待 p95）
+	rootCmd.AddCommand(commands.NewKnowledgeCommand(func() *config.Config {
+		return cfg
+	}))
+
 	// balance 账户余额子命令
 	rootCmd.AddCommand(commands.NewBalanceCommand(func() *config.Config {
 		return cfg

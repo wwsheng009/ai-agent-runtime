@@ -84,6 +84,66 @@ func TestAgentChatReturnsConflictWhenSessionLeaseIsHeld(t *testing.T) {
 	}
 }
 
+// TestAgentChatStreamOpensBeforeLeaseConflict 锁定 P0「开流前移」契约：
+// 流式请求的响应头与 `: open` 注释帧必须先于会话租约排队等前置步骤出站；
+// 排队/前置阶段的失败不能再回 409 JSON，而应作为 SSE error 帧回传，
+// 且 error_type=session_lease_conflict 供前端走「会话占用」语义。
+func TestAgentChatStreamOpensBeforeLeaseConflict(t *testing.T) {
+	storage, err := chat.NewFileStorage(filepath.Join(t.TempDir(), "sessions"))
+	if err != nil {
+		t.Fatalf("new storage: %v", err)
+	}
+	manager := chat.NewSessionManager(storage, chat.DefaultSessionManagerConfig())
+	defer manager.Stop()
+
+	session, err := manager.Create(context.Background(), "lease-user")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	store := chat.NewInMemoryRuntimeStore(16)
+	_, err = store.AcquireLease(context.Background(), chat.LeaseRequest{
+		SessionID: session.ID,
+		OwnerID:   "existing-owner",
+		OwnerKind: "test",
+		TTL:       time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("acquire existing lease: %v", err)
+	}
+
+	handler := NewHandler(nil, nil, nil)
+	handler.SetSessionManager(manager)
+	handler.sessionRuntimeStore = store
+	handler.sessionEventStore = store
+
+	body := fmt.Sprintf(`{"messages":[{"role":"user","content":"hello"}],"session_id":%q,"user_id":"lease-user","stream":true}`, session.ID)
+	req := httptest.NewRequest(http.MethodPost, "/api/agent/chat", strings.NewReader(body))
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	handler.AgentChat(rec, req)
+
+	// 开流后 HTTP 状态已固定为 200；错误只能走流内 error 帧。
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 once stream opened, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("expected SSE content type, got %q", ct)
+	}
+	bodyText := rec.Body.String()
+	if !strings.HasPrefix(strings.TrimLeft(bodyText, "\r\n"), ": open") {
+		t.Fatalf("expected `: open` comment frame as first bytes, got %q", bodyText)
+	}
+	if !strings.Contains(bodyText, "event: error") {
+		t.Fatalf("expected lease conflict as SSE error frame, got %q", bodyText)
+	}
+	if !strings.Contains(bodyText, `"error_type":"session_lease_conflict"`) {
+		t.Fatalf("expected error_type=session_lease_conflict in frame, got %q", bodyText)
+	}
+	if !strings.Contains(bodyText, `"retryable":true`) {
+		t.Fatalf("expected retryable guidance in frame, got %q", bodyText)
+	}
+}
+
 func TestSessionLeaseConflictSuggestsRuntimeServerForLocalAICLIOwner(t *testing.T) {
 	lease := &chat.SessionLease{OwnerKind: "aicli-actor"}
 	action := sessionLeaseConflictSuggestedAction(lease)

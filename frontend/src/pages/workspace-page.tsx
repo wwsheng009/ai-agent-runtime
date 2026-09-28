@@ -30,6 +30,7 @@ import {
   useRuntimeClientIdentity,
 } from "@/lib/runtime-client";
 import { normalizeSessionId } from "@/lib/session-id";
+import { WorkspaceThreadStoreContext } from "@/lib/thread-state/thread-store";
 import {
   applySessionHistoryToThread,
   createRuntimeDeltaCoordinator,
@@ -92,6 +93,8 @@ export function WorkspacePage() {
     selectedThread,
     setSelectedArtifactId,
     setThreads,
+    setThreadsLive,
+    threadStore,
     threads,
   } = useWorkspaceThreadSelection({
     initialThreads: [],
@@ -260,6 +263,7 @@ export function WorkspacePage() {
       sessionActiveTurn,
       sessionId: selectedThread?.sessionId,
       setThreads,
+      setThreadsLive,
       trajectoryReady: trajectoryReplay.ready,
       trajectoryStore,
     });
@@ -485,7 +489,9 @@ export function WorkspacePage() {
 
   return (
     <>
-      {shell}
+      <WorkspaceThreadStoreContext.Provider value={threadStore}>
+        {shell}
+      </WorkspaceThreadStoreContext.Provider>
       <SessionSwitchConfirmDialog
         open={pendingSessionSwitch !== null}
         sessionTitle={pendingSessionSwitch?.title ?? ""}

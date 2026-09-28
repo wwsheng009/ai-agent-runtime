@@ -71,6 +71,16 @@ func (s *Service) Attach(bus *runtimeevents.Bus) {
 	)
 }
 
+// Store 返回底层 SQLiteStore：供旁路写入方（如 Phase 1 shadow 观察器写
+// exploration_attribution）共享同一连接，避免为同一 DB 开第二个句柄。
+// 调用方必须自备 nil 检查；Service.Close() 之后句柄不再可用。
+func (s *Service) Store() *SQLiteStore {
+	if s == nil {
+		return nil
+	}
+	return s.store
+}
+
 // Close unsubscribes from the EventBus and closes the underlying store.
 func (s *Service) Close() {
 	if s == nil {

@@ -15,6 +15,14 @@ function event(
   return makeTrajectoryEvent(kind, seq, { type: "text", content });
 }
 
+/** 隐藏标签页判定依赖 document.visibilityState（jsdom 可覆写）。 */
+function setVisibility(state: DocumentVisibilityState) {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    get: () => state,
+  });
+}
+
 describe("coalesceTrajectoryEvents 帧内合并", () => {
   it("同 kind 连续事件合并为一段（保留首尾 seq）", () => {
     const segments = coalesceTrajectoryEvents([
@@ -137,5 +145,84 @@ describe("TrajectoryBatcher rAF 帧内批量 + 后台兜底", () => {
     expect(cafMock).toHaveBeenCalled();
     const batch = flush.mock.calls[0][0] as unknown[];
     expect(batch).toHaveLength(1);
+  });
+
+  it("隐藏标签页零工作：不排帧/定时器，恢复可见一次冲刷（P0-2）", () => {
+    const onFlushed = vi.fn();
+    const batcher = new TrajectoryBatcher({ flush, onFlushed });
+    batcher.attachVisibilityListener();
+    setVisibility("hidden");
+    try {
+      batcher.push(event("chunk", 1, "A"));
+      batcher.push(event("chunk", 2, "B"));
+      expect(flush).not.toHaveBeenCalled();
+      expect(rafMock).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(500);
+      expect(flush).not.toHaveBeenCalled();
+
+      setVisibility("visible");
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(flush).toHaveBeenCalledTimes(1);
+      expect(flush.mock.calls[0][0]).toHaveLength(2);
+      expect(onFlushed).toHaveBeenCalledTimes(1);
+    } finally {
+      batcher.detachVisibilityListener();
+      batcher.dispose();
+      setVisibility("visible");
+    }
+  });
+
+  it("ensureFresh：读路径同步兑现但不发布，下一次 flushNow 补发（P0-2）", () => {
+    const onFlushed = vi.fn();
+    const batcher = new TrajectoryBatcher({ flush, onFlushed });
+    batcher.push(event("chunk", 1, "A"));
+
+    batcher.ensureFresh();
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(onFlushed).not.toHaveBeenCalled();
+
+    // 无挂起批次的 flushNow 只补发一次通知，不重复应用。
+    batcher.flushNow();
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(onFlushed).toHaveBeenCalledTimes(1);
+    batcher.flushNow();
+    expect(onFlushed).toHaveBeenCalledTimes(1);
+    batcher.dispose();
+  });
+
+  it("空批次 flushNow 不触发 onFlushed", () => {
+    const onFlushed = vi.fn();
+    const batcher = new TrajectoryBatcher({ flush, onFlushed });
+    batcher.flushNow();
+    expect(flush).not.toHaveBeenCalled();
+    expect(onFlushed).not.toHaveBeenCalled();
+    batcher.dispose();
+  });
+
+  it("惰性闸门：无订阅者时不 rebuild，读路径 ensureFresh / force 兑现（P0-2）", () => {
+    const onFlushed = vi.fn();
+    const batcher = new TrajectoryBatcher({
+      flush,
+      onFlushed,
+      shouldFlush: () => false,
+    });
+    batcher.push(event("chunk", 1, "A"));
+
+    batcher.flushNow(); // 非强制：闸门拦截，保留挂起批次
+    expect(flush).not.toHaveBeenCalled();
+    expect(onFlushed).not.toHaveBeenCalled();
+
+    batcher.ensureFresh(); // 读路径兜底：同步兑现，不发布
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(onFlushed).not.toHaveBeenCalled();
+
+    batcher.flushNow(); // 下一次冲刷补发一次通知
+    expect(onFlushed).toHaveBeenCalledTimes(1);
+
+    // 强制冲刷（显式同步点）不受闸门约束。
+    batcher.push(event("chunk", 2, "B"));
+    batcher.flushNow(true);
+    expect(flush).toHaveBeenCalledTimes(2);
+    batcher.dispose();
   });
 });

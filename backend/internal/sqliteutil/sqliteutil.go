@@ -47,16 +47,35 @@ func IsLockedError(err error) bool {
 // 重试，其余错误（含重试耗尽）原样返回。ctx 取消时立即返回 ctx.Err()，避免调用方
 // 在短生命周期操作（如健康检查）中因锁竞争而挂起。
 func RetryLockedCtx(ctx context.Context, fn func() error) error {
+	return RetryLockedCtxObserved(ctx, nil, fn)
+}
+
+// RetryLockedCtxObserved 与 RetryLockedCtx 相同，额外把本次调用累计的锁等待
+// 时间（退避之和）在返回前上报一次 onWait（仅当确实发生过等待）。
+//
+// 状态面（`knowledge.status`，06 §4 Phase 1 交付 5）用它采集"锁等待 p95"：
+// 采样的是**调用方视角的等待代价**，而不是单次退避。契约：
+//   - onWait 在 fn 的调用栈返回前同步执行，必须快速返回且不得 panic；
+//   - 未发生等待（首次即成功 / 非锁错误）时不调用；
+//   - 等待被 ctx 取消截断时，已累计的等待仍然上报（这正是最该被观察的形态）。
+func RetryLockedCtxObserved(ctx context.Context, onWait func(time.Duration), fn func() error) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	var lastErr error
+	var waited time.Duration
+	defer func() {
+		if waited > 0 && onWait != nil {
+			onWait(waited)
+		}
+	}()
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if attempt > 0 {
 			wait := lockRetryWait(attempt - 1)
+			waited += wait
 			onLockRetry(attempt, wait)
 			select {
 			case <-time.After(wait):

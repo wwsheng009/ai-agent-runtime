@@ -44,6 +44,17 @@ func MutationSummary(metadata map[string]interface{}) string {
 	return ""
 }
 
+// MutatedPaths returns the file paths a tool explicitly reported as mutated.
+// Only the `mutated_paths` metadata is trusted: read-only tools (view, grep,
+// …) must never be mistaken for writers by the post-write sync path.
+func MutatedPaths(metadata map[string]interface{}) []string {
+	metadata = mutationMetadata(metadata)
+	if len(metadata) == 0 {
+		return nil
+	}
+	return mutationPaths(metadata["mutated_paths"])
+}
+
 func mutationMetadata(metadata map[string]interface{}) map[string]interface{} {
 	if len(metadata) == 0 {
 		return nil

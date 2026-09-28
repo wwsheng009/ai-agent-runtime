@@ -28,6 +28,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/filebrowse"
 	"github.com/wwsheng009/ai-agent-runtime/internal/filetransport"
 	"github.com/wwsheng009/ai-agent-runtime/internal/gitbrowse"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimellm "github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
@@ -355,6 +356,19 @@ func runServe(args []string) int {
 		return 1
 	}
 
+	// 落盘兜底（2026-09-28）：serve 缺省只写 stderr（LogConfig 缺省 output=stdout），
+	// 一旦进程以 nohup / 后台方式拉起，日志只剩重定向文件甚至丢失——backend/logs
+	// 下的 runtime-server 日志停在 9/16 就是证据。用户未显式配置输出目标时，这里
+	// 补一份 ~/.aicli/logs/runtime-server.log（与 aicli CLI 日志同目录，lumberjack
+	// 轮转），让 /api/agent/chat 的分段耗时与错误现场可事后复盘。
+	// 显式 output=file/both 或 enabled=false 的配置一律尊重，不覆盖。
+	serveLogOutput := strings.ToLower(strings.TrimSpace(cfg.Log.Output))
+	if serveLogOutput == "" || serveLogOutput == "stdout" {
+		cfg.Log.Output = "both"
+		if strings.TrimSpace(cfg.Log.FilePath) == "" {
+			cfg.Log.FilePath = "~/.aicli/logs/runtime-server.log"
+		}
+	}
 	if err := logger.InitLogger(&cfg.Log); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
 		return 1
@@ -972,16 +986,22 @@ func runtimeServerHealthURL(listenAddr string) (string, bool) {
 }
 
 type runtimeServerApp struct {
-	router          *mux.Router
-	handler         *runtimeapi.Handler
-	cfg             *config.Config
-	skillsCfg       *config.SkillsRuntimeConfig
-	runtimeManager  *runtimecfg.RuntimeManager
-	bootstrap       *runtimebootstrap.Manager
-	mcpManager      mcpmanager.Manager
+	router         *mux.Router
+	handler        *runtimeapi.Handler
+	cfg            *config.Config
+	skillsCfg      *config.SkillsRuntimeConfig
+	runtimeManager *runtimecfg.RuntimeManager
+	bootstrap      *runtimebootstrap.Manager
+	mcpManager     mcpmanager.Manager
+	// toolAdapter 是技能/工具面适配器（内部持有工具 Manager，含 LSP 语言
+	// 服务器池）。close() 时释放，避免语言服务器进程悬挂（docs/lsp 03 W2）。
+	toolAdapter     io.Closer
 	ledgerStore     io.Closer
 	supervision     *runtimeserver.SupervisionControlPlane
 	subagentBatches io.Closer
+	// knowledge 是本进程持有的知识层接入句柄（Phase 1 交付 6）。
+	// mode=off 时为 nil；close() 里释放并等待后台首次索引退出。
+	knowledge *knowledge.Activation
 }
 
 // loadRuntimeServerManager 通过分层栈加载 runtime.yaml（P2）：
@@ -1035,6 +1055,9 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	if err != nil {
 		return nil, err
 	}
+	// 工具面适配器自身（非底层 MCP manager）持有工具 Manager 与 LSP 池，
+	// 启动失败分支必须一并释放，否则语言服务器进程会残留。
+	toolAdapterCloser, _ := mcpAdapter.(io.Closer)
 
 	bootstrapManager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
 		Config:       runtimeConfig,
@@ -1051,11 +1074,17 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		if manager != nil {
 			_ = manager.Stop()
 		}
+		if toolAdapterCloser != nil {
+			_ = toolAdapterCloser.Close()
+		}
 		return nil, fmt.Errorf("failed to initialize runtime bootstrap: %w", err)
 	}
 	if err := bootstrapManager.Validate(); err != nil {
 		if manager != nil {
 			_ = manager.Stop()
+		}
+		if toolAdapterCloser != nil {
+			_ = toolAdapterCloser.Close()
 		}
 		_ = bootstrapManager.Stop()
 		return nil, fmt.Errorf("invalid runtime bootstrap: %w", err)
@@ -1279,6 +1308,17 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		router.HandleFunc("/", runtimeInfoHandler).Methods(http.MethodGet)
 	}
 
+	// Phase 1 交付 6：workspace 解析之后、app 对外提供服务之前接入知识层。
+	// mode=off（默认）时不建库不建锁；失败只 warn，不让启动失败。
+	knowledgeActivation := bootRuntimeServerKnowledge(runtimeConfig, runtimeManager.GetFilePath())
+	// Phase 1 交付 4：shadow 拦截观察器（grep/view → exploration_attribution）。
+	// 与 CLI 宿主同口径（applyLocalChatToolObservation）：知识层 shadow 模式 +
+	// 账本可用才接线；否则观察器为 nil，全部会话保持无知识层行为。
+	handler.SetKnowledgeShadow(knowledge.ShadowObserverFor(knowledgeActivation, knowledgeAttributionSink(ledgerStore)))
+	// Phase 1 交付 5：状态面句柄（GET /api/runtime/knowledge/status）。
+	// 与 shadow 观察器同源；mode=off 时句柄为 nil，端点返回 mode=off 载荷。
+	handler.SetKnowledgeActivation(knowledgeActivation)
+
 	return &runtimeServerApp{
 		router:          router,
 		handler:         handler,
@@ -1287,9 +1327,11 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		runtimeManager:  runtimeManager,
 		bootstrap:       bootstrapManager,
 		mcpManager:      manager,
+		toolAdapter:     toolAdapterCloser,
 		ledgerStore:     ledgerStore,
 		supervision:     supervisionPlane,
 		subagentBatches: subagentBatches,
+		knowledge:       knowledgeActivation,
 	}, nil
 }
 
@@ -1346,6 +1388,11 @@ func (a *runtimeServerApp) close() {
 			logger.Warn("Failed to stop MCP manager", logger.Err(err))
 		}
 	}
+	if a.toolAdapter != nil {
+		if err := a.toolAdapter.Close(); err != nil {
+			logger.Warn("Failed to close runtime tool adapter (LSP pool)", logger.Err(err))
+		}
+	}
 	if a.ledgerStore != nil {
 		if err := a.ledgerStore.Close(); err != nil {
 			logger.Warn("Failed to close usage ledger store", logger.Err(err))
@@ -1366,6 +1413,14 @@ func (a *runtimeServerApp) close() {
 		if err := a.supervision.Close(); err != nil {
 			logger.Warn("Failed to close supervision control plane", logger.Err(err))
 		}
+	}
+	// 知识层最后关：Close 会取消并等待后台首次索引退出（它持写事务），
+	// 放在其它组件之后可以保证退出阶段没有新的索引请求进来。
+	if a.knowledge != nil {
+		if err := a.knowledge.Close(); err != nil {
+			logger.Warn("Failed to close knowledge layer", logger.Err(err))
+		}
+		a.knowledge = nil
 	}
 }
 

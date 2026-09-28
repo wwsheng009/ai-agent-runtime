@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
+	"github.com/wwsheng009/ai-agent-runtime/internal/lsp"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	mcpregistry "github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
@@ -39,6 +41,10 @@ type Manager struct {
 	mcp           manager.Manager
 	sandbox       *runtimeexecutor.Sandbox
 	runtimeConfig *runtimecfg.RuntimeConfig
+	// lspMu guards lspBridge: hosts may attach the pool after construction
+	// (async project scan → late enable), while turns keep listing tools.
+	lspMu     sync.RWMutex
+	lspBridge *lsp.Bridge
 }
 
 const toolkitMCPName = "toolkit"
@@ -65,12 +71,17 @@ func NewDefaultManagerWithRuntimeConfig(mcp manager.Manager, config *runtimecfg.
 		workspaceRoot = strings.TrimSpace(config.Workspace.Root)
 	}
 	registerBuiltinToolkitTools(registry, sandbox, workspaceRoot, config)
-	return &Manager{
+	manager := &Manager{
 		toolkit:       registry,
 		mcp:           mcp,
 		sandbox:       sandbox,
 		runtimeConfig: config,
 	}
+	manager.lspBridge = newLSPBridge(config, workspaceRoot)
+	if manager.lspBridge != nil && manager.lspBridge.Enabled() {
+		registerLSPTooling(registry, manager.lspBridge, config)
+	}
+	return manager
 }
 
 // ListTools returns the unified tool list, preferring MCP tools on name conflict.
@@ -118,9 +129,13 @@ func (m *Manager) ListTools() []ToolDescriptor {
 			if !exists {
 				parameters = normalizeParameters(nil)
 			}
+			description := tool.Description()
+			if m.lspInlineHintEnabled(name) {
+				description = strings.TrimRight(description, " ") + " " + lspInlineDiagnosticsHint
+			}
 			toolsList = append(toolsList, ToolDescriptor{
 				Name:        name,
-				Description: tool.Description(),
+				Description: description,
 				Parameters:  parameters,
 				Metadata:    cloneMetadataMap(metadata),
 			})
@@ -153,7 +168,41 @@ func (m *Manager) Execute(ctx context.Context, name string, args map[string]inte
 func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[string]interface{}) (string, map[string]interface{}, error) {
 	start := time.Now()
 	output, metadata, err := m.executeWithMeta(ctx, name, args)
+	if err == nil {
+		output = m.appendLSPDiagnostics(ctx, metadata, output)
+	}
 	return output, withToolDurationFallback(metadata, time.Since(start)), err
+}
+
+// appendLSPDiagnostics is W6: after a successful mutation it appends the
+// current diagnostics of every written file to the untouched tool output
+// (docs/lsp 03 invariants I1/I2). It is a no-op unless the LSP pool is
+// enabled and the tool reported `mutated_paths`.
+func (m *Manager) appendLSPDiagnostics(ctx context.Context, metadata map[string]interface{}, output string) string {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
+		return output
+	}
+	paths := toolresult.MutatedPaths(metadata)
+	if len(paths) == 0 {
+		return output
+	}
+	return bridge.AppendToResult(ctx, output, paths)
+}
+
+// lspInlineHintEnabled reports whether the tool's model-facing description
+// should carry the inline-diagnostics expectation (docs/lsp 02 §4.2).
+func (m *Manager) lspInlineHintEnabled(toolName string) bool {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
+		return false
+	}
+	switch toolName {
+	case "edit", "write", "append_write", "apply_patch", "multiedit":
+		return true
+	default:
+		return false
+	}
 }
 
 // withToolDurationFallback 只在工具未上报有效耗时时补墙钟值；0ms（亚毫秒）保持

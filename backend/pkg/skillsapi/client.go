@@ -1432,6 +1432,9 @@ type GetUsageLedgerParams struct {
 	Success    *bool
 	Since      *time.Time
 	Limit      int
+	// GroupBy 打开服务端聚合；当前唯一合法值是 "profile"（FR-13），
+	// 为空时响应与聚合前逐字节一致。
+	GroupBy string
 }
 
 type UsageLedgerRecord struct {
@@ -1448,12 +1451,49 @@ type UsageLedgerRecord struct {
 	StatusCode   int                    `json:"status_code"`
 	Metadata     map[string]interface{} `json:"metadata,omitempty"`
 	CreatedAt    string                 `json:"created_at"`
+
+	// 探索归因 9 指标（Phase 0 交付 2 / ADR-0003 §4.1）。
+	// mode=off（默认）下服务端不写这些列，响应里字段缺省（omitempty）。
+	ExplorationTokens             int `json:"exploration_tokens,omitempty"`
+	ReuseTokens                   int `json:"reuse_tokens,omitempty"`
+	IndexLookupCount              int `json:"index_lookup_count,omitempty"`
+	IndexHit                      int `json:"index_hit,omitempty"`
+	FallbackCount                 int `json:"fallback_count,omitempty"`
+	UnsafeReuseCount              int `json:"unsafe_reuse_count,omitempty"`
+	ToolCallsPerTask              int `json:"tool_calls_per_task,omitempty"`
+	RepeatedReadCount             int `json:"repeated_read_count,omitempty"`
+	KnowledgeVersionMismatchCount int `json:"knowledge_version_mismatch_count,omitempty"`
+}
+
+// UsageLedgerProfileGroup 是 group_by=profile 时的一行聚合。
+// 9 个探索归因指标为零值时省略（与 mode=off 的响应逐字节一致）。
+type UsageLedgerProfileGroup struct {
+	Profile      string `json:"profile"`
+	Requests     int    `json:"requests"`
+	Failures     int    `json:"failures"`
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+	TotalTokens  int    `json:"total_tokens"`
+
+	ExplorationTokens             int `json:"exploration_tokens,omitempty"`
+	ReuseTokens                   int `json:"reuse_tokens,omitempty"`
+	IndexLookupCount              int `json:"index_lookup_count,omitempty"`
+	IndexHit                      int `json:"index_hit,omitempty"`
+	FallbackCount                 int `json:"fallback_count,omitempty"`
+	UnsafeReuseCount              int `json:"unsafe_reuse_count,omitempty"`
+	ToolCallsPerTask              int `json:"tool_calls_per_task,omitempty"`
+	RepeatedReadCount             int `json:"repeated_read_count,omitempty"`
+	KnowledgeVersionMismatchCount int `json:"knowledge_version_mismatch_count,omitempty"`
 }
 
 type GetUsageLedgerResponse struct {
 	Records []UsageLedgerRecord    `json:"records"`
 	Count   int                    `json:"count"`
 	Filters map[string]interface{} `json:"filters"`
+	// 仅在请求 GroupBy=profile 时出现；为空时省略，旧响应形状不变。
+	GroupBy      string                    `json:"group_by,omitempty"`
+	Groups       []UsageLedgerProfileGroup `json:"groups,omitempty"`
+	GroupedTotal int                       `json:"grouped_total,omitempty"`
 }
 
 type ResetUsageStatsRequest struct {
@@ -3794,6 +3834,10 @@ func (c *Client) GetUsageLedger(ctx context.Context, params GetUsageLedgerParams
 	}
 	if params.Limit > 0 {
 		query.Set("limit", strconv.Itoa(params.Limit))
+	}
+	// GroupBy 为空时不发参数：服务端响应形状与聚合前完全一致。
+	if params.GroupBy != "" {
+		query.Set("group_by", params.GroupBy)
 	}
 
 	var response GetUsageLedgerResponse

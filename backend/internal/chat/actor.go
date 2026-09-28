@@ -194,6 +194,10 @@ type SessionActorConfig struct {
 	// 不再长期占用 session 锁（配合 PrepareRun 在下一个 run 前重新获取）。
 	// 回调在 actor 的命令循环线程执行，不应阻塞或长时间运行。
 	OnRunFinished func()
+	// OnProgress 是 run 级进度旁路回调（P0-1）：ReAct 循环在 LLM 响应完成、
+	// 工具调用开始/结束、每步迭代结束时各触发一次。回调在 run goroutine 上
+	// 同步执行，必须快速返回（建议非阻塞投递）；失败不得影响 run 结果。
+	OnProgress func(kind string)
 	// CheckpointInterval 控制长 turn 中途增量落库的最小间隔：ReAct 循环每次
 	// 提交 durable 历史（assistant 文本 / tool 结果 / 压缩改写）后都会请求一次
 	// checkpoint，实际写入按该间隔节流。0 使用 DefaultSessionCheckpointInterval；
@@ -270,6 +274,7 @@ type SessionActor struct {
 	runStallTimeout time.Duration
 	onRunStalled    func(turnID string)
 	onRunFinished   func()
+	onProgress      func(kind string)
 	runSequence     atomic.Uint64
 	// checkpointInterval / lastCheckpointAt 实现长 turn 中途落库的节流，
 	// 语义见 SessionActorConfig.CheckpointInterval。
@@ -361,6 +366,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		runStallTimeout:    cfg.RunStallTimeout,
 		onRunStalled:       cfg.OnRunStalled,
 		onRunFinished:      cfg.OnRunFinished,
+		onProgress:         cfg.OnProgress,
 		checkpointInterval: resolveSessionCheckpointInterval(cfg.CheckpointInterval),
 		cmdCh:              make(chan Command, 32),
 		stop:               make(chan struct{}),
@@ -3441,6 +3447,11 @@ func (a *SessionActor) historyCheckpointLoopConfig(routeOverride *RunRouteOverri
 	if cfg == nil {
 		cfg = agent.DefaultLoopReActConfig()
 	}
+	if a.onProgress != nil {
+		cfg.OnProgress = func(_ context.Context, kind string) {
+			a.onProgress(kind)
+		}
+	}
 	if session == nil {
 		return cfg
 	}
@@ -4617,6 +4628,10 @@ func (a *SessionActor) interruptActiveSessionRun() *sessionRunControl {
 	if cancel != nil || cancelCause != nil {
 		cancelSessionRunCause(cancelCause, cancel, runCancelSourceUserInterrupt)
 	}
+	// P0-1：中断是一次 run 级状态迁移（§5.4）；仅在实际中断了活动 run 时上报。
+	if run != nil {
+		a.noteProgress("interrupt")
+	}
 	return run
 }
 
@@ -5029,11 +5044,23 @@ func (a *SessionActor) AskUserQuestion(ctx context.Context, req toolbroker.UserQ
 	}
 }
 
+// noteProgress 上报一次 actor 级进度 tick（P0-1，§5.4 状态迁移：审批/输入
+// 等待进入与解除、中断）。nil-safe：未接线时完全 no-op；契约同
+// SessionActorConfig.OnProgress——必须快速返回、不得影响 run 结果。
+func (a *SessionActor) noteProgress(kind string) {
+	if a == nil || a.onProgress == nil {
+		return
+	}
+	a.onProgress(kind)
+}
+
 func (a *SessionActor) registerApprovalWaiter(requestID string) chan runtimepolicy.ApprovalResponse {
 	a.waiterMu.Lock()
-	defer a.waiterMu.Unlock()
 	ch := make(chan runtimepolicy.ApprovalResponse, 1)
 	a.approvalWaiters[requestID] = ch
+	a.waiterMu.Unlock()
+	// 进入审批等待 = 一次状态迁移；run 被阻塞但执行面仍在。
+	a.noteProgress("approval_requested")
 	return ch
 }
 
@@ -5051,6 +5078,8 @@ func (a *SessionActor) resolveApproval(requestID string, resp runtimepolicy.Appr
 	if ch == nil {
 		return false
 	}
+	// 解除审批等待 = 状态迁移（决定已送达阻塞中的 run）。
+	a.noteProgress("approval_resolved")
 	select {
 	case ch <- resp:
 	default:
@@ -5136,9 +5165,11 @@ func (a *SessionActor) pendingApprovalRunTerminal(state *RuntimeState, requestID
 
 func (a *SessionActor) registerQuestionWaiter(questionID string) chan string {
 	a.waiterMu.Lock()
-	defer a.waiterMu.Unlock()
 	ch := make(chan string, 1)
 	a.questionWaiters[questionID] = ch
+	a.waiterMu.Unlock()
+	// 进入输入等待 = 一次状态迁移。
+	a.noteProgress("input_requested")
 	return ch
 }
 
@@ -5156,6 +5187,8 @@ func (a *SessionActor) resolveQuestion(questionID, answer string) bool {
 	if ch == nil {
 		return false
 	}
+	// 解除输入等待 = 状态迁移（回答已送达阻塞中的 run）。
+	a.noteProgress("input_resolved")
 	select {
 	case ch <- answer:
 	default:

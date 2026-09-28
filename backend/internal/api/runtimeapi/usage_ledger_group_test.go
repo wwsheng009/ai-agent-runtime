@@ -80,6 +80,61 @@ func TestAggregateUsageLedgerByProfileWithoutRecordedProfile(t *testing.T) {
 	require.Equal(t, 33, groups[0].TotalTokens)
 }
 
+// 知识层探索归因 9 指标（Phase 0 交付 2 / `06` §5.2）：按 profile 组求和。
+func TestAggregateUsageLedgerByProfileSumsExplorationAttribution(t *testing.T) {
+	first := ledgerGroupRecord("coding", true, 100, 20, 120)
+	first.ExplorationTokens = 40
+	first.ReuseTokens = 8
+	first.IndexLookupCount = 3
+	first.IndexHit = 2
+	first.FallbackCount = 1
+	first.ToolCallsPerTask = 7
+	first.RepeatedReadCount = 4
+	// UnsafeReuseCount / KnowledgeVersionMismatchCount 是硬门槛（=0），
+	// 第一行保持 0，第二行给非零以验证求和确实发生。
+
+	second := ledgerGroupRecord("coding", true, 50, 10, 60)
+	second.ExplorationTokens = 2
+	second.UnsafeReuseCount = 0
+	second.KnowledgeVersionMismatchCount = 0
+	second.ToolCallsPerTask = 5
+
+	groups := aggregateUsageLedgerByProfile([]*entity.TokenUsageHistory{first, second})
+
+	require.Len(t, groups, 1)
+	group := groups[0]
+	require.Equal(t, "coding", group.Profile)
+	require.Equal(t, 42, group.ExplorationTokens)
+	require.Equal(t, 8, group.ReuseTokens)
+	require.Equal(t, 3, group.IndexLookupCount)
+	require.Equal(t, 2, group.IndexHit)
+	require.Equal(t, 1, group.FallbackCount)
+	require.Equal(t, 0, group.UnsafeReuseCount)
+	require.Equal(t, 12, group.ToolCallsPerTask)
+	require.Equal(t, 4, group.RepeatedReadCount)
+	require.Equal(t, 0, group.KnowledgeVersionMismatchCount)
+}
+
+// mode=off（默认）下 9 个归因字段全为 0，聚合行不得多出任何键——
+// 保证旧响应逐字节不变（硬不变量）。
+func TestUsageLedgerProfileGroupOmitsZeroAttribution(t *testing.T) {
+	raw, err := json.Marshal(usageLedgerProfileGroup{
+		Profile:      "coding",
+		Requests:     1,
+		InputTokens:  10,
+		OutputTokens: 2,
+		TotalTokens:  12,
+	})
+	require.NoError(t, err)
+	for _, key := range []string{
+		"exploration_tokens", "reuse_tokens", "index_lookup_count", "index_hit",
+		"fallback_count", "unsafe_reuse_count", "tool_calls_per_task",
+		"repeated_read_count", "knowledge_version_mismatch_count",
+	} {
+		require.NotContains(t, string(raw), key, "零值归因字段不得出现在序列化结果中")
+	}
+}
+
 func TestUsageScopeJSONOmitsEmptyProfile(t *testing.T) {
 	raw, err := json.Marshal(UsageScope{
 		TenantID:  "tenant-a",

@@ -376,12 +376,24 @@ export function useWorkspaceAgentChatTurn({
     }));
     setSelectedArtifactId(requestArtifact.id);
 
+    // 直连 chat 流的占位身份：草稿（尚无会话）没有 runtime 通道，天然无冲突。
+    const directStreamSessionId =
+      sessionIdBeforeTurn || turnState.currentSessionId;
+
     void (async () => {
       try {
+        // 跨通道单写者选举：持有时 /runtime/stream 只消费不应用，避免同一
+        // 推理块被两条通道各写一半后在结构提交里互相覆盖（丢词/重复）。
+        deltaCoordinator?.holdDirectStream(directStreamSessionId);
         await streamAgentChat(
           requestPayload,
           {
             idleTimeoutMs: CHAT_STREAM_IDLE_TIMEOUT_MS,
+            // 任意字节（含注释帧）即视为连接已建立：与 sse.ts 读侧看门狗同口径，
+            // 服务端排队/前置阶段也会每 15s 补 `: keepalive`，连接守卫不再误杀。
+            onActivity: () => {
+              turnState.receivedStreamBytes = true;
+            },
             signal: controller.signal,
             ...createAgentChatStreamHandlers({
               assistantMessageId,
@@ -450,6 +462,7 @@ export function useWorkspaceAgentChatTurn({
           activeTurnIdRef.current = null;
           setActiveTurnId(null);
         }
+        deltaCoordinator?.releaseDirectStream(directStreamSessionId);
         deltaCoordinator?.endTurn(turnId);
         // 条目删除 = isResponding→false、phase→null（与旧 finally 同步）。
         turnRegistry.finishTurn(turnId);

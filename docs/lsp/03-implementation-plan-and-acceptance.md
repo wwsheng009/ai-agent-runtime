@@ -65,6 +65,8 @@
 | `diagnostics.max_chars` | 内联诊断的字符预算（Q2） | 同上；超预算的截断策略需固定且可解释 |
 | `diagnostics.wait_ms` | 编辑后等待诊断的时延上限（Q5） | 必须有上限；超时按 Q3 的降级语义返回 |
 | `diagnostics.degrade_mode` | LSP 缺失/超时时：返回空 / 返回提示 / 失败（Q3） | 三选一，且行为可被消息内容区分 |
+| `lsp.prewarm` | 池构建时是否预热全部 server（关闭时保持 W3 首次使用懒启动） | 默认 `false`；预热失败与懒启动失败同为"不可用" |
+| `lsp.restart_limit` | 单个 server 每会话的自动崩溃替换上限（L2） | 默认 `1`；`0` = 关闭自动恢复（手动重启仍可用） |
 
 验收要求：上述每一项都能**在不改代码**的情况下改变行为（配置化本身是验收项 A5）。
 
@@ -145,7 +147,7 @@
 
 | 触发条件 | 动作 |
 | --- | --- |
-| A4 发现既有列语义不足（`lsp_diagnostics` / `lsp_servers`） | 回流 `docs/knowledge_Layer/03_agent_harness_supplement.md` §5.2 讨论，不在 `docs/lsp` 补表定义 |
+| A4 发现既有列语义不足（`lsp_diagnostics` / `lsp_servers`） | 回流 `docs/knowledge_Layer/supplement/05_runtime_integration_project_detection_and_lsp.md` §10.2 讨论，不在 `docs/lsp` 补表定义 |
 | A9 需要裁定多 server 优先级 | 回流规格侧（`lsp_servers` 语义解释权） |
 | A6/A8 发现需要 diff 语义或返回体规格支持 | 回流知识层；必要时新增 ADR |
 | 规格变更 | 本目录三篇文档随之修订（修订**不会**反向要求规格变更） |

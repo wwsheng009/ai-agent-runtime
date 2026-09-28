@@ -69,19 +69,20 @@ Proposed ──(owner 接受)──→ Accepted ──(被新 ADR 取代)──�
 
 | ADR | 标题 | 状态 | 可逆性 | Gate | 取代 |
 |---|---|---|---|---|---|
-| [0001](0001-project-module-language-schema.md) | Project/Module/Language 模型收敛 | Proposed | expensive（但当前零迁移成本） | **Phase1-start** | `02` 的 `language_projects` |
+| [0001](0001-project-module-language-schema.md) | Project/Module/Language 模型收敛 | **Accepted**（2026-09-28） | expensive（但当前零迁移成本） | **Phase1-start** | `02` 的 `language_projects` |
 | [0002](0002-acp-lsp-ownership.md) | ACP 下 LSP 归属与能力面 | Proposed | cheap | Phase4-start | `supplement/05` §2.3 的 `external_preferred` |
-| [0003](0003-exploration-attribution-metrics.md) | 探索归因与 shadow 差异率度量 | Proposed | cheap（仅测量） | **Phase1-shadow**（阈值）/ Phase1-start（口径） | `supplement/05` §9.3 |
+| [0003](0003-exploration-attribution-metrics.md) | 探索归因与 shadow 差异率度量 | **Accepted**（2026-09-28，口径；阈值待 `Phase1-shadow`） | cheap（仅测量） | **Phase1-shadow**（阈值）/ Phase1-start（口径） | `supplement/05` §9.3 |
 | [0004](0004-stale-index-tool-surface.md) | 陈旧索引下的 `code.*` 工具面 | Proposed | cheap | Phase2-start | `supplement/05` §9.4 |
 
 > **Gate 可达性修订（2026-09-21）**：`0004` §10 的 `S_fresh` / `S_max` 取值 Gate 由 `Phase0-baseline` 改为 **`Phase2-start`**——二者是 **reader 观测到的陈旧度**阈值，需要索引 + 多进程仲裁 + 心跳数据，Phase 0（`mode=off`、无索引、无 reader）**结构上产不出**。注意：`0004` 的 Accept **本来就不被该值阻塞**（§4.1 已声明 60s / 15min 为初始值），此处仅修正 Gate 指向。
 | [0005](0005-windows-child-process-lifecycle.md) | Windows 子进程树生命周期与复用既有 process guard | Proposed | moderate | Phase4-start | `supplement/05` §9.5 |
-| [0006](0006-lsp-position-encoding-boundary.md) | LSP 位置编码转换边界与缓存键 | Proposed | moderate | Phase4-start | 澄清并补齐 `03` §5.3 |
-| [0007](0007-phantom-tables-and-doc-invariants.md) | 幽灵表清理与文档不变量 | Proposed | cheap | Phase1-start | `02` §8 的 6 个无 DDL 表名；`04` L546 的 `index_jobs` DDL 落点 |
+| [0006](0006-lsp-position-encoding-boundary.md) | LSP 位置编码转换边界与缓存键 | Proposed | moderate | Phase4-start | 澄清并补齐 `supplement/05_...md` §10.3（原 `03` §5.3） |
+| [0007](0007-phantom-tables-and-doc-invariants.md) | 幽灵表清理与文档不变量 | **Accepted**（2026-09-28） | cheap | Phase1-start | `02` §8 的 6 个无 DDL 表名；`04` L546 的 `index_jobs` DDL 落点 |
 
 > **落盘状态（2026-09-20）**：`0000`（模板）与 `0001`–`0007` 均已落盘，**全部为 `Proposed`**，等待 owner 按 §2 逐个 Accept。
+> **接受状态（2026-09-28）**：项目 owner 授权代改并记录裁决，`0001`（Project/Module/Language 模型收敛）、`0003`（探索归因**口径**部分——§10 的 α 阈值仍受 `Phase1-shadow` 门禁约束）、`0007`（幽灵表清理与文档不变量）已由 `Proposed` 改为 `Accepted`，**Phase 1 的 `Phase1-start` 门禁解除**；裁决记录见 `../CHANGELOG.md` 的 2026-09-28 条目。`0002` / `0004` / `0005` / `0006` 仍为 `Proposed`。
 > **注意**：ADR **不得复制 DDL**（§7）。ADR-0007 §4.3 要求把 `04` 中的 `CREATE TABLE index_jobs` 迁移到 extension schema；
-> 该迁移在 ADR-0007 被 Accept 之前**不执行**，但已在 `04` 相应位置与本节标注为待办。
+> **已于 2026-09-28 执行**：迁至 [`supplement/15_change_management.md`](supplement/15_change_management.md) §15.3，`04` §4.3 只留用途 / 验收指标 / 引用（其余 core 表 DDL 的引用化见 `06` §9 待办 #19）。
 
 ---
 
@@ -95,14 +96,14 @@ Proposed ──(owner 接受)──→ Accepted ──(被新 ADR 取代)──�
 
 ```text
 01 架构意图 ──┐
-02 core schema ──┼──→ adr/*.md（决策） ──→ 03 supplement/*（扩展 schema） ──→ 04（落地计划/验收）
-03 extension ──┘
+02 core schema ──┼──→ adr/*.md（决策） ──→ supplement/*（扩展 schema；03 为拆分索引） ──→ 04（落地计划/验收）
+03（拆分索引） ──┘
 ```
 
-- ADR 不复制 DDL。ADR 说"改什么、为什么、代价是什么"，DDL 的唯一事实源仍是 `02`（core）与 `03`/`supplement`（extension）。
+- ADR 不复制 DDL。ADR 说"改什么、为什么、代价是什么"，DDL 的唯一事实源仍是 `02`（core）与 `supplement/*`（extension；`03` 自 2026-09-28 起仅为拆分索引）。
 - **DDL 规则的精确边界（2026-09-20 补充）**
   - ADR **不得复制** `02`/`03` 中**已存在**的 DDL——那是同一对象的第二处定义，必然漂移。
-  - ADR **可以**给出**新增对象**的**拟议 DDL**（该对象尚无事实源，不存在"第二处"）；一旦 ADR 被 Accept，DDL 必须落到 `02`（core）或 `03`/`supplement/*`（extension），ADR 改为引用。
+  - ADR **可以**给出**新增对象**的**拟议 DDL**（该对象尚无事实源，不存在"第二处"）；一旦 ADR 被 Accept，DDL 必须落到 `02`（core）或 `supplement/*`（extension；`03` 为拆分索引），ADR 改为引用。
   - 本规则**只约束 `knowledge.db`**。其他库（如 usage ledger）的 schema 事实源是其自身代码——例如 `backend/internal/usageledger/sqlite_store.go` 的 `init()` 语句列表——不适用本规则。
 - ADR 不写验收阈值。阈值属于 `04` §7，且必须由 Phase 0 基线校准。
 
@@ -123,5 +124,5 @@ Proposed ──(owner 接受)──→ Accepted ──(被新 ADR 取代)──�
 | 附录 B 条目 | 对应 ADR | 状态 |
 |---|---|---|
 | B3（阈值是否写死） | [0003](0003-exploration-attribution-metrics.md) | 口径已定，阈值待 `Phase1-shadow`（2026-09-21 修订，原为 `Phase0-baseline`） |
-| B6（项目模型重叠） | [0001](0001-project-module-language-schema.md) | Proposed |
+| B6（项目模型重叠） | [0001](0001-project-module-language-schema.md) | Accepted（2026-09-28） |
 | B15（schema 应用顺序） | 待转 ADR（与 [0007](0007-phantom-tables-and-doc-invariants.md) 的 I2 相关） | 未开始 |

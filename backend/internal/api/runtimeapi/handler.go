@@ -37,6 +37,7 @@ import (
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	runtimehooks "github.com/wwsheng009/ai-agent-runtime/internal/hooks"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
 	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
@@ -109,7 +110,13 @@ type Handler struct {
 	skillLoader   *skill.Loader
 	mcpManager    skill.MCPManager
 	mcpAdmin      mcpadmin.AdminService
-	llmRuntime    *llm.LLMRuntime
+	// Phase 1 交付 4：知识层 shadow 拦截观察器（runtime-server 启动时经
+	// SetKnowledgeShadow 注入）；nil 时全部会话保持无知识层行为。
+	knowledgeShadow *knowledge.ShadowObserver
+	// Phase 1 交付 5：知识层状态面句柄（经 SetKnowledgeActivation 注入）；
+	// nil（mode=off / 启动期降级）时 /knowledge/status 返回 mode=off 而非 404。
+	knowledgeActivation *knowledge.Activation
+	llmRuntime          *llm.LLMRuntime
 	// §4.13 审批解释（可选注入）：nil 时用 llmRuntime 的内建一次性调用；
 	// 两者都不可用则端点降级为规则摘要（永不把模型故障变成 5xx）。
 	approvalSummarizer ApprovalSummarizer
@@ -177,7 +184,12 @@ type Handler struct {
 	// wait_agent window and returns next_action=suspend. It lives on the
 	// long-lived Handler because sessionAgentController instances are built per
 	// broker/request, while the budget must survive them.
-	waitBudget                  agentcontrol.WaitBudget
+	waitBudget agentcontrol.WaitBudget
+	// progressRunMu / progressRunIDs 缓存 session→active ExecutionRun 的解析结果
+	//（P0-1）：ReAct 循环的进度 tick 不应每步都查一次账本；与 waitBudget 同理，
+	// 缓存挂在长生命周期 Handler 上（sessionAgentController 按 broker/请求构建）。
+	progressRunMu               sync.Mutex
+	progressRunIDs              map[string]progressRunCacheEntry
 	aicliConfigMu               sync.RWMutex
 	aicliConfig                 *agentconfig.Config
 	siteAccountService          SiteAccountService
@@ -712,6 +724,24 @@ func (h *Handler) SetMutationPolicy(policy MutationPolicy) {
 	h.mutationPolicy = policy
 }
 
+// SetKnowledgeShadow 注入 Phase 1 shadow 拦截观察器（runtime-server 启动时装配）。
+// 观察器为 nil（知识层 off / 账本不可用 / 未接线）时所有会话保持无知识层行为。
+func (h *Handler) SetKnowledgeShadow(observer *knowledge.ShadowObserver) {
+	if h == nil {
+		return
+	}
+	h.knowledgeShadow = observer
+}
+
+// SetKnowledgeActivation 注入知识层接入句柄（Phase 1 交付 5，runtime-server 启动时装配）。
+// 句柄为 nil（mode=off / 启动期降级）时 /knowledge/status 仍可用，返回 mode=off。
+func (h *Handler) SetKnowledgeActivation(activation *knowledge.Activation) {
+	if h == nil {
+		return
+	}
+	h.knowledgeActivation = activation
+}
+
 // SetMCPAdminService 注入 MCP 管理服务（runtime-server 启动时装配）。
 func (h *Handler) SetMCPAdminService(service mcpadmin.AdminService) {
 	if h == nil {
@@ -915,6 +945,8 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 		warning:             adminDebugRouteWarning(canonicalRuntimeEntrypoint+"/debug/prompt-layout", canonicalAgentChatEntrypoint),
 	})).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/status", h.GetRuntimeStatus).Methods(http.MethodGet)
+	// Phase 1 交付 5：知识层状态面（索引状态 / 行数 / DB 大小 / 最近 job / 锁等待 p95）。
+	runtimeRouter.HandleFunc("/knowledge/status", h.GetKnowledgeStatus).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/health", h.GetRuntimeHealth).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/events", h.ListRuntimeEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/logs", h.ListRuntimeLogs).Methods(http.MethodGet)
@@ -1760,6 +1792,22 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		req.EnableReAct = true
 	}
 
+	// 2026-09-28（P0 开流前移）：请求一旦声明 stream，SSE 响应头与 `: open`
+	// 首帧必须先于任何「可失败且耗时不可控」的前置步骤出站——会话获取（5s
+	// 上限）、会话租约排队（同进程冲突最长 5 分钟）、profile/工作区/quota/
+	// agent 构建全部排在开流之后。前端连接守卫因此量的是「首字节延迟」而不是
+	// 「排队完成」；静默期由 15s `: keepalive` 注释帧维持（与 /runtime/stream
+	// 同源），读侧 45s 静默看门狗同样按字节口径判活。
+	chatStream, streamOpenErr := h.openAgentChatStream(w, r, req.Stream)
+	if streamOpenErr != nil {
+		h.writeError(w, http.StatusBadRequest, streamOpenErr)
+		return
+	}
+	if chatStream != nil {
+		w = chatStream
+		defer chatStream.Close()
+	}
+
 	ctx := r.Context()
 	if requestID != "" {
 		ctx = logger.WithRequestID(ctx, requestID)
@@ -1772,6 +1820,18 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		turnID = "turn_" + uuid.NewString()
 	}
 	ctx = agent.WithTurnID(ctx, turnID)
+	// 分段耗时（item 4 可观测性）：一次请求一条汇总日志，覆盖
+	// session_get / profile / lease / pre_stream 分段与首帧延迟。
+	timing := newAgentChatTiming()
+	timing.streaming = req.Stream
+	sessionIDValue := ""
+	defer func() {
+		firstFrame := time.Duration(0)
+		if chatStream != nil {
+			firstFrame = chatStream.FirstFrameDelay()
+		}
+		timing.log(sessionIDValue, turnID, r.Context().Err() != nil, firstFrame)
+	}()
 	usageScope := h.resolveUsageScope(r, req.TenantID, req.ProjectID, req.UserID)
 	// 会话获取/创建会写共享 session_history.sqlite，被并发 aicli 进程锁定时
 	// 会阻塞在 sqlite busy_timeout 上（驱动不响应 Go context 取消），
@@ -1785,6 +1845,8 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		writeSessionStoreError(w, err)
 		return
 	}
+	sessionIDValue = sessionID(session)
+	timing.mark("session_get")
 
 	// 目录回退（§4.3.2）：请求未显式指定 workspace_path 时，采用会话创建时
 	// 绑定的目录。会话上下文已有值时不覆盖（目录一经绑定不随单轮请求漂移）。
@@ -1832,6 +1894,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 	// 赋值一次即覆盖整条请求链；execute 等未解析 profile 的入口保持缺省
 	// （ledger 不写 profile 键，不猜）。
 	usageScope.Profile = ledgerProfileName(profileState)
+	timing.mark("profile")
 	if session != nil {
 		leaseScope := requestID
 		if leaseScope == "" {
@@ -1851,6 +1914,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			}()
 		}
 	}
+	timing.mark("lease")
 
 	selectedConfig := h.resolveRuntimeConfig(usageScope)
 	if profileState != nil && profileState.RuntimeConfig != nil {
@@ -2126,14 +2190,19 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			// 时刻；收尾 Close 与在途回合释放的先后由下方 releaseActiveTurn 旁的
 			// 同一个 defer 固定（先 flush 再释放，见 2026-09-18 时序修正）。
 			// flush_ms 与会话运行时流同源（缺省 50ms；显式 0 = 写即 flush）。
-			chatFlushInterval, flushErr := resolveStreamFlushInterval(r)
-			if flushErr != nil {
-				h.writeError(w, http.StatusBadRequest, flushErr)
-				return
+			// 响应头与 `: open` 已在请求入口出站（P0 开流前移），这里复用同一个
+			// 单写者；仅当入口未开流（如后续新增的早退分支）时兜底补开。
+			pacedChat := agentChatStreamFrom(w)
+			if pacedChat == nil {
+				opened, openErr := h.openAgentChatStream(w, r, true)
+				if openErr != nil {
+					h.writeError(w, http.StatusBadRequest, openErr)
+					return
+				}
+				pacedChat = opened
+				w = opened
 			}
-			h.prepareSSEHeaders(w)
-			chatFlusher, _ := w.(http.Flusher)
-			pacedChat := newPacedFlushWriter(w, chatFlusher, streamWriteBufferSize, chatFlushInterval)
+			timing.mark("pre_stream")
 			emitter := h.newTrajectoryEmitter(pacedChat, session, turnID)
 			emitter.Emit("meta", map[string]interface{}{
 				"session_id": sessionID(session),
@@ -2262,7 +2331,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 			// 判定「回合已结束」，而流上终态帧还没到，前端只能靠终态兜底收敛。
 			// 把 Close 收进同一个 defer：先 flush 收尾帧，再释放在途登记。
 			defer func() {
-				_ = pacedChat.Close()
+				pacedChat.Close()
 				releaseActiveTurn()
 			}()
 
@@ -3833,16 +3902,16 @@ func waitForSameProcessLeaseRelease(ctx context.Context, store chat.SessionLease
 }
 
 func (h *Handler) writeSessionLeaseConflict(w http.ResponseWriter, err error) bool {
-	var conflict *chat.LeaseConflictError
-	if !stderrors.As(err, &conflict) {
+	runtimeErr := sessionLeaseConflictRuntimeErr(err)
+	if runtimeErr == nil {
 		return false
 	}
-	runtimeErr := errors.New(errors.ErrSessionLeaseConflict, sessionLeaseConflictMessage(conflict))
-	if conflict != nil && conflict.Lease != nil {
-		runtimeErr = runtimeErr.
-			WithContext("lease", conflict.Lease).
-			WithContext("retryable", true).
-			WithContext("suggested_action", sessionLeaseConflictSuggestedAction(conflict.Lease))
+	// 已开流的请求（P0 开流前移后，排队冲突发生在首帧之后）用 SSE error 帧
+	// 回传：error_type=session_lease_conflict 由 RuntimeError context 提供，
+	// 前端据此走「会话占用」语义（等待/重试）而不是通用错误分支。
+	if stream := agentChatStreamFrom(w); stream != nil {
+		stream.EmitError(http.StatusConflict, runtimeErr, "")
+		return true
 	}
 	h.writeError(w, http.StatusConflict, runtimeErr)
 	return true
@@ -9700,51 +9769,31 @@ func writeSessionStoreError(w http.ResponseWriter, err error) {
 	if err == nil {
 		return
 	}
-	statusCode := http.StatusServiceUnavailable
-	code := "STORE_UNAVAILABLE"
-	message := err.Error()
-
-	// 会话不存在是客户端语义（404），不是"存储不可用"（503）。此前统一
-	// 落 503，前端把 503 当作可重试的服务故障（退避重试 + 降级横幅），
-	// 已删除/失效会话的读取因此会在控制台反复报错，且掩盖了真正的存储
-	// 故障。仅当错误确实是 not-found 时才降级为 404。
-	if stderrors.Is(err, chat.ErrSessionNotFound) ||
-		strings.Contains(strings.ToLower(message), "session not found") {
-		code = "SESSION_NOT_FOUND"
-		statusCode = http.StatusNotFound
-	} else if strings.Contains(message, "database is locked") ||
-		strings.Contains(message, "database locked") {
-		code = "STORE_LOCKED"
-		message = "会话存储被其他进程（aicli CLI）锁定，请稍后重试。"
-	} else if strings.Contains(message, "context deadline exceeded") ||
-		strings.Contains(message, "deadline exceeded") {
-		code = "STORE_TIMEOUT"
-		message = "会话存储查询超时（共享数据库被并发写入占用），请稍后重试。"
-	} else if strings.Contains(message, "database is busy") ||
-		strings.Contains(message, "database busy") {
-		code = "STORE_BUSY"
-		message = "会话存储正忙，请稍后重试。"
-	} else if strings.Contains(message, "context canceled") {
-		code = "STORE_CANCELED"
-		message = "会话存储请求被取消。"
-		statusCode = http.StatusGatewayTimeout
+	// 映射逻辑与会话存储的流内 error 帧共用（sessionStoreErrorPayload）：
+	// JSON 与 SSE 两条出口不会各自漂移。
+	// 注意：会话不存在（404 语义）不再被算作「存储不可用（503）」——此前
+	// 统一落 503，前端把 503 当作可重试的服务故障（退避重试 + 降级横幅），
+	// 已删除/失效会话的读取因此在控制台反复报错，还掩盖了真正的存储故障。
+	statusCode, response := sessionStoreErrorPayload(w, err)
+	if stream := agentChatStreamFrom(w); stream != nil {
+		stream.EmitPayload(statusCode, response)
+		return
 	}
-
-	response := map[string]interface{}{
-		"error": message,
-		"code":  code,
-	}
-	if requestID := strings.TrimSpace(w.Header().Get("X-Request-ID")); requestID != "" {
-		response["request_id"] = requestID
-	}
-
-	// 使用 writeJSON 直接写 response，避免 writeError 的额外逻辑
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, statusCode int, err error) {
+	if err == nil {
+		return
+	}
+	// 已开流的请求（P0 开流前移）：响应头已出站，错误只能走 SSE error 帧，
+	// 不能再回 JSON；payload 形状与下面的 JSON 分支一致（buildErrorPayload）。
+	if stream := agentChatStreamFrom(w); stream != nil {
+		stream.EmitError(statusCode, err, "")
+		return
+	}
 	response := map[string]interface{}{
 		"error": err.Error(),
 	}
@@ -9772,6 +9821,12 @@ func (h *Handler) writeError(w http.ResponseWriter, statusCode int, err error) {
 
 func (h *Handler) writeAgentChatExecutionError(ctx context.Context, w http.ResponseWriter, statusCode int, err error, session *chat.Session, traceID string) {
 	if err == nil {
+		return
+	}
+	if stream := agentChatStreamFrom(w); stream != nil {
+		// 流式出口：preflight 修正/落库逻辑保留，trace 写进帧内（响应头已发出，
+		// 不能再改 X-Trace-ID）。
+		stream.EmitExecutionError(ctx, h, statusCode, err, session, traceID, "")
 		return
 	}
 	preparedErr, resolvedTraceID := h.prepareAgentChatExecutionError(ctx, err, session, traceID)

@@ -52,7 +52,7 @@ func DefaultConfig() Config {
 		StorePath:               "",
 		StoreDSN:                "",
 		LogDir:                  "",
-		MaxConcurrentJobs:       2,
+		MaxConcurrentJobs:       4,
 		Retention:               30 * 24 * time.Hour,
 		CleanupInterval:         time.Hour,
 		EventHandler:            nil,

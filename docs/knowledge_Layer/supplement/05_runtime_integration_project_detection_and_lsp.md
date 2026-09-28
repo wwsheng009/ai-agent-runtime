@@ -597,9 +597,9 @@ Go 特有注意点：
 
 | # | 原提问摘要 | 裁决 | Status | Gate |
 |---|---|---|---|---|
-| 1 | `03` 的 `projects/modules` 与 `02` 的 `language_projects` 如何收敛为本文的 Project/Module 层 | [ADR-0001](../adr/0001-project-module-language-schema.md) | Proposed | `Phase1-start` |
+| 1 | `supplement/02_project_model.md` 的 `projects/modules` 与 `02` 的 `language_projects` 如何收敛为本文的 Project/Module 层 | [ADR-0001](../adr/0001-project-module-language-schema.md) | **Accepted**（2026-09-28） | `Phase1-start` |
 | 2 | ACP 场景 LSP 归属：`external_preferred` 具体探测什么信号 | [ADR-0002](../adr/0002-acp-lsp-ownership.md) | Proposed | `Phase4-start` |
-| 3 | `shadow` 模式的差异率分母定义：按 turn / 按 `grep/view` 调用次数 / 按 token | [ADR-0003](../adr/0003-exploration-attribution-metrics.md) | Proposed | **`Phase1-shadow`**（阈值，2026-09-21 修订）/ `Phase1-start`（口径） |
+| 3 | `shadow` 模式的差异率分母定义：按 turn / 按 `grep/view` 调用次数 / 按 token | [ADR-0003](../adr/0003-exploration-attribution-metrics.md) | **Accepted**（2026-09-28，口径） | **`Phase1-shadow`**（阈值，2026-09-21 修订）/ `Phase1-start`（口径） |
 | 4 | reader 模式下 `code.*` 是否仍注册给模型 | [ADR-0004](../adr/0004-stale-index-tool-surface.md) | Proposed | `Phase2-start` |
 | 5 | Windows 进程树清理用 Job Object 还是 `taskkill /T` | [ADR-0005](../adr/0005-windows-child-process-lifecycle.md) | Proposed | `Phase4-start` |
 
@@ -607,7 +607,7 @@ Go 特有注意点：
 
 | ADR | 主题 | 它澄清 / 取代的对象 |
 |---|---|---|
-| [ADR-0006](../adr/0006-lsp-position-encoding-boundary.md) | LSP 位置编码转换边界与缓存键 | 补齐 `03` §5.3 的三条规则；给 `03.lsp_servers` 补 `position_encoding` 列 |
+| [ADR-0006](../adr/0006-lsp-position-encoding-boundary.md) | LSP 位置编码转换边界与缓存键 | 补齐 `supplement/05_runtime_integration_project_detection_and_lsp.md` §10.3 的三条规则；给其 §10.2 的 `lsp_servers` 补 `position_encoding` 列 |
 | [ADR-0007](../adr/0007-phantom-tables-and-doc-invariants.md) | 幽灵表清理与文档不变量 | `02` §8 总览块中 6 个无 DDL 的表名；`04` L546 的 `index_jobs` DDL 越位 |
 
 > **注意**：上表 5 项中第 5 项的**答案已存在于仓库代码**——`internal/executor/process_guard_windows.go`
@@ -616,11 +616,113 @@ Go 特有注意点：
 
 ### 9.1 原始提问（保留备查）
 
-1. `03` 的 `projects/modules` 与 `02` 的 `language_projects` 如何收敛为本文的 Project/Module 层？（影响 schema，必须先 ADR）
+1. `supplement/02_project_model.md` 的 `projects/modules` 与 `02` 的 `language_projects` 如何收敛为本文的 Project/Module 层？（影响 schema，必须先 ADR）
 2. ACP 场景 LSP 归属：`external_preferred` 具体探测什么信号？（v1 可能无信号可用，需明确默认行为）
 3. `shadow` 模式的差异率分母定义：按 turn、按 `grep/view` 调用次数、还是按 token？（决定 Phase 1 门槛可复算性）
 4. reader 模式下 `code.*` 是否仍注册给模型？（本文建议"注册但带 staleness"，需与 `04` §4.6 工具面收敛共同裁决）
 5. Windows 进程树清理用 Job Object 还是 `taskkill /T`？（影响 `internal/winconsole` 是否被复用）
+
+---
+
+## 10. LSP 工程化规格（extension schema，自 `03` §5 迁入）
+
+### 10.1 必须补充
+
+```text
+LSP 生命周期
+能力协商
+初始化参数
+workspace root
+document sync
+UTF-16 / byte offset 统一
+请求超时
+取消
+并发限制
+崩溃恢复
+重启策略
+多 root workspace
+结果版本对齐
+LSP 不可用降级
+```
+
+### 10.2 建议表
+
+```sql
+-- ⚠️ 待补列（ADR-0006 §4.3）：position_encoding TEXT NOT NULL DEFAULT 'utf-16'
+--    用途：记录 initialize 协商得到的编码（general.positionEncodings），供事后判别与诊断。
+--    注意：默认值 'utf-16' 是 **LSP 协议默认值**，不是本方案的选择。
+--    在 ADR-0006 被 Accept 之前不执行本改动。见 adr/0006-lsp-position-encoding-boundary.md。
+CREATE TABLE lsp_servers (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    language TEXT NOT NULL,
+    command TEXT NOT NULL,
+    args_json TEXT,
+    root_path TEXT,
+    capabilities_json TEXT,
+    status TEXT NOT NULL DEFAULT 'STOPPED',
+    last_started_at INTEGER,
+    last_error TEXT,
+
+    FOREIGN KEY(workspace_id)
+        REFERENCES workspaces(id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE lsp_documents (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    lsp_uri TEXT NOT NULL,
+    language_id TEXT,
+    document_version INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT,
+    opened_at INTEGER,
+    updated_at INTEGER,
+
+    FOREIGN KEY(workspace_id)
+        REFERENCES workspaces(id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE lsp_diagnostics (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    severity TEXT,
+    message TEXT,
+    source TEXT,
+    start_line INTEGER,
+    start_column INTEGER,
+    end_line INTEGER,
+    end_column INTEGER,
+    document_version INTEGER,
+    created_at INTEGER NOT NULL
+);
+```
+
+### 10.3 位置编码规则
+
+```text
+内部统一使用 UTF-8 byte offset + line/column。
+与 LSP 交互时转换为 UTF-16 code unit。
+所有缓存键必须包含 document_version。
+```
+
+> **⚠️ 本节规则不完整（[ADR-0006](adr/0006-lsp-position-encoding-boundary.md)，2026-09-20）**
+>
+> 上述三条**方向正确但缺边界定义**，且第 2 条把协议默认值当成了协议常量。ADR-0006 补充以下缺口：
+>
+> | 缺口 | ADR-0006 的结论 |
+> |---|---|
+> | 编码协商 | `initialize` 必须携带 `general.positionEncodings: ["utf-8","utf-16"]`；**未协商时协议默认 `utf-16`**，不得假设 utf-8 |
+> | canonical 精确定义 | `line` 0-based；`column` 是**行内 UTF-8 字节数**；区间半开 `[start, end)`；BOM 不计入 offset |
+> | 非 BMP / 组合字符 | `😀`（代理对）、`e`+U+0301 必须可逆转换，不得切断代理对 |
+> | BOM / CRLF | 行尾**原样发送**不归一化；`didOpen` 前剥离 BOM 并记 `bom_bytes` 偏移 |
+> | `document_version` | 从"缓存键要求"**升级为结果有效性要求**：版本不匹配的结果必须丢弃 |
+> | `lsp_servers` 列 | 需补 `position_encoding`（见 §10.2 该表的标注） |
+>
+> **在 ADR-0006 被 Accept 之前不改写本节的三条规则。**
 
 ---
 
