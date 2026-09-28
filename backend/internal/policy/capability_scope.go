@@ -38,9 +38,17 @@ func ReadOnlyChildCapabilities() []Capability {
 // It documents the behavior the runtime actually enforces: write-like tools
 // and background tasks are removed from the child's model-visible tool surface
 // (and denied at execution), shell stays available but only for individually
-// classified read-only commands, the delegation boundary may remove extra
-// spawn tools, and no approval path can widen the boundary.
-const ReadOnlyChildOptionDescription = "Hard child execution boundary. Write-like tools (write, edit, apply_patch, append_write, multiedit, download) and background_task are removed from the child's model-visible tool surface and denied at execution, while shell stays available but only for individually classified read-only commands. The delegation boundary (BlockDelegation / max depth) may remove spawn_agent/spawn_team as well. Independent of permission_mode: approval and bypass_permissions cannot override it. Set read_only=true only when the child must not produce file changes or background jobs; leave it unset for implementer/writer tasks."
+// classified read-only commands (compound commands allowed only when every
+// segment is on the allow table; redirection / command substitution / dynamic
+// expansion are denied — see AssessShellReadOnlyCommand), the delegation
+// boundary may remove extra spawn tools, and no approval path can widen the
+// boundary.
+//
+// The dispatch advice tail exists because parents kept picking read_only=true
+// for children that then needed general shell syntax mid-run (doc1 §7.10 ②):
+// the parent sees the shell contract before dispatch instead of only the
+// child-side denial escalation.
+const ReadOnlyChildOptionDescription = "Hard child execution boundary. Write-like tools (write, edit, apply_patch, append_write, multiedit, download) and background_task are removed from the child's model-visible tool surface and denied at execution, while shell stays available but only for individually classified read-only commands. The delegation boundary (BlockDelegation / max depth) may remove spawn_agent/spawn_team as well. Independent of permission_mode: approval and bypass_permissions cannot override it. Set read_only=true only when the child must not produce file changes or background jobs; leave it unset for implementer/writer tasks. Read-only children's shell stays allowlisted: redirection, command substitution and dynamic expansion are denied, and compound commands (&&, ||, ;, |) must be read-only in every segment — leave read_only unset for children that need writes or general shell syntax."
 
 func (p *ToolExecutionPolicy) SetCapabilityScope(capabilities []Capability) {
 	if p == nil {

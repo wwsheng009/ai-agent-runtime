@@ -475,8 +475,16 @@ fix-trace.txt、fix/fix2 的 invoke 原文与响应）。
 `TestWaitAgentTaskIDProducesPreDispatchFailureObservation`、
 `TestLocalWaitAgentTaskIDProducesPreDispatchFailureObservation`。非终态未绑定任务保留"身份未就绪"可执行错误
 （与"未知 id"不混同）；② `wait_agent` 对
-read_only 子代理的执行面限制（管道/命令替换一律拒绝）属策略设计，但**派发建议**上父代理应默认给
+read_only 子代理的执行面限制 ~~（管道/命令替换一律拒绝）~~ 属策略设计，但**派发建议**上父代理应默认给
 "要跑命令"的子代理 `read_only=false`（本轮 pre-dispatch 失败即因两个任务都成了 writer）。
+**已补（2026-09-28）**：派发契约（`policy.ReadOnlyChildOptionDescription`，两 spawn 工具共用）尾部新增
+可执行的 shell 面说明——**先修正审计表述**：实际规则是逐段白名单（`cat a | head -5` 允许；重定向 `>`/`<`、
+命令替换/动态展开 `$`/反引号/`%`/`!` 一律拒绝，见 `AssessShellReadOnlyCommand`），不是"管道一律拒绝"；
+文案据此写为"redirection, command substitution and dynamic expansion are denied, and compound commands
+(&&, ||, ;, |) must be read-only in every segment — leave read_only unset for children that need writes or
+general shell syntax"，父代理在派发前即可决策，而非等子代理运行中反复被拒后上浮重派。回归：
+`TestSpawnAgentReadOnlyDescriptionCarriesDispatchAdvice`（前缀契约由既有
+`TestSpawnAgentReadOnlyDescriptionMatchesPolicyConstant` 继续钉住）。
 
 ### 7.11 架构问答：长任务截止（10min 估计 / 5min 必须结束）+ 主代理巡检节奏（2026-09-26 真机）
 

@@ -34,3 +34,18 @@ func TestSpawnAgentReadOnlyDescriptionMatchesPolicyConstant(t *testing.T) {
 			"%s: read_only description must embed the shared contract, got %q", name, description)
 	}
 }
+
+// TestSpawnAgentReadOnlyDescriptionCarriesDispatchAdvice 钉住 doc1 §7.10 ②：
+// 派发建议必须让父代理在**派发前**就知道只读子代理的 shell 面是逐段白名单
+// （重定向/命令替换/动态展开一律拒绝），从而给"要跑命令"的子代理留
+// read_only 未设置，而不是等子代理运行中反复被拒后再上浮重派。
+func TestSpawnAgentReadOnlyDescriptionCarriesDispatchAdvice(t *testing.T) {
+	for _, clause := range []string{
+		"redirection, command substitution",
+		"compound commands",
+		"leave read_only unset for children that need writes or general shell syntax",
+	} {
+		require.Contains(t, runtimepolicy.ReadOnlyChildOptionDescription, clause,
+			"read_only dispatch advice clause drifted from the enforced shell boundary")
+	}
+}
