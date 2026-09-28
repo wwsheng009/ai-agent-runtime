@@ -505,6 +505,7 @@ cards:
       protocols:
         - openai
     capability:
+      max_context_tokens: 1000000
       reasoning_model: true
       reasoning_efforts:
         - high

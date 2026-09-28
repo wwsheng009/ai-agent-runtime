@@ -3071,6 +3071,11 @@ func buildLocalChatBackgroundManager(runtimeConfig *runtimecfg.RuntimeConfig, on
 		StoreDSN:                strings.TrimSpace(cfg.StoreDSN),
 		LogDir:                  strings.TrimSpace(cfg.LogDir),
 		MaxConcurrentJobs:       cfg.MaxConcurrentJobs,
+		InstanceID:              strings.TrimSpace(cfg.InstanceID),
+		LeaseTTL:                cfg.LeaseTTL,
+		HeartbeatInterval:       cfg.HeartbeatInterval,
+		QueueTimeout:            cfg.QueueTimeout,
+		RecoverPendingOnStart:   cfg.RecoverPendingOnStart,
 		EventHandler:            onEvent,
 	})
 }

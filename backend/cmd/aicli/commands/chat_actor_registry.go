@@ -2847,6 +2847,11 @@ func (r *localActorRegistry) ResolveApproval(ctx context.Context, args toolbroke
 // terminal_delta。mailbox-only 与状态快照两条分支共用这一外壳，返回契约一致。
 func (r *localActorRegistry) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
 	obligations, baseline, pending, budgetKey := r.localWaitLedger(ctx)
+	if len(obligations) == 0 {
+		// doc1 §7.9 剩余②：无挂起记录（未托管 / 已 resume / 非 durable 降级）时，
+		// 按调用方显式等待的目标从批次账本直出，obligations[] 不再缺省。
+		obligations, baseline, pending = r.localWaitTargetObligations(ctx, args)
+	}
 	waitBudgetLimit := r.localAgentsConfig().MaxConsecutiveWaitWithoutProgress
 	if len(obligations) > 0 && !pending {
 		r.localWaitBudget.Reset(budgetKey)
@@ -3061,6 +3066,13 @@ func (r *localActorRegistry) localWaitLedger(ctx context.Context) ([]toolbroker.
 	if err != nil || len(rows) == 0 {
 		return nil, nil, false, ""
 	}
+	obligations, baseline, pending := localWaitObligationsFromRows(rows)
+	return obligations, baseline, pending, sessionID + "|" + turnID
+}
+
+// localWaitObligationsFromRows 把账本行渲染成工具面契约的 obligations[] 视图；
+// 挂起路径与"直出"路径共用同一渲染（与 API 宿主同口径）。
+func localWaitObligationsFromRows(rows []subagentbatch.WaitLedgerRow) ([]toolbroker.AgentWaitObligation, []string, bool) {
 	obligations := make([]toolbroker.AgentWaitObligation, 0, len(rows))
 	baseline := make([]string, 0, len(rows))
 	pending := false
@@ -3082,7 +3094,69 @@ func (r *localActorRegistry) localWaitLedger(ctx context.Context) ([]toolbroker.
 			pending = true
 		}
 	}
-	return obligations, baseline, pending, sessionID + "|" + turnID
+	return obligations, baseline, pending
+}
+
+// localWaitTargetObligations 在"无挂起记录"场景下把调用方显式等待的目标直接投影
+// 成 obligations[]（doc1 §7.9 剩余②）：目标（batch id / task id / 子会话 id）先
+// 映射到所属批次，再走与挂起路径同源的 BuildWaitLedger；只覆盖调用方 wait 的
+// 目标，不扫描会话全部批次。预算键保持为空（直出行没有挂起 turn 可挂靠，预算
+// 仍 fail-open 不武装）；账本读失败同样 fail-open，不改变等待窗口的可用性。
+func (r *localActorRegistry) localWaitTargetObligations(ctx context.Context, args toolbroker.WaitAgentArgs) ([]toolbroker.AgentWaitObligation, []string, bool) {
+	if r == nil || r.Host == nil || r.Host.SubagentBatches == nil {
+		return nil, nil, false
+	}
+	ids := normalizeLocalAgentWaitIDs(args)
+	if len(ids) == 0 {
+		return nil, nil, false
+	}
+	parentSessionID := strings.TrimSpace(r.Host.baseRuntimeSessionID())
+	if parentSessionID == "" {
+		return nil, nil, false
+	}
+	batchIDs := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	add := func(batchID string) {
+		batchID = strings.TrimSpace(batchID)
+		if batchID == "" {
+			return
+		}
+		if _, exists := seen[batchID]; exists {
+			return
+		}
+		seen[batchID] = struct{}{}
+		batchIDs = append(batchIDs, batchID)
+	}
+	for _, id := range ids {
+		if batch, ok, err := subagentbatch.FindBatchByIDInParentSession(ctx, r.Host.SubagentBatches, parentSessionID, id); err != nil {
+			return nil, nil, false
+		} else if ok {
+			add(batch.BatchID)
+			continue
+		}
+		if _, batchID, ok, err := subagentbatch.FindTaskByIDInParentSession(ctx, r.Host.SubagentBatches, parentSessionID, id); err != nil {
+			return nil, nil, false
+		} else if ok {
+			add(batchID)
+			continue
+		}
+		if _, batchID, ok, err := subagentbatch.FindTaskByChildSessionIDInParentSession(ctx, r.Host.SubagentBatches, parentSessionID, id); err != nil {
+			return nil, nil, false
+		} else if ok {
+			add(batchID)
+		}
+	}
+	if len(batchIDs) == 0 {
+		return nil, nil, false
+	}
+	rows, err := subagentbatch.BuildWaitLedger(ctx, r.Host.SubagentBatches, &subagentbatch.TurnSuspension{
+		SessionID:   parentSessionID,
+		ResumeQueue: batchIDs,
+	})
+	if err != nil || len(rows) == 0 {
+		return nil, nil, false
+	}
+	return localWaitObligationsFromRows(rows)
 }
 
 // localWaitBudgetKey returns the calling turn's active-wait budget key (session

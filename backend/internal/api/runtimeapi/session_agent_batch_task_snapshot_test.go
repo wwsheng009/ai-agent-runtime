@@ -201,3 +201,54 @@ func TestWaitAgentTaskIDProducesPreDispatchFailureObservation(t *testing.T) {
 	require.Equal(t, string(subagentbatch.TaskFailed), observation.CurrentTaskStatus)
 	require.Equal(t, "policy: single_writer_rejected", observation.Error)
 }
+
+// TestWaitAgentObligationsDirectFromTargetsWithoutParkedRecord 钉住 doc1 §7.9
+// 剩余②：没有 §6.12 挂起记录时，wait_agent 仍按显式等待的目标直出 obligations[]
+// （行形状与挂起路径同源），而不是只给 agent 投影；未知目标不得臆造行。
+func TestWaitAgentObligationsDirectFromTargetsWithoutParkedRecord(t *testing.T) {
+	controller, batchID := newAPIBatchSnapshotFixture(t)
+	ctx := toolctx.WithSessionID(context.Background(), apiBatchSnapshotParent)
+
+	result, err := controller.Wait(ctx, toolbroker.WaitAgentArgs{ID: apiBatchSnapshotChild, TimeoutMs: 50})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.TimedOut)
+	require.Len(t, result.Obligations, 1)
+	require.Equal(t, batchID, result.Obligations[0].ObligationID)
+	require.Equal(t, "batch", result.Obligations[0].SubjectKind)
+	require.Equal(t, string(subagentbatch.BatchRunning), result.Obligations[0].State)
+	require.False(t, result.Obligations[0].Terminal)
+	require.NotEqual(t, "finalize", result.NextAction,
+		"pending direct-out obligations must keep I1 semantics")
+
+	missing, err := controller.Wait(ctx, toolbroker.WaitAgentArgs{ID: "not-a-bound-child", TimeoutMs: 50})
+	require.NoError(t, err)
+	require.NotNil(t, missing)
+	require.Empty(t, missing.Obligations, "unknown targets must not fabricate ledger rows")
+}
+
+// TestWaitAgentDirectObligationsFinalizeWhenTargetTerminal 钉住直出账本与收尾门的
+// 配合：目标批次已终态时，wait_agent 立即返回 finalize，且 obligations[] 带终态行
+// （baseline 语义），不会留下"永远再等一次"的空转。
+func TestWaitAgentDirectObligationsFinalizeWhenTargetTerminal(t *testing.T) {
+	controller, batchID := newAPIBatchSnapshotFixture(t)
+	finishAPIBatchSnapshotTask(t, controller, batchID, subagentbatch.TaskSucceeded, "账本回退输出", false)
+	ctx := context.Background()
+	store := controller.handler.getSubagentBatchStore()
+	batch, err := store.GetBatch(ctx, batchID)
+	require.NoError(t, err)
+	_, err = store.UpdateBatch(ctx, batchID, batch.Version, func(b *subagentbatch.SubagentBatch) {
+		b.Status = subagentbatch.BatchCompleted
+	})
+	require.NoError(t, err)
+
+	waitCtx := toolctx.WithSessionID(ctx, apiBatchSnapshotParent)
+	result, err := controller.Wait(waitCtx, toolbroker.WaitAgentArgs{ID: apiBatchSnapshotChild, TimeoutMs: 5000})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.TimedOut, "an all-terminal ledger must finalize immediately")
+	require.Len(t, result.Obligations, 1)
+	require.True(t, result.Obligations[0].Terminal)
+	require.Equal(t, string(subagentbatch.BatchCompleted), result.Obligations[0].State)
+	require.Equal(t, "finalize", result.NextAction)
+}

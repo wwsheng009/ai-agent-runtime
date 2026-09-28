@@ -15,9 +15,13 @@ import (
 	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
 
-func TestDefaultConfigKeepsExplicitRerunRecoveryUnlimited(t *testing.T) {
+func TestDefaultConfigCapsRerunRecoveryAttempts(t *testing.T) {
 	cfg := DefaultConfig()
-	require.Equal(t, -1, cfg.RecoveryMaxAttempts)
+	require.Equal(t, 3, cfg.RecoveryMaxAttempts)
+	require.False(t, cfg.RecoverPendingOnStart)
+	require.Equal(t, 60*time.Second, cfg.LeaseTTL)
+	require.Equal(t, 10*time.Second, cfg.HeartbeatInterval)
+	require.Equal(t, 30*time.Minute, cfg.QueueTimeout)
 	require.Equal(t, []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 3 * time.Minute, 5 * time.Minute}, cfg.RecoveryBackoffSchedule)
 }
 
@@ -172,7 +176,7 @@ func TestManagerDispatchesByPriorityWithinCapacity(t *testing.T) {
 	require.Equal(t, []string{blocker.ID, high.ID, low.ID}, runningOrder[:3])
 }
 
-func TestManagerRecoversPendingAndMarksInterruptedRunningJobsOrphaned(t *testing.T) {
+func TestManagerStartupInterruptsPendingAndOrphansDeadRunningJobs(t *testing.T) {
 	ctx := context.Background()
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "background.db")
@@ -229,7 +233,20 @@ func TestManagerRecoversPendingAndMarksInterruptedRunningJobsOrphaned(t *testing
 		require.NoError(t, manager.Close())
 	}()
 
-	require.NoError(t, waitForJobStatus(ctx, manager, pendingJob.ID, StatusCompleted, backgroundTestTimeout(20*time.Second)))
+	// Startup must not resurrect pending work whose owning process is gone:
+	// the record becomes a terminal "interrupted" job (2026-09-28).
+	interrupted, err := manager.GetJob(ctx, pendingJob.ID)
+	require.NoError(t, err)
+	require.NotNil(t, interrupted)
+	require.Equal(t, StatusInterrupted, interrupted.Status)
+	require.Contains(t, interrupted.Message, "not auto-resumed")
+
+	pendingEvents, err := manager.ListEvents(ctx, pendingJob.ID, 0, 0)
+	require.NoError(t, err)
+	pendingTypes := eventTypes(pendingEvents)
+	require.Contains(t, pendingTypes, "recovered_pending_ignored")
+	require.NotContains(t, pendingTypes, "recovered_queued")
+	require.NotContains(t, pendingTypes, "process_created")
 
 	recoveredRunning, err := manager.GetJob(ctx, runningJob.ID)
 	require.NoError(t, err)
@@ -237,13 +254,11 @@ func TestManagerRecoversPendingAndMarksInterruptedRunningJobsOrphaned(t *testing
 	require.Equal(t, StatusOrphaned, recoveredRunning.Status)
 	require.Contains(t, recoveredRunning.Message, "restarted before job")
 
-	pendingEvents, err := manager.ListEvents(ctx, pendingJob.ID, 0, 0)
-	require.NoError(t, err)
-	require.Contains(t, eventTypes(pendingEvents), "recovered_queued")
-
 	runningEvents, err := manager.ListEvents(ctx, runningJob.ID, 0, 0)
 	require.NoError(t, err)
-	require.Contains(t, eventTypes(runningEvents), "orphaned")
+	runningTypes := eventTypes(runningEvents)
+	require.Contains(t, runningTypes, "orphaned")
+	require.NotContains(t, runningTypes, "recovered_requeued")
 }
 
 func TestManagerReturnsStableJobNotFoundCode(t *testing.T) {
@@ -284,7 +299,7 @@ func TestManagerPrunesExpiredTerminalJobsAndOwnedArtifacts(t *testing.T) {
 	require.True(t, os.IsNotExist(statErr))
 }
 
-func TestManagerRecoversRunningJobWithRerunPolicy(t *testing.T) {
+func TestManagerOrphansDeadRunningRerunJobWithoutRequeue(t *testing.T) {
 	ctx := context.Background()
 	tempDir := t.TempDir()
 	storePath := filepath.Join(tempDir, "background.db")
@@ -325,22 +340,340 @@ func TestManagerRecoversRunningJobWithRerunPolicy(t *testing.T) {
 		require.NoError(t, manager.Close())
 	}()
 
-	require.NoError(t, waitForJobStatus(ctx, manager, runningJob.ID, StatusCompleted, backgroundTestTimeout(20*time.Second)))
-
+	// Rerun policy no longer re-queues on startup: a running record whose
+	// process is gone becomes terminal "orphaned" instead (2026-09-28).
 	recovered, err := manager.GetJob(ctx, runningJob.ID)
 	require.NoError(t, err)
 	require.NotNil(t, recovered)
-	require.Equal(t, StatusCompleted, recovered.Status)
+	require.Equal(t, StatusOrphaned, recovered.Status)
+	require.Contains(t, recovered.Message, "restarted before job")
 	require.Equal(t, RestartPolicyRerun, recovered.RestartPolicy)
+
+	events, err := manager.ListEvents(ctx, runningJob.ID, 0, 0)
+	require.NoError(t, err)
+	recoveredTypes := eventTypes(events)
+	require.Contains(t, recoveredTypes, "orphaned")
+	require.NotContains(t, recoveredTypes, "recovered_requeued")
+	require.NotContains(t, recoveredTypes, "process_created")
 
 	output, err := manager.ReadOutput(ctx, TaskOutputArgs{JobID: runningJob.ID, Offset: 0})
 	require.NoError(t, err)
 	require.Contains(t, output.Output, "partial-output")
-	require.Contains(t, output.Output, "rerun")
+	require.NotContains(t, output.Output, "rerun")
+}
 
-	events, err := manager.ListEvents(ctx, runningJob.ID, 0, 0)
+func TestManagerRecoverPendingOnStartKeepsLegacyRequeue(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "background.db")
+	logDir := filepath.Join(tempDir, "logs")
+	require.NoError(t, os.MkdirAll(logDir, 0o755))
+
+	store, err := NewSQLiteStore(&StoreConfig{Path: storePath})
 	require.NoError(t, err)
-	require.Contains(t, eventTypes(events), "recovered_requeued")
+	require.NoError(t, store.SaveJob(ctx, Job{
+		ID:        "job_pending_optin",
+		SessionID: "session-1",
+		Kind:      "shell",
+		Command:   shellEchoCommand("pending-optin"),
+		Status:    StatusPending,
+		CreatedAt: time.Now().Add(-time.Second).UTC(),
+		LogPath:   filepath.Join(logDir, "job_pending_optin.log"),
+		Metadata:  map[string]interface{}{"timeout_sec": 15},
+	}))
+	require.NoError(t, store.Close())
+
+	manager := NewManager(Config{
+		StorePath:             storePath,
+		LogDir:                logDir,
+		MaxConcurrentJobs:     1,
+		RecoverPendingOnStart: true,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	require.NoError(t, waitForJobStatus(ctx, manager, "job_pending_optin", StatusCompleted, backgroundTestTimeout(20*time.Second)))
+	events, err := manager.ListEvents(ctx, "job_pending_optin", 0, 0)
+	require.NoError(t, err)
+	require.Contains(t, eventTypes(events), "recovered_queued")
+}
+
+func TestCancelJobThroughStoreSurvivesStaleWriter(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "background.db")
+	logDir := filepath.Join(tempDir, "logs")
+	require.NoError(t, os.MkdirAll(logDir, 0o755))
+
+	manager := NewManager(Config{
+		StorePath:         storePath,
+		LogDir:            logDir,
+		MaxConcurrentJobs: 1,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	managed := &managedJob{
+		ctx: context.Background(),
+		info: Job{
+			ID:        "job_stale_writer",
+			SessionID: "session-stale",
+			Kind:      "shell",
+			Command:   shellEchoCommand("stale"),
+			Status:    StatusRunning,
+			CreatedAt: time.Now().Add(-time.Minute).UTC(),
+		},
+		output: newOutputBuffer(1024),
+	}
+	require.NoError(t, manager.store.SaveJob(ctx, managed.info))
+	manager.mu.Lock()
+	manager.jobs[managed.info.ID] = managed
+	manager.mu.Unlock()
+
+	// Simulate another instance cancelling the job through the shared store.
+	stored, err := manager.store.GetJob(ctx, managed.info.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	finishedAt := time.Now().UTC()
+	exitCode := -1
+	stored.Status = StatusCancelled
+	stored.Message = "cancelled"
+	stored.ExitCode = &exitCode
+	stored.FinishedAt = &finishedAt
+	updated, err := manager.updateStoredJobCAS(ctx, *stored, stored.StateVersion)
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	// The stale writer must not overwrite the terminal state, nor record a
+	// bogus terminal event.
+	manager.orphanJob(managed, "stale watchdog write")
+
+	final, err := manager.store.GetJob(ctx, managed.info.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final)
+	require.Equal(t, StatusCancelled, final.Status)
+
+	snapshot := managed.snapshot()
+	require.NotNil(t, snapshot)
+	require.Equal(t, StatusCancelled, snapshot.Status)
+
+	events, err := manager.ListEvents(ctx, managed.info.ID, 0, 0)
+	require.NoError(t, err)
+	require.NotContains(t, eventTypes(events), "orphaned")
+}
+
+func TestCancelJobFallsBackToStoreWhenNotInMemory(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "background.db")
+	logDir := filepath.Join(tempDir, "logs")
+	require.NoError(t, os.MkdirAll(logDir, 0o755))
+
+	manager := NewManager(Config{
+		StorePath:         storePath,
+		LogDir:            logDir,
+		MaxConcurrentJobs: 1,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	// A job created by another runtime instance is visible in the store but not
+	// in this manager's memory; CancelJob must fall back to the store instead of
+	// reporting JOB_NOT_FOUND (2026-09-28).
+	stale := Job{
+		ID:        "job_store_only",
+		SessionID: "session-store-only",
+		Kind:      "shell",
+		Command:   shellDelayCommand(time.Minute, "store-only"),
+		Status:    StatusRunning,
+		CreatedAt: time.Now().Add(-time.Minute).UTC(),
+		LogPath:   filepath.Join(logDir, "job_store_only.log"),
+	}
+	require.NoError(t, manager.store.SaveJob(ctx, stale))
+
+	cancelled, err := manager.CancelJob(ctx, stale.ID)
+	require.NoError(t, err)
+	require.NotNil(t, cancelled)
+	require.Equal(t, StatusCancelled, cancelled.Status)
+
+	final, err := manager.store.GetJob(ctx, stale.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final)
+	require.Equal(t, StatusCancelled, final.Status)
+}
+
+func TestManagerSkipsPendingJobOwnedByLivePeer(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "background.db")
+	logDir := filepath.Join(tempDir, "logs")
+	require.NoError(t, os.MkdirAll(logDir, 0o755))
+
+	store, err := NewSQLiteStore(&StoreConfig{Path: storePath})
+	require.NoError(t, err)
+	lease := time.Now().Add(time.Minute).UTC()
+	require.NoError(t, store.SaveJob(ctx, Job{
+		ID:              "job_peer",
+		SessionID:       "session-peer",
+		Kind:            "shell",
+		Command:         shellEchoCommand("peer"),
+		Status:          StatusPending,
+		CreatedAt:       time.Now().Add(-time.Second).UTC(),
+		LogPath:         filepath.Join(logDir, "job_peer.log"),
+		OwnerInstanceID: "inst_peer",
+		LeaseExpiresAt:  &lease,
+		Metadata:        map[string]interface{}{"timeout_sec": 15},
+	}))
+	require.NoError(t, store.Close())
+
+	manager := NewManager(Config{StorePath: storePath, LogDir: logDir, MaxConcurrentJobs: 1})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	// A live peer still owns this job: it must not be recovered, dispatched or
+	// rewritten here (2026-09-28).
+	job, err := manager.GetJob(ctx, "job_peer")
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.Equal(t, StatusPending, job.Status)
+	require.Equal(t, "inst_peer", job.OwnerInstanceID)
+
+	events, err := manager.ListEvents(ctx, "job_peer", 0, 0)
+	require.NoError(t, err)
+	require.Empty(t, events)
+}
+
+func TestManagerInterruptsPendingJobWithExpiredLease(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, "background.db")
+	logDir := filepath.Join(tempDir, "logs")
+	require.NoError(t, os.MkdirAll(logDir, 0o755))
+
+	store, err := NewSQLiteStore(&StoreConfig{Path: storePath})
+	require.NoError(t, err)
+	expiredLease := time.Now().Add(-time.Minute).UTC()
+	require.NoError(t, store.SaveJob(ctx, Job{
+		ID:              "job_dead_owner",
+		SessionID:       "session-dead",
+		Kind:            "shell",
+		Command:         shellEchoCommand("dead-owner"),
+		Status:          StatusPending,
+		CreatedAt:       time.Now().Add(-time.Minute).UTC(),
+		LogPath:         filepath.Join(logDir, "job_dead_owner.log"),
+		OwnerInstanceID: "inst_dead",
+		LeaseExpiresAt:  &expiredLease,
+		Metadata:        map[string]interface{}{"timeout_sec": 15},
+	}))
+	require.NoError(t, store.Close())
+
+	manager := NewManager(Config{StorePath: storePath, LogDir: logDir, MaxConcurrentJobs: 1})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	job, err := manager.GetJob(ctx, "job_dead_owner")
+	require.NoError(t, err)
+	require.NotNil(t, job)
+	require.Equal(t, StatusInterrupted, job.Status)
+
+	events, err := manager.ListEvents(ctx, "job_dead_owner", 0, 0)
+	require.NoError(t, err)
+	require.Contains(t, eventTypes(events), "recovered_pending_ignored")
+}
+
+func TestManagerExpiresQueuedJobPastDeadline(t *testing.T) {
+	// 队列 deadline 自提交时刻起算，包含「提交 → dispatcher 认领 → 进程启动」
+	// 的派发链延迟。150ms 在冷启动/慢盘/杀软扫描新库文件（Windows）环境下会
+	// 稳定误杀**首个** job（last status=expired, "never dispatched"），而作者
+	// 的 Linux 机器上派发链短于此窗口故全绿。1s 仍远小于 10s 观察窗口，
+	// 「排队超 deadline → expired」的被测语义不变；生产默认 QueueTimeout 30m
+	// 远大于派发链，不受此竞态影响（见 manager.go expireOverdueQueuedJobs 的
+	// scheduled 豁免注释）。
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	manager := NewManager(Config{
+		StorePath:         filepath.Join(tempDir, "background.db"),
+		LogDir:            filepath.Join(tempDir, "logs"),
+		MaxConcurrentJobs: 1,
+		MonitorInterval:   50 * time.Millisecond,
+		QueueTimeout:      time.Second,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	blocker, err := manager.SubmitShell(ctx, "session-deadline", BackgroundTaskArgs{
+		Command: shellDelayCommand(3*time.Second, "blocker"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, blocker.ID, StatusRunning, backgroundTestTimeout(10*time.Second)))
+
+	queued, err := manager.SubmitShell(ctx, "session-deadline", BackgroundTaskArgs{
+		Command: shellEchoCommand("never-runs"),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, queued.DeadlineAt)
+	require.NoError(t, waitForJobStatus(ctx, manager, queued.ID, StatusExpired, backgroundTestTimeout(10*time.Second)))
+
+	expired, err := manager.GetJob(ctx, queued.ID)
+	require.NoError(t, err)
+	require.NotNil(t, expired)
+	require.Equal(t, StatusExpired, expired.Status)
+	require.Contains(t, expired.Message, "queue deadline exceeded")
+
+	events, err := manager.ListEvents(ctx, queued.ID, 0, 0)
+	require.NoError(t, err)
+	expiredTypes := eventTypes(events)
+	require.Contains(t, expiredTypes, "expired")
+	require.NotContains(t, expiredTypes, "process_created")
+
+	_, _ = manager.CancelJob(ctx, blocker.ID)
+}
+
+func TestDispatchSkipsJobCancelledInStore(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	manager := NewManager(Config{
+		StorePath:         filepath.Join(tempDir, "background.db"),
+		LogDir:            filepath.Join(tempDir, "logs"),
+		MaxConcurrentJobs: 1,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	managed := &managedJob{
+		ctx: context.Background(),
+		info: Job{
+			ID:              "job_dispatch_cancel",
+			SessionID:       "session-dispatch",
+			Kind:            "shell",
+			Command:         shellEchoCommand("never"),
+			Status:          StatusPending,
+			CreatedAt:       time.Now().Add(-time.Second).UTC(),
+			OwnerInstanceID: manager.instanceID,
+		},
+		output: newOutputBuffer(1024),
+	}
+	require.NoError(t, manager.store.SaveJob(ctx, managed.info))
+	manager.mu.Lock()
+	manager.jobs[managed.info.ID] = managed
+	manager.mu.Unlock()
+
+	// Another instance cancels the job in the shared store after it was queued
+	// locally; the dispatcher must re-read before starting it (2026-09-28).
+	stored, err := manager.store.GetJob(ctx, managed.info.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	stored.Status = StatusCancelled
+	updated, err := manager.updateStoredJobCAS(ctx, *stored, stored.StateVersion)
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	manager.dispatchPending()
+
+	snapshot := managed.snapshot()
+	require.NotNil(t, snapshot)
+	require.Equal(t, StatusCancelled, snapshot.Status)
+	managed.mu.RLock()
+	scheduled := managed.scheduled
+	managed.mu.RUnlock()
+	require.False(t, scheduled)
+
+	events, err := manager.ListEvents(ctx, managed.info.ID, 0, 0)
+	require.NoError(t, err)
+	require.NotContains(t, eventTypes(events), "process_created")
 }
 
 func TestManagerRecoversDetachedRunningJobAcrossRestart(t *testing.T) {

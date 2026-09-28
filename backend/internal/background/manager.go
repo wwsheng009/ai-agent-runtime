@@ -35,7 +35,24 @@ type Config struct {
 	MaxConcurrentJobs       int
 	Retention               time.Duration
 	CleanupInterval         time.Duration
-	EventHandler            func(JobEvent)
+	// InstanceID identifies this runtime process in the shared background
+	// store. Empty generates a fresh per-process id (2026-09-28).
+	InstanceID string
+	// LeaseTTL bounds how long jobs stay owned after their owner stops
+	// heartbeating. Default 60s.
+	LeaseTTL time.Duration
+	// HeartbeatInterval is how often the owner refreshes its instance
+	// heartbeat and job leases. Default 10s.
+	HeartbeatInterval time.Duration
+	// QueueTimeout bounds how long a job may stay pending before it becomes
+	// terminal "expired". Default 30m; a negative value disables expiry.
+	QueueTimeout time.Duration
+	// RecoverPendingOnStart re-queues persisted pending jobs when a manager
+	// starts. It defaults to false: startup recovery marks pending jobs as
+	// interrupted instead of resurrecting work whose owning process is gone
+	// (2026-09-28).
+	RecoverPendingOnStart bool
+	EventHandler          func(JobEvent)
 }
 
 // DefaultConfig returns a conservative default config.
@@ -47,7 +64,7 @@ func DefaultConfig() Config {
 		HeartbeatTimeout:        30 * time.Second,
 		LaunchMaxAttempts:       3,
 		RetryBackoff:            500 * time.Millisecond,
-		RecoveryMaxAttempts:     -1,
+		RecoveryMaxAttempts:     3,
 		RecoveryBackoffSchedule: defaultBackgroundRecoverySchedule(),
 		StorePath:               "",
 		StoreDSN:                "",
@@ -55,6 +72,10 @@ func DefaultConfig() Config {
 		MaxConcurrentJobs:       4,
 		Retention:               30 * 24 * time.Hour,
 		CleanupInterval:         time.Hour,
+		LeaseTTL:                60 * time.Second,
+		HeartbeatInterval:       10 * time.Second,
+		QueueTimeout:            30 * time.Minute,
+		RecoverPendingOnStart:   false,
 		EventHandler:            nil,
 	}
 }
@@ -117,6 +138,14 @@ type Manager struct {
 	// lazily created for the same reason as waiters, and in-memory on purpose:
 	// a monitor only nudges a live session.
 	monitorRegistry *monitorRegistry
+	// instanceID anchors job ownership and leases in the shared store
+	// (2026-09-28). Registrations are lazy so an unused manager never creates
+	// the store file.
+	instanceID         string
+	instanceHost       string
+	instanceStartedAt  time.Time
+	instanceMu         sync.Mutex
+	instanceRegistered bool
 }
 
 type managedJob struct {
@@ -168,6 +197,21 @@ func NewManager(cfg Config) *Manager {
 	if cfg.CleanupInterval == 0 {
 		cfg.CleanupInterval = DefaultConfig().CleanupInterval
 	}
+	if strings.TrimSpace(cfg.InstanceID) == "" {
+		cfg.InstanceID = "inst_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	}
+	if cfg.LeaseTTL <= 0 {
+		cfg.LeaseTTL = DefaultConfig().LeaseTTL
+	}
+	if cfg.HeartbeatInterval <= 0 {
+		cfg.HeartbeatInterval = DefaultConfig().HeartbeatInterval
+	}
+	if cfg.HeartbeatInterval > cfg.LeaseTTL {
+		cfg.HeartbeatInterval = cfg.LeaseTTL / 2
+	}
+	if cfg.QueueTimeout == 0 {
+		cfg.QueueTimeout = DefaultConfig().QueueTimeout
+	}
 	manager := &Manager{
 		config:            cfg,
 		jobs:              make(map[string]*managedJob),
@@ -175,6 +219,11 @@ func NewManager(cfg Config) *Manager {
 		maxConcurrentJobs: cfg.MaxConcurrentJobs,
 		stopCh:            make(chan struct{}),
 		doneCh:            make(chan struct{}),
+		instanceID:        strings.TrimSpace(cfg.InstanceID),
+		instanceStartedAt: time.Now().UTC(),
+	}
+	if host, err := os.Hostname(); err == nil {
+		manager.instanceHost = strings.TrimSpace(host)
 	}
 	manager.eventHandler = cfg.EventHandler
 	if strings.TrimSpace(cfg.StorePath) != "" || strings.TrimSpace(cfg.StoreDSN) != "" {
@@ -235,6 +284,7 @@ func (m *Manager) Close() error {
 		}
 		<-m.doneCh
 		m.jobWG.Wait()
+		m.markInstanceStopped(context.Background())
 		if closer, ok := m.store.(interface{ Close() error }); ok {
 			closeErr = closer.Close()
 		}
@@ -306,9 +356,19 @@ func (m *Manager) SubmitShell(ctx context.Context, sessionID string, req Backgro
 		managed.info.CreatedAt = now
 	}
 	m.lastCreatedAt = now
+	if m.instanceID != "" {
+		managed.info.OwnerInstanceID = m.instanceID
+	}
+	queuedAt := managed.info.CreatedAt
+	managed.info.QueuedAt = &queuedAt
+	if m.config.QueueTimeout > 0 {
+		deadline := queuedAt.Add(m.config.QueueTimeout)
+		managed.info.DeadlineAt = &deadline
+	}
 	m.jobs[jobID] = managed
 	m.mu.Unlock()
 
+	m.ensureInstanceRegistered(ctx)
 	if m.store != nil {
 		_ = m.store.SaveJob(ctx, managed.info)
 	}
@@ -358,7 +418,7 @@ func (m *Manager) ReadOutput(ctx context.Context, req TaskOutputArgs) (TaskOutpu
 	pendingDiag := TaskOutputResult{}
 	if status == StatusPending {
 		queuePosition, active, maxConcurrent := m.jobQueueDiagnostics(jobID)
-		pendingDiag = m.pendingQueueDiagnostics(queuePosition, active, maxConcurrent, info.Metadata)
+		pendingDiag = m.pendingQueueDiagnostics(queuePosition, active, maxConcurrent, info)
 	}
 
 	if logPath != "" {
@@ -435,7 +495,11 @@ func (m *Manager) cancelJobWithSource(ctx context.Context, jobID, cancelSource s
 	}
 	managed := m.getJob(jobID)
 	if managed == nil {
-		return nil, jobNotFoundError(jobID)
+		// The job is not in this instance's in-memory map (for example it was
+		// created by another aicli process sharing the same store). Cancel
+		// through the store so cross-instance cancellation works; task_kill
+		// used to fail with JOB_NOT_FOUND here (2026-09-28).
+		return m.cancelStoredJob(ctx, jobID, cancelSource)
 	}
 
 	managed.mu.RLock()
@@ -467,6 +531,70 @@ func (m *Manager) cancelJobWithSource(ctx context.Context, jobID, cancelSource s
 		cancel()
 	}
 	return managed.snapshot(), nil
+}
+
+// cancelStoredJob cancels a job that is not owned by this instance's in-memory
+// map. The terminal transition is written through the store with CAS so a
+// stale writer cannot overwrite it afterwards; the process kill is best effort
+// (the pid may be unknown or already gone).
+func (m *Manager) cancelStoredJob(ctx context.Context, jobID, cancelSource string) (*Job, error) {
+	if m == nil || m.store == nil {
+		return nil, jobNotFoundError(jobID)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		stored, err := m.store.GetJob(ctx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if stored == nil {
+			return nil, jobNotFoundError(jobID)
+		}
+		if isTerminalStatus(stored.Status) {
+			return stored, fmt.Errorf("job already finished: %s", stored.Status)
+		}
+		finishedAt := time.Now().UTC()
+		exitCode := -1
+		stored.Status = StatusCancelled
+		stored.Message = "cancelled"
+		stored.ExitCode = &exitCode
+		stored.FinishedAt = &finishedAt
+		if stored.Metadata == nil {
+			stored.Metadata = map[string]interface{}{}
+		}
+		stored.Metadata["error_code"] = string(runtimeerrors.ErrAgentRunCanceled)
+		stored.Metadata["cancel_source"] = cancelSource
+		for _, key := range []string{backgroundMetaRecoveryAttempt, backgroundMetaRecoveryMax, backgroundMetaNextRecoveryAt, "recovery_reason"} {
+			delete(stored.Metadata, key)
+		}
+		updated, err := m.updateStoredJobCAS(ctx, *stored, stored.StateVersion)
+		if err != nil {
+			return nil, err
+		}
+		if !updated {
+			continue
+		}
+		stored.StateVersion++
+		m.appendJobEvent(ctx, jobID, "cancelled", map[string]interface{}{
+			"status":        stored.Status,
+			"reason":        "cancelled",
+			"error_code":    string(runtimeerrors.ErrAgentRunCanceled),
+			"cancel_source": cancelSource,
+		})
+		if pid, ok := detachedPID(stored.Metadata); ok {
+			if killErr := terminateJobProcess(pid); killErr != nil {
+				m.appendJobEvent(ctx, jobID, "kill_failed", map[string]interface{}{
+					"pid":   pid,
+					"error": killErr.Error(),
+				})
+			}
+		}
+		return stored, nil
+	}
+	current, readErr := m.store.GetJob(ctx, jobID)
+	if readErr == nil && current != nil {
+		return current, fmt.Errorf("cancel raced with a concurrent update: %s", current.Status)
+	}
+	return nil, jobNotFoundError(jobID)
 }
 
 // ListJobs returns jobs matching the filter.
@@ -909,11 +1037,391 @@ func (m *Manager) failStartupAcceptance(managed *managedJob, err error) {
 }
 
 func (m *Manager) persistManagedJob(managed *managedJob) {
-	if m == nil || m.store == nil || managed == nil {
+	_ = m.persistJobStateCAS(managed)
+}
+
+// casStoreWriter is implemented by stores that support optimistic-concurrency
+// updates (the SQLite store). Stores without it fall back to a best-effort
+// overwrite so alternative Store implementations keep working.
+type casStoreWriter interface {
+	UpdateJobCAS(ctx context.Context, job Job, expectedVersion int64) (bool, error)
+}
+
+func (m *Manager) updateStoredJobCAS(ctx context.Context, job Job, expectedVersion int64) (bool, error) {
+	if m == nil || m.store == nil {
+		return false, fmt.Errorf("background store is not configured")
+	}
+	if cas, ok := m.store.(casStoreWriter); ok {
+		return cas.UpdateJobCAS(ctx, job, expectedVersion)
+	}
+	if err := m.store.UpdateJob(ctx, job); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// persistJobStateCAS writes the job's current in-memory state through the store
+// with optimistic concurrency, and reports whether the write landed.
+//
+// On a version conflict the persisted row was changed by another writer
+// (another manager instance sharing the database, or a racing goroutine), so
+// the helper re-reads it: a terminal row is adopted locally and the job stops
+// writing (terminal states are absorbing); a non-terminal row is retried once
+// with the fresh version.
+func (m *Manager) persistJobStateCAS(managed *managedJob) bool {
+	if managed == nil {
+		return false
+	}
+	if m == nil || m.store == nil {
+		return true // in-memory manager: the local state is authoritative
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		snapshot := managed.snapshot()
+		if snapshot == nil {
+			return false
+		}
+		updated, err := m.updateStoredJobCAS(context.Background(), *snapshot, snapshot.StateVersion)
+		if err != nil {
+			return false
+		}
+		if updated {
+			managed.mu.Lock()
+			if managed.info.StateVersion == snapshot.StateVersion {
+				managed.info.StateVersion = snapshot.StateVersion + 1
+			}
+			managed.mu.Unlock()
+			return true
+		}
+		current, readErr := m.store.GetJob(context.Background(), snapshot.ID)
+		if readErr != nil || current == nil {
+			return false
+		}
+		if isTerminalStatus(current.Status) {
+			// The persisted terminal state is authoritative: the local write
+			// lost the CAS race, so adopt the stored outcome unconditionally
+			// (2026-09-28 — otherwise the losing writer keeps a divergent
+			// terminal status locally and records a misleading event).
+			m.adoptStoredJob(managed, *current)
+			m.notifyDispatcher()
+			return false
+		}
+		managed.mu.Lock()
+		managed.info.StateVersion = current.StateVersion
+		managed.mu.Unlock()
+	}
+	return false
+}
+
+// terminalTransitionVisible reports whether the terminal status this writer
+// intended is the one currently visible on the managed job. When a CAS persist
+// lost the race against another writer, the losing transition must not record a
+// terminal event (2026-09-28: cancelled rows were followed by bogus orphaned
+// events from stale watchdogs).
+func (m *Manager) terminalTransitionVisible(managed *managedJob, intended JobStatus) bool {
+	if managed == nil {
+		return false
+	}
+	managed.mu.RLock()
+	defer managed.mu.RUnlock()
+	return managed.info.Status == intended
+}
+
+// instanceStoreWriter is implemented by the SQLite store: instance heartbeats,
+// lease renewal and clean shutdown records for the ownership model.
+type instanceStoreWriter interface {
+	UpsertRuntimeInstance(ctx context.Context, instance RuntimeInstance) error
+	MarkRuntimeInstanceStopped(ctx context.Context, instanceID string, at time.Time) error
+	RenewJobLeases(ctx context.Context, ownerInstanceID string, leaseExpiresAt time.Time) (int64, error)
+	ReleaseJobLeases(ctx context.Context, ownerInstanceID string, releasedAt time.Time) (int64, error)
+}
+
+// ensureInstanceRegistered registers this runtime process in the shared store.
+// Registration is lazy on purpose: an unused manager must not create the store
+// file (empty-chat bootstrap stays side-effect free).
+func (m *Manager) ensureInstanceRegistered(ctx context.Context) {
+	if m == nil || m.store == nil || m.instanceID == "" {
 		return
 	}
-	if snapshot := managed.snapshot(); snapshot != nil {
-		_ = m.store.UpdateJob(context.Background(), *snapshot)
+	writer, ok := m.store.(instanceStoreWriter)
+	if !ok {
+		return
+	}
+	m.instanceMu.Lock()
+	registered := m.instanceRegistered
+	m.instanceMu.Unlock()
+	if registered {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	instance := RuntimeInstance{
+		ID:          m.instanceID,
+		PID:         os.Getpid(),
+		Host:        m.instanceHost,
+		StartedAt:   m.instanceStartedAt,
+		HeartbeatAt: time.Now().UTC(),
+		State:       "running",
+	}
+	if err := writer.UpsertRuntimeInstance(ctx, instance); err != nil {
+		return
+	}
+	m.instanceMu.Lock()
+	m.instanceRegistered = true
+	m.instanceMu.Unlock()
+}
+
+// heartbeatInstance refreshes this instance's liveness and renews the leases of
+// the non-terminal jobs it owns.
+func (m *Manager) heartbeatInstance(ctx context.Context) {
+	if m == nil || m.store == nil || m.instanceID == "" {
+		return
+	}
+	m.instanceMu.Lock()
+	registered := m.instanceRegistered
+	m.instanceMu.Unlock()
+	if !registered {
+		return
+	}
+	writer, ok := m.store.(instanceStoreWriter)
+	if !ok {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	now := time.Now().UTC()
+	_ = writer.UpsertRuntimeInstance(ctx, RuntimeInstance{
+		ID:          m.instanceID,
+		PID:         os.Getpid(),
+		Host:        m.instanceHost,
+		StartedAt:   m.instanceStartedAt,
+		HeartbeatAt: now,
+		State:       "running",
+	})
+	if m.config.LeaseTTL > 0 {
+		_, _ = writer.RenewJobLeases(ctx, m.instanceID, now.Add(m.config.LeaseTTL))
+	}
+}
+
+// markInstanceStopped records a clean shutdown so peers stop treating this
+// instance's leases as live.
+func (m *Manager) markInstanceStopped(ctx context.Context) {
+	if m == nil || m.store == nil || m.instanceID == "" {
+		return
+	}
+	m.instanceMu.Lock()
+	registered := m.instanceRegistered
+	m.instanceMu.Unlock()
+	if !registered {
+		return
+	}
+	if writer, ok := m.store.(instanceStoreWriter); ok {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		now := time.Now().UTC()
+		_ = writer.MarkRuntimeInstanceStopped(ctx, m.instanceID, now)
+		// A clean shutdown releases ownership immediately instead of making
+		// peers wait out the full TTL before they can recover still-running
+		// detached processes.
+		_, _ = writer.ReleaseJobLeases(ctx, m.instanceID, now)
+	}
+}
+
+// ownedByLivePeer reports whether another runtime instance still holds a live
+// lease on the job: such jobs must never be recovered or rewritten here
+// (2026-09-28).
+func (m *Manager) ownedByLivePeer(job Job) bool {
+	if m == nil {
+		return false
+	}
+	owner := strings.TrimSpace(job.OwnerInstanceID)
+	if owner == "" || owner == m.instanceID {
+		return false
+	}
+	return job.LeaseExpiresAt != nil && !job.LeaseExpiresAt.IsZero() && time.Now().UTC().Before(*job.LeaseExpiresAt)
+}
+
+// adoptStoredJob replaces the local view with the persisted row (status,
+// timestamps, metadata, version). It is how a losing writer converges on the
+// authoritative terminal state, and how the dispatcher drops jobs it no longer
+// owns.
+func (m *Manager) adoptStoredJob(managed *managedJob, stored Job) {
+	if managed == nil {
+		return
+	}
+	managed.mu.Lock()
+	managed.info.Status = stored.Status
+	managed.info.Message = stored.Message
+	managed.info.FinishedAt = stored.FinishedAt
+	managed.info.ExitCode = stored.ExitCode
+	managed.info.StateVersion = stored.StateVersion
+	managed.info.OwnerInstanceID = stored.OwnerInstanceID
+	managed.info.LeaseExpiresAt = stored.LeaseExpiresAt
+	managed.info.QueuedAt = stored.QueuedAt
+	managed.info.DeadlineAt = stored.DeadlineAt
+	if managed.info.Metadata == nil {
+		managed.info.Metadata = map[string]interface{}{}
+	}
+	for key, value := range stored.Metadata {
+		managed.info.Metadata[key] = cloneJobMetadataValue(value)
+	}
+	if isTerminalStatus(stored.Status) {
+		managed.scheduled = false
+	}
+	managed.mu.Unlock()
+}
+
+// refreshFromStore re-reads the persisted row before dispatch and reports
+// whether this instance may still run the job. Terminal rows are adopted
+// locally; rows owned by another live instance, or past their queue deadline,
+// are dropped or expired (2026-09-28).
+func (m *Manager) refreshFromStore(managed *managedJob) bool {
+	if managed == nil || m == nil {
+		return false
+	}
+	if m.store == nil {
+		if m.deadlinePassed(managed) {
+			m.expireQueuedJob(managed)
+			return false
+		}
+		return true
+	}
+	snapshot := managed.snapshot()
+	if snapshot == nil {
+		return false
+	}
+	stored, err := m.store.GetJob(context.Background(), snapshot.ID)
+	if err != nil || stored == nil {
+		return false
+	}
+	if isTerminalStatus(stored.Status) {
+		m.adoptStoredJob(managed, *stored)
+		return false
+	}
+	if owner := strings.TrimSpace(stored.OwnerInstanceID); owner != "" && owner != m.instanceID {
+		// Another instance owns this job (for example an opted-in recovery
+		// picked it up first): drop the local handle instead of racing it.
+		m.adoptStoredJob(managed, *stored)
+		return false
+	}
+	if stored.DeadlineAt != nil && !stored.DeadlineAt.IsZero() && time.Now().UTC().After(*stored.DeadlineAt) {
+		m.expireQueuedJob(managed)
+		return false
+	}
+	managed.mu.Lock()
+	managed.info.StateVersion = stored.StateVersion
+	managed.mu.Unlock()
+	return true
+}
+
+func (m *Manager) deadlinePassed(managed *managedJob) bool {
+	if managed == nil {
+		return false
+	}
+	managed.mu.RLock()
+	deadline := managed.info.DeadlineAt
+	managed.mu.RUnlock()
+	return deadline != nil && !deadline.IsZero() && time.Now().UTC().After(*deadline)
+}
+
+// expireQueuedJob marks a pending job that outlived its queue deadline as
+// terminal "expired" (2026-09-28): bounded queues never leave jobs pending
+// forever.
+func (m *Manager) expireQueuedJob(managed *managedJob) {
+	if managed == nil {
+		return
+	}
+	finishedAt := time.Now().UTC()
+	managed.mu.Lock()
+	if isTerminalStatus(managed.info.Status) {
+		managed.scheduled = false
+		managed.mu.Unlock()
+		return
+	}
+	// A dispatched job that is still starting (scheduled) has left the queue:
+	// the queue deadline no longer applies to it (2026-09-28).
+	if managed.scheduled {
+		managed.mu.Unlock()
+		return
+	}
+	managed.scheduled = false
+	managed.info.Status = StatusExpired
+	managed.info.Message = "queue deadline exceeded; job was never dispatched"
+	managed.info.ExitCode = nil
+	managed.info.FinishedAt = &finishedAt
+	managed.mu.Unlock()
+	m.persistJobStateCAS(managed)
+	if !m.terminalTransitionVisible(managed, StatusExpired) {
+		m.notifyDispatcher()
+		return
+	}
+	m.appendJobEvent(context.Background(), managed.info.ID, "expired", map[string]interface{}{
+		"status": StatusExpired,
+		"reason": "queue deadline exceeded",
+	})
+	m.notifyDispatcher()
+}
+
+// expireStoredJob expires a persisted pending job without loading it into
+// memory (startup recovery path).
+func (m *Manager) expireStoredJob(ctx context.Context, job Job) bool {
+	if m == nil || m.store == nil || isTerminalStatus(job.Status) {
+		return false
+	}
+	if job.DeadlineAt == nil || job.DeadlineAt.IsZero() || !time.Now().UTC().After(*job.DeadlineAt) {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	finishedAt := time.Now().UTC()
+	updated := job
+	updated.Status = StatusExpired
+	updated.Message = "queue deadline exceeded; job was never dispatched"
+	updated.ExitCode = nil
+	updated.FinishedAt = &finishedAt
+	ok, err := m.updateStoredJobCAS(ctx, updated, job.StateVersion)
+	if err != nil || !ok {
+		return false
+	}
+	m.appendJobEvent(ctx, job.ID, "expired", map[string]interface{}{
+		"status": StatusExpired,
+		"reason": "queue deadline exceeded",
+	})
+	return true
+}
+
+// expireOverdueQueuedJobs expires in-memory pending jobs past their deadline;
+// it runs on the watchdog tick so jobs blocked by a saturated queue still reach
+// a terminal state.
+func (m *Manager) expireOverdueQueuedJobs() {
+	if m == nil {
+		return
+	}
+	now := time.Now().UTC()
+	overdue := make([]*managedJob, 0)
+	m.mu.RLock()
+	for _, managed := range m.jobs {
+		if managed == nil {
+			continue
+		}
+		managed.mu.RLock()
+		status := managed.info.Status
+		scheduled := managed.scheduled
+		deadline := managed.info.DeadlineAt
+		managed.mu.RUnlock()
+		if status != StatusPending || scheduled || deadline == nil || deadline.IsZero() {
+			continue
+		}
+		if now.After(*deadline) {
+			overdue = append(overdue, managed)
+		}
+	}
+	m.mu.RUnlock()
+	for _, managed := range overdue {
+		m.expireQueuedJob(managed)
 	}
 }
 
@@ -955,8 +1463,10 @@ func (m *Manager) completeJobWithMessage(managed *managedJob, exitCode int, mess
 	// Finished processes are never hard tool failures; drop any stale error_code.
 	delete(managed.info.Metadata, "error_code")
 	managed.mu.Unlock()
-	if m.store != nil {
-		_ = m.store.UpdateJob(context.Background(), managed.info)
+	m.persistJobStateCAS(managed)
+	if !m.terminalTransitionVisible(managed, StatusCompleted) {
+		m.notifyDispatcher()
+		return
 	}
 	m.appendJobEvent(context.Background(), managed.info.ID, "completed", map[string]interface{}{
 		"status":    managed.info.Status,
@@ -1006,8 +1516,10 @@ func (m *Manager) failJobWithCodeAndError(managed *managedJob, exitCode int, cod
 		managed.info.Metadata[backgroundMetaLaunchState] = launchStateFailed
 	}
 	managed.mu.Unlock()
-	if m.store != nil {
-		_ = m.store.UpdateJob(context.Background(), managed.info)
+	m.persistJobStateCAS(managed)
+	if !m.terminalTransitionVisible(managed, StatusFailed) {
+		m.notifyDispatcher()
+		return
 	}
 	m.appendJobEvent(context.Background(), managed.info.ID, "failed", map[string]interface{}{
 		"status":     managed.info.Status,
@@ -1040,8 +1552,10 @@ func (m *Manager) markTimedOut(managed *managedJob, message string) {
 	}
 	managed.info.Metadata["error_code"] = string(runtimeerrors.ErrToolTimeout)
 	managed.mu.Unlock()
-	if m.store != nil {
-		_ = m.store.UpdateJob(context.Background(), managed.info)
+	m.persistJobStateCAS(managed)
+	if !m.terminalTransitionVisible(managed, StatusTimedOut) {
+		m.notifyDispatcher()
+		return
 	}
 	m.appendJobEvent(context.Background(), managed.info.ID, "timed_out", map[string]interface{}{
 		"status":     managed.info.Status,
@@ -1076,8 +1590,10 @@ func (m *Manager) orphanJob(managed *managedJob, message string) {
 	}
 	managed.info.Metadata["error_code"] = string(runtimeerrors.ErrProcessHealthcheck)
 	managed.mu.Unlock()
-	if m.store != nil {
-		_ = m.store.UpdateJob(context.Background(), managed.info)
+	m.persistJobStateCAS(managed)
+	if !m.terminalTransitionVisible(managed, StatusOrphaned) {
+		m.notifyDispatcher()
+		return
 	}
 	m.appendJobEvent(context.Background(), managed.info.ID, "orphaned", map[string]interface{}{
 		"status":     StatusOrphaned,
@@ -1124,9 +1640,16 @@ func (m *Manager) markCancelled(ctx context.Context, managed *managedJob, reason
 	if _, exists := managed.info.Metadata["cancel_source"]; !exists {
 		managed.info.Metadata["cancel_source"] = "parent_context"
 	}
+	// Cancellation is final: drop any scheduled recovery so a later recovery
+	// pass cannot resurrect the job (2026-09-28).
+	for _, key := range []string{backgroundMetaRecoveryAttempt, backgroundMetaRecoveryMax, backgroundMetaNextRecoveryAt, "recovery_reason"} {
+		delete(managed.info.Metadata, key)
+	}
 	managed.mu.Unlock()
-	if m.store != nil {
-		_ = m.store.UpdateJob(context.Background(), managed.info)
+	m.persistJobStateCAS(managed)
+	if !m.terminalTransitionVisible(managed, StatusCancelled) {
+		m.notifyDispatcher()
+		return
 	}
 	m.appendJobEvent(context.Background(), managed.info.ID, "cancelled", map[string]interface{}{
 		"status":        managed.info.Status,
@@ -1207,6 +1730,13 @@ func (m *Manager) dispatchLoop() {
 		watchdog = watchdogTicker.C
 		defer watchdogTicker.Stop()
 	}
+	var heartbeatTicker *time.Ticker
+	var heartbeat <-chan time.Time
+	if m.config.HeartbeatInterval > 0 {
+		heartbeatTicker = time.NewTicker(m.config.HeartbeatInterval)
+		heartbeat = heartbeatTicker.C
+		defer heartbeatTicker.Stop()
+	}
 	for {
 		select {
 		case <-m.stopCh:
@@ -1215,6 +1745,9 @@ func (m *Manager) dispatchLoop() {
 			m.dispatchPendingSafely()
 		case <-watchdog:
 			m.reclaimStuckScheduled()
+			m.expireOverdueQueuedJobs()
+		case <-heartbeat:
+			m.heartbeatInstance(context.Background())
 		case <-cleanup:
 			_, _ = m.Cleanup(context.Background())
 		}
@@ -1285,6 +1818,11 @@ func (m *Manager) dispatchPending() {
 		for _, managed := range pending {
 			if capacity <= 0 {
 				break
+			}
+			// Re-read the shared row right before dispatch: a job cancelled or
+			// claimed elsewhere must not start here (2026-09-28).
+			if !m.refreshFromStore(managed) {
+				continue
 			}
 			if !m.markScheduled(managed) {
 				continue
@@ -1389,13 +1927,25 @@ func (m *Manager) jobQueueDiagnostics(jobID string) (queuePosition, active, maxC
 // pendingQueueDiagnostics builds the caller-facing guidance for a job that is
 // still pending, so LLM/tool callers can distinguish normal queuing from a
 // saturated or recovering queue instead of guessing.
-func (m *Manager) pendingQueueDiagnostics(queuePosition, active, maxConcurrent int, metadata map[string]interface{}) TaskOutputResult {
+func (m *Manager) pendingQueueDiagnostics(queuePosition, active, maxConcurrent int, job Job) TaskOutputResult {
 	diag := TaskOutputResult{
 		QueuePosition: queuePosition,
 		ActiveJobs:    active,
 		MaxConcurrent: maxConcurrent,
 	}
-	if _, recovering := stringMetadataValue(metadata, backgroundMetaNextRecoveryAt); recovering && queuePosition == 0 {
+	if job.QueuedAt != nil && !job.QueuedAt.IsZero() {
+		diag.QueuedAt = job.QueuedAt.UTC().Format(time.RFC3339Nano)
+	}
+	deadlineNote := ""
+	if job.DeadlineAt != nil && !job.DeadlineAt.IsZero() {
+		diag.DeadlineAt = job.DeadlineAt.UTC().Format(time.RFC3339Nano)
+		if remaining := time.Until(*job.DeadlineAt); remaining > 0 {
+			deadlineNote = fmt.Sprintf(" (queue deadline in %s)", remaining.Round(time.Second))
+		} else {
+			deadlineNote = " (queue deadline exceeded; the job is about to expire)"
+		}
+	}
+	if _, recovering := stringMetadataValue(job.Metadata, backgroundMetaNextRecoveryAt); recovering && queuePosition == 0 {
 		diag.SchedulerState = "recovering"
 		diag.NextAction = "job is in automatic recovery backoff; wait for recovery or query again after next_recovery_at"
 		return diag
@@ -1403,13 +1953,13 @@ func (m *Manager) pendingQueueDiagnostics(queuePosition, active, maxConcurrent i
 	switch {
 	case maxConcurrent > 0 && active >= maxConcurrent:
 		diag.SchedulerState = "saturated"
-		diag.NextAction = fmt.Sprintf("queue saturated: %d/%d slots active; wait for a slot to free or cancel a stuck job", active, maxConcurrent)
+		diag.NextAction = fmt.Sprintf("queue saturated: %d/%d slots active; wait for a slot to free or cancel a stuck job%s", active, maxConcurrent, deadlineNote)
 	case queuePosition > 1:
 		diag.SchedulerState = "queued"
-		diag.NextAction = fmt.Sprintf("job queued at position %d; retry task_output shortly", queuePosition)
+		diag.NextAction = fmt.Sprintf("job queued at position %d; retry task_output shortly%s", queuePosition, deadlineNote)
 	default:
 		diag.SchedulerState = "dispatched"
-		diag.NextAction = "job is next in line or starting; retry task_output shortly"
+		diag.NextAction = "job is next in line or starting; retry task_output shortly" + deadlineNote
 	}
 	return diag
 }
@@ -1540,37 +2090,28 @@ func (m *Manager) recoverPersistedJobs(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	// Register only when the shared store actually opened (an existing file);
+	// unused managers must keep bootstrap side-effect free.
+	if opener, ok := m.store.(interface{ Opened() bool }); !ok || opener.Opened() {
+		m.ensureInstanceRegistered(ctx)
+	}
 	for i := len(jobs) - 1; i >= 0; i-- {
 		job := jobs[i]
+		if m.ownedByLivePeer(job) {
+			// Another runtime instance still heartbeats this job: leave it
+			// alone instead of racing it (2026-09-28).
+			continue
+		}
 		switch job.Status {
 		case StatusPending:
-			managed := m.managedJobFromStored(job)
-			if managed == nil {
-				continue
-			}
-			m.mu.Lock()
-			if _, exists := m.jobs[job.ID]; !exists {
-				m.jobs[job.ID] = managed
-			}
-			m.mu.Unlock()
-			m.appendJobEvent(context.Background(), job.ID, "recovered_queued", map[string]interface{}{
-				"status":          StatusPending,
-				"previous_status": StatusPending,
-			})
-		case StatusRunning:
-			if m.recoverDetachedRunningJob(job) {
-				continue
-			}
-			req := requestFromJob(job)
-			if normalizeRestartPolicy(req.RestartPolicy) == RestartPolicyRerun {
-				recovered := job
-				recovered.RestartPolicy = RestartPolicyRerun
-				if recovered.Metadata == nil {
-					recovered.Metadata = map[string]interface{}{}
+			if m.config.RecoverPendingOnStart || strings.TrimSpace(job.OwnerInstanceID) == m.instanceID {
+				if m.expireStoredJob(ctx, job) {
+					continue
 				}
-				reason := "background manager restarted before the detached process outcome was recorded"
-				recovered.Metadata["recovery_reason"] = reason
-				managed := m.managedJobFromStored(recovered)
+				// Explicit opt-in (legacy behavior): re-queue pending jobs on
+				// startup. Off by default — startup must not resurrect work
+				// whose owning process is gone (2026-09-28).
+				managed := m.managedJobFromStored(job)
 				if managed == nil {
 					continue
 				}
@@ -1579,31 +2120,23 @@ func (m *Manager) recoverPersistedJobs(ctx context.Context) {
 					m.jobs[job.ID] = managed
 				}
 				m.mu.Unlock()
-				m.jobWG.Add(1)
-				go func(jobID string, recoveredJob *managedJob, recoveryReason string) {
-					defer m.jobWG.Done()
-					recoveryQueued := m.resumeDetachedRecovery(recoveredJob, recoveryReason)
-					if !recoveryQueued {
-						recoveryQueued = m.scheduleDetachedRecovery(recoveredJob, "manager_restarted", recoveryReason)
-					}
-					if !recoveryQueued {
-						m.orphanJob(recoveredJob, "automatic recovery attempts exhausted after background manager restart")
-						return
-					}
-					current := recoveredJob.snapshot()
-					if current == nil || current.Status != StatusPending {
-						return
-					}
-					m.appendJobEvent(context.Background(), jobID, "recovered_requeued", map[string]interface{}{
-						"status":          current.Status,
-						"previous_status": StatusRunning,
-						"restart_policy":  string(RestartPolicyRerun),
-					})
-				}(job.ID, managed, reason)
+				m.appendJobEvent(context.Background(), job.ID, "recovered_queued", map[string]interface{}{
+					"status":          StatusPending,
+					"previous_status": StatusPending,
+				})
 				continue
 			}
+			m.interruptStoredJob(context.Background(), job, "owner process gone; not auto-resumed")
+		case StatusRunning:
+			if m.recoverDetachedRunningJob(job) {
+				continue
+			}
+			// The recorded process is gone. Rerun policy no longer re-queues on
+			// restart: a job whose owner died (or that was cancelled) must not
+			// be resurrected by the next instance that opens the store
+			// (2026-09-28). Callers can re-submit explicitly instead.
 			recovered := job
-			recovered.RestartPolicy = normalizeRestartPolicy(req.RestartPolicy)
+			recovered.RestartPolicy = normalizeRestartPolicy(requestFromJob(job).RestartPolicy)
 			if recovered.Metadata == nil {
 				recovered.Metadata = map[string]interface{}{}
 			}
@@ -1620,6 +2153,40 @@ func (m *Manager) recoverPersistedJobs(ctx context.Context) {
 			m.orphanJob(managed, "background manager restarted before job outcome was recorded")
 		}
 	}
+}
+
+// interruptStoredJob marks a persisted pending job as interrupted instead of
+// re-queueing it. Startup recovery must never resurrect work from a process
+// that is gone (2026-09-28: pending jobs sat for days and then ran en masse on
+// the next aicli start).
+func (m *Manager) interruptStoredJob(ctx context.Context, job Job, message string) {
+	if m == nil || m.store == nil || isTerminalStatus(job.Status) {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	finishedAt := time.Now().UTC()
+	updated := job
+	updated.Status = StatusInterrupted
+	updated.Message = strings.TrimSpace(message)
+	updated.ExitCode = nil
+	updated.FinishedAt = &finishedAt
+	if updated.Metadata == nil {
+		updated.Metadata = map[string]interface{}{}
+	}
+	for _, key := range []string{backgroundMetaRecoveryAttempt, backgroundMetaRecoveryMax, backgroundMetaNextRecoveryAt, "recovery_reason"} {
+		delete(updated.Metadata, key)
+	}
+	ok, err := m.updateStoredJobCAS(ctx, updated, job.StateVersion)
+	if err != nil || !ok {
+		return
+	}
+	m.appendJobEvent(ctx, job.ID, "recovered_pending_ignored", map[string]interface{}{
+		"status":          StatusInterrupted,
+		"previous_status": StatusPending,
+		"reason":          strings.TrimSpace(message),
+	})
 }
 
 func (m *Manager) managedJobFromStored(job Job) *managedJob {
@@ -1845,6 +2412,12 @@ func decorateTaskOutputResult(result TaskOutputResult, job Job) TaskOutputResult
 	if value, ok := stringMetadataValue(job.Metadata, backgroundMetaHealthcheckError); ok {
 		result.HealthcheckError = value
 	}
+	if job.QueuedAt != nil && !job.QueuedAt.IsZero() {
+		result.QueuedAt = job.QueuedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if job.DeadlineAt != nil && !job.DeadlineAt.IsZero() {
+		result.DeadlineAt = job.DeadlineAt.UTC().Format(time.RFC3339Nano)
+	}
 	decorateTaskOutputHealth(&result, job, time.Now().UTC())
 	return result
 }
@@ -2000,7 +2573,8 @@ func finishedProcessExitCode(err error) (int, bool) {
 // transition will happen, so readers can stop waiting.
 func IsTerminalStatus(status JobStatus) bool {
 	switch status {
-	case StatusCompleted, StatusFailed, StatusTimedOut, StatusCancelled, StatusOrphaned:
+	case StatusCompleted, StatusFailed, StatusTimedOut, StatusCancelled, StatusOrphaned,
+		StatusInterrupted, StatusExpired, StatusAbandoned:
 		return true
 	default:
 		return false

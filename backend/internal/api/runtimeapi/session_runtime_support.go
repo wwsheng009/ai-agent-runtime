@@ -2141,6 +2141,11 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 // 绝不丢输入也绝不谎报账本）。
 func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
 	obligations, baseline, pending, budgetKey := c.waitLedger(ctx)
+	if len(obligations) == 0 {
+		// doc1 §7.9 剩余②：无挂起记录（未托管 / 已 resume / 非 durable 降级）时，
+		// 按调用方显式等待的目标从批次账本直出，obligations[] 不再缺省。
+		obligations, baseline, pending = c.waitTargetObligations(ctx, args)
+	}
 	waitBudgetLimit := c.agentsConfig().MaxConsecutiveWaitWithoutProgress
 	if len(obligations) > 0 && !pending {
 		c.waitBudget().Reset(budgetKey)
@@ -2299,6 +2304,13 @@ func (c *sessionAgentController) waitLedger(ctx context.Context) ([]toolbroker.A
 	if err != nil || len(rows) == 0 {
 		return nil, nil, false, ""
 	}
+	obligations, baseline, pending := waitObligationsFromRows(rows)
+	return obligations, baseline, pending, sessionID + "|" + turnID
+}
+
+// waitObligationsFromRows 把账本行渲染成工具面契约的 obligations[] 视图；挂起路径
+// 与"直出"路径共用同一渲染，行形状（含 terminal/baseline 判定）不会漂移。
+func waitObligationsFromRows(rows []subagentbatch.WaitLedgerRow) ([]toolbroker.AgentWaitObligation, []string, bool) {
 	obligations := make([]toolbroker.AgentWaitObligation, 0, len(rows))
 	baseline := make([]string, 0, len(rows))
 	pending := false
@@ -2320,7 +2332,75 @@ func (c *sessionAgentController) waitLedger(ctx context.Context) ([]toolbroker.A
 			pending = true
 		}
 	}
-	return obligations, baseline, pending, sessionID + "|" + turnID
+	return obligations, baseline, pending
+}
+
+// waitTargetObligations 在"无挂起记录"场景下把调用方显式等待的目标直接投影成
+// obligations[]（doc1 §7.9 剩余②）：每个目标（batch id / task id / 子会话 id）
+// 先映射到它所属的批次，再走与挂起路径同源的 BuildWaitLedger——账本读数仍来自
+// 控制面，不新增存储、不臆造行。只覆盖调用方 wait 的目标，不扫描会话全部批次
+// （避免把"没在等"的后台批次变成 I1 义务）。预算键有意保持为空：直出行没有
+// 挂起 turn 可挂靠，预算仍 fail-open 不武装（与 I9 的降级方向一致）；账本读
+// 失败同样 fail-open，不把原本可用的等待窗口变成本次调用的错误。
+func (c *sessionAgentController) waitTargetObligations(ctx context.Context, args toolbroker.WaitAgentArgs) ([]toolbroker.AgentWaitObligation, []string, bool) {
+	if c == nil || c.handler == nil {
+		return nil, nil, false
+	}
+	ids := normalizeAgentWaitIDs(args)
+	if len(ids) == 0 {
+		return nil, nil, false
+	}
+	store := c.handler.peekSubagentBatchStore()
+	if store == nil {
+		return nil, nil, false
+	}
+	parentSessionID := strings.TrimSpace(toolctx.SessionID(ctx))
+	if parentSessionID == "" {
+		return nil, nil, false
+	}
+	batchIDs := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	add := func(batchID string) {
+		batchID = strings.TrimSpace(batchID)
+		if batchID == "" {
+			return
+		}
+		if _, exists := seen[batchID]; exists {
+			return
+		}
+		seen[batchID] = struct{}{}
+		batchIDs = append(batchIDs, batchID)
+	}
+	for _, id := range ids {
+		if batch, ok, err := subagentbatch.FindBatchByIDInParentSession(ctx, store, parentSessionID, id); err != nil {
+			return nil, nil, false
+		} else if ok {
+			add(batch.BatchID)
+			continue
+		}
+		if _, batchID, ok, err := subagentbatch.FindTaskByIDInParentSession(ctx, store, parentSessionID, id); err != nil {
+			return nil, nil, false
+		} else if ok {
+			add(batchID)
+			continue
+		}
+		if _, batchID, ok, err := subagentbatch.FindTaskByChildSessionIDInParentSession(ctx, store, parentSessionID, id); err != nil {
+			return nil, nil, false
+		} else if ok {
+			add(batchID)
+		}
+	}
+	if len(batchIDs) == 0 {
+		return nil, nil, false
+	}
+	rows, err := subagentbatch.BuildWaitLedger(ctx, store, &subagentbatch.TurnSuspension{
+		SessionID:   parentSessionID,
+		ResumeQueue: batchIDs,
+	})
+	if err != nil || len(rows) == 0 {
+		return nil, nil, false
+	}
+	return waitObligationsFromRows(rows)
 }
 
 func (c *sessionAgentController) waitForAgentStatus(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {

@@ -443,8 +443,16 @@ func (m *Manager) scheduleDetachedRecovery(managed *managedJob, reason, message 
 	snapshot := managed.info
 	managed.mu.Unlock()
 
-	if m.store != nil {
-		_ = m.store.UpdateJob(context.Background(), snapshot)
+	if !m.persistJobStateCAS(managed) {
+		// A concurrent writer (typically a cancel from another instance that
+		// shares the store) finalized the job; do not schedule further
+		// recovery (2026-09-28).
+		managed.mu.RLock()
+		terminal := isTerminalStatus(managed.info.Status)
+		managed.mu.RUnlock()
+		if terminal {
+			return true
+		}
 	}
 	m.appendJobEvent(context.Background(), snapshot.ID, "recovery_scheduled", map[string]interface{}{
 		"attempt":          attempt,
@@ -485,6 +493,16 @@ func (m *Manager) waitAndQueueDetachedRecovery(managed *managedJob, attempt int,
 	managed.info.StartedAt = nil
 	managed.info.FinishedAt = nil
 	managed.info.ExitCode = nil
+	// A requeued job gets a fresh queue window; otherwise a stale deadline
+	// would expire it the moment it returns to the queue (2026-09-28).
+	queuedAt := time.Now().UTC()
+	managed.info.QueuedAt = &queuedAt
+	if m.config.QueueTimeout > 0 {
+		deadline := queuedAt.Add(m.config.QueueTimeout)
+		managed.info.DeadlineAt = &deadline
+	} else {
+		managed.info.DeadlineAt = nil
+	}
 	managed.info.Message = fmt.Sprintf("automatic recovery %d queued", attempt)
 	managed.scheduled = false
 	delete(managed.info.Metadata, backgroundMetaPID)
@@ -495,8 +513,13 @@ func (m *Manager) waitAndQueueDetachedRecovery(managed *managedJob, attempt int,
 	snapshot := managed.info
 	managed.mu.Unlock()
 
-	if m.store != nil {
-		_ = m.store.UpdateJob(context.Background(), snapshot)
+	if !m.persistJobStateCAS(managed) {
+		managed.mu.RLock()
+		terminal := isTerminalStatus(managed.info.Status)
+		managed.mu.RUnlock()
+		if terminal {
+			return true
+		}
 	}
 	m.appendJobEvent(context.Background(), snapshot.ID, "recovery_queued", map[string]interface{}{
 		"attempt": attempt,
@@ -527,8 +550,13 @@ func (m *Manager) resumeDetachedRecovery(managed *managedJob, reason string) boo
 	snapshot := managed.info
 	managed.mu.Unlock()
 
-	if m.store != nil {
-		_ = m.store.UpdateJob(context.Background(), snapshot)
+	if !m.persistJobStateCAS(managed) {
+		managed.mu.RLock()
+		terminal := isTerminalStatus(managed.info.Status)
+		managed.mu.RUnlock()
+		if terminal {
+			return true
+		}
 	}
 	m.appendJobEvent(context.Background(), snapshot.ID, "recovery_resumed", map[string]interface{}{
 		"attempt":          attempt,

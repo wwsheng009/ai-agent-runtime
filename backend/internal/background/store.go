@@ -234,6 +234,81 @@ func (s *SQLiteStore) UpdateJob(ctx context.Context, job Job) error {
 	return s.upsertJob(ctx, job)
 }
 
+// terminalStatusesSQL lists the statuses that absorb writes: once a row is
+// terminal no further state transition is allowed (P0, 2026-09-28). It is
+// shared by UpdateJobCAS and mirrors IsTerminalStatus.
+const terminalStatusesSQL = "'completed','failed','cancelled','timed_out','orphaned','interrupted','expired','abandoned'"
+
+// UpdateJobCAS persists job only when the stored row still carries
+// expectedVersion and has not reached a terminal status. It reports whether the
+// write landed; callers must re-read the store when it did not. This is the
+// optimistic-concurrency guard that keeps a stale writer (another manager
+// instance sharing the database, or a racing goroutine) from overwriting a
+// terminal state such as cancelled with orphaned/completed (2026-09-28).
+func (s *SQLiteStore) UpdateJobCAS(ctx context.Context, job Job, expectedVersion int64) (bool, error) {
+	if s == nil {
+		return false, fmt.Errorf("background store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(job.ID) == "" {
+		return false, fmt.Errorf("job id is required")
+	}
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = time.Now().UTC()
+	}
+	metadataJSON := "{}"
+	if len(job.Metadata) > 0 {
+		payload, err := json.Marshal(job.Metadata)
+		if err != nil {
+			return false, fmt.Errorf("marshal job metadata: %w", err)
+		}
+		metadataJSON = string(payload)
+	}
+	kind := strings.TrimSpace(job.Kind)
+	if kind == "" {
+		kind = "unknown"
+	}
+	sessionID := strings.TrimSpace(job.SessionID)
+	result, err := s.db.ExecContext(ctx, `
+        UPDATE background_jobs SET
+            session_id = ?, kind = ?, status = ?, message = ?, command = ?, cwd = ?,
+            priority = ?, created_at = ?, started_at = ?, finished_at = ?, exit_code = ?,
+            log_path = ?, metadata_json = ?, state_version = state_version + 1,
+            owner_instance_id = ?, lease_expires_at = ?, queued_at = ?, deadline_at = ?
+        WHERE id = ? AND state_version = ? AND status NOT IN (`+terminalStatusesSQL+`)
+    `,
+		sessionID,
+		kind,
+		string(job.Status),
+		nullIfEmpty(job.Message),
+		nullIfEmpty(job.Command),
+		nullIfEmpty(job.Cwd),
+		job.Priority,
+		job.CreatedAt.Format(time.RFC3339Nano),
+		formatTimePtr(job.StartedAt),
+		formatTimePtr(job.FinishedAt),
+		job.ExitCode,
+		nullIfEmpty(job.LogPath),
+		metadataJSON,
+		nullIfEmpty(job.OwnerInstanceID),
+		formatTimePtr(job.LeaseExpiresAt),
+		formatTimePtr(job.QueuedAt),
+		formatTimePtr(job.DeadlineAt),
+		job.ID,
+		expectedVersion,
+	)
+	if err != nil {
+		return false, fmt.Errorf("update background job (cas): %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("update background job (cas) rows affected: %w", err)
+	}
+	return affected > 0, nil
+}
+
 func (s *SQLiteStore) upsertJob(ctx context.Context, job Job) error {
 	if s == nil {
 		return fmt.Errorf("background store is not initialized")
@@ -263,8 +338,9 @@ func (s *SQLiteStore) upsertJob(ctx context.Context, job Job) error {
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO background_jobs (
             id, session_id, kind, status, message, command, cwd, priority, created_at,
-            started_at, finished_at, exit_code, log_path, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            started_at, finished_at, exit_code, log_path, metadata_json, state_version,
+            owner_instance_id, lease_expires_at, queued_at, deadline_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             session_id = excluded.session_id,
             kind = excluded.kind,
@@ -278,7 +354,12 @@ func (s *SQLiteStore) upsertJob(ctx context.Context, job Job) error {
             finished_at = excluded.finished_at,
             exit_code = excluded.exit_code,
             log_path = excluded.log_path,
-            metadata_json = excluded.metadata_json
+            metadata_json = excluded.metadata_json,
+            state_version = excluded.state_version,
+            owner_instance_id = excluded.owner_instance_id,
+            lease_expires_at = excluded.lease_expires_at,
+            queued_at = excluded.queued_at,
+            deadline_at = excluded.deadline_at
     `,
 		job.ID,
 		sessionID,
@@ -294,6 +375,11 @@ func (s *SQLiteStore) upsertJob(ctx context.Context, job Job) error {
 		job.ExitCode,
 		nullIfEmpty(job.LogPath),
 		metadataJSON,
+		job.StateVersion,
+		nullIfEmpty(job.OwnerInstanceID),
+		formatTimePtr(job.LeaseExpiresAt),
+		formatTimePtr(job.QueuedAt),
+		formatTimePtr(job.DeadlineAt),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert background job: %w", err)
@@ -315,25 +401,30 @@ func (s *SQLiteStore) GetJob(ctx context.Context, jobID string) (*Job, error) {
 	}
 	row := s.db.QueryRowContext(ctx, `
         SELECT id, session_id, kind, status, message, command, cwd, priority, created_at,
-               started_at, finished_at, exit_code, log_path, metadata_json
+               started_at, finished_at, exit_code, log_path, metadata_json, state_version,
+               owner_instance_id, lease_expires_at, queued_at, deadline_at
         FROM background_jobs
         WHERE id = ?
     `, jobID)
 
 	var (
-		job           Job
-		statusRaw     string
-		messageRaw    sql.NullString
-		createdAtRaw  string
-		startedAtRaw  sql.NullString
-		finishedAtRaw sql.NullString
-		sessionIDRaw  sql.NullString
-		kindRaw       sql.NullString
-		commandRaw    sql.NullString
-		cwdRaw        sql.NullString
-		logPathRaw    sql.NullString
-		metadataJSON  string
-		exitCodeRaw   sql.NullInt64
+		job              Job
+		statusRaw        string
+		messageRaw       sql.NullString
+		createdAtRaw     string
+		startedAtRaw     sql.NullString
+		finishedAtRaw    sql.NullString
+		sessionIDRaw     sql.NullString
+		kindRaw          sql.NullString
+		commandRaw       sql.NullString
+		cwdRaw           sql.NullString
+		logPathRaw       sql.NullString
+		metadataJSON     string
+		exitCodeRaw      sql.NullInt64
+		ownerInstanceRaw sql.NullString
+		leaseRaw         sql.NullString
+		queuedAtRaw      sql.NullString
+		deadlineRaw      sql.NullString
 	)
 	if err := row.Scan(
 		&job.ID,
@@ -350,6 +441,11 @@ func (s *SQLiteStore) GetJob(ctx context.Context, jobID string) (*Job, error) {
 		&exitCodeRaw,
 		&logPathRaw,
 		&metadataJSON,
+		&job.StateVersion,
+		&ownerInstanceRaw,
+		&leaseRaw,
+		&queuedAtRaw,
+		&deadlineRaw,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -396,6 +492,12 @@ func (s *SQLiteStore) GetJob(ctx context.Context, jobID string) (*Job, error) {
 	if metadataJSON != "" {
 		_ = json.Unmarshal([]byte(metadataJSON), &job.Metadata)
 	}
+	if ownerInstanceRaw.Valid {
+		job.OwnerInstanceID = ownerInstanceRaw.String
+	}
+	job.LeaseExpiresAt = parseTimePtr(leaseRaw)
+	job.QueuedAt = parseTimePtr(queuedAtRaw)
+	job.DeadlineAt = parseTimePtr(deadlineRaw)
 	job.RestartPolicy = normalizeLoadedRestartPolicy(job)
 
 	return &job, nil
@@ -440,7 +542,8 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, filter JobFilter) ([]Job, er
 
 	query := `
 		SELECT id, session_id, kind, status, message, command, cwd, priority, created_at,
-		       started_at, finished_at, exit_code, log_path, metadata_json
+		       started_at, finished_at, exit_code, log_path, metadata_json, state_version,
+		       owner_instance_id, lease_expires_at, queued_at, deadline_at
 		FROM background_jobs
 	`
 	if len(clauses) > 0 {
@@ -469,19 +572,23 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, filter JobFilter) ([]Job, er
 	jobs := make([]Job, 0)
 	for rows.Next() {
 		var (
-			job           Job
-			statusRaw     string
-			messageRaw    sql.NullString
-			createdAtRaw  string
-			startedAtRaw  sql.NullString
-			finishedAtRaw sql.NullString
-			sessionIDRaw  sql.NullString
-			kindRaw       sql.NullString
-			commandRaw    sql.NullString
-			cwdRaw        sql.NullString
-			logPathRaw    sql.NullString
-			metadataJSON  string
-			exitCodeRaw   sql.NullInt64
+			job              Job
+			statusRaw        string
+			messageRaw       sql.NullString
+			createdAtRaw     string
+			startedAtRaw     sql.NullString
+			finishedAtRaw    sql.NullString
+			sessionIDRaw     sql.NullString
+			kindRaw          sql.NullString
+			commandRaw       sql.NullString
+			cwdRaw           sql.NullString
+			logPathRaw       sql.NullString
+			metadataJSON     string
+			exitCodeRaw      sql.NullInt64
+			ownerInstanceRaw sql.NullString
+			leaseRaw         sql.NullString
+			queuedAtRaw      sql.NullString
+			deadlineRaw      sql.NullString
 		)
 		if err := rows.Scan(
 			&job.ID,
@@ -498,6 +605,11 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, filter JobFilter) ([]Job, er
 			&exitCodeRaw,
 			&logPathRaw,
 			&metadataJSON,
+			&job.StateVersion,
+			&ownerInstanceRaw,
+			&leaseRaw,
+			&queuedAtRaw,
+			&deadlineRaw,
 		); err != nil {
 			return nil, fmt.Errorf("scan background job: %w", err)
 		}
@@ -540,6 +652,12 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, filter JobFilter) ([]Job, er
 		if metadataJSON != "" {
 			_ = json.Unmarshal([]byte(metadataJSON), &job.Metadata)
 		}
+		if ownerInstanceRaw.Valid {
+			job.OwnerInstanceID = ownerInstanceRaw.String
+		}
+		job.LeaseExpiresAt = parseTimePtr(leaseRaw)
+		job.QueuedAt = parseTimePtr(queuedAtRaw)
+		job.DeadlineAt = parseTimePtr(deadlineRaw)
 		job.RestartPolicy = normalizeLoadedRestartPolicy(job)
 		jobs = append(jobs, job)
 	}
@@ -566,6 +684,7 @@ func (s *SQLiteStore) PruneJobs(ctx context.Context, before time.Time) ([]Job, e
 	}
 	candidates, err := s.ListJobs(ctx, JobFilter{Status: []JobStatus{
 		StatusCompleted, StatusFailed, StatusTimedOut, StatusCancelled, StatusOrphaned,
+		StatusInterrupted, StatusExpired, StatusAbandoned,
 	}})
 	if err != nil {
 		return nil, err
@@ -758,7 +877,40 @@ func (s *SQLiteStore) init(ctx context.Context) error {
     `); err != nil {
 		return fmt.Errorf("create background_job_events index: %w", err)
 	}
+	if _, err := s.db.ExecContext(ctx, `
+        CREATE TABLE IF NOT EXISTS runtime_instances (
+            instance_id TEXT PRIMARY KEY,
+            pid INTEGER,
+            host TEXT,
+            started_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            state TEXT NOT NULL
+        )
+    `); err != nil {
+		return fmt.Errorf("create runtime_instances table: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+        CREATE INDEX IF NOT EXISTS idx_runtime_instances_heartbeat
+        ON runtime_instances(heartbeat_at)
+    `); err != nil {
+		return fmt.Errorf("create runtime_instances index: %w", err)
+	}
 	if err := s.ensureBackgroundJobsColumn(ctx, "message", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureBackgroundJobsColumn(ctx, "state_version", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureBackgroundJobsColumn(ctx, "owner_instance_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureBackgroundJobsColumn(ctx, "lease_expires_at", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureBackgroundJobsColumn(ctx, "queued_at", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureBackgroundJobsColumn(ctx, "deadline_at", "TEXT"); err != nil {
 		return err
 	}
 	return nil
@@ -797,6 +949,153 @@ func (s *SQLiteStore) ensureBackgroundJobsColumn(ctx context.Context, columnName
 		return fmt.Errorf("alter background_jobs add %s: %w", columnName, err)
 	}
 	return nil
+}
+
+// UpsertRuntimeInstance registers a runtime instance or refreshes its
+// heartbeat.
+func (s *SQLiteStore) UpsertRuntimeInstance(ctx context.Context, instance RuntimeInstance) error {
+	if s == nil {
+		return fmt.Errorf("background store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
+	}
+	id := strings.TrimSpace(instance.ID)
+	if id == "" {
+		return fmt.Errorf("instance id is required")
+	}
+	state := strings.TrimSpace(instance.State)
+	if state == "" {
+		state = "running"
+	}
+	startedAt := instance.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	heartbeatAt := instance.HeartbeatAt
+	if heartbeatAt.IsZero() {
+		heartbeatAt = time.Now().UTC()
+	}
+	if _, err := s.db.ExecContext(ctx, `
+        INSERT INTO runtime_instances (instance_id, pid, host, started_at, heartbeat_at, state)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(instance_id) DO UPDATE SET
+            pid = excluded.pid,
+            host = excluded.host,
+            heartbeat_at = excluded.heartbeat_at,
+            state = excluded.state
+    `, id, instance.PID, nullIfEmpty(instance.Host), startedAt.UTC().Format(time.RFC3339Nano), heartbeatAt.UTC().Format(time.RFC3339Nano), state); err != nil {
+		return fmt.Errorf("upsert runtime instance: %w", err)
+	}
+	return nil
+}
+
+// MarkRuntimeInstanceStopped records a clean shutdown so peers stop treating
+// this instance's leases as live.
+func (s *SQLiteStore) MarkRuntimeInstanceStopped(ctx context.Context, instanceID string, at time.Time) error {
+	if s == nil {
+		return fmt.Errorf("background store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return err
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	if _, err := s.db.ExecContext(ctx, `
+        UPDATE runtime_instances SET state = 'stopped', heartbeat_at = ? WHERE instance_id = ?
+    `, at.UTC().Format(time.RFC3339Nano), strings.TrimSpace(instanceID)); err != nil {
+		return fmt.Errorf("mark runtime instance stopped: %w", err)
+	}
+	return nil
+}
+
+// RenewJobLeases extends the lease of every non-terminal job owned by owner.
+// Leases are deliberately not a state transition: state_version is untouched.
+func (s *SQLiteStore) RenewJobLeases(ctx context.Context, ownerInstanceID string, leaseExpiresAt time.Time) (int64, error) {
+	if s == nil {
+		return 0, fmt.Errorf("background store is not initialized")
+	}
+	if err := s.ensure(); err != nil {
+		return 0, err
+	}
+	owner := strings.TrimSpace(ownerInstanceID)
+	if owner == "" {
+		return 0, nil
+	}
+	result, err := s.db.ExecContext(ctx, `
+        UPDATE background_jobs SET lease_expires_at = ?
+        WHERE owner_instance_id = ? AND status NOT IN (`+terminalStatusesSQL+`)
+    `, leaseExpiresAt.UTC().Format(time.RFC3339Nano), owner)
+	if err != nil {
+		return 0, fmt.Errorf("renew background job leases: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("renew background job leases rows: %w", err)
+	}
+	return affected, nil
+}
+
+// ReleaseJobLeases marks every non-terminal job owned by owner as immediately
+// reclaimable (clean shutdown). It is modelled as an already-expired lease so
+// peers can recover the jobs without waiting out the TTL.
+func (s *SQLiteStore) ReleaseJobLeases(ctx context.Context, ownerInstanceID string, releasedAt time.Time) (int64, error) {
+	if releasedAt.IsZero() {
+		releasedAt = time.Now().UTC()
+	}
+	return s.RenewJobLeases(ctx, ownerInstanceID, releasedAt.Add(-time.Second))
+}
+
+// ListRuntimeInstances returns known runtime instances, newest heartbeat first.
+func (s *SQLiteStore) ListRuntimeInstances(ctx context.Context) ([]RuntimeInstance, error) {
+	if s == nil {
+		return nil, fmt.Errorf("background store is not initialized")
+	}
+	skipEmpty, err := s.ensureForRead()
+	if err != nil {
+		return nil, err
+	}
+	if skipEmpty {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT instance_id, pid, host, started_at, heartbeat_at, state
+        FROM runtime_instances ORDER BY heartbeat_at DESC
+    `)
+	if err != nil {
+		return nil, fmt.Errorf("list runtime instances: %w", err)
+	}
+	defer rows.Close()
+
+	instances := make([]RuntimeInstance, 0)
+	for rows.Next() {
+		var (
+			instance     RuntimeInstance
+			pidRaw       sql.NullInt64
+			hostRaw      sql.NullString
+			startedRaw   string
+			heartbeatRaw string
+			stateRaw     string
+		)
+		if err := rows.Scan(&instance.ID, &pidRaw, &hostRaw, &startedRaw, &heartbeatRaw, &stateRaw); err != nil {
+			return nil, fmt.Errorf("scan runtime instance: %w", err)
+		}
+		if pidRaw.Valid {
+			instance.PID = int(pidRaw.Int64)
+		}
+		if hostRaw.Valid {
+			instance.Host = hostRaw.String
+		}
+		instance.StartedAt, _ = time.Parse(time.RFC3339Nano, startedRaw)
+		instance.HeartbeatAt, _ = time.Parse(time.RFC3339Nano, heartbeatRaw)
+		instance.State = stateRaw
+		instances = append(instances, instance)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return instances, nil
 }
 
 func resolveLazyBackgroundDSN(cfg *StoreConfig) (string, string, error) {
@@ -852,6 +1151,19 @@ func formatTimePtr(value *time.Time) interface{} {
 		return nil
 	}
 	return value.UTC().Format(time.RFC3339Nano)
+}
+
+// parseTimePtr decodes an RFC3339Nano timestamp column; empty/invalid values
+// become nil so legacy rows keep working.
+func parseTimePtr(value sql.NullString) *time.Time {
+	if !value.Valid || strings.TrimSpace(value.String) == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value.String)
+	if err != nil {
+		return nil
+	}
+	return &parsed
 }
 
 func normalizeLoadedRestartPolicy(job Job) RestartPolicy {

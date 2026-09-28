@@ -145,3 +145,136 @@ func TestSQLiteStorePersistsJobsAndEventsAcrossReopen(t *testing.T) {
 	require.Len(t, eventsAfterFirst, 1)
 	require.Equal(t, "completed", eventsAfterFirst[0].Type)
 }
+
+func TestUpdateJobCASEnforcesVersionAndTerminalGuard(t *testing.T) {
+	ctx := context.Background()
+	storePath := filepath.Join(t.TempDir(), "runtime", "background.sqlite")
+
+	store, err := NewSQLiteStore(&StoreConfig{Path: storePath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	require.NoError(t, store.SaveJob(ctx, Job{
+		ID:        "job_cas",
+		SessionID: "session-cas",
+		Kind:      "shell",
+		Command:   "echo cas",
+		Status:    StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}))
+
+	loaded, err := store.GetJob(ctx, "job_cas")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Equal(t, int64(0), loaded.StateVersion)
+
+	// 1) CAS with the current version lands and bumps the version.
+	running := *loaded
+	running.Status = StatusRunning
+	updated, err := store.UpdateJobCAS(ctx, running, loaded.StateVersion)
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	// 2) A stale writer carrying the old version is rejected.
+	stale := *loaded
+	stale.Status = StatusRunning
+	updated, err = store.UpdateJobCAS(ctx, stale, loaded.StateVersion)
+	require.NoError(t, err)
+	require.False(t, updated)
+
+	current, err := store.GetJob(ctx, "job_cas")
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	require.Equal(t, int64(1), current.StateVersion)
+
+	// 3) A legitimate transition to a terminal state lands.
+	completed := *current
+	completed.Status = StatusCompleted
+	updated, err = store.UpdateJobCAS(ctx, completed, current.StateVersion)
+	require.NoError(t, err)
+	require.True(t, updated)
+
+	// 4) Once terminal, even a write with the right version is absorbed.
+	final, err := store.GetJob(ctx, "job_cas")
+	require.NoError(t, err)
+	require.NotNil(t, final)
+	require.Equal(t, StatusCompleted, final.Status)
+	overwrite := *final
+	overwrite.Status = StatusOrphaned
+	updated, err = store.UpdateJobCAS(ctx, overwrite, final.StateVersion)
+	require.NoError(t, err)
+	require.False(t, updated)
+
+	after, err := store.GetJob(ctx, "job_cas")
+	require.NoError(t, err)
+	require.NotNil(t, after)
+	require.Equal(t, StatusCompleted, after.Status)
+	require.Equal(t, final.StateVersion, after.StateVersion)
+}
+
+func TestSQLiteStoreRuntimeInstancesAndJobOwnership(t *testing.T) {
+	ctx := context.Background()
+	storePath := filepath.Join(t.TempDir(), "runtime", "background.sqlite")
+
+	store, err := NewSQLiteStore(&StoreConfig{Path: storePath})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	startedAt := time.Now().Add(-time.Minute).UTC()
+	require.NoError(t, store.UpsertRuntimeInstance(ctx, RuntimeInstance{
+		ID: "inst_a", PID: os.Getpid(), Host: "host-a", StartedAt: startedAt, State: "running",
+	}))
+
+	lease := time.Now().Add(time.Minute).UTC()
+	queuedAt := time.Now().UTC()
+	deadline := time.Now().Add(30 * time.Minute).UTC()
+	require.NoError(t, store.SaveJob(ctx, Job{
+		ID: "job_owned", SessionID: "session-owned", Kind: "shell", Command: "echo owned",
+		Status: StatusPending, CreatedAt: time.Now().UTC(),
+		OwnerInstanceID: "inst_a",
+		LeaseExpiresAt:  &lease,
+		QueuedAt:        &queuedAt,
+		DeadlineAt:      &deadline,
+	}))
+
+	loaded, err := store.GetJob(ctx, "job_owned")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Equal(t, "inst_a", loaded.OwnerInstanceID)
+	require.NotNil(t, loaded.LeaseExpiresAt)
+	require.WithinDuration(t, lease, *loaded.LeaseExpiresAt, time.Second)
+	require.NotNil(t, loaded.QueuedAt)
+	require.NotNil(t, loaded.DeadlineAt)
+	require.WithinDuration(t, deadline, *loaded.DeadlineAt, time.Second)
+
+	renewed := time.Now().Add(2 * time.Minute).UTC()
+	affected, err := store.RenewJobLeases(ctx, "inst_a", renewed)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, affected)
+	reloaded, err := store.GetJob(ctx, "job_owned")
+	require.NoError(t, err)
+	require.NotNil(t, reloaded.LeaseExpiresAt)
+	require.WithinDuration(t, renewed, *reloaded.LeaseExpiresAt, time.Second)
+	require.Equal(t, int64(0), reloaded.StateVersion, "lease renewal must not bump state_version")
+
+	affected, err = store.ReleaseJobLeases(ctx, "inst_a", time.Now().UTC())
+	require.NoError(t, err)
+	require.EqualValues(t, 1, affected)
+	released, err := store.GetJob(ctx, "job_owned")
+	require.NoError(t, err)
+	require.NotNil(t, released.LeaseExpiresAt)
+	require.True(t, released.LeaseExpiresAt.Before(time.Now().UTC()), "released lease must read as expired")
+
+	instances, err := store.ListRuntimeInstances(ctx)
+	require.NoError(t, err)
+	require.Len(t, instances, 1)
+	require.Equal(t, "inst_a", instances[0].ID)
+	require.Equal(t, os.Getpid(), instances[0].PID)
+	require.Equal(t, "running", instances[0].State)
+
+	require.NoError(t, store.MarkRuntimeInstanceStopped(ctx, "inst_a", time.Now().UTC()))
+	instances, err = store.ListRuntimeInstances(ctx)
+	require.NoError(t, err)
+	require.Len(t, instances, 1)
+	require.Equal(t, "stopped", instances[0].State)
+}

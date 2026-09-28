@@ -21,6 +21,16 @@ const (
 	StatusTimedOut  JobStatus = "timed_out"
 	StatusCancelled JobStatus = "cancelled"
 	StatusOrphaned  JobStatus = "orphaned"
+	// StatusInterrupted marks a job whose owning process exited before the job
+	// finished. Interrupted jobs are terminal and are never auto-resumed by a
+	// later runtime instance (2026-09-28: pending jobs used to be re-queued on
+	// every manager start and ran days later).
+	StatusInterrupted JobStatus = "interrupted"
+	// StatusExpired marks a queued job that exceeded its queue deadline
+	// (reserved for the queue-TTL work in the P1 phase).
+	StatusExpired JobStatus = "expired"
+	// StatusAbandoned marks a job the user explicitly gave up on.
+	StatusAbandoned JobStatus = "abandoned"
 )
 
 // StartupProbeType identifies the generic probe used to accept a started process.
@@ -116,6 +126,10 @@ type TaskOutputResult struct {
 	MaxConcurrent  int    `json:"max_concurrent,omitempty"`
 	SchedulerState string `json:"scheduler_state,omitempty"`
 	NextAction     string `json:"next_action,omitempty"`
+	// QueuedAt / DeadlineAt expose the queue window for pending jobs
+	// (2026-09-28): a pending job past DeadlineAt becomes terminal "expired".
+	QueuedAt   string `json:"queued_at,omitempty"`
+	DeadlineAt string `json:"deadline_at,omitempty"`
 }
 
 // JobFilter filters background job queries.
@@ -143,4 +157,31 @@ type Job struct {
 	ExitCode      *int
 	LogPath       string
 	Metadata      map[string]interface{}
+	// StateVersion is the optimistic-concurrency version of the persisted row.
+	// Writers present the version they last read; stale writers are rejected so
+	// terminal states cannot be overwritten (2026-09-28).
+	StateVersion int64
+	// OwnerInstanceID identifies the runtime instance that submitted the job.
+	// Empty means "unowned" (legacy rows): any instance may recover it.
+	OwnerInstanceID string
+	// LeaseExpiresAt is the ownership deadline, refreshed by the owner's
+	// heartbeat loop. A job whose lease expired may be recovered (interrupted /
+	// orphaned) by another instance; a live lease must be left untouched.
+	LeaseExpiresAt *time.Time
+	// QueuedAt / DeadlineAt bound how long a pending job may wait to be
+	// dispatched before it becomes terminal "expired".
+	QueuedAt   *time.Time
+	DeadlineAt *time.Time
+}
+
+// RuntimeInstance captures a live runtime process that owns background work.
+// Ownership is lease-based: only the owner instance may schedule or rewrite a
+// job while it keeps heartbeating (2026-09-28).
+type RuntimeInstance struct {
+	ID          string
+	PID         int
+	Host        string
+	StartedAt   time.Time
+	HeartbeatAt time.Time
+	State       string
 }

@@ -5583,7 +5583,7 @@ func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *backgr
 	storePath := resolveRuntimeBackgroundStorePath(h.runtimeConfigFile, bgCfg.StorePath)
 	storeDSN := strings.TrimSpace(bgCfg.StoreDSN)
 	logDir := resolveRuntimeBackgroundLogDir(h.runtimeConfigFile, bgCfg.LogDir)
-	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%s|%d|%s|%d|%v", storePath, storeDSN, logDir, bgCfg.MaxOutputBytes, bgCfg.MaxConcurrentJobs, bgCfg.DefaultTimeout, bgCfg.MonitorInterval, bgCfg.HeartbeatTimeout, bgCfg.LaunchMaxAttempts, bgCfg.RetryBackoff, bgCfg.RecoveryMaxAttempts, bgCfg.RecoveryBackoffSchedule)
+	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%s|%d|%s|%d|%v|%v|%s|%s|%s|%s", storePath, storeDSN, logDir, bgCfg.MaxOutputBytes, bgCfg.MaxConcurrentJobs, bgCfg.DefaultTimeout, bgCfg.MonitorInterval, bgCfg.HeartbeatTimeout, bgCfg.LaunchMaxAttempts, bgCfg.RetryBackoff, bgCfg.RecoveryMaxAttempts, bgCfg.RecoveryBackoffSchedule, bgCfg.RecoverPendingOnStart, bgCfg.InstanceID, bgCfg.LeaseTTL, bgCfg.HeartbeatInterval, bgCfg.QueueTimeout)
 
 	h.backgroundMu.Lock()
 	defer h.backgroundMu.Unlock()
@@ -5603,6 +5603,11 @@ func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *backgr
 		StoreDSN:                storeDSN,
 		LogDir:                  logDir,
 		MaxConcurrentJobs:       bgCfg.MaxConcurrentJobs,
+		InstanceID:              strings.TrimSpace(bgCfg.InstanceID),
+		LeaseTTL:                bgCfg.LeaseTTL,
+		HeartbeatInterval:       bgCfg.HeartbeatInterval,
+		QueueTimeout:            bgCfg.QueueTimeout,
+		RecoverPendingOnStart:   bgCfg.RecoverPendingOnStart,
 		EventHandler:            h.handleBackgroundEvent,
 	})
 	h.backgroundManager = manager
