@@ -472,7 +472,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 
 ### P2：统一交互机制落地（注册表 / 宿主 / 模式与生效域）
 
-- **P2-1 注册表与解析器**：`runtimeCommandSpec` 注册（catalog 扩展 + 子命令解析器），覆盖附录 F 全部条目；未登记默认 queue；T29/T30。
+- **P2-1 ✅ 注册表与解析器**：`runtimeCommandSpec`（Mode/Effect/Category/Confirm/Notice/SwitchKey）+ 附录 F.1 全量 59 条 + F.2 别名归并 + 子命令变体解析；未登记命令/未知子命令 → queue（INV-6）；T28 不变式与 T29 catalog 覆盖单测已绿（`chat_runtime_command_registry.go`，尚未被路由消费——按 P2-2/P2-3 接入）。
 - **P2-2 三级开关**：`chat.runtime_interaction.mode`（auto/readonly/off）+ 分类级 + 命令级；env `AICLI_CHAT_RUNTIME_INTERACTION`；关闭时逐条等价 v1.0（T31）。
 - **P2-3 宿主与生效域执行器**：`runtimeCommandHost.Submit` + `applyRuntimeEffect`（read/next-turn/next-call 适配器；session/process 拒绝）；统一审计事件与 Notice 提示（T32/T33）。
 - **P2-4 副屏与 prompt 载体**：BusyScreen（§3.7 四项前置）+ priority prompt（确认/单选）复用；L0 输入移交（T20~T26、T34）。
@@ -1040,3 +1040,17 @@ runtimeCommandSpec{
 > 灰度打开后的行为：`/help`、`/status`、`/session`、`/queue`（非 clear）在 turn 运行期间立即可见；`/queue clear` 保持拒绝；其余命令保持现状（queue/reject）。
 
 **P1 阶段收口结论**：P0（分类基线/快照设计）+ P1（元数据/解析器/四档路由/两阶段锁/执行器/M4/灰度）全部落地，下一步进入 **P2**（统一交互机制：注册表与解析器 P2-1 → 三级开关 P2-2 → 宿主与生效域执行器 P2-3 → 副屏与 prompt 载体 P2-4 → 生效域适配 P2-5）。
+
+### G.5 P2-1 注册表与解析器（已完成，2026-09-28）
+
+| 项 | 落地 |
+| --- | --- |
+| 类型 | `runtimeInteractionMode`（inline/screen/prompt/queue/block）、`runtimeEffectScope`（read/live/next-turn/next-call/session/process）、`commandCategory`（C1~C12）、`runtimeCommandSpec`（Command/Category/Mode/Effect/Confirm/Notice/SwitchKey） |
+| 数据 | `runtimeCommandRegistry`：附录 F.1 全量 **59 条**（58 catalog + `/todos`）逐条代码化；复合命令按变体表声明（`/debug`、`/supervision`、`/agents`、`/goal`、`/model`、`/provider`、`/mcp`、`/skills`、`/account` 等）；`/exit` 唯一 `block` |
+| 归并 | `canonicalRuntimeCommandName` + `runtimeLegacyAliasCommands`：catalog 别名索引优先，F.2 legacy 入口补齐（`/?`、`/h`、`/q`、`/quit`、`/cls`、`/n`、`/cmd`、`/rewind`、`/tool`、`/describe`、`/catalog`、`/rename`、`/reasoning-effort`）；`/mode:<name>` 冒号简写归并到 `/permission-mode` |
+| 解析 | `resolveRuntimeCommandSpec`：Bare → Variants[首 token] → Wildcard → **queue 兜底（ok=false，INV-6）**；返回时自动补 `SwitchKey` |
+| 校验 | `runtimeCommandRegistryViolations`：`session`/`process` 生效域只允许 queue/block（T28 静态断言） |
+
+**测试（4 项）**：`TestRuntimeCommandRegistryCoversCatalog`（T29：catalog 主命令与别名全覆盖 + 非空条目）、`TestRuntimeCommandRegistryInvariants`（T28）、`TestResolveRuntimeCommandSpecVariants`（22 组变体/别名/未知兜底）、`TestResolveRuntimeCommandSpecSwitchKey`。
+
+**边界**：本步骤只做声明与解析，**尚未被路由消费**——消费路径将在 P2-2（三级开关）与 P2-3（宿主 + 生效域执行器）接入；接入前运行时行为仍由 P1 的 BusyPolicy 通道决定。
