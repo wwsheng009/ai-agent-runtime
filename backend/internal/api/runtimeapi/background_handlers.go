@@ -121,6 +121,103 @@ func (h *Handler) CancelBackgroundJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// PauseBackgroundJob holds a queued background job (2026-09-28, P3).
+func (h *Handler) PauseBackgroundJob(w http.ResponseWriter, r *http.Request) {
+	h.controlBackgroundJob(w, r, "pause")
+}
+
+// ResumeBackgroundJob returns a paused background job to the queue.
+func (h *Handler) ResumeBackgroundJob(w http.ResponseWriter, r *http.Request) {
+	h.controlBackgroundJob(w, r, "resume")
+}
+
+// AbandonBackgroundJob drops a queued or paused job as terminal "abandoned".
+func (h *Handler) AbandonBackgroundJob(w http.ResponseWriter, r *http.Request) {
+	h.controlBackgroundJob(w, r, "abandon")
+}
+
+// RequeueBackgroundJob creates a new job from a terminal one.
+func (h *Handler) RequeueBackgroundJob(w http.ResponseWriter, r *http.Request) {
+	h.controlBackgroundJob(w, r, "requeue")
+}
+
+// controlBackgroundJob runs one P3 lifecycle control (pause / resume / abandon
+// / requeue) and maps the manager's conflicts onto HTTP 409.
+func (h *Handler) controlBackgroundJob(w http.ResponseWriter, r *http.Request, action string) {
+	manager := h.getBackgroundManager(h.runtimeConfig)
+	if manager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, errors.New(errors.ErrConfigInvalid, "background manager not configured"))
+		return
+	}
+	jobID := strings.TrimSpace(mux.Vars(r)["id"])
+	if jobID == "" {
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "job id is required"))
+		return
+	}
+
+	var (
+		job *background.Job
+		err error
+	)
+	switch action {
+	case "pause":
+		job, err = manager.PauseJob(r.Context(), jobID)
+	case "resume":
+		job, err = manager.ResumeJob(r.Context(), jobID)
+	case "abandon":
+		job, err = manager.AbandonJob(r.Context(), jobID)
+	case "requeue":
+		job, err = manager.RequeueJob(r.Context(), jobID)
+	default:
+		h.writeError(w, http.StatusBadRequest, errors.New(errors.ErrValidationFailed, "unknown background job action"))
+		return
+	}
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "job not found"))
+			return
+		}
+		if isBackgroundJobControlConflict(err) {
+			h.writeError(w, http.StatusConflict, errors.New(errors.ErrValidationFailed, err.Error()))
+			return
+		}
+		h.writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if job == nil {
+		h.writeError(w, http.StatusNotFound, errors.New(errors.ErrValidationFailed, "job not found"))
+		return
+	}
+
+	payload := map[string]interface{}{"job": job}
+	if action == "requeue" {
+		payload["requeued_from"] = jobID
+	}
+	h.writeJSON(w, http.StatusOK, payload)
+}
+
+// isBackgroundJobControlConflict reports whether a control error is a state
+// conflict (409) rather than a server failure.
+func isBackgroundJobControlConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	for _, marker := range []string{
+		"already finished",
+		"cannot pause",
+		"cannot abandon",
+		"is not paused",
+		"is still active",
+		"raced with a concurrent update",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // ListBackgroundJobEvents lists background job events for a job.
 func (h *Handler) ListBackgroundJobEvents(w http.ResponseWriter, r *http.Request) {
 	manager := h.getBackgroundManager(h.runtimeConfig)

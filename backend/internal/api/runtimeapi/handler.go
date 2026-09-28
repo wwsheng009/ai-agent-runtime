@@ -971,6 +971,10 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/background/jobs", h.ListBackgroundJobs).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/background/jobs/{id}", h.GetBackgroundJob).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/background/jobs/{id}/cancel", h.CancelBackgroundJob).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/pause", h.PauseBackgroundJob).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/resume", h.ResumeBackgroundJob).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/abandon", h.AbandonBackgroundJob).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/background/jobs/{id}/requeue", h.RequeueBackgroundJob).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/background/jobs/{id}/events", h.ListBackgroundJobEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/background/jobs/{id}/output", h.GetBackgroundJobOutput).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/mcps", h.ListRuntimeMCPs).Methods(http.MethodGet)
@@ -5583,7 +5587,7 @@ func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *backgr
 	storePath := resolveRuntimeBackgroundStorePath(h.runtimeConfigFile, bgCfg.StorePath)
 	storeDSN := strings.TrimSpace(bgCfg.StoreDSN)
 	logDir := resolveRuntimeBackgroundLogDir(h.runtimeConfigFile, bgCfg.LogDir)
-	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%s|%d|%s|%d|%v|%v|%s|%s|%s|%s", storePath, storeDSN, logDir, bgCfg.MaxOutputBytes, bgCfg.MaxConcurrentJobs, bgCfg.DefaultTimeout, bgCfg.MonitorInterval, bgCfg.HeartbeatTimeout, bgCfg.LaunchMaxAttempts, bgCfg.RetryBackoff, bgCfg.RecoveryMaxAttempts, bgCfg.RecoveryBackoffSchedule, bgCfg.RecoverPendingOnStart, bgCfg.InstanceID, bgCfg.LeaseTTL, bgCfg.HeartbeatInterval, bgCfg.QueueTimeout)
+	key := fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s|%s|%d|%s|%d|%v|%v|%s|%s|%s|%s|%s", storePath, storeDSN, logDir, bgCfg.MaxOutputBytes, bgCfg.MaxConcurrentJobs, bgCfg.DefaultTimeout, bgCfg.MonitorInterval, bgCfg.HeartbeatTimeout, bgCfg.LaunchMaxAttempts, bgCfg.RetryBackoff, bgCfg.RecoveryMaxAttempts, bgCfg.RecoveryBackoffSchedule, bgCfg.RecoverPendingOnStart, bgCfg.InstanceID, bgCfg.LeaseTTL, bgCfg.HeartbeatInterval, bgCfg.QueueTimeout, bgCfg.OrphanReaperInterval)
 
 	h.backgroundMu.Lock()
 	defer h.backgroundMu.Unlock()
@@ -5607,6 +5611,7 @@ func (h *Handler) getBackgroundManager(config *runtimecfg.RuntimeConfig) *backgr
 		LeaseTTL:                bgCfg.LeaseTTL,
 		HeartbeatInterval:       bgCfg.HeartbeatInterval,
 		QueueTimeout:            bgCfg.QueueTimeout,
+		OrphanReaperInterval:    bgCfg.OrphanReaperInterval,
 		RecoverPendingOnStart:   bgCfg.RecoverPendingOnStart,
 		EventHandler:            h.handleBackgroundEvent,
 	})
