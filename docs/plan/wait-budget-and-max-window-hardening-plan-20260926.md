@@ -49,7 +49,7 @@
 | 落点 | 内容 |
 | --- | --- |
 | `internal/agentcontrol/wait_timeout.go` | `MaxWaitTimeoutMs = 120000`（默认 30s / 下界 10s / 上界 2m） |
-| `internal/config/manager.go` | 内置 `agents.maxWaitTimeoutMs` 默认 2m；新增 `agents.maxConsecutiveWaitWithoutProgress`（0=默认 2，负值=禁用） |
+| `internal/config/manager.go` | 内置 `agents.maxWaitTimeoutMs` 默认 2m；新增 `agents.maxConsecutiveWaitWithoutProgress`（0=默认 6，负值=禁用） |
 | `internal/config/agents_normalize.go` | 新字段 0 值归一化；负值"显式禁用"语义写入归一化契约 |
 | 测试同步 | `wait_timeout_test.go`、`manager_test.go`、`agentguidance/guidance_test.go`、`broker_team_wait_policy_test.go`、`prompt/environment_context_test.go` |
 
