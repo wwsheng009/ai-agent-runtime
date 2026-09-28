@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -40,7 +41,10 @@ type Manager struct {
 	mcp           manager.Manager
 	sandbox       *runtimeexecutor.Sandbox
 	runtimeConfig *runtimecfg.RuntimeConfig
-	lspBridge     *lsp.Bridge
+	// lspMu guards lspBridge: hosts may attach the pool after construction
+	// (async project scan → late enable), while turns keep listing tools.
+	lspMu     sync.RWMutex
+	lspBridge *lsp.Bridge
 }
 
 const toolkitMCPName = "toolkit"
@@ -175,20 +179,22 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 // (docs/lsp 03 invariants I1/I2). It is a no-op unless the LSP pool is
 // enabled and the tool reported `mutated_paths`.
 func (m *Manager) appendLSPDiagnostics(ctx context.Context, metadata map[string]interface{}, output string) string {
-	if m == nil || m.lspBridge == nil || !m.lspBridge.Enabled() {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
 		return output
 	}
 	paths := toolresult.MutatedPaths(metadata)
 	if len(paths) == 0 {
 		return output
 	}
-	return m.lspBridge.AppendToResult(ctx, output, paths)
+	return bridge.AppendToResult(ctx, output, paths)
 }
 
 // lspInlineHintEnabled reports whether the tool's model-facing description
 // should carry the inline-diagnostics expectation (docs/lsp 02 §4.2).
 func (m *Manager) lspInlineHintEnabled(toolName string) bool {
-	if m == nil || m.lspBridge == nil || !m.lspBridge.Enabled() {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
 		return false
 	}
 	switch toolName {

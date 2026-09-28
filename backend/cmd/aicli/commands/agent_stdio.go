@@ -447,6 +447,8 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 	if chat.ACPMCPSession != nil {
 		chat.ACPMCPSession.prepareForPrompt(promptCtx)
 	}
+	// 同一个 turn 边界：登记启动期项目扫描完成后迟到的 LSP 工具。
+	prepareLateLSPToolSurface(chat)
 
 	response, err := sendMessageWithImages(chat, text, imagePaths)
 	if err != nil {

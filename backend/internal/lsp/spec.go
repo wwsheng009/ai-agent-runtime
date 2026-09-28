@@ -307,6 +307,33 @@ func PresetServers() []ServerSpec {
 	}
 }
 
+// PresetServersNamed returns the subset of PresetServers() whose Name is in
+// names, preserving preset order. Unknown names are ignored, so callers can
+// pass a project-scan result (server names) without validating it first. The
+// returned specs are the full preset definitions (command/args/selectors), so
+// they can be persisted into a config layer or fed to NewBridge directly.
+func PresetServersNamed(names []string) []ServerSpec {
+	if len(names) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			wanted[trimmed] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	selected := make([]ServerSpec, 0, len(wanted))
+	for _, spec := range PresetServers() {
+		if _, ok := wanted[spec.Name]; ok {
+			selected = append(selected, spec)
+		}
+	}
+	return selected
+}
+
 // ---- process dialect ----
 
 // SpawnProcess is the default DialFunc: it starts the server as a child

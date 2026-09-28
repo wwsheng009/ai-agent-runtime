@@ -436,7 +436,8 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 			mcpForTools = mcpmanager.NewMergedManager(sessionMCP.manager, globalMCP)
 		}
 
-		toolManager = runtimetools.NewDefaultManagerWithRuntimeConfig(mcpForTools, loadRuntimeToolConfig(cfg, session))
+		runtimeToolConfig := loadRuntimeToolConfig(cfg, session)
+		toolManager = runtimetools.NewDefaultManagerWithRuntimeConfig(mcpForTools, runtimeToolConfig)
 		toolDescs := toolManager.ListTools()
 		for _, desc := range toolDescs {
 			session.FunctionCatalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(toolManager, desc), desc)
@@ -461,6 +462,10 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 			refresher.invalidateSurface = func() int { return invalidateACPSessionToolSurface(session) }
 		}
 		session.ACPMCPSession = refresher
+		// 启动期 LSP 自动装配（异步）：轻量扫描项目类型 → 写工作区
+		// .aicli/runtime.yaml → 挂载 LSP 池；新工具在下一个 turn 边界登记。
+		// 不阻塞启动关键路径（见 chat_lsp_bootstrap.go）。
+		startChatLSPBootstrap(session, toolManager, runtimeToolConfig, resolveRuntimeToolConfigPath(cfg, session))
 		if MCPManagerInstance != nil {
 			session.MCPStatus = Status()
 			session.MCPEnabled = session.MCPStatus.Enabled

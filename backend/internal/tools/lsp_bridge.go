@@ -61,15 +61,71 @@ func newLSPBridgeWith(config *runtimecfg.RuntimeConfig, workspaceRoot string, di
 	return bridge
 }
 
+// currentLSPBridge returns the manager's pool under the bridge lock, so
+// callers on turn goroutines never race with a late AttachLSP.
+func (m *Manager) currentLSPBridge() *lsp.Bridge {
+	if m == nil {
+		return nil
+	}
+	m.lspMu.RLock()
+	defer m.lspMu.RUnlock()
+	return m.lspBridge
+}
+
+// LSPEnabled reports whether this manager currently owns an enabled language
+// server pool.
+func (m *Manager) LSPEnabled() bool {
+	bridge := m.currentLSPBridge()
+	return bridge != nil && bridge.Enabled()
+}
+
+// EnableLSPFromConfig attaches the language-server pool described by config and
+// registers the LSP tool surface on the existing registry. It is the
+// late-binding counterpart of the construction-time wiring: a host may run a
+// project scan asynchronously and call this once the effective config enables
+// LSP, instead of blocking startup on the scan.
+//
+// The call is idempotent and safe off the turn goroutine: the bridge pointer is
+// guarded by lspMu and the toolkit registry owns its own lock. It returns true
+// only when this call attached the pool (already enabled, config still
+// disabled, or no usable server spec all return false). A pool attached this
+// way is released by the same Close as a construction-time pool.
+func (m *Manager) EnableLSPFromConfig(config *runtimecfg.RuntimeConfig) bool {
+	if m == nil || config == nil || !config.LSP.Enabled {
+		return false
+	}
+	m.lspMu.Lock()
+	defer m.lspMu.Unlock()
+	if m.lspBridge != nil && m.lspBridge.Enabled() {
+		return false
+	}
+	bridge := newLSPBridge(config, strings.TrimSpace(config.Workspace.Root))
+	if bridge == nil || !bridge.Enabled() {
+		return false
+	}
+	// Register the tools before publishing the bridge: once lspBridge is set,
+	// ListTools advertises the inline-diagnostics hint, so the registry must
+	// already contain lsp_servers/lsp_diagnostics at that point.
+	if m.toolkit != nil {
+		registerLSPTooling(m.toolkit, bridge, config)
+	}
+	m.lspBridge = bridge
+	return true
+}
+
 // lspRuntimeLogger adapts the runtime's global logger to the minimal
 // lsp.Logger surface, so server stderr and lifecycle events land in the
 // session log (L2 observability).
 type lspRuntimeLogger struct{}
 
-func (lspRuntimeLogger) Debugf(format string, args ...interface{}) { logpkg.S().Debugf(format, args...) }
-func (lspRuntimeLogger) Infof(format string, args ...interface{})  { logpkg.S().Infof(format, args...) }
-func (lspRuntimeLogger) Warnf(format string, args ...interface{})  { logpkg.S().Warnf(format, args...) }
-func (lspRuntimeLogger) Errorf(format string, args ...interface{}) { logpkg.S().Errorf(format, args...) }
+func (lspRuntimeLogger) Debugf(format string, args ...interface{}) {
+	logpkg.S().Debugf(format, args...)
+}
+func (lspRuntimeLogger) Infof(format string, args ...interface{}) { logpkg.S().Infof(format, args...) }
+func (lspRuntimeLogger) Warnf(format string, args ...interface{}) { logpkg.S().Warnf(format, args...) }
+func (lspRuntimeLogger) Errorf(format string, args ...interface{}) {
+	logpkg.S().Errorf(format, args...)
+}
 
 // registerLSPTooling registers the LSP tools that are enabled by config.
 // `lsp_servers` mirrors the pool state; `lsp_diagnostics` is opt-in through
@@ -92,12 +148,13 @@ func registerLSPTooling(registry *toolkit.Registry, bridge *lsp.Bridge, config *
 // Close releases the language-server pool owned by this manager (L2). The
 // host calls it on shutdown; a nil bridge is a no-op.
 func (m *Manager) Close() error {
-	if m == nil || m.lspBridge == nil {
+	bridge := m.currentLSPBridge()
+	if bridge == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	m.lspBridge.Stop(ctx)
+	bridge.Stop(ctx)
 	return nil
 }
 

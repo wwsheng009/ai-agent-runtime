@@ -73,8 +73,8 @@ type ChatSession struct {
 	// knowledge.mode=off（默认）时恒为 nil——所有消费点都必须接受 nil，
 	// 这条不变量是"off 与无知识层逐字节一致"的落点。
 	Knowledge *knowledge.Activation
-	HTTPDebug    bool
-	Stream       bool
+	HTTPDebug bool
+	Stream    bool
 	// FastMode enables Codex service_tier=priority. Only meaningful when protocol is codex.
 	FastMode bool
 	BaseURL  string
@@ -158,9 +158,13 @@ type ChatSession struct {
 	// ACPMCPSession 是 ACP 会话私有的 MCP 运行时（客户端下发来源）。
 	// 非 ACP 会话恒为 nil；会话关闭/删除时负责回收其子进程。
 	ACPMCPSession *acpSessionMCP
-	SkillsBinding *skillsRuntimeBinding // Skills 运行时绑定
-	SkillsMode    string                // Skills 暴露模式
-	SkillsDebug   bool                  // Skills 调试输出
+	// ChatLSPLateEnable 承载启动期异步项目扫描的结果：扫描完成后在后台挂载
+	// LSP 池，新工具函数在下一次 turn 边界登记（函数目录只允许 turn goroutine
+	// 写，见 chat_lsp_bootstrap.go）。
+	ChatLSPLateEnable *chatLSPLateEnable
+	SkillsBinding     *skillsRuntimeBinding // Skills 运行时绑定
+	SkillsMode        string                // Skills 暴露模式
+	SkillsDebug       bool                  // Skills 调试输出
 	// NoSkills 是 --no-skills：跳过 skill 自动发现，只保留显式目录。
 	NoSkills bool
 	Config   *config.Config // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
@@ -780,19 +784,7 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 }
 
 func loadRuntimeToolConfig(cfg *config.Config, session *ChatSession) *runtimecfg.RuntimeConfig {
-	configPath := ""
-	if session != nil && strings.TrimSpace(session.RuntimeConfigPath) != "" {
-		configPath = strings.TrimSpace(session.RuntimeConfigPath)
-		// Session/profile paths may still be relative (stored in resumed
-		// session metadata or written by an older profile). Anchor them against
-		// the CWD/executable search before treating them as missing, so a
-		// valid in-tree runtime.yaml is not reported as "未找到配置文件".
-		if resolved := resolveExistingPathValue(configPath, false); resolved != "" {
-			configPath = resolved
-		}
-	} else if cfg != nil && cfg.SkillsRuntime != nil && strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) != "" {
-		configPath = resolveGlobalRuntimeConfigPath(cfg)
-	}
+	configPath := resolveRuntimeToolConfigPath(cfg, session)
 	if configPath == "" {
 		// No runtime.yaml in the .aicli layers (./.aicli/ > ~/.aicli/). The
 		// development layouts (backend/configs) are never consulted. A missing
@@ -816,6 +808,26 @@ func loadRuntimeToolConfig(cfg *config.Config, session *ChatSession) *runtimecfg
 	}
 	resolved.Workspace.Root = resolveLocalWorkspacePath(resolved, session)
 	return resolved
+}
+
+// resolveRuntimeToolConfigPath 解析会话工具面使用的 runtime.yaml 路径：
+// 会话/profile 显式路径优先，其次是全局 .aicli 层解析；"" 表示使用内置默认值。
+// 与 loadRuntimeToolConfig 共用同一份解析，避免启动期扫描的写入目标与加载来源漂移。
+func resolveRuntimeToolConfigPath(cfg *config.Config, session *ChatSession) string {
+	configPath := ""
+	if session != nil && strings.TrimSpace(session.RuntimeConfigPath) != "" {
+		configPath = strings.TrimSpace(session.RuntimeConfigPath)
+		// Session/profile paths may still be relative (stored in resumed
+		// session metadata or written by an older profile). Anchor them against
+		// the CWD/executable search before treating them as missing, so a
+		// valid in-tree runtime.yaml is not reported as "未找到配置文件".
+		if resolved := resolveExistingPathValue(configPath, false); resolved != "" {
+			configPath = resolved
+		}
+	} else if cfg != nil && cfg.SkillsRuntime != nil && strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) != "" {
+		configPath = resolveGlobalRuntimeConfigPath(cfg)
+	}
+	return configPath
 }
 
 // printWelcome 打印欢迎信息
@@ -1747,6 +1759,10 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 			}
 			input = strings.TrimSpace(normalizeQueuedInputLine(input))
 		}
+
+		// turn 边界：登记后台项目扫描完成后迟到的 LSP 工具（挂池发生在扫描
+		// goroutine，登记只能发生在会话 turn goroutine 上，见 chat_lsp_bootstrap.go）。
+		prepareLateLSPToolSurface(session)
 
 		// 处理 Shell 命令（! 前缀）
 		if strings.HasPrefix(input, "!") {
