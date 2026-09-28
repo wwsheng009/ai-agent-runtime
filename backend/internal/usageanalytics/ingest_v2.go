@@ -336,8 +336,8 @@ func (c *collector) onSubagentCompleted(event runtimeevents.Event) {
 INSERT INTO usage_subagents (
   subagent_id, parent_session_id, child_session_id, role, task_type, task_subject, read_only, success, completion_reason,
   failure_category, error_code, attempt, max_attempts, retry_reason, id_synthesized, duration_ms,
-  started_at_unix_nano, completed_at_unix_nano, usage_total_tokens, source, conflict_count, record_json
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  started_at_unix_nano, completed_at_unix_nano, usage_total_tokens, budget_tokens, source, conflict_count, record_json
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(subagent_id, parent_session_id) DO UPDATE SET
   child_session_id = CASE WHEN excluded.child_session_id <> '' THEN excluded.child_session_id ELSE usage_subagents.child_session_id END,
   role = CASE WHEN excluded.role <> '' THEN excluded.role ELSE usage_subagents.role END,
@@ -362,6 +362,7 @@ ON CONFLICT(subagent_id, parent_session_id) DO UPDATE SET
   started_at_unix_nano = CASE WHEN usage_subagents.started_at_unix_nano = 0 THEN excluded.started_at_unix_nano ELSE usage_subagents.started_at_unix_nano END,
   completed_at_unix_nano = MAX(usage_subagents.completed_at_unix_nano, excluded.completed_at_unix_nano),
   usage_total_tokens = MAX(usage_subagents.usage_total_tokens, excluded.usage_total_tokens),
+  budget_tokens = MAX(usage_subagents.budget_tokens, excluded.budget_tokens),
   source = CASE WHEN excluded.source <> '' THEN excluded.source ELSE usage_subagents.source END,
   conflict_count = usage_subagents.conflict_count + excluded.conflict_count,
   record_json = CASE WHEN excluded.record_json IS NOT NULL AND length(excluded.record_json) > 0 THEN excluded.record_json ELSE usage_subagents.record_json END`,
@@ -384,6 +385,7 @@ ON CONFLICT(subagent_id, parent_session_id) DO UPDATE SET
 		normalized.StartedAt.UnixNano(),
 		normalized.CompletedAt.UnixNano(),
 		normalized.UsageTotalTokens,
+		payloadInt64(event.Payload, "budget_tokens"),
 		normalized.Source,
 		conflictCount,
 		string(record),

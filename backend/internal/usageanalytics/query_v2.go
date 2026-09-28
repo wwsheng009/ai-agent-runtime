@@ -81,6 +81,10 @@ type SubagentStat struct {
 	RetryReason      string    `json:"retry_reason,omitempty"`
 	DurationMS       int64     `json:"duration_ms"`
 	UsageTotalTokens int64     `json:"usage_total_tokens"`
+	// BudgetTokens 是该子代理任务声明的 token 预算（0 = 未声明，§4.2）；
+	// BudgetExceeded 由"预算 > 0 且实际用量超预算"派生。
+	BudgetTokens   int64 `json:"budget_tokens,omitempty"`
+	BudgetExceeded bool  `json:"budget_exceeded,omitempty"`
 	ConflictCount    int       `json:"conflict_count"`
 	CompletedAt      time.Time `json:"completed_at,omitempty"`
 }
@@ -395,7 +399,7 @@ func (s *Store) SubagentStats(q SubagentStatsQuery) (SubagentStatsResult, error)
 	rows, ok, err := s.query(fmt.Sprintf(`
 SELECT subagent_id, parent_session_id, child_session_id, role, %s, %s, source, success, completion_reason,
        failure_category, error_code, attempt, max_attempts, retry_reason, duration_ms,
-       usage_total_tokens, conflict_count, completed_at_unix_nano
+       usage_total_tokens, budget_tokens, conflict_count, completed_at_unix_nano
 FROM usage_subagents
 WHERE %s
 ORDER BY completed_at_unix_nano DESC, subagent_id ASC
@@ -417,10 +421,11 @@ LIMIT ?`, taskTypeExpr, taskSubjectExpr, where), append(args, normalizeLimit(q.L
 			&stat.SubagentID, &stat.ParentSessionID, &stat.ChildSessionID, &stat.Role, &stat.TaskType, &stat.TaskSubject, &stat.Source,
 			&successFlag, &stat.CompletionReason, &stat.FailureCategory, &stat.ErrorCode,
 			&stat.Attempt, &stat.MaxAttempts, &stat.RetryReason, &stat.DurationMS,
-			&stat.UsageTotalTokens, &stat.ConflictCount, &completedNano,
+			&stat.UsageTotalTokens, &stat.BudgetTokens, &stat.ConflictCount, &completedNano,
 		); err != nil {
 			return result, fmt.Errorf("scan subagent stats: %w", err)
 		}
+		stat.BudgetExceeded = stat.BudgetTokens > 0 && stat.UsageTotalTokens > stat.BudgetTokens
 		if successFlag != nil {
 			flag := *successFlag == 1
 			stat.Success = &flag
@@ -646,19 +651,21 @@ FROM usage_tool_calls WHERE session_id IN (%s) GROUP BY session_id`, placeholder
 	if rows, ok, err := s.query(fmt.Sprintf(`
 SELECT parent_session_id, COUNT(*),
        SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END),
-       SUM(CASE WHEN failure_category = ? THEN 1 ELSE 0 END)
+       SUM(CASE WHEN failure_category = ? THEN 1 ELSE 0 END),
+       SUM(CASE WHEN budget_tokens > 0 AND usage_total_tokens > budget_tokens THEN 1 ELSE 0 END)
 FROM usage_subagents WHERE parent_session_id IN (%s) GROUP BY parent_session_id`, placeholders),
 		append([]interface{}{llm.FailureCategoryTimeout}, args...)...); err == nil && ok {
 		for rows.Next() {
 			var sessionID string
-			var runs, failures, timeouts int
-			if err := rows.Scan(&sessionID, &runs, &failures, &timeouts); err != nil {
+			var runs, failures, timeouts, budgetExceeded int
+			if err := rows.Scan(&sessionID, &runs, &failures, &timeouts, &budgetExceeded); err != nil {
 				break
 			}
 			if position, found := index[sessionID]; found {
 				rollups[position].SubagentRuns = runs
 				rollups[position].SubagentFailures = failures
 				rollups[position].SubagentTimeouts = timeouts
+				rollups[position].SubagentBudgetExceeded = budgetExceeded
 				rollups[position].SubagentFailureRate = ratio(failures, runs)
 			}
 		}
@@ -746,6 +753,9 @@ func buildV2Diagnostics(rollup SessionRollup, hasV2Data bool) []Diagnostic {
 	}
 	if rollup.SubagentTimeouts >= subagentTimeoutWarningMinCount {
 		diagnostics = append(diagnostics, Diagnostic{Code: "subagent_timeout", Severity: "warning", Count: rollup.SubagentTimeouts})
+	}
+	if rollup.SubagentBudgetExceeded > 0 {
+		diagnostics = append(diagnostics, Diagnostic{Code: "subagent_budget_exceeded", Severity: "warning", Count: rollup.SubagentBudgetExceeded})
 	}
 	if rollup.RetryRecoveredTurns > 0 {
 		diagnostics = append(diagnostics, Diagnostic{Code: "retry_recovered", Severity: "info", Count: rollup.RetryRecoveredTurns})

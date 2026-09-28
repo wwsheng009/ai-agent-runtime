@@ -82,6 +82,9 @@ type SessionRollup struct {
 	SubagentFailures      int     `json:"subagent_failures,omitempty"`
 	SubagentFailureRate   float64 `json:"subagent_failure_rate,omitempty"`
 	SubagentTimeouts      int     `json:"subagent_timeouts,omitempty"`
+	// SubagentBudgetExceeded 是声明了任务预算且实际用量超预算的子代理数
+	// （§4.2 超支告警：6.14M tokens 类事故在账本与诊断面板直接可见）。
+	SubagentBudgetExceeded int `json:"subagent_budget_exceeded,omitempty"`
 	RetryRecoveredTurns   int     `json:"retry_recovered_turns,omitempty"`
 	// MaxToolFailureStreak 是会话内各回合"最长连续工具失败"的最大值（§3.1
 	// 归因链）：诊断面板据此一眼看到陷得最深的连续失败。

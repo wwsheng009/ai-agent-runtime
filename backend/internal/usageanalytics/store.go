@@ -382,6 +382,7 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   started_at_unix_nano    INTEGER NOT NULL DEFAULT 0,
   completed_at_unix_nano  INTEGER NOT NULL DEFAULT 0,
   usage_total_tokens      INTEGER NOT NULL DEFAULT 0,
+  budget_tokens           INTEGER NOT NULL DEFAULT 0,
   source                  TEXT NOT NULL DEFAULT '',
   conflict_count          INTEGER NOT NULL DEFAULT 0,
   record_json             BLOB,
@@ -557,6 +558,14 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 			return err
 		} else if !hasLastSuccess {
 			if _, err := s.db.Exec("ALTER TABLE usage_turns ADD COLUMN last_tool_success TEXT NOT NULL DEFAULT ''"); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
+		}
+		// §4.2 子代理任务预算：usage_subagents 补 budget_tokens（老库幂等迁移）。
+		if hasBudget, err := s.hasColumn("usage_subagents", "budget_tokens"); err != nil {
+			return err
+		} else if !hasBudget {
+			if _, err := s.db.Exec("ALTER TABLE usage_subagents ADD COLUMN budget_tokens INTEGER NOT NULL DEFAULT 0"); err != nil {
 				return fmt.Errorf("migrate usage analytics db: %w", err)
 			}
 		}
