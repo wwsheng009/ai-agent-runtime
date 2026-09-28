@@ -125,6 +125,14 @@ func chatBusyPolicyFromRuntimeSpec(text string) chatBusyCommandPolicy {
 			return chatBusyPolicyScreen
 		}
 		return chatBusyPolicyDeferred
+	case runtimeModePrompt:
+		// P2-4b-3：首批 prompt 档（/queue clear）复用 S 档路由形态把行交给宿主，
+		// 由宿主内的确认门决定执行/拒绝/降级；路由层不新增档位，避免默认分支
+		// fail-closed 误伤输入。
+		if busyPromptCommandWhitelisted(text) {
+			return chatBusyPolicyScreen
+		}
+		return chatBusyPolicyDeferred
 	default:
 		return chatBusyPolicyDeferred
 	}

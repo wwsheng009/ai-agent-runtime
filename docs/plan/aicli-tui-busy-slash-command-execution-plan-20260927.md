@@ -475,7 +475,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 - **P2-1 ✅ 注册表与解析器**：`runtimeCommandSpec`（Mode/Effect/Category/Confirm/Notice/SwitchKey）+ 附录 F.1 全量 59 条 + F.2 别名归并 + 子命令变体解析；未登记命令/未知子命令 → queue（INV-6）；T28 不变式与 T29 catalog 覆盖单测已绿（`chat_runtime_command_registry.go`，尚未被路由消费——按 P2-2/P2-3 接入）。
 - **P2-2 ✅ 三级开关**：`AICLI_CHAT_RUNTIME_INTERACTION`（auto/readonly/off）+ `..._CATEGORIES`（C#=mode）+ `..._COMMANDS`（命令=mode，键先别名归并）；优先级命令级 > 分类级 > 全局；block 不可被放宽；T31 单测已绿（`chat_runtime_command_switch.go`，消费接入见 P2-3）。
 - **P2-3 ✅ 宿主与生效域执行器**：`runtimeCommandHost.SubmitBusy`（注册表→三级开关→安全门→模式分发）+ 生效域守卫（session/process 不可达，block+process 例外只拒绝）+ 非 read 生效域执行后的 Notice 提示 + 统一审计事件 `aicli.chat.runtime_interaction`（命令/模式/生效域/结果/耗时，T32/T33）；路由由注册表接管（**双开关显式启用**才生效，P2 环境变量未设置时保持 P1 首批白名单行为）；screen/prompt 载体仍按 P2-4 降级。
-- **P2-4 🚧 副屏与 prompt 载体**：①②④ 见 G.9/G.10；③+⑤ ✅ **首批 S 档通道打通**（G.11）：策略映射 `screen→S`（仅白名单）+ 宿主 `case runtimeModeScreen` + `runBusyScreenCommand`（能力门 fail-closed / L0 仲裁 / modal 登记 / 租约预算 2s / 退出恢复），白名单 = `/todos` `/history` `/usage` `/debug display` `/web endpoints`；picker/写入类 screen 仍 Deferred。剩余：prompt 载体（确认/单选）与 T20~T26 TTY 真机验证、T34。
+- **P2-4 🚧 副屏与 prompt 载体**：①②④ 见 G.9/G.10；③+⑤ ✅ 首批 S 档通道（G.11，白名单 `/todos` `/history` `/usage` `/debug display` `/web endpoints`）；**prompt 载体 ✅ 忙时确认门**（G.13：复用 priority prompt 通道 + modal 登记 + 三态语义「确认执行 / 拒绝消费 / 不可用降级」，首推 `/queue clear`）。picker/写入类 screen 与其余 prompt 命令仍 Deferred。剩余：T20~T26 TTY 真机验证、T34（确认提示观感/ESC 中断）。
 - **P2-5 🚧 生效域适配**：核验完成（G.12）——注册表中 `inline+非 read` 仅 `/title <text>`，其 next-turn 语义由 Phase A 会话写承载（已加断言）；`chatBusyCommandUnsafeEffect` 覆盖已迁移分支的全部 Phase B 效应，忙时 inline 执行无静默丢效应路径；新增 **T35 准入审计**（inline+非 read 必须显式登记，否则测试失败）。仍需 actor 重建/权限源切换的 next-turn/next-call 命令（模型/Provider/reasoning_effort/profile/routing/add-dir、permission-mode/yolo/trust/grants/approval-reuse）当前全部为 screen/prompt → deferred，适配器与 V1/V2a/V10 未决项按 D12 兜底，待晋升时补。
 - **P2-6 网络长任务**：C11 保持 queue；P3 评估「异步任务 + 进度副屏」。
 - 每个晋升命令必须附快照依赖清单 + 忙时专项测试。
@@ -1154,3 +1154,16 @@ runtimeCommandSpec{
 | D12 兜底 | 需要 actor 重建/权限源切换的 next-turn/next-call 命令（V1/V2a/V10 未决项）仍保持 screen/prompt → deferred，未做任何提前晋升。 |
 
 **结论**：P2-5 在本轮**无需新适配器代码**——注册表现状下不存在「inline 执行会丢 Phase B 效应」的命令；风险面已被 T35 锁死，后续晋升 picker/写入类命令时必须先补确认流与快照依赖清单。
+
+### G.13 P2-4b-3 prompt 载体：忙时确认门 + `/queue clear` 首个晋升（2026-09-28）
+
+| 项 | 结论 |
+| --- | --- |
+| 通道选型 | 复用既有 **priority prompt** 通道（与 `bypass_permissions` 确认同一条读取路径：`pushChatComposerInputMode(chatInputModeConfirmation)` → `showChatRuntimePriorityPrompt` → `chatInteractiveReadPriorityItemWithPrompt` → `renderChatRuntimePriorityPromptTranscript`），**不新建 modal 载体**；确认期间登记 `chatInputOwnerModal`（独占 stdin/ESC）。 |
+| 路由形态 | prompt 档**不新增路由档位**：白名单命中时策略映射直接返回 `chatBusyPolicyScreen`（S 档形态 = 「行交给宿主，未占有则回退入队」），执行/拒绝/降级的语义全部收敛在宿主内。避免新档位落入队列 default 分支 fail-closed 误伤输入。 |
+| 确认语义 | `y/yes/是/确认/ok/确定` → 执行；其他输入 → **消费该行**并回显「已取消忙时执行」（避免反复弹确认）；读取中断/通道不可用 → **未占有**（降级入队，不丢输入）；非本地终端来源 → 视为拒绝（INV-8 同款手势规则）。 |
+| 执行路径 | 确认后走与 S 档相同的执行入口（Phase A + `recordChatPromptHistory`），审计 `result=executed`；拒绝审计 `result=rejected`（`Occupied=true`，不入队）；降级审计 `result=degraded`。 |
+| 首批白名单 | 仅 `/queue clear`（部署时最常用的「忙时清空排队输入」；其生效域是 InputQueue 自身）。空白归一（`/queue   clear` 等价）。其余 prompt 档（`/attach paste` `/debug on\|off` `/hotkeys reload` `/normal` 等）仍 deferred。 |
+| 能力门 | `chatBusyPromptChannelAvailable`（fail-closed：统一渲染面 + 交互式会话 + `Interaction` 可用），生产不可注入、测试经包级变量替身注入。 |
+| 测试 | 新增 5 项：策略映射（含空白归一、非首批 deferred）、确认后执行（审计 executed/prompt + modal 与 commandMu 释放 + 提问文案携带命令）、显式拒绝（消费不执行、审计 rejected）、通道不可用降级（审计 degraded）、非首批 prompt 不进入确认门；T35 审计扩展为「首批 prompt 白名单必须解析为 prompt 档」。 |
+| 说明 | 真机 TTY 下的确认提示观感与 ESC 中断路径仍需 T20~T26 验证；本步只锁定契约与失败模式。 |

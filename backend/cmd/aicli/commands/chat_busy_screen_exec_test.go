@@ -195,4 +195,12 @@ func TestRuntimeCommandRegistryBusyAdmissionAudit(t *testing.T) {
 			t.Errorf("首批白名单命令 %q 缺少 screen+read 声明", command)
 		}
 	}
+
+	// 首批 prompt 白名单必须解析为 prompt 档（否则确认门不会被触发）。
+	for _, line := range chatBusyPromptFirstBatchCommands {
+		spec, ok := resolveRuntimeCommandSpec(line)
+		if !ok || spec.Mode != runtimeModePrompt {
+			t.Errorf("首批 prompt 白名单 %q 未解析为 prompt 档：ok=%v mode=%s", line, ok, spec.Mode)
+		}
+	}
 }

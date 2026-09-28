@@ -103,8 +103,27 @@ func (h *runtimeCommandHost) submit(line string) runtimeHostOutcome {
 		outcome.Result = "executed"
 		outcome.Occupied = true
 		return outcome
+	case runtimeModePrompt:
+		// P2-4b-3：首批 prompt 档经忙时确认门执行；未确认/通道不可用按契约
+		// 消费或降级。非首批 prompt 命令仍 deferred。
+		if !busyPromptCommandWhitelisted(line) {
+			outcome.Result = "degraded"
+			return outcome
+		}
+		occupied, executed := runBusyPromptCommand(h.session, line)
+		if !occupied {
+			outcome.Result = "degraded"
+			return outcome
+		}
+		outcome.Occupied = true
+		if !executed {
+			outcome.Result = "rejected"
+			return outcome
+		}
+		outcome.Result = "executed"
+		return outcome
 	default:
-		// prompt 载体与其余 screen 命令见后续增量；queue 本就要入队。
+		// 其余 screen/prompt 命令与 queue 档见后续增量；queue 本就要入队。
 		outcome.Result = "degraded"
 		return outcome
 	}
