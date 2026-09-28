@@ -26,6 +26,13 @@ type turnToolStats struct {
 	lastFailureIndex map[string]int
 	lastSuccessIndex map[string]int
 	sequence         int
+	// consecutiveFailures / maxConsecutiveFailures 追踪回合内的工具错误级联
+	// （建议稿 §3.1 归因链）：失败累加、成功清零，flush 时给出回合内最长
+	// 连续失败次数——恢复计数只说明"是否恢复"，连续次数说明"陷得多深"。
+	consecutiveFailures    int
+	maxConsecutiveFailures int
+	// lastSuccessTool 是本回合最后一次成功工具调用的名字（空 = 本回合无成功）。
+	lastSuccessTool string
 }
 
 func newTurnToolStats() *turnToolStats {
@@ -50,16 +57,23 @@ func (s *turnToolStats) record(toolName string, ok bool) {
 	if ok {
 		s.succeeded[toolName]++
 		s.lastSuccessIndex[toolName] = s.sequence
+		s.lastSuccessTool = toolName
+		s.consecutiveFailures = 0
 		return
 	}
 	s.failed[toolName]++
 	s.lastFailureIndex[toolName] = s.sequence
+	s.consecutiveFailures++
+	if s.consecutiveFailures > s.maxConsecutiveFailures {
+		s.maxConsecutiveFailures = s.consecutiveFailures
+	}
 }
 
-// flush 返回（工具失败总数、失败后恢复数、未恢复数）。
-func (s *turnToolStats) flush() (failedTotal, recovered, unrecovered int) {
+// flush 返回（工具失败总数、失败后恢复数、未恢复数、最长连续失败数、
+// 最后一次成功工具名）。
+func (s *turnToolStats) flush() (failedTotal, recovered, unrecovered, maxStreak int, lastSuccessTool string) {
 	if s == nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0, ""
 	}
 	for _, name := range s.order {
 		failed := s.failed[name]
@@ -77,7 +91,7 @@ func (s *turnToolStats) flush() (failedTotal, recovered, unrecovered int) {
 	if unrecovered > failedTotal {
 		unrecovered = failedTotal
 	}
-	return failedTotal, recovered, unrecovered
+	return failedTotal, recovered, unrecovered, s.maxConsecutiveFailures, s.lastSuccessTool
 }
 
 func (c *collector) turnStats(sessionID, turnID string) *turnToolStats {
@@ -407,7 +421,7 @@ func (c *collector) upsertTurnTerminal(sessionID string, event runtimeevents.Eve
 		}
 	}
 	stats := c.takeTurnStats(sessionID, turnID)
-	failedTotal, recovered, unrecovered := stats.flush()
+	failedTotal, recovered, unrecovered, failureStreak, lastSuccessTool := stats.flush()
 	record, err := json.Marshal(payload)
 	if err != nil {
 		record = nil
@@ -416,9 +430,10 @@ func (c *collector) upsertTurnTerminal(sessionID string, event runtimeevents.Eve
 INSERT INTO usage_turns (
   session_id, turn_id, trace_id, success, completion_reason, error_code, steps, duration_ms,
   tool_error_count, recovered_tool_error_count, unrecovered_tool_error_count,
+  tool_failure_streak, last_tool_success,
   prompt_tokens, completion_tokens, total_tokens, cache_read_tokens, reasoning_tokens,
   started_at_unix_nano, ended_at_unix_nano, record_json
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(session_id, turn_id) DO UPDATE SET
   trace_id = CASE WHEN excluded.trace_id <> '' THEN excluded.trace_id ELSE usage_turns.trace_id END,
   success = COALESCE(excluded.success, usage_turns.success),
@@ -429,6 +444,8 @@ ON CONFLICT(session_id, turn_id) DO UPDATE SET
   tool_error_count = MAX(usage_turns.tool_error_count, excluded.tool_error_count),
   recovered_tool_error_count = MAX(usage_turns.recovered_tool_error_count, excluded.recovered_tool_error_count),
   unrecovered_tool_error_count = MAX(usage_turns.unrecovered_tool_error_count, excluded.unrecovered_tool_error_count),
+  tool_failure_streak = MAX(usage_turns.tool_failure_streak, excluded.tool_failure_streak),
+  last_tool_success = CASE WHEN excluded.last_tool_success <> '' THEN excluded.last_tool_success ELSE usage_turns.last_tool_success END,
   prompt_tokens = MAX(usage_turns.prompt_tokens, excluded.prompt_tokens),
   completion_tokens = MAX(usage_turns.completion_tokens, excluded.completion_tokens),
   total_tokens = MAX(usage_turns.total_tokens, excluded.total_tokens),
@@ -447,6 +464,8 @@ ON CONFLICT(session_id, turn_id) DO UPDATE SET
 		int64(failedTotal),
 		int64(recovered),
 		int64(unrecovered),
+		int64(failureStreak),
+		lastSuccessTool,
 		payloadInt64(payload, "usage_prompt_tokens", "prompt_tokens"),
 		payloadInt64(payload, "usage_completion_tokens", "completion_tokens"),
 		payloadInt64(payload, "usage_total_tokens", "total_tokens"),

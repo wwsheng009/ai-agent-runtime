@@ -83,6 +83,9 @@ type SessionRollup struct {
 	SubagentFailureRate   float64 `json:"subagent_failure_rate,omitempty"`
 	SubagentTimeouts      int     `json:"subagent_timeouts,omitempty"`
 	RetryRecoveredTurns   int     `json:"retry_recovered_turns,omitempty"`
+	// MaxToolFailureStreak 是会话内各回合"最长连续工具失败"的最大值（§3.1
+	// 归因链）：诊断面板据此一眼看到陷得最深的连续失败。
+	MaxToolFailureStreak int `json:"max_tool_failure_streak,omitempty"`
 	AverageResponseTimeMs int64   `json:"average_response_time_ms,omitempty"`
 	TotalDurationMs       int64   `json:"total_duration_ms,omitempty"`
 	// AverageFirstTokenMs 会话内已观测请求的首字时间均值（样本加权）。
@@ -265,6 +268,12 @@ type TurnUsage struct {
 	ToolErrors            int         `json:"tool_errors"`
 	RecoveredToolErrors   int         `json:"recovered_tool_errors,omitempty"`
 	UnrecoveredToolErrors int         `json:"unrecovered_tool_errors,omitempty"`
+	// ToolFailureStreak 是该回合内最长连续工具失败次数（§3.1 归因链：连续
+	// 次数说明"陷得多深"，与 recovered/unrecovered 的"是否恢复"互补）。
+	ToolFailureStreak int `json:"tool_failure_streak,omitempty"`
+	// LastToolSuccess 是该回合最后一次成功工具调用的名字（空 = 本回合无成功），
+	// 与 ToolFailureStreak 一起回答"最后一次成功 → 连续失败几次"。
+	LastToolSuccess string `json:"last_tool_success,omitempty"`
 	Usage                 TokenTotals `json:"usage"`
 	UsageQuality          string      `json:"usage_quality"`
 	UsageCoverage         float64     `json:"usage_coverage"`

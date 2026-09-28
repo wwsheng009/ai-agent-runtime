@@ -401,6 +401,8 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   tool_error_count             INTEGER NOT NULL DEFAULT 0,
   recovered_tool_error_count   INTEGER NOT NULL DEFAULT 0,
   unrecovered_tool_error_count INTEGER NOT NULL DEFAULT 0,
+  tool_failure_streak          INTEGER NOT NULL DEFAULT 0,
+  last_tool_success            TEXT NOT NULL DEFAULT '',
   prompt_tokens                INTEGER NOT NULL DEFAULT 0,
   completion_tokens            INTEGER NOT NULL DEFAULT 0,
   total_tokens                 INTEGER NOT NULL DEFAULT 0,
@@ -539,6 +541,24 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 	} else if hasErrorCategory {
 		if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_usage_requests_error_category ON usage_requests(error_category) WHERE error_category <> ''`); err != nil {
 			return fmt.Errorf("migrate usage analytics db: %w", err)
+		}
+	}
+	// §3.1 工具错误级联：usage_turns 补"回合内最长连续失败"与"最后一次成功
+	// 工具名"两列（老库幂等迁移，与新库 DDL 同源）。
+	if !s.readOnly {
+		if hasStreak, err := s.hasColumn("usage_turns", "tool_failure_streak"); err != nil {
+			return err
+		} else if !hasStreak {
+			if _, err := s.db.Exec("ALTER TABLE usage_turns ADD COLUMN tool_failure_streak INTEGER NOT NULL DEFAULT 0"); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
+		}
+		if hasLastSuccess, err := s.hasColumn("usage_turns", "last_tool_success"); err != nil {
+			return err
+		} else if !hasLastSuccess {
+			if _, err := s.db.Exec("ALTER TABLE usage_turns ADD COLUMN last_tool_success TEXT NOT NULL DEFAULT ''"); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
 		}
 	}
 	// 版本门控迁移：v1/v2 基础表 → v2 版本号 → v3 预聚合列（§6.1）。

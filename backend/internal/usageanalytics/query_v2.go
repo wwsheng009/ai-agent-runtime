@@ -666,16 +666,17 @@ FROM usage_subagents WHERE parent_session_id IN (%s) GROUP BY parent_session_id`
 	}
 
 	if rows, ok, err := s.query(fmt.Sprintf(`
-SELECT session_id, SUM(recovered_tool_error_count)
+SELECT session_id, SUM(recovered_tool_error_count), MAX(tool_failure_streak)
 FROM usage_turns WHERE session_id IN (%s) GROUP BY session_id`, placeholders), args...); err == nil && ok {
 		for rows.Next() {
 			var sessionID string
-			var recovered int
-			if err := rows.Scan(&sessionID, &recovered); err != nil {
+			var recovered, maxStreak int
+			if err := rows.Scan(&sessionID, &recovered, &maxStreak); err != nil {
 				break
 			}
 			if position, found := index[sessionID]; found {
 				rollups[position].RetryRecoveredTurns = recovered
+				rollups[position].MaxToolFailureStreak = maxStreak
 			}
 		}
 		rows.Close()
@@ -692,7 +693,8 @@ func (s *Store) enrichTurnsWithV2(sessionID string, turns []TurnUsage) {
 		index[strings.TrimSpace(turns[i].TurnID)] = i
 	}
 	rows, ok, err := s.query(`
-SELECT turn_id, tool_error_count, recovered_tool_error_count, unrecovered_tool_error_count
+SELECT turn_id, tool_error_count, recovered_tool_error_count, unrecovered_tool_error_count,
+       tool_failure_streak, last_tool_success
 FROM usage_turns WHERE session_id = ?`, sessionID)
 	if err != nil || !ok {
 		return
@@ -700,8 +702,9 @@ FROM usage_turns WHERE session_id = ?`, sessionID)
 	defer rows.Close()
 	for rows.Next() {
 		var turnID string
-		var toolErrors, recovered, unrecovered int
-		if err := rows.Scan(&turnID, &toolErrors, &recovered, &unrecovered); err != nil {
+		var toolErrors, recovered, unrecovered, failureStreak int
+		var lastSuccess string
+		if err := rows.Scan(&turnID, &toolErrors, &recovered, &unrecovered, &failureStreak, &lastSuccess); err != nil {
 			return
 		}
 		if position, found := index[strings.TrimSpace(turnID)]; found {
@@ -709,6 +712,8 @@ FROM usage_turns WHERE session_id = ?`, sessionID)
 			turns[position].ToolResultsObserved = toolErrors
 			turns[position].RecoveredToolErrors = recovered
 			turns[position].UnrecoveredToolErrors = unrecovered
+			turns[position].ToolFailureStreak = failureStreak
+			turns[position].LastToolSuccess = lastSuccess
 		}
 	}
 }
