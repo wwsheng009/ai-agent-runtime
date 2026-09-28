@@ -847,6 +847,15 @@ func (c *sessionAgentController) ApplyWorktree(ctx context.Context, args toolbro
 	if err != nil {
 		return nil, err
 	}
+	if state := c.handler.resolveAgentRuntimeState(ctx, sessionID); apiAgentRuntimeStateExecuting(state) {
+		// Landing a worktree while its session still holds a turn races the
+		// child's remaining writes (2026-09-27 incident: a child applied its own
+		// worktree mid-turn). Wait or close first; "no evidence" never blocks.
+		return nil, fmt.Errorf(
+			"apply refused: session %s is still executing (runtime_state=%s); wait for it to finish (wait_agent) or close it (close_agent) before landing its worktree",
+			sessionID, state,
+		)
+	}
 	diffStat, _ := handle.DiffStat(ctx)
 	report, err := handle.ApplyWithReport(ctx, worktree.ApplyOptions{
 		Paths: append([]string(nil), args.Paths...),
@@ -872,8 +881,9 @@ func (c *sessionAgentController) ApplyWorktree(ctx context.Context, args toolbro
 		Kept:              args.Keep,
 		SkippedPaths:      append([]string(nil), report.SkippedPaths...),
 		DeferredDeletions: append([]string(nil), report.DeferredDeletions...),
+		ForceBackupCommit: report.BackupCommit,
 	}
-	notes := make([]string, 0, 2)
+	notes := make([]string, 0, 3)
 	if len(report.SkippedPaths) > 0 {
 		notes = append(notes, fmt.Sprintf(
 			"%d worktree path(s) are outside the requested paths filter and were not applied: %s",
@@ -883,6 +893,11 @@ func (c *sessionAgentController) ApplyWorktree(ctx context.Context, args toolbro
 		notes = append(notes, fmt.Sprintf(
 			"%d path(s) deleted in the worktree branch were left in place (a path checkout cannot express deletions): %s",
 			len(report.DeferredDeletions), strings.Join(report.DeferredDeletions, ", ")))
+	}
+	if report.BackupCommit != "" {
+		notes = append(notes, fmt.Sprintf(
+			"forced apply overwrote tracked main-tree changes; a snapshot was kept at %s (recover with: git stash apply %s)",
+			report.BackupCommit, report.BackupCommit))
 	}
 	result.NextAction = strings.Join(notes, "; ")
 	if !args.Keep {
