@@ -177,7 +177,12 @@ type Handler struct {
 	// wait_agent window and returns next_action=suspend. It lives on the
 	// long-lived Handler because sessionAgentController instances are built per
 	// broker/request, while the budget must survive them.
-	waitBudget                  agentcontrol.WaitBudget
+	waitBudget agentcontrol.WaitBudget
+	// progressRunMu / progressRunIDs 缓存 session→active ExecutionRun 的解析结果
+	//（P0-1）：ReAct 循环的进度 tick 不应每步都查一次账本；与 waitBudget 同理，
+	// 缓存挂在长生命周期 Handler 上（sessionAgentController 按 broker/请求构建）。
+	progressRunMu               sync.Mutex
+	progressRunIDs              map[string]progressRunCacheEntry
 	aicliConfigMu               sync.RWMutex
 	aicliConfig                 *agentconfig.Config
 	siteAccountService          SiteAccountService

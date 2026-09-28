@@ -4491,6 +4491,9 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		EventStore:   eventStore,
 		EventBus:     h.getRuntimeEventBus(),
 		LoopConfig:   loopConfig,
+		// P0-1：run 级进度 tick → 监督账本（LLM 响应完成、工具开始/结束、
+		// 每步迭代各一次）。无 supervision store 时返回 nil，循环行为不变。
+		OnProgress: h.progressRecorderForSession(sessionID),
 		// 灰度开关（默认开）：run 终态后到达的审批决议零恢复；显式
 		// supervision.approval_terminal_guard=false 可回退旧行为。
 		ApprovalTerminalGuard: h.supervisionConfig.ApprovalTerminalGuard,
