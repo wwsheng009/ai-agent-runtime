@@ -430,9 +430,16 @@ missing-target 指引（`TestFinalizeAgentWaitResultMissingTargetGuidesToReceipt
 **证据目录**：`artifacts/remote-debug-61409/`（两轮 invoke 原文、`status-round2.json` /
 `verify-status.json` / `verify2-status.json`、`verify-invoke.assistant.md`）。
 
-**剩余（诚实记录）**：① 账本行回退的 **API 宿主**（`sessionAgentController.snapshot`）与 CLI 对称实现，
-但只做了编译 + 全包回归，未加独立单测；② `wait_agent(task_id)` 返回的 `obligations[]` 在
-"无挂起记录"场景下仍缺省（模型只能从 agent 投影取状态）——按需要可再补账本直出。
+**剩余（诚实记录）**：① 账本行回退的 **API 宿主**（`sessionAgentController.snapshot`）与 CLI 对称实现
+~~只做了编译 + 全包回归，未加独立单测~~ **已补（2026-09-28，`0122bdd7`）**：
+`session_agent_batch_task_snapshot_test.go` 覆盖终态行投影（成功/失败证据/未绑定不伪装命中）；② `wait_agent(task_id)`
+返回的 `obligations[]` 在 "无挂起记录"场景下 ~~仍缺省（模型只能从 agent 投影取状态）——按需要可再补账本直出~~
+**已补（2026-09-28）**：两宿主新增 `waitTargetObligations`/`localWaitTargetObligations`——把调用方显式等待的
+目标（batch id / task id / 子会话 id）映射到所属批次，走与挂起路径同源的 `BuildWaitLedger` 直出账本
+（只覆盖 wait 目标、不扫描全部批次；预算键保持空，fail-open 不武装）。直出行不吃"全终态立即 finalize"
+短路，保证 agent 投影（状态/输出/失败原因）仍随本次等待返回。回归：
+`TestWaitAgentObligationsDirectFromTargetsWithoutParkedRecord`、
+`TestWaitAgentDirectObligationsFinalizeWhenTargetTerminal` 及 CLI 两条镜像用例。
 
 ### 7.10 长时运行/监管真机轮（session_20260926191909_od40XJn6，51875）
 

@@ -2141,13 +2141,18 @@ func (c *sessionAgentController) ResolveApproval(ctx context.Context, args toolb
 // 绝不丢输入也绝不谎报账本）。
 func (c *sessionAgentController) Wait(ctx context.Context, args toolbroker.WaitAgentArgs) (*toolbroker.AgentWaitResult, error) {
 	obligations, baseline, pending, budgetKey := c.waitLedger(ctx)
+	directOut := false
 	if len(obligations) == 0 {
 		// doc1 §7.9 剩余②：无挂起记录（未托管 / 已 resume / 非 durable 降级）时，
 		// 按调用方显式等待的目标从批次账本直出，obligations[] 不再缺省。
 		obligations, baseline, pending = c.waitTargetObligations(ctx, args)
+		directOut = len(obligations) > 0
 	}
 	waitBudgetLimit := c.agentsConfig().MaxConsecutiveWaitWithoutProgress
-	if len(obligations) > 0 && !pending {
+	if len(obligations) > 0 && !pending && !directOut {
+		// 挂起路径的"账本已无待办 ⇒ 立即 finalize"短路（AC-P2-4e）对直出行不适用：
+		// 模型显式等待的目标需要一次快照段来拿 agent 投影（状态/输出/失败原因），
+		// 全终态时该段本就不烧窗口。这里保持原有短路只服务挂起记录。
 		c.waitBudget().Reset(budgetKey)
 		return toolbroker.ApplyAgentWaitLedger(
 			toolbroker.FinalizeAgentWaitResult(&toolbroker.AgentWaitResult{}, time.Now()),
