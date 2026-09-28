@@ -20,6 +20,10 @@ type Scope struct {
 const (
 	ScopeModeChildren    = "children"
 	ScopeModeDescendants = "descendants"
+	// WakePendingOverdueThreshold 是"父会话存在 wake_pending 但长时间没有可
+	// 运行 turn"的告警阈值（建议稿 §2.5；计划 §12.1 关键告警）。快照据此把
+	// 滞留的未 claim wake 呈现为 wake_pending_overdue，而非静默积压。
+	WakePendingOverdueThreshold = 10 * time.Minute
 )
 
 // DescendantState is the runtime-projected state of one descendant. The
@@ -72,6 +76,9 @@ type Snapshot struct {
 	Descendants []SnapshotItem  `json:"descendants,omitempty"`
 	Truncated   bool            `json:"truncated,omitempty"`
 	NextSeq     int64           `json:"next_seq,omitempty"`
+	// OldestWakePendingAgeMs 是最老的未 claim wake 年龄（§2.5）：与
+	// Summary.WakePendingOverdue 一起让滞留可见。
+	OldestWakePendingAgeMs int64 `json:"oldest_wake_pending_age_ms,omitempty"`
 }
 
 // SnapshotSummary is the rollup counters (doc 6.2 summary).
@@ -85,6 +92,10 @@ type SnapshotSummary struct {
 	Canceling              int `json:"canceling,omitempty"`
 	TerminalUnacknowledged int `json:"terminal_unacknowledged,omitempty"`
 	ActionRequired         int `json:"action_required,omitempty"`
+	// §2.5 队列卫生：未 claim 的待投递 wake 数量与其中超过
+	// WakePendingOverdueThreshold 的数量。
+	PendingWakes       int `json:"pending_wakes,omitempty"`
+	WakePendingOverdue int `json:"wake_pending_overdue,omitempty"`
 }
 
 // SnapshotItem is one descendant row in the snapshot.
@@ -169,6 +180,13 @@ type SnapshotRequest struct {
 	HostCapabilities *HostCapabilities
 }
 
+// WakePendingLister is the optional store extension used by BuildSnapshot to
+// surface pending wake age (建议稿 §2.5 / 计划 §12.1 关键告警). Stores that do
+// not implement it keep building snapshots unchanged.
+type WakePendingLister interface {
+	ListWakePending(ctx context.Context, filter WakeFilter) ([]WakePending, error)
+}
+
 // BuildSnapshot assembles the unified snapshot from durable notifications,
 // pending actions and runtime descendant state. Default ordering prefers
 // abnormal/action-required items (doc 6.2 rule 7).
@@ -248,6 +266,34 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 			} else {
 				actionByTarget[key] = a
 			}
+		}
+	}
+
+	// §2.5 滞留告警：待投递 wake 的积压量与最老年龄必须可见，否则"父会话存在
+	// wake_pending 但长时间没有可运行 turn"只能靠人工审计发现（计划 §12.1）。
+	// 只统计未 claim 行：已被 claim 的 wake 表示 turn 侧已接手。
+	if wakeStore, ok := store.(WakePendingLister); ok {
+		if pendingWakes, err := wakeStore.ListWakePending(ctx, WakeFilter{RootScopeID: rootScopeID, UnclaimedOnly: true}); err == nil {
+			snapshot.Summary.PendingWakes = len(pendingWakes)
+			var oldest time.Duration
+			overdue := 0
+			for _, wake := range pendingWakes {
+				if wake.CreatedAt.IsZero() {
+					continue
+				}
+				age := snapshot.GeneratedAt.Sub(wake.CreatedAt)
+				if age < 0 {
+					age = 0
+				}
+				if age > oldest {
+					oldest = age
+				}
+				if age >= WakePendingOverdueThreshold {
+					overdue++
+				}
+			}
+			snapshot.Summary.WakePendingOverdue = overdue
+			snapshot.OldestWakePendingAgeMs = oldest.Milliseconds()
 		}
 	}
 
