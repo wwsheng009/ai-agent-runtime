@@ -14,6 +14,7 @@ import (
 type RegistryOptions struct {
 	Dial          DialFunc
 	Logger        Logger
+	Observer      Observer
 	ClientName    string
 	ClientVersion string
 }
@@ -255,14 +256,48 @@ func (s *Server) Status() ServerStatus {
 	return status
 }
 
-// wantsStart reports whether a lazy start should be attempted.
+// wantsStart reports whether a start (initial or crash replacement) should be
+// attempted now. A member whose first start failed is not retried
+// automatically; a crashed member is replaced while the restart budget lasts
+// (L2, `lsp.restartLimit`).
 func (s *Server) wantsStart() bool {
 	if s.entry.parent.isStopped() {
 		return false
 	}
-	s.entry.mu.Lock()
-	defer s.entry.mu.Unlock()
-	return s.entry.client == nil && !s.entry.starting && s.entry.lastErr == ""
+	entry := s.entry
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.starting {
+		return false
+	}
+	if entry.client == nil {
+		return entry.lastErr == ""
+	}
+	if entry.client.Status().State != StateCrashed {
+		return false
+	}
+	return entry.restarts < entry.parent.cfg.RestartLimitValue()
+}
+
+// recoverCrashed kicks a bounded crash replacement and reports whether waiting
+// for it makes sense. It never blocks: callers wait on the observable state
+// (starting → ready/unavailable) inside their own deadline.
+func (s *Server) recoverCrashed(ctx context.Context) bool {
+	entry := s.entry
+	if entry.parent.isStopped() {
+		return false
+	}
+	entry.mu.Lock()
+	starting := entry.starting
+	entry.mu.Unlock()
+	if starting {
+		return true
+	}
+	if !s.wantsStart() {
+		return false
+	}
+	go func() { _ = entry.start(ctx) }()
+	return true
 }
 
 // ensureStarted starts the member once, in the background. Failure is recorded
@@ -282,12 +317,28 @@ func (r *Registry) isStopped() bool {
 	return r.stopped
 }
 
-// start performs a blocking start and records the outcome.
+// start performs a blocking start and records the outcome. It also replaces a
+// crashed member while the automatic-recovery budget lasts (L2: the policy is
+// an implementation detail, the outcome stays observable through Status() and
+// the Observer seam).
 func (e *registryEntry) start(ctx context.Context) error {
 	e.mu.Lock()
-	if e.client != nil || e.starting {
+	if e.starting {
 		e.mu.Unlock()
 		return nil
+	}
+	if e.client != nil {
+		if e.client.Status().State != StateCrashed {
+			e.mu.Unlock()
+			return nil
+		}
+		if e.restarts >= e.parent.cfg.RestartLimitValue() {
+			e.mu.Unlock()
+			return fmt.Errorf("lsp: %s crashed; restart budget exhausted (restartLimit=%d)", e.spec.Name, e.parent.cfg.RestartLimitValue())
+		}
+		// Count the replacement before it starts so concurrent observers see
+		// the budget move immediately.
+		e.restarts++
 	}
 	e.starting = true
 	e.lastErr = ""
@@ -300,6 +351,7 @@ func (e *registryEntry) start(ctx context.Context) error {
 		Root:            e.parent.root,
 		Dial:            opts.Dial,
 		Log:             opts.Logger,
+		Observer:        opts.Observer,
 		StartupTimeout:  e.spec.StartupTimeout,
 		ShutdownTimeout: e.spec.ShutdownTimeout,
 		ClientName:      opts.ClientName,

@@ -207,6 +207,15 @@ type Config struct {
 	Servers []ServerSpec `yaml:"servers,omitempty" json:"servers,omitempty"`
 	// Diagnostics carries the inline-diagnostics knobs.
 	Diagnostics DiagnosticsConfig `yaml:"diagnostics,omitempty" json:"diagnostics,omitempty"`
+	// Prewarm starts every configured member when the pool is constructed
+	// instead of waiting for first use. Default false keeps the lazy start
+	// (W3); enabling it trades idle processes for a cold-start-free first
+	// edit.
+	Prewarm bool `yaml:"prewarm,omitempty" json:"prewarm,omitempty"`
+	// RestartLimit caps automatic crash recovery per member and session
+	// (L2). nil or a negative value means DefaultRestartLimit; 0 disables
+	// automatic recovery (manual Restart stays available).
+	RestartLimit *int `yaml:"restartLimit,omitempty" json:"restartLimit,omitempty"`
 }
 
 // DefaultConfig is the inert default: presets are declared but the pool stays
@@ -219,10 +228,28 @@ func DefaultConfig() Config {
 	}
 }
 
+// DefaultRestartLimit is the automatic crash-recovery cap applied when
+// lsp.restartLimit is unset: one replacement per member per session.
+const DefaultRestartLimit = 1
+
+// RestartLimitValue resolves the effective automatic-recovery cap. nil and
+// negative values fall back to DefaultRestartLimit; 0 disables automatic
+// recovery (L2).
+func (c Config) RestartLimitValue() int {
+	if c.RestartLimit == nil || *c.RestartLimit < 0 {
+		return DefaultRestartLimit
+	}
+	return *c.RestartLimit
+}
+
 // Normalize fills defaults and drops malformed entries. Duplicate names keep
 // the first declaration (stable precedence, A9).
 func (c Config) Normalize() Config {
 	c.Diagnostics = c.Diagnostics.Normalize()
+	if c.RestartLimit != nil {
+		limit := *c.RestartLimit
+		c.RestartLimit = &limit
+	}
 	if c.Servers == nil {
 		c.Servers = PresetServers()
 	}

@@ -41,13 +41,29 @@ type Outcome struct {
 	Servers []string
 }
 
+// BridgeOptions carries the injectable seams of the facade. Logger feeds both
+// the registry (server stderr, lifecycle logs) and the default event observer;
+// Observer adds a host-side consumer on top of the logging.
+type BridgeOptions struct {
+	Logger   Logger
+	Dial     DialFunc
+	Observer Observer
+}
+
 // NewBridge builds the facade. dial may be nil (SpawnProcess is used).
 func NewBridge(cfg Config, root string, logger Logger, dial DialFunc) *Bridge {
+	return NewBridgeWithOptions(cfg, root, BridgeOptions{Logger: logger, Dial: dial})
+}
+
+// NewBridgeWithOptions builds the facade from explicit seams.
+func NewBridgeWithOptions(cfg Config, root string, opts BridgeOptions) *Bridge {
 	cfg = cfg.Normalize()
+	logger := LoggerOrNop(opts.Logger)
+	observer := composeObservers(opts.Observer, logObserver(logger))
 	return &Bridge{
 		cfg:      cfg,
-		registry: NewRegistry(cfg, root, RegistryOptions{Dial: dial, Logger: logger}),
-		logger:   LoggerOrNop(logger),
+		registry: NewRegistry(cfg, root, RegistryOptions{Dial: opts.Dial, Logger: opts.Logger, Observer: observer}),
+		logger:   logger,
 	}
 }
 
@@ -298,6 +314,18 @@ func (b *Bridge) readyClient(ctx context.Context, server *Server, deadline time.
 			}
 			return nil, "client unavailable"
 		case StateStarting:
+		case StateCrashed:
+			// A crashed member is replaced automatically while the restart
+			// budget lasts (L2); kick the replacement and wait for it inside
+			// the shared deadline instead of degrading on first sight of the
+			// crash.
+			if !server.recoverCrashed(ctx) {
+				// Re-check: the replacement may have finished between the
+				// status read and the recovery decision.
+				if latest := server.Status(); latest.State == StateCrashed {
+					return nil, firstNonEmpty(latest.Reason, latest.LastError, string(latest.State))
+				}
+			}
 		default:
 			return nil, firstNonEmpty(status.Reason, status.LastError, string(status.State))
 		}

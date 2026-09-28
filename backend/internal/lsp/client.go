@@ -34,6 +34,8 @@ type ClientOptions struct {
 	Root string
 	Dial DialFunc
 	Log  Logger
+	// Observer receives lifecycle and diagnostics events. nil disables them.
+	Observer Observer
 	// StartupTimeout bounds initialize + initialized round trips.
 	StartupTimeout time.Duration
 	// ShutdownTimeout bounds shutdown + exit plus the kill fallback.
@@ -257,10 +259,39 @@ func (c *Client) Status() ServerStatus {
 	return c.status
 }
 
+// setStatus mutates the status record and emits a state event whenever the
+// observable state (or its failure reason) changed.
 func (c *Client) setStatus(mutate func(*ServerStatus)) {
 	c.mu.Lock()
+	beforeState := c.status.State
+	beforeErr := c.status.LastError
 	mutate(&c.status)
+	status := c.status
 	c.mu.Unlock()
+	if status.State != beforeState || status.LastError != beforeErr {
+		c.emit(Event{Kind: EventServerState, Status: status})
+	}
+}
+
+// emit delivers one observer event outside the client lock.
+func (c *Client) emit(event Event) {
+	if c.opts.Observer == nil {
+		return
+	}
+	if event.Server == "" {
+		event.Server = c.opts.Spec.Name
+	}
+	if event.Time.IsZero() {
+		event.Time = time.Now()
+	}
+	c.opts.Observer(event)
+}
+
+// touchActive records the last document operation the client served: the
+// observable "this server is actually working" fact in `lsp_servers` (L2).
+// It never emits an event by itself.
+func (c *Client) touchActive() {
+	c.setStatus(func(s *ServerStatus) { s.LastActive = time.Now() })
 }
 
 // Encoding reports the negotiated position encoding.
@@ -340,6 +371,7 @@ func (c *Client) OpenOrUpdate(ctx context.Context, path string, content []byte) 
 		if err := tr.notify("textDocument/didOpen", params); err != nil {
 			return version, fmt.Errorf("lsp: didOpen %s: %w", path, err)
 		}
+		c.touchActive()
 		return version, nil
 	}
 
@@ -354,6 +386,7 @@ func (c *Client) OpenOrUpdate(ctx context.Context, path string, content []byte) 
 	if err := tr.notify("textDocument/didChange", params); err != nil {
 		return version, fmt.Errorf("lsp: didChange %s: %w", path, err)
 	}
+	c.touchActive()
 	return version, nil
 }
 
@@ -382,6 +415,7 @@ func (c *Client) Save(ctx context.Context, path string) error {
 	if err := tr.notify("textDocument/didSave", params); err != nil {
 		return fmt.Errorf("lsp: didSave %s: %w", path, err)
 	}
+	c.touchActive()
 	return nil
 }
 
@@ -577,9 +611,13 @@ func (c *Client) handlePublishDiagnostics(params json.RawMessage) {
 	c.diags[payload.URI] = snap
 	waiters := c.waiters[payload.URI]
 	delete(c.waiters, payload.URI)
+	tracked := doc != nil
 	c.mu.Unlock()
 	for _, ch := range waiters {
 		close(ch)
+	}
+	if tracked {
+		c.emit(Event{Kind: EventDiagnostics, Path: URIToPath(payload.URI), Count: len(items)})
 	}
 }
 

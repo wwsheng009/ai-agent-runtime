@@ -9,6 +9,7 @@ import (
 
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/lsp"
+	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -35,6 +36,13 @@ const lspInlineDiagnosticsHint = "启用 LSP 时，本工具成功后会把同�
 // newLSPBridge builds the tool-layer facade. It returns nil when the LSP
 // section is disabled so every call site can treat LSP as absent (A11).
 func newLSPBridge(config *runtimecfg.RuntimeConfig, workspaceRoot string) *lsp.Bridge {
+	return newLSPBridgeWith(config, workspaceRoot, nil, nil)
+}
+
+// newLSPBridgeWith is the injectable seam (dial, observer). The bridge logs
+// lifecycle/diagnostics events through the runtime logger, and
+// `lsp.prewarm` starts the pool here instead of on the first edit.
+func newLSPBridgeWith(config *runtimecfg.RuntimeConfig, workspaceRoot string, dial lsp.DialFunc, observer lsp.Observer) *lsp.Bridge {
 	if config == nil || !config.LSP.Enabled {
 		return nil
 	}
@@ -42,8 +50,26 @@ func newLSPBridge(config *runtimecfg.RuntimeConfig, workspaceRoot string) *lsp.B
 	if root == "" {
 		root = "."
 	}
-	return lsp.NewBridge(config.LSP, root, nil, nil)
+	bridge := lsp.NewBridgeWithOptions(config.LSP, root, lsp.BridgeOptions{
+		Logger:   lspRuntimeLogger{},
+		Dial:     dial,
+		Observer: observer,
+	})
+	if config.LSP.Prewarm && bridge.Enabled() {
+		bridge.StartAll(context.Background())
+	}
+	return bridge
 }
+
+// lspRuntimeLogger adapts the runtime's global logger to the minimal
+// lsp.Logger surface, so server stderr and lifecycle events land in the
+// session log (L2 observability).
+type lspRuntimeLogger struct{}
+
+func (lspRuntimeLogger) Debugf(format string, args ...interface{}) { logpkg.S().Debugf(format, args...) }
+func (lspRuntimeLogger) Infof(format string, args ...interface{})  { logpkg.S().Infof(format, args...) }
+func (lspRuntimeLogger) Warnf(format string, args ...interface{})  { logpkg.S().Warnf(format, args...) }
+func (lspRuntimeLogger) Errorf(format string, args ...interface{}) { logpkg.S().Errorf(format, args...) }
 
 // registerLSPTooling registers the LSP tools that are enabled by config.
 // `lsp_servers` mirrors the pool state; `lsp_diagnostics` is opt-in through
@@ -159,6 +185,10 @@ func formatLSPServerStatus(status lsp.ServerStatus) string {
 	}
 	if status.Restarts > 0 {
 		builder.WriteString(fmt.Sprintf(" restarts=%d", status.Restarts))
+	}
+	if !status.LastActive.IsZero() {
+		builder.WriteString(" last_active=")
+		builder.WriteString(status.LastActive.UTC().Format(time.RFC3339))
 	}
 	if reason := strings.TrimSpace(status.Reason); reason != "" {
 		builder.WriteString(" reason=")

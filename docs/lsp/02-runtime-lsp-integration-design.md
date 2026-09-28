@@ -59,6 +59,11 @@ crush 是单进程 CLI，LSP client 集合在进程内共享，归属问题被"�
 - 运行中崩溃 → 标记该 server 为不可用，后续 `getDiagnostics` 跳过它。
 - 重启策略（自动/手动）属于实现细节，但**必须可观测**：`lsp_servers` 列要能表达"哪些 server 当前可用、哪些失败、失败原因"。
 
+> **实现注记（W2/W3 落地后）**：
+> - 自动恢复**有界**：同一 server 每个会话最多自动替换 `lsp.restartLimit` 次（默认 `1`；`0` 关闭自动恢复，手动重启不受限）。预算耗尽后仍按降级语义返回，不会无限重启。
+> - 生命周期事实（`starting`/`ready`/`unavailable`/`crashed`/`stopped` 与失败原因）与诊断发布（文件、条数）通过 `internal/lsp` 的事件缝（Observer）暴露，默认写入会话日志；`lsp_servers` 仍是面向模型的可观测面，事件缝不改变既有出口。
+> - `lsp.prewarm`（默认 `false`）可在池构建时预热全部成员，取代 W3 的首次使用懒启动；预热失败与懒启动失败同为"不可用"，不阻断会话。
+
 ### 2.3 L3 路由层
 
 一个文件可能被多个 server 覆盖（例如 tsserver 与 eslint）。crush 的 `HandlesFile` 是"逐 server 询问"，本项目保持同构，但要求：

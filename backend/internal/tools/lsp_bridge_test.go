@@ -2,10 +2,15 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/lsp"
 )
 
 func lspTestRuntimeConfig(t *testing.T, toolEnabled bool) *runtimecfg.RuntimeConfig {
@@ -94,5 +99,93 @@ func TestLSPServersToolReportsPool(t *testing.T) {
 	}
 	if !strings.Contains(output, "LSP pool:") || !strings.Contains(output, "gopls") {
 		t.Fatalf("lsp_servers must list the preset pool:\n%s", output)
+	}
+}
+
+// failingDial counts dial attempts and always fails, modelling a missing
+// binary without spawning anything.
+func failingDial(calls *int32) lsp.DialFunc {
+	return func(context.Context, lsp.ServerSpec, string, lsp.Logger) (*lsp.DialResult, error) {
+		atomic.AddInt32(calls, 1)
+		return nil, errors.New("missing binary")
+	}
+}
+
+func waitForLSPCondition(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestNewLSPBridgePrewarmStartsPool(t *testing.T) {
+	cfg := lspTestRuntimeConfig(t, false)
+	cfg.LSP.Prewarm = true
+	cfg.LSP.Servers = []lsp.ServerSpec{{Name: "fake", Command: "fake-lsp", Extensions: []string{".go"}}}
+	var calls int32
+	bridge := newLSPBridgeWith(cfg, cfg.Workspace.Root, failingDial(&calls), nil)
+	if bridge == nil {
+		t.Fatalf("bridge must exist while lsp.enabled=true")
+	}
+	t.Cleanup(func() { bridge.Stop(context.Background()) })
+
+	waitForLSPCondition(t, "prewarm dial", func() bool { return atomic.LoadInt32(&calls) == 1 })
+	waitForLSPCondition(t, "unavailable state", func() bool {
+		statuses := bridge.Statuses()
+		return len(statuses) == 1 && statuses[0].State == lsp.StateUnavailable
+	})
+	if reason := bridge.Statuses()[0].Reason; !strings.Contains(reason, "missing binary") {
+		t.Fatalf("prewarm failure must stay observable, reason = %q", reason)
+	}
+}
+
+func TestNewLSPBridgeStaysLazyByDefault(t *testing.T) {
+	cfg := lspTestRuntimeConfig(t, false)
+	cfg.LSP.Servers = []lsp.ServerSpec{{Name: "fake", Command: "fake-lsp", Extensions: []string{".go"}}}
+	var calls int32
+	bridge := newLSPBridgeWith(cfg, cfg.Workspace.Root, failingDial(&calls), nil)
+	if bridge == nil {
+		t.Fatalf("bridge must exist while lsp.enabled=true")
+	}
+	t.Cleanup(func() { bridge.Stop(context.Background()) })
+
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Fatalf("lazy default must not dial at construction, got %d call(s)", got)
+	}
+	if state := bridge.Statuses()[0].State; state != lsp.StateStarting {
+		t.Fatalf("pending member state = %q, want %q (pending first use)", state, lsp.StateStarting)
+	}
+
+	if !bridge.Handles(filepath.Join(cfg.Workspace.Root, "main.go")) {
+		t.Fatalf("fake spec must claim .go files")
+	}
+	waitForLSPCondition(t, "lazy dial on first use", func() bool { return atomic.LoadInt32(&calls) == 1 })
+}
+
+func TestFormatLSPServerStatusCarriesPoolFacts(t *testing.T) {
+	active := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	line := formatLSPServerStatus(lsp.ServerStatus{
+		Name:       "gopls",
+		State:      lsp.StateReady,
+		PID:        4242,
+		Restarts:   2,
+		LastActive: active,
+		Reason:     "ok",
+	})
+	for _, want := range []string{
+		"gopls: ready",
+		"pid=4242",
+		"restarts=2",
+		"last_active=2026-09-28T12:00:00Z",
+		"reason=ok",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("lsp_servers line %q must contain %q", line, want)
+		}
 	}
 }
