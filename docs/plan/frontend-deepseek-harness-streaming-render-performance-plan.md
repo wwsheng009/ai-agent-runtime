@@ -1,6 +1,6 @@
 # 前端万级流事件渲染性能方案（deepseek-harness 参考实现取证）
 
-> 状态：**全部计划项收敛：P0-1 / P0-2 / P1-1 / P1-2 已实施并验证（2026-09-28，见 §11）；P2-1 核对完成；P2-2 基准已锁定（预算草案就绪）；P2-3 决策账已建立；P1-3 已评估并暂缓立项（触发条件见 §11）**
+> 状态：**全部计划项收敛：P0-1 / P0-2 / P1-1 / P1-2 已实施并验证（2026-09-28，见 §11）；P2-1 核对完成；P2-2 基准锁定 + 预算门禁 + CI 全落地；P2-3 决策账已建立；P1-3 已评估并暂缓立项（触发条件见 §11）**
 > 日期：2026-09-28
 > 参考仓库：`E:\projects\ai\deepseek-harness`（master @ `c291e7961a`，2026-09-10）
 > 目标仓库：本仓库 `frontend/`
@@ -577,9 +577,19 @@ Deque 不做背压、不做合并、不做丢弃——**容量、coalescing、�
 
 **状态**
 
-- 基准已锁定（本机 40 轮场景）；两条场景中的「活跃重连」探针与 CI 接线
-  （release-aicli / build-aicli-win7 工作流）标注后续；「优化后重复测量再收紧」
-  的闭环从下次改动起生效。
+- 两条基准探针 + 预算门禁 + CI 接线全部落地：
+  - 活跃重连探针 `frontend/e2e/zz-reconnect-probe.manual.ts`（`context.setOffline`
+    真实掐断进行中 SSE → 前端自动重连收敛）。实测 8 轮场景：断线→在线收敛
+    ≈1.33s（marks 2625ms → 3958ms）、**零长任务**、帧 p95=17ms / max=50ms /
+    >100ms=0、mutations 869（/frame max 140）、removals 358——重连窗口无
+    主线程卡顿；
+  - 预算门禁 `frontend/e2e/budget-check.mjs`：只认 `baseline-*` / `reconnect-*`
+    报告，按上表红线断言（实测 2 份报告全绿，typewriter 等旧报告跳过）；
+  - CI `.github/workflows/frontend-perf-baseline.yml`：`workflow_dispatch` 手动
+    触发（含历史轮数入参），pnpm install → build → 双探针 → 门禁 → 报告归档；
+    **不接发布管道**（性能基准是测量工具，不阻塞 release）。
+- 「优化后重复测量再收紧」闭环生效：改代码 → 复跑本 workflow → 对比报告 →
+  超线即红灯，新基线回填后再收紧 budget-check 阈值。
 
 ### P2-3 性能决策记录（已实施，2026-09-28）
 
@@ -639,9 +649,8 @@ Deque 不做背压、不做合并、不做丢弃——**容量、coalescing、�
 ### 未实施（后续）
 
 - **P1-3** 已评估：暂缓立项（触发条件：可见行 >2000 劣化 / 导出 / 多视图同步 /
-  协议级续传，见 §11）；
-- **P2-2** 剩余接线：活跃重连基准探针 + CI 基准 job（release-aicli /
-  build-aicli-win7 工作流），标注后续。
+  协议级续传，见 §11）。
+- 无例行未实施项；性能治理进入「复测 → 收紧」的常态循环（CI workflow 手动触发）。
 
 ---
 

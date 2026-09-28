@@ -1,0 +1,78 @@
+name: Frontend perf baseline (manual)
+
+# P2-2 预算制度在 CI 的执行端：手动触发跑两条性能基准（长会话流式 + 活跃重连），
+# 产出报告并用预算红线断言（frontend/e2e/budget-check.mjs，阈值来源
+# docs/plan/frontend-deepseek-harness-streaming-render-performance-plan.md §11 P2-2）。
+#
+# 用途：
+# - 优化前后各跑一次，对比报告（A/B 基线）；超红线即红灯（step 失败）；
+# - 不接发布管道——性能基准是测量/治理工具，不阻塞发布；
+# - 每轮优化后复测，并把新基线回填计划书后再收紧 budget-check 阈值。
+#
+# 触发：仓库 Actions 页手动运行（workflow_dispatch）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: 历史轮数（zz-perf-probe 的 PERF_ROUNDS，默认 40，0 = 空会话）
+        type: number
+        default: 40
+
+env:
+  NODE_VERSION: "24"
+
+jobs:
+  baseline:
+    name: Capture + gate perf baselines
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browser (chrome)
+        run: pnpm exec playwright install --with-deps chrome
+
+      - name: Build (tsc + vite, 探针的 dist 新鲜度守卫前提)
+        run: pnpm build
+
+      - name: Probe 1 — long-session streaming baseline
+        run: >-
+          PERF_ROUNDS=${{ inputs.rounds || 40 }}
+          PERF_TAG=baseline-ci
+          pnpm exec playwright test --config playwright.manual.config.ts e2e/zz-perf-probe.manual.ts
+
+      - name: Probe 2 — active reconnect baseline
+        run: >-
+          PERF_TAG=ci
+          pnpm exec playwright test --config playwright.manual.config.ts e2e/zz-reconnect-probe.manual.ts
+
+      - name: Gate — budget check (red lines)
+        run: node e2e/budget-check.mjs .artifacts/perf
+
+      - name: Upload perf reports
+        uses: actions/upload-artifact@v7
+        with:
+          name: perf-reports
+          path: frontend/.artifacts/perf
+          if-no-files-found: error
+          retention-days: 30
