@@ -475,7 +475,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 - **P2-1 ✅ 注册表与解析器**：`runtimeCommandSpec`（Mode/Effect/Category/Confirm/Notice/SwitchKey）+ 附录 F.1 全量 59 条 + F.2 别名归并 + 子命令变体解析；未登记命令/未知子命令 → queue（INV-6）；T28 不变式与 T29 catalog 覆盖单测已绿（`chat_runtime_command_registry.go`，尚未被路由消费——按 P2-2/P2-3 接入）。
 - **P2-2 ✅ 三级开关**：`AICLI_CHAT_RUNTIME_INTERACTION`（auto/readonly/off）+ `..._CATEGORIES`（C#=mode）+ `..._COMMANDS`（命令=mode，键先别名归并）；优先级命令级 > 分类级 > 全局；block 不可被放宽；T31 单测已绿（`chat_runtime_command_switch.go`，消费接入见 P2-3）。
 - **P2-3 ✅ 宿主与生效域执行器**：`runtimeCommandHost.SubmitBusy`（注册表→三级开关→安全门→模式分发）+ 生效域守卫（session/process 不可达，block+process 例外只拒绝）+ 非 read 生效域执行后的 Notice 提示 + 统一审计事件 `aicli.chat.runtime_interaction`（命令/模式/生效域/结果/耗时，T32/T33）；路由由注册表接管（**双开关显式启用**才生效，P2 环境变量未设置时保持 P1 首批白名单行为）；screen/prompt 载体仍按 P2-4 降级。
-- **P2-4 🚧 副屏与 prompt 载体**：① 租约等待 ✅ `AcquireAlternateScreenWait` + surface 级预算 `SetAlternateScreenWaitBudget`（既有 ~20 处 handler 调用点零改动继承等待能力；含超时/取消/致命错误/复位共 7 项单测，见 G.9）；② 流式缓冲 ✅ 核验（租约期 frame `Invalidate`+`Deferred`、释放后 `FullRepaint` 已由 `TestTerminalSessionLeaseReleaseForcesPrimaryRecovery` 锁定，**不新增冗余 StreamHold/StreamFlush API**；长租约 ledger 增长量化归 U1/P0-2）；P2-4b-2 待办（设计见 G.9）：③ modal 影子登记与恢复、④ `prepareInteractiveRead` 跨回合门、⑤ 白名单 S 档接入 host（先 `/todos` 单条打通，再放量 `/history` `/usage` `/debug display` `/web endpoints` `/account`）+ T20~T26/T34。
+- **P2-4 🚧 副屏与 prompt 载体**：① 租约等待 ✅ `AcquireAlternateScreenWait` + surface 级预算 `SetAlternateScreenWaitBudget`（既有 ~20 处 handler 调用点零改动继承等待能力；含超时/取消/致命错误/复位共 7 项单测，见 G.9）；② 流式缓冲 ✅ 核验（租约期 frame `Invalidate`+`Deferred`、释放后 `FullRepaint` 已由 `TestTerminalSessionLeaseReleaseForcesPrimaryRecovery` 锁定，**不新增冗余 StreamHold/StreamFlush API**；长租约 ledger 增长量化归 U1/P0-2）；④ 跨回合门 ✅ `prepareInteractiveRead` 入口 `waitForBusyScreenIdle`（以 surface 租约为事实源，含提示与中断；4 项单测，见 G.10）；剩余：③ modal 影子登记/恢复、⑤ 白名单 S 档接入 host（先 `/todos` 单条打通，再放量 `/history` `/usage` `/debug display` `/web endpoints` `/account`）+ T20~T26/T34。
 - **P2-5 生效域适配**：`live`（显示/热刷新/投递/控制面写）直接接入；`next-turn` 复用 `actorRebuildPending`/`reconcilePendingChatActorRebuild`/`refreshLocalRuntimeAfterSelection`（模型/Provider/reasoning_effort/profile/routing/add-dir）；`next-call` 复用 `withLivePermissionModeSource`（permission-mode/yolo/trust/grants/approval-reuse）；缺适配器或未决项（V1/V2a/V10）先降 queue 兜底（D12）。
 - **P2-6 网络长任务**：C11 保持 queue；P3 评估「异步任务 + 进度副屏」。
 - 每个晋升命令必须附快照依赖清单 + 忙时专项测试。
@@ -1116,3 +1116,15 @@ runtimeCommandSpec{
 3. **能力门（fail-closed）**：统一渲染面 + `session.Surface.Enabled()` + 全屏能力（`CanUseFullScreenList` / `canOpenChatDebugOverlay` 同款判定）+ 非 JSONOutput/NoInteractive + L0 无 priority prompt 待答；任一不满足 → 降级 queue（保持现状行为）。
 4. **放量顺序**：先 `/todos`（面板，§3.7.4 白名单）单条打通「租约（预算）→ modal 登记 → 只读交互 → Close → `Release` → `RequestPrimaryRecovery` → 恢复 capture」，再依次放 `/history`、`/usage`、`/debug display`、`/web endpoints`、`/account --no-refresh|show`；T20~T26 的 TTY 行为验证随后补齐。
 5. **灰度**：screen 档仅在 `AICLI_CHAT_RUNTIME_INTERACTION` 显式启用（auto）时生效；文档提示 T20~T26 未过前建议保持 `off`/`readonly`。
+
+### G.10 P2-4b-2a 跨回合副屏门（2026-09-28）
+
+| 项 | 结论 |
+| --- | --- |
+| 事实源 | 不新增会话标志：门直接以 **surface 副屏租约**为事实源（`chatBusyScreenActiveForSession` = `session.Surface.LeaseActive()`）。租约释放即门打开，天然覆盖「忙时副屏跨回合存活」这一唯一危险窗口。 |
+| 落点 | `prepareInteractiveRead`（`chat_team_drain.go:106`，主循环唯一开读前入口）在 `NoInteractive/JSONOutput` 守卫之后、`waitForInteractivePromptReady` 之前调用 `waitForBusyScreenIdle`。 |
+| 语义 | 100ms 轮询等待；首次进入给一次可见提示「副屏交互进行中，关闭后将恢复输入」；`session.IsInterrupted()` 时立即返回 `errChatInteractivePromptCancelled`，让主循环走既有中断分支（`chat.go:1644-1654`）。 |
+| 为何安全 | 现有非忙时副屏（`/resume` `/history` `/todos` `/backtrack` `/export` `/mcp` `/model` 面板等）都在命令 handler 内「开租约 → 交互 → 释放」后才返回主循环，主循环再次调用 `prepareInteractiveRead` 时租约必已释放 → 门对既有流程零影响（回归实测：整包仅剩 2 个 `RunChatLoop` 基线失败）。 |
+| 测试 | 4 项：租约活跃时阻塞、释放后放行、无租约立即返回（含 nil session/无 surface）、中断快速返回；外加 `prepareInteractiveRead` 集成项验证门确实被调用。`-race` 通过。 |
+
+**剩余（P2-4b-2b）**：③ `chatInputOwnerModal` 影子登记与恢复 + ⑤ `runtimeCommandHost.runScreen`（预算 + 能力门 + 白名单）+ `/todos` 单条打通；随后 T20~T26 TTY 行为验证。

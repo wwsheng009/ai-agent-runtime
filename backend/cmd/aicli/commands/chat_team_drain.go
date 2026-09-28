@@ -107,6 +107,11 @@ func prepareInteractiveRead(session *ChatSession) (bool, string, error) {
 	if session == nil || session.NoInteractive || session.JSONOutput {
 		return false, "", nil
 	}
+	// P2-4b ④：忙时副屏可能跨回合存活；主循环开读前必须等它关闭，
+	// 否则 composer 会与副屏内的全屏列表/分页器争抢 stdin。
+	if err := waitForBusyScreenIdle(session); err != nil {
+		return false, "", err
+	}
 	if err := waitForInteractivePromptReady(session); err != nil {
 		return false, "", err
 	}
