@@ -83,10 +83,44 @@ func chatSlashCommandBusyPolicyFor(text string) chatBusyCommandPolicy {
 		return policy
 	}
 
+	// P2-3：显式启用运行时交互开关后，注册表成为策略的单一事实源（§3.8.2）。
+	if chatRuntimeInteractionRegistryActive() {
+		return chatBusyPolicyFromRuntimeSpec(text)
+	}
+
 	if chatSlashCommandQueueSafe(text) {
 		return chatBusyPolicyDeferred
 	}
 	return chatBusyPolicyReject
+}
+
+// chatRuntimeInteractionRegistryActive 判定注册表是否接管路由策略（P2-3）。
+// 需要两个开关同时满足，保证灰度可回退：
+//   - P1 忙时通道开启（AICLI_CHAT_BUSY_COMMAND）；
+//   - P2 开关被**显式设置**（AICLI_CHAT_RUNTIME_INTERACTION 非空，
+//     auto/readonly/off 任一）。未显式设置时保持 P1 首批白名单行为（T18 等价）。
+func chatRuntimeInteractionRegistryActive() bool {
+	if !chatBusyCommandEnabled() {
+		return false
+	}
+	return strings.TrimSpace(os.Getenv(runtimeInteractionEnv)) != ""
+}
+
+// chatBusyPolicyFromRuntimeSpec 把注册表声明（经三级开关降级后）映射到 P1 四档：
+// block→R；inline→I；screen/prompt/queue→D（副屏/prompt 载体见 P2-4）；未登记→D。
+func chatBusyPolicyFromRuntimeSpec(text string) chatBusyCommandPolicy {
+	spec, registered := resolveRuntimeCommandSpec(text)
+	if !registered {
+		return chatBusyPolicyDeferred
+	}
+	switch runtimeCommandWithSwitch(spec, runtimeSwitchTableFromEnv()).Mode {
+	case runtimeModeBlock:
+		return chatBusyPolicyReject
+	case runtimeModeInline:
+		return chatBusyPolicyImmediate
+	default:
+		return chatBusyPolicyDeferred
+	}
 }
 
 // chatBusyCommandNameAndArgs 归一命令名（小写，保留前导 `/`）与参数。

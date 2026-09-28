@@ -199,7 +199,7 @@ func ensureChatBufferedInputQueue(session *ChatSession) *chatInputQueue {
 		return chatInputCommandBusyPolicy(session, text)
 	})
 	session.InputQueue.setBusyCommandExecutor(func(item chatQueuedInput) bool {
-		return executeBusySlashCommand(session, item.Text)
+		return runtimeCommandHostFor(session).SubmitBusy(item.Text)
 	})
 	session.InputQueue.setRouteFeedback(func(text string, result chatInputRouteResult) {
 		renderBusyInputRouteFeedback(session, text, result)

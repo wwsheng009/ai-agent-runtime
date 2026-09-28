@@ -5,24 +5,32 @@ import (
 	"strings"
 )
 
-// executeBusySlashCommand 在忙时 capture 循环内执行一条 immediate 命令
-// （方案 §3.2 执行函数骨架 / §5 P1-5）。返回 true 表示命令已被本通道占有并完成
-// （成功渲染，或已给出可见的失败原因）；返回 false 表示未占有，调用方必须把它
-// 回退为 deferred（入队），绝不丢输入。
-//
-// 三道门 + TryLock 全部 fail-closed：
-//  1. 策略再校验（防御 catalog 竞态）；
-//  2. 统一渲染面（INV-2/M2）：legacy stdout 直写会话一律降级；
-//  3. L0 仲裁（INV-7）：仲裁器未注册或 modal/priority prompt 活跃 → 降级；
-//  4. Phase A TryLock：主循环正在解析/渲染时降级，capture 永不阻塞。
-//
-// 忙时安全断言（只读契约）：命令结果若携带 send/picker/overlay/screen/quit 等
-// 效应，视为分类错误 → 不渲染、降级排队并给出诊断。
+// executeBusySlashCommand 是 P1 的忙时命令入口（策略判定 + inline 执行）。
+// P2-3 起 capture 循环改走 runtimeCommandHost.SubmitBusy；本函数保留给
+// P1 策略路径与既有测试使用。
 func executeBusySlashCommand(session *ChatSession, line string) bool {
 	if session == nil || session.Interaction == nil {
 		return false
 	}
 	if chatSlashCommandBusyPolicyFor(line) != chatBusyPolicyImmediate {
+		return false
+	}
+	return runBusyInlineCommand(session, line)
+}
+
+// runBusyInlineCommand 是 inline 模式的执行原语（P2-3 起由 runtimeCommandHost
+// 复用）：不含策略判定，只做执行前的门禁与忙时安全断言。返回 true 表示命令已被
+// 本通道占有并完成渲染；false 表示未占有（调用方必须回退入队）。
+//
+// 门禁（全部 fail-closed）：
+//  1. 统一渲染面（INV-2/M2）：legacy stdout 直写会话一律降级；
+//  2. L0 仲裁（INV-7）：仲裁器未注册或 modal/priority prompt 活跃 → 降级；
+//  3. Phase A TryLock：主循环正在解析/渲染时降级，capture 永不阻塞。
+//
+// 忙时安全断言（只读契约）：命令结果若携带 send/picker/overlay/screen/quit 等
+// 效应，视为分类错误 → 不渲染、降级排队并给出诊断。
+func runBusyInlineCommand(session *ChatSession, line string) bool {
+	if session == nil || session.Interaction == nil {
 		return false
 	}
 	if !unifiedDirectInteractiveOutput(session) {

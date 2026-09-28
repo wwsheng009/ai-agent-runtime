@@ -474,7 +474,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 
 - **P2-1 ✅ 注册表与解析器**：`runtimeCommandSpec`（Mode/Effect/Category/Confirm/Notice/SwitchKey）+ 附录 F.1 全量 59 条 + F.2 别名归并 + 子命令变体解析；未登记命令/未知子命令 → queue（INV-6）；T28 不变式与 T29 catalog 覆盖单测已绿（`chat_runtime_command_registry.go`，尚未被路由消费——按 P2-2/P2-3 接入）。
 - **P2-2 ✅ 三级开关**：`AICLI_CHAT_RUNTIME_INTERACTION`（auto/readonly/off）+ `..._CATEGORIES`（C#=mode）+ `..._COMMANDS`（命令=mode，键先别名归并）；优先级命令级 > 分类级 > 全局；block 不可被放宽；T31 单测已绿（`chat_runtime_command_switch.go`，消费接入见 P2-3）。
-- **P2-3 宿主与生效域执行器**：`runtimeCommandHost.Submit` + `applyRuntimeEffect`（read/next-turn/next-call 适配器；session/process 拒绝）；统一审计事件与 Notice 提示（T32/T33）。
+- **P2-3 ✅ 宿主与生效域执行器**：`runtimeCommandHost.SubmitBusy`（注册表→三级开关→安全门→模式分发）+ 生效域守卫（session/process 不可达，block+process 例外只拒绝）+ 非 read 生效域执行后的 Notice 提示 + 统一审计事件 `aicli.chat.runtime_interaction`（命令/模式/生效域/结果/耗时，T32/T33）；路由由注册表接管（**双开关显式启用**才生效，P2 环境变量未设置时保持 P1 首批白名单行为）；screen/prompt 载体仍按 P2-4 降级。
 - **P2-4 副屏与 prompt 载体**：BusyScreen（§3.7 四项前置）+ priority prompt（确认/单选）复用；L0 输入移交（T20~T26、T34）。
 - **P2-5 生效域适配**：`live`（显示/热刷新/投递/控制面写）直接接入；`next-turn` 复用 `actorRebuildPending`/`reconcilePendingChatActorRebuild`/`refreshLocalRuntimeAfterSelection`（模型/Provider/reasoning_effort/profile/routing/add-dir）；`next-call` 复用 `withLivePermissionModeSource`（permission-mode/yolo/trust/grants/approval-reuse）；缺适配器或未决项（V1/V2a/V10）先降 queue 兜底（D12）。
 - **P2-6 网络长任务**：C11 保持 queue；P3 评估「异步任务 + 进度副屏」。
@@ -1068,3 +1068,22 @@ runtimeCommandSpec{
 **测试（4 项）**：`TestRuntimeCommandSwitchOffDegradesAllToQueue`（T31：遍历注册表全集断言 off 降级且 block 不变）、`TestRuntimeCommandSwitchReadonlyKeepsReadEffects`、`TestRuntimeCommandSwitchPrecedence`（含命令级覆盖分类级与 read 变体保留）、`TestRuntimeSwitchTableFromEnv`（解析/别名归并/非法项）。
 
 **边界**：与 P2-1 相同，本步骤只提供解析与降级函数，**尚未被路由或宿主消费**；运行时行为在 P2-3 接入前仍由 P1 的 BusyPolicy 通道决定。
+
+### G.7 P2-3 宿主与生效域执行器（已完成，2026-09-28）
+
+| 项 | 落地 |
+| --- | --- |
+| 宿主 | `runtimeCommandHost.SubmitBusy`（`chat_runtime_command_host.go`）：注册表解析 → 三级开关降级 → P1 总闸（未开一律 queue）→ 生效域守卫 → 模式分发（inline/queue/block 已落地；screen/prompt 降级，待 P2-4 载体）→ 审计发布 |
+| 执行原语 | 从 P1 执行器抽出 `runBusyInlineCommand`（统一面门 → 仲裁 L0 门 → Phase A TryLock → 解析 → 忙时安全断言 → 渲染 → 历史）；`executeBusySlashCommand` 保留为「P1 策略 + 原语」兼容入口 |
+| 生效域守卫（T32） | `runtimeHostEffectReachable`：`session`/`process` 在宿主层不可达；唯一合法组合是 `block+process`（`/exit`，只拒绝不执行）——该例外在守卫判定中显式放行 |
+| Notice（T32） | inline 且生效域非 `read` 的命令，执行后按 `spec.Notice` 给出生效提示（如 `/title <text>` → 「下一回合生效」） |
+| 审计（T33） | 事件 `aicli.chat.runtime_interaction`（payload：command/registered/mode/effect/result/occupied/duration_ms）；加入渲染数据面抑制清单（写入 eventLog/timeline/SSE，不产生 Scene 系统消息噪声） |
+| 路由接管 | `chatSlashCommandBusyPolicyFor` 在**双开关**下改由注册表映射：`block→R`、`inline→I`、`screen/prompt/queue→D`、未登记→D（T30）；映射发生在既有 catalog/子命令覆盖之后，保证 P1 已定级命令不回退 |
+| 灰度门（关键） | `chatRuntimeInteractionRegistryActive` = `AICLI_CHAT_BUSY_COMMAND` 打开 **且** `AICLI_CHAT_RUNTIME_INTERACTION` 被显式设置；P2 变量未设置时行为与 P1 首批白名单逐条一致（T18/T31 等价性保持） |
+| 接线 | capture 循环的 busy 消费方由 `executeBusySlashCommand` 改为 `runtimeCommandHost.SubmitBusy`（未占有一律回退入队，不丢输入） |
+
+**新增测试（7 项）**：`TestRuntimeCommandHostInlinesRegisteredReadCommand`（非首批 read 命令立即执行 + 审计内容 + 锁释放）、`TestRuntimeCommandHostDegradesScreenMode`（T6）、`TestRuntimeCommandHostQueuesUnknownCommand`（T30）、`TestRuntimeCommandHostRejectsBlockCommand`（block 拒绝 + 提示）、`TestRuntimeCommandHostEmitsNoticeForNextTurnEffect`（T32 Notice）、`TestRuntimeCommandHostEffectReachability`（T32）、`TestChatBusyPolicyRegistryMappingWhenP2Enabled`（auto/readonly/off/未启用 四态路由映射）。
+
+**验证**：`go build`/`gofmt` 干净；`-race`（host/registry/switch/queue/busy/executor 选择集）✅；整包回归仅剩 2 个 `RunChatLoop` 已知基线项（此前 4 项中 2 项已由并行工作流修复），无新增失败。
+
+**偏差与边界**：① `applyRuntimeEffect` 的 next-turn/next-call **适配器本体**属 P2-5，本步骤只做「生效域可达性守卫 + Notice + 审计」；当前 inline 集合中仅 `/title <text>` 为非 read 生效域，其写盘由既有 handler 完成。② P2 路由接管要求 P2 变量显式设置（而非 F.4 的默认 auto），作为分阶段灰度的过渡规则；P2-5 收口后可按 F.4 将默认切为 auto。③ `/clear` 等 C1 命令在 P2 显式启用后由「拒绝」变为「排队」，文案变更仍按 M5 留到 P3。

@@ -13,6 +13,9 @@ const (
 	chatEventInputQueueDiscarded = "input.queue.discarded"
 	chatEventInputQueueDrained   = "input.queue.drained"
 	chatInputQueueAgentName      = "aicli-input-queue"
+	// chatEventRuntimeInteraction 是统一运行时交互的审计事件（P2-3/T33）：
+	// 每次宿主交互记录 命令/模式/生效域/结果/耗时。
+	chatEventRuntimeInteraction = "aicli.chat.runtime_interaction"
 )
 
 // isChatInputQueueDiagnosticEvent 判断事件是否为输入队列本地诊断事件
@@ -50,7 +53,8 @@ func isChatInputQueueDiagnosticEvent(eventType string) bool {
 // 被抑制的事件仍会写入事件日志（eventLog / replay / TUI timeline）并
 // 经 SSE 转发，只影响渲染数据面。
 func isChatRenderDataPlaneSuppressedEvent(eventType string) bool {
-	return isChatInputQueueDiagnosticEvent(eventType) || eventType == chatWebDynamicStatusBusEvent || eventType == chatWebUserSubmittedBusEvent
+	return isChatInputQueueDiagnosticEvent(eventType) || eventType == chatEventRuntimeInteraction ||
+		eventType == chatWebDynamicStatusBusEvent || eventType == chatWebUserSubmittedBusEvent
 }
 
 func publishLocalChatDiagnosticEvent(session *ChatSession, eventType string, payload map[string]interface{}) {
