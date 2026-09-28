@@ -1165,8 +1165,8 @@ runtimeCommandSpec{
 | 执行路径 | 确认后走与 S 档相同的执行入口（Phase A + `recordChatPromptHistory`），审计 `result=executed`；拒绝审计 `result=rejected`（`Occupied=true`，不入队）；降级审计 `result=degraded`。 |
 | 首批白名单 | 仅 `/queue clear`（部署时最常用的「忙时清空排队输入」；其生效域是 InputQueue 自身）。空白归一（`/queue   clear` 等价）。其余 prompt 档（`/attach paste` `/debug on\|off` `/hotkeys reload` `/normal` 等）仍 deferred。 |
 | 能力门 | `chatBusyPromptChannelAvailable`（fail-closed：统一渲染面 + 交互式会话 + `Interaction` 可用），生产不可注入、测试经包级变量替身注入。 |
-| 测试 | 新增 5 项：策略映射（含空白归一、非首批 deferred）、确认后执行（审计 executed/prompt + modal 与 commandMu 释放 + 提问文案携带命令）、显式拒绝（消费不执行、审计 rejected）、通道不可用降级（审计 degraded）、非首批 prompt 不进入确认门；T35 审计扩展为「首批 prompt 白名单必须解析为 prompt 档」。 |
-| 说明 | 真机 TTY 下的确认提示观感与 ESC 中断路径仍需 T20~T26 验证；本步只锁定契约与失败模式。 |
+| 测试 | 新增 6 项：策略映射（含空白归一、非首批 deferred）、确认后执行（审计 executed/prompt + modal 与 commandMu 释放 + 提问文案携带命令）、显式拒绝（消费不执行、审计 rejected）、通道不可用降级（审计 degraded）、非首批 prompt 不进入确认门、**中断读取（answered=false）→ 未占有且不渲染「已取消」**（T34，见 G.15 同款断言口径）；T35 审计扩展为「首批 prompt 白名单必须解析为 prompt 档」。 |
+| 说明 | 确认门的三态语义（执行/拒绝/中断）已在单测层闭合；真机 TTY 下的**提示观感**（与流式内容交错、窄终端折行）仍需手工矩阵，ESC 路径的真机走查见 T34 遗留项。 |
 
 ### G.14 P2-4 TTY 真机证据：内核 pty 上的副屏租约生命周期（T20~T26 物理层闭环，2026-09-28）
 

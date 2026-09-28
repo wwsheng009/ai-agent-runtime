@@ -173,3 +173,31 @@ func TestBusyPromptChannelUnavailableEmitsNotice(t *testing.T) {
 		t.Fatalf("确认通道降级提示缺失：%q", got)
 	}
 }
+
+// T34：确认读取被中断（answered=false，如 ESC/EOF）必须「未占有」回退入队，
+// 且**不得**渲染「已取消」——那属于用户显式拒绝（confirmed=false）的语义。
+func TestBusyPromptInterruptedReadFallsBackWithoutCancelNotice(t *testing.T) {
+	session, coordinator, output, _ := newRuntimeHostTestSession(t)
+	releaseCapture := beginChatInputShadowLevel(session, chatInputOwnerBusyCapture)
+	defer releaseCapture()
+
+	withChatBusyPromptTestHook(t, func(*ChatSession, string, []string) (bool, bool) {
+		return false, false
+	})
+	occupied, executed := runBusyPromptCommand(session, "/queue clear")
+	if occupied || executed {
+		t.Fatalf("中断读取必须未占有，实际 occupied=%v executed=%v", occupied, executed)
+	}
+	coordinator.waitUIActorIdle()
+	awaitUnifiedPresenterIdle(t, coordinator)
+	if got := output.String(); strings.Contains(got, "已取消忙时执行") {
+		t.Fatalf("中断读取被误判为用户拒绝：%q", got)
+	}
+	if !chatBusyCommandArbitrationAllows(session) {
+		t.Fatal("中断读取后 modal 登记必须已释放")
+	}
+	if !session.commandMu.TryLock() {
+		t.Fatal("中断读取后 commandMu 必须已释放")
+	}
+	session.commandMu.Unlock()
+}
