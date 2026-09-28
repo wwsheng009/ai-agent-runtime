@@ -476,7 +476,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 - **P2-2 ✅ 三级开关**：`AICLI_CHAT_RUNTIME_INTERACTION`（auto/readonly/off）+ `..._CATEGORIES`（C#=mode）+ `..._COMMANDS`（命令=mode，键先别名归并）；优先级命令级 > 分类级 > 全局；block 不可被放宽；T31 单测已绿（`chat_runtime_command_switch.go`，消费接入见 P2-3）。
 - **P2-3 ✅ 宿主与生效域执行器**：`runtimeCommandHost.SubmitBusy`（注册表→三级开关→安全门→模式分发）+ 生效域守卫（session/process 不可达，block+process 例外只拒绝）+ 非 read 生效域执行后的 Notice 提示 + 统一审计事件 `aicli.chat.runtime_interaction`（命令/模式/生效域/结果/耗时，T32/T33）；路由由注册表接管（**双开关显式启用**才生效，P2 环境变量未设置时保持 P1 首批白名单行为）；screen/prompt 载体仍按 P2-4 降级。
 - **P2-4 🚧 副屏与 prompt 载体**：①②④ 见 G.9/G.10；③+⑤ ✅ **首批 S 档通道打通**（G.11）：策略映射 `screen→S`（仅白名单）+ 宿主 `case runtimeModeScreen` + `runBusyScreenCommand`（能力门 fail-closed / L0 仲裁 / modal 登记 / 租约预算 2s / 退出恢复），白名单 = `/todos` `/history` `/usage` `/debug display` `/web endpoints`；picker/写入类 screen 仍 Deferred。剩余：prompt 载体（确认/单选）与 T20~T26 TTY 真机验证、T34。
-- **P2-5 生效域适配**：`live`（显示/热刷新/投递/控制面写）直接接入；`next-turn` 复用 `actorRebuildPending`/`reconcilePendingChatActorRebuild`/`refreshLocalRuntimeAfterSelection`（模型/Provider/reasoning_effort/profile/routing/add-dir）；`next-call` 复用 `withLivePermissionModeSource`（permission-mode/yolo/trust/grants/approval-reuse）；缺适配器或未决项（V1/V2a/V10）先降 queue 兜底（D12）。
+- **P2-5 🚧 生效域适配**：核验完成（G.12）——注册表中 `inline+非 read` 仅 `/title <text>`，其 next-turn 语义由 Phase A 会话写承载（已加断言）；`chatBusyCommandUnsafeEffect` 覆盖已迁移分支的全部 Phase B 效应，忙时 inline 执行无静默丢效应路径；新增 **T35 准入审计**（inline+非 read 必须显式登记，否则测试失败）。仍需 actor 重建/权限源切换的 next-turn/next-call 命令（模型/Provider/reasoning_effort/profile/routing/add-dir、permission-mode/yolo/trust/grants/approval-reuse）当前全部为 screen/prompt → deferred，适配器与 V1/V2a/V10 未决项按 D12 兜底，待晋升时补。
 - **P2-6 网络长任务**：C11 保持 queue；P3 评估「异步任务 + 进度副屏」。
 - 每个晋升命令必须附快照依赖清单 + 忙时专项测试。
 
@@ -1142,3 +1142,15 @@ runtimeCommandSpec{
 | 测试 | 新增 4 项：策略映射（含首批/非首批/P1 关闭回退）、白名单执行（校验执行期间 modal 属主、预算 2s、退出后预算复位/modal 释放/commandMu 释放、审计 `executed`）、非首批 screen 不进入副屏入口（审计 `degraded`）、能力门 fail-closed（无 surface 会话不通过）。既有 T6（`/todos` 降级）与 P2 开关映射用例同步更新为 S 档契约。 |
 
 **行为影响**：仅在 `AICLI_CHAT_BUSY_COMMAND` 开启 **且** `AICLI_CHAT_RUNTIME_INTERACTION` 显式设置（auto）时，首批 5 条只读 screen 命令在忙时改走副屏；否则逐条等价于改造前（deferred 入队）。真机 TTY 行为验证（T20~T26）仍待补。
+
+### G.12 P2-5a 生效域核验（inline 非 read 的准入审计，2026-09-28）
+
+| 项 | 结论 |
+| --- | --- |
+| 注册表事实 | 全量注册表中 **inline 且非 read** 的命令**只有一个**：`/title <text>`（`runtimeModeInline` + `runtimeEffectNextTurn`）。其余 next-turn/next-call/live 命令全部是 screen/prompt 档（`/model` `/provider` `/reasoning_effort` `/profile` `/routing panel` `/agents` `/theme set`…），当前一律 deferred。 |
+| next-turn 语义 | 忙时执行 `/title <text>` 由 `tryExecuteStructuredChatCommand` 在 **Phase A** 写 `RuntimeSession.Metadata.Title`，下一回合读取会话字段即生效，**无需 actor 重建**；宿主按 §3.8.4 追加「下一回合生效」Notice。已加断言锁定（title 落盘 + Notice 双验证）。 |
+| Phase B 完备性 | `chatBusyCommandUnsafeEffect` 覆盖 `dispatchChatCommand` 已迁移分支消费的全部 Phase B 效应（quit / replay-history / transcript-pager / debug-overlay / web-endpoints / usage / account / accounts / resume / backtrack / model / theme / skill / export / mcp / backtrack-apply / send-objective / send-message / send-skill-turn / composer-draft），因此「忙时 inline 执行」等价于「零 Phase B 效应」，无静默丢效应路径。 |
+| 新增不变量 | **T35 准入审计**（`TestRuntimeCommandRegistryBusyAdmissionAudit`）：遍历注册表，任何 `inline + 非 read` 命令必须出现在显式准入表 `auditedInlineWrites` 中并附生效域结论；新登记此类命令会直接测试失败（防止未来静默执行未审计写入）。同时校验首批 screen 白名单必须指向真实注册项且含 `screen+read` 声明。 |
+| D12 兜底 | 需要 actor 重建/权限源切换的 next-turn/next-call 命令（V1/V2a/V10 未决项）仍保持 screen/prompt → deferred，未做任何提前晋升。 |
+
+**结论**：P2-5 在本轮**无需新适配器代码**——注册表现状下不存在「inline 执行会丢 Phase B 效应」的命令；风险面已被 T35 锁死，后续晋升 picker/写入类命令时必须先补确认流与快照依赖清单。

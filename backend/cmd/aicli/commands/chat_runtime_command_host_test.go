@@ -141,6 +141,14 @@ func TestRuntimeCommandHostEmitsNoticeForNextTurnEffect(t *testing.T) {
 	if !strings.Contains(output.String(), "下一回合生效") {
 		t.Fatalf("next-turn 命令未给出生效提示：%q", output.String())
 	}
+	// P2-5a：next-turn 语义必须由 Phase A 的会话写承载（无需 actor 重建），
+	// 否则忙时执行会静默丢效应。
+	if session.RuntimeSession == nil {
+		t.Fatal("测试会话缺少 RuntimeSession")
+	}
+	if got := strings.TrimSpace(session.RuntimeSession.Metadata.Title); got != "忙时改标题" {
+		t.Fatalf("next-turn 效应未落盘：title = %q", got)
+	}
 }
 
 // T30：未登记命令 → queue（不占有、不执行、不丢输入）。

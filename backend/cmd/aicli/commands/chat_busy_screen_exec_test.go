@@ -142,3 +142,57 @@ func TestRuntimeCommandHostScreenCapabilityFailClosed(t *testing.T) {
 		t.Fatal("无 surface 的会话不应通过副屏能力门")
 	}
 }
+
+// T35（P2-5a）：忙碌通道准入审计。inline 且非 read 的命令会被宿主**直接执行**
+// （忙时安全断言只拦 Phase B 效应），因此必须显式登记准入结论；新登记此类命令
+// 时本测试失败，强制先做生效域判断（§3.8.4/D12）。
+func TestRuntimeCommandRegistryBusyAdmissionAudit(t *testing.T) {
+	// 目前唯一：/title <text>（next-turn）——Phase A 仅写会话元数据，下一回合由
+	// 会话字段直接承载，无需 actor 重建（G.12）。
+	auditedInlineWrites := map[string]string{
+		"/title": "next-turn：Phase A 写 Metadata.Title，下一回合读取",
+	}
+
+	for name, entry := range runtimeCommandRegistry {
+		specs := make([]runtimeCommandSpec, 0, 1+len(entry.Variants))
+		if entry.Bare != nil {
+			specs = append(specs, *entry.Bare)
+		}
+		for _, variant := range entry.Variants {
+			specs = append(specs, variant)
+		}
+		for _, spec := range specs {
+			if spec.Mode != runtimeModeInline || spec.Effect == runtimeEffectRead {
+				continue
+			}
+			if _, ok := auditedInlineWrites[spec.Command]; !ok {
+				t.Errorf("inline+%s 命令 %q（注册键 %q）未登记忙时准入结论：需审计 Phase A 写效应或改为 screen/prompt",
+					spec.Effect, spec.Command, name)
+			}
+		}
+	}
+
+	// 首批 screen 白名单必须指向真实注册项，且至少有一个 screen+read 变体。
+	for command := range chatBusyScreenFirstBatchCommands {
+		entry, ok := runtimeCommandRegistry[command]
+		if !ok {
+			t.Errorf("首批白名单命令 %q 不在注册表中", command)
+			continue
+		}
+		matched := false
+		check := func(spec runtimeCommandSpec) {
+			if spec.Mode == runtimeModeScreen && spec.Effect == runtimeEffectRead {
+				matched = true
+			}
+		}
+		if entry.Bare != nil {
+			check(*entry.Bare)
+		}
+		for _, variant := range entry.Variants {
+			check(variant)
+		}
+		if !matched {
+			t.Errorf("首批白名单命令 %q 缺少 screen+read 声明", command)
+		}
+	}
+}
