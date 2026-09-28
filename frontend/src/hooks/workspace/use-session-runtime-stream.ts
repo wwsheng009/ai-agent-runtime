@@ -236,8 +236,11 @@ export function useSessionRuntimeStream({
       // 按到达顺序在同一次 reducer 里兑现：逐条 apply 的结果与「一条一次提交」
       // 完全一致（都是对最新 state 顺序应用），只是合并成一次页面级提交。
       const batch = pendingRuntimeCommits.splice(0, pendingRuntimeCommits.length);
-      setThreadsRef.current((current) =>
-        batch.reduce(
+      setThreadsRef.current((current) => {
+        // P0-2：整批都没有落点（重复帧 / 非当前线程 / 已定稿）时不产生新引用——
+        // setState 收到相同引用直接旁路，React 不再重渲染整棵工作区树。
+        let changed = false;
+        const nextThreads = batch.reduce(
           (threads, item) =>
             threads.map((thread) => {
               if (thread.id !== threadIdRef.current) {
@@ -251,25 +254,32 @@ export function useSessionRuntimeStream({
                 thread.lastError?.startsWith("Runtime stream failed")
                   ? { ...thread, transport: "live" as const, lastError: null }
                   : thread;
+              if (recovered !== thread) {
+                changed = true;
+              }
               // 方案B：请求进行中，打字机增量事件直接渲染到消息；
               // 否则只进事件快照（历史回放/reload 不误渲染），在途回合身份透传给桥接帧。
               // A durable event from another turn never mutates the
               // currently streaming assistant message.  The claim above
               // is intentionally shared by both transport paths.
-              if (item.shouldApplyLiveDelta) {
-                return applyRuntimeDeltaToThreadRef.current(
-                  recovered,
-                  item.event,
-                  item.activeTurn || undefined,
-                );
+              const applied = item.shouldApplyLiveDelta
+                ? applyRuntimeDeltaToThreadRef.current(
+                    recovered,
+                    item.event,
+                    item.activeTurn || undefined,
+                  )
+                : applyRuntimeEventToThreadRef.current(
+                    recovered, sessionId, item.nextEvents, item.event, item.activeTurn || undefined,
+                  );
+              if (applied !== recovered) {
+                changed = true;
               }
-              return applyRuntimeEventToThreadRef.current(
-                recovered, sessionId, item.nextEvents, item.event, item.activeTurn || undefined,
-              );
+              return applied;
             }),
           current,
-        ),
-      );
+        );
+        return changed ? nextThreads : current;
+      });
     };
 
     const runtimeCommitScheduler = createStreamingFrameScheduler(

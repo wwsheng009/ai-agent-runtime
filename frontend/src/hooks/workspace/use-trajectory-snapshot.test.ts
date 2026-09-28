@@ -128,4 +128,50 @@ describe("createTrajectoryStore（快照订阅 store）", () => {
     store.flush();
     expect(store.getSnapshot().items.length).toBe(1);
   });
+
+  it("读路径兜底：getSnapshot 同步兑现挂起批次，flush 时补发一次通知（P0-2）", () => {
+    const store = createTrajectoryStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+    store.push("chunk", { type: "text", content: "a", _event: { sequence: 1 } });
+    expect(listener).not.toHaveBeenCalled();
+
+    // 读路径（ensureFresh）：挂起批次同步应用，读到最新投影；渲染期不发布。
+    expect(store.getSnapshot().items.length).toBe(1);
+    expect(listener).not.toHaveBeenCalled();
+
+    // 下一次 flush 补发一次通知（不重复应用）。
+    store.flush();
+    expect(listener).toHaveBeenCalledTimes(1);
+    store.dispose();
+  });
+
+  it("无落点批次不发布：过期 seq 事件不改引用、不通知（P0-2）", () => {
+    const store = createTrajectoryStore();
+    const listener = vi.fn();
+    store.subscribe(listener);
+    store.push("chunk", { type: "text", content: "a", _event: { sequence: 1 } });
+    store.flush();
+    expect(listener).toHaveBeenCalledTimes(1);
+    const stable = store.getSnapshot();
+
+    // 过期 seq（重复投递）：reducer 幂等跳过 → 无落点 → 不发布、引用保持稳定。
+    store.push("chunk", { type: "text", content: "b", _event: { sequence: 1 } });
+    store.flush();
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(store.getSnapshot()).toBe(stable);
+    store.dispose();
+  });
+
+  it("无订阅者时 advanceCursor 仍先兑现挂起批次（强制同步点，P0-2）", () => {
+    const store = createTrajectoryStore();
+    // 无订阅者：非强制冲刷被惰性闸门拦截，挂起批次保留（不 rebuild）。
+    store.push("chunk", { type: "text", content: "a", _event: { sequence: 1 } });
+    store.advanceCursor(5);
+    // 强制同步点先应用 seq=1，再推进游标——事件不会被推进后的游标判为过期。
+    const snapshot = store.getSnapshot();
+    expect(snapshot.items.length).toBe(1);
+    expect(snapshot.lastEventSeq).toBe(5);
+    store.dispose();
+  });
 });

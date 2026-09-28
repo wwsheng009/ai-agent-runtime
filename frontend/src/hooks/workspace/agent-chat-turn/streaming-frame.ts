@@ -36,12 +36,24 @@ const MIN_COMMIT_INTERVAL_MS = 120;
  */
 export const STRUCTURAL_COMMIT_INTERVAL_MS = 1000;
 
+/** 隐藏标签页判定（P0-2）：无 document 环境（SSR / 单测）视为可见。 */
+function isDocumentHidden(): boolean {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+
 export function createStreamingFrameScheduler(
   renderStreamingMessage: (options?: { force?: boolean }) => void,
 ) {
   let pendingStreamingFrame: number | null = null;
   let pendingStreamingTimeout: number | null = null;
   let lastCommitAt = 0;
+  /**
+   * P0-2：自上次提交以来是否存在未兑现的渲染请求。
+   * - `schedule()` 置脏，提交清脏；
+   * - 隐藏标签页不排任何回调（零工作），脏位保留，恢复可见时一次兑现；
+   * - 无脏位的调度回调不再空提交（no-op commit 旁路）。
+   */
+  let dirty = false;
 
   const now = () =>
     typeof performance !== "undefined" && typeof performance.now === "function"
@@ -69,16 +81,25 @@ export function createStreamingFrameScheduler(
     }
     pendingStreamingFrame = null;
     clearPendingStreamingTimeout();
+    dirty = false;
   };
 
   const commitStreamingMessage = (force = false) => {
     cancelPending();
+    dirty = false;
     lastCommitAt = now();
     renderStreamingMessage({ force });
   };
 
-  /** 立即冲刷（页面恢复可见 / 流结束时调用）：不受最小间隔约束。 */
+  /**
+   * 立即冲刷（页面恢复可见 / 流结束时调用）：可见时不受最小间隔约束；
+   * 隐藏时只记脏，恢复可见时一次兑现（P0-2：隐藏标签页零工作）。
+   */
   const flushStreamingMessage = () => {
+    if (isDocumentHidden()) {
+      dirty = true;
+      return;
+    }
     commitStreamingMessage(true);
   };
 
@@ -91,11 +112,21 @@ export function createStreamingFrameScheduler(
     pendingStreamingFrame = window.requestAnimationFrame(() => {
       pendingStreamingFrame = null;
       clearPendingStreamingTimeout();
+      if (isDocumentHidden()) {
+        dirty = true; // 隐藏：保留脏位，恢复可见时兑现
+        return;
+      }
+      if (!dirty) {
+        return; // 无变化：不空提交
+      }
       commitStreamingMessage();
     });
 
-    // Background tabs do not fire rAF; a setTimeout fallback keeps the
-    // stream rendering alive (G3) and flushes as soon as the tab returns.
+    // 后台兜底（G3）只在可见时保留：隐藏标签页零工作（P0-2），恢复可见由
+    // visibilitychange 一次冲刷；挂起事件已累积在 turnState / 挂起批次里，不丢。
+    if (isDocumentHidden()) {
+      return;
+    }
     pendingStreamingTimeout = window.setTimeout(() => {
       if (
         pendingStreamingFrame !== null &&
@@ -105,11 +136,24 @@ export function createStreamingFrameScheduler(
         pendingStreamingFrame = null;
       }
       pendingStreamingTimeout = null;
+      if (isDocumentHidden()) {
+        dirty = true;
+        return;
+      }
+      if (!dirty) {
+        return;
+      }
       commitStreamingMessage();
     }, 100);
   };
 
   const scheduleStreamingMessage = () => {
+    dirty = true;
+    // P0-2：隐藏标签页零工作——不排 rAF / 不排兜底定时器；恢复可见时
+    // visibilitychange 看到脏位并一次冲刷。
+    if (isDocumentHidden()) {
+      return;
+    }
     if (pendingStreamingFrame !== null || pendingStreamingTimeout !== null) {
       return;
     }
@@ -137,9 +181,18 @@ export function createStreamingFrameScheduler(
   };
 
   const handleVisibilityChange = () => {
-    if (document.visibilityState === "visible") {
-      flushStreamingMessage();
+    if (document.visibilityState !== "visible") {
+      return;
     }
+    // 隐藏期间攒下的渲染请求（脏位 / 挂起句柄）在这里一次兑现；没有就不提交。
+    if (
+      !dirty &&
+      pendingStreamingFrame === null &&
+      pendingStreamingTimeout === null
+    ) {
+      return;
+    }
+    commitStreamingMessage(true);
   };
 
   const attachVisibilityListener = () => {

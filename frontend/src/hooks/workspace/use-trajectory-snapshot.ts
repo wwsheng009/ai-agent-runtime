@@ -9,7 +9,7 @@ import { useSyncExternalStore } from "react";
 import { TrajectoryBatcher } from "@/lib/trajectory/stream-batch";
 import {
   advanceSeqCursor,
-  applyEvent,
+  applyEvents,
   eventSeqOf,
   makeTrajectoryEvent,
 } from "@/lib/trajectory/trajectory-reducer";
@@ -169,11 +169,13 @@ export function createTrajectoryStore(options?: {
   };
 
   const flush = () => {
-    batcher.flushNow();
+    // 显式同步点：不受惰性闸门约束（调用方在兑现后立即读快照）。
+    batcher.flushNow(true);
   };
 
   const advanceCursorEntry = (targetSeq: number, record: boolean) => {
-    batcher.flushNow();
+    // 游标推进前必须先兑现挂起批次，否则更早的挂起事件会被推进后的游标判为过期。
+    batcher.flushNow(true);
     const before = snapshot.lastEventSeq;
     const result = advanceSeqCursor(snapshot, targetSeq);
     const moved = result.snapshot.lastEventSeq !== before || result.changes.length > 0;
@@ -260,22 +262,76 @@ export function createTrajectoryStore(options?: {
         advanceCursorEntry(action.seq, false);
       }
     }
-    batcher.flushNow();
+    batcher.flushNow(true);
     notify();
   };
 
+  /** 乱序缓冲是否有新增/覆盖（消费删除总伴随 lastEventSeq 推进，另行判定）。 */
+  const pendingBufferChanged = (
+    before: TrajectorySnapshot["pending"],
+    after: TrajectorySnapshot["pending"],
+  ): boolean => {
+    const beforeKeys = Object.keys(before);
+    if (beforeKeys.length !== Object.keys(after).length) {
+      return true;
+    }
+    return beforeKeys.some((key) => after[Number(key)] !== before[Number(key)]);
+  };
+
+  /**
+   * 批次是否产生真实变化（P0-2 无变化不发布）：
+   * - changes：item / revision 变更；
+   * - lastEventSeq：游标推进（含空洞跳过与缓冲消费）；
+   * - pending：乱序缓冲新增 / 覆盖。
+   */
+  const contentChanged = (
+    before: TrajectorySnapshot,
+    after: TrajectorySnapshot,
+    changeCount: number,
+  ): boolean =>
+    changeCount > 0 ||
+    after.lastEventSeq !== before.lastEventSeq ||
+    pendingBufferChanged(before.pending, after.pending);
+
+  /** 有未发布的真实变化（读路径 ensureFresh 应用后置位，下一次 flush 补发）。 */
+  let publishPending = false;
+
   const batcher = new TrajectoryBatcher({
     fallbackDelayMs: options?.fallbackDelayMs,
+    // P0-2「无订阅者不 rebuild」：轨迹视图未挂载时不产生投影重建成本，
+    // 读路径 ensureFresh 兜底（挂起批次保留，读时一次兑现）。
+    shouldFlush: () => listeners.size > 0,
     flush: (events) => {
-      for (const event of events) {
-        snapshot = applyEvent(snapshot, event).snapshot;
+      // P0-1：批量单次克隆 + 就地顺序应用（原实现逐条 applyEvent，每条事件
+      // 都整份克隆快照）。
+      const before = snapshot;
+      const result = applyEvents(before, events);
+      // P0-2：无真实变化（重复 seq / 已见 delta）时丢弃克隆、保持旧引用——
+      // 订阅方读到同一引用，useSyncExternalStore 直接旁路，不触发重渲染。
+      if (contentChanged(before, result.snapshot, result.changes.length)) {
+        publishPending = true;
+        snapshot = result.snapshot;
       }
-      notify();
+    },
+    onFlushed: () => {
+      // 发布统一由 onFlushed 承担（读路径兜底 ensureFresh 不发布）；仅在
+      // 确有未发布的真实变化时通知，no-op 批次静默。
+      if (publishPending) {
+        publishPending = false;
+        notify();
+      }
     },
   });
+  // P0-2：隐藏标签页不排帧、不排兜底定时器（零工作）；恢复可见时一次冲刷。
+  batcher.attachVisibilityListener();
 
   return {
-    getSnapshot: () => snapshot,
+    getSnapshot: () => {
+      // P0-2 读路径兜底（ensureFresh）：有挂起批次时先同步兑现，任何订阅方
+      // 读到的都是最新投影；发布推迟到下一次 flush / 可见性恢复。
+      batcher.ensureFresh();
+      return snapshot;
+    },
     push: (kind, payload) => pushEntry(kind, payload, true),
     flush,
     advanceCursor: (targetSeq) => advanceCursorEntry(targetSeq, true),
@@ -326,6 +382,7 @@ export function createTrajectoryStore(options?: {
       };
     },
     dispose: () => {
+      batcher.detachVisibilityListener();
       batcher.dispose();
       listeners.clear();
       seenDeltaKeys.clear();
