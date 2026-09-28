@@ -23,7 +23,7 @@ func testConfig(t *testing.T, mutate func(*Config)) Config {
 			Scope:       ScopeAll,
 			MaxItems:    20,
 			MaxChars:    2000,
-			WaitMS:      2000,
+			WaitMS:      500,
 			DegradeMode: DegradeHint,
 		},
 	}

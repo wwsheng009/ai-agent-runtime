@@ -429,6 +429,11 @@ func (c *Client) CurrentDiagnostics(path string) []Diagnostic {
 // WaitDiagnostics waits for diagnostics published for the given document
 // version. fresh=false means the wait timed out or only stale data was
 // available. version<=0 matches any publish received after the local change.
+//
+// An empty publish is only taken at face value once the freshness budget is
+// exhausted: servers such as rust-analyzer publish an empty set on didOpen
+// before analysis completes, and returning that interim result immediately
+// would mask the real diagnostics published moments later.
 func (c *Client) WaitDiagnostics(ctx context.Context, path string, version int, wait time.Duration) (items []Diagnostic, fresh bool) {
 	uri := PathToURI(path)
 	if wait <= 0 {
@@ -436,35 +441,50 @@ func (c *Client) WaitDiagnostics(ctx context.Context, path string, version int, 
 	}
 	deadline := time.Now().Add(wait)
 	for {
+		remaining := time.Until(deadline)
 		c.mu.Lock()
 		snap := c.diags[uri]
-		if snap != nil && !snap.Superseded && acceptable(snap, version) {
+		if snap != nil && !snap.Superseded && acceptable(snap, version) && len(snap.Items) > 0 {
 			items := append([]Diagnostic(nil), snap.Items...)
 			c.mu.Unlock()
 			return items, true
+		}
+		if remaining <= 0 {
+			c.mu.Unlock()
+			return c.settle(uri, version)
 		}
 		ch := make(chan struct{})
 		c.waiters[uri] = append(c.waiters[uri], ch)
 		c.mu.Unlock()
 
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return c.bestEffort(uri)
-		}
 		timer := time.NewTimer(remaining)
 		select {
 		case <-ch:
 			timer.Stop()
 		case <-ctx.Done():
 			timer.Stop()
-			return c.bestEffort(uri)
+			return c.settle(uri, version)
 		case <-timer.C:
-			return c.bestEffort(uri)
+			return c.settle(uri, version)
 		case <-c.done:
 			timer.Stop()
-			return c.bestEffort(uri)
+			return c.settle(uri, version)
 		}
 	}
+}
+
+// settle resolves a wait whose budget ran out: a conclusive empty snapshot is
+// an explicit "no problems" answer, anything else stays best effort (stale
+// data may still be reported, but never as fresh).
+func (c *Client) settle(uri string, version int) ([]Diagnostic, bool) {
+	c.mu.Lock()
+	snap := c.diags[uri]
+	if snap != nil && !snap.Superseded && acceptable(snap, version) && len(snap.Items) == 0 {
+		c.mu.Unlock()
+		return nil, true
+	}
+	c.mu.Unlock()
+	return c.bestEffort(uri)
 }
 
 // acceptable reports whether a snapshot satisfies a wait for version.
@@ -521,6 +541,10 @@ func (c *Client) handlePublishDiagnostics(params json.RawMessage) {
 		c.opts.Log.Warnf("lsp: %s malformed diagnostics: %v", c.opts.Spec.Name, err)
 		return
 	}
+	// Servers spell file URIs in their own way (drive-letter case, escaped
+	// colon). Normalize before matching tracked documents so the snapshot
+	// lands under the same key WaitDiagnostics looks up.
+	payload.URI = canonicalURI(payload.URI)
 	c.mu.Lock()
 	doc := c.docs[payload.URI]
 	if payload.Version != nil && doc != nil && doc.Version != *payload.Version {

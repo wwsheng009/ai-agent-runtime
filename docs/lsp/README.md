@@ -71,6 +71,7 @@
 
 > 验收映射（本次实现）：A1/A2/A3/A5/A7/A8/A10/A11 已有自动化用例，入口 `go test ./internal/lsp/... ./internal/tools/...`；
 > A4 受上游建表 gating（无新表/新列）；A6/A9 的默认值与多 server 优先级裁定需真实 server 基线与规格回流（§7），尚未在代码中固化为结论。
+> 真机冒烟：`TestRealRustAnalyzerRoundTrip`（rust-analyzer；未安装或 `-short` 时自动跳过）覆盖 spawn → initialize 握手 → didOpen/didChange/didSave → 诊断等待 → 追加式渲染全链路。
 
 **结论：本目录文档可以先行交付与评审，但其描述的代码实现必须以 `Phase4-start` 为最早起点。**
 在 Phase 0–3 期间，本文档的唯一用途是：让后续实现者不必重新做一遍调研。
