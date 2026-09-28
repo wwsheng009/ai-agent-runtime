@@ -1,6 +1,6 @@
 # 前端万级流事件渲染性能方案（deepseek-harness 参考实现取证）
 
-> 状态：**P0-1 / P0-2 / P1-1 / P1-2 已实施并验证（2026-09-28，见 §11）；P1-3 起待立项或按需推进**
+> 状态：**P0-1 / P0-2 / P1-1 / P1-2 已实施并验证（2026-09-28，见 §11）；P2-1 渲染面逐项核对完成（无代码改动）；P1-3 起待立项或按需推进**
 > 日期：2026-09-28
 > 参考仓库：`E:\projects\ai\deepseek-harness`（master @ `c291e7961a`，2026-09-10）
 > 目标仓库：本仓库 `frontend/`
@@ -503,10 +503,39 @@ Deque 不做背压、不做合并、不做丢弃——**容量、coalescing、�
   streaming-frame 4 项）；`tsc -b` 干净。全量验证以 `--maxWorkers=4` 低并发执行，
   规避默认并发 spawn 的 ENOMEM（本机内存紧张，非代码问题）。
 
+### P2-1 渲染面逐项核对（已核对，2026-09-28）
+
+**问题**
+
+- P1-1/P1-2 消除了「提交路径」的放大（订阅切片 + 分级帧门），需确认「渲染面」
+  本身没有第二处放大链：消息行是否被整列重建、增量 Markdown 是否重复解析、
+  折叠展开是否在流式期造成额外协调。
+
+**核对结论（未改代码）**
+
+- memo 覆盖 **已达标**：`message-row.tsx:191` `MessageRow = memo(MessageRowImpl)`
+  是唯一列表级挡板；行 props 全部可浅比较——`artifactMap`（:73）与
+  `branchAnchors`（:104）useMemo 缓存、`key={message.id}` 稳定、宿主回调直传、
+  行内按 id 绑定的回调在行内 `useCallback` 建一次；流式期只有增长中的行与其
+  active 标记切换涉及的两行重渲染。
+- 增量 Markdown **已达标**：`StreamingMarkdown`（segment-components.tsx）经
+  `useTypewriter` 单调揭示——冻结前缀比对永远判「追加」、只对增长中目标文本
+  打字；`liveTextRef` 只订阅 ref 不订阅渲染（增量与打字机单驱动，实测 ScriptDur
+  1.05s vs 双驱动 1.95s、LayoutCount 201 vs 442 的既有记录不回归）。
+- 折叠边界 **已达标**：折叠谓词是纯函数（`lib/chat-view/collapse.ts`，
+  `findFinalAnswerStart` 等，无 React 依赖）；两层折叠——回合级统计折叠行
+  `turn-process-row.tsx`（收起态过程行不渲染，统计口径来自折叠摘要）+
+  行级展开 `chat-process-row.tsx`（`expandable && expanded` 才渲染详情）；
+  语义与 `frontend-message-rendering-deepseek-alignment-plan.md`（批次 A–F 已
+  实施，e2e 73/73 全绿）一致。
+- 验证：以上文件位于 P1-1 的 3005 项全量测试覆盖内（message-list /
+  segment-rendering / collapse-rendering / live-stream-rendering 等既有用例全绿，
+  全量运行即本组验证）。
+
 ### 未实施（后续）
 
 - **P1-3 历史窗口评估**（按需）；
-- **P2-1 渲染面逐项核对**（memo / 增量 mdast / 折叠边界）；**P2-2 基准固化 + 预算制度**（需真实基准测量后再收紧）；**P2-3 性能决策记录**（本节为第一步留痕）。
+- **P2-2 基准固化 + 预算制度**（需真实基准测量后再收紧）；**P2-3 性能决策记录**（本节为第一步留痕）。
 
 ---
 
@@ -545,6 +574,7 @@ Deque 不做背压、不做合并、不做丢弃——**容量、coalescing、�
 | `frontend/src/lib/live-stream-text.ts` | live 揭示文本通道（瞬态/持久分离雏形） |
 | `frontend/src/lib/thread-state/thread-store.ts` | live / 结构双通道线程 store；按会话 live 分片（P1-1） |
 | `frontend/src/lib/thread-state/publication.ts` | 发布分级 `none / animation-frame / immediate`（P1-2） |
+| `message-row.tsx` / `segment-components.tsx` / `lib/chat-view/collapse.ts` / `turn-process-row.tsx` | P2-1 核对对象：memo 挡板 / 单调揭示增量 Markdown / 两层折叠（已核对，无代码改动） |
 | `frontend/src/hooks/workspace/use-session-runtime-stream.ts` | 重连循环与 runtime 提交调度 |
 | `frontend/src/e2e/` 手动探针 `zz-perf-probe.manual.ts`（见 streaming-frame.ts 注释） | 现有性能探针 |
 | `frontend/src/components/workspace/trajectory/trajectory-virtual-rows.ts` 等 | 我们已有的虚拟化落点（轨迹/Diff/文件浏览器） |
