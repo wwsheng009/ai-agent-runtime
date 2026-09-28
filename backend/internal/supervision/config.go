@@ -127,6 +127,13 @@ type Config struct {
 	// MaxExtensionTotal 是累计延长的上限倍率（I5/Q4：总量 ≤ 4× 原始预算，
 	// 默认 4）。
 	MaxExtensionTotal float64 `json:"max_extension_total,omitempty" yaml:"max_extension_total,omitempty"`
+	// AutoExtendHealthy 是"到期评估 + 健康自动延长"的灰度开关
+	// （docs/plan/agent-harness-optimization-recommendations-20260928.md §2.2/§2.3）。
+	// nil/true（默认）时：软阈值到期先做健康度评估，健康（最近 progress 在一个
+	// soft 窗口内）不再上报/开窗；执行硬到期与决策窗口兜底处健康则自动延长一次
+	// （消耗 I5 预算）而不是强杀。显式 false 恢复引入该机制前的行为，用于灰度
+	// 回退，无需回滚二进制。
+	AutoExtendHealthy *bool `json:"auto_extend_healthy,omitempty" yaml:"auto_extend_healthy,omitempty"`
 	// TurnHardCap 是 turn 级 hard cap（Q5/EC-E1/EC-H12，默认 24h）：挂起 turn
 	// 的最长存活时间；到期前必须产生一次 critical 决策上报，禁止静默结束。
 	TurnHardCap time.Duration `json:"turn_hard_cap,omitempty" yaml:"turn_hard_cap,omitempty"`
@@ -162,6 +169,7 @@ func DefaultConfig() Config {
 		MaxExtensions:             3,
 		MaxExtensionPerCall:       1,
 		MaxExtensionTotal:         4,
+		AutoExtendHealthy:         boolPtr(true),
 		TurnHardCap:               24 * time.Hour,
 		// C4-2（§6.12）：终态保留窗口与单次 GC 批量。
 		ExecutionRunRetention:  DefaultExecutionRunRetention,
@@ -278,6 +286,10 @@ func (c Config) WithDefaults() Config {
 	if c.MaxExtensionTotal > 0 {
 		d.MaxExtensionTotal = c.MaxExtensionTotal
 	}
+	// AutoExtendHealthy 默认开：nil 保持 nil（等价启用），仅显式值需传递。
+	if c.AutoExtendHealthy != nil {
+		d.AutoExtendHealthy = c.AutoExtendHealthy
+	}
 	if c.TurnHardCap > 0 {
 		d.TurnHardCap = c.TurnHardCap
 	}
@@ -348,6 +360,18 @@ func (c Config) ApprovalTerminalGuardEnabled() bool {
 		return true
 	}
 	return *c.ApprovalTerminalGuard
+}
+
+// AutoExtendHealthyEnabled reports whether the healthy auto-extend safety net
+// (20260928 建议稿 §2.2/§2.3) is active. Unset means enabled: the deadline
+// evaluation checks health before it escalates or cancels, and only an
+// explicit false restores the pre-change "deadline reached ⇒ escalate/cancel"
+// behavior for gray rollback.
+func (c Config) AutoExtendHealthyEnabled() bool {
+	if c.AutoExtendHealthy == nil {
+		return true
+	}
+	return *c.AutoExtendHealthy
 }
 
 // WakeSchedulerConfig 导出给装配层使用的 wake 调参。
