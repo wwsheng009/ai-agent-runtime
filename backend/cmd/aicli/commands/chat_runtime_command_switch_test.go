@@ -40,8 +40,10 @@ func TestRuntimeCommandSwitchReadonlyKeepsReadEffects(t *testing.T) {
 	table := runtimeSwitchTable{Global: runtimeInteractionReadonly}
 
 	status, _ := resolveRuntimeCommandSpec("/status")
-	if got := runtimeCommandWithSwitch(status, table); got.Mode != runtimeModeInline {
-		t.Fatalf("/status(read) 在 readonly 下应保持 inline，实际 %s", got.Mode)
+	// 批次 3：/status 已是只读 ScreenDocument；readonly 只约束生效域，不降级
+	// 只读副屏（mode 保持注册表声明的 screen）。
+	if got := runtimeCommandWithSwitch(status, table); got.Mode != runtimeModeScreen {
+		t.Fatalf("/status(read) 在 readonly 下应保持 screen，实际 %s", got.Mode)
 	}
 	model, _ := resolveRuntimeCommandSpec("/model")
 	if got := runtimeCommandWithSwitch(model, table); got.Mode != runtimeModeQueue {
@@ -80,8 +82,8 @@ func TestRuntimeCommandSwitchPrecedence(t *testing.T) {
 		t.Fatalf("命令级 readonly 应覆盖分类级 auto，实际 %s", got.Mode)
 	}
 	modelStatus, _ := resolveRuntimeCommandSpec("/model status")
-	if got := runtimeCommandWithSwitch(modelStatus, table); got.Mode != runtimeModeInline {
-		t.Fatalf("read 变体在命令级 readonly 下应保持 inline，实际 %s", got.Mode)
+	if got := runtimeCommandWithSwitch(modelStatus, table); got.Mode != runtimeModeScreen {
+		t.Fatalf("read 变体在命令级 readonly 下应保持其声明 Mode（screen），实际 %s", got.Mode)
 	}
 }
 

@@ -100,6 +100,9 @@ type runtimeCommandSpec struct {
 	Confirm   bool   // prompt/screen 是否需要显式确认
 	Notice    string // 生效域提示模板（如「下一回合生效」）
 	SwitchKey string // 分类/命令级开关键（解析器默认按主命令生成）
+	// Output 是输出类别（批次 5 单一事实源，方案 §5.2(4)）。零值表示未显式
+	// 声明，按 Mode/Confirm 派生；screen 档必须显式声明（T11 守卫）。
+	Output chatCommandOutputCategory
 }
 
 type runtimeCommandEntry struct {
@@ -116,6 +119,11 @@ func rtConfirm() runtimeSpecOption {
 
 func rtNotice(notice string) runtimeSpecOption {
 	return func(spec *runtimeCommandSpec) { spec.Notice = notice }
+}
+
+// rtOutput 显式声明输出类别（批次 5：与 Mode/Effect 同源，见 chat_command_output_category.go）。
+func rtOutput(category chatCommandOutputCategory) runtimeSpecOption {
+	return func(spec *runtimeCommandSpec) { spec.Output = category }
 }
 
 func rtSpec(command string, category commandCategory, mode runtimeInteractionMode, effect runtimeEffectScope, opts ...runtimeSpecOption) runtimeCommandSpec {
@@ -236,7 +244,7 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Bare: rtBare(rtSpec("/plans", categoryTurnsGoals, runtimeModeInline, runtimeEffectRead)),
 		Variants: map[string]runtimeCommandSpec{
 			"list":   rtSpec("/plans", categoryTurnsGoals, runtimeModeInline, runtimeEffectRead),
-			"detail": rtSpec("/plans", categoryTurnsGoals, runtimeModeInline, runtimeEffectRead),
+			"detail": rtSpec("/plans", categoryTurnsGoals, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"diff":   rtSpec("/plans", categoryTurnsGoals, runtimeModeInline, runtimeEffectRead),
 			"reopen": rtSpec("/plans", categoryTurnsGoals, runtimeModeQueue, runtimeEffectSession, rtNotice("已排队，回合结束后执行")),
 		},
@@ -250,32 +258,32 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Wildcard: ptrRuntimeSpec(rtSpec("/skill", categorySkillsTools, runtimeModeQueue, runtimeEffectSession, rtNotice("已排队，回合结束后执行")))},
 	// C3 会话元数据与历史
 	"/session":  {Bare: rtBare(rtSpec("/session", categorySessionMeta, runtimeModeInline, runtimeEffectRead))},
-	"/sessions": {Bare: rtBare(rtSpec("/sessions", categorySessionMeta, runtimeModeInline, runtimeEffectRead))},
-	"/history":  {Bare: rtBare(rtSpec("/history", categorySessionMeta, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档")))},
+	"/sessions": {Bare: rtBare(rtSpec("/sessions", categorySessionMeta, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
+	"/history":  {Bare: rtBare(rtSpec("/history", categorySessionMeta, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
 	"/title": {
 		Bare:     rtBare(rtSpec("/title", categorySessionMeta, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"))),
 		Wildcard: ptrRuntimeSpec(rtSpec("/title", categorySessionMeta, runtimeModeInline, runtimeEffectNextTurn, rtNotice("下一回合生效"))),
 	},
-	"/export": {Bare: rtBare(rtSpec("/export", categorySessionMeta, runtimeModeScreen, runtimeEffectRead, rtConfirm(), rtNotice("确认后写外部文件，不写会话")))},
+	"/export": {Bare: rtBare(rtSpec("/export", categorySessionMeta, runtimeModeScreen, runtimeEffectRead, rtConfirm(), rtNotice("确认后写外部文件，不写会话"), rtOutput(chatOutputScreenInteractive)))},
 	"/agent":  {Bare: rtBare(rtSpec("/agent", categoryDiagnostics, runtimeModeInline, runtimeEffectRead))},
 
 	// C4 模型与路由
 	"/model": {
-		Bare:     rtBare(rtSpec("/model", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"))),
-		Variants: map[string]runtimeCommandSpec{"status": rtSpec("/model", categoryModelRouting, runtimeModeInline, runtimeEffectRead)},
-		Wildcard: ptrRuntimeSpec(rtSpec("/model", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"))),
+		Bare:     rtBare(rtSpec("/model", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive))),
+		Variants: map[string]runtimeCommandSpec{"status": rtSpec("/model", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument))},
+		Wildcard: ptrRuntimeSpec(rtSpec("/model", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive))),
 	},
 	"/provider": {
-		Bare:     rtBare(rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"))),
-		Variants: map[string]runtimeCommandSpec{"status": rtSpec("/provider", categoryModelRouting, runtimeModeInline, runtimeEffectRead)},
-		Wildcard: ptrRuntimeSpec(rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"))),
+		Bare:     rtBare(rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive))),
+		Variants: map[string]runtimeCommandSpec{"status": rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument))},
+		Wildcard: ptrRuntimeSpec(rtSpec("/provider", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive))),
 	},
 	"/routing": {
 		Bare: rtBare(rtSpec("/routing", categoryModelRouting, runtimeModeInline, runtimeEffectRead)),
 		Variants: map[string]runtimeCommandSpec{
 			"show":   rtSpec("/routing", categoryModelRouting, runtimeModeInline, runtimeEffectRead),
 			"doctor": rtSpec("/routing", categoryModelRouting, runtimeModeInline, runtimeEffectRead),
-			"panel":  rtSpec("/routing", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("面板内写动作逐项确认")),
+			"panel":  rtSpec("/routing", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("面板内写动作逐项确认"), rtOutput(chatOutputScreenInteractive)),
 			"on":     rtSpec("/routing", categoryModelRouting, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
 			"off":    rtSpec("/routing", categoryModelRouting, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
 			"reset":  rtSpec("/routing", categoryModelRouting, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
@@ -285,11 +293,11 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 	"/profile": {
 		Bare: rtBare(rtSpec("/profile", categoryModelRouting, runtimeModeInline, runtimeEffectRead)),
 		Variants: map[string]runtimeCommandSpec{
-			"status": rtSpec("/profile", categoryModelRouting, runtimeModeInline, runtimeEffectRead),
-			"list":   rtSpec("/profile", categoryModelRouting, runtimeModeInline, runtimeEffectRead),
-			"show":   rtSpec("/profile", categoryModelRouting, runtimeModeInline, runtimeEffectRead),
-			"diff":   rtSpec("/profile", categoryModelRouting, runtimeModeInline, runtimeEffectRead),
-			"pick":   rtSpec("/profile", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
+			"status": rtSpec("/profile", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"list":   rtSpec("/profile", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"show":   rtSpec("/profile", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"diff":   rtSpec("/profile", categoryModelRouting, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"pick":   rtSpec("/profile", categoryModelRouting, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive)),
 			"reload": rtSpec("/profile", categoryModelRouting, runtimeModeQueue, runtimeEffectNextTurn, rtNotice("已排队，回合结束后执行")),
 			"save":   rtSpec("/profile", categoryModelRouting, runtimeModeQueue, runtimeEffectNextTurn, rtNotice("已排队，回合结束后执行")),
 			"import": rtSpec("/profile", categoryModelRouting, runtimeModeQueue, runtimeEffectNextTurn, rtNotice("已排队，回合结束后执行")),
@@ -350,36 +358,36 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Variants: map[string]runtimeCommandSpec{"status": rtSpec("/queue", categoryContextInput, runtimeModeInline, runtimeEffectRead), "clear": rtSpec("/queue", categoryContextInput, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("确认后丢弃待提交输入"))},
 	},
 	"/todos": {
-		Bare: rtBare(rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"))),
+		Bare: rtBare(rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument))),
 		Variants: map[string]runtimeCommandSpec{
-			"all":    rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档")),
-			"active": rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档")),
-			"done":   rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档")),
-			"brief":  rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档")),
+			"all":    rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"active": rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"done":   rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"brief":  rtSpec("/todos", categoryTasksTodos, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 		},
 	},
 	"/image": {Bare: rtBare(rtSpec("/image", categoryNetworkLongTasks, runtimeModeQueue, runtimeEffectSession, rtNotice("已排队，回合结束后执行")))},
 	"/login": {Bare: rtBare(rtSpec("/login", categoryNetworkLongTasks, runtimeModeQueue, runtimeEffectSession, rtNotice("已排队，回合结束后执行")))},
 
 	// C8 技能与工具
-	"/functions": {Bare: rtBare(rtSpec("/functions", categorySkillsTools, runtimeModeInline, runtimeEffectRead))},
+	"/functions": {Bare: rtBare(rtSpec("/functions", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
 	"/function": {Bare: rtBare(rtSpec("/function", categorySkillsTools, runtimeModeInline, runtimeEffectRead)),
 		Wildcard: ptrRuntimeSpec(rtSpec("/function", categorySkillsTools, runtimeModeInline, runtimeEffectRead))},
 	"/skills": {
-		Bare: rtBare(rtSpec("/skills", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联列表"))),
+		Bare: rtBare(rtSpec("/skills", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联列表"), rtOutput(chatOutputScreenDocument))),
 		Variants: map[string]runtimeCommandSpec{
-			"list":    rtSpec("/skills", categorySkillsTools, runtimeModeInline, runtimeEffectRead),
-			"select":  rtSpec("/skills", categorySkillsTools, runtimeModeScreen, runtimeEffectRead),
+			"list":    rtSpec("/skills", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联列表"), rtOutput(chatOutputScreenDocument)),
+			"select":  rtSpec("/skills", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtOutput(chatOutputScreenInteractive)),
 			"enable":  rtSpec("/skills", categorySkillsTools, runtimeModePrompt, runtimeEffectLive, rtConfirm(), rtNotice("热刷新，对后续请求生效")),
 			"disable": rtSpec("/skills", categorySkillsTools, runtimeModePrompt, runtimeEffectLive, rtConfirm(), rtNotice("热刷新，对后续请求生效")),
 		},
 	},
 	"/mcp": {
-		Bare: rtBare(rtSpec("/mcp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联列表"))),
+		Bare: rtBare(rtSpec("/mcp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联列表"), rtOutput(chatOutputScreenDocument))),
 		Variants: map[string]runtimeCommandSpec{
-			"list":    rtSpec("/mcp", categorySkillsTools, runtimeModeInline, runtimeEffectRead),
-			"status":  rtSpec("/mcp", categorySkillsTools, runtimeModeInline, runtimeEffectRead),
-			"select":  rtSpec("/mcp", categorySkillsTools, runtimeModeScreen, runtimeEffectNextCall, rtConfirm()),
+			"list":    rtSpec("/mcp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联列表"), rtOutput(chatOutputScreenDocument)),
+			"status":  rtSpec("/mcp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联列表"), rtOutput(chatOutputScreenDocument)),
+			"select":  rtSpec("/mcp", categorySkillsTools, runtimeModeScreen, runtimeEffectNextCall, rtConfirm(), rtOutput(chatOutputScreenInteractive)),
 			"add":     rtSpec("/mcp", categorySkillsTools, runtimeModeQueue, runtimeEffectNextCall, rtNotice("已排队，回合结束后执行")),
 			"remove":  rtSpec("/mcp", categorySkillsTools, runtimeModeQueue, runtimeEffectNextCall, rtNotice("已排队，回合结束后执行")),
 			"enable":  rtSpec("/mcp", categorySkillsTools, runtimeModeQueue, runtimeEffectNextCall, rtNotice("已排队，回合结束后执行")),
@@ -390,20 +398,20 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 	},
 
 	// C9 诊断与状态
-	"/help": {Bare: rtBare(rtSpec("/help", categoryDiagnostics, runtimeModeInline, runtimeEffectRead))},
+	"/help": {Bare: rtBare(rtSpec("/help", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
 	"/hotkeys": {
-		Bare:     rtBare(rtSpec("/hotkeys", categoryDiagnostics, runtimeModeInline, runtimeEffectRead)),
+		Bare:     rtBare(rtSpec("/hotkeys", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument))),
 		Variants: map[string]runtimeCommandSpec{"reload": rtSpec("/hotkeys", categoryDiagnostics, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("写 keymap 配置，下一回合生效"))},
 	},
-	"/status": {Bare: rtBare(rtSpec("/status", categoryDiagnostics, runtimeModeInline, runtimeEffectRead))},
-	"/usage":  {Bare: rtBare(rtSpec("/usage", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档")))},
+	"/status": {Bare: rtBare(rtSpec("/status", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
+	"/usage":  {Bare: rtBare(rtSpec("/usage", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
 	"/debug": {
 		Bare: rtBare(rtSpec("/debug", categoryDiagnostics, runtimeModeInline, runtimeEffectRead)),
 		Variants: map[string]runtimeCommandSpec{
 			"status":  rtSpec("/debug", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
 			"routing": rtSpec("/debug", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
 			"state":   rtSpec("/debug", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
-			"display": rtSpec("/debug", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档")),
+			"display": rtSpec("/debug", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"on":      rtSpec("/debug", categoryDiagnostics, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
 			"off":     rtSpec("/debug", categoryDiagnostics, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
 			"export":  rtSpec("/debug", categoryDiagnostics, runtimeModeQueue, runtimeEffectNextTurn, rtNotice("已排队，回合结束后执行")),
@@ -425,8 +433,8 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Variants: map[string]runtimeCommandSpec{
 			"status":   rtSpec("/agents", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
 			"list":     rtSpec("/agents", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
-			"pick":     rtSpec("/agents", categoryDiagnostics, runtimeModeScreen, runtimeEffectLive, rtConfirm()),
-			"panel":    rtSpec("/agents", categoryDiagnostics, runtimeModeScreen, runtimeEffectLive, rtConfirm()),
+			"pick":     rtSpec("/agents", categoryDiagnostics, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtOutput(chatOutputScreenInteractive)),
+			"panel":    rtSpec("/agents", categoryDiagnostics, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtOutput(chatOutputScreenInteractive)),
 			"approve":  rtSpec("/agents", categoryDiagnostics, runtimeModePrompt, runtimeEffectLive, rtConfirm()),
 			"deny":     rtSpec("/agents", categoryDiagnostics, runtimeModePrompt, runtimeEffectLive, rtConfirm()),
 			"answer":   rtSpec("/agents", categoryDiagnostics, runtimeModePrompt, runtimeEffectLive, rtConfirm()),
@@ -435,14 +443,14 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 			"cleanup":  rtSpec("/agents", categoryDiagnostics, runtimeModePrompt, runtimeEffectLive, rtConfirm()),
 		},
 	},
-	"/timeline": {Bare: rtBare(rtSpec("/timeline", categoryDiagnostics, runtimeModeInline, runtimeEffectRead))},
-	"/collab":   {Bare: rtBare(rtSpec("/collab", categoryDiagnostics, runtimeModeInline, runtimeEffectRead))},
+	"/timeline": {Bare: rtBare(rtSpec("/timeline", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
+	"/collab":   {Bare: rtBare(rtSpec("/collab", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},
 	"/web": {
 		Bare: rtBare(rtSpec("/web", categoryDiagnostics, runtimeModeInline, runtimeEffectRead)),
 		Variants: map[string]runtimeCommandSpec{
 			"status":    rtSpec("/web", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
 			"token":     rtSpec("/web", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
-			"endpoints": rtSpec("/web", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档")),
+			"endpoints": rtSpec("/web", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"open":      rtSpec("/web", categoryDiagnostics, runtimeModeQueue, runtimeEffectSession, rtNotice("已排队，回合结束后执行")),
 		},
 	},
@@ -476,7 +484,7 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		Bare: rtBare(rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeInline, runtimeEffectRead)),
 		Variants: map[string]runtimeCommandSpec{
 			"status": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeInline, runtimeEffectRead),
-			"select": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
+			"select": rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModeScreen, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"), rtOutput(chatOutputScreenInteractive)),
 			"set":    rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效")),
 		},
 		Wildcard: ptrRuntimeSpec(rtSpec("/reasoning_effort", categoryOutputAppearance, runtimeModePrompt, runtimeEffectNextTurn, rtConfirm(), rtNotice("下一回合生效"))),
@@ -484,27 +492,36 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 	"/theme": {
 		Bare: rtBare(rtSpec("/theme", categoryOutputAppearance, runtimeModeInline, runtimeEffectRead)),
 		Variants: map[string]runtimeCommandSpec{
-			"status":  rtSpec("/theme", categoryOutputAppearance, runtimeModeInline, runtimeEffectRead),
-			"list":    rtSpec("/theme", categoryOutputAppearance, runtimeModeInline, runtimeEffectRead),
-			"preview": rtSpec("/theme", categoryOutputAppearance, runtimeModeInline, runtimeEffectRead),
-			"select":  rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtNotice("视觉立即生效")),
-			"set":     rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtNotice("视觉立即生效")),
+			"status":  rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"list":    rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"preview": rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"select":  rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtNotice("视觉立即生效"), rtOutput(chatOutputScreenInteractive)),
+			"set":     rtSpec("/theme", categoryOutputAppearance, runtimeModeScreen, runtimeEffectLive, rtConfirm(), rtNotice("视觉立即生效"), rtOutput(chatOutputScreenInteractive)),
 		},
 	},
 	"/s":      {Bare: rtBare(rtSpec("/s", categoryOutputAppearance, runtimeModePrompt, runtimeEffectLive, rtConfirm(), rtNotice("显示面立即生效")))},
 	"/normal": {Bare: rtBare(rtSpec("/normal", categoryOutputAppearance, runtimeModePrompt, runtimeEffectLive, rtConfirm(), rtNotice("显示面立即生效")))},
 
 	// C11 网络与长任务（固定 queue）
+	// /account 裸形式是「刷新当前 provider」的网络长任务（P1 队列契约不变），
+	// 批次 1 迁入副屏的是 show/--no-refresh 两个只读快照变体；批次 4 起这两个
+	// 变体走忙时副屏通道。
 	"/account": {
+		// 裸形式 = refresh（网络长任务）：显式登记 Bare 让目录全集都能解析到
+		// 类别声明（T11），忙时行为与注册表兜底（queue）逐字一致。
+		Bare: rtBare(rtSpec("/account", categoryNetworkLongTasks, runtimeModeQueue, runtimeEffectRead, rtNotice("已排队，回合结束后执行"))),
 		Variants: map[string]runtimeCommandSpec{
-			"show":         rtSpec("/account", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectRead),
-			"--no-refresh": rtSpec("/account", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectRead),
+			"show":         rtSpec("/account", categoryNetworkLongTasks, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"--no-refresh": rtSpec("/account", categoryNetworkLongTasks, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"refresh":      rtSpec("/account", categoryNetworkLongTasks, runtimeModeQueue, runtimeEffectRead, rtNotice("已排队，回合结束后执行")),
 		},
 	},
+	// /accounts 默认路径立即读缓存（chat_account_async_test.go 锁定），属只读快照
+	// → 批次 4 声明为 screen；refresh 仍是队列。
 	"/accounts": {
+		Bare: rtBare(rtSpec("/accounts", categoryNetworkLongTasks, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument))),
 		Variants: map[string]runtimeCommandSpec{
-			"display": rtSpec("/accounts", categoryNetworkLongTasks, runtimeModeInline, runtimeEffectRead),
+			"display": rtSpec("/accounts", categoryNetworkLongTasks, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"refresh": rtSpec("/accounts", categoryNetworkLongTasks, runtimeModeQueue, runtimeEffectRead, rtNotice("已排队，回合结束后执行")),
 		},
 	},

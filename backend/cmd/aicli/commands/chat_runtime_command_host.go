@@ -95,9 +95,10 @@ func (h *runtimeCommandHost) submit(line string) runtimeHostOutcome {
 		outcome.Occupied = true
 		return outcome
 	case runtimeModeScreen:
-		// P2-4b：首批白名单 S 档走副屏通道；其余 screen 档（picker/写入类）
-		// 仍降级入队，待各自确认流在 P2-5/P3 落地。降级必须显式提示（INV-10）。
-		if !busyScreenCommandFirstBatch(effective) {
+		// 批次 4：白名单扩展为全部只读 ScreenDocument 命令；其余 screen 档
+		// （picker/写入类）仍降级入队，待各自确认流在 P2-5/P3 落地。
+		// 降级必须显式提示（INV-10）。
+		if !busyScreenCommandReadOnlyDocument(effective) {
 			notifyBusyCommandDegraded(h.session, line, "该命令尚未开通忙时副屏通道")
 			outcome.Result = "degraded"
 			return outcome

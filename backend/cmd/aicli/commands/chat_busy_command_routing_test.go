@@ -31,8 +31,10 @@ func TestChatInputQueuePolicyRoutingImmediateAndScreen(t *testing.T) {
 	queue.setCommandPolicyResolver(chatSlashCommandBusyPolicyFor)
 	queue.setBusyCommandExecutor(func(chatQueuedInput) bool { return true })
 
-	if got := queue.routeInputTextFromSource("/status", chatInputSourceStdin); !got.immediate() {
-		t.Fatalf("/status 应为 immediate，实际 %+v", got)
+	// 批次 3/4：/status 是只读 ScreenDocument 且进入忙时副屏白名单，忙时
+	// 路由为 screen（立即消费、经副屏通道执行），不再走 immediate 内联。
+	if got := queue.routeInputTextFromSource("/status", chatInputSourceStdin); !got.screen() {
+		t.Fatalf("/status 应为 screen，实际 %+v", got)
 	}
 	if got := queue.routeInputTextFromSource("/theme", chatInputSourceStdin); !got.immediate() {
 		t.Fatalf("/theme 默认由注册表接管（inline+read）应为 immediate，实际 %+v", got)

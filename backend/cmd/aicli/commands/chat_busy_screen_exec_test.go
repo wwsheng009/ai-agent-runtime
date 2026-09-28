@@ -33,7 +33,7 @@ func TestChatBusyPolicyScreenFirstBatch(t *testing.T) {
 		"/debug display": chatBusyPolicyScreen,
 		"/web endpoints": chatBusyPolicyScreen,
 		"/debug status":  chatBusyPolicyImmediate,
-		"/skills":        chatBusyPolicyDeferred, // screen+read 但非首批
+		"/skills":        chatBusyPolicyScreen,   // 批次 4：只读文档变体纳入白名单
 		"/theme on":      chatBusyPolicyDeferred, // screen+live（写入类，非首批）
 		"/export":        chatBusyPolicyDeferred,
 	}
@@ -119,11 +119,11 @@ func TestRuntimeCommandHostDegradesNonWhitelistedScreen(t *testing.T) {
 		dispatched = true
 		return true
 	})
-	if runtimeCommandHostFor(session).SubmitBusy("/skills") {
-		t.Fatal("非首批 screen 命令（/skills）必须降级入队")
+	if runtimeCommandHostFor(session).SubmitBusy("/model") {
+		t.Fatal("非白名单 screen 命令（/model 确认流）必须降级入队")
 	}
 	if dispatched {
-		t.Fatal("非首批 screen 命令不得进入副屏执行入口")
+		t.Fatal("非白名单 screen 命令不得进入副屏执行入口")
 	}
 	events := store.runtimeInteractions()
 	if len(events) != 1 || events[0].Payload["result"] != "degraded" || events[0].Payload["mode"] != "screen" {
@@ -232,7 +232,7 @@ func TestRuntimeCommandRegistryBusyAdmissionAudit(t *testing.T) {
 	}
 
 	// 首批 screen 白名单必须指向真实注册项，且至少有一个 screen+read 变体。
-	for command := range chatBusyScreenFirstBatchCommands {
+	for command := range chatBusyScreenDocumentCommands {
 		entry, ok := runtimeCommandRegistry[command]
 		if !ok {
 			t.Errorf("首批白名单命令 %q 不在注册表中", command)

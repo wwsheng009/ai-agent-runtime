@@ -2,8 +2,6 @@ package commands
 
 import (
 	"time"
-
-	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 )
 
 // P2-4b（方案 §3.7.1/§3.7.4）：S 档首批白名单与副屏执行原语。
@@ -15,41 +13,63 @@ import (
 // chatBusyScreenWaitBudget 是进入副屏前的租约等待预算（§3.7.1：≤2s）。
 const chatBusyScreenWaitBudget = 2 * time.Second
 
-// chatBusyScreenFirstBatchCommands 是首批白名单命令名（注册表 Command 键）。
-var chatBusyScreenFirstBatchCommands = map[string]struct{}{
-	"/todos":   {},
-	"/history": {},
-	"/usage":   {},
-	"/debug":   {}, // 仅 "display" 变体是 screen（其余变体走 inline 路径）
-	"/web":     {}, // 仅 "endpoints" 变体是 screen
+// chatBusyScreenDocumentCommands 是忙时 S 档白名单（批次 4：从首批 5 条扩展
+// 到全部「只读 + 副屏文档」命令，方案 §6 批次 4 / T10）。
+//
+// 判据（三重，全部 fail-closed）：注册表声明 screen 档 + read 生效域 +
+// 显式声明 `screen-document` 输出类别。命令名进白名单只表示「其只读变体
+// 允许忙时开屏」：picker/确认流变体（/model、/provider、/theme select、
+// /skills select、/mcp select、/routing panel、/profile pick）因
+// Effect≠read 或输出类别为 screen-interactive 被判据本身排除，live 写入类
+// （/agents panel、/export）同理。批次 5 合并单一事实源后，本名单由注册表
+// 的「输出类别」声明直接派生。
+var chatBusyScreenDocumentCommands = map[string]struct{}{
+	"/todos":     {},
+	"/history":   {},
+	"/usage":     {},
+	"/debug":     {}, // 仅 "display" 变体是 screen（其余变体走 inline 路径）
+	"/web":       {}, // 仅 "endpoints" 变体是 screen
+	"/account":   {},
+	"/accounts":  {},
+	"/help":      {},
+	"/status":    {},
+	"/sessions":  {},
+	"/functions": {},
+	"/plans":     {}, // 仅 "detail" 变体是 screen（列表/对比仍是短内联）
+	"/timeline":  {},
+	"/collab":    {},
+	"/hotkeys":   {},
+	// 批次 3 尾批：只读 list/status 变体迁入副屏后同批纳入忙时通道
+	// （/model status、/provider status、/theme status|list|preview、
+	// /skills list、/mcp list|status、/profile status|list|show|diff）。
+	"/model":    {},
+	"/provider": {},
+	"/theme":    {},
+	"/skills":   {},
+	"/mcp":      {},
+	"/profile":  {},
 }
 
-// busyScreenCommandFirstBatch 判定命令是否属于首批 S 档白名单：
-// 必须同时满足 screen 档 + 只读生效域 + 命令名在白名单内。
-func busyScreenCommandFirstBatch(spec runtimeCommandSpec) bool {
+// busyScreenCommandReadOnlyDocument 判定命令是否可走忙时副屏通道（S 档）：
+// 必须同时满足 screen 档 + 只读生效域 + 显式声明只读文档输出类别 + 属于
+// 白名单。输出类别判据保证同名命令的交互变体（如 /skills select）不会
+// 因命令名命中白名单而被误放行。
+func busyScreenCommandReadOnlyDocument(spec runtimeCommandSpec) bool {
 	if spec.Mode != runtimeModeScreen || spec.Effect != runtimeEffectRead {
 		return false
 	}
-	_, ok := chatBusyScreenFirstBatchCommands[spec.Command]
+	if spec.Output != chatOutputScreenDocument {
+		return false
+	}
+	_, ok := chatBusyScreenDocumentCommands[spec.Command]
 	return ok
 }
 
 // chatBusyScreenCapability 是副屏能力门（fail-closed）。抽成包级变量以便
-// 单测注入：生产实现复用 /debug display 同款判定（统一渲染面 + 已启用的
-// 统一 surface + 无在途租约/弹层 + 终端支持全屏列表）。
+// 单测注入；生产实现就是框架的 chatScreenCapability（批次 0：I7 单一实现，
+// 忙时与空闲路径共用同一个 gate，不再各自维护一份）。
 var chatBusyScreenCapability = func(session *ChatSession) bool {
-	if session == nil || session.NoInteractive || session.JSONOutput ||
-		session.Interaction == nil || session.Surface == nil {
-		return false
-	}
-	if !unifiedDirectInteractiveOutput(session) {
-		return false
-	}
-	if !session.Surface.Enabled() || !session.Surface.OwnedViewport() ||
-		session.Surface.LeaseActive() || session.Surface.HasActivePopup() {
-		return false
-	}
-	return ui.CanUseFullScreenList(resumeFullScreenTerminal(session))
+	return chatScreenCapability(session)
 }
 
 // chatBusyScreenDispatchOverride 仅供测试注入替身（nil = 走主分派器）。

@@ -111,32 +111,11 @@ func chatBusyCommandUnsafeEffect(result CommandResult) string {
 		return "quit"
 	case result.ReplayHistory:
 		return "replay-history"
-	case result.OpenTranscript:
-		return "transcript-pager"
-	case result.OpenDebugOverlay:
-		return "debug-overlay"
-	case result.OpenWebEndpointsScreen:
-		return "web-endpoints-screen"
-	case result.OpenUsageScreen != nil:
-		return "usage-screen"
-	case result.OpenAccountScreen != nil:
-		return "account-screen"
-	case result.OpenAccountsScreen != nil:
-		return "accounts-screen"
-	case result.OpenResumePicker != nil:
-		return "resume-picker"
-	case result.OpenBacktrackPicker != nil:
-		return "backtrack-picker"
-	case result.OpenModelPicker != nil:
-		return "model-picker"
-	case result.OpenThemePicker != nil:
-		return "theme-picker"
-	case result.OpenSkillPicker != nil:
-		return "skill-picker"
-	case result.OpenExportPicker != nil:
-		return "export-picker"
-	case result.OpenMCPPicker != nil:
-		return "mcp-picker"
+	case result.Screen != nil:
+		// 批次 5（D-E）：旧 Open* 字段（transcript pager、debug overlay、usage、
+		// account(s)、各 picker）已统一为 Screen；inline 通道对任何副屏效应
+		// 一律拒绝并按命令策略入队，S 档由 runBusyScreenCommand 承接。
+		return "screen"
 	case result.ApplyBacktrack != nil:
 		return "backtrack-apply"
 	case result.SendObjective != "":

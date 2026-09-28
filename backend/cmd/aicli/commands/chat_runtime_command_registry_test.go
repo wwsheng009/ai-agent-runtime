@@ -40,8 +40,9 @@ func TestResolveRuntimeCommandSpecVariants(t *testing.T) {
 		effect runtimeEffectScope
 		ok     bool
 	}{
-		{"/help", runtimeModeInline, runtimeEffectRead, true},
-		{"/?", runtimeModeInline, runtimeEffectRead, true},
+		// 批次 3：/help 迁入只读 ScreenDocument（副屏），不再内联直写。
+		{"/help", runtimeModeScreen, runtimeEffectRead, true},
+		{"/?", runtimeModeScreen, runtimeEffectRead, true},
 		{"/exit", runtimeModeBlock, runtimeEffectProcess, true},
 		{"/quit", runtimeModeBlock, runtimeEffectProcess, true},
 		{"/model status", runtimeModeInline, runtimeEffectRead, true},

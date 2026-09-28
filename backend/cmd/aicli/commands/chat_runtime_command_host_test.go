@@ -211,7 +211,7 @@ func TestChatBusyPolicyRegistryMappingWhenP2Enabled(t *testing.T) {
 
 	t.Setenv(runtimeInteractionEnv, "auto")
 	cases := map[string]chatBusyCommandPolicy{
-		"/model status": chatBusyPolicyImmediate,
+		"/model status": chatBusyPolicyScreen, // 批次 3：read 变体迁副屏 + 白名单
 		"/debug status": chatBusyPolicyImmediate,
 		"/model":        chatBusyPolicyDeferred,
 		// P2-4b：首批白名单 S 档（screen+read）转由副屏通道消费；
@@ -219,7 +219,7 @@ func TestChatBusyPolicyRegistryMappingWhenP2Enabled(t *testing.T) {
 		"/todos":         chatBusyPolicyScreen,
 		"/history":       chatBusyPolicyScreen,
 		"/debug display": chatBusyPolicyScreen,
-		"/skills":        chatBusyPolicyDeferred,
+		"/skills":        chatBusyPolicyScreen, // 批次 4：只读文档变体纳入白名单
 		"/exit":          chatBusyPolicyReject,
 		"/unknown-cmd":   chatBusyPolicyDeferred,
 	}
@@ -233,8 +233,8 @@ func TestChatBusyPolicyRegistryMappingWhenP2Enabled(t *testing.T) {
 	if got := chatSlashCommandBusyPolicyFor("/stream on"); got != chatBusyPolicyDeferred {
 		t.Fatalf("readonly 下 live 命令应降级，实际 %s", got)
 	}
-	if got := chatSlashCommandBusyPolicyFor("/model status"); got != chatBusyPolicyImmediate {
-		t.Fatalf("readonly 下 read 命令应保持 immediate，实际 %s", got)
+	if got := chatSlashCommandBusyPolicyFor("/model status"); got != chatBusyPolicyScreen {
+		t.Fatalf("readonly 下 read 命令应保持 screen 档，实际 %s", got)
 	}
 
 	t.Setenv(runtimeInteractionEnv, "off")
@@ -247,13 +247,15 @@ func TestChatBusyPolicyRegistryMappingWhenP2Enabled(t *testing.T) {
 
 	// 全局档未显式设置 = auto（默认，D14）：注册表仍然接管。
 	t.Setenv(runtimeInteractionEnv, "")
-	if got := chatSlashCommandBusyPolicyFor("/model status"); got != chatBusyPolicyImmediate {
-		t.Fatalf("全局档未设置时 /model status 应走注册表 immediate，实际 %s", got)
+	if got := chatSlashCommandBusyPolicyFor("/model status"); got != chatBusyPolicyScreen {
+		t.Fatalf("全局档未设置时 /model status 应走注册表 screen，实际 %s", got)
 	}
 	if got := chatSlashCommandBusyPolicyFor("/todos"); got != chatBusyPolicyScreen {
 		t.Fatalf("全局档未设置时 /todos 应走注册表 screen，实际 %s", got)
 	}
-	if got := chatSlashCommandBusyPolicyFor("/help"); got != chatBusyPolicyImmediate {
-		t.Fatalf("全局档未设置时首批命令应保持 immediate，实际 %s", got)
+	// 批次 3/4：/help 由主屏内联迁入只读 ScreenDocument 并进入忙时副屏白名单，
+	// 因此注册表接管后忙时档位由 immediate 变为 screen（行为差异见实施记录 §1.4/§1.5）。
+	if got := chatSlashCommandBusyPolicyFor("/help"); got != chatBusyPolicyScreen {
+		t.Fatalf("全局档未设置时 /help 应走注册表 screen（只读副屏），实际 %s", got)
 	}
 }

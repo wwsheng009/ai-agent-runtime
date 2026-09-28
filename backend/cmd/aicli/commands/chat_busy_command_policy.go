@@ -58,37 +58,15 @@ func chatBusyCommandEnabled() bool {
 // chatSlashCommandBusyPolicyFor 解析一段输入对应的目标忙时策略（fail-closed）：
 //
 //  1. 非 slash / 空输入 → inherit（不是命令，路由不由本函数决定）；
-//  2. 命令名含别名经 catalog 归一，取 spec.BusyPolicy；
-//  3. 不接受参数的命令携带参数 → inherit（只放行文档化的裸形式）；
-//  4. 子命令级覆盖：`/queue clear` 保持现状（状态变更，不得 immediate）；
-//  5. I/S 在总闸显式关闭时回退 D；D/R 直接返回；
-//  6. inherit → 默认由注册表接管（§3.8.2）；仅当总闸显式关闭时退回旧白名单派生：
-//     queue-safe→D，否则→R（保证显式关闭时零行为差异）。
+//  2. 默认总闸开启 → 运行时注册表是唯一事实源（§3.8.2 / 批次 5 合并
+//     catalog.BusyPolicy）；未知子命令由注册表 fail-safe 收敛为 queue；
+//  3. 仅当总闸 AICLI_CHAT_BUSY_COMMAND 显式关闭时退回 P1 旧白名单派生：
+//     queue-safe→D，否则→R（T18 等价基线，保证一键回退零行为差异）。
+//
+// 批次 5 起 catalog 只承担别名归并与帮助文案事实源，不再声明忙时策略。
 func chatSlashCommandBusyPolicyFor(text string) chatBusyCommandPolicy {
-	name, args, ok := chatBusyCommandNameAndArgs(text)
-	if !ok {
+	if _, _, ok := chatBusyCommandNameAndArgs(text); !ok {
 		return chatBusyPolicyInherit
-	}
-
-	policy := chatBusyPolicyInherit
-	if spec, found := chatSlashCommandCatalogMap()[name]; found {
-		policy = spec.BusyPolicy
-		if len(args) > 0 && !spec.AcceptsArgs {
-			policy = chatBusyPolicyInherit
-		}
-	}
-	if override, ok := chatBusyCommandSubcommandPolicy(name, args); ok {
-		policy = override
-	}
-
-	switch policy {
-	case chatBusyPolicyImmediate, chatBusyPolicyScreen:
-		if !chatBusyCommandEnabled() {
-			return chatBusyPolicyDeferred
-		}
-		return policy
-	case chatBusyPolicyDeferred, chatBusyPolicyReject:
-		return policy
 	}
 
 	// D14：总闸开启（默认）时注册表即策略的单一事实源（§3.8.2）。
@@ -125,7 +103,7 @@ func chatBusyPolicyFromRuntimeSpec(text string) chatBusyCommandPolicy {
 	case runtimeModeInline:
 		return chatBusyPolicyImmediate
 	case runtimeModeScreen:
-		if busyScreenCommandFirstBatch(effective) {
+		if busyScreenCommandReadOnlyDocument(effective) {
 			return chatBusyPolicyScreen
 		}
 		return chatBusyPolicyDeferred
@@ -167,14 +145,4 @@ func chatInputCommandBusyPolicy(session *ChatSession, text string) chatBusyComma
 		return chatBusyPolicyDeferred
 	}
 	return chatSlashCommandBusyPolicyFor(text)
-}
-
-// chatBusyCommandSubcommandPolicy 返回子命令级覆盖；ok=false 表示无覆盖。
-func chatBusyCommandSubcommandPolicy(name string, args []string) (chatBusyCommandPolicy, bool) {
-	if name == "/queue" && len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "clear") {
-		// 清空队列属于状态变更，即使 /queue 整体标记为 immediate 也必须走旧判定
-		//（queue-safe 白名单将其判为 reject），避免忙时丢队列数据。
-		return chatBusyPolicyInherit, true
-	}
-	return chatBusyPolicyInherit, false
 }

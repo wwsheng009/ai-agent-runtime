@@ -29,6 +29,10 @@ func buildChatSlashHelpLines() []string {
 		if summary == "" {
 			summary = "命令"
 		}
+		// 批次 5：副屏命令在帮助里显式标注退出键（Esc 一次回主屏，I4）。
+		if chatSlashHelpPrimaryScreen(spec.Name) {
+			summary += chatSlashHelpScreenMarker
+		}
 		rows = append(rows, chatSlashHelpRow{Label: label, Summary: summary})
 	}
 
@@ -62,6 +66,19 @@ func buildChatSlashHelpLines() []string {
 		"",
 	)
 	return lines
+}
+
+// chatSlashHelpScreenMarker 是副屏命令的统一帮助标注（Esc 契约，方案 §6 批次 5）。
+const chatSlashHelpScreenMarker = "（副屏，Esc 返回）"
+
+// chatSlashHelpPrimaryScreen 报告命令的主入口（裸命令声明）是否走副屏交互。
+// 仅主入口为 screen 的命令标注，避免把「子命令才开副屏」的命令整体误标。
+func chatSlashHelpPrimaryScreen(name string) bool {
+	entry, ok := runtimeCommandRegistry[name]
+	if !ok || entry.Bare == nil {
+		return false
+	}
+	return entry.Bare.Mode == runtimeModeScreen
 }
 
 func printChatSlashHelp(session *ChatSession) {

@@ -18,13 +18,11 @@ func TestChatBusyCommandUnsafeEffect(t *testing.T) {
 	cases := map[string]CommandResult{
 		"quit":             {Action: CommandQuit},
 		"replay-history":   {ReplayHistory: true},
-		"transcript-pager": {OpenTranscript: true},
-		"debug-overlay":    {OpenDebugOverlay: true},
+		"transcript-pager": {Screen: &chatScreenSpec{ID: "transcript.pager", Title: "历史记录"}},
+		"debug-display":    {Screen: &chatScreenSpec{ID: "debug.display", Title: "调试面板"}},
 		"send-objective":   {SendObjective: "objective"},
 		"send-message":     {SendMessageAfterCommit: "message"},
 		"send-skill-turn":  {SendSkillTurn: &SendSkillTurnRequest{}},
-		"model-picker":     {OpenModelPicker: &ModelPickerRequest{}},
-		"theme-picker":     {OpenThemePicker: &ThemePickerRequest{}},
 		"backtrack-apply":  {ApplyBacktrack: &BacktrackApplyRequest{}},
 		"composer-draft":   {RestoreComposerDraft: "draft"},
 	}
