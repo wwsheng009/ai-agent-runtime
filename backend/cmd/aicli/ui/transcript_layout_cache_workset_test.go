@@ -37,7 +37,7 @@ func TestCellRowsCacheMaxCoversResumedSessionWorkingSet(t *testing.T) {
 // 端到端回归：工作集装得下时，预热后的第二轮全量扫描必须 100% 命中、零逐出。
 // 旧容量 1024 在此测试下会得到 0 命中 / 4000 未命中。
 func TestSharedCellRowsCacheFitsResumedSessionWorkingSet(t *testing.T) {
-	c := &cellRowsCache{lru: newCellLayoutLRU[[]AppScreenRow](cellRowsCacheMax, cellRowsCacheMaxBytes)}
+	c := &cellRowsCache{lru: newCellLayoutLRU[cellLayoutKey, []AppScreenRow](cellRowsCacheMax, cellRowsCacheMaxBytes)}
 	fp := "dark|1|github|{0}|false"
 	keys := make([]cellLayoutKey, 0, resumedSessionWorkingSet)
 	for i := 0; i < resumedSessionWorkingSet; i++ {
@@ -64,7 +64,7 @@ func TestSharedCellRowsCacheFitsResumedSessionWorkingSet(t *testing.T) {
 // history-plan 侧：规划阶段同样按 cell 顺序遍历全部历史，容量不足会让每次完整
 // 规划都重新 wrap 并物化全部历史行。
 func TestSharedHistoryPlanCacheFitsResumedSessionWorkingSet(t *testing.T) {
-	c := &historyPlanCache{lru: newCellLayoutLRU[[]planPhysicalRow](historyPlanCacheMax, historyPlanCacheMaxBytes)}
+	c := &historyPlanCache{lru: newCellLayoutLRU[cellLayoutKey, []planPhysicalRow](historyPlanCacheMax, historyPlanCacheMaxBytes)}
 	fp := "dark|1|github|{0}|false"
 	keys := make([]cellLayoutKey, 0, resumedSessionWorkingSet)
 	for i := 0; i < resumedSessionWorkingSet; i++ {

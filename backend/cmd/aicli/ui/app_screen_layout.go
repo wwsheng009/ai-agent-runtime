@@ -470,6 +470,9 @@ func foldedToolChainScreenRows(toolCell scene.TranscriptCell, width int, theme s
 		hint = toolFoldHint
 	}
 	preview := cell.BuildPreview(toolCell.Source, toolFoldOptions(hint))
+	// 同一轮 pass 里 fold target 扫描已经（或即将）为同一 source 判定 omission；
+	// 把这次投影的结论回填，避免新 cell 冷启动时重复一次 BuildPreview。
+	sharedFoldOmissions.warm(toolCell.Source, preview.OmittedLines > 0 || preview.ByteTruncated)
 	if len(preview.Lines) == 0 {
 		return nil
 	}

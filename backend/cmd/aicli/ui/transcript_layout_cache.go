@@ -26,22 +26,25 @@ import (
 // 容量小于工作集时逐出策略决定一切，见 cellLayoutLRU 的注释。
 type cellRowsCache struct {
 	mu  sync.Mutex
-	lru *cellLayoutLRU[[]AppScreenRow]
+	lru *cellLayoutLRU[cellLayoutKey, []AppScreenRow]
 }
 
-// cellLayoutLRU 是 cellLayoutKey 索引的侵入式 LRU 表：head 为最近使用，tail
+// cellLayoutLRU 是内容寻址键索引的侵入式 LRU 表：head 为最近使用，tail
 // 为最久未使用；条目内嵌 prev/next 链接，因此命中触碰与逐出都是 O(1)，
 // 不需要在命中路径上线性扫描顺序表。
+//
+// 键类型泛化为 K comparable：布局行缓存用 cellLayoutKey，折叠 omission
+// 判定缓存（tool_fold_omission_cache.go）用更小的 source 键。
 //
 // 为什么必须是 LRU 而不是 FIFO：布局扫描按稳定的 transcript 顺序遍历全部
 // cell。当工作集超过容量（N 个 cell 顺序扫描、容量 C < N）时，FIFO 会在条目
 // 被再次复用之前就把它逐出，稳态命中率退化为 0 —— 每一帧都重新布局并对每个
 // diff/代码单元格重跑一遍语法高亮，这是巨型会话把 UI 锁按秒级持有的直接原因。
 // LRU 让「刚刚用过的 cell」活到下一轮扫描，把稳态命中率拉回工作集比例。
-type cellLayoutLRU[V any] struct {
-	entries  map[cellLayoutKey]*cellLayoutEntry[V]
-	head     *cellLayoutEntry[V] // 最近使用（MRU）
-	tail     *cellLayoutEntry[V] // 最久未使用（逐出候选）
+type cellLayoutLRU[K comparable, V any] struct {
+	entries  map[K]*cellLayoutEntry[K, V]
+	head     *cellLayoutEntry[K, V] // 最近使用（MRU）
+	tail     *cellLayoutEntry[K, V] // 最久未使用（逐出候选）
 	bytes    int
 	max      int
 	maxBytes int
@@ -50,30 +53,30 @@ type cellLayoutLRU[V any] struct {
 	evict    uint64
 }
 
-type cellLayoutEntry[V any] struct {
-	key   cellLayoutKey
+type cellLayoutEntry[K comparable, V any] struct {
+	key   K
 	value V
 	bytes int
-	prev  *cellLayoutEntry[V]
-	next  *cellLayoutEntry[V]
+	prev  *cellLayoutEntry[K, V]
+	next  *cellLayoutEntry[K, V]
 }
 
-func newCellLayoutLRU[V any](max, maxBytes int) *cellLayoutLRU[V] {
+func newCellLayoutLRU[K comparable, V any](max, maxBytes int) *cellLayoutLRU[K, V] {
 	if max <= 0 {
 		max = cellRowsCacheMax
 	}
 	if maxBytes <= 0 {
 		maxBytes = cellRowsCacheMaxBytes
 	}
-	return &cellLayoutLRU[V]{
-		entries:  make(map[cellLayoutKey]*cellLayoutEntry[V], max/4+1),
+	return &cellLayoutLRU[K, V]{
+		entries:  make(map[K]*cellLayoutEntry[K, V], max/4+1),
 		max:      max,
 		maxBytes: maxBytes,
 	}
 }
 
 // get 返回缓存值，并把命中条目提到 MRU 位置（O(1) 重链）。
-func (l *cellLayoutLRU[V]) get(key cellLayoutKey) (V, bool) {
+func (l *cellLayoutLRU[K, V]) get(key K) (V, bool) {
 	var zero V
 	if l == nil {
 		return zero, false
@@ -90,7 +93,7 @@ func (l *cellLayoutLRU[V]) get(key cellLayoutKey) (V, bool) {
 
 // put 插入或覆盖条目，然后逐出到预算内。bytes 是调用方给出的确定性估算
 // （与 renderengine.RenderCache 一致：用于容量控制，不是 Go heap 采样）。
-func (l *cellLayoutLRU[V]) put(key cellLayoutKey, value V, bytes int) {
+func (l *cellLayoutLRU[K, V]) put(key K, value V, bytes int) {
 	if l == nil {
 		return
 	}
@@ -100,7 +103,7 @@ func (l *cellLayoutLRU[V]) put(key cellLayoutKey, value V, bytes int) {
 		entry.bytes = bytes
 		l.moveToFront(entry)
 	} else {
-		entry := &cellLayoutEntry[V]{key: key, value: value, bytes: bytes}
+		entry := &cellLayoutEntry[K, V]{key: key, value: value, bytes: bytes}
 		l.entries[key] = entry
 		l.pushFront(entry)
 		l.bytes += bytes
@@ -108,7 +111,7 @@ func (l *cellLayoutLRU[V]) put(key cellLayoutKey, value V, bytes int) {
 	l.evictToBudget()
 }
 
-func (l *cellLayoutLRU[V]) moveToFront(entry *cellLayoutEntry[V]) {
+func (l *cellLayoutLRU[K, V]) moveToFront(entry *cellLayoutEntry[K, V]) {
 	if l.head == entry {
 		return
 	}
@@ -116,7 +119,7 @@ func (l *cellLayoutLRU[V]) moveToFront(entry *cellLayoutEntry[V]) {
 	l.pushFront(entry)
 }
 
-func (l *cellLayoutLRU[V]) pushFront(entry *cellLayoutEntry[V]) {
+func (l *cellLayoutLRU[K, V]) pushFront(entry *cellLayoutEntry[K, V]) {
 	entry.prev = nil
 	entry.next = l.head
 	if l.head != nil {
@@ -128,7 +131,7 @@ func (l *cellLayoutLRU[V]) pushFront(entry *cellLayoutEntry[V]) {
 	}
 }
 
-func (l *cellLayoutLRU[V]) unlink(entry *cellLayoutEntry[V]) {
+func (l *cellLayoutLRU[K, V]) unlink(entry *cellLayoutEntry[K, V]) {
 	if entry.prev != nil {
 		entry.prev.next = entry.next
 	} else if l.head == entry {
@@ -144,7 +147,7 @@ func (l *cellLayoutLRU[V]) unlink(entry *cellLayoutEntry[V]) {
 
 // evictToBudget 从 LRU 端逐出，直到条目数与估算字节都回到预算内。至少保留
 // 一个条目：单个超预算的巨型 cell 不能把缓存清空，否则会退回每次全量重布局。
-func (l *cellLayoutLRU[V]) evictToBudget() {
+func (l *cellLayoutLRU[K, V]) evictToBudget() {
 	for len(l.entries) > l.max || (l.bytes > l.maxBytes && len(l.entries) > 1) {
 		entry := l.tail
 		if entry == nil {
@@ -158,7 +161,7 @@ func (l *cellLayoutLRU[V]) evictToBudget() {
 }
 
 // stats 返回命中/未命中/逐出计数与当前条目数、估算字节。调用方负责加锁。
-func (l *cellLayoutLRU[V]) stats() (hits, misses, evictions uint64, entries, bytes int) {
+func (l *cellLayoutLRU[K, V]) stats() (hits, misses, evictions uint64, entries, bytes int) {
 	if l == nil {
 		return 0, 0, 0, 0, 0
 	}
@@ -188,7 +191,7 @@ const (
 )
 
 var sharedCellRows = &cellRowsCache{
-	lru: newCellLayoutLRU[[]AppScreenRow](cellRowsCacheMax, cellRowsCacheMaxBytes),
+	lru: newCellLayoutLRU[cellLayoutKey, []AppScreenRow](cellRowsCacheMax, cellRowsCacheMaxBytes),
 }
 
 // cellLayoutKeyFor 派生 cell 的布局缓存键。
@@ -271,6 +274,11 @@ type TranscriptLayoutCacheStats struct {
 	PlanEvictions     uint64
 	PlanEntries       int
 	PlanBytes         int
+	FoldOmitHits      uint64
+	FoldOmitMisses    uint64
+	FoldOmitEvictions uint64
+	FoldOmitEntries   int
+	FoldOmitBytes     int
 }
 
 // TranscriptLayoutCacheStatsSnapshot 采集布局缓存与 history-plan 缓存的计数
@@ -281,6 +289,8 @@ func TranscriptLayoutCacheStatsSnapshot() TranscriptLayoutCacheStats {
 		snapshot.CellRowsEntries, snapshot.CellRowsBytes = sharedCellRows.stats()
 	snapshot.PlanHits, snapshot.PlanMisses, snapshot.PlanEvictions,
 		snapshot.PlanEntries, snapshot.PlanBytes = sharedHistoryPlan.stats()
+	snapshot.FoldOmitHits, snapshot.FoldOmitMisses, snapshot.FoldOmitEvictions,
+		snapshot.FoldOmitEntries, snapshot.FoldOmitBytes = sharedFoldOmissions.stats()
 	return snapshot
 }
 

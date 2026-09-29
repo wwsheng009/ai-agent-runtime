@@ -21,7 +21,7 @@ func testCell(source string, kind scene.PresentationKind) scene.TranscriptCell {
 }
 
 func TestCellRowsCacheHitAndInvalidation(t *testing.T) {
-	c := &cellRowsCache{lru: newCellLayoutLRU[[]AppScreenRow](4, cellRowsCacheMaxBytes)}
+	c := &cellRowsCache{lru: newCellLayoutLRU[cellLayoutKey, []AppScreenRow](4, cellRowsCacheMaxBytes)}
 	fp := "dark|1|github|{0}|false"
 	cell := testCell("hello\nworld", scene.PresentationPlain)
 	key := cellLayoutKeyFor(cell, 40, fp)
@@ -70,7 +70,7 @@ func TestCellRowsCacheKeyIncludesPresentationDocument(t *testing.T) {
 }
 
 func TestCellRowsCacheEviction(t *testing.T) {
-	c := &cellRowsCache{lru: newCellLayoutLRU[[]AppScreenRow](2, cellRowsCacheMaxBytes)}
+	c := &cellRowsCache{lru: newCellLayoutLRU[cellLayoutKey, []AppScreenRow](2, cellRowsCacheMaxBytes)}
 	fp := "dark|1|github|{0}|false"
 	for i := 0; i < 3; i++ {
 		source := "cell-" + string(rune('a'+i))
@@ -99,7 +99,7 @@ func TestCellRowsCacheEviction(t *testing.T) {
 // 零逐出（缓存不再参与成本，布局真正变成 O(Δ)）。
 func TestCellRowsCacheCoversWorkingSet(t *testing.T) {
 	const workingSet = 64
-	c := &cellRowsCache{lru: newCellLayoutLRU[[]AppScreenRow](workingSet, cellRowsCacheMaxBytes)}
+	c := &cellRowsCache{lru: newCellLayoutLRU[cellLayoutKey, []AppScreenRow](workingSet, cellRowsCacheMaxBytes)}
 	fp := "dark|1|github|{0}|false"
 	keys := make([]cellLayoutKey, 0, workingSet)
 	for i := 0; i < workingSet; i++ {
@@ -138,7 +138,7 @@ func TestCellRowsCacheCoversWorkingSet(t *testing.T) {
 // LRU 只能利用时间局部性，救不了真正超过容量的工作集。这就是为什么修复必须
 // 落在容量上（cellRowsCacheMax >= 会话 cell 数），而不是落在逐出策略上。
 func TestCellRowsCacheThrashesBelowWorkingSet(t *testing.T) {
-	c := &cellRowsCache{lru: newCellLayoutLRU[[]AppScreenRow](2, cellRowsCacheMaxBytes)}
+	c := &cellRowsCache{lru: newCellLayoutLRU[cellLayoutKey, []AppScreenRow](2, cellRowsCacheMaxBytes)}
 	fp := "dark|1|github|{0}|false"
 	sources := []string{"scan-a", "scan-b", "scan-c"}
 	keys := make([]cellLayoutKey, 0, len(sources))
