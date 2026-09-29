@@ -6,6 +6,7 @@ import { initChat, renderButton, refreshScreen } from "./js/chat.js";
 import { initComposerPanel } from "./js/composer.js";
 import { initComposerAttachments } from "./js/attachments.js";
 import { initAnalysis } from "./js/analysis.js";
+import { initLSP } from "./js/lsp.js";
 import { initConfigAdmin } from "./js/config-admin.js";
 import { initProviderEditor } from "./js/provider-editor.js";
 import { initProviderImport } from "./js/provider-import.js";
@@ -52,6 +53,7 @@ initFiles(); // 「文件」页签：文件管理器（预览弹窗 reparent + �
 initGit();   // 「GIT」页签：git 管理器（diff 弹窗 reparent + 工具栏事件绑定）
 initMCP();
 initAnalysis();
+initLSP();
 
 // ---- 启动序列(原文件尾部) ----
 loadRuntimeMeta(); // 权威 provider/model/reasoning 值同步到底部选择器

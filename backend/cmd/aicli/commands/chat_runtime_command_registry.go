@@ -413,6 +413,7 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 			"diagnostics": rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"diag":        rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"check":       rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"baseline":    rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
 			"help":        rtSpec("/lsp", categorySkillsTools, runtimeModeInline, runtimeEffectRead),
 			"restart":     rtSpec("/lsp", categorySkillsTools, runtimeModeQueue, runtimeEffectLive, rtNotice("已排队，回合结束后执行")),
 			"start":       rtSpec("/lsp", categorySkillsTools, runtimeModeQueue, runtimeEffectLive, rtNotice("已排队，回合结束后执行")),

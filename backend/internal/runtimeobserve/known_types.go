@@ -73,11 +73,11 @@ import "strings"
 //     无 chat 侧交付通道」，不改变任何投递行为），否则三分法无法把「已知但无
 //     通道」与「完全未知」区分开。收编范围由 internal/events/contract_test.go
 //     的扫描门禁锁定：新增未登记的裸字面量发射点即测试失败。
-// 10. 会话级路由管理事件（internal/events/session_routing_events.go）。
-// 11. 托管 turn 生命周期里程碑（internal/events/turn_events.go；方案 §6.8 / 审计
-//    缺口 G3）：turn.suspended / turn.resumed。发射点分别是 internal/agent/loop.go
-//    的 parkBackgroundTurn（durable 首次挂起）与 internal/supervision 的
-//    WakeConsumer.Announce（宿主投递 resume 成功后转发到事件总线）。
+//  10. 会话级路由管理事件（internal/events/session_routing_events.go）。
+//  11. 托管 turn 生命周期里程碑（internal/events/turn_events.go；方案 §6.8 / 审计
+//     缺口 G3）：turn.suspended / turn.resumed。发射点分别是 internal/agent/loop.go
+//     的 parkBackgroundTurn（durable 首次挂起）与 internal/supervision 的
+//     WakeConsumer.Announce（宿主投递 resume 成功后转发到事件总线）。
 //
 // 匹配规则与 Projector 保持一致：TrimSpace 后精确匹配；仅大小写不同按未知处理，
 // 以保留异常语义（见 normalizeEventType）。
@@ -116,6 +116,9 @@ func buildKnownEventTypes() map[string]bool {
 		EventRendererChanged,
 		EventObservationGap,
 		EventResyncRequired,
+		EventLSPRequestFinished,
+		EventLSPServerState,
+		EventLSPDiagnosticsUpdated,
 	)
 
 	// 来源 2：internal/chat/events.go 的会话事件常量（行号见注释）。
@@ -309,7 +312,11 @@ func IsKnownEventType(eventType string) bool {
 // 目录是封闭集合（来源见文件头），正常永远触发不到；此上限只作为
 // "目录被误扩成通配/前缀匹配"时的内存与快照体积保险，超出部分记入溢出桶。
 // 不变量由 TestKnownEventTypeCatalogInvariants 断言。
-const maxFilteredByTypeEntries = 128
+//
+// 2026-09-29：LSP 观测域（lsp.request.finished / lsp.server.state /
+// lsp.diagnostics.updated，见 internal/events/lsp_events.go）加入目录后规模
+// 131 进入阈值内，上界从 128 提到 160 给封闭目录留出后续家族扩展余量。
+const maxFilteredByTypeEntries = 160
 
 // filteredOverflowKey 承载超出 maxFilteredByTypeEntries 的计数（防御性兜底）。
 const filteredOverflowKey = "_other"

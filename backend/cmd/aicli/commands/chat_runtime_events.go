@@ -5618,6 +5618,14 @@ func (b *chatRuntimeEventBridge) shouldSuppressMismatchedPrimaryTurnEvent(event 
 	if event.Type == agentcontrol.EventAgentReclaimed {
 		return false
 	}
+	// LSP 观测事件与会话绑定、与轮次无关（池在工具执行期发布，载荷无 turn_id）：
+	// 若按"无身份不能证明归属"整批丢弃，运行期基线（§4.3）永远为空——与
+	// agent.reclaimed 同一失败模式（见上一条注释的真实日志证据）。它们已在
+	// isChatRenderDataPlaneSuppressedEvent 中声明为「只进事件日志」，因此不会
+	// 污染 Scene/消息流。
+	if isLSPObservationBusEvent(event.Type) {
+		return false
+	}
 	// Blocking interactive events (approval, question) must reach the user
 	// because the actor is synchronously waiting for a decision. The
 	// turn-ownership guard below is a data-plane optimisation for non-blocking

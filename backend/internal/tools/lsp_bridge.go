@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
@@ -54,11 +55,58 @@ func newLSPBridgeWith(config *runtimecfg.RuntimeConfig, workspaceRoot string, di
 		Logger:   lspRuntimeLogger{},
 		Dial:     dial,
 		Observer: observer,
+		// 工具执行 ctx 携带会话归属（toolctx），runtime-server 的共享工具
+		// 管理器由此把 LSP 事件关联到具体会话；aicli 单会话路径下同样正确。
+		SessionIDFromContext: toolctx.SessionID,
 	})
 	if config.LSP.Prewarm && bridge.Enabled() {
 		bridge.StartAll(context.Background())
 	}
 	return bridge
+}
+
+// lspObserverHub 是可后置注入的池事件转发器：桥在构造期拿到的就是它的 emit
+// 方法，因此 host 在池挂载之后仍可补上/替换转发目标（会话 runtime host 建立
+// 晚于工具管理器构造时尤其需要），不必重建 pool。转发目标为 nil 时静默丢弃。
+type lspObserverHub struct {
+	mu   sync.RWMutex
+	host lsp.Observer
+}
+
+func (h *lspObserverHub) emit(event lsp.Event) {
+	if h == nil {
+		return
+	}
+	h.mu.RLock()
+	host := h.host
+	h.mu.RUnlock()
+	if host != nil {
+		host(event)
+	}
+}
+
+func (h *lspObserverHub) set(host lsp.Observer) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.host = host
+	h.mu.Unlock()
+}
+
+// SetLSPObserver 后置注入 LSP 池事件转发（host 观测接线；生命周期事件与
+// 请求事件共用同一 hub）。传 nil 停用；可在任意时刻调用，只影响后续事件。
+func (m *Manager) SetLSPObserver(observer lsp.Observer) {
+	if m == nil {
+		return
+	}
+	m.lspMu.Lock()
+	if m.lspObserver == nil {
+		m.lspObserver = &lspObserverHub{}
+	}
+	hub := m.lspObserver
+	m.lspMu.Unlock()
+	hub.set(observer)
 }
 
 // currentLSPBridge returns the manager's pool under the bridge lock, so
@@ -107,6 +155,17 @@ func (m *Manager) LSPDiagnosticsConfig() (lsp.DiagnosticsConfig, bool) {
 		return lsp.DiagnosticsConfig{}, false
 	}
 	return bridge.Config().Diagnostics.Normalize(), true
+}
+
+// LSPMetrics 返回当前池的进程内请求读数（web「LSP 观测」页签与后续
+// observe 事件的单一来源）。ok=false 表示池缺失/未启用：调用方据此区分
+// 「未启用」与「已启用但尚无样本」（后者是真实的 0，可以展示）。
+func (m *Manager) LSPMetrics() (lsp.MetricsSnapshot, bool) {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
+		return lsp.MetricsSnapshot{}, false
+	}
+	return bridge.MetricsSnapshot(), true
 }
 
 // LSPRestart is the manual recovery entry point exposed to hosts (L2): stop
@@ -160,7 +219,11 @@ func (m *Manager) EnableLSPFromConfig(config *runtimecfg.RuntimeConfig) bool {
 	if m.lspBridge != nil && m.lspBridge.Enabled() {
 		return false
 	}
-	bridge := newLSPBridge(config, strings.TrimSpace(config.Workspace.Root))
+	observer := lsp.Observer(nil)
+	if m.lspObserver != nil {
+		observer = m.lspObserver.emit
+	}
+	bridge := newLSPBridgeWith(config, strings.TrimSpace(config.Workspace.Root), nil, observer)
 	if bridge == nil || !bridge.Enabled() {
 		return false
 	}

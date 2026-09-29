@@ -31,6 +31,7 @@ const chatLSPCommandUsage = `用法:
   /lsp status               显示 LSP 池状态：开关、工作区、server 生命周期与诊断配置
   /lsp list | servers       同 /lsp status
   /lsp diagnostics <file>   读取指定文件当前诊断（只读；有界等待后按降级语义返回）
+  /lsp baseline [--days N]  归因会话日志出 §4.3 基线报告（默认最近 14 天；--since/--root 可选）
   /lsp restart [name]       重启指定 server；缺省重启全部已配置 server
   /lsp start [name]         启动（预热）指定 server；缺省启动全部（已就绪者跳过）
   /lsp help                 显示本帮助`
@@ -76,6 +77,8 @@ func chatLSPReadOnlyScreenIdentity(command string) (string, string, bool) {
 		return "lsp.status", "LSP 服务器状态", true
 	case "diagnostics", "diag", "check":
 		return "lsp.diagnostics", "LSP 诊断", true
+	case "baseline":
+		return "lsp.baseline", "LSP 基线报告", true
 	default:
 		return "", "", false
 	}
@@ -104,6 +107,8 @@ func chatLSPCommandText(session *ChatSession, command string) string {
 			return "错误: 需要指定文件路径\n用法: /lsp diagnostics <file>"
 		}
 		return chatLSPDiagnosticsText(session, args[1])
+	case "baseline":
+		return chatLSPBaselineText(args[1:])
 	case "restart":
 		return chatLSPRestartText(session, args[1:])
 	case "start":

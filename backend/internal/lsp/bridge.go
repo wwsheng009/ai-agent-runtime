@@ -15,6 +15,15 @@ type Bridge struct {
 	cfg      Config
 	registry *Registry
 	logger   Logger
+	// observer 是 host 侧观察者（BridgeOptions.Observer 原样保存）：Bridge 级
+	// 请求事件（request.finished）直接从 Bridge 发出，不经过 registry 内
+	// client 的观察链（那条链只承载生命周期/诊断发布事件）。
+	observer Observer
+	// metrics 是进程内请求读数（web /overview 与 /events 的单一来源）。
+	metrics *Metrics
+	// sessionIDFromContext 从工具执行 ctx 解析会话归属（可选；runtime-server
+	// 的共享工具管理器靠它把事件关联到具体会话）。
+	sessionIDFromContext func(context.Context) string
 }
 
 // Outcome is the result of one diagnostics pass for one file.
@@ -48,6 +57,11 @@ type BridgeOptions struct {
 	Logger   Logger
 	Dial     DialFunc
 	Observer Observer
+	// SessionIDFromContext 从工具执行 ctx 解析会话归属（可选）：runtime-server
+	// 等宿主共享一个工具管理器服务多会话，事件必须按执行上下文归属，否则
+	// observe 侧无法关联到具体会话。返回空串表示该事件无会话归属（生命周期
+	// 事件天然如此）；aicli 单会话宿主可不设置，由 host 侧回退补会话 id。
+	SessionIDFromContext func(context.Context) string
 }
 
 // NewBridge builds the facade. dial may be nil (SpawnProcess is used).
@@ -61,9 +75,12 @@ func NewBridgeWithOptions(cfg Config, root string, opts BridgeOptions) *Bridge {
 	logger := LoggerOrNop(opts.Logger)
 	observer := composeObservers(opts.Observer, logObserver(logger))
 	return &Bridge{
-		cfg:      cfg,
-		registry: NewRegistry(cfg, root, RegistryOptions{Dial: opts.Dial, Logger: opts.Logger, Observer: observer}),
-		logger:   logger,
+		cfg:                  cfg,
+		registry:             NewRegistry(cfg, root, RegistryOptions{Dial: opts.Dial, Logger: opts.Logger, Observer: observer}),
+		logger:               logger,
+		observer:             opts.Observer,
+		metrics:              NewMetrics(),
+		sessionIDFromContext: opts.SessionIDFromContext,
 	}
 }
 
@@ -155,7 +172,13 @@ func (b *Bridge) AppendToResult(ctx context.Context, output string, paths []stri
 			continue
 		}
 		seen[resolved] = struct{}{}
+		start := time.Now()
 		outcome := b.Diagnose(ctx, resolved)
+		appended := 0
+		if outcome.Text != "" {
+			appended = len(outcome.Text)
+		}
+		b.observeRequest(ctx, "inline", resolved, outcome, appended, time.Since(start))
 		if outcome.Text == "" {
 			continue
 		}
@@ -291,10 +314,13 @@ func (b *Bridge) Report(ctx context.Context, path string) (text string, handled 
 		return "", false, nil
 	}
 	resolved := b.resolve(path)
+	start := time.Now()
 	outcome := b.Diagnose(ctx, resolved)
 	if !outcome.Handled {
+		b.observeRequest(ctx, "tool", resolved, outcome, 0, time.Since(start))
 		return "", false, nil
 	}
+	text = ""
 	switch {
 	case outcome.Degraded:
 		cfg := b.registry.DiagnosticsConfig()
@@ -302,12 +328,101 @@ func (b *Bridge) Report(ctx context.Context, path string) (text string, handled 
 		if note == "" {
 			note = "LSP diagnostics unavailable: " + outcome.Reason + "\n"
 		}
-		return note, true, nil
+		text = note
 	case len(outcome.Items) == 0:
-		return "No diagnostics reported for " + resolved + ".\n", true, nil
+		text = "No diagnostics reported for " + resolved + ".\n"
 	default:
-		return outcome.Text, true, nil
+		text = outcome.Text
 	}
+	b.observeRequest(ctx, "tool", resolved, outcome, len(text), time.Since(start))
+	return text, true, nil
+}
+
+// classifyOutcome 把 Outcome 折叠为低敏枚举（写进事件与读数；前端据此分桶）。
+func classifyOutcome(outcome Outcome) string {
+	switch {
+	case !outcome.Handled:
+		return "no_server"
+	case outcome.Degraded:
+		switch {
+		case strings.Contains(outcome.Reason, "no fresh diagnostics"),
+			strings.Contains(outcome.Reason, "wait budget"):
+			return "degraded_no_fresh"
+		case strings.Contains(outcome.Reason, "read file"):
+			return "degraded_read_error"
+		default:
+			return "degraded"
+		}
+	case len(outcome.Items) == 0:
+		return "clean"
+	default:
+		return "injected"
+	}
+}
+
+// firstServer 返回参与本次请求的第一个 server（多 server 折叠为单个低敏枚举）。
+func firstServer(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(names[0])
+}
+
+// observeRequest 记录并发布一次请求事实：metrics 恒记录（web 页面读数不依赖
+// host 接线），host observer 存在时额外投递 EventRequest（observe 平面入口）。
+func (b *Bridge) observeRequest(ctx context.Context, trigger, path string, outcome Outcome, appendedBytes int, elapsed time.Duration) {
+	if b == nil {
+		return
+	}
+	sessionID := ""
+	if b.sessionIDFromContext != nil && ctx != nil {
+		sessionID = strings.TrimSpace(b.sessionIDFromContext(ctx))
+	}
+	record := RequestRecord{
+		Time:           time.Now().UTC(),
+		Trigger:        trigger,
+		Server:         firstServer(outcome.Servers),
+		Outcome:        classifyOutcome(outcome),
+		DurationMS:     elapsed.Milliseconds(),
+		DiagCount:      len(outcome.Items),
+		AppendedBytes:  appendedBytes,
+		OmittedItems:   outcome.OmittedItems,
+		OmittedByChars: outcome.OmittedByChars,
+	}
+	if b.metrics != nil {
+		b.metrics.Observe(record)
+	}
+	if b.logger != nil {
+		b.logger.Debugf(
+			"lsp: %s request %s outcome=%s duration_ms=%d diagnostics=%d appended_bytes=%d",
+			trigger, path, record.Outcome, record.DurationMS, record.DiagCount, record.AppendedBytes,
+		)
+	}
+	if b.observer != nil {
+		b.observer(Event{
+			Kind:           EventRequest,
+			Time:           record.Time,
+			SessionID:      sessionID,
+			Server:         record.Server,
+			Path:           path,
+			Count:          record.DiagCount,
+			Trigger:        record.Trigger,
+			Outcome:        record.Outcome,
+			DurationMS:     record.DurationMS,
+			DiagCount:      record.DiagCount,
+			AppendedBytes:  record.AppendedBytes,
+			OmittedItems:   record.OmittedItems,
+			OmittedByChars: record.OmittedByChars,
+		})
+	}
+}
+
+// MetricsSnapshot 返回进程内请求读数（含最近请求明细，最新在前）。
+func (b *Bridge) MetricsSnapshot() MetricsSnapshot {
+	if b == nil || b.metrics == nil {
+		return MetricsSnapshot{}
+	}
+	return b.metrics.Snapshot()
 }
 
 // readyClient waits (inside the shared wait budget) for a server to become

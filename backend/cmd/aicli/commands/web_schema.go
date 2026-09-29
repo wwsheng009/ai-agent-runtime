@@ -67,6 +67,14 @@ const (
 	// 子路径：/status、/tools、/subagents、/errors、/routing、/routing/events；
 	// v1 不新增 SSE 事件（页签激活时按需拉取，见 web/js/analysis.js）。
 	ChatWebAPIAnalysisPath = "/web/api/analysis"
+	// ChatWebAPILSPPath 「LSP 观测」页签端点前缀（lsp.observe.v1，方案见
+	// docs/plan/lsp-observability-and-analysis-plan-20260929.md §5）：
+	//   GET /web/api/lsp/status    池状态（enabled/root/config/servers；只读不启动）
+	//   GET /web/api/lsp/overview  使用读数（埋点未接入时 available=false，不伪造 0）
+	//   GET /web/api/lsp/events    最近 lsp.* 事件（同上）
+	//   GET /web/api/lsp/baseline  §4.3 基线报告（跨会话；10 分钟 TTL 缓存；未采集输出 n/a）
+	// 数据源为当前会话的 tools.Manager LSP 池（与 TUI /lsp status 同源）。
+	ChatWebAPILSPPath = "/web/api/lsp"
 	// ChatWebAPIMCPsPath MCP 管理端点前缀（MCP 页签）：
 	//   GET/POST /web/api/mcps
 	//   POST     /web/api/mcps/reload

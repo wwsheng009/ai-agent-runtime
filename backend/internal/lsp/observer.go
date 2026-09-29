@@ -14,6 +14,11 @@ const (
 	// EventDiagnostics fires when a member publishes diagnostics for a
 	// document the client tracks.
 	EventDiagnostics EventKind = "diagnostics"
+	// EventRequest fires once per post-write request (inline append, report
+	// tool). It carries the low-sensitivity scalars the observability plan
+	// (docs/plan/lsp-observability-and-analysis-plan-20260929.md §3) turns
+	// into fallback/latency/coverage readings; source text is never included.
+	EventRequest EventKind = "request.finished"
 )
 
 // Event is one observable pool fact. Observers run inline on the emitting
@@ -26,6 +31,17 @@ type Event struct {
 	Status ServerStatus `json:"status,omitempty"`
 	Path   string       `json:"path,omitempty"`
 	Count  int          `json:"count,omitempty"`
+	// SessionID 是事件归属的会话（Bridge 从工具执行 ctx 解析；生命周期事件
+	// 没有执行上下文，保持为空）。
+	SessionID string `json:"session_id,omitempty"`
+	// Request 级字段（Kind == EventRequest）。
+	Trigger        string `json:"trigger,omitempty"`
+	Outcome        string `json:"outcome,omitempty"`
+	DurationMS     int64  `json:"duration_ms,omitempty"`
+	DiagCount      int    `json:"diag_count,omitempty"`
+	AppendedBytes  int    `json:"appended_bytes,omitempty"`
+	OmittedItems   int    `json:"omitted_items,omitempty"`
+	OmittedByChars int    `json:"omitted_by_chars,omitempty"`
 }
 
 // Observer receives pool events. A nil Observer disables delivery.
@@ -66,6 +82,12 @@ func logObserver(logger Logger) Observer {
 			}
 		case EventDiagnostics:
 			logger.Debugf("lsp: %s published %d diagnostic(s) for %s", event.Server, event.Count, event.Path)
+		case EventRequest:
+			logger.Debugf(
+				"lsp: %s request %s outcome=%s duration_ms=%d diagnostics=%d appended_bytes=%d",
+				firstNonEmpty(event.Trigger, "request"), event.Path, event.Outcome,
+				event.DurationMS, event.DiagCount, event.AppendedBytes,
+			)
 		}
 	}
 }

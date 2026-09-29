@@ -1,0 +1,79 @@
+// Package eventbridge 把 LSP 池事件投影为运行时事件（lsp.*，live-only）。
+//
+// 投影规则与 internal/runtimeobserve 的字段白名单严格对齐：只发标量/短枚举
+// （trigger/outcome/duration_ms/diag_count/appended_bytes/omitted_*/server/state/
+// pid/count），源码正文、诊断文本与路径不进入载荷。aicli chat 与 runtime-server
+// 共用这一份投影，避免两处漂移。
+//
+// 会话归属：优先取事件自带的 SessionID（Bridge 从工具执行 ctx 解析，见
+// toolctx.SessionID），其次用 Options.FallbackSessionID（aicli 单会话 host 的
+// 兜底）；都没有时作为无会话事件进入 observe 流（生命周期事件天然如此）。
+package eventbridge
+
+import (
+	"strings"
+
+	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimelsp "github.com/wwsheng009/ai-agent-runtime/internal/lsp"
+)
+
+// Options 控制会话归属回退。
+type Options struct {
+	// FallbackSessionID 在事件自身无会话归属时使用；为空表示不回退。
+	FallbackSessionID string
+}
+
+// Observer 返回把池事件发布到 bus 的观察者；bus 为 nil 时返回 nil。
+// 观察者可能在 LSP 热路径（transport reader / turn goroutine）上被调用，
+// 因此只做标量投影与同步 Publish，不做 I/O、不阻塞。
+func Observer(bus runtimeevents.Publisher, opts Options) runtimelsp.Observer {
+	if bus == nil {
+		return nil
+	}
+	fallback := strings.TrimSpace(opts.FallbackSessionID)
+	return func(event runtimelsp.Event) {
+		sessionID := strings.TrimSpace(event.SessionID)
+		if sessionID == "" {
+			sessionID = fallback
+		}
+		switch event.Kind {
+		case runtimelsp.EventRequest:
+			bus.Publish(runtimeevents.Event{
+				Type:      runtimeevents.EventLSPRequestFinished,
+				SessionID: sessionID,
+				Timestamp: event.Time,
+				Payload: map[string]interface{}{
+					"trigger":          event.Trigger,
+					"outcome":          event.Outcome,
+					"duration_ms":      event.DurationMS,
+					"diag_count":       event.DiagCount,
+					"appended_bytes":   event.AppendedBytes,
+					"omitted_items":    event.OmittedItems,
+					"omitted_by_chars": event.OmittedByChars,
+					"server":           event.Server,
+				},
+			})
+		case runtimelsp.EventServerState:
+			bus.Publish(runtimeevents.Event{
+				Type:      runtimeevents.EventLSPServerState,
+				SessionID: sessionID,
+				Timestamp: event.Time,
+				Payload: map[string]interface{}{
+					"server": event.Status.Name,
+					"state":  string(event.Status.State),
+					"pid":    event.Status.PID,
+				},
+			})
+		case runtimelsp.EventDiagnostics:
+			bus.Publish(runtimeevents.Event{
+				Type:      runtimeevents.EventLSPDiagnosticsUpdated,
+				SessionID: sessionID,
+				Timestamp: event.Time,
+				Payload: map[string]interface{}{
+					"server": event.Server,
+					"count":  event.Count,
+				},
+			})
+		}
+	}
+}

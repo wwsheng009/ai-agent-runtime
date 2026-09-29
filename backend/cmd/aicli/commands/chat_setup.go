@@ -496,6 +496,10 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 	}
 	session.LocalRuntimeHost = localRuntimeHost
 	session.ActorFirstReady = true
+	// LSP 观测接线：池事件 → 会话 EventBus（lsp.*，live-only）。runtime host
+	// 在工具管理器构造之后才建立，因此走可后置注入的 SetLSPObserver；构造期
+	// 已挂载的池也会从这一刻起把后续事件转发出去（方案 §3.2）。
+	toolManager.SetLSPObserver(chatLSPRuntimeObserver(session))
 	restoreLocalRuntimeHostTeamState(session)
 	session.ChatExecutor = newAICLIActorChatExecutor()
 	startChatActorWarmup(session)

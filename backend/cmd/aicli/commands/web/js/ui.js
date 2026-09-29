@@ -4,6 +4,7 @@
 import { refreshScreen } from "./chat.js";
 import { loadConfigAdmin } from "./config-admin.js";
 import { loadAnalysis, stopAnalysisAuto } from "./analysis.js";
+import { loadLSP, stopLSPAuto } from "./lsp.js";
 import { loadCacheAnalytics, refreshCacheAnalytics } from "./cache.js";
 import { loadDebugInfo, refreshDebugInfo } from "./debug.js";
 import { loadFiles } from "./files.js";
@@ -59,6 +60,8 @@ var tabCacheBtn = document.getElementById("tab-cache-btn");
 var tabCacheEl = document.getElementById("tab-cache");
 var tabAnalysisBtn = document.getElementById("tab-analysis-btn");
 var tabAnalysisEl = document.getElementById("tab-analysis");
+var tabLSPBtn = document.getElementById("tab-lsp-btn");
+var tabLSPEl = document.getElementById("tab-lsp");
 var tabDebugBtn = document.getElementById("tab-debug-btn");
 var tabDebugEl = document.getElementById("tab-debug");
 var tabAboutBtn = document.getElementById("tab-about-btn");
@@ -79,6 +82,7 @@ function activateTab(tabName) {
   var isConfig = tabName === "config";
   var isCache = tabName === "cache";
   var isAnalysis = tabName === "analysis";
+  var isLSP = tabName === "lsp";
   var isDebug = tabName === "debug";
   var isAbout = tabName === "about";
   tabMainBtn.classList.toggle("active", isMain);
@@ -90,6 +94,7 @@ function activateTab(tabName) {
   if (tabConfigBtn) { tabConfigBtn.classList.toggle("active", isConfig); }
   if (tabCacheBtn) { tabCacheBtn.classList.toggle("active", isCache); }
   if (tabAnalysisBtn) { tabAnalysisBtn.classList.toggle("active", isAnalysis); }
+  if (tabLSPBtn) { tabLSPBtn.classList.toggle("active", isLSP); }
   if (tabDebugBtn) { tabDebugBtn.classList.toggle("active", isDebug); }
   if (tabAboutBtn) { tabAboutBtn.classList.toggle("active", isAbout); }
   tabMainEl.classList.toggle("active", isMain);
@@ -101,6 +106,7 @@ function activateTab(tabName) {
   if (tabConfigEl) { tabConfigEl.classList.toggle("active", isConfig); }
   if (tabCacheEl) { tabCacheEl.classList.toggle("active", isCache); }
   if (tabAnalysisEl) { tabAnalysisEl.classList.toggle("active", isAnalysis); }
+  if (tabLSPEl) { tabLSPEl.classList.toggle("active", isLSP); }
   if (tabDebugEl) { tabDebugEl.classList.toggle("active", isDebug); }
   if (tabAboutEl) { tabAboutEl.classList.toggle("active", isAbout); }
   if (isMain) { refreshScreen(); }
@@ -123,6 +129,9 @@ function activateTab(tabName) {
   // 分析页签同约定：数据属于当前会话，仅首次进入/会话变化时拉取；离开页签
   // 关闭自动刷新，避免后台页签空转（页内刷新按钮见 js/analysis.js initAnalysis）。
   if (isAnalysis) { loadAnalysis(); } else { stopAnalysisAuto(); }
+  // LSP 观测页签同约定：池状态/读数按会话缓存，首次进入或会话变化才拉取；
+  // 离开页签关闭自动刷新（页内自动/刷新按钮见 js/lsp.js initLSP）。
+  if (isLSP) { loadLSP(); } else { stopLSPAuto(); }
   // 调试页签的快照是拉取时刻的后端状态（无 SSE 增量），每次进入都重拉一次。
   if (isDebug) { loadDebugInfo(); }
   // 关于页签的端点清单同样按「进入即重拉」处理：清单由服务端渲染，
@@ -382,6 +391,7 @@ export function initTabs() {
   if (tabConfigBtn) { tabConfigBtn.addEventListener("click", function () { activateTab("config"); }); }
   if (tabCacheBtn) { tabCacheBtn.addEventListener("click", function () { activateTab("cache"); }); }
   if (tabAnalysisBtn) { tabAnalysisBtn.addEventListener("click", function () { activateTab("analysis"); }); }
+  if (tabLSPBtn) { tabLSPBtn.addEventListener("click", function () { activateTab("lsp"); }); }
   if (tabDebugBtn) { tabDebugBtn.addEventListener("click", function () { activateTab("debug"); }); }
   if (tabAboutBtn) { tabAboutBtn.addEventListener("click", function () { activateTab("about"); }); }
   var cacheRefreshBtn = document.getElementById("cache-refresh-btn");

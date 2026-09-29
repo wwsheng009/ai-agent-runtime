@@ -45,6 +45,9 @@ type Manager struct {
 	// (async project scan → late enable), while turns keep listing tools.
 	lspMu     sync.RWMutex
 	lspBridge *lsp.Bridge
+	// lspObserver 是池事件的 host 转发槽：可后置注入（会话 runtime host 建立
+	// 晚于工具管理器构造），桥在构造期即持有 hub，注入后立即生效。
+	lspObserver *lspObserverHub
 }
 
 const toolkitMCPName = "toolkit"
@@ -76,8 +79,9 @@ func NewDefaultManagerWithRuntimeConfig(mcp manager.Manager, config *runtimecfg.
 		mcp:           mcp,
 		sandbox:       sandbox,
 		runtimeConfig: config,
+		lspObserver:   &lspObserverHub{},
 	}
-	manager.lspBridge = newLSPBridge(config, workspaceRoot)
+	manager.lspBridge = newLSPBridgeWith(config, workspaceRoot, nil, manager.lspObserver.emit)
 	if manager.lspBridge != nil && manager.lspBridge.Enabled() {
 		registerLSPTooling(registry, manager.lspBridge, config)
 	}

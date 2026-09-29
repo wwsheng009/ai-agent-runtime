@@ -54,7 +54,27 @@ func isChatInputQueueDiagnosticEvent(eventType string) bool {
 // 经 SSE 转发，只影响渲染数据面。
 func isChatRenderDataPlaneSuppressedEvent(eventType string) bool {
 	return isChatInputQueueDiagnosticEvent(eventType) || eventType == chatEventRuntimeInteraction ||
-		eventType == chatWebDynamicStatusBusEvent || eventType == chatWebUserSubmittedBusEvent
+		eventType == chatWebDynamicStatusBusEvent || eventType == chatWebUserSubmittedBusEvent ||
+		isLSPObservationBusEvent(eventType)
+}
+
+// isLSPObservationBusEvent 返回 LSP 观测事件（方案 §3/§4.3）：
+//   - lsp.request.finished  请求级埋点，基线（离线脚本 / /lsp baseline / 页签 F）的
+//     唯一事实源，必须落事件日志；
+//   - lsp.server.state / lsp.diagnostics.updated  池生命周期与诊断发布。
+//
+// 它们与轮次无关（池在工具执行期与会话绑定发布，载荷无 turn_id），只应进入事件
+// 日志与 observe/SSE 平面；进入渲染数据面只会以未映射类型的 KindSystem 单元格
+// 污染消息流（与 aicli.chat.dynamic_status 同类）。
+func isLSPObservationBusEvent(eventType string) bool {
+	switch eventType {
+	case runtimeevents.EventLSPRequestFinished,
+		runtimeevents.EventLSPServerState,
+		runtimeevents.EventLSPDiagnosticsUpdated:
+		return true
+	default:
+		return false
+	}
 }
 
 func publishLocalChatDiagnosticEvent(session *ChatSession, eventType string, payload map[string]interface{}) {
