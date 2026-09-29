@@ -438,6 +438,8 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 
 		runtimeToolConfig := loadRuntimeToolConfig(cfg, session)
 		toolManager = runtimetools.NewDefaultManagerWithRuntimeConfig(mcpForTools, runtimeToolConfig)
+		// /lsp 命令族需要会话级工具管理器读取 LSP 池（状态/诊断/手动重启）。
+		session.ChatToolManager = toolManager
 		toolDescs := toolManager.ListTools()
 		for _, desc := range toolDescs {
 			session.FunctionCatalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(toolManager, desc), desc)

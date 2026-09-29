@@ -808,6 +808,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | `/skill [--direct] <name> <prompt>` | 默认提交 skill 回合（注入程序说明，由模型自选程序）；`--direct` 直接执行并把后面的文本作为 `prompt` |
 | `/skills [query]` | 列出并选择执行 skill |
 | `/mcp [list\|status <name>\|add <name> <url> [options]\|enable\|disable\|remove <name>\|reload\|help]` | 管理 MCP Server（列表/新增/启停/删除/热重载），与 `aicli mcp`、console 与微型 Web 面板共用同一份配置与实现 |
+| `/lsp [status\|list\|servers\|diagnostics <file>\|restart [name]\|start [name]\|help]` | 查看语言服务器（LSP）池状态（开关/工作区/server 生命周期/诊断阈值）、读取指定文件的当前诊断、手动启动或重启 server；只读长文档在统一渲染下进备用屏（可滚动/搜索，超 3 行才开屏，备用屏不可用降级为内联），`restart/start` 回执与 `help` 保持内联；池未启用时按「LSP 未启用」降级提示（编辑工具不受影响） |
 | `/sessions` | 列出或筛选可恢复会话 |
 | `/load <session-id>` | 加载指定会话 |
 | `/resume [latest|<session-id>]` | 恢复最近会话或指定会话；无参数时显示可恢复会话选择器 |

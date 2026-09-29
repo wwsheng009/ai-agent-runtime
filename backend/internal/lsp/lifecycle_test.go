@@ -2,8 +2,10 @@ package lsp
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -187,6 +189,56 @@ func TestConfigRestartLimitValue(t *testing.T) {
 	two := 2
 	if got := (Config{RestartLimit: &two}).RestartLimitValue(); got != 2 {
 		t.Fatalf("explicit restartLimit = %d, want 2", got)
+	}
+}
+
+// StartServer 是手动懒启动入口（TUI /lsp start 的底座）：首次启动失败后
+// 显式调用必须允许重试；已就绪成员是 no-op；未知名称报错。
+func TestRegistryStartServerManualRetry(t *testing.T) {
+	dir := t.TempDir()
+	fake := newFakeServer(t)
+	var attempts int32
+	var fail atomic.Bool
+	fail.Store(true)
+	dial := func(ctx context.Context, spec ServerSpec, root string, logger Logger) (*DialResult, error) {
+		atomic.AddInt32(&attempts, 1)
+		if fail.Load() {
+			return nil, errors.New("missing binary")
+		}
+		return fake.dial()(ctx, spec, root, logger)
+	}
+	registry := NewRegistry(testConfig(t, nil), dir, RegistryOptions{Dial: dial})
+	ctx := context.Background()
+	t.Cleanup(func() { registry.Stop(ctx) })
+
+	if err := registry.StartServer(ctx, "fake"); err == nil {
+		t.Fatal("首次手动启动失败必须返回错误")
+	}
+	if status := registry.Statuses()[0]; status.State != StateUnavailable {
+		t.Fatalf("失败后状态 = %+v, want unavailable", status)
+	}
+
+	// 显式重试：入口先清掉首次失败记录（否则自动懒启动路径会因 lastErr
+	// 拒绝重试，状态也会一直停留在 unavailable），再重新握手。
+	fail.Store(false)
+	if err := registry.StartServer(ctx, "fake"); err != nil {
+		t.Fatalf("手动重试必须成功: %v", err)
+	}
+	if status := registry.Statuses()[0]; status.State != StateReady {
+		t.Fatalf("重试后状态 = %+v, want ready", status)
+	}
+
+	// 已就绪成员是 no-op：不产生新的握手尝试。
+	before := atomic.LoadInt32(&attempts)
+	if err := registry.StartServer(ctx, "fake"); err != nil {
+		t.Fatalf("已就绪成员应 no-op: %v", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != before {
+		t.Fatalf("已就绪成员不应重新 dial：attempts=%d want %d", got, before)
+	}
+
+	if err := registry.StartServer(ctx, "nope"); err == nil || !strings.Contains(err.Error(), "unknown server") {
+		t.Fatalf("未知名称应报 unknown server，得到 %v", err)
 	}
 }
 

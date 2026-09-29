@@ -396,6 +396,28 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 			"auth":    rtSpec("/mcp", categorySkillsTools, runtimeModeQueue, runtimeEffectNextCall, rtNotice("已排队，回合结束后执行")),
 		},
 	},
+	// /lsp：语言服务器池的用户侧入口（docs/lsp 02 §2.2 / 03 W7）。
+	// 只读长文档（status/list/servers/diagnostics）按 §5.1 迁入副屏
+	// （screen+read，正文超内联预算时开 ScreenDocument，短输出与无副屏场景
+	// 内联降级）；help 是短用法卡保持 inline+read；restart/start 影响在途
+	// 编辑所依赖的进程，声明为 queue+live——忙时排队到回合结束后执行
+	// （手动恢复入口，见 lsp.restart_limit 语义）。
+	"/lsp": {
+		Bare: rtBare(rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument))),
+		Variants: map[string]runtimeCommandSpec{
+			"status":      rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"list":        rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"ls":          rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"servers":     rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"show":        rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"diagnostics": rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"diag":        rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"check":       rtSpec("/lsp", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)),
+			"help":        rtSpec("/lsp", categorySkillsTools, runtimeModeInline, runtimeEffectRead),
+			"restart":     rtSpec("/lsp", categorySkillsTools, runtimeModeQueue, runtimeEffectLive, rtNotice("已排队，回合结束后执行")),
+			"start":       rtSpec("/lsp", categorySkillsTools, runtimeModeQueue, runtimeEffectLive, rtNotice("已排队，回合结束后执行")),
+		},
+	},
 
 	// C9 诊断与状态
 	"/help": {Bare: rtBare(rtSpec("/help", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenDocument)))},

@@ -32,6 +32,7 @@ import (
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
 	runtimeprompt "github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	"github.com/wwsheng009/ai-agent-runtime/internal/sqlitedriver"
+	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -162,9 +163,12 @@ type ChatSession struct {
 	// LSP 池，新工具函数在下一次 turn 边界登记（函数目录只允许 turn goroutine
 	// 写，见 chat_lsp_bootstrap.go）。
 	ChatLSPLateEnable *chatLSPLateEnable
-	SkillsBinding     *skillsRuntimeBinding // Skills 运行时绑定
-	SkillsMode        string                // Skills 暴露模式
-	SkillsDebug       bool                  // Skills 调试输出
+	// ChatToolManager 是会话工具管理器（含 LSP 池）。/lsp 命令据此读取语言
+	// 服务器池状态、执行按需诊断与手动重启；--disable-tools 会话恒为 nil。
+	ChatToolManager *runtimetools.Manager
+	SkillsBinding   *skillsRuntimeBinding // Skills 运行时绑定
+	SkillsMode      string                // Skills 暴露模式
+	SkillsDebug     bool                  // Skills 调试输出
 	// NoSkills 是 --no-skills：跳过 skill 自动发现，只保留显式目录。
 	NoSkills bool
 	Config   *config.Config // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析

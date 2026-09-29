@@ -166,6 +166,32 @@ func (r *Registry) Restart(ctx context.Context, name string) error {
 	return entry.start(ctx)
 }
 
+// StartServer starts the named member synchronously. It is the manual
+// counterpart of the lazy first-use start (L2): an already-ready member is a
+// no-op, a crashed member is replaced inside the restart budget, and a member
+// whose first start failed is retried because the caller asked explicitly.
+// Failure is recorded on the entry and returned; callers degrade, never abort
+// the session (docs/lsp 02 §2.2).
+func (r *Registry) StartServer(ctx context.Context, name string) error {
+	if r == nil {
+		return fmt.Errorf("lsp: registry is not configured")
+	}
+	r.mu.RLock()
+	entry := r.entries[strings.TrimSpace(name)]
+	r.mu.RUnlock()
+	if entry == nil {
+		return fmt.Errorf("lsp: unknown server %q", name)
+	}
+	// A manual start is an explicit retry: clear the recorded first-start
+	// failure so entry.start is willing to try again.
+	entry.mu.Lock()
+	if entry.client == nil && !entry.starting {
+		entry.lastErr = ""
+	}
+	entry.mu.Unlock()
+	return entry.start(ctx)
+}
+
 // Stop shuts every managed client down. Idempotent.
 func (r *Registry) Stop(ctx context.Context) {
 	if r == nil {

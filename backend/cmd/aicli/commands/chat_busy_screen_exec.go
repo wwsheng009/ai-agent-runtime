@@ -48,6 +48,9 @@ var chatBusyScreenDocumentCommands = map[string]struct{}{
 	"/skills":   {},
 	"/mcp":      {},
 	"/profile":  {},
+	// 批次 3 尾批扩展：/lsp 只读长文档（status/list/servers/diagnostics）
+	// 迁入副屏后同批纳入忙时通道；restart/start 与 help 不在此列。
+	"/lsp": {},
 }
 
 // busyScreenCommandReadOnlyDocument 判定命令是否可走忙时副屏通道（S 档）：

@@ -793,6 +793,21 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 			},
 		},
 		{
+			Name:        "/lsp",
+			Usage:       "/lsp [status|list|servers|diagnostics <file>|restart [name]|start [name]|help]",
+			Summary:     "查看语言服务器（LSP）池状态、读取按需诊断、手动启动/重启 server",
+			Group:       string(chatSlashCommandGroupFunctions),
+			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "status", Summary: "池状态：开关、工作区、server 生命周期与诊断配置（默认）"},
+				{Token: "list", Summary: "同 status（servers 亦为别名）"},
+				{Token: "diagnostics", Summary: "读取指定文件当前诊断（diagnostics <file>）"},
+				{Token: "restart", Summary: "重启指定 server；缺省重启全部（restart [name]）"},
+				{Token: "start", Summary: "启动/预热指定 server；缺省启动全部（start [name]）"},
+				{Token: "help", Summary: "显示 /lsp 用法"},
+			},
+		},
+		{
 			Name:        "/web",
 			Usage:       "/web [token|endpoints|open|status]",
 			Summary:     "管理微型 Web 客户端（显示 URL/令牌、列出端点、打开浏览器）",

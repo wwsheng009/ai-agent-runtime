@@ -120,6 +120,15 @@ func (b *Bridge) Restart(ctx context.Context, name string) error {
 	return b.registry.Restart(ctx, name)
 }
 
+// StartServer is the manual lazy-start entry point: it starts one member
+// synchronously (ready members are left untouched).
+func (b *Bridge) StartServer(ctx context.Context, name string) error {
+	if b == nil {
+		return nil
+	}
+	return b.registry.StartServer(ctx, name)
+}
+
 // Handles reports whether any server claims the file (W1).
 func (b *Bridge) Handles(path string) bool {
 	if b == nil {

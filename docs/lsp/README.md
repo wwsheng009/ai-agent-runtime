@@ -67,6 +67,7 @@
 | ADR-0002 / ADR-0006 | Proposed，Gate = `Phase4-start` |
 | 本目录文档 | 已完成（参考分析 + 实施方案） |
 | 代码实现（runtime 侧 W1–W7） | 已落地：`backend/internal/lsp/`（编码边界 / 传输 / 客户端池 / 归属路由 / 内联渲染）+ `backend/internal/tools/lsp_bridge.go`（`lsp_servers` / `lsp_diagnostics` / 编辑结果尾部追加）；配置入口 `lsp.*`（默认 `enabled=false`） |
+| TUI 用户侧入口（`/lsp` 命令族） | 已落地：`backend/cmd/aicli/commands/chat_lsp_command.go`（`status`/`list`/`servers`/`diagnostics <file>`/`restart [name]`/`start [name]`），复用 `internal/tools` 的 LSP 管理面（状态/诊断/手动启停）；只读长文档按 alt-screen 框架 §5.1 进备用屏 `ScreenDocument`（`lsp.status`/`lsp.diagnostics`，超内联预算且能力满足时才开屏，短输出/无副屏降级内联），忙时走副屏通道（S），`restart`/`start` 忙时排队到回合结束后 |
 | W8 持久化 | 未动 schema：`lsp_servers` / `lsp_diagnostics` 表属 `knowledge_Layer`，随 `Phase4-start` 建表后接入（本目录不加表/列） |
 
 > 验收映射（本次实现）：A1/A2/A3/A5/A7/A8/A10/A11 已有自动化用例，入口 `go test ./internal/lsp/... ./internal/tools/...`；

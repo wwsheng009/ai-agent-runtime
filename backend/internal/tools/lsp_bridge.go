@@ -79,6 +79,67 @@ func (m *Manager) LSPEnabled() bool {
 	return bridge != nil && bridge.Enabled()
 }
 
+// LSPStatuses exposes the `lsp_servers`-shaped pool records to hosts that
+// render their own status surface (TUI `/lsp status`). It returns nil when no
+// pool is attached; callers treat that as "LSP disabled" (A11).
+func (m *Manager) LSPStatuses() []lsp.ServerStatus {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
+		return nil
+	}
+	return bridge.Statuses()
+}
+
+// LSPRoot returns the workspace root bound to the pool ("" when disabled).
+func (m *Manager) LSPRoot() string {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
+		return ""
+	}
+	return bridge.Root()
+}
+
+// LSPDiagnosticsConfig returns the normalized diagnostics thresholds of the
+// attached pool; ok=false means no enabled pool.
+func (m *Manager) LSPDiagnosticsConfig() (lsp.DiagnosticsConfig, bool) {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
+		return lsp.DiagnosticsConfig{}, false
+	}
+	return bridge.Config().Diagnostics.Normalize(), true
+}
+
+// LSPRestart is the manual recovery entry point exposed to hosts (L2): stop
+// the named server and start a fresh process. Errors describe why the
+// replacement could not start; the session keeps running either way.
+func (m *Manager) LSPRestart(ctx context.Context, name string) error {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
+		return fmt.Errorf("lsp: pool is not enabled")
+	}
+	return bridge.Restart(ctx, name)
+}
+
+// LSPStart starts one named server synchronously (manual lazy-start entry).
+func (m *Manager) LSPStart(ctx context.Context, name string) error {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
+		return fmt.Errorf("lsp: pool is not enabled")
+	}
+	return bridge.StartServer(ctx, name)
+}
+
+// LSPReport runs the on-demand diagnostics pipeline for one file (W7 shape):
+// handled=false means no configured server claims the file. A nil pool
+// degrades to ("" , false, nil) so callers never have to special-case it.
+func (m *Manager) LSPReport(ctx context.Context, path string) (string, bool, error) {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
+		return "", false, nil
+	}
+	return bridge.Report(ctx, path)
+}
+
 // EnableLSPFromConfig attaches the language-server pool described by config and
 // registers the LSP tool surface on the existing registry. It is the
 // late-binding counterpart of the construction-time wiring: a host may run a

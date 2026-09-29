@@ -374,7 +374,7 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		!commandMatches(cmdLower, "/plan") && !commandMatches(cmdLower, "/plans") &&
 		!commandMatches(cmdLower, "/timeline") && !commandMatches(cmdLower, "/collab") &&
 		!commandMatches(cmdLower, "/mcp") && !commandMatches(cmdLower, "/web") && !commandMatches(cmdLower, "/routing") &&
-		!commandMatches(cmdLower, "/profile") {
+		!commandMatches(cmdLower, "/lsp") && !commandMatches(cmdLower, "/profile") {
 		return CommandResult{}, false, nil
 	}
 
@@ -440,6 +440,10 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 
 	if commandMatches(cmdLower, "/mcp") {
 		return executeStructuredMCPCommand(session, command), true, nil
+	}
+
+	if commandMatches(cmdLower, "/lsp") {
+		return executeStructuredLSPCommand(session, command), true, nil
 	}
 
 	if commandMatches(cmdLower, "/web") {

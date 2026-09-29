@@ -138,6 +138,13 @@ func chatScreenMCPReadOnlySpec(id, title, text string) chatScreenSpec {
 	return chatScreenDocumentSpec(id, title, chatScreenTextDoc(text))
 }
 
+// chatScreenLSPReadOnlySpec 映射 /lsp status|list|servers 与
+// /lsp diagnostics <file>：服务器池清单与诊断报告是可能超过半屏的只读
+// 页面；restart/start 回执、help 用法与错误信息仍留在主屏内联单元格。
+func chatScreenLSPReadOnlySpec(id, title, text string) chatScreenSpec {
+	return chatScreenDocumentSpec(id, title, chatScreenTextDoc(text))
+}
+
 // chatScreenProfileReadOnlySpec 映射 /profile status|list|show|diff：只读报告
 // 走副屏；use/reload/off/save/import 等写入类回执保持内联。
 func chatScreenProfileReadOnlySpec(id, title, text string) chatScreenSpec {
