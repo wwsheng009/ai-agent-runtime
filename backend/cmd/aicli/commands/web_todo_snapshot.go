@@ -7,18 +7,23 @@
 //   - 实时（SSE tool_end）：payload.protocol_result.metadata.todo_snapshot。
 //     这是 internal/agent 按工具作用域挂上的裁剪视图（只有 todos 工具会带），
 //     原始 todos 数组与工具协议元数据不进入线上载荷。
-//   - 回放（GET /web/api/screen?format=json）：会话 transcript 里最近一条带 todos
-//     工具元数据的消息。生产侧把它整体嵌在 metadata.tool_metadata 下（历史原文），
-//     旧记录可能平铺在 metadata.todos，故按「嵌套优先 + 平铺回退」读取。
+//   - 回放（GET /web/api/screen?format=json）：会话级最新快照缓存（tool_end
+//     事件写入）优先；无缓存时从 canonical 转录按页回读，最后回退内存
+//     transcript 扫描（见 chatLatestTodoSnapshot）。生产侧把快照整体嵌在
+//     metadata.tool_metadata 下（历史原文），旧记录可能平铺在 metadata.todos，
+//     故按「嵌套优先 + 平铺回退」读取。
 //
 // 两端都不臆造数据：坏条目丢弃、状态不在契约内丢弃、整组不可用时返回 nil
 // （调用方据此保持已有面板内容，不用空列表覆盖）。
 package commands
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -46,15 +51,40 @@ func chatWebTodoSnapshotFromToolPayload(payload map[string]interface{}) *chatWeb
 	if len(payload) == 0 {
 		return nil
 	}
-	protocol, _ := payload["protocol_result"].(map[string]interface{})
+	protocol := chatWebTodoJSONMap(payload["protocol_result"])
 	if len(protocol) == 0 {
 		return nil
 	}
-	metadata, _ := protocol["metadata"].(map[string]interface{})
+	metadata := chatWebTodoJSONMap(protocol["metadata"])
 	if len(metadata) == 0 {
 		return nil
 	}
 	return chatWebTodoSnapshotFromRaw(metadata["todo_snapshot"])
+}
+
+// chatWebTodoJSONMap 把快照宿主（protocol_result/metadata/tool_metadata）归一成
+// JSON 对象：进程内强类型 map（runtimetypes.Metadata）与 JSON 反序列化出的
+// map[string]interface{} 一律接受。与 agent_stdio_plan.go 的 replayTodoSnapshot
+// 同一套归一策略，避免只认某一种 map 类型时静默丢快照。
+func chatWebTodoJSONMap(raw interface{}) map[string]interface{} {
+	switch typed := raw.(type) {
+	case nil:
+		return nil
+	case map[string]interface{}:
+		return typed
+	case runtimetypes.Metadata:
+		return map[string]interface{}(typed)
+	default:
+		encoded, err := json.Marshal(raw)
+		if err != nil {
+			return nil
+		}
+		decoded := map[string]interface{}{}
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			return nil
+		}
+		return decoded
+	}
 }
 
 // chatWebTodoSnapshotFromRaw 解析实时通道快照（protocol_result.metadata.todo_snapshot）。
@@ -106,10 +136,103 @@ func chatWebTodoSnapshotFromMessages(messages []runtimetypes.Message, sessionID 
 	return nil
 }
 
+// chatLatestTodoSnapshot 解析当前会话的最新待办快照（方案 V12 定稿链路）：
+//
+//  1. tool_end 事件缓存：忙时 /todos 立即执行时，session.Messages 还是回合
+//     开始前的热投影，只有事件缓存带得到本回合刚写完的最新列表；会话身份不
+//     匹配（/new、/resume 切换）自动跳过；
+//  2. canonical 存储分页回退：进程重启 / 快照滑出热窗口 / 压缩丢消息后，内存
+//     扫描看不到快照，从最新页往回读，读到第一条 todos 即停（页数与超时都有
+//     上界，读取失败不阻塞命令）；
+//  3. 内存 transcript 回退扫描：无分页后端（文件/内存存储）与非交互路径。
+func chatLatestTodoSnapshot(session *ChatSession) *chatWebTodoSnapshot {
+	if session == nil {
+		return nil
+	}
+	sessionID := currentRuntimeSessionID(session)
+	if snapshot := session.latestChatTodoSnapshot(sessionID); snapshot != nil {
+		return snapshot
+	}
+	if snapshot := chatTodosSnapshotFromCanonicalHistory(session, sessionID); snapshot != nil {
+		return snapshot
+	}
+	return chatWebTodoSnapshotFromMessages(sessionTranscriptMessages(session), sessionID)
+}
+
+const (
+	// 回退读取的硬上界：典型会话最新一页即命中；没有待办的会话最多读
+	// chatTodosCanonicalMaxPages × chatTodosCanonicalPageLimit 条就放弃，
+	// 避免一个只读面板把大会话整段反序列化。
+	chatTodosCanonicalPageLimit = 64
+	chatTodosCanonicalMaxPages  = 3
+	// 超时按「没有快照」处理并继续内存扫描：fail-soft，不让存储抖动卡住交互。
+	chatTodosCanonicalTimeout = 3 * time.Second
+)
+
+// chatTodosSnapshotFromCanonicalHistory 从 canonical 转录按页反向读取最新
+// todos 快照；无分页后端或读取失败返回 nil。
+func chatTodosSnapshotFromCanonicalHistory(session *ChatSession, sessionID string) *chatWebTodoSnapshot {
+	if session == nil || session.SessionManager == nil || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	if _, ok := session.SessionManager.GetStorage().(runtimechat.SessionStorageHistoryPager); !ok {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), chatTodosCanonicalTimeout)
+	defer cancel()
+	beforeSeq := 0
+	for page := 0; page < chatTodosCanonicalMaxPages; page++ {
+		history, err := session.SessionManager.GetHistoryPage(ctx, sessionID, beforeSeq, chatTodosCanonicalPageLimit)
+		if err != nil || history == nil || len(history.Messages) == 0 {
+			return nil
+		}
+		if snapshot := chatWebTodoSnapshotFromMessages(history.Messages, sessionID); snapshot != nil {
+			return snapshot
+		}
+		if !history.HasMore || history.NextBeforeSeq <= 0 {
+			return nil
+		}
+		beforeSeq = history.NextBeforeSeq
+	}
+	return nil
+}
+
+// rememberChatTodoSnapshot 记录 tool_end 事件带出的最新快照（会话级、加锁）。
+// 快照写入后不再原地修改，读侧直接取指针，无需二次深拷贝。
+func (session *ChatSession) rememberChatTodoSnapshot(sessionID string, snapshot *chatWebTodoSnapshot) {
+	if session == nil || snapshot == nil || len(snapshot.Items) == 0 {
+		return
+	}
+	session.todoSnapshotMu.Lock()
+	session.todoSnapshot = snapshot
+	session.todoSnapshotSessionID = strings.TrimSpace(sessionID)
+	session.todoSnapshotMu.Unlock()
+}
+
+// latestChatTodoSnapshot 读取缓存；会话身份不匹配（切换/新建）返回 nil，
+// 让调用方回退到新会话自己的数据面，绝不跨会话串列表。
+func (session *ChatSession) latestChatTodoSnapshot(sessionID string) *chatWebTodoSnapshot {
+	if session == nil {
+		return nil
+	}
+	session.todoSnapshotMu.Lock()
+	defer session.todoSnapshotMu.Unlock()
+	snapshot := session.todoSnapshot
+	if snapshot == nil || len(snapshot.Items) == 0 {
+		return nil
+	}
+	current := strings.TrimSpace(sessionID)
+	cached := strings.TrimSpace(session.todoSnapshotSessionID)
+	if current != "" && cached != "" && current != cached {
+		return nil
+	}
+	return snapshot
+}
+
 // chatWebTodoMetadataBag 返回真正承载 todos 键的元数据包。
 // 嵌套包带键时以嵌套为准；否则回退平铺的顶层元数据。
 func chatWebTodoMetadataBag(metadata map[string]interface{}) map[string]interface{} {
-	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok && len(nested) > 0 {
+	if nested := chatWebTodoJSONMap(metadata["tool_metadata"]); len(nested) > 0 {
 		if _, hasTodos := nested["todos"]; hasTodos {
 			return nested
 		}
@@ -193,5 +316,5 @@ func chatWebTodoSnapshotForSession() *chatWebTodoSnapshot {
 	if session == nil {
 		return nil
 	}
-	return chatWebTodoSnapshotFromMessages(sessionTranscriptMessages(session), currentRuntimeSessionID(session))
+	return chatLatestTodoSnapshot(session)
 }

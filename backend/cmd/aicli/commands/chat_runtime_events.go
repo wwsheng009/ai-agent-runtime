@@ -1297,6 +1297,9 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 	if b == nil {
 		return
 	}
+	if event.Type == runtimechat.EventToolFinished {
+		b.rememberTodoSnapshotFromEvent(event)
+	}
 	b.maybeAdoptPrimaryRunTurn(event)
 	// 已被 EndRun 终结、随后又被提问回答继续的挂起轮：它的事件带的是已
 	// retire 的 turn id，若不在这里复活 run 上下文，整段续跑
@@ -1366,6 +1369,26 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 		// slow consumer lets some events overtake others.
 		b.deferRuntimeEvent(event, size)
 	}
+}
+
+// rememberTodoSnapshotFromEvent caches the newest todos snapshot at the event
+// ingress (before queueing/coalescing can delay or drop it): busy-time /todos
+// executes immediately, so the UI path is not guaranteed to have consumed this
+// event yet. Only primary-session events are kept — a subagent transcript must
+// never leak into the parent session's task panel.
+func (b *chatRuntimeEventBridge) rememberTodoSnapshotFromEvent(event runtimeevents.Event) {
+	if b == nil || b.session == nil {
+		return
+	}
+	primarySessionID := b.primaryRuntimeSessionID()
+	if sessionID := strings.TrimSpace(event.SessionID); sessionID != "" && primarySessionID != "" && sessionID != primarySessionID {
+		return
+	}
+	snapshot := chatWebTodoSnapshotFromToolPayload(event.Payload)
+	if snapshot == nil {
+		return
+	}
+	b.session.rememberChatTodoSnapshot(primarySessionID, snapshot)
 }
 
 // isCriticalSubagentLifecycleEvent identifies control-plane outcomes that

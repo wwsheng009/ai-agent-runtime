@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -144,5 +145,35 @@ func TestChatTodosCommandStructuredDispatchRecognizes(t *testing.T) {
 	plain := ui.RenderDocumentPlain(result.Document())
 	if !strings.Contains(plain, "写方案") {
 		t.Fatalf("结构化分发结果缺少任务项：\n%s", plain)
+	}
+}
+
+// TestChatTodosCommandShowsLiveSnapshotWhileTranscriptLags 忙时回归：本回合的
+// todos 结果还没同步进 session.Messages（热投影仍是旧的），tool_end 事件缓存
+// 已写入最新列表；/todos 必须渲染最新那份，而不是"当前会话暂无待办"。
+func TestChatTodosCommandShowsLiveSnapshotWhileTranscriptLags(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "session-busy"},
+		Messages:       []runtimetypes.Message{{Role: "assistant", Content: "工具还在跑"}},
+	}
+	session.rememberChatTodoSnapshot("session-busy", &chatWebTodoSnapshot{
+		Items: []chatWebTodoItem{
+			{Content: "核对 invalidation_events 口径", Status: "in_progress", ActiveForm: "核对口径"},
+			{Content: "运行 knowledge 相关包全量测试验证", Status: "pending"},
+		},
+		SessionID: "session-busy",
+	})
+
+	plain := chatTodosTestPlain(t, session, "/todos")
+	if strings.Contains(plain, "当前会话暂无待办") {
+		t.Fatalf("忙时 turn 内不得显示无待办：\n%s", plain)
+	}
+	for _, want := range []string{
+		"任务列表（2 项：进行中 1 / 待办 1 / 已完成 0）",
+		"运行 knowledge 相关包全量测试验证",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("/todos 缺少 %q：\n%s", want, plain)
+		}
 	}
 }

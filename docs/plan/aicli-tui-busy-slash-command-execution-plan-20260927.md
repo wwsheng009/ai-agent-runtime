@@ -536,10 +536,10 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 | T35 | next-turn 切换类忙时执行（`/model`、`/stream`、`/theme`） | 确认后提示「下一回合生效」；当前 turn 不受影响、无 race | `-race` 单测 + TTY |
 | T36 | next-call 安全类忙时执行（`/permission-mode`、`/trust`、`/add-dir`） | 确认后对后续工具调用生效；审计记录；当前 turn 无错乱 | `-race` 单测 |
 | T37 | 忙时 `/todos`（默认/`active`/`done`） | **inline 部分已实现**（参数直达/过滤，单测通过）；screen 面板待 P2-4 | TTY 集成 |
-| T38 | 面板打开期间 todos 工具更新 | 面板刷新到最新快照（轮询/事件驱动）；无脏读、无重复渲染 | `-race` + TTY |
+| T38 | 面板打开期间 todos 工具更新 | **数据面已实现**（2026-09-29）：tool_end 缓存 + canonical 分页回退，/todos 与 web 回放都取最新快照（实时面板原为事件驱动）；无脏读、无重复渲染，TTY 全链路演练待补 | `-race` 单测 ✅ + TTY 待补 |
 | T39 | 无待办数据 | **已实现**：显示「当前会话暂无待办」；不渲染过期数据（单测通过） | 单测 |
 | T40 | 无副屏能力/租约超时 | inline 降级路径已实现；screen 阶段复核与 screen 视图一致性 | 单测 |
-| T41 | 快照并发（turn 写 transcript / 面板读） | `-race` 无竞态；实现为 tool_end 缓存 + 无缓存回退扫描（V12） | `-race` 单测 |
+| T41 | 快照并发（turn 写 transcript / 面板读） | **已实现**（2026-09-29）：会话级缓存全程加锁 + 无缓存回退扫描；`go test -race` 通过 | `-race` 单测 ✅ |
 
 ---
 
@@ -930,7 +930,7 @@ func (h *runtimeCommandHost) Submit(req runtimeRequest) runtimeOutcome {
 | V9 | `/mcp list\|status` 是否触网 | 第二轮 E.4-3 | 未决；暂 queue |
 | V10 | `/plan enter\|exit\|approve` 在 TUI 忙时的安全性 | 第三轮 A（新增） | 未决；TUI 无 `isRunActive` 门禁，需专项测试（ACP 已显式拒绝） |
 | V11 | 闸门安装完整性（未安装 `commandGate` 的入口会放行） | 第三轮 C（新增） | 未决；P0 复核 agent-stdio/headless 入口（本方案范围限 TUI） |
-| V12 | `/todos` 快照的 transcript 并发读安全性 | 第四轮（新增） | 未决；实现为 tool_end 缓存快照（加锁）+ 无缓存回退扫描；T41 `-race` 锁定 |
+| V12 | `/todos` 快照的 transcript 并发读安全性 | 第四轮（新增） | **已落地**（2026-09-29）：会话级 tool_end 快照缓存（加锁 + 会话身份隔离）+ canonical 分页回退 + 内存扫描兜底；T41 `-race` 锁定 |
 
 ### F.6 第三轮核实摘要（2026-09-27）
 

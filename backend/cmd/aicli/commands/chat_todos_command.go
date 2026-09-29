@@ -36,7 +36,8 @@ const (
 // executeStructuredTodosCommand 渲染当前会话最近一次 todos 工具快照。
 //
 // 数据面与 web「任务列表」面板同源（web_todo_snapshot.go）：
-// 反向扫描 transcript 中最近一条带 todo 快照的 todos 工具结果。
+// tool_end 事件缓存（最新，忙时也可见）→ canonical 转录分页回读 →
+// 内存 transcript 反向扫描，见 chatLatestTodoSnapshot。
 // 快照缺失/为空即视为无待办，不渲染过期数据。
 func executeStructuredTodosCommand(session *ChatSession, command string) CommandResult {
 	if session == nil {
@@ -110,15 +111,16 @@ func handleTodosCommand(session *ChatSession, command string) bool {
 	return false
 }
 
-// chatTodosSnapshotForSession 取当前会话最近一次待办快照（只读）。
+// chatTodosSnapshotForSession 取当前会话最新待办快照（只读）。
 //
-// 注意（方案 V12）：transcript 扫描与运行中 turn 的 messages 写入并发，
-// 需在 -race 下验证；宿主落地时应改为「tool_end 缓存快照（加锁）+ 无缓存回退扫描」。
+// 数据面（方案 V12）：tool_end 事件缓存（忙时也能读到本回合最新列表）
+// → canonical 存储分页回退（重启/热窗口裁剪后仍可恢复）
+// → 内存 transcript 扫描（无分页后端的兼容路径）；见 chatLatestTodoSnapshot。
 func chatTodosSnapshotForSession(session *ChatSession) *chatWebTodoSnapshot {
 	if session == nil {
 		return nil
 	}
-	return chatWebTodoSnapshotFromMessages(sessionTranscriptMessages(session), currentRuntimeSessionID(session))
+	return chatLatestTodoSnapshot(session)
 }
 
 func buildChatTodosLines(snapshot *chatWebTodoSnapshot, filter chatTodosFilter) []string {
