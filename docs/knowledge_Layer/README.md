@@ -1,8 +1,8 @@
 # Code Knowledge Runtime（知识层）文档索引
 
-> 最后更新：2026-09-28
+> 最后更新：2026-09-29
 > 本目录描述"代码知识运行时"（Code Knowledge Runtime）的设计与落地计划。
-> 当前阶段：**Phase 0 已落地**（2026-09-20 核心 5 交付 + 2026-09-28 交付 7 `exploration_attribution` 建表）；**Phase 1 已开工**（2026-09-28：门禁 ADR-0001 / 0003（口径）/ 0007 已 Accept；交付 4「shadow 拦截 `grep` / `view`」与交付 5「`knowledge.status` 状态面」已完成）。
+> 当前阶段：**Phase 0 已落地**（2026-09-20 核心 5 交付 + 2026-09-28 交付 7 `exploration_attribution` 建表）；**Phase 1 已开工**（2026-09-28 门禁 ADR-0001 / 0003（口径）/ 0007 已 Accept；2026-09-29 交付 1–6 全部完成——含 Java/C++ 粗符号与文件软删除对账；**同日 `Phase1-shadow` 实测 v1 已执行**：真实调用重放 n=400，M1=20.81 %（view 48.4 % / grep 行级 0.47 %；grep file-level 对照 mean 31.8 %）——**主门槛不通过**，需先裁决 grep 覆盖口径；**三个入口 live 验证已通过**（aicli cmd+tui + ACP + runtime-server，见 [`reports/phase1_shadow_report.md`](reports/phase1_shadow_report.md) §4.5）。
 
 ---
 
@@ -85,7 +85,7 @@
 | Phase | 内容 | 状态 | 验收门槛摘要 |
 |---|---|---|---|
 | 0 | 基线与契约 | **已完成**（2026-09-28） | 可测量、`mode=off` 行为不变 |
-| 1 | 索引 MVP（shadow） | **进行中**（交付 6 已完成；交付 4/5 未开始） | M1 调用级可用率（α 由 shadow 校准） |
+| 1 | 索引 MVP（shadow） | **进行中**（交付 1–6 已完成；2026-09-29 shadow 实测 v1：M1=20.8 %，grep 行级 0.5 % → **未达标**，file-level 对照 31.8 % 待口径裁决；live 验证 3/3 入口通过） | M1 调用级可用率（α 由 shadow 校准） |
 | 2 | Exploration Memory + Planner | 未开始 | 重复探索 ↓ ≥ 30%、`unsafe_reuse=0` |
 | 3 | Code API 与工具面收敛 | 未开始 | 探索 token ↓ ≥ 40%、fallback ≤ 30% |
 | 4 | Adapter SPI 与可选 LSP | 未开始 | 精度 ≥ 90%、召回 ≥ 85% |
@@ -94,10 +94,17 @@
 | 7 | Semantic Retrieval（可选） | 未开始 | recall 提升、出网 = 0 |
 | 8+ | 跨语言 / Runtime Evidence / ABAP | **明确推迟** | — |
 
-> 阈值均为初始建议值，必须用 Phase 0 基线校准（见 `04` §7.6）。
-> 已实测 3 个仓库：两条初值（120s / 200MB）在 3860 文件的仓库上被击穿（146.9s / 247.5 MiB），
-> 且成本应按"每 ref"而非"每文件"表达；校准建议见
-> [`reports/phase0_baseline_report.md`](reports/phase0_baseline_report.md) §2.4 / §5。
+> 阈值已按 `04` §7.6 完成校准（2026-09-29）：首次全量 **≤ 360 s**（n=3 中位 292.4 s；
+> 跨仓库抽验 38.9–43.8 ms/文件）、DB 沿用默认 512MB（实测 313.9 MiB）；单文件增量
+> **Fail**（marginal p95 302 ms，待 Phase 5 增量触发或口径重议）。详见 `04` §7.4 与
+> [`reports/phase1_shadow_report.md`](reports/phase1_shadow_report.md) §4.7。
+>
+> 2026-09-29 `Phase1-shadow` 实测 v1（真实调用重放，n=400）：
+> M1=20.81 %（view 48.4 % / grep 行级 0.5 %）、M2=24.15 %、M4=75.4 %；grep file-level
+> 对照 mean 31.83 %（p90 100 %、answerable 49.4 %，待新 ADR 裁决口径）；索引侧 4989 文件 324.9 s / 313.5 MiB。
+> 结论=**主门槛不通过**（grep 覆盖为 ADR-0003 §6.2 已预告的行级交集低估所主导）；
+> 同日**三个入口 live 验证通过**（aicli cmd+tui + ACP + runtime-server：真实会话落库 grep coverage=0.667 / view=0.600；后两个入口各追加 2 条同值行；生产代码复算 M1–M4，报告 §4.5）。
+> 复算 / 校准入口与剩余工作见 [`reports/phase1_shadow_report.md`](reports/phase1_shadow_report.md)。
 
 ---
 

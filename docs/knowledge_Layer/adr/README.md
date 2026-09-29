@@ -1,6 +1,6 @@
 # ADR 索引与流程（决策唯一事实源）
 
-> 最后更新：2026-09-20
+> 最后更新：2026-09-29
 > 本目录是 `docs/knowledge_Layer/` 内**决策的唯一事实源**（见 `../README.md` §3）。
 > 任何推翻既有设计的改动，必须先在本目录新增/更新 ADR，再改文档与代码。
 
@@ -78,11 +78,25 @@ Proposed ──(owner 接受)──→ Accepted ──(被新 ADR 取代)──�
 | [0005](0005-windows-child-process-lifecycle.md) | Windows 子进程树生命周期与复用既有 process guard | Proposed | moderate | Phase4-start | `supplement/05` §9.5 |
 | [0006](0006-lsp-position-encoding-boundary.md) | LSP 位置编码转换边界与缓存键 | Proposed | moderate | Phase4-start | 澄清并补齐 `supplement/05_...md` §10.3（原 `03` §5.3） |
 | [0007](0007-phantom-tables-and-doc-invariants.md) | 幽灵表清理与文档不变量 | **Accepted**（2026-09-28） | cheap | Phase1-start | `02` §8 的 6 个无 DDL 表名；`04` L546 的 `index_jobs` DDL 落点 |
+| [0008](0008-grep-coverage-file-level.md) | grep 通道探索归因采用 file-level 覆盖口径 | Proposed（2026-09-29 起草） | cheap（仅测量） | `Phase1-shadow`（数据已具备） | 部分取代 [0003](0003-exploration-attribution-metrics.md) §4.2 的 grep 通道 coverage 口径 |
+| [0009](0009-v1-table-set-scope.md) | v1 表集口径裁决（上限定义域、三分组与命名规范） | Proposed（2026-09-29 起草） | cheap | **Phase1-start** | `04` §0.3/§4.3 的 "≤16 张" 口径；`../README.md` §3 的同一转述 |
 
 > **落盘状态（2026-09-20）**：`0000`（模板）与 `0001`–`0007` 均已落盘，**全部为 `Proposed`**，等待 owner 按 §2 逐个 Accept。
 > **接受状态（2026-09-28）**：项目 owner 授权代改并记录裁决，`0001`（Project/Module/Language 模型收敛）、`0003`（探索归因**口径**部分——§10 的 α 阈值仍受 `Phase1-shadow` 门禁约束）、`0007`（幽灵表清理与文档不变量）已由 `Proposed` 改为 `Accepted`，**Phase 1 的 `Phase1-start` 门禁解除**；裁决记录见 `../CHANGELOG.md` 的 2026-09-28 条目。`0002` / `0004` / `0005` / `0006` 仍为 `Proposed`。
 > **注意**：ADR **不得复制 DDL**（§7）。ADR-0007 §4.3 要求把 `04` 中的 `CREATE TABLE index_jobs` 迁移到 extension schema；
 > **已于 2026-09-28 执行**：迁至 [`supplement/15_change_management.md`](supplement/15_change_management.md) §15.3，`04` §4.3 只留用途 / 验收指标 / 引用（其余 core 表 DDL 的引用化见 `06` §9 待办 #19）。
+>
+> **2026-09-29 新增**：`0008` 由方案作者起草（**Proposed**），依据 `Phase1-shadow` 实测
+> （[`reports/phase1_shadow_report.md`](../reports/phase1_shadow_report.md) §4.1 / §4.3）——
+> grep 行级覆盖被 ADR-0003 §6.2 预告的低估偏差主导（行级 M1=0.47 %，
+> 同批 file-level usable@0.8=26.76 %、answerable=49.38 %）。等待 owner 裁决；
+> ADR-0003 §10 的"抽样核对报告"待办由该报告以全量重放回应。
+>
+> **2026-09-29 新增（0009）**：`0009` 由方案作者起草（**Proposed**），裁决 ADR-0007 §10 的 I5 待办
+> （`04` 声明 ≤16 vs `02` 实际 23 = 22 表 + `symbol_fts` 虚表）。推荐 **选项 C：上限与分组解耦，
+> `v1 表集上限` 只约束【v1 core】**（数字 16→23；extension/deferred 与 `schema_migrations` 不计入）；
+> 附录 A/B/C 给出 28 名三分组建议、6 幽灵名去向与 I3 两对漂移的规范名
+> （`inheritance_edges`、`dependency_versions`）。等待 owner 裁决；裁决前不改 `02`/`04`/`supplement/*`/`06`。
 
 ---
 

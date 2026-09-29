@@ -16,7 +16,7 @@
 | 评审者 | `04` §2 / §6 / 附录 B，配合本文 §3 |
 | 新人 | `README.md` §2 → 本文 §1、§2 |
 
-**一句话状态**：Phase 0 **核心 5 交付已完成**（2026-09-20）——含基线报告（3 个仓库 + 5 真实任务 + 7 条 LLM 记录）；**Phase 1 门禁已解除**：`0001` / `0007` / `0003`（口径）已于 2026-09-28 标为 `Accepted`（owner 授权代改，裁决记录见 `CHANGELOG.md`），其余 4 条按各自 Gate 在对应 Phase 前 Accept；ADR-0003 的 α 阈值待 Phase 1 shadow 实测后落稿（`04` §7.6）。文档治理尾项（§9 条目 8 / 9：`00_` 归档 + `01` 边界 / `03` 拆分）**已于 2026-09-28 完成**（记录见 `CHANGELOG.md` 补记与本文 §9.3；`01` 正文逐节删减仍留待办 **#18**），属文档维护，**不影响工程验收**。
+**一句话状态**：Phase 0 **核心 5 交付已完成**（2026-09-20）——含基线报告（3 个仓库 + 5 真实任务 + 7 条 LLM 记录）；**Phase 1 门禁已解除**：`0001` / `0007` / `0003`（口径）已于 2026-09-28 标为 `Accepted`（owner 授权代改，裁决记录见 `CHANGELOG.md`），其余 4 条按各自 Gate 在对应 Phase 前 Accept；ADR-0003 的 α 阈值实测已于 2026-09-29 完成（shadow v1），因口径争议（ADR-0008）待裁决后落稿（`04` §7.6）。文档治理尾项（§9 条目 8 / 9：`00_` 归档 + `01` 边界 / `03` 拆分）**已于 2026-09-28 完成**（记录见 `CHANGELOG.md` 补记与本文 §9.3；`01` 正文逐节删减仍留待办 **#18**），属文档维护，**不影响工程验收**。
 
 ---
 
@@ -27,7 +27,7 @@
 | Phase | 内容 | 状态 | 进入条件 |
 |---|---|---|---|
 | 0 | 基线与契约 | **核心 5 交付已完成**（2026-09-20）；文档治理尾项已完成（§9 8/9，2026-09-28） | 无（可立即开工） |
-| 1 | 索引 MVP（shadow） | **进行中**（2026-09-28 开工；交付 1–6 已完成；待 `Phase1-shadow` 实测校准 α 并复算 M1） | ✅ 已满足：ADR-0001、ADR-0003（口径）、ADR-0007 已 Accept |
+| 1 | 索引 MVP（shadow） | **进行中**（2026-09-28 开工；2026-09-29 交付 1–6 全部完成；同日 `Phase1-shadow` 实测 v1：M1=20.8 %、grep 行级 0.5 % → 未达标，file-level 对照 31.8 % 待覆盖口径裁决；live 验证 3/3 入口通过；性能已按 §7.4 校准（≤360 s）、单文件增量实测 Fail（marginal p95 302 ms）） | ✅ 已满足：ADR-0001、ADR-0003（口径）、ADR-0007 已 Accept |
 | 2 | Exploration Memory + Planner | 未开始 | ADR-0004 Accept；Phase 1 验收通过 |
 | 3 | Code API 与工具面收敛 | 未开始 | Phase 2 验收通过 |
 | 4 | Adapter SPI 与可选 LSP | 未开始 | ADR-0002 / 0005 / 0006 Accept；Phase 1 验收通过 |
@@ -40,7 +40,7 @@
 
 1. ~~**ADR-0001**（`Phase1-start`）：Project/Module/Language 模型收敛~~ → ✅ **Accepted（2026-09-28）**
 2. ~~**ADR-0007**（`Phase1-start`）：幽灵表清理与文档不变量~~ → ✅ **Accepted（2026-09-28）**（其 §9 待办 1–3 的触发条件已满足，执行另行排期）
-3. **ADR-0003**（`Phase1-start` 定口径 / **`Phase1-shadow`** 定阈值）：shadow 差异率分母定义 → ✅ **口径已于 2026-09-28 Accepted**；阈值仍待 Phase 1 shadow（**门禁可达性已于 2026-09-21 修复**，原 `Phase0-baseline` 阈值 Gate 结构性不可达，见 §9.1 #11）
+3. **ADR-0003**（`Phase1-start` 定口径 / **`Phase1-shadow`** 定阈值）：shadow 差异率分母定义 → ✅ **口径已于 2026-09-28 Accepted**；阈值实测已完成（2026-09-29 shadow v1），待 **ADR-0008 口径裁决**后落稿（**门禁可达性已于 2026-09-21 修复**，原 `Phase0-baseline` 阈值 Gate 结构性不可达，见 §9.1 #11）
 4. 其余 4 条（`0002` / `0004` / `0005` / `0006`）按各自 Gate 在对应 Phase 前 Accept 即可
 5. ~~**Phase 1 规划缺口 7 项**~~ —— ✅ **已于 2026-09-21 全部修复**，见 §9.1 #10–#16 的“修复”列
 
@@ -135,13 +135,13 @@
   1. `knowledge/index`：从 `workspace/scanner.go` 升级。保留正则作为 builtin adapter；补 Java / Rust / C++ 粗符号（`class` / `func` / `fn` / `struct` / `interface` 级别）；**修正测试文件被忽略的问题**——改为索引并写 `files.is_test=1` / `symbols.is_test=1`，`ignorePatterns` 中的 `.*\.test\.(go|py|js|ts)$` 与 `^_\w+` 必须移除或改为标记，否则 `code.tests` 与影响面分析永久为空；输出 `content_hash`、`is_generated`、`language`、`size`、`mtime_ns`。
   2. `knowledge/store`：`04` §4.3 的 v1 表 + `symbols_fts` 同步触发器。
   3. 增量：仅 `content_hash` 变化才重解析；删除文件标记 `deleted_at`，不立即物理删除。
-  4. `knowledge.mode=shadow`：在**既有 `grep` / `view` 的执行路径上拦截**（ADR-0003 §4.3 拦截范围 / §4.4 候选查询映射），索引侧同时算候选结果，**仍返回原结果**，逐调用对比写入 `exploration_attribution` 与 `invalidation_events`。**Phase 1 不新增工具**——`code.search` 是 Phase 3 交付（见 §4 Phase 3）；原表述误用 Phase 3 产物定义 Phase 1 shadow。**2026-09-28 已落地**：观察器 `internal/knowledge/shadow.go`（`ShadowObserver` / `ShadowObserverFor`：只读 `Search` / `FindSymbols` 算候选 + 旁路落库，失败只 debug 不冒泡，隐私只落 `query_hash`）；`agent.LoopReActConfig.OnToolObserved` 在 MCP 分支与并行批次出口上报最终结果（`internal/agent/loop.go`）；三入口接线（aicli cmd/tui `applyLocalChatToolObservation`、acp `attachSessionKnowledge`、runtime-server `SetKnowledgeShadow` + `applyAPISessionToolObservation`）。
+  4. `knowledge.mode=shadow`：在**既有 `grep` / `view` 的执行路径上拦截**（ADR-0003 §4.3 拦截范围 / §4.4 候选查询映射），索引侧同时算候选结果，**仍返回原结果**，逐调用对比写入 `exploration_attribution`（不写 `invalidation_events`：该表只承载变更源类事件，reason 闭集见 `04` §4.3；2026-09-29 口径修正）。**Phase 1 不新增工具**——`code.search` 是 Phase 3 交付（见 §4 Phase 3）；原表述误用 Phase 3 产物定义 Phase 1 shadow。**2026-09-28 已落地**：观察器 `internal/knowledge/shadow.go`（`ShadowObserver` / `ShadowObserverFor`：只读 `Search` / `FindSymbols` 算候选 + 旁路落库，失败只 debug 不冒泡，隐私只落 `query_hash`）；`agent.LoopReActConfig.OnToolObserved` 在 MCP 分支与并行批次出口上报最终结果（`internal/agent/loop.go`）；三入口接线（aicli cmd/tui `applyLocalChatToolObservation`、acp `attachSessionKnowledge`、runtime-server `SetKnowledgeShadow` + `applyAPISessionToolObservation`）。
   5. `knowledge.status` CLI / HTTP：索引状态、文件数、符号数、DB 大小、最近 job、锁等待 p95。
   6. **接入（激活）**：`knowledge.Open` 接入 `cmd/runtime-server`（启动阶段调用 + 向 `internal/background` 注册索引任务，默认 writer owner）、`cmd/aicli` cmd/tui（`commands/chat.go` 解析 workspace 后调用）、`cmd/aicli` acp。规格见 `supplement/05` §2 / §8。**没有这一项，Phase 1 的 shadow 没有任何进程会打开知识层，验收无法进行**（2026-09-21 补入归属；本次 A/B 延期即此因）。**2026-09-28 实现偏离**：`internal/background` 只有 shell 作业通道（`SubmitShell`），无进程内任务注册口；首次全量索引由 `knowledge.Activate` 内部 goroutine 承担（见 `CHANGELOG.md`）。
-- **文件落点**：新增 `knowledge/store_sqlite.go`、`indexer.go`、`indexer_light.go`、`adapter_builtin.go`、`query.go`、`owner.go`、`knowledge_test.go`；修改 `workspace/{scanner,symbol_index,context_builder}.go`、`sqliteutil`、`events` / `runtimeevents`；**接入修改 `cmd/runtime-server/main.go`、`cmd/aicli/commands/chat.go` 及其 acp 入口**（2026-09-21 补入）。**交付 4 落点（2026-09-28）**：新增 `knowledge/shadow.go`、`knowledge/shadow_test.go`、`runtimeapi/knowledge_shadow_wiring_test.go`、`agent/loop_observe_test.go`、`usageledger/sqlite_store_exploration_attribution_write_test.go`；修改 `usageledger/sqlite_store.go`（`AppendExplorationAttribution`）、`agent/loop.go`（`OnToolObserved`）、`runtimeapi/{handler,session_runtime_support}.go`、`cmd/runtime-server/{main,knowledge_boot}.go`、`cmd/aicli/commands/{chat_actor_host,agent_stdio}.go`。**交付 5 落点（2026-09-28）**：新增 `knowledge/{jobs,lockwait,status}.go`、`runtimeapi/knowledge_handlers.go`、`cmd/aicli/commands/knowledge.go` 及对应测试（`knowledge/status_test.go`、`sqliteutil/lock_wait_observe_test.go`、`runtimeapi/knowledge_status_handler_test.go`、`cmd/aicli/commands/knowledge_status_test.go`）；修改 `knowledge/{activation,config,indexer,store,store_sqlite}.go`、`sqliteutil/sqliteutil.go`、`runtimeapi/handler.go`、`cmd/runtime-server/main.go`、`cmd/aicli/main.go`。
-- **验收门槛**（2026-09-21 修订：**主门槛与诊断指标分离**）：**主门槛 = ADR-0003 §4.5 的 M1 调用级可用率**——`baseline_n > 0` 的被拦截调用上 `usable = (coverage ≥ α) AND (economy ≤ 1.0)` 的均值达标；**α 由本 Phase 的 shadow 实测校准**（Gate = `Phase1-shadow`）；**诊断指标（不判 Pass/Fail，用于定位失败）** = M2 覆盖度 / M3 经济性 / M4 token 收益、以及 `code.search` 与 `grep` 的 top-10 文件集合差异率 < 15%（原为验收口径，现降为诊断，消除与 ADR-0003 §4.5 的双口径冲突）；本仓库首次全量索引 ≤ 实测基线（先测后定，初值 ≤ 120s）；单文件增量 < 50ms；DB ≤ 200MB；`files.content_hash` 与磁盘一致率 100%（抽样 ≥ 200 文件）；锁等待 p95 < 50ms；**接入验证**：三入口 `mode=off` 行为与改动前一致、`mode=shadow` 有数据落库且 M1 可复算。
+- **文件落点**：新增 `knowledge/store_sqlite.go`（读路径在 `store_sqlite_read.go`、FTS 在 `store_sqlite_fts.go`）、`indexer.go`、`adapter_builtin.go`、`owner.go`、`activation.go`、`shadow.go`、`jobs.go`、`lockwait.go`、`status.go`、`migrations/0001_init.sql` / `0002_file_soft_delete.sql` 及配套 `*_test.go`（2026-09-29 校正：原预测的 `indexer_light.go` / `query.go` / `knowledge_test.go` 未单独落盘）；`workspace/*` 未改动（轻索引自带 walker，测试文件按 `is_test` 标记）；修改 `sqliteutil`、`events` / `runtimeevents`；**接入修改 `cmd/runtime-server/main.go`、`cmd/aicli/commands/chat.go` 及其 acp 入口**（2026-09-21 补入）。**交付 4 落点（2026-09-28）**：新增 `knowledge/shadow.go`、`knowledge/shadow_test.go`、`runtimeapi/knowledge_shadow_wiring_test.go`、`agent/loop_observe_test.go`、`usageledger/sqlite_store_exploration_attribution_write_test.go`；修改 `usageledger/sqlite_store.go`（`AppendExplorationAttribution`）、`agent/loop.go`（`OnToolObserved`）、`runtimeapi/{handler,session_runtime_support}.go`、`cmd/runtime-server/{main,knowledge_boot}.go`、`cmd/aicli/commands/{chat_actor_host,agent_stdio}.go`。**交付 5 落点（2026-09-28）**：新增 `knowledge/{jobs,lockwait,status}.go`、`runtimeapi/knowledge_handlers.go`、`cmd/aicli/commands/knowledge.go` 及对应测试（`knowledge/status_test.go`、`sqliteutil/lock_wait_observe_test.go`、`runtimeapi/knowledge_status_handler_test.go`、`cmd/aicli/commands/knowledge_status_test.go`）；修改 `knowledge/{activation,config,indexer,store,store_sqlite}.go`、`sqliteutil/sqliteutil.go`、`runtimeapi/handler.go`、`cmd/runtime-server/main.go`、`cmd/aicli/main.go`。
+- **验收门槛**（2026-09-21 修订：**主门槛与诊断指标分离**）：**主门槛 = ADR-0003 §4.5 的 M1 调用级可用率**——`baseline_n > 0` 的被拦截调用上 `usable = (coverage ≥ α) AND (economy ≤ 1.0)` 的均值达标；**α 由本 Phase 的 shadow 实测校准**（Gate = `Phase1-shadow`）；**诊断指标（不判 Pass/Fail，用于定位失败）** = M2 覆盖度 / M3 经济性 / M4 token 收益、以及 `code.search` 与 `grep` 的 top-10 文件集合差异率 < 15%（原为验收口径，现降为诊断，消除与 ADR-0003 §4.5 的双口径冲突）；本仓库首次全量索引 ≤ 实测基线（先测后定，初值 ≤ 120s）；单文件增量 < 50ms；DB ≤ 200MB；`files.content_hash` 与磁盘一致率 100%（抽样 ≥ 200 文件）；锁等待 p95 < 50ms；**接入验证**：三入口 `mode=off` 行为与改动前一致、`mode=shadow` 有数据落库且 M1 可复算。**2026-09-29 实测**：全量 ≤360 s（§7.4）；单文件增量 **Fail**（marginal p95 302 ms）；DB 313.9 MiB；content_hash 261/261；锁抽样 0 样本（报告 §4.6/§4.7）。
 - **回滚**：`mode=off` + 删除 `knowledge.db`。
-- **状态**：**进行中**（2026-09-28 开工）。交付 1–3 的代码已在 `internal/knowledge`；**交付 6「接入（激活）」已完成**（三入口）；**交付 4（shadow 拦截 `grep` / `view`）已完成**（2026-09-28：三入口接线 + `exploration_attribution` 落库，见 `CHANGELOG.md`）；**交付 5（`knowledge.status`）已完成**（2026-09-28：CLI `aicli knowledge status` + HTTP `GET /api/runtime/knowledge/status`，见 `CHANGELOG.md`）。下一步：进入 `Phase1-shadow` 实测（α 校准 + M1 复算）；Phase 1 尚未验收。
+- **状态**：**进行中**（2026-09-28 开工）。交付 1–3 的代码已在 `internal/knowledge`；**交付 6「接入（激活）」已完成**（三入口）；**交付 4（shadow 拦截 `grep` / `view`）已完成**（2026-09-28：三入口接线 + `exploration_attribution` 落库，见 `CHANGELOG.md`）；**交付 5（`knowledge.status`）已完成**（2026-09-28：CLI `aicli knowledge status` + HTTP `GET /api/runtime/knowledge/status`，见 `CHANGELOG.md`）；**2026-09-29 收口交付 1/3**——Java/C++ 粗符号与文件软删除对账（`files.deleted_at` / `MarkFilesDeleted` / 复活）已落地，交付 1–6 全部完成（见 `CHANGELOG.md`）。**2026-09-29 `Phase1-shadow` 实测 v1 已执行**（真实调用重放 n=400：M1=20.81 %、M2=24.15 %、M4=75.4 %；view 48.4 % / grep 行级 0.47 %（grep file-level 对照 mean 31.83 %、answerable 49.4 %））——主门槛不通过，瓶颈为行级口径（ADR-0003 §6.2），需新 ADR 裁决（file-level 或 per-file 归因提前）；**2026-09-29 三个入口 live 验证通过**（aicli cmd+tui + ACP + runtime-server，见报告 §4.5）；**2026-09-29 抽样补齐** content_hash 一致率 261/261 = 100 %、锁等待 4 写者 0 样本 / 0 重试失败（报告 §4.6，含 `index_jobs.id` 并发碰撞修复）；Phase 1 尚未验收，剩余工作见 `reports/phase1_shadow_report.md` §5。**2026-09-29 再收口**：性能 §7.4 校准（≤360 s、跨仓 38.9–43.8 ms/文件）+ 单文件增量实测 Fail（marginal p95 302 ms）+ 多 `paths` 作用域落地（报告 §5 第 2 项部分）。
 
 ### Phase 2 — Exploration Memory + Context Planner
 
@@ -310,6 +310,8 @@ Phase 3 (Code API / 工具面)  ◄────────────  Phase 5
 | `docs/knowledge_Layer/adr/0001..0007-*.md` | 7 条初始决策 | 0 |
 | `docs/knowledge_Layer/06_implementation_index_and_guidance.md` | **本文** | 0 |
 
+> 2026-09-29 落盘核对：原预测的 `indexer_light.go` / `query.go` / `knowledge_test.go` 未单独成文件（功能分别在 `indexer.go`、`store_sqlite_read.go`、各 `*_test.go`）；Phase 1 实际新增 `store_sqlite_fts.go`、`activation.go`、`shadow.go`、`jobs.go`、`lockwait.go`、`status.go`、`migrations/0002_file_soft_delete.sql`。
+
 ### 5.2 修改
 
 | 路径 | 修改点 | Phase |
@@ -328,8 +330,7 @@ Phase 3 (Code API / 工具面)  ◄────────────  Phase 5
 | `backend/internal/events` / `runtimeevents` | knowledge 事件接入 | 1/5 |
 | `backend/cmd/runtime-server/main.go` | 启动阶段 `knowledge.Open`；向 `internal/background` 注册索引任务（2026-09-28 实现偏离：改由 `knowledge.Activate` 内部 goroutine 承担，见 `CHANGELOG.md`）；默认 writer owner | 1 |
 | `backend/cmd/aicli/commands/chat.go`（含 acp 入口） | workspace 解析后 `knowledge.Open`；reader / owner 竞争 | 1 |
-| `backend/configs/config.yaml` | `knowledge.*` 配置段 | 0 |
-| `backend/configs/runtime.yaml` / `runtime.win7.yaml` / `config.runtime.snapshot.yaml` | 同上 | 0 |
+| `backend/configs/runtime.yaml` / `runtime.win7.yaml` | `knowledge:` 配置段（2026-09-29 校正：`config.yaml` / `config.runtime.snapshot.yaml` 无该段，运行时零值即 off） | 0 |
 | `backend/configs/model_cards.yaml` | 若涉及工具 / 模式提示词 | 3 |
 | `docs/knowledge_Layer/01_*.md` | 去重、加锚点、去 PostgreSQL（2026-09-28：已加"§0 事实源边界"；正文逐节删减见 §9 待办 #18） | 0 |
 | `docs/knowledge_Layer/02_*.md` | 顶部声明 schema 应用顺序；删除 / 标注 PostgreSQL | 0 |
@@ -412,14 +413,15 @@ Phase 3 (Code API / 工具面)  ◄────────────  Phase 5
 | # | 待办 | 触发条件 | 落点 |
 |---|---|---|---|
 | 1 | ✅ **已完成**（2026-09-28，ADR-0007 解锁后）：`04` §4.3 的 `CREATE TABLE index_jobs` 迁至 `supplement/15_change_management.md` §15.3；`04` 只留用途 / 验收指标 / 引用 | ADR-0007 被 Accept（已满足） | `04` §4.3、`supplement/15` §15.3 |
-| 2 | `02` §8 总览块中 6 个无 DDL 的表名：清理或补 DDL | ADR-0007 被 Accept | `02` §8 |
-| 3 | 文档不变量 I1–I5 落地为可执行检查 | ADR-0007 被 Accept | `02` / `04` |
+| 2 | `02` §8 总览块中 6 个无 DDL 的表名：清理或补 DDL。**2026-09-29 脚本（I1）确认 6 名**：`branches` / `dependencies` / `events` / `index_jobs` / `inheritance` / `language_projects`（另 `symbol_fts` 有 DDL 但未列入总览）；按 ADR-0007 已否决“补 DDL”，待三分组归类清理 | ADR-0007 被 Accept（已满足） | `02` §8 |
+| 3 | ✅ **已完成（2026-09-29）**：`backend/scripts/check_knowledge_doc_invariants.go`（stdlib、`go run`、失败 exit≠0、含正向 fixture 自测）。当前基线 **5/5 FAIL**：I1 六幽灵名 + `symbol_fts` 未列；I2 `04` 15 处越位 DDL；I3 两对漂移 `{inheritance, inheritance_edges}` / `{dependencies, dependency_versions}`；I4 `02 §8` 尚无三分组；I5 声明 16 vs 实际 23 | ADR-0007 被 Accept（已满足） | `02` / `04` |
 | 4 | `supplement/05` §10.3（原 `03` §5.3）三条规则改写；`lsp_servers` 补 `position_encoding` 列 | ADR-0006 被 Accept | `supplement/05` §10.3 |
 | 5 | `02` 顶部加"core 先行；启用 extension 前必须先应用 `supplement/*` 的 ALTER"声明 | B15 转 ADR 并 Accept | `02` 顶部（**当前仅有"待补"标注**） |
 | 6 | `04` 附录 B 其余条目逐条判定：决策 → ADR；笔误 → 直接改文档并记 `CHANGELOG`；风险 → 留 `04` §6 | Phase 1 开工前 | `adr/`、`04` 附录 B |
-| 7 | `04` §4.3 声明的"v1 表集 ≤ 16 张"与 `02` 实际 22 张 core DDL 的不自洽 | 由 ADR-0007 不变量 I5 检查结果裁决 | — |
+| 7 | `04` §4.3 声明的"v1 表集 ≤ 16 张"与 `02` 实际 22 张 core DDL 的不自洽。**2026-09-29 I5 实测确认**：声明 **≤16**（§0.3 / §4.3 标题）vs 实际 **23**（22 表 + `symbol_fts` 虚表）→ 裁决输入已就绪（两问：虚表是否计入上限；`index_jobs` 等 extension 归属） | 由 I5 检查结果裁决（**已产出**） | — |
 | 8 | ✅ **已完成**（2026-09-28）：`00_Code_Intelligence_Project_Knowledge_Layer.md` 移入 `archive/` 并加免责声明 | Phase 0 文档治理 | `archive/` |
 | 9 | ✅ **已完成**（2026-09-28）：`03_*.md` 拆分为 `supplement/01`–`16`（`03` 变为拆分索引）；`01_*.md` 见 **#18** | Phase 0 | `01` / `03` / `supplement/*` |
+| 20 | **（新登记，2026-09-29）** `02` §8 三分组落地（ADR-0007 D1）：`【v1 core】/【extension】/【已推迟】` + 6 幽灵名归类 + `symbol_fts` 补列 | I1/I4 实测 FAIL 已确认 | `02` §8 |
 
 ### 9.1 规划缺口（2026-09-21 核查发现，同日已修复）
 
@@ -456,7 +458,7 @@ Phase 3 (Code API / 工具面)  ◄────────────  Phase 5
 | 16 | ADR-0003 **D3 改为三条可检验形式**（不新增行 / 不改变既有聚合 / 不改变历史行语义），并注明 Phase 0 的 9 列 `ADD COLUMN DEFAULT 0` **满足**该实质要求；§8 验证表同步改写 | `adr/0003` §4.1 / §8 | 实现与不变量不再字面冲突；Accept 前无需改代码 |
 | **17** | ADR-0004 §10 的 `S_fresh` / `S_max` Gate 由 `Phase0-baseline` 改为 **`Phase2-start`**；§4.1 “由 Phase 0 校准”同步修订并注明“Accept 不被该值阻塞” | `adr/0004` §4.1 / §10、`adr/README.md` §4 / §5 | Gate 指向可达成；校准不再悬空 |
 
-**仍未解决但已登记的相邻项**：`04` §5 Phase 1 的“首次全量 ≤ 120s”“DB ≤ 200MB”两条初值已被实测击穿（146.9s / 247.5 MiB），建议改为“≤ 0.6ms × refs 且 ≤ 300s”“≤ 1KiB × refs 且 ≤ 300MB”——该改动的 Gate 是 `04` §7.4 评审，**不属于本次 7 项缺口**。
+**仍未解决但已登记的相邻项**：`04` §5 Phase 1 的“首次全量 ≤ 120s”“DB ≤ 200MB”两条初值已被实测击穿（146.9s / 247.5 MiB），建议改为“≤ 0.6ms × refs 且 ≤ 300s”“≤ 1KiB × refs 且 ≤ 300MB”——该改动已于 **2026-09-29 经 `04` §7.4 评审落定**：首次全量 **≤ 360 s**（n=3 中位 292.4 s）、DB 沿用默认 512MB（实测 313.9 MiB）；未采用“每 ref”建议（历史建议存于 phase0 报告 §5）。
 
 ---
 

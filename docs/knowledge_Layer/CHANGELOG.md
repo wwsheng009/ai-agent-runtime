@@ -6,6 +6,157 @@
 
 ---
 
+## 2026-09-29 — ADR-0009 起草（v1 表集口径裁决，Proposed）
+
+回应 ADR-0007 §10 的 `Phase1-start` 待办（I5：`04` 声明 ≤16 vs `02` 实际 23）与 `06` §9 待办 #2/#7/#20。
+
+### Added
+
+- ADR [`adr/0009-v1-table-set-scope.md`](adr/0009-v1-table-set-scope.md)（**Proposed**）：
+  推荐 **选项 C——上限与分组解耦，`v1 表集上限` 只约束【v1 core】**（当前 23 = 22 表 + `symbol_fts`；
+  extension/deferred 与 `schema_migrations` 不计入）；附 28 名三分组建议（22 core + `symbol_fts` 补列 /
+  1 extension / 5 deferred）、6 幽灵名去向与 I3 两对漂移的规范名（`inheritance_edges`、`dependency_versions`）。
+  等待 owner 裁决。
+
+### Notes
+
+- 裁决前不动事实源：本轮未修改 `02`/`04`/`supplement/*`/`06`；`adr/README.md` 索引表同步登记 `0009 = Proposed`。
+
+---
+
+## 2026-09-29 — Phase1-shadow 实测 v1（真实调用重放）与候选映射修复
+
+执行 `Phase1-shadow` Gate（ADR-0003 §10）：需要 shadow 数据校准 α 并复算 M1。
+此前仓库只有 `exploration_attribution` 的写入路径：既无读取/聚合工具，也无无头测量入口。
+
+### Added
+
+- `usageledger.ListExplorationAttribution`：按时间读取归因行（NULL coverage/economy 原样还原）。
+- `knowledge.SummarizeAttribution` / `CalibrateShadowAlpha`：M1–M4（mean/p50/p90 +
+  按 tool/source/project 分组），usable 用传入 α 重算；同批数据重复复算逐位一致。
+- 实测入口 `knowledge.TestPhase1ShadowReplay`（env-gated，CI 跳过）：真实调用重放 →
+  生产 `ShadowObserver` → 真实 `RunIndex` 索引 → 真实 `usageledger` 落库 → 复算报告。
+- 调用集提取脚本 `backend/scripts/extract-shadow-calls.mjs` 与调用集
+  `reports/phase1_shadow_calls.jsonl`（400 条真实 grep/view：235/165）。
+- `knowledge.Config.Alpha`（yaml `alpha`）+ `Activation.Config()`；`ShadowObserverFor`
+  把配置 α 传入观察器；`runtime.yaml` 增加说明（缺省 0.8 仍是联调初值）。
+- 报告 `reports/phase1_shadow_report.md`。
+- ADR 提案 [`adr/0008-grep-coverage-file-level.md`](adr/0008-grep-coverage-file-level.md)
+  （**Proposed**）：grep 通道主判据改 file-level 覆盖（新增两列），行级保留为诊断；
+  依据报告 §4.1/§4.3 的实测反差（行级 M1=0.47 % vs 文件级 usable@0.8=26.76 %），
+  并回应 ADR-0003 §10 的"抽样核对报告"待办。等待 owner 裁决。
+- **live 接入验证（首个入口，2026-09-29）**：`aicli chat`（cmd+tui 宿主）以 `mode=shadow`
+  跑真实会话（隔离 workspace + 临时 runtime.yaml/账本 DSN）——`knowledge.db` 落 2 文件 /
+  3 符号，`ledger.db` 落 2 条 `exploration_attribution`（grep coverage=0.667、view=0.600）；
+  新增 `TestLiveLedgerVerify`（env 门控）走生产 reader 复算 M1–M4（小样本 M1=0 %、
+  M2=63.33 %、M4=74.34 %）。同日 **ACP 入口验证通过**（`aicli acp` + Node NDJSON JSON-RPC
+  客户端：initialize → session/new → session/prompt；grep/view `tool_call` 后账本追加 2 条
+  同值行）与 **runtime-server 入口验证通过**（HTTP：会话创建 → `permission-mode`
+  `bypass_permissions`+confirm → `runtime/commands submit_prompt`；grep/view 并行执行后
+  `DONE`，账本再追加 2 条同值行）——**live 验证 3/3**。注意：HTTP 会话默认模型来自
+  `runtime.yaml` `agent.defaultModel`（内建 `claude-3-5-sonnet` 无 provider 声明会 fail-fast）。
+- **抽样补齐 §5 未覆盖度量（2026-09-29）**：新增 env 门控 live 抽样
+  `internal/knowledge/live_sampling_test.go`——content_hash 一致率 **261/261 = 100 %**
+  （263 抽样；2 例为索引后被修改的预期不对称），同进程 4 写者锁等待
+  `samples=0 / p95=0 / retry_failures=0`（240 文件 ×4、13.0 s 全部成功）。
+  过程中修复 `index_jobs.id` 同纳秒碰撞（`jobs.go` 追加进程内原子序号 `indexJobSeq`），
+  回归 `TestStartIndexJobIDsAreUnique`（8 并发 job 全成功且 ID 互异）。
+- **性能阈值校准（04 §7.6 / 报告 §4.7，2026-09-29）**：等规模样本 n=3（原工作树 +
+  2 个 4989 文件语料副本）全量索引——耗时中位数 **292.4 s**、95 % CI [241.8, 356.5] s；
+  DB 中位数 313.9 MiB（CI [313.2, 314.3] MiB）；**`04` §7.4「首次全量索引（本仓库规模）」
+  由未校准占位 ≤120 s 校准为 ≤ 360 s**（CI 上界取整）；二次增量（全量跳过）0.7–0.9 ms/文件。
+  跨仓库抽验（module cache 异源语料 ×2：`x/net@v0.57.0` 742 文件 32.5 s、
+  `gin@v1.12.0` 98 文件 3.81 s；**38.9–43.8 ms/文件**）与本仓库 58.6 ms/文件同量级；
+  GitHub 直连被网络阻塞，故用本机 module cache 取样。
+- **多 `paths` 逐项作用域（2026-09-29，报告 §5 第 2 项）**：grep shadow 映射支持 rg
+  多根语义——`shadow_scope.go` 前缀集合 OR + `shadow.go` 的 `grepPathScopes` /
+  `parseGrepBaselineMulti` / `prefixScopePathMulti`（逐行归属某作用域、否则回退首项），
+  4 个回归测试（含观察器端到端 union 用例）；提取端 `extract-shadow-calls.mjs` 不再
+  截取 `paths` 首项而是保留整组。对 v1 复算无影响（现有 400 条调用集中 `paths`=0，
+  240 条为单 `path`），修复面向未来重放与 live 会话。
+- **单文件增量实测（`04` §7.4 最后一行落数，2026-09-29）**：新增 env 门控
+  `live_incremental_test.go`（20 样本、逐次 `indexed=1` 断言）；干净复测 job 墙钟
+  p50 4.15 s / p95 4.35 s、"全量跳过"基线 4.05 s（遍历≈0.81 ms/文件）→
+  **marginal p50 108 ms / p95 302 ms**（受干扰首测 p95 687 ms）；对照「p95 < 50 ms」
+  **Fail**，须 Phase 5 增量触发（fsnotify）或重定口径。
+- **文档不变量检查落地（06 §9 #3，2026-09-29）**：新增 `backend/scripts/check_knowledge_doc_invariants.go`
+  （ADR-0007 §4.4 的 I1–I5，stdlib、`go run`、失败 exit≠0、含正向 fixture 自测）。
+  首次实测 **5/5 FAIL**（即 #2/#19/#20 尚未执行的事实）：I1 六幽灵名
+  （`branches`/`dependencies`/`events`/`index_jobs`/`inheritance`/`language_projects`）
+  + `symbol_fts` 未列入；I2 `04` 内 15 处越位 DDL；I3 两对命名漂移
+  `{inheritance, inheritance_edges}`/`{dependencies, dependency_versions}`；
+  I4 `02` §8 尚无三分组；**I5 声明 ≤16 vs 实际 23**（22 表 + 虚表）→ #7 裁决输入就绪；
+  已登记 #20「`02` §8 三分组落地」。
+
+### Fixed（重放实测暴露的 shadow 缺陷）
+
+- 绝对 path / file_path 未折叠为 workspace 相对路径 → 候选恒为空（`relativizeWorkspacePath`）。
+- grep 输出路径未按作用域目录补前缀（rg 以 path 为根输出相对路径）→ (path,line) 永不相交
+  （`parseGrepBaseline(output, scopeBase)`）。
+- regex pattern 直接检索 FTS → 零命中；改为交替拆分 + 字面 token 并集去重（≤6 token，`shadowPatternTokens`）。
+- refs 候选未接入且 `FindRefs` 未回填 `path` → 使用点行不可达；新增 `Reference.Path` +
+  观察器 refs 候选通道（可选接口 `refCandidateIndex`），并把批量 `patterns` 还原为多次检索
+  （`grepPatternList` / `collectShadowTokens` + 提取脚本数组还原）。
+- 双作用域只取其一（`path`+`glob` 同时给出时只取 `firstNonEmpty` 的第一个，真实样本
+  144/243 条）→ `newScopeFilterSpec` 让 path 与 glob 为 AND，baseline 前缀仍只由 path 决定。
+
+### Findings
+
+- **M1=20.81 %（n=370）**：view 通道 48.4 %（可用），grep 行级 **0.47 %**（M2 3.79 %）；
+  同一批数据的 file-level 对照：grep mean **31.83 %**、p90 100 %、usable@0.8 26.76 %、
+  answerable **49.38 %**——量化证明瓶颈是行级口径（ADR-0003 §6.2 偏差），需新 ADR 裁决。
+- 索引侧复测（4989 文件）：324.9 s / 313.5 MiB，对照 `04` §7.4 初值仍 Fail（同 Phase 0 结论）。
+- α 中位数校准=0.10，行级分布双峰（α∈[0.1,0.8] 对 M1 影响可忽略），本次**不写死阈值**。
+
+---
+
+## 2026-09-29 — Phase 1 交付 1/3 收口（Java/C++ 粗符号 + 文件软删除）与 shadow 口径修正
+
+起因：`06` 实施状态核查发现两处交付缺口与一处口径漂移——交付 1 要求"补 Java / Rust / C++
+粗符号"但 Java/C++ 未实现；交付 3 要求"删除文件标记 `deleted_at`"但索引只做 `content_hash`
+增量、不对账删除；`04`/`06` 声称 shadow 对比写 `invalidation_events`，而该表 reason 闭集是
+变更源事件（`04` §4.3），ADR-0003 也未定义 shadow 写该表。
+
+### Added
+
+- **Java 粗符号**（`adapter_builtin.go` 的 `javaSymbolPatterns`）：class / interface / enum /
+  record + 带修饰符的方法/构造器（支持 `@Annotation` 前缀与 `public` 可见性判定）；
+  `default -> handle();` 等 switch 箭头与字段初始化不误收。`.java` 此前只有文件行、没有符号行。
+- **C/C++ 粗符号**（`cppSymbolPatterns`，注册 `cpp` 与 `c`）：class / struct / union / enum +
+  具名函数（含 `Foo::bar` 限定、`const` / `noexcept` / 尾置返回类型）；`statementKeywords`
+  守卫排除 `return compute(x);` 这类语句。已知折损："最令人烦恼的解析"式变量构造可能误收
+  （代码注释已标注，由 Phase 4 深索引收敛）。
+- **`migrations/0002_file_soft_delete.sql`**：`files.deleted_at` 列 + `(workspace_id, deleted_at)`
+  索引；既有 v1 库打开时自动升级（含升级路径测试）。
+- **Store 接口**：`ListActiveFiles` / `MarkFilesDeleted`（单事务：`files.deleted_at` +
+  `index_state=stale` + 其 `symbols.deleted_at` 同步标记；幂等；reader 返回 `ErrReadOnlyStore`）。
+- **reader 版本守卫**：`verifyInitialized` 在 schema 版本落后于本二进制时显式报错
+  （提示以 writer 打开一次完成迁移），避免旧库半可用。
+- **`RunIndex` 删除对账**：完整遍历（`!Truncated`）后把"库内登记、磁盘缺失"的文件软删除，
+  新增 `IndexResult.Deleted` 计数；文件恢复时 `UpsertFile` 清空标记、`ReplaceSymbols`
+  重建符号（复活）。`truncated` 时绝不对账，避免把未遍历到的文件误标为删除。
+- **读路径过滤**：FindSymbols / FindRefs / Search / searchLike / symbolIDsByName / Stats
+  全部排除 `f.deleted_at IS NOT NULL` 的文件及其符号/引用。
+- **测试**：`adapter_java_cpp_test.go`、`indexer_soft_delete_test.go`、`store_test.go` 的
+  `TestMarkFilesDeletedIsIdempotent` / `TestSoftDeleteMigrationUpgradesV1Store`。
+
+### Changed
+
+- **`04` §5 Phase 1 交付 4 / `06` §4 Phase 1 交付 4**：shadow 对比只写
+  `exploration_attribution`，明确**不写 `invalidation_events`**（口径修正）；
+  `store.go` 的 `RecordInvalidation` 注释同步。
+- **`06` §1.1/§4/§5、`04` §5、`README.md` §1/§4**：交付 1–6 状态、实际文件落点与
+  配置段落点校正（原预测的 `indexer_light.go` / `query.go` / `knowledge_test.go` 未单独
+  落盘；`knowledge:` 段实际只在 `runtime.yaml` / `runtime.win7.yaml`）。
+
+### Notes
+
+- `KnowledgeVersion`（磁盘契约版本，DB 文件名的一部分）保持 1：0002 是增量迁移，不改变
+  `stable_key` 身份语义；`schema_migrations` 版本随之前进到 2。
+- 仍未收敛：`Phase1-shadow` 实测（α 校准 + M1 复算）；Phase 1 尚未验收。
+
+---
+
 ## 2026-09-28 — Phase 1 交付 5（`knowledge.status` CLI / HTTP 状态面）
 
 起因：关闭 `06` §4 Phase 1 交付 5 —— 把索引状态、文件数 / 符号数、DB 大小、最近 job、
