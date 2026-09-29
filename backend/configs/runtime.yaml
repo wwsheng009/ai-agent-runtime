@@ -88,3 +88,7 @@ knowledge:
   # mode: on    —— 索引 + code.* 工具面 + 上下文注入（Phase 2 起，需 ADR 门禁）
   # db_path 缺省为 <workspace>/.aicli/knowledge/knowledge.db。
   mode: off
+  # alpha：shadow 覆盖率阈值（usable = coverage >= alpha 且 economy <= 1.0，
+  # ADR-0003 §4.2）。ADR 规定它由 Phase1-shadow 实测校准（04 §7.6）；缺省
+  # 0.8 只是管线联调初值，不是验收门槛。
+  # alpha: 0.8

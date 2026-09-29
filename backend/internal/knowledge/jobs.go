@@ -7,8 +7,14 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+// indexJobSeq 消除同纳秒 StartIndexJob 调用的主键碰撞：Windows 时间粒度较粗时
+// 两次快速调用可能拿到同一 UnixNano，纯时间摘要会撞 UNIQUE(index_jobs.id)
+// （2026-09-29 live 多写者实验暴露）。跨进程写者互斥仍由 owner 仲裁保证（ADR-0001）。
+var indexJobSeq atomic.Uint64
 
 // index_jobs 的读写（06 §4 Phase 1 交付 5；DDL 事实源见 supplement/15 §15.3）。
 //
@@ -26,7 +32,9 @@ func (s *sqliteStore) StartIndexJob(ctx context.Context, job IndexJob) (string, 
 		return "", errors.New("knowledge: start index job: workspace id is required")
 	}
 	if strings.TrimSpace(job.ID) == "" {
-		job.ID = "job_" + digest(job.WorkspaceID, string(job.Kind), strconv.FormatInt(time.Now().UnixNano(), 10))
+		job.ID = "job_" + digest(job.WorkspaceID, string(job.Kind),
+			strconv.FormatInt(time.Now().UnixNano(), 10),
+			strconv.FormatUint(indexJobSeq.Add(1), 10))
 	}
 	if strings.TrimSpace(job.Kind) == "" {
 		job.Kind = IndexJobKindLight

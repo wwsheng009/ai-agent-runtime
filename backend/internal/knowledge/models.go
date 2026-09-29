@@ -96,6 +96,9 @@ type FileRecord struct {
 	IsGenerated bool       `json:"is_generated"`
 	IndexState  IndexState `json:"index_state"`
 	IndexedAt   time.Time  `json:"indexed_at"`
+	// DeletedAt 非零（unix 毫秒）表示文件已从磁盘消失并被软删除（04 §5 Phase 1
+	// 交付 3）：行与其符号保留、读路径过滤，物理清理由 Phase 5 GC 负责。
+	DeletedAt int64 `json:"deleted_at,omitempty"`
 }
 
 // Symbol 是 symbols 表的一行。
@@ -137,15 +140,18 @@ type Reference struct {
 	// 它与 ToSymbolID 是两份独立事实：目标是 stdlib / 第三方 / 尚未索引的符号时
 	// ToSymbolID 为空，此时名字是唯一的线索（04 §4.3 的 refs 缺少该列，见
 	// migrations/0001_init.sql 的差异说明）。
-	ToSymbolName    string    `json:"to_symbol_name,omitempty"`
-	ToSymbolVersion int       `json:"to_symbol_version,omitempty"`
-	Kind            RefKind   `json:"kind"`
-	FileID          string    `json:"file_id"`
-	Line            int       `json:"line"`
-	Col             int       `json:"col"`
-	Snippet         string    `json:"snippet,omitempty"`
-	Confidence      float64   `json:"confidence"`
-	Source          RefSource `json:"source"`
+	ToSymbolName    string  `json:"to_symbol_name,omitempty"`
+	ToSymbolVersion int     `json:"to_symbol_version,omitempty"`
+	Kind            RefKind `json:"kind"`
+	FileID          string  `json:"file_id"`
+	// Path 是引用所在文件的 workspace 相对路径；FindRefs 联表填充。
+	// 仅按 file_id 标识的写入路径不要求该字段。
+	Path       string    `json:"path,omitempty"`
+	Line       int       `json:"line"`
+	Col        int       `json:"col"`
+	Snippet    string    `json:"snippet,omitempty"`
+	Confidence float64   `json:"confidence"`
+	Source     RefSource `json:"source"`
 }
 
 // InvalidationReasonAdapterConflict 是 04 §4.4 的歧义规则要求的失效事件原因：

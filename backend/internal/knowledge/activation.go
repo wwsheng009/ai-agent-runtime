@@ -98,6 +98,14 @@ func (a *Activation) Layer() *Layer {
 	return a.layer
 }
 
+// Config 返回本次接入的生效配置；nil/off 时返回零值 Config。
+func (a *Activation) Config() Config {
+	if a == nil || a.layer == nil {
+		return Config{}
+	}
+	return a.layer.cfg
+}
+
 // Mode 返回生效模式（off 时为 ModeOff）。
 func (a *Activation) Mode() Mode {
 	if a == nil {

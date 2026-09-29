@@ -47,6 +47,9 @@ type Config struct {
 	MaxFileBytes int64 `yaml:"max_file_bytes,omitempty" json:"max_file_bytes,omitempty"`
 	// MaxDBSizeMB 是 knowledge.db 软上限（MB），Phase 5 GC 使用。
 	MaxDBSizeMB int64 `yaml:"max_db_size_mb,omitempty" json:"max_db_size_mb,omitempty"`
+	// Alpha 是 shadow 覆盖率阈值 α（ADR-0003 §4.2）：usable 判定与 M1 复算共用，
+	// 由 Phase1-shadow 实测校准（04 §7.6）；<= 0 时取 DefaultShadowAlpha。
+	Alpha float64 `yaml:"alpha,omitempty" json:"alpha,omitempty"`
 	// Workspace 是被索引的工作区根目录（运行时注入，不来自 YAML）。
 	Workspace string `yaml:"-" json:"-"`
 }
@@ -94,6 +97,9 @@ func (c Config) Normalize() Config {
 	if c.MaxDBSizeMB <= 0 {
 		c.MaxDBSizeMB = DefaultMaxDBSizeMB
 	}
+	if c.Alpha <= 0 {
+		c.Alpha = DefaultShadowAlpha
+	}
 	c.Workspace = strings.TrimSpace(c.Workspace)
 	c.DBPath = strings.TrimSpace(c.DBPath)
 	return c
@@ -106,6 +112,9 @@ func (c Config) Validate() error {
 	}
 	if c.Mode != ModeOff && c.Workspace == "" {
 		return errors.New("knowledge: workspace must be set when mode is shadow or on")
+	}
+	if c.Alpha < 0 || c.Alpha > 1 {
+		return fmt.Errorf("knowledge: alpha must be in (0,1], got %v", c.Alpha)
 	}
 	return nil
 }

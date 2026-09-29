@@ -123,7 +123,11 @@ func (s *sqliteStore) init(ctx context.Context) error {
 	return nil
 }
 
-// verifyInitialized 确认只读打开的库确实已经建好 schema。
+// verifyInitialized 确认只读打开的库确实已经建好 schema，且版本不落后于本二进制。
+//
+// 落后时显式失败而不是继续查询：旧库缺少新列（如 0002 的 files.deleted_at），
+// 半可用的读者会在任意查询上抛出 "no such column"，把"需要一次 owner 迁移"
+// 这个事实藏进 SQL 错误里。
 func (s *sqliteStore) verifyInitialized(ctx context.Context) error {
 	version, err := s.SchemaVersion(ctx)
 	if err != nil {
@@ -131,6 +135,16 @@ func (s *sqliteStore) verifyInitialized(ctx context.Context) error {
 	}
 	if version == 0 {
 		return errors.New("knowledge: store is not initialized (no applied migrations)")
+	}
+	migrations, err := Migrations()
+	if err != nil {
+		return err
+	}
+	latest := migrations[len(migrations)-1].Version
+	if version < latest {
+		return fmt.Errorf(
+			"knowledge: store schema v%d is older than this binary (v%d); open it once as writer to migrate",
+			version, latest)
 	}
 	return nil
 }
@@ -226,7 +240,9 @@ func (s *sqliteStore) UpsertFile(ctx context.Context, rec FileRecord) (string, e
 				is_test      = excluded.is_test,
 				is_generated = excluded.is_generated,
 				index_state  = excluded.index_state,
-				indexed_at   = excluded.indexed_at
+				indexed_at   = excluded.indexed_at,
+				-- 文件重新出现（重新纳入索引）即复活：清空软删除标记。
+				deleted_at   = NULL
 		`,
 			rec.ID, rec.WorkspaceID, rec.Path, rec.Language, rec.Size, rec.MTimeNS, rec.ContentHash,
 			boolToInt(rec.IsTest), boolToInt(rec.IsGenerated), string(rec.IndexState), unixMillis(rec.IndexedAt))
@@ -251,7 +267,8 @@ func (s *sqliteStore) DeleteFile(ctx context.Context, workspaceID, path string) 
 func (s *sqliteStore) FileByPath(ctx context.Context, workspaceID, path string) (FileRecord, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, workspace_id, path, COALESCE(language, ''), size, COALESCE(mtime_ns, 0),
-		       content_hash, is_test, is_generated, index_state, COALESCE(indexed_at, 0)
+		       content_hash, is_test, is_generated, index_state, COALESCE(indexed_at, 0),
+		       COALESCE(deleted_at, 0)
 		FROM files WHERE workspace_id = ? AND path = ?
 	`, workspaceID, normalizeRelPath(path))
 	rec, err := scanFile(row)
@@ -262,6 +279,80 @@ func (s *sqliteStore) FileByPath(ctx context.Context, workspaceID, path string) 
 		return FileRecord{}, false, fmt.Errorf("knowledge: read file record: %w", err)
 	}
 	return rec, true, nil
+}
+
+// ListActiveFiles 返回该 workspace 全部未软删除的文件记录（按 path 升序）。
+func (s *sqliteStore) ListActiveFiles(ctx context.Context, workspaceID string) ([]FileRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, workspace_id, path, COALESCE(language, ''), size, COALESCE(mtime_ns, 0),
+		       content_hash, is_test, is_generated, index_state, COALESCE(indexed_at, 0),
+		       COALESCE(deleted_at, 0)
+		FROM files
+		WHERE workspace_id = ? AND deleted_at IS NULL
+		ORDER BY path
+	`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("knowledge: list files: %w", err)
+	}
+	defer rows.Close()
+	var out []FileRecord
+	for rows.Next() {
+		rec, err := scanFile(rows)
+		if err != nil {
+			return nil, fmt.Errorf("knowledge: scan file record: %w", err)
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// MarkFilesDeleted 软删除一批文件（04 §5 Phase 1 交付 3），单事务完成：
+// files.deleted_at + index_state=stale，其 symbols.deleted_at 同步标记。
+// 已删除路径幂等跳过；返回本次新标记的文件数。
+func (s *sqliteStore) MarkFilesDeleted(ctx context.Context, workspaceID string, paths []string, at time.Time) (int, error) {
+	if strings.TrimSpace(workspaceID) == "" || len(paths) == 0 {
+		return 0, nil
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	stamp := unixMillis(at)
+	marked := 0
+	err := s.execWrite(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		marked = 0
+		for _, path := range paths {
+			path = normalizeRelPath(path)
+			if path == "" {
+				continue
+			}
+			var fileID string
+			err := tx.QueryRowContext(ctx,
+				`SELECT id FROM files WHERE workspace_id = ? AND path = ? AND deleted_at IS NULL`,
+				workspaceID, path).Scan(&fileID)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE files SET deleted_at = ?, index_state = ? WHERE id = ?`,
+				stamp, string(IndexStale), fileID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE symbols SET deleted_at = ? WHERE file_id = ? AND deleted_at IS NULL`,
+				stamp, fileID); err != nil {
+				return err
+			}
+			marked++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return marked, nil
 }
 
 // ReplaceSymbols 原子替换一个文件的符号集合（FTS 触发器随之同步）。

@@ -3,6 +3,7 @@ package knowledge
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // Store 是知识层的持久化契约。
@@ -30,11 +31,21 @@ type Store interface {
 	// 调用方以 (workspace, path) 为键；重复调用是幂等的。
 	UpsertFile(ctx context.Context, rec FileRecord) (string, error)
 
-	// DeleteFile 删除文件及其全部派生行（symbols / refs），单事务完成。
+	// DeleteFile 物理删除文件及其全部派生行（symbols / refs），单事务完成。
+	// 索引路径不用它：文件消失走 MarkFilesDeleted 软删除；本方法留给 Phase 5 GC。
 	DeleteFile(ctx context.Context, workspaceID, path string) error
 
 	// FileByPath 返回已存储的文件记录；ok=false 表示未知。
 	FileByPath(ctx context.Context, workspaceID, path string) (FileRecord, bool, error)
+
+	// ListActiveFiles 返回该 workspace 全部未软删除的文件记录（按 path 升序）。
+	// 增量索引用它做"库内 vs 磁盘"对账；reader 角色只读可用。
+	ListActiveFiles(ctx context.Context, workspaceID string) ([]FileRecord, error)
+
+	// MarkFilesDeleted 把路径集合标记为软删除（04 §5 Phase 1 交付 3）：
+	// files.deleted_at 与 index_state=stale，其 symbols.deleted_at 同步标记，
+	// 返回本次新标记的文件数；已删除路径幂等跳过。
+	MarkFilesDeleted(ctx context.Context, workspaceID string, paths []string, at time.Time) (int, error)
 
 	// ReplaceSymbols 原子替换一个文件的符号集合。符号 id 由 StableKey 派生，
 	// 因此增量重建不会改变 id。
@@ -52,7 +63,8 @@ type Store interface {
 	// Search 在 symbols_fts 上做全文检索。
 	Search(ctx context.Context, q SearchQuery) ([]SearchHit, error)
 
-	// RecordInvalidation 记录一次索引失效事件（shadow 对比、外部变更）。
+	// RecordInvalidation 记录一次索引失效事件（变更源 / 适配器冲突等；
+	// shadow 对比写 exploration_attribution，不写本表）。
 	RecordInvalidation(ctx context.Context, ev InvalidationEvent) error
 
 	// Stats 返回状态面与 shadow 差异率度量使用的行数汇总。

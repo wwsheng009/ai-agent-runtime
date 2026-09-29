@@ -21,6 +21,8 @@ type IndexResult struct {
 	Indexed int `json:"indexed"`
 	// Skipped 是 content_hash 未变而跳过的文件数（增量索引的收益）。
 	Skipped int `json:"skipped"`
+	// Deleted 是本次对账中新标记为软删除的文件数（04 §5 Phase 1 交付 3）。
+	Deleted int `json:"deleted"`
 	// Errors 是读取/解析失败的文件数；这些文件被标记为 index_state=error。
 	Errors int `json:"errors"`
 	// Symbols / Refs 是本次写入的行数。
@@ -190,8 +192,48 @@ func RunIndex(ctx context.Context, store Store, cfg Config) (result IndexResult,
 		result.Refs += len(refs)
 	}
 
+	// 删除对账：库内登记但磁盘已不存在的文件标记 deleted_at（交付 3）。
+	// truncated 时绝不能执行——本轮没有走完工作区，"缺失"不等于"删除"。
+	if !result.Truncated {
+		deleted, err := reconcileDeletedFiles(ctx, store, wsID, cfg.Workspace, files)
+		if err != nil {
+			return result, err
+		}
+		result.Deleted = deleted
+	}
+
 	result.Duration = time.Since(started)
 	return result, nil
+}
+
+// reconcileDeletedFiles 把"库内登记、磁盘已不存在"的文件标记为软删除（交付 3）。
+//
+// 只信本轮完整遍历的结果：调用方在 truncated（触及 maxIndexFiles 上限）时必须
+// 跳过，否则未遍历到的文件会被误标为删除。文件重新出现时由 UpsertFile 复活
+// （清空 deleted_at），符号随 ReplaceSymbols 重建。
+func reconcileDeletedFiles(ctx context.Context, store Store, wsID, root string, seen []string) (int, error) {
+	seenSet := make(map[string]struct{}, len(seen))
+	for _, abs := range seen {
+		rel, err := filepath.Rel(root, abs)
+		if err != nil {
+			continue
+		}
+		seenSet[normalizeRelPath(rel)] = struct{}{}
+	}
+	active, err := store.ListActiveFiles(ctx, wsID)
+	if err != nil {
+		return 0, err
+	}
+	var missing []string
+	for _, rec := range active {
+		if _, ok := seenSet[rec.Path]; !ok {
+			missing = append(missing, rec.Path)
+		}
+	}
+	if len(missing) == 0 {
+		return 0, nil
+	}
+	return store.MarkFilesDeleted(ctx, wsID, missing, time.Now())
 }
 
 // collectIndexableFiles 返回按路径排序的候选文件绝对路径列表。
@@ -290,7 +332,8 @@ func inspectFile(ctx context.Context, store Store, cfg Config, wsID, absPath str
 	if err != nil {
 		return rec, fileProcess, err
 	}
-	if ok && existing.Size == rec.Size && existing.MTimeNS == rec.MTimeNS && existing.ContentHash != "" {
+	if ok && existing.DeletedAt == 0 &&
+		existing.Size == rec.Size && existing.MTimeNS == rec.MTimeNS && existing.ContentHash != "" {
 		rec.ContentHash = existing.ContentHash
 		rec.IndexState = existing.IndexState
 		if rec.IndexState == IndexLight || rec.IndexState == IndexDeep {
@@ -304,7 +347,8 @@ func inspectFile(ctx context.Context, store Store, cfg Config, wsID, absPath str
 	}
 	sum := sha256.Sum256(content)
 	rec.ContentHash = hex.EncodeToString(sum[:])
-	if ok && existing.ContentHash == rec.ContentHash && (existing.IndexState == IndexLight || existing.IndexState == IndexDeep) {
+	if ok && existing.DeletedAt == 0 && existing.ContentHash == rec.ContentHash &&
+		(existing.IndexState == IndexLight || existing.IndexState == IndexDeep) {
 		// mtime 变了但内容没变（checkout / touch）：跳过解析，仅刷新元数据。
 		return rec, fileUnchanged, nil
 	}
