@@ -73,7 +73,10 @@ func TestChatDebugDisplayShowsStorageSection(t *testing.T) {
 		"Read Pool: open=",
 		"WAL:",
 		"Append: path=",
-		"Maintenance: runs=",
+		// 19db390b 起在线页回收整体移除：维护行只报告 prune 次数并显式标注
+		// vacuum=disabled（见 chat_debug_storage.go:130），不再有 runs= 计数。
+		"Maintenance: prune=",
+		"vacuum=disabled",
 		"supports_returning=",
 		"Contention: busy_retries=0 busy_snapshot_517=0 busy_exhausted=0",
 		"批量落盘: enabled=true async=true",

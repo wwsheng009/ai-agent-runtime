@@ -27,74 +27,15 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 	// through to handleCommand or retry through raw stdout.
 	if session == nil || !session.JSONOutput {
 		// Phase A（§3.3 两阶段锁）：解析 + 会话/配置变更 + 命令结果渲染在
-		// commandMu 内；Phase B 效应（send/picker/screen，见下方 `unlockCommand()`
-		// 之后的块）必须在锁外应用，忙时 immediate 通道才能安全 TryLock。
+		// commandMu 内；Phase B 效应（send/picker/screen，见 chatCommandPhaseB）
+		// 必须在锁外应用，忙时通道才能安全 TryLock。
 		unlockCommand := lockChatCommandPhaseA(session)
-		result, handled, err := tryExecuteStructuredChatCommand(session, command)
-		if handled {
-			if err != nil {
-				result = commandErrorResult(err)
-			}
-			renderErr := renderChatCommandResult(session, result, noInteractive)
-			// Phase A 结束；以下效应属于 Phase B。
-			unlockCommand()
-			if result.ReplayHistory && session != nil {
-				// /load: replay the loaded transcript after the confirmation
-				// cell. The replay renderer owns its cells (one per message)
-				// and falls back to plain output when no surface is present.
-				// 统一渲染下这里只画出最新一页，更早的页由随后的逐页补齐
-				// （replayLoadedSessionHistory → startDeferredResumeHistoryLoad）
-				// 边读边补，会话装载不再等全量翻页。
-				replayLoadedSessionHistory(session, "已加载历史会话")
-			}
-			if renderErr == nil {
-				// 批次 5（D-E）：副屏效应只保留 CommandResult.Screen 一条通道，
-				// 统一由 dispatchChatScreenEffects 派发。A 族 picker 的 Effect
-				// Spec 在命令提交后调用既有 opener（预检与多段交互时序不变），
-				// 每段交互的租约与 close 序列仍由 chatScreenAcquireLease 承担。
-				dispatchChatScreenEffects(session, result)
-			}
-			if renderErr == nil && result.ApplyBacktrack != nil && session != nil {
-				// Direct backtrack apply has no alternate screen, but it still owns
-				// the same destructive transaction: actor mutation, canonical Scene
-				// replacement, one result cell, then submit/draft mutation.
-				applyUnifiedBacktrackRequest(session, result.ApplyBacktrack.Request)
-			}
-			if renderErr == nil && result.SendObjective != "" && session != nil {
-				// /goal <objective>: stream the objective request through the
-				// normal send pipeline after the confirmation cell commits.
-				// The send error goes through the surface-aware output helper
-				// so it stays visible without bypassing the owned viewport.
-				if err := sendGoalObjectiveRequest(session, result.SendObjective); err != nil {
-					printfDirectInteractiveOutput(session, "错误: %v\n", err)
-				}
-			}
-			if renderErr == nil && result.SendMessageAfterCommit != "" && session != nil {
-				// /shell: the captured command cell commits first; the output
-				// then streams to the AI through the normal send pipeline as
-				// its own turn (same post-commit boundary as SendObjective).
-				if err := sendChatMessageAfterCommit(session, result.SendMessageAfterCommit); err != nil {
-					printfDirectInteractiveOutput(session, "错误: %v\n", err)
-				}
-			}
-			if renderErr == nil && result.SendSkillTurn != nil && session != nil {
-				// /skill 默认路径：命令本身不渲染单元，登记一次性 pin 后经既有
-				// send 管线提交普通回合；pin 只对这条 send 生效。
-				if err := sendSkillTurnRequest(session, result.SendSkillTurn); err != nil {
-					printfDirectInteractiveOutput(session, "错误: %v\n", err)
-				}
-			}
-			if renderErr == nil && result.RestoreComposerDraft != "" && session != nil {
-				// /retry is a command-cell result followed by a Composer mutation.
-				// Keep that effect after the command commit so retained transcript
-				// order and the actor-owned prompt state never interleave.
-				if err := restoreChatRetryDraft(session, result.RestoreComposerDraft); err != nil {
-					_ = renderChatCommandResult(session, commandErrorResult(err), noInteractive)
-				}
-			}
-			return result.Action == CommandQuit
-		}
+		result, handled, renderErr := chatCommandPhaseALocked(session, command, noInteractive)
+		// Phase A 结束；以下效应属于 Phase B。
 		unlockCommand()
+		if handled {
+			return chatCommandPhaseB(session, result, renderErr, noInteractive)
+		}
 	}
 	// TerminalSession ownership is a one-way renderer cutover. Do not route an
 	// unstructured command into handleCommand here: several retained handlers
@@ -108,6 +49,85 @@ func dispatchChatCommand(session *ChatSession, command string, noInteractive boo
 		beginDirectInteractiveOutput(session)
 	}
 	return handleCommand(session, command, noInteractive)
+}
+
+// chatCommandPhaseALocked 执行两阶段契约（方案 §3.3）的 Phase A：调用方必须
+// 已持有 commandMu（主分派器经 lockChatCommandPhaseA，忙时通道经 TryLock）。
+// Phase A 在锁内完成结构化命令的解析、会话/配置变更与命令结果渲染。
+//
+// handled=false 表示不是结构化命令，由调用方决定后续 legacy 路径；
+// renderErr 非 nil 表示结果单元未提交，Phase B 效应必须整体跳过。
+func chatCommandPhaseALocked(session *ChatSession, command string, noInteractive bool) (CommandResult, bool, error) {
+	result, handled, err := tryExecuteStructuredChatCommand(session, command)
+	if !handled {
+		return result, false, nil
+	}
+	if err != nil {
+		result = commandErrorResult(err)
+	}
+	return result, true, renderChatCommandResult(session, result, noInteractive)
+}
+
+// chatCommandPhaseB 在 commandMu 之外应用命令结果的 Phase B 效应
+// （screen/send/picker/backtrack/draft；方案 §3.3：这些效应必须在锁外执行，
+// 忙时通道才能安全 TryLock）。调用方不得持锁调用；返回值沿用主分派器契约：
+// true 表示命令请求退出会话。
+func chatCommandPhaseB(session *ChatSession, result CommandResult, renderErr error, noInteractive bool) bool {
+	if result.ReplayHistory && session != nil {
+		// /load: replay the loaded transcript after the confirmation
+		// cell. The replay renderer owns its cells (one per message)
+		// and falls back to plain output when no surface is present.
+		// 统一渲染下这里只画出最新一页，更早的页由随后的逐页补齐
+		// （replayLoadedSessionHistory → startDeferredResumeHistoryLoad）
+		// 边读边补，会话装载不再等全量翻页。
+		replayLoadedSessionHistory(session, "已加载历史会话")
+	}
+	if renderErr == nil {
+		// 批次 5（D-E）：副屏效应只保留 CommandResult.Screen 一条通道，
+		// 统一由 dispatchChatScreenEffects 派发。A 族 picker 的 Effect
+		// Spec 在命令提交后调用既有 opener（预检与多段交互时序不变），
+		// 每段交互的租约与 close 序列仍由 chatScreenAcquireLease 承担。
+		dispatchChatScreenEffects(session, result)
+	}
+	if renderErr == nil && result.ApplyBacktrack != nil && session != nil {
+		// Direct backtrack apply has no alternate screen, but it still owns
+		// the same destructive transaction: actor mutation, canonical Scene
+		// replacement, one result cell, then submit/draft mutation.
+		applyUnifiedBacktrackRequest(session, result.ApplyBacktrack.Request)
+	}
+	if renderErr == nil && result.SendObjective != "" && session != nil {
+		// /goal <objective>: stream the objective request through the
+		// normal send pipeline after the confirmation cell commits.
+		// The send error goes through the surface-aware output helper
+		// so it stays visible without bypassing the owned viewport.
+		if err := sendGoalObjectiveRequest(session, result.SendObjective); err != nil {
+			printfDirectInteractiveOutput(session, "错误: %v\n", err)
+		}
+	}
+	if renderErr == nil && result.SendMessageAfterCommit != "" && session != nil {
+		// /shell: the captured command cell commits first; the output
+		// then streams to the AI through the normal send pipeline as
+		// its own turn (same post-commit boundary as SendObjective).
+		if err := sendChatMessageAfterCommit(session, result.SendMessageAfterCommit); err != nil {
+			printfDirectInteractiveOutput(session, "错误: %v\n", err)
+		}
+	}
+	if renderErr == nil && result.SendSkillTurn != nil && session != nil {
+		// /skill 默认路径：命令本身不渲染单元，登记一次性 pin 后经既有
+		// send 管线提交普通回合；pin 只对这条 send 生效。
+		if err := sendSkillTurnRequest(session, result.SendSkillTurn); err != nil {
+			printfDirectInteractiveOutput(session, "错误: %v\n", err)
+		}
+	}
+	if renderErr == nil && result.RestoreComposerDraft != "" && session != nil {
+		// /retry is a command-cell result followed by a Composer mutation.
+		// Keep that effect after the command commit so retained transcript
+		// order and the actor-owned prompt state never interleave.
+		if err := restoreChatRetryDraft(session, result.RestoreComposerDraft); err != nil {
+			_ = renderChatCommandResult(session, commandErrorResult(err), noInteractive)
+		}
+	}
+	return result.Action == CommandQuit
 }
 
 // lockChatCommandPhaseA 获取命令互斥锁（方案 §3.3 P1-4）。nil 会话返回空操作，

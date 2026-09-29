@@ -25,6 +25,13 @@ func TestRunChatLoopInteractiveInitialPromptSubmitsOnceAndStaysInteractive(t *te
 	session.Interaction.SetWriter(&output)
 	defer session.Interaction.Shutdown()
 
+	// go test 的 stdin/stdout 是管道：管道/PTY 分支会把测试注入的输入队列置空，
+	// 队列输入永远不会被消费。本用例锁定队列消费契约，先关闭该分支
+	// （接缝说明见 chatPipeLineEditorPreferredFn）。
+	prevPreferred := chatPipeLineEditorPreferredFn
+	chatPipeLineEditorPreferredFn = func() bool { return false }
+	t.Cleanup(func() { chatPipeLineEditorPreferredFn = prevPreferred })
+
 	runChatLoop(session, false, "inspect project")
 
 	want := []string{"inspect project", "follow up"}

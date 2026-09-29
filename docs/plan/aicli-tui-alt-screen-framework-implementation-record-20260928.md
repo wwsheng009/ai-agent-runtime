@@ -185,7 +185,7 @@ A2（唯一取租约点）：取备用屏租约只允许发生在 `chat_screen_f
 
 - 批次 0–5：全部完成。批次 5 交付物：`CommandResult` 不再有 `Open*` 字段；legacy 分支物理删除（`AICLI_CHAT_SCREEN_FRAMEWORK=legacy` 退休为警告值，只记 `unknown_env` 并按 `unified` 运行）；`catalog.BusyPolicy` 与 `runtimeRegistry.Mode` 合并为单一事实源；T11 输出类别清单守卫（每条命令必须声明输出类别）；`/help` 标注「Esc 返回」。
 - 计划内保留例外：`/profile pick`（无租约 priority-line popup）与 `/agents panel`（仅快照）不迁本框架，理由见 §1.3。
-- 既有失败（非本计划引入，3 条，均在干净 HEAD 复现）：`TestRunChatLoopInteractiveInitialPromptSubmitsOnceAndStaysInteractive`、`TestRunChatLoop_DrainsQueuedLinesAfterTeamSettlesBeforePrompt`（`cmd/aicli/commands`）、`TestReadInteractiveLineForcedReadWhenPeekAlwaysEmpty`（`cmd/aicli/ui`）；放行口径为「不新增失败」。
+- 既有失败（非本计划引入）：`TestReadInteractiveLineForcedReadWhenPeekAlwaysEmpty`（`cmd/aicli/ui`）；`cmd/aicli/commands` 另余 1 条在研渲染用例 `TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsideActiveReasoning`（溢出交接事务把 active cell 前缀插入 primary 滚动区 `1;OutputBottomRowr` 后，后继帧未重绘尾部，`terminal_session.go:1192`；断言见 672ccdc2）。原 3 条中 2 条循环用例（`TestRunChatLoopInteractiveInitialPromptSubmitsOnceAndStaysInteractive`、`TestRunChatLoop_DrainsQueuedLinesAfterTeamSettlesBeforePrompt`）已由后续基线清理批次经 host 生命周期测试缝（`chatPipeLineEditorPreferredFn`）转绿：`cmd/aicli/commands` 包全量 12 红 → 1 红。放行口径为「不新增失败」。
 - 计划 §11 待复核项收口：
   - 第 1 条：已关闭（搜索态 Esc 例外固定进 T5b）。
   - 第 2 条：键位映射未改动，仍由既有 `ui.RunTranscriptPagerWithLease` 原语承载（`chat_transcript_pager.go:60`），批次 1 只替换打开/关闭与租约编排；未新增键位回归。

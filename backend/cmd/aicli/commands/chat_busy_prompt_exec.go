@@ -92,6 +92,9 @@ func chatBusyPromptAffirmative(text string) bool {
 //   - (false,false)：未占有（通道不可用/中断/执行入口拒绝）→ 调用方回退入队；
 //   - (true,false)：已消费但未执行（用户显式拒绝）→ 审计 rejected，不再入队；
 //   - (true,true)：已执行 → 审计 executed。
+//
+// 锁边界：确认门与 Phase A（解析 + 渲染）在 commandMu 内；执行步骤解锁后
+// 才应用 Phase B 效应（chatBusyScreenRunDispatch 承担解锁）。
 func runBusyPromptCommand(session *ChatSession, line string) (occupied bool, executed bool) {
 	if session == nil || session.Interaction == nil {
 		return false, false
@@ -107,7 +110,8 @@ func runBusyPromptCommand(session *ChatSession, line string) (occupied bool, exe
 		session.Interaction.RenderLocalSupplement("[input] 命令通道正忙，该命令已排队，将在当前回合结束后执行。")
 		return false, false
 	}
-	defer session.commandMu.Unlock()
+	// 从这里起锁由各出口手工释放：执行步骤 chatBusyScreenRunDispatch 会在
+	// Phase A 之后解锁，以便在锁外应用 Phase B 效应；此处不得 defer Unlock。
 
 	releaseModal := beginChatInputShadowLevel(session, chatInputOwnerModal)
 	defer releaseModal()
@@ -120,6 +124,7 @@ func runBusyPromptCommand(session *ChatSession, line string) (occupied bool, exe
 	confirmed, answered := chatBusyPromptConfirm(session, question, details)
 	if !answered {
 		// 通道不可用或读取被中断：不消费，回退入队（不丢输入）。
+		session.commandMu.Unlock()
 		return false, false
 	}
 	if !confirmed {
@@ -127,6 +132,7 @@ func runBusyPromptCommand(session *ChatSession, line string) (occupied bool, exe
 		if session.Interaction != nil {
 			session.Interaction.RenderLocalSupplement("[input] 已取消忙时执行：" + line)
 		}
+		session.commandMu.Unlock()
 		return true, false
 	}
 	if !chatBusyScreenRunDispatch(session, line) {

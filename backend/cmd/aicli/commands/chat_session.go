@@ -2061,11 +2061,30 @@ func resolveAbsoluteChatPath(path string) string {
 	if path == "" {
 		return ""
 	}
+	// Windows 风格的绝对路径（盘符或 UNC）在 Linux/macOS 上会被 filepath.Abs
+	// 当作相对路径拼上 cwd（例如 "E:\logs\a.json" 变成
+	// "<cwd>/E:\logs\a.json"），让错误信息与 /debug 元数据展示假路径。
+	// 这类路径原样返回；Windows 上 filepath.Abs 本就返回同一结果。
+	if isWindowsStyleAbsolutePath(path) {
+		return path
+	}
 	resolved, err := filepath.Abs(path)
 	if err != nil {
 		return filepath.Clean(path)
 	}
 	return filepath.Clean(resolved)
+}
+
+// isWindowsStyleAbsolutePath 识别盘符（X:\ 或 X:/）与 UNC（\\server\share）
+// 前缀。要求盘符后紧跟分隔符，避免把 "a:b" 这类合法 POSIX 相对路径误判。
+func isWindowsStyleAbsolutePath(path string) bool {
+	if len(path) >= 3 && path[1] == ':' && (path[2] == '\\' || path[2] == '/') {
+		c := path[0]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return true
+		}
+	}
+	return strings.HasPrefix(path, `\\`)
 }
 
 func pathWithinBaseDir(baseDir, targetPath string) bool {

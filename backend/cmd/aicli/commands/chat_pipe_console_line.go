@@ -121,6 +121,11 @@ func chatPipeLineEditorPreferred() bool {
 	return !legacyConsoleLineEditorUsable()
 }
 
+// chatPipeLineEditorPreferredFn 是 runChatLoop 消费的判定入口：生产恒指向
+// chatPipeLineEditorPreferred。测试（go test 的 stdin/stdout 都是管道）用它
+// 关闭该分支，否则启动阶段会把测试注入的输入队列置空，队列输入永远不被消费。
+var chatPipeLineEditorPreferredFn = chatPipeLineEditorPreferred
+
 func fdIsPipeOrChar(f *os.File) bool {
 	fi, err := f.Stat()
 	if err != nil {

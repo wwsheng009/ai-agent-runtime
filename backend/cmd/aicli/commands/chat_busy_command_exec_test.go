@@ -15,20 +15,25 @@ func TestChatBusyCommandUnsafeEffect(t *testing.T) {
 		t.Fatalf("只读结果不应报告效应，实际 %q", got)
 	}
 
-	cases := map[string]CommandResult{
-		"quit":             {Action: CommandQuit},
-		"replay-history":   {ReplayHistory: true},
-		"transcript-pager": {Screen: &chatScreenSpec{ID: "transcript.pager", Title: "历史记录"}},
-		"debug-display":    {Screen: &chatScreenSpec{ID: "debug.display", Title: "调试面板"}},
-		"send-objective":   {SendObjective: "objective"},
-		"send-message":     {SendMessageAfterCommit: "message"},
-		"send-skill-turn":  {SendSkillTurn: &SendSkillTurnRequest{}},
-		"backtrack-apply":  {ApplyBacktrack: &BacktrackApplyRequest{}},
-		"composer-draft":   {RestoreComposerDraft: "draft"},
+	// 批次 5（D-E）起旧 Open* 效应统一为 Screen：inline 通道对任何副屏效应
+	// 一律报 "screen"（chat_busy_command_exec.go:114-118），由 S 档承接。
+	cases := []struct {
+		want   string
+		result CommandResult
+	}{
+		{"quit", CommandResult{Action: CommandQuit}},
+		{"replay-history", CommandResult{ReplayHistory: true}},
+		{"screen", CommandResult{Screen: &chatScreenSpec{ID: "transcript.pager", Title: "历史记录"}}},
+		{"screen", CommandResult{Screen: &chatScreenSpec{ID: "debug.display", Title: "调试面板"}}},
+		{"send-objective", CommandResult{SendObjective: "objective"}},
+		{"send-message", CommandResult{SendMessageAfterCommit: "message"}},
+		{"send-skill-turn", CommandResult{SendSkillTurn: &SendSkillTurnRequest{}}},
+		{"backtrack-apply", CommandResult{ApplyBacktrack: &BacktrackApplyRequest{}}},
+		{"composer-draft", CommandResult{RestoreComposerDraft: "draft"}},
 	}
-	for want, result := range cases {
-		if got := chatBusyCommandUnsafeEffect(result); got != want {
-			t.Fatalf("效应 %s 未按预期报告，实际 %q", want, got)
+	for _, tc := range cases {
+		if got := chatBusyCommandUnsafeEffect(tc.result); got != tc.want {
+			t.Fatalf("效应 %s 未按预期报告，实际 %q", tc.want, got)
 		}
 	}
 }
@@ -98,13 +103,17 @@ func TestExecuteBusySlashCommandGuards(t *testing.T) {
 	if executeBusySlashCommand(session, "/model") {
 		t.Fatal("非 immediate 命令不得走忙时通道")
 	}
-	if executeBusySlashCommand(session, "/help") {
+	// /help、/status 批次 5 已迁 screen 档；改用仍为 inline 档的 /queue，
+	// 让断言真正落在「无交互协调器 → 降级」这道门上。
+	if executeBusySlashCommand(session, "/queue") {
 		t.Fatal("无统一渲染面/交互协调器时必须降级")
 	}
 }
 
-// P1-5 happy path：统一渲染面 + busy capture 层级注册后，首批只读命令立即执行，
-// 且执行后不残留 Phase A 锁。
+// P1-5 happy path：统一渲染面 + busy capture 层级注册后，首批 §4.1 中仍为
+// inline 档的只读命令立即执行，且执行后不残留 Phase A 锁。批次 5 后 /help、
+// /status 已迁 screen 档并由 S 档承接（生产路径回归见
+// chat_busy_dispatch_regression_test.go），此处以 /queue 固定 inline 契约。
 func TestExecuteBusySlashCommandUnifiedSession(t *testing.T) {
 	t.Setenv(chatBusyCommandEnv, "on")
 
@@ -128,8 +137,8 @@ func TestExecuteBusySlashCommandUnifiedSession(t *testing.T) {
 	releaseCapture := beginChatInputShadowLevel(session, chatInputOwnerBusyCapture)
 	defer releaseCapture()
 
-	if !executeBusySlashCommand(session, "/help") {
-		t.Fatal("/help 应在忙时通道内立即执行")
+	if !executeBusySlashCommand(session, "/queue") {
+		t.Fatal("/queue 应在忙时通道内立即执行")
 	}
 	if !session.commandMu.TryLock() {
 		t.Fatal("忙时命令执行后 commandMu 必须已释放")
@@ -138,7 +147,7 @@ func TestExecuteBusySlashCommandUnifiedSession(t *testing.T) {
 
 	coordinator.waitUIActorIdle()
 	awaitUnifiedPresenterIdle(t, coordinator)
-	if !strings.Contains(presenterOutput.String(), "/help") {
+	if !strings.Contains(presenterOutput.String(), "queued input") {
 		t.Fatalf("忙时命令结果未到达统一渲染面，输出=%q", presenterOutput.String())
 	}
 }

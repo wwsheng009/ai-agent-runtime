@@ -73,17 +73,37 @@ var chatBusyScreenCapability = func(session *ChatSession) bool {
 }
 
 // chatBusyScreenDispatchOverride 仅供测试注入替身（nil = 走主分派器）。
-// 不能把主分派器写进包级变量初始化式：dispatchChatCommand → … →
-// runBusyScreenCommand 会构成初始化环。
 var chatBusyScreenDispatchOverride func(session *ChatSession, line string) bool
 
-// chatBusyScreenRunDispatch 是副屏执行入口（生产 = 主分派器，含命令渲染与
-// Phase B 屏幕开启）。
+// chatBusyScreenRunDispatch 是副屏执行入口，**调用方必须已持有 commandMu**：
+// 本函数在锁内执行 Phase A（解析 + 会话/配置变更 + 渲染），随后立即释放锁，
+// 并在锁外应用 Phase B 效应（副屏开启/交互、send 等，§3.3 两阶段契约）。
+// 返回 true 表示命令已被本通道占有并完成。
+//
+// 禁止退化为直接调用 dispatchChatCommand：主分派器会再次获取同一把**非可
+// 重入** commandMu（lockChatCommandPhaseA → command.go:119 一带），使同一
+// goroutine 自我死锁——修复前 S 档白名单 15 条命令在能力满足时全部不可用，
+// 且 capture goroutine 永久持锁。回归测试见
+// TestRuntimeCommandHostRunsWhitelistedScreenProductionDispatch。
+//
+// 测试替身替换整个执行步骤（含锁的释放），保证替身被调用时锁已释放、
+// modal 登记与租约预算均已生效。
 func chatBusyScreenRunDispatch(session *ChatSession, line string) bool {
 	if chatBusyScreenDispatchOverride != nil {
+		// 替身路径：TryLock 只作 fail-fast 探测，执行期间不持锁。
+		session.commandMu.Unlock()
 		return chatBusyScreenDispatchOverride(session, line)
 	}
-	return dispatchChatCommand(session, line, false)
+	result, handled, renderErr := chatCommandPhaseALocked(session, line, false)
+	session.commandMu.Unlock()
+	if !handled || renderErr != nil {
+		// 未命中结构化命令或结果单元未提交：不认领输入，调用方回退入队。
+		return false
+	}
+	// Phase B 效应必须在锁外应用。白名单内的只读 screen 命令不可能请求
+	// 退出会话，quit 返回值仅服务于主分派器契约，此处忽略。
+	_ = chatCommandPhaseB(session, result, renderErr, false)
+	return true
 }
 
 // runBusyScreenCommand 是 screen 模式的执行原语（P2-4b）。返回 true 表示命令
@@ -92,7 +112,8 @@ func chatBusyScreenRunDispatch(session *ChatSession, line string) bool {
 // 门禁（全部 fail-closed）：
 //  1. 副屏能力（统一渲染面 + surface 就绪 + 终端支持全屏），见 chatBusyScreenCapability；
 //  2. L0 仲裁（INV-7）：模态/priority prompt 活跃时不放行；
-//  3. Phase A TryLock：与 inline 相同的命令互斥；
+//  3. Phase A TryLock：与 inline 相同的命令互斥（Phase A 在锁内执行，
+//     解锁后才应用 Phase B 效应）；
 //
 // 执行期间：登记 chatInputOwnerModal（§3.7.1 第 3 步：副屏拥有 stdin 与 ESC，
 // 其他通道的请求降级），并把 surface 的租约等待预算设为 2s，使 handler 内部
@@ -112,7 +133,8 @@ func runBusyScreenCommand(session *ChatSession, line string) bool {
 		session.Interaction.RenderLocalSupplement("[input] 命令通道正忙，该命令已排队，将在当前回合结束后执行。")
 		return false
 	}
-	defer session.commandMu.Unlock()
+	// 锁由 chatBusyScreenRunDispatch 在 Phase A 之后释放：不得在此 defer
+	// Unlock，否则 Phase B 仍会在持锁状态下执行。
 
 	releaseModal := beginChatInputShadowLevel(session, chatInputOwnerModal)
 	defer releaseModal()

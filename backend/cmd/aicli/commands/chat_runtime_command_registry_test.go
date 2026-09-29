@@ -45,7 +45,9 @@ func TestResolveRuntimeCommandSpecVariants(t *testing.T) {
 		{"/?", runtimeModeScreen, runtimeEffectRead, true},
 		{"/exit", runtimeModeBlock, runtimeEffectProcess, true},
 		{"/quit", runtimeModeBlock, runtimeEffectProcess, true},
-		{"/model status", runtimeModeInline, runtimeEffectRead, true},
+		// 批次 5 尾批只读变体：/model status 迁入只读副屏
+		// （注册表声明见 chat_runtime_command_registry.go:273）。
+		{"/model status", runtimeModeScreen, runtimeEffectRead, true},
 		{"/model", runtimeModeScreen, runtimeEffectNextTurn, true},
 		{"/model gpt-x", runtimeModeScreen, runtimeEffectNextTurn, true},
 		{"/debug display", runtimeModeScreen, runtimeEffectRead, true},

@@ -1610,6 +1610,13 @@ func TestRunChatLoop_DrainsQueuedLinesAfterTeamSettlesBeforePrompt(t *testing.T)
 	var output bytes.Buffer
 	session.Interaction.SetWriter(&output)
 
+	// go test 的 stdin/stdout 是管道：管道/PTY 分支会把测试注入的输入队列置空，
+	// 队列输入永远不会被消费。本用例锁定「team 落定后排空预输入」契约，先关闭
+	// 该分支（接缝说明见 chatPipeLineEditorPreferredFn）。
+	prevPreferred := chatPipeLineEditorPreferredFn
+	chatPipeLineEditorPreferredFn = func() bool { return false }
+	t.Cleanup(func() { chatPipeLineEditorPreferredFn = prevPreferred })
+
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		_ = store.UpdateTeamStatus(context.Background(), teamID, team.TeamStatusDone)
