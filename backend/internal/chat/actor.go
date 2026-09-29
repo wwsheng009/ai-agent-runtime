@@ -275,12 +275,12 @@ type SessionActor struct {
 	triggerTurnLastDroppedAt  time.Time
 	triggerTurnLastDroppedKey string
 	// runStallTimeout / onRunStalled mirror SessionActorConfig; see there.
-	runStallTimeout time.Duration
-	onRunStalled    func(turnID string)
-	onRunFinished   func()
-	onProgress      func(kind string)
+	runStallTimeout  time.Duration
+	onRunStalled     func(turnID string)
+	onRunFinished    func()
+	onProgress       func(kind string)
 	onBudgetProgress func(state agent.TurnBudgetState)
-	runSequence     atomic.Uint64
+	runSequence      atomic.Uint64
 	// checkpointInterval / lastCheckpointAt 实现长 turn 中途落库的节流，
 	// 语义见 SessionActorConfig.CheckpointInterval。
 	checkpointInterval time.Duration
@@ -2297,6 +2297,12 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	}
 
 	observedTokens, hasObservedTokens := runtimeSessionActiveContextTokens(a.llmRuntime, session, history)
+	// The compaction trigger must measure the same quantity as the prompt
+	// preflight gate (messages + tool schemas against window − reserved output);
+	// otherwise a history reads "below_limit" and the next provider request is
+	// still rejected before it is sent (2026-09-28 incident).
+	tools := a.compactToolSurface(ctx, turnID)
+	inputBudget, toolSchemaTokens := agent.CompactTriggerBudget(a.llmRuntime, a.agent, tools)
 	runtime := compactruntime.New(a.llmRuntime, manager)
 	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
 		SessionID:          a.id,
@@ -2309,7 +2315,9 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 		CountTokens:        a.llmRuntime.CountMessagesTokens,
 		ObservedTokens:     observedTokens,
 		HasObservedTokens:  hasObservedTokens,
-		Tools:              a.compactToolSurface(ctx, turnID),
+		InputBudget:        inputBudget,
+		ToolSchemaTokens:   toolSchemaTokens,
+		Tools:              tools,
 	})
 	payload["reason"] = status.Reason
 	payload["mode"] = status.Mode
@@ -2485,6 +2493,8 @@ func (a *SessionActor) runManualCompact(
 	}
 
 	taskID := a.id
+	tools := a.compactToolSurface(ctx, traceID)
+	inputBudget, toolSchemaTokens := agent.CompactTriggerBudget(a.llmRuntime, a.agent, tools)
 	runtime := compactruntime.New(a.llmRuntime, manager)
 	result, resolvedStatus, err := runtime.MaybeCompact(ctx, compactruntime.Request{
 		SessionID:          a.id,
@@ -2499,7 +2509,9 @@ func (a *SessionActor) runManualCompact(
 		CountTokens:        a.llmRuntime.CountMessagesTokens,
 		ObservedTokens:     countRuntimeChatContextTokens(a.llmRuntime, session.GetMessages()),
 		HasObservedTokens:  true,
-		Tools:              a.compactToolSurface(ctx, traceID),
+		InputBudget:        inputBudget,
+		ToolSchemaTokens:   toolSchemaTokens,
+		Tools:              tools,
 	})
 	status = resolvedStatus
 	payload["reason"] = status.Reason

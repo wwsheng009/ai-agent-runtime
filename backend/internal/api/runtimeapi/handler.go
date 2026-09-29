@@ -4160,6 +4160,11 @@ func (h *Handler) maybeAutoCompactSessionHistory(ctx context.Context, session *c
 		keepRecent = manager.Budget.KeepRecentMessages
 	}
 
+	// Align the compaction trigger with the provider send gate where this path
+	// can: the frozen turn tool surface is not available here, so only the input
+	// budget (window − reserved output, capped by the prompt budget) is applied
+	// and the tool-schema share stays with the capability trigger.
+	inputBudget, _ := agent.CompactTriggerBudget(h.llmRuntime, apiAgent, nil)
 	runtime := compactruntime.New(h.llmRuntime, manager)
 	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
 		SessionID:          session.ID,
@@ -4170,6 +4175,7 @@ func (h *Handler) maybeAutoCompactSessionHistory(ctx context.Context, session *c
 		KeepRecentMessages: keepRecent,
 		Phase:              compactruntime.PhasePreTurn,
 		CountTokens:        h.llmRuntime.CountMessagesTokens,
+		InputBudget:        inputBudget,
 	})
 
 	payload := map[string]interface{}{

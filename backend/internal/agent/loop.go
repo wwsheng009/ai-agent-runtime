@@ -6069,6 +6069,8 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 		},
 		ObservedTokens:    promptTokens,
 		HasObservedTokens: true,
+		InputBudget:       budget.enforcedInputBudget(),
+		ToolSchemaTokens:  maxIntValue(0, toolSchemaTokens),
 		Tools:             frozenTurnToolSurface(ctx),
 	}
 	result, status, err := runtime.MaybeCompact(ctx, compactRequest)
@@ -6210,6 +6212,23 @@ func buildPromptPreflightFailure(code string, messages []types.Message, promptTo
 
 func resolveContextBuildPromptBudget(runtime *llm.LLMRuntime, agent *Agent, loopConfig *LoopReActConfig) promptPreflightBudget {
 	return resolvePromptPreflightBudget(runtime, agent, loopConfig, 0)
+}
+
+// CompactTriggerBudget exposes the prompt preflight gate's input budget and the
+// frozen tool surface's token estimate so session compaction can trigger on the
+// same quantity the gate admits:
+//
+//	trigger = min(prompt budget, window − reserved output) − tool schema tokens
+//
+// Without the alignment the capability-derived trigger (window × ratio,
+// messages only) sits above the gate and a history can read "below_limit" while
+// the next provider request is rejected before it is sent (2026-09-28
+// incident: trigger 108800, gate 96000, prompt 116025 with 128 messages).
+// A non-positive budget means "not resolvable"; callers keep the capability
+// trigger.
+func CompactTriggerBudget(runtime *llm.LLMRuntime, agent *Agent, tools []types.ToolDefinition) (int, int) {
+	budget := resolvePromptPreflightBudget(runtime, agent, nil, 0)
+	return budget.enforcedInputBudget(), estimateToolDefinitionTokens(runtime, tools)
 }
 
 func resolvePromptPreflightBudget(runtime *llm.LLMRuntime, agent *Agent, loopConfig *LoopReActConfig, remainingBudget int) promptPreflightBudget {

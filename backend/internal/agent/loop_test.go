@@ -2984,6 +2984,42 @@ func TestResolvePromptPreflightBudget_UsesConfigurableFallbackForUnknownCapabili
 	require.NotContains(t, budget.BudgetCandidates, "default_context_max_prompt_tokens")
 }
 
+// TestCompactTriggerBudgetAlignsWithPromptPreflight pins the 2026-09-28
+// incident fix at the source: the gate budget is min(prompt budget, window −
+// reserved output) — here min(108800, 128000 − 32000) = 96000 — and the tool
+// schema estimate is what lets session compaction subtract the schema share so
+// its message-only trigger stays on the same quantity the gate measures.
+func TestCompactTriggerBudgetAlignsWithPromptPreflight(t *testing.T) {
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "test-provider",
+		DefaultModel:    "test-model",
+	})
+	provider := &SequenceLLMProvider{
+		name:         "test-provider",
+		providerCaps: &llm.ModelCapabilities{MaxContextTokens: 128000, MaxOutputTokens: 4096},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("test-provider", provider))
+
+	agent := NewAgentWithLLM(&Config{
+		Name:             "test-agent",
+		Provider:         "test-provider",
+		Model:            "test-model",
+		DefaultMaxTokens: 32000,
+	}, &MockMCPManager{}, llmRuntime)
+
+	tools := []types.ToolDefinition{
+		{Name: "shell", Description: "Execute a shell command and return its captured output."},
+		{Name: "view", Description: "Read a file or a byte range and return its content."},
+	}
+	inputBudget, toolSchemaTokens := CompactTriggerBudget(llmRuntime, agent, tools)
+	require.Equal(t, 96000, inputBudget)
+	require.Greater(t, toolSchemaTokens, 0)
+	require.Less(t, inputBudget-toolSchemaTokens, inputBudget)
+
+	_, noSchema := CompactTriggerBudget(llmRuntime, agent, nil)
+	require.Equal(t, 0, noSchema)
+}
+
 func TestResolvePromptPreflightBudget_UsesDefaultFallbackForUnknownCapability(t *testing.T) {
 	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "test-provider",

@@ -48,6 +48,19 @@ type Request struct {
 	// local compact keeps that tools prefix and forces tool_choice=none so the
 	// summary pass can reuse provider prompt cache without executing tools.
 	Tools []types.ToolDefinition
+	// InputBudget optionally carries the enforced provider input budget — the
+	// same number the prompt preflight gate admits a request against:
+	// min(prompt budget, context window − reserved output tokens). When > 0 and
+	// lower than the capability-derived trigger, the trigger is lowered to it.
+	InputBudget int
+	// ToolSchemaTokens optionally carries the frozen tool surface's token
+	// estimate. The preflight gate measures messages + tool schemas while this
+	// trigger measures messages only, so the trigger is lowered by this amount
+	// to keep both layers comparable. Without it a session can read
+	// "below_limit" and still be rejected before the provider request is sent
+	// (2026-09-28 incident: messages 98152 < trigger 108800, prompt 116025 >
+	// gate 96000).
+	ToolSchemaTokens int
 }
 
 // Result captures a successful history replacement.
@@ -155,6 +168,7 @@ func (r *Runtime) MaybeCompact(ctx context.Context, req Request) (*Result, Statu
 	status.Mode = limit.Mode
 	status.ResolvedProvider = limit.ResolvedProvider
 	status.ResolvedModel = limit.ResolvedModel
+	limit.TriggerTokenLimit = alignTriggerWithInputBudget(limit.TriggerTokenLimit, req.InputBudget, req.ToolSchemaTokens)
 	status.TriggerTokenLimit = limit.TriggerTokenLimit
 	status.MaxContextTokens = limit.MaxContextTokens
 	status.TokenBefore = resolveObservedTokenCount(req, counter)
@@ -201,6 +215,32 @@ func resolveObservedTokenCount(req Request, counter TokenCounter) int {
 		return 0
 	}
 	return counter(req.History)
+}
+
+// alignTriggerWithInputBudget keeps the message-only compaction trigger inside
+// the provider send gate. The gate admits a request when
+//
+//	messages + tool schemas <= min(prompt budget, context window − reserved output)
+//
+// while the capability-derived trigger compares messages only against
+// window × ratio. The two disagree by the reserved output tokens and the tool
+// schema size, so a history can read "below_limit" and still be rejected by the
+// gate (2026-09-28 incident: trigger 108800, gate 96000, prompt 116025).
+//
+// The aligned trigger is min(trigger, inputBudget) − toolSchemaTokens. A
+// non-positive remainder (the schema alone exhausts the gate) keeps the
+// original trigger: compaction cannot help that request, and the gate reports
+// tool_schema_exceeds_budget itself.
+func alignTriggerWithInputBudget(trigger, inputBudget, toolSchemaTokens int) int {
+	if inputBudget > 0 && (trigger <= 0 || inputBudget < trigger) {
+		trigger = inputBudget
+	}
+	if toolSchemaTokens > 0 {
+		if aligned := trigger - toolSchemaTokens; aligned > 0 && (trigger <= 0 || aligned < trigger) {
+			trigger = aligned
+		}
+	}
+	return trigger
 }
 
 func resolveAutoCompactThreshold(runtime *llm.LLMRuntime, providerName, model, requestedMode string) (threshold, bool) {

@@ -774,6 +774,74 @@ func TestMaybeCompactFallsBackToWildcardAndSkipsBelowLimit(t *testing.T) {
 	require.Equal(t, 0, provider.callCount)
 }
 
+// TestMaybeCompactTriggerAlignsWithInputBudget pins the 2026-09-28 incident
+// fix: the capability trigger (window × 0.85, messages only) sat above the
+// provider send gate (window − reserved output, messages + tool schemas), so a
+// history read "below_limit" while the next provider request was still rejected
+// before it was sent (messages 98152 < trigger 108800, prompt 116025 > gate
+// 96000). Passing the gate's numbers must make the same history compact.
+func TestMaybeCompactTriggerAlignsWithInputBudget(t *testing.T) {
+	newRuntime := func() (*llm.LLMRuntime, *compactTestProvider) {
+		runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+			DefaultProvider: "provider-a",
+			DefaultModel:    "gpt-5",
+			MaxRetries:      0,
+		})
+		provider := &compactTestProvider{
+			name: "provider-a",
+			capabilities: map[string]agentconfig.ModelCapabilitySpec{
+				"gpt-5": {MaxContextTokens: 128000},
+			},
+		}
+		require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+		require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+		return runtime, provider
+	}
+
+	history := compactTestHistory()
+	counter := func(messages []types.Message) int { return len(messages) * 19000 }
+	tokensBefore := counter(history)
+	require.Greater(t, tokensBefore, 78127, "fixture must sit in the trigger/gate blind spot")
+	require.Less(t, tokensBefore, 108800, "fixture must stay below the capability trigger")
+
+	// Pre-fix behavior: without the gate numbers the capability trigger skips.
+	runtime, provider := newRuntime()
+	result, status, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID:          "session-trigger-blind-spot",
+		Provider:           "provider-a",
+		Model:              "gpt-5",
+		History:            history,
+		KeepRecentMessages: 2,
+		Phase:              PhasePreTurn,
+		CountTokens:        counter,
+	})
+	require.NoError(t, err)
+	require.Nil(t, result)
+	require.Equal(t, "below_limit", status.Reason)
+	require.Equal(t, 108800, status.TriggerTokenLimit)
+	require.Equal(t, 0, provider.streamCount)
+
+	// Aligned trigger: 96000 − 17873 = 78127, so the same history compacts.
+	runtime, provider = newRuntime()
+	result, status, err = New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID:          "session-trigger-aligned",
+		Provider:           "provider-a",
+		Model:              "gpt-5",
+		History:            history,
+		KeepRecentMessages: 2,
+		Phase:              PhasePreTurn,
+		CountTokens:        counter,
+		InputBudget:        96000,
+		ToolSchemaTokens:   17873,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 78127, status.TriggerTokenLimit)
+	require.Equal(t, tokensBefore, status.TokenBefore)
+	require.NotNil(t, result)
+	require.NotEmpty(t, result.ReplacementHistory)
+	require.Equal(t, 1, provider.streamCount)
+}
+
 func TestMaybeCompactUsesObservedTokensForTrigger(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "provider-a",
