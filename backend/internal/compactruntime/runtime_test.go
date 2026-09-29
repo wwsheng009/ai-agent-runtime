@@ -399,8 +399,64 @@ func TestMaybeCompactReducesOversizedInputBeforeProviderCompaction(t *testing.T)
 	require.Equal(t, 1, provider.streamCount, "a fitted reduced request should preserve provider compaction")
 	require.NotNil(t, provider.lastRequest)
 	require.Equal(t, true, provider.lastRequest.Metadata["compact_input_reduced"])
-	require.Greater(t, provider.lastRequest.Metadata["compact_omitted_messages"].(int), 0)
+	// §4.1 degradation order: oversized tool results are trimmed first, so the
+	// fitted request can still cover the whole history instead of folding whole
+	// messages into the deterministic prefix digest.
+	require.Greater(t, provider.lastRequest.Metadata["compact_tool_results_reduced"].(int), 0)
+	require.Equal(t, 0, provider.lastRequest.Metadata["compact_omitted_messages"].(int))
 	require.Empty(t, localCompactionRequestBudgetFailure(runtime, provider.lastRequest, threshold{MaxContextTokens: 5000}))
+	summary := requireCompactionMessage(t, result.ReplacementHistory)
+	require.NotEqual(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
+}
+
+// TestFittedCompactionTrimsToolResultsBeforeOmittingMessages pins the §4.1
+// layered degradation: when the full-history compaction request exceeds the
+// compaction model's budget, oversized tool results are trimmed first, so the
+// provider summary can still cover the whole history instead of folding whole
+// messages into the deterministic prefix digest.
+func TestFittedCompactionTrimsToolResultsBeforeOmittingMessages(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {
+				MaxContextTokens:      20000,
+				AutoCompactTokenLimit: 100,
+			},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+
+	history := []types.Message{
+		*types.NewUserMessage("original request"),
+		{Role: "assistant", ToolCalls: []types.ToolCall{{ID: "call-1", Name: "view"}}, Metadata: types.NewMetadata()},
+		*types.NewToolMessage("call-1", strings.Repeat("first tool output line\n", 5000)),
+		{Role: "assistant", ToolCalls: []types.ToolCall{{ID: "call-2", Name: "view"}}, Metadata: types.NewMetadata()},
+		*types.NewToolMessage("call-2", strings.Repeat("second tool output line\n", 5000)),
+		*types.NewUserMessage("latest request"),
+	}
+	result, _, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID: "session-compact-tool-result-trim",
+		Provider:  "provider-a",
+		Model:     "gpt-5",
+		History:   history,
+		CountTokens: func(messages []types.Message) int {
+			return len(messages) * 100
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, provider.lastRequest)
+	require.Greater(t, provider.lastRequest.Metadata["compact_tool_results_reduced"].(int), 0,
+		"oversized tool results must be trimmed before whole messages are omitted")
+	require.Equal(t, 0, provider.lastRequest.Metadata["compact_omitted_messages"].(int),
+		"the trimmed request must still cover the whole history")
+	require.Empty(t, localCompactionRequestBudgetFailure(runtime, provider.lastRequest, threshold{MaxContextTokens: 20000}))
 	summary := requireCompactionMessage(t, result.ReplacementHistory)
 	require.NotEqual(t, "deterministic_fallback", summary.Metadata.GetString("summary_source", ""))
 }

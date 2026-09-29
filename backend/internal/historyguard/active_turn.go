@@ -227,6 +227,14 @@ func reduceLatestReplayToolResults(messages []types.Message, maxBytes int, maxTo
 	return next, true
 }
 
+// ReduceToolResultContentForPrompt trims an oversized tool result to its head,
+// tail and artifact reference lines with a compaction notice, preserving the
+// tool-call pairing. Exported for callers that fit a compaction request before
+// summarizing instead of omitting whole messages (recommendations §4.1).
+func ReduceToolResultContentForPrompt(content string, maxBytes int) (string, bool) {
+	return buildReducedToolResultContent(content, maxBytes)
+}
+
 func buildReducedToolResultContent(content string, maxBytes int) (string, bool) {
 	content = strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
 	if content == "" || maxBytes <= 0 || len(content) <= maxBytes {

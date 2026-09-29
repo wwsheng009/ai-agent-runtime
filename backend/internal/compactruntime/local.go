@@ -9,6 +9,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
+	"github.com/wwsheng009/ai-agent-runtime/internal/historyguard"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -564,21 +565,22 @@ func buildFittedLocalCompactionLLMRequest(runtime *llm.LLMRuntime, req Request, 
 	}
 
 	findFit := func(systems []types.Message, withAnchor bool) *llm.LLMRequest {
-		last := buildCandidate(starts[len(starts)-1], systems, withAnchor)
-		if localCompactionRequestBudgetFailure(runtime, last, threshold) != "" {
+		// The minimal candidate (anchor + deterministic digest, no raw history)
+		// must fit even before tool-result trimming; otherwise this layout is
+		// unusable.
+		if fitCompactionRequestWithToolResultReduction(runtime, buildCandidate(starts[len(starts)-1], systems, withAnchor), threshold) == nil {
 			return nil
 		}
 		low, high := 0, len(starts)-1
 		for low < high {
 			mid := low + (high-low)/2
-			candidate := buildCandidate(starts[mid], systems, withAnchor)
-			if localCompactionRequestBudgetFailure(runtime, candidate, threshold) == "" {
+			if candidate := fitCompactionRequestWithToolResultReduction(runtime, buildCandidate(starts[mid], systems, withAnchor), threshold); candidate != nil {
 				high = mid
 			} else {
 				low = mid + 1
 			}
 		}
-		return buildCandidate(starts[low], systems, withAnchor)
+		return fitCompactionRequestWithToolResultReduction(runtime, buildCandidate(starts[low], systems, withAnchor), threshold)
 	}
 
 	// Prefer the anchor-keeping layout (stable prefix), then degrade in order:
@@ -662,6 +664,75 @@ func localCompactionRequestBudgetFailure(runtime *llm.LLMRuntime, request *llm.L
 		return fmt.Sprintf("compact request skipped because estimated input is %d tokens (budget %d)", inputTokens, inputBudget)
 	}
 	return ""
+}
+
+// localCompactionToolResultReductionTiers are the head/tail byte budgets tried,
+// in order, when a fitted compaction request still exceeds the compaction
+// model's input budget: trimming oversized tool results first lets the request
+// keep covering more raw history instead of folding whole messages into the
+// deterministic prefix digest (2026-09-28 recommendations §4.1: 先裁工具输出再摘要).
+var localCompactionToolResultReductionTiers = []int{4096, 1024, 256}
+
+// fitCompactionRequestWithToolResultReduction returns the request unchanged when
+// it already fits the compaction input budget; otherwise it returns a clone
+// whose oversized tool results are trimmed to the first tier that fits, or nil
+// when even the smallest tier does not fit.
+func fitCompactionRequestWithToolResultReduction(runtime *llm.LLMRuntime, request *llm.LLMRequest, threshold threshold) *llm.LLMRequest {
+	if request == nil {
+		return nil
+	}
+	if localCompactionRequestBudgetFailure(runtime, request, threshold) == "" {
+		return request
+	}
+	current := request
+	totalReduced := 0
+	for _, tier := range localCompactionToolResultReductionTiers {
+		next, count := reduceCompactionRequestToolResults(current, tier)
+		if count == 0 {
+			return nil
+		}
+		totalReduced += count
+		current = next
+		if localCompactionRequestBudgetFailure(runtime, current, threshold) == "" {
+			metadata := make(map[string]interface{}, len(current.Metadata)+2)
+			for key, value := range current.Metadata {
+				metadata[key] = value
+			}
+			metadata["compact_tool_results_reduced"] = totalReduced
+			metadata["compact_tool_result_reduction_bytes"] = tier
+			current.Metadata = metadata
+			return current
+		}
+	}
+	return nil
+}
+
+// reduceCompactionRequestToolResults clones the request and trims every tool
+// result larger than tier bytes to head+tail. Tool-call pairing is preserved:
+// only the content of the tool message changes.
+func reduceCompactionRequestToolResults(request *llm.LLMRequest, tier int) (*llm.LLMRequest, int) {
+	if request == nil || tier <= 0 || len(request.Messages) == 0 {
+		return request, 0
+	}
+	reduced := *request
+	reduced.Messages = cloneMessages(request.Messages)
+	count := 0
+	for index := range reduced.Messages {
+		message := &reduced.Messages[index]
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "tool") {
+			continue
+		}
+		trimmed, changed := historyguard.ReduceToolResultContentForPrompt(message.Content, tier)
+		if !changed {
+			continue
+		}
+		message.Content = trimmed
+		count++
+	}
+	if count == 0 {
+		return request, 0
+	}
+	return &reduced, count
 }
 
 func localCompactionInputBudget(runtime *llm.LLMRuntime, request *llm.LLMRequest, threshold threshold) int {
