@@ -29,19 +29,29 @@ func CompactActiveTurnReplayWithCounter(messages []types.Message, maxBytes int, 
 		maxBytes = DefaultActiveTurnReplayMaxBytes
 	}
 
-	userIndex := activeUserTurnStart(messages)
-	if userIndex < 0 || userIndex >= len(messages)-1 {
+	// anchor is the active turn's user message. A compacted/rewritten history
+	// may no longer carry one (2026-09-28 incident: 128 messages with no user
+	// role, every fold path returned false and the request hard-failed as
+	// active_turn_not_compactable). Without an anchor the whole prefix counts
+	// as foldable history, so the fold still has a target instead of giving up.
+	anchor := activeUserTurnStart(messages)
+	if anchor >= len(messages)-1 {
 		return messages, false
 	}
 
-	activeBytes := estimatedMessagesBytes(messages[userIndex:])
+	regionStart := anchor
+	if regionStart < 0 {
+		// Anchor-less history: the foldable region is everything from the head.
+		regionStart = 0
+	}
+	activeBytes := estimatedMessagesBytes(messages[regionStart:])
 	overBytes := activeBytes > maxBytes
 	activeTokens := 0
 	totalTokens := 0
 	overTokens := false
 	overTotalTokens := false
 	if counter != nil && maxTokens > 0 {
-		activeTokens = counter(messages[userIndex:])
+		activeTokens = counter(messages[regionStart:])
 		totalTokens = counter(messages)
 		overTokens = activeTokens > maxTokens
 		overTotalTokens = totalTokens > maxTokens
@@ -50,16 +60,24 @@ func CompactActiveTurnReplayWithCounter(messages []types.Message, maxBytes int, 
 		return messages, false
 	}
 
-	preserveStart := latestReplayBlockStart(messages, userIndex)
-	if preserveStart < userIndex+1 || preserveStart > len(messages) {
+	preserveStart := replayBlockStart(messages, anchor)
+	if preserveStart < anchor+1 || preserveStart > len(messages) {
 		return messages, false
 	}
 
 	current := messages
 	compactedOlderReplay := false
-	if preserveStart > userIndex+1 {
-		compactStart := userIndex + 1
-		if anchorStart := latestCompactionSummaryStart(messages, userIndex, preserveStart); anchorStart >= 0 {
+	if preserveStart > anchor+1 {
+		compactStart := anchor + 1
+		if compactStart < 0 {
+			compactStart = 0
+		}
+		// An anchor-less history must keep its leading system prompt: folding it
+		// into a replay summary would drop the instructions the model runs on.
+		if compactStart == 0 && messages[0].Role == "system" {
+			compactStart = 1
+		}
+		if anchorStart := latestCompactionSummaryStart(messages, anchor, preserveStart); anchorStart >= 0 {
 			if anchorStart+1 < preserveStart {
 				compactStart = anchorStart + 1
 			} else {
@@ -87,9 +105,9 @@ func CompactActiveTurnReplayWithCounter(messages []types.Message, maxBytes int, 
 				next = append(next, cloneMessages(messages[:compactStart])...)
 				next = append(next, *compacted)
 				next = append(next, cloneMessages(messages[preserveStart:])...)
-				if counter != nil && maxTokens > 0 && userIndex+1 < len(next) {
+				if counter != nil && maxTokens > 0 && anchor >= 0 && anchor+1 < len(next) {
 					if promptTokensAfter := counter(next); promptTokensAfter > 0 {
-						next[userIndex+1].Metadata["prompt_tokens_after"] = promptTokensAfter
+						next[anchor+1].Metadata["prompt_tokens_after"] = promptTokensAfter
 					}
 				}
 				current = next
@@ -112,7 +130,7 @@ func CompactActiveTurnReplayWithCounter(messages []types.Message, maxBytes int, 
 }
 
 func latestCompactionSummaryStart(messages []types.Message, userIndex, preserveStart int) int {
-	if userIndex < 0 || preserveStart <= userIndex+1 {
+	if preserveStart <= userIndex+1 {
 		return -1
 	}
 	for index := preserveStart - 1; index > userIndex; index-- {
@@ -152,12 +170,12 @@ func messagesExceedActiveTurnBudget(messages []types.Message, maxBytes int, maxT
 }
 
 func reduceLatestReplayToolResults(messages []types.Message, maxBytes int, maxTokens int, counter func([]types.Message) int) ([]types.Message, bool) {
-	userIndex := activeUserTurnStart(messages)
-	if userIndex < 0 || userIndex >= len(messages)-1 {
+	anchor := activeUserTurnStart(messages)
+	if anchor >= len(messages)-1 {
 		return messages, false
 	}
-	preserveStart := latestReplayBlockStart(messages, userIndex)
-	if preserveStart < userIndex+1 || preserveStart >= len(messages) {
+	preserveStart := replayBlockStart(messages, anchor)
+	if preserveStart < anchor+1 || preserveStart >= len(messages) {
 		return messages, false
 	}
 
@@ -409,19 +427,28 @@ func mostRepeatedToolCalls(calls map[string]*summarizedToolCall, limit int) []su
 }
 
 func latestReplayBlockStart(messages []types.Message, userIndex int) int {
-	if userIndex < 0 || userIndex >= len(messages)-1 {
+	if userIndex < 0 {
 		return len(messages)
 	}
+	return replayBlockStart(messages, userIndex)
+}
 
+// replayBlockStart is latestReplayBlockStart with an anchor that may be -1 for
+// an anchor-less (compacted/rewritten) history: the scan floor is then the head
+// of the message list instead of a user message index.
+func replayBlockStart(messages []types.Message, anchor int) int {
+	if anchor >= len(messages)-1 {
+		return len(messages)
+	}
 	index := len(messages) - 1
-	for index > userIndex && isTrailingContextMessage(messages[index]) {
+	for index > anchor && isTrailingContextMessage(messages[index]) {
 		index--
 	}
-	for index > userIndex && messages[index].Role == "tool" {
+	for index > anchor && messages[index].Role == "tool" {
 		index--
 	}
-	if index <= userIndex {
-		return userIndex + 1
+	if index <= anchor {
+		return anchor + 1
 	}
 	if messages[index].Role == "assistant" && len(messages[index].ToolCalls) > 0 {
 		return index

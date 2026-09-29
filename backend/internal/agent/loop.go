@@ -6000,13 +6000,21 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 	if budget.PromptBudget <= 0 {
 		return nil, nil, false, nil
 	}
+	// Gate on the enforced input budget (window − reserved output), not the raw
+	// prompt budget: the send gate measures messages + tool schemas against it,
+	// and compacting against a looser number leaves the request rejected before
+	// it is sent (2026-09-28 incident).
+	inputBudget := budget.enforcedInputBudget()
+	if inputBudget <= 0 {
+		inputBudget = budget.PromptBudget
+	}
 	messageTokens := estimatePromptMessageTokens(loop.llmRuntime, history)
 	promptTokens := messageTokens + maxIntValue(0, toolSchemaTokens)
-	if promptTokens <= budget.PromptBudget || !activeTurnSemanticCompactionEligible(budget, observedUsage) {
+	if promptTokens <= inputBudget || !activeTurnSemanticCompactionEligible(budget, observedUsage) {
 		return nil, nil, false, nil
 	}
 
-	replacementTokenLimit := budget.PromptBudget - maxIntValue(0, toolSchemaTokens)
+	replacementTokenLimit := inputBudget - maxIntValue(0, toolSchemaTokens)
 	if replacementTokenLimit <= 0 {
 		replacementTokenLimit = 1
 	}
@@ -6159,7 +6167,16 @@ func maxIntValue(left, right int) int {
 }
 
 func compactRecoveryMessageTokenLimit(metadata map[string]interface{}) int {
-	limit := firstPositiveBudgetMetadataInt(metadata["prompt_budget"])
+	// Fit the replacement to the budget the prompt preflight gate actually
+	// enforces: the effective input budget (window − reserved output) when
+	// known, falling back to the prompt budget, minus the frozen tool surface's
+	// share. Using the raw prompt budget left the replacement above the gate
+	// (2026-09-28 incident: 108800 − 17873 = 90927 > 96000 − 17873 = 78127),
+	// so a "successful" recovery could still be rejected before the next send.
+	limit := firstPositiveBudgetMetadataInt(metadata["effective_input_budget"])
+	if limit <= 0 {
+		limit = firstPositiveBudgetMetadataInt(metadata["prompt_budget"])
+	}
 	if limit <= 0 {
 		return 0
 	}

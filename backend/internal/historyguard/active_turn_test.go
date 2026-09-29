@@ -8,6 +8,54 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+// TestCompactActiveTurnReplay_AnchorlessHistoryStillFolds pins the 2026-09-28
+// incident's second defect: a compacted/rewritten history without a user-role
+// message (the failure payload carried no active_turn_message_count and no
+// latest replay block count) made every fold path return false, so the request
+// hard-failed as active_turn_not_compactable. The fold must keep working
+// without the anchor and preserve the leading system prompt.
+func TestCompactActiveTurnReplay_AnchorlessHistoryStillFolds(t *testing.T) {
+	big := strings.Repeat("anchorless replay payload line\n", 80)
+	messages := []types.Message{
+		*types.NewSystemMessage("system instructions"),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_1", Name: "view", Args: map[string]interface{}{"file_path": "a.go"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_1", big),
+		{
+			Role: "assistant",
+			ToolCalls: []types.ToolCall{
+				{ID: "call_2", Name: "view", Args: map[string]interface{}{"file_path": "b.go"}},
+			},
+			Metadata: types.NewMetadata(),
+		},
+		*types.NewToolMessage("call_2", "latest replay result"),
+	}
+	if idx := activeUserTurnStart(messages); idx != -1 {
+		t.Fatalf("fixture precondition: expected no user anchor, got %d", idx)
+	}
+
+	counter := func(msgs []types.Message) int { return len(msgs) * 1000 }
+	got, compacted := CompactActiveTurnReplayWithCounter(messages, DefaultActiveTurnReplayMaxBytes, 1000, counter)
+	if !compacted {
+		t.Fatal("anchor-less history must still fold older replay instead of hard-failing")
+	}
+	if got[0].Role != "system" || got[0].Content != "system instructions" {
+		t.Fatalf("leading system prompt must be preserved, got %#v", got[0])
+	}
+	if len(got) >= len(messages) {
+		t.Fatalf("expected the older replay to fold into a summary, got %d messages", len(got))
+	}
+	last := got[len(got)-1]
+	if last.Role != "tool" || last.Content != "latest replay result" {
+		t.Fatalf("latest replay block must be preserved as the working set, got %#v", last)
+	}
+}
+
 func TestCompactActiveTurnReplay_NoCompactionWhenWithinBudget(t *testing.T) {
 	messages := []types.Message{
 		*types.NewUserMessage("current request"),

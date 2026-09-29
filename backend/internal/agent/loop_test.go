@@ -3020,6 +3020,22 @@ func TestCompactTriggerBudgetAlignsWithPromptPreflight(t *testing.T) {
 	require.Equal(t, 0, noSchema)
 }
 
+// TestCompactRecoveryMessageTokenLimitPrefersEnforcedBudget pins the recovery
+// side of the 2026-09-28 incident: the replacement must fit the enforced input
+// budget (window − reserved output, 96000), not the raw prompt budget (108800),
+// so a "successful" recovery cannot be rejected by the send gate afterwards.
+func TestCompactRecoveryMessageTokenLimitPrefersEnforcedBudget(t *testing.T) {
+	require.Equal(t, 78127, compactRecoveryMessageTokenLimit(map[string]interface{}{
+		"prompt_budget":          108800,
+		"effective_input_budget": 96000,
+		"tool_schema_tokens":     17873,
+	}))
+	require.Equal(t, 90927, compactRecoveryMessageTokenLimit(map[string]interface{}{
+		"prompt_budget":      108800,
+		"tool_schema_tokens": 17873,
+	}))
+}
+
 func TestResolvePromptPreflightBudget_UsesDefaultFallbackForUnknownCapability(t *testing.T) {
 	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "test-provider",
