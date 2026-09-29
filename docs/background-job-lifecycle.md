@@ -151,8 +151,8 @@ background:
 |------|------|--------|
 | **P0 止血** ✅ 2026-09-28 | CAS + 终态不可覆盖；cancel 走 store；启动恢复改为「标记 interrupted」；存量清理 | 0.5–1 天 |
 | **P1 控制面** ✅ 2026-09-28 | owner_instance + 租约 + 实例注册；队列 deadline/expired；取消清恢复计划；dispatcher re-read | 1–2 天 |
-| **P2 进程树** | Job Object / pgid；reaper；kill 校验 | ~1 天 |
-| **P3 体验** | pause / resume / requeue；事件与 UI；配置项 | ~0.5 天 |
+| **P2 进程树** ✅ 2026-09-28 | Job Object / pgid；reaper；kill 校验 | ~1 天 |
+| **P3 体验** ✅ 2026-09-28 | pause / resume / requeue / abandon；事件与 UI；配置项 | ~0.5 天 |
 
 **回归测试清单**：多实例并发同一 job 只跑一次；取消后 5 分钟不复活（跨实例）；pending 超时 → expired；rerun 超限停止；启动不恢复他人任务；终态不可覆盖；取消/失败后 30s 内进程树消失；孤儿进程/端口自动清理。
 
@@ -169,9 +169,13 @@ background:
 
 - **P0 已实施**：`state_version` + `UpdateJobCAS`（终态吸收）；写路径全量 CAS；cancel 走 store（跨实例、修 `JOB_NOT_FOUND`、清恢复计划）；启动恢复 pending→`interrupted`、死亡 running→`orphaned`（不重排）；`RecoveryMaxAttempts` 默认 3；`RecoverPendingOnStart` 开关。
 - **P1 已实施**：`runtime_instances` 实例表；job 绑定 `owner_instance_id` 与租约（心跳 10s / TTL 60s，Clean 关闭立即释放租约）；恢复只处理「无主或租约过期」的任务（活体持有者完全不动）；队列窗口 `queued_at/deadline_at`（默认 30m，仅对未派发任务生效，超期 → `expired`）；派发前 re-read store（终态采纳 / 非本实例丢弃 / 同步版本）。
-- **待实施**：P2（进程组/Job Object、reaper）与 P3（pause/resume/requeue、事件与 UI 补全）。
+- **P2 已实施**：进程树（Windows Job Object / Unix `Setpgid`+pgid，`process_group` 元数据）；取消与终态整树终止；kill 校验（pid + `process_identity`，默认 5s 内确认）；孤儿 reaper（`orphanReaperInterval` 默认 30s，最多 3 次重试、退避 10s、耗尽后 5min 静默重试）；新增 `kill_verified` / `kill_failed` 事件。
+- **P3 已实施**：显式生命周期操作 `pause / resume / abandon / requeue`（管理器 CAS + 事件 + HTTP 端点 `POST /background/jobs/{id}/pause|resume|abandon|requeue` + `task_control` 工具）；`paused` 非终态（暂停时清队列 deadline，恢复时给新窗口）；`abandoned` 终态（排队/暂停中放弃）；`requeue` = 新建 job（同会话/同命令，新 job 记 `requeued_from`，旧 job 记 `requeued` 事件）；跨实例可见（dispatch 前 re-read 采纳 `paused`，watchdog 对账 `paused→pending`）；前端 jobs 面板按状态矩阵渲染动作、新状态徽章与中英文案；新增事件 `paused / resumed / requeued / abandoned / adopted / lease_expired`（runtime 侧映射为 `job_paused` 等，已进观测目录与前端事件契约）。
+- **实施偏差（§9）**：detached 任务**不**启用 `KILL_ON_JOB_CLOSE`——否则运行实例退出会连带杀死本应存活的 detached 任务，与 P1 的跨实例接管冲突；改为持有 Job Object 句柄 + `TerminateJobObject` 按需整树终止，实例崩溃后的残留由 reaper（pid + identity 校验 + `taskkill /T` 重试）回收。direct-exec 任务使用 `KILL_ON_JOB_CLOSE`（它们是运行实例的严格子进程）。
+- **已知特性**：Windows 上 PowerShell 会等待其子进程退出，因此「命令留下长命后代」的作业会一直显示 running；取消现在会整树终止（runner + 命令 + 后代）。
+- **明确未做**：`persist_across_restart`（§4/§8 的常驻服务跨重启自动接管）。当前语义已覆盖「存活进程可被新实例接管」，而自动重放正是本次事故的根因（排队数天/反复复活），故不默认启用；如后续确有常驻服务需求，建议作为独立开关 + 显式声明（opt-in）单独立项。
 
-> 新配置：`background.instanceId / leaseTTL / heartbeatInterval / queueTimeout`（默认 60s / 10s / 30m；`recoverPendingOnStart` 默认 false）。
+> 新配置：`background.instanceId / leaseTTL / heartbeatInterval / queueTimeout / orphanReaperInterval`（默认 60s / 10s / 30m / 30s；`recoverPendingOnStart` 默认 false）。
 
 ## 附 A：存量数据清理（一次性）
 

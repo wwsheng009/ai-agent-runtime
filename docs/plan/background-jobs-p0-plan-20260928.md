@@ -122,3 +122,26 @@ UPDATE background_jobs
 - **manager（派发复读）**：`dispatchPending` 在 `markScheduled` 前 re-read store——终态采纳、非本实例拥有则丢弃、超期则过期、同步 `state_version`。
 - **配置/接线**：`InstanceID / LeaseTTL / HeartbeatInterval / QueueTimeout`（`background.Config`、`RuntimeConfig.Background`、两处构造、handler 配置 key）。
 - **测试**：新增 6 个用例（store 实例/租约/所有权往返、活体 owner 跳过、过期租约中断、队列超期 expired、派发前取消不启动、默认值）；`go test ./internal/background/` 全绿（~125s），`./internal/config/`、`./internal/toolbroker/`、`runtimeapi -run Background` 全绿；`go vet`、`go build ./...` 通过。
+
+## P2 实施记录（2026-09-28，同批实施）
+
+- **进程树**：新增 `proc_tree_windows.go`（Windows Job Object：`CreateJobObject` + `AssignProcessToJobObject` + `TerminateJobObject`，x/sys/windows）、`proc_tree_unix.go`（`Setpgid` + 进程组信号）、`proc_tree_unsupported.go`（其余平台降级为单 pid）。
+- **接线**：detached runner 启动后、恢复接管存活 runner 时、direct-exec `cmd.Start()` 后均挂树；`process_group` 写入 job 元数据（跨实例 kill 与观测用）。
+- **整树终止**：取消路径（内存 / store 回退）先 `TerminateJobObject`/pgid 杀整树，再按 pid + identity 校验；全部 6 个终态写入路径释放进程树句柄（终态即清理残留）。
+- **kill 校验**：`killAndVerifyJobProcess`（5s 内确认进程消失，identity 不匹配视为 pid 复用即已退出）→ 成功记 `kill_verified`，失败记 `kill_failed` 并交给 reaper。
+- **reaper**：`runOrphanReaper` 随 `orphanReaperInterval`（默认 30s）运行；重试 ≤3 次、退避 10s、耗尽后 5min 静默重试并只告警一次；只处理本实例登记的目标（内存表，句柄只在 spawn 实例有效）。
+- **配置/接线**：`orphanReaperInterval`（`background.Config`、`RuntimeConfig.Background`、两处构造、handler key）。
+- **实施偏差**：detached 任务不用 `KILL_ON_JOB_CLOSE`（需跨实例存活），direct-exec 用 kill-on-close；崩溃残留由 reaper 的 pid 校验 + `taskkill /T` 回收。
+- **测试**：新增 3 个用例（取消整树含长命后代 + `kill_verified`；reaper 清理终态残留进程；`process_group` 记录）；`go test ./internal/background/` 全绿（75 pass / 0 fail，~41s——整树终止让取消路径不再等待慢速 taskkill，套件明显提速），`./internal/config/`、`./internal/toolbroker/`、`runtimeapi -run Background` 全绿；`go vet`、`go build ./...` 通过。
+
+## P3 实施记录（2026-09-28，同批实施）
+
+- **状态机**：新增非终态 `paused`（暂停即清 `deadline_at`，不参与派发也不过期；恢复时给新的队列窗口）。
+- **管理器**（`manager.go`）：`PauseJob / ResumeJob / AbandonJob / RequeueJob` + 通用 CAS 控制转移 `updateStoredJobState`（幂等、无 store 时走内存、成功后 `adoptStoredJob` + `notifyDispatcher`）；`abandon` 仅限 pending/paused，running 必须走 cancel；`requeue` 仅限终态并新建 job（`requeued_from`）。
+- **跨实例可见性**：`refreshFromStore` 在派发前采纳 peer 的 `paused`（不派发）；watchdog 每 tick `reconcilePausedJobs` 对账 `paused → pending`（peer 恢复后本实例会重新入队）。
+- **HTTP**：`POST /api/runtime/background/jobs/{id}/pause|resume|abandon|requeue`（200 `{job}`，requeue 另带 `requeued_from`；409 状态冲突、404 未知 id）。
+- **工具**：`task_control`（`job_id|task_id` + `action=pause|resume|abandon|requeue` + 可选 `reason`），策略面同步登记（taxonomy/capability/grants/tool_policy/arg-kinds/arg-audit）；状态冲突是内容结果（`applied=false` + 当前状态 + 提示改走 task_kill），未知 id 才是可修复错误。
+- **事件与观测**：新增 `paused / resumed / requeued / requeued_from / abandoned`，接管路径补 `adopted`、租约接管补 `lease_expired`；`job_paused / job_resumed / job_requeued / job_abandoned / job_expired / job_interrupted / job_adopted` 进 runtimeobserve 目录（否则会被计成 unknown_events_dropped）。
+- **前端**：`types/runtime/jobs.ts` 补 4 状态与 `queuedAt/deadlineAt/ownerInstanceId`；`api/runtime/jobs.ts` 补 4 端点 + `RuntimeJobRequeueResponse`；`jobs-panel-shared.ts` 补 `jobAvailableActions` 动作矩阵与 live/settled 新分区；面板动作按钮抽为 `jobs-panel-job-actions.tsx`（守住 500 行门禁）；hook 增 `runAction/pendingAction`（保留 `cancel/cancellingId` 兼容入口）；中英文案与事件契约同步。
+- **测试**：后端新增 6 个管理器用例 + 1 个端点用例 + 1 个工具用例；前端新增/更新 4 个测试文件（53 用例）。验证：`go test ./internal/background/ ./internal/toolbroker/ ./internal/policy/ ./internal/api/runtimeapi/ ./internal/runtimeobserve/ ./internal/events/` 全绿，`go build ./...`、`go vet` 通过；前端 `npx tsc -b`、`npm run test`（359 文件 / 3018 用例）、`npm run lint:i18n` 全绿。
+- **遗留**：`frontend/scripts/verify-max-lines.mjs` 报 `use-session-runtime-stream.ts`（576 行）超限——本次未触碰该文件（`git diff` 为空），属既有问题，另行处理。
