@@ -2,7 +2,8 @@
 //
 // 数据全部来自 `/api/runtime/background/jobs*`（无假数据）：live（pending/running）
 // 与 settled（终态）分区展示，live 行本地走秒（elapsed tick），行内可展开读取
-// 增量输出（REST `/output` 分页），live 行可取消。
+// 增量输出（REST `/output` 分页）；行内动作按 `jobAvailableActions` 矩阵渲染
+// （pending→暂停/取消/放弃，paused→恢复/取消/放弃，running→取消，终态→重排队）。
 // P2-9：数据由 shell owner 的 `useBackgroundJobs` 单例提供（弹层与顶栏状态条共用同一份，
 // 保证「状态条计数 == 弹层 live 计数」），面板只渲染与转发动作。
 // 交互：Esc / 遮罩点击关闭，关闭后焦点回到触发按钮（use-focus-restore）。
@@ -23,6 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
+import { JobActions } from "@/components/workspace/jobs-panel-job-actions";
 import {
   formatJobDuration,
   formatJobTimestamp,
@@ -30,6 +32,8 @@ import {
   jobStatusLabelKey,
   resolveJobElapsedMs,
   splitRuntimeJobs,
+  type JobAction,
+  type JobActionPending,
 } from "@/components/workspace/jobs-panel-shared";
 import { type BackgroundJobsController } from "@/hooks/workspace/use-background-jobs";
 import { useElapsedTick } from "@/hooks/workspace/use-elapsed-tick";
@@ -70,7 +74,7 @@ export function JobsPanel({
   open,
 }: JobsPanelProps) {
   const { t } = useTranslation("workspace");
-  const { cancel, cancellingId, error, hasLiveJobs, jobs, loading, refresh } =
+  const { error, hasLiveJobs, jobs, loading, pendingAction, refresh, runAction } =
     controller;
   const [expandedJobId, setExpandedJobId] = useState("");
   const [outputs, setOutputs] = useState<Record<string, JobOutputState>>({});
@@ -224,8 +228,8 @@ export function JobsPanel({
             <JobSection
               jobs={live}
               label={t("panels.jobs.live", { count: live.length })}
-              onCancel={cancel}
-              cancellingId={cancellingId}
+              onAction={runAction}
+              pendingAction={pendingAction}
               now={now}
               onToggleOutput={handleToggleOutput}
               onLoadMore={handleLoadMore}
@@ -239,8 +243,8 @@ export function JobsPanel({
               className={live.length > 0 ? "mt-4" : undefined}
               jobs={settled}
               label={t("panels.jobs.settled", { count: settled.length })}
-              onCancel={cancel}
-              cancellingId={cancellingId}
+              onAction={runAction}
+              pendingAction={pendingAction}
               now={now}
               onToggleOutput={handleToggleOutput}
               onLoadMore={handleLoadMore}
@@ -259,23 +263,23 @@ type JobSectionProps = {
   className?: string;
   jobs: RuntimeJob[];
   label: string;
-  cancellingId: string;
   now: number;
   expandedJobId: string;
   outputs: Record<string, JobOutputState>;
-  onCancel: (jobId: string) => void;
+  pendingAction: JobActionPending;
+  onAction: (jobId: string, action: JobAction) => void;
   onToggleOutput: (jobId: string) => void;
   onLoadMore: (jobId: string) => void;
 };
 
 function JobSection({
-  cancellingId,
   className,
   expandedJobId,
   jobs,
   label,
   now,
-  onCancel,
+  pendingAction,
+  onAction,
   onLoadMore,
   onToggleOutput,
   outputs,
@@ -288,12 +292,12 @@ function JobSection({
       <ul className="mt-1.5 space-y-1.5">
         {jobs.map((job) => (
           <JobRow
-            cancelling={cancellingId === job.id}
             expanded={expandedJobId === job.id}
             job={job}
             key={job.id}
             now={now}
-            onCancel={onCancel}
+            pendingAction={pendingAction}
+            onAction={onAction}
             onLoadMore={onLoadMore}
             onToggleOutput={onToggleOutput}
             output={outputs[job.id]}
@@ -305,22 +309,22 @@ function JobSection({
 }
 
 type JobRowProps = {
-  cancelling: boolean;
   expanded: boolean;
   job: RuntimeJob;
   now: number;
   output?: JobOutputState;
-  onCancel: (jobId: string) => void;
+  pendingAction: JobActionPending;
+  onAction: (jobId: string, action: JobAction) => void;
   onToggleOutput: (jobId: string) => void;
   onLoadMore: (jobId: string) => void;
 };
 
 function JobRow({
-  cancelling,
   expanded,
   job,
   now,
-  onCancel,
+  pendingAction,
+  onAction,
   onLoadMore,
   onToggleOutput,
   output,
@@ -384,17 +388,12 @@ function JobRow({
             </div>
           ) : null}
         </div>
-        {live ? (
-          <Button
-            className="shrink-0"
-            disabled={cancelling}
-            onClick={() => onCancel(job.id)}
-            size="sm"
-            variant="ghost"
-          >
-            {cancelling ? t("panels.jobs.cancelling") : t("panels.jobs.cancel")}
-          </Button>
-        ) : null}
+        <JobActions
+          jobId={job.id}
+          onAction={onAction}
+          pendingAction={pendingAction}
+          status={job.status}
+        />
       </div>
 
       {expanded ? (
@@ -437,9 +436,11 @@ function jobStatusToneClass(status: RuntimeJobStatus): string {
     case "running":
       return "text-accent-primary";
     case "pending":
+    case "paused":
       return "text-analytics-warning";
     case "failed":
     case "timed_out":
+    case "interrupted":
       return "text-analytics-danger";
     default:
       return "text-muted-foreground";

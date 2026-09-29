@@ -49,6 +49,10 @@ export type RuntimeEventType =
   | "job_cancelled"
   | "job_finished"
   | "job_output"
+  | "job_abandoned"
+  | "job_paused"
+  | "job_requeued"
+  | "job_resumed"
   | "job_started"
   | "llm.max_output_tokens.escalated"
   | "llm.prompt_cache.backoff_applied"
@@ -154,6 +158,10 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "job_cancelled": [],
   "job_finished": [],
   "job_output": [],
+  "job_abandoned": [],
+  "job_paused": [],
+  "job_requeued": [],
+  "job_resumed": [],
   "job_started": [],
   "llm.max_output_tokens.escalated": [],
   "llm.prompt_cache.backoff_applied": [],

@@ -52,6 +52,7 @@ export {
   normalizeSessionRuntimeState,
 } from "./session-runtime";
 export {
+  abandonRuntimeJob,
   cancelRuntimeJob,
   getRuntimeJob,
   getRuntimeJobOutput,
@@ -62,6 +63,9 @@ export {
   normalizeRuntimeJobList,
   normalizeRuntimeJobOutput,
   normalizeRuntimeJobStatus,
+  pauseRuntimeJob,
+  requeueRuntimeJob,
+  resumeRuntimeJob,
 } from "./jobs";
 export {
   DEFAULT_USAGE_LEDGER_LIMIT,

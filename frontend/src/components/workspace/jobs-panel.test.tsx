@@ -56,7 +56,9 @@ function makeController(
     jobs: [],
     liveCount: 0,
     loading: false,
+    pendingAction: null,
     refresh: vi.fn(),
+    runAction: vi.fn(async () => true),
     ...overrides,
   };
 }
@@ -104,6 +106,16 @@ describe("JobsPanel", () => {
     });
     await act(flush);
     return controller;
+  }
+
+  /** 行内动作按钮文案（排除无文本的输出展开按钮）。 */
+  function actionLabels(command: string): string[] {
+    const row = Array.from(document.body.querySelectorAll("li")).find((item) =>
+      item.textContent?.includes(command),
+    );
+    return Array.from(row?.querySelectorAll("button") ?? [])
+      .map((button) => button.textContent?.trim() ?? "")
+      .filter((text) => text !== "");
   }
 
   it("按 live/settled 分区渲染任务与退出码", async () => {
@@ -229,24 +241,73 @@ describe("JobsPanel", () => {
     expect(document.body.textContent).toContain("second");
   });
 
-  it("取消动作转发给控制器（刷新语义在 hook 内）", async () => {
+  it("动作按钮按状态矩阵渲染（pending/paused/终态）", async () => {
+    await renderPanel({
+      hasLiveJobs: true,
+      liveCount: 2,
+      jobs: [
+        makeJob({ id: "pending-1", command: "queued task", status: "pending" }),
+        makeJob({ id: "paused-1", command: "paused task", status: "paused" }),
+        makeJob({ id: "settled-1", command: "done task", status: "completed" }),
+      ],
+    });
+
+    expect(actionLabels("queued task")).toEqual(["暂停", "取消", "放弃"]);
+    expect(actionLabels("paused task")).toEqual(["恢复", "取消", "放弃"]);
+    expect(actionLabels("done task")).toEqual(["重新排队"]);
+  });
+
+  it("点击动作按钮把 (jobId, action) 转发给控制器", async () => {
     const controller = await renderPanel({
       hasLiveJobs: true,
       liveCount: 1,
-      jobs: [makeJob({ id: "live-1", command: "sleep 30" })],
+      jobs: [
+        makeJob({ id: "pending-1", command: "queued task", status: "pending" }),
+        makeJob({ id: "settled-1", command: "done task", status: "completed" }),
+      ],
     });
 
-    const cancelButton = Array.from(document.body.querySelectorAll("button")).find(
-      (button) => button.textContent?.trim() === "取消",
+    const clickAction = async (label: string) => {
+      const button = Array.from(document.body.querySelectorAll("button")).find(
+        (candidate) => candidate.textContent?.trim() === label,
+      );
+      expect(button).toBeDefined();
+      await act(async () => {
+        button?.click();
+      });
+      await act(flush);
+    };
+
+    await clickAction("暂停");
+    await clickAction("放弃");
+    await clickAction("重新排队");
+
+    expect(controller.runAction).toHaveBeenNthCalledWith(1, "pending-1", "pause");
+    expect(controller.runAction).toHaveBeenNthCalledWith(2, "pending-1", "abandon");
+    expect(controller.runAction).toHaveBeenNthCalledWith(3, "settled-1", "requeue");
+  });
+
+  it("在途动作显示进行中文案并禁用该行按钮", async () => {
+    await renderPanel({
+      hasLiveJobs: true,
+      liveCount: 1,
+      pendingAction: { jobId: "pending-1", action: "pause" },
+      jobs: [makeJob({ id: "pending-1", command: "queued task", status: "pending" })],
+    });
+
+    const row = Array.from(document.body.querySelectorAll("li")).find((item) =>
+      item.textContent?.includes("queued task"),
     );
-    expect(cancelButton).toBeDefined();
+    const buttons = Array.from(row?.querySelectorAll("button") ?? []).filter(
+      (button) => (button.textContent?.trim() ?? "") !== "",
+    );
 
-    await act(async () => {
-      cancelButton?.click();
-    });
-    await act(flush);
-
-    expect(controller.cancel).toHaveBeenCalledWith("live-1");
+    expect(buttons.map((button) => button.textContent?.trim())).toEqual([
+      "暂停中…",
+      "取消",
+      "放弃",
+    ]);
+    expect(buttons.every((button) => button.disabled)).toBe(true);
   });
 
   it("关闭按钮与 Esc 都触发 onClose", async () => {

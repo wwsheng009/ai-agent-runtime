@@ -1,12 +1,24 @@
-// P2-1A：后台任务面板的纯函数层（可单测，不触碰 React / fetch）。
+// P2-1A / P3：后台任务面板的纯函数层（可单测，不触碰 React / fetch）。
 //
 // 语义约定：
-// - live = pending | running（后端仍在推进，面板显示 elapsed 走秒与取消）；
-// - settled = completed | failed | timed_out | cancelled | orphaned（终态，显示时长与退出码）。
+// - live = pending | running | paused（非终态，面板显示 elapsed 走秒与可用动作）；
+// - settled = completed | failed | timed_out | cancelled | orphaned | interrupted
+//   | expired | abandoned（终态，显示时长与退出码，可重排队）。
 
 import type { RuntimeJob, RuntimeJobStatus } from "@/types/runtime";
 
-export const liveJobStatuses: RuntimeJobStatus[] = ["pending", "running"];
+export const liveJobStatuses: RuntimeJobStatus[] = ["pending", "running", "paused"];
+
+export const settledJobStatuses: RuntimeJobStatus[] = [
+  "completed",
+  "failed",
+  "timed_out",
+  "cancelled",
+  "orphaned",
+  "interrupted",
+  "expired",
+  "abandoned",
+];
 
 /** 触发 jobs 面板刷新的运行时事件（后端 job_* 事件流）。 */
 export const jobsRelevantRuntimeEvents = [
@@ -16,11 +28,45 @@ export const jobsRelevantRuntimeEvents = [
   "job_cancelled",
   "job_timed_out",
   "job_orphaned",
+  "job_paused",
+  "job_resumed",
+  "job_requeued",
+  "job_abandoned",
   "background_task",
 ];
 
 export function isLiveJobStatus(status: RuntimeJobStatus): boolean {
   return liveJobStatuses.includes(status);
+}
+
+export function isTerminalJobStatus(status: RuntimeJobStatus): boolean {
+  return settledJobStatuses.includes(status);
+}
+
+/** 任务行动作（与后端状态机端点一一对应）。 */
+export type JobAction = "pause" | "resume" | "cancel" | "abandon" | "requeue";
+
+/** 在途动作（面板据此禁用按钮并显示进行中文案）。 */
+export type JobActionPending = { jobId: string; action: JobAction } | null;
+
+/**
+ * 动作矩阵（纯函数便于单测）：
+ * - pending → pause / cancel / abandon；
+ * - paused  → resume / cancel / abandon；
+ * - running → cancel；
+ * - 终态    → requeue。
+ */
+export function jobAvailableActions(status: RuntimeJobStatus): JobAction[] {
+  switch (status) {
+    case "pending":
+      return ["pause", "cancel", "abandon"];
+    case "paused":
+      return ["resume", "cancel", "abandon"];
+    case "running":
+      return ["cancel"];
+    default:
+      return isTerminalJobStatus(status) ? ["requeue"] : [];
+  }
 }
 
 export function splitRuntimeJobs(jobs: RuntimeJob[]): {
@@ -139,4 +185,24 @@ export function buildJobsReloadKey(
 /** i18n 键后缀：`panels.jobs.status.<status>`。 */
 export function jobStatusLabelKey(status: RuntimeJobStatus): string {
   return `panels.jobs.status.${status}`;
+}
+
+/** i18n 键：动作标签 `panels.jobs.<action>`。 */
+export function jobActionLabelKey(action: JobAction): `panels.jobs.${JobAction}` {
+  return `panels.jobs.${action}`;
+}
+
+const jobActionPendingKeys = {
+  abandon: "abandoning",
+  cancel: "cancelling",
+  pause: "pausing",
+  requeue: "requeuing",
+  resume: "resuming",
+} as const;
+
+/** i18n 键：动作在途标签 `panels.jobs.<action+ing>`（cancel → cancelling）。 */
+export function jobActionPendingLabelKey(
+  action: JobAction,
+): `panels.jobs.${(typeof jobActionPendingKeys)[JobAction]}` {
+  return `panels.jobs.${jobActionPendingKeys[action]}`;
 }

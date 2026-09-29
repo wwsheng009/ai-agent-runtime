@@ -6,17 +6,23 @@
 
 export type RuntimeJobStatus =
   | "pending"
+  | "paused"
   | "running"
   | "completed"
   | "failed"
   | "timed_out"
   | "cancelled"
-  | "orphaned";
+  | "orphaned"
+  | "interrupted"
+  | "expired"
+  | "abandoned";
 
 /** 未知状态值不在类型里新增枚举，归一化时回落 `pending` 并保留原始 status_text。 */
 export type RuntimeJob = {
   id: string;
   sessionId: string;
+  /** P3：调度该任务的 runtime 实例 id（旧后端可能缺省）。 */
+  ownerInstanceId?: string;
   kind: string;
   command: string;
   cwd: string;
@@ -25,10 +31,21 @@ export type RuntimeJob = {
   status: RuntimeJobStatus;
   message: string;
   createdAt: string;
+  /** P3：进入队列时间（旧后端可能缺省）。 */
+  queuedAt?: string;
+  /** P3：调度截止时间（旧后端可能缺省）。 */
+  deadlineAt?: string;
   startedAt: string;
   finishedAt: string;
   exitCode: number | null;
   logPath: string;
+};
+
+/** `POST .../requeue` 的响应：新任务 + 被重排队的旧任务 id。 */
+export type RuntimeJobRequeueResponse = {
+  job: RuntimeJob;
+  /** 后端顶层字段 `requeued_from`，缺失时为空串。 */
+  requeuedFrom: string;
 };
 
 export type RuntimeJobListQuery = {

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  abandonRuntimeJob,
   cancelRuntimeJob,
   getRuntimeJob,
   getRuntimeJobOutput,
@@ -10,6 +11,9 @@ import {
   normalizeRuntimeJobEvent,
   normalizeRuntimeJobOutput,
   normalizeRuntimeJobStatus,
+  pauseRuntimeJob,
+  requeueRuntimeJob,
+  resumeRuntimeJob,
 } from "@/api/runtime/jobs";
 
 describe("normalizeRuntimeJobStatus", () => {
@@ -17,6 +21,10 @@ describe("normalizeRuntimeJobStatus", () => {
     expect(normalizeRuntimeJobStatus("RUNNING")).toBe("running");
     expect(normalizeRuntimeJobStatus(" timed_out ")).toBe("timed_out");
     expect(normalizeRuntimeJobStatus("orphaned")).toBe("orphaned");
+    expect(normalizeRuntimeJobStatus("paused")).toBe("paused");
+    expect(normalizeRuntimeJobStatus(" INTERRUPTED ")).toBe("interrupted");
+    expect(normalizeRuntimeJobStatus("expired")).toBe("expired");
+    expect(normalizeRuntimeJobStatus("ABANDONED")).toBe("abandoned");
   });
 
   it("未知或非字符串回落 pending", () => {
@@ -37,8 +45,11 @@ describe("runtime job normalize", () => {
         Cwd: "E:/repo",
         Priority: 3,
         RestartPolicy: "on_failure",
+        OwnerInstanceID: "runtime-1",
         Status: "FAILED",
         CreatedAt: "2026-09-13T10:00:00Z",
+        QueuedAt: "2026-09-13T09:59:59Z",
+        DeadlineAt: "2026-09-13T10:10:00Z",
         StartedAt: "2026-09-13T10:00:01Z",
         FinishedAt: "2026-09-13T10:00:09Z",
         ExitCode: 2,
@@ -51,6 +62,34 @@ describe("runtime job normalize", () => {
       priority: 3,
       exitCode: 2,
       logPath: "E:/logs/job-9.log",
+      ownerInstanceId: "runtime-1",
+      queuedAt: "2026-09-13T09:59:59Z",
+      deadlineAt: "2026-09-13T10:10:00Z",
+    });
+  });
+
+  it("P3 新字段缺失时给空串（向后兼容旧后端）", () => {
+    const job = normalizeRuntimeJob({ ID: "job-1", Status: "pending" });
+
+    expect(job.ownerInstanceId).toBe("");
+    expect(job.queuedAt).toBe("");
+    expect(job.deadlineAt).toBe("");
+  });
+
+  it("P3 新字段兼容 snake_case", () => {
+    expect(
+      normalizeRuntimeJob({
+        id: "job-1",
+        status: "paused",
+        owner_instance_id: "runtime-2",
+        queued_at: "2026-09-13T09:00:00Z",
+        deadline_at: "2026-09-13T09:30:00Z",
+      }),
+    ).toMatchObject({
+      status: "paused",
+      ownerInstanceId: "runtime-2",
+      queuedAt: "2026-09-13T09:00:00Z",
+      deadlineAt: "2026-09-13T09:30:00Z",
     });
   });
 });
@@ -235,5 +274,77 @@ describe("normalizeRuntimeJobEvent / normalizeRuntimeJobOutput 容错", () => {
       message: "",
       errorCode: "",
     });
+  });
+});
+
+describe("P3 任务动作端点", () => {
+  const originalFetch = globalThis.fetch;
+  let calls: Array<{ url: string; init?: RequestInit }> = [];
+
+  function respondWith(body: unknown, status = 200) {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+  }
+
+  beforeEach(() => {
+    calls = [];
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("pause/resume/abandon 均为 POST 无请求体，返回归一化后的 job", async () => {
+    respondWith({ job: { ID: "job/1", Status: "PAUSED" } });
+    const paused = await pauseRuntimeJob("job/1");
+    expect(calls[0].url).toContain("/api/runtime/background/jobs/job%2F1/pause");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(calls[0].init?.body).toBeUndefined();
+    expect(paused.status).toBe("paused");
+
+    respondWith({ job: { ID: "job/1", Status: "RUNNING" } });
+    const resumed = await resumeRuntimeJob("job/1");
+    expect(calls[1].url).toContain("/api/runtime/background/jobs/job%2F1/resume");
+    expect(calls[1].init?.method).toBe("POST");
+    expect(resumed.status).toBe("running");
+
+    respondWith({ job: { ID: "job/1", Status: "ABANDONED" } });
+    const abandoned = await abandonRuntimeJob("job/1");
+    expect(calls[2].url).toContain("/api/runtime/background/jobs/job%2F1/abandon");
+    expect(calls[2].init?.method).toBe("POST");
+    expect(abandoned.status).toBe("abandoned");
+  });
+
+  it("requeue 返回新 job 与顶层 requeued_from", async () => {
+    respondWith({
+      job: { ID: "job-2", Status: "PENDING", Command: "go build" },
+      requeued_from: "job-1",
+    });
+
+    const result = await requeueRuntimeJob("job-1");
+
+    expect(calls[0].url).toContain("/api/runtime/background/jobs/job-1/requeue");
+    expect(calls[0].init?.method).toBe("POST");
+    expect(result.job).toMatchObject({ id: "job-2", status: "pending" });
+    expect(result.requeuedFrom).toBe("job-1");
+  });
+
+  it("requeue 缺 requeued_from 时回落空串", async () => {
+    respondWith({ job: { ID: "job-2", Status: "pending" } });
+
+    const result = await requeueRuntimeJob("job-1");
+
+    expect(result.requeuedFrom).toBe("");
+  });
+
+  it("409 沿用错误路径抛出后端 message", async () => {
+    respondWith({ error: "job is not paused" }, 409);
+
+    await expect(resumeRuntimeJob("job-1")).rejects.toThrow(/job is not paused/);
   });
 });

@@ -8,14 +8,35 @@ import {
   formatJobTimestamp,
   isJobsRelevantRuntimeEvent,
   isLiveJobStatus,
+  isTerminalJobStatus,
+  jobActionLabelKey,
+  jobActionPendingLabelKey,
+  jobAvailableActions,
   jobStatusLabelKey,
   jobsRelevantRuntimeEvents,
   liveJobStatuses,
   parseTimestamp,
   resolveJobElapsedMs,
+  settledJobStatuses,
   sortJobsByRecency,
   splitRuntimeJobs,
+  type JobAction,
 } from "@/components/workspace/jobs-panel-shared";
+
+/** 与 `RuntimeJobStatus` 联合类型一一对应；枚举扩展时本列表必须同步（防漏测）。 */
+const allJobStatuses: RuntimeJobStatus[] = [
+  "pending",
+  "paused",
+  "running",
+  "completed",
+  "failed",
+  "timed_out",
+  "cancelled",
+  "orphaned",
+  "interrupted",
+  "expired",
+  "abandoned",
+];
 
 function makeJob(overrides: Partial<RuntimeJob> = {}): RuntimeJob {
   return {
@@ -37,20 +58,52 @@ function makeJob(overrides: Partial<RuntimeJob> = {}): RuntimeJob {
   };
 }
 
-describe("isLiveJobStatus / liveJobStatuses", () => {
-  it("仅把 pending、running 视作进行中", () => {
-    expect(liveJobStatuses).toEqual(["pending", "running"]);
-    for (const status of ["pending", "running"] satisfies RuntimeJobStatus[]) {
-      expect(isLiveJobStatus(status)).toBe(true);
-    }
+describe("isLiveJobStatus / isTerminalJobStatus", () => {
+  it("paused 归 live；interrupted/expired/abandoned 归终态", () => {
+    expect(liveJobStatuses).toEqual(["pending", "running", "paused"]);
+    expect(isLiveJobStatus("paused")).toBe(true);
     for (const status of [
       "completed",
       "failed",
       "timed_out",
       "cancelled",
       "orphaned",
+      "interrupted",
+      "expired",
+      "abandoned",
     ] satisfies RuntimeJobStatus[]) {
       expect(isLiveJobStatus(status)).toBe(false);
+      expect(isTerminalJobStatus(status)).toBe(true);
+    }
+  });
+
+  it("每个 RuntimeJobStatus 恰好归入 live 或 settled 之一（枚举扩展防漏）", () => {
+    for (const status of allJobStatuses) {
+      const inLive = liveJobStatuses.includes(status);
+      const inSettled = settledJobStatuses.includes(status);
+      expect(inLive).toBe(!inSettled);
+      expect(isLiveJobStatus(status)).toBe(inLive);
+      expect(isTerminalJobStatus(status)).toBe(inSettled);
+    }
+    expect(new Set(allJobStatuses).size).toBe(
+      liveJobStatuses.length + settledJobStatuses.length,
+    );
+  });
+});
+
+describe("jobAvailableActions", () => {
+  it("按状态机矩阵返回动作（与后端端点约束一致）", () => {
+    expect(jobAvailableActions("pending")).toEqual(["pause", "cancel", "abandon"]);
+    expect(jobAvailableActions("paused")).toEqual(["resume", "cancel", "abandon"]);
+    expect(jobAvailableActions("running")).toEqual(["cancel"]);
+    for (const status of settledJobStatuses) {
+      expect(jobAvailableActions(status)).toEqual(["requeue"]);
+    }
+  });
+
+  it("全部状态都有动作（新增枚举不遗漏）", () => {
+    for (const status of allJobStatuses) {
+      expect(jobAvailableActions(status).length).toBeGreaterThan(0);
     }
   });
 });
@@ -142,6 +195,39 @@ describe("splitRuntimeJobs", () => {
     expect(live.map((job) => job.id)).toEqual(["running"]);
     expect(settled.map((job) => job.id)).toEqual(["failed", "completed"]);
   });
+
+  it("paused 归 live，interrupted/expired/abandoned 归 settled", () => {
+    const paused = makeJob({ id: "paused", status: "paused" });
+    const interrupted = makeJob({
+      id: "interrupted",
+      status: "interrupted",
+      finishedAt: "2026-09-13T12:00:00.000Z",
+    });
+    const expired = makeJob({
+      id: "expired",
+      status: "expired",
+      finishedAt: "2026-09-13T13:00:00.000Z",
+    });
+    const abandoned = makeJob({
+      id: "abandoned",
+      status: "abandoned",
+      finishedAt: "2026-09-13T11:00:00.000Z",
+    });
+
+    const { live, settled } = splitRuntimeJobs([
+      interrupted,
+      paused,
+      expired,
+      abandoned,
+    ]);
+
+    expect(live.map((job) => job.id)).toEqual(["paused"]);
+    expect(settled.map((job) => job.id)).toEqual([
+      "expired",
+      "interrupted",
+      "abandoned",
+    ]);
+  });
 });
 
 describe("resolveJobElapsedMs", () => {
@@ -231,6 +317,14 @@ describe("isJobsRelevantRuntimeEvent", () => {
     for (const type of jobsRelevantRuntimeEvents) {
       expect(isJobsRelevantRuntimeEvent(type)).toBe(true);
     }
+    expect(jobsRelevantRuntimeEvents).toEqual(
+      expect.arrayContaining([
+        "job_paused",
+        "job_resumed",
+        "job_requeued",
+        "job_abandoned",
+      ]),
+    );
     expect(isJobsRelevantRuntimeEvent("  JOB_STARTED ")).toBe(true);
     expect(isJobsRelevantRuntimeEvent("message_delta")).toBe(false);
     expect(isJobsRelevantRuntimeEvent("")).toBe(false);
@@ -243,6 +337,8 @@ describe("buildJobsReloadKey", () => {
     expect(buildJobsReloadKey("job_started", 3)).toBe("job_started:3");
     expect(buildJobsReloadKey("job_started", undefined)).toBe("job_started:0");
     expect(buildJobsReloadKey("job_finished", 0)).toBe("job_finished:0");
+    expect(buildJobsReloadKey("job_paused", 2)).toBe("job_paused:2");
+    expect(buildJobsReloadKey("job_requeued", 5)).toBe("job_requeued:5");
     expect(buildJobsReloadKey("assistant_message", 9)).toBe("");
     expect(buildJobsReloadKey(undefined, 1)).toBe("");
   });
@@ -251,5 +347,27 @@ describe("buildJobsReloadKey", () => {
 describe("jobStatusLabelKey", () => {
   it("输出 i18n 键后缀", () => {
     expect(jobStatusLabelKey("timed_out")).toBe("panels.jobs.status.timed_out");
+    expect(jobStatusLabelKey("paused")).toBe("panels.jobs.status.paused");
+    expect(jobStatusLabelKey("abandoned")).toBe("panels.jobs.status.abandoned");
+  });
+});
+
+describe("jobActionLabelKey / jobActionPendingLabelKey", () => {
+  it("动作标签与在途标签的 i18n 键（cancel 拼写为 cancelling）", () => {
+    expect(jobActionLabelKey("pause")).toBe("panels.jobs.pause");
+    expect(jobActionLabelKey("requeue")).toBe("panels.jobs.requeue");
+    expect(jobActionPendingLabelKey("cancel")).toBe("panels.jobs.cancelling");
+    expect(jobActionPendingLabelKey("resume")).toBe("panels.jobs.resuming");
+    expect(jobActionPendingLabelKey("abandon")).toBe("panels.jobs.abandoning");
+
+    for (const action of [
+      "pause",
+      "resume",
+      "cancel",
+      "abandon",
+      "requeue",
+    ] satisfies JobAction[]) {
+      expect(jobActionLabelKey(action)).toBe(`panels.jobs.${action}`);
+    }
   });
 });

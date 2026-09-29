@@ -4,13 +4,23 @@
 // 1. 打开面板时按会话拉取一次 `/background/jobs?session_id=...`；
 // 2. job_* 运行时事件到达后延迟一拍再刷新（事件先于落库）；
 // 3. 存在 live 任务时按固定间隔轮询，终态任务不轮询；
-// 4. 取消任务成功后立即刷新。
+// 4. 任务动作（暂停/恢复/取消/放弃/重排队）成功后立即刷新。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+// 既有 list/cancel 沿用 runtime-api barrel；P3 新动作端点直接取自 jobs REST 客户端，
+// 避免扩大 runtime-api barrel 的改动面。
+import {
+  abandonRuntimeJob,
+  pauseRuntimeJob,
+  requeueRuntimeJob,
+  resumeRuntimeJob,
+} from "@/api/runtime/jobs";
 import {
   buildJobsReloadKey,
   isLiveJobStatus,
+  type JobAction,
+  type JobActionPending,
 } from "@/components/workspace/jobs-panel-shared";
 import { cancelRuntimeJob, listRuntimeJobs } from "@/lib/runtime-api";
 import type { RuntimeJob } from "@/types/runtime";
@@ -39,7 +49,7 @@ export function useBackgroundJobs({
   const [error, setError] = useState<string | null>(null);
   const [refreshToken, setRefreshToken] = useState(0);
   const [eventRefreshKey, setEventRefreshKey] = useState("");
-  const [cancellingId, setCancellingId] = useState("");
+  const [pendingAction, setPendingAction] = useState<JobActionPending>(null);
   const requestIdRef = useRef(0);
   const sid = sessionId?.trim() ?? "";
   const runtimeEventKey = buildJobsReloadKey(
@@ -52,7 +62,8 @@ export function useBackgroundJobs({
     [jobs],
   );
 
-  // 常驻状态条与弹层共用同一份数据（单一事实源），计数只数 pending/running。
+  // 常驻状态条与弹层共用同一份数据（单一事实源），计数与 live 语义一致
+  // （pending/running/paused；paused 仍可能被恢复，继续纳入轮询与计数）。
   const liveCount = useMemo(
     () => jobs.filter((job) => isLiveJobStatus(job.status)).length,
     [jobs],
@@ -121,24 +132,52 @@ export function useBackgroundJobs({
     void load();
   }, [enabled, sid, refreshToken, eventRefreshKey]);
 
-  /** 取消任务：成功后立刻刷新列表；失败把原因暴露给面板（不清空已有数据）。 */
-  const cancel = useCallback(async (jobId: string): Promise<boolean> => {
-    const target = jobId.trim();
-    if (!target) {
-      return false;
-    }
-    setCancellingId(target);
-    try {
-      await cancelRuntimeJob(target);
-      setRefreshToken((token) => token + 1);
-      return true;
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-      return false;
-    } finally {
-      setCancellingId("");
-    }
-  }, []);
+  /** 任务动作统一入口：成功后立刻刷新列表；失败把原因暴露给面板（不清空已有数据）。 */
+  const runAction = useCallback(
+    async (jobId: string, action: JobAction): Promise<boolean> => {
+      const target = jobId.trim();
+      if (!target) {
+        return false;
+      }
+      setPendingAction({ jobId: target, action });
+      try {
+        switch (action) {
+          case "pause":
+            await pauseRuntimeJob(target);
+            break;
+          case "resume":
+            await resumeRuntimeJob(target);
+            break;
+          case "abandon":
+            await abandonRuntimeJob(target);
+            break;
+          case "requeue":
+            await requeueRuntimeJob(target);
+            break;
+          case "cancel":
+            await cancelRuntimeJob(target);
+            break;
+        }
+        setRefreshToken((token) => token + 1);
+        return true;
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+        return false;
+      } finally {
+        setPendingAction(null);
+      }
+    },
+    [],
+  );
+
+  // P2-9 兼容入口：既有调用方（顶栏/旧测试）仍可用 cancel + cancellingId；
+  // 面板统一走 runAction / pendingAction，两者共享同一份在途状态。
+  const cancel = useCallback(
+    (jobId: string) => runAction(jobId, "cancel"),
+    [runAction],
+  );
+  const cancellingId =
+    pendingAction && pendingAction.action === "cancel" ? pendingAction.jobId : "";
 
   return {
     cancel,
@@ -148,7 +187,9 @@ export function useBackgroundJobs({
     jobs,
     liveCount,
     loading,
+    pendingAction,
     refresh,
+    runAction,
   };
 }
 
