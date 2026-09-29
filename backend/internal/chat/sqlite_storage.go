@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -31,7 +32,9 @@ import (
 // Schema evolution uses PRAGMA user_version so already-migrated databases skip
 // CREATE TABLE / ALTER TABLE inspection on every chat start. Bump
 // sqliteSessionSchemaVersion whenever the on-disk schema shape changes.
-const sqliteSessionSchemaVersion = 1
+// v2: session_messages.identity_hash（role+content 身份指纹 + 索引），支撑
+// checkpoint 投影重建的 O(1) 快速路径（P0-3）。
+const sqliteSessionSchemaVersion = 2
 
 type SQLiteSessionStorage struct {
 	db  *sql.DB
@@ -54,6 +57,14 @@ type SQLiteSessionStorage struct {
 	snapshotDSNOverride string
 	// snapshotAfterCopyHook 仅供测试注入复制后故障以验证一致性门禁，生产恒为 nil。
 	snapshotAfterCopyHook func(context.Context, *sql.Conn, string)
+
+	// checkpoint 投影重建的归因计数（P0-3 步骤 0）：见 CanonicalRebuildStats。
+	canonicalFullLoads      atomic.Int64
+	canonicalFastProofs     atomic.Int64
+	canonicalBackfilledRows atomic.Int64
+	// forceLegacyProjectionRebuild 仅供测试/基准注入：跳过 identity_hash 快速
+	// 路径，强制 default 分支走全量 canonical 解码，用于 A/B 对比与差分验证。
+	forceLegacyProjectionRebuild bool
 }
 
 type encodedSessionMessage struct {
@@ -519,11 +530,21 @@ func (s *SQLiteSessionStorage) migrateSchema(ctx context.Context) error {
 		{name: "tool_call_count", definition: "INTEGER NOT NULL DEFAULT -1"},
 		{name: "tool_result", definition: "INTEGER NOT NULL DEFAULT -1"},
 		{name: "content_part_count", definition: "INTEGER NOT NULL DEFAULT -1"},
+		// v2：role+content 身份指纹（惰性回填），用于跳过投影重建的全量解码。
+		{name: "identity_hash", definition: "BLOB"},
 	}
 	for _, column := range columns {
 		if err := ensureSQLiteColumn(ctx, s.db, "session_messages", column.name, column.definition); err != nil {
 			return err
 		}
+	}
+	// identity_hash 的等值查找（新消息判定）必须走索引：否则每次 checkpoint
+	// 退化为对全会话行数的扫描。
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_session_messages_identity
+		ON session_messages(session_id, identity_hash)
+	`); err != nil {
+		return fmt.Errorf("create session_messages identity index: %w", err)
 	}
 	return nil
 }
@@ -561,6 +582,7 @@ CREATE TABLE IF NOT EXISTS session_messages (
 	content_part_count INTEGER NOT NULL DEFAULT -1,
     byte_count INTEGER NOT NULL,
     sha256 TEXT NOT NULL,
+    identity_hash BLOB,
     created_at TEXT NOT NULL,
     PRIMARY KEY(session_id, seq),
     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -604,6 +626,7 @@ CREATE TABLE snapshot.session_messages (
     content_part_count INTEGER NOT NULL DEFAULT -1,
     byte_count INTEGER NOT NULL,
     sha256 TEXT NOT NULL,
+    identity_hash BLOB,
     created_at TEXT NOT NULL,
     PRIMARY KEY(session_id, seq)
 );
@@ -626,9 +649,9 @@ func copySQLiteSessionSnapshot(ctx context.Context, connection *sql.Conn, sessio
 		  FROM main.sessions WHERE id = ?`,
 		`INSERT INTO snapshot.session_messages(
 			session_id, seq, payload_json, artifact_path, preview_json, role,
-			tool_call_count, tool_result, content_part_count, byte_count, sha256, created_at
+			tool_call_count, tool_result, content_part_count, byte_count, sha256, identity_hash, created_at
 		) SELECT session_id, seq, payload_json, artifact_path, preview_json, role,
-		         tool_call_count, tool_result, content_part_count, byte_count, sha256, created_at
+		         tool_call_count, tool_result, content_part_count, byte_count, sha256, identity_hash, created_at
 		  FROM main.session_messages WHERE session_id = ?`,
 		`INSERT INTO snapshot.session_prompt_messages(session_id, position, payload_json, byte_count)
 		 SELECT session_id, position, payload_json, byte_count
@@ -835,10 +858,6 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 			// Metadata-only updates do not rewrite the bounded prompt projection.
 			*storedProjection = session.History
 		default:
-			canonical, loadErr := s.loadCanonicalMessagesTx(ctx, tx, session.ID)
-			if loadErr != nil || len(canonical) == 0 {
-				canonical = session.History
-			}
 			// The caller-supplied history may either be:
 			//   (a) a stale/shorter in-memory projection that is merely a window
 			//       of the canonical transcript (e.g. a CLI exit sync racing an
@@ -847,9 +866,39 @@ func (s *SQLiteSessionStorage) updateSessionTx(ctx context.Context, tx *sql.Tx, 
 			//   (b) a deliberate replacement containing messages that do NOT
 			//       exist in the canonical transcript (e.g. a compaction
 			//       summary) — honor the caller's replacement.
-			source := canonical
-			if incomingHistoryReachesNewest(session.History, canonical) {
-				source = session.History
+			//
+			// Deciding between the two used to require decoding the whole
+			// canonical transcript (6472 rows / ~2s per checkpoint on a
+			// production session, 14% of the profile). identity_hash answers the
+			// same question with indexed point queries whenever the incoming
+			// history provably reaches the newest canonical row (see
+			// incomingHistoryReachesNewestFastTx); the full path is kept as the
+			// fallback for stale windows and for pre-v2 rows that have not been
+			// backfilled yet.
+			source := session.History
+			proven := false
+			if !s.forceLegacyProjectionRebuild {
+				proven, err = s.incomingHistoryReachesNewestFastTx(ctx, tx, session.ID, session.History)
+				if err != nil {
+					// 证据查询失败不改变语义：按未证明处理，回退全量路径。
+					proven = false
+				}
+			}
+			if proven {
+				s.canonicalFastProofs.Add(1)
+			} else {
+				canonical, loadErr := s.loadCanonicalMessagesTx(ctx, tx, session.ID)
+				if loadErr != nil || len(canonical) == 0 {
+					canonical = session.History
+				}
+				source = canonical
+				if incomingHistoryReachesNewest(session.History, canonical) {
+					source = session.History
+				}
+				s.canonicalFullLoads.Add(1)
+				// 本次回退已经把整段 canonical 读进内存，顺手补齐 identity_hash：
+				// 旧库只需要付一次全量成本，之后的 checkpoint 走点查快速路径。
+				s.backfillCanonicalIdentityHashesBestEffort(ctx, tx, session.ID)
 			}
 			projection, err := s.buildHotProjection(source)
 			if err != nil {
@@ -1842,11 +1891,12 @@ func (s *SQLiteSessionStorage) insertCanonicalEncodedTx(ctx context.Context, tx 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO session_messages(
 			session_id, seq, payload_json, artifact_path, preview_json, byte_count, sha256, created_at,
-			role, tool_call_count, tool_result, content_part_count
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			role, tool_call_count, tool_result, content_part_count, identity_hash
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, sessionID, seq, inlinePayload, artifactPath, preview.payload, encoded.size, digest,
 		time.Now().UTC().Format(time.RFC3339Nano), encoded.message.Role, len(encoded.message.ToolCalls),
-		boolToSQLiteInt(strings.EqualFold(strings.TrimSpace(encoded.message.Role), "tool")), len(encoded.message.ContentParts))
+		boolToSQLiteInt(strings.EqualFold(strings.TrimSpace(encoded.message.Role), "tool")), len(encoded.message.ContentParts),
+		canonicalMessageIdentityHash(encoded.message))
 	if err != nil {
 		return fmt.Errorf("insert canonical message %d: %w", seq, err)
 	}

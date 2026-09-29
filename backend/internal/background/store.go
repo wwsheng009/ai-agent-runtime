@@ -920,9 +920,29 @@ func (s *SQLiteStore) ensureBackgroundJobsColumn(ctx context.Context, columnName
 	if s == nil || s.db == nil {
 		return fmt.Errorf("background store is not initialized")
 	}
+	exists, err := s.backgroundJobsColumnExists(ctx, columnName)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE background_jobs ADD COLUMN %s %s`, columnName, columnType)); err != nil {
+		// Two processes sharing this store race the same migration: both see
+		// the column missing, one ALTER wins and the loser gets "duplicate
+		// column name". Re-inspect before failing the whole open (2026-09-29).
+		if existsNow, checkErr := s.backgroundJobsColumnExists(ctx, columnName); checkErr == nil && existsNow {
+			return nil
+		}
+		return fmt.Errorf("alter background_jobs add %s: %w", columnName, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) backgroundJobsColumnExists(ctx context.Context, columnName string) (bool, error) {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(background_jobs)`)
 	if err != nil {
-		return fmt.Errorf("inspect background_jobs schema: %w", err)
+		return false, fmt.Errorf("inspect background_jobs schema: %w", err)
 	}
 	defer rows.Close()
 
@@ -936,19 +956,16 @@ func (s *SQLiteStore) ensureBackgroundJobsColumn(ctx context.Context, columnName
 			pk         int
 		)
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultVal, &pk); err != nil {
-			return fmt.Errorf("scan background_jobs schema: %w", err)
+			return false, fmt.Errorf("scan background_jobs schema: %w", err)
 		}
 		if strings.EqualFold(name, columnName) {
-			return nil
+			return true, nil
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("iterate background_jobs schema: %w", err)
+		return false, fmt.Errorf("iterate background_jobs schema: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE background_jobs ADD COLUMN %s %s`, columnName, columnType)); err != nil {
-		return fmt.Errorf("alter background_jobs add %s: %w", columnName, err)
-	}
-	return nil
+	return false, nil
 }
 
 // UpsertRuntimeInstance registers a runtime instance or refreshes its

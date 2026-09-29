@@ -35,7 +35,17 @@ func toolFoldOptions(hint string) cell.PreviewOptions {
 // 判定必须走 BuildPreview 本身：任何更便宜的估算（数行数、比字节数）都可能
 // 与真正渲染出来的标记不一致——例如尾部空行会被丢弃——从而把提示或默认展开
 // 挂在一个根本没有标记的 cell 上，再次变成假承诺。
+//
+// 判定结果按 source 内容寻址缓存（tool_fold_omission_cache.go）：同一 cell 在
+// 每轮布局里都会被重新判定一次，而 BuildPreview 是这条链上最贵的调用；缓存
+// 把稳态成本从 O(全部折叠 cell) 降为 O(新增 cell)。判定语义的唯一出处仍是
+// toolFoldOmitsUncached。
 func toolFoldOmits(source string) bool {
+	return sharedFoldOmissions.omits(source)
+}
+
+// toolFoldOmitsUncached 是 omission 判定的本体（无缓存）。
+func toolFoldOmitsUncached(source string) bool {
 	preview := cell.BuildPreview(source, toolFoldOptions(""))
 	return preview.OmittedLines > 0 || preview.ByteTruncated
 }
@@ -43,7 +53,9 @@ func toolFoldOmits(source string) bool {
 // toolFoldPlainLines 返回显示预算投影后的纯文本行（含折叠标记）。pager 与首屏
 // 共用同一投影，因此 pager 里收起的折叠与首屏逐行一致。
 func toolFoldPlainLines(source string, hint string) []string {
-	lines := cell.BuildPreview(source, toolFoldOptions(hint)).Lines
+	preview := cell.BuildPreview(source, toolFoldOptions(hint))
+	sharedFoldOmissions.warm(source, preview.OmittedLines > 0 || preview.ByteTruncated)
+	lines := preview.Lines
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
 		out = append(out, render.PlainBackend{}.Render(render.LinesDoc(line)))
@@ -70,12 +82,19 @@ func toolFoldTarget(cells []scene.TranscriptCell) scene.CellID {
 // 占据多行，且未提交（mutable）的 cell 由 active band 渲染，不参与折叠归属。
 func toolFoldTargetRows(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}) scene.CellID {
 	target := scene.CellID(0)
+	// 同一个 cell 可能连续占据多行（gap/换行/wrap）；判定按 cell 只做一次，
+	// 否则一个长 cell 会把同一次 BuildPreview 判定重复 N 遍。
+	checked := make(map[scene.CellID]struct{}, 16)
 	for _, row := range rows {
 		if _, excluded := mutable[row.CellID]; excluded {
 			continue
 		}
+		if _, done := checked[row.CellID]; done {
+			continue
+		}
+		checked[row.CellID] = struct{}{}
 		candidate, found := cells[row.CellID]
-		if !found || candidate.ID == target {
+		if !found {
 			continue
 		}
 		if !cellUsesFoldedToolPresentation(candidate) || !toolFoldOmits(candidate.Source) {

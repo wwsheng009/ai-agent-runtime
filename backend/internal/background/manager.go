@@ -171,7 +171,12 @@ type managedJob struct {
 	// scheduledAt records when the job was handed to a worker goroutine; the
 	// watchdog uses it to reclaim slots that never transition to running.
 	scheduledAt time.Time
-	cancel      context.CancelFunc
+	// acceptingSince records when startup acceptance actually began, i.e. when
+	// the launch reported a live process. The watchdog measures the probe
+	// budget from here, not from scheduledAt, so a slow launcher cannot
+	// consume the acceptance window (2026-09-29). Guarded by mu.
+	acceptingSince time.Time
+	cancel         context.CancelFunc
 	// tree groups the job's process tree (Windows Job Object / Unix pgid) so it
 	// can be killed as one unit (2026-09-28, P2).
 	tree *processTree
@@ -1102,9 +1107,17 @@ func (m *Manager) runJob(managed *managedJob) {
 	if managed == nil {
 		return
 	}
-	if m.canUseDetachedExecution(managed) {
+	if reason := m.detachedExecutionBlockReason(managed); reason == "" {
 		m.runDetachedJob(managed)
 		return
+	} else if reason == detachBlockRunnerHostMissing {
+		// Win7 §7: no PowerShell host for the detached runner (removed or
+		// trimmed). Keep the job alive on the native in-process path and
+		// surface the downgrade once for diagnostics.
+		m.appendJobEvent(context.Background(), managed.info.ID, "detached_unavailable", map[string]interface{}{
+			"reason":   reason,
+			"fallback": "in_process",
+		})
 	}
 	ctx := managed.ctx
 	if ctx == nil {
@@ -1246,6 +1259,7 @@ func (m *Manager) acceptStartedProcess(ctx context.Context, managed *managedJob,
 	managed.info.Metadata[backgroundMetaLaunchState] = launchStateProcessCreated
 	managed.info.Metadata[backgroundMetaProcessStarted] = true
 	managed.info.Metadata[backgroundMetaPID] = pid
+	managed.acceptingSince = time.Now().UTC()
 	if health := inspectProcess(pid); health.Identity != "" {
 		managed.info.Metadata[backgroundMetaProcessIdentity] = health.Identity
 	}
@@ -2356,7 +2370,7 @@ func (m *Manager) reclaimStuckScheduled() {
 		scheduled := managed.scheduled
 		status := managed.info.Status
 		_, waitingForRecovery := stringMetadataValue(managed.info.Metadata, backgroundMetaNextRecoveryAt)
-		elapsed := now.Sub(managed.scheduledAt)
+		elapsed := now.Sub(scheduledStuckReference(managed))
 		state, _ := stringMetadataValue(managed.info.Metadata, backgroundMetaLaunchState)
 		startup := normalizeStartupAcceptance(managed.request.Startup)
 		managed.mu.RUnlock()
@@ -2390,6 +2404,28 @@ func (m *Manager) scheduledStuckThreshold(state string, startup StartupAcceptanc
 	return 30 * time.Second
 }
 
+// scheduledStuckReference returns the clock a scheduled job's stuck budget is
+// measured from. Until the launch reports a live process that is the dispatch
+// time; once startup acceptance begins (launch_state=process_created or
+// accepting) the window restarts at acceptingSince. Otherwise a slow detached
+// launcher consumes the startup-acceptance budget before the probe even runs
+// and the watchdog reclaims a healthy job milliseconds after its probe
+// started, killing the live process (2026-09-29: an 8-10s Windows launcher
+// crossed the 5s probe + 5s margin budget; the job was reported failed while
+// process_started/process_alive were true).
+func scheduledStuckReference(managed *managedJob) time.Time {
+	if managed == nil {
+		return time.Time{}
+	}
+	switch state, _ := stringMetadataValue(managed.info.Metadata, backgroundMetaLaunchState); state {
+	case launchStateProcessCreated, launchStateAccepting:
+		if !managed.acceptingSince.IsZero() {
+			return managed.acceptingSince
+		}
+	}
+	return managed.scheduledAt
+}
+
 // reclaimStuckJob fails a job whose worker goroutine never started execution
 // and cancels its context so the goroutine (if alive) can unwind.
 func (m *Manager) reclaimStuckJob(managed *managedJob) {
@@ -2407,8 +2443,20 @@ func (m *Manager) reclaimStuckJob(managed *managedJob) {
 		managed.mu.Unlock()
 		return
 	}
-	elapsed := time.Since(managed.scheduledAt)
+	state, _ := stringMetadataValue(managed.info.Metadata, backgroundMetaLaunchState)
+	elapsed := time.Since(scheduledStuckReference(managed))
+	// Re-validate under the lock: the scan may have seen the job over budget,
+	// but the worker can have entered a fresh window since (typically by
+	// creating the process). Never reclaim a job that is still within its
+	// current budget (2026-09-29).
+	if elapsed < m.scheduledStuckThreshold(state, normalizeStartupAcceptance(managed.request.Startup)) {
+		managed.mu.Unlock()
+		return
+	}
 	message := fmt.Sprintf("scheduler stuck: job scheduled %s ago but never started running", elapsed.Round(time.Second))
+	if state == launchStateProcessCreated || state == launchStateAccepting {
+		message = fmt.Sprintf("scheduler stuck: process started %s ago but startup acceptance never completed", elapsed.Round(time.Second))
+	}
 	managed.scheduled = false
 	managed.info.Status = StatusFailed
 	exitCode := -1

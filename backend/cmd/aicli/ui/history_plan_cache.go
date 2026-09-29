@@ -26,7 +26,7 @@ import (
 // 时按当前状态填充。
 type historyPlanCache struct {
 	mu  sync.Mutex
-	lru *cellLayoutLRU[[]planPhysicalRow]
+	lru *cellLayoutLRU[cellLayoutKey, []planPhysicalRow]
 }
 
 // planPhysicalRow 是 plain cell 一个物理行的完整来源映射 + 物化行。
@@ -45,7 +45,7 @@ const (
 )
 
 var sharedHistoryPlan = &historyPlanCache{
-	lru: newCellLayoutLRU[[]planPhysicalRow](historyPlanCacheMax, historyPlanCacheMaxBytes),
+	lru: newCellLayoutLRU[cellLayoutKey, []planPhysicalRow](historyPlanCacheMax, historyPlanCacheMaxBytes),
 }
 
 // planCacheKeyFor 派生 history-plan 缓存键（与布局缓存同一套内容寻址键）。

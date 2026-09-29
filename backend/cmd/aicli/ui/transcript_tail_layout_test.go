@@ -18,7 +18,7 @@ import (
 func resetSharedCellRows() {
 	sharedCellRows.mu.Lock()
 	defer sharedCellRows.mu.Unlock()
-	sharedCellRows.lru = newCellLayoutLRU[[]AppScreenRow](cellRowsCacheMax, cellRowsCacheMaxBytes)
+	sharedCellRows.lru = newCellLayoutLRU[cellLayoutKey, []AppScreenRow](cellRowsCacheMax, cellRowsCacheMaxBytes)
 }
 
 // tailParityFixtureState 覆盖尾部窗口必须正确处理的全部形态：跨 cell 的 gap

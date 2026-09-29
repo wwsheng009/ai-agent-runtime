@@ -228,6 +228,7 @@ Win7 兼容包在功能、性能与更新节奏上有以下明确限制：
 | 会话历史隔离 | Win7 runtime 配置使用独立的会话数据库（`session_history_win7.sqlite` 主库 + 30 秒刷新只读副本），与普通版（`session_history.sqlite`）默认互不可见；写入主库的改动最多延迟 30 秒出现在副本中 |
 | 无自动更新 | Win7 版只随 `win7-*` tag 发布，不会跟随主线 `v*` 发布自动更新；需手动下载新 Release 覆盖 |
 | 终端兼容 | Win7 conhost 不支持现代 VT/ConPTY；交互式输入依赖 `--compat-mode`（`ReadConsoleW`/`ReadConsoleInputW` 路径），第三方终端（MobaXterm、mintty、Git Bash）需配合 `aicli-console.exe` 启动器 |
+| 后台任务 | **无 PowerShell**（被裁剪/移除）的机器上，`background_task`/`task_output` 自动降级为进程内原生监督（`os/exec` + Job Object）：任务仍可提交、取消、读输出，但不具备跨 runtime 重启恢复；存在 PowerShell（建议 WMF 5.1+）时使用 detached runner，可跨重启恢复 |
 | 系统依赖 | 依赖 Win7 SP1 及最后的 SHA-2/根证书/TLS 更新；未打补丁的系统可能出现 x509/TLS 连接失败 |
 | 性能 | wasm 版 SQLite 与内置扫描器（无外部 `rg.exe` 时）性能低于现代系统；大数据量任务建议在受支持的系统上运行 |
 

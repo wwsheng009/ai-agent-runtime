@@ -351,6 +351,12 @@ type chatDebugDisplayLayoutCacheInfo struct {
 	PlanEntries       int     `json:"plan_entries"`
 	PlanBytes         int     `json:"plan_bytes"`
 	PlanHitRate       float64 `json:"plan_hit_rate"`
+	FoldOmitHits      uint64  `json:"fold_omit_hits"`
+	FoldOmitMisses    uint64  `json:"fold_omit_misses"`
+	FoldOmitEvictions uint64  `json:"fold_omit_evictions"`
+	FoldOmitEntries   int     `json:"fold_omit_entries"`
+	FoldOmitBytes     int     `json:"fold_omit_bytes"`
+	FoldOmitHitRate   float64 `json:"fold_omit_hit_rate"`
 }
 
 // chatDebugCacheHitRate 返回 hits/(hits+misses)；没有查询时返回 0（而不是
@@ -833,7 +839,8 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 			}
 		}
 		// 布局缓存成本快照：只要发生过查询就输出，命中率是核心字段。
-		if cacheStats := ui.TranscriptLayoutCacheStatsSnapshot(); cacheStats.CellRowsHits+cacheStats.CellRowsMisses > 0 {
+		if cacheStats := ui.TranscriptLayoutCacheStatsSnapshot(); cacheStats.CellRowsHits+cacheStats.CellRowsMisses > 0 ||
+			cacheStats.FoldOmitHits+cacheStats.FoldOmitMisses > 0 {
 			app.LayoutCache = &chatDebugDisplayLayoutCacheInfo{
 				CellRowsHits:      cacheStats.CellRowsHits,
 				CellRowsMisses:    cacheStats.CellRowsMisses,
@@ -847,6 +854,12 @@ func BuildChatDebugDisplaySnapshotWithOptions(opts ChatDebugDisplayOptions) *cha
 				PlanEntries:       cacheStats.PlanEntries,
 				PlanBytes:         cacheStats.PlanBytes,
 				PlanHitRate:       chatDebugCacheHitRate(cacheStats.PlanHits, cacheStats.PlanMisses),
+				FoldOmitHits:      cacheStats.FoldOmitHits,
+				FoldOmitMisses:    cacheStats.FoldOmitMisses,
+				FoldOmitEvictions: cacheStats.FoldOmitEvictions,
+				FoldOmitEntries:   cacheStats.FoldOmitEntries,
+				FoldOmitBytes:     cacheStats.FoldOmitBytes,
+				FoldOmitHitRate:   chatDebugCacheHitRate(cacheStats.FoldOmitHits, cacheStats.FoldOmitMisses),
 			}
 		}
 		if state.Active.Phase != ui.ActiveCellInactive {

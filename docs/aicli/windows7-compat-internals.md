@@ -197,6 +197,14 @@ Win32 API 直连：
   `runtime-server-win7-*.exe` 等命名，端口被非服务进程接管时拒绝自动终止。
 - `internal/agentcontrol/registry_service.go`：SQLite 共享连接池注释专门提到
   "Win7-compatible SQLite driver" 同进程多连接池协调。
+- `internal/background/detached.go`：后台任务的 detached runner 需要 PowerShell
+  宿主。`pwsh`/`powershell` 都不存在时（本节描述的裁剪机），任务不再尝试拉起
+  必然失败的 runner，而是回退到 `(*Manager).runJob` 的原生 in-process 监督
+  （`os/exec` + Job Object + `OpenProcess` 存活探测），并写入
+  `detached_unavailable` 事件（`fallback=in_process`）；代价是不具备跨 runtime
+  重启的 detached 恢复。runner 脚本同时降级为 PS2 兼容语法（`New-Object` 替代
+  `[Type]::new()`、去掉 PS3+ 的 `Remove-Job -Force`），覆盖未安装 WMF 5.1 的
+  老 Win7 主机。
 
 ## 8. 会话与 SQLite 兼容（read-replica）
 
@@ -268,3 +276,4 @@ session、SQLite、依赖或 workflow 时，必须同时通过标准构建和 Wi
 | 控制台 | `internal/winconsole/console_utf8_windows.go`、`cmd/aicli/ui/terminal_driver_windows.go`、`cmd/aicli/commands/chat_legacy_console_{line,editor_windows}.go`、`chat_system_console_editor_windows.go`、`cmd/aicli-console/main.go`、`internal/consolehost/consolehost_windows.go` |
 | 渲染降级 | `cmd/aicli/commands/chat_surface_output.go`、`chat_debug_screen_http.go` |
 | 服务控制 | `internal/runtimeserver/service_control.go`、`internal/agentcontrol/registry_service.go` |
+| 后台任务 | `internal/background/detached.go`（无 PowerShell 时原生 in-process 回退、PS2 兼容 runner 脚本）、`internal/background/detached_spawn_windows.go` |
