@@ -76,7 +76,7 @@
 | `code.*` | 知识层暴露给模型的工具族（`code.search` / `code.find_symbol` / `code.find_refs` / `code.callers` / `code.impact`） | `04` §4.6 |
 | 定义类查询 | `code.find_symbol` / `code.search`。陈旧时失败**显式**（模型会回退 `grep`） | ADR-0004 §1.2 |
 | 关系类查询 | `code.find_refs` / `code.callers` / `code.impact`。陈旧时失败**静默且不可逆** | ADR-0004 §1.2 |
-| `S_fresh` / `S_max` | 陈旧度分档边界（**初始值** 60s / 15min，须由 Phase 0 校准） | ADR-0004 §4.1 |
+| `S_fresh` / `S_max` | 陈旧度分档边界（**初始值** 60s / 15min；实际取值 Gate = `Phase2-start`，2026-09-21 由 `Phase0-baseline` 修订；该取值不阻塞 Accept） | ADR-0004 §4.1 / §10 |
 | `completeness` | `full` / `partial` / `fallback`，随每个 `code.*` 结果返回 | ADR-0004 §4.2 |
 | shadow 差异率 | 被拦截的 `grep`/`view` 调用与索引侧候选之间的差异度量 | ADR-0003 |
 | baseline / candidate | `G`（被拦截调用实际返回的条目）/ `K`（索引侧候选条目） | ADR-0003 §4.1 |

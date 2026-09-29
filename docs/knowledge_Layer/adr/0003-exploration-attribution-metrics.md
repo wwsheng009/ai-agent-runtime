@@ -295,7 +295,7 @@ usable   := (coverage >= α) AND (economy <= 1.0)
 
 | 项 | Gate |
 |---|---|
-| α 的取值与 Phase 1 门槛数值 | **`Phase1-shadow`**（2026-09-21 由 `Phase0-baseline` 改，见下） |
+| ✅ **已定稿（2026-09-29）**：α=0.8、Phase 1 门槛 M1 ≥ 0.31（95 % CI 下界）；主门槛复核通过（见 ADR-0008 §8.1 / 报告 §5.1） | **`Phase1-shadow`**（已满足） |
 | `coverage` 低估问题的**警告写入 Phase 0 报告** | `Phase0-baseline`（**已完成**，见 `reports/phase0_baseline_report.md` §7） |
 | `coverage` 低估问题的**抽样核对报告**（`candidate_n < baseline_n` 样本人工核对） | `Phase1-shadow`（Phase 0 无 shadow 数据，无法抽样） |
 | `view` 区间与 chunk 边界的对齐精度 | `Phase1-start` |

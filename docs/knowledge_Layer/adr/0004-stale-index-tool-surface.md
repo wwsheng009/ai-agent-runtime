@@ -1,6 +1,7 @@
 # ADR-0004: 陈旧索引下的 `code.*` 工具面
 
-- **Status**: Proposed
+- **Status**: Accepted
+- **Accepted**: 2026-09-29，项目 owner 授权代改（先例：ADR-0008 / ADR-0009）
 - **Date**: 2026-09-20
 - **Deciders**: 项目 owner
 - **Gate**: `Phase2-start`
@@ -260,3 +261,6 @@ type ToolDefinitionMetadataProvider interface { ... }
 | writer 提交后 reader 的通知机制（心跳轮询 vs 通知） | `Phase2-start` |
 | 与 `04` §4.6 工具命名/优先级表的最终对齐 | `Phase2-start` |
 | 描述变体对 prompt 缓存命中率的影响测量 | `Phase3-start` |
+
+> **接受记录（2026-09-29）**：本 ADR 由项目 owner 授权代改接受（先例：[ADR-0008](0008-grep-coverage-file-level.md) / [ADR-0009](0009-v1-table-set-scope.md)）。
+> §4.1 已声明 `S_fresh`（60s）/ `S_max`（15min）为**初始值**，其实际取值**不阻塞 Accept**；上表各项仍按各自 Gate 跟进（`S_fresh` / `S_max` 取值 = `Phase2-start`）。

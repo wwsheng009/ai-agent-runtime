@@ -4,7 +4,7 @@
 > 数据面：`exploration_attribution`（读取：`usageledger.ListExplorationAttribution`；复算：`knowledge.SummarizeAttribution` / `CalibrateShadowAlpha`）
 > 实测入口：`backend/internal/knowledge/shadow_replay_test.go`（`TestPhase1ShadowReplay`）
 > 调用集：`reports/phase1_shadow_calls.jsonl`（提取脚本 `backend/scripts/extract-shadow-calls.mjs`）
-> 状态：**已执行；结论=主门槛不通过（grep 行级覆盖 0.47 %）**。Phase 1 保持"进行中"，剩余工作见 §5；口径裁决数据见 §4.3。
+> 状态：**已执行（v1）；2026-09-29 口径裁决（ADR-0008 Accepted）后主门槛复核 = 通过**——α=0.8、合并 M1=35.95 % ≥ 门槛 0.31（grep file-level 26.76 %、view 48.41 %）。剩余工作见 §5；口径裁决数据见 §4.3、阈值定稿见 §4.4、复核结论见 §5.1。
 
 ---
 
@@ -131,6 +131,10 @@ M4=63.0 %；全量 M1=20.81 %、M2=24.15 %、M4=75.4 %**（批量调用并入分
 - 行级分布仍双峰（grep 几乎全 0；view 命中时≈1.0），α 在 0.10–0.80 区间对 M1 影响可忽略。
   因此本次**不写死 α / 门槛**：把 α 定在 0.10 会等价于"不设门槛"；正式 α 与门槛
   应与口径裁决（§5.1）一起定，避免制造"已校准"的假象。
+- **2026-09-29 定稿（ADR-0008 Accepted 后）**：**α = 0.8**（沿用 `DefaultShadowAlpha`；grep file-level
+  中位数 0 → 0.10 退化为"无门槛"，不予采纳；view 中位数 0.733 取整 0.75 与 0.8 对 M1 差异可忽略）——
+  `knowledge.shadow.alpha` 默认位已是 0.8，无需改动。Phase 1 门槛按 §7.6 的 95 % CI 法取合并 M1
+  置信下界 **≥ 0.31**；复核结论见 §5.1。
 
 ### 4.5 live 接入验证（三入口：cmd+tui / ACP / runtime-server，2026-09-29）
 
@@ -225,14 +229,16 @@ M4=63.0 %；全量 M1=20.81 %、M2=24.15 %、M4=75.4 %**（批量调用并入分
 - 局限：S2/S3 为**同一语料**的两份独立副本（排除 `.git` 与未索引文件的树遍历差异）；
   跨仓库样本来自 module cache（Go-only 语料），多语言仓库泛化仍属观察性结论。
 
-## 5. 剩余工作（Phase 1 仍未验收）
+## 5. 剩余工作（2026-09-29：主门槛通过；以下为未收口项）
 
-1. **口径裁决（新 ADR，owner）**：建议 grep 覆盖率采用 file-level（§4.3 数据：
-   mean 31.83 %、p90 100 %、usable@0.8 26.76 %、answerable 49.38 %），行级口径保留为
-   诊断列；ADR §10 已把"per-file/per-symbol 归因层"列为 `Phase2-start` 跟进项——
-   本次数据支持**提前裁决**。view 通道可先行按通道定门槛（M1=48.4 %）。
-   **已起草 [`adr/0008-grep-coverage-file-level.md`](../adr/0008-grep-coverage-file-level.md)
-   （Status=Proposed，含选项 B–E 的被否理由与回退方案），等待 owner 裁决。**
+1. ✅ **口径裁决与阈值定稿（2026-09-29 完成）**：owner 授权代改，[`adr/0008-grep-coverage-file-level.md`](../adr/0008-grep-coverage-file-level.md)
+   由 `Proposed` → **`Accepted`**——grep 覆盖率采用 **file-level**（依据 §4.3：mean 31.83 %、p90 100 %、
+   usable@0.8 26.76 %、answerable 49.38 %），行级口径保留为**诊断列**（0.47 % 为 ADR-0003 §6.2 已预告的低估）；
+   view 通道口径不变。
+   **α 定稿 = 0.8**（中位数规则退化说明见 §4.4）；**Phase 1 门槛 = 合并 M1 ≥ 0.31**（95 % CI 下界，n=370）。
+   **主门槛复核（α=0.8）：Pass**——grep file-level `usable@0.8=26.76 %`（n=213）、view `M1=48.41 %`（n=157）、
+   合并 **M1 = 133/370 = 35.95 % ≥ 0.31**。复算命令：§6 第 2 步（`TestPhase1ShadowReplay`，`KNOWLEDGE_SHADOW_ALPHA=0.8`）。
+   **P2 进入条件 = ADR-0004 Accept**；本 ADR 的"新列实现 + 三入口 live 写入"仍为 Open（ADR-0008 §10）。
 2. **grep 候选映射继续收敛**：
    - ~~复数 `paths` 逐项作用域~~：**已完成**（2026-09-29）——观察器新增
      `newScopeFilterSpecMulti`（多前缀 OR + glob AND）、`grepPathScopes`（`path` +

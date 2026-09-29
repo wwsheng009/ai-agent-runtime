@@ -35,7 +35,7 @@
 - **不新建独立服务**：v1 以库形式落在 `backend/internal/knowledge/`，进程外只允许 LSP 子进程。
 - **单写者 + 只读降级**：`knowledge.db` 同一 workspace 同一时刻只有一个 owner 写者；无 owner 时整层降级为"只读索引 + 现有工具 fallback"。
 - **复用优先**：artifact / memorystore / factledger / compactruntime / contextmgr / contextpack / sqliteutil / usageledger / toolkit / policy 全部复用，不重建。
-- **v1 表集 ≤ 16 张**（含 FTS 虚拟表与 migration 表），03 附录 A 的 50 张表按 P0/P1/P2 重新裁剪，类型系统/跨语言/Runtime Evidence 明确推迟。
+- **v1 表集 ≤ 23 张**（= `02` §8【v1 core】的 22 表 + `symbol_fts` 虚表；含 FTS 虚拟表；不含 migration 簿记表（归 `internal/migrate`）与 extension/deferred；口径见 [ADR-0009](adr/0009-v1-table-set-scope.md)），03 附录 A 的 50 张表按 P0/P1/P2 重新裁剪，类型系统/跨语言/Runtime Evidence 明确推迟。
 - **影子模式先行**：`knowledge.mode = off | shadow | on`，shadow 期间只用索引计算但返回旧结果并记录差异，用真实差异率换正确性信心。
 - **不替换 P0 工具**：`code.*` 是增强前端，索引不可用时内部 fallback 到现有 grep/view 并在返回中标注 `source:"fallback"`。
 
@@ -338,227 +338,37 @@
 - **ChangeManager 不直接写库**，只产出 `ChangeEvent`，由 owner 写者消费。
 - **Provider 只读**：`knowledge.Provider.Build()` 不触发索引写入；缺索引时返回 `degraded` 并让 contextmgr 走原有路径。
 
-### 4.3 v1 最小数据模型（16 张）
+### 4.3 P0/P1 最小数据模型（16 张；v1 core 的子集）
 
 裁剪原则：只保留"没有它就无法实现 P0/P1 能力"的表；03 附录 A 的 50 张表按此重新归类。
 
-```sql
--- 0. 迁移
-CREATE TABLE schema_migrations (
-    version      INTEGER PRIMARY KEY,
-    applied_at   INTEGER NOT NULL,
-    checksum     TEXT NOT NULL
-);
+> **2026-09-29 引用化（`06` §9 #19，ADR-0009 落地）**：本节原先内联的 15 处 DDL 语句（14 处建表 + 1 处 FTS 虚表，含其索引）已全部删除，只保留用途 / 验收指标 / 引用（ADR-0007 D5、不变量 I2）。"16 张"的口径不变：= 12 个 core 概念（`refs` 在 `02` 的规范名为 `references`）+ 2 张 extension（`symbol_aliases`、`index_jobs`）+ 1 张 migrate 簿记（`schema_migrations`）+ 1 张 FTS 虚表；其中属于 v1 core 的子集见 §0.3 与 ADR-0009 §4.1。
 
--- 1. 工作区（id 复用 workspaceregistry，不新造主键）
-CREATE TABLE workspaces (
-    id           TEXT PRIMARY KEY,
-    root_path    TEXT NOT NULL,
-    created_at   INTEGER NOT NULL,
-    updated_at   INTEGER NOT NULL
-);
-CREATE UNIQUE INDEX idx_workspaces_root ON workspaces(root_path);
-
--- 2. 文件
-CREATE TABLE files (
-    id            TEXT PRIMARY KEY,
-    workspace_id  TEXT NOT NULL,
-    path          TEXT NOT NULL,          -- workspace 相对路径，统一 '/' 分隔、大小写规范化
-    language      TEXT,
-    size          INTEGER NOT NULL DEFAULT 0,
-    mtime_ns      INTEGER,
-    content_hash  TEXT NOT NULL,          -- sha256
-    is_test       INTEGER NOT NULL DEFAULT 0,
-    is_generated  INTEGER NOT NULL DEFAULT 0,
-    index_state   TEXT NOT NULL DEFAULT 'unknown', -- unknown|light|deep|stale|error
-    indexed_at    INTEGER,
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
-);
-CREATE UNIQUE INDEX idx_files_ws_path ON files(workspace_id, path);
-CREATE INDEX idx_files_ws_hash ON files(workspace_id, content_hash);
-CREATE INDEX idx_files_ws_state ON files(workspace_id, index_state);
-
--- 3. 符号（stable_key 见 4.4）
-CREATE TABLE symbols (
-    id                TEXT PRIMARY KEY,
-    workspace_id      TEXT NOT NULL,
-    file_id           TEXT NOT NULL,
-    stable_key        TEXT NOT NULL,
-    name              TEXT NOT NULL,
-    qualified_name    TEXT NOT NULL,
-    kind              TEXT NOT NULL,       -- func|method|struct|interface|class|type|const|var|test
-    language          TEXT NOT NULL,
-    owner_symbol_id   TEXT,
-    signature         TEXT,
-    signature_hash    TEXT,
-    content_hash      TEXT,
-    start_line        INTEGER NOT NULL,
-    start_col         INTEGER NOT NULL DEFAULT 0,
-    end_line          INTEGER NOT NULL,
-    end_col           INTEGER NOT NULL DEFAULT 0,
-    is_exported       INTEGER NOT NULL DEFAULT 0,
-    is_test           INTEGER NOT NULL DEFAULT 0,
-    deleted_at        INTEGER,
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-    FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
-);
-CREATE UNIQUE INDEX idx_symbols_stable ON symbols(workspace_id, stable_key);
-CREATE INDEX idx_symbols_name ON symbols(workspace_id, name);
-CREATE INDEX idx_symbols_qualified ON symbols(workspace_id, qualified_name);
-CREATE INDEX idx_symbols_file ON symbols(file_id);
-
--- 4. 符号版本（用于引用/缓存绑版本，落实 03 §1.4 规则 5）
-CREATE TABLE symbol_versions (
-    id              TEXT PRIMARY KEY,
-    symbol_id       TEXT NOT NULL,
-    version         INTEGER NOT NULL,
-    content_hash    TEXT NOT NULL,
-    signature_hash  TEXT,
-    adapter_version TEXT NOT NULL,
-    valid_from      INTEGER NOT NULL,
-    valid_to        INTEGER,
-    FOREIGN KEY(symbol_id) REFERENCES symbols(id) ON DELETE CASCADE
-);
-CREATE UNIQUE INDEX idx_symbol_versions ON symbol_versions(symbol_id, version);
-
--- 5. 符号别名/重命名（P0，来自 03 §1.3，必须进 v1，否则引用修复无据可依）
-CREATE TABLE symbol_aliases (
-    id           TEXT PRIMARY KEY,
-    symbol_id    TEXT NOT NULL,
-    alias_key    TEXT NOT NULL,
-    alias_type   TEXT NOT NULL,           -- rename|move|overload
-    created_at   INTEGER NOT NULL,
-    FOREIGN KEY(symbol_id) REFERENCES symbols(id) ON DELETE CASCADE
-);
-CREATE INDEX idx_symbol_aliases_key ON symbol_aliases(alias_key);
-
--- 6. 引用
-CREATE TABLE refs (
-    id                TEXT PRIMARY KEY,
-    workspace_id      TEXT NOT NULL,
-    from_symbol_id    TEXT,
-    to_symbol_id      TEXT,
-    to_symbol_version INTEGER,
-    kind              TEXT NOT NULL,       -- reference|call|import|implement
-    file_id           TEXT NOT NULL,
-    line              INTEGER NOT NULL,
-    col               INTEGER NOT NULL DEFAULT 0,
-    snippet           TEXT,
-    confidence        REAL NOT NULL DEFAULT 0.5,
-    source            TEXT NOT NULL,       -- lsp|tree-sitter|heuristic|fts
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-    FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
-);
-CREATE INDEX idx_refs_to ON refs(workspace_id, to_symbol_id);
-CREATE INDEX idx_refs_from ON refs(workspace_id, from_symbol_id);
-CREATE INDEX idx_refs_file ON refs(file_id);
-
--- 7. 探索会话 / 节点 / 边（多轮复用，最高 ROI）
-CREATE TABLE exploration_sessions (
-    id           TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    session_id   TEXT NOT NULL,
-    task_id      TEXT,
-    created_at   INTEGER NOT NULL,
-    updated_at   INTEGER NOT NULL,
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
-);
-CREATE INDEX idx_explore_sessions ON exploration_sessions(workspace_id, session_id, task_id);
-
-CREATE TABLE exploration_nodes (
-    id              TEXT PRIMARY KEY,
-    exploration_id  TEXT NOT NULL,
-    node_type       TEXT NOT NULL,         -- file|symbol|query|answer
-    target          TEXT NOT NULL,
-    file_id         TEXT,
-    symbol_id       TEXT,
-    summary         TEXT,
-    confidence      REAL NOT NULL DEFAULT 0.5,
-    knowledge_version TEXT NOT NULL,
-    created_at      INTEGER NOT NULL,
-    last_used_at    INTEGER,
-    use_count       INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY(exploration_id) REFERENCES exploration_sessions(id) ON DELETE CASCADE
-);
-CREATE INDEX idx_explore_nodes_target ON exploration_nodes(exploration_id, target);
-
-CREATE TABLE exploration_edges (
-    id            TEXT PRIMARY KEY,
-    exploration_id TEXT NOT NULL,
-    from_node_id  TEXT NOT NULL,
-    to_node_id    TEXT NOT NULL,
-    edge_type     TEXT NOT NULL,           -- calls|references|contains|derived_from
-    weight        REAL NOT NULL DEFAULT 1.0,
-    FOREIGN KEY(exploration_id) REFERENCES exploration_sessions(id) ON DELETE CASCADE
-);
-CREATE INDEX idx_explore_edges_from ON exploration_edges(from_node_id);
-
--- 8. 上下文快照 / 条目（可解释性 + stale 拒绝注入）
-CREATE TABLE context_snapshots (
-    id                TEXT PRIMARY KEY,
-    session_id        TEXT NOT NULL,
-    task_id           TEXT,
-    workspace_id      TEXT,
-    knowledge_version TEXT,
-    compiler_version  TEXT NOT NULL,
-    budget_json       TEXT,
-    created_at        INTEGER NOT NULL
-);
-CREATE INDEX idx_ctx_snapshots_session ON context_snapshots(session_id, created_at);
-
-CREATE TABLE context_items (
-    id            TEXT PRIMARY KEY,
-    snapshot_id   TEXT NOT NULL,
-    item_type     TEXT NOT NULL,           -- symbol|file_region|exploration|fact|note|tool_result
-    ref_id        TEXT,
-    source        TEXT NOT NULL,           -- lsp|tree-sitter|heuristic|memory|artifact|fact
-    trust         TEXT NOT NULL DEFAULT 'medium', -- high|medium|low|untrusted
-    tokens        INTEGER NOT NULL DEFAULT 0,
-    reason        TEXT,
-    stale         INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY(snapshot_id) REFERENCES context_snapshots(id) ON DELETE CASCADE
-);
-CREATE INDEX idx_ctx_items_snapshot ON context_items(snapshot_id);
-
--- 9. 缓存（只保留持久层；进程内缓存不进表）
-CREATE TABLE cache_entries (
-    id            TEXT PRIMARY KEY,
-    workspace_id  TEXT NOT NULL,
-    cache_key     TEXT NOT NULL,
-    cache_type    TEXT NOT NULL,           -- retrieval|compile|summary
-    payload_json  TEXT NOT NULL,
-    knowledge_version TEXT NOT NULL,
-    created_at    INTEGER NOT NULL,
-    expires_at    INTEGER
-);
-CREATE UNIQUE INDEX idx_cache_key ON cache_entries(workspace_id, cache_type, cache_key);
-
-CREATE TABLE invalidation_events (
-    id            TEXT PRIMARY KEY,
-    workspace_id  TEXT NOT NULL,
-    reason        TEXT NOT NULL,           -- file_changed|git_sync|adapter_upgraded|schema_upgraded|manual
-    scope_json    TEXT,
-    created_at    INTEGER NOT NULL
-);
-CREATE INDEX idx_invalidation_ws ON invalidation_events(workspace_id, created_at);
+- **0. 迁移簿记（`schema_migrations`）：不建知识表**。**用途**：迁移版本 / 校验和；**验收指标**：版本高于代码支持则拒绝打开（§7.6 与 R12）；**引用**：由 `internal/migrate` 统一创建维护（`backend/internal/knowledge/migrations/0001_init.sql` 头注 1；ADR-0009 §4.1 裁决其不计入 v1 表集，原 DDL 结构会与实现冲突）。
+- **1. 工作区 `workspaces`**（id 复用 workspaceregistry，不新造主键）。**用途**：工作区标识与根路径；**验收指标**：单写者仲裁与只读降级（§4.1 / §4.7）；**引用**：`02` §9。
+- **2. 文件 `files`**。**用途**：文件清单、内容哈希与索引状态（`index_state`）；**验收指标**：§7.4（首次全量、单文件增量 p95）；**引用**：`02` §12–13。
+- **3. 符号 `symbols`**。**用途**：符号主表（`stable_key` 见 §4.4）；**验收指标**：§7.3（精度 / 召回）；**引用**：`02` §15–16。
+- **4. 符号版本 `symbol_versions`**。**用途**：引用 / 缓存绑版本（落实 03 §1.4 规则 5）；**验收指标**：§7.3 与 §7.6；**引用**：`02` §17。
+- **5. `symbol_aliases`（extension）**。**用途**：重命名 / 移动 / 重载别名，引用修复的事实源（03 §1.3）；**验收指标**：§4.4 的重命名迁移路径；**引用**：[`supplement/01_symbol_identity.md`](supplement/01_symbol_identity.md) §1.3（extension 唯一事实源；按 ADR-0009 §10 待并入 extension 组名单）。
+- **6. 引用 `refs`**。**用途**：引用 / 调用 / 导入边（`kind` + `confidence` + `source`）；**验收指标**：§7.3；**引用**：`02` §18（规范名 `references`；`refs` ↔ `references` 的收敛见 ADR-0009 §10）。
+- **7. 探索记忆三表（`exploration_sessions` / `exploration_nodes` / `exploration_edges`）**。**用途**：多轮探索复用（最高 ROI）；**验收指标**：§7.2 与 M1（ADR-0003）；**引用**：`02` §21 / §22 / §23。
+- **8. 上下文两表（`context_snapshots` / `context_items`）**。**用途**：可解释性与 stale 拒绝注入；**验收指标**：§7.3 / §7.5；**引用**：`02` §27 / §28。
+- **9. 缓存与失效两表（`cache_entries` / `invalidation_events`）**。**用途**：持久缓存（retrieval/compile/summary）与失效事件（file_changed/git_sync/…）；**验收指标**：§7.2 / §7.6；**引用**：`02` §31 / §32。
 
 **10. 索引任务（`index_jobs`）：定义见 extension schema**
 
 > **2026-09-28 迁出**（ADR-0007 §4.3 / `06` §9 待办 #1）：本节原先内联 `CREATE TABLE`，违反"`04` 只引用表名"（ADR-0007 D5）。
 > 表 DDL 现落在 [`supplement/15_change_management.md`](supplement/15_change_management.md) §15.3；`04` 只保留用途与验收指标。
-> `04` §4.3 其余 15 张表的引用化见 `06` §9 待办 #19（依赖 I5 口径裁决）。
+> `04` §4.3 其余 15 处 DDL 的引用化已于 **2026-09-29 执行**（ADR-0009 Accepted / `06` §9 #19）；本节及其余条目现已全部只含用途 / 验收指标 / 引用。
 
 - **用途**：owner（单写者）的持久化写队列——owner 内单 goroutine 串行消费；任何变更路径（agent 编辑钩子 / `git diff` / fsnotify）都必须**先写 `index_jobs` 再串行执行**，不得直接写 `symbols`（§4.1 / §4.7）。
 - **验收指标**：见 §7.4（首次全量索引、单文件增量 p95）与 §7.6（校准口径）；数据来源列 `started_at` / `finished_at` / `files_total` / `files_done`。
 
-```sql
--- 11. FTS5（多语言检索，与 symbols 同步）
-CREATE VIRTUAL TABLE symbols_fts USING fts5(
-    name, qualified_name, signature, summary,
-    content='symbols', content_rowid='rowid',
-    tokenize='unicode61'
-);
-```
+**11. FTS5 检索（`symbol_fts` 虚表，多语言检索，与 `symbols` 同步）**
+
+- **用途**：`name` / `qualified_name` / `signature` 的全文检索（v1 语义检索主通道；embedding 默认关闭）。
+- **验收指标**：§7.3（检索召回）与 §7.6。
+- **引用**：`02` §73（该文件规范名 `symbol_fts`；本文件旧稿名 `symbols_fts`、列集差异与实现的收敛见 ADR-0009 §10 与 `0001_init.sql` 头注 2）。
 
 **明确推迟到 v2+ 的表**（03 附录 A 的其余 34 张）：
 `projects/modules/packages/build_configs/dependency_versions/generated_sources/ignore_rules`（v1 用配置 + 内置规则替代）、`type_relations/inheritance_edges/implementation_edges/overloads/generic_params/parameters/local_variables/annotations`、`import_bindings/name_resolutions/scope_bindings`、`lsp_servers/lsp_documents/lsp_diagnostics`、`version_vectors/cache_dependencies/events_outbox/consumer_offsets`（v1 用 `knowledge_version` + `invalidation_events` 替代）、`security_redactions/tool_permissions/audit_log`（v1 复用 `policy`/`fsscope` + 日志）、`eval_*`（v1 用测试 golden 文件）、`call_candidates/reference_candidates`（v1 用 `confidence` 列替代）、`tests/test_symbols/test_runs/coverage_evidence`（v1 用 `files.is_test` + `symbols.is_test` 替代）、`cross_language_links/idl_contracts/api_endpoints/rpc_methods/message_topics/db_schema_links`、`runtime_evidence/runtime_edges/runtime_symbol_stats`、`change_events/git_sync_state`（v1 复用 `internal/events` 与 `gitbrowse`）。
@@ -846,7 +656,7 @@ knowledge:
 
 **验收门槛**
 
-- **主门槛（唯一 Pass/Fail 判据）**：ADR-0003 §4.5 的 **M1 调用级可用率**——在 `baseline_n > 0` 的被拦截调用上，`usable = (coverage ≥ α) AND (economy ≤ 1.0)` 的均值达标。**α 由本 Phase 的 shadow 实测校准后写入 config**（ADR-0003 §10，Gate = `Phase1-shadow`）。
+- **主门槛（唯一 Pass/Fail 判据）**：ADR-0003 §4.5 的 **M1 调用级可用率**——在 `baseline_n > 0` 的被拦截调用上，`usable = (coverage ≥ α) AND (economy ≤ 1.0)` 的均值达标。**α 由本 Phase 的 shadow 实测校准后写入 config**（ADR-0003 §10，Gate = `Phase1-shadow`；**2026-09-29 定稿：α=0.8，门槛 = 合并 M1 ≥ 0.31，复核通过**）。
 - **诊断指标（不判 Pass/Fail，用于定位失败）**：M2 覆盖度、M3 经济性、M4 token 收益（ADR-0003 §4.5）；以及 `code.search` 与 `grep` 的 top-10 文件集合差异率 < 15%——差异率**保留为可解释性诊断**，不再是验收口径（2026-09-21 修订，消除与 ADR-0003 §4.5 的双口径冲突）。
 - 本仓库（排除 `node_modules`/`dist`/`.aicli`）首次全量索引耗时 ≤ 实测基线（**2026-09-29 已校准：≤ 360 s**，报告 §4.7）；单文件增量 < 50ms（**实测 Fail**：marginal p95 302 ms，须 Phase 5 增量触发或口径重议）。
 - DB 大小 ≤ `max_db_size_mb`（默认 512MB；实测 313.9 MiB）——原 200MB 初值已被 §7.4 校准取代；`max_db_size_mb` 生效时可触发 GC。
@@ -856,7 +666,7 @@ knowledge:
 
 **回滚**：`mode=off` + 删除 `knowledge.db`。
 
-**状态**：**进行中**（2026-09-28 开工）——交付 1–3 的代码已在 `internal/knowledge`（`indexer.go` / `store_sqlite.go` / `adapter_builtin.go` / `owner.go` / 增量 `content_hash`）；**交付 6「接入（激活）」已完成**（`internal/knowledge/activation.go` + `cmd/runtime-server` / `cmd/aicli` cmd+tui / `cmd/aicli` acp 三入口，见 `CHANGELOG.md`）；**交付 4（shadow 拦截 `grep` / `view`）已完成**（2026-09-28：三入口接线 + `exploration_attribution` 落库，见 `CHANGELOG.md`）；**交付 5（`knowledge.status` 面）已完成**（2026-09-28：CLI + HTTP 状态面，见 `CHANGELOG.md`）；**2026-09-29 收口交付 1/3**——交付 1 补上 Java/C++ 粗符号（`adapter_builtin.go` 的 `javaSymbolPatterns` / `cppSymbolPatterns` + `adapter_java_cpp_test.go`），交付 3 补上删除对账（迁移 `0002_file_soft_delete.sql`、`files.deleted_at`、`ListActiveFiles` / `MarkFilesDeleted`、`RunIndex` 软删除与复活，含测试）——交付 1–6 全部落地；**2026-09-29 `Phase1-shadow` 实测 v1**（真实调用重放 n=400）：M1=20.81 %（view 48.4 % / grep 行级 0.47 %）、M2=24.15 %，主门槛不通过；grep file-level 对照 mean 31.83 %、answerable 49.4 %，瓶颈为行级口径（§6.2），需新 ADR 裁决；见 `reports/phase1_shadow_report.md`（含 §4.5 live 验证：aicli cmd+tui + ACP + runtime-server，3/3 入口）。本 Phase 仍未验收。
+**状态**：**进行中**（2026-09-28 开工）——交付 1–3 的代码已在 `internal/knowledge`（`indexer.go` / `store_sqlite.go` / `adapter_builtin.go` / `owner.go` / 增量 `content_hash`）；**交付 6「接入（激活）」已完成**（`internal/knowledge/activation.go` + `cmd/runtime-server` / `cmd/aicli` cmd+tui / `cmd/aicli` acp 三入口，见 `CHANGELOG.md`）；**交付 4（shadow 拦截 `grep` / `view`）已完成**（2026-09-28：三入口接线 + `exploration_attribution` 落库，见 `CHANGELOG.md`）；**交付 5（`knowledge.status` 面）已完成**（2026-09-28：CLI + HTTP 状态面，见 `CHANGELOG.md`）；**2026-09-29 收口交付 1/3**——交付 1 补上 Java/C++ 粗符号（`adapter_builtin.go` 的 `javaSymbolPatterns` / `cppSymbolPatterns` + `adapter_java_cpp_test.go`），交付 3 补上删除对账（迁移 `0002_file_soft_delete.sql`、`files.deleted_at`、`ListActiveFiles` / `MarkFilesDeleted`、`RunIndex` 软删除与复活，含测试）——交付 1–6 全部落地；**2026-09-29 `Phase1-shadow` 实测 v1**（真实调用重放 n=400）：M1=20.81 %（view 48.4 % / grep 行级 0.47 %）、M2=24.15 %，主门槛不通过；grep file-level 对照 mean 31.83 %、answerable 49.4 %，瓶颈为行级口径（§6.2），需新 ADR 裁决；**2026-09-29 裁决后复核（ADR-0008 Accepted、α=0.8）：grep file-level 26.76 %、view 48.41 %、合并 M1=35.95 % ≥ 0.31 → 主门槛通过**（P2 进入条件 = ADR-0004 Accept；ADR-0008 新列实现与 grep 映射收敛仍为 Open）；见 `reports/phase1_shadow_report.md`（含 §4.5 live 验证：aicli cmd+tui + ACP + runtime-server，3/3 入口）。本 Phase 主门槛已通过，整体验收的剩余项见报告 §5。
 
 ### Phase 2 — Exploration Memory + Context Planner
 

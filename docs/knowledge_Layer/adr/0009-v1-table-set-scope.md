@@ -1,6 +1,7 @@
 # ADR-0009: v1 表集口径裁决（上限定义域、三分组与命名规范）
 
-- **Status**: Proposed
+- **Status**: Accepted
+- **Accepted**: 2026-09-29（项目 owner 授权代改并记录裁决，见 `../CHANGELOG.md` 的 2026-09-29 ADR-0009 落地条目）
 - **Date**: 2026-09-29
 - **Deciders**: 项目 owner（方案作者起草）
 - **Gate**: `Phase1-start`
@@ -180,6 +181,14 @@ go run scripts/check_knowledge_doc_invariants.go
 - **I2 仍红**：`04` §4.3 还有 15 处 DDL；这是 #19 的范畴，而其触发条件（"I5 裁决后"）正是本 ADR——Accept 后可立即执行。
 - 本 ADR 起草期间**不修改** `02`/`04`/`supplement/*`/`06`；本节条件是给落地执行者的验收单，不是起草时的既成事实。
 
+### 8.1 落地记录（2026-09-29）
+
+- **状态**：owner 授权代改，`Proposed` → `Accepted`；§4 文档改动 + 附录 A/D 分组 + #19 引用化已同日落盘。
+- **落地改动**：`04` §0.3（声明 → ≤23）、`04` §4.3 标题（"P0/P1 最小数据模型（16 张；v1 core 的子集）"）与 15 处 DDL 引用化、`README.md` §3、`02` §8 三分组（顶部旧注记删除）。
+- **检查器复跑（2026-09-29）**：`cd backend; go run scripts/check_knowledge_doc_invariants.go` = **5/5 PASS**——I1 = 23 vs 23（22 表 + `symbol_fts`）；I2 = 0 越位 DDL；I3 = 0 漂移；I4 = 三分组（23 + 1 + 2 名）；I5 = 声明 23 = 实际 23。
+- **#19 例外映射（无 `02` DDL 的三项）**：`schema_migrations` → `internal/migrate`（§4.1 裁决；原 DDL 与已落盘实现冲突）；`symbol_aliases` → `supplement/01` §1.3（extension 事实源）；FTS 虚表 → `02` §73 的规范名 `symbol_fts`（旧稿名 `symbols_fts` 及列集差异的收敛见 §10）。
+- **行号提示**：附录 A/B 的行号为改写前快照；`02` 三分组后行号有位移，定位以章节号为准。
+
 ---
 
 ## 9. Alternatives Rejected (and why)
@@ -197,11 +206,13 @@ go run scripts/check_knowledge_doc_invariants.go
 
 ## 10. Open Follow-ups
 
+> **落地记录（2026-09-29）**：第 1/2/3 项已随本 ADR 落地并复跑验证（检查器 **5/5 PASS**，见 §8.1）；第 4/5/6 项仍为 Open。
+
 | 项 | Gate |
 |---|---|
-| `04` §0.3（→23）、§4.3 标题（子集表述）、`README.md` §3 的落地改写；`02` §8 三分组（附录 D）与顶部旧注记删除 | `Phase1-start`（本 ADR Accept 后立即执行） |
-| #19：`04` §4.3 其余 15 处 DDL 引用化（I2 转绿） | 本 ADR Accept 后（I5 裁决已完成，触发条件满足） |
-| I3 两对漂移的最终消解确认（附录 C）与 allowlist 维护（现含 `files/file_versions`、`symbols/symbol_versions`） | `Phase1-start` |
+| ✅ **已执行（2026-09-29）**：`04` §0.3（→23）、§4.3 标题（子集表述）、`README.md` §3 的落地改写；`02` §8 三分组（附录 D）与顶部旧注记删除 | `Phase1-start`（已满足） |
+| ✅ **已执行（2026-09-29）**：#19：`04` §4.3 其余 15 处 DDL 引用化（I2 转绿；例外映射见 §8.1） | 本 ADR Accept 后（已满足） |
+| ✅ **已验证（2026-09-29）**：I3 两对漂移的最终消解确认（附录 C）与 allowlist 维护（现含 `files/file_versions`、`symbols/symbol_versions`） | `Phase1-start`（复跑 I3 = 0 漂移） |
 | `references`（`02`）vs `refs`（`04`/实现）的规范名与实现对齐；`symbol_fts`（`02` L2185/`supplement/13`）vs `symbols_fts`（`04`/实现）的收敛 | `Phase1-start`（`06` L125 已登记；两对都不在 I3 现模式 `{X, X_edges}/{X, X_versions}` 内，需单点裁决） |
 | extension 组第二批名单（`symbol_aliases`、`projects`、`modules`、`project_languages`、`dependency_packages`）与 ADR-0001 的 `supplement/02` 同步（现仍是 `packages`/标量 `language` 的旧形态） | `Phase1-start` |
 | 是否把 I5 声明源收敛到单处（`04` 内不再有两套数字）／扩展 I3 模式覆盖 `_outbox`、`refs/references` 等 | `Phase2-start` |

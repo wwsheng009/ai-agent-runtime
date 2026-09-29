@@ -2,7 +2,7 @@
 
 > 最后更新：2026-09-29
 > 本目录描述"代码知识运行时"（Code Knowledge Runtime）的设计与落地计划。
-> 当前阶段：**Phase 0 已落地**（2026-09-20 核心 5 交付 + 2026-09-28 交付 7 `exploration_attribution` 建表）；**Phase 1 已开工**（2026-09-28 门禁 ADR-0001 / 0003（口径）/ 0007 已 Accept；2026-09-29 交付 1–6 全部完成——含 Java/C++ 粗符号与文件软删除对账；**同日 `Phase1-shadow` 实测 v1 已执行**：真实调用重放 n=400，M1=20.81 %（view 48.4 % / grep 行级 0.47 %；grep file-level 对照 mean 31.8 %）——**主门槛不通过**，需先裁决 grep 覆盖口径；**三个入口 live 验证已通过**（aicli cmd+tui + ACP + runtime-server，见 [`reports/phase1_shadow_report.md`](reports/phase1_shadow_report.md) §4.5）。
+> 当前阶段：**Phase 0 已落地**（2026-09-20 核心 5 交付 + 2026-09-28 交付 7 `exploration_attribution` 建表）；**Phase 1 主门槛已通过**（2026-09-28 门禁 ADR-0001 / 0003（口径）/ 0007 已 Accept；2026-09-29 交付 1–6 全部完成——含 Java/C++ 粗符号与文件软删除对账；**同日 `Phase1-shadow` 实测 v1 已执行**：真实调用重放 n=400，M1=20.81 %（view 48.4 % / grep 行级 0.47 %；grep file-level 对照 mean 31.8 %）——2026-09-29 经 ADR-0008（file-level，Accepted）+ α=0.8 裁决后复核：**主门槛通过**（合并 M1=35.95 % ≥ 0.31）；**P2 门禁已解除**（2026-09-29：ADR-0004 Accepted，待开工）；**三个入口 live 验证已通过**（aicli cmd+tui + ACP + runtime-server，见 [`reports/phase1_shadow_report.md`](reports/phase1_shadow_report.md) §4.5）。
 
 ---
 
@@ -18,7 +18,7 @@
 | `04_completeness_review_and_optimized_plan.md` | 完整性评审 + 优化落地计划 | **已完成，执行中** | 落地计划与验收事实源 |
 | `GLOSSARY.md` | 术语表 | **已建立**（2026-09-20） | **术语唯一事实源** |
 | `CHANGELOG.md` | 变更日志 | **已建立**（2026-09-20） | 变更历史 |
-| `adr/` | 决策记录（`0000` 模板 + `0001`–`0007`） | **已建立**（2026-09-20）；`0001`/`0003`/`0007` 于 2026-09-28 Accept，`0002`/`0004`/`0005`/`0006` 仍 `Proposed` | **决策唯一事实源** |
+| `adr/` | 决策记录（`0000` 模板 + `0001`–`0009`） | **已建立**（2026-09-20）；`0001`/`0003`/`0007` 于 2026-09-28 Accept，`0008`/`0009`/`0004` 于 2026-09-29 Accept，`0002`/`0005`/`0006` 仍 `Proposed` | **决策唯一事实源** |
 | `06_implementation_index_and_guidance.md` | 方案实施索引与指引（实施入口） | **已建立**（2026-09-20） | 实施索引（**非**事实源） |
 
 > **跨目录入口**：本目录 LSP 规格（[`supplement/05_runtime_integration_project_detection_and_lsp.md`](supplement/05_runtime_integration_project_detection_and_lsp.md) §1–§9 设计与接入、§10 extension schema）的**落地实施文档**位于 [`../lsp/`](../lsp/README.md)（参考实现分析 → runtime 集成设计 → 实施顺序与验收）。该目录仅为**实施方案**，不改变本目录的事实源边界。
@@ -75,7 +75,7 @@
 - 记忆分层：`memorystore`（笔记）/ `factledger`（事实）/ exploration memory（任务工作集）三层分离。
 - 测试文件：索引并标记 `is_test`，不再忽略。
 - 语义检索：FTS5 为主，embedding 默认关闭。
-- v1 表集：≤ 16 张（见 `04` §4.3）。
+- v1 表集：≤ 23 张（见 `04` §0.3；= `02` §8【v1 core】的 22 表 + `symbol_fts` 虚表；口径见 [ADR-0009](adr/0009-v1-table-set-scope.md)）。
 - 并发：单写者（owner 仲裁）+ 只读降级。
 
 ---
@@ -85,8 +85,8 @@
 | Phase | 内容 | 状态 | 验收门槛摘要 |
 |---|---|---|---|
 | 0 | 基线与契约 | **已完成**（2026-09-28） | 可测量、`mode=off` 行为不变 |
-| 1 | 索引 MVP（shadow） | **进行中**（交付 1–6 已完成；2026-09-29 shadow 实测 v1：M1=20.8 %，grep 行级 0.5 % → **未达标**，file-level 对照 31.8 % 待口径裁决；live 验证 3/3 入口通过） | M1 调用级可用率（α 由 shadow 校准） |
-| 2 | Exploration Memory + Planner | 未开始 | 重复探索 ↓ ≥ 30%、`unsafe_reuse=0` |
+| 1 | 索引 MVP（shadow） | **主门槛通过**（2026-09-29：交付 1–6 已完成；shadow v1 经 ADR-0008 file-level 口径复核，合并 M1=35.95 % ≥ 0.31；live 验证 3/3 入口通过；单文件增量口径待重议） | M1 调用级可用率（α=0.8，门槛 0.31 已定稿） |
+| 2 | Exploration Memory + Planner | **门禁已解除，待开工**（2026-09-29：ADR-0004 Accepted） | 重复探索 ↓ ≥ 30%、`unsafe_reuse=0` |
 | 3 | Code API 与工具面收敛 | 未开始 | 探索 token ↓ ≥ 40%、fallback ≤ 30% |
 | 4 | Adapter SPI 与可选 LSP | 未开始 | 精度 ≥ 90%、召回 ≥ 85% |
 | 5 | Change Manager 与一致性 | 未开始 | 增量 = 全量、stale 判定 100% |
@@ -102,7 +102,7 @@
 > 2026-09-29 `Phase1-shadow` 实测 v1（真实调用重放，n=400）：
 > M1=20.81 %（view 48.4 % / grep 行级 0.5 %）、M2=24.15 %、M4=75.4 %；grep file-level
 > 对照 mean 31.83 %（p90 100 %、answerable 49.4 %，待新 ADR 裁决口径）；索引侧 4989 文件 324.9 s / 313.5 MiB。
-> 结论=**主门槛不通过**（grep 覆盖为 ADR-0003 §6.2 已预告的行级交集低估所主导）；
+> 结论=**主门槛通过**（2026-09-29 口径裁决后复核：ADR-0008 采用 file-level、α=0.8、合并 M1=35.95 % ≥ 门槛 0.31；grep 行级 0.47 % 降为诊断）；
 > 同日**三个入口 live 验证通过**（aicli cmd+tui + ACP + runtime-server：真实会话落库 grep coverage=0.667 / view=0.600；后两个入口各追加 2 条同值行；生产代码复算 M1–M4，报告 §4.5）。
 > 复算 / 校准入口与剩余工作见 [`reports/phase1_shadow_report.md`](reports/phase1_shadow_report.md)。
 

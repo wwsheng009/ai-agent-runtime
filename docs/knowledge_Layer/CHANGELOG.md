@@ -6,6 +6,82 @@
 
 ---
 
+## 2026-09-29 — Phase 2 开工规划落档（Exploration Memory + Context Planner）
+
+`06` §4 Phase 2 追加子节 **「Phase 2 开工规划（2026-09-29）」**：工作流 W0–W7（按依赖排序，每条含目标 / 文件落点 / 测试清单 / 验收映射 G1–G4 / 前置依赖 / 风险）、第一步最小切片 S1（标注"可在下一轮直接开工"）、与 ADR-0008 配套项（新列 + live 写入）的先后关系。
+
+### Changed
+
+- `06` §4 Phase 2：追加开工规划子节；Phase 2「状态」行：`门禁已解除，待开工` → **`规划完成（2026-09-29），待开工`**（并指向规划子节与最小首片 S1）。
+- `06` §1.1 Phase 2 行同步为 **规划完成（2026-09-29），待开工**，指向 §4 Phase 2 规划子节。
+
+### Notes
+
+- 本轮为**只读核对 + 文档落档**：不写业务代码、不改 `04` / `adr/*`、不 git commit。
+- 与并行写者核验：落档前检索 `docs/knowledge_Layer/` 无既有 Phase 2 开工规划（无重复/覆盖）；对 `06` 的编辑均先重读目标行。
+- 规划发现（缺口，已写入 `06` 规划子节"现状核对"）：`exploration_sessions/nodes/edges` 建表已在 `knowledge/migrations/0001_init.sql`（但无 Go 读写代码）；`contextmgr` 无 `KnowledgeMode` / `Knowledge` 字段；工作区级 `knowledge_version` 无生成器；ADR-0008 的 `baseline_files_n` / `overlap_files_n` 新列与三入口 live 写入仍未实现（列为 W0，建议先于 W2 收口）。
+- 首片 S1 = W1 前半（探索记忆存储层 + `WorkspaceVersion` + 测试），零迁移、可在下一轮直接开工。
+- 旁注（非 Phase 2 阻塞，待复核）：`backend/internal/knowledge/config.go` 的 `DefaultMaxDBSizeMB = 200` 与 `04` §7.4 校准值 512MB 不一致（Phase 5 GC 触发点）。
+
+---
+
+## 2026-09-29 — ADR-0004 Accept（陈旧索引下 `code.*` 工具面）：P2 门禁解除
+
+owner 授权代改并记录裁决（先例：ADR-0008 / 0009）：ADR-0004 由 `Proposed` 改为 **`Accepted`**。
+
+### Changed
+
+- `adr/0004-stale-index-tool-surface.md`：`Status: Proposed` → `Accepted`，加注"2026-09-29，项目 owner 授权代改（先例：0008/0009）"；§10 追加接受记录；**正文其余不动**（Accepted 后不可改正文）。
+- `adr/README.md`：§5 索引表 `0004` 行（Proposed → **Accepted**）+ 新增"接受与落地状态（2026-09-29）"段落；2026-09-28 段落的剩余 Proposed 列表尾注同步。
+- `06` §0 一句话状态 / §1.1 Phase 2 行（未开始 → **门禁已解除，待开工**）/ §1.2 阻塞清单 / §3 ADR 表 / §4 Phase 2 前置与状态；`README.md` §0 当前阶段 / §2 文档状态表 / §4 进度表 Phase 2 行同步。
+- `supplement/05` §9 表第 4 行、`GLOSSARY.md` §4 的 `S_fresh` / `S_max` 条目（"须由 Phase 0 校准" → Gate = `Phase2-start`，补齐 2026-09-21 Gate 修订）同步。
+
+### Notes
+
+- 关键决策（陈旧索引下 `code.*` 工具面口径）：按陈旧度**分级注册**——新鲜全开；中等只开定义类 `code.find_symbol` / `code.search`；过旧全关；关系类 `code.find_refs` / `code.callers` / `code.impact` 陈旧时**不注册**（杜绝静默错误）。schema 恒定、描述可变；三个逃生舱开关。
+- `S_fresh`（60s）/ `S_max`（15min）阈值：**Gate = `Phase2-start`**（2026-09-21 由 `Phase0-baseline` 修订），初值**不阻塞 Accept**；§10 其余跟进项同 Gate。
+- **P2 门禁解除**（ADR-0008 §8.1 的"P2 进入条件 = ADR-0004 Accept"已满足），Phase 2 待开工；未开工事实不变（`04` §5 Phase 2 状态仍为"未开始"，本轮未改）。
+
+---
+
+## 2026-09-29 — ADR-0008 裁决落地（file-level 口径）+ α 定稿与 Phase 1 主门槛复核通过
+
+owner 授权代改并记录裁决：ADR-0008 采纳**选项 A**——grep 通道主判据 = **file-level 覆盖**（行级保留为诊断；view 口径不变）。
+
+### Changed
+
+- `adr/0008-grep-coverage-file-level.md`：`Proposed` → **`Accepted`**；新增 §8.1 落地与阈值定稿、§10 行状态更新；`adr/README.md` 索引与说明同步；`adr/0003` §10 的"α 与 Phase 1 门槛数值"待办标记完成。
+- `reports/phase1_shadow_report.md` §1 / §4.4 / §5.1：口径裁决依据（file-level mean 31.83 %、p90 100 %、usable@0.8 26.76 %、answerable 49.38 %；行级 0.47 % 仅作诊断）、α 定稿与 Phase 1 复核结论落稿。
+- `06` §1.1 / §1.3 / §3 ADR 表 / §4 Phase 1 状态行、`04` §5 Phase 1 状态、`README.md` §4 进度表与说明同步。
+- config：`knowledge.shadow.alpha` 字段已存在且默认即建议值 0.8，**无需改动**。
+
+### Verified
+
+- **α 定稿 = 0.8**；**Phase 1 门槛 = 合并 M1 ≥ 0.31**（95 % CI 下界，α=0.8）。
+- **Phase 1 主门槛复核 = Pass**：grep file-level `usable@0.8 = 26.76 %`（n=213）、view `M1 = 48.41 %`（n=157）、合并 **M1 = 133/370 = 35.95 % ≥ 0.31**；复算：报告 §6 第 2 步（`TestPhase1ShadowReplay`，`KNOWLEDGE_SHADOW_ALPHA=0.8`）。
+- **P2 进入条件 = ADR-0004 Accept**；ADR-0008 的"新列实现 + 三入口 live 写入新列"仍为 Open。
+
+---
+
+## 2026-09-29 — ADR-0009 落地（v1 表集口径，Accepted）：不变量检查器 5/5 PASS
+
+ADR-0009 由 `Proposed` 改为 `Accepted`（项目 owner 授权代改，先例见 2026-09-28 条目），并完成 §4 落地与 `06` §9 #19。
+
+### Changed
+
+- `04` §0.3：v1 表集声明 `≤16` → **`≤23`**（= `02` §8【v1 core】的 22 表 + `symbol_fts` 虚表；不含 `schema_migrations` / extension / deferred）。
+- `04` §4.3 标题 → "P0/P1 最小数据模型（16 张；v1 core 的子集）"；其余 15 处 DDL（14 表 + FTS 虚表，含索引）**引用化**，`04` 彻底无 DDL（#19）。例外映射（无 `02` DDL 的三项）：`schema_migrations` → `internal/migrate`、`symbol_aliases` → `supplement/01` §1.3、FTS 虚表 → `02` §73 的规范名 `symbol_fts`（旧稿名 `symbols_fts`）。
+- `02` §8：三分组落地——【v1 core】23 名 /【extension】1 名（`index_jobs`）/【已推迟】5 名（`branches`/`inheritance`/`dependencies`/`language_projects`/`events`；删除名以删除线或注记出现，不进入名字集合）；删除"本块与下方 DDL 不一致"旧注记。
+- `README.md` §3：v1 表集转述同步为 ≤23（见 `04` §0.3）；`adr/README.md`：`0009` 状态同步为 **Accepted**。
+- `06` §9：#2 / #3 / #7 / #19 / #20 标记完成并补结果；相邻待办仅剩 #5。
+- ADR-0009 §8.1 / §10：追加落地记录（含例外映射与行号提示）。
+
+### Verified
+
+- `cd backend; go run scripts/check_knowledge_doc_invariants.go` = **5/5 PASS**：I1（23 = 23）、I2（0 越位 DDL）、I3（0 漂移）、I4（三分组 23+1+2）、I5（声明 23 = 实际 23）。
+
+---
+
 ## 2026-09-29 — ADR-0009 起草（v1 表集口径裁决，Proposed）
 
 回应 ADR-0007 §10 的 `Phase1-start` 待办（I5：`04` 声明 ≤16 vs `02` 实际 23）与 `06` §9 待办 #2/#7/#20。

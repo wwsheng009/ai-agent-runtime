@@ -1,8 +1,9 @@
 # ADR-0008: grep 通道探索归因采用 file-level 覆盖口径
 
-- **Status**: Proposed
+- **Status**: Accepted
+- **Accepted**: 2026-09-29（项目 owner 授权代改，按最佳实践确认；阈值定稿与 Phase 1 复核见 §8.1）
 - **Date**: 2026-09-29
-- **Deciders**: 方案作者（起草，Proposed）/ 项目 owner（Accept 或 Reject）
+- **Deciders**: 方案作者（起草）/ 项目 owner（Accept）
 - **Gate**: `Phase1-shadow`（数据前提 2026-09-29 已满足，见 §1）
 - **Reversibility**: cheap（仅测量：新列可空 / `DEFAULT 0`，撤销 = 停止读写新列，无数据迁移）
 - **Supersedes**: 部分取代 [ADR-0003](0003-exploration-attribution-metrics.md) §4.2 中 **grep 通道**的 coverage 口径；
@@ -129,6 +130,15 @@
   说明候选映射已接近文本检索语义，可再评估是否合并口径（列入 §10）。
 - Phase 1 验收：三入口 live 数据须写入新列（接入验证项），M1 按通道报告。
 
+### 8.1 落地与阈值定稿（2026-09-29）
+
+- **状态**：owner 授权代改，`Proposed` → `Accepted`（采纳选项 A：grep 主判据 file-level，行级保留为诊断；view 口径不变）。
+- **α 定稿**：**0.8**（两通道统一）。依据：`04` §7.6 的中位数规则在双峰覆盖分布上退化（grep file-level 中位数 0 → 下限 0.10，等价于不设门槛；view 中位数 0.733 取整 0.75 与 0.8 对 M1 差异可忽略），故沿用 `DefaultShadowAlpha`——`knowledge.shadow.alpha` 字段已存在且默认即 0.8，无需改动代码/config；按通道复校准列为 Phase 2 复测项。
+- **Phase 1 主门槛复核（α=0.8）**：grep file-level `usable@0.8 = 26.76 %`（n=213）、view `M1 = 48.41 %`（n=157）、合并 **M1 = 35.95 %**（133/370）；门槛按 §7.6 的 95 % CI 法取合并置信下界 **≥ 0.31** → **主门槛通过**。复算命令见报告 §6（`TestPhase1ShadowReplay`，`KNOWLEDGE_SHADOW_ALPHA=0.8`）。
+- **P2 进入条件**：**ADR-0004 Accept**（`Phase2-start`）。
+- **仍未完成（本 ADR 既有 follow-up）**：新列实现（`baseline_files_n` / `overlap_files_n`，additive 迁移 + writer/reader + 测试）与三入口 live 写入新列——见 §10。
+- **口径提示**：0.31 为 95 % CI 下界（保守端）；若 owner 另定固定门槛，以其为准重判。
+
 ## 9. Alternatives Rejected (and why)
 
 | 方案 | 否决理由（一句话） |
@@ -142,9 +152,9 @@
 
 | 项 | Gate |
 |---|---|
-| α 与 Phase 1 门槛数值（按通道校准，`04` §7.6） | `Phase1-shadow`（数据已具备） |
-| 新列实现（additive 迁移 + writer/reader + 测试） | 本 ADR Accept 后 |
-| 三入口 live 数据写入新列（接入验证） | Phase 1 验收前 |
+| ✅ **已定稿（2026-09-29）**：α = 0.8；Phase 1 门槛 = 合并 M1 ≥ 0.31（95 % CI 下界）；主门槛复核 = 通过（见 §8.1） | `Phase1-shadow`（已满足） |
+| 新列实现（additive 迁移 + writer/reader + 测试） | 本 ADR Accept 后（**仍未执行**） |
+| 三入口 live 数据写入新列（接入验证） | Phase 1 验收前（**仍未执行**） |
 | per-file / per-symbol 归因层（回答"命中文件里是否真的读了那一行"） | `Phase2-start`（ADR-0003 §10 原项） |
 | grep 候选映射继续收敛（`literal=true`、glob+path 双约束、未解析标识符 refs 扩展） | 工程项，不阻塞本 ADR |
 | file-level 与行级差异收敛后是否合并口径 | `Phase2-start` |

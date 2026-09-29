@@ -72,31 +72,41 @@ Proposed ──(owner 接受)──→ Accepted ──(被新 ADR 取代)──�
 | [0001](0001-project-module-language-schema.md) | Project/Module/Language 模型收敛 | **Accepted**（2026-09-28） | expensive（但当前零迁移成本） | **Phase1-start** | `02` 的 `language_projects` |
 | [0002](0002-acp-lsp-ownership.md) | ACP 下 LSP 归属与能力面 | Proposed | cheap | Phase4-start | `supplement/05` §2.3 的 `external_preferred` |
 | [0003](0003-exploration-attribution-metrics.md) | 探索归因与 shadow 差异率度量 | **Accepted**（2026-09-28，口径；阈值待 `Phase1-shadow`） | cheap（仅测量） | **Phase1-shadow**（阈值）/ Phase1-start（口径） | `supplement/05` §9.3 |
-| [0004](0004-stale-index-tool-surface.md) | 陈旧索引下的 `code.*` 工具面 | Proposed | cheap | Phase2-start | `supplement/05` §9.4 |
+| [0004](0004-stale-index-tool-surface.md) | 陈旧索引下的 `code.*` 工具面 | **Accepted**（2026-09-29，owner 授权代改） | cheap | Phase2-start | `supplement/05` §9.4 |
 
 > **Gate 可达性修订（2026-09-21）**：`0004` §10 的 `S_fresh` / `S_max` 取值 Gate 由 `Phase0-baseline` 改为 **`Phase2-start`**——二者是 **reader 观测到的陈旧度**阈值，需要索引 + 多进程仲裁 + 心跳数据，Phase 0（`mode=off`、无索引、无 reader）**结构上产不出**。注意：`0004` 的 Accept **本来就不被该值阻塞**（§4.1 已声明 60s / 15min 为初始值），此处仅修正 Gate 指向。
 | [0005](0005-windows-child-process-lifecycle.md) | Windows 子进程树生命周期与复用既有 process guard | Proposed | moderate | Phase4-start | `supplement/05` §9.5 |
 | [0006](0006-lsp-position-encoding-boundary.md) | LSP 位置编码转换边界与缓存键 | Proposed | moderate | Phase4-start | 澄清并补齐 `supplement/05_...md` §10.3（原 `03` §5.3） |
 | [0007](0007-phantom-tables-and-doc-invariants.md) | 幽灵表清理与文档不变量 | **Accepted**（2026-09-28） | cheap | Phase1-start | `02` §8 的 6 个无 DDL 表名；`04` L546 的 `index_jobs` DDL 落点 |
-| [0008](0008-grep-coverage-file-level.md) | grep 通道探索归因采用 file-level 覆盖口径 | Proposed（2026-09-29 起草） | cheap（仅测量） | `Phase1-shadow`（数据已具备） | 部分取代 [0003](0003-exploration-attribution-metrics.md) §4.2 的 grep 通道 coverage 口径 |
-| [0009](0009-v1-table-set-scope.md) | v1 表集口径裁决（上限定义域、三分组与命名规范） | Proposed（2026-09-29 起草） | cheap | **Phase1-start** | `04` §0.3/§4.3 的 "≤16 张" 口径；`../README.md` §3 的同一转述 |
+| [0008](0008-grep-coverage-file-level.md) | grep 通道探索归因采用 file-level 覆盖口径 | **Accepted**（2026-09-29，owner 授权代改） | cheap（仅测量） | `Phase1-shadow`（已满足） | 部分取代 [0003](0003-exploration-attribution-metrics.md) §4.2 的 grep 通道 coverage 口径；α=0.8、M1 ≥ 0.31，主门槛复核通过（见 §8.1） |
+| [0009](0009-v1-table-set-scope.md) | v1 表集口径裁决（上限定义域、三分组与命名规范） | **Accepted**（2026-09-29，owner 授权代改） | cheap | **Phase1-start** | `04` §0.3/§4.3 的 "≤16 张" 口径；`../README.md` §3 的同一转述（已取代） |
 
 > **落盘状态（2026-09-20）**：`0000`（模板）与 `0001`–`0007` 均已落盘，**全部为 `Proposed`**，等待 owner 按 §2 逐个 Accept。
-> **接受状态（2026-09-28）**：项目 owner 授权代改并记录裁决，`0001`（Project/Module/Language 模型收敛）、`0003`（探索归因**口径**部分——§10 的 α 阈值仍受 `Phase1-shadow` 门禁约束）、`0007`（幽灵表清理与文档不变量）已由 `Proposed` 改为 `Accepted`，**Phase 1 的 `Phase1-start` 门禁解除**；裁决记录见 `../CHANGELOG.md` 的 2026-09-28 条目。`0002` / `0004` / `0005` / `0006` 仍为 `Proposed`。
+> **接受状态（2026-09-28）**：项目 owner 授权代改并记录裁决，`0001`（Project/Module/Language 模型收敛）、`0003`（探索归因**口径**部分——§10 的 α 阈值仍受 `Phase1-shadow` 门禁约束）、`0007`（幽灵表清理与文档不变量）已由 `Proposed` 改为 `Accepted`，**Phase 1 的 `Phase1-start` 门禁解除**；裁决记录见 `../CHANGELOG.md` 的 2026-09-28 条目。`0002` / `0005` / `0006` 仍为 `Proposed`（`0004` 已于 2026-09-29 接受，见下）。
 > **注意**：ADR **不得复制 DDL**（§7）。ADR-0007 §4.3 要求把 `04` 中的 `CREATE TABLE index_jobs` 迁移到 extension schema；
 > **已于 2026-09-28 执行**：迁至 [`supplement/15_change_management.md`](supplement/15_change_management.md) §15.3，`04` §4.3 只留用途 / 验收指标 / 引用（其余 core 表 DDL 的引用化见 `06` §9 待办 #19）。
 >
-> **2026-09-29 新增**：`0008` 由方案作者起草（**Proposed**），依据 `Phase1-shadow` 实测
-> （[`reports/phase1_shadow_report.md`](../reports/phase1_shadow_report.md) §4.1 / §4.3）——
-> grep 行级覆盖被 ADR-0003 §6.2 预告的低估偏差主导（行级 M1=0.47 %，
-> 同批 file-level usable@0.8=26.76 %、answerable=49.38 %）。等待 owner 裁决；
+> **接受与落地状态（2026-09-29）**：`0008` 经项目 owner 授权代改，由 `Proposed` 改为 **`Accepted`**——
+> grep 通道主判据采用 file-level（行级保留为诊断），依据 [报告](../reports/phase1_shadow_report.md) §4.1 / §4.3
+> （行级 M1=0.47 % 为 ADR-0003 §6.2 已预告的低估；同批 file-level mean 31.83 %、p90 100 %、usable@0.8=26.76 %、answerable=49.38 %）。
+> 阈值定稿 **α=0.8**、Phase 1 门槛 **合并 M1 ≥ 0.31**（95 % CI 下界）→ **主门槛复核通过**
+> （合并 M1=35.95 %，grep 26.76 % / view 48.41 %；P2 进入条件 = ADR-0004 Accept），
+> 详见 [ADR-0008](0008-grep-coverage-file-level.md) §8.1 与 `../CHANGELOG.md` 同日条目；
 > ADR-0003 §10 的"抽样核对报告"待办由该报告以全量重放回应。
 >
-> **2026-09-29 新增（0009）**：`0009` 由方案作者起草（**Proposed**），裁决 ADR-0007 §10 的 I5 待办
-> （`04` 声明 ≤16 vs `02` 实际 23 = 22 表 + `symbol_fts` 虚表）。推荐 **选项 C：上限与分组解耦，
-> `v1 表集上限` 只约束【v1 core】**（数字 16→23；extension/deferred 与 `schema_migrations` 不计入）；
-> 附录 A/B/C 给出 28 名三分组建议、6 幽灵名去向与 I3 两对漂移的规范名
-> （`inheritance_edges`、`dependency_versions`）。等待 owner 裁决；裁决前不改 `02`/`04`/`supplement/*`/`06`。
+> **接受与落地状态（2026-09-29）**：`0009` 经项目 owner 授权代改，由 `Proposed` 改为 **`Accepted`**，
+> 采纳 **选项 C：上限与分组解耦，`v1 表集上限` 只约束【v1 core】**（数字 16→23；extension/deferred 与
+> `schema_migrations` 不计入）；`02`/`04`/`../README.md`/`06` 已同步，检查器复跑 **5/5 PASS**
+> （I1 23=23 / I2 零越位 / I3 零漂移 / I4 三分组 23+1+2 / I5 声明 23=实际 23），
+> 详见 [ADR-0009](0009-v1-table-set-scope.md) §8.1 与 `../CHANGELOG.md` 同日条目。
+>
+> **接受与落地状态（2026-09-29）**：`0004` 经项目 owner 授权代改（先例 `0008` / `0009`），由 `Proposed` 改为 **`Accepted`**——
+> 陈旧索引下 `code.*` 采纳 §4 **选项 D：按陈旧度分级注册**（新鲜全开；中等陈旧只开定义类
+> `code.find_symbol` / `code.search`；过旧全关；关系类 `code.find_refs` / `code.callers` / `code.impact`
+> 陈旧时不注册，以免静默错误）；schema 恒定、描述可变；三个逃生舱开关。
+> `S_fresh`（60s）/ `S_max`（15min）为**初始值**，实际取值 Gate = **`Phase2-start`**（§4.1 已声明不阻塞 Accept）；
+> §10 其余跟进项（`code.impact` 档位、reader 通知机制、与 `04` §4.6 对齐）同 Gate。
+> **P2 门禁解除，Phase 2 待开工**；裁决记录见 `../CHANGELOG.md` 的 2026-09-29 条目。
 
 ---
 

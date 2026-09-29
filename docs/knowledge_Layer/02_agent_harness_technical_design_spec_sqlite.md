@@ -281,62 +281,36 @@ PRAGMA busy_timeout = 5000;
 
 # 8. SQLite 数据模型总览
 
-> **⚠️ 本块与下方 DDL 不一致（2026-09-20 核查）**
+> **三分组已落地（ADR-0009，2026-09-29）**
 >
-> 下列清单共 **28** 个名字，但本文件的 `CREATE TABLE` 区块（L320–1039）只定义了 **22** 张
-> （另有 1 张虚拟表 `symbol_fts`，L2159）。**6 个名字在本文件中没有 DDL**：
-> `branches`、`inheritance`、`dependencies`、`language_projects`、`index_jobs`、`events`。
->
-> - `language_projects` / `events` 的处置见 [ADR-0001](adr/0001-project-module-language-schema.md) §4.7；
-> - 其余 4 个见 [ADR-0007](adr/0007-phantom-tables-and-doc-invariants.md) §4.1，其中包含两处**命名漂移**
->   （`inheritance` vs `03.inheritance_edges`、`dependencies` vs `03.dependency_versions`）
->   与一处 **DDL 越位**（`index_jobs` 的 DDL 原在 `04` L546，而非本文件；**2026-09-28 已按 ADR-0007 §4.3 迁至 `supplement/15_change_management.md` §15.3**）。
-> - [ADR-0007](adr/0007-phantom-tables-and-doc-invariants.md) §4.2 要求本块拆为
->   **【v1 core】/【extension】/【deferred】三分组**，并配机械不变量检查（I1–I5）。
->   **在 ADR-0007 被 Accept 之前不执行重组**，此处仅作标注。
->
-> **阅读本块时请勿假定其中每个名字都已存在。**
+> 本块已按 [ADR-0009](adr/0009-v1-table-set-scope.md) 附录 A/D 拆为三分组：
+> 【v1 core】= 本文件携带 DDL 的集合（22 表 + `symbol_fts` 虚表，共 **23** 名）——即"v1 表集上限"的定义域；
+> 【extension】的 DDL 在 `supplement/*`（不计入上限）；【已推迟】为 `04` §4.3 的 v2+ 清单，
+> 其中 `~~删除线~~` 与 `——` 后文字仅作处置注记、不构成表名。
+> 此前"本块与下方 DDL 不一致"的注记（2026-09-20）已随本裁决删除；6 幽灵名去向见 ADR-0009 附录 B。
 
 ```text
-workspaces
-repositories
-branches
-commits
+【v1 core】——本文件携带 DDL（22 表 + 1 虚表 = 23 名）；即 v1 表集上限的定义域
+  workspaces, repositories, commits, files, file_versions,
+  symbols, symbol_versions, references, calls, imports,
+  exploration_sessions, exploration_nodes, exploration_edges,
+  tasks, task_files, task_symbols,
+  context_snapshots, context_items,
+  tool_calls, tool_results, cache_entries, invalidation_events,
+  symbol_fts (virtual)
 
-files
-file_versions
+【extension】——DDL 在 supplement/*，不在本文件；不计入 v1 表集上限
+  index_jobs
 
-symbols
-symbol_versions
-
-references
-imports
-
-calls
-inheritance
-dependencies
-
-exploration_sessions
-exploration_nodes
-exploration_edges
-
-tasks
-task_files
-task_symbols
-
-context_snapshots
-context_items
-
-tool_calls
-tool_results
-
-cache_entries
-invalidation_events
-
-language_projects
-index_jobs
-events
+【已推迟】——不在 v1（`04` §4.3 v2+ 清单）；`——` 后与 `~~…~~` 为处置注记，不进入名字集合
+  inheritance_edges —— 规范名（`supplement/03` §3.2）；旧名 ~~inheritance~~ 已删除（v2+）
+  dependency_versions —— 规范名（`supplement/02` §2.2）；旧名 ~~dependencies~~ 已删除（v2+）
+  ~~branches~~ —— 已删除（`repositories.current_branch` + `commits.parent_hash` 取代）
+  ~~language_projects~~ —— 已删除（由 `project_languages` 取代，见 extension 组第二批）
+  ~~events~~ —— 已删除（v2+ 由 `events_outbox` + `consumer_offsets` 取代；v1 用 `invalidation_events`）
 ```
+
+> **extension 第二批**（待与 ADR-0001 落地同步，现不计入任何分组名单）：`symbol_aliases`、`projects`、`modules`、`project_languages`、`dependency_packages`（见 ADR-0009 §10）。
 
 ---
 
