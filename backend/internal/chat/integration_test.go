@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // MockLLMProviderForChat 用于 Chat/Session 集成测试的 Mock 提供者
@@ -100,7 +100,7 @@ func TestSessionManagerWithLLMRuntime(t *testing.T) {
 	// 创建 LLM Runtime 并注册 Mock Provider
 	runtimeConfig := &llm.RuntimeConfig{
 		DefaultModel: "gpt-4",
-		MaxRetries:    2,
+		MaxRetries:   2,
 	}
 	runtime := llm.NewLLMRuntime(runtimeConfig)
 	mockProvider := NewMockLLMProviderForChat()
@@ -137,7 +137,7 @@ func TestSessionPersistenceWithLLM(t *testing.T) {
 	// 创建 LLM Runtime
 	runtimeConfig := &llm.RuntimeConfig{
 		DefaultModel: "gpt-4",
-		MaxRetries:    2,
+		MaxRetries:   2,
 	}
 	runtime := llm.NewLLMRuntime(runtimeConfig)
 	mockProvider := NewMockLLMProviderForChat()
@@ -178,7 +178,7 @@ func TestSessionTTLWithLLMExecution(t *testing.T) {
 	ctx := context.Background()
 	storage := NewInMemoryStorage()
 	config := &SessionManagerConfig{
-		TTL:            100 * time.Millisecond,
+		TTL:             100 * time.Millisecond,
 		CleanupInterval: 50 * time.Millisecond,
 	}
 	manager := NewSessionManager(storage, config)
@@ -284,7 +284,7 @@ func TestSessionWithMCPManagerIntegration(t *testing.T) {
 	// 创建 LLM Runtime
 	runtimeConfig := &llm.RuntimeConfig{
 		DefaultModel: "gpt-4",
-		MaxRetries:    2,
+		MaxRetries:   2,
 	}
 	runtime := llm.NewLLMRuntime(runtimeConfig)
 	mockProvider := NewMockLLMProviderForChat()
@@ -371,7 +371,7 @@ func TestSessionAgentWorkflow(t *testing.T) {
 	// 创建 LLM Runtime
 	runtimeConfig := &llm.RuntimeConfig{
 		DefaultModel: "gpt-4",
-		MaxRetries:    2,
+		MaxRetries:   2,
 	}
 	runtime := llm.NewLLMRuntime(runtimeConfig)
 	mockProvider := NewMockLLMProviderForChat()
@@ -379,10 +379,10 @@ func TestSessionAgentWorkflow(t *testing.T) {
 
 	// 创建 Agent 配置
 	agentConfig := &agent.Config{
-		Name:          "test-agent",
-		Model:         "gpt-4",
-		MaxSteps:      10,
-		SystemPrompt:  "You are a helpful assistant.",
+		Name:         "test-agent",
+		Model:        "gpt-4",
+		MaxSteps:     10,
+		SystemPrompt: "You are a helpful assistant.",
 	}
 
 	// 创建 Agent (简化场景，不需要实际运行)

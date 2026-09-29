@@ -50,10 +50,10 @@ func TestResultFromPartsError(t *testing.T) {
 
 func TestResultEventMapIsCompact(t *testing.T) {
 	result := ResultFromParts("view", "call-map", strings.Repeat("x", 500), "", map[string]interface{}{
-		toolresult.MetadataKey:      toolresult.KindText,
-		toolresult.SourceKey:        toolresult.SourceToolkit,
+		toolresult.MetadataKey:        toolresult.KindText,
+		toolresult.SourceKey:          toolresult.SourceToolkit,
 		toolresult.MetadataOutcomeKey: toolresult.OutcomeSuccess,
-		"noisy_internal":            "should-not-appear",
+		"noisy_internal":              "should-not-appear",
 	})
 	eventMap := result.EventMap()
 	if eventMap["ok"] != true {

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
 func TestSessionProviderBuildUsesSessionSnapshot(t *testing.T) {

@@ -16,13 +16,13 @@ type Request struct {
 
 // Result 统一结果
 type Result struct {
-	Success      bool           `json:"success" yaml:"success"`
-	Output       string         `json:"output" yaml:"output"`
-	Skill        string         `json:"skill,omitempty" yaml:"skill,omitempty"`
-	Observations []Observation  `json:"observations,omitempty" yaml:"observations,omitempty"`
-	Usage        *TokenUsage    `json:"usage,omitempty" yaml:"usage,omitempty"`
-	Duration     Duration       `json:"duration" yaml:"duration"`
-	Error        string         `json:"error,omitempty" yaml:"error,omitempty"`
+	Success      bool          `json:"success" yaml:"success"`
+	Output       string        `json:"output" yaml:"output"`
+	Skill        string        `json:"skill,omitempty" yaml:"skill,omitempty"`
+	Observations []Observation `json:"observations,omitempty" yaml:"observations,omitempty"`
+	Usage        *TokenUsage   `json:"usage,omitempty" yaml:"usage,omitempty"`
+	Duration     Duration      `json:"duration" yaml:"duration"`
+	Error        string        `json:"error,omitempty" yaml:"error,omitempty"`
 }
 
 // Clone 克隆请求
@@ -134,8 +134,8 @@ func (r *Request) MarkSuccess(output string) *Result {
 // NewResult 创建结果
 func NewResult(success bool, output string) *Result {
 	return &Result{
-		Success:  success,
-		Output:   output,
+		Success: success,
+		Output:  output,
 		Duration: Duration{
 			Start: time.Now(),
 			End:   time.Now(),

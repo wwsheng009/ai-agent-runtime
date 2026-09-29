@@ -41,15 +41,15 @@ func TestEvaluateAlerts_OutboxBacklog(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		runID := "run_ob_" + string(rune('a'+i))
 		created, err := store.EnqueueCompletionOutbox(ctx, CompletionOutboxEntry{
-			OutboxID:       "outbox_" + runID,
-			RunID:          runID,
-			SessionID:      "child-1",
+			OutboxID:        "outbox_" + runID,
+			RunID:           runID,
+			SessionID:       "child-1",
 			ParentSessionID: "parent-session",
-			RootSessionID:  "root-session",
-			Status:         RunStatusSucceeded,
-			IdempotencyKey: "subagent_completion:" + runID + ":1",
-			PayloadJSON:    payload,
-			CreatedAt:      now,
+			RootSessionID:   "root-session",
+			Status:          RunStatusSucceeded,
+			IdempotencyKey:  "subagent_completion:" + runID + ":1",
+			PayloadJSON:     payload,
+			CreatedAt:       now,
 		})
 		require.NoError(t, err)
 		require.True(t, created)

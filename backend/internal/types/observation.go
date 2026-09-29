@@ -4,15 +4,15 @@ import "time"
 
 // Observation 执行观察记录
 type Observation struct {
-	Step       string                 `json:"step" yaml:"step"`
-	Tool       string                 `json:"tool" yaml:"tool"`
-	Input      interface{}            `json:"input" yaml:"input"`
-	Output     interface{}            `json:"output" yaml:"output"`
-	Success    bool                   `json:"success" yaml:"success"`
-	Error      string                 `json:"error,omitempty" yaml:"error,omitempty"`
-	Metrics    map[string]interface{} `json:"metrics,omitempty" yaml:"metrics,omitempty"`
-	Timestamp  time.Time              `json:"timestamp" yaml:"timestamp"`
-	Duration   Duration               `json:"duration" yaml:"duration"`
+	Step      string                 `json:"step" yaml:"step"`
+	Tool      string                 `json:"tool" yaml:"tool"`
+	Input     interface{}            `json:"input" yaml:"input"`
+	Output    interface{}            `json:"output" yaml:"output"`
+	Success   bool                   `json:"success" yaml:"success"`
+	Error     string                 `json:"error,omitempty" yaml:"error,omitempty"`
+	Metrics   map[string]interface{} `json:"metrics,omitempty" yaml:"metrics,omitempty"`
+	Timestamp time.Time              `json:"timestamp" yaml:"timestamp"`
+	Duration  Duration               `json:"duration" yaml:"duration"`
 }
 
 // NewObservation 创建新的观察记录

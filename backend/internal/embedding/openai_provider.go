@@ -27,7 +27,7 @@ type OpenAIEmbeddingRequest struct {
 
 // OpenAIEmbeddingResponse OpenAI Embedding 响应
 type OpenAIEmbeddingResponse struct {
-	Object string    `json:"object"`
+	Object string `json:"object"`
 	Data   []struct {
 		Object    string    `json:"object"`
 		Embedding []float32 `json:"embedding"`
@@ -220,9 +220,9 @@ func (p *OpenAIProvider) GenerateBatch(texts []string) ([]*Embedding, error) {
 	// 对于批量请求，可以使用 OpenAI 的批量 API 或并发请求
 	// 这里实现一种简化版本：并发请求
 	type result struct {
-		index    int
+		index     int
 		embedding *Embedding
-		err      error
+		err       error
 	}
 
 	resultChan := make(chan result, len(texts))

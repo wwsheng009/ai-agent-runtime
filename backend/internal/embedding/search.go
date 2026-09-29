@@ -8,8 +8,8 @@ import (
 
 // Filter 过滤器
 type Filter struct {
-	Key      string      // 元数据键
-	Value    any         // 期望值
+	Key      string         // 元数据键
+	Value    any            // 期望值
 	Operator FilterOperator // 操作符
 }
 
@@ -17,25 +17,25 @@ type Filter struct {
 type FilterOperator int
 
 const (
-	FilterEqual FilterOperator = iota // 等于
-	FilterNotEqual                    // 不等于
-	FilterContains                    // 包含
-	FilterNotContains                 // 不包含
-	FilterGreaterThan                 // 大于
-	FilterLessThan                    // 小于
-	FilterExists                      // 存在
-	FilterNotExists                   // 不存在
+	FilterEqual       FilterOperator = iota // 等于
+	FilterNotEqual                          // 不等于
+	FilterContains                          // 包含
+	FilterNotContains                       // 不包含
+	FilterGreaterThan                       // 大于
+	FilterLessThan                          // 小于
+	FilterExists                            // 存在
+	FilterNotExists                         // 不存在
 )
 
 // SearchConfig 搜索配置
 type SearchConfig struct {
-	TopK              int          // 返回结果数量
-	Threshold         float32      // 相似度阈值
-	Filters           []Filter     // 过滤条件
-	IncludeMetadata   bool         // 是否包含元数据
-	IncludeDistance   bool         // 是否包含距离信息
-	Rerank            bool         // 是否重新排序
-	ContextWindowSize int          // 上下文窗口大小（字符）
+	TopK              int      // 返回结果数量
+	Threshold         float32  // 相似度阈值
+	Filters           []Filter // 过滤条件
+	IncludeMetadata   bool     // 是否包含元数据
+	IncludeDistance   bool     // 是否包含距离信息
+	Rerank            bool     // 是否重新排序
+	ContextWindowSize int      // 上下文窗口大小（字符）
 }
 
 // DefaultSearchConfig 默认搜索配置
@@ -54,15 +54,15 @@ func DefaultSearchConfig() *SearchConfig {
 // SemanticSearchResult 语义搜索结果
 type SemanticSearchResult struct {
 	*SearchResult
-	Context    string            // 上下文片段
-	Metadata   map[string]any    // 过滤后的元数据
-	Highlight  []string          // 高亮关键词
+	Context   string         // 上下文片段
+	Metadata  map[string]any // 过滤后的元数据
+	Highlight []string       // 高亮关键词
 }
 
 // SemanticSearcher 语义搜索器
 type SemanticSearcher struct {
-	index   *VectorIndex
-	config  *SearchConfig
+	index  *VectorIndex
+	config *SearchConfig
 }
 
 // NewSemanticSearcher 创建语义搜索器
@@ -498,8 +498,8 @@ func (ss *SemanticSearcher) SearchRegex(pattern string, topK int) ([]*SemanticSe
 						Rank:     len(results),
 						Distance: 0,
 					},
-					Context:  item.Content[start:end],
-					Metadata: metadata,
+					Context:   item.Content[start:end],
+					Metadata:  metadata,
 					Highlight: []string{item.Content[matches[0]:matches[1]]},
 				}
 

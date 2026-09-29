@@ -15,9 +15,10 @@ import (
 
 // BuildHostKeyCallback 根据 Options 构建 host key 校验回调。
 // mode 取值：
-//   "no"         — 跳过校验，输出警告（Insecure）
-//   默认/空      — accept-new：首次自动接受并追加到 known_hosts
-//   "yes" / 其他 — 严格模式：拒绝未知主机
+//
+//	"no"         — 跳过校验，输出警告（Insecure）
+//	默认/空      — accept-new：首次自动接受并追加到 known_hosts
+//	"yes" / 其他 — 严格模式：拒绝未知主机
 func BuildHostKeyCallback(opts *Options, stderr io.Writer) (ssh.HostKeyCallback, error) {
 	if opts.StrictHostKeyChecking == StrictModeNo {
 		warnOnce(stderr, "Warning: StrictHostKeyChecking is disabled, hosts keys are not verified (MITM risk)")
@@ -141,4 +142,3 @@ func warnOnce(w io.Writer, msg string) {
 	warnedMessages[msg] = true
 	fmt.Fprintln(w, msg)
 }
-

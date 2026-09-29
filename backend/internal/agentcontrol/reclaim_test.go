@@ -268,29 +268,29 @@ func TestQuotaChildrenLargeMixedSetWithTerminalRows(t *testing.T) {
 			})
 		case 1: // active child
 			records = append(records, AgentRecord{
-				AgentID:        fmt.Sprintf("child-%d", i),
-				RootSessionID:  fmt.Sprintf("root-%d", i),
-				AgentPath:      fmt.Sprintf("/root/child-%d", i),
-				AgentType:      AgentTypeChild,
-				Status:         AgentStatusActive,
+				AgentID:       fmt.Sprintf("child-%d", i),
+				RootSessionID: fmt.Sprintf("root-%d", i),
+				AgentPath:     fmt.Sprintf("/root/child-%d", i),
+				AgentType:     AgentTypeChild,
+				Status:        AgentStatusActive,
 			})
 		case 2: // closed child
 			records = append(records, AgentRecord{
-				AgentID:        fmt.Sprintf("closed-%d", i),
-				RootSessionID:  fmt.Sprintf("root-%d", i),
-				AgentPath:      fmt.Sprintf("/root/closed-%d", i),
-				AgentType:      AgentTypeChild,
-				Status:         AgentStatusClosed,
-				ClosedAt:       &closedAt,
+				AgentID:       fmt.Sprintf("closed-%d", i),
+				RootSessionID: fmt.Sprintf("root-%d", i),
+				AgentPath:     fmt.Sprintf("/root/closed-%d", i),
+				AgentType:     AgentTypeChild,
+				Status:        AgentStatusClosed,
+				ClosedAt:      &closedAt,
 			})
 		case 3: // stale child
 			records = append(records, AgentRecord{
-				AgentID:        fmt.Sprintf("stale-%d", i),
-				RootSessionID:  fmt.Sprintf("root-%d", i),
-				AgentPath:      fmt.Sprintf("/root/stale-%d", i),
-				AgentType:      AgentTypeChild,
-				Status:         AgentStatusStale,
-				ClosedAt:       &closedAt,
+				AgentID:       fmt.Sprintf("stale-%d", i),
+				RootSessionID: fmt.Sprintf("root-%d", i),
+				AgentPath:     fmt.Sprintf("/root/stale-%d", i),
+				AgentType:     AgentTypeChild,
+				Status:        AgentStatusStale,
+				ClosedAt:      &closedAt,
 			})
 		}
 	}

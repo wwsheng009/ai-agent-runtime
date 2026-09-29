@@ -14,11 +14,11 @@ import (
 
 // LocalSiteAccountService implements runtime Web/CLI-shared site detect + account sync.
 type LocalSiteAccountService struct {
-	configPath      string
-	authStorePath   string
-	client          *siteaccount.Client
-	loadConfig      func(path string) (*agentconfig.Config, error)
-	now             func() time.Time
+	configPath       string
+	authStorePath    string
+	client           *siteaccount.Client
+	loadConfig       func(path string) (*agentconfig.Config, error)
+	now              func() time.Time
 	providerReloader func(cfg *agentconfig.Config) error
 }
 

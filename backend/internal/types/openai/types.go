@@ -11,43 +11,43 @@ const (
 
 // ChatCompletionRequest OpenAI聊天完成请求
 type ChatCompletionRequest struct {
-	Model               string           `json:"model"`
-	Messages            []Message        `json:"messages,omitempty"`
-	Temperature         *float64         `json:"temperature,omitempty"`
-	MaxTokens           *int             `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int             `json:"max_completion_tokens,omitempty"` // 推理模型使用
-	TopP                *float64         `json:"top_p,omitempty"`
-	TopK                *int             `json:"top_k,omitempty"` // Top-K 采样参数
-	Stream              bool             `json:"stream,omitempty"`
-	StreamOptions       *StreamOptions   `json:"stream_options,omitempty"` // 流式响应选项
-	Stop                []string         `json:"stop,omitempty"`
-	N                   *int             `json:"n,omitempty"`
-	Tools               []Tool           `json:"tools,omitempty"`
-	ToolChoice          interface{}      `json:"tool_choice,omitempty"` // string or object
-	ParallelToolCalls   *bool            `json:"parallel_tool_calls,omitempty"` // 并行工具调用控制
-	User                string           `json:"user,omitempty"` // 用户标识符
-	FrequencyPenalty    *float64         `json:"frequency_penalty,omitempty"` // 频率惩罚（-2.0 到 2.0）
-	PresencePenalty     *float64         `json:"presence_penalty,omitempty"` // 存在惩罚（-2.0 到 2.0）
-	Seed                *float64         `json:"seed,omitempty"` // 随机种子，用于可重现的输出
-	LogProbs            *bool            `json:"logprobs,omitempty"` // 是否返回对数概率
-	TopLogProbs         *int             `json:"top_logprobs,omitempty"` // 返回顶部对数概率数量（0-5）
-	EncodingFormat      json.RawMessage  `json:"encoding_format,omitempty"` // token 编码格式
-	ReasoningEffort     string           `json:"reasoning_effort,omitempty"` // OpenAI reasoning_effort 原样透传字段
-	Reasoning           *Reasoning       `json:"reasoning,omitempty"` // 推理参数
-	WebSearchOptions    *WebSearchOptions `json:"web_search_options,omitempty"` // Web搜索选项
-	ResponseFormat      *ResponseFormat  `json:"response_format,omitempty"` // 响应格式（JSON 模式、结构化输出）
-	Audio               json.RawMessage  `json:"audio,omitempty"` // 音频选项（TTS/STT）
-	Modalities          json.RawMessage  `json:"modalities,omitempty"` // 多模态配置
-	THINKING            *json.RawMessage `json:"thinking,omitempty"` // Claude Thinking 格式（内部使用）
+	Model               string            `json:"model"`
+	Messages            []Message         `json:"messages,omitempty"`
+	Temperature         *float64          `json:"temperature,omitempty"`
+	MaxTokens           *int              `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int              `json:"max_completion_tokens,omitempty"` // 推理模型使用
+	TopP                *float64          `json:"top_p,omitempty"`
+	TopK                *int              `json:"top_k,omitempty"` // Top-K 采样参数
+	Stream              bool              `json:"stream,omitempty"`
+	StreamOptions       *StreamOptions    `json:"stream_options,omitempty"` // 流式响应选项
+	Stop                []string          `json:"stop,omitempty"`
+	N                   *int              `json:"n,omitempty"`
+	Tools               []Tool            `json:"tools,omitempty"`
+	ToolChoice          interface{}       `json:"tool_choice,omitempty"`         // string or object
+	ParallelToolCalls   *bool             `json:"parallel_tool_calls,omitempty"` // 并行工具调用控制
+	User                string            `json:"user,omitempty"`                // 用户标识符
+	FrequencyPenalty    *float64          `json:"frequency_penalty,omitempty"`   // 频率惩罚（-2.0 到 2.0）
+	PresencePenalty     *float64          `json:"presence_penalty,omitempty"`    // 存在惩罚（-2.0 到 2.0）
+	Seed                *float64          `json:"seed,omitempty"`                // 随机种子，用于可重现的输出
+	LogProbs            *bool             `json:"logprobs,omitempty"`            // 是否返回对数概率
+	TopLogProbs         *int              `json:"top_logprobs,omitempty"`        // 返回顶部对数概率数量（0-5）
+	EncodingFormat      json.RawMessage   `json:"encoding_format,omitempty"`     // token 编码格式
+	ReasoningEffort     string            `json:"reasoning_effort,omitempty"`    // OpenAI reasoning_effort 原样透传字段
+	Reasoning           *Reasoning        `json:"reasoning,omitempty"`           // 推理参数
+	WebSearchOptions    *WebSearchOptions `json:"web_search_options,omitempty"`  // Web搜索选项
+	ResponseFormat      *ResponseFormat   `json:"response_format,omitempty"`     // 响应格式（JSON 模式、结构化输出）
+	Audio               json.RawMessage   `json:"audio,omitempty"`               // 音频选项（TTS/STT）
+	Modalities          json.RawMessage   `json:"modalities,omitempty"`          // 多模态配置
+	THINKING            *json.RawMessage  `json:"thinking,omitempty"`            // Claude Thinking 格式（内部使用）
 }
 
 // Message 消息
 type Message struct {
 	Role       string     `json:"role"`
-	Content    any        `json:"content,omitempty"` // string or []MediaContent - 支持多模态
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"` // 工具调用（用于响应）
+	Content    any        `json:"content,omitempty"`      // string or []MediaContent - 支持多模态
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // 工具调用（用于响应）
 	ToolCallID string     `json:"tool_call_id,omitempty"` // 工具调用ID（用于role=tool的响应消息）
-	Name       *string    `json:"name,omitempty"` // 消息名称（用于tool消息）
+	Name       *string    `json:"name,omitempty"`         // 消息名称（用于tool消息）
 
 	// 内部缓存
 	parsedContent []MediaContent `json:"-"` // 缓存解析后的多模态内容
@@ -259,8 +259,8 @@ type ToolFunction struct {
 
 // Tool 工具定义
 type Tool struct {
-	Type     string    `json:"type"`              // "function"
-	Function Function  `json:"function"`
+	Type     string   `json:"type"` // "function"
+	Function Function `json:"function"`
 }
 
 // Function 函数定义
@@ -317,9 +317,9 @@ type Choice struct {
 
 // Usage 使用情况
 type Usage struct {
-	PromptTokens     int                `json:"prompt_tokens"`
-	CompletionTokens int                `json:"completion_tokens"`
-	TotalTokens      int                `json:"total_tokens"`
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 
 	// 缓存 tokens
 	PromptCacheHitTokens int `json:"prompt_cache_hit_tokens,omitempty"`
@@ -329,18 +329,18 @@ type Usage struct {
 	CompletionTokenDetails *OutputTokenDetails `json:"completion_tokens_details,omitempty"`
 
 	// 备用字段（某些提供商使用不同字段名）
-	InputTokens            int                `json:"input_tokens,omitempty"`
-	OutputTokens           int                `json:"output_tokens,omitempty"`
-	InputTokensDetails     *InputTokenDetails `json:"input_tokens_details,omitempty"`
+	InputTokens        int                `json:"input_tokens,omitempty"`
+	OutputTokens       int                `json:"output_tokens,omitempty"`
+	InputTokensDetails *InputTokenDetails `json:"input_tokens_details,omitempty"`
 }
 
 // InputTokenDetails 输入 token 详细统计
 type InputTokenDetails struct {
-	CachedTokens         int `json:"cached_tokens,omitempty"`         // 缓存的 token 数
+	CachedTokens         int `json:"cached_tokens,omitempty"`          // 缓存的 token 数
 	CachedCreationTokens int `json:"cached_creation_tokens,omitempty"` // 缓存创建的 token 数
-	TextTokens           int `json:"text_tokens,omitempty"`           // 文本 token 数
-	AudioTokens          int `json:"audio_tokens,omitempty"`          // 音频 token 数
-	ImageTokens          int `json:"image_tokens,omitempty"`          // 图片 token 数
+	TextTokens           int `json:"text_tokens,omitempty"`            // 文本 token 数
+	AudioTokens          int `json:"audio_tokens,omitempty"`           // 音频 token 数
+	ImageTokens          int `json:"image_tokens,omitempty"`           // 图片 token 数
 }
 
 // OutputTokenDetails 输出 token 详细统计
@@ -364,10 +364,10 @@ type ErrorDetail struct {
 
 // ChatCompletionChunk OpenAI流式响应块
 type ChatCompletionChunk struct {
-	ID      string   `json:"id"`
-	Object  string   `json:"object"`
-	Created int64    `json:"created"`
-	Model   string   `json:"model"`
+	ID      string        `json:"id"`
+	Object  string        `json:"object"`
+	Created int64         `json:"created"`
+	Model   string        `json:"model"`
 	Choices []ChunkChoice `json:"choices"`
 	// Usage 令牌使用情况（仅在最终 chunk 中返回）
 	Usage *Usage `json:"usage,omitempty"`
@@ -375,31 +375,31 @@ type ChatCompletionChunk struct {
 
 // ChunkChoice 块选择
 type ChunkChoice struct {
-	Index        int              `json:"index"`
-	Delta        ChunkDelta       `json:"delta"`
-	FinishReason *string          `json:"finish_reason,omitempty"`
+	Index        int        `json:"index"`
+	Delta        ChunkDelta `json:"delta"`
+	FinishReason *string    `json:"finish_reason,omitempty"`
 }
 
 // ChunkDelta 块增量
 type ChunkDelta struct {
-	Role            string      `json:"role,omitempty"`
-	Content         *string     `json:"content,omitempty"`      // 改为指针
-	ReasoningContent string     `json:"reasoning_content,omitempty"`
-	Reasoning        *string     `json:"reasoning,omitempty"`        // 新增：推理内容（o1/gpt-5）
-	ToolCalls       []ToolCallDelta `json:"tool_calls,omitempty"` // 流式工具调用
+	Role             string          `json:"role,omitempty"`
+	Content          *string         `json:"content,omitempty"` // 改为指针
+	ReasoningContent string          `json:"reasoning_content,omitempty"`
+	Reasoning        *string         `json:"reasoning,omitempty"`  // 新增：推理内容（o1/gpt-5）
+	ToolCalls        []ToolCallDelta `json:"tool_calls,omitempty"` // 流式工具调用
 }
 
 // MarshalJSON 自定义 JSON 序列化，避免输出 null 值
 func (cd ChunkDelta) MarshalJSON() ([]byte, error) {
 	type alias ChunkDelta // 避免递归调用
 	tmp := struct {
-		Role            *string           `json:"role,omitempty"`
-		Content         *string           `json:"content,omitempty"`
-		ReasoningContent string           `json:"reasoning_content,omitempty"`
-		Reasoning       *string           `json:"reasoning,omitempty"`
-		ToolCalls       []ToolCallDelta   `json:"tool_calls,omitempty"`
+		Role             *string         `json:"role,omitempty"`
+		Content          *string         `json:"content,omitempty"`
+		ReasoningContent string          `json:"reasoning_content,omitempty"`
+		Reasoning        *string         `json:"reasoning,omitempty"`
+		ToolCalls        []ToolCallDelta `json:"tool_calls,omitempty"`
 	}{}
-	
+
 	// 只设置非空字符串的 Role
 	if cd.Role != "" {
 		tmp.Role = &cd.Role
@@ -416,7 +416,7 @@ func (cd ChunkDelta) MarshalJSON() ([]byte, error) {
 	if len(cd.ToolCalls) > 0 {
 		tmp.ToolCalls = cd.ToolCalls
 	}
-	
+
 	return json.Marshal(tmp)
 }
 
@@ -500,54 +500,54 @@ type ToolMessage struct {
 // Reasoning 推理参数（用于 o1, o3, gpt-5 等推理模型）
 type Reasoning struct {
 	MaxTokens int    `json:"max_tokens,omitempty"` // 最大推理 token 数
-	Effort    string `json:"effort,omitempty"`    // 推理级别: "low", "medium", "high"
+	Effort    string `json:"effort,omitempty"`     // 推理级别: "low", "medium", "high"
 }
 
 // Thinking Claude Thinking 格式（用于内部转换）
 type Thinking struct {
-	Type         string `json:"type"`                   // "enabled", "disabled", "adaptive"
+	Type         string `json:"type"`                    // "enabled", "disabled", "adaptive"
 	BudgetTokens *int   `json:"budget_tokens,omitempty"` // 最大推理 token 数
 }
 
 // WebSearchOptions Web搜索选项（用于 Web Search 工具）
 type WebSearchOptions struct {
-	UserLocation        *WebSearchUserLocation `json:"user_location,omitempty"`         // 用户位置
-	SearchContextSize   string                 `json:"search_context_size,omitempty"`  // 搜索上下文大小: "low", "medium", "high"
+	UserLocation      *WebSearchUserLocation `json:"user_location,omitempty"`       // 用户位置
+	SearchContextSize string                 `json:"search_context_size,omitempty"` // 搜索上下文大小: "low", "medium", "high"
 }
 
 // WebSearchUserLocation Web搜索用户位置
 type WebSearchUserLocation struct {
-	Type     string `json:"type"`                // "approximate"
-	Timezone string `json:"timezone,omitempty"`  // 时区，如 "America/New_York"
-	Country  string `json:"country,omitempty"`   // 国家代码，如 "US"
-	Region   string `json:"region,omitempty"`    // 地区/州代码，如 "CA"
-	City     string `json:"city,omitempty"`      // 城市名称，如 "San Francisco"
+	Type     string `json:"type"`               // "approximate"
+	Timezone string `json:"timezone,omitempty"` // 时区，如 "America/New_York"
+	Country  string `json:"country,omitempty"`  // 国家代码，如 "US"
+	Region   string `json:"region,omitempty"`   // 地区/州代码，如 "CA"
+	City     string `json:"city,omitempty"`     // 城市名称，如 "San Francisco"
 }
 
 // MediaContent 多模态内容项（支持文本、图片、音频、视频、文件）
 type MediaContent struct {
-	Type       string             `json:"type"`                // text, image_url, input_audio, file, video_url
-	Text       string             `json:"text,omitempty"`
+	Type string `json:"type"` // text, image_url, input_audio, file, video_url
+	Text string `json:"text,omitempty"`
 
 	// 图片支持
-	ImageUrl   *MessageImageUrl   `json:"image_url,omitempty"`
+	ImageUrl *MessageImageUrl `json:"image_url,omitempty"`
 
 	// 音频支持
-	InputAudio *MessageInputAudio  `json:"input_audio,omitempty"`
+	InputAudio *MessageInputAudio `json:"input_audio,omitempty"`
 
 	// 文件支持
-	File       *MessageFile        `json:"file,omitempty"`
+	File *MessageFile `json:"file,omitempty"`
 
 	// 视频支持
-	VideoUrl   *MessageVideoUrl    `json:"video_url,omitempty"`
+	VideoUrl *MessageVideoUrl `json:"video_url,omitempty"`
 
 	// 缓存控制（OpenRouter 特定）
-	CacheControl json.RawMessage    `json:"cache_control,omitempty"`
+	CacheControl json.RawMessage `json:"cache_control,omitempty"`
 }
 
 // MessageImageUrl 图片 URL（支持 base64 和外部 URL）
 type MessageImageUrl struct {
-	Url      string `json:"url"`                     // 图片 URL 或 data URL
+	Url      string `json:"url"`                 // 图片 URL 或 data URL
 	Detail   string `json:"detail,omitempty"`    // low, high, auto
 	MimeType string `json:"mime_type,omitempty"` // MIME 类型
 }
@@ -560,7 +560,7 @@ type MessageInputAudio struct {
 
 // MessageFile 文件附件
 type MessageFile struct {
-	FileName string `json:"filename,omitempty"` // 文件名
+	FileName string `json:"filename,omitempty"`  // 文件名
 	FileData string `json:"file_data,omitempty"` // base64 编码的文件数据
 	FileId   string `json:"file_id,omitempty"`   // 文件 ID
 }
@@ -572,16 +572,16 @@ type MessageVideoUrl struct {
 
 // ResponseFormat 响应格式配置（用于 JSON 模式和结构化输出）
 type ResponseFormat struct {
-	Type       string          `json:"type,omitempty"` // "text", "json_object", "json_schema"
+	Type       string          `json:"type,omitempty"`        // "text", "json_object", "json_schema"
 	JsonSchema json.RawMessage `json:"json_schema,omitempty"` // 当 type="json_schema" 时的 schema 定义
 }
 
 // FormatJsonSchema JSON Schema 格式定义（用于 ResponseFormat）
 type FormatJsonSchema struct {
 	Description string          `json:"description,omitempty"` // 描述
-	Name        string          `json:"name"`                   // 名称
-	Schema      any             `json:"schema,omitempty"`       // JSON Schema
-	Strict      json.RawMessage `json:"strict,omitempty"`       // 是否严格模式
+	Name        string          `json:"name"`                  // 名称
+	Schema      any             `json:"schema,omitempty"`      // JSON Schema
+	Strict      json.RawMessage `json:"strict,omitempty"`      // 是否严格模式
 }
 
 // StreamOptions 流式响应选项

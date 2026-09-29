@@ -446,15 +446,15 @@ func (h *Handler) GetSupervisionSnapshot(w http.ResponseWriter, r *http.Request)
 			RootTeamID:    strings.TrimSpace(q.Get("root_team_id")),
 			Mode:          strings.TrimSpace(q.Get("mode")),
 		},
-		AfterSeq:         int64Query(q.Get("after_seq")),
-		Health:           strings.TrimSpace(q.Get("health")),
-		IncludeTerminal:  boolQuery(q.Get("include_terminal")),
+		AfterSeq:        int64Query(q.Get("after_seq")),
+		Health:          strings.TrimSpace(q.Get("health")),
+		IncludeTerminal: boolQuery(q.Get("include_terminal")),
 		// token 水位只作观测：操作者读模型显式请求，模型面工具路径不请求。
 		IncludeBudgetWatermark: true,
-		Limit:            intQuery(q.Get("limit")),
-		DefaultLimit:     h.supervisionTuning().SnapshotMaxItems,
-		Provider:         h.getSupervisionDescendantProvider(),
-		HostCapabilities: h.supervisionHostCapabilities(),
+		Limit:                  intQuery(q.Get("limit")),
+		DefaultLimit:           h.supervisionTuning().SnapshotMaxItems,
+		Provider:               h.getSupervisionDescendantProvider(),
+		HostCapabilities:       h.supervisionHostCapabilities(),
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)
@@ -734,15 +734,15 @@ func (h *Handler) GetSupervisionAudit(w http.ResponseWriter, r *http.Request) {
 			RootTeamID:    rootTeamID,
 			Mode:          strings.TrimSpace(q.Get("mode")),
 		},
-		AfterSeq:         afterSeq,
-		Health:           strings.TrimSpace(q.Get("health")),
-		IncludeTerminal:  boolQuery(q.Get("include_terminal")),
+		AfterSeq:        afterSeq,
+		Health:          strings.TrimSpace(q.Get("health")),
+		IncludeTerminal: boolQuery(q.Get("include_terminal")),
 		// token 水位只作观测：审计读模型与快照同口径（模型面不可见）。
 		IncludeBudgetWatermark: true,
-		Limit:            limit,
-		DefaultLimit:     h.supervisionTuning().SnapshotMaxItems,
-		Provider:         h.getSupervisionDescendantProvider(),
-		HostCapabilities: h.supervisionHostCapabilities(),
+		Limit:                  limit,
+		DefaultLimit:           h.supervisionTuning().SnapshotMaxItems,
+		Provider:               h.getSupervisionDescendantProvider(),
+		HostCapabilities:       h.supervisionHostCapabilities(),
 	})
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err)

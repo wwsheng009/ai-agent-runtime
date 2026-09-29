@@ -75,22 +75,22 @@ type SessionRollup struct {
 	ToolResultsObserved  int       `json:"tool_results_observed"`
 	ToolErrors           int       `json:"tool_errors"`
 	// schema v2（方案 §4 批次 1.3）：工具/子代理维度增量字段，仅增不改。
-	ToolCallsObserved     int     `json:"tool_calls_observed,omitempty"`
-	ToolFailures          int     `json:"tool_failures,omitempty"`
-	ToolFailureRate       float64 `json:"tool_failure_rate,omitempty"`
-	SubagentRuns          int     `json:"subagent_runs,omitempty"`
-	SubagentFailures      int     `json:"subagent_failures,omitempty"`
-	SubagentFailureRate   float64 `json:"subagent_failure_rate,omitempty"`
-	SubagentTimeouts      int     `json:"subagent_timeouts,omitempty"`
+	ToolCallsObserved   int     `json:"tool_calls_observed,omitempty"`
+	ToolFailures        int     `json:"tool_failures,omitempty"`
+	ToolFailureRate     float64 `json:"tool_failure_rate,omitempty"`
+	SubagentRuns        int     `json:"subagent_runs,omitempty"`
+	SubagentFailures    int     `json:"subagent_failures,omitempty"`
+	SubagentFailureRate float64 `json:"subagent_failure_rate,omitempty"`
+	SubagentTimeouts    int     `json:"subagent_timeouts,omitempty"`
 	// SubagentBudgetExceeded 是声明了任务预算且实际用量超预算的子代理数
 	// （§4.2 超支告警：6.14M tokens 类事故在账本与诊断面板直接可见）。
 	SubagentBudgetExceeded int `json:"subagent_budget_exceeded,omitempty"`
-	RetryRecoveredTurns   int     `json:"retry_recovered_turns,omitempty"`
+	RetryRecoveredTurns    int `json:"retry_recovered_turns,omitempty"`
 	// MaxToolFailureStreak 是会话内各回合"最长连续工具失败"的最大值（§3.1
 	// 归因链）：诊断面板据此一眼看到陷得最深的连续失败。
-	MaxToolFailureStreak int `json:"max_tool_failure_streak,omitempty"`
-	AverageResponseTimeMs int64   `json:"average_response_time_ms,omitempty"`
-	TotalDurationMs       int64   `json:"total_duration_ms,omitempty"`
+	MaxToolFailureStreak  int   `json:"max_tool_failure_streak,omitempty"`
+	AverageResponseTimeMs int64 `json:"average_response_time_ms,omitempty"`
+	TotalDurationMs       int64 `json:"total_duration_ms,omitempty"`
 	// AverageFirstTokenMs 会话内已观测请求的首字时间均值（样本加权）。
 	AverageFirstTokenMs  int64    `json:"average_first_token_ms,omitempty"`
 	FirstTokenSamples    int      `json:"first_token_samples,omitempty"`
@@ -260,23 +260,23 @@ type TurnUsage struct {
 	DurationMs int64     `json:"duration_ms"`
 	// FirstTokenMs 该 turn 内已观测请求的首字时间均值；FirstTokenSamples 是
 	// 参与平均的请求数（0 表示该 turn 没有首字观测）。
-	FirstTokenMs          int64       `json:"first_token_ms,omitempty"`
-	FirstTokenSamples     int         `json:"first_token_samples,omitempty"`
-	Outcome               string      `json:"outcome"`
-	ErrorCategory         string      `json:"error_category,omitempty"`
-	LLMRequests           int         `json:"llm_requests"`
-	LLMSuccesses          int         `json:"llm_successes"`
-	LLMErrors             int         `json:"llm_errors"`
-	ToolResultsObserved   int         `json:"tool_results_observed"`
-	ToolErrors            int         `json:"tool_errors"`
-	RecoveredToolErrors   int         `json:"recovered_tool_errors,omitempty"`
-	UnrecoveredToolErrors int         `json:"unrecovered_tool_errors,omitempty"`
+	FirstTokenMs          int64  `json:"first_token_ms,omitempty"`
+	FirstTokenSamples     int    `json:"first_token_samples,omitempty"`
+	Outcome               string `json:"outcome"`
+	ErrorCategory         string `json:"error_category,omitempty"`
+	LLMRequests           int    `json:"llm_requests"`
+	LLMSuccesses          int    `json:"llm_successes"`
+	LLMErrors             int    `json:"llm_errors"`
+	ToolResultsObserved   int    `json:"tool_results_observed"`
+	ToolErrors            int    `json:"tool_errors"`
+	RecoveredToolErrors   int    `json:"recovered_tool_errors,omitempty"`
+	UnrecoveredToolErrors int    `json:"unrecovered_tool_errors,omitempty"`
 	// ToolFailureStreak 是该回合内最长连续工具失败次数（§3.1 归因链：连续
 	// 次数说明"陷得多深"，与 recovered/unrecovered 的"是否恢复"互补）。
 	ToolFailureStreak int `json:"tool_failure_streak,omitempty"`
 	// LastToolSuccess 是该回合最后一次成功工具调用的名字（空 = 本回合无成功），
 	// 与 ToolFailureStreak 一起回答"最后一次成功 → 连续失败几次"。
-	LastToolSuccess string `json:"last_tool_success,omitempty"`
+	LastToolSuccess       string      `json:"last_tool_success,omitempty"`
 	Usage                 TokenTotals `json:"usage"`
 	UsageQuality          string      `json:"usage_quality"`
 	UsageCoverage         float64     `json:"usage_coverage"`

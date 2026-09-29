@@ -35,8 +35,8 @@ func TestFetchSub2APIUsage_QuotaLimited(t *testing.T) {
 	defer server.Close()
 
 	snapshot, err := NewClient(server.Client()).FetchAccountSnapshot(context.Background(), FetchInput{
-		BaseURL:  server.URL,
-		SiteType: SiteTypeSub2API,
+		BaseURL:    server.URL,
+		SiteType:   SiteTypeSub2API,
 		Credential: AccountCredential{APIKey: "sk-test"},
 	})
 	if err != nil {
@@ -92,9 +92,9 @@ func TestFetchSub2APIUsage_UnrestrictedWallet(t *testing.T) {
 func TestFetchSub2APIUsage_UnrestrictedSubscription(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"mode":     "unrestricted",
-			"planName": "pro",
-			"unit":     "USD",
+			"mode":      "unrestricted",
+			"planName":  "pro",
+			"unit":      "USD",
 			"remaining": 3.2,
 			"subscription": map[string]any{
 				"daily_limit_usd":   10,

@@ -244,13 +244,13 @@ func (s *SQLiteStore) GetOrchestratorLease(ctx context.Context, teamID string) (
 		WHERE team_id = ?
 	`, strings.TrimSpace(teamID))
 	var (
-		record       OrchestratorLease
-		leaseText    string
-		heartbeat    string
-		lastTick     string
-		lastSuccess  string
-		createdText  string
-		updatedText  string
+		record      OrchestratorLease
+		leaseText   string
+		heartbeat   string
+		lastTick    string
+		lastSuccess string
+		createdText string
+		updatedText string
 	)
 	err := row.Scan(&record.TeamID, &record.OwnerID, &record.OwnerInstance, &leaseText, &record.FencingToken,
 		&heartbeat, &lastTick, &lastSuccess, &record.RestartCount, &record.LastError, &createdText, &updatedText)

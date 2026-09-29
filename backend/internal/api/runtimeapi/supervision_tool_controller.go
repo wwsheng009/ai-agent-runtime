@@ -149,10 +149,10 @@ func (c *handlerSupervisionToolController) SupervisionDescendants(ctx context.Co
 			RootSessionID: strings.TrimSpace(parentSessionID),
 			Mode:          strings.TrimSpace(args.Mode),
 		},
-		AfterSeq:         args.AfterSeq,
-		Health:           strings.TrimSpace(args.Health),
-		IncludeTerminal:  args.IncludeTerminal,
-		IncludeResults:   args.IncludeResults,
+		AfterSeq:        args.AfterSeq,
+		Health:          strings.TrimSpace(args.Health),
+		IncludeTerminal: args.IncludeTerminal,
+		IncludeResults:  args.IncludeResults,
 		// token 水位只作观测：模型面**不**请求（零值即不附带）。父代理的
 		// 决策输入是业务进度/结果，不是 "tokens 84%" 这类成本读数。
 		Limit:            args.Limit,

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
+	gorillaws "github.com/gorilla/websocket"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/dnscache"
 	"github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
-	gorillaws "github.com/gorilla/websocket"
 )
 
 const defaultWebSocketHandshakeTimeout = 30 * time.Second

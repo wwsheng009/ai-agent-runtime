@@ -20,7 +20,7 @@ func AdaptFromProfile(p *profilesys.ResolvedAgent) *ResolvedAgent {
 			UseServers:     append([]string(nil), p.MCPSelection.UseServers...),
 			ExcludeServers: append([]string(nil), p.MCPSelection.ExcludeServers...),
 		},
-		SkillDirs:       append([]string(nil), p.SkillDirs...),
+		SkillDirs: append([]string(nil), p.SkillDirs...),
 		Skills: ResolvedSkillSelection{
 			Allowlist: append([]string(nil), p.Skills.Allowlist...),
 			Denylist:  append([]string(nil), p.Skills.Denylist...),

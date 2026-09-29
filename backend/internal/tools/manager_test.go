@@ -270,7 +270,7 @@ func TestWithToolDurationFallback(t *testing.T) {
 		t.Fatalf("nil metadata should get wall-clock 25ms, got %#v", got)
 	}
 	reported := map[string]interface{}{"duration_ms": 957}
-	if got := withToolDurationFallback(reported, 25 * time.Millisecond); toolMetadataDurationMS(got) != 957 {
+	if got := withToolDurationFallback(reported, 25*time.Millisecond); toolMetadataDurationMS(got) != 957 {
 		t.Fatalf("tool-reported duration must win, got %#v", got)
 	}
 	if got := withToolDurationFallback(nil, 0); got != nil {

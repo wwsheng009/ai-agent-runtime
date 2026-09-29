@@ -17,22 +17,22 @@ type AlertCode string
 //   - child run with expired owner lease (orphan suspected)
 //   - parent wake pending but no runnable turn for a long time
 const (
-	AlertOutboxBacklog        AlertCode = "outbox_backlog"
-	AlertCriticalStale        AlertCode = "critical_notification_stale"
-	AlertRunProgressStalled   AlertCode = "run_progress_stalled"
-	AlertRunOrphanSuspected   AlertCode = "run_orphan_suspected"
-	AlertWakePendingStale     AlertCode = "wake_pending_stale"
+	AlertOutboxBacklog      AlertCode = "outbox_backlog"
+	AlertCriticalStale      AlertCode = "critical_notification_stale"
+	AlertRunProgressStalled AlertCode = "run_progress_stalled"
+	AlertRunOrphanSuspected AlertCode = "run_orphan_suspected"
+	AlertWakePendingStale   AlertCode = "wake_pending_stale"
 )
 
 // Alert is one evaluation output row. Alerts are derived read-only views over
 // the durable store; they never mutate state.
 type Alert struct {
-	Code      AlertCode  `json:"code"`
-	Severity  Severity   `json:"severity"`
-	SubjectID string     `json:"subject_id,omitempty"`
-	Message   string     `json:"message"`
+	Code      AlertCode     `json:"code"`
+	Severity  Severity      `json:"severity"`
+	SubjectID string        `json:"subject_id,omitempty"`
+	Message   string        `json:"message"`
 	Age       time.Duration `json:"age,omitempty"`
-	Count     int        `json:"count"`
+	Count     int           `json:"count"`
 }
 
 // AlertConfig controls alert thresholds. Zero values fall back to the

@@ -152,9 +152,9 @@ func TestWakeConsumer_QueueTimeoutEscalatesOnce(t *testing.T) {
 
 	delivered := 0
 	consumer := &WakeConsumer{
-		Wakes:        scheduler,
-		Runnable:     func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool { return true },
-		ResumeQueue:  ResumeQueuePolicy{Timeout: 5 * time.Minute},
+		Wakes:       scheduler,
+		Runnable:    func(ctx context.Context, rootScopeID, parentSessionID, parentTeamID string) bool { return true },
+		ResumeQueue: ResumeQueuePolicy{Timeout: 5 * time.Minute},
 		ResumeCapacity: ResumeCapacityProbeFunc(func(ctx context.Context, req ResumeCapacityRequest) (ResumeCapacityVerdict, error) {
 			return ResumeCapacityVerdict{Allowed: false, Reason: ResumeGateDepth, Detail: "descendant depth at max"}, nil
 		}),
@@ -187,10 +187,10 @@ func TestWakeConsumer_QueueTimeoutEscalatesOnce(t *testing.T) {
 	// The escalation is the only notification whose subject is the parent
 	// session itself (the lifecycle row targets the child run).
 	escalationFilter := NotificationFilter{
-		RootScopeID:          "root-session-queue",
+		RootScopeID:           "root-session-queue",
 		TargetParentSessionID: "root-session-queue",
-		SubjectKind:          SubjectAgentSession,
-		SubjectID:            "root-session-queue",
+		SubjectKind:           SubjectAgentSession,
+		SubjectID:             "root-session-queue",
 	}
 	notes, err := store.ListNotifications(ctx, escalationFilter)
 	require.NoError(t, err)

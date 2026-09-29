@@ -109,19 +109,19 @@ type AckLifecycleArgs struct {
 
 // ControlDescendantArgs is the parsed input of control_descendant.
 type ControlDescendantArgs struct {
-	NotificationID     string
-	Action             string
-	Reason             string
-	Cascade            string
+	NotificationID string
+	Action         string
+	Reason         string
+	Cascade        string
 	// ExtendBy / NewDeadline / ExtendWhich are the extend_deadline payload
 	// (doc 6.5): exactly one of ExtendBy / NewDeadline, and ExtendWhich selects
 	// execution|progress|both. The supervision layer re-validates the I5 budget
 	// and the I6 irreversible points at execute time; this parse layer only
 	// enforces the request shape so an action that would be rejected never
 	// lands an audit row.
-	ExtendBy    time.Duration
-	NewDeadline *time.Time
-	ExtendWhich string
+	ExtendBy           time.Duration
+	NewDeadline        *time.Time
+	ExtendWhich        string
 	ExpectedVersion    int64
 	HasExpectedVersion bool
 }

@@ -11,21 +11,21 @@ import (
 
 // Span 追踪跨度
 type Span struct {
-	ID          string            // Span ID
-	ParentID    string            // 父 Span ID
-	TraceID     string            // 追踪 ID
-	Name        string            // Span 名称
-	StartTime   time.Time         // 开始时间
-	EndTime     time.Time         // 结束时间
-	Attributes  map[string]string // 属性
-	Events      []SpanEvent       // 事件
-	Status      SpanStatus        // 状态
+	ID         string            // Span ID
+	ParentID   string            // 父 Span ID
+	TraceID    string            // 追踪 ID
+	Name       string            // Span 名称
+	StartTime  time.Time         // 开始时间
+	EndTime    time.Time         // 结束时间
+	Attributes map[string]string // 属性
+	Events     []SpanEvent       // 事件
+	Status     SpanStatus        // 状态
 }
 
 // SpanEvent Span 事件
 type SpanEvent struct {
-	Timestamp time.Time
-	Name      string
+	Timestamp  time.Time
+	Name       string
 	Attributes map[string]string
 }
 
@@ -68,9 +68,9 @@ type Trace struct {
 // NewTrace 创建新的追踪
 func NewTrace(rootName string) *Trace {
 	traceID := generateTraceID()
-	
+
 	root := NewSpan(rootName, traceID, "")
-	
+
 	return &Trace{
 		TraceID: traceID,
 		Root:    root,
@@ -126,8 +126,8 @@ func (s *Span) AddEvent(name string) {
 // AddEventWithAttributes 添加带属性的事件
 func (s *Span) AddEventWithAttributes(name string, attributes map[string]string) {
 	event := SpanEvent{
-		Timestamp: time.Now(),
-		Name:      name,
+		Timestamp:  time.Now(),
+		Name:       name,
 		Attributes: attributes,
 	}
 	s.Events = append(s.Events, event)
@@ -160,7 +160,7 @@ func (t *Trace) GetDuration() time.Duration {
 	if len(t.Spans) == 0 {
 		return 0
 	}
-	
+
 	return t.Root.Duration()
 }
 
@@ -227,10 +227,10 @@ func NewDefaultTracer() *DefaultTracer {
 // StartTrace 开始新的追踪
 func (t *DefaultTracer) StartTrace(name string) *Trace {
 	trace := NewTrace(name)
-	
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	
+
 	t.traces[trace.TraceID] = trace
 	return trace
 }
@@ -239,7 +239,7 @@ func (t *DefaultTracer) StartTrace(name string) *Trace {
 func (t *DefaultTracer) GetTrace(traceID string) *Trace {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	
+
 	return t.traces[traceID]
 }
 
@@ -247,7 +247,7 @@ func (t *DefaultTracer) GetTrace(traceID string) *Trace {
 func (t *DefaultTracer) RemoveTrace(traceID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	
+
 	delete(t.traces, traceID)
 }
 
@@ -255,7 +255,7 @@ func (t *DefaultTracer) RemoveTrace(traceID string) {
 func (t *DefaultTracer) GetAllTraces() []*Trace {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	
+
 	traces := make([]*Trace, 0, len(t.traces))
 	for _, trace := range t.traces {
 		traces = append(traces, trace)
@@ -357,12 +357,12 @@ func NewInstrumentedSpan(name string) *InstrumentedSpan {
 func (is *InstrumentedSpan) Start(fn func() error) error {
 	is.StartTime = time.Now()
 	defer is.Finish()
-	
+
 	err := fn()
 	if err != nil {
 		is.SetError(err.Error())
 	}
-	
+
 	return err
 }
 
@@ -370,13 +370,13 @@ func (is *InstrumentedSpan) Start(fn func() error) error {
 func (is *InstrumentedSpan) StartWithResult(fn func() (interface{}, error)) (interface{}, error) {
 	is.StartTime = time.Now()
 	defer is.Finish()
-	
+
 	result, err := fn()
 	if err != nil {
 		is.SetError(err.Error())
 	}
-	
+
 	is.SetAttribute("success", fmt.Sprintf("%t", err == nil))
-	
+
 	return result, err
 }

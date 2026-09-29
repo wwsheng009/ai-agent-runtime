@@ -19,24 +19,24 @@ var version = "0.1.0"
 
 // cliFlags SFTP 客户端 CLI 参数。
 type cliFlags struct {
-	port          int
-	user          string
-	identityFiles []string
-	password      string
-	passwordSet   bool
-	options       []string
-	quiet         bool
-	verbose       bool
-	configFile    string
-	batchFile     string
-	recursive     bool
-	force         bool
-	showVersion   bool
-	ipv4          bool
-	ipv6          bool
-	timeout       int
+	port           int
+	user           string
+	identityFiles  []string
+	password       string
+	passwordSet    bool
+	options        []string
+	quiet          bool
+	verbose        bool
+	configFile     string
+	batchFile      string
+	recursive      bool
+	force          bool
+	showVersion    bool
+	ipv4           bool
+	ipv6           bool
+	timeout        int
 	knownHostsFile string
-	showHelp      bool
+	showHelp       bool
 
 	// 目标（user@host[:path]）与本地/远程参数
 	hostSpec string

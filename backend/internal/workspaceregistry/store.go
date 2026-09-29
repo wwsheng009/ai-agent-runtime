@@ -30,8 +30,8 @@ const StoreFileName = "workspace_directories.yaml"
 
 // DirectoryRecord is one registered workspace directory.
 type DirectoryRecord struct {
-	ID         string `yaml:"id" json:"id"`                        // sha1(pathKey(path))[:12]
-	Path       string `yaml:"path" json:"path"`                    // cleaned absolute path (native separators)
+	ID         string `yaml:"id" json:"id"`                         // sha1(pathKey(path))[:12]
+	Path       string `yaml:"path" json:"path"`                     // cleaned absolute path (native separators)
 	Name       string `yaml:"name,omitempty" json:"name,omitempty"` // optional alias; UI falls back to basename
 	CreatedAt  int64  `yaml:"created_at" json:"created_at"`         // unix seconds
 	LastUsedAt int64  `yaml:"last_used_at,omitempty" json:"last_used_at,omitempty"`

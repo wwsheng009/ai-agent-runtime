@@ -36,19 +36,19 @@ type RunProgressEvent struct {
 // parent mailbox (doc 7.4). IdempotencyKey is
 // "subagent_completion:<run_id>:<terminal_version>".
 type CompletionOutboxEntry struct {
-	OutboxID        string
-	RunID           string
-	SessionID       string
-	ParentSessionID string
-	RootSessionID   string
-	Status          string
-	IdempotencyKey  string
-	PayloadJSON     string
-	Attempts        int
-	LastError       string
-	DeliveredAt     *time.Time
+	OutboxID         string
+	RunID            string
+	SessionID        string
+	ParentSessionID  string
+	RootSessionID    string
+	Status           string
+	IdempotencyKey   string
+	PayloadJSON      string
+	Attempts         int
+	LastError        string
+	DeliveredAt      *time.Time
 	ParentMailboxSeq int64
-	CreatedAt       time.Time
+	CreatedAt        time.Time
 }
 
 // ExecutionRunStore persists execution runs and the completion outbox.

@@ -27,7 +27,7 @@ type BatchObligationSource struct {
 }
 
 const (
-	defaultObligationMaxBatches      = 32
+	defaultObligationMaxBatches       = 32
 	defaultObligationMaxTasksPerBatch = 20
 	defaultObligationMaxPreviewRunes  = 200
 )

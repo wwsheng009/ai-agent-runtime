@@ -180,10 +180,10 @@ func (c *localSupervisionToolController) SupervisionDescendants(ctx context.Cont
 			RootSessionID: c.callerSessionID(parentSessionID),
 			Mode:          strings.TrimSpace(args.Mode),
 		},
-		AfterSeq:         args.AfterSeq,
-		Health:           strings.TrimSpace(args.Health),
-		IncludeTerminal:  args.IncludeTerminal,
-		IncludeResults:   args.IncludeResults,
+		AfterSeq:        args.AfterSeq,
+		Health:          strings.TrimSpace(args.Health),
+		IncludeTerminal: args.IncludeTerminal,
+		IncludeResults:  args.IncludeResults,
 		// token 水位只作观测：模型面**不**请求（零值即不附带）。CLI 宿主与
 		// API 宿主同口径——父代理不按成本读数在运行中做决策。
 		Limit:            args.Limit,

@@ -211,7 +211,7 @@ func TestGetContext(t *testing.T) {
 
 // Helper function
 func contains(s, substr string) bool {
-	return len(s) > 0 && len(substr) > 0 && len(substr) <= len(s) && 
+	return len(s) > 0 && len(substr) > 0 && len(substr) <= len(s) &&
 		(s == substr || (len(s) > len(substr) && indexOf(s, substr) >= 0))
 }
 

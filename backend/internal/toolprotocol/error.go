@@ -11,15 +11,15 @@ type ErrorCode string
 
 // Common wire error codes (aligned with runtimeerrors / toolresult classification).
 const (
-	ErrorCodeInvalidArgs   ErrorCode = "tool_invalid_args"
-	ErrorCodeTimeout       ErrorCode = "tool_timeout"
-	ErrorCodePermission    ErrorCode = "agent_permission"
-	ErrorCodePathNotFound  ErrorCode = "tool_path_not_found"
-	ErrorCodeExecution     ErrorCode = "tool_execution"
-	ErrorCodeCanceled      ErrorCode = "agent_run_canceled"
-	ErrorCodeStaleContext  ErrorCode = "tool_stale_context"
-	ErrorCodeSpawnDepth    ErrorCode = "agent_spawn_depth_limit"
-	ErrorCodeUnknown       ErrorCode = "tool_unknown"
+	ErrorCodeInvalidArgs  ErrorCode = "tool_invalid_args"
+	ErrorCodeTimeout      ErrorCode = "tool_timeout"
+	ErrorCodePermission   ErrorCode = "agent_permission"
+	ErrorCodePathNotFound ErrorCode = "tool_path_not_found"
+	ErrorCodeExecution    ErrorCode = "tool_execution"
+	ErrorCodeCanceled     ErrorCode = "agent_run_canceled"
+	ErrorCodeStaleContext ErrorCode = "tool_stale_context"
+	ErrorCodeSpawnDepth   ErrorCode = "agent_spawn_depth_limit"
+	ErrorCodeUnknown      ErrorCode = "tool_unknown"
 )
 
 // Error is the portable error wire object for tool results and notifications.

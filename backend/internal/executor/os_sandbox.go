@@ -43,10 +43,10 @@ type OSSandboxRequest struct {
 
 // OSSandboxLaunch is the rewritten (or passthrough) process launch.
 type OSSandboxLaunch struct {
-	Command  string
-	Args     []string
-	Env      []string
-	WorkDir  string
+	Command string
+	Args    []string
+	Env     []string
+	WorkDir string
 	// Backend is the backend name that produced this launch (empty when off).
 	Backend string
 	// Applied is true only when OS isolation was actually applied.

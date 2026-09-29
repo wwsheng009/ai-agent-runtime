@@ -128,10 +128,10 @@ func TestOrchestratorStaleOwnerCannotClaim(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
 	require.NoError(t, err)
 	mateID, err := store.UpsertTeammate(ctx, Teammate{
-		ID:      "mate-a",
-		TeamID:  teamID,
-		Name:    "mate-a",
-		State:   TeammateStateIdle,
+		ID:     "mate-a",
+		TeamID: teamID,
+		Name:   "mate-a",
+		State:  TeammateStateIdle,
 	})
 	require.NoError(t, err)
 	createReady := func(title string) string {
@@ -158,13 +158,13 @@ func TestOrchestratorStaleOwnerCannotClaim(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, acquired)
 	_, claimed, err := registry.ClaimAgentControlTask(ctx, agentcontrol.TaskClaimRequest{
-		ID:              task1,
-		Workflow:        agentcontrol.WorkflowSpawnTeam,
-		TeamID:          teamID,
-		Assignee:        mateID,
-		LeaseUntil:      leaseUntil,
-		OwnerID:         "owner-a",
-		OwnerToken:      leaseA.FencingToken,
+		ID:         task1,
+		Workflow:   agentcontrol.WorkflowSpawnTeam,
+		TeamID:     teamID,
+		Assignee:   mateID,
+		LeaseUntil: leaseUntil,
+		OwnerID:    "owner-a",
+		OwnerToken: leaseA.FencingToken,
 	})
 	require.NoError(t, err)
 	require.True(t, claimed)
@@ -181,25 +181,25 @@ func TestOrchestratorStaleOwnerCannotClaim(t *testing.T) {
 
 	// The stale owner with the old token must be rejected...
 	_, _, err = registry.ClaimAgentControlTask(ctx, agentcontrol.TaskClaimRequest{
-		ID:              task2,
-		Workflow:        agentcontrol.WorkflowSpawnTeam,
-		TeamID:          teamID,
-		Assignee:        mateID,
-		LeaseUntil:      leaseUntil,
-		OwnerID:         "owner-a",
-		OwnerToken:      leaseA.FencingToken,
+		ID:         task2,
+		Workflow:   agentcontrol.WorkflowSpawnTeam,
+		TeamID:     teamID,
+		Assignee:   mateID,
+		LeaseUntil: leaseUntil,
+		OwnerID:    "owner-a",
+		OwnerToken: leaseA.FencingToken,
 	})
 	require.ErrorIs(t, err, agentcontrol.ErrOrchestratorOwnerMismatch)
 
 	// ...while the current owner with the fresh token succeeds.
 	_, claimed, err = registry.ClaimAgentControlTask(ctx, agentcontrol.TaskClaimRequest{
-		ID:              task2,
-		Workflow:        agentcontrol.WorkflowSpawnTeam,
-		TeamID:          teamID,
-		Assignee:        mateID,
-		LeaseUntil:      leaseUntil,
-		OwnerID:         "owner-b",
-		OwnerToken:      leaseB.FencingToken,
+		ID:         task2,
+		Workflow:   agentcontrol.WorkflowSpawnTeam,
+		TeamID:     teamID,
+		Assignee:   mateID,
+		LeaseUntil: leaseUntil,
+		OwnerID:    "owner-b",
+		OwnerToken: leaseB.FencingToken,
 	})
 	require.NoError(t, err)
 	require.True(t, claimed)
@@ -292,10 +292,10 @@ func TestOrchestratorRunWithWakeClaimAndReleaseOnExit(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
 	require.NoError(t, err)
 	_, err = store.UpsertTeammate(ctx, Teammate{
-		ID:      "mate-a",
-		TeamID:  teamID,
-		Name:    "mate-a",
-		State:   TeammateStateIdle,
+		ID:     "mate-a",
+		TeamID: teamID,
+		Name:   "mate-a",
+		State:  TeammateStateIdle,
 	})
 	require.NoError(t, err)
 	taskID, err := store.CreateTask(ctx, Task{
@@ -356,10 +356,10 @@ func TestOrchestratorNewOwnerResumesHealthReconcile(t *testing.T) {
 	teamID, err := store.CreateTeam(ctx, Team{Status: TeamStatusActive})
 	require.NoError(t, err)
 	mateID, err := store.UpsertTeammate(ctx, Teammate{
-		ID:      "mate-a",
-		TeamID:  teamID,
-		Name:    "mate-a",
-		State:   TeammateStateBusy,
+		ID:     "mate-a",
+		TeamID: teamID,
+		Name:   "mate-a",
+		State:  TeammateStateBusy,
 	})
 	require.NoError(t, err)
 	// A task whose attempt lease expired while its owner was alive.

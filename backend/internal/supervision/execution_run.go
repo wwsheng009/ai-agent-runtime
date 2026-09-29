@@ -8,8 +8,8 @@ import (
 // Execution run kinds (doc 5.3). P3 covers agent_run; team kinds are reserved
 // for P4/P5 but the model already carries the shared fields.
 const (
-	RunKindAgentRun      = "agent_run"
-	RunKindTeamLoop      = "team_loop"
+	RunKindAgentRun        = "agent_run"
+	RunKindTeamLoop        = "team_loop"
 	RunKindTeamTaskAttempt = "team_task_attempt"
 )
 
@@ -128,12 +128,12 @@ type ExecutionRun struct {
 	OwnerID         string
 	// TurnID is the dispatching turn this obligation belongs to (AC-P0-3c).
 	// Resume reuses the same turn id (I3), so join/resume accounting keys on it.
-	TurnID              string
-	OwnerLeaseUntil     *time.Time
-	StartedAt           time.Time
-	LastHeartbeatAt     time.Time
-	LastProgressAt      time.Time
-	ProgressSeq         int64
+	TurnID          string
+	OwnerLeaseUntil *time.Time
+	StartedAt       time.Time
+	LastHeartbeatAt time.Time
+	LastProgressAt  time.Time
+	ProgressSeq     int64
 	// BudgetLevel / BudgetLine / BudgetRatio are the live turn-budget watermark
 	// of the run's current turn (建议稿 §4.2 运行中水位): "ok|soft|hard", the
 	// rendered line ("turn budget: step 240/300 · tokens 62%") and the max

@@ -26,12 +26,12 @@ const EventTypeProgress = "tool.progress"
 
 // Progress is a mid-execution progress notification wire object.
 type Progress struct {
-	ToolID    ToolID                 `json:"tool_id"`
-	CallID    CallID                 `json:"call_id,omitempty"`
-	SessionID string                 `json:"session_id,omitempty"`
-	TraceID   string                 `json:"trace_id,omitempty"`
-	Kind      NotificationKind       `json:"kind,omitempty"`
-	Message   string                 `json:"message,omitempty"`
+	ToolID    ToolID           `json:"tool_id"`
+	CallID    CallID           `json:"call_id,omitempty"`
+	SessionID string           `json:"session_id,omitempty"`
+	TraceID   string           `json:"trace_id,omitempty"`
+	Kind      NotificationKind `json:"kind,omitempty"`
+	Message   string           `json:"message,omitempty"`
 	// Percent is 0-100 when known; omit / negative means unknown.
 	Percent  float64                `json:"percent,omitempty"`
 	Partial  string                 `json:"partial,omitempty"`

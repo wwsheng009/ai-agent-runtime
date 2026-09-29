@@ -139,8 +139,8 @@ func ProjectApprovalRequest(ctx context.Context, store Store, wakes *WakeSchedul
 			string(ActionCancel),
 			string(ActionClose),
 		},
-		DecisionState:         "",
-		ResolutionState:       ResolutionUnresolved,
+		DecisionState:   "",
+		ResolutionState: ResolutionUnresolved,
 	})
 	if err != nil {
 		return Notification{}, fmt.Errorf("supervision: persist approval projection: %w", err)

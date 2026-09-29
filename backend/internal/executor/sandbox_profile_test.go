@@ -8,9 +8,9 @@ import (
 
 func TestNormalizeSandboxProfile(t *testing.T) {
 	cases := map[string]string{
-		"":         "",
-		"off":      SandboxProfileOff,
-		"disabled": SandboxProfileOff,
+		"":          "",
+		"off":       SandboxProfileOff,
+		"disabled":  SandboxProfileOff,
 		"workspace": SandboxProfileWorkspace,
 		"read-only": SandboxProfileReadOnly,
 		"readonly":  SandboxProfileReadOnly,

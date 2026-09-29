@@ -194,7 +194,7 @@ func (cpty *ConPty) Close() error {
 		cpty.cmdIn.handle, cpty.cmdOut.handle)
 }
 
-func (cpty *ConPty) Read(p []byte) (int, error) { return cpty.cmdOut.Read(p) }
+func (cpty *ConPty) Read(p []byte) (int, error)  { return cpty.cmdOut.Read(p) }
 func (cpty *ConPty) Write(p []byte) (int, error) { return cpty.cmdIn.Write(p) }
 func (cpty *ConPty) Pid() int                    { return int(cpty.pi.ProcessId) }
 

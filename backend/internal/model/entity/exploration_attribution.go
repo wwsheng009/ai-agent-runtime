@@ -14,9 +14,9 @@ import "time"
 // scope)，不存 pattern 明文；ProjectID 存稳定键（工作区路径的哈希前缀），
 // 不存绝对路径。
 type ExplorationAttribution struct {
-	ID       string
+	ID        string
 	SessionID string
-	TurnID   string
+	TurnID    string
 	RequestID string
 	// Tool 为被拦截的工具名：grep | view。
 	Tool string

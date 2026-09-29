@@ -60,8 +60,8 @@ func TestSplitCommandLine(t *testing.T) {
 			in:   `"C:\Program Files\OpenSSH\ssh.exe" -W %h:%p jump`,
 			want: []string{`C:\Program Files\OpenSSH\ssh.exe`, "-W", "%h:%p", "jump"},
 		},
-		{in: ``, want: nil},          // 空命令
-		{in: `   `, want: nil},       // 全空白
+		{in: ``, want: nil},              // 空命令
+		{in: `   `, want: nil},           // 全空白
 		{in: `"unterminated`, want: nil}, // 引号未闭合
 	}
 

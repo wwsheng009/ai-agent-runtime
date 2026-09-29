@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolbroker"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
-	"github.com/wwsheng009/ai-agent-runtime/internal/team"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 type runMetaSequenceProvider struct {

@@ -118,9 +118,9 @@ type convertResult struct {
 	// SheetTotal / SheetsDelivered / SheetsMissing describe workbook coverage:
 	// a CSV conversion that silently delivered only the active sheet used to
 	// look like a complete render (2026-09-27 review H14).
-	SheetTotal       int
-	SheetsDelivered  int
-	SheetsMissing    []string
+	SheetTotal      int
+	SheetsDelivered int
+	SheetsMissing   []string
 }
 
 // convertDocument 按类型选择转换命令并返回渲染结果。

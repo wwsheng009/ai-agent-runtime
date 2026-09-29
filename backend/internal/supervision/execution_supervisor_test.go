@@ -73,11 +73,11 @@ func TestExecutionSupervisor_StartRunResolvesDeadlines(t *testing.T) {
 	supervisor.Now = func() time.Time { return now }
 
 	run, err := supervisor.StartRun(ctx, RunSpec{
-		Workflow:      RunWorkflowSpawnAgent,
-		RootSessionID: "root-session",
+		Workflow:        RunWorkflowSpawnAgent,
+		RootSessionID:   "root-session",
 		ParentSessionID: "parent-session",
-		SessionID:     "child-1",
-		AgentID:       "child-1",
+		SessionID:       "child-1",
+		AgentID:         "child-1",
 	})
 	require.NoError(t, err)
 	require.NotEmpty(t, run.RunID)

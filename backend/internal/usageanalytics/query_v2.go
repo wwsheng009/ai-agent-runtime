@@ -65,39 +65,39 @@ type SubagentStatsQuery struct {
 
 // SubagentStat 是单个子代理完成记录。
 type SubagentStat struct {
-	SubagentID       string    `json:"subagent_id"`
-	ParentSessionID  string    `json:"parent_session_id"`
-	ChildSessionID   string    `json:"child_session_id,omitempty"`
-	Role             string    `json:"role,omitempty"`
-	TaskType         string    `json:"task_type,omitempty"`
-	TaskSubject      string    `json:"task_subject,omitempty"`
-	Source           string    `json:"source,omitempty"`
-	Success          *bool     `json:"success"`
-	CompletionReason string    `json:"completion_reason"`
-	FailureCategory  string    `json:"failure_category,omitempty"`
-	ErrorCode        string    `json:"error_code,omitempty"`
-	Attempt          int       `json:"attempt"`
-	MaxAttempts      int       `json:"max_attempts"`
-	RetryReason      string    `json:"retry_reason,omitempty"`
-	DurationMS       int64     `json:"duration_ms"`
-	UsageTotalTokens int64     `json:"usage_total_tokens"`
+	SubagentID       string `json:"subagent_id"`
+	ParentSessionID  string `json:"parent_session_id"`
+	ChildSessionID   string `json:"child_session_id,omitempty"`
+	Role             string `json:"role,omitempty"`
+	TaskType         string `json:"task_type,omitempty"`
+	TaskSubject      string `json:"task_subject,omitempty"`
+	Source           string `json:"source,omitempty"`
+	Success          *bool  `json:"success"`
+	CompletionReason string `json:"completion_reason"`
+	FailureCategory  string `json:"failure_category,omitempty"`
+	ErrorCode        string `json:"error_code,omitempty"`
+	Attempt          int    `json:"attempt"`
+	MaxAttempts      int    `json:"max_attempts"`
+	RetryReason      string `json:"retry_reason,omitempty"`
+	DurationMS       int64  `json:"duration_ms"`
+	UsageTotalTokens int64  `json:"usage_total_tokens"`
 	// BudgetTokens 是该子代理任务声明的 token 预算（0 = 未声明，§4.2）；
 	// BudgetExceeded 由"预算 > 0 且实际用量超预算"派生。
-	BudgetTokens   int64 `json:"budget_tokens,omitempty"`
-	BudgetExceeded bool  `json:"budget_exceeded,omitempty"`
-	ConflictCount    int       `json:"conflict_count"`
-	CompletedAt      time.Time `json:"completed_at,omitempty"`
+	BudgetTokens   int64     `json:"budget_tokens,omitempty"`
+	BudgetExceeded bool      `json:"budget_exceeded,omitempty"`
+	ConflictCount  int       `json:"conflict_count"`
+	CompletedAt    time.Time `json:"completed_at,omitempty"`
 }
 
 // SubagentStatsSummary 是子代理聚合视图（失败率/分类分布/来源分布）。
 type SubagentStatsSummary struct {
-	Total             int            `json:"total"`
-	Succeeded         int            `json:"succeeded"`
-	Failed            int            `json:"failed"`
-	Unknown           int            `json:"unknown"`
-	FailureRate       float64        `json:"failure_rate"`
-	Timeouts          int            `json:"timeouts"`
-	Retried           int            `json:"retried"`
+	Total       int     `json:"total"`
+	Succeeded   int     `json:"succeeded"`
+	Failed      int     `json:"failed"`
+	Unknown     int     `json:"unknown"`
+	FailureRate float64 `json:"failure_rate"`
+	Timeouts    int     `json:"timeouts"`
+	Retried     int     `json:"retried"`
 	// §4.2 超支告警：声明了任务预算的子代理数与其实际用量超预算的数
 	// （"1 exceeded of 3 budgeted" 比孤立计数可解释）。
 	BudgetedRuns      int            `json:"budgeted_runs,omitempty"`

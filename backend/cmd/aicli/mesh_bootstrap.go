@@ -60,7 +60,7 @@ func startMeshHost(cmd *cobra.Command) *mesh.Host {
 		// 审计开关（§9.5）：--mesh-journal=false 时 journal 仍分配 seq（扇入与
 		// SSE 的 seq 同源，§6.3），但不写任何审计行。
 		JournalDisabled: !commands.ChatWebMeshJournalEnabled(),
-		Warn:        meshWarn,
+		Warn:            meshWarn,
 	})
 	mesh.SetCurrent(host)
 	if err := host.Start(); err != nil {

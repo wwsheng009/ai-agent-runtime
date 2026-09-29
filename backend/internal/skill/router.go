@@ -17,11 +17,11 @@ type RouteResult struct {
 
 // Router Skill 路由器
 type Router struct {
-	registry         *Registry
-	embeddingRouter  EmbeddingRouter
-	minScore         float64
-	maxResults       int
-	caseSensitive    bool
+	registry        *Registry
+	embeddingRouter EmbeddingRouter
+	minScore        float64
+	maxResults      int
+	caseSensitive   bool
 }
 
 // NewRouter 创建路由器
@@ -192,9 +192,9 @@ func (r *Router) calculateKeywordScore(skill *Skill, keyword, prompt string) flo
 	index := strings.Index(promptLower, keyword)
 	positionBonus := 1.0
 	if index == 0 {
-		positionBonus = 1.2  // 开头匹配加分
+		positionBonus = 1.2 // 开头匹配加分
 	} else if index > 0 && index < len(promptLower)/3 {
-		positionBonus = 1.1  // 前三分之一的分数加成
+		positionBonus = 1.1 // 前三分之一的分数加成
 	}
 
 	return totalWeight * positionBonus
@@ -202,7 +202,7 @@ func (r *Router) calculateKeywordScore(skill *Skill, keyword, prompt string) flo
 
 // calculatePatternScore 计算模式分数
 func (r *Router) calculatePatternScore(skill *Skill, pattern, prompt string) float64 {
-	baseScore := 0.8  // 模式匹配基础分数
+	baseScore := 0.8 // 模式匹配基础分数
 
 	for _, trigger := range skill.Triggers {
 		if trigger.Type == "pattern" {
@@ -253,10 +253,10 @@ func (r *Router) filterByScore(results []*RouteResult, minScore float64) []*Rout
 
 // RouterConfig 路由器配置
 type RouterConfig struct {
-	MinScore      float64 `yaml:"minScore"`
-	MaxResults    int     `yaml:"maxResults"`
-	CaseSensitive bool    `yaml:"caseSensitive"`
-	EnableEmbedding bool `yaml:"enableEmbedding"`
+	MinScore        float64 `yaml:"minScore"`
+	MaxResults      int     `yaml:"maxResults"`
+	CaseSensitive   bool    `yaml:"caseSensitive"`
+	EnableEmbedding bool    `yaml:"enableEmbedding"`
 }
 
 // ApplyConfig 应用配置
@@ -282,12 +282,12 @@ func (r *Router) GetStats() *RouterStats {
 
 // RouterStats 路由器统计信息
 type RouterStats struct {
-	TotalSkills         int     `json:"totalSkills"`
-	SkillsWithKeywords  int     `json:"skillsWithKeywords"`
-	SkillsWithPatterns  int     `json:"skillsWithPatterns"`
-	CaseSensitive       bool    `json:"caseSensitive"`
-	MinScore            float64 `json:"minScore"`
-	MaxResults          int     `json:"maxResults"`
+	TotalSkills        int     `json:"totalSkills"`
+	SkillsWithKeywords int     `json:"skillsWithKeywords"`
+	SkillsWithPatterns int     `json:"skillsWithPatterns"`
+	CaseSensitive      bool    `json:"caseSensitive"`
+	MinScore           float64 `json:"minScore"`
+	MaxResults         int     `json:"maxResults"`
 }
 
 // EmbeddingRouter Embedding 路由器接口

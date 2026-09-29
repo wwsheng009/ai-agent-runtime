@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
-	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
+	"github.com/wwsheng009/ai-agent-runtime/internal/api/runtimeapi"
 	"gopkg.in/yaml.v3"
 )
 

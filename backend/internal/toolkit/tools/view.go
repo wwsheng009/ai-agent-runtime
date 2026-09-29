@@ -877,8 +877,8 @@ func (v *ViewTool) executeBatch(ctx context.Context, requests []ViewFileRequest,
 	}
 	if succeeded == 0 {
 		meta := map[string]interface{}{
-			"batch":                       true,
-			"request_count":               len(requests),
+			"batch":         true,
+			"request_count": len(requests),
 			// Total failures, not just the bounded detail rows: consumers
 			// derive success counts from requested-failed, so under-reporting
 			// failed_count invented successes for an all-failed batch

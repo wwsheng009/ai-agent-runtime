@@ -167,4 +167,3 @@ func newStopHookReminderMessage(hookMessage string) *types.Message {
 		},
 	})
 }
-

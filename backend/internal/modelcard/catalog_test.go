@@ -292,12 +292,12 @@ func TestBuiltinSourceResolvesAnthropicLatestModels(t *testing.T) {
 	}
 
 	cases := []struct {
-		modelID            string
-		wantCardID         string
-		wantContext        int
-		wantMaxTokens      int
-		wantReasoning      string
-		wantDefaultEffort  string
+		modelID           string
+		wantCardID        string
+		wantContext       int
+		wantMaxTokens     int
+		wantReasoning     string
+		wantDefaultEffort string
 	}{
 		{"claude-fable-5", "anthropic.claude-fable-5", 1000000, 128000, "low,medium,high,xhigh,max", "high"},
 		{"claude-mythos-5", "anthropic.claude-mythos-5", 1000000, 128000, "low,medium,high,xhigh,max", "high"},

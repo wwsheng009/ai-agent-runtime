@@ -54,7 +54,7 @@ type ModelSingleProbe struct {
 
 // ModelProbeMatrix 是单个模型的跨协议探测结果（模型 → 各协议探针列表）。
 type ModelProbeMatrix struct {
-	Model  string            `json:"model"`
+	Model  string             `json:"model"`
 	Probes []ModelSingleProbe `json:"probes"`
 }
 

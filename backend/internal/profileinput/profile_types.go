@@ -61,19 +61,19 @@ type ResolvedPaths struct {
 // ResolvedAgent is the system-level output of profile resolution.
 // Mirrors profile.ResolvedAgent from ai-gateway.
 type ResolvedAgent struct {
-	ProfileName     string              `json:"profile_name"`
-	ProfileRoot     string              `json:"profile_root"`
-	AgentID         string              `json:"agent_id"`
-	DefaultProvider string              `json:"default_provider,omitempty"`
-	Provider        string              `json:"provider,omitempty"`
-	Model           string              `json:"model,omitempty"`
-	RuntimeConfig   string              `json:"runtime_config,omitempty"`
-	MCPConfig       string              `json:"mcp_config,omitempty"`
-	MCPSelection    ResolvedMCPSelection `json:"mcp_selection,omitempty"`
-	SkillDirs       []string            `json:"skill_dirs,omitempty"`
+	ProfileName     string                 `json:"profile_name"`
+	ProfileRoot     string                 `json:"profile_root"`
+	AgentID         string                 `json:"agent_id"`
+	DefaultProvider string                 `json:"default_provider,omitempty"`
+	Provider        string                 `json:"provider,omitempty"`
+	Model           string                 `json:"model,omitempty"`
+	RuntimeConfig   string                 `json:"runtime_config,omitempty"`
+	MCPConfig       string                 `json:"mcp_config,omitempty"`
+	MCPSelection    ResolvedMCPSelection   `json:"mcp_selection,omitempty"`
+	SkillDirs       []string               `json:"skill_dirs,omitempty"`
 	Skills          ResolvedSkillSelection `json:"skills,omitempty"`
-	Prompts         ResolvedPromptFiles `json:"prompts,omitempty"`
-	PromptMode      string              `json:"prompt_mode,omitempty"`
-	ToolPolicy      ResolvedToolPolicy  `json:"tool_policy,omitempty"`
-	Paths           ResolvedPaths       `json:"paths"`
+	Prompts         ResolvedPromptFiles    `json:"prompts,omitempty"`
+	PromptMode      string                 `json:"prompt_mode,omitempty"`
+	ToolPolicy      ResolvedToolPolicy     `json:"tool_policy,omitempty"`
+	Paths           ResolvedPaths          `json:"paths"`
 }

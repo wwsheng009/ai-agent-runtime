@@ -9,10 +9,10 @@ type DAG struct {
 
 // Node DAG 节点
 type Node struct {
-	ID          string      `json:"id"`
-	Data        interface{} `json:"data"`
-	Deps        []string    `json:"deps"`        // 依赖列表
-	Dependents  []string    `json:"dependents"` // 依赖此节点的其他节点
+	ID         string      `json:"id"`
+	Data       interface{} `json:"data"`
+	Deps       []string    `json:"deps"`       // 依赖列表
+	Dependents []string    `json:"dependents"` // 依赖此节点的其他节点
 }
 
 // DAGBuilder DAG 构建器

@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestToolkitMCPServer_ListToolsIncludesSchema(t *testing.T) {

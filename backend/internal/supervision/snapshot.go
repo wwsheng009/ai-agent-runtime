@@ -111,27 +111,27 @@ type SnapshotItem struct {
 	// Execution run supervision fields (P6-3): attached from the durable
 	// execution run record so operators see attempt, deadlines, heartbeat and
 	// progress timestamps in one view (doc 10 rule 3).
-	RunID              string              `json:"run_id,omitempty"`
-	RunStatus          string              `json:"run_status,omitempty"`
-	Attempt            int                 `json:"attempt,omitempty"`
-	MaxAttempts        int                 `json:"max_attempts,omitempty"`
-	RunOwnerID         string              `json:"run_owner_id,omitempty"`
-	ProgressDeadlineAt *time.Time          `json:"progress_deadline_at,omitempty"`
-	ApprovalDeadlineAt *time.Time          `json:"approval_deadline_at,omitempty"`
-	CancelDeadlineAt   *time.Time          `json:"cancel_deadline_at,omitempty"`
-	LastHeartbeatAt    *time.Time          `json:"last_heartbeat_at,omitempty"`
-	LastProgressAt     *time.Time          `json:"last_progress_at,omitempty"`
+	RunID              string     `json:"run_id,omitempty"`
+	RunStatus          string     `json:"run_status,omitempty"`
+	Attempt            int        `json:"attempt,omitempty"`
+	MaxAttempts        int        `json:"max_attempts,omitempty"`
+	RunOwnerID         string     `json:"run_owner_id,omitempty"`
+	ProgressDeadlineAt *time.Time `json:"progress_deadline_at,omitempty"`
+	ApprovalDeadlineAt *time.Time `json:"approval_deadline_at,omitempty"`
+	CancelDeadlineAt   *time.Time `json:"cancel_deadline_at,omitempty"`
+	LastHeartbeatAt    *time.Time `json:"last_heartbeat_at,omitempty"`
+	LastProgressAt     *time.Time `json:"last_progress_at,omitempty"`
 	// BudgetLevel / BudgetLine / BudgetRatio are the live turn-budget watermark
 	// of the run's current turn (建议稿 §4.2 运行中水位): "ok|soft|hard" plus the
 	// rendered line ("turn budget: step 240/300 · tokens 62%"). Empty level means
 	// the host never reported one, which keeps unwired rows byte-identical.
-	BudgetLevel        string              `json:"budget_level,omitempty"`
-	BudgetLine         string              `json:"budget_line,omitempty"`
-	BudgetRatio        float64             `json:"budget_ratio,omitempty"`
-	Reason             string              `json:"reason,omitempty"`
-	AutoAction         *SnapshotAutoAction `json:"auto_action,omitempty"`
-	RecommendedAction  string              `json:"recommended_action,omitempty"`
-	AllowedActions     []string            `json:"allowed_actions,omitempty"`
+	BudgetLevel       string              `json:"budget_level,omitempty"`
+	BudgetLine        string              `json:"budget_line,omitempty"`
+	BudgetRatio       float64             `json:"budget_ratio,omitempty"`
+	Reason            string              `json:"reason,omitempty"`
+	AutoAction        *SnapshotAutoAction `json:"auto_action,omitempty"`
+	RecommendedAction string              `json:"recommended_action,omitempty"`
+	AllowedActions    []string            `json:"allowed_actions,omitempty"`
 	// NextAction explains which remediation path was filtered out because this
 	// host has no entry point for it (empty when nothing was filtered).
 	NextAction     string `json:"next_action,omitempty"`
@@ -183,7 +183,7 @@ type SnapshotRequest struct {
 	// SupervisionDescendants）必须保持 false——token 水位不交给 LLM 在运行中
 	// 反应，父代理的决策输入是业务进度，不是成本表。
 	IncludeBudgetWatermark bool
-	Limit          int
+	Limit                  int
 	// DefaultLimit is the host-configured fallback used when Limit is not set
 	// (plan §9: the 200-row cap used to be hardcoded here). Zero keeps the
 	// package-level default so unwired hosts behave exactly as before.

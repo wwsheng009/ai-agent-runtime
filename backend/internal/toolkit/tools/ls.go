@@ -66,10 +66,10 @@ func NewLsTool() *LsTool {
 
 func (l *LsTool) DefinitionMetadata() map[string]interface{} {
 	return map[string]interface{}{
-		runtimetypes.ToolMetadataKindKey:            runtimetypes.ToolKindRead,
-		runtimetypes.ToolMetadataReadOnlyKey:        true,
-		runtimetypes.ToolMetadataMutatesFSKey:       false,
-		runtimetypes.ToolMetadataRequiresNetKey:     false,
+		runtimetypes.ToolMetadataKindKey:             runtimetypes.ToolKindRead,
+		runtimetypes.ToolMetadataReadOnlyKey:         true,
+		runtimetypes.ToolMetadataMutatesFSKey:        false,
+		runtimetypes.ToolMetadataRequiresNetKey:      false,
 		runtimetypes.ToolMetadataSupportsParallelKey: true,
 		runtimetypes.ToolMetadataRetryClassKey:       runtimetypes.ToolRetryClassSafe,
 	}

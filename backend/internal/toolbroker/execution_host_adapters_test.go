@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 	"github.com/stretchr/testify/require"
+	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
 func TestAgentSessionRunInterrupterClosesLiveSession(t *testing.T) {
