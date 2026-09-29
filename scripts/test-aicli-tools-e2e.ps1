@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   aicli 工具链 E2E（E2E-TOOLS-01）：单进程 3 轮真实 provider 会话，验证
   read 去重 / write→edit 账本 / 外部改动后的 stale 拒绝。

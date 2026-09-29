@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [int]$TimeoutSeconds = 45,
     [switch]$KeepWindow

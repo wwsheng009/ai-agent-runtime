@@ -1,4 +1,4 @@
-#requires -Version 7
+﻿#requires -Version 7
 <#
 .SYNOPSIS
   E2E：resume 之后**整份** transcript 必须交付到原生 scrollback（历史尾部不得缺失）。

@@ -1,4 +1,4 @@
-#requires -Version 7
+﻿#requires -Version 7
 <#
 诊断工具：量测 resume 期间「UI/debug 端点」的响应时延，把「卡住」变成数字。
 

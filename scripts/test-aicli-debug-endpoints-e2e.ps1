@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   aicli 调试端点 E2E：独立进程启动 → /debug/endpoints 发现 → 读屏 → 同步 invoke → 幂等回放 → turn 后验 → /exit 收尾。
 

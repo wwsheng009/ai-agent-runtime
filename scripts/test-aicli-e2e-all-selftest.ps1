@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   scripts/test-aicli-e2e-all.ps1 的自测（负例驱动）：用桩 harness 验证聚合逻辑。
 

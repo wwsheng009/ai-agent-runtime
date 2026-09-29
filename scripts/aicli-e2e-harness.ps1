@@ -1,4 +1,4 @@
-# aicli E2E 观测工具集（被 test-aicli-*.ps1 dot-source 复用）
+﻿# aicli E2E 观测工具集（被 test-aicli-*.ps1 dot-source 复用）
 #
 # 用法：
 #   . (Join-Path $PSScriptRoot 'aicli-e2e-harness.ps1')

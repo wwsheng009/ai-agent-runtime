@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   PR-4 单轮预算 / turn 生命周期 / 第 5 条 prompt cache 熔断的受控注入式验收。
 

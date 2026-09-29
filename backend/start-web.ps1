@@ -1,4 +1,4 @@
-# 启动 aicli web 服务器并保持 stdin 打开（避免后台无 TTY 时进程退出）。
+﻿# 启动 aicli web 服务器并保持 stdin 打开（避免后台无 TTY 时进程退出）。
 $binary = "E:\projects\ai\ai-agent-runtime\backend\aicli-2x.exe"
 $env:AICLI_PPROF = "127.0.0.1:61228"
 

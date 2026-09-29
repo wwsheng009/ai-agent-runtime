@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$OutputDir = "output/release-gate",
     [string]$Version = "",

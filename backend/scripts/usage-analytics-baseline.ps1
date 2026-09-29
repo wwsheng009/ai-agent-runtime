@@ -1,4 +1,4 @@
-# usage-analytics-baseline.ps1
+﻿# usage-analytics-baseline.ps1
 #
 # 用途（方案 §4 批次 0.4 / 附录 A.1）：
 #   输出与实施计划 §0.4 同构的可复现基线：分析库各表计数（含已归档的
