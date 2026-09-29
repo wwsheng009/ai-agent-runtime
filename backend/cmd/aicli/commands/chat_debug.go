@@ -2444,7 +2444,14 @@ func chatSupervisionTimeShort(value string) string {
 
 func printChatTimeline(session *ChatSession, command string) {
 	if unifiedDirectInteractiveOutput(session) {
-		_ = renderChatCommandResult(session, executeStructuredTimelineCommand(session, command), false)
+		result := executeStructuredTimelineCommand(session, command)
+		renderErr := renderChatCommandResult(session, result, false)
+		if renderErr == nil {
+			// 批次 3 的只读副屏效应必须与主分派器同款派发：不可承载备用屏时由
+			// chatScreenDegradeInline 内联 Spec 正文（chat_screen_framework.go
+			// 降级契约），内部调用者绝不静默吞掉输出。
+			dispatchChatScreenEffects(session, result)
+		}
 		return
 	}
 	text := "错误: 当前没有活动会话"
@@ -2477,7 +2484,12 @@ func chatTimelineCommandText(session *ChatSession, command string) string {
 
 func printChatCollab(session *ChatSession, command string) {
 	if unifiedDirectInteractiveOutput(session) {
-		_ = renderChatCommandResult(session, executeStructuredCollabCommand(session, command), false)
+		result := executeStructuredCollabCommand(session, command)
+		renderErr := renderChatCommandResult(session, result, false)
+		if renderErr == nil {
+			// 同 /timeline：Screen 效应统一派发，降级路径负责内联正文。
+			dispatchChatScreenEffects(session, result)
+		}
 		return
 	}
 	text := "错误: 当前没有活动会话"

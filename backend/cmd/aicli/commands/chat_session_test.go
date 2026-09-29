@@ -232,6 +232,7 @@ func TestRuntimeMessageFromAICLIMessage_PreservesCodexOutputItems(t *testing.T) 
 		"response_output_items": []map[string]interface{}{
 			{
 				"type": "reasoning",
+				"id":   "rs_fixture_reasoning_1",
 				"summary": []map[string]interface{}{
 					{
 						"type": "summary_text",
@@ -258,6 +259,9 @@ func TestRuntimeMessageFromAICLIMessage_PreservesCodexOutputItems(t *testing.T) 
 	}
 	if outputItems[0]["encrypted_content"] != "-" {
 		t.Fatalf("expected encrypted_content to be preserved, got %#v", outputItems[0]["encrypted_content"])
+	}
+	if outputItems[0]["id"] != "rs_fixture_reasoning_1" {
+		t.Fatalf("expected the reasoning item id to be preserved with the blob, got %#v", outputItems[0]["id"])
 	}
 }
 

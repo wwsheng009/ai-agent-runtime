@@ -4,9 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,8 +25,6 @@ import (
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
-
-const commandTestTinyPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP+qC1oAAAAAElFTkSuQmCC"
 
 type directMetadataFunction struct {
 	name     string
@@ -59,15 +58,22 @@ func (f *blockingDirectFunction) Execute(ctx context.Context, args map[string]in
 	}
 }
 
-func TestHandleImageAttachmentCommandValidatesAndRemovesAttachments(t *testing.T) {
-	payload, err := base64.StdEncoding.DecodeString(commandTestTinyPNGBase64)
-	if err != nil {
-		t.Fatalf("decode png: %v", err)
+// writeCommandTestPNG 写出一张真实编码的 PNG：附件预处理器会对图片做结构校验
+// （imageprep），手工拼的 base64 夹具一旦截断就会被拒。
+func writeCommandTestPNG(t *testing.T, path string) {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatalf("encode png: %v", err)
 	}
-	imagePath := filepath.Join(t.TempDir(), "diagram.png")
-	if err := os.WriteFile(imagePath, payload, 0o644); err != nil {
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		t.Fatalf("write png: %v", err)
 	}
+}
+
+func TestHandleImageAttachmentCommandValidatesAndRemovesAttachments(t *testing.T) {
+	imagePath := filepath.Join(t.TempDir(), "diagram.png")
+	writeCommandTestPNG(t, imagePath)
 	session := &ChatSession{}
 
 	output := captureStdout(t, func() {

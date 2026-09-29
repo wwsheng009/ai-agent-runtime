@@ -1153,7 +1153,9 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_setup.go", Func: "buildChatSession", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_setup.go", Func: "emitChatSandboxWarning", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_setup.go", Func: "finalizeChatSessionWithError", Kind: "fmt.Fprint(os.Std*)", Count: 1},
-		{File: "chat_setup.go", Func: "initializeChatCapabilities", Kind: "fmt.Fprint(os.Std*)", Count: 3},
+		// 4 = MCP/Skills 初始化告警 + cleanup 的 Skills/LSP 停止告警
+		// （chat_setup.go:419/510/533/540）。
+		{File: "chat_setup.go", Func: "initializeChatCapabilities", Kind: "fmt.Fprint(os.Std*)", Count: 4},
 		{File: "chat_setup.go", Func: "printChatExitResumeHint", Kind: "fmt.Print", Count: 1},
 		{File: "chat_setup.go", Func: "printChatSessionPreamble", Kind: "fmt.Fprint(os.Std*)", Count: 2},
 		// 11 = 迁移前基线 10 + per-skill 启停（/skills disable|enable）在 legacy

@@ -226,8 +226,10 @@ func containsLine(lines []string, want string) bool {
 	return false
 }
 
-// TestChatAccountsScreenOptionsCarryRefreshKey 覆盖 /accounts 屏的刷新接线：屏幕
-// 必须携带刷新回调与页脚提示，且冻结打开屏幕那一刻的请求参数（--enabled-only）。
+// TestChatAccountsScreenOptionsCarryRefreshKey 覆盖 /accounts 屏的刷新接线：可开屏
+// 路径由 chatAccountsScreenOptions 携带刷新回调与页脚提示（开屏第一帧与按 r 之后
+// 的帧同源）；测试夹具没有全屏 TTY，Spec 必须 fail-closed 降级（ForceInline 且清空
+// 查看器 chrome），但保留打开那一刻冻结的请求参数（--enabled-only）。
 func TestChatAccountsScreenOptionsCarryRefreshKey(t *testing.T) {
 	session, _ := newUnifiedChatAccountSession(t)
 	// beta 置为未启用：--enabled-only 的冻结参数只有作用于真实 provider 集合
@@ -236,23 +238,37 @@ func TestChatAccountsScreenOptionsCarryRefreshKey(t *testing.T) {
 	beta.Enabled = false
 	session.Config.Providers.Items["beta"] = beta
 
+	// 接线源头：屏内刷新回调与页脚提示必须由 options 携带（Spec 在可开屏时
+	// 原样复制它们；测试环境不可开屏，故在源头断言）。
+	options := chatAccountsScreenOptions(session, AccountListScreenRequest{})
+	if options.Refresh == nil {
+		t.Fatal("全部账户屏必须携带屏内刷新回调")
+	}
+	if options.RefreshHint != accountsScreenRefreshHint {
+		t.Fatalf("刷新提示 = %q want %q", options.RefreshHint, accountsScreenRefreshHint)
+	}
+	if !strings.Contains(options.Title, accountsScreenTitle) {
+		t.Fatalf("屏标题 = %q", options.Title)
+	}
+
 	result, handled, err := tryExecuteStructuredChatCommand(session, "/accounts display")
 	if err != nil || !handled || result.Screen == nil || result.Screen.ID != "accounts.screen" {
 		t.Fatalf("/accounts display handled=%v err=%v result=%+v", handled, err, result.Screen)
 	}
 	spec := *result.Screen
-	if spec.Refresh == nil {
-		t.Fatal("全部账户屏必须携带屏内刷新回调")
+	// 无全屏 TTY：fail-closed 降级，查看器 chrome（刷新回调/页脚提示）必须清空。
+	if !spec.ForceInline || spec.ForceInlineReason != "unavailable" {
+		t.Fatalf("降级 Spec 必须 ForceInline(unavailable): %+v", spec)
 	}
-	if spec.RefreshHint != accountsScreenRefreshHint {
-		t.Fatalf("刷新提示 = %q want %q", spec.RefreshHint, accountsScreenRefreshHint)
+	if spec.Refresh != nil || spec.RefreshHint != "" {
+		t.Fatalf("降级 Spec 不得携带查看器刷新 chrome: refresh=%v hint=%q", spec.Refresh != nil, spec.RefreshHint)
 	}
 	if !strings.Contains(spec.Title, accountsScreenTitle) {
 		t.Fatalf("屏标题 = %q", spec.Title)
 	}
 	body := ui.RenderDocumentPlain(spec.Doc)
-	if !containsLine(strings.Split(body, "\n"), screenViewerFooter) {
-		t.Fatalf("第一帧必须是缓存快照正文:\n%s", body)
+	if containsLine(strings.Split(body, "\n"), screenViewerFooter) {
+		t.Fatalf("降级文档不得携带查看器页脚:\n%s", body)
 	}
 	if !strings.Contains(body, "beta") {
 		t.Fatal("display 未带 --enabled-only，冻结快照必须包含未启用的 provider")
