@@ -175,6 +175,14 @@ type SnapshotRequest struct {
 	// (result_status/result_summary/artifact_refs/error_class/finished_at).
 	// Default false keeps the row payload unchanged (P0-4 改动 1).
 	IncludeResults bool
+	// IncludeBudgetWatermark attaches the host-reported live turn-budget
+	// watermark (budget_level/budget_line/budget_ratio) to agent rows.
+	//
+	// 这是一条**只作观测**的读数通道：操作者/HTTP 读模型（GetSupervisionSnapshot、
+	// GetSupervisionAudit）置 true，而模型面工具路径（subagent_status 等
+	// SupervisionDescendants）必须保持 false——token 水位不交给 LLM 在运行中
+	// 反应，父代理的决策输入是业务进度，不是成本表。
+	IncludeBudgetWatermark bool
 	Limit          int
 	// DefaultLimit is the host-configured fallback used when Limit is not set
 	// (plan §9: the 200-row cap used to be hardcoded here). Zero keeps the
@@ -362,7 +370,7 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 			item.RecommendedAction = "inspect_cancel_result"
 			item.ActionRequired = false
 		}
-		attachExecutionRun(ctx, runStore, &item)
+		attachExecutionRun(ctx, runStore, &item, req.IncludeBudgetWatermark)
 		if req.IncludeResults {
 			applySnapshotResult(&item, d)
 		}
@@ -394,7 +402,7 @@ func BuildSnapshot(ctx context.Context, store Store, req SnapshotRequest) (*Snap
 		if action, ok := actionByTarget[key]; ok {
 			item.AutoAction = &SnapshotAutoAction{Action: action.Action, Status: action.Status, ActionID: action.ActionID}
 		}
-		attachExecutionRun(ctx, runStore, &item)
+		attachExecutionRun(ctx, runStore, &item, req.IncludeBudgetWatermark)
 		snapshot.Descendants = append(snapshot.Descendants, item)
 	}
 
@@ -483,7 +491,7 @@ const defaultSnapshotLimit = 200
 // ExecutionRunStore and a run exists for the descendant session. Best-effort:
 // missing run records or query failures leave the run fields empty without
 // failing the snapshot.
-func attachExecutionRun(ctx context.Context, runStore ExecutionRunStore, item *SnapshotItem) {
+func attachExecutionRun(ctx context.Context, runStore ExecutionRunStore, item *SnapshotItem, includeBudget bool) {
 	if runStore == nil || item == nil {
 		return
 	}
@@ -515,11 +523,14 @@ func attachExecutionRun(ctx context.Context, runStore ExecutionRunStore, item *S
 		lastProgress := run.LastProgressAt
 		item.LastProgressAt = &lastProgress
 	}
-	// §4.2：把运行中水位一并带给父代理——巡检一眼看到"tokens 84%"，而不是
-	// 等终局报告。空 level 表示宿主未上报，行输出保持字节不变。
-	item.BudgetLevel = strings.TrimSpace(run.BudgetLevel)
-	item.BudgetLine = strings.TrimSpace(run.BudgetLine)
-	item.BudgetRatio = run.BudgetRatio
+	// §4.2 运行中水位：**只作观测**。只有操作者读模型显式请求时才附到行上；
+	// 模型面（subagent_status）拿不到 token 读数，父代理不会按成本表在运行中
+	// 反应。空 level 表示宿主未上报，行输出保持字节不变。
+	if includeBudget {
+		item.BudgetLevel = strings.TrimSpace(run.BudgetLevel)
+		item.BudgetLine = strings.TrimSpace(run.BudgetLine)
+		item.BudgetRatio = run.BudgetRatio
+	}
 	if item.ExecutionDeadlineAt == nil {
 		item.ExecutionDeadlineAt = run.ExecutionDeadlineAt
 	}

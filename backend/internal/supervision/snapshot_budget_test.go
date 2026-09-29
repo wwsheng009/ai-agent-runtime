@@ -2,16 +2,18 @@ package supervision
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-// §4.2 运行中水位（读侧）：快照行必须把 run 记录的实时水位带给父代理，未上报
-// 水位的行保持零值（omitempty ⇒ 未接线宿主的行输出字节不变）。
-func TestAttachExecutionRunCarriesBudgetWatermark(t *testing.T) {
-	store := newTestStore(t, "snapshot-budget-attach")
+// §4.2 运行中水位（只作观测）：token 水位只允许出现在**显式请求**的操作者
+// 读模型里；模型面（默认请求）的行必须与未接线宿主字节一致——父代理不得在
+// 运行中按 "tokens 84%" 反应。
+func TestAttachExecutionRunBudgetWatermarkObservationOnly(t *testing.T) {
+	store := newTestStore(t, "snapshot-budget-observation")
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -35,16 +37,24 @@ func TestAttachExecutionRunCarriesBudgetWatermark(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, created)
 
-	item := SnapshotItem{Kind: SubjectAgentSession, ID: "child-snap"}
-	attachExecutionRun(ctx, store, &item)
-	require.Equal(t, "run-snap-budget", item.RunID)
-	require.Equal(t, "soft", item.BudgetLevel, "巡检行必须携带运行中水位")
-	require.Equal(t, "turn budget: step 2/10 · tokens 84%", item.BudgetLine)
-	require.InDelta(t, 0.84, item.BudgetRatio, 0.0001)
+	// 模型面（默认）：run 字段照常附着，但 token 水位不可见。
+	modelRow := SnapshotItem{Kind: SubjectAgentSession, ID: "child-snap"}
+	attachExecutionRun(ctx, store, &modelRow, false)
+	require.Equal(t, "run-snap-budget", modelRow.RunID, "模型面仍须携带 run 观测字段")
+	require.Empty(t, modelRow.BudgetLevel, "模型面不得携带 token 水位")
+	require.Empty(t, modelRow.BudgetLine)
+	require.Zero(t, modelRow.BudgetRatio)
+	modelJSON, err := json.Marshal(modelRow)
+	require.NoError(t, err)
+	require.NotContains(t, string(modelJSON), `"budget_level"`, "模型面行输出不得出现 token 水位字段")
+	require.NotContains(t, string(modelJSON), `"budget_line"`)
+	require.NotContains(t, string(modelJSON), `"budget_ratio"`)
+	require.NotContains(t, string(modelJSON), "84%")
 
-	// 未上报水位的行：零值（输出字节不变）。
-	plain := SnapshotItem{Kind: SubjectAgentSession, ID: "child-none"}
-	attachExecutionRun(ctx, store, &plain)
-	require.Empty(t, plain.BudgetLevel)
-	require.Zero(t, plain.BudgetRatio)
+	// 观测面（显式请求）：水位可见。
+	operatorRow := SnapshotItem{Kind: SubjectAgentSession, ID: "child-snap"}
+	attachExecutionRun(ctx, store, &operatorRow, true)
+	require.Equal(t, "soft", operatorRow.BudgetLevel)
+	require.Equal(t, "turn budget: step 2/10 · tokens 84%", operatorRow.BudgetLine)
+	require.InDelta(t, 0.84, operatorRow.BudgetRatio, 0.0001)
 }
