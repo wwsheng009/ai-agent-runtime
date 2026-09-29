@@ -121,6 +121,13 @@ type SnapshotItem struct {
 	CancelDeadlineAt   *time.Time          `json:"cancel_deadline_at,omitempty"`
 	LastHeartbeatAt    *time.Time          `json:"last_heartbeat_at,omitempty"`
 	LastProgressAt     *time.Time          `json:"last_progress_at,omitempty"`
+	// BudgetLevel / BudgetLine / BudgetRatio are the live turn-budget watermark
+	// of the run's current turn (建议稿 §4.2 运行中水位): "ok|soft|hard" plus the
+	// rendered line ("turn budget: step 240/300 · tokens 62%"). Empty level means
+	// the host never reported one, which keeps unwired rows byte-identical.
+	BudgetLevel        string              `json:"budget_level,omitempty"`
+	BudgetLine         string              `json:"budget_line,omitempty"`
+	BudgetRatio        float64             `json:"budget_ratio,omitempty"`
 	Reason             string              `json:"reason,omitempty"`
 	AutoAction         *SnapshotAutoAction `json:"auto_action,omitempty"`
 	RecommendedAction  string              `json:"recommended_action,omitempty"`
@@ -508,6 +515,11 @@ func attachExecutionRun(ctx context.Context, runStore ExecutionRunStore, item *S
 		lastProgress := run.LastProgressAt
 		item.LastProgressAt = &lastProgress
 	}
+	// §4.2：把运行中水位一并带给父代理——巡检一眼看到"tokens 84%"，而不是
+	// 等终局报告。空 level 表示宿主未上报，行输出保持字节不变。
+	item.BudgetLevel = strings.TrimSpace(run.BudgetLevel)
+	item.BudgetLine = strings.TrimSpace(run.BudgetLine)
+	item.BudgetRatio = run.BudgetRatio
 	if item.ExecutionDeadlineAt == nil {
 		item.ExecutionDeadlineAt = run.ExecutionDeadlineAt
 	}
