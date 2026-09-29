@@ -677,14 +677,14 @@ Last Turn Finished: 2026-09-14T03:20:11Z
 
 | 字段 | 数据源 | 含义 |
 |---|---|---|
-| `Turn Budget Level` / `Turn Budget Line` / `Turn Budget Ratio` | 事件桥原子快照（`TurnBudgetSnapshot`） | **通告时刻**的水位（软着陆触发那一步的取样）；本轮未触发时输出 `<none this run>` |
+| `Turn Budget Level` / `Turn Budget Line` / `Turn Budget Ratio` | 事件桥原子快照（`TurnBudgetSnapshot`，源事件 `agent.turn.budget_warning`） | **通告时刻**的水位（跨过 80% 水位那一步的取样；水位只作观测，不向模型注入）；本轮未触发时输出 `<none this run>` |
 | `Turns Running` | observe `runtime.running_turns` | 已 started、尚未 finished 的轮数 |
 | `Last Turn` | observe `runtime.last_turn` | 最近一轮的**终局**水位：`session=` / `step=N/M`（`M` 可为 `unlimited`）/ `state=running` 或 `elapsed=…` / `level=` / `ratio=` |
 | `Last Turn Finished` | observe `finished_at` | 最近一轮结束时间（RFC3339 UTC） |
 
 **判读要点**：
 
-- **两个取样点不同源**：bridge 水位是**通告时刻**（软着陆触发那一步，实测事件行 `step 1/10`），
+- **两个取样点不同源**：bridge 水位是**通告时刻**（`agent.turn.budget_warning` 触发那一步，实测事件行 `step 1/10`），
   observe 的 `Last Turn` 是**退出时刻**终局水位（实测 `step 2/10`）；宿主不得把事件行当终值。
 - 水位是 **per-run** 状态：`BeginRunKind` 清空，跨 turn 不继承；空闲行不会长出预算文案。
 - 观察平面未启用时输出 `<observe disabled>` / `<none observed>` / `<none this run>` 占位，不报错。

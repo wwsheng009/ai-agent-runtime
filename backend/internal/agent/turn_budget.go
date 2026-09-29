@@ -36,14 +36,15 @@ const (
 	TurnBudgetDimensionWallClock = "wall_clock"
 	TurnBudgetDimensionTokens    = "tokens"
 
-	// TurnBudgetSoftRatio 收尾水位：达到即注入一次收尾指令，避免在硬边界处
-	// 静默截断正在进行的工作。
+	// TurnBudgetSoftRatio 收尾水位：达到即发一条**观测**告警（见下方
+	// EventTurnBudgetWarning）。2026-09-28 起不再向模型注入收尾指令——token
+	// 对 LLM 不设边界；硬边界仍由运行时执行。
 	TurnBudgetSoftRatio = 0.8
 
 	// EventTurnBudgetWarning 在 run 首次跨过收尾水位（软）时发出一次：父会话与
 	// 监督面据此在 **运行中** 就能订阅到"子代理已接近预算"，而不是等终局报告
-	// （建议稿 §4.2 运行中实时超支告警）。系统提醒事件是模型上下文渲染的副产物
-	// （kind 埋在 system_reminder 载荷里），不适合做宿主的订阅锚点，故单列。
+	// （建议稿 §4.2 运行中实时超支告警）。水位只作观测：这条事件不进入模型上下文，
+	// 模型侧不感知也不反应 token 边界（2026-09-28 起原软着陆注入已取消）。
 	EventTurnBudgetWarning = "agent.turn.budget_warning"
 	// EventTurnBudgetExhausted 在 token 硬边界终止 run 时发出：此前该停止路径
 	// 事件面完全静默（只有终局 result 的 LimitReached），监督面无法在停止时刻
@@ -215,23 +216,6 @@ func FormatTurnBudgetDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh", hours)
 	}
 	return fmt.Sprintf("%dh%dm", hours, minutes)
-}
-
-// TurnBudgetSoftLandingMessage 是软着陆（收尾水位）注入给模型的指令。
-// 目标：让模型主动收尾并留下可续跑的交接信息，而不是在硬边界被静默截断。
-func TurnBudgetSoftLandingMessage(state TurnBudgetState) string {
-	line := strings.TrimSpace(state.Line)
-	if line == "" {
-		line = "turn budget: unspecified"
-	}
-	return strings.Join([]string{
-		fmt.Sprintf("Turn budget notice: this turn is at %d%% of its configured budget (%s).", int(math.Round(state.Ratio*100)), line),
-		"Wrap up now instead of starting new exploration:",
-		"1) finish or explicitly abandon the tool call currently in flight;",
-		"2) persist any workspace/session findings that must survive this turn;",
-		"3) reply with a short handoff: what is done, what is not, and the exact next action to resume.",
-		"New long-running work will not fit in this turn.",
-	}, "\n")
 }
 
 // TurnBudgetHardStopMessage 是 token 预算耗尽时的用户可见收尾文案。

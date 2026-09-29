@@ -60,7 +60,10 @@ func turnBudgetRequestText(req *llm.LLMRequest) string {
 	return b.String()
 }
 
-func TestReActLoop_Run_InjectsTurnBudgetSoftLandingOnce(t *testing.T) {
+// TestReActLoop_Run_DoesNotInjectSoftLandingCue 钉住 2026-09-28 的口径：
+// 对 LLM 而言 token 理论无限——跨过 80% 水位**不向模型注入任何收尾提示**，
+// 水位只留在观测面（Result 字段 + 事件），模型侧看不到 token 读数。
+func TestReActLoop_Run_DoesNotInjectSoftLandingCue(t *testing.T) {
 	loop, provider := newTurnBudgetTestLoop(t, 10, []*llm.LLMResponse{
 		// 20000 的预算下，预检水位是 3200 token（足以容纳工具 schema），
 		// 16800 恰好是 84% —— 高于 80% 收尾水位、低于硬边界。
@@ -77,15 +80,14 @@ func TestReActLoop_Run_InjectsTurnBudgetSoftLandingOnce(t *testing.T) {
 	require.True(t, result.Success)
 	require.Equal(t, 2, provider.callCount)
 
-	// 80% 水位提示真实出现在第二次模型调用里，且只出现一次。
-	require.True(t, result.TurnBudgetSoftCueInjected)
+	// 模型侧（含第二次调用）不得出现任何收尾提示或 token 读数。
 	second := turnBudgetRequestText(provider.requests[1])
-	require.Contains(t, second, `<system-reminder kind="turn_budget">`)
-	require.Contains(t, second, "tokens 84%")
-	require.Contains(t, second, "Wrap up now")
-	require.Equal(t, 1, strings.Count(second, "Wrap up now"), "cue must be injected once per turn")
+	require.NotContains(t, second, `<system-reminder kind="turn_budget">`)
+	require.NotContains(t, second, "Turn budget notice")
+	require.NotContains(t, second, "Wrap up now")
+	require.NotContains(t, second, "tokens 84%")
 
-	// 结果字段是同一份水位口径：收尾判决 + 最终水位行（含水印本身）。
+	// 观测面照常：结果字段是同一份水位口径（判决 + 最终水位行）。
 	require.Equal(t, TurnBudgetLevelSoft, result.TurnBudgetLevel)
 	require.Equal(t, "turn budget: step 2/10 · tokens 84%", result.TurnBudgetLine)
 }
@@ -113,7 +115,6 @@ func TestReActLoop_Run_TokenBudgetHardStopIsGraceful(t *testing.T) {
 	require.Contains(t, result.Output, "token 预算上限")
 	require.Contains(t, result.Output, "tokens 100%")
 	require.Equal(t, TurnBudgetLevelHard, result.TurnBudgetLevel)
-	require.False(t, result.TurnBudgetSoftCueInjected, "hard stop must not inject a cue the model never reads")
 
 	// 硬边界不是静默截断：不再调用模型，且把收尾文案写回可持久化历史。
 	require.Equal(t, 1, provider.callCount)
@@ -140,18 +141,20 @@ func TestReActLoop_Run_StepLimitReportsTurnBudgetReason(t *testing.T) {
 	require.Equal(t, "turn budget: step 1/1", result.TurnBudgetLine)
 }
 
-// 落点 B 的桥接契约：TUI 状态行只认「带 turn 身份 + kind=turn_budget」的
-// system_reminder.injected。这里走真实 EventBus 事件流，钉住宿主消费的三个前置条件：
-// 事件类型、payload kind、payload turn_id（由 emitRuntimeEvent 按 run ctx 统一盖章）。
-func TestReActLoop_Run_TurnBudgetReminderEventCarriesTurnIdentity(t *testing.T) {
-	loop, _ := newTurnBudgetTestLoop(t, 10, []*llm.LLMResponse{
+// 落点 B 的桥接契约（2026-09-28 改口径）：TUI 状态行只认「带 turn 身份」的
+// agent.turn.budget_warning（水位只作观测，不再有软着陆注入）。这里走真实
+// EventBus 事件流，钉住宿主消费的前置条件：事件类型、payload 水位、payload
+// turn_id（由 emitRuntimeEvent 按 run ctx 统一盖章），并同时断言模型侧**没有**
+// 任何收尾注入。
+func TestReActLoop_Run_TurnBudgetWarningEventCarriesTurnIdentity(t *testing.T) {
+	loop, provider := newTurnBudgetTestLoop(t, 10, []*llm.LLMResponse{
 		turnBudgetToolCallResponse("先看目录。", 16800),
 		{Content: "收尾完成。", Model: "test-model", Usage: &types.TokenUsage{TotalTokens: 60}},
 	})
 	bus := runtimeevents.NewBus()
-	var reminders []runtimeevents.Event
-	bus.Subscribe(EventSystemReminderInjected, func(event runtimeevents.Event) {
-		reminders = append(reminders, event)
+	var warnings []runtimeevents.Event
+	bus.Subscribe(EventTurnBudgetWarning, func(event runtimeevents.Event) {
+		warnings = append(warnings, event)
 	})
 	loop.agent.SetEventBus(bus)
 
@@ -161,23 +164,24 @@ func TestReActLoop_Run_TurnBudgetReminderEventCarriesTurnIdentity(t *testing.T) 
 		BudgetTokens:  20000,
 	})
 	require.NoError(t, err)
-	require.True(t, result.TurnBudgetSoftCueInjected)
+	require.True(t, result.Success)
 
-	var budgetEvent *runtimeevents.Event
-	for i := range reminders {
-		if reminders[i].Payload["kind"] == ReminderKindTurnBudget {
-			budgetEvent = &reminders[i]
-		}
-	}
-	require.NotNil(t, budgetEvent, "soft landing must emit %s with kind=%s", EventSystemReminderInjected, ReminderKindTurnBudget)
-	require.Equal(t, "turn-budget-bridge", budgetEvent.Payload["turn_id"], "host keys the status line on the durable turn identity")
-	require.Equal(t, TurnBudgetLevelSoft, budgetEvent.Payload["turn_budget_level"])
-	require.Equal(t, true, budgetEvent.Payload["durable"], "wrap-up cue must survive into the next turn")
+	require.Len(t, warnings, 1, "80%% 水位告警恰好一次")
+	warning := warnings[0]
+	require.Equal(t, "turn-budget-bridge", warning.Payload["turn_id"], "host keys the status line on the durable turn identity")
+	require.Equal(t, TurnBudgetLevelSoft, warning.Payload["turn_budget_level"])
 	// 事件里的行是**通告时刻**的水位；result.TurnBudgetLine 是退出时刻的终局水位。
 	// 二者口径同源但取样点不同（step 1/10 通告，step 2/10 收尾），宿主不应把事件行
 	// 当作终值使用。
-	require.Equal(t, "turn budget: step 1/10 · tokens 84%", budgetEvent.Payload["turn_budget_line"])
+	require.Equal(t, "turn budget: step 1/10 · tokens 84%", warning.Payload["turn_budget_line"])
 	require.Equal(t, "turn budget: step 2/10 · tokens 84%", result.TurnBudgetLine)
+
+	// 模型侧不得出现任何收尾注入。
+	for i := range provider.requests {
+		text := turnBudgetRequestText(provider.requests[i])
+		require.NotContains(t, text, `<system-reminder kind="turn_budget">`)
+		require.NotContains(t, text, "Wrap up now")
+	}
 }
 
 // TestReActLoop_Run_EmitsTurnLifecycleEvents 是 PR-4 落点 C 的回归：每轮 run 必须
@@ -241,10 +245,9 @@ func TestReActLoop_Run_TurnBudgetDefaultsFromLoopConfig(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.True(t, result.Success)
-	require.True(t, result.TurnBudgetSoftCueInjected)
 	require.Equal(t, TurnBudgetLevelSoft, result.TurnBudgetLevel)
 	require.Equal(t, "turn budget: step 2/10 · tokens 84%", result.TurnBudgetLine)
-	require.Contains(t, turnBudgetRequestText(provider.requests[1]), "tokens 84%")
+	require.NotContains(t, turnBudgetRequestText(provider.requests[1]), "Wrap up now")
 }
 
 // TestReActLoop_Run_ExplicitBudgetOverridesLoopConfig 钉住优先级：显式
@@ -263,7 +266,6 @@ func TestReActLoop_Run_ExplicitBudgetOverridesLoopConfig(t *testing.T) {
 		BudgetTokens:  20000,
 	})
 	require.NoError(t, err)
-	require.True(t, result.TurnBudgetSoftCueInjected)
 	require.Equal(t, TurnBudgetLevelSoft, result.TurnBudgetLevel)
 	require.Equal(t, "turn budget: step 2/10 · tokens 84%", result.TurnBudgetLine)
 }

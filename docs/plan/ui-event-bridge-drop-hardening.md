@@ -6,6 +6,13 @@
 > **P0/P1 主链（PR-0..PR-4 与第 5 条）收敛**；§6.5 的 P2 残余项（web SSE 丢帧暴露、
 > 稳态 watchdog、投影失效归因分类、`PostDeferred` 高水位降级）不在本次范围，另行排期；
 > §10.1 待决策 4/5/6 与 §10.2 假设仍开放。提交边界与勘误见 §8.5。
+> **口径变更（2026-09-28）**：PR-4 落点 A 的**软着陆注入已取消**——对 LLM 而言
+> token 理论无限，模型侧不再接收任何预算读数/收尾提示（`TurnBudgetSoftLandingMessage`、
+> `turn_budget` reminder、`Result.turn_budget_soft_cue_injected` 均已移除；token 硬边界
+> 仍由运行时执行）。80% 水位只保留**观测**面：事件 `agent.turn.budget_warning`、
+> 监督账本 `ExecutionRun.budget_*`（操作者 HTTP 读模型可见），TUI 状态行（落点 B）
+> 改由 `agent.turn.budget_warning` 镜像；旧会话中已持久化的 `turn_budget` reminder
+> 仍可归一化渲染。
 > 日期：2026-09-14（本地 +08:00）
 > 适用版本：当前仓库 `E:\projects\ai\ai-agent-runtime`（Go module：`backend`）
 > 关联文档：

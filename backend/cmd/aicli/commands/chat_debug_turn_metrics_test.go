@@ -22,7 +22,7 @@ func TestChatDebugTurnMetricsBlockShowsBridgeWatermarkWithoutObserve(t *testing.
 	)
 	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: sessionID}}
 	session.RuntimeEventBridge = newTurnBudgetTestBridge(t, sessionID, turnID)
-	deliverTurnBudgetEvent(session.RuntimeEventBridge, turnBudgetReminderEvent(sessionID, turnID, "soft", line, nil))
+	deliverTurnBudgetEvent(session.RuntimeEventBridge, turnBudgetWarningEvent(sessionID, turnID, "soft", line, nil))
 
 	plain := renderDocPlainText(buildChatDebugDisplayDocument(session))
 	for _, marker := range []string{

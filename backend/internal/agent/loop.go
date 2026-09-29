@@ -569,7 +569,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	}
 	turnBudgetUsage := TurnBudgetUsage{}
 	turnBudgetState := TurnBudgetState{Level: TurnBudgetLevelOK}
-	turnBudgetSoftAnnounced := false
+	// turnBudgetWarned 门控 80% 水位的**观测告警**事件一次性发射。2026-09-28 起
+	// 不再有任何模型侧注入：对 LLM 而言 token 理论无限，模型不感知 token 边界。
+	turnBudgetWarned := false
 	// §4.2 水位上报的抑制状态：上一次上报的判决等级 + 整数百分比。
 	lastBudgetLevel := ""
 	lastBudgetPercent := -1
@@ -627,7 +629,6 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			result.TurnBudgetLevel = turnBudgetState.Level
 			result.TurnBudgetLine = turnBudgetState.Line
 		}
-		result.TurnBudgetSoftCueInjected = turnBudgetSoftAnnounced
 		// Prompt cache 熔断的终局计数与聚合计数（同一次 run 的同一份状态，
 		// 宿主读 Result 即可，无需从事件流里二次累加）。
 		result.PromptCacheBreakerTrips = promptBreaker.Trips()
@@ -786,38 +787,15 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 				loop.noteBudgetProgress(currentCtx, turnBudgetState)
 			}
 		}
-		if turnBudgetState.Level == TurnBudgetLevelSoft && !turnBudgetSoftAnnounced {
-			// Soft landing (§6.4): inject exactly one durable wrap-up cue and make
-			// the watermark visible to hosts while the model still has room to act.
-			// A hard verdict skips the cue on purpose: the hard boundary stops the
-			// turn immediately, so an instruction the model never reads would only
-			// pollute history.
-			turnBudgetSoftAnnounced = true
-			reminderMsg := newTurnBudgetReminderMessage(turnBudgetState)
-			if reminderMsg != nil {
-				builder.Add(*reminderMsg)
-				promptBuilder.Add(*reminderMsg)
-				payload := SystemReminderEventPayload(traceID, step, SystemReminder{
-					Kind:    ReminderKindTurnBudget,
-					Body:    stripSystemReminderEnvelope(reminderMsg.Content),
-					Durable: true,
-				})
-				payload["turn_budget_level"] = turnBudgetState.Level
-				payload["turn_budget_line"] = turnBudgetState.Line
-				payload["turn_budget_ratio"] = turnBudgetState.Ratio
-				payload["turn_budget_reasons"] = turnBudgetState.Reasons
-				// turn 身份由 emitRuntimeEvent 统一盖章（本 loop 的 loop.turnID 取自 run ctx），
-				// 宿主（TUI 状态行）因此能按 turn 归属决定是否展示进度，与 tool/llm 事件同一口径。
-				loop.emitRuntimeEvent(EventSystemReminderInjected, sessionID, "", payload)
-			}
-			// §4.2 运行中预算告警：同一份水位再发一条独立契约事件，父会话/监督面
-			// 可据此在 run 结束前订阅"接近预算"（reminder 事件是上下文渲染副产物，
-			// 不适合做订阅锚点）。一次性由 turnBudgetSoftAnnounced 门控。
+		if turnBudgetState.Level == TurnBudgetLevelSoft && !turnBudgetWarned {
+			// §4.2 运行中预算告警（**只作观测**）：跨过 80% 水位发一条独立契约
+			// 事件，父会话/监督面/TUI 状态行可订阅"接近预算"。**不向模型注入任何
+			// 收尾提示**——对 LLM 而言 token 理论无限，模型侧不感知也不反应 token
+			// 边界；真正的硬边界仍由运行时执行（见下方 exhausted 分支）。
+			// 一次性由 turnBudgetWarned 门控。
+			turnBudgetWarned = true
 			loop.emitRuntimeEvent(EventTurnBudgetWarning, sessionID, "",
 				TurnBudgetEventPayload(traceID, step, turnBudgetSpec, turnBudgetUsage, turnBudgetState))
-			if err := persistBuilderHistory(builder, options.PersistHistory); err != nil {
-				return nil, err
-			}
 		}
 		if options.BudgetTokens > 0 && remainingBudget <= 0 {
 			// §4.2：token 硬边界此前事件面静默（只有终局 result 的 LimitReached），

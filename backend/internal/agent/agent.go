@@ -104,13 +104,11 @@ type Result struct {
 	ToolCallLimit int    `json:"tool_call_limit,omitempty"`
 	LimitReason   string `json:"limit_reason,omitempty"`
 	// Turn-budget observability (PR-4, plan §6.4). Level is ok / soft / hard;
-	// TurnBudgetLine is the same single-line progress text the model and host
-	// see, so logs, the debug surface and the TUI never re-derive the watermark.
-	// TurnBudgetSoftCueInjected records that the 80% wrap-up cue was actually
-	// delivered to the model at least once during this turn.
-	TurnBudgetLevel           string `json:"turn_budget_level,omitempty"`
-	TurnBudgetLine            string `json:"turn_budget,omitempty"`
-	TurnBudgetSoftCueInjected bool   `json:"turn_budget_soft_cue_injected,omitempty"`
+	// TurnBudgetLine is the same single-line progress text hosts/debug surfaces
+	// render, so they never re-derive the watermark. 模型侧不再有任何预算注入
+	// （2026-09-28 起软着陆收尾提示已取消），因此没有"cue 是否注入"字段。
+	TurnBudgetLevel string `json:"turn_budget_level,omitempty"`
+	TurnBudgetLine  string `json:"turn_budget,omitempty"`
 	// Prompt-cache breaker observability (PR-4, plan §6.4 item 5).
 	// PromptCacheBreakerTrips counts how often an identical prompt fingerprint
 	// tripped the short-term breaker; UpstreamInvalidResponseEvents is the

@@ -111,20 +111,6 @@ func TestFormatTurnBudgetDuration(t *testing.T) {
 		require.Equal(t, tc.want, FormatTurnBudgetDuration(tc.in), tc.in.String())
 	}
 }
-
-func TestTurnBudgetSoftLandingMessageCarriesWatermarkAndHandoff(t *testing.T) {
-	state := EvaluateTurnBudget(
-		TurnBudgetSpec{MaxSteps: 300, MaxWallClock: 40 * time.Minute, MaxTokens: 1000},
-		TurnBudgetUsage{CompletedSteps: 240, Elapsed: 32 * time.Minute, TokensSpent: 620},
-	)
-	body := TurnBudgetSoftLandingMessage(state)
-	require.Contains(t, body, "80% of its configured budget")
-	require.Contains(t, body, "turn budget: step 240/300 · 32m/40m · tokens 62%")
-	require.Contains(t, body, "Wrap up now")
-	require.Contains(t, body, "persist any workspace/session findings")
-	require.Contains(t, body, "exact next action to resume")
-}
-
 func TestTurnBudgetHardStopMessageCarriesWatermark(t *testing.T) {
 	state := EvaluateTurnBudget(TurnBudgetSpec{MaxTokens: 100}, TurnBudgetUsage{TokensSpent: 100})
 	body := TurnBudgetHardStopMessage(state)
@@ -133,17 +119,8 @@ func TestTurnBudgetHardStopMessageCarriesWatermark(t *testing.T) {
 	require.Contains(t, body, "续跑")
 }
 
-func TestNewTurnBudgetReminderMessageIsDurableAndTyped(t *testing.T) {
-	state := EvaluateTurnBudget(TurnBudgetSpec{MaxTokens: 100}, TurnBudgetUsage{TokensSpent: 85})
-	msg := newTurnBudgetReminderMessage(state)
-	require.NotNil(t, msg)
-	require.True(t, IsSystemReminder(*msg))
-	require.Equal(t, ReminderKindTurnBudget, ReminderKindOf(*msg))
-	require.True(t, IsSystemReminderDurable(*msg), "wrap-up handoff must survive persist")
-	require.Contains(t, msg.Content, "<system-reminder kind=\"turn_budget\">")
-	require.Contains(t, msg.Content, "tokens 85%")
-}
-
+// 2026-09-28 起不再产生 turn_budget reminder（模型侧无预算注入），但历史会话里
+// 已持久化的旧 reminder 仍须能归一化与渲染——kind 的规范映射保持可用。
 func TestNormalizeReminderKindKeepsTurnBudgetCanonical(t *testing.T) {
 	require.Equal(t, ReminderKindTurnBudget, NormalizeReminderKind(" Turn_Budget "))
 	require.False(t, IsPureAdvisoryReminderKind(ReminderKindTurnBudget))

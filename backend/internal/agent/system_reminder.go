@@ -41,10 +41,9 @@ const (
 	// next turn. It is prompt-only: the feedback is delivered exactly once from
 	// durable plan state and never re-injected after consumption.
 	ReminderKindPlanReview = "plan_review"
-	// ReminderKindTurnBudget marks the PR-4 per-turn budget wrap-up cue
-	// (docs/plan/ui-event-bridge-drop-hardening.md §6.4). It stays durable on
-	// purpose: the handoff instruction must survive into the next turn so the
-	// model can resume instead of the turn being silently truncated.
+	// ReminderKindTurnBudget 是 PR-4 §6.4 的 per-turn 收尾提醒 kind。2026-09-28
+	// 起不再产生（token 对模型不设边界：模型侧不注入任何预算读数）；保留该 kind
+	// 只为历史会话里已持久化的旧 reminder 仍能正常归一化与渲染。
 	ReminderKindTurnBudget      = "turn_budget"
 	ReminderKindRuntimeAdvisory = "runtime_advisory"
 	// ReminderKindMainAgentRouting marks the §5.4 main-agent routing guidance
