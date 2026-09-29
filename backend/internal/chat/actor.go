@@ -198,6 +198,10 @@ type SessionActorConfig struct {
 	// 工具调用开始/结束、每步迭代结束时各触发一次。回调在 run goroutine 上
 	// 同步执行，必须快速返回（建议非阻塞投递）；失败不得影响 run 结果。
 	OnProgress func(kind string)
+	// OnBudgetProgress 是 run 级预算水位旁路回调（建议稿 §4.2 运行中水位）：
+	// ReAct 循环在水位变化时触发。契约同 OnProgress——在 run goroutine 上同步
+	// 执行、必须快速返回、失败不得影响 run 结果；nil 时循环行为不变。
+	OnBudgetProgress func(state agent.TurnBudgetState)
 	// CheckpointInterval 控制长 turn 中途增量落库的最小间隔：ReAct 循环每次
 	// 提交 durable 历史（assistant 文本 / tool 结果 / 压缩改写）后都会请求一次
 	// checkpoint，实际写入按该间隔节流。0 使用 DefaultSessionCheckpointInterval；
@@ -275,6 +279,7 @@ type SessionActor struct {
 	onRunStalled    func(turnID string)
 	onRunFinished   func()
 	onProgress      func(kind string)
+	onBudgetProgress func(state agent.TurnBudgetState)
 	runSequence     atomic.Uint64
 	// checkpointInterval / lastCheckpointAt 实现长 turn 中途落库的节流，
 	// 语义见 SessionActorConfig.CheckpointInterval。
@@ -367,6 +372,7 @@ func NewSessionActor(sessionID string, cfg SessionActorConfig) (*SessionActor, e
 		onRunStalled:       cfg.OnRunStalled,
 		onRunFinished:      cfg.OnRunFinished,
 		onProgress:         cfg.OnProgress,
+		onBudgetProgress:   cfg.OnBudgetProgress,
 		checkpointInterval: resolveSessionCheckpointInterval(cfg.CheckpointInterval),
 		cmdCh:              make(chan Command, 32),
 		stop:               make(chan struct{}),
@@ -3450,6 +3456,11 @@ func (a *SessionActor) historyCheckpointLoopConfig(routeOverride *RunRouteOverri
 	if a.onProgress != nil {
 		cfg.OnProgress = func(_ context.Context, kind string) {
 			a.onProgress(kind)
+		}
+	}
+	if a.onBudgetProgress != nil {
+		cfg.OnBudgetProgress = func(_ context.Context, state agent.TurnBudgetState) {
+			a.onBudgetProgress(state)
 		}
 	}
 	if session == nil {

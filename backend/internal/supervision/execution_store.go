@@ -23,6 +23,13 @@ type RunProgressEvent struct {
 	RunID string
 	Kind  string
 	Seq   int64
+	// BudgetLevel / BudgetLine / BudgetRatio carry the live turn-budget
+	// watermark when the caller has one (建议稿 §4.2 运行中水位). Empty level
+	// means "this tick has no budget reading": the stored watermark is left
+	// untouched, so ordinary progress ticks can never wipe it.
+	BudgetLevel string
+	BudgetLine  string
+	BudgetRatio float64
 }
 
 // CompletionOutboxEntry is a pending terminal completion notification for the
@@ -127,7 +134,8 @@ const (
 		cancel_source, finished_at, max_attempts, fencing_token, result_ref,
 		error_code, version, created_at, updated_at,
 		turn_id, declared_budget, extension_count, extended_total,
-		decision_window_until`
+		decision_window_until,
+		budget_level, budget_line, budget_ratio`
 
 	// DefaultExecutionRunRetention is the documented retention window (§6.12):
 	// a terminal obligation stays readable until turn finalization + 7 days.
@@ -171,7 +179,7 @@ func (s *SQLiteSupervisionStore) CreateExecutionRun(ctx context.Context, run Exe
 		run.UpdatedAt = now
 	}
 	query := `INSERT INTO supervision_execution_runs (` + executionRunColumns + `)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 	_, err = db.ExecContext(ctx, query,
 		run.RunID, run.Kind, run.Workflow, run.RootSessionID, run.ParentSessionID,
 		run.ParentRunID, run.SessionID, run.AgentID, run.Attempt, run.Status, run.OwnerID,
@@ -184,7 +192,8 @@ func (s *SQLiteSupervisionStore) CreateExecutionRun(ctx context.Context, run Exe
 		run.FencingToken, run.ResultRef, run.ErrorCode, run.Version,
 		formatRunTime(run.CreatedAt), formatRunTime(run.UpdatedAt),
 		run.TurnID, int64(run.DeclaredBudget), run.ExtensionCount,
-		int64(run.ExtendedTotal), runTimeSQL(run.DecisionWindowUntil))
+		int64(run.ExtendedTotal), runTimeSQL(run.DecisionWindowUntil),
+		run.BudgetLevel, run.BudgetLine, run.BudgetRatio)
 	if err != nil {
 		if isSQLiteConstraint(err) {
 			return false, nil
@@ -379,12 +388,24 @@ func (s *SQLiteSupervisionStore) RecordExecutionProgress(ctx context.Context, ev
 	if runID == "" {
 		return false, fmt.Errorf("run_id is required")
 	}
+	// 水位是"本 turn 的最新读数"（§4.2）：只有携带预算的 tick 才覆写三列，
+	// 普通进度 tick（空 level）保留既有水位，避免高频进度写把读数抹成空。
+	budgetLevel := strings.TrimSpace(event.BudgetLevel)
+	budgetLine := strings.TrimSpace(event.BudgetLine)
+	budgetSet := ""
+	budgetArgs := make([]interface{}, 0, 3)
+	if budgetLevel != "" || budgetLine != "" {
+		budgetSet = ", budget_level=?, budget_line=?, budget_ratio=?"
+		budgetArgs = append(budgetArgs, budgetLevel, budgetLine, event.BudgetRatio)
+	}
 	if event.Seq > 0 {
 		query := `UPDATE supervision_execution_runs SET
-			last_progress_at=?, progress_seq=MAX(progress_seq, ?), updated_at=?
+			last_progress_at=?, progress_seq=MAX(progress_seq, ?), updated_at=?` + budgetSet + `
 			WHERE run_id=? AND status NOT IN (` + strings.Join(repeatQuestionMarks(len(runTerminalStatuses)), ",") + `)`
-		args := make([]interface{}, 0, 4+len(runTerminalStatuses))
-		args = append(args, formatRunTime(now), event.Seq, formatRunTime(now), runID)
+		args := make([]interface{}, 0, 4+len(runTerminalStatuses)+len(budgetArgs))
+		args = append(args, formatRunTime(now), event.Seq, formatRunTime(now))
+		args = append(args, budgetArgs...)
+		args = append(args, runID)
 		for status := range runTerminalStatuses {
 			args = append(args, status)
 		}
@@ -399,10 +420,12 @@ func (s *SQLiteSupervisionStore) RecordExecutionProgress(ctx context.Context, ev
 		return affected > 0, nil
 	}
 	query := `UPDATE supervision_execution_runs SET
-		last_progress_at=?, progress_seq=progress_seq+1, updated_at=?
+		last_progress_at=?, progress_seq=progress_seq+1, updated_at=?` + budgetSet + `
 		WHERE run_id=? AND status NOT IN (` + strings.Join(repeatQuestionMarks(len(runTerminalStatuses)), ",") + `)`
-	args := make([]interface{}, 0, 3+len(runTerminalStatuses))
-	args = append(args, formatRunTime(now), formatRunTime(now), runID)
+	args := make([]interface{}, 0, 3+len(runTerminalStatuses)+len(budgetArgs))
+	args = append(args, formatRunTime(now), formatRunTime(now))
+	args = append(args, budgetArgs...)
+	args = append(args, runID)
 	for status := range runTerminalStatuses {
 		args = append(args, status)
 	}
@@ -818,7 +841,8 @@ func scanExecutionRun(row rowScanner) (ExecutionRun, error) {
 		&run.CancelSource, &finishedAt, &run.MaxAttempts, &run.FencingToken, &run.ResultRef,
 		&run.ErrorCode, &run.Version, &createdAt, &updatedAt,
 		&run.TurnID, &declaredBudget, &run.ExtensionCount, &extendedTotal,
-		&decisionWindowUntil)
+		&decisionWindowUntil,
+		&run.BudgetLevel, &run.BudgetLine, &run.BudgetRatio)
 	if err != nil {
 		return ExecutionRun{}, err
 	}

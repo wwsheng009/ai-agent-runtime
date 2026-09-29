@@ -115,6 +115,13 @@ type LoopReActConfig struct {
 	//
 	// 契约：尽力而为、快速返回（建议非阻塞投递）；失败不得冒泡为 turn 失败。
 	OnProgress func(ctx context.Context, kind string) `yaml:"-"`
+	// OnBudgetProgress 上报一次运行中的 turn 预算水位（建议稿 §4.2 运行中水位）：
+	// 首报必发，其后仅在判决等级变化或整数百分比变化时各触发一次。宿主据此把
+	// "tokens 84%" 这类实时读数写进监督账本，父会话在 run 结束前就能看到。
+	//
+	// 契约同 OnProgress：尽力而为、快速返回；失败不得冒泡为 turn 失败。
+	// nil = 完全 no-op（未接线宿主行为不变）。
+	OnBudgetProgress func(ctx context.Context, state TurnBudgetState) `yaml:"-"`
 	// OnToolObserved 在工具执行完成后回调一次，供只读观察（Phase 1 shadow 拦截
 	// grep/view）：参数是工具返回的原始文本（未经 history 截断；ADR-0003 的
 	// baseline_n 口径是「被拦截调用实际返回的条目数」）与错误文本。
@@ -225,6 +232,15 @@ func (loop *ReActLoop) noteProgress(ctx context.Context, kind string) {
 		return
 	}
 	loop.config.OnProgress(ctx, kind)
+}
+
+// noteBudgetProgress 上报一次运行中预算水位（建议稿 §4.2）。契约同 noteProgress：
+// 尽力而为、快速返回；回调失败不得冒泡为 turn 失败。
+func (loop *ReActLoop) noteBudgetProgress(ctx context.Context, state TurnBudgetState) {
+	if loop == nil || loop.config == nil || loop.config.OnBudgetProgress == nil {
+		return
+	}
+	loop.config.OnBudgetProgress(ctx, state)
 }
 
 // observeToolResult 上报一次工具执行结果（Phase 1 shadow 拦截 grep/view）。
@@ -554,6 +570,9 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	turnBudgetUsage := TurnBudgetUsage{}
 	turnBudgetState := TurnBudgetState{Level: TurnBudgetLevelOK}
 	turnBudgetSoftAnnounced := false
+	// §4.2 水位上报的抑制状态：上一次上报的判决等级 + 整数百分比。
+	lastBudgetLevel := ""
+	lastBudgetPercent := -1
 	// turnEventSessionID 承载 turn 生命周期事件的会话标识。它必须在 defer 注册
 	// 之前声明：defer 里的 finished 事件在每个退出路径上都要能找到会话 id，
 	// 而真正的 sessionID 要到下面（result 分配之后）才解析/生成。
@@ -757,6 +776,16 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 			turnBudgetUsage.Elapsed = time.Since(startTime.Start)
 		}
 		turnBudgetState = EvaluateTurnBudget(turnBudgetSpec, turnBudgetUsage)
+		// §4.2 运行中水位：变化才上报（首报必发；等级或整数百分比变化必发），
+		// 避免每个 step 都打一次账本写。nil 回调完全 no-op。
+		if !turnBudgetSpec.Empty() {
+			percent := int(turnBudgetState.Ratio*100 + 0.5)
+			if lastBudgetLevel == "" || turnBudgetState.Level != lastBudgetLevel || percent != lastBudgetPercent {
+				lastBudgetLevel = turnBudgetState.Level
+				lastBudgetPercent = percent
+				loop.noteBudgetProgress(currentCtx, turnBudgetState)
+			}
+		}
 		if turnBudgetState.Level == TurnBudgetLevelSoft && !turnBudgetSoftAnnounced {
 			// Soft landing (§6.4): inject exactly one durable wrap-up cue and make
 			// the watermark visible to hosts while the model still has room to act.

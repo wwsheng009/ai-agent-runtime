@@ -427,6 +427,18 @@ func (s *SQLiteSupervisionStore) init(ctx context.Context) error {
 					ON supervision_execution_runs(status, finished_at);
 			`,
 		},
+		{
+			// §4.2 运行中水位：把子 run 当前 turn 的预算水位（level/line/ratio）
+			// 落进执行账本，供监督面/操作者读到"tokens 84%"这类实时读数。Additive
+			// + 零值默认：旧行读回为空串/0，即"未上报"，行为与字节输出不变。
+			Version: 8,
+			Name:    "execution_run_budget_watermark",
+			UpSQL: `
+				ALTER TABLE supervision_execution_runs ADD COLUMN budget_level TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_execution_runs ADD COLUMN budget_line TEXT NOT NULL DEFAULT '';
+				ALTER TABLE supervision_execution_runs ADD COLUMN budget_ratio REAL NOT NULL DEFAULT 0;
+			`,
+		},
 	}
 	return migrate.Apply(ctx, s.db, migrations)
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
@@ -98,4 +99,33 @@ func TestLocalHostProgressRecorderDisabledWithoutSupervision(t *testing.T) {
 
 	host, _ := newLocalProgressTestHost(t)
 	require.Nil(t, host.progressRecorderForSession("   "), "空会话 ID 不得返回回调")
+}
+
+// TestLocalHostBudgetRecorderWritesWatermark pins §4.2 end to end on the CLI
+// host: watermark ticks must land as budget_level / budget_line / budget_ratio
+// on the session's active execution run, while an empty reading never wipes a
+// stored watermark.
+func TestLocalHostBudgetRecorderWritesWatermark(t *testing.T) {
+	host, store := newLocalProgressTestHost(t)
+	runID := seedLocalProgressRun(t, store, "child-budget-cli")
+
+	recorder := host.budgetRecorderForSession("child-budget-cli")
+	require.NotNil(t, recorder, "有监督面且有 run 的会话必须拿到水位写回回调")
+	recorder(agent.TurnBudgetState{
+		Level: "soft",
+		Line:  "turn budget: step 2/10 · tokens 84%",
+		Ratio: 0.84,
+	})
+
+	got, err := store.GetExecutionRun(context.Background(), runID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "soft", got.BudgetLevel)
+	require.Equal(t, "turn budget: step 2/10 · tokens 84%", got.BudgetLine)
+	require.InDelta(t, 0.84, got.BudgetRatio, 0.0001)
+
+	recorder(agent.TurnBudgetState{})
+	after, err := store.GetExecutionRun(context.Background(), runID)
+	require.NoError(t, err)
+	require.Equal(t, "soft", after.BudgetLevel, "空读数不得抹掉既有水位")
 }

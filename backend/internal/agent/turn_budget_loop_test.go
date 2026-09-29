@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -302,4 +303,38 @@ func TestReActLoop_Run_EmitsLiveBudgetEvents(t *testing.T) {
 	require.Equal(t, "turn-budget-live", exhausted[0].Payload["turn_id"])
 	require.Equal(t, TurnBudgetLevelHard, exhausted[0].Payload["turn_budget_level"])
 	require.Equal(t, 20000, exhausted[0].Payload["budget_tokens"])
+}
+
+// TestReActLoop_Run_ReportsBudgetWatermarkToHost 钉住 §4.2 的宿主回写面：水位变化
+// 时循环必须把同一份判决（等级/行/比例）交给 OnBudgetProgress，宿主才能把它写进
+// 监督账本；nil 回调保持完全 no-op（未接线宿主行为不变）。
+func TestReActLoop_Run_ReportsBudgetWatermarkToHost(t *testing.T) {
+	loop, _ := newTurnBudgetTestLoop(t, 10, []*llm.LLMResponse{
+		turnBudgetToolCallResponse("先看目录。", 16800),
+		{Content: "收尾完成。", Model: "test-model", Usage: &types.TokenUsage{TotalTokens: 60}},
+	})
+	var mu sync.Mutex
+	var states []TurnBudgetState
+	loop.config.OnBudgetProgress = func(_ context.Context, state TurnBudgetState) {
+		mu.Lock()
+		states = append(states, state)
+		mu.Unlock()
+	}
+
+	result, err := loop.run(context.Background(), "查看目录并总结。", loopRunOptions{
+		TraceID:       "trace_turn_budget_report",
+		IncludePrompt: true,
+		BudgetTokens:  20000,
+	})
+	require.NoError(t, err)
+	require.True(t, result.Success)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, states, "水位变化必须上报宿主")
+	last := states[len(states)-1]
+	require.Equal(t, TurnBudgetLevelSoft, last.Level)
+	require.Contains(t, last.Line, "tokens 84%")
+	require.Greater(t, last.Ratio, 0.8)
+	require.LessOrEqual(t, len(states), 4, "同一水位不得每步重复上报")
 }

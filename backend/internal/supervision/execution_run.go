@@ -134,6 +134,14 @@ type ExecutionRun struct {
 	LastHeartbeatAt     time.Time
 	LastProgressAt      time.Time
 	ProgressSeq         int64
+	// BudgetLevel / BudgetLine / BudgetRatio are the live turn-budget watermark
+	// of the run's current turn (建议稿 §4.2 运行中水位): "ok|soft|hard", the
+	// rendered line ("turn budget: step 240/300 · tokens 62%") and the max
+	// configured-dimension ratio. Empty level means "not reported yet", which
+	// keeps every legacy row byte-identical.
+	BudgetLevel         string
+	BudgetLine          string
+	BudgetRatio         float64
 	ExecutionDeadlineAt *time.Time
 	ProgressDeadlineAt  *time.Time
 	ApprovalDeadlineAt  *time.Time
@@ -183,6 +191,8 @@ func (r ExecutionRun) Normalize() ExecutionRun {
 	r.CancelSource = strings.TrimSpace(r.CancelSource)
 	r.ResultRef = strings.TrimSpace(r.ResultRef)
 	r.ErrorCode = strings.TrimSpace(r.ErrorCode)
+	r.BudgetLevel = strings.TrimSpace(r.BudgetLevel)
+	r.BudgetLine = strings.TrimSpace(r.BudgetLine)
 	if r.Attempt <= 0 {
 		r.Attempt = 1
 	}

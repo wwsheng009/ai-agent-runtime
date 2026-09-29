@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -52,6 +53,46 @@ func (h *localChatRuntimeHost) recordLocalRunProgress(sessionID, kind string) {
 	_, _ = store.RecordExecutionProgress(ctx, supervision.RunProgressEvent{
 		RunID: runID,
 		Kind:  strings.TrimSpace(kind),
+	}, time.Now().UTC())
+}
+
+// budgetRecorderForSession returns the run-level budget watermark sink for one
+// child session (建议稿 §4.2 运行中水位): the returned callback stamps the live
+// turn budget watermark (level/line/ratio) on the session's active ExecutionRun.
+// It returns nil when durable supervision is not wired (nil hook = the ReAct
+// loop keeps its previous behavior).
+func (h *localChatRuntimeHost) budgetRecorderForSession(sessionID string) func(agent.TurnBudgetState) {
+	if h == nil || strings.TrimSpace(sessionID) == "" || !h.localExecutionSupervisorAvailable() {
+		return nil
+	}
+	return func(state agent.TurnBudgetState) {
+		h.recordLocalRunBudget(sessionID, state)
+	}
+}
+
+// recordLocalRunBudget writes one budget watermark tick. Best-effort by the same
+// contract as recordLocalRunProgress: swallowed errors, bounded timeout, and an
+// empty watermark is never sent (the store would keep the previous reading).
+func (h *localChatRuntimeHost) recordLocalRunBudget(sessionID string, state agent.TurnBudgetState) {
+	store, ok := h.localExecutionRunStore()
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(state.Level) == "" && strings.TrimSpace(state.Line) == "" {
+		return
+	}
+	runID := h.progressRunIDForSession(store, sessionID)
+	if runID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _ = store.RecordExecutionProgress(ctx, supervision.RunProgressEvent{
+		RunID:       runID,
+		Kind:        "turn_budget",
+		BudgetLevel: state.Level,
+		BudgetLine:  state.Line,
+		BudgetRatio: state.Ratio,
 	}, time.Now().UTC())
 }
 

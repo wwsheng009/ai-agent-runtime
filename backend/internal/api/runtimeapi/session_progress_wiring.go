@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/agent"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -53,6 +54,48 @@ func (h *Handler) recordSessionRunProgress(sessionID, kind string) {
 	_, _ = supervisor.RecordProgress(ctx, supervision.RunProgressEvent{
 		RunID: runID,
 		Kind:  strings.TrimSpace(kind),
+	})
+}
+
+// budgetRecorderForSession returns the run-level budget watermark sink for one
+// session (建议稿 §4.2 运行中水位): the returned callback stamps the live turn
+// budget watermark (level/line/ratio) on the session's active ExecutionRun, so
+// the supervision snapshot can show "tokens 84%" while the child still runs.
+// It returns nil when durable supervision is not configured (nil hook = the
+// ReAct loop keeps its previous behavior).
+func (h *Handler) budgetRecorderForSession(sessionID string) func(agent.TurnBudgetState) {
+	if h == nil || strings.TrimSpace(sessionID) == "" || h.getExecutionSupervisor() == nil {
+		return nil
+	}
+	return func(state agent.TurnBudgetState) {
+		h.recordSessionRunBudget(sessionID, state)
+	}
+}
+
+// recordSessionRunBudget writes one budget watermark tick. Best-effort by the
+// same contract as recordSessionRunProgress: swallowed errors, bounded timeout,
+// and an empty watermark level is never sent (the store treats it as "no
+// reading" and would keep the previous one anyway).
+func (h *Handler) recordSessionRunBudget(sessionID string, state agent.TurnBudgetState) {
+	supervisor := h.getExecutionSupervisor()
+	if supervisor == nil || supervisor.Store == nil {
+		return
+	}
+	if strings.TrimSpace(state.Level) == "" && strings.TrimSpace(state.Line) == "" {
+		return
+	}
+	runID := h.sessionRunIDForProgress(supervisor.Store, sessionID)
+	if runID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _ = supervisor.RecordProgress(ctx, supervision.RunProgressEvent{
+		RunID:       runID,
+		Kind:        "turn_budget",
+		BudgetLevel: state.Level,
+		BudgetLine:  state.Line,
+		BudgetRatio: state.Ratio,
 	})
 }
 

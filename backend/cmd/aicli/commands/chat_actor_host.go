@@ -1717,6 +1717,8 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		// P0-1：run 级进度 tick → 监督面 ExecutionRun 的 last_progress_at；
 		// 无监督 run（非 spawn 子会话 / 监督未启用）时回调为 nil，行为不变。
 		OnProgress: h.progressRecorderForSession(sessionID),
+		// §4.2 运行中水位：水位变化时把实时读数写进同一账本；无监督面时 nil。
+		OnBudgetProgress: h.budgetRecorderForSession(sessionID),
 		// 灰度开关（默认开）：run 终态后到达的审批决议零恢复；显式
 		// supervision.approval_terminal_guard=false 可回退旧行为。
 		ApprovalTerminalGuard: h.supervisionConfig.ApprovalTerminalGuard,
