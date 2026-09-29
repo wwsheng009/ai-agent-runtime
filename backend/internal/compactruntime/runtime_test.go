@@ -842,6 +842,58 @@ func TestMaybeCompactTriggerAlignsWithInputBudget(t *testing.T) {
 	require.Equal(t, 1, provider.streamCount)
 }
 
+// TestMaybeCompactReplacementFitsReplacementTokenLimit pins the contract the
+// session-compaction call sites rely on (2026-09-28): with the enforced gate
+// budget passed as ReplacementTokenLimit, the produced history — summary plus
+// retained recent messages — must fit it, so the following provider request is
+// not rejected by the send gate right after a "successful" compaction.
+func TestMaybeCompactReplacementFitsReplacementTokenLimit(t *testing.T) {
+	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "provider-a",
+		DefaultModel:    "gpt-5",
+		MaxRetries:      0,
+	})
+	provider := &compactTestProvider{
+		name: "provider-a",
+		capabilities: map[string]agentconfig.ModelCapabilitySpec{
+			"gpt-5": {MaxContextTokens: 128000},
+		},
+	}
+	require.NoError(t, runtime.RegisterProvider("provider-a", provider))
+	require.NoError(t, runtime.RegisterProviderAlias("gpt-5", "provider-a"))
+	provider.responseContent = "compact summary"
+
+	history := []types.Message{
+		*types.NewSystemMessage("system instructions"),
+		*types.NewUserMessage("Fix the build."),
+		*types.NewAssistantMessage(strings.Repeat("analysis ", 400)),
+		*types.NewUserMessage("Continue."),
+		*types.NewAssistantMessage("latest progress"),
+	}
+	counter := func(messages []types.Message) int {
+		total := 0
+		for _, message := range messages {
+			total += len(message.Content)
+		}
+		return total
+	}
+	const limit = 2000
+	result, status, err := New(runtime, nil).MaybeCompact(context.Background(), Request{
+		SessionID:             "session-replacement-limit",
+		Provider:              "provider-a",
+		Model:                 "gpt-5",
+		History:               history,
+		KeepRecentMessages:    2,
+		ReplacementTokenLimit: limit,
+		Force:                 true,
+		Phase:                 PhasePreTurn,
+		CountTokens:           counter,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result, "status: %+v", status)
+	require.LessOrEqual(t, counter(result.ReplacementHistory), limit)
+}
+
 func TestMaybeCompactUsesObservedTokensForTrigger(t *testing.T) {
 	runtime := llm.NewLLMRuntime(&llm.RuntimeConfig{
 		DefaultProvider: "provider-a",

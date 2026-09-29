@@ -2305,19 +2305,20 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	inputBudget, toolSchemaTokens := agent.CompactTriggerBudget(a.llmRuntime, a.agent, tools)
 	runtime := compactruntime.New(a.llmRuntime, manager)
 	result, status, err := runtime.MaybeCompact(ctx, compactruntime.Request{
-		SessionID:          a.id,
-		TaskID:             taskID,
-		Provider:           firstNonEmpty(chatActorConfigValue(cfg, "provider"), a.llmRuntime.DefaultProvider()),
-		Model:              firstNonEmpty(chatActorConfigValue(cfg, "model"), a.llmRuntime.DefaultModel()),
-		History:            history,
-		KeepRecentMessages: keepRecent,
-		Phase:              compactruntime.PhasePreTurn,
-		CountTokens:        a.llmRuntime.CountMessagesTokens,
-		ObservedTokens:     observedTokens,
-		HasObservedTokens:  hasObservedTokens,
-		InputBudget:        inputBudget,
-		ToolSchemaTokens:   toolSchemaTokens,
-		Tools:              tools,
+		SessionID:             a.id,
+		TaskID:                taskID,
+		Provider:              firstNonEmpty(chatActorConfigValue(cfg, "provider"), a.llmRuntime.DefaultProvider()),
+		Model:                 firstNonEmpty(chatActorConfigValue(cfg, "model"), a.llmRuntime.DefaultModel()),
+		History:               history,
+		KeepRecentMessages:    keepRecent,
+		Phase:                 compactruntime.PhasePreTurn,
+		CountTokens:           a.llmRuntime.CountMessagesTokens,
+		ObservedTokens:        observedTokens,
+		HasObservedTokens:     hasObservedTokens,
+		ReplacementTokenLimit: compactReplacementTokenLimit(inputBudget, toolSchemaTokens),
+		InputBudget:           inputBudget,
+		ToolSchemaTokens:      toolSchemaTokens,
+		Tools:                 tools,
 	})
 	payload["reason"] = status.Reason
 	payload["mode"] = status.Mode
@@ -2403,6 +2404,18 @@ func (a *SessionActor) maybeAutoCompactSession(ctx context.Context, session *Ses
 	})
 	a.dispatchPostCompactHook(ctx, payload)
 	a.publishCompactReconciliation(turnID, result)
+}
+
+// compactReplacementTokenLimit fits a compaction replacement to the provider
+// send gate: the enforced input budget minus the frozen tool surface's share.
+// 0 means "not resolvable" and leaves the adapter's own replacement ceiling in
+// place. Without it a pre-turn replacement could still exceed the gate the
+// following request is measured against.
+func compactReplacementTokenLimit(inputBudget, toolSchemaTokens int) int {
+	if inputBudget > toolSchemaTokens {
+		return inputBudget - toolSchemaTokens
+	}
+	return 0
 }
 
 func (a *SessionActor) compactToolSurface(ctx context.Context, turnID string) []runtimetypes.ToolDefinition {
@@ -2497,21 +2510,22 @@ func (a *SessionActor) runManualCompact(
 	inputBudget, toolSchemaTokens := agent.CompactTriggerBudget(a.llmRuntime, a.agent, tools)
 	runtime := compactruntime.New(a.llmRuntime, manager)
 	result, resolvedStatus, err := runtime.MaybeCompact(ctx, compactruntime.Request{
-		SessionID:          a.id,
-		TaskID:             taskID,
-		Provider:           firstNonEmpty(chatActorConfigValue(cfg, "provider"), a.llmRuntime.DefaultProvider()),
-		Model:              firstNonEmpty(chatActorConfigValue(cfg, "model"), a.llmRuntime.DefaultModel()),
-		Mode:               strings.TrimSpace(requestedMode),
-		Force:              true,
-		History:            session.GetMessages(),
-		KeepRecentMessages: keepRecent,
-		Phase:              compactruntime.PhasePreTurn,
-		CountTokens:        a.llmRuntime.CountMessagesTokens,
-		ObservedTokens:     countRuntimeChatContextTokens(a.llmRuntime, session.GetMessages()),
-		HasObservedTokens:  true,
-		InputBudget:        inputBudget,
-		ToolSchemaTokens:   toolSchemaTokens,
-		Tools:              tools,
+		SessionID:             a.id,
+		TaskID:                taskID,
+		Provider:              firstNonEmpty(chatActorConfigValue(cfg, "provider"), a.llmRuntime.DefaultProvider()),
+		Model:                 firstNonEmpty(chatActorConfigValue(cfg, "model"), a.llmRuntime.DefaultModel()),
+		Mode:                  strings.TrimSpace(requestedMode),
+		Force:                 true,
+		History:               session.GetMessages(),
+		KeepRecentMessages:    keepRecent,
+		Phase:                 compactruntime.PhasePreTurn,
+		CountTokens:           a.llmRuntime.CountMessagesTokens,
+		ObservedTokens:        countRuntimeChatContextTokens(a.llmRuntime, session.GetMessages()),
+		HasObservedTokens:     true,
+		ReplacementTokenLimit: compactReplacementTokenLimit(inputBudget, toolSchemaTokens),
+		InputBudget:           inputBudget,
+		ToolSchemaTokens:      toolSchemaTokens,
+		Tools:                 tools,
 	})
 	status = resolvedStatus
 	payload["reason"] = status.Reason
