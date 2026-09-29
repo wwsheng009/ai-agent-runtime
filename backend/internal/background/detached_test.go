@@ -33,6 +33,11 @@ func TestBuildWindowsDetachedRunnerContentUsesDetectedShellAndCwd(t *testing.T) 
 	require.Contains(t, content, `$heartbeatPath = 'C:\logs\job.status.heartbeat'`)
 	require.Contains(t, content, `$scriptExitCode = 1`)
 	require.NotContains(t, content, `cmd.exe /D /S /C`)
+	// PowerShell 2.0 compatible runner syntax (Win7 hosts without WMF 5.1).
+	require.Contains(t, content, `New-Object -TypeName System.IO.StreamWriter -ArgumentList 'C:\logs\job.log'`)
+	require.Contains(t, content, `if ($null -ne $heartbeatJob)`)
+	require.NotContains(t, content, `::new(`)
+	require.NotContains(t, content, `Remove-Job -Job $heartbeatJob -Force`)
 }
 
 func TestDetachedLaunchRetriesTransientLauncherFailures(t *testing.T) {
@@ -267,4 +272,63 @@ func TestWriteUnixDetachedRunnerUsesDetectedShellAndRecordsCwdFailure(t *testing
 	require.Contains(t, content, "printf 'failed to change directory: %s\\n' '/tmp/work dir'")
 	require.Contains(t, content, "printf \"%s\" \"1\" > '"+statusPath+"'")
 	require.Contains(t, content, "'/opt/zsh' '-c' 'git status' >> '"+logPath+"' 2>&1")
+}
+
+func TestDetachedExecutionBlockReason(t *testing.T) {
+	original := detachedRunnerHostAvailable
+	defer func() { detachedRunnerHostAvailable = original }()
+
+	manager := &Manager{}
+	managed := &managedJob{logPath: filepath.Join(t.TempDir(), "job.log")}
+
+	detachedRunnerHostAvailable = func() bool { return false }
+	require.Equal(t, detachBlockRunnerHostMissing, manager.detachedExecutionBlockReason(managed))
+	require.False(t, manager.canUseDetachedExecution(managed))
+
+	detachedRunnerHostAvailable = func() bool { return true }
+	require.Empty(t, manager.detachedExecutionBlockReason(managed))
+	require.True(t, manager.canUseDetachedExecution(managed))
+
+	managed.logPath = ""
+	require.Equal(t, detachBlockNoLogDir, manager.detachedExecutionBlockReason(managed))
+	require.Equal(t, detachBlockInvalidJob, manager.detachedExecutionBlockReason(nil))
+}
+
+func TestDetachedRunnerHostMissingFallsBackToInProcess(t *testing.T) {
+	original := detachedRunnerHostAvailable
+	defer func() { detachedRunnerHostAvailable = original }()
+	detachedRunnerHostAvailable = func() bool { return false }
+
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	manager := NewManager(Config{
+		StorePath:         filepath.Join(tempDir, "background.db"),
+		LogDir:            filepath.Join(tempDir, "logs"),
+		MaxConcurrentJobs: 1,
+	})
+	defer func() { require.NoError(t, manager.Close()) }()
+
+	job, err := manager.SubmitShell(ctx, "session-win7-native", BackgroundTaskArgs{
+		Command: shellEchoCommand("native-fallback"),
+	})
+	require.NoError(t, err)
+	require.NoError(t, waitForJobStatus(ctx, manager, job.ID, StatusCompleted, backgroundTestTimeout(10*time.Second)))
+
+	loaded, err := manager.GetJob(ctx, job.ID)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	_, hasRunner := stringMetadataValue(loaded.Metadata, backgroundMetaRunnerPath)
+	require.False(t, hasRunner, "in-process fallback must not carry detached runner metadata")
+	_, hasStatusPath := stringMetadataValue(loaded.Metadata, backgroundMetaStatusPath)
+	require.False(t, hasStatusPath)
+	_, hasHeartbeat := stringMetadataValue(loaded.Metadata, backgroundMetaHeartbeatPath)
+	require.False(t, hasHeartbeat)
+
+	events, err := manager.ListEvents(ctx, job.ID, 0, 0)
+	require.NoError(t, err)
+	require.Contains(t, eventTypes(events), "detached_unavailable")
+
+	output, err := manager.ReadOutput(ctx, TaskOutputArgs{JobID: job.ID})
+	require.NoError(t, err)
+	require.Contains(t, output.Output, "native-fallback")
 }

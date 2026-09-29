@@ -1260,6 +1260,58 @@ func TestWatchdogReclaimsStuckScheduledJob(t *testing.T) {
 	require.NoError(t, waitForJobStatus(ctx, manager, second.ID, StatusCompleted, backgroundTestTimeout(5*time.Second)))
 }
 
+func TestWatchdogAnchorsStartupWindowAtProcessCreation(t *testing.T) {
+	// Bare manager: no live dispatcher/watchdog racing the synthetic jobs.
+	manager := &Manager{jobs: make(map[string]*managedJob)}
+	base := time.Now().UTC()
+	mk := func(id string, scheduledAt time.Time, acceptingSince time.Time, launchState string) *managedJob {
+		return &managedJob{
+			info: Job{
+				ID:        id,
+				Status:    StatusPending,
+				CreatedAt: base,
+				Metadata:  map[string]interface{}{backgroundMetaLaunchState: launchState},
+			},
+			scheduled:      true,
+			scheduledAt:    scheduledAt,
+			acceptingSince: acceptingSince,
+			output:         newOutputBuffer(1024),
+		}
+	}
+	// The launcher consumed the whole nominal acceptance budget before the
+	// process existed: the probe only just started, so the job must keep its
+	// own fresh window instead of being reclaimed as "scheduler stuck".
+	justStarted := base.Add(-time.Second)
+	longScheduled := base.Add(-20 * time.Second)
+	manager.mu.Lock()
+	manager.jobs["slow-launch"] = mk("slow-launch", longScheduled, justStarted, launchStateAccepting)
+	// The worker really is gone after creating the process: acceptance has
+	// overrun its own anchored window and the slot must be reclaimed.
+	manager.jobs["stuck-accepting"] = mk("stuck-accepting", longScheduled, longScheduled, launchStateAccepting)
+	// The launcher never produced a process: the dispatch budget still applies.
+	manager.jobs["never-launched"] = mk("never-launched", base.Add(-31*time.Second), time.Time{}, launchStateQueued)
+	manager.mu.Unlock()
+
+	manager.reclaimStuckScheduled()
+
+	slow, err := manager.GetJob(context.Background(), "slow-launch")
+	require.NoError(t, err)
+	require.Equal(t, StatusPending, slow.Status)
+	require.Equal(t, launchStateAccepting, slow.Metadata[backgroundMetaLaunchState])
+
+	stuck, err := manager.GetJob(context.Background(), "stuck-accepting")
+	require.NoError(t, err)
+	require.Equal(t, StatusFailed, stuck.Status)
+	require.Contains(t, stuck.Message, "scheduler stuck")
+	require.Contains(t, stuck.Message, "startup acceptance never completed")
+	require.Equal(t, launchStateFailed, stuck.Metadata[backgroundMetaLaunchState])
+
+	never, err := manager.GetJob(context.Background(), "never-launched")
+	require.NoError(t, err)
+	require.Equal(t, StatusFailed, never.Status)
+	require.Contains(t, never.Message, "never started running")
+}
+
 func TestReadOutputQueueDiagnostics(t *testing.T) {
 	manager := NewManager(Config{MaxConcurrentJobs: 1})
 	defer manager.Close()

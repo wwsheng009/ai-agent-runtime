@@ -61,11 +61,51 @@ func (e *detachedLaunchError) Unwrap() error {
 	return e.err
 }
 
-func (m *Manager) canUseDetachedExecution(managed *managedJob) bool {
-	if m == nil || managed == nil {
-		return false
+const (
+	detachBlockInvalidJob        = "invalid_job"
+	detachBlockNoLogDir          = "no_log_dir"
+	detachBlockRunnerHostMissing = "runner_host_missing"
+)
+
+// detachedRunnerHostAvailable reports whether the platform can host the
+// detached runner script. Unix always can (/bin/sh + setsid/nohup); Windows
+// needs PowerShell, and the §7 Win7 fleet explicitly includes machines where
+// PowerShell is removed or trimmed (windows7-compat-internals.md §7). Such
+// machines must not select a runner that can never start — they fall back to
+// native in-process supervision instead (2026-09-29). Overridable in tests.
+var detachedRunnerHostAvailable = defaultDetachedRunnerHostAvailable
+
+func defaultDetachedRunnerHostAvailable() bool {
+	if runtime.GOOS != "windows" {
+		return true
 	}
-	return strings.TrimSpace(managed.logPath) != ""
+	if _, err := exec.LookPath("pwsh"); err == nil {
+		return true
+	}
+	if _, err := exec.LookPath("powershell"); err == nil {
+		return true
+	}
+	return false
+}
+
+func (m *Manager) canUseDetachedExecution(managed *managedJob) bool {
+	return m.detachedExecutionBlockReason(managed) == ""
+}
+
+// detachedExecutionBlockReason returns "" when the detached runner may run
+// this job, or a reason string when the job must stay on the native
+// in-process path (see (*Manager).runJob).
+func (m *Manager) detachedExecutionBlockReason(managed *managedJob) string {
+	if m == nil || managed == nil {
+		return detachBlockInvalidJob
+	}
+	if strings.TrimSpace(managed.logPath) == "" {
+		return detachBlockNoLogDir
+	}
+	if !detachedRunnerHostAvailable() {
+		return detachBlockRunnerHostMissing
+	}
+	return ""
 }
 
 func (m *Manager) runDetachedJob(managed *managedJob) {
@@ -761,12 +801,14 @@ func writeWindowsDetachedRunner(path string, shell runtimeexecutor.Shell, comman
 func startDetachedRunner(path string) (int, error) {
 	if runtime.GOOS == "windows" {
 		launcher := windowsPowerShellHost()
-		script := fmt.Sprintf("$p = Start-Process -FilePath '%s' -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', '%s') -WindowStyle Hidden -PassThru; [Console]::Out.Write($p.Id)", escapePowerShellSingleQuotes(launcher), escapePowerShellSingleQuotes(path))
-		out, err := exec.Command(launcher, "-NoProfile", "-NonInteractive", "-Command", script).Output()
-		if err != nil {
-			return 0, err
-		}
-		return strconv.Atoi(strings.TrimSpace(string(out)))
+		// Spawn the runner directly instead of bouncing through a per-job
+		// `Start-Process` wrapper: the wrapper waited for a full PowerShell
+		// cold start, measured at ~10-14s per job on a loaded machine, which
+		// made the scheduler watchdog treat a slow launch as a stuck worker
+		// (2026-09-29). exec.Cmd.Start returns as soon as the process exists.
+		return startDetachedProcess(launcher, []string{
+			"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path,
+		})
 	}
 	script := fmt.Sprintf("if command -v setsid >/dev/null 2>&1; then setsid /bin/sh %s >/dev/null 2>&1 < /dev/null & echo $!; else nohup /bin/sh %s >/dev/null 2>&1 < /dev/null & echo $!; fi", shellQuote(path), shellQuote(path))
 	out, err := exec.Command("/bin/sh", "-c", script).Output()
@@ -821,10 +863,6 @@ func escapeBatchPath(text string) string {
 	return strings.ReplaceAll(text, `"`, `""`)
 }
 
-func escapePowerShellSingleQuotes(text string) string {
-	return strings.ReplaceAll(text, `'`, `''`)
-}
-
 func buildShellCommandLine(args []string) string {
 	if len(args) == 0 {
 		return ""
@@ -852,15 +890,28 @@ func buildWindowsDetachedRunnerContent(shell runtimeexecutor.Shell, command, cwd
 		`$env:PATH = "$systemRoot\System32\WindowsPowerShell\v1.0;$systemRoot\System32;$systemRoot;$env:PATH"`,
 		fmt.Sprintf("$heartbeatPath = %s", powershellQuote(heartbeatPath)),
 		"[System.IO.File]::WriteAllText($heartbeatPath, [DateTimeOffset]::UtcNow.Ticks.ToString())",
-		fmt.Sprintf("$writer = [System.IO.StreamWriter]::new(%s, $true, (New-Object System.Text.UTF8Encoding $false))", powershellQuote(logPath)),
+		// New-Object instead of [Type]::new(): the latter is PowerShell 5+
+		// syntax and the §7 Win7 fleet includes hosts without WMF 5.1
+		// (2026-09-29).
+		fmt.Sprintf("$writer = New-Object -TypeName System.IO.StreamWriter -ArgumentList %s, $true, (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList $false)", powershellQuote(logPath)),
 		"$scriptExitCode = 0",
 		"$ownerPid = $PID",
-		"$heartbeatJob = Start-Job -ArgumentList $heartbeatPath, $ownerPid -ScriptBlock {",
+		"$heartbeatBlock = {",
 		"  param($path, $parentPid)",
 		"  while ($null -ne (Get-Process -Id $parentPid -ErrorAction SilentlyContinue)) {",
 		"    try { [System.IO.File]::WriteAllText([string]$path, [DateTimeOffset]::UtcNow.Ticks.ToString()) } catch {}",
-		"    Start-Sleep -Seconds 1",
+		"    Start-Sleep -Milliseconds 500",
 		"  }",
+		"}",
+		// Start-ThreadJob runs in-process and is ~4-6s cheaper than Start-Job
+		// on a cold PowerShell host; that overhead used to sit between the
+		// runner and the user command (2026-09-29). Windows PowerShell 5.1
+		// has no ThreadJob module, so keep the Start-Job fallback.
+		"$heartbeatJob = $null",
+		"if (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue) {",
+		"  $heartbeatJob = Start-ThreadJob -ArgumentList $heartbeatPath, $ownerPid -ScriptBlock $heartbeatBlock",
+		"} else {",
+		"  $heartbeatJob = Start-Job -ArgumentList $heartbeatPath, $ownerPid -ScriptBlock $heartbeatBlock",
 		"}",
 		"try {",
 	)
@@ -874,8 +925,12 @@ func buildWindowsDetachedRunnerContent(shell runtimeexecutor.Shell, command, cwd
 		"  $writer.WriteLine($_.ToString())",
 		"  $scriptExitCode = 1",
 		"} finally {",
-		"  Stop-Job -Job $heartbeatJob -ErrorAction SilentlyContinue",
-		"  Remove-Job -Job $heartbeatJob -Force -ErrorAction SilentlyContinue",
+		// Stop/Remove-Job without -Force: -Force is PowerShell 3+ and these
+		// hosts may still be on 2.0 (2026-09-29).
+		"  if ($null -ne $heartbeatJob) {",
+		"    Stop-Job -Job $heartbeatJob -ErrorAction SilentlyContinue",
+		"    Remove-Job -Job $heartbeatJob -ErrorAction SilentlyContinue",
+		"  }",
 		"  [System.IO.File]::WriteAllText($heartbeatPath, [DateTimeOffset]::UtcNow.Ticks.ToString())",
 		"  $writer.Dispose()",
 		"}",
