@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -127,7 +128,8 @@ func NewViewTool() *ViewTool {
 		BaseTool: toolkit.NewBaseTool(
 			"view",
 			"查看一个或多个文件。用 files 批量读取独立文件或区间；单文件用 file_path。输出包含稳定行号和截断元数据。"+
-				"已知符号名但不知道行号时可传 symbol（索引可用时按符号范围读取；索引不可用时退化为 file_path 行范围或提示改用 grep）。",
+				"已知符号名但不知道行号时可传 symbol（索引可用时按符号范围读取；索引不可用时退化为 file_path 行范围或提示改用 grep）。"+
+				"符号级读取优先用 code_inspect（可用时；本工具的 symbol 参数为兼容入口）。",
 			"1.1.0",
 			parameters,
 			true,
@@ -294,6 +296,11 @@ func (v *ViewTool) resolveViewSymbol(ctx context.Context, symbol string, limit i
 	}
 	handle, ok := v.symbolResolver(ctx)
 	if !ok || handle == nil || handle.Index == nil || strings.TrimSpace(handle.WorkspaceID) == "" {
+		return ViewFileRequest{}, false
+	}
+	// shadow 档（04 §4.6 第 3 步）：索引候选不改变模型可见输出，symbol 参数
+	// 退化为行范围读取/报错口径（与 code.* 的 shadow 语义一致）。
+	if handle.Mode == knowledge.ModeShadow {
 		return ViewFileRequest{}, false
 	}
 	sym, _, found, err := resolveCodeSymbol(ctx, handle.Index, symbol, "")

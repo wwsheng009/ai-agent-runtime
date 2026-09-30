@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
@@ -79,7 +80,8 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 	if !ok {
 		result, _ := t.runGrep(ctx, grepParams())
 		env := fallbackEnvelope("code_search", codeFallbackIndexUnavailable, codeConfidenceNone, "grep", result)
-		env.Truncated = clamped
+		env.Truncated = env.Truncated || clamped
+		env.Explanation += codeSearchLangFallbackNote(lang)
 		return codeResult(env), nil
 	}
 
@@ -92,7 +94,8 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 	if err != nil {
 		result, _ := t.runGrep(ctx, grepParams())
 		env := fallbackEnvelope("code_search", codeFallbackIndexError, codeConfidenceNone, "grep", result)
-		env.Truncated = clamped
+		env.Truncated = env.Truncated || clamped
+		env.Explanation += codeSearchLangFallbackNote(lang)
 		return codeResult(env), nil
 	}
 
@@ -102,7 +105,8 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 		result, _ := t.runGrep(ctx, grepParams())
 		env := fallbackEnvelope("code_search", codeFallbackShadowMode, codeConfidenceFTS, "grep", result)
 		env.Explanation += fmt.Sprintf(" 索引候选 %d 条（未返回）。", len(hits))
-		env.Truncated = clamped
+		env.Explanation += codeSearchLangFallbackNote(lang)
+		env.Truncated = env.Truncated || clamped
 		return codeResult(env), nil
 	}
 
@@ -110,7 +114,8 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 	if len(hits) == 0 {
 		result, _ := t.runGrep(ctx, grepParams())
 		env := fallbackEnvelope("code_search", codeFallbackNoIndexHit, codeConfidenceNone, "grep", result)
-		env.Truncated = clamped
+		env.Truncated = env.Truncated || clamped
+		env.Explanation += codeSearchLangFallbackNote(lang)
 		return codeResult(env), nil
 	}
 
@@ -123,7 +128,31 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 		"symbols_fts 命中 %d 条（按相关性排序；score 仅在本结果集内可比，v1 不分页，next_cursor 为空）。",
 		len(hits),
 	)
+	// 低置信补量（04 §4.6 第 4 步）：命中里没有任何与查询同名/包含的符号时，
+	// 视为低相关，补一次 grep 作为补充证据（索引命中仍是主结果）。
+	if !codeSearchNameMatched(hits, query) {
+		if result, _ := t.runGrep(ctx, grepParams()); result != nil && strings.TrimSpace(result.Content) != "" {
+			env.Source = codeSourceIndexGrep
+			env.Fallback = &codeFallback{
+				Tool:   "grep",
+				Reason: codeFallbackLowConfidence,
+				Output: strings.TrimSpace(result.Content),
+			}
+			env.Explanation += " 低相关补量：补一次 grep 作为补充证据（source=index+grep，索引命中仍是主结果）。"
+			if codeResultTruncated(result) {
+				env.Truncated = true
+			}
+		}
+	}
 	return codeResult(env), nil
+}
+
+// codeSearchLangFallbackNote 说明 fallback 与索引路径的过滤差异（grep 无语言维度）。
+func codeSearchLangFallbackNote(lang string) string {
+	if strings.TrimSpace(lang) == "" {
+		return ""
+	}
+	return "；fallback 未应用 lang 过滤（grep 无语言维度，按字面量检索）。"
 }
 
 // codeSearchHits 把 FTS 命中映射为稳定结果形状。

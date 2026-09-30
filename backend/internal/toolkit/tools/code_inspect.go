@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -91,6 +92,14 @@ func (t *CodeInspectTool) Execute(ctx context.Context, params map[string]interfa
 		return codeResult(env), nil
 	}
 
+	// shadow 档（04 §4.6 第 3 步）：候选照算，但返回 view/grep 结果，
+	// 不改变模型可见输出。
+	if handle.Mode == knowledge.ModeShadow {
+		env := t.inspectFallback(ctx, codeFallbackShadowMode, confidence, symbol, filePath, offset, limit)
+		env.Explanation += " 索引候选 1 条（未返回）。"
+		return codeResult(env), nil
+	}
+
 	path := handle.PathForFile(sym.FileID)
 	if path == "" {
 		env := t.inspectFallback(ctx, codeFallbackIndexError, confidence, symbol, filePath, offset, limit)
@@ -105,7 +114,7 @@ func (t *CodeInspectTool) Execute(ctx context.Context, params map[string]interfa
 	if limit > 0 && limit < readLimit {
 		readLimit = limit
 	}
-	result, _ := t.runView(ctx, map[string]interface{}{
+	result, viewErr := t.runView(ctx, map[string]interface{}{
 		"file_path": path,
 		"offset":    sym.Range.Start.Line - 1,
 		"limit":     readLimit,
@@ -133,6 +142,20 @@ func (t *CodeInspectTool) Execute(ctx context.Context, params map[string]interfa
 		"按符号读取：%s（%s，第 %d–%d 行）；正文经 view 读取（等价 view file_path=%s offset=%d limit=%d）。",
 		sym.Name, path, sym.Range.Start.Line, sym.Range.End.Line, path, sym.Range.Start.Line-1, readLimit,
 	)
+	// limit 裁剪或 view 自身截断都意味着正文不完整；读取失败则显式降级标记。
+	env.Truncated = (limit > 0 && limit < span) || codeResultTruncated(result)
+	if viewErr != nil || result == nil || !result.Success {
+		env.Degraded = true
+		env.Explanation += "；正文读取失败"
+		switch {
+		case viewErr != nil:
+			env.Explanation += "：" + viewErr.Error()
+		case result != nil && result.Error != nil:
+			env.Explanation += "：" + result.Error.Error()
+		default:
+			env.Explanation += "（view 未返回内容）"
+		}
+	}
 	return codeResult(env), nil
 }
 

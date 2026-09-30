@@ -32,9 +32,16 @@ func TestRegisterBuiltinToolkitToolsGatesCodeTools(t *testing.T) {
 	registry = toolkit.NewRegistry()
 	cfg.Knowledge.CodeTools = knowledge.CodeToolsOn
 	registerBuiltinToolkitTools(registry, nil, root, cfg)
+	if _, ok := registry.Get("code_search"); ok {
+		t.Fatal("mode=off 时 code_search 不得注册（ADR-0004 §4.4 全局硬闸）")
+	}
+
+	registry = toolkit.NewRegistry()
+	cfg.Knowledge.Mode = knowledge.ModeOn
+	registerBuiltinToolkitTools(registry, nil, root, cfg)
 	for _, name := range []string{"code_search", "code_inspect", "code_navigate", "code_references", "code_callers"} {
 		if _, ok := registry.Get(name); !ok {
-			t.Fatalf("%s 未在 code_tools=on 时注册", name)
+			t.Fatalf("%s 未在 mode=on + code_tools=on 时注册", name)
 		}
 	}
 }

@@ -442,8 +442,10 @@ func canonicalManagedToolName(name string) string {
 func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexecutor.Sandbox, workspaceRoot string, runtimeConfig *runtimecfg.RuntimeConfig) {
 	// Phase 3（06 §4 Phase 3）：code.* 工具面（默认 off；knowledge.code_tools=on
 	// 才注册，回滚即关闭）。索引不可用时工具自身按降级协议 fallback 到 grep/view。
+	// ADR-0004 §4.4 全局硬闸：mode=off 时无论 code_tools 如何都不得注册 code.*
+	// （工具面必须回到纯 grep/view 基线）。
 	var codeResolver tools.CodeIndexResolver
-	if runtimeConfig != nil && runtimeConfig.Knowledge.CodeToolsEnabled() {
+	if runtimeConfig != nil && runtimeConfig.Knowledge.CodeToolsEnabled() && runtimeConfig.Knowledge.Enabled() {
 		codeResolver = newCodeIndexResolver(runtimeConfig.Knowledge, workspaceRoot)
 	}
 	register := func(tool toolkit.Tool) {

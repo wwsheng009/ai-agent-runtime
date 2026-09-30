@@ -414,3 +414,167 @@ func TestViewSymbolWithoutIndexAndFilePathErrors(t *testing.T) {
 		t.Fatalf("error = %v, want guidance", res.Error)
 	}
 }
+
+// ---- 2026-09-30 修复轮：shadow 全覆盖 / kind 校验 / 路径归一化 / 截断 ----
+
+func TestCodeToolsShadowModeCoversAllTools(t *testing.T) {
+	fixture := newCodeToolsFixture(t)
+	shadow := *fixture.handle
+	shadow.Mode = knowledge.ModeShadow
+	resolver := func(context.Context) (*CodeIndexHandle, bool) { return &shadow, true }
+
+	cases := []struct {
+		name string
+		run  func() *toolkit.ToolResult
+	}{
+		{"code_inspect", func() *toolkit.ToolResult {
+			tool := NewCodeInspectTool()
+			tool.SetBasePath(fixture.root)
+			tool.SetCodeIndexResolver(resolver)
+			res, _ := tool.Execute(context.Background(), map[string]interface{}{"symbol": "Beta"})
+			return res
+		}},
+		{"code_references", func() *toolkit.ToolResult {
+			tool := NewCodeReferencesTool()
+			tool.SetBasePath(fixture.root)
+			tool.SetCodeIndexResolver(resolver)
+			res, _ := tool.Execute(context.Background(), map[string]interface{}{"symbol": "Alpha"})
+			return res
+		}},
+		{"code_callers", func() *toolkit.ToolResult {
+			tool := NewCodeCallersTool()
+			tool.SetBasePath(fixture.root)
+			tool.SetCodeIndexResolver(resolver)
+			res, _ := tool.Execute(context.Background(), map[string]interface{}{"symbol": "Alpha"})
+			return res
+		}},
+		{"code_navigate_members", func() *toolkit.ToolResult {
+			tool := NewCodeNavigateTool()
+			tool.SetBasePath(fixture.root)
+			tool.SetCodeIndexResolver(resolver)
+			res, _ := tool.Execute(context.Background(), map[string]interface{}{
+				"file_path": fixture.fileRel, "direction": "members",
+			})
+			return res
+		}},
+		{"code_navigate_definition", func() *toolkit.ToolResult {
+			tool := NewCodeNavigateTool()
+			tool.SetBasePath(fixture.root)
+			tool.SetCodeIndexResolver(resolver)
+			res, _ := tool.Execute(context.Background(), map[string]interface{}{
+				"symbol": "Alpha", "direction": "definition",
+			})
+			return res
+		}},
+	}
+	for _, tc := range cases {
+		env := decodeCodeEnvelope(t, tc.run())
+		if env.Source != codeSourceFallback || env.Fallback == nil || env.Fallback.Reason != codeFallbackShadowMode {
+			t.Fatalf("%s shadow envelope = %+v, want fallback/shadow_mode", tc.name, env)
+		}
+		if !strings.Contains(env.Explanation, "索引候选") {
+			t.Fatalf("%s explanation = %q, want candidate count", tc.name, env.Explanation)
+		}
+	}
+
+	// view --symbol 在 shadow 档不得走索引：带 file_path 时退化为行范围读取。
+	view := NewViewTool()
+	view.SetBasePath(fixture.root)
+	view.SetCodeIndexResolver(resolver)
+	res, err := view.Execute(context.Background(), map[string]interface{}{
+		"symbol": "Beta", "file_path": fixture.fileRel,
+	})
+	if err != nil || res == nil || !res.Success {
+		t.Fatalf("view shadow: err=%v res=%+v", err, res)
+	}
+	if !strings.Contains(res.Content, "package pkg") {
+		t.Fatalf("view shadow content = %q, want line-range fallback", res.Content)
+	}
+}
+
+func TestCodeReferencesRejectsInvalidKind(t *testing.T) {
+	fixture := newCodeToolsFixture(t)
+	tool := NewCodeReferencesTool()
+	tool.SetBasePath(fixture.root)
+	tool.SetCodeIndexResolver(fixture.resolver)
+
+	res, err := tool.Execute(context.Background(), map[string]interface{}{"symbol": "Alpha", "kind": "typo"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Success || res.Error == nil || !strings.Contains(res.Error.Error(), "kind") {
+		t.Fatalf("res = %+v, want explicit kind error", res)
+	}
+}
+
+func TestCodeNavigateMembersNormalizesWindowsPath(t *testing.T) {
+	fixture := newCodeToolsFixture(t)
+	tool := NewCodeNavigateTool()
+	tool.SetBasePath(fixture.root)
+	tool.SetCodeIndexResolver(fixture.resolver)
+
+	res, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": "pkg\\demo.go", "direction": "members",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	env := decodeCodeEnvelope(t, res)
+	if env.Source != codeSourceIndex {
+		t.Fatalf("envelope = %+v, want index path after path normalization", env)
+	}
+	var members []codeSymbolHit
+	if err := json.Unmarshal(env.Results, &members); err != nil {
+		t.Fatalf("results decode: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("members = %+v, want 2 symbols", members)
+	}
+}
+
+func TestCodeNavigateRequiresDirection(t *testing.T) {
+	tool := NewCodeNavigateTool()
+	res, err := tool.Execute(context.Background(), map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res == nil || res.Success || res.Error == nil || !strings.Contains(res.Error.Error(), "direction 必填") {
+		t.Fatalf("res = %+v, want direction error", res)
+	}
+}
+
+func TestCodeInspectLimitMarksTruncated(t *testing.T) {
+	fixture := newCodeToolsFixture(t)
+	tool := NewCodeInspectTool()
+	tool.SetBasePath(fixture.root)
+	tool.SetCodeIndexResolver(fixture.resolver)
+
+	res, err := tool.Execute(context.Background(), map[string]interface{}{"symbol": "Beta", "limit": 1})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	env := decodeCodeEnvelope(t, res)
+	if !env.Truncated {
+		t.Fatalf("envelope = %+v, want truncated=true when limit < symbol span", env)
+	}
+}
+
+func TestCodeSearchLowConfidenceSupplement(t *testing.T) {
+	fixture := newCodeToolsFixture(t)
+	tool := NewCodeSearchTool()
+	tool.SetBasePath(fixture.root)
+	tool.SetCodeIndexResolver(fixture.resolver)
+
+	// "func" 命中签名而非符号名 → 低相关，应补一次 grep（source=index+grep）。
+	res, err := tool.Execute(context.Background(), map[string]interface{}{"query": "func"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	env := decodeCodeEnvelope(t, res)
+	if env.Source != codeSourceIndexGrep || env.Fallback == nil || env.Fallback.Reason != codeFallbackLowConfidence {
+		t.Fatalf("envelope = %+v, want index+grep low-confidence supplement", env)
+	}
+	if !strings.Contains(env.Fallback.Output, "func Beta()") {
+		t.Fatalf("supplement output = %q, want grep hit", env.Fallback.Output)
+	}
+}

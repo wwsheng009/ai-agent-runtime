@@ -30,7 +30,7 @@
 | 1 | 索引 MVP（shadow） | **主门槛通过**（2026-09-29：交付 1–6 完成；shadow v1 经 ADR-0008 file-level 口径复核，合并 M1=35.95 % ≥ 0.31；live 验证 3/3 入口通过；性能已按 §7.4 校准（≤360 s）；单文件增量实测 Fail，待口径重议） | ✅ 已满足：ADR-0001 / 0003（口径）/ 0007，且 0008 / 0009 已于 2026-09-29 Accept |
 | 2 | Exploration Memory + Planner | **实现完成（2026-09-30）**：W1–W7 全部落地（W7 分 W7a 激活装配 / W7b 测量段两切片）；验证：`knowledge` 3.8s / `contextmgr` 1.0s / `agent` 17.5s / `runtimeapi` 51.8s 全 ok + `go build ./...` OK，有界演练 n=385（median≈420、95% CI [416,424]、p95 450、建议预算 500）；真实 on-mode A/B ≥20 任务实测待跑（见 §4「W7」小节「登记注记」） | ✅ 已满足：ADR-0004 已于 2026-09-29 Accept；Phase 1 主门槛已通过（剩余工程项见 [`reports/phase1_shadow_report.md`](reports/phase1_shadow_report.md) §5） |
 | 3 | Code API 与工具面收敛 | **实现完成（2026-09-30）**：`knowledge.code_tools` 门控（默认 off）+ 5 个 code.* 工具（统一返回结构 / 降级协议 / view --symbol / 工具描述分工）；验证：14 例新测试 + `knowledge`/`contextmgr`/`config`/`tools`/`toolkit` 全绿 + 真实会话 E2E（`code_search` → `code_callers`，`source=index`）；收益类验收与 M3 判定待测量轮（见 §4「Phase 3」小节「登记注记」） | Phase 2 验收通过（A/B 遗留不阻塞实现） |
-| 4 | Adapter SPI 与可选 LSP | 未开始 | ADR-0002 / 0005 / 0006 Accept；Phase 1 验收通过 |
+| 4 | Adapter SPI 与可选 LSP | **实现完成（2026-09-30）**：SPI + 能力声明 + builtin/tree-sitter(降级)/lsp(进程外) 三通道 + 进程管理（guard/锁/上限/崩溃回收）+ 版本参与身份与全量重建 + 离线降级；验证：17 例新测试 + golden set 1765 条（builtin P=1.0000/R=0.8510）+ LSP live 实测（见 §4「Phase 4」小节） | ⚠️ **ADR-0002 / 0005 / 0006 仍为 Proposed**（本轮按 ADR 决议内容落地，正式 Accept 待 owner 裁决）；Phase 1 验收通过 |
 | 5 | Change Manager 与一致性 | 未开始 | Phase 3 合入后 |
 | 6 | Context Compiler 深度集成 | 未开始 | Phase 2 + 3 + 5 验收通过 |
 | 7 | Semantic Retrieval（可选） | 未开始 | Phase 6 验收通过 |
@@ -383,7 +383,7 @@ DoD（完成判据）：① 零迁移即可读写三表；② 同 target 重复�
 >
 > **验证记录**：`go build ./...` OK；`knowledge` 2.5s / `contextmgr` 0.5s / `config` 1.3s / `tools` 0.8s / `toolkit` 2.6s 全 ok；新增 14 例测试（工具索引/降级/shadow/结构 10 + 注册门控与解析器 3 + 配置开关 1）。E2E（真实会话 `mode=on` + `code_tools=on`）：模型实际调用 `code_search` → `code_callers`（runtime-events `tool_name` 事件），结果信封 `"source":"index"`，回答给出 `planner.go:247` 定义 / `planner.go:209` 调用点；`/exit` 后锁释放。
 >
-> **登记注记（偏差与缺口）**：① 注册名用下划线（provider 函数名约束），设计文档的 `code.*` 为概念命名；② `configs/model_cards.yaml` 无工具面清单（模型能力卡），系统提示载体为工具描述，未改该文件；③ `cmd/toolkit-mcp-server` 无 workspace/knowledge 上下文，未注册；④ `version` 留空（版本向量属 Phase 5 交付 3）；`next_cursor` v1 恒空。缺口（测量轮）：探索 token ↓≥40%、fallback ≤30%、工具调用总数不增加与 M3 判定待真实 A/B。
+> **登记注记（偏差与缺口）**：① 注册名用下划线（provider 函数名约束），设计文档的 `code.*` 为概念命名；② `configs/model_cards.yaml` 无工具面清单（模型能力卡），系统提示载体为工具描述，未改该文件；③ `cmd/toolkit-mcp-server` 无 workspace/knowledge 上下文，未注册；④ `version` 留空（版本向量属 Phase 5 交付 3）；`next_cursor` v1 恒空。缺口（测量轮）：探索 token ↓≥40%、fallback ≤30%、工具调用总数不增加与 M3 判定待真实 A/B。⑤ 2026-09-30 修复轮（评审清单见 `docs/plan/code-tools-gap-review-and-fix-plan-20260930.md`）：shadow 档统一覆盖 5 工具 + `view --symbol`；`code_references` kind 闭集校验；fallback 透传 grep/view 截断信号并标注 lang/kind 过滤差异；`code_inspect` 补 `truncated`/读取失败标记；`code_navigate` 路径分隔符归一化 + 空 direction 明确报错 + members 截断口径修正；`mode=off` 时即使 `code_tools=on` 也不注册（ADR-0004 §4.4 硬闸）；解析器只读句柄按 size/mtime 失效重建；on 档低相关命中补一次 grep（`source=index+grep`）；grep 模型可见描述并入 Phase 3 分工句。**仍未落地（登记后续）**：ADR-0004 陈旧度分级（`snapshot_ts`/`staleness_seconds`/`completeness`、分级注册、逃生舱）；引用索引漏报（`EvaluatePlan` 生产调用点缺失）根因与索引侧修复；FTS exact-name 加权与限定名查询（`knowledge.Plan`）。
 
 ### Phase 4 — Adapter SPI 与可选 LSP
 
@@ -398,7 +398,13 @@ DoD（完成判据）：① 零迁移即可读写三表；② 同 target 重复�
 - **文件落点**：新增 `knowledge/adapter.go`、`adapter_treesitter.go`、`adapter_lsp.go`、`indexer_deep.go`、`testdata/golden/`，以及 `knowledge/lsp/` 子包；`supplement/05` §8 给出集成点（`internal/acp/`、`cmd/runtime-server/main.go` 等）。
 - **验收门槛**：Go 仓库 definition / references 精度 ≥ 90%、召回 ≥ 85%（golden set，人工标注 ≥ 200 条）；LSP 崩溃 100% 降级不阻断 agent；进程数 ≤ `lsp.max_processes`；内存 ≤ `lsp.memory_limit_mb`；关闭 adapter 后 builtin 仍可用。
 - **回滚**：关闭 adapter，退回 builtin。
-- **状态**：未开始。
+- **状态**：✅ **实现完成（2026-09-30）**。
+>
+> **落地**：① `LanguageAdapter` SPI 扩展（`Name`/`Version`/`Detect`/`Extract`/`Capabilities`）+ `AdapterCapabilities`（definition|references|callers|types|tests）+ `AdapterKind`（builtin|treesitter|lsp）+ `SelectIndexAdapter`（不可用→降级 builtin，Reason 可观测）；② builtin 显式化为默认通道（零行为变化）；tree-sitter 通道登记但未接入语法（`Available()=false`，选择即降级）；lsp 为进程外语义通道（definition/references，复用 `internal/lsp` 的 canonical 位置边界）；③ 进程管理 `knowledge/lsp/`：ADR-0002 §4.4 锁（活持→不 spawn；过期→接管；Close 释放）、`max_processes`/`memory_limit_mb` 超限回收、崩溃检测（`client.Done()`）、`SpawnProcess` 接入 `internal/executor.ProcessGuard`（ADR-0005：Windows Job Object + KILL_ON_JOB_CLOSE / Unix Setpgid）；④ `signature_hash = sha1(normalized_signature + adapter_version)` 参数化 + `workspaces.adapter_version`（迁移 0003）+ 版本不一致 → `full_rebuild_on_adapter_change`；⑤ 离线：能力矩阵测试 + 崩溃/超时/不可用均降级不阻断。落点：`knowledge/adapter{,_builtin,_treesitter,_lsp}.go`、`knowledge/lsp/{manager,proc_windows,proc_other}.go`、`internal/lsp/{spec,client}.go`、`knowledge/{indexer,config,store,store_sqlite,version,version_hash}.go`、`migrations/0003_*.sql`。
+>
+> **验证记录**：`go build ./...` OK；`knowledge` / `knowledge/lsp` / `lsp` / `config` / `tools` / `toolkit` / `runtimeapi` / `cmd/*` 全绿；新增 17 例测试。golden set（go/parser 编译级真值，1765 条 ≥200）：builtin definition **P=1.0000 / R=0.8510**（function 99.5% / type 100% / method 99.8% / variable 68.8% / constant 16.1%）；**LSP live（gopls v0.23.0 + 真实 backend 模块，80 调用点）：definition P=0.9375 / R=0.9375 → 达门槛（≥0.90/≥0.85）**。
+>
+> **登记注记（门禁与遗留）**：⚠️ **前置 ADR（0002/0005/0006）仍为 Proposed**——本轮按 ADR 决议内容实现，正式 Accept 与门禁裁定待 owner；遗留：① tree-sitter 未接语法依赖；② LSP 语义通道尚未接入 `code.*` 工具面（接入时须显式转换"索引 1-based 行号 ↔ ADR-0006 canonical 0-based"）；③ ACP `session/set_config_option` 的 `knowledge.lsp.mode` select 未接线（ADR-0002 §4.2）；④ 内存探测为 tasklist 解析（Windows），未接 Job Object 记账；⑤ 收益类/精度门槛的完整判定（references 精度、真实任务 A/B）待测量轮。
 
 ### Phase 5 — Change Manager 与一致性
 

@@ -65,10 +65,13 @@ func (t *CodeNavigateTool) Execute(ctx context.Context, params map[string]interf
 	filePath := codeParamString(params, "file_path")
 	direction := strings.ToLower(codeParamString(params, "direction"))
 	if direction == "" {
-		if symbol != "" {
+		switch {
+		case symbol != "":
 			direction = "definition"
-		} else {
+		case filePath != "":
 			direction = "members"
+		default:
+			return codeParamError("code_navigate", "direction 必填（definition|members|refs）"), nil
 		}
 	}
 	limit, clamped := codeClampLimit(codeParamInt(params, "limit", 0), codeRefsDefaultLimit, codeRefsMaxLimit)
@@ -78,7 +81,7 @@ func (t *CodeNavigateTool) Execute(ctx context.Context, params map[string]interf
 		if symbol == "" {
 			return codeParamError("code_navigate", "direction=definition 需要 symbol"), nil
 		}
-		return t.navigateDefinition(ctx, symbol, clamped), nil
+		return t.navigateDefinition(ctx, symbol), nil
 	case "members":
 		if filePath == "" {
 			return codeParamError("code_navigate", "direction=members 需要 file_path"), nil
@@ -98,13 +101,12 @@ func (t *CodeNavigateTool) Execute(ctx context.Context, params map[string]interf
 }
 
 // navigateDefinition 返回符号定义位置（不含正文；正文由 code_inspect / view 读取）。
-func (t *CodeNavigateTool) navigateDefinition(ctx context.Context, symbol string, clamped bool) *toolkit.ToolResult {
+func (t *CodeNavigateTool) navigateDefinition(ctx context.Context, symbol string) *toolkit.ToolResult {
 	grepParams := map[string]interface{}{"pattern": symbol, "literal": true}
 	handle, ok := t.resolveIndex(ctx)
 	if !ok {
 		result, _ := t.runGrep(ctx, grepParams)
 		env := fallbackEnvelope("code_navigate", codeFallbackIndexUnavailable, codeConfidenceNone, "grep", result)
-		env.Truncated = clamped
 		return codeResult(env)
 	}
 	sym, confidence, found, err := resolveCodeSymbol(ctx, handle.Index, symbol, "")
@@ -115,7 +117,13 @@ func (t *CodeNavigateTool) navigateDefinition(ctx context.Context, symbol string
 		}
 		result, _ := t.runGrep(ctx, grepParams)
 		env := fallbackEnvelope("code_navigate", reason, confidence, "grep", result)
-		env.Truncated = clamped
+		return codeResult(env)
+	}
+	// shadow 档（04 §4.6 第 3 步）：候选照算，但返回 grep 结果。
+	if handle.Mode == knowledge.ModeShadow {
+		result, _ := t.runGrep(ctx, grepParams)
+		env := fallbackEnvelope("code_navigate", codeFallbackShadowMode, confidence, "grep", result)
+		env.Explanation += " 索引候选 1 条（未返回）。"
 		return codeResult(env)
 	}
 	path := handle.PathForFile(sym.FileID)
@@ -134,25 +142,44 @@ func (t *CodeNavigateTool) navigateDefinition(ctx context.Context, symbol string
 
 // navigateMembers 列出文件内定义的符号（只做符号枚举，不做文件列举）。
 func (t *CodeNavigateTool) navigateMembers(ctx context.Context, filePath string, limit int, clamped bool) *toolkit.ToolResult {
+	normalized := normalizeCodePath(filePath)
 	handle, ok := t.resolveIndex(ctx)
 	if !ok {
-		result, _ := t.runView(ctx, map[string]interface{}{"file_path": filePath, "limit": 200})
+		result, _ := t.runView(ctx, map[string]interface{}{"file_path": normalized, "limit": 200})
 		env := fallbackEnvelope("code_navigate", codeFallbackIndexUnavailable, codeConfidenceNone, "view", result)
 		env.Explanation += " members 需要索引；已降级为读取文件头部，请用 grep 继续定位具体成员。"
-		env.Truncated = clamped
+		env.Truncated = env.Truncated || clamped
 		return codeResult(env)
 	}
 
-	syms, err := handle.Index.FindSymbols(ctx, knowledge.SymbolQuery{PathPrefix: filePath, Limit: limit})
+	// PathPrefix 是前缀语义（可能带出子目录文件）：先放大候选窗口，过滤出
+	// 目标文件本身后再按调用方 limit 截断，避免前缀噪音挤掉目标文件成员。
+	queryLimit := limit
+	if queryLimit < codeRefsMaxLimit {
+		if queryLimit*4 > codeRefsMaxLimit {
+			queryLimit = codeRefsMaxLimit
+		} else {
+			queryLimit *= 4
+		}
+	}
+	syms, err := handle.Index.FindSymbols(ctx, knowledge.SymbolQuery{PathPrefix: normalized, Limit: queryLimit})
 	if err != nil {
-		result, _ := t.runView(ctx, map[string]interface{}{"file_path": filePath, "limit": 200})
+		result, _ := t.runView(ctx, map[string]interface{}{"file_path": normalized, "limit": 200})
 		env := fallbackEnvelope("code_navigate", codeFallbackIndexError, codeConfidenceNone, "view", result)
-		env.Truncated = clamped
+		env.Truncated = env.Truncated || clamped
 		return codeResult(env)
 	}
 
-	// PathPrefix 是前缀语义（可能带出子目录文件）；members 只保留该文件本身。
-	normalized := strings.TrimSuffix(strings.TrimSpace(filePath), "/")
+	// shadow 档（04 §4.6 第 3 步）：候选照算，但返回 view 结果。
+	if handle.Mode == knowledge.ModeShadow {
+		result, _ := t.runView(ctx, map[string]interface{}{"file_path": normalized, "limit": 200})
+		env := fallbackEnvelope("code_navigate", codeFallbackShadowMode, codeConfidenceExact, "view", result)
+		env.Explanation += fmt.Sprintf(" 索引候选 %d 条（未返回）。", len(syms))
+		env.Truncated = env.Truncated || clamped
+		return codeResult(env)
+	}
+
+	// members 只保留该文件本身。
 	results := make([]codeSymbolHit, 0, len(syms))
 	for _, sym := range syms {
 		if sym.DeletedAt != 0 {
@@ -165,11 +192,17 @@ func (t *CodeNavigateTool) navigateMembers(ctx context.Context, filePath string,
 		results = append(results, codeSymbolHitFrom(sym, path))
 	}
 
+	truncated := clamped || len(syms) >= queryLimit
+	if len(results) > limit {
+		results = results[:limit]
+		truncated = true
+	}
+
 	env := newCodeEnvelope("code_navigate")
 	env.Source = codeSourceIndex
 	env.Confidence = codeConfidenceExact
 	env.Results = results
-	env.Truncated = clamped || len(syms) >= limit
+	env.Truncated = truncated
 	env.Explanation = fmt.Sprintf("文件 %s 内定义 %d 个符号（索引口径，路径精确匹配）。", normalized, len(results))
 	return codeResult(env)
 }

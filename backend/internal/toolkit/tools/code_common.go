@@ -55,6 +55,9 @@ const (
 	codeFallbackShadowMode       = "shadow_mode"
 	codeFallbackIndexError       = "index_error"
 	codeFallbackByRequest        = "file_path_requested"
+	// codeFallbackLowConfidence 是 on 档"低相关命中 → 补一次 grep"的补量标记
+	// （04 §4.6 第 4 步；source=index+grep，索引命中仍是主结果）。
+	codeFallbackLowConfidence = "low_confidence_supplement"
 )
 
 // CodeIndex 是 code.* 与 view --symbol 需要的只读索引句柄（knowledge.Store 的窄子集）。
@@ -245,6 +248,11 @@ func fallbackEnvelope(tool, reason string, confidence float64, fallbackTool stri
 	env.Explanation = codeFallbackExplanation(reason, fallbackTool)
 	if result != nil {
 		env.Fallback.Output = strings.TrimSpace(result.Content)
+		// 透传 grep/view 自身的截断信号：丢弃它会让模型把被窗口裁剪的输出
+		// 当作完整证据（与两个工具各自的 honest-truncation 契约不一致）。
+		if codeResultTruncated(result) {
+			env.Truncated = true
+		}
 		if !result.Success && result.Error != nil {
 			env.Explanation += "；fallback 错误: " + result.Error.Error()
 		}
@@ -268,6 +276,63 @@ func codeFallbackExplanation(reason, fallbackTool string) string {
 	default:
 		return "已降级到 " + fallbackTool + "。"
 	}
+}
+
+// codeResultTruncated 读取 grep/view 结果的截断元数据。
+//
+// grep 用 "truncated"（行窗口）与 "results_truncated"（字节预算），view 用
+// "is_truncated"；任一为真都表示模型可见输出被裁剪。
+func codeResultTruncated(result *toolkit.ToolResult) bool {
+	if result == nil || result.Metadata == nil {
+		return false
+	}
+	for _, key := range []string{"truncated", "results_truncated", "is_truncated"} {
+		if v, ok := result.Metadata[key].(bool); ok && v {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeCodePath 统一路径分隔符：Windows 调用方常传反斜杠，而索引存的是
+// workspace 相对的正斜杠路径；不归一化会让精确匹配静默落空。
+func normalizeCodePath(path string) string {
+	normalized := strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")
+	return strings.TrimSuffix(normalized, "/")
+}
+
+// validCodeRefKind 校验 refs.kind 闭集（knowledge.RefKind）。
+func validCodeRefKind(kind string) bool {
+	switch knowledge.RefKind(strings.ToLower(strings.TrimSpace(kind))) {
+	case knowledge.RefReference, knowledge.RefCall, knowledge.RefImport, knowledge.RefImplement:
+		return true
+	default:
+		return false
+	}
+}
+
+// annotateRefFallback 标注引用类降级丢失的 kind 语义（fallback 是文本近似）。
+func annotateRefFallback(env *codeEnvelope, kind string) {
+	if env == nil || strings.TrimSpace(kind) == "" {
+		return
+	}
+	env.Explanation += "；fallback 为文本近似，不保证按 kind 过滤（含同名噪音）。"
+}
+
+// codeSearchNameMatched 报告 FTS 命中里是否存在与查询同名/包含关系的符号；
+// 全部不匹配时按低相关处理（04 §4.6 第 4 步的补量分支）。
+func codeSearchNameMatched(hits []knowledge.SearchHit, query string) bool {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return true
+	}
+	for _, hit := range hits {
+		if strings.Contains(strings.ToLower(hit.Name), q) ||
+			strings.Contains(strings.ToLower(hit.QualifiedName), q) {
+			return true
+		}
+	}
+	return false
 }
 
 // codeRefHit 是引用类结果的统一形状（code.references / code.callers / navigate refs）。

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
@@ -17,8 +18,8 @@ import (
 //   - mode=off / 库文件不存在 / 打开失败 → 不可用（工具按降级协议 fallback 到 grep/view）；
 //   - 只读打开（OpenStore(readOnly=true)）：读者永不写库、不参与 owner 仲裁，
 //     因此不会与 owner 进程争锁（ADR-0001 单写者 / 多读者）；
-//   - 句柄按 db 路径在进程内缓存（只读句柄无需关闭；库被替换时由下一次
-//     解析自然重建）。
+//   - 句柄按 db 路径在进程内缓存；库文件被重建/替换（size 或 mtime 变化）时
+//     下一次解析重开只读句柄，避免进程永久指向旧快照。
 
 // codeIndexCache 是进程级只读句柄缓存（key = knowledge.db 绝对路径）。
 type codeIndexCache struct {
@@ -27,9 +28,10 @@ type codeIndexCache struct {
 }
 
 type codeIndexEntry struct {
-	once  sync.Once
-	store knowledge.Store
-	err   error
+	store   knowledge.Store
+	err     error
+	size    int64
+	modTime time.Time
 }
 
 var codeIndexCacheGlobal = &codeIndexCache{entries: map[string]*codeIndexEntry{}}
@@ -88,21 +90,34 @@ func newCodeIndexResolver(cfg knowledge.Config, workspaceRoot string) tools.Code
 }
 
 // open 返回（必要时打开并缓存）指定 db 路径的只读句柄。
+//
+// 失效口径：库文件的 size/mtime 变化（全量重建 / 替换 / checkpoint）时重开。
+// 旧句柄刻意不 Close：并发调用可能仍持有它，提前关闭会造成 use-after-close；
+// 只读句柄随进程回收，而库重建是低频事件。打开失败不缓存（下次调用重试）。
 func (c *codeIndexCache) open(ctx context.Context, path string) (knowledge.Store, error) {
 	if c == nil {
 		return nil, os.ErrInvalid
 	}
-	c.mu.Lock()
-	entry, ok := c.entries[path]
-	if !ok {
-		entry = &codeIndexEntry{}
-		c.entries[path] = entry
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
 	}
-	c.mu.Unlock()
-	entry.once.Do(func() {
-		entry.store, entry.err = knowledge.OpenStore(ctx, path, true)
-	})
-	return entry.store, entry.err
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.entries[path]; ok && entry != nil && entry.store != nil &&
+		entry.size == info.Size() && entry.modTime.Equal(info.ModTime()) {
+		return entry.store, entry.err
+	}
+	store, openErr := knowledge.OpenStore(ctx, path, true)
+	if openErr != nil {
+		return nil, openErr
+	}
+	c.entries[path] = &codeIndexEntry{
+		store:   store,
+		size:    info.Size(),
+		modTime: info.ModTime(),
+	}
+	return store, nil
 }
 
 // closeAll 关闭并清空缓存。

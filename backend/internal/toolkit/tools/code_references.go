@@ -43,7 +43,7 @@ func NewCodeReferencesTool() *CodeReferencesTool {
 	return &CodeReferencesTool{BaseTool: toolkit.NewBaseTool(
 		"code_references",
 		"符号引用查询（索引增强，设计文档中的 `code.references`）：谁使用了符号 X。"+
-			"比 grep 更精确（按符号身份匹配，排除同名噪音）；索引不可用时自动降级为 grep（source=fallback）。",
+			"按符号身份匹配、比纯文本更精确（引用为索引侧启发式，可能含同名噪音）；索引不可用时自动降级为 grep（source=fallback，按文本近似）。",
 		"1.0.0",
 		parameters,
 		true,
@@ -61,10 +61,14 @@ func (t *CodeReferencesTool) Execute(ctx context.Context, params map[string]inte
 	if symbol == "" {
 		return codeParamError("code_references", "symbol 参数缺失或为空"), nil
 	}
+	kind := strings.ToLower(codeParamString(params, "kind"))
+	if kind != "" && !validCodeRefKind(kind) {
+		return codeParamError("code_references", "kind 只能是 reference|call|import|implement"), nil
+	}
 	limit, clamped := codeClampLimit(codeParamInt(params, "limit", 0), codeRefsDefaultLimit, codeRefsMaxLimit)
 	return runCodeRefsQuery(
 		ctx, &t.codeToolBase, "code_references",
-		symbol, codeParamString(params, "kind"), codeParamString(params, "path_prefix"), limit, clamped,
+		symbol, kind, codeParamString(params, "path_prefix"), limit, clamped,
 	), nil
 }
 
@@ -82,7 +86,8 @@ func runCodeRefsQuery(ctx context.Context, base *codeToolBase, toolName, symbol,
 	if !ok {
 		result, _ := base.runGrep(ctx, grepParams)
 		env := fallbackEnvelope(toolName, codeFallbackIndexUnavailable, codeConfidenceNone, "grep", result)
-		env.Truncated = clamped
+		env.Truncated = env.Truncated || clamped
+		annotateRefFallback(&env, kind)
 		return codeResult(env)
 	}
 
@@ -90,7 +95,8 @@ func runCodeRefsQuery(ctx context.Context, base *codeToolBase, toolName, symbol,
 	if err != nil {
 		result, _ := base.runGrep(ctx, grepParams)
 		env := fallbackEnvelope(toolName, codeFallbackIndexError, codeConfidenceNone, "grep", result)
-		env.Truncated = clamped
+		env.Truncated = env.Truncated || clamped
+		annotateRefFallback(&env, kind)
 		return codeResult(env)
 	}
 	if !found {
@@ -102,7 +108,8 @@ func runCodeRefsQuery(ctx context.Context, base *codeToolBase, toolName, symbol,
 	if err != nil {
 		result, _ := base.runGrep(ctx, grepParams)
 		env := fallbackEnvelope(toolName, codeFallbackIndexError, confidence, "grep", result)
-		env.Truncated = clamped
+		env.Truncated = env.Truncated || clamped
+		annotateRefFallback(&env, kind)
 		return codeResult(env)
 	}
 	// 部分解析的引用（ToSymbolID 为空）在按 id 查询时会落空：再按名字查一次，
@@ -113,11 +120,21 @@ func runCodeRefsQuery(ctx context.Context, base *codeToolBase, toolName, symbol,
 			confidence = codeConfidenceFuzzy
 		}
 	}
+	// shadow 档（04 §4.6 第 3 步）：候选照算，但返回 grep 结果。
+	if handle.Mode == knowledge.ModeShadow {
+		result, _ := base.runGrep(ctx, grepParams)
+		env := fallbackEnvelope(toolName, codeFallbackShadowMode, confidence, "grep", result)
+		env.Explanation += fmt.Sprintf(" 索引候选 %d 条（未返回）。", len(refs))
+		env.Truncated = env.Truncated || clamped
+		annotateRefFallback(&env, kind)
+		return codeResult(env)
+	}
 	if len(refs) == 0 {
 		// 零命中：补一次 grep（索引引用是正则启发式，可能漏；grep 是兜底真值）。
 		result, _ := base.runGrep(ctx, grepParams)
 		env := fallbackEnvelope(toolName, codeFallbackNoIndexHit, confidence, "grep", result)
-		env.Truncated = clamped
+		env.Truncated = env.Truncated || clamped
+		annotateRefFallback(&env, kind)
 		return codeResult(env)
 	}
 
