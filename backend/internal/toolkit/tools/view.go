@@ -75,6 +75,9 @@ type ViewTool struct {
 	*toolkit.BaseTool
 	sandboxPolicy
 	maxLineSize int64
+	// symbolResolver 是 Phase 3 的 view --symbol 支持：nil 表示索引不可用
+	// （symbol 参数退化为行范围读取/报错口径，04 §5 Phase 3 交付 4）。
+	symbolResolver CodeIndexResolver
 }
 
 // NewViewTool 创建 View 工具
@@ -85,6 +88,10 @@ func NewViewTool() *ViewTool {
 			"file_path": map[string]interface{}{
 				"type":        "string",
 				"description": "单个文件路径。也可改用 files 在一次调用中读取多个文件。",
+			},
+			"symbol": map[string]interface{}{
+				"type":        "string",
+				"description": "可选：按符号名读取（Phase 3）。索引可用时自动定位符号所在文件与行范围；索引不可用时若同时给了 file_path 则按行范围读取并附 note，否则报错并提示改用 grep 或 file_path+offset/limit。",
 			},
 			"files": map[string]interface{}{
 				"type":        "array",
@@ -119,7 +126,8 @@ func NewViewTool() *ViewTool {
 	return &ViewTool{
 		BaseTool: toolkit.NewBaseTool(
 			"view",
-			"查看一个或多个文件。用 files 批量读取独立文件或区间；单文件用 file_path。输出包含稳定行号和截断元数据。",
+			"查看一个或多个文件。用 files 批量读取独立文件或区间；单文件用 file_path。输出包含稳定行号和截断元数据。"+
+				"已知符号名但不知道行号时可传 symbol（索引可用时按符号范围读取；索引不可用时退化为 file_path 行范围或提示改用 grep）。",
 			"1.1.0",
 			parameters,
 			true,
@@ -153,6 +161,7 @@ type ViewParams struct {
 	Offset   int               `json:"offset,omitempty"`
 	Limit    int               `json:"limit,omitempty"`
 	Compact  bool              `json:"compact,omitempty"`
+	Symbol   string            `json:"symbol,omitempty"`
 }
 
 type ViewFileRequest struct {
@@ -191,6 +200,22 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}), nil
 	}
 	requests := make([]ViewFileRequest, 0, len(p.Files)+1)
+	symbolNote := ""
+	if symbol := strings.TrimSpace(p.Symbol); symbol != "" {
+		if resolved, ok := v.resolveViewSymbol(ctx, symbol, p.Limit); ok {
+			// symbol 优先：解析成功时忽略 file_path/offset/limit（按符号范围读取）。
+			requests = append(requests, resolved)
+			p.FilePath, p.Files, p.Offset, p.Limit = "", nil, 0, 0
+		} else if strings.TrimSpace(p.FilePath) != "" {
+			symbolNote = fmt.Sprintf("[note] symbol=%q 未能解析（索引不可用或符号不存在）；已按 file_path 的行范围读取。", symbol)
+		} else {
+			return stampToolOwnsOutput(&toolkit.ToolResult{
+				Success:    false,
+				OutputKind: toolresult.KindText,
+				Error:      fmt.Errorf("view: symbol %q 无法解析（索引不可用或符号不存在）；请改用 file_path+offset/limit 或 grep", symbol),
+			}), nil
+		}
+	}
 	if strings.TrimSpace(p.FilePath) != "" {
 		requests = append(requests, ViewFileRequest{FilePath: p.FilePath, Offset: p.Offset, Limit: p.Limit})
 	}
@@ -199,7 +224,7 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 		return stampToolOwnsOutput(&toolkit.ToolResult{
 			Success:    false,
 			OutputKind: toolresult.KindText,
-			Error:      fmt.Errorf("file_path 或 files 参数至少需要一个"),
+			Error:      fmt.Errorf("file_path、files 或 symbol 参数至少需要一个"),
 		}), nil
 	}
 	// files 数组（即使只有 1 项）表达批量意图：应用批量默认 limit 与
@@ -210,6 +235,9 @@ func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (
 	)
 	if len(requests) == 1 && len(p.Files) == 0 {
 		result, execErr = v.executeSingle(ctx, requests[0])
+		if symbolNote != "" {
+			result = annotateViewSymbolNote(result, symbolNote)
+		}
 		return stampToolOwnsOutputWithBudget(result, viewOutputBudgetBytes), execErr
 	} else {
 		result, execErr = v.executeBatch(ctx, requests, p.Compact)
@@ -241,6 +269,64 @@ func annotateIgnoredBatchWindow(result *toolkit.ToolResult, offset, limit int) *
 	)
 	result.Metadata["ignored_top_level_window"] = map[string]interface{}{"offset": offset, "limit": limit}
 	result.Metadata["ignored_top_level_window_note"] = note
+	if strings.TrimSpace(result.Content) == "" {
+		result.Content = note
+	} else {
+		result.Content = strings.TrimRight(result.Content, "\n") + "\n\n" + note
+	}
+	return result
+}
+
+// SetCodeIndexResolver 注入 Phase 3 的只读索引解析器（view --symbol 支持）。
+// nil 表示索引不可用：symbol 参数退化为行范围读取/报错口径。
+func (v *ViewTool) SetCodeIndexResolver(resolver CodeIndexResolver) {
+	if v == nil {
+		return
+	}
+	v.symbolResolver = resolver
+}
+
+// resolveViewSymbol 解析 symbol 参数 → 按符号范围的行窗口请求。
+// ok=false 表示索引不可用 / 符号不存在 / 路径未知（调用方走退化口径）。
+func (v *ViewTool) resolveViewSymbol(ctx context.Context, symbol string, limit int) (ViewFileRequest, bool) {
+	if v == nil || v.symbolResolver == nil {
+		return ViewFileRequest{}, false
+	}
+	handle, ok := v.symbolResolver(ctx)
+	if !ok || handle == nil || handle.Index == nil || strings.TrimSpace(handle.WorkspaceID) == "" {
+		return ViewFileRequest{}, false
+	}
+	sym, _, found, err := resolveCodeSymbol(ctx, handle.Index, symbol, "")
+	if err != nil || !found {
+		return ViewFileRequest{}, false
+	}
+	path := handle.PathForFile(sym.FileID)
+	if path == "" {
+		return ViewFileRequest{}, false
+	}
+	start := sym.Range.Start.Line - 1
+	if start < 0 {
+		start = 0
+	}
+	span := sym.Range.End.Line - sym.Range.Start.Line + 1
+	if span <= 0 {
+		span = 1
+	}
+	if limit > 0 && limit < span {
+		span = limit
+	}
+	return ViewFileRequest{FilePath: path, Offset: start, Limit: span}, true
+}
+
+// annotateViewSymbolNote 在 symbol 降级读取的结果上追加说明（不改变读取内容）。
+func annotateViewSymbolNote(result *toolkit.ToolResult, note string) *toolkit.ToolResult {
+	if result == nil || strings.TrimSpace(note) == "" {
+		return result
+	}
+	if result.Metadata == nil {
+		result.Metadata = map[string]interface{}{}
+	}
+	result.Metadata["view_symbol_note"] = note
 	if strings.TrimSpace(result.Content) == "" {
 		result.Content = note
 	} else {

@@ -652,7 +652,8 @@ func NewGrepTool() *GrepTool {
 	return &GrepTool{
 		BaseTool: toolkit.NewBaseTool(
 			"grep",
-			"代码/文件内容搜索的首选工具（优先于 shell rg/grep）。用 patterns + paths 批量搜索相关目标；字面匹配设 literal=true；高级 ripgrep 选项使用 rg_args。优先使用 rg，不可用时回退内置扫描。空结果是有效证据，不是崩溃。",
+			"代码/文件内容搜索的首选工具（优先于 shell rg/grep）。用 patterns + paths 批量搜索相关目标；字面匹配设 literal=true；高级 ripgrep 选项使用 rg_args。优先使用 rg，不可用时回退内置扫描。空结果是有效证据，不是崩溃。"+
+				"分工（Phase 3）：符号级问题（X 定义在哪、谁引用/调用了 X）在 code_search / code_inspect / code_navigate / code_references / code_callers 可用时优先用它们；文本、配置、日志检索仍用本工具。",
 			"3.3.0",
 			parameters,
 			true,

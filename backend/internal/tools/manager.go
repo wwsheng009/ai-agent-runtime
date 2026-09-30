@@ -440,6 +440,12 @@ func canonicalManagedToolName(name string) string {
 }
 
 func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexecutor.Sandbox, workspaceRoot string, runtimeConfig *runtimecfg.RuntimeConfig) {
+	// Phase 3（06 §4 Phase 3）：code.* 工具面（默认 off；knowledge.code_tools=on
+	// 才注册，回滚即关闭）。索引不可用时工具自身按降级协议 fallback 到 grep/view。
+	var codeResolver tools.CodeIndexResolver
+	if runtimeConfig != nil && runtimeConfig.Knowledge.CodeToolsEnabled() {
+		codeResolver = newCodeIndexResolver(runtimeConfig.Knowledge, workspaceRoot)
+	}
 	register := func(tool toolkit.Tool) {
 		if configurable, ok := tool.(interface {
 			SetSandbox(*runtimeexecutor.Sandbox)
@@ -450,6 +456,13 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 			SetBasePath(string)
 		}); ok {
 			configurable.SetBasePath(workspaceRoot)
+		}
+		if codeResolver != nil {
+			if configurable, ok := tool.(interface {
+				SetCodeIndexResolver(tools.CodeIndexResolver)
+			}); ok {
+				configurable.SetCodeIndexResolver(codeResolver)
+			}
 		}
 		_ = registry.Register(tool)
 	}
@@ -479,6 +492,13 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	register(tools.NewWebSearchTool())
 	if shouldRegisterOpenAIImageGenerateTool(runtimeConfig) {
 		register(tools.NewOpenAIImageGenerateTool(runtimeConfig))
+	}
+	if codeResolver != nil {
+		register(tools.NewCodeSearchTool())
+		register(tools.NewCodeInspectTool())
+		register(tools.NewCodeNavigateTool())
+		register(tools.NewCodeReferencesTool())
+		register(tools.NewCodeCallersTool())
 	}
 }
 

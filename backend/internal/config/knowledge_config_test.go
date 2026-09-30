@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -70,4 +71,31 @@ func TestKnowledgeConfigExplicitOffMatchesDefault(t *testing.T) {
 	require.Equal(t, knowledge.ModeOff, cfg.Knowledge.Normalize().Mode)
 	require.False(t, cfg.Knowledge.Enabled())
 	require.NoError(t, ValidateRuntimeConfig(cfg))
+}
+
+// Phase 3（06 §4 Phase 3）：code_tools 开关默认 off（零行为变化），显式 on
+// 才暴露 code.* 工具面；未知值必须在加载期拒绝。
+func TestKnowledgeConfigCodeToolsSwitch(t *testing.T) {
+	cfg := DefaultRuntimeConfig()
+	require.False(t, cfg.Knowledge.CodeToolsEnabled(), "默认 off：不注册 code.*")
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	require.NoError(t, yaml.Unmarshal([]byte("knowledge:\n  mode: on\n  code_tools: on\n"), cfg))
+	require.True(t, cfg.Knowledge.CodeToolsEnabled())
+	require.NoError(t, ValidateRuntimeConfig(cfg))
+
+	bad := DefaultRuntimeConfig()
+	require.NoError(t, yaml.Unmarshal([]byte("knowledge:\n  code_tools: turbo\n"), bad))
+	require.Error(t, ValidateRuntimeConfig(bad), "未知 code_tools 必须在加载期被拒绝")
+}
+
+// Phase 3：随附运行时配置（configs/runtime.yaml / runtime.win7.yaml）显式开启
+// code_tools——避免"代码默认 off、随附配置漏配"导致工具面静默消失；两个文件
+// 的取值必须一致（win7 是覆盖档，manager_test 断言两档全量等价）。
+func TestShippedRuntimeConfigsEnableCodeTools(t *testing.T) {
+	for _, name := range []string{"runtime.yaml", "runtime.win7.yaml"} {
+		manager := NewRuntimeManager(filepath.Join("..", "..", "configs", name))
+		require.NoError(t, manager.Load(), name)
+		require.True(t, manager.Get().Knowledge.CodeToolsEnabled(), "%s 必须开启 knowledge.code_tools", name)
+	}
 }

@@ -1001,6 +1001,10 @@ func ValidateKnowledgeConfig(config *knowledge.Config) error {
 	if config.MaxFileBytes < 0 || config.MaxDBSizeMB < 0 {
 		return errors.New(errors.ErrValidationFailed, "knowledge limits cannot be negative")
 	}
+	// Phase 3（06 §4 Phase 3）：code_tools 只接受 off|on（默认 off）。
+	if _, err := knowledge.ParseCodeTools(config.CodeTools); err != nil {
+		return errors.New(errors.ErrValidationFailed, "knowledge code_tools must be off or on")
+	}
 	return nil
 }
 
