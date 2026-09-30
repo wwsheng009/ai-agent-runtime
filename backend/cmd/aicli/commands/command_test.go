@@ -30,6 +30,7 @@ type directMetadataFunction struct {
 	name     string
 	output   string
 	metadata map[string]interface{}
+	params   map[string]interface{}
 	lastArgs map[string]interface{}
 }
 
@@ -121,6 +122,9 @@ func (f *directMetadataFunction) Name() string { return f.name }
 func (f *directMetadataFunction) Description() string { return "direct metadata function" }
 
 func (f *directMetadataFunction) Parameters() map[string]interface{} {
+	if f.params != nil {
+		return f.params
+	}
 	return map[string]interface{}{
 		"type": "object",
 	}
@@ -1835,7 +1839,7 @@ func TestHandleCommand_DirectFunctionRespectsDisableTools(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		for _, command := range []string{`/call read_status {}`, `/tool read_status {}`, `/skill anything run`} {
+		for _, command := range []string{`/call read_status {}`, `/skill anything run`} {
 			handleCommand(session, command, false)
 		}
 	})
@@ -1985,13 +1989,119 @@ func TestHandleCommand_DirectReadOnlyFunctionRemainsNonInteractive(t *testing.T)
 	}
 }
 
-func TestParseDirectFunctionArgs_RejectsTextForNonImageFunction(t *testing.T) {
-	_, err := parseDirectFunctionArgs("plain text", false, "execute_shell_command")
+func newDirectFunctionSession(t *testing.T, fn *directMetadataFunction) *ChatSession {
+	t.Helper()
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	catalog.RegisterFunction(fn)
+	return &ChatSession{FunctionCatalog: catalog, FunctionRegistry: registry}
+}
+
+func TestParseDirectFunctionArgs_AutoAssemblesSingleRequiredStringArg(t *testing.T) {
+	fn := &directMetadataFunction{
+		name: "web_search",
+		params: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{"type": "string"},
+				"count": map[string]interface{}{"type": "integer"},
+			},
+			"required": []string{"query"},
+		},
+	}
+	session := newDirectFunctionSession(t, fn)
+
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "bare text", raw: "量子计算", want: "量子计算"},
+		{name: "double quoted", raw: `"量子 计算"`, want: "量子 计算"},
+		{name: "single quoted", raw: `'量子 计算'`, want: "量子 计算"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args, err := parseDirectFunctionArgs(session, tc.raw, false, "web_search")
+			if err != nil {
+				t.Fatalf("parseDirectFunctionArgs(%q): %v", tc.raw, err)
+			}
+			if len(args) != 1 || args["query"] != tc.want {
+				t.Fatalf("expected query-only args %q, got %#v", tc.want, args)
+			}
+		})
+	}
+
+	args, err := parseDirectFunctionArgs(session, `{"query":"x","count":3}`, false, "web_search")
+	if err != nil {
+		t.Fatalf("JSON object args should pass through: %v", err)
+	}
+	if args["query"] != "x" || args["count"] != float64(3) {
+		t.Fatalf("unexpected JSON passthrough args: %#v", args)
+	}
+}
+
+func TestParseDirectFunctionArgs_RejectsTextWhenSchemaAmbiguous(t *testing.T) {
+	fn := &directMetadataFunction{
+		name: "two_arg",
+		params: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{"type": "string"},
+				"path":  map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"query", "path"},
+		},
+	}
+	session := newDirectFunctionSession(t, fn)
+
+	_, err := parseDirectFunctionArgs(session, "plain text", false, "two_arg")
 	if err == nil {
-		t.Fatal("expected non-image function text args to be rejected")
+		t.Fatal("expected ambiguous text args to be rejected")
 	}
 	if !strings.Contains(err.Error(), "非 skill function 需要 JSON object 参数") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "可用字段: query, path") {
+		t.Fatalf("expected field hint in error, got: %v", err)
+	}
+}
+
+func TestParseDirectFunctionArgs_RejectsTextWithoutSchemaFields(t *testing.T) {
+	fn := &directMetadataFunction{name: "no_args"}
+	session := newDirectFunctionSession(t, fn)
+
+	_, err := parseDirectFunctionArgs(session, "plain text", false, "no_args")
+	if err == nil {
+		t.Fatal("expected text args without schema fields to be rejected")
+	}
+	if !strings.Contains(err.Error(), "非 skill function 需要 JSON object 参数") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleCommand_DirectFunctionCall_AutoAssemblesSingleStringArg(t *testing.T) {
+	fn := &directMetadataFunction{
+		name:   "web_search",
+		output: "search ok",
+		params: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"query"},
+		},
+	}
+	session := newDirectFunctionSession(t, fn)
+	session.PermissionMode = runtimepolicy.ModeBypassPermissions
+
+	output := captureStdout(t, func() {
+		if quit := handleCommand(session, `/call web_search 量子计算`, false); quit {
+			t.Fatal("expected call command not to exit")
+		}
+	})
+	if got := fn.lastArgs["query"]; got != "量子计算" {
+		t.Fatalf("expected auto-assembled query arg, got %#v (output=%q)", fn.lastArgs, output)
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +35,7 @@ func handleDirectFunctionCommand(session *ChatSession, command string) bool {
 		return false
 	}
 	if session.DisableTools {
-		fmt.Println("错误: 当前会话已禁用 tools；/call、/tool 和 /skill 不可执行")
+		fmt.Println("错误: 当前会话已禁用 tools；/call 和 /skill 不可执行")
 		return false
 	}
 
@@ -41,7 +43,7 @@ func handleDirectFunctionCommand(session *ChatSession, command string) bool {
 	jsonOutput = jsonOutput || shouldUseSessionJSONCommandOutput(session)
 	requestedName, rawArgs := splitCommandNameAndRemainder(payload)
 	if requestedName == "" {
-		fmt.Println(formatCommandError("错误: 需要指定 function 名称\n用法: /call <name> [args-json] 或 /tool <name> [args-json]", jsonOutput))
+		fmt.Println(formatCommandError("错误: 需要指定 function 名称\n用法: /call <name> [args-json]", jsonOutput))
 		return false
 	}
 
@@ -50,7 +52,7 @@ func handleDirectFunctionCommand(session *ChatSession, command string) bool {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
 	}
-	args, err := parseDirectFunctionArgs(rawArgs, isSkill, resolvedName)
+	args, err := parseDirectFunctionArgs(session, rawArgs, isSkill, resolvedName)
 	if err != nil {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
@@ -71,7 +73,7 @@ func handleDirectFunctionCommand(session *ChatSession, command string) bool {
 }
 
 // executeStructuredDirectFunctionCommand is the unified interactive entry
-// point for `/call <name> [args-json]` and its alias `/tool`. It owns the
+// point for `/call <name> [args-json]`. It owns the
 // whole command: resolution, argument parsing, authorization and execution all
 // reuse the legacy direct-invoke chain, but the result is rendered as one
 // unified command cell instead of raw stdout (same contract as
@@ -81,21 +83,21 @@ func executeStructuredDirectFunctionCommand(session *ChatSession, command string
 		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
 	}
 	if session.DisableTools {
-		return commandTextResult("错误: 当前会话已禁用 tools；/call、/tool 和 /skill 不可执行"), true
+		return commandTextResult("错误: 当前会话已禁用 tools；/call 和 /skill 不可执行"), true
 	}
 
 	payload, jsonOutput := extractCommandArgumentOptions(command)
 	jsonOutput = jsonOutput || shouldUseSessionJSONCommandOutput(session)
 	requestedName, rawArgs := splitCommandNameAndRemainder(payload)
 	if requestedName == "" {
-		return commandTextResult("错误: 需要指定 function 名称\n用法: /call <name> [args-json] 或 /tool <name> [args-json]"), true
+		return commandTextResult("错误: 需要指定 function 名称\n用法: /call <name> [args-json]"), true
 	}
 
-	resolvedName, _, err := resolveDirectCallableFunctionName(session, requestedName, false)
+	resolvedName, isSkill, err := resolveDirectCallableFunctionName(session, requestedName, false)
 	if err != nil {
 		return commandErrorResult(err), true
 	}
-	args, err := parseDirectFunctionArgs(rawArgs, false, resolvedName)
+	args, err := parseDirectFunctionArgs(session, rawArgs, isSkill, resolvedName)
 	if err != nil {
 		return commandErrorResult(err), true
 	}
@@ -125,7 +127,7 @@ func handleDirectSkillCommand(session *ChatSession, command string) bool {
 		return false
 	}
 	if session.DisableTools {
-		fmt.Println("错误: 当前会话已禁用 tools；/call、/tool 和 /skill 不可执行")
+		fmt.Println("错误: 当前会话已禁用 tools；/call 和 /skill 不可执行")
 		return false
 	}
 
@@ -142,7 +144,7 @@ func handleDirectSkillCommand(session *ChatSession, command string) bool {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
 	}
-	args, err := parseDirectFunctionArgs(rawPrompt, true, resolvedName)
+	args, err := parseDirectFunctionArgs(session, rawPrompt, true, resolvedName)
 	if err != nil {
 		fmt.Println(formatCommandError("错误: "+err.Error(), jsonOutput))
 		return false
@@ -360,7 +362,7 @@ func hasPathSuffix(path, suffix string) bool {
 	return strings.HasSuffix(path, "/"+suffix)
 }
 
-func parseDirectFunctionArgs(raw string, isSkill bool, functionName string) (map[string]interface{}, error) {
+func parseDirectFunctionArgs(session *ChatSession, raw string, isSkill bool, functionName string) (map[string]interface{}, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		if isSkill {
@@ -378,13 +380,181 @@ func parseDirectFunctionArgs(raw string, isSkill bool, functionName string) (map
 		}
 		return args, nil
 	}
+	text := unquoteDirectFunctionText(raw)
 	if isSkill {
-		return map[string]interface{}{"prompt": raw}, nil
+		return map[string]interface{}{"prompt": text}, nil
 	}
 	if toolnames.IsOpenAIImageGenerateToolName(functionName) {
-		return map[string]interface{}{"prompt": raw}, nil
+		return map[string]interface{}{"prompt": text}, nil
+	}
+	// 非 skill function：schema 有唯一必填 string 参数（如 web_search.query）时，
+	// 把裸文本自动组装成该参数，省去手写 JSON object。
+	if argName, ok := directFunctionPrimaryStringArg(session, functionName); ok {
+		return map[string]interface{}{argName: text}, nil
+	}
+	if hint := directFunctionArgHint(session, functionName); hint != "" {
+		return nil, fmt.Errorf("非 skill function 需要 JSON object 参数（%s）", hint)
 	}
 	return nil, fmt.Errorf("非 skill function 需要 JSON object 参数，例如 {\"prompt\":\"...\"}")
+}
+
+// unquoteDirectFunctionText 去掉裸文本最外层成对引号（"..." 支持转义，'...' 原样去壳），
+// 使 `/call web_search "量子计算"` 与 `/call web_search 量子计算` 等价。
+func unquoteDirectFunctionText(raw string) string {
+	if len(raw) < 2 {
+		return raw
+	}
+	if raw[0] == '"' && raw[len(raw)-1] == '"' {
+		if unquoted, err := strconv.Unquote(raw); err == nil {
+			return unquoted
+		}
+	}
+	if raw[0] == '\'' && raw[len(raw)-1] == '\'' {
+		return raw[1 : len(raw)-1]
+	}
+	return raw
+}
+
+// directFunctionPrimaryStringArg 从 function schema 推导可承载裸文本的唯一参数：
+// 恰好一个必填 string 参数，或（无 required 声明时）恰好一个 string 参数。
+func directFunctionPrimaryStringArg(session *ChatSession, functionName string) (string, bool) {
+	schema := directFunctionSchema(session, functionName)
+	properties := directFunctionSchemaProperties(schema)
+	if len(properties) == 0 {
+		return "", false
+	}
+	required := directFunctionSchemaRequired(schema)
+	if len(required) == 1 {
+		if prop, ok := properties[required[0]]; ok && directFunctionSchemaPropIsString(prop) {
+			return required[0], true
+		}
+	}
+	if len(required) > 0 {
+		return "", false
+	}
+	candidate := ""
+	for name, prop := range properties {
+		if !directFunctionSchemaPropIsString(prop) {
+			continue
+		}
+		if candidate != "" {
+			return "", false
+		}
+		candidate = name
+	}
+	if candidate == "" {
+		return "", false
+	}
+	return candidate, true
+}
+
+// directFunctionArgHint 为无法自动组装的情况给出可用字段与示例。
+func directFunctionArgHint(session *ChatSession, functionName string) string {
+	schema := directFunctionSchema(session, functionName)
+	fields := directFunctionSchemaFieldNames(schema)
+	if len(fields) == 0 {
+		return ""
+	}
+	exampleField := fields[0]
+	if required := directFunctionSchemaRequired(schema); len(required) > 0 {
+		exampleField = required[0]
+	}
+	return fmt.Sprintf("可用字段: %s；例如 {\"%s\":\"...\"}", strings.Join(fields, ", "), exampleField)
+}
+
+func directFunctionSchema(session *ChatSession, functionName string) map[string]interface{} {
+	catalog := ensureFunctionCatalog(session)
+	if catalog == nil || catalog.Registry() == nil {
+		return nil
+	}
+	fn, ok := catalog.Registry().Get(functionName)
+	if !ok || fn == nil {
+		return nil
+	}
+	return fn.Parameters()
+}
+
+func directFunctionSchemaProperties(schema map[string]interface{}) map[string]interface{} {
+	if len(schema) == 0 {
+		return nil
+	}
+	switch raw := schema["properties"].(type) {
+	case map[string]interface{}:
+		return raw
+	case map[string]map[string]interface{}:
+		out := make(map[string]interface{}, len(raw))
+		for name, prop := range raw {
+			out[name] = prop
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func directFunctionSchemaRequired(schema map[string]interface{}) []string {
+	switch raw := schema["required"].(type) {
+	case []string:
+		out := make([]string, 0, len(raw))
+		for _, name := range raw {
+			if name = strings.TrimSpace(name); name != "" {
+				out = append(out, name)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(raw))
+		for _, item := range raw {
+			name, _ := item.(string)
+			if name = strings.TrimSpace(name); name != "" {
+				out = append(out, name)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func directFunctionSchemaPropIsString(prop interface{}) bool {
+	obj, ok := prop.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	value, _ := obj["type"].(string)
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "string":
+		return true
+	default:
+		return false
+	}
+}
+
+func directFunctionSchemaFieldNames(schema map[string]interface{}) []string {
+	properties := directFunctionSchemaProperties(schema)
+	if len(properties) == 0 {
+		return nil
+	}
+	required := directFunctionSchemaRequired(schema)
+	seen := make(map[string]struct{}, len(properties))
+	out := make([]string, 0, len(properties))
+	for _, name := range required {
+		if _, ok := properties[name]; ok {
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, name)
+		}
+	}
+	rest := make([]string, 0, len(properties)-len(out))
+	for name := range properties {
+		if _, ok := seen[name]; !ok {
+			rest = append(rest, name)
+		}
+	}
+	sort.Strings(rest)
+	return append(out, rest...)
 }
 
 type directFunctionApprovalHandler struct {
@@ -501,7 +671,7 @@ func authorizeDirectFunctionInvocation(session *ChatSession, functionName string
 	}
 	permissionMode := chatSessionPermissionMode(session)
 	if session.DisableTools {
-		return nil, fmt.Errorf("当前会话已禁用 tools；/call、/tool 和 /skill 不可执行")
+		return nil, fmt.Errorf("当前会话已禁用 tools；/call 和 /skill 不可执行")
 	}
 	catalog := ensureFunctionCatalog(session)
 	if catalog == nil || catalog.Registry() == nil {
@@ -521,7 +691,7 @@ func authorizeDirectFunctionInvocation(session *ChatSession, functionName string
 		Policy:     policy,
 		AskHandler: directFunctionApprovalHandler{session: session, interactive: interactive},
 	}
-	// Direct /call|/tool|/skill must honor project+CLI permission product rules.
+	// Direct /call|/skill must honor project+CLI permission product rules.
 	runtimepolicy.ApplyPermissionsOverlayToEngine(engine, session.PermissionsOverlay)
 	decision, err := engine.Evaluate(ctx, runtimepolicy.EvalRequest{
 		SessionID:    currentRuntimeSessionID(session),

@@ -180,7 +180,7 @@ func executeStructuredSkillCommand(session *ChatSession, command string) (Comman
 		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
 	}
 	if session.DisableTools {
-		return commandTextResult("错误: 当前会话已禁用 tools；/call、/tool 和 /skill 不可执行"), true
+		return commandTextResult("错误: 当前会话已禁用 tools；/call 和 /skill 不可执行"), true
 	}
 
 	payload, jsonOutput := extractCommandArgumentOptions(command)
@@ -195,7 +195,7 @@ func executeStructuredSkillCommand(session *ChatSession, command string) (Comman
 	if err != nil {
 		return commandErrorResult(err), true
 	}
-	args, err := parseDirectFunctionArgs(rawPrompt, true, resolvedName)
+	args, err := parseDirectFunctionArgs(session, rawPrompt, true, resolvedName)
 	if err != nil {
 		return commandErrorResult(err), true
 	}

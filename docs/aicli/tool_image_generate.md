@@ -67,12 +67,11 @@ aicli image --provider CODEX_04 --model gpt-5.4 --path codex_native "生成一�
 /image --json 生成一张壁纸
 ```
 
-也可以用 `/call` 或 `/tool` 直接调用同一个工具：
+也可以用 `/call` 直接调用同一个工具：
 
 ```
 /call openai_image_generate 一只在月光下奔跑的猫
 /call openai_image_generate {"prompt":"一只在月光下奔跑的猫"}
-/tool openai_image_generate 一只在月光下奔跑的猫
 ```
 
 ### 指定 provider

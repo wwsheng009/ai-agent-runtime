@@ -64,7 +64,7 @@ func TestDispatchChatCommandSimpleDocumentsStayOnUnifiedTerminalSession(t *testi
 	for _, marker := range []string{
 		"可用命令:",
 		"错误: 需要指定 function 名称",
-		"错误: 需要提供 prompt 预览最终暴露集合",
+		"Function Catalog",
 		"暂无可用会话",
 	} {
 		if !strings.Contains(transcript, marker) {

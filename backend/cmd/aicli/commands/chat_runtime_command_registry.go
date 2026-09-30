@@ -187,7 +187,6 @@ var runtimeLegacyAliasCommands = map[string]string{
 	"/n":                "/normal",
 	"/cmd":              "/shell",
 	"/rewind":           "/backtrack",
-	"/tool":             "/call",
 	"/describe":         "/function",
 	"/catalog":          "/functions",
 	"/rename":           "/title",

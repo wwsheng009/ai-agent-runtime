@@ -201,7 +201,7 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 	case "/agent":
 		ctx := parseSlashArgumentContext(argsText, cursor)
 		return matchSlashArgumentCandidates(agentTargetArgumentCandidates(session, false, true), activeSlashArgumentQuery(ctx))
-	case "/function", "/describe", "/call", "/tool":
+	case "/function", "/describe", "/call":
 		return completeCatalogFunctionArgs(session, argsText, cursor, command)
 	case "/routing":
 		// §10.2 I-9：逐段补全（作用域 → 键 → 值）+ 非法值最近似兜底，

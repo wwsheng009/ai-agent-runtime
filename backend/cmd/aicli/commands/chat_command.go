@@ -18,7 +18,6 @@ const ChatCommandLongHelp = `与 AI 模型进行交互式对话。
   - /status /sessions /resume
   - /functions <prompt>
   - /call <function> [args-json]
-  - /tool <function> [args-json]
   - /skill <skill> <prompt>
   - /skills [query]
 

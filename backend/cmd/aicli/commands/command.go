@@ -176,18 +176,16 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 	}
 	if commandMatches(cmdLower, "/functions") || commandMatches(cmdLower, "/catalog") {
 		prompt, jsonOutput := extractCommandArgumentOptions(command)
-		if prompt == "" && jsonOutput {
-			printChatCommandOutput(session, formatFunctionCatalogSummary(session, true))
-			return false
-		}
+		// bare /functions（无 prompt）与 /functions --json 同源：列出当前
+		// catalog；只有显式给出 prompt 才做暴露预览。
 		if prompt == "" {
-			printChatCommandOutput(session, "错误: 需要提供 prompt 预览最终暴露集合\n用法: /functions <prompt> [--json] 或 /catalog <prompt> [--json]")
+			printChatCommandOutput(session, formatFunctionCatalogSummary(session, jsonOutput))
 			return false
 		}
 		printChatCommandOutput(session, formatFunctionExposurePreview(session, prompt, jsonOutput))
 		return false
 	}
-	if commandMatches(cmdLower, "/call") || commandMatches(cmdLower, "/tool") {
+	if commandMatches(cmdLower, "/call") {
 		return handleDirectFunctionCommand(session, command)
 	}
 	if commandMatches(cmdLower, "/skills") {

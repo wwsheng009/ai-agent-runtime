@@ -213,7 +213,9 @@ func TestChatScreenBatch3UnifiedRoutingDocumentFixtures(t *testing.T) {
 		marker   string
 	}{
 		{command: "/sessions", screenID: "sessions.screen", title: "历史会话"},
+		{command: "/functions", screenID: "functions.screen", title: "函数目录"},
 		{command: "/functions --json", screenID: "functions.screen", title: "函数目录"},
+		{command: "/catalog", screenID: "functions.screen", title: "函数目录"},
 		{command: "/plans batch3-plan", screenID: "plans.detail", title: "计划详情", marker: "迁移后的详情正文"},
 		{command: "/agents panel full", screenID: "agents.panel", title: "Agent 面板"},
 	}

@@ -447,8 +447,6 @@ aicli image --provider SENSENOVA_IMAGE --model sensenova-u1-fast "生成一张�
 # 直接调用内置 tool（适合图片生成这类不依赖模型 tool-choice 的场景）
 /call openai_image_generate 帮我生成一张海边日落照片
 /call openai_image_generate {"prompt":"帮我生成一张海边日落照片"}
-/tool openai_image_generate 帮我生成一张海边日落照片
-/tool openai_image_generate {"prompt":"帮我生成一张海边日落照片"}
 
 # 直接调用 skill（会路由到 skill__imagegen）
 /skill imagegen 帮我生成一张海边日落照片
@@ -804,7 +802,6 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | `/functions <prompt>` | 预览当前 prompt 会暴露哪些 builtin tools / skill functions |
 | `/function <name>` | 查看单个 function 描述 |
 | `/call <name> [args-json]` | 直接执行指定 function；`openai_image_generate` 可直接把后续文本作为 `prompt` |
-| `/tool <name> [args-json]` | `/call` 别名；`openai_image_generate` 可直接把后续文本作为 `prompt` |
 | `/skill [--direct] <name> <prompt>` | 默认提交 skill 回合（注入程序说明，由模型自选程序）；`--direct` 直接执行并把后面的文本作为 `prompt` |
 | `/skills [query]` | 列出并选择执行 skill |
 | `/mcp [list\|status <name>\|add <name> <url> [options]\|enable\|disable\|remove <name>\|reload\|help]` | 管理 MCP Server（列表/新增/启停/删除/热重载），与 `aicli mcp`、console 与微型 Web 面板共用同一份配置与实现 |
@@ -821,7 +818,8 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 
 说明：
 
-- `/call` / `/tool` 适合直接执行 `openai_image_generate` 这类内置工具；例如 `/call openai_image_generate 生成图片` 会自动转换为 `{"prompt":"生成图片"}`。
+- `/call` 适合直接执行 `openai_image_generate` 这类内置工具；例如 `/call openai_image_generate 生成图片` 会自动转换为 `{"prompt":"生成图片"}`。
+- `/call` 的裸文本参数会按 function schema 自动组装：schema 只有唯一必填 string 参数时（如 `web_search` 的 `query`），`/call web_search 量子计算`、`/call web_search "量子计算"` 等价于 `{"query":"量子计算"}`；参数不唯一或缺失 schema 时仍要求 JSON object，并在报错中提示可用字段。
 - `/skill imagegen ...` 会直接调用 `skill__imagegen`，由 skill 工作流转发到 `/v1/images/generations` provider。
 - `/model` 支持 `status`、`clear-reasoning`、`--provider/-p`、`--model/-m`、`--reasoning-effort/-r`；切换后会刷新 provider、adapter、BaseURL、HTTP client、function builder、logger 和 runtime session metadata。
 - `/mcp` 直接管理当前 MCP 配置（优先级：`./.aicli/mcp.yaml` > `~/.aicli/mcp.yaml` > 显式配置 > 向上搜索），写操作落盘并热重载、重连；成功后会把最新 MCP 工具重新注册进当前会话。

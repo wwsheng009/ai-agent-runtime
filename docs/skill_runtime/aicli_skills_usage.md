@@ -31,7 +31,7 @@
 
 - `docs/skill_runtime/skill_invocation_mechanism.md`
 
-如果你需要更偏“CLI 使用面”的说明，例如安装、配置加载顺序、`aicli` 默认 chat / `aicli chat` 常用命令、`/call`、`/tool`、`/skill`、`/skills` 这类 chat 斜杠命令，请同时阅读：
+如果你需要更偏“CLI 使用面”的说明，例如安装、配置加载顺序、`aicli` 默认 chat / `aicli chat` 常用命令、`/call`、`/skill`、`/skills` 这类 chat 斜杠命令，请同时阅读：
 
 - `docs/aicli/README.md`
 - `docs/aicli/quickstart.md`

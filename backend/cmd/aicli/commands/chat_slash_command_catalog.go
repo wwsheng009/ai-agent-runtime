@@ -751,7 +751,6 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:         "/call",
-			Aliases:      []string{"/tool"},
 			Usage:        "/call <name> [args-json]",
 			Summary:      "直接执行 function/tool；openai_image_generate 可直接传 prompt",
 			Group:        string(chatSlashCommandGroupFunctions),

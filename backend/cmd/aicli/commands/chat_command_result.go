@@ -235,11 +235,11 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 			return result, true, nil
 		}
 	}
-	// /call and /tool are fully migrated: direct function invocation resolves,
-	// authorizes and executes through the unified command cell. Both must be
-	// recognized before the broad legacy fence so no variant can revive the
-	// terminal writer (same contract as /skill).
-	if (commandMatches(cmdLower, "/call") || commandMatches(cmdLower, "/tool")) && unifiedDirectInteractiveOutput(session) {
+	// /call is fully migrated: direct function invocation resolves, authorizes
+	// and executes through the unified command cell. It must be recognized
+	// before the broad legacy fence so no variant can revive the terminal
+	// writer (same contract as /skill).
+	if commandMatches(cmdLower, "/call") && unifiedDirectInteractiveOutput(session) {
 		if result, handled := executeStructuredDirectFunctionCommand(session, command); handled {
 			return result, true, nil
 		}
@@ -466,18 +466,14 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 
 	if commandMatches(cmdLower, "/functions") || commandMatches(cmdLower, "/catalog") {
 		prompt, jsonOutput := extractCommandArgumentOptions(command)
-		if prompt == "" && jsonOutput {
+		// bare /functions（无 prompt）与 /functions --json 同源：列出当前
+		// catalog（builtin + skill）；只有显式给出 prompt 才做暴露预览。
+		if prompt == "" {
 			if unifiedDirectInteractiveOutput(session) {
-				return chatScreenDocResult(chatScreenFunctionsSpec("函数目录", buildChatFunctionCatalogDocument(session, true))), true, nil
+				return chatScreenDocResult(chatScreenFunctionsSpec("函数目录", buildChatFunctionCatalogDocument(session, jsonOutput))), true, nil
 			}
 			return CommandResult{
-				Blocks: []RenderBlock{{Document: buildChatFunctionCatalogDocument(session, true)}},
-				Action: CommandContinue,
-			}, true, nil
-		}
-		if prompt == "" {
-			return CommandResult{
-				Blocks: []RenderBlock{{Document: buildChatPlainTextCommandDocument("错误: 需要提供 prompt 预览最终暴露集合\n用法: /functions <prompt> [--json] 或 /catalog <prompt> [--json]")}},
+				Blocks: []RenderBlock{{Document: buildChatFunctionCatalogDocument(session, jsonOutput)}},
 				Action: CommandContinue,
 			}, true, nil
 		}
