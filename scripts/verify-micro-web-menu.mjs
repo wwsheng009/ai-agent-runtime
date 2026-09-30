@@ -201,6 +201,7 @@ check("每个菜单动作都指向真实存在的目标控件", () => {
     "tab-about": "#tab-about-btn",
     "tab-cache": "#tab-cache-btn",
     "tab-analysis": "#tab-analysis-btn",
+    "tab-lsp": "#tab-lsp-btn",
     "shortcut-help": "#shortcut-help",
     // 浮动 composer 面板的折叠开关：菜单动作转发到 js/composer.js 的
     // toggleComposerPanel()（而不是点击某个控件），面板本身即目标。

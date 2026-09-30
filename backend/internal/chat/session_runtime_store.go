@@ -2165,7 +2165,7 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		return nil, err
 	}
 	row := s.readQueryer().QueryRowContext(ctx, `
-		SELECT session_id, status, current_turn_id, current_checkpoint_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json, frozen_turn_tools_json,
+		SELECT session_id, status, current_turn_id, current_checkpoint_id, suspended_turn_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json, frozen_turn_tools_json,
 		       pending_tool_json, pending_approval_json, pending_question_json, last_run_terminal_reason, head_offset, active_job_ids_json, updated_at
 		FROM session_runtime_state
 		WHERE session_id = ?
@@ -2186,12 +2186,14 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 		updatedAtRaw         string
 		currentTurnIDRaw     sql.NullString
 		currentCheckpointRaw sql.NullString
+		suspendedTurnIDRaw   sql.NullString
 	)
 	if err := row.Scan(
 		&state.SessionID,
 		&statusRaw,
 		&currentTurnIDRaw,
 		&currentCheckpointRaw,
+		&suspendedTurnIDRaw,
 		&currentRunMetaRaw,
 		&ambientRunMetaRaw,
 		&stableToolSurfaceRaw,
@@ -2215,6 +2217,9 @@ func (s *SQLiteRuntimeStore) LoadState(ctx context.Context, sessionID string) (*
 	}
 	if currentCheckpointRaw.Valid {
 		state.CurrentCheckpointID = currentCheckpointRaw.String
+	}
+	if suspendedTurnIDRaw.Valid {
+		state.SuspendedTurnID = suspendedTurnIDRaw.String
 	}
 	if len(bytes.TrimSpace(currentRunMetaRaw)) > 0 {
 		var runMeta team.RunMeta
@@ -2375,13 +2380,14 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO session_runtime_state (
-			session_id, status, current_turn_id, current_checkpoint_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json,
+			session_id, status, current_turn_id, current_checkpoint_id, suspended_turn_id, current_run_meta_json, ambient_run_meta_json, stable_tool_surface_json,
 			frozen_turn_tools_json, pending_tool_json, pending_approval_json, pending_question_json, last_run_terminal_reason, head_offset, active_job_ids_json, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id) DO UPDATE SET
 			status = excluded.status,
 			current_turn_id = excluded.current_turn_id,
 			current_checkpoint_id = excluded.current_checkpoint_id,
+			suspended_turn_id = excluded.suspended_turn_id,
 			current_run_meta_json = excluded.current_run_meta_json,
 			ambient_run_meta_json = excluded.ambient_run_meta_json,
 			stable_tool_surface_json = excluded.stable_tool_surface_json,
@@ -2393,7 +2399,7 @@ func (s *SQLiteRuntimeStore) SaveState(ctx context.Context, state *RuntimeState)
 			head_offset = excluded.head_offset,
 			active_job_ids_json = excluded.active_job_ids_json,
 			updated_at = excluded.updated_at
-	`, state.SessionID, string(state.Status), nullIfEmpty(state.CurrentTurnID), nullIfEmpty(state.CurrentCheckpointID),
+	`, state.SessionID, string(state.Status), nullIfEmpty(state.CurrentTurnID), nullIfEmpty(state.CurrentCheckpointID), nullIfEmpty(state.SuspendedTurnID),
 		nullIfEmptyBytes(currentRunMetaJSON), nullIfEmptyBytes(ambientRunMetaJSON), nullIfEmptyBytes(stableToolSurfaceJSON), nullIfEmptyBytes(frozenTurnToolsJSON), nullIfEmptyBytes(pendingToolJSON), nullIfEmptyBytes(pendingApprovalJSON), nullIfEmptyBytes(pendingQuestionJSON), nullIfEmpty(state.LastRunTerminalReason), state.HeadOffset, activeJobsJSON, state.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return fmt.Errorf("save runtime state: %w", err)
@@ -4929,6 +4935,13 @@ func (s *SQLiteRuntimeStore) init(ctx context.Context) error {
 			Name:    "session_runtime_state_last_run_terminal_reason",
 			UpSQL: `
 				ALTER TABLE session_runtime_state ADD COLUMN last_run_terminal_reason TEXT;
+			`,
+		},
+		{
+			Version: 22,
+			Name:    "session_runtime_state_suspended_turn",
+			UpSQL: `
+				ALTER TABLE session_runtime_state ADD COLUMN suspended_turn_id TEXT;
 			`,
 		},
 	}

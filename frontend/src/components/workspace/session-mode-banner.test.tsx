@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
-// §4.6 常驻模式标识（渲染层）：常显/隐藏条件、tone 档位、plan 上下文与未知模式回落。
+// §4.6 常驻模式标识（渲染层）：常显/隐藏条件、tone 档位、plan 上下文与未知模式回落；
+// §6.8 / gap 3b：托管挂起段与迟到唤醒提示（非阻塞、随数据清除消失）。
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -10,6 +11,7 @@ import { SessionModeBanner } from "./session-mode-banner";
 import type { RuntimeSessionPlanMode } from "@/lib/runtime-api";
 
 import type { ParkedTurnTaskCounts, ParkedTurnView } from "@/lib/parked-turn";
+import type { ResumedTurnNotice } from "@/lib/parked-turn";
 import type { ComponentProps } from "react";
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
@@ -77,11 +79,31 @@ describe("SessionModeBanner", () => {
   }
 
   function parkedView(taskCounts: ParkedTurnTaskCounts | null = null): ParkedTurnView {
-    return { turn: parked(), taskCounts };
+    return { turn: parked(), taskCounts, resumedNotice: null };
+  }
+
+  function notice(overrides: Partial<ResumedTurnNotice> = {}): ResumedTurnNotice {
+    return {
+      sessionId: "session-1",
+      turnId: "turn-1",
+      trigger: "terminal",
+      terminal: true,
+      wakeReasons: [],
+      resumedAt: "2026-09-26T00:10:00Z",
+      ...overrides,
+    };
+  }
+
+  function noticeOnlyView(resumedNotice: ResumedTurnNotice): ParkedTurnView {
+    return { turn: null, taskCounts: null, resumedNotice };
   }
 
   function parkedText() {
     return container.querySelector('[data-testid="session-parked-turn"]')?.textContent ?? null;
+  }
+
+  function resumedText() {
+    return container.querySelector('[data-testid="session-resumed-notice"]')?.textContent ?? null;
   }
 
   it("没有会话或没有模式快照时不占位", () => {
@@ -207,5 +229,36 @@ describe("SessionModeBanner", () => {
     renderBanner({ parkedTurn: parkedView(), plan: plan(), sessionId: undefined });
 
     expect(banner()).toBeNull();
+  });
+
+  it("迟到唤醒：无挂起 / 无模式快照时也单独渲染一行「已由监督自动恢复」", () => {
+    renderBanner({ parkedTurn: noticeOnlyView(notice()), plan: null, sessionId: "session-1" });
+
+    expect(banner()).not.toBeNull();
+    expect(banner()?.getAttribute("data-parked")).toBe("false");
+    expect(banner()?.getAttribute("data-resumed")).toBe("true");
+    expect(parkedText()).toBeNull();
+    expect(resumedText()).toContain("已由监督自动恢复");
+    expect(resumedText()).toContain("trigger=terminal");
+  });
+
+  it("迟到唤醒：trigger 缺失时走通用文案，不渲染空括号", () => {
+    renderBanner({
+      parkedTurn: noticeOnlyView(notice({ trigger: "" })),
+      plan: plan(),
+      sessionId: "session-1",
+    });
+
+    expect(resumedText()).toContain("已由监督自动恢复");
+    expect(resumedText()).not.toContain("trigger=");
+  });
+
+  it("迟到唤醒：通知被清除（归约层 TTL / 新一轮挂起）后提示消失", () => {
+    renderBanner({ parkedTurn: noticeOnlyView(notice()), plan: plan(), sessionId: "session-1" });
+    expect(container.querySelector('[data-testid="session-resumed-notice"]')).not.toBeNull();
+
+    renderBanner({ parkedTurn: null, plan: plan(), sessionId: "session-1" });
+    expect(container.querySelector('[data-testid="session-resumed-notice"]')).toBeNull();
+    expect(banner()?.getAttribute("data-resumed")).toBe("false");
   });
 });

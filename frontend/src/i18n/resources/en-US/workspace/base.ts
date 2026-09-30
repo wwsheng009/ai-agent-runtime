@@ -449,6 +449,9 @@ export const enWorkspaceBase = {
     parkedTurn: {
       waiting: "Parked: waiting on {{count}} obligation(s)",
       tasks: "Parked: {{running}} task(s) running ({{completed}} done / {{failed}} failed)",
+      // Gap 3b late wake: transient notice when a turn is auto-resumed after it already finished.
+      resumed: "Auto-resumed by supervision (trigger={{trigger}})",
+      resumedFallback: "Auto-resumed by supervision",
     },
     loadingModels: "loading models",
     modelCatalogUnavailable: "model catalog unavailable",

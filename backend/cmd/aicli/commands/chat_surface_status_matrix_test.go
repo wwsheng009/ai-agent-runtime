@@ -43,6 +43,8 @@ func TestChatSurfaceStatusIsRunningMatrix(t *testing.T) {
 		{name: "retrying empty detail", s: chatSurfaceStatus{kind: chatSurfaceStatusRetrying}, want: true},
 		{name: "approval", s: chatSurfaceStatus{kind: chatSurfaceStatusApproval}, want: true},
 		{name: "answer", s: chatSurfaceStatus{kind: chatSurfaceStatusAnswer}, want: true},
+		// 托管挂起（§6.12）没有自己的 run：绝不能被视为运行中而启动计时。
+		{name: "parked", s: chatSurfaceStatus{kind: chatSurfaceStatusParked}, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -74,6 +76,7 @@ func TestChatSurfaceStatusStringMatrix(t *testing.T) {
 		{name: "stopping", s: chatSurfaceStatus{kind: chatSurfaceStatusStopping}, want: "Stopping"},
 		{name: "approval", s: chatSurfaceStatus{kind: chatSurfaceStatusApproval}, want: "Awaiting approval"},
 		{name: "answer", s: chatSurfaceStatus{kind: chatSurfaceStatusAnswer}, want: "Awaiting answer"},
+		{name: "parked", s: chatSurfaceStatus{kind: chatSurfaceStatusParked}, want: "Waiting for subagents"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,6 +111,9 @@ func TestChatDynamicStatusActionMatrix(t *testing.T) {
 			wantAction: "Analyzing", wantRole: style.RoleReasoning, wantInterrupt: true},
 		{name: "streaming", s: chatSurfaceStatus{kind: chatSurfaceStatusStreaming},
 			wantAction: "Generating response", wantRole: style.RoleProgress, wantInterrupt: true},
+		// 托管挂起：无秒表后缀（不可中断），也不复用 "Analyzing"。
+		{name: "parked", s: chatSurfaceStatus{kind: chatSurfaceStatusParked},
+			wantAction: "Waiting for subagents", wantRole: style.RoleInfo, wantInterrupt: false},
 		{name: "approval", s: chatSurfaceStatus{kind: chatSurfaceStatusApproval},
 			wantAction: "Waiting for approval", wantRole: style.RoleApproval, wantInterrupt: true},
 		{name: "answer", s: chatSurfaceStatus{kind: chatSurfaceStatusAnswer},

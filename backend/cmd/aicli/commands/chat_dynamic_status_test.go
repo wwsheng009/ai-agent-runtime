@@ -177,3 +177,31 @@ func TestFormatChatDynamicStatusElapsed(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildChatDynamicStatusModelParkedTurnHasNoFrozenClock 钉住幽灵状态栏回归：
+// 托管挂起（§6.12）没有自己的 run 时钟，绝不能复用运行态的 "Analyzing" 文案 +
+// 完成冻结的秒表（真机事故："◦ Analyzing (58s • ctrl+c to stop)" 永不推进），
+// 即使 deferred CompleteWaiting 已经冻结了上一段 run 的耗时。
+func TestBuildChatDynamicStatusModelParkedTurnHasNoFrozenClock(t *testing.T) {
+	parked := chatSurfaceStatus{kind: chatSurfaceStatusParked}
+
+	live := buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(parked, 120, chatInputModeChat, 58*time.Second, false, false)
+	if live == nil {
+		t.Fatal("expected a parked dynamic status model")
+	}
+	if plain := style.StatusLineDocument(*live, 120).PlainText(); plain != "◦ Waiting for subagents" {
+		t.Fatalf("parked dynamic status = %q, want %q", plain, "◦ Waiting for subagents")
+	}
+
+	frozen := buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(parked, 120, chatInputModeChat, 58*time.Second, true, false)
+	if frozen == nil {
+		t.Fatal("expected a parked dynamic status model after completion")
+	}
+	done := style.StatusLineDocument(*frozen, 120).PlainText()
+	if done != "◦ Waiting for subagents" {
+		t.Fatalf("completed parked dynamic status = %q, want the parked line", done)
+	}
+	if strings.Contains(done, "58s") || strings.Contains(done, "Analyzing") || strings.Contains(done, "Worked for") {
+		t.Fatalf("parked line must not carry a frozen clock or the running form: %q", done)
+	}
+}

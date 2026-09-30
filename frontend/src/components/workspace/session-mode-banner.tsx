@@ -1,5 +1,6 @@
 // 会话常驻状态标识（§4.6 模式 + §6.8 托管挂起）：聊天区顶部常显当前权限模式，
-// plan 模式下补计划上下文；托管挂起期间并列显示「托管中：…」。
+// plan 模式下补计划上下文；托管挂起期间并列显示「托管中：…」，迟到唤醒（gap 3b）
+// 到达时补一条瞬时「已由监督自动恢复」提示（非阻塞、由归约层 TTL 清除）。
 //
 // 落点理由（§6.8 的可观测表达）：本组件是 composer 上沿停靠列里**始终可见**的
 // 状态行——会话存在即渲染，不依赖弹层或输入态；`composer-status-row` 承载的是
@@ -11,7 +12,13 @@
 // 不承载任何裁决动作——裁决入口仍是 composer 上沿的 pending bar 与右侧计划面板，
 // 避免出现第二套 pending 判定（P1-7 的口径）。
 
-import { HourglassIcon, ScrollTextIcon, ShieldAlertIcon, ShieldIcon } from "lucide-react";
+import {
+  HourglassIcon,
+  RotateCcwIcon,
+  ScrollTextIcon,
+  ShieldAlertIcon,
+  ShieldIcon,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
@@ -58,6 +65,7 @@ export function SessionModeBanner({
 
   const parkedTurnSnapshot = parkedTurn?.turn ?? null;
   const parkedTaskCounts = parkedTurn?.taskCounts ?? null;
+  const resumedNotice = parkedTurn?.resumedNotice ?? null;
   const taskTotal = parkedTaskCounts
     ? parkedTaskCounts.running + parkedTaskCounts.completed + parkedTaskCounts.failed
     : 0;
@@ -76,6 +84,13 @@ export function SessionModeBanner({
           count: parkedTurnSnapshot.obligationCount,
         }) as string)
     : "";
+  // 迟到唤醒提示：与「托管中」同一状态行但独立成段；trigger 缺失时走通用文案，
+  // 不渲染空括号。turn_id / wake_reasons / 时间戳保留在归约数据里（诊断可见）。
+  const resumedLabel = resumedNotice
+    ? resumedNotice.trigger
+      ? (t("composer.parkedTurn.resumed", { trigger: resumedNotice.trigger }) as string)
+      : (t("composer.parkedTurn.resumedFallback") as string)
+    : "";
 
   return (
     <div
@@ -85,6 +100,7 @@ export function SessionModeBanner({
       )}
       data-mode={mode}
       data-parked={parkedTurnSnapshot ? "true" : "false"}
+      data-resumed={resumedNotice ? "true" : "false"}
       data-testid="session-mode-banner"
       data-tone={tone}
     >
@@ -114,6 +130,16 @@ export function SessionModeBanner({
         >
           <HourglassIcon aria-hidden="true" className="size-3.5 shrink-0" />
           {parkedLabel}
+        </span>
+      ) : null}
+      {resumedNotice ? (
+        <span
+          className="inline-flex items-center gap-1 text-accent-teal"
+          data-testid="session-resumed-notice"
+          role="status"
+        >
+          <RotateCcwIcon aria-hidden="true" className="size-3.5 shrink-0" />
+          {resumedLabel}
         </span>
       ) : null}
     </div>

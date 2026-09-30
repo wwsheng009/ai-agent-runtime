@@ -1,16 +1,24 @@
 // @vitest-environment jsdom
 
 // §6.8 托管挂起 hook：挂起事件出现（N=obligation_count）/ 恢复事件清除 /
-// agent.turn.finished 不清除 / 会话切换隔离。
+// agent.turn.finished 不清除 / 会话切换隔离；gap 3b 迟到唤醒通知及其 TTL。
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ParkedTurnSnapshot, ParkedTurnView } from "@/lib/parked-turn";
+import type {
+  ParkedTurnSnapshot,
+  ParkedTurnSurface,
+  ParkedTurnView,
+} from "@/lib/parked-turn";
 import type { RuntimeAgentRecord, SessionRuntimeEvent } from "@/types/runtime";
 
-import { useParkedTurnView, useParkedTurns } from "./use-parked-turns";
+import {
+  RESUMED_TURN_NOTICE_TTL_MS,
+  useParkedTurnView,
+  useParkedTurns,
+} from "./use-parked-turns";
 
 type HookSnapshot = ReturnType<typeof useParkedTurns>;
 type ReactActEnvironmentGlobal = typeof globalThis & {
@@ -161,6 +169,86 @@ describe("useParkedTurns", () => {
     const back = renderHook("sess-1");
     expect(back.current().parkedTurn?.obligationCount).toBe(3);
   });
+
+  it("迟到唤醒：无 suspended 的 turn.resumed 也产生恢复通知，并在 TTL 后自动消失", () => {
+    vi.useFakeTimers();
+    try {
+      const hook = renderHook("sess-1");
+
+      act(() => {
+        hook.current().applyRuntimeEvent(resumed("sess-1"));
+      });
+
+      expect(hook.current().parkedTurn).toBeNull();
+      expect(hook.current().resumedNotice?.turnId).toBe("turn-1");
+      expect(hook.current().resumedNotice?.trigger).toBe("terminal");
+      expect(hook.current().resumedNotice?.terminal).toBe(true);
+
+      act(() => {
+        vi.advanceTimersByTime(RESUMED_TURN_NOTICE_TTL_MS);
+      });
+
+      expect(hook.current().resumedNotice).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("新一轮 turn.suspended 清除同会话旧恢复通知", () => {
+    const hook = renderHook("sess-1");
+
+    act(() => {
+      hook.current().applyRuntimeEvent(resumed("sess-1"));
+      hook.current().applyRuntimeEvent(suspended("sess-1", 2));
+    });
+
+    expect(hook.current().resumedNotice).toBeNull();
+    expect(hook.current().parkedTurn?.obligationCount).toBe(2);
+  });
+
+  it("agent.turn.finished 不清除恢复通知（只表示本次 run 结束）", () => {
+    const hook = renderHook("sess-1");
+
+    act(() => {
+      hook.current().applyRuntimeEvent(resumed("sess-1"));
+      hook.current().applyRuntimeEvent(
+        runtimeEvent("agent.turn.finished", { turn_id: "turn-1" }, "sess-1"),
+      );
+    });
+
+    expect(hook.current().resumedNotice?.turnId).toBe("turn-1");
+  });
+
+  it("恢复通知按会话隔离：切到他会话不显示 A 的通知，切回仍能看到", () => {
+    const hook = renderHook("sess-1");
+
+    act(() => {
+      hook.current().applyRuntimeEvent(resumed("sess-1"));
+    });
+    expect(hook.current().resumedNotice?.sessionId).toBe("sess-1");
+
+    const other = renderHook("sess-2");
+    expect(other.current().resumedNotice).toBeNull();
+
+    const back = renderHook("sess-1");
+    expect(back.current().resumedNotice?.turnId).toBe("turn-1");
+  });
+
+  it("缺 session_id 的 turn.resumed 不建恢复通知", () => {
+    const hook = renderHook("sess-1");
+
+    act(() => {
+      hook.current().applyRuntimeEvent(
+        runtimeEvent("turn.resumed", {
+          turn_id: "turn-1",
+          trigger: "terminal",
+          terminal: true,
+        }),
+      );
+    });
+
+    expect(hook.current().resumedNotice).toBeNull();
+  });
 });
 
 describe("useParkedTurnView", () => {
@@ -217,9 +305,16 @@ describe("useParkedTurnView", () => {
     };
   }
 
+  function surface(
+    turn: ParkedTurnSnapshot | null,
+    resumedNotice: ParkedTurnSurface["resumedNotice"] = null,
+  ): ParkedTurnSurface {
+    return { turn, resumedNotice };
+  }
+
   function renderView(props: {
     agents: RuntimeAgentRecord[];
-    parkedTurn: ParkedTurnSnapshot | null;
+    parkedTurn: ParkedTurnSurface | null;
     refresh: () => void;
     onView: (view: ParkedTurnView | null) => void;
   }) {
@@ -246,7 +341,7 @@ describe("useParkedTurnView", () => {
 
     renderView({
       agents,
-      parkedTurn: snapshot(),
+      parkedTurn: surface(snapshot()),
       refresh,
       onView: (next) => {
         captured.view = next;
@@ -264,14 +359,40 @@ describe("useParkedTurnView", () => {
       captured.view = next;
     };
 
-    renderView({ agents: [], parkedTurn: snapshot(), refresh, onView });
-    renderView({ agents: [], parkedTurn: snapshot(), refresh, onView });
+    renderView({ agents: [], parkedTurn: surface(snapshot()), refresh, onView });
+    renderView({ agents: [], parkedTurn: surface(snapshot()), refresh, onView });
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(captured.view?.taskCounts).toEqual({ running: 0, completed: 0, failed: 0 });
 
     renderView({ agents: [], parkedTurn: null, refresh, onView });
     expect(captured.view).toBeNull();
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("仅迟到唤醒通知时也产出视图：turn/taskCounts 为 null，且不触发目录补刷", () => {
+    const refresh = vi.fn();
+    const captured: { view: ParkedTurnView | null } = { view: null };
+
+    renderView({
+      agents: [],
+      parkedTurn: surface(null, {
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        trigger: "terminal",
+        terminal: true,
+        wakeReasons: [],
+        resumedAt: "2026-09-26T00:10:00Z",
+      }),
+      refresh,
+      onView: (next) => {
+        captured.view = next;
+      },
+    });
+
+    expect(captured.view?.turn).toBeNull();
+    expect(captured.view?.taskCounts).toBeNull();
+    expect(captured.view?.resumedNotice?.trigger).toBe("terminal");
+    expect(refresh).not.toHaveBeenCalled();
   });
 });
 
@@ -282,7 +403,7 @@ function ViewHarness({
   onView,
 }: {
   agents: RuntimeAgentRecord[];
-  parkedTurn: ParkedTurnSnapshot | null;
+  parkedTurn: ParkedTurnSurface | null;
   refresh: () => void;
   onView: (view: ParkedTurnView | null) => void;
 }) {

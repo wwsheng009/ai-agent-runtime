@@ -1433,6 +1433,8 @@ func chatSurfaceTitleState(s chatSurfaceStatus) string {
 		return "stopping"
 	case chatSurfaceStatusWaiting, chatSurfaceStatusApproval, chatSurfaceStatusAnswer:
 		return "waiting"
+	case chatSurfaceStatusParked:
+		return "waiting"
 	case chatSurfaceStatusRetrying:
 		return "retrying"
 	default:
@@ -2384,7 +2386,16 @@ func (c *chatInteractionCoordinator) finishWaiting(completed bool) {
 	// branch switches that happened during the turn. Invalidate before the
 	// status rebuild so both surfaces see a fresh probe.
 	invalidateChatStatusGitBranchCache(session)
-	c.updateSurfaceStatusLocked(c.currentSurfaceStateLocked())
+	surface := c.currentSurfaceStateLocked()
+	if completed && !surface.isRunning() && surface.kind != chatSurfaceStatusParked &&
+		chatSessionHasParkedTurnRecord(session) {
+		// §6.12 durable 兜底：run 收尾的 parked 标记由 actor 尾部写入，可能晚于
+		// 本次完成重绘（executor 返回即释放 turn gate，deferred CompleteWaiting
+		// 可能先跑）。只信内存 summary 会把仍在挂起的 turn 画成 "Worked for …"
+		// 并停在那里；账本是唯一事实源：仍有挂起记录时保持 Parked。
+		surface = chatSurfaceStatus{kind: chatSurfaceStatusParked}
+	}
+	c.updateSurfaceStatusLocked(surface)
 	c.mu.Unlock()
 	refreshChatTitleMetadata(session)
 }
@@ -2507,6 +2518,7 @@ const (
 	chatSurfaceStatusApproval                               // 等待审批（agent stage）
 	chatSurfaceStatusAnswer                                 // 等待回答（agent stage）
 	chatSurfaceStatusNotice                                 // 透传 UI 文案（detail=全文），非状态机语义
+	chatSurfaceStatusParked                                 // 托管挂起（§6.12：actor Busy 但没有自己的 run）
 )
 
 // chatSurfaceStatus 是 surface 状态的结构化描述。kind 决定语义（是否 running、
@@ -2561,6 +2573,8 @@ func (s chatSurfaceStatus) String() string {
 			return detail
 		}
 		return "Ready"
+	case chatSurfaceStatusParked:
+		return "Waiting for subagents"
 	default:
 		return "Ready"
 	}
@@ -2594,6 +2608,12 @@ func (c *chatInteractionCoordinator) currentSurfaceStateLocked() chatSurfaceStat
 	// toggle the legacy activity flags above. Never project that real actor run
 	// as Ready merely because the foreground coordinator is locally idle.
 	if !interactiveSessionActorReady(c.session) {
+		if interactiveSessionActorAwaitingObligations(c.session) {
+			// §6.12 托管挂起：actor 没有自己的 run，只有 durable 义务在跑。
+			// 它与"模型正在思考"必须区分：后者有活时钟，前者没有（见
+			// chatDynamicStatusAction 的 Parked 分支）。
+			return chatSurfaceStatus{kind: chatSurfaceStatusParked}
+		}
 		return chatSurfaceStatus{kind: chatSurfaceStatusWaiting}
 	}
 	return chatSurfaceStatus{kind: chatSurfaceStatusIdle}
@@ -2667,7 +2687,9 @@ func buildChatDynamicStatusModelForWidthInputModeCompletionAndEsc(s chatSurfaceS
 	// turn 的 deferred CompleteWaiting 之前接管状态行，此时 surface state 已经
 	// 是运行态，绝不能让上一轮的 "Worked for …" 覆盖正在进行的 run（事故：
 	// 状态栏显示 "Worked for 28m 41s" 后 transcript 仍在继续输出）。
-	if completed && !s.isRunning() {
+	// 托管挂起例外：turn 没有结束（§6.12），"Worked for …" 会让用户以为它已经
+	// 收尾；Parked 行必须保持自己的文案。
+	if completed && !s.isRunning() && s.kind != chatSurfaceStatusParked {
 		text := "Worked for " + formatChatDynamicStatusElapsed(elapsed)
 		if ui.DisplayWidth(text) > width {
 			text = compactStatusValue(text, width)
@@ -2737,6 +2759,11 @@ func chatDynamicStatusAction(s chatSurfaceStatus, inputMode chatInputMode) (stri
 		return "Retrying " + detail, style.RoleWarning, true
 	case chatSurfaceStatusWaiting, chatSurfaceStatusThinking, chatSurfaceStatusPlanning:
 		return "Analyzing", style.RoleReasoning, true
+	case chatSurfaceStatusParked:
+		// 托管挂起（§6.12）：actor 仍 Busy（不接受新 turn），但本会话没有自己的
+		// run —— 只有 durable 义务在跑。绝不能复用 "Analyzing" + 秒表后缀：
+		// 没有活 run 时钟时完成冻结值会渲染成一个永不推进的假倒计时。
+		return "Waiting for subagents", style.RoleInfo, false
 	case chatSurfaceStatusStreaming:
 		return "Generating response", style.RoleProgress, true
 	case chatSurfaceStatusApproval:
@@ -3619,6 +3646,8 @@ func compactChatSurfaceState(s chatSurfaceStatus) string {
 		return "停止中"
 	case chatSurfaceStatusRetrying:
 		return "重试中"
+	case chatSurfaceStatusParked:
+		return "等待子代理"
 	default:
 		return compactStatusValue(s.detail, 10)
 	}

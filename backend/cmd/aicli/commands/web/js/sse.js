@@ -5,6 +5,7 @@ import { hideApproval, showApproval, showQuestion } from "./approvals.js";
 import { clearPendingPrompts, getUiState, refreshScreen, setUI, updateTitle } from "./chat.js";
 import { handleCacheSSEEvent } from "./cache.js";
 import { createEventSequenceGuard } from "./event-sequence.js";
+import { handleParkedTurnSSEEvent } from "./parked.js";
 import { loadRuntimeMeta } from "./runtime.js";
 import { loadStatusBar } from "./statusbar.js";
 import { handleMeshStreamEvent, loadSessions, meshResumeSeq, notifySessionSwitchedCompleted, notifySharedStreamState } from "./sessions.js";
@@ -151,6 +152,9 @@ function onSSEEvent(eventName, data) {
   //   - 会话开始/结束/切换 → 清空并隐藏，等新会话的事件或 /web/api/screen 回放。
   // 放在 switch 之前：面板更新与下方分支（流式渲染、对话区刷新）互不依赖。
   handleTodoSSEEvent(eventName, data);
+  // 托管挂起/恢复横幅（turn.suspended / turn.resumed，方案 §6.8 / 审计 G3）：
+  // 与任务面板同层，先于 switch 分流；元素缺失时模块内部静默降级。
+  handleParkedTurnSSEEvent(eventName, data);
 
   switch (eventName) {
     case "connected":

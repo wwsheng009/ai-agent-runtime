@@ -426,6 +426,9 @@ export const zhWorkspaceBase = {
     parkedTurn: {
       waiting: "托管中：等待 {{count}} 个义务",
       tasks: "托管中：{{running}} 个任务运行中（{{completed}} 完成 / {{failed}} 异常）",
+      // gap 3b 迟到唤醒：父 turn 早已正常结束、从未 suspended 时的瞬时恢复提示。
+      resumed: "已由监督自动恢复（trigger={{trigger}}）",
+      resumedFallback: "已由监督自动恢复",
     },
     loadingModels: "正在加载模型",
     modelCatalogUnavailable: "模型目录不可用",

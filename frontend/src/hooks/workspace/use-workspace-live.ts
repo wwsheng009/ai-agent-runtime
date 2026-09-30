@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type Dispatch,
@@ -16,7 +17,7 @@ import {
   reportSnapshotRefresh,
   reportUnownedTurn,
 } from "@/lib/live-diagnostics/store";
-import type { ParkedTurnSnapshot } from "@/lib/parked-turn";
+import type { ParkedTurnSurface } from "@/lib/parked-turn";
 import { normalizeSessionId } from "@/lib/session-id";
 import { type ThreadStoreUpdater } from "@/lib/thread-state/thread-store";
 import {
@@ -94,8 +95,11 @@ export type UseWorkspaceLiveResult = {
   liveTurnId: string | null;
   /** 当前会话是否正在生成回复（本地回合或续传回合）。 */
   currentSessionResponding: boolean;
-  /** §6.8 当前会话的托管挂起快照；未挂起 / 无会话时为 null。 */
-  parkedTurn: ParkedTurnSnapshot | null;
+  /**
+   * §6.8 当前会话的托管呈现面：挂起快照 + 迟到唤醒通知（gap 3b）；
+   * 两者皆无时为 null。合并成一个 prop 下传，调用方不拼两个可空值。
+   */
+  parkedTurn: ParkedTurnSurface | null;
   /**
    * P4-刷新续传：停止「服务端仍在跑、本地没有请求可 abort」的续传回合。
    *
@@ -168,9 +172,20 @@ export function useWorkspaceLive({
   // §6.8 托管挂起：本会话的 `turn.suspended` / `turn.resumed` 边沿投影。状态挂在
   // 事件入口的同一层（本 hook 持有前台会话的 onRuntimeEvent 投递），随会话切换
   // 按 session_id select；`agent.turn.finished` 不参与清除（见 lib/parked-turn）。
-  const { applyRuntimeEvent: applyParkedTurnEvent, parkedTurn } = useParkedTurns({
-    sessionId,
-  });
+  const {
+    applyRuntimeEvent: applyParkedTurnEvent,
+    parkedTurn: parkedTurnSnapshot,
+    resumedNotice,
+  } = useParkedTurns({ sessionId });
+  // 呈现面：挂起快照与迟到唤醒通知合并成一个 prop（任一存在即非 null），
+  // 由 useParkedTurnView 打包任务投影后下传（见 lib/parked-turn/events.ts）。
+  const parkedTurn = useMemo<ParkedTurnSurface | null>(
+    () =>
+      parkedTurnSnapshot || resumedNotice
+        ? { turn: parkedTurnSnapshot, resumedNotice }
+        : null,
+    [parkedTurnSnapshot, resumedNotice],
+  );
   // 本地直连回合 / 服务端续传回合统一成一个「当前在途回合」身份：增量闸门、
   // 流通道归属判定与流式消息都按它对齐。
   const liveTurnId = localTurnId ?? resumedTurnId;

@@ -466,6 +466,41 @@ func TestSQLiteRuntimeStorePersistsCurrentRunMeta(t *testing.T) {
 	assert.Equal(t, "task-1", loaded.CurrentRunMeta.Team.CurrentTaskID)
 }
 
+// §6.12：挂起 turn 的派生缓存必须随 RuntimeState 一起持久化——重启后的宿主
+// 读回同一个 SuspendedTurnID，才能把 parked turn 继续按 busy 语义对外呈现
+// （AC-P3-3c）。此前 schema 漏列该字段，挂起态跨进程即丢。
+func TestSQLiteRuntimeStorePersistsSuspendedTurnID(t *testing.T) {
+	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
+		DSN: "file:runtime-store-suspended-turn-test?mode=memory&cache=shared",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx := context.Background()
+	require.NoError(t, store.SaveState(ctx, &RuntimeState{
+		SessionID:       "session-1",
+		Status:          SessionIdle,
+		SuspendedTurnID: "turn_parked",
+		UpdatedAt:       time.Now().UTC(),
+	}))
+
+	loaded, err := store.LoadState(ctx, "session-1")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Equal(t, "turn_parked", loaded.SuspendedTurnID)
+
+	// 清空必须同样落盘：settle/resume 结束后不得留下永久粘住的挂起 turn。
+	require.NoError(t, store.SaveState(ctx, &RuntimeState{
+		SessionID: "session-1",
+		Status:    SessionIdle,
+		UpdatedAt: time.Now().UTC(),
+	}))
+	loaded, err = store.LoadState(ctx, "session-1")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	require.Empty(t, loaded.SuspendedTurnID)
+}
+
 func TestSQLiteRuntimeStorePersistsAmbientRunMeta(t *testing.T) {
 	store, err := NewSQLiteRuntimeStore(&RuntimeStoreConfig{
 		DSN: "file:runtime-store-ambient-run-meta-test?mode=memory&cache=shared",

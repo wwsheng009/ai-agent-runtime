@@ -260,6 +260,20 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
   #conversation .msg-filter-panel { border-radius: 10px; }
 }
 
+/* ---- 托管挂起/恢复横幅（turn.suspended / turn.resumed，方案 §6.8） ----
+   与消息过滤面板同层吸附在消息区顶部；挂起态常驻（等待子任务 ≠ 卡死），
+   恢复态 8s 后由 js/parked.js 自动隐藏。 */
+#conversation .parked-banner {
+  position: sticky; top: 0; z-index: 24;
+  margin: 0 0 8px 0; padding: 6px 10px;
+  font-size: 11px; line-height: 1.6; text-align: center;
+  background: var(--bg2); color: var(--fg2);
+  border: 1px solid var(--border2); border-radius: 6px;
+  pointer-events: none;
+}
+#conversation .parked-banner.parked-suspended { border-color: var(--accent); color: var(--accent2); }
+#conversation .parked-banner.parked-resumed { border-color: var(--green); color: var(--green); }
+
 /* ---- 长会话窗口化：顶部「更早消息」提示行 ---- */
 /* 上滚懒加载的提示/加载态；已到达最早一条时由 JS 移除。 */
 #screen .conv-load-older {
