@@ -1,6 +1,6 @@
 # ADR 索引与流程（决策唯一事实源）
 
-> 最后更新：2026-09-29
+> 最后更新：2026-09-30
 > 本目录是 `docs/knowledge_Layer/` 内**决策的唯一事实源**（见 `../README.md` §3）。
 > 任何推翻既有设计的改动，必须先在本目录新增/更新 ADR，再改文档与代码。
 
@@ -78,7 +78,7 @@ Proposed ──(owner 接受)──→ Accepted ──(被新 ADR 取代)──�
 | [0005](0005-windows-child-process-lifecycle.md) | Windows 子进程树生命周期与复用既有 process guard | Proposed | moderate | Phase4-start | `supplement/05` §9.5 |
 | [0006](0006-lsp-position-encoding-boundary.md) | LSP 位置编码转换边界与缓存键 | Proposed | moderate | Phase4-start | 澄清并补齐 `supplement/05_...md` §10.3（原 `03` §5.3） |
 | [0007](0007-phantom-tables-and-doc-invariants.md) | 幽灵表清理与文档不变量 | **Accepted**（2026-09-28） | cheap | Phase1-start | `02` §8 的 6 个无 DDL 表名；`04` L546 的 `index_jobs` DDL 落点 |
-| [0008](0008-grep-coverage-file-level.md) | grep 通道探索归因采用 file-level 覆盖口径 | **Accepted**（2026-09-29，owner 授权代改） | cheap（仅测量） | `Phase1-shadow`（已满足） | 部分取代 [0003](0003-exploration-attribution-metrics.md) §4.2 的 grep 通道 coverage 口径；α=0.8、M1 ≥ 0.31，主门槛复核通过（见 §8.1） |
+| [0008](0008-grep-coverage-file-level.md) | grep 通道探索归因采用 file-level 覆盖口径 | **Accepted**（2026-09-29，owner 授权代改） | cheap（仅测量） | `Phase1-shadow`（已满足） | 部分取代 [0003](0003-exploration-attribution-metrics.md) §4.2 的 grep 通道 coverage 口径；α=0.8、M1 ≥ 0.31，主门槛复核通过（见 §8.1）；**落地完成（2026-09-30：新列 + 三入口 live 写入）** |
 | [0009](0009-v1-table-set-scope.md) | v1 表集口径裁决（上限定义域、三分组与命名规范） | **Accepted**（2026-09-29，owner 授权代改） | cheap | **Phase1-start** | `04` §0.3/§4.3 的 "≤16 张" 口径；`../README.md` §3 的同一转述（已取代） |
 
 > **落盘状态（2026-09-20）**：`0000`（模板）与 `0001`–`0007` 均已落盘，**全部为 `Proposed`**，等待 owner 按 §2 逐个 Accept。

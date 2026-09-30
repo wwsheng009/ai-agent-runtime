@@ -248,6 +248,8 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 		// Phase 0 交付 7 / ADR-0003 §4.1：探索归因与 shadow 差异率度量。
 		// 只建表与索引，不产生数据（mode=off 下没有任何调用方会写入）。
 		// DDL 与 ADR-0003 §4.1 逐列对齐；追加语句复用 IF NOT EXISTS 幂等语义（D7）。
+		// baseline_files_n / overlap_files_n 是 ADR-0008 §4 的 additive file-level
+		// 列（grep 主判据），历史库经 ensureExplorationFileColumns 补齐。
 		`CREATE TABLE IF NOT EXISTS exploration_attribution (
 			id TEXT PRIMARY KEY,
 			session_id TEXT,
@@ -257,8 +259,10 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			query_hash TEXT,
 			project_id TEXT,
 			baseline_n INTEGER NOT NULL DEFAULT 0,
+			baseline_files_n INTEGER NOT NULL DEFAULT 0,
 			candidate_n INTEGER NOT NULL DEFAULT 0,
 			overlap_n INTEGER NOT NULL DEFAULT 0,
+			overlap_files_n INTEGER NOT NULL DEFAULT 0,
 			baseline_tokens INTEGER NOT NULL DEFAULT 0,
 			candidate_tokens INTEGER NOT NULL DEFAULT 0,
 			coverage REAL,
@@ -278,7 +282,10 @@ func (s *SQLiteStore) init(ctx context.Context) error {
 			return fmt.Errorf("initialize usage ledger store: %w", err)
 		}
 	}
-	return s.ensureLedgerMetricColumns(ctx)
+	if err := s.ensureLedgerMetricColumns(ctx); err != nil {
+		return err
+	}
+	return s.ensureExplorationFileColumns(ctx)
 }
 
 // ledgerMetricColumns 是 Phase 0（04 §5 交付 2）新增的 9 个知识层度量列。
@@ -300,7 +307,7 @@ var ledgerMetricColumns = []string{
 
 // ensureLedgerMetricColumns 为既有库补齐 Phase 0 新增列。
 func (s *SQLiteStore) ensureLedgerMetricColumns(ctx context.Context) error {
-	existing, err := s.ledgerColumns(ctx)
+	existing, err := s.tableColumns(ctx, "token_usage_history")
 	if err != nil {
 		return err
 	}
@@ -316,11 +323,38 @@ func (s *SQLiteStore) ensureLedgerMetricColumns(ctx context.Context) error {
 	return nil
 }
 
-// ledgerColumns 返回 token_usage_history 现有列名集合。
-func (s *SQLiteStore) ledgerColumns(ctx context.Context) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(token_usage_history)`)
+// explorationFileColumns 是 ADR-0008 §4 / §8.1 为 exploration_attribution
+// 新增的 2 个 file-level 列。与 ledgerMetricColumns 同策略：老库缺列时
+// ADD COLUMN 是元数据级变更，历史行取 DEFAULT 0，历史语义与改动前一致
+// （ADR-0008 §6.2：历史行不参与 file-level M1）。
+var explorationFileColumns = []string{
+	"baseline_files_n",
+	"overlap_files_n",
+}
+
+// ensureExplorationFileColumns 为既有库补齐 ADR-0008 §4 的 file-level 列。
+func (s *SQLiteStore) ensureExplorationFileColumns(ctx context.Context) error {
+	existing, err := s.tableColumns(ctx, "exploration_attribution")
 	if err != nil {
-		return nil, fmt.Errorf("inspect usage ledger schema: %w", err)
+		return err
+	}
+	for _, column := range explorationFileColumns {
+		if existing[column] {
+			continue
+		}
+		statement := `ALTER TABLE exploration_attribution ADD COLUMN ` + column + ` INTEGER NOT NULL DEFAULT 0`
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("add exploration attribution column %s: %w", column, err)
+		}
+	}
+	return nil
+}
+
+// tableColumns 返回指定表的现有列名集合（表名只允许内部常量，不做拼接注入面）。
+func (s *SQLiteStore) tableColumns(ctx context.Context, table string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s schema: %w", table, err)
 	}
 	defer rows.Close()
 
@@ -335,7 +369,7 @@ func (s *SQLiteStore) ledgerColumns(ctx context.Context) (map[string]bool, error
 			primary   int
 		)
 		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primary); err != nil {
-			return nil, fmt.Errorf("scan usage ledger schema: %w", err)
+			return nil, fmt.Errorf("scan %s schema: %w", table, err)
 		}
 		columns[name] = true
 	}
@@ -360,9 +394,10 @@ func (s *SQLiteStore) AppendExplorationAttribution(ctx context.Context, rec *ent
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO exploration_attribution (
 			id, session_id, turn_id, request_id, tool, query_hash, project_id,
-			baseline_n, candidate_n, overlap_n, baseline_tokens, candidate_tokens,
+			baseline_n, baseline_files_n, candidate_n, overlap_n, overlap_files_n,
+			baseline_tokens, candidate_tokens,
 			coverage, economy, usable, source, knowledge_mode, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID,
 		nullIfEmpty(rec.SessionID),
 		nullIfEmpty(rec.TurnID),
@@ -371,8 +406,10 @@ func (s *SQLiteStore) AppendExplorationAttribution(ctx context.Context, rec *ent
 		nullIfEmpty(rec.QueryHash),
 		nullIfEmpty(rec.ProjectID),
 		rec.BaselineN,
+		rec.BaselineFilesN,
 		rec.CandidateN,
 		rec.OverlapN,
+		rec.OverlapFilesN,
 		rec.BaselineTokens,
 		rec.CandidateTokens,
 		nullableFloat(rec.Coverage),

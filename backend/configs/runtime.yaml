@@ -81,14 +81,29 @@ sessionRuntime:
   #   operationTimeout: 3s # 单次读操作上限；应小于写侧默认 10s（长读会拖住 WAL checkpoint）
 
 knowledge:
-  # 知识层（docs/knowledge_Layer）总开关。mode=off 是默认值，也是唯一被允许
-  # 出现在本文件里的值：Phase 0 只冻结契约，知识层代码不参与任何路径。
-  # mode: off   —— 关闭（默认；索引不构建、工具面不注册、上下文不注入）
+  # 知识层（docs/knowledge_Layer）总开关。Phase 2 已完成、ADR-0004 已 Accepted，
+  # 门禁解除：on / shadow 均可写入本文件（Phase 0「只允许 off」口径已过期）。
+  # mode: off    —— 关闭（默认；索引不构建、工具面不注册、上下文不注入）
   # mode: shadow —— 只构建索引与统计，绝不注入 prompt（Phase 1 起）
-  # mode: on    —— 索引 + code.* 工具面 + 上下文注入（Phase 2 起，需 ADR 门禁）
+  # mode: on     —— 索引 + code.* 工具面 + 上下文注入（Phase 2 起；装配链按
+  #                 W7a 保守映射 on → context_knowledge_mode=signals，由
+  #                 runtime-server / runtimeapi / aicli 三入口自动注入，勿重复配置）
   # db_path 缺省为 <workspace>/.aicli/knowledge/knowledge.db。
-  mode: off
+  mode: on
+  # code_tools：Phase 3（06 §4 Phase 3）的 code.* 工具面开关。
+  #   off —— 不注册 code.*（代码默认值；工具面与纯 grep/view 基线逐字节一致）
+  #   on  —— 注册 code_search / code_inspect / code_navigate / code_references /
+  #          code_callers；索引不可用时自动降级 grep/view（source=fallback）
+  code_tools: on
   # alpha：shadow 覆盖率阈值（usable = coverage >= alpha 且 economy <= 1.0，
   # ADR-0003 §4.2）。ADR 规定它由 Phase1-shadow 实测校准（04 §7.6）；缺省
   # 0.8 只是管线联调初值，不是验收门槛。
   # alpha: 0.8
+  # planner：Reuse Gate 的保守阈值（06 §4 Phase 2 W3；04 §4.4 阈值策略）。
+  # 下列值即代码缺省值，初值待 Phase 2 实测校准（04 §7.6）；取消注释即可覆盖。
+  # planner:
+  #   min_reuse_confidence: 0.80    # 同任务直接复用下限
+  #   write_reuse_confidence: 0.90  # 同任务写操作下限（复用 + 强制验证读取）
+  #   cross_task_confidence: 0.90   # 跨任务下限（复用 + 强制验证读取）
+  #   verify_read_below: 0.90       # 低于此值必须安排一次验证读取
+  #   explore_below: 0.50           # 低于此值触发探索（04 §4.4 硬下限）

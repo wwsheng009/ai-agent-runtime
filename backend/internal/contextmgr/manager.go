@@ -8,6 +8,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/artifact"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/factledger"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memory"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memorystore"
 	"github.com/wwsheng009/ai-agent-runtime/internal/team"
@@ -136,6 +137,9 @@ type BuildInput struct {
 	PromptBudgetSource       string
 	PromptBudgetSourceDetail string
 	EnablePromptCompaction   bool
+	// KnowledgeWrite 透传写操作意图给 Planner（W4 阈值：写复用 ≥0.90 且强制
+	// 验证读取）；缺省 false。调用方（agent 循环）在写场景置位。
+	KnowledgeWrite bool
 }
 
 // BuildResult 返回上下文装配结果和元信息。
@@ -145,15 +149,28 @@ type BuildResult struct {
 }
 
 type Strategy struct {
-	Profile                 string
-	CompactionMode          string
-	RecallMode              string
-	ObservationMode         string
-	WorkspaceMode           string
+	Profile         string
+	CompactionMode  string
+	RecallMode      string
+	ObservationMode string
+	WorkspaceMode   string
+	// KnowledgeMode = off | signals | broad（W5）。默认 off：零调用、零注入，
+	// Build 行为与改动前逐字节一致（G4 可逆主承载）。
+	KnowledgeMode           string
 	MinCompactionMessages   int
 	MinRecallQueryLength    int
 	MinWorkspaceQueryLength int
-	LedgerLoadLimit         int
+	// MinKnowledgeQueryLength <=0 时取 knowledge.DefaultMinKnowledgeQueryLength；
+	// >0 时经 PlanInput.MinQueryLength 传给 Planner，并在调用前短路更短查询。
+	MinKnowledgeQueryLength int
+	// ReuseConfidenceFloor >0 时在注入前额外丢弃低于该置信度的 Reuse 项
+	// （Planner 阈值之上的第二道保险；0 = 只信 Planner）。
+	//
+	// W7 校准（2026-09-30）：A/B 收益实测未执行（无真实 on-mode 样本），保持 0；
+	// 触发上调的条件：真实样本复算出现 unsafe_reuse_count > 0，或 G1/G3 不达
+	// 而需收紧注入面（回写入口见 reports/phase2_exploration_report.md §校准）。
+	ReuseConfidenceFloor float64
+	LedgerLoadLimit      int
 }
 
 type LayerSpec struct {
@@ -186,6 +203,10 @@ type Manager struct {
 	ProjectMemory ProjectMemoryStore
 	Events        runtimeevents.Publisher
 	Agent         string
+	// Knowledge 是 W4 Planner（建议直接注入 *knowledge.Layer：它会补齐
+	// WorkspaceVersion 观测；裸 store Planner 无版本观测时按版本未知 fail
+	// closed，全部转 Explore）。nil 或 KnowledgeMode=off 时零调用、零注入。
+	Knowledge knowledge.Planner
 }
 
 // DefaultBudget 返回保守的默认预算。
@@ -263,6 +284,7 @@ func StrategyForProfile(profile string) Strategy {
 			RecallMode:              RecallModeDisabled,
 			ObservationMode:         ObservationModeFailures,
 			WorkspaceMode:           WorkspaceModeBroad,
+			KnowledgeMode:           KnowledgeModeOff,
 			MinCompactionMessages:   2,
 			MinRecallQueryLength:    12,
 			MinWorkspaceQueryLength: 4,
@@ -275,6 +297,7 @@ func StrategyForProfile(profile string) Strategy {
 			RecallMode:              RecallModeBroad,
 			ObservationMode:         ObservationModeAll,
 			WorkspaceMode:           WorkspaceModeBroad,
+			KnowledgeMode:           KnowledgeModeOff,
 			MinCompactionMessages:   1,
 			MinRecallQueryLength:    4,
 			MinWorkspaceQueryLength: 4,
@@ -287,6 +310,7 @@ func StrategyForProfile(profile string) Strategy {
 			RecallMode:              RecallModeSignals,
 			ObservationMode:         ObservationModeAll,
 			WorkspaceMode:           WorkspaceModeBroad,
+			KnowledgeMode:           KnowledgeModeOff,
 			MinCompactionMessages:   1,
 			MinRecallQueryLength:    8,
 			MinWorkspaceQueryLength: 4,
@@ -309,6 +333,9 @@ func ResolveStrategy(profile string, overrides Strategy) Strategy {
 	if overrides.WorkspaceMode != "" {
 		strategy.WorkspaceMode = overrides.WorkspaceMode
 	}
+	if overrides.KnowledgeMode != "" {
+		strategy.KnowledgeMode = normalizeKnowledgeMode(overrides.KnowledgeMode)
+	}
 	if overrides.MinCompactionMessages > 0 {
 		strategy.MinCompactionMessages = overrides.MinCompactionMessages
 	}
@@ -317,6 +344,12 @@ func ResolveStrategy(profile string, overrides Strategy) Strategy {
 	}
 	if overrides.MinWorkspaceQueryLength > 0 {
 		strategy.MinWorkspaceQueryLength = overrides.MinWorkspaceQueryLength
+	}
+	if overrides.MinKnowledgeQueryLength > 0 {
+		strategy.MinKnowledgeQueryLength = overrides.MinKnowledgeQueryLength
+	}
+	if overrides.ReuseConfidenceFloor > 0 {
+		strategy.ReuseConfidenceFloor = overrides.ReuseConfidenceFloor
 	}
 	if overrides.LedgerLoadLimit > 0 {
 		strategy.LedgerLoadLimit = overrides.LedgerLoadLimit
@@ -410,6 +443,24 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 	scopedHistory := cloneMessages(input.History)
 	goalScopeStats := goalScopeFilterStats{}
 	systemMessages, nonSystemMessages := splitMessages(scopedHistory)
+	knowledgeMode := normalizeKnowledgeMode(m.Strategy.KnowledgeMode)
+	strategyMetadata := map[string]interface{}{
+		"compaction_mode":            m.Strategy.CompactionMode,
+		"prompt_compaction_enabled":  input.EnablePromptCompaction,
+		"recall_mode":                m.Strategy.RecallMode,
+		"observation_mode":           m.Strategy.ObservationMode,
+		"workspace_mode":             m.Strategy.WorkspaceMode,
+		"min_compaction_messages":    m.Strategy.MinCompactionMessages,
+		"min_recall_query_length":    m.Strategy.MinRecallQueryLength,
+		"min_workspace_query_length": m.Strategy.MinWorkspaceQueryLength,
+		"ledger_load_limit":          m.Strategy.LedgerLoadLimit,
+	}
+	if knowledgeMode != KnowledgeModeOff {
+		// off 下不新增任何 key，保持 Build 结果与改动前逐字节一致（G4）。
+		strategyMetadata["knowledge_mode"] = knowledgeMode
+		strategyMetadata["min_knowledge_query_length"] = m.Strategy.MinKnowledgeQueryLength
+		strategyMetadata["reuse_confidence_floor"] = m.Strategy.ReuseConfidenceFloor
+	}
 	result := BuildResult{
 		Metadata: map[string]interface{}{
 			"budget_max_prompt_tokens":        budget.MaxPromptTokens,
@@ -418,18 +469,8 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			"goal_scoped_messages_filtered":   goalScopeStats.MessagesFiltered,
 			"goal_scoped_tool_calls_filtered": goalScopeStats.ToolCallsFiltered,
 			"context_profile":                 m.Strategy.Profile,
-			"context_strategy": map[string]interface{}{
-				"compaction_mode":            m.Strategy.CompactionMode,
-				"prompt_compaction_enabled":  input.EnablePromptCompaction,
-				"recall_mode":                m.Strategy.RecallMode,
-				"observation_mode":           m.Strategy.ObservationMode,
-				"workspace_mode":             m.Strategy.WorkspaceMode,
-				"min_compaction_messages":    m.Strategy.MinCompactionMessages,
-				"min_recall_query_length":    m.Strategy.MinRecallQueryLength,
-				"min_workspace_query_length": m.Strategy.MinWorkspaceQueryLength,
-				"ledger_load_limit":          m.Strategy.LedgerLoadLimit,
-			},
-			"context_layers": ResolvedLayerPlan(m.Strategy.Profile, budget, m.Strategy),
+			"context_strategy":                strategyMetadata,
+			"context_layers":                  ResolvedLayerPlan(m.Strategy.Profile, budget, m.Strategy),
 		},
 	}
 	if baseMaxPromptTokens > 0 && baseMaxPromptTokens != budget.MaxPromptTokens {
@@ -543,6 +584,21 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 			"goal_id":                    input.GoalID,
 			"suppressed_for_active_turn": factLedgerSuppressed,
 		},
+	}
+	if knowledgeMode != KnowledgeModeOff {
+		layerMetrics["knowledge"] = map[string]interface{}{
+			"mode":                       knowledgeMode,
+			"injected":                   false,
+			"count":                      0,
+			"reuse_count":                0,
+			"explore_count":              0,
+			"verify_count":               0,
+			"provisional_count":          0,
+			"stale_filtered":             0,
+			"floor_filtered":             0,
+			"degraded":                   false,
+			"suppressed_for_active_turn": false,
+		}
 	}
 	if hadFrozenTurnContext {
 		result.Metadata["turn_context_snapshot_reused"] = true
@@ -809,6 +865,52 @@ func (m *Manager) Build(ctx context.Context, input BuildInput) BuildResult {
 				"symbol_count": symbolCount,
 				"chunk_count":  chunkCount,
 			})
+		}
+	}
+
+	if knowledgeMode != KnowledgeModeOff {
+		// W5：知识层注入（只注入 Reuse；off 已在上面短路，零调用零注入）。
+		// 与其它易变层一致：活动回合已有回放或已冻结过本 stage 时不再重注入。
+		if stagePresent(knowledgeStage) || activeTurnHasReplay {
+			applyKnowledgeMetadata(result.Metadata, nil, knowledgeInjectionStats{
+				Mode:   knowledgeMode,
+				Reason: knowledgeReasonSuppressed,
+			})
+			if metrics, ok := layerMetrics["knowledge"].(map[string]interface{}); ok {
+				metrics["suppressed_for_active_turn"] = true
+			}
+			result.Metadata["knowledge_suppressed_for_active_turn"] = true
+		} else {
+			knowledgeMessage, knowledgeStats := m.buildKnowledgeMessage(ctx, input)
+			metrics, _ := layerMetrics["knowledge"].(map[string]interface{})
+			applyKnowledgeMetadata(result.Metadata, metrics, knowledgeStats)
+			if knowledgeMessage != nil {
+				appendDynamic(*knowledgeMessage)
+				m.emitEvent("context.knowledge.injected", input.TraceID, input.SessionID, map[string]interface{}{
+					"task_id":             input.TaskID,
+					"mode":                knowledgeStats.Mode,
+					"count":               knowledgeStats.InjectedCount,
+					"reuse_count":         knowledgeStats.ReuseCount,
+					"explore_count":       knowledgeStats.ExploreCount,
+					"verify_count":        len(knowledgeStats.VerifyTargets),
+					"stale_item_injected": 0,
+					"reason":              knowledgeStats.Reason,
+				})
+			}
+			if len(knowledgeStats.VerifyTargets) > 0 {
+				// 安排验证读取：调用方用既有 grep/view 完成一次低成本确认。
+				m.emitEvent("context.knowledge.verify_requested", input.TraceID, input.SessionID, map[string]interface{}{
+					"task_id": input.TaskID,
+					"targets": knowledgeStats.VerifyTargets,
+				})
+			}
+			if knowledgeStats.Degraded {
+				m.emitEvent("context.knowledge.degraded", input.TraceID, input.SessionID, map[string]interface{}{
+					"task_id": input.TaskID,
+					"reason":  knowledgeStats.Reason,
+					"error":   knowledgeStats.Error,
+				})
+			}
 		}
 	}
 

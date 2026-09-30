@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Role 描述本进程与 workspace store 的关系（ADR-0001）。
@@ -39,6 +40,8 @@ type Layer struct {
 	owner *ownership
 	// workspaceID 是 workspaces 行的 id；首次使用时惰性登记。
 	workspaceID string
+	// planVersion 缓存 Planner 的 WorkspaceVersion 采样（TTL 与 W2 同源）。
+	planVersion versionCache
 }
 
 // Open 解析配置并返回 Layer。
@@ -156,6 +159,65 @@ func (l *Layer) Stats(ctx context.Context) (Stats, error) {
 		return Stats{}, err
 	}
 	return l.store.Stats(ctx, wsID)
+}
+
+// Plan 返回认知层的复用/探索决策（06 §4 Phase 2 W4）。
+//
+// nil / mode=off 返回空 Plan（Reason=disabled）：不查 store、不 panic。
+// shadow/on 走只读路径；workspace 未登记（索引不可用）或 store 失败时返回
+// Degraded + Reason，不冒泡错误（04 §4.1 Degrade-Not-Fail）。
+// PlanInput.Current 为空时按 DefaultReuseVersionTTL 采样并缓存 WorkspaceVersion，
+// 采样时刻随观测返回，供 W3 Gate 做 TTL 滞后兜底。
+func (l *Layer) Plan(ctx context.Context, in PlanInput) (Plan, error) {
+	if l == nil || l.store == nil || l.cfg.Mode == ModeOff {
+		return Plan{Reason: PlanReasonDisabled}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	wsID, err := l.planWorkspaceID(ctx)
+	if err != nil {
+		if errors.Is(err, errWorkspaceNotIndexed) {
+			return Plan{Degraded: true, Reason: PlanReasonIndexUnavailable}, nil
+		}
+		return Plan{Degraded: true, Reason: classifyStoreError(ctx, err)}, nil
+	}
+	if strings.TrimSpace(in.WorkspaceID) == "" {
+		in.WorkspaceID = wsID
+	}
+	if strings.TrimSpace(in.Current.Version) == "" {
+		now := in.Now
+		if now.IsZero() {
+			now = time.Now()
+		}
+		obs, err := l.planVersion.observe(ctx, l.store, wsID, in.VersionTTL, now)
+		if err != nil {
+			return Plan{Degraded: true, Reason: classifyStoreError(ctx, err)}, nil
+		}
+		in.Current = obs
+	}
+	return NewPlanner(PlannerOptions{Reader: l.store, Config: l.cfg.Planner}).Plan(ctx, in)
+}
+
+// planWorkspaceID 只读解析 workspaces 行 id。
+//
+// 与 ensureWorkspace 不同，它不调用 EnsureWorkspace（owner 会写库），保证
+// Planner 路径纯读（04 §4.2）；未登记时返回 errWorkspaceNotIndexed。
+func (l *Layer) planWorkspaceID(ctx context.Context) (string, error) {
+	if l.workspaceID != "" {
+		return l.workspaceID, nil
+	}
+	if strings.TrimSpace(l.cfg.Workspace) == "" {
+		return "", errors.New("knowledge: plan: workspace must be set")
+	}
+	id, ok, err := l.store.FindWorkspace(ctx, l.cfg.Workspace)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", errWorkspaceNotIndexed
+	}
+	return id, nil
 }
 
 // FindSymbols 解析符号名。

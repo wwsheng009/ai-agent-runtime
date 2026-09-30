@@ -104,6 +104,79 @@ func TestSummarizeAttributionIsDeterministic(t *testing.T) {
 	}
 }
 
+// ADR-0008 §4.1/§4.2：file-level 复算与行级诊断并存——
+//   - gNew1：file_coverage 1.0（行级 0.25）→ usable；
+//   - gNew2：file_coverage 0.5（行级 0.9）→ 不可用（file-level 主判据）；
+//   - gLegacy：无 file-level 列（历史行）→ 回退行级覆盖，仍进 M1 分母。
+func TestSummarizeAttributionFileLevel(t *testing.T) {
+	t0 := time.Date(2026, 9, 29, 10, 0, 0, 0, time.UTC)
+	records := []*entity.ExplorationAttribution{
+		{
+			ID: "gNew1", Tool: "grep", BaselineN: 4, BaselineFilesN: 2,
+			CandidateN: 1, OverlapN: 1, OverlapFilesN: 2,
+			Coverage: floatPtr(0.25), Economy: floatPtr(0.5),
+			KnowledgeMode: "shadow", CreatedAt: t0,
+		},
+		{
+			ID: "gNew2", Tool: "grep", BaselineN: 4, BaselineFilesN: 2,
+			CandidateN: 0, OverlapN: 3, OverlapFilesN: 1,
+			Coverage: floatPtr(0.9), Economy: floatPtr(0.5),
+			KnowledgeMode: "shadow", CreatedAt: t0.Add(time.Second),
+		},
+		{
+			ID: "gLegacy", Tool: "grep", BaselineN: 4,
+			CandidateN: 1, OverlapN: 4,
+			Coverage: floatPtr(0.95), Economy: floatPtr(0.5),
+			KnowledgeMode: "shadow", CreatedAt: t0.Add(2 * time.Second),
+		},
+		{
+			ID: "v1", Tool: "view", BaselineN: 2,
+			CandidateN: 1, OverlapN: 2,
+			Coverage: floatPtr(1.0), Economy: nil,
+			KnowledgeMode: "shadow", CreatedAt: t0.Add(3 * time.Second),
+		},
+		{
+			ID: "zero", Tool: "grep", BaselineN: 0,
+			KnowledgeMode: "shadow", CreatedAt: t0.Add(4 * time.Second),
+		},
+	}
+
+	report := SummarizeAttribution(records, 0.8)
+	if report.Calls != 5 || report.Denominator != 4 || report.ZeroBaseline != 1 {
+		t.Fatalf("calls/denominator/zero = %d/%d/%d, want 5/4/1",
+			report.Calls, report.Denominator, report.ZeroBaseline)
+	}
+	// gNew1（file-level 通过）+ gLegacy（行级回退通过）+ v1（view 行级通过）。
+	if report.Usable != 3 {
+		t.Fatalf("usable = %d, want 3 (gNew1/gLegacy/v1)", report.Usable)
+	}
+	assertClose(t, "M1", report.M1, 0.75)
+	assertClose(t, "M2", report.M2, 0.775) // 行级诊断 [0.25,0.9,0.95,1.0]
+
+	if report.FileDenominator != 2 || report.FileUsable != 1 {
+		t.Fatalf("file denom/usable = %d/%d, want 2/1", report.FileDenominator, report.FileUsable)
+	}
+	assertClose(t, "M1File", report.M1File, 0.5)
+	assertClose(t, "FileCoverageMean", report.FileCoverageMean, 0.75)
+	assertClose(t, "FileCoverageP50", report.FileCoverageP50, 0.5)
+	assertClose(t, "FileCoverageP90", report.FileCoverageP90, 1.0)
+	assertClose(t, "FilePrecision", report.FilePrecision, 0.75) // (2+1)/(2+2)
+	if report.Answerable != 3 {
+		t.Fatalf("answerable = %d, want 3", report.Answerable)
+	}
+	assertClose(t, "AnswerableRate", report.AnswerableRate, 0.6)
+
+	// 按通道报告：grep 的 M1 使用 file-level（新行）+ 行级回退（历史行）。
+	grep := report.ByTool["grep"]
+	assertClose(t, "grep.M1", grep.M1, 2.0/3.0) // gNew1/gLegacy，gNew2 被 file-level 否决
+	assertClose(t, "grep.M1File", grep.M1File, 0.5)
+	view := report.ByTool["view"]
+	if view.FileDenominator != 0 {
+		t.Fatalf("view 行不得进入 file-level 分母: %+v", view)
+	}
+	assertClose(t, "view.M1", view.M1, 1.0)
+}
+
 func TestCalibrateShadowAlphaUsesMedian(t *testing.T) {
 	records := attributionFixture()
 	// 覆盖度样本 [1.0, 0.5, 0.6, 1.0] → 最近秩中位数 0.6。

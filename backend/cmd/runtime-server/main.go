@@ -1315,6 +1315,10 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	// 与 CLI 宿主同口径（applyLocalChatToolObservation）：知识层 shadow 模式 +
 	// 账本可用才接线；否则观察器为 nil，全部会话保持无知识层行为。
 	handler.SetKnowledgeShadow(knowledge.ShadowObserverFor(knowledgeActivation, knowledgeAttributionSink(ledgerStore)))
+	// Phase 2 W2：探索记忆采集器（grep/view → exploration_sessions/nodes/edges）。
+	// 与 shadow 同门控：mode=shadow|on 且本进程为 owner 时非 nil；off / reader /
+	// 启动期降级（knowledgeActivation == nil）时为 nil（零写入，nil-safe）。
+	handler.SetKnowledgeRecorder(knowledgeRecorderFor(knowledgeActivation))
 	// Phase 1 交付 5：状态面句柄（GET /api/runtime/knowledge/status）。
 	// 与 shadow 观察器同源；mode=off 时句柄为 nil，端点返回 mode=off 载荷。
 	handler.SetKnowledgeActivation(knowledgeActivation)

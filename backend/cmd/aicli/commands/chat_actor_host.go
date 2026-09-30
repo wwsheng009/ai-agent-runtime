@@ -1761,13 +1761,18 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 	}
 	loopConfig := buildLocalChatLoopConfig(runtimeConfig, session, requestedReasoningEffort)
 	// §6.12 扩展：轻量 spawn_agent 子代理以 agent_session: 义务写入挂起记录后，
+	// run 收尾的 settle 必须能判读子会话终态——接宿主自己的 durable 判读器
+	// （supervision 通知面；未接线时保持 batch-only 语义，已有挂起不受影响）。
 	loopConfig.AgentSessionObligations = h.agentSessionObligationResolver()
 	// §6.1 宿主接线：主 Agent 路由只接主会话。子会话走 aicli.subagents.routing
 	// （scheduler 侧），主 Agent 的开关不得改变子 Agent 行为（§6.3 配置隔离）。
 	applyLocalChatMainAgentRouting(loopConfig, session, isBaseSession)
 	// Phase 1 交付 4：知识层 shadow 拦截（grep/view → exploration_attribution）。
 	// 知识层 off / 账本未启用时 hook 为 nil，行为与无知识层一致（ADR-0003 §4.4）。
-	applyLocalChatToolObservation(loopConfig, session, h)
+	// W6：来源门禁（只读子代理 / 只读会话零写入）与任务作用域随观察透传。
+	observationSubagent := !isBaseSession || strings.TrimSpace(childAgentType) != "" || childDepth > 0 || childReadOnly
+	applyLocalChatToolObservation(loopConfig, session, h,
+		knowledge.ObservationSourceFor(observationSubagent, childReadOnly), localChatObservationTaskID(session))
 	applyLocalChatCompletionRequirement(loopConfig, session, childAgentType, childCompletionRequirement, workspaceRoot)
 	actor, err := runtimechat.NewSessionActor(sessionID, runtimechat.SessionActorConfig{
 		Agent:        apiAgent,
@@ -2234,7 +2239,11 @@ func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runti
 			agentConfig.Options["profile_context"] = cloneSkillContextMap(profileContext)
 		}
 	}
-	applyLocalChatContextOptions(agentConfig, runtimeConfig)
+	var knowledgeActivation *knowledge.Activation
+	if session != nil {
+		knowledgeActivation = session.Knowledge
+	}
+	applyLocalChatContextOptions(agentConfig, runtimeConfig, knowledgeActivation)
 	if guidance := strings.TrimSpace(renderActiveGoalGuidance(session)); guidance != "" {
 		if agentConfig.Options == nil {
 			agentConfig.Options = make(map[string]interface{})
@@ -2676,29 +2685,56 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 	return policy
 }
 
-// applyLocalChatToolObservation 接线 Phase 1 shadow 拦截（ADR-0003）：
-// 知识层 shadow 模式下把 grep/view 的实际输出喂给 ShadowObserver，旁路写入
-// exploration_attribution（与 token_usage_history 同一账本 DB）。
-// 知识层 off / 账本未启用时 hook 为 nil——agent loop 与无知识层逐字节一致。
-func applyLocalChatToolObservation(config *agent.LoopReActConfig, session *ChatSession, host *localChatRuntimeHost) {
+// applyLocalChatToolObservation 接线知识层工具观察链（TUI 与 ACP 共用，
+// ACP 见 agent_stdio.attachSessionKnowledge）：
+//   - Phase 1 shadow 拦截（ADR-0003）：grep/view 的实际输出喂给 ShadowObserver，
+//     旁路写入 exploration_attribution（与 token_usage_history 同一账本 DB）；
+//   - Phase 2 W2 探索记忆采集：同一份观察交给 ExplorationRecorder 写入
+//     exploration_*（异步、有界、失败不冒泡）。
+//
+// W6：source 是宿主判定的观察来源（主会话 / 可写子代理 / 只读子代理 /
+// 只读会话），taskID 是任务作用域（可空）。只读来源的观察不写 exploration
+// memory；shadow 归因面不受门禁影响（观测/度量，不是探索记忆）。
+//
+// 知识层 off / 账本未启用 / reader 角色时对应组件为 nil——hook 保持 nil 或
+// 内部 no-op，agent loop 与无知识层逐字节一致。
+func applyLocalChatToolObservation(config *agent.LoopReActConfig, session *ChatSession, host *localChatRuntimeHost, source knowledge.ObservationSource, taskID string) {
 	if config == nil || session == nil || host == nil {
 		return
 	}
 	observer := knowledge.ShadowObserverFor(session.Knowledge, ledgerAttributionSink(host.ledgerSvc))
-	if observer == nil {
+	recorder := session.Knowledge.Recorder()
+	if observer == nil && recorder == nil {
 		return
 	}
 	config.OnToolObserved = func(ctx context.Context, sessionID string, call runtimetypes.ToolCall, output string, toolErr string) {
-		if _, err := observer.Observe(ctx, knowledge.ObservedCall{
+		observed := knowledge.ObservedCall{
 			SessionID: sessionID,
+			TaskID:    taskID,
 			Tool:      call.Name,
 			Args:      call.Args,
 			Output:    output,
 			Err:       toolErr,
-		}); err != nil {
-			logpkg.Debugf("knowledge: shadow observe %s failed: %v", call.Name, err)
+			Source:    source,
 		}
+		if observer != nil {
+			if _, err := observer.Observe(ctx, observed); err != nil {
+				logpkg.Debugf("knowledge: shadow observe %s failed: %v", call.Name, err)
+			}
+		}
+		// nil-safe：recorder 为 nil（off / reader）时零写入。
+		recorder.Record(ctx, observed)
 	}
+}
+
+// localChatObservationTaskID 解析观察的任务作用域（W6）：只认会话里已存在的
+// 团队任务锚点（active_team_task_id），不编造任务语义；无锚点时回退 session
+// 级工作集（task_id 为空，W1 的 DTO 允许该回退）。
+func localChatObservationTaskID(session *ChatSession) string {
+	if session == nil || session.RuntimeSession == nil {
+		return ""
+	}
+	return runtimeSessionContextString(session.RuntimeSession, chatRuntimeContextActiveTaskID)
 }
 
 // ledgerAttributionSink 把本地账本服务折叠成 exploration_attribution 落库口；
@@ -2866,8 +2902,14 @@ func localChatTeamRoutingConfig(session *ChatSession) *config.AICLISubagentRouti
 	return config.EffectiveTeamRoutingConfig(session.Config)
 }
 
-func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runtimecfg.RuntimeConfig) {
-	if agentConfig == nil || runtimeConfig == nil {
+func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runtimecfg.RuntimeConfig, activation *knowledge.Activation) {
+	if agentConfig == nil {
+		return
+	}
+	// W7 激活切片：知识层装配独立于 context/workspace 段是否存在——mode=on 且
+	// 已激活时新增 key；off / shadow / nil 一律零新增（默认 off 逐字节一致）。
+	applyLocalChatKnowledgeOptions(agentConfig, activation)
+	if runtimeConfig == nil {
 		return
 	}
 	ctxCfg := runtimeConfig.Context
@@ -2964,6 +3006,32 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 	if dsn := strings.TrimSpace(runtimeConfig.Artifact.StoreDSN); dsn != "" {
 		agentConfig.Options["artifact_store_dsn"] = dsn
 	}
+}
+
+// applyLocalChatKnowledgeOptions 把知识层装配写入本地 chat agent 的 options
+// （06 §4 Phase 2 W7 激活切片；TUI 与 ACP 共用 buildLocalChatAgent 路径）。
+//
+// 门控与 runtimeapi 的 applyKnowledgeContextOptions 同口径：仅当 Layer 非 nil
+// 且 `knowledge.mode=on` 时新增 `context_knowledge_mode`（on→signals 保守档）
+// 与 `context_knowledge_layer`；off（默认）/ shadow（ModeShadow 契约：绝不注入
+// prompt）/ 激活失败（nil）零新增，默认 off 行为与改动前逐字节一致。
+func applyLocalChatKnowledgeOptions(agentConfig *agent.Config, activation *knowledge.Activation) {
+	if agentConfig == nil || activation == nil {
+		return
+	}
+	layer := activation.Layer()
+	if layer == nil {
+		return
+	}
+	mode := contextmgr.KnowledgeModeForLayerMode(layer.Mode())
+	if mode == contextmgr.KnowledgeModeOff {
+		return
+	}
+	if agentConfig.Options == nil {
+		agentConfig.Options = make(map[string]interface{})
+	}
+	agentConfig.Options["context_knowledge_mode"] = mode
+	agentConfig.Options["context_knowledge_layer"] = layer
 }
 
 // chatReadOnlyRoots returns the session's read-only exempt external roots (F5):

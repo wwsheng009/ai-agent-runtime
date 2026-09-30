@@ -59,7 +59,9 @@ func TestShadowObserver_GrepComputesCoverageAndWrites(t *testing.T) {
 	require.Equal(t, 1, rec.OverlapN)
 	require.NotNil(t, rec.Coverage)
 	require.InDelta(t, 1.0/3.0, *rec.Coverage, 1e-9)
-	require.False(t, rec.Usable, "coverage < α 时 usable=false")
+	require.Equal(t, 2, rec.BaselineFilesN, "ADR-0008 §4：baseline 文件集合落库")
+	require.Equal(t, 1, rec.OverlapFilesN, "ADR-0008 §4：文件交集落库")
+	require.False(t, rec.Usable, "file_coverage = 1/2 < α 时 usable=false")
 	require.Len(t, rec.QueryHash, 64, "query_hash 是 sha256 十六进制")
 	require.Equal(t, "grep", rec.Tool)
 	require.Equal(t, "shadow", rec.KnowledgeMode)
@@ -84,8 +86,48 @@ func TestShadowObserver_GrepZeroResultStillRecords(t *testing.T) {
 	require.NotNil(t, rec)
 	require.Zero(t, rec.BaselineN)
 	require.Nil(t, rec.Coverage, "baseline_n = 0 时 coverage 必须为 NULL")
+	require.Zero(t, rec.BaselineFilesN, "零结果调用 file-level 分母为 0")
+	require.Zero(t, rec.OverlapFilesN)
 	require.False(t, rec.Usable)
 	require.Len(t, sink.records, 1, "零结果调用也要落库（单独过滤统计）")
+}
+
+// ADR-0008 §4.1：grep 以 file-level 覆盖判 usable——行级覆盖低但文件级完全
+// 命中且经济性通过时 usable = true；部分文件重合（< α）则 false。
+func TestShadowObserver_GrepFileLevelCoverageDrivesUsable(t *testing.T) {
+	index := &fakeShadowIndex{hits: []SearchHit{
+		{Path: "backend/a.go", Line: 10, Name: "A"},
+	}}
+	sink := &fakeAttributionSink{}
+	obs := NewShadowObserver(ShadowConfig{Mode: ModeShadow, Index: index, Sink: sink})
+
+	// 基线 3 行全在 backend/a.go：file_coverage = 1/1 = 1.0 ≥ 0.8，
+	// 而行级 coverage = 1/3 < 0.8 —— 两条口径必须给出不同结论。
+	rec, err := obs.Observe(context.Background(), ObservedCall{
+		Tool:   "grep",
+		Args:   map[string]any{"pattern": "A", "path": "backend"},
+		Output: "backend/a.go:10:func A\nbackend/a.go:22:var a\nbackend/a.go:30:x\n",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	require.Equal(t, 1, rec.BaselineFilesN)
+	require.Equal(t, 1, rec.OverlapFilesN)
+	require.NotNil(t, rec.Coverage)
+	require.InDelta(t, 1.0/3.0, *rec.Coverage, 1e-9, "行级 coverage 保留为诊断")
+	require.True(t, rec.Usable, "file-level 全覆盖时 grep usable = true（ADR-0008 §4.1）")
+
+	// 基线跨 2 个文件、候选只命中 1 个：file_coverage = 0.5 < 0.8 → 不可用。
+	partial, err := obs.Observe(context.Background(), ObservedCall{
+		Tool:   "grep",
+		Args:   map[string]any{"pattern": "A", "path": "backend"},
+		Output: "backend/a.go:10:func A\nbackend/b.go:7:var b\n",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, partial)
+	require.Equal(t, 2, partial.BaselineFilesN)
+	require.Equal(t, 1, partial.OverlapFilesN)
+	require.False(t, partial.Usable, "file_coverage = 0.5 < α 时 usable=false")
+	require.Len(t, sink.records, 2, "两次调用都落库（含 file-level 两列）")
 }
 
 // view 路径：baseline 是 offset/limit 覆盖的行，candidate 是与区间相交的符号 span。
@@ -110,6 +152,8 @@ func TestShadowObserver_ViewRangeCoverage(t *testing.T) {
 	require.NotNil(t, rec.Coverage)
 	require.InDelta(t, 3.0/20.0, *rec.Coverage, 1e-9)
 	require.False(t, rec.Usable)
+	require.Zero(t, rec.BaselineFilesN, "ADR-0008 §4.3：view 通道不写 file-level 列")
+	require.Zero(t, rec.OverlapFilesN)
 }
 
 // 全覆盖 + 更便宜 → usable = true（coverage >= α 且 economy <= 1）。

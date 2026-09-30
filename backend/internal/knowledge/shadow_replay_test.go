@@ -176,6 +176,9 @@ func TestPhase1ShadowReplay(t *testing.T) {
 			float64(fileLevel.overlapFiles)/float64(fileLevel.baselineFiles),
 			float64(fileLevel.answerable)/float64(fileLevel.calls))
 	}
+	if fileLevel.mismatches > 0 {
+		t.Fatalf("file-level 落库列与内存集合复算不一致：mismatches=%d（ADR-0008 §8.1 live 写入未生效）", fileLevel.mismatches)
+	}
 	if os.Getenv("KNOWLEDGE_SHADOW_DEBUG") == "1" {
 		limit := len(records)
 		if limit > 12 {
@@ -228,12 +231,16 @@ func loadReplayCalls(t *testing.T, path string) []replayCall {
 // 覆盖率 := |G_files ∩ K_files| / |G_files|，只在 baseline 文件集非空时进分母；
 // file_precision := Σ|G_files ∩ K_files| / Σ|G_files|；answerable_rate :=
 // candidate_n > 0 的调用占比。
+//
+// 自 ADR-0008 §4 起两列已落库：本结构同时把"内存集合复算值"与落库列对比，
+// mismatches > 0 说明 writer 没有把 file-level 值写进去（live 接入验证项）。
 type replayFileLevel struct {
 	calls         int
 	denominator   int
 	answerable    int
 	overlapFiles  int
 	baselineFiles int
+	mismatches    int
 	coverages     []float64
 }
 
@@ -251,6 +258,9 @@ func (f *replayFileLevel) add(rec *entity.ExplorationAttribution, detail Observa
 		if _, ok := detail.CandidateFiles[file]; ok {
 			overlap++
 		}
+	}
+	if rec.BaselineFilesN != len(detail.BaselineFiles) || rec.OverlapFilesN != overlap {
+		f.mismatches++
 	}
 	f.overlapFiles += overlap
 	f.baselineFiles += len(detail.BaselineFiles)

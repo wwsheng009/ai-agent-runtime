@@ -1,8 +1,8 @@
 # Code Knowledge Runtime（知识层）文档索引
 
-> 最后更新：2026-09-29
+> 最后更新：2026-09-30
 > 本目录描述"代码知识运行时"（Code Knowledge Runtime）的设计与落地计划。
-> 当前阶段：**Phase 0 已落地**（2026-09-20 核心 5 交付 + 2026-09-28 交付 7 `exploration_attribution` 建表）；**Phase 1 主门槛已通过**（2026-09-28 门禁 ADR-0001 / 0003（口径）/ 0007 已 Accept；2026-09-29 交付 1–6 全部完成——含 Java/C++ 粗符号与文件软删除对账；**同日 `Phase1-shadow` 实测 v1 已执行**：真实调用重放 n=400，M1=20.81 %（view 48.4 % / grep 行级 0.47 %；grep file-level 对照 mean 31.8 %）——2026-09-29 经 ADR-0008（file-level，Accepted）+ α=0.8 裁决后复核：**主门槛通过**（合并 M1=35.95 % ≥ 0.31）；**P2 门禁已解除**（2026-09-29：ADR-0004 Accepted，待开工）；**三个入口 live 验证已通过**（aicli cmd+tui + ACP + runtime-server，见 [`reports/phase1_shadow_report.md`](reports/phase1_shadow_report.md) §4.5）。
+> 当前阶段：**Phase 0 已落地**（2026-09-20 核心 5 交付 + 2026-09-28 交付 7 `exploration_attribution` 建表）；**Phase 1 主门槛已通过**（2026-09-28 门禁 ADR-0001 / 0003（口径）/ 0007 已 Accept；2026-09-29 交付 1–6 全部完成——含 Java/C++ 粗符号与文件软删除对账；**同日 `Phase1-shadow` 实测 v1 已执行**：真实调用重放 n=400，M1=20.81 %（view 48.4 % / grep 行级 0.47 %；grep file-level 对照 mean 31.8 %）——2026-09-29 经 ADR-0008（file-level，Accepted）+ α=0.8 裁决后复核：**主门槛通过**（合并 M1=35.95 % ≥ 0.31）；**Phase 2 已实现完成**（2026-09-30，W1–W7；遗留见 06 §4 W7）；**三个入口 live 验证已通过**（aicli cmd+tui + ACP + runtime-server，见 [`reports/phase1_shadow_report.md`](reports/phase1_shadow_report.md) §4.5）。
 
 ---
 
@@ -86,7 +86,7 @@
 |---|---|---|---|
 | 0 | 基线与契约 | **已完成**（2026-09-28） | 可测量、`mode=off` 行为不变 |
 | 1 | 索引 MVP（shadow） | **主门槛通过**（2026-09-29：交付 1–6 已完成；shadow v1 经 ADR-0008 file-level 口径复核，合并 M1=35.95 % ≥ 0.31；live 验证 3/3 入口通过；单文件增量口径待重议） | M1 调用级可用率（α=0.8，门槛 0.31 已定稿） |
-| 2 | Exploration Memory + Planner | **门禁已解除，待开工**（2026-09-29：ADR-0004 Accepted） | 重复探索 ↓ ≥ 30%、`unsafe_reuse=0` |
+| 2 | Exploration Memory + Planner | **实现完成（2026-09-30，W1–W7；遗留见 06 §4 W7）** | 重复探索 ↓ ≥ 30%、`unsafe_reuse=0` |
 | 3 | Code API 与工具面收敛 | 未开始 | 探索 token ↓ ≥ 40%、fallback ≤ 30% |
 | 4 | Adapter SPI 与可选 LSP | 未开始 | 精度 ≥ 90%、召回 ≥ 85% |
 | 5 | Change Manager 与一致性 | 未开始 | 增量 = 全量、stale 判定 100% |

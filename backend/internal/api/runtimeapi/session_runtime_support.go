@@ -4407,6 +4407,9 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	disableTools := false
 	childReadOnly := false
 	childDepth := 0
+	// W6：观察任务作用域（团队任务激活时存在）；空串表示无任务语义，
+	// 探索记忆回退 session 级工作集，不编造 task id。
+	observationTaskID := ""
 	// 会话存储（session_history.sqlite）可能与并发 aicli CLI 进程共享，被写锁
 	// 占用时 Get 会阻塞在 sqlite busy_timeout / 应用层重试。带截止时间查询，
 	// 失败时降级为默认配置，而不是让请求无限挂起（前端表现为 "signal timed out"）。
@@ -4450,6 +4453,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		if value, ok := sessionmeta.Int(session.Metadata.Context, toolbroker.AgentSessionContextDepth); ok {
 			childDepth = value
 		}
+		observationTaskID = getContextString(sessionmeta.ActiveTeamTaskID)
 	}
 
 	selectedConfig := runtimeConfig
@@ -4491,7 +4495,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		agentConfig.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
 		agentConfig.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
 		agentConfig.MaxRepeatedPollCalls = selectedConfig.Agent.MaxRepeatedPollCalls
-		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig)
+		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig, h.knowledgeActivation)
 	}
 	if streamRequested || strings.TrimSpace(requestedReasoningEffort) != "" {
 		if agentConfig.Options == nil {
@@ -4586,7 +4590,11 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 	applyAPISessionCompletionRequirement(loopConfig, profileState, childAgentType, childCompletionRequirement, workspacePath)
 	// Phase 1 交付 4：知识层 shadow 拦截（grep/view → exploration_attribution）。
 	// 未注入观察器（知识层 off / 账本不可用）时 hook 为 nil，行为与无知识层一致。
-	applyAPISessionToolObservation(loopConfig, h, sessionID)
+	// W6：来源门禁与子代理判定同口径（agent_type / depth / read_only）——只读
+	// 子代理 / 只读会话的观察零写入；可写子代理按 task 作用域写入。
+	observationSubagent := strings.TrimSpace(childAgentType) != "" || childDepth > 0 || childReadOnly
+	applyAPISessionToolObservation(loopConfig, h, sessionID,
+		knowledge.ObservationSourceFor(observationSubagent, childReadOnly), observationTaskID)
 
 	// The session lease is scoped to each run rather than to the actor
 	// lifetime. The initial acquisition above guards actor construction
@@ -4857,28 +4865,47 @@ func applyAPISessionCompletionRequirement(config *agent.LoopReActConfig, profile
 	config.CompletionRequirement = agent.NormalizeCompletionRequirement(requirement)
 }
 
-// applyAPISessionToolObservation 接线 Phase 1 shadow 拦截（ADR-0003 §4.4）：
-// 宿主经 SetKnowledgeShadow 注入观察器时，把 grep/view 的最终结果旁路给
-// ShadowObserver（只读索引 + 旁路落库，不影响工具结果）；未注入时 hook 保持
-// nil，agent loop 行为与无知识层逐字节一致。
-func applyAPISessionToolObservation(config *agent.LoopReActConfig, h *Handler, sessionID string) {
-	if config == nil || h == nil || h.knowledgeShadow == nil {
+// applyAPISessionToolObservation 接线知识层工具观察链：
+//   - Phase 1 shadow 拦截（ADR-0003 §4.4）：grep/view 的最终结果旁路给
+//     ShadowObserver（只读索引 + 旁路落库）；
+//   - Phase 2 W2 探索记忆采集：同一份观察交给 ExplorationRecorder 写入
+//     exploration_*（异步、有界、失败不冒泡）。
+//
+// W6：source 是宿主判定的观察来源（主会话 / 可写子代理 / 只读子代理 /
+// 只读会话），taskID 是任务作用域（可空）。只读来源的观察不写 exploration
+// memory；shadow 归因面不受门禁影响（它是观测/度量，不是探索记忆）。
+//
+// 宿主经 SetKnowledgeShadow / SetKnowledgeRecorder 注入；两者都未注入时 hook
+// 保持 nil，agent loop 行为与无知识层逐字节一致。
+func applyAPISessionToolObservation(config *agent.LoopReActConfig, h *Handler, sessionID string, source knowledge.ObservationSource, taskID string) {
+	if config == nil || h == nil {
 		return
 	}
 	observer := h.knowledgeShadow
+	recorder := h.knowledgeRecorder
+	if observer == nil && recorder == nil {
+		return
+	}
 	config.OnToolObserved = func(ctx context.Context, sid string, call runtimetypes.ToolCall, output string, toolErr string) {
 		if strings.TrimSpace(sid) == "" {
 			sid = sessionID
 		}
-		if _, err := observer.Observe(ctx, knowledge.ObservedCall{
+		observed := knowledge.ObservedCall{
 			SessionID: sid,
+			TaskID:    taskID,
 			Tool:      call.Name,
 			Args:      call.Args,
 			Output:    output,
 			Err:       toolErr,
-		}); err != nil {
-			logger.Debugf("knowledge: shadow observe %s failed: %v", call.Name, err)
+			Source:    source,
 		}
+		if observer != nil {
+			if _, err := observer.Observe(ctx, observed); err != nil {
+				logger.Debugf("knowledge: shadow observe %s failed: %v", call.Name, err)
+			}
+		}
+		// nil-safe：recorder 为 nil（off / reader / 未接线）时零写入。
+		recorder.Record(ctx, observed)
 	}
 }
 

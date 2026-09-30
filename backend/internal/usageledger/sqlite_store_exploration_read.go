@@ -24,7 +24,8 @@ func (s *SQLiteStore) ListExplorationAttribution(ctx context.Context, since time
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, COALESCE(session_id, ''), COALESCE(turn_id, ''), COALESCE(request_id, ''),
 		       tool, COALESCE(query_hash, ''), COALESCE(project_id, ''),
-		       baseline_n, candidate_n, overlap_n, baseline_tokens, candidate_tokens,
+		       baseline_n, baseline_files_n, candidate_n, overlap_n, overlap_files_n,
+		       baseline_tokens, candidate_tokens,
 		       coverage, economy, usable, COALESCE(source, ''), knowledge_mode, created_at
 		FROM exploration_attribution
 		WHERE created_at >= ?
@@ -47,7 +48,7 @@ func (s *SQLiteStore) ListExplorationAttribution(ctx context.Context, since time
 		if err := rows.Scan(
 			&rec.ID, &rec.SessionID, &rec.TurnID, &rec.RequestID,
 			&rec.Tool, &rec.QueryHash, &rec.ProjectID,
-			&rec.BaselineN, &rec.CandidateN, &rec.OverlapN,
+			&rec.BaselineN, &rec.BaselineFilesN, &rec.CandidateN, &rec.OverlapN, &rec.OverlapFilesN,
 			&rec.BaselineTokens, &rec.CandidateTokens,
 			&coverage, &economy, &usable, &rec.Source, &rec.KnowledgeMode, &createdAt,
 		); err != nil {

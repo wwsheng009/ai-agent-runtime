@@ -87,6 +87,38 @@ type Store interface {
 	// 纯读：reader 角色也可用它支撑状态面。
 	LatestIndexJob(ctx context.Context, workspaceID string) (*IndexJob, error)
 
+	// ---- 探索记忆（06 §4 Phase 2 W1 / S1）----
+	//
+	// 三张 exploration_* 表已在 0001 冻结，以下方法零迁移即可读写。
+	// 写方法在 reader 角色下返回 ErrReadOnlyStore（硬失败，不静默降级）；
+	// 读方法 reader 可用。节点的 knowledge_version 必填（非空）。
+
+	// UpsertExplorationSession 以 upsert 语义登记一次探索会话，返回稳定 id。
+	// 身份为 (workspace_id, session_id, task_id)，重复登记只刷新 updated_at。
+	UpsertExplorationSession(ctx context.Context, sess ExplorationSession) (string, error)
+
+	// AppendExplorationNode 追加一条探索节点，返回稳定 id。
+	// 同一 exploration_id 内同一 target 重复写入是幂等的：use_count 累加、
+	// last_used_at 刷新，其余可变量取最新观察值。
+	AppendExplorationNode(ctx context.Context, node ExplorationNode) (string, error)
+
+	// TouchExplorationNode 记录一次复用：use_count+1、last_used_at=at
+	// （零值 at 取当前时间）；节点不存在时返回错误。
+	TouchExplorationNode(ctx context.Context, nodeID string, at time.Time) error
+
+	// AppendExplorationEdge 追加一条节点关系，返回稳定 id；同一四元组
+	// (exploration_id, from, to, edge_type) 重复追加幂等（权重取最新值）。
+	AppendExplorationEdge(ctx context.Context, edge ExplorationEdge) (string, error)
+
+	// LookupExplorationNodes 返回工作区内的探索节点：给出 TaskID 查任务工作集，
+	// 为空则跨任务按 Target/Type 过滤；Limit <= 0 时使用 store 默认上限。
+	// 纯读，reader 可用。
+	LookupExplorationNodes(ctx context.Context, q ExplorationNodeQuery) ([]ExplorationNode, error)
+
+	// LatestExplorationSession 返回 (workspace_id, session_id) 下最近更新的
+	// 会话；ok=false 表示尚未登记。纯读，reader 可用。
+	LatestExplorationSession(ctx context.Context, workspaceID, sessionID string) (ExplorationSession, bool, error)
+
 	// Close 释放句柄；必须幂等。
 	Close() error
 }

@@ -42,6 +42,10 @@ type Activation struct {
 	ran    bool
 
 	onDone func(IndexResult, error)
+
+	// Phase 2 W2：探索记忆采集器（惰性创建、随 Activation 关闭）。
+	recorderMu sync.Mutex
+	recorder   *ExplorationRecorder
 }
 
 // Activate 打开 workspace 上的知识层，并在本进程是 owner 时后台启动首次全量索引。
@@ -124,6 +128,37 @@ func (a *Activation) Role() Role {
 
 // Enabled 报告知识层是否参与执行路径。
 func (a *Activation) Enabled() bool { return a.Mode() != ModeOff }
+
+// Recorder 返回探索记忆采集器（06 §4 Phase 2 W2）。
+//
+// 门控与 ShadowObserverFor 同口径：仅 mode=shadow|on 且本进程是 owner 时返回
+// 非 nil；off / reader / 未打开 store 时返回 nil（调用方无需分支，nil 上调用
+// Record/Flush/Close 都是 no-op，保证零写入）。采集器惰性创建并随本 Activation
+// 关闭（Close 会等待其队列排空/取消），同一 Activation 多次调用返回同一实例。
+func (a *Activation) Recorder() *ExplorationRecorder {
+	if a == nil || a.layer == nil || a.layer.store == nil {
+		return nil
+	}
+	mode := a.layer.Mode()
+	if mode != ModeShadow && mode != ModeOn {
+		return nil
+	}
+	if a.layer.Role() != RoleOwner {
+		return nil
+	}
+	a.recorderMu.Lock()
+	defer a.recorderMu.Unlock()
+	if a.recorder == nil {
+		layer := a.layer
+		a.recorder = NewExplorationRecorder(ExplorationRecorderConfig{
+			Store:          layer.store,
+			Workspace:      layer.Workspace(),
+			Mode:           mode,
+			workspaceIDFor: layer.ensureWorkspace,
+		})
+	}
+	return a.recorder
+}
 
 // Workspace 返回被索引的工作区根目录。
 func (a *Activation) Workspace() string {
@@ -221,6 +256,14 @@ func (a *Activation) LastIndex() (IndexResult, error, bool) {
 func (a *Activation) Close() error {
 	if a == nil {
 		return nil
+	}
+	// 先停采集器：它的 worker 可能在写 store，必须在关库之前退出。
+	a.recorderMu.Lock()
+	recorder := a.recorder
+	a.recorder = nil
+	a.recorderMu.Unlock()
+	if recorder != nil {
+		recorder.Close()
 	}
 	if a.cancel != nil {
 		a.cancel()

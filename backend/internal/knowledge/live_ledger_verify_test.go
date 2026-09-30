@@ -29,9 +29,13 @@ func TestLiveLedgerVerify(t *testing.T) {
 	t.Logf("calls=%d denominator=%d zero=%d usable=%d M1=%.4f M2=%.4f M3=%.4f M4=%.4f",
 		report.Calls, report.Denominator, report.ZeroBaseline, report.Usable,
 		report.M1, report.M2, report.M3, report.M4)
+	t.Logf("file_level: denom=%d usable=%d M1File=%.4f coverage_mean=%.4f p50=%.4f p90=%.4f file_precision=%.4f answerable_rate=%.4f",
+		report.FileDenominator, report.FileUsable, report.M1File,
+		report.FileCoverageMean, report.FileCoverageP50, report.FileCoverageP90,
+		report.FilePrecision, report.AnswerableRate)
 	for tool, b := range report.ByTool {
-		t.Logf("tool=%s calls=%d denom=%d usable=%d M1=%.4f M2=%.4f M3=%.4f coverage_p50=%.4f",
-			tool, b.Calls, b.Denominator, b.Usable, b.M1, b.M2, b.M3, b.CoverageP50)
+		t.Logf("tool=%s calls=%d denom=%d usable=%d M1=%.4f file_denom=%d M1File=%.4f M2=%.4f M3=%.4f coverage_p50=%.4f",
+			tool, b.Calls, b.Denominator, b.Usable, b.M1, b.FileDenominator, b.M1File, b.M2, b.M3, b.CoverageP50)
 	}
 	t.Logf("calibrated_alpha=%.2f", CalibrateShadowAlpha(rows))
 }

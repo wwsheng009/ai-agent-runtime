@@ -2009,3 +2009,34 @@ func TestSplitManagedMessagesAdoptsPostUserDynamicContextAsRawHistory(t *testing
 	require.Equal(t, []string{"hi", "frozen recall", "answer", "fresh recall"}, []string{raw[0].Content, raw[1].Content, raw[2].Content, raw[3].Content})
 	require.True(t, raw[3].Metadata.GetBool(metaContextSnapshot, false))
 }
+
+func TestStrategyKnowledgeDefaultsAndOverrides(t *testing.T) {
+	for _, profile := range []string{BudgetProfileCompact, BudgetProfileBalanced, BudgetProfileExtended} {
+		strategy := StrategyForProfile(profile)
+		if strategy.KnowledgeMode != KnowledgeModeOff {
+			t.Fatalf("profile %q: expected knowledge off by default, got %q", profile, strategy.KnowledgeMode)
+		}
+		if strategy.MinKnowledgeQueryLength != 0 || strategy.ReuseConfidenceFloor != 0 {
+			t.Fatalf("profile %q: expected zero knowledge knobs, got %+v", profile, strategy)
+		}
+	}
+
+	resolved := ResolveStrategy(BudgetProfileBalanced, Strategy{
+		KnowledgeMode:           KnowledgeModeBroad,
+		MinKnowledgeQueryLength: 6,
+		ReuseConfidenceFloor:    0.80,
+	})
+	if resolved.KnowledgeMode != KnowledgeModeBroad ||
+		resolved.MinKnowledgeQueryLength != 6 ||
+		resolved.ReuseConfidenceFloor != 0.80 {
+		t.Fatalf("knowledge overrides not applied: %+v", resolved)
+	}
+
+	if normalizeKnowledgeMode("") != KnowledgeModeOff ||
+		normalizeKnowledgeMode("disabled") != KnowledgeModeOff ||
+		normalizeKnowledgeMode("garbage") != KnowledgeModeOff ||
+		normalizeKnowledgeMode(KnowledgeModeSignals) != KnowledgeModeSignals ||
+		normalizeKnowledgeMode(KnowledgeModeBroad) != KnowledgeModeBroad {
+		t.Fatal("unexpected knowledge mode normalization")
+	}
+}

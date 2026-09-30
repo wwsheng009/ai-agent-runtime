@@ -41,12 +41,18 @@ type AttributionSink interface {
 type ObservedCall struct {
 	SessionID string
 	TurnID    string
-	Tool      string
-	Args      map[string]any
+	// TaskID 是观察所属的任务作用域（W6：per-task 写入）。空串表示宿主未提供
+	// 任务语义——此时回退 session 级工作集，不编造任务 id。
+	TaskID string
+	Tool   string
+	Args   map[string]any
 	// Output 是工具实际返回给模型的文本（baseline 的唯一来源）。
 	Output string
 	// Err 非空表示调用失败；失败调用没有可信 baseline，不落行。
 	Err string
+	// Source 标记观察来源（W6 写入门禁）：只读子代理 / 只读会话 / 未标注
+	// 一律不写 exploration memory（见 ObservationSource）。
+	Source ObservationSource
 }
 
 // ShadowConfig 组装一个 ShadowObserver。
@@ -133,6 +139,7 @@ func ProjectIDForWorkspace(workspace string) string {
 //
 // 不落库、不改变 Observe 语义；只供 Phase1-shadow 的口径裁决测量使用
 // （行级覆盖 vs file-level 覆盖，见 reports/phase1_shadow_report.md）。
+// grep 的文件集合另以计数形式落 baseline_files_n / overlap_files_n（ADR-0008 §4）。
 type ObservationDetail struct {
 	BaselineFiles  map[string]struct{}
 	CandidateFiles map[string]struct{}
@@ -171,6 +178,8 @@ func (o *ShadowObserver) observeDetailed(ctx context.Context, call ObservedCall)
 		detail.BaselineFiles = grepObs.BaselineFiles
 		detail.CandidateFiles = grepObs.CandidateFiles
 	case "view":
+		// ADR-0008 §4.3：view 通道口径不变（行级区间覆盖）。新列只服务 grep
+		// 的 file-level 主判据，view 行保持默认 0，不参与 file-level M1。
 		rec, hash = o.observeView(ctx, call)
 		if file := relativizeWorkspacePath(argString(call.Args, "file_path"), o.cfg.Workspace); file != "" {
 			detail.BaselineFiles = map[string]struct{}{file: {}}
@@ -208,8 +217,10 @@ func (o *ShadowObserver) observeGrep(ctx context.Context, call ObservedCall) (*e
 
 // shadowGrepObservation 是 grep 观测的完整结果：落库行 + 两侧文件集合。
 //
-// 文件集合不落库（ADR-0003 §4.1 冻结了 exploration_attribution 的列集），
-// 只供 Phase1-shadow 的口径裁决测量使用（行级覆盖 vs file-level 覆盖）。
+// 文件集合本身不落库（隐私/列集约束，ADR-0003 §4.1 只冻结了行级列集）；
+// 自 ADR-0008 §4 起，两侧文件集合的大小与交集以计数形式落到
+// exploration_attribution.baseline_files_n / overlap_files_n 两列。
+// 其余集合仅供 Phase1-shadow 的口径裁决测量使用。
 type shadowGrepObservation struct {
 	Record         *entity.ExplorationAttribution
 	BaselineFiles  map[string]struct{}
@@ -247,7 +258,12 @@ func (o *ShadowObserver) observeGrepDetailed(ctx context.Context, call ObservedC
 	for _, key := range baselineKeys {
 		out.BaselineFiles[pathFromKey(key)] = struct{}{}
 	}
+	// ADR-0008 §4.1：grep 的 usable 主判据是 file-level 覆盖，分母在观察时刻
+	// 即可取得（D2 可现场测量），必须落到基线列而不是只留在内存集合里。
+	rec.BaselineFilesN = len(out.BaselineFiles)
 	if len(rawPatterns) == 0 {
+		// 无 pattern 可检索：候选为空 → overlap_files_n = 0，file-level 不可用。
+		fillShadowFileUsable(rec, o.cfg.Alpha)
 		return out, hash
 	}
 
@@ -305,6 +321,8 @@ func (o *ShadowObserver) observeGrepDetailed(ctx context.Context, call ObservedC
 	rec.OverlapN = overlapCount(baselineKeys, candidateKeys)
 	rec.CandidateTokens = estimateTokens(strings.Join(rendered, "\n"))
 	fillShadowMetrics(rec, o.cfg.Alpha)
+	rec.OverlapFilesN = overlapFileSets(out.BaselineFiles, out.CandidateFiles)
+	fillShadowFileUsable(rec, o.cfg.Alpha)
 	return out, hash
 }
 
@@ -365,7 +383,7 @@ func (o *ShadowObserver) observeView(ctx context.Context, call ObservedCall) (*e
 	return rec, hash
 }
 
-// fillShadowMetrics 按 ADR-0003 §4.2 计算 coverage / economy / usable。
+// fillShadowMetrics 按 ADR-0003 §4.2 计算行级 coverage / economy / usable。
 //
 // coverage := overlap_n / baseline_n（baseline_n > 0）
 // economy  := candidate_tokens / baseline_tokens
@@ -373,6 +391,10 @@ func (o *ShadowObserver) observeView(ctx context.Context, call ObservedCall) (*e
 //
 // baseline_tokens == 0 且 baseline_n > 0 时 economy 记 NULL，usable 只由
 // coverage 决定（两侧都是零成本，等价于通过经济性）。
+//
+// ADR-0008 §4.1 起，grep 通道的 usable 主判据改为 file-level：本函数写入的
+// 行级 coverage 降为诊断指标，grep 的 usable 由 fillShadowFileUsable 覆写；
+// view 通道口径不变，仍以区间行级覆盖判定。
 func fillShadowMetrics(rec *entity.ExplorationAttribution, alpha float64) {
 	if rec.BaselineN > 0 {
 		coverage := float64(rec.OverlapN) / float64(rec.BaselineN)
@@ -387,6 +409,44 @@ func fillShadowMetrics(rec *entity.ExplorationAttribution, alpha float64) {
 		usable = *rec.Economy <= 1.0
 	}
 	rec.Usable = usable
+}
+
+// fillShadowFileUsable 按 ADR-0008 §4.1 用 file-level 覆盖重算 grep 的 usable：
+//
+//	file_coverage := overlap_files_n / baseline_files_n
+//	usable        := (file_coverage >= α) AND (economy <= 1.0)
+//
+// 行级 coverage / economy 保留为诊断指标（不参与本判定）。baseline_files_n == 0
+// （零结果或路径未解析）时 usable = false，且该行不构成 file-level M1 分母
+// （历史行语义：新列默认 0，不参与 file-level M1，ADR-0008 §6.2）。
+func fillShadowFileUsable(rec *entity.ExplorationAttribution, alpha float64) {
+	if rec == nil {
+		return
+	}
+	if rec.BaselineFilesN <= 0 {
+		rec.Usable = false
+		return
+	}
+	fileCoverage := float64(rec.OverlapFilesN) / float64(rec.BaselineFilesN)
+	usable := fileCoverage >= alpha
+	if usable && rec.Economy != nil {
+		usable = *rec.Economy <= 1.0
+	}
+	rec.Usable = usable
+}
+
+// overlapFileSets 返回两个文件集合的交集大小（file-level 分子）。
+func overlapFileSets(a, b map[string]struct{}) int {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	overlap := 0
+	for file := range a {
+		if _, ok := b[file]; ok {
+			overlap++
+		}
+	}
+	return overlap
 }
 
 const shadowCandidateLimit = 100

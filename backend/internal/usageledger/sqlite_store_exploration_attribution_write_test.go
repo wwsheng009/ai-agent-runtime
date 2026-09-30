@@ -25,7 +25,8 @@ func TestSQLiteStore_AppendExplorationAttributionRoundTrip(t *testing.T) {
 	rec := &entity.ExplorationAttribution{
 		ID: "attr-1", SessionID: "sess-1", TurnID: "turn-1", RequestID: "req-1",
 		Tool: "grep", QueryHash: strings.Repeat("a", 64), ProjectID: "proj",
-		BaselineN: 4, CandidateN: 2, OverlapN: 2, BaselineTokens: 100, CandidateTokens: 75,
+		BaselineN: 4, BaselineFilesN: 2, CandidateN: 2, OverlapN: 2, OverlapFilesN: 2,
+		BaselineTokens: 100, CandidateTokens: 75,
 		Coverage: &coverage, Economy: &economy, Usable: true,
 		Source: "heuristic", KnowledgeMode: "shadow", CreatedAt: time.Now().UTC(),
 	}
@@ -33,22 +34,27 @@ func TestSQLiteStore_AppendExplorationAttributionRoundTrip(t *testing.T) {
 
 	var (
 		gotTool, gotHash, gotMode             string
-		gotBaselineN, gotCandidateN           int
+		gotBaselineN, gotBaselineFilesN       int
+		gotCandidateN, gotOverlapFilesN       int
 		gotOverlapN, gotUsable                int
 		gotBaselineTokens, gotCandidateTokens int
 		gotCoverage, gotEconomy               float64
 	)
 	require.NoError(t, store.db.QueryRowContext(ctx, `
-		SELECT tool, query_hash, baseline_n, candidate_n, overlap_n, baseline_tokens,
-		       candidate_tokens, coverage, economy, usable, knowledge_mode
+		SELECT tool, query_hash, baseline_n, baseline_files_n, candidate_n, overlap_n,
+		       overlap_files_n, baseline_tokens, candidate_tokens, coverage, economy,
+		       usable, knowledge_mode
 		FROM exploration_attribution WHERE id = ?`, "attr-1").Scan(
-		&gotTool, &gotHash, &gotBaselineN, &gotCandidateN, &gotOverlapN, &gotBaselineTokens,
-		&gotCandidateTokens, &gotCoverage, &gotEconomy, &gotUsable, &gotMode))
+		&gotTool, &gotHash, &gotBaselineN, &gotBaselineFilesN, &gotCandidateN, &gotOverlapN,
+		&gotOverlapFilesN, &gotBaselineTokens, &gotCandidateTokens, &gotCoverage, &gotEconomy,
+		&gotUsable, &gotMode))
 	require.Equal(t, "grep", gotTool)
 	require.Equal(t, strings.Repeat("a", 64), gotHash)
 	require.Equal(t, 4, gotBaselineN)
+	require.Equal(t, 2, gotBaselineFilesN, "ADR-0008 §4：file-level 分母落库")
 	require.Equal(t, 2, gotCandidateN)
 	require.Equal(t, 2, gotOverlapN)
+	require.Equal(t, 2, gotOverlapFilesN, "ADR-0008 §4：file-level 分子落库")
 	require.Equal(t, 100, gotBaselineTokens)
 	require.Equal(t, 75, gotCandidateTokens)
 	require.InDelta(t, 0.5, gotCoverage, 1e-9)

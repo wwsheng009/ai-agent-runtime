@@ -31,6 +31,13 @@ type ExplorationAttribution struct {
 	CandidateN int
 	// OverlapN = |G ∩ K|。
 	OverlapN int
+	// BaselineFilesN / OverlapFilesN 是 ADR-0008 §4 的 file-level 口径（只用于
+	// grep 通道）：两侧文件集合大小与交集。grep 的 usable 判据以 file_coverage
+	// := OverlapFilesN / BaselineFilesN 为准，行级列降为诊断；view 通道口径不变
+	// （行级区间覆盖），两列保持 0。历史行/未启用（默认 0）不参与 file-level M1
+	// （ADR-0008 §6.2）。
+	BaselineFilesN int
+	OverlapFilesN  int
 	// BaselineTokens / CandidateTokens 是两侧内容的 token 估计值。
 	BaselineTokens  int
 	CandidateTokens int

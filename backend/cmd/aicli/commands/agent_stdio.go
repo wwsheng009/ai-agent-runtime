@@ -986,7 +986,8 @@ func (h *acpSessionHost) attachSessionKnowledge(hostSess *acpHostSession, worksp
 		return
 	}
 	// 同一句柄挂到 ChatSession：SessionActor 构建时据此接线 Phase 1 shadow
-	// 拦截（与 TUI 同口径，见 applyLocalChatToolObservation）。mode=off 时上面
+	// 拦截与 Phase 2 W2 探索记忆采集（与 TUI 同口径，共用
+	// applyLocalChatToolObservation，ACP 无需单独 hook）。mode=off 时上面
 	// 已提前返回 nil，行为与无知识层一致。
 	if hostSess.chat != nil {
 		hostSess.chat.Knowledge = act

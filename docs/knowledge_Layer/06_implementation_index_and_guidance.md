@@ -16,7 +16,7 @@
 | 评审者 | `04` §2 / §6 / 附录 B，配合本文 §3 |
 | 新人 | `README.md` §2 → 本文 §1、§2 |
 
-**一句话状态**：Phase 0 **核心 5 交付已完成**（2026-09-20）——含基线报告（3 个仓库 + 5 真实任务 + 7 条 LLM 记录）；**Phase 1 门禁已解除**：`0001` / `0007` / `0003`（口径）已于 2026-09-28 标为 `Accepted`（owner 授权代改，裁决记录见 `CHANGELOG.md`），其余条按各自 Gate 在对应 Phase 前 Accept；ADR-0003 的 α 阈值已实测并**定稿**（2026-09-29：ADR-0008 Accepted 采用 file-level 口径、α=0.8、Phase 1 门槛 M1 ≥ 0.31，主门槛复核通过；见 `04` §7.6 与报告 §5.1）。**ADR-0004 已于 2026-09-29 Accepted，P2 门禁解除（待开工）**。文档治理尾项（§9 条目 8 / 9：`00_` 归档 + `01` 边界 / `03` 拆分）**已于 2026-09-28 完成**（记录见 `CHANGELOG.md` 补记与本文 §9.3；`01` 正文逐节删减仍留待办 **#18**），属文档维护，**不影响工程验收**。
+**一句话状态**：Phase 0 **核心 5 交付已完成**（2026-09-20）——含基线报告（3 个仓库 + 5 真实任务 + 7 条 LLM 记录）；**Phase 1 门禁已解除**：`0001` / `0007` / `0003`（口径）已于 2026-09-28 标为 `Accepted`（owner 授权代改，裁决记录见 `CHANGELOG.md`），其余条按各自 Gate 在对应 Phase 前 Accept；ADR-0003 的 α 阈值已实测并**定稿**（2026-09-29：ADR-0008 Accepted 采用 file-level 口径、α=0.8、Phase 1 门槛 M1 ≥ 0.31，主门槛复核通过；见 `04` §7.6 与报告 §5.1）。**ADR-0004 已于 2026-09-29 Accepted，P2 门禁解除；Phase 2 已实现完成（2026-09-30，W1–W7，见 §4「W7」小节）**。文档治理尾项（§9 条目 8 / 9：`00_` 归档 + `01` 边界 / `03` 拆分）**已于 2026-09-28 完成**（记录见 `CHANGELOG.md` 补记与本文 §9.3；`01` 正文逐节删减仍留待办 **#18**），属文档维护，**不影响工程验收**。
 
 ---
 
@@ -28,8 +28,8 @@
 |---|---|---|---|
 | 0 | 基线与契约 | **核心 5 交付已完成**（2026-09-20）；文档治理尾项已完成（§9 8/9，2026-09-28） | 无（可立即开工） |
 | 1 | 索引 MVP（shadow） | **主门槛通过**（2026-09-29：交付 1–6 完成；shadow v1 经 ADR-0008 file-level 口径复核，合并 M1=35.95 % ≥ 0.31；live 验证 3/3 入口通过；性能已按 §7.4 校准（≤360 s）；单文件增量实测 Fail，待口径重议） | ✅ 已满足：ADR-0001 / 0003（口径）/ 0007，且 0008 / 0009 已于 2026-09-29 Accept |
-| 2 | Exploration Memory + Planner | **规划完成（2026-09-29），待开工**（门禁已解除：ADR-0004 Accepted；开工规划见 §4 Phase 2「Phase 2 开工规划（2026-09-29）」） | ✅ 已满足：ADR-0004 已于 2026-09-29 Accept；Phase 1 主门槛已通过（剩余工程项见 [`reports/phase1_shadow_report.md`](reports/phase1_shadow_report.md) §5） |
-| 3 | Code API 与工具面收敛 | 未开始 | Phase 2 验收通过 |
+| 2 | Exploration Memory + Planner | **实现完成（2026-09-30）**：W1–W7 全部落地（W7 分 W7a 激活装配 / W7b 测量段两切片）；验证：`knowledge` 3.8s / `contextmgr` 1.0s / `agent` 17.5s / `runtimeapi` 51.8s 全 ok + `go build ./...` OK，有界演练 n=385（median≈420、95% CI [416,424]、p95 450、建议预算 500）；真实 on-mode A/B ≥20 任务实测待跑（见 §4「W7」小节「登记注记」） | ✅ 已满足：ADR-0004 已于 2026-09-29 Accept；Phase 1 主门槛已通过（剩余工程项见 [`reports/phase1_shadow_report.md`](reports/phase1_shadow_report.md) §5） |
+| 3 | Code API 与工具面收敛 | **实现完成（2026-09-30）**：`knowledge.code_tools` 门控（默认 off）+ 5 个 code.* 工具（统一返回结构 / 降级协议 / view --symbol / 工具描述分工）；验证：14 例新测试 + `knowledge`/`contextmgr`/`config`/`tools`/`toolkit` 全绿 + 真实会话 E2E（`code_search` → `code_callers`，`source=index`）；收益类验收与 M3 判定待测量轮（见 §4「Phase 3」小节「登记注记」） | Phase 2 验收通过（A/B 遗留不阻塞实现） |
 | 4 | Adapter SPI 与可选 LSP | 未开始 | ADR-0002 / 0005 / 0006 Accept；Phase 1 验收通过 |
 | 5 | Change Manager 与一致性 | 未开始 | Phase 3 合入后 |
 | 6 | Context Compiler 深度集成 | 未开始 | Phase 2 + 3 + 5 验收通过 |
@@ -44,7 +44,7 @@
 4. ~~其余 4 条（`0002` / `0004` / `0005` / `0006`）按各自 Gate 在对应 Phase 前 Accept 即可~~ → `0004` 已于 2026-09-29 Accepted（**Phase 2 门禁解除**）；其余 3 条（`0002` / `0005` / `0006`）按各自 Gate 在对应 Phase 前 Accept 即可
 5. ~~**Phase 1 规划缺口 7 项**~~ —— ✅ **已于 2026-09-21 全部修复**，见 §9.1 #10–#16 的“修复”列
 
-> 细节见 §3。~~**在门禁 ADR 被 Accept 之前，Phase 1 及之后的实现不得开工**~~；**Phase 1 门禁已于 2026-09-28 解除**（`0001` / `0007` / `0003` 口径已 Accepted），Phase 1 可开工；**Phase 2 门禁已于 2026-09-29 解除**（`0004` 已 Accepted），Phase 2 待开工；Phase 0 已开始并完成核心交付。
+> 细节见 §3。~~**在门禁 ADR 被 Accept 之前，Phase 1 及之后的实现不得开工**~~；**Phase 1 门禁已于 2026-09-28 解除**（`0001` / `0007` / `0003` 口径已 Accepted），Phase 1 可开工；**Phase 2 门禁已于 2026-09-29 解除**（`0004` 已 Accepted），Phase 2 已实现完成（2026-09-30，W1–W7；遗留见 §4「W7」小节）；Phase 0 已开始并完成核心交付。
 
 ---
 
@@ -162,7 +162,7 @@
   6. 多 Agent 语义：探索节点写 `session_id + task_id + workspace_id`；只读子代理不写索引、不写 exploration memory；跨任务复用阈值 ≥ 0.90。
 - **验收门槛**：多轮任务重复工具调用次数下降 ≥ 30%（用 ledger 归因，样本 ≥ 20，且给出置信区间）；`unsafe_reuse_count = 0`；端到端 p95 延迟增幅 ≤ 10%；关闭 `KnowledgeMode` 后指标回到基线（可逆）。
 - **回滚**：`KnowledgeMode=off`。
-- **状态**：**规划完成（2026-09-29），待开工**（门禁已解除：ADR-0004 Accepted；开工规划见本小节「Phase 2 开工规划（2026-09-29）」，最小首片 S1 可在下一轮直接开工）。
+- **状态**：**实现完成（2026-09-30）**——W1–W7 全部落地（W7 分 W7a 激活装配 / W7b 测量段两切片，见「W7」小节）。验证：W7a 复跑 `knowledge` 3.8s / `contextmgr` 1.0s / `agent` 17.5s / `runtimeapi` 51.8s 全 ok + `go build ./...` OK；W7b 复跑 `knowledge` 1.79s / `contextmgr` 0.41s 全 ok，有界演练 n=385（median≈420、95% CI [416,424]、p95 450、建议预算 500、保留 800=1.6× 余量）。**遗留**：真实 on-mode A/B ≥20 任务实测待跑（报告落点 `reports/phase2_exploration_report.md`）、`verify_requested` 消费方未接线、`broad` 档阈值校准留后续（详见「W7」小节「登记注记」）。开工规划见本小节「Phase 2 开工规划（2026-09-29）」。
 
 ### Phase 2 开工规划（2026-09-29）
 
@@ -179,26 +179,28 @@
 
 **现状核对（2026-09-29，只读）**：
 
-- `exploration_sessions` / `exploration_nodes` / `exploration_edges` **建表已存在**（`backend/internal/knowledge/migrations/0001_init.sql` L126–163；节点含 `knowledge_version` 列），但 `Store` 接口与 `backend/internal/knowledge/*` **没有任何读写代码**——Phase 2 交付 1 的剩余部分是 Go 契约与写入路径，不是 DDL。
-- `backend/internal/knowledge` 现有：`store.go`（窄接口）/ `store_sqlite*.go`（读写分文件）/ `activation.go`（三入口共用接入原语）/ `shadow.go`（Phase 1 观测器）/ `telemetry.go`（`UnsafeReuseCount` / `RepeatedReadCount` 等计数位与 `SafetyViolations()`）。
+- `exploration_sessions` / `exploration_nodes` / `exploration_edges` **建表已存在**（`backend/internal/knowledge/migrations/0001_init.sql` L126–163；节点含 `knowledge_version` 列）；**Go 读写代码已落库**（2026-09-30 复核：`exploration.go` / `store_sqlite_exploration.go` / `store_sqlite_exploration_read.go`；W2 采集器经该契约写入，见 W2 小节）。
+- `backend/internal/knowledge` 现有：`store.go`（窄接口）/ `store_sqlite*.go`（读写分文件）/ `activation.go`（三入口共用接入原语）/ `shadow.go`（Phase 1 观测器）/ `telemetry.go`（`UnsafeReuseCount` / `RepeatedReadCount` 等计数位与 `SafetyViolations()`）/ `exploration_recorder.go`（Phase 2 W2 采集器：异步有界、失败不冒泡、nil-safe）。
 - `backend/internal/contextmgr/manager.go`：`Strategy` / `Manager` **无** `KnowledgeMode`、`Knowledge` 字段（现有 `RecallMode` / `WorkspaceMode` 可作对称样板）；`backend/internal/contextpack/context_pack.go` 已有 `Provider` 接口；`backend/internal/memorystore/store.go`（`notes.jsonl` 长期笔记，不自动写入）已存在。
-- `agent.LoopReActConfig.OnToolObserved`（`backend/internal/agent/loop.go`）与三入口接线（`backend/internal/runtimeapi/session_runtime_support.go`、`backend/cmd/aicli/commands/{chat_actor_host,agent_stdio}.go`、`backend/cmd/runtime-server/main.go`）已在 Phase 1 落地，可直接复用为探索记忆采集通道。
-- **规划发现的缺口**：① 工作区级 `knowledge_version`（`H(workspace, file hashes, adapter versions, schema version)`）**无生成器**（`version.go` 只有 DB 契约常量 `KnowledgeVersion=1`）；② ADR-0008 的 `baseline_files_n` / `overlap_files_n` 新列与三入口 live 写入**仍未实现**（列为 W0）。
+- `agent.LoopReActConfig.OnToolObserved`（`backend/internal/agent/loop.go`）与三入口接线（`backend/internal/api/runtimeapi/session_runtime_support.go`、`backend/cmd/aicli/commands/{chat_actor_host,agent_stdio}.go`、`backend/cmd/runtime-server/{main.go,knowledge_boot.go}`）已在 Phase 1 落地；**W2 已把探索记忆采集器接入该通道**（runtimeapi / aicli TUI+ACP / runtime-server 三入口，见 W2 小节）。
+- **规划发现的缺口（2026-09-30 复核：①、② 均已关闭；W2 偏差与剩余缺口见 W2 小节「登记注记」）**：① 工作区级 `knowledge_version`（`H(workspace, file hashes, adapter versions, schema version)`）~~**无生成器**（`version.go` 只有 DB 契约常量 `KnowledgeVersion=1`）~~ → **已补齐（2026-09-30：`version_hash.go` 的 `WorkspaceVersion` 落库）**；② ~~ADR-0008 的 `baseline_files_n` / `overlap_files_n` 新列与三入口 live 写入**仍未实现**（列为 W0）~~ → **已完成（2026-09-30，W0 落地；证据见下）**。
 
 **工作流拆分（按依赖排序）**：
 
 | 工作流 | 目标（一句话） | 前置 | 验收映射 |
 |---|---|---|---|
-| W0 | ADR-0008 收口：新列 + 三入口 live 写入（Phase 1 遗留项，非 Phase 2 交付） | 无 | Phase 1 接入验证；为 W7 供 file-level 诊断 |
-| W1 | 探索记忆持久化层：DTO + store 读写 + `knowledge_version` 生成器 | 无 | G1 数据底座 |
-| W2 | 自动采集（Recorder）与三入口接线 | W1；W0（同批文件） | G1 / G2 / G3 |
-| W3 | 置信度 / 版本 / 阈值（Reuse Gate） | W1 | G2 |
-| W4 | `knowledge.Planner`（`Plan{Reuse, Explore, Degraded, Reason}`） | W1、W3 | G1 / G2 |
-| W5 | `contextmgr` 集成（`KnowledgeMode` + `Strategy` + 注入） | W4 | G1 / G3 / G4 |
-| W6 | 多 Agent 语义与写入门禁 | W2 | G2 |
-| W7 | 验收测量与报告（A/B ≥ 20 任务 + 复算） | W2–W6（+W0） | G1–G4 |
+| W0 | ✅ **已完成（2026-09-30）**：ADR-0008 收口——新列 + 三入口 live 写入（Phase 1 遗留项，非 Phase 2 交付）；验证：`gofmt` clean / `go vet` 六包通过 / `go test -count=1` 四包全 ok / `-run Shadow` 全 PASS（详见 W0 小节） | 无 | Phase 1 接入验证；为 W7 供 file-level 诊断 |
+| W1 | ✅ **已完成（2026-09-30；补登日 2026-09-30）**：探索记忆持久化层——DTO + store 读写 + `WorkspaceVersion` 生成器；验证：`gofmt` clean / `go test -count=1`（`knowledge` 1.99s）全 ok / W1 定向 18 用例全 PASS（详见 W1 小节） | 无 | G1 数据底座 |
+| W2 | ✅ **已完成（2026-09-30）**：自动采集（Recorder）与三入口接线；验证：`gofmt` clean / `go vet` 四包通过 / `go test -count=1`（`knowledge` 3.2s、`runtimeapi` 39.9s、`runtime-server` 0.75s）全 ok / 针对性 `-run` 过滤（Exploration / Shadow / ActivationRecorder，knowledge + aicli/commands）全 PASS（详见 W2 小节） | W1；W0（同批文件） | G1 / G2 / G3 |
+| W3 | ✅ **已完成（2026-09-30）**：置信度 / 版本 / Reuse Gate（`explore` / `reuse_verify` / `reuse` 三态 + 强制验证条件）；验证：`gofmt` clean / `go vet`（knowledge / config）通过 / `go build ./...` OK / `go test -count=1`（`knowledge` 2.13s、`config` 1.25s）全 ok / `confidence_test.go` 表驱动 21 用例全 PASS（详见 W3 小节） | W1 | G2 |
+| W4 | ✅ **已完成（2026-09-30）**：`knowledge.Planner`（`Plan{Reuse, Explore, Degraded, Reason}` + 稳定 Reason token + 纯函数 `EvaluatePlan` + `Layer.Plan`）；验证：`gofmt` clean / `go vet ./internal/knowledge/` 通过 / `go test -count=1 ./internal/knowledge/` **ok 2.281s**（登记轮独立复跑）/ 决策矩阵 19/19 子测试 + `planner_test.go` 13 个测试函数全 PASS（详见 W4 小节） | W1、W3 | G1 / G2 |
+| W5 | ✅ **已完成（2026-09-30）**：`contextmgr` 集成——`KnowledgeMode`（off/signals/broad，fail-closed）+ `Strategy` 知识旋钮（默认 off）+ `Manager.Knowledge` 注入 + 二次 stale/version 与 floor 过滤 + signals/broad 渲染与预算截断；验证：`gofmt` clean / `go vet`（contextmgr / knowledge）通过 / `go build ./...` OK / `go test -count=1`：`contextmgr` 0.42s、`knowledge` 1.82s 全 ok（登记轮独立复跑 0.405s / 1.852s）/ `knowledge_test.go` 9 用例 + `manager_test.go` 追加用例全 PASS（详见 W5 小节） | W4 | G1 / G3 / G4 |
+| W6 | ✅ **已完成（2026-09-30）**：多 Agent 语义与写入门禁——`ObservationSource` 枚举 + `WriteAllowed()`（未标注 / 只读子代理 / 只读会话 fail-closed 零写入）、`Record` / `process` 双层拦截、写入侧跨任务 floor（`task_id` 空时仅 ≥0.90 落库）、`ObservedCall.TaskID → exploration_sessions.task_id`、agent 循环置位 `KnowledgeWrite`；验证：`gofmt` clean / `go vet` 五包通过 / `go test -count=1`（`knowledge` 3.6s、`agent` 15.7s、`contextmgr` 0.93s）全 ok / `go build ./...` OK / `runtimeapi` 全量 ok 40.9s（子代理另跑）（详见 W6 小节；#21 确认预存见 §9） | W2 | G2 |
+| W7 | ✅ **已完成（2026-09-30，两切片）**：W7a 激活装配（`KnowledgeModeForLayerMode` + agent / runtimeapi / aicli 装配链，默认 off 零行为变化）；W7b 测量段（`exploration_report.go` 装置 + `CalibrateTokenBudget`，有界演练 n=385：median≈420、95% CI [416,424]、p95 450、max 498，建议预算 500 / 保留 800=1.6× 余量）；验证：`knowledge` 3.8s / `contextmgr` 1.0s / `agent` 17.5s / `runtimeapi` 51.8s 全 ok + build OK（W7a）、`knowledge` 1.79s / `contextmgr` 0.41s ok（W7b）；**遗留**：真实 on-mode A/B ≥20 任务待跑等（详见 W7 小节） | W2–W6（+W0） | G1–G4 |
 
 #### W0 — ADR-0008 收口：新列 + live 写入（Phase 1 遗留项）
+
+> **状态：✅ 已完成（2026-09-30）**。落地：`entity` 两列（`BaselineFilesN` / `OverlapFilesN`）+ `usageledger` DDL/ALTER/读写 + `knowledge/shadow.go` file-level 落列与 `usable` 重算 + `attribution.go` file-level 复算族 + 三入口 live 接线（runtimeapi `handler.go:734`、aicli `chat_actor_host.go:1707/2614`、runtime-server `main.go:1317`）。验证：`gofmt` clean（修复 4 文件后）、`go vet` 六包通过、`go test -count=1` 全 ok（`usageledger` 11.9s / `knowledge` 2.0s / `runtimeapi` 41.6s / `runtime-server` 0.5s）、`cmd/aicli/commands -run Shadow` 全 PASS。范围外失败 2 条见 §9 #21/#22（不阻塞 W0）。
 
 - **目标**：为 `exploration_attribution` 追加 `baseline_files_n` / `overlap_files_n`（additive 列，缺省 0），在 shadow 观测与三入口 live 路径写入，满足 ADR-0008 §8.1 / §10 的两项 Open（"新列实现" + "三入口 live 写入"）。
 - **文件落点**：
@@ -211,6 +213,12 @@
 - **风险**：补列必须 additive 且幂等（旧库兼容）；与并行写者在 `usageledger/sqlite_store.go` 的改动冲突；live 写入需要真实会话 × 三入口，成本高于单测。
 
 #### W1 — 探索记忆持久化层（DTO + store 读写 + `knowledge_version` 生成器）
+
+> **状态：✅ 已完成（2026-09-30；补登日 2026-09-30）**。落地：新增 `backend/internal/knowledge/exploration.go`（DTO / `NodeType`·`EdgeType` 闭集 / scope 校验 / 稳定 ID 派生）、`store_sqlite_exploration.go`（`UpsertExplorationSession` / `AppendExplorationNode`（同 target 幂等：`use_count+1`、`last_used_at` 刷新）/ `TouchExplorationNode` / `AppendExplorationEdge`，全部经 `execWrite`；reader 写 → `ErrReadOnlyStore`）、`store_sqlite_exploration_read.go`（`LookupExplorationNodes`（workspace/task/target/type/limit + 默认上限 + 稳定排序）/ `LatestExplorationSession`，纯读 reader 可用）、`version_hash.go`（`WorkspaceVersion` = `wv1_` + 稳定摘要(工作区 id, 排序后 path=content_hash, `AdapterVersion`, schema 版本)）；修改 `store.go`（仅追加 6 个接口方法，+32 行、0 删改）；**零迁移**（未新增 0003，0001 的 `idx_explore_sessions` / `idx_explore_nodes_target` / `idx_explore_edges_from` 已覆盖）。
+>
+> **验证记录**：`gofmt -l` 7 文件 clean；`go test -count=1 ./internal/knowledge/...` **ok 1.990s**（登记轮独立复跑）；W1 定向 18 用例全 PASS（0.518s）——枚举闭集 / ID 稳定 / scope 校验 / `WorkspaceVersion` 对文件哈希·adapter·schema 敏感且同输入幂等 / session upsert 幂等 / node 同 target 幂等与计数 / `knowledge_version` 必填 / reader 写 `ErrReadOnlyStore` / `ON DELETE CASCADE` / workspace 隔离 / task·target·type 过滤 / limit 默认 / 排序稳定 / latest 排序。
+>
+> **登记注记（补登说明）**：本小节为**补登**——Phase 2 总收口核验（见本 CHANGELOG 同日「Phase 2 完成」条目 Notes）发现 W1 表行无 ✅、小节无状态块、CHANGELOG 无独立条目；2026-09-30 按本小节规划原文逐项复核（文件 / 函数 / 测试）后登记。**日期口径**：W1 七文件均未提交（`git status` 为 untracked，`git log --all` 对相关路径无记录），完成日期取文件 mtime（2026-09-30 06:43–06:50），补登日 2026-09-30。DoD ①–⑤ 逐项核验通过；零迁移维持（未新增 0003）。
 
 - **目标**：把三张探索记忆表变成可读写的包内契约；节点写 `knowledge_version`；提供"任务工作集"（`workspace_id + task_id`）与跨任务（`target`）两条查询路径；沿用 Phase 1 的单写者 / 只读降级语义（reader 写入硬失败，不静默降级）。
 - **文件落点**：
@@ -227,6 +235,14 @@
 
 #### W2 — 自动采集（Recorder）与三入口接线
 
+> **状态：✅ 已完成（2026-09-30，13 文件）**。前置 W1 存储层已在库（`exploration.go` / `store_sqlite_exploration.go` / `store_sqlite_exploration_read.go` / `version_hash.go`）。
+>
+> **落地**：新增 `backend/internal/knowledge/exploration_recorder.go`——异步有界采集（`grep` / `view` 最终结果 → session + query/file 节点 + `derived_from` 边；query 仅落 `query_hash`；confidence file 1.0 / query 0.9；`knowledge_version` TTL 30s；同 target 去重交 store 主键；队列满丢弃；nil-safe）；`activation.go` 增 `Recorder()`（仅 `mode=shadow|on` 且 owner 非 nil；off/reader nil）；三入口接线——runtimeapi `backend/internal/api/runtimeapi/session_runtime_support.go:4575`（调用）/ `:4854`（`applyAPISessionToolObservation`）+ `handler.go:746`（`SetKnowledgeRecorder`）、aicli TUI+ACP 共用 `backend/cmd/aicli/commands/chat_actor_host.go:1720`（调用）/ `:2638`（`applyLocalChatToolObservation`；ACP 见 `agent_stdio.go:988`）、runtime-server `backend/cmd/runtime-server/main.go:1321` + `knowledge_boot.go:94`（`knowledgeRecorderFor`）。
+>
+> **验证记录**：`gofmt` clean；`go vet` 四包通过；`go test -count=1`：`knowledge` 3.2s / `runtimeapi` 39.9s / `runtime-server` 0.75s 全 ok；`-run 'Exploration|Shadow|ActivationRecorder'`（knowledge + aicli/commands）全 PASS。测试 4 新增（`exploration_recorder_test.go`、runtimeapi `exploration_wiring_test.go`、aicli/commands `exploration_wiring_test.go`、runtime-server `knowledge_recorder_wiring_test.go`）+ 1 修正（aicli/commands `chat_shadow_wiring_test.go`：无账本时 hook 仍须接线）。
+>
+> **登记注记（偏差与缺口）**：① `OnToolObserved` 无 task/turn 上下文 → session 级回退（`task_id` 为空，不编造任务语义）；② 无跨调用批量（异步有界 + 队列满丢弃）；③ 计划中的 `loop_observe_test` 扩展未做；④ Phase 级状态行（`06` §1.1、`04` §5）留 W7 验收后更新（本轮只登记 W2 工作流行）；⑤ 缺口：W6 写入门禁未落地、`knowledge_version` TTL 滞后（缓存 ≤30s，stale 兜底判定在 W3）、Recorder 显式装配仅 runtime-server（aicli 经 `session.Knowledge.Recorder()`）；⑥ 与并行写者 `AgentSessionObligations` 接线无重叠。
+
 - **目标**：复用既有 `OnToolObserved` 只读钩子，把 `grep` / `view` 的最终结果写入探索记忆（任务工作集，**自动写入**，与 `memorystore` 的人工长期笔记分层）；节点写 `session_id + task_id + workspace_id`；契约与 Phase 1 shadow 一致（尽力而为、不得修改结果、失败不冒泡），`mode=off` 零写入。
 - **文件落点**：
   - 新增 `backend/internal/knowledge/exploration_recorder.go`（`ObservedCall` → session/node/edge 映射；隐私只落 `query_hash`，复用 shadow 口径；同 target 合并；采样/批量；`nil`-safe）。
@@ -241,6 +257,14 @@
 
 #### W3 — 置信度 / 版本 / 阈值（Reuse Gate）
 
+> **状态：✅ 已完成（2026-09-30，5 文件：2 新增 + 3 修改）**。前置 W1（节点带 `knowledge_version`）已在库（`exploration.go` / `version_hash.go`）。
+>
+> **落地**：新增 `backend/internal/knowledge/confidence.go`——`SourceWeight` 取值闭集（0.95/0.90/0.80/0.65/0.55/0.40，含 `SourceWeightFromConfidence`，与 `version.go` 的 `Confidence.Score()` 单测钉齐）、`AgreementFactor`（1.00/0.90/0.70）、`StalenessPenalty`（`StalenessSignals.Penalty` 同时命中取最大罚分；`knowledge_version` 不匹配 → 1.00 归零）、`AmbiguityPenalty`（0/0.10/0.30）、`ComputeConfidence`（04 §4.4 乘法公式 + clamp，NaN → 0 fail closed）、`CompareKnowledgeVersion`（任一侧空 → `unknown`，fail closed）、`EvaluateReuseGate`（判定优先级：版本 → 硬下限 → 待验证带 → TTL 滞后 → 强制验证；输出 `explore` / `reuse_verify` / `reuse` 三态与 `Usable` / `Stale` / `Provisional` / `Verify` / `Reason` 稳定 token；`Verify` 强制条件：写操作 ∨ 跨任务 ∨ `confidence < verify_read_below`（默认 0.90）∨ 版本快照超 30s TTL，`reuse_verify` 带同样要求验证）、`ExplorationNode.GateInput`（搬运 W2 已落库行，供 W4 消费）。修改 `backend/internal/knowledge/config.go`——`PlannerConfig`（规格 4 键 + additive `explore_below`）、`Normalize` / `Validate`（阈值域 (0,1]；`explore_below` 不得高于同任务直接复用下限）、`ReuseFloor`（同任务 0.80 / 写 0.90 / 跨任务 0.90 取最大）、`Config.Planner`。修改 `backend/configs/{runtime.yaml,runtime.win7.yaml}`——`knowledge.planner.*` 注释模板（缺省即代码值，标注"初值待 Phase 2 实测校准"）。
+>
+> **验证记录**：`gofmt` clean；`go vet`（knowledge / config）通过；`go build ./...` OK；`go test -count=1`：`knowledge` 2.13s / `config` 1.25s 全 ok；`confidence_test.go` 表驱动 21 用例（source_weight 闭集与 `Score()` 对齐、agreement / staleness / ambiguity、clamp / NaN、版本比较、TTL 滞后兜底、Recorder 行消费、阈值边界（== 视为通过）、配置归一化 / 校验 / `ReuseFloor` / YAML 往返）全 PASS；登记轮抽检 `-run 'Confidence|Reuse|Planner|Staleness|SourceWeight|CompareKnowledgeVersion'`（knowledge）复跑 ok（0.185s）。过程记录：`TestPlannerConfigYAMLRoundTrip` 初跑失败（fixture 未注入 workspace）→ 一行修复 `WithWorkspace("ws")`，复跑全绿。
+>
+> **登记注记（偏差与缺口）**：① 新增 `explore_below=0.50` 键（规格 4 键装不下 <0.50 下界，additive）；② 未加加载期校验（与 Alpha 一致，`Open` 时校验）；③ 文档状态（`06` §1.1 / `04` §5）留 W7 验收后更新。缺口：W4 需自带 `VersionObservation`（含 `ObservedAt`）才能吃到 TTL 兜底；写入侧 confidence 是否改用 `ComputeConfidence` 留 W6/W7；W5 需把 `Provisional` 写 `context_items.reason`；W7 用 `Usable` 口径复算 `unsafe_reuse_count=0`。
+
 - **目标**：实现 `04` §4.4 的可执行 confidence（`source_weight × agreement × (1-staleness) × (1-ambiguity)`；`knowledge_version` 不匹配 → 直接不可用）并落地保守默认阈值：同任务 ≥ 0.80（涉及写操作 ≥ 0.90）、跨任务 ≥ 0.90、0.50–0.80 复用但标记待验证、< 0.50 触发探索。
 - **文件落点**：新增 `backend/internal/knowledge/confidence.go` + `confidence_test.go`；修改 `backend/internal/knowledge/config.go`（`Planner` 配置：`min_reuse_confidence` / `write_reuse_confidence` / `cross_task_confidence` / `verify_read_below`，含 `Normalize` 默认值）与 `backend/configs/*.yaml`（`knowledge.planner.*` 模板，注释标注"初值待 Phase 2 实测校准"）。
 - **测试清单**：表驱动覆盖 source_weight（0.95/0.90/0.80/0.65/0.55/0.40）、agreement（1.0/0.9/0.7）、staleness（0.5/0.3/0.3/版本不匹配）、ambiguity（0.3/0.1）；阈值边界（== 阈值视为通过）；config 归一化、YAML 往返、`< 0.90` 时验证读取标志。
@@ -249,6 +273,14 @@
 - **风险**：confidence 是新量化口径，默认值只是初值 → 验收前必须用实测回写；不得与 `contextmgr` 的 `trust`（来源可信性）混用。
 
 #### W4 — `knowledge.Planner`
+
+> **状态：✅ 已完成（2026-09-30，3 文件：2 新增 + 1 修改）**。前置 W1（`ExplorationNode` 读契约）/ W3（`EvaluateReuseGate` + `PlannerConfig`）已在库。
+>
+> **落地**：新增 `backend/internal/knowledge/planner.go`——`PlanInput` / `Plan` / `ReuseItem` / `ExploreItem`、稳定 Reason token（`ok` / `disabled` / `query_too_short` / `no_candidates` / `store_unavailable` / `store_timeout` / `index_unavailable` / `invalid_input`，复用项沿用 W3 的 `ReuseReason*`）、纯函数 `EvaluatePlan`（无 IO、不读时钟、同输入可复算；`<8 rune` → 空 Plan 零 store 调用；无候选 → Explore；同任务 `<0.90` → Reuse+Verify、`==0.90/≥0.90` → Reuse；写 → `write_verify`；跨任务 → `cross_task_verify`；版本不匹配/未知 → Explore；TTL 滞后 → `version_observation_lag`）、`Planner` 接口 + `NewPlanner`（窄读接口 `ExplorationNodeReader` 注入；store nil/错/超时/取消 → `Degraded` + `error=nil`）、`versionCache`（Layer 级版本采样缓存，TTL 30s，`ObservedAt` 供 Gate 兜底）。修改 `backend/internal/knowledge/knowledge.go`——`Layer.Plan`（nil/off/无 store → 空 `Plan` + `disabled`，不 panic；只读 workspace；`PlanInput.Current` 为空时采样版本）。新增 `backend/internal/knowledge/planner_test.go`——决策矩阵 19 用例 + 其余 12 个测试函数（共 13 个 `Test*`：确定性、Degraded 族、超时/取消、`Layer.Plan` nil/off/reader、`versionCache` TTL、真实 SQLite store 复用）。
+>
+> **验证记录**：`gofmt -l internal/knowledge/` clean；`go vet ./internal/knowledge/` 通过；`go test -count=1 ./internal/knowledge/` **ok**（父会话 2.168s / 登记轮独立复跑 2.281s）；`-v` 实跑：决策矩阵 **19/19 子测试 PASS**、`planner_test.go` **13 个测试函数全 PASS**（含 `TestPlannerReuseFromSQLiteStore` / `TestLayerPlanReaderIndexUnavailableThenReuse` / `TestVersionCacheTTL`）。
+>
+> **登记注记（偏差与缺口）**：① `MinKnowledgeQueryLength` 落 `planner.go`（`DefaultMinKnowledgeQueryLength=8` rune，`PlanInput.MinQueryLength` 可覆盖；W5 `Strategy` 正式收口）；② 版本采样缓存放 Layer 级（`versionCache` 30s TTL；`ObservedAt` 随观测返回，TTL 滞后兜底判定仍归 W3 Gate）；③ `Planner` 接口保留 `error` 返回位，实现永不返回 error（Degrade-Not-Fail）。缺口（W5 注入口径）：只注入 `Reuse`；`Verify` / `Provisional` 需 W5 写 metadata `reason` 并执行验证读取；`Degraded` 零注入；W5 须做二次 stale/version 过滤（为 Phase 6 `stale_item_injected=0` 预留）。
 
 - **目标**：实现 `Planner.Plan(ctx, PlanInput) (Plan, error)`，输出 `Plan{Reuse, Explore, Degraded, Reason}`；`Reuse` 项带 `confidence` + `knowledge_version`；`confidence < 0.90` 时必须安排一次验证读取（用既有 `grep` / `view` 实现，**不依赖 Phase 3 的 `code.*`**）。
 - **文件落点**：新增 `backend/internal/knowledge/planner.go` + `planner_test.go`；修改 `backend/internal/knowledge/knowledge.go`（`Layer.Plan`：nil/off 返回空 Plan，不 panic）。
@@ -259,6 +291,14 @@
 
 #### W5 — `contextmgr` 集成（`KnowledgeMode` + `Strategy` + 注入）
 
+> **状态：✅ 已完成（2026-09-30，4 文件：2 新增 + 2 修改）**。前置 W4（`knowledge.Planner`）已在库；实现口径与四态证据见下。
+>
+> **落地**：新增 `backend/internal/contextmgr/knowledge.go`——档位常量 `off | signals | broad`（`normalizeKnowledgeMode` 对空值/未知值 fail closed 到 off）、`DefaultKnowledgeTokens=800`（1 rune ≈ 1 token 上界估算，初值待 W7 校准）、`buildKnowledgeMessage`（off 短路零调用；`Goal` 为空或 < `MinKnowledgeQueryLength`（<=0 回退 `knowledge.DefaultMinKnowledgeQueryLength`）不触达 Planner；有 `TaskID` 走同任务 scope、否则跨任务；`PlanInput.Write` 透传 `BuildInput.KnowledgeWrite`；`Plan.Degraded` 或 Planner 错误 → 零注入）；注入前二次 stale/version 过滤（空 version / `version_mismatch` / `version_unknown` 丢弃）与 `ReuseConfidenceFloor` 二次过滤（NaN 及低于阈值丢弃）；`signals` 摘要（数量 / verify_required / provisional / target 名单）与 `broad` 条目行（`- [exploration] target=… confidence=… version=… reason=… verify=… item_type=exploration source=memory`，预算内截断、首条放不下则零注入）；消息 metadata 带 `context_stage=knowledge`、`knowledge_items`（`item_type=exploration`、`source=memory`、`node_id`、`target`、`confidence`、`knowledge_version`、`scope`、`verify`、`provisional`、`reason`）与 `knowledge_verify_targets`；`applyKnowledgeMetadata` 写层指标（`knowledge_stale_item_injected` 恒置 0）。修改 `backend/internal/contextmgr/manager.go`（+134/-18）——`Strategy` 增 `KnowledgeMode` / `MinKnowledgeQueryLength` / `ReuseConfidenceFloor`（三 profile 默认 off，`ResolveStrategy` 支持覆盖）；`Manager.Knowledge knowledge.Planner`；`BuildInput.KnowledgeWrite`；Build 集成：off 不新增任何 `knowledge_*` key（逐字节基线），非 off 时 `stagePresent(knowledge)` 或活动回合回放 → 抑制（`knowledge_suppressed_for_active_turn`），否则 `appendDynamic` 追加并发布 `context.knowledge.injected` / `context.knowledge.verify_requested` / `context.knowledge.degraded` 事件。新增 `backend/internal/contextmgr/knowledge_test.go`（9 用例 + `var _ knowledge.Planner = (*knowledge.Layer)(nil)` 编译期钉齐）；修改 `backend/internal/contextmgr/manager_test.go`（追加 `TestStrategyKnowledgeDefaultsAndOverrides`，+31 行）。
+>
+> **验证记录**：`gofmt` clean；`go vet`（contextmgr / knowledge）通过；`go build ./...` OK；`go test -count=1`：`contextmgr` 0.42s / `knowledge` 1.82s 全 ok（登记轮独立复跑 0.405s / 1.852s）。四态证据：① off（空值 / `disabled` / 未知值）→ planner calls=0、messages+metadata 与基线 `DeepEqual`、零 `knowledge_*` key，开→关可逆回基线（G4）；② Reuse → `signals` 摘要（不含条目明细）/ `broad` 条目含 reason/version/confidence；③ Verify/Provisional → `knowledge_verify_targets` + `context.knowledge.verify_requested` 事件；④ Degraded → 零注入 + `context.knowledge.degraded` + `knowledge_degraded=true`；`knowledge_stale_item_injected` 恒 0。子代理另跑：`agent` ok；`runtimeapi` 一处 flaky（并行写者 parked-turn 测试，单跑通过，与 W5 无关）。
+>
+> **登记注记（偏差与缺口）**：① 档位命名收口为 `off | signals | broad`（本小节原「`on` 下」表述由三档取代；`04` §4.5 即此三档，无独立 `on` 档）；② `Manager.Knowledge` 落为 `knowledge.Planner` 接口（`04` §7.2 原文 `*knowledge.Planner`），`knowledge_test.go` 编译期钉齐 `*knowledge.Layer` 可直接注入、无需适配器；③ broad 预算用常量 `DefaultKnowledgeTokens=800`（未新增 `Budget` 字段），`context_items` 落库留 Phase 6（本 Phase 只做 metadata 与分层口径）。缺口：W6 写入门禁未落地（`BuildInput.KnowledgeWrite` 已透传、调用方未置位）；运行时装配默认 off（W7 激活切片注入 `*knowledge.Layer`）；`verify_requested` 消费方（agent 循环的 grep/view 验证读取）未接线；预算 / 阈值 / 长度参数校准留 W7。
+
 - **目标**：`contextmgr` 新增 `KnowledgeMode = off | signals | broad`（与 `WorkspaceMode` / `RecallMode` 对称）；`Strategy` 增 `MinKnowledgeQueryLength`、`ReuseConfidenceFloor`；`on` 下按档位把 Planner 的 `Reuse` 项装配进上下文（`signals` 只注入摘要/信号，`broad` 注入条目）；`off` 零调用、零注入，行为与改动前逐字节一致。
 - **文件落点**：修改 `backend/internal/contextmgr/manager.go`（常量、`Strategy`、`Manager.Knowledge`、`BuildInput` 透传、`StrategyForProfile` / `ResolveStrategy` 默认与覆盖）；新增 `backend/internal/contextmgr/knowledge.go`（`Reuse` → 消息/metadata；token 预算内截断；条目带 `item_type=exploration`、`source=memory`、`knowledge_version`、`confidence`、`reason`）；新增 `backend/internal/contextmgr/knowledge_test.go`；修改 `backend/internal/contextmgr/manager_test.go`（off 等于基线）。
 - **测试清单**：off / signals / broad 三档；fake Planner 断言 **off 下零调用**；预算截断与最小查询长度；`ReuseConfidenceFloor` 覆盖；`Strategy` 归一化与 profile 默认；注入集合不含 stale / 版本不匹配项。
@@ -268,6 +308,14 @@
 
 #### W6 — 多 Agent 语义与写入门禁
 
+> **状态：✅ 已完成（2026-09-30）**。前置 W2（Recorder 采集 + 三入口接线）已在库；读侧 ≥0.90 阈值与 Reuse Gate 由 W3/W4 已落地，W6 只补**写入侧硬拦 + 作用域隔离**。
+>
+> **落地**：修改 `backend/internal/knowledge/exploration_recorder.go`——`ObservationSource` 枚举（`""` / `main_session` / `subagent` / `subagent_read_only` / `read_only_session`）+ `WriteAllowed()`（未标注 / 只读一律 false，fail closed）+ `ObservationSourceFor(subagent, readOnly)` 折叠；`Record`（投递预过滤）与 `process`（worker 侧二次判定）双层门禁；`applyCrossTaskWriteFloor`：`task_id` 为空时仅 `confidence ≥ 0.90` 节点落库（取 W3 默认 `CrossTaskConfidence`，不暴露旋钮；低置信节点及其边一并丢弃）；`ObservedCall.TaskID → exploration_sessions.task_id`（空则回退 session 级工作集，不编造）。修改 `backend/internal/knowledge/shadow.go`——`ObservedCall` 增 `TaskID` / `Source`（additive）。新增 `backend/internal/agent/loop_knowledge.go`（`knowledgeWriteIntent`：只读边界 → false、强写意图 → true、只读核验措辞 → false、无法判定 → true（保守按写语义）；`agentIsReadOnly` 复用既有 `ToolExecutionPolicy.ReadOnly`）+ 修改 `backend/internal/agent/loop.go`（置位 `contextmgr.BuildInput.KnowledgeWrite`）。编排透传：runtimeapi `backend/internal/api/runtimeapi/session_runtime_support.go`（子代理判定与路由同口径 `agent_type / depth / read_only`；`task_id` 经 `observationTaskID`）与 aicli `backend/cmd/aicli/commands/chat_actor_host.go`（`localChatObservationTaskID` 只认会话内 `active_team_task_id` 锚点，无锚点回退 session）。
+>
+> **验证记录**：`gofmt` clean；`go vet` 五包通过；`go test -count=1`：`knowledge` 3.6s / `agent` 15.7s / `contextmgr` 0.93s 全 ok；`go build ./...` OK；子代理另跑 `runtimeapi` 全量 ok（40.9s）。测试新增 `exploration_scope_test.go`（门禁矩阵 5 例 + `ObservationSourceFor` 折叠 + 跨任务 floor 正/反例）、runtimeapi `subagent_knowledge_write_guard_test.go`（编排路径：只读子代理 / 未标注 / 可写子代理）、`loop_knowledge_test.go`（`KnowledgeWrite` 置位与透传正/反例）；既有接线测试随签名更新。
+>
+> **登记注记（偏差与缺口）**：① 读侧 ≥0.90 已由 W3/W4 落地（Planner / Reuse Gate），W6 只补写入侧硬拦 + 作用域隔离；② "只读子代理"标志既有（`SubagentTask.ReadOnly` / `ToolExecutionPolicy.ReadOnly`），W6 仅透传、未新增最小枚举；③ `KnowledgeWrite` 判定为启发式（未知 → 按写语义，误报只降复用率、不产生不安全复用），留 W7 实测校准（`04` §7.6）。缺口（W7）：运行时装配默认 off；`verify_requested` 消费方（agent 循环的 grep/view 验证读取）未接线；A/B 测量与 G1–G4 复算。**#21 结论更新**：viewport 测试已在 HEAD 干净 worktree 复现同样失败 → 由「疑似预存」升级为「确认预存」，与 W6 无关（详见 §9 #21）。
+
 - **目标**：探索节点写 `session_id + task_id + workspace_id`；只读子代理**不写索引、不写 exploration memory**；跨任务复用阈值 ≥ 0.90（配置已在 W3，W6 负责写入侧硬拦与作用域隔离）。
 - **文件落点**：修改 `backend/internal/knowledge/exploration_recorder.go`（写前置门禁：`ReadOnly` / 子代理类型；跨任务查询过滤）；修改 `backend/internal/agent/*`（**若现无"只读子代理"标志，引入最小枚举并透传**，开工时先核实）；修改 `backend/internal/runtimeapi/session_runtime_support.go` 与 `backend/cmd/aicli/commands/*`（把子代理模式传进 Recorder）。
 - **测试清单**：新增 `backend/internal/knowledge/exploration_scope_test.go`（只读子代理零写入、跨任务阈值过滤、workspace 隔离）；新增 `backend/internal/runtimeapi/subagent_knowledge_write_guard_test.go`（编排路径断言）。
@@ -276,6 +324,16 @@
 - **风险**：子代理只读标志可能不存在 → 需最小新增；判定错误的方向必须是"默认不写"（漏记可接受、脏写不可接受）；跨任务阈值默认 0.90 不得下调。
 
 #### W7 — 验收测量与报告（A/B ≥ 20 任务 + 复算）
+
+> **状态：✅ 已完成（2026-09-30，两切片）**。前置 W2–W6（+W0）已在库；W7a 激活装配与 W7b 测量段全部落地；默认 off 零行为变化。
+>
+> **落地（W7a 激活装配）**：`contextmgr.KnowledgeModeForLayerMode`（`knowledge.mode` → `KnowledgeMode` 映射；`backend/internal/contextmgr/knowledge.go`）+ agent / runtimeapi / aicli 装配链接线（调用点 `backend/internal/api/runtimeapi/handler.go`、`backend/cmd/aicli/commands/chat_actor_host.go`）；默认 off 零行为变化。
+>
+> **落地（W7b 测量段）**：新增 `backend/internal/knowledge/exploration_report.go`（测量装置 + `CalibrateTokenBudget`：中位数 + 95% CI 上界取整，`04` §7.6 口径）；新增 `backend/internal/contextmgr/knowledge_calibration_test.go`（预算校准用例）。有界演练 n=385：median≈420、95% CI [416,424]、p95 450、max 498 → 建议预算 500；保留 `DefaultKnowledgeTokens=800`（=1.6× 余量）。
+>
+> **验证记录**：W7a 复跑 `knowledge` 3.8s / `contextmgr` 1.0s / `agent` 17.5s / `runtimeapi` 51.8s 全 ok + `go build ./...` OK；W7b 复跑 `knowledge` 1.79s / `contextmgr` 0.41s 全 ok。
+>
+> **登记注记（偏差与缺口）**：① 真实 on-mode A/B ≥20 任务实测待跑（报告落点 `reports/phase2_exploration_report.md`，由并行会话维护；本轮不触碰 `reports/`）；② `verify_requested` 消费方未接线（W7 规格外缺口）；③ `broad` 档阈值校准留后续（`DefaultKnowledgeTokens` 建议 500、当前保留 800）；④ §9 #21 已确认为预存、#22 flaky（均不阻塞）。
 
 - **目标**：以真实任务集跑 `on` vs `off` A/B ≥ 20 个任务，产出 Phase 2 验收报告（`04` §7.7 模板），G1–G4 全部可复算。
 - **文件落点**：新增 `docs/knowledge_Layer/reports/phase2_exploration_report.md`；新增 `backend/internal/knowledge/exploration_report_test.go`（从 `usageledger` + telemetry 复算 G1/G2，报告数字与复算逐位一致）；若缺会话级 p95 埋点，最小追加（开工时核实 `internal/observability` 或既有 runtime 统计）；**验收通过后**才更新 `06` §1.1 / §4 与 `04` §5 Phase 2 状态。
@@ -319,7 +377,13 @@ DoD（完成判据）：① 零迁移即可读写三表；② 同 target 重复�
 - **文件落点**：新增 `toolkit/tools/code_*.go`（5 个）；修改 `toolkit/registry.go`、`toolkit/tools/view.go`、`configs/model_cards.yaml`。
 - **验收门槛**：典型任务（"改 timeout 默认值""谁调用 X""影响面分析"）探索 token 下降 ≥ 40%；无索引环境下 `code.*` 100% 可用（降级路径覆盖所有工具）；fallback 触发率 ≤ 30%；工具调用总数不增加。
 - **回滚**：工具开关关闭，回到 `grep` / `view`。
-- **状态**：未开始。
+- **状态**：✅ **实现完成（2026-09-30）**。
+>
+> **落地**：① 工具面——`knowledge.code_tools`（off|on，默认 off）门控 + 5 个工具注册（`code_search` / `code_inspect` / `code_navigate` / `code_references` / `code_callers`；下划线注册名，`code.*` 为概念命名）；② 统一返回结构 `source` / `confidence` / `version` / `range` / `truncated` / `next_cursor` / `explanation` / `degraded`（`toolkit/tools/code_common.go`）；③ 降级协议（04 §4.6）——mode=off / 库不存在 / 查询失败 → fallback grep/view（`source="fallback"` + `fallback.tool/reason/output`）；shadow 档算候选但返回 grep 结果；on 档零命中补一次 grep；④ `view` 可选 `symbol` 参数（索引命中按符号范围读取；无索引退化行范围/报错）；⑤ 工具描述分工指引（grep/view/code.* 互相指向）。落点：新增 `backend/internal/toolkit/tools/code_common.go` + `code_{search,inspect,navigate,references,callers}.go`、`backend/internal/tools/code_index_resolver.go`；修改 `knowledge/config.go`、`config/manager.go`、`tools/manager.go`、`toolkit/tools/{view,grep}.go`；配置启用：`backend/configs/runtime.yaml` / `runtime.win7.yaml` / 项目层 `.aicli/runtime.yaml` 均写入 `code_tools: on`。
+>
+> **验证记录**：`go build ./...` OK；`knowledge` 2.5s / `contextmgr` 0.5s / `config` 1.3s / `tools` 0.8s / `toolkit` 2.6s 全 ok；新增 14 例测试（工具索引/降级/shadow/结构 10 + 注册门控与解析器 3 + 配置开关 1）。E2E（真实会话 `mode=on` + `code_tools=on`）：模型实际调用 `code_search` → `code_callers`（runtime-events `tool_name` 事件），结果信封 `"source":"index"`，回答给出 `planner.go:247` 定义 / `planner.go:209` 调用点；`/exit` 后锁释放。
+>
+> **登记注记（偏差与缺口）**：① 注册名用下划线（provider 函数名约束），设计文档的 `code.*` 为概念命名；② `configs/model_cards.yaml` 无工具面清单（模型能力卡），系统提示载体为工具描述，未改该文件；③ `cmd/toolkit-mcp-server` 无 workspace/knowledge 上下文，未注册；④ `version` 留空（版本向量属 Phase 5 交付 3）；`next_cursor` v1 恒空。缺口（测量轮）：探索 token ↓≥40%、fallback ≤30%、工具调用总数不增加与 M3 判定待真实 A/B。
 
 ### Phase 4 — Adapter SPI 与可选 LSP
 
@@ -570,6 +634,8 @@ Phase 3 (Code API / 工具面)  ◄────────────  Phase 5
 | 8 | ✅ **已完成**（2026-09-28）：`00_Code_Intelligence_Project_Knowledge_Layer.md` 移入 `archive/` 并加免责声明 | Phase 0 文档治理 | `archive/` |
 | 9 | ✅ **已完成**（2026-09-28）：`03_*.md` 拆分为 `supplement/01`–`16`（`03` 变为拆分索引）；`01_*.md` 见 **#18** | Phase 0 | `01` / `03` / `supplement/*` |
 | 20 | ✅ **已完成（2026-09-29）**：`02` §8 三分组落地（ADR-0007 D1 / ADR-0009 附录 D）：`【v1 core】/【extension】/【已推迟】` + 6 幽灵名归类 + `symbol_fts` 补列；复跑 I1/I4 转绿（详见 #2/#3） | ADR-0009 被 Accept（已满足） | `02` §8 |
+| 21 | **范围外失败（确认预存，不阻塞 W0 / W6 / Phase 2）**：`TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsideActiveReasoning`（`backend/cmd/aicli/commands/chat_history_reconcile_test.go` L451）**确定性失败**——viewport 缺 `history user 6`；测试文件自 2026-09-24 未变、域与知识层不相关；**2026-09-30 结论更新**：在 HEAD 干净 worktree 复现同样失败 → 由「疑似预存」升级为「**确认预存**」，与 W6 无关 | 无（独立排查；不阻塞 W0 / W6 / Phase 2） | `backend/cmd/aicli/commands/chat_history_reconcile_test.go` |
+| 22 | **范围外失败（待清，不阻塞 W0）**：`TestAICLIChatActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled`（`backend/cmd/aicli/commands/chat_local_orchestration_integration_test.go` L946）**波动**——全量跑失败、单跑通过 | 无（独立排查；不阻塞 W0 / Phase 2） | `backend/cmd/aicli/commands/chat_local_orchestration_integration_test.go` |
 
 ### 9.1 规划缺口（2026-09-21 核查发现，同日已修复）
 

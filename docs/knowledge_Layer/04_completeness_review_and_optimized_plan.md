@@ -690,7 +690,7 @@ knowledge:
 
 **回滚**：`KnowledgeMode=off`。
 
-**状态**：未开始
+**状态**：实现完成（2026-09-30）——W1–W7 全覆盖（W7 分 W7a 激活装配 / W7b 测量段两切片，登记见 `06` §4 Phase 2）；遗留：真实 on-mode A/B ≥20 任务实测待跑（报告落点 `reports/phase2_exploration_report.md`）、`verify_requested` 消费方未接线、`broad` 档阈值校准留后续（`06` §9 #21 确认预存 / #22 flaky，不阻塞）。
 
 ### Phase 3 — Code API 与工具面收敛
 
@@ -713,7 +713,7 @@ knowledge:
 
 **回滚**：工具开关关闭，回到 `grep/view`。
 
-**状态**：未开始
+**状态**：实现完成（2026-09-30）——交付 1–5 全部落地（工具注册名以下划线形式；`knowledge.code_tools` 默认 off，灰度开启；降级协议含 mode=off / shadow / on 三档口径）；遗留：收益类验收（探索 token ↓≥40%、fallback ≤30%、调用总数不增加）与 M3 判定待测量轮；`configs/model_cards.yaml` 无工具面清单未改（系统提示载体为工具描述）；`cmd/toolkit-mcp-server` 无 workspace 上下文未接。
 
 ### Phase 4 — Adapter SPI 与可选 LSP
 

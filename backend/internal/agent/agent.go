@@ -12,6 +12,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/contextmgr"
 	"github.com/wwsheng009/ai-agent-runtime/internal/errors"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm"
 	mcpcatalog "github.com/wwsheng009/ai-agent-runtime/internal/mcp/catalog"
 	"github.com/wwsheng009/ai-agent-runtime/internal/memory"
@@ -1088,6 +1089,18 @@ func newDefaultContextManager(cfg *Config, store *artifact.Store) *contextmgr.Ma
 		if value, ok := cfg.Options["context_workspace_mode"].(string); ok && value != "" {
 			strategy.WorkspaceMode = value
 		}
+		// W7 激活切片：知识层注入旋钮（KnowledgeMode = off|signals|broad）。
+		// 空值不覆盖 profile 默认（off）；未知值由 ResolveStrategy 归一化 fail
+		// closed 到 off。
+		if value, ok := cfg.Options["context_knowledge_mode"].(string); ok && value != "" {
+			strategy.KnowledgeMode = value
+		}
+		if value, ok := contextOptionInt(cfg.Options, "context_min_knowledge_query_length"); ok {
+			strategy.MinKnowledgeQueryLength = value
+		}
+		if value, ok := contextOptionFloat(cfg.Options, "context_reuse_confidence_floor"); ok {
+			strategy.ReuseConfidenceFloor = value
+		}
 		if value, ok := contextOptionInt(cfg.Options, "context_min_compaction_messages"); ok {
 			strategy.MinCompactionMessages = value
 		}
@@ -1128,8 +1141,27 @@ func newDefaultContextManager(cfg *Config, store *artifact.Store) *contextmgr.Ma
 		manager.Strategy = contextmgr.ResolveStrategy(profile, strategy)
 		attachWorkspaceContext(manager, cfg)
 		attachProjectMemory(manager, cfg)
+		attachKnowledgePlanner(manager, cfg)
 	}
 	return manager
+}
+
+// attachKnowledgePlanner 注入 W7 激活切片的知识层句柄：装配方在 workspace
+// 激活后把句柄放进 `context_knowledge_layer`（建议传 `*knowledge.Layer`——
+// 它补齐 WorkspaceVersion 观测；裸 store Planner 会因版本未知 fail-closed
+// 全转 Explore）。
+//
+// nil / 类型不符时一律不注入：`Manager.Knowledge` 保持 nil，配合 off 档的
+// 短路（零调用、零注入）保证"默认 off 行为与改动前逐字节一致"。
+func attachKnowledgePlanner(manager *contextmgr.Manager, cfg *Config) {
+	if manager == nil || cfg == nil || len(cfg.Options) == 0 {
+		return
+	}
+	planner, _ := cfg.Options["context_knowledge_layer"].(knowledge.Planner)
+	if planner == nil {
+		return
+	}
+	manager.Knowledge = planner
 }
 
 func attachWorkspaceContext(manager *contextmgr.Manager, cfg *Config) {
@@ -1263,6 +1295,28 @@ func contextOptionInt(options map[string]interface{}, key string) (int, bool) {
 		return int(value), value > 0
 	case float64:
 		return int(value), value > 0
+	default:
+		return 0, false
+	}
+}
+
+// contextOptionFloat 读取 >0 的浮点 option（如 context_reuse_confidence_floor）；
+// 0 / 缺失 / 非法值返回 false（= 不覆盖默认）。
+func contextOptionFloat(options map[string]interface{}, key string) (float64, bool) {
+	if len(options) == 0 {
+		return 0, false
+	}
+	switch value := options[key].(type) {
+	case float64:
+		return value, value > 0
+	case float32:
+		return float64(value), value > 0
+	case int:
+		return float64(value), value > 0
+	case int32:
+		return float64(value), value > 0
+	case int64:
+		return float64(value), value > 0
 	default:
 		return 0, false
 	}

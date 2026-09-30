@@ -86,3 +86,11 @@ func knowledgeAttributionSink(store any) knowledge.AttributionSink {
 	sink, _ := store.(knowledge.AttributionSink)
 	return sink
 }
+
+// knowledgeRecorderFor 从知识层激活句柄装配探索记忆采集器（06 §4 Phase 2 W2）。
+//
+// 与 ShadowObserverFor 同门控口径：仅 mode=shadow|on 且本进程为 owner 时非 nil；
+// off / reader / 启动期降级（act == nil）时返回 nil——入口零写入，nil-safe。
+func knowledgeRecorderFor(act *knowledge.Activation) *knowledge.ExplorationRecorder {
+	return act.Recorder()
+}

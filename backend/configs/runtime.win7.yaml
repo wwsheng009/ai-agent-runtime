@@ -75,6 +75,19 @@ observe:
   enabled: true
 
 knowledge:
-  # 知识层（docs/knowledge_Layer）总开关；默认 off，且 Phase 0 只允许 off。
-  # 取值：off（关闭）/ shadow（只索引不注入）/ on（索引 + 注入，需 ADR 门禁）。
-  mode: off
+  # 知识层（docs/knowledge_Layer）总开关；Phase 2 已完成、ADR-0004 已 Accepted，
+  # 门禁解除：on / shadow 均可（Phase 0「只允许 off」口径已过期）。
+  # 取值：off（关闭）/ shadow（只索引不注入）/ on（索引 + 注入；装配链按 W7a
+  # 保守映射 on → context_knowledge_mode=signals，由宿主自动注入，勿重复配置）。
+  mode: on
+  # code_tools：Phase 3（06 §4 Phase 3）的 code.* 工具面开关；取值与语义
+  # 必须与 runtime.yaml 保持一致（win7 文件是覆盖档，不是行为分叉）。
+  code_tools: on
+  # planner：Reuse Gate 的保守阈值（06 §4 Phase 2 W3；04 §4.4 阈值策略）。
+  # 下列值即代码缺省值，初值待 Phase 2 实测校准（04 §7.6）；取消注释即可覆盖。
+  # planner:
+  #   min_reuse_confidence: 0.80    # 同任务直接复用下限
+  #   write_reuse_confidence: 0.90  # 同任务写操作下限（复用 + 强制验证读取）
+  #   cross_task_confidence: 0.90   # 跨任务下限（复用 + 强制验证读取）
+  #   verify_read_below: 0.90       # 低于此值必须安排一次验证读取
+  #   explore_below: 0.50           # 低于此值触发探索（04 §4.4 硬下限）

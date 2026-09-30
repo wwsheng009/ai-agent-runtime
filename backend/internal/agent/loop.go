@@ -2078,6 +2078,8 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			// preserved while estimated tokens remain under the prompt budget.
 			// Preflight / session auto-compact remain the primary overflow paths.
 			EnablePromptCompaction: true,
+			// W6：写场景的复用按 ≥0.90 + 强制验证读取（只读策略恒为读语义）。
+			KnowledgeWrite: loop.knowledgeWriteIntent(goal),
 		})
 		managedHistory = built.Messages
 		promptPrefixRewritten = promptHistoryPrefixChanged(history, managedHistory)

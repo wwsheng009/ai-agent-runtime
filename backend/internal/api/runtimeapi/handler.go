@@ -113,6 +113,9 @@ type Handler struct {
 	// Phase 1 交付 4：知识层 shadow 拦截观察器（runtime-server 启动时经
 	// SetKnowledgeShadow 注入）；nil 时全部会话保持无知识层行为。
 	knowledgeShadow *knowledge.ShadowObserver
+	// Phase 2 W2：探索记忆采集器（runtime-server 启动时经 SetKnowledgeRecorder
+	// 注入）；nil（mode=off / reader / 未接线）时零写入。
+	knowledgeRecorder *knowledge.ExplorationRecorder
 	// Phase 1 交付 5：知识层状态面句柄（经 SetKnowledgeActivation 注入）；
 	// nil（mode=off / 启动期降级）时 /knowledge/status 返回 mode=off 而非 404。
 	knowledgeActivation *knowledge.Activation
@@ -744,6 +747,15 @@ func (h *Handler) SetKnowledgeShadow(observer *knowledge.ShadowObserver) {
 		return
 	}
 	h.knowledgeShadow = observer
+}
+
+// SetKnowledgeRecorder 注入探索记忆采集器（06 §4 Phase 2 W2，runtime-server
+// 启动时装配）。采集器为 nil（mode=off / reader / 未接线）时零写入。
+func (h *Handler) SetKnowledgeRecorder(recorder *knowledge.ExplorationRecorder) {
+	if h == nil {
+		return
+	}
+	h.knowledgeRecorder = recorder
 }
 
 // SetKnowledgeActivation 注入知识层接入句柄（Phase 1 交付 5，runtime-server 启动时装配）。
@@ -2084,7 +2096,7 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		agentConfig.MaxExplorationSteps = selectedConfig.Agent.MaxExplorationSteps
 		agentConfig.MaxRepeatedToolCalls = selectedConfig.Agent.MaxRepeatedToolCalls
 		agentConfig.MaxRepeatedPollCalls = selectedConfig.Agent.MaxRepeatedPollCalls
-		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig)
+		agentConfig.Options = contextOptionsFromRuntimeConfig(selectedConfig, h.knowledgeActivation)
 	}
 	if agentConfig.Options == nil {
 		agentConfig.Options = make(map[string]interface{})
@@ -12008,7 +12020,7 @@ func buildRecoverySummaryFromTraceSummaries(traces []runtimeevents.TraceSummary)
 	return buildRecoverySummaryFromView(view)
 }
 
-func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[string]interface{} {
+func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig, activation *knowledge.Activation) map[string]interface{} {
 	if config == nil {
 		return nil
 	}
@@ -12081,10 +12093,37 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[strin
 	if dsn := strings.TrimSpace(config.Artifact.StoreDSN); dsn != "" {
 		options["artifact_store_dsn"] = dsn
 	}
+	applyKnowledgeContextOptions(options, activation)
 	if len(options) == 0 {
 		return nil
 	}
 	return options
+}
+
+// applyKnowledgeContextOptions 把知识层装配写入会话 agent options（06 §4
+// Phase 2 W7 激活切片；runtime-server 与 runtimeapi 共用本路径）：
+//
+//   - 仅当知识层已激活（Layer 非 nil）且 `knowledge.mode=on` 时新增两个 key；
+//     off（默认）/ shadow（ModeShadow 契约：只构建索引与统计、绝不注入
+//     prompt）/ 激活失败（nil）一律零新增，options 与改动前逐字节一致；
+//   - `context_knowledge_mode` 由 Layer.Mode() 经 contextmgr 映射（on→signals
+//     保守档；broad 留给后续校准切片显式开启）；
+//   - `context_knowledge_layer` 传 `*knowledge.Layer`（补齐 WorkspaceVersion
+//     观测；裸 store Planner 会因版本未知 fail-closed 全转 Explore）。
+func applyKnowledgeContextOptions(options map[string]interface{}, activation *knowledge.Activation) {
+	if options == nil || activation == nil {
+		return
+	}
+	layer := activation.Layer()
+	if layer == nil {
+		return
+	}
+	mode := runtimecontext.KnowledgeModeForLayerMode(layer.Mode())
+	if mode == runtimecontext.KnowledgeModeOff {
+		return
+	}
+	options["context_knowledge_mode"] = mode
+	options["context_knowledge_layer"] = layer
 }
 
 func contextSnapshotFromRuntimeConfig(config *runtimecfg.RuntimeConfig) map[string]interface{} {
