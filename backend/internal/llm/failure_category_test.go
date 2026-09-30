@@ -46,3 +46,23 @@ func TestNormalizeFailureCategory_AcceptsMappedOutput(t *testing.T) {
 		}
 	}
 }
+
+// TestFailureCategoryFromErrorCode_ToolSurfaceFailures 锁定 2026-09-30 真机缺口：
+// 子代理任务的终局错误原文（工具名不存在 / 执行策略拒绝）必须归类为 tool_error。
+// 此前它们落到 unknown：父模型拿到空 retry_advice，只能反复重派新子代理
+// （证据会话 session_20260929175325_cxHK8mPD：12 个子代理 10 次 failed/unknown）。
+func TestFailureCategoryFromErrorCode_ToolSurfaceFailures(t *testing.T) {
+	cases := map[string]string{
+		"tool not found: commands":                                      FailureCategoryToolError,
+		"tool not found: shell_commands":                                FailureCategoryToolError,
+		"policy:capability not allowed by execution policy: exec_shell": FailureCategoryToolError,
+		"CAPABILITY NOT ALLOWED BY EXECUTION POLICY: exec_shell":        FailureCategoryToolError,
+		// 未知文本仍不猜测。
+		"something completely new": FailureCategoryUnknown,
+	}
+	for text, want := range cases {
+		if got := FailureCategoryFromErrorCode(text); got != want {
+			t.Errorf("FailureCategoryFromErrorCode(%q) = %q, want %q", text, got, want)
+		}
+	}
+}

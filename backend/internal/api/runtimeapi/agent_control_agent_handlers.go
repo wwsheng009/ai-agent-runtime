@@ -116,6 +116,10 @@ func (h *Handler) materializeAgentControlAgentProjections(ctx context.Context, s
 	if err := h.sweepStaleAgentControlAgentRegistry(ctx, store); err != nil {
 		return err
 	}
+	// P0-A/P0-B（2026-09-30，与 CLI 宿主同构）：轻量子会话的完成订阅是进程内存
+	// 态，宿主重启后按 root 收敛一次——重建订阅 + 把重启窗口内丢失的子会话终态
+	// 补投影（mailbox + 通知 + run 终态收敛）。每进程每 root 一次。
+	h.recoverAgentChildCompletions(ctx, store)
 	records, err := h.projectAgentControlAgents(ctx, projectionAgentFilter(filter))
 	if err != nil {
 		return err

@@ -108,6 +108,17 @@ func FailureCategoryFromErrorCode(code string) string {
 		return FailureCategoryInterrupted
 	case strings.Contains(normalized, "PERMISSION") || strings.Contains(normalized, "TOOL_") || strings.Contains(normalized, "HOOK"):
 		return FailureCategoryToolError
+	// 2026-09-30 真机：子代理任务因工具面问题终局时，错误原文是
+	// "tool not found: commands"（模型给出不存在的工具名）与
+	// "policy:capability not allowed by execution policy: exec_shell"
+	// （执行策略拒绝）。两者都是确定性的工具侧失败，此前落到 unknown：
+	// 父模型拿到空建议后只能反复重派新子代理（该会话 10 次失败、单次烧掉
+	// 数百万 token）。归类为 tool_error 后 retry_advice 给出
+	// complete_locally_or_change_tool，父模型可立即改道。
+	case strings.Contains(normalized, "TOOL NOT FOUND") || strings.Contains(normalized, "UNKNOWN TOOL"):
+		return FailureCategoryToolError
+	case strings.Contains(normalized, "NOT ALLOWED BY EXECUTION POLICY") || strings.Contains(normalized, "CAPABILITY NOT ALLOWED"):
+		return FailureCategoryToolError
 	case strings.Contains(normalized, "UPSTREAM") || strings.Contains(normalized, "PROVIDER"):
 		return FailureCategoryProviderError
 	}
