@@ -2669,7 +2669,7 @@ func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent
 	b.renderMu.Lock()
 	currentEpoch := b.runEpoch
 	b.renderMu.Unlock()
-	if queued.epoch != currentEpoch && !isCriticalSubagentLifecycleEvent(queued.event.Type) {
+	if queued.epoch != currentEpoch && !b.uiActorPostMustNotDrop(queued.event.Type) {
 		b.logLateRuntimeEvent(queued.event, "stale local run epoch")
 		return
 	}
@@ -2693,11 +2693,12 @@ func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent
 	}
 	if accepted, legacyOK := b.postRuntimeEventToUIActorWithEpoch(queued.event, queued.epoch); accepted {
 		return
-	} else if isCriticalSubagentLifecycleEvent(queued.event.Type) {
-		// If the UI actor is already closed/replaced, retain the control-plane
-		// terminal in the legacy/Scene path instead of silently losing it. The
-		// critical actor admission path never times out merely due to a full
-		// mailbox, so this fallback cannot overtake queued actor predecessors.
+	} else if b.uiActorPostMustNotDrop(queued.event.Type) {
+		// If the UI actor is already closed/replaced, retain a critical event
+		// (subagent control-plane terminal or a tool/LLM terminal boundary) in
+		// the legacy/Scene path instead of silently losing it. The critical
+		// actor admission path never times out merely due to a full mailbox, so
+		// this fallback cannot overtake queued actor predecessors.
 		b.handleEvent(queued.event)
 		return
 	} else if legacyOK && b.isRunEpochCurrent(queued.epoch) {
@@ -2759,6 +2760,26 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActor(event runtimeevents.E
 	return accepted
 }
 
+// uiActorPostMustNotDrop reports whether losing this event on the final hop to
+// the UI actor mailbox silently corrupts authoritative state. Classification
+// (§6.1.1) already promotes these events to eventClassCritical ("不丢：保留位 +
+// 重试通道"); the actor hop must honour the same contract instead of dropping
+// tool/LLM terminal boundaries after the bounded wait.
+//
+// Dropping a single tool.completed leaves its Scene tool-chain cell mutable
+// forever: canonicalHistoryCommitFrontier treats the first mutable cell as a
+// barrier, so no later cell can be committed and the whole committed display
+// freezes (live: session_20260927073805_QbWBceF5, 2026-09-30 — the dropped
+// "tool.completed" at 09:50:10 pinned cell 12603 and froze scrollback for hours).
+// The bounded mailbox wait is therefore re-armed for these events, mirroring the
+// subagent-lifecycle path that must stay observable across run retirement.
+//
+// In off/observe mode the pre-classification behaviour is preserved (the env
+// switch remains a full rollback).
+func (b *chatRuntimeEventBridge) uiActorPostMustNotDrop(eventType string) bool {
+	return b != nil && b.eventIsCritical(eventType)
+}
+
 // postRuntimeEventToUIActorWithEpoch enqueues the event on the UI actor
 // mailbox. Returns (accepted, legacyOK): accepted=true means the event was
 // handed to the actor; legacyOK=true means the caller may fall back to the
@@ -2804,6 +2825,7 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 		}
 		coordinator.uiActor.ObservePostWaitNanos(time.Since(waitStart))
 	}()
+	mustNotDrop := b.uiActorPostMustNotDrop(event.Type)
 	for {
 		if coordinator.tryPostUIAction(action) {
 			return true, true
@@ -2819,13 +2841,19 @@ func (b *chatRuntimeEventBridge) postRuntimeEventToUIActorWithEpoch(event runtim
 		}
 		// A bounded mailbox is normal backpressure, but waiting for it must
 		// never outlive the run that owns this event. EndRun seals the epoch
-		// after its drain timeout, which releases this loop.
-		if !isCriticalSubagentLifecycleEvent(event.Type) && !b.isRunEpochCurrent(epoch) {
+		// after its drain timeout, which releases this loop for events whose
+		// loss is recoverable. Events classified critical (tool/LLM terminal
+		// boundaries, subagent lifecycle) must not be lost even across run
+		// retirement: dropping one corrupts the Scene/committed display instead
+		// of degrading a redraw, so they keep the bounded-wait retry (below)
+		// and the legacy fallback in handleQueuedEvent.
+		if !mustNotDrop && !b.isRunEpochCurrent(epoch) {
 			return false, false
 		}
 		if time.Now().After(waitDeadline) {
-			if isCriticalSubagentLifecycleEvent(event.Type) {
-				b.logLateRuntimeEvent(event, "UI actor mailbox stalled; critical lifecycle event remains pending")
+			if mustNotDrop {
+				b.logLateRuntimeEvent(event, fmt.Sprintf(
+					"UI actor mailbox stalled; critical event remains pending (type=%s)", event.Type))
 				waitDeadline = time.Now().Add(timeout)
 				continue
 			}
