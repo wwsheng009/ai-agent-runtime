@@ -2,7 +2,6 @@ package ui
 
 import (
 	"errors"
-	"reflect"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
@@ -510,7 +509,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			nextTranscript, activeOnly = transcriptReplacementActiveOnlySnapshot(state.Transcript, a.Snapshot, state.Active)
 		}
 		if !activeOnly {
-			nextTranscript = NewTranscriptState(a.Snapshot)
+			nextTranscript = newTranscriptStateFromSnapshot(state.Transcript, a.Snapshot)
 			activeOnly = state.SemanticActiveCellProjection &&
 				transcriptReplacementOnlyUpdatesActive(state.Transcript, nextTranscript, state.Active)
 		}
@@ -936,14 +935,15 @@ func transcriptCellStaticMetadataEqual(left, right scene.TranscriptCell) bool {
 // semantic source of truth, but when every non-active cell is byte-for-byte
 // unchanged there is no reason to lay out the finalized transcript again.
 func transcriptReplacementOnlyUpdatesActive(previous, next TranscriptState, active ActiveCellState) bool {
-	if active.CellID == 0 || active.Phase != ActiveCellMutable || len(previous.Cells) != len(next.Cells) {
+	if previous.SceneID != next.SceneID ||
+		active.CellID == 0 || active.Phase != ActiveCellMutable || len(previous.Cells) != len(next.Cells) {
 		return false
 	}
 	found := false
 	for index := range previous.Cells {
 		left, right := previous.Cells[index], next.Cells[index]
 		if left.ID != active.CellID && right.ID != active.CellID {
-			if !reflect.DeepEqual(left, right) {
+			if !transcriptCellUnchangedForActiveOnly(left, right) {
 				return false
 			}
 			continue
@@ -959,6 +959,30 @@ func transcriptReplacementOnlyUpdatesActive(previous, next TranscriptState, acti
 		found = true
 	}
 	return found
+}
+
+// transcriptCellUnchangedForActiveOnly is the cheap non-active-cell equality used
+// by transcriptReplacementOnlyUpdatesActive and by the incremental snapshot
+// detach (newTranscriptStateFromSnapshot). The Scene transaction contract makes
+// the per-cell Revision the mutation fence (update/finalize must strictly
+// increase it), so equal ID+Revision+static metadata identifies the same
+// immutable Scene object. Source is still compared as a content guard for
+// hand-built or migrated states that bypass the fence.
+//
+// Presentation/Document is a rendering projection and is deliberately not
+// traversed: reflect.DeepEqual over every cell's document tree cost the UI actor
+// seconds per authoritative snapshot on long sessions (live: 8k cells,
+// plan-max-ms 75s, "UI actor mailbox stalled" drops of tool.completed), while
+// theme/presentation changes rebase through SetThemeContextAction instead of the
+// transcript replacement path.
+func transcriptCellUnchangedForActiveOnly(left, right scene.TranscriptCell) bool {
+	if left.ID != right.ID || left.Revision != right.Revision {
+		return false
+	}
+	if !transcriptCellStaticMetadataEqual(left, right) {
+		return false
+	}
+	return left.Source == right.Source
 }
 
 func transcriptSnapshotAlreadyInstalled(current TranscriptState, snapshot *scene.Snapshot) bool {

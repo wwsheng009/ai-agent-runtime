@@ -943,7 +943,7 @@ func transcriptPlanMemoHit(state *UIControllerState) bool {
 	if !effects.lastPlannedTranscriptValid ||
 		effects.lastPlannedTranscriptSceneID != state.Transcript.SceneID ||
 		effects.lastPlannedTranscriptFence != transcriptFinalizedPrefixFence(state.Transcript) ||
-		effects.lastPlannedTranscriptCells != len(state.Transcript.Cells) ||
+		effects.lastPlannedTranscriptCells != transcriptFinalizedCellCount(state.Transcript) ||
 		effects.lastPlannedTranscriptLayoutGen != state.LayoutGeneration ||
 		effects.lastPlannedWidth != state.Geometry.Width ||
 		effects.lastPlannedHeight != state.Geometry.Height ||
@@ -973,7 +973,7 @@ func recordTranscriptPlanMemo(state *UIControllerState, candidates int) {
 	effects.lastPlannedTranscriptValid = true
 	effects.lastPlannedTranscriptSceneID = state.Transcript.SceneID
 	effects.lastPlannedTranscriptFence = transcriptFinalizedPrefixFence(state.Transcript)
-	effects.lastPlannedTranscriptCells = len(state.Transcript.Cells)
+	effects.lastPlannedTranscriptCells = transcriptFinalizedCellCount(state.Transcript)
 	effects.lastPlannedTranscriptLayoutGen = state.LayoutGeneration
 	effects.lastPlannedWidth = state.Geometry.Width
 	effects.lastPlannedHeight = state.Geometry.Height
@@ -981,6 +981,24 @@ func recordTranscriptPlanMemo(state *UIControllerState, candidates int) {
 	effects.lastPlannedThemeKey = themeFingerprint(state.Theme)
 	effects.lastPlannedTerminalEpoch = effects.TerminalEpoch
 	effects.lastPlannedCandidateCount = candidates
+}
+
+// transcriptFinalizedCellCount counts the cells the finalized-prefix plan can
+// consume. The total cell count is deliberately not used as a memo fence: a busy
+// turn keeps appending *mutable* tail cells (new reasoning / tool-chain
+// boundaries), and treating any count change as a plan-input change re-planned
+// the entire history per appended cell — measured at 723ms/op on a 2000-cell
+// transcript, and visible live as plan-last-ms 4.7-6.9s with ~9 plans/min. Only
+// the finalized prefix enters planEligibleHistoryCommits; mutable cells are the
+// frontier barrier and are planned by syncHistoryEffectsForActiveCell.
+func transcriptFinalizedCellCount(transcript TranscriptState) int {
+	count := 0
+	for _, cell := range transcript.Cells {
+		if cell.Phase != scene.CellMutable {
+			count++
+		}
+	}
+	return count
 }
 
 // syncHistoryEffectsForActiveCell is the hot path for append-only stream
