@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   aicli E2E 全量入口（聚合）：E2E-DEBUG-01 → 02 → 03 → E2E-TOOLS-01 顺序执行 + 断言基线校验。
 

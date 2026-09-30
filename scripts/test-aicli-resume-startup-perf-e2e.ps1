@@ -1,4 +1,4 @@
-#requires -Version 7
+﻿#requires -Version 7
 <#
 .SYNOPSIS
   E2E：resume 启动性能 —— 「卡住很久才进入恢复」的可观测判据。

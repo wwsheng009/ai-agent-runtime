@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateRange(30, 900)]
     [int]$TimeoutSeconds = 300,

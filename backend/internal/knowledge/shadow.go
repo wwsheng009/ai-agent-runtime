@@ -55,6 +55,10 @@ type ShadowConfig struct {
 	Alpha float64
 	// Mode 产生本批数据的知识层模式（shadow | on）；off 时观察器整体 no-op。
 	Mode Mode
+	// Workspace 是工作区根目录（绝对路径）。调用参数里的绝对 path / file_path
+	// 必须先折叠为 workspace 相对路径才能与索引的 files.path 对齐；不折叠会让
+	// 带绝对作用域的调用候选恒为空（Phase1-shadow 实测发现的缺陷）。
+	Workspace string
 	// ProjectID 工作区稳定键（哈希前缀），由接入方计算。
 	ProjectID string
 	// Index 索引侧只读面；nil 时观察器 no-op（防御分支）。
@@ -101,6 +105,8 @@ func ShadowObserverFor(act *Activation, sink AttributionSink) *ShadowObserver {
 	}
 	return NewShadowObserver(ShadowConfig{
 		Mode:      ModeShadow,
+		Alpha:     act.Config().Alpha,
+		Workspace: act.Workspace(),
 		ProjectID: ProjectIDForWorkspace(act.Workspace()),
 		Index:     layer,
 		Sink:      sink,
@@ -123,19 +129,35 @@ func ProjectIDForWorkspace(workspace string) string {
 //
 // 返回 (nil, nil) 的场合：观察器/index 未配置、mode=off、非 grep/view、
 // 调用失败。这些场合都不是错误，调用方无需分支。
+// ObservationDetail 是 observeDetailed 的附带信息：两侧文件集合。
+//
+// 不落库、不改变 Observe 语义；只供 Phase1-shadow 的口径裁决测量使用
+// （行级覆盖 vs file-level 覆盖，见 reports/phase1_shadow_report.md）。
+type ObservationDetail struct {
+	BaselineFiles  map[string]struct{}
+	CandidateFiles map[string]struct{}
+}
+
 func (o *ShadowObserver) Observe(ctx context.Context, call ObservedCall) (*entity.ExplorationAttribution, error) {
+	rec, _, err := o.observeDetailed(ctx, call)
+	return rec, err
+}
+
+// observeDetailed 与 Observe 同流程，额外返回两侧文件集合。
+func (o *ShadowObserver) observeDetailed(ctx context.Context, call ObservedCall) (*entity.ExplorationAttribution, ObservationDetail, error) {
+	var detail ObservationDetail
 	if o == nil || o.cfg.Index == nil {
-		return nil, nil
+		return nil, detail, nil
 	}
 	if o.cfg.Mode == ModeOff {
-		return nil, nil
+		return nil, detail, nil
 	}
 	tool := strings.ToLower(strings.TrimSpace(call.Tool))
 	if tool != "grep" && tool != "view" {
-		return nil, nil
+		return nil, detail, nil
 	}
 	if strings.TrimSpace(call.Err) != "" {
-		return nil, nil
+		return nil, detail, nil
 	}
 
 	var (
@@ -144,12 +166,21 @@ func (o *ShadowObserver) Observe(ctx context.Context, call ObservedCall) (*entit
 	)
 	switch tool {
 	case "grep":
-		rec, hash = o.observeGrep(ctx, call)
+		grepObs, grepHash := o.observeGrepDetailed(ctx, call)
+		rec, hash = grepObs.Record, grepHash
+		detail.BaselineFiles = grepObs.BaselineFiles
+		detail.CandidateFiles = grepObs.CandidateFiles
 	case "view":
 		rec, hash = o.observeView(ctx, call)
+		if file := relativizeWorkspacePath(argString(call.Args, "file_path"), o.cfg.Workspace); file != "" {
+			detail.BaselineFiles = map[string]struct{}{file: {}}
+			if rec != nil && rec.CandidateN > 0 {
+				detail.CandidateFiles = map[string]struct{}{file: {}}
+			}
+		}
 	}
 	if rec == nil {
-		return nil, nil
+		return nil, detail, nil
 	}
 	rec.ID = uuid.NewString()
 	rec.SessionID = call.SessionID
@@ -163,46 +194,118 @@ func (o *ShadowObserver) Observe(ctx context.Context, call ObservedCall) (*entit
 
 	if o.cfg.Sink != nil {
 		if err := o.cfg.Sink.AppendExplorationAttribution(ctx, rec); err != nil {
-			return rec, fmt.Errorf("knowledge: append exploration attribution: %w", err)
+			return rec, detail, fmt.Errorf("knowledge: append exploration attribution: %w", err)
 		}
 	}
-	return rec, nil
+	return rec, detail, nil
 }
 
-// observeGrep 处理 `grep pattern`（带 path/glob 作用域）→ `Search(pattern)`。
+// observeGrep 处理 `grep pattern`（带 path/glob 作用域）→ 索引侧候选。
 func (o *ShadowObserver) observeGrep(ctx context.Context, call ObservedCall) (*entity.ExplorationAttribution, string) {
-	pattern := argString(call.Args, "pattern")
-	scope := firstNonEmpty(argString(call.Args, "path"), argString(call.Args, "glob"), argString(call.Args, "include"))
-	baselineKeys, baselineTokens := parseGrepBaseline(call.Output)
-	hash := queryHash("grep", pattern, scope)
+	obs, hash := o.observeGrepDetailed(ctx, call)
+	return obs.Record, hash
+}
+
+// shadowGrepObservation 是 grep 观测的完整结果：落库行 + 两侧文件集合。
+//
+// 文件集合不落库（ADR-0003 §4.1 冻结了 exploration_attribution 的列集），
+// 只供 Phase1-shadow 的口径裁决测量使用（行级覆盖 vs file-level 覆盖）。
+type shadowGrepObservation struct {
+	Record         *entity.ExplorationAttribution
+	BaselineFiles  map[string]struct{}
+	CandidateFiles map[string]struct{}
+}
+
+// observeGrepDetailed 是 observeGrep 的完整实现；Observe 只用 Record。
+func (o *ShadowObserver) observeGrepDetailed(ctx context.Context, call ObservedCall) (shadowGrepObservation, string) {
+	rawPatterns := grepPatternList(call.Args)
+	pattern := strings.Join(rawPatterns, " | ")
+	// path/paths 与 glob/include 可能同时给出（rg 语义：根目录集合 + 文件名过滤），
+	// 约束都要参与候选过滤：多路径前缀是 OR、glob 是 AND；baseline 输出的相对
+	// 前缀按"已属于某作用域则原样、否则回退首项"补全（与历史单路径语义一致）。
+	pathScopes := grepPathScopes(call.Args)
+	globScope := firstNonEmpty(argString(call.Args, "glob"), argString(call.Args, "include"))
+	filter := newScopeFilterSpecMulti(pathScopes, globScope, o.cfg.Workspace)
+	scopeBases := make([]string, 0, len(pathScopes))
+	for _, scope := range pathScopes {
+		if base := relativizeWorkspacePath(scope, o.cfg.Workspace); base != "" {
+			scopeBases = append(scopeBases, base)
+		}
+	}
+	baselineKeys, baselineTokens := parseGrepBaselineMulti(call.Output, scopeBases)
+	hash := queryHash("grep", pattern, strings.TrimSpace(strings.Join(pathScopes, " ")+" "+globScope))
 
 	rec := &entity.ExplorationAttribution{
 		BaselineN:      len(baselineKeys),
 		BaselineTokens: baselineTokens,
 	}
-	if pattern == "" {
-		return rec, hash
+	out := shadowGrepObservation{
+		Record:         rec,
+		BaselineFiles:  make(map[string]struct{}, len(baselineKeys)),
+		CandidateFiles: make(map[string]struct{}, shadowCandidateLimit),
+	}
+	for _, key := range baselineKeys {
+		out.BaselineFiles[pathFromKey(key)] = struct{}{}
+	}
+	if len(rawPatterns) == 0 {
+		return out, hash
 	}
 
-	hits, err := o.cfg.Index.Search(ctx, SearchQuery{Text: pattern, Limit: shadowCandidateLimit})
-	if err == nil {
-		scopePrefix := normalizeShadowPath(scope)
-		candidateKeys := make([]string, 0, len(hits))
-		rendered := make([]string, 0, len(hits))
-		for _, hit := range hits {
-			path := normalizeShadowPath(hit.Path)
-			if scopePrefix != "" && !strings.HasPrefix(path, scopePrefix) {
-				continue
-			}
-			candidateKeys = append(candidateKeys, keyForLine(path, hit.Line))
-			rendered = append(rendered, fmt.Sprintf("%s:%d:%s", path, hit.Line, hit.Name))
-		}
-		rec.CandidateN = len(candidateKeys)
-		rec.OverlapN = overlapCount(baselineKeys, candidateKeys)
-		rec.CandidateTokens = estimateTokens(strings.Join(rendered, "\n"))
+	// 候选映射：regex 交替拆成多个字面 token，逐个检索并按 (path,line) 去重，
+	// 再截断到 shadowCandidateLimit。直接拿 regex 检索 FTS 会恒为空。
+	// 两条候选通道并用：symbols（定义行）+ refs（使用点行）——后者让候选集
+	// 覆盖"非定义行"，逼近文本 grep 的命中原象（Phase1-shadow 实测驱动）。
+	tokens := collectShadowTokens(rawPatterns)
+	if len(tokens) == 0 {
+		tokens = rawPatterns
 	}
+	candidateKeys := make([]string, 0, shadowCandidateLimit)
+	rendered := make([]string, 0, shadowCandidateLimit)
+	seenCandidates := make(map[string]bool)
+	appendCandidate := func(path string, line int, name string) {
+		if len(candidateKeys) >= shadowCandidateLimit {
+			return
+		}
+		path = normalizeShadowPath(path)
+		if path == "" || !filter.matches(path) {
+			return
+		}
+		key := keyForLine(path, line)
+		if seenCandidates[key] {
+			return
+		}
+		seenCandidates[key] = true
+		out.CandidateFiles[path] = struct{}{}
+		candidateKeys = append(candidateKeys, key)
+		rendered = append(rendered, fmt.Sprintf("%s:%d:%s", path, line, name))
+	}
+	for _, token := range tokens {
+		if len(candidateKeys) >= shadowCandidateLimit {
+			break
+		}
+		hits, err := o.cfg.Index.Search(ctx, SearchQuery{Text: token, Limit: shadowCandidateLimit})
+		if err == nil {
+			for _, hit := range hits {
+				appendCandidate(hit.Path, hit.Line, hit.Name)
+			}
+		}
+		if len(candidateKeys) >= shadowCandidateLimit {
+			break
+		}
+		if refIndex, ok := o.cfg.Index.(refCandidateIndex); ok {
+			refs, err := refIndex.FindRefs(ctx, RefQuery{ToSymbolName: token, Limit: shadowRefCandidateLimit})
+			if err == nil {
+				for _, ref := range refs {
+					appendCandidate(ref.Path, ref.Line, ref.ToSymbolName)
+				}
+			}
+		}
+	}
+	rec.CandidateN = len(candidateKeys)
+	rec.OverlapN = overlapCount(baselineKeys, candidateKeys)
+	rec.CandidateTokens = estimateTokens(strings.Join(rendered, "\n"))
 	fillShadowMetrics(rec, o.cfg.Alpha)
-	return rec, hash
+	return out, hash
 }
 
 // observeView 处理 `view file offset/limit` → 该区间的符号视图。
@@ -211,7 +314,7 @@ func (o *ShadowObserver) observeGrep(ctx context.Context, call ObservedCall) (*e
 // 行号集合，candidate 记与该区间相交的符号 span；overlap 按"被符号覆盖的行数"
 // 计。
 func (o *ShadowObserver) observeView(ctx context.Context, call ObservedCall) (*entity.ExplorationAttribution, string) {
-	file := normalizeShadowPath(argString(call.Args, "file_path"))
+	file := relativizeWorkspacePath(argString(call.Args, "file_path"), o.cfg.Workspace)
 	offset := intArg(call.Args, "offset")
 	if offset <= 0 {
 		offset = 1
@@ -288,13 +391,42 @@ func fillShadowMetrics(rec *entity.ExplorationAttribution, alpha float64) {
 
 const shadowCandidateLimit = 100
 
+// shadowRefCandidateLimit 限制单个 token 的引用点候选数；refs 表按名字查
+// 常见标识符可能返回很多使用点，需要与符号候选共享同一截断预算。
+const shadowRefCandidateLimit = 100
+
+// refCandidateIndex 是 ShadowIndex 的**可选**扩展：按名字解析使用点（refs）。
+//
+// 生产 Layer / sqliteStore 都实现它；最小 fake 只实现 Search + FindSymbols 时，
+// 观察器自动退化为"仅符号定义行"的候选集，不破坏既有实现与测试。
+type refCandidateIndex interface {
+	FindRefs(ctx context.Context, q RefQuery) ([]Reference, error)
+}
+
 // parseGrepBaseline 从 grep 输出解析 (path,line) 条目。
 //
 // 只认形如 `path:line:` / `path-line-` 的行（含 Windows 盘符路径）；解析不到
 // 条目时 baseline_n = 0，按 ADR-0003 §4.5 落库但不进 M1 分母。
-func parseGrepBaseline(output string) ([]string, int) {
+//
+// scopeBase 是折叠后的作用域（目录或文件）。rg 以 path 参数为根输出相对路径
+// （`rg pattern backend` 输出 `internal/...`），而候选来自 files.path 的
+// workspace 相对路径（`backend/internal/...`）——不补全前缀，两侧 (path,line)
+// 永远无法相交（Phase1-shadow 重放实测发现的缺陷）。glob 作用域不参与前缀。
+func parseGrepBaseline(output, scopeBase string) ([]string, int) {
+	return parseGrepBaselineMulti(output, []string{scopeBase})
+}
+
+// parseGrepBaselineMulti 同 parseGrepBaseline，但接受多个作用域基准（rg 多路径）：
+// 逐行先判"已属于某基准"（原样保留），否则按首个可用基准补前缀（历史单路径语义）。
+func parseGrepBaselineMulti(output string, scopeBases []string) ([]string, int) {
 	if strings.TrimSpace(output) == "" {
 		return nil, 0
+	}
+	bases := make([]string, 0, len(scopeBases))
+	for _, base := range scopeBases {
+		if base = strings.TrimSuffix(strings.TrimSpace(base), "/"); base != "" {
+			bases = append(bases, base)
+		}
 	}
 	var keys []string
 	for _, line := range strings.Split(output, "\n") {
@@ -306,9 +438,53 @@ func parseGrepBaseline(output string) ([]string, int) {
 		if err != nil {
 			continue
 		}
-		keys = append(keys, keyForLine(normalizeShadowPath(m[1]), lineNo))
+		keys = append(keys, keyForLine(prefixScopePathMulti(normalizeShadowPath(m[1]), bases), lineNo))
 	}
 	return keys, estimateTokens(output)
+}
+
+// prefixScopePath 把"相对作用域目录"的 grep 输出路径补全成 workspace 相对路径。
+func prefixScopePath(path, scopeBase string) string {
+	return prefixScopePathMulti(path, []string{scopeBase})
+}
+
+// prefixScopePathMulti 在多作用域基准下补全输出路径：先看它是否已属于某个基准
+// （属于则原样，避免把 `docs/b.md` 错缀成 `backend/docs/b.md`）；绝对路径与 glob
+// 基准不参与补全；都不匹配时回退首个可用基准（历史单路径行为）。
+func prefixScopePathMulti(path string, scopeBases []string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return path
+	}
+	lowerPath := strings.ToLower(path)
+	for _, base := range scopeBases {
+		base = strings.TrimSuffix(strings.TrimSpace(base), "/")
+		if base == "" || base == "." || strings.ContainsAny(base, "*?[") {
+			continue
+		}
+		if strings.HasPrefix(lowerPath, strings.ToLower(base)+"/") {
+			return path
+		}
+	}
+	if isAbsoluteLikePath(path) {
+		return path
+	}
+	for _, base := range scopeBases {
+		base = strings.TrimSuffix(strings.TrimSpace(base), "/")
+		if base == "" || base == "." || strings.ContainsAny(base, "*?[") {
+			continue
+		}
+		return base + "/" + path
+	}
+	return path
+}
+
+// isAbsoluteLikePath 报告路径是否形如 `/x` 或 `C:/x`（已归一化为 '/'）。
+func isAbsoluteLikePath(p string) bool {
+	if strings.HasPrefix(p, "/") {
+		return true
+	}
+	return len(p) >= 3 && p[1] == ':' && p[2] == '/'
 }
 
 var grepLinePattern = regexp.MustCompile(`^(.+?):(\d+)[:-]`)
@@ -368,6 +544,41 @@ func argString(args map[string]any, key string) string {
 		return strings.TrimSpace(v)
 	}
 	return ""
+}
+
+// grepPathScopes 收集 grep 调用的全部路径作用域：`path` 单值在前，`paths`
+// （数组或单字符串）逐项追加，按大小写不敏感去重。取值语义与工具端
+// resolveSearchPathListParam 一致：字符串即单路径，不做分隔符拆分。
+func grepPathScopes(args map[string]any) []string {
+	if args == nil {
+		return nil
+	}
+	out := make([]string, 0, 2)
+	seen := make(map[string]bool, 2)
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[strings.ToLower(v)] {
+			return
+		}
+		seen[strings.ToLower(v)] = true
+		out = append(out, v)
+	}
+	add(argString(args, "path"))
+	switch raw := args["paths"].(type) {
+	case string:
+		add(raw)
+	case []string:
+		for _, v := range raw {
+			add(v)
+		}
+	case []any:
+		for _, v := range raw {
+			if s, ok := v.(string); ok {
+				add(s)
+			}
+		}
+	}
+	return out
 }
 
 func intArg(args map[string]any, key string) int {

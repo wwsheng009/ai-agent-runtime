@@ -134,7 +134,8 @@ function handleAction(action) {
     case "tab-debug":
     case "tab-about":
     case "tab-cache":
-    case "tab-analysis": clickExisting(action + "-btn"); break;
+    case "tab-analysis":
+    case "tab-lsp": clickExisting(action + "-btn"); break;
     default: break;
   }
 }

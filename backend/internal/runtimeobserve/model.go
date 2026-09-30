@@ -55,6 +55,11 @@ const (
 	EventRendererChanged = "renderer.snapshot.changed"
 	EventObservationGap  = "observation.gap"
 	EventResyncRequired  = "observation.resync_required"
+	// LSP 观测事件（live-only；标量载荷，方案见
+	// docs/plan/lsp-observability-and-analysis-plan-20260929.md §3）。
+	EventLSPRequestFinished    = "lsp.request.finished"
+	EventLSPServerState        = "lsp.server.state"
+	EventLSPDiagnosticsUpdated = "lsp.diagnostics.updated"
 )
 
 // Correlation 是所有观测事件的关联上下文（方案 §4.3/§6.1）。

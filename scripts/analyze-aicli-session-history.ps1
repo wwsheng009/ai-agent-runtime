@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Root = (Join-Path $HOME ".aicli\chat-logs"),
     [ValidateRange(1, 1000)]

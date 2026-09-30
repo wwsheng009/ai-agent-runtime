@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Unified build script: build any repository tool for Windows or Windows 7.
 

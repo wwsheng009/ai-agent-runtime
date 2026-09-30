@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Backward-compatible wrapper for the Win7 runtime-server build.
 

@@ -292,6 +292,14 @@ type ChatSession struct {
 	// replays the whole user message, so it is only allowed while this stays 0.
 	turnToolExecutionMu sync.Mutex
 	turnToolExecutions  int
+	// todoSnapshotMu guards the tool_end-driven latest-todos cache (plan V12):
+	// busy-time /todos executes immediately while session.Messages is still the
+	// pre-turn hot projection, so this cache is the only source that carries the
+	// in-flight turn's newest task list. Session-scoped via todoSnapshotSessionID
+	// (switch/resume invalidates by identity mismatch, no explicit reset needed).
+	todoSnapshotMu        sync.Mutex
+	todoSnapshot          *chatWebTodoSnapshot
+	todoSnapshotSessionID string
 	// goalStatusMu guards live goal-status turn timing used by the status line.
 	// Codex accrues active-goal elapsed only while an agent turn is running.
 	goalStatusMu                  sync.Mutex

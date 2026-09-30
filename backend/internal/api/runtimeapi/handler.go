@@ -470,7 +470,7 @@ func NewHandler(
 	loader *skill.Loader,
 	mcpManager skill.MCPManager,
 ) *Handler {
-	return &Handler{
+	handler := &Handler{
 		skillRegistry:               registry,
 		skillLoader:                 loader,
 		mcpManager:                  mcpManager,
@@ -486,6 +486,11 @@ func NewHandler(
 			resolvedModeCount:  make(map[string]int),
 		},
 	}
+	// LSP 观测接线：runtime-server 工具面（AgentAdapter→tools.Manager）持有 LSP
+	// 池，池事件接到本 Handler 的运行时事件总线（lsp.*，live-only，见
+	// lsp_observation.go）。
+	handler.attachLSPObservation()
+	return handler
 }
 
 // SetLLMRuntime 设置 LLM Runtime

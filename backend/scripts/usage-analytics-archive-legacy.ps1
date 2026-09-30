@@ -1,4 +1,4 @@
-# usage-analytics-archive-legacy.ps1
+﻿# usage-analytics-archive-legacy.ps1
 #
 # 用途（方案 §4 批次 0.4）：
 #   把 usage_analytics.sqlite 中已无代码引用的三张旧表

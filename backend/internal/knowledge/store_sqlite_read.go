@@ -25,7 +25,7 @@ func (s *sqliteStore) FindSymbols(ctx context.Context, q SymbolQuery) ([]Symbol,
 	// Default symbol queries expose production symbols. Test-file symbols remain
 	// persisted for reference resolution and diagnostics, but should not pollute
 	// ordinary name searches (for example, Open -> TestOpenFile).
-	where := []string{"s.deleted_at IS NULL", "s.is_test = 0"}
+	where := []string{"s.deleted_at IS NULL", "s.is_test = 0", "f.deleted_at IS NULL"}
 	var args []any
 	if q.Name != "" {
 		if q.Exact {
@@ -89,10 +89,8 @@ func (s *sqliteStore) FindRefs(ctx context.Context, q RefQuery) ([]Reference, er
 		limit = defaultQueryLimit
 	}
 
-	var (
-		where []string
-		args  []any
-	)
+	where := []string{"f.deleted_at IS NULL"}
+	var args []any
 	switch {
 	case q.ToSymbolID != "":
 		where = append(where, "r.to_symbol_id = ?")
@@ -135,7 +133,7 @@ func (s *sqliteStore) FindRefs(ctx context.Context, q RefQuery) ([]Reference, er
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT r.id, r.workspace_id, COALESCE(r.from_symbol_id, ''), COALESCE(r.to_symbol_id, ''),
 		       COALESCE(r.to_symbol_name, ''), COALESCE(r.to_symbol_version, 0), r.kind,
-		       r.file_id, r.line, r.col,
+		       r.file_id, f.path, r.line, r.col,
 		       COALESCE(r.snippet, ''), r.confidence, r.source
 		FROM refs r JOIN files f ON f.id = r.file_id
 		`+clause+`
@@ -159,8 +157,10 @@ func (s *sqliteStore) FindRefs(ctx context.Context, q RefQuery) ([]Reference, er
 // symbolIDsByName 返回同名（未删除）符号的 id 列表，用于把引用查询从名字
 // 解析到身份。
 func (s *sqliteStore) symbolIDsByName(ctx context.Context, name string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id FROM symbols WHERE name = ? AND deleted_at IS NULL LIMIT ?`, name, defaultQueryLimit)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.id FROM symbols s JOIN files f ON f.id = s.file_id
+		WHERE s.name = ? AND s.deleted_at IS NULL AND f.deleted_at IS NULL
+		LIMIT ?`, name, defaultQueryLimit)
 	if err != nil {
 		return nil, fmt.Errorf("knowledge: resolve ref target: %w", err)
 	}
@@ -194,7 +194,7 @@ func (s *sqliteStore) Search(ctx context.Context, q SearchQuery) ([]SearchHit, e
 	if limit <= 0 {
 		limit = defaultQueryLimit
 	}
-	where := []string{"symbols_fts MATCH ?", "s.deleted_at IS NULL"}
+	where := []string{"symbols_fts MATCH ?", "s.deleted_at IS NULL", "f.deleted_at IS NULL"}
 	args := []any{match}
 	if q.Lang != "" {
 		where = append(where, "s.language = ?")
@@ -253,7 +253,7 @@ func (s *sqliteStore) searchLike(ctx context.Context, q SearchQuery) ([]SearchHi
 	if limit <= 0 {
 		limit = defaultQueryLimit
 	}
-	where := []string{"s.deleted_at IS NULL"}
+	where := []string{"s.deleted_at IS NULL", "f.deleted_at IS NULL"}
 	args := make([]any, 0, len(tokens)*3+3)
 	for _, token := range tokens {
 		pattern := "%" + escapeLike(token) + "%"
@@ -346,10 +346,11 @@ func (s *sqliteStore) Stats(ctx context.Context, workspaceID string) (Stats, err
 	stats.SchemaVersion = version
 	row := s.db.QueryRowContext(ctx, `
 		SELECT
-			(SELECT COUNT(*) FROM files   WHERE workspace_id = ?),
+			(SELECT COUNT(*) FROM files   WHERE workspace_id = ? AND deleted_at IS NULL),
 			(SELECT COUNT(*) FROM symbols WHERE workspace_id = ? AND deleted_at IS NULL),
-			(SELECT COUNT(*) FROM refs    WHERE workspace_id = ?),
-			(SELECT COALESCE(MAX(indexed_at), 0) FROM files WHERE workspace_id = ?)
+			(SELECT COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id
+			  WHERE r.workspace_id = ? AND f.deleted_at IS NULL),
+			(SELECT COALESCE(MAX(indexed_at), 0) FROM files WHERE workspace_id = ? AND deleted_at IS NULL)
 	`, workspaceID, workspaceID, workspaceID, workspaceID)
 	if err := row.Scan(&stats.Files, &stats.Symbols, &stats.Refs, &stats.IndexedAt); err != nil {
 		return stats, fmt.Errorf("knowledge: read stats: %w", err)
@@ -366,9 +367,10 @@ func scanFile(row rowScanner) (FileRecord, error) {
 		isGen      int
 		indexState string
 		indexedAt  int64
+		deletedAt  int64
 	)
 	if err := row.Scan(&rec.ID, &rec.WorkspaceID, &rec.Path, &language, &rec.Size, &rec.MTimeNS,
-		&rec.ContentHash, &isTest, &isGen, &indexState, &indexedAt); err != nil {
+		&rec.ContentHash, &isTest, &isGen, &indexState, &indexedAt, &deletedAt); err != nil {
 		return FileRecord{}, err
 	}
 	rec.Language = language
@@ -376,6 +378,7 @@ func scanFile(row rowScanner) (FileRecord, error) {
 	rec.IsGenerated = isGen != 0
 	rec.IndexState = IndexState(indexState)
 	rec.IndexedAt = timeFromUnixMillis(indexedAt)
+	rec.DeletedAt = deletedAt
 	return rec, nil
 }
 
@@ -410,7 +413,7 @@ func scanReference(row rowScanner) (Reference, error) {
 		source string
 	)
 	if err := row.Scan(&ref.ID, &ref.WorkspaceID, &ref.FromSymbolID, &ref.ToSymbolID,
-		&ref.ToSymbolName, &ref.ToSymbolVersion, &kind, &ref.FileID, &ref.Line, &ref.Col, &ref.Snippet,
+		&ref.ToSymbolName, &ref.ToSymbolVersion, &kind, &ref.FileID, &ref.Path, &ref.Line, &ref.Col, &ref.Snippet,
 		&ref.Confidence, &source); err != nil {
 		return Reference{}, fmt.Errorf("knowledge: scan ref: %w", err)
 	}

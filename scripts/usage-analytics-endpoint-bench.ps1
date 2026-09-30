@@ -1,4 +1,4 @@
-# usage-analytics-endpoint-bench.ps1
+﻿# usage-analytics-endpoint-bench.ps1
 #
 # 用量分析页端点基线/回归脚本（方案 §2.8 / §11.3 / Phase 0.1）。
 #

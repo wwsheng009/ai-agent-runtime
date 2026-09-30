@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/lsp"
 	"github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolnames"
 )
@@ -17,6 +18,15 @@ type AgentAdapter struct {
 // NewAgentAdapter wraps a runtime tools manager for the agent loop.
 func NewAgentAdapter(manager *Manager) *AgentAdapter {
 	return &AgentAdapter{manager: manager}
+}
+
+// SetLSPObserver 把 LSP 池事件观察者转发到底层工具 Manager（runtime-server
+// 观测接线用；未启用 LSP 或未挂池时是安全 no-op）。
+func (a *AgentAdapter) SetLSPObserver(observer lsp.Observer) {
+	if a == nil || a.manager == nil {
+		return
+	}
+	a.manager.SetLSPObserver(observer)
 }
 
 // ListTools returns runtime tools in agent-compatible metadata form.

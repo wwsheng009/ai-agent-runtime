@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   从 GitHub Release 下载并安装 aicli 到用户可执行目录（Windows）。
 

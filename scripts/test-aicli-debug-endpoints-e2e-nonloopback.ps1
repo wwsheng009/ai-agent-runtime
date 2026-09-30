@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   E2E-DEBUG-02：非回环鉴权（--web-host 0.0.0.0 + X-AICLI-Token）验收。
 

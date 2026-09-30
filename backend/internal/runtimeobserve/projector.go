@@ -55,6 +55,10 @@ var eventAllowlist = map[string]bool{
 	EventRendererChanged: true,
 	EventObservationGap:  true,
 	EventResyncRequired:  true,
+	// LSP 观测（低敏标量；正文/路径/诊断文本不在白名单）。
+	EventLSPRequestFinished:    true,
+	EventLSPServerState:        true,
+	EventLSPDiagnosticsUpdated: true,
 }
 
 // IsAllowedType 返回事件类型是否在 v1 白名单内。
@@ -130,6 +134,17 @@ var payloadAllowKeys = map[string]bool{
 	"artifact_archived":          true,
 	"artifact_skipped":           true,
 	"artifact_id":                true,
+	// LSP 观测（live-only）：请求/池事实全部是标量或短枚举；server 是池内
+	// 名称（类似 provider/model）。path/reason/诊断正文刻意不在白名单。
+	"trigger":          true,
+	"outcome":          true,
+	"server":           true,
+	"pid":              true,
+	"count":            true,
+	"diag_count":       true,
+	"appended_bytes":   true,
+	"omitted_items":    true,
+	"omitted_by_chars": true,
 }
 
 // ProjectRuntimeEvent 把 bus 事件投影为观测事件。
@@ -203,7 +218,7 @@ func (p *Projector) projectPayload(eventType string, payload map[string]interfac
 				"error_code", "error_category", "usage_source", "aggregation_level",
 				"tool_name", "stream_id", "finish_reason", "reasoning_visibility",
 				"renderer_id", "attempt_id", "turn_id", "budget_level",
-				"artifact_skipped", "artifact_id":
+				"artifact_skipped", "artifact_id", "trigger", "outcome", "server":
 				out[key] = boundUTF8String(typed, 512)
 			default:
 				// 其他字符串（可能的 URL/路径/内容）一律丢弃。

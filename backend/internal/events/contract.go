@@ -127,6 +127,14 @@ var runtimeEventContracts = []Contract{
 	{Type: "tool.progress", Channels: ChannelLiveOnly},
 	{Type: "subagent.progress", Channels: ChannelLiveOnly},
 	{Type: "subagent.batch.progress", Channels: ChannelLiveOnly},
+	// LSP 观测：请求事件挂 A 通道（§3 预留的"长窗口复算再挂 session_store"
+	// 在 M4 兑现）——每文件一次编辑即一行标量，是 §4.3 覆盖率/命中率/降级率/
+	// 等待 P50/P95 的唯一可复算事实源；池生命周期与诊断发布保持 live-only
+	// 以约束体积。方案见 docs/plan/lsp-observability-and-analysis-plan-20260929.md
+	// §3/§4.2。
+	{Type: EventLSPRequestFinished, Channels: ChannelSessionStore},
+	{Type: EventLSPServerState, Channels: ChannelLiveOnly},
+	{Type: EventLSPDiagnosticsUpdated, Channels: ChannelLiveOnly},
 
 	// ---- D 通道：仅回合末尾巴补发（实时通道与事件库都没有它们）----
 	{Type: "subagent.batch.started", Channels: ChannelTailOnly},

@@ -515,14 +515,14 @@ func samePath(left, right string) bool {
 func (h *Handler) resolveProfileMCPAdapter(ctx context.Context, resolved *profilesys.ResolvedAgent, runtimeCfg *runtimecfg.RuntimeConfig) (skill.MCPManager, mcpmanager.Manager, error) {
 	if resolved == nil {
 		if h.mcpManager == nil {
-			return runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimeCfg)), nil, nil
+			return h.wireLSPObservation(runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimeCfg))), nil, nil
 		}
 		return h.mcpManager, nil, nil
 	}
 	configPath := strings.TrimSpace(resolved.MCPConfig)
 	if configPath == "" {
 		if h.mcpManager == nil {
-			return runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimeCfg)), nil, nil
+			return h.wireLSPObservation(runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimeCfg))), nil, nil
 		}
 		return h.mcpManager, nil, nil
 	}
@@ -559,7 +559,7 @@ func (h *Handler) resolveProfileMCPAdapter(ctx context.Context, resolved *profil
 	if err := manager.Start(ctx); err != nil {
 		return nil, nil, err
 	}
-	return runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(manager, runtimeCfg)), manager, nil
+	return h.wireLSPObservation(runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(manager, runtimeCfg))), manager, nil
 }
 
 func buildProfileEmbeddingRouter(config *runtimecfg.RuntimeConfig, registry *skill.Registry) (*skill.SemanticEmbeddingRouter, error) {

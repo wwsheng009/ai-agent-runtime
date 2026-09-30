@@ -838,7 +838,7 @@ knowledge:
    - 输出 `content_hash`、`is_generated`、`language`、`size`、`mtime_ns`。
 2. `knowledge/store`：§4.3 的 v1 表 + `symbols_fts` 同步触发器。
 3. 增量：仅 `content_hash` 变化才重解析；删除文件标记 `deleted_at` 而不是立即物理删除。
-4. `knowledge.mode=shadow`：在**既有 `grep` / `view` 工具的执行路径上做拦截**（ADR-0003 §4.3 拦截范围、§4.4 候选查询映射），索引侧同时算候选结果，**仍返回 `grep` / `view` 的原结果**，把逐调用对比写入 `exploration_attribution` 与 `invalidation_events`。
+4. `knowledge.mode=shadow`：在**既有 `grep` / `view` 工具的执行路径上做拦截**（ADR-0003 §4.3 拦截范围、§4.4 候选查询映射），索引侧同时算候选结果，**仍返回 `grep` / `view` 的原结果**，把逐调用对比写入 `exploration_attribution`（**不写 `invalidation_events`**——该表 reason 闭集为 `file_changed|git_sync|adapter_upgraded|schema_upgraded|manual`，属变更源事件，见 §4.3；2026-09-29 口径修正）。
    - **注意（2026-09-21 修订）**：`code.search` 是 **Phase 3** 交付（见下 Phase 3 交付 1）。Phase 1 **不新增任何工具**，只拦截既有工具；原表述用 `code.search` 定义 Phase 1 shadow，会让 Phase 1 依赖 Phase 3 产物而无法开工。
 5. `knowledge.status` CLI / HTTP：索引状态、文件数、符号数、DB 大小、最近 job、锁等待 p95。
 6. **接入（激活）——三个入口**：`knowledge.Open` 接入 `cmd/runtime-server`（启动阶段调用 + 向 `internal/background` 注册索引任务，默认 writer owner）、`cmd/aicli` cmd/tui（`commands/chat.go` 解析 workspace 后调用）、`cmd/aicli` acp。规格见 `supplement/05` §2、§8。
@@ -848,15 +848,15 @@ knowledge:
 
 - **主门槛（唯一 Pass/Fail 判据）**：ADR-0003 §4.5 的 **M1 调用级可用率**——在 `baseline_n > 0` 的被拦截调用上，`usable = (coverage ≥ α) AND (economy ≤ 1.0)` 的均值达标。**α 由本 Phase 的 shadow 实测校准后写入 config**（ADR-0003 §10，Gate = `Phase1-shadow`）。
 - **诊断指标（不判 Pass/Fail，用于定位失败）**：M2 覆盖度、M3 经济性、M4 token 收益（ADR-0003 §4.5）；以及 `code.search` 与 `grep` 的 top-10 文件集合差异率 < 15%——差异率**保留为可解释性诊断**，不再是验收口径（2026-09-21 修订，消除与 ADR-0003 §4.5 的双口径冲突）。
-- 本仓库（排除 `node_modules`/`dist`/`.aicli`）首次全量索引耗时 ≤ 实测基线（建议先测后定，初值 ≤ 120s）；单文件增量 < 50ms。
-- DB 大小 ≤ 200MB（对本仓库规模）；`max_db_size_mb` 生效时可触发 GC。
-- `files.content_hash` 与磁盘一致率 100%（抽样 ≥ 200 文件）。
-- 锁等待 p95 < 50ms。
+- 本仓库（排除 `node_modules`/`dist`/`.aicli`）首次全量索引耗时 ≤ 实测基线（**2026-09-29 已校准：≤ 360 s**，报告 §4.7）；单文件增量 < 50ms（**实测 Fail**：marginal p95 302 ms，须 Phase 5 增量触发或口径重议）。
+- DB 大小 ≤ `max_db_size_mb`（默认 512MB；实测 313.9 MiB）——原 200MB 初值已被 §7.4 校准取代；`max_db_size_mb` 生效时可触发 GC。
+- `files.content_hash` 与磁盘一致率 100%（抽样 ≥ 200 文件）——2026-09-29 实测 261/261。
+- 锁等待 p95 < 50ms——2026-09-29 抽样 0 样本 / 0 重试失败（证据弱，报告 §4.6）。
 - **接入验证**：三个入口（runtime-server / aicli cmd+tui / aicli acp）在 `mode=off` 下行为与改动前完全一致；`mode=shadow` 下 `exploration_attribution` 有数据落库，且 M1 可复算（同批记录两次计算结果一致）。
 
 **回滚**：`mode=off` + 删除 `knowledge.db`。
 
-**状态**：**进行中**（2026-09-28 开工）——交付 1–3 的代码已在 `internal/knowledge`（`indexer.go` / `store_sqlite.go` / `adapter_builtin.go` / `owner.go` / 增量 `content_hash`）；**交付 6「接入（激活）」已完成**（`internal/knowledge/activation.go` + `cmd/runtime-server` / `cmd/aicli` cmd+tui / `cmd/aicli` acp 三入口，见 `CHANGELOG.md`）；**交付 4（shadow 拦截 `grep` / `view`）已完成**（2026-09-28：三入口接线 + `exploration_attribution` 落库，见 `CHANGELOG.md`）；**交付 5（`knowledge.status` 面）已完成**（2026-09-28：CLI + HTTP 状态面，见 `CHANGELOG.md`）——交付 4/5 均已落地，`mode=shadow` 下 `exploration_attribution` 可产生数据；本 Phase 仍未验收，待 shadow 实测校准 α 并复算 M1。
+**状态**：**进行中**（2026-09-28 开工）——交付 1–3 的代码已在 `internal/knowledge`（`indexer.go` / `store_sqlite.go` / `adapter_builtin.go` / `owner.go` / 增量 `content_hash`）；**交付 6「接入（激活）」已完成**（`internal/knowledge/activation.go` + `cmd/runtime-server` / `cmd/aicli` cmd+tui / `cmd/aicli` acp 三入口，见 `CHANGELOG.md`）；**交付 4（shadow 拦截 `grep` / `view`）已完成**（2026-09-28：三入口接线 + `exploration_attribution` 落库，见 `CHANGELOG.md`）；**交付 5（`knowledge.status` 面）已完成**（2026-09-28：CLI + HTTP 状态面，见 `CHANGELOG.md`）；**2026-09-29 收口交付 1/3**——交付 1 补上 Java/C++ 粗符号（`adapter_builtin.go` 的 `javaSymbolPatterns` / `cppSymbolPatterns` + `adapter_java_cpp_test.go`），交付 3 补上删除对账（迁移 `0002_file_soft_delete.sql`、`files.deleted_at`、`ListActiveFiles` / `MarkFilesDeleted`、`RunIndex` 软删除与复活，含测试）——交付 1–6 全部落地；**2026-09-29 `Phase1-shadow` 实测 v1**（真实调用重放 n=400）：M1=20.81 %（view 48.4 % / grep 行级 0.47 %）、M2=24.15 %，主门槛不通过；grep file-level 对照 mean 31.83 %、answerable 49.4 %，瓶颈为行级口径（§6.2），需新 ADR 裁决；见 `reports/phase1_shadow_report.md`（含 §4.5 live 验证：aicli cmd+tui + ACP + runtime-server，3/3 入口）。本 Phase 仍未验收。
 
 ### Phase 2 — Exploration Memory + Context Planner
 
@@ -1101,14 +1101,14 @@ Phase 3 (Code API / 工具面)  ◄────────────  Phase 5
 
 | 指标 | 目标 | 测量点 |
 |---|---|---|
-| 首次全量索引（本仓库规模） | ≤ 120s（Phase 0 实测后校准） | `index_jobs` 记录 |
-| 单文件增量索引 | p95 < 50ms | `index_jobs` 明细 |
+| 首次全量索引（本仓库规模） | ≤ 360 s（2026-09-29 `Phase1-shadow` 校准：n=3 中位数 292.4 s，95 % CI [241.8, 356.5] s，4989 文件 / 47.8 MB 源码；跨仓库抽验 ×2：38.9–43.8 ms/文件；原初值 ≤120 s 为未校准占位，报告 §4.7） | `index_jobs` 记录 |
+| 单文件增量索引 | **p95 < 50 ms（当前 Fail）**：2026-09-29 实测（4989 文件 / 20 样本 / `indexed=1`）job 墙钟 p95 4.35 s、marginal p95 302 ms，仅"全量跳过"基线就 4.05 s——须 Phase 5 Change Manager 增量触发（fsnotify）或重定口径（报告 §4.7） | `index_jobs` 明细 |
 | 符号查询（`code.inspect`） | p95 < 100ms | knowledge 统计 |
 | 上下文编译（缓存命中） | p95 < 50ms | `context_snapshots` 耗时 |
 | 上下文编译（未命中） | p95 < 200ms | 同上 |
 | 锁等待 | p95 < 50ms，重试失败率 < 0.1% | `sqliteutil.RetryLocked` 埋点 |
 | 单 turn 索引耗时上限 | ≤ `max_index_time_per_turn_ms`（默认 200ms） | knowledge 统计 |
-| DB 大小 | ≤ `max_db_size_mb`（默认 512MB） | 文件系统 |
+| DB 大小 | ≤ `max_db_size_mb`（默认 512MB）；实测中位数 313.9 MiB（n=3，95 % CI [313.2, 314.3] MiB） | 文件系统 |
 | 端到端 p95 延迟增幅 | ≤ 10% | 会话级埋点 |
 
 ### 7.5 测量方法

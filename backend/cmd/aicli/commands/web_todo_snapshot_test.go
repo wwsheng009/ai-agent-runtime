@@ -9,10 +9,14 @@
 package commands
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
@@ -271,5 +275,250 @@ func TestChatWebPage_ServesTodoPanelAssets(t *testing.T) {
 	HandleChatWebPage(appRecorder, appReq)
 	if !strings.Contains(appRecorder.Body.String(), "initTodoPanel()") {
 		t.Fatal("app.js 未初始化任务列表面板")
+	}
+}
+
+// staleTranscriptTodoMessage 构造一条热投影里的旧快照消息（忙时 turn 的
+// session.Messages 只能看到上一回合的这一条）。
+func staleTranscriptTodoMessage(content string) runtimetypes.Message {
+	return runtimetypes.Message{
+		Role:    "tool",
+		Content: "旧列表",
+		Metadata: runtimetypes.Metadata{
+			"tool_metadata": map[string]interface{}{
+				"todos": []map[string]interface{}{{"content": content, "status": "pending"}},
+			},
+		},
+	}
+}
+
+// TestChatLatestTodoSnapshotPrefersLiveCacheOverStaleTranscript 忙时回归：
+// session.Messages 还是回合开始前的热投影（旧列表），tool_end 缓存里是本回合
+// 刚写完的最新列表；/todos 的数据面必须给最新那份，而不是落后的那份。
+func TestChatLatestTodoSnapshotPrefersLiveCacheOverStaleTranscript(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "session-busy"},
+		Messages:       []runtimetypes.Message{staleTranscriptTodoMessage("旧任务")},
+	}
+	session.rememberChatTodoSnapshot("session-busy", &chatWebTodoSnapshot{
+		Items: []chatWebTodoItem{
+			{Content: "最新任务", Status: "in_progress", ActiveForm: "最新任务中"},
+		},
+		SessionID: "session-busy",
+	})
+
+	got := chatLatestTodoSnapshot(session)
+	if got == nil || len(got.Items) != 1 {
+		t.Fatalf("应取到事件缓存快照，实际 %+v", got)
+	}
+	if got.Items[0].Content != "最新任务" || got.Items[0].Status != "in_progress" {
+		t.Fatalf("必须返回最新快照（而不是 transcript 里的旧列表）：%+v", got.Items)
+	}
+}
+
+// TestChatLatestTodoSnapshotCacheIsSessionScoped 会话切换后事件缓存不得串列表：
+// 缓存属于 session-a，当前是 session-b，必须回退到 b 自己的 transcript 快照。
+func TestChatLatestTodoSnapshotCacheIsSessionScoped(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "session-b"},
+		Messages:       []runtimetypes.Message{staleTranscriptTodoMessage("B 会话的任务")},
+	}
+	session.rememberChatTodoSnapshot("session-a", &chatWebTodoSnapshot{
+		Items:     []chatWebTodoItem{{Content: "A 会话的任务", Status: "pending"}},
+		SessionID: "session-a",
+	})
+
+	if cached := session.latestChatTodoSnapshot("session-a"); cached == nil {
+		t.Fatal("同会话身份应命中缓存")
+	}
+	if cached := session.latestChatTodoSnapshot("session-b"); cached != nil {
+		t.Fatalf("跨会话身份不得命中缓存：%+v", cached)
+	}
+	got := chatLatestTodoSnapshot(session)
+	if got == nil || got.Items[0].Content != "B 会话的任务" {
+		t.Fatalf("应回退到当前会话自己的快照，实际 %+v", got)
+	}
+}
+
+// TestChatRuntimeEventBridgeCachesPrimarySessionTodoSnapshot 桥接装配回归：
+// tool_finished 事件在入队前就写进会话缓存（忙时 /todos 与 UI 消费队列无竞态），
+// 且子代理会话的事件不得污染父会话任务面板。
+func TestChatRuntimeEventBridgeCachesPrimarySessionTodoSnapshot(t *testing.T) {
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "session-primary"}}
+	bridge := newChatRuntimeEventBridge(session)
+
+	bridge.Handle(runtimeevents.Event{
+		Type:      runtimechat.EventToolFinished,
+		SessionID: "session-primary",
+		Payload: todoSnapshotPayload([]map[string]interface{}{
+			{"content": "本回合最新任务", "status": "in_progress"},
+		}),
+	})
+	got := chatLatestTodoSnapshot(session)
+	if got == nil || got.Items[0].Content != "本回合最新任务" {
+		t.Fatalf("tool_finished 应写入会话级快照缓存，实际 %+v", got)
+	}
+
+	bridge.Handle(runtimeevents.Event{
+		Type:      runtimechat.EventToolFinished,
+		SessionID: "child-session-1",
+		Payload: todoSnapshotPayload([]map[string]interface{}{
+			{"content": "子代理任务", "status": "pending"},
+		}),
+	})
+	if got := chatLatestTodoSnapshot(session); got == nil || got.Items[0].Content != "本回合最新任务" {
+		t.Fatalf("子会话事件不得覆盖父会话快照：%+v", got)
+	}
+}
+
+// TestChatWebTodoSnapshotFromMessagesNormalizesTypedMetadata 进程内强类型 map
+// （runtimetypes.Metadata）与 JSON 反序列化 map 必须同样可读：回放扫描与实时
+// 载荷提取都走 chatWebTodoJSONMap 归一。
+func TestChatWebTodoSnapshotFromMessagesNormalizesTypedMetadata(t *testing.T) {
+	messages := []runtimetypes.Message{
+		{
+			Role:    "tool",
+			Content: "typed",
+			Metadata: runtimetypes.Metadata{
+				"tool_metadata": runtimetypes.Metadata{
+					"todos": []map[string]interface{}{
+						{"content": "类型归一", "status": "completed"},
+					},
+					"session_id": "typed-session",
+				},
+			},
+		},
+	}
+	snapshot := chatWebTodoSnapshotFromMessages(messages, "")
+	if snapshot == nil || len(snapshot.Items) != 1 || snapshot.Items[0].Content != "类型归一" {
+		t.Fatalf("强类型嵌套 tool_metadata 应可读，实际 %+v", snapshot)
+	}
+	if snapshot.SessionID != "typed-session" {
+		t.Fatalf("session_id = %q", snapshot.SessionID)
+	}
+
+	typedPayload := map[string]interface{}{
+		"protocol_result": runtimetypes.Metadata{
+			"metadata": runtimetypes.Metadata{
+				"todo_snapshot": map[string]interface{}{
+					"items": []map[string]interface{}{{"content": "实时类型归一", "status": "pending"}},
+				},
+			},
+		},
+	}
+	live := chatWebTodoSnapshotFromToolPayload(typedPayload)
+	if live == nil || len(live.Items) != 1 || live.Items[0].Content != "实时类型归一" {
+		t.Fatalf("强类型 protocol_result 应可读，实际 %+v", live)
+	}
+}
+
+// chatTodosPagerStorage 是只实现分页读取的最小存储替身：验证冷路径
+// （重启 / 快照滑出热窗口）从 canonical 转录按页回读最近一次 todos。
+type chatTodosPagerStorage struct {
+	runtimechat.SessionStorage
+	pages []*runtimechat.SessionHistoryPage
+	calls int
+}
+
+func (s *chatTodosPagerStorage) Load(context.Context, string) (*runtimechat.Session, error) {
+	return nil, errors.New("chatTodosPagerStorage: Load is not used in this test")
+}
+
+func (s *chatTodosPagerStorage) GetMessagePage(_ context.Context, _ string, _ int, _ int) (*runtimechat.SessionHistoryPage, error) {
+	if s.calls >= len(s.pages) {
+		return &runtimechat.SessionHistoryPage{}, nil
+	}
+	page := s.pages[s.calls]
+	s.calls++
+	return page, nil
+}
+
+// TestChatLatestTodoSnapshotReadsCanonicalHistoryBeyondHotWindow 热投影被裁剪
+// （重启后 session.Messages 里已没有 todos 消息）时，/todos 必须从 canonical
+// 分页向前找回最近一次快照，且读到即停（不整段反序列化）。
+func TestChatLatestTodoSnapshotReadsCanonicalHistoryBeyondHotWindow(t *testing.T) {
+	storage := &chatTodosPagerStorage{pages: []*runtimechat.SessionHistoryPage{
+		{
+			Messages:      []runtimetypes.Message{{Role: "assistant", Content: "最近的回复（无 todos）"}},
+			Total:         3,
+			FirstSeq:      3,
+			LastSeq:       3,
+			NextBeforeSeq: 2,
+			HasMore:       true,
+		},
+		{
+			Messages:      []runtimetypes.Message{staleTranscriptTodoMessage("历史任务")},
+			Total:         3,
+			FirstSeq:      1,
+			LastSeq:       2,
+			NextBeforeSeq: 1,
+			HasMore:       false,
+		},
+	}}
+	manager := runtimechat.NewSessionManager(storage, &runtimechat.SessionManagerConfig{CleanupInterval: 0})
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "session-trimmed"},
+		SessionManager: manager,
+		Messages:       []runtimetypes.Message{{Role: "user", Content: "热投影已被裁剪"}},
+	}
+
+	got := chatLatestTodoSnapshot(session)
+	if got == nil || len(got.Items) != 1 || got.Items[0].Content != "历史任务" {
+		t.Fatalf("应从 canonical 转录恢复最近的 todos 快照，实际 %+v", got)
+	}
+	if storage.calls != 2 {
+		t.Fatalf("命中即停：分页读取次数 = %d, want 2", storage.calls)
+	}
+}
+
+// TestChatTodoSnapshotCacheConcurrentAccess 忙时 /todos（读）与 tool_end 事件
+// 入队（写）天然并发；会话级缓存必须全程加锁（方案 V12 的 -race 口径）。
+func TestChatTodoSnapshotCacheConcurrentAccess(t *testing.T) {
+	session := &ChatSession{RuntimeSession: &runtimechat.Session{ID: "session-race"}}
+	var wg sync.WaitGroup
+	for writer := 0; writer < 4; writer++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for index := 0; index < 200; index++ {
+				session.rememberChatTodoSnapshot("session-race", &chatWebTodoSnapshot{
+					Items: []chatWebTodoItem{
+						{Content: fmt.Sprintf("任务-%d-%d", worker, index), Status: "pending"},
+					},
+				})
+				_ = chatLatestTodoSnapshot(session)
+				_ = session.latestChatTodoSnapshot("session-other")
+			}
+		}(writer)
+	}
+	wg.Wait()
+}
+
+// TestChatWebScreenJSONPrefersLiveCache 回放通道（/web/api/screen）与 /todos
+// 共用同一解析链路：tool_end 缓存里的最新快照必须胜过热投影里的旧快照，
+// 刷新页面 / 会话切换后面板不再回退到落后列表。
+func TestChatWebScreenJSONPrefersLiveCache(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "session-screen-live"},
+		Messages:       []runtimetypes.Message{staleTranscriptTodoMessage("旧任务")},
+	}
+	session.rememberChatTodoSnapshot("session-screen-live", &chatWebTodoSnapshot{
+		Items:     []chatWebTodoItem{{Content: "最新任务", Status: "in_progress"}},
+		SessionID: "session-screen-live",
+	})
+	withWebTestSession(t, session)
+
+	body, err := marshalChatWebScreenJSONWindowFiltered(chatWebMessageWindow{}, chatWebMessageFilter{})
+	if err != nil {
+		t.Fatalf("marshal screen json: %v", err)
+	}
+	var decoded struct {
+		Todo *chatWebTodoSnapshot `json:"todo_snapshot"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal screen json: %v", err)
+	}
+	if decoded.Todo == nil || len(decoded.Todo.Items) != 1 || decoded.Todo.Items[0].Content != "最新任务" {
+		t.Fatalf("screen 回放应优先返回事件缓存快照，实际 %+v; body=%s", decoded.Todo, string(body))
 	}
 }

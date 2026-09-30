@@ -141,6 +141,74 @@ var tsSymbolPatterns = []symbolPattern{
 	},
 }
 
+// javaSymbolPatterns 覆盖 Java 的粗符号：类型声明 + 带修饰符的方法/构造器。
+//
+// "粗"的边界（04 §5 Phase 1 交付 1）：类型声明求全（class/interface/enum/record），
+// 方法只收"行首带 public/protected/... 修饰符"的声明；包级私有方法与接口方法
+// 可能漏收——regex 无法可靠区分方法与语句，这是轻索引的已知折损，由 Phase 4 的
+// tree-sitter / LSP adapter 收敛。方法体与局部变量仍由 Lazy 原则排除在外。
+var javaSymbolPatterns = []symbolPattern{
+	{
+		re:       regexp.MustCompile(`^\s*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed|strictfp)\s+)*class\s+(\w+)`),
+		kind:     SymbolType,
+		nameIdx:  1,
+		exported: exportedByJavaPublic,
+	},
+	{
+		re:       regexp.MustCompile(`^\s*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed|strictfp)\s+)*interface\s+(\w+)`),
+		kind:     SymbolInterface,
+		nameIdx:  1,
+		exported: exportedByJavaPublic,
+	},
+	{
+		re:       regexp.MustCompile(`^\s*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed|strictfp)\s+)*enum\s+(\w+)`),
+		kind:     SymbolEnum,
+		nameIdx:  1,
+		exported: exportedByJavaPublic,
+	},
+	{
+		re:       regexp.MustCompile(`^\s*(?:(?:public|protected|private|abstract|final|static|sealed|non-sealed|strictfp)\s+)*record\s+(\w+)`),
+		kind:     SymbolType,
+		nameIdx:  1,
+		exported: exportedByJavaPublic,
+	},
+	{
+		// 修饰符之后到方法名之间禁止出现 '-' / ';' / '=' / '{'：
+		// '-' 挡住 `default -> handle();` 这类 switch 箭头表达式，'=' 挡住字段初始化。
+		re:       regexp.MustCompile(`^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:public|protected|private|static|final|abstract|synchronized|native|default|strictfp)\b[^-;={]*?(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w.,\s<>\[\]?]+)?[{;]`),
+		kind:     SymbolMethod,
+		nameIdx:  1,
+		exported: exportedByJavaPublic,
+	},
+}
+
+// cppSymbolPatterns 覆盖 C/C++ 的粗符号：class/struct/union/enum 与具名函数。
+//
+// 函数规则要求"至少一个前缀 token + 空格 + 名字 + (...) + {/;}"，从而不把
+// `foo(x);` 这类调用语句当成声明；行首是语句关键字（return/if/for/...）时由
+// Extract 的 statementKeywords 守卫再排除一层。C++ 的"最令人烦恼的解析"式变量
+// 构造（`std::lock_guard guard(mu);`）仍可能被误收——粗符号阶段的已知折损。
+var cppSymbolPatterns = []symbolPattern{
+	{
+		re:       regexp.MustCompile(`^\s*(?:template\s*<[^>]*>\s*)?(?:class|struct|union)\s+(\w+)`),
+		kind:     SymbolType,
+		nameIdx:  1,
+		exported: exportedByKeyword,
+	},
+	{
+		re:       regexp.MustCompile(`^\s*enum(?:\s+class)?\s+(\w+)`),
+		kind:     SymbolEnum,
+		nameIdx:  1,
+		exported: exportedByKeyword,
+	},
+	{
+		re:       regexp.MustCompile(`^\s*(?:template\s*<[^>]*>\s*)?(?:[\w:<>~*&\[\],]+\s+)+[\w:<>~*&\[\],]*?(\w+)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?(?:->\s*[\w:<>*&,\s\[\]]+)?[{;]`),
+		kind:     SymbolFunction,
+		nameIdx:  1,
+		exported: exportedByKeyword,
+	},
+}
+
 var rustSymbolPatterns = []symbolPattern{
 	{
 		re:       regexp.MustCompile(`^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)`),
@@ -187,6 +255,14 @@ var callKeywords = map[string]bool{
 	"await": true, "assert": true, "raise": true, "throw": true, "super": true, "this": true,
 }
 
+// statementKeywords 是"行首出现即视为语句而非函数声明"的关键字。
+// 只用于函数类规则（SymbolFunction）的防误报守卫：`return compute(x);` 的
+// "return compute(" 与 C 风格函数定义在 regex 层无法区分。
+var statementKeywords = map[string]bool{
+	"if": true, "for": true, "while": true, "switch": true, "return": true,
+	"case": true, "catch": true, "do": true, "else": true, "goto": true,
+}
+
 // Extract 实现 LanguageAdapter：按语言选择规则表，逐行匹配。
 func (a builtinAdapter) Extract(ctx context.Context, file FileRecord, content []byte) (Extraction, error) {
 	lines := strings.Split(string(content), "\n")
@@ -211,6 +287,11 @@ func (a builtinAdapter) Extract(ctx context.Context, file FileRecord, content []
 				// 04 §2 Lazy：轻索引只覆盖"文件 + 顶层符号 + imports"，
 				// 方法体与局部变量属于按需深索引；缩进即非顶层的可靠信号。
 				break
+			}
+			if pattern.kind == SymbolFunction && statementKeywords[leadingWord(trimmed)] {
+				// `return compute(x);` / `if (check(x)) {` 这类语句形似
+				// "返回类型 + 函数名 + 参数"，行首是语句关键字时显式排除。
+				continue
 			}
 			m := pattern.re.FindStringSubmatchIndex(line)
 			if m == nil {
@@ -357,6 +438,10 @@ func patternsFor(language string) []symbolPattern {
 		return rustSymbolPatterns
 	case "python":
 		return pythonPatterns
+	case "java":
+		return javaSymbolPatterns
+	case "cpp", "c":
+		return cppSymbolPatterns
 	default:
 		return nil
 	}
@@ -388,10 +473,42 @@ func capture(line string, m []int, idx int) string {
 	return line[m[pos]:m[pos+1]]
 }
 
+// leadingWord 返回首个空白/左括号前的词，用于语句关键字守卫。
+func leadingWord(trimmed string) string {
+	for i, r := range trimmed {
+		if r == ' ' || r == '\t' || r == '(' {
+			return trimmed[:i]
+		}
+	}
+	return trimmed
+}
+
 // exportedByCase 按首字母大小写判定导出（Go 约定）。
 func exportedByCase(_, name string) bool {
 	r, _ := utf8.DecodeRuneInString(name)
 	return unicode.IsUpper(r)
+}
+
+// exportedByJavaPublic 按 Java 可见性判定：声明行（去掉注解后）以 public 开头。
+func exportedByJavaPublic(line, _ string) bool {
+	trimmed := strings.TrimSpace(line)
+	for strings.HasPrefix(trimmed, "@") {
+		// 跳过 @Annotation 或 @Annotation(...) 前缀。
+		end := strings.IndexAny(trimmed, " \t(")
+		if end < 0 {
+			return false
+		}
+		if trimmed[end] == '(' {
+			close := strings.Index(trimmed, ")")
+			if close < 0 {
+				return false
+			}
+			trimmed = strings.TrimSpace(trimmed[close+1:])
+			continue
+		}
+		trimmed = strings.TrimSpace(trimmed[end:])
+	}
+	return strings.HasPrefix(trimmed, "public ") || strings.HasPrefix(trimmed, "public\t")
 }
 
 // exportedByKeyword 检查声明行是否带 export / pub 前缀。

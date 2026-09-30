@@ -1297,6 +1297,9 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 	if b == nil {
 		return
 	}
+	if event.Type == runtimechat.EventToolFinished {
+		b.rememberTodoSnapshotFromEvent(event)
+	}
 	b.maybeAdoptPrimaryRunTurn(event)
 	// 已被 EndRun 终结、随后又被提问回答继续的挂起轮：它的事件带的是已
 	// retire 的 turn id，若不在这里复活 run 上下文，整段续跑
@@ -1366,6 +1369,26 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 		// slow consumer lets some events overtake others.
 		b.deferRuntimeEvent(event, size)
 	}
+}
+
+// rememberTodoSnapshotFromEvent caches the newest todos snapshot at the event
+// ingress (before queueing/coalescing can delay or drop it): busy-time /todos
+// executes immediately, so the UI path is not guaranteed to have consumed this
+// event yet. Only primary-session events are kept — a subagent transcript must
+// never leak into the parent session's task panel.
+func (b *chatRuntimeEventBridge) rememberTodoSnapshotFromEvent(event runtimeevents.Event) {
+	if b == nil || b.session == nil {
+		return
+	}
+	primarySessionID := b.primaryRuntimeSessionID()
+	if sessionID := strings.TrimSpace(event.SessionID); sessionID != "" && primarySessionID != "" && sessionID != primarySessionID {
+		return
+	}
+	snapshot := chatWebTodoSnapshotFromToolPayload(event.Payload)
+	if snapshot == nil {
+		return
+	}
+	b.session.rememberChatTodoSnapshot(primarySessionID, snapshot)
 }
 
 // isCriticalSubagentLifecycleEvent identifies control-plane outcomes that
@@ -5621,6 +5644,14 @@ func (b *chatRuntimeEventBridge) shouldSuppressMismatchedPrimaryTurnEvent(event 
 	// reason="event turn does not match active run"，人读中文行（renderChatRuntimeTimeline
 	// Event 的 agent.reclaimed 分支）因此从未真正渲染过。
 	if event.Type == agentcontrol.EventAgentReclaimed {
+		return false
+	}
+	// LSP 观测事件与会话绑定、与轮次无关（池在工具执行期发布，载荷无 turn_id）：
+	// 若按"无身份不能证明归属"整批丢弃，运行期基线（§4.3）永远为空——与
+	// agent.reclaimed 同一失败模式（见上一条注释的真实日志证据）。它们已在
+	// isChatRenderDataPlaneSuppressedEvent 中声明为「只进事件日志」，因此不会
+	// 污染 Scene/消息流。
+	if isLSPObservationBusEvent(event.Type) {
 		return false
 	}
 	// Blocking interactive events (approval, question) must reach the user

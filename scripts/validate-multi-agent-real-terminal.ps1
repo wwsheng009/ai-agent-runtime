@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Provider = "mimo_anthropic",
     [string]$AicliPath = "",
     [string]$OutputDir = "docs\working",

@@ -1,0 +1,15 @@
+root = true
+
+# 全仓统一 LF 行尾（与 .gitattributes 的 `* text=auto eol=lf` 保持一致）。
+[*]
+charset = utf-8
+end_of_line = lf
+
+# Windows 批处理脚本例外，保持 CRLF。
+[*.{bat,cmd}]
+end_of_line = crlf
+
+# PowerShell 脚本统一 UTF-8 BOM：Windows PowerShell 5.1 在 GBK 代码页下会把
+# 无 BOM 的 UTF-8 脚本按 ANSI 误读，导致中文注释/字符串解析异常。
+[*.ps1]
+charset = utf-8-bom

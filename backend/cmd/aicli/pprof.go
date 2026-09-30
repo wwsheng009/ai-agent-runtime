@@ -444,6 +444,12 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// 同源（进程内 usageanalytics.Service，同一 usage_analytics.sqlite）。
 	mux.HandleFunc(commands.ChatWebAPIAnalysisPath, commands.HandleChatWebAPIAnalysis)
 	mux.HandleFunc(commands.ChatWebAPIAnalysisPath+"/", commands.HandleChatWebAPIAnalysis)
+	// /web/api/lsp/* LSP 观测端点族（lsp.observe.v1「LSP 观测」页签）：
+	// status / overview / events，数据源为当前会话 LSP 池（与 TUI /lsp status
+	// 同源）。overview/events 在事件埋点落地前返回 available=false（不伪造 0），
+	// 埋点接入后无需改前端即可点亮。
+	mux.HandleFunc(commands.ChatWebAPILSPPath, commands.HandleChatWebAPILSP)
+	mux.HandleFunc(commands.ChatWebAPILSPPath+"/", commands.HandleChatWebAPILSP)
 	// /web/api/skills[/{name}] 当前会话的 skill catalog（与 TUI /skills 同源：
 	// session.FunctionCatalog 的 skill 描述符），供「技能」页签的列表与详情面板。
 	mux.HandleFunc(commands.ChatWebAPISkillsPath, commands.HandleChatWebAPISkills)
