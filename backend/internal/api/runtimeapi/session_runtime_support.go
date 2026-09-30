@@ -4554,7 +4554,8 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 			toolPolicy = toolPolicy.Clone()
 			toolPolicy.ReadOnly = true
 		}
-		toolPolicy.SetCapabilityScope(runtimepolicy.ReadOnlyChildCapabilities())
+		// 与 CLI 宿主同口径：只读边界只能收窄，父策略已带能力面时取交集。
+		toolPolicy.SetCapabilityScope(toolPolicy.IntersectAllowedCapabilities(runtimepolicy.ReadOnlyChildCapabilities()))
 		apiAgent.SetToolExecutionPolicy(toolPolicy)
 	}
 	applyAPIAgentChildDepthPolicy(apiAgent, childDepth, apiAgentDepthCeiling(selectedConfig))

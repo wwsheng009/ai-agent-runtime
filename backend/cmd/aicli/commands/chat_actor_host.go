@@ -1941,7 +1941,9 @@ func applyLocalChildReadOnlyPolicy(apiAgent *agent.Agent, readOnly bool) {
 		toolPolicy = toolPolicy.Clone()
 		toolPolicy.ReadOnly = true
 	}
-	toolPolicy.SetCapabilityScope(runtimepolicy.ReadOnlyChildCapabilities())
+	// 只读边界只能收窄：父策略已带能力面时取交集，避免 read_only 派生反而
+	// 重新拿到父策略没有的 network/agent_management 能力（绝不宽于父会话）。
+	toolPolicy.SetCapabilityScope(toolPolicy.IntersectAllowedCapabilities(runtimepolicy.ReadOnlyChildCapabilities()))
 	apiAgent.SetToolExecutionPolicy(toolPolicy)
 }
 

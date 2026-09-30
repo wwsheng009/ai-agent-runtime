@@ -75,6 +75,27 @@ func (p *ToolExecutionPolicy) AllowCapabilities(capabilities []Capability) error
 	return nil
 }
 
+// IntersectAllowedCapabilities returns the capabilities from requested that the
+// policy's existing scope already allows. When no capability scope is enabled
+// the requested list is returned unchanged (there is nothing to intersect
+// with). Hosts use it to seat a derived child boundary (for example the
+// read-only child surface) without ever widening an inherited parent scope:
+// a read-only child under a parent that never had network/agent-management
+// must not gain those capabilities just because the derived boundary lists them.
+func (p *ToolExecutionPolicy) IntersectAllowedCapabilities(requested []Capability) []Capability {
+	requested = dedupeCapabilities(requested)
+	if p == nil || !p.CapabilityScopeEnabled {
+		return requested
+	}
+	filtered := make([]Capability, 0, len(requested))
+	for _, capability := range requested {
+		if p.AllowedCapabilities[capability] {
+			filtered = append(filtered, capability)
+		}
+	}
+	return filtered
+}
+
 func (p *ToolExecutionPolicy) AllowedCapabilityNames() []string {
 	if p == nil || !p.CapabilityScopeEnabled {
 		return nil
@@ -115,6 +136,21 @@ func CapabilitiesForTask(role string, readOnly bool, toolNames, writePaths []str
 	for _, toolName := range toolNames {
 		capabilities = append(capabilities, resolver.Resolve(EvalRequest{ToolName: toolName})...)
 	}
+	// A task without an explicit tool list inherits the parent's surface, so the
+	// capability floor has to follow the role family instead: the vocabulary
+	// models actually use (spawn_agent agent_type explore/general/plan,
+	// spawn_subagents task_type config/explore/generate/implement/...) is wider
+	// than the legacy role names, and an unrecognized role used to fall through
+	// to "no defaults" - which silently dropped CapExecShell/CapNetwork from the
+	// derived child scope while the child still inherited the parent's tools.
+	if len(toolNames) == 0 {
+		switch RoleFamilyForTask(role) {
+		case RoleFamilyResearch:
+			capabilities = append(capabilities, CapExecShell, CapNetwork)
+		case RoleFamilyTest, RoleFamilyWrite:
+			capabilities = append(capabilities, CapExecShell)
+		}
+	}
 	if readOnly {
 		filtered := capabilities[:0]
 		for _, capability := range capabilities {
@@ -128,6 +164,40 @@ func CapabilitiesForTask(role string, readOnly bool, toolNames, writePaths []str
 		capabilities = filtered
 	}
 	return dedupeCapabilities(capabilities)
+}
+
+// RoleFamily classifies a subagent role (or task_type) onto the role families
+// the runtime ships defaults for. It is the single alias table shared by
+// agent.DefaultToolsForRole and CapabilitiesForTask so the tool list and the
+// capability floor cannot drift apart.
+type RoleFamily string
+
+const (
+	RoleFamilyResearch RoleFamily = "research"
+	RoleFamilyTest     RoleFamily = "test"
+	RoleFamilyWrite    RoleFamily = "write"
+)
+
+// RoleFamilyForTask maps a role/task_type string onto its family. Unknown or
+// empty roles return "" (no defaults, no capability widening).
+func RoleFamilyForTask(role string) RoleFamily {
+	normalized := strings.ToLower(strings.TrimSpace(role))
+	normalized = strings.ReplaceAll(normalized, "_", "-")
+	switch normalized {
+	case "researcher", "web-researcher", "explorer", "scout",
+		"explore", "understand", "research", "investigate",
+		"plan", "planner":
+		return RoleFamilyResearch
+	case "tester", "test", "verifier", "verification", "verify", "validate":
+		return RoleFamilyTest
+	case "writer", "implementer", "coder", "developer",
+		"implement", "generate", "modify", "refactor", "migrate",
+		"integration", "config", "security",
+		"general", "worker", "default":
+		return RoleFamilyWrite
+	default:
+		return ""
+	}
 }
 
 func cloneCapabilityMap(source map[Capability]bool) map[Capability]bool {
