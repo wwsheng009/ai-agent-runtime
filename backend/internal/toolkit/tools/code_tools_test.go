@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 )
 
@@ -75,7 +76,7 @@ func newCodeToolsFixture(t *testing.T) *codeToolsFixture {
 
 	syms := []knowledge.Symbol{
 		{
-			FileID: fileID, WorkspaceID: wsID, Name: "Alpha", QualifiedName: "Alpha",
+			FileID: fileID, WorkspaceID: wsID, Name: "Alpha", QualifiedName: "pkg.Alpha",
 			StableKey: knowledge.StableKey("go", knowledge.SymbolKind("function"), "pkg", "", "Alpha", ""),
 			Kind:      knowledge.SymbolKind("function"), Language: "go", Signature: "func Alpha()",
 			Range: knowledge.Range{
@@ -84,7 +85,7 @@ func newCodeToolsFixture(t *testing.T) *codeToolsFixture {
 			},
 		},
 		{
-			FileID: fileID, WorkspaceID: wsID, Name: "Beta", QualifiedName: "Beta",
+			FileID: fileID, WorkspaceID: wsID, Name: "Beta", QualifiedName: "pkg.Beta",
 			StableKey: knowledge.StableKey("go", knowledge.SymbolKind("function"), "pkg", "", "Beta", ""),
 			Kind:      knowledge.SymbolKind("function"), Language: "go", Signature: "func Beta()",
 			Range: knowledge.Range{
@@ -576,5 +577,76 @@ func TestCodeSearchLowConfidenceSupplement(t *testing.T) {
 	}
 	if !strings.Contains(env.Fallback.Output, "func Beta()") {
 		t.Fatalf("supplement output = %q, want grep hit", env.Fallback.Output)
+	}
+}
+
+// ---- 2026-10-01 修复轮 2：限定名解析 / 精确名排序 / view 去重语义 ----
+
+func TestCodeSearchQualifiedNameResolvesTail(t *testing.T) {
+	fixture := newCodeToolsFixture(t)
+	tool := NewCodeSearchTool()
+	tool.SetBasePath(fixture.root)
+	tool.SetCodeIndexResolver(fixture.resolver)
+
+	res, err := tool.Execute(context.Background(), map[string]interface{}{"query": "pkg.Alpha"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	env := decodeCodeEnvelope(t, res)
+	if env.Source != codeSourceIndex || env.Confidence != codeConfidenceExact {
+		t.Fatalf("envelope = %+v, want index/exact for qualified query", env)
+	}
+	var hits []codeSymbolHit
+	if err := json.Unmarshal(env.Results, &hits); err != nil {
+		t.Fatalf("results decode: %v", err)
+	}
+	if len(hits) == 0 || hits[0].Name != "Alpha" {
+		t.Fatalf("hits = %+v, want Alpha first", hits)
+	}
+	if !strings.Contains(env.Explanation, "限定名") {
+		t.Fatalf("explanation = %q, want qualified-name note", env.Explanation)
+	}
+}
+
+func TestOrderCodeSearchHitsExactFirst(t *testing.T) {
+	hits := []knowledge.SearchHit{
+		{Name: "SessionSubscriptionPlanInput"},
+		{Name: "PlanInputDraft"},
+		{Name: "PlanInput"},
+		{Name: "Plan"},
+	}
+	ordered := orderCodeSearchHits(hits, "PlanInput")
+	if ordered[0].Name != "PlanInput" {
+		t.Fatalf("ordered = %+v, want exact name first", ordered)
+	}
+	if ordered[1].Name != "PlanInputDraft" {
+		t.Fatalf("ordered = %+v, want prefix match second", ordered)
+	}
+}
+
+func TestCodeInspectMarksViewDedupStub(t *testing.T) {
+	fixture := newCodeToolsFixture(t)
+	tool := NewCodeInspectTool()
+	tool.SetBasePath(fixture.root)
+	tool.SetCodeIndexResolver(fixture.resolver)
+	ctx := toolctx.WithSessionID(context.Background(), "code-inspect-dedup-test")
+
+	if _, err := tool.Execute(ctx, map[string]interface{}{"symbol": "Beta"}); err != nil {
+		t.Fatalf("first Execute: %v", err)
+	}
+	res, err := tool.Execute(ctx, map[string]interface{}{"symbol": "Beta"})
+	if err != nil {
+		t.Fatalf("second Execute: %v", err)
+	}
+	env := decodeCodeEnvelope(t, res)
+	if !strings.Contains(env.Explanation, "去重") {
+		t.Fatalf("explanation = %q, want view-dedup note", env.Explanation)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(env.Results, &payload); err != nil {
+		t.Fatalf("results decode: %v", err)
+	}
+	if payload["content_omitted"] != "view_dedup" {
+		t.Fatalf("payload = %+v, want content_omitted=view_dedup", payload)
 	}
 }

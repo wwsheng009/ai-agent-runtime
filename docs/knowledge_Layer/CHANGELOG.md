@@ -6,6 +6,22 @@
 
 ---
 
+## 2026-10-01 — 修复：code_search 限定名/精确名排序 + code_inspect 去重语义（修复轮 2）
+
+承接前一条修复轮，继续收敛工具层语义缺口（不改索引/知识层）。
+
+### Changed
+
+- `code_search`：限定名查询（`a.b` / `a.b.c`）先做尾段精确符号解析，把限定前缀匹配的符号前置；命中完整限定名时 `confidence=1.0`（修复 `knowledge.Plan` 这类查询返回无关命中）。FTS 命中按"精确名 > 前缀 > 包含"稳定重排（修复 `PlanInput` 本体排在 `SessionSubscriptionPlanInput` 等子串命中之后）。
+- `code_search`：explanation 改为"返回 N 条"，`limit` 截断时注明命中总数可能更多；限定名精确命中时跳过低相关补量。
+- `code_inspect`：view 的 unchanged-window 去重命中时，结果显式标注 `content_omitted=view_dedup` 并在 explanation 说明（避免把 stub 提示当符号正文）。
+
+### Verified
+
+- 新增 3 例测试（限定名尾段解析、精确名排序、去重标注）；`go build ./...` OK；`internal/toolkit/tools` 与 `internal/tools` 全绿。
+
+---
+
 ## 2026-09-30 — 修复：code.* 工具面缺口修复轮（评审 + 修复）
 
 对 code.* 工具面做只读评审（真实会话 30+ 次调用 + 实现走查），并修复其中可低风险落地的一批缺口（完整评审清单与后续项见 `docs/plan/code-tools-gap-review-and-fix-plan-20260930.md`）。
@@ -48,18 +64,23 @@ Phase 4（`06` §4 Phase 4 / `04` §5 Phase 4）实现落地：`LanguageAdapter`
 - `backend/internal/knowledge/store.go` / `store_sqlite.go` / `migrations/0003_workspace_adapter_version.sql`（新增）：`workspaces.adapter_version` 读写。
 - `backend/internal/knowledge/config.go`：`knowledge.adapter`、`knowledge.index.full_rebuild_on_adapter_change`、`knowledge.lsp.{enabled,mode,max_processes,memory_limit_mb,startup_timeout,request_timeout}`（mode 仅 off|self；`external` 按 ADR-0002 §4.3 拒绝）。
 - `backend/internal/knowledge/version_hash.go`：工作区知识版本改用库内 adapter 版本（未记录时回落常量，既有库的版本值逐字节不变）。
+- `backend/internal/knowledge/adapter_lsp_factory.go`（新增）：语义通道生产构造入口 `NewSemanticAdapterForWorkspace`（ADR-0002 §4.1 双重门控；v1 仅 Go 模块），返回稳定降级 reason；`adapter_lsp.go` 首查惰性 `Ensure`（受 `startup_timeout` 约束）+ `Close`（释放锁与子进程）。
+- `backend/internal/toolkit/tools/{code_common,code_references}.go`：**语义通道接入工具面**——`code_references` / `code_callers` / `code_navigate(refs)` 在语义可用时优先返回编译器级引用集合（`source=lsp`）；失败 / 零命中 / kind 不支持自动回落索引路径；位置口径转换集中一处（索引 1-based ↔ ADR-0006 canonical 0-based）、声明自身剔除；`kind=call` 用行内 `name(` 启发式过滤（候选集来自语义通道，confidence 回到 0.90 口径）。
+- `backend/internal/tools/code_index_resolver.go`：进程级语义适配器缓存（key=root|enabled|mode；只缓存成功构造）+ `CodeIndexHandle.{Root,Semantic}` 注入。
 
 ### Verified
 
 - 新增测试 17 例：SPI/选择/降级/全量重建/版本敏感 8 例；LSP 语义通道与进程管理 8 例（UTF-16→canonical 位置转换、崩溃/超时/不可用降级、锁活持/过期接管/释放、客户端复用、内存上限回收、非法进程上限）；builtin 测试文件抽取定点 1 例。
+- 工具面接线测试 6 例：语义优先（含声明剔除与 1-based↔0-based 转换断言）、语义失败回落索引、`kind=import` 绕过语义、`kind=call` 启发式过滤、门控与缓存（未启用 / 非 Go 模块 → nil）、构造门控（4 段）。
 - golden set：go/parser 编译级真值 **1765 条**（门槛 ≥200）；**builtin definition precision=1.0000 / recall=0.8510**（function 99.5% / type 100% / method 99.8% / variable 68.8% / constant 16.1%——块内常量按"轻索引"口径不入索引）。
-- LSP live（gopls v0.23.0 + 真实 `backend/` 模块，80 个调用点查询）：**definition precision=0.9375 / recall=0.9375**（80 查询全部有返回，75 命中）——达到 Phase 4 门槛（≥0.90 / ≥0.85）；5 个未命中为接口方法声明等不在真值口径内的位置（登记为测量口径边界）。
+- LSP live（gopls v0.23.0 + 真实 `backend/` 模块）：**definition precision=0.9750 / recall=0.9750**（80 查询，78 命中）——达到 Phase 4 门槛（≥0.90 / ≥0.85）；**references precision（代理口径）=1.0000**（305 条返回全部通过词边界 token 校验），**recall（裁决后）=0.7674**（40 符号；索引基线 49 条，覆盖 33、索引误绑定 6、语义漏报 10）——**recall 门槛 0.85 未达标**，10/10 漏报位于 `_test.go`（见 Notes 遗留）。
 - 回归：`go build ./...` OK；`knowledge` / `knowledge/lsp` / `lsp` / `config` / `tools` / `toolkit` / `runtimeapi` / `cmd/*` 全绿；`cmd/contractgen` 漂移按测试指引重生成（`frontend/src/types/runtime/event-contract.ts`）。
 
 ### Notes
 
 - 默认值零变化：adapter 缺省 builtin；`lsp.enabled=false` 时任何入口都不起 LSP；全部开关关闭时行为与 Phase 3 逐字节一致。
-- 登记偏差与遗留：① tree-sitter 通道仅登记（未接入语法依赖）；② LSP 语义通道**尚未接入 `code.*` 工具面**——接入时须处理"索引行号 1-based（`adapter_builtin.go:276`）vs ADR-0006 canonical 0-based"的显式转换；③ ACP `session/set_config_option` 的 `knowledge.lsp.mode` select 选项未接线（ADR-0002 §4.2，宿主侧）；④ 内存探测用 `tasklist` 解析（Windows），未接 Job Object 记账；⑤ golden 真值以 go/parser 生成（等价人工标注的可验证真值），测试文件按查询面口径（`is_test=0`）排除。
+- **前置 ADR-0002 / 0005 / 0006 已于 2026-09-30 由项目 owner 授权代改并 Accept**（"按最佳实践确认"，先例 ADR-0004 / 0008 / 0009）；证据即本条目的实现与验证记录。
+- 登记偏差与遗留：① tree-sitter 通道仅登记（未接入语法依赖）；② ~~LSP 语义通道未接入工具面~~ → **已接入**（引用类三工具；位置口径转换集中一处）；definition 类工具仍走索引（索引 definition 实测 P=1.0000，语义 definition 门槛达标但工具面暂无"按位置查定义"入口）；③ ACP `session/set_config_option` 的 `knowledge.lsp.mode` select 选项未接线（ADR-0002 §4.2，宿主侧）；④ 内存探测用 `tasklist` 解析（Windows），未接 Job Object 记账；⑤ golden 真值以 go/parser 生成（等价人工标注的可验证真值），测试文件按查询面口径（`is_test=0`）排除；⑥ **references recall 门槛未达标（0.7674 < 0.85）**：漏报 10/10 位于 `_test.go`——本装置下 gopls 对测试文件位置的定义/引用查询无返回（同位置 definition 裁决为空），根因（gopls 测试包加载 vs harness 限制）待查；工具面影响：测试文件内的引用在语义通道下会缺失（自动回落索引仅发生在零命中时，部分命中不会补量），修复方向见 Phase 5 前的测量轮。
 - 已知红（与本轮改动无关）：`cmd/aicli/commands` 包级 FAIL（无 `--- FAIL` 行；已定位为 `acp_mcp_host_test.go:563-566` 的 helper 进程 `os.Exit` 提前终止测试二进制——该用例的 ACP/MCP 子集单测单独运行通过；`cmd/contractgen` 的漂移为上一轮遗留，已修）。
 
 ---

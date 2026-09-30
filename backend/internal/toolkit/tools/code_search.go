@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
@@ -99,6 +100,13 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 		return codeResult(env), nil
 	}
 
+	// 限定名（a.b / a.b.c）尾段精确解析：FTS 对这类查询常按 token 散列而漏掉
+	// 意图符号；限定前缀匹配的符号会被前置（不匹配则不补，避免误报）。
+	hits, qualifiedExact := withQualifiedTailHits(ctx, handle, query, pathPrefix, hits)
+	// 精确名优先重排：让 code_search("PlanInput") 的类型本体排在
+	// SessionSubscriptionPlanInput 这类子串命中之前。
+	hits = orderCodeSearchHits(hits, query)
+
 	// shadow 档（04 §4.6 第 3 步）：索引候选照算，但返回 grep 结果，不改变
 	// 模型可见输出；候选数量写进 explanation 供对比观察。
 	if handle.Mode == knowledge.ModeShadow {
@@ -122,15 +130,24 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 	env := newCodeEnvelope("code_search")
 	env.Source = codeSourceIndex
 	env.Confidence = codeConfidenceFTS
+	if qualifiedExact {
+		env.Confidence = codeConfidenceExact
+	}
 	env.Results = codeSearchHits(hits, handle)
 	env.Truncated = clamped || len(hits) >= limit
 	env.Explanation = fmt.Sprintf(
-		"symbols_fts 命中 %d 条（按相关性排序；score 仅在本结果集内可比，v1 不分页，next_cursor 为空）。",
+		"symbols_fts 返回 %d 条（精确名优先排序；score 仅在本结果集内可比，v1 不分页，next_cursor 为空）。",
 		len(hits),
 	)
+	if qualifiedExact {
+		env.Explanation += " 限定名尾段解析命中（confidence=1.0）。"
+	}
+	if env.Truncated {
+		env.Explanation += fmt.Sprintf(" 受 limit=%d 窗口约束，命中总数可能多于返回数。", limit)
+	}
 	// 低置信补量（04 §4.6 第 4 步）：命中里没有任何与查询同名/包含的符号时，
 	// 视为低相关，补一次 grep 作为补充证据（索引命中仍是主结果）。
-	if !codeSearchNameMatched(hits, query) {
+	if !qualifiedExact && !codeSearchNameMatched(hits, query) {
 		if result, _ := t.runGrep(ctx, grepParams()); result != nil && strings.TrimSpace(result.Content) != "" {
 			env.Source = codeSourceIndexGrep
 			env.Fallback = &codeFallback{
@@ -145,6 +162,92 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 		}
 	}
 	return codeResult(env), nil
+}
+
+// orderCodeSearchHits 按"精确名 > 前缀 > 包含 > 其他"稳定重排命中：
+// FTS 的相关性排序会把子串命中排在精确名之前，符号级检索应先给精确名。
+func orderCodeSearchHits(hits []knowledge.SearchHit, query string) []knowledge.SearchHit {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" || len(hits) < 2 {
+		return hits
+	}
+	rank := func(hit knowledge.SearchHit) int {
+		name := strings.ToLower(strings.TrimSpace(hit.Name))
+		qualified := strings.ToLower(strings.TrimSpace(hit.QualifiedName))
+		switch {
+		case name == q || qualified == q:
+			return 0
+		case strings.HasPrefix(name, q) || strings.HasPrefix(qualified, q):
+			return 1
+		case strings.Contains(name, q) || strings.Contains(qualified, q):
+			return 2
+		default:
+			return 3
+		}
+	}
+	ordered := make([]knowledge.SearchHit, len(hits))
+	copy(ordered, hits)
+	sort.SliceStable(ordered, func(i, j int) bool { return rank(ordered[i]) < rank(ordered[j]) })
+	return ordered
+}
+
+// withQualifiedTailHits 对限定名查询做尾段精确解析，并把限定前缀匹配的符号
+// 前置；返回是否命中完整限定名（决定 confidence 与是否需要低相关补量）。
+func withQualifiedTailHits(ctx context.Context, handle *CodeIndexHandle, query, pathPrefix string, hits []knowledge.SearchHit) ([]knowledge.SearchHit, bool) {
+	trimmed := strings.TrimSpace(query)
+	dot := strings.LastIndex(trimmed, ".")
+	if dot <= 0 || dot == len(trimmed)-1 {
+		return hits, false
+	}
+	qualifier := strings.ToLower(strings.TrimSpace(trimmed[:dot]))
+	tail := strings.TrimSpace(trimmed[dot+1:])
+	if qualifier == "" || tail == "" || strings.ContainsAny(tail, " \t") {
+		return hits, false
+	}
+	syms, err := handle.Index.FindSymbols(ctx, knowledge.SymbolQuery{
+		Name: tail, Exact: true, PathPrefix: pathPrefix, Limit: codeSymbolsDefaultLimit,
+	})
+	if err != nil || len(syms) == 0 {
+		return hits, false
+	}
+	seen := make(map[string]bool, len(hits))
+	for _, hit := range hits {
+		if hit.SymbolID != "" {
+			seen[hit.SymbolID] = true
+		}
+	}
+	prepended := make([]knowledge.SearchHit, 0, len(syms))
+	exact := false
+	for _, sym := range syms {
+		if sym.DeletedAt != 0 {
+			continue
+		}
+		qualified := strings.ToLower(strings.TrimSpace(sym.QualifiedName))
+		switch {
+		case strings.EqualFold(sym.QualifiedName, trimmed):
+			exact = true
+		case !strings.HasPrefix(qualified, qualifier+".") && !strings.Contains(qualified, qualifier):
+			// 限定前缀不匹配的尾段同名符号不补（避免 "a.b" 类查询引入误报）。
+			continue
+		}
+		if sym.ID != "" && seen[sym.ID] {
+			continue
+		}
+		prepended = append(prepended, knowledge.SearchHit{
+			SymbolID:      sym.ID,
+			Name:          sym.Name,
+			QualifiedName: sym.QualifiedName,
+			Kind:          sym.Kind,
+			Path:          handle.PathForFile(sym.FileID),
+			Language:      sym.Language,
+			Line:          sym.Range.Start.Line,
+			Signature:     sym.Signature,
+		})
+	}
+	if len(prepended) == 0 {
+		return hits, exact
+	}
+	return append(prepended, hits...), exact
 }
 
 // codeSearchLangFallbackNote 说明 fallback 与索引路径的过滤差异（grep 无语言维度）。

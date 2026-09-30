@@ -111,3 +111,18 @@
 2. **引用索引漏报根因**：`EvaluatePlan` / `classifyStoreError` 生产调用点缺失（疑似 refs 刷新/陈旧快照链路），需索引侧排查 + 全量重建验证；并考虑 refs precision（`Fatalf` 字符串、接口声明行）改进。
 3. **FTS exact-name 加权与限定名（`knowledge.Plan`）查询支持**。
 4. **`code_inspect` 的 view 去重提示**（`unchanged: ...`）作为 `content` 返回的语义（本轮未处理）。
+
+## 7. 修复轮 2（2026-10-01）
+
+承接 §6，继续收敛工具层语义缺口（不改索引/知识层）：
+
+| 修复 | 落点 | 验证 |
+|---|---|---|
+| 限定名（`a.b`）尾段精确解析并前置匹配符号；命中完整限定名时 `confidence=1.0` | `code_search.go`（`withQualifiedTailHits`） | `TestCodeSearchQualifiedNameResolvesTail` |
+| FTS 命中按"精确名 > 前缀 > 包含"稳定重排（`PlanInput` 本体先于子串命中） | `code_search.go`（`orderCodeSearchHits`） | `TestOrderCodeSearchHitsExactFirst` |
+| explanation 改为"返回 N 条"+ limit 截断说明；限定名命中时跳过低相关补量 | `code_search.go` | 用例断言 + 代码复核 |
+| view 去重命中显式标注 `content_omitted=view_dedup` 并说明 | `code_inspect.go`（`inspectDedupHit`） | `TestCodeInspectMarksViewDedupStub` |
+
+验证：`go build ./...` OK；`go test -count=1 ./internal/toolkit/tools/ ./internal/tools/` 全绿（toolkit/tools 46s）。
+
+仍未落地（与 §6 相同）：ADR-0004 陈旧度分级、引用索引漏报根因、`codeParamInt` 字符串数字（该 helper 位于并行会话正在编辑的 `code_common.go`，本轮回避）。

@@ -134,14 +134,21 @@ func (t *CodeInspectTool) Execute(ctx context.Context, params map[string]interfa
 	if result != nil {
 		content = strings.TrimSpace(result.Content)
 	}
-	env.Results = map[string]interface{}{
+	payload := map[string]interface{}{
 		"symbol":  codeSymbolHitFrom(sym, path),
 		"content": content,
 	}
+	env.Results = payload
 	env.Explanation = fmt.Sprintf(
 		"按符号读取：%s（%s，第 %d–%d 行）；正文经 view 读取（等价 view file_path=%s offset=%d limit=%d）。",
 		sym.Name, path, sym.Range.Start.Line, sym.Range.End.Line, path, sym.Range.Start.Line-1, readLimit,
 	)
+	// view 的 unchanged-window 去重会把 content 换成提示文本；必须显式标注，
+	// 否则模型会把 stub 当作符号正文。
+	if inspectDedupHit(result) {
+		payload["content_omitted"] = "view_dedup"
+		env.Explanation += "；正文命中 view 去重（该窗口已在本会话返回过），本次未重复返回正文——再次调用即可拿到正文。"
+	}
 	// limit 裁剪或 view 自身截断都意味着正文不完整；读取失败则显式降级标记。
 	env.Truncated = (limit > 0 && limit < span) || codeResultTruncated(result)
 	if viewErr != nil || result == nil || !result.Success {
@@ -157,6 +164,15 @@ func (t *CodeInspectTool) Execute(ctx context.Context, params map[string]interfa
 		}
 	}
 	return codeResult(env), nil
+}
+
+// inspectDedupHit 报告 view 的 unchanged-window 去重命中（content 是提示文本）。
+func inspectDedupHit(result *toolkit.ToolResult) bool {
+	if result == nil || result.Metadata == nil {
+		return false
+	}
+	hit, _ := result.Metadata["dedup_hit"].(bool)
+	return hit
 }
 
 // inspectFallback 处理符号路径的降级：优先按 file_path 走 view，否则按符号名走 grep。
