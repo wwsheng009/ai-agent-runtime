@@ -135,6 +135,55 @@ FROM turn_suspensions WHERE session_id = ? AND turn_id = ?`, sessionID, turnID).
 	return &record, true, nil
 }
 
+// ListTurnSuspensions returns every parked-turn record of one session, newest
+// parked first. Read-only: the settlement wake path needs to find a parked turn
+// after its run ended (when the derived runtime-state cache may be gone), and
+// diagnostics report the durable waiting state from the same rows.
+func (s *sqliteBatchStore) ListTurnSuspensions(ctx context.Context, sessionID string) ([]*TurnSuspension, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, nil
+	}
+	db, err := s.dbc(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT session_id, turn_id, root_scope_id, obligation_ids_json, parked_at,
+	decision_window_until, resume_queue_json
+FROM turn_suspensions WHERE session_id = ?
+ORDER BY parked_at DESC, turn_id ASC`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("subagentbatch: list turn suspensions: %w", err)
+	}
+	defer rows.Close()
+	var out []*TurnSuspension
+	for rows.Next() {
+		var (
+			record        TurnSuspension
+			obligations   string
+			resumeQueue   string
+			parkedAt      sql.NullString
+			decisionUntil sql.NullString
+		)
+		if err := rows.Scan(&record.SessionID, &record.TurnID, &record.RootScopeID, &obligations,
+			&parkedAt, &decisionUntil, &resumeQueue); err != nil {
+			return nil, fmt.Errorf("subagentbatch: read turn suspension row: %w", err)
+		}
+		record.ObligationIDs = decodeJSONIDList(obligations)
+		record.ResumeQueue = decodeJSONIDList(resumeQueue)
+		record.ParkedAt = parseBatchTime(parkedAt.String)
+		if until := parseNullableBatchTime(decisionUntil); until != nil {
+			record.DecisionWindowUntil = *until
+		}
+		out = append(out, &record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("subagentbatch: iterate turn suspensions: %w", err)
+	}
+	return out, nil
+}
+
 // ClearTurnSuspension removes a parked-turn record once the turn resumes or is
 // abandoned. Removing an absent record is not an error.
 func (s *sqliteBatchStore) ClearTurnSuspension(ctx context.Context, sessionID, turnID string) error {

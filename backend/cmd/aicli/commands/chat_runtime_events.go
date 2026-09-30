@@ -1237,6 +1237,43 @@ func (b *chatRuntimeEventBridge) retireTurnLocked(turnID string) {
 	delete(b.retiredTurnIDs, oldest)
 }
 
+// expectResumedTurnAfterWake 撤销 turn.resumed 指名挂起轮的退役标记；armRevival
+// 为真时再把该轮记为「即将复活」（由 maybeAdoptResumedPrimaryTurn 在其首条事件
+// 到达时复活 run 上下文）。
+//
+// 背景（2026-09-30 审计）：托管挂起（§6.12）的 run 收尾时 EndRun 会
+// retireTurnLocked(activeTurnID)；wake 恢复是「同一 turn 的新 episode」（复用挂起
+// turn_id，见 internal/chat TestSubmitPromptOnSuspendedTurnResumesSameTurnID），
+// 而 shouldSuppressMismatchedPrimaryTurnEvent 的 retiredTurnIDs 分支先于
+// activeTurnID 比对，会把整段恢复输出全部丢弃——模型在跑、终端毫无反应。
+// 提问回答路径靠 expectResumedTurnAfterAnswer 复活；本函数是托管恢复的等价入口，
+// 只由 turn.resumed 边沿驱动（投递成功后才会发布），因此不会为失败的 wake 复活旧轮。
+// trigger=settled 的闭合边沿不武装复活（账本已全终态、不会再有 run）。
+func (b *chatRuntimeEventBridge) expectResumedTurnAfterWake(turnID string, armRevival bool) {
+	if b == nil {
+		return
+	}
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if armRevival {
+		b.resumeTurnID = turnID
+	}
+	if _, retired := b.retiredTurnIDs[turnID]; !retired {
+		return
+	}
+	delete(b.retiredTurnIDs, turnID)
+	for i, id := range b.retiredTurnOrder {
+		if id == turnID {
+			b.retiredTurnOrder = append(b.retiredTurnOrder[:i:i], b.retiredTurnOrder[i+1:]...)
+			break
+		}
+	}
+}
+
 func (b *chatRuntimeEventBridge) endRunDrainTimeout() time.Duration {
 	if b != nil && b.session != nil && b.session.IsInterrupted() {
 		return chatRuntimeInterruptedEndRunDrainTimeout
@@ -1299,6 +1336,17 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 	}
 	if event.Type == runtimechat.EventToolFinished {
 		b.rememberTodoSnapshotFromEvent(event)
+	}
+	// §6.8 托管恢复（supervision wake / settled 闭合）：恢复 episode 复用挂起 turn
+	// 的 turn_id，而该 turn 的 run 收尾时已被 EndRun 退役——不先撤销退役标记，
+	// retiredTurnIDs 分支会把整段恢复输出（LLM 续写、工具行、assistant_message）
+	// 全部丢弃：模型在跑，终端毫无反应（2026-09-30 审计；与提问回答的复活同源）。
+	// trigger=settled 是"账本全终态、没有新 run"的闭合边沿，只解退役、不武装复活
+	// （否则会开出一个永远等不到 session_end 的幻影 run）。
+	if event.Type == runtimeevents.EventTurnResumed {
+		settled := payloadBoolValue(event.Payload, "settled") ||
+			strings.EqualFold(payloadStringValue(event.Payload["trigger"]), runtimeevents.TurnResumedTriggerSettled)
+		b.expectResumedTurnAfterWake(payloadStringValue(event.Payload["turn_id"]), !settled)
 	}
 	b.maybeAdoptPrimaryRunTurn(event)
 	// 已被 EndRun 终结、随后又被提问回答继续的挂起轮：它的事件带的是已
@@ -5467,19 +5515,95 @@ func (b *chatRuntimeEventBridge) observePrimaryRunTurn(event runtimeevents.Event
 	if turnID == "" {
 		return
 	}
+	// 所有权移交的调试行必须在锁外写（writeSessionDebugInfo 会做 IO，桥内其他
+	// 路径同样只在锁外写）：注册顺序保证先 Unlock 再写。
+	var ownershipNotice string
 	b.renderMu.Lock()
+	defer func() {
+		if ownershipNotice != "" {
+			writeSessionDebugInfo(b.session, ownershipNotice, false)
+		}
+	}()
 	defer b.renderMu.Unlock()
 	if !b.runActive {
-		return
-	}
-	if b.retiredTurnIDs == nil {
-		b.retiredTurnIDs = make(map[string]struct{})
-	}
-	if _, retired := b.retiredTurnIDs[turnID]; retired {
+		// run 不在跑：保持 ambient 语义（由 updateComposerAgentStageForAmbientPrimaryRunEvent
+		// 只投状态、不接管转录）。真正需要接管的轮走 Handle → maybeAdoptPrimaryRunTurn
+		// 的收养路径（含 wake/resume 复用挂起 turn_id、EndRun 遗留陈旧收养的情形）。
 		return
 	}
 	if b.activeTurnID == "" {
+		b.unretireTurnLocked(turnID)
 		b.activeTurnID = turnID
+		return
+	}
+	if b.activeTurnID == turnID {
+		// 活动 run 的轮不可能同时是退役轮（EndRun 会先清 runActive）：撤销陈旧退役。
+		b.unretireTurnLocked(turnID)
+		return
+	}
+	// 2026-09-30 现场（session_20260929175325_cxHK8mPD，宿主重启后永久静默）：
+	// 陈旧 run 上下文会霸占 activeTurnID —— 宿主重启 / auto-continuation 之后，
+	// 上一轮（或一次从未闭合的 run）的 turn id 留在桥上，新轮的 session_start、
+	// assistant_message、session_end 全被 ownership 守卫丢弃（debug.log 满屏
+	// render suppressed reason="event turn does not match active run"）。因为新轮的
+	// session_end 同样被丢，陈旧上下文永不闭合：模型明明在跑并产出回答，页面却
+	// 从此全程无反应，用户只能读成「回答没有提交到服务器」。
+	// session_start 是 actor 侧的权威「新一轮开始」信号（同一会话同一时刻只有
+	// 一轮在跑），因此把所有权移交给新轮、旧轮退役；残余的旧轮事件本就该被挡下。
+	previous := b.activeTurnID
+	b.retireTurnLocked(previous)
+	b.unretireTurnLocked(turnID)
+	b.activeTurnID = turnID
+	if b.adoptedTurnID == previous {
+		// 旧的所有者是被收养的 run（sidecar/wake 启动）：收养关系随所有权一起
+		// 移交给新轮，保证 adopted run 仍由该轮的 session_end 关闭。
+		b.adoptedTurnID = turnID
+		b.adoptedRunEpoch = b.runEpoch
+	}
+	ownershipNotice = fmt.Sprintf("[runtime-event] primary turn ownership transferred reason=%q previous_turn_id=%q turn_id=%q run_active=%t run_epoch=%d",
+		"new session_start supersedes stale active run", previous, turnID, b.runActive, b.runEpoch)
+}
+
+// adoptPrimaryRunTurnLocked 为一个主会话轮打开（收养）run 上下文：撤销陈旧退役、
+// 作废陈旧收养记录，然后以该轮开启新 run epoch。调用方必须已持有 renderMu。
+//
+// 与 BeginRun 的区别：这是「事件流自身驱动」的收养路径，用于 sidecar / wake /
+// auto-continuation 提交的轮（没有 CLI BeginRun），run 由该轮的 session_end 关闭。
+func (b *chatRuntimeEventBridge) adoptPrimaryRunTurnLocked(turnID string) {
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return
+	}
+	b.unretireTurnLocked(turnID)
+	b.adoptedTurnID = ""
+	b.adoptedRunEpoch = 0
+	b.runStarted = true
+	b.runActive = true
+	b.runEpoch++
+	b.setRunState(chatRunStateRunning)
+	b.activeTurnID = turnID
+	b.adoptedTurnID = turnID
+	b.adoptedRunEpoch = b.runEpoch
+}
+
+// unretireTurnLocked 撤销一个轮的退役标记。wake/resume 恢复 episode 复用挂起轮的
+// turn_id，而 retiredTurnIDs 分支在 shouldSuppressMismatchedPrimaryTurnEvent 里先于
+// activeTurnID 比对执行：不撤销就会把整段恢复输出（LLM 续写、工具行、
+// assistant_message、session_end）全部丢弃（2026-09-30 现场同源）。
+func (b *chatRuntimeEventBridge) unretireTurnLocked(turnID string) {
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return
+	}
+	if _, retired := b.retiredTurnIDs[turnID]; !retired {
+		return
+	}
+	delete(b.retiredTurnIDs, turnID)
+	for i, id := range b.retiredTurnOrder {
+		if id == turnID {
+			b.retiredTurnOrder = append(b.retiredTurnOrder[:i:i], b.retiredTurnOrder[i+1:]...)
+			break
+		}
 	}
 }
 
@@ -5504,16 +5628,13 @@ func (b *chatRuntimeEventBridge) maybeAdoptPrimaryRunTurn(event runtimeevents.Ev
 	}
 	b.renderMu.Lock()
 	defer b.renderMu.Unlock()
-	if b.runActive || b.adoptedTurnID != "" {
+	if b.runActive {
 		return
 	}
-	b.runStarted = true
-	b.runActive = true
-	b.runEpoch++
-	b.setRunState(chatRunStateRunning)
-	b.activeTurnID = turnID
-	b.adoptedTurnID = turnID
-	b.adoptedRunEpoch = b.runEpoch
+	// run 不在跑 ⇒ 任何遗留的收养记录/退役标记都属于上一个 episode（EndRun 只退役
+	// turn、不清 adoptedTurnID；wake/resume 又复用同一 turn_id）：统一按新 episode
+	// 重开 run，否则该会话将永久静默（2026-09-30 现场同一条规则）。
+	b.adoptPrimaryRunTurnLocked(turnID)
 }
 
 // expectResumedTurnAfterAnswer 标记「提问回答即将继续的那个轮」。
@@ -8378,12 +8499,18 @@ func renderChatRuntimeTimelineEvent(event runtimeevents.Event) chatRuntimeTimeli
 		if batchID := strings.TrimSpace(payloadStringValue(event.Payload["batch_id"])); batchID != "" {
 			title += "（batch " + batchID + "）"
 		}
+		// dedup 身份必须含 turn_id：轻量 spawn_agent 子代理的宿主侧挂起没有
+		// batch_id，若回落到 event.Type，同一会话的第二次挂起会被当成重复丢掉。
 		return typedChatRuntimeTimelineEvent(cell.TimelineEvent{
 			Kind:   cell.TimelineTeam,
 			Status: cell.StatusInfo,
 			Tag:    "[subagents]",
 			Title:  title,
-		}, firstNonEmptyChatValue(payloadStringValue(event.Payload["batch_id"]), event.Type))
+		}, firstNonEmptyChatValue(
+			payloadStringValue(event.Payload["batch_id"]),
+			payloadStringValue(event.Payload["turn_id"]),
+			event.Type,
+		))
 	case runtimeevents.EventTurnResumed:
 		// 恢复 = 宿主把 wake 真正投递成一次 resume episode（同一 turn_id）。
 		// terminal=true 时账本已全终态：本回合应直接产出终局报告（§16.4）。

@@ -368,6 +368,11 @@ func (h *Handler) sweepStaleAgentControlAgentRegistry(ctx context.Context, store
 	if len(existing) == 0 {
 		return nil
 	}
+	// 逆漂移：重启恢复 / 显式 resume 会把会话重新跑起来，判死过的行必须复位，
+	// 与 CLI 宿主同构（cmd/aicli/commands/chat_actor_registry.go）。
+	if err := h.reviveLiveAgentControlAgentRegistry(ctx, store, existing); err != nil {
+		return err
+	}
 	lookup := h.agentRegistrySessionBindingLookup()
 	marked := make(map[string]bool, len(existing))
 	terminalChildren := make([]agentcontrol.AgentRecord, 0, len(existing))
@@ -465,4 +470,87 @@ func (h *Handler) markAgentControlSubtreeStale(ctx context.Context, store agentc
 	}
 	_, err := store.CloseAgentControlAgentSubtree(ctx, record.RootSessionID, record.AgentPath, staleAt)
 	return err
+}
+
+// apiAgentReviveWindow bounds the revival scan to recently terminal rows: a
+// session that comes back to life does so inside the restart/resume window, and
+// an unbounded scan would pay one lease point query per historical row on every
+// projection refresh.
+const apiAgentReviveWindow = 24 * time.Hour
+
+// apiAgentRegistryLeaseLive is the positive counterpart of
+// apiAgentRegistryHasExpiredLease: that helper reports "not expired" both for a
+// valid lease and for no lease at all, while revival must prove the session is
+// owned right now.
+func apiAgentRegistryLeaseLive(ctx context.Context, store chat.RuntimeStateStore, sessionID string) (bool, error) {
+	leaseStore, ok := store.(chat.SessionLeaseStore)
+	if !ok || leaseStore == nil {
+		return false, nil
+	}
+	lease, err := leaseStore.GetLease(ctx, strings.TrimSpace(sessionID))
+	if err != nil || lease == nil {
+		return false, err
+	}
+	return lease.ExpiresAt.After(time.Now().UTC()), nil
+}
+
+// apiAgentRegistrySessionLiveAgain reports whether a terminal registry row's
+// session is owned and running again (restart recovery / explicit resume
+// re-acquired the lease and moved the state back to running).
+func (h *Handler) apiAgentRegistrySessionLiveAgain(ctx context.Context, sessionID string) (bool, error) {
+	store := h.getSessionRuntimeStore()
+	if store == nil {
+		return false, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false, nil
+	}
+	live, err := apiAgentRegistryLeaseLive(ctx, store, sessionID)
+	if err != nil || !live {
+		return false, err
+	}
+	state, err := store.LoadState(ctx, sessionID)
+	if err != nil || state == nil {
+		return false, err
+	}
+	switch state.Status {
+	case chat.SessionRunning, chat.SessionRewinding:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// reviveLiveAgentControlAgentRegistry is the API-host twin of the CLI's revival
+// sweep (cmd/aicli/commands/chat_actor_registry.go): a stale/closed row whose
+// session is owned and running again must return to active, or the agent APIs、
+// web 面板和父会话把运行中的子代理报成已结束。它只动 stale/closed 行（store 侧
+// SQL 守卫），并要求"未过期 lease + running/rewinding"两条证据同时成立。
+func (h *Handler) reviveLiveAgentControlAgentRegistry(ctx context.Context, store agentcontrol.AgentRegistryStore, existing []agentcontrol.AgentRecord) error {
+	reactivator, ok := store.(agentcontrol.AgentReactivator)
+	if !ok || reactivator == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	for _, record := range existing {
+		record = record.Normalize()
+		if !record.Closed() || record.AgentID == "" || record.SessionID == "" {
+			continue
+		}
+		if record.ClosedAt != nil && now.Sub(*record.ClosedAt) > apiAgentReviveWindow {
+			continue
+		}
+		live, err := h.apiAgentRegistrySessionLiveAgain(ctx, record.SessionID)
+		if err != nil {
+			return err
+		}
+		if !live {
+			continue
+		}
+		if _, _, err := reactivator.ReactivateAgentControlAgent(ctx, record.AgentID); err != nil {
+			return err
+		}
+	}
+	return nil
 }

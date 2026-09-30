@@ -292,6 +292,14 @@ type Handler struct {
 	// materializeAgentControlAgentProjections）。
 	agentControlMaterializeMu sync.Mutex
 
+	// childCompletionReplayMu / childCompletionReplayChildren 是 P0-A/P0-B
+	//（2026-09-30）的"每进程每子会话一次"重放闸门：轻量子会话的完成订阅是进程
+	// 内存态，重启后每个子会话只需补投影 + 重建订阅一次，之后由重建的订阅接管；
+	// 会话尚未落盘时释放名额，留给下一次物化重试
+	//（见 agent_child_completion_recovery.go）。
+	childCompletionReplayMu       sync.Mutex
+	childCompletionReplayChildren map[string]struct{}
+
 	sessionRuntimeMu       sync.RWMutex
 	sessionHub             *chat.SessionHub
 	sessionRuntimeStore    chat.RuntimeStateStore
@@ -2365,6 +2373,11 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				Temperature:         0.7,
 				StreamSink:          streamSink,
 				OnHistoryCheckpoint: historyCheckpointer.OnCheckpoint,
+
+				// §6.12：Web 回合走 /api/agent/chat 的直连 loop，不经 actor 的
+				// buildSessionLoopConfig；携带 agent_session: 义务的挂起记录同样
+				// 需要 supervision 判读器才能在本 run 末结清。
+				AgentSessionObligations: h.agentSessionObligationResolver(),
 			})
 			if reactErr != nil {
 				// 失败/中断（含客户端断开导致的 ctx 取消）也要落库：否则本轮已产生
@@ -2690,6 +2703,10 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 				Thinking:            types.ResolveThinkingConfig(req.Thinking),
 				Temperature:         0.7,
 				OnHistoryCheckpoint: historyCheckpointer.OnCheckpoint,
+
+				// §6.12：与流式直连路径同源，非流式 Web 回合的 loop 也需要子会话
+				// 义务判读器才能结清挂起 turn。
+				AgentSessionObligations: h.agentSessionObligationResolver(),
 			},
 		})
 		if reactErr != nil {

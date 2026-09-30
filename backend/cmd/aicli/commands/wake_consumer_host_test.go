@@ -10,6 +10,7 @@ import (
 
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
+	runtimeserver "github.com/wwsheng009/ai-agent-runtime/internal/runtimeserver"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
 )
 
@@ -75,17 +76,20 @@ func newWakeConsumerTestHostWithTurnEndCheck(t *testing.T, name string, schedule
 			},
 		},
 	}
+	// 控制面（projector 与 turn-end 判定读 host.Supervision.Store/Wakes）。
+	host.Supervision = &runtimeserver.SupervisionControlPlane{Store: store, Wakes: scheduler}
 	host.bindSupervisionWakeConsumer()
 	return host, store, deliveries
 }
 
-// TestLocalHostTurnEndCheck_DefaultOffKeepsWakePending pins the manual audit
-// default: with supervision.turn_end_check unset/false the host must not
-// subscribe the turn-end drain, so a pending wake stays durable and is only
-// surfaced by the next natural turn preflight or by an explicit
-// /supervision wake --deliver.
-func TestLocalHostTurnEndCheck_DefaultOffKeepsWakePending(t *testing.T) {
-	host, store, deliveries := newWakeConsumerTestHostWithTurnEndCheck(t, "aicli-turn-end-check-off", supervision.WakeSchedulerConfig{}, false)
+// TestLocalHostTurnEndCheck_TerminalWakeDrainsWithoutOptIn pins the 2026-09-30
+// fix: with supervision.turn_end_check unset/false the turn-end consumer still
+// drains **non-progress** wakes (child terminal / approval / failure / settled
+// obligation). Without this, an interactive parent that has no natural turn
+// would never be woken when a child agent ends (真机 W6 现场：子代理结束而父会话
+// 永久 idle)。开关仍然约束 progress 类自检，opt-in 语义不变。
+func TestLocalHostTurnEndCheck_TerminalWakeDrainsWithoutOptIn(t *testing.T) {
+	host, store, deliveries := newWakeConsumerTestHostWithTurnEndCheck(t, "aicli-turn-end-terminal", supervision.WakeSchedulerConfig{}, false)
 	ctx := context.Background()
 	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
 		SessionID: "root-session",
@@ -100,17 +104,43 @@ func TestLocalHostTurnEndCheck_DefaultOffKeepsWakePending(t *testing.T) {
 		Payload:   map[string]interface{}{"success": true},
 	})
 
-	require.Equal(t, 0, deliveries.count(), "turn_end_check=false 时 turn 结束不得自动 drain")
+	deliveries.wait(t, 5*time.Second)
+	require.Equal(t, 1, deliveries.count(), "子代理终态类 wake 不得被 turn_end_check 开关挡住")
+}
+
+// TestLocalHostTurnEndCheck_ProgressOnlyWakeStaysPendingWithoutOptIn pins the
+// preserved opt-in semantics: a scope whose only pending wake is the periodic
+// progress check keeps it durable when turn_end_check is off (the switch still
+// governs the progress self-check family).
+func TestLocalHostTurnEndCheck_ProgressOnlyWakeStaysPendingWithoutOptIn(t *testing.T) {
+	host, store, deliveries := newWakeConsumerTestHostWithTurnEndCheck(t, "aicli-turn-end-progress", supervision.WakeSchedulerConfig{}, false)
+	ctx := context.Background()
+	require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+		SessionID: "root-session",
+		Status:    runtimechat.SessionIdle,
+		UpdatedAt: time.Now().UTC(),
+	}))
+	_, err := host.supervisionWake.Wakes.ScheduleWake(ctx, supervision.WakeRequest{
+		RootScopeID:           "root-session",
+		TargetParentSessionID: "root-session",
+		WakeReason:            supervision.WakeReasonProgressCheck,
+	})
+	require.NoError(t, err)
+
+	host.EventBus.Publish(runtimeevents.Event{
+		Type:      runtimechat.EventSessionEnd,
+		SessionID: "root-session",
+		Payload:   map[string]interface{}{"success": true},
+	})
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, 0, deliveries.count(), "progress 自检仍受 turn_end_check 约束")
+
 	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{
 		RootScopeID:   "root-session",
 		UnclaimedOnly: true,
 	})
 	require.NoError(t, err)
-	require.Len(t, pending, 1, "wake 必须保持 durable，等待下一次自然 turn 的 preflight 或显式投递")
-
-	// 显式投递仍走同一 runnable 门：空闲父会话可以被手动 drain。
-	require.NoError(t, host.supervisionWake.MaybeWakeParent(ctx, "root-session", "", "root-session"))
-	require.Equal(t, 1, deliveries.count(), "显式投递必须仍然可用")
+	require.Len(t, pending, 1, "progress wake 必须保持 durable，等待显式投递或开关打开")
 }
 
 // syncWaitDeliveries records wake deliveries with a channel for waiting.

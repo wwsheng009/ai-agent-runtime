@@ -793,6 +793,17 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 	}
 	result.Created = true
 	result.Queued = queued
+	// §6.12：派发即把轻量子代理登记为本 turn 的挂起义务（与批次派发
+	// parkBackgroundTurn 同语义）。子代理在父 turn 结束前完成时，settle 会在
+	// run 收尾清账并补发 turn.resumed(settled)；否则父 turn 保持挂起，子代理
+	// 终态经既有 wake/resume 链路续跑。失败只降级为未挂起，不影响派发结果。
+	if queued && r.Host != nil {
+		if r.Host.parkLocalAgentChildObligation(ctx, parentSessionID, childSession.ID) {
+			// 模型感知：只有义务真的落账才宣告 wait/finalize 语义，避免对模型
+			// 承诺一个不会发生的挂起。
+			result.NextAction = localAgentObligationSpawnNextAction
+		}
+	}
 	r.dispatchLocalAgentHook(runtimehooks.EventSubagentStart, localSpawnAgentHookPayload(parentSessionID, childSession, map[string]interface{}{
 		"queued": queued,
 	}))
@@ -1159,8 +1170,14 @@ func (h *localChatRuntimeHost) trackChildEventSubscription(childSessionID string
 	if h.childEventUnsubs == nil {
 		h.childEventUnsubs = make(map[string]func())
 	}
+	// 重建订阅（重启/恢复重绑定）会覆盖同 id 的旧句柄：先取旧句柄，替换后释放，
+	// 否则重复登记会把前一个订阅泄漏到 EventBus 上。
+	previous := h.childEventUnsubs[childSessionID]
 	h.childEventUnsubs[childSessionID] = unsubscribe
 	h.childEventUnsubsMu.Unlock()
+	if previous != nil {
+		previous()
+	}
 }
 
 // releaseChildEventSubscription 释放并注销一个子会话的订阅（幂等）。
@@ -1268,65 +1285,121 @@ func (r *localActorRegistry) subscribeLocalAgentCompletion(parentSessionID strin
 		// 子会话终态：丢弃该子会话的节流状态并释放 per-child 订阅。
 		r.Host.subagentProgressMirror().Forget(childSessionID)
 		r.Host.releaseChildEventSubscription(childSessionID)
-		payload := map[string]interface{}{
-			"agent_id":              childSessionID,
-			"session_id":            childSessionID,
-			"parent_session_id":     parentSessionID,
-			"path":                  childPath,
-			"source_event_type":     eventType,
-			"source_event_trace_id": strings.TrimSpace(event.TraceID),
-			"status":                localAgentCompletionStatus(event),
-		}
-		if !event.Timestamp.IsZero() {
-			payload["source_event_timestamp"] = event.Timestamp.UTC().Format(time.RFC3339Nano)
-		}
-		if childDepth > 0 {
-			payload["depth"] = childDepth
-		}
-		if childType != "" {
-			payload["agent_type"] = childType
-			payload["role"] = childType
-		}
-		toolbroker.AddSpawnAgentRoutePayload(payload, childSession)
-		copyLocalAgentCompletionPayload(payload, event.Payload)
-		// 方案 §2.1 / D4：本地镜像载荷补齐规范化字段（success 权威、status
-		// 兼容别名），与 runtime-server 侧共用同一归一化实现。
-		payload["source"] = "agent_controller"
-		usageanalytics.NormalizeSubagentCompletionPayload(payload, localAgentCompletionStatus(event))
-		if store := r.localAgentRegistryStore(); store != nil && childPath != "" {
-			rootSessionID := localAgentRootSessionID(childSession, parentSessionID)
-			if _, closeErr := store.CloseAgentControlAgentSubtree(context.Background(), rootSessionID, childPath, time.Now().UTC()); closeErr != nil {
-				payload["lifecycle_close_error"] = closeErr.Error()
-			}
-		}
-		r.projectLocalAgentCompletion(context.Background(), parentSessionID, childSessionID, localAgentCompletionStatus(event), eventType)
-		// Keep worktree after completion so parent can apply/discard explicitly.
-		// close_agent still cleans remaining worktrees.
-		annotateLocalSpawnWorktreeCompletion(context.Background(), r, childSession, payload)
-		completionMessage, mailboxErr := r.deliverSubagentCompletionMailbox(context.Background(), parentSessionID, childSessionID, childPath, childType, eventType, payload)
-		payload = toolbroker.AnnotateSubagentCompletionDisplayMirror(payload, completionMessage, mailboxErr)
-		r.dispatchLocalAgentHook(runtimehooks.EventSubagentStop, cloneRuntimeEventPayload(payload))
-		mirrored := runtimeevents.Event{
-			Type:      "subagent.completed",
-			TraceID:   strings.TrimSpace(event.TraceID),
-			AgentName: "agent-controller",
-			SessionID: parentSessionID,
-			Payload:   payload,
-			Timestamp: event.Timestamp,
-		}
-		if mirrored.Timestamp.IsZero() {
-			mirrored.Timestamp = time.Now().UTC()
-		}
-		if seq, err := r.Host.EventStore.AppendEvent(context.Background(), mirrored); err == nil {
-			if mirrored.Payload == nil {
-				mirrored.Payload = map[string]interface{}{}
-			}
-			mirrored.Payload["seq"] = seq
-		}
-		r.Host.EventBus.Publish(mirrored)
+		r.handleLocalChildTerminal(context.Background(), parentSessionID, childSession, event, localChildEventMeta{path: childPath, depth: childDepth, kind: childType}, false)
 	}
 	unsubscribe = r.Host.EventBus.SubscribeCancelable("", handler)
 	r.Host.trackChildEventSubscription(childSessionID, unsubscribe)
+}
+
+// localChildEventMeta 是子会话终态投影所需的静态身份（路径/深度/类型）。spawn
+// 时写入子会话 context 并随 SessionStore 持久化，因此重启后独立加载的子会话
+// 也能解析出同一身份（FR-9/D8 同源）。
+type localChildEventMeta struct {
+	path  string
+	depth int
+	kind  string
+}
+
+// localChildEventMetaFor 从子会话上下文解析身份。实时订阅与启动重放共用，
+// 保证两条路径拿到逐字节一致的 path/depth/agent_type。
+func localChildEventMetaFor(childSession *runtimechat.Session) localChildEventMeta {
+	meta := localChildEventMeta{}
+	if childSession == nil {
+		return meta
+	}
+	meta.path = localAgentSessionPath(childSession)
+	meta.depth = localAgentSessionDepth(childSession)
+	if value, ok := childSession.GetContext(toolbroker.AgentSessionContextAgentType); ok {
+		if text, ok := value.(string); ok {
+			meta.kind = strings.TrimSpace(text)
+		}
+	}
+	return meta
+}
+
+// handleLocalChildTerminal 是子会话终态的统一投影入口：实时订阅回调与启动期
+// 重放（replayLocalChildCompletions）共用同一条路径，载荷、幂等键与副作用保持
+// 一致。所有写入都设计为幂等——registry close 只动 active 行、completion 投影按
+// subject 版本 upsert、mailbox 以确定性 message id 去重——因此重放不会重复记账
+// （父侧 subagent.completed 镜像事件由调用方的"已投影"闸门保证不重复）。
+func (r *localActorRegistry) handleLocalChildTerminal(ctx context.Context, parentSessionID string, childSession *runtimechat.Session, event runtimeevents.Event, meta localChildEventMeta, replay bool) {
+	if r == nil || r.Host == nil || childSession == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	childSessionID := strings.TrimSpace(childSession.ID)
+	if parentSessionID == "" || childSessionID == "" {
+		return
+	}
+	eventType := strings.TrimSpace(event.Type)
+	if eventType == "" {
+		eventType = runtimechat.EventSessionEnd
+	}
+	childPath := meta.path
+	childDepth := meta.depth
+	childType := meta.kind
+	payload := map[string]interface{}{
+		"agent_id":              childSessionID,
+		"session_id":            childSessionID,
+		"parent_session_id":     parentSessionID,
+		"path":                  childPath,
+		"source_event_type":     eventType,
+		"source_event_trace_id": strings.TrimSpace(event.TraceID),
+		"status":                localAgentCompletionStatus(event),
+	}
+	if !event.Timestamp.IsZero() {
+		payload["source_event_timestamp"] = event.Timestamp.UTC().Format(time.RFC3339Nano)
+	}
+	if childDepth > 0 {
+		payload["depth"] = childDepth
+	}
+	if childType != "" {
+		payload["agent_type"] = childType
+		payload["role"] = childType
+	}
+	toolbroker.AddSpawnAgentRoutePayload(payload, childSession)
+	copyLocalAgentCompletionPayload(payload, event.Payload)
+	// 方案 §2.1 / D4：本地镜像载荷补齐规范化字段（success 权威、status
+	// 兼容别名），与 runtime-server 侧共用同一归一化实现。
+	payload["source"] = "agent_controller"
+	usageanalytics.NormalizeSubagentCompletionPayload(payload, localAgentCompletionStatus(event))
+	if store := r.localAgentRegistryStore(); store != nil && childPath != "" {
+		rootSessionID := localAgentRootSessionID(childSession, parentSessionID)
+		if _, closeErr := store.CloseAgentControlAgentSubtree(ctx, rootSessionID, childPath, time.Now().UTC()); closeErr != nil {
+			payload["lifecycle_close_error"] = closeErr.Error()
+		}
+	}
+	r.projectLocalAgentCompletion(ctx, parentSessionID, childSessionID, localAgentCompletionStatus(event), eventType)
+	// Keep worktree after completion so parent can apply/discard explicitly.
+	// close_agent still cleans remaining worktrees.
+	annotateLocalSpawnWorktreeCompletion(ctx, r, childSession, payload)
+	completionMessage, mailboxErr := r.deliverSubagentCompletionMailbox(ctx, parentSessionID, childSessionID, childPath, childType, eventType, payload)
+	payload = toolbroker.AnnotateSubagentCompletionDisplayMirror(payload, completionMessage, mailboxErr)
+	// 启动重放只收敛 durable 账本：用户 hook 是 live 副作用，重放不得二次触发。
+	if !replay {
+		r.dispatchLocalAgentHook(runtimehooks.EventSubagentStop, cloneRuntimeEventPayload(payload))
+	}
+	mirrored := runtimeevents.Event{
+		Type:      "subagent.completed",
+		TraceID:   strings.TrimSpace(event.TraceID),
+		AgentName: "agent-controller",
+		SessionID: parentSessionID,
+		Payload:   payload,
+		Timestamp: event.Timestamp,
+	}
+	if mirrored.Timestamp.IsZero() {
+		mirrored.Timestamp = time.Now().UTC()
+	}
+	if seq, err := r.Host.EventStore.AppendEvent(ctx, mirrored); err == nil {
+		if mirrored.Payload == nil {
+			mirrored.Payload = map[string]interface{}{}
+		}
+		mirrored.Payload["seq"] = seq
+	}
+	r.Host.EventBus.Publish(mirrored)
 }
 
 // projectLocalAgentCompletion mirrors the API host bridge. It never turns an
@@ -1344,7 +1417,7 @@ func (r *localActorRegistry) projectLocalAgentCompletion(ctx context.Context, pa
 	if rootScopeID == "" {
 		return
 	}
-	_, _ = supervision.ProjectAgentCompletion(
+	notification, projectErr := supervision.ProjectAgentCompletion(
 		ctx,
 		r.Host.Supervision.Store,
 		r.Host.Supervision.Wakes,
@@ -1354,6 +1427,22 @@ func (r *localActorRegistry) projectLocalAgentCompletion(ctx context.Context, pa
 		status,
 		sourceEventType,
 	)
+	if projectErr == nil && !supervision.LifecycleWakeScheduled(notification) {
+		// 成功（info/closed）终态不排生命周期 wake（projection 只在 critical +
+		// action_required 时排），而结算谓词只在 run 结束跑：没有这一笔，
+		// "全部义务成功"的挂起 turn 会永久停放，与 spawn_agent 的
+		// "auto-resumes it on the child's terminal event" 契约相悖。
+		// 结清判定以 durable 账本为准（ListTurnSuspensions + settle 谓词），
+		// 不依赖派生缓存；排出的 wake 由下面的 wakeSupervisedParent 立即排空。
+		_, _ = supervision.ScheduleSettledTurnWake(
+			ctx,
+			r.Host.SubagentBatches,
+			r.Host.agentSessionObligationResolver(),
+			r.Host.Supervision.Wakes,
+			parentSessionID,
+			rootScopeID,
+		)
+	}
 	// P2 closure: a critical completion must be able to start a parent turn
 	// without an explicit wait. If the parent is still busy the wake stays
 	// durable and the parent turn-end subscription drains it (doc 6.5).
@@ -1758,6 +1847,11 @@ func (r *localActorRegistry) materializeLocalAgentRegistry(ctx context.Context) 
 	if err := r.sweepStaleLocalAgentRegistry(ctx, store, existing); err != nil {
 		return err
 	}
+	// 逆漂移：重启恢复 / 显式 resume 会把会话重新跑起来，sweep 判死过的行必须
+	// 复位（sweep 与 revival 用同一份 listing、同一份 lease 时钟，方向相反）。
+	if _, err := r.reviveLiveLocalAgentRegistryRows(ctx, store, existing); err != nil {
+		return err
+	}
 	// One listing answers every existence check below (was one point query per
 	// projected record).
 	index, err := newLocalAgentRecordIndex(ctx, store, existing)
@@ -2005,6 +2099,77 @@ func (r *localActorRegistry) sweepStaleLocalAgentRegistry(ctx context.Context, s
 	return nil
 }
 
+// localAgentReviveWindow bounds the revival scan to recently terminal rows: a
+// session that comes back to life does so inside the restart/resume window, and
+// an unbounded scan would pay one lease point query per historical row on every
+// materialize (the spawn gate, list reads and the periodic reconcile all call
+// it).
+const localAgentReviveWindow = 24 * time.Hour
+
+// reviveLiveLocalAgentRegistryRows converges the inverse drift of
+// sweepStaleLocalAgentRegistry: a stale/closed row whose session is owned and
+// running again must return to active, or /agents、web 面板和父会话把运行中的
+// 子代理报成已结束（真机 2026-09-30：03:04:16 sweep 标 stale，03:04:2x 恢复运行
+// 后行未复位）。它只动 stale/closed 行，active 行由 store 侧 SQL 守卫保护。
+func (r *localActorRegistry) reviveLiveLocalAgentRegistryRows(ctx context.Context, store agentcontrol.AgentRegistryStore, existing []agentcontrol.AgentRecord) (int64, error) {
+	reactivator, ok := store.(agentcontrol.AgentReactivator)
+	if !ok || reactivator == nil {
+		return 0, nil
+	}
+	now := time.Now().UTC()
+	var revived int64
+	for _, record := range existing {
+		record = record.Normalize()
+		if !record.Closed() || record.AgentID == "" || record.SessionID == "" {
+			continue
+		}
+		if record.ClosedAt != nil && now.Sub(*record.ClosedAt) > localAgentReviveWindow {
+			continue
+		}
+		live, err := r.localAgentSessionLiveAgain(ctx, record.SessionID)
+		if err != nil {
+			return revived, err
+		}
+		if !live {
+			continue
+		}
+		if _, changed, err := reactivator.ReactivateAgentControlAgent(ctx, record.AgentID); err != nil {
+			return revived, err
+		} else if changed {
+			revived++
+		}
+	}
+	return revived, nil
+}
+
+// localAgentSessionLiveAgain reports whether a terminal registry row's session
+// is owned and running again. Restart recovery / explicit resume re-acquires
+// the execution lease and moves the runtime state back to running; the registry
+// row keeps its terminal status until the host revives it.
+func (r *localActorRegistry) localAgentSessionLiveAgain(ctx context.Context, sessionID string) (bool, error) {
+	if r == nil || r.Host == nil || r.Host.RuntimeStore == nil {
+		return false, nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false, nil
+	}
+	live, err := localAgentRegistryLeaseLive(ctx, r.Host.RuntimeStore, sessionID)
+	if err != nil || !live {
+		return false, err
+	}
+	state, err := r.Host.RuntimeStore.LoadState(ctx, sessionID)
+	if err != nil || state == nil {
+		return false, err
+	}
+	switch state.Status {
+	case runtimechat.SessionRunning, runtimechat.SessionRewinding:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
 func (r *localActorRegistry) localAgentRegistryTerminalState(ctx context.Context, sessionID string) (terminal bool, stale bool, err error) {
 	if r == nil || r.Host == nil || r.Host.SessionStore == nil {
 		return false, false, nil
@@ -2051,6 +2216,22 @@ func localAgentRegistryHasExpiredLease(ctx context.Context, runtimeStore runtime
 		return false, err
 	}
 	return !lease.ExpiresAt.After(time.Now().UTC()), nil
+}
+
+// localAgentRegistryLeaseLive is the positive counterpart of
+// localAgentRegistryHasExpiredLease: that helper reports "not expired" both for
+// a valid lease and for no lease at all, while revival must prove the session is
+// owned right now.
+func localAgentRegistryLeaseLive(ctx context.Context, runtimeStore runtimechat.RuntimeStateStore, sessionID string) (bool, error) {
+	leaseStore, ok := runtimeStore.(runtimechat.SessionLeaseStore)
+	if !ok || leaseStore == nil {
+		return false, nil
+	}
+	lease, err := leaseStore.GetLease(ctx, strings.TrimSpace(sessionID))
+	if err != nil || lease == nil {
+		return false, err
+	}
+	return lease.ExpiresAt.After(time.Now().UTC()), nil
 }
 
 // localAgentRuntimeStateClaimsProgress reports whether a durable runtime state
@@ -2467,6 +2648,12 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 					return nil, err
 				}
 				triggered = true
+				// §6.12：触发型投递同样是把一次新 run 交给既有子会话——与
+				// spawn_agent 派发同语义，调用者的 turn 必须能在子会话终态前挂起
+				// 等待；否则回合结束只会冻结 "Worked for …"，而子代理仍在跑
+				// （真机 2026-09-30：resume_agent + followup_task 的 turn 无挂起记录，
+				// 状态行停在完成摘要）。仅对调用者自己树内的子会话登记义务。
+				r.parkTriggeredChildObligation(ctx, fromSessionID, sessionID)
 			}
 		}
 	}
@@ -2533,6 +2720,55 @@ func (r *localActorRegistry) deliverAgentMessage(ctx context.Context, fromSessio
 		})
 	}
 	return result, nil
+}
+
+// parkTriggeredChildObligation registers a triggered delivery (followup_task /
+// send_message with trigger) as a durable obligation of the caller's current
+// turn when the target is a child session inside the caller's own tree. It
+// mirrors the dispatch-time park in Spawn (§6.12): a parent that hands new work
+// to an existing child and then ends its turn must park instead of showing a
+// frozen "Worked for …" while the child is still running.
+//
+// Cross-tree and team targets are never parked: their completion is not this
+// turn's obligation, and the durable agent_session obligation would never
+// settle on the caller's resume path. Best-effort by contract: a missing store,
+// a missing identity row or a failed park write simply leaves the turn
+// unparked (the I9 in-flight signal still covers the observable side).
+func (r *localActorRegistry) parkTriggeredChildObligation(ctx context.Context, callerSessionID, targetSessionID string) {
+	if r == nil || r.Host == nil {
+		return
+	}
+	callerSessionID = strings.TrimSpace(callerSessionID)
+	targetSessionID = strings.TrimSpace(targetSessionID)
+	if callerSessionID == "" || targetSessionID == "" || strings.EqualFold(callerSessionID, targetSessionID) {
+		return
+	}
+	store := r.localAgentRegistryStore()
+	if store == nil {
+		return
+	}
+	// IncludeClosed: a resumed child (resume_agent + followup_task) keeps its
+	// terminal identity row until the host revives it; the row is still the tree
+	// evidence that this target is the caller's own child.
+	records, err := store.ListAgentControlAgents(ctx, agentcontrol.AgentFilter{
+		AgentID:       targetSessionID,
+		IncludeClosed: true,
+		Limit:         1,
+	})
+	if err != nil || len(records) == 0 {
+		return
+	}
+	record := records[0].Normalize()
+	if record.Depth <= 0 {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(record.ParentSessionID), callerSessionID) {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(record.AgentType), agentcontrol.AgentTypeTeamTeammate) {
+		return
+	}
+	r.Host.parkLocalAgentChildObligation(ctx, callerSessionID, targetSessionID)
 }
 
 // deliverLocalAgentMailboxEventResult is deliverAgentMailboxEvent with the
@@ -3059,7 +3295,13 @@ func (r *localActorRegistry) localWaitLedger(ctx context.Context) ([]toolbroker.
 	if err != nil || state == nil {
 		return nil, nil, false, ""
 	}
+	// 挂起记录可能在 run 仍未结束时由派发方写入（spawn_agent 派发即挂起、
+	// 批次派发同理），所以先看挂起 turn，再回落到运行中的 CurrentTurnID：
+	// 这样等待同一 turn 的 wait_agent 在 run 内就能看到账本（否则只能等收尾）。
 	turnID := strings.TrimSpace(state.SuspendedTurnID)
+	if turnID == "" {
+		turnID = strings.TrimSpace(state.CurrentTurnID)
+	}
 	if turnID == "" {
 		return nil, nil, false, ""
 	}
@@ -3067,7 +3309,7 @@ func (r *localActorRegistry) localWaitLedger(ctx context.Context) ([]toolbroker.
 	if err != nil || !ok || record == nil {
 		return nil, nil, false, ""
 	}
-	rows, err := subagentbatch.BuildWaitLedger(ctx, r.Host.SubagentBatches, record)
+	rows, err := subagentbatch.BuildWaitLedgerWith(ctx, r.Host.SubagentBatches, record, r.Host.agentSessionObligationResolver())
 	if err != nil || len(rows) == 0 {
 		return nil, nil, false, ""
 	}
@@ -4139,6 +4381,23 @@ func (r *localActorRegistry) Resume(ctx context.Context, sessionID string) (*too
 	}
 	if _, err := r.Host.SessionHub.GetOrCreate(sessionID); err != nil {
 		return nil, err
+	}
+	// 恢复即复位：会话重新被持有后，stale/closed 行必须回到 active，否则
+	// /agents 与父会话把运行中的子代理报成已结束。账本写入失败不回滚已经生效
+	// 的 resume；下一次 materialize 的 revival sweep 会再次收敛该行。
+	if store := r.localAgentRegistryStore(); store != nil {
+		if reactivator, ok := store.(agentcontrol.AgentReactivator); ok && reactivator != nil {
+			_, _, _ = reactivator.ReactivateAgentControlAgent(ctx, sessionID)
+		}
+	}
+	// 完成订阅是进程内存态、只在 spawn 时登记：重启后 resume 的子会话必须重建，
+	// 否则它再次结束时 mailbox/通知/wake 都不会产生（2026-09-30 现场缺口）。
+	if r.Host.SessionStore != nil {
+		if session, loadErr := r.Host.SessionStore.Load(ctx, sessionID); loadErr == nil && session != nil {
+			if parentSessionID := localChildParentSessionID(session); parentSessionID != "" {
+				r.subscribeLocalAgentCompletion(parentSessionID, session)
+			}
+		}
 	}
 	return r.agentSnapshot(ctx, sessionID)
 }

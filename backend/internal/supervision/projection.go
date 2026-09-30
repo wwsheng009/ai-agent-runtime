@@ -95,7 +95,7 @@ func ProjectLifecycle(ctx context.Context, store Store, wakes *WakeScheduler, ev
 	// acknowledgement/action in UpsertNotification; scheduling solely from
 	// severity+resolution would otherwise wake the parent again on every
 	// restart even though the durable decision is already complete.
-	if wakes != nil && notification.Severity == SeverityCritical && notification.ActionRequired() {
+	if wakes != nil && LifecycleWakeScheduled(notification) {
 		_, err := wakes.ScheduleWake(ctx, WakeRequest{
 			RootScopeID:           notification.RootScopeID,
 			TargetParentSessionID: notification.TargetParentSessionID,

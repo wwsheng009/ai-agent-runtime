@@ -227,9 +227,15 @@ type localChatRuntimeHost struct {
 	closing              bool
 	actorTurnGateMu      sync.Mutex
 	actorTurnGates       map[string]chan struct{}
-	lifecycleCtx         context.Context
-	lifecycleCancel      context.CancelFunc
-	asyncWG              sync.WaitGroup
+	// parkedTurnEdgeMu / parkedTurnEdges 保证「同一 turn 的 turn.suspended / 在途
+	// 降级信号只播报一次」：轻量 spawn_agent 子代理在派发时由宿主侧挂起，与批次
+	// 派发的挂起路径可能竞争同一记录，边沿判定需要宿主侧去重。键为 sessionID|turnID
+	//（降级信号加 inflight| 前缀）。惰性创建：测试常以结构体字面量构造 host。
+	parkedTurnEdgeMu sync.Mutex
+	parkedTurnEdges  map[string]bool
+	lifecycleCtx     context.Context
+	lifecycleCancel  context.CancelFunc
+	asyncWG          sync.WaitGroup
 
 	// observeOnce / observeSvc 缓存本地 Runtime Observation Plane 服务：
 	// ensureLocalObserveService 惰性构建一次，host.Close() 时释放。
@@ -773,6 +779,12 @@ func (h *localChatRuntimeHost) wireLocalSupervisionExecutor() {
 	}
 	h.Supervision.SetActionExecutor(executor)
 	h.wireLocalSupervisionWakeConsumer()
+	// P0-A/P0-B（2026-09-30 现场）：子会话完成订阅是进程内存态，宿主重启后
+	// 必须重建；并把重启期间丢失的子会话终态补投影一次。与 batch 的启动重放
+	// 同款语义：交互式会话只补 durable 账本（mailbox + 通知），不自动 drain，
+	// 避免启动期偷跑一个隐藏 turn 顶掉首个 composer；headless 立即投递。
+	h.rebindLocalChildCompletionSubscriptions(context.Background())
+	h.replayLocalChildCompletions(context.Background(), !chatHostSessionInteractive(h.BaseSession))
 }
 
 // EventSupervisionWakeDeliveryFailed is published when an auto-wake turn could
@@ -1115,9 +1127,6 @@ func (h *localChatRuntimeHost) bindSupervisionWakeConsumer() {
 	if h == nil || h.supervisionWake == nil || h.EventBus == nil || h.BaseSession == nil || h.BaseSession.RuntimeSession == nil {
 		return
 	}
-	if !h.supervisionConfig.TurnEndCheckEnabled() {
-		return
-	}
 	rootSessionID := strings.TrimSpace(h.BaseSession.RuntimeSession.ID)
 	if rootSessionID == "" {
 		return
@@ -1131,6 +1140,13 @@ func (h *localChatRuntimeHost) bindSupervisionWakeConsumer() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		// 2026-09-30 现场修正：子代理终态类 wake 不再受 supervision.turn_end_check
+		// 约束。交互式会话没有"自然 turn"时，父会话只能靠这条 drain 才醒得来
+		//（W6 结束而父会话永久 idle 的直接缺口）；开关仍然只约束 progress 类
+		// 自检，opt-in 语义不变。
+		if !h.turnEndWakeDrainAllowed(ctx, rootSessionID) {
+			return
+		}
 		if err := h.wakeSupervisedParent(ctx, rootSessionID, rootSessionID); errors.Is(err, supervision.ErrWakeRateLimited) {
 			// P1-6 方案 4: the class budget deferred the wake; give the parent
 			// one bounded digest-only turn instead of leaving it idle with an
@@ -1139,6 +1155,48 @@ func (h *localChatRuntimeHost) bindSupervisionWakeConsumer() {
 			_ = h.selfCheckSupervisedParent(ctx, rootSessionID, rootSessionID)
 		}
 	})
+}
+
+// localTurnEndWakeProbeLimit 限制 turn-end 判定时的 pending wake 读取条数：只要
+// 命中一条非 progress 类就放行，无需读出全部积压。
+const localTurnEndWakeProbeLimit = 16
+
+// turnEndWakeDrainAllowed 判定父会话 turn 结束时是否允许排空 wake：
+//   - supervision.turn_end_check 显式开启 ⇒ 全量放行（历史语义）；
+//   - 关闭时仅当存在**非 progress 类**的 pending wake 才放行——子代理终态、
+//     审批、失败、obligation 结算都属于这一类，而周期进度自检（opt-in）不在此列。
+//
+// 这条口径把"子代理结束必须能唤醒父会话"从 opt-in 开关里解耦出来，同时保留
+// 开关对进度自检的约束与 wake 预算（MaxAutoWakePerWindow）的限流。
+func (h *localChatRuntimeHost) turnEndWakeDrainAllowed(ctx context.Context, rootSessionID string) bool {
+	if h == nil {
+		return false
+	}
+	if h.supervisionConfig.TurnEndCheckEnabled() {
+		return true
+	}
+	if h.Supervision == nil || h.Supervision.Store == nil {
+		return false
+	}
+	rootSessionID = strings.TrimSpace(rootSessionID)
+	if rootSessionID == "" {
+		return false
+	}
+	pending, err := h.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:           rootSessionID,
+		TargetParentSessionID: rootSessionID,
+		UnclaimedOnly:         true,
+		Limit:                 localTurnEndWakeProbeLimit,
+	})
+	if err != nil {
+		return false
+	}
+	for _, wake := range pending {
+		if supervision.WakeBudgetClassOf(wake.WakeReason) != supervision.WakeBudgetClassProgress {
+			return true
+		}
+	}
+	return false
 }
 
 // wakeSupervisedParent drains pending wakes for a parent and delivers one
@@ -1351,6 +1409,9 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	// G2：控制面就绪后立刻把 batch 账本/进度投影接到 wake scheduler，保证第一次
 	// resume 投递就带上 pending_count 与 rollup（不依赖 opt-in 的周期巡查）。
 	host.wireLocalSupervisionSources()
+	// §6.12 可观测性兜底：回合结束但仍有在途子代理、且没有挂起记录时补发 I9
+	// 降级信号（与 turn_end_check 无关；该开关只控制 wake 是否在回合末 drain）。
+	host.bindLocalInFlightChildSignal()
 	// P2-9：宿主启动时即开启低频一致性对账（默认 observe，10 分钟），
 	// 让上一次进程崩溃/TTL 清理留下的 active 漂移在首个 pass 就被发现。
 	host.startLocalRegistryReconcile()
@@ -1699,6 +1760,8 @@ func (h *localChatRuntimeHost) buildSessionActor(sessionID string, session *Chat
 		return nil, leaseErr
 	}
 	loopConfig := buildLocalChatLoopConfig(runtimeConfig, session, requestedReasoningEffort)
+	// §6.12 扩展：轻量 spawn_agent 子代理以 agent_session: 义务写入挂起记录后，
+	loopConfig.AgentSessionObligations = h.agentSessionObligationResolver()
 	// §6.1 宿主接线：主 Agent 路由只接主会话。子会话走 aicli.subagents.routing
 	// （scheduler 侧），主 Agent 的开关不得改变子 Agent 行为（§6.3 配置隔离）。
 	applyLocalChatMainAgentRouting(loopConfig, session, isBaseSession)
@@ -1820,7 +1883,11 @@ func applyLocalChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType string, 
 	if toolPolicy == nil {
 		toolPolicy = agent.NewToolExecutionPolicy(allowlist, readOnly)
 	} else {
-		toolPolicy = toolPolicy.DeriveChild(allowlist, readOnly)
+		// 角色必须传下去：DeriveChild 的 role 为空时能力地板只有
+		// read_only+write_fs，内建 general/plan/explore 子代理会在继承到 shell
+		// 工具面后被能力门禁拒绝（真机证据：子代理报
+		// "capability not allowed by execution policy: exec_shell"）。
+		toolPolicy = toolPolicy.DeriveChildForTask(allowlist, readOnly, agentType, nil)
 	}
 	// A freshly created child policy inherits nothing, so seat the toolkit base
 	// path on it before a sandbox is materialized; otherwise its relative path

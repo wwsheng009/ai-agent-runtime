@@ -24,8 +24,10 @@ type TurnSuspension struct {
 	// RootScopeID groups every turn of one supervision scope (normally the
 	// session id; kept explicit so a restart re-enters the same wake scope).
 	RootScopeID string
-	// ObligationIDs are the obligations dispatched before parking (batch task
-	// ids and, once the obligation ledger lands, its ids too).
+	// ObligationIDs are the obligations dispatched before parking. Batch-backed
+	// obligations stay bare ids (matching ResumeQueue); child agent sessions
+	// dispatched by spawn_agent carry the AgentSessionObligationPrefix so both
+	// kinds share one persisted representation and no schema migration.
 	ObligationIDs []string
 	// ParkedAt is when the turn parked.
 	ParkedAt time.Time
@@ -80,42 +82,65 @@ func normalizeIDList(values []string) []string {
 	return out
 }
 
+// AgentSessionObligationPrefix marks an obligation backed by a child agent
+// session (a lightweight spawn_agent child) instead of a subagent batch. The
+// obligation stays a single string entry so the §6.12 record keeps exactly one
+// persisted representation (obligation_ids_json) and needs no schema change;
+// readers that only understand batches must skip prefixed ids.
+const AgentSessionObligationPrefix = "agent_session:"
+
+// AgentSessionObligationID renders the obligation id for one child session.
+func AgentSessionObligationID(sessionID string) string {
+	return AgentSessionObligationPrefix + strings.TrimSpace(sessionID)
+}
+
+// IsAgentSessionObligation reports whether an obligation id is backed by a
+// child agent session.
+func IsAgentSessionObligation(obligationID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(obligationID), AgentSessionObligationPrefix)
+}
+
+// AgentSessionIDFromObligation returns the child session id encoded in an
+// agent-session obligation id ("" when the id is batch-backed).
+func AgentSessionIDFromObligation(obligationID string) string {
+	trimmed := strings.TrimSpace(obligationID)
+	if !strings.HasPrefix(trimmed, AgentSessionObligationPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(trimmed, AgentSessionObligationPrefix))
+}
+
+// ObligationAgentSessionIDs lists the child-session obligations in record
+// order (batch-backed ids are ignored).
+func (t *TurnSuspension) ObligationAgentSessionIDs() []string {
+	if t == nil {
+		return nil
+	}
+	obligations := normalizeIDList(t.ObligationIDs)
+	if len(obligations) == 0 {
+		return nil
+	}
+	var sessionIDs []string
+	for _, obligation := range obligations {
+		if sessionID := AgentSessionIDFromObligation(obligation); sessionID != "" {
+			sessionIDs = append(sessionIDs, sessionID)
+		}
+	}
+	return sessionIDs
+}
+
 // TurnObligationsSettled reports whether every obligation referenced by the
 // parked-turn record reached a terminal state, i.e. whether the parked turn may
-// end (design §6.12 / EC-E1 "turn 永不结束"). The batch control plane is the
-// record's own source of truth — the dispatcher writes the batch/task ids from
-// the same store — so the settle check reads it back instead of trusting a
-// caller-supplied summary.
+// end (design §6.12 / EC-E1 "turn 永不结束").
 //
-// Only *resolved* batches count as evidence: a batch id with no row (never
-// created, or already GC'd) cannot prove the work finished and is skipped. A
-// record whose batches are all unresolved is reported as not settled, so the
-// suspension is kept and re-evaluated at the next turn boundary. The safe
-// direction is keeping the turn parked (obligations are never silently dropped),
-// never clearing the record on a guess.
+// This is the batch-only entry point kept for callers that never write
+// child-session obligations; it delegates to TurnObligationsSettledWith with a
+// nil resolver (a record carrying agent_session: obligations therefore stays
+// parked — conservative, never cleared on a guess). Callers that also park
+// spawn_agent children must pass their durable child-session resolver via the
+// With form.
 func TurnObligationsSettled(ctx context.Context, store BatchStore, record *TurnSuspension) (bool, error) {
-	if store == nil || record == nil {
-		return false, nil
-	}
-	batchIDs := record.obligationBatchIDs()
-	if len(batchIDs) == 0 {
-		return false, nil
-	}
-	resolved := 0
-	for _, batchID := range batchIDs {
-		batch, err := store.GetBatch(ctx, batchID)
-		if err != nil {
-			return false, err
-		}
-		if batch == nil {
-			continue
-		}
-		resolved++
-		if !batch.Status.Terminal() {
-			return false, nil
-		}
-	}
-	return resolved > 0, nil
+	return TurnObligationsSettledWith(ctx, store, record, nil)
 }
 
 // obligationBatchIDs returns the batch ids that gate this parked turn.
@@ -136,7 +161,15 @@ func (t *TurnSuspension) ObligationBatchIDs() []string {
 	if len(obligations) == 0 {
 		return nil
 	}
-	return obligations[:1]
+	for _, obligation := range obligations {
+		// Child-session obligations are not batches; the fallback exists for
+		// batch ids written without a resume queue.
+		if IsAgentSessionObligation(obligation) {
+			continue
+		}
+		return []string{obligation}
+	}
+	return nil
 }
 
 func (t *TurnSuspension) obligationBatchIDs() []string {

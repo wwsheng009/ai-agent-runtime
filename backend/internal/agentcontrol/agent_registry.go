@@ -324,6 +324,19 @@ type AgentStaleMarker interface {
 	MarkAgentControlAgentSubtreeStale(ctx context.Context, rootSessionID string, agentPath string, staleAt time.Time) (int64, error)
 }
 
+// AgentReactivator optionally revives a terminal identity row whose session is
+// owned and running again. Restart recovery and explicit resume re-acquire the
+// execution lease, but the registry row stays stale/closed unless the host can
+// say so: without this half, /agents、web 面板和父会话会把运行中的子代理报成
+// 已结束（真机 2026-09-30：03:04:16 sweep 标 stale，03:04:2x 恢复运行后未复位）。
+type AgentReactivator interface {
+	// ReactivateAgentControlAgent moves exactly one stale/closed row back to
+	// active and clears closed_at. It never touches an active row, and the
+	// guard is evaluated inside the store so a concurrent close cannot be
+	// undone. changed is false when the row was not terminal or does not exist.
+	ReactivateAgentControlAgent(ctx context.Context, agentID string) (AgentRecord, bool, error)
+}
+
 // AgentSpawnReservationStore optionally supports an atomic spawn reservation.
 // Stores that implement it can enforce cross-process active-thread limits in
 // the same transaction that creates the durable child identity row.

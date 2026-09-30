@@ -931,6 +931,54 @@ func (s *SQLiteGlobalAgentRegistryStore) ReclaimAgentControlAgentSubtree(ctx con
 	return s.markAgentControlAgentSubtreeTerminal(ctx, rootSessionID, agentPath, AgentStatusClosed, "reclaimed:"+reason, reclaimedAt)
 }
 
+// ReactivateAgentControlAgent revives exactly one terminal row whose session is
+// live again (restart recovery / explicit resume re-acquired the execution
+// lease). The guard is inside the statement — only stale/closed rows move and
+// an active row is never touched — so it cannot undo a concurrent close, and a
+// missing or already-active row reports changed=false instead of writing.
+//
+// The emitted wake event carries "active" (mirroring "stale"/"closed"), so
+// watchers can tell a revival from a plain upsert.
+func (s *SQLiteGlobalAgentRegistryStore) ReactivateAgentControlAgent(ctx context.Context, agentID string) (AgentRecord, bool, error) {
+	if s == nil {
+		return AgentRecord{}, false, fmt.Errorf("agent control agent registry store is not initialized")
+	}
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return AgentRecord{}, false, fmt.Errorf("agent id is required")
+	}
+	db, err := s.dbHandle()
+	if err != nil {
+		return AgentRecord{}, false, err
+	}
+	result, err := db.ExecContext(ctx, `
+		UPDATE agent_control_agents
+		SET status = ?, closed_at = NULL, updated_at = ?
+		WHERE agent_id = ?
+			AND (closed_at IS NOT NULL OR status IN (?, ?))
+	`, AgentStatusActive, formatAgentTime(time.Now().UTC()), agentID, AgentStatusClosed, AgentStatusStale)
+	if err != nil {
+		return AgentRecord{}, false, fmt.Errorf("reactivate agent control agent %s: %w", agentID, err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return AgentRecord{}, false, fmt.Errorf("read reactivated agent count: %w", err)
+	}
+	if count == 0 {
+		return AgentRecord{}, false, nil
+	}
+	record, err := s.getAgentControlAgentByID(ctx, agentID)
+	if err != nil {
+		return AgentRecord{}, false, err
+	}
+	wake, err := s.appendAgentWakeEvent(ctx, record, "active")
+	if err != nil {
+		return record, true, err
+	}
+	s.notifyAgentWake(wake)
+	return record, true, nil
+}
+
 func (s *SQLiteGlobalAgentRegistryStore) markAgentControlAgentSubtreeTerminal(ctx context.Context, rootSessionID string, agentPath, status, eventKind string, terminalAt time.Time) (int64, error) {
 	if s == nil {
 		return 0, fmt.Errorf("agent control agent registry store is not initialized")

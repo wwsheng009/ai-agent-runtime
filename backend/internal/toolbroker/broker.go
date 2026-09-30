@@ -616,7 +616,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for spawn_agent progress or, without ids, for a parent mailbox event. Batch results include every current snapshot and each ready agent's output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. waiting_approval requires approval handling. Do not use this for spawn_team teammate ids. " + agentguidance.WaitDisciplineText(),
+				Description: "Wait for spawn_agent progress or, without ids, for a parent mailbox event. Batch results include every current snapshot and each ready agent's output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. waiting_approval requires approval handling. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Do not use this for spawn_team teammate ids. " + agentguidance.WaitDisciplineText(),
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -809,7 +809,7 @@ func (b *Broker) Definitions() []types.ToolDefinition {
 			},
 			types.ToolDefinition{
 				Name:        ToolWaitAgent,
-				Description: "Wait for spawn_agent children to become idle, blocked, failed, or waiting_approval. Batch results include every current snapshot and each ready output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. Use wait_team for spawn_team teammates. " + agentguidance.WaitDisciplineText(),
+				Description: "Wait for spawn_agent children to become idle, blocked, failed, or waiting_approval. Batch results include every current snapshot and each ready output once. Consume ready outputs directly. If timed_out, follow next_action and do not immediately repeat the same wait while independent work remains. obligations[] covers both batch tasks and lightweight child sessions (agent_session rows): a non-terminal row keeps the result pending (never a finalize verdict) and terminal rows join the baseline. Use wait_team for spawn_team teammates. " + agentguidance.WaitDisciplineText(),
 				Parameters: map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{

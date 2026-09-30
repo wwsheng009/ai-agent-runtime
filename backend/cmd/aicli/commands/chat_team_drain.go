@@ -103,6 +103,57 @@ func interactiveSessionActorReady(session *ChatSession) bool {
 	return !ok || !state.Busy()
 }
 
+// interactiveSessionActorAwaitingObligations reports whether the actor holds a
+// parked managed turn (§6.12 awaiting_obligations): it is Busy for new turns
+// but has no run of its own, so the dynamic status must not render a live
+// "Analyzing" clock that can never advance (the frozen completion elapsed).
+// It mirrors interactiveSessionActorReady's wiring and degrades to false when
+// the hub or the actor is unavailable.
+func interactiveSessionActorAwaitingObligations(session *ChatSession) bool {
+	if session == nil || session.LocalRuntimeHost == nil ||
+		session.LocalRuntimeHost.SessionHub == nil || session.RuntimeSession == nil {
+		return false
+	}
+	sessionID := strings.TrimSpace(session.RuntimeSession.ID)
+	if sessionID == "" {
+		return false
+	}
+	actor, exists := session.LocalRuntimeHost.SessionHub.Get(sessionID)
+	if !exists || actor == nil {
+		return false
+	}
+	state, ok := actor.StateSummary()
+	return ok && state.AwaitingObligations()
+}
+
+// chatSessionHasParkedTurnRecord reports whether the durable §6.12 ledger still
+// holds a parked turn for this session. It is the race-safe source of truth for
+// the completed-freeze decision: the actor stamps RuntimeState.SuspendedTurnID in
+// its run tail, which can land after the deferred CompleteWaiting repaint (the
+// turn gate is released when the executor returns). A missing store, an empty
+// session id or a read error degrades to false — the freeze then behaves exactly
+// as before, never worse.
+func chatSessionHasParkedTurnRecord(session *ChatSession) bool {
+	if session == nil || session.LocalRuntimeHost == nil || session.RuntimeSession == nil {
+		return false
+	}
+	store := session.LocalRuntimeHost.SubagentBatches
+	if store == nil {
+		return false
+	}
+	sessionID := strings.TrimSpace(session.RuntimeSession.ID)
+	if sessionID == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	records, err := store.ListTurnSuspensions(ctx, sessionID)
+	if err != nil {
+		return false
+	}
+	return len(records) > 0
+}
+
 func prepareInteractiveRead(session *ChatSession) (bool, string, error) {
 	if session == nil || session.NoInteractive || session.JSONOutput {
 		return false, "", nil

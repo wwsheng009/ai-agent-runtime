@@ -129,6 +129,14 @@ type LoopReActConfig struct {
 	// 契约：尽力而为、快速返回（建议非阻塞投递）；不得修改 result；失败不得
 	// 冒泡为 turn 失败。nil = 完全 no-op（mode=off / 未接入知识层的路径）。
 	OnToolObserved func(ctx context.Context, sessionID string, call types.ToolCall, output string, toolErr string) `yaml:"-"`
+	// AgentSessionObligations resolves child agent sessions parked as
+	// `agent_session:` obligations (lightweight spawn_agent children). nil keeps
+	// the batch-only §6.12 settle predicate; hosts that park child sessions must
+	// wire their durable registry reader so the parked turn can clear once every
+	// listed child reached a terminal control-plane state. A record carrying
+	// agent-session obligations never settles while this is nil (conservative:
+	// never clear on a guess).
+	AgentSessionObligations subagentbatch.AgentSessionObligationResolver `yaml:"-"`
 }
 
 // ReActLoop ReAct 循环（Reasoning + Acting）
@@ -7183,7 +7191,11 @@ func (loop *ReActLoop) settleParkedTurnOnRunEnd(ctx context.Context, sessionID, 
 	if err != nil || !ok || record == nil {
 		return
 	}
-	settled, err := subagentbatch.TurnObligationsSettled(settleCtx, store, record)
+	var agentSessionResolver subagentbatch.AgentSessionObligationResolver
+	if loop.config != nil {
+		agentSessionResolver = loop.config.AgentSessionObligations
+	}
+	settled, err := subagentbatch.TurnObligationsSettledWith(settleCtx, store, record, agentSessionResolver)
 	if err != nil || !settled {
 		return
 	}

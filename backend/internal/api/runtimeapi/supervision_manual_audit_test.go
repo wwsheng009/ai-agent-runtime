@@ -219,15 +219,16 @@ func TestSupervisionWakeDrainEndpointRequiresScope(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// TestSupervisionTurnEndDrainSwitchOnAPISide pins the API-side half of the
-// manual audit default (docs/plan/supervision-manual-audit-plan-20260922.md
-// §2): a session turn end must not drain a pending wake while
-// supervision.turn_end_check is unset, and must drain it again once the
-// fallback switch is explicitly enabled.
+// TestSupervisionTurnEndDrainOnAPISide pins the API-side half of the
+// 2026-09-30 fix (与 CLI 宿主同口径): a pending **terminal/lifecycle** wake
+// drains at session turn end even when supervision.turn_end_check is unset —
+// an interactive parent with no natural turn would otherwise never be woken
+// when a child agent ends (真机 W6 现场). The opt-in switch still governs the
+// progress self-check family.
 //
 // The consumer is replaced by a counting one so the assertion measures the
-// switch (the callback's early return) instead of agent execution.
-func TestSupervisionTurnEndDrainSwitchOnAPISide(t *testing.T) {
+// turn-end gate instead of agent execution.
+func TestSupervisionTurnEndDrainOnAPISide(t *testing.T) {
 	handler, store, scheduler := newAPIWakeTestHandler(t, "api-turn-end-switch")
 	ctx := context.Background()
 	sessionManager := chat.NewSessionManager(chat.NewInMemoryStorage(), nil)
@@ -278,17 +279,29 @@ func TestSupervisionTurnEndDrainSwitchOnAPISide(t *testing.T) {
 		return pending
 	}
 
-	// 默认：turn 结束不 drain（订阅仍在，只是回调提前返回）。
+	// 终态类 wake（critical lifecycle）：未开开关也必须在 turn 结束 drain。
+	publishTurnEnd()
+	require.Eventually(t, func() bool { return deliveries.Load() == 1 }, 3*time.Second, 20*time.Millisecond,
+		"子代理终态类 wake 不得被 turn_end_check 开关挡住")
+	require.Empty(t, pendingForSession())
+
+	// 只有 progress 类 wake 时：未开开关保持 durable（opt-in 语义不变）。
+	_, err = scheduler.ScheduleWake(ctx, supervision.WakeRequest{
+		RootScopeID:           session.ID,
+		TargetParentSessionID: session.ID,
+		WakeReason:            supervision.WakeReasonProgressCheck,
+	})
+	require.NoError(t, err)
+	deliveries.Store(0)
 	publishTurnEnd()
 	time.Sleep(200 * time.Millisecond)
-	require.Zero(t, deliveries.Load(), "turn_end_check 未设置时 turn 结束不得 drain")
-	require.Len(t, pendingForSession(), 1, "wake 必须保持 durable")
+	require.Zero(t, deliveries.Load(), "progress 自检仍受 turn_end_check 约束")
+	require.Len(t, pendingForSession(), 1, "progress wake 必须保持 durable")
 
-	// 显式回退开关：恢复 turn 结束自动闭合语义。
+	// 显式开关：恢复全量自动闭合语义（progress wake 被处理，不再滞留）。
 	enabled := true
 	handler.SetSupervisionConfig(supervision.Config{TurnEndCheck: &enabled})
 	publishTurnEnd()
-	require.Eventually(t, func() bool { return deliveries.Load() == 1 }, 3*time.Second, 20*time.Millisecond,
-		"turn_end_check=true 时 turn 结束必须 drain")
-	require.Empty(t, pendingForSession())
+	require.Eventually(t, func() bool { return len(pendingForSession()) == 0 }, 3*time.Second, 20*time.Millisecond,
+		"turn_end_check=true 时 turn 结束必须处理积压 wake")
 }

@@ -111,9 +111,6 @@ func (h *Handler) bindSupervisionTurnEndConsumer() {
 			return
 		}
 		bus.SubscribeCancelable(chat.EventSessionEnd, func(event runtimeevents.Event) {
-			if !h.supervisionTuning().TurnEndCheckEnabled() {
-				return
-			}
 			sessionID := strings.TrimSpace(event.SessionID)
 			if sessionID == "" {
 				return
@@ -128,6 +125,12 @@ func (h *Handler) bindSupervisionTurnEndConsumer() {
 				return
 			}
 			rootScopeID := apiAgentRootSessionID(session, sessionID)
+			// 2026-09-30 现场修正（与 CLI 宿主同构）：子代理终态类 wake 不再受
+			// supervision.turn_end_check 约束——没有自然 turn 时，父会话只能靠
+			// 这条 drain 才醒得来；开关仍只约束 progress 类自检。
+			if !h.apiTurnEndWakeDrainAllowed(ctx, rootScopeID) {
+				return
+			}
 			controller := &sessionAgentController{handler: h}
 			err = controller.wakeSupervisedParent(ctx, rootScopeID, sessionID)
 			if errors.Is(err, supervision.ErrWakeRateLimited) {
@@ -139,6 +142,49 @@ func (h *Handler) bindSupervisionTurnEndConsumer() {
 			}
 		})
 	})
+}
+
+// apiTurnEndWakeProbeLimit 限制 turn-end 判定时的 pending wake 读取条数：只要命中
+// 一条非 progress 类就放行，无需读出全部积压。
+const apiTurnEndWakeProbeLimit = 16
+
+// apiTurnEndWakeDrainAllowed 判定父会话 turn 结束时是否允许排空 wake：
+//   - supervision.turn_end_check 显式开启 ⇒ 全量放行（历史语义）；
+//   - 关闭时仅当存在**非 progress 类**的 pending wake 才放行——子代理终态、审批、
+//     失败、obligation 结算都属于这一类，而周期进度自检（opt-in）不在此列。
+//
+// 与 CLI 宿主 chat_actor_host.go 的 turnEndWakeDrainAllowed 同口径：把"子代理结束
+// 必须能唤醒父会话"从 opt-in 开关里解耦出来，同时保留开关对进度自检的约束与
+// wake 预算（MaxAutoWakePerWindow）的限流。
+func (h *Handler) apiTurnEndWakeDrainAllowed(ctx context.Context, rootScopeID string) bool {
+	if h == nil {
+		return false
+	}
+	if h.supervisionTuning().TurnEndCheckEnabled() {
+		return true
+	}
+	store := h.getSupervisionStore()
+	if store == nil {
+		return false
+	}
+	rootScopeID = strings.TrimSpace(rootScopeID)
+	if rootScopeID == "" {
+		return false
+	}
+	pending, err := store.ListWakePending(ctx, supervision.WakeFilter{
+		RootScopeID:   rootScopeID,
+		UnclaimedOnly: true,
+		Limit:         apiTurnEndWakeProbeLimit,
+	})
+	if err != nil {
+		return false
+	}
+	for _, wake := range pending {
+		if supervision.WakeBudgetClassOf(wake.WakeReason) != supervision.WakeBudgetClassProgress {
+			return true
+		}
+	}
+	return false
 }
 
 // SetSupervisionDescendantProvider sets the runtime descendant provider

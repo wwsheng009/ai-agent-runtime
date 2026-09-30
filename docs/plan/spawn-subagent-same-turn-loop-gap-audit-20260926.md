@@ -507,3 +507,426 @@ general shell syntax"，父代理在派发前即可决策，而非等子代理�
 **结论**：① "5 分钟必须结束"满足（声明式优先，真机验证）；② LLM 可自主处理（声明式 + 每 ≤2min 回归控制权 + cancel 工具），但它没有"定时唤醒"，且子代理内部工具超时（实测 2min）会先于外层截止终止任务 ⇒ 长命令必须显式给子代理 `timeout_ms` 或分片；③ 巡检间隔 = min(等待窗口, 默认 2min 上限)，要更细就调小 `agents.maxWaitTimeoutMs`（如 30s）或让模型用 `timeout_ms: 30000`。
 **宿主差异（需注意）**：执行监督者默认模式 CLI=**observe**（`AICLI_EXECUTION_SUPERVISOR_MODE=enforce` 可开）、API=**enforce**；observe 只记录决策与通知，enforce 才发 interrupt/cancel-grace。
 **证据**：`artifacts/remote-debug-51875/arch-invoke*、arch3-invoke*、arch4-invoke*`（含 waited_ms 时序与子代理终止原文）。
+
+### 7.12 轻量子代理挂起闭环（2026-09-30，缺口 1–3）
+
+**背景**：2026-09-30 真机复盘（`session_20260929175325_cxHK8mPD`）发现：父 turn 派发
+`spawn_agent` 轻量子代理后 `wait_agent` 超时收尾，UI 只显示 "Worked for 2m 35s"，
+等待期没有任何"托管中"表达（该会话 `turn.suspended` 计数 0）；而 §6.12 挂起/账本
+此前只覆盖 subagent batch。子代理完成后的 wake 仍能续跑父 turn（实测同秒 resume），
+但"等待子代理"与"已收工"在 UI 上不可区分。
+
+**改动（CLI 宿主；API 宿主待接）**
+
+| 文件 | 改动 |
+| --- | --- |
+| `internal/subagentbatch/turn_suspension.go` | `agent_session:` 前缀义务编码（复用 `obligation_ids_json`，无 schema 迁移）+ `ObligationAgentSessionIDs()`；批次 id 解析跳过前缀项 |
+| `internal/subagentbatch/obligation_resolver.go`（新增） | `AgentSessionObligationResolver` + `TurnObligationsSettledWith`：批次 + 子会话义务全终态才可清账；缺行跳过、无法判读保持挂起 |
+| `internal/subagentbatch/wait_ledger.go` | `BuildWaitLedgerWith`：账本新增 `agent_session` 行（active/closed/missing），wait_agent 的 pending/I1 指引覆盖子代理 |
+| `internal/agent/loop.go` | `LoopReActConfig.AgentSessionObligations`；`settleParkedTurnOnRunEnd` 改用 With 版本 |
+| `cmd/aicli/commands/chat_actor_agent_obligations.go`（新增） | ①派发即挂起 `parkLocalAgentChildObligation`（仅 durable batch store + 判读面齐备时写）；②宿主侧 `turn.suspended` 边沿播报（session\|turn 去重，批次已播报则不重复）；③判读器读 supervision 通知面（agent_completed/failed/interrupted ⇒ terminated）；④回合结束仍有在途子代理且无挂起记录 → 复用 `subagent.suspension.unavailable` 降级信号 |
+| `cmd/aicli/commands/chat_actor_registry.go` | Spawn 成功且 queued ⇒ park；`localWaitLedger` 改用 With + `CurrentTurnID` 兜底（run 内即可见账本） |
+| `cmd/aicli/commands/chat_actor_host.go` | 判读器接入 loop config；注册回合末在途信号 binder |
+| `cmd/aicli/commands/chat_runtime_events.go` | `turn.suspended` dedup 身份补 `turn_id`（无 batch_id 的宿主侧挂起不再被去重吞掉） |
+| `frontend/src/lib/parked-turn/events.ts` 等 11 文件 | 迟到唤醒瞬时通知：与挂起分表存放、TTL 10s 自动消失、同会话新一轮 `turn.suspended` 清除、会话隔离；banner 非阻塞一行（`session-resumed-notice`） |
+
+**验证**
+
+- `go test ./internal/subagentbatch/ ./internal/agent/ -count=1` → ok。
+- `go test ./cmd/aicli/commands/ -run "TestLocalAgentSessionObligationResolver|TestLocalSpawnPark|TestLocalParkedChildObligation|TestLocalInFlightSignal|TestLocalWaitLedger|TestWaitAgent|TestRenderTurnSuspension|TestLocalTurnResumed|TestLocalHostWakeConsumer|TestLocalSupervisionSources|TestLocalHostWiresResumeDelivery" -count=1` → ok；
+  新增 5 条用例覆盖：判读器（终态投影）、派发挂起 + 边沿一次、终态结算、在途降级信号、真实 `Spawn` 集成（RuntimeState.CurrentTurnID 兜底）。
+- `go build ./...`、`go vet`（3 包）、`gofmt -l`（改动文件）干净。
+- 前端：`npx vitest run src/lib/parked-turn src/hooks/workspace/use-parked-turns.test.tsx src/components/workspace/session-mode-banner.test.tsx` → 3 files / 47 passed；`npx tsc -b` exit 0。
+
+**边界（诚实记录）**：① API 宿主（runtime-server）的 spawn 路径**已于 2026-09-30 补齐**
+（见 §7.14）；② 判读面缺失（无 supervision store）时不写挂起（不写无法结算的记录），
+改由回合末降级信号表达；③ 真机 LLM 端到端未跑。
+
+### 7.13 角色词表归一与子代理 shell 能力（2026-09-30，继续优化）
+
+**问题**：`DefaultToolsForRole` 只认精确角色名（researcher/tester/writer/implementer/…），
+而模型实际使用的是 spawn_agent `agent_type`（explore/general/plan）与 spawn_subagents
+`task_type`（config/explore/generate/implement/…）。未归一的 role 落到 nil（"继承父策略"），
+同时 `CapabilitiesForTask(role, …, toolNames=nil, …)` 的能力面只剩 read_only+write_fs：
+子代理继承到父工具面，却被能力门禁挡掉 shell（exec_shell）与 network（fetch/web_search）。
+
+**改动**
+
+- `internal/policy/capability_scope.go`：新增 `RoleFamilyForTask`（单一别名表：
+  research/test/write 三族）与 `CapabilitiesForTask` 的角色家族能力地板——仅当任务未声明
+  工具表（继承父策略）时生效；显式工具表仍以工具为准，未知角色不扩权。
+- `internal/agent/role_defaults.go`：默认工具表按同一家族表归一，新增
+  explore/understand/research/plan（研究族）、implement/generate/modify/refactor/migrate/
+  integration/config/security/general/worker/default（写族）、verify/validate（测试族）等别名。
+- `cmd/aicli/commands/chat_actor_agent_obligations.go` + `chat_actor_registry.go`：
+  spawn_agent 成功登记挂起义务后，工具结果携带 `next_action=obligation_registered…`，
+  把「wait_agent 会报 agent_session 义务行 / 直接收尾也会被挂起并在子代理终态续跑」
+  告诉模型（仅在义务真的落账时宣告，避免承诺不会发生的挂起）。
+
+**验证**：`go test ./internal/policy/ -count=1`、`go test ./internal/agent/ -count=1` 全绿；
+`go build ./...`、gofmt 干净；新增 `role_defaults_vocabulary_test.go` 与
+`capability_scope_role_test.go` 钉住别名命中与「未知角色不扩权」。
+
+**边界**：未知 role（自定义 agentdef 名等）仍保持 nil / 不扩权；`plan` 家族按研究族
+（读 + shell + 网络，不写盘）；能力扩权仍受父策略 `intersectCapabilities` 限制，绝不
+宽于父会话。
+
+**追加修复（同日，真机证据）**：一个 `agent_type=general` 的轻量子代理在真机上报
+`policy:capability not allowed by execution policy: exec_shell`——连 `go test` 都跑不了。
+根因不在词表，而在 agentdef 派生链：`applyLocalChildAgentdefToolPolicy`（CLI 与 API 各
+一处）用 `DeriveChild(allowlist, readOnly)` 派生，role 传成 `""`；内建 `general` 的
+`Tools: nil`（继承全套工具）又让 allowlist 为空，于是
+`CapabilitiesForTask("", …, nil, …)` 的能力地板只剩 `read_only+write_fs`，子代理继承到
+shell 工具面却被能力门禁拒绝。修复：两处改用
+`DeriveChildForTask(allowlist, readOnly, agentType, nil)` 把真实角色传下去（`general`
+→ 写族 → 补回 `exec_shell`；仍受父策略交集约束，绝不宽于父会话）。回归测试：
+`chat_child_shell_capability_test.go`（general/plan/explore 派生后 `exec_shell` 必须可用）。
+
+### 7.14 API 宿主 spawn_agent 挂起义务 parity（2026-09-30）
+
+**改动（backend/internal/api/runtimeapi）**
+
+- 新增 `session_agent_obligations.go`：`apiAgentSessionObligationResolver`（与 CLI 同口径：
+  supervision 通知面 + `SupervisionState==terminated`；无行=found=false，不视为完成）、
+  `parkAgentChildObligation`（判读器缺失/非 durable store/无 turn id 均静默跳过，绝不影响
+  Spawn）、`apiTurnIDForSession`（ctx turn id → `CurrentTurnID` → `SuspendedTurnID`）。
+- `session_runtime_support.go`：`Spawn` 在 queued 成功后登记 `agent_session:` 义务；
+  `waitLedger` / `waitTargetObligations` 改用 `BuildWaitLedgerWith`；
+  actor 工厂 `loopConfig.AgentSessionObligations` 注入判读器。
+- `handler.go`：Web 回合的内联 loop config（流式/非流式两处）同样注入判读器——Web 回合
+  不经过 actor，只接 actor 会让该路径的义务永远无法结清。
+
+**验证**：新增 3 条用例（真实 Spawn 挂起 + 去重、终态结算、wait 账本含 agent_session 行）
+`go test ./internal/api/runtimeapi/ -run "TestAPISpawnParksQueuedChildObligation|TestAPIAgentSessionObligationSettlesAfterTerminalProjection|TestAPIWaitLedgerIncludesAgentSessionObligation" -count=1` ✅；
+`go build ./...`、`go vet ./internal/api/runtimeapi/`、gofmt ✅。
+
+**边界**：① API 宿主暂不播报宿主侧 `turn.suspended` 边沿（挂起状态仍经 actor 收尾回写
+`SuspendedTurnID` 且 wait 账本可见；如需 UI 边沿需加 Handler 级去重状态）；② 直连
+`/api/agent/chat` 回合不持久化 RuntimeState，`waitLedger` 以 `SuspendedTurnID` 定位记录，
+该路径下账本看不到挂起（批次义务同样如此，属既有不对称）；但 park/settle 都用 ctx 的
+turn id，语义正确。
+
+### 7.15 账本 ctx 兜底 + 只读派生收窄 + wait_agent 描述（2026-09-30，第三批）
+
+1. **直连路径 wait 账本可见性（修 §7.14 边界②）**：`waitLedger`
+   （runtimeapi/session_runtime_support.go）在 `SuspendedTurnID` 为空时，回退到调用 ctx 上
+   的 turn 注解（`agent.TurnIDFromContext`）——与 `parkAgentChildObligation` 的 turn id
+   解析同源。直连 `/api/agent/chat` 回合不落 RuntimeState，此前该路径的轻量子会话/批次
+   义务在 wait_agent 里永远不可见。回归测试：`TestAPIWaitLedgerFallsBackToContextTurnID`。
+2. **只读派生只能收窄（边界加固）**：CLI 与 API 的 `applyLocalChildReadOnlyPolicy` 此前
+   `SetCapabilityScope(ReadOnlyChildCapabilities())` **直接替换**继承面，父策略没有
+   network/agent_management 时会被 read_only 派生静默放宽。新增
+   `ToolExecutionPolicy.IntersectAllowedCapabilities`（父面无 scope 时原样返回，有则取交集），
+   两处宿主改为交集落座。测试：`TestIntersectAllowedCapabilitiesNeverWidensParentScope`、
+   `TestApplyLocalChildReadOnlyPolicyNarrowsToParentCapabilities`。
+3. **wait_agent 工具描述**：两处 schema 描述补上 "obligations[] covers both batch tasks and
+   lightweight child sessions (agent_session rows): a non-terminal row keeps the result
+   pending (never a finalize verdict) and terminal rows join the baseline."，让模型在调用前
+   就知道轻量子会话义务与 I1 语义。
+
+**验证**：`go test ./internal/policy/ ./internal/toolbroker/ ./internal/api/runtimeapi/`
+（定向）+ `cmd/aicli/commands` 定向全绿；gofmt/vet 干净。
+
+**provider 上下文口径（核查结论，未改代码）**：loop 侧
+（`resolvePromptPreflightBudget`：`contextWindow` 优先 `ModelCapabilityMaxContextTokens`）与
+CLI 侧（`resolveChatStatusContextWindowTokens` / token 用量：capability → provider limit →
+active turn）**同序**，且 CLI 会把 `session.Provider.ModelCapabilities` 传播进 loop 的
+runtime provider 配置（chat_actor_host.go:3031、chat_core.go:702），两侧读同一份能力数据，
+未发现功能分裂。唯一差异是**能力缺失时的兜底**：CLI 用 `sharedChatDefaultContextWindowTokens`
+（256K）而 loop 用 provider caps（如 128K）——只影响展示/active-turn 提示，不影响 loop 的
+真实 prompt 预算；若要统一，需先确认哪个面出现过 128K 与 1M 并列的现场。
+
+### 7.16 三端 UI 接线审计 + micro web client 挂起横幅（2026-09-30，第四批）
+
+**审计问题**：subagent 执行完成后，是否会唤醒主 agent 并更新 UI（aicli TUI / frontend /
+micro web client）。
+
+**结论（逐端取证）**
+
+- **唤醒（两宿主都有）**：CLI `chat_actor_host.go`（投递成功后 `publishLocalTurnResumed`）
+  与 API `supervision_batch_projector.go`（投递成功后 `publishTurnResumed`）都会把 wake 投递成
+  一次 resume episode 并播报 `turn.resumed`；测试 `TestLocalTurnResumedEventPayload`、
+  `supervision_batch_projector_test.go`。
+- **aicli TUI：已接线**。`chat_runtime_events.go` 把 `turn.suspended` / `turn.resumed` 渲染成
+  `[subagents]` 时间线行（挂起："等待 N 个义务"；恢复：trigger/pending/终态），测试
+  `chat_turn_events_render_test.go`；恢复 run 的流式输出走正常渲染管线——但同 turn 复用的
+  退役门禁缺口见 §7.17（已修）。
+- **frontend：已接线**。`frontend/src/lib/parked-turn/`（挂起快照与迟到通知分离的归约器）、
+  `use-parked-turns`、`session-mode-banner`、`stopResumedTurn`（`use-workspace-live.ts`）齐备，
+  事件契约（`event-contract.ts`）含两事件，vitest 覆盖。
+- **micro web client：此前零处理**（`backend/cmd/aicli/commands/web/` 下 grep
+  `suspended|resumed|parked` 无任何匹配）。SSE 端不过滤（`chatWebSSEEventName` 对未映射事件
+  返回 `(rawEvent,false)`，按原名透传），因此事件本就到达客户端，只是没有消费者。
+
+**改动（micro web client，最小可用面）**
+
+- 新增 `web/js/parked.js`：`turn.suspended` → 常驻横幅（义务数/batch 身份）；`turn.resumed`
+  → 恢复通知（trigger/pending/terminal，8s 自动隐藏，且不被恢复 run 的 `turn_start` 清掉）；
+  `turn_start` 清挂起态；`session_switched` 清空；元素缺失静默降级。
+- `web/js/sse.js` 接入分发（与 `handleTodoSSEEvent` 同层）；`web/index.html` 增加
+  `#parked-banner`（sticky 在消息区顶部）；`web/style.css` 增加 `.parked-banner` 双主题样式
+  （只用两个主题块都已定义的 token，满足 menu verify 的 CSS 不变量）。
+- 回归：Go 资产测试 `web_parked_turn_asset_test.go`（go:embed 收录 + sse.js 装配链 +
+  index/style 元素与样式）；`scripts/verify-micro-web-parked-turn.mjs`（10 项断言，纯逻辑迷你 DOM）。
+
+**边界**：micro 客户端没有挂起快照端点，横幅是纯事件驱动；页面刷新/断线重连若错过边沿则
+不显示（不伪造状态）——如需刷新后仍可见，需要为 `/web/api/*` 增加挂起快照字段（另议）。
+
+### 7.17 aicli TUI 托管恢复输出被退役门禁吞掉（2026-09-30，第五批）
+
+**根因**：§6.12 挂起 turn 的 run 收尾时 `EndRun` 会 `retireTurnLocked(activeTurnID)`；而
+wake 恢复是「同一 turn 的新 episode」（复用挂起 turn_id，见
+`internal/chat TestSubmitPromptOnSuspendedTurnResumesSameTurnID`）。
+`shouldSuppressMismatchedPrimaryTurnEvent` 的 `retiredTurnIDs` 分支先于 `activeTurnID` 比对，
+于是恢复 episode 的 `llm.request.started` / 工具行 / `assistant_message` 全被丢弃——模型在跑，
+终端只显示一行「托管恢复」，没有任何内容（用户读成"TUI 没有接入"）。此前唯一的解退休入口是
+`maybeAdoptResumedPrimaryTurn`，只由提问回答的 `expectResumedTurnAfterAnswer` 武装。
+
+**修复**：`chatRuntimeEventBridge.Handle` 在 `turn.resumed` 边沿调用
+`expectResumedTurnAfterWake(turnID, arm)`：撤销退役标记并清除 `retiredTurnOrder`；
+`trigger=settled`（账本全终态闭合、不会再有 run）只解退役、不武装复活，避免开出等不到
+`session_end` 的幻影 run。
+
+**验证**：`TestChatRuntimeEventBridge_WakeResumeRevivesRetiredTurn`（恢复后同 turn 事件必须
+过门禁并重开 run 上下文）、`TestChatRuntimeEventBridge_SettledResumeDoesNotOpenPhantomRun`
+（闭合边沿不复活）；`go test ./cmd/aicli/commands/ -run "TestChatRuntimeEvent|TestChatWebPage|
+TestHandleChatWebPage|TestLocalTurnResumed|TestApplyLocalChild"` 全绿。
+
+### 7.18 session_20260929175325_cxHK8mPD 真机审计：子代理 10 连败的三个根因（2026-09-30）
+
+**现场**：该会话 12 个子代理、10 个 `failed`（analytics），单子代理 token 消耗 0.4M–8.4M。
+错误原文只有三类：`tool not found: commands|shell_commands`、`policy:capability not allowed by
+execution policy: exec_shell`、1 个 `stopped`。逐条取证如下（存储位置：批次控制面
+`~/.aicli/sessions/runtime/subagent_batches/session_<id>.sqlite`、监督面
+`~/.aicli/sessions/runtime/supervision/supervision.db`）。
+
+**根因 A（已修，工作树未提交）**：内建 general/plan/explore 子代理经 agentdef 派生策略时 role
+丢失 → 能力地板只剩 read_only+write_fs → 子代理继承到 shell 工具面后被门禁拒绝
+（`chat_child_shell_capability_test.go` 即为此写的回归）。修复在
+`chat_actor_host.go`（`DeriveChildForTask(..., agentType, ...)`，08:33 改），09:28 构建已含。
+真机验证：修复后的两个子代理 `U0ubRwbv`/`zzSmruDS` 进度事件带 `tool_name=shell` 且
+`supervision_execution_runs.status=succeeded`。
+
+**根因 B（本次已修）**：失败分类把这两类**确定性工具面错误**归 `unknown`（无 retry_advice，
+父模型只能反复重派新子代理）。修复：`internal/llm/failure_category.go` 增加
+`TOOL NOT FOUND` / `NOT ALLOWED BY EXECUTION POLICY` 子串 → `tool_error`；回归
+`TestFailureCategoryFromErrorCode_ToolSurfaceFailures`。
+
+**根因 C（未修，契约违背）**：spawn_agent 的 next_action 明确承诺 "ending the turn is safe:
+the host parks the turn and **auto-resumes it on the child's terminal event**"，但
+`internal/supervision/projection.go:98` 只在 `SeverityCritical && ActionRequired()` 时排 wake；
+成功终态只写 `severity=info / resolution=closed` 通知。于是**全部义务成功**的挂起回合永不自动
+恢复。真机证据：`turn_ea632a84`（义务 `agent_session:U0ubRwbv` + `agent_session:zzSmruDS`）
+两子代理 01:41:08 / 01:51:17 succeeded，`supervision_wake_pending`=0、
+`supervision_wake_delivered` 无这两行、无 `turn.resumed`，父会话持续 parked（>10min），
+模型却在回合末向用户承诺"完成后自动接续"。建议修复方向：在 `projectLocalAgentCompletion`
+（CLI）/ API 投影处，对"终态且属于挂起回合义务"的 completion 也排一次 wake
+（notify key 沿用 obligation+seq 去重；WakeReason 用 agent_completed），或宿主侧用
+`TurnObligationsSettledWith` 结清后投递 resume。
+
+**附带观察**：义务生命周期与会话生命周期分离——`ZO0aFOKs` 义务在 01:00 被判 failed 后，父会话
+仍可 `followup_task` 使用该子会话并在 01:28 完成修复；"失败"只描述那一次 attempt。
+
+### 7.19 §7.18-C 修复（结算 wake）+ 状态栏残影修复 + 过期数据清理（2026-09-30）
+
+**A. 结算 wake（契约违背修复，CLI + API 双宿主）**
+
+- 新增 `supervision.ScheduleSettledTurnWake`（`internal/supervision/settled_turn_wake.go`）：
+  在子会话终态投影**没有**排生命周期 wake（非 critical）时，读 durable 挂起账本，
+  若该 turn 的义务全部已知终态则排一笔 `obligation_settled` wake（notify key 由
+  turn id 派生，重复调用只投一次）；CLI `projectLocalAgentCompletion` 与 API
+  `projectAgentCompletion` 在投影后调用它，随后走既有 `wakeSupervisedParent` 排空。
+- 新增 `subagentbatch.TurnObligationsAllTerminal`（严格判定）：与 settle 谓词不同，
+  **没有生命周期行的子会话视为仍在运行并阻塞**——运行中的 spawn_agent 子代理没有行，
+  若按 settle 谓词的"未知跳过"语义，第一个孩子完成就会把 turn 判成结清并提前恢复父会话。
+- `supervision.LifecycleWakeScheduled` 抽出投影的唤醒条件，投影与完成桥共用，防止漂移。
+- 新增 `ListTurnSuspensions(ctx, sessionID)`（BatchStore 接口 + sqlite 实现）：不依赖
+  `RuntimeState.SuspendedTurnID` 派生缓存即可找到挂起 turn。
+- 回归：CLI `TestProjectLocalAgentCompletionWakesSettledParkedTurn` /
+  `…DoesNotDoubleWakeCriticalSettledTurn`；API `TestAPIProjectAgentCompletionWakesSettledParkedTurn`；
+  判定表 `TestTurnObligationsAllTerminal`（缺行/运行中/混合批次/nil 判读器全部阻塞）。
+
+**B. 状态栏残影（"Analyzing (58s)" 永不推进）**
+
+- 根因：`currentSurfaceStateLocked` 把"actor Busy 但本会话没有 run"的托管挂起回退成
+  `Waiting` → 动态栏复用运行态文案 "Analyzing"，而 `dynamicStatusCompleted` 冻结了上一段
+  run 的耗时（58s），秒表永远不动。
+- 修复：新增 `chatSurfaceStatusParked` + `interactiveSessionActorAwaitingObligations`
+  （`chat_team_drain.go`）；托管挂起渲染 "◦ Waiting for subagents"（不可中断、无秒表），
+  且完成冻结的 "Worked for …" 不得覆盖它（turn 尚未结束）。
+- 回归：`TestBuildChatDynamicStatusModelParkedTurnHasNoFrozenClock` + 状态矩阵三表新增
+  parked 行（isRunning=false / String / action-role-interrupt）。
+
+**C. 过期数据清理（2026-09-30 10:56 CST，均有备份）**
+
+- 备份：`.tmp/backup/supervision-20260930-105622.db`（1.4MB）、
+  `.tmp/backup/agent_control-20260930-105636.sqlite`（592MB，SQLite backup API 一致性快照）。
+- 监督库（活跃 lease 与 7 天窗口内数据不动）：`wake_pending` 279→5（删 274 条僵尸 wake）、
+  `supervision_lifecycle_notifications` 1226→473（删 753 条死会话过期通知，其中 229 条
+  unresolved critical）、`wake_delivered` 保持 82（均在 7 天内）；WAL 已 checkpoint。
+- Agent 注册表：以**内置** `PruneAgentWakeEvents`（enforce 模式，7 天 closed 窗口 + 每 agent
+  64 条活跃上限）删 261,743 条 closed wake 事件（1,210,293→949,902，46s/28 批）；
+  `PurgeTerminalAgentRecords` 30 天窗口无命中。宿主默认仍是 observe，本次为一次性操作。
+- 残留（未动，记录在案）：`agent_control.sqlite` freelist 31,102 页 ≈127MB 需停机窗口
+  VACUUM 才能回收（auto_vacuum=0）；`session_actor_leases` 266 条过期租约保留（`GetLease`
+  会读到它们做接管判定，属诊断语义，不做静默清理）。
+
+### 7.20 重启竞态下的账本复位（revival 收敛，CLI + API 双宿主）（2026-09-30）
+
+**现象**：子代理会话实际在运行（lease 未过期、runtime state=running、turn 在流式输出），
+`agent_control_agents` 行却是 `stale`/`closed` —— `/agents`、Web 面板与父会话因此把运行中
+的子代理报成已结束（真机：`session_20260930105804_4YgwfIX7`、`…105807_4OT9C2lq`）。
+
+**根因**：sweep 与恢复的竞态是单向的。旧进程退出释放执行 lease 后，新进程的
+`sweepStaleLocalAgentRegistry` / `sweepStaleAgentControlAgentRegistry` 按"expired lease +
+state 仍 claims progress"把行标 stale；随后重启恢复 / 显式 `resume_agent` 让会话重新持有
+lease 并继续运行，但**没有任何路径把行复位**（投影 upsert 明确禁止复活终态行，见
+`UpsertAgentControlAgent` 的 SQL 守卫）。
+
+**修复**：
+
+- `agentcontrol.AgentReactivator` + `ReactivateAgentControlAgent`（单行、幂等）：只把
+  stale/closed 行移回 `active` 并清空 `closed_at`，守卫在 SQL 内（active 行与并发 close
+  都不会被覆盖），成功后补发 `active` wake 事件供面板/父流解释状态回摆。
+- CLI：`materializeLocalAgentRegistry` 在 stale sweep 之后跑
+  `reviveLiveLocalAgentRegistryRows` —— 同一份 listing、同一个 lease 时钟，方向相反；
+  条件为"未过期 lease + state=running/rewinding"（无 lease 的空闲会话不会被复活，崩溃遗留
+  的 running 状态仍保持终态），并用 24h 窗口把扫描限制在近期终态行。`Resume` 另外做即时
+  复位（best-effort，不因账本写入失败回滚已生效的 resume）。
+- API：`sweepStaleAgentControlAgentRegistry` 同样先跑 `reviveLiveAgentControlAgentRegistry`
+  （`apiAgentRegistryLeaseLive` + running/rewinding），保持两宿主对同一 registry 文件的收敛
+  口径一致（G3/N2 同构要求）。
+
+**测试**：`TestReactivateAgentControlAgentRevivesOnlyTerminalRows`（active/未知 id 不动、
+stale→active 清 closed_at、`active` 事件、幂等、closed 同样可复位）；
+CLI `TestReviveLiveLocalAgentRegistryRowsRevivesRunningSession` /
+`…KeepsDeadSessionTerminal` / `TestResumeReactivatesTerminalAgentRow`；
+API `TestAPISweepRevivesLiveAgentRegistryRow` / `TestAPISweepKeepsDeadSessionTerminal`。
+
+**现场修复**：03:37 用新 store 调用把仍在运行却被标 stale 的 `session_20260930105807_4OT9C2lq`
+复位为 `active`（closed_at 清空）；复查"live lease 会话 vs 终态行"零不一致。运行中的宿主仍是
+旧二进制，下一次重建/重启后该收敛自动生效（stale 与 revival 由同一 pass 双向收敛）。
+
+### 7.21 子代理终态唤醒缺口修复（P0-A/P0-B/P0-C，P1 归并）（2026-09-30）
+
+**现象（真机 W6=`session_20260930105807_4OT9C2lq`）**：子代理 03:57:48 以 success/idle 结束，
+完整汇报已写进它自己的事件流（seq 15623/15624），但父会话（`…175325_cxHK8mPD`）事件流最后
+一条仍是 03:55:01 的自有 session_end，mailbox 停在 seq 16（10:24 的子代理），无 supervision
+通知、无 wake —— 主 agent 永久 idle，只能人工介入（"子代理在汇报前停止"）。
+
+**根因（三层，按确定性排序）**：
+
+1. **完成订阅是进程内存态**：`subscribeLocalAgentCompletion`（CLI）与
+   `subscribeAgentCompletion`（API）只在 spawn 时登记，宿主重启后没有重建路径。被 resume
+   续跑的子代理结束时，新进程里没有任何监听者，完成投影（mailbox + 通知 + 镜像 + wake）
+   全部不产生。
+2. **turn-end 自动 drain 默认关闭**（`supervision.turn_end_check`）：即使 wake 已排
+   （run 级 stall/timeout），交互式会话没有自然 turn 时也永远不投递；现场两条 wake
+   （03:08 `progress_stalled`、03:28 `execution_timed_out`）至今 `claimed_at=NULL`。
+3. **run 账本不终态**：`ProjectAgentCompletion` 内部本会收敛子会话的 execution run 与 run
+   级告警（`finalizeChildExecutionRuns` → `MarkExecutionRunTerminal` + `ConvergeRunAlerts`），
+   但链路 1 断掉后无人触发，run 停在 `queued`、过期 deadline 反复产生 critical 通知。
+
+**修复**：
+
+- **P0-A 订阅重建**：CLI `rebindLocalChildCompletionSubscriptions`（宿主启动 +
+  `Resume` 即时重建；`trackChildEventSubscription` 覆盖前先释放旧句柄，避免订阅泄漏）；
+  API `recoverAgentChildCompletion` 的订阅部分（按子会话"每进程一次"，会话尚未落盘时
+  归还名额、下一次物化重试）。
+- **P0-B 启动重放**：CLI `replayLocalChildCompletions`（宿主启动：尾部事件取最近
+  `session_end`/`session_interrupted`，48h 窗口，终态之后有新动作的子会话跳过，父侧
+  `subagent.completed` 镜像作为"已投影"闸门保证幂等；交互式只补 durable 账本、不 drain，
+  与 batch 启动重放同款语义）；API 对等实现挂在物化路径
+  （`materializeAgentControlAgentProjections`），幂等判据用 supervision 通知。
+- **P0-C turn-end 放行**：CLI `turnEndWakeDrainAllowed` / API `apiTurnEndWakeDrainAllowed`
+  —— `turn_end_check` 关闭时，只要该 scope 存在**非 progress 类** pending wake 就允许
+  drain（子代理终态/审批/失败/obligation 结算都属于此类）；开关仍只约束 progress 自检，
+  wake 预算（MaxAutoWakePerWindow）限流不变。
+- **P1 run 终态收敛**：并入 P0-B 路径（补投影即调用
+  `ProjectAgentCompletion → finalizeChildExecutionRuns`），无需新增巡检器；缺失的
+  completion 一旦被重放，run 与 run 级告警同时收敛。
+
+**测试**：CLI `TestReplayLocalChildCompletionsProjectsMissedTerminal` /
+`…SkipsChildThatMovedOn` / `TestRebindLocalChildCompletionSubscriptionsCatchesNextTerminal` /
+`TestLocalHostTurnEndCheck_TerminalWakeDrainsWithoutOptIn` /
+`…ProgressOnlyWakeStaysPendingWithoutOptIn`；API
+`TestRecoverAgentChildCompletionsReplaysAndRebinds` / `TestSupervisionTurnEndDrainOnAPISide`
+（原 CLI `TestLocalHostTurnEndCheck_DefaultOffKeepsWakePending` 与 API
+`TestSupervisionTurnEndDrainSwitchOnAPISide` 按新契约改写）。
+
+**残留（设计边界，未动）**：成功终态（info/closed）不排 lifecycle wake —— 父会话靠 I1
+挂起 turn 的 `obligation_settled` 或下一次自然 turn 的 preflight digest 收取结果；
+"父 idle 且未挂起时被成功终态自动唤醒"不在本契约内（如需覆盖，应改 I1 挂起判定，而不是
+放宽 wake 排程）。API 侧重放不追加父侧 `subagent.completed` 镜像（mailbox 事件 + digest
+承担同一事实）。运行中的宿主仍需重建/重启才能带上本修复。
+
+### 7.22 「宿主重启后永久静默」的第二个根因：render ownership 死锁（2026-09-30 现场复核）
+
+**现场（`aicli-2x.exe resume session_20260929175325_cxHK8mPD`，PID 17756，15:05:52 启动）**：
+15:06 / 15:09 / 15:15 三轮**都真实跑完**（LLM 请求、工具回执、`session_end success=true`），
+15:15 那轮还产出了完整的 `assistant_message`（"## 进展 …"）；但每一轮的**全部主事件**被
+`shouldSuppressMismatchedPrimaryTurnEvent` 丢弃：`debug.log` 满屏
+`render suppressed reason="event turn does not match active run"`，连该轮自己的
+`session_start` / `session_end` 也在其中。新轮的 `session_end` 同样被丢 → 陈旧 run 上下文
+永不闭合，死锁自我延续：模型照常产出回答，页面从此全程无反应（用户读成"回答没有提交到
+服务器/无法回复"）。诊断计数：`runtime.render_fence_dropped {"active_mismatch":…,"turn_id":…}`。
+
+**根因**：`observePrimaryRunTurn` 只在 `activeTurnID == ""` 时登记当前轮；宿主重启 /
+auto-continuation 遗留的陈旧 `activeTurnID` 会永久霸占所有权，而 `session_start`（actor 侧
+权威的"新一轮开始"信号）没有夺回所有权的路径；`maybeAdoptPrimaryRunTurn` 又因
+`runActive || adoptedTurnID != ""` 而拒绝重新打开 run。三条守卫叠加 = 无自愈能力。
+
+**修复（chat_runtime_events.go）**：
+
+- `observePrimaryRunTurn`：主会话 `session_start` 携带的 turn id 与当前 `activeTurnID` 不同
+  时**移交所有权**（旧轮 `retireTurnLocked` 退役；若旧轮是被收养的 run，收养关系随迁），
+  并写 `primary turn ownership transferred` 调试行（锁外写，避免 IO 持锁）。
+- `maybeAdoptPrimaryRunTurn`：`!runActive && adoptedTurnID != "" && != turnID` 视为陈旧收养，
+  清掉收养记录后由新轮重新打开 run（否则 `runActive=false + adoptedTurnID!=""` 同样永久静默）。
+
+**回归测试**：`TestChatRuntimeEventBridge_StaleActiveTurnYieldsToNewSessionStart` /
+`…StaleAdoptedTurnYieldsToNewSessionStart`（钉住"移交后新轮 assistant_message/session_end 必须
+进入渲染管线、被顶替轮残余事件仍被挡下、同一轮重复 session_start 幂等"）。
+
+**运维事实（为什么"多次修复"没生效）**：端口 63056 的宿主是 `aicli-2x.exe`，其二进制
+mtime=11:02:19 —— **早于当天全部修复**；多次 `resume` 都复用同一个陈旧二进制，源码级修复
+从未进入运行进程。修复必须 **重建 + 重启**（`go build -o aicli.exe ./cmd/aicli` 后替换
+`aicli-2x.exe` 再 `resume`）。
+
+### 7.23 §7.22 的第二层：wake 恢复 episode 复用被退役 turn_id（2026-09-30 16:33 现场）
+
+**现场（`aicli-5x.exe resume session_20260929175325_cxHK8mPD`，PID 15588，16:26:04 启动）**：
+16:33:13 wake_consumer 投递 settled wake（`supervision_wake_delivered` 有记录），16:33:13.6
+起跑 `turn_3bf8448a`，16:34:22 产出完整的 `assistant_message`（"🏁 Phase 2 收口完成"）与
+`session_end success=true`；但整轮事件（session_start/assistant_message/session_end 及全部
+中间事件）再次被 `render suppressed reason="event turn does not match active run"` 丢弃 ——
+页面只有 child completion + `[Child lifecycle preflight]`，用户读成"没有拉起主 agent"。
+
+**根因（比 §7.22 更深一层，三条叠加）**：
+
+1. wake 恢复是「同一 turn 的新 episode」：`turn_3bf8448a` 第一 episode 16:26:26→16:27:13
+   已被 `EndRun` **退役**，16:33 的 settled wake 复用同一 turn_id。
+2. `EndRun`（chat_runtime_events.go:1126-1136）退役 turn、清 `runActive`，但**不清**
+   `activeTurnID`/`adoptedTurnID`；于是 `maybeAdoptPrimaryRunTurn` 的等值早退与
+   `maybeAdoptResumedPrimaryTurn`（要求 `adoptedTurnID==""`）双双失效。
+3. settled 边沿的 `turn.resumed` payload **不含 turn_id**（只有 `pending_count` /
+   `trigger=terminal` / `wake_ids`…），`expectResumedTurnAfterWake` 拿到空 id 直接返回，
+   退役标记无从撤销。
+
+结果：`retiredTurnIDs` 分支先于 `activeTurnID` 比对执行 → 整段 episode 被丢；新 episode 的
+`session_end` 同样被丢 → 陈旧上下文永不闭合（与 §7.22 同一条死锁，只是触发面更窄）。
+
+**修复**：
+
+- 新增 `adoptPrimaryRunTurnLocked`（撤销退役 + 作废陈旧收养记录 + 以该轮开启新 run epoch）
+  与 `unretireTurnLocked`；`maybeAdoptPrimaryRunTurn` 在 `!runActive` 时统一走该路径。
+- `observePrimaryRunTurn` 在活动 run 的三条路径上撤销陈旧退役（含所有权移交路径）。
+- **保持 ambient 语义**：`!runActive` 时 `observePrimaryRunTurn` 仍不接管转录，由
+  `updateComposerAgentStageForAmbientPrimaryRunEvent` 只投状态
+  （`TestChatRuntimeEvents_ProjectsBackgroundPrimaryRunAsNotReady` 钉住）。
+
+**回归**：`TestChatRuntimeEventBridge_ResumedEpisodeRevivesRetiredTurn`（复刻 16:33 现场：
+退役 + 同 id 复用 + 陈旧收养 → 必须重开 run、撤销退役、assistant_message/session_end 可渲染）。
+
+**残留**：settled `turn.resumed` 不带 turn_id（本次修复不再依赖它；建议后续把 turn_id 补进
+该 payload，让恢复边沿自身可自证）。

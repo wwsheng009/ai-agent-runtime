@@ -659,6 +659,11 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 			return nil, rollbackSpawnFailure(fmt.Errorf("queue child prompt: %w", err))
 		}
 		queued = true
+		// §6.12 派发即挂起（与 CLI 宿主 parkLocalAgentChildObligation 对齐）：queued
+		// 子会话是父 turn 的活义务，登记 agent_session: 义务后父 turn 才可能在
+		// 子会话终态前保持挂起而不是提前收尾。尽力而为：缺 durable store / 判读器 /
+		// turn id 时只降级为未挂起，绝不让派发失败或变慢。
+		c.parkAgentChildObligation(ctx, parentSessionID, sessionID)
 	}
 	result, err := c.snapshot(ctx, sessionID)
 	if err != nil {
@@ -1224,7 +1229,7 @@ func (c *sessionAgentController) projectAgentCompletion(ctx context.Context, par
 	if rootScopeID == "" {
 		return
 	}
-	_, _ = supervision.ProjectAgentCompletion(
+	notification, projectErr := supervision.ProjectAgentCompletion(
 		ctx,
 		store,
 		c.handler.getSupervisionWakeScheduler(),
@@ -1234,6 +1239,20 @@ func (c *sessionAgentController) projectAgentCompletion(ctx context.Context, par
 		status,
 		sourceEventType,
 	)
+	if projectErr == nil && !supervision.LifecycleWakeScheduled(notification) {
+		// 成功（info/closed）终态不排生命周期 wake（projection 只在 critical +
+		// action_required 时排），而结算谓词只在 run 结束跑：没有这一笔，
+		// "全部义务成功"的挂起 turn 会永久停放，与 spawn_agent 的
+		// "auto-resumes it on the child's terminal event" 契约相悖。
+		_, _ = supervision.ScheduleSettledTurnWake(
+			ctx,
+			c.handler.getSubagentBatchStore(),
+			c.handler.agentSessionObligationResolver(),
+			c.handler.getSupervisionWakeScheduler(),
+			parentSessionID,
+			rootScopeID,
+		)
+	}
 	// P2 closure: a critical completion must be able to start a parent turn
 	// without an explicit wait. When the parent is still busy the wake stays
 	// durable and the next runnable transition drains it (doc 6.5).
@@ -2285,15 +2304,19 @@ func (c *sessionAgentController) waitLedger(ctx context.Context) ([]toolbroker.A
 	if sessionID == "" {
 		return nil, nil, false, ""
 	}
-	store := c.handler.getSessionRuntimeStore()
-	if store == nil {
-		return nil, nil, false, ""
+	turnID := ""
+	if store := c.handler.getSessionRuntimeStore(); store != nil {
+		if state, err := store.LoadState(ctx, sessionID); err == nil && state != nil {
+			turnID = strings.TrimSpace(state.SuspendedTurnID)
+		}
 	}
-	state, err := store.LoadState(ctx, sessionID)
-	if err != nil || state == nil {
-		return nil, nil, false, ""
+	if turnID == "" {
+		// 直连 /api/agent/chat 回合不持久化 RuntimeState（chatcore/runtimeapi 均无
+		// 写点），挂起记录只落在批次库；此时用调用 ctx 上的 turn 注解兜底——与
+		// parkAgentChildObligation 的 turn id 解析同源，否则该路径的 wait 账本
+		// 永远看不到挂起（轻量子会话义务与批次义务同样受影响）。
+		turnID = strings.TrimSpace(agent.TurnIDFromContext(ctx))
 	}
-	turnID := strings.TrimSpace(state.SuspendedTurnID)
 	if turnID == "" {
 		return nil, nil, false, ""
 	}
@@ -2305,7 +2328,10 @@ func (c *sessionAgentController) waitLedger(ctx context.Context) ([]toolbroker.A
 	if err != nil || !ok || record == nil {
 		return nil, nil, false, ""
 	}
-	rows, err := subagentbatch.BuildWaitLedger(ctx, batches, record)
+	// §6.12：子会话义务（agent_session:）与批次义务同源判读——resolver 读
+	// supervision 控制面，未装配时为 nil，此时这些行以 missing 保持 pending
+	// （保守方向，绝不把读不到的义务当完成）。
+	rows, err := subagentbatch.BuildWaitLedgerWith(ctx, batches, record, c.handler.agentSessionObligationResolver())
 	if err != nil || len(rows) == 0 {
 		return nil, nil, false, ""
 	}
@@ -2398,10 +2424,10 @@ func (c *sessionAgentController) waitTargetObligations(ctx context.Context, args
 	if len(batchIDs) == 0 {
 		return nil, nil, false
 	}
-	rows, err := subagentbatch.BuildWaitLedger(ctx, store, &subagentbatch.TurnSuspension{
+	rows, err := subagentbatch.BuildWaitLedgerWith(ctx, store, &subagentbatch.TurnSuspension{
 		SessionID:   parentSessionID,
 		ResumeQueue: batchIDs,
-	})
+	}, c.handler.agentSessionObligationResolver())
 	if err != nil || len(rows) == 0 {
 		return nil, nil, false
 	}
@@ -4546,6 +4572,11 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 		return nil, leaseErr
 	}
 	loopConfig := buildSessionLoopConfig(selectedConfig, requestedReasoningEffort)
+	// §6.12 结算判读器：携带 agent_session: 义务的挂起记录只有在 supervision
+	// 控制面报出每个子会话终态后才会被 loop.settleParkedTurnOnRunEnd 结清。
+	// 未装配 supervision store 时为 nil——记录保持挂起（保守方向），批量义务
+	// 的结清规则不变。
+	loopConfig.AgentSessionObligations = h.agentSessionObligationResolver()
 	// §6.1 宿主接线：主 Agent 路由只接主会话。child 标记（agent_type / depth /
 	// read_only）与上面的子会话策略同口径——带任一标记的会话是子 Agent，走
 	// aicli.subagents.routing，主 Agent 的开关不得改变其行为（§6.3 配置隔离）。
@@ -4697,7 +4728,9 @@ func applyAPIChildAgentdefToolPolicy(apiAgent *agent.Agent, agentType, workspace
 	if toolPolicy == nil {
 		toolPolicy = agent.NewToolExecutionPolicy(allowlist, readOnly)
 	} else {
-		toolPolicy = toolPolicy.DeriveChild(allowlist, readOnly)
+		// 与 CLI 宿主同口径：角色必须传下去，否则能力地板缺少 exec_shell，
+		// 内建 general/plan/explore 子代理会在继承到 shell 工具面后被能力门禁拒绝。
+		toolPolicy = toolPolicy.DeriveChildForTask(allowlist, readOnly, agentType, nil)
 	}
 	if len(binding.ToolDenylist) > 0 {
 		if toolPolicy.DeniedTools == nil {

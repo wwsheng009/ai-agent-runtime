@@ -108,6 +108,44 @@ func TestChatRuntimeEventBridge_ResumeExpectationIgnoresForeignTurn(t *testing.T
 	require.True(t, bridge.shouldSuppressMismatchedPrimaryTurnEvent(foreign))
 }
 
+// TestChatRuntimeEventBridge_WakeResumeRevivesRetiredTurn 钉住 §6.8 托管恢复：
+// 挂起 run 收尾退役 turn（EndRun → retireTurnLocked），wake 复用同一 turn_id 续跑；
+// turn.resumed 必须先撤销退役标记，否则 retiredTurnIDs 分支把整段恢复输出吞掉——
+// 模型在跑、终端毫无反应（2026-09-30 审计；此前只有提问回答路径能复活）。
+func TestChatRuntimeEventBridge_WakeResumeRevivesRetiredTurn(t *testing.T) {
+	bridge := newResumeTestBridge(t)
+	resumedLLM := resumedTurnEvent(runtimechat.EventLLMRequestStarted)
+	require.True(t, bridge.shouldSuppressMismatchedPrimaryTurnEvent(resumedLLM),
+		"a retired turn stays suppressed before the resume edge")
+
+	bridge.Handle(runtimeevents.Event{
+		Type:      runtimeevents.EventTurnResumed,
+		SessionID: "session-resume",
+		Payload:   map[string]interface{}{"turn_id": "turn-1", "trigger": "terminal"},
+	})
+	_, retired := bridge.retiredTurnIDs["turn-1"]
+	require.False(t, retired, "turn.resumed must un-retire the same-turn resume target")
+	require.True(t, bridge.isRunActive(), "the wake resume must reopen the run context")
+	require.False(t, bridge.shouldSuppressMismatchedPrimaryTurnEvent(resumedLLM),
+		"wake-resumed same-turn events must reach the render pipeline")
+}
+
+// TestChatRuntimeEventBridge_SettledResumeDoesNotOpenPhantomRun 钉住闭合边沿：
+// trigger=settled 表示账本已全终态、不会再有 run，只解退役、不武装复活——否则
+// 终端会永久停在"运行中"，等一个永远不来的 session_end。
+func TestChatRuntimeEventBridge_SettledResumeDoesNotOpenPhantomRun(t *testing.T) {
+	bridge := newResumeTestBridge(t)
+	bridge.Handle(runtimeevents.Event{
+		Type:      runtimeevents.EventTurnResumed,
+		SessionID: "session-resume",
+		Payload:   map[string]interface{}{"turn_id": "turn-1", "trigger": "settled", "settled": true},
+	})
+	_, retired := bridge.retiredTurnIDs["turn-1"]
+	require.False(t, retired, "the closure edge still clears the retirement marker")
+	require.False(t, bridge.isRunActive(), "a settled closure must not open a run")
+	require.Empty(t, bridge.resumeTurnID, "a settled closure must not arm revival")
+}
+
 // TestChatRuntimeEventDrainSnapshot_DistinguishesBacklogFromRenderLag pins the
 // EndRun verdict rule: a drain timeout may only fail the run when events are
 // genuinely undelivered. In the real session every turn ended as

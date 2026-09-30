@@ -85,6 +85,12 @@ type BatchStore interface {
 	// GetTurnSuspension returns one parked-turn record; ok=false when absent.
 	GetTurnSuspension(ctx context.Context, sessionID, turnID string) (*TurnSuspension, bool, error)
 
+	// ListTurnSuspensions returns every parked-turn record of one session,
+	// newest parked first. Read-only: the settlement wake path uses it to find
+	// a turn that may have settled after its run ended, and diagnostics use it
+	// to report the durable waiting state.
+	ListTurnSuspensions(ctx context.Context, sessionID string) ([]*TurnSuspension, error)
+
 	// ClearTurnSuspension removes a parked-turn record (resume or abort).
 	ClearTurnSuspension(ctx context.Context, sessionID, turnID string) error
 
