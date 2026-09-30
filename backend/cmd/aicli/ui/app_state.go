@@ -109,6 +109,78 @@ func (s TranscriptState) Clone() TranscriptState {
 	return s
 }
 
+// newTranscriptStateFromSnapshot detaches an authoritative Scene snapshot while
+// re-cloning only what changed. The reducer receives one such snapshot per
+// coalesced event batch; re-detaching every cell's presentation on each batch
+// pinned the UI actor on long sessions (live: 8k cells / 238k layout rows,
+// plan-max-ms up to 75s, mailbox drops). Cells that match the previous state's
+// COW identity (id/revision/static metadata/source) are reused by value; only
+// the changed suffix is cloned out of the snapshot. A different SceneID means a
+// replay/rebuild, so the whole state is re-detached instead of reused.
+func newTranscriptStateFromSnapshot(previous TranscriptState, snapshot *scene.Snapshot) TranscriptState {
+	if snapshot == nil {
+		return TranscriptState{}
+	}
+	if previous.SceneID != snapshot.SceneID {
+		return NewTranscriptState(snapshot)
+	}
+	// Locate the first snapshot cell that cannot be reused from previous. Nil
+	// entries never appear in previous (NewTranscriptState skips them), so the
+	// two sequences stay index-aligned over non-nil cells.
+	firstChanged := -1
+	count := 0
+	for _, cell := range snapshot.Cells {
+		if cell == nil {
+			continue
+		}
+		if firstChanged < 0 {
+			if count >= len(previous.Cells) || !transcriptCellUnchangedForActiveOnly(previous.Cells[count], *cell) {
+				firstChanged = count
+			}
+		}
+		count++
+	}
+	if count == 0 {
+		next := previous
+		next.SceneID = snapshot.SceneID
+		next.Revision = snapshot.Revision
+		next.ContentVersion = snapshot.ContentVersion
+		next.Cells = nil
+		return next
+	}
+	if firstChanged < 0 {
+		if count == len(previous.Cells) {
+			// Only the scene-wide fence advanced: reuse every detached cell.
+			next := previous
+			next.SceneID = snapshot.SceneID
+			next.Revision = snapshot.Revision
+			next.ContentVersion = snapshot.ContentVersion
+			return next
+		}
+		// previous is a strict prefix of the snapshot: reuse the prefix and
+		// detach the appended tail.
+		firstChanged = len(previous.Cells)
+	}
+	next := previous
+	next.SceneID = snapshot.SceneID
+	next.Revision = snapshot.Revision
+	next.ContentVersion = snapshot.ContentVersion
+	cells := make([]scene.TranscriptCell, 0, count)
+	cells = append(cells, previous.Cells[:firstChanged]...)
+	position := 0
+	for _, cell := range snapshot.Cells {
+		if cell == nil {
+			continue
+		}
+		if position >= firstChanged {
+			cells = append(cells, cloneTranscriptCell(*cell))
+		}
+		position++
+	}
+	next.Cells = cells
+	return next
+}
+
 // LayoutRows derives semantic transcript rows without first cloning every
 // cell. scene.LayoutTranscript only reads its input and returns detached row
 // values, so the temporary pointer slice is sufficient isolation for this

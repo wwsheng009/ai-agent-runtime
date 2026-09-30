@@ -105,7 +105,13 @@ type HistoryEffectQueueState struct {
 	// avoid). Cell Revision is the scene's own per-cell mutation fence
 	// (update/finalize require a strictly greater revision), so the
 	// fingerprint has the same trust level as transcriptCellVersionEqual.
-	lastPlannedTranscriptFence     uint64
+	lastPlannedTranscriptFence uint64
+	// lastPlannedTranscriptCells counts the FINALIZED cells (Phase != mutable)
+	// covered by the last complete plan. The total cell count is not used: a
+	// busy turn appends mutable tail cells (reasoning/tool-chain boundaries)
+	// that the finalized-prefix plan never consumes, and invalidating on them
+	// re-planned the entire history per appended cell (723ms/op benchmark on a
+	// 2000-cell transcript; live plan-last-ms 4.7-6.9s, ~9 plans/min).
 	lastPlannedTranscriptCells     int
 	lastPlannedTranscriptLayoutGen uint64
 	lastPlannedWidth               int

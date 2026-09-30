@@ -173,10 +173,12 @@ func TestDeferredOlderPagePrependReplansAndCoversOlderCells(t *testing.T) {
 		t.Fatalf("the finalized-prefix fence did not change after inserting the older page "+
 			"(before=%d after=%d): the memo would hit and skip the round entirely", fenceBefore, fenceAfter)
 	}
-	// 结构证据 2：失效的结果是**整份 transcript 被重新规划**（memo 记录的是新的 cell 数）。
-	if got := state.HistoryEffects.lastPlannedTranscriptCells; got != len(prepended) {
+	// 结构证据 2：失效的结果是**整份 transcript 被重新规划**（memo 记录的是新的
+	// finalized cell 数；mutable 尾部不参与 finalized-prefix 计划）。
+	wantFinalized := transcriptFinalizedCellCount(state.Transcript)
+	if got := state.HistoryEffects.lastPlannedTranscriptCells; got != wantFinalized {
 		t.Fatalf("the deferred insert did not re-plan the whole transcript: "+
-			"memo cells %d -> %d, want %d (this is the L2.5 cost)", cellsBefore, got, len(prepended))
+			"memo cells %d -> %d, want %d (this is the L2.5 cost)", cellsBefore, got, wantFinalized)
 	}
 
 	page1IDs := map[scene.CellID]struct{}{}
