@@ -12,23 +12,34 @@ import (
 )
 
 var (
-	exitCleanupMu sync.Mutex
-	exitCleanupFn func()
+	exitCleanupMu  sync.Mutex
+	exitCleanupFns []func()
 )
 
+// registerExitCleanup 登记一个进程退出清理回调。
+//
+// 必须是列表而不是单槽位：chat 会话收尾 / 知识层释放 / 调试面注销 / MCP 关闭
+// 等各自独立登记，单槽位会让后登记者覆盖先登记者。2026-09-30 实测：chat.go
+// 连续登记三次后只剩最后一个（调试面注销），导致 /exit 后 knowledge.db.lock
+// 不释放、会话资源不回收，只能等下一个进程做陈旧锁抢占。
 func registerExitCleanup(cleanup func()) {
+	if cleanup == nil {
+		return
+	}
 	exitCleanupMu.Lock()
 	defer exitCleanupMu.Unlock()
-	exitCleanupFn = cleanup
+	exitCleanupFns = append(exitCleanupFns, cleanup)
 }
 
+// runExitCleanup 按登记的反序执行并清空全部清理回调（defer 语义：后登记先执行）。
+// 幂等：已执行的清理不会在重复调用时重放。
 func runExitCleanup() {
 	exitCleanupMu.Lock()
-	cleanup := exitCleanupFn
-	exitCleanupFn = nil
+	cleanups := exitCleanupFns
+	exitCleanupFns = nil
 	exitCleanupMu.Unlock()
-	if cleanup != nil {
-		cleanup()
+	for i := len(cleanups) - 1; i >= 0; i-- {
+		cleanups[i]()
 	}
 }
 
