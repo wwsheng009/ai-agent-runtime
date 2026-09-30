@@ -28,7 +28,9 @@ const aicliActorReadyPollInterval = 20 * time.Millisecond
 // backs may block a prompt. Such a state is the leftover of a previous process
 // (resume after a crash/kill), e.g. Status=SessionRunning with a turn that will
 // never finish, and it never converges on its own. A busy state backed by a live
-// run is followed instead of failed; see waitForAICLIActorReady.
+// run is followed instead of failed, and a parked managed turn (idle +
+// SuspendedTurnID) is admitted as a new episode instead of waiting; see
+// waitForAICLIActorReady.
 var aicliActorReadyWaitTimeout = 30 * time.Second
 
 // chatActorBuildBudget 限制一次提交里的 actor 构建（warmup / 驱逐后重建）。
@@ -108,6 +110,10 @@ func continueAICLIActorWhenReady(
 	}
 }
 
+// waitForAICLIActorReady waits until the actor can take the caller's next
+// operation. The readiness predicate mirrors the actor's own admission gate
+// (SessionActor.ensureReady): only a turn that is executing or blocked on
+// input/approval in this process keeps a caller waiting.
 func waitForAICLIActorReady(ctx context.Context, actor *runtimechat.SessionActor) error {
 	if actor == nil {
 		return fmt.Errorf("session actor is nil")
@@ -118,7 +124,12 @@ func waitForAICLIActorReady(ctx context.Context, actor *runtimechat.SessionActor
 	defer staleTimeout.Stop()
 	for {
 		state, ok := actor.StateSummary()
-		if !ok || !state.Busy() {
+		if !ok || state.AcceptsResume() {
+			// A parked managed turn (§6.12: idle + SuspendedTurnID) has no run of
+			// its own and will never converge to "not busy" on its own, but it is
+			// admissible: a new submission becomes a new episode of the same turn
+			// (AC-P2-7a). Waiting on it would burn the stale-state budget for a
+			// state that the following SubmitPrompt/Continue accepts.
 			return nil
 		}
 		// A live run in this process owns the busy state (a resumed turn, a long
@@ -134,13 +145,17 @@ func waitForAICLIActorReady(ctx context.Context, actor *runtimechat.SessionActor
 			return ctx.Err()
 		case <-staleTimeout.C:
 			state, _ := actor.StateSummary()
-			return fmt.Errorf(
-				"actor 等待就绪超时（%v）：status=%s turn=%s pending_tool=%v pending_approval=%v active_jobs=%d；"+
+			msg := fmt.Sprintf(
+				"actor 等待就绪超时（%v）：status=%s turn=%s suspended_turn=%s pending_tool=%v pending_approval=%v pending_question=%v active_jobs=%d；"+
 					"该忙碌状态没有本进程的运行在支撑，可能是上一进程遗留的 turn，可先 Ctrl+C 结束当前轮次再重新 resume，或使用 /team 清理",
 				aicliActorReadyWaitTimeout,
-				state.Status, state.CurrentTurnID,
-				state.PendingToolName, state.PendingApproval, state.ActiveJobCount,
+				state.Status, state.CurrentTurnID, state.SuspendedTurnID,
+				state.PendingToolName, state.PendingApproval, state.PendingQuestion, state.ActiveJobCount,
 			)
+			if state.PendingQuestion || state.PendingApproval {
+				msg += "；会话有未处理的提问/审批，可用 /agents 查看或重新 resume"
+			}
+			return errors.New(msg)
 		case <-ticker.C:
 		}
 	}

@@ -304,8 +304,70 @@ func TestWaitForAICLIActorReady_TimesOutForBusyStateWithoutLiveRun(t *testing.T)
 	if !strings.Contains(err.Error(), "status=") {
 		t.Fatalf("expected status diagnostic in error message, got: %v", err)
 	}
+	if !strings.Contains(err.Error(), "suspended_turn=") || !strings.Contains(err.Error(), "pending_question=") {
+		t.Fatalf("expected suspended-turn/question diagnostics in error message, got: %v", err)
+	}
 	if isACPCancelError(err) {
 		t.Fatalf("actor readiness timeout must not be classified as cancellation: %v", err)
+	}
+}
+
+func TestWaitForAICLIActorReady_AcceptsParkedTurnWithoutLiveRun(t *testing.T) {
+	// A parked managed turn (§6.12: idle + SuspendedTurnID) has no run of its
+	// own and never converges to "not busy", but the submit path admits it as a
+	// new episode of the same turn (AC-P2-7a). The readiness wait must therefore
+	// release immediately instead of burning the stale-state budget and failing
+	// with a "status=idle ... 没有本进程的运行在支撑" diagnostic.
+	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
+		DefaultProvider: "mock",
+		DefaultModel:    "mock-model",
+	})
+	if err := llmRuntime.RegisterProvider("mock", runtimellm.NewMockProvider("mock", 10*time.Millisecond)); err != nil {
+		t.Fatalf("RegisterProvider: %v", err)
+	}
+	stateStore := runtimechat.NewInMemoryRuntimeStore(8)
+	if err := stateStore.SaveState(context.Background(), &runtimechat.RuntimeState{
+		SessionID:       "session-parked",
+		Status:          runtimechat.SessionIdle,
+		SuspendedTurnID: "turn-parked",
+		UpdatedAt:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+	apiAgent := agent.NewAgentWithLLM(&agent.Config{
+		Name:     "test-actor",
+		Provider: "mock",
+		Model:    "mock-model",
+		MaxSteps: 4,
+	}, nil, llmRuntime)
+	actor, err := runtimechat.NewSessionActor("session-parked", runtimechat.SessionActorConfig{
+		Agent:      apiAgent,
+		LLMRuntime: llmRuntime,
+		StateStore: stateStore,
+	})
+	if err != nil {
+		t.Fatalf("NewSessionActor: %v", err)
+	}
+	state, ok := actor.StateSummary()
+	if !ok || !state.Busy() || !state.AwaitingObligations() {
+		t.Fatalf("pre-seeded parked state must read as busy-with-obligations, got %+v", state)
+	}
+	if actor.RunInFlight() {
+		t.Fatal("parked state must not report an in-process run")
+	}
+
+	origTimeout := aicliActorReadyWaitTimeout
+	aicliActorReadyWaitTimeout = 120 * time.Millisecond
+	defer func() { aicliActorReadyWaitTimeout = origTimeout }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	started := time.Now()
+	if err := waitForAICLIActorReady(ctx, actor); err != nil {
+		t.Fatalf("parked turn must be admitted for a new episode, got: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("parked turn must not burn the stale-state budget, waited %s", elapsed)
 	}
 }
 
