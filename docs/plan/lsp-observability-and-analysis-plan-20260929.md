@@ -403,6 +403,22 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 同会话状态事件给出 **`first_publish_ms=7156`**（该字段首个真机样本）；
 `appended_note_bytes` / `appended_empty_bytes`（此前 0/888 样本）开始有真实值。
 基线随之刷新：`lsp_cold_first_publish_p95=14363 ms`（n=3，P50 11349），§4.3 表已更新。
+
+**真机验收·补充（同日，无代码变更）**：为触发第九轮路径级快速失败与 O4 的
+`cold_fast_fail` 归因，构造"确定性冷路径"（模块内文件 + 依赖不存在的模块 +
+挂起的 GOPROXY，使其分析被卡住 23 s），单成员配置、同路径连续三次编辑：
+
+| # | outcome | 耗时 | 关键读数 |
+| --- | --- | --- | --- |
+| 1 | `degraded_no_fresh` | 2637 ms | `reason_category=no_publish`；首次付满预算、无快照 → 打标"已知冷" |
+| 2 | `degraded_no_fresh` | **276 ms** | `cold_fast_fail=true`（250 ms 预算 + 开销） |
+| 3 | `degraded_no_fresh` | **276 ms** | `cold_fast_fail=true`（持续生效） |
+
+同会话状态事件 `first_publish_ms=23322`（该路径分析 23 s 后才发布；发布即清标、恢复
+常规）——第九轮"首次付满 → 打标 → 后续只等 `cold_retry_ms` → 首个发布清除"的完整
+闭环在真机逐条复现（约 **10×** 等待缩减）。双成员配置同时验证了
+`attempted_members=2` 落盘与多成员 `first_publish_ms` 分别上报（3597/3639、
+4027/3936、2566/3523 ms）。
 - 行为备注：内容未变化的 write 会按幂等回放处理且不触发 LSP 请求（无变更不诊断，符合预期）。
 
 **崩溃根因定位（已闭环）**：跨会话同秒崩溃（09-30 10:37:33×3、10:43:04×3）确认为
