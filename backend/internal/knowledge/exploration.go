@@ -198,7 +198,9 @@ func (e ExplorationEdge) Validate() error {
 //   - 任务工作集：TaskID 非空，按 sessions.task_id 精确匹配；
 //   - 会话级工作集：TaskID 为空、SessionID 非空，取该会话下 task_id 为空的
 //     节点（W1 DTO 的"宿主无任务语义"回退口径，06 §4 Phase 2 W6）；
-//   - 跨任务：两者都为空，按 Target 精确匹配。
+//   - 跨任务：两者都为空，Target 作为加权检索键（exact > prefix > contains，
+//     限定名末段与全名都参与；归一化规则见 store_sqlite_exploration_read.go
+//     的 explorationLookupKeys），Target 为空时不按目标过滤。
 //
 // 过滤条件之间是 AND。
 type ExplorationNodeQuery struct {
@@ -209,7 +211,9 @@ type ExplorationNodeQuery struct {
 	// SessionID 限定会话级工作集：该会话下 task_id 为空的节点（不含任务锚点
 	// 行）。与 TaskID 同给时是 AND 语义。
 	SessionID string `json:"session_id,omitempty"`
-	// Target 精确匹配节点目标；空表示任意。
+	// Target 是目标过滤 / 检索键：任务、会话路径按 n.target 精确匹配；
+	// 跨任务路径作为加权检索键（exact > prefix > contains，支持限定名与
+	// 路径符号的末段匹配）。空表示任意。
 	Target string `json:"target,omitempty"`
 	// Type 过滤节点类型；空表示任意。
 	Type NodeType `json:"node_type,omitempty"`

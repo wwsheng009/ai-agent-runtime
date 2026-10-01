@@ -71,8 +71,9 @@ type PlanInput struct {
 	SessionID string `json:"session_id,omitempty"`
 	// Query 是本次规划的自然语言查询/目标；必填。
 	Query string `json:"query"`
-	// Target 是可选的精确查找目标（workspace 相对路径 / 符号名 / 已记录的
-	// 查询摘要）。为空时以 Query 作为精确查找键。
+	// Target 是可选的目标检索键（workspace 相对路径 / 符号限定名 / 已记录的
+	// 查询摘要）。跨任务路径由 store 侧做加权检索（exact > prefix > contains，
+	// 限定名末段参与）；为空时以 Query 作为检索键。
 	Target string `json:"target,omitempty"`
 	// Scope 是复用作用域；零值按跨任务（更保守）。
 	// Scope=task 但 TaskID 与 SessionID 都为空时同样按跨任务处理
@@ -221,7 +222,8 @@ func queryMeetsMinLength(query string, min int) bool {
 	return utf8.RuneCountInString(strings.TrimSpace(query)) >= min
 }
 
-// planLookupTarget 返回精确查找键：Target 优先，为空时退回 Query。
+// planLookupTarget 返回跨任务检索键：Target 优先，为空时退回 Query；
+// store 侧按加权规则（exact > prefix > contains）匹配，不再要求精确相等。
 func planLookupTarget(in PlanInput) string {
 	if target := strings.TrimSpace(in.Target); target != "" {
 		return target
@@ -243,7 +245,8 @@ func effectiveScope(in PlanInput) ReuseScope {
 //   - 任务工作集：同任务作用域且 TaskID 非空（s.task_id 精确匹配）；
 //   - 会话级工作集：同任务作用域、TaskID 为空但 SessionID 非空（该会话下
 //     task_id 为空的节点，W1 DTO 回退口径）；
-//   - 跨任务：其余情况按 Target（优先）或 Query 精确匹配。
+//   - 跨任务：其余情况把 Target（优先）或 Query 作为加权检索键交给 store
+//     （exact > prefix > contains；归一化规则见 explorationLookupKeys）。
 func planLookupQuery(in PlanInput) ExplorationNodeQuery {
 	q := ExplorationNodeQuery{WorkspaceID: in.WorkspaceID, Limit: in.Limit}
 	if effectiveScope(in) == ReuseScopeTask {

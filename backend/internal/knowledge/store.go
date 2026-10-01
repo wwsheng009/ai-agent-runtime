@@ -122,7 +122,8 @@ type Store interface {
 	AppendExplorationEdge(ctx context.Context, edge ExplorationEdge) (string, error)
 
 	// LookupExplorationNodes 返回工作区内的探索节点：给出 TaskID 查任务工作集，
-	// 为空则跨任务按 Target/Type 过滤；Limit <= 0 时使用 store 默认上限。
+	// 为空则跨任务按 Target 加权检索（exact > prefix > contains；Target 为空
+	// 时按最近使用全量返回）/ Type 过滤；Limit <= 0 时使用 store 默认上限。
 	// 纯读，reader 可用。
 	LookupExplorationNodes(ctx context.Context, q ExplorationNodeQuery) ([]ExplorationNode, error)
 

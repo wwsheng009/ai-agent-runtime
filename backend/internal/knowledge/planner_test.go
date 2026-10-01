@@ -314,7 +314,7 @@ func TestPlannerSessionWorkSetLookup(t *testing.T) {
 		t.Fatalf("lookup query = %+v, want task work set", reader.lastQuery)
 	}
 
-	// 3) 无锚点：跨任务仍按精确 target（既有路径不回归）。
+	// 3) 无锚点：跨任务把 target 作为加权检索键交给 store（planner 侧键不变）。
 	reader.lastQuery = ExplorationNodeQuery{}
 	in.TaskID = ""
 	in.SessionID = ""
@@ -327,6 +327,60 @@ func TestPlannerSessionWorkSetLookup(t *testing.T) {
 		t.Fatalf("lookup query = %+v, want cross-task target lookup", reader.lastQuery)
 	}
 }
+
+// 跨任务加权检索端到端（§6.3 登记项）：真实 store 下，限定名查询命中探索记忆，
+// 不再因为"整串查询当精确 target"而 no_candidates。
+func TestPlannerCrossTaskWeightedLookupFindsQualifiedName(t *testing.T) {
+	ctx := context.Background()
+	store := openExplorationTestStore(t)
+	wsID, err := store.EnsureWorkspace(ctx, Workspace{RootPath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("EnsureWorkspace: %v", err)
+	}
+	sess, err := store.UpsertExplorationSession(ctx, ExplorationSession{WorkspaceID: wsID, SessionID: "sess-chat"})
+	if err != nil {
+		t.Fatalf("UpsertExplorationSession: %v", err)
+	}
+	if _, err := store.AppendExplorationNode(ctx, ExplorationNode{
+		ExplorationID: sess, NodeType: NodeTypeSymbol, Target: "knowledge.Plan",
+		Confidence: 0.95, KnowledgeVersion: plannerTestVersion,
+	}); err != nil {
+		t.Fatalf("AppendExplorationNode: %v", err)
+	}
+
+	planner := NewPlanner(PlannerOptions{Reader: store, Now: plannerTestNow, VersionTTL: DefaultReuseVersionTTL})
+	in := plannerTestInput()
+	in.WorkspaceID = wsID
+	in.TaskID = ""
+	in.SessionID = ""
+	in.Scope = ReuseScopeCrossTask
+	in.Target = ""
+	in.Query = "knowledge.Plan"
+	in.Current = VersionObservation{Version: plannerTestVersion, ObservedAt: plannerTestNow()}
+	in.Now = plannerTestNow()
+
+	plan, err := planner.Plan(ctx, in)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Degraded || plan.Reason != PlanReasonOK || len(plan.Reuse) != 1 {
+		t.Fatalf("plan = %+v, want one reusable qualified-name node", plan)
+	}
+	if plan.Reuse[0].Target != "knowledge.Plan" || !plan.Reuse[0].Verify {
+		t.Fatalf("reuse = %+v, want knowledge.Plan with cross-task verify", plan.Reuse[0])
+	}
+
+	// 检索键无命中时仍是 no_candidates（不降级、不报错）。
+	in.Query = "zzz-not-recorded-anywhere"
+	plan, err = planner.Plan(ctx, in)
+	if err != nil {
+		t.Fatalf("Plan(no match): %v", err)
+	}
+	if plan.Degraded || plan.Reason != PlanReasonNoCandidates {
+		t.Fatalf("plan(no match) = %+v, want no_candidates", plan)
+	}
+}
+
 func assertDegradedPlan(t *testing.T, plan Plan, err error, reason string) {
 	t.Helper()
 	if err != nil {

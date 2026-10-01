@@ -44,10 +44,12 @@ func TestLookupExplorationNodesFilters(t *testing.T) {
 		{"workspace scope", ExplorationNodeQuery{WorkspaceID: wsID}, 4},
 		{"task scope", ExplorationNodeQuery{WorkspaceID: wsID, TaskID: "task-a"}, 3},
 		{"other task scope", ExplorationNodeQuery{WorkspaceID: wsID, TaskID: "task-b"}, 1},
-		{"cross-task by target", ExplorationNodeQuery{WorkspaceID: wsID, Target: "pkg/a.go"}, 1},
+		// 跨任务路径是加权检索（§6.3）：精确命中 pkg/a.go，前缀命中同文件的符号
+		// 节点 pkg/a.go#Foo；任务/会话路径的精确语义不受影响（见独立用例）。
+		{"cross-task weighted exact+prefix", ExplorationNodeQuery{WorkspaceID: wsID, Target: "pkg/a.go"}, 2},
 		{"workspace by type", ExplorationNodeQuery{WorkspaceID: wsID, Type: NodeTypeFile}, 2},
 		{"task by type", ExplorationNodeQuery{WorkspaceID: wsID, TaskID: "task-a", Type: NodeTypeFile}, 1},
-		{"target+type mismatch", ExplorationNodeQuery{WorkspaceID: wsID, Target: "pkg/a.go", Type: NodeTypeSymbol}, 0},
+		{"cross-task weighted + type", ExplorationNodeQuery{WorkspaceID: wsID, Target: "pkg/a.go", Type: NodeTypeSymbol}, 1},
 		{"unknown task", ExplorationNodeQuery{WorkspaceID: wsID, TaskID: "task-x"}, 0},
 	}
 	for _, tc := range cases {
