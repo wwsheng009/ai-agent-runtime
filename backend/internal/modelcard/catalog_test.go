@@ -329,6 +329,31 @@ func TestBuiltinSourceResolvesAnthropicLatestModels(t *testing.T) {
 	}
 }
 
+// Space Bunny 在 commandcode 网关（stealth/space-bunny-alpha）与 opencode.ai
+// 网关（space-bunny-free）上是同一个 openai 兼容端点，上下文窗口 1M。卡片缺失
+// 时会落回 fallback（无 max_context_tokens），preflight 只能按默认 256k 预算
+// 提前压缩，因此这里锁住 1M 窗口与 90% 自动压缩线。
+func TestBuiltinSourceResolvesSpaceBunnyWithOneMillionContext(t *testing.T) {
+	catalog, _, err := LoadSources([]Source{BuiltinSource()}, true)
+	if err != nil {
+		t.Fatalf("LoadSources builtin: %v", err)
+	}
+
+	// 第三个 id 只命中 model_patterns，覆盖同族新 id 也继承 1M 窗口。
+	for _, modelID := range []string{"space-bunny-free", "stealth/space-bunny-alpha", "space-bunny-pro"} {
+		spec, applied := catalog.Resolve(Context{RuntimeProtocol: "openai"}, modelID)
+		if len(applied) == 0 || applied[0].CardID != "stealth.space-bunny.openai" {
+			t.Fatalf("%q: expected card stealth.space-bunny.openai, got %+v", modelID, applied)
+		}
+		if spec.MaxContextTokens != 1000000 {
+			t.Fatalf("%q: expected max_context_tokens 1000000, got %+v", modelID, spec)
+		}
+		if spec.AutoCompactTokenLimit != 900000 {
+			t.Fatalf("%q: expected auto_compact_token_limit 900000, got %+v", modelID, spec)
+		}
+	}
+}
+
 func TestModelIDsFuzzyMatchCommonProviderAliases(t *testing.T) {
 	catalog, _, err := LoadSources([]Source{{
 		Name: "test.yaml",

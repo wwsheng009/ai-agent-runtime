@@ -958,6 +958,52 @@ providers:
         - z-ai/glm-5.1
       timeout: 300s
       truncation_adapter: openai_local
+    space_bunny:
+      api_key: ${SPACE_BUNNY_API_KEYS:-}
+      api_path: /v1/chat/completions
+      base_url: ${SPACE_BUNNY_BASE_URL:-https://api.commandcode.ai/provider/v1}
+      default_model: stealth/space-bunny-alpha
+      enabled: true
+      forward_url: /v1/chat/completions
+      max_tokens_limit: 128000
+      model_mappings:
+        '*': stealth/space-bunny-alpha
+        space-bunny-free: stealth/space-bunny-alpha
+        stealth/space-bunny-alpha: stealth/space-bunny-alpha
+      model_capabilities:
+        stealth/space-bunny-alpha:
+          input_modalities:
+            - text
+          max_context_tokens: 1000000
+          auto_compact_token_limit: 900000
+      protocol: openai
+      support_types:
+        - openai
+      supported_models:
+        - stealth/space-bunny-alpha
+      timeout: 300s
+      truncation_adapter: openai_local
+    space_bunny_free:
+      api_key: ${SPACE_BUNNY_FREE_API_KEYS:-}
+      api_path: /v1/chat/completions
+      base_url: ${SPACE_BUNNY_FREE_BASE_URL:-https://opencode.ai/zen/go}
+      default_model: space-bunny-free
+      enabled: true
+      forward_url: /v1/chat/completions
+      max_tokens_limit: 128000
+      model_capabilities:
+        space-bunny-free:
+          input_modalities:
+            - text
+          max_context_tokens: 1000000
+          auto_compact_token_limit: 900000
+      protocol: openai
+      support_types:
+        - openai
+      supported_models:
+        - space-bunny-free
+      timeout: 300s
+      truncation_adapter: openai_local
     sensenova:
       enabled: true
       protocol: openai

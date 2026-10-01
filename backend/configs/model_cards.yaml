@@ -977,3 +977,23 @@ cards:
       supports_reasoning_summary_parameter: true
       supports_reasoning_summaries: true
       comp_hash: "3000"
+# Space Bunny（stealth/space-bunny-alpha、opencode.ai 的 space-bunny-free）：
+  # 两个 id 都是 text-only 的 openai 兼容端点，上下文窗口 1M；auto_compact 取
+  # 窗口的 90%，与本目录其它百万级卡片（gpt-5.4 系列 945000）同一口径。
+  - id: stealth.space-bunny.openai
+    title: Space Bunny
+    priority: 90
+    provider_template: openai.chat
+    match:
+      model_ids:
+        - stealth/space-bunny-alpha
+        - space-bunny-free
+      model_patterns:
+        - space-bunny-*
+      protocols:
+        - openai
+    capability:
+      max_context_tokens: 1000000
+      auto_compact_token_limit: 900000
+      input_modalities:
+        - text
