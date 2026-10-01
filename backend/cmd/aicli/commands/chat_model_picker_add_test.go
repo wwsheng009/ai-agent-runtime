@@ -160,3 +160,55 @@ func TestPersistChatModelAddThenRemoveRoundTrip(t *testing.T) {
 		t.Fatalf("after round trip = %v, want %v", got, want)
 	}
 }
+
+// The model picker prepends an "add" row at index 0, so every model index is
+// shifted by one. Both the confirm and the delete branch must map through the
+// offset; using the raw picker index would select the wrong model, and the
+// delete branch would index models[-1] when the add row itself is highlighted.
+func TestBuildModelPickerItemsWithAddRowPrependsAddRow(t *testing.T) {
+	models := []string{"gpt-5", "claude-sonnet-4"}
+	list := buildModelPickerItemsWithAddRow(models, "gpt-5")
+
+	if len(list.items) != len(models)+1 {
+		t.Fatalf("items = %d, want %d (add row + models)", len(list.items), len(models)+1)
+	}
+	if list.addIndex != 0 || list.optionIndexOff != 1 {
+		t.Fatalf("addIndex = %d optionIndexOff = %d, want 0/1", list.addIndex, list.optionIndexOff)
+	}
+	if !strings.Contains(list.items[0].Title, "添加模型") {
+		t.Fatalf("first row = %q, want the add row", list.items[0].Title)
+	}
+	if list.items[0].SearchText == "" {
+		t.Fatal("the add row needs SearchText so it stays reachable by search")
+	}
+	// Row 1 must be the first model, not the second: this is the off-by-one the
+	// offset exists to absorb.
+	if !strings.HasPrefix(list.items[1].Title, models[0]) {
+		t.Fatalf("row 1 = %q, want it to start with %q", list.items[1].Title, models[0])
+	}
+}
+
+// Every model index must round-trip through the offset, and the add row must
+// map out of range so no branch can index models[-1].
+func TestModelPickerIndexMappingCoversEveryRow(t *testing.T) {
+	models := []string{"gpt-5", "claude-sonnet-4", "qwen3-max"}
+	list := buildModelPickerItemsWithAddRow(models, "")
+	for modelIndex, want := range models {
+		got := list.addIndex + 1 + modelIndex - list.optionIndexOff
+		if got != modelIndex {
+			t.Fatalf("model %q: mapped index = %d, want %d", want, got, modelIndex)
+		}
+	}
+	if addMapped := list.addIndex - list.optionIndexOff; addMapped >= 0 && addMapped < len(models) {
+		t.Fatalf("the add row must map out of range, got %d", addMapped)
+	}
+}
+
+// buildModelPickerModelItems keeps its single-return contract for callers that
+// only need rows; it must still carry the add row at the front.
+func TestBuildModelPickerModelItemsIncludesAddRow(t *testing.T) {
+	items := buildModelPickerModelItems([]string{"gpt-5"}, "")
+	if len(items) != 2 || !strings.Contains(items[0].Title, "添加模型") {
+		t.Fatalf("items = %#v, want the add row followed by the models", items)
+	}
+}

@@ -11,8 +11,6 @@ func TestFullScreenListDeleteKeysRequestDeletion(t *testing.T) {
 		name string
 		key  editorKey
 	}{
-		{name: "lowercase x", key: editorKey{kind: editorKeyRune, r: 'x'}},
-		{name: "uppercase X", key: editorKey{kind: editorKeyRune, r: 'X'}},
 		{name: "delete key", key: editorKey{kind: editorKeyDelete}},
 	}
 	for _, test := range tests {
@@ -33,6 +31,24 @@ func TestFullScreenListDeleteKeysRequestDeletion(t *testing.T) {
 				t.Fatal("delete must not be reported as cancelled")
 			}
 		})
+	}
+}
+
+// 'x' used to be a delete alias alongside the Delete key. It is now an ordinary
+// search character: type-to-filter owns every printable rune, and reserving one
+// for delete made searches that happen to contain an 'x' silently wrong. The
+// full 'a'/'x' contract is pinned in fullscreen_list_keys_test.go.
+func TestFullScreenListLowercaseXNoLongerDeletes(t *testing.T) {
+	items := []FullScreenListItem{{Title: "one"}, {Title: "two"}}
+	state := fullScreenListState{selected: 1}
+	matches := fullScreenListMatches(items, "")
+	result, done := applyFullScreenListKey(&state,
+		editorKey{kind: editorKeyRune, r: 'x'}, items, matches, 24)
+	if done || result.DeleteRequested {
+		t.Fatalf("'x' must be a search character, result=%#v done=%v", result, done)
+	}
+	if !state.searching || state.query != "x" {
+		t.Fatalf("'x' must start a search, searching=%v query=%q", state.searching, state.query)
 	}
 }
 
@@ -114,7 +130,9 @@ func TestRunFullScreenListLoopReturnsDeleteRequestWithOnDelete(t *testing.T) {
 		refreshSize: func() (int, int) { return 80, 12 },
 		writeFrame:  func(frame string) error { return nil },
 		readKey: func(context.Context) (editorKey, bool, error) {
-			return editorKey{kind: editorKeyRune, r: 'x'}, true, nil
+			// Must be the Delete key: 'x' is now an ordinary search character,
+			// so a readKey that keeps returning it would never leave the loop.
+			return editorKey{kind: editorKeyDelete}, true, nil
 		},
 	})
 	if err != nil {

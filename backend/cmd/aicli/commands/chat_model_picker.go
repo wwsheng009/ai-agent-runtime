@@ -133,14 +133,14 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 						return nil
 					}
 					currentModel := currentModelForProvider(session, providerName)
+					pickerList := buildModelPickerItemsWithAddRow(models, currentModel)
 					picked, pickErr := chatPickerStageResult(context.Background(), session, lease, ui.FullScreenListOptions{
 						Title:        "选择模型",
-						Subtitle:     fmt.Sprintf("provider: %s · Enter 确认，a 添加模型，x/Delete 删除选中模型，Esc 取消", providerName),
+						Subtitle:     fmt.Sprintf("provider: %s · Enter 确认，Delete 删除选中模型，Esc 取消", providerName),
 						EmptyMessage: "没有匹配的模型",
 						ConfirmLabel: "使用选中模型",
-						Items:        buildModelPickerModelItems(models, currentModel),
+						Items:        pickerList.items,
 						OnDelete:     func(int) error { return nil },
-						OnAdd:        func(int) error { return nil },
 					})
 					if pickErr != nil {
 						result := commandErrorResult(fmt.Errorf("选择模型失败: %w", pickErr))
@@ -152,7 +152,7 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 						early = &result
 						return nil
 					}
-					if picked.AddRequested {
+					if picked.Index == pickerList.addIndex {
 						// 自由文本录入模型 id。模型 id 不含空白，所以按空白/逗号切分
 						// 不会歧义，一次粘贴可加多个（与 Web 端 provider 编辑器一致）。
 						// 校验失败保持输入框打开并就地说明原因，不丢用户已输入的内容。
@@ -192,10 +192,14 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 						continue
 					}
 					if picked.DeleteRequested {
-						if picked.Index < 0 || picked.Index >= len(models) {
+						// The add row occupies index 0, so a raw index would both
+						// shift every model by one and panic on the add row itself
+						// (models[-1]). Map through the offset first.
+						modelIndex := picked.Index - pickerList.optionIndexOff
+						if modelIndex < 0 || modelIndex >= len(models) {
 							continue
 						}
-						target := models[picked.Index]
+						target := models[modelIndex]
 						if guardErr := chatModelRemovalGuard(providerCtx.Provider, currentModel, target); guardErr != nil {
 							_ = renderChatCommandResult(session, commandTextResult(guardErr.Error()), false)
 							continue
@@ -216,10 +220,11 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 						}
 						continue
 					}
-					if picked.Index < 0 || picked.Index >= len(models) {
+					modelIndex := picked.Index - pickerList.optionIndexOff
+					if modelIndex < 0 || modelIndex >= len(models) {
 						continue
 					}
-					modelName = models[picked.Index]
+					modelName = models[modelIndex]
 					break
 				}
 			}
@@ -317,8 +322,40 @@ func buildModelProviderFullScreenItems(providers []string, current string) []ui.
 	return buildChatPickerItems(providers, current, "provider", "provider")
 }
 
+// chatModelPickerAddRowTitle is the leading row that opens the add-model input.
+const chatModelPickerAddRowTitle = "＋ 添加模型（手动输入 id）"
+
+// modelPickerList is the model picker's rows plus the offset needed to map a
+// picker item index back to an entry in models. The add row is deliberately
+// prepended (mirroring the /login provider stage) so adding is the first
+// action, independent of the model catalog or the current filter.
+//
+// Adding is a row rather than a key on purpose: type-to-filter owns every
+// printable character, and 'a' is common in model ids (llama, audio, large).
+// Reserving it would force a "/" prefix that nothing advertises, which reads
+// as a dead key rather than a documented escape hatch.
+type modelPickerList struct {
+	items          []ui.FullScreenListItem
+	addIndex       int
+	optionIndexOff int
+}
+
+func buildModelPickerItemsWithAddRow(models []string, current string) modelPickerList {
+	items := buildChatPickerItems(models, current, "model", "model")
+	addItem := ui.FullScreenListItem{
+		Title:      chatModelPickerAddRowTitle,
+		Detail:     "model",
+		SearchText: "create new model 添加模型 新建",
+	}
+	return modelPickerList{
+		items:          append([]ui.FullScreenListItem{addItem}, items...),
+		addIndex:       0,
+		optionIndexOff: 1,
+	}
+}
+
 func buildModelPickerModelItems(models []string, current string) []ui.FullScreenListItem {
-	return buildChatPickerItems(models, current, "model", "model")
+	return buildModelPickerItemsWithAddRow(models, current).items
 }
 
 // chatModelRemovalGuard rejects a model deletion that would break the current

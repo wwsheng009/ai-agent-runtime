@@ -54,13 +54,6 @@ type FullScreenListOptions struct {
 	// caller can confirm the action, persist it (for example to the config
 	// file), and reopen the list with refreshed items.
 	OnDelete func(index int) error
-	// OnAdd, when non-nil, enables the add keys (a/A) and closes the list with
-	// AddRequested=true. Index names the highlighted row, or -1 when the current
-	// filter matches nothing -- adding is deliberately NOT row-scoped, because
-	// the common flow is "search a model, find it missing, press a to add it".
-	// Same contract as OnDelete: the list never mutates items or writes state;
-	// the caller owns validation, persistence and reopening with fresh items.
-	OnAdd func(index int) error
 	// PreviewForItem, when set, replaces item.Preview for the highlighted row.
 	PreviewForItem func(index int) string
 
@@ -102,11 +95,6 @@ type FullScreenListResult struct {
 	// on the highlighted enabled row. Index names the row. The list has
 	// already closed; the caller owns confirmation and persistence.
 	DeleteRequested bool
-	// AddRequested reports that the user pressed an add key (a/A). Index names
-	// the highlighted row, or -1 when nothing matches the current filter. The
-	// list has already closed; the caller owns the input, validation and
-	// persistence.
-	AddRequested bool
 	// Text carries the submitted value in FreeTextMode (trimmed). Index is -1
 	// for text submissions.
 	Text string
@@ -117,11 +105,6 @@ type fullScreenListState struct {
 	offset    int
 	query     string
 	searching bool
-	// canAdd mirrors options.OnAdd != nil. It lives on the state rather than
-	// as a parameter so the add key can fall back to a search character for
-	// callers that never opted in, without changing the key handler's
-	// signature for every existing caller and test.
-	canAdd bool
 	// Paging status, filled by the loop for the renderer when PageLoader is
 	// active. Read-only for navigation and filtering.
 	paging  bool
@@ -268,7 +251,7 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 		return FullScreenListResult{}, editorKey{}, fullScreenUnavailable("full-screen loop is not configured", nil)
 	}
 
-	state := fullScreenListState{canAdd: options.OnAdd != nil}
+	state := fullScreenListState{}
 	if options.FreeTextMode {
 		// Free-text mode reuses the query buffer as the value being edited; the
 		// item list and its filtering are bypassed entirely.
@@ -385,15 +368,6 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 				if options.OnDelete == nil {
 					// Delete keys are only meaningful when the caller opted in.
 					// Keep the list open so unconfigured callers are unaffected.
-					dirty = true
-					continue
-				}
-				return result, key, nil
-			}
-			if result.AddRequested {
-				if options.OnAdd == nil {
-					// Unreachable via the rune path (canAdd already gates it), but
-					// keep the list open rather than acting on a stale result.
 					dirty = true
 					continue
 				}
@@ -590,26 +564,6 @@ func applyFullScreenListKey(state *fullScreenListState, key editorKey, items []F
 		switch key.r {
 		case 'q', 'Q':
 			return FullScreenListResult{Index: -1, Cancelled: true}, true
-		case 'x', 'X':
-			if len(matches) > 0 {
-				return FullScreenListResult{Index: matches[state.selected], DeleteRequested: true}, true
-			}
-		case 'a', 'A':
-			// Add is opt-in like delete: a caller that never wired OnAdd keeps
-			// 'a' as an ordinary search character, so the rune falls through to
-			// the query branch. Swallowing it would silently corrupt every
-			// search that happens to contain an 'a'.
-			if !state.canAdd {
-				return fullScreenListBeginSearch(state, key.r), false
-			}
-			// Unlike delete, add does not act on a row, so it stays available
-			// even when the filter matches nothing -- that is exactly when the
-			// user wants it ("搜不到 -> 现场加一个"). Index is -1 then.
-			idx := -1
-			if len(matches) > 0 {
-				idx = matches[state.selected]
-			}
-			return FullScreenListResult{Index: idx, AddRequested: true}, true
 		case 'j':
 			moveFullScreenListSelection(state, items, matches, 1)
 		case 'k':
@@ -624,13 +578,19 @@ func applyFullScreenListKey(state *fullScreenListState, key editorKey, items []F
 			state.searching = true
 		default:
 			// 直接输入即搜索：非导航可打印字符立即进入搜索模式，
-			// 恢复 legacy picker “输入关键词即过滤”的体验。搜索以
-			// j/k/g/G/q 开头的词时先按 / 再输入即可。
+			// 恢复 legacy picker "输入关键词即过滤"的体验。保留字只剩
+			// q/j/k/g/G，搜索以它们开头的词时先按 / 再输入即可。
+			//
+			// 删除走 Delete 键、添加走列表首行，都是刻意不占可打印字符：
+			// 模型 id 里 a（llama/audio/large）和 x 很常见，命令键抢走它们
+			// 就得靠 / 绕，而 / 绕法不会被提示，用户只会以为按键失灵。
 			return fullScreenListBeginSearch(state, key.r), false
 		}
 	case editorKeyDelete:
 		// The Delete key is a delete action outside search mode; inside search
-		// mode it is handled above as "trim query character".
+		// mode it is handled above as "trim query character". There is
+		// deliberately no 'x' alias: it would steal a printable character from
+		// type-to-filter, and callers already advertise the Delete key.
 		if len(matches) > 0 {
 			return FullScreenListResult{Index: matches[state.selected], DeleteRequested: true}, true
 		}

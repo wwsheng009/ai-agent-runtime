@@ -787,7 +787,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | `/s` | 开启流式输出，等价 `/stream on` |
 | `/normal`、`/n` | 关闭流式输出，等价 `/stream off` |
 | `/theme [mode\|palette\|list\|status\|preview\|select]` | 查看或切换终端主题（明暗 auto/dark/light + 配色 classic/focus/contrast/mono） |
-| `/model [name|status|clear-reasoning|--provider ...]` | 查看或切换 provider/model/reasoning_effort。不带名字时打开全屏模型选择器：`Enter` 使用选中模型、**`a` 添加模型**、`x`/`Delete` 删除选中模型、`Esc` 取消。`a` 打开自由文本输入，可一次粘贴多个（空格或逗号分隔），重复项会被点名跳过；添加后立刻写回 `config.yaml` 的 `supported_models` 并重开列表 |
+| `/model [name|status|clear-reasoning|--provider ...]` | 查看或切换 provider/model/reasoning_effort。不带名字时打开全屏模型选择器：`Enter` 使用选中模型、`Delete` 键删除选中模型（带确认）、`Esc` 取消。**添加模型是列表首行的「＋ 添加模型」**，选中后 `Enter` 进入自由文本输入；可一次粘贴多个（空格或逗号分隔），重复项会被点名跳过，添加后立刻写回 `config.yaml` 的 `supported_models` 并重开列表。添加/删除都不占用字母键，因此直接输入即搜索（`llama`、`qwen` 等含 `a`/`x` 的模型名可直接搜出） |
 | `/login [provider|--provider ...]` | 在 chat 内新增或更新 provider 登录凭证，并可刷新/切换当前模型 |
 | `/account [provider] [show\|detect] [--save] [--no-refresh] [--json] [--timeout 15s]` | 查看或刷新「当前（或指定）provider」的账户余额/订阅额度；`--save` 才写回 `config.yaml` |
 | `/accounts [refresh\|display] [--wait] [--enabled-only] [--no-refresh] [--json] [--timeout 15s]` | 全部 provider 的余额总览：默认提交后台刷新并立刻渲染缓存快照，`refresh` 只提交、`display` 只看缓存（零网络）、`--wait` 才是阻塞拉取；备用屏内按 `r` 刷新显示 |
