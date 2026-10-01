@@ -779,19 +779,12 @@ func transcriptReplacementInvalidatesAckedHistory(previous, next TranscriptState
 	if effects.ledger == nil {
 		return false
 	}
-	ackedByCell := make(map[scene.CellID][]HistoryCommit)
-	for _, entry := range effects.ledger.byToken {
-		if entry.State != HistoryCommitAcked {
-			continue
-		}
-		ackedByCell[entry.Commit.CellID] = append(ackedByCell[entry.Commit.CellID], entry.Commit)
-	}
-	if len(ackedByCell) == 0 {
-		return false
-	}
-
-	previousIndex := transcriptCellIndexes(previous)
-	nextIndex := transcriptCellIndexes(next)
+	// 单遍扫描账本，不再按 cell 物化 map[CellID][]HistoryCommit：旧实现把每个
+	// Acked commit（含 Lines 切片头）追加进中间 map，resumed 长会话上每次替换
+	// 判定都要重新分配整份已交付历史（生产 pprof：12 分钟 4.19GB，占全部分配
+	// 19%）。判定只需要每个 commit 的 CellID / SourceRange，就地比较即可；
+	// 任一条件不满足即返回 true，因此与遍历顺序无关，语义与逐 cell 分组一致。
+	var previousIndex, nextIndex map[scene.CellID]int
 	// Prefix comparisons: for every acked cell the original code compared
 	// previous.Cells[:oldAt] with next.Cells[:newAt]. When positions are
 	// unchanged (oldAt == newAt) every such comparison is a prefix of the same
@@ -800,7 +793,17 @@ func transcriptReplacementInvalidatesAckedHistory(previous, next TranscriptState
 	// change makes the two prefix slices differ in length, so it already
 	// invalidates the acknowledged history.
 	maxPrefix := -1
-	for cellID, commits := range ackedByCell {
+	seenAcked := false
+	for _, entry := range effects.ledger.byToken {
+		if entry.State != HistoryCommitAcked {
+			continue
+		}
+		seenAcked = true
+		if previousIndex == nil {
+			previousIndex = transcriptCellIndexes(previous)
+			nextIndex = transcriptCellIndexes(next)
+		}
+		cellID := entry.Commit.CellID
 		oldAt, oldOK := previousIndex[cellID]
 		newAt, newOK := nextIndex[cellID]
 		if !oldOK || !newOK {
@@ -825,13 +828,14 @@ func transcriptReplacementInvalidatesAckedHistory(previous, next TranscriptState
 		// genuine correction of acknowledged bytes. A theme change that
 		// affects rendering is handled by SetThemeContextAction (rebasePending),
 		// not by the transcript replacement path.
-		for _, commit := range commits {
-			start, end := commit.SourceRange.Start, commit.SourceRange.End
-			if start < 0 || end < start || end > len(oldCell.Source) || end > len(newCell.Source) ||
-				oldCell.Source[start:end] != newCell.Source[start:end] {
-				return true
-			}
+		start, end := entry.Commit.SourceRange.Start, entry.Commit.SourceRange.End
+		if start < 0 || end < start || end > len(oldCell.Source) || end > len(newCell.Source) ||
+			oldCell.Source[start:end] != newCell.Source[start:end] {
+			return true
 		}
+	}
+	if !seenAcked {
+		return false
 	}
 	if maxPrefix >= 0 && !transcriptSemanticPrefixEqual(previous.Cells[:maxPrefix], next.Cells[:maxPrefix]) {
 		return true
