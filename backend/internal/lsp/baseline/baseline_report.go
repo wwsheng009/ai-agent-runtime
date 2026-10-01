@@ -66,6 +66,11 @@ func Rows(stats Stats) []Row {
 	if stats.ActiveOutput != stats.EditOutput {
 		outputText = fmt.Sprintf("%d（全部 %d）", stats.ActiveOutput, stats.EditOutput)
 	}
+	appendSamples := fmt.Sprintf("追加 %d B / LSP 活跃会话内回执可见 %s B", stats.AppendedBytes, outputText)
+	if stats.AppendedDiagBytes+stats.AppendedNoteBytes+stats.AppendedEmptyBytes > 0 {
+		appendSamples += fmt.Sprintf("（新构建拆分：诊断 %d / 提示 %d / 空块 %d）",
+			stats.AppendedDiagBytes, stats.AppendedNoteBytes, stats.AppendedEmptyBytes)
+	}
 
 	return []Row{
 		{
@@ -104,7 +109,7 @@ func Rows(stats Stats) []Row {
 			Metric:     "lsp_append_bytes_ratio",
 			Value:      appendRatio,
 			Window:     window,
-			Samples:    fmt.Sprintf("追加 %d B / LSP 活跃会话内回执可见 %s B", stats.AppendedBytes, outputText),
+			Samples:    appendSamples,
 			Conclusion: "待标定（需人工判读）",
 			Date:       date,
 		},
@@ -124,7 +129,41 @@ func Rows(stats Stats) []Row {
 			Conclusion: "待标定（需人工判读）",
 			Date:       date,
 		},
+		{
+			Metric:     "lsp_cold_first_probe_ratio",
+			Value:      coldProbeText(stats),
+			Window:     window,
+			Samples:    coldProbeSamples(stats),
+			Conclusion: coldProbeConclusion(stats),
+			Date:       date,
+		},
 	}
+}
+
+// coldProbeText 输出 no_fresh 中"首探针"的占比：未标记已知冷、按完整预算等待
+// 的那部分（O4 的 cold_fast_fail=false）。占比高说明路径级快速失败尚未覆盖主要
+// 成本，是下一轮是否引入 cold_probe 预算的判据；未采集输出 n/a + 原因。
+func coldProbeText(stats Stats) string {
+	total := stats.ColdFirstProbe + stats.ColdRepeat
+	if total <= 0 {
+		return "n/a（窗口内无带 cold_fast_fail 的 no_fresh 请求；新构建落盘后开始采集）"
+	}
+	return ratioText(stats.ColdFirstProbe, total, "")
+}
+
+func coldProbeSamples(stats Stats) string {
+	if stats.ColdFirstProbe+stats.ColdRepeat <= 0 {
+		return "n=0（未采集，非缺失数据）"
+	}
+	return fmt.Sprintf("first %d / repeat %d（repeat 已由路径级快速失败覆盖）",
+		stats.ColdFirstProbe, stats.ColdRepeat)
+}
+
+func coldProbeConclusion(stats Stats) string {
+	if stats.ColdFirstProbe+stats.ColdRepeat <= 0 {
+		return "待采集（需要 cold_fast_fail 事件字段）"
+	}
+	return "待标定（需人工判读）"
 }
 
 // fallbackSamples 描述 fallback 的分母构成；attempted 为 0 时不再打印
@@ -222,6 +261,18 @@ func RenderMarkdown(stats Stats) string {
 	fmt.Fprintf(&builder, "- 诊断：命中 %d 次（injected %d 次），累计条数 %d\n", stats.DiagHit, stats.Injected, stats.DiagCount)
 	fmt.Fprintf(&builder, "- 追加：累计 %d 字节；截断请求 %d 次（省略 %d 条 / %d 字符）\n",
 		stats.AppendedBytes, stats.Truncated, stats.OmittedItems, stats.OmittedByChars)
+	if stats.AppendedDiagBytes+stats.AppendedNoteBytes+stats.AppendedEmptyBytes > 0 {
+		fmt.Fprintf(&builder, "- 追加拆分（O2，新构建样本）：诊断 %d / 提示 %d / 空块 %d 字节\n",
+			stats.AppendedDiagBytes, stats.AppendedNoteBytes, stats.AppendedEmptyBytes)
+	}
+	if stats.ColdFirstProbe+stats.ColdRepeat > 0 {
+		fmt.Fprintf(&builder, "- 冷路径探针（O4）：首探针 %d / 重复 %d（no_fresh 请求）\n",
+			stats.ColdFirstProbe, stats.ColdRepeat)
+	}
+	if stats.MultiMemberRequests > 0 {
+		fmt.Fprintf(&builder, "- 多成员请求（O5）：%d 次（最多尝试 %d 个成员）\n",
+			stats.MultiMemberRequests, stats.AttemptedMembersMax)
+	}
 	fmt.Fprintf(&builder, "- 服务分布：%s\n", compactJSON(stats.Servers))
 	fmt.Fprintf(&builder, "- 编辑调用（tool.completed 中的编辑类工具）：%d 次；可读回执字节 %d（%d 次回执含字节）\n\n",
 		stats.EditCalls, stats.EditOutput, stats.EditOutputEvs)

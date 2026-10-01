@@ -331,7 +331,10 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 			!client.HasSnapshot(path) && client.TakeColdGrace(path) {
 			remaining += grace
 		}
-		items, itemsFresh := client.WaitDiagnostics(ctx, path, version, remaining)
+		// 实际等待预算（可能被冷快速失败缩减、或被冷启动宽限延长）：降级
+		// 文案必须报告真实预算，否则"within 1s"会在只等 250ms 时误导模型与日志。
+		budget := remaining
+		items, itemsFresh := client.WaitDiagnostics(ctx, path, version, budget)
 		if !itemsFresh {
 			// A path with no snapshot that just spent more than the reduced
 			// budget is known cold; later edits fail fast until the path's own
@@ -342,7 +345,7 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 			if coldBudget > 0 && !client.HasSnapshot(path) && remaining > coldBudget {
 				client.MarkColdWait(path)
 			}
-			reason := "no fresh diagnostics within " + wait.String()
+			reason := "no fresh diagnostics within " + budget.String()
 			// Distinguish "server analyzed and had nothing" from "server never
 			// published anything": the latter usually means the file is outside
 			// the server's module or inside a directory the toolchain ignores

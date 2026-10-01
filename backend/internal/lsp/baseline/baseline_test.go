@@ -19,9 +19,9 @@ func writeFixture(t *testing.T) string {
 		t.Fatalf("mkdir: %v", err)
 	}
 	lines := []string{
-		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"trigger":"inline","outcome":"injected","duration_ms":10,"diag_count":2,"appended_bytes":100,"server":"gopls","path_fingerprint":"p1","diag_fingerprint":"d1"}}`,
+		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"trigger":"inline","outcome":"injected","duration_ms":10,"diag_count":2,"appended_bytes":100,"appended_diag_bytes":80,"appended_note_bytes":10,"appended_empty_bytes":10,"attempted_members":2,"server":"gopls","path_fingerprint":"p1","diag_fingerprint":"d1"}}`,
 		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:02:00Z","payload":{"trigger":"tool","outcome":"clean","duration_ms":7,"path_fingerprint":"p1"}}`,
-		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:01:00Z","payload":{"trigger":"inline","outcome":"degraded_no_fresh","duration_ms":30,"reason_category":"wait_timeout"}}`,
+		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:01:00Z","payload":{"trigger":"inline","outcome":"degraded_no_fresh","duration_ms":30,"reason_category":"wait_timeout","cold_fast_fail":false}}`,
 		`{"type":"lsp.request.finished","session_id":"s2","timestamp":"2026-09-29T10:02:00Z","payload":{"trigger":"tool","outcome":"no_server","duration_ms":5}}`,
 		`{"type":"lsp.server.state","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"server":"gopls","state":"ready","pid":42,"first_publish_ms":1234}}`,
 		`{"type":"tool.completed","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"logical_tool":"apply_patch","output_model_visible_bytes":1000}}`,
@@ -91,14 +91,78 @@ func TestAnalyzeFixtureMatchesScriptNumbers(t *testing.T) {
 	if got := stats.DegradeReasons["wait_timeout"]; got != 1 {
 		t.Fatalf("degrade_reasons[wait_timeout] = %d, want 1", got)
 	}
+	if stats.AppendedDiagBytes != 80 || stats.AppendedNoteBytes != 10 || stats.AppendedEmptyBytes != 10 {
+		t.Fatalf("append breakdown = %d/%d/%d, want 80/10/10",
+			stats.AppendedDiagBytes, stats.AppendedNoteBytes, stats.AppendedEmptyBytes)
+	}
+	if stats.ColdFirstProbe != 1 || stats.ColdRepeat != 0 {
+		t.Fatalf("cold probe split = %d/%d, want 1/0", stats.ColdFirstProbe, stats.ColdRepeat)
+	}
+	if stats.MultiMemberRequests != 1 || stats.AttemptedMembersMax != 2 {
+		t.Fatalf("multi-member = %d/max %d, want 1/2", stats.MultiMemberRequests, stats.AttemptedMembersMax)
+	}
+	if got := rows["lsp_cold_first_probe_ratio"].Value; got != "1.0000" {
+		t.Fatalf("cold first probe ratio = %q, want 1.0000", got)
+	}
+	if got := rows["lsp_append_bytes_ratio"].Samples; !strings.Contains(got, "诊断 80") {
+		t.Fatalf("append samples missing breakdown: %q", got)
+	}
 	if stats.ColdFirstPublishP50MS == nil || *stats.ColdFirstPublishP50MS != 1234 {
 		t.Fatalf("cold first publish p50 = %v, want 1234", stats.ColdFirstPublishP50MS)
 	}
 	if got := rows["lsp_cold_first_publish_p95"].Value; got != "1234 ms" {
 		t.Fatalf("cold first publish p95 row = %q, want 1234 ms", got)
 	}
-	if report := RenderMarkdown(stats); !strings.Contains(report, "§4.3 基线登记表") {
-		t.Fatalf("report missing table header")
+	if report := RenderMarkdown(stats); !strings.Contains(report, "§4.3 基线登记表") ||
+		!strings.Contains(report, "冷路径探针（O4）") || !strings.Contains(report, "多成员请求（O5）") {
+		t.Fatalf("report missing table header or O4/O5 detail lines")
+	}
+}
+
+// TestColdProbeRowStates pins the n/a vs ratio states of the O4 split row.
+func TestColdProbeRowStates(t *testing.T) {
+	byMetric := func(stats Stats) map[string]Row {
+		rows := map[string]Row{}
+		for _, row := range Rows(stats) {
+			rows[row.Metric] = row
+		}
+		return rows
+	}
+	if got := byMetric(Stats{})["lsp_cold_first_probe_ratio"].Value; !strings.HasPrefix(got, "n/a") {
+		t.Fatalf("empty cold probe row = %q, want n/a", got)
+	}
+	row := byMetric(Stats{ColdFirstProbe: 3, ColdRepeat: 1})["lsp_cold_first_probe_ratio"]
+	if row.Value != "0.7500" || !strings.Contains(row.Samples, "first 3 / repeat 1") {
+		t.Fatalf("mixed cold probe row = %#v", row)
+	}
+}
+
+// TestColdProbeIgnoresUnclassifiedNoFresh pins that legacy no_fresh events
+// (without the cold_fast_fail field) do not inflate the first-probe counter.
+func TestColdProbeIgnoresUnclassifiedNoFresh(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "2026", "10", "01", "sess", "events")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	line := `{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-10-01T00:00:00Z","payload":{"trigger":"inline","outcome":"degraded_no_fresh","duration_ms":1000}}`
+	if err := os.WriteFile(filepath.Join(dir, "runtime-events.jsonl"), []byte(line+"\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	stats, err := Analyze(Options{Roots: []string{root}})
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	if stats.ColdFirstProbe != 0 || stats.ColdRepeat != 0 {
+		t.Fatalf("unclassified no_fresh must not count: first=%d repeat=%d",
+			stats.ColdFirstProbe, stats.ColdRepeat)
+	}
+	rows := map[string]Row{}
+	for _, row := range Rows(stats) {
+		rows[row.Metric] = row
+	}
+	if got := rows["lsp_cold_first_probe_ratio"].Value; !strings.HasPrefix(got, "n/a") {
+		t.Fatalf("row = %q, want n/a for an unclassified window", got)
 	}
 }
 

@@ -248,9 +248,22 @@ LSP 的收益路径只有一条主链路 + 一个可选工具面：
 | O4 | 请求事件新增 `cold_fast_fail` 归因 | `TestColdRetryAfterGraceTimeout` |
 | O5 | 请求事件新增 `attempted_members`（多成员观测，仅 >1 落盘） | `observer_join_test` |
 | O6 | 空结果块 compact（默认）+ 修正字面 `\n`；配置 `diagnostics.emptyStyle` | `TestRenderDiagnosticsEmptyStyle` |
+| O7 | 分析侧消费新字段：新增 `lsp_cold_first_probe_ratio` 行、追加字节拆分与多成员明细；降级文案报告真实预算 | `TestColdProbeRowStates` / `TestColdProbeIgnoresUnclassifiedNoFresh` / `--selftest` |
 
 效果待新窗口复算（预期：pyright/ts 112 次请求 → 0；fallback(attempted) 0.7215 → ~0.671；
 clean 空块 ~130B → ~60B；`cold_fast_fail` 可直接统计）。
+
+### 6.4 复算工具就绪（O7，2026-10-01）
+
+- Go 基线包（`internal/lsp/baseline`）与 Python 脚本已同构消费 O2/O4/O5 新字段：
+  §4.3 新增 `lsp_cold_first_probe_ratio`（no_fresh 的首探针/重复探针拆分），
+  追加字节行附"新构建拆分：诊断/提示/空块"，事实明细附多成员请求计数；
+  旧构建缺 `cold_fast_fail` 字段的事件**不参与拆分**（"缺失 ≠ 首探针"）。
+- 首轮复算（窗口至 2026-10-01T03:00Z，1089 请求）：`cold_fast_fail` 0 样本（运行中构建尚未包含
+  O4）；`no_publish` 3 条均无该字段；多成员请求 0 次（120 个带 `tool_call_id` 的编辑调用全部单文件）。
+- 已确认的新读数：**冷启动 P95 = 14363 ms（n=3，P50 11349ms）**——冷启动才是"会话首个编辑
+  必然降级"的主因，路径级快速失败 + prewarm 的处置方向正确；首次 no_fresh 全预算等待的规模
+  需待 ≥20 条带 `cold_fast_fail` 样本后再定（判据：`lsp_cold_first_probe_ratio`）。
 
 ---
 
@@ -304,7 +317,7 @@ go test ./internal/lsp/ -run "TestHintOnceDedupesInlineAppend|TestEmptyPublishEa
 
 | 文件 | 内容 |
 | --- | --- |
-| `.tmp/lsp-benefit-baseline.md` / `.json` | 888 请求基线报告（§4.3 七项指标 + 事实明细 + 按日） |
+| `.tmp/lsp-benefit-baseline.md` / `.json` | 888 请求基线报告（§4.3 七项指标 + 事实明细 + 按日；2026-10-01 起为八项，新增 `lsp_cold_first_probe_ratio`） |
 | `.tmp/lsp-benefit-facts.md` / `.json` | 构建代际对比、结果分桶、闭环明细、注入明细、每会话 |
 
 > 快照会随新事件增长而变化；报告正文中的数字均以上述窗口（截至 2026-10-01T01:53:39Z）为准。

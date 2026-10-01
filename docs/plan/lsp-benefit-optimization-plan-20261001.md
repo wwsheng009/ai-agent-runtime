@@ -158,6 +158,7 @@ eventbridge 仅 >1 时落盘（单成员请求载荷保持现状）；白名单�
 | O4 | ✅ | 冷分支置位 → `RequestRecord`/`Event` → eventbridge → 白名单 | `TestColdRetryAfterGraceTimeout`（恰好 1 次 `cold_fast_fail`） |
 | O5 | ✅ | `AttemptedMembers = len(outcome.Servers)`，仅 >1 落盘 | `observer_join_test` |
 | O6 | ✅ | `spec.go`（`emptyStyle` 默认 compact）、`format.go`、`bridge.go`；顺带把空块的字面 `\n` 修为真实换行 | `TestRenderDiagnosticsEmptyStyle`（compact/full 两态） |
+| O7 | ✅ | 分析侧消费新字段：Go 基线包 + Python 脚本同构新增 `lsp_cold_first_probe_ratio` 行、追加字节拆分、多成员明细；降级文案改报**实际预算**（原恒报配置 `wait_ms`） | `TestColdProbeRowStates` / `TestColdProbeIgnoresUnclassifiedNoFresh` / `--selftest` / `TestColdRetryAfterGraceTimeout` |
 
 **验证记录**
 
@@ -203,3 +204,4 @@ eventbridge 仅 >1 时落盘（单成员请求载荷保持现状）；白名单�
 | clean 平均追加字节 | ~130B | → ~60B | `appended_empty_bytes` 直接读数（O2 后） |
 | `cold_fast_fail` | 无字段 | 可直接统计路径级快速失败次数 | 新事件字段 |
 | `attempted_members` | 无字段 | 可确认多成员工作区是否出现叠加等待 | 新事件字段（仅 >1 落盘） |
+| `lsp_cold_first_probe_ratio` | n/a（0 分类样本） | ≥20 样本后判读：首探针占比高 → 下一轮引入 `cold_probe_ms`（保守默认）；占比低 → 维持现状 | 基线报告新行（Go/Python 同构，旧事件缺字段不计入） |

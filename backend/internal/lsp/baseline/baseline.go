@@ -93,6 +93,20 @@ type Stats struct {
 	Truncated      int            `json:"truncated_requests"`
 	OmittedItems   int            `json:"omitted_items"`
 	OmittedByChars int            `json:"omitted_by_chars"`
+	// Append breakdown（O2，2026-10-01）：事件携带的诊断正文/提示/空块字节拆分。
+	// 旧构建无字段时保持 0，渲染为"未采集"（不伪造 0）。
+	AppendedDiagBytes  int `json:"appended_diag_bytes,omitempty"`
+	AppendedNoteBytes  int `json:"appended_note_bytes,omitempty"`
+	AppendedEmptyBytes int `json:"appended_empty_bytes,omitempty"`
+	// ColdFirstProbe / ColdRepeat：no_fresh 请求中"首探针"（路径未标记已知冷，
+	// 按完整预算等待）与"重复探针"（cold_fast_fail=true，已被路径级快速失败
+	// 覆盖）的拆分；前者是下一轮 cold_probe 预算的判据（O4）。
+	ColdFirstProbe int `json:"cold_first_probe,omitempty"`
+	ColdRepeat     int `json:"cold_repeat,omitempty"`
+	// MultiMemberRequests / AttemptedMembersMax：一次请求尝试 >1 个成员的次数与
+	// 最大成员数（多成员工作区是否出现叠加等待的判据，O5）。
+	MultiMemberRequests int `json:"multi_member_requests,omitempty"`
+	AttemptedMembersMax int `json:"attempted_members_max,omitempty"`
 	// DegradeReasons breaks degraded requests down by the low-sensitivity
 	// reason_category enum (new-build events only; legacy events lack it).
 	DegradeReasons map[string]int `json:"degrade_reasons,omitempty"`
@@ -165,20 +179,26 @@ func Analyze(opts Options) (Stats, error) {
 	seen := map[string]struct{}{}
 
 	type requestFact struct {
-		sessionID       string
-		day             string
-		trigger         string
-		outcome         string
-		durationMS      int
-		diagCount       int
-		appendedBytes   int
-		omittedItems    int
-		omittedByChars  int
-		server          string
-		ts              time.Time
-		pathFingerprint string
-		diagFingerprint string
-		reasonCategory  string
+		sessionID          string
+		day                string
+		trigger            string
+		outcome            string
+		durationMS         int
+		diagCount          int
+		appendedBytes      int
+		appendedDiagBytes  int
+		appendedNoteBytes  int
+		appendedEmptyBytes int
+		omittedItems       int
+		omittedByChars     int
+		server             string
+		ts                 time.Time
+		pathFingerprint    string
+		diagFingerprint    string
+		reasonCategory     string
+		coldFastFail       bool
+		coldProbeClassified bool
+		attemptedMembers   int
 	}
 	var requests []requestFact
 
@@ -250,6 +270,9 @@ func Analyze(opts Options) (Stats, error) {
 						durationMS:      payloadInt(payload, "duration_ms"),
 						diagCount:       payloadInt(payload, "diag_count"),
 						appendedBytes:   payloadInt(payload, "appended_bytes"),
+						appendedDiagBytes:  payloadInt(payload, "appended_diag_bytes"),
+						appendedNoteBytes:  payloadInt(payload, "appended_note_bytes"),
+						appendedEmptyBytes: payloadInt(payload, "appended_empty_bytes"),
 						omittedItems:    payloadInt(payload, "omitted_items"),
 						omittedByChars:  payloadInt(payload, "omitted_by_chars"),
 						server:          payloadString(payload, "server"),
@@ -257,6 +280,9 @@ func Analyze(opts Options) (Stats, error) {
 						pathFingerprint: payloadString(payload, "path_fingerprint"),
 						diagFingerprint: payloadString(payload, "diag_fingerprint"),
 						reasonCategory:  payloadString(payload, "reason_category"),
+						coldFastFail:    payloadBool(payload, "cold_fast_fail"),
+						coldProbeClassified: payloadHas(payload, "cold_fast_fail"),
+						attemptedMembers: payloadInt(payload, "attempted_members"),
 					}
 					requests = append(requests, fact)
 					if fact.sessionID != "" {
@@ -305,6 +331,9 @@ func Analyze(opts Options) (Stats, error) {
 			stats.Servers[fact.server]++
 		}
 		stats.AppendedBytes += fact.appendedBytes
+		stats.AppendedDiagBytes += fact.appendedDiagBytes
+		stats.AppendedNoteBytes += fact.appendedNoteBytes
+		stats.AppendedEmptyBytes += fact.appendedEmptyBytes
 		stats.DiagCount += fact.diagCount
 		if fact.omittedItems > 0 || fact.omittedByChars > 0 {
 			stats.Truncated++
@@ -326,6 +355,21 @@ func Analyze(opts Options) (Stats, error) {
 		}
 		if strings.HasPrefix(fact.outcome, "degraded") {
 			stats.Degraded++
+		}
+		// 只有携带 cold_fast_fail 字段的事件才参与拆分：旧构建缺字段时
+		// "缺失"不等于"首探针"，否则会把历史 no_fresh 全部误计入分子。
+		if fact.outcome == "degraded_no_fresh" && fact.coldProbeClassified {
+			if fact.coldFastFail {
+				stats.ColdRepeat++
+			} else {
+				stats.ColdFirstProbe++
+			}
+		}
+		if fact.attemptedMembers > 1 {
+			stats.MultiMemberRequests++
+		}
+		if fact.attemptedMembers > stats.AttemptedMembersMax {
+			stats.AttemptedMembersMax = fact.attemptedMembers
 		}
 		if fact.reasonCategory != "" {
 			if stats.DegradeReasons == nil {
@@ -447,6 +491,30 @@ func payloadInt(payload map[string]interface{}, key string) int {
 	default:
 		return 0
 	}
+}
+
+// payloadBool 解析布尔载荷（JSON true/false 或字符串 "true"）。
+func payloadBool(payload map[string]interface{}, key string) bool {
+	if payload == nil {
+		return false
+	}
+	switch value := payload[key].(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "true")
+	default:
+		return false
+	}
+}
+
+// payloadHas 报告键是否存在（区分"字段缺失"与"显式 false"）。
+func payloadHas(payload map[string]interface{}, key string) bool {
+	if payload == nil {
+		return false
+	}
+	_, ok := payload[key]
+	return ok
 }
 
 // ratioText 渲染比值；分母为 0 时按反模式纪律输出 n/a 与原因。

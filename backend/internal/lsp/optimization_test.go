@@ -629,10 +629,14 @@ func TestColdRetryAfterGraceTimeout(t *testing.T) {
 	}
 
 	start = time.Now()
-	_ = bridge.AppendToResult(ctx, "e2\n", []string{path})
+	second := bridge.AppendToResult(ctx, "e2\n", []string{path})
 	secondElapsed := time.Since(start)
 	if secondElapsed > 400*time.Millisecond {
 		t.Fatalf("second wait = %v, want the reduced cold retry (~100ms)", secondElapsed)
+	}
+	// 降级文案必须报告实际预算（100ms），而不是配置的完整 wait_ms（200ms）。
+	if !strings.Contains(second, "within 100ms") {
+		t.Fatalf("cold fast-fail note must report the actual budget, got:\n%s", second)
 	}
 	coldFails := 0
 	for _, event := range recorder.snapshot() {

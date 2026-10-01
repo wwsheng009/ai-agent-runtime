@@ -171,12 +171,17 @@ def aggregate(events, stats):
                     "duration_ms": to_int(payload.get("duration_ms")) or 0,
                     "diag_count": to_int(payload.get("diag_count")) or 0,
                     "appended_bytes": to_int(payload.get("appended_bytes")) or 0,
+                    "appended_diag_bytes": to_int(payload.get("appended_diag_bytes")) or 0,
+                    "appended_note_bytes": to_int(payload.get("appended_note_bytes")) or 0,
+                    "appended_empty_bytes": to_int(payload.get("appended_empty_bytes")) or 0,
                     "omitted_items": to_int(payload.get("omitted_items")) or 0,
                     "omitted_by_chars": to_int(payload.get("omitted_by_chars")) or 0,
                     "server": str(payload.get("server") or "").strip(),
                     "path_fingerprint": str(payload.get("path_fingerprint") or "").strip(),
                     "diag_fingerprint": str(payload.get("diag_fingerprint") or "").strip(),
                     "reason_category": str(payload.get("reason_category") or "").strip(),
+                    "cold_fast_fail": payload.get("cold_fast_fail"),
+                    "attempted_members": to_int(payload.get("attempted_members")) or 0,
                 }
             )
             continue
@@ -216,6 +221,21 @@ def aggregate(events, stats):
     degrade_reasons = Counter(
         item["reason_category"] for item in requests if item["reason_category"]
     )
+    # O2/O4/O5 新字段（2026-10-01 起落盘）：旧构建无字段时保持 0，报告渲染为
+    # "未采集"而不是 0。
+    appended_diag_bytes = sum(item["appended_diag_bytes"] for item in requests)
+    appended_note_bytes = sum(item["appended_note_bytes"] for item in requests)
+    appended_empty_bytes = sum(item["appended_empty_bytes"] for item in requests)
+    cold_first_probe = sum(
+        1 for item in requests
+        if item["outcome"] == "degraded_no_fresh" and item["cold_fast_fail"] is False
+    )
+    cold_repeat = sum(
+        1 for item in requests
+        if item["outcome"] == "degraded_no_fresh" and item["cold_fast_fail"] is True
+    )
+    multi_member_requests = sum(1 for item in requests if item["attempted_members"] > 1)
+    attempted_members_max = max((item["attempted_members"] for item in requests), default=0)
 
     durations = sorted(item["duration_ms"] for item in requests)
     truncated = [item for item in requests if item["omitted_items"] > 0 or item["omitted_by_chars"] > 0]
@@ -287,6 +307,13 @@ def aggregate(events, stats):
         "truncated_requests": len(truncated),
         "omitted_items": sum(item["omitted_items"] for item in requests),
         "omitted_by_chars": sum(item["omitted_by_chars"] for item in requests),
+        "appended_diag_bytes": appended_diag_bytes,
+        "appended_note_bytes": appended_note_bytes,
+        "appended_empty_bytes": appended_empty_bytes,
+        "cold_first_probe": cold_first_probe,
+        "cold_repeat": cold_repeat,
+        "multi_member_requests": multi_member_requests,
+        "attempted_members_max": attempted_members_max,
         "sessions": len(sessions),
         "first_at": min(timestamps).isoformat() if timestamps else None,
         "last_at": max(timestamps).isoformat() if timestamps else None,
@@ -357,6 +384,16 @@ def render_markdown(rows, stats):
     lines.append(f"- 追加：累计 {stats['appended_bytes']} 字节；"
                  f"截断请求 {stats['truncated_requests']} 次（省略 {stats['omitted_items']} 条 / "
                  f"{stats['omitted_by_chars']} 字符）")
+    if (stats["appended_diag_bytes"] + stats["appended_note_bytes"]
+            + stats["appended_empty_bytes"]) > 0:
+        lines.append(f"- 追加拆分（O2，新构建样本）：诊断 {stats['appended_diag_bytes']} / "
+                     f"提示 {stats['appended_note_bytes']} / 空块 {stats['appended_empty_bytes']} 字节")
+    if stats["cold_first_probe"] + stats["cold_repeat"] > 0:
+        lines.append(f"- 冷路径探针（O4）：首探针 {stats['cold_first_probe']} / "
+                     f"重复 {stats['cold_repeat']}（no_fresh 请求）")
+    if stats["multi_member_requests"] > 0:
+        lines.append(f"- 多成员请求（O5）：{stats['multi_member_requests']} 次"
+                     f"（最多尝试 {stats['attempted_members_max']} 个成员）")
     lines.append(f"- 服务分布：{json.dumps(stats['servers'], ensure_ascii=False)}")
     lines.append(f"- 编辑调用（tool.completed 中的编辑类工具）：{stats['edit_calls']} 次；"
                  f"可读回执字节 {stats['edit_output_bytes']}（{stats['edit_output_events']} 次回执含字节）")
@@ -384,6 +421,9 @@ def render_markdown(rows, stats):
                  "回执未携带时标记 n/a（不猜分母）。")
     lines.append("- `lsp_cold_first_publish_p95` 依赖首个发布时补发的 `first_publish_ms`"
                  "（新构建落盘后开始采集；旧事件标记 n/a，不把未采集渲染成 0）。")
+    lines.append("- `lsp_cold_first_probe_ratio` 拆分 no_fresh：首探针（路径未标记已知冷、"
+                 "按完整预算等待）与重复探针（`cold_fast_fail=true`，已被路径级快速失败覆盖）；"
+                 "无带该字段的样本时输出 n/a。")
     lines.append("- 本报告只汇总 aicli/runtime-server 会话事件；runtime-server 的事件目录"
                  "可用 `--root` 指向其 chat-logs/事件根。")
     return "\n".join(lines) + "\n"
@@ -426,6 +466,12 @@ def build_rows(stats):
         append_ratio = ratio_text(stats["appended_bytes"], stats["active_edit_output_bytes"])
     else:
         append_ratio = "n/a（LSP 活跃会话内编辑回执缺少 output_model_visible_bytes）"
+    append_samples = (f"追加 {stats['appended_bytes']} B / LSP 活跃会话内回执可见 "
+                      f"{stats['active_edit_output_bytes']} B（全部 {stats['edit_output_bytes']} B）")
+    if (stats["appended_diag_bytes"] + stats["appended_note_bytes"]
+            + stats["appended_empty_bytes"]) > 0:
+        append_samples += (f"（新构建拆分：诊断 {stats['appended_diag_bytes']} / "
+                           f"提示 {stats['appended_note_bytes']} / 空块 {stats['appended_empty_bytes']}）")
     p95 = None if stats["latency_p95_ms"] is None else f"{stats['latency_p95_ms']} ms"
     if stats["closure_eligible"] > 0:
         closure_value = ratio_text(stats["closure_closed"], stats["closure_eligible"])
@@ -475,8 +521,7 @@ def build_rows(stats):
             "metric": "lsp_append_bytes_ratio",
             "value": append_ratio,
             "window": window,
-            "samples": f"追加 {stats['appended_bytes']} B / LSP 活跃会话内回执可见 "
-                       f"{stats['active_edit_output_bytes']} B（全部 {stats['edit_output_bytes']} B）",
+            "samples": append_samples,
             "conclusion": "待标定（需人工判读）",
             "date": date,
         },
@@ -496,7 +541,36 @@ def build_rows(stats):
             "conclusion": "待标定（需人工判读）",
             "date": date,
         },
+        {
+            "metric": "lsp_cold_first_probe_ratio",
+            "value": cold_probe_row_value(stats),
+            "window": window,
+            "samples": cold_probe_row_samples(stats),
+            "conclusion": cold_probe_row_conclusion(stats),
+            "date": date,
+        },
     ]
+
+
+def cold_probe_row_value(stats):
+    """no_fresh 中首探针占比（O4）：未标记已知冷、按完整预算等待的那部分。"""
+    total = stats["cold_first_probe"] + stats["cold_repeat"]
+    if total <= 0:
+        return "n/a（窗口内无带 cold_fast_fail 的 no_fresh 请求；新构建落盘后开始采集）"
+    return ratio_text(stats["cold_first_probe"], total)
+
+
+def cold_probe_row_samples(stats):
+    if stats["cold_first_probe"] + stats["cold_repeat"] <= 0:
+        return "n=0（未采集，非缺失数据）"
+    return (f"first {stats['cold_first_probe']} / repeat {stats['cold_repeat']}"
+            "（repeat 已由路径级快速失败覆盖）")
+
+
+def cold_probe_row_conclusion(stats):
+    if stats["cold_first_probe"] + stats["cold_repeat"] <= 0:
+        return "待采集（需要 cold_fast_fail 事件字段）"
+    return "待标定（需人工判读）"
 
 
 def cold_row_value(stats):
@@ -522,14 +596,16 @@ def selftest():
         lines = [
             {"type": "lsp.request.finished", "session_id": "s1", "timestamp": "2026-09-29T10:00:00Z",
              "payload": {"trigger": "inline", "outcome": "injected", "duration_ms": 10,
-                         "diag_count": 2, "appended_bytes": 100, "server": "gopls",
+                         "diag_count": 2, "appended_bytes": 100,
+                         "appended_diag_bytes": 80, "appended_note_bytes": 10,
+                         "appended_empty_bytes": 10, "attempted_members": 2, "server": "gopls",
                          "path_fingerprint": "p1", "diag_fingerprint": "d1"}},
             {"type": "lsp.request.finished", "session_id": "s1", "timestamp": "2026-09-29T10:02:00Z",
              "payload": {"trigger": "tool", "outcome": "clean", "duration_ms": 7,
                          "path_fingerprint": "p1"}},
             {"type": "lsp.request.finished", "session_id": "s1", "timestamp": "2026-09-29T10:01:00Z",
              "payload": {"trigger": "inline", "outcome": "degraded_no_fresh", "duration_ms": 30,
-                         "reason_category": "wait_timeout"}},
+                         "reason_category": "wait_timeout", "cold_fast_fail": False}},
             {"type": "lsp.request.finished", "session_id": "s2", "timestamp": "2026-09-29T10:02:00Z",
              "payload": {"trigger": "tool", "outcome": "no_server", "duration_ms": 5}},
             {"type": "lsp.server.state", "session_id": "s1", "timestamp": "2026-09-29T10:00:00Z",
@@ -561,6 +637,13 @@ def selftest():
             ("edit_output_bytes", result["edit_output_bytes"], 1100),
             ("cold_first_publish_p50_ms", result["cold_first_publish_p50_ms"], 1234),
             ("cold_first_publish_p95_ms", result["cold_first_publish_p95_ms"], 1234),
+            ("appended_diag_bytes", result["appended_diag_bytes"], 80),
+            ("appended_note_bytes", result["appended_note_bytes"], 10),
+            ("appended_empty_bytes", result["appended_empty_bytes"], 10),
+            ("cold_first_probe", result["cold_first_probe"], 1),
+            ("cold_repeat", result["cold_repeat"], 0),
+            ("multi_member_requests", result["multi_member_requests"], 1),
+            ("attempted_members_max", result["attempted_members_max"], 2),
             ("sessions", result["sessions"], 2),
             ("closure_eligible", result["closure_eligible"], 1),
             ("closure_closed", result["closure_closed"], 1),
@@ -577,12 +660,15 @@ def selftest():
             failures.append(f"closure: got {rows['lsp_closure_ratio']}")
         if rows["lsp_cold_first_publish_p95"] != "1234 ms":
             failures.append(f"cold first publish: got {rows['lsp_cold_first_publish_p95']}")
+        if rows["lsp_cold_first_probe_ratio"] != ratio_text(1, 1):
+            failures.append(f"cold probe ratio: got {rows['lsp_cold_first_probe_ratio']}")
         if failures:
             print("selftest FAILED:")
             for failure in failures:
                 print("  -", failure)
             return 1
-        print("selftest OK（4 请求 / 覆盖率 1.0 / P50 7ms / 追加比 100/1100 / fallback 1/3 / closure 1.0）")
+        print("selftest OK（4 请求 / 覆盖率 1.0 / P50 7ms / 追加比 100/1100 / fallback 1/3 / "
+              "closure 1.0 / cold probe 1.0）")
         return 0
 
 
