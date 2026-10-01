@@ -665,6 +665,47 @@ func TestDiagnoseCountsNewVsTotalDiagnostics(t *testing.T) {
 	}
 }
 
+// TestColdGraceCoversNewPathOnWarmClient pins O10: a path that has never
+// published still gets the one-time grace extension on a client that has
+// already published for other paths. Live evidence (2026-10-01): a newly
+// created Go file's first analysis landed 1.71s after didOpen and missed the
+// plain 1.0s budget, so the model never saw the compile error of the file it
+// had just written; the grace-extended budget covers it.
+func TestColdGraceCoversNewPathOnWarmClient(t *testing.T) {
+	dir := t.TempDir()
+	warm := writeTestFile(t, dir, "warm.go", "package main\n")
+	fresh := writeTestFile(t, dir, "fresh.go", "package main\n\n// fresh\n")
+	fake := newFakeServer(t)
+	cfg := testConfig(t, func(c *Config) {
+		c.Servers[0].EmptyPublishConclusive = boolPtr(true)
+		c.Diagnostics.WaitMS = 300
+		c.Diagnostics.StartWaitMS = 100
+		c.Diagnostics.ColdStartGraceMS = 900
+		c.Diagnostics.ColdRetryMS = 100
+		c.Diagnostics.EmptyConfirmMS = 40
+	})
+	bridge := NewBridgeWithOptions(cfg, dir, BridgeOptions{Dial: fake.dial()})
+	ctx := context.Background()
+	t.Cleanup(func() { bridge.Stop(ctx) })
+
+	// Warm the connection: this path publishes immediately (empty, stamped).
+	if out := bridge.AppendToResult(ctx, "warm\n", []string{warm}); !strings.Contains(out, `count="0"`) {
+		t.Fatalf("warm-up request must go clean, got:\n%s", out)
+	}
+	// The next path's first publish needs 700ms: inside the grace-extended
+	// budget (300+900ms), past the plain one (300ms).
+	fake.setPublishDelay(700 * time.Millisecond)
+	start := time.Now()
+	out := bridge.AppendToResult(ctx, "fresh\n", []string{fresh})
+	elapsed := time.Since(start)
+	if !strings.Contains(out, `count="0"`) {
+		t.Fatalf("new path on a warm client must be covered by the grace, got:\n%s", out)
+	}
+	if elapsed < 700*time.Millisecond {
+		t.Fatalf("elapsed = %v, want the delayed publish awaited (>=700ms)", elapsed)
+	}
+}
+
 // TestColdRetryAfterGraceTimeout pins the long-cold-window behavior: once the
 // one-time grace is spent with nothing ever published, later edits fail fast
 // (cold_retry_ms) instead of re-paying the full budget on every edit, and the

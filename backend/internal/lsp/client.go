@@ -348,12 +348,20 @@ func (c *Client) EverPublished() bool {
 	return c != nil && c.everPublished.Load()
 }
 
-// TakeColdGrace grants a one-time extended wait for path while this
-// connection has never published anything. It bounds the cold-start grace to
-// one grant per path per server instance, so an ignored file (never
-// published) pays the extension once instead of on every edit.
+// TakeColdGrace grants a one-time extended wait for path while that path has
+// no snapshot yet. The grant is per path per server instance: an ignored file
+// (never published) pays the extension once and is then covered by the
+// per-path cold fast-fail, so steady-state latency stays untouched.
+//
+// The gate used to be client-level ("this connection has never published
+// anything"), which starved every path first seen after the connection's
+// first publish. Live evidence (2026-10-01, session_20261001112556_LRs1jqOD,
+// warm gopls): a newly created Go file's first analysis published at 1.71s
+// while the plain 1.0s budget expired first, so the model never saw the
+// compile error of the file it had just written; the same request succeeds
+// inside the grace-extended budget.
 func (c *Client) TakeColdGrace(path string) bool {
-	if c == nil || c.everPublished.Load() {
+	if c == nil {
 		return false
 	}
 	uri := PathToURI(path)

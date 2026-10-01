@@ -251,6 +251,7 @@ LSP 的收益路径只有一条主链路 + 一个可选工具面：
 | O7 | 分析侧消费新字段：新增 `lsp_cold_first_probe_ratio` 行、追加字节拆分与多成员明细；降级文案报告真实预算 | `TestColdProbeRowStates` / `TestColdProbeIgnoresUnclassifiedNoFresh` / `--selftest` |
 | O8 | 删除/移走路径跳过内联诊断（不再把正常 delete 变成 `read file` 降级提示；目录同样跳过） | `TestAppendToResultSkipsDeletedPaths` |
 | O9 | 请求事件新增 `total_diag_count`/`new_diag_count`（scope 过滤前全量与新增条数）→ 基线新增 `lsp_diag_new_ratio`；**A6（scope 默认值）从此有数据可判** | `TestDiagnoseCountsNewVsTotalDiagnostics` / eventbridge 载荷断言 / `--selftest` |
+| O10 | 冷启动宽限按路径授予（真机发现：暖连接上新建文件 1.71s 发布 vs 1.0s 预算 → 白丢诊断） | `TestColdGraceCoversNewPathOnWarmClient` |
 
 效果待新窗口复算（预期：pyright/ts 112 次请求 → 0；fallback(attempted) 0.7215 → ~0.671；
 clean 空块 ~130B → ~60B；`cold_fast_fail` 可直接统计）。

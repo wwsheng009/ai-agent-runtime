@@ -161,8 +161,22 @@ eventbridge 仅 >1 时落盘（单成员请求载荷保持现状）；白名单�
 | O7 | ✅ | 分析侧消费新字段：Go 基线包 + Python 脚本同构新增 `lsp_cold_first_probe_ratio` 行、追加字节拆分、多成员明细；降级文案改报**实际预算**（原恒报配置 `wait_ms`） | `TestColdProbeRowStates` / `TestColdProbeIgnoresUnclassifiedNoFresh` / `--selftest` / `TestColdRetryAfterGraceTimeout` |
 | O8 | ✅ | 删除/移走的路径（apply_patch delete/move）不再进入内联诊断：文件已不存在时静默跳过，不再产生 `read file` 降级提示与无谓请求；目录同样跳过 | `TestAppendToResultSkipsDeletedPaths` |
 | O9 | ✅ | 请求事件新增 `total_diag_count`/`new_diag_count`（scope 过滤前全量与其中新增条数，仅全量>0 时落盘）：解锁 A6（scope 默认值）决策；基线新增 `lsp_diag_new_ratio` 行与明细 | `TestDiagnoseCountsNewVsTotalDiagnostics` / eventbridge 载荷断言 / baseline fixture / `--selftest` |
+| O10 | ✅ | 冷启动宽限改为**按路径**授予（去掉客户端级 `everPublished` 门）：暖连接上新文件的首次分析不再撞 1s 预算；重复探针仍由路径级冷快速失败兜底 | `TestColdGraceCoversNewPathOnWarmClient`（暖机后新路径 700ms 发布被宽限覆盖） |
 
 **验证记录**
+
+**真机会话验收（2026-10-01，`session_20261001112556_LRs1jqOD` @ `127.0.0.1:56317`，含 O1–O9 的构建）**
+
+四轮远程驱动（`POST /web/api/invoke`）+ 会话事件（`chat-logs/.../events/runtime-events.jsonl`）实测：
+
+- 冷路径（O4）：gopls 首次使用，首探针烧满宽限预算 2501ms（`no_publish`）→ 第二探针 250ms、`cold_fast_fail=true`；
+- 注入（O2/O9）：新建含未定义符号的 Go 文件 → `outcome=injected`、`total_diag_count=1`、`new_diag_count=1`、
+  `duration_ms=30`、`appended_diag_bytes=214`；块文本含 `error 5:9 [gopls] undefined: zzLSPProbeUndefined`，无 `<lsp_note`；
+- 干净路径（O6）：对干净文件追加注释 → `outcome=clean`、`appended_empty_bytes=111`、182ms 早接受，块为自闭合 `<lsp_diagnostics ... count="0"/>`；
+- 删除跳过（O8）：两次删除探测文件均**零请求、零提示**（对照：同机旧构建会话删除同一文件当场输出 `<lsp_note>...read file...`）；
+- 预检（O1）：typescript/pyright/clangd 在 `/web/api/lsp/status` 直接 `unavailable`（不产生请求）；
+- **真机发现（已修为 O10）**：暖连接上新建文件的首次分析在 1.71s 发布，1.0s 预算先到期 → 该轮白丢诊断；
+  冷宽限当时被客户端级 `everPublished` 门挡住。
 
 - `go test ./internal/lsp/... ./internal/runtimeobserve/... -count=1` → 全绿（lsp 24.2s）。
 - `go test -p 2 ./internal/tools/... ./internal/runtimeserver/... ./internal/webui/... -count=1` → exit 0。
@@ -208,3 +222,4 @@ eventbridge 仅 >1 时落盘（单成员请求载荷保持现状）；白名单�
 | `attempted_members` | 无字段 | 可确认多成员工作区是否出现叠加等待 | 新事件字段（仅 >1 落盘） |
 | `lsp_cold_first_probe_ratio` | n/a（0 分类样本） | ≥20 样本后判读：首探针占比高 → 下一轮引入 `cold_probe_ms`（保守默认）；占比低 → 维持现状 | 基线报告新行（Go/Python 同构，旧事件缺字段不计入） |
 | `lsp_diag_new_ratio` | n/a（0 诊断样本） | ≥20 诊断样本后判读：新增占比低（如 <50%）→ 评估把 `diagnostics.scope` 默认切到 `changed`；占比高 → 维持 `all`（A6） | 基线报告新行（Go/Python 同构，仅全量>0 的事件携带） |
+| 新文件首探针命中率 | 真机 1/1 丢失（1.71s 发布 vs 1.0s 预算） | O10 后首探针在宽限预算（2.5s）内命中；重复探针仍 250ms 快失败 | 新文件编辑的 `injected` / `degraded_no_fresh` 计数 |

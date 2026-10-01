@@ -122,10 +122,13 @@ type DiagnosticsConfig struct {
 	// pool state stays observable through `lsp_servers` / `/lsp status`.
 	// nil = default true.
 	HintOnce *bool `yaml:"hintOnce,omitempty" json:"hintOnce,omitempty"`
-	// ColdStartGraceMS extends the wait once per path while the server has
-	// never published anything (cold view / first analysis). It is bounded to
-	// one grant per path per server instance and disabled after the first
-	// publish ever observed, so steady-state latency is untouched.
+	// ColdStartGraceMS extends the wait once per path while that path has no
+	// snapshot yet (cold view / first analysis of a file). It is bounded to
+	// one grant per path per server instance and repeats are covered by the
+	// per-path cold fast-fail, so steady-state latency is untouched. A warm
+	// connection still grants it to a path it has never published for: the
+	// first analysis of a newly created file can outlive the plain budget
+	// (live evidence: 1.71s publish vs 1.0s budget).
 	// 0/unset = DefaultColdStartGraceMS; negative disables.
 	ColdStartGraceMS int `yaml:"coldStartGraceMs,omitempty" json:"coldStartGraceMs,omitempty"`
 	// ColdRetryMS is the reduced wait once a path is known cold: the

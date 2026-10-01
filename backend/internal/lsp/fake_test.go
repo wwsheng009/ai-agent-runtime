@@ -115,6 +115,13 @@ func (f *fakeServer) setSuppressPublish(v bool) {
 	f.mu.Unlock()
 }
 
+// setPublishDelay postpones diagnostics publishes; safe while serving.
+func (f *fakeServer) setPublishDelay(d time.Duration) {
+	f.mu.Lock()
+	f.publishDelay = d
+	f.mu.Unlock()
+}
+
 func (f *fakeServer) count(method string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -284,7 +291,10 @@ func (f *fakeServer) publish(conn net.Conn, uri string, version int, source func
 			"diagnostics": diagnostics,
 		},
 	}
-	if delay := f.publishDelay; delay > 0 {
+	f.mu.Lock()
+	delay := f.publishDelay
+	f.mu.Unlock()
+	if delay > 0 {
 		// Asynchronous: a real server keeps reading while it computes, and on
 		// net.Pipe a blocking sleep would also stall the client's next write.
 		go func() {
