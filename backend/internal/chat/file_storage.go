@@ -1007,6 +1007,23 @@ func IsAddressableSessionID(sessionID string) bool {
 	return sanitizeSessionID(sessionID) == sessionID
 }
 
+// normalizeSessionIDForWrite 把落库前的会话 ID 收敛到可寻址的规范形式。
+//
+// 读取侧（Load/Delete/…）始终先跑 sanitizeSessionID，写入侧若保留原串就会
+// 产生“写得进、读不出”的脏行（如 "/root/agent"、尾随斜杠、首尾空白）：
+// 这些行会出现在列表里，点击必然 404，而且按规范化后的 ID 删除会命中 0 行。
+// 正常 ID 经过本函数保持不变；只有本身不可寻址的 ID 才会被改写或拒绝。
+func normalizeSessionIDForWrite(sessionID string) (string, error) {
+	normalized := sanitizeSessionID(sessionID)
+	if normalized == "" {
+		return "", ErrInvalidSession
+	}
+	if !IsAddressableSessionID(normalized) {
+		return "", fmt.Errorf("%w: %q", ErrUnaddressableSessionID, sessionID)
+	}
+	return normalized, nil
+}
+
 func sortSessionsByUpdated(sessions []*Session) {
 	sort.Slice(sessions, func(i, j int) bool {
 		left, right := sessions[i], sessions[j]

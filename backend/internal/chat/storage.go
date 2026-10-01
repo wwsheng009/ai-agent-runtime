@@ -18,6 +18,13 @@ var (
 	ErrSessionExpired     = errors.New("session expired")
 	ErrInvalidMessageType = errors.New("invalid message type")
 	ErrInvalidTags        = errors.New("invalid tags")
+	// ErrUnaddressableSessionID 表示会话 ID 经规范化后仍无法按原串读回
+	// （例如 "<nil>"）。这类 ID 一旦落库就是“写得进、读不出”的孤儿，
+	// 必须在写入边界拒绝。
+	ErrUnaddressableSessionID = errors.New("unaddressable session id")
+	// ErrCleanupStalled 表示清理循环选中了候选会话但一轮下来没有任何实际
+	// 删除进展。调用方必须停止循环而不是原地重扫（旧实现会无限空转）。
+	ErrCleanupStalled = errors.New("session cleanup stalled")
 )
 
 // SessionStorage 会话存储接口

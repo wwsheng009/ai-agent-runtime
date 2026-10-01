@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,7 +35,10 @@ import (
 // sqliteSessionSchemaVersion whenever the on-disk schema shape changes.
 // v2: session_messages.identity_hash（role+content 身份指纹 + 索引），支撑
 // checkpoint 投影重建的 O(1) 快速路径（P0-3）。
-const sqliteSessionSchemaVersion = 2
+// v3: sessions 清理谓词索引（expires_at,id）/（updated_at,id）。没有索引时
+// Cleanup 退化为全表扫描 + 临时 B 树排序，在 WASM SQLite 上会长时间占满
+// 单连接；更糟的是“选得出、删不掉”的脏行会让循环无限重扫（见 Cleanup 注释）。
+const sqliteSessionSchemaVersion = 3
 
 type SQLiteSessionStorage struct {
 	db  *sql.DB
@@ -569,6 +573,13 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user_updated
 ON sessions(user_id, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_state_updated
 ON sessions(state, updated_at DESC, id);
+-- v3: 清理谓词复合索引。Cleanup 拆成两条查询后都整段命中这里，且都是
+-- covering + 免排序：
+--   expires_at < ?                      → 前缀范围 + 覆盖列
+--   expires_at IS NULL AND updated_at<? → 等值前缀 + 范围 + 覆盖列
+-- 没有它时旧查询只能 SCAN sessions + USE TEMP B-TREE FOR ORDER BY。
+CREATE INDEX IF NOT EXISTS idx_sessions_expires
+ON sessions(expires_at, updated_at, id);
 
 CREATE TABLE IF NOT EXISTS session_messages (
     session_id TEXT NOT NULL,
@@ -705,6 +716,19 @@ func (s *SQLiteSessionStorage) Save(ctx context.Context, session *Session) error
 	}
 	if strings.TrimSpace(session.ID) == "" {
 		session.ID = generateSessionID()
+	} else {
+		// 写入边界最后一道防线：读取侧始终先 sanitizeSessionID，这里若原样
+		// 落库就会产生“写得进、读不出”的脏行，进而卡死清理循环。
+		normalized, err := normalizeSessionIDForWrite(session.ID)
+		if err != nil {
+			return err
+		}
+		if normalized != session.ID {
+			if logger := logpkg.S(); logger != nil {
+				logger.Warnf("[session-history] normalizing unaddressable session id on save: %q -> %q", session.ID, normalized)
+			}
+			session.ID = normalized
+		}
 	}
 	if session.CreatedAt.IsZero() {
 		session.CreatedAt = time.Now()
@@ -752,6 +776,16 @@ func (s *SQLiteSessionStorage) Update(ctx context.Context, session *Session) err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	normalized, err := normalizeSessionIDForWrite(session.ID)
+	if err != nil {
+		return err
+	}
+	if normalized != session.ID {
+		if logger := logpkg.S(); logger != nil {
+			logger.Warnf("[session-history] normalizing unaddressable session id on update: %q -> %q", session.ID, normalized)
+		}
+		session.ID = normalized
 	}
 	ctx, tx, tracker, err := s.beginWriteTx(ctx)
 	if err != nil {
@@ -2620,8 +2654,21 @@ func (s *SQLiteSessionStorage) Delete(ctx context.Context, sessionID string) err
 	return s.deleteSession(ctx, sessionID, true)
 }
 
+// deleteSession 删除外部传入的会话 ID：先按读取侧同一套规则规范化。
 func (s *SQLiteSessionStorage) deleteSession(ctx context.Context, sessionID string, reclaim bool) error {
-	sessionID = sanitizeSessionID(sessionID)
+	return s.deleteSessionByID(ctx, sanitizeSessionID(sessionID), reclaim)
+}
+
+// deleteSessionExact 按数据库中原样存储的 ID 删除（清理循环专用）。
+//
+// 不能对已落库的 ID 再跑 sanitizeSessionID："/root/p26s3" 会被改写成
+// "p26s3"，DELETE 命中 0 行并返回 ErrSessionNotFound；旧清理循环把该错误
+// 当作“已被并发删除”吞掉，于是这类行永远留在表里，循环无限重扫。
+func (s *SQLiteSessionStorage) deleteSessionExact(ctx context.Context, sessionID string, reclaim bool) error {
+	return s.deleteSessionByID(ctx, sessionID, reclaim)
+}
+
+func (s *SQLiteSessionStorage) deleteSessionByID(ctx context.Context, sessionID string, reclaim bool) error {
 	result, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, sessionID)
 	if err != nil {
 		return fmt.Errorf("delete sqlite session: %w", err)
@@ -2715,46 +2762,106 @@ func (s *SQLiteSessionStorage) Close(ctx context.Context, sessionID string) erro
 	return s.Update(ctx, session)
 }
 
+// sessionCleanupBatchSize 是单轮清理的最大候选数。
+const sessionCleanupBatchSize = 128
+
+// Cleanup 删除过期会话。
+//
+// 两个关键不变量（v3 修复）：
+//  1. 候选行来自 sessions 表本身，必须按落库原样 ID 删除（deleteSessionExact）。
+//     旧实现对候选 ID 再跑 sanitizeSessionID，"/root/x" 被改写成 "x" 后命中
+//     0 行；循环又把 ErrSessionNotFound 当成“已被并发删除”吞掉并继续重扫，
+//     于是清理 goroutine 会永久空转（生产事故：~1 核 + 数百 MB/s 重读，直到
+//     进程重启）。这里只有真正删除成功才计入 removed。
+//  2. 一轮下来没有任何实际删除进展时必须退出（ErrCleanupStalled），无论
+//     原因是什么，都不能原地重扫同一批行。
 func (s *SQLiteSessionStorage) Cleanup(ctx context.Context, after time.Time) (int, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	threshold := after.UTC().Format(time.RFC3339Nano)
 	removed := 0
 	for {
-		rows, err := s.db.QueryContext(ctx, `
-			SELECT id FROM sessions
-			WHERE (expires_at IS NOT NULL AND expires_at < ?)
-			   OR (expires_at IS NULL AND updated_at < ?)
-			ORDER BY updated_at ASC, id ASC
-			LIMIT 128
-		`, now, threshold)
+		ids, err := s.expiredSessionBatch(ctx, now, threshold, sessionCleanupBatchSize)
 		if err != nil {
-			return removed, fmt.Errorf("query expired sessions: %w", err)
-		}
-		ids := make([]string, 0, 128)
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return removed, err
-			}
-			ids = append(ids, id)
-		}
-		if err := rows.Close(); err != nil {
 			return removed, err
 		}
 		if len(ids) == 0 {
 			break
 		}
+		deleted := 0
+		var undeletable []string
 		for _, id := range ids {
-			if err := s.deleteSession(ctx, id, false); err != nil && err != ErrSessionNotFound {
+			err := s.deleteSessionExact(ctx, id, false)
+			switch {
+			case err == nil:
+				deleted++
+			case errors.Is(err, ErrSessionNotFound):
+				// 行可能已被并发进程删掉（正常）；也可能本身不可寻址（脏数据）。
+				undeletable = append(undeletable, id)
+			default:
 				return removed, err
 			}
-			removed++
+		}
+		removed += deleted
+		if deleted == 0 {
+			sample := ""
+			if len(undeletable) > 0 {
+				sample = undeletable[0]
+			}
+			if logger := logpkg.S(); logger != nil {
+				logger.Warnf("[session-history] cleanup stalled: %d candidate sessions not deletable (sample=%q)", len(ids), sample)
+			}
+			return removed, fmt.Errorf("%w: %d candidate sessions not deletable (sample=%q)", ErrCleanupStalled, len(ids), sample)
 		}
 	}
 	// 在线页回收已移除（见 applyBootstrapPRAGMAs 注释）：删除后的空闲页留在
 	// freelist，由离线 compaction 回收。
 	return removed, nil
+}
+
+// expiredSessionBatch 返回至多 limit 条过期会话 ID：显式过期（expires_at < now）
+// 与 TTL 过期（expires_at IS NULL 且 updated_at < threshold）各查一条。
+//
+// 旧实现用 OR 把两个谓词并成一条查询，SQLite 只能 SCAN sessions + TEMP B-TREE
+// 排序：WASM 引擎下每轮都要读整张表（生产 profile 中 rows.Next 占 13.9s/15s），
+// 且候选只有 2 行时也会被清理循环高频重放。拆成两条查询后各自整段命中 v3
+// 索引（idx_sessions_expires / idx_sessions_updated），不再需要临时排序。
+func (s *SQLiteSessionStorage) expiredSessionBatch(ctx context.Context, now, threshold string, limit int) ([]string, error) {
+	ids := make([]string, 0, limit)
+	queries := []struct {
+		statement string
+		arg       string
+	}{
+		{`
+			SELECT id FROM sessions
+			WHERE expires_at IS NOT NULL AND expires_at < ?
+			ORDER BY expires_at ASC, updated_at ASC, id ASC
+			LIMIT ?
+		`, now},
+		{`
+			SELECT id FROM sessions
+			WHERE expires_at IS NULL AND updated_at < ?
+			ORDER BY updated_at ASC, id ASC
+			LIMIT ?
+		`, threshold},
+	}
+	for _, query := range queries {
+		rows, err := s.db.QueryContext(ctx, query.statement, query.arg, limit)
+		if err != nil {
+			return nil, fmt.Errorf("query expired sessions: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
 }
 
 func (s *SQLiteSessionStorage) ArchiveIdleSessions(ctx context.Context, before time.Time, batchSize int) (int, error) {
