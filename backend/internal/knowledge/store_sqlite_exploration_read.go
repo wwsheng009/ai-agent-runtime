@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -170,10 +171,12 @@ func explorationLookupKeys(raw string) []string {
 		// 路径符号：路径部分命中文件节点，符号段命中符号节点。
 		add(normalized[:hash])
 		add(lookupTailField(normalized[hash+1:]))
+		queryLookupTokens(normalized, add)
 		return keys
 	}
 	if slash := strings.LastIndex(normalized, "/"); slash >= 0 && slash < len(normalized)-1 {
 		add(lookupTailField(normalized[slash+1:]))
+		queryLookupTokens(normalized, add)
 		return keys
 	}
 	if dot := strings.LastIndex(normalized, "."); dot > 0 && dot < len(normalized)-1 {
@@ -182,7 +185,74 @@ func explorationLookupKeys(raw string) []string {
 			add(tail)
 		}
 	}
+	queryLookupTokens(normalized, add)
 	return keys
+}
+
+// maxQueryLookupTokens 限制自然语言补充键的数量：SQL 规模有界，避免长查询放大。
+const maxQueryLookupTokens = 12
+
+// queryTokenPattern 匹配查询里的 ASCII 路径/标识符 token（中文与标点自然截断）。
+var queryTokenPattern = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_./#-]*`)
+
+// queryLookupTokens 从查询文本扫描 ASCII 路径/标识符 token 作为补充检索键。
+//
+// 动机（2026-10-01 收口轮六）：跨任务检索键此前只取"整串 + 末段"，真实任务查询
+// （"请用 grep 工具在 internal/knowledge/ 目录中查找 planLookupQuery …"）的末段
+// 会退化成"目录中查找"这类无意义键 → 跨任务命中 ≈ 0，per-workspace 复用不可达。
+//
+// 规则保守且有界（不新增 SQL 语义，键仍走既有 escapeLike 与 exact>prefix>contains）：
+//   - 路径 token：加全 token；目录前缀自身含 '/' 或原 token 以 '/' 结尾时加目录前缀
+//     （internal/knowledge/planner.go → internal/knowledge；internal/knowledge/ → 同）；
+//   - 限定名 token：加全 token + 末段点分名（扩展名除外，沿用既有口径）；
+//   - 裸标识符：长度 ≥ 5，或长度 ≥ 4 且含 '_' / 大写 / 数字（降低常见词噪声）；
+//   - 最多追加 maxQueryLookupTokens 个；重复键由 add 去重。
+func queryLookupTokens(normalized string, add func(string)) {
+	budget := maxQueryLookupTokens
+	for _, rawToken := range queryTokenPattern.FindAllString(normalized, -1) {
+		if budget <= 0 {
+			return
+		}
+		token := strings.TrimRight(rawToken, "./#-")
+		if len(token) < 3 {
+			continue
+		}
+		switch {
+		case strings.Contains(token, "/"):
+			add(token)
+			budget--
+			idx := strings.LastIndex(token, "/")
+			if idx > 0 {
+				dir := strings.Trim(token[:idx], "/")
+				if dir != "" && strings.Contains(dir, "/") {
+					add(dir)
+					budget--
+				}
+			}
+		case strings.Contains(token, "."):
+			add(token)
+			budget--
+			if tail := token[strings.LastIndex(token, ".")+1:]; tail != "" && !explorationFileExtensionTail(tail) {
+				add(tail)
+				budget--
+			}
+		default:
+			if len(token) >= 5 || (len(token) >= 4 && queryTokenHasSignal(token)) {
+				add(token)
+				budget--
+			}
+		}
+	}
+}
+
+// queryTokenHasSignal 报告裸标识符是否含"代码命名"信号（下划线/大写/数字）。
+func queryTokenHasSignal(token string) bool {
+	for _, r := range token {
+		if r == '_' || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupTailField 取末段的首个空白分隔片段：自然语言查询常把符号名嵌在句中

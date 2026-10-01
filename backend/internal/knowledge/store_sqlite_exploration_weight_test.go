@@ -58,12 +58,28 @@ func TestExplorationLookupKeysNormalization(t *testing.T) {
 		{"bare name", "PlanInput", []string{"PlanInput"}},
 		{"qualified name", "knowledge.Plan", []string{"knowledge.Plan", "Plan"}},
 		{"multi-segment qualified name", "pkg.Type.Method", []string{"pkg.Type.Method", "Method"}},
-		{"path", "internal/knowledge/planner.go", []string{"internal/knowledge/planner.go", "planner.go"}},
+		{"path", "internal/knowledge/planner.go", []string{"internal/knowledge/planner.go", "planner.go", "internal/knowledge"}},
 		{"file name keeps only full key", "planner.go", []string{"planner.go"}},
 		{"path symbol", "pkg/a.go#Foo", []string{"pkg/a.go#Foo", "pkg/a.go", "Foo"}},
 		{"windows separators and leading dot slash", `.\pkg\a.go`, []string{"pkg/a.go", "a.go"}},
-		{"natural language tail", "请检查 knowledge.Plan 的复用", []string{"请检查 knowledge.Plan 的复用", "Plan"}},
-		{"natural language path tail", "internal/knowledge/planner.go 的实现", []string{"internal/knowledge/planner.go 的实现", "planner.go"}},
+		{"natural language tail", "请检查 knowledge.Plan 的复用", []string{"请检查 knowledge.Plan 的复用", "Plan", "knowledge.Plan"}},
+		{"natural language path tail", "internal/knowledge/planner.go 的实现", []string{"internal/knowledge/planner.go 的实现", "planner.go", "internal/knowledge/planner.go", "internal/knowledge"}},
+		{
+			"natural language task query keeps directory and identifier tokens",
+			"请用 grep 工具在 internal/knowledge/ 目录中查找 planLookupQuery 的定义与调用点，并一句话总结。只读。",
+			[]string{
+				"请用 grep 工具在 internal/knowledge/ 目录中查找 planLookupQuery 的定义与调用点，并一句话总结。只读。",
+				"目录中查找",
+				"internal/knowledge",
+				"planLookupQuery",
+			},
+		},
+		{
+			"deep path adds multi-segment directory prefix",
+			"backend/internal/knowledge/planner.go 的实现",
+			[]string{"backend/internal/knowledge/planner.go 的实现", "planner.go", "backend/internal/knowledge/planner.go", "backend/internal/knowledge"},
+		},
+		{"short common words are not keys", "view file code read", []string{"view file code read"}},
 		{"blank", "   ", nil},
 	}
 	for _, tc := range cases {
@@ -198,7 +214,10 @@ func TestLookupExplorationNodesCrossTaskWeightedNoMatch(t *testing.T) {
 	}
 
 	// LIKE 通配符按字面量处理：'%' / '_' 不得放大为通配。
-	for _, wildcard := range []string{"Plan%", "Plan_"} {
+	// 注意（收口轮六）：查询里的 ASCII 标识符 token（如 "Plan"，≥4 且含大写）现在
+	// 是合法检索键，故这里用 3 字符前缀构造用例——命中只可能来自通配展开：
+	// 若转义失效，"Pla%" / "Pla_" 会命中 PlanInput。
+	for _, wildcard := range []string{"Pla%", "Pla_"} {
 		got, err := store.LookupExplorationNodes(ctx, ExplorationNodeQuery{WorkspaceID: wsID, Target: wildcard})
 		if err != nil {
 			t.Fatalf("lookup wildcard %q: %v", wildcard, err)
@@ -315,5 +334,27 @@ func TestLookupExplorationNodesTaskSessionTargetStaysExact(t *testing.T) {
 	}
 	if len(crossNodes) != 4 {
 		t.Fatalf("cross lookup = %v, want 4 weighted hits", lookupNodeTargets(crossNodes))
+	}
+}
+
+// 自然语言任务查询（收口轮六）：目录前缀 + 符号名 + 中文也能命中跨任务探索记忆，
+// 且符号精确命中优先于文件前缀命中；无关节点不进入结果。
+func TestLookupExplorationNodesCrossTaskNaturalLanguageQuery(t *testing.T) {
+	ctx, store, wsID, explorationID := newExplorationFixture(t)
+	base := time.UnixMilli(1_700_000_000_000)
+	appendLookupNodes(t, store, explorationID, base,
+		lookupNodeSpec{target: "internal/knowledge/planner.go", offset: -3 * time.Hour},
+		lookupNodeSpec{target: "planLookupQuery", offset: -2 * time.Hour},
+		lookupNodeSpec{target: "unrelated/other.go", offset: -time.Hour},
+	)
+
+	query := "请用 grep 工具在 internal/knowledge/ 目录中查找 planLookupQuery 的定义与调用点，并一句话总结。只读。"
+	got, err := store.LookupExplorationNodes(ctx, ExplorationNodeQuery{WorkspaceID: wsID, Target: query})
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	want := []string{"planLookupQuery", "internal/knowledge/planner.go"}
+	if !reflect.DeepEqual(lookupNodeTargets(got), want) {
+		t.Fatalf("targets = %v, want %v（符号精确优先于文件前缀；无关节点不返回）", lookupNodeTargets(got), want)
 	}
 }

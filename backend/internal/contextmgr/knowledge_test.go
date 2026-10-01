@@ -778,3 +778,22 @@ func TestKnowledgeSnapshotRecordingOffZeroWrites(t *testing.T) {
 		t.Fatalf("off 不得记录快照：%#v", value)
 	}
 }
+
+// query 节点的查询哈希不进入 signals 的"目标名单"：哈希对模型无信息量，
+// 但计数仍包含该条目（收口轮六）。
+func TestKnowledgeSignalsSkipsQueryHashTargets(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	content := knowledgeSignalsContent([]knowledge.CompiledItem{
+		{Target: hash, Verify: true},
+		{Target: "internal/knowledge/planner.go", Verify: true},
+	})
+	if strings.Contains(content, hash) {
+		t.Fatalf("signals must not list query hash targets: %q", content)
+	}
+	if !strings.Contains(content, "internal/knowledge/planner.go") {
+		t.Fatalf("signals must keep readable targets: %q", content)
+	}
+	if !strings.Contains(content, "2 reusable item(s)") {
+		t.Fatalf("counts must include hash-target items: %q", content)
+	}
+}

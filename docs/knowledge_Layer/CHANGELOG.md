@@ -6,6 +6,27 @@
 
 ---
 
+## 2026-10-01 — 收口轮（七）：自然语言查询键提取 + 探索记忆污染修复（A/B 前置）
+
+### Changed
+
+- `knowledge/store_sqlite_exploration_read.go`：新增 `queryLookupTokens`——从查询文本扫描 ASCII 路径/标识符 token 作为**补充检索键**（路径 token + 多段目录前缀、限定名 token + 末段点分名、裸标识符长度 ≥5 或 ≥4 且含 `_`/大写/数字），上限 12 个；键仍走既有 `escapeLike` 与 exact>prefix>contains 加权，不新增 SQL 语义。修复"目录前缀 + 符号名 + 中文"的真实任务查询末段退化为无意义键（如"目录中查找"）导致跨任务命中≈0 的问题。
+- `contextmgr/knowledge.go`：signals 档"目标名单"跳过 query 节点的查询哈希（32–64 位 hex）——哈希对模型无信息量，此前会被列进 `Reuse targets`。
+- `knowledge/shadow.go`：`prefixScopePathMulti` 单文件作用域修复——rg 以**文件**为根时输出 basename（`planner.go:210: …`），补全不得再拼一层（否则得到 `internal/knowledge/planner.go/planner.go` 的畸形路径）。
+
+### Verified
+
+- 测试：键归一化表（新增 NL 任务查询 / 深路径 / 常见短词不建键 3 例，更新 4 例既有期望）、真实 store 的 NL 跨任务查询用例（符号精确优先于文件前缀、无关节点不返回）、signals 哈希过滤用例、单文件作用域补全用例；`knowledge` 与 `contextmgr` 相关用例全绿。
+- 真机（新二进制）：全新会话 + NL 查询（`请用 grep 工具在 internal/knowledge/ 目录中查找 planLookupQuery …`）→ `context_snapshots` 新增 `injected=3`，全部 `reason=cross_task_verify`、`scope=cross_task`、`stale=0`；注入块 `Reuse targets` 为可读路径（无哈希）。
+- 缺陷复现与根因（真机）：畸形节点 `internal/knowledge/planner.go/planner.go` 源于模型 `grep(pattern=ReuseItem, path=internal/knowledge/planner.go)`（把文件当搜索根）+ 旧补全规则；已修复并加回归用例。
+
+### Notes
+
+- `context_snapshots.workspace_id` 在该 headless/invoke 路径仍为 NULL：根因是 `workspace_id` 选项未由该路径设置（planner 不受影响，Layer 自解析 workspace）；登记待接线。
+- M5 A/B：工作区（`%TEMP%\p6_ab\ws`，4127 文件）预索引 + 驱动脚本（`ab_driver.ps1`，逐 arm 启停节点、JSONL 记录）+ 分析脚本（`ab_analyze.py`，逐任务 token/工具调用/成功率 + 快照对账）已就绪，待跑 20 任务 × off/on。
+
+---
+
 ## 2026-10-01 — 收口轮（六）：跨任务（per-workspace）复用可达性修复 + M5 测量阻塞点定位
 
 ### Changed

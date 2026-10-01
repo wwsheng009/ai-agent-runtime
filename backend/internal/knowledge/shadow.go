@@ -534,6 +534,15 @@ func prefixScopePathMulti(path string, scopeBases []string) string {
 		if base == "" || base == "." || strings.ContainsAny(base, "*?[") {
 			continue
 		}
+		// 作用域本身是文件：rg 以单文件为根时输出 basename（planner.go:210: …），
+		// 补全结果就是该文件；再拼一层会得到 file/file 的畸形路径（收口轮六修复：
+		// 探索记忆曾据此落库 internal/knowledge/planner.go/planner.go 并被注入）。
+		if strings.EqualFold(base, path) {
+			return base
+		}
+		if last := base[strings.LastIndex(base, "/")+1:]; last != "" && strings.EqualFold(last, path) {
+			return base
+		}
 		return base + "/" + path
 	}
 	return path

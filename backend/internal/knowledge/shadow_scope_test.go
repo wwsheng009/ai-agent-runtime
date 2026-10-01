@@ -199,3 +199,20 @@ func TestShadowObserver_GrepScopeRelativeOutputAligns(t *testing.T) {
 	require.NotNil(t, rec.Coverage)
 	require.InDelta(t, 1.0, *rec.Coverage, 1e-9)
 }
+
+// 单文件作用域：rg 以文件为根输出 basename，补全不得拼成 file/file（收口轮六）。
+func TestParseGrepBaselineFileScopeDoesNotDoublePrefix(t *testing.T) {
+	keys, _ := parseGrepBaseline("planner.go:210: x\nplanner.go:244: y", "internal/knowledge/planner.go")
+	require.Equal(t, []string{
+		"internal/knowledge/planner.go:210",
+		"internal/knowledge/planner.go:244",
+	}, keys)
+
+	// 输出已是完整相对路径（与作用域同文件）时不重复拼接。
+	keys, _ = parseGrepBaseline("internal/knowledge/planner.go:7: z", "internal/knowledge/planner.go")
+	require.Equal(t, []string{"internal/knowledge/planner.go:7"}, keys)
+
+	// 目录作用域的既有补全语义不变。
+	keys, _ = parseGrepBaseline("planner.go:1: x", "internal/knowledge")
+	require.Equal(t, []string{"internal/knowledge/planner.go:1"}, keys)
+}

@@ -482,7 +482,7 @@ func knowledgeSignalsContent(items []knowledge.CompiledItem) string {
 	verifyCount := 0
 	provisionalCount := 0
 	for _, item := range items {
-		if target := strings.TrimSpace(item.Target); target != "" {
+		if target := strings.TrimSpace(item.Target); target != "" && !looksLikeQueryHash(target) {
 			targets = append(targets, target)
 		}
 		if item.Verify {
@@ -504,6 +504,22 @@ func knowledgeSignalsContent(items []knowledge.CompiledItem) string {
 		Reason:   "signals_digest",
 		Content:  builder.String(),
 	})
+}
+
+// looksLikeQueryHash 报告目标是否是 query 节点的查询哈希（32–64 位 hex）。
+//
+// signals 档的"目标名单"只列对模型有可读意义的目标；query 节点的 target 是
+// 查询哈希（用于同查询去重/精确命中），列进名单对模型无信息量（收口轮六）。
+func looksLikeQueryHash(target string) bool {
+	if len(target) < 32 || len(target) > 64 {
+		return false
+	}
+	for _, r := range target {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // knowledgeBroadContent 渲染 broad 档：每条编译条目一个 data block（03 §14.5
