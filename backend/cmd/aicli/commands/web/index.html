@@ -786,8 +786,16 @@
                 <textarea id="cfg-provider-headers" rows="4" placeholder="x-opencode-session: {session_id}&#10;x-opencode-client: aicli" autocomplete="off" spellcheck="false"></textarea>
               </div>
               <div class="config-form-block">
-                <div class="cfg-label">每个模型的 reasoning 配置</div>
-                <div id="cfg-model-reasoning-editors" class="cfg-model-reasoning-editors"><div class="config-empty">保存模型列表后在此逐模型配置 reasoning effort</div></div>
+                <div class="cfg-label-row">
+                  <label class="cfg-label" for="cfg-model-filter">模型编辑器（providers.items.&lt;name&gt;.model_capabilities.&lt;model&gt;）</label>
+                  <input id="cfg-model-filter" class="cfg-model-filter" type="search" placeholder="过滤模型…" autocomplete="off" spellcheck="false">
+                  <span id="cfg-model-count" class="cfg-hint-inline"></span>
+                </div>
+                <div class="cfg-hint">点击左侧模型名打开详细编辑面板：上下文窗口、最大输出、reasoning 档位与预算、自动压缩、输入模态、原生工具与端点契约。留空表示不写入（0 / false / 空数组表示显式清空）。</div>
+                <div class="cfg-model-editor">
+                  <div id="cfg-model-list" class="cfg-model-list"><div class="config-empty">在上方填写支持模型后在此逐模型编辑</div></div>
+                  <div id="cfg-model-editor" class="cfg-model-editor-panel"><div class="config-empty">点击左侧任一模型打开编辑面板</div></div>
+                </div>
               </div>
               <div class="config-form-actions">
                 <button type="button" id="cfg-provider-cancel-btn">取消</button>

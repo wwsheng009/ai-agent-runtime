@@ -1696,12 +1696,185 @@ body.sidebar-collapsed #sidebar {
 .config-form-block { margin-bottom: 10px; }
 .config-form-block .cfg-label { display: block; font-size: 11px; color: var(--fg4); margin-bottom: 4px; }
 .config-form-block textarea { width: 100%; resize: vertical; }
-.cfg-model-reasoning { border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; margin-bottom: 6px; background: var(--bg3); }
-.cfg-model-reasoning-head { margin-bottom: 6px; }
-.cfg-model-reasoning-head .cfg-check { font-size: 12px; color: var(--fg2); display: flex; align-items: center; gap: 6px; }
-.cfg-model-reasoning-fields { display: flex; flex-wrap: wrap; gap: 8px; }
-.cfg-model-reasoning-fields .cfg-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--fg4); }
-.cfg-model-reasoning-fields input { width: 150px; }
+
+/* ---- 模型编辑器（Provider 弹窗内：左侧模型列表 + 右侧详细面板） ----
+   取代旧的“每模型一行内联 reasoning 表单”：模型多时内联表单无法扫读，
+   改为「列表（带配置摘要 chip）+ 点开一个模型的面板」，一次只编辑一个模型。
+
+   面板高度固定（--cfg-model-editor-h）：列表与面板等高并各自滚动，
+   避免面板内容（曾高达 915px）在 320px 视口里滚 3 屏。窄屏改为上下堆叠。 */
+.cfg-model-editor {
+  --cfg-model-editor-h: 400px;
+  /* 列表占 26%：面板窄于 ~500px 时，3 列栅格只能给每格 ~142px，
+     default_reasoning_effort 这类长 config key 就会被省略号截断。
+     列表本身靠模型名换行 + chip 换行，150~180px 已经够扫读。 */
+  display: grid; grid-template-columns: minmax(150px, 26%) 1fr; gap: 8px;
+  align-items: stretch; margin-top: 6px;
+}
+@media (max-width: 720px) {
+  .cfg-model-editor { grid-template-columns: 1fr; --cfg-model-editor-h: 300px; }
+  /* 窄屏下 11px 字号 + 3px 内边距只换来 21px 高的控件，指尖点不准。
+     抬到 30px 触摸高度（不做到 44px：这个面板有 15 个字段，44px 会把
+     面板撑到需要滚四五屏）。 */
+  .cfg-model-editor-panel input,
+  .cfg-model-editor-panel select,
+  .cfg-model-editor-panel textarea { font-size: 13px; padding: 6px 8px; }
+  .cfg-model-editor-panel .cfg-switch { font-size: 12px; padding: 6px 10px; }
+  .cfg-model-editor-panel .cfg-mod { font-size: 12px; padding: 6px 10px; }
+}
+.cfg-model-filter {
+  background: var(--bg3); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 3px 8px; font-family: inherit; font-size: 11px;
+  min-width: 140px; max-width: 240px; flex: 1 1 auto;
+}
+.cfg-model-filter:focus { outline: none; border-color: var(--accent); }
+.cfg-model-list {
+  height: var(--cfg-model-editor-h); overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg3); padding: 3px; overscroll-behavior: contain;
+}
+.cfg-model-item {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  width: 100%; text-align: left; background: transparent; color: var(--fg2);
+  border: 1px solid transparent; border-radius: 3px; padding: 4px 6px;
+  margin-bottom: 2px; cursor: pointer; font-family: inherit; font-size: 12px;
+}
+.cfg-model-item:hover { background: var(--bg2); border-color: var(--border); }
+.cfg-model-item.active { background: var(--bg1); border-color: var(--accent); }
+.cfg-model-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.cfg-model-name { font-weight: 600; word-break: break-all; }
+.cfg-model-item.configured .cfg-model-name { color: var(--fg); }
+.cfg-model-chips { display: flex; flex-wrap: wrap; gap: 3px; }
+.cfg-model-chip {
+  font-size: 10px; line-height: 1.5; padding: 0 5px; border-radius: 8px;
+  background: var(--bg2); color: var(--fg4); border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.cfg-model-chip.empty { color: var(--fg4); opacity: 0.7; }
+.cfg-model-chip.ctx, .cfg-model-chip.out { color: var(--accent); border-color: var(--accent); }
+.cfg-model-chip.reasoning, .cfg-model-chip.efforts { color: var(--purple, #a371f7); }
+.cfg-model-chip.compact, .cfg-model-chip.tool, .cfg-model-chip.modalities { color: var(--green); }
+.cfg-model-chip.contract { color: var(--yellow, #d29922); }
+.cfg-model-chip.default { color: var(--green); border-color: var(--green); }
+
+/* 面板：头部固定 + 主体滚动。头部常驻，滚到底仍知道在编辑哪个模型。 */
+.cfg-model-editor-panel {
+  display: flex; flex-direction: column; min-width: 0;
+  height: var(--cfg-model-editor-h);
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg3);
+}
+.cfg-model-editor-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  flex: 0 0 auto; padding: 6px 8px; border-bottom: 1px solid var(--border);
+  background: var(--bg2); border-radius: 4px 4px 0 0;
+}
+.cfg-model-editor-title { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.cfg-model-editor-name { font-size: 13px; font-weight: 600; color: var(--fg); word-break: break-all; }
+.cfg-model-editor-sub { font-size: 10px; color: var(--fg4); white-space: nowrap; }
+.cfg-model-editor-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.cfg-model-editor-body { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; overscroll-behavior: contain; }
+
+/* 分区：小标题 + 下划细线（不用 fieldset 盒子，省掉边框/legend 占位）。
+   不加 text-transform: uppercase——它只对拉丁字母生效，混排下会出现
+   “REASONING” 与 “令牌预算” 大小写风格不一致的割裂感。 */
+.cfg-model-section { margin-bottom: 9px; }
+.cfg-model-section:last-child { margin-bottom: 0; }
+.cfg-model-section-title {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--fg4);
+  padding-bottom: 3px; margin-bottom: 5px; border-bottom: 1px solid var(--border);
+}
+/* 140px 下限：面板 461px 时每行正好放下 3 个字段（自动压缩组的三个字段
+   因此排成一行而不是两行 + 一个空洞）。下限再小中文标签会开始被裁。 */
+.cfg-model-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 6px 8px; align-items: end;
+}
+/* 面板内元素一律用 .cfg-model-editor-panel 前缀限定作用域。两个原因：
+   1. 面板嵌套在 .config-form-block 里，而 .config-form-block .cfg-label
+      （特异度 0,2,0）会盖掉裸的 .cfg-label（0,1,0）——不加前缀 flex 布局
+      根本不生效（.cfg-key 于是作为 inline 顶破容器造成横向溢出）。
+   2. 裸 .cfg-item / .cfg-label 是全局选择器，会漏改配置表单其它区块。 */
+.cfg-model-editor-panel .cfg-item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+/* 标签竖排：中文名一行、config key 另起一行。横排时 3 列栅格装不下
+   default_reasoning_effort 这类长 key，会被省略号截断。 */
+.cfg-model-editor-panel .cfg-label {
+  display: flex; flex-direction: column; gap: 0; min-width: 0; margin-bottom: 0;
+}
+/* min-width: 0 必须显式给：flex item 默认 min-width:auto 不肯缩到内容宽度
+   以下，nowrap 的长 key 会直接顶破容器（而不是触发 ellipsis）。 */
+.cfg-model-editor-panel .cfg-label-text {
+  min-width: 0;
+  font-size: 11px; color: var(--fg2); line-height: 1.35;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* config key：灰色等宽小字，让面板与 config.yaml 的 model_capabilities 逐字段对得上。 */
+.cfg-model-editor-panel .cfg-key {
+  display: block; min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9px; line-height: 1.35; color: var(--fg4); opacity: 0.85;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cfg-model-editor-body input, .cfg-model-editor-body select, .cfg-model-editor-body textarea {
+  background: var(--bg2); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 3px 6px; font-family: inherit; font-size: 11px; width: 100%;
+}
+.cfg-model-editor-body input:focus, .cfg-model-editor-body select:focus,
+.cfg-model-editor-body textarea:focus { outline: none; border-color: var(--accent); }
+/* 数值右对齐 + 等宽数字：token 数位数差异大，右对齐才好纵向比对。 */
+.cfg-model-editor-body .cfg-num { text-align: right; font-variant-numeric: tabular-nums; }
+.cfg-model-editor-body textarea { resize: vertical; line-height: 1.45; }
+.cfg-item-wide { grid-column: 1 / -1; margin-top: 7px; }
+/* 输入模态：多选 chip 组，取代逗号分隔自由文本框。
+   沿用 .cfg-switch 的既有约定（原生 checkbox + :has() 选中态 + :focus-within
+   焦点环），所以键盘可达性与屏幕阅读器行为和布尔开关完全一致。
+   运行时只消费 text / image，其余值仍允许勾选（会落盘、只是不生效）——
+   不能用 disabled 藏起来，用户需要能看懂自己到底配了什么。 */
+.cfg-modalities { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 1px; }
+.cfg-mod {
+  display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+  padding: 3px 8px; border: 1px solid var(--border); border-radius: 11px;
+  background: var(--bg2); user-select: none; -webkit-user-select: none;
+}
+.cfg-mod:hover { border-color: var(--border2); }
+.cfg-mod input { margin: 0; width: auto; padding: 0; accent-color: var(--accent); }
+.cfg-mod:has(input:checked) { border-color: var(--accent); background: var(--bg1); }
+.cfg-mod:focus-within { outline: 1px solid var(--accent); outline-offset: 1px; }
+.cfg-mod-name { font-size: 11px; color: var(--fg2); line-height: 1.4; }
+.cfg-mod:has(input:checked) .cfg-mod-name { color: var(--accent); }
+.cfg-mod-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9px; color: var(--fg4); opacity: 0.85;
+}
+/* 「仅记录、运行时不消费」的模态用虚线边框标出来，这样在点之前就能看出
+   勾上不等于能力生效——否则用户会以为勾了 audio 就支持音频。 */
+.cfg-mod.inert { border-style: dashed; }
+.cfg-mod.inert .cfg-mod-name { color: var(--fg4); }
+.cfg-mod.inert:has(input:checked) .cfg-mod-name { color: var(--fg2); }
+.cfg-modality-warn { color: #d9822b; font-weight: 600; }
+:root[data-theme="light"] .cfg-modality-warn { color: #b45309; }
+
+/* 端点契约是唯一一个 3 选 1 的下拉，auto-fit 会把它撑满整行（490px 死白）。
+   限宽让它保持「控件」的样子。 */
+.cfg-model-editor-panel select { max-width: 320px; }
+
+.cfg-model-note { margin: 3px 0 0; font-size: 10px; color: var(--fg4); }
+.cfg-model-note code { font-size: 10px; }
+
+/* 布尔开关：整行 chip，不占数值栅格（避免孤零零的 checkbox 像坏掉的空输入框）。
+   紧跟所属分区标题摆放，所以行首不加额外上边距。 */
+.cfg-model-toggles { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 7px; }
+.cfg-switch {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+  font-size: 11px; color: var(--fg2); line-height: 1.4;
+  padding: 3px 8px; border: 1px solid var(--border); border-radius: 11px;
+  background: var(--bg2); user-select: none; -webkit-user-select: none;
+}
+.cfg-switch:hover { border-color: var(--border2); color: var(--fg); }
+.cfg-switch input { margin: 0; width: auto; padding: 0; accent-color: var(--accent); }
+.cfg-switch:has(input:checked) { border-color: var(--accent); color: var(--accent); background: var(--bg1); }
+.cfg-switch:focus-within { outline: 1px solid var(--accent); outline-offset: 1px; }
+
 .config-form-actions { display: flex; align-items: center; gap: 8px; }
 .config-form-actions .cfg-status { font-size: 11px; }
 #tab-config .cfg-status.ok { color: var(--green); }

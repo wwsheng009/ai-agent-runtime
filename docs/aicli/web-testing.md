@@ -35,7 +35,7 @@ aicli chat --pprof
 | 端点 | 桩数据要点 |
 |------|-----------|
 | `GET /web/api/runtime` | `{ current: { provider, model, reasoning_effort }, providers: [{ name, models, model_details }] }` |
-| `GET /web/api/config` | `{ config_path, default_provider, chat: {}, providers: [...] }`，provider 对象需含 `name/protocol/base_url/enabled/api_key_set/api_key_source/api_key_masked/models/default_model` |
+| `GET /web/api/config` | `{ config_path, default_provider, chat: {}, providers: [...] }`，provider 对象需含 `name/protocol/base_url/enabled/api_key_set/api_key_source/api_key_masked/models/default_model`；`models[]` 每项是 `model_capabilities` 的**完整字段投影**（`max_context_tokens` / `max_tokens` / reasoning 四字段 / `reasoning_effort_budgets` / `auto_compact_*` / `supports_remote_compact` / `replay_reasoning_content` 三态 / `input_modalities` / `native_tools`），模型编辑器面板据此回显 |
 | `GET /web/api/sessions` | `{ sessions: [] }` |
 | `GET /web/api/screen` | 任意 JSON |
 | `GET /web/api/status?format=text` | 纯文本（调试页签状态文档，与 `aicli /debug` 内容一致；桩可为任意多行文本） |
@@ -214,9 +214,37 @@ aicli chat --pprof
 - [ ] API Key：明文不回传，输入框始终为空；状态行按凭据来源显示（Key Store / OAuth / 密钥池 / 内联 / 未配置）+ 掩码回显；已保存时显示"清除"按钮。
 - [ ] Base URL / API Path / 转发 URL / 默认模型：回显与保存一致。
 - [ ] 支持模型 textarea："获取模型列表"按钮调 `POST /web/api/config/providers/fetch-models`，**整体覆盖**原支持模型列表（去重保序）；网关未返回可合并模型时保留原列表并提示。
-- [ ] Reasoning 编辑器：获取模型列表后按 `model_metadata`（`/models` 元数据 → model card → 协议默认值重匹配结果）整体覆盖各模型 reasoning 配置，未命中元数据的模型清空旧配置；保存模型列表后按模型逐行生成。
-- [ ] 覆盖仅作用于表单草稿：获取后不点保存不落盘；旧模型 ID / 旧 reasoning 草稿不再保留。
-- [ ] 保存后 payload 中各字段值与表单一致（可在 DevTools Network 面板检查 `POST /web/api/config/providers`）。
+- [ ] **模型编辑器**（左侧列表 + 右侧面板，取代旧的「每模型一行内联 reasoning 表单」）：
+  - [ ] 左侧 `#cfg-model-list` 按支持模型逐行渲染，每行是**可点击**的模型名 + 配置摘要 chip（`ctx 200K` / `out 32K` / `reasoning` / `N 档` / `压缩 150K` / 模态 / 原生工具 / 端点契约）；完全未配置的模型显示灰色「未配置」chip。
+  - [ ] 点击模型行打开右侧 `#cfg-model-editor` 面板，按 6 个分组渲染 **model_capabilities 的全部可编辑字段**：上下文与输出（`max_context_tokens` / `max_tokens` / `auto_compact_ratio`）、Reasoning（`reasoning_model` / `reasoning_efforts` / 默认 effort / 压缩 effort）、Reasoning 预算（`reasoning_effort_budgets`，每行 `effort: tokens`）、自动压缩（`auto_compact_token_limit` / `auto_compact_mode` / `supports_remote_compact`）、输入模态与原生工具（`input_modalities` / `image_generation` / `images_generations_api`）、端点契约（`replay_reasoning_content` 三态下拉）。
+  - [ ] 再次点击同一模型收起面板；面板头有「设为默认模型」（写入 `default_model` 后显示「默认模型」徽标）与「从列表移除」（同步删掉支持模型 textarea 中的该行并关闭面板）。
+  - [ ] 过滤框 `#cfg-model-filter` 按子串过滤模型名，计数显示 `N / M 个模型`；无匹配时列表显示提示而非空白。
+  - [ ] **未声明值渲染为空串**（显示 placeholder），不是 `0`——数字框显示 `0` 会被误读成真实值；`0` / `false` / 空数组在保存时表示**显式清空**（后端从 config.yaml 移除该字段），留空同样不写入。
+  - [ ] `replay_reasoning_content` 三态可区分：未声明（空）/ `true 强制回传` / `false 禁止注入`——三者在保存与回显后必须各自保持不变。
+  - [ ] 已保存配置回显：编辑某 provider 后重新打开，模型编辑器应显示 `model_capabilities` 里的值（不再只回显 reasoning 四字段）。
+  - [ ] 面板内未保存的输入在「切换模型 / 改支持模型 textarea / fetch-models 合并 / 保存 / 关闭弹窗」后都不丢失（草稿收集）；fetch-models **覆盖**路径则按覆盖语义丢弃旧草稿。
+  - [ ] **面板布局**（2026-10 改版：`section` 小标题 + 竖排标签取代 6 个 fieldset 盒子）：
+    - [ ] 左侧列表与右侧面板**等高**（`--cfg-model-editor-h`），各自独立滚动；面板头部固定，滚到底仍能看到模型名。
+    - [ ] 面板内容不应横向溢出；15 个字段的中文名与 config key **都不被省略号截断**（列表列占比 26%，让面板拿到 ~500px 供 3 列栅格；标签竖排两行，key 独占整格宽度）。
+    - [ ] 每个分区自带它的开关：`reasoning_model` 紧跟「Reasoning」标题，`supports_remote_compact` 紧跟「自动压缩」标题 —— 不要让开关掉到下一段而看起来属于别的分组。
+    - [ ] 布尔开关渲染成 chip 而不是栅格里的 checkbox（孤零零的 checkbox 会像坏掉的空输入框）；选中态有高亮边框。
+    - [ ] **输入模态是多选 chip 组**（不是逗号分隔自由文本框）：词表 5 项全渲染，已保存值对应 chip 处于勾选态，隐藏输入 `[data-field="input_modalities"]` 与勾选态同步。
+      - [ ] 虚线边框的 chip = 运行时**不消费**（audio / video / file，以及任何词表外的值）；实线 = 真正生效（text / image）。点之前就要能看出区别，不能让用户以为勾了 audio 就支持音频。
+      - [ ] 勾了「仅记录」的模态后，说明文案要点名它并说明不生效。
+      - [ ] 勾了 `image_generation` 却没同时勾 文本+图像 时出现警告（`agentconfig/images.go` 要求两者同时存在才生效）；此警告优先于「未声明」提示。
+      - [ ] 全部取消 = 回到「未声明」（隐藏输入为空串，提交为不写该字段），而不是写成 `[""]`。
+      - [ ] **词表外的值必须原样保留**（手写配置 / 将来新增的模态）：渲染成可删除 chip，「打开面板→保存」不能静默丢弃。
+    - [ ] 数值输入右对齐 + `tabular-nums`（token 数位数差异大，右对齐才好纵向比对）；未声明值显示 placeholder 而不是 `0`。
+    - [ ] 分区标题**不加 `text-transform: uppercase`** —— 它只对拉丁字母生效，混排下会出现「REASONING」与「令牌预算」风格割裂。
+    - [ ] 窄屏（≤720px）上下堆叠，无横向溢出，控件触摸高度 ≥30px。
+    - [ ] 回归（几何量测，真实 Chromium）：先 `node backend/scripts/stub-micro-web.mjs 8792`，再
+      `node backend/scripts/probe-model-editor-layout.mjs [--narrow]`（`AICLI_SHOT=x.png` 附带截图）。
+      脚本会把「横向溢出 / 标签被截断 / 触摸目标过小」直接报成 `PROBLEMS:`，并输出 `body.scrollRatio`
+      （面板内容高 / 视口高；改版前 2.86，现 ~1.4）。
+    - [ ] 行为回归：`node backend/scripts/verify-micro-web-model-editor.mjs`（jsdom 真实 DOM 驱动，43 条断言：列表渲染、面板回显、编辑→保存载荷、过滤/移除/设默认、新增模型）。
+- [ ] 获取模型列表后按 `model_metadata`（`/models` 元数据 → model card → 协议默认值重匹配结果）整体覆盖各模型配置，未命中元数据的模型清空旧配置。
+- [ ] 覆盖仅作用于表单草稿：获取后不点保存不落盘；旧模型 ID / 旧草稿不再保留。
+- [ ] 保存后 payload 中各字段值与表单一致，模型配置走 `model_capabilities` 字段（可在 DevTools Network 面板检查 `POST /web/api/config/providers`）。
 
 ### 2.5 缓存分析页
 
