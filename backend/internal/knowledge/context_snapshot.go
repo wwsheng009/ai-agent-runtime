@@ -156,6 +156,15 @@ type ContextSnapshotStore interface {
 	RecordContextSnapshot(ctx context.Context, rec ContextSnapshotRecord) error
 }
 
+// ContextSnapshotReader 是快照审计读接口（*sqliteStore 满足；reader 角色可用）。
+//
+// 验收门槛（04 §7.3 `stale_item_injected = 0`）用它在表内直接复算：
+// context_items 中 stale=1 的行数就是违规注入数。
+type ContextSnapshotReader interface {
+	ContextSnapshotsBySession(ctx context.Context, sessionID string, limit int) ([]ContextSnapshotRecord, error)
+	ContextItemsBySnapshot(ctx context.Context, snapshotID string) ([]ContextItemRecord, error)
+}
+
 // ContextRecorderMetrics 是记录器的有界计数（无需外部监控系统即可断言）。
 type ContextRecorderMetrics struct {
 	Recorded  int64

@@ -19,8 +19,11 @@ import (
 	"time"
 )
 
-// 编译期断言：sqliteStore 直接满足快照落库的窄接口。
-var _ ContextSnapshotStore = (*sqliteStore)(nil)
+// 编译期断言：sqliteStore 直接满足快照落库与审计读的窄接口。
+var (
+	_ ContextSnapshotStore  = (*sqliteStore)(nil)
+	_ ContextSnapshotReader = (*sqliteStore)(nil)
+)
 
 // RecordContextSnapshot 在一个事务内写入快照及其注入条目。
 func (s *sqliteStore) RecordContextSnapshot(ctx context.Context, rec ContextSnapshotRecord) error {

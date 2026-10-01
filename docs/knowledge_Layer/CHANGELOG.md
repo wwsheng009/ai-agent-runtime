@@ -6,6 +6,26 @@
 
 ---
 
+## 2026-10-01 — Phase 6 切片 7：验收门槛可复现化 + 验收报告（Phase 6 收口）
+
+### Added
+
+- `knowledge/acceptance_phase6_test.go`：G1/G2 硬门槛（表内 `context_items.stale=1` 行数 = 0、条目版本与快照版本不一致 = 0；注入候选混入 `#pending3`/空版本/低置信作反证）+ 快照写入时延（真库 n=50，**p50 540 µs / p95 563 µs**，门槛 50 ms）。
+- `contextmgr/acceptance_phase6_test.go`：注入侧硬门槛（被过滤条目的 target 不出现在 prompt）+ off 可逆（与"无知识层"基线消息逐条一致、零 knowledge metadata）+ 对抗性内容（闭合标签恒 1 个、`</data` 中性化、属性引号转义）+ 真库 E2E（注入 → 快照落库 → 压缩只留计数/版本痕迹）。
+- `knowledge.ContextSnapshotReader`：快照审计读接口（`*sqliteStore` 满足、reader 角色可用），供跨包复算 G1。
+- `reports/phase6_context_compiler_report.md`：Phase 6 验收报告（04 §7.7 模板）——8 项门槛 7 项 Pass，收益 A/B 登记为待测量轮。
+
+### Verified
+
+- 6 例新门槛用例全绿；缓存 p95 门槛沿用切片 2 的真库实测（hit 0.54 ms / miss 1.07 ms）；全量回归（build + 6 包）绿。
+
+### Notes
+
+- **唯一未闭合项**：收益指标 A/B（token 下降 ≥ 25% / 任务成功率不降，任务集须来自真实 `usageledger` 采样）+ 端到端 p95 增幅 ≤ 10%；建议与 Phase 5 的真实会话 E2E 方法合并跑（见报告 §4.1/§4.4）。
+- **Phase 6 切片计划收口**：原 8 片中，切片 5（防注入/信任/冲突接线）的实现已在切片 1/3/4 完成，其验证并入本切片——实际落地 7 片，全部完成。
+
+---
+
 ## 2026-10-01 — Phase 6 切片 6：Observation Compressor 与 compactruntime 合并（knowledge 压缩模板）
 
 ### Changed
