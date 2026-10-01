@@ -40,6 +40,10 @@ var LSP_OUTCOME_LABELS = {
   degraded_no_fresh: "无新诊断/等待超时",
   degraded_starting: "启动中降级",
   degraded_read_error: "读文件失败",
+  degraded_binary_missing: "server 二进制缺失",
+  degraded_crashed: "server 崩溃",
+  degraded_transport_closed: "传输关闭",
+  degraded_canceled: "已取消",
   degraded: "降级"
 };
 
