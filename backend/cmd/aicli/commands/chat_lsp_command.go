@@ -312,6 +312,11 @@ func chatLSPServerStatusLine(status runtimelsp.ServerStatus) string {
 	if status.Restarts > 0 {
 		parts = append(parts, fmt.Sprintf("restarts=%d", status.Restarts))
 	}
+	// 冷启动延迟（启动→首个发布）：跨会话基线已采集（§4.3），这里让单会话也能
+	// 直接判读"这次为什么慢"；未发布（0）时不显示，避免噪音。
+	if status.FirstPublishMS > 0 {
+		parts = append(parts, fmt.Sprintf("first_publish=%dms", status.FirstPublishMS))
+	}
 	line := strings.Join(parts, " ")
 	reason := strings.TrimSpace(status.Reason)
 	if reason == "" {

@@ -182,12 +182,12 @@ py scripts/analyze-lsp-baseline.py --selftest   # 内置样例自验（不依赖
 
 | 区块 | 内容 | 数据源 |
 | --- | --- | --- |
-| A 池状态卡 | 每个 server：state/pid/encoding/reason/lastActive；配置摘要（scope/max_items/wait_ms/degrade_mode/tool_enabled） | `/web/api/lsp/status`（复用 `chatLSPManager(session)`：`chat_lsp_command.go:118-145`） |
+| A 池状态卡 | 每个 server：state/pid/encoding/reason/lastActive/**first_publish_ms（冷启动延迟，第八轮）**；配置摘要（scope/max_items/wait_ms/degrade_mode/tool_enabled） | `/web/api/lsp/status`（复用 `chatLSPManager(session)`：`chat_lsp_command.go:118-145`） |
 | B 会话读数条 | 触发次数、命中率、降级率（按原因分桶）、等待 P50/P95、追加字节占比 | `/web/api/lsp/overview?scope=session|all` |
 | C 最近事件表 | 时间 / trigger / server / outcome / duration_ms / diag_count / appended_bytes / tool_call_id（可跳转对话中对应工具行） | `/web/api/lsp/events?limit=50`（M2 后源自 observe ring/Query） |
 | D 优化建议条 | 由读数生成的人话结论（例："pyright 未安装，3 次内联降级"；"等待 P95 超 wait_ms 的 60%，建议调低 scope"）；**阈值未标定则不显示判断，只显事实** | 前端规则表（阈值引用 §4.3） |
 | E 链路入口 | 链到 `/debug/chat/status`、runtime-server 观测页 | 现有端点 |
-| F 基线登记表（跨会话） | §4.3 六项指标（未采集显示 n/a）+ 窗口/扫描事实；阈值列固定"待标定"，不做告警 | `/web/api/lsp/baseline?days=14`（`internal/lsp/baseline`，服务端 10 分钟 TTL 缓存；与 TUI `/lsp baseline` 同源） |
+| F 基线登记表（跨会话） | §4.3 七项指标（未采集显示 n/a）+ 窗口/扫描事实；阈值列固定"待标定"，不做告警 | `/web/api/lsp/baseline?days=14`（`internal/lsp/baseline`，服务端 10 分钟 TTL 缓存；与 TUI `/lsp baseline` 同源） |
 
 ### 5.2 后端 API 契约（新增 `backend/cmd/aicli/commands/web_lsp_handlers.go`）
 
@@ -243,7 +243,7 @@ py scripts/analyze-lsp-baseline.py --selftest   # 内置样例自验（不依赖
 - **验证**：`go test ./internal/lsp/ ./internal/runtimeobserve/ ./internal/tools/ -run ...`、`go test ./internal/events/`、`go test ./cmd/aicli/commands/ -run "TestChatWebLSP|TestHandleChatWebPage"` 全绿；`go build ./cmd/aicli/...` 通过。
 - **runtime-server 接线（补记）**：新增共享投影包 `internal/lsp/eventbridge`（aicli chat 与 runtime-server 共用一份投影，避免两处漂移）；`lsp.Bridge` 增加 `SessionIDFromContext`（接 `toolctx.SessionID`——agent loop 已为每次工具执行注入会话 id）与 `Event.SessionID`；`AgentAdapter.SetLSPObserver` 透传；`runtimeapi.NewHandler` 装配时 `attachLSPObservation`（池事件 → Handler 运行时事件总线）。runtime-server 的进程级共享工具管理器由此把 LSP 事件**按执行上下文归属到具体会话**；无执行上下文的池生命周期事件作为无会话事件进入 observe 流。
 - **profile 级接线（补记）**：`runtimeapi.wireLSPObservation` 同时覆盖 `resolveProfileMCPAdapter` 新建的临时工具管理器，runtime-server 各条工具面路径的池事件都进同一总线。
-- **M4 数据入口（补记）**：`lsp.request.finished` 挂 A 通道落盘（含 session_id），配合 `scripts/analyze-lsp-baseline.py`（`--selftest` 自验、`--days/--since/--root` 窗口过滤、`--json/--out` 输出）直接产出 §4.3 六项指标与事实明细。真实库冷跑：1432 个 runtime-events.jsonl / 49.5 万行 / 27.7s，编辑回执 4751 次（校验 `logical_tool` 与 `output_model_visible_bytes` 口径）。
+- **M4 数据入口（补记）**：`lsp.request.finished` 挂 A 通道落盘（含 session_id），配合 `scripts/analyze-lsp-baseline.py`（`--selftest` 自验、`--days/--since/--root` 窗口过滤、`--json/--out` 输出）直接产出 §4.3 指标与事实明细（第八轮起为七项，含冷启动 `lsp_cold_first_publish_p95`）。真实库冷跑：1432 个 runtime-events.jsonl / 49.5 万行 / 27.7s，编辑回执 4751 次（校验 `logical_tool` 与 `output_model_visible_bytes` 口径）。
 - **基线产品化（补记）**：新增 `internal/lsp/baseline`（归因 + §4.3 报告渲染，与脚本同 fixture 互锁）、`/lsp baseline` 子命令（screen+read 只读长文档，忙时不阻塞）与页签 F 区块 `GET /web/api/lsp/baseline`（跨会话，服务端 10 分钟 TTL 缓存兜住 15s 自动刷新；日志根缺失 → 200 + `available=false` + 稳定原因码）。默认 14 天窗口按文件 mtime 整文件跳过；真实库全量 Go 扫描 7.9s（冷）、单测 0.65s。
 - **遗留**：仅剩运行期积累——部署后收集 ≥2 周数据，回填 §4.3 并固化阈值（ADR-0003 D4）。
 - **真实链路缺陷与修复（补记 2）**：为「事件发布 → A 通道落盘」补回归测试时发现——bridge 的 `shouldSuppressMismatchedPrimaryTurnEvent` 对**无 turn_id 的会话级事件**在 `runActive && activeTurnID != ""`（即正常轮次进行中）时一律丢弃，`lsp.request.finished` 因此永远进不了 `runtime-events.jsonl`，M4 基线与页签 F 会静默显示 n/a（与 `agent.reclaimed` 曾整批丢失同一失败模式）。修复：`isLSPObservationBusEvent` 豁免归属门，并把三个 `lsp.*` 类型加入 `isChatRenderDataPlaneSuppressedEvent`（只进事件日志/observe，不进 Scene 消息流）。回归：`TestChatRuntimeEventBridge_PersistsLSPRequestFinished`（生产形态：轮次进行中 + 已识别 turn）、`TestChatRuntimeEventBridge_TurnOwnershipKeepsSuppressingStaleTurnEvents`（豁免不得削弱过期轮次抑制）、`TestLSPEventChannelsPinBaselineStorage`（通道表态钉死）。
@@ -276,6 +276,7 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 | `first_publish_ms` 只存在于池状态（live-only）：首个发布不改变状态，`setStatus` 不会发事件 → **从未落盘**，跨会话基线拿不到冷启动延迟（方案 §5.8 第三轮只做了观测面） | ① 首个发布时显式补发一条 `lsp.server.state` 事件（带 `first_publish_ms`，锁外发送）；② eventbridge 落盘该字段、projector 白名单同步；③ Go/Python 基线新增 `lsp_cold_first_publish_p95` 行（按 (session, server) 取首个发布；未采集输出 n/a） | `TestClientStatusReportsFirstPublishMS`（观察者收到带 `first_publish_ms` 的状态事件）、Go/Python fixture 互锁新增冷启动断言 |
 | 真机冒烟 `TestRealRustAnalyzerRoundTrip` 在握手中被快速失败拦下（`start_wait_ms` 默认 250ms，实测 rust-analyzer 握手可超 250ms） | 用例显式放宽 `StartWaitMS`（该用例断言完整往返；快速失败已有专门单测 `StartWaitMS=50`）；**默认值不动**——live 证据里 gopls 握手通常在 250ms 内（`degraded_starting` 仅 2 次），等 rust-analyzer 会话的 `degraded_starting` 数据再决定是否调默认 | 连续两轮 `go test ./internal/lsp/...` 全绿 |
 | 冷路径快速失败被**连接级**信号挡住：live 窗口 20 条 `no_fresh` 里 **11 条落在"该路径从未发布过"**（其中一个路径连续 6 次各烧满 1000ms），但连接早已为别的路径发布过 → `!EverPublished()` 不成立，既拿不到宽限也永不标记冷（连接级信号与"该路径的视图还没加载"无关） | 标记条件改为**路径级**：`cold_retry_ms > 0` + 该路径无快照 + 本次等待**超过**快速失败预算（即确实多花了钱）→ 标记"已知冷"；宽限语义保持不变（仍只给冷连接，热连接上的模块外/忽略目录路径不该再等 1.5s）。首个发布即清除标记 | 新增 `TestColdRetryAppliesPerPathOnWarmConnection`（热连接 + 冷路径：首编辑 ~400ms 全预算 → 次编辑 ~50ms 快速失败 → 该路径发布后恢复 fast clean）；`TestColdRetryAfterGraceTimeout`/`TestColdGrace*` 不回归 |
+| 冷启动延迟只在**基线**（跨会话）可见，单会话状态面（TUI `/lsp status` 与 web「LSP 观测」A 卡）看不到 `first_publish_ms` → 用户当次"为什么这次慢"仍需翻事件 | 状态行/状态表补 `first_publish_ms` 展示（TUI：`first_publish=1234ms`；web：新增"首个发布"列，复用 `lspMS`）；未发布（0）不显示，避免噪音 | 新增 `TestChatLSPServerStatusLineShowsFirstPublishLatency`（就绪显示 / 未发布不显示）；`cmd/aicli` 构建与 `/lsp` 命令族测试全绿 |
 
 新增配置键（全部有内置默认，不改代码即可调整）：
 `diagnostics.start_wait_ms` / `diagnostics.empty_early_accept` / `diagnostics.empty_confirm_ms` /
@@ -355,6 +356,12 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
   1000ms；原因是标记条件依赖连接级 `EverPublished()`（热连接永不满足）。
 - 落地：标记条件改为路径级（无快照 + 本次等待超过快速失败预算）；宽限仍只给冷连接。
   预期效果：这类路径的第 2 次起编辑从 1000ms 降到 250ms（该会话可省约 5×750ms）。
+
+**第十轮优化（2026-10-01，冷启动延迟在单会话状态面可见）**：
+- 缺口：第八轮把 `first_publish_ms` 打通到事件与基线（跨会话），但 TUI `/lsp status` 与 web A 卡
+  仍看不到它——"这次为什么慢"只能在基线里查。
+- 落地：TUI 状态行加 `first_publish=1234ms`（就绪且 >0 时）；web A 卡新增"首个发布"列；
+  §5.1 区块表与 §4.3 指标计数同步（七项）。
 - 行为备注：内容未变化的 write 会按幂等回放处理且不触发 LSP 请求（无变更不诊断，符合预期）。
 
 **崩溃根因定位（已闭环）**：跨会话同秒崩溃（09-30 10:37:33×3、10:43:04×3）确认为

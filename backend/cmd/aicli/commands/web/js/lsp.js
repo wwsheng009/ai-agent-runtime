@@ -170,12 +170,13 @@ function lspServersSection(status) {
     rows.push("<tr><td>" + esc(lspText(s.name) || "(未命名)") +
       "</td><td>" + esc(lspStateLabel(s.state)) +
       "</td><td>" + (s.pid ? esc(String(s.pid)) : "--") +
+      "</td><td>" + esc(lspMS(s.first_publish_ms)) +
       "</td><td>" + esc(lspText(s.position_encoding) || "--") +
       "</td><td>" + esc(lspClip(s.root, 60) || "--") +
       "</td><td>" + esc(lspClip(s.reason, 80) || "--") + "</td></tr>");
   }
   return html + '<div style="overflow-x:auto"><table class="cache-table"><thead><tr>' +
-    "<th>Server</th><th>状态</th><th>PID</th><th>编码</th><th>工作区</th><th>原因</th>" +
+    "<th>Server</th><th>状态</th><th>PID</th><th>首个发布</th><th>编码</th><th>工作区</th><th>原因</th>" +
     "</tr></thead><tbody>" + rows.join("") + "</tbody></table></div>";
 }
 

@@ -281,3 +281,26 @@ func TestChatLSPReadOnlyVariantsUseScreenDocument(t *testing.T) {
 		t.Fatal("LSP 未启用提示不应进入副屏")
 	}
 }
+
+// 冷启动延迟（first_publish_ms，§4.3/§5.8 第八轮）要能单会话判读：就绪成员在
+// 状态行显示它，未发布（0）时不产生噪音。
+func TestChatLSPServerStatusLineShowsFirstPublishLatency(t *testing.T) {
+	ready := runtimelsp.ServerStatus{
+		Name:           "gopls",
+		State:          runtimelsp.StateReady,
+		PID:            4242,
+		FirstPublishMS: 1234,
+	}
+	line := chatLSPServerStatusLine(ready)
+	if !strings.Contains(line, "first_publish=1234ms") {
+		t.Fatalf("就绪成员应显示首个发布延迟：%q", line)
+	}
+	if !strings.Contains(line, "pid=4242") {
+		t.Fatalf("既有字段不得回归：%q", line)
+	}
+
+	pending := runtimelsp.ServerStatus{Name: "gopls", State: runtimelsp.StateStarting}
+	if line := chatLSPServerStatusLine(pending); strings.Contains(line, "first_publish") {
+		t.Fatalf("未发布成员不应显示冷启动延迟：%q", line)
+	}
+}
