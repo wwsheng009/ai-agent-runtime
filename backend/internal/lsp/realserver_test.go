@@ -52,6 +52,10 @@ func TestRealRustAnalyzerRoundTrip(t *testing.T) {
 			MaxItems:    20,
 			MaxChars:    4000,
 			WaitMS:      60000,
+			// 本用例断言完整往返（happy path）：握手中的快速失败（默认
+			// start_wait_ms=250ms）有专门单测覆盖，这里必须容忍真实
+			// rust-analyzer 的握手耗时（实测可超 250ms，冷机更慢）。
+			StartWaitMS: 30000,
 			DegradeMode: DegradeHint,
 		},
 	}.Normalize()

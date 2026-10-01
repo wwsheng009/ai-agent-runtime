@@ -112,7 +112,34 @@ func Rows(stats Stats) []Row {
 			Conclusion: closureConclusion(stats),
 			Date:       date,
 		},
+		{
+			Metric:     "lsp_cold_first_publish_p95",
+			Value:      coldStartText(stats),
+			Window:     window,
+			Samples:    coldStartSamples(stats),
+			Conclusion: "待标定（需人工判读）",
+			Date:       date,
+		},
 	}
+}
+
+// coldStartText 输出冷启动延迟 P95（服务启动→首个诊断发布）；未采集输出 n/a + 原因。
+func coldStartText(stats Stats) string {
+	if stats.ColdFirstPublishP95MS == nil {
+		return "n/a（窗口内无带 first_publish_ms 的 server 状态事件；新构建落盘后开始采集）"
+	}
+	return fmt.Sprintf("%d ms", *stats.ColdFirstPublishP95MS)
+}
+
+func coldStartSamples(stats Stats) string {
+	if len(stats.coldStarts) == 0 {
+		return "n=0（未采集，非缺失数据）"
+	}
+	p50 := "n/a"
+	if stats.ColdFirstPublishP50MS != nil {
+		p50 = fmt.Sprintf("%d ms", *stats.ColdFirstPublishP50MS)
+	}
+	return fmt.Sprintf("n=%d（P50 %s；按 (session, server) 取首个发布）", len(stats.coldStarts), p50)
 }
 
 func closureText(stats Stats) string {

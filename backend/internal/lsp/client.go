@@ -908,9 +908,19 @@ func (c *Client) handlePublishDiagnostics(params json.RawMessage) {
 		snap.HasVersion = true
 	}
 	c.diags[payload.URI] = snap
+	firstPublish := false
+	var coldStatus ServerStatus
 	if c.firstPublish.IsZero() {
 		c.firstPublish = time.Now()
 		c.everPublished.Store(true)
+		// 冷启动延迟只在"首个发布"这一刻可观测：状态本身没有变化，setStatus
+		// 永远不会发这条事件，所以在这里显式补一条带 first_publish_ms 的状态
+		// 事件（锁外发送，观察者回调可能回读客户端状态）。
+		firstPublish = true
+		coldStatus = c.status
+		if !coldStatus.StartedAt.IsZero() {
+			coldStatus.FirstPublishMS = c.firstPublish.Sub(coldStatus.StartedAt).Milliseconds()
+		}
 	}
 	// Any publish for the path ends its cold state: the view is alive.
 	delete(c.coldWait, payload.URI)
@@ -934,6 +944,9 @@ func (c *Client) handlePublishDiagnostics(params json.RawMessage) {
 	delete(c.waiters, payload.URI)
 	tracked := doc != nil
 	c.mu.Unlock()
+	if firstPublish {
+		c.emit(Event{Kind: EventServerState, Status: coldStatus})
+	}
 	for _, ch := range waiters {
 		close(ch)
 	}

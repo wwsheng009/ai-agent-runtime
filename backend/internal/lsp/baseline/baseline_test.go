@@ -23,6 +23,7 @@ func writeFixture(t *testing.T) string {
 		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:02:00Z","payload":{"trigger":"tool","outcome":"clean","duration_ms":7,"path_fingerprint":"p1"}}`,
 		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:01:00Z","payload":{"trigger":"inline","outcome":"degraded_no_fresh","duration_ms":30,"reason_category":"wait_timeout"}}`,
 		`{"type":"lsp.request.finished","session_id":"s2","timestamp":"2026-09-29T10:02:00Z","payload":{"trigger":"tool","outcome":"no_server","duration_ms":5}}`,
+		`{"type":"lsp.server.state","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"server":"gopls","state":"ready","pid":42,"first_publish_ms":1234}}`,
 		`{"type":"tool.completed","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"logical_tool":"apply_patch","output_model_visible_bytes":1000}}`,
 		`{"type":"tool.completed","session_id":"s1","timestamp":"2026-09-29T10:01:00Z","payload":{"logical_tool":"write","output_model_visible_bytes":100}}`,
 		`{"type":"tool.completed","session_id":"s1","timestamp":"2026-09-29T10:01:30Z","payload":{"logical_tool":"grep"}}`,
@@ -86,6 +87,12 @@ func TestAnalyzeFixtureMatchesScriptNumbers(t *testing.T) {
 	if got := stats.DegradeReasons["wait_timeout"]; got != 1 {
 		t.Fatalf("degrade_reasons[wait_timeout] = %d, want 1", got)
 	}
+	if stats.ColdFirstPublishP50MS == nil || *stats.ColdFirstPublishP50MS != 1234 {
+		t.Fatalf("cold first publish p50 = %v, want 1234", stats.ColdFirstPublishP50MS)
+	}
+	if got := rows["lsp_cold_first_publish_p95"].Value; got != "1234 ms" {
+		t.Fatalf("cold first publish p95 row = %q, want 1234 ms", got)
+	}
 	if report := RenderMarkdown(stats); !strings.Contains(report, "§4.3 基线登记表") {
 		t.Fatalf("report missing table header")
 	}
@@ -94,13 +101,14 @@ func TestAnalyzeFixtureMatchesScriptNumbers(t *testing.T) {
 func TestAnalyzeWindowAndEmptyState(t *testing.T) {
 	root := writeFixture(t)
 	// 窗口只保留 10:02 之后的事件：剩 2 条（clean + tool/no_server）；被窗口
-	// 挡掉的事件（2 条 request + 3 条工具回执）都计入 skipped_old。
+	// 挡掉的事件（2 条 request + 3 条工具回执 + 1 条冷启动状态事件）都计入
+	// skipped_old。
 	stats, err := Analyze(Options{Roots: []string{root}, Since: time.Date(2026, 9, 29, 10, 2, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
-	if stats.Requests != 2 || stats.Scan.SkippedOld != 5 {
-		t.Fatalf("window requests/skipped = %d/%d, want 2/5", stats.Requests, stats.Scan.SkippedOld)
+	if stats.Requests != 2 || stats.Scan.SkippedOld != 6 {
+		t.Fatalf("window requests/skipped = %d/%d, want 2/6", stats.Requests, stats.Scan.SkippedOld)
 	}
 	// 无 LSP 活跃会话时覆盖率不得渲染成 0（§4.3 反模式）。
 	empty, err := Analyze(Options{Roots: []string{filepath.Join(root, "missing")}})

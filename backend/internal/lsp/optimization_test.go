@@ -431,10 +431,12 @@ func TestClientStatusReportsFirstPublishMS(t *testing.T) {
 	fake := newFakeServer(t)
 	fake.publishDelay = 80 * time.Millisecond
 	cfg := testConfig(t, nil)
+	var events []Event
 	client, err := NewClient(ClientOptions{
 		Spec:            cfg.Servers[0],
 		Root:            dir,
 		Dial:            fake.dial(),
+		Observer:        func(event Event) { events = append(events, event) },
 		MaxTrackedDocs:  8,
 		StartupTimeout:  2 * time.Second,
 		ShutdownTimeout: time.Second,
@@ -459,6 +461,17 @@ func TestClientStatusReportsFirstPublishMS(t *testing.T) {
 	}
 	if got := client.Status().FirstPublishMS; got < 40 {
 		t.Fatalf("FirstPublishMS = %d, want the ~80ms publish delay to be visible", got)
+	}
+	// 冷启动延迟必须落盘（事件面），否则基线跨会话拿不到它：首个发布时补发的
+	// 状态事件要带 first_publish_ms。
+	found := false
+	for _, event := range events {
+		if event.Kind == EventServerState && event.Status.FirstPublishMS >= 40 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no server-state event carried first_publish_ms: %+v", events)
 	}
 }
 

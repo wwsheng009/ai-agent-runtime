@@ -268,6 +268,8 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 | 编辑覆盖率疑似 12% 缺口（855 编辑 vs 753 请求） | 事件级配对审计（离线脚本，按会话+`tool_call_id`）：**新构建会话 42/45 配对（93%），0 个请求没有对应编辑**；缺口来自旧构建事件无 `tool_call_id`（786/828）+ 少量幂等/失败编辑（已文档化的预期行为）——**结论：无需修复**，避免后续重复怀疑 | 审计脚本（同 §4.3 口径：`tool.completed` × `lsp.request.finished` 配对） |
 | 缺二进制/崩溃/传输关闭被折叠成裸 `degraded`（live：pyright 缺二进制 4 条与崩溃无法区分，基线与告警不可行动） | `classifyOutcome` 改为复用 `ReasonCategory`（outcome 与 reason_category 共用单一事实源，防漂移）；新增 `degraded_binary_missing` / `degraded_crashed` / `degraded_transport_closed` / `degraded_canceled`；裸 `degraded` 只兜底真正未知的原因 | `metrics_test` 分类表新增 4 例；`bridge_test` 缺二进制端到端断言（dial 报 not found → `degraded_binary_missing`） |
 | rust-analyzer 真机冒烟在 Windows 偶发红灯（TempDir 清理 sharing violation） | 显式工作区目录 + 带重试的清理：`Stop` 已等 `cmd.Wait`（ShutdownTimeout），但句柄释放可能再滞后数毫秒（ADR-0005） | 连续两轮 `go test ./internal/lsp/...` 全绿（含真机用例） |
+| `first_publish_ms` 只存在于池状态（live-only）：首个发布不改变状态，`setStatus` 不会发事件 → **从未落盘**，跨会话基线拿不到冷启动延迟（方案 §5.8 第三轮只做了观测面） | ① 首个发布时显式补发一条 `lsp.server.state` 事件（带 `first_publish_ms`，锁外发送）；② eventbridge 落盘该字段、projector 白名单同步；③ Go/Python 基线新增 `lsp_cold_first_publish_p95` 行（按 (session, server) 取首个发布；未采集输出 n/a） | `TestClientStatusReportsFirstPublishMS`（观察者收到带 `first_publish_ms` 的状态事件）、Go/Python fixture 互锁新增冷启动断言 |
+| 真机冒烟 `TestRealRustAnalyzerRoundTrip` 在握手中被快速失败拦下（`start_wait_ms` 默认 250ms，实测 rust-analyzer 握手可超 250ms） | 用例显式放宽 `StartWaitMS`（该用例断言完整往返；快速失败已有专门单测 `StartWaitMS=50`）；**默认值不动**——live 证据里 gopls 握手通常在 250ms 内（`degraded_starting` 仅 2 次），等 rust-analyzer 会话的 `degraded_starting` 数据再决定是否调默认 | 连续两轮 `go test ./internal/lsp/...` 全绿 |
 
 新增配置键（全部有内置默认，不改代码即可调整）：
 `diagnostics.start_wait_ms` / `diagnostics.empty_early_accept` / `diagnostics.empty_confirm_ms` /
@@ -335,6 +337,12 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 - 修复（真缺口）：`classifyOutcome` 的兜底把"缺二进制/崩溃/传输关闭"折叠成裸 `degraded`；
   现改为复用 `ReasonCategory`，两类归因字段（outcome 与 reason_category）从此共用同一事实源。
 - 测试稳定性：真机冒烟在 Windows 的 TempDir 清理竞态修复（带重试清理）。
+
+**第八轮优化（2026-10-01，冷启动延迟闭环）**：
+- 缺口：`first_publish_ms` 从未落盘（首个发布不改变状态 → 状态事件不会发）→ 基线拿不到冷启动延迟。
+- 落地：首个发布补发带 `first_publish_ms` 的状态事件；eventbridge/projector 同步；基线新增
+  `lsp_cold_first_publish_p95` 行（未采集 n/a，不渲染成 0）。
+- 附带：真机冒烟的 `start_wait_ms` 敏感性修复（用例放宽；默认值等 rust-analyzer 会话证据再评估）。
 - 行为备注：内容未变化的 write 会按幂等回放处理且不触发 LSP 请求（无变更不诊断，符合预期）。
 
 **崩溃根因定位（已闭环）**：跨会话同秒崩溃（09-30 10:37:33×3、10:43:04×3）确认为

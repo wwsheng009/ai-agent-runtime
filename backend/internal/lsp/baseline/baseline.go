@@ -29,6 +29,9 @@ const (
 	eventLSPRequest = "lsp.request.finished"
 	// eventToolCompleted 是编辑调用分母来源（payload.logical_tool）。
 	eventToolCompleted = "tool.completed"
+	// eventLSPServerState 承载冷启动观测：首个发布时补发的状态事件带
+	// first_publish_ms（启动→首个发布的延迟，plan §5.8 第三轮）。
+	eventLSPServerState = "lsp.server.state"
 )
 
 // editingTools 与 §3.1 mutated_paths 覆盖面同口径。
@@ -93,6 +96,12 @@ type Stats struct {
 	// DegradeReasons breaks degraded requests down by the low-sensitivity
 	// reason_category enum (new-build events only; legacy events lack it).
 	DegradeReasons map[string]int `json:"degrade_reasons,omitempty"`
+	// ColdFirstPublish*：服务启动→首个诊断发布的延迟（毫秒）。按 (session, server)
+	// 取首个带 first_publish_ms 的状态事件；旧构建无该字段时输出 n/a（不把未采集
+	// 渲染成 0）。
+	ColdFirstPublishP50MS *int `json:"cold_first_publish_p50_ms,omitempty"`
+	ColdFirstPublishP95MS *int `json:"cold_first_publish_p95_ms,omitempty"`
+	coldStarts            []int
 	// Closure: injected requests whose diagnostic set disappeared on the next
 	// edit of the same file (outcome=clean). Requires fingerprint-bearing
 	// events (plan §3.3); zero eligible means "not collected", not "0".
@@ -147,6 +156,11 @@ func Analyze(opts Options) (Stats, error) {
 	editCallsBySession := map[string]int{}
 	editOutputBySession := map[string]int{}
 	sessionRequests := map[string]int{}
+	type coldFact struct {
+		ts time.Time
+		ms int
+	}
+	coldFirst := map[string]coldFact{}
 	var timestamps []time.Time
 	seen := map[string]struct{}{}
 
@@ -207,7 +221,8 @@ func Analyze(opts Options) (Stats, error) {
 				stats.Scan.Lines++
 				// 便宜预筛：只解可能相关的事件行（写入端为紧凑 JSON，但按
 				// 「类型值是否出现在行内」判断，兼容美化格式）。
-				if !strings.Contains(line, eventLSPRequest) && !strings.Contains(line, eventToolCompleted) {
+				if !strings.Contains(line, eventLSPRequest) && !strings.Contains(line, eventToolCompleted) &&
+					!strings.Contains(line, eventLSPServerState) {
 					continue
 				}
 				var event rawEvent
@@ -263,6 +278,17 @@ func Analyze(opts Options) (Stats, error) {
 						stats.EditOutput += outputBytes
 						stats.EditOutputEvs++
 						editOutputBySession[sessionID] += outputBytes
+					}
+				case eventLSPServerState:
+					firstPublishMS := payloadInt(event.Payload, "first_publish_ms")
+					if firstPublishMS <= 0 {
+						continue
+					}
+					// 同一 (session, server) 只取最早一条：首个发布即该连接的
+					// 冷启动延迟；同会话内重启会再发一条，取首次即可。
+					key := strings.TrimSpace(event.SessionID) + "\x00" + payloadString(event.Payload, "server")
+					if prev, ok := coldFirst[key]; !ok || event.Timestamp.Before(prev.ts) {
+						coldFirst[key] = coldFact{ts: event.Timestamp, ms: firstPublishMS}
 					}
 				}
 			}
@@ -339,6 +365,12 @@ func Analyze(opts Options) (Stats, error) {
 			stats.ActiveOutput += total
 		}
 	}
+	for _, fact := range coldFirst {
+		stats.coldStarts = append(stats.coldStarts, fact.ms)
+	}
+	sort.Ints(stats.coldStarts)
+	stats.ColdFirstPublishP50MS = Percentile(stats.coldStarts, 0.50)
+	stats.ColdFirstPublishP95MS = Percentile(stats.coldStarts, 0.95)
 	// lsp_closure_ratio（plan §3.3）：同一会话内，被注入的诊断集合是否在下一次
 	// 同文件编辑后消失（下一次请求 outcome=clean）。只统计带 fingerprint 的
 	// injected 请求；无 eligible 样本输出 n/a（不把未采集渲染成 0）。

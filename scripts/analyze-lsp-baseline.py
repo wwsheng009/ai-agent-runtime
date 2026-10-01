@@ -34,6 +34,8 @@ from pathlib import Path
 
 LSP_REQUEST_TYPE = "lsp.request.finished"
 TOOL_COMPLETED_TYPE = "tool.completed"
+# 首个发布时补发的状态事件带 first_publish_ms（冷启动观测，plan §5.8 第三轮）。
+LSP_SERVER_STATE_TYPE = "lsp.server.state"
 
 # 编辑类工具（与 §3.1 的 mutated_paths 覆盖面同口径；工具名以 runtime 的
 # logical_tool 为准）。
@@ -122,7 +124,8 @@ def load_events(roots, since):
                     # 便宜预筛：事件写入端用 json.Marshal（紧凑无空格），但这里只
                     # 按「类型值是否出现在行内」判断，兼容旧/美化格式；不含目标
                     # 类型的行直接跳过，避免对整库逐行 json.loads。
-                    if LSP_REQUEST_TYPE not in line and TOOL_COMPLETED_TYPE not in line:
+                    if (LSP_REQUEST_TYPE not in line and TOOL_COMPLETED_TYPE not in line
+                            and LSP_SERVER_STATE_TYPE not in line):
                         continue
                     try:
                         event = json.loads(line)
@@ -133,7 +136,7 @@ def load_events(roots, since):
                         stats["malformed"] += 1
                         continue
                     event_type = str(event.get("type") or "").strip()
-                    if event_type not in (LSP_REQUEST_TYPE, TOOL_COMPLETED_TYPE):
+                    if event_type not in (LSP_REQUEST_TYPE, TOOL_COMPLETED_TYPE, LSP_SERVER_STATE_TYPE):
                         continue
                     timestamp = parse_timestamp(event.get("timestamp"))
                     if since is not None and (timestamp is None or timestamp < since):
@@ -150,6 +153,9 @@ def aggregate(events, stats):
     edit_output_events = 0
     edit_calls_by_session = Counter()
     edit_output_bytes_by_session = Counter()
+    # 冷启动延迟：同一 (session, server) 只取最早一条带 first_publish_ms 的状态
+    # 事件（首个发布即该连接的冷启动延迟；同会话内重启会再发一条，取首次）。
+    cold_first = {}
 
     for event_type, timestamp, event in events:
         payload = event.get("payload")
@@ -174,6 +180,16 @@ def aggregate(events, stats):
                 }
             )
             continue
+        if event_type == LSP_SERVER_STATE_TYPE:
+            first_publish_ms = to_int(payload.get("first_publish_ms"))
+            if first_publish_ms is None or first_publish_ms <= 0:
+                continue
+            key = (str(event.get("session_id") or "").strip(),
+                   str(payload.get("server") or "").strip())
+            prev = cold_first.get(key)
+            if prev is None or (timestamp is not None and (prev[0] is None or timestamp < prev[0])):
+                cold_first[key] = (timestamp, first_publish_ms)
+            continue
         tool_name = str(payload.get("logical_tool") or "").strip()
         if tool_name in EDIT_TOOLS:
             edit_calls += 1
@@ -196,6 +212,7 @@ def aggregate(events, stats):
     degraded = sum(count for outcome, count in outcomes.items() if outcome.startswith(DEGRADED_PREFIX))
     no_server = outcomes.get("no_server", 0)
     clean = outcomes.get("clean", 0)
+    cold_starts = sorted(value for _, value in cold_first.values())
     degrade_reasons = Counter(
         item["reason_category"] for item in requests if item["reason_category"]
     )
@@ -262,6 +279,9 @@ def aggregate(events, stats):
         "durations": durations,
         "latency_p50_ms": percentile(durations, 0.50),
         "latency_p95_ms": percentile(durations, 0.95),
+        "cold_first_publish_p50_ms": percentile(cold_starts, 0.50),
+        "cold_first_publish_p95_ms": percentile(cold_starts, 0.95),
+        "cold_first_publish_samples": cold_starts,
         "appended_bytes": sum(item["appended_bytes"] for item in requests),
         "diag_count": sum(item["diag_count"] for item in requests),
         "truncated_requests": len(truncated),
@@ -362,6 +382,8 @@ def render_markdown(rows, stats):
                  "消失（下一次请求为 clean）才算闭环；无 fingerprint 样本标记 n/a。")
     lines.append("- `lsp_append_bytes_ratio` 依赖编辑回执的 `output_model_visible_bytes`；"
                  "回执未携带时标记 n/a（不猜分母）。")
+    lines.append("- `lsp_cold_first_publish_p95` 依赖首个发布时补发的 `first_publish_ms`"
+                 "（新构建落盘后开始采集；旧事件标记 n/a，不把未采集渲染成 0）。")
     lines.append("- 本报告只汇总 aicli/runtime-server 会话事件；runtime-server 的事件目录"
                  "可用 `--root` 指向其 chat-logs/事件根。")
     return "\n".join(lines) + "\n"
@@ -457,7 +479,31 @@ def build_rows(stats):
             "conclusion": closure_conclusion,
             "date": date,
         },
+        {
+            "metric": "lsp_cold_first_publish_p95",
+            "value": cold_row_value(stats),
+            "window": window,
+            "samples": cold_row_samples(stats),
+            "conclusion": "待标定（需人工判读）",
+            "date": date,
+        },
     ]
+
+
+def cold_row_value(stats):
+    """冷启动延迟 P95（启动→首个发布）；未采集输出 n/a + 原因。"""
+    p95 = stats.get("cold_first_publish_p95_ms")
+    if p95 is None:
+        return "n/a（窗口内无带 first_publish_ms 的 server 状态事件；新构建落盘后开始采集）"
+    return f"{p95} ms"
+
+
+def cold_row_samples(stats):
+    p50 = stats.get("cold_first_publish_p50_ms")
+    count = len(stats.get("cold_first_publish_samples") or [])
+    if count == 0:
+        return "n=0（未采集，非缺失数据）"
+    return f"n={count}（P50 {cell(p50)} ms；按 (session, server) 取首个发布）"
 
 
 def selftest():
@@ -477,6 +523,8 @@ def selftest():
                          "reason_category": "wait_timeout"}},
             {"type": "lsp.request.finished", "session_id": "s2", "timestamp": "2026-09-29T10:02:00Z",
              "payload": {"trigger": "tool", "outcome": "no_server", "duration_ms": 5}},
+            {"type": "lsp.server.state", "session_id": "s1", "timestamp": "2026-09-29T10:00:00Z",
+             "payload": {"server": "gopls", "state": "ready", "pid": 42, "first_publish_ms": 1234}},
             {"type": "tool.completed", "session_id": "s1", "timestamp": "2026-09-29T10:00:00Z",
              "payload": {"logical_tool": "apply_patch", "output_model_visible_bytes": 1000}},
             {"type": "tool.completed", "session_id": "s1", "timestamp": "2026-09-29T10:01:00Z",
@@ -502,6 +550,8 @@ def selftest():
             ("p50", result["latency_p50_ms"], 7),
             ("p95", result["latency_p95_ms"], 30),
             ("edit_output_bytes", result["edit_output_bytes"], 1100),
+            ("cold_first_publish_p50_ms", result["cold_first_publish_p50_ms"], 1234),
+            ("cold_first_publish_p95_ms", result["cold_first_publish_p95_ms"], 1234),
             ("sessions", result["sessions"], 2),
             ("closure_eligible", result["closure_eligible"], 1),
             ("closure_closed", result["closure_closed"], 1),
@@ -514,6 +564,8 @@ def selftest():
             failures.append(f"append ratio: got {rows['lsp_append_bytes_ratio']}")
         if rows["lsp_closure_ratio"] != ratio_text(1, 1):
             failures.append(f"closure: got {rows['lsp_closure_ratio']}")
+        if rows["lsp_cold_first_publish_p95"] != "1234 ms":
+            failures.append(f"cold first publish: got {rows['lsp_cold_first_publish_p95']}")
         if failures:
             print("selftest FAILED:")
             for failure in failures:

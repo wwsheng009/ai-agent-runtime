@@ -156,6 +156,8 @@ var payloadAllowKeys = map[string]bool{
 	"appended_note_bytes":  true,
 	"appended_empty_bytes": true,
 	"path_fingerprint":     true,
+	// first_publish_ms 是启动→首个发布的毫秒数（冷启动观测，方案 §5.8 第三轮）。
+	"first_publish_ms": true,
 }
 
 // ProjectRuntimeEvent 把 bus 事件投影为观测事件。

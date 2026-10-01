@@ -89,6 +89,9 @@ func Observer(bus runtimeevents.Publisher, opts Options) runtimelsp.Observer {
 			if category := runtimelsp.ReasonCategory(reason); category != "" {
 				payload["reason_category"] = category
 			}
+			if event.Status.FirstPublishMS > 0 {
+				payload["first_publish_ms"] = event.Status.FirstPublishMS
+			}
 			bus.Publish(runtimeevents.Event{
 				Type:      runtimeevents.EventLSPServerState,
 				SessionID: sessionID,
