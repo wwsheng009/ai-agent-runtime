@@ -58,6 +58,9 @@ func newLSPBridgeWith(config *runtimecfg.RuntimeConfig, workspaceRoot string, di
 		// 工具执行 ctx 携带会话归属（toolctx），runtime-server 的共享工具
 		// 管理器由此把 LSP 事件关联到具体会话；aicli 单会话路径下同样正确。
 		SessionIDFromContext: toolctx.SessionID,
+		// 请求事件同时带上工具调用与回合 join 键（观测方案 §3.1）。
+		ToolCallIDFromContext: toolctx.ToolCallID,
+		TurnIDFromContext:     toolctx.TurnID,
 	})
 	if config.LSP.Prewarm && bridge.Enabled() {
 		bridge.StartAll(context.Background())
