@@ -3,32 +3,37 @@ package contextmgr
 import (
 	"context"
 	"fmt"
-	"math"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
-// 知识层注入（06 §4 Phase 2 W5；语义见 04 §4.4/§4.5）。
+// 知识层注入（06 §4 Phase 2 W5 起步；Phase 6 切片 3 起统一走 Context Compiler）。
 //
 // 口径：
 //   - KnowledgeMode = off | signals | broad，与 WorkspaceMode/RecallMode 对称；
 //     off（含空值 / 未知值，fail closed）零调用 Planner、零注入，Build 结果与
 //     改动前逐字节一致（G4 可逆主承载）。
 //   - 只注入 Planner 的 Reuse 项；Explore 只计数不注入（探索由调用方执行）。
-//   - 进入 prompt 前做二次 stale/version 过滤：knowledge_version 为空、或
-//     Reason 为版本不匹配/未知的条目一律丢弃（为 Phase 6 的
-//     stale_item_injected=0 留扣；当前恒为 0）。
-//   - Verify=true / Provisional 条目照常注入，但在 metadata 标 reason，并把
+//   - **Phase 6 切片 3**：注入前统一走 `knowledge.CompilePlan`（信任等级 /
+//     来源冲突 / stale / 置信度下限 / token 预算 / 可解释性字段），渲染统一为
+//     data block（03 §14.5 规则 2/4）；stale 条目由编译器丢弃并计数
+//     （stale_item_injected 恒为 0 的第三道防线）。
+//   - 有缓存（`Manager.KnowledgeCache`）且 Planner 可提供版本观测
+//     （`*knowledge.Layer`）时走 compile 层缓存：键含知识版本与编译器版本，
+//     命中不重编译；缓存故障降级直算（切片 2 语义）。
+//   - 条目按 tier 映射 hot/warm/cold（04 §5 Phase 6 交付 2）：高置信直接复用 →
+//     hot；Verify/Provisional → warm；未注入（stale/低置信/超预算/被覆盖）→
+//     cold（只留在可解释性记录里）。
+//   - Verify=true / Provisional 条目照常注入，但在 metadata 标 reason/tier，并把
 //     验证读取目标写入 knowledge_verify_targets，由调用方（agent 循环）用
 //     既有 grep / view 完成一次低成本验证；本 Phase 不依赖 code.*。
 //   - Plan.Degraded / Planner 错误 → 零注入，回退基线（Degrade-Not-Fail）。
-//   - signals 只注入摘要/信号；broad 注入条目行，受保守 token 预算截断。
-//
-// 本 Phase 只做 contextmgr 内注入与 metadata；context_items 的写入路径留给
-// Phase 6（item_type=exploration / source=memory 是分层口径约定，不落库）。
+//   - signals 只注入摘要/信号（一个 digest data block）；broad 注入条目 data
+//     block，受保守 token 预算截断（由编译器执行，口径见 DefaultKnowledgeTokens）。
 const (
 	// KnowledgeModeOff 关闭知识层注入（默认）：零调用、零注入、可逆回基线。
 	KnowledgeModeOff = "off"
@@ -112,11 +117,24 @@ type knowledgeInjectionStats struct {
 	ProvisionalCount int
 	StaleFiltered    int
 	FloorFiltered    int
-	Degraded         bool
-	Reason           string
-	Error            string
-	Items            []map[string]interface{}
-	VerifyTargets    []map[string]interface{}
+	// Phase 6 切片 3：编译器口径的补充计数与缓存命中。
+	BudgetFiltered     int
+	OverriddenFiltered int
+	CacheHit           bool
+	Degraded           bool
+	Reason             string
+	Error              string
+	Items              []map[string]interface{}
+	VerifyTargets      []map[string]interface{}
+}
+
+// knowledgeTierHotConfidence 是 hot 档阈值：与 Verify 读取阈值同口径（0.90）。
+const knowledgeTierHotConfidence = 0.90
+
+// knowledgeVersionObserver 由 *knowledge.Layer 实现：提供当前工作区版本观测
+// （含 `#pendingN` 未稳定标记），用于 compile 层缓存键。
+type knowledgeVersionObserver interface {
+	ObserveVersion(ctx context.Context, ttl time.Duration, now time.Time) (knowledge.VersionObservation, error)
 }
 
 // buildKnowledgeMessage 执行一次知识层注入决策；失败/降级一律零注入。
@@ -181,20 +199,31 @@ func (m *Manager) buildKnowledgeMessage(ctx context.Context, input BuildInput) (
 		return nil, stats
 	}
 
-	floor := m.Strategy.ReuseConfidenceFloor
-	kept := make([]knowledge.ReuseItem, 0, len(plan.Reuse))
-	for _, item := range plan.Reuse {
-		if knowledgeItemStale(item) {
-			stats.StaleFiltered++
-			continue
-		}
-		if floor > 0 && (math.IsNaN(item.Confidence) || item.Confidence < floor) {
-			stats.FloorFiltered++
-			continue
-		}
-		kept = append(kept, item)
+	// Phase 6 切片 3：注入前统一走 Context Compiler（信任/冲突/stale/下限/预算/
+	// 可解释性）；signals 档不按预算截断（只注入摘要），broad 档按默认预算截断。
+	tokenBudget := 0
+	if stats.Mode == KnowledgeModeBroad {
+		tokenBudget = DefaultKnowledgeTokens
 	}
-	if len(kept) == 0 {
+	compileReq := knowledge.CompileRequest{
+		Plan:            plan,
+		TokenBudget:     tokenBudget,
+		ConfidenceFloor: m.Strategy.ReuseConfidenceFloor,
+	}
+	compiled := m.compileKnowledgePlan(ctx, input, taskID, scope, compileReq, &stats)
+	for _, dropped := range compiled.Dropped {
+		switch dropped.DropReason {
+		case knowledge.CompileReasonStale:
+			stats.StaleFiltered++
+		case knowledge.CompileReasonBelowFloor:
+			stats.FloorFiltered++
+		case knowledge.CompileReasonBudget:
+			stats.BudgetFiltered++
+		case knowledge.CompileReasonOverridden:
+			stats.OverriddenFiltered++
+		}
+	}
+	if len(compiled.Items) == 0 {
 		if stats.ReuseCount == 0 {
 			stats.Reason = knowledgeReasonNoReuse
 		} else {
@@ -205,22 +234,17 @@ func (m *Manager) buildKnowledgeMessage(ctx context.Context, input BuildInput) (
 
 	var content string
 	if stats.Mode == KnowledgeModeBroad {
-		content, stats.InjectedCount = knowledgeBroadContent(kept, DefaultKnowledgeTokens)
-		if content == "" {
-			stats.Reason = knowledgeReasonAllFiltered
-			return nil, stats
-		}
+		content = knowledgeBroadContent(compiled.Items)
 	} else {
-		content = knowledgeSignalsContent(kept)
-		stats.InjectedCount = len(kept)
+		content = knowledgeSignalsContent(compiled.Items)
 	}
-
-	represented := kept
-	if stats.Mode == KnowledgeModeBroad && stats.InjectedCount < len(kept) {
-		represented = kept[:stats.InjectedCount]
+	if content == "" {
+		stats.Reason = knowledgeReasonAllFiltered
+		return nil, stats
 	}
-	stats.Items = make([]map[string]interface{}, 0, len(represented))
-	for _, item := range represented {
+	stats.InjectedCount = len(compiled.Items)
+	stats.Items = make([]map[string]interface{}, 0, len(compiled.Items))
+	for _, item := range compiled.Items {
 		stats.Items = append(stats.Items, knowledgeItemMetadata(item))
 		if item.Verify {
 			stats.VerifyTargets = append(stats.VerifyTargets, knowledgeVerifyTarget(item))
@@ -236,6 +260,9 @@ func (m *Manager) buildKnowledgeMessage(ctx context.Context, input BuildInput) (
 	message.Metadata["knowledge_mode"] = stats.Mode
 	message.Metadata["knowledge_count"] = stats.InjectedCount
 	message.Metadata["knowledge_items"] = stats.Items
+	if stats.CacheHit {
+		message.Metadata["knowledge_cache_hit"] = true
+	}
 	if stats.Reason != "" {
 		message.Metadata["knowledge_reason"] = stats.Reason
 	}
@@ -243,6 +270,53 @@ func (m *Manager) buildKnowledgeMessage(ctx context.Context, input BuildInput) (
 		message.Metadata["knowledge_verify_targets"] = stats.VerifyTargets
 	}
 	return message, stats
+}
+
+// compileKnowledgePlan 执行一次编译：有缓存且可观测知识版本时走 compile 层
+// 缓存；否则直算（无缓存可用时不计入命中率口径，见 knowledge.CompileCache.Do）。
+func (m *Manager) compileKnowledgePlan(ctx context.Context, input BuildInput, taskID string, scope knowledge.ReuseScope, req knowledge.CompileRequest, stats *knowledgeInjectionStats) knowledge.CompileResult {
+	if m == nil || m.KnowledgeCache == nil {
+		return knowledge.CompilePlan(req)
+	}
+	version, ok := m.knowledgeVersionToken(ctx)
+	if !ok || strings.TrimSpace(input.WorkspaceID) == "" {
+		return knowledge.CompilePlan(req)
+	}
+	key := knowledge.CompileCacheKeyInput{
+		WorkspaceID:      input.WorkspaceID,
+		TaskID:           taskID,
+		SessionID:        strings.TrimSpace(input.SessionID),
+		Query:            strings.TrimSpace(input.Goal),
+		Scope:            string(scope),
+		Write:            input.KnowledgeWrite,
+		Mode:             stats.Mode,
+		TokenBudget:      req.TokenBudget,
+		ConfidenceFloor:  req.ConfidenceFloor,
+		KnowledgeVersion: version,
+	}
+	result := m.KnowledgeCache.Do(ctx, key, req)
+	if stats != nil {
+		stats.CacheHit = result.CacheHit
+	}
+	return result
+}
+
+// knowledgeVersionToken 通过 Layer 的版本观测取缓存键所需的知识版本 token；
+// 不可观测（裸 Planner / 观测失败 / 空版本）时返回 ok=false（无缓存）。
+func (m *Manager) knowledgeVersionToken(ctx context.Context) (string, bool) {
+	if m == nil || m.Knowledge == nil {
+		return "", false
+	}
+	observer, ok := m.Knowledge.(knowledgeVersionObserver)
+	if !ok {
+		return "", false
+	}
+	observation, err := observer.ObserveVersion(ctx, 0, time.Time{})
+	if err != nil {
+		return "", false
+	}
+	version := strings.TrimSpace(observation.Version)
+	return version, version != ""
 }
 
 // applyKnowledgeMetadata 把一次注入判定写入 BuildResult metadata 与层指标。
@@ -260,6 +334,9 @@ func applyKnowledgeMetadata(metadata map[string]interface{}, metrics map[string]
 	metadata["knowledge_stale_filtered"] = stats.StaleFiltered
 	metadata["knowledge_stale_item_injected"] = 0
 	metadata["knowledge_floor_filtered"] = stats.FloorFiltered
+	metadata["knowledge_budget_filtered"] = stats.BudgetFiltered
+	metadata["knowledge_overridden_filtered"] = stats.OverriddenFiltered
+	metadata["knowledge_cache_hit"] = stats.CacheHit
 	metadata["knowledge_degraded"] = stats.Degraded
 	if stats.Reason != "" {
 		metadata["knowledge_reason"] = stats.Reason
@@ -282,59 +359,59 @@ func applyKnowledgeMetadata(metadata map[string]interface{}, metrics map[string]
 	metrics["provisional_count"] = stats.ProvisionalCount
 	metrics["stale_filtered"] = stats.StaleFiltered
 	metrics["floor_filtered"] = stats.FloorFiltered
+	metrics["budget_filtered"] = stats.BudgetFiltered
+	metrics["overridden_filtered"] = stats.OverriddenFiltered
+	metrics["cache_hit"] = stats.CacheHit
 	metrics["degraded"] = stats.Degraded
 }
 
-// knowledgeItemStale 是注入前的二次 stale/version 过滤：无版本或版本不匹配/
-// 未知/未稳定的条目一律不得进入 prompt（04 §4.4；Phase 6 stale_item_injected=0）。
-func knowledgeItemStale(item knowledge.ReuseItem) bool {
-	version := strings.TrimSpace(item.KnowledgeVersion)
-	if version == "" {
-		return true
-	}
-	// 未稳定 token（带 #pendingN）：索引落后于磁盘时记录的知识不能作为可复用
-	// 证据（Phase 5 交付 3）。复用判定侧同口径（CompareKnowledgeVersion），
-	// 这里是注入前的最后一道防线。
-	if knowledge.IsVersionUnstable(version) {
-		return true
-	}
-	switch item.Reason {
-	case knowledge.ReuseReasonVersionMismatch, knowledge.ReuseReasonVersionUnknown:
-		return true
-	default:
-		return false
-	}
-}
-
-func knowledgeItemMetadata(item knowledge.ReuseItem) map[string]interface{} {
+// knowledgeItemMetadata 生成条目 metadata（与编译条目字段对齐）：source / trust /
+// version / reason / tier / tokens 随条目进入 message metadata，供调试、tier
+// 统计与可解释性要求（03 §14.4：必须保留 source/confidence/version/explanation）。
+func knowledgeItemMetadata(item knowledge.CompiledItem) map[string]interface{} {
 	return map[string]interface{}{
-		"item_type":         knowledgeItemType,
-		"source":            knowledgeItemSource,
-		"node_id":           item.NodeID,
-		"node_type":         string(item.NodeType),
+		"item_type":         item.ItemType,
+		"source":            string(item.Source),
+		"node_id":           item.RefID,
 		"target":            item.Target,
 		"confidence":        item.Confidence,
-		"knowledge_version": item.KnowledgeVersion,
-		"scope":             string(item.Scope),
+		"knowledge_version": item.Version,
+		"trust":             string(item.Trust),
+		"tier":              knowledgeTier(item),
+		"tokens":            item.Tokens,
 		"verify":            item.Verify,
 		"provisional":       item.Provisional,
 		"reason":            item.Reason,
 	}
 }
 
-func knowledgeVerifyTarget(item knowledge.ReuseItem) map[string]interface{} {
+// knowledgeTier 把编译条目映射到 hot/warm/cold（04 §5 Phase 6 交付 2）。
+//
+//   - hot：高置信且无需验证的直接复用项（进入下一请求的主承载）；
+//   - warm：需验证读取（Verify）/ 暂定（Provisional）/ 置信度未达 hot 阈值；
+//   - cold：未注入条目（stale/低置信/超预算/被覆盖），只留在可解释性记录里
+//     （由 dropped 计数与 knowledge_*_filtered 元数据承载）。
+func knowledgeTier(item knowledge.CompiledItem) string {
+	if item.Verify || item.Provisional || item.Confidence < knowledgeTierHotConfidence {
+		return "warm"
+	}
+	return "hot"
+}
+
+func knowledgeVerifyTarget(item knowledge.CompiledItem) map[string]interface{} {
 	return map[string]interface{}{
-		"node_id":           item.NodeID,
+		"node_id":           item.RefID,
 		"target":            item.Target,
 		"confidence":        item.Confidence,
-		"knowledge_version": item.KnowledgeVersion,
+		"knowledge_version": item.Version,
 		"reason":            item.Reason,
+		"trust":             string(item.Trust),
 	}
 }
 
 // knowledgeSignalsContent 生成 signals 档摘要：只给信号（数量/验证需求/目标
-// 名单），不注入条目明细。
-func knowledgeSignalsContent(items []knowledge.ReuseItem) string {
+// 名单），不注入条目明细；整体包裹为一个 data block（03 §14.5 规则 2）。
+func knowledgeSignalsContent(items []knowledge.CompiledItem) string {
 	targets := make([]string, 0, len(items))
 	verifyCount := 0
 	provisionalCount := 0
@@ -354,54 +431,40 @@ func knowledgeSignalsContent(items []knowledge.ReuseItem) string {
 	if len(targets) > 0 {
 		builder.WriteString("\nReuse targets: " + strings.Join(limitStrings(targets, 8), ", "))
 	}
-	return builder.String()
+	return knowledge.RenderDataBlock(knowledge.CompiledItem{
+		ItemType: knowledgeItemType,
+		Source:   knowledge.SourceClassMemory,
+		Trust:    knowledge.TrustCodeIntelligence,
+		Reason:   "signals_digest",
+		Content:  builder.String(),
+	})
 }
 
-// knowledgeBroadContent 生成 broad 档条目行，并按保守 token 预算截断；
-// 返回实际注入条目数。预算放不下第一条时返回空串（零注入优于超预算）。
-func knowledgeBroadContent(items []knowledge.ReuseItem, tokenBudget int) (string, int) {
-	if tokenBudget <= 0 {
-		tokenBudget = DefaultKnowledgeTokens
-	}
-	header := "Exploration memory reuse:"
-	used := approxKnowledgeTokens(header)
-	lines := make([]string, 0, len(items)+1)
-	lines = append(lines, header)
-	injected := 0
+// knowledgeBroadContent 渲染 broad 档：每条编译条目一个 data block（03 §14.5
+// 规则 2/4：来源与版本入块头）。token 预算截断已由 CompilePlan 用同一预算完成，
+// 此处只拼接；空集合返回空串（调用方按"全部被过滤"处理）。
+func knowledgeBroadContent(items []knowledge.CompiledItem) string {
+	blocks := make([]string, 0, len(items))
 	for _, item := range items {
-		line := knowledgeBroadLine(item)
-		cost := approxKnowledgeTokens(line)
-		if used+cost > tokenBudget {
-			break
-		}
-		lines = append(lines, line)
-		used += cost
-		injected++
+		blocks = append(blocks, knowledgeBroadBlock(item))
 	}
-	if injected == 0 {
-		return "", 0
-	}
-	return strings.Join(lines, "\n"), injected
+	return strings.Join(blocks, "\n")
 }
 
-func knowledgeBroadLine(item knowledge.ReuseItem) string {
-	line := fmt.Sprintf("- [%s] target=%s confidence=%.2f version=%s reason=%s verify=%t item_type=%s source=%s",
-		knowledgeItemType,
-		strings.TrimSpace(item.Target),
-		item.Confidence,
-		strings.TrimSpace(item.KnowledgeVersion),
-		item.Reason,
-		item.Verify,
-		knowledgeItemType,
-		knowledgeItemSource,
-	)
+// knowledgeBroadBlock 渲染单条 broad 条目：块体给 target/confidence/verify 与
+// 摘要（是数据，不是指令），块头给来源/版本/理由（03 §14.5 规则 1/4）。
+func knowledgeBroadBlock(item knowledge.CompiledItem) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "target=%s confidence=%.2f verify=%t", item.Target, item.Confidence, item.Verify)
 	if item.Provisional {
-		line += " provisional=true"
+		builder.WriteString(" provisional=true")
 	}
-	if summary := summarizeLine(item.Summary, 200); summary != "" {
-		line += "\n  summary: " + summary
+	if summary := summarizeLine(item.Content, 200); summary != "" {
+		builder.WriteString("\nsummary: " + summary)
 	}
-	return line
+	rendered := item
+	rendered.Content = builder.String()
+	return knowledge.RenderDataBlock(rendered)
 }
 
 // approxKnowledgeTokens 保守估算 token：1 rune ≈ 1 token（CJK 上界，ASCII

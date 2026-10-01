@@ -465,11 +465,13 @@ DoD（完成判据）：① 零迁移即可读写三表；② 同 target 重复�
 - **文件落点**：新增 `contextpack/knowledge_provider.go`、`knowledge/compiler.go`；修改 `contextmgr/manager.go`、`contextpack/context_pack.go`。
 - **验收门槛**：相同任务上下文 token 下降 ≥ 25% 且任务成功率不降（A/B，样本 ≥ 20）；`stale` item 注入数 = 0；compiler 缓存命中 p95 < 50ms、未命中 p95 < 200ms。
 - **回滚**：provider 开关关闭。
-- **状态**：**切片 1–2 落地（2026-10-01）**——①语义内核 `knowledge/compiler.go`（信任等级闭集 + `context_items.trust` 映射 + 来源冲突优先级（复用 04 §4.4 权重）+ `CompilePlan`（stale/下限/预算/可解释性字段）+ `RenderDataBlock` 防注入包裹）+ 8 例测试；②compile 层缓存（`cache_entries`：窄接口 + 确定性键（含知识版本/编译器版本）+ Degrade-Not-Fail + 命中/时延指标；真库 200 次实测 hit p95 0.54ms / miss p95 1.07ms / hit_rate 0.995）+ 8 例测试；切片计划（8 片）见 CHANGELOG。
+- **状态**：**切片 1–3 落地（2026-10-01）**——①语义内核 `knowledge/compiler.go`（信任等级闭集 + `context_items.trust` 映射 + 来源冲突优先级（复用 04 §4.4 权重）+ `CompilePlan`（stale/下限/预算/可解释性字段）+ `RenderDataBlock` 防注入包裹）+ 8 例测试；②compile 层缓存（`cache_entries`：窄接口 + 确定性键（含知识版本/编译器版本）+ Degrade-Not-Fail + 命中/时延指标；真库 200 次实测 hit p95 0.54ms / miss p95 1.07ms / hit_rate 0.995）+ 8 例测试；③contextmgr 接线（注入走 `CompilePlan` + data block 渲染 + `Manager.KnowledgeCache` + `LayerPlan.knowledge` 层与 hot/warm/cold tier 映射；off 可逆保持）+ 3 例新测试；切片计划（8 片）见 CHANGELOG。
 
 > **切片 1 落地（2026-10-01）**：语义内核 `knowledge/compiler.go`（纯函数、无 IO、可复算）——信任等级 7 级闭集 + 落库映射 + `Injectable()`；来源冲突优先级与 `ResolveConflicts`；`CompilePlan` 产出 `context_items` 语义镜像（source/version/trust/reason/stale/tokens/explanation）；`IsReuseItemStale` 规范判据；`RenderDataBlock`（03 §14.5 规则 2/4：data block 包裹 + 内容中性化 + 属性转义）。验证：8 例新测试 + `internal/knowledge` 全包。**登记**：supplement 14 §14.4 与 04 §4.4 在 Regex/FTS 先后上不一致，按 04 执行（`compiler.go` 头注说明）。
 >
 > **切片 2 落地（2026-10-01）**：compile 层缓存 `knowledge/cache.go` + `store_sqlite_cache.go`——`CompileCacheStore` 窄接口（`*sqliteStore` 满足；未实现者自动「无缓存」）；确定性 sha256 键（计划输入 + 编译策略 + 知识版本 + 编译器版本 `CompileCacheVersion`）；`CompileCache.Do` 命中即返回、未命中回填、**任何缓存故障降级直算**（含 reader 角色 `ErrReadOnlyStore`）；`CompileCacheMetrics`（命中率 + hit/miss p50/p95，512 样本有界）。**门槛复现**（真库 + 真编译 200 次）：hit p95 0.54ms（< 50ms）、miss p95 1.07ms（< 200ms）、hit_rate 0.995。验证：8 例新测试 + 全包。
+>
+> **切片 3 落地（2026-10-01）**：contextmgr 接线——注入统一走 `knowledge.CompilePlan`（本地 stale 判据收敛到 `knowledge.IsReuseItemStale`）；渲染统一为 data block（broad 每条目一块 / signals 单 digest 块）；`Manager.KnowledgeCache` 在有版本观测时启用 compile 缓存（命中不重编译，故障降级）；`LayerPlan.knowledge` 层 + 条目 tier（hot/warm/cold）元数据；`knowledge_items` 增 trust/tier/tokens。**行为变化（有意）**：broad/signals 注入文本格式改为 data block；`DefaultCompileItemOverhead` 24 → 320（预算覆盖渲染后尺寸，实测曾 969 > 800）。off 可逆与 `stale_item_injected=0` 保持。验证：contextmgr/agent 全包绿 + 3 例新测试。
 
 ### Phase 7 — Semantic Retrieval（可选，后置）
 

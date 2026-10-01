@@ -6,6 +6,28 @@
 
 ---
 
+## 2026-10-01 — Phase 6 切片 3：contextmgr 接线（编译 + data block + compile 缓存 + tier 映射）
+
+### Changed
+
+- `contextmgr/knowledge.go`：知识层注入改走 Context Compiler——
+  - 注入前统一 `knowledge.CompilePlan`（信任/冲突/stale/置信度下限/token 预算/可解释性）；本地 `knowledgeItemStale` 删除，收敛到 `knowledge.IsReuseItemStale` 规范判据；
+  - 渲染统一为 data block（03 §14.5 规则 2/4）：broad = 每条目一块（块头给来源/版本/理由，块体给 target/confidence/verify + 摘要）；signals = 单个 digest 块（措辞不变，仍是「只给信号、不给明细」）；
+  - `Manager.KnowledgeCache`（新字段）：Planner 可提供版本观测（`*knowledge.Layer`）时走 compile 层缓存，命中不重编译；不可观测/观测失败/缓存故障一律降级直算；
+  - 条目按 tier 映射 hot/warm/cold（04 §5 交付 2）：高置信直接复用 → hot；Verify/Provisional → warm；未注入（stale/低置信/超预算/被覆盖）→ cold（仅审计）；`knowledge_items` 增加 trust/tier/tokens，新增 `knowledge_budget_filtered` / `knowledge_overridden_filtered` / `knowledge_cache_hit` 元数据；
+  - off 档零调用零注入不变（既有 off 可逆测试 + 新缓存场景下继续钉住）。
+- `contextmgr/manager.go`：`LayerPlan` 增加 `knowledge` 层（name/description/sources/max_tokens/mode），描述 tier 映射。
+- `agent/agent.go`：`attachKnowledgePlanner` 在 `*knowledge.Layer` 的 store 满足 `CompileCacheStore` 时装配 `KnowledgeCache`（reader 角色只读会被降级直算）。
+- `knowledge/compiler.go`：`DefaultCompileItemOverhead` 24 → 320——预算必须覆盖**渲染后**的 data block（块头 + 块体脚手架），否则整条消息可超预算（切片 3 实测暴露：969 > 800）。
+- 测试：`TestKnowledgeBroadInjectionShapeAndEvents` 断言更新为 data block 格式；`knowledge_calibration_test.go` 校准路径改用编译渲染（预算不变量对**新生产格式**成立）；新增 3 例（tier/信任元数据、缓存命中与降级、LayerPlan knowledge 层 + 缓存下 off 可逆）。
+
+### Verified
+
+- `internal/contextmgr` + `internal/agent` 全包绿；`go build ./...` 绿。
+- 预算不变量：典型上界条目块 ≤ 800（`TestKnowledgeBroadBudgetCoversTypicalUpperBoundLine`，新生产格式）。
+
+---
+
 ## 2026-10-01 — Phase 6 切片 2：compile 层缓存（`cache_entries`）
 
 ### Added

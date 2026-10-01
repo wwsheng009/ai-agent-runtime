@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
@@ -243,7 +244,16 @@ func TestKnowledgeBroadInjectionShapeAndEvents(t *testing.T) {
 	if message == nil {
 		t.Fatal("expected broad injection message")
 	}
-	for _, fragment := range []string{"- [exploration]", "target=backend/a.go", "confidence=0.95", "version=wv1", "reason=ok", "item_type=exploration source=memory"} {
+	for _, fragment := range []string{
+		// Phase 6 切片 3：broad 档渲染为 data block（03 §14.5 规则 2/4）——
+		// 块头给来源/版本/理由，块体给 target/confidence/verify 与摘要。
+		`<data type="exploration" source="memory" trust="CODE_INTELLIGENCE"`,
+		`version="wv1"`,
+		`reason="ok"`,
+		`target=backend/a.go confidence=0.95`,
+		"summary: remembered exploration summary for backend/a.go",
+		"</data>",
+	} {
 		if !strings.Contains(message.Content, fragment) {
 			t.Fatalf("broad content missing %q: %q", fragment, message.Content)
 		}
@@ -452,5 +462,218 @@ func TestKnowledgeModeForLayerMode(t *testing.T) {
 		if got := KnowledgeModeForLayerMode(tc.in); got != tc.want {
 			t.Fatalf("KnowledgeModeForLayerMode(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 切片 3：Context Compiler 接线（tier 映射 / compile 层缓存 / LayerPlan）
+// ---------------------------------------------------------------------------
+
+// fakeVersionedPlanner 是带版本观测的 Planner（模拟 *knowledge.Layer 的
+// ObserveVersion），用于 compile 层缓存接线测试。
+type fakeVersionedPlanner struct {
+	fakeKnowledgePlanner
+	version      string
+	observeErr   error
+	observeCalls int
+}
+
+func (f *fakeVersionedPlanner) ObserveVersion(ctx context.Context, ttl time.Duration, now time.Time) (knowledge.VersionObservation, error) {
+	f.observeCalls++
+	if f.observeErr != nil {
+		return knowledge.VersionObservation{}, f.observeErr
+	}
+	return knowledge.VersionObservation{Version: f.version}, nil
+}
+
+// fakeCompileCacheStore 是 knowledge.CompileCacheStore 的内存假体。
+type fakeCompileCacheStore struct {
+	entries map[string]knowledge.CacheEntry
+}
+
+func newFakeCompileCacheStore() *fakeCompileCacheStore {
+	return &fakeCompileCacheStore{entries: map[string]knowledge.CacheEntry{}}
+}
+
+func (f *fakeCompileCacheStore) key(workspaceID, cacheType, cacheKey string) string {
+	return workspaceID + "\x00" + cacheType + "\x00" + cacheKey
+}
+
+func (f *fakeCompileCacheStore) GetCacheEntry(_ context.Context, workspaceID, cacheType, cacheKey string) (knowledge.CacheEntry, bool, error) {
+	entry, ok := f.entries[f.key(workspaceID, cacheType, cacheKey)]
+	return entry, ok, nil
+}
+
+func (f *fakeCompileCacheStore) PutCacheEntry(_ context.Context, entry knowledge.CacheEntry) error {
+	f.entries[f.key(entry.WorkspaceID, entry.CacheType, entry.CacheKey)] = entry
+	return nil
+}
+
+func (f *fakeCompileCacheStore) DeleteCacheEntry(_ context.Context, workspaceID, cacheType, cacheKey string) error {
+	delete(f.entries, f.key(workspaceID, cacheType, cacheKey))
+	return nil
+}
+
+func (f *fakeCompileCacheStore) PurgeExpiredCacheEntries(_ context.Context, now time.Time, limit int) (int, error) {
+	return 0, nil
+}
+
+// tier 映射与信任字段进入条目 metadata；渲染为 data block。
+func TestKnowledgeCompiledTierAndTrustMetadata(t *testing.T) {
+	planner := &fakeKnowledgePlanner{plan: knowledge.Plan{
+		Reuse: []knowledge.ReuseItem{
+			knowledgeTestReuseItem("backend/hot.go", "wv1", knowledge.ReuseReasonOK, 0.95, false, false),
+			knowledgeTestReuseItem("backend/warm.go", "wv1", knowledge.ReuseReasonCrossTaskVerify, 0.93, true, false),
+		},
+		Reason: knowledge.PlanReasonOK,
+	}}
+	manager := newKnowledgeTestManager(planner, KnowledgeModeBroad)
+	result := manager.Build(context.Background(), knowledgeTestBuildInput("locate the runtime agent loop entry"))
+	message := knowledgeMessageFrom(result)
+	if message == nil {
+		t.Fatal("expected broad injection message")
+	}
+	items, ok := message.Metadata["knowledge_items"].([]map[string]interface{})
+	if !ok || len(items) != 2 {
+		t.Fatalf("expected two item metadata entries, got %#v", message.Metadata["knowledge_items"])
+	}
+	if items[0]["tier"] != "hot" {
+		t.Fatalf("高置信无验证条目必须映射 hot，got %#v", items[0])
+	}
+	if items[1]["tier"] != "warm" {
+		t.Fatalf("Verify 条目必须映射 warm，got %#v", items[1])
+	}
+	for _, item := range items {
+		if item["trust"] != "CODE_INTELLIGENCE" || item["source"] != "memory" || item["item_type"] != "exploration" {
+			t.Fatalf("可解释性字段缺失：%#v", item)
+		}
+		if tokens, ok := item["tokens"].(int); !ok || tokens <= 0 {
+			t.Fatalf("tokens 必须为正上界：%#v", item)
+		}
+	}
+	if !strings.Contains(message.Content, `<data type="exploration" source="memory" trust="CODE_INTELLIGENCE"`) ||
+		!strings.Contains(message.Content, `stale="false"`) {
+		t.Fatalf("broad 注入必须包裹为 data block：%q", message.Content)
+	}
+	if strings.Contains(message.Content, "backend/warm.go\n") && !strings.Contains(message.Content, "verify=true") {
+		t.Fatalf("块体必须标注 verify：%q", message.Content)
+	}
+}
+
+// compile 层缓存接线：有版本观测时命中不重编译；无版本观测时不用缓存。
+func TestKnowledgeCompileCacheHitAndDegrade(t *testing.T) {
+	plan := knowledge.Plan{
+		Reuse:  []knowledge.ReuseItem{knowledgeTestReuseItem("backend/a.go", "wv1", knowledge.ReuseReasonOK, 0.95, false, false)},
+		Reason: knowledge.PlanReasonOK,
+	}
+
+	t.Run("hit_skips_recompile", func(t *testing.T) {
+		planner := &fakeVersionedPlanner{fakeKnowledgePlanner: fakeKnowledgePlanner{plan: plan}, version: "wv1"}
+		manager := newKnowledgeTestManager(planner, KnowledgeModeBroad)
+		cache := knowledge.NewCompileCache(newFakeCompileCacheStore())
+		compileCalls := 0
+		cache.Compile = func(req knowledge.CompileRequest) knowledge.CompileResult {
+			compileCalls++
+			return knowledge.CompilePlan(req)
+		}
+		manager.KnowledgeCache = cache
+		input := knowledgeTestBuildInput("locate the runtime agent loop entry")
+
+		first := manager.Build(context.Background(), input)
+		if first.Metadata["knowledge_cache_hit"] != false {
+			t.Fatalf("首次必须未命中：%#v", first.Metadata["knowledge_cache_hit"])
+		}
+		if compileCalls != 1 {
+			t.Fatalf("首次必须编译一次，got %d", compileCalls)
+		}
+		second := manager.Build(context.Background(), input)
+		if second.Metadata["knowledge_cache_hit"] != true {
+			t.Fatalf("第二次必须命中：%#v", second.Metadata["knowledge_cache_hit"])
+		}
+		if compileCalls != 1 {
+			t.Fatalf("命中不得重编译，got %d", compileCalls)
+		}
+		firstMessage, secondMessage := knowledgeMessageFrom(first), knowledgeMessageFrom(second)
+		if firstMessage == nil || secondMessage == nil || firstMessage.Content != secondMessage.Content {
+			t.Fatalf("命中渲染必须一致：first=%v second=%v", firstMessage, secondMessage)
+		}
+	})
+
+	t.Run("version_unobservable_uses_direct_compile", func(t *testing.T) {
+		planner := &fakeKnowledgePlanner{plan: plan}
+		manager := newKnowledgeTestManager(planner, KnowledgeModeBroad)
+		store := newFakeCompileCacheStore()
+		manager.KnowledgeCache = knowledge.NewCompileCache(store)
+		input := knowledgeTestBuildInput("locate the runtime agent loop entry")
+
+		for i := 0; i < 2; i++ {
+			result := manager.Build(context.Background(), input)
+			if result.Metadata["knowledge_cache_hit"] != false {
+				t.Fatalf("无版本观测时不得命中：%#v", result.Metadata["knowledge_cache_hit"])
+			}
+			if knowledgeMessageFrom(result) == nil {
+				t.Fatal("无缓存可用时仍必须照常注入")
+			}
+		}
+		if len(store.entries) != 0 {
+			t.Fatalf("无版本观测不得写缓存：%#v", store.entries)
+		}
+	})
+
+	t.Run("observe_error_degrades", func(t *testing.T) {
+		planner := &fakeVersionedPlanner{
+			fakeKnowledgePlanner: fakeKnowledgePlanner{plan: plan},
+			version:              "wv1",
+			observeErr:           errors.New("version sampling failed"),
+		}
+		manager := newKnowledgeTestManager(planner, KnowledgeModeSignals)
+		manager.KnowledgeCache = knowledge.NewCompileCache(newFakeCompileCacheStore())
+		result := manager.Build(context.Background(), knowledgeTestBuildInput("locate the runtime agent loop entry"))
+		if result.Metadata["knowledge_cache_hit"] != false || knowledgeMessageFrom(result) == nil {
+			t.Fatalf("观测失败必须降级直算且照常注入：%#v", result.Metadata)
+		}
+	})
+}
+
+// LayerPlan 增加 knowledge 层（04 §5 Phase 6 交付 2）。
+func TestKnowledgeLayerPlanIncludesKnowledgeLayer(t *testing.T) {
+	off := ResolvedLayerPlan(BudgetProfileBalanced, DefaultBudget(), Strategy{})
+	if off.Knowledge.Name != "knowledge" {
+		t.Fatalf("knowledge layer missing: %#v", off.Knowledge)
+	}
+	if off.Knowledge.Mode != KnowledgeModeOff {
+		t.Fatalf("默认 off：%#v", off.Knowledge)
+	}
+	if off.Knowledge.MaxTokens != DefaultKnowledgeTokens {
+		t.Fatalf("knowledge 层预算必须与默认注入预算一致：%#v", off.Knowledge)
+	}
+	if len(off.Knowledge.Sources) != 1 || off.Knowledge.Sources[0] != "exploration_memory" {
+		t.Fatalf("knowledge 层来源：%#v", off.Knowledge.Sources)
+	}
+
+	broad := ResolvedLayerPlan(BudgetProfileBalanced, DefaultBudget(), Strategy{KnowledgeMode: KnowledgeModeBroad})
+	if broad.Knowledge.Mode != KnowledgeModeBroad {
+		t.Fatalf("broad 档必须反映在层计划：%#v", broad.Knowledge)
+	}
+
+	// off 可逆：cache 字段不改变 off 行为（零调用、零注入）。
+	planner := &fakeVersionedPlanner{fakeKnowledgePlanner: fakeKnowledgePlanner{plan: planWithReuse()}, version: "wv1"}
+	manager := newKnowledgeTestManager(planner, KnowledgeModeOff)
+	manager.KnowledgeCache = knowledge.NewCompileCache(newFakeCompileCacheStore())
+	input := knowledgeTestBuildInput("locate the runtime agent loop entry")
+	result := manager.Build(context.Background(), input)
+	baseline := NewManager(DefaultBudget(), nil).Build(context.Background(), input)
+	if planner.calls != 0 || knowledgeMessageFrom(result) != nil {
+		t.Fatalf("off 必须保持惰性：calls=%d", planner.calls)
+	}
+	if !reflect.DeepEqual(result.Messages, baseline.Messages) {
+		t.Fatal("off 必须与基线逐字节一致")
+	}
+}
+
+func planWithReuse() knowledge.Plan {
+	return knowledge.Plan{
+		Reuse:  []knowledge.ReuseItem{knowledgeTestReuseItem("backend/a.go", "wv1", knowledge.ReuseReasonOK, 0.95, false, false)},
+		Reason: knowledge.PlanReasonOK,
 	}
 }

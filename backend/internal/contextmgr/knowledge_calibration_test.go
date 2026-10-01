@@ -35,14 +35,18 @@ func TestKnowledgeBroadBudgetCoversTypicalUpperBoundLine(t *testing.T) {
 		Scope:            knowledge.ReuseScopeTask,
 		Reason:           knowledge.ReuseReasonOK,
 	}
-	line := knowledgeBroadLine(item)
-	cost := approxKnowledgeTokens(line)
-	require.LessOrEqual(t, cost, DefaultKnowledgeTokens,
-		"典型上界条目行必须落在默认预算内（行成本 %d > 预算 %d）", cost, DefaultKnowledgeTokens)
-
-	content, injected := knowledgeBroadContent([]knowledge.ReuseItem{item}, DefaultKnowledgeTokens)
-	require.Equal(t, 1, injected, "预算内必须至少注入该条目")
+	// Phase 6 切片 3：生产渲染改为编译 data block（含块头开销）——预算不变量
+	// 必须对**新的生产格式**成立：单条典型上界条目在默认预算内必须能注入。
+	compiled := knowledge.CompilePlan(knowledge.CompileRequest{
+		Plan:        knowledge.Plan{Reuse: []knowledge.ReuseItem{item}, Reason: knowledge.PlanReasonOK},
+		TokenBudget: DefaultKnowledgeTokens,
+	})
+	require.Len(t, compiled.Items, 1, "典型上界条目不得被默认预算截断")
+	content := knowledgeBroadContent(compiled.Items)
 	require.NotEmpty(t, content)
+	cost := approxKnowledgeTokens(content)
+	require.LessOrEqual(t, cost, DefaultKnowledgeTokens,
+		"典型上界条目块必须落在默认预算内（块成本 %d > 预算 %d）", cost, DefaultKnowledgeTokens)
 }
 
 // shadowCall 是 phase1_shadow_calls.jsonl 的最小投影（只取测量所需字段）。
@@ -121,10 +125,17 @@ func TestPhase2CalibrationDrill(t *testing.T) {
 			Scope:            knowledge.ReuseScopeTask,
 			Reason:           knowledge.ReuseReasonOK,
 		}
-		lineCosts = append(lineCosts, float64(approxKnowledgeTokens(knowledgeBroadLine(item))))
-		// 预算语义是「header + Σ条目行」：同时测量单条目整条消息成本。
-		if content, injected := knowledgeBroadContent([]knowledge.ReuseItem{item}, DefaultKnowledgeTokens); injected == 1 {
-			messageCosts = append(messageCosts, float64(approxKnowledgeTokens(content)))
+		// 生产渲染走编译 data block（Phase 6 切片 3）：条目块成本与整条消息成本
+		// 都按真实渲染路径测量。
+		compiled := knowledge.CompilePlan(knowledge.CompileRequest{
+			Plan:        knowledge.Plan{Reuse: []knowledge.ReuseItem{item}, Reason: knowledge.PlanReasonOK},
+			TokenBudget: DefaultKnowledgeTokens,
+		})
+		if len(compiled.Items) == 1 {
+			content := knowledgeBroadContent(compiled.Items)
+			blockCost := float64(approxKnowledgeTokens(content))
+			lineCosts = append(lineCosts, blockCost)
+			messageCosts = append(messageCosts, blockCost)
 		}
 		queryLens = append(queryLens, float64(utf8.RuneCountInString(query)))
 	}

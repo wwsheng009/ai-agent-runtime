@@ -272,9 +272,13 @@ type CompileResult struct {
 // 编译内核
 // ---------------------------------------------------------------------------
 
-// DefaultCompileItemOverhead 是单条 data block 包裹的固定 token 开销上界
-// （属性行 + 起止标签；与 contextmgr 的 1 rune ≈ 1 token 上界同口径）。
-const DefaultCompileItemOverhead = 24
+// DefaultCompileItemOverhead 是单条条目进入 prompt 的固定开销上界：data block
+// 块头（type/source/trust/version/ref/stale/reason）+ 块体脚手架 + 起止标签。
+//
+// 取值覆盖典型上界（version ≤64 / ref ≤64 rune）：块头 ≈260 + 块体脚手架 ≈60，
+// 取整 320。预算按「内容 rune + 本开销」计，保证**渲染后的整条消息**不超预算
+// （与 contextmgr 的 1 rune ≈ 1 token 上界同口径；Phase 6 切片 3 校准）。
+const DefaultCompileItemOverhead = 320
 
 // IsReuseItemStale 是复用项的**规范 stale 判据**（contextmgr 注入前的第二道
 // 防线与编译器共用同一语义）：

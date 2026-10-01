@@ -189,6 +189,9 @@ type LayerPlan struct {
 	Hot            LayerSpec `json:"hot"`
 	Warm           LayerSpec `json:"warm"`
 	Cold           LayerSpec `json:"cold"`
+	// Knowledge 是 Phase 6 的编译知识层（04 §5 交付 2）：条目按 tier 映射
+	// hot（高置信直接复用）/ warm（Verify/Provisional）/ cold（未注入，仅审计）。
+	Knowledge LayerSpec `json:"knowledge"`
 }
 
 // Manager 实现 P1 级别的 admission/compaction/recall。
@@ -207,6 +210,11 @@ type Manager struct {
 	// WorkspaceVersion 观测；裸 store Planner 无版本观测时按版本未知 fail
 	// closed，全部转 Explore）。nil 或 KnowledgeMode=off 时零调用、零注入。
 	Knowledge knowledge.Planner
+	// KnowledgeCache 是 Phase 6 切片 3 的 compile 层缓存：非 nil 且 Knowledge
+	// 可提供版本观测（*knowledge.Layer）时，编译结果按 (workspace, 计划输入,
+	// 策略, 知识版本) 缓存，命中不重编译；nil / 不可观测 / 缓存故障一律直算
+	// （Degrade-Not-Fail）。默认 nil：不改变既有行为。
+	KnowledgeCache *knowledge.CompileCache
 }
 
 // DefaultBudget 返回保守的默认预算。
@@ -390,6 +398,14 @@ func ResolvedLayerPlan(profile string, budget Budget, strategy Strategy) LayerPl
 			Sources:     []string{"decision_ledger", "artifact_recall", "project_memory"},
 			MaxItems:    resolvedBudget.MaxRecallResults,
 			Mode:        resolvedStrategy.CompactionMode + "+" + resolvedStrategy.RecallMode,
+		},
+		Knowledge: LayerSpec{
+			Name: "knowledge",
+			Description: "Compiled exploration-memory items (data-block wrapped; source/version/trust/stale accounted). " +
+				"Tier mapping: verified high-confidence reuse → hot; verify/provisional → warm; dropped (stale/below-floor/budget/overridden) → cold (audit only).",
+			Sources:   []string{"exploration_memory"},
+			MaxTokens: DefaultKnowledgeTokens,
+			Mode:      normalizeKnowledgeMode(resolvedStrategy.KnowledgeMode),
 		},
 	}
 }

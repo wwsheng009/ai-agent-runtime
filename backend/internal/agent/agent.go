@@ -1162,6 +1162,13 @@ func attachKnowledgePlanner(manager *contextmgr.Manager, cfg *Config) {
 		return
 	}
 	manager.Knowledge = planner
+	// Phase 6 切片 3：Layer 的 store 满足 CompileCacheStore 时启用 compile 层
+	// 缓存（键含知识版本/编译器版本；reader 角色只读会被降级直算）。
+	if layer, ok := planner.(*knowledge.Layer); ok {
+		if cacheStore, ok := layer.Store().(knowledge.CompileCacheStore); ok {
+			manager.KnowledgeCache = knowledge.NewCompileCache(cacheStore)
+		}
+	}
 }
 
 func attachWorkspaceContext(manager *contextmgr.Manager, cfg *Config) {
