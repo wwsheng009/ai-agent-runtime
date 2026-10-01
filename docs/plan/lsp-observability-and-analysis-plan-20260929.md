@@ -129,7 +129,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `lsp_edit_coverage_ratio` | 0.9070 | 09-29T22:50Z → 10-01T01:53Z | inline 887 / LSP 活跃会话内 edit 978（全部 5708） | 待标定 | 2026-10-01 |
 | `lsp_diag_hit_ratio` | 1.0000 | 同上 | hit 40 / injected 40 | 待标定 | 2026-10-01 |
-| `lsp_fallback_ratio` | 0.5923（requests 分母）；attempted 分母为 0.7215 | 同上 | degraded 526 / requests 888（no_server 159、clean 163） | 待标定；含 365 条"未分类降级"（见下）；**分母待收敛** | 2026-10-01 |
+| `lsp_fallback_ratio` | 0.7215（attempted 分母；2026-10-01 起与运行时读数统一，历史 requests 口径值为 0.5923） | 同上 | degraded 526 / attempted 729（no_server 159、clean 163） | 待标定；含 365 条"未分类降级"（见下） | 2026-10-01 |
 | `lsp_wait_latency_p95` | 1000 ms | 同上 | n=888（P50 0 ms） | 待标定 | 2026-10-01 |
 | `lsp_append_bytes_ratio` | 0.1934 | 同上 | 追加 125078 B / 活跃会话回执可见 646753 B | 待标定 | 2026-10-01 |
 | `lsp_closure_ratio` | 0.6667 | 同上 | closed 2 / eligible 3 | 待标定；样本仅 3（fingerprint 仅新构建事件携带） | 2026-10-01 |
@@ -278,6 +278,7 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 | 冷路径快速失败被**连接级**信号挡住：live 窗口 20 条 `no_fresh` 里 **11 条落在"该路径从未发布过"**（其中一个路径连续 6 次各烧满 1000ms），但连接早已为别的路径发布过 → `!EverPublished()` 不成立，既拿不到宽限也永不标记冷（连接级信号与"该路径的视图还没加载"无关） | 标记条件改为**路径级**：`cold_retry_ms > 0` + 该路径无快照 + 本次等待**超过**快速失败预算（即确实多花了钱）→ 标记"已知冷"；宽限语义保持不变（仍只给冷连接，热连接上的模块外/忽略目录路径不该再等 1.5s）。首个发布即清除标记 | 新增 `TestColdRetryAppliesPerPathOnWarmConnection`（热连接 + 冷路径：首编辑 ~400ms 全预算 → 次编辑 ~50ms 快速失败 → 该路径发布后恢复 fast clean）；`TestColdRetryAfterGraceTimeout`/`TestColdGrace*` 不回归 |
 | 冷启动延迟只在**基线**（跨会话）可见，单会话状态面（TUI `/lsp status` 与 web「LSP 观测」A 卡）看不到 `first_publish_ms` → 用户当次"为什么这次慢"仍需翻事件 | 状态行/状态表补 `first_publish_ms` 展示（TUI：`first_publish=1234ms`；web：新增"首个发布"列，复用 `lspMS`）；未发布（0）不显示，避免噪音 | 新增 `TestChatLSPServerStatusLineShowsFirstPublishLatency`（就绪显示 / 未发布不显示）；`cmd/aicli` 构建与 `/lsp` 命令族测试全绿 |
 | 崩溃（重启预算耗尽）的真实降级原因仍是**原始进程错误**（live：`exit status 0xffffffff`）→ `ReasonCategory` 认不出 `crashed`，outcome 落回裸 `degraded`（喂大"未分类降级"桶）、note 不可行动（看不出是崩溃）；**第六/七轮的分类修复在真实崩溃路径上没有生效**（与第八轮 `first_publish_ms` 同类：修复没覆盖 live 分支） | 自动恢复被拒绝时写入**结构化原因**（`lsp: X crashed; restart budget exhausted (restartLimit=N): <原始错误>`）：状态是唯一事实源——桥接降级原因、TUI/web 状态页、事件面共用同一文本；状态合并时"崩溃 + 有结构化错误"优先显示它并保留原始错误尾巴；手动 `/lsp restart` 与 10 分钟窗口后的自动重试均不受影响 | `TestRestartWindowResetsBudget` 扩展断言：note 含 `restart budget exhausted`、状态原因结构化、outcome=`degraded_crashed`、reason_category=`restart_budget_exhausted`；`internal/lsp/...` 全量 + `go vet` 通过 |
+| 崩溃/缺二进制成员在状态页只给**原因**、不给**下一步**：第十一轮把"崩溃 + 预算耗尽"结构化后，用户仍需知道 `/lsp restart` 是恢复入口（自动恢复在预算耗尽后停下；缺二进制成员不会自动重试） | TUI `/lsp status` 在存在崩溃/不可用成员时追加一行恢复指引（`/lsp restart <name>`，注明"重启会重新检查二进制"）；全健康时静默；web 建议条已有同类提示（不改） | 新增 `TestChatLSPRecoveryHintCoversCrashedAndUnavailable`（崩溃+缺二进制进提示、就绪成员不进、全健康/空列表静默）；`TestChatLSPCommandTextStatusWithPool`/`TestChatLSPStatusAnnotatesMissingBinaryForPendingServers` 改为"状态/事实可见"的稳健断言（缺二进制预检后成员直接报 `unavailable`）；`cmd/aicli/commands` 的 `TestChatLSP*` 全绿 + `go vet` 通过 |
 
 新增配置键（全部有内置默认，不改代码即可调整）：
 `diagnostics.start_wait_ms` / `diagnostics.empty_early_accept` / `diagnostics.empty_confirm_ms` /
@@ -377,6 +378,12 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 `diagnostics.tool_enabled` / `cold_start_grace_ms` / `cold_retry_ms` 三行（含默认值与
 "每路径一次 / 首个发布清除"语义），A10 补冷路径三形态验收（宽限 → 快速失败 → 发布后恢复，
 附回归用例名）；`docs/lsp/README.md` 优化轮摘要补第七~十一轮要点。
+
+**第十三轮（2026-10-01，恢复入口可见）**：TUI `/lsp status` 对崩溃/不可用成员追加
+`/lsp restart <name>` 指引（web 建议条已有同类提示）；顺带把两条既有断言改为
+"状态/事实可见"形态，兼容缺二进制预检（成员从 `pending first use` 变为直接报
+`unavailable` + 精确原因）。仅触碰 `cmd/aicli/commands` 面，不涉及并行在途的
+`internal/lsp` 包。
 - 行为备注：内容未变化的 write 会按幂等回放处理且不触发 LSP 请求（无变更不诊断，符合预期）。
 
 **崩溃根因定位（已闭环）**：跨会话同秒崩溃（09-30 10:37:33×3、10:43:04×3）确认为

@@ -146,7 +146,34 @@ func chatLSPStatusText(session *ChatSession) string {
 	for _, status := range statuses {
 		lines = append(lines, chatLSPServerStatusLine(status))
 	}
+	if hint := chatLSPRecoveryHint(statuses); hint != "" {
+		lines = append(lines, hint)
+	}
 	return strings.Join(lines, "\n")
+}
+
+// chatLSPRecoveryHint 为崩溃/不可用成员给出可行动的手动恢复入口。第十一轮把
+// "崩溃 + 重启预算耗尽"的原因结构化了，但用户看到原因后仍需知道下一步：自动
+// 恢复在预算耗尽（默认每成员每 10 分钟 1 次）后会停下，二进制缺失的成员也不会
+// 再自动重试——两者都能用 /lsp restart 显式重试（重启会重新检查 PATH）。
+// 全健康时不产生任何输出（不制造噪音）。
+func chatLSPRecoveryHint(statuses []runtimelsp.ServerStatus) string {
+	names := make([]string, 0, len(statuses))
+	for _, status := range statuses {
+		switch status.State {
+		case runtimelsp.StateCrashed, runtimelsp.StateUnavailable:
+			if name := strings.TrimSpace(status.Name); name != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"提示: %s 需要恢复；`/lsp restart %s` 可手动重启（缺省重启全部；重启会重新检查二进制）。",
+		strings.Join(names, "、"), names[0],
+	)
 }
 
 // chatLSPDisabledText 是「LSP 不存在」的降级输出：给出配置入口与自动检测

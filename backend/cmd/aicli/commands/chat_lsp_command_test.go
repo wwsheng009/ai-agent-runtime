@@ -82,10 +82,15 @@ func TestChatLSPCommandTextHelp(t *testing.T) {
 
 func TestChatLSPCommandTextStatusWithPool(t *testing.T) {
 	text := chatLSPCommandText(newChatLSPTestSession(t), "/lsp status")
-	for _, want := range []string{"LSP 已启用", "工作区:", "fake-go", "pending first use", "scope=all", "wait_ms="} {
+	for _, want := range []string{"LSP 已启用", "工作区:", "fake-go", "scope=all", "wait_ms="} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("状态输出缺少 %q：%q", want, text)
 		}
+	}
+	// 成员状态必须被渲染：懒启动语义下是 "pending first use"；缺二进制预检
+	// 落地后同一成员直接报 "unavailable"（两种形态都接受，事实是状态可见）。
+	if !strings.Contains(text, "pending first use") && !strings.Contains(text, "unavailable") {
+		t.Fatalf("状态输出缺少成员状态：%q", text)
 	}
 }
 
@@ -94,8 +99,15 @@ func TestChatLSPCommandTextStatusWithPool(t *testing.T) {
 func TestChatLSPStatusAnnotatesMissingBinaryForPendingServers(t *testing.T) {
 	stubLSPLookPath(t) // 全部视为缺失
 	text := chatLSPCommandText(newChatLSPTestSession(t), "/lsp status")
-	if !strings.Contains(text, "未找到可执行文件 aicli-missing-lsp-binary-for-tests") {
-		t.Fatalf("pending 成员缺失二进制应提前标注：%q", text)
+	// 事实可见性（两种形态都接受）：pending 成员的 TUI 探测标注，或成员状态
+	// 原因里的 executable ... not found（缺二进制预检落地后状态直接报
+	// unavailable + 精确原因，探测标注不再唯一形态）。
+	if !strings.Contains(text, "aicli-missing-lsp-binary-for-tests") ||
+		(!strings.Contains(text, "未找到可执行文件") && !strings.Contains(text, "not found")) {
+		t.Fatalf("缺失二进制应在状态页可见：%q", text)
+	}
+	if !strings.Contains(text, "/lsp restart") {
+		t.Fatalf("缺二进制成员应给出恢复入口：%q", text)
 	}
 
 	stubLSPLookPath(t, "aicli-missing-lsp-binary-for-tests")
@@ -302,5 +314,38 @@ func TestChatLSPServerStatusLineShowsFirstPublishLatency(t *testing.T) {
 	pending := runtimelsp.ServerStatus{Name: "gopls", State: runtimelsp.StateStarting}
 	if line := chatLSPServerStatusLine(pending); strings.Contains(line, "first_publish") {
 		t.Fatalf("未发布成员不应显示冷启动延迟：%q", line)
+	}
+}
+
+// 恢复入口可见（§5.1 D 行"可行动"纪律）：崩溃/不可用成员必须给出 /lsp restart
+// 指引——第十一轮把原因结构化后，状态页仍要回答"下一步做什么"；全健康时静默。
+func TestChatLSPRecoveryHintCoversCrashedAndUnavailable(t *testing.T) {
+	crashed := runtimelsp.ServerStatus{
+		Name:   "gopls",
+		State:  runtimelsp.StateCrashed,
+		Reason: "lsp: gopls crashed; restart budget exhausted (restartLimit=1): exit status 0xffffffff",
+	}
+	missing := runtimelsp.ServerStatus{
+		Name:   "pyright",
+		State:  runtimelsp.StateUnavailable,
+		Reason: `lsp: start pyright: executable "pyright-langserver" not found`,
+	}
+	ready := runtimelsp.ServerStatus{Name: "clangd", State: runtimelsp.StateReady, PID: 7}
+
+	hint := chatLSPRecoveryHint([]runtimelsp.ServerStatus{ready, crashed, missing})
+	for _, needle := range []string{"gopls", "pyright", "/lsp restart gopls", "重新检查二进制"} {
+		if !strings.Contains(hint, needle) {
+			t.Fatalf("恢复提示缺少 %q：%q", needle, hint)
+		}
+	}
+	if strings.Contains(hint, "clangd") {
+		t.Fatalf("就绪成员不应进入恢复提示：%q", hint)
+	}
+
+	if hint := chatLSPRecoveryHint([]runtimelsp.ServerStatus{ready}); hint != "" {
+		t.Fatalf("全健康时不应产生提示：%q", hint)
+	}
+	if hint := chatLSPRecoveryHint(nil); hint != "" {
+		t.Fatalf("无成员时不应产生提示：%q", hint)
 	}
 }
