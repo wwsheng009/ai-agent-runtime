@@ -197,6 +197,7 @@ func (s *watchSource) handle(event fsnotify.Event) {
 	if path == "" {
 		return
 	}
+	// 目录被删/改名时从监听集合里移除（文件路径不在 dirs 里，这是空操作）。
 	if event.Op&fsnotify.Remove != 0 || event.Op&fsnotify.Rename != 0 {
 		s.mu.Lock()
 		delete(s.dirs, path)
@@ -208,7 +209,11 @@ func (s *watchSource) handle(event fsnotify.Event) {
 			return
 		}
 	}
-	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+	// 删除同样要入队：定向增量（IndexPaths）对"磁盘已不存在"的路径走软删除
+	// （TestIndexPathsSoftDeletesMissingFile），删除传播因此与新建/修改同一时延
+	// 口径，而不是等到下一个 turn 边界。目录删除会被下面的后缀预筛挡掉，不需要
+	// 在这里区分；Rename 的旧路径也按同一"磁盘已不存在"口径处理。
+	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
 		return
 	}
 	// 便宜的预筛：非代码后缀直接丢（知识库自己的 .db/-wal/-shm、锁文件、

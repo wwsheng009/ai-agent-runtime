@@ -2,6 +2,8 @@ package knowledge
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -78,6 +80,40 @@ func TestWatchSourceIndexesExternalWritesWhileIdle(t *testing.T) {
 		}
 	}
 	require.True(t, found, "watcher 必须发现空闲期的文件修改（新符号 Gamma 进库）")
+}
+
+// 空闲期的外部删除必须被 watcher 发现：定向增量对"磁盘已不存在"的路径走软删除
+// （IndexPaths 的既有口径），删除传播因此与新建/修改同一时延口径，而不是等到
+// 下一个 turn 边界。
+func TestWatchSourceSoftDeletesExternalRemovalWhileIdle(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	layer := watchLayerForTest(t, root)
+
+	// 前置：先让 demo/b.go 被 watcher 索引（删除的对象必须真实在库里）。
+	writeTree(t, root, "demo/b.go", "package demo\n\nfunc Beta() int { return 2 }\n")
+	require.True(t, waitForFileIndexed(t, layer, "demo/b.go", 5*time.Second),
+		"前置条件：watcher 必须先索引新建文件")
+
+	require.NoError(t, os.Remove(filepath.Join(root, "demo", "b.go")))
+	wsID, err := layer.planWorkspaceID(ctx)
+	require.NoError(t, err)
+	deadline := time.Now().Add(5 * time.Second)
+	gone := false
+	for !gone && time.Now().Before(deadline) {
+		records, err := layer.Store().ListActiveFiles(ctx, wsID)
+		require.NoError(t, err)
+		gone = true
+		for _, record := range records {
+			if normalizeRelPath(record.Path) == "demo/b.go" {
+				gone = false
+			}
+		}
+		if !gone {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	require.True(t, gone, "watcher 必须发现空闲期的文件删除（软删除后不再出现在活跃文件里）")
 }
 
 // 非索引口径的路径不得入队：内置忽略集（node_modules / .aicli）、非代码后缀、

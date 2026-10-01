@@ -64,5 +64,5 @@ py -3 .tmp/kb_probe.py                 # 只读探测 knowledge.db（files/symbo
 ## 6. 后续收口（2026-10-01 同日）
 
 - **登记① 已收口**：新增 `GET /web/api/knowledge[/status]`（knowledge.status.v1），与 `aicli knowledge status`、runtime-server `GET /api/runtime/knowledge/status` 同源同形（直接返回同一 `knowledge.StatusReport`）。真实进程实测：owner 态 `mode=on / role=owner / watch.active=true, dirs=1 / last_job(kind=light,status=done)`；reader 态 `role=reader / owner_pid=<owner> / files=1 symbols=1 refs=2 / staleness_ms` 可见；裸路径等价；405/404 正确；`/debug/endpoints` 可发现。6 例新测试 + `cmd/aicli/commands` 全绿 + `go build ./...` OK。
-- **登记③ 部分落地**：watch 的**状态**现在可直接读（`watch.active` / `dirs` / `degraded_reason`）；watch=on 的**端到端时延压缩**仍需以 `watch: on` 重启会话后复测（本报告的 A3/A4 是 watch=off 口径）。
-- 仍遗留：登记②（`/web/api/turn` usage 在 reasoning 回合读数不自洽，待核）；on-mode A/B（≥20 任务）与端到端 p95 统计门槛（测量轮）。
+- **登记③ 已收口（同日）**：真机 `watch:on`（会话全程零 turn）实测外部新建 372ms / 修改 348ms / **删除 392ms** 由事件路径吸收（`last_job.kind=incremental`）；修复 fsnotify 源漏掉 `Remove` 事件（修复前：删除 15s 超时 ×2）；新增 `TestWatchSourceSoftDeletesExternalRemovalWhileIdle`。判据：软删除不推进 `indexed_at`，用 `last_job.id`/`files` 计数。watch 的**状态**仍可直接读（`watch.active`/`dirs`/`degraded_reason`）。
+- 仍遗留：登记②（`/web/api/turn` usage 在 reasoning 回合读数不自洽，已定位到事件载荷，待核）；登记④（新观测：owner 强杀后新进程降级 reader 且进程内不重试接管，建议 Phase 6 评估退避重试）；on-mode A/B（≥20 任务）与端到端 p95 统计门槛（测量轮）。

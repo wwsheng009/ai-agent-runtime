@@ -6,6 +6,26 @@
 
 ---
 
+## 2026-10-01 — watcher 删除事件缺口修复 + `watch=on` 真机时延验证（登记③ 收口）
+
+### Fixed
+
+- **fsnotify 源漏掉文件删除**（`change_watch.go`）：事件白名单是 `Write|Create|Rename`，`Remove` 被排除——文件删除永远不入队，删除传播只能等到下一个 turn 边界（git/scan 校正源），与 `watch=on` 的「一次事件」承诺不符。下游本就支持（`IndexPaths` 对「磁盘已不存在」的路径走软删除，见 `TestIndexPathsSoftDeletesMissingFile`），修复即把 `Remove` 纳入入队集合；目录删除由后缀预筛挡掉，`s.dirs` 记账保持原语义（文件路径不在其中，是空操作）。
+- 新增回归用例 `TestWatchSourceSoftDeletesExternalRemovalWhileIdle`（watcher 用例 4 → 5）。
+
+### Verified
+
+- 真机（新二进制 + 临时工作区 + `watch:on`，**会话全程零 turn**）：外部新建 372ms / 修改 348ms / **删除 392ms** 被事件路径吸收（`last_job.kind=incremental`）。修复前对照：删除 15s 超时（连续两次、不同文件），修复后 392ms。
+- 判据说明：软删除**不推进** `indexed_at`（该字段取活跃文件的最新索引时间），删除场景应以 `last_job.id` / `files` 计数为准。
+- `internal/knowledge` 全包 + `go build ./...` 全绿。
+
+### Notes
+
+- 登记③ 收口：`watch=on` 的「外部变更 → 事件路径」时延已在真实进程验证（新建/修改/删除同口径）；「下一个 turn 直接命中索引」沿用既有 E2E 口径，未再跑 LLM 轮次。
+- 新观测（登记④，**非缺陷**，保守设计的代价）：owner 被**强杀**后，同工作区新进程若落在「锁不可删 / 持有者 pid 判活」窗口，会降级为 reader 并在**整个进程生命周期内不再重试接管**（`acquireOwnership` 仅在 `Layer.Open` 调用一次）；`degraded_reason` 显式标注 `read-only: store is owned by pid N`。恢复路径：重启进程，或等 `maxLockAge`（2h）后由下一进程接管。建议 Phase 6 评估「reader 退避重试接管」。
+
+---
+
 ## 2026-10-01 — Phase 5 登记① 收口：知识层状态端点（`/web/api/knowledge`）
 
 ### Added
