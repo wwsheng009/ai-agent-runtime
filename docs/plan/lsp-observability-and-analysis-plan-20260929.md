@@ -123,32 +123,37 @@
 2. **会话复盘**：`~/.aicli/chat-logs/**/runtime-events.jsonl` 按 session 聚合（脚本 `scripts/`，字段口径同 §3.3），回答"哪个工具/项目/服务器在失败"。
 3. **周期基线**：按天/项目聚合出基线报告，写回 §4.3；阈值只在基线产出后固化（ADR-0003 D4）。
 
-### 4.3 基线登记表（首次回填 2026-10-01，阈值仍待标定）
+### 4.3 基线登记表（最近回填 2026-10-01T01:53Z，阈值仍待标定）
 
 | 指标 | 基线值 | 采样窗口 | 样本量 | 结论/阈值 | 日期 |
 | --- | --- | --- | --- | --- | --- |
-| `lsp_edit_coverage_ratio` | 0.8807 | 09-29T22:50Z → 10-01T00:48Z | inline 753 / LSP 活跃会话内 edit 855（全部 5585） | 待标定 | 2026-10-01 |
-| `lsp_diag_hit_ratio` | 1.0000 | 同上 | hit 39 / injected 39 | 待标定 | 2026-10-01 |
-| `lsp_fallback_ratio` | 0.5597 | 同上 | degraded 422 / 754（no_server 133、clean 160） | 待标定；含 274 条"未分类降级"（见下） | 2026-10-01 |
-| `lsp_wait_latency_p95` | 1000 ms | 同上 | n=754（P50 1 ms） | 待标定 | 2026-10-01 |
-| `lsp_append_bytes_ratio` | 0.1943 | 同上 | 追加 109258 B / 回执可见 562370 B | 待标定 | 2026-10-01 |
-| `lsp_closure_ratio` | 1.0000 | 同上 | closed 2 / eligible 2 | 待标定；样本仅 2（fingerprint 仅新构建事件携带） | 2026-10-01 |
+| `lsp_edit_coverage_ratio` | 0.9070 | 09-29T22:50Z → 10-01T01:53Z | inline 887 / LSP 活跃会话内 edit 978（全部 5708） | 待标定 | 2026-10-01 |
+| `lsp_diag_hit_ratio` | 1.0000 | 同上 | hit 40 / injected 40 | 待标定 | 2026-10-01 |
+| `lsp_fallback_ratio` | 0.5923（requests 分母）；attempted 分母为 0.7215 | 同上 | degraded 526 / requests 888（no_server 159、clean 163） | 待标定；含 365 条"未分类降级"（见下）；**分母待收敛** | 2026-10-01 |
+| `lsp_wait_latency_p95` | 1000 ms | 同上 | n=888（P50 0 ms） | 待标定 | 2026-10-01 |
+| `lsp_append_bytes_ratio` | 0.1934 | 同上 | 追加 125078 B / 活跃会话回执可见 646753 B | 待标定 | 2026-10-01 |
+| `lsp_closure_ratio` | 0.6667 | 同上 | closed 2 / eligible 3 | 待标定；样本仅 3（fingerprint 仅新构建事件携带） | 2026-10-01 |
+| `lsp_cold_first_publish_p95` | n/a（未采集） | 同上 | n=0 | 待采集 | 2026-10-01 |
+
+> 上一版回填（窗口至 10-01T00:48Z：覆盖率 0.8807 / fallback 0.5597 / closure 1.0(2/2)）
+> 保留在 git 历史与收益评估报告附录；两版口径相同，本表为最新。
+> 收益评估（含成本/闭环/代际对比/数据缺口）：`docs/analysis/lsp-benefit-evaluation-20261001.md`。
 
 > 反模式（明令禁止）：把"未采集"渲染成 0；把分母含未启用 LSP 的会话算进覆盖率；阈值未标定就写进告警。
 
-**首次回填的口径限制（固化阈值前必须处理）**：
+**回填的口径限制（固化阈值前必须处理）**：
 
-1. 窗口跨三个构建。旧构建事件记录 `outcome="degraded"` 但不带 `reason`（274 条，36%）：
+1. 窗口跨三个构建。旧构建事件记录 `outcome="degraded"` 但不带 `reason`（365 条，41%）：
    它们确实是降级——计入 fallback 分子**是正确口径，不是污染**——但**原因不可分类**
    （no_fresh / starting / read error 不可区分），所以这段样本只支撑总体 fallback，
    不支撑原因级结论；新构建请求事件的 `outcome` 已是细分类别，且**自第六轮起请求事件落盘
    低敏 `reason_category`**（wait_timeout / no_publish / starting / …），可按原因细分——
    本窗口的旧事件没有该字段。
    报告事实区已单独标注"未分类降级"（Go 基线包与 Python 脚本同步，保持互锁）。
-2. 优化构建后的两个会话（25+12=37 请求）样本：clean 14 / injected 2 / no_fresh 14 /
-   starting 2 / pyright 缺二进制 4 / no_server 1。其中"缺二进制 4"在事件里曾是裸 `degraded`
-   （第七轮起细分为 `degraded_binary_missing`）。样本含实机测试脚本污染（冷视图轮次
-   本身就是被测场景），只作方向参考，不作阈值依据。
+2. 优化构建后的四个会话（25+18+12+6=61 请求）样本：clean 17 / injected 3 / no_fresh 20 /
+   starting 3 / 裸 degraded 7 / pyright 缺二进制 6 / no_server 5。其中"缺二进制"在旧事件里
+   曾是裸 `degraded`（第七轮起细分为 `degraded_binary_missing`）。样本含实机测试脚本污染
+   （冷视图轮次本身就是被测场景），只作方向参考，不作阈值依据。
 3. 阈值固化前置条件：优化构建纯新样本 ≥1 周（ADR-0003 D4）；未分类标注已完成。
 
 **回填工具（M4，已就绪）**：`scripts/analyze-lsp-baseline.py` 读取 `chat-logs/**/runtime-events.jsonl`（口径见 §3），
@@ -263,13 +268,14 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 | `lsp_closure_ratio` 长期 n/a（无法验证闭环） | path/diag fingerprint 落地；Go 基线包与 Python 脚本按「同会话同文件下一次编辑为 clean」计算闭环率 | Go/Python 同 fixture 互锁（closure 1.0） |
 | 冷视图首次分析超预算（实机：backend 视图重启后 ~85s 才发布；期间内联编辑连续 no_fresh） | ① `diagnostics.cold_start_grace_ms`（默认 1500，负值关闭）：连接**从未发布过任何诊断**时，对每个路径授予一次有界延长（之后与稳态一致，不拖慢被忽略目录的重复编辑）；② 启动中降级后**后台预热**：服务就绪即 didOpen+didSave，模块视图立即开始加载，不再等下一次编辑；③ 池状态新增 `first_publish_ms`（启动→首个发布的延迟）作为冷启动观测 | `TestColdGraceLetsLateFirstPublishLand`、`TestColdGraceGrantedOncePerPath`、`TestPrewarmOpensDocumentAfterColdStart`、`TestClientStatusReportsFirstPublishMS` |
 | "空发布提前采信"存在假 clean 风险（历史事件扫描：同版本 empty→non-empty 8 次、Δ=1.3–7.9s，且**全部**发生在"该版本先出现非空诊断"之后） | 护栏：同一版本文档出现过非空诊断后，空发布不再作为结论性 clean（提前采信与 settle 两处同时收紧，诚实降级为 no_fresh）；新增 `empty_accept_superseded` 计数（服务器状态）作快路径回归守卫 | `TestEarlyAcceptSkippedAfterProblemsForSameVersion`、`TestSettleRefusesChurnEmpty`、`TestFalseCleanCounterCountsSupersededEmpty`；快路径旧用例不回归 |
-| 冷视图加载期（实机 ~85s）内每次编辑都付满预算（1s/次），单轮多编辑累计数秒 | 冷路径快速失败：**宽限已授予 + 连接从未发布 + 该路径无快照**（强信号，避免误判热连接偶发慢分析）才标记"已知冷"，后续编辑只等 `diagnostics.cold_retry_ms`（默认 250）；该路径首个发布即清除标记并恢复常规路径（含空发布提前采信） | `TestColdRetryAfterGraceTimeout`（首编辑 ~600ms 宽限预算 → 次编辑 ~100ms 快速降级 → 发布后恢复 fast clean）；`TestColdGrace*` 不回归 |
+| 冷视图加载期（实机 ~85s）内每次编辑都付满预算（1s/次），单轮多编辑累计数秒 | 冷路径快速失败：**宽限已授予 + 连接从未发布 + 该路径无快照**（强信号，避免误判热连接偶发慢分析）才标记"已知冷"，后续编辑只等 `diagnostics.cold_retry_ms`（默认 250）；该路径首个发布即清除标记并恢复常规路径（含空发布提前采信）。**（第九轮修正：标记条件改为"该路径无快照 + 本次等待超过快速失败预算"，不再要求连接从未发布——连接级信号漏掉了热连接上的冷路径，见第九轮行）** | `TestColdRetryAfterGraceTimeout`（首编辑 ~600ms 宽限预算 → 次编辑 ~100ms 快速降级 → 发布后恢复 fast clean）；`TestColdGrace*` 不回归 |
 | 请求事件缺 `reason_category`（只有 server-state 事件有；projector 白名单与方案 §3.1 均已按请求级字段设计）→ 基线无法按原因细分，"从未发布"（模块外/忽略目录）与"普通超时"（有旧快照）不可区分，阻碍快速失败启发式的证据化调参 | ① `ReasonCategory` 新增 `no_publish`（"published nothing" 优先于 wait_timeout）；② `Event`/`RequestRecord` 增 `ReasonCategory`，Bridge 在请求事件上计算并下发；③ eventbridge 落盘请求事件 `reason_category`（低敏短枚举，自由文本 reason 仍不出进程）；④ Go/Python 基线新增"降级原因分布"事实行 | `TestReasonCategory`（no_publish 用例）、`observer_join_test`（请求 payload 带 reason_category）、`TestNoPublishReasonIsActionable`（MetricsSnapshot 记录为 no_publish）、Go/Python fixture 互锁新增 degrade_reasons 断言 |
 | 编辑覆盖率疑似 12% 缺口（855 编辑 vs 753 请求） | 事件级配对审计（离线脚本，按会话+`tool_call_id`）：**新构建会话 42/45 配对（93%），0 个请求没有对应编辑**；缺口来自旧构建事件无 `tool_call_id`（786/828）+ 少量幂等/失败编辑（已文档化的预期行为）——**结论：无需修复**，避免后续重复怀疑 | 审计脚本（同 §4.3 口径：`tool.completed` × `lsp.request.finished` 配对） |
 | 缺二进制/崩溃/传输关闭被折叠成裸 `degraded`（live：pyright 缺二进制 4 条与崩溃无法区分，基线与告警不可行动） | `classifyOutcome` 改为复用 `ReasonCategory`（outcome 与 reason_category 共用单一事实源，防漂移）；新增 `degraded_binary_missing` / `degraded_crashed` / `degraded_transport_closed` / `degraded_canceled`；裸 `degraded` 只兜底真正未知的原因 | `metrics_test` 分类表新增 4 例；`bridge_test` 缺二进制端到端断言（dial 报 not found → `degraded_binary_missing`） |
 | rust-analyzer 真机冒烟在 Windows 偶发红灯（TempDir 清理 sharing violation） | 显式工作区目录 + 带重试的清理：`Stop` 已等 `cmd.Wait`（ShutdownTimeout），但句柄释放可能再滞后数毫秒（ADR-0005） | 连续两轮 `go test ./internal/lsp/...` 全绿（含真机用例） |
 | `first_publish_ms` 只存在于池状态（live-only）：首个发布不改变状态，`setStatus` 不会发事件 → **从未落盘**，跨会话基线拿不到冷启动延迟（方案 §5.8 第三轮只做了观测面） | ① 首个发布时显式补发一条 `lsp.server.state` 事件（带 `first_publish_ms`，锁外发送）；② eventbridge 落盘该字段、projector 白名单同步；③ Go/Python 基线新增 `lsp_cold_first_publish_p95` 行（按 (session, server) 取首个发布；未采集输出 n/a） | `TestClientStatusReportsFirstPublishMS`（观察者收到带 `first_publish_ms` 的状态事件）、Go/Python fixture 互锁新增冷启动断言 |
 | 真机冒烟 `TestRealRustAnalyzerRoundTrip` 在握手中被快速失败拦下（`start_wait_ms` 默认 250ms，实测 rust-analyzer 握手可超 250ms） | 用例显式放宽 `StartWaitMS`（该用例断言完整往返；快速失败已有专门单测 `StartWaitMS=50`）；**默认值不动**——live 证据里 gopls 握手通常在 250ms 内（`degraded_starting` 仅 2 次），等 rust-analyzer 会话的 `degraded_starting` 数据再决定是否调默认 | 连续两轮 `go test ./internal/lsp/...` 全绿 |
+| 冷路径快速失败被**连接级**信号挡住：live 窗口 20 条 `no_fresh` 里 **11 条落在"该路径从未发布过"**（其中一个路径连续 6 次各烧满 1000ms），但连接早已为别的路径发布过 → `!EverPublished()` 不成立，既拿不到宽限也永不标记冷（连接级信号与"该路径的视图还没加载"无关） | 标记条件改为**路径级**：`cold_retry_ms > 0` + 该路径无快照 + 本次等待**超过**快速失败预算（即确实多花了钱）→ 标记"已知冷"；宽限语义保持不变（仍只给冷连接，热连接上的模块外/忽略目录路径不该再等 1.5s）。首个发布即清除标记 | 新增 `TestColdRetryAppliesPerPathOnWarmConnection`（热连接 + 冷路径：首编辑 ~400ms 全预算 → 次编辑 ~50ms 快速失败 → 该路径发布后恢复 fast clean）；`TestColdRetryAfterGraceTimeout`/`TestColdGrace*` 不回归 |
 
 新增配置键（全部有内置默认，不改代码即可调整）：
 `diagnostics.start_wait_ms` / `diagnostics.empty_early_accept` / `diagnostics.empty_confirm_ms` /
@@ -343,6 +349,12 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 - 落地：首个发布补发带 `first_publish_ms` 的状态事件；eventbridge/projector 同步；基线新增
   `lsp_cold_first_publish_p95` 行（未采集 n/a，不渲染成 0）。
 - 附带：真机冒烟的 `start_wait_ms` 敏感性修复（用例放宽；默认值等 rust-analyzer 会话证据再评估）。
+
+**第九轮优化（2026-10-01，冷路径快速失败改为路径级）**：
+- 证据：窗口内 20 条 `no_fresh` 中 11 条在"从未发布过的路径"上，其中一条路径连续 6 次各付满
+  1000ms；原因是标记条件依赖连接级 `EverPublished()`（热连接永不满足）。
+- 落地：标记条件改为路径级（无快照 + 本次等待超过快速失败预算）；宽限仍只给冷连接。
+  预期效果：这类路径的第 2 次起编辑从 1000ms 降到 250ms（该会话可省约 5×750ms）。
 - 行为备注：内容未变化的 write 会按幂等回放处理且不触发 LSP 请求（无变更不诊断，符合预期）。
 
 **崩溃根因定位（已闭环）**：跨会话同秒崩溃（09-30 10:37:33×3、10:43:04×3）确认为

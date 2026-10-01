@@ -631,3 +631,76 @@ func TestColdRetryAfterGraceTimeout(t *testing.T) {
 		t.Fatalf("third wait = %v, want the normal early-accept path", thirdElapsed)
 	}
 }
+
+// TestColdRetryAppliesPerPathOnWarmConnection pins the per-path fast-fail: a
+// path that never published anything fails fast on later edits even when the
+// connection is already warm for other paths. Live window evidence: 11 of 20
+// no_fresh requests sat on never-published paths while gopls had already
+// published for other paths (one path burned the full 1000ms budget six
+// times), because the old condition required the *connection* to have never
+// published. The connection-level grace stays reserved for cold connections:
+// the first edit on such a path pays the plain budget, and the path's own
+// publish restores the normal route.
+func TestColdRetryAppliesPerPathOnWarmConnection(t *testing.T) {
+	dir := t.TempDir()
+	warmPath := writeTestFile(t, dir, "warm.go", "package main\n")
+	coldPath := writeTestFile(t, dir, "cold.go", "package main\n")
+	fake := newFakeServer(t)
+	fake.setSuppressPublish(true)
+	cfg := testConfig(t, func(c *Config) {
+		c.Servers[0].EmptyPublishConclusive = boolPtr(true)
+		c.Diagnostics.WaitMS = 400
+		c.Diagnostics.StartWaitMS = 50
+		c.Diagnostics.ColdStartGraceMS = 200
+		c.Diagnostics.ColdRetryMS = 50
+		c.Diagnostics.EmptyConfirmMS = 40
+	})
+	bridge := NewBridgeWithOptions(cfg, dir, BridgeOptions{Dial: fake.dial()})
+	ctx := context.Background()
+	t.Cleanup(func() { bridge.Stop(ctx) })
+
+	// First request establishes the connection (and spends warmPath's grace);
+	// the publish for warmPath then makes the connection warm, which used to
+	// disable the fast-fail for every path.
+	_ = bridge.AppendToResult(ctx, "w1\n", []string{warmPath})
+	fake.publish(fake.connection(), PathToURI(warmPath), 1, nil)
+
+	start := time.Now()
+	first := bridge.AppendToResult(ctx, "c1\n", []string{coldPath})
+	firstElapsed := time.Since(start)
+	// 同一会话内重复的同类降级只解释一次（claimDegradeHint），所以这里断言
+	// 指标面（outcome）而不是文本里的 note。
+	if recent := bridge.MetricsSnapshot().RecentRequests; len(recent) == 0 ||
+		recent[0].Outcome != "degraded_no_fresh" {
+		t.Fatalf("first cold-path request must degrade, recent = %+v, text = %q", recent, first)
+	}
+	if firstElapsed < 300*time.Millisecond {
+		t.Fatalf("first cold-path wait = %v, want the plain budget (~400ms, no connection-level grace)", firstElapsed)
+	}
+
+	start = time.Now()
+	second := bridge.AppendToResult(ctx, "c2\n", []string{coldPath})
+	secondElapsed := time.Since(start)
+	if recent := bridge.MetricsSnapshot().RecentRequests; len(recent) == 0 ||
+		recent[0].Outcome != "degraded_no_fresh" {
+		t.Fatalf("second cold-path request must stay degraded, recent = %+v, text = %q", recent, second)
+	}
+	if secondElapsed > 200*time.Millisecond {
+		t.Fatalf("second cold-path wait = %v, want the reduced cold retry (~50ms)", secondElapsed)
+	}
+
+	// The path's own publish clears the cold mark: the next edit takes the
+	// normal route (a conclusive empty publish answers immediately). The file
+	// content never changed, so the document version is still 1.
+	fake.publish(fake.connection(), PathToURI(coldPath), 1, nil)
+	start = time.Now()
+	third := bridge.AppendToResult(ctx, "c3\n", []string{coldPath})
+	thirdElapsed := time.Since(start)
+	if recent := bridge.MetricsSnapshot().RecentRequests; len(recent) == 0 ||
+		recent[0].Outcome != "clean" {
+		t.Fatalf("publish must restore the fast clean path, recent = %+v, text = %q", recent, third)
+	}
+	if thirdElapsed > 300*time.Millisecond {
+		t.Fatalf("third wait = %v, want the normal early-accept path", thirdElapsed)
+	}
+}

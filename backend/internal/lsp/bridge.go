@@ -305,12 +305,17 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 		}
 		// Cold view handling. First sight of a cold path (nothing published
 		// yet) gets one bounded extension so a medium view load lands inside
-		// this request. Once the grace is spent and the connection still has
-		// never published, the path is known cold: later edits use a reduced
-		// retry budget instead of re-paying the full wait on every edit during
-		// a long view load (live evidence: ~85s), and the first edit after the
-		// publish gets the real result.
-		if cold := time.Duration(cfg.ColdRetryMS) * time.Millisecond; cold > 0 && client.ColdWait(path) {
+		// this request. Once the grace is spent and *this path* still has no
+		// snapshot, the path is known cold: later edits use a reduced retry
+		// budget instead of re-paying the full wait on every edit during a long
+		// view load (live evidence: ~85s), and the first publish for the path
+		// restores the normal route. The signal is per path, not per
+		// connection: live window had 11/20 no_fresh requests on paths that had
+		// never published anything while the connection was already warm for
+		// other paths (one path burned the full budget six times), which the
+		// old connection-level condition let through.
+		coldBudget := time.Duration(cfg.ColdRetryMS) * time.Millisecond
+		if cold := coldBudget; cold > 0 && client.ColdWait(path) {
 			if cold < remaining {
 				remaining = cold
 			}
@@ -320,7 +325,13 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 		}
 		items, itemsFresh := client.WaitDiagnostics(ctx, path, version, remaining)
 		if !itemsFresh {
-			if !client.HasSnapshot(path) && client.ColdGraceUsed(path) && !client.EverPublished() {
+			// A path with no snapshot that just spent more than the reduced
+			// budget is known cold; later edits fail fast until the path's own
+			// publish clears the mark. The signal is per path, not per
+			// connection: live window had 11/20 no_fresh requests on paths that
+			// had never published anything while the connection was already
+			// warm for other paths (one path burned the full budget six times).
+			if coldBudget > 0 && !client.HasSnapshot(path) && remaining > coldBudget {
 				client.MarkColdWait(path)
 			}
 			reason := "no fresh diagnostics within " + wait.String()
