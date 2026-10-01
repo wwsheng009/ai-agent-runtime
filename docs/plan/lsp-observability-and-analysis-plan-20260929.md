@@ -123,20 +123,20 @@
 2. **会话复盘**：`~/.aicli/chat-logs/**/runtime-events.jsonl` 按 session 聚合（脚本 `scripts/`，字段口径同 §3.3），回答"哪个工具/项目/服务器在失败"。
 3. **周期基线**：按天/项目聚合出基线报告，写回 §4.3；阈值只在基线产出后固化（ADR-0003 D4）。
 
-### 4.3 基线登记表（最近回填 2026-10-01T01:53Z，阈值仍待标定）
+### 4.3 基线登记表（最近回填 2026-10-01T02:54Z，阈值仍待标定）
 
 | 指标 | 基线值 | 采样窗口 | 样本量 | 结论/阈值 | 日期 |
 | --- | --- | --- | --- | --- | --- |
-| `lsp_edit_coverage_ratio` | 0.9070 | 09-29T22:50Z → 10-01T01:53Z | inline 887 / LSP 活跃会话内 edit 978（全部 5708） | 待标定 | 2026-10-01 |
-| `lsp_diag_hit_ratio` | 1.0000 | 同上 | hit 40 / injected 40 | 待标定 | 2026-10-01 |
-| `lsp_fallback_ratio` | 0.7215（attempted 分母；2026-10-01 起与运行时读数统一，历史 requests 口径值为 0.5923） | 同上 | degraded 526 / attempted 729（no_server 159、clean 163） | 待标定；含 365 条"未分类降级"（见下） | 2026-10-01 |
-| `lsp_wait_latency_p95` | 1000 ms | 同上 | n=888（P50 0 ms） | 待标定 | 2026-10-01 |
-| `lsp_append_bytes_ratio` | 0.1934 | 同上 | 追加 125078 B / 活跃会话回执可见 646753 B | 待标定 | 2026-10-01 |
-| `lsp_closure_ratio` | 0.6667 | 同上 | closed 2 / eligible 3 | 待标定；样本仅 3（fingerprint 仅新构建事件携带） | 2026-10-01 |
-| `lsp_cold_first_publish_p95` | n/a（未采集） | 同上 | n=0 | 待采集 | 2026-10-01 |
+| `lsp_edit_coverage_ratio` | 0.9284 | 09-29T22:50:31Z → 10-01T02:54:01Z | inline 1077 / LSP 活跃会话内 edit 1160（全部 5890） | 待标定 | 2026-10-01 |
+| `lsp_diag_hit_ratio` | 1.0000 | 同上 | hit 41 / injected 41 | 待标定 | 2026-10-01 |
+| `lsp_fallback_ratio` | 0.7321（attempted 分母；与运行时读数统一，历史 requests 口径值为 0.5923） | 同上 | degraded 612 / attempted 836（no_server 242、clean 183） | 待标定；未分类降级 439（旧构建无 `reason`）；新构建原因分布 `{binary_missing 12, no_publish 3, starting 2}` | 2026-10-01 |
+| `lsp_wait_latency_p95` | 1000 ms | 同上 | n=1078（P50 0 ms） | 待标定 | 2026-10-01 |
+| `lsp_append_bytes_ratio` | 0.1828 | 同上 | 追加 141561 B / 活跃会话回执可见 774379 B（全部 3675416 B） | 待标定 | 2026-10-01 |
+| `lsp_closure_ratio` | 0.7500 | 同上 | closed 3 / eligible 4 | 待标定；样本仍少（fingerprint 仅新构建事件携带） | 2026-10-01 |
+| `lsp_cold_first_publish_p95` | **14363 ms**（P50 11349） | 同上 | n=3（按 (session, server) 取首个发布；含 2026-10-01 真机验收会话的 7156ms） | 待标定；冷启动延迟首次可算 | 2026-10-01 |
 
-> 上一版回填（窗口至 10-01T00:48Z：覆盖率 0.8807 / fallback 0.5597 / closure 1.0(2/2)）
-> 保留在 git 历史与收益评估报告附录；两版口径相同，本表为最新。
+> 上一版回填（窗口至 10-01T01:53Z：覆盖率 0.9070 / fallback 0.7215 / closure 0.6667 /
+> cold n/a）保留在 git 历史；两版口径相同，本表为最新（窗口至 10-01T02:54Z）。
 > 收益评估（含成本/闭环/代际对比/数据缺口）：`docs/analysis/lsp-benefit-evaluation-20261001.md`。
 
 > 反模式（明令禁止）：把"未采集"渲染成 0；把分母含未启用 LSP 的会话算进覆盖率；阈值未标定就写进告警。
@@ -384,6 +384,22 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 "状态/事实可见"形态，兼容缺二进制预检（成员从 `pending first use` 变为直接报
 `unavailable` + 精确原因）。仅触碰 `cmd/aicli/commands` 面，不涉及并行在途的
 `internal/lsp` 包。
+
+**真机验收（2026-10-01，第十四轮，无代码变更）**：从**已提交的 HEAD** 用独立
+`git worktree` 构建二进制（不混入任何在途改动），在隔离工作区（模块外 + 模块内两个
+文件、显式 lsp 配置跳过自动扫描）跑一次 `aicli exec` 真机会话；四条请求把四条路径
+各走一遍：
+
+| # | outcome | 耗时 | 关键读数 |
+| --- | --- | --- | --- |
+| 1 | `degraded_starting` | 329 ms | `reason_category=starting`；启动期快速失败（≈`start_wait_ms`） |
+| 2 | `clean` | 1866 ms | 冷宽限窗口内等到首个发布（连接从未发布过 → 宽限生效） |
+| 3 | `clean` | 169 ms | 暖态稳态快路径 |
+| 4 | `degraded_no_fresh` | 1008 ms | `reason_category=no_publish`、note 307 B（模块内文件视图未加载；热连接不授宽限，符合第九轮口径） |
+
+同会话状态事件给出 **`first_publish_ms=7156`**（该字段首个真机样本）；
+`appended_note_bytes` / `appended_empty_bytes`（此前 0/888 样本）开始有真实值。
+基线随之刷新：`lsp_cold_first_publish_p95=14363 ms`（n=3，P50 11349），§4.3 表已更新。
 - 行为备注：内容未变化的 write 会按幂等回放处理且不触发 LSP 请求（无变更不诊断，符合预期）。
 
 **崩溃根因定位（已闭环）**：跨会话同秒崩溃（09-30 10:37:33×3、10:43:04×3）确认为
