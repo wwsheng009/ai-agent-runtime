@@ -3,6 +3,8 @@ package agent
 import (
 	"fmt"
 	"strings"
+
+	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 )
 
 // Registered built-in runtime tool names.
@@ -196,11 +198,28 @@ func agentChildPolicy(parent *Agent, task SubagentTask) *ToolExecutionPolicy {
 		parentPolicy = parent.GetToolExecutionPolicy()
 	}
 	if parentPolicy != nil {
-		return parentPolicy.DeriveChildForTask(task.ToolsWhitelist, task.ReadOnly, task.Role, subagentWritePaths(task))
+		return parentPolicy.DeriveChildForTask(task.ToolsWhitelist, task.ReadOnly, subagentPolicyRole(task), subagentWritePaths(task))
 	}
 	child := NewToolExecutionPolicy(task.ToolsWhitelist, task.ReadOnly)
-	child.SetCapabilityScope(CapabilitiesForTask(task.Role, task.ReadOnly, task.ToolsWhitelist, subagentWritePaths(task)))
+	child.SetCapabilityScope(CapabilitiesForTask(subagentPolicyRole(task), task.ReadOnly, task.ToolsWhitelist, subagentWritePaths(task)))
 	return child
+}
+
+// subagentPolicyRole resolves the role string used for role-family tool
+// defaults and the capability floor. Models set role, task_type, or agent_type
+// depending on the spawn tool (spawn_subagents marks role as a deprecated
+// routing alias and prefers task_type; spawn_agent uses agent_type), so all
+// three feed the same family table. Keying only off task.Role silently sent
+// "task_type-only" children down the unknown-role path: no role defaults, and
+// an inherited shell tool that the derived capability scope then denied with
+// "capability not allowed by execution policy: exec_shell".
+func subagentPolicyRole(task SubagentTask) string {
+	for _, candidate := range []string{task.Role, task.TaskType, task.AgentType} {
+		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // resolveChildToolSurface resolves the effective tool surface of a subagent
@@ -219,7 +238,7 @@ func resolveChildToolSurface(parent *Agent, task SubagentTask) (SubagentTask, *T
 	requested := task.ToolsWhitelist
 	if requested == nil {
 		source = "role defaults"
-		requested = DefaultToolsForRole(task.Role)
+		requested = DefaultToolsForRole(subagentPolicyRole(task))
 	}
 	normalized := normalizeToolWhitelist(requested)
 
@@ -242,5 +261,65 @@ func resolveChildToolSurface(parent *Agent, task SubagentTask) (SubagentTask, *T
 	if child.AllowlistEnabled && parentPolicy != nil {
 		task.ToolsWhitelist = child.AllowedToolNames()
 	}
+	task = appendShellSurfaceRouteWarnings(task, child)
 	return task, child, nil
+}
+
+// appendShellSurfaceRouteWarnings adds non-blocking route warnings when the
+// task goal clearly needs shell commands but the resolved child surface cannot
+// run them. This is the dispatch-side half of the 2026-09-30 real-machine
+// failure: a child whose whitelist omitted shell (or whose capability scope
+// lacked exec_shell) spent its whole run probing for command tools, producing
+// "tool not found: commands" / "capability not allowed ...: exec_shell".
+// The warning reaches the parent in the spawn result so it can fix the surface
+// at the decision point instead of re-spawning blindly.
+func appendShellSurfaceRouteWarnings(task SubagentTask, child *ToolExecutionPolicy) SubagentTask {
+	if child == nil || !goalHasShellIntent(task.Goal) {
+		return task
+	}
+	if childSurfaceLacksShell(child) {
+		task.RouteWarnings = appendRouteWarningOnce(task.RouteWarnings, shellSurfaceRouteWarning())
+		return task
+	}
+	if child.ReadOnly && goalNeedsMutatingShell(task.Goal) {
+		task.RouteWarnings = appendRouteWarningOnce(task.RouteWarnings, readOnlyShellRouteWarning())
+	}
+	return task
+}
+
+// childSurfaceLacksShell reports whether the derived policy cannot execute any
+// shell command: either the allowlist has no shell-like tool, or the capability
+// scope does not grant exec_shell. A nil policy means "no gate" (unknown, not
+// denied), so it stays permissive.
+func childSurfaceLacksShell(child *ToolExecutionPolicy) bool {
+	if child == nil {
+		return false
+	}
+	if child.AllowlistEnabled && !containsShellLikeToolName(child.AllowedToolNames()) {
+		return true
+	}
+	if child.CapabilityScopeEnabled {
+		if err := child.AllowCapabilities([]runtimepolicy.Capability{runtimepolicy.CapExecShell}); err != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func containsShellLikeToolName(names []string) bool {
+	for _, name := range names {
+		if runtimepolicy.IsShellLikeToolName(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendRouteWarningOnce(warnings []string, warning string) []string {
+	for _, existing := range warnings {
+		if existing == warning {
+			return warnings
+		}
+	}
+	return append(warnings, warning)
 }

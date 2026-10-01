@@ -176,6 +176,68 @@ func writeIntentRouteWarning() string {
 	return "goal_appears_to_require_writes: read_only=true will strip all write-like tools from this child and deny them at execution; set read_only=false for writer tasks, or narrow the goal to read-only analysis and report findings back to the parent"
 }
 
+// shellIntentPattern / shellIntentChineseSignals 检测「目标确实要跑命令」的措辞
+// （运行/执行 + 命令、测试、构建、git 等）。与 M5 写意图一样只用于非阻断的
+// route_warnings，允许少量误报；命中不改变 spawn 行为。2026-09-30 真机教训：
+// 派发时白名单漏掉 shell，子代理整轮在猜工具名（tool not found: commands）。
+var shellIntentPattern = regexp.MustCompile(`(?i)\b(?:run|runs|running|execute|executes?|invoke|launch)\b[^.\n]{0,48}?\b(?:shell|commands?|scripts?|tests?|test suite|build|compile|lint|go test|npm|pnpm|yarn|cargo|pytest|make|docker|git)\b|\b(?:go test|go build|npm (?:install|ci|test|run)|pnpm\b|cargo (?:build|test|run)|pytest\b|git (?:status|diff|log|show))\b`)
+
+var shellIntentChineseSignals = []string{
+	"运行命令", "执行命令", "跑命令", "运行 shell", "执行 shell",
+	"运行测试", "跑测试", "执行测试", "运行 go test", "跑 go test", "执行 go test",
+	"运行构建", "执行构建", "构建项目", "编译项目",
+}
+
+// goalHasShellIntent 对子代理 goal 做启发式命令执行意图检测。命中且派发出的
+// 工具面/能力面没有 shell 时，spawn 结果会带 goal_appears_to_require_commands
+// 告警，让父模型在决策点补上 shell 白名单，而不是等子代理白跑一轮。
+func goalHasShellIntent(goal string) bool {
+	if shellIntentPattern.MatchString(goal) {
+		return true
+	}
+	lower := strings.ToLower(goal)
+	for _, signal := range shellIntentChineseSignals {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+// mutatingShellIntentPattern / mutatingShellChineseSignals 检测只读 shell 无法
+// 放行的命令（构建/测试/安装类）。read_only=true 的子代理只接受逐条分类的
+// 只读命令，这类目标需要 read_only=false。
+var mutatingShellIntentPattern = regexp.MustCompile(`(?i)\b(?:go test|go build|go run|npm (?:install|ci|test|run)|pnpm\b|yarn\b|cargo (?:build|test|run)|pytest\b|mvn\b|gradle\b|docker\b|pip install|run the build|build the (?:project|code|binary|module)|compile the (?:project|code|module))\b`)
+
+var mutatingShellChineseSignals = []string{
+	"运行测试", "跑测试", "执行测试", "运行 go test", "跑 go test", "执行 go test",
+	"运行构建", "执行构建", "构建项目", "编译项目", "安装依赖",
+}
+
+func goalNeedsMutatingShell(goal string) bool {
+	if mutatingShellIntentPattern.MatchString(goal) {
+		return true
+	}
+	lower := strings.ToLower(goal)
+	for _, signal := range mutatingShellChineseSignals {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+// shellSurfaceRouteWarning 在子代理工具面/能力面完全没有 shell 时追加到
+// route_warnings，父模型在 spawn 结果里即时可见并可纠正。
+func shellSurfaceRouteWarning() string {
+	return "goal_appears_to_require_commands: this child's resolved tool surface has no usable shell tool (tools_whitelist omitted \"shell\", or the parent policy does not grant exec_shell); include \"shell\" in tools_whitelist and keep read_only=false for tasks that need general shell syntax, or narrow the goal to what the granted tools can do"
+}
+
+// readOnlyShellRouteWarning 在 read_only=true 但目标需要构建/测试类命令时追加。
+func readOnlyShellRouteWarning() string {
+	return "goal_appears_to_require_mutating_shell: read_only=true only permits individually classified read-only commands (git status/diff/log/show, rg, ls, pwd, ...); build/test/install commands such as go test will be hard-denied; set read_only=false for this child, or narrow the goal to static inspection"
+}
+
 // enrichReadOnlyToolDescriptions 在只读子代理的模型可见工具面上，给 shell 工具
 // description 动态追加 READ-ONLY MODE 预告，让模型第一轮就知道 shell 边界，
 // 而不是逐个命令试错后被拒。非只读策略原样返回。

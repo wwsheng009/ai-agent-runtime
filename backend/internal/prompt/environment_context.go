@@ -229,7 +229,7 @@ func RenderTaskDifficultyGuidance() string {
 		"Use easy for local, low-risk, single-step work. Use normal for regular multi-file or multi-step work. Use hard for complex implementation, broad investigation, or tasks requiring test verification. Use expert for high-risk architecture, security, permission, provider/protocol, migration, or cross-system consistency work.",
 		"Do not spawn subagents for easy work unless explicitly requested or clearly beneficial. Prefer one or more subagents for hard/expert work when subtasks can be isolated.",
 		"When spawning subagents, include difficulty and difficulty_rationale for every child task. Do not invent provider/model names; leave provider/model empty unless the user explicitly asked for a specific override. The runtime maps difficulty to local provider/model configuration.",
-		"For multiple subtasks, use this structure: id, role, goal, difficulty, difficulty_rationale, depends_on, read_only, and tools_whitelist when needed.",
+		"For multiple subtasks, use this structure: id, role, goal, difficulty, difficulty_rationale, depends_on, read_only, and tools_whitelist when needed. Include \"shell\" in tools_whitelist for any subtask that must run commands (builds, tests, git, package managers); omitting it hides the shell tool from the child entirely and the run is wasted on tool-name guessing.",
 	}
 	return strings.Join(lines, "\n")
 }
@@ -244,6 +244,7 @@ func RenderMultiAgentCollaborationGuidance() string {
 		"Multi-agent collaboration guidance:",
 		"",
 		"- Delegate only bounded, independent subtasks whose result you need, with a non-overlapping scope and the exact deliverable you expect back.",
+		"- A subtask that must run commands (builds, tests, git, package managers) needs a shell-capable surface: include \"shell\" in its tools_whitelist, and keep read_only unset for tasks that need builds/tests or general shell syntax - read-only children only accept individually classified read-only commands (git status/diff/log/show, rg, ls, pwd).",
 		"- After spawn_agent returns, continue meaningful non-overlapping work in the same turn; do not block immediately on wait_agent while the child runs in the background.",
 		"- Consume progress incrementally with read_agent_events using after_seq; never re-read a window you already consumed. When only progress is needed, pass view=tool_progress so the window carries tool events plus terminal/approval events and stays token-cheap.",
 		"- " + agentguidance.WaitBudgetRule,

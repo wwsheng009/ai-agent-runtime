@@ -930,3 +930,47 @@ mtime=11:02:19 —— **早于当天全部修复**；多次 `resume` 都复用�
 
 **残留**：settled `turn.resumed` 不带 turn_id（本次修复不再依赖它；建议后续把 turn_id 补进
 该 payload，让恢复边沿自身可自证）。
+
+### 7.24 子代理 shell 派发缺口第二层：task_type 归一 + 继承能力面 + 派发期告警（2026-10-01 真机验证）
+
+**问题（§7.18 同一失败类的剩余缺口）**：`resolveChildToolSurface` / `agentChildPolicy` 只读
+`task.Role`，而 spawn_subagents schema 已把 `role` 标为 deprecated routing alias、主推
+`task_type`。只给 `task_type`（或只给 `agent_type`）的子任务落入 unknown-role：无角色默认
+工具表 → 子代理"继承父工具面"，但 `DeriveChildForTask` 仍按空 role 落 `read_only+write_fs`
+能力门禁 → 继承到的 shell 被拒，报 `capability not allowed by execution policy: exec_shell`。
+另一形态：显式 `tools_whitelist` 漏 shell 且 goal 要跑命令时无任何提示 → 子代理猜
+`commands` / `shell_commands`（`tool not found`），整轮白跑。
+
+**修复**
+
+- `internal/agent/tool_vocabulary.go`：新增 `subagentPolicyRole`（`Role → TaskType →
+  AgentType`，三者共用同一角色家族表）；`resolveChildToolSurface` 解析后追加非阻断
+  route_warning `goal_appears_to_require_commands`（命令目标 + 工具面/能力面无 shell）与
+  `goal_appears_to_require_mutating_shell`（read_only=true + 构建/测试类目标），文案与
+  检测在 `denial_guidance.go`，与 M5 写意图告警同构、去重。
+- `internal/policy/tool_policy.go`：`DeriveChildForTask` 在 `allowedTools == nil`（继承父工具
+  面）时改为继承父能力边界（只读仅剥离 `write_fs` / `external_side_effect`）；父策略无
+  capability scope 时子策略保持无 scope——不宽于父，也不再凭空收窄。共享
+  `filterReadOnlyCapabilities`（capability_scope.go），两条派生路径不再漂移。
+- 指引：`internal/prompt/environment_context.go` 委派/协作 bullet 与 `loop.go` 的
+  `tools_whitelist` 描述明确要求：需要跑命令的子任务显式包含 `shell`；构建/测试/通用 shell
+  语法不设 `read_only`。
+
+**真机验证（session_20261001093948_Hsgg0e60，`aicli-4x.exe` 09:39:38 构建，晚于修复源文件
+09:35）**：经 `/web/api/invoke` 注入单轮指令，强制 spawn_subagents 一个任务
+`{task_type:"verify", read_only:false}`，**不写 role、不写 tools_whitelist**，goal 为运行
+`go version`。取证：
+
+- parent trace（export md-trace）：spawn_subagents 入参仅 `difficulty/goal/id/read_only/
+  task_type`；
+- 批次库 `subagent_tasks`：`role=""`、`status=succeeded`、`error_class/error_code` 空；
+- 子会话事件：`tool_started`/`tool_finished` `tool_name=shell`、`command=go version`、
+  `ok=true`、exit code 0、输出 `go version go1.27.1 windows/amd64`；`subagent.completed`
+  `success=true`；
+- 全会话无 `tool not found` / `capability not allowed` / denial；turn 挂起后自动
+  `turn.resumed`，45.9s 完成。
+
+**边界**：告警路径（显式白名单漏 shell）由单测覆盖
+（`subagent_shell_surface_test.go` / `tool_policy_shell_inherit_test.go`），本次真机只验证
+task_type-only 成功路径；`commands`/`shell_commands` 这类模型自造工具名仍属子代理侧命名
+行为，派发侧保证的是工具面/能力面与决策点告警正确。

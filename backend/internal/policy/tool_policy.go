@@ -522,6 +522,32 @@ func (p *ToolExecutionPolicy) DeriveChildForTask(allowedTools []string, readOnly
 	child := p.Clone()
 	child.ReadOnly = child.ReadOnly || readOnly
 	child.AllowlistEnabled, child.AllowedTools = intersectAllowedTools(p.AllowlistEnabled, p.AllowedTools, allowedTools)
+	if allowedTools == nil {
+		// nil means "inherit the parent tool surface verbatim". Deriving a
+		// capability floor from an unrecognized/empty role would then deny
+		// tools the child actually inherited - the real-machine failure was
+		// "capability not allowed by execution policy: exec_shell" on a child
+		// that still held the shell tool. Inherit the parent capability
+		// boundary instead: equal to the parent, never wider.
+		if !p.CapabilityScopeEnabled {
+			// The parent has no capability gate; inventing one for the child
+			// would silently narrow the surface it just inherited.
+			child.CapabilityScopeEnabled = false
+			child.AllowedCapabilities = nil
+			return child
+		}
+		inherited := make([]Capability, 0, len(p.AllowedCapabilities))
+		for capability, allowed := range p.AllowedCapabilities {
+			if allowed {
+				inherited = append(inherited, capability)
+			}
+		}
+		if child.ReadOnly {
+			inherited = filterReadOnlyCapabilities(inherited)
+		}
+		child.SetCapabilityScope(inherited)
+		return child
+	}
 	requested := CapabilitiesForTask(role, child.ReadOnly, allowedTools, writePaths)
 	if p.CapabilityScopeEnabled {
 		requested = intersectCapabilities(p.AllowedCapabilities, requested)

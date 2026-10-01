@@ -152,18 +152,26 @@ func CapabilitiesForTask(role string, readOnly bool, toolNames, writePaths []str
 		}
 	}
 	if readOnly {
-		filtered := capabilities[:0]
-		for _, capability := range capabilities {
-			// CapExecShell is kept under read-only so declared shell tools can
-			// still run read-only commands; CapWriteFS / external side effects
-			// remain out of scope regardless of declared tool names.
-			if capability != CapWriteFS && capability != CapExternalSideEffect {
-				filtered = append(filtered, capability)
-			}
-		}
-		capabilities = filtered
+		capabilities = filterReadOnlyCapabilities(capabilities)
 	}
 	return dedupeCapabilities(capabilities)
+}
+
+// filterReadOnlyCapabilities drops the capabilities a read-only child must
+// never hold: write access and external side effects. CapExecShell is kept so
+// declared shell tools can still run individually classified read-only
+// commands; the read-only policy flag and the shell classifier enforce the
+// command-level boundary. Used both by the role/tool-derived floor
+// (CapabilitiesForTask) and by the inherited-parent-scope path
+// (DeriveChildForTask) so the two cannot drift apart.
+func filterReadOnlyCapabilities(capabilities []Capability) []Capability {
+	filtered := make([]Capability, 0, len(capabilities))
+	for _, capability := range capabilities {
+		if capability != CapWriteFS && capability != CapExternalSideEffect {
+			filtered = append(filtered, capability)
+		}
+	}
+	return filtered
 }
 
 // RoleFamily classifies a subagent role (or task_type) onto the role families
