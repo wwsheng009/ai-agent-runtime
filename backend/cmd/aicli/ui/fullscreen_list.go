@@ -69,7 +69,10 @@ type FullScreenListOptions struct {
 	// Enter submits the trimmed text through OnConfirmText -- a non-nil error
 	// keeps the input open and is shown in the subtitle (inline validation), so
 	// callers can reuse their write-path validator without losing the user's
-	// input. Esc/q cancels. Callers use this for fields whose value has no
+	// input. OnConfirmText is only consulted for a submit: Esc/interrupt/EOF
+	// always cancel, so a validator that rejects "" can never trap the user in
+	// this stage. Only Esc cancels -- 'q' types a 'q', because these fields hold
+	// model ids like qwen/qwq. Callers use this for fields whose value has no
 	// catalog (for example routing max_tokens/temperature/thinking_effort).
 	FreeTextMode  bool
 	FreeTextValue string
@@ -362,7 +365,11 @@ func runFullScreenListLoop(ctx context.Context, options FullScreenListOptions, h
 		}
 		if done {
 			if options.FreeTextMode {
-				if options.OnConfirmText != nil {
+				// A cancel is not a submit. The validator answers "is this value
+				// acceptable?", and a submit of "" is legitimately rejected, so
+				// running it here would trap Esc in a reopen loop: the stage
+				// ignored the key and the user could not leave at all.
+				if !result.Cancelled && options.OnConfirmText != nil {
 					if confErr := options.OnConfirmText(result.Text); confErr != nil {
 						// Inline validation feedback: keep the input open with the
 						// reason in the subtitle so the value can be corrected
@@ -633,9 +640,12 @@ func applyFullScreenListKey(state *fullScreenListState, key editorKey, items []F
 }
 
 // applyFullScreenFreeTextKey handles one key in FreeTextMode: printable runes
-// edit the value, Backspace/Delete drop the last rune, Enter submits the trimmed
-// text, Esc/q/interrupt/EOF cancels. Navigation keys are inert (there is no
-// list to move through).
+// edit the value, Backspace/Delete drop the last rune, Enter submits the
+// trimmed text, Esc/interrupt/EOF cancels. Navigation keys are inert (there is
+// no list to move through).
+//
+// Unlike the list mode, 'q' is NOT a cancel key here -- it types a 'q'. The
+// callers are model-id fields, where 'q' is common (qwen, qwq, qwq-32b).
 func applyFullScreenFreeTextKey(state *fullScreenListState, key editorKey) (FullScreenListResult, bool) {
 	if state == nil {
 		return FullScreenListResult{Index: -1, Cancelled: true}, true

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -129,4 +130,77 @@ func TestRunFullScreenListLoopAddKeyOptInAtLoopLevel(t *testing.T) {
 			t.Fatalf("expected AddRequested and an open-list exit, got %+v", result)
 		}
 	})
+}
+
+// Regression: Esc in the add-model free-text stage must return to the model
+// list, and it must do so even when OnConfirmText rejects the empty string.
+//
+// The loop used to run the FreeTextMode validator on *every* finished key,
+// including the cancel. chatModelAdditionTextError(provider, "") returns
+// "请输入要添加的模型 id", so Esc was treated as "submitted an empty form",
+// the stage reopened, and the keypress looked like a total no-op -- the user
+// could not leave the add screen at all.
+func TestFullScreenListFreeTextEscBypassesConfirmValidator(t *testing.T) {
+	var validated []string
+	result, _, err := runFullScreenListLoop(context.Background(), FullScreenListOptions{
+		Title:        "添加模型",
+		FreeTextMode: true,
+		OnConfirmText: func(text string) error {
+			validated = append(validated, text)
+			return fmt.Errorf("请输入要添加的模型 id")
+		},
+	}, fullScreenListLoopHooks{
+		refreshSize: func() (int, int) { return 80, 12 },
+		writeFrame:  func(string) error { return nil },
+		now:         func() time.Time { return time.Unix(0, 0) },
+		readKey: func(context.Context) (editorKey, bool, error) {
+			return editorKey{kind: editorKeyCancelPopup}, true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if !result.Cancelled {
+		t.Fatalf("Esc must cancel the free-text stage, got %+v", result)
+	}
+	if len(validated) != 0 {
+		t.Fatalf("OnConfirmText must not run for a cancel, got %v", validated)
+	}
+}
+
+// The inverse guard: a real submit with an empty value is still validated, so
+// the fix cannot simply skip OnConfirmText unconditionally. The first Enter is
+// rejected (which must keep the stage open); a following Esc ends the loop, so
+// the test terminates and "was the validator consulted?" is still observable.
+func TestFullScreenListFreeTextEnterStillValidates(t *testing.T) {
+	var validated []string
+	step := 0
+	result, _, err := runFullScreenListLoop(context.Background(), FullScreenListOptions{
+		Title:        "添加模型",
+		FreeTextMode: true,
+		OnConfirmText: func(text string) error {
+			validated = append(validated, text)
+			return fmt.Errorf("请输入要添加的模型 id")
+		},
+	}, fullScreenListLoopHooks{
+		refreshSize: func() (int, int) { return 80, 12 },
+		writeFrame:  func(string) error { return nil },
+		now:         func() time.Time { return time.Unix(0, 0) },
+		readKey: func(context.Context) (editorKey, bool, error) {
+			step++
+			if step == 1 {
+				return editorKey{kind: editorKeyEnter}, true, nil
+			}
+			return editorKey{kind: editorKeyCancelPopup}, true, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if !result.Cancelled {
+		t.Fatalf("the rejected Enter must have kept the stage open so Esc could cancel it, got %+v", result)
+	}
+	if len(validated) != 1 || validated[0] != "" {
+		t.Fatalf("OnConfirmText calls = %v, want one call with an empty string", validated)
+	}
 }
