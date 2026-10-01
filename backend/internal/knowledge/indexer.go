@@ -34,6 +34,8 @@ type IndexResult struct {
 }
 
 // ignoreDirs 是索引永不进入的目录（与 workspace scanner 的忽略集保持一致的语义）。
+// .gitignore 是叠加其上的第二层（见 gitignore.go）：内置集在 .gitignore 缺失或
+// 未声明依赖目录（node_modules 等）时兜底，且不被取反规则重新包含。
 var ignoreDirs = map[string]bool{
 	".git": true, ".hg": true, ".svn": true,
 	"node_modules": true, "vendor": true, "dist": true, "build": true,
@@ -237,11 +239,19 @@ func reconcileDeletedFiles(ctx context.Context, store Store, wsID, root string, 
 }
 
 // collectIndexableFiles 返回按路径排序的候选文件绝对路径列表。
+//
+// 过滤分三层（成本从低到高）：
+//  1. 内置 ignoreDirs + 隐藏目录：整棵子树跳过，是缓存/依赖目录的主防线；
+//  2. 目录内 .gitignore（按目录栈叠加；knowledge.index.use_gitignore 可关闭）：
+//     项目自己声明什么不是源码（构建产物 / 生成文件 / 本地配置）；
+//  3. codeExtensions：只收内置 adapter 能解析的后缀。
 func collectIndexableFiles(cfg Config) ([]string, bool, error) {
 	root := cfg.Workspace
+	useGitignore := cfg.Index.UseGitignoreEnabled()
 	var (
 		files     []string
 		truncated bool
+		ignores   gitignoreSet
 	)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -251,13 +261,31 @@ func collectIndexableFiles(cfg Config) ([]string, bool, error) {
 			}
 			return nil
 		}
+		rel := relPathWithin(root, path)
+		if useGitignore {
+			// 深度优先：弹出不再覆盖当前路径的规则文件，保证只看祖先链。
+			ignores.retainAncestors(rel)
+		}
 		name := d.Name()
 		if d.IsDir() {
 			if path == root {
+				if useGitignore {
+					if f := loadGitignoreFile(root, ""); f != nil {
+						ignores.push(*f)
+					}
+				}
 				return nil
 			}
 			if ignoreDirs[name] || strings.HasPrefix(name, ".") {
 				return fs.SkipDir
+			}
+			if useGitignore && ignores.isIgnored(rel, true) {
+				return fs.SkipDir
+			}
+			if useGitignore {
+				if f := loadGitignoreFile(path, rel); f != nil {
+					ignores.push(*f)
+				}
 			}
 			return nil
 		}
@@ -265,6 +293,9 @@ func collectIndexableFiles(cfg Config) ([]string, bool, error) {
 			return nil
 		}
 		if _, ok := codeExtensions[strings.ToLower(filepath.Ext(name))]; !ok {
+			return nil
+		}
+		if useGitignore && ignores.isIgnored(rel, false) {
 			return nil
 		}
 		if len(files) >= maxIndexFiles {
@@ -279,6 +310,19 @@ func collectIndexableFiles(cfg Config) ([]string, bool, error) {
 	}
 	sort.Strings(files)
 	return files, truncated, nil
+}
+
+// relPathWithin 返回 p 相对 root 的 '/' 分隔路径；root 自身返回 ""。
+func relPathWithin(root, p string) string {
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return ""
+	}
+	rel = normalizeRelPath(rel)
+	if rel == "." {
+		return ""
+	}
+	return rel
 }
 
 // fileDecision 是 inspectFile 对单个文件的处置结论。

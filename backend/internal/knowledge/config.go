@@ -158,6 +158,18 @@ func (p PlannerConfig) ReuseFloor(scope ReuseScope, write bool) float64 {
 	return floor
 }
 
+// IndexConfig 是 `knowledge.index.*` 配置段。
+type IndexConfig struct {
+	// UseGitignore 控制索引遍历是否读取工作区内的 .gitignore（默认 true）。
+	// 关闭后只保留内置忽略集与隐藏目录规则，是"忽略规则误伤"的回滚逃生舱。
+	UseGitignore *bool `yaml:"use_gitignore,omitempty" json:"use_gitignore,omitempty"`
+}
+
+// UseGitignoreEnabled 报告 .gitignore 过滤是否生效（缺省 true）。
+func (c IndexConfig) UseGitignoreEnabled() bool {
+	return c.UseGitignore == nil || *c.UseGitignore
+}
+
 // Config 是知识层的解析后配置。
 //
 // 该结构同时作为 `knowledge:` YAML 段的承载类型（internal/config.RuntimeConfig
@@ -180,6 +192,8 @@ type Config struct {
 	// CodeTools 控制 Phase 3 的 code.* 工具面是否注册（off|on，默认 off）。
 	// 独立于 Mode：mode=on 但 code_tools 未开启时工具面不出现（灰度/回滚）。
 	CodeTools string `yaml:"code_tools,omitempty" json:"code_tools,omitempty"`
+	// Index 是索引管线行为开关。
+	Index IndexConfig `yaml:"index,omitempty" json:"index,omitempty"`
 	// Workspace 是被索引的工作区根目录（运行时注入，不来自 YAML）。
 	Workspace string `yaml:"-" json:"-"`
 }

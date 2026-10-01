@@ -6,6 +6,26 @@
 
 ---
 
+## 2026-10-01 — 索引范围收口：.gitignore 过滤接入（G11/R11 的 .gitignore 层）
+
+### Changed
+
+- `backend/internal/knowledge/gitignore.go`（新）：git 语义的 .gitignore 解析与匹配——按目录层级叠加（root→深，最后命中胜出）、`!` 取反、`#` 注释、`\` 转义、尾部 `/` 仅匹配目录、前导 `/` 锚定、无 `/` 模式按 basename 任意深度匹配、`*`/`?`/`[]` 不跨 `/`、`**/` / `/**/` / `/**` 三种整段形态；单文件读失败 / 规则编译失败降级为"无该规则"，不阻断索引。
+- `backend/internal/knowledge/indexer.go`：`collectIndexableFiles` 在 WalkDir 中按目录栈应用 .gitignore（内置 `ignoreDirs` + 隐藏目录仍是第一道防线，且不被取反规则重新包含）；新增忽略规则后，已入库文件由下一次全量对账软删除。
+- `backend/internal/knowledge/config.go`：新增 `knowledge.index.use_gitignore`（默认 true）；关闭后回到"内置忽略集 + 隐藏目录"旧口径（回滚逃生舱）。
+
+### Verified
+
+- 新增 6 例测试：规则语义表（basename/锚定/目录/`**`/转义/字符类/CRLF）、嵌套优先级与目录通配取反链（`dir/*` + `!dir/` + `!dir/**`）、collect 集成（node_modules 与隐藏目录保持生效）、开关关闭口径、全量软删除新增忽略文件。
+- `go build` OK；`internal/knowledge` 聚焦测试通过（规则语义 / collect 集成 / 软删除对账）。
+
+### Notes
+
+- 范围边界：只读取工作区内的 .gitignore；`.git/info/exclude` 与用户全局 excludesFile 不参与（前者需要先定位仓库根，后者是机器级配置）。非 git 工作区同样生效。
+- 内置忽略集与 .gitignore 是**叠加**关系：node_modules / vendor / dist 等即使未被 .gitignore 声明也会被剪枝，且不能被 `!` 规则重新包含。
+
+---
+
 ## 2026-10-01 — 修复：code_search 限定名/精确名排序 + code_inspect 去重语义（修复轮 2）
 
 承接前一条修复轮，继续收敛工具层语义缺口（不改索引/知识层）。
