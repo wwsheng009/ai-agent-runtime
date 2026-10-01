@@ -446,6 +446,19 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 `vitest` 8 文件 67 测试全绿、`tsc -b` 通过、`lint:i18n` 945 键 0 违规。
 遗留：舰队级**比率区块**需后端聚合端点（复用 §3.3 口径）后再点亮，本次面板刻意不含比率。
 
+**第十六轮（2026-10-01，舰队级"比率区块"后端端点 + 前端接入，§5.5 续作）**：
+新增 `GET /api/runtime/analytics/lsp/baseline?days=N|since=RFC3339`
+（`internal/api/runtimeapi/analytics_lsp_handlers.go`）——**直接复用
+`internal/lsp/baseline.Analyze`**（与 TUI `/lsp baseline`、§4.3 登记表、
+`scripts/analyze-lsp-baseline.py` 同一实现，两侧由同一 fixture 数字互锁），返回 §4.3
+行 + 原始 Stats + 扫描事实；未采集项按基线约定输出 `n/a` + 原因，不伪造 0；鉴权与既有
+analytics 一致（loopback / admin token / admin role），时间窗 `since` 与 `days` 互斥。
+前端 `api/runtime/lsp.ts` 增加 `getLspBaseline`，面板新增"舰队基线（§4.3 同口径）"区块，
+与事件流**独立降级**（任一失败不影响另一区）。测试：后端 3 例（同口径数字 / 窗口与参数
+归一 / 403）→ runtimeapi 整包 `ok`（40s）；前端新增基线客户端用例 → 8 文件 68 测试全绿、
+`tsc -b` 0 错、`lint:i18n` 0 违规。
+遗留：端点每次请求做一次 chat-logs 扫描（与 TUI 同价）；高频轮询前需加 TTL 缓存。
+
 ---
 
 ## 6. 里程碑与验收

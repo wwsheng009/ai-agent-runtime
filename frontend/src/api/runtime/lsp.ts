@@ -134,3 +134,63 @@ export async function fetchLspObserveFeed(
   merged.sort((a, b) => b.observation_seq - a.observation_seq);
   return { events: merged, byType };
 }
+
+// ---------------------------------------------------------------------------
+// 舰队级基线（比率区块）：GET /api/runtime/analytics/lsp/baseline
+//
+// 后端直接复用 internal/lsp/baseline.Analyze（与 TUI `/lsp baseline`、方案 §4.3
+// 登记表同一实现，两侧由同一 fixture 数字互锁），所以这里是**同一口径的数字**，
+// 不是前端重算。未采集项由后端输出 "n/a" + 原因，前端原样展示（不补 0）。
+// ---------------------------------------------------------------------------
+
+/** §4.3 基线登记表的一行（后端 baseline.Row）。 */
+export type LspBaselineRow = {
+  metric: string;
+  value: string;
+  window: string;
+  samples: string;
+  conclusion: string;
+  date: string;
+};
+
+/** 扫描过程事实（后端 baseline.ScanStats）。 */
+export type LspBaselineScan = {
+  files: number;
+  lines: number;
+  malformed: number;
+  skipped_old?: number;
+  skipped_files?: number;
+};
+
+export type LspBaselineResponse = {
+  schema_version: string;
+  generated_at: string;
+  /** "all" / "days=N" / "since=<RFC3339>"。 */
+  window: string;
+  scan: LspBaselineScan;
+  stats: Record<string, unknown>;
+  rows: LspBaselineRow[];
+};
+
+export type GetLspBaselineOptions = {
+  /** 时间窗（天）；与 since 互斥，缺省 = 全窗口。 */
+  days?: number;
+  since?: string;
+  adminToken?: string;
+  signal?: AbortSignal;
+};
+
+export async function getLspBaseline(
+  options: GetLspBaselineOptions = {},
+): Promise<LspBaselineResponse> {
+  return fetchRuntimeJson<LspBaselineResponse>(
+    buildRuntimeUrlWithQuery("/api/runtime/analytics/lsp/baseline", {
+      days: options.days,
+      since: options.since,
+    }),
+    {
+      headers: buildObserveHeaders(options.adminToken),
+      signal: options.signal,
+    },
+  );
+}

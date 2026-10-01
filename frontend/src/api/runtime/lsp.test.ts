@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   LSP_OBSERVE_EVENT_TYPES,
   fetchLspObserveFeed,
+  getLspBaseline,
   listLspObserveEvents,
 } from "@/api/runtime/lsp";
 
@@ -118,5 +119,40 @@ describe("fetchLspObserveFeed", () => {
     );
 
     await expect(fetchLspObserveFeed()).rejects.toMatchObject({ status: 403 });
+  });
+});
+
+describe("getLspBaseline", () => {
+  it("透传 days 并解析扁平 payload（§4.3 行 + 扫描事实）", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      expect(url).toContain("/api/runtime/analytics/lsp/baseline");
+      expect(url).toContain("days=7");
+      return jsonResponse({
+        schema_version: "runtime.analytics.lsp.v1",
+        generated_at: "2026-10-01T03:00:00Z",
+        window: "days=7",
+        scan: { files: 12, lines: 900, malformed: 1 },
+        stats: { requests: 4 },
+        rows: [
+          {
+            metric: "覆盖率",
+            value: "1.0",
+            window: "7d",
+            samples: "n=2",
+            conclusion: "待标定",
+            date: "2026-10-01",
+          },
+        ],
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const baseline = await getLspBaseline({ days: 7 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(baseline.window).toBe("days=7");
+    expect(baseline.scan.files).toBe(12);
+    expect(baseline.rows[0]?.value).toBe("1.0");
   });
 });

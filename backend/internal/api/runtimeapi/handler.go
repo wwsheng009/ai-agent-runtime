@@ -989,6 +989,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/analytics/errors", h.ListAnalyticsErrorPatterns).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/routing", h.ListAnalyticsRoutingStats).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/analytics/routing/events", h.ListAnalyticsRoutingEvents).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/analytics/lsp/baseline", h.GetAnalyticsLSPBaseline).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces/stats", h.GetRuntimeTraceStats).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces/governance", h.GetRuntimeTraceGovernance).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/traces", h.GetRuntimeTraces).Methods(http.MethodGet)

@@ -6,8 +6,8 @@
 //   * 诚实降级：403 → "未授权或观测面未启用"；其他错误 → role="alert" + 原因；
 //     窗口内无事件 → "暂无 LSP 事件"，不渲染 0 指标冒充健康。
 
-import type { LspObserveEvent } from "@/api/runtime/lsp";
-import { fetchLspObserveFeed } from "@/api/runtime/lsp";
+import type { LspBaselineResponse, LspObserveEvent } from "@/api/runtime/lsp";
+import { fetchLspObserveFeed, getLspBaseline } from "@/api/runtime/lsp";
 import { RuntimeApiError, readErrorEnvelope } from "@/api/runtime/shared";
 import { Button } from "@/components/ui/button";
 import { RefreshCwIcon } from "lucide-react";
@@ -38,31 +38,47 @@ function formatEventTime(value: string): string {
   return parsed.toLocaleTimeString();
 }
 
+/** 错误降级文案：403 视为"观测面不可用"，其余用后端消息，最后兜底异常文本。 */
+function describeLspError(err: unknown, t: (key: "lspPanel.forbidden") => string): string {
+  if (err instanceof RuntimeApiError && err.status === 403) {
+    return t("lspPanel.forbidden");
+  }
+  if (err instanceof RuntimeApiError) {
+    return readErrorEnvelope(err.payload).message || err.message;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 export function LspObservabilityPanel({ adminToken }: { adminToken?: string }) {
   const { t } = useTranslation("usageAnalytics");
   const [events, setEvents] = useState<LspObserveEvent[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [baseline, setBaseline] = useState<LspBaselineResponse | null>(null);
+  const [baselineError, setBaselineError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    try {
-      const feed = await fetchLspObserveFeed({ limit: FEED_LIMIT, adminToken });
-      setEvents(feed.events);
+    setBaselineError(null);
+    // 两个数据面独立降级：事件流不可用时基线仍可展示，反之亦然（不互相冒充）。
+    const [feedResult, baselineResult] = await Promise.allSettled([
+      fetchLspObserveFeed({ limit: FEED_LIMIT, adminToken }),
+      getLspBaseline({ adminToken }),
+    ]);
+    if (feedResult.status === "fulfilled") {
+      setEvents(feedResult.value.events);
       setLoaded(true);
-    } catch (err) {
-      if (err instanceof RuntimeApiError && err.status === 403) {
-        setError(t("lspPanel.forbidden"));
-      } else if (err instanceof RuntimeApiError) {
-        setError(readErrorEnvelope(err.payload).message || err.message);
-      } else {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    } finally {
-      setLoading(false);
+    } else {
+      setError(describeLspError(feedResult.reason, t));
     }
+    if (baselineResult.status === "fulfilled") {
+      setBaseline(baselineResult.value);
+    } else {
+      setBaselineError(describeLspError(baselineResult.reason, t));
+    }
+    setLoading(false);
   }, [adminToken, t]);
 
   useEffect(() => {
@@ -93,6 +109,44 @@ export function LspObservabilityPanel({ adminToken }: { adminToken?: string }) {
           {loading ? t("lspPanel.loading") : t("lspPanel.refresh")}
         </Button>
       </div>
+
+      {baseline ? (
+        <div className="surface-panel rounded-panel-lg p-4">
+          <h3 className="text-sm font-semibold">{t("lspPanel.baseline")}</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t("lspPanel.baselineNote")} · {t("lspPanel.baselineWindow")}: {baseline.window} ·{" "}
+            {t("lspPanel.baselineScan")}: {formatNumber(baseline.scan.files)} / {formatNumber(baseline.scan.malformed)}
+          </p>
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full min-w-0 text-left text-xs">
+              <thead className="text-muted-foreground">
+                <tr>
+                  <th className="py-1 pr-3 font-medium">{t("lspPanel.metric")}</th>
+                  <th className="py-1 pr-3 font-medium">{t("lspPanel.value")}</th>
+                  <th className="py-1 pr-3 font-medium">{t("lspPanel.samples")}</th>
+                  <th className="py-1 pr-3 font-medium">{t("lspPanel.conclusion")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {baseline.rows.map((row) => (
+                  <tr key={row.metric} className="border-t border-border/60">
+                    <td className="py-1 pr-3 font-medium">{row.metric}</td>
+                    <td className="py-1 pr-3 font-mono">{row.value}</td>
+                    <td className="py-1 pr-3 text-muted-foreground">{row.samples || "—"}</td>
+                    <td className="py-1 pr-3 text-muted-foreground">{row.conclusion}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
+
+      {baselineError ? (
+        <div role="alert" className="surface-panel rounded-panel-lg p-4 text-sm text-destructive">
+          {t("lspPanel.baselineUnavailable")}: {baselineError}
+        </div>
+      ) : null}
 
       {error ? (
         <div role="alert" className="surface-panel rounded-panel-lg p-4 text-sm text-destructive">
