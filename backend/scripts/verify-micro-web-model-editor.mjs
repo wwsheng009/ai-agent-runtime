@@ -399,5 +399,12 @@ check("removed model not submitted",
   lastSaveBody && !lastSaveBody.supported_models.includes("m-c"),
   lastSaveBody && lastSaveBody.supported_models);
 
+// 换 provider 重开编辑器：待添加的 id 和提示行都不能从上一个 provider 残留。
+// （这行为本来是漏的：只重置了过滤框，添加框留着上一个 provider 的半截输入。）
+addInput().value = "leftover-id";
+mod.openProviderEditor("beta");
+check("reopen clears pending add input", addInput().value === "", JSON.stringify(addInput().value));
+check("reopen clears notice", notice() === "", notice());
+
 if (failed) { console.log("\n" + failed + " FAILED"); process.exit(1); }
 console.log("\nALL PASS");

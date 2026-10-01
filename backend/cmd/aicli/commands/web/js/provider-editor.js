@@ -174,6 +174,10 @@ export function openProviderEditor(name) {
   configEl("cfg-provider-models").value = models.join("\n");
   var filterEl = configEl("cfg-model-filter");
   if (filterEl) { filterEl.value = ""; }
+  // 添加入口同理：换 provider 重开时不能留着上一个 provider 的待添加 id。
+  var addEl = configEl("cfg-model-add");
+  if (addEl) { addEl.value = ""; }
+  hideModelNotice();
   rebuildModelEditors(models, p);
   showConfigEditor(true);
   setCfgStatus(configEl("cfg-provider-status"), "", "");
@@ -767,6 +771,7 @@ function undoRemoveModel() {
 }
 
 // 模型编辑器自己的提示行（与 provider 保存状态分开：那条线被「保存中…」占用）。
+function hideModelNotice() { showModelNotice(""); }
 function showModelNotice(text, kind, undoable) {
   var el = configEl("cfg-model-notice");
   if (!el) { return; }

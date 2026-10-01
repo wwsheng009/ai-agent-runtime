@@ -102,6 +102,32 @@ const m = await page.evaluate(() => {
         return row ? row.scrollWidth > row.clientWidth + 1 : null;
       })(),
     },
+    // 添加入口可发现性：第一版把它挤在标题行里且复用了 .cfg-model-filter 的
+    // class，于是和「过滤模型…」长得一模一样、一起被压到 140–240px ——
+    // 入口存在但没人找得到（真机上被当成不存在）。这几项量的是「能不能一眼看见」。
+    addDiscoverable: (() => {
+      const add = document.getElementById("cfg-model-add");
+      const filter = document.getElementById("cfg-model-filter");
+      const label = document.querySelector('.cfg-model-add-label[for="cfg-model-add"]');
+      if (!add) { return { missing: true }; }
+      const a = add.getBoundingClientRect();
+      const f = filter ? filter.getBoundingClientRect() : null;
+      const cs = getComputedStyle(add);
+      const fs = filter ? getComputedStyle(filter) : null;
+      return {
+        // 有常驻文字标签（不能只靠 placeholder，一输入就消失）
+        hasLabel: !!label,
+        labelText: label ? label.textContent.trim() : null,
+        // 与过滤框同框线宽 => 长得一样，用户会当成第二个搜索框
+        looksLikeFilter: fs ? cs.borderStyle === fs.borderStyle && cs.borderColor === fs.borderColor : null,
+        // 被压到和过滤框一样窄 => 挤在角落里
+        width: Math.round(a.width),
+        minWidth: Math.round(a.width),
+        onOwnRow: f ? Math.abs(a.top - f.top) > 4 || a.left > f.right : true,
+        // 必须在弹窗可视区域内（没被挤到需要横向滚动才能看到）
+        withinViewport: a.width > 60 && a.right <= window.innerWidth + 1 && a.left >= -1,
+      };
+    })(),
     // 输入模态 chip 组：全部渲染、已保存值处于勾选态、不溢出、触摸高度够
     modalities: {
       rendered: Array.from(panel.querySelectorAll("[data-modality]"))
@@ -144,6 +170,16 @@ if (m.addRemove.nameClearance === false) { problems.push("移除 × 压住了模
 if (m.addRemove.rowOverflowX) { problems.push("模型行横向溢出"); }
 if (NARROW && m.addRemove.removeH.some((v) => v < 28)) {
   problems.push("窄屏移除 × 触摸目标偏小: " + m.addRemove.removeH.join(","));
+}
+const ad = m.addDiscoverable;
+if (ad.missing) {
+  problems.push("缺少手动添加输入框 #cfg-model-add");
+} else {
+  if (!ad.hasLabel) { problems.push("添加入口没有常驻文字标签（只靠 placeholder 会看不见）"); }
+  if (ad.looksLikeFilter) { problems.push("添加框与过滤框同框线，长得一样会被当成第二个搜索框"); }
+  if (!ad.onOwnRow) { problems.push("添加框与过滤框同行且都在窄栏里，入口不显眼"); }
+  if (ad.width < 160) { problems.push("添加框被压得过窄: " + ad.width + "px"); }
+  if (!ad.withinViewport) { problems.push("添加框不在可视区域内"); }
 }
 console.log(problems.length ? "PROBLEMS: " + problems.join(" | ") : "OK: no layout problems detected");
 

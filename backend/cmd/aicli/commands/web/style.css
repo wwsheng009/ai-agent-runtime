@@ -1728,6 +1728,25 @@ body.sidebar-collapsed #sidebar {
   min-width: 140px; max-width: 240px; flex: 1 1 auto;
 }
 .cfg-model-filter:focus { outline: none; border-color: var(--accent); }
+
+/* 添加模型：独立成行 + 虚线边框 + 常驻文字标签。
+   第一版把它塞在标题行里、还复用了 .cfg-model-filter 的 class，结果它和
+   「过滤模型…」长得一模一样并排、一起被压到 140–240px：入口存在但没人找
+   得到。添加入口必须一眼可辨，所以不复用过滤框的样式，标签也不能只靠
+   placeholder（一旦输入就消失）。 */
+.cfg-model-add-row { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+.cfg-model-add-label {
+  display: flex; align-items: center; gap: 2px; flex-shrink: 0;
+  font-size: 11px; color: var(--green); white-space: nowrap; user-select: none;
+}
+.cfg-model-add {
+  flex: 1 1 auto; min-width: 0;
+  background: var(--bg3); color: var(--fg);
+  border: 1px dashed var(--green); border-radius: 4px;
+  padding: 5px 8px; font-family: inherit; font-size: 12px;
+}
+.cfg-model-add::placeholder { color: var(--fg4); }
+.cfg-model-add:focus { outline: none; border-style: solid; box-shadow: 0 0 0 1px var(--green); }
 .cfg-model-list {
   height: var(--cfg-model-editor-h); overflow-y: auto;
   border: 1px solid var(--border); border-radius: 4px;
@@ -1801,6 +1820,8 @@ body.sidebar-collapsed #sidebar {
   #cfg-model-list .cfg-model-remove { opacity: 1; width: 28px; height: 28px; font-size: 18px; }
   .cfg-model-undo { padding: 5px 12px; font-size: 12px; }
   .cfg-model-filter { min-width: 100%; max-width: none; padding: 6px 8px; font-size: 13px; }
+  .cfg-model-add { padding: 7px 8px; font-size: 13px; }
+  .cfg-model-add-label { font-size: 12px; }
   .cfg-model-notice { font-size: 12px; }
 }
 
