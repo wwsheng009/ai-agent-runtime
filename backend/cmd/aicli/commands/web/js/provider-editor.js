@@ -676,12 +676,112 @@ function renderModelList(models) {
     var d = cfgModelDraft[model] || emptyModelDraft();
     var cls = "cfg-model-item" + (model === cfgModelSelected ? " active" : "") +
       (modelDraftIsEmpty(d) ? "" : " configured");
-    html += '<button type="button" class="' + cls + '" data-model="' + esc(model) + '" title="' + esc(model) + '">' +
+    // 行是 div 而不是 button：删除 × 必须是独立的兄弟按钮，button 里嵌 button
+    // 是无效 HTML（且点击会被外层吞掉）。可点击区域仍是真正的 <button>，
+    // 键盘与读屏路径不依赖行上的 click 处理。
+    html += '<div class="' + cls + '" data-model="' + esc(model) + '">' +
+      '<button type="button" class="cfg-model-open" title="' + esc(model) + '">' +
       '<span class="cfg-model-name">' + esc(model) + "</span>" +
       '<span class="cfg-model-chips">' + modelSummaryChips(model, d) + "</span>" +
-      "</button>";
+      "</button>" +
+      '<button type="button" class="cfg-model-remove" data-remove-model="' + esc(model) + '"' +
+      ' title="从支持模型列表移除 ' + esc(model) + '" aria-label="移除 ' + esc(model) + '">×</button>' +
+      "</div>";
   });
   listEl.innerHTML = html;
+}
+
+// 手动添加模型：接受单个 id，也接受一次粘贴多个（空格/逗号分隔）。
+// 之前只能去上方「支持模型」文本域手工加一行，加完还得滚回列表——
+// 添加入口必须和看到列表的地方在一起。
+function addModel() {
+  var input = configEl("cfg-model-add");
+  if (!input) { return; }
+  var raw = String(input.value || "").trim();
+  if (!raw) { return; }
+  var models = currentModels();
+  var added = [];
+  var dup = [];
+  raw.split(/[\s,]+/).forEach(function (m) {
+    if (!m) { return; }
+    if (models.indexOf(m) >= 0) { dup.push(m); return; }
+    models.push(m);
+    added.push(m);
+  });
+  if (!added.length) {
+    showModelNotice(dup.length ? "已在列表中，未重复添加：" + dup.join("、") : "", "warn");
+    return;
+  }
+  configEl("cfg-provider-models").value = models.join("\n");
+  input.value = "";
+  // 新模型没有草稿条目；面板按空草稿渲染＝全部字段未声明。
+  rebuildModelEditors(models, null);
+  cfgModelSelected = added[0];
+  renderModelList(currentModels());
+  renderModelEditorPanel();
+  var msg = "已添加 " + added.join("、");
+  if (dup.length) { msg += "（已在列表中，跳过：" + dup.join("、") + "）"; }
+  showModelNotice(msg);
+}
+
+// 最近一次移除的模型 + 它的草稿 + 原位置，供撤销用。
+// 移除会连带删掉该模型的 model_capabilities 草稿，误点 × 的代价不小，
+// 所以给一次撤销，而不是弹确认框打断操作。
+var cfgLastRemoved = null;
+
+function removeModel(model) {
+  collectModelDrafts();
+  var models = currentModels();
+  if (models.indexOf(model) < 0) { return; }
+  var ta = configEl("cfg-provider-models");
+  if (!ta) { return; }
+  var index = models.indexOf(model);
+  cfgLastRemoved = { model: model, draft: cfgModelDraft[model], index: index };
+  ta.value = models.filter(function (m) { return m !== model; }).join("\n");
+  delete cfgModelDraft[model];
+  if (cfgModelSelected === model) { cfgModelSelected = ""; }
+  renderModelList(currentModels());
+  renderModelEditorPanel();
+  var was = cfgLastRemoved.draft && !modelDraftIsEmpty(cfgLastRemoved.draft) ? "（含已填配置）" : "";
+  showModelNotice("已移除 " + model + was, null, true);
+}
+
+function undoRemoveModel() {
+  var rec = cfgLastRemoved;
+  if (!rec) { return; }
+  cfgLastRemoved = null;
+  var models = currentModels();
+  if (models.indexOf(rec.model) >= 0) {
+    // 撤销窗口内又被加回来了：直接丢弃这次撤销记录。
+    showModelNotice(rec.model + " 已在列表中", "warn");
+    return;
+  }
+  var ta = configEl("cfg-provider-models");
+  if (!ta) { return; }
+  models.splice(Math.min(rec.index, models.length), 0, rec.model);
+  ta.value = models.join("\n");
+  if (rec.draft) { cfgModelDraft[rec.model] = rec.draft; }
+  renderModelList(currentModels());
+  renderModelEditorPanel();
+  showModelNotice("已恢复 " + rec.model);
+}
+
+// 模型编辑器自己的提示行（与 provider 保存状态分开：那条线被「保存中…」占用）。
+function showModelNotice(text, kind, undoable) {
+  var el = configEl("cfg-model-notice");
+  if (!el) { return; }
+  if (!text) { el.hidden = true; el.textContent = ""; return; }
+  el.textContent = text;
+  el.className = "cfg-model-notice" + (kind ? " " + kind : "");
+  el.hidden = false;
+  if (undoable) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "cfg-model-undo";
+    btn.setAttribute("data-action", "undo-remove-model");
+    btn.textContent = "撤销";
+    el.appendChild(btn);
+  }
 }
 
 // 打开某个模型的编辑面板（再次点击同一模型收起）。
@@ -915,8 +1015,11 @@ function collectModelDrafts() {
   cfgModelDraft[cfgModelSelected] = d;
 }
 
-// 面板动作：设为默认模型 / 从支持模型列表移除。
+// 面板动作：设为默认模型 / 从支持模型列表移除 / 撤销移除。
+// addModel / undo-remove-model 不依赖 cfgModelSelected，所以要在 model 判空之前处理。
 function handleModelEditorAction(action) {
+  if (action === "add-model") { addModel(); return; }
+  if (action === "undo-remove-model") { undoRemoveModel(); return; }
   collectModelDrafts();
   var model = cfgModelSelected;
   if (!model) { return; }
@@ -928,14 +1031,8 @@ function handleModelEditorAction(action) {
     return;
   }
   if (action === "remove-model") {
-    var ta = configEl("cfg-provider-models");
-    if (ta) {
-      var kept = currentModels().filter(function (m) { return m !== model; });
-      ta.value = kept.join("\n");
-      delete cfgModelDraft[model];
-      cfgModelSelected = "";
-      rebuildModelEditors(kept, null);
-    }
+    // 列表行的 × 与面板头部的「移除」走同一条路径，因此都有撤销。
+    removeModel(model);
   }
 }
 
@@ -1533,10 +1630,43 @@ export function initProviderEditor() {
     if (modelList) {
       // 列表内容每次重渲染，事件委托绑定一次。
       modelList.addEventListener("click", function (e) {
-        var btn = e.target && e.target.closest ? e.target.closest("[data-model]") : null;
+        // × 按钮在 [data-model] 行内部，必须先判它，否则移除会被当成选中模型。
+        var rm = e.target && e.target.closest ? e.target.closest("[data-remove-model]") : null;
+        if (rm) {
+          e.preventDefault();
+          e.stopPropagation();
+          removeModel(rm.getAttribute("data-remove-model") || "");
+          return;
+        }
+        var row = e.target && e.target.closest ? e.target.closest("[data-model]") : null;
+        if (!row) { return; }
+        e.preventDefault();
+        toggleModelEditor(row.getAttribute("data-model") || "");
+      });
+    }
+    var modelAdd = configEl("cfg-model-add");
+    if (modelAdd) {
+      // 回车即添加：这个输入框没有独立按钮，键盘路径不能依赖鼠标点。
+      modelAdd.addEventListener("keydown", function (e) {
+        if (e.key !== "Enter") { return; }
+        e.preventDefault();
+        handleModelEditorAction("add-model");
+      });
+      // 提示行是「加了什么 / 跳过什么」的反馈，敲键输入时先清掉旧提示，
+      // 免得上一条「已添加 X」在用户改输入时还挂着造成误导。
+      modelAdd.addEventListener("input", function () {
+        var notice = configEl("cfg-model-notice");
+        if (notice && !notice.hidden) { showModelNotice(""); }
+      });
+    }
+    // 提示行在模型编辑器面板之外（面板委托收不到），单独委托一次。
+    var modelNotice = configEl("cfg-model-notice");
+    if (modelNotice) {
+      modelNotice.addEventListener("click", function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest("[data-action]") : null;
         if (!btn) { return; }
         e.preventDefault();
-        toggleModelEditor(btn.getAttribute("data-model") || "");
+        handleModelEditorAction(btn.getAttribute("data-action") || "");
       });
     }
     var modelFilter = configEl("cfg-model-filter");

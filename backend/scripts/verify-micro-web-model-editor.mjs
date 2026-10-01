@@ -308,5 +308,96 @@ check("chip edits submitted",
   lastSaveBody && JSON.stringify(lastSaveBody.model_capabilities["m-a"].input_modalities) ===
     JSON.stringify(["text", "pdf"]), lastSaveBody && lastSaveBody.model_capabilities["m-a"].input_modalities);
 
+// ---- 7. 手动添加 / 移除模型 ----
+mod.openProviderEditor("alpha");
+$("cfg-model-list").querySelector('[data-model="m-a"]').click();
+
+function addInput() { return $("cfg-model-add"); }
+function pressAdd(value) {
+  addInput().value = value;
+  addInput().dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+}
+function modelIds() {
+  return Array.from($("cfg-model-list").querySelectorAll("[data-model]"))
+    .map((n) => n.getAttribute("data-model"));
+}
+function notice() {
+  const n = $("cfg-model-notice");
+  return n.hidden ? "" : n.textContent;
+}
+function rowRemove(model) {
+  return $("cfg-model-list").querySelector(`[data-remove-model="${model}"]`);
+}
+
+// 手动添加单个模型：回车即可，不需要去上方文本域。
+check("add input exists", !!addInput(), "missing #cfg-model-add");
+pressAdd("gpt-5-mini");
+check("manual add appends model", modelIds().join(",") === "m-a,m-b,m-c,gpt-5-mini", modelIds().join(","));
+check("manual add writes models textarea",
+  $("cfg-provider-models").value.split(/\r?\n/).pop() === "gpt-5-mini",
+  JSON.stringify($("cfg-provider-models").value));
+check("manual add opens new model panel",
+  /gpt-5-mini/.test($("cfg-model-editor").textContent), "panel did not open");
+check("manual add notice", /已添加 gpt-5-mini/.test(notice()), notice());
+
+// 粘贴多个（空格分隔）应一次全部加入，并点名跳过的重复项。
+pressAdd("claude-x claude-y m-a");
+check("paste multiple adds all",
+  modelIds().join(",") === "m-a,m-b,m-c,gpt-5-mini,claude-x,claude-y", modelIds().join(","));
+check("paste multiple reports skipped duplicate",
+  /跳过：m-a/.test(notice()), notice());
+
+// 重复添加不产生重复行。
+pressAdd("m-a");
+check("duplicate add is a no-op", modelIds().filter((m) => m === "m-a").length === 1, modelIds().join(","));
+check("duplicate add explains", /已在列表中/.test(notice()), notice());
+
+// 行内 × 直接移除，不必先打开面板；且点 × 不能被当成「选中该模型」。
+// 此时选中的是 claude-x（上一次批量添加把它打开了），移除 m-c 不该动它。
+check("row remove button exists per row",
+  ["m-a", "m-b", "m-c"].every((m) => !!rowRemove(m)), "missing ×");
+rowRemove("m-c").click();
+check("row remove drops model", !modelIds().includes("m-c"), modelIds().join(","));
+check("row remove drops from textarea",
+  !$("cfg-provider-models").value.split(/\r?\n/).includes("m-c"),
+  JSON.stringify($("cfg-provider-models").value));
+check("removing another model leaves open panel alone",
+  /claude-x/.test($("cfg-model-editor").textContent), $("cfg-model-editor").textContent.slice(0, 40));
+check("row remove offers undo", /已移除 m-c/.test(notice()), notice());
+
+// 撤销：模型回到原位置（插在 m-b 之后，而不是追加到末尾）。
+$("cfg-model-notice").querySelector('[data-action="undo-remove-model"]').click();
+check("undo restores model at original index",
+  modelIds().join(",") === "m-a,m-b,m-c,gpt-5-mini,claude-x,claude-y", modelIds().join(","));
+
+// 移除当前选中的模型时，面板要收起来。
+rowRemove("claude-x").click();
+check("removing selected model closes panel",
+  /点击左侧任一模型/.test($("cfg-model-editor").textContent), $("cfg-model-editor").textContent.slice(0, 40));
+$("cfg-model-notice").querySelector('[data-action="undo-remove-model"]').click();
+
+// 移除会连带丢掉草稿：提示要点名，撤销要把草稿一起还回来。
+$("cfg-model-list").querySelector('[data-model="m-a"]').click();
+field("m-a", "max_context_tokens").value = "123456";
+rowRemove("m-a").click();
+check("remove of configured model warns about losing config",
+  /含已填配置/.test(notice()), notice());
+$("cfg-model-notice").querySelector('[data-action="undo-remove-model"]').click();
+check("undo restores draft too",
+  field("m-a", "max_context_tokens").value === "123456", field("m-a", "max_context_tokens").value);
+check("undo clears the undo button",
+  !$("cfg-model-notice").querySelector('[data-action="undo-remove-model"]'), "undo still offered");
+
+// 新增的模型在保存时必须真的进 payload；移除的（这次不撤销）必须不在里面。
+rowRemove("m-c").click();
+$("config-provider-form").dispatchEvent(new window.Event("submit", { cancelable: true, bubbles: true }));
+await flush(30);
+check("added models submitted",
+  lastSaveBody && ["gpt-5-mini", "claude-x", "claude-y"].every((m) => lastSaveBody.supported_models.includes(m)),
+  lastSaveBody && lastSaveBody.supported_models);
+check("removed model not submitted",
+  lastSaveBody && !lastSaveBody.supported_models.includes("m-c"),
+  lastSaveBody && lastSaveBody.supported_models);
+
 if (failed) { console.log("\n" + failed + " FAILED"); process.exit(1); }
 console.log("\nALL PASS");

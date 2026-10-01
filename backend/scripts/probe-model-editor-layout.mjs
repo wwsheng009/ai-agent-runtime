@@ -79,6 +79,29 @@ const m = await page.evaluate(() => {
     clippedKeys: clipped(".cfg-key"),
     // 触摸目标高度（窄屏可点按区域）
     switchH: Array.from(panel.querySelectorAll(".cfg-switch")).map(h),
+    // 手动添加 / 移除：两个入口都在模型编辑器块内（不要求用户去别处找）
+    addRemove: {
+      addInput: !!document.getElementById("cfg-model-add"),
+      notice: !!document.getElementById("cfg-model-notice"),
+      // 必须限定在编辑器列表内：模型选择器弹窗（.cfg-model-popup）也用
+      // .cfg-model-item，那边没有 ×，不限定会误报「每行应有移除按钮」。
+      removeBtns: document.querySelectorAll("#cfg-model-list [data-remove-model]").length,
+      modelCount: document.querySelectorAll("#cfg-model-list .cfg-model-item").length,
+      // × 常驻 20px、窄屏 28px：窄屏必须有足够触摸高度
+      removeH: Array.from(document.querySelectorAll("#cfg-model-list .cfg-model-remove")).map(h),
+      // × 绝对定位在行内，不能把模型名挤掉
+      nameClearance: (() => {
+        const row = document.querySelector("#cfg-model-list .cfg-model-item");
+        if (!row) { return null; }
+        const name = row.querySelector(".cfg-model-name").getBoundingClientRect();
+        const x = row.querySelector(".cfg-model-remove").getBoundingClientRect();
+        return x.left >= name.right - 1;
+      })(),
+      rowOverflowX: (() => {
+        const row = document.querySelector("#cfg-model-list .cfg-model-item");
+        return row ? row.scrollWidth > row.clientWidth + 1 : null;
+      })(),
+    },
     // 输入模态 chip 组：全部渲染、已保存值处于勾选态、不溢出、触摸高度够
     modalities: {
       rendered: Array.from(panel.querySelectorAll("[data-modality]"))
@@ -111,6 +134,16 @@ if (m.modalities.rendered.join(",") !== "text,image") {
 }
 if (m.modalities.hidden !== "text, image") {
   problems.push("模态隐藏输入未同步: " + JSON.stringify(m.modalities.hidden));
+}
+if (!m.addRemove.addInput) { problems.push("缺少手动添加输入框 #cfg-model-add"); }
+if (!m.addRemove.notice) { problems.push("缺少添加/移除反馈行 #cfg-model-notice"); }
+if (m.addRemove.removeBtns !== m.addRemove.modelCount) {
+  problems.push(`每行应有移除按钮：${m.addRemove.removeBtns}/${m.addRemove.modelCount}`);
+}
+if (m.addRemove.nameClearance === false) { problems.push("移除 × 压住了模型名"); }
+if (m.addRemove.rowOverflowX) { problems.push("模型行横向溢出"); }
+if (NARROW && m.addRemove.removeH.some((v) => v < 28)) {
+  problems.push("窄屏移除 × 触摸目标偏小: " + m.addRemove.removeH.join(","));
 }
 console.log(problems.length ? "PROBLEMS: " + problems.join(" | ") : "OK: no layout problems detected");
 

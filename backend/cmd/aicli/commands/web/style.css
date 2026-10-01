@@ -1733,15 +1733,37 @@ body.sidebar-collapsed #sidebar {
   border: 1px solid var(--border); border-radius: 4px;
   background: var(--bg3); padding: 3px; overscroll-behavior: contain;
 }
-.cfg-model-item {
+/* 行是 div（为了塞下兄弟节点 ×，button 嵌 button 是无效 HTML）；
+   列布局与边框仍归行，文字与 chip 排版归内层 .cfg-model-open。
+   一律用 #cfg-model-list 限定：模型选择器弹窗（.cfg-model-popup）复用了
+   .cfg-model-item 这个类名，不限定的话这里的 border / margin 会漏过去。 */
+#cfg-model-list .cfg-model-item {
+  position: relative; width: 100%;
+  background: transparent; border: 1px solid transparent; border-radius: 3px;
+  padding-right: 22px; margin-bottom: 2px;
+}
+#cfg-model-list .cfg-model-item:hover { background: var(--bg2); border-color: var(--border); }
+#cfg-model-list .cfg-model-item.active { background: var(--bg1); border-color: var(--accent); }
+#cfg-model-list .cfg-model-open {
   display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
   width: 100%; text-align: left; background: transparent; color: var(--fg2);
-  border: 1px solid transparent; border-radius: 3px; padding: 4px 6px;
-  margin-bottom: 2px; cursor: pointer; font-family: inherit; font-size: 12px;
+  border: 0; border-radius: 3px; padding: 4px 6px; margin: 0;
+  cursor: pointer; font-family: inherit; font-size: 12px;
 }
-.cfg-model-item:hover { background: var(--bg2); border-color: var(--border); }
-.cfg-model-item.active { background: var(--bg1); border-color: var(--accent); }
-.cfg-model-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+#cfg-model-list .cfg-model-open:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+/* 删除 ×：常驻但默认淡出，hover / 键盘聚焦 / 当前行时才显形。
+   误删会连带丢掉该模型的 model_capabilities 草稿，撤销在提示行里。 */
+#cfg-model-list .cfg-model-remove {
+  position: absolute; top: 3px; right: 3px; z-index: 1;
+  width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;
+  padding: 0; font-size: 15px; line-height: 1; border-radius: 3px;
+  background: transparent; border: 1px solid transparent; color: var(--fg4);
+  cursor: pointer; opacity: 0; transition: opacity 0.1s;
+}
+#cfg-model-list .cfg-model-item:hover .cfg-model-remove,
+#cfg-model-list .cfg-model-remove:focus-visible { opacity: 1; }
+#cfg-model-list .cfg-model-remove:hover { color: var(--red, #e5534b); border-color: var(--red, #e5534b); }
+#cfg-model-list .cfg-model-remove:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; }
 .cfg-model-name { font-weight: 600; word-break: break-all; }
 .cfg-model-item.configured .cfg-model-name { color: var(--fg); }
 .cfg-model-chips { display: flex; flex-wrap: wrap; gap: 3px; }
@@ -1756,6 +1778,31 @@ body.sidebar-collapsed #sidebar {
 .cfg-model-chip.compact, .cfg-model-chip.tool, .cfg-model-chip.modalities { color: var(--green); }
 .cfg-model-chip.contract { color: var(--yellow, #d29922); }
 .cfg-model-chip.default { color: var(--green); border-color: var(--green); }
+
+/* 添加/移除的反馈行。与 provider 保存状态分开：那条线被「保存中…」占用，
+   混用会让「已移除 X」在下一次保存时被冲掉。 */
+.cfg-model-notice {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin: 4px 0 0; font-size: 11px; color: var(--fg3, var(--fg2));
+}
+.cfg-model-notice[hidden] { display: none; }
+.cfg-model-notice.warn { color: var(--yellow, #d29922); }
+.cfg-model-undo {
+  background: transparent; border: 1px solid var(--border2); border-radius: 3px;
+  padding: 1px 7px; color: var(--fg2); cursor: pointer; font-family: inherit; font-size: 11px;
+}
+.cfg-model-undo:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 窄屏覆盖：放在**基础规则之后**。同特异度下后写的赢，放前面会被基础规则
+   反超（第一版就踩了这个坑：× 在 420px 下仍是 20px 触摸目标）。
+   - 触屏没有 hover：× 与撤销必须常驻且够大，否则「移除」实际不可用；
+   - 过滤/添加两个输入框在窄屏各占一行，挤在一行会小到没法点。 */
+@media (max-width: 720px) {
+  #cfg-model-list .cfg-model-remove { opacity: 1; width: 28px; height: 28px; font-size: 18px; }
+  .cfg-model-undo { padding: 5px 12px; font-size: 12px; }
+  .cfg-model-filter { min-width: 100%; max-width: none; padding: 6px 8px; font-size: 13px; }
+  .cfg-model-notice { font-size: 12px; }
+}
 
 /* 面板：头部固定 + 主体滚动。头部常驻，滚到底仍知道在编辑哪个模型。 */
 .cfg-model-editor-panel {

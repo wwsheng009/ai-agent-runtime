@@ -787,10 +787,12 @@
               </div>
               <div class="config-form-block">
                 <div class="cfg-label-row">
-                  <label class="cfg-label" for="cfg-model-filter">模型编辑器（providers.items.&lt;name&gt;.model_capabilities.&lt;model&gt;）</label>
-                  <input id="cfg-model-filter" class="cfg-model-filter" type="search" placeholder="过滤模型…" autocomplete="off" spellcheck="false">
+                  <div class="cfg-label">模型编辑器（providers.items.&lt;name&gt;.model_capabilities.&lt;model&gt;）</div>
+                  <input id="cfg-model-filter" class="cfg-model-filter" type="search" placeholder="过滤模型…" aria-label="过滤模型" autocomplete="off" spellcheck="false">
+                  <input id="cfg-model-add" class="cfg-model-filter" type="text" placeholder="＋ 添加模型 id（可粘贴多个，空格分隔）" aria-label="添加模型" autocomplete="off" spellcheck="false">
                   <span id="cfg-model-count" class="cfg-hint-inline"></span>
                 </div>
+                <p class="cfg-model-notice" id="cfg-model-notice" hidden></p>
                 <div class="cfg-hint">点击左侧模型名打开详细编辑面板：上下文窗口、最大输出、reasoning 档位与预算、自动压缩、输入模态、原生工具与端点契约。留空表示不写入（0 / false / 空数组表示显式清空）。</div>
                 <div class="cfg-model-editor">
                   <div id="cfg-model-list" class="cfg-model-list"><div class="config-empty">在上方填写支持模型后在此逐模型编辑</div></div>
