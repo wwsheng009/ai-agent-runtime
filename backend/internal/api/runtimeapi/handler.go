@@ -12291,6 +12291,11 @@ func (h *Handler) buildContextPack(ctx context.Context, session *chat.Session, p
 	if store := h.getTeamStore(); store != nil && (strings.TrimSpace(teamID) != "" || strings.TrimSpace(taskID) != "") {
 		builder.AddProvider(contextpack.NewTeamProvider(team.NewContextBuilder(store), 6))
 	}
+	// Phase 6 切片 4：知识层只读视图（仅 knowledge.mode=on；shadow 只保鲜索引、
+	// 绝不进 prompt；off 不装配——pack 与未装配时逐字节一致）。
+	if layer := h.contextPackKnowledgeLayer(); layer != nil {
+		builder.AddProvider(contextpack.NewKnowledgeProvider(layer))
+	}
 
 	pack, _ := builder.Build(ctx, &contextpack.Input{
 		Prompt:        prompt,
@@ -12330,6 +12335,19 @@ func (h *Handler) buildContextPack(ctx context.Context, session *chat.Session, p
 		}
 	}
 	return pack
+}
+
+// contextPackKnowledgeLayer 返回可注入 context pack 的知识层句柄：仅
+// knowledge.mode=on（shadow 只保鲜索引、绝不进 prompt；off / 未激活返回 nil）。
+func (h *Handler) contextPackKnowledgeLayer() *knowledge.Layer {
+	if h == nil || h.knowledgeActivation == nil {
+		return nil
+	}
+	layer := h.knowledgeActivation.Layer()
+	if layer == nil || layer.Mode() != knowledge.ModeOn {
+		return nil
+	}
+	return layer
 }
 
 func buildContextPackSessionSnapshot(session *chat.Session, maxMessages int) *contextpack.SessionSnapshot {

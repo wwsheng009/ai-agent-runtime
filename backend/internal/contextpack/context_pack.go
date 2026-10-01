@@ -234,6 +234,24 @@ func Reduce(pack map[string]interface{}) map[string]interface{} {
 		}
 	}
 
+	if knowledgePack, ok := pack["knowledge"].(map[string]interface{}); ok {
+		knowledgeSummary := map[string]interface{}{}
+		if count, ok := toInt(knowledgePack["count"]); ok {
+			knowledgeSummary["count"] = count
+		}
+		if reason, ok := knowledgePack["reason"].(string); ok && strings.TrimSpace(reason) != "" {
+			knowledgeSummary["reason"] = strings.TrimSpace(reason)
+		}
+		// digest 是 provider 侧有界渲染的 data block：**不做截断**——截断会留下
+		// 未闭合的块，破坏 03 §14.5 的包裹规则；超界由 provider 退化为计数块。
+		if digest, ok := knowledgePack["digest_block"].(string); ok && strings.TrimSpace(digest) != "" {
+			knowledgeSummary["digest"] = strings.TrimSpace(digest)
+		}
+		if len(knowledgeSummary) > 0 {
+			reduced["knowledge"] = knowledgeSummary
+		}
+	}
+
 	if warnings, ok := pack["_warnings"]; ok {
 		reduced["warnings"] = warnings
 	}

@@ -272,6 +272,26 @@ type CompileResult struct {
 // 编译内核
 // ---------------------------------------------------------------------------
 
+const (
+	// CompiledTierHot 是「高置信、无需验证」的直接复用条目（进入下一请求主承载）。
+	CompiledTierHot = "hot"
+	// CompiledTierWarm 是需验证读取 / 暂定 / 置信度未达 hot 阈值的条目。
+	CompiledTierWarm = "warm"
+	// CompiledTierHotConfidence 是 hot 阈值：与 Verify 读取阈值同口径（0.90）。
+	CompiledTierHotConfidence = 0.90
+)
+
+// CompiledItemTier 把**注入条目**映射到 hot/warm（04 §5 Phase 6 交付 2）。
+//
+// cold 只属于未注入条目（dropped：stale/低置信/超预算/被覆盖），不出现在
+// CompiledResult.Items 里；调用方用 dropped 计数承载 cold 一侧。
+func CompiledItemTier(item CompiledItem) string {
+	if item.Verify || item.Provisional || item.Confidence < CompiledTierHotConfidence {
+		return CompiledTierWarm
+	}
+	return CompiledTierHot
+}
+
 // DefaultCompileItemOverhead 是单条条目进入 prompt 的固定开销上界：data block
 // 块头（type/source/trust/version/ref/stale/reason）+ 块体脚手架 + 起止标签。
 //

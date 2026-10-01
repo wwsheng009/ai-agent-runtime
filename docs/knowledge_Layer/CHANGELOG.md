@@ -6,6 +6,29 @@
 
 ---
 
+## 2026-10-01 — Phase 6 切片 4：contextpack knowledge.Provider（只读视图）
+
+### Added
+
+- `contextpack/knowledge_provider.go`：只读知识层 provider（04 §5 文件落点）——
+  - 契约：不写库 / 不记录探索 / 不触发索引；Planner=nil、空或短查询、Degraded 计划、无注入条目一律 `(nil, nil)`（pack 与未装配时逐字节一致）；
+  - 结构化字段（items / dropped / tiers / stale_item_injected / tokens）供程序化消费与审计；Planner 错误经 Builder 变成 `_warnings`（可见不致命）；
+  - `digest_block`：`RenderDataBlock` 产出的 data block（≤600 rune；超界退化为计数块——**绝不给半个块**），供任何 prompt 路径安全取用；
+  - 预算 / 置信度下限与 contextmgr 同口径（`DefaultKnowledgePackBudget = 800`）。
+- `contextpack/context_pack.go`：`Reduce` 增加 knowledge 归约（count / reason / digest）；digest **不截断**（截断会留下未闭合块，破坏 03 §14.5 包裹规则）。
+- `knowledge/compiler.go`：tier 规则单一来源 `CompiledItemTier`（hot/warm + 0.90 阈值常量 `CompiledTierHotConfidence`）；contextmgr 的 `knowledgeTier` 改为委托（切片 3 代码收敛）。
+- `handler.go`：`buildContextPack` 在 `knowledge.mode=on` 时装配 provider；`contextPackKnowledgeLayer` 门控——shadow 只保鲜索引（ModeShadow 契约）、off / 未激活零装配。
+
+### Verified
+
+- `internal/contextpack` 全包（5 例新测试：跳过条件 / 只读视图与 digest / 降级与错误 / 预算与下限 / Reduce 保块）绿；runtimeapi 门控用例（on / shadow / off 三态）绿。
+
+### Notes
+
+- 发现 `internal/contextpack/contextpack/` 是**无人引用的重复副本**（与 `internal/contextpack` 同名同内容，全仓无 import）；本切片未改动，建议单独清理（避免后续误改副本）。
+
+---
+
 ## 2026-10-01 — Phase 6 切片 3：contextmgr 接线（编译 + data block + compile 缓存 + tier 映射）
 
 ### Changed

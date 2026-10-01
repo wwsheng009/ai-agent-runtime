@@ -128,9 +128,6 @@ type knowledgeInjectionStats struct {
 	VerifyTargets      []map[string]interface{}
 }
 
-// knowledgeTierHotConfidence 是 hot 档阈值：与 Verify 读取阈值同口径（0.90）。
-const knowledgeTierHotConfidence = 0.90
-
 // knowledgeVersionObserver 由 *knowledge.Layer 实现：提供当前工作区版本观测
 // （含 `#pendingN` 未稳定标记），用于 compile 层缓存键。
 type knowledgeVersionObserver interface {
@@ -385,17 +382,15 @@ func knowledgeItemMetadata(item knowledge.CompiledItem) map[string]interface{} {
 	}
 }
 
-// knowledgeTier 把编译条目映射到 hot/warm/cold（04 §5 Phase 6 交付 2）。
+// knowledgeTier 把编译条目映射到 hot/warm/cold（04 §5 Phase 6 交付 2）；
+// 口径单一来源在 knowledge.CompiledItemTier。
 //
 //   - hot：高置信且无需验证的直接复用项（进入下一请求的主承载）；
 //   - warm：需验证读取（Verify）/ 暂定（Provisional）/ 置信度未达 hot 阈值；
 //   - cold：未注入条目（stale/低置信/超预算/被覆盖），只留在可解释性记录里
 //     （由 dropped 计数与 knowledge_*_filtered 元数据承载）。
 func knowledgeTier(item knowledge.CompiledItem) string {
-	if item.Verify || item.Provisional || item.Confidence < knowledgeTierHotConfidence {
-		return "warm"
-	}
-	return "hot"
+	return knowledge.CompiledItemTier(item)
 }
 
 func knowledgeVerifyTarget(item knowledge.CompiledItem) map[string]interface{} {
