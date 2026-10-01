@@ -460,7 +460,11 @@ func buildChatWebScreenSnapshotWindowed(window chatWebMessageWindow) *chatDebugS
 		return snap
 	}
 	if session.Interaction != nil && session.Interaction.uiActor != nil {
-		cells := session.Interaction.uiActor.AppState().Transcript.Cells
+		// 只取 transcript cells，绝不能让快照路径深拷贝投递账本：
+		// AppState() 会克隆整个 HistoryCommitLedger（pprof 实测累计 89GB、
+		// 占全部分配的 8.8%，且每次都要在 actor 互斥量内复制整张账本）。
+		// DiagnosticState 保留 transcript/active/bottom，只丢弃账本。
+		cells := session.Interaction.uiActor.DiagnosticState().AppState.Transcript.Cells
 		if total := countTranscriptCellMessages(cells); total > 0 {
 			return snap.fillWindowedMessages(total, window, func(start, end int) []chatWebScreenMessage {
 				return transcriptFallbackMessagesRange(cells, start, end)
