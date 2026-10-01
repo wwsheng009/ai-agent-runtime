@@ -207,6 +207,13 @@ func (b *Bridge) AppendToResult(ctx context.Context, output string, paths []stri
 			continue
 		}
 		seen[resolved] = struct{}{}
+		// Deleted or moved-away paths (apply_patch delete/move) have nothing to
+		// diagnose: os.ReadFile would fail and turn a normal delete into an
+		// "LSP diagnostics unavailable: read file ..." note. Directories are not
+		// documents either. Skip both silently (no request, no note).
+		if info, statErr := os.Stat(resolved); statErr != nil || info.IsDir() {
+			continue
+		}
 		start := time.Now()
 		outcome := b.Diagnose(ctx, resolved)
 		if outcome.Degraded && !b.claimDegradeHint(outcome) {

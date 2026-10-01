@@ -249,6 +249,7 @@ LSP 的收益路径只有一条主链路 + 一个可选工具面：
 | O5 | 请求事件新增 `attempted_members`（多成员观测，仅 >1 落盘） | `observer_join_test` |
 | O6 | 空结果块 compact（默认）+ 修正字面 `\n`；配置 `diagnostics.emptyStyle` | `TestRenderDiagnosticsEmptyStyle` |
 | O7 | 分析侧消费新字段：新增 `lsp_cold_first_probe_ratio` 行、追加字节拆分与多成员明细；降级文案报告真实预算 | `TestColdProbeRowStates` / `TestColdProbeIgnoresUnclassifiedNoFresh` / `--selftest` |
+| O8 | 删除/移走路径跳过内联诊断（不再把正常 delete 变成 `read file` 降级提示；目录同样跳过） | `TestAppendToResultSkipsDeletedPaths` |
 
 效果待新窗口复算（预期：pyright/ts 112 次请求 → 0；fallback(attempted) 0.7215 → ~0.671；
 clean 空块 ~130B → ~60B；`cold_fast_fail` 可直接统计）。

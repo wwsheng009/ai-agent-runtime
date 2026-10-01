@@ -159,6 +159,7 @@ eventbridge 仅 >1 时落盘（单成员请求载荷保持现状）；白名单�
 | O5 | ✅ | `AttemptedMembers = len(outcome.Servers)`，仅 >1 落盘 | `observer_join_test` |
 | O6 | ✅ | `spec.go`（`emptyStyle` 默认 compact）、`format.go`、`bridge.go`；顺带把空块的字面 `\n` 修为真实换行 | `TestRenderDiagnosticsEmptyStyle`（compact/full 两态） |
 | O7 | ✅ | 分析侧消费新字段：Go 基线包 + Python 脚本同构新增 `lsp_cold_first_probe_ratio` 行、追加字节拆分、多成员明细；降级文案改报**实际预算**（原恒报配置 `wait_ms`） | `TestColdProbeRowStates` / `TestColdProbeIgnoresUnclassifiedNoFresh` / `--selftest` / `TestColdRetryAfterGraceTimeout` |
+| O8 | ✅ | 删除/移走的路径（apply_patch delete/move）不再进入内联诊断：文件已不存在时静默跳过，不再产生 `read file` 降级提示与无谓请求；目录同样跳过 | `TestAppendToResultSkipsDeletedPaths` |
 
 **验证记录**
 

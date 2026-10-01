@@ -596,6 +596,34 @@ func TestFalseCleanCounterCountsSupersededEmpty(t *testing.T) {
 	t.Fatalf("empty_accept_superseded = %d, want 1", bridge.Statuses()[0].EmptyAcceptSuperseded)
 }
 
+// TestAppendToResultSkipsDeletedPaths pins that a delete/move in a patch does
+// not turn into an "LSP diagnostics unavailable: read file" note: the path no
+// longer exists, so there is nothing to diagnose and no request is recorded.
+// Directories are skipped the same way (not documents).
+func TestAppendToResultSkipsDeletedPaths(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestFile(t, dir, "main.go", "package main\n")
+	fake := newFakeServer(t)
+	cfg := testConfig(t, func(c *Config) {})
+	recorder := &eventRecorder{}
+	bridge := NewBridgeWithOptions(cfg, dir, BridgeOptions{Dial: fake.dial(), Observer: recorder.observe})
+	ctx := context.Background()
+	t.Cleanup(func() { bridge.Stop(ctx) })
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if out := bridge.AppendToResult(ctx, "patched\n", []string{path}); out != "patched\n" {
+		t.Fatalf("deleted path must not append anything, got:\n%s", out)
+	}
+	if out := bridge.AppendToResult(ctx, "patched\n", []string{dir}); out != "patched\n" {
+		t.Fatalf("directory must not append anything, got:\n%s", out)
+	}
+	if events := recorder.snapshot(); len(events) != 0 {
+		t.Fatalf("skipped paths must not record an LSP request, got %d event(s)", len(events))
+	}
+}
+
 // TestColdRetryAfterGraceTimeout pins the long-cold-window behavior: once the
 // one-time grace is spent with nothing ever published, later edits fail fast
 // (cold_retry_ms) instead of re-paying the full budget on every edit, and the
