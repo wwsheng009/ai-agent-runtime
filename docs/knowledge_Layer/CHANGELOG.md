@@ -6,6 +6,27 @@
 
 ---
 
+## 2026-10-01 — Phase 5 切片 8 实施：交付 3 收尾（未稳定版本 token 不得参与复用判定）
+
+### Changed
+
+- `backend/internal/knowledge/confidence.go`：`CompareKnowledgeVersion` 新增未稳定口径——任一侧带 `#pendingN`（外部变更刚被发现、索引尚未追上）一律按 `VersionStatusUnknown` 处理，**即使两侧字符串相等**。理由：pending token 的含义是"索引落后于磁盘"，它不钉住任何内容状态；两侧都是 `#pending3` 并不表示"同一份知识"，只表示"当时都有 3 个待处理变更"。相等即放行会让不稳定快照被当作可复用知识（fail open）。
+- 新增导出 `knowledge.IsVersionUnstable(version)`：复用判定与注入前过滤共用同一口径。
+- `backend/internal/contextmgr/knowledge.go`：`knowledgeItemStale` 同步拒绝未稳定 token（注入前最后一道防线，Phase 6 的 `stale_item_injected=0` 口径）。
+
+### Verified
+
+- `knowledge/confidence_test.go`：版本比较表新增 3 例（current/stored/both pending → unknown），复用门表新增 1 例（两侧同为 pending → explore/不可用/Stale，reason=version_unknown）。
+- `contextmgr/knowledge_test.go`：`TestKnowledgeStaleAndFloorFiltering` 增加 `wv1#pending3` + reason=ok 的条目，stale 过滤计数 2 → 3（未稳定条目不得进 prompt）。
+- `internal/knowledge` + `internal/contextmgr` 全包通过；`go build ./...` OK。
+
+### Notes
+
+- 这是交付 3"版本向量参与复用判定"的最后一块：索引侧（代次化版本缓存 + 判定点校正 + `#pending` 标记）→ 判定侧（本切片 fail-closed）→ 注入侧（context item 过滤）三处口径一致。
+- Phase 5 实现侧至此收口；剩余仅"真实会话级 E2E 与端到端 p95（on-mode A/B）"测量轮。
+
+---
+
 ## 2026-10-01 — Phase 5 切片 7 实施：交付 1 第三类变更源（fsnotify 可选源）
 
 ### Changed

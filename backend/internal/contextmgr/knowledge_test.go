@@ -323,6 +323,9 @@ func TestKnowledgeStaleAndFloorFiltering(t *testing.T) {
 		Reuse: []knowledge.ReuseItem{
 			knowledgeTestReuseItem("no-version.go", "", knowledge.ReuseReasonOK, 0.95, false, false),
 			knowledgeTestReuseItem("mismatch.go", "wv-old", knowledge.ReuseReasonVersionMismatch, 0.95, false, false),
+			// 未稳定 token（#pendingN）：索引落后于磁盘时记录的知识不得进 prompt，
+			// 即使 reason 是 ok（Phase 5 交付 3 的注入前防线）。
+			knowledgeTestReuseItem("pending.go", "wv1#pending3", knowledge.ReuseReasonOK, 0.95, false, false),
 			knowledgeTestReuseItem("low-confidence.go", "wv1", knowledge.ReuseReasonProvisional, 0.40, true, true),
 			knowledgeTestReuseItem("valid.go", "wv1", knowledge.ReuseReasonOK, 0.85, false, false),
 		},
@@ -332,8 +335,8 @@ func TestKnowledgeStaleAndFloorFiltering(t *testing.T) {
 	manager.Strategy.ReuseConfidenceFloor = 0.50
 
 	result := manager.Build(context.Background(), knowledgeTestBuildInput("locate the runtime agent loop entry"))
-	if result.Metadata["knowledge_stale_filtered"] != 2 {
-		t.Fatalf("expected two stale-filtered items, metadata=%#v", result.Metadata)
+	if result.Metadata["knowledge_stale_filtered"] != 3 {
+		t.Fatalf("expected three stale-filtered items (no-version / mismatch / pending), metadata=%#v", result.Metadata)
 	}
 	if result.Metadata["knowledge_floor_filtered"] != 1 {
 		t.Fatalf("expected one floor-filtered item, metadata=%#v", result.Metadata)

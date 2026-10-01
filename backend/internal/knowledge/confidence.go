@@ -233,16 +233,33 @@ const (
 //
 // 版本 token 是 W1 WorkspaceVersion 的不透明字符串，只做去空白后的相等比较，
 // 不解析内部结构。
+//
+// 例外：**未稳定 token**（带 `#pendingN` 外部变更标记，Phase 5 交付 3）一律按
+// unknown 处理。理由：pending token 的含义是"索引落后于磁盘"，它不钉住任何内容
+// 状态——两侧都是 `#pending3` 并不表示"同一份知识"，只表示"当时都有 3 个待处理
+// 变更"。相等即放行会让不稳定快照被当作可复用知识（fail open），因此这里
+// fail closed：未稳定 → unknown → 探索。
 func CompareKnowledgeVersion(current, stored string) VersionStatus {
 	cur := strings.TrimSpace(current)
 	prev := strings.TrimSpace(stored)
 	if cur == "" || prev == "" {
 		return VersionStatusUnknown
 	}
+	if IsVersionUnstable(cur) || IsVersionUnstable(prev) {
+		return VersionStatusUnknown
+	}
 	if cur == prev {
 		return VersionStatusMatch
 	}
 	return VersionStatusMismatch
+}
+
+// IsVersionUnstable 报告版本 token 是否带"索引落后于磁盘"的未稳定标记。
+//
+// 供复用判定（本文件）与注入前过滤（contextmgr）共用：任何拿到版本 token 的
+// 决策点都应把未稳定 token 当作"不能作为可复用证据"（fail closed）。
+func IsVersionUnstable(version string) bool {
+	return strings.Contains(version, externalVersionPendingMarker)
 }
 
 // VersionObservation 是一次 WorkspaceVersion 采样。

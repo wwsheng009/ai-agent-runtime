@@ -286,9 +286,16 @@ func applyKnowledgeMetadata(metadata map[string]interface{}, metrics map[string]
 }
 
 // knowledgeItemStale 是注入前的二次 stale/version 过滤：无版本或版本不匹配/
-// 未知的条目一律不得进入 prompt（04 §4.4；Phase 6 stale_item_injected=0）。
+// 未知/未稳定的条目一律不得进入 prompt（04 §4.4；Phase 6 stale_item_injected=0）。
 func knowledgeItemStale(item knowledge.ReuseItem) bool {
-	if strings.TrimSpace(item.KnowledgeVersion) == "" {
+	version := strings.TrimSpace(item.KnowledgeVersion)
+	if version == "" {
+		return true
+	}
+	// 未稳定 token（带 #pendingN）：索引落后于磁盘时记录的知识不能作为可复用
+	// 证据（Phase 5 交付 3）。复用判定侧同口径（CompareKnowledgeVersion），
+	// 这里是注入前的最后一道防线。
+	if knowledge.IsVersionUnstable(version) {
 		return true
 	}
 	switch item.Reason {

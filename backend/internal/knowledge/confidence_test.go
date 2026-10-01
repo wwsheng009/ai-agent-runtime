@@ -252,6 +252,11 @@ func TestCompareKnowledgeVersion(t *testing.T) {
 		{"stored_empty", "wv1_abc", "", VersionStatusUnknown},
 		{"current_empty", "", "wv1_abc", VersionStatusUnknown},
 		{"both_empty", "", "", VersionStatusUnknown},
+		// 未稳定 token（#pendingN，Phase 5 交付 3）：含义是"索引落后于磁盘"，
+		// 不钉住内容状态——两侧相等也必须按 unknown 处理（fail closed）。
+		{"current_pending", "wv1#pending2", "wv1", VersionStatusUnknown},
+		{"stored_pending", "wv1", "wv1#pending2", VersionStatusUnknown},
+		{"both_pending_equal", "wv1#pending2", "wv1#pending2", VersionStatusUnknown},
 	}
 	for _, tc := range cases {
 		if got := CompareKnowledgeVersion(tc.current, tc.stored); got != tc.want {
@@ -342,6 +347,9 @@ func TestReuseGateVersionUnavailable(t *testing.T) {
 		{"mismatch", "wv1_new", "wv1_old", ReuseReasonVersionMismatch, VersionStatusMismatch},
 		{"stored_unknown", "wv1_new", "", ReuseReasonVersionUnknown, VersionStatusUnknown},
 		{"current_unknown", "", "wv1_old", ReuseReasonVersionUnknown, VersionStatusUnknown},
+		// 两侧同为未稳定 token：不得因"字符串相等"放行（Phase 5 交付 3 的
+		// fail-closed 口径——pending 不钉住内容状态）。
+		{"both_pending", "wv1#pending3", "wv1#pending3", ReuseReasonVersionUnknown, VersionStatusUnknown},
 	}
 	for _, tc := range cases {
 		got := EvaluateReuseGate(ReuseGateInput{
