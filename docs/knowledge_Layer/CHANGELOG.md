@@ -6,6 +6,30 @@
 
 ---
 
+## 2026-10-01 — Phase 6 切片 2：compile 层缓存（`cache_entries`）
+
+### Added
+
+- `knowledge/cache.go`：
+  - `CompileCacheStore` 窄接口（Get / Put / Delete / PurgeExpired 四方法；`*sqliteStore` 直接满足，未实现该接口的 Store 假体自动退化为「无缓存」）；
+  - `CompileCacheKey`：确定性 sha256 键 = workspace + 计划输入（task/session/query/scope/write）+ 编译策略（mode/budget/floor）+ **知识版本** + **编译器版本**（`CompileCacheVersion`；编译语义变化时递增即全量失效）；
+  - `CompileCache.Do`：命中直接返回（`CacheHit=true`）；未命中执行编译并回填；**任何缓存故障（读/写失败、载荷损坏、版本不符、过期、reader 角色只读）都降级为直算**（Degrade-Not-Fail）并计入 Errors；版本不符/过期条目尽力清理；
+  - `CompileCacheMetrics`：命中/未命中/错误计数 + 命中率 + 两侧时延 p50/p95（有界样本 512，最近邻取法）。
+- `knowledge/store_sqlite_cache.go`：`cache_entries` 的 SQLite 读写——`GetCacheEntry` / `PutCacheEntry`（ON CONFLICT upsert）/ `DeleteCacheEntry`（幂等）/ `PurgeExpiredCacheEntries`（NULL 过期 = 永不过期）；写路径走 `execWrite`，reader 角色硬失败 `ErrReadOnlyStore`。
+- `knowledge/cache_test.go`：8 例测试（键确定性与 11 维敏感 / 命中不重编译 / 四类故障降级 / 版本与过期守卫 / 分位口径 / 真库往返（upsert·删除幂等·过期清理·reader 只读拒绝）/ 门槛复现 / 校验边界）。
+
+### Verified
+
+- **门槛复现**（04 §5 Phase 6；真库 + 真编译，200 次）：`hits=199 misses=1`，**hit p95 = 0.54ms**（门槛 < 50ms）、**miss p95 = 1.07ms**（门槛 < 200ms）、hit_rate = 0.995（04 §7.2 要求 compile 层 ≥ 50%）。
+- `internal/knowledge` 全包 + `go build ./...` 全绿。
+
+### Notes
+
+- 缓存键含知识版本：Phase 5 的 `#pendingN` 未稳定 token 会自然改变键——索引落后期间不会复用旧载荷（与 fail-closed 口径一致）。
+- TTL 默认 15 分钟仅兜底回收（正确性由版本键承担）；`PurgeExpiredCacheEntries` 待切片 8 接入 GC 周期。
+
+---
+
 ## 2026-10-01 — Phase 6 切片 1：Context Compiler 编译语义内核（`knowledge/compiler.go`）
 
 ### Added

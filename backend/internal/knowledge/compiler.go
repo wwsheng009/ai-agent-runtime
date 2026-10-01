@@ -264,6 +264,8 @@ type CompileResult struct {
 	Dropped []DroppedItem `json:"dropped,omitempty"`
 	// Reason 是本次编译的稳定 token。
 	Reason string `json:"reason"`
+	// CacheHit 表示结果来自 compile 层缓存（切片 2）；编译内核恒为 false。
+	CacheHit bool `json:"cache_hit,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
