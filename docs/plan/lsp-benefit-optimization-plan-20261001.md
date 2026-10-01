@@ -181,6 +181,17 @@ eventbridge 仅 >1 时落盘（单成员请求载荷保持现状）；白名单�
 - **真机发现（已修为 O11）**：本次会话 3 条 no_fresh 中，满预算首探针的 `cold_fast_fail=false` 被
   `omitempty` 丢弃，基线读数为 `first 0 / repeat 4`——首探针分类结构性不可达；现 no_fresh 显式携带该字段。
 
+**真机会话验收 · 第二轮（2026-10-01，`session_20261001114340_ggxp8aAU` @ `127.0.0.1:54398`，含 O1–O11 的构建）**
+
+- O11：首探针 `degraded_no_fresh`（2500ms）显式携带 `cold_fast_fail=false`（旧构建此处缺字段）；
+  基线读数由 `first 0` 变为 `first 1 / repeat 4`（`lsp_cold_first_probe_ratio = 0.2000`）——分类端到端可用；
+- O10：暖连接上新建含未定义符号的 Go 文件，**首探针直接 `injected`**（1333ms，落在宽限预算 2.5s 内；
+  旧构建同场景 1.0s 先到期 → 白丢诊断）；`total_diag_count=1`、`new_diag_count=1`、`appended_diag_bytes=214`，
+  块文本 `error 5:9 [gopls] undefined: zzLSPProbeUndefined`；
+- O6：干净文件编辑 → `clean` 172ms、`appended_empty_bytes=111`、自闭合块；O8：两次删除探测文件零请求零提示；
+- O1 预检 `unavailable` 不变；`lsp_diag_new_ratio = 1.0000（new 2 / all 2）`；
+- 备注：进程启动后的第一条请求命中握手窗口 → `degraded_starting`（250ms，不消耗路径宽限），第二条请求才使用宽限。
+
 - `go test ./internal/lsp/... ./internal/runtimeobserve/... -count=1` → 全绿（lsp 24.2s）。
 - `go test -p 2 ./internal/tools/... ./internal/runtimeserver/... ./internal/webui/... -count=1` → exit 0。
 - `py -3 scripts/analyze-lsp-baseline.py --selftest` → OK（4 请求 / fallback 1/3 / closure 1.0）。
