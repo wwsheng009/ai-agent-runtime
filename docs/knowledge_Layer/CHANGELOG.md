@@ -6,6 +6,27 @@
 
 ---
 
+## 2026-10-01 — 收口轮（三）：ADR-0004 陈旧索引下的 code.* 工具面落地（§7.1 结案）
+
+### Added / Changed
+
+- **信封三字段**（ADR §4.2/D3）：`code.*` 全部结果携带 `snapshot_ts`（unix 秒，0=无快照）、`staleness_seconds`（reader 实际值、writer 恒 0）、`completeness ∈ {full, partial, fallback}`；无 `omitempty`（任意模式都必须出现），metadata 同步三字段；`truncated` → `partial`，`source=fallback` → `fallback`。
+- **分级注册**（ADR §4.1）：`CodeStaleFreshSeconds=60` / `CodeStaleMaxSeconds=900` 收敛为常量（D7）；`CodeTierForSnapshot`——writer 或逃生舱关闭分级 → `all`；reader 按 S 落 `all|definitions|none`（边界含；`snapshotTS<=0` 即从未成功索引 → `none`，fail closed）。staleness 来源 = `knowledge.Store.Stats.IndexedAt`（与 status.go 同源，向上取整防截断越档）；writer 判定复用 knowledge 写锁仲裁（新增只读 `knowledge.LockHolderPID`，不引入第二套判活口径）；`Stats` 读取失败按不可用处理（工具自身降级）。
+- **动态切换（不重启会话）**：`tools.Manager.ListTools()` 前按最新陈旧度重评估并 `Registry.Register/Unregister` 切换分组；执行期再判一次（注册与执行之间的陈旧度漂移窗口）——关系类在非 `all` 档、定义类在 `none` 档 → 显式 `fallback(stale_index)`，绝不返回可能静默漏报的索引结果（D1）。
+- **逃生舱**（ADR §4.4）：`knowledge.tools.stale_reader=off`（reader 也按 writer 策略注册）、`knowledge.tools.enabled=false`（索引照跑、工具面不注册）；配置校验与测试落地（`knowledge/config.go` + `config/manager.go`）。
+- **描述变体**（ADR §4.3）：中等陈旧档定义类工具的 description 追加陈旧提示；JSON schema 恒定（D4，schema 对比测试）。
+
+### Verified
+
+- 新增测试：三档注册 / 信封三字段（含 fallback 与 truncated 映射）/ 两逃生舱 / 描述变体 / schema 恒定 / 动态切换 / 边界（60s、900s、无快照）；`go build ./...` 与 `./internal/tools/ ./internal/toolkit/tools/ ./internal/config/ ./internal/knowledge/` 全绿（子代理 worktree + 主仓集成两轮）。
+
+### Notes
+
+- **偏差登记**：① ADR 证据 1 假设的 `RegisterGroup` 不存在（`apply_patch_test.go` 里只是字符串夹具），改为复用 `tools/manager.go` 既有条件注册 + `Registry.Register/Unregister`；② ADR §4.1 的"heartbeat 变化后推送切换"未做事件推送，改为 `ListTools` 惰性重评估 + 执行期硬守卫（语义等价：切换在下一个工具面读取点生效）；③ `code_navigate` 含 references 方向，按**关系类**保守处理（中等陈旧不注册）。
+- 集成说明：主仓 `tools/manager.go` 另有并行会话未提交改动（rg 别名），集成时保留其工作树改动，提交仅含 ADR-0004 变更。
+
+---
+
 ## 2026-10-01 — 收口轮（续）：跨任务探索候选加权检索 + 限定名归一化（§6.3 结案）
 
 ### Changed

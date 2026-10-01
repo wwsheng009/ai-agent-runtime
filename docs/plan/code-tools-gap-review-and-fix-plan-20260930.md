@@ -22,6 +22,7 @@
 2. **ADR-0004「陈旧索引分级」整体未落地（走查）**
    - 无 staleness/snapshot/completeness 字段（`code_common.go:108-120`）；注册仅单一 `code_tools off|on`（`knowledge/config.go:28-33`、`manager.go:445-448`）；无描述追加、无 `knowledge.tools.stale_reader` 逃生舱；`RegisterGroup` 不存在。
    - `06` Phase 3 登记注记与 CHANGELOG 未登记该缺口。
+   - **2026-10-01 结案**：信封三字段 + 三档分级注册 + 两逃生舱 + 描述变体全部落地（`ListTools` 惰性重评估 + 执行期硬守卫；`RegisterGroup` 证据有误，改用 `Registry.Register/Unregister`）。见 CHANGELOG「收口轮（三）」。
 3. **shadow 档语义泄漏（走查）**
    - 唯一 `ModeShadow` 判断在 `code_search.go:101`；`code_inspect` / `code_navigate` / `code_references` / `code_callers` / `view --symbol` 在 `mode=shadow + code_tools=on` 时仍返回 `source=index`，污染灰度对比。
 4. **引用精确率（实测）**：`kind=call` 结果混入 `t.Fatalf("EvaluatePlan() = ...")` 字符串与接口方法声明行；同名符号（如 `Plan`）跨符号混合，"排除同名噪音"被高估。
@@ -108,7 +109,7 @@
 
 仍未落地（后续轮次）：
 
-1. **ADR-0004 陈旧度分级**：信封 `snapshot_ts` / `staleness_seconds` / `completeness`、按陈旧度分级注册、description 追加、`knowledge.tools.stale_reader` 逃生舱、`RegisterGroup` 机制。
+1. ~~**ADR-0004 陈旧度分级**~~ **（2026-10-01 结案）**：信封 `snapshot_ts` / `staleness_seconds` / `completeness`、按陈旧度分级注册（writer 全开 / reader ≤60s 全开 / ≤900s 仅定义类 / 过旧不注册）、description 追加、`knowledge.tools.stale_reader=off` + `knowledge.tools.enabled=false` 逃生舱全部落地；`RegisterGroup` 不存在（ADR 证据 1 有误），复用既有条件注册 + `Registry.Register/Unregister`，`ListTools` 惰性重评估 + 执行期硬守卫替代事件推送。见 CHANGELOG「收口轮（三）」。
 2. ~~**引用索引漏报根因**~~ **（2026-10-01 结案）**：现场为陈旧索引快照（当前代码/全新索引/增量重写/生产库均绑定正常）；索引侧修复 = `builtin/4` 接口方法声明守卫（`planner.go:136/142` 的伪调用点）+ `AdapterVersion` 升级强制全量重建；`Fatalf` 字符串误报已于 Phase 4 `insideStringOrComment` 修复。见 CHANGELOG「收口轮」。
 3. ~~**FTS exact-name 加权与限定名（`knowledge.Plan`）查询支持**~~ **（2026-10-01 结案）**：跨任务路径改加权检索（exact > prefix > contains）+ 限定名/路径符号归一化；未新建 FTS 表（LIKE + CASE + `escapeLike`），`EvaluatePlan` 判定语义不变。见 CHANGELOG「收口轮（续）」。
 4. **`code_inspect` 的 view 去重提示**（`unchanged: ...`）作为 `content` 返回的语义（本轮未处理）。
