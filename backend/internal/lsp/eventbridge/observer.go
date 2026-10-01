@@ -54,6 +54,13 @@ func Observer(bus runtimeevents.Publisher, opts Options) runtimelsp.Observer {
 				payload["total_diag_count"] = event.TotalDiagCount
 				payload["new_diag_count"] = event.NewDiagCount
 			}
+			// 冷探针分类标记（O11）：no_fresh 事件必须显式携带 cold_fast_fail
+			// （true=重复探针，false=首探针）。缺省 omitempty 会把 false 丢掉，
+			// 离线基线只能看到 true，首探针样本与旧构建的缺字段样本无法区分
+			// （实测：lsp_cold_first_probe_ratio 结构性恒为 first 0）。
+			if event.ColdFastFail || event.Outcome == "degraded_no_fresh" {
+				payload["cold_fast_fail"] = event.ColdFastFail
+			}
 			// Join keys (plan §3.1): request → tool call / turn. The raw path
 			// is projected to path_fingerprint by the observe plane and never
 			// persisted as text.

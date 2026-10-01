@@ -63,6 +63,36 @@ func TestObserverProjectsRequestWithSession(t *testing.T) {
 	}
 }
 
+// TestObserverEmitsColdFastFailForNoFresh pins O11: a no_fresh request must
+// carry cold_fast_fail explicitly (false = first probe) so the offline
+// baseline can classify it; dropping false made every first probe
+// indistinguishable from old-build samples without the field, which pinned
+// lsp_cold_first_probe_ratio at "first 0".
+func TestObserverEmitsColdFastFailForNoFresh(t *testing.T) {
+	pub := &recordingPublisher{}
+	observer := Observer(pub, Options{FallbackSessionID: "s-1"})
+	observer(runtimelsp.Event{
+		Kind:       runtimelsp.EventRequest,
+		Trigger:    "inline",
+		Outcome:    "degraded_no_fresh",
+		Server:     "gopls",
+		DurationMS: 1000,
+	})
+	if len(pub.events) != 1 {
+		t.Fatalf("published = %d, want 1", len(pub.events))
+	}
+	if value, ok := pub.events[0].Payload["cold_fast_fail"]; !ok || value != false {
+		t.Fatalf("no_fresh payload must carry cold_fast_fail=false: %#v", pub.events[0].Payload)
+	}
+	// Non-cold outcomes stay byte-identical: no key when the request neither
+	// fast-failed nor needs classification.
+	pub.events = nil
+	observer(runtimelsp.Event{Kind: runtimelsp.EventRequest, Outcome: "injected", Server: "gopls"})
+	if _, ok := pub.events[0].Payload["cold_fast_fail"]; ok {
+		t.Fatalf("injected payload must not grow a cold_fast_fail key: %#v", pub.events[0].Payload)
+	}
+}
+
 func TestObserverFallbackLifecycleAndNilBus(t *testing.T) {
 	if Observer(nil, Options{}) != nil {
 		t.Fatal("nil publisher must yield nil observer")

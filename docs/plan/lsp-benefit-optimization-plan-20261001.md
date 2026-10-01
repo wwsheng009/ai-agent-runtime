@@ -162,6 +162,7 @@ eventbridge 仅 >1 时落盘（单成员请求载荷保持现状）；白名单�
 | O8 | ✅ | 删除/移走的路径（apply_patch delete/move）不再进入内联诊断：文件已不存在时静默跳过，不再产生 `read file` 降级提示与无谓请求；目录同样跳过 | `TestAppendToResultSkipsDeletedPaths` |
 | O9 | ✅ | 请求事件新增 `total_diag_count`/`new_diag_count`（scope 过滤前全量与其中新增条数，仅全量>0 时落盘）：解锁 A6（scope 默认值）决策；基线新增 `lsp_diag_new_ratio` 行与明细 | `TestDiagnoseCountsNewVsTotalDiagnostics` / eventbridge 载荷断言 / baseline fixture / `--selftest` |
 | O10 | ✅ | 冷启动宽限改为**按路径**授予（去掉客户端级 `everPublished` 门）：暖连接上新文件的首次分析不再撞 1s 预算；重复探针仍由路径级冷快速失败兜底 | `TestColdGraceCoversNewPathOnWarmClient`（暖机后新路径 700ms 发布被宽限覆盖） |
+| O11 | ✅ | no_fresh 事件显式携带 `cold_fast_fail`（false=首探针）：原 `omitempty` 丢掉 false，基线只能看到 true → `lsp_cold_first_probe_ratio` 结构性恒为 `first 0`；非 no_fresh 事件字节不变 | `TestObserverEmitsColdFastFailForNoFresh` |
 
 **验证记录**
 
@@ -177,6 +178,8 @@ eventbridge 仅 >1 时落盘（单成员请求载荷保持现状）；白名单�
 - 预检（O1）：typescript/pyright/clangd 在 `/web/api/lsp/status` 直接 `unavailable`（不产生请求）；
 - **真机发现（已修为 O10）**：暖连接上新建文件的首次分析在 1.71s 发布，1.0s 预算先到期 → 该轮白丢诊断；
   冷宽限当时被客户端级 `everPublished` 门挡住。
+- **真机发现（已修为 O11）**：本次会话 3 条 no_fresh 中，满预算首探针的 `cold_fast_fail=false` 被
+  `omitempty` 丢弃，基线读数为 `first 0 / repeat 4`——首探针分类结构性不可达；现 no_fresh 显式携带该字段。
 
 - `go test ./internal/lsp/... ./internal/runtimeobserve/... -count=1` → 全绿（lsp 24.2s）。
 - `go test -p 2 ./internal/tools/... ./internal/runtimeserver/... ./internal/webui/... -count=1` → exit 0。
