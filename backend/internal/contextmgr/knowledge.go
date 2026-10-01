@@ -282,6 +282,10 @@ func (m *Manager) buildKnowledgeMessage(ctx context.Context, input BuildInput) (
 	message.Metadata["knowledge_mode"] = stats.Mode
 	message.Metadata["knowledge_count"] = stats.InjectedCount
 	message.Metadata["knowledge_items"] = stats.Items
+	if stats.Version != "" {
+		// 供压缩痕迹（knowledgeCompactionTrace）与转录审计使用。
+		message.Metadata["knowledge_version"] = stats.Version
+	}
 	if stats.CacheHit {
 		message.Metadata["knowledge_cache_hit"] = true
 	}

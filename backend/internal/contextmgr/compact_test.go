@@ -60,3 +60,27 @@ func TestCompactMessagesRetainsLatestAndCriticalHandoffInfo(t *testing.T) {
 	require.Contains(t, content, "Remaining work:")
 	require.Contains(t, content, "verify compact retention")
 }
+
+// Phase 6 切片 6：knowledge 块的压缩模板——只留计数/版本痕迹，绝不携带正文。
+func TestCompactMessagesKnowledgeTraceWithoutBody(t *testing.T) {
+	body := "<data source=\"knowledge\" type=\"exploration\">\nSECRET-BODY-MARKER: stale candidate body\n</data>"
+	knowledge := types.NewAssistantMessage(body)
+	knowledge.Metadata["context_stage"] = knowledgeStage
+	knowledge.Metadata["knowledge_count"] = 3
+	knowledge.Metadata["knowledge_mode"] = "broad"
+	knowledge.Metadata["knowledge_version"] = "wv1"
+
+	message := compactMessages([]types.Message{
+		*types.NewUserMessage("please continue the task"),
+		*knowledge,
+	})
+	require.NotNil(t, message)
+	content := message.Content
+
+	require.NotContains(t, content, "SECRET-BODY-MARKER", "摘要不得携带 knowledge 正文（版本漂移后即 stale 注入）")
+	require.NotContains(t, content, "Durable session context:", "knowledge 不是 durable 阶段，不得跨压缩携带")
+	require.Contains(t, content, "Knowledge injections (re-derived each turn; body not carried):")
+	require.Contains(t, content, "3 items")
+	require.Contains(t, content, "mode=broad")
+	require.Contains(t, content, "version=wv1")
+}

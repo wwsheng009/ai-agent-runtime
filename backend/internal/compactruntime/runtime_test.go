@@ -1896,3 +1896,70 @@ func cloneLLMRequest(req *llm.LLMRequest) *llm.LLMRequest {
 	}
 	return &cloned
 }
+
+// Phase 6 切片 6：钉住 knowledge 阶段**不是** durable 压缩上下文——把它当
+// durable 跨压缩携带，会让旧知识正文在版本漂移后留在 prompt 里（stale 注入）。
+func TestKnowledgeStageIsNotDurableCompactContext(t *testing.T) {
+	knowledge := types.NewAssistantMessage("<data source=\"knowledge\">old body</data>")
+	knowledge.Metadata["context_stage"] = "knowledge"
+	goal := types.NewAssistantMessage("Persistent goal: keep working.")
+	goal.Metadata["context_stage"] = "active_goal"
+
+	selected := selectCompactionDurableContext([]types.Message{*goal, *knowledge}, nil, 1000)
+	for _, message := range selected {
+		if message.Metadata.GetString("context_stage", "") == "knowledge" {
+			t.Fatalf("knowledge 不得作为 durable 上下文跨压缩携带：%#v", message.Metadata)
+		}
+	}
+	if !isDurableCompactStage("active_goal") {
+		t.Fatal("durable 集合口径被改动：active_goal 必须仍是 durable")
+	}
+	if isDurableCompactStage("knowledge") {
+		t.Fatal("durable 集合口径被改动：knowledge 不得是 durable（见 local.go 注释）")
+	}
+}
+
+// Phase 6 切片 6：瞬态注入（knowledge）不得进入摘要输入、也不得作为
+// retention 单元跨压缩保留；durable 阶段与压缩投影不受影响。
+func TestTransientKnowledgeStageExcludedFromSummaryAndRetention(t *testing.T) {
+	knowledge := types.NewAssistantMessage("<data source=\"knowledge\">SECRET-KNOWLEDGE-BODY</data>")
+	knowledge.Metadata["context_stage"] = "knowledge"
+	recall := types.NewAssistantMessage("transient recall SECRET-RECALL-BODY")
+	recall.Metadata["context_stage"] = "recall"
+	goal := types.NewDeveloperMessage("Persistent goal: keep working.")
+	goal.Metadata["context_stage"] = "active_goal"
+	priorSummary := types.NewAssistantMessage("Prior compacted context: keep this.")
+	priorSummary.Metadata["context_stage"] = "compaction"
+
+	summaryInput := compactionSummaryHistory(PhasePreTurn, []types.Message{*goal, *priorSummary, *knowledge, *recall})
+	foundGoal, foundPrior := false, false
+	for _, message := range summaryInput {
+		if strings.Contains(message.Content, "SECRET-KNOWLEDGE-BODY") || strings.Contains(message.Content, "SECRET-RECALL-BODY") {
+			t.Fatalf("瞬态注入正文不得进入摘要输入：%s", message.Content)
+		}
+		if strings.Contains(message.Content, "Persistent goal") {
+			foundGoal = true
+		}
+		if strings.Contains(message.Content, "Prior compacted context") {
+			foundPrior = true
+		}
+	}
+	if !foundGoal || !foundPrior {
+		t.Fatalf("durable 阶段与压缩投影必须仍在摘要输入里（goal=%v prior=%v）", foundGoal, foundPrior)
+	}
+
+	units := buildLocalRetentionUnits([]types.Message{*goal, *knowledge, *recall})
+	for _, unit := range units {
+		for _, message := range unit {
+			if strings.Contains(message.Content, "SECRET-KNOWLEDGE-BODY") || strings.Contains(message.Content, "SECRET-RECALL-BODY") {
+				t.Fatalf("瞬态注入不得作为 retention 单元保留：%s", message.Content)
+			}
+		}
+	}
+	if !isTransientCompactStage("knowledge") || !isTransientCompactStage("recall") {
+		t.Fatal("瞬态 stage 判定口径被改动")
+	}
+	if isTransientCompactStage("compaction") || isTransientCompactStage("active_goal") || isTransientCompactStage("") {
+		t.Fatal("durable/压缩投影/普通消息不得被判为瞬态")
+	}
+}

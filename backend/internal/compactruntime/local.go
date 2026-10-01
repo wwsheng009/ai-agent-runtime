@@ -797,18 +797,27 @@ func buildLocalCompactionRequest(systemMessages, history []types.Message) []type
 }
 
 func compactionSummaryHistory(phase string, history []types.Message) []types.Message {
-	if normalizedPhase(phase) != PhaseMidTurn {
-		return cloneMessages(history)
-	}
+	// 瞬态注入（knowledge / recall / workspace 等逐轮重生成的 stage）不得进入
+	// 摘要输入：旧正文被写进摘要后会跨压缩长期驻留，成为 stale 注入向量。
 	filtered := make([]types.Message, 0, len(history))
 	for _, message := range history {
-		stage := strings.TrimSpace(message.Metadata.GetString("context_stage", ""))
-		if strings.EqualFold(strings.TrimSpace(message.Role), "user") && stage != "" && !strings.EqualFold(stage, "compaction") {
+		if isTransientCompactStage(message.Metadata.GetString("context_stage", "")) {
 			continue
 		}
 		filtered = append(filtered, *message.Clone())
 	}
-	return filtered
+	if normalizedPhase(phase) != PhaseMidTurn {
+		return filtered
+	}
+	midTurn := make([]types.Message, 0, len(filtered))
+	for _, message := range filtered {
+		stage := strings.TrimSpace(message.Metadata.GetString("context_stage", ""))
+		if strings.EqualFold(strings.TrimSpace(message.Role), "user") && stage != "" && !strings.EqualFold(stage, "compaction") {
+			continue
+		}
+		midTurn = append(midTurn, message)
+	}
+	return midTurn
 }
 
 type localRetentionUnit []types.Message
@@ -820,6 +829,11 @@ func buildLocalRetentionUnits(messages []types.Message) []localRetentionUnit {
 	for index := 0; index < len(messages); {
 		message := messages[index]
 		if isCompactionMessage(message) {
+			index++
+			continue
+		}
+		if isTransientCompactStage(message.Metadata.GetString("context_stage", "")) {
+			// 瞬态注入不得作为 retention 单元跨压缩保留（见 isDurableCompactStage）。
 			index++
 			continue
 		}
@@ -866,6 +880,17 @@ func buildLocalRetentionUnits(messages []types.Message) []localRetentionUnit {
 
 func isCompactionMessage(message types.Message) bool {
 	return strings.EqualFold(strings.TrimSpace(message.Metadata.GetString("context_stage", "")), "compaction")
+}
+
+// isTransientCompactStage 报告 stage 是否是“逐轮重生成”的瞬态注入：既不是
+// durable 世界状态，也不是压缩投影本身。这类消息不得进入摘要输入、也不得作为
+// retention 单元跨压缩保留（knowledge / recall / workspace 等）。
+func isTransientCompactStage(stage string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(stage))
+	if normalized == "" || normalized == "compaction" {
+		return false
+	}
+	return !isDurableCompactStage(normalized)
 }
 
 func selectCompactionRecentMessages(messages []types.Message, keepRecent int, counter TokenCounter, maxTokens int) []types.Message {
@@ -1141,6 +1166,10 @@ func toolCallNamesByID(history []types.Message) map[string]string {
 }
 
 func isDurableCompactStage(stage string) bool {
+	// 注意：**不得**把 "knowledge" 加进本集合。knowledge 块按知识版本逐轮重生成；
+	// 当作 durable 跨压缩携带会让旧正文在版本漂移后留在 prompt 里，成为 stale
+	// 注入向量（Phase 6 硬门槛 stale_item_injected=0）。压缩摘要只保留
+	// contextmgr 侧生成的计数/版本痕迹（contextmgr/knowledgeCompactionTrace）。
 	switch strings.ToLower(strings.TrimSpace(stage)) {
 	case "active_goal", "todo_state", "team", "fact_ledger", "project_memory", "observation":
 		return true

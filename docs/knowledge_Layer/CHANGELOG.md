@@ -6,6 +6,29 @@
 
 ---
 
+## 2026-10-01 — Phase 6 切片 6：Observation Compressor 与 compactruntime 合并（knowledge 压缩模板）
+
+### Changed
+
+- `compactruntime/local.go`：
+  - 新增 `isTransientCompactStage`（staged ∧ ¬durable ∧ ¬compaction）：knowledge / recall / workspace 这类**逐轮重生成**的瞬态注入，**不得**进入摘要输入、**不得**作为 retention 单元跨压缩保留——旧正文被写进摘要或原样留存后，会在知识版本漂移后成为 **stale 注入向量**（Phase 6 硬门槛 `stale_item_injected=0`）；
+  - `compactionSummaryHistory` 两个 phase 都先剔除瞬态注入（保留 durable 阶段与 `compaction` 投影；mid-turn 原有的 staged-user 规则不变）；
+  - `buildLocalRetentionUnits` 跳过瞬态注入（与既有的 compaction 投影跳过同构）；
+  - `isDurableCompactStage` 增**禁止事项注释**：不得把 `knowledge` 加进 durable 集合（写明原因与替代方案）。
+- `contextmgr/compact.go`（确定性摘要回退路径）：新增 **knowledge 压缩模板**——`knowledge` 阶段消息只产出一行有界痕迹（`N items / mode / version`，预算 400、最多 2 条），**绝不携带注入正文**；摘要中单列 "Knowledge injections (re-derived each turn; body not carried)" 小节。`isDurablePromptStage` 同步加禁止事项注释。
+- `contextmgr/knowledge.go`：注入消息 metadata 增 `knowledge_version`（供压缩痕迹与转录审计）。
+- 未新增压缩器：全部复用 `compactruntime` / `contextmgr` 既有压缩机制（04 §5 交付 3 / 06 §5.3）。
+
+### Verified
+
+- `compactruntime` 全包（2 例新测试：knowledge 非 durable 集合口径钉住；瞬态注入不进摘要输入/不进 retention 单元，durable 与压缩投影不受影响）+ `contextmgr` 全包（1 例新测试：摘要含计数/版本痕迹、不含正文、不进 durable 小节）绿。
+
+### Notes
+
+- **接受的行为取舍**：mid-turn 压缩后，本轮注入的 knowledge 块会从工作历史移除（不跨压缩携带），模型在本轮剩余部分依赖摘要痕迹；下一次 build 会按当前版本重新注入。这是"正确性优先于连续性"的选择——携带未重新校验的旧知识块会直接违反 `stale_item_injected=0`。
+
+---
+
 ## 2026-10-01 — Phase 6 切片 5：context_snapshots / context_items 可解释性落库
 
 ### Added

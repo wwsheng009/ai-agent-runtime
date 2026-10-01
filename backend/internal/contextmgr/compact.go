@@ -32,6 +32,7 @@ func compactMessagesWithContinuation(messages []types.Message, continued bool) *
 		remainingBudget    = 1000
 		durableBudget      = 1400
 		priorSummaryBudget = 2400
+		knowledgeBudget    = 400
 	)
 
 	userItems := make([]string, 0, 12)
@@ -44,6 +45,7 @@ func compactMessagesWithContinuation(messages []types.Message, continued bool) *
 	remainingItems := make([]string, 0, 10)
 	durableItems := make([]string, 0, 8)
 	priorSummaryItems := make([]string, 0, 4)
+	knowledgeItems := make([]string, 0, 4)
 
 	for _, message := range messages {
 		content := strings.TrimSpace(message.Content)
@@ -59,6 +61,15 @@ func compactMessagesWithContinuation(messages []types.Message, continued bool) *
 				durableItems = appendWithinBudgetLatest(durableItems, durablePromptStageLabel(stage)+": "+summarizeLine(content, 280), 6, durableBudget)
 				constraintItems = appendManyWithinBudgetLatest(constraintItems, extractConstraintHints(content), 8, constraintBudget)
 				remainingItems = appendManyWithinBudgetLatest(remainingItems, extractRemainingHints(content), 8, remainingBudget)
+			}
+			continue
+		}
+		if stage == knowledgeStage {
+			// Phase 6 切片 6：knowledge 块**不进摘要正文**（正文按知识版本逐轮
+			// 重生成；把旧正文带进摘要会在版本漂移后变成 stale 注入，破坏
+			// stale_item_injected=0）。只留一行有界审计痕迹。
+			if trace := knowledgeCompactionTrace(message.Metadata); trace != "" {
+				knowledgeItems = appendWithinBudgetLatest(knowledgeItems, trace, 2, knowledgeBudget)
 			}
 			continue
 		}
@@ -131,6 +142,12 @@ func compactMessagesWithContinuation(messages []types.Message, continued bool) *
 	if len(durableItems) > 0 {
 		lines = append(lines, "Durable session context:")
 		for _, item := range durableItems {
+			lines = append(lines, "- "+item)
+		}
+	}
+	if len(knowledgeItems) > 0 {
+		lines = append(lines, "Knowledge injections (re-derived each turn; body not carried):")
+		for _, item := range knowledgeItems {
 			lines = append(lines, "- "+item)
 		}
 	}
@@ -343,12 +360,41 @@ func appendManyWithinBudgetLatest(items []string, more []string, maxItems, maxRu
 }
 
 func isDurablePromptStage(stage string) bool {
+	// 注意：**不得**把 "knowledge" 加进本集合。knowledge 块按知识版本逐轮重生成；
+	// 当作 durable 跨压缩携带会让旧正文在版本漂移后留在 prompt 里，成为
+	// stale 注入向量（Phase 6 硬门槛 stale_item_injected=0）。摘要只保留
+	// knowledgeCompactionTrace 生成的计数/版本痕迹。
 	switch strings.ToLower(strings.TrimSpace(stage)) {
 	case "active_goal", "todo_state", "team", "fact_ledger", "project_memory", "observation":
 		return true
 	default:
 		return false
 	}
+}
+
+// knowledgeCompactionTrace 生成 knowledge 阶段消息的压缩痕迹：只含计数/模式/
+// 版本，**绝不含注入正文**（正文按版本逐轮重生成）。
+func knowledgeCompactionTrace(metadata types.Metadata) string {
+	if metadata == nil {
+		return ""
+	}
+	count := metadata.GetInt("knowledge_count", 0)
+	mode := metadata.GetString("knowledge_mode", "")
+	version := metadata.GetString("knowledge_version", "")
+	if count <= 0 && mode == "" && version == "" {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if count > 0 {
+		parts = append(parts, fmt.Sprintf("%d items", count))
+	}
+	if mode != "" {
+		parts = append(parts, "mode="+mode)
+	}
+	if version != "" {
+		parts = append(parts, "version="+version)
+	}
+	return "knowledge injection (" + strings.Join(parts, ", ") + ") — re-derived each turn, body not carried"
 }
 
 func durablePromptStageLabel(stage string) string {
