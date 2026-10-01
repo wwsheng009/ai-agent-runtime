@@ -6,6 +6,25 @@
 
 ---
 
+## 2026-10-01 — 收口轮（六）：跨任务（per-workspace）复用可达性修复 + M5 测量阻塞点定位
+
+### Changed
+
+- `knowledge/planner.go`：`storePlanner.Plan` 在**会话/任务工作集无可复用项**时回退到跨任务检索（04 §4.4 第三条路径 + C8「per-task 写入、per-workspace 复用」），按跨任务阈值评估（≥0.90 直接复用 / 0.50–0.90 待验证 + 强制验证）；失败/无命中保留原判定（Degrade-Not-Fail），会话命中时不改变既有语义（不多打一次 store）。
+- 既有契约测试随新语义更新（`TestPlannerLookupShape`：首次查询形状不变 + 追加一次回退查询）；`fakePlanReader` 增加查询序列记录（additive）。
+
+### Verified
+
+- 5 例新测试（回退命中 / 会话命中不触发 / 低于硬下限保留原判定 / 回退失败静默 / 真实 store 端到端：旧会话记忆被新会话召回）+ `knowledge` 包 planner 用例全绿。
+- 真机（新二进制，`%TEMP%\kb_closeout_e2e\ws`）：**全新会话** + 含路径查询（`internal/knowledge/planner.go …`）→ `context_snapshots` 新增 `injected=1, mode=signals, stale_filtered=0`（跨任务复用注入）；对照组：自然语言查询（目录前缀 + 符号名 + 中文）→ **零注入**。
+
+### Notes（M5 测量阻塞点，登记）
+
+- 跨任务回退的实际命中取决于 `explorationLookupKeys` 的键提取：查询为**纯路径/限定名**时可命中（exact > prefix > contains），但"目录前缀 + 符号名 + 中文"的典型 NL 任务键退化为无意义尾段（如"中查找"）→ 命中 ≈ 0；会话内复用（会话工作集，含 query 哈希节点）不受影响。
+- 结论：§7.2 的"上下文 token / 任务 ↓ ≥ 25%"（真实 NL 任务集 A/B）在当前键提取下**仍不可测**——需先扩展键提取（或按 Phase 7 走 FTS/语义检索）再跑测量轮；本轮已把任务集采样（82 条真实任务）、筛选口径与 A/B 工作区（`%TEMP%\p6_ab\ws`，4127 文件，索引就绪）准备好，供下一轮直接复用。
+
+---
+
 ## 2026-10-01 — 收口轮（五）：知识层"不可用"状态面统一 + `knowledge migrate`（P0 现场收尾）
 
 ### Changed

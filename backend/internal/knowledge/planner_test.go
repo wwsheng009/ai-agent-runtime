@@ -268,11 +268,13 @@ type fakePlanReader struct {
 	block     bool
 	calls     int
 	lastQuery ExplorationNodeQuery
+	queries   []ExplorationNodeQuery
 }
 
 func (f *fakePlanReader) LookupExplorationNodes(ctx context.Context, q ExplorationNodeQuery) ([]ExplorationNode, error) {
 	f.calls++
 	f.lastQuery = q
+	f.queries = append(f.queries, q)
 	if f.block {
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -452,8 +454,16 @@ func TestPlannerLookupShape(t *testing.T) {
 	if _, err := planner.Plan(ctx, in); err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	if reader.lastQuery.WorkspaceID != "ws-1" || reader.lastQuery.TaskID != "task-1" || reader.lastQuery.SessionID != "" || reader.lastQuery.Target != "" {
-		t.Fatalf("task-scope lookup = %+v, want workspace/task work set without target filter", reader.lastQuery)
+	// 新语义（per-workspace 复用）：任务工作集无候选时追加一次跨任务回退查询；
+	// 首次查询形状保持不变。
+	if reader.calls != 2 {
+		t.Fatalf("reader calls = %d, want task lookup + cross-task fallback", reader.calls)
+	}
+	if first := reader.queries[0]; first.WorkspaceID != "ws-1" || first.TaskID != "task-1" || first.SessionID != "" || first.Target != "" {
+		t.Fatalf("task-scope lookup = %+v, want workspace/task work set without target filter", first)
+	}
+	if fallback := reader.queries[1]; fallback.TaskID != "" || fallback.SessionID != "" || fallback.Target != in.Target {
+		t.Fatalf("cross-task fallback lookup = %+v, want anchor-free target lookup", fallback)
 	}
 
 	cross := plannerTestInput()

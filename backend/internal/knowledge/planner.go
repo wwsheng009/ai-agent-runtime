@@ -211,7 +211,34 @@ func (p *storePlanner) Plan(ctx context.Context, in PlanInput) (Plan, error) {
 	if err != nil {
 		return Plan{Degraded: true, Reason: classifyStoreError(ctx, err)}, nil
 	}
-	return EvaluatePlan(in, nodes, opts.Config), nil
+	plan := EvaluatePlan(in, nodes, opts.Config)
+	if len(plan.Reuse) > 0 {
+		return plan, nil
+	}
+	// 会话/任务工作集没有可复用项时，回退到跨任务（per-workspace）检索：
+	// 04 §4.4 的第三条路径 + C8「per-task 写入、per-workspace 复用」。
+	//
+	// 生产路径始终携带 SessionID（agent 循环以会话锚定），若只在"无锚点"时
+	// 才走跨任务路径，跨任务复用永远不可达——新会话对既有探索记忆零召回。
+	// 回退只在**同工作集无可复用项**时触发，且按更保守的跨任务阈值评估
+	// （≥0.90 + 强制验证读取），不改变有会话命中时的既有语义。
+	//
+	// 失败/无命中一律保留原判定（Degrade-Not-Fail，不冒泡错误）。
+	if strings.TrimSpace(in.TaskID) == "" && strings.TrimSpace(in.SessionID) == "" {
+		return plan, nil // 原本就是跨任务路径，无需回退
+	}
+	cross := in
+	cross.Scope = ReuseScopeCrossTask
+	cross.TaskID, cross.SessionID = "", ""
+	crossNodes, err := opts.Reader.LookupExplorationNodes(ctx, planLookupQuery(cross))
+	if err != nil {
+		return plan, nil
+	}
+	fallback := EvaluatePlan(cross, crossNodes, opts.Config)
+	if len(fallback.Reuse) == 0 {
+		return plan, nil
+	}
+	return fallback, nil
 }
 
 // queryMeetsMinLength 报告查询是否达到最小长度（按 rune 计；min<=0 取默认）。
