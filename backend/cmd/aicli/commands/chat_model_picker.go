@@ -135,11 +135,12 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 					currentModel := currentModelForProvider(session, providerName)
 					picked, pickErr := chatPickerStageResult(context.Background(), session, lease, ui.FullScreenListOptions{
 						Title:        "选择模型",
-						Subtitle:     fmt.Sprintf("provider: %s · Enter 确认，x/Delete 删除选中模型，Esc 取消", providerName),
+						Subtitle:     fmt.Sprintf("provider: %s · Enter 确认，a 添加模型，x/Delete 删除选中模型，Esc 取消", providerName),
 						EmptyMessage: "没有匹配的模型",
 						ConfirmLabel: "使用选中模型",
 						Items:        buildModelPickerModelItems(models, currentModel),
 						OnDelete:     func(int) error { return nil },
+						OnAdd:        func(int) error { return nil },
 					})
 					if pickErr != nil {
 						result := commandErrorResult(fmt.Errorf("选择模型失败: %w", pickErr))
@@ -150,6 +151,45 @@ func openChatModelPicker(session *ChatSession, request ModelPickerRequest) {
 						result := commandTextResult("已取消切换模型")
 						early = &result
 						return nil
+					}
+					if picked.AddRequested {
+						// 自由文本录入模型 id。模型 id 不含空白，所以按空白/逗号切分
+						// 不会歧义，一次粘贴可加多个（与 Web 端 provider 编辑器一致）。
+						// 校验失败保持输入框打开并就地说明原因，不丢用户已输入的内容。
+						typed, cancelled, inputErr := chatPickerFreeTextStage(context.Background(), session, lease, ui.FullScreenListOptions{
+							Title:        "添加模型",
+							Subtitle:     fmt.Sprintf("provider: %s · 输入模型 id 后 Enter 保存到配置文件，Esc 取消", providerName),
+							ConfirmLabel: "添加并保存",
+							FreeTextHint: "可粘贴多个，空格或逗号分隔",
+							OnConfirmText: func(text string) error {
+								return chatModelAdditionTextError(providerCtx.Provider, text)
+							},
+						})
+						if inputErr != nil {
+							result := commandErrorResult(fmt.Errorf("添加模型失败: %w", inputErr))
+							early = &result
+							return nil
+						}
+						if cancelled {
+							// 放弃添加 ≠ 放弃整个命令：回到模型列表。
+							continue
+						}
+						added, skipped := splitChatModelAdditions(typed, providerCtx.Provider)
+						if persistErr := persistChatModelAddition(session.Config, providerName, added); persistErr != nil {
+							_ = renderChatCommandResult(session, commandErrorResult(fmt.Errorf("添加模型失败: %w", persistErr)), false)
+							continue
+						}
+						// 点名跳过项，不静默丢弃：用户粘的是一份清单，少了一个要看得见。
+						summary := fmt.Sprintf("已添加模型 %s（已保存到配置文件）", strings.Join(added, "、"))
+						if len(skipped) > 0 {
+							summary += fmt.Sprintf("；已存在跳过 %s", strings.Join(skipped, "、"))
+						}
+						_ = renderChatCommandResult(session, commandTextResult(summary), false)
+						// 与删除同构：刷新上下文后重开列表，让新模型出现在原位。
+						if reloadedCtx, _, reloadErr := resolveModelCommandExecutionContext(session, providerName, ""); reloadErr == nil {
+							providerCtx = reloadedCtx
+						}
+						continue
 					}
 					if picked.DeleteRequested {
 						if picked.Index < 0 || picked.Index >= len(models) {
@@ -330,16 +370,9 @@ func persistChatModelRemoval(cfg *config.Config, providerName, model string) err
 	if cfg == nil {
 		return fmt.Errorf("配置未加载")
 	}
-	canonical := ""
-	var provider config.Provider
-	for name, p := range cfg.Providers.Items {
-		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(providerName)) {
-			canonical, provider = name, p
-			break
-		}
-	}
-	if canonical == "" {
-		return fmt.Errorf("provider %s 不存在", providerName)
+	canonical, provider, err := findChatProviderConfig(cfg, providerName)
+	if err != nil {
+		return err
 	}
 	kept := filterChatProviderModels(provider.SupportedModels, model)
 	if len(kept) == len(provider.SupportedModels) {
@@ -371,6 +404,116 @@ func filterChatProviderModels(models []string, target string) []string {
 		}
 	}
 	return kept
+}
+
+// splitChatModelAdditions parses the free-text input of the add stage into
+// candidate model ids. Model ids never contain whitespace, so splitting on it
+// (and on commas, for parity with the web provider editor) is unambiguous and
+// lets one paste add several models. Candidates are de-duplicated
+// case-insensitively and keep input order; the second return value is the ones
+// already present in the provider, which are reported rather than silently
+// dropped.
+func splitChatModelAdditions(text string, provider config.Provider) (add []string, skipped []string) {
+	fields := strings.FieldsFunc(text, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\r' || r == '\n' || r == ','
+	})
+	seen := make(map[string]bool, len(fields))
+	present := make(map[string]bool, len(provider.SupportedModels))
+	present[strings.ToLower(strings.TrimSpace(provider.DefaultModel))] = true
+	for _, m := range provider.SupportedModels {
+		present[strings.ToLower(strings.TrimSpace(m))] = true
+	}
+	for _, f := range fields {
+		key := strings.ToLower(f)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if present[key] {
+			skipped = append(skipped, f)
+			continue
+		}
+		add = append(add, f)
+	}
+	return add, skipped
+}
+
+// chatModelAdditionTextError is the free-text stage validator. A non-nil error
+// keeps the stage open and shows the reason inline, so the user's typing is
+// never lost. Only a fully-redundant input is rejected; partial duplicates are
+// accepted and named in the result line, because refusing the whole batch over
+// one duplicate is hostile when pasting a long list.
+func chatModelAdditionTextError(provider config.Provider, text string) error {
+	add, skipped := splitChatModelAdditions(text, provider)
+	if len(add) == 0 && len(skipped) == 0 {
+		return fmt.Errorf("请输入要添加的模型 id")
+	}
+	if len(add) == 0 {
+		return fmt.Errorf("模型 %s 已存在，无需重复添加", strings.Join(skipped, "、"))
+	}
+	return nil
+}
+
+// persistChatModelAddition appends the model ids to the provider's
+// supported_models in the on-disk config and syncs the in-memory copy so the
+// reopened picker stage lists the persisted catalog. Order is preserved and
+// the provider default is left alone: adding a model must not silently change
+// which model is active.
+func persistChatModelAddition(cfg *config.Config, providerName string, added []string) error {
+	if cfg == nil {
+		return fmt.Errorf("配置未加载")
+	}
+	canonical, provider, err := findChatProviderConfig(cfg, providerName)
+	if err != nil {
+		return err
+	}
+	if len(added) == 0 {
+		return fmt.Errorf("没有要添加的模型")
+	}
+	next := make([]string, 0, len(provider.SupportedModels)+len(added))
+	next = append(next, provider.SupportedModels...)
+	seen := make(map[string]bool, len(next))
+	for _, m := range next {
+		seen[strings.ToLower(strings.TrimSpace(m))] = true
+	}
+	appended := make([]string, 0, len(added))
+	for _, m := range added {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		key := strings.ToLower(m)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		next = append(next, m)
+		appended = append(appended, m)
+	}
+	if len(appended) == 0 {
+		return fmt.Errorf("模型 %s 已存在，无需重复添加", strings.Join(added, "、"))
+	}
+	if _, err := config.UpdateProviderConfig(cfg.ConfigFilePath,
+		config.ProviderConfigUpdate{Name: canonical, SupportedModels: &next}); err != nil {
+		return err
+	}
+	provider.SupportedModels = next
+	cfg.Providers.Items[canonical] = provider
+	return nil
+}
+
+// findChatProviderConfig resolves a provider name to its canonical map key and
+// value, case-insensitively. Shared by the add/remove persistence paths.
+func findChatProviderConfig(cfg *config.Config, providerName string) (string, config.Provider, error) {
+	if cfg == nil {
+		return "", config.Provider{}, fmt.Errorf("配置未加载")
+	}
+	for name, p := range cfg.Providers.Items {
+		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(providerName)) {
+			return name, p, nil
+		}
+	}
+	return "", config.Provider{}, fmt.Errorf("provider %s 不存在", providerName)
 }
 
 func buildModelPickerReasoningItems(options []string, current string) []ui.FullScreenListItem {
