@@ -4,8 +4,8 @@
 - **工作区**：`%TEMP%\p6_ab\ws`（仓库副本，内含 `.aicli\runtime.yaml` + `.aicli\knowledge\knowledge.db`，最终 279 MB / 776 exploration_nodes）
 - **模型**：`opencode.ai / space-bunny-free`（两臂同 provider / 同 model / 同任务集 / 同 prompt 后缀）
 - **驱动**：`POST /web/api/invoke`（同步远程调用）+ `GET /web/api/turn`（turn 台账 + 空闲门）+ `POST /web/api/input {"type":"interrupt"}`（卡死回收）+ 直读 `knowledge.db`（只读 SQLite）
-- **任务集**：`.tmp\ab_set.json`（20 个真实会话任务，逐任务同序）
-- **分析器**：`.tmp\ab_analyze.py` → `.tmp\ab_report.json`（per_task 明细 + 同任务配对比较 + integrity 闸门）
+- **任务集**：`backend/scripts/knowledge_ab_tasks.json`（20 个真实会话任务，逐任务同序）
+- **分析器**：`backend/scripts/knowledge_ab_analyze.py` → `.tmp\ab_report.json`（per_task 明细 + 同任务配对比较 + integrity 闸门）
 
 ## 1. 结论摘要
 
@@ -43,7 +43,7 @@ warm 臂实测踩到的坑：**模型在一个 turn 里跑起 14 分钟不返回
 2. 后续任务被排进会话 pending 队列（`GET /web/api/turn` 显示 `pending=5`），**300ms 内返回 `requires_approval` + 0 token**；
 3. `POST /web/api/sessions/new` 的切换指令也卡在队列里，t10 的 `session` 与 t09 相同 —— "每任务新会话"的隔离性静默失效。
 
-修法（`.tmp\ab_driver.ps1`）：
+修法（`backend/scripts/knowledge_ab_driver.ps1`）：
 
 - **每个任务 invoke 前过空闲门**：`GET /web/api/turn` 的 `current.busy` 必须为 false；
 - busy > 20s 即 `POST /web/api/input {"type":"interrupt","discard_pending":true}` 强杀 turn 并等 `busy=false`；
@@ -128,19 +128,20 @@ off 臂修完空闲门后又暴露第二个阻塞源：**模型调 `ask_user_que
 2. **prompt token 无信号需要解释**：注入预算只有 800 tokens（`token_budget=800`），而两臂 prompt 基线在 5 万–28 万量级 —— 注入量相对基数过小，理论上就难以体现 ≥25% 的下降。要么把任务集换成"大范围检索型"（注入收益占比高），要么承认 M5 的 token 判据需要按"注入命中的那部分 turn"重算，而不是全 turn 平均。
 3. **墙钟回退需定位**：on 臂 +76%（CI >0）。可能来自注入带来的额外编译/检索开销，或 on 档 index 更热导致 `code_*` 工具等待。下轮要把"工具调用耗时"拆出来单独看。
 4. **completion token -35.8% 与 prompt token -3% 的矛盾**：on 臂输出更短但输入没降，提示 on 档更早给出结论、但没有少读代码（tool_calls 只降 14.6% 且 CI 跨 0）。需核对 `context_items` 的 `trust/confidence` 分布是否让模型跳过了验证步骤 —— 若成立，是**正确性风险**而非纯收益，必须在验收里单列。
-5. **驱动修复需回归**：空闲门 / 交互禁令 / 单任务预算三处修复在 `.tmp\ab_driver.ps1`（未入库）。若后续要把 A/B 变成常规验收脚本，应迁到 `backend/scripts/` 并补一个"注入 turn 阻塞"的回归用例。
+5. **驱动修复需回归**：空闲门 / 交互禁令 / 单任务预算三处修复已于收口轮八随本报告一并迁入 `backend/scripts/knowledge_ab_driver.ps1`（默认路径相对脚本位置推导，不再依赖一次性 `.tmp`）。仍缺一条"注入 turn 阻塞"的回归用例：应在进程内复现"turn 未结束时 invoke 已返回"的时序，断言空闲门会先发 interrupt 再放行下一个任务。
 
 ## 7. 复现方式
 
 ```pwsh
+# 前置：cd backend; go build -o aicli.exe ./cmd/aicli（被测二进制需含知识层改动）
 # 1) 预热（播种 knowledge.db）
 $sfx = "`n`n【A/B 驱动约束】只做只读分析；不要改文件；不要跑 go build/go test；不要提问或使用交互工具。"
-pwsh -File .tmp\ab_driver.ps1 -Arm warm -Mode on  -SessionPerTask -TimeoutMs 90000 -TaskBudgetSec 150 -PromptSuffix $sfx
+pwsh -File backend\scripts\knowledge_ab_driver.ps1 -Arm warm -Mode on  -SessionPerTask -TimeoutMs 90000 -TaskBudgetSec 150 -PromptSuffix $sfx
 # 2) 两臂（顺序执行，共用同一 knowledge.db）
-pwsh -File .tmp\ab_driver.ps1 -Arm off -Mode off -SessionPerTask -TimeoutMs 90000 -TaskBudgetSec 120 -PromptSuffix $sfx
-pwsh -File .tmp\ab_driver.ps1 -Arm on  -Mode on  -SessionPerTask -TimeoutMs 90000 -TaskBudgetSec 120 -PromptSuffix $sfx
+pwsh -File backend\scripts\knowledge_ab_driver.ps1 -Arm off -Mode off -SessionPerTask -TimeoutMs 90000 -TaskBudgetSec 120 -PromptSuffix $sfx
+pwsh -File backend\scripts\knowledge_ab_driver.ps1 -Arm on  -Mode on  -SessionPerTask -TimeoutMs 90000 -TaskBudgetSec 120 -PromptSuffix $sfx
 # 3) 分析（per_task + 同任务配对 + integrity）
-$env:PYTHONIOENCODING='utf-8'; py -3 .tmp\ab_analyze.py     # → .tmp\ab_report.json
+$env:PYTHONIOENCODING='utf-8'; py -3 backend\scripts\knowledge_ab_analyze.py     # → .tmp\ab_report.json
 ```
 
-产物：`.tmp\ab_run_{warm,off,on}.jsonl`、`.tmp\ab_report.json`。
+产物：`.tmp\ab_run_{warm,off,on}.jsonl`、`.tmp\ab_report.json`（均在 `<repo>/.tmp`，被 `.gitignore` 排除；工作区副本默认 `%TEMP%\p6_ab\ws`，可用 `-Ws` / `AB_WS` / `AB_OUT_DIR` 覆盖）。

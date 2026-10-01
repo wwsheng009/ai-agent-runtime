@@ -11,20 +11,23 @@
 ### Added
 
 - `reports/phase5_ab_report.md`：Phase 5 on-mode A/B 报告（方法 / 口径 / 逐任务配对 / 配对统计 / 机制证据 / 工程教训 / 缺口登记）。
-- 测量链路（`.tmp\ab_driver.ps1`，未入库）：**turn 空闲门**（每次 invoke 前校验 `GET /web/api/turn` 的 `current.busy`）、**卡死回收**（`POST /web/api/input {"type":"interrupt","discard_pending":true}`）、**交互禁令 + 单任务预算**（`-PromptSuffix` / `-TaskBudgetSec`）、HTTP 客户端超时收紧到 140s。
+- `backend/scripts/knowledge_ab_driver.ps1`：A/B 测量驱动（逐 arm 启停节点 + 就绪门 + turn 空闲门 + 卡死回收 + 逐任务新会话 + JSONL 落盘）。**turn 空闲门**（每次 invoke 前校验 `GET /web/api/turn` 的 `current.busy`）、**卡死回收**（`POST /web/api/input {"type":"interrupt","discard_pending":true}`）、**交互禁令 + 单任务预算**（`-PromptSuffix` / `-TaskBudgetSec`）、HTTP 客户端超时收紧到 140s。默认路径相对脚本位置推导（原为 `.tmp\ab_driver.ps1`，收口轮八迁入）。
+- `backend/scripts/knowledge_ab_analyze.py`：配对分析器（逐任务 token / tool_calls / 成功率 + 同任务配对 + integrity 闸门）；输出目录默认 `<repo>/.tmp`，可用 `AB_OUT_DIR` / `AB_WS` 覆盖。
+- `backend/scripts/knowledge_ab_tasks.json`：20 个真实会话任务构成的固定任务集（两臂同序同 prompt）。
 
 ### Verified
 
 - **机制闸门成立**：off 臂运行窗口（18:37–18:47）`context_snapshots` **0 条**；on 臂（18:55 起）每任务 1 条快照，`budget_json` 为 `mode=signals`、`token_budget=800`、`injected` 1–44、`budget_filtered=0`。即"效果不显著"不是"没注入"。
 - **配对读数（n=8，PARTIAL）**：prompt token 平均 **-3.03%**，95%CI [-15.57%, +21.62%]（3 降 / 5 升）→ **未达 M5 的 ↓≥25%**，且当前样本不足以判定；`turn_success` 两臂均 8/8，未见成功率下降。附带信号：completion token -35.80%（8/8 同向，CI 不跨 0）、tool_calls -14.58%（CI 跨 0）、**墙钟 +107.85%（变慢，CI >0）**。
 - 驱动修复有效性：修复前 warm 臂 t09~t11 因一个 14 分钟不返回的 turn 全部变成 `requires_approval` + 0 token；修复后同类卡死从"整臂报废"降级为"单任务 `budget_exceeded`"（t09/t10/t12 两臂各约 186s），其余任务全部正常完成。
+- 入库校验：驱动 `Parser::ParseFile` 通过；分析器 `py_compile` 通过，且以仓库路径实跑 `.tmp` 现有数据，复现与报告完全一致的读数（`paired n=8 prompt -3.03% CI [-15.57%, +21.62%]`）；任务集 JSON 解析出 20 条。
 
 ### Notes
 
 - **M5 未验收**：需 ≥20 个配对任务。下一轮把任务集收敛为 20 条只读理解型任务（不触发 build / 不触发交互工具）后重跑。
 - 注入预算 800 tokens 相对两臂 5 万–28 万量级的 prompt 基线过小，"全 turn 平均 token ↓25%" 这一判据可能本身不可达，待与 `06` §7.2 对齐口径（按命中 turn 重算）。
 - on 臂 completion token 全面下降但 prompt/tool_calls 未同步下降，登记为**潜在正确性风险**（是否跳过了验证步骤），下轮需核对 `context_items` 的 `trust/confidence` 分布。
-- 驱动脚本仍在 `.tmp/`（不入库）；若 A/B 要转常规验收，需迁到 `backend/scripts/` 并补"注入 turn 阻塞"回归用例。
+- 驱动/分析器/任务集已入库，但**仍缺回归用例**：需在进程内复现"turn 未结束时 invoke 已返回"的时序，断言空闲门会先发 interrupt 再放行下一个任务。
 
 ---
 

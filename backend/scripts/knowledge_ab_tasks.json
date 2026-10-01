@@ -1,0 +1,190 @@
+[
+ {
+  "id": "t01",
+  "prompt": "请用 grep 工具在 backend/internal/knowledge/ 目录中查找 DefaultMinKnowledgeQueryLength 的定义，再用 view 读取该定义所在文件的相关行；最后用一句话总结：它的值是多少、校准依据在哪个报告文件。只读操作，不要修改任何文件。",
+  "expect_any": [
+   "DefaultMinKnowledgeQueryLength",
+   "8"
+  ],
+  "source_session": "session_20260930200406_6QAFacrr",
+  "match": "DefaultMinKnowledgeQueryLength 的定义"
+ },
+ {
+  "id": "t02",
+  "prompt": "请用 grep 工具在 backend/internal/knowledge/ 中查找 TouchExplorationNode 的调用点，再用 view 查看 store_sqlite_exploration.go 中该函数的实现行；最后用一句话总结它的语义。只读操作，不要修改任何文件。",
+  "expect_any": [
+   "TouchExplorationNode"
+  ],
+  "source_session": "session_20260930201440_81CyphPw",
+  "match": "TouchExplorationNode 的调用点"
+ },
+ {
+  "id": "t03",
+  "prompt": "请用 grep 工具在 backend/internal/knowledge/ 中查找 planLookupQuery 的定义与调用点，并用 view 查看 planner.go 中该函数的实现行；最后用一句话总结它的作用。只读操作，不要修改任何文件。",
+  "expect_any": [
+   "planLookupQuery"
+  ],
+  "source_session": "session_20260930204322_6L9q8cFW",
+  "match": "planLookupQuery 的定义与调用点"
+ },
+ {
+  "id": "t04",
+  "prompt": "请用 code_search 工具查找 planLookupQuery，再用 code_callers 查它的调用点，最后用一句话总结（只读，不要修改文件）。",
+  "expect_any": [
+   "planLookupQuery"
+  ],
+  "source_session": "session_20260930211357_tIVR9Oa4",
+  "match": "code_search 工具查找 planLookupQuery"
+ },
+ {
+  "id": "t05",
+  "prompt": "请用 code_navigate 工具（direction=members）列出 backend/internal/knowledge/planner.go 定义的符号，然后一句话总结。只读，不要修改文件。",
+  "expect_any": [
+   "ReuseItem",
+   "PlanInput"
+  ],
+  "source_session": "session_20260930211946_Zd3sI4dS",
+  "match": "code_navigate 工具"
+ },
+ {
+  "id": "t06",
+  "prompt": "只做两件事，不要用 shell：1) 用 view 工具以 offset 10、limit 10 读取 backend/internal/docread/source_limit_test.go；2) 用完全相同的 offset 和 limit 再读一次同一文件。然后用一句话说明第二次返回是否包含 unchanged 字样（把该字样原样贴出来）。",
+  "expect_any": [
+   "source_limit_test.go"
+  ],
+  "source_session": "session_20260927084016_inXVmddY",
+  "match": "source_limit_test.go"
+ },
+ {
+  "id": "t07",
+  "prompt": "只读测试，不要修改任何文件。请依次调用三个工具：(1) code_search(query=planLookupQuery)；(2) view(file_path=backend/internal/knowledge/planner.go, symbol=PlanInput)；(3) code_references(symbol=planLookupQuery)。然后用 3 行分别汇报：工具名 / 返回的 source 字段值 / 一行结果摘要。",
+  "expect_any": [
+   "planLookupQuery"
+  ],
+  "source_session": "session_20260930212532_KlNjsHls",
+  "match": "只读测试"
+ },
+ {
+  "id": "t08",
+  "prompt": "请分三点说明：为什么 SSE 增量渲染需要合并与节流？每点一句话。",
+  "expect_any": [
+   "合并",
+   "节流"
+  ],
+  "source_session": "session_20260927164318_HS1KG1RW",
+  "match": "SSE 增量渲染需要合并与节流"
+ },
+ {
+  "id": "t09",
+  "prompt": "检查当前项目中的知识库模块：当前的知识库需要按.gitignore文件过滤，还有类似的.node_modules 之类的目录，避免把缓存还有非必要的",
+  "expect_any": [
+   "gitignore"
+  ],
+  "source_session": "session_20261001083331_tYkHLf8u",
+  "match": ".gitignore文件过滤"
+ },
+ {
+  "id": "t10",
+  "prompt": "当前发现llm 响应到ai输出不及时，检查相关的sse llm到ui输出的链路是否存在缓冲或是相关的类似的缓冲机制",
+  "expect_any": [
+   "SSE",
+   "缓冲",
+   "流"
+  ],
+  "source_session": "session_20260927160529_pIgkVfY5",
+  "match": "llm 响应到ai输出不及时"
+ },
+ {
+  "id": "t11",
+  "prompt": "检查为什么aicli 无法加载工作区目录下的.agents/skills 的skill列表，检查skill 加载逻辑",
+  "expect_any": [
+   "skills"
+  ],
+  "source_session": "session_20260925205649_qEtvLwuY",
+  "match": ".agents/skills 的skill列表"
+ },
+ {
+  "id": "t12",
+  "prompt": "检查会话中的tool call 为什么会渲染在正文agent.turn.finished之后：会话 session_20260925221754_dyRAoaEO  endpoints: http://127.0.0.1:51932/debug/endpoints  web: http://127.0.0.1:51932/web/",
+  "expect_any": [
+   "turn.finished"
+  ],
+  "source_session": "session_20260925235356_V6rlFeGQ",
+  "match": "turn.finished之后"
+ },
+ {
+  "id": "t13",
+  "prompt": "检查当前项目中的模型卡片的元数据的加载逻辑，比如是否优先加载~/.aicli 目录的元数据配置",
+  "expect_any": [
+   "模型卡片",
+   "元数据"
+  ],
+  "source_session": "session_20260927102046_q3VQk1we",
+  "match": "模型卡片的元数据的加载逻辑"
+ },
+ {
+  "id": "t14",
+  "prompt": "当前项目集成了lsp工具，需要评估lsp带来的收益",
+  "expect_any": [
+   "lsp"
+  ],
+  "source_session": "session_20261001094918_4puIJYhP",
+  "match": "评估lsp带来的收益"
+ },
+ {
+  "id": "t15",
+  "prompt": "在本项目中有lsp集成的功能，也lsp的相关数据分析，找到相关的功能/文档/还有数据，进行分析，分析lsp的使用效果，需要优化的地方",
+  "expect_any": [
+   "lsp"
+  ],
+  "source_session": "session_20261001065122_7lCAoZSX",
+  "match": "在本项目中有lsp集成的功能"
+ },
+ {
+  "id": "t16",
+  "prompt": "检查这个会话为什么恢复不完整，aicli-3x resume session_20260924072950_ltYRU9tG --yolo --pprof --debug ，可以参考/docs/e2e/debug-guide.md 进行调试远程操作，",
+  "expect_any": [
+   "resume",
+   "恢复"
+  ],
+  "source_session": "session_20260924210420_3EVTBM5t",
+  "match": "为什么恢复不完整"
+ },
+ {
+  "id": "t17",
+  "prompt": "问题： 当前访问aicli micro web client时会使用/web?token=xxxx ,但是再刷新 页面时，token丢失，检查当前的逻辑，有没有保存token到浏览器，在刷新时有没有使用检查浏览器中的token",
+  "expect_any": [
+   "token"
+  ],
+  "source_session": "session_20260925063526_I23tmMtW",
+  "match": "token丢失"
+ },
+ {
+  "id": "t18",
+  "prompt": "检查“aicli micro web client”中的markdown 渲染器中的编程开发语言标识，当前在渲染开发语言，在左上角会标识 开发语言，但是当前渲染开发语言标识显示会与正文干涉。",
+  "expect_any": [
+   "markdown"
+  ],
+  "source_session": "session_20260925143542_DvjjK3UE",
+  "match": "markdown 渲染器中的编程开发语言标识"
+ },
+ {
+  "id": "t19",
+  "prompt": "检查为什么页面http://localhost:8101/workspace/sessions/session_20260927134421_PcpdpuEa 的右边侧上没有显示文件浏览器与git浏览器，还有会话详情多个tab，原来是有的。为什么现在消失了",
+  "expect_any": [
+   "文件浏览器",
+   "git"
+  ],
+  "source_session": "session_20260927144504_g0s7IBd5",
+  "match": "文件浏览器与git浏览器"
+ },
+ {
+  "id": "t20",
+  "prompt": "审查commandcode-read-tool-design-borrowing-20260926.md的实施",
+  "expect_any": [
+   "read"
+  ],
+  "source_session": "session_20260927182353_KVI1yj69",
+  "match": "commandcode-read-tool-design-borrowing"
+ }
+]
