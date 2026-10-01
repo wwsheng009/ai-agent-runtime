@@ -6,6 +6,22 @@
 
 ---
 
+## 2026-10-01 — 收口轮（四）：`codeParamInt` 字符串数字（登记项收尾）
+
+### Changed
+
+- `backend/internal/toolkit/tools/code_common.go`：`codeParamInt` 增 `case string`（`strconv.Atoi` + TrimSpace）——模型常把数字参数写成字符串（`"20"` / `" 12 "`），此前会**静默回落默认值**；小数/非法字符串仍回退（不引入浮点截断语义）。
+
+### Verified
+
+- 新增 `TestCodeParamIntAcceptsNumericStrings`（13 子例：int/int64/float64/json.Number/数字串/带空白/负数/非法/小数/空串/bool/缺键/nil）；`go test ./internal/toolkit/tools/ -count=1` 全绿（33.8s）。
+
+### Notes
+
+- 评审修复轮 2 的两项遗留（本项 + `code_inspect` view 去重提示）至此全部收尾；修复计划 §6/§7 清单已无未落地项。
+
+---
+
 ## 2026-10-01 — 收口轮（三）：ADR-0004 陈旧索引下的 code.* 工具面落地（§7.1 结案）
 
 ### Added / Changed

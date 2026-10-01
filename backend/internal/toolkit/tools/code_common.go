@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
@@ -780,6 +781,12 @@ func codeParamInt(params map[string]interface{}, key string, fallback int) int {
 	case json.Number:
 		if parsed, err := value.Int64(); err == nil {
 			return int(parsed)
+		}
+	case string:
+		// 模型常把数字参数写成字符串（"20"）：必须解析，不能静默回落默认值
+		// （评审修复轮 2 登记项）。只接受整数形态，小数/非法值一律回退。
+		if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+			return parsed
 		}
 	}
 	return fallback

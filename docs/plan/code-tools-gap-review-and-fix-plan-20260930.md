@@ -112,7 +112,7 @@
 1. ~~**ADR-0004 陈旧度分级**~~ **（2026-10-01 结案）**：信封 `snapshot_ts` / `staleness_seconds` / `completeness`、按陈旧度分级注册（writer 全开 / reader ≤60s 全开 / ≤900s 仅定义类 / 过旧不注册）、description 追加、`knowledge.tools.stale_reader=off` + `knowledge.tools.enabled=false` 逃生舱全部落地；`RegisterGroup` 不存在（ADR 证据 1 有误），复用既有条件注册 + `Registry.Register/Unregister`，`ListTools` 惰性重评估 + 执行期硬守卫替代事件推送。见 CHANGELOG「收口轮（三）」。
 2. ~~**引用索引漏报根因**~~ **（2026-10-01 结案）**：现场为陈旧索引快照（当前代码/全新索引/增量重写/生产库均绑定正常）；索引侧修复 = `builtin/4` 接口方法声明守卫（`planner.go:136/142` 的伪调用点）+ `AdapterVersion` 升级强制全量重建；`Fatalf` 字符串误报已于 Phase 4 `insideStringOrComment` 修复。见 CHANGELOG「收口轮」。
 3. ~~**FTS exact-name 加权与限定名（`knowledge.Plan`）查询支持**~~ **（2026-10-01 结案）**：跨任务路径改加权检索（exact > prefix > contains）+ 限定名/路径符号归一化；未新建 FTS 表（LIKE + CASE + `escapeLike`），`EvaluatePlan` 判定语义不变。见 CHANGELOG「收口轮（续）」。
-4. **`code_inspect` 的 view 去重提示**（`unchanged: ...`）作为 `content` 返回的语义（本轮未处理）。
+4. ~~**`code_inspect` 的 view 去重提示**（`unchanged: ...`）作为 `content` 返回的语义~~ **（2026-10-01 结案）**：已由修复轮 2 落地（`inspectDedupHit` → `content_omitted=view_dedup` + explanation 说明，`TestCodeInspectMarksViewDedupStub`）。
 
 ## 7. 修复轮 2（2026-10-01）
 
@@ -127,4 +127,4 @@
 
 验证：`go build ./...` OK；`go test -count=1 ./internal/toolkit/tools/ ./internal/tools/` 全绿（toolkit/tools 46s）。
 
-仍未落地（与 §6 相同）：ADR-0004 陈旧度分级、引用索引漏报根因、`codeParamInt` 字符串数字（该 helper 位于并行会话正在编辑的 `code_common.go`，本轮回避）。
+**2026-10-01 收口**：ADR-0004 陈旧度分级、引用索引漏报根因、§6.3 加权检索三项全部结案（见上）；`codeParamInt` 字符串数字已补齐（`case string` + `TestCodeParamIntAcceptsNumericStrings`，13 子例）。
