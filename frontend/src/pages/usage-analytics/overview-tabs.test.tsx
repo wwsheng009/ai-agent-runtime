@@ -25,6 +25,7 @@ vi.mock("./provider-model-analysis", () => ({
 }));
 vi.mock("./quota", () => ({ UsageQuotaPanel: () => <div data-testid="quota-panel" /> }));
 vi.mock("./routing-observability-panel", () => ({ RoutingObservabilityPanel: () => <div data-testid="routing-panel" /> }));
+vi.mock("./lsp-observability-panel", () => ({ LspObservabilityPanel: () => <div data-testid="lsp-panel" /> }));
 
 import { UsageOverview } from "./overview";
 import { AnalyticsHeader } from "./primitives";
@@ -88,7 +89,7 @@ describe("usage overview categories", () => {
     const form = container.querySelector('form[aria-label="分析范围与筛选"]');
     expect(form).not.toBeNull();
     expect(form?.closest('[role="tabpanel"]')).toBeNull();
-    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(6);
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(7);
     expect(container.querySelector('[data-testid="overview-chart"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="quota-panel"]')).toBeNull();
     expect(container.querySelector('[data-testid="routing-panel"]')).toBeNull();
@@ -107,6 +108,7 @@ describe("usage overview categories", () => {
       expect(Boolean(container.querySelector("#usage-sessions-title"))).toBe(view === "sessions");
       expect(Boolean(container.querySelector('[data-testid="quota-panel"]'))).toBe(view === "quota");
       expect(Boolean(container.querySelector('[data-testid="routing-panel"]'))).toBe(view === "routing");
+      expect(Boolean(container.querySelector('[data-testid="lsp-panel"]'))).toBe(view === "lsp");
     }
     expect(container.querySelector('[role="status"]')?.textContent).toContain("暂时无法读取工件流快照");
     // 分类变化不应成为主分析请求的依赖。

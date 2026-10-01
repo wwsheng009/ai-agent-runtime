@@ -1,5 +1,5 @@
 // Overview 分类使用独立的 view 参数，避免与会话详情的 tab 参数互相干扰。
-export const overviewViews = ["overview", "models", "sessions", "quota", "routing", "artifacts"] as const;
+export const overviewViews = ["overview", "models", "sessions", "quota", "routing", "lsp", "artifacts"] as const;
 export type OverviewView = (typeof overviewViews)[number];
 
 export function resolveOverviewView(value: string | null): OverviewView {

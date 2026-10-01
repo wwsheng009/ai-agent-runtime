@@ -29,6 +29,7 @@ import { emptyCoverage, emptyDimensions, emptyTotals } from "./defaults";
 import { AnalyticsHeader, FilterInput, FilterSelect, Metric, QualityNotice, UsageAnalyticsChartsFallback } from "./primitives";
 import { UsageQuotaPanel } from "./quota";
 import { RoutingObservabilityPanel } from "./routing-observability-panel";
+import { LspObservabilityPanel } from "./lsp-observability-panel";
 import { SessionTable } from "./sessions";
 import { resetOverviewFilters, resolveOverviewView, selectOverviewView, type OverviewView } from "./overview-navigation";
 import { OverviewTabs } from "./overview-tabs";
@@ -357,6 +358,7 @@ export function UsageOverview() {
             ) : null}
             {view === "quota" ? <UsageQuotaPanel adminToken={adminToken} /> : null}
             {view === "routing" ? <RoutingObservabilityPanel adminToken={adminToken} /> : null}
+            {view === "lsp" ? <LspObservabilityPanel adminToken={adminToken} /> : null}
             {view === "artifacts" ? (
               <>
                 <ArtifactFlowPanel snapshot={toolEfficiency} loading={observabilityLoading} />

@@ -1,4 +1,4 @@
-import { ArchiveIcon, BarChart3Icon, CpuIcon, GaugeIcon, ListIcon, RouteIcon } from "lucide-react";
+import { ArchiveIcon, BarChart3Icon, CpuIcon, GaugeIcon, ListIcon, RouteIcon, ServerIcon } from "lucide-react";
 import type { KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -11,6 +11,7 @@ const viewIcons = {
   sessions: ListIcon,
   quota: GaugeIcon,
   routing: RouteIcon,
+  lsp: ServerIcon,
   artifacts: ArchiveIcon,
 };
 

@@ -432,6 +432,20 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 
 遗留：`lsp_closure_ratio` 与其余读数需要新事件积累后回填 §4.3 阈值（本次实机已可计算）。
 
+**第十五轮（2026-10-01，React 舰队级 LSP 面板 §5.5，前端切片）**：数据面走**观测事件**
+（§5.5 备选路径）——`/api/runtime/observe/v1/events` 的 `event_type` 是精确匹配（无通配符），
+故新增客户端按三种 `lsp.*` 类型并发拉取再合并（`frontend/src/api/runtime/lsp.ts`：envelope
+解包、Bearer、**任一类型失败即整体失败**，不拿部分数据冒充全量）。面板
+（`pages/usage-analytics/lsp-observability-panel.tsx` + `lsp-observability-shared.ts`）只展示
+**事实与窗口计数**（服务器最新状态 / outcome 与 reason 计数 / 最近事件），**不重算比率**——
+覆盖率、fallback、闭环率仍单源于 §3.3（TUI 与 web 会话内面板），避免第二套数字；
+403 → "观测面不可用"、空窗口 → "无事件"，不伪造 0 指标。挂载为用量分析页新页签
+（`overviewTabs.lsp` + `overview-navigation/tabs/overview` + zh-CN/en-US i18n）。
+测试：`lsp.test.ts`（envelope/跨类型去重/失败传播）、`lsp-observability-shared.test.ts`
+（纯逻辑：最新状态、计数、标签回退）、`overview-tabs.test.tsx` 更新为 7 页签；
+`vitest` 8 文件 67 测试全绿、`tsc -b` 通过、`lint:i18n` 945 键 0 违规。
+遗留：舰队级**比率区块**需后端聚合端点（复用 §3.3 口径）后再点亮，本次面板刻意不含比率。
+
 ---
 
 ## 6. 里程碑与验收
