@@ -38,6 +38,7 @@ var LSP_OUTCOME_LABELS = {
   clean: "无问题",
   no_server: "无 server 覆盖",
   degraded_no_fresh: "无新诊断/等待超时",
+  degraded_starting: "启动中降级",
   degraded_read_error: "读文件失败",
   degraded: "降级"
 };
@@ -140,7 +141,7 @@ function lspSuggestions(status, overview) {
     }
     if ((m.degraded || 0) > 0) {
       tips.push("累计 " + lspNum(m.degraded) + " 次降级（fallback_ratio " + lspPercent(m.fallback_ratio) +
-        "）：对照「最近事件」结果列定位缺二进制 / 等待超时 / 读文件失败。");
+        "，分母为已路由请求）：对照「最近事件」结果列定位缺二进制 / 等待超时 / 读文件失败。");
     }
     if ((m.latency_samples || 0) > 0 && (m.wait_latency_p95_ms || 0) > 0) {
       tips.push("等待 P95 = " + lspMS(m.wait_latency_p95_ms) + "（样本 " + lspNum(m.latency_samples) +
@@ -216,10 +217,11 @@ function lspEventsSection(eventsBody) {
       "</td><td>" + esc(lspOutcomeLabel(e.outcome)) +
       "</td><td>" + lspMS(e.duration_ms) +
       "</td><td>" + lspNum(e.diag_count) +
-      "</td><td>" + lspNum(e.appended_bytes) + "</td></tr>");
+      "</td><td>" + lspNum(e.appended_bytes) +
+      "</td><td>" + esc(lspClip(lspText(e.tool_call_id), 18) || "--") + "</td></tr>");
   }
   return html + '<div style="overflow-x:auto"><table class="cache-table"><thead><tr>' +
-    "<th>时间</th><th>触发</th><th>Server</th><th>结果</th><th>等待</th><th>诊断数</th><th>追加字节</th>" +
+    "<th>时间</th><th>触发</th><th>Server</th><th>结果</th><th>等待</th><th>诊断数</th><th>追加字节</th><th>工具调用</th>" +
     "</tr></thead><tbody>" + rows.join("") + "</tbody></table></div>";
 }
 

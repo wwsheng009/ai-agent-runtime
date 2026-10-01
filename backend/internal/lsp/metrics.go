@@ -31,28 +31,49 @@ type RequestRecord struct {
 	AppendedBytes  int       `json:"appended_bytes"`
 	OmittedItems   int       `json:"omitted_items,omitempty"`
 	OmittedByChars int       `json:"omitted_by_chars,omitempty"`
+	// Join keys (observability plan §3.1): request → tool call / turn.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	TurnID     string `json:"turn_id,omitempty"`
+	// Low-sensitivity correlation fingerprints (path / diagnostic set).
+	PathFingerprint string `json:"path_fingerprint,omitempty"`
+	DiagFingerprint string `json:"diag_fingerprint,omitempty"`
+	// Append breakdown: only AppendedDiagBytes is diagnostic value; notes and
+	// empty-result blocks are protocol overhead (plan §3.3 readout).
+	AppendedDiagBytes  int `json:"appended_diag_bytes,omitempty"`
+	AppendedNoteBytes  int `json:"appended_note_bytes,omitempty"`
+	AppendedEmptyBytes int `json:"appended_empty_bytes,omitempty"`
+	// ReasonCategory is the low-sensitivity degrade category (plan §3.3);
+	// empty for non-degraded requests and for legacy events.
+	ReasonCategory string `json:"reason_category,omitempty"`
 }
 
-// MetricsSnapshot 是读数快照：比率分母口径固定为 requests，除零返回 0。
+// MetricsSnapshot 是读数快照：fallback 分母为 attempted（排除 no_server），
+// diag_hit 分母为 injected；除零返回 0。
 type MetricsSnapshot struct {
-	Requests         int             `json:"requests"`
-	InlineAttempts   int             `json:"inline_attempts"`
-	ToolRequests     int             `json:"tool_requests"`
-	Injected         int             `json:"injected"`
-	Clean            int             `json:"clean"`
-	NoServer         int             `json:"no_server"`
-	Degraded         int             `json:"degraded"`
-	DiagHit          int             `json:"diag_hit"`
-	DiagHitRatio     float64         `json:"diag_hit_ratio"`
-	FallbackRatio    float64         `json:"fallback_ratio"`
-	WaitLatencyP50MS int64           `json:"wait_latency_p50_ms"`
-	WaitLatencyP95MS int64           `json:"wait_latency_p95_ms"`
-	LatencySamples   int             `json:"latency_samples"`
-	DiagCount        int64           `json:"diag_count"`
-	AppendedBytes    int64           `json:"appended_bytes"`
-	ByOutcome        map[string]int  `json:"by_outcome,omitempty"`
-	LastRequestAt    *time.Time      `json:"last_request_at,omitempty"`
-	RecentRequests   []RequestRecord `json:"recent_requests"`
+	Requests           int     `json:"requests"`
+	InlineAttempts     int     `json:"inline_attempts"`
+	ToolRequests       int     `json:"tool_requests"`
+	Injected           int     `json:"injected"`
+	Clean              int     `json:"clean"`
+	NoServer           int     `json:"no_server"`
+	Degraded           int     `json:"degraded"`
+	DiagHit            int     `json:"diag_hit"`
+	DiagHitRatio       float64 `json:"diag_hit_ratio"`
+	FallbackRatio      float64 `json:"fallback_ratio"`
+	WaitLatencyP50MS   int64   `json:"wait_latency_p50_ms"`
+	WaitLatencyP95MS   int64   `json:"wait_latency_p95_ms"`
+	LatencySamples     int     `json:"latency_samples"`
+	DiagCount          int64   `json:"diag_count"`
+	AppendedBytes      int64   `json:"appended_bytes"`
+	AppendedDiagBytes  int64   `json:"appended_diag_bytes"`
+	AppendedNoteBytes  int64   `json:"appended_note_bytes"`
+	AppendedEmptyBytes int64   `json:"appended_empty_bytes"`
+	// Attempted excludes no_server (files no member claims): the fallback
+	// ratio must not be diluted by "nothing was ever asked of LSP".
+	Attempted      int             `json:"attempted"`
+	ByOutcome      map[string]int  `json:"by_outcome,omitempty"`
+	LastRequestAt  *time.Time      `json:"last_request_at,omitempty"`
+	RecentRequests []RequestRecord `json:"recent_requests"`
 }
 
 // Metrics 累加请求级读数；并发由 mu 保护。
@@ -70,6 +91,9 @@ type Metrics struct {
 	latency       []int64
 	diagCount     int64
 	appendedBytes int64
+	appendedDiag  int64
+	appendedNote  int64
+	appendedEmpty int64
 	lastAt        time.Time
 	recent        []RequestRecord
 }
@@ -112,6 +136,9 @@ func (m *Metrics) Observe(record RequestRecord) {
 	}
 	m.diagCount += int64(record.DiagCount)
 	m.appendedBytes += int64(record.AppendedBytes)
+	m.appendedDiag += int64(record.AppendedDiagBytes)
+	m.appendedNote += int64(record.AppendedNoteBytes)
+	m.appendedEmpty += int64(record.AppendedEmptyBytes)
 	m.latency = append(m.latency, record.DurationMS)
 	if len(m.latency) > metricsLatencyCap {
 		m.latency = m.latency[len(m.latency)-metricsLatencyCap:]
@@ -133,23 +160,27 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	snap := MetricsSnapshot{
-		Requests:         m.requests,
-		InlineAttempts:   m.inline,
-		ToolRequests:     m.tool,
-		Injected:         m.injected,
-		Clean:            m.clean,
-		NoServer:         m.noServer,
-		Degraded:         m.degraded,
-		DiagHit:          m.diagHit,
-		DiagHitRatio:     ratio(m.diagHit, m.injected),
-		FallbackRatio:    ratio(m.degraded, m.requests),
-		WaitLatencyP50MS: percentile(m.latency, 0.50),
-		WaitLatencyP95MS: percentile(m.latency, 0.95),
-		LatencySamples:   len(m.latency),
-		DiagCount:        m.diagCount,
-		AppendedBytes:    m.appendedBytes,
-		ByOutcome:        make(map[string]int, len(m.byOutcome)),
-		RecentRequests:   make([]RequestRecord, 0, len(m.recent)),
+		Requests:           m.requests,
+		InlineAttempts:     m.inline,
+		ToolRequests:       m.tool,
+		Injected:           m.injected,
+		Clean:              m.clean,
+		NoServer:           m.noServer,
+		Degraded:           m.degraded,
+		DiagHit:            m.diagHit,
+		DiagHitRatio:       ratio(m.diagHit, m.injected),
+		FallbackRatio:      ratio(m.degraded, m.requests-m.noServer),
+		WaitLatencyP50MS:   percentile(m.latency, 0.50),
+		WaitLatencyP95MS:   percentile(m.latency, 0.95),
+		LatencySamples:     len(m.latency),
+		DiagCount:          m.diagCount,
+		AppendedBytes:      m.appendedBytes,
+		AppendedDiagBytes:  m.appendedDiag,
+		AppendedNoteBytes:  m.appendedNote,
+		AppendedEmptyBytes: m.appendedEmpty,
+		Attempted:          m.requests - m.noServer,
+		ByOutcome:          make(map[string]int, len(m.byOutcome)),
+		RecentRequests:     make([]RequestRecord, 0, len(m.recent)),
 	}
 	for outcome, count := range m.byOutcome {
 		snap.ByOutcome[outcome] = count

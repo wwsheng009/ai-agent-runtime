@@ -168,6 +168,9 @@ def aggregate(events, stats):
                     "omitted_items": to_int(payload.get("omitted_items")) or 0,
                     "omitted_by_chars": to_int(payload.get("omitted_by_chars")) or 0,
                     "server": str(payload.get("server") or "").strip(),
+                    "path_fingerprint": str(payload.get("path_fingerprint") or "").strip(),
+                    "diag_fingerprint": str(payload.get("diag_fingerprint") or "").strip(),
+                    "reason_category": str(payload.get("reason_category") or "").strip(),
                 }
             )
             continue
@@ -193,6 +196,9 @@ def aggregate(events, stats):
     degraded = sum(count for outcome, count in outcomes.items() if outcome.startswith(DEGRADED_PREFIX))
     no_server = outcomes.get("no_server", 0)
     clean = outcomes.get("clean", 0)
+    degrade_reasons = Counter(
+        item["reason_category"] for item in requests if item["reason_category"]
+    )
 
     durations = sorted(item["duration_ms"] for item in requests)
     truncated = [item for item in requests if item["omitted_items"] > 0 or item["omitted_by_chars"] > 0]
@@ -221,6 +227,27 @@ def aggregate(events, stats):
         total for session_id, total in edit_output_bytes_by_session.items() if session_id in sessions
     )
 
+    # lsp_closure_ratio（§3.3）：同一会话内，被注入的诊断集合是否在下一次同文件
+    # 编辑后消失（下一次请求 outcome=clean）。只统计带 fingerprint 的 injected
+    # 请求；无 eligible 样本输出 n/a（不把未采集渲染成 0）。
+    closure_eligible = 0
+    closure_closed = 0
+    by_session_path = defaultdict(list)
+    for item in requests:
+        session_id = item["session_id"]
+        path_fingerprint = item["path_fingerprint"]
+        if not session_id or not path_fingerprint:
+            continue
+        by_session_path[(session_id, path_fingerprint)].append(item)
+    for facts in by_session_path.values():
+        facts.sort(key=lambda x: x["timestamp"] or datetime.max.replace(tzinfo=timezone.utc))
+        for index, item in enumerate(facts):
+            if item["outcome"] != "injected" or not item["diag_fingerprint"]:
+                continue
+            closure_eligible += 1
+            if index + 1 < len(facts) and facts[index + 1]["outcome"] == "clean":
+                closure_closed += 1
+
     return {
         "requests": len(requests),
         "triggers": dict(triggers),
@@ -231,6 +258,7 @@ def aggregate(events, stats):
         "clean": clean,
         "no_server": no_server,
         "degraded": degraded,
+        "degrade_reasons": dict(degrade_reasons),
         "durations": durations,
         "latency_p50_ms": percentile(durations, 0.50),
         "latency_p95_ms": percentile(durations, 0.95),
@@ -247,6 +275,8 @@ def aggregate(events, stats):
         "edit_output_events": edit_output_events,
         "active_edit_calls": active_edit_calls,
         "active_edit_output_bytes": active_edit_output_bytes,
+        "closure_eligible": closure_eligible,
+        "closure_closed": closure_closed,
         "by_day": by_day,
         "scan": stats,
     }
@@ -289,6 +319,17 @@ def render_markdown(rows, stats):
     lines.append("")
     lines.append(f"- 触发：{json.dumps(stats['triggers'], ensure_ascii=False)}")
     lines.append(f"- 结果：{json.dumps(stats['outcomes'], ensure_ascii=False)}")
+    unclassified = int(stats["outcomes"].get("degraded", 0) or 0)
+    if unclassified:
+        lines.append(
+            f"- 未分类降级：{unclassified} 条（旧构建无 `reason` 字段或其他未知原因；"
+            f"计入 fallback 分子，但无法按原因细分）"
+        )
+    if stats.get("degrade_reasons"):
+        lines.append(
+            f"- 降级原因分布（新构建，低敏枚举）："
+            f"{json.dumps(stats['degrade_reasons'], ensure_ascii=False)}"
+        )
     lines.append(f"- 等待：P50 = {cell(stats['latency_p50_ms'])} ms，"
                  f"P95 = {cell(stats['latency_p95_ms'])} ms（n={len(stats['durations'])}）")
     lines.append(f"- 诊断：命中 {stats['diag_hit']} 次（injected {stats['injected']} 次），"
@@ -317,7 +358,8 @@ def render_markdown(rows, stats):
     lines.append("- 覆盖率分母是「编辑类工具调用次数」，一次调用可能覆盖多文件（多行 request 事件），"
                  "因此该比值是近似口径，需与 `mutated_paths` 覆盖缺口一起判读。")
     lines.append("- `lsp_closure_ratio` 需要诊断身份（fingerprint）才能计算续轮消失率："
-                 "当前事件只有标量，标记 n/a，待 §3 后续项补齐。")
+                 "基于 path/diag fingerprint 计算，被注入的诊断集合在下一次同文件编辑后"
+                 "消失（下一次请求为 clean）才算闭环；无 fingerprint 样本标记 n/a。")
     lines.append("- `lsp_append_bytes_ratio` 依赖编辑回执的 `output_model_visible_bytes`；"
                  "回执未携带时标记 n/a（不猜分母）。")
     lines.append("- 本报告只汇总 aicli/runtime-server 会话事件；runtime-server 的事件目录"
@@ -353,6 +395,15 @@ def build_rows(stats):
     else:
         append_ratio = "n/a（LSP 活跃会话内编辑回执缺少 output_model_visible_bytes）"
     p95 = None if stats["latency_p95_ms"] is None else f"{stats['latency_p95_ms']} ms"
+    if stats["closure_eligible"] > 0:
+        closure_value = ratio_text(stats["closure_closed"], stats["closure_eligible"])
+        closure_samples = (f"closed {stats['closure_closed']} / eligible {stats['closure_eligible']}"
+                           "（下一次同文件编辑为 clean）")
+        closure_conclusion = "待标定（需人工判读）"
+    else:
+        closure_value = "n/a（窗口内无带 fingerprint 的 injected 请求）"
+        closure_samples = "eligible 0（未采集，非缺失数据）"
+        closure_conclusion = "待采集（需要 path/diag fingerprint 事件）"
 
     return [
         {
@@ -400,10 +451,10 @@ def build_rows(stats):
         },
         {
             "metric": "lsp_closure_ratio",
-            "value": "n/a（事件暂无诊断身份，需补 fingerprint）",
+            "value": closure_value,
             "window": window,
-            "samples": "0（口径未定义，非缺失数据）",
-            "conclusion": "待采集（§3 后续项）",
+            "samples": closure_samples,
+            "conclusion": closure_conclusion,
             "date": date,
         },
     ]
@@ -416,9 +467,14 @@ def selftest():
         lines = [
             {"type": "lsp.request.finished", "session_id": "s1", "timestamp": "2026-09-29T10:00:00Z",
              "payload": {"trigger": "inline", "outcome": "injected", "duration_ms": 10,
-                         "diag_count": 2, "appended_bytes": 100, "server": "gopls"}},
+                         "diag_count": 2, "appended_bytes": 100, "server": "gopls",
+                         "path_fingerprint": "p1", "diag_fingerprint": "d1"}},
+            {"type": "lsp.request.finished", "session_id": "s1", "timestamp": "2026-09-29T10:02:00Z",
+             "payload": {"trigger": "tool", "outcome": "clean", "duration_ms": 7,
+                         "path_fingerprint": "p1"}},
             {"type": "lsp.request.finished", "session_id": "s1", "timestamp": "2026-09-29T10:01:00Z",
-             "payload": {"trigger": "inline", "outcome": "degraded_no_fresh", "duration_ms": 30}},
+             "payload": {"trigger": "inline", "outcome": "degraded_no_fresh", "duration_ms": 30,
+                         "reason_category": "wait_timeout"}},
             {"type": "lsp.request.finished", "session_id": "s2", "timestamp": "2026-09-29T10:02:00Z",
              "payload": {"trigger": "tool", "outcome": "no_server", "duration_ms": 5}},
             {"type": "tool.completed", "session_id": "s1", "timestamp": "2026-09-29T10:00:00Z",
@@ -434,18 +490,21 @@ def selftest():
         events, stats = load_events([tmp], None)
         result = aggregate(events, stats)
         checks = [
-            ("requests", result["requests"], 3),
+            ("requests", result["requests"], 4),
             ("inline", result["triggers"].get("inline"), 2),
-            ("tool", result["triggers"].get("tool"), 1),
+            ("tool", result["triggers"].get("tool"), 2),
             ("injected", result["injected"], 1),
             ("diag_hit", result["diag_hit"], 1),
             ("degraded", result["degraded"], 1),
+            ("degrade_reasons.wait_timeout", result["degrade_reasons"].get("wait_timeout"), 1),
             ("no_server", result["no_server"], 1),
             ("edit_calls", result["edit_calls"], 2),
-            ("p50", result["latency_p50_ms"], 10),
+            ("p50", result["latency_p50_ms"], 7),
             ("p95", result["latency_p95_ms"], 30),
             ("edit_output_bytes", result["edit_output_bytes"], 1100),
             ("sessions", result["sessions"], 2),
+            ("closure_eligible", result["closure_eligible"], 1),
+            ("closure_closed", result["closure_closed"], 1),
         ]
         failures = [f"{name}: got {actual}, want {want}" for name, actual, want in checks if actual != want]
         rows = {row["metric"]: row["value"] for row in build_rows(result)}
@@ -453,14 +512,14 @@ def selftest():
             failures.append(f"coverage: got {rows['lsp_edit_coverage_ratio']}")
         if rows["lsp_append_bytes_ratio"] != ratio_text(100, 1100):
             failures.append(f"append ratio: got {rows['lsp_append_bytes_ratio']}")
-        if rows["lsp_closure_ratio"].startswith("n/a") is False:
-            failures.append("closure 必须诚实标记 n/a")
+        if rows["lsp_closure_ratio"] != ratio_text(1, 1):
+            failures.append(f"closure: got {rows['lsp_closure_ratio']}")
         if failures:
             print("selftest FAILED:")
             for failure in failures:
                 print("  -", failure)
             return 1
-        print("selftest OK（3 请求 / 覆盖率 1.0 / P50 10ms / 追加比 100/1100 / closure n/a）")
+        print("selftest OK（4 请求 / 覆盖率 1.0 / P50 7ms / 追加比 100/1100 / closure 1.0）")
         return 0
 
 

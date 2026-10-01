@@ -74,32 +74,40 @@ type DayBucket struct {
 
 // Stats 是聚合结果（JSON 键与离线脚本 --json 对齐）。
 type Stats struct {
-	Requests       int                   `json:"requests"`
-	Triggers       map[string]int        `json:"triggers"`
-	Outcomes       map[string]int        `json:"outcomes"`
-	Servers        map[string]int        `json:"servers"`
-	Injected       int                   `json:"injected"`
-	DiagHit        int                   `json:"diag_hit"`
-	Clean          int                   `json:"clean"`
-	NoServer       int                   `json:"no_server"`
-	Degraded       int                   `json:"degraded"`
-	LatencyP50MS   *int                  `json:"latency_p50_ms"`
-	LatencyP95MS   *int                  `json:"latency_p95_ms"`
-	AppendedBytes  int                   `json:"appended_bytes"`
-	DiagCount      int                   `json:"diag_count"`
-	Truncated      int                   `json:"truncated_requests"`
-	OmittedItems   int                   `json:"omitted_items"`
-	OmittedByChars int                   `json:"omitted_by_chars"`
-	Sessions       int                   `json:"sessions"`
-	FirstAt        string                `json:"first_at"`
-	LastAt         string                `json:"last_at"`
-	EditCalls      int                   `json:"edit_calls"`
-	EditOutput     int                   `json:"edit_output_bytes"`
-	EditOutputEvs  int                   `json:"edit_output_events"`
-	ActiveEdit     int                   `json:"active_edit_calls"`
-	ActiveOutput   int                   `json:"active_edit_output_bytes"`
-	ByDay          map[string]*DayBucket `json:"by_day"`
-	Scan           ScanStats             `json:"scan"`
+	Requests       int            `json:"requests"`
+	Triggers       map[string]int `json:"triggers"`
+	Outcomes       map[string]int `json:"outcomes"`
+	Servers        map[string]int `json:"servers"`
+	Injected       int            `json:"injected"`
+	DiagHit        int            `json:"diag_hit"`
+	Clean          int            `json:"clean"`
+	NoServer       int            `json:"no_server"`
+	Degraded       int            `json:"degraded"`
+	LatencyP50MS   *int           `json:"latency_p50_ms"`
+	LatencyP95MS   *int           `json:"latency_p95_ms"`
+	AppendedBytes  int            `json:"appended_bytes"`
+	DiagCount      int            `json:"diag_count"`
+	Truncated      int            `json:"truncated_requests"`
+	OmittedItems   int            `json:"omitted_items"`
+	OmittedByChars int            `json:"omitted_by_chars"`
+	// DegradeReasons breaks degraded requests down by the low-sensitivity
+	// reason_category enum (new-build events only; legacy events lack it).
+	DegradeReasons map[string]int `json:"degrade_reasons,omitempty"`
+	// Closure: injected requests whose diagnostic set disappeared on the next
+	// edit of the same file (outcome=clean). Requires fingerprint-bearing
+	// events (plan §3.3); zero eligible means "not collected", not "0".
+	ClosureEligible int                   `json:"closure_eligible"`
+	ClosureClosed   int                   `json:"closure_closed"`
+	Sessions        int                   `json:"sessions"`
+	FirstAt         string                `json:"first_at"`
+	LastAt          string                `json:"last_at"`
+	EditCalls       int                   `json:"edit_calls"`
+	EditOutput      int                   `json:"edit_output_bytes"`
+	EditOutputEvs   int                   `json:"edit_output_events"`
+	ActiveEdit      int                   `json:"active_edit_calls"`
+	ActiveOutput    int                   `json:"active_edit_output_bytes"`
+	ByDay           map[string]*DayBucket `json:"by_day"`
+	Scan            ScanStats             `json:"scan"`
 	// GeneratedAt 是本次归因时刻（报告日期列）。
 	GeneratedAt string `json:"generated_at"`
 
@@ -143,16 +151,20 @@ func Analyze(opts Options) (Stats, error) {
 	seen := map[string]struct{}{}
 
 	type requestFact struct {
-		sessionID      string
-		day            string
-		trigger        string
-		outcome        string
-		durationMS     int
-		diagCount      int
-		appendedBytes  int
-		omittedItems   int
-		omittedByChars int
-		server         string
+		sessionID       string
+		day             string
+		trigger         string
+		outcome         string
+		durationMS      int
+		diagCount       int
+		appendedBytes   int
+		omittedItems    int
+		omittedByChars  int
+		server          string
+		ts              time.Time
+		pathFingerprint string
+		diagFingerprint string
+		reasonCategory  string
 	}
 	var requests []requestFact
 
@@ -216,16 +228,20 @@ func Analyze(opts Options) (Stats, error) {
 						timestamps = append(timestamps, event.Timestamp)
 					}
 					fact := requestFact{
-						sessionID:      strings.TrimSpace(event.SessionID),
-						day:            day,
-						trigger:        payloadString(payload, "trigger"),
-						outcome:        payloadString(payload, "outcome"),
-						durationMS:     payloadInt(payload, "duration_ms"),
-						diagCount:      payloadInt(payload, "diag_count"),
-						appendedBytes:  payloadInt(payload, "appended_bytes"),
-						omittedItems:   payloadInt(payload, "omitted_items"),
-						omittedByChars: payloadInt(payload, "omitted_by_chars"),
-						server:         payloadString(payload, "server"),
+						sessionID:       strings.TrimSpace(event.SessionID),
+						day:             day,
+						trigger:         payloadString(payload, "trigger"),
+						outcome:         payloadString(payload, "outcome"),
+						durationMS:      payloadInt(payload, "duration_ms"),
+						diagCount:       payloadInt(payload, "diag_count"),
+						appendedBytes:   payloadInt(payload, "appended_bytes"),
+						omittedItems:    payloadInt(payload, "omitted_items"),
+						omittedByChars:  payloadInt(payload, "omitted_by_chars"),
+						server:          payloadString(payload, "server"),
+						ts:              event.Timestamp,
+						pathFingerprint: payloadString(payload, "path_fingerprint"),
+						diagFingerprint: payloadString(payload, "diag_fingerprint"),
+						reasonCategory:  payloadString(payload, "reason_category"),
 					}
 					requests = append(requests, fact)
 					if fact.sessionID != "" {
@@ -285,6 +301,12 @@ func Analyze(opts Options) (Stats, error) {
 		if strings.HasPrefix(fact.outcome, "degraded") {
 			stats.Degraded++
 		}
+		if fact.reasonCategory != "" {
+			if stats.DegradeReasons == nil {
+				stats.DegradeReasons = map[string]int{}
+			}
+			stats.DegradeReasons[fact.reasonCategory]++
+		}
 		bucket := stats.ByDay[fact.day]
 		if bucket == nil {
 			bucket = &DayBucket{}
@@ -315,6 +337,29 @@ func Analyze(opts Options) (Stats, error) {
 	for sessionID, total := range editOutputBySession {
 		if _, active := sessionRequests[sessionID]; active {
 			stats.ActiveOutput += total
+		}
+	}
+	// lsp_closure_ratio（plan §3.3）：同一会话内，被注入的诊断集合是否在下一次
+	// 同文件编辑后消失（下一次请求 outcome=clean）。只统计带 fingerprint 的
+	// injected 请求；无 eligible 样本输出 n/a（不把未采集渲染成 0）。
+	bySessionPath := map[string][]requestFact{}
+	for _, fact := range requests {
+		if fact.sessionID == "" || fact.pathFingerprint == "" {
+			continue
+		}
+		key := fact.sessionID + "\x00" + fact.pathFingerprint
+		bySessionPath[key] = append(bySessionPath[key], fact)
+	}
+	for _, facts := range bySessionPath {
+		sort.SliceStable(facts, func(i, j int) bool { return facts[i].ts.Before(facts[j].ts) })
+		for index, fact := range facts {
+			if fact.outcome != "injected" || fact.diagFingerprint == "" {
+				continue
+			}
+			stats.ClosureEligible++
+			if index+1 < len(facts) && facts[index+1].outcome == "clean" {
+				stats.ClosureClosed++
+			}
 		}
 	}
 	for _, bucket := range stats.ByDay {

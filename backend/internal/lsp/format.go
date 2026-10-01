@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // RenderOptions is the rendering contract of the inline block. Every threshold
@@ -86,6 +87,16 @@ func RenderDiagnostics(items []Diagnostic, opts RenderOptions) RenderResult {
 	}
 	servers := strings.Join(opts.Servers, ",")
 
+	if len(items) == 0 {
+		// Empty result: one self-closing line confirms "checked, no problems"
+		// without paying the full header+footer of a diagnostic block.
+		text := fmt.Sprintf(
+			`<lsp_diagnostics file="%s" count="0" scope="%s" servers="%s"/>\n`,
+			escapeAttr(opts.File), scope, escapeAttr(servers),
+		)
+		return RenderResult{Text: text}
+	}
+
 	header := fmt.Sprintf(
 		`<lsp_diagnostics file="%s" count="%d" shown="%d" scope="%s" servers="%s"`,
 		escapeAttr(opts.File), len(items), len(shown), scope, escapeAttr(servers),
@@ -97,27 +108,30 @@ func RenderDiagnostics(items []Diagnostic, opts RenderOptions) RenderResult {
 
 	var builder strings.Builder
 	builder.WriteString(header)
-	budget := maxChars - len(header)
+	// MaxChars is a character budget (docs/lsp 03 §4); count runes, not bytes,
+	// so CJK messages do not get truncated at a third of the configured size.
+	budget := maxChars - utf8.RuneCountInString(header)
 	written := 0
 	for _, item := range shown {
 		line := formatDiagnosticLine(item)
-		if budget-len(line) < 0 {
+		lineRunes := utf8.RuneCountInString(line)
+		if budget-lineRunes < 0 {
 			break
 		}
 		builder.WriteString(line)
-		budget -= len(line)
+		budget -= lineRunes
 		written++
 	}
 	omittedByChars := len(shown) - written
 	if omittedByChars > 0 {
 		note := fmt.Sprintf("[lsp] %d more diagnostics omitted (max_chars=%d)\n", omittedByChars, maxChars)
-		if budget-len(note) >= 0 || written == 0 {
+		if budget-utf8.RuneCountInString(note) >= 0 || written == 0 {
 			builder.WriteString(note)
 		}
 	}
 	if omittedItems > 0 {
 		note := fmt.Sprintf("[lsp] %d more diagnostics omitted (max_items=%d)\n", omittedItems, maxItems)
-		if budget-len(note) >= 0 || written == 0 {
+		if budget-utf8.RuneCountInString(note) >= 0 || written == 0 {
 			builder.WriteString(note)
 		}
 	}

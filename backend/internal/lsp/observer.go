@@ -34,6 +34,17 @@ type Event struct {
 	// SessionID 是事件归属的会话（Bridge 从工具执行 ctx 解析；生命周期事件
 	// 没有执行上下文，保持为空）。
 	SessionID string `json:"session_id,omitempty"`
+	// ToolCallID/TurnID 把请求事件关联到具体工具调用与回合（工具执行 ctx
+	// 携带；生命周期事件为空）。观测方案 §3.1 的 join 键。
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	TurnID     string `json:"turn_id,omitempty"`
+	// PathFingerprint/DiagFingerprint 是低敏关联指纹（不落路径与诊断正文）：
+	// 前者用于把同一文件的编辑串起来算 closure，后者标识本次诊断集合。
+	PathFingerprint string `json:"path_fingerprint,omitempty"`
+	DiagFingerprint string `json:"diag_fingerprint,omitempty"`
+	// Version/HasVersion 是诊断发布对应的文档版本（发布事件携带）。
+	Version    int  `json:"version,omitempty"`
+	HasVersion bool `json:"has_version,omitempty"`
 	// Request 级字段（Kind == EventRequest）。
 	Trigger        string `json:"trigger,omitempty"`
 	Outcome        string `json:"outcome,omitempty"`
@@ -42,6 +53,9 @@ type Event struct {
 	AppendedBytes  int    `json:"appended_bytes,omitempty"`
 	OmittedItems   int    `json:"omitted_items,omitempty"`
 	OmittedByChars int    `json:"omitted_by_chars,omitempty"`
+	// ReasonCategory is the low-sensitivity category of the degrade reason
+	// (Kind == EventRequest); the free-form reason never leaves the process.
+	ReasonCategory string `json:"reason_category,omitempty"`
 }
 
 // Observer receives pool events. A nil Observer disables delivery.

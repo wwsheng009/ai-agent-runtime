@@ -17,6 +17,8 @@ type RegistryOptions struct {
 	Observer      Observer
 	ClientName    string
 	ClientVersion string
+	// Now is the injectable clock for restart-window tests.
+	Now func() time.Time
 }
 
 // Registry owns the pool of language server clients for one workspace root.
@@ -32,19 +34,21 @@ type Registry struct {
 	entries map[string]*registryEntry
 	order   []string
 	stopped bool
+	now     func() time.Time
 }
 
 type registryEntry struct {
 	spec   ServerSpec
 	parent *Registry
 
-	mu        sync.Mutex
-	client    *Client
-	starting  bool
-	lastErr   string
-	restarts  int
-	startedAt time.Time
-	readyAt   time.Time
+	mu            sync.Mutex
+	client        *Client
+	starting      bool
+	lastErr       string
+	restarts      int
+	lastRestartAt time.Time
+	startedAt     time.Time
+	readyAt       time.Time
 }
 
 // NewRegistry builds the pool from config. Servers start lazily on first use
@@ -62,6 +66,10 @@ func NewRegistry(cfg Config, root string, opts RegistryOptions) *Registry {
 		root:    root,
 		opts:    opts,
 		entries: make(map[string]*registryEntry, len(cfg.Servers)),
+		now:     opts.Now,
+	}
+	if registry.now == nil {
+		registry.now = time.Now
 	}
 	for _, spec := range cfg.Servers {
 		if !spec.IsEnabled() {
@@ -162,6 +170,7 @@ func (r *Registry) Restart(ctx context.Context, name string) error {
 	entry.stop(ctx)
 	entry.mu.Lock()
 	entry.restarts++
+	entry.lastRestartAt = r.now()
 	entry.mu.Unlock()
 	return entry.start(ctx)
 }
@@ -302,6 +311,12 @@ func (s *Server) wantsStart() bool {
 	if entry.client.Status().State != StateCrashed {
 		return false
 	}
+	// Sliding window: a crash that follows a quiet period longer than
+	// restartWindow gets a fresh budget instead of leaving the member
+	// degraded for the rest of the process lifetime.
+	if entry.restarts > 0 && entry.parent.now().Sub(entry.lastRestartAt) > entry.parent.cfg.RestartWindowValue() {
+		entry.restarts = 0
+	}
 	return entry.restarts < entry.parent.cfg.RestartLimitValue()
 }
 
@@ -365,6 +380,7 @@ func (e *registryEntry) start(ctx context.Context) error {
 		// Count the replacement before it starts so concurrent observers see
 		// the budget move immediately.
 		e.restarts++
+		e.lastRestartAt = e.parent.now()
 	}
 	e.starting = true
 	e.lastErr = ""
@@ -373,15 +389,18 @@ func (e *registryEntry) start(ctx context.Context) error {
 
 	opts := e.parent.opts
 	client, err := NewClient(ClientOptions{
-		Spec:            e.spec,
-		Root:            e.parent.root,
-		Dial:            opts.Dial,
-		Log:             opts.Logger,
-		Observer:        opts.Observer,
-		StartupTimeout:  e.spec.StartupTimeout,
-		ShutdownTimeout: e.spec.ShutdownTimeout,
-		ClientName:      opts.ClientName,
-		ClientVersion:   opts.ClientVersion,
+		Spec:             e.spec,
+		Root:             e.parent.root,
+		Dial:             opts.Dial,
+		Log:              opts.Logger,
+		Observer:         opts.Observer,
+		StartupTimeout:   e.spec.StartupTimeout,
+		ShutdownTimeout:  e.spec.ShutdownTimeout,
+		ClientName:       opts.ClientName,
+		ClientVersion:    opts.ClientVersion,
+		EmptyEarlyAccept: e.parent.cfg.Diagnostics.EmptyEarlyAcceptValue() && e.spec.EmptyPublishConclusiveValue(),
+		EmptyConfirm:     time.Duration(e.parent.cfg.Diagnostics.EmptyConfirmMS) * time.Millisecond,
+		MaxTrackedDocs:   e.parent.cfg.MaxTrackedDocsValue(),
 	})
 	if err == nil {
 		err = client.Start(ctx)

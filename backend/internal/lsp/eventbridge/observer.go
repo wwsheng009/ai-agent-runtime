@@ -38,41 +38,87 @@ func Observer(bus runtimeevents.Publisher, opts Options) runtimelsp.Observer {
 		}
 		switch event.Kind {
 		case runtimelsp.EventRequest:
+			payload := map[string]interface{}{
+				"trigger":          event.Trigger,
+				"outcome":          event.Outcome,
+				"duration_ms":      event.DurationMS,
+				"diag_count":       event.DiagCount,
+				"appended_bytes":   event.AppendedBytes,
+				"omitted_items":    event.OmittedItems,
+				"omitted_by_chars": event.OmittedByChars,
+				"server":           event.Server,
+			}
+			// Join keys (plan §3.1): request → tool call / turn. The raw path
+			// is projected to path_fingerprint by the observe plane and never
+			// persisted as text.
+			if event.ToolCallID != "" {
+				payload["tool_call_id"] = event.ToolCallID
+			}
+			if event.TurnID != "" {
+				payload["turn_id"] = event.TurnID
+			}
+			if event.ReasonCategory != "" {
+				payload["reason_category"] = event.ReasonCategory
+			}
+			pathFingerprint := event.PathFingerprint
+			if pathFingerprint == "" && event.Path != "" {
+				pathFingerprint = runtimelsp.FingerprintPath(event.Path)
+			}
+			if pathFingerprint != "" {
+				payload["path_fingerprint"] = pathFingerprint
+			}
+			if event.DiagFingerprint != "" {
+				payload["diag_fingerprint"] = event.DiagFingerprint
+			}
 			bus.Publish(runtimeevents.Event{
 				Type:      runtimeevents.EventLSPRequestFinished,
 				SessionID: sessionID,
 				Timestamp: event.Time,
-				Payload: map[string]interface{}{
-					"trigger":          event.Trigger,
-					"outcome":          event.Outcome,
-					"duration_ms":      event.DurationMS,
-					"diag_count":       event.DiagCount,
-					"appended_bytes":   event.AppendedBytes,
-					"omitted_items":    event.OmittedItems,
-					"omitted_by_chars": event.OmittedByChars,
-					"server":           event.Server,
-				},
+				Payload:   payload,
 			})
 		case runtimelsp.EventServerState:
+			reason := event.Status.Reason
+			if reason == "" {
+				reason = event.Status.LastError
+			}
+			payload := map[string]interface{}{
+				"server": event.Status.Name,
+				"state":  string(event.Status.State),
+				"pid":    event.Status.PID,
+			}
+			if category := runtimelsp.ReasonCategory(reason); category != "" {
+				payload["reason_category"] = category
+			}
 			bus.Publish(runtimeevents.Event{
 				Type:      runtimeevents.EventLSPServerState,
 				SessionID: sessionID,
 				Timestamp: event.Time,
-				Payload: map[string]interface{}{
-					"server": event.Status.Name,
-					"state":  string(event.Status.State),
-					"pid":    event.Status.PID,
-				},
+				Payload:   payload,
 			})
 		case runtimelsp.EventDiagnostics:
+			payload := map[string]interface{}{
+				"server": event.Server,
+				"count":  event.Count,
+			}
+			pathFingerprint := event.PathFingerprint
+			if pathFingerprint == "" && event.Path != "" {
+				pathFingerprint = runtimelsp.FingerprintPath(event.Path)
+			}
+			if pathFingerprint != "" {
+				payload["path_fingerprint"] = pathFingerprint
+			}
+			if event.HasVersion {
+				payload["version"] = event.Version
+				payload["has_version"] = true
+			}
+			if event.DiagFingerprint != "" {
+				payload["diag_fingerprint"] = event.DiagFingerprint
+			}
 			bus.Publish(runtimeevents.Event{
 				Type:      runtimeevents.EventLSPDiagnosticsUpdated,
 				SessionID: sessionID,
 				Timestamp: event.Time,
-				Payload: map[string]interface{}{
-					"server": event.Server,
-					"count":  event.Count,
-				},
+				Payload:   payload,
 			})
 		}
 	}

@@ -9,7 +9,8 @@ import (
 )
 
 // writeFixture 写入与 scripts/analyze-lsp-baseline.py --selftest 同构的样例：
-// 两侧实现必须给出同一组数字（3 请求 / P50 10ms / 覆盖率 1.0 / 追加比 100:1100）。
+// 两侧实现必须给出同一组数字（4 请求 / P50 7ms / 覆盖率 1.0 / 追加比 100:1100 /
+// closure 1.0）。
 func writeFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -18,8 +19,9 @@ func writeFixture(t *testing.T) string {
 		t.Fatalf("mkdir: %v", err)
 	}
 	lines := []string{
-		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"trigger":"inline","outcome":"injected","duration_ms":10,"diag_count":2,"appended_bytes":100,"server":"gopls"}}`,
-		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:01:00Z","payload":{"trigger":"inline","outcome":"degraded_no_fresh","duration_ms":30}}`,
+		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"trigger":"inline","outcome":"injected","duration_ms":10,"diag_count":2,"appended_bytes":100,"server":"gopls","path_fingerprint":"p1","diag_fingerprint":"d1"}}`,
+		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:02:00Z","payload":{"trigger":"tool","outcome":"clean","duration_ms":7,"path_fingerprint":"p1"}}`,
+		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:01:00Z","payload":{"trigger":"inline","outcome":"degraded_no_fresh","duration_ms":30,"reason_category":"wait_timeout"}}`,
 		`{"type":"lsp.request.finished","session_id":"s2","timestamp":"2026-09-29T10:02:00Z","payload":{"trigger":"tool","outcome":"no_server","duration_ms":5}}`,
 		`{"type":"tool.completed","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"logical_tool":"apply_patch","output_model_visible_bytes":1000}}`,
 		`{"type":"tool.completed","session_id":"s1","timestamp":"2026-09-29T10:01:00Z","payload":{"logical_tool":"write","output_model_visible_bytes":100}}`,
@@ -39,18 +41,18 @@ func TestAnalyzeFixtureMatchesScriptNumbers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
-	if stats.Requests != 3 || stats.Sessions != 2 {
-		t.Fatalf("requests/sessions = %d/%d, want 3/2", stats.Requests, stats.Sessions)
+	if stats.Requests != 4 || stats.Sessions != 2 {
+		t.Fatalf("requests/sessions = %d/%d, want 4/2", stats.Requests, stats.Sessions)
 	}
-	if stats.Triggers["inline"] != 2 || stats.Triggers["tool"] != 1 {
+	if stats.Triggers["inline"] != 2 || stats.Triggers["tool"] != 2 {
 		t.Fatalf("triggers = %#v", stats.Triggers)
 	}
 	if stats.Injected != 1 || stats.DiagHit != 1 || stats.Degraded != 1 || stats.NoServer != 1 {
 		t.Fatalf("outcome counters = injected %d hit %d degraded %d no_server %d",
 			stats.Injected, stats.DiagHit, stats.Degraded, stats.NoServer)
 	}
-	if stats.LatencyP50MS == nil || *stats.LatencyP50MS != 10 {
-		t.Fatalf("p50 = %v, want 10", stats.LatencyP50MS)
+	if stats.LatencyP50MS == nil || *stats.LatencyP50MS != 7 {
+		t.Fatalf("p50 = %v, want 7", stats.LatencyP50MS)
 	}
 	if stats.LatencyP95MS == nil || *stats.LatencyP95MS != 30 {
 		t.Fatalf("p95 = %v, want 30", stats.LatencyP95MS)
@@ -75,8 +77,14 @@ func TestAnalyzeFixtureMatchesScriptNumbers(t *testing.T) {
 	if got := rows["lsp_append_bytes_ratio"].Value; got != "0.0909" {
 		t.Fatalf("append ratio = %q, want 0.0909", got)
 	}
-	if !strings.HasPrefix(rows["lsp_closure_ratio"].Value, "n/a") {
-		t.Fatalf("closure must be honest n/a, got %q", rows["lsp_closure_ratio"].Value)
+	if stats.ClosureEligible != 1 || stats.ClosureClosed != 1 {
+		t.Fatalf("closure counters = %d/%d, want 1/1", stats.ClosureEligible, stats.ClosureClosed)
+	}
+	if got := rows["lsp_closure_ratio"].Value; got != "1.0000" {
+		t.Fatalf("closure = %q, want 1.0000", got)
+	}
+	if got := stats.DegradeReasons["wait_timeout"]; got != 1 {
+		t.Fatalf("degrade_reasons[wait_timeout] = %d, want 1", got)
 	}
 	if report := RenderMarkdown(stats); !strings.Contains(report, "§4.3 基线登记表") {
 		t.Fatalf("report missing table header")
@@ -85,14 +93,14 @@ func TestAnalyzeFixtureMatchesScriptNumbers(t *testing.T) {
 
 func TestAnalyzeWindowAndEmptyState(t *testing.T) {
 	root := writeFixture(t)
-	// 窗口只保留 10:02 之后的事件：只剩 1 条（tool/no_server）；被窗口挡掉的
-	// 两类事件（3 条 request + 2 条编辑回执）都计入 skipped_old。
+	// 窗口只保留 10:02 之后的事件：剩 2 条（clean + tool/no_server）；被窗口
+	// 挡掉的事件（2 条 request + 3 条工具回执）都计入 skipped_old。
 	stats, err := Analyze(Options{Roots: []string{root}, Since: time.Date(2026, 9, 29, 10, 2, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
-	if stats.Requests != 1 || stats.Scan.SkippedOld != 5 {
-		t.Fatalf("window requests/skipped = %d/%d, want 1/5", stats.Requests, stats.Scan.SkippedOld)
+	if stats.Requests != 2 || stats.Scan.SkippedOld != 5 {
+		t.Fatalf("window requests/skipped = %d/%d, want 2/5", stats.Requests, stats.Scan.SkippedOld)
 	}
 	// 无 LSP 活跃会话时覆盖率不得渲染成 0（§4.3 反模式）。
 	empty, err := Analyze(Options{Roots: []string{filepath.Join(root, "missing")}})

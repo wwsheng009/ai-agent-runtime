@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 // DialResult carries a live bidirectional connection to a language server
@@ -23,6 +26,14 @@ type DialResult struct {
 	Kill func() error
 	// Wait blocks until the process exits. May be nil.
 	Wait func() error
+	// Guard is the process-tree guard that owns this server (ADR-0005):
+	// Windows Job Object with KILL_ON_JOB_CLOSE, Unix process group. It may be
+	// nil for in-process dialects; callers that need tree semantics must treat
+	// nil as "no guard available" rather than creating their own.
+	Guard *executor.ProcessGuard
+	// StderrTail returns the last captured stderr lines ("" when none); it
+	// feeds the crash reason so failures stay attributable.
+	StderrTail func() string
 }
 
 // DialFunc starts (or attaches to) a language server for the given spec.
@@ -42,6 +53,14 @@ type ClientOptions struct {
 	ShutdownTimeout time.Duration
 	ClientName      string
 	ClientVersion   string
+	// EmptyEarlyAccept trusts a version-stamped empty publish as conclusive
+	// (clean fast path). See DiagnosticsConfig.EmptyEarlyAccept.
+	EmptyEarlyAccept bool
+	// EmptyConfirm debounces a conclusive empty publish (a real set published
+	// moments later supersedes it). <=0 accepts immediately.
+	EmptyConfirm time.Duration
+	// MaxTrackedDocs caps the open-document set; <=0 uses the default.
+	MaxTrackedDocs int
 }
 
 // diagSnapshot is the last publishDiagnostics payload for one document.
@@ -54,6 +73,18 @@ type diagSnapshot struct {
 	Superseded bool
 	ReceivedAt time.Time
 }
+
+// acceptedEmpty records a conclusive-empty answer handed to a caller so a
+// later non-empty publish for the same version can be counted as a false
+// clean.
+type acceptedEmpty struct {
+	version int
+	at      time.Time
+}
+
+// emptyAcceptSupersedeWindow bounds how long after a conclusive-empty answer a
+// non-empty publish for the same version still counts as a false clean.
+const emptyAcceptSupersedeWindow = 30 * time.Second
 
 // Client is a single language server connection bound to one workspace root.
 type Client struct {
@@ -68,8 +99,35 @@ type Client struct {
 	enc      PositionEncoding
 	syncKind textDocumentSync
 	docs     map[string]*Document
+	docUsed  map[string]time.Time
 	diags    map[string]*diagSnapshot
 	waiters  map[string][]chan struct{}
+	// lastEmit dedupes diagnostics.updated events by set fingerprint so a
+	// server re-publishing the same set does not flood the event plane.
+	lastEmit map[string]string
+	maxDocs  int
+	// everPublished marks the first diagnostics publish observed on this
+	// connection. Before it, the first analysis of a module view may still be
+	// loading; the bridge grants one bounded cold-start grace per path
+	// (TakeColdGrace) and reports first-publish latency in the status.
+	everPublished atomic.Bool
+	firstPublish  time.Time
+	coldGraced    map[string]struct{}
+	// coldWait marks paths whose wait already timed out with no snapshot at
+	// all (cold view still loading); the bridge then uses a reduced retry
+	// budget until the first publish for the path arrives.
+	coldWait map[string]struct{}
+	// nonEmptyVersions remembers the last version that produced a non-empty
+	// diagnostic set per document. An empty publish for that same version is a
+	// re-analysis artifact (live evidence: gopls republishes an empty set for a
+	// version that already had problems, then the real set seconds later), so
+	// it must not be treated as a conclusive clean.
+	nonEmptyVersions map[string]int
+	// emptyAccepted records conclusive-empty answers handed to callers so a
+	// later non-empty publish for the same version can be counted as a false
+	// clean (empty_accept_superseded), the regression guard for the fast path.
+	emptyAccepted map[string]acceptedEmpty
+	superseded    atomic.Int64
 
 	exiting atomic.Bool
 	done    chan struct{}
@@ -107,12 +165,22 @@ func NewClient(opts ClientOptions) (*Client, error) {
 			State:  StateUnavailable,
 			Reason: "not started",
 		},
-		enc:      EncodingUTF16,
-		syncKind: textDocumentSync{Change: TextDocumentSyncKindFull},
-		docs:     map[string]*Document{},
-		diags:    map[string]*diagSnapshot{},
-		waiters:  map[string][]chan struct{}{},
-		done:     make(chan struct{}),
+		enc:              EncodingUTF16,
+		syncKind:         textDocumentSync{Change: TextDocumentSyncKindFull},
+		docs:             map[string]*Document{},
+		docUsed:          map[string]time.Time{},
+		diags:            map[string]*diagSnapshot{},
+		waiters:          map[string][]chan struct{}{},
+		lastEmit:         map[string]string{},
+		coldGraced:       map[string]struct{}{},
+		coldWait:         map[string]struct{}{},
+		nonEmptyVersions: map[string]int{},
+		emptyAccepted:    map[string]acceptedEmpty{},
+		done:             make(chan struct{}),
+	}
+	c.maxDocs = opts.MaxTrackedDocs
+	if c.maxDocs <= 0 {
+		c.maxDocs = DefaultMaxTrackedDocs
 	}
 	return c, nil
 }
@@ -218,7 +286,11 @@ func defaultClientCapabilities() clientCapabilities {
 			PublishDiagnostics: &publishDiagnosticsCapabilities{VersionSupport: true},
 			Synchronization:    &synchronizationCapabilities{DidSave: true},
 		},
-		Workspace: &workspaceCapabilities{WorkspaceFolders: false},
+		// We always send a workspaceFolders array in initializeParams; the
+		// capability must therefore advertise support (LSP 3.17 spec). A
+		// false value while sending folders is contradictory and lets
+		// strict servers ignore the folder set.
+		Workspace: &workspaceCapabilities{WorkspaceFolders: true},
 	}
 }
 
@@ -231,11 +303,17 @@ func (c *Client) watchExit() {
 		if c.exiting.Load() {
 			return
 		}
-		c.opts.Log.Warnf("lsp: server %s exited unexpectedly: %v", c.opts.Spec.Name, err)
+		reason := judgeReason(err)
+		if c.dialRes.StderrTail != nil {
+			if tail := strings.TrimSpace(c.dialRes.StderrTail()); tail != "" {
+				reason = truncateReason(reason + ": " + tail)
+			}
+		}
+		c.opts.Log.Warnf("lsp: server %s exited unexpectedly: %v", c.opts.Spec.Name, reason)
 		c.setStatus(func(s *ServerStatus) {
 			s.State = StateCrashed
-			s.Reason = judgeReason(err)
-			s.LastError = judgeReason(err)
+			s.Reason = reason
+			s.LastError = reason
 		})
 		if c.tr != nil {
 			c.tr.close()
@@ -256,7 +334,83 @@ func (c *Client) Done() <-chan struct{} { return c.done }
 func (c *Client) Status() ServerStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.status
+	status := c.status
+	if !c.firstPublish.IsZero() && !status.StartedAt.IsZero() {
+		status.FirstPublishMS = c.firstPublish.Sub(status.StartedAt).Milliseconds()
+	}
+	status.EmptyAcceptSuperseded = c.superseded.Load()
+	return status
+}
+
+// EverPublished reports whether this connection has ever received a
+// diagnostics publish (including empty sets).
+func (c *Client) EverPublished() bool {
+	return c != nil && c.everPublished.Load()
+}
+
+// TakeColdGrace grants a one-time extended wait for path while this
+// connection has never published anything. It bounds the cold-start grace to
+// one grant per path per server instance, so an ignored file (never
+// published) pays the extension once instead of on every edit.
+func (c *Client) TakeColdGrace(path string) bool {
+	if c == nil || c.everPublished.Load() {
+		return false
+	}
+	uri := PathToURI(path)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.coldGraced[uri]; ok {
+		return false
+	}
+	c.coldGraced[uri] = struct{}{}
+	return true
+}
+
+// FirstPublishAt returns when the first diagnostics publish arrived (zero
+// before that).
+func (c *Client) FirstPublishAt() time.Time {
+	if c == nil {
+		return time.Time{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.firstPublish
+}
+
+// ColdGraceUsed reports whether the one-time cold grace was already spent on
+// this path (granted, regardless of whether it helped).
+func (c *Client) ColdGraceUsed(path string) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.coldGraced[PathToURI(path)]
+	return ok
+}
+
+// MarkColdWait records that a wait for path timed out with no snapshot at all.
+// Callers gate it on the cold-start signal (grace already spent, nothing ever
+// published) so a transient slow analysis on a warm connection never trips it.
+// The mark is cleared by the first publish for the path.
+func (c *Client) MarkColdWait(path string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.coldWait[PathToURI(path)] = struct{}{}
+}
+
+// ColdWait reports whether this path is known cold (see MarkColdWait).
+func (c *Client) ColdWait(path string) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.coldWait[PathToURI(path)]
+	return ok
 }
 
 // setStatus mutates the status record and emits a state event whenever the
@@ -309,6 +463,24 @@ func (c *Client) PID() int {
 	return c.dialRes.PID
 }
 
+// Call performs a raw JSON-RPC request against the running server.
+//
+// It exists so consumers that need LSP methods beyond diagnostics (knowledge's
+// semantic adapter: textDocument/definition, textDocument/references) can reuse
+// this client's transport, lifecycle and position-encoding negotiation instead
+// of speaking the protocol themselves. The caller owns method/param semantics.
+func (c *Client) Call(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
+	tr, err := c.transport()
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.touchActive()
+	return tr.call(ctx, method, params)
+}
+
 func (c *Client) transport() (*transport, error) {
 	if c.tr == nil {
 		return nil, ErrTransportClosed
@@ -331,10 +503,12 @@ func (c *Client) OpenOrUpdate(ctx context.Context, path string, content []byte) 
 	enc := c.enc
 	kind := c.syncKind.Change
 	var (
-		version int
-		change  *ProtocolRange
+		version    int
+		change     *ProtocolRange
+		changeText string
 	)
-	if !opened {
+	switch {
+	case !opened:
 		doc = &Document{
 			URI:      uri,
 			Path:     path,
@@ -345,19 +519,53 @@ func (c *Client) OpenOrUpdate(ctx context.Context, path string, content []byte) 
 		}
 		c.docs[uri] = doc
 		version = doc.Version
-	} else {
-		full := doc.FullRange(enc)
+	case bytes.Equal(doc.Content, stripped):
+		// No textual change: nothing to notify. The document version (and any
+		// diagnostics already published for it) stays current, so a wait can
+		// resolve from the existing snapshot instead of waiting for a publish
+		// that will never come.
+		c.docUsed[uri] = time.Now()
+		c.mu.Unlock()
+		return doc.Version, nil
+	default:
+		oldContent := doc.Content
 		doc.Version++
 		doc.Content = stripped
 		version = doc.Version
-		change = &full
+		if kind == TextDocumentSyncKindIncremental {
+			if span, ok := singleSpanEdit(oldContent, stripped); ok {
+				change = &ProtocolRange{
+					Start: CanonicalToProtocol(oldContent, enc, OffsetToCanonical(oldContent, span.start)),
+					End:   CanonicalToProtocol(oldContent, enc, OffsetToCanonical(oldContent, span.oldEnd)),
+				}
+				changeText = string(stripped[span.newStart:span.newEnd])
+			}
+		}
+		if change == nil {
+			// Full-sync servers (or a diff that cannot be expressed as one
+			// span): send the whole document as a full-range replacement.
+			full := doc.FullRange(enc)
+			change = &full
+			changeText = string(doc.Content)
+		}
 	}
 	if snap := c.diags[uri]; snap != nil {
 		snap.Superseded = true
 	}
+	c.docUsed[uri] = time.Now()
+	evicted := c.evictOverCapLocked(uri)
 	text := string(doc.Content)
 	languageID := doc.Language
 	c.mu.Unlock()
+
+	// Evicted documents are closed after the lock: didClose is best effort and
+	// must never block the edit itself.
+	for _, evictedURI := range evicted {
+		params := didCloseParams{TextDocument: textDocumentIdentifier{URI: evictedURI}}
+		if err := tr.notify("textDocument/didClose", params); err != nil {
+			c.opts.Log.Debugf("lsp: %s didClose %s: %v", c.opts.Spec.Name, evictedURI, err)
+		}
+	}
 
 	if !opened {
 		params := didOpenParams{
@@ -375,7 +583,7 @@ func (c *Client) OpenOrUpdate(ctx context.Context, path string, content []byte) 
 		return version, nil
 	}
 
-	event := textDocumentContentChangeEvent{Text: text}
+	event := textDocumentContentChangeEvent{Text: changeText}
 	if kind == TextDocumentSyncKindIncremental {
 		event.Range = change
 	}
@@ -388,6 +596,41 @@ func (c *Client) OpenOrUpdate(ctx context.Context, path string, content []byte) 
 	}
 	c.touchActive()
 	return version, nil
+}
+
+// evictOverCapLocked trims the open-document set to maxDocs, closing the
+// least-recently-used documents. The just-touched document is never evicted.
+// Callers must hold c.mu and send didClose for the returned URIs.
+func (c *Client) evictOverCapLocked(keep string) []string {
+	if c.maxDocs <= 0 || len(c.docs) <= c.maxDocs {
+		return nil
+	}
+	var evicted []string
+	for len(c.docs) > c.maxDocs {
+		oldestURI := ""
+		var oldest time.Time
+		for uri := range c.docs {
+			if uri == keep {
+				continue
+			}
+			used := c.docUsed[uri]
+			if oldestURI == "" || used.Before(oldest) {
+				oldestURI, oldest = uri, used
+			}
+		}
+		if oldestURI == "" {
+			break
+		}
+		delete(c.docs, oldestURI)
+		delete(c.diags, oldestURI)
+		delete(c.docUsed, oldestURI)
+		delete(c.lastEmit, oldestURI)
+		delete(c.nonEmptyVersions, oldestURI)
+		delete(c.emptyAccepted, oldestURI)
+		delete(c.coldWait, oldestURI)
+		evicted = append(evicted, oldestURI)
+	}
+	return evicted
 }
 
 // Save notifies the server that a tracked document was flushed to disk.
@@ -460,6 +703,18 @@ func (c *Client) CurrentDiagnostics(path string) []Diagnostic {
 	return append([]Diagnostic(nil), snap.Items...)
 }
 
+// HasSnapshot reports whether the server ever published a diagnostic set for
+// this document (fresh or stale). It lets callers separate "nothing to report"
+// from "never published" when a wait times out.
+func (c *Client) HasSnapshot(path string) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.diags[PathToURI(path)] != nil
+}
+
 // WaitDiagnostics waits for diagnostics published for the given document
 // version. fresh=false means the wait timed out or only stale data was
 // available. version<=0 matches any publish received after the local change.
@@ -474,15 +729,53 @@ func (c *Client) WaitDiagnostics(ctx context.Context, path string, version int, 
 		return c.bestEffort(uri)
 	}
 	deadline := time.Now().Add(wait)
+	var emptySince time.Time
 	for {
-		remaining := time.Until(deadline)
 		c.mu.Lock()
 		snap := c.diags[uri]
-		if snap != nil && !snap.Superseded && acceptable(snap, version) && len(snap.Items) > 0 {
-			items := append([]Diagnostic(nil), snap.Items...)
-			c.mu.Unlock()
-			return items, true
+		emptyConclusive := false
+		if snap != nil && !snap.Superseded && acceptable(snap, version) {
+			if len(snap.Items) > 0 {
+				items := append([]Diagnostic(nil), snap.Items...)
+				c.mu.Unlock()
+				return items, true
+			}
+			// Conclusive empty: the server stamped the publish with the
+			// current document version, so it analyzed exactly this text.
+			// Unstamped empty publishes stay conservative (see settle) to
+			// avoid masking interim results from servers like rust-analyzer.
+			// The same version must never have shown problems before: an empty
+			// publish after a non-empty one is a re-analysis artifact, not a
+			// clean bill of health.
+			if c.opts.EmptyEarlyAccept && version > 0 && snap.HasVersion && snap.Version == version &&
+				c.nonEmptyVersions[uri] != version {
+				if emptySince.IsZero() {
+					emptySince = time.Now()
+				}
+				if c.opts.EmptyConfirm <= 0 || time.Since(emptySince) >= c.opts.EmptyConfirm {
+					emptyConclusive = true
+				}
+			} else {
+				emptySince = time.Time{}
+			}
+		} else {
+			emptySince = time.Time{}
 		}
+		if emptyConclusive {
+			c.emptyAccepted[uri] = acceptedEmpty{version: snap.Version, at: time.Now()}
+			c.mu.Unlock()
+			return nil, true
+		}
+		// Compute the wait window *after* evaluating the snapshot: the first
+		// empty publish sets emptySince in this iteration, and the debounce
+		// deadline must be derived from it rather than from the previous loop.
+		waitUntil := deadline
+		if !emptySince.IsZero() && c.opts.EmptyConfirm > 0 {
+			if confirmAt := emptySince.Add(c.opts.EmptyConfirm); confirmAt.Before(waitUntil) {
+				waitUntil = confirmAt
+			}
+		}
+		remaining := time.Until(waitUntil)
 		if remaining <= 0 {
 			c.mu.Unlock()
 			return c.settle(uri, version)
@@ -514,8 +807,14 @@ func (c *Client) settle(uri string, version int) ([]Diagnostic, bool) {
 	c.mu.Lock()
 	snap := c.diags[uri]
 	if snap != nil && !snap.Superseded && acceptable(snap, version) && len(snap.Items) == 0 {
-		c.mu.Unlock()
-		return nil, true
+		// Conclusive only when this version never had a non-empty set; a churn
+		// empty (live evidence: gopls republished empty then the real set
+		// 1.3-7.9s later for the same version) must degrade, not claim clean.
+		if !snap.HasVersion || c.nonEmptyVersions[uri] != snap.Version {
+			c.emptyAccepted[uri] = acceptedEmpty{version: snap.Version, at: time.Now()}
+			c.mu.Unlock()
+			return nil, true
+		}
 	}
 	c.mu.Unlock()
 	return c.bestEffort(uri)
@@ -609,6 +908,28 @@ func (c *Client) handlePublishDiagnostics(params json.RawMessage) {
 		snap.HasVersion = true
 	}
 	c.diags[payload.URI] = snap
+	if c.firstPublish.IsZero() {
+		c.firstPublish = time.Now()
+		c.everPublished.Store(true)
+	}
+	// Any publish for the path ends its cold state: the view is alive.
+	delete(c.coldWait, payload.URI)
+	if len(items) > 0 && snap.HasVersion {
+		// Remember which version showed problems so a later empty publish for
+		// it is not mistaken for a clean result (see WaitDiagnostics/settle).
+		c.nonEmptyVersions[payload.URI] = snap.Version
+	}
+	if len(items) > 0 {
+		// A conclusive-empty answer that a non-empty publish for the same
+		// version contradicts is a false clean: count it as the regression
+		// guard for the fast path.
+		if accepted, ok := c.emptyAccepted[payload.URI]; ok {
+			if accepted.version == snap.Version && time.Since(accepted.at) <= emptyAcceptSupersedeWindow {
+				c.superseded.Add(1)
+			}
+			delete(c.emptyAccepted, payload.URI)
+		}
+	}
 	waiters := c.waiters[payload.URI]
 	delete(c.waiters, payload.URI)
 	tracked := doc != nil
@@ -617,7 +938,26 @@ func (c *Client) handlePublishDiagnostics(params json.RawMessage) {
 		close(ch)
 	}
 	if tracked {
-		c.emit(Event{Kind: EventDiagnostics, Path: URIToPath(payload.URI), Count: len(items)})
+		// Dedupe by set fingerprint: servers re-publish identical sets on
+		// unrelated notifications; only changes are observable facts.
+		fingerprint := DiagnosticsFingerprint(items)
+		c.mu.Lock()
+		changed := c.lastEmit[payload.URI] != fingerprint
+		if changed {
+			c.lastEmit[payload.URI] = fingerprint
+		}
+		c.mu.Unlock()
+		if changed {
+			c.emit(Event{
+				Kind:            EventDiagnostics,
+				Path:            URIToPath(payload.URI),
+				PathFingerprint: FingerprintPath(URIToPath(payload.URI)),
+				Count:           len(items),
+				DiagFingerprint: fingerprint,
+				Version:         snap.Version,
+				HasVersion:      snap.HasVersion,
+			})
+		}
 	}
 }
 

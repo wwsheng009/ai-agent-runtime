@@ -106,13 +106,35 @@ func Rows(stats Stats) []Row {
 		},
 		{
 			Metric:     "lsp_closure_ratio",
-			Value:      "n/a（事件暂无诊断身份，需补 fingerprint）",
+			Value:      closureText(stats),
 			Window:     window,
-			Samples:    "0（口径未定义，非缺失数据）",
-			Conclusion: "待采集（§3 后续项）",
+			Samples:    closureSamples(stats),
+			Conclusion: closureConclusion(stats),
 			Date:       date,
 		},
 	}
+}
+
+func closureText(stats Stats) string {
+	if stats.ClosureEligible <= 0 {
+		return "n/a（窗口内无带 fingerprint 的 injected 请求）"
+	}
+	return ratioText(stats.ClosureClosed, stats.ClosureEligible, "")
+}
+
+func closureSamples(stats Stats) string {
+	if stats.ClosureEligible <= 0 {
+		return "eligible 0（未采集，非缺失数据）"
+	}
+	return fmt.Sprintf("closed %d / eligible %d（下一次同文件编辑为 clean）",
+		stats.ClosureClosed, stats.ClosureEligible)
+}
+
+func closureConclusion(stats Stats) string {
+	if stats.ClosureEligible <= 0 {
+		return "待采集（需要 path/diag fingerprint 事件）"
+	}
+	return "待标定（需人工判读）"
 }
 
 // RenderMarkdown 渲染完整报告（章节与离线脚本同构，供 /lsp baseline 与后续
@@ -142,6 +164,12 @@ func RenderMarkdown(stats Stats) string {
 	builder.WriteString("\n### 事实明细（不构成阈值判断）\n\n")
 	fmt.Fprintf(&builder, "- 触发：%s\n", compactJSON(stats.Triggers))
 	fmt.Fprintf(&builder, "- 结果：%s\n", compactJSON(stats.Outcomes))
+	if n := stats.Outcomes["degraded"]; n > 0 {
+		fmt.Fprintf(&builder, "- 未分类降级：%d 条（旧构建无 `reason` 字段或其他未知原因；计入 fallback 分子，但无法按原因细分）\n", n)
+	}
+	if len(stats.DegradeReasons) > 0 {
+		fmt.Fprintf(&builder, "- 降级原因分布（新构建，低敏枚举）：%s\n", compactJSON(stats.DegradeReasons))
+	}
 	p50, p95 := "n/a", "n/a"
 	if stats.LatencyP50MS != nil {
 		p50 = fmt.Sprintf("%d", *stats.LatencyP50MS)
@@ -175,7 +203,7 @@ func RenderMarkdown(stats Stats) string {
 	}
 	builder.WriteString("\n### 口径与限制\n\n")
 	builder.WriteString("- 覆盖率分母是「LSP 活跃会话」内的编辑类工具调用次数；一次调用可能覆盖多文件（多行 request 事件），该比值是近似口径。\n")
-	builder.WriteString("- `lsp_closure_ratio` 需要诊断身份（fingerprint）才能计算续轮消失率：当前事件只有标量，标记 n/a。\n")
+	builder.WriteString("- `lsp_closure_ratio` 基于 path/diag fingerprint 计算：被注入的诊断集合在下一次同文件编辑后消失（下一次请求为 clean）才算闭环；无 fingerprint 样本输出 n/a。\n")
 	builder.WriteString("- `lsp_append_bytes_ratio` 依赖编辑回执的 `output_model_visible_bytes`；回执未携带时标记 n/a（不猜分母）。\n")
 	return builder.String()
 }

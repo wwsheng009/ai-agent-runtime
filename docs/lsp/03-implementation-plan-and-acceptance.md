@@ -67,6 +67,13 @@
 | `diagnostics.degrade_mode` | LSP 缺失/超时时：返回空 / 返回提示 / 失败（Q3） | 三选一，且行为可被消息内容区分 |
 | `lsp.prewarm` | 池构建时是否预热全部 server（关闭时保持 W3 首次使用懒启动） | 默认 `false`；预热失败与懒启动失败同为"不可用" |
 | `lsp.restart_limit` | 单个 server 每会话的自动崩溃替换上限（L2） | 默认 `1`；`0` = 关闭自动恢复（手动重启仍可用） |
+| `lsp.restart_window` | 自动恢复预算的滑动窗口：静默期超过窗口后预算重置（2026-10-01 落地） | 默认 `10m`；防止一次预算耗尽后整场会话静默降级 |
+| `lsp.max_tracked_docs` | 单 client 打开文档上限（LRU 逐出并发送 didClose） | 默认 `128` |
+| `diagnostics.start_wait_ms` | 冷启动（server 仍在握手）时的等待上限 | 默认 `250`；避免首个编辑烧满 `wait_ms` |
+| `diagnostics.empty_early_accept` | 带版本号的空发布是否视为"无问题"结论 | 默认 `true`，且仅对声明 `empty_publish_conclusive` 的 server 生效（gopls 预设开启） |
+| `diagnostics.empty_confirm_ms` | 空发布确认窗口（防中间空集） | 默认 `150` |
+| `diagnostics.hint_once` | 同一 (server, reason) 的内联降级提示只出现一次 | 默认 `true`；`lsp_diagnostics` 显式调用不受限 |
+| `servers[].empty_publish_conclusive` | 该 server 的空发布是否具结论性 | 默认 `false`；`gopls` 预设为 `true`，其余保守等待 |
 
 验收要求：上述每一项都能**在不改代码**的情况下改变行为（配置化本身是验收项 A5）。
 

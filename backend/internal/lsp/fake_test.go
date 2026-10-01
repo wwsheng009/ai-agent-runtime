@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeDiagnostic is the compact test description of one diagnostic. Positions
@@ -29,18 +30,31 @@ type fakeDiagnostic struct {
 type fakeServer struct {
 	t        *testing.T
 	encoding string
+	// syncKind is the textDocumentSync change kind advertised in initialize
+	// (1 = full, 2 = incremental). Zero means full.
+	syncKind int
 
 	// diagnosticsFor is invoked for every didOpen/didChange with the document
 	// version the client just announced; nil publishes an empty set.
 	diagnosticsFor func(uri string, version int) []fakeDiagnostic
 	// diagnosticsOnOpen, when set, replaces diagnosticsFor for didOpen only.
 	diagnosticsOnOpen func(uri string, version int) []fakeDiagnostic
+	// suppressPublish models a server that never publishes diagnostics for the
+	// document (ignored directory / file outside the server's module).
+	suppressPublish bool
+	// publishDelay postpones diagnostics publishes, modelling a slow first
+	// analysis (cold module view) that lands after the normal wait budget.
+	publishDelay time.Duration
+	// initDelay postpones the initialize response, modelling a handshake that
+	// outlives diagnostics.start_wait_ms.
+	initDelay time.Duration
 
 	mu       sync.Mutex
 	conn     net.Conn
 	opened   map[string]string
 	versions map[string]int
 	methods  []string
+	changes  map[string][]didChangeParams
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
@@ -50,6 +64,7 @@ func newFakeServer(t *testing.T) *fakeServer {
 		encoding: "utf-16",
 		opened:   make(map[string]string),
 		versions: make(map[string]int),
+		changes:  make(map[string][]didChangeParams),
 	}
 }
 
@@ -86,6 +101,20 @@ func (f *fakeServer) records() []string {
 	return append([]string(nil), f.methods...)
 }
 
+// connection returns the peer connection once the serve loop captured it.
+func (f *fakeServer) connection() net.Conn {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.conn
+}
+
+// setSuppressPublish toggles publish suppression; safe while serving.
+func (f *fakeServer) setSuppressPublish(v bool) {
+	f.mu.Lock()
+	f.suppressPublish = v
+	f.mu.Unlock()
+}
+
 func (f *fakeServer) count(method string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -108,6 +137,17 @@ func (f *fakeServer) record(method string) {
 	f.mu.Lock()
 	f.methods = append(f.methods, method)
 	f.mu.Unlock()
+}
+
+// lastChange returns the most recent didChange params for one document.
+func (f *fakeServer) lastChange(uri string) (didChangeParams, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	changes := f.changes[uri]
+	if len(changes) == 0 {
+		return didChangeParams{}, false
+	}
+	return changes[len(changes)-1], true
 }
 
 type fakeRPCError struct {
@@ -146,10 +186,17 @@ func (f *fakeServer) serve(conn net.Conn) {
 		}
 		switch msg.Method {
 		case "initialize":
+			if f.initDelay > 0 {
+				time.Sleep(f.initDelay)
+			}
+			changeKind := f.syncKind
+			if changeKind == 0 {
+				changeKind = 1
+			}
 			f.respond(conn, msg.ID, map[string]interface{}{
 				"capabilities": map[string]interface{}{
 					"positionEncoding": f.encoding,
-					"textDocumentSync": 1,
+					"textDocumentSync": changeKind,
 				},
 				"serverInfo": map[string]interface{}{"name": "fake-lsp", "version": "0.0.1"},
 			})
@@ -169,12 +216,20 @@ func (f *fakeServer) serve(conn net.Conn) {
 				if f.diagnosticsOnOpen != nil {
 					items = f.diagnosticsOnOpen
 				}
-				f.publish(conn, params.TextDocument.URI, params.TextDocument.Version, items)
+				f.mu.Lock()
+				suppress := f.suppressPublish
+				f.mu.Unlock()
+				if !suppress {
+					f.publish(conn, params.TextDocument.URI, params.TextDocument.Version, items)
+				}
 			}
 		case "textDocument/didChange":
 			var params didChangeParams
 			if err := json.Unmarshal(msg.Params, &params); err == nil {
 				f.record("didChange")
+				f.mu.Lock()
+				f.changes[params.TextDocument.URI] = append(f.changes[params.TextDocument.URI], params)
+				f.mu.Unlock()
 				text := ""
 				if len(params.ContentChanges) > 0 {
 					text = params.ContentChanges[0].Text
@@ -183,7 +238,12 @@ func (f *fakeServer) serve(conn net.Conn) {
 				f.opened[params.TextDocument.URI] = text
 				f.versions[params.TextDocument.URI] = params.TextDocument.Version
 				f.mu.Unlock()
-				f.publish(conn, params.TextDocument.URI, params.TextDocument.Version, f.diagnosticsFor)
+				f.mu.Lock()
+				suppress := f.suppressPublish
+				f.mu.Unlock()
+				if !suppress {
+					f.publish(conn, params.TextDocument.URI, params.TextDocument.Version, f.diagnosticsFor)
+				}
 			}
 		case "textDocument/didSave":
 			f.record("didSave")
@@ -215,7 +275,7 @@ func (f *fakeServer) publish(conn net.Conn, uri string, version int, source func
 			"code":     item.Code,
 		})
 	}
-	f.write(conn, map[string]interface{}{
+	message := map[string]interface{}{
 		"jsonrpc": "2.0",
 		"method":  "textDocument/publishDiagnostics",
 		"params": map[string]interface{}{
@@ -223,7 +283,17 @@ func (f *fakeServer) publish(conn net.Conn, uri string, version int, source func
 			"version":     version,
 			"diagnostics": diagnostics,
 		},
-	})
+	}
+	if delay := f.publishDelay; delay > 0 {
+		// Asynchronous: a real server keeps reading while it computes, and on
+		// net.Pipe a blocking sleep would also stall the client's next write.
+		go func() {
+			time.Sleep(delay)
+			f.write(conn, message)
+		}()
+		return
+	}
+	f.write(conn, message)
 }
 
 func (f *fakeServer) respond(conn net.Conn, id json.RawMessage, result interface{}) {

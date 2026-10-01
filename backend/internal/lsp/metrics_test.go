@@ -26,8 +26,10 @@ func TestMetricsSnapshotAggregates(t *testing.T) {
 	if snap.DiagHit != 1 {
 		t.Fatalf("diag_hit = %d, want 1（只有 diag_count>0 的 injected 计入）", snap.DiagHit)
 	}
-	if snap.DiagHitRatio != 0.5 || snap.FallbackRatio != 0.2 {
-		t.Fatalf("ratios = diag_hit:%v fallback:%v, want 0.5/0.2", snap.DiagHitRatio, snap.FallbackRatio)
+	// fallback 分母为 attempted（5 请求 - 1 no_server = 4）：1/4 = 0.25。
+	if snap.DiagHitRatio != 0.5 || snap.FallbackRatio != 0.25 || snap.Attempted != 4 {
+		t.Fatalf("ratios = diag_hit:%v fallback:%v attempted:%d, want 0.5/0.25/4",
+			snap.DiagHitRatio, snap.FallbackRatio, snap.Attempted)
 	}
 	if snap.WaitLatencyP50MS != 10 || snap.WaitLatencyP95MS != 30 || snap.LatencySamples != 5 {
 		t.Fatalf("latency = p50:%d p95:%d samples:%d, want 10/30/5",
@@ -74,6 +76,7 @@ func TestClassifyOutcome(t *testing.T) {
 		{"no server", Outcome{}, "no_server"},
 		{"wait timeout", Outcome{Handled: true, Degraded: true, Reason: "no fresh diagnostics within 1s"}, "degraded_no_fresh"},
 		{"budget exhausted", Outcome{Handled: true, Degraded: true, Reason: "diagnostics wait budget exhausted"}, "degraded_no_fresh"},
+		{"server starting", Outcome{Handled: true, Degraded: true, Reason: "server still starting: gopls"}, "degraded_starting"},
 		{"read error", Outcome{Handled: true, Degraded: true, Reason: "read file: boom"}, "degraded_read_error"},
 		{"other degrade", Outcome{Handled: true, Degraded: true, Reason: "unknown"}, "degraded"},
 		{"clean", Outcome{Handled: true, Fresh: true}, "clean"},

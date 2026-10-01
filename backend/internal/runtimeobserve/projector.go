@@ -145,6 +145,17 @@ var payloadAllowKeys = map[string]bool{
 	"appended_bytes":   true,
 	"omitted_items":    true,
 	"omitted_by_chars": true,
+	// 请求级 join 键与低敏关联指纹（方案 §3.1/§3.4）：tool_call_id 是不透明
+	// 短 id，diag_fingerprint 是截断哈希，reason_category 是短枚举。
+	"tool_call_id":         true,
+	"reason_category":      true,
+	"diag_fingerprint":     true,
+	"version":              true,
+	"has_version":          true,
+	"appended_diag_bytes":  true,
+	"appended_note_bytes":  true,
+	"appended_empty_bytes": true,
+	"path_fingerprint":     true,
 }
 
 // ProjectRuntimeEvent 把 bus 事件投影为观测事件。
@@ -218,7 +229,8 @@ func (p *Projector) projectPayload(eventType string, payload map[string]interfac
 				"error_code", "error_category", "usage_source", "aggregation_level",
 				"tool_name", "stream_id", "finish_reason", "reasoning_visibility",
 				"renderer_id", "attempt_id", "turn_id", "budget_level",
-				"artifact_skipped", "artifact_id", "trigger", "outcome", "server":
+				"artifact_skipped", "artifact_id", "trigger", "outcome", "server",
+				"tool_call_id", "reason_category", "diag_fingerprint", "path_fingerprint":
 				out[key] = boundUTF8String(typed, 512)
 			default:
 				// 其他字符串（可能的 URL/路径/内容）一律丢弃。

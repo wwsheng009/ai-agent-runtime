@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,20 @@ type Bridge struct {
 	// sessionIDFromContext 从工具执行 ctx 解析会话归属（可选；runtime-server
 	// 的共享工具管理器靠它把事件关联到具体会话）。
 	sessionIDFromContext func(context.Context) string
+	// toolCallIDFromContext / turnIDFromContext 解析请求事件 join 键（可选）。
+	toolCallIDFromContext func(context.Context) string
+	turnIDFromContext     func(context.Context) string
+	// hinted 记录已展示过的降级提示（HintOnce），避免每次编辑重复同一段
+	// 噪声；池状态仍可通过 lsp_servers / /lsp status 查看。
+	hintMu sync.Mutex
+	hinted map[string]struct{}
+	// prewarmMu guards prewarming: when a request degrades while the server
+	// is still handshaking, a background task opens+saves the document as soon
+	// as the server is ready, so the first module analysis starts immediately
+	// instead of waiting for the next edit (live evidence: a cold gopls view
+	// can take tens of seconds to publish its first diagnostics).
+	prewarmMu  sync.Mutex
+	prewarming map[string]struct{}
 }
 
 // Outcome is the result of one diagnostics pass for one file.
@@ -48,6 +63,10 @@ type Outcome struct {
 	OmittedByChars int
 	// Servers lists the names that participated.
 	Servers []string
+	// DiagFingerprint identifies the diagnostic set ("" for clean/degraded).
+	// It lets the offline baseline compute edit→diagnostic closure without
+	// persisting diagnostic text (observability plan §3.3).
+	DiagFingerprint string
 }
 
 // BridgeOptions carries the injectable seams of the facade. Logger feeds both
@@ -62,6 +81,12 @@ type BridgeOptions struct {
 	// observe 侧无法关联到具体会话。返回空串表示该事件无会话归属（生命周期
 	// 事件天然如此）；aicli 单会话宿主可不设置，由 host 侧回退补会话 id。
 	SessionIDFromContext func(context.Context) string
+	// ToolCallIDFromContext / TurnIDFromContext 解析工具调用与回合归属
+	// （可选）：观测方案 §3.1 要求请求事件可 join 到 tool receipt。
+	ToolCallIDFromContext func(context.Context) string
+	TurnIDFromContext     func(context.Context) string
+	// Now is the injectable clock (restart-window tests). nil = time.Now.
+	Now func() time.Time
 }
 
 // NewBridge builds the facade. dial may be nil (SpawnProcess is used).
@@ -75,12 +100,15 @@ func NewBridgeWithOptions(cfg Config, root string, opts BridgeOptions) *Bridge {
 	logger := LoggerOrNop(opts.Logger)
 	observer := composeObservers(opts.Observer, logObserver(logger))
 	return &Bridge{
-		cfg:                  cfg,
-		registry:             NewRegistry(cfg, root, RegistryOptions{Dial: opts.Dial, Logger: opts.Logger, Observer: observer}),
-		logger:               logger,
-		observer:             opts.Observer,
-		metrics:              NewMetrics(),
-		sessionIDFromContext: opts.SessionIDFromContext,
+		cfg:                   cfg,
+		registry:              NewRegistry(cfg, root, RegistryOptions{Dial: opts.Dial, Logger: opts.Logger, Observer: observer, Now: opts.Now}),
+		logger:                logger,
+		observer:              opts.Observer,
+		metrics:               NewMetrics(),
+		sessionIDFromContext:  opts.SessionIDFromContext,
+		toolCallIDFromContext: opts.ToolCallIDFromContext,
+		turnIDFromContext:     opts.TurnIDFromContext,
+		hinted:                map[string]struct{}{},
 	}
 }
 
@@ -174,6 +202,11 @@ func (b *Bridge) AppendToResult(ctx context.Context, output string, paths []stri
 		seen[resolved] = struct{}{}
 		start := time.Now()
 		outcome := b.Diagnose(ctx, resolved)
+		if outcome.Degraded && !b.claimDegradeHint(outcome) {
+			// The same failure was already explained once in this session;
+			// keep later edit results free of repeated notes.
+			outcome.Text = ""
+		}
 		appended := 0
 		if outcome.Text != "" {
 			appended = len(outcome.Text)
@@ -217,7 +250,10 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 
 	cfg := b.registry.DiagnosticsConfig()
 	wait := time.Duration(cfg.WaitMS) * time.Millisecond
-	deadline := time.Now().Add(wait)
+	startWait := time.Duration(cfg.StartWaitMS) * time.Millisecond
+	if startWait <= 0 || startWait > wait {
+		startWait = wait
+	}
 
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -233,9 +269,17 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 	degradeReason := ""
 	for _, server := range servers {
 		outcome.Servers = append(outcome.Servers, server.Name())
-		client, reason := b.readyClient(ctx, server, deadline)
+		// Each member gets its own budget: a slow or absent first server must
+		// not starve the others (multi-server workspaces, docs/lsp 02 §6 Q4).
+		serverDeadline := time.Now().Add(wait)
+		client, reason := b.readyClient(ctx, server, serverDeadline, startWait)
 		if client == nil {
 			degradeReason = firstNonEmpty(degradeReason, reason)
+			if strings.HasPrefix(reason, "server still starting") {
+				// Fast-fail is right for this edit, but the view load should
+				// not wait for the next one: prewarm it in the background.
+				b.prewarm(server, path)
+			}
 			continue
 		}
 		// Baseline for scope=changed is the last snapshot *before* the
@@ -254,14 +298,41 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 			degradeReason = firstNonEmpty(degradeReason, judgeReason(err))
 			continue
 		}
-		remaining := time.Until(deadline)
+		remaining := time.Until(serverDeadline)
 		if remaining <= 0 {
 			degradeReason = firstNonEmpty(degradeReason, "diagnostics wait budget exhausted")
 			continue
 		}
+		// Cold view handling. First sight of a cold path (nothing published
+		// yet) gets one bounded extension so a medium view load lands inside
+		// this request. Once the grace is spent and the connection still has
+		// never published, the path is known cold: later edits use a reduced
+		// retry budget instead of re-paying the full wait on every edit during
+		// a long view load (live evidence: ~85s), and the first edit after the
+		// publish gets the real result.
+		if cold := time.Duration(cfg.ColdRetryMS) * time.Millisecond; cold > 0 && client.ColdWait(path) {
+			if cold < remaining {
+				remaining = cold
+			}
+		} else if grace := time.Duration(cfg.ColdStartGraceMS) * time.Millisecond; grace > 0 &&
+			!client.HasSnapshot(path) && client.TakeColdGrace(path) {
+			remaining += grace
+		}
 		items, itemsFresh := client.WaitDiagnostics(ctx, path, version, remaining)
 		if !itemsFresh {
-			degradeReason = firstNonEmpty(degradeReason, "no fresh diagnostics within "+wait.String())
+			if !client.HasSnapshot(path) && client.ColdGraceUsed(path) && !client.EverPublished() {
+				client.MarkColdWait(path)
+			}
+			reason := "no fresh diagnostics within " + wait.String()
+			// Distinguish "server analyzed and had nothing" from "server never
+			// published anything": the latter usually means the file is outside
+			// the server's module or inside a directory the toolchain ignores
+			// (dot/underscore dirs for gopls) — a live-debugging trap that a
+			// bare timeout reason hides.
+			if !client.HasSnapshot(path) {
+				reason += ": server published nothing (file may be outside its module, in an ignored directory, or the server is still loading its first analysis; retry shortly)"
+			}
+			degradeReason = firstNonEmpty(degradeReason, reason)
 			continue
 		}
 		fresh = true
@@ -295,6 +366,7 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 	})
 	outcome.Items = SortDiagnostics(items)
 	outcome.Fresh = true
+	outcome.DiagFingerprint = DiagnosticsFingerprint(outcome.Items)
 	outcome.Text = rendered.Text
 	outcome.OmittedItems = rendered.OmittedItems
 	outcome.OmittedByChars = rendered.OmittedByChars
@@ -348,6 +420,8 @@ func classifyOutcome(outcome Outcome) string {
 		case strings.Contains(outcome.Reason, "no fresh diagnostics"),
 			strings.Contains(outcome.Reason, "wait budget"):
 			return "degraded_no_fresh"
+		case strings.Contains(outcome.Reason, "still starting"):
+			return "degraded_starting"
 		case strings.Contains(outcome.Reason, "read file"):
 			return "degraded_read_error"
 		default:
@@ -360,12 +434,47 @@ func classifyOutcome(outcome Outcome) string {
 	}
 }
 
+// appendSplit classifies appended bytes into diagnostic value / degradation
+// note / empty-result block. Only the first kind is LSP value; the other two
+// are protocol overhead that the readout keeps separate (plan §3.3).
+func appendSplit(outcome Outcome, appended int) (diag, note, empty int) {
+	switch {
+	case appended <= 0:
+		return 0, 0, 0
+	case outcome.Degraded:
+		return 0, appended, 0
+	case len(outcome.Items) == 0:
+		return 0, 0, appended
+	default:
+		return appended, 0, 0
+	}
+}
+
 // firstServer 返回参与本次请求的第一个 server（多 server 折叠为单个低敏枚举）。
 func firstServer(names []string) string {
 	if len(names) == 0 {
 		return ""
 	}
 	return strings.TrimSpace(names[0])
+}
+
+// claimDegradeHint reports whether the inline path may append the degradation
+// note for this outcome. With HintOnce effective, the same (server-set,
+// reason) pair is explained once per session; repeating it on every edit is
+// token noise, while the pool state stays observable through `lsp_servers` /
+// `/lsp status`. Explicit `lsp_diagnostics` calls always answer (Report).
+func (b *Bridge) claimDegradeHint(outcome Outcome) bool {
+	if b == nil || !b.cfg.Diagnostics.HintOnceValue() {
+		return true
+	}
+	key := strings.Join(outcome.Servers, ",") + "|" + truncateReason(strings.TrimSpace(outcome.Reason))
+	b.hintMu.Lock()
+	_, seen := b.hinted[key]
+	if !seen {
+		b.hinted[key] = struct{}{}
+	}
+	b.hintMu.Unlock()
+	return !seen
 }
 
 // observeRequest 记录并发布一次请求事实：metrics 恒记录（web 页面读数不依赖
@@ -378,16 +487,38 @@ func (b *Bridge) observeRequest(ctx context.Context, trigger, path string, outco
 	if b.sessionIDFromContext != nil && ctx != nil {
 		sessionID = strings.TrimSpace(b.sessionIDFromContext(ctx))
 	}
+	toolCallID, turnID := "", ""
+	if ctx != nil {
+		if b.toolCallIDFromContext != nil {
+			toolCallID = strings.TrimSpace(b.toolCallIDFromContext(ctx))
+		}
+		if b.turnIDFromContext != nil {
+			turnID = strings.TrimSpace(b.turnIDFromContext(ctx))
+		}
+	}
+	pathFingerprint := FingerprintPath(path)
+	diagBytes, noteBytes, emptyBytes := appendSplit(outcome, appendedBytes)
+	// Low-sensitivity degrade category (plan §3.1/§3.3): the free-form reason
+	// may embed stderr chatter, so only the enum is persisted.
+	reasonCategory := ReasonCategory(outcome.Reason)
 	record := RequestRecord{
-		Time:           time.Now().UTC(),
-		Trigger:        trigger,
-		Server:         firstServer(outcome.Servers),
-		Outcome:        classifyOutcome(outcome),
-		DurationMS:     elapsed.Milliseconds(),
-		DiagCount:      len(outcome.Items),
-		AppendedBytes:  appendedBytes,
-		OmittedItems:   outcome.OmittedItems,
-		OmittedByChars: outcome.OmittedByChars,
+		Time:               time.Now().UTC(),
+		Trigger:            trigger,
+		Server:             firstServer(outcome.Servers),
+		Outcome:            classifyOutcome(outcome),
+		DurationMS:         elapsed.Milliseconds(),
+		DiagCount:          len(outcome.Items),
+		AppendedBytes:      appendedBytes,
+		OmittedItems:       outcome.OmittedItems,
+		OmittedByChars:     outcome.OmittedByChars,
+		ToolCallID:         toolCallID,
+		TurnID:             turnID,
+		PathFingerprint:    pathFingerprint,
+		DiagFingerprint:    outcome.DiagFingerprint,
+		AppendedDiagBytes:  diagBytes,
+		AppendedNoteBytes:  noteBytes,
+		AppendedEmptyBytes: emptyBytes,
+		ReasonCategory:     reasonCategory,
 	}
 	if b.metrics != nil {
 		b.metrics.Observe(record)
@@ -400,19 +531,24 @@ func (b *Bridge) observeRequest(ctx context.Context, trigger, path string, outco
 	}
 	if b.observer != nil {
 		b.observer(Event{
-			Kind:           EventRequest,
-			Time:           record.Time,
-			SessionID:      sessionID,
-			Server:         record.Server,
-			Path:           path,
-			Count:          record.DiagCount,
-			Trigger:        record.Trigger,
-			Outcome:        record.Outcome,
-			DurationMS:     record.DurationMS,
-			DiagCount:      record.DiagCount,
-			AppendedBytes:  record.AppendedBytes,
-			OmittedItems:   record.OmittedItems,
-			OmittedByChars: record.OmittedByChars,
+			Kind:            EventRequest,
+			Time:            record.Time,
+			SessionID:       sessionID,
+			ToolCallID:      toolCallID,
+			TurnID:          turnID,
+			Server:          record.Server,
+			Path:            path,
+			PathFingerprint: pathFingerprint,
+			DiagFingerprint: outcome.DiagFingerprint,
+			Count:           record.DiagCount,
+			Trigger:         record.Trigger,
+			Outcome:         record.Outcome,
+			DurationMS:      record.DurationMS,
+			DiagCount:       record.DiagCount,
+			AppendedBytes:   record.AppendedBytes,
+			OmittedItems:    record.OmittedItems,
+			OmittedByChars:  record.OmittedByChars,
+			ReasonCategory:  reasonCategory,
 		})
 	}
 }
@@ -425,10 +561,13 @@ func (b *Bridge) MetricsSnapshot() MetricsSnapshot {
 	return b.metrics.Snapshot()
 }
 
-// readyClient waits (inside the shared wait budget) for a server to become
-// ready. It never exceeds the deadline and never blocks on a crashed server.
-func (b *Bridge) readyClient(ctx context.Context, server *Server, deadline time.Time) (*Client, string) {
+// readyClient waits (inside the per-server wait budget) for a server to become
+// ready. A member that is still handshaking gets at most startWait, so a cold
+// start degrades quickly instead of burning the full diagnostics budget; the
+// background start keeps going for the next edit.
+func (b *Bridge) readyClient(ctx context.Context, server *Server, deadline time.Time, startWait time.Duration) (*Client, string) {
 	status := server.Status()
+	var startDeadline time.Time
 	for {
 		switch status.State {
 		case StateReady:
@@ -438,6 +577,9 @@ func (b *Bridge) readyClient(ctx context.Context, server *Server, deadline time.
 			}
 			return nil, "client unavailable"
 		case StateStarting:
+			if startDeadline.IsZero() {
+				startDeadline = time.Now().Add(startWait)
+			}
 		case StateCrashed:
 			// A crashed member is replaced automatically while the restart
 			// budget lasts (L2); kick the replacement and wait for it inside
@@ -453,9 +595,20 @@ func (b *Bridge) readyClient(ctx context.Context, server *Server, deadline time.
 		default:
 			return nil, firstNonEmpty(status.Reason, status.LastError, string(status.State))
 		}
-		remaining := time.Until(deadline)
+		waitUntil := deadline
+		if status.State == StateStarting && startDeadline.Before(waitUntil) {
+			waitUntil = startDeadline
+		}
+		remaining := time.Until(waitUntil)
 		if remaining <= 0 {
-			return nil, "server still starting: " + server.Name()
+			switch status.State {
+			case StateStarting:
+				return nil, "server still starting: " + server.Name()
+			case StateCrashed:
+				return nil, firstNonEmpty(status.Reason, status.LastError, "crashed: "+server.Name())
+			default:
+				return nil, firstNonEmpty(status.Reason, status.LastError, string(status.State))
+			}
 		}
 		pause := 20 * time.Millisecond
 		if remaining < pause {
@@ -476,6 +629,54 @@ func (b *Bridge) resolve(path string) string {
 		return path
 	}
 	return filepath.Join(b.registry.Root(), path)
+}
+
+// prewarmTimeout bounds the background wait for a starting server plus the
+// open/save round trip. Prewarming exists only to start the first analysis
+// earlier; it must never outlive its usefulness.
+const prewarmTimeout = 20 * time.Second
+
+// prewarm opens and saves path once a starting server becomes ready, in the
+// background, so the first module analysis begins immediately instead of
+// waiting for the next edit. Concurrent prewarms for the same (server, path)
+// are deduped; failures are silent (the foreground path stays authoritative).
+func (b *Bridge) prewarm(server *Server, path string) {
+	if b == nil || server == nil || strings.TrimSpace(path) == "" {
+		return
+	}
+	key := server.Name() + "|" + path
+	b.prewarmMu.Lock()
+	if b.prewarming == nil {
+		b.prewarming = map[string]struct{}{}
+	}
+	if _, ok := b.prewarming[key]; ok {
+		b.prewarmMu.Unlock()
+		return
+	}
+	b.prewarming[key] = struct{}{}
+	b.prewarmMu.Unlock()
+
+	go func() {
+		defer func() {
+			b.prewarmMu.Lock()
+			delete(b.prewarming, key)
+			b.prewarmMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), prewarmTimeout)
+		defer cancel()
+		client, _ := b.readyClient(ctx, server, time.Now().Add(prewarmTimeout), prewarmTimeout)
+		if client == nil {
+			return
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		if _, err := client.OpenOrUpdate(ctx, path, content); err != nil {
+			return
+		}
+		_ = client.Save(ctx, path)
+	}()
 }
 
 func firstNonEmpty(values ...string) string {

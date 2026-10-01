@@ -148,6 +148,14 @@ type ServerStatus struct {
 	Restarts   int              `json:"restarts,omitempty"`
 	LastError  string           `json:"last_error,omitempty"`
 	LastActive time.Time        `json:"last_active,omitempty"`
+	// FirstPublishMS is the delay from server start to the first diagnostics
+	// publish (0 = nothing published yet). It quantifies cold-start / view
+	// load latency, the dominant remaining degradation cause.
+	FirstPublishMS int64 `json:"first_publish_ms,omitempty"`
+	// EmptyAcceptSuperseded counts conclusive-empty answers that a later
+	// non-empty publish for the same version contradicted (false cleans). It
+	// guards the empty early-accept fast path.
+	EmptyAcceptSuperseded int64 `json:"empty_accept_superseded,omitempty"`
 }
 
 // ---- protocol wire types (only this package may use them) ----

@@ -49,10 +49,6 @@ export type RuntimeEventType =
   | "job_cancelled"
   | "job_finished"
   | "job_output"
-  | "job_abandoned"
-  | "job_paused"
-  | "job_requeued"
-  | "job_resumed"
   | "job_started"
   | "llm.max_output_tokens.escalated"
   | "llm.prompt_cache.backoff_applied"
@@ -66,6 +62,9 @@ export type RuntimeEventType =
   | "llm.retry.aggregated"
   | "llm_request_finished"
   | "llm_request_started"
+  | "lsp.diagnostics.updated"
+  | "lsp.request.finished"
+  | "lsp.server.state"
   | "mailbox_received"
   | "main_agent.route_applied"
   | "main_agent.route_cleared"
@@ -158,10 +157,6 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "job_cancelled": [],
   "job_finished": [],
   "job_output": [],
-  "job_abandoned": [],
-  "job_paused": [],
-  "job_requeued": [],
-  "job_resumed": [],
   "job_started": [],
   "llm.max_output_tokens.escalated": [],
   "llm.prompt_cache.backoff_applied": [],
@@ -175,6 +170,9 @@ export const RUNTIME_EVENT_CHANNELS: Record<
   "llm.retry.aggregated": [],
   "llm_request_finished": [],
   "llm_request_started": [],
+  "lsp.diagnostics.updated": ["live_only"],
+  "lsp.request.finished": ["session_store"],
+  "lsp.server.state": ["live_only"],
   "mailbox_received": [],
   "main_agent.route_applied": ["session_store"],
   "main_agent.route_cleared": ["session_store"],
@@ -250,6 +248,7 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
   "context_reconciled",
   "llm.prompt_cache.breaker_tripped",
   "llm.provider.health_opened",
+  "lsp.request.finished",
   "main_agent.route_applied",
   "main_agent.route_cleared",
   "main_agent.route_cost_guard_tripped",
@@ -279,6 +278,8 @@ export const RUNTIME_EVENT_PERSISTED_TYPES: readonly RuntimeEventType[] = [
 ];
 
 export const RUNTIME_EVENT_LIVE_ONLY_TYPES: readonly RuntimeEventType[] = [
+  "lsp.diagnostics.updated",
+  "lsp.server.state",
   "subagent.batch.progress",
   "subagent.progress",
   "tool.progress",

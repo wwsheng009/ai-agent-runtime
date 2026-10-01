@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/executor"
 )
 
 // ---- configuration surface (docs/lsp 02 §4, 03 §4) ----
@@ -47,11 +49,34 @@ const (
 
 // Built-in fallbacks. Config may override every one of them.
 const (
-	DefaultMaxItems        = 20
-	DefaultMaxChars        = 2000
-	DefaultWaitMS          = 1000
+	DefaultMaxItems = 20
+	DefaultMaxChars = 2000
+	DefaultWaitMS   = 1000
+	// DefaultStartWaitMS bounds how long one request waits for a member that
+	// is still handshaking (cold start). A cold gopls usually cannot finish
+	// inside a single edit; waiting the full diagnostics budget just adds
+	// latency, so the request degrades early and the background start keeps
+	// going for the next edit.
+	DefaultStartWaitMS = 250
+	// DefaultEmptyConfirmMS is the debounce for conclusive empty publishes.
+	DefaultEmptyConfirmMS  = 150
 	DefaultStartupTimeout  = 15 * time.Second
 	DefaultShutdownTimeout = 5 * time.Second
+	// DefaultColdStartGraceMS extends the first diagnostics wait for a path
+	// whose server has not published anything yet: gopls may spend seconds
+	// loading a module view before the first publish, and the normal budget
+	// would degrade that edit (live evidence: backend view took ~85s under
+	// heavy load; medium cold starts land inside the grace).
+	DefaultColdStartGraceMS = 1500
+	// DefaultColdRetryMS is the reduced wait used once a path is known cold:
+	// the grace was already spent and the connection still never published.
+	// Re-waiting the full budget on every edit during a long view load only
+	// adds latency; the first edit after the publish gets the real result.
+	DefaultColdRetryMS = 250
+	// DefaultMaxTrackedDocs caps the per-client didOpen document set. Long
+	// sessions touch many files; without a bound the docs map (full content
+	// copies) grows forever and servers keep analyzing closed files.
+	DefaultMaxTrackedDocs = 128
 )
 
 // DiagnosticsConfig mirrors the `diagnostics.*` keys from docs/lsp 03 §4.
@@ -70,17 +95,53 @@ type DiagnosticsConfig struct {
 	// ToolEnabled registers the optional `diagnostics` tool (W7). Default
 	// false: the inline loop is the primary feedback path.
 	ToolEnabled bool `yaml:"toolEnabled,omitempty" json:"toolEnabled,omitempty"`
+	// StartWaitMS bounds the wait for a member that is still starting. <=0
+	// falls back to DefaultStartWaitMS; it is capped by WaitMS (a request
+	// never waits longer than the diagnostics budget).
+	StartWaitMS int `yaml:"startWaitMs,omitempty" json:"startWaitMs,omitempty"`
+	// EmptyEarlyAccept trusts a version-stamped empty publish as a conclusive
+	// "no problems" answer, ending the wait immediately instead of burning the
+	// full WaitMS. nil = default true. It only takes effect for servers that
+	// declare EmptyPublishConclusive (gopls preset); servers that publish
+	// interim empty sets (rust-analyzer) keep the conservative behavior.
+	EmptyEarlyAccept *bool `yaml:"emptyEarlyAccept,omitempty" json:"emptyEarlyAccept,omitempty"`
+	// EmptyConfirmMS is the debounce applied to a version-stamped empty
+	// publish before it is accepted: a real diagnostic set published moments
+	// later supersedes it. <=0 falls back to DefaultEmptyConfirmMS.
+	EmptyConfirmMS int `yaml:"emptyConfirmMs,omitempty" json:"emptyConfirmMs,omitempty"`
+	// HintOnce limits the inline degradation note to the first occurrence per
+	// (server, reason) pair. Repeated identical notes are pure token noise;
+	// pool state stays observable through `lsp_servers` / `/lsp status`.
+	// nil = default true.
+	HintOnce *bool `yaml:"hintOnce,omitempty" json:"hintOnce,omitempty"`
+	// ColdStartGraceMS extends the wait once per path while the server has
+	// never published anything (cold view / first analysis). It is bounded to
+	// one grant per path per server instance and disabled after the first
+	// publish ever observed, so steady-state latency is untouched.
+	// 0/unset = DefaultColdStartGraceMS; negative disables.
+	ColdStartGraceMS int `yaml:"coldStartGraceMs,omitempty" json:"coldStartGraceMs,omitempty"`
+	// ColdRetryMS is the reduced wait once a path is known cold: the
+	// connection has never published and a grace-extended wait for this path
+	// already failed with no snapshot. The view load continues in the
+	// background; failing fast keeps a long cold window (live evidence: ~85s)
+	// from burning the full budget on every edit. 0/unset = DefaultColdRetryMS;
+	// negative disables (always wait the full budget).
+	ColdRetryMS int `yaml:"coldRetryMs,omitempty" json:"coldRetryMs,omitempty"`
 }
 
 // DefaultDiagnosticsConfig returns the documented defaults. Scope defaults to
 // "all" (crush parity); A6 carries the data-driven decision to switch it.
 func DefaultDiagnosticsConfig() DiagnosticsConfig {
 	return DiagnosticsConfig{
-		Scope:       ScopeAll,
-		MaxItems:    DefaultMaxItems,
-		MaxChars:    DefaultMaxChars,
-		WaitMS:      DefaultWaitMS,
-		DegradeMode: DegradeHint,
+		Scope:            ScopeAll,
+		MaxItems:         DefaultMaxItems,
+		MaxChars:         DefaultMaxChars,
+		WaitMS:           DefaultWaitMS,
+		DegradeMode:      DegradeHint,
+		StartWaitMS:      DefaultStartWaitMS,
+		EmptyConfirmMS:   DefaultEmptyConfirmMS,
+		ColdStartGraceMS: DefaultColdStartGraceMS,
+		ColdRetryMS:      DefaultColdRetryMS,
 	}
 }
 
@@ -98,12 +159,53 @@ func (d DiagnosticsConfig) Normalize() DiagnosticsConfig {
 	if d.WaitMS <= 0 {
 		d.WaitMS = DefaultWaitMS
 	}
+	if d.StartWaitMS <= 0 || d.StartWaitMS > d.WaitMS {
+		d.StartWaitMS = DefaultStartWaitMS
+		if d.StartWaitMS > d.WaitMS {
+			d.StartWaitMS = d.WaitMS
+		}
+	}
+	if d.EmptyConfirmMS <= 0 || d.EmptyConfirmMS > d.WaitMS {
+		d.EmptyConfirmMS = DefaultEmptyConfirmMS
+		if d.EmptyConfirmMS > d.WaitMS {
+			d.EmptyConfirmMS = d.WaitMS
+		}
+	}
+	if d.ColdStartGraceMS == 0 {
+		d.ColdStartGraceMS = DefaultColdStartGraceMS
+	}
+	if d.ColdStartGraceMS < 0 {
+		d.ColdStartGraceMS = 0
+	}
+	if d.ColdStartGraceMS > 5000 {
+		d.ColdStartGraceMS = 5000
+	}
+	if d.ColdRetryMS == 0 {
+		d.ColdRetryMS = DefaultColdRetryMS
+	}
+	if d.ColdRetryMS < 0 {
+		d.ColdRetryMS = 0
+	}
+	if d.ColdRetryMS > 5000 {
+		d.ColdRetryMS = 5000
+	}
 	switch d.DegradeMode {
 	case DegradeNone, DegradeHint, DegradeError:
 	default:
 		d.DegradeMode = DegradeHint
 	}
 	return d
+}
+
+// EmptyEarlyAcceptValue resolves the effective early-accept policy (nil =
+// true).
+func (d DiagnosticsConfig) EmptyEarlyAcceptValue() bool {
+	return d.EmptyEarlyAccept == nil || *d.EmptyEarlyAccept
+}
+
+// HintOnceValue resolves the effective hint dedupe policy (nil = true).
+func (d DiagnosticsConfig) HintOnceValue() bool {
+	return d.HintOnce == nil || *d.HintOnce
 }
 
 // ServerSpec declares one language server, its ownership metadata and the
@@ -125,6 +227,10 @@ type ServerSpec struct {
 	InitializationOptions map[string]interface{} `yaml:"initializationOptions,omitempty" json:"initializationOptions,omitempty"`
 	// Enabled defaults to true when nil.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// EmptyPublishConclusive declares that a version-stamped empty publish
+	// from this server is a final "no problems" answer (gopls), not an
+	// interim result. nil = false (conservative wait).
+	EmptyPublishConclusive *bool `yaml:"emptyPublishConclusive,omitempty" json:"emptyPublishConclusive,omitempty"`
 	// StartupTimeout bounds initialize; <=0 uses DefaultStartupTimeout.
 	StartupTimeout time.Duration `yaml:"startupTimeout,omitempty" json:"startupTimeout,omitempty"`
 	// ShutdownTimeout bounds shutdown/exit; <=0 uses DefaultShutdownTimeout.
@@ -135,6 +241,13 @@ type ServerSpec struct {
 func (s ServerSpec) IsEnabled() bool {
 	return s.Enabled == nil || *s.Enabled
 }
+
+// EmptyPublishConclusiveValue resolves the per-server early-accept opt-in.
+func (s ServerSpec) EmptyPublishConclusiveValue() bool {
+	return s.EmptyPublishConclusive != nil && *s.EmptyPublishConclusive
+}
+
+func boolPtr(value bool) *bool { return &value }
 
 // HandlesFile is the W1 ownership decision. It is path/metadata based only —
 // never content heuristics (docs/lsp 02 §2.3) — and a spec with no selector
@@ -216,6 +329,14 @@ type Config struct {
 	// (L2). nil or a negative value means DefaultRestartLimit; 0 disables
 	// automatic recovery (manual Restart stays available).
 	RestartLimit *int `yaml:"restartLimit,omitempty" json:"restartLimit,omitempty"`
+	// RestartWindow is the sliding window the automatic-recovery budget is
+	// counted over. A member that crashes after a quiet period longer than
+	// this window gets a fresh budget instead of staying degraded for the
+	// rest of the process lifetime. <=0 uses DefaultRestartWindow.
+	RestartWindow time.Duration `yaml:"restartWindow,omitempty" json:"restartWindow,omitempty"`
+	// MaxTrackedDocs bounds the per-client open-document set (LRU eviction
+	// sends didClose). <=0 uses DefaultMaxTrackedDocs.
+	MaxTrackedDocs int `yaml:"maxTrackedDocs,omitempty" json:"maxTrackedDocs,omitempty"`
 }
 
 // DefaultConfig is the inert default: presets are declared but the pool stays
@@ -232,6 +353,10 @@ func DefaultConfig() Config {
 // lsp.restartLimit is unset: one replacement per member per session.
 const DefaultRestartLimit = 1
 
+// DefaultRestartWindow is the sliding window the restart budget is counted
+// over when lsp.restartWindow is unset: one replacement per 10 minutes.
+const DefaultRestartWindow = 10 * time.Minute
+
 // RestartLimitValue resolves the effective automatic-recovery cap. nil and
 // negative values fall back to DefaultRestartLimit; 0 disables automatic
 // recovery (L2).
@@ -240,6 +365,22 @@ func (c Config) RestartLimitValue() int {
 		return DefaultRestartLimit
 	}
 	return *c.RestartLimit
+}
+
+// RestartWindowValue resolves the effective recovery window.
+func (c Config) RestartWindowValue() time.Duration {
+	if c.RestartWindow <= 0 {
+		return DefaultRestartWindow
+	}
+	return c.RestartWindow
+}
+
+// MaxTrackedDocsValue resolves the effective open-document cap.
+func (c Config) MaxTrackedDocsValue() int {
+	if c.MaxTrackedDocs <= 0 {
+		return DefaultMaxTrackedDocs
+	}
+	return c.MaxTrackedDocs
 }
 
 // Normalize fills defaults and drops malformed entries. Duplicate names keep
@@ -281,6 +422,9 @@ func PresetServers() []ServerSpec {
 			Args:       []string{"serve"},
 			Extensions: []string{".go"},
 			Filenames:  []string{"go.mod", "go.work"},
+			// gopls 的 publishDiagnostics 在分析完成后发布（带版本），空集即
+			// 结论；rust-analyzer 等会先发中间空集，因此默认不开启。
+			EmptyPublishConclusive: boolPtr(true),
 		},
 		{
 			Name:       "typescript",
@@ -361,15 +505,32 @@ func SpawnProcess(ctx context.Context, spec ServerSpec, root string, logger Logg
 		return nil, fmt.Errorf("lsp: %s: stdout: %w", spec.Name, err)
 	}
 	cmd.Stderr = &lineLogWriter{logger: logger, prefix: spec.Name}
+	tail := &stderrTail{}
+	cmd.Stderr = io.MultiWriter(cmd.Stderr, tail)
+	// ADR-0005 §4.1：LSP 子进程必须纳入 internal/executor 的进程树守卫
+	// （Windows Job Object + KILL_ON_JOB_CLOSE；Unix Setpgid），禁止在别处
+	// 自建 Job Object。绑定失败不阻断启动，但必须可观测（rep.Mode）。
+	guard := executor.NewProcessGuard()
+	if err := guard.Bind(cmd); err != nil {
+		guard.Close()
+		return nil, fmt.Errorf("lsp: %s: process guard bind: %w", spec.Name, err)
+	}
 	if err := cmd.Start(); err != nil {
+		guard.Close()
 		return nil, fmt.Errorf("lsp: %s: start: %w", spec.Name, err)
+	}
+	if err := guard.Attach(cmd.Process); err != nil {
+		// 沿用既有降级语义：绑定失败时 terminate 会退到 taskkill/direct kill。
+		guard.NoteAttachError(err)
 	}
 	conn := &processConn{reader: stdout, writer: stdin}
 	return &DialResult{
-		Conn: conn,
-		PID:  cmd.Process.Pid,
-		Kill: cmd.Process.Kill,
-		Wait: cmd.Wait,
+		Conn:       conn,
+		PID:        cmd.Process.Pid,
+		Kill:       func() error { guard.Terminate(); return nil },
+		Wait:       cmd.Wait,
+		Guard:      guard,
+		StderrTail: tail.String,
 	}, nil
 }
 
