@@ -146,7 +146,8 @@
    本窗口的旧事件没有该字段。
    报告事实区已单独标注"未分类降级"（Go 基线包与 Python 脚本同步，保持互锁）。
 2. 优化构建后的两个会话（25+12=37 请求）样本：clean 14 / injected 2 / no_fresh 14 /
-   starting 2 / pyright 缺二进制 4 / no_server 1。样本含实机测试脚本污染（冷视图轮次
+   starting 2 / pyright 缺二进制 4 / no_server 1。其中"缺二进制 4"在事件里曾是裸 `degraded`
+   （第七轮起细分为 `degraded_binary_missing`）。样本含实机测试脚本污染（冷视图轮次
    本身就是被测场景），只作方向参考，不作阈值依据。
 3. 阈值固化前置条件：优化构建纯新样本 ≥1 周（ADR-0003 D4）；未分类标注已完成。
 
@@ -264,6 +265,9 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 | "空发布提前采信"存在假 clean 风险（历史事件扫描：同版本 empty→non-empty 8 次、Δ=1.3–7.9s，且**全部**发生在"该版本先出现非空诊断"之后） | 护栏：同一版本文档出现过非空诊断后，空发布不再作为结论性 clean（提前采信与 settle 两处同时收紧，诚实降级为 no_fresh）；新增 `empty_accept_superseded` 计数（服务器状态）作快路径回归守卫 | `TestEarlyAcceptSkippedAfterProblemsForSameVersion`、`TestSettleRefusesChurnEmpty`、`TestFalseCleanCounterCountsSupersededEmpty`；快路径旧用例不回归 |
 | 冷视图加载期（实机 ~85s）内每次编辑都付满预算（1s/次），单轮多编辑累计数秒 | 冷路径快速失败：**宽限已授予 + 连接从未发布 + 该路径无快照**（强信号，避免误判热连接偶发慢分析）才标记"已知冷"，后续编辑只等 `diagnostics.cold_retry_ms`（默认 250）；该路径首个发布即清除标记并恢复常规路径（含空发布提前采信） | `TestColdRetryAfterGraceTimeout`（首编辑 ~600ms 宽限预算 → 次编辑 ~100ms 快速降级 → 发布后恢复 fast clean）；`TestColdGrace*` 不回归 |
 | 请求事件缺 `reason_category`（只有 server-state 事件有；projector 白名单与方案 §3.1 均已按请求级字段设计）→ 基线无法按原因细分，"从未发布"（模块外/忽略目录）与"普通超时"（有旧快照）不可区分，阻碍快速失败启发式的证据化调参 | ① `ReasonCategory` 新增 `no_publish`（"published nothing" 优先于 wait_timeout）；② `Event`/`RequestRecord` 增 `ReasonCategory`，Bridge 在请求事件上计算并下发；③ eventbridge 落盘请求事件 `reason_category`（低敏短枚举，自由文本 reason 仍不出进程）；④ Go/Python 基线新增"降级原因分布"事实行 | `TestReasonCategory`（no_publish 用例）、`observer_join_test`（请求 payload 带 reason_category）、`TestNoPublishReasonIsActionable`（MetricsSnapshot 记录为 no_publish）、Go/Python fixture 互锁新增 degrade_reasons 断言 |
+| 编辑覆盖率疑似 12% 缺口（855 编辑 vs 753 请求） | 事件级配对审计（离线脚本，按会话+`tool_call_id`）：**新构建会话 42/45 配对（93%），0 个请求没有对应编辑**；缺口来自旧构建事件无 `tool_call_id`（786/828）+ 少量幂等/失败编辑（已文档化的预期行为）——**结论：无需修复**，避免后续重复怀疑 | 审计脚本（同 §4.3 口径：`tool.completed` × `lsp.request.finished` 配对） |
+| 缺二进制/崩溃/传输关闭被折叠成裸 `degraded`（live：pyright 缺二进制 4 条与崩溃无法区分，基线与告警不可行动） | `classifyOutcome` 改为复用 `ReasonCategory`（outcome 与 reason_category 共用单一事实源，防漂移）；新增 `degraded_binary_missing` / `degraded_crashed` / `degraded_transport_closed` / `degraded_canceled`；裸 `degraded` 只兜底真正未知的原因 | `metrics_test` 分类表新增 4 例；`bridge_test` 缺二进制端到端断言（dial 报 not found → `degraded_binary_missing`） |
+| rust-analyzer 真机冒烟在 Windows 偶发红灯（TempDir 清理 sharing violation） | 显式工作区目录 + 带重试的清理：`Stop` 已等 `cmd.Wait`（ShutdownTimeout），但句柄释放可能再滞后数毫秒（ADR-0005） | 连续两轮 `go test ./internal/lsp/...` 全绿（含真机用例） |
 
 新增配置键（全部有内置默认，不改代码即可调整）：
 `diagnostics.start_wait_ms` / `diagnostics.empty_early_accept` / `diagnostics.empty_confirm_ms` /
@@ -324,6 +328,13 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
   （存在旧快照）"无法区分——两者处置完全不同（改工作区 vs 加预算），这也是下一轮
   "暖连接快速失败"能否放宽的判据。
 - 落地：见上表新行；自下一构建起落盘。自由文本 reason 仍不出进程（低敏纪律不变）。
+
+**第七轮优化（2026-10-01，覆盖率审计 + outcome 归因细分）**：
+- 审计（负结果，价值在止损）：编辑覆盖率 12% 缺口被证伪——新构建会话 42/45 配对、0 个请求缺编辑，
+  缺口全部来自旧构建事件无 `tool_call_id` 与幂等/失败编辑。**不做修复**。
+- 修复（真缺口）：`classifyOutcome` 的兜底把"缺二进制/崩溃/传输关闭"折叠成裸 `degraded`；
+  现改为复用 `ReasonCategory`，两类归因字段（outcome 与 reason_category）从此共用同一事实源。
+- 测试稳定性：真机冒烟在 Windows 的 TempDir 清理竞态修复（带重试清理）。
 - 行为备注：内容未变化的 write 会按幂等回放处理且不触发 LSP 请求（无变更不诊断，符合预期）。
 
 **崩溃根因定位（已闭环）**：跨会话同秒崩溃（09-30 10:37:33×3、10:43:04×3）确认为

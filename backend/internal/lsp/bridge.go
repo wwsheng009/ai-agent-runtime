@@ -411,19 +411,30 @@ func (b *Bridge) Report(ctx context.Context, path string) (text string, handled 
 }
 
 // classifyOutcome 把 Outcome 折叠为低敏枚举（写进事件与读数；前端据此分桶）。
+// 原因折叠复用 ReasonCategory：outcome 与 reason_category 两个落盘字段共用同一
+// 事实源，不会各自漂移；所有可操作的降级原因都必须有细分类别，裸 "degraded"
+// 只兜底真正未知的原因（live 证据：缺二进制曾被折叠成裸 degraded，无法与崩溃/
+// 传输关闭区分，基线与告警都无法据此行动）。
 func classifyOutcome(outcome Outcome) string {
 	switch {
 	case !outcome.Handled:
 		return "no_server"
 	case outcome.Degraded:
-		switch {
-		case strings.Contains(outcome.Reason, "no fresh diagnostics"),
-			strings.Contains(outcome.Reason, "wait budget"):
+		switch ReasonCategory(outcome.Reason) {
+		case "no_publish", "wait_timeout":
 			return "degraded_no_fresh"
-		case strings.Contains(outcome.Reason, "still starting"):
+		case "starting":
 			return "degraded_starting"
-		case strings.Contains(outcome.Reason, "read file"):
+		case "read_error":
 			return "degraded_read_error"
+		case "binary_missing":
+			return "degraded_binary_missing"
+		case "crashed", "restart_budget_exhausted":
+			return "degraded_crashed"
+		case "transport_closed":
+			return "degraded_transport_closed"
+		case "canceled":
+			return "degraded_canceled"
 		default:
 			return "degraded"
 		}

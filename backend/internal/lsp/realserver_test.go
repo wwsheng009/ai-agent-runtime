@@ -26,7 +26,13 @@ func TestRealRustAnalyzerRoundTrip(t *testing.T) {
 		t.Skip("rust-analyzer not installed; skipping real language-server integration")
 	}
 
-	dir := t.TempDir()
+	// Windows：子进程退出后文件句柄释放可能滞后数毫秒，t.TempDir 的清理会
+	// 偶发 sharing violation（ADR-0005 子进程生命周期）。用显式目录 + 带重试的
+	// 清理，避免偶发红灯。
+	dir, err := os.MkdirTemp("", "lsp-rust-e2e-")
+	if err != nil {
+		t.Fatalf("create workspace dir: %v", err)
+	}
 	mustWriteFile(t, filepath.Join(dir, "Cargo.toml"),
 		"[package]\nname = \"lsp-e2e\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n")
 	sourcePath := filepath.Join(dir, "src", "main.rs")
@@ -51,7 +57,10 @@ func TestRealRustAnalyzerRoundTrip(t *testing.T) {
 	}.Normalize()
 	bridge := NewBridge(cfg, dir, nil, SpawnProcess)
 	ctx := context.Background()
-	t.Cleanup(func() { bridge.Stop(context.Background()) })
+	t.Cleanup(func() {
+		bridge.Stop(context.Background())
+		removeAllWithRetry(dir)
+	})
 
 	// 模拟编辑类工具刚返回的文本：追加语义要求它逐字节保留（I1）。
 	output := "patch applied to src/main.rs"
@@ -104,4 +113,16 @@ func mustWriteFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+// removeAllWithRetry 等子进程完全释放工作区句柄后再删除目录：Stop 已等待进程
+// 退出，但 Windows 上文件句柄的释放可能再滞后数毫秒。
+func removeAllWithRetry(dir string) {
+	for attempt := 0; attempt < 20; attempt++ {
+		if err := os.RemoveAll(dir); err == nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = os.RemoveAll(dir)
 }

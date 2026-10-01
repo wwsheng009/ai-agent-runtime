@@ -243,6 +243,11 @@ func TestAppendToResultDegradeModes(t *testing.T) {
 			if !outcome.Handled || !outcome.Degraded {
 				t.Fatalf("outcome = %+v, want handled+degraded", outcome)
 			}
+			// 缺二进制必须是细分类别，不能折叠成裸 degraded（否则基线与告警
+			// 无法区分"要装二进制"与"服务器崩溃/传输关闭"）。
+			if got := classifyOutcome(outcome); got != "degraded_binary_missing" {
+				t.Fatalf("outcome = %q, want degraded_binary_missing", got)
+			}
 			const original = "edit succeeded\n"
 			out := bridge.AppendToResult(ctx, original, []string{path})
 			if tc.empty {
