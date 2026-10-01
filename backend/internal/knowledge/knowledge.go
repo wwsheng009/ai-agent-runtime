@@ -71,6 +71,11 @@ type Layer struct {
 	// recoveredFrom 是"库损坏后留证重建"的留证文件路径（R12 第三段）；
 	// 空串 = 本次打开未发生重建。状态面据此解释"为什么索引是空的"。
 	recoveredFrom string
+
+	// watch 是交付 1 的第三类变更源（fsnotify，knowledge.watch=on 且 owner 时存在）；
+	// watchReason 解释"开启却没在监听"的原因（启动失败/队列不可用）。
+	watch       *watchSource
+	watchReason string
 }
 
 // Open 解析配置并返回 Layer。
@@ -99,15 +104,18 @@ func Open(ctx context.Context, cfg Config) (*Layer, error) {
 		return nil, err
 	}
 	store, err := OpenStore(ctx, cfg.storePath(), own.readOnly())
+	recoveredFrom := ""
 	if err != nil {
 		recovered, quarantined, rerr := openStoreWithRecovery(ctx, cfg, own, err)
 		if rerr != nil {
 			_ = own.release()
 			return nil, rerr
 		}
-		return &Layer{cfg: cfg, role: own.role(), store: recovered, owner: own, recoveredFrom: quarantined}, nil
+		store, recoveredFrom = recovered, quarantined
 	}
-	return &Layer{cfg: cfg, role: own.role(), store: store, owner: own}, nil
+	layer := &Layer{cfg: cfg, role: own.role(), store: store, owner: own, recoveredFrom: recoveredFrom}
+	layer.attachWatch()
+	return layer, nil
 }
 
 // Mode 返回配置的模式（nil Layer 为 off）。
@@ -337,6 +345,11 @@ func (l *Layer) Close() error {
 	if l == nil {
 		return nil
 	}
+	// 先停 watcher：它在向队列投递事件，必须排在队列之前退出。
+	if l.watch != nil {
+		l.watch.Close()
+		l.watch = nil
+	}
 	// 先停变更队列：它的 worker 可能在写 store，必须在关库之前退出。
 	l.queueMu.Lock()
 	queue := l.queue
@@ -404,4 +417,44 @@ func (l *Layer) ChangeQueue() *ChangeQueue {
 		})
 	}
 	return l.queue
+}
+
+// attachWatch 在 owner + shadow|on + knowledge.watch=on 时启动文件系统监听。
+//
+// 未启动时只在"用户开启了 watch 但没起来"的情况下记录原因——默认 off 不写
+// 原因，避免状态面被噪音填满；但"开了没生效"必须可解释（Degrade-Not-Fail）。
+func (l *Layer) attachWatch() {
+	if l == nil || l.store == nil {
+		return
+	}
+	if l.cfg.Mode != ModeShadow && l.cfg.Mode != ModeOn {
+		return
+	}
+	if l.role != RoleOwner {
+		return
+	}
+	if !l.cfg.WatchEnabled() {
+		return
+	}
+	src, reason := startWatchSource(l.cfg, l.ChangeQueue())
+	if src == nil {
+		l.watchReason = reason
+		return
+	}
+	l.watch = src
+}
+
+// WatchStatus 返回文件系统监听的本进程视角（nil-safe）。
+func (l *Layer) WatchStatus() WatchStatus {
+	if l == nil {
+		return WatchStatus{}
+	}
+	if l.watch == nil {
+		return WatchStatus{DegradedReason: l.watchReason}
+	}
+	return WatchStatus{
+		Active:         true,
+		Dirs:           l.watch.Dirs(),
+		DegradedReason: l.watch.DegradedReason(),
+	}
 }

@@ -84,10 +84,25 @@ type StatusReport struct {
 	// StoreRecoveredFrom 是"库损坏后留证重建"的留证文件路径（R12 第三段）：
 	// 非空表示本次打开把损坏库改名留证并重建，索引因此为空、等待重新索引。
 	StoreRecoveredFrom string `json:"store_recovered_from,omitempty"`
+	// Watch 是交付 1 第三类变更源（fsnotify）的本进程视角。
+	Watch WatchStatus `json:"watch"`
 	// DegradedReason 解释"为什么状态不完整"（未索引 / reader 降级 / 上次索引失败）。
 	// 空串 = 无降级。它存在的原因：状态面最怕静默——零值必须能被解释。
 	DegradedReason string `json:"degraded_reason,omitempty"`
 	GeneratedAt    int64  `json:"generated_at"`
+}
+
+// WatchStatus 是交付 1 第三类变更源（fsnotify 文件系统监听）的本进程视角。
+//
+// 口径：Active 只在"本进程是 owner 且 knowledge.watch=on 且监听真的起来了"时为
+// true；开启但没生效时 DegradedReason 必须给出原因（配额耗尽/权限/队列不可用）。
+type WatchStatus struct {
+	// Active 表示本进程正在监听工作区。
+	Active bool `json:"active"`
+	// Dirs 是已监听目录数（Active 时有意义）。
+	Dirs int `json:"dirs,omitempty"`
+	// DegradedReason 解释"开启却没在监听 / 只监听了一部分"。
+	DegradedReason string `json:"degraded_reason,omitempty"`
 }
 
 // OwnerPID 返回当前持有 store 写锁的进程 pid；未知时为 0。
@@ -151,6 +166,7 @@ func (l *Layer) Status(ctx context.Context) (StatusReport, error) {
 	}
 	report.GC = l.GCStats()
 	report.StoreRecoveredFrom = l.recoveredFrom
+	report.Watch = l.WatchStatus()
 	if l.store == nil {
 		return report, nil
 	}

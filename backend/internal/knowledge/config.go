@@ -313,6 +313,12 @@ type Config struct {
 	// CodeTools 控制 Phase 3 的 code.* 工具面是否注册（off|on，默认 off）。
 	// 独立于 Mode：mode=on 但 code_tools 未开启时工具面不出现（灰度/回滚）。
 	CodeTools string `yaml:"code_tools,omitempty" json:"code_tools,omitempty"`
+	// Watch 控制 Phase 5 交付 1 的第三类变更源（fsnotify 文件系统监听，off|on，
+	// 默认 off）。开启后空闲期的外部变更（编辑器保存 / 脚本写盘 / git checkout）
+	// 会被即时发现并入队；关闭时仍由判定点校正（git/stat）在下一个 turn 边界发现。
+	// 默认 off 的理由：watch 是系统级资源（inotify 配额），默认开启会改变既有
+	// 部署的资源画像。
+	Watch string `yaml:"watch,omitempty" json:"watch,omitempty"`
 	// Adapter 选择索引适配器：builtin（默认）/ treesitter / lsp（Phase 4 交付 2）。
 	// 不可用的选择会降级 builtin 并记录原因，而不是失败（Degrade-Not-Fail）。
 	Adapter string `yaml:"adapter,omitempty" json:"adapter,omitempty"`
@@ -367,6 +373,21 @@ func ParseCodeTools(s string) (string, error) {
 	}
 }
 
+// ErrInvalidWatch 表示配置的 watch 取值不是 off|on 之一。
+var ErrInvalidWatch = errors.New("knowledge: invalid watch value")
+
+// ParseWatch 解析 watch 取值；空值等价 off（fail closed）。
+func ParseWatch(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", CodeToolsOff, "false", "0", "disabled":
+		return CodeToolsOff, nil
+	case CodeToolsOn, "true", "1", "enabled":
+		return CodeToolsOn, nil
+	default:
+		return "", fmt.Errorf("%w: %q", ErrInvalidWatch, s)
+	}
+}
+
 // Normalize 补齐零值（mode/限额）并返回规范化后的副本。
 // 它不校验 workspace——workspace 由 Open 在启用时校验。
 func (c Config) Normalize() Config {
@@ -387,6 +408,9 @@ func (c Config) Normalize() Config {
 	c.Planner = c.Planner.Normalize()
 	if parsed, err := ParseCodeTools(c.CodeTools); err == nil {
 		c.CodeTools = parsed
+	}
+	if parsed, err := ParseWatch(c.Watch); err == nil {
+		c.Watch = parsed
 	}
 	if kind, err := ParseAdapterKind(c.Adapter); err == nil {
 		c.Adapter = string(kind)
@@ -414,6 +438,9 @@ func (c Config) Validate() error {
 	if _, err := ParseCodeTools(c.CodeTools); err != nil {
 		return err
 	}
+	if _, err := ParseWatch(c.Watch); err != nil {
+		return err
+	}
 	if _, err := ParseAdapterKind(c.Adapter); err != nil {
 		return err
 	}
@@ -425,6 +452,12 @@ func (c Config) Validate() error {
 
 // Enabled 报告配置是否启用知识层。
 func (c Config) Enabled() bool { return c.Normalize().Mode != ModeOff }
+
+// WatchEnabled 报告交付 1 的第三类变更源（fsnotify 监听）是否开启（默认 off）。
+func (c Config) WatchEnabled() bool {
+	parsed, err := ParseWatch(c.Watch)
+	return err == nil && parsed == CodeToolsOn
+}
 
 // CodeToolsEnabled 报告 Phase 3 的 code.* 工具面是否开启（默认 off）。
 func (c Config) CodeToolsEnabled() bool {

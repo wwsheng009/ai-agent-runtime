@@ -83,6 +83,10 @@ knowledge:
   # code_tools：Phase 3（06 §4 Phase 3）的 code.* 工具面开关；取值与语义
   # 必须与 runtime.yaml 保持一致（win7 文件是覆盖档，不是行为分叉）。
   code_tools: on
+  # watch：Phase 5 交付 1 的第三类变更源（fsnotify 文件系统监听；off|on，默认
+  # off）。语义与 runtime.yaml 的注释一致：开启后空闲期的外部变更被即时发现，
+  # 关闭时由判定点校正（git/stat）在下一个 turn 边界发现。
+  # watch: on
   # planner：Reuse Gate 的保守阈值（06 §4 Phase 2 W3；04 §4.4 阈值策略）。
   # 下列值即代码缺省值，初值待 Phase 2 实测校准（04 §7.6）；取消注释即可覆盖。
   # planner:

@@ -6,6 +6,31 @@
 
 ---
 
+## 2026-10-01 — Phase 5 切片 7 实施：交付 1 第三类变更源（fsnotify 可选源）
+
+### Changed
+
+- `backend/internal/knowledge/change_watch.go`（新）：`watchSource` 把工作区文件系统事件翻译成工作区相对路径并交给**同一个变更队列**（debounce + 串行增量仍由队列负责，本文件只负责"发现"）。
+  - 只监听目录；**事件按索引口径过滤**（`resolveIndexTargets`：内置忽略集 + `.gitignore` + 非代码后缀），知识库自己的 `.aicli/*.db(-wal/-shm)` 写入不会形成回环；另有"代码后缀预筛"，避免每个事件都去读 `.gitignore`。
+  - 遍历剪枝：内置忽略集 + 隐藏目录不监听；新建目录补监听；目录数上限 `maxWatchDirs=2048`，超限显式降级并记录原因（不静默半监听）。
+  - 启动失败（权限/配额/队列不可用）只记录原因，绝不让 Activation/Open 失败（Degrade-Not-Fail）。
+- `backend/internal/knowledge/config.go`：新增 `knowledge.watch`（off|on，默认 off）+ `ParseWatch` / `WatchEnabled` / `Normalize`/`Validate` 接入；`backend/internal/config/manager.go` 的 `ValidateKnowledgeConfig` 同步（未知值在加载期拒绝）。
+- `backend/internal/knowledge/knowledge.go`：`Open` 在 owner + shadow|on + `watch=on` 时启动监听；`Close` 先停 watcher、再停队列、最后关库；`WatchStatus()` 提供 Active/Dirs/DegradedReason。
+- `backend/internal/knowledge/status.go`：`StatusReport.Watch`（开启却没生效时必须给出原因）。
+- 配置模板：`configs/runtime.yaml` / `runtime.win7.yaml` 补 `watch` 注释模板（**默认不开启**——watch 是系统级资源，默认开启会改变既有部署的资源画像）。
+
+### Verified
+
+- `knowledge/change_watch_test.go` 4 例（真实 fsnotify 事件）：空闲期新建/修改代码文件被即时索引（0.70s 内）；被忽略路径（node_modules / .aicli / 非代码后缀 / `.db-wal`）不入索引；默认 off 时无监听且不即时索引；配额耗尽显式降级（`cap reached`）。
+- `internal/knowledge` 全包 `-race` ok（84.3s）；`internal/config` ok；`go build ./...` OK。
+
+### Notes
+
+- 定位：edit hook 覆盖"agent 自己改的文件"，外部校正（git/stat）覆盖"判定点能看到的落后"，watcher 覆盖**空闲期**——最坏延迟从"一个 turn"降到"一次事件"。
+- 剩余：版本向量参与 context item（交付 3 剩余）、真实会话级 E2E（on-mode A/B 与端到端 p95）。
+
+---
+
 ## 2026-10-01 — Phase 5 切片 6 实施：R12 第三段（库损坏时留证重建 + 重建期降级）
 
 ### Changed

@@ -95,6 +95,15 @@ knowledge:
   #   on  —— 注册 code_search / code_inspect / code_navigate / code_references /
   #          code_callers；索引不可用时自动降级 grep/view（source=fallback）
   code_tools: on
+  # watch：Phase 5 交付 1 的第三类变更源（fsnotify 文件系统监听）。
+  #   off —— 不监听（代码默认值）；空闲期的外部变更由判定点校正（git/stat）
+  #          在下一个 turn 边界发现，最坏延迟一个 turn
+  #   on  —— 监听工作区，空闲期的编辑器保存 / 脚本写盘 / git checkout 会被
+  #          即时发现并入队（最坏延迟一次事件）；只监听目录，事件按索引口径
+  #          过滤（忽略集 / .gitignore / 非代码后缀），不产生回环
+  # 默认 off 的理由：watch 是系统级资源（inotify 配额），开启前请确认配额充足；
+  # 超上限会显式降级并在状态面（watch.degraded_reason）给出原因。
+  # watch: on
   # alpha：shadow 覆盖率阈值（usable = coverage >= alpha 且 economy <= 1.0，
   # ADR-0003 §4.2）。ADR 规定它由 Phase1-shadow 实测校准（04 §7.6）；缺省
   # 0.8 只是管线联调初值，不是验收门槛。

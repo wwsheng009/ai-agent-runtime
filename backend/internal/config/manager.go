@@ -1005,6 +1005,10 @@ func ValidateKnowledgeConfig(config *knowledge.Config) error {
 	if _, err := knowledge.ParseCodeTools(config.CodeTools); err != nil {
 		return errors.New(errors.ErrValidationFailed, "knowledge code_tools must be off or on")
 	}
+	// Phase 5 交付 1：watch（fsnotify 第三类变更源）只接受 off|on（默认 off）。
+	if _, err := knowledge.ParseWatch(config.Watch); err != nil {
+		return errors.New(errors.ErrValidationFailed, "knowledge watch must be off or on")
+	}
 	return nil
 }
 
