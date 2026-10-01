@@ -46,13 +46,16 @@ type Event struct {
 	Version    int  `json:"version,omitempty"`
 	HasVersion bool `json:"has_version,omitempty"`
 	// Request 级字段（Kind == EventRequest）。
-	Trigger        string `json:"trigger,omitempty"`
-	Outcome        string `json:"outcome,omitempty"`
-	DurationMS     int64  `json:"duration_ms,omitempty"`
-	DiagCount      int    `json:"diag_count,omitempty"`
-	AppendedBytes  int    `json:"appended_bytes,omitempty"`
-	OmittedItems   int    `json:"omitted_items,omitempty"`
-	OmittedByChars int    `json:"omitted_by_chars,omitempty"`
+	Trigger    string `json:"trigger,omitempty"`
+	Outcome    string `json:"outcome,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	DiagCount  int    `json:"diag_count,omitempty"`
+	// TotalDiagCount/NewDiagCount: A6 decision data (all vs new-only counts).
+	TotalDiagCount int `json:"total_diag_count,omitempty"`
+	NewDiagCount   int `json:"new_diag_count,omitempty"`
+	AppendedBytes  int `json:"appended_bytes,omitempty"`
+	OmittedItems   int `json:"omitted_items,omitempty"`
+	OmittedByChars int `json:"omitted_by_chars,omitempty"`
 	// Append breakdown（观测方案 §3.3）：只有 AppendedDiagBytes 是诊断价值，
 	// note/empty 是协议噪声，两者分开落盘后才能直接复算收益。
 	AppendedDiagBytes  int `json:"appended_diag_bytes,omitempty"`

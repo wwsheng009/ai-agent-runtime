@@ -48,6 +48,12 @@ func Observer(bus runtimeevents.Publisher, opts Options) runtimelsp.Observer {
 				"omitted_by_chars": event.OmittedByChars,
 				"server":           event.Server,
 			}
+			// A6 decision data: only meaningful when the file actually carried
+			// diagnostics; a clean file stays byte-identical to before.
+			if event.TotalDiagCount > 0 {
+				payload["total_diag_count"] = event.TotalDiagCount
+				payload["new_diag_count"] = event.NewDiagCount
+			}
 			// Join keys (plan §3.1): request → tool call / turn. The raw path
 			// is projected to path_fingerprint by the observe plane and never
 			// persisted as text.

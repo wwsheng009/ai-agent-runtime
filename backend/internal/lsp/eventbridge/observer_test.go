@@ -30,6 +30,8 @@ func TestObserverProjectsRequestWithSession(t *testing.T) {
 		Outcome:        "injected",
 		DurationMS:     12,
 		DiagCount:      3,
+		TotalDiagCount: 5,
+		NewDiagCount:   2,
 		AppendedBytes:  42,
 		OmittedItems:   1,
 		OmittedByChars: 2,
@@ -52,6 +54,9 @@ func TestObserverProjectsRequestWithSession(t *testing.T) {
 	}
 	if payload["server"] != "gopls" {
 		t.Fatalf("payload server = %v", payload["server"])
+	}
+	if payload["total_diag_count"] != 5 || payload["new_diag_count"] != 2 {
+		t.Fatalf("A6 counts missing from payload: %#v", payload)
 	}
 	if _, hasPath := payload["path"]; hasPath {
 		t.Fatalf("path 不得进入载荷: %#v", payload)

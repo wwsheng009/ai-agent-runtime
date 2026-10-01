@@ -135,11 +135,12 @@
 | `lsp_closure_ratio` | 0.7500 | 同上 | closed 3 / eligible 4 | 待标定；样本仍少（fingerprint 仅新构建事件携带） | 2026-10-01 |
 | `lsp_cold_first_publish_p95` | **14363 ms**（P50 11349） | 同上 | n=3（按 (session, server) 取首个发布；含 2026-10-01 真机验收会话的 7156ms） | 待标定；冷启动延迟首次可算 | 2026-10-01 |
 | `lsp_cold_first_probe_ratio` | n/a（窗口内无带 `cold_fast_fail` 的 no_fresh 样本） | 同上 | n=0（未采集，非缺失数据；新构建落盘后开始采集） | 待采集（需要 `cold_fast_fail` 事件字段，O4 起落盘；首探针占比高 → 下一轮引入 cold_probe 预算的判据） | 2026-10-01 |
+| `lsp_diag_new_ratio` | n/a（窗口内无带 `total_diag_count` 的诊断样本） | 同上 | n=0（未采集，非缺失数据；新构建落盘后开始采集） | 待采集（需要 `total_diag_count`/`new_diag_count` 事件字段，O9 起落盘；**A6 判据**：新增占比低 → scope=all 在反复重发既有问题，切 changed 收益大） | 2026-10-01 |
 
 > 上一版回填（窗口至 10-01T01:53Z：覆盖率 0.9070 / fallback 0.7215 / closure 0.6667 /
 > cold n/a）保留在 git 历史；两版口径相同，本表为最新（窗口至 10-01T02:54Z）。
 > 收益评估（含成本/闭环/代际对比/数据缺口）：`docs/analysis/lsp-benefit-evaluation-20261001.md`。
-> 指标计数：本表当前为八项（2026-10-01 新增 `lsp_cold_first_probe_ratio`，O7）；历史补记中的"七项"为当轮状态。
+> 指标计数：本表当前为九项（2026-10-01 新增 `lsp_cold_first_probe_ratio`（O7）与 `lsp_diag_new_ratio`（O9，A6 判据））；历史补记中的"七项/八项"为当轮状态。
 
 > 反模式（明令禁止）：把"未采集"渲染成 0；把分母含未启用 LSP 的会话算进覆盖率；阈值未标定就写进告警。
 
@@ -189,7 +190,7 @@ py scripts/analyze-lsp-baseline.py --selftest   # 内置样例自验（不依赖
 | C 最近事件表 | 时间 / trigger / server / outcome / duration_ms / diag_count / appended_bytes / tool_call_id（可跳转对话中对应工具行） | `/web/api/lsp/events?limit=50`（M2 后源自 observe ring/Query） |
 | D 优化建议条 | 由读数生成的人话结论（例："pyright 未安装，3 次内联降级"；"等待 P95 超 wait_ms 的 60%，建议调低 scope"）；**阈值未标定则不显示判断，只显事实** | 前端规则表（阈值引用 §4.3） |
 | E 链路入口 | 链到 `/debug/chat/status`、runtime-server 观测页 | 现有端点 |
-| F 基线登记表（跨会话） | §4.3 八项指标（未采集显示 n/a）+ 窗口/扫描事实；阈值列固定"待标定"，不做告警 | `/web/api/lsp/baseline?days=14`（`internal/lsp/baseline`，服务端 10 分钟 TTL 缓存；与 TUI `/lsp baseline` 同源） |
+| F 基线登记表（跨会话） | §4.3 九项指标（未采集显示 n/a）+ 窗口/扫描事实；阈值列固定"待标定"，不做告警 | `/web/api/lsp/baseline?days=14`（`internal/lsp/baseline`，服务端 10 分钟 TTL 缓存；与 TUI `/lsp baseline` 同源） |
 
 ### 5.2 后端 API 契约（新增 `backend/cmd/aicli/commands/web_lsp_handlers.go`）
 

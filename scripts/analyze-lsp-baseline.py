@@ -174,6 +174,8 @@ def aggregate(events, stats):
                     "appended_diag_bytes": to_int(payload.get("appended_diag_bytes")) or 0,
                     "appended_note_bytes": to_int(payload.get("appended_note_bytes")) or 0,
                     "appended_empty_bytes": to_int(payload.get("appended_empty_bytes")) or 0,
+                    "total_diag_count": to_int(payload.get("total_diag_count")) or 0,
+                    "new_diag_count": to_int(payload.get("new_diag_count")) or 0,
                     "omitted_items": to_int(payload.get("omitted_items")) or 0,
                     "omitted_by_chars": to_int(payload.get("omitted_by_chars")) or 0,
                     "server": str(payload.get("server") or "").strip(),
@@ -226,6 +228,8 @@ def aggregate(events, stats):
     appended_diag_bytes = sum(item["appended_diag_bytes"] for item in requests)
     appended_note_bytes = sum(item["appended_note_bytes"] for item in requests)
     appended_empty_bytes = sum(item["appended_empty_bytes"] for item in requests)
+    total_diag_count = sum(item["total_diag_count"] for item in requests)
+    new_diag_count = sum(item["new_diag_count"] for item in requests)
     cold_first_probe = sum(
         1 for item in requests
         if item["outcome"] == "degraded_no_fresh" and item["cold_fast_fail"] is False
@@ -310,6 +314,8 @@ def aggregate(events, stats):
         "appended_diag_bytes": appended_diag_bytes,
         "appended_note_bytes": appended_note_bytes,
         "appended_empty_bytes": appended_empty_bytes,
+        "total_diag_count": total_diag_count,
+        "new_diag_count": new_diag_count,
         "cold_first_probe": cold_first_probe,
         "cold_repeat": cold_repeat,
         "multi_member_requests": multi_member_requests,
@@ -381,6 +387,9 @@ def render_markdown(rows, stats):
                  f"P95 = {cell(stats['latency_p95_ms'])} ms（n={len(stats['durations'])}）")
     lines.append(f"- 诊断：命中 {stats['diag_hit']} 次（injected {stats['injected']} 次），"
                  f"累计条数 {stats['diag_count']}")
+    if stats["total_diag_count"] > 0:
+        lines.append(f"- 诊断新旧构成（O9/A6）：新增 {stats['new_diag_count']} / "
+                     f"全量 {stats['total_diag_count']}（scope=all 时全量即注入量）")
     lines.append(f"- 追加：累计 {stats['appended_bytes']} 字节；"
                  f"截断请求 {stats['truncated_requests']} 次（省略 {stats['omitted_items']} 条 / "
                  f"{stats['omitted_by_chars']} 字符）")
@@ -424,6 +433,9 @@ def render_markdown(rows, stats):
     lines.append("- `lsp_cold_first_probe_ratio` 拆分 no_fresh：首探针（路径未标记已知冷、"
                  "按完整预算等待）与重复探针（`cold_fast_fail=true`，已被路径级快速失败覆盖）；"
                  "无带该字段的样本时输出 n/a。")
+    lines.append("- `lsp_diag_new_ratio` 是 A6（scope 默认值）的判据：全量为 scope 过滤前的"
+                 "条数，新增为编辑前不存在的条数；新增占比低说明 scope=all 在反复重发既有"
+                 "问题，切 scope=changed 的收益大；无带该字段的样本时输出 n/a。")
     lines.append("- 本报告只汇总 aicli/runtime-server 会话事件；runtime-server 的事件目录"
                  "可用 `--root` 指向其 chat-logs/事件根。")
     return "\n".join(lines) + "\n"
@@ -502,6 +514,14 @@ def build_rows(stats):
             "date": date,
         },
         {
+            "metric": "lsp_diag_new_ratio",
+            "value": diag_new_row_value(stats),
+            "window": window,
+            "samples": diag_new_row_samples(stats),
+            "conclusion": diag_new_row_conclusion(stats),
+            "date": date,
+        },
+        {
             "metric": "lsp_fallback_ratio",
             "value": fallback_ratio,
             "window": window,
@@ -560,6 +580,26 @@ def cold_probe_row_value(stats):
     return ratio_text(stats["cold_first_probe"], total)
 
 
+def diag_new_row_value(stats):
+    """注入诊断中新增（编辑前不存在）的占比：A6（scope 默认值）判据。"""
+    if stats["total_diag_count"] <= 0:
+        return "n/a（窗口内无带 total_diag_count 的诊断样本；新构建落盘后开始采集）"
+    return ratio_text(stats["new_diag_count"], stats["total_diag_count"])
+
+
+def diag_new_row_samples(stats):
+    if stats["total_diag_count"] <= 0:
+        return "n=0（未采集，非缺失数据）"
+    return (f"new {stats['new_diag_count']} / all {stats['total_diag_count']}"
+            "（全量为 scope 过滤前条数）")
+
+
+def diag_new_row_conclusion(stats):
+    if stats["total_diag_count"] <= 0:
+        return "待采集（需要 total_diag_count 事件字段）"
+    return "待标定（A6：新增占比低 → 考虑 scope=changed 默认）"
+
+
 def cold_probe_row_samples(stats):
     if stats["cold_first_probe"] + stats["cold_repeat"] <= 0:
         return "n=0（未采集，非缺失数据）"
@@ -598,7 +638,8 @@ def selftest():
              "payload": {"trigger": "inline", "outcome": "injected", "duration_ms": 10,
                          "diag_count": 2, "appended_bytes": 100,
                          "appended_diag_bytes": 80, "appended_note_bytes": 10,
-                         "appended_empty_bytes": 10, "attempted_members": 2, "server": "gopls",
+                         "appended_empty_bytes": 10, "attempted_members": 2,
+                         "total_diag_count": 3, "new_diag_count": 2, "server": "gopls",
                          "path_fingerprint": "p1", "diag_fingerprint": "d1"}},
             {"type": "lsp.request.finished", "session_id": "s1", "timestamp": "2026-09-29T10:02:00Z",
              "payload": {"trigger": "tool", "outcome": "clean", "duration_ms": 7,
@@ -644,6 +685,8 @@ def selftest():
             ("cold_repeat", result["cold_repeat"], 0),
             ("multi_member_requests", result["multi_member_requests"], 1),
             ("attempted_members_max", result["attempted_members_max"], 2),
+            ("total_diag_count", result["total_diag_count"], 3),
+            ("new_diag_count", result["new_diag_count"], 2),
             ("sessions", result["sessions"], 2),
             ("closure_eligible", result["closure_eligible"], 1),
             ("closure_closed", result["closure_closed"], 1),
@@ -662,13 +705,15 @@ def selftest():
             failures.append(f"cold first publish: got {rows['lsp_cold_first_publish_p95']}")
         if rows["lsp_cold_first_probe_ratio"] != ratio_text(1, 1):
             failures.append(f"cold probe ratio: got {rows['lsp_cold_first_probe_ratio']}")
+        if rows["lsp_diag_new_ratio"] != ratio_text(2, 3):
+            failures.append(f"diag new ratio: got {rows['lsp_diag_new_ratio']}")
         if failures:
             print("selftest FAILED:")
             for failure in failures:
                 print("  -", failure)
             return 1
         print("selftest OK（4 请求 / 覆盖率 1.0 / P50 7ms / 追加比 100/1100 / fallback 1/3 / "
-              "closure 1.0 / cold probe 1.0）")
+              "closure 1.0 / cold probe 1.0 / diag new 2/3）")
         return 0
 
 

@@ -98,6 +98,10 @@ type Stats struct {
 	AppendedDiagBytes  int `json:"appended_diag_bytes,omitempty"`
 	AppendedNoteBytes  int `json:"appended_note_bytes,omitempty"`
 	AppendedEmptyBytes int `json:"appended_empty_bytes,omitempty"`
+	// A6 decision data（O9）：全量诊断条数与其中"编辑前不存在"的新增条数
+	// （scope 过滤前统计；旧构建无字段时保持 0，渲染为未采集）。
+	TotalDiagCount int `json:"total_diag_count,omitempty"`
+	NewDiagCount   int `json:"new_diag_count,omitempty"`
 	// ColdFirstProbe / ColdRepeat：no_fresh 请求中"首探针"（路径未标记已知冷，
 	// 按完整预算等待）与"重复探针"（cold_fast_fail=true，已被路径级快速失败
 	// 覆盖）的拆分；前者是下一轮 cold_probe 预算的判据（O4）。
@@ -179,26 +183,28 @@ func Analyze(opts Options) (Stats, error) {
 	seen := map[string]struct{}{}
 
 	type requestFact struct {
-		sessionID          string
-		day                string
-		trigger            string
-		outcome            string
-		durationMS         int
-		diagCount          int
-		appendedBytes      int
-		appendedDiagBytes  int
-		appendedNoteBytes  int
-		appendedEmptyBytes int
-		omittedItems       int
-		omittedByChars     int
-		server             string
-		ts                 time.Time
-		pathFingerprint    string
-		diagFingerprint    string
-		reasonCategory     string
-		coldFastFail       bool
+		sessionID           string
+		day                 string
+		trigger             string
+		outcome             string
+		durationMS          int
+		diagCount           int
+		appendedBytes       int
+		appendedDiagBytes   int
+		appendedNoteBytes   int
+		appendedEmptyBytes  int
+		totalDiagCount      int
+		newDiagCount        int
+		omittedItems        int
+		omittedByChars      int
+		server              string
+		ts                  time.Time
+		pathFingerprint     string
+		diagFingerprint     string
+		reasonCategory      string
+		coldFastFail        bool
 		coldProbeClassified bool
-		attemptedMembers   int
+		attemptedMembers    int
 	}
 	var requests []requestFact
 
@@ -263,26 +269,28 @@ func Analyze(opts Options) (Stats, error) {
 						timestamps = append(timestamps, event.Timestamp)
 					}
 					fact := requestFact{
-						sessionID:       strings.TrimSpace(event.SessionID),
-						day:             day,
-						trigger:         payloadString(payload, "trigger"),
-						outcome:         payloadString(payload, "outcome"),
-						durationMS:      payloadInt(payload, "duration_ms"),
-						diagCount:       payloadInt(payload, "diag_count"),
-						appendedBytes:   payloadInt(payload, "appended_bytes"),
-						appendedDiagBytes:  payloadInt(payload, "appended_diag_bytes"),
-						appendedNoteBytes:  payloadInt(payload, "appended_note_bytes"),
-						appendedEmptyBytes: payloadInt(payload, "appended_empty_bytes"),
-						omittedItems:    payloadInt(payload, "omitted_items"),
-						omittedByChars:  payloadInt(payload, "omitted_by_chars"),
-						server:          payloadString(payload, "server"),
-						ts:              event.Timestamp,
-						pathFingerprint: payloadString(payload, "path_fingerprint"),
-						diagFingerprint: payloadString(payload, "diag_fingerprint"),
-						reasonCategory:  payloadString(payload, "reason_category"),
-						coldFastFail:    payloadBool(payload, "cold_fast_fail"),
+						sessionID:           strings.TrimSpace(event.SessionID),
+						day:                 day,
+						trigger:             payloadString(payload, "trigger"),
+						outcome:             payloadString(payload, "outcome"),
+						durationMS:          payloadInt(payload, "duration_ms"),
+						diagCount:           payloadInt(payload, "diag_count"),
+						appendedBytes:       payloadInt(payload, "appended_bytes"),
+						appendedDiagBytes:   payloadInt(payload, "appended_diag_bytes"),
+						appendedNoteBytes:   payloadInt(payload, "appended_note_bytes"),
+						appendedEmptyBytes:  payloadInt(payload, "appended_empty_bytes"),
+						totalDiagCount:      payloadInt(payload, "total_diag_count"),
+						newDiagCount:        payloadInt(payload, "new_diag_count"),
+						omittedItems:        payloadInt(payload, "omitted_items"),
+						omittedByChars:      payloadInt(payload, "omitted_by_chars"),
+						server:              payloadString(payload, "server"),
+						ts:                  event.Timestamp,
+						pathFingerprint:     payloadString(payload, "path_fingerprint"),
+						diagFingerprint:     payloadString(payload, "diag_fingerprint"),
+						reasonCategory:      payloadString(payload, "reason_category"),
+						coldFastFail:        payloadBool(payload, "cold_fast_fail"),
 						coldProbeClassified: payloadHas(payload, "cold_fast_fail"),
-						attemptedMembers: payloadInt(payload, "attempted_members"),
+						attemptedMembers:    payloadInt(payload, "attempted_members"),
 					}
 					requests = append(requests, fact)
 					if fact.sessionID != "" {
@@ -334,6 +342,8 @@ func Analyze(opts Options) (Stats, error) {
 		stats.AppendedDiagBytes += fact.appendedDiagBytes
 		stats.AppendedNoteBytes += fact.appendedNoteBytes
 		stats.AppendedEmptyBytes += fact.appendedEmptyBytes
+		stats.TotalDiagCount += fact.totalDiagCount
+		stats.NewDiagCount += fact.newDiagCount
 		stats.DiagCount += fact.diagCount
 		if fact.omittedItems > 0 || fact.omittedByChars > 0 {
 			stats.Truncated++

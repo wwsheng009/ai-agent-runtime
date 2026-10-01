@@ -90,6 +90,14 @@ func Rows(stats Stats) []Row {
 			Date:       date,
 		},
 		{
+			Metric:     "lsp_diag_new_ratio",
+			Value:      diagNewText(stats),
+			Window:     window,
+			Samples:    diagNewSamples(stats),
+			Conclusion: diagNewConclusion(stats),
+			Date:       date,
+		},
+		{
 			Metric:     "lsp_fallback_ratio",
 			Value:      fallback,
 			Window:     window,
@@ -138,6 +146,30 @@ func Rows(stats Stats) []Row {
 			Date:       date,
 		},
 	}
+}
+
+// diagNewText 输出注入诊断中"新增（编辑前不存在）"的占比：A6（scope 默认值）
+// 的判据——占比低说明 scope=all 在反复重发既有问题，切 changed 收益大；
+// 未采集输出 n/a + 原因。
+func diagNewText(stats Stats) string {
+	if stats.TotalDiagCount <= 0 {
+		return "n/a（窗口内无带 total_diag_count 的诊断样本；新构建落盘后开始采集）"
+	}
+	return ratioText(stats.NewDiagCount, stats.TotalDiagCount, "")
+}
+
+func diagNewSamples(stats Stats) string {
+	if stats.TotalDiagCount <= 0 {
+		return "n=0（未采集，非缺失数据）"
+	}
+	return fmt.Sprintf("new %d / all %d（全量为 scope 过滤前条数）", stats.NewDiagCount, stats.TotalDiagCount)
+}
+
+func diagNewConclusion(stats Stats) string {
+	if stats.TotalDiagCount <= 0 {
+		return "待采集（需要 total_diag_count 事件字段）"
+	}
+	return "待标定（A6：新增占比低 → 考虑 scope=changed 默认）"
 }
 
 // coldProbeText 输出 no_fresh 中"首探针"的占比：未标记已知冷、按完整预算等待
@@ -259,6 +291,10 @@ func RenderMarkdown(stats Stats) string {
 	}
 	fmt.Fprintf(&builder, "- 等待：P50 = %s ms，P95 = %s ms（n=%d）\n", p50, p95, len(stats.durations))
 	fmt.Fprintf(&builder, "- 诊断：命中 %d 次（injected %d 次），累计条数 %d\n", stats.DiagHit, stats.Injected, stats.DiagCount)
+	if stats.TotalDiagCount > 0 {
+		fmt.Fprintf(&builder, "- 诊断新旧构成（O9/A6）：新增 %d / 全量 %d（scope=all 时全量即注入量）\n",
+			stats.NewDiagCount, stats.TotalDiagCount)
+	}
 	fmt.Fprintf(&builder, "- 追加：累计 %d 字节；截断请求 %d 次（省略 %d 条 / %d 字符）\n",
 		stats.AppendedBytes, stats.Truncated, stats.OmittedItems, stats.OmittedByChars)
 	if stats.AppendedDiagBytes+stats.AppendedNoteBytes+stats.AppendedEmptyBytes > 0 {

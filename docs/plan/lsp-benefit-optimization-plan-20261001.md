@@ -160,6 +160,7 @@ eventbridge 仅 >1 时落盘（单成员请求载荷保持现状）；白名单�
 | O6 | ✅ | `spec.go`（`emptyStyle` 默认 compact）、`format.go`、`bridge.go`；顺带把空块的字面 `\n` 修为真实换行 | `TestRenderDiagnosticsEmptyStyle`（compact/full 两态） |
 | O7 | ✅ | 分析侧消费新字段：Go 基线包 + Python 脚本同构新增 `lsp_cold_first_probe_ratio` 行、追加字节拆分、多成员明细；降级文案改报**实际预算**（原恒报配置 `wait_ms`） | `TestColdProbeRowStates` / `TestColdProbeIgnoresUnclassifiedNoFresh` / `--selftest` / `TestColdRetryAfterGraceTimeout` |
 | O8 | ✅ | 删除/移走的路径（apply_patch delete/move）不再进入内联诊断：文件已不存在时静默跳过，不再产生 `read file` 降级提示与无谓请求；目录同样跳过 | `TestAppendToResultSkipsDeletedPaths` |
+| O9 | ✅ | 请求事件新增 `total_diag_count`/`new_diag_count`（scope 过滤前全量与其中新增条数，仅全量>0 时落盘）：解锁 A6（scope 默认值）决策；基线新增 `lsp_diag_new_ratio` 行与明细 | `TestDiagnoseCountsNewVsTotalDiagnostics` / eventbridge 载荷断言 / baseline fixture / `--selftest` |
 
 **验证记录**
 
@@ -206,3 +207,4 @@ eventbridge 仅 >1 时落盘（单成员请求载荷保持现状）；白名单�
 | `cold_fast_fail` | 无字段 | 可直接统计路径级快速失败次数 | 新事件字段 |
 | `attempted_members` | 无字段 | 可确认多成员工作区是否出现叠加等待 | 新事件字段（仅 >1 落盘） |
 | `lsp_cold_first_probe_ratio` | n/a（0 分类样本） | ≥20 样本后判读：首探针占比高 → 下一轮引入 `cold_probe_ms`（保守默认）；占比低 → 维持现状 | 基线报告新行（Go/Python 同构，旧事件缺字段不计入） |
+| `lsp_diag_new_ratio` | n/a（0 诊断样本） | ≥20 诊断样本后判读：新增占比低（如 <50%）→ 评估把 `diagnostics.scope` 默认切到 `changed`；占比高 → 维持 `all`（A6） | 基线报告新行（Go/Python 同构，仅全量>0 的事件携带） |

@@ -155,9 +155,12 @@ var payloadAllowKeys = map[string]bool{
 	"appended_diag_bytes":  true,
 	"appended_note_bytes":  true,
 	"appended_empty_bytes": true,
-	"cold_fast_fail":       true,
-	"attempted_members":    true,
-	"path_fingerprint":     true,
+	// A6 decision data（O9）：全量诊断条数与新增条数（均为小整数）。
+	"total_diag_count":  true,
+	"new_diag_count":    true,
+	"cold_fast_fail":    true,
+	"attempted_members": true,
+	"path_fingerprint":  true,
 	// first_publish_ms 是启动→首个发布的毫秒数（冷启动观测，方案 §5.8 第三轮）。
 	"first_publish_ms": true,
 }

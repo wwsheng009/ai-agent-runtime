@@ -19,7 +19,7 @@ func writeFixture(t *testing.T) string {
 		t.Fatalf("mkdir: %v", err)
 	}
 	lines := []string{
-		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"trigger":"inline","outcome":"injected","duration_ms":10,"diag_count":2,"appended_bytes":100,"appended_diag_bytes":80,"appended_note_bytes":10,"appended_empty_bytes":10,"attempted_members":2,"server":"gopls","path_fingerprint":"p1","diag_fingerprint":"d1"}}`,
+		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"trigger":"inline","outcome":"injected","duration_ms":10,"diag_count":2,"total_diag_count":3,"new_diag_count":2,"appended_bytes":100,"appended_diag_bytes":80,"appended_note_bytes":10,"appended_empty_bytes":10,"attempted_members":2,"server":"gopls","path_fingerprint":"p1","diag_fingerprint":"d1"}}`,
 		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:02:00Z","payload":{"trigger":"tool","outcome":"clean","duration_ms":7,"path_fingerprint":"p1"}}`,
 		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:01:00Z","payload":{"trigger":"inline","outcome":"degraded_no_fresh","duration_ms":30,"reason_category":"wait_timeout","cold_fast_fail":false}}`,
 		`{"type":"lsp.request.finished","session_id":"s2","timestamp":"2026-09-29T10:02:00Z","payload":{"trigger":"tool","outcome":"no_server","duration_ms":5}}`,
@@ -101,6 +101,12 @@ func TestAnalyzeFixtureMatchesScriptNumbers(t *testing.T) {
 	if stats.MultiMemberRequests != 1 || stats.AttemptedMembersMax != 2 {
 		t.Fatalf("multi-member = %d/max %d, want 1/2", stats.MultiMemberRequests, stats.AttemptedMembersMax)
 	}
+	if stats.TotalDiagCount != 3 || stats.NewDiagCount != 2 {
+		t.Fatalf("diag new/total = %d/%d, want 2/3", stats.NewDiagCount, stats.TotalDiagCount)
+	}
+	if got := rows["lsp_diag_new_ratio"].Value; got != "0.6667" {
+		t.Fatalf("diag new ratio = %q, want 0.6667", got)
+	}
 	if got := rows["lsp_cold_first_probe_ratio"].Value; got != "1.0000" {
 		t.Fatalf("cold first probe ratio = %q, want 1.0000", got)
 	}
@@ -114,7 +120,8 @@ func TestAnalyzeFixtureMatchesScriptNumbers(t *testing.T) {
 		t.Fatalf("cold first publish p95 row = %q, want 1234 ms", got)
 	}
 	if report := RenderMarkdown(stats); !strings.Contains(report, "§4.3 基线登记表") ||
-		!strings.Contains(report, "冷路径探针（O4）") || !strings.Contains(report, "多成员请求（O5）") {
+		!strings.Contains(report, "冷路径探针（O4）") || !strings.Contains(report, "多成员请求（O5）") ||
+		!strings.Contains(report, "诊断新旧构成（O9/A6）") {
 		t.Fatalf("report missing table header or O4/O5 detail lines")
 	}
 }

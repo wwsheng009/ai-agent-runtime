@@ -624,6 +624,47 @@ func TestAppendToResultSkipsDeletedPaths(t *testing.T) {
 	}
 }
 
+// TestDiagnoseCountsNewVsTotalDiagnostics pins the A6 decision data: every
+// fresh outcome reports the full diagnostic count and how many items were new
+// (absent from the pre-change snapshot), for scope=all as well — that pair is
+// what tells the offline baseline how much of the injected payload a
+// scope=changed default would drop.
+func TestDiagnoseCountsNewVsTotalDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestFile(t, dir, "main.go", "package main\n")
+	fake := newFakeServer(t)
+	fake.diagnosticsOnOpen = func(uri string, version int) []fakeDiagnostic {
+		// Line 0 stays byte-identical across the edit (LSP lines are 0-based):
+		// Key() includes the byte columns, so a diagnostic on a line whose
+		// content changed would legitimately count as new (a moved error).
+		return []fakeDiagnostic{{Line: 0, Char: 1, EndChar: 2, Severity: 1, Message: "first"}}
+	}
+	fake.diagnosticsFor = func(uri string, version int) []fakeDiagnostic {
+		return []fakeDiagnostic{
+			{Line: 0, Char: 1, EndChar: 2, Severity: 1, Message: "first"},
+			{Line: 1, Char: 1, EndChar: 2, Severity: 1, Message: "second"},
+		}
+	}
+	cfg := testConfig(t, func(c *Config) {})
+	bridge := NewBridgeWithOptions(cfg, dir, BridgeOptions{Dial: fake.dial()})
+	ctx := context.Background()
+	t.Cleanup(func() { bridge.Stop(ctx) })
+
+	first := bridge.Diagnose(ctx, path)
+	if !first.Fresh || first.TotalDiagCount != 1 || first.NewDiagCount != 1 {
+		t.Fatalf("first outcome = fresh %v total %d new %d, want true/1/1",
+			first.Fresh, first.TotalDiagCount, first.NewDiagCount)
+	}
+	// The second pass must be a real edit: unchanged content skips didChange
+	// (no new publish), which would keep the old set and report 1/0.
+	path = writeTestFile(t, dir, "main.go", "package main\n// edited\n")
+	second := bridge.Diagnose(ctx, path)
+	if !second.Fresh || second.TotalDiagCount != 2 || second.NewDiagCount != 1 {
+		t.Fatalf("second outcome = fresh %v total %d new %d, want true/2/1",
+			second.Fresh, second.TotalDiagCount, second.NewDiagCount)
+	}
+}
+
 // TestColdRetryAfterGraceTimeout pins the long-cold-window behavior: once the
 // one-time grace is spent with nothing ever published, later edits fail fast
 // (cold_retry_ms) instead of re-paying the full budget on every edit, and the

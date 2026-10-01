@@ -71,6 +71,14 @@ type Outcome struct {
 	// cold-path retry budget instead of the full diagnostics budget
 	// (perf attribution; never rendered into the model-facing text).
 	ColdFastFail bool
+	// TotalDiagCount / NewDiagCount are the A6 decision data: how many
+	// diagnostics the file carried in total and how many of them were new
+	// (absent from the pre-change snapshot). With scope=all the model still
+	// sees every item, but the pair lets the offline baseline measure how much
+	// of the injected payload is pre-existing noise that a scope=changed
+	// default would drop. Never rendered into the model-facing text.
+	TotalDiagCount int
+	NewDiagCount   int
 }
 
 // BridgeOptions carries the injectable seams of the facade. Logger feeds both
@@ -278,6 +286,7 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 	}
 
 	collected := make(map[string]Diagnostic)
+	allCollected := make(map[string]Diagnostic)
 	baseline := make(map[string]struct{})
 	fresh := false
 	degradeReason := ""
@@ -366,6 +375,7 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 		}
 		fresh = true
 		for _, item := range items {
+			allCollected[item.Key()] = item
 			if cfg.Scope == ScopeChanged {
 				if _, existed := baseline[item.Key()]; existed {
 					continue
@@ -380,6 +390,12 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 		outcome.Reason = firstNonEmpty(degradeReason, "diagnostics unavailable")
 		outcome.Text = DegradeNote(path, outcome.Reason, cfg.DegradeMode)
 		return outcome
+	}
+	outcome.TotalDiagCount = len(allCollected)
+	for key := range allCollected {
+		if _, existed := baseline[key]; !existed {
+			outcome.NewDiagCount++
+		}
 	}
 
 	items := make([]Diagnostic, 0, len(collected))
@@ -549,6 +565,8 @@ func (b *Bridge) observeRequest(ctx context.Context, trigger, path string, outco
 		Outcome:            classifyOutcome(outcome),
 		DurationMS:         elapsed.Milliseconds(),
 		DiagCount:          len(outcome.Items),
+		TotalDiagCount:     outcome.TotalDiagCount,
+		NewDiagCount:       outcome.NewDiagCount,
 		AppendedBytes:      appendedBytes,
 		OmittedItems:       outcome.OmittedItems,
 		OmittedByChars:     outcome.OmittedByChars,
@@ -574,24 +592,26 @@ func (b *Bridge) observeRequest(ctx context.Context, trigger, path string, outco
 	}
 	if b.observer != nil {
 		b.observer(Event{
-			Kind:            EventRequest,
-			Time:            record.Time,
-			SessionID:       sessionID,
-			ToolCallID:      toolCallID,
-			TurnID:          turnID,
-			Server:          record.Server,
-			Path:            path,
-			PathFingerprint: pathFingerprint,
-			DiagFingerprint: outcome.DiagFingerprint,
-			Count:           record.DiagCount,
-			Trigger:         record.Trigger,
-			Outcome:         record.Outcome,
-			DurationMS:      record.DurationMS,
-			DiagCount:       record.DiagCount,
-			AppendedBytes:   record.AppendedBytes,
-			OmittedItems:    record.OmittedItems,
-			OmittedByChars:  record.OmittedByChars,
-			ReasonCategory:  reasonCategory,
+			Kind:               EventRequest,
+			Time:               record.Time,
+			SessionID:          sessionID,
+			ToolCallID:         toolCallID,
+			TurnID:             turnID,
+			Server:             record.Server,
+			Path:               path,
+			PathFingerprint:    pathFingerprint,
+			DiagFingerprint:    outcome.DiagFingerprint,
+			Count:              record.DiagCount,
+			Trigger:            record.Trigger,
+			Outcome:            record.Outcome,
+			DurationMS:         record.DurationMS,
+			DiagCount:          record.DiagCount,
+			TotalDiagCount:     record.TotalDiagCount,
+			NewDiagCount:       record.NewDiagCount,
+			AppendedBytes:      record.AppendedBytes,
+			OmittedItems:       record.OmittedItems,
+			OmittedByChars:     record.OmittedByChars,
+			ReasonCategory:     reasonCategory,
 			AppendedDiagBytes:  record.AppendedDiagBytes,
 			AppendedNoteBytes:  record.AppendedNoteBytes,
 			AppendedEmptyBytes: record.AppendedEmptyBytes,

@@ -22,15 +22,18 @@ const (
 
 // RequestRecord 是单次后写请求的低敏事实（metrics 与 web /events 共用同一形状）。
 type RequestRecord struct {
-	Time           time.Time `json:"time"`
-	Trigger        string    `json:"trigger"`
-	Server         string    `json:"server,omitempty"`
-	Outcome        string    `json:"outcome"`
-	DurationMS     int64     `json:"duration_ms"`
-	DiagCount      int       `json:"diag_count"`
-	AppendedBytes  int       `json:"appended_bytes"`
-	OmittedItems   int       `json:"omitted_items,omitempty"`
-	OmittedByChars int       `json:"omitted_by_chars,omitempty"`
+	Time       time.Time `json:"time"`
+	Trigger    string    `json:"trigger"`
+	Server     string    `json:"server,omitempty"`
+	Outcome    string    `json:"outcome"`
+	DurationMS int64     `json:"duration_ms"`
+	DiagCount  int       `json:"diag_count"`
+	// A6 decision data: all diagnostics on the file vs the new-only count.
+	TotalDiagCount int `json:"total_diag_count,omitempty"`
+	NewDiagCount   int `json:"new_diag_count,omitempty"`
+	AppendedBytes  int `json:"appended_bytes"`
+	OmittedItems   int `json:"omitted_items,omitempty"`
+	OmittedByChars int `json:"omitted_by_chars,omitempty"`
 	// Join keys (observability plan §3.1): request → tool call / turn.
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	TurnID     string `json:"turn_id,omitempty"`
