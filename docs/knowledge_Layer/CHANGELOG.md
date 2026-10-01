@@ -6,6 +6,27 @@
 
 ---
 
+## 2026-10-01 — Phase 5 登记① 收口：知识层状态端点（`/web/api/knowledge`）
+
+### Added
+
+- `GET /web/api/knowledge[/status]`（knowledge.status.v1）：聊天会话 web 面首次暴露知识层状态快照。数据源与 `aicli knowledge status`、runtime-server `GET /api/runtime/knowledge/status` **同源同形**（直接返回同一 `knowledge.StatusReport`：mode/role/owner_pid/watch/gc/lock_wait/last_job/staleness/degraded_reason 等）；mode=off / 无会话返回 200 + mode=off 最小载荷（不是 404）；未知子路径 404、非 GET 405；只读——不触发索引、不写库，owner 与 reader 行为一致。
+- 接线：`web_schema.go`（路径常量）+ `pprof.go`（路由注册，含 `/` 变体）+ `chat_debug_endpoints.go`（清单登记，只认清单的脚本可发现）。
+
+### Verified
+
+- 6 例新测试（mode=off / 真实 Layer / 裸路径等价 / 无会话 / 405 / 404）+ `cmd/aicli/commands` 全绿 + `go build ./...` OK。
+- 真实进程实测（新二进制 + 临时工作区 + `watch: on`）：`mode=on`、`role=owner`、**`watch.active=true, dirs=1`**、`files/symbols/refs` 与 `last_job(kind=light,status=done)` 齐全、`degraded_reason` 空；裸路径等价；405/404 正确；`/debug/endpoints` 可发现。
+- reader 降级实测（同工作区第二进程）：`role=reader` + `owner_pid` 指向 owner + 同一索引读数（`files=1/symbols=1/refs=2`）+ `staleness_ms` 可见。
+- 关闭 Phase 5 真实会话 E2E 报告登记①（知识层状态面不可读）；登记③的「watch 状态可观测」随之落地（`watch=on` 时 `active=true` 可直接读）。
+
+### Notes
+
+- 仍遗留：`watch=on` 的**端到端时延压缩**（外部变更从"一个 turn"变为"一次事件"）未在真实会话验证（需以 `watch: on` 重启会话）；on-mode A/B（≥20 任务）与端到端 p95 统计门槛仍待测量轮。
+- 登记②（`/web/api/turn` usage 在 reasoning 回合读数不自洽）仍未动。
+
+---
+
 ## 2026-10-01 — Phase 5 真实会话远程 E2E（交付 1/3 的生产路径验证）
 
 ### Verified

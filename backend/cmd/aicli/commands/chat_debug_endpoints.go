@@ -121,6 +121,7 @@ var webDebugEndpoints = []struct {
 	{Method: "POST", Path: "/web/api/mcps/reload", Note: "热重载 MCP 配置并重连（MCP 页签）"},
 	{Method: "GET", Path: "/web/api/analysis", Note: "用量分析（/status|/tools|/subagents|/errors|/routing|/routing/events）"},
 	{Method: "GET", Path: "/web/api/lsp", Note: "LSP 观测（/status|/overview|/events；池状态与 TUI /lsp status 同源，读数与事件在埋点落地前 available=false）"},
+	{Method: "GET", Path: "/web/api/knowledge", Note: "知识层状态（/status；与 `aicli knowledge status`、runtime-server GET /api/runtime/knowledge/status 同源同形，mode=off 时返回最小载荷而不是 404）"},
 	{Method: "GET", Path: "/web/api/cache", Note: "LLM 缓存分析（/overview|/requests|/messages/{id}/trace）"},
 }
 

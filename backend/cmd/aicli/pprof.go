@@ -450,6 +450,12 @@ func startPprofServer(addr string) (*pprofServerHandle, error) {
 	// 埋点接入后无需改前端即可点亮。
 	mux.HandleFunc(commands.ChatWebAPILSPPath, commands.HandleChatWebAPILSP)
 	mux.HandleFunc(commands.ChatWebAPILSPPath+"/", commands.HandleChatWebAPILSP)
+	// /web/api/knowledge[/status] 知识层状态（knowledge.status.v1）：与
+	// `aicli knowledge status`、runtime-server GET /api/runtime/knowledge/status
+	// 同源同形（同一 knowledge.StatusReport，含 mode/role/watch/gc/lock_wait/
+	// last_job）；只读端点，mode=off 时返回 mode=off 的最小载荷而不是 404。
+	mux.HandleFunc(commands.ChatWebAPIKnowledgePath, commands.HandleChatWebAPIKnowledge)
+	mux.HandleFunc(commands.ChatWebAPIKnowledgePath+"/", commands.HandleChatWebAPIKnowledge)
 	// /web/api/skills[/{name}] 当前会话的 skill catalog（与 TUI /skills 同源：
 	// session.FunctionCatalog 的 skill 描述符），供「技能」页签的列表与详情面板。
 	mux.HandleFunc(commands.ChatWebAPISkillsPath, commands.HandleChatWebAPISkills)

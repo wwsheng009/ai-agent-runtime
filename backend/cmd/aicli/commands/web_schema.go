@@ -75,6 +75,12 @@ const (
 	//   GET /web/api/lsp/baseline  §4.3 基线报告（跨会话；10 分钟 TTL 缓存；未采集输出 n/a）
 	// 数据源为当前会话的 tools.Manager LSP 池（与 TUI /lsp status 同源）。
 	ChatWebAPILSPPath = "/web/api/lsp"
+	// ChatWebAPIKnowledgePath 知识层状态端点（knowledge.status.v1）：
+	//   GET /web/api/knowledge[/status]  知识层状态快照（只读；mode=off 时
+	//   返回 mode=off 的最小载荷而不是 404）。
+	// 数据源与 `aicli knowledge status`、runtime-server 的
+	// GET /api/runtime/knowledge/status 同源同形（同一 knowledge.StatusReport）。
+	ChatWebAPIKnowledgePath = "/web/api/knowledge"
 	// ChatWebAPIMCPsPath MCP 管理端点前缀（MCP 页签）：
 	//   GET/POST /web/api/mcps
 	//   POST     /web/api/mcps/reload
