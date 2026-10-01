@@ -83,7 +83,12 @@ func appTranscriptRenderLine(row AppScreenRow, cells map[scene.CellID]scene.Tran
 		return render.Line{}
 	}
 	if len(row.RenderLine.Spans) > 0 {
-		return cloneAppRenderLine(row.RenderLine)
+		// 直接复用布局行的结构化 line，不再深拷贝：该 line 在整条管线里
+		// 只读消费（等价比较、frame 组装、ledger Enqueue 前各自克隆），
+		// plain 路径的 assemblePlainHistoryCommits 也早已按同一约定共享
+		// 物理行底层。生产 pprof：这里每行一次的深拷贝贡献了 ~50GB 累计
+		// 分配（调用方 99% 是规划器逐行物化）。
+		return row.RenderLine
 	}
 	if row.Text == "" {
 		return render.Line{}

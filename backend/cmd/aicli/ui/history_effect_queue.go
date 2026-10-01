@@ -209,6 +209,35 @@ func (s HistoryEffectQueueState) HasPending() bool {
 		s.ledger != nil && s.ledger.HasPending()
 }
 
+// hasSettledRecordForSource reports whether every ledger record for this source
+// identity is settled for reconciliation purposes.
+//
+// 规划器用它跳过「已经交付/已终结」的分片，避免在每次 transcript 迁移时把
+// 整段历史的 render payload 重新物化一遍（pprof：planMarkdownCellHistoryCommits
+// 累计 211GB，其中绝大多数分片早已 Acked）。只有 Pending/InFlight 条目参与
+// syncHistoryEffectCandidates 的 payload 比对与 rebase，因此只要存在这类条目
+// 就必须继续发射候选；全部为终态（Acked/Failed/Abandoned/Invalidated）时
+// 发射与否不影响投递语义，跳过纯属省分配。
+func (s HistoryEffectQueueState) hasSettledRecordForSource(key historyCommitSourceKey) bool {
+	if s.ledger == nil {
+		return false
+	}
+	tokens := s.ledger.bySource[key]
+	if len(tokens) == 0 {
+		return false
+	}
+	for token := range tokens {
+		entry, ok := s.ledger.byToken[token]
+		if !ok {
+			continue
+		}
+		if entry.State == HistoryCommitPending || entry.State == HistoryCommitInFlight {
+			return false
+		}
+	}
+	return true
+}
+
 // recordTranscriptPlanTiming 记录一次 transcript 规划 pass 的耗时（P16 归因）。
 // 耗时与计数分列：PlanCount>0 且 MaxPlanMs 接近冻结窗口，才说明 P12 的卡顿
 // 花在规划器上。

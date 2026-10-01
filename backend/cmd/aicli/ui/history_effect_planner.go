@@ -88,6 +88,9 @@ func planEligibleHistoryCommitsWithin(state AppState, deadline time.Time) ([]His
 		return activeCommits, complete
 	}
 	ackedActive := indexAckedActiveHistoryCommits(state.HistoryEffects)
+	// 已结算分片（Acked/Failed/Abandoned/Invalidated）不再参与 reconcile，
+	// 规划时直接跳过，避免每次 transcript 迁移都把整段历史重新物化 payload。
+	settled := state.HistoryEffects.hasSettledRecordForSource
 	// The primary frame now owns only the mutable/bottom inline viewport.
 	// Finalized transcript rows all belong to native terminal history; retaining
 	// a screen-sized transcript tail here would make those rows disappear as
@@ -105,8 +108,8 @@ func planEligibleHistoryCommitsWithin(state AppState, deadline time.Time) ([]His
 		if found && beforeFrontier && cellIsFinalizedForHistory(cell) && cell.Source != "" {
 			skipRows := activeAckedRenderedPrefixRows(ackedActive, cellID, rows[start:end], byID)
 			if cellUsesStructuredPresentation(cell) {
-				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, state.LayoutGeneration, byID)...)
-			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, width, themeFingerprint(state.Theme), state.LayoutGeneration, byID); mapped {
+				commits = append(commits, planMarkdownCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, state.LayoutGeneration, byID, settled)...)
+			} else if segments, mapped := planPlainCellHistoryCommits(cell, rows[start:end], start, firstVisible, skipRows, width, themeFingerprint(state.Theme), state.LayoutGeneration, byID, settled); mapped {
 				commits = append(commits, segments...)
 			} else if complete && skipRows == 0 && end <= firstVisible {
 				// 截断窗口里被切断的 cell 只看得到一部分物理行，而
@@ -114,7 +117,9 @@ func planEligibleHistoryCommitsWithin(state AppState, deadline time.Time) ([]His
 				// 0），只带得动可见的那几行。它和续跑后完整窗口给出的逐行 fragment
 				// 是**不同身份**，两份都会被投递 —— 边界 cell 的可见行会在 scrollback
 				// 里写两遍。截断窗口下跳过，交给完整窗口那一轮。
-				commits = append(commits, wholeCellHistoryCommit(cell, rows[start:end], start, end, state.LayoutGeneration, byID))
+				if commit, ok := wholeCellHistoryCommit(cell, rows[start:end], start, end, state.LayoutGeneration, byID, settled); ok {
+					commits = append(commits, commit)
+				}
 			}
 		}
 		start = end
@@ -416,8 +421,14 @@ func planMutableMarkdownHistoryCommit(active ActiveCellState, geometry GeometryS
 // keeps the enclosing immutable source range and receives a stable renderer
 // fragment ordinal. The terminal payload remains the renderer's structured
 // line, never the raw Markdown source.
-func planMarkdownCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow, displayStart, firstVisible, skipRows int, generation uint64, byID map[scene.CellID]scene.TranscriptCell) []HistoryCommit {
-	commits := make([]HistoryCommit, 0, len(rows))
+func planMarkdownCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow, displayStart, firstVisible, skipRows int, generation uint64, byID map[scene.CellID]scene.TranscriptCell, settled func(historyCommitSourceKey) bool) []HistoryCommit {
+	// 容量不再按整 cell 行数预分配（pprof：仅这一行就累计分配 24.5GB）：
+	// 一次 pass 只为尚未结算的分片建 commit，通常远少于 cell 行数。
+	capacity := len(rows)
+	if capacity > 8 {
+		capacity = 8
+	}
+	commits := make([]HistoryCommit, 0, capacity)
 	fragmentID := uint64(0)
 	for index, row := range rows {
 		if row.TranscriptGap {
@@ -425,6 +436,16 @@ func planMarkdownCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenR
 		}
 		fragmentID++
 		if int(fragmentID) <= skipRows {
+			continue
+		}
+		// 已交付/已终结的分片不需要再物化 lines：跳过即可，身份编号
+		// （fragmentID）不受影响，未结算分片的语义与顺序完全不变。
+		if settled != nil && settled(historyCommitSourceIdentity(HistoryCommit{
+			CellID:      cell.ID,
+			Revision:    cell.Revision,
+			SourceRange: SourceRange{Start: 0, End: len(cell.Source)},
+			FragmentID:  fragmentID,
+		})) {
 			continue
 		}
 		end := index + 1
@@ -456,7 +477,14 @@ func planMarkdownCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenR
 // wholeCellHistoryCommit is the conservative fallback for structured rendering
 // and unusual source that cannot be bijectively related to plain source lines.
 // It is only eligible when no row from the cell remains in the primary frame.
-func wholeCellHistoryCommit(cell scene.TranscriptCell, rows []AppScreenRow, start, end int, generation uint64, byID map[scene.CellID]scene.TranscriptCell) HistoryCommit {
+func wholeCellHistoryCommit(cell scene.TranscriptCell, rows []AppScreenRow, start, end int, generation uint64, byID map[scene.CellID]scene.TranscriptCell, settled func(historyCommitSourceKey) bool) (HistoryCommit, bool) {
+	if settled != nil && settled(historyCommitSourceIdentity(HistoryCommit{
+		CellID:      cell.ID,
+		Revision:    cell.Revision,
+		SourceRange: SourceRange{Start: 0, End: len(cell.Source)},
+	})) {
+		return HistoryCommit{}, false
+	}
 	lines := make([]render.Line, 0, len(rows))
 	for _, row := range rows {
 		lines = append(lines, appTranscriptRenderLine(row, byID))
@@ -468,7 +496,7 @@ func wholeCellHistoryCommit(cell scene.TranscriptCell, rows []AppScreenRow, star
 		DisplayRange:     DisplayRange{Start: start, End: end},
 		LayoutGeneration: generation,
 		Lines:            lines,
-	}
+	}, true
 }
 
 // sourceLineRange is a non-overlapping source range for one logical source
@@ -512,7 +540,7 @@ func sourceLineRanges(source string) []sourceLineRange {
 //
 // Markdown is handled by planMarkdownCellHistoryCommits because its renderer
 // can add/remove physical rows and therefore has no source-byte fragment map.
-func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow, displayStart, firstVisible, skipRows, width int, themeFp string, generation uint64, byID map[scene.CellID]scene.TranscriptCell) ([]HistoryCommit, bool) {
+func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow, displayStart, firstVisible, skipRows, width int, themeFp string, generation uint64, byID map[scene.CellID]scene.TranscriptCell, settled func(historyCommitSourceKey) bool) ([]HistoryCommit, bool) {
 	lineRanges := sourceLineRanges(cell.Source)
 	if len(lineRanges) == 0 {
 		return nil, false
@@ -540,7 +568,7 @@ func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow,
 			}
 		}
 		if aligned {
-			return assemblePlainHistoryCommits(cell, cached, leadingGaps, displayStart, firstVisible, skipRows, generation), true
+			return assemblePlainHistoryCommits(cell, cached, leadingGaps, displayStart, firstVisible, skipRows, generation, settled), true
 		}
 	}
 
@@ -594,14 +622,20 @@ func planPlainCellHistoryCommits(cell scene.TranscriptCell, rows []AppScreenRow,
 		return nil, false
 	}
 	sharedHistoryPlan.put(key, physical)
-	return assemblePlainHistoryCommits(cell, physical, leadingGaps, displayStart, firstVisible, skipRows, generation), true
+	return assemblePlainHistoryCommits(cell, physical, leadingGaps, displayStart, firstVisible, skipRows, generation, settled), true
 }
 
 // assemblePlainHistoryCommits 按当前动态状态把物理行组装为 HistoryCommit：
 // skipRows 跳过已 acked 前缀，DisplayRange 按全局行下标偏移，LayoutGeneration
 // 取当前值。lines 共享物理行底层（只读消费，零拷贝）。
-func assemblePlainHistoryCommits(cell scene.TranscriptCell, physical []planPhysicalRow, leadingGaps, displayStart, firstVisible, skipRows int, generation uint64) []HistoryCommit {
-	commits := make([]HistoryCommit, 0, len(physical))
+func assemblePlainHistoryCommits(cell scene.TranscriptCell, physical []planPhysicalRow, leadingGaps, displayStart, firstVisible, skipRows int, generation uint64, settled func(historyCommitSourceKey) bool) []HistoryCommit {
+	// 与 markdown 路径同理：一次 pass 只为尚未结算的分片建 commit，
+	// 不再按整 cell 物理行数预分配。
+	capacity := len(physical)
+	if capacity > 8 {
+		capacity = 8
+	}
+	commits := make([]HistoryCommit, 0, capacity)
 	for i, pr := range physical {
 		if i < skipRows {
 			continue
@@ -614,6 +648,14 @@ func assemblePlainHistoryCommits(cell scene.TranscriptCell, physical []planPhysi
 		}
 		end := leadingGaps + i + 1
 		if displayStart+end > firstVisible {
+			continue
+		}
+		if settled != nil && settled(historyCommitSourceIdentity(HistoryCommit{
+			CellID:      cell.ID,
+			Revision:    cell.Revision,
+			SourceRange: pr.source,
+			FragmentID:  pr.fragment,
+		})) {
 			continue
 		}
 		lines := make([]render.Line, 0, end-start)
