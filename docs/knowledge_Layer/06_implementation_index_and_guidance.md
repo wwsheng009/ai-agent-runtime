@@ -465,7 +465,7 @@ DoD（完成判据）：① 零迁移即可读写三表；② 同 target 重复�
 - **文件落点**：新增 `contextpack/knowledge_provider.go`、`knowledge/compiler.go`；修改 `contextmgr/manager.go`、`contextpack/context_pack.go`。
 - **验收门槛**：相同任务上下文 token 下降 ≥ 25% 且任务成功率不降（A/B，样本 ≥ 20）；`stale` item 注入数 = 0；compiler 缓存命中 p95 < 50ms、未命中 p95 < 200ms。
 - **回滚**：provider 开关关闭。
-- **状态**：**切片 1–4 落地（2026-10-01）**——①语义内核 `knowledge/compiler.go`（信任等级闭集 + `context_items.trust` 映射 + 来源冲突优先级（复用 04 §4.4 权重）+ `CompilePlan`（stale/下限/预算/可解释性字段）+ `RenderDataBlock` 防注入包裹）+ 8 例测试；②compile 层缓存（`cache_entries`：窄接口 + 确定性键（含知识版本/编译器版本）+ Degrade-Not-Fail + 命中/时延指标；真库 200 次实测 hit p95 0.54ms / miss p95 1.07ms / hit_rate 0.995）+ 8 例测试；③contextmgr 接线（注入走 `CompilePlan` + data block 渲染 + `Manager.KnowledgeCache` + `LayerPlan.knowledge` 层与 hot/warm/cold tier 映射；off 可逆保持）+ 3 例新测试；④contextpack 只读 provider（`knowledge_provider.go`：结构化视图 + 有界 digest data block + Reduce 保块 + on 门控装配）+ 5 例新测试；切片计划（8 片）见 CHANGELOG。
+- **状态**：**切片 1–5 落地（2026-10-01）**——①语义内核 `knowledge/compiler.go`（信任等级闭集 + `context_items.trust` 映射 + 来源冲突优先级（复用 04 §4.4 权重）+ `CompilePlan`（stale/下限/预算/可解释性字段）+ `RenderDataBlock` 防注入包裹）+ 8 例测试；②compile 层缓存（`cache_entries`：窄接口 + 确定性键（含知识版本/编译器版本）+ Degrade-Not-Fail + 命中/时延指标；真库 200 次实测 hit p95 0.54ms / miss p95 1.07ms / hit_rate 0.995）+ 8 例测试；③contextmgr 接线（注入走 `CompilePlan` + data block 渲染 + `Manager.KnowledgeCache` + `LayerPlan.knowledge` 层与 hot/warm/cold tier 映射；off 可逆保持）+ 3 例新测试；④contextpack 只读 provider（`knowledge_provider.go`：结构化视图 + 有界 digest data block + Reduce 保块 + on 门控装配）+ 5 例新测试；⑤`context_snapshots`/`context_items` 落库（迁移 0004 + `ContextRecorder`（只记注入条目 / 幂等 / reader 粘性停用）+ 真库读写 + contextmgr 接线）+ 7 例新测试；切片计划（8 片）见 CHANGELOG。
 
 > **切片 1 落地（2026-10-01）**：语义内核 `knowledge/compiler.go`（纯函数、无 IO、可复算）——信任等级 7 级闭集 + 落库映射 + `Injectable()`；来源冲突优先级与 `ResolveConflicts`；`CompilePlan` 产出 `context_items` 语义镜像（source/version/trust/reason/stale/tokens/explanation）；`IsReuseItemStale` 规范判据；`RenderDataBlock`（03 §14.5 规则 2/4：data block 包裹 + 内容中性化 + 属性转义）。验证：8 例新测试 + `internal/knowledge` 全包。**登记**：supplement 14 §14.4 与 04 §4.4 在 Regex/FTS 先后上不一致，按 04 执行（`compiler.go` 头注说明）。
 >
@@ -474,6 +474,8 @@ DoD（完成判据）：① 零迁移即可读写三表；② 同 target 重复�
 > **切片 3 落地（2026-10-01）**：contextmgr 接线——注入统一走 `knowledge.CompilePlan`（本地 stale 判据收敛到 `knowledge.IsReuseItemStale`）；渲染统一为 data block（broad 每条目一块 / signals 单 digest 块）；`Manager.KnowledgeCache` 在有版本观测时启用 compile 缓存（命中不重编译，故障降级）；`LayerPlan.knowledge` 层 + 条目 tier（hot/warm/cold）元数据；`knowledge_items` 增 trust/tier/tokens。**行为变化（有意）**：broad/signals 注入文本格式改为 data block；`DefaultCompileItemOverhead` 24 → 320（预算覆盖渲染后尺寸，实测曾 969 > 800）。off 可逆与 `stale_item_injected=0` 保持。验证：contextmgr/agent 全包绿 + 3 例新测试。
 >
 > **切片 4 落地（2026-10-01）**：contextpack 只读 provider `contextpack/knowledge_provider.go`——零成本跳过（nil Planner / 空短查询 / Degraded / 无条目）；结构化视图（items/dropped/tiers/stale_item_injected）+ **有界 digest data block**（≤600 rune，超界退化计数块，绝不给半个块）；`Reduce` 保留完整块不截断；tier 规则收敛到 `knowledge.CompiledItemTier`；`handler.buildContextPack` 仅 `mode=on` 装配（shadow 保鲜索引不进 prompt、off 零装配）。验证：contextpack 全包 + 5 例新测试 + runtimeapi 三态门控用例。
+>
+> **切片 5 落地（2026-10-01）**：`context_snapshots`/`context_items` 落库——迁移 `0004`（context_items 增 version/confidence/tier/provisional/explanation）；`knowledge/context_snapshot.go`（语义镜像 + `ContextRecorder`：只记注入条目、确定性主键幂等、reader 粘性停用）+ `store_sqlite_context.go`（单事务写、reader 可读）+ contextmgr 接线（`Manager.KnowledgeRecorder`，失败记 metadata 不阻断）。**表内口径**：`context_items.stale=1` 行数 = `stale_item_injected`（表里出现即违规）。验证：knowledge 4 例 + contextmgr 3 例新测试。
 
 ### Phase 7 — Semantic Retrieval（可选，后置）
 

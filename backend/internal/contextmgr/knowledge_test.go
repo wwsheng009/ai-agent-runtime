@@ -677,3 +677,104 @@ func planWithReuse() knowledge.Plan {
 		Reason: knowledge.PlanReasonOK,
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 切片 5：快照落库接线（context_snapshots / context_items）
+// ---------------------------------------------------------------------------
+
+type recordingSnapshotStore struct {
+	calls   int
+	records []knowledge.ContextSnapshotRecord
+	err     error
+}
+
+func (s *recordingSnapshotStore) RecordContextSnapshot(_ context.Context, rec knowledge.ContextSnapshotRecord) error {
+	s.calls++
+	if s.err != nil {
+		return s.err
+	}
+	s.records = append(s.records, rec)
+	return nil
+}
+
+func knowledgeSnapshotPlan() knowledge.Plan {
+	return knowledge.Plan{
+		Reuse: []knowledge.ReuseItem{
+			knowledgeTestReuseItem("backend/hot.go", "wv1", knowledge.ReuseReasonOK, 0.95, false, false),
+			knowledgeTestReuseItem("backend/warm.go", "wv1", knowledge.ReuseReasonCrossTaskVerify, 0.93, true, false),
+			knowledgeTestReuseItem("backend/stale.go", "wv-old", knowledge.ReuseReasonVersionMismatch, 0.95, false, false),
+		},
+		Reason: knowledge.PlanReasonOK,
+	}
+}
+
+// 只记注入条目（stale 恒 0）；dropped 只进 budget_json。
+func TestKnowledgeSnapshotRecordingRecordsInjectedItemsOnly(t *testing.T) {
+	planner := &fakeVersionedPlanner{fakeKnowledgePlanner: fakeKnowledgePlanner{plan: knowledgeSnapshotPlan()}, version: "wv1"}
+	manager := newKnowledgeTestManager(planner, KnowledgeModeBroad)
+	store := &recordingSnapshotStore{}
+	manager.KnowledgeRecorder = knowledge.NewContextRecorder(store)
+
+	result := manager.Build(context.Background(), knowledgeTestBuildInput("locate the runtime agent loop entry"))
+	if result.Metadata["knowledge_snapshot_recorded"] != true {
+		t.Fatalf("快照必须已记录：%#v", result.Metadata["knowledge_snapshot_recorded"])
+	}
+	if result.Metadata["knowledge_version"] != "wv1" {
+		t.Fatalf("快照元数据必须带知识版本：%#v", result.Metadata["knowledge_version"])
+	}
+	if len(store.records) != 1 {
+		t.Fatalf("必须恰好记录一次，got %d", len(store.records))
+	}
+	record := store.records[0]
+	if record.SessionID != "session-knowledge" || record.TaskID != "task-1" {
+		t.Fatalf("会话/任务锚点不符：%#v", record)
+	}
+	if record.KnowledgeVersion != "wv1" || record.CompilerVersion == "" {
+		t.Fatalf("版本字段不符：%#v", record)
+	}
+	if len(record.Items) != 2 {
+		t.Fatalf("只记注入条目（stale/被过滤的不落表），got %d", len(record.Items))
+	}
+	for _, item := range record.Items {
+		if item.Stale {
+			t.Fatalf("context_items 不得出现 stale=1 行（stale_item_injected=0 的表内口径）：%#v", item)
+		}
+		if item.Source == "" || item.Version == "" || item.Trust == "" || item.Reason == "" {
+			t.Fatalf("可解释性四件套缺失：%#v", item)
+		}
+	}
+	if !strings.Contains(record.BudgetJSON, "dropped") || !strings.Contains(record.BudgetJSON, "stale") {
+		t.Fatalf("budget_json 必须承载 dropped 原因计数：%s", record.BudgetJSON)
+	}
+}
+
+// 写入失败 Degrade-Not-Fail：记 metadata、注入照常、请求不失败。
+func TestKnowledgeSnapshotRecordingFailureDegrades(t *testing.T) {
+	planner := &fakeVersionedPlanner{fakeKnowledgePlanner: fakeKnowledgePlanner{plan: knowledgeSnapshotPlan()}, version: "wv1"}
+	manager := newKnowledgeTestManager(planner, KnowledgeModeBroad)
+	manager.KnowledgeRecorder = knowledge.NewContextRecorder(&recordingSnapshotStore{err: errors.New("disk full")})
+
+	result := manager.Build(context.Background(), knowledgeTestBuildInput("locate the runtime agent loop entry"))
+	if errText, _ := result.Metadata["knowledge_snapshot_error"].(string); !strings.Contains(errText, "disk full") {
+		t.Fatalf("失败必须记 metadata：%#v", result.Metadata["knowledge_snapshot_error"])
+	}
+	if knowledgeMessageFrom(result) == nil {
+		t.Fatal("快照失败不得阻断注入")
+	}
+}
+
+// off：零写入（装配了记录器也不触库）。
+func TestKnowledgeSnapshotRecordingOffZeroWrites(t *testing.T) {
+	manager := newKnowledgeTestManager(&fakeKnowledgePlanner{plan: knowledgeSnapshotPlan()}, KnowledgeModeOff)
+	store := &recordingSnapshotStore{}
+	manager.KnowledgeRecorder = knowledge.NewContextRecorder(store)
+
+	result := manager.Build(context.Background(), knowledgeTestBuildInput("locate the runtime agent loop entry"))
+	if store.calls != 0 {
+		t.Fatalf("off 必须零写入，calls=%d", store.calls)
+	}
+	// off 档 metadata 与基线逐字节一致（键缺省或 false 均可，但不得为 true）。
+	if value, ok := result.Metadata["knowledge_snapshot_recorded"]; ok && value != false {
+		t.Fatalf("off 不得记录快照：%#v", value)
+	}
+}

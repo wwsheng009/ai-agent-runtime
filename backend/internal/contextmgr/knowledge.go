@@ -2,6 +2,7 @@ package contextmgr
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -126,6 +127,10 @@ type knowledgeInjectionStats struct {
 	Error              string
 	Items              []map[string]interface{}
 	VerifyTargets      []map[string]interface{}
+	// Phase 6 切片 5：快照落库结果（版本 token 与 Degrade-Not-Fail 状态）。
+	Version          string
+	SnapshotRecorded bool
+	SnapshotError    string
 }
 
 // knowledgeVersionObserver 由 *knowledge.Layer 实现：提供当前工作区版本观测
@@ -252,6 +257,26 @@ func (m *Manager) buildKnowledgeMessage(ctx context.Context, input BuildInput) (
 	}
 	stats.Reason = plan.Reason
 
+	// Phase 6 切片 5：快照落库（context_snapshots / context_items）——只记录
+	// **注入条目**（stale 恒为 0，表内出现 stale=1 行即代表注入违规）；失败
+	// Degrade-Not-Fail：记 metadata 并继续，绝不阻断请求。
+	if m.KnowledgeRecorder != nil {
+		meta := knowledge.ContextSnapshotMeta{
+			SessionID:        strings.TrimSpace(input.SessionID),
+			TaskID:           taskID,
+			WorkspaceID:      strings.TrimSpace(input.WorkspaceID),
+			KnowledgeVersion: stats.Version,
+			BudgetJSON:       knowledgeBudgetJSON(stats, compiled),
+		}
+		recorded, recordErr := m.KnowledgeRecorder.Record(ctx, meta, compiled)
+		switch {
+		case recordErr != nil:
+			stats.SnapshotError = recordErr.Error()
+		case recorded:
+			stats.SnapshotRecorded = true
+		}
+	}
+
 	message := types.NewAssistantMessage(content)
 	message.Metadata["context_stage"] = knowledgeStage
 	message.Metadata["knowledge_mode"] = stats.Mode
@@ -272,11 +297,15 @@ func (m *Manager) buildKnowledgeMessage(ctx context.Context, input BuildInput) (
 // compileKnowledgePlan 执行一次编译：有缓存且可观测知识版本时走 compile 层
 // 缓存；否则直算（无缓存可用时不计入命中率口径，见 knowledge.CompileCache.Do）。
 func (m *Manager) compileKnowledgePlan(ctx context.Context, input BuildInput, taskID string, scope knowledge.ReuseScope, req knowledge.CompileRequest, stats *knowledgeInjectionStats) knowledge.CompileResult {
+	// 版本观测与缓存无关：快照落库（切片 5）也需要它，因此先取一次。
+	version, observable := m.knowledgeVersionToken(ctx)
+	if stats != nil && observable {
+		stats.Version = version
+	}
 	if m == nil || m.KnowledgeCache == nil {
 		return knowledge.CompilePlan(req)
 	}
-	version, ok := m.knowledgeVersionToken(ctx)
-	if !ok || strings.TrimSpace(input.WorkspaceID) == "" {
+	if !observable || strings.TrimSpace(input.WorkspaceID) == "" {
 		return knowledge.CompilePlan(req)
 	}
 	key := knowledge.CompileCacheKeyInput{
@@ -296,6 +325,36 @@ func (m *Manager) compileKnowledgePlan(ctx context.Context, input BuildInput, ta
 		stats.CacheHit = result.CacheHit
 	}
 	return result
+}
+
+// knowledgeBudgetJSON 组装快照的预算/过滤摘要（budget_json）：注入计数与
+// 全部 dropped 原因都在这里留痕，表里只出现注入条目。
+func knowledgeBudgetJSON(stats knowledgeInjectionStats, compiled knowledge.CompileResult) string {
+	dropped := map[string]int{}
+	for _, item := range compiled.Dropped {
+		dropped[item.DropReason]++
+	}
+	tokens := 0
+	for _, item := range compiled.Items {
+		tokens += item.Tokens
+	}
+	payload := map[string]interface{}{
+		"mode":                stats.Mode,
+		"token_budget":        DefaultKnowledgeTokens,
+		"injected":            len(compiled.Items),
+		"tokens":              tokens,
+		"dropped":             dropped,
+		"stale_filtered":      stats.StaleFiltered,
+		"floor_filtered":      stats.FloorFiltered,
+		"budget_filtered":     stats.BudgetFiltered,
+		"overridden_filtered": stats.OverriddenFiltered,
+		"reason":              compiled.Reason,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 // knowledgeVersionToken 通过 Layer 的版本观测取缓存键所需的知识版本 token；
@@ -334,6 +393,14 @@ func applyKnowledgeMetadata(metadata map[string]interface{}, metrics map[string]
 	metadata["knowledge_budget_filtered"] = stats.BudgetFiltered
 	metadata["knowledge_overridden_filtered"] = stats.OverriddenFiltered
 	metadata["knowledge_cache_hit"] = stats.CacheHit
+	// Phase 6 切片 5：快照落库状态（Degrade-Not-Fail：失败只记 metadata）。
+	metadata["knowledge_snapshot_recorded"] = stats.SnapshotRecorded
+	if stats.SnapshotError != "" {
+		metadata["knowledge_snapshot_error"] = stats.SnapshotError
+	}
+	if stats.Version != "" {
+		metadata["knowledge_version"] = stats.Version
+	}
 	metadata["knowledge_degraded"] = stats.Degraded
 	if stats.Reason != "" {
 		metadata["knowledge_reason"] = stats.Reason

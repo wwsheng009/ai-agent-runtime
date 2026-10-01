@@ -215,6 +215,11 @@ type Manager struct {
 	// 策略, 知识版本) 缓存，命中不重编译；nil / 不可观测 / 缓存故障一律直算
 	// （Degrade-Not-Fail）。默认 nil：不改变既有行为。
 	KnowledgeCache *knowledge.CompileCache
+	// KnowledgeRecorder 是 Phase 6 切片 5 的快照记录器：注入成功（且有注入
+	// 条目）时把编译结果写入 context_snapshots / context_items（只记注入条目，
+	// stale 恒 0）；写入失败 Degrade-Not-Fail（metadata 记 knowledge_snapshot_error，
+	// 请求照常）。默认 nil：零写入。
+	KnowledgeRecorder *knowledge.ContextRecorder
 }
 
 // DefaultBudget 返回保守的默认预算。

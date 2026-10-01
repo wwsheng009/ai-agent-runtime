@@ -1168,6 +1168,11 @@ func attachKnowledgePlanner(manager *contextmgr.Manager, cfg *Config) {
 		if cacheStore, ok := layer.Store().(knowledge.CompileCacheStore); ok {
 			manager.KnowledgeCache = knowledge.NewCompileCache(cacheStore)
 		}
+		// Phase 6 切片 5：快照落库（context_snapshots / context_items）；
+		// reader 角色首次写入即静默停用（ContextRecorder 内部处理）。
+		if snapshotStore, ok := layer.Store().(knowledge.ContextSnapshotStore); ok {
+			manager.KnowledgeRecorder = knowledge.NewContextRecorder(snapshotStore)
+		}
 	}
 }
 

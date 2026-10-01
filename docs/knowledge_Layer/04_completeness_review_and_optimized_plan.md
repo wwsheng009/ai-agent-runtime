@@ -782,7 +782,7 @@ knowledge:
 
 **回滚**：provider 开关关闭。
 
-**状态**：**切片 1–4 落地（2026-10-01）**——①语义内核 `knowledge/compiler.go`（信任等级闭集 + 冲突优先级 + stale/下限/预算过滤 + `context_items` 语义镜像 + data block 渲染）+ 8 例测试；②compile 层缓存（`cache_entries` 窄接口 + 确定性键（含知识版本/编译器版本）+ 降级直算 + 命中/时延指标；真库 200 次实测 hit p95 0.54ms / miss p95 1.07ms）+ 8 例测试；③contextmgr 接线（注入走 `CompilePlan` + data block + `KnowledgeCache` + `LayerPlan.knowledge` 与 hot/warm/cold tier；off 可逆）+ 3 例测试；④contextpack 只读 provider（结构化视图 + 有界 digest data block + Reduce 保块 + on 门控装配）+ 5 例测试。前置（Phase 2/3/5 验收）已满足；Phase 5 的 on-mode A/B 与端到端 p95 仍待测量轮（与 Phase 6 的 A/B 合并跑）。
+**状态**：**切片 1–5 落地（2026-10-01）**——①语义内核 `knowledge/compiler.go`（信任等级闭集 + 冲突优先级 + stale/下限/预算过滤 + `context_items` 语义镜像 + data block 渲染）+ 8 例测试；②compile 层缓存（`cache_entries` 窄接口 + 确定性键（含知识版本/编译器版本）+ 降级直算 + 命中/时延指标；真库 200 次实测 hit p95 0.54ms / miss p95 1.07ms）+ 8 例测试；③contextmgr 接线（注入走 `CompilePlan` + data block + `KnowledgeCache` + `LayerPlan.knowledge` 与 hot/warm/cold tier；off 可逆）+ 3 例测试；④contextpack 只读 provider（结构化视图 + 有界 digest data block + Reduce 保块 + on 门控装配）+ 5 例测试；⑤`context_snapshots`/`context_items` 落库（迁移 0004 + 只记注入条目 + 幂等 + reader 粘性停用 + 真库读写）+ 7 例测试。前置（Phase 2/3/5 验收）已满足；Phase 5 的 on-mode A/B 与端到端 p95 仍待测量轮（与 Phase 6 的 A/B 合并跑）。
 
 ### Phase 7 — Semantic Retrieval（可选，后置）
 

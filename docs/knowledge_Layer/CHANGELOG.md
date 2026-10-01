@@ -6,6 +6,29 @@
 
 ---
 
+## 2026-10-01 — Phase 6 切片 5：context_snapshots / context_items 可解释性落库
+
+### Added
+
+- 迁移 `0004_context_items_explainability.sql`（additive）：`context_items` 增 `version` / `confidence` / `tier` / `provisional` / `explanation`——配合 0001 已有的 `source` / `trust` / `reason` / `stale`，满足「每个 item 有 source/version/trust/reason/stale」的验收要求。
+- `knowledge/context_snapshot.go`：语义镜像 + 记录器——
+  - **只记注入条目**：stale / 低置信 / 超预算 / 被覆盖只进 `budget_json` 的 dropped 计数；因此 `context_items.stale=1` 的行数就是 `stale_item_injected`（表内口径，04 §7.3），表里出现 stale=1 行即代表注入违规；
+  - 确定性主键（内容哈希派生快照 id、`(snapshot, ref, item_type)` 派生条目 id）+ `ON CONFLICT DO NOTHING` → 重复记录同一次编译幂等；
+  - `ContextRecorder`：Degrade-Not-Fail——无条目 / 无 store 静默跳过；真实失败返回 error 交调用方记 metadata；**reader 角色首次 `ErrReadOnlyStore` 后粘性停用**（不重试、不再产生失败噪声）。
+- `knowledge/store_sqlite_context.go`：真库读写（单事务写快照+条目，不出现「有快照没条目」中间态；`ContextSnapshotsBySession` / `ContextItemsBySnapshot` 读路径 reader 可用）。
+- contextmgr：`Manager.KnowledgeRecorder` + 注入成功后记录（metadata：`knowledge_snapshot_recorded` / `knowledge_snapshot_error` / `knowledge_version`）；版本观测提升到编译入口（缓存与快照共用一次观测）。
+- agent：`attachKnowledgePlanner` 在 store 满足 `ContextSnapshotStore` 时装配记录器。
+
+### Verified
+
+- knowledge 全包（4 例新测试：映射确定性与四件套 / 记录器跳过·失败·只读粘性停用 / 真库往返 + 幂等 / reader 只读与会话隔离）绿；contextmgr 全包（3 例新测试：只记注入条目 / 失败降级 / off 零写入）绿。
+
+### Notes
+
+- 迁移编号：本切片新增的是 **0004**（0002 / 0003 已被 `file_soft_delete` / `workspace_adapter_version` 占用）。
+
+---
+
 ## 2026-10-01 — Phase 6 切片 4：contextpack knowledge.Provider（只读视图）
 
 ### Added
