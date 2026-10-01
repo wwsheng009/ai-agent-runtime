@@ -81,6 +81,9 @@ type StatusReport struct {
 	LockWait LockWaitStats `json:"lock_wait"`
 	// GC 是软删除行物理清理的摘要（04 §5 Phase 5 交付 4，本进程视角）。
 	GC GCStatus `json:"gc,omitempty"`
+	// StoreRecoveredFrom 是"库损坏后留证重建"的留证文件路径（R12 第三段）：
+	// 非空表示本次打开把损坏库改名留证并重建，索引因此为空、等待重新索引。
+	StoreRecoveredFrom string `json:"store_recovered_from,omitempty"`
 	// DegradedReason 解释"为什么状态不完整"（未索引 / reader 降级 / 上次索引失败）。
 	// 空串 = 无降级。它存在的原因：状态面最怕静默——零值必须能被解释。
 	DegradedReason string `json:"degraded_reason,omitempty"`
@@ -147,6 +150,7 @@ func (l *Layer) Status(ctx context.Context) (StatusReport, error) {
 		report.LockWait = s.lockWait.snapshot()
 	}
 	report.GC = l.GCStats()
+	report.StoreRecoveredFrom = l.recoveredFrom
 	if l.store == nil {
 		return report, nil
 	}
@@ -188,6 +192,17 @@ func (l *Layer) Status(ctx context.Context) (StatusReport, error) {
 			report.DegradedReason = fmt.Sprintf("read-only: store is owned by pid %d", report.OwnerPID)
 		} else {
 			report.DegradedReason = "read-only: store is owned by another process"
+		}
+	}
+	// 库损坏重建（R12 第三段）：索引此刻必然为空，必须解释清楚——否则
+	// "零值"会被误读成"这个工作区没有代码"。
+	if l.recoveredFrom != "" {
+		note := fmt.Sprintf("store was rebuilt after corruption (evidence kept at %s); index is empty until reindex",
+			l.recoveredFrom)
+		if report.DegradedReason == "" {
+			report.DegradedReason = note
+		} else {
+			report.DegradedReason = note + "; " + report.DegradedReason
 		}
 	}
 	return report, nil

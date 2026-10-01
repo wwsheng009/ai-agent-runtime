@@ -6,6 +6,25 @@
 
 ---
 
+## 2026-10-01 — Phase 5 切片 6 实施：R12 第三段（库损坏时留证重建 + 重建期降级）
+
+### Changed
+
+- `backend/internal/knowledge/recovery.go`（新）：`isCorruptStoreError`（驱动码 `CORRUPT`/`NOTADB` 含扩展码优先、消息模式兜底；**版本不匹配不属于损坏**）、`quarantineCorruptStore`（主库 + `-wal`/`-shm` 副文件一起改名留证，时间戳后缀、绝不覆盖历史证据、绝不删除）、`openStoreWithRecovery`（仅 owner 角色对损坏错误做一次"留证 → 重建 → 重开"）。
+- `backend/internal/knowledge/knowledge.go`：`Open` 在 `OpenStore` 失败且判定为损坏时走自愈路径，把留证路径记在 Layer 上（`recoveredFrom`）；其它错误（版本不匹配 / 权限 / 锁）原样返回。
+- `backend/internal/knowledge/status.go`：`StatusReport.StoreRecoveredFrom` 暴露留证路径，`DegradedReason` 说明"库已重建、索引为空、等待重新索引"——零值必须能被解释，否则会被误读成"这个工作区没有代码"。
+- 语义：`knowledge.db` 是派生数据（随时可由工作区重建），所以损坏时不让用户卡在"打不开"；重建期索引为空 → 判定与注入按既有 degraded 语义降级（绝不把空索引当成"没有知识"以外的含义）。reader 没有写权限，只报错、把处置权交还 owner。
+
+### Verified
+
+- `knowledge/recovery_test.go` 4 例：损坏库 → owner 打开成功、损坏文件留证且内容原样、重建后可重新索引（Stats.Files > 0）、状态面给出留证路径 + 降级原因；**版本不匹配绝不留证改名**（`ErrSchemaNewer` 仍拒绝、原库原样保留、未来迁移行仍在）；只读路径不动文件；`isCorruptStoreError` 表驱动 6 例（含"版本不匹配/旧库提示不是损坏"的负例）。
+
+### Notes
+
+- 同时修复切片 5 的验收用例在**全量包跑**下的偶发失败：`TestAcceptanceCheckoutStaleDetection50Samples` 原先只认"`#pending` 保守"这一条路径，但队列 worker 可能恰好在判定前把 checkout 后的内容异步吸收——那是**正确**判定（索引与磁盘一致）。现在断言真正的不变量：checkout 后**绝不能返回 checkout 前那个稳定版本**（保守路径或"版本已随内容变化"的吸收路径都可），并在每轮判定前排空队列消除遗留 debounce 定时器；50/50 走保守路径。
+
+---
+
 ## 2026-10-01 — Phase 5 切片 5 实施：验收门槛可复现化（三项统计口径）
 
 ### Changed

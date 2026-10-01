@@ -148,6 +148,7 @@ func TestAcceptanceCheckoutStaleDetection50Samples(t *testing.T) {
 
 	const samples = 50
 	detected := 0
+	pendingPath := 0
 	for i := 1; i <= samples; i++ {
 		// 1) 未提交的工作区改写 → 索引追上 → 判定必须稳定（git 侧的持续
 		//    modified 不得造成误报，Fresh 过滤负责这一条）。
@@ -160,16 +161,41 @@ func TestAcceptanceCheckoutStaleDetection50Samples(t *testing.T) {
 		require.NotContains(t, stable.Version, "#pending",
 			"索引已追上时不得报未稳定（第 %d 次采样）", i)
 
+		// 排空队列：确保没有"上一轮遗留的 debounce 定时器"在判定前异步补索引。
+		// 不排空的话，遗留定时器会把 checkout 后的内容提前吸收，本用例就测不到
+		// 判定点本身（见下方"吸收路径"的口径说明）。
+		if q := layer.ChangeQueue(); q != nil {
+			if _, err := q.Flush(ctx); err != nil {
+				t.Fatalf("Flush(#%d): %v", i, err)
+			}
+		}
+
 		// 2) git checkout -- 还原到 HEAD（外部写盘）→ 判定必须立即保守。
+		//
+		// 正确判定有两条路径（都不是"误判"）：
+		//   - 保守路径：索引落后 → token 带 #pending（本用例要钉住的主路径）；
+		//   - 吸收路径：队列 worker 恰好在判定前把 checkout 后的内容索引完 →
+		//     版本随内容变化（索引与磁盘一致，"可复用"的结论本身正确）。
+		// 错误判定只有一种：**与 checkout 前同一个稳定版本**——那意味着
+		// 旧内容的知识被当成新内容的可复用知识（stale 误判）。
 		gitRun(t, root, "checkout", "--", "demo/a.go")
 		after, err := layer.ObserveVersion(ctx, 0, time.Now())
 		require.NoError(t, err)
-		if strings.Contains(after.Version, "#pending") {
+		switch {
+		case strings.Contains(after.Version, "#pending"):
 			detected++
+			pendingPath++
+		case after.Version != stable.Version:
+			detected++ // 吸收路径：索引已跟上 checkout 后的内容
+		default:
+			t.Errorf("第 %d 次采样：checkout 后仍返回 checkout 前的稳定版本（stale 误判）", i)
 		}
 	}
 	require.Equal(t, samples, detected,
 		"checkout 后 stale 判定检出率必须 100%%（检出 %d/%d）", detected, samples)
+	require.GreaterOrEqual(t, pendingPath, samples*9/10,
+		"保守路径（#pending）必须覆盖绝大多数样本（实际 %d/%d）", pendingPath, samples)
+	t.Logf("checkout 后判定：保守路径 %d/%d，吸收路径 %d/%d", pendingPath, samples, samples-pendingPath, samples)
 }
 
 // TestAcceptanceReadLatencyAndLockWaitUnderWriteLoad 对应门槛 3：写侧持续跑

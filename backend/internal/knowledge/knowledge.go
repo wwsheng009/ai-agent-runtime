@@ -67,6 +67,10 @@ type Layer struct {
 	lastGCError     string
 	// gcSizeFn 是触发判定的库大小来源注入口（测试用）；nil 时走 store 主文件大小。
 	gcSizeFn func() int64
+
+	// recoveredFrom 是"库损坏后留证重建"的留证文件路径（R12 第三段）；
+	// 空串 = 本次打开未发生重建。状态面据此解释"为什么索引是空的"。
+	recoveredFrom string
 }
 
 // Open 解析配置并返回 Layer。
@@ -96,8 +100,12 @@ func Open(ctx context.Context, cfg Config) (*Layer, error) {
 	}
 	store, err := OpenStore(ctx, cfg.storePath(), own.readOnly())
 	if err != nil {
-		_ = own.release()
-		return nil, err
+		recovered, quarantined, rerr := openStoreWithRecovery(ctx, cfg, own, err)
+		if rerr != nil {
+			_ = own.release()
+			return nil, rerr
+		}
+		return &Layer{cfg: cfg, role: own.role(), store: recovered, owner: own, recoveredFrom: quarantined}, nil
 	}
 	return &Layer{cfg: cfg, role: own.role(), store: store, owner: own}, nil
 }
