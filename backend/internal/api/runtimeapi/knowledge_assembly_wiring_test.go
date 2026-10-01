@@ -2,7 +2,6 @@ package runtimeapi
 
 import (
 	"context"
-	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -11,9 +10,10 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 )
 
-// W7 激活切片：runtimeapi / runtime-server 会话装配——mode=on 时注入
-// `context_knowledge_mode=signals` + `*knowledge.Layer`；off（默认）/ shadow
-// （只建索引、绝不注入）/ 激活失败（nil）零新增，options 与改动前逐字节一致。
+// W7 激活切片 + Phase 5 变更源 1：runtimeapi / runtime-server 会话装配——
+// mode=on 时注入 `context_knowledge_mode=signals` + `*knowledge.Layer`；
+// shadow 只发布 Layer（编辑类工具的变更接收方，绝不注入 prompt）；
+// off（默认）/ 激活失败（nil）零新增，options 与改动前逐字节一致。
 
 func activateKnowledgeAssemblyForTest(t *testing.T, mode knowledge.Mode) *knowledge.Activation {
 	t.Helper()
@@ -37,16 +37,18 @@ func TestContextOptionsFromRuntimeConfigKnowledgeAssembly(t *testing.T) {
 	require.True(t, ok, "装配必须注入 *knowledge.Layer（版本观测），got %#v", onOptions["context_knowledge_layer"])
 	require.Equal(t, knowledge.ModeOn, layer.Mode())
 
-	// shadow：ModeShadow 契约是"绝不注入 prompt" → 零新增。
+	// shadow：ModeShadow 契约是"绝不注入 prompt"（不设 mode），但发布 layer 句柄——
+	// 它是编辑类工具的变更接收方（Phase 5 变更源 1），只让索引保鲜。
 	shadowAct := activateKnowledgeAssemblyForTest(t, knowledge.ModeShadow)
 	shadowOptions := contextOptionsFromRuntimeConfig(config, shadowAct)
-	require.Nil(t, shadowOptions, "shadow must not add any option, got %#v", shadowOptions)
+	require.NotContains(t, shadowOptions, "context_knowledge_mode", "shadow 绝不注入 prompt")
+	shadowLayer, ok := shadowOptions["context_knowledge_layer"].(*knowledge.Layer)
+	require.True(t, ok, "shadow 必须发布 layer 句柄, got %#v", shadowOptions["context_knowledge_layer"])
+	require.Equal(t, knowledge.ModeShadow, shadowLayer.Mode())
 
-	// off / 激活失败（nil）：零新增，且与 shadow 路径逐字节一致。
+	// off / 激活失败（nil）：零新增（与改动前逐字节一致）。
 	require.Nil(t, contextOptionsFromRuntimeConfig(config, nil))
-	require.True(t,
-		reflect.DeepEqual(contextOptionsFromRuntimeConfig(config, nil), contextOptionsFromRuntimeConfig(config, shadowAct)),
-		"shadow options must be byte-identical to the off baseline")
+	require.NotContains(t, contextOptionsFromRuntimeConfig(config, nil), "context_knowledge_layer")
 }
 
 // runtime-server 的装配路径：main.go 只做 SetKnowledgeActivation，会话 options

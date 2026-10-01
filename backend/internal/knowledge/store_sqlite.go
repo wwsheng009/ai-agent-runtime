@@ -123,11 +123,14 @@ func (s *sqliteStore) init(ctx context.Context) error {
 	return nil
 }
 
-// verifyInitialized 确认只读打开的库确实已经建好 schema，且版本不落后于本二进制。
+// verifyInitialized 确认只读打开的库确实已经建好 schema，且版本与本二进制兼容。
 //
 // 落后时显式失败而不是继续查询：旧库缺少新列（如 0002 的 files.deleted_at），
 // 半可用的读者会在任意查询上抛出 "no such column"，把"需要一次 owner 迁移"
 // 这个事实藏进 SQL 错误里。
+//
+// 版本**高于**本二进制时同样拒绝（04 §5 Phase 5 交付 6 / 风险 R12"新 DB 不被
+// 旧代码打开"）：降级读会按旧列集解读新结构，静默给出错误结果比失败更糟。
 func (s *sqliteStore) verifyInitialized(ctx context.Context) error {
 	version, err := s.SchemaVersion(ctx)
 	if err != nil {
@@ -145,6 +148,11 @@ func (s *sqliteStore) verifyInitialized(ctx context.Context) error {
 		return fmt.Errorf(
 			"knowledge: store schema v%d is older than this binary (v%d); open it once as writer to migrate",
 			version, latest)
+	}
+	if version > latest {
+		return fmt.Errorf(
+			"knowledge: %w (store v%d > binary v%d); open this workspace with the newer binary",
+			migrate.ErrSchemaNewer, version, latest)
 	}
 	return nil
 }
@@ -210,6 +218,46 @@ func (s *sqliteStore) FindWorkspace(ctx context.Context, rootPath string) (strin
 	default:
 		return "", false, err
 	}
+}
+
+// WorkspaceAdapterVersion 返回库内记录的索引 adapter 版本（未记录时为空串）。
+//
+// 纯读，readOnly 句柄同样可用：状态面与重建判定都要能回答"这份索引是谁写的"。
+func (s *sqliteStore) WorkspaceAdapterVersion(ctx context.Context, workspaceID string) (string, error) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return "", errors.New("knowledge: workspace_id is required")
+	}
+	var version string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(adapter_version, '') FROM workspaces WHERE id = ?`, workspaceID).Scan(&version)
+	switch {
+	case err == nil:
+		return version, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return "", nil
+	default:
+		return "", fmt.Errorf("knowledge: read workspace adapter version: %w", err)
+	}
+}
+
+// SetWorkspaceAdapterVersion 记录本次成功索引使用的 adapter 版本
+// （Phase 4 交付 4：版本变化触发 full_rebuild_on_adapter_change）。
+func (s *sqliteStore) SetWorkspaceAdapterVersion(ctx context.Context, workspaceID, version string) error {
+	if strings.TrimSpace(workspaceID) == "" {
+		return errors.New("knowledge: workspace_id is required")
+	}
+	return s.execWrite(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE workspaces SET adapter_version = ?, updated_at = ? WHERE id = ?`,
+			strings.TrimSpace(version), time.Now().Unix(), workspaceID)
+		if err != nil {
+			return err
+		}
+		if affected, _ := res.RowsAffected(); affected == 0 {
+			return errors.New("knowledge: workspace not found")
+		}
+		return nil
+	})
 }
 
 // UpsertFile 记录文件身份与内容哈希。

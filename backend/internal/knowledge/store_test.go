@@ -26,6 +26,53 @@ func newTestStore(t *testing.T) Store {
 	return store
 }
 
+// TestOpenStoreRefusesNewerSchema 钉住 04 §5 Phase 5 交付 6 / 风险 R12：
+// 库由**更新的二进制**写下（schema 版本高于本二进制）时，写入与只读两条
+// 打开路径都必须拒绝——降级读会按旧列集解读新结构，静默给错比失败更糟。
+func TestOpenStoreRefusesNewerSchema(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "future.db")
+
+	store, err := OpenStore(ctx, path, false)
+	if err != nil {
+		t.Fatalf("OpenStore(seed): %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	migrations, err := Migrations()
+	if err != nil {
+		t.Fatalf("Migrations: %v", err)
+	}
+	future := migrations[len(migrations)-1].Version + 1
+	db, err := sqliteutil.OpenFileCtx(ctx, path, true)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, 'future', ?)`,
+		future, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed future migration: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	// 写入路径：Apply 收口处拒绝。
+	if _, err := OpenStore(ctx, path, false); err == nil || !errors.Is(err, migrate.ErrSchemaNewer) {
+		t.Fatalf("writer on newer store = %v, want migrate.ErrSchemaNewer", err)
+	}
+	// 只读路径：verifyInitialized 拒绝，且消息带上两侧版本号。
+	_, err = OpenStore(ctx, path, true)
+	if err == nil || !errors.Is(err, migrate.ErrSchemaNewer) {
+		t.Fatalf("reader on newer store = %v, want migrate.ErrSchemaNewer", err)
+	}
+	if !strings.Contains(err.Error(), "newer binary") {
+		t.Fatalf("reader error = %q, want actionable hint", err.Error())
+	}
+}
+
 func TestOpenStoreAppliesMigrations(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

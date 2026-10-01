@@ -13,6 +13,8 @@ type contextKey string
 
 const (
 	sessionIDKey               contextKey = "tool_session_id"
+	toolCallIDKey              contextKey = "tool_call_id"
+	turnIDKey                  contextKey = "tool_turn_id"
 	goalIDKey                  contextKey = "tool_goal_id"
 	agentDepthKey              contextKey = "tool_agent_depth"
 	generatedImageOutputDirKey contextKey = "generated_image_output_dir"
@@ -20,6 +22,7 @@ const (
 	workspaceRootKey           contextKey = "tool_workspace_root"
 	allowedRootsKey            contextKey = "tool_allowed_roots"
 	artifactStoreKey           contextKey = "tool_artifact_store"
+	fileChangeNotifierKey      contextKey = "tool_file_change_notifier"
 )
 
 // WithSessionID stores the active session ID in ctx.
@@ -36,6 +39,45 @@ func SessionID(ctx context.Context) string {
 		return ""
 	}
 	if value, ok := ctx.Value(sessionIDKey).(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+// WithToolCallID stores the tool-call id that owns the current execution.
+func WithToolCallID(ctx context.Context, toolCallID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, toolCallIDKey, strings.TrimSpace(toolCallID))
+}
+
+// ToolCallID retrieves the tool-call id from ctx ("" when unbound). It is the
+// join key between a tool receipt and side-channel facts (e.g. LSP requests).
+func ToolCallID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if value, ok := ctx.Value(toolCallIDKey).(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+// WithTurnID stores the logical turn id that owns the current execution.
+func WithTurnID(ctx context.Context, turnID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, turnIDKey, strings.TrimSpace(turnID))
+}
+
+// TurnID retrieves the logical turn id from ctx ("" when unbound).
+func TurnID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if value, ok := ctx.Value(turnIDKey).(string); ok {
 		return strings.TrimSpace(value)
 	}
 	return ""
@@ -150,6 +192,34 @@ func WorkspaceRoot(ctx context.Context) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
+}
+
+// WithFileChangeNotifier injects the sink that edit-class tools report to after a
+// successful write (Phase 5 change source 1: the agent edit hook).
+//
+// The sink comes from the session's knowledge layer (`*knowledge.Layer` /
+// `*knowledge.Activation` `MarkChanged`) and must return fast and non-blocking:
+// a tool result must never be slowed down by indexing. A nil sink leaves ctx
+// unchanged (context.WithValue rejects nil values).
+func WithFileChangeNotifier(ctx context.Context, notify func(paths ...string)) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if notify == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, fileChangeNotifierKey, notify)
+}
+
+// FileChangeNotifierFromContext retrieves the edit-hook sink from a tool
+// execution ctx. Nil means "no knowledge layer is listening" (mode=off, reader
+// role, or a non-session path) and callers must skip reporting entirely.
+func FileChangeNotifierFromContext(ctx context.Context) func(paths ...string) {
+	if ctx == nil {
+		return nil
+	}
+	notify, _ := ctx.Value(fileChangeNotifierKey).(func(paths ...string))
+	return notify
 }
 
 // WithAllowedRoots stores the session's externally admitted filesystem roots

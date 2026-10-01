@@ -112,10 +112,20 @@ func NormalizeName(s string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
 }
 
-// SignatureHash 计算 04 §4.4 定义的 signature_hash = sha1(normalized_signature + adapter_version)。
-func SignatureHash(signature string) string {
-	sum := sha1.Sum([]byte(NormalizeName(signature) + AdapterVersion))
+// SignatureHashFor 是 SignatureHash 的 adapter 参数化形式（Phase 4 交付 4）：
+// signature_hash = sha1(normalized_signature + adapter_version)。
+//
+// adapter_version 参与身份，因此切换/升级 adapter 会让既有 stable_key 失效——
+// 这是 full_rebuild_on_adapter_change 的触发依据（04 §4.4）。
+func SignatureHashFor(signature, adapterVersion string) string {
+	sum := sha1.Sum([]byte(NormalizeName(signature) + adapterVersion))
 	return hex.EncodeToString(sum[:])
+}
+
+// SignatureHash 计算 04 §4.4 定义的 signature_hash，adapter 取包级 AdapterVersion
+// （即 builtin 通道的版本；其他 adapter 走 SignatureHashFor）。
+func SignatureHash(signature string) string {
+	return SignatureHashFor(signature, AdapterVersion)
 }
 
 // StableKey 计算 04 §4.4 定义的符号稳定身份：

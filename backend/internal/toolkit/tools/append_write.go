@@ -229,6 +229,8 @@ func (w *AppendWriteTool) Execute(ctx context.Context, params map[string]interfa
 	// refuses, and a truncating overwrite bypasses read-before-write entirely
 	// (2026-09-27 review H6).
 	recordFileWrite(ctx, absPath, newContentBytes, "append_write")
+	// Phase 5 变更源 1（edit hook）：落盘成功后同步标记（非阻塞入队）。
+	notifyFileChanges(ctx, absPath)
 
 	action := transferResult.Action
 	if truncateFirst && transferResult.Created {

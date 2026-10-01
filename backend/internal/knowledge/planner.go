@@ -403,11 +403,28 @@ type versionCache struct {
 	mu         sync.Mutex
 	version    string
 	observedAt time.Time
+	// generation 是采样时的索引代次（ChangeQueue.Generation）：索引每落地一次
+	// 代次 +1，旧代次的缓存立即失效——避免"失效后又被写回旧版本"的竞态。
+	generation uint64
 }
 
-// observe 返回当前版本观测：TTL 内直接复用缓存，否则重新采样并刷新缓存。
+// invalidate 丢弃缓存，强制下一次 observe 重新采样。
+// 索引落地（ChangeQueue.OnResult）或校正发现外部变更时调用：版本缓存是
+// "30s 内不必重算"的优化，但索引已经变化时必须立即重算，否则复用判定
+// 会拿到被 TTL 压住的旧版本（Phase 5 交付 3）。
+func (c *versionCache) invalidate() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.version = ""
+	c.observedAt = time.Time{}
+	c.mu.Unlock()
+}
+
+// observe 返回当前版本观测：TTL 内**且代次未变**时复用缓存，否则重新采样并刷新缓存。
 // 采样失败不返回陈旧值（store 已不可信，调用方应走 Degraded）。
-func (c *versionCache) observe(ctx context.Context, store Store, workspaceID string, ttl time.Duration, now time.Time) (VersionObservation, error) {
+func (c *versionCache) observe(ctx context.Context, store Store, workspaceID string, ttl time.Duration, now time.Time, generation uint64) (VersionObservation, error) {
 	if ttl <= 0 {
 		ttl = DefaultReuseVersionTTL
 	}
@@ -416,7 +433,7 @@ func (c *versionCache) observe(ctx context.Context, store Store, workspaceID str
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.version != "" && !c.observedAt.IsZero() && now.Sub(c.observedAt) < ttl {
+	if c.version != "" && !c.observedAt.IsZero() && c.generation == generation && now.Sub(c.observedAt) < ttl {
 		return VersionObservation{Version: c.version, ObservedAt: c.observedAt}, nil
 	}
 	version, err := WorkspaceVersion(ctx, store, workspaceID)
@@ -425,5 +442,6 @@ func (c *versionCache) observe(ctx context.Context, store Store, workspaceID str
 	}
 	c.version = version
 	c.observedAt = now
+	c.generation = generation
 	return VersionObservation{Version: version, ObservedAt: now}, nil
 }

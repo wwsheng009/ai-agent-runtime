@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,6 +43,30 @@ type Layer struct {
 	workspaceID string
 	// planVersion 缓存 Planner 的 WorkspaceVersion 采样（TTL 与 W2 同源）。
 	planVersion versionCache
+
+	// Phase 5 交付 1/2：编辑触发的变更队列（惰性创建、随 Layer 关闭）。
+	// 挂在 Layer 而不是 Activation：agent 侧只持有 Layer，且同一 workspace
+	// 的多个 Activation 共享一个串行队列（不会出现两个 worker 抢同一 store）。
+	queueMu     sync.Mutex
+	queue       *ChangeQueue
+	queueClosed bool
+
+	// Phase 5 交付 1（变更源 2）：外部变更校正（git + stat）的节流与观测状态。
+	syncMu                 sync.Mutex
+	lastGitSyncAt          time.Time
+	externalSyncCount      int
+	externalSyncDirtyCount int
+	gitMu                  sync.Mutex
+	gitSource              *GitChangeSource
+
+	// Phase 5 交付 4：GC 状态（状态面摘要 + 自动触发的冷却窗口）。
+	gcMu            sync.Mutex
+	gcRuns          int
+	lastGCAttemptAt time.Time
+	lastGCReport    GCReport
+	lastGCError     string
+	// gcSizeFn 是触发判定的库大小来源注入口（测试用）；nil 时走 store 主文件大小。
+	gcSizeFn func() int64
 }
 
 // Open 解析配置并返回 Layer。
@@ -167,7 +192,10 @@ func (l *Layer) Stats(ctx context.Context) (Stats, error) {
 // shadow/on 走只读路径；workspace 未登记（索引不可用）或 store 失败时返回
 // Degraded + Reason，不冒泡错误（04 §4.1 Degrade-Not-Fail）。
 // PlanInput.Current 为空时按 DefaultReuseVersionTTL 采样并缓存 WorkspaceVersion，
-// 采样时刻随观测返回，供 W3 Gate 做 TTL 滞后兜底。
+// 采样时刻随观测返回，供 W3 Gate 做 TTL 滞后兜底；采样走 ObserveVersion——
+// 它是 Phase 5 的判定点：先做一次外部变更校正（git + stat，节流、尽力而为），
+// 发现变更时把本次版本标为未稳定（#pending），旧知识立即不可复用（fail-closed）。
+// 校正只读 git/磁盘并做非阻塞入队，store 写入发生在队列 goroutine（不在本调用内）。
 func (l *Layer) Plan(ctx context.Context, in PlanInput) (Plan, error) {
 	if l == nil || l.store == nil || l.cfg.Mode == ModeOff {
 		return Plan{Reason: PlanReasonDisabled}, nil
@@ -190,7 +218,7 @@ func (l *Layer) Plan(ctx context.Context, in PlanInput) (Plan, error) {
 		if now.IsZero() {
 			now = time.Now()
 		}
-		obs, err := l.planVersion.observe(ctx, l.store, wsID, in.VersionTTL, now)
+		obs, err := l.ObserveVersion(ctx, in.VersionTTL, now)
 		if err != nil {
 			return Plan{Degraded: true, Reason: classifyStoreError(ctx, err)}, nil
 		}
@@ -301,6 +329,15 @@ func (l *Layer) Close() error {
 	if l == nil {
 		return nil
 	}
+	// 先停变更队列：它的 worker 可能在写 store，必须在关库之前退出。
+	l.queueMu.Lock()
+	queue := l.queue
+	l.queue = nil
+	l.queueClosed = true
+	l.queueMu.Unlock()
+	if queue != nil {
+		queue.Close()
+	}
 	var firstErr error
 	if l.store != nil {
 		if err := l.store.Close(); err != nil {
@@ -316,4 +353,47 @@ func (l *Layer) Close() error {
 	}
 	l.role = RoleNone
 	return firstErr
+}
+
+// MarkChanged 把编辑过的文件交给变更队列（Phase 5 交付 1 的 edit hook 入口）。
+//
+// 门控与 Recorder 同口径：仅 mode=shadow|on 且本进程是 owner 时真正入队；
+// off / reader 是 no-op（reader 没有写权限，标记它没有意义）。nil-safe 且非阻塞——
+// 调用方（工具层/编辑路径）不需要分支，也不会被索引拖慢。
+func (l *Layer) MarkChanged(paths ...string) {
+	if l == nil || len(paths) == 0 {
+		return
+	}
+	queue := l.ChangeQueue()
+	if queue == nil {
+		return
+	}
+	queue.Mark(paths...)
+}
+
+// ChangeQueue 返回本层的变更队列（惰性创建）；off / reader / 无 store 时为 nil。
+// 同一 Layer 多次调用返回同一实例；队列随 Layer.Close 关闭（Close 会等它退出）。
+func (l *Layer) ChangeQueue() *ChangeQueue {
+	if l == nil || l.store == nil {
+		return nil
+	}
+	if l.cfg.Mode != ModeShadow && l.cfg.Mode != ModeOn {
+		return nil
+	}
+	if l.role != RoleOwner {
+		return nil
+	}
+	l.queueMu.Lock()
+	defer l.queueMu.Unlock()
+	if l.queueClosed {
+		return nil
+	}
+	if l.queue == nil {
+		l.queue = NewChangeQueue(l.cfg, l.store, ChangeQueueOptions{
+			// 索引落地后工作区版本必然变化：失效版本缓存，避免 30s TTL 把新版本
+			// 压住（Phase 5 交付 3：版本向量参与复用判定）。
+			OnResult: func(IndexResult) { l.planVersion.invalidate() },
+		})
+	}
+	return l.queue
 }

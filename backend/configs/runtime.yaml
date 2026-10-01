@@ -107,3 +107,9 @@ knowledge:
   #   cross_task_confidence: 0.90   # 跨任务下限（复用 + 强制验证读取）
   #   verify_read_below: 0.90       # 低于此值必须安排一次验证读取
   #   explore_below: 0.50           # 低于此值触发探索（04 §4.4 硬下限）
+  # max_db_size_mb：knowledge.db 软上限（缺省 512，04 §7.4 校准值）。超过它且
+  # 冷却窗口（10 分钟）已过时，判定点会顺带清理一次软删除行（Phase 5 交付 4）。
+  # gc_retention_days：软删除行的保留期（缺省 30 天）；保留期内不物理清理，
+  # 重命名/移动的引用修复与"符号去哪了"的追问依赖这些行。
+  # max_db_size_mb: 512
+  # gc_retention_days: 30

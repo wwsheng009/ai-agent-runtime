@@ -275,6 +275,8 @@ func (w *WriteTool) Execute(ctx context.Context, params map[string]interface{}) 
 		metadata[key] = value
 	}
 
+	// Phase 5 变更源 1（edit hook）：落盘成功后同步标记（非阻塞入队，见 change_notify.go）。
+	notifyFileChanges(ctx, absPath)
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,

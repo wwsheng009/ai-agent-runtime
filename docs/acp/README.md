@@ -303,6 +303,11 @@ todos 快照重建任务列表，重复快照不再重发。
 - `id: "provider"`（`category: "_provider"`）：provider 选择器。仅当配置中
   存在 ≥2 个 enabled provider 时下发；分类以 `_` 开头是 ACP 的扩展分类
   约定，客户端不识别该分类时按普通 select 渲染。
+- `id: "knowledge.lsp.mode"`（`category: "_knowledge"`）：语义通道（语言服务器）
+  选择器，值域 `off|self`（ADR-0002 §4.2）。仅当本会话有知识层
+  （`knowledge.mode` ≠ off）且 `knowledge.lsp.enabled=true` 时下发——`enabled=false`
+  是逃生舱，会话内不得打开。切换为**会话级覆盖**，下一个 turn 生效；不写回
+  配置文件（重启回到配置默认）。未启用知识层的会话切换会被显式拒绝。
 
 用户切换时发送 `session/set_config_option`，agent 分别复用交互式 `/model`、
 `/reasoning_effort`、`/provider` 的同一套运行时切换逻辑，并返回更新后的完整

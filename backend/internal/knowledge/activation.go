@@ -94,6 +94,27 @@ func Activate(ctx context.Context, cfg Config, workspace string, opts Activation
 	return act, nil
 }
 
+// MarkChanged 把编辑过的文件交给变更队列（Phase 5 交付 1 的 edit hook 入口）。
+//
+// 门控与 Recorder 同口径：仅 mode=shadow|on 且本进程是 owner 时真正入队；
+// off / reader 是 no-op（reader 没有写权限，标记它没有意义）。nil-safe 且非阻塞——
+// 调用方（工具层/编辑路径）不需要分支，也不会被索引拖慢。
+func (a *Activation) MarkChanged(paths ...string) {
+	if a == nil {
+		return
+	}
+	a.layer.MarkChanged(paths...)
+}
+
+// ChangeQueue 返回本接入的变更队列（惰性创建）；off / reader / 无 store 时为 nil。
+// 同一 Activation 多次调用返回同一实例；队列随 Close 关闭（Close 会等它退出）。
+func (a *Activation) ChangeQueue() *ChangeQueue {
+	if a == nil {
+		return nil
+	}
+	return a.layer.ChangeQueue()
+}
+
 // Layer 返回底层句柄（off 时为 nil）。
 func (a *Activation) Layer() *Layer {
 	if a == nil {

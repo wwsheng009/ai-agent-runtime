@@ -215,6 +215,46 @@ func TestRunIndexSoftDeletesNewlyIgnoredFile(t *testing.T) {
 	}
 }
 
+// 定向增量与全量索引同口径：被 .gitignore / 内置忽略目录排除的显式路径
+// 必须拒绝（计入 Errors），不得写入索引。
+func TestIndexPathsRejectsGitignoredAndIgnoredDirPaths(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	writeTree(t, root, ".gitignore", "generated/\n")
+	writeTree(t, root, "generated/gen.go", "package generated\n")
+	writeTree(t, root, "node_modules/dep/index.js", "export default 1\n")
+	writeTree(t, root, "src/a.go", indexPathsSourceA)
+
+	store := newTestStore(t)
+	cfg := indexPathsConfig(root)
+	if _, err := RunIndex(ctx, store, cfg); err != nil {
+		t.Fatalf("RunIndex: %v", err)
+	}
+
+	writeTree(t, root, "src/a.go", indexPathsSourceAV2)
+	result, err := IndexPaths(ctx, store, cfg, []string{
+		"generated/gen.go", "node_modules/dep/index.js", "src/a.go",
+	})
+	if err != nil {
+		t.Fatalf("IndexPaths: %v", err)
+	}
+	if result.Scanned != 1 || result.Indexed != 1 || result.Errors != 2 {
+		t.Fatalf("定向增量排除口径不符: %+v", result)
+	}
+
+	wsID, err := store.EnsureWorkspace(ctx, Workspace{RootPath: root})
+	if err != nil {
+		t.Fatalf("EnsureWorkspace: %v", err)
+	}
+	if _, ok, err := store.FileByPath(ctx, wsID, "generated/gen.go"); err != nil || ok {
+		t.Fatalf("被忽略路径不得写入索引: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := store.FileByPath(ctx, wsID, "node_modules/dep/index.js"); err != nil || ok {
+		t.Fatalf("内置忽略目录不得写入索引: ok=%v err=%v", ok, err)
+	}
+}
+
 // 目录通配 + 取反链的真实形态（本仓库 .gitignore 对 output/ 的处理）：
 // "dir/*" 忽略内容、"!dir/" 放行目录、"!dir/**" 取回内容——三段缺一不可，
 // 否则源码包会被整目录误杀。

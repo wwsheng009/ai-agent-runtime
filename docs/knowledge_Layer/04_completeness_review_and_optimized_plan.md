@@ -735,7 +735,7 @@ knowledge:
 
 **回滚**：`knowledge.adapter=builtin`，LSP 关闭。
 
-**状态**：未开始
+**状态**：实现完成（2026-09-30）——交付 1–5 全部落地（SPI/能力声明、builtin+tree-sitter(降级)+lsp(进程外) 三通道、进程管理含锁/上限/崩溃回收与 executor 守卫、adapter 版本参与身份与全量重建、离线降级），并完成**语义通道接入工具面**（引用类三工具 + `code_navigate` 按位置查定义；`source=lsp`；位置口径转换集中一处）+ 索引引用抽取字符串守卫 + **ACP `knowledge.lsp.mode` select 接线**（ADR-0002 §4.2；会话级覆盖在运行时配置副本上落地）。验证：34 例新测试；golden set 1765 条（≥200），builtin definition P=1.0000 / R=0.8510；LSP live：definition P=0.9241–0.9750 / R=0.9125–0.9750 ✓，references P=1.0000 / R=1.0000 ✓（原 0.7674 为裁决口径错误 + 索引字符串误报，已修）。✅ 前置 ADR-0002/0005/0006 已于 2026-09-30 授权代改 Accept；遗留：tree-sitter 未接语法、按名字 definition 仍走索引、会话覆盖未持久化（重启回配置默认）、内存探测口径（tasklist）、live 测量需独占运行且异常终止会遗留 gopls。
 
 ### Phase 5 — Change Manager 与一致性
 
@@ -759,7 +759,7 @@ knowledge:
 
 **回滚**：关闭 watcher，退回显式 `knowledge.reindex`。
 
-**状态**：未开始
+**状态**：**切片 1–4 完成（2026-10-01）**——交付 1（两类变更源：edit hook 全链 + git/stat 外部校正）、交付 2（debounce + 串行队列）、交付 4（GC）、交付 5（增量 vs 全量等价性）、交付 6（迁移版本拒绝）全部落地，交付 3 的复用判定侧落地（context item 侧待接）：① `IndexPaths`（定向增量：不遍历/不写 adapter 版本/越界与后缀计入 Errors/磁盘已删走软删除/adapter 版本不一致整体跳过）+ `change_queue.go`（Mark 非阻塞幂等去重 → debounce 300ms → 单 worker 串行，MaxBatch 256，Close 幂等等待；**修复"重复标记重置 debounce"的饥饿缺陷**）+ `IndexJobKindIncremental`；② edit hook：`toolctx.WithFileChangeNotifier` + 编辑类工具（write/edit/multiedit/append_write/apply_patch/download）落盘成功后报告 → agent 两条工具执行 ctx 注入 → 队列；队列所有权在 `Layer`（多 Activation 共享 worker）；shadow 档发布句柄但不设 mode（不注入 prompt）；③ **变更源 2（外部校正）**：`change_git.go`（HEAD 移动 + 工作树状态，按转移报告、`GIT_OPTIONAL_LOCKS=0` 只读）+ `change_scan.go`（已索引文件 size+mtime 比对 + `Fresh` 集合过滤 git 侧假阳性，`git checkout --` 还原的唯一发现者）+ `change_sync.go`（`Layer.SyncExternalChanges` 三源合并入队、分源节流；`Layer.ObserveVersion` 作为判定点：发现变更即失效版本缓存并给 token 附 `#pendingN`，fail-closed）+ 版本缓存**代次化**（`ChangeQueue.Generation`，修掉"失效后又被写回旧版本"竞态）+ agent `run()` turn 边界触发；④ **迁移版本拒绝**：`migrate.Apply` 公共收口点拒绝"库 schema 新于本二进制"（`ErrSchemaNewer`）+ knowledge 只读路径 `verifyInitialized` 同步补上，构成双向口径（落后：reader 拒绝 / owner 迁移；超前：两条路径都拒绝）；⑤ **GC**：`GCDeleted` 单事务先显式删 symbols（外键级联不触发 FTS 触发器）再删 files（级联 refs/versions/aliases）+ 保留期 30 天可配 + `shouldAutoGC`（超 `max_db_size_mb` + 10 分钟冷却）+ `Layer.RunGC`/`maybeAutoGC` + `StatusReport.GC`；`DefaultMaxDBSizeMB` 200 → 512（§7.4 校准值）；⑥ **等价性测试（ID 级逐行）当场捕获并修复既有缺陷**：`loadKnownSymbols` 未排除被重写文件的旧符号 → 同名新旧并存"歧义即不绑定" → 引用静默丢 `to_symbol_id`（全量重建对自遮蔽同样中招）。验证：45 例新测试（含 `-race`）+ `go build ./...` OK + `knowledge`/`migrate`/`agent`/`toolkit`/`tools`/`toolctx`/`contextmgr`/`runtimeapi`/`subagentbatch`/`artifact`/`supervision`/`agentcontrol`/`cmd/runtime-server` 全绿；改 2/加 1/删 1 后增量与终态全量 diff = 0；edit hook 端到端通过；外部校正端到端（真实临时 git 仓库：外部改写 / `git checkout --` 还原 → 判定立即保守 → 索引追上后稳定）通过；GC 端到端（过期软删除清理 + 保留期 + 触发口径 + 只读拒绝）通过。遗留：fsnotify 可选源（空闲期外部变更的即时发现；当前最坏延迟一个 turn）、版本向量参与 context item、R12 第三段（损坏时重命名重建 + 降级 off）、真实会话级 E2E 与三项统计验收（编辑 100 次 diff=0 / checkout 后 stale 100% ≥50 样本 / 锁等待 p95）；登记发现 `FindSymbols` 无 workspace 过滤（生产 store 与 workspace 一一对应，故不可达）。
 
 ### Phase 6 — Context Compiler 深度集成
 

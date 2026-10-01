@@ -370,6 +370,8 @@ func (e *EditTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}, nil
 	}
 	recordFileWrite(ctx, absPath, encodedContent, "edit")
+	// Phase 5 变更源 1（edit hook）：落盘成功后同步标记（非阻塞入队）。
+	notifyFileChanges(ctx, absPath)
 
 	// 计算差异
 	oldLen := len(contentStr)

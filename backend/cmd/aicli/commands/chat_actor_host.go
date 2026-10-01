@@ -2147,7 +2147,32 @@ func (h *localChatRuntimeHost) resumePolicyView(ctx context.Context, req supervi
 	return supervision.ResumePolicyView{}
 }
 
+// runtimeConfigWithKnowledgeLSPOverride 把会话级 knowledge.lsp.mode 覆盖应用到
+// 运行时配置的**副本**上（ADR-0002 §4.2）：绝不改共享配置对象——同一进程里的
+// 其它会话与子代理仍看原值。override 为空/非法/与配置同值时原样返回（避免无谓
+// 复制，语义适配器缓存 key 也只按生效值区分）。
+func runtimeConfigWithKnowledgeLSPOverride(cfg *runtimecfg.RuntimeConfig, session *ChatSession) *runtimecfg.RuntimeConfig {
+	if cfg == nil || session == nil {
+		return cfg
+	}
+	override := strings.ToLower(strings.TrimSpace(session.KnowledgeLSPModeOverride))
+	switch override {
+	case string(knowledge.LSPModeOff), string(knowledge.LSPModeSelf):
+	default:
+		return cfg
+	}
+	if override == strings.ToLower(strings.TrimSpace(cfg.Knowledge.LSP.Mode)) {
+		return cfg
+	}
+	clone := *cfg
+	clone.Knowledge.LSP.Mode = override
+	return &clone
+}
+
 func buildLocalChatAgent(session *ChatSession, host *localChatRuntimeHost, runtimeConfig *runtimecfg.RuntimeConfig, workspaceRoot string, childAgentType string, requestedModel string, requestedRoute ...string) *agent.Agent {
+	// ADR-0002 §4.2：会话级 knowledge.lsp.mode 覆盖在这里落地（构造副本，
+	// 绝不改共享配置），工具注册读到的就是本会话的生效值。
+	runtimeConfig = runtimeConfigWithKnowledgeLSPOverride(runtimeConfig, session)
 	requestedProvider := ""
 	requestedReasoningEffort := ""
 	if len(requestedRoute) > 0 {
@@ -3011,10 +3036,13 @@ func applyLocalChatContextOptions(agentConfig *agent.Config, runtimeConfig *runt
 // applyLocalChatKnowledgeOptions 把知识层装配写入本地 chat agent 的 options
 // （06 §4 Phase 2 W7 激活切片；TUI 与 ACP 共用 buildLocalChatAgent 路径）。
 //
-// 门控与 runtimeapi 的 applyKnowledgeContextOptions 同口径：仅当 Layer 非 nil
-// 且 `knowledge.mode=on` 时新增 `context_knowledge_mode`（on→signals 保守档）
-// 与 `context_knowledge_layer`；off（默认）/ shadow（ModeShadow 契约：绝不注入
-// prompt）/ 激活失败（nil）零新增，默认 off 行为与改动前逐字节一致。
+// 门控与 runtimeapi 的 applyKnowledgeContextOptions 同口径：
+//   - `knowledge.mode=on`：新增 `context_knowledge_mode`（on→signals 保守档）与
+//     `context_knowledge_layer`；
+//   - `knowledge.mode=shadow`：**只**发布 `context_knowledge_layer`，不设 mode。
+//     句柄是编辑类工具的变更接收方（Phase 5 变更源 1），只让索引保鲜，不注入
+//     prompt（contextmgr 在 mode=off 时零调用零注入，ModeShadow 契约不变）；
+//   - off（默认）/ 激活失败（nil）零新增，默认 off 行为与改动前逐字节一致。
 func applyLocalChatKnowledgeOptions(agentConfig *agent.Config, activation *knowledge.Activation) {
 	if agentConfig == nil || activation == nil {
 		return
@@ -3025,6 +3053,12 @@ func applyLocalChatKnowledgeOptions(agentConfig *agent.Config, activation *knowl
 	}
 	mode := contextmgr.KnowledgeModeForLayerMode(layer.Mode())
 	if mode == contextmgr.KnowledgeModeOff {
+		if layer.Mode() == knowledge.ModeShadow {
+			if agentConfig.Options == nil {
+				agentConfig.Options = make(map[string]interface{})
+			}
+			agentConfig.Options["context_knowledge_layer"] = layer
+		}
 		return
 	}
 	if agentConfig.Options == nil {

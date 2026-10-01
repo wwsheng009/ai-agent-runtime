@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -84,8 +85,56 @@ func newCodeIndexResolver(cfg knowledge.Config, workspaceRoot string) tools.Code
 			Index:       store,
 			Mode:        base.Mode,
 			WorkspaceID: wsID,
+			Root:        wsRoot,
+			Semantic:    semanticAdapterFor(base, wsRoot),
 			FilePaths:   filePaths,
 		}, true
+	}
+}
+
+// semanticAdapterCache 是进程级语义适配器缓存（key = root|enabled|mode）。
+//
+// 只缓存成功构造的适配器：构造失败（未启用/不支持的语言/缺 server spec）
+// 不缓存——配置修正后下一次调用即可生效。超时/上限等细粒度配置变化不参与
+// key（进程内配置通常来自同一份 runtime 配置，重建进程即刷新）。
+var semanticAdapterCache = struct {
+	mu      sync.Mutex
+	entries map[string]knowledge.SemanticAdapter
+}{entries: map[string]knowledge.SemanticAdapter{}}
+
+// semanticAdapterFor 返回（必要时构造）workspace 的语义适配器；nil = 不可用。
+func semanticAdapterFor(cfg knowledge.Config, root string) knowledge.SemanticAdapter {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil
+	}
+	key := root + "|" + strconv.FormatBool(cfg.LSP.Enabled) + "|" + strings.ToLower(strings.TrimSpace(cfg.LSP.Mode))
+	semanticAdapterCache.mu.Lock()
+	if adapter, ok := semanticAdapterCache.entries[key]; ok {
+		semanticAdapterCache.mu.Unlock()
+		return adapter
+	}
+	semanticAdapterCache.mu.Unlock()
+
+	adapter, _ := knowledge.NewSemanticAdapterForWorkspace(cfg, root)
+	if adapter != nil {
+		semanticAdapterCache.mu.Lock()
+		semanticAdapterCache.entries[key] = adapter
+		semanticAdapterCache.mu.Unlock()
+	}
+	return adapter
+}
+
+// closeSemanticAdapters 关闭并清空语义适配器缓存（释放锁文件；测试路径用）。
+func closeSemanticAdapters() {
+	semanticAdapterCache.mu.Lock()
+	entries := semanticAdapterCache.entries
+	semanticAdapterCache.entries = map[string]knowledge.SemanticAdapter{}
+	semanticAdapterCache.mu.Unlock()
+	for _, adapter := range entries {
+		if closer, ok := adapter.(interface{ Close(context.Context) error }); ok {
+			_ = closer.Close(context.Background())
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 # ADR-0002: ACP 下 LSP 归属与能力面
 
-- **Status**: Proposed
+- **Status**: Accepted
+- **Accepted**: 2026-09-30（项目 owner 授权代改，按最佳实践确认；Phase 4 实现与验证记录见 `../CHANGELOG.md` 同日条目）
 - **Date**: 2026-09-20
 - **Deciders**: 项目 owner
 - **Gate**: `Phase4-start`
@@ -140,6 +141,16 @@ default: off
   **所有 client 都可见可改**（满足 D2）。
 - 复用既有实现路径（`agent_stdio_config_option.go`；`server.go` 的
   `SupportsBooleanConfigOptions()` 仅用于 boolean 分支），**select 分支无需新能力协商**。
+
+**实现状态（2026-09-30）**：✅ 已落地。落点
+`backend/cmd/aicli/commands/agent_stdio_config_option.go`（选项构造/值域校验/切换）
++ `chat_actor_host.go`（`runtimeConfigWithKnowledgeLSPOverride`：会话级覆盖在**运行时
+配置副本**上落地，共享配置与其它会话零影响）+ `internal/acp/types.go`
+（`_knowledge` 扩展分类）。下发门控：本会话有知识层且 `knowledge.lsp.enabled=true`
+（`enabled=false` 是逃生舱，会话内不得打开）；未启用知识层的会话显式拒绝切换。
+覆盖仅存内存（未写回 chat-prefs，重启回配置默认）——与"绝不隐式改用户配置"同向。
+验证：5 例测试（门控 / 覆盖优先 / `session/set_config_option` 端到端 / 拒绝 /
+配置副本语义），见 CHANGELOG「Phase 4」条目。
 
 ### 4.3 保留 `external` 但不实现
 

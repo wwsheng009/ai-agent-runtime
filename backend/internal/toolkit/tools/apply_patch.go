@@ -150,6 +150,8 @@ func (t *ApplyPatchTool) Execute(ctx context.Context, params map[string]interfac
 	}
 
 	mutatedPaths, combinedPatch := applier.diff()
+	// Phase 5 变更源 1（edit hook）：补丁已落盘，同步标记全部被写路径。
+	notifyFileChanges(ctx, mutatedPaths...)
 	summary.Files = len(mutatedPaths)
 	message := summary.message()
 	if strings.TrimSpace(combinedPatch) != "" {

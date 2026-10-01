@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
@@ -30,6 +32,9 @@ const (
 	codeSourceIndex     = "index"
 	codeSourceFallback  = "fallback"
 	codeSourceIndexGrep = "index+grep"
+	// codeSourceSemantic 是语义通道（进程外 LSP）结果：编译器级口径，
+	// 精度高于索引启发式（Phase 4 接线；默认关闭，见 knowledge.lsp.enabled）。
+	codeSourceSemantic = "lsp"
 
 	codeConfidenceExact = 1.00
 	codeConfidenceFTS   = 0.90
@@ -74,6 +79,10 @@ type CodeIndexHandle struct {
 	Index       CodeIndex
 	Mode        knowledge.Mode
 	WorkspaceID string
+	// Root 是 workspace 根目录（绝对路径）；语义查询的路径锚点。
+	Root string
+	// Semantic 是可选语义通道（nil = 未启用/不支持，调用方降级到索引路径）。
+	Semantic knowledge.SemanticAdapter
 	// FilePaths 是 file_id → workspace 相对路径的映射（打开索引时构建一次）。
 	FilePaths map[string]string
 }
@@ -378,6 +387,131 @@ func codeRefsQuery(ctx context.Context, idx CodeIndex, sym knowledge.Symbol, nam
 		query.ToSymbolID = sym.ID
 	}
 	return idx.FindRefs(ctx, query)
+}
+
+// ---- 语义通道（Phase 4 接线：ADR-0006 位置边界 + ADR-0002 §4.1 门控）----
+
+// trySemanticRefsQuery 尝试用语义通道回答引用查询。
+//
+// 返回 (env, true) 表示已产出结果；返回 (nil, false) 表示调用方应走索引路径
+// （未启用 / 不可用 / 查询失败 / 零命中 / kind 不支持）。语义查询需要**声明
+// 位置**，因此符号必须先在索引中解析成功——索引仍是位置来源，语义通道只提升
+// 引用集合的精度。
+//
+// kind 口径：LSP 不区分调用/类型使用。"" 与 "reference" 直接返回全部引用点；
+// "call" 用行内 `name(` 启发式过滤（与索引侧同口径，但候选集是编译器级）；
+// import/implement 交给索引通道（索引有 kind 信息，语义没有）。
+func trySemanticRefsQuery(ctx context.Context, toolName string, handle *CodeIndexHandle, sym knowledge.Symbol, found bool, symbol, kind string, limit int, clamped bool) (*codeEnvelope, bool) {
+	if handle == nil || handle.Semantic == nil || !found {
+		return nil, false
+	}
+	switch kind {
+	case "", "reference", "call":
+	default:
+		return nil, false
+	}
+	path := handle.PathForFile(sym.FileID)
+	if path == "" || sym.Range.Start.Line <= 0 {
+		return nil, false
+	}
+	// 位置口径转换只在这里发生：索引 1-based（adapter_builtin.go:276）↔
+	// canonical 0-based（ADR-0006 §4.4）。列是行内 UTF-8 字节偏移，两边一致。
+	locs, err := handle.Semantic.References(ctx, path, sym.Range.Start.Line-1, sym.Range.Start.Column)
+	if err != nil || len(locs) == 0 {
+		return nil, false
+	}
+	// 声明自身不算"引用点"（与索引通道口径一致；LSP 的 includeDeclaration
+	// 由适配器固定为 true，因此这里按位置剔除）。
+	declLine := sym.Range.Start.Line - 1
+	refs := make([]knowledge.SemanticLocation, 0, len(locs))
+	for _, loc := range locs {
+		if loc.Path == path && loc.Line == declLine {
+			continue
+		}
+		refs = append(refs, loc)
+	}
+	if kind == "call" {
+		refs = filterCallLocations(handle, refs, symbol)
+	}
+	if len(refs) == 0 {
+		return nil, false
+	}
+
+	results := make([]codeRefHit, 0, len(refs))
+	for _, loc := range refs {
+		hit := codeRefHit{
+			Path:       loc.Path,
+			Line:       loc.Line + 1, // canonical 0-based → 结果口径 1-based
+			Col:        loc.Col,
+			Kind:       string(knowledge.RefReference),
+			Confidence: codeConfidenceExact,
+			Source:     string(handle.Semantic.Name()),
+		}
+		if kind == "call" {
+			// 调用点由启发式过滤得到：置信度回到索引侧同口径（0.90）。
+			hit.Kind = string(knowledge.RefCall)
+			hit.Confidence = codeConfidenceFTS
+		}
+		results = append(results, hit)
+	}
+	truncated := clamped
+	if len(results) > limit {
+		results = results[:limit]
+		truncated = true
+	}
+	env := newCodeEnvelope(toolName)
+	env.Source = codeSourceSemantic
+	env.Confidence = codeConfidenceExact
+	env.Results = results
+	env.Truncated = truncated
+	env.Explanation = fmt.Sprintf(
+		"语义通道（%s，编译器级口径）命中 %d 条引用；LSP 不区分调用/类型使用%s。",
+		handle.Semantic.Version(), len(results), semanticKindNote(kind),
+	)
+	return &env, true
+}
+
+// semanticKindNote 说明语义通道下 kind 的近似口径。
+func semanticKindNote(kind string) string {
+	if kind == "call" {
+		return "，调用点由行内 `name(` 启发式过滤（候选集来自语义通道）"
+	}
+	return ""
+}
+
+// filterCallLocations 用行内 `name(` 启发式从引用点中筛出调用点。
+// 文件读取失败的行保守丢弃（宁可少报，不假装精确）。
+func filterCallLocations(handle *CodeIndexHandle, locs []knowledge.SemanticLocation, symbol string) []knowledge.SemanticLocation {
+	out := make([]knowledge.SemanticLocation, 0, len(locs))
+	cache := map[string][]string{}
+	for _, loc := range locs {
+		lines, ok := cache[loc.Path]
+		if !ok {
+			lines = readWorkspaceLines(handle.Root, loc.Path)
+			cache[loc.Path] = lines
+		}
+		if loc.Line < 0 || loc.Line >= len(lines) {
+			continue
+		}
+		line := lines[loc.Line]
+		if strings.Contains(line, symbol+"(") || strings.Contains(line, symbol+" (") {
+			out = append(out, loc)
+		}
+	}
+	return out
+}
+
+// readWorkspaceLines 读取 workspace 相对路径的文本行；失败返回 nil。
+func readWorkspaceLines(root, rel string) []string {
+	root = strings.TrimSpace(root)
+	if root == "" || strings.TrimSpace(rel) == "" {
+		return nil
+	}
+	content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		return nil
+	}
+	return strings.Split(string(content), "\n")
 }
 
 // ---- 符号结果与解析 ----

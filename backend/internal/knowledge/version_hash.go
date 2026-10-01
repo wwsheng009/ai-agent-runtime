@@ -39,7 +39,13 @@ func WorkspaceVersion(ctx context.Context, store Store, workspaceID string) (str
 	if err != nil {
 		return "", fmt.Errorf("knowledge: workspace version: %w", err)
 	}
-	return workspaceVersionHash(workspaceID, AdapterVersion, schemaVersion, files), nil
+	// Phase 4：adapter 版本以库内记录为准（可能不是 builtin）；未记录时回落
+	// 包级常量，使既有库的版本值与 Phase 4 之前逐字节一致。
+	adapterVersion, err := store.WorkspaceAdapterVersion(ctx, workspaceID)
+	if err != nil || strings.TrimSpace(adapterVersion) == "" {
+		adapterVersion = AdapterVersion
+	}
+	return workspaceVersionHash(workspaceID, adapterVersion, schemaVersion, files), nil
 }
 
 // workspaceVersionHash 是 WorkspaceVersion 的纯函数内核：把参与版本的分量

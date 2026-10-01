@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/acp"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -26,6 +27,10 @@ const (
 	// with "_" for extensions, so spec-compliant clients render it as a plain
 	// select without needing to know the name.
 	acpProviderConfigOptionID = "provider"
+	// acpKnowledgeLSPModeConfigOptionID is the stable id of the semantic-channel
+	// select option (ADR-0002 §4.2). It is the ADR-mandated key name, so clients
+	// and docs can address it directly; category uses the "_" extension prefix.
+	acpKnowledgeLSPModeConfigOptionID = "knowledge.lsp.mode"
 )
 
 // acpConfigOptionsForChat projects the chat session state into ACP config
@@ -50,6 +55,9 @@ func acpConfigOptionsForChat(chatSession *ChatSession) []acp.SessionConfigOption
 	}
 	if providerOption, ok := acpProviderConfigOption(chatSession); ok {
 		options = append(options, providerOption)
+	}
+	if lspOption, ok := acpKnowledgeLSPModeConfigOption(chatSession); ok {
+		options = append(options, lspOption)
 	}
 	if len(options) == 0 {
 		return nil
@@ -208,6 +216,85 @@ func acpProviderConfigOption(chatSession *ChatSession) (acp.SessionConfigOption,
 		CurrentValue: values[0],
 		Options:      options,
 	}, true
+}
+
+// acpKnowledgeLSPModeConfigOption projects ADR-0002 §4.2 into an ACP select:
+// id `knowledge.lsp.mode`, values [off, self], category `_knowledge` (the "_"
+// prefix is ACP's extension convention, so clients render a plain select).
+//
+// 只在**本会话确实有知识层且语义通道未被配置硬闸关闭**时下发：
+//   - Knowledge == nil（knowledge.mode=off）→ 没有可切换的语义通道；
+//   - knowledge.lsp.enabled=false 是逃生舱（ADR-0002 §4.1），会话内不得把它打开。
+//
+// 两种情况都不该让客户端看到一个点了没用的选择器。
+func acpKnowledgeLSPModeConfigOption(chatSession *ChatSession) (acp.SessionConfigOption, bool) {
+	if chatSession == nil || chatSession.Knowledge == nil {
+		return acp.SessionConfigOption{}, false
+	}
+	cfg := chatSession.Knowledge.Config()
+	if !cfg.LSP.Enabled {
+		return acp.SessionConfigOption{}, false
+	}
+	current := acpEffectiveKnowledgeLSPMode(chatSession, cfg.LSP.Mode)
+	return acp.SessionConfigOption{
+		ID:           acpKnowledgeLSPModeConfigOptionID,
+		Name:         "Knowledge LSP",
+		Description:  "Semantic channel (language server) used by code.* tools for subsequent turns in this session.",
+		Category:     acp.SessionConfigOptionCategoryKnowledge,
+		Type:         acp.SessionConfigOptionTypeSelect,
+		CurrentValue: current,
+		Options: []acp.SessionConfigSelectOption{
+			{Value: string(knowledge.LSPModeOff), Name: "off", Description: "索引通道（builtin）结果；不起语言服务器进程。"},
+			{Value: string(knowledge.LSPModeSelf), Name: "self", Description: "进程内自起语言服务器（gopls），code.* 引用/定义走编译器级语义通道。"},
+		},
+	}, true
+}
+
+// acpEffectiveKnowledgeLSPMode 返回会话当前生效的 LSP 模式：会话覆盖优先，
+// 否则取知识层配置；非法/空值一律按 off 收敛（fail closed，与配置校验同向）。
+func acpEffectiveKnowledgeLSPMode(chatSession *ChatSession, configured string) string {
+	if chatSession != nil {
+		if override := strings.ToLower(strings.TrimSpace(chatSession.KnowledgeLSPModeOverride)); override != "" {
+			if acpKnowledgeLSPModeOptionAllowed(override) {
+				return override
+			}
+			return string(knowledge.LSPModeOff)
+		}
+	}
+	value := strings.ToLower(strings.TrimSpace(configured))
+	if !acpKnowledgeLSPModeOptionAllowed(value) {
+		return string(knowledge.LSPModeOff)
+	}
+	return value
+}
+
+// acpKnowledgeLSPModeOptionAllowed 是 v1 的值域（ADR-0002 §4.3）：只有 off|self，
+// external 没有 no-op 实现，必须拒绝而不是静默降级。
+func acpKnowledgeLSPModeOptionAllowed(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case string(knowledge.LSPModeOff), string(knowledge.LSPModeSelf):
+		return true
+	default:
+		return false
+	}
+}
+
+// applyRuntimeKnowledgeLSPModeSwitch 落地会话级 knowledge.lsp.mode 覆盖。
+// 与模型/思考档一致：只改会话状态（绝不写回全局配置），从下一个 turn 生效——
+// buildLocalChatAgent 构造运行时配置副本时应用它。没有知识层的会话拒绝切换。
+func applyRuntimeKnowledgeLSPModeSwitch(session *ChatSession, raw string) (string, error) {
+	if session == nil {
+		return "", fmt.Errorf("当前没有活动会话")
+	}
+	if session.Knowledge == nil {
+		return "", acp.InvalidParams(fmt.Errorf("本会话未启用知识层（knowledge.mode=off），%s 不可切换", acpKnowledgeLSPModeConfigOptionID))
+	}
+	if !acpKnowledgeLSPModeOptionAllowed(raw) {
+		return "", acp.InvalidParams(fmt.Errorf("%s %q is not supported (v1: off|self)", acpKnowledgeLSPModeConfigOptionID, raw))
+	}
+	value := strings.ToLower(strings.TrimSpace(raw))
+	session.KnowledgeLSPModeOverride = value
+	return value, nil
 }
 
 // acpCurrentProvider returns the provider currently bound to the session,
@@ -415,6 +502,11 @@ func applyACPConfigOptionSwitch(chat *ChatSession, configID, valueID string) err
 			return nil
 		}
 		_, err := applyRuntimeProviderSwitch(chat, valueID)
+		return err
+	case strings.EqualFold(configID, acpKnowledgeLSPModeConfigOptionID):
+		// ADR-0002 §4.2：select 值域 off|self，未启用知识层的会话拒绝切换
+		// （选项本身也不会被下发，见 acpKnowledgeLSPModeConfigOption）。
+		_, err := applyRuntimeKnowledgeLSPModeSwitch(chat, valueID)
 		return err
 	default:
 		return acp.InvalidParams(fmt.Errorf("unknown configId %q", configID))

@@ -27,6 +27,13 @@ type Store interface {
 	// 读者不得写库，但"这个 workspace 有没有被索引过"是纯读问题。
 	FindWorkspace(ctx context.Context, rootPath string) (string, bool, error)
 
+	// WorkspaceAdapterVersion 返回库内记录的索引 adapter 版本（未记录时为空串）。
+	// Phase 4 交付 4：版本不一致时按配置触发 full_rebuild_on_adapter_change。
+	WorkspaceAdapterVersion(ctx context.Context, workspaceID string) (string, error)
+
+	// SetWorkspaceAdapterVersion 记录本次成功索引使用的 adapter 版本。
+	SetWorkspaceAdapterVersion(ctx context.Context, workspaceID, version string) error
+
 	// UpsertFile 记录文件的身份与内容哈希，返回稳定的文件 id。
 	// 调用方以 (workspace, path) 为键；重复调用是幂等的。
 	UpsertFile(ctx context.Context, rec FileRecord) (string, error)
@@ -46,6 +53,10 @@ type Store interface {
 	// files.deleted_at 与 index_state=stale，其 symbols.deleted_at 同步标记，
 	// 返回本次新标记的文件数；已删除路径幂等跳过。
 	MarkFilesDeleted(ctx context.Context, workspaceID string, paths []string, at time.Time) (int, error)
+
+	// GCDeleted 物理清理 deleted_at 早于 cutoff 的软删除文件及其派生行
+	// （04 §5 Phase 5 交付 4）；只读 store 返回 ErrReadOnlyStore。
+	GCDeleted(ctx context.Context, workspaceID string, cutoff time.Time) (GCReport, error)
 
 	// ReplaceSymbols 原子替换一个文件的符号集合。符号 id 由 StableKey 派生，
 	// 因此增量重建不会改变 id。

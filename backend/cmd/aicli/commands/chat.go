@@ -74,8 +74,13 @@ type ChatSession struct {
 	// knowledge.mode=off（默认）时恒为 nil——所有消费点都必须接受 nil，
 	// 这条不变量是"off 与无知识层逐字节一致"的落点。
 	Knowledge *knowledge.Activation
-	HTTPDebug bool
-	Stream    bool
+	// KnowledgeLSPModeOverride 是 ACP `knowledge.lsp.mode` select 的会话级覆盖
+	// （ADR-0002 §4.2；空串 = 跟随配置，取值 off|self）。与模型/思考档一致，
+	// 从下一个 turn 生效：buildLocalChatAgent 构造运行时配置副本时应用它，
+	// 工具面据此决定是否走语义通道。绝不写回全局配置。
+	KnowledgeLSPModeOverride string
+	HTTPDebug                bool
+	Stream                   bool
 	// FastMode enables Codex service_tier=priority. Only meaningful when protocol is codex.
 	FastMode bool
 	BaseURL  string

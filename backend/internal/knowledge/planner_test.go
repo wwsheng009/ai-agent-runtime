@@ -572,11 +572,11 @@ func TestVersionCacheTTL(t *testing.T) {
 	t0 := plannerTestNow()
 	var cache versionCache
 
-	first, err := cache.observe(ctx, store, wsID, time.Minute, t0)
+	first, err := cache.observe(ctx, store, wsID, time.Minute, t0, 0)
 	if err != nil {
 		t.Fatalf("observe: %v", err)
 	}
-	second, err := cache.observe(ctx, store, wsID, time.Minute, t0.Add(10*time.Second))
+	second, err := cache.observe(ctx, store, wsID, time.Minute, t0.Add(10*time.Second), 0)
 	if err != nil {
 		t.Fatalf("observe: %v", err)
 	}
@@ -584,7 +584,7 @@ func TestVersionCacheTTL(t *testing.T) {
 		t.Fatalf("cached observation = %+v, want version %q observed at %v", second, first.Version, t0)
 	}
 
-	third, err := cache.observe(ctx, store, wsID, time.Minute, t0.Add(2*time.Minute))
+	third, err := cache.observe(ctx, store, wsID, time.Minute, t0.Add(2*time.Minute), 0)
 	if err != nil {
 		t.Fatalf("observe: %v", err)
 	}

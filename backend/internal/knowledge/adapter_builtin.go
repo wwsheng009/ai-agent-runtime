@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"context"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -9,41 +10,38 @@ import (
 	"unicode/utf8"
 )
 
-// LanguageAdapter 把一份文件内容翻译成符号与引用候选。
-//
-// 这是知识层唯一的"语言相关"接缝：tree-sitter、LSP、runtime evidence 各自实现
-// 本接口后接入，索引流程（indexer.go）不需要任何改动（ADR-0007）。
-type LanguageAdapter interface {
-	// Name 是写入 refs.source 的生产者标识。
-	Name() RefSource
-	// Extract 解析文件；实现不得写入 store，也不得依赖 workspace 之外的输入。
-	Extract(ctx context.Context, file FileRecord, content []byte) (Extraction, error)
-}
-
-// Extraction 是一次解析的产物。
-type Extraction struct {
-	Symbols []Symbol
-	Refs    []pendingRef
-}
-
-// pendingRef 是尚未解析目标的引用候选（目标解析见 indexer.resolveRefs）。
-type pendingRef struct {
-	Name         string
-	Kind         RefKind
-	Line         int
-	Col          int
-	Snippet      string
-	FromSymbolID string
-}
-
 // builtinAdapter 是零依赖的 regex 解析器，产出 confidence=heuristic 的行。
 //
 // 它存在的意义是让索引在任何环境都能跑通（无 tree-sitter、无 LSP），
 // 同时把"这是猜测"如实写进 confidence/source，避免下游把启发式当语义事实。
+//
+// SPI（LanguageAdapter / AdapterCapabilities / Extraction / pendingRef）见
+// adapter.go（Phase 4）；本文件只承载 builtin 实现。
 type builtinAdapter struct{}
+
+// builtinAdapterVersion 是 builtin 解析器的版本，参与 signature_hash 与工作区
+// 知识版本（04 §4.4）。升级它会让既有符号身份失效，触发全量重建。
+const builtinAdapterVersion = AdapterVersion
 
 // Name 实现 LanguageAdapter。
 func (builtinAdapter) Name() RefSource { return SourceBuiltin }
+
+// Version 实现 LanguageAdapter。
+func (builtinAdapter) Version() string { return builtinAdapterVersion }
+
+// Detect 实现 LanguageAdapter：按后缀识别内置 adapter 覆盖的语言。
+func (builtinAdapter) Detect(path string, _ []byte) (string, bool) {
+	lang, ok := codeExtensions[strings.ToLower(filepath.Ext(path))]
+	return lang, ok
+}
+
+// Capabilities 实现 LanguageAdapter。
+//
+// builtin 是文本启发式通道：不提供语义级 definition/references（那是 LSP 的
+// 职责），能力面如实为 false，而不是假装可用（04 §5 Phase 4 的能力矩阵）。
+func (builtinAdapter) Capabilities() AdapterCapabilities {
+	return AdapterCapabilities{}
+}
 
 // symbolPattern 描述一条声明匹配规则。
 type symbolPattern struct {
@@ -320,6 +318,11 @@ func (a builtinAdapter) Extract(ctx context.Context, file FileRecord, content []
 			if name == "" || callKeywords[name] {
 				continue
 			}
+			// 字符串/注释里的"调用形"文本不是引用：`t.Fatalf("Activate(owner): %v", err)`
+			// 曾实测被抽成调用点（live 测量中占测试文件引用的全部"漏报"）。
+			if insideStringOrComment(line, loc[2]) {
+				continue
+			}
 			out.Refs = append(out.Refs, pendingRef{
 				Name:    name,
 				Kind:    RefCall,
@@ -337,6 +340,49 @@ func (a builtinAdapter) Extract(ctx context.Context, file FileRecord, content []
 		out.Refs[i].FromSymbolID = enclosingSymbol(out.Symbols, out.Refs[i].Line)
 	}
 	return out, nil
+}
+
+// insideStringOrComment 报告字节偏移 idx 是否落在字符串字面量或行注释内。
+//
+// 内置通道是**行内正则**：`t.Fatalf("Activate(owner): %v", err)` 这类字符串里的
+// 调用形文本会被误抽成引用（live 测量里测试文件引用的"漏报"全部源于此）。
+// 这里做轻量扫描排除，不追跨行原始字符串与块注释——那属于 tree-sitter/LSP 的
+// 语义面，builtin 只保证"不把明显的字符串文本当代码"。
+func insideStringOrComment(line string, idx int) bool {
+	if idx <= 0 {
+		return false
+	}
+	if idx > len(line) {
+		idx = len(line)
+	}
+	inDouble, inRaw := false, false
+	for i := 0; i < idx; i++ {
+		switch c := line[i]; {
+		case inRaw:
+			if c == '`' {
+				inRaw = false
+			}
+		case inDouble:
+			switch c {
+			case '\\':
+				i++ // 跳过转义字符（如 \"）
+			case '"':
+				inDouble = false
+			}
+		default:
+			switch c {
+			case '"':
+				inDouble = true
+			case '`':
+				inRaw = true
+			case '/':
+				if i+1 < len(line) && line[i+1] == '/' {
+					return true // 行注释：其后全部是注释文本
+				}
+			}
+		}
+	}
+	return inDouble || inRaw
 }
 
 // symbolNamespace 返回 04 §4.4 要求的 namespace / package / module 分量。
@@ -368,7 +414,7 @@ func buildSymbol(file FileRecord, line string, lineNo int, name, owner string, p
 	if owner != "" {
 		qualified = owner + "." + name
 	}
-	hash := SignatureHash(signature)
+	hash := SignatureHashFor(signature, builtinAdapterVersion)
 	stableKey := StableKey(file.Language, pattern.kind, symbolNamespace(file), owner, qualified, hash)
 	return Symbol{
 		// ID 在解析阶段就定稿：引用解析需要用它回填 refs.from_symbol_id。

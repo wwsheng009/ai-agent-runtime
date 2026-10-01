@@ -127,6 +127,10 @@ const (
 	// ACP reserves categories starting with "_" for extensions, so clients
 	// that do not know it still render the option as a generic select.
 	SessionConfigOptionCategoryProvider = "_provider"
+	// SessionConfigOptionCategoryKnowledge is a custom (non-spec) category for
+	// the knowledge-layer semantic-channel selector (`knowledge.lsp.mode`,
+	// ADR-0002 §4.2); same "_" extension convention as provider.
+	SessionConfigOptionCategoryKnowledge = "_knowledge"
 )
 
 // SessionConfigOption type discriminators.

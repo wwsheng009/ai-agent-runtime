@@ -41,6 +41,11 @@ const (
 // IndexJobKindLight 是 Phase 1 唯一在跑的索引通道（regex_builtin 解析器）。
 const IndexJobKindLight = "light"
 
+// IndexJobKindIncremental 是定向增量通道（IndexPaths，Phase 5 交付 1/2）：
+// 只处理调用方标记的少数文件，不遍历工作区。单独成 kind 是为了让状态面
+// 能区分"全量/扫描运行"与"编辑触发的增量运行"（也是单文件增量 p95 的测量口径）。
+const IndexJobKindIncremental = "incremental"
+
 // maxIndexJobErrorBytes 限制落库的错误摘要长度，避免一次坏运行的完整堆栈把行撑爆。
 const maxIndexJobErrorBytes = 512
 
@@ -74,6 +79,8 @@ type StatusReport struct {
 	LastJob *IndexJob `json:"last_job,omitempty"`
 	// LockWait 是本进程写路径的锁等待采样（见 LockWaitStats 的口径说明）。
 	LockWait LockWaitStats `json:"lock_wait"`
+	// GC 是软删除行物理清理的摘要（04 §5 Phase 5 交付 4，本进程视角）。
+	GC GCStatus `json:"gc,omitempty"`
 	// DegradedReason 解释"为什么状态不完整"（未索引 / reader 降级 / 上次索引失败）。
 	// 空串 = 无降级。它存在的原因：状态面最怕静默——零值必须能被解释。
 	DegradedReason string `json:"degraded_reason,omitempty"`
@@ -139,6 +146,7 @@ func (l *Layer) Status(ctx context.Context) (StatusReport, error) {
 	if s, ok := l.store.(*sqliteStore); ok {
 		report.LockWait = s.lockWait.snapshot()
 	}
+	report.GC = l.GCStats()
 	if l.store == nil {
 		return report, nil
 	}

@@ -6,23 +6,135 @@
 
 ---
 
+## 2026-10-01 — Phase 5 切片 4 实施：迁移版本拒绝（交付 6）+ GC（交付 4）
+
+### 交付 6：schema 迁移版本拒绝（新 DB 不被旧代码打开）
+
+风险 R12 的第二半（"版本拒绝"）此前只做了一半：旧库（schema 落后）由 reader
+显式拒绝、由 owner 迁移；但**新库**（schema 高于本二进制）两条路径都会放行——
+旧代码按旧列集读写新结构，静默给错比失败更糟。
+
+### Changed
+
+- `backend/internal/migrate/migrate.go`：`Apply` 在**所有 store 的公共收口点**上拒绝"库版本高于本二进制"（`ErrSchemaNewer`，消息带两侧版本号与处置建议）；新增 `LatestVersion`（顺序无关取最大值）与 `maxVersion`。六个 store（knowledge / agentcontrol / artifact / chat / team / supervision / subagentbatch）一起受益，不需要各自加检查。
+- `backend/internal/knowledge/store_sqlite.go`：`verifyInitialized`（只读路径）补上"新于本二进制"分支，包 `migrate.ErrSchemaNewer` 并给出可操作提示（"用更新的二进制打开这个 workspace"）。
+- `backend/configs/runtime.yaml`：补 GC 两个旋钮的注释模板（`max_db_size_mb` / `gc_retention_days`）。
+
+### 交付 4：GC（软删除行物理清理）
+
+### Changed
+
+- `backend/internal/knowledge/store_sqlite_gc.go`（新）：`GCDeleted(ctx, workspaceID, cutoff)` —— 在单事务内**先显式删 symbols**（`symbols_fts` 的同步靠 `symbols` 上的 AFTER DELETE 触发器，而 SQLite 的外键级联动作**不触发**触发器；只删 files 会留下"搜得到、查不到"的幽灵符号），再删 files（级联清掉 refs / symbol_versions / symbol_aliases）；refs 行数在级联前先数（SQLite 不报告级联行数）。返回 `GCReport`（Files / Symbols / Refs / BytesBefore / BytesAfter）。只读 store 返回 `ErrReadOnlyStore`。
+- `backend/internal/knowledge/gc.go`（新）：保留期（`DefaultGCRetentionDays = 30`，`Config.GCRetention()` 可配）、触发口径（`shouldAutoGC`：超过 `max_db_size_mb` 且冷却窗口 `DefaultGCInterval = 10min` 已过）、`Layer.RunGC`（显式入口，owner 专属；reader/off 返回零报告且不报错）、`Layer.maybeAutoGC`（判定点顺带检查，失败只记录不传播——GC 是维护动作，不是复用判定的正确性前提）、`GCStats` 状态摘要。
+- `backend/internal/knowledge/{store.go,knowledge.go,status.go,change_sync.go,config.go}`：`Store` 接口加 `GCDeleted`；Layer 加 GC 状态与测试注入口（`gcSizeFn`）；`StatusReport.GC` 暴露摘要；`ObserveVersion`（判定点）在采样前顺带检查库大小；`DefaultMaxDBSizeMB` 200 → **512**（04 §7.4 校准值：本仓库实测 313.9 MiB，200 的初值一开始就压着上限）。
+
+### Verified
+
+- 交付 6：`internal/migrate` 新增 `TestLatestVersion` / `TestApplyRefusesNewerSchema`（含 `errors.Is(ErrSchemaNewer)` 与"消息带两侧版本号"断言、以及"已知到 v3 的二进制可正常打开"的正例）/ `TestApplyIsIdempotent`；`knowledge` 新增 `TestOpenStoreRefusesNewerSchema`（写入与只读两条路径都拒绝 + 可操作提示）。
+- 交付 4：`knowledge/gc_test.go` 6 例 —— 过期软删除文件被物理清理（Files=1、Symbols>0、Refs>0；FileByPath 找不到、符号不可见、存活文件的符号保留）；保留期内不清理（并钉住 `GCRetention()` 的缺省/覆盖/`<=0` 回落口径）；`shouldAutoGC` 表驱动 6 例；判定点触发（超软上限 → 真清理，冷却窗口内不重复触发）；只读 store 硬失败；reader 层 no-op。**GC 不改变工作区版本**（版本只由未软删除文件构成），因此判定点触发不会污染版本判定。
+- `go build ./...` OK；`internal/knowledge`/`migrate`/`agent`/`toolkit`/`tools`/`toolctx`/`contextmgr`/`runtimeapi`/`subagentbatch`/`artifact`/`supervision`/`agentcontrol`/`cmd/runtime-server` 全绿；GC 用例 `-race` 通过。
+
+### Notes
+
+- 交付 4 刻意**不做 VACUUM**：删行后 SQLite 原地复用空闲页（文件不缩但不再增长），而 VACUUM 要独占锁并重写全库，绝不能出现在判定点热路径上。需要收缩文件的运维动作仍可手动 `sqlite3 <db> VACUUM`；`GCReport` 的 BytesBefore/After 如实反映"文件是否缩了"。
+- 交付 6 的拒绝口径是**双向**的：落后 → reader 拒绝 / owner 迁移；超前 → 两条路径都拒绝。损坏时"重命名重建 + 降级 off"（R12 的第三段）仍待做。
+- 剩余：fsnotify 可选源（交付 1 第三类）、版本向量参与 context item（交付 3 剩余）、三项统计验收（编辑 100 次 diff=0 / checkout 后 stale 100% ≥50 样本 / 锁等待 p95）。
+
 ## 2026-10-01 — 索引范围收口：.gitignore 过滤接入（G11/R11 的 .gitignore 层）
 
 ### Changed
 
 - `backend/internal/knowledge/gitignore.go`（新）：git 语义的 .gitignore 解析与匹配——按目录层级叠加（root→深，最后命中胜出）、`!` 取反、`#` 注释、`\` 转义、尾部 `/` 仅匹配目录、前导 `/` 锚定、无 `/` 模式按 basename 任意深度匹配、`*`/`?`/`[]` 不跨 `/`、`**/` / `/**/` / `/**` 三种整段形态；单文件读失败 / 规则编译失败降级为"无该规则"，不阻断索引。
-- `backend/internal/knowledge/indexer.go`：`collectIndexableFiles` 在 WalkDir 中按目录栈应用 .gitignore（内置 `ignoreDirs` + 隐藏目录仍是第一道防线，且不被取反规则重新包含）；新增忽略规则后，已入库文件由下一次全量对账软删除。
+- `backend/internal/knowledge/indexer.go`：`collectIndexableFiles` 在 WalkDir 中按目录栈应用 .gitignore（内置 `ignoreDirs` + 隐藏目录仍是第一道防线，且不被取反规则重新包含）；`IndexPaths`/`resolveIndexTargets` 与全量同口径，拒绝被内置目录 / 隐藏目录 / .gitignore 排除的显式路径（计入 Errors）；新增忽略规则后，已入库文件由下一次全量对账软删除。
 - `backend/internal/knowledge/config.go`：新增 `knowledge.index.use_gitignore`（默认 true）；关闭后回到"内置忽略集 + 隐藏目录"旧口径（回滚逃生舱）。
 
 ### Verified
 
-- 新增 6 例测试：规则语义表（basename/锚定/目录/`**`/转义/字符类/CRLF）、嵌套优先级与目录通配取反链（`dir/*` + `!dir/` + `!dir/**`）、collect 集成（node_modules 与隐藏目录保持生效）、开关关闭口径、全量软删除新增忽略文件。
-- `go build` OK；`internal/knowledge` 聚焦测试通过（规则语义 / collect 集成 / 软删除对账）。
+- 新增 7 例测试：规则语义表（basename/锚定/目录/`**`/转义/字符类/CRLF）、嵌套优先级与目录通配取反链（`dir/*` + `!dir/` + `!dir/**`）、collect 集成（node_modules 与隐藏目录保持生效）、开关关闭口径、全量软删除新增忽略文件、IndexPaths 拒绝被忽略路径。
+- `go build ./...` OK；`internal/knowledge` 全包测试通过（含全部既有用例）。
 
 ### Notes
 
 - 范围边界：只读取工作区内的 .gitignore；`.git/info/exclude` 与用户全局 excludesFile 不参与（前者需要先定位仓库根，后者是机器级配置）。非 git 工作区同样生效。
 - 内置忽略集与 .gitignore 是**叠加**关系：node_modules / vendor / dist 等即使未被 .gitignore 声明也会被剪枝，且不能被 `!` 规则重新包含。
+
+## 2026-10-01 — Phase 5 切片 3 实施：变更源 2（git + stat 外部校正）
+
+edit hook 只覆盖"工具写盘"；shell/exec 写盘、外部进程写盘、git checkout/pull/reset
+都会绕过它。本切片补齐**外部变更校正源**，并把校正挂在"判定点"上：版本采样前先校正，
+让 stale 判定建立在校正后的状态上。
+
+### Changed
+
+- `backend/internal/knowledge/change_git.go`（新）：`GitChangeSource` —— HEAD 移动（`rev-parse` + `diff --name-only old..new`）与工作树状态（`status --porcelain -z`，含未跟踪新文件、删除、重命名两侧）。**按转移报告**（只报新条目/状态码变化）：持续 modified 的文件不会每轮重复上报，避免版本判定永远带 pending。只读契约：`GIT_OPTIONAL_LOCKS=0`（不抢锁、不刷新 index）；非仓库/git 不可用 → `Skipped`（不是错误）；路径统一工作区相对并丢弃工作区外路径（工作区是仓库子目录时）。
+- `backend/internal/knowledge/change_scan.go`（新）：`ScanIndexedFileStats` —— 把 store 的已索引文件与磁盘现状按 **size + mtime_ns** 比对（与索引器 `stageFile` 的廉价预筛同口径），磁盘已删 → `Missing`（交索引器软删除）。这是 `git checkout -- <file>`（还原到 HEAD、status 干净、HEAD 未动）这类变化的**唯一发现者**，也是非 git 工作区的兜底。
+- `backend/internal/knowledge/change_sync.go`（新）：`Layer.SyncExternalChanges`（三源合并 → 队列；owner + shadow|on 门控；失败/节流降级，永不阻断）与 `Layer.ObserveVersion`（判定点：校正 → 发现变更则失效版本缓存 + 本次 token 附 `#pendingN` 未稳定标记 → 旧知识立即不可复用，fail-closed）。**分源节流**：stat 校正每次判定都跑（廉价、正确性靠它），git 校正按 2s 节流（只补"未跟踪新文件"这一 stat 看不见的维度）。校正结果先按索引器同口径过滤（工作区 + `codeExtensions`）——知识层自己的 `.aicli/*.db`、锁文件不会被当成变化喂给队列。
+- `backend/internal/knowledge/{knowledge,planner,change_queue}.go`：版本缓存（`versionCache`）新增**索引代次**（`ChangeQueue.Generation`，每次成功的定向增量 +1）：TTL 内但代次已变 → 强制重采样。修掉"失效后又被写回旧版本"的竞态（索引落地与采样并发时，旧版本曾能被缓存压住 30s）。`Plan` 的版本采样改走 `ObserveVersion`；队列 `OnResult` 仍失效缓存（双保险）。**并修复队列饥饿缺陷**：`Mark` 原实现即使路径已在待办集合里也发 wake 信号 → debounce 被反复重置，反复标记同一路径（校正源每轮重标仍然落后的文件正是这种模式）会让 worker 永远等不到开工时机；改为"只有真正新增待办才唤醒"（切片 1 遗留缺陷，本次由校正源测试暴露）。
+- `backend/internal/knowledge/change_scan.go` + `change_sync.go`：git 侧路径再过一道**"索引是否真落后"**过滤（`StatScanReport.Fresh`）——工作树相对 HEAD 持续 modified 的文件在索引已跟上后不得再入队，否则版本判定会永远带 `#pending`（git 状态转移与索引追上之间存在一个 ≤2s 的窗口，曾让校正源"误报"自己已处理过的文件）。
+- `backend/internal/agent/{loop,tool_exec_middleware}.go`：**turn 边界触发**——`run()` 在 turn 开始（首轮 LLM 请求与 Plan 之前）跑一次校正，让本 turn 的复用判定看到校正后的版本；`knowledgeLayerForAgent` 取 `context_knowledge_layer` 的 `*knowledge.Layer`；未挂载知识层是 no-op（off/reader 零副作用）。
+
+### Verified
+
+- 新增 10 例测试：git 源 3 例（真实临时仓库：修改/未跟踪/删除三态 + HEAD 移动 + 工作区外过滤；非仓库跳过）；stat 源 1 例（外部改写 size+mtime、磁盘删除）；Layer 级 5 例（外部改写 → 队列 → 版本立即变保守 → 索引追上后稳定且不同；**`git checkout --` 还原**场景（git 侧断言干净，只有 stat 能发现）；**持续 modified 但索引已跟上不得产生 pending**（跨 2s 节流窗口连续采样）；git 仅节流、stat 不受限；nil/reader no-op）；agent 侧 1 例（turn 边界确实触发；未挂载不触发）。
+- `go build ./...` OK；`internal/knowledge`/`agent`/`toolkit`/`tools`/`toolctx`/`contextmgr`/`runtimeapi`/`cmd/runtime-server` 全绿。
+
+### Notes
+
+- 校正**成本**：stat 校正 ≈ O(已索引文件) 次 stat（每次判定点执行，通常 <30ms）；git 校正 ≈ 1–2 次 git 进程（2s 节流）。版本采样本身仍有 30s TTL 缓存，但校正不受 TTL 限制——正确性优先。
+- 验收门槛"外部 git checkout 后 stale 判定正确率 100%"的**机制**已具备并被测试覆盖；50 样本 × 连续 checkout 的统计实测留待测量轮（连同"编辑 100 次 diff=0"与锁等待 p95）。
+- 仍待实施：fsnotify 可选源（交付 1 的第三类，用于空闲期外部变更的即时发现；当前由"判定点 + turn 边界"覆盖）、GC（交付 4）、迁移版本拒绝（交付 6）、版本向量参与 context item（交付 3 的剩余部分）。
+
+---
+
+## 2026-10-01 — Phase 5 切片 2 实施：edit hook 全链接线（工具 → ctx → 队列）
+
+切片 1 交付了"入口 + 队列 + 执行端"但无人调用；本切片把**编辑类工具**接上：
+落盘成功 → 会话知识层 `MarkChanged` → 串行队列 → debounce 定向增量。
+链路按"工具只认 ctx、装配方注入句柄"分层，off/reader/非会话路径零副作用。
+
+### Changed
+
+- `backend/internal/toolctx/context.go`：新增 `WithFileChangeNotifier` / `FileChangeNotifierFromContext`（会话级变更接收方，nil 不注入）。
+- `backend/internal/toolkit/tools/change_notify.go`（新）+ `{write,edit,multiedit,append_write,apply_patch,download}.go`：落盘**成功**后报告被写路径（失败不报告；apply_patch 报告全部 mutated paths）。shell/exec 类工具不标记（无法可靠判定写盘；由后续 git diff 校正源兜底）。
+- `backend/internal/agent/{tool_exec_middleware,loop,approved_tool}.go`：`knowledgeChangeNotifierForAgent` 从 `context_knowledge_layer` 取 `knowledge.ChangeNotifier`，在 `toolCallContext` 与 `approvedToolCallContext` 两条工具执行路径上注入；未挂载知识层不注入（off 基线零副作用）。
+- `backend/internal/knowledge/{knowledge,activation}.go`：变更队列所有权从 `Activation` 下移到 `Layer`（agent 侧只持有 Layer；同 workspace 多 Activation 共享一个串行 worker，不会两个 worker 抢同一 store）；`Activation.MarkChanged/ChangeQueue` 保留为转发；新增 `knowledge.ChangeNotifier` 接口（`*Layer` / `*Activation` 都实现）。
+- `backend/internal/knowledge/change_queue.go`：`Mark` 过滤工作区**外**的绝对路径（download 写到工作区外不制造 Errors 噪声；直接调 `IndexPaths` 仍显式计入 Errors）。
+- `backend/internal/api/runtimeapi/handler.go` + `backend/cmd/aicli/commands/chat_actor_host.go`：**shadow 档改为发布 `context_knowledge_layer`（仍不设 `context_knowledge_mode`）**——句柄是编辑标记的接收方，只让索引保鲜，不注入 prompt（`contextmgr` 在 mode=off 时零调用零注入，`ModeShadow` 契约不变；已有测试 `TestContextManagerKnowledgeAssemblyOffWithPlannerZeroCalls` 钉住该前提）。
+
+### Verified
+
+- 新增 12 例测试：工具侧 5 例（write/edit/multiedit/apply_patch/append_write 报告路径、失败不报告、无接收方零副作用、helper no-op、**端到端**：编辑工具 → `MarkChanged` → 队列 → debounce 增量 → store 新旧符号正确替换）；agent 侧 2 例（两条 ctx 路径绑定接收方 + 未挂载/类型不符不绑定）；装配侧 2 例更新（aicli / runtimeapi 的 shadow 断言改为"发布句柄但不设 mode"）；toolctx/queue 过滤随既有用例覆盖。
+- `go build ./...` OK；`internal/knowledge`（全量）/`agent`/`toolkit`/`tools`/`toolctx`/`contextmgr`/`runtimeapi`/`cmd/runtime-server` 全绿；`cmd/aicli/commands` 目标用例 PASS（该包为既知红，见 Phase 4 注记）。
+
+### Notes
+
+- **变更源 1 完成**（agent edit hook：主、同步标记）；变更源 2（git diff 校正）与 3（fsnotify 可选）仍待实施——shell/exec 写盘、外部进程写盘、`git checkout` 都靠它们兜底。
+- 真实会话 E2E（模型实际调用 write → 索引在 debounce 后刷新）未跑：链路各段已有测试（工具报告 / ctx 绑定 / 装配发布 / 队列增量），端到端会话级验证留待测量轮。
+
+---
+
+## 2026-10-01 — Phase 5 切片 1 实施：定向增量（IndexPaths）+ 串行变更队列
+
+04 §5 Phase 5 的**执行端**先落地：变更源（edit hook / git diff / fsnotify）只负责
+"标记哪些文件变了"，队列与定向增量负责把它变成索引更新。切片 1 覆盖交付 1 的
+edit hook 入口、交付 2（debounce + 串行队列）与交付 5（增量 vs 全量等价性测试）。
+
+### Changed
+
+- `backend/internal/knowledge/indexer.go`：**定向增量 `IndexPaths`**（Phase 5 交付 1/2 的执行端）——抽取 `stageFile`/`writePendingFiles` 单文件管线供全量与增量共用；不遍历工作区、不做全量删除对账、不写 adapter 版本；路径越界/后缀不可索引计入 Errors（不静默）；磁盘已删路径走软删除（与全量对账同语义）；adapter 版本不一致且开启 full_rebuild 时**整体跳过**（绝不写出新旧 adapter 混装库）。新增 `IndexJobKindIncremental`，状态面可区分全量/增量运行。
+- `backend/internal/knowledge/change_queue.go`：**串行变更队列**（Phase 5 交付 1/2）——`Mark`（非阻塞、幂等、去重）→ debounce（默认 300ms）→ 单 worker 串行 `IndexPaths`（`runMu` 保证至多一个写事务在跑）；`MaxBatch`（默认 256）防单 job 拉长；`Close` 幂等并等待当前 job；nil store/未开启时全链路 no-op。`Activation.MarkChanged` 是其 edit hook 入口（owner + shadow|on 才入队，与 `Recorder` 同门控）。
+- `backend/internal/knowledge/indexer.go`（**缺陷修复，等价性测试捕获**）：`loadKnownSymbols` 新增"排除本轮重写文件"参数——旧实现把**被重写文件的旧符号**也留在名字表里，同一名字（旧+新）触发"歧义即不绑定"，引用静默丢 `to_symbol_id`；增量与全量因此不等价，且**全量重建对"文件改后仍定义同名符号"的自遮蔽同样中招**（既有缺陷，非 Phase 5 引入）。修复后 `TestIncrementalMatchesFullRebuild` 逐行（含 ID）等价。
+
+### Verified
+
+- Phase 5 定向增量与队列测试 13 例（`internal/knowledge`，含 `-race` 复跑）：`IndexPaths` 只刷新被标记文件（旧符号消失/新符号入库/未标记文件零重写/**自遮蔽引用必须绑定新符号**）、软删除（行保留 + active 列表剔除）、越界与后缀拒绝计数、adapter 版本变化整体跳过（旧索引零写入）、**增量 vs 全量 ID 级等价性**（改 2/加 1/删 1、分两批标记、双 store 同根比较）；队列去重合并、debounce 后台自动执行、8 goroutine 并发标记不丢不并发写、Close 幂等且停止入队、nil store no-op、`Activation.MarkChanged` 端到端（owner+shadow 触发增量，nil Activation no-op）。
+- `go build ./...` OK；`internal/knowledge`（含既有用例）与相关包全绿；`-race` 复跑队列/增量用例通过。
+
+### Notes
+
+- **尚未接线**：agent 编辑工具的调用点（write/edit/apply_patch 落盘后调用 `Activation.MarkChanged`）与 git diff / fsnotify 两类变更源仍是下一步；本切片只交付"入口 + 队列 + 执行端"。
+- **登记发现（跨 workspace 名字表）**：`loadKnownSymbols` 读的是 store 内**全部**符号（`FindSymbols` 无 workspace 过滤）。生产上 store 与 workspace 一一对应（DB 在 `<workspace>/.aicli/`），故当前不可达；但"一个 store 多 workspace"（共享 DBPath）时会出现跨 workspace 同名歧义/误绑定。已登记，待 Phase 5 的 owner 仲裁/多工作区议题一并处理。
+- **等价性口径**：ID 级等价成立的前提是"引用方也被标记"（变更源现实语义）；未标记引用方的旧引用会暂时悬空（`to_symbol_id` 指向已被替换的旧符号），由下一次标记或全量刷新——该边界在 `TestIndexPathsRefreshesOnlyMarkedFiles` 中显式断言。
 
 ---
 
@@ -86,22 +198,27 @@ Phase 4（`06` §4 Phase 4 / `04` §5 Phase 4）实现落地：`LanguageAdapter`
 - `backend/internal/knowledge/version_hash.go`：工作区知识版本改用库内 adapter 版本（未记录时回落常量，既有库的版本值逐字节不变）。
 - `backend/internal/knowledge/adapter_lsp_factory.go`（新增）：语义通道生产构造入口 `NewSemanticAdapterForWorkspace`（ADR-0002 §4.1 双重门控；v1 仅 Go 模块），返回稳定降级 reason；`adapter_lsp.go` 首查惰性 `Ensure`（受 `startup_timeout` 约束）+ `Close`（释放锁与子进程）。
 - `backend/internal/toolkit/tools/{code_common,code_references}.go`：**语义通道接入工具面**——`code_references` / `code_callers` / `code_navigate(refs)` 在语义可用时优先返回编译器级引用集合（`source=lsp`）；失败 / 零命中 / kind 不支持自动回落索引路径；位置口径转换集中一处（索引 1-based ↔ ADR-0006 canonical 0-based）、声明自身剔除；`kind=call` 用行内 `name(` 启发式过滤（候选集来自语义通道，confidence 回到 0.90 口径）。
+- `backend/internal/toolkit/tools/code_navigate.go`：**definition 语义面按位置入口**——`direction=definition` 支持 `file_path`+`line`（`col` 可选，缺省按行内标识符有界尝试），语义通道优先、索引反查兜底（该行引用 → 目标符号；否则所在符号并明确标注）、最后退化为读取该行。
+- `backend/internal/knowledge/adapter_builtin.go`：引用抽取新增字符串/注释守卫 `insideStringOrComment`——`t.Fatalf("Activate(owner): %v", err)` 这类**字符串里的"调用形"文本不再被抽成引用**（live 测量定位到的索引误报源，占测试文件引用的全部噪声样本）。
+- `backend/cmd/aicli/commands/{agent_stdio_config_option,chat_actor_host,chat}.go` + `internal/acp/types.go`：**ACP `knowledge.lsp.mode` select 接线**（ADR-0002 §4.2 的宿主侧交付）——id `knowledge.lsp.mode`、值域 `off|self`（select 不受 boolean 能力门控）、category `_knowledge`；**下发门控**：仅当本会话有知识层且 `lsp.enabled=true`（逃生舱不得被会话打开）；切换为**会话级覆盖**（`ChatSession.KnowledgeLSPModeOverride`，绝不写回全局配置），在 `buildLocalChatAgent` 构造**运行时配置副本**时落地——共享配置与其它会话/子代理不受影响，语义适配器缓存按生效值区分，下一个 turn 生效；未启用知识层的会话显式拒绝（非静默降级）。
 - `backend/internal/tools/code_index_resolver.go`：进程级语义适配器缓存（key=root|enabled|mode；只缓存成功构造）+ `CodeIndexHandle.{Root,Semantic}` 注入。
 
 ### Verified
 
 - 新增测试 17 例：SPI/选择/降级/全量重建/版本敏感 8 例；LSP 语义通道与进程管理 8 例（UTF-16→canonical 位置转换、崩溃/超时/不可用降级、锁活持/过期接管/释放、客户端复用、内存上限回收、非法进程上限）；builtin 测试文件抽取定点 1 例。
-- 工具面接线测试 6 例：语义优先（含声明剔除与 1-based↔0-based 转换断言）、语义失败回落索引、`kind=import` 绕过语义、`kind=call` 启发式过滤、门控与缓存（未启用 / 非 Go 模块 → nil）、构造门控（4 段）。
+- 工具面接线测试 12 例：语义优先（含声明剔除与 1-based↔0-based 转换断言）、语义失败回落索引、`kind=import` 绕过语义、`kind=call` 启发式过滤、门控与缓存（未启用 / 非 Go 模块 → nil）、构造门控（4 段）、**按位置查定义 5 例**（语义优先 / 显式 col / 索引反查 / 所在符号 / 缺 line 报错）、**字符串注释守卫 1 例**（真调用保留、字符串/原始字符串/注释/转义引号四类文本排除、列偏移断言）。
+- ACP 选项接线测试 5 例（`cmd/aicli/commands`）：下发门控（无知识层 / `lsp.enabled=false` 逃生舱不下发、select 类型与 `_knowledge` 分类、值域恰为 off|self）、会话覆盖优先与非法覆盖 fail closed、`session/set_config_option` 端到端（切换成功 + 响应回读 + `external` 拒绝且状态不变）、未启用知识层显式拒绝、运行时配置副本落地（nil/空/同值/非法原样返回，不同值返回副本且共享配置零改写）。
 - golden set：go/parser 编译级真值 **1765 条**（门槛 ≥200）；**builtin definition precision=1.0000 / recall=0.8510**（function 99.5% / type 100% / method 99.8% / variable 68.8% / constant 16.1%——块内常量按"轻索引"口径不入索引）。
-- LSP live（gopls v0.23.0 + 真实 `backend/` 模块）：**definition precision=0.9750 / recall=0.9750**（80 查询，78 命中）——达到 Phase 4 门槛（≥0.90 / ≥0.85）；**references precision（代理口径）=1.0000**（305 条返回全部通过词边界 token 校验），**recall（裁决后）=0.7674**（40 符号；索引基线 49 条，覆盖 33、索引误绑定 6、语义漏报 10）——**recall 门槛 0.85 未达标**，10/10 漏报位于 `_test.go`（见 Notes 遗留）。
+- LSP live（gopls v0.23.0 + 真实 `backend/` 模块）：**definition precision=0.9241–0.9750 / recall=0.9125–0.9750**（多次实测区间：80 查询，73–78 命中）——达到 Phase 4 门槛（≥0.90 / ≥0.85）；**references precision（代理口径）=1.0000 / recall（裁决后）=1.0000**（40 符号；索引基线 40 条，覆盖 33、索引误绑定 7、索引误报 0、语义漏报 0）——**双门槛达标**。
+- 口径修正记录：上一轮 references 的 0.7674 系**两处口径问题**——① 裁决把"该位置无定义返回"误判为语义漏报（实为索引在字符串字面量里的误报）；② 索引本身确实把 `t.Fatalf("Activate(owner): %v", err)` 这类文本抽成了引用。本轮修正裁决并加 `insideStringOrComment` 守卫后，误报清零（false_positives=0）、语义漏报清零（semantic_misses=0）。
 - 回归：`go build ./...` OK；`knowledge` / `knowledge/lsp` / `lsp` / `config` / `tools` / `toolkit` / `runtimeapi` / `cmd/*` 全绿；`cmd/contractgen` 漂移按测试指引重生成（`frontend/src/types/runtime/event-contract.ts`）。
 
 ### Notes
 
 - 默认值零变化：adapter 缺省 builtin；`lsp.enabled=false` 时任何入口都不起 LSP；全部开关关闭时行为与 Phase 3 逐字节一致。
 - **前置 ADR-0002 / 0005 / 0006 已于 2026-09-30 由项目 owner 授权代改并 Accept**（"按最佳实践确认"，先例 ADR-0004 / 0008 / 0009）；证据即本条目的实现与验证记录。
-- 登记偏差与遗留：① tree-sitter 通道仅登记（未接入语法依赖）；② ~~LSP 语义通道未接入工具面~~ → **已接入**（引用类三工具；位置口径转换集中一处）；definition 类工具仍走索引（索引 definition 实测 P=1.0000，语义 definition 门槛达标但工具面暂无"按位置查定义"入口）；③ ACP `session/set_config_option` 的 `knowledge.lsp.mode` select 选项未接线（ADR-0002 §4.2，宿主侧）；④ 内存探测用 `tasklist` 解析（Windows），未接 Job Object 记账；⑤ golden 真值以 go/parser 生成（等价人工标注的可验证真值），测试文件按查询面口径（`is_test=0`）排除；⑥ **references recall 门槛未达标（0.7674 < 0.85）**：漏报 10/10 位于 `_test.go`——本装置下 gopls 对测试文件位置的定义/引用查询无返回（同位置 definition 裁决为空），根因（gopls 测试包加载 vs harness 限制）待查；工具面影响：测试文件内的引用在语义通道下会缺失（自动回落索引仅发生在零命中时，部分命中不会补量），修复方向见 Phase 5 前的测量轮。
-- 已知红（与本轮改动无关）：`cmd/aicli/commands` 包级 FAIL（无 `--- FAIL` 行；已定位为 `acp_mcp_host_test.go:563-566` 的 helper 进程 `os.Exit` 提前终止测试二进制——该用例的 ACP/MCP 子集单测单独运行通过；`cmd/contractgen` 的漂移为上一轮遗留，已修）。
+- 登记偏差与遗留：① tree-sitter 通道仅登记（未接入语法依赖）；② ~~LSP 语义通道未接入工具面~~ → **已接入**（引用类三工具 + `code_navigate` 按位置查定义；位置口径转换集中一处）；按名字的 definition 仍走索引（索引 definition 实测 P=1.0000）；③ ~~ACP `knowledge.lsp.mode` select 未接线~~ → **已接线**（ADR-0002 §4.2 宿主侧交付完成）；会话覆盖仅存内存、未进 chat-prefs 持久化（重启回配置默认）——与"绝不隐式改用户配置"取向一致，是否需要持久化待产品裁定；④ 内存探测用 `tasklist` 解析（Windows），未接 Job Object 记账；⑤ golden 真值以 go/parser 生成（等价人工标注的可验证真值），测试文件按查询面口径（`is_test=0`）排除；⑥ ~~references recall 门槛未达标~~ → **已达标（1.0000）**，原 0.7674 为裁决口径错误 + 索引字符串误报（已修，见上"口径修正记录"）；⑦ live 测量需**独占运行**：与其它包测试并发时出现过一次全空样本（semantic/builtin 均 0，疑资源竞争下 gopls 未就绪），复跑稳定通过——CI 中应串行执行 live 套件；**异常终止会遗留 gopls 进程**（本轮实测残留 1.5 GB + 0.4 GB 两个，导致后续 `go test` 编译期 OOM）——live 套件应带进程清理，CI 侧建议在 job 结束回收 gopls。
+- 已知红（与本轮改动无关）：`cmd/aicli/commands` 包级 FAIL（无 `--- FAIL` 行，测试二进制在并行批次中途被 `os.Exit` 型路径提前终止）。2026-09-30 复核：`-skip 'TestACPSessionMCPStdioEndToEnd|TestMCPHelperServerProcess'` 仍复现，故早前"helper 进程 os.Exit"的定位不完整（精确用例待定，`-v` 日志止于 `TestProfileCommand*` 批次之后）；本轮新增 5 例在该包**全量运行**中全部 PASS（日志可见），失败与本轮改动无关。（`cmd/contractgen` 的漂移为上一轮遗留，已修。）
 
 ---
 

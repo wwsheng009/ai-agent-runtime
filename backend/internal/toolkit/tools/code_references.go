@@ -129,6 +129,11 @@ func runCodeRefsQuery(ctx context.Context, base *codeToolBase, toolName, symbol,
 		annotateRefFallback(&env, kind)
 		return codeResult(env)
 	}
+	// Phase 4 语义通道：启用且可用时优先返回编译器级引用集合（不可用/失败/
+	// 零命中自动回落到索引路径，语义通道不改变"永不失败"契约）。
+	if env, ok := trySemanticRefsQuery(ctx, toolName, handle, sym, found, symbol, kind, limit, clamped); ok {
+		return codeResult(*env)
+	}
 	if len(refs) == 0 {
 		// 零命中：补一次 grep（索引引用是正则启发式，可能漏；grep 是兜底真值）。
 		result, _ := base.runGrep(ctx, grepParams)

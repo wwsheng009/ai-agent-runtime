@@ -333,6 +333,8 @@ func (m *MultieditTool) Execute(ctx context.Context, params map[string]interface
 		}, nil
 	}
 	recordFileWrite(ctx, absPath, encodedResult, "multiedit")
+	// Phase 5 变更源 1（edit hook）：落盘成功后同步标记（非阻塞入队）。
+	notifyFileChanges(ctx, absPath)
 
 	// 计算统计信息
 	linesBefore := len(strings.Split(originalContent, "\n"))

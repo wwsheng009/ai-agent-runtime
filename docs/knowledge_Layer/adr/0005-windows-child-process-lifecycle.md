@@ -1,6 +1,7 @@
 # ADR-0005: Windows 子进程树生命周期与复用既有 process guard
 
-- **Status**: Proposed
+- **Status**: Accepted
+- **Accepted**: 2026-09-30（项目 owner 授权代改，按最佳实践确认；Phase 4 实现与验证记录见 `../CHANGELOG.md` 同日条目）
 - **Date**: 2026-09-20
 - **Deciders**: 项目 owner
 - **Gate**: `Phase4-start`

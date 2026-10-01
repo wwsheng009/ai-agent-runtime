@@ -12103,9 +12103,11 @@ func contextOptionsFromRuntimeConfig(config *runtimecfg.RuntimeConfig, activatio
 // applyKnowledgeContextOptions 把知识层装配写入会话 agent options（06 §4
 // Phase 2 W7 激活切片；runtime-server 与 runtimeapi 共用本路径）：
 //
-//   - 仅当知识层已激活（Layer 非 nil）且 `knowledge.mode=on` 时新增两个 key；
-//     off（默认）/ shadow（ModeShadow 契约：只构建索引与统计、绝不注入
-//     prompt）/ 激活失败（nil）一律零新增，options 与改动前逐字节一致；
+//   - `knowledge.mode=on` 时新增两个 key；`knowledge.mode=shadow` 时**只**发布
+//     `context_knowledge_layer`（不设 mode）：句柄是编辑类工具的变更接收方
+//     （Phase 5 变更源 1），只让索引保鲜，不注入 prompt（contextmgr 在 mode=off
+//     时零调用零注入，ModeShadow 契约不变）；off（默认）/ 激活失败（nil）零新增，
+//     options 与改动前逐字节一致；
 //   - `context_knowledge_mode` 由 Layer.Mode() 经 contextmgr 映射（on→signals
 //     保守档；broad 留给后续校准切片显式开启）；
 //   - `context_knowledge_layer` 传 `*knowledge.Layer`（补齐 WorkspaceVersion
@@ -12120,6 +12122,9 @@ func applyKnowledgeContextOptions(options map[string]interface{}, activation *kn
 	}
 	mode := runtimecontext.KnowledgeModeForLayerMode(layer.Mode())
 	if mode == runtimecontext.KnowledgeModeOff {
+		if layer.Mode() == knowledge.ModeShadow {
+			options["context_knowledge_layer"] = layer
+		}
 		return
 	}
 	options["context_knowledge_mode"] = mode

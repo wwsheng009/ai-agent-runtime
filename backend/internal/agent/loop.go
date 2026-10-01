@@ -251,6 +251,21 @@ func (loop *ReActLoop) noteBudgetProgress(ctx context.Context, state TurnBudgetS
 	loop.config.OnBudgetProgress(ctx, state)
 }
 
+// syncKnowledgeExternalChanges 在 turn 边界运行一次知识层的外部变更校正
+// （Phase 5 变更源 2：git 状态/HEAD + 已索引文件 stat）。契约：尽力而为、
+// 快速返回、不得影响 turn——未挂载知识层时是 no-op，节流与失败降级都在
+// Layer 内（SyncExternalChanges）。
+func (loop *ReActLoop) syncKnowledgeExternalChanges(ctx context.Context) {
+	if loop == nil {
+		return
+	}
+	layer := knowledgeLayerForAgent(loop.agent)
+	if layer == nil {
+		return
+	}
+	_, _ = layer.SyncExternalChanges(ctx)
+}
+
 // observeToolResult 上报一次工具执行结果（Phase 1 shadow 拦截 grep/view）。
 // 契约同 LoopReActConfig.OnToolObserved：尽力而为、不得影响工具结果。
 func (loop *ReActLoop) observeToolResult(ctx context.Context, sessionID string, tc types.ToolCall, result toolExecutionResult) {
@@ -553,6 +568,12 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 		currentCtx, runCancel = agentWithTimeoutCause(currentCtx, loop.config.MaxRunDuration, errReActRunTimeout)
 		defer runCancel()
 	}
+
+	// Phase 5 变更源 2（外部变更校正）：turn 边界跑一次 git 状态/HEAD + 已索引
+	// 文件 stat 校正，让本 turn 的 Plan/复用判定建立在校正后的版本上
+	// （shell/exec 写盘、外部写盘、git checkout 都靠它兜底）。Layer 内部节流
+	// （最小间隔）且失败不阻断；未挂载知识层 / reader / off 是 no-op。
+	loop.syncKnowledgeExternalChanges(currentCtx)
 
 	// PR-4 §6.4 第 5 条：run 级 prompt cache 熔断器。经 ctx 下发而不落 loop
 	// 结构体，think() 的"请求前退避"与重试事件聚合读同一实例，串行/并发 run
@@ -5079,6 +5100,14 @@ func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToo
 	if strings.TrimSpace(sessionID) != "" {
 		ctx = toolctx.WithSessionID(ctx, sessionID)
 	}
+	// Join keys for side-channel facts emitted during tool execution (LSP
+	// requests): the call id and the owning turn. Absent ids stay unbound.
+	if callID := strings.TrimSpace(currentToolCallID); callID != "" {
+		ctx = toolctx.WithToolCallID(ctx, callID)
+	}
+	if turnID := strings.TrimSpace(TurnIDFromContext(ctx)); turnID != "" {
+		ctx = toolctx.WithTurnID(ctx, turnID)
+	}
 	ctx = toolctx.WithAgentDepth(ctx, depth)
 	// Anchor tool execution to the session-bound workspace so shell commands
 	// and relative path resolution run inside the bound project directory
@@ -5091,6 +5120,11 @@ func toolCallContext(ctx context.Context, toolCalls []types.ToolCall, currentToo
 	}
 	if readOnlyRoots := toolReadOnlyRootsForAgent(agent); len(readOnlyRoots) > 0 {
 		ctx = toolctx.WithReadOnlyRoots(ctx, readOnlyRoots)
+	}
+	// Phase 5 变更源 1（edit hook）：把会话知识层的变更接收方交给编辑类工具，
+	// 落盘成功后同步标记（非阻塞入队）。未挂载知识层时不注入（off 基线零副作用）。
+	if notifier := knowledgeChangeNotifierForAgent(agent); notifier != nil {
+		ctx = toolctx.WithFileChangeNotifier(ctx, notifier.MarkChanged)
 	}
 	if outputDir := generatedImageOutputDirForAgentSession(agent, sessionID); strings.TrimSpace(outputDir) != "" {
 		ctx = toolctx.WithGeneratedImageOutputDir(ctx, outputDir)
@@ -7576,7 +7610,7 @@ func spawnSubagentsToolDefinition(suspensionAvailable bool, agentCatalog string)
 							"tools_whitelist": map[string]interface{}{
 								"type":        "array",
 								"items":       map[string]interface{}{"type": "string"},
-								"description": "Optional child tool allowlist. Including shell exposes the tool, but each command remains subject to read-only command classification when read_only=true. In read-only tasks, write-like entries are automatically filtered instead of rejecting the whole child batch.",
+								"description": "Optional child tool allowlist. Tasks that must run commands (builds/tests/git/package managers) must include \"shell\"; omitting it hides the shell tool from the child and the run is wasted on tool-name guessing. Including shell exposes the tool, but each command remains subject to read-only command classification when read_only=true. In read-only tasks, write-like entries are automatically filtered instead of rejecting the whole child batch.",
 							},
 							"depends_on": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 							"patches": map[string]interface{}{

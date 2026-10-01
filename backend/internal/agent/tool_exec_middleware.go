@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolargs"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolexec"
@@ -128,6 +129,34 @@ func toolWorkspaceRootForAgent(agent *Agent) string {
 		return root
 	}
 	return ""
+}
+
+// knowledgeLayerForAgent returns the session knowledge layer handle stored under
+// `context_knowledge_layer` (nil when the option is unset or holds another type).
+// Used for Phase 5 change source 2: the turn-boundary external-change correction.
+func knowledgeLayerForAgent(agent *Agent) *knowledge.Layer {
+	if agent == nil || agent.config == nil {
+		return nil
+	}
+	layer, _ := agent.config.Options["context_knowledge_layer"].(*knowledge.Layer)
+	return layer
+}
+
+// knowledgeChangeNotifierForAgent returns the session knowledge layer's change
+// sink (Phase 5 change source 1: the edit hook) so edit-class tools can report
+// written files while the tool-call context is built.
+//
+// The assembly stores the handle under `context_knowledge_layer` (recommended
+// value: `*knowledge.Layer`, which satisfies both knowledge.Planner and
+// knowledge.ChangeNotifier). An unset option, a non-session agent, or a value
+// that only implements Planner yields nil: tools then report nothing, which is
+// exactly the mode=off baseline (zero side effects).
+func knowledgeChangeNotifierForAgent(agent *Agent) knowledge.ChangeNotifier {
+	if agent == nil || agent.config == nil {
+		return nil
+	}
+	notifier, _ := agent.config.Options["context_knowledge_layer"].(knowledge.ChangeNotifier)
+	return notifier
 }
 
 // toolAllowedRootsForAgent returns the session's admitted external roots

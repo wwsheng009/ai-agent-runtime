@@ -206,6 +206,8 @@ func (d *DownloadTool) Execute(ctx context.Context, params map[string]interface{
 		}, nil
 	}
 
+	// Phase 5 变更源 1（edit hook）：下载落盘后同步标记（工作区外路径由队列过滤）。
+	notifyFileChanges(ctx, absPath)
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,

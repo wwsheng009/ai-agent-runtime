@@ -3,6 +3,7 @@ package migrate
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -18,7 +19,27 @@ type Migration struct {
 	UpSQL   string
 }
 
+// ErrSchemaNewer 表示库里的 schema 版本高于本二进制已知的最新迁移——库是
+// **更新的二进制**写下的，降级打开不安全（旧代码不认识新列/新表，会在任意
+// 读写上失败，甚至写坏新结构）。
+var ErrSchemaNewer = errors.New("schema is newer than this binary")
+
+// LatestVersion 返回迁移集中的最高版本号（空集返回 0）。
+func LatestVersion(migrations []Migration) int {
+	latest := 0
+	for _, m := range migrations {
+		if m.Version > latest {
+			latest = m.Version
+		}
+	}
+	return latest
+}
+
 // Apply runs migrations against the given database.
+//
+// 已应用版本**高于**本二进制已知最新版本时拒绝执行（04 §5 Phase 5 交付 6 /
+// 风险 R12"版本拒绝：新 DB 不被旧代码打开"）：这是所有 store 的公共收口点，
+// 版本拒绝在这里做一次，六个 store 一起受益。
 func Apply(ctx context.Context, db *sql.DB, migrations []Migration) error {
 	if db == nil {
 		return fmt.Errorf("database is nil")
@@ -32,6 +53,11 @@ func Apply(ctx context.Context, db *sql.DB, migrations []Migration) error {
 	applied, err := loadApplied(ctx, db)
 	if err != nil {
 		return err
+	}
+	if maxApplied := maxVersion(applied); maxApplied > LatestVersion(migrations) {
+		return fmt.Errorf(
+			"%w: database schema v%d is newer than this binary (v%d); refusing to open — use the newer binary or restore a backup",
+			ErrSchemaNewer, maxApplied, LatestVersion(migrations))
 	}
 	sort.Slice(migrations, func(i, j int) bool {
 		return migrations[i].Version < migrations[j].Version
@@ -49,6 +75,17 @@ func Apply(ctx context.Context, db *sql.DB, migrations []Migration) error {
 		}
 	}
 	return nil
+}
+
+// maxVersion 返回已应用版本集合中的最大值（空集返回 0）。
+func maxVersion(applied map[int]bool) int {
+	max := 0
+	for version := range applied {
+		if version > max {
+			max = version
+		}
+	}
+	return max
 }
 
 func ensureTable(ctx context.Context, db *sql.DB) error {

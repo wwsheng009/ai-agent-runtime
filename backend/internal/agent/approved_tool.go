@@ -62,6 +62,10 @@ func approvedToolCallContext(ctx context.Context, agent *Agent) context.Context 
 	if readOnlyRoots := toolReadOnlyRootsForAgent(agent); len(readOnlyRoots) > 0 {
 		ctx = toolctx.WithReadOnlyRoots(ctx, readOnlyRoots)
 	}
+	// Phase 5 变更源 1：已批准的工具重放走同一条编辑标记路径（与 toolCallContext 同口径）。
+	if notifier := knowledgeChangeNotifierForAgent(agent); notifier != nil {
+		ctx = toolctx.WithFileChangeNotifier(ctx, notifier.MarkChanged)
+	}
 	return ctx
 }
 
