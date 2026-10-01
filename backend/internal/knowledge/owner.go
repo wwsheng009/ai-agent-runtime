@@ -154,6 +154,28 @@ func LockHolderPID(cfg Config) int {
 	return holder
 }
 
+// LockRecordPID 返回锁文件里记录的 pid，**不做过期/存活判定**
+// （0 = 锁不存在或内容不可解析）。
+//
+// 它只服务诊断与指引文案：锁超过 maxLockAge 会被视为陈旧，但持有者进程可能
+// 仍在——Windows 下锁文件被该进程打开，os.Remove 会因共享冲突失败，接管不了
+// （acquireOwnership 因此降级为 reader）。此时 LockHolderPID 返回 0，而本函数
+// 仍能回答"是谁占着"。
+//
+// 分工：LockHolderPID 是仲裁口径（决定 writer/reader），本函数是纯诊断口径，
+// 不得用于任何权限/角色判定。
+func LockRecordPID(cfg Config) int {
+	body, err := os.ReadFile(cfg.storePath() + ".lock")
+	if err != nil {
+		return 0
+	}
+	var payload lockPayload
+	if err := json.Unmarshal(body, &payload); err != nil || payload.PID <= 0 {
+		return 0
+	}
+	return payload.PID
+}
+
 // readOnly 报告 store 是否必须以只读方式打开。
 func (o *ownership) readOnly() bool { return o == nil || o.state != RoleOwner }
 

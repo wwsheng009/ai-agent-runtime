@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -90,6 +91,34 @@ type StatusReport struct {
 	// 空串 = 无降级。它存在的原因：状态面最怕静默——零值必须能被解释。
 	DegradedReason string `json:"degraded_reason,omitempty"`
 	GeneratedAt    int64  `json:"generated_at"`
+}
+
+// UnavailableStatus 构造"已配置但不可用"的状态载荷（mode=on/shadow 但 store 打不开）。
+//
+// 语义：Mode 报告配置意图（配置里写了什么），Enabled=false 表示本进程用不了它；
+// DegradedReason 用与工具面 fallback 相同的 token 前缀（index_unavailable，见
+// toolkit/tools 的 codeFallbackIndexUnavailable）+ 原始错误，使状态面与工具面
+// 对同一次"索引不可用"给出同一口径的解释。
+//
+// 存在动机（Phase 5 E2E 登记②）：接入失败此前只落在 debug 日志里，状态面退化成
+// mode=off 的最小载荷——"配置开了却没生效"无法从状态面看出来，排障只能靠猜
+// （现场：schema v3 库对新二进制只读打开被拒，web 状态面却报 off）。
+func UnavailableStatus(cfg Config, reason string) StatusReport {
+	cfg = cfg.Normalize()
+	report := StatusReport{
+		Mode:        cfg.Mode,
+		Enabled:     false,
+		Role:        RoleNone,
+		Workspace:   cfg.Workspace,
+		GeneratedAt: time.Now().UnixMilli(),
+	}
+	if cfg.Mode != ModeOff && strings.TrimSpace(cfg.Workspace) != "" {
+		report.DBPath = cfg.storePath()
+	}
+	if r := strings.TrimSpace(reason); r != "" {
+		report.DegradedReason = "index_unavailable: " + r
+	}
+	return report
 }
 
 // WatchStatus 是交付 1 第三类变更源（fsnotify 文件系统监听）的本进程视角。

@@ -6,6 +6,29 @@
 
 ---
 
+## 2026-10-01 — 收口轮（五）：知识层"不可用"状态面统一 + `knowledge migrate`（P0 现场收尾）
+
+### Changed
+
+- `internal/knowledge`：新增 `UnavailableStatus`（"已配置但不可用"载荷：mode=配置值、enabled=false、degraded_reason 带 `index_unavailable` 前缀 + 原始原因）与 `LockRecordPID`（诊断口径：锁超龄时仍能读出占用者 pid；仲裁口径 `LockHolderPID` 语义不变）。
+- `cmd/aicli`：`ChatSession.KnowledgeError` 记录接入失败原因（TUI/ACP 两条路径同口径）；`/web/api/knowledge/status` 在 Knowledge=nil 且原因非空时返回上述降级载荷，不再退化成 mode=off；`aicli knowledge status` 失败时同样打印该载荷 + `knowledge migrate` 指引。
+- 新增 `aicli knowledge migrate`（`--workspace/--json/--no-index/--timeout`）：显式做一次 writer 打开（迁移 schema + 默认等待索引重建）；写锁被占时给出持有者 pid 与处置建议（不抢占）。
+
+### Verified
+
+- 单测：`internal/knowledge`（UnavailableStatus / LockRecordPID）+ `cmd/aicli/commands`（web 降级载荷、migrate off/owner 路径、CLI 契约）全绿。
+- 真机（新二进制 `aicli-p0.exe`，工作区 `E:\projects\ai\ai-agent-runtime`）：
+  - `knowledge status`：`mode on` + `degraded index_unavailable: … schema v3 …` + migrate 提示（此前为裸错误 + usage dump）；
+  - `knowledge migrate`：`无法迁移：锁文件仍记录 pid 39272（锁已超龄但无法接管…）`（此前为无指引的原始错误）；
+  - 全新工作区 `knowledge migrate --no-index`：owner + `schema v4` + 行数汇总，exit 0；
+  - `/web/api/knowledge/status`：`mode=on, enabled=false, degraded_reason=index_unavailable: … schema v3 …`（此前 `mode=off` 最小载荷）。
+
+### Notes
+
+- 现场发现并登记：Windows 下锁文件被老进程打开时 `os.Remove` 因共享冲突失败 → 新二进制无法接管（降级 reader），且锁超 `maxLockAge=2h` 被判"陈旧"——`LockHolderPID` 返回 0 与"锁仍被占用"并存；指引文案改用 `LockRecordPID` 兜底。`maxLockAge` 与长会话寿命的关系留作后续观察项（本轮不改仲裁语义）。
+
+---
+
 ## 2026-10-01 — 收口轮（四）：`codeParamInt` 字符串数字（登记项收尾）
 
 ### Changed

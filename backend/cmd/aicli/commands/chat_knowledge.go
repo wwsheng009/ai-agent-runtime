@@ -177,8 +177,13 @@ func attachChatKnowledge(session *ChatSession) {
 	}
 	act, err := acquireChatKnowledge(&runtimeConfig.Knowledge, workspace)
 	if err != nil {
+		// 失败原因必须留在会话上：状态面（/web/api/knowledge/status）据此把
+		// "配置开了但用不了"如实报成 degraded_reason，而不是静默退化成 off
+		// （Phase 5 E2E 登记②）。
+		session.KnowledgeError = err.Error()
 		logpkg.Debugf("knowledge: activation for %q skipped: %v", workspace, err)
 		return
 	}
 	session.Knowledge = act
+	session.KnowledgeError = ""
 }

@@ -72,12 +72,24 @@ func HandleChatWebAPIKnowledge(w http.ResponseWriter, r *http.Request) {
 // chatWebKnowledgeStatusReportFor 读取当前会话的知识层状态；会话缺失 /
 // mode=off（Activation 为 nil）时返回 mode=off 的最小载荷
 // （knowledge.Activation.Status 本身 nil-safe，这里只兜底 session 为 nil 的路径）。
+//
+// 配置开了但接入失败（Knowledge=nil 且 KnowledgeError 非空）时返回
+// "已配置但不可用"的降级载荷（mode=配置值 + degraded_reason），不得退化成
+// mode=off——两者必须能从状态面区分（Phase 5 E2E 登记②）。
 func chatWebKnowledgeStatusReportFor(ctx context.Context, session *ChatSession) (knowledge.StatusReport, error) {
 	if session == nil {
 		var activation *knowledge.Activation
 		return activation.Status(ctx)
 	}
-	return session.Knowledge.Status(ctx)
+	if session.Knowledge != nil {
+		return session.Knowledge.Status(ctx)
+	}
+	if reason := strings.TrimSpace(session.KnowledgeError); reason != "" {
+		runtimeConfig := loadRuntimeToolConfig(session.Config, session)
+		return knowledge.UnavailableStatus(runtimeConfig.Knowledge, reason), nil
+	}
+	var activation *knowledge.Activation
+	return activation.Status(ctx)
 }
 
 // chatWebKnowledgeSubPath 返回 /web/api/knowledge 之后的子路径（无首尾斜杠）。

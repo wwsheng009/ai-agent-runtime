@@ -979,6 +979,11 @@ func (h *acpSessionHost) attachSessionKnowledge(hostSess *acpHostSession, worksp
 	runtimeConfig := loadRuntimeToolConfig(h.cfg, hostSess.chat)
 	act, err := acquireChatKnowledge(&runtimeConfig.Knowledge, ws)
 	if err != nil {
+		// 与 TUI 路径同口径：失败原因留在 ChatSession 上，状态面据此报告
+		// "已配置但不可用"而不是退化成 off（Phase 5 E2E 登记②）。
+		if hostSess.chat != nil {
+			hostSess.chat.KnowledgeError = err.Error()
+		}
 		logpkg.Debugf("knowledge: ACP activation for %q skipped: %v", ws, err)
 		return
 	}
@@ -991,6 +996,7 @@ func (h *acpSessionHost) attachSessionKnowledge(hostSess *acpHostSession, worksp
 	// 已提前返回 nil，行为与无知识层一致。
 	if hostSess.chat != nil {
 		hostSess.chat.Knowledge = act
+		hostSess.chat.KnowledgeError = ""
 	}
 	hostSess.knowledge = act
 	hostSess.knowledgeWorkspace = ws

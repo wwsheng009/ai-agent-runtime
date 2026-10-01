@@ -128,3 +128,14 @@
 验证：`go build ./...` OK；`go test -count=1 ./internal/toolkit/tools/ ./internal/tools/` 全绿（toolkit/tools 46s）。
 
 **2026-10-01 收口**：ADR-0004 陈旧度分级、引用索引漏报根因、§6.3 加权检索三项全部结案（见上）；`codeParamInt` 字符串数字已补齐（`case string` + `TestCodeParamIntAcceptsNumericStrings`，13 子例）。
+
+## 8. P0 现场收尾（2026-10-01，收口轮（五））
+
+来自 Phase 5 E2E 的两条登记（"配置开了却报 off" + "迁移无指引"）已落地：
+
+| 项 | 落点 | 验证 |
+|---|---|---|
+| 状态面区分"已配置但不可用"（mode=配置值 + `degraded_reason=index_unavailable:…`） | `knowledge.UnavailableStatus`；`chat.go`（`KnowledgeError`）；`web_knowledge_handlers.go`；`knowledge.go`（status 失败路径） | 单测 2 例 + 真机 web/CLI 双面 |
+| `aicli knowledge migrate`（一次 writer 打开；锁被占给出 pid 与建议） | `knowledge.go`（`newKnowledgeMigrateCommand`/`runKnowledgeMigrate`）；`knowledge.LockRecordPID` | 单测 4 例 + 真机（被占/新库两路径） |
+
+现场新发现（登记为观察项）：Windows 下老进程打开锁文件时 `os.Remove` 共享冲突失败 → 新二进制无法接管（reader），且锁超 `maxLockAge=2h` 被判陈旧——两者叠加使 `LockHolderPID=0` 与"锁仍被占"并存；指引文案以 `LockRecordPID` 兜底。仲裁语义未改。

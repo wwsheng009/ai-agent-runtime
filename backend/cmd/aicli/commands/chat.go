@@ -74,6 +74,11 @@ type ChatSession struct {
 	// knowledge.mode=off（默认）时恒为 nil——所有消费点都必须接受 nil，
 	// 这条不变量是"off 与无知识层逐字节一致"的落点。
 	Knowledge *knowledge.Activation
+	// KnowledgeError 记录本会话知识层接入失败的原因（配置 on/shadow 但 store
+	// 打不开等；空串 = 未失败）。Knowledge 为 nil 且本字段非空时，状态面必须
+	// 如实报告"已配置但不可用"（degraded_reason），不得退化成 mode=off——
+	// 配置开了却没生效必须能被状态面解释（Phase 5 E2E 登记②）。
+	KnowledgeError string
 	// KnowledgeLSPModeOverride 是 ACP `knowledge.lsp.mode` select 的会话级覆盖
 	// （ADR-0002 §4.2；空串 = 跟随配置，取值 off|self）。与模型/思考档一致，
 	// 从下一个 turn 生效：buildLocalChatAgent 构造运行时配置副本时应用它，
