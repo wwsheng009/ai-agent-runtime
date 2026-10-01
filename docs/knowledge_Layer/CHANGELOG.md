@@ -6,6 +6,25 @@
 
 ---
 
+## 2026-10-01 — Phase 6 切片 1：Context Compiler 编译语义内核（`knowledge/compiler.go`）
+
+### Added
+
+- `knowledge/compiler.go`：Phase 6 的语义内核（纯函数、无 IO、可复算）——
+  - 信任等级闭集（03 §14.3：SYSTEM/TRUSTED_TOOL/CODE_INTELLIGENCE/UNTRUSTED_TOOL/USER_CONTENT/CODE_COMMENT/GENERATED）+ `context_items.trust` 落库映射（high|medium|low|untrusted；未知等级 fail closed 到 untrusted）+ `Injectable()`（不可信工具输出永不注入）；
+  - 来源闭集与冲突优先级（03 §14.4；权重直接复用 04 §4.4 `SourceWeight` 闭集）+ `ResolveConflicts`（同目标同类型只保留最高优先级，其余进 dropped 且原因可查；独立通道 memory/artifact/fact 不参与该序）；
+  - `CompilePlan`：复用项 → `CompiledItem`（item_type/ref_id/source/trust/version/confidence/reason/stale/tokens/explanation，即 `context_items` 的语义镜像）；stale（空版本 / `#pendingN` / 版本不匹配 / 版本未知）绝不进入可注入集合；置信度下限过滤；预算截断按确定性排序（confidence↓ → tokens↑ → ref_id↑）；
+  - `RenderDataBlock`：03 §14.5 规则 2/4 的 data block 包裹（来源 + 版本入块头；内容中的 `</data` 中性化；属性转义）；
+  - `IsReuseItemStale`：复用项 stale 的**规范判据**（与 contextmgr 注入前第二道防线同语义；切片 3 收敛到同一实现）。
+- `knowledge/compiler_test.go`：8 例测试（信任映射 / 优先级序 / stale 判据 / 过滤与丢弃原因 / 可解释性字段 / 预算确定性 / 冲突解决 / data block 与转义）。
+
+### Notes
+
+- **文档不一致登记**（以 04 为准）：supplement 14 §14.4 的冲突序写作「LSP > 适配器 > Tree-sitter > FTS5 > Regex」，而 04 §4.4 的 `SourceWeight` 闭集里 Regex(0.55) > FTS(0.40)。本实现按 04（落地口径事实源）执行，`compiler.go` 头注已说明。
+- Phase 6 切片计划（8 片）：①编译内核（本切片）②compile 层缓存（`cache_entries`；命中 p95 < 50ms / 未命中 < 200ms）③`contextmgr` LayerPlan knowledge 层 + 注入接线（off 可逆）④`contextpack` `knowledge.Provider`（只读）⑤防注入 / 信任等级 / 冲突解决接线 ⑥`context_snapshots`/`items` 写入与可解释性 ⑦Observation Compressor 复用 `compactruntime` ⑧验收门槛可复现化 + E2E。
+
+---
+
 ## 2026-10-01 — watcher 删除事件缺口修复 + `watch=on` 真机时延验证（登记③ 收口）
 
 ### Fixed

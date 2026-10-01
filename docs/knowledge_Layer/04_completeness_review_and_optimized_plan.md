@@ -782,7 +782,7 @@ knowledge:
 
 **回滚**：provider 开关关闭。
 
-**状态**：未开始
+**状态**：**切片 1 落地（2026-10-01）**——语义内核 `knowledge/compiler.go`（信任等级闭集 + 冲突优先级 + stale/下限/预算过滤 + `context_items` 语义镜像 + data block 渲染）+ 8 例测试；切片计划（8 片）见 CHANGELOG。前置（Phase 2/3/5 验收）已满足；Phase 5 的 on-mode A/B 与端到端 p95 仍待测量轮（与 Phase 6 的 A/B 合并跑）。
 
 ### Phase 7 — Semantic Retrieval（可选，后置）
 

@@ -465,7 +465,9 @@ DoD（完成判据）：① 零迁移即可读写三表；② 同 target 重复�
 - **文件落点**：新增 `contextpack/knowledge_provider.go`、`knowledge/compiler.go`；修改 `contextmgr/manager.go`、`contextpack/context_pack.go`。
 - **验收门槛**：相同任务上下文 token 下降 ≥ 25% 且任务成功率不降（A/B，样本 ≥ 20）；`stale` item 注入数 = 0；compiler 缓存命中 p95 < 50ms、未命中 p95 < 200ms。
 - **回滚**：provider 开关关闭。
-- **状态**：未开始。
+- **状态**：**切片 1 落地（2026-10-01）**——语义内核 `knowledge/compiler.go`（信任等级闭集 + `context_items.trust` 映射 + 来源冲突优先级（复用 04 §4.4 权重）+ `CompilePlan`（stale/下限/预算/可解释性字段）+ `RenderDataBlock` 防注入包裹）+ 8 例测试；切片计划（8 片）见 CHANGELOG。
+
+> **切片 1 落地（2026-10-01）**：语义内核 `knowledge/compiler.go`（纯函数、无 IO、可复算）——信任等级 7 级闭集 + 落库映射 + `Injectable()`；来源冲突优先级与 `ResolveConflicts`；`CompilePlan` 产出 `context_items` 语义镜像（source/version/trust/reason/stale/tokens/explanation）；`IsReuseItemStale` 规范判据；`RenderDataBlock`（03 §14.5 规则 2/4：data block 包裹 + 内容中性化 + 属性转义）。验证：8 例新测试 + `internal/knowledge` 全包。**登记**：supplement 14 §14.4 与 04 §4.4 在 Regex/FTS 先后上不一致，按 04 执行（`compiler.go` 头注说明）。
 
 ### Phase 7 — Semantic Retrieval（可选，后置）
 
