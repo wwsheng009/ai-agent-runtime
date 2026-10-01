@@ -28,7 +28,11 @@ const KnowledgeVersion = 1
 // `var output bytes.Buffer` 之类局部变量当成符号，同目录下同名同签名的局部变量
 // 因此算出同一个 stable_key（实测 5080 行被合并 / 1992 个键），既污染轻索引，
 // 又把"身份冲突"的噪声灌进 adapter_conflict 事件。
-const AdapterVersion = "builtin/3"
+// builtin/4：排除"无关键字的方法声明"（Go/TS 接口体、抽象方法）被误抽成
+// kind=call 引用——实测 planner.go 的接口方法声明行被当成调用点，污染
+// code_callers 结果（评审 P0 item 4 的索引侧修复）。升级版本号同时让 builtin/3
+// 写出的旧索引自然失效并触发全量重建，避免半份错误的引用表继续服役。
+const AdapterVersion = "builtin/4"
 
 // Confidence 表达一行的产生方式。它是稳定有序的枚举，调用方可单次比较完成过滤。
 //

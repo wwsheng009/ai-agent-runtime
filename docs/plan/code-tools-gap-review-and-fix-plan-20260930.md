@@ -18,6 +18,7 @@
    - `code_callers(EvaluatePlan)` / `code_references(EvaluatePlan)` 返回 5 条全部在 `planner_test.go`，漏掉生产调用点 `backend/internal/knowledge/planner.go:213`（`return EvaluatePlan(in, nodes, opts.Config), nil`，已用 view 复核存在）。
    - `classifyStoreError` 同样漏掉 `planner.go:211`；而 `planner.go` 其余调用点（204/209/249/259/290/294/336/347/358）均可查到。
    - 信封无 `snapshot_ts/staleness_seconds/completeness`，模型无法察觉结果不完整 → 影响面分析可能得出"没有生产调用者"的错误结论（ADR-0004 §1.2/D1 明令防范）。
+   - **2026-10-01 结案**：漏报不可复现于当前代码（提取层 / 全新索引 / 增量重写 / 生产库四处实证绑定正常）——现场为陈旧索引快照；仍活着的索引侧缺陷（接口方法声明被误抽成 `kind=call`，`planner.go:136/142`）已由 `builtin/4` 修复。详见 CHANGELOG「收口轮」。
 2. **ADR-0004「陈旧索引分级」整体未落地（走查）**
    - 无 staleness/snapshot/completeness 字段（`code_common.go:108-120`）；注册仅单一 `code_tools off|on`（`knowledge/config.go:28-33`、`manager.go:445-448`）；无描述追加、无 `knowledge.tools.stale_reader` 逃生舱；`RegisterGroup` 不存在。
    - `06` Phase 3 登记注记与 CHANGELOG 未登记该缺口。
@@ -108,7 +109,7 @@
 仍未落地（后续轮次）：
 
 1. **ADR-0004 陈旧度分级**：信封 `snapshot_ts` / `staleness_seconds` / `completeness`、按陈旧度分级注册、description 追加、`knowledge.tools.stale_reader` 逃生舱、`RegisterGroup` 机制。
-2. **引用索引漏报根因**：`EvaluatePlan` / `classifyStoreError` 生产调用点缺失（疑似 refs 刷新/陈旧快照链路），需索引侧排查 + 全量重建验证；并考虑 refs precision（`Fatalf` 字符串、接口声明行）改进。
+2. ~~**引用索引漏报根因**~~ **（2026-10-01 结案）**：现场为陈旧索引快照（当前代码/全新索引/增量重写/生产库均绑定正常）；索引侧修复 = `builtin/4` 接口方法声明守卫（`planner.go:136/142` 的伪调用点）+ `AdapterVersion` 升级强制全量重建；`Fatalf` 字符串误报已于 Phase 4 `insideStringOrComment` 修复。见 CHANGELOG「收口轮」。
 3. **FTS exact-name 加权与限定名（`knowledge.Plan`）查询支持**。
 4. **`code_inspect` 的 view 去重提示**（`unchanged: ...`）作为 `content` 返回的语义（本轮未处理）。
 

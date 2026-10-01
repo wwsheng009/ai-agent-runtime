@@ -6,6 +6,34 @@
 
 ---
 
+## 2026-10-01 — 收口轮：P0 引用索引漏报结案（根因 + builtin/4 索引侧修复）
+
+### Findings（根因）
+
+- 评审 P0「引用索引漏报（`EvaluatePlan` 生产调用点缺失）」**在当前代码不可复现**，三处实证：
+  - 提取层：`planner.go:211/213` 的 return 行调用（复合字面量内 / 多值返回）被 builtin 提取器正确抽出（探针实测）；
+  - 全链路：全新索引 + 3 轮增量重写后 `FindRefs` 全部绑定（`TestReferenceBindingStableAcrossIncrementalRewrites`）；
+  - 生产库（`.aicli/knowledge/knowledge.db`，原始只读直查）：`planner.go:213 → EvaluatePlan`、`211 → classifyStoreError` 均已绑定。
+- 结论：评审现场是**陈旧索引快照**（当时库尚未重建），其不可察觉正是 ADR-0004「陈旧度信号」缺失的后果——该分级属本轮收口另一笔欠账（进行中）。
+- **仍活着的索引侧缺陷（本轮已修）**：接口方法声明行被误抽成 `kind=call` 引用——`planner.go:136`（`Planner` 接口）/ `142`（`ExplorationNodeReader` 接口）实证；这些"伪调用点"会污染 `code_callers`。
+
+### Changed
+
+- `backend/internal/knowledge/adapter_builtin.go`：新增 `interfaceMethodDeclPattern`（无关键字方法声明整行：Go/TS 接口体、抽象方法；要求 `name(params)` 后**必须有返回类型子句**——裸调用 `compute(x)` 不匹配），在调用抽取前整行跳过。
+- `backend/internal/knowledge/version.go`：`AdapterVersion` `builtin/3 → builtin/4`（提取语义变化必须触发全量重建；同时让 builtin/3 写出的旧引用表自然失效——这是"陈旧索引现场"的根治手段）。
+
+### Verified
+
+- 新增 3 例回归（`refs_regression_test.go`）：接口声明不成为引用（Go/TS，含同名真调用正例）；return 行调用必抽出（复合字面量/多值返回）；增量重写 3 轮后绑定稳定 + 接口声明行不入引用表。
+- `go test ./internal/knowledge/ -count=1` 全绿（含 golden set 精度/召回门槛）。
+
+### Notes
+
+- 遗留（登记）：Java/C# 风格的 `Type Name(...);` 抽象方法声明未纳入守卫——文本层无法与 `System.out.println(x);` 这类真调用可靠区分，贸然排除会掉召回；由 LSP/tree-sitter 语义通道承担。
+- 评审 item 4 的 `Fatalf` 字符串误报已在 Phase 4 `insideStringOrComment` 修复（本轮复核仍成立）。
+
+---
+
 ## 2026-10-01 — Phase 6 切片 7：验收门槛可复现化 + 验收报告（Phase 6 收口）
 
 ### Added

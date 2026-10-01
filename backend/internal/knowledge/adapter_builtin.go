@@ -240,6 +240,18 @@ var callPattern = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
 // declPrefix 用于排除"声明本身被当成调用"的行。
 var declPrefix = regexp.MustCompile(`^\s*(?:pub\s+)?(?:async\s+)?(?:func|def|fn|function|class|interface|struct|type)\b`)
 
+// interfaceMethodDeclPattern 识别"无关键字的方法声明"整行（Go/TS 接口体、抽象方法）：
+//
+//	Plan(ctx context.Context, in PlanInput) (Plan, error)
+//	search(q: string): Promise<Hit[]>;
+//
+// 这些行没有 func/def 关键字，declPrefix 挡不住，会被 callPattern 误抽成
+// kind=call 引用——实测 planner.go 的 `Planner` / `ExplorationNodeReader` 接口
+// 方法声明行被当成调用点，污染 code_callers 的结果（评审 P0 item 4）。
+// 裸调用语句 `compute(x)` 不匹配：模式要求 name(params) 之后**必须有返回类型子句**
+// （括号列表 / 类型 token / `: Type`），且整行只有这些内容。
+var interfaceMethodDeclPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\[\]]*\])?\s*\([^()]*\)\s*(?:\([^()]*\)|[A-Za-z_][A-Za-z0-9_\.\[\]\*<>]*|:\s*[^;]+)\s*;?\s*$`)
+
 // callKeywords 是永远不会被当作被调用符号的关键字。
 var callKeywords = map[string]bool{
 	"if": true, "for": true, "while": true, "switch": true, "return": true, "func": true,
@@ -309,6 +321,10 @@ func (a builtinAdapter) Extract(ctx context.Context, file FileRecord, content []
 			break
 		}
 		if matchedDecl || declPrefix.MatchString(line) {
+			continue
+		}
+		if interfaceMethodDeclPattern.MatchString(trimmed) {
+			// 无关键字的方法声明（接口体/抽象方法）不是引用。
 			continue
 		}
 
