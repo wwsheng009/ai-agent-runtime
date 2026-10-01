@@ -21,6 +21,7 @@ func (r *eventRecorder) observe(event Event) {
 	r.mu.Unlock()
 }
 
+// snapshot returns a copy of the recorded events (safe across goroutines).
 func (r *eventRecorder) snapshot() []Event {
 	r.mu.Lock()
 	defer r.mu.Unlock()

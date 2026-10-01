@@ -176,11 +176,9 @@ LSP 的收益路径只有一条主链路 + 一个可选工具面：
 - 16 次 gopls 崩溃的根因是**整机内存耗尽导致的外部终止**（Windows `Resource-Exhaustion-Detector`），
   不是 LSP 池缺陷；缓解（重启窗口 + 崩溃归因）已落地，见 plan §5.8「崩溃根因定位」。
 - pyright / typescript 合计 112 次请求、0 条诊断——缺二进制是当前**最大的可行动降级源**。
-- **口径漂移（本次评估发现）**：`lsp_fallback_ratio` 存在两套分母——
-  基线报告（`internal/lsp/baseline/baseline_report.go:35-37`、`scripts/analyze-lsp-baseline.py`）
-  用 `degraded / requests` = **0.5923**（526/888）；
-  运行时读数（`internal/lsp/metrics.go:172`）用 `degraded / attempted`（排除 no_server）= **0.7215**（526/729）。
-  plan §3.3/§5.8 定义的是 attempted。同一指标在页面与基线报告会显示两个数，建议收敛（见 §6 建议 4）。
+- **口径已统一（2026-10-01，O3）**：基线报告（`internal/lsp/baseline/baseline_report.go`）与
+  Python 脚本改用 `degraded / attempted`（排除 no_server）= **0.7215**（526/729），与运行时读数
+  （`internal/lsp/metrics.go:172`）一致；历史 requests 口径值 0.5923 仅作对比注记。
 
 ---
 
@@ -224,19 +222,35 @@ LSP 的收益路径只有一条主链路 + 一个可选工具面：
 ### 6.2 建议（按性价比排序，阈值仍待积累）
 
 1. **补装 pyright / typescript-language-server（或显式从池中移除）**：112 次请求、0 诊断、纯成本；
-   新构建已能把原因细分为 `binary_missing` 并给出可行动提示。
+   新构建已能把原因细分为 `binary_missing` 并给出可行动提示。**已实施（O1，2026-10-01）**：
+   池级预检跳过缺失成员，状态面保留 `unavailable + binary_missing` 原因，手动 `StartServer`/`Restart`
+   可失效缓存重试。
 2. **压低冷视图 no_fresh 的 1s 等待**：新构建 20/61 次请求仍打满预算（占其总等待 74%）。
    现有快速失败启发式（宽限已授予 + 连接从未发布 + 无快照）未覆盖「连接曾发布、但该路径冷」的场景；
    建议先积累 ≥1 周新构建样本，再决定是否放宽判据（避免把热连接的慢分析误判为冷）。
    （窗口外进展：提交 `a6a98435` 已把快速失败改为**路径级信号**，效果待新窗口复算。）
 3. **评估默认开启策略**：当前只有 9% 会话 / 17% 编辑在收益面内。若考虑默认开启，需同时评估
    gopls 冷启动等待与内存压力（本窗口 16 次崩溃为整机内存耗尽的外部终止）。
-4. **修复两处数据管道口径**（本次评估发现，均为低风险改动，但属代码变更，未在评估中执行）：
-   - `internal/lsp/eventbridge/observer.go` 的请求投影补 `appended_diag_bytes` / `appended_note_bytes` /
-     `appended_empty_bytes`（`runtimeobserve/projector.go:151-157` 已白名单，但事件载荷 0/888 样本）；
-   - 统一 `lsp_fallback_ratio` 分母为 attempted（`metrics.go` 已是该口径；基线报告与脚本仍用 requests）。
+4. **修复两处数据管道口径**——**已实施（O2/O3，2026-10-01）**：
+   - `internal/lsp/eventbridge/observer.go` 请求投影已补 `appended_diag_bytes` / `appended_note_bytes` /
+     `appended_empty_bytes`，`cold_fast_fail` / `attempted_members` 一并落盘；
+   - `lsp_fallback_ratio` 已统一为 attempted 分母（Go 基线包 + Python 脚本 + 自验样例同步）。
 5. **继续积累后再标定阈值**（ADR-0003 D4）：closure eligible 目前仅 3 条、新构建纯样本仅 61 请求；
    建议 closure eligible ≥20、新构建样本 ≥1 周后再固化告警阈值。
+
+### 6.3 已实施（2026-10-01，方案见 `docs/plan/lsp-benefit-optimization-plan-20261001.md`）
+
+| 项 | 内容 | 测试证据 |
+| --- | --- | --- |
+| O1 | 缺二进制池级预检：缺失成员不进入请求路径；状态面保留原因；手动重启失效缓存重试 | `TestRegistrySkipsUnavailableMembers` |
+| O2 | 事件投影补 `appended_diag/note/empty_bytes` | `observer_join_test` |
+| O3 | `lsp_fallback_ratio` 统一 attempted 分母（Go 基线包 + Python 脚本 + 自验样例） | `baseline_test` + `--selftest` |
+| O4 | 请求事件新增 `cold_fast_fail` 归因 | `TestColdRetryAfterGraceTimeout` |
+| O5 | 请求事件新增 `attempted_members`（多成员观测，仅 >1 落盘） | `observer_join_test` |
+| O6 | 空结果块 compact（默认）+ 修正字面 `\n`；配置 `diagnostics.emptyStyle` | `TestRenderDiagnosticsEmptyStyle` |
+
+效果待新窗口复算（预期：pyright/ts 112 次请求 → 0；fallback(attempted) 0.7215 → ~0.671；
+clean 空块 ~130B → ~60B；`cold_fast_fail` 可直接统计）。
 
 ---
 
@@ -247,11 +261,11 @@ LSP 的收益路径只有一条主链路 + 一个可选工具面：
 2. **小样本**：injected 40、closure eligible 3、新构建 61 请求；所有比例只作方向判读。
 3. **窗口跨构建 + 实机测试流量**：旧构建事件缺 `reason_category`/指纹（365 条未分类降级），
    部分流量来自优化轮的真机验证脚本（被测场景本身），会污染比例。
-4. **`appended_*_bytes` 拆分字段未落盘**：metrics 里有、事件载荷里没有（0/888 样本），
-   因此本报告的字节构成是从 `outcome + appended_bytes` 反推的近似，不是直接读数。
+4. **`appended_*_bytes` 拆分字段未落盘**——**已修复（O2，2026-10-01）**；本报告窗口内的字节构成
+   仍是反推值（历史事件不回填），新窗口起可直接读数。
 5. **`first_publish_ms` 窗口内 0 样本**：冷启动延迟仍 `n/a`（未采集，不是 0）。
    （窗口外进展：提交 `654822f6` 已让 `first_publish_ms` 在单会话状态面可见，事件落盘覆盖待复算。）
-6. **fallback 两套分母**（§4.3），引用该指标时必须写明分母。
+6. **fallback 两套分母**——**已统一（O3，2026-10-01）**为 attempted（0.7215）。
 7. **诊断正文不落盘**：无法评估诊断质量（误报/漏报）、也无法判断模型是否采纳了诊断建议。
 
 ---

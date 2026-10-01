@@ -33,8 +33,12 @@ func Rows(stats Stats) []Row {
 		diagHit = ratioText(stats.DiagHit, stats.Injected, "")
 	}
 	fallback := "n/a（窗口内无 LSP 请求）"
-	if stats.Requests > 0 {
-		fallback = ratioText(stats.Degraded, stats.Requests, "")
+	if attempted := stats.Requests - stats.NoServer; attempted > 0 {
+		// 与运行时读数（internal/lsp/metrics.go）同口径：分母排除 no_server，
+		// 否则"没有任何成员认领"会稀释 fallback（plan §3.3/§5.8）。
+		fallback = ratioText(stats.Degraded, attempted, "")
+	} else if stats.Requests > 0 {
+		fallback = "n/a（attempted 为 0：全部请求均无 server 认领）"
 	}
 	p95 := "n/a"
 	if stats.LatencyP95MS != nil {
@@ -84,7 +88,7 @@ func Rows(stats Stats) []Row {
 			Metric:     "lsp_fallback_ratio",
 			Value:      fallback,
 			Window:     window,
-			Samples:    fmt.Sprintf("degraded %d / requests %d（no_server %d、clean %d）", stats.Degraded, stats.Requests, stats.NoServer, stats.Clean),
+			Samples:    fallbackSamples(stats),
 			Conclusion: "待标定（需人工判读）",
 			Date:       date,
 		},
@@ -121,6 +125,16 @@ func Rows(stats Stats) []Row {
 			Date:       date,
 		},
 	}
+}
+
+// fallbackSamples 描述 fallback 的分母构成；attempted 为 0 时不再打印
+// "degraded 0 / attempted 0"（值本身是 n/a，样本行应解释原因）。
+func fallbackSamples(stats Stats) string {
+	if attempted := stats.Requests - stats.NoServer; attempted > 0 {
+		return fmt.Sprintf("degraded %d / attempted %d（no_server %d、clean %d）",
+			stats.Degraded, attempted, stats.NoServer, stats.Clean)
+	}
+	return fmt.Sprintf("no attempted requests（no_server %d）", stats.NoServer)
 }
 
 // coldStartText 输出冷启动延迟 P95（服务启动→首个诊断发布）；未采集输出 n/a + 原因。

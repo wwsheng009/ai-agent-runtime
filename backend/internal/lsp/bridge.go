@@ -67,6 +67,10 @@ type Outcome struct {
 	// It lets the offline baseline compute edit→diagnostic closure without
 	// persisting diagnostic text (observability plan §3.3).
 	DiagFingerprint string
+	// ColdFastFail records that at least one member used the reduced
+	// cold-path retry budget instead of the full diagnostics budget
+	// (perf attribution; never rendered into the model-facing text).
+	ColdFastFail bool
 }
 
 // BridgeOptions carries the injectable seams of the facade. Logger feeds both
@@ -76,6 +80,9 @@ type BridgeOptions struct {
 	Logger   Logger
 	Dial     DialFunc
 	Observer Observer
+	// LookPath is the executable preflight seam (nil = exec.LookPath);
+	// Dial-based transports skip the preflight and are always available.
+	LookPath func(string) (string, error)
 	// SessionIDFromContext 从工具执行 ctx 解析会话归属（可选）：runtime-server
 	// 等宿主共享一个工具管理器服务多会话，事件必须按执行上下文归属，否则
 	// observe 侧无法关联到具体会话。返回空串表示该事件无会话归属（生命周期
@@ -101,7 +108,7 @@ func NewBridgeWithOptions(cfg Config, root string, opts BridgeOptions) *Bridge {
 	observer := composeObservers(opts.Observer, logObserver(logger))
 	return &Bridge{
 		cfg:                   cfg,
-		registry:              NewRegistry(cfg, root, RegistryOptions{Dial: opts.Dial, Logger: opts.Logger, Observer: observer, Now: opts.Now}),
+		registry:              NewRegistry(cfg, root, RegistryOptions{Dial: opts.Dial, Logger: opts.Logger, Observer: observer, Now: opts.Now, LookPath: opts.LookPath}),
 		logger:                logger,
 		observer:              opts.Observer,
 		metrics:               NewMetrics(),
@@ -319,6 +326,7 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 			if cold < remaining {
 				remaining = cold
 			}
+			outcome.ColdFastFail = true
 		} else if grace := time.Duration(cfg.ColdStartGraceMS) * time.Millisecond; grace > 0 &&
 			!client.HasSnapshot(path) && client.TakeColdGrace(path) {
 			remaining += grace
@@ -369,11 +377,12 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 		items = append(items, item)
 	}
 	rendered := RenderDiagnostics(items, RenderOptions{
-		File:     path,
-		Servers:  outcome.Servers,
-		MaxItems: cfg.MaxItems,
-		MaxChars: cfg.MaxChars,
-		Scope:    cfg.Scope,
+		File:         path,
+		Servers:      outcome.Servers,
+		MaxItems:     cfg.MaxItems,
+		MaxChars:     cfg.MaxChars,
+		Scope:        cfg.Scope,
+		EmptyCompact: cfg.EmptyStyleValue() == EmptyStyleCompact,
 	})
 	outcome.Items = SortDiagnostics(items)
 	outcome.Fresh = true
@@ -541,6 +550,8 @@ func (b *Bridge) observeRequest(ctx context.Context, trigger, path string, outco
 		AppendedNoteBytes:  noteBytes,
 		AppendedEmptyBytes: emptyBytes,
 		ReasonCategory:     reasonCategory,
+		ColdFastFail:       outcome.ColdFastFail,
+		AttemptedMembers:   len(outcome.Servers),
 	}
 	if b.metrics != nil {
 		b.metrics.Observe(record)
@@ -571,6 +582,11 @@ func (b *Bridge) observeRequest(ctx context.Context, trigger, path string, outco
 			OmittedItems:    record.OmittedItems,
 			OmittedByChars:  record.OmittedByChars,
 			ReasonCategory:  reasonCategory,
+			AppendedDiagBytes:  record.AppendedDiagBytes,
+			AppendedNoteBytes:  record.AppendedNoteBytes,
+			AppendedEmptyBytes: record.AppendedEmptyBytes,
+			ColdFastFail:       record.ColdFastFail,
+			AttemptedMembers:   record.AttemptedMembers,
 		})
 	}
 }

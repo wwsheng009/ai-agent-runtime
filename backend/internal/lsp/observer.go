@@ -53,6 +53,17 @@ type Event struct {
 	AppendedBytes  int    `json:"appended_bytes,omitempty"`
 	OmittedItems   int    `json:"omitted_items,omitempty"`
 	OmittedByChars int    `json:"omitted_by_chars,omitempty"`
+	// Append breakdown（观测方案 §3.3）：只有 AppendedDiagBytes 是诊断价值，
+	// note/empty 是协议噪声，两者分开落盘后才能直接复算收益。
+	AppendedDiagBytes  int `json:"appended_diag_bytes,omitempty"`
+	AppendedNoteBytes  int `json:"appended_note_bytes,omitempty"`
+	AppendedEmptyBytes int `json:"appended_empty_bytes,omitempty"`
+	// ColdFastFail 表示本次请求对至少一个成员使用了路径级冷快速失败预算
+	// （perf 归因；不进入模型文本）。
+	ColdFastFail bool `json:"cold_fast_fail,omitempty"`
+	// AttemptedMembers 是本次请求实际尝试的成员数（多成员工作区 >1；
+	// 0 表示没有成员认领）。仅在 >1 时落盘，避免单成员载荷膨胀。
+	AttemptedMembers int `json:"attempted_members,omitempty"`
 	// ReasonCategory is the low-sensitivity category of the degrade reason
 	// (Kind == EventRequest); the free-form reason never leaves the process.
 	ReasonCategory string `json:"reason_category,omitempty"`

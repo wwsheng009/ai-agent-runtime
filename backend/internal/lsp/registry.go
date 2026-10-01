@@ -3,6 +3,7 @@ package lsp
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,6 +20,10 @@ type RegistryOptions struct {
 	ClientVersion string
 	// Now is the injectable clock for restart-window tests.
 	Now func() time.Time
+	// LookPath is the executable preflight seam (nil = exec.LookPath). It is
+	// consulted only for process-spawning transports: Dial-based transports
+	// (tests, custom hosts) are always considered available.
+	LookPath func(string) (string, error)
 }
 
 // Registry owns the pool of language server clients for one workspace root.
@@ -49,6 +54,61 @@ type registryEntry struct {
 	lastRestartAt time.Time
 	startedAt     time.Time
 	readyAt       time.Time
+	// availability 是缺二进制预检的一次性缓存（manual restart 会失效重查）。
+	availChecked bool
+	available    bool
+	availErr     string
+}
+
+// checkAvailable resolves and caches the executable preflight. Dial-based
+// transports (tests, custom hosts) are always considered available; the
+// explicit LookPath seam wins over both. The cache is invalidated by manual
+// StartServer/Restart so a fresh install is picked up without a new session.
+func (e *registryEntry) checkAvailable() bool {
+	e.mu.Lock()
+	if e.availChecked {
+		available := e.available
+		e.mu.Unlock()
+		return available
+	}
+	e.mu.Unlock()
+
+	available, reason := true, ""
+	if e.parent.opts.Dial == nil {
+		lookPath := e.parent.opts.LookPath
+		if lookPath == nil {
+			lookPath = exec.LookPath
+		}
+		if _, err := lookPath(e.spec.Command); err != nil {
+			available = false
+			reason = fmt.Sprintf("lsp: start %s: executable %q not found", e.spec.Name, e.spec.Command)
+		}
+	}
+
+	e.mu.Lock()
+	e.availChecked = true
+	e.available = available
+	e.availErr = reason
+	e.mu.Unlock()
+	return available
+}
+
+// availabilityReason returns the cached preflight failure text ("" when the
+// member is available).
+func (e *registryEntry) availabilityReason() string {
+	e.checkAvailable()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.availErr
+}
+
+// resetAvailability invalidates the cached preflight for an explicit retry.
+func (e *registryEntry) resetAvailability() {
+	e.mu.Lock()
+	e.availChecked = false
+	e.available = false
+	e.availErr = ""
+	e.mu.Unlock()
 }
 
 // NewRegistry builds the pool from config. Servers start lazily on first use
@@ -104,6 +164,9 @@ func (r *Registry) StartAll(ctx context.Context) {
 		return
 	}
 	for _, server := range r.Servers() {
+		if !server.available() {
+			continue
+		}
 		server.ensureStarted(ctx)
 	}
 }
@@ -134,6 +197,12 @@ func (r *Registry) ServersForPath(path string) []*Server {
 	var matched []*Server
 	for _, server := range r.Servers() {
 		if !server.entry.spec.HandlesFile(path) {
+			continue
+		}
+		if !server.available() {
+			// 缺二进制预检：该成员在本次会话内不再尝试启动；状态面
+			// （lsp_servers / /lsp status / web）仍展示原因，manual
+			// StartServer/Restart 会失效缓存重试。
 			continue
 		}
 		server.ensureStarted(context.Background())
@@ -167,6 +236,7 @@ func (r *Registry) Restart(ctx context.Context, name string) error {
 	if entry == nil {
 		return fmt.Errorf("lsp: unknown server %q", name)
 	}
+	entry.resetAvailability()
 	entry.stop(ctx)
 	entry.mu.Lock()
 	entry.restarts++
@@ -192,7 +262,9 @@ func (r *Registry) StartServer(ctx context.Context, name string) error {
 		return fmt.Errorf("lsp: unknown server %q", name)
 	}
 	// A manual start is an explicit retry: clear the recorded first-start
-	// failure so entry.start is willing to try again.
+	// failure and the preflight cache (the binary may have been installed
+	// after the session started) so entry.start is willing to try again.
+	entry.resetAvailability()
 	entry.mu.Lock()
 	if entry.client == nil && !entry.starting {
 		entry.lastErr = ""
@@ -235,6 +307,9 @@ func (s *Server) Client() *Client {
 	defer s.entry.mu.Unlock()
 	return s.entry.client
 }
+
+// available reports whether the member passed the executable preflight.
+func (s *Server) available() bool { return s.entry.checkAvailable() }
 
 // Status is the merged lifecycle record of the member.
 func (s *Server) Status() ServerStatus {
@@ -287,6 +362,12 @@ func (s *Server) Status() ServerStatus {
 	case lastErr != "":
 		status.State = StateUnavailable
 		status.Reason = lastErr
+	case !entry.checkAvailable():
+		// 预检失败：成员从未启动，必须报 unavailable + 可行动原因，
+		// 而不是默认的 starting（否则状态页会误导用户等待）。
+		status.State = StateUnavailable
+		status.Reason = entry.availabilityReason()
+		status.LastError = status.Reason
 	case entry.parent.isStopped():
 		status.State = StateStopped
 		status.Reason = "shut down"

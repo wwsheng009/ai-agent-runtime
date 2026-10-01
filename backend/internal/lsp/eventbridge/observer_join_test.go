@@ -20,6 +20,8 @@ func TestObserverProjectsJoinKeysFingerprintsAndReasonCategory(t *testing.T) {
 		ToolCallID: "call-1", TurnID: "turn-1",
 		Path: "/tmp/secret.go", PathFingerprint: "fp-path", DiagFingerprint: "fp-diag",
 		ReasonCategory: "wait_timeout",
+		AppendedDiagBytes: 120, AppendedNoteBytes: 30,
+		ColdFastFail: true, AttemptedMembers: 2,
 	})
 	observer(runtimelsp.Event{
 		Kind: runtimelsp.EventServerState,
@@ -50,6 +52,15 @@ func TestObserverProjectsJoinKeysFingerprintsAndReasonCategory(t *testing.T) {
 	}
 	if request["reason_category"] != "wait_timeout" {
 		t.Fatalf("request reason_category = %v, want wait_timeout", request["reason_category"])
+	}
+	if request["appended_diag_bytes"] != 120 || request["appended_note_bytes"] != 30 {
+		t.Fatalf("append breakdown = %#v", request)
+	}
+	if _, hasEmpty := request["appended_empty_bytes"]; hasEmpty {
+		t.Fatalf("zero append breakdown must be omitted: %#v", request)
+	}
+	if request["cold_fast_fail"] != true || request["attempted_members"] != 2 {
+		t.Fatalf("perf attribution = %#v", request)
 	}
 
 	state := pub.events[1].Payload

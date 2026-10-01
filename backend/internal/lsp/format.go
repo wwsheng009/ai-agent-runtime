@@ -15,6 +15,9 @@ type RenderOptions struct {
 	MaxItems int
 	MaxChars int
 	Scope    DiagnosticScope
+	// EmptyCompact drops scope/servers from the clean-result marker
+	// (diagnostics.emptyStyle=compact; zero value keeps the full block).
+	EmptyCompact bool
 }
 
 // RenderResult is the append-only text plus the truncation facts so callers can
@@ -90,10 +93,17 @@ func RenderDiagnostics(items []Diagnostic, opts RenderOptions) RenderResult {
 	if len(items) == 0 {
 		// Empty result: one self-closing line confirms "checked, no problems"
 		// without paying the full header+footer of a diagnostic block.
-		text := fmt.Sprintf(
-			`<lsp_diagnostics file="%s" count="0" scope="%s" servers="%s"/>\n`,
-			escapeAttr(opts.File), scope, escapeAttr(servers),
-		)
+		text := ""
+		if opts.EmptyCompact {
+			// 解释型字符串：真实换行（历史实现是原始字符串，落成字面 "\n"，
+			// 与非空块的 header 不一致；随 compact 一并修正）。
+			text = fmt.Sprintf("<lsp_diagnostics file=\"%s\" count=\"0\"/>\n", escapeAttr(opts.File))
+		} else {
+			text = fmt.Sprintf(
+				"<lsp_diagnostics file=\"%s\" count=\"0\" scope=\"%s\" servers=\"%s\"/>\n",
+				escapeAttr(opts.File), scope, escapeAttr(servers),
+			)
+		}
 		return RenderResult{Text: text}
 	}
 

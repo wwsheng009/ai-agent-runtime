@@ -79,6 +79,14 @@ const (
 	DefaultMaxTrackedDocs = 128
 )
 
+// EmptyStyle values for DiagnosticsConfig.EmptyStyle. compact keeps the
+// "checked, no problems" signal while dropping the redundant scope/servers
+// attributes; full preserves the pre-optimization block verbatim.
+const (
+	EmptyStyleCompact = "compact"
+	EmptyStyleFull    = "full"
+)
+
 // DiagnosticsConfig mirrors the `diagnostics.*` keys from docs/lsp 03 §4.
 type DiagnosticsConfig struct {
 	// Scope is "all" (crush behavior) or "changed" (baseline diff).
@@ -127,6 +135,18 @@ type DiagnosticsConfig struct {
 	// from burning the full budget on every edit. 0/unset = DefaultColdRetryMS;
 	// negative disables (always wait the full budget).
 	ColdRetryMS int `yaml:"coldRetryMs,omitempty" json:"coldRetryMs,omitempty"`
+	// EmptyStyle controls the clean-result inline block: "compact" (default)
+	// emits only the self-closing marker, "full" also carries scope/servers.
+	// Only the empty branch changes; diagnostic blocks are untouched.
+	EmptyStyle string `yaml:"emptyStyle,omitempty" json:"emptyStyle,omitempty"`
+}
+
+// EmptyStyleValue resolves the effective empty-block style (default compact).
+func (d DiagnosticsConfig) EmptyStyleValue() string {
+	if strings.EqualFold(strings.TrimSpace(d.EmptyStyle), EmptyStyleFull) {
+		return EmptyStyleFull
+	}
+	return EmptyStyleCompact
 }
 
 // DefaultDiagnosticsConfig returns the documented defaults. Scope defaults to

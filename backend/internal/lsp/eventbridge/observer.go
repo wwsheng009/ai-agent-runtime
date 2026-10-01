@@ -70,6 +70,22 @@ func Observer(bus runtimeevents.Publisher, opts Options) runtimelsp.Observer {
 			if event.DiagFingerprint != "" {
 				payload["diag_fingerprint"] = event.DiagFingerprint
 			}
+			// Append breakdown（§3.3）：诊断正文与协议噪声分列，0 不落盘。
+			if event.AppendedDiagBytes > 0 {
+				payload["appended_diag_bytes"] = event.AppendedDiagBytes
+			}
+			if event.AppendedNoteBytes > 0 {
+				payload["appended_note_bytes"] = event.AppendedNoteBytes
+			}
+			if event.AppendedEmptyBytes > 0 {
+				payload["appended_empty_bytes"] = event.AppendedEmptyBytes
+			}
+			if event.ColdFastFail {
+				payload["cold_fast_fail"] = true
+			}
+			if event.AttemptedMembers > 1 {
+				payload["attempted_members"] = event.AttemptedMembers
+			}
 			bus.Publish(runtimeevents.Event{
 				Type:      runtimeevents.EventLSPRequestFinished,
 				SessionID: sessionID,

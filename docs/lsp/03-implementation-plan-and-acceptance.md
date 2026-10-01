@@ -76,7 +76,13 @@
 | `diagnostics.tool_enabled` | 是否注册可选工具 `lsp_diagnostics`（W7） | 默认 `false`：内联闭环是主反馈环，独立工具只作补充路径 |
 | `diagnostics.cold_start_grace_ms` | 冷视图（server 从未发布过任何诊断）时对每个路径**一次**的有界延长（2026-10-01 落地） | 默认 `1500`，负值关闭；每个路径每 server 实例只授予一次，首个发布后不再授予（不拖慢稳态与忽略目录的重复编辑） |
 | `diagnostics.cold_retry_ms` | 已知冷路径的快速失败预算：该路径无快照且本次等待已超过该预算 → 后续编辑只等这个值（2026-10-01 落地，第九轮改为路径级判定） | 默认 `250`，负值关闭（始终等满 `wait_ms`）；该路径**首个发布**即清除"已知冷"标记 |
+| `diagnostics.empty_style` | clean 结果的内联标记样式：`compact`（仅自闭合标记） / `full`（附带 scope/servers 属性）（2026-10-01 落地） | 默认 `compact`：空结果只保留"已检查无问题"信号，去掉固定冗余属性；配置可回退 `full` |
 | `servers[].empty_publish_conclusive` | 该 server 的空发布是否具结论性 | 默认 `false`；`gopls` 预设为 `true`，其余保守等待 |
+
+缺二进制预检（2026-10-01 落地，非配置项）：池成员在首次路由前做一次可执行文件解析；缺失成员
+**不进入请求路径**（不再产生逐次 `degraded_binary_missing`），状态面（`lsp_servers` / `/lsp status` / web）
+仍显示 `unavailable + binary_missing` 原因；手动 `StartServer` / `Restart` 会失效预检缓存并重试
+（用户可能在会话中途安装）。Dial 注入的传输（测试/自定义宿主）跳过预检，视为可用。
 
 验收要求：上述每一项都能**在不改代码**的情况下改变行为（配置化本身是验收项 A5）。
 

@@ -45,6 +45,10 @@ type RequestRecord struct {
 	// ReasonCategory is the low-sensitivity degrade category (plan §3.3);
 	// empty for non-degraded requests and for legacy events.
 	ReasonCategory string `json:"reason_category,omitempty"`
+	// ColdFastFail / AttemptedMembers 是 perf 归因：路径级冷快速失败是否生效、
+	// 本次实际尝试了几个成员（多成员工作区）。
+	ColdFastFail     bool `json:"cold_fast_fail,omitempty"`
+	AttemptedMembers int  `json:"attempted_members,omitempty"`
 }
 
 // MetricsSnapshot 是读数快照：fallback 分母为 attempted（排除 no_server），

@@ -405,10 +405,20 @@ def build_rows(stats):
         if stats["injected"] > 0
         else "n/a（窗口内无 injected 请求）"
     )
+    # 与运行时读数（internal/lsp/metrics.go）同口径：分母排除 no_server，
+    # 否则"没有任何成员认领"会稀释 fallback（plan §3.3/§5.8）。
+    attempted = stats["requests"] - stats["no_server"]
     fallback_ratio = (
-        ratio_text(stats["degraded"], stats["requests"])
-        if stats["requests"] > 0
-        else "n/a（窗口内无 LSP 请求）"
+        ratio_text(stats["degraded"], attempted)
+        if attempted > 0
+        else "n/a（窗口内无 LSP 请求）" if stats["requests"] == 0
+        else "n/a（attempted 为 0：全部请求均无 server 认领）"
+    )
+    fallback_samples = (
+        f"degraded {stats['degraded']} / attempted {attempted}"
+        f"（no_server {stats['no_server']}、clean {stats['clean']}）"
+        if attempted > 0
+        else f"no attempted requests（no_server {stats['no_server']}）"
     )
     if stats["sessions"] == 0:
         append_ratio = "n/a（窗口内无 LSP 活跃会话）"
@@ -449,8 +459,7 @@ def build_rows(stats):
             "metric": "lsp_fallback_ratio",
             "value": fallback_ratio,
             "window": window,
-            "samples": f"degraded {stats['degraded']} / requests {stats['requests']}"
-                       f"（no_server {stats['no_server']}、clean {stats['clean']}）",
+            "samples": fallback_samples,
             "conclusion": "待标定（需人工判读）",
             "date": date,
         },
@@ -562,6 +571,8 @@ def selftest():
             failures.append(f"coverage: got {rows['lsp_edit_coverage_ratio']}")
         if rows["lsp_append_bytes_ratio"] != ratio_text(100, 1100):
             failures.append(f"append ratio: got {rows['lsp_append_bytes_ratio']}")
+        if rows["lsp_fallback_ratio"] != ratio_text(1, 3):
+            failures.append(f"fallback: got {rows['lsp_fallback_ratio']}")
         if rows["lsp_closure_ratio"] != ratio_text(1, 1):
             failures.append(f"closure: got {rows['lsp_closure_ratio']}")
         if rows["lsp_cold_first_publish_p95"] != "1234 ms":
@@ -571,7 +582,7 @@ def selftest():
             for failure in failures:
                 print("  -", failure)
             return 1
-        print("selftest OK（4 请求 / 覆盖率 1.0 / P50 7ms / 追加比 100/1100 / closure 1.0）")
+        print("selftest OK（4 请求 / 覆盖率 1.0 / P50 7ms / 追加比 100/1100 / fallback 1/3 / closure 1.0）")
         return 0
 
 

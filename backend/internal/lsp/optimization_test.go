@@ -613,7 +613,8 @@ func TestColdRetryAfterGraceTimeout(t *testing.T) {
 		c.Diagnostics.ColdRetryMS = 100
 		c.Diagnostics.EmptyConfirmMS = 40
 	})
-	bridge := NewBridgeWithOptions(cfg, dir, BridgeOptions{Dial: fake.dial()})
+	recorder := &eventRecorder{}
+	bridge := NewBridgeWithOptions(cfg, dir, BridgeOptions{Dial: fake.dial(), Observer: recorder.observe})
 	ctx := context.Background()
 	t.Cleanup(func() { bridge.Stop(ctx) })
 
@@ -633,6 +634,15 @@ func TestColdRetryAfterGraceTimeout(t *testing.T) {
 	if secondElapsed > 400*time.Millisecond {
 		t.Fatalf("second wait = %v, want the reduced cold retry (~100ms)", secondElapsed)
 	}
+	coldFails := 0
+	for _, event := range recorder.snapshot() {
+		if event.Kind == EventRequest && event.ColdFastFail {
+			coldFails++
+		}
+	}
+	if coldFails != 1 {
+		t.Fatalf("cold_fast_fail events = %d, want exactly the second edit", coldFails)
+	}
 
 	// A publish ends the cold state and restores the normal fast path. The
 	// file content never changed, so the document version is still 1.
@@ -645,6 +655,74 @@ func TestColdRetryAfterGraceTimeout(t *testing.T) {
 	}
 	if thirdElapsed > 300*time.Millisecond {
 		t.Fatalf("third wait = %v, want the normal early-accept path", thirdElapsed)
+	}
+}
+
+// TestRenderDiagnosticsEmptyStyle pins the clean-result marker: compact drops
+// scope/servers (diagnostics.emptyStyle default), full keeps the legacy
+// attributes for callers that need them.
+func TestRenderDiagnosticsEmptyStyle(t *testing.T) {
+	compact := RenderDiagnostics(nil, RenderOptions{File: "main.go", Servers: []string{"gopls"}, EmptyCompact: true})
+	if want := "<lsp_diagnostics file=\"main.go\" count=\"0\"/>\n"; compact.Text != want {
+		t.Fatalf("compact empty = %q, want %q", compact.Text, want)
+	}
+	full := RenderDiagnostics(nil, RenderOptions{File: "main.go", Servers: []string{"gopls"}})
+	if want := "<lsp_diagnostics file=\"main.go\" count=\"0\" scope=\"all\" servers=\"gopls\"/>\n"; full.Text != want {
+		t.Fatalf("full empty = %q, want %q", full.Text, want)
+	}
+}
+
+// TestRegistrySkipsUnavailableMembers pins the executable preflight: a member
+// whose binary is missing is not routed (no spawn attempt, no request event),
+// stays visible as unavailable with the actionable binary-missing reason, and
+// an available member keeps the normal route.
+func TestRegistrySkipsUnavailableMembers(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestFile(t, dir, "main.go", "package main\n")
+	cfg := testConfig(t, func(c *Config) {
+		c.Servers = []ServerSpec{{Name: "missing", Command: "definitely-missing-lsp", Extensions: []string{".go"}}}
+	})
+	missing := func(string) (string, error) { return "", errors.New("executable not found") }
+
+	registry := NewRegistry(cfg, dir, RegistryOptions{LookPath: missing})
+	if got := registry.ServersForPath(path); len(got) != 0 {
+		t.Fatalf("unavailable member must not be routed, got %d", len(got))
+	}
+	statuses := registry.Statuses()
+	if len(statuses) != 1 || statuses[0].State != StateUnavailable {
+		t.Fatalf("statuses = %#v, want one unavailable member", statuses)
+	}
+	if !strings.Contains(statuses[0].Reason, "not found") {
+		t.Fatalf("reason = %q, want actionable binary-missing text", statuses[0].Reason)
+	}
+
+	available := func(cmd string) (string, error) { return cmd, nil }
+	registry2 := NewRegistry(cfg, dir, RegistryOptions{LookPath: available})
+	if got := registry2.ServersForPath(path); len(got) != 1 {
+		t.Fatalf("available member must be routed, got %d", len(got))
+	}
+
+	// Dial 注入的传输跳过预检（测试/自定义宿主一律视为可用）：即使 LookPath
+	// 失败也必须正常路由。
+	dialRegistry := NewRegistry(cfg, dir, RegistryOptions{
+		Dial: func(context.Context, ServerSpec, string, Logger) (*DialResult, error) {
+			return nil, errors.New("dial stub")
+		},
+		LookPath: missing,
+	})
+	if got := dialRegistry.ServersForPath(path); len(got) != 1 {
+		t.Fatalf("Dial-injected transport must skip the executable preflight, got %d", len(got))
+	}
+
+	// Bridge 层：预检失败的成员既不认领文件，也不改动编辑回执。
+	bridge := NewBridgeWithOptions(cfg, dir, BridgeOptions{LookPath: missing})
+	ctx := context.Background()
+	t.Cleanup(func() { bridge.Stop(ctx) })
+	if bridge.Handles(path) {
+		t.Fatalf("preflight-skipped member must not claim files")
+	}
+	if out := bridge.AppendToResult(ctx, "edit\n", []string{path}); out != "edit\n" {
+		t.Fatalf("append must stay untouched, got %q", out)
 	}
 }
 

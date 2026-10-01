@@ -78,6 +78,10 @@ func TestAnalyzeFixtureMatchesScriptNumbers(t *testing.T) {
 	if got := rows["lsp_append_bytes_ratio"].Value; got != "0.0909" {
 		t.Fatalf("append ratio = %q, want 0.0909", got)
 	}
+	// fallback 分母是 attempted（requests - no_server）：1/3，而不是 1/4。
+	if got := rows["lsp_fallback_ratio"].Value; got != "0.3333" {
+		t.Fatalf("fallback = %q, want 0.3333（attempted 分母）", got)
+	}
 	if stats.ClosureEligible != 1 || stats.ClosureClosed != 1 {
 		t.Fatalf("closure counters = %d/%d, want 1/1", stats.ClosureEligible, stats.ClosureClosed)
 	}
