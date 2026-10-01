@@ -6,6 +6,25 @@
 
 ---
 
+## 2026-10-01 — Phase 5 真实会话远程 E2E（交付 1/3 的生产路径验证）
+
+### Verified
+
+- 会话 `session_20261001102354_qsfZLi0z`（runtime-server `:49747`；`knowledge.mode=on` + `code_tools=on`，`watch` 默认 off；真实仓库 5142 文件 / 5.5 万符号，同期另有 4 个会话在改同一工作区）经 `POST /web/api/invoke` 驱动 7 轮；**三方证据逐轮对齐**（模型自述 ↔ 工具结果信封 `session_history.sqlite` ↔ 库内状态 `knowledge.db` 只读查询）：
+  - A1 只读工具面 `source=index`（`code_search` / `code_inspect`；`ObserveVersion` 行 271–298）；
+  - A2 **edit hook 端到端**：模型 `write` 落盘 → 索引自动 +1 文件/符号（无需显式 reindex）→ `code_search.source=index`；
+  - A3 **判定点校正（变更源 2）**：会话外写盘 → 首查 `source=fallback`（`degraded=true` + `reason=no_index_hit`，grep 兜底仍给出正确路径/行号）→ turn 结束后入库 → 同查询翻转为 `source=index`；
+  - A4 删除传播：删后首查 1 命中（≤1 turn 残留）→ 下一轮 0 命中 + 库内软删除（`files_active` 回到 5013）；
+  - A5 时延观测：索引命中回合 4.1–8.3s/轮；fallback 回合 87.1s（13×）。
+- 报告（含逐轮证据表与复现方式）：[`reports/phase5_real_session_e2e_report.md`](reports/phase5_real_session_e2e_report.md)。
+
+### Notes
+
+- 登记：① 知识层状态面（含 `StatusReport.Watch`）未经 web/observe 暴露，真实会话无法直读 mode/watch/queue；② `/web/api/turn` 的 usage 在含 reasoning 的回合出现不自洽读数（待核，本报告只用墙钟与库事实）；③ `watch=on` 场景未在本轮验证（需重启 runtime-server）；④ on-mode A/B（≥20 任务）与端到端 p95 统计门槛仍未做——三项统计门槛仍以 `acceptance_phase5_test.go` 进程内复现为准。
+- 两枚探针文件已在验证后删除并完成软删除传播；工作树未留残余。
+
+---
+
 ## 2026-10-01 — Phase 5 切片 8 实施：交付 3 收尾（未稳定版本 token 不得参与复用判定）
 
 ### Changed
