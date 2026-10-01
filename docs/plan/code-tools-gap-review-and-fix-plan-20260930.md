@@ -110,7 +110,7 @@
 
 1. **ADR-0004 陈旧度分级**：信封 `snapshot_ts` / `staleness_seconds` / `completeness`、按陈旧度分级注册、description 追加、`knowledge.tools.stale_reader` 逃生舱、`RegisterGroup` 机制。
 2. ~~**引用索引漏报根因**~~ **（2026-10-01 结案）**：现场为陈旧索引快照（当前代码/全新索引/增量重写/生产库均绑定正常）；索引侧修复 = `builtin/4` 接口方法声明守卫（`planner.go:136/142` 的伪调用点）+ `AdapterVersion` 升级强制全量重建；`Fatalf` 字符串误报已于 Phase 4 `insideStringOrComment` 修复。见 CHANGELOG「收口轮」。
-3. **FTS exact-name 加权与限定名（`knowledge.Plan`）查询支持**。
+3. ~~**FTS exact-name 加权与限定名（`knowledge.Plan`）查询支持**~~ **（2026-10-01 结案）**：跨任务路径改加权检索（exact > prefix > contains）+ 限定名/路径符号归一化；未新建 FTS 表（LIKE + CASE + `escapeLike`），`EvaluatePlan` 判定语义不变。见 CHANGELOG「收口轮（续）」。
 4. **`code_inspect` 的 view 去重提示**（`unchanged: ...`）作为 `content` 返回的语义（本轮未处理）。
 
 ## 7. 修复轮 2（2026-10-01）

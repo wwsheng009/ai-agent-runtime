@@ -6,6 +6,26 @@
 
 ---
 
+## 2026-10-01 — 收口轮（续）：跨任务探索候选加权检索 + 限定名归一化（§6.3 结案）
+
+### Changed
+
+- `backend/internal/knowledge/store_sqlite_exploration_read.go`：跨任务路径（TaskID/SessionID 均为空）的 `Target` 从**精确匹配**改为**加权检索**（exact=0 > prefix=1 > contains=2，权重优先，其后沿用 `last_used_at DESC（NULL 在后）→ created_at DESC → id ASC`，SQL LIMIT 在排序后生效）；任务/会话路径保持 `n.target` 精确过滤与既有排序不变。
+- 新增 `explorationLookupKeys` 归一化（规则全文注释在代码内）：全名与末段都参与匹配——`path#symbol`（三键）、路径（全名 + basename）、限定名（全名 + 末段点分名，`knowledge.Plan` → `Plan`）、裸名；末段在首个空白处截断（自然语言里嵌入符号名可命中）；末段命中代码扩展名时不提取；`LOWER()` 双侧折叠 + `escapeLike` 转义 `%`/`_`/`\`。
+- `exploration.go` / `planner.go` / `store.go`：DTO/接口/Planner 注释对齐新语义；`EvaluatePlan` 阈值/版本/stale 口径零改动。
+- **未新建 FTS 表**（复用 LIKE + CASE；避免迁移与新索引维护面）。
+
+### Verified
+
+- 新增 8 组行为测试（`store_sqlite_exploration_weight_test.go`：归一化键集合 / 三档权重压过时间 / 限定名与自然语言嵌入 / 路径符号与反斜杠 / 无命中与通配符转义 / 排序稳定与 Limit / 任务会话语义不变）+ Planner 真库端到端；`go test ./internal/knowledge/ -count=1` 全绿（子代理复跑 44.5s / 主仓集成复跑 33.3s）；`go build ./...` + `go vet` OK。
+- 既有跨任务用例期望按新语义修正（`pkg/a.go` 现在同时精确命中文件节点、前缀命中 `pkg/a.go#Foo` 符号节点）。
+
+### Notes
+
+- 边界（登记）：长句只把**裸符号名**嵌在句中（无点号/路径可提取末段）仍不命中——属 token 化/FTS 桥接的后续空间；本轮按登记项范围（exact-name 加权 + 限定名）实现。
+
+---
+
 ## 2026-10-01 — 收口轮：P0 引用索引漏报结案（根因 + builtin/4 索引侧修复）
 
 ### Findings（根因）
