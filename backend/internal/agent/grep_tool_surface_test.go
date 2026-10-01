@@ -60,6 +60,32 @@ func TestOptimizeModelToolSurfaceKeepsGrepDepthOutOfCodexWireSchema(t *testing.T
 	require.NotContains(t, wireProperties, "max_depth")
 }
 
+// TestOptimizeModelToolSurfacePrefersGrepOverRGAlias pins the alias folding:
+// the registered `rg` alias stays executable, but the model-facing surface
+// advertises only the canonical `grep` tool so no second identical schema is
+// shipped to the provider.
+func TestOptimizeModelToolSurfacePrefersGrepOverRGAlias(t *testing.T) {
+	manager := runtimetools.NewAgentAdapter(runtimetools.NewDefaultManager(nil))
+	definitions := make([]types.ToolDefinition, 0, 2)
+	for _, info := range manager.ListTools() {
+		if info.Name == "grep" || info.Name == "rg" {
+			definitions = append(definitions, types.ToolDefinition{
+				Name:        info.Name,
+				Description: info.Description,
+				Parameters:  normalizeToolParameters(info.InputSchema),
+			})
+		}
+	}
+	require.Len(t, definitions, 2)
+
+	optimized := optimizeModelToolSurface(definitions)
+	require.Len(t, optimized, 1)
+	require.Equal(t, "grep", optimized[0].Name)
+	properties := optimized[0].Parameters["properties"].(map[string]interface{})
+	require.Contains(t, properties, "pattern")
+	require.NotContains(t, properties, "max_depth")
+}
+
 func sortedMapKeys(values map[string]interface{}) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {

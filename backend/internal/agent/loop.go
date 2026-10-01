@@ -4365,6 +4365,22 @@ func simpleGoalHasFileNameCue(normalized string) bool {
 	return false
 }
 
+// grepToolSurfaceRank ranks content-search tool aliases for model surface
+// compaction. Higher rank wins; zero means not a content-search surface alias.
+// The registered `rg` alias stays executable through the tool registry, but the
+// model-facing wire advertises only the canonical `grep` name so the model does
+// not face two identical schemas.
+func grepToolSurfaceRank(name string) int {
+	switch name {
+	case "grep":
+		return 2
+	case "rg":
+		return 1
+	default:
+		return 0
+	}
+}
+
 func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefinition {
 	if len(tools) == 0 {
 		return nil
@@ -4373,11 +4389,17 @@ func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefiniti
 	// shell surface with Codex-like content-success semantics.
 	preferredShellName := ""
 	preferredShellRank := 0
+	preferredSearchName := ""
+	preferredSearchRank := 0
 	for _, definition := range tools {
 		name := strings.ToLower(strings.TrimSpace(definition.Name))
 		if rank := shellToolSurfaceRank(name); rank > preferredShellRank {
 			preferredShellRank = rank
 			preferredShellName = name
+		}
+		if rank := grepToolSurfaceRank(name); rank > preferredSearchRank {
+			preferredSearchRank = rank
+			preferredSearchName = name
 		}
 	}
 
@@ -4387,13 +4409,16 @@ func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefiniti
 		if preferredShellName != "" && shellToolSurfaceRank(name) > 0 && name != preferredShellName {
 			continue
 		}
+		if preferredSearchName != "" && grepToolSurfaceRank(name) > 0 && name != preferredSearchName {
+			continue
+		}
 		item := types.ToolDefinition{
 			Name:        definition.Name,
 			Description: definition.Description,
 			Parameters:  cloneInterfaceMap(definition.Parameters),
 			Metadata:    cloneInterfaceMap(definition.Metadata),
 		}
-		if name == "grep" {
+		if grepToolSurfaceRank(name) > 0 {
 			item.Description = "搜索文件内容。优先用 patterns + paths 在一次调用中批量搜索相关目标；高级 ripgrep 选项放入 rg_args。结果统一为 path:line[:column]: text。"
 			item.Parameters = compactGrepParametersForModel(item.Parameters)
 		}

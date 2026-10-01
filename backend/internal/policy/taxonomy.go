@@ -22,6 +22,7 @@ type ToolTaxonomy struct {
 var knownToolTaxonomy = map[string]ToolTaxonomy{
 	"view":                    {Name: "view", Kind: types.ToolKindRead, ReadOnly: true},
 	"grep":                    {Name: "grep", Kind: types.ToolKindSearch, ReadOnly: true},
+	"rg":                      {Name: "rg", Kind: types.ToolKindSearch, ReadOnly: true},
 	"glob":                    {Name: "glob", Kind: types.ToolKindSearch, ReadOnly: true},
 	"ls":                      {Name: "ls", Kind: types.ToolKindRead, ReadOnly: true},
 	"sourcegraph":             {Name: "sourcegraph", Kind: types.ToolKindSearch, ReadOnly: true, RequiresNet: true},

@@ -60,6 +60,7 @@ var localToolkitPriorityTools = map[string]struct{}{
 	"ls":   {},
 	"glob": {},
 	"grep": {},
+	"rg":   {},
 	"view": {},
 }
 
@@ -505,6 +506,10 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	register(tools.NewAppendWriteTool())
 	register(tools.NewGlobTool())
 	register(tools.NewGrepTool())
+	// rg 是 grep 的兼容别名（同一 schema/执行实现）：注册它让以 shell 习惯名
+	// `rg` 发起的工具调用落到 grep，而不是 "tool not found"。模型面仍只列出
+	// grep（见 agent.optimizeModelToolSurface 的搜索面折叠）。
+	register(tools.NewRGTool())
 	register(tools.NewLsTool())
 	register(tools.NewDownloadTool())
 	register(tools.NewFetchTool())
