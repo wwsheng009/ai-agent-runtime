@@ -277,6 +277,7 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
 | 真机冒烟 `TestRealRustAnalyzerRoundTrip` 在握手中被快速失败拦下（`start_wait_ms` 默认 250ms，实测 rust-analyzer 握手可超 250ms） | 用例显式放宽 `StartWaitMS`（该用例断言完整往返；快速失败已有专门单测 `StartWaitMS=50`）；**默认值不动**——live 证据里 gopls 握手通常在 250ms 内（`degraded_starting` 仅 2 次），等 rust-analyzer 会话的 `degraded_starting` 数据再决定是否调默认 | 连续两轮 `go test ./internal/lsp/...` 全绿 |
 | 冷路径快速失败被**连接级**信号挡住：live 窗口 20 条 `no_fresh` 里 **11 条落在"该路径从未发布过"**（其中一个路径连续 6 次各烧满 1000ms），但连接早已为别的路径发布过 → `!EverPublished()` 不成立，既拿不到宽限也永不标记冷（连接级信号与"该路径的视图还没加载"无关） | 标记条件改为**路径级**：`cold_retry_ms > 0` + 该路径无快照 + 本次等待**超过**快速失败预算（即确实多花了钱）→ 标记"已知冷"；宽限语义保持不变（仍只给冷连接，热连接上的模块外/忽略目录路径不该再等 1.5s）。首个发布即清除标记 | 新增 `TestColdRetryAppliesPerPathOnWarmConnection`（热连接 + 冷路径：首编辑 ~400ms 全预算 → 次编辑 ~50ms 快速失败 → 该路径发布后恢复 fast clean）；`TestColdRetryAfterGraceTimeout`/`TestColdGrace*` 不回归 |
 | 冷启动延迟只在**基线**（跨会话）可见，单会话状态面（TUI `/lsp status` 与 web「LSP 观测」A 卡）看不到 `first_publish_ms` → 用户当次"为什么这次慢"仍需翻事件 | 状态行/状态表补 `first_publish_ms` 展示（TUI：`first_publish=1234ms`；web：新增"首个发布"列，复用 `lspMS`）；未发布（0）不显示，避免噪音 | 新增 `TestChatLSPServerStatusLineShowsFirstPublishLatency`（就绪显示 / 未发布不显示）；`cmd/aicli` 构建与 `/lsp` 命令族测试全绿 |
+| 崩溃（重启预算耗尽）的真实降级原因仍是**原始进程错误**（live：`exit status 0xffffffff`）→ `ReasonCategory` 认不出 `crashed`，outcome 落回裸 `degraded`（喂大"未分类降级"桶）、note 不可行动（看不出是崩溃）；**第六/七轮的分类修复在真实崩溃路径上没有生效**（与第八轮 `first_publish_ms` 同类：修复没覆盖 live 分支） | 自动恢复被拒绝时写入**结构化原因**（`lsp: X crashed; restart budget exhausted (restartLimit=N): <原始错误>`）：状态是唯一事实源——桥接降级原因、TUI/web 状态页、事件面共用同一文本；状态合并时"崩溃 + 有结构化错误"优先显示它并保留原始错误尾巴；手动 `/lsp restart` 与 10 分钟窗口后的自动重试均不受影响 | `TestRestartWindowResetsBudget` 扩展断言：note 含 `restart budget exhausted`、状态原因结构化、outcome=`degraded_crashed`、reason_category=`restart_budget_exhausted`；`internal/lsp/...` 全量 + `go vet` 通过 |
 
 新增配置键（全部有内置默认，不改代码即可调整）：
 `diagnostics.start_wait_ms` / `diagnostics.empty_early_accept` / `diagnostics.empty_confirm_ms` /
@@ -362,6 +363,15 @@ gopls 有 228/324 请求打满 `wait_ms`；详见本轮分析报告）：
   仍看不到它——"这次为什么慢"只能在基线里查。
 - 落地：TUI 状态行加 `first_publish=1234ms`（就绪且 >0 时）；web A 卡新增"首个发布"列；
   §5.1 区块表与 §4.3 指标计数同步（七项）。
+
+**第十一轮优化（2026-10-01，崩溃预算耗尽路径的结构化原因）**：
+- 证据：代理自身会话（09-29 起长驻，旧构建）gopls 07:14 崩溃后，每条编辑的降级 note 都是
+  `exit status 0xffffffff`（原始进程错误）——outcome 落回裸 `degraded`、原因不可分类、note
+  不可行动；代码核查确认当前树在"自动恢复被拒绝"时同样不回写结构化原因（第六/七轮的
+  `degraded_crashed` 分类只覆盖了带 `crashed` 字样的文本）。
+- 落地：`registryEntry`/`Server.Status()` 在恢复被拒时暴露结构化原因（含原始错误尾巴）。
+  恢复路径不变：手动 `/lsp restart` 立即可用；`restartWindow`（默认 10 分钟）静默期后自动
+  重试一次。
 - 行为备注：内容未变化的 write 会按幂等回放处理且不触发 LSP 请求（无变更不诊断，符合预期）。
 
 **崩溃根因定位（已闭环）**：跨会话同秒崩溃（09-30 10:37:33×3、10:43:04×3）确认为

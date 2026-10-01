@@ -115,8 +115,24 @@ func TestRestartWindowResetsBudget(t *testing.T) {
 	waitFor(t, "second crash", func() bool { return bridge.Statuses()[0].State == StateCrashed })
 
 	// Second crash inside the window: budget exhausted → degrade.
-	if out := bridge.AppendToResult(ctx, "e3\n", []string{path}); !strings.Contains(out, "<lsp_note") {
+	// 结构化原因：live 路径曾把原始进程错误（"exit status 0xffffffff"）留作原因，
+	// ReasonCategory 认不出它 → outcome 落回裸 degraded，note 也不可行动。
+	// （HintOnce 只解释一次，所以断言落在本条 note 上。）
+	out := bridge.AppendToResult(ctx, "e3\n", []string{path})
+	if !strings.Contains(out, "<lsp_note") {
 		t.Fatalf("exhausted budget must degrade inside the window, got:\n%s", out)
+	}
+	if !strings.Contains(out, "restart budget exhausted") {
+		t.Fatalf("inline note must name the exhausted crash, got:\n%s", out)
+	}
+	if status := bridge.Statuses()[0]; status.State != StateCrashed ||
+		!strings.Contains(status.Reason, "crashed; restart budget exhausted") {
+		t.Fatalf("exhausted crash must expose the structured reason, got %+v", status)
+	}
+	if recent := bridge.MetricsSnapshot().RecentRequests; len(recent) == 0 ||
+		recent[0].Outcome != "degraded_crashed" ||
+		recent[0].ReasonCategory != "restart_budget_exhausted" {
+		t.Fatalf("exhausted crash must classify as degraded_crashed, recent = %+v", recent)
 	}
 
 	// Quiet period longer than the window resets the budget.

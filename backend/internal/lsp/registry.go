@@ -262,6 +262,12 @@ func (s *Server) Status() ServerStatus {
 			status.Language = strings.Join(entry.spec.Languages, ",")
 		}
 		status.Restarts += restarts
+		// 崩溃且（自动）恢复已被拒绝：结构化原因优先，同时保留崩溃原文（live:
+		// "exit status 0xffffffff"），供分类、状态页与排查共用。
+		if status.State == StateCrashed && lastErr != "" {
+			status.Reason = lastErr
+			status.LastError = lastErr
+		}
 		return status
 	}
 
@@ -335,10 +341,40 @@ func (s *Server) recoverCrashed(ctx context.Context) bool {
 		return true
 	}
 	if !s.wantsStart() {
+		s.recordCrashBudgetExhausted()
 		return false
 	}
 	go func() { _ = entry.start(ctx) }()
 	return true
+}
+
+// recordCrashBudgetExhausted writes the structured "crashed; restart budget
+// exhausted" reason onto the entry when automatic recovery is refused. Without
+// it the observable reason stays the raw process error (live: "exit status
+// 0xffffffff"): ReasonCategory cannot classify it, so the request outcome falls
+// back to a bare `degraded` (feeding the unclassified bucket the baseline
+// tracks) and the inline note reads like a mystery rather than a crash. The
+// status is the single source of truth: the bridge's degrade reason, the TUI /
+// web status page and the event stream all read this text.
+func (s *Server) recordCrashBudgetExhausted() {
+	entry := s.entry
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if entry.client == nil || entry.client.Status().State != StateCrashed {
+		return
+	}
+	if strings.Contains(entry.lastErr, "restart budget exhausted") {
+		return
+	}
+	reason := fmt.Sprintf(
+		"lsp: %s crashed; restart budget exhausted (restartLimit=%d)",
+		entry.spec.Name, entry.parent.cfg.RestartLimitValue(),
+	)
+	if raw := strings.TrimSpace(entry.client.Status().Reason); raw != "" &&
+		!strings.Contains(raw, "restart budget exhausted") {
+		reason += ": " + raw
+	}
+	entry.lastErr = reason
 }
 
 // ensureStarted starts the member once, in the background. Failure is recorded
