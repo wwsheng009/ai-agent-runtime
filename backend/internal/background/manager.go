@@ -3016,10 +3016,10 @@ func newOutputBuffer(maxBytes int) *outputBuffer {
 	if maxBytes <= 0 {
 		maxBytes = DefaultConfig().MaxOutputBytes
 	}
-	return &outputBuffer{
-		data:     make([]byte, 0, maxBytes),
-		maxBytes: maxBytes,
-	}
+	// 惰性扩容：不再预分配 maxBytes（默认 1MB）。生产 pprof 显示存活的
+	// job 每个钉住 1MB（46 个 job = 46MB inuse），而绝大多数 job 的输出
+	// 远小于上限；上限仍由 maxBytes 约束，Write 溢出时原地压缩。
+	return &outputBuffer{maxBytes: maxBytes}
 }
 
 func (b *outputBuffer) Write(p []byte) (int, error) {
@@ -3038,7 +3038,10 @@ func (b *outputBuffer) Write(p []byte) (int, error) {
 	b.data = append(b.data, p...)
 	if len(b.data) > b.maxBytes {
 		overflow := len(b.data) - b.maxBytes
-		b.data = append([]byte{}, b.data[overflow:]...)
+		// 原地压缩：旧实现 append([]byte{}, ...) 每次溢出都新分配一块约
+		// maxBytes 的数组，长任务流式输出会把同样的 1MB 分配重复上千次。
+		copy(b.data, b.data[overflow:])
+		b.data = b.data[:b.maxBytes]
 		b.baseOffset += int64(overflow)
 	}
 	return len(p), nil
