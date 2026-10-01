@@ -32,6 +32,56 @@ const (
 	CodeToolsOn = "on"
 )
 
+// ADR-0004 §4.4 的 `knowledge.tools.*` 逃生舱（与 code_tools 叠加，不是替代）。
+const (
+	// StaleReaderOn 按陈旧度分级注册（默认）：reader 在 S_fresh < S ≤ S_max
+	// 时只注册定义类，S > S_max 不注册（ADR-0004 §4.1）。
+	StaleReaderOn = "on"
+	// StaleReaderOff 逃生舱：即使 reader 也按 writer 策略注册（用户自担风险）。
+	StaleReaderOff = "off"
+)
+
+// ErrInvalidStaleReader 表示配置的 tools.stale_reader 不是 on|off 之一。
+var ErrInvalidStaleReader = errors.New("knowledge: invalid tools.stale_reader")
+
+// ToolsConfig 是 `knowledge.tools.*` 配置段（ADR-0004 §4.4）。
+//
+// 与既有 code_tools 的关系：code_tools 决定"code.* 工具面是否可能注册"，
+// tools.enabled 提供"索引照跑、但不注册工具"的第三种观测态（shadow 之外），
+// tools.stale_reader 提供"忽略 reader 陈旧度分级"的逃生舱。
+type ToolsConfig struct {
+	// Enabled 是工具面总开关；nil / true = 开启，false = 不注册任何 code.*。
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// StaleReader 取值 on|off；缺省 on（reader 按陈旧度分级）。
+	StaleReader string `yaml:"stale_reader,omitempty" json:"stale_reader,omitempty"`
+}
+
+// ParseStaleReader 解析 tools.stale_reader；空值等价 on（默认分级，fail closed
+// 到安全一侧：分级生效）。
+func ParseStaleReader(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", StaleReaderOn, "true", "1", "enabled":
+		return StaleReaderOn, nil
+	case StaleReaderOff, "false", "0", "disabled":
+		return StaleReaderOff, nil
+	default:
+		return "", fmt.Errorf("%w: %q", ErrInvalidStaleReader, s)
+	}
+}
+
+// ToolsEnabled 报告工具面总开关是否开启（缺省 true）。
+func (t ToolsConfig) ToolsEnabled() bool {
+	return t.Enabled == nil || *t.Enabled
+}
+
+// StaleReaderGradingEnabled 报告 reader 是否按陈旧度分级（缺省 true）；
+// false 即逃生舱 knowledge.tools.stale_reader=off。非法值按分级生效处理
+// （加载期已由 Validate 拒绝，运行期只保证不 panic 且落在安全一侧）。
+func (t ToolsConfig) StaleReaderGradingEnabled() bool {
+	parsed, err := ParseStaleReader(t.StaleReader)
+	return err != nil || parsed == StaleReaderOn
+}
+
 // Phase 4（04 §5 Phase 4）的 adapter 与 LSP 上限默认值。
 //
 // 全部是"保守起步值"，验收门槛由真实测量回写（06 §4 Phase 4 验收门槛）。
@@ -313,6 +363,8 @@ type Config struct {
 	// CodeTools 控制 Phase 3 的 code.* 工具面是否注册（off|on，默认 off）。
 	// 独立于 Mode：mode=on 但 code_tools 未开启时工具面不出现（灰度/回滚）。
 	CodeTools string `yaml:"code_tools,omitempty" json:"code_tools,omitempty"`
+	// Tools 是 ADR-0004 §4.4 的逃生舱（enabled / stale_reader）。
+	Tools ToolsConfig `yaml:"tools,omitempty" json:"tools,omitempty"`
 	// Watch 控制 Phase 5 交付 1 的第三类变更源（fsnotify 文件系统监听，off|on，
 	// 默认 off）。开启后空闲期的外部变更（编辑器保存 / 脚本写盘 / git checkout）
 	// 会被即时发现并入队；关闭时仍由判定点校正（git/stat）在下一个 turn 边界发现。
@@ -409,6 +461,9 @@ func (c Config) Normalize() Config {
 	if parsed, err := ParseCodeTools(c.CodeTools); err == nil {
 		c.CodeTools = parsed
 	}
+	if parsed, err := ParseStaleReader(c.Tools.StaleReader); err == nil {
+		c.Tools.StaleReader = parsed
+	}
 	if parsed, err := ParseWatch(c.Watch); err == nil {
 		c.Watch = parsed
 	}
@@ -436,6 +491,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if _, err := ParseCodeTools(c.CodeTools); err != nil {
+		return err
+	}
+	if _, err := ParseStaleReader(c.Tools.StaleReader); err != nil {
 		return err
 	}
 	if _, err := ParseWatch(c.Watch); err != nil {

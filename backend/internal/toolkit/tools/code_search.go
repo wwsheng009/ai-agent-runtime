@@ -80,7 +80,15 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 	handle, ok := t.resolveIndex(ctx)
 	if !ok {
 		result, _ := t.runGrep(ctx, grepParams())
-		env := fallbackEnvelope("code_search", codeFallbackIndexUnavailable, codeConfidenceNone, "grep", result)
+		env := fallbackEnvelope("code_search", codeFallbackIndexUnavailable, codeConfidenceNone, "grep", result, nil)
+		env.Truncated = env.Truncated || clamped
+		env.Explanation += codeSearchLangFallbackNote(lang)
+		return codeResult(env), nil
+	}
+	// 陈旧度守卫（ADR-0004 §4.1）：定义类在过旧档不返回索引结果，实时兜底。
+	if !definitionTierUsable(handle) {
+		result, _ := t.runGrep(ctx, grepParams())
+		env := staleGuardEnvelope("code_search", handle, "grep", result)
 		env.Truncated = env.Truncated || clamped
 		env.Explanation += codeSearchLangFallbackNote(lang)
 		return codeResult(env), nil
@@ -94,7 +102,7 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 	})
 	if err != nil {
 		result, _ := t.runGrep(ctx, grepParams())
-		env := fallbackEnvelope("code_search", codeFallbackIndexError, codeConfidenceNone, "grep", result)
+		env := fallbackEnvelope("code_search", codeFallbackIndexError, codeConfidenceNone, "grep", result, handle)
 		env.Truncated = env.Truncated || clamped
 		env.Explanation += codeSearchLangFallbackNote(lang)
 		return codeResult(env), nil
@@ -111,7 +119,7 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 	// 模型可见输出；候选数量写进 explanation 供对比观察。
 	if handle.Mode == knowledge.ModeShadow {
 		result, _ := t.runGrep(ctx, grepParams())
-		env := fallbackEnvelope("code_search", codeFallbackShadowMode, codeConfidenceFTS, "grep", result)
+		env := fallbackEnvelope("code_search", codeFallbackShadowMode, codeConfidenceFTS, "grep", result, handle)
 		env.Explanation += fmt.Sprintf(" 索引候选 %d 条（未返回）。", len(hits))
 		env.Explanation += codeSearchLangFallbackNote(lang)
 		env.Truncated = env.Truncated || clamped
@@ -121,7 +129,7 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 	// on 档无命中：补一次 grep 并合并（04 §4.6 第 4 步的"结果为空"分支）。
 	if len(hits) == 0 {
 		result, _ := t.runGrep(ctx, grepParams())
-		env := fallbackEnvelope("code_search", codeFallbackNoIndexHit, codeConfidenceNone, "grep", result)
+		env := fallbackEnvelope("code_search", codeFallbackNoIndexHit, codeConfidenceNone, "grep", result, handle)
 		env.Truncated = env.Truncated || clamped
 		env.Explanation += codeSearchLangFallbackNote(lang)
 		return codeResult(env), nil
@@ -130,6 +138,7 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 	env := newCodeEnvelope("code_search")
 	env.Source = codeSourceIndex
 	env.Confidence = codeConfidenceFTS
+	applySnapshot(&env, handle)
 	if qualifiedExact {
 		env.Confidence = codeConfidenceExact
 	}

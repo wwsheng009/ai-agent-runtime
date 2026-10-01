@@ -36,6 +36,24 @@ const (
 	// 精度高于索引启发式（Phase 4 接线；默认关闭，见 knowledge.lsp.enabled）。
 	codeSourceSemantic = "lsp"
 
+	// ADR-0004 §4.1 的两档陈旧度边界（初始值：60s / 15min，Phase2-start 校准）。
+	// D7 要求它们是常量而非字面量散布，因此只在此处定义。
+	CodeStaleFreshSeconds int64 = 60
+	CodeStaleMaxSeconds   int64 = 900
+
+	// 分级注册 tier（ADR-0004 §4.1）：
+	//   all         = 全开（writer / reader S ≤ S_fresh）
+	//   definitions = 仅定义类（reader S_fresh < S ≤ S_max）
+	//   none        = 不注册（reader S > S_max / 从未成功索引）
+	CodeIndexTierAll         = "all"
+	CodeIndexTierDefinitions = "definitions"
+	CodeIndexTierNone        = "none"
+
+	// completeness 取值（ADR-0004 §4.2）。
+	codeCompletenessFull     = "full"
+	codeCompletenessPartial  = "partial"
+	codeCompletenessFallback = "fallback"
+
 	codeConfidenceExact = 1.00
 	codeConfidenceFTS   = 0.90
 	codeConfidenceFuzzy = 0.80
@@ -63,6 +81,9 @@ const (
 	// codeFallbackLowConfidence 是 on 档"低相关命中 → 补一次 grep"的补量标记
 	// （04 §4.6 第 4 步；source=index+grep，索引命中仍是主结果）。
 	codeFallbackLowConfidence = "low_confidence_supplement"
+	// codeFallbackStaleIndex 是陈旧度守卫触发的降级原因（ADR-0004 §4.1：
+	// 关系类在中等陈旧 / 定义类在过旧档都不得返回索引结果，只能实时兜底）。
+	codeFallbackStaleIndex = "stale_index"
 )
 
 // CodeIndex 是 code.* 与 view --symbol 需要的只读索引句柄（knowledge.Store 的窄子集）。
@@ -85,6 +106,59 @@ type CodeIndexHandle struct {
 	Semantic knowledge.SemanticAdapter
 	// FilePaths 是 file_id → workspace 相对路径的映射（打开索引时构建一次）。
 	FilePaths map[string]string
+	// SnapshotTS 是索引最近成功写事务时间（unix 秒；0 = 无索引快照）。
+	// ADR-0004 §4.2：所有 code.* 结果必须携带它。
+	SnapshotTS int64
+	// StalenessSeconds 是 (now - SnapshotTS) 的实际值（ADR-0004 D3）；
+	// writer 恒为 0（索引本地即最新），reader 不得为 0 或省略。
+	StalenessSeconds int64
+	// Writer 表示本进程持有 store 写锁（本地索引即最新）。
+	Writer bool
+	// Tier 是 ADR-0004 §4.1 的分级结果（all|definitions|none）。
+	Tier string
+}
+
+// CodeTierForSnapshot 计算 ADR-0004 §4.1 的分级：
+// writer 或逃生舱关闭分级（gradingEnabled=false）→ all；
+// reader 按 S 落三档（== 边界视为通过：≤ S_fresh 为 all，≤ S_max 为 definitions）。
+// snapshotTS <= 0（从未成功索引）没有可用快照，按 none 处理（fail closed）。
+func CodeTierForSnapshot(writer bool, snapshotTS, stalenessSeconds int64, gradingEnabled bool) string {
+	if writer || !gradingEnabled {
+		return CodeIndexTierAll
+	}
+	if snapshotTS <= 0 {
+		return CodeIndexTierNone
+	}
+	switch {
+	case stalenessSeconds <= CodeStaleFreshSeconds:
+		return CodeIndexTierAll
+	case stalenessSeconds <= CodeStaleMaxSeconds:
+		return CodeIndexTierDefinitions
+	default:
+		return CodeIndexTierNone
+	}
+}
+
+// CodeTierAllowsDefinition 报告定义类查询在当前 tier 下是否可用
+// （中等陈旧仍可用；过旧档硬闸关闭）。
+func CodeTierAllowsDefinition(tier string) bool { return tier != CodeIndexTierNone }
+
+// CodeTierAllowsRelation 报告关系类查询在当前 tier 下是否可用
+// （只有全开档可用；D1：陈旧时不得返回可能静默漏报的引用集合）。
+// 空串 = 未分级句柄（既有测试/手工构造），按全开处理；生产句柄由
+// newCodeIndexResolver 统一设置，不会是空串。
+func CodeTierAllowsRelation(tier string) bool {
+	return tier == CodeIndexTierAll || tier == ""
+}
+
+// definitionTierUsable / relationTierUsable 是运行时守卫：注册决策与执行
+// 之间存在时间窗口（陈旧度会漂移），执行前必须按当前 handle 再判一次。
+func definitionTierUsable(handle *CodeIndexHandle) bool {
+	return handle == nil || CodeTierAllowsDefinition(handle.Tier)
+}
+
+func relationTierUsable(handle *CodeIndexHandle) bool {
+	return handle == nil || CodeTierAllowsRelation(handle.Tier)
 }
 
 // PathForFile 返回 file_id 对应的 workspace 相对路径；未知返回空串。
@@ -118,17 +192,24 @@ type codeFallback struct {
 
 // codeEnvelope 是 code.* 的统一返回结构（04 §5 Phase 3 交付 2）。
 type codeEnvelope struct {
-	Tool        string        `json:"tool"`
-	Source      string        `json:"source"`
-	Confidence  float64       `json:"confidence"`
-	Version     string        `json:"version,omitempty"`
-	Range       *codeRange    `json:"range,omitempty"`
-	Truncated   bool          `json:"truncated"`
-	NextCursor  string        `json:"next_cursor,omitempty"`
-	Explanation string        `json:"explanation,omitempty"`
-	Degraded    bool          `json:"degraded"`
-	Results     interface{}   `json:"results,omitempty"`
-	Fallback    *codeFallback `json:"fallback,omitempty"`
+	Tool       string  `json:"tool"`
+	Source     string  `json:"source"`
+	Confidence float64 `json:"confidence"`
+	Version    string  `json:"version,omitempty"`
+	// ADR-0004 §4.2：三字段在任意模式下都必须出现（无 omitempty）。
+	// snapshot_ts = 索引最近成功写事务时间（unix 秒；0 = 无索引快照）；
+	// staleness_seconds = reader 实际陈旧度（writer 恒 0）；
+	// completeness ∈ {full, partial, fallback}。
+	SnapshotTS       int64         `json:"snapshot_ts"`
+	StalenessSeconds int64         `json:"staleness_seconds"`
+	Completeness     string        `json:"completeness"`
+	Range            *codeRange    `json:"range,omitempty"`
+	Truncated        bool          `json:"truncated"`
+	NextCursor       string        `json:"next_cursor,omitempty"`
+	Explanation      string        `json:"explanation,omitempty"`
+	Degraded         bool          `json:"degraded"`
+	Results          interface{}   `json:"results,omitempty"`
+	Fallback         *codeFallback `json:"fallback,omitempty"`
 }
 
 // newCodeEnvelope 创建带默认值的信封。
@@ -138,6 +219,9 @@ func newCodeEnvelope(tool string) codeEnvelope {
 
 // codeResult 把信封编码为模型可见的工具结果（Content=JSON；Metadata 带关键字段）。
 func codeResult(env codeEnvelope) *toolkit.ToolResult {
+	if env.Completeness == "" {
+		env.Completeness = codeCompletenessFor(env)
+	}
 	payload, err := json.Marshal(env)
 	if err != nil {
 		return stampToolOwnsOutput(&toolkit.ToolResult{
@@ -147,11 +231,14 @@ func codeResult(env codeEnvelope) *toolkit.ToolResult {
 		})
 	}
 	meta := map[string]interface{}{
-		"code_tool":  env.Tool,
-		"source":     env.Source,
-		"confidence": env.Confidence,
-		"degraded":   env.Degraded,
-		"truncated":  env.Truncated,
+		"code_tool":         env.Tool,
+		"source":            env.Source,
+		"confidence":        env.Confidence,
+		"degraded":          env.Degraded,
+		"truncated":         env.Truncated,
+		"snapshot_ts":       env.SnapshotTS,
+		"staleness_seconds": env.StalenessSeconds,
+		"completeness":      env.Completeness,
 	}
 	if env.Fallback != nil {
 		meta["fallback_tool"] = env.Fallback.Tool
@@ -163,6 +250,31 @@ func codeResult(env codeEnvelope) *toolkit.ToolResult {
 		Content:    string(payload),
 		Metadata:   meta,
 	})
+}
+
+// codeCompletenessFor 从来源与截断推导 completeness（ADR-0004 §4.2）：
+// fallback = 实时 grep/view 兜底；index+grep / 截断 = partial；纯索引完整 = full。
+func codeCompletenessFor(env codeEnvelope) string {
+	switch env.Source {
+	case codeSourceFallback:
+		return codeCompletenessFallback
+	case codeSourceIndexGrep:
+		return codeCompletenessPartial
+	}
+	if env.Truncated {
+		return codeCompletenessPartial
+	}
+	return codeCompletenessFull
+}
+
+// applySnapshot 把索引快照的陈旧度写入信封；handle=nil 时保持零值
+// （字段仍必须出现，ADR-0004 §4.2 要求三字段不省略）。
+func applySnapshot(env *codeEnvelope, handle *CodeIndexHandle) {
+	if env == nil || handle == nil {
+		return
+	}
+	env.SnapshotTS = handle.SnapshotTS
+	env.StalenessSeconds = handle.StalenessSeconds
 }
 
 // codeToolBase 提供 code.* 与 view --symbol 共用的依赖注入与 fallback 执行。
@@ -248,11 +360,13 @@ func (b *codeToolBase) runView(ctx context.Context, params map[string]interface{
 }
 
 // fallbackEnvelope 把一次 grep/view 结果包成统一返回结构（source="fallback"）。
-func fallbackEnvelope(tool, reason string, confidence float64, fallbackTool string, result *toolkit.ToolResult) codeEnvelope {
+// handle 非 nil 时同时携带索引快照的陈旧度（D3：reader 实际值不得省略）。
+func fallbackEnvelope(tool, reason string, confidence float64, fallbackTool string, result *toolkit.ToolResult, handle *CodeIndexHandle) codeEnvelope {
 	env := newCodeEnvelope(tool)
 	env.Source = codeSourceFallback
 	env.Confidence = confidence
 	env.Degraded = true
+	applySnapshot(&env, handle)
 	env.Fallback = &codeFallback{Tool: fallbackTool, Reason: reason}
 	env.Explanation = codeFallbackExplanation(reason, fallbackTool)
 	if result != nil {
@@ -269,6 +383,31 @@ func fallbackEnvelope(tool, reason string, confidence float64, fallbackTool stri
 	return env
 }
 
+// staleGuardEnvelope 是陈旧度守卫触发的降级信封：不返回索引结果，改用实时
+// fallback（ADR-0004 §5 D1 的硬约束），并显式解释触发档位与实际陈旧度。
+func staleGuardEnvelope(tool string, handle *CodeIndexHandle, fallbackTool string, result *toolkit.ToolResult) codeEnvelope {
+	env := fallbackEnvelope(tool, codeFallbackStaleIndex, codeConfidenceNone, fallbackTool, result, handle)
+	if handle != nil {
+		env.Explanation = fmt.Sprintf(
+			"索引快照已落后约 %d 秒（%s）：为避免静默漏报，本次未返回索引结果，改用 %s 实时输出（ADR-0004 §4.1/§5 D1）。",
+			handle.StalenessSeconds, staleTierName(handle.Tier), fallbackTool,
+		)
+	}
+	return env
+}
+
+// staleTierName 把 tier 映射为可读档位名（降级说明用）。
+func staleTierName(tier string) string {
+	switch tier {
+	case CodeIndexTierAll:
+		return "全开档"
+	case CodeIndexTierDefinitions:
+		return "中等陈旧（仅定义类）"
+	default:
+		return "过旧档（不注册）"
+	}
+}
+
 // codeFallbackExplanation 生成稳定、可读的降级说明。
 func codeFallbackExplanation(reason, fallbackTool string) string {
 	switch reason {
@@ -282,6 +421,8 @@ func codeFallbackExplanation(reason, fallbackTool string) string {
 		return "索引查询失败：已降级到 " + fallbackTool + "（Degrade-Not-Fail）。"
 	case codeFallbackByRequest:
 		return "按 file_path 读取（等价 view，未走索引）：结果为 " + fallbackTool + " 的原始输出。"
+	case codeFallbackStaleIndex:
+		return "索引快照陈旧度超过安全窗口：已按硬约束降级到 " + fallbackTool + " 实时结果（ADR-0004 §4.1/§5 D1）。"
 	default:
 		return "已降级到 " + fallbackTool + "。"
 	}
@@ -462,6 +603,7 @@ func trySemanticRefsQuery(ctx context.Context, toolName string, handle *CodeInde
 	env := newCodeEnvelope(toolName)
 	env.Source = codeSourceSemantic
 	env.Confidence = codeConfidenceExact
+	applySnapshot(&env, handle)
 	env.Results = results
 	env.Truncated = truncated
 	env.Explanation = fmt.Sprintf(

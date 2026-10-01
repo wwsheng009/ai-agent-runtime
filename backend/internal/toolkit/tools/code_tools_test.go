@@ -135,17 +135,20 @@ func newCodeToolsFixture(t *testing.T) *codeToolsFixture {
 
 // codeTestEnvelope 是统一返回结构的测试镜像。
 type codeTestEnvelope struct {
-	Tool        string          `json:"tool"`
-	Source      string          `json:"source"`
-	Confidence  float64         `json:"confidence"`
-	Version     string          `json:"version"`
-	Range       *codeRange      `json:"range"`
-	Truncated   bool            `json:"truncated"`
-	NextCursor  string          `json:"next_cursor"`
-	Explanation string          `json:"explanation"`
-	Degraded    bool            `json:"degraded"`
-	Results     json.RawMessage `json:"results"`
-	Fallback    *codeFallback   `json:"fallback"`
+	Tool             string          `json:"tool"`
+	Source           string          `json:"source"`
+	Confidence       float64         `json:"confidence"`
+	Version          string          `json:"version"`
+	SnapshotTS       int64           `json:"snapshot_ts"`
+	StalenessSeconds int64           `json:"staleness_seconds"`
+	Completeness     string          `json:"completeness"`
+	Range            *codeRange      `json:"range"`
+	Truncated        bool            `json:"truncated"`
+	NextCursor       string          `json:"next_cursor"`
+	Explanation      string          `json:"explanation"`
+	Degraded         bool            `json:"degraded"`
+	Results          json.RawMessage `json:"results"`
+	Fallback         *codeFallback   `json:"fallback"`
 }
 
 func decodeCodeEnvelope(t *testing.T, res *toolkit.ToolResult) codeTestEnvelope {

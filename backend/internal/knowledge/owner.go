@@ -139,6 +139,21 @@ func (o *ownership) role() Role {
 	return o.state
 }
 
+// LockHolderPID 返回 store 写锁的当前持有者 pid；0 = 无有效锁
+// （锁不存在 / 持有者已死 / 锁已过期 / 内容不可解析）。
+//
+// 只读诊断用途：不创建、不抢占、不修改锁文件。ADR-0004 的 code.* 工具面
+// 用它判断"本进程是否 writer"（holder == os.Getpid() 即 writer），从而在
+// writer 下全开、reader 下按陈旧度分级。语义与 acquireOwnership 的仲裁
+// 完全同源（复用 lockIsStale），不引入第二套判活口径。
+func LockHolderPID(cfg Config) int {
+	stale, holder := lockIsStale(cfg.storePath() + ".lock")
+	if stale {
+		return 0
+	}
+	return holder
+}
+
 // readOnly 报告 store 是否必须以只读方式打开。
 func (o *ownership) readOnly() bool { return o == nil || o.state != RoleOwner }
 

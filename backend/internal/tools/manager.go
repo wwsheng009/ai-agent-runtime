@@ -13,6 +13,7 @@ import (
 	agentconfig "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/llm/adapter"
 	"github.com/wwsheng009/ai-agent-runtime/internal/lsp"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
@@ -41,6 +42,9 @@ type Manager struct {
 	mcp           manager.Manager
 	sandbox       *runtimeexecutor.Sandbox
 	runtimeConfig *runtimecfg.RuntimeConfig
+	// codeGate 是 ADR-0004 的 code.* 分级注册闸门（nil = code_tools off 或
+	// mode=off，工具面与改动前逐字节一致）。
+	codeGate *codeToolGate
 	// lspMu guards lspBridge: hosts may attach the pool after construction
 	// (async project scan → late enable), while turns keep listing tools.
 	lspMu     sync.RWMutex
@@ -73,12 +77,13 @@ func NewDefaultManagerWithRuntimeConfig(mcp manager.Manager, config *runtimecfg.
 		sandbox = runtimeexecutor.NewSandbox(&config.Sandbox)
 		workspaceRoot = strings.TrimSpace(config.Workspace.Root)
 	}
-	registerBuiltinToolkitTools(registry, sandbox, workspaceRoot, config)
+	codeGate := registerBuiltinToolkitTools(registry, sandbox, workspaceRoot, config)
 	manager := &Manager{
 		toolkit:       registry,
 		mcp:           mcp,
 		sandbox:       sandbox,
 		runtimeConfig: config,
+		codeGate:      codeGate,
 		lspObserver:   &lspObserverHub{},
 	}
 	manager.lspBridge = newLSPBridgeWith(config, workspaceRoot, nil, manager.lspObserver.emit)
@@ -90,6 +95,11 @@ func NewDefaultManagerWithRuntimeConfig(mcp manager.Manager, config *runtimecfg.
 
 // ListTools returns the unified tool list, preferring MCP tools on name conflict.
 func (m *Manager) ListTools() []ToolDescriptor {
+	// ADR-0004 §4.1：每次列出工具前按最新陈旧度重新评估并切换分组；
+	// 会话内动态生效（无需重启会话）。
+	if m != nil && m.codeGate != nil {
+		m.codeGate.sync(context.Background())
+	}
 	seen := make(map[string]struct{})
 	toolsList := make([]ToolDescriptor, 0)
 
@@ -136,6 +146,9 @@ func (m *Manager) ListTools() []ToolDescriptor {
 			description := tool.Description()
 			if m.lspInlineHintEnabled(name) {
 				description = strings.TrimRight(description, " ") + " " + lspInlineDiagnosticsHint
+			}
+			if m.codeGate != nil {
+				description += m.codeGate.descriptionSuffix(name)
 			}
 			toolsList = append(toolsList, ToolDescriptor{
 				Name:        name,
@@ -291,6 +304,11 @@ func (m *Manager) executeWithMeta(ctx context.Context, name string, args map[str
 	}
 
 	lookupName := canonicalManagedToolName(name)
+	// ADR-0004 §4.1：不在当前档位（未注册）的 code.* 直接拒绝；工具自身的
+	// 运行时守卫是第二道防线（注册决策与执行之间陈旧度可能漂移）。
+	if m.codeGate != nil && m.codeGate.isCodeTool(lookupName) && !m.codeGate.toolVisible(lookupName) {
+		return "", nil, fmt.Errorf("tool '%s' is not available: code index snapshot is out of policy (ADR-0004)", name)
+	}
 	if m.toolkit != nil {
 		if tool, ok := m.toolkit.Get(lookupName); ok {
 			if m.shouldPreferLocalToolkitTool(lookupName) {
@@ -439,7 +457,7 @@ func canonicalManagedToolName(name string) string {
 	return strings.TrimSpace(name)
 }
 
-func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexecutor.Sandbox, workspaceRoot string, runtimeConfig *runtimecfg.RuntimeConfig) {
+func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexecutor.Sandbox, workspaceRoot string, runtimeConfig *runtimecfg.RuntimeConfig) *codeToolGate {
 	// Phase 3（06 §4 Phase 3）：code.* 工具面（默认 off；knowledge.code_tools=on
 	// 才注册，回滚即关闭）。索引不可用时工具自身按降级协议 fallback 到 grep/view。
 	// ADR-0004 §4.4 全局硬闸：mode=off 时无论 code_tools 如何都不得注册 code.*
@@ -448,7 +466,7 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	if runtimeConfig != nil && runtimeConfig.Knowledge.CodeToolsEnabled() && runtimeConfig.Knowledge.Enabled() {
 		codeResolver = newCodeIndexResolver(runtimeConfig.Knowledge, workspaceRoot)
 	}
-	register := func(tool toolkit.Tool) {
+	configure := func(tool toolkit.Tool) {
 		if configurable, ok := tool.(interface {
 			SetSandbox(*runtimeexecutor.Sandbox)
 		}); ok {
@@ -466,6 +484,9 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 				configurable.SetCodeIndexResolver(codeResolver)
 			}
 		}
+	}
+	register := func(tool toolkit.Tool) {
+		configure(tool)
 		_ = registry.Register(tool)
 	}
 
@@ -495,13 +516,25 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	if shouldRegisterOpenAIImageGenerateTool(runtimeConfig) {
 		register(tools.NewOpenAIImageGenerateTool(runtimeConfig))
 	}
-	if codeResolver != nil {
-		register(tools.NewCodeSearchTool())
-		register(tools.NewCodeInspectTool())
-		register(tools.NewCodeNavigateTool())
-		register(tools.NewCodeReferencesTool())
-		register(tools.NewCodeCallersTool())
+	if codeResolver == nil {
+		return nil
 	}
+	// ADR-0004 §4.1/§4.4：构造期先按初始档位注册（复用本文件既有的条件
+	// 注册机制）；之后每次 ListTools 由 gate.sync 重新评估并切换分组，
+	// 会话内动态生效、无需重启。工具自身还有执行期陈旧度守卫（第二道防线）。
+	gate := newCodeToolGate(codeResolver, runtimeConfig.Knowledge, registry)
+	for _, spec := range []codeToolSpec{
+		{name: "code_search", class: codeToolClassDefinition, tool: tools.NewCodeSearchTool()},
+		{name: "code_inspect", class: codeToolClassDefinition, tool: tools.NewCodeInspectTool()},
+		{name: "code_navigate", class: codeToolClassDefinition, tool: tools.NewCodeNavigateTool()},
+		{name: "code_references", class: codeToolClassRelation, tool: tools.NewCodeReferencesTool()},
+		{name: "code_callers", class: codeToolClassRelation, tool: tools.NewCodeCallersTool()},
+	} {
+		configure(spec.tool)
+		gate.add(spec.name, spec.class, spec.tool)
+	}
+	gate.sync(context.Background())
+	return gate
 }
 
 func shouldRegisterOpenAIImageGenerateTool(runtimeConfig *runtimecfg.RuntimeConfig) bool {
@@ -796,4 +829,170 @@ func normalizeParameters(schema map[string]interface{}) map[string]interface{} {
 		fallback = map[string]interface{}{}
 	}
 	return fallback
+}
+
+// ---- ADR-0004：code.* 工具面的陈旧度分级注册（§4.1）与描述变体（§4.3）----
+//
+// 机制说明（ADR 证据 1 勘误）：本仓库不存在 RegisterGroup(name, active)；
+// 既有机制是 registerBuiltinToolkitTools 里的构造期条件注册（manager.go:442）。
+// 本闸门复用它做初始档位，并在每次 ListTools 前用 Registry.Register/Unregister
+// 做会话内动态切换（heartbeat/写事务推进后无需重启会话即可换档）。
+
+// code.* 的两类工具面（ADR-0004 §1.2 的风险划分）：
+//
+//	definition = 定义类（陈旧只导致显式漏检，模型可回退 grep）
+//	relation   = 关系类（陈旧会产生"没有调用者"式静默错误，必须硬约束）
+const (
+	codeToolClassDefinition = "definition"
+	codeToolClassRelation   = "relation"
+)
+
+// codeToolSpec 是一个受分级管辖的 code.* 工具。
+type codeToolSpec struct {
+	name  string
+	class string
+	tool  toolkit.Tool
+}
+
+// codeToolGate 是 code.* 的分级注册闸门。
+//
+// 线程安全：sync/descriptionSuffix/toolVisible 都持锁；registry 自身有锁，
+// 两者嵌套顺序固定为 gate.mu → registry.mu，不会反向。
+type codeToolGate struct {
+	resolver tools.CodeIndexResolver
+	config   knowledge.Config
+	registry *toolkit.Registry
+
+	mu         sync.Mutex
+	specs      []codeToolSpec
+	classes    map[string]string
+	registered map[string]bool
+	tier       string
+	staleness  int64
+}
+
+func newCodeToolGate(resolver tools.CodeIndexResolver, cfg knowledge.Config, registry *toolkit.Registry) *codeToolGate {
+	return &codeToolGate{
+		resolver:   resolver,
+		config:     cfg,
+		registry:   registry,
+		classes:    map[string]string{},
+		registered: map[string]bool{},
+	}
+}
+
+func (g *codeToolGate) add(name, class string, tool toolkit.Tool) {
+	if g == nil || tool == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.specs = append(g.specs, codeToolSpec{name: name, class: class, tool: tool})
+	g.classes[name] = class
+}
+
+// evaluate 解析当前档位：
+//   - resolver 未装配 / tools.enabled=false → none（逃生舱：索引照跑，不注册工具）；
+//   - 索引不可用（库不存在 / 打开失败）→ all：保留既有 Degrade-Not-Fail 工具面，
+//     工具执行时各自 fallback 到 grep/view（与 ADR 前行为一致）；
+//   - 索引可用 → handle.Tier（resolver 按 writer / reader+S 计算，含 stale_reader 逃生舱）。
+func (g *codeToolGate) evaluate(ctx context.Context) (string, *tools.CodeIndexHandle) {
+	if g == nil || g.resolver == nil {
+		return tools.CodeIndexTierNone, nil
+	}
+	if !g.config.Tools.ToolsEnabled() {
+		return tools.CodeIndexTierNone, nil
+	}
+	handle, ok := g.resolver(ctx)
+	if !ok || handle == nil {
+		return tools.CodeIndexTierAll, nil
+	}
+	tier := handle.Tier
+	if tier == "" {
+		tier = tools.CodeIndexTierAll
+	}
+	return tier, handle
+}
+
+// sync 重新评估档位并让注册表与档位一致（幂等：档位未变时不触碰注册表，
+// 避免无谓的 SchemaRevision 抖动）。
+func (g *codeToolGate) sync(ctx context.Context) {
+	if g == nil || g.registry == nil {
+		return
+	}
+	tier, handle := g.evaluate(ctx)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.tier = tier
+	if handle != nil {
+		g.staleness = handle.StalenessSeconds
+	} else {
+		g.staleness = 0
+	}
+	for _, spec := range g.specs {
+		want := codeToolTierIncludes(tier, spec.class)
+		if want == g.registered[spec.name] {
+			continue
+		}
+		if want {
+			if err := g.registry.Register(spec.tool); err == nil {
+				g.registered[spec.name] = true
+			}
+			continue
+		}
+		if err := g.registry.Unregister(spec.name); err == nil {
+			delete(g.registered, spec.name)
+		}
+	}
+}
+
+// codeToolTierIncludes 报告某类工具在给定档位下是否注册。
+func codeToolTierIncludes(tier, class string) bool {
+	switch tier {
+	case tools.CodeIndexTierAll:
+		return true
+	case tools.CodeIndexTierDefinitions:
+		return class == codeToolClassDefinition
+	default:
+		return false
+	}
+}
+
+// descriptionSuffix 实现 ADR-0004 §4.3 的描述变体：仅中等陈旧档
+// （definitions）的定义类工具追加陈旧提示，N 为实际陈旧秒数；
+// 其他档位返回空串（schema 恒定，仅 description 文本可变）。
+func (g *codeToolGate) descriptionSuffix(name string) string {
+	if g == nil {
+		return ""
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.tier != tools.CodeIndexTierDefinitions || g.staleness <= 0 {
+		return ""
+	}
+	if g.classes[name] != codeToolClassDefinition {
+		return ""
+	}
+	return fmt.Sprintf(" 结果来自本地索引快照，可能落后约 %d 秒。若需确认某个符号是否存在或已删除，请用 grep 复核。", g.staleness)
+}
+
+// isCodeTool 报告 name 是否受本闸门管辖（含当前未注册的档位）。
+func (g *codeToolGate) isCodeTool(name string) bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, ok := g.classes[name]
+	return ok
+}
+
+// toolVisible 报告 name 在当前档位下是否已注册（模型可见）。
+func (g *codeToolGate) toolVisible(name string) bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.registered[name]
 }

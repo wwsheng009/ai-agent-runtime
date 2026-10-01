@@ -81,13 +81,36 @@ func newCodeIndexResolver(cfg knowledge.Config, workspaceRoot string) tools.Code
 				filePaths[file.ID] = file.Path
 			}
 		}
+		// ADR-0004 §4.1/§4.2：快照元数据来自索引最近一次成功写事务
+		// （Stats.IndexedAt，与 status.go 同源）。writer 判定复用 knowledge
+		// 写锁仲裁：锁持有者是本进程即 writer（本地索引即最新，S=0）。
+		stats, err := store.Stats(ctx, wsID)
+		if err != nil {
+			// 陈旧度未知：视为不可用，工具按降级协议 fallback（fail closed）。
+			return nil, false
+		}
+		writer := knowledge.LockHolderPID(resolved) == os.Getpid()
+		snapshotTS := stats.IndexedAt / 1000
+		stalenessSeconds := int64(0)
+		if !writer && stats.IndexedAt > 0 {
+			if delta := time.Now().UnixMilli() - stats.IndexedAt; delta > 0 {
+				// 向上取整：60.1s 不得因截断仍落在"新鲜"档（安全一侧）。
+				stalenessSeconds = (delta + 999) / 1000
+			}
+		}
 		return &tools.CodeIndexHandle{
-			Index:       store,
-			Mode:        base.Mode,
-			WorkspaceID: wsID,
-			Root:        wsRoot,
-			Semantic:    semanticAdapterFor(base, wsRoot),
-			FilePaths:   filePaths,
+			Index:            store,
+			Mode:             base.Mode,
+			WorkspaceID:      wsID,
+			Root:             wsRoot,
+			Semantic:         semanticAdapterFor(base, wsRoot),
+			FilePaths:        filePaths,
+			SnapshotTS:       snapshotTS,
+			StalenessSeconds: stalenessSeconds,
+			Writer:           writer,
+			Tier: tools.CodeTierForSnapshot(
+				writer, snapshotTS, stalenessSeconds, base.Tools.StaleReaderGradingEnabled(),
+			),
 		}, true
 	}
 }

@@ -118,8 +118,13 @@ func (t *CodeNavigateTool) navigateDefinition(ctx context.Context, symbol string
 	handle, ok := t.resolveIndex(ctx)
 	if !ok {
 		result, _ := t.runGrep(ctx, grepParams)
-		env := fallbackEnvelope("code_navigate", codeFallbackIndexUnavailable, codeConfidenceNone, "grep", result)
+		env := fallbackEnvelope("code_navigate", codeFallbackIndexUnavailable, codeConfidenceNone, "grep", result, nil)
 		return codeResult(env)
+	}
+	// 陈旧度守卫（ADR-0004 §4.1）：definition 是定义类，仅过旧档硬闸。
+	if !definitionTierUsable(handle) {
+		result, _ := t.runGrep(ctx, grepParams)
+		return codeResult(staleGuardEnvelope("code_navigate", handle, "grep", result))
 	}
 	sym, confidence, found, err := resolveCodeSymbol(ctx, handle.Index, symbol, "")
 	if err != nil || !found {
@@ -128,13 +133,13 @@ func (t *CodeNavigateTool) navigateDefinition(ctx context.Context, symbol string
 			reason = codeFallbackIndexError
 		}
 		result, _ := t.runGrep(ctx, grepParams)
-		env := fallbackEnvelope("code_navigate", reason, confidence, "grep", result)
+		env := fallbackEnvelope("code_navigate", reason, confidence, "grep", result, handle)
 		return codeResult(env)
 	}
 	// shadow 档（04 §4.6 第 3 步）：候选照算，但返回 grep 结果。
 	if handle.Mode == knowledge.ModeShadow {
 		result, _ := t.runGrep(ctx, grepParams)
-		env := fallbackEnvelope("code_navigate", codeFallbackShadowMode, confidence, "grep", result)
+		env := fallbackEnvelope("code_navigate", codeFallbackShadowMode, confidence, "grep", result, handle)
 		env.Explanation += " 索引候选 1 条（未返回）。"
 		return codeResult(env)
 	}
@@ -143,6 +148,7 @@ func (t *CodeNavigateTool) navigateDefinition(ctx context.Context, symbol string
 	env := newCodeEnvelope("code_navigate")
 	env.Source = codeSourceIndex
 	env.Confidence = confidence
+	applySnapshot(&env, handle)
 	env.Range = &hit.Range
 	env.Results = []codeSymbolHit{hit}
 	env.Explanation = fmt.Sprintf(
@@ -160,9 +166,14 @@ func (t *CodeNavigateTool) navigateDefinitionAtPosition(ctx context.Context, fil
 	handle, ok := t.resolveIndex(ctx)
 	if !ok {
 		result, _ := t.runView(ctx, map[string]interface{}{"file_path": normalized, "offset": line - 1, "limit": 5})
-		env := fallbackEnvelope("code_navigate", codeFallbackIndexUnavailable, codeConfidenceNone, "view", result)
+		env := fallbackEnvelope("code_navigate", codeFallbackIndexUnavailable, codeConfidenceNone, "view", result, nil)
 		env.Explanation += " 按位置查定义需要索引句柄（语义通道挂在索引句柄上）；已降级为读取该行。"
 		return codeResult(env)
+	}
+	// 陈旧度守卫（ADR-0004 §4.1）：按位置查定义属定义类，仅过旧档硬闸。
+	if !definitionTierUsable(handle) {
+		result, _ := t.runView(ctx, map[string]interface{}{"file_path": normalized, "offset": line - 1, "limit": 5})
+		return codeResult(staleGuardEnvelope("code_navigate", handle, "view", result))
 	}
 	// 1) 语义通道（编译器级口径）。
 	if env, ok := semanticDefinitionAt(ctx, handle, normalized, line, col, limit, clamped); ok {
@@ -174,7 +185,7 @@ func (t *CodeNavigateTool) navigateDefinitionAtPosition(ctx context.Context, fil
 	}
 	// 3) 退化：读取该行附近（至少让模型看到内容）。
 	result, _ := t.runView(ctx, map[string]interface{}{"file_path": normalized, "offset": line - 1, "limit": 5})
-	env := fallbackEnvelope("code_navigate", codeFallbackNoIndexHit, codeConfidenceNone, "view", result)
+	env := fallbackEnvelope("code_navigate", codeFallbackNoIndexHit, codeConfidenceNone, "view", result, handle)
 	env.Explanation += fmt.Sprintf(" 未能在 %s:%d 解析出符号（语义通道不可用且索引无该行记录）；已返回该行附近内容。", normalized, line)
 	return codeResult(env)
 }
@@ -227,6 +238,7 @@ func semanticDefinitionAt(ctx context.Context, handle *CodeIndexHandle, path str
 		env := newCodeEnvelope("code_navigate")
 		env.Source = codeSourceSemantic
 		env.Confidence = codeConfidenceExact
+		applySnapshot(&env, handle)
 		env.Results = results
 		env.Truncated = truncated
 		env.Explanation = fmt.Sprintf(
@@ -258,6 +270,7 @@ func indexDefinitionAt(ctx context.Context, handle *CodeIndexHandle, path string
 			env := newCodeEnvelope("code_navigate")
 			env.Source = codeSourceIndex
 			env.Confidence = confidence
+			applySnapshot(&env, handle)
 			env.Range = &hit.Range
 			env.Results = []codeSymbolHit{hit}
 			env.Explanation = fmt.Sprintf(
@@ -280,6 +293,7 @@ func indexDefinitionAt(ctx context.Context, handle *CodeIndexHandle, path string
 			env := newCodeEnvelope("code_navigate")
 			env.Source = codeSourceIndex
 			env.Confidence = codeConfidenceFTS
+			applySnapshot(&env, handle)
 			env.Range = &hit.Range
 			env.Results = []codeSymbolHit{hit}
 			env.Explanation = fmt.Sprintf(
@@ -375,8 +389,15 @@ func (t *CodeNavigateTool) navigateMembers(ctx context.Context, filePath string,
 	handle, ok := t.resolveIndex(ctx)
 	if !ok {
 		result, _ := t.runView(ctx, map[string]interface{}{"file_path": normalized, "limit": 200})
-		env := fallbackEnvelope("code_navigate", codeFallbackIndexUnavailable, codeConfidenceNone, "view", result)
+		env := fallbackEnvelope("code_navigate", codeFallbackIndexUnavailable, codeConfidenceNone, "view", result, nil)
 		env.Explanation += " members 需要索引；已降级为读取文件头部，请用 grep 继续定位具体成员。"
+		env.Truncated = env.Truncated || clamped
+		return codeResult(env)
+	}
+	// 陈旧度守卫（ADR-0004 §4.1）：members 是定义类，仅过旧档硬闸。
+	if !definitionTierUsable(handle) {
+		result, _ := t.runView(ctx, map[string]interface{}{"file_path": normalized, "limit": 200})
+		env := staleGuardEnvelope("code_navigate", handle, "view", result)
 		env.Truncated = env.Truncated || clamped
 		return codeResult(env)
 	}
@@ -394,7 +415,7 @@ func (t *CodeNavigateTool) navigateMembers(ctx context.Context, filePath string,
 	syms, err := handle.Index.FindSymbols(ctx, knowledge.SymbolQuery{PathPrefix: normalized, Limit: queryLimit})
 	if err != nil {
 		result, _ := t.runView(ctx, map[string]interface{}{"file_path": normalized, "limit": 200})
-		env := fallbackEnvelope("code_navigate", codeFallbackIndexError, codeConfidenceNone, "view", result)
+		env := fallbackEnvelope("code_navigate", codeFallbackIndexError, codeConfidenceNone, "view", result, handle)
 		env.Truncated = env.Truncated || clamped
 		return codeResult(env)
 	}
@@ -402,7 +423,7 @@ func (t *CodeNavigateTool) navigateMembers(ctx context.Context, filePath string,
 	// shadow 档（04 §4.6 第 3 步）：候选照算，但返回 view 结果。
 	if handle.Mode == knowledge.ModeShadow {
 		result, _ := t.runView(ctx, map[string]interface{}{"file_path": normalized, "limit": 200})
-		env := fallbackEnvelope("code_navigate", codeFallbackShadowMode, codeConfidenceExact, "view", result)
+		env := fallbackEnvelope("code_navigate", codeFallbackShadowMode, codeConfidenceExact, "view", result, handle)
 		env.Explanation += fmt.Sprintf(" 索引候选 %d 条（未返回）。", len(syms))
 		env.Truncated = env.Truncated || clamped
 		return codeResult(env)
@@ -430,6 +451,7 @@ func (t *CodeNavigateTool) navigateMembers(ctx context.Context, filePath string,
 	env := newCodeEnvelope("code_navigate")
 	env.Source = codeSourceIndex
 	env.Confidence = codeConfidenceExact
+	applySnapshot(&env, handle)
 	env.Results = results
 	env.Truncated = truncated
 	env.Explanation = fmt.Sprintf("文件 %s 内定义 %d 个符号（索引口径，路径精确匹配）。", normalized, len(results))

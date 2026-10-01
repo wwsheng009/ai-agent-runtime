@@ -72,37 +72,42 @@ func (t *CodeInspectTool) Execute(ctx context.Context, params map[string]interfa
 		result, _ := t.runView(ctx, map[string]interface{}{
 			"file_path": filePath, "offset": offset, "limit": limit,
 		})
-		env := fallbackEnvelope("code_inspect", codeFallbackByRequest, codeConfidenceNone, "view", result)
+		env := fallbackEnvelope("code_inspect", codeFallbackByRequest, codeConfidenceNone, "view", result, nil)
 		return codeResult(env), nil
 	}
 
 	handle, ok := t.resolveIndex(ctx)
 	if !ok {
-		env := t.inspectFallback(ctx, codeFallbackIndexUnavailable, codeConfidenceNone, symbol, filePath, offset, limit)
+		env := t.inspectFallback(ctx, codeFallbackIndexUnavailable, codeConfidenceNone, symbol, filePath, offset, limit, nil)
+		return codeResult(env), nil
+	}
+	// 陈旧度守卫（ADR-0004 §4.1）：定义类在过旧档不返回索引结果，实时兜底。
+	if !definitionTierUsable(handle) {
+		env := t.inspectFallback(ctx, codeFallbackStaleIndex, codeConfidenceNone, symbol, filePath, offset, limit, handle)
 		return codeResult(env), nil
 	}
 
 	sym, confidence, found, err := resolveCodeSymbol(ctx, handle.Index, symbol, "")
 	if err != nil {
-		env := t.inspectFallback(ctx, codeFallbackIndexError, codeConfidenceNone, symbol, filePath, offset, limit)
+		env := t.inspectFallback(ctx, codeFallbackIndexError, codeConfidenceNone, symbol, filePath, offset, limit, handle)
 		return codeResult(env), nil
 	}
 	if !found {
-		env := t.inspectFallback(ctx, codeFallbackNoIndexHit, codeConfidenceNone, symbol, filePath, offset, limit)
+		env := t.inspectFallback(ctx, codeFallbackNoIndexHit, codeConfidenceNone, symbol, filePath, offset, limit, handle)
 		return codeResult(env), nil
 	}
 
 	// shadow 档（04 §4.6 第 3 步）：候选照算，但返回 view/grep 结果，
 	// 不改变模型可见输出。
 	if handle.Mode == knowledge.ModeShadow {
-		env := t.inspectFallback(ctx, codeFallbackShadowMode, confidence, symbol, filePath, offset, limit)
+		env := t.inspectFallback(ctx, codeFallbackShadowMode, confidence, symbol, filePath, offset, limit, handle)
 		env.Explanation += " 索引候选 1 条（未返回）。"
 		return codeResult(env), nil
 	}
 
 	path := handle.PathForFile(sym.FileID)
 	if path == "" {
-		env := t.inspectFallback(ctx, codeFallbackIndexError, confidence, symbol, filePath, offset, limit)
+		env := t.inspectFallback(ctx, codeFallbackIndexError, confidence, symbol, filePath, offset, limit, handle)
 		return codeResult(env), nil
 	}
 
@@ -123,6 +128,7 @@ func (t *CodeInspectTool) Execute(ctx context.Context, params map[string]interfa
 	env := newCodeEnvelope("code_inspect")
 	env.Source = codeSourceIndex
 	env.Confidence = confidence
+	applySnapshot(&env, handle)
 	env.Range = &codeRange{
 		Path:      path,
 		StartLine: sym.Range.Start.Line,
@@ -176,13 +182,20 @@ func inspectDedupHit(result *toolkit.ToolResult) bool {
 }
 
 // inspectFallback 处理符号路径的降级：优先按 file_path 走 view，否则按符号名走 grep。
-func (t *CodeInspectTool) inspectFallback(ctx context.Context, reason string, confidence float64, symbol, filePath string, offset, limit int) codeEnvelope {
+// reason=stale_index 时走陈旧守卫信封（解释实际陈旧度与档位）。
+func (t *CodeInspectTool) inspectFallback(ctx context.Context, reason string, confidence float64, symbol, filePath string, offset, limit int, handle *CodeIndexHandle) codeEnvelope {
+	var result *toolkit.ToolResult
+	fallbackTool := "grep"
 	if filePath != "" {
-		result, _ := t.runView(ctx, map[string]interface{}{
+		fallbackTool = "view"
+		result, _ = t.runView(ctx, map[string]interface{}{
 			"file_path": filePath, "offset": offset, "limit": limit,
 		})
-		return fallbackEnvelope("code_inspect", reason, confidence, "view", result)
+	} else {
+		result, _ = t.runGrep(ctx, map[string]interface{}{"pattern": symbol, "literal": true})
 	}
-	result, _ := t.runGrep(ctx, map[string]interface{}{"pattern": symbol, "literal": true})
-	return fallbackEnvelope("code_inspect", reason, confidence, "grep", result)
+	if reason == codeFallbackStaleIndex {
+		return staleGuardEnvelope("code_inspect", handle, fallbackTool, result)
+	}
+	return fallbackEnvelope("code_inspect", reason, confidence, fallbackTool, result, handle)
 }
