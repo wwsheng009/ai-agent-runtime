@@ -118,8 +118,8 @@ func (e *DefaultCommandExecuter) ExecuteDetailed(ctx context.Context, command st
 		cmd.Dir = cfg.workdir
 	}
 
-	// 过滤敏感环境变量
-	cmd.Env = runtimeexecutor.FilterSensitiveEnv(os.Environ())
+	// 过滤敏感环境变量，并注入 resolver 选定的 rg 目录，保证 shell 内可直接调用 rg。
+	cmd.Env = runtimeexecutor.WithResolvedRipgrepPath(runtimeexecutor.FilterSensitiveEnv(os.Environ()))
 
 	// PowerShell 需要 UTF-8 输出编码
 	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {

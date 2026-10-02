@@ -56,6 +56,31 @@ func LookPath(name string) (string, error) {
 	return resolution.Path, nil
 }
 
+// ShellPrependDir returns the directory to prepend to a child process PATH so
+// a plain `rg` invocation resolves even when the binary is only available via
+// AICLI_RG_PATH, the release-bundled codex-path copy, or an adjacent file.
+// Only canonical file names qualify (rg.exe on Windows, rg elsewhere): PATH
+// cannot alias an arbitrary executable name.
+func ShellPrependDir() (string, bool) {
+	resolution, err := Resolve()
+	if err != nil {
+		return "", false
+	}
+	base := filepath.Base(strings.TrimSpace(resolution.Path))
+	if runtime.GOOS == "windows" {
+		if !strings.EqualFold(base, "rg.exe") {
+			return "", false
+		}
+	} else if base != "rg" {
+		return "", false
+	}
+	dir := strings.TrimSpace(filepath.Dir(resolution.Path))
+	if dir == "" || dir == "." {
+		return "", false
+	}
+	return dir, true
+}
+
 // SourceForPath classifies a resolved path without changing execution policy.
 func SourceForPath(path string) string {
 	path = strings.TrimSpace(path)

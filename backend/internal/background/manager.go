@@ -2959,7 +2959,10 @@ func buildShellCommand(ctx context.Context, command string) *exec.Cmd {
 	// 使用智能 shell 检测，与 BashTool 保持一致
 	shell := runtimeexecutor.DefaultUserShell()
 	shellArgs := shell.DeriveExecArgs(command, false)
-	return exec.CommandContext(ctx, shellArgs[0], shellArgs[1:]...)
+	cmd := exec.CommandContext(ctx, shellArgs[0], shellArgs[1:]...)
+	// 注入 resolver 选定的 rg 目录，保证后台命令内可直接调用 rg。
+	cmd.Env = runtimeexecutor.WithResolvedRipgrepPath(os.Environ())
+	return cmd
 }
 
 func exitCodeFromError(err error) int {

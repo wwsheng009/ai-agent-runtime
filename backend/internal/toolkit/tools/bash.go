@@ -23,6 +23,7 @@ import (
 	runtimeexecutor "github.com/wwsheng009/ai-agent-runtime/internal/executor"
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
 	"github.com/wwsheng009/ai-agent-runtime/internal/output"
+	runtimeripgrep "github.com/wwsheng009/ai-agent-runtime/internal/ripgrep"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolprotocol"
@@ -346,17 +347,12 @@ func (b *BashTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// an unmatched glob, a quoted token, or a shell that never expands globs
 	// (PowerShell/cmd). A glob that really expands under effectiveWorkdir -
 	// e.g. `grep -rn x cmd/aicli/commands/*.go` on bash - is a legitimate
-	// search and must not be rejected for its syntax.
-	if globToken, blocked := searchPathGlobLiteralToken(command, effectiveWorkdir); blocked {
-		return toolResultFailureWithCode(
-			fmt.Errorf("检测到搜索命令的 path 参数 `%s` 会被原样传给 rg/grep（当前 shell 不展开该通配符，或它在 workdir 下没有任何匹配），将以路径错误失败。请改用 `rg -g \"*.go\" pattern backend`、换成真实存在的目录，或优先调用 toolkit `grep`（path + glob）。", globToken),
-			string(runtimeerrors.ErrToolShellCompat),
-			"Prefer toolkit `grep` with path and glob. If shell rg is required, use `-g \"*.go\"` / `--glob` and keep path as a real directory; do not pass a path glob that matches no existing path.",
-			map[string]interface{}{
-				"failure_class": "shell_preflight",
-				"path_glob":     globToken,
-			},
-		), nil
+	// search and runs normally. A literal-reaching glob is soft-redirected
+	// (executed=false + next_action) instead of hard-failed, so piped/compound
+	// searches share the simple-search redirect contract and a fixable command
+	// shape does not poison batch accounting.
+	if globToken, literal := searchPathGlobLiteralToken(command, effectiveWorkdir); literal {
+		return bashSearchPathGlobRedirectResult(globToken), nil
 	}
 
 	// detach=true: fire-and-forget launch outside the per-command job object.
@@ -1036,8 +1032,8 @@ func (e *DefaultCommandExecuter) Execute(ctx context.Context, command string, ti
 		cmd.Dir = cfg.workdir
 	}
 
-	// 过滤敏感环境变量
-	cmd.Env = runtimeexecutor.FilterSensitiveEnv(os.Environ())
+	// 过滤敏感环境变量，并注入 resolver 选定的 rg 目录，保证 shell 内可直接调用 rg。
+	cmd.Env = runtimeexecutor.WithResolvedRipgrepPath(runtimeexecutor.FilterSensitiveEnv(os.Environ()))
 
 	// PowerShell 需要 UTF-8 输出编码
 	if shell.Type == runtimeexecutor.ShellTypePowerShell || shell.Type == runtimeexecutor.ShellTypePwsh {
@@ -1692,6 +1688,15 @@ func friendlyHintForSearchTool(toolName, command, output string, exitCode int, w
 			toolName,
 			truncateDiagnosticText(strings.TrimSpace(command), 160),
 		)
+	case looksLikeMissingSearchToolOutput(cleanedLower, toolName) ||
+		looksLikeMissingSearchToolOutput(rawLower, toolName):
+		// The shell could not find rg/grep itself. Steer to toolkit grep, whose
+		// builtin scanner makes ripgrep optional, instead of retrying an
+		// install-dependent command.
+		return fmt.Sprintf(
+			"提示: 当前 shell 找不到 `%s`（未安装或不在 PATH）。直接改用 toolkit `grep`：它优先使用 rg，不可用时自动回退内置扫描，无需安装 ripgrep；确需 shell rg 时可安装 ripgrep，或设置 AICLI_RG_PATH 后以该绝对路径调用。",
+			toolName,
+		)
 	case exitCode == 1:
 		// rg/grep exit 1 means "no matches" when there is no real error body.
 		// Models often retry uselessly; point them at the dedicated grep tool.
@@ -1715,6 +1720,33 @@ func friendlyHintForSearchTool(toolName, command, output string, exitCode int, w
 		)
 	}
 	return ""
+}
+
+// looksLikeMissingSearchToolOutput reports shell output where the search tool
+// binary itself is missing, while avoiding blaming rg for a missing pipe stage
+// such as `head`. The caller passes lowercased text and the tool name.
+func looksLikeMissingSearchToolOutput(outputLower, toolName string) bool {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	if name == "" || strings.TrimSpace(outputLower) == "" {
+		return false
+	}
+	for _, quoted := range []string{"'" + name + "'", "\"" + name + "\""} {
+		if strings.Contains(outputLower, quoted) &&
+			(strings.Contains(outputLower, "not recognized") ||
+				strings.Contains(outputLower, "command not found") ||
+				strings.Contains(outputLower, "executable file not found") ||
+				strings.Contains(outputLower, "not found")) {
+			return true
+		}
+	}
+	switch {
+	case strings.Contains(outputLower, name+": command not found"),
+		strings.Contains(outputLower, name+": not found"),
+		strings.Contains(outputLower, "exec: \""+name+"\""),
+		strings.Contains(outputLower, "exec: "+name+":"):
+		return true
+	}
+	return false
 }
 
 // isSearchToolNoMatch reports whether a failed shell command is the common
@@ -2447,6 +2479,9 @@ func bashCommandFailureNextAction(command, output string, err error, workdir str
 		searchOutputLooksLikePathIOError(err.Error()) {
 		return "Shell search path looks like an unexpanded glob or path IO error. Prefer toolkit `grep` with path + glob; if using shell rg, put filters in `-g \"*.go\"` and keep path as a real directory. Do not retry `rg pattern dir/**/*.go` on Windows."
 	}
+	if looksLikeMissingSearchToolOutput(combined, firstSearchToolToken(runtimeexecutor.SplitCommandTokens(command))) {
+		return "Shell search tool is missing or not on PATH. Call toolkit `grep` directly: its engine prefers rg but falls back to the builtin scanner, so no install is required. Do not replay the shell search unchanged."
+	}
 	if looksLikeSearchShellCommand(command) ||
 		strings.Contains(combined, "regex parse") ||
 		strings.Contains(combined, "regex error") {
@@ -2496,7 +2531,8 @@ func bashCommandPreflight(command string) (blocked bool, message, nextAction str
 	}
 	// Path-position globs are checked by searchPathGlobLiteralToken after the
 	// effective workdir is resolved: a glob that really expands to existing
-	// files is a legitimate search, only a literal-reaching glob is blocked.
+	// files is a legitimate search; literal-reaching globs are soft-redirected
+	// (not hard-failed) by bashSearchPathGlobRedirectResult.
 	if !runtimeexecutor.IsWindows() {
 		return false, "", ""
 	}
@@ -2517,20 +2553,23 @@ type searchPathGlobCandidate struct {
 
 // searchPathGlobCandidates returns every path-position glob token in an rg/grep
 // command, preserving whether the token was fully quoted. The first positional
-// after the search tool is the pattern (a regex may legally contain * ? []), so
-// only later positionals are candidates; -g/--glob values are legitimate and
-// were already consumed as flag values.
+// after the search tool is the pattern (a regex may legally contain * ? [])
+// unless the pattern comes from -e/--regexp/-f/--file or the tool runs a
+// patternless mode (rg --files); only then are all positionals paths. -g/--glob
+// values are legitimate and were already consumed as flag values.
 func searchPathGlobCandidates(command string) []searchPathGlobCandidate {
 	if !looksLikeSearchShellCommand(command) {
 		return nil
 	}
 	tokens := runtimeexecutor.SplitCommandTokensDetailed(command)
 	searchIdx := -1
+	searchTool := ""
 	for i, token := range tokens {
 		base := strings.ToLower(filepath.Base(strings.TrimSpace(token.Text)))
 		base = strings.TrimSuffix(base, ".exe")
 		if isRipgrepOrGrepTool(base) {
 			searchIdx = i
+			searchTool = base
 			break
 		}
 	}
@@ -2539,6 +2578,9 @@ func searchPathGlobCandidates(command string) []searchPathGlobCandidate {
 	}
 	var candidates []searchPathGlobCandidate
 	positional := 0
+	patternFromFlag := false
+	patternlessMode := false
+	flagsEnded := false
 	for i := searchIdx + 1; i < len(tokens); i++ {
 		part := strings.TrimSpace(tokens[i].Text)
 		if part == "" {
@@ -2548,12 +2590,19 @@ func searchPathGlobCandidates(command string) []searchPathGlobCandidate {
 		if part == "|" || part == "||" || part == "&&" || part == ";" {
 			break
 		}
-		if strings.HasPrefix(part, "-") {
-			if searchFlagConsumesNextValue(part) {
-				// Combined forms like -g*.go / --glob=*.go already consumed the value.
-				if searchFlagHasInlineValue(part) {
-					continue
-				}
+		if !flagsEnded && part == "--" {
+			flagsEnded = true
+			continue
+		}
+		if !flagsEnded && strings.HasPrefix(part, "-") {
+			if searchFlagSuppliesPattern(part) {
+				patternFromFlag = true
+			}
+			if searchFlagIsPatternlessMode(part) {
+				patternlessMode = true
+			}
+			if searchFlagConsumesNextValue(part, searchTool) && !searchFlagHasInlineValue(part) {
+				// Skip the flag value; combined forms like -g*.go already carry it.
 				if i+1 < len(tokens) && !strings.HasPrefix(strings.TrimSpace(tokens[i+1].Text), "-") {
 					i++
 				}
@@ -2561,11 +2610,12 @@ func searchPathGlobCandidates(command string) []searchPathGlobCandidate {
 			continue
 		}
 		positional++
-		// First positional is the pattern (regex may legally contain * ? []).
-		if positional == 1 {
+		// The first positional is the pattern unless a flag supplied it or the
+		// search mode has no pattern at all.
+		if positional == 1 && !patternFromFlag && !patternlessMode {
 			continue
 		}
-		// Later positionals are paths: globs here are the residual failure mode.
+		// Remaining positionals are paths: globs here are the residual failure mode.
 		if pathTokenHasShellGlob(part) {
 			candidates = append(candidates, searchPathGlobCandidate{Token: part, Quoted: tokens[i].FullyQuoted})
 		}
@@ -2732,6 +2782,106 @@ func searchPathGlobReachesTool(command, workdir string) bool {
 	return reaches
 }
 
+// searchToolLookPath and ripgrepShellDir are stubbable so tests do not depend
+// on the host PATH or on the resolver's environment.
+var (
+	searchToolLookPath = exec.LookPath
+	ripgrepShellDir    = runtimeripgrep.ShellPrependDir
+)
+
+// shellRipgrepAvailable reports whether a plain `rg` invocation can run in the
+// command shell: either PATH/PATHEXT already resolves it, or command execution
+// will prepend the resolver-selected canonical rg directory to PATH.
+func shellRipgrepAvailable() bool {
+	if path, err := searchToolLookPath("rg"); err == nil && strings.TrimSpace(path) != "" {
+		return true
+	}
+	_, ok := ripgrepShellDir()
+	return ok
+}
+
+// bashSearchPathGlobRedirectResult soft-redirects a shell search whose
+// path-position glob would reach rg/grep literally. The command is not
+// executed; the model gets the same success-shaped contract as the simple
+// shell-search redirect plus a concrete -g rewrite derived from the offending
+// token (dir/*_test.go -> `rg -g "*_test.go" <pattern> dir`). When no rg can
+// run in the shell, the rewrite is omitted and toolkit grep (whose builtin
+// scanner needs no rg) becomes the only suggested path.
+func bashSearchPathGlobRedirectResult(globToken string) *toolkit.ToolResult {
+	metadata := map[string]interface{}{
+		toolresult.MetadataOutcomeKey: toolresult.OutcomeSuccess,
+		"shell_search_redirected":     true,
+		"shell_path_glob_redirected":  true,
+		"redirect_tool":               "grep",
+		"executed":                    false,
+		"path_glob":                   globToken,
+	}
+	rgAvailable := shellRipgrepAvailable()
+	metadata["shell_rg_available"] = rgAvailable
+	if !rgAvailable {
+		metadata[toolresult.MetadataNextActionKey] = "Call toolkit `grep` with path and glob. Its engine prefers rg but falls back to the builtin scanner, so a missing rg binary does not block the search; do not replay the shell path glob unchanged."
+		return &toolkit.ToolResult{
+			Success:    true,
+			OutputKind: toolresult.KindText,
+			Content: fmt.Sprintf(
+				"未执行：搜索命令的 path 参数 `%s` 含 shell 通配符，会被原样传给 rg/grep 并触发路径错误（当前 shell 不展开该通配符，或它在 workdir 下没有任何匹配）。这不是无匹配结果，也不是 hard failure。当前 shell PATH 上没有可用的 `rg`，请把通配符交给 toolkit `grep` 的 path + glob 参数：它的引擎优先使用 rg，不可用时自动回退内置扫描，无需安装 ripgrep。",
+				globToken,
+			),
+			Metadata: metadata,
+		}
+	}
+	rewrite := searchPathGlobRewriteSuggestion(globToken)
+	rewriteHint := "`rg -g \"*.go\" <pattern> <真实目录>`"
+	nextAction := "Prefer toolkit `grep` with path and glob. If shell rg is required, use `-g \"*.go\"` / `--glob` and keep path as a real directory; do not pass a path glob that matches no existing path."
+	if rewrite != "" {
+		rewriteHint = rewrite
+		nextAction = fmt.Sprintf("Re-run with the glob moved into the search tool filter, e.g. %s, or call toolkit `grep` with path + glob. Do not replay the same path glob unchanged.", rewrite)
+	}
+	content := fmt.Sprintf(
+		"未执行：搜索命令的 path 参数 `%s` 含 shell 通配符，会被原样传给 rg/grep 并触发路径错误（当前 shell 不展开该通配符，或它在 workdir 下没有任何匹配；Windows 常见 os error 123）。这不是无匹配结果，也不是 hard failure。请改用 %s（`-g` 会把通配符交给 rg/grep 自身，且通常递归子目录；若只需该目录一层，请改为显式文件列表），或直接调用 toolkit `grep`（path + glob）。",
+		globToken, rewriteHint,
+	)
+	metadata[toolresult.MetadataNextActionKey] = nextAction
+	return &toolkit.ToolResult{
+		Success:    true,
+		OutputKind: toolresult.KindText,
+		Content:    content,
+		Metadata:   metadata,
+	}
+}
+
+// searchPathGlobRewriteSuggestion derives the concrete -g rewrite for a
+// path-position glob. Directory parts that are themselves globs (or a bare
+// filename glob) fall back to placeholders so the suggestion never contains
+// another literal path glob that would fail the same way.
+func searchPathGlobRewriteSuggestion(globToken string) string {
+	parts := strings.Split(filepath.ToSlash(strings.TrimSpace(globToken)), "/")
+	pattern := ""
+	dirParts := make([]string, 0, len(parts))
+	for i := len(parts) - 1; i >= 0; i-- {
+		part := strings.TrimSpace(parts[i])
+		if part == "" || part == "**" {
+			continue
+		}
+		if pattern == "" {
+			pattern = part
+			continue
+		}
+		dirParts = append([]string{part}, dirParts...)
+	}
+	if pattern == "" {
+		return ""
+	}
+	dir := strings.Join(dirParts, "/")
+	if dir == "." {
+		dir = ""
+	}
+	if dir == "" || hasGlobMeta(dir) {
+		return fmt.Sprintf("`rg -g %q <pattern> <真实目录>`", pattern)
+	}
+	return fmt.Sprintf("`rg -g %q <pattern> %s`", pattern, dir)
+}
+
 // searchRunsAfterDirectoryChange reports whether a cd/chdir/Set-Location token
 // appears before the rg/grep invocation; workdir-based glob resolution is
 // unreliable for those commands.
@@ -2750,39 +2900,89 @@ func searchRunsAfterDirectoryChange(tokens []string) bool {
 	return false
 }
 
-func searchFlagConsumesNextValue(flag string) bool {
-	lower := strings.ToLower(strings.TrimSpace(flag))
-	if searchFlagHasInlineValue(lower) {
+// searchFlagConsumesNextValue reports whether flag takes the next token as its
+// value. Short flags are matched case-sensitively (grep -f FILE vs -F
+// fixed-strings; rg -r REPLACE vs grep -r recursive) and tool-aware where the
+// meaning differs between rg and grep.
+func searchFlagConsumesNextValue(flag, tool string) bool {
+	raw := strings.TrimSpace(flag)
+	lower := strings.ToLower(raw)
+	if searchFlagHasInlineValue(raw) {
 		return true
 	}
 	switch lower {
-	case "-e", "--regexp", "-f", "--file", "-g", "--glob", "--iglob",
-		"-t", "--type", "-T", "--type-not", "-m", "--max-count",
-		"-A", "--after-context", "-B", "--before-context", "-C", "--context",
-		"--max-depth", "--max-filesize", "--sort", "--sortr",
-		"-r", "--replace", "--type-add", "--type-clear", "--ignore-file",
-		"--engine", "--field-context-separator", "--path-separator",
-		"--context-separator":
+	case "--regexp", "--file", "--glob", "--iglob", "--type", "--type-not",
+		"--max-count", "--after-context", "--before-context", "--context",
+		"--max-depth", "--max-filesize", "--sort", "--sortr", "--replace",
+		"--type-add", "--type-clear", "--ignore-file", "--engine",
+		"--field-context-separator", "--path-separator", "--context-separator":
 		return true
-	default:
-		// Combined short form -g*.go already handled by HasInlineValue.
-		return false
 	}
+	switch raw {
+	case "-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C":
+		return true
+	case "-r":
+		// rg -r/--replace takes a value; grep -r is recursive and takes none.
+		return tool == "rg" || tool == "ripgrep"
+	}
+	return false
+}
+
+// searchFlagSuppliesPattern reports whether the flag itself supplies the search
+// pattern (-e/--regexp, -f/--file, including inline forms), which means the
+// first positional token is a path rather than the pattern. Matching stays
+// case-sensitive so grep -F (fixed strings) is not mistaken for -f FILE.
+func searchFlagSuppliesPattern(flag string) bool {
+	raw := strings.TrimSpace(flag)
+	lower := strings.ToLower(raw)
+	if eq := strings.IndexByte(lower, '='); eq >= 0 {
+		switch lower[:eq] {
+		case "--regexp", "--file":
+			return true
+		}
+	}
+	switch lower {
+	case "--regexp", "--file":
+		return true
+	}
+	switch {
+	case raw == "-e", raw == "-f":
+		return true
+	case strings.HasPrefix(raw, "-e") && !strings.HasPrefix(raw, "-e-"):
+		return len(raw) > 2
+	case strings.HasPrefix(raw, "-f"):
+		return len(raw) > 2
+	}
+	return false
+}
+
+// searchFlagIsPatternlessMode reports search modes that take no pattern, so
+// every positional token is a path (rg --files).
+func searchFlagIsPatternlessMode(flag string) bool {
+	lower := strings.ToLower(strings.TrimSpace(flag))
+	if eq := strings.IndexByte(lower, '='); eq >= 0 {
+		lower = lower[:eq]
+	}
+	return lower == "--files"
 }
 
 func searchFlagHasInlineValue(flag string) bool {
-	lower := strings.ToLower(strings.TrimSpace(flag))
+	raw := strings.TrimSpace(flag)
+	lower := strings.ToLower(raw)
 	if strings.HasPrefix(lower, "--") {
 		return strings.Contains(lower, "=")
 	}
-	// Short combined flags: -g*.go, -m10, -A2, -n is flag-only.
-	if strings.HasPrefix(lower, "-g") && lower != "-g" {
+	// Short combined flags: -g*.go, -ePATTERN, -fFILE; -m10/-A2 stay flag+value
+	// pairs and are handled by searchFlagConsumesNextValue.
+	switch {
+	case strings.HasPrefix(raw, "-g") && raw != "-g":
 		return true
-	}
-	if strings.HasPrefix(lower, "-e") && lower != "-e" && !strings.HasPrefix(lower, "-e-") {
+	case strings.HasPrefix(raw, "-e") && raw != "-e" && !strings.HasPrefix(raw, "-e-"):
 		// -ePATTERN is uncommon but possible; treat non-exact -e* carefully.
-		// Only -e followed by more alnum content without another short flag letter soup.
-		return len(lower) > 2
+		return len(raw) > 2
+	case strings.HasPrefix(raw, "-f") && raw != "-f":
+		// -fFILE mirrors grep/getopt attached-value form; -F stays fixed-strings.
+		return len(raw) > 2
 	}
 	return false
 }

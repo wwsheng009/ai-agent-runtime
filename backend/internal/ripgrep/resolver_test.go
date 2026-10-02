@@ -87,3 +87,25 @@ func writeTestExecutable(t *testing.T, path string) string {
 	}
 	return abs
 }
+
+func TestShellPrependDirRequiresCanonicalName(t *testing.T) {
+	dir := t.TempDir()
+	canonical := writeTestExecutable(t, filepath.Join(dir, executableName()))
+	t.Setenv(EnvironmentPath, canonical)
+	t.Setenv("PATH", t.TempDir())
+
+	got, ok := ShellPrependDir()
+	if !ok {
+		t.Fatal("expected canonical rg to be PATH-injectable")
+	}
+	if got != dir {
+		t.Fatalf("prepend dir = %q, want %q", got, dir)
+	}
+
+	oddDir := t.TempDir()
+	odd := writeTestExecutable(t, filepath.Join(oddDir, "rg-alt"+filepath.Ext(executableName())))
+	t.Setenv(EnvironmentPath, odd)
+	if got, ok := ShellPrependDir(); ok {
+		t.Fatalf("non-canonical rg must not be PATH-injectable, got %q", got)
+	}
+}

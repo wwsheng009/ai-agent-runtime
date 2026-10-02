@@ -1804,6 +1804,42 @@ func TestSearchPathGlobCandidates(t *testing.T) {
 	if len(searchPathGlobCandidates(`go test ./...`)) != 0 {
 		t.Fatal("non-search commands must not match")
 	}
+	// -e/--regexp and -f/--file supply the pattern themselves, so the first
+	// positional is a path and must be inspected.
+	for _, command := range []string{
+		`rg -n -e foo backend/internal/errors/*.go`,
+		`rg -n --regexp foo backend/internal/errors/*.go`,
+		`rg -n --regexp=foo backend/internal/errors/*.go`,
+		`rg -n -f patterns.txt backend/internal/errors/*.go`,
+		`rg -n --file patterns.txt backend/internal/errors/*.go`,
+		`grep -n -e foo backend/internal/errors/*.go`,
+		`grep -n -f patterns.txt backend/internal/errors/*.go`,
+	} {
+		candidates = searchPathGlobCandidates(command)
+		if len(candidates) != 1 || candidates[0].Token != "backend/internal/errors/*.go" {
+			t.Fatalf("expected pattern-from-flag command %q to expose the path glob, got %#v", command, candidates)
+		}
+	}
+	// rg --files has no pattern: every positional is a path.
+	if candidates = searchPathGlobCandidates(`rg --files backend/internal/errors/*.go`); len(candidates) != 1 || candidates[0].Token != "backend/internal/errors/*.go" {
+		t.Fatalf("expected rg --files path glob, got %#v", candidates)
+	}
+	// grep -r is recursive (no value); only rg -r consumes a replacement.
+	if candidates = searchPathGlobCandidates(`grep -r foo backend/internal/errors/*.go`); len(candidates) != 1 {
+		t.Fatalf("grep -r must not swallow the pattern, got %#v", candidates)
+	}
+	// grep -F is fixed-strings, not -f FILE.
+	if candidates = searchPathGlobCandidates(`grep -F foo backend/internal/errors/*.go`); len(candidates) != 1 {
+		t.Fatalf("grep -F must not be mistaken for -f FILE, got %#v", candidates)
+	}
+	// An -e value that looks like a glob is a regex, not a path.
+	if len(searchPathGlobCandidates(`rg -n -e "a*b" backend`)) != 0 {
+		t.Fatal("-e value must not become a path candidate")
+	}
+	// -- ends flag parsing; the first positional after it is still the pattern.
+	if candidates = searchPathGlobCandidates(`rg -n -- pattern backend/internal/errors/*.go`); len(candidates) != 1 {
+		t.Fatalf("expected path glob after --, got %#v", candidates)
+	}
 }
 
 func TestClassifyPathGlobResolution(t *testing.T) {
@@ -1899,55 +1935,156 @@ func TestResolvePathGlobPattern(t *testing.T) {
 	}
 }
 
-func TestBashTool_SearchPathShellGlobPreflight(t *testing.T) {
-	if !shellExpandsUnquotedGlobs(runtimeexecutor.DefaultUserShell()) {
-		t.Skip("path-position globs are only expandable on POSIX shells")
-	}
+func TestBashTool_SearchPathShellGlobHandling(t *testing.T) {
+	// Pin shell rg availability so redirect messages do not depend on the host.
+	originalLookPath := searchToolLookPath
+	searchToolLookPath = func(string) (string, error) { return "/usr/bin/rg", nil }
+	t.Cleanup(func() { searchToolLookPath = originalLookPath })
+
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "sample.go"), []byte("package sample"), 0o644); err != nil {
 		t.Fatalf("write sample.go: %v", err)
 	}
 
-	// A glob that really expands runs instead of being rejected for its syntax.
-	tool := NewBashTool()
-	tool.SetBasePath(dir)
-	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "sample.go:1:func sample"}}
-	result, err := tool.Execute(context.Background(), map[string]interface{}{
-		"command": `grep -rn "func sample" *.go | head -20`,
-	})
-	if err != nil {
-		t.Fatalf("unexpected outer error: %v", err)
-	}
-	if !result.Success {
-		t.Fatalf("expanding path glob should execute, got error: %v", result.Error)
-	}
-	if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code == "TOOL_SHELL_COMPAT" {
-		t.Fatalf("expanding path glob must not be preflight-blocked: %#v", result.Metadata)
+	// A glob that really expands runs instead of being redirected for its syntax.
+	if shellExpandsUnquotedGlobs(runtimeexecutor.DefaultUserShell()) {
+		tool := NewBashTool()
+		tool.SetBasePath(dir)
+		tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "sample.go:1:func sample"}}
+		result, err := tool.Execute(context.Background(), map[string]interface{}{
+			"command": `grep -rn "func sample" *.go | head -20`,
+		})
+		if err != nil {
+			t.Fatalf("unexpected outer error: %v", err)
+		}
+		if !result.Success || result.Metadata["shell_path_glob_redirected"] == true {
+			t.Fatalf("expanding path glob should execute, got %#v", result)
+		}
 	}
 
-	// An unmatched glob would reach grep literally: block with actionable guidance.
-	tool = NewBashTool()
-	tool.SetBasePath(dir)
-	tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "should-not-run"}}
-	result, err = tool.Execute(context.Background(), map[string]interface{}{
-		"command": `grep -rn "func sample" missing-dir/*.go`,
-	})
-	if err != nil {
-		t.Fatalf("unexpected outer error: %v", err)
+	// A literal-reaching glob is soft-redirected on every shell: no failure, no
+	// execution, and a concrete -g rewrite in content/next_action. The three
+	// commands cover the reported piped case, rg --files, and -e PATTERN, which
+	// used to escape candidate detection.
+	for _, command := range []string{
+		`grep -rn "func sample" missing-dir/*.go | head -20`,
+		`rg --files 'missing-dir/*.go'`,
+		`rg -n -e sample 'missing-dir/*.go' | Select-Object -First 5`,
+	} {
+		tool := NewBashTool()
+		tool.SetBasePath(dir)
+		tool.executer = fakeExecuter{result: CommandExecutionResult{Output: "should-not-run"}}
+		result, err := tool.Execute(context.Background(), map[string]interface{}{"command": command})
+		if err != nil {
+			t.Fatalf("unexpected outer error for %q: %v", command, err)
+		}
+		if !result.Success || result.Error != nil {
+			t.Fatalf("literal path glob must be a soft redirect, not a failure: %q -> %#v", command, result)
+		}
+		if result.Metadata["shell_path_glob_redirected"] != true || result.Metadata["executed"] != false {
+			t.Fatalf("expected path-glob redirect metadata for %q, got %#v", command, result.Metadata)
+		}
+		if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code != "" {
+			t.Fatalf("soft redirect must not carry an error code for %q, got %q", command, code)
+		}
+		glob, _ := result.Metadata["path_glob"].(string)
+		if !strings.Contains(glob, "*") {
+			t.Fatalf("expected path_glob token for %q, got %#v", command, result.Metadata)
+		}
+		next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
+		if !strings.Contains(next, "-g") && !strings.Contains(strings.ToLower(next), "grep") {
+			t.Fatalf("expected next_action to steer to grep/-g for %q, got %q", command, next)
+		}
+		if !strings.Contains(result.Content, "未执行") || !strings.Contains(result.Content, "-g") {
+			t.Fatalf("expected precise redirect content for %q, got %q", command, result.Content)
+		}
 	}
-	if result.Success || result.Error == nil {
-		t.Fatalf("expected preflight block for unmatched path glob, got %#v", result)
+}
+
+func TestSearchPathGlobRewriteSuggestion(t *testing.T) {
+	if got := searchPathGlobRewriteSuggestion("backend/cmd/aicli/commands/*_test.go"); !strings.Contains(got, `-g "*_test.go"`) || !strings.Contains(got, "backend/cmd/aicli/commands") {
+		t.Fatalf("expected concrete -g rewrite, got %q", got)
 	}
-	errText := result.Error.Error()
-	if !strings.Contains(errText, "通配符") && !strings.Contains(errText, "glob") && !strings.Contains(errText, "-g") {
-		t.Fatalf("expected path-glob recovery message, got %q", errText)
+	if got := searchPathGlobRewriteSuggestion("backend/**/*.go"); !strings.Contains(got, `-g "*.go"`) || !strings.Contains(got, "backend") || strings.Contains(got, "**") {
+		t.Fatalf("expected ** to be folded out of the rewrite, got %q", got)
+	}
+	if got := searchPathGlobRewriteSuggestion("*.go"); !strings.Contains(got, "<真实目录>") {
+		t.Fatalf("bare filename glob must use a placeholder directory, got %q", got)
+	}
+	if got := searchPathGlobRewriteSuggestion("src*/x.go"); !strings.Contains(got, "<真实目录>") || strings.Contains(got, "src*") {
+		t.Fatalf("globby directory part must not leak into the rewrite, got %q", got)
+	}
+}
+
+func TestBashSearchPathGlobRedirectRespectsRipgrepAvailability(t *testing.T) {
+	originalLookPath := searchToolLookPath
+	t.Cleanup(func() { searchToolLookPath = originalLookPath })
+	originalShellDir := ripgrepShellDir
+	ripgrepShellDir = func() (string, bool) { return "", false }
+	t.Cleanup(func() { ripgrepShellDir = originalShellDir })
+
+	searchToolLookPath = func(string) (string, error) { return "/usr/bin/rg", nil }
+	result := bashSearchPathGlobRedirectResult("backend/cmd/aicli/commands/*_test.go")
+	if !result.Success {
+		t.Fatal("redirect must stay success-shaped")
+	}
+	if result.Metadata["shell_rg_available"] != true {
+		t.Fatalf("expected rg-available metadata, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, `-g "*_test.go"`) || !strings.Contains(result.Content, "backend/cmd/aicli/commands") {
+		t.Fatalf("expected concrete rg rewrite when rg is on PATH, got %q", result.Content)
+	}
+
+	searchToolLookPath = func(string) (string, error) { return "", os.ErrNotExist }
+	result = bashSearchPathGlobRedirectResult("backend/cmd/aicli/commands/*_test.go")
+	if result.Metadata["shell_rg_available"] != false || !result.Success {
+		t.Fatalf("expected success-shaped rg-missing redirect, got %#v", result)
+	}
+	if strings.Contains(result.Content, "rg -g") {
+		t.Fatalf("must not suggest shell rg when it is unavailable, got %q", result.Content)
+	}
+	if !strings.Contains(result.Content, "toolkit `grep`") || !strings.Contains(result.Content, "内置扫描") {
+		t.Fatalf("expected builtin-fallback guidance, got %q", result.Content)
 	}
 	next, _ := result.Metadata[toolresult.MetadataNextActionKey].(string)
-	if !strings.Contains(strings.ToLower(next), "grep") && !strings.Contains(next, "-g") {
-		t.Fatalf("expected next_action to steer to grep/-g, got %q", next)
+	if !strings.Contains(strings.ToLower(next), "builtin") {
+		t.Fatalf("expected next_action to mention the builtin fallback, got %q", next)
 	}
-	if code, _ := result.Metadata[toolresult.MetadataErrorCodeKey].(string); code != "TOOL_SHELL_COMPAT" {
-		t.Fatalf("expected TOOL_SHELL_COMPAT for path-glob preflight, got %#v", result.Metadata)
+
+	// The resolver-provided rg will be prepended to the child PATH, so the
+	// shell rewrite stays available even though the parent PATH lacks rg.
+	ripgrepShellDir = func() (string, bool) { return "/opt/codex-path", true }
+	result = bashSearchPathGlobRedirectResult("backend/cmd/aicli/commands/*_test.go")
+	if result.Metadata["shell_rg_available"] != true {
+		t.Fatalf("resolver-provided rg must count as shell-available, got %#v", result.Metadata)
+	}
+	if !strings.Contains(result.Content, `-g "*_test.go"`) {
+		t.Fatalf("expected rg rewrite when the resolver will inject rg, got %q", result.Content)
+	}
+}
+
+func TestFriendlyHintForSearchToolMissingRipgrep(t *testing.T) {
+	hint := friendlyHintForSearchTool("rg", `rg -n foo backend | Select-Object -First 5`,
+		"rg: The term 'rg' is not recognized as a name of a cmdlet, function, script file, or executable program.", 127, "")
+	if !strings.Contains(hint, "toolkit `grep`") || !strings.Contains(hint, "内置扫描") {
+		t.Fatalf("expected missing-rg guidance toward toolkit grep, got %q", hint)
+	}
+	// A missing pipe stage (head) must not be blamed on rg.
+	if hint := friendlyHintForSearchTool("rg", `rg -n foo backend | head -20`,
+		"The term 'head' is not recognized as a name of a cmdlet.", 127, ""); hint != "" {
+		t.Fatalf("missing head must not be reported as missing rg, got %q", hint)
+	}
+}
+
+func TestBashCommandFailureNextActionMissingSearchTool(t *testing.T) {
+	next := bashCommandFailureNextAction(
+		`rg -n foo backend | Select-Object -First 5`,
+		"rg: The term 'rg' is not recognized as a name of a cmdlet.",
+		fmt.Errorf("exit status 127"),
+		"",
+	)
+	if !strings.Contains(next, "toolkit `grep`") || !strings.Contains(next, "builtin") {
+		t.Fatalf("expected builtin fallback guidance, got %q", next)
 	}
 }
 
