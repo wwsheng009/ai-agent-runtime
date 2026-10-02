@@ -254,8 +254,15 @@ func closureConclusion(stats Stats) string {
 func RenderMarkdown(stats Stats) string {
 	var builder strings.Builder
 	builder.WriteString("## LSP 基线报告（自动生成，阈值待人工固化）\n\n")
-	fmt.Fprintf(&builder, "- 扫描文件：%d 个 runtime-events.jsonl，%d 行（损坏 %d 行，按窗口跳过 %d 行）\n",
-		stats.Scan.Files, stats.Scan.Lines, stats.Scan.Malformed, stats.Scan.SkippedOld)
+	// 扫描量只在**真的扫了日志**时才有意义。数据面迁到分析库后（baselinesql），
+	// SQL 源不读任何日志，Scan 恒为 0 —— 那时若照旧渲染就会输出"扫描文件：0 个"，
+	// 看起来像故障，实质是"这条路本来就不扫日志"。所以按实际来源条件渲染。
+	if stats.Scan.Files > 0 {
+		fmt.Fprintf(&builder, "- 扫描文件：%d 个 runtime-events.jsonl，%d 行（损坏 %d 行，按窗口跳过 %d 行）\n",
+			stats.Scan.Files, stats.Scan.Lines, stats.Scan.Malformed, stats.Scan.SkippedOld)
+	} else {
+		builder.WriteString("- 数据源：分析库（usage_lsp_requests / usage_lsp_first_publish）；不扫描日志，无扫描量\n")
+	}
 	first, last := "n/a", "n/a"
 	if stats.FirstAt != "" {
 		first = stats.FirstAt

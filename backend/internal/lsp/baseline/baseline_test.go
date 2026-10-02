@@ -1,6 +1,8 @@
 package baseline
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,4 +249,144 @@ func TestAnalyzeRealRootBenchmark(t *testing.T) {
 	}
 	t.Logf("files=%d skipped_files=%d lines=%d requests=%d elapsed=%s",
 		stats.Scan.Files, stats.Scan.SkippedFiles, stats.Scan.Lines, stats.Requests, time.Since(start))
+}
+
+// writeMultiFileFixture 造一个跨多文件、且**故意制造跨文件并列时间戳**的库：
+//
+//   - 40 个文件分布在多层目录，文件名排序与"事件时间"刻意相反，逼出遍历顺序；
+//   - s1 的同一 path_fingerprint 在多个文件里出现**完全相同**的时间戳——
+//     这是 closure 判定里 sort.SliceStable(ts) 唯一能暴露顺序差异的场景；
+//   - 同一个 (session, server) 的 first_publish_ms 在不同文件给出不同值，
+//     用来验证"取最早"在并行归并后仍然成立；
+//   - 混入空行与损坏行，确认 malformed/lines 口径不变。
+func writeMultiFileFixture(t *testing.T, files int) string {
+	t.Helper()
+	root := t.TempDir()
+	for index := 0; index < files; index++ {
+		// 目录名逆序铺开：WalkDir 的字典序 index 递增，与事件时间递减相反。
+		dir := filepath.Join(root, "d", fmt.Sprintf("%02d", files-index), "sess", "events")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		minute := 40 - index%20
+		lines := []string{
+			// 与文件 0 完全相同的时间戳（跨文件并列）：稳定排序下谁的顺序先到谁算前一条。
+			fmt.Sprintf(`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"trigger":"inline","outcome":"injected","duration_ms":%d,"diag_count":1,"diag_fingerprint":"d%[1]d","path_fingerprint":"p1","appended_bytes":%[1]d}}`, 100+index),
+			// 同 session 同文件指纹、较晚时间戳的 clean：只有紧跟在 injected 之后才闭合。
+			fmt.Sprintf(`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:%02d:00Z","payload":{"trigger":"tool","outcome":"clean","duration_ms":%d,"path_fingerprint":"p1"}}`, minute, 5+index),
+			fmt.Sprintf(`{"type":"lsp.request.finished","session_id":"s2","timestamp":"2026-09-29T10:%02d:00Z","payload":{"trigger":"tool","outcome":"degraded_slow","duration_ms":%d,"reason_category":"wait_timeout","attempted_members":%d}}`, minute, 900+index, index%3+1),
+			fmt.Sprintf(`{"type":"lsp.server.state","session_id":"s1","timestamp":"2026-09-29T09:%02d:00Z","payload":{"server":"gopls","state":"ready","first_publish_ms":%d}}`, minute, 1000+index),
+			`{"type":"tool.completed","session_id":"s1","timestamp":"2026-09-29T09:00:00Z","payload":{"logical_tool":"apply_patch","output_model_visible_bytes":1000}}`,
+			"",
+			`{"type":"tool.completed","payload":{`,
+		}
+		path := filepath.Join(dir, "runtime-events.jsonl")
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			t.Fatalf("write fixture %d: %v", index, err)
+		}
+	}
+	return root
+}
+
+// TestAnalyzeParallelMatchesSerial 是并行改造的核心护栏：同一份库，worker=1
+// （退化串行）与默认 pool（4..16 并发）的 Stats 必须**完全一致**。
+//
+// 比对走 JSON 序列化：Stats 的 map 键由 encoding/json 排序输出，序列化结果是
+// 稳定的，所以字节相等就等价于"每一个数字、每一个 map、每一条 ByDay 明细都相等"。
+// 夹具里的跨文件并列时间戳专门盯 closure 的稳定排序口径。
+func TestAnalyzeParallelMatchesSerial(t *testing.T) {
+	// 关掉增量索引：本测试要比较的变量是「worker 数」，而账本命中会让第二次
+	// 扫描改走复用路径，把「串行 vs 并发」和「冷 vs 热」两件事搅在一起。索引的
+	// 等价性由 incremental_test.go 单独证明。
+	t.Setenv("AICLI_LSP_BASELINE_INDEX", "off")
+	root := writeMultiFileFixture(t, 40)
+	opts := Options{Roots: []string{root}, Now: time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)}
+
+	scanWorkerOverride = 1
+	serial, err := Analyze(opts)
+	scanWorkerOverride = 0
+	if err != nil {
+		t.Fatalf("serial analyze: %v", err)
+	}
+	parallel, err := Analyze(opts)
+	if err != nil {
+		t.Fatalf("parallel analyze: %v", err)
+	}
+
+	serialJSON, err := json.Marshal(serial)
+	if err != nil {
+		t.Fatalf("marshal serial: %v", err)
+	}
+	parallelJSON, err := json.Marshal(parallel)
+	if err != nil {
+		t.Fatalf("marshal parallel: %v", err)
+	}
+	if string(serialJSON) != string(parallelJSON) {
+		t.Fatalf("parallel output differs from serial:\n serial=%s\nparallel=%s", serialJSON, parallelJSON)
+	}
+	// 夹具必须真的产生非平凡聚合，否则"相等"没有说服力。
+	if serial.Scan.Files != 40 || serial.Scan.Malformed != 40 || serial.Scan.Lines != 240 {
+		t.Fatalf("fixture scan = %#v, want files=40 malformed=40 lines=240", serial.Scan)
+	}
+	if serial.Requests != 120 || serial.Sessions != 2 {
+		t.Fatalf("fixture requests/sessions = %d/%d, want 120/2", serial.Requests, serial.Sessions)
+	}
+	if len(serial.ByDay) != 1 {
+		t.Fatalf("fixture by_day = %#v, want a single day", serial.ByDay)
+	}
+}
+
+// TestAnalyzeParallelDeterministicAcrossRuns 反复跑并行路径，要求结果稳定
+// （不为 true 就不可能：一旦有 goroutine 调度依赖的累加，这里会随机翻车）。
+func TestAnalyzeParallelDeterministicAcrossRuns(t *testing.T) {
+	// 同上：本测试盯的是调度无关性，账本命中会让后续几轮走复用路径，测的不再
+	// 是同一条代码路径。
+	t.Setenv("AICLI_LSP_BASELINE_INDEX", "off")
+	root := writeMultiFileFixture(t, 24)
+	opts := Options{Roots: []string{root}, Now: time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)}
+	first, err := Analyze(opts)
+	if err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+	want, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for round := 0; round < 5; round++ {
+		again, err := Analyze(opts)
+		if err != nil {
+			t.Fatalf("analyze round %d: %v", round, err)
+		}
+		got, err := json.Marshal(again)
+		if err != nil {
+			t.Fatalf("marshal round %d: %v", round, err)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("round %d differs:\n want=%s\n got=%s", round, want, got)
+		}
+	}
+}
+
+// TestScanOneFileUnreadableIsNonFatal 钉住"单文件读取失败不中断整次统计"：
+// 打不开的路径不得被计入 Scan.Files。
+func TestScanOneFileUnreadableIsNonFatal(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing", "runtime-events.jsonl")
+	outcome := scanFile(missing, 0, scanOutcome{}, time.Time{}, 0)
+	if outcome.opened || outcome.lines != 0 || len(outcome.requests) != 0 {
+		t.Fatalf("unreadable file outcome = %+v, want zero-value non-fatal result", outcome)
+	}
+}
+
+// TestScanWorkerCountBounds 覆盖 worker 档位：夹在 [4,16] 且不超过文件数。
+func TestScanWorkerCountBounds(t *testing.T) {
+	scanWorkerOverride = 0
+	if got := scanWorkerCount(0); got < 4 || got > 16 {
+		t.Fatalf("scanWorkerCount(0) = %d, want within [4,16]", got)
+	}
+	if got := scanWorkerCount(2); got != 2 {
+		t.Fatalf("scanWorkerCount(2) = %d, want capped at file count 2", got)
+	}
+	if got := scanWorkerCount(1000); got < 4 || got > 16 {
+		t.Fatalf("scanWorkerCount(1000) = %d, want within [4,16]", got)
+	}
 }
