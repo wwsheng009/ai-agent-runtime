@@ -56,6 +56,14 @@ observe:
   # Runtime Observation Plane: 默认关闭；此处显式开启只读观测 API。
   # 启用后注册 /api/runtime/observe/v1/*（capabilities / snapshot /
   # sessions/{session_id} / events）。SSE 与 renderer 依赖 Phase 3/4，v1 不注册。
+  #
+  # ⚠️ 本文件属于**便携层**（configs/），而 runtime-server 的
+  # LoadRuntimeAgentConfig 只加载 ConfigLayerSearchPaths() 中第一个存在的
+  # **单个**文件，不做多层合并（backend/internal/runtimeserver/config_snapshot.go:30）。
+  # 项目层 .aicli/ 优先级高于本层，因此**这里的 observe.enabled 不会生效**，
+  # 除非启动时显式 `--config backend/configs/runtime.yaml`。
+  # 实际生效位置是仓库根 .aicli/runtime.yaml 与 backend/.aicli/runtime.yaml。
+  # 保留此处仅为记录期望值；改动前请先确认生效层。
   enabled: true
 
 sessionRuntime:
