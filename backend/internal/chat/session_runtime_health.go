@@ -3,9 +3,10 @@ package chat
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
+
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 )
 
 // ============================================================================
@@ -29,13 +30,13 @@ import (
 
 // RuntimeStoreHealthProbeEnv 控制打开前 quick_check 健康探测；默认关闭，
 // 只有显式设置为 "quick" 才开启（未设置/其它值=零开销跳过）。
-const RuntimeStoreHealthProbeEnv = "AICLI_SQLITE_HEALTH_PROBE"
+const RuntimeStoreHealthProbeEnv = sqliteutil.HealthProbeEnv
 
 // runtimeStoreHealthProbeTimeout 是单次探测的总预算。
 const runtimeStoreHealthProbeTimeout = 60 * time.Second
 
 func runtimeStoreHealthProbeEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv(RuntimeStoreHealthProbeEnv)), "quick")
+	return sqliteutil.HealthProbeEnabled()
 }
 
 // probeRuntimeStoreHealth 由 init 在迁移之前调用；未开启或内存库时零开销。
@@ -48,8 +49,8 @@ func (s *SQLiteRuntimeStore) probeRuntimeStoreHealth(ctx context.Context) error 
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, runtimeStoreHealthProbeTimeout)
 	defer cancel()
-	var result string
-	if err := s.db.QueryRowContext(probeCtx, "PRAGMA quick_check").Scan(&result); err != nil {
+	result, err := sqliteutil.QuickCheck(probeCtx, s.db)
+	if err != nil {
 		return fmt.Errorf(
 			"runtime store health probe: quick_check 未能完成（库可能损坏；设置 %s 可跳过探测）：%w",
 			RuntimeStoreHealthProbeEnv, err)

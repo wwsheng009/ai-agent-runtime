@@ -37,7 +37,7 @@ Tree 10 page 175644 cell 5: Rowid 9202282 out of order
 |---|---|---|
 | 根治 | 驱动 v0.32.0 → **v0.35.6**（引擎由 wasm/wazero 改为纯 Go 翻译实现，无启动编译预热） | `backend/go.mod`、`internal/sqlitedriver/` |
 | 去放大器 | 删除 `PRAGMA auto_vacuum=INCREMENTAL`、后台 `PRAGMA incremental_vacuum(N)` 维护任务、`wal_checkpoint(TRUNCATE)`（Close 只做 `PASSIVE`）、会话历史清理后的 `incremental_vacuum(256)` | `internal/chat/session_runtime_store.go`、`sqlite_storage.go`、`runtime_store_append_stats.go` |
-| 防御 | 打开文件前对账 `-wal/-shm`（陈旧 wal-index 会被采信为权威索引）；源码级护栏禁止上述 PRAGMA 回潮；并发 WAL 写完整性压测 | `internal/sqliteutil`、`internal/chat/sqlite_hygiene_test.go`、`runtime_store_wal_concurrency_test.go` |
+| 防御 | 打开文件前对账 `-wal/-shm`（陈旧 wal-index 会被采信为权威索引）；源码级护栏禁止上述 PRAGMA 回潮；并发 WAL 写完整性压测；artifact store 与 runtime store 共用可选健康探测 | `internal/sqliteutil`、`internal/artifact/store.go`、`internal/chat/sqlite_hygiene_test.go`、`runtime_store_wal_concurrency_test.go` |
 
 **win7 构建**（Go 1.21.4 + `go.win7.mod` + v0.22.0）拿不到修复（PR #405 要求 Go ≥1.26，
 且占位 API 在 Win7 不存在），因此 win7 走 `journal_mode=DELETE`（回滚日志，跨进程靠
@@ -86,8 +86,8 @@ aicli storage compact --db <path> --json
 
 > **默认关闭**：不设置任何环境变量时与从前行为完全一致，探测零开销跳过。
 
-设置环境变量 `AICLI_SQLITE_HEALTH_PROBE=quick` 后，runtime store 会在第一次打开、
-执行迁移之前运行只读 `PRAGMA quick_check`：
+设置环境变量 `AICLI_SQLITE_HEALTH_PROBE=quick` 后，runtime store 和文件型
+artifact store 会在第一次打开、执行迁移之前运行只读 `PRAGMA quick_check`：
 
 - 返回 `ok` → 正常继续；
 - 非 `ok` 或探测执行失败 → 打开直接失败（fail-closed），进程以可见错误退出，
@@ -98,3 +98,30 @@ aicli storage compact --db <path> --json
 分钟级），不适合每次 CLI 启动都做；建议在 runtime-server、维护脚本或排障会话中
 显式开启。一次性只读体检也可以直接用 `aicli storage compact --dry-run`
 （quick_check 前置、损坏库退出码 2、不改写主库；打开前仍会做陈旧 wal-index 对账）。
+
+## 6. 已损坏库的处置（不能由 VACUUM 自动修复）
+
+`quick_check` 报告 `Freelist: size is ...`、`btreeInitPage()`、`bad ptr map`
+等明细时，损坏已经落在主库数据页；`-shm` 对账只能处理“陈旧索引”，不能还原
+已经写坏的 B-tree。此时 `storage compact` 拒绝执行 `VACUUM` 是预期的 fail-closed
+行为，**不要使用 `--no-integrity-check` 强行重建**。
+
+先退出所有 aicli/runtime-server 进程，并保留原文件及副文件。若需要尽量抢救
+artifact 行，可使用系统 SQLite CLI 的只读 `.recover` 生成新库（绝不在原库上
+`.read`）：
+
+```powershell
+$db = "$HOME\.aicli\sessions\runtime\artifacts.sqlite"
+$sql = "$HOME\.aicli\sessions\runtime\artifacts.recovered.sql"
+$new = "$HOME\.aicli\sessions\runtime\artifacts.recovered.sqlite"
+
+sqlite3 -readonly $db ".recover --ignore-freelist" > $sql
+sqlite3 $new ".read '$sql'"
+sqlite3 -readonly $new "PRAGMA quick_check"
+```
+
+`.recover` 只能尽量提取仍可读取的页，必须核对 `quick_check=ok`、表结构以及
+关键 artifact/checkpoint 数量后，才可以在备份原库的前提下替换。若抢救结果
+不可用，最安全的降级是将主库、`-wal`、`-shm` 一起改名留证，再让 artifact
+store 创建空库；这会丢失无法从其它来源重建的 artifact 数据，但不会继续在坏库
+上写入。当前运行时代码不自动执行该动作，避免把潜在可恢复数据静默删除。

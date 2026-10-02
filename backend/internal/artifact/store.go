@@ -183,7 +183,11 @@ func (s *Store) ensure() error {
 			s.openErr = fmt.Errorf("open artifact db: %w", err)
 			return
 		}
-		bootstrap := &Store{db: db}
+		bootstrap := &Store{
+			db:   db,
+			dsn:  s.dsn,
+			path: s.path,
+		}
 		if err := bootstrap.init(context.Background()); err != nil {
 			_ = db.Close()
 			s.openErr = err
@@ -815,6 +819,42 @@ func (s *Store) ListCheckpoints(ctx context.Context, sessionID string, limit, of
 }
 
 func (s *Store) init(ctx context.Context) error {
+	// Optional fail-closed integrity gate.  This must run before migrations:
+	// schema writes cannot repair a malformed B-tree and may make forensic
+	// recovery harder.  The gate is shared with the runtime store and remains
+	// opt-in because quick_check scans the complete database.
+	if s != nil && !sqliteutil.IsMemoryDSN(s.dsn) && sqliteutil.HealthProbeEnabled() {
+		probeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		result, err := sqliteutil.QuickCheck(probeCtx, s.db)
+		if err != nil {
+			return fmt.Errorf(
+				"artifact store health probe: quick_check 未能完成（库可能损坏；设置 %s 可跳过探测）：%w",
+				sqliteutil.HealthProbeEnv, err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(result), "ok") {
+			return fmt.Errorf(
+				"artifact store health probe: quick_check 未通过（库已损坏；修复前禁止写入，设置 %s 可跳过探测）：%s",
+				sqliteutil.HealthProbeEnv, clampArtifactHealthDetail(result))
+		}
+	}
+
+	// Keep file-backed artifact stores on the same conservative SQLite baseline
+	// as the runtime store.  The shared opener selects WAL on the main build
+	// (and rollback journaling for win7compat) and bounds WAL growth where it
+	// applies; these connection-local settings complete the baseline.
+	if s != nil && !sqliteutil.IsMemoryDSN(s.dsn) {
+		for _, statement := range []string{
+			"PRAGMA synchronous=NORMAL",
+			"PRAGMA temp_store=FILE",
+			"PRAGMA mmap_size=0",
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("configure artifact sqlite: %w", err)
+			}
+		}
+	}
+
 	migrations := []migrate.Migration{
 		{
 			Version: 1,
@@ -917,6 +957,29 @@ func (s *Store) init(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// clampArtifactHealthDetail keeps a damaged database from producing an
+// unbounded startup error.  The full output remains available through the
+// offline diagnostic command.
+func clampArtifactHealthDetail(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "unknown"
+	}
+	const (
+		maxLines = 3
+		maxRunes = 400
+	)
+	lines := strings.Split(text, "\n")
+	if len(lines) > maxLines {
+		lines = append(lines[:maxLines], fmt.Sprintf("…（共 %d 行，已截断）", len(lines)))
+	}
+	result := strings.Join(lines, "\n")
+	if runes := []rune(result); len(runes) > maxRunes {
+		result = string(runes[:maxRunes]) + "…（已截断）"
+	}
+	return result
 }
 
 func resolveLazyDSN(cfg *StoreConfig) (string, string, error) {

@@ -405,7 +405,7 @@ func storageCompactOne(target storageCompactTarget, opts storageCompactOptions) 
 		if !strings.EqualFold(integrity, "ok") {
 			clamped := storageClampIntegrity(integrity)
 			report.IntegrityBefore = clamped
-			return storageFail(report, "库完整性检查未通过，已跳过 VACUUM（请先按 docs 走修复流程）", errors.New(clamped))
+			return storageFail(report, "库完整性检查未通过，已跳过 VACUUM（请先按 docs/analysis/sqlite-wal-corruption-and-offline-compaction-20260926.md §6 走修复流程）", errors.New(clamped))
 		}
 	}
 

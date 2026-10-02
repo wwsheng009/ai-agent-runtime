@@ -78,6 +78,7 @@ const (
 // Deref miss reasons for tool_artifact_deref_miss_total.
 const (
 	DerefMissReasonNotFound     = "not_found"
+	DerefMissReasonStoreCorrupt = "store_corrupt"
 	DerefMissReasonCrossSession = "cross_session"
 	DerefMissReasonBadOffset    = "bad_offset"
 	DerefMissReasonNoStore      = "no_store"
@@ -247,7 +248,7 @@ func normalizePointerNoticeKind(kind string) string {
 
 func normalizeDerefMissReason(reason string) string {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case DerefMissReasonNotFound, DerefMissReasonCrossSession, DerefMissReasonBadOffset,
+	case DerefMissReasonNotFound, DerefMissReasonStoreCorrupt, DerefMissReasonCrossSession, DerefMissReasonBadOffset,
 		DerefMissReasonNoStore, DerefMissReasonBadArgs:
 		return strings.ToLower(strings.TrimSpace(reason))
 	default:

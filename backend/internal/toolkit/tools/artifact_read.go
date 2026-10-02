@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/observability"
+	"github.com/wwsheng009/ai-agent-runtime/internal/sqliteutil"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
@@ -111,6 +112,12 @@ func (a *ArtifactReadTool) Execute(ctx context.Context, params map[string]interf
 
 	record, err := store.Get(ctx, id)
 	if err != nil {
+		if sqliteutil.IsCorruptError(err) {
+			observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonStoreCorrupt)
+			return artifactReadFailure(fmt.Sprintf(
+				"artifact store 已损坏，已拒绝读取；请先运行 `aicli storage compact --target artifacts --dry-run` 做只读确认，保留原库后按修复流程处理：%v",
+				err)), nil
+		}
 		observability.RecordToolArtifactDerefMiss(observability.DerefMissReasonNotFound)
 		return artifactReadFailure(fmt.Sprintf("读取 artifact 失败: %v", err)), nil
 	}
