@@ -3,11 +3,16 @@
 //     由 api/runtime/lsp.ts 按类型并发拉取并合并）；
 //   * 展示**事实与窗口计数**（服务器最新状态 / 请求 outcome 与原因计数 / 最近事件），
 //     不重算比率指标——覆盖率、fallback、闭环率等口径单源于 §3.3（TUI 与 web 会话内面板）；
-//   * 诚实降级：403 → "未授权或观测面未启用"；其他错误 → role="alert" + 原因；
+//   * 诚实降级：观测面不可用（403/404/405）→ "未授权或观测面未启用"；
+//     其他错误 → role="alert" + 原因；
 //     窗口内无事件 → "暂无 LSP 事件"，不渲染 0 指标冒充健康。
 
 import type { LspBaselineResponse, LspObserveEvent } from "@/api/runtime/lsp";
-import { fetchLspObserveFeed, getLspBaseline } from "@/api/runtime/lsp";
+import {
+  fetchLspObserveFeed,
+  getLspBaseline,
+  LspObserveUnavailableError,
+} from "@/api/runtime/lsp";
 import { RuntimeApiError, readErrorEnvelope } from "@/api/runtime/shared";
 import { Button } from "@/components/ui/button";
 import { RefreshCwIcon } from "lucide-react";
@@ -38,9 +43,18 @@ function formatEventTime(value: string): string {
   return parsed.toLocaleTimeString();
 }
 
-/** 错误降级文案：403 视为"观测面不可用"，其余用后端消息，最后兜底异常文本。 */
+/**
+ * 错误降级文案：观测面不可用统一走"未授权或未启用"，其余用后端消息，
+ * 最后兜底异常文本。
+ *
+ * 关键修正：后端在 observe.enabled=false 时**根本不注册** /observe/v1/* 路由
+ * （runtimeapi/handler.go 的 ensureObserveService 守卫），因此信号是 **404**
+ * 而非 403。原先只特判 403，导致用户直接看到
+ * "runtime request failed with status 404" 这种无法据以排查的原始文案。
+ * 现在由 api/runtime/lsp.ts 把 403/404/405 统一归一为 LspObserveUnavailableError。
+ */
 function describeLspError(err: unknown, t: (key: "lspPanel.forbidden") => string): string {
-  if (err instanceof RuntimeApiError && err.status === 403) {
+  if (err instanceof LspObserveUnavailableError || (err instanceof RuntimeApiError && err.status === 403)) {
     return t("lspPanel.forbidden");
   }
   if (err instanceof RuntimeApiError) {
@@ -115,7 +129,40 @@ export function LspObservabilityPanel({ adminToken }: { adminToken?: string }) {
           <h3 className="text-sm font-semibold">{t("lspPanel.baseline")}</h3>
           <p className="mt-1 text-xs text-muted-foreground">
             {t("lspPanel.baselineNote")} · {t("lspPanel.baselineWindow")}: {baseline.window} ·{" "}
-            {t("lspPanel.baselineScan")}: {formatNumber(baseline.scan.files)} / {formatNumber(baseline.scan.malformed)}
+            {/* 事实源由后端声明（source），不由 UI 猜。数据面读分析库时不扫日志，
+                scan.* 恒为 0 —— 渲染成"扫描 0 文件/0 损坏"会被读成"数据有问题"，
+                所以那条路径下根本不提扫描量。 */}
+            {baseline.source === "chat_logs" ? (
+              <>
+                {t("lspPanel.baselineScan")}: {formatNumber(baseline.scan.files)} /{" "}
+                {formatNumber(baseline.scan.malformed)}
+              </>
+            ) : (
+              t("lspPanel.baselineSourceDb")
+            )}
+            {baseline.cache?.hit ? (
+              <>
+                {" · "}
+                {t("lspPanel.baselineCached", {
+                  age: baseline.cache.age_seconds ?? 0,
+                  ttl: baseline.cache.ttl_seconds ?? 0,
+                })}
+              </>
+            ) : null}
+            {/* 增量索引只在真的扫日志时才有意义。走分析库时后端不发这些字段，
+                缺席是预期的 —— 此时说"未使用索引"是误导（真相是不扫日志）。 */}
+            {baseline.source === "chat_logs" ? (
+              <>
+                {" · "}
+                {baseline.scan.reused_files !== undefined ||
+                baseline.scan.delta_files !== undefined
+                  ? t("lspPanel.baselineIndexed", {
+                      reused: formatNumber(baseline.scan.reused_files ?? 0),
+                      delta: formatNumber(baseline.scan.delta_files ?? 0),
+                    })
+                  : t("lspPanel.baselineNoIndex")}
+              </>
+            ) : null}
           </p>
           <div className="mt-2 overflow-x-auto">
             <table className="w-full min-w-0 text-left text-xs">

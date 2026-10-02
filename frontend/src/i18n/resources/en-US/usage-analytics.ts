@@ -108,6 +108,12 @@ export const enUsageAnalytics = {
     baselineNote: "Numbers come from the shared internal/lsp/baseline implementation — not recomputed in the browser",
     baselineWindow: "Window",
     baselineScan: "Files / malformed",
+    // The data path reads the analytics DB and never scans logs. The wording has
+    // to say "does not scan", or a bare "0 files" reads as "no data in the logs".
+    baselineSourceDb: "source: analytics DB (logs are not scanned)",
+    baselineCached: "cached ({{age}}s old / TTL {{ttl}}s)",
+    baselineIndexed: "incremental index ({{reused}} reused / {{delta}} delta)",
+    baselineNoIndex: "incremental index not used",
     baselineUnavailable: "Baseline unavailable",
     metric: "Metric",
     value: "Value",

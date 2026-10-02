@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   LSP_OBSERVE_EVENT_TYPES,
+  LspObserveUnavailableError,
   fetchLspObserveFeed,
   getLspBaseline,
   listLspObserveEvents,
@@ -79,6 +80,28 @@ describe("listLspObserveEvents", () => {
       status: 403,
     });
   });
+
+  it("HTTP 404（observe.enabled=false → 路由未注册）归一为 LspObserveUnavailableError", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ error: "not found" }, 404)));
+
+    // 404 是「观测面未注册」的真实信号，必须与普通失败区分，
+    // 否则面板会把 "runtime request failed with status 404" 直接抛给用户。
+    const err = await listLspObserveEvents({ eventType: "lsp.server.state" }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(LspObserveUnavailableError);
+    expect((err as LspObserveUnavailableError).status).toBe(404);
+  });
+
+  it("非不可用类错误（如 500）保持原样上抛，不误判为观测面未启用", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ error: "boom" }, 500)));
+
+    const err = await listLspObserveEvents({ eventType: "lsp.server.state" }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).not.toBeInstanceOf(LspObserveUnavailableError);
+    expect((err as { status?: number }).status).toBe(500);
+  });
 });
 
 describe("fetchLspObserveFeed", () => {
@@ -119,6 +142,43 @@ describe("fetchLspObserveFeed", () => {
     );
 
     await expect(fetchLspObserveFeed()).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("capabilities 探测 404 时短路：一个事件查询都不发", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname.endsWith("/observe/v1/capabilities")) {
+        return jsonResponse({ error: "not found" }, 404);
+      }
+      return jsonResponse({ ok: true, data: queryResult([], 0) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchLspObserveFeed({ limit: 10 })).rejects.toBeInstanceOf(
+      LspObserveUnavailableError,
+    );
+
+    // 探测失败即短路：否则会并发打出 3 个注定 404 的请求。
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/observe/v1/capabilities");
+  });
+
+  it("capabilities 探测通过后才按类型并发拉取", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      if (url.pathname.endsWith("/observe/v1/capabilities")) {
+        return jsonResponse({ ok: true, data: {} });
+      }
+      const eventType = url.searchParams.get("event_type") ?? "";
+      return jsonResponse({ ok: true, data: queryResult([], 0) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const feed = await fetchLspObserveFeed({ limit: 10 });
+
+    // 1 次探测 + 3 次事件查询
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(Object.keys(feed.byType).sort()).toEqual([...LSP_OBSERVE_EVENT_TYPES].sort());
   });
 });
 

@@ -106,6 +106,12 @@ export const zhUsageAnalytics = {
     baselineNote: "数字来自共享的 internal/lsp/baseline 实现，非前端重算",
     baselineWindow: "窗口",
     baselineScan: "文件 / 损坏",
+    // 数据面读分析库时不扫日志。措辞必须说清"不扫"，否则"0 文件"会被
+    // 读成"日志里没有数据"。
+    baselineSourceDb: "数据源：分析库（不扫描日志）",
+    baselineCached: "缓存命中（{{age}}s 前 / TTL {{ttl}}s）",
+    baselineIndexed: "增量索引（{{reused}} 复用 / {{delta}} 增量）",
+    baselineNoIndex: "未使用增量索引",
     baselineUnavailable: "基线不可用",
     metric: "指标",
     value: "值",
