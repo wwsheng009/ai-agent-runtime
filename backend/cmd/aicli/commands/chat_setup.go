@@ -514,6 +514,11 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 		session.ChatExecutor = newAICLIRuntimeServerChatExecutor(discovery.runtimeServerURL)
 		session.ActorFirstReady = true
 		session.LocalRuntimeHost = nil
+		// runtime-server 模式下本地能力面（skills/runtime host）整段不挂载；
+		// 技能在 runtime-server 进程里。这会让 /skills 报 total=0 且 binding=nil
+		// 且所有本地组件 未配置——看上去和"加载失败"一模一样，但其实是"没走这条路"。
+		// 显式记下，免得诊断再次陷入"各闸全绿却什么都没"的死循环。
+		session.CapabilitiesInitError = fmt.Sprintf("runtime-server 模式已接管（URL=%s），本地能力面（skills/runtime host）未挂载", discovery.runtimeServerURL)
 		return nil, nil, nil
 	}
 

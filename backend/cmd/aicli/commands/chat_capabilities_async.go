@@ -27,6 +27,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -151,6 +152,39 @@ func currentChatCapabilityLoad(session *ChatSession) *chatCapabilityLoad {
 	return session.capabilitiesLoad
 }
 
+// sessionCapabilitiesLoadView 回显异步能力面门控的真实状态。
+//
+// 这是「各闸全绿（present/enabled/dirs 都对）但 binding=nil」时唯一能区分下列
+// 三种处境的观测点：
+//   - 门控未安装：此会话根本没走异步装载路径（discover/attach 都不会执行，
+//     因此装载侧的 error 也无从产生——诊断字段全空是必然，不是"没报错"）；
+//   - 门控已安装、发现仍在跑或已报错：err 直接给出真实原因；
+//   - 门控已安装、发现已完成且无错：问题在挂载侧或 skills 本身。
+//
+// 缺了这一层，前面所有诊断都只能看到"没挂上"这个结果，看不到"装载是否启动过"。
+func sessionCapabilitiesLoadView(session *ChatSession) string {
+	load := currentChatCapabilityLoad(session)
+	if load == nil {
+		return "load=none(gate未安装:此会话未走异步装载路径)"
+	}
+	discoveryDone := false
+	select {
+	case <-load.done:
+		discoveryDone = true
+	default:
+	}
+	load.mu.Lock()
+	errVal := load.err
+	load.mu.Unlock()
+	if errVal != nil {
+		return fmt.Sprintf("load=error(discovery_done=%v) %q", discoveryDone, errVal.Error())
+	}
+	if discoveryDone {
+		return "load=discovered(err=nil,attach待turn或已挂)"
+	}
+	return "load=discovering(err=nil)"
+}
+
 // awaitChatCapabilities 在真正需要 turn 执行器之前阻塞到能力面就绪，并在主
 // goroutine 上完成挂载。未安装（同步路径 / 非交互 / runtime-server 路径）时 no-op。
 func awaitChatCapabilities(ctx context.Context, session *ChatSession) error {
@@ -176,6 +210,13 @@ func runChatCapabilitiesLoad(session *ChatSession) {
 		// 发现失败不静默：既有同步路径把它升级成启动失败，这里保持一致，让首个
 		// turn 在 ensureChatExecutor 处拿到同一个错误而不是空工具面。
 		logpkg.Warnf("AICLI chat capabilities background load failed: %v", err)
+		// 把 error 留在 session 上，让 /skills 诊断能直接复述——能力面初始化失败
+		// 会导致 skills/runtime host/tools 全缺失，但用户只能看到「total=0」这
+		// 样的二级现象；把 error 暴露出来才能止住「怎么查不出错」的循环。
+		if session != nil {
+			session.CapabilitiesInitError = err.Error()
+		}
+		fmt.Fprintf(os.Stderr, "Warning: 能力面初始化失败（工具/Skills/运行时宿主不可用）: %v\n", err)
 		clearChatStartupProgress(session)
 		// 这批 mark 落在 ready 那次 flush 之后，补一次才能在 AICLI_STARTUP_TIMING
 		// 里看到后台装载的真实耗时分布。
@@ -219,7 +260,13 @@ func awaitChatCapabilitiesForTurn(ctx context.Context, session *ChatSession) err
 		return nil
 	}
 	if ctx.Err() != nil {
+		if session != nil {
+			session.CapabilitiesInitError = err.Error()
+		}
 		return err
+	}
+	if session != nil {
+		session.CapabilitiesInitError = fmt.Sprintf("启动装载工具面超时（%s）: %v", chatCapabilitiesWaitLimit, err)
 	}
 	return fmt.Errorf("启动装载工具面超时（%s）: %w", chatCapabilitiesWaitLimit, err)
 }

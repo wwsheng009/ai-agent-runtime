@@ -58,6 +58,11 @@ type skillsRuntimeBinding struct {
 	skillFunctions       map[string]*SkillFunction
 	skillFunctionsByPath map[string]*SkillFunction
 	skillNameCounts      map[string]int
+	// roots 是本次加载实际扫描的 skill 目录（按优先级顺序），供 /skills 清单
+	// 展示来源层：工作区 .agents/skills、用户 ~/.aicli/skills 等。清单必须能回答
+	// “我改的那个 skill 到底被扫到了没有”，所以这里存的是加载时的真实目录，
+	// 而不是命令执行时再解析一次（后者会与函数面漂移）。
+	roots []string
 }
 
 type skillExposureCandidate struct {
@@ -1077,6 +1082,7 @@ func buildSkillsRuntimeBindingFromManager(cfg *config.Config, session *ChatSessi
 			reuse.skillFunctions = map[string]*SkillFunction{}
 			reuse.skillFunctionsByPath = map[string]*SkillFunction{}
 			reuse.skillNameCounts = map[string]int{}
+			reuse.roots = append([]string(nil), manager.SkillDirs()...)
 			catalog.PruneSkillFunctionsExcept(nil)
 			return reuse, nil
 		}
@@ -1215,6 +1221,7 @@ func buildSkillsRuntimeBindingFromManager(cfg *config.Config, session *ChatSessi
 	binding.skillFunctions = skillFunctions
 	binding.skillFunctionsByPath = skillFunctionsByPath
 	binding.skillNameCounts = skillNameCounts
+	binding.roots = append([]string(nil), manager.SkillDirs()...)
 	if reuse != nil {
 		// 热刷新：撤销新集合之外的 skill 函数（停用即不可再被 /skills 选中）。
 		catalog.PruneSkillFunctionsExcept(skillFunctionKeepSet(skillFunctions))

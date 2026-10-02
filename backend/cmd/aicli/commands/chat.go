@@ -181,7 +181,13 @@ type ChatSession struct {
 	SkillsDebug     bool                  // Skills 调试输出
 	// NoSkills 是 --no-skills：跳过 skill 自动发现，只保留显式目录。
 	NoSkills bool
-	Config   *config.Config // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
+	// CapabilitiesInitError 记录后台能力面装载（discoverChatCapabilities /
+	// attachChatCapabilities）失败的 error。TUI 走异步路径时，能力面初始化失败
+	// 不应被静默吞掉——它会直接导致 skills/runtime host/tools 等一整套能力面
+	// 缺失，但用户只能看到「total=0」这样的二级现象。把 error 记在这里，
+	// /skills 诊断里把它吐出来，至少能让一次 /skills 回答"为什么什么都没挂上"。
+	CapabilitiesInitError string
+	Config                *config.Config // 载入的 aicli 全局配置，用于偏好持久化与 provider/model 解析
 	// configFingerprint 记录 Config 最近一次加载时配置源文件的指纹
 	// （path+mtime+size；分层加载开启时覆盖所有层）。turn 入口 / 状态查询据此
 	// 发现磁盘配置变化并重载，无需重启进程。

@@ -31,8 +31,12 @@ func canOpenChatSkillPicker(session *ChatSession) bool {
 // lease ends before the composer is touched: the confirmed skill becomes a
 // composer draft (`/skill <name> `) only after lease release and primary
 // presenter recovery, so the user composes the prompt in the unified composer.
+//
+// 只由 /skills select|pick|choose 显式触发——清单本身不需要它。副屏能力不足时
+// 明确报错并给出替代路径，绝不静默返回：静默返回会让用户敲了 /skills select
+// 却什么都看不到，也不知道该改用什么。
 func openChatSkillPicker(session *ChatSession, _ SkillPickerRequest) {
-	if !canOpenChatSkillPicker(session) {
+	if session == nil {
 		return
 	}
 
@@ -48,9 +52,7 @@ func openChatSkillPicker(session *ChatSession, _ SkillPickerRequest) {
 			_ = renderChatCommandResult(session, commandTextResult("错误: Function Catalog: 未初始化"), false)
 			return
 		}
-		skills := filterSkillCatalogEntries(report.Skills, "")
-		skills = filterUserInvocableSkillEntries(catalog, skills)
-		skills = buildSkillPickerCatalogEntries(session, skills)
+		skills := chatSkillCatalogEntries(session, catalog, report, "")
 		if len(skills) == 0 {
 			_ = renderChatCommandResult(session, commandTextResult("错误: 未找到匹配 skill"), false)
 			return
@@ -104,6 +106,13 @@ func openChatSkillPicker(session *ChatSession, _ SkillPickerRequest) {
 		}
 		return
 	}
+}
+
+// skillPickerUnavailableHint 说明全屏选择器为何不可用并给出替代路径。
+// 显式请求的交互失败必须可见——否则用户只会看到“敲了没反应”。
+func skillPickerUnavailableHint() string {
+	return "当前环境不支持全屏选择器（需要 ANSI TTY、未被其他副屏/弹层占用、且回合已结束）。\n" +
+		"改用 /skills 查看技能清单，再用 /skill <name> <prompt> 直接执行。"
 }
 
 // buildSkillPickerFullScreenItems builds fullscreen rows for the skill picker.
@@ -230,17 +239,39 @@ func executeStructuredSkillCommand(session *ChatSession, command string) (Comman
 	}, true
 }
 
-// executeStructuredSkillsMenuCommand is the unified interactive entry point for
-// /skills. Explicit list queries stay finite documents; bare /skills and
-// /skills select open the typed skill picker, whose confirmed selection becomes
-// a composer draft. When the picker is unavailable, the menu degrades to the
-// catalog report.
+// executeStructuredSkillsMenuCommand 是 /skills 的统一入口。
+//
+// /skills 是只读清单命令，列出**当前会话实际加载**的技能（工作区 .agents/skills、
+// 用户 ~/.aicli/skills 等已扫描根，Codex/Claude 兼容格式，profile 与
+// disabled_skills 过滤后的结果），并回显这些根。
+//
+//	/skills                   → 全量清单
+//	/skills list|ls|status     → 同上
+//	/skills <query>            → 按名称/描述/分类/标签/路径过滤的清单
+//	/skills select|pick|choose → 显式打开全屏选择器（交互式选择，不属于清单职责）
+//	/skills enable|disable <n> → 启停
+//	/skills --json             → 结构化投影
+//
+// 清单分支没有任何能力门：会话里加载到的技能必须全部可见。此前 bare /skills 会
+// 改开全屏选择器、且“选择器不可用”才降级成清单，于是它既不是清单（弹了个
+// picker），又可能在能力翻转时什么都不显示。选择是显式动作，只在 /skills select
+// 时发生。
 func executeStructuredSkillsMenuCommand(session *ChatSession, command string) (CommandResult, bool) {
 	query, jsonOutput := extractCommandArgumentOptions(command)
 	query = strings.TrimSpace(query)
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
 	}
+	// TUI 路径上能力面是「首帧后异步发现、首个 turn 才挂载」：discover 在后台
+	// goroutine 跑，attach 由 ensureChatExecutor 在 turn 入口触发。而 /skills 是
+	// 斜杠命令、不经过 turn —— 用户在新会话里先敲 /skills（还没发过消息）时，
+	// attach 尚未执行，清单必然显示 total=0，诊断则是 binding=nil +
+	// shared_manager{absent} + load=...err=nil，看上去像"加载失败"，实际是
+	// "还没挂载"。这里主动补齐挂载（attach 写 session，必须在主 goroutine 上执行），
+	// 让读数反映真实能力面而不是时序上的半成品状态；失败时
+	// awaitChatCapabilitiesForTurn 会把 error 记进 session.CapabilitiesInitError，
+	// 诊断照常复述，不会把真失败伪装成"没挂"。
+	_ = awaitChatCapabilitiesForTurn(context.Background(), session)
 	catalog := ensureFunctionCatalog(session)
 	if catalog == nil || catalog.Registry() == nil {
 		return commandTextResult("错误: Function Catalog: 未初始化"), true
@@ -258,8 +289,7 @@ func executeStructuredSkillsMenuCommand(session *ChatSession, command string) (C
 	// --json is a finite structured projection: render the JSON payload as one
 	// plain command cell instead of falling back to legacy stdout.
 	if jsonOutput {
-		skills := filterSkillCatalogEntries(report.Skills, query)
-		skills = filterUserInvocableSkillEntries(catalog, skills)
+		skills := chatSkillCatalogEntries(session, catalog, report, query)
 		payload := struct {
 			Count  int                             `json:"count"`
 			Query  string                          `json:"query,omitempty"`
@@ -272,34 +302,29 @@ func executeStructuredSkillsMenuCommand(session *ChatSession, command string) (C
 		return commandTextResult(marshalIndentedJSON(payload)), true
 	}
 
-	// select/pick/choose and bare /skills open the picker.
-	opensPicker := false
+	// select/pick/choose 是显式的交互式选择；其余一律是清单。
 	switch strings.ToLower(query) {
 	case "select", "pick", "choose":
-		opensPicker = true
-		query = ""
+		if !canOpenChatSkillPicker(session) {
+			// 显式请求的交互失败必须可见，并给出替代路径。
+			return commandTextResult(skillPickerUnavailableHint()), true
+		}
+		return CommandResult{
+			Action: CommandContinue,
+			Screen: chatScreenEffectSpec("skill.picker", "选择 Skill", func(s *ChatSession) {
+				openChatSkillPicker(s, SkillPickerRequest{})
+			}),
+		}, true
 	case "list", "ls", "status":
 		query = ""
-	default:
-		opensPicker = query == ""
 	}
-
-	if opensPicker {
-		if canOpenChatSkillPicker(session) {
-			return CommandResult{
-				Action: CommandContinue,
-				Screen: chatScreenEffectSpec("skill.picker", "选择 Skill", func(s *ChatSession) {
-					openChatSkillPicker(s, SkillPickerRequest{})
-				}),
-			}, true
-		}
-		// No picker surface: degrade to the full catalog report.
-		query = ""
-	}
-	doc := buildChatSkillCatalogDocument(filterSkillCatalogEntries(report.Skills, query), query)
+	doc := buildChatSkillCatalogDocument(
+		chatSkillCatalogEntries(session, catalog, report, query),
+		query,
+		sessionSkillRoots(session),
+	)
 	if unifiedDirectInteractiveOutput(session) && strings.TrimSpace(query) == "" {
-		// 批次 3 尾批：全量目录（list/status 与 picker 不可用降级）走副屏。
-		// 过滤查询仍是短结果，保持主屏内联单元格。
+		// 全量目录走副屏；过滤查询仍是短结果，保持主屏内联单元格。
 		return chatScreenDocResult(chatScreenSkillsListSpec(doc)), true
 	}
 	return CommandResult{

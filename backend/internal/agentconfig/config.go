@@ -3,6 +3,7 @@
 package agentconfig
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand"
 	"net/textproto"
@@ -1288,14 +1289,63 @@ func InitGlobalConfig(configPath string) (*Config, error) {
 			}
 		}
 	}
+	presetLayerApplied := false
 	if merged, err := applySystemPresetLayer(userYAML, cfg); err != nil {
 		return nil, err
 	} else {
+		// merged != cfg 表示确实有 preset 层参与合并；此时不动 enabled，
+		// 让 preset 的显式取值优先（内置默认值是最低层，不能反压 preset）。
+		if merged != cfg {
+			presetLayerApplied = true
+		}
 		cfg = merged
+	}
+	if !presetLayerApplied {
+		applySkillsRuntimeEnabledDefault(userYAML, cfg)
 	}
 	cfg.ConfigFilePath = configPath
 	globalConfig = cfg
 	return cfg, nil
+}
+
+// applySkillsRuntimeEnabledDefault 兑现文档承诺（docs/skill_runtime/aicli_skills_usage.md：
+// 「skills_runtime.enabled 默认为 true」）。
+//
+// 真实故障：用户配置里为了指定 config_file 写了 skills_runtime: 段，但没写
+// enabled，于是 Enabled 反序列化成 false，initSkillFunctionsWithManager 直接
+// return nil,nil —— 会话挂不上 skills runtime，/skills 报 total=0，而页面上
+// （runtime-server 模板带 enabled: true）又能看到技能，读写两端分叉。
+//
+// 为什么必须探测原始 YAML 而不是无条件赋值：Enabled 是普通 bool，"用户没写"与
+// "用户显式写 false"反序列化后都是 false。直接赋 true 会吃掉显式关闭，
+// skills_runtime.enabled: false 将永久失效——那比现状更糟。只在用户文档确实
+// 没写过这个键时才补默认值。
+func applySkillsRuntimeEnabledDefault(rawYAML []byte, cfg *Config) {
+	if cfg == nil || cfg.SkillsRuntime == nil {
+		return
+	}
+	if yamlMappingHasKey(rawYAML, "skills_runtime", "enabled") {
+		return
+	}
+	cfg.SkillsRuntime.Enabled = true
+}
+
+// yamlMappingHasKey 报告原始 YAML 里 section.key 是否被显式写过。解析失败时返回
+// false（按"没写"处理），因为此处只决定是否补默认值，不该让加载失败。
+func yamlMappingHasKey(rawYAML []byte, section, key string) bool {
+	if len(bytes.TrimSpace(rawYAML)) == 0 {
+		return false
+	}
+	var doc map[string]any
+	if err := unmarshalYAML(rawYAML, &doc); err != nil {
+		return false
+	}
+	nested, ok := doc[section].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, present := nested[key]
+	return present
 }
 
 // applySystemPresetLayer merges matching enabled system presets below the
