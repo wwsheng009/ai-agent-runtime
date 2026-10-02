@@ -77,6 +77,12 @@ func discoverCodexCompatibleSkillRootSpecs(anchor string, configFile string, hom
 // projectMarkers 对应 codex 的 `project_root_markers`：缺省只认 .git；
 // 空切片表示禁用项目根探测（此时项目根=anchor，与 codex 语义一致）。
 func discoverCodexCompatibleSkillRootSpecsWithMarkers(anchor string, configFile string, homeDir string, projectMarkers []string) []codexSkillRootSpec {
+	return discoverCodexCompatibleSkillRootSpecsInternal(anchor, configFile, homeDir, projectMarkers, true)
+}
+
+// discoverCodexCompatibleSkillRootSpecsInternal 是发现/候选的统一实现。
+// requireExisting=false 时保留尚不存在的标准安装位（热加载 pending 监听用）。
+func discoverCodexCompatibleSkillRootSpecsInternal(anchor string, configFile string, homeDir string, projectMarkers []string, requireExisting bool) []codexSkillRootSpec {
 	seen := make(map[string]struct{})
 	result := make([]codexSkillRootSpec, 0, 8)
 
@@ -85,9 +91,11 @@ func discoverCodexCompatibleSkillRootSpecsWithMarkers(anchor string, configFile 
 		if dir == "" {
 			return
 		}
-		info, err := os.Stat(dir)
-		if err != nil || !info.IsDir() {
-			return
+		if requireExisting {
+			info, err := os.Stat(dir)
+			if err != nil || !info.IsDir() {
+				return
+			}
 		}
 		if _, exists := seen[dir]; exists {
 			return
@@ -208,4 +216,22 @@ func projectAgentsSkillDirs(base string, projectMarkers []string) []string {
 // 复用，保证与 DiscoverCodexCompatibleSkillDirs 使用同一套项目边界。
 func ProjectAgentsSkillDirs(anchor string) []string {
 	return projectAgentsSkillDirs(anchor, defaultProjectRootMarkers)
+}
+
+// DiscoverCodexCompatibleSkillWatchDirs 返回 Codex 兼容发现里“标准安装位”的
+// 候选目录（含尚不存在的目录），供热加载建立 pending 监听：`<cwd>/.agents/skills`
+// 这类目录在启动时可能不存在，第一次安装（mkdir + 写文件）也必须触发热加载。
+//
+// 只用于扩展监听面，不参与 loader 的目录集合（加载仍走
+// DiscoverCodexCompatibleSkillDirs 的“仅实际存在”语义）。
+func DiscoverCodexCompatibleSkillWatchDirs(anchor string, configFile string) []string {
+	specs := discoverCodexCompatibleSkillRootSpecsInternal(
+		anchor, configFile, resolveSkillDiscoveryHomeDir(), defaultProjectRootMarkers, false)
+	dirs := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		if strings.TrimSpace(spec.Path) != "" {
+			dirs = append(dirs, spec.Path)
+		}
+	}
+	return dirs
 }

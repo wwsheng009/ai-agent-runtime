@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -114,4 +115,80 @@ triggers:
 	manifestPath, kind = skillManifestPathForWatchedFile(filepath.Join(dir, "scripts", "helper.yaml"))
 	assert.Equal(t, "", manifestPath)
 	assert.Equal(t, skillManifestKindUnknown, kind)
+}
+
+// 动态安装：运行中新建 skill 目录并写入 SKILL.md，无需重启即可注册；删除目录
+// 后必须注销，避免 registry 残留幽灵技能。跨平台用例：Linux inotify 的目录
+// 监听非递归，依赖目录补齐扫描兜住新目录里的事件。
+func TestHotReload_DirectoryInstallAndRemove(t *testing.T) {
+	loader := NewLoader(nil)
+	registry := NewRegistry(nil)
+	hotReload, err := NewHotReload(loader, registry)
+	require.NoError(t, err)
+	hotReload.SetDebounceTime(50 * time.Millisecond)
+
+	skillDir := t.TempDir()
+	require.NoError(t, hotReload.StartMany([]string{skillDir}))
+	t.Cleanup(func() { _ = hotReload.Stop() })
+
+	waitFor := func(assertion func() bool, message string) {
+		t.Helper()
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			if assertion() {
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		t.Fatalf("timed out: %s", message)
+	}
+
+	installed := filepath.Join(skillDir, "dynamic-skill")
+	require.NoError(t, os.MkdirAll(installed, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(installed, "SKILL.md"),
+		[]byte("---\nname: dynamic-skill\ndescription: installed while running\n---\n\nbody\n"), 0o644))
+
+	waitFor(func() bool {
+		item, ok := registry.Get("dynamic-skill")
+		return ok && item != nil
+	}, "newly installed skill must register without restart")
+
+	require.NoError(t, os.RemoveAll(installed))
+	waitFor(func() bool {
+		_, ok := registry.Get("dynamic-skill")
+		return !ok
+	}, "removed skill directory must unregister its skills")
+}
+
+// 启动时尚不存在标准安装位（新工作区）：WatchRoots 监听最近已存在的祖先，
+// 第一次安装（mkdir -p `<cwd>/.agents/skills/<name>` + SKILL.md）即注册，
+// 不需要重启，也不需要在启动时预创建目录。
+func TestHotReload_WatchRoots_PicksUpFirstInstall(t *testing.T) {
+	loader := NewLoader(nil)
+	registry := NewRegistry(nil)
+	hotReload, err := NewHotReload(loader, registry)
+	require.NoError(t, err)
+	hotReload.SetDebounceTime(50 * time.Millisecond)
+
+	workspace := t.TempDir()
+	root := filepath.Join(workspace, ".agents", "skills")
+	require.NoDirExists(t, root)
+
+	require.NoError(t, hotReload.StartMany([]string{workspace}))
+	hotReload.WatchRoots([]string{root})
+	t.Cleanup(func() { _ = hotReload.Stop() })
+
+	installed := filepath.Join(root, "first-install")
+	require.NoError(t, os.MkdirAll(installed, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(installed, "SKILL.md"),
+		[]byte("---\nname: first-install\ndescription: first install\n---\n\nbody\n"), 0o644))
+
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if item, ok := registry.Get("first-install"); ok && item != nil {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("first install into a previously missing skill root must hot reload")
 }

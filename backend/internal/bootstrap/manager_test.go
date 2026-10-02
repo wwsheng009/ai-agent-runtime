@@ -723,3 +723,34 @@ func TestManager_NewManager_AbsolutizesRelativeSkillDir(t *testing.T) {
 	require.True(t, info.IsDir())
 	assert.Equal(t, absDir, manager.SkillDir())
 }
+
+// DiscoverOnly 只代表“只发现、不加载正文”；长期服务通过 EnableHotReload 显式
+// 开启目录监听，从而支持运行中动态安装 skill（不重启进程）。
+func TestManager_NewManager_DiscoverOnlyCanEnableHotReload(t *testing.T) {
+	mcpManager := &bootstrapMCPManager{}
+	skillDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "skill.yaml"), []byte(`name: optin-hot
+description: optin hot
+triggers:
+  - type: keyword
+    values: ["optin"]
+    weight: 1
+`), 0o644))
+
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.HotReload.Enabled = true
+
+	manager, err := NewManager(&Options{
+		Config:          cfg,
+		SkillDir:        skillDir,
+		DiscoverOnly:    true,
+		EnableHotReload: true,
+		MCPManager:      mcpManager,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	require.NotNil(t, manager.HotReload())
+	watching, _ := manager.HotReload().GetStats()["watching"].(bool)
+	assert.True(t, watching, "DiscoverOnly + EnableHotReload must actually watch the skill dirs")
+}

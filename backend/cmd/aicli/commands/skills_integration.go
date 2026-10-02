@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
@@ -32,6 +33,9 @@ const (
 	skillExposureOnly     = "only"
 	aicliExecToolName     = "aicli_exec"
 	directBridgeTimeout   = "2m"
+	// skillsRuntimeRefreshDebounce 合并连续热加载事件（一次安装通常产生
+	// mkdir + 多个文件事件），避免函数面被重复重建。
+	skillsRuntimeRefreshDebounce = 300 * time.Millisecond
 )
 
 type skillExecutor interface {
@@ -63,6 +67,9 @@ type skillsRuntimeBinding struct {
 	// “我改的那个 skill 到底被扫到了没有”，所以这里存的是加载时的真实目录，
 	// 而不是命令执行时再解析一次（后者会与函数面漂移）。
 	roots []string
+	// hotReloadAttached 确保热加载回调只注册一次：binding 会被 in-place 复用
+	//（启停 / 热加载刷新），重复注册会让一次事件触发多次函数面重建。
+	hotReloadAttached bool
 }
 
 type skillExposureCandidate struct {
@@ -1010,7 +1017,10 @@ func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, too
 	}
 
 	resolvedSkillDirs := resolveChatSkillDirs(cfg, session, cliSkillDirs)
-	if len(resolvedSkillDirs) == 0 {
+	if len(resolvedSkillDirs) == 0 && shared == nil {
+		// 没有任何技能目录、也没有可复用的长期宿主：保持“无 skills runtime”。
+		// 有 shared（chat host）时继续：即使当前 0 个 skill，也要建立空的函数面
+		// 并挂上热加载回调，支持运行中第一次安装（动态安装无需重启）。
 		return nil, nil
 	}
 
@@ -1067,7 +1077,12 @@ func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, too
 		return nil, err
 	}
 
-	return buildSkillsRuntimeBindingFromManager(cfg, session, mcpRuntime, manager, ownsManager, cliSkillsTopK, cliSkillsMode, nil)
+	binding, err := buildSkillsRuntimeBindingFromManager(cfg, session, mcpRuntime, manager, ownsManager, cliSkillsTopK, cliSkillsMode, nil)
+	if err != nil {
+		return nil, err
+	}
+	binding.attachHotReloadRefresh(session)
+	return binding, nil
 }
 
 // buildSkillsRuntimeBindingFromManager 从已就绪的 manager 构建（或就地刷新）
@@ -1082,9 +1097,6 @@ func buildSkillsRuntimeBindingFromManager(cfg *config.Config, session *ChatSessi
 	}
 	summaries := manager.Registry().ListSummaries()
 	if len(summaries) == 0 {
-		if ownsManager {
-			_ = manager.Stop()
-		}
 		// 全部停用/无可用 skill：reuse 模式（热刷新）仍要撤销旧函数面，
 		// 否则停用后 /skills 还能选中并执行——假开关。
 		if reuse != nil {
@@ -1096,7 +1108,30 @@ func buildSkillsRuntimeBindingFromManager(cfg *config.Config, session *ChatSessi
 			catalog.PruneSkillFunctionsExcept(nil)
 			return reuse, nil
 		}
-		return nil, nil
+		if manager.HotReload() == nil {
+			if ownsManager {
+				_ = manager.Stop()
+			}
+			return nil, nil
+		}
+		// 空集合但具备热加载能力（长期宿主）：保留一个空 binding，运行中安装
+		// skill 后由 HotReload 回调触发 refresh，无需重启。
+		empty := &skillsRuntimeBinding{
+			manager:              manager,
+			ownsManager:          ownsManager,
+			mcpRuntime:           mcpRuntime,
+			count:                0,
+			exposureTopK:         resolveConfiguredSkillExposureTopK(cfg.SkillsRuntime, cliSkillsTopK),
+			exposureMode:         resolveConfiguredSkillExposureMode(cfg.SkillsRuntime, cliSkillsMode),
+			catalog:              catalog,
+			skillFunctions:       map[string]*SkillFunction{},
+			skillFunctionsByPath: map[string]*SkillFunction{},
+			skillNameCounts:      map[string]int{},
+			roots:                append([]string(nil), manager.SkillDirs()...),
+		}
+		catalog.PruneSkillFunctionsExcept(nil)
+		session.SkillsBinding = empty
+		return empty, nil
 	}
 
 	sort.Slice(summaries, func(i, j int) bool {
@@ -1250,6 +1285,10 @@ func refreshSkillsRuntimeBinding(session *ChatSession, cfg *config.Config) error
 	if session == nil || session.SkillsBinding == nil || session.SkillsBinding.manager == nil {
 		return fmt.Errorf("当前会话没有可刷新的 skills runtime")
 	}
+	// 串行化刷新：/skills 启停命令与文件监听回调都可能触发重建。
+	session.skillsBindingMu.Lock()
+	defer session.skillsBindingMu.Unlock()
+
 	cfg = effectiveChatSkillConfig(cfg, session)
 	if cfg == nil {
 		return fmt.Errorf("skills 配置不可用")
@@ -1263,6 +1302,58 @@ func refreshSkillsRuntimeBinding(session *ChatSession, cfg *config.Config) error
 	}
 	_, err := buildSkillsRuntimeBindingFromManager(cfg, session, binding.mcpRuntime, binding.manager, false, binding.exposureTopK, binding.exposureMode, binding)
 	return err
+}
+
+// attachHotReloadRefresh 把 bootstrap 的 HotReload 事件接到会话级防抖刷新：
+// 运行中新增/删除/修改 skill 后，函数面与 /skills 清单无需重启即可更新。
+//
+// 只对"长期宿主"的 manager 生效（EnableHotReload 开启后才有 HotReload）；
+// 一次性扫描的私有 manager 不注册，避免无意义的重建。
+func (b *skillsRuntimeBinding) attachHotReloadRefresh(session *ChatSession) {
+	if b == nil || b.manager == nil || session == nil || b.hotReloadAttached {
+		return
+	}
+	hotReload := b.manager.HotReload()
+	if hotReload == nil {
+		return
+	}
+	b.hotReloadAttached = true
+	hotReload.AddCallback(func(event *runtimeskill.ReloadEvent) {
+		if event == nil {
+			return
+		}
+		switch event.Type {
+		case runtimeskill.ReloadEventSkillAdded,
+			runtimeskill.ReloadEventSkillUpdated,
+			runtimeskill.ReloadEventSkillRemoved:
+			session.scheduleSkillsRuntimeRefresh()
+		}
+	})
+}
+
+// scheduleSkillsRuntimeRefresh 把同一会话的多次热加载事件合并为一次防抖刷新。
+func (s *ChatSession) scheduleSkillsRuntimeRefresh() {
+	if s == nil {
+		return
+	}
+	s.skillsRefreshMu.Lock()
+	if s.skillsRefreshTimer != nil {
+		s.skillsRefreshTimer.Stop()
+	}
+	s.skillsRefreshTimer = time.AfterFunc(skillsRuntimeRefreshDebounce, func() {
+		s.skillsRefreshMu.Lock()
+		s.skillsRefreshTimer = nil
+		s.skillsRefreshMu.Unlock()
+
+		cfg := effectiveChatSkillConfig(s.Config, s)
+		if cfg == nil {
+			return
+		}
+		if err := refreshSkillsRuntimeBinding(s, cfg); err != nil {
+			logpkg.Warnf("skills hot reload refresh failed: %v", err)
+		}
+	})
+	s.skillsRefreshMu.Unlock()
 }
 
 func skillFunctionKeepSet(functions map[string]*SkillFunction) map[string]struct{} {

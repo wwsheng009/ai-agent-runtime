@@ -24,6 +24,15 @@ type Options struct {
 	SkillDir     string
 	SkillDirs    []string
 	DiscoverOnly bool
+	// EnableHotReload 让 DiscoverOnly 形态的长期服务（aicli chat host /
+	// runtime-server）也能开启目录监听：DiscoverOnly 只代表"只发现、不加载正文"，
+	// 不代表不需要动态安装能力。一次性扫描的 CLI 不设置此开关，避免多余的
+	// watcher goroutine 与临时目录句柄。
+	EnableHotReload bool
+	// WatchSkillDirs 是“候选安装位”（可以尚不存在）：热加载会监听最近已存在
+	// 的祖先，目录被创建后自动接管。用于 `.agents/skills` 这类启动时可能不存在
+	// 的标准位置，保证第一次安装也能热加载；不参与加载集合。
+	WatchSkillDirs []string
 	// SkillFilter optionally restricts which skill names are registered.
 	// nil keeps the pre-profile behavior (every discovered skill is kept).
 	SkillFilter         func(string) bool
@@ -139,7 +148,9 @@ func NewManager(opts *Options) (*Manager, error) {
 	}
 	manager.embeddingRouter = embeddingRouter
 
-	if !opts.DiscoverOnly && config.HotReload.Enabled && len(manager.skillDirs) > 0 {
+	hasWatchCandidates := len(opts.WatchSkillDirs) > 0
+	if config.HotReload.Enabled && (!opts.DiscoverOnly || opts.EnableHotReload) &&
+		(len(manager.skillDirs) > 0 || hasWatchCandidates) {
 		hotReload, err := skill.NewHotReload(manager.loader, manager.registry)
 		if err != nil {
 			return nil, err
@@ -149,11 +160,18 @@ func NewManager(opts *Options) (*Manager, error) {
 		if config.HotReload.DebounceDelay > 0 {
 			hotReload.SetDebounceTime(config.HotReload.DebounceDelay)
 		}
-		if err := hotReload.StartMany(manager.skillDirs); err != nil {
+		if len(manager.skillDirs) > 0 {
+			if err := hotReload.StartMany(manager.skillDirs); err != nil {
+				return nil, err
+			}
+		} else if err := hotReload.StartEmpty(); err != nil {
 			return nil, err
 		}
-		if err := hotReload.Reload(); err != nil {
-			return nil, err
+		hotReload.WatchRoots(opts.WatchSkillDirs)
+		if len(manager.skillDirs) > 0 {
+			if err := hotReload.Reload(); err != nil {
+				return nil, err
+			}
 		}
 	}
 

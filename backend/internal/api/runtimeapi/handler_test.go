@@ -7457,3 +7457,41 @@ func TestGetUsageLedger_ServiceUnavailableDistinguishesDisabledFromBroken(t *tes
 	assert.Contains(t, brokenRec.Body.String(), "unsupported usage ledger driver: postgres")
 	assert.NotContains(t, brokenRec.Body.String(), "usage ledger not configured")
 }
+
+// 目录监听事件必须驱动 skills.changed 广播并失效 codex list 缓存；embedding
+// router 缺失（未启用语义检索）时也不能把广播一起丢掉。回归：旧实现要求
+// router 非 nil 才注册回调，未启用 embedding 的 runtime-server 完全收不到事件。
+func TestAttachEmbeddingHotReloadSync_PublishesReloadDoneWithoutEmbeddingRouter(t *testing.T) {
+	mcpManager := &testMCPManager{}
+	registry := skill.NewRegistry(mcpManager)
+	loader := skill.NewLoader(mcpManager)
+	hotReload, err := skill.NewHotReload(loader, registry)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = hotReload.Stop() })
+
+	handler := NewHandler(registry, loader, mcpManager)
+	handler.SetHotReload(hotReload)
+	require.Nil(t, handler.embeddingRouter)
+
+	skillDir := t.TempDir()
+	require.NoError(t, hotReload.StartMany([]string{skillDir}))
+	versionBefore := handler.currentCodexSkillsListCacheVersion()
+	require.NoError(t, hotReload.Reload())
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		events := handler.getRuntimeEventBus().Query(runtimeevents.QueryFilter{
+			EventType: "skills.changed",
+			Limit:     10,
+		})
+		for _, event := range events {
+			if event.Payload["action"] == skillMutationActionHotReloadRun {
+				require.Greater(t, handler.currentCodexSkillsListCacheVersion(), versionBefore,
+					"reload event must invalidate the codex skills list cache")
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("reload_done hot reload event was not published as skills.changed")
+}

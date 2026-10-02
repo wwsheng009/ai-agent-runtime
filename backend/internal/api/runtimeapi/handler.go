@@ -9555,7 +9555,7 @@ func (h *Handler) ensureHotReload() (*skill.HotReload, error) {
 }
 
 func (h *Handler) attachEmbeddingHotReloadSync() {
-	if h.hotReload == nil || h.embeddingRouter == nil || h.embeddingHotReloadSyncAttached {
+	if h.hotReload == nil || h.embeddingHotReloadSyncAttached {
 		return
 	}
 
@@ -9566,15 +9566,29 @@ func (h *Handler) attachEmbeddingHotReloadSync() {
 
 		switch event.Type {
 		case skill.ReloadEventSkillAdded, skill.ReloadEventSkillUpdated:
-			if registeredSkill, ok := h.skillRegistry.Get(event.SkillName); ok {
-				_ = h.embeddingRouter.IncrementalIndex(registeredSkill)
+			// embedding 同步是可选增强：router 缺失也必须广播 skills.changed，
+			// 否则 web 端拿不到目录变化、codex list 缓存也不会失效。
+			if h.embeddingRouter != nil {
+				if registeredSkill, ok := h.skillRegistry.Get(event.SkillName); ok {
+					_ = h.embeddingRouter.IncrementalIndex(registeredSkill)
+				}
 			}
 			h.publishHotReloadSkillChangedEvent(event)
 		case skill.ReloadEventSkillRemoved:
-			_ = h.embeddingRouter.RemoveIndex(&skill.Skill{Name: event.SkillName})
+			if h.embeddingRouter != nil {
+				_ = h.embeddingRouter.RemoveIndex(&skill.Skill{Name: event.SkillName})
+			}
 			h.publishHotReloadSkillChangedEvent(event)
 		case skill.ReloadEventReloadDone:
-			_ = h.embeddingRouter.RebuildIndex()
+			if h.embeddingRouter != nil {
+				_ = h.embeddingRouter.RebuildIndex()
+			}
+			// 全量重载（热加载 start/reload、新目录补齐）也必须广播并失效
+			// codex list 缓存，否则 web 端仍可能读到旧快照。
+			h.publishSkillsChangedEvent(nil, map[string]interface{}{
+				"action": skillMutationActionHotReloadRun,
+				"status": "success",
+			})
 		}
 	})
 	h.embeddingHotReloadSyncAttached = true

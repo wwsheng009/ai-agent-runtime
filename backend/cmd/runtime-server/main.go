@@ -1064,6 +1064,9 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		SkillDir:     skillsCfg.SkillDir,
 		SkillDirs:    resolvedExtraSkillDirs(skillsCfg),
 		DiscoverOnly: true,
+		// 长期服务：目录监听常开，外部安装/删除 skill 后无需重启即可生效
+		//（事件经 handler 转成 skills-changed 并失效 codex list 缓存）。
+		EnableHotReload: true,
 		// SK-6：skills_runtime.disabled_skills 在 loader 过滤器权威点生效。
 		SkillFilter:         profileinput.WithDisabledSkills(nil, skillsCfg.DisabledSkillNames()),
 		MCPManager:          mcpAdapter,

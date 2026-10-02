@@ -180,6 +180,11 @@ type ChatSession struct {
 	SkillsBinding   *skillsRuntimeBinding // Skills 运行时绑定
 	SkillsMode      string                // Skills 暴露模式
 	SkillsDebug     bool                  // Skills 调试输出
+	// skillsRefreshMu / skillsRefreshTimer 把 skill 目录热加载事件合并成一次
+	// 防抖刷新；skillsBindingMu 串行化刷新本身，避免与 /skills 启停命令交错。
+	skillsRefreshMu    sync.Mutex
+	skillsRefreshTimer *time.Timer
+	skillsBindingMu    sync.Mutex
 	// NoSkills 是 --no-skills：跳过 skill 自动发现，只保留显式目录。
 	NoSkills bool
 	// CapabilitiesInitError 记录后台能力面装载（discoverChatCapabilities /

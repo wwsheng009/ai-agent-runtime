@@ -2,6 +2,8 @@ package commands
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
@@ -10,6 +12,7 @@ import (
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	profilesys "github.com/wwsheng009/ai-agent-runtime/internal/profile"
 	runtimeprofileinput "github.com/wwsheng009/ai-agent-runtime/internal/profileinput"
+	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 )
 
 type chatProfileState struct {
@@ -474,6 +477,25 @@ func resolveChatSkillDirs(cfg *config.Config, session *ChatSession, cliSkillDirs
 		return mergeActivePluginSkillDirs(appendUniqueExistingDirs(session.ResolvedSkillDirs, cliSkillDirs))
 	}
 	return resolveConfiguredSkillDirs(skillRuntimeConfig(cfg), cliSkillDirs, includeDiscovered)
+}
+
+// resolveChatSkillWatchDirs 返回动态安装的候选监听位（目录可以尚不存在）：
+// 当前工作区的 Codex 兼容标准位（`<cwd>/.agents/skills`、用户级目录、config
+// 目录）由 discovery 候选给出；显式配置目录已由 EnsureSkillDirs 创建，无需候选。
+// 热加载只为尚不存在的候选挂 pending 监听，第一次安装即可生效。
+func resolveChatSkillWatchDirs(cfg *config.Config, session *ChatSession) []string {
+	if session != nil && session.NoSkills {
+		return nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil || strings.TrimSpace(cwd) == "" {
+		return nil
+	}
+	configFile := ""
+	if skillsCfg := skillRuntimeConfig(cfg); skillsCfg != nil {
+		configFile = resolveExistingPathValue(skillsCfg.ConfigFile, false)
+	}
+	return runtimeskill.DiscoverCodexCompatibleSkillWatchDirs(filepath.Clean(cwd), configFile)
 }
 
 func appendUniqueExistingDirs(base []string, extra []string) []string {

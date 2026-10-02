@@ -1263,6 +1263,12 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		Config:       runtimeConfig,
 		SkillDirs:    resolveChatSkillDirs(cfg, session, nil),
 		DiscoverOnly: true,
+		// 交互式 chat 宿主是长期进程：开启目录监听，`aicli skill add` / 手工
+		// 复制到 .agents/skills 等动态安装无需重启即可反映到函数面。
+		EnableHotReload: true,
+		// 启动时不存在的标准安装位（如新工作区的 .agents/skills）也纳入候选
+		// 监听，保证“第一次安装”同样热加载。
+		WatchSkillDirs: resolveChatSkillWatchDirs(cfg, session),
 		// SK-6：profile 选择与 skills_runtime.disabled_skills 取交集，禁用优先。
 		SkillFilter: runtimeprofileinput.WithDisabledSkills(
 			runtimeprofileinput.BuildSkillFilter(session.ProfileSkillSelection),

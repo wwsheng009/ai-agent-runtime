@@ -49,8 +49,15 @@ Skill 的"加载"是一次性的目录扫描 + 注册表登记（热重载负责
 | 批量加载 | `Load/LoadAll/Discover/DiscoverAll`，结果按 path 去重；`Discover*` 只产出轻量 summary | `internal/skill/loader.go:32-115` |
 | 注册表 | `skills` + `skillsByPath` 双索引、`summaries`、已 hydrate 缓存、MCP manager 引用；`Register` 内建 keyword/pattern 索引 | `internal/skill/registry.go:40-124,352-376` |
 | 装配 | `bootstrap.Manager`：`EnsureSkillDirs` → 目录集合 → `LoadAll`（或 `DiscoverOnly`）→ 可选 HotReload → 可选 EmbeddingRouter → 注入 skills handler | `internal/bootstrap/manager.go:77-145` |
-| 热重载 | fsnotify 监听多根目录 + debounce 批处理；事件分派到 `reloadSkill` / `removeSkillByManifest` / `reloadAllSkills`；source rank 决定同源覆盖顺序；暴露 stats/events 与 `/skills/hot-reload/*` API | `internal/skill/hot_reload.go:91-145,381-538,606-649` |
+| 热重载 | fsnotify 监听多根目录 + debounce 批处理；事件分派到 `reloadSkill` / `removeSkillByManifest` / `reloadAllSkills`；**新建目录**（动态安装）会登记监听并做一次目录补齐扫描，**删除/重命名目录**会注销其中 skill；source rank 决定同源覆盖顺序；暴露 stats/events 与 `/skills/hot-reload/*` API | `internal/skill/hot_reload.go` |
 | 语义路由 | `RouteWithConfig`：keyword → pattern → embedding，去重 → minScore 过滤 → maxResults 截断；embedding 仅在 `Router.EnableEmbedding && Embedding.Enabled` 时构建（默认 threshold 0.5 / top-k 5） | `internal/skill/router.go:85-123`；`embedding_router.go:31-42` |
+
+### 2.1 动态安装（不重启进程）
+
+- **监听面**：`HotReload` 监听所有已存在的 skill 根；对启动时尚不存在的标准安装位（`<cwd>/.agents/skills`、`~/.agents/skills` 等）登记 pending 监听（先监听最近已存在的祖先），目录一旦创建即自动接管并扫描其中的 manifest。
+- **aicli chat**：交互宿主以 `DiscoverOnly + EnableHotReload + WatchSkillDirs` 建 bootstrap；事件写入 registry 后，会话级 300ms 防抖调用 `refreshSkillsRuntimeBinding` 重建函数面——`aicli skill add` / 手工复制 / 删除在下一次模型回合即可见，`/skills` 清单同步更新。启动时 0 个 skill 的会话也保留空 binding，第一次安装同样生效。
+- **runtime-server**：同一开关开启目录监听；`ApplyToSkillsHandler` 注入 HotReload 后，`skills.changed` 事件（带 action/skill_name/skill_path/count/`codex_list_cache_version`）同时失效 codex list 缓存，`ReloadDone` 也会广播；web 端无需重启进程。
+- **目录语义**：新建目录登记监听并做防抖补齐扫描；删除/重命名目录注销其中已登记的 skill（避免 ghost 条目）。事件驱动为主，`/skills/hot-reload/*` API 仍可用于手工显式触发。
 
 ---
 

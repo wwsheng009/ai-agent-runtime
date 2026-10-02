@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -61,6 +62,17 @@ type HotReload struct {
 	// 扫描器状态
 	scanning bool
 	scanMu   sync.Mutex
+
+	// watchedDirs 记录已登记监听的目录（含运行中动态创建的子目录），目录被
+	// 删除/重命名时据此反注册其中登记过的 skill。
+	// scheduledDirScans 合并同一个新目录的补齐扫描，避免一次安装反复重扫。
+	watchedDirs       map[string]struct{}
+	scheduledDirScans map[string]struct{}
+	// pendingRoots 是"候选根目录"（启动时尚不存在，如新工作区的
+	// `<cwd>/.agents/skills`）：先监听最近已存在的祖先，目录创建后自动接管。
+	pendingRoots map[string]struct{}
+	// reloadMu 串行化目录补齐 / 全量重载，防抖回调可能并发触发。
+	reloadMu sync.Mutex
 }
 
 // NewHotReload 创建热加载器
@@ -73,17 +85,20 @@ func NewHotReload(loader *Loader, registry *Registry) (*HotReload, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &HotReload{
-		watcher:      watcher,
-		loader:       loader,
-		registry:     registry,
-		callbacks:    make([]ReloadCallback, 0),
-		eventBuffer:  make(chan *ReloadEvent, 100),
-		debounceMap:  make(map[string]time.Time),
-		skillFiles:   make(map[string]string),
-		ctx:          ctx,
-		cancel:       cancel,
-		enabled:      true,
-		debounceTime: 500 * time.Millisecond, // 默认防抖时间
+		watcher:           watcher,
+		loader:            loader,
+		registry:          registry,
+		callbacks:         make([]ReloadCallback, 0),
+		eventBuffer:       make(chan *ReloadEvent, 100),
+		debounceMap:       make(map[string]time.Time),
+		skillFiles:        make(map[string]string),
+		watchedDirs:       make(map[string]struct{}),
+		scheduledDirScans: make(map[string]struct{}),
+		pendingRoots:      make(map[string]struct{}),
+		ctx:               ctx,
+		cancel:            cancel,
+		enabled:           true,
+		debounceTime:      500 * time.Millisecond, // 默认防抖时间
 	}, nil
 }
 
@@ -94,9 +109,6 @@ func (h *HotReload) Start(skillDir string) error {
 
 // StartMany 启动多个目录的热加载
 func (h *HotReload) StartMany(skillDirs []string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	// 检查是否已经在扫描
 	h.scanMu.Lock()
 	if h.scanning {
@@ -110,11 +122,13 @@ func (h *HotReload) StartMany(skillDirs []string) error {
 		return fmt.Errorf("skill directory is required")
 	}
 
+	h.mu.Lock()
 	h.skillDirs = normalized
 	h.skillDir = normalized[0]
+	h.mu.Unlock()
 
 	for _, dir := range normalized {
-		if err := h.watcher.Add(dir); err != nil {
+		if err := h.watchDir(dir); err != nil {
 			return fmt.Errorf("failed to add directory to watcher: %w", err)
 		}
 		if err := h.addSubdirectories(dir); err != nil {
@@ -122,7 +136,9 @@ func (h *HotReload) StartMany(skillDirs []string) error {
 		}
 	}
 
+	h.scanMu.Lock()
 	h.scanning = true
+	h.scanMu.Unlock()
 
 	// 启动事件处理 goroutine
 	go h.processEvents()
@@ -135,6 +151,116 @@ func (h *HotReload) StartMany(skillDirs []string) error {
 	})
 
 	return nil
+}
+
+// StartEmpty 启动事件循环但不监听任何现有根：调用方随后通过 WatchRoots 登记
+// 候选安装位（启动时不存在的标准目录），由目录创建事件接管。
+//
+// 用于“启动时一个技能目录都不存在”的会话/服务：保留热加载能力，第一次安装
+// 即可生效，而不是因为空集合直接关闭整条链路。
+func (h *HotReload) StartEmpty() error {
+	h.scanMu.Lock()
+	if h.scanning {
+		h.scanMu.Unlock()
+		return fmt.Errorf("hot reload already scanning")
+	}
+	h.scanning = true
+	h.scanMu.Unlock()
+
+	go h.processEvents()
+	go h.watch()
+
+	h.emitEvent(&ReloadEvent{
+		Type:      ReloadEventReloadStarted,
+		Timestamp: time.Now(),
+	})
+	return nil
+}
+
+// WatchRoots 登记一组"候选根目录"：目录已存在则直接监听；不存在则监听最近
+// 已存在的祖先，待目录被创建（动态安装的第一步）后自动接管并补齐扫描。
+//
+// 标准安装位（`<cwd>/.agents/skills`、`~/.agents/skills` 等）在启动时可能
+// 尚不存在，只有 StartMany 的现有根会让"第一次安装"失去热加载能力。
+//
+// WatchRoots 不参与加载（loader 的目录集合仍由调用方提供），只扩展监听面。
+func (h *HotReload) WatchRoots(dirs []string) {
+	if h == nil || h.watcher == nil {
+		return
+	}
+	for _, dir := range normalizeSkillDirs(dirs) {
+		dir = canonicalizeSkillTreePath(dir, false)
+		if dir == "" {
+			continue
+		}
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			if err := h.watchDir(dir); err == nil {
+				_ = h.addSubdirectories(dir)
+			}
+			continue
+		}
+		h.watchPendingRoot(dir)
+	}
+}
+
+// watchPendingRoot 为尚不存在的目标目录登记 pending 监听：向上找到最近的
+// 已存在祖先挂监听，创建事件到达时由 advancePendingRoots 逐级推进接管。
+func (h *HotReload) watchPendingRoot(target string) {
+	target = filepath.Clean(strings.TrimSpace(target))
+	if target == "" {
+		return
+	}
+	for ancestor := filepath.Dir(target); ancestor != "" && ancestor != filepath.Dir(ancestor); ancestor = filepath.Dir(ancestor) {
+		info, err := os.Stat(ancestor)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if err := h.watchDir(ancestor); err != nil {
+			return
+		}
+		h.mu.Lock()
+		h.pendingRoots[target] = struct{}{}
+		h.mu.Unlock()
+		return
+	}
+}
+
+// advancePendingRoots 在目录创建/重命名事件后推进候选根：已到位则登记监听、
+// 补齐子目录并扫描其中的 skill；中间目录则先挂上，继续等待更深一层。
+func (h *HotReload) advancePendingRoots(created string) {
+	created = filepath.Clean(strings.TrimSpace(created))
+	if created == "" {
+		return
+	}
+
+	h.mu.RLock()
+	targets := make([]string, 0, len(h.pendingRoots))
+	for target := range h.pendingRoots {
+		if skillWatchPathEqual(created, target) || strings.HasPrefix(target, created+string(os.PathSeparator)) {
+			targets = append(targets, target)
+		}
+	}
+	h.mu.RUnlock()
+	if len(targets) == 0 {
+		return
+	}
+
+	for _, target := range targets {
+		if info, err := os.Stat(target); err == nil && info.IsDir() {
+			if err := h.watchDir(target); err == nil {
+				h.mu.Lock()
+				delete(h.pendingRoots, target)
+				h.mu.Unlock()
+				_ = h.addSubdirectories(target)
+				h.scheduleDirectoryScan(target)
+			}
+			continue
+		}
+		// 中间目录刚出现：挂上监听，目标目录就绪前继续等待下一级创建事件。
+		if info, err := os.Stat(created); err == nil && info.IsDir() {
+			_ = h.watchDir(created)
+		}
+	}
 }
 
 // Stop 停止热加载
@@ -264,6 +390,30 @@ func (h *HotReload) handleEvent(event fsnotify.Event) {
 		return
 	}
 
+	// 目录级事件必须优先于清单文件过滤处理：
+	//   - 新建目录：动态安装 skill 的第一步（mkdir + 写入 SKILL.md/skill.yaml）。
+	//     Linux inotify 的目录监听是非递归的，新建的子目录不会被父目录监听覆盖，
+	//     这里立即登记监听并安排一次目录补齐扫描，避免“装完不生效”；
+	//   - 删除/重命名目录：注销目录内已登记的 skill，避免 registry 残留幽灵技能。
+	// 另外先推进候选根：启动时不存在的标准安装位一旦被创建即自动接管。
+	if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
+		if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+			h.advancePendingRoots(event.Name)
+		}
+	}
+	if event.Op&fsnotify.Create == fsnotify.Create {
+		if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+			h.handleDirectoryCreate(event.Name)
+			h.scheduleDirectoryScan(event.Name)
+			return
+		}
+	}
+	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 && h.isWatchedDir(event.Name) {
+		h.unwatchDir(event.Name)
+		h.removeSkillsUnderDir(event.Name)
+		return
+	}
+
 	manifestPath, kind := skillManifestPathForWatchedFile(event.Name)
 	if manifestPath == "" {
 		return
@@ -286,22 +436,167 @@ func (h *HotReload) handleEvent(event fsnotify.Event) {
 	time.AfterFunc(debounceTime, func() {
 		h.processFile(manifestPath, kind, event.Op)
 	})
-
-	// 处理目录创建事件（监听新创建的子目录）
-	if event.Op&fsnotify.Create == fsnotify.Create {
-		h.handleDirectoryCreate(event.Name)
-	}
 }
 
 // handleDirectoryCreate 处理目录创建事件
 func (h *HotReload) handleDirectoryCreate(path string) {
-	// fsnotify.Watcher 不提供直接检查是否监听的方法
-	// 直接尝试添加目录监听，如果已监听 fsnotify 会返回错误
-	if err := h.watcher.Add(path); err == nil {
-		_ = h.addSubdirectories(path)
-		return // 成功添加
+	if err := h.watchDir(path); err != nil {
+		// 添加失败通常意味着路径不存在或已在监听，忽略错误。
+		return
 	}
-	// 添加失败通常意味着已经在监听，忽略错误
+	_ = h.addSubdirectories(path)
+}
+
+// watchDir 登记目录监听并记账（幂等）。
+func (h *HotReload) watchDir(path string) error {
+	path = canonicalizeSkillTreePath(path, false)
+	if path == "" {
+		return nil
+	}
+	h.mu.Lock()
+	if _, exists := h.watchedDirs[path]; exists {
+		h.mu.Unlock()
+		return nil
+	}
+	h.mu.Unlock()
+
+	if err := h.watcher.Add(path); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	h.watchedDirs[path] = struct{}{}
+	h.mu.Unlock()
+	return nil
+}
+
+// unwatchDir 移除目录监听与记账（含此前登记过的子目录）。
+func (h *HotReload) unwatchDir(path string) {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" {
+		return
+	}
+	prefix := path + string(os.PathSeparator)
+
+	h.mu.Lock()
+	removed := make([]string, 0, 1)
+	for watched := range h.watchedDirs {
+		if skillWatchPathEqual(watched, path) || strings.HasPrefix(filepath.Clean(watched), prefix) {
+			removed = append(removed, watched)
+			delete(h.watchedDirs, watched)
+		}
+	}
+	h.mu.Unlock()
+
+	for _, watched := range removed {
+		_ = h.watcher.Remove(watched)
+	}
+}
+
+// isWatchedDir 报告路径是否是已登记的监听目录。
+func (h *HotReload) isWatchedDir(path string) bool {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for watched := range h.watchedDirs {
+		if skillWatchPathEqual(watched, path) {
+			return true
+		}
+	}
+	return false
+}
+
+// scheduleDirectoryScan 在新目录出现后安排一次防抖补齐扫描：安装动作可能是
+// “先建目录再写文件”，目录监听登记存在竞态窗口，直接扫目录可以兜住丢失的事件。
+// 同一个目录只保留一次待执行扫描。
+func (h *HotReload) scheduleDirectoryScan(dir string) {
+	dir = filepath.Clean(strings.TrimSpace(dir))
+	if dir == "" {
+		return
+	}
+	h.mu.Lock()
+	if _, exists := h.scheduledDirScans[dir]; exists {
+		h.mu.Unlock()
+		return
+	}
+	h.scheduledDirScans[dir] = struct{}{}
+	debounceTime := h.debounceTime
+	h.mu.Unlock()
+
+	time.AfterFunc(debounceTime, func() {
+		h.mu.Lock()
+		delete(h.scheduledDirScans, dir)
+		h.mu.Unlock()
+		h.reloadSkillsUnderDir(dir)
+	})
+}
+
+// reloadSkillsUnderDir 扫描一个目录下的 skill 清单并注册/刷新（动态安装补齐）。
+func (h *HotReload) reloadSkillsUnderDir(dir string) {
+	if h == nil || h.registry == nil {
+		return
+	}
+	h.reloadMu.Lock()
+	defer h.reloadMu.Unlock()
+
+	seen := make(map[string]struct{})
+	_, err := walkSkillTree(dir, !isCodexSystemSkillRoot(dir), func(entry skillTreeEntry) error {
+		if entry.Info == nil || entry.Info.IsDir() || !shouldParseSkillManifest(entry.Path) {
+			return nil
+		}
+		path := filepath.Clean(entry.Path)
+		if _, exists := seen[path]; exists {
+			return nil
+		}
+		seen[path] = struct{}{}
+		h.reloadSkill(path)
+		return nil
+	})
+	if err != nil {
+		h.emitEvent(&ReloadEvent{
+			Type:      ReloadEventError,
+			FilePath:  dir,
+			Error:     fmt.Sprintf("failed to scan new skill directory: %v", err),
+			Timestamp: time.Now(),
+		})
+	}
+}
+
+// removeSkillsUnderDir 注销目录下已登记的 skill（目录被删除/重命名时）。
+func (h *HotReload) removeSkillsUnderDir(dir string) {
+	if h == nil || h.registry == nil {
+		return
+	}
+	dir = filepath.Clean(strings.TrimSpace(dir))
+	if dir == "" {
+		return
+	}
+	prefix := dir + string(os.PathSeparator)
+
+	h.mu.RLock()
+	paths := make([]string, 0, len(h.skillFiles))
+	for path := range h.skillFiles {
+		if skillWatchPathEqual(path, dir) || strings.HasPrefix(filepath.Clean(path), prefix) {
+			paths = append(paths, path)
+		}
+	}
+	h.mu.RUnlock()
+
+	for _, path := range paths {
+		h.removeSkillByManifest(path)
+	}
+}
+
+// skillWatchPathEqual 比较监听记账路径；Windows 文件系统大小写不敏感。
+func skillWatchPathEqual(a, b string) bool {
+	a = filepath.Clean(strings.TrimSpace(a))
+	b = filepath.Clean(strings.TrimSpace(b))
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 type skillManifestKind int
@@ -681,7 +976,7 @@ func (h *HotReload) addSubdirectories(dir string) error {
 		if entry.Info == nil || !entry.Info.IsDir() {
 			return nil
 		}
-		if err := h.watcher.Add(entry.Path); err != nil {
+		if err := h.watchDir(entry.Path); err != nil {
 			// 忽略错误，可能是权限问题或已监听。
 		}
 		return nil
