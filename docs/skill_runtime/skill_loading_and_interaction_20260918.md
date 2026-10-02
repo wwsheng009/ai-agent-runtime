@@ -44,7 +44,7 @@ Skill 的"加载"是一次性的目录扫描 + 注册表登记（热重载负责
 
 | 环节 | 事实 | 位置 |
 |---|---|---|
-| 目录来源 | `skills_runtime.skill_dir` / `skill_dirs` / `extra_skill_dirs`；再按 Codex 兼容规则补：`<anchor>/skills`、各祖先 `<dir>/.agents/skills`（repo scope）、`~/.aicli/skills`、`~/.aicli/agents/skills`（user scope）。只返回实际存在的目录并稳定去重 | `internal/skill/roots.go:9-97` |
+| 目录来源 | `skills_runtime.skill_dir` / `skill_dirs` / `extra_skill_dirs`；再按 Codex 兼容规则补：`<anchor>/skills`、项目根（默认 marker `.git`）以内各祖先 `<dir>/.agents/skills`（repo scope）、`~/.agents/skills`、`~/.aicli/skills`、`~/.aicli/agents/skills`、`~/.aicli/.agents/skills`（user scope）。只返回实际存在的目录并稳定去重 | `internal/skill/roots.go:9-97` |
 | 解析入口 | 只解析 legacy manifest 与 Codex `SKILL.md`；companion `prompt.md` 支持 lazy / eager 两种加载；`systemPrompt/userPrompt` 可回写为 `prompt.md` | `internal/skill/manifest.go:224-227,371,476-498,642-648`；`loader.go:117-157` |
 | 批量加载 | `Load/LoadAll/Discover/DiscoverAll`，结果按 path 去重；`Discover*` 只产出轻量 summary | `internal/skill/loader.go:32-115` |
 | 注册表 | `skills` + `skillsByPath` 双索引、`summaries`、已 hydrate 缓存、MCP manager 引用；`Register` 内建 keyword/pattern 索引 | `internal/skill/registry.go:40-124,352-376` |

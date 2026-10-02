@@ -55,7 +55,7 @@ func discoverCodexSkillLoadOutcome(anchor, configFile, homeDir string, extraRoot
 		seenRoots[spec.Path] = struct{}{}
 
 		followSymlinks := !isCodexSystemSkillRoot(spec.Path)
-		if err := walkSkillTree(spec.Path, followSymlinks, func(entry skillTreeEntry) error {
+		warnings, err := walkSkillTree(spec.Path, followSymlinks, func(entry skillTreeEntry) error {
 			if entry.Info == nil || entry.Info.IsDir() {
 				return nil
 			}
@@ -143,7 +143,14 @@ func discoverCodexSkillLoadOutcome(anchor, configFile, homeDir string, extraRoot
 			}
 			outcome.Skills = append(outcome.Skills, meta)
 			return nil
-		}); err != nil {
+		})
+		for _, warning := range warnings {
+			outcome.Warnings = append(outcome.Warnings, CodexSkillError{
+				Path:    spec.Path,
+				Message: warning,
+			})
+		}
+		if err != nil {
 			outcome.Errors = append(outcome.Errors, CodexSkillError{
 				Path:    spec.Path,
 				Message: err.Error(),

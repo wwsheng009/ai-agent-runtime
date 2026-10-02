@@ -1014,11 +1014,21 @@ func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, too
 		return nil, nil
 	}
 
+	// MCP 运行时来源优先级：会话工具管理器（已含 toolkit + 会话/本地 MCP 合并面）
+	// → 进程级 MCPManagerInstance 兜底 → 无。
+	//
+	// 关键点：toolManager 非 nil 不等于「带 MCP」——宿主可以在没有任何 MCP 链时用
+	// mcp=nil 构造它（chat_setup 的 mcpForTools 在本地 MCP 关闭且无会话 MCP 时为
+	// nil）。此时 NewAgentAdapter 返回的是一个空 MCP 面，而旧的 else 分支永远不可达，
+	// 技能于是拿不到 MCP。这里必须探测真实可用性，兜底才有效。
 	var mcpRuntime runtimeskill.MCPManager
-	if toolManager != nil {
+	if toolManager.MCPAvailable() {
 		mcpRuntime = runtimetools.NewAgentAdapter(toolManager)
 	} else if MCPManagerInstance != nil {
 		mcpRuntime = runtimeskill.NewMCPAdapter(MCPManagerInstance)
+	} else if toolManager != nil {
+		// 无 MCP 可用时仍保留工具管理器（保留 toolkit 面，便于按需降级而非直接置空）。
+		mcpRuntime = runtimetools.NewAgentAdapter(toolManager)
 	}
 
 	manager := shared
@@ -1311,27 +1321,32 @@ func resolveConfiguredSkillDirs(cfg *config.SkillsRuntimeConfig, cliSkillDirs []
 	if cfg != nil {
 		if configFile := strings.TrimSpace(cfg.ConfigFile); configFile != "" {
 			if resolvedConfigFile := resolveExistingPathValue(configFile, false); resolvedConfigFile != "" {
-				for _, dir := range runtimeskill.DiscoverCodexCompatibleSkillDirs(filepath.Dir(resolvedConfigFile), resolvedConfigFile) {
+				// config_file 可能经「可执行文件目录向上回溯」命中另一个工作区的
+				// 配置（例如从 E:\temp 启动却命中二进制所在仓库的
+				// backend/configs/runtime.yaml）。Codex 兼容发现的锚点必须是当前
+				// 工作区 cwd，否则会把那个仓库的 .agents/skills 误带进当前工作区。
+				anchorDir := filepath.Dir(resolvedConfigFile)
+				if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+					anchorDir = filepath.Clean(cwd)
+				}
+				for _, dir := range runtimeskill.DiscoverCodexCompatibleSkillDirs(anchorDir, resolvedConfigFile) {
 					addDir(dir)
 				}
 			}
 		}
 	}
 
-	// 工作区锚点：进程 cwd（及祖先目录）下的 .agents/skills 必须无条件参与
-	// 加载，与 web「Codex skills list」（internal/api/runtimeapi/codex_list.go 以
-	// cwd 为锚点）和文档承诺（仓库 skill 目录默认进入 loader/registry）一致。
+	// 工作区锚点：进程 cwd（及项目根以内的祖先目录）下的 .agents/skills 必须
+	// 无条件参与加载，与 web「Codex skills list」（internal/api/runtimeapi/codex_list.go
+	// 以 cwd 为锚点）和文档承诺（仓库 skill 目录默认进入 loader/registry）一致。
 	// 只以「配置文件所在目录」为锚点时，配置文件位于 ~/.aicli（用户级配置的
 	// 常态）或未配置 config_file 时，<workspace>/.agents/skills 永远不会进入
 	// loader/registry，chat 的 skill catalog 恒为 total=0。
+	// 扫描范围与 codex 对齐：以项目根（默认 marker .git）为界，不越界到仓库外
+	// 的父目录（internal/skill.ProjectAgentsSkillDirs）。
 	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
-		for dir := filepath.Clean(cwd); dir != ""; {
-			addDir(filepath.Join(dir, ".agents", "skills"))
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
+		for _, dir := range runtimeskill.ProjectAgentsSkillDirs(cwd) {
+			addDir(dir)
 		}
 	}
 

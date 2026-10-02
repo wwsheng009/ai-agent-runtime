@@ -10,8 +10,23 @@ import (
 const (
 	maxSkillScanDepth        = 6
 	maxSkillDirsPerRoot      = 2000
+	maxSkillEntriesPerRoot   = 20000
 	codexSystemRootComponent = ".system"
 )
+
+// skillWalkLimits 对应 codex walk 的预算（max_depth / max_directories /
+// max_entries）。条目预算与 codex MAX_SKILLS_ENTRIES_PER_ROOT=20000 对齐。
+type skillWalkLimits struct {
+	MaxDepth   int
+	MaxDirs    int
+	MaxEntries int
+}
+
+var defaultSkillWalkLimits = skillWalkLimits{
+	MaxDepth:   maxSkillScanDepth,
+	MaxDirs:    maxSkillDirsPerRoot,
+	MaxEntries: maxSkillEntriesPerRoot,
+}
 
 type skillTreeEntry struct {
 	Path  string
@@ -22,32 +37,39 @@ type skillTreeEntry struct {
 // walkSkillTree 以 BFS 方式遍历技能树。
 //
 // 规则：
-// - 只遍历可见目录
-// - 目录深度上限为 6
-// - 每个 root 最多遍历 2000 个目录
-// - system root 不跟随 symlink，其他 root 可选择跟随
-// - visitor 仅接收已确认的目录/文件，不负责过滤
-func walkSkillTree(root string, followSymlinks bool, visitor func(skillTreeEntry) error) error {
+//   - 只遍历可见目录
+//   - 目录深度上限为 6，每个 root 最多 2000 个目录、20000 个条目
+//     （与 codex MAX_SCAN_DEPTH / MAX_SKILLS_DIRS_PER_ROOT /
+//     MAX_SKILLS_ENTRIES_PER_ROOT 对齐）
+//   - system root 不跟随 symlink，其他 root 可选择跟随
+//   - visitor 仅接收已确认的目录/文件，不负责过滤
+//
+// 触碰预算时通过返回的 warnings 上报（不再直接打印到 stdout）。
+func walkSkillTree(root string, followSymlinks bool, visitor func(skillTreeEntry) error) ([]string, error) {
+	return walkSkillTreeWithLimits(root, followSymlinks, defaultSkillWalkLimits, visitor)
+}
+
+func walkSkillTreeWithLimits(root string, followSymlinks bool, limits skillWalkLimits, visitor func(skillTreeEntry) error) ([]string, error) {
 	root = canonicalizeSkillTreePath(root, followSymlinks)
 	if root == "" {
-		return nil
+		return nil, nil
 	}
 
 	rootInfo, err := os.Lstat(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if rootInfo.Mode()&os.ModeSymlink != 0 {
 		if !followSymlinks {
-			return nil
+			return nil, nil
 		}
 		rootInfo, err = os.Stat(root)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if !rootInfo.IsDir() {
-		return nil
+		return nil, nil
 	}
 
 	type queuedDir struct {
@@ -58,7 +80,9 @@ func walkSkillTree(root string, followSymlinks bool, visitor func(skillTreeEntry
 	queue := []queuedDir{{path: root, depth: 0}}
 	visited := map[string]struct{}{root: struct{}{}}
 	truncated := false
+	entriesSeen := 0
 
+walkLoop:
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
@@ -70,6 +94,12 @@ func walkSkillTree(root string, followSymlinks bool, visitor func(skillTreeEntry
 		}
 
 		for _, entry := range entries {
+			if limits.MaxEntries > 0 && entriesSeen >= limits.MaxEntries {
+				truncated = true
+				break walkLoop
+			}
+			entriesSeen++
+
 			name := entry.Name()
 			if isHiddenFileOrDir(name) {
 				continue
@@ -94,12 +124,12 @@ func walkSkillTree(root string, followSymlinks bool, visitor func(skillTreeEntry
 				if resolved == "" {
 					continue
 				}
-				if current.depth+1 > maxSkillScanDepth {
+				if limits.MaxDepth > 0 && current.depth+1 > limits.MaxDepth {
 					continue
 				}
-				if len(visited) >= maxSkillDirsPerRoot {
+				if limits.MaxDirs > 0 && len(visited) >= limits.MaxDirs {
 					truncated = true
-					continue
+					break walkLoop
 				}
 				if _, exists := visited[resolved]; exists {
 					continue
@@ -111,7 +141,7 @@ func walkSkillTree(root string, followSymlinks bool, visitor func(skillTreeEntry
 						Info:  targetInfo,
 						Depth: current.depth + 1,
 					}); err != nil {
-						return err
+						return nil, err
 					}
 				}
 				queue = append(queue, queuedDir{path: resolved, depth: current.depth + 1})
@@ -123,12 +153,12 @@ func walkSkillTree(root string, followSymlinks bool, visitor func(skillTreeEntry
 				if resolved == "" {
 					continue
 				}
-				if current.depth+1 > maxSkillScanDepth {
+				if limits.MaxDepth > 0 && current.depth+1 > limits.MaxDepth {
 					continue
 				}
-				if len(visited) >= maxSkillDirsPerRoot {
+				if limits.MaxDirs > 0 && len(visited) >= limits.MaxDirs {
 					truncated = true
-					continue
+					break walkLoop
 				}
 				if _, exists := visited[resolved]; exists {
 					continue
@@ -140,7 +170,7 @@ func walkSkillTree(root string, followSymlinks bool, visitor func(skillTreeEntry
 						Info:  info,
 						Depth: current.depth + 1,
 					}); err != nil {
-						return err
+						return nil, err
 					}
 				}
 				queue = append(queue, queuedDir{path: resolved, depth: current.depth + 1})
@@ -153,16 +183,17 @@ func walkSkillTree(root string, followSymlinks bool, visitor func(skillTreeEntry
 					Info:  info,
 					Depth: current.depth + 1,
 				}); err != nil {
-					return err
+					return nil, err
 				}
 			}
 		}
 	}
 
+	var warnings []string
 	if truncated {
-		fmt.Printf("Warning: skill scan truncated after %d directories (root: %s)\n", maxSkillDirsPerRoot, root)
+		warnings = append(warnings, fmt.Sprintf("skills scan reached its traversal limit (root: %s)", root))
 	}
-	return nil
+	return warnings, nil
 }
 
 func canonicalizeSkillTreePath(path string, followSymlinks bool) string {

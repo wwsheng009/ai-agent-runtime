@@ -30,6 +30,12 @@ func (a *MCPAdapter) FindTool(toolName string) (ToolInfo, error) {
 	if err != nil {
 		return ToolInfo{}, err
 	}
+	// 缺失的工具必须返回 error 而不是让 info==nil 继续走下去：
+	// registry.validate 会对每个声明工具调用 FindTool 并把 err!=nil 记为
+	// missing_tools，而 nil info 会在下面的 info.Tool 处直接 panic。
+	if info == nil || info.Tool == nil {
+		return ToolInfo{}, fmt.Errorf("mcp tool %q not found", toolName)
+	}
 
 	return ToolInfo{
 		Name:             mcpregistry.CallableToolName(info, a.manager.ListTools()),

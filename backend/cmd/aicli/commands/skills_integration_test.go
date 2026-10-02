@@ -1768,3 +1768,48 @@ triggers:
 		t.Fatalf("会话生效面的 exposure 覆盖未生效: mode=%q topK=%d", binding.exposureMode, binding.exposureTopK)
 	}
 }
+
+// config_file 经「可执行文件目录向上回溯」命中另一棵仓库时，不得把那个仓库的
+// .agents/skills 带进当前工作区：Codex 兼容发现的锚点必须是 cwd。
+//
+// 复现现场：aicli 二进制位于 E:\projects\ai\ai-agent-runtime\backend，用户级配置写
+// `skills_runtime.config_file: configs/runtime.yaml`，在 E:\temp 启动时 cwd 向上
+// 搜不到该相对路径，于是回退到「可执行文件目录向上」命中仓库内的
+// backend/configs/runtime.yaml；旧实现以该配置文件目录为锚点做祖先扫描，把
+// 仓库根的 .agents/skills 当成了当前会话的 skill 根。
+func TestResolveConfiguredSkillDirs_ConfigFileExecutableFallbackDoesNotLeakSkillRoot(t *testing.T) {
+	repoRoot := t.TempDir()
+	backendDir := filepath.Join(repoRoot, "backend")
+	configDir := filepath.Join(backendDir, "configs")
+	repoSkills := filepath.Join(repoRoot, ".agents", "skills")
+	writeTestFile(t, filepath.Join(repoSkills, "repo-skill", "skill.yaml"), "name: repo-skill\ndescription: repo skill\n")
+	writeTestFile(t, filepath.Join(configDir, "runtime.yaml"), "version: \"v1\"\n")
+
+	previousExe := executablePathForTest
+	executablePathForTest = filepath.Join(backendDir, "aicli.exe")
+	t.Cleanup(func() { executablePathForTest = previousExe })
+
+	// 当前工作区是另一个目录：既没有 configs/runtime.yaml，也没有 .agents/skills。
+	workspace := t.TempDir()
+	chdirTest(t, workspace)
+	// 隔离用户级目录，避免真实 HOME 下的 skills 混进断言。
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+
+	relativeConfig := filepath.Join("configs", "runtime.yaml")
+	if got := resolveExistingPathValue(relativeConfig, false); got == "" {
+		t.Fatal("prerequisite failed: executable-dir fallback did not resolve the repo config file")
+	}
+
+	resolved := resolveConfiguredSkillDirs(&config.SkillsRuntimeConfig{
+		Enabled:    true,
+		ConfigFile: relativeConfig,
+	}, nil, true)
+
+	for _, dir := range resolved {
+		if filepath.Clean(dir) == filepath.Clean(repoSkills) {
+			t.Fatalf("repo skill root leaked into an unrelated workspace: %#v", resolved)
+		}
+	}
+}

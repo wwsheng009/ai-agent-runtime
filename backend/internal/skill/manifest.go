@@ -216,7 +216,7 @@ func (p *ManifestParser) ParseSummaryBytes(data []byte) (*SkillSummary, error) {
 func (p *ManifestParser) ParseDir(dirPath string) ([]*Skill, error) {
 	var skills []*Skill
 
-	err := walkSkillTree(dirPath, !isCodexSystemSkillRoot(dirPath), func(entry skillTreeEntry) error {
+	_, err := walkSkillTree(dirPath, !isCodexSystemSkillRoot(dirPath), func(entry skillTreeEntry) error {
 		if entry.Info == nil || entry.Info.IsDir() {
 			return nil
 		}
@@ -248,7 +248,7 @@ func (p *ManifestParser) ParseDir(dirPath string) ([]*Skill, error) {
 func (p *ManifestParser) ParseSummaryDir(dirPath string) ([]*SkillSummary, error) {
 	var summaries []*SkillSummary
 
-	err := walkSkillTree(dirPath, !isCodexSystemSkillRoot(dirPath), func(entry skillTreeEntry) error {
+	_, err := walkSkillTree(dirPath, !isCodexSystemSkillRoot(dirPath), func(entry skillTreeEntry) error {
 		if entry.Info == nil || entry.Info.IsDir() {
 			return nil
 		}

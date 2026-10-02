@@ -31,10 +31,10 @@
 
 | 事项 | 事实 | 位置 |
 |---|---|---|
-| 根目录 | `<anchor>/skills`、anchor 各级祖先 `.agents/skills`、`~/.aicli/skills`、`~/.aicli/agents/skills`、`<config_dir>/skills` | `internal/skill/roots.go:92,86-88,97-98,101-103` |
+| 根目录 | `<anchor>/skills`、项目根（默认 marker `.git`）以内各级祖先 `.agents/skills`、`~/.agents/skills`、`~/.aicli/skills`、`~/.aicli/agents/skills`、`~/.aicli/.agents/skills`、`<config_dir>/skills` | `internal/skill/roots.go:92,86-88,97-98,101-103` |
 | 配置/CLI 附加根 | `skills_runtime.skill_dir / skill_dirs / extra_skill_dirs`；`aicli chat|exec --skills-dir`（可重复） | `internal/agentconfig/config.go:844-846`、`cmd/aicli/commands/chat_command.go:121`、`exec_common_flags.go:59` |
-| 实际装配顺序 | config → CLI `--skills-dir` → Codex 兼容发现 → cwd 祖先 `.agents/skills` → plugin 根 | `cmd/aicli/commands/skills_integration.go:1173-1213` |
-| 扫描规则 | BFS、深度上限 6、每根 2000 目录、跳过隐藏项；`scripts/ references/ assets/ agents/` 不当作 skill | `internal/skill/scan.go:11-12`、`manifest.go:502-515` |
+| 实际装配顺序 | config → CLI `--skills-dir` → Codex 兼容发现 → 项目根以内 cwd 祖先 `.agents/skills` → plugin 根 | `cmd/aicli/commands/skills_integration.go:1173-1213` |
+| 扫描规则 | BFS、深度上限 6、每根 2000 目录 / 20000 条目（对齐 codex `MAX_SCAN_DEPTH` / `MAX_SKILLS_DIRS_PER_ROOT` / `MAX_SKILLS_ENTRIES_PER_ROOT`）、跳过隐藏项；`scripts/ references/ assets/ agents/` 不当作 skill | `internal/skill/scan.go:11-12`、`manifest.go:502-515` |
 | 冲突优先级 | 目录顺序先者优先（`sourceRankForPath` 返回目录索引） | `internal/skill/hot_reload.go:623-646` |
 | 注册语义 | `skills` + `skillsByPath` 双索引；同 path 覆盖；legacy×legacy 同名后者丢弃；Codex 同名可共存、name 索引先到先得 | `internal/skill/registry.go:99-129` |
 | 缺失能力 | 无 `~/.agents/skills` 显式用户根（仅在 cwd 位于 home 下时被祖先遍历间接覆盖）；无 `--skill`/`--no-skills`；无重复名/shadow 报告 | 反证核查见附录 B |
@@ -103,7 +103,7 @@
 | 目录名 = name、name 字符集校验 | 未校验 | ❌ 缺 |
 | `$ARGUMENTS` / `$ARGUMENTS[N]` / `${N}` / 命名参数 `${SKILL_DIR}` `${PROJECT_DIR}` `${SESSION_ID}` `${EFFORT}`（+ CLAUDE_* 别名） | 不存在 | ❌ 缺 |
 | 正文动态 shell 注入（`` !`cmd` `` / ```` ```! ````） | 不存在（`internal/skill` 无 `os/exec`） | ❌ 缺（建议不做） |
-| 发现：`.agents/skills` 项目级 + 用户级、≤10 层且到 home 停 | 项目级祖先遍历（到盘根，不因 home 停）；用户级 `.agents/skills` 无显式根 | ⚠️ 部分 |
+| 发现：`.agents/skills` 项目级 + 用户级、≤10 层且到 home 停 | 项目级祖先遍历以项目根为界（默认 marker `.git`；无 marker 时仅工作目录，对齐 codex `host_roots.rs`）；用户级 `.agents/skills` 为显式根 | ✅ 已对齐 |
 | 额外位置（settings `skills` 数组 / `--skill` / `--no-skills`） | 由 `extra_skill_dirs` + `--skills-dir` 承担；无 `--skill`/`--no-skills` | ⚠️ 部分 |
 | 同名遮蔽告警（duplicate names） | 无 | ❌ 缺 |
 | `/skills` 浏览、`/skill` 调用 | 已有（TUI + Web） | ✅（形态不同） |

@@ -553,7 +553,7 @@ func (h *HotReload) reloadAllSkills(skillDirs []string) error {
 	loaded := make([]fileSkill, 0)
 	seenSkillPaths := make(map[string]struct{})
 	for _, skillDir := range normalized {
-		err := walkSkillTree(skillDir, !isCodexSystemSkillRoot(skillDir), func(entry skillTreeEntry) error {
+		_, err := walkSkillTree(skillDir, !isCodexSystemSkillRoot(skillDir), func(entry skillTreeEntry) error {
 			if entry.Info == nil || entry.Info.IsDir() {
 				return nil
 			}
@@ -677,7 +677,7 @@ func (h *HotReload) emitEvent(event *ReloadEvent) {
 
 // addSubdirectories 递归添加子目录
 func (h *HotReload) addSubdirectories(dir string) error {
-	return walkSkillTree(dir, !isCodexSystemSkillRoot(dir), func(entry skillTreeEntry) error {
+	_, err := walkSkillTree(dir, !isCodexSystemSkillRoot(dir), func(entry skillTreeEntry) error {
 		if entry.Info == nil || !entry.Info.IsDir() {
 			return nil
 		}
@@ -686,6 +686,7 @@ func (h *HotReload) addSubdirectories(dir string) error {
 		}
 		return nil
 	})
+	return err
 }
 
 // GetStats 获取统计信息

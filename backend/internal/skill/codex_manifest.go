@@ -130,6 +130,108 @@ func (p *ManifestParser) parseCodexSummaryFile(filePath string) (*SkillSummary, 
 	return SummaryFromSkill(skill), nil
 }
 
+// repairCodexFrontmatterScalarFields 复刻 codex parser.rs 的容错修复：部分第三方
+// SKILL.md 的标量值里带 `: `（如 `description: Build for AWS: ECS`），严格 YAML
+// 会拒绝。这里按行把这类值改成单引号标量后重试；无法安全判定时保持原样，让
+// 原始 YAML 错误照常上报。
+func repairCodexFrontmatterScalarFields(frontmatter string) (string, bool) {
+	lines := strings.Split(frontmatter, "\n")
+	repaired := make([]string, 0, len(lines))
+	changed := false
+	blockScalarIndent := -1
+
+	for _, line := range lines {
+		indent := 0
+		for indent < len(line) && line[indent] == ' ' {
+			indent++
+		}
+		// 多行块标量（| / >）内部的内容原样保留。
+		if blockScalarIndent >= 0 {
+			if strings.TrimSpace(line) == "" || indent > blockScalarIndent {
+				repaired = append(repaired, line)
+				continue
+			}
+			blockScalarIndent = -1
+		}
+
+		colon := strings.IndexByte(line, ':')
+		if colon < 0 {
+			repaired = append(repaired, line)
+			continue
+		}
+		key := line[:colon]
+		value := line[colon+1:]
+		if strings.TrimSpace(key) == "" || value == "" || !isCodexYAMLInlineSpace(value[0]) {
+			repaired = append(repaired, line)
+			continue
+		}
+
+		leadingWhitespace := value[:len(value)-len(strings.TrimLeft(value, " \t"))]
+		scalar := value[len(leadingWhitespace):]
+		comment := ""
+		for i := 0; i < len(scalar); i++ {
+			if scalar[i] != '#' {
+				continue
+			}
+			if i > 0 && !isCodexYAMLInlineSpace(scalar[i-1]) {
+				continue
+			}
+			trimmed := strings.TrimRight(scalar[:i], " \t")
+			comment = scalar[len(trimmed):]
+			scalar = trimmed
+			break
+		}
+		scalar = strings.TrimRight(scalar, " \t")
+		if scalar == "" {
+			repaired = append(repaired, line)
+			continue
+		}
+
+		switch scalar[0] {
+		case '|', '>':
+			blockScalarIndent = indent
+			repaired = append(repaired, line)
+			continue
+		case '\'', '"':
+			repaired = append(repaired, line)
+			continue
+		}
+
+		hasColonSeparator := false
+		for i := 0; i+1 < len(scalar); i++ {
+			if scalar[i] == ':' && isCodexYAMLInlineSpace(scalar[i+1]) {
+				hasColonSeparator = true
+				break
+			}
+		}
+		invalidFlowLikeScalar := false
+		switch scalar[0] {
+		case '[', '{', '@', '`':
+			var probe interface{}
+			if err := yaml.Unmarshal([]byte(scalar), &probe); err != nil {
+				invalidFlowLikeScalar = true
+			}
+		}
+		if !hasColonSeparator && !invalidFlowLikeScalar {
+			repaired = append(repaired, line)
+			continue
+		}
+
+		quoted := "'" + strings.ReplaceAll(scalar, "'", "''") + "'"
+		repaired = append(repaired, key+":"+leadingWhitespace+quoted+comment)
+		changed = true
+	}
+
+	if !changed {
+		return frontmatter, false
+	}
+	return strings.Join(repaired, "\n"), true
+}
+
+func isCodexYAMLInlineSpace(char byte) bool {
+	return char == ' ' || char == '\t'
+}
+
 func parseCodexSkillMetadata(filePath string, data []byte, loadBody bool) (*CodexSkillMetadata, error) {
 	frontmatterBytes, bodyBytes, err := splitCodexFrontmatter(data)
 	if err != nil {
@@ -139,8 +241,11 @@ func parseCodexSkillMetadata(filePath string, data []byte, loadBody bool) (*Code
 
 	var frontmatter codexSkillFrontmatter
 	if err := yaml.Unmarshal(frontmatterBytes, &frontmatter); err != nil {
-		return nil, errors.Wrap(errors.ErrConfigInvalid,
-			fmt.Sprintf("failed to unmarshal codex frontmatter: %s", filePath), err)
+		repaired, repairedOK := repairCodexFrontmatterScalarFields(string(frontmatterBytes))
+		if !repairedOK || yaml.Unmarshal([]byte(repaired), &frontmatter) != nil {
+			return nil, errors.Wrap(errors.ErrConfigInvalid,
+				fmt.Sprintf("failed to unmarshal codex frontmatter: %s", filePath), err)
+		}
 	}
 
 	name := collapseWhitespace(frontmatter.Name)

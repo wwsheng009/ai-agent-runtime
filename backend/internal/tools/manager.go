@@ -98,6 +98,18 @@ func NewDefaultManagerWithRuntimeConfig(mcp manager.Manager, config *runtimecfg.
 	return manager
 }
 
+// MCPAvailable reports whether this manager actually carries an MCP runtime.
+//
+// A non-nil Manager does NOT imply a usable MCP surface: hosts construct it with
+// mcp=nil when no MCP chain is attached (e.g. chat_setup builds it from
+// mcpForTools, which is nil when local MCP is off and there is no session MCP).
+// Callers that need to choose between this manager and a separate MCP manager
+// must probe instead of testing for nil, otherwise the MCP fallback is
+// unreachable and they silently get a dead MCP surface.
+func (m *Manager) MCPAvailable() bool {
+	return m != nil && m.mcp != nil
+}
+
 // ListTools returns the unified tool list, preferring MCP tools on name conflict.
 func (m *Manager) ListTools() []ToolDescriptor {
 	// ADR-0004 §4.1：每次列出工具前按最新陈旧度重新评估并切换分组；

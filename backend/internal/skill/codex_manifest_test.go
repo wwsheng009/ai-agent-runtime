@@ -131,3 +131,36 @@ triggers:
 	assert.Equal(t, filepath.Clean(skillPath), summaries[0].Source.Path)
 	assert.Equal(t, metadataPath, summaries[0].Source.MetadataPath)
 }
+
+// codex parser.rs 对齐：第三方 SKILL.md 的 prose 标量里带 `: ` 时自动加引号重试，
+// `description: Build for AWS: ECS` 这类写法不再导致整个技能被拒绝。
+func TestManifestParser_ParseFile_RepairsProseScalarWithColon(t *testing.T) {
+	dir := t.TempDir()
+	skillPath := filepath.Join(dir, "SKILL.md")
+	require.NoError(t, os.WriteFile(skillPath, []byte(`---
+name: aws-build
+description: Build for AWS: ECS workloads
+argument-hint: <duration: e.g. 7d>
+---
+body
+`), 0o644))
+
+	parser := NewManifestParser()
+	skill, err := parser.ParseFile(skillPath)
+	require.NoError(t, err)
+	require.NotNil(t, skill)
+	require.NotNil(t, skill.Codex)
+	assert.Equal(t, "Build for AWS: ECS workloads", skill.Description)
+	assert.Equal(t, "<duration: e.g. 7d>", skill.Codex.ArgumentHint)
+}
+
+// 修复只针对可判定的标量行；无法修复的 YAML 仍必须报错。
+func TestManifestParser_ParseFile_StillRejectsBrokenYAML(t *testing.T) {
+	dir := t.TempDir()
+	skillPath := filepath.Join(dir, "SKILL.md")
+	require.NoError(t, os.WriteFile(skillPath, []byte("---\nname: broken\ndescription\n---\nbody\n"), 0o644))
+
+	parser := NewManifestParser()
+	_, err := parser.ParseFile(skillPath)
+	require.Error(t, err)
+}
