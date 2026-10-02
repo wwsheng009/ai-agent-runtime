@@ -103,6 +103,21 @@ func (c *runtimeSelectionController) render() {
 	updateRuntimeSelectionPopup(c.session, c.handle, lines, c.prompt)
 }
 
+// renderWithInput 重画弹层并把已键入的文本并进 popup 输入行。
+//
+// fixed surface 下 popup 输入行归 surface 所有，编辑器不能自己往 stdout 画它
+// （否则每秒的状态重绘会把直写擦掉，表现为输入与 ↑↓ 高亮「没反应」）。
+func (c *runtimeSelectionController) renderWithInput(text string) {
+	if c == nil || c.renderFn == nil {
+		return
+	}
+	c.clampSelected()
+	lines := c.renderFn(c.selected, c.warning)
+	// 输入行是单行渲染；多行输入只取首行，光标跟随首行输入末尾。
+	inputLine := strings.SplitN(text, "\n", 2)[0]
+	updateRuntimeSelectionPopup(c.session, c.handle, lines, c.prompt+inputLine)
+}
+
 // chatSelectionComposer wires ↑/↓ into a transient selection prompt so the
 // popup highlight moves without submitting a line.
 type chatSelectionComposer struct {
@@ -133,11 +148,26 @@ func (c *chatSelectionComposer) ReadLine() (string, error) {
 }
 
 func (c *chatSelectionComposer) hooks() ui.LineEditorHooks {
-	return ui.LineEditorHooks{
+	hooks := ui.LineEditorHooks{
 		OnChange:   c.onChange,
 		OnNavigate: c.onNavigate,
 		OnCancel:   c.onCancel,
 	}
+	if chatComposerUsesFixedSurface(c.session) {
+		// popup 输入行由 surface 拥有：编辑器不得直写 stdout，必须被消费掉。
+		hooks.OnTerminalWrite = c.onTerminalWrite
+		hooks.SuppressSubmitEcho = true
+	}
+	return hooks
+}
+
+// onTerminalWrite 返回 true 表示该次编辑器直写已被消费。
+//
+// fixed surface 下选择弹层的输入行是 popup 的 ComposerLine，由 surface 画；
+// 让编辑器落到 os.Stdout 会覆盖 surface 的行（用户看到 popup 输入行被啃掉字符），
+// 且 ↑↓ 重画出来的行会与之打架，表现为高亮「切不动」。
+func (c *chatSelectionComposer) onTerminalWrite(_ ui.LineEditorSnapshot, _ ui.LineEditorRenderSnapshot, _ io.Writer, _ string) bool {
+	return chatComposerUsesFixedSurface(c.session)
 }
 
 func (c *chatSelectionComposer) initializePrompt() {
@@ -155,10 +185,20 @@ func (c *chatSelectionComposer) clearPrompt() {
 }
 
 func (c *chatSelectionComposer) onChange(snapshot ui.LineEditorSnapshot) {
-	if c == nil || !c.trackPrompt || c.session == nil || c.session.Interaction == nil {
+	if c == nil || c.session == nil {
 		return
 	}
-	c.session.Interaction.SetPromptInput(snapshot.Text)
+	if c.trackPrompt {
+		if c.session.Interaction != nil {
+			c.session.Interaction.SetPromptInput(snapshot.Text)
+		}
+		return
+	}
+	// fixed surface：输入必须并进 popup 输入行，否则 surface 重绘会擦掉编辑器的
+	// 直写（与 chatModalComposerPrompt.foldChatPriorityPromptPopupInput 同理）。
+	if c.controller != nil {
+		c.controller.renderWithInput(snapshot.Text)
+	}
 }
 
 func (c *chatSelectionComposer) onNavigate(_ ui.LineEditorSnapshot, delta int) bool {
