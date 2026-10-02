@@ -122,6 +122,7 @@ type ChatSession struct {
 	escapeStoppingNoticeShown atomic.Bool                          // 重复 Esc 的“停止处理中”提示本中断周期内是否已展示（P2-10）
 	interruptCleanupMu        sync.Mutex                           // 保护当前中断清理完成信号
 	interruptCleanupDone      chan struct{}                        // 阻止下一轮与上一轮异步清理交错
+	interruptCleanupStartedAt time.Time                            // 当前在途中断清理的登记时间（判定超期未关闭，见 interruptCleanupStalled）
 	escapeConsumerMu          sync.Mutex                           // 保护会话级 ESC 消费者注册表（阶段 C）
 	escapeConsumer            *chatEscapeConsumerState             // 共享 ESC 消费者：按引用计数持有 Arm/goroutine
 	inputArbitrationMu        sync.Mutex                           // 保护阶段 F 影子仲裁器（§12.3 P0）
@@ -506,11 +507,13 @@ func (s *ChatSession) setInterruptCleanup(done chan struct{}) {
 	previous := s.interruptCleanupDone
 	if previous == nil {
 		s.interruptCleanupDone = done
+		s.interruptCleanupStartedAt = time.Now()
 		s.interruptCleanupMu.Unlock()
 		return
 	}
 	combined := make(chan struct{})
 	s.interruptCleanupDone = combined
+	s.interruptCleanupStartedAt = time.Now()
 	s.interruptCleanupMu.Unlock()
 	go func() {
 		<-previous
@@ -538,6 +541,7 @@ func (s *ChatSession) reserveInterruptCleanup() (chan struct{}, bool) {
 	}
 	done := make(chan struct{})
 	s.interruptCleanupDone = done
+	s.interruptCleanupStartedAt = time.Now()
 	return done, true
 }
 
@@ -596,6 +600,7 @@ func (s *ChatSession) waitForInterruptCleanupWithin(timeout time.Duration) {
 			s.interruptCleanupMu.Lock()
 			if s.interruptCleanupDone == done {
 				s.interruptCleanupDone = nil
+				s.interruptCleanupStartedAt = time.Time{}
 				s.interruptCleanupMu.Unlock()
 				return
 			}
@@ -609,6 +614,7 @@ func (s *ChatSession) waitForInterruptCleanupWithin(timeout time.Duration) {
 			s.interruptCleanupMu.Lock()
 			if s.interruptCleanupDone == done {
 				s.interruptCleanupDone = nil
+				s.interruptCleanupStartedAt = time.Time{}
 			}
 			s.interruptCleanupMu.Unlock()
 			return
@@ -634,6 +640,52 @@ func (s *ChatSession) isInterruptCleanupInFlight() bool {
 	default:
 		return true
 	}
+}
+
+// interruptCleanupStalled reports whether the in-flight cleanup signal has
+// outlived its own budget (chatInterruptCleanupWaitTimeout) without closing.
+// An abnormal cleanup must not swallow later Esc presses forever: the ESC
+// consumer detaches such a signal and reserves a fresh cleanup
+// (see detachStalledInterruptCleanup).
+func (s *ChatSession) interruptCleanupStalled() bool {
+	if s == nil {
+		return false
+	}
+	s.interruptCleanupMu.Lock()
+	defer s.interruptCleanupMu.Unlock()
+	return s.interruptCleanupStalledLocked()
+}
+
+func (s *ChatSession) interruptCleanupStalledLocked() bool {
+	done := s.interruptCleanupDone
+	if done == nil || s.interruptCleanupStartedAt.IsZero() {
+		return false
+	}
+	select {
+	case <-done:
+		return false
+	default:
+	}
+	return time.Since(s.interruptCleanupStartedAt) > chatInterruptCleanupWaitTimeout
+}
+
+// detachStalledInterruptCleanup drops a stalled cleanup signal so the next
+// interrupt can reserve a fresh one. The abandoned cleanup goroutine stays
+// bounded by chatInterruptCleanupTimeout and only closes its own channel; it
+// no longer blocks new interrupt cleanups (reserveInterruptCleanup would
+// otherwise refuse forever).
+func (s *ChatSession) detachStalledInterruptCleanup() bool {
+	if s == nil {
+		return false
+	}
+	s.interruptCleanupMu.Lock()
+	defer s.interruptCleanupMu.Unlock()
+	if !s.interruptCleanupStalledLocked() {
+		return false
+	}
+	s.interruptCleanupDone = nil
+	s.interruptCleanupStartedAt = time.Time{}
+	return true
 }
 
 // finishInterruptCleanupUI leaves the Stopping composer stage once actor stop

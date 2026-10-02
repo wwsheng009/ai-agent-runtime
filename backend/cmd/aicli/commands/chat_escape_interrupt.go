@@ -109,16 +109,22 @@ func runChatEscapeInterruptConsumer(session *ChatSession, escCh <-chan bool, don
 	for {
 		select {
 		case <-escCh:
-			// A second Esc while Stopping has no new interrupt target.
-			// Ignore it instead of opening backtrack or re-rendering.
-			if session.IsInterrupted() {
-				// P2-10：重复 Esc 不再完全静默——每个中断周期提示一次
-				// “停止处理中”，让用户知道按键已被接收且不会重复触发。
+			// 重复 Esc 语义（P2-10 + ESC 失效修复）：
+			//   - 中断清理仍在途且未超期：视为“正在停止”，不再叠加新的
+			//     中断请求，每个中断周期提示一次“停止处理中”；
+			//   - 清理已结束 / 从未启动 / 已超期：不能按会话级 interrupted
+			//     标志永久吞键。wake/actor 直驱回合不经过本地主循环的
+			//     ResetInterrupt，一次未生效的中断会残留标志，把后续 Esc
+			//     全部吞掉（表现为 Esc 无响应）。此时解除超期信号并重新发起
+			//     真实中断——interrupt 路径幂等，reserveInterruptCleanup
+			//     保证清理 goroutine 不叠加。
+			if session.IsInterrupted() && session.isInterruptCleanupInFlight() && !session.interruptCleanupStalled() {
 				if session.chatEscapeStoppingNoticeDue() {
 					renderChatEscapeStoppingNotice(session)
 				}
 				continue
 			}
+			session.detachStalledInterruptCleanup()
 			session.InterruptPreservePendingInput()
 			renderChatEscapeInterruptNotice(session)
 		case <-done:

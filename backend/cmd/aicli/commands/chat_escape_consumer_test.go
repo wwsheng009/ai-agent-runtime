@@ -94,6 +94,9 @@ func TestChatEscapeConsumerInterruptsActorOnlyTurn(t *testing.T) {
 }
 
 // P2-10：中断后的重复 Esc 不再完全静默，但每个中断周期只提示一次。
+// 修复（ESC 失效）后“停止窗口”只在中止清理仍在途且未超期时生效：
+// 清理已结束时重复 Esc 必须重试真实中断，见
+// chat_escape_interrupt_retry_test.go。
 func TestChatEscapeStoppingNoticeIsRateLimitedPerInterrupt(t *testing.T) {
 	session, kh := newEscapeConsumerTestSession(t)
 	release := startChatEscapeInterruptWatcher(session)
@@ -101,6 +104,10 @@ func TestChatEscapeStoppingNoticeIsRateLimitedPerInterrupt(t *testing.T) {
 
 	kh.Notify()
 	waitForEscapeInterrupt(t, session)
+
+	// 模拟停止清理仍在途：停止窗口内重复 Esc 只提示一次，不叠加中断请求。
+	inFlight := make(chan struct{})
+	session.setInterruptCleanup(inFlight)
 
 	kh.Notify()
 	deadline := time.After(2 * time.Second)
@@ -116,6 +123,7 @@ func TestChatEscapeStoppingNoticeIsRateLimitedPerInterrupt(t *testing.T) {
 		t.Fatal("stopping notice must be rate limited within one interrupt cycle")
 	}
 
+	close(inFlight)
 	session.ResetInterrupt()
 	if !session.chatEscapeStoppingNoticeDue() {
 		t.Fatal("a new interrupt cycle must allow the stopping notice again")

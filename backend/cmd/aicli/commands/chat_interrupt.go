@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -243,19 +244,44 @@ func (h *localChatRuntimeHost) interruptActorRun(ctx context.Context, sessionID 
 	actor.MarkUserInterrupt()
 	interruptCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
-	_ = actor.Interrupt(interruptCtx)
+	interruptErr := actor.Interrupt(interruptCtx)
 	// Interrupt only cancels the active turn and marks runtime state stopped.
 	// The SessionActor itself must be stopped so OnStop releases the session
 	// lease; otherwise a later terminal/process still sees ownership conflict.
 	// The next prompt recreates the actor via SessionHub.GetOrCreate.
-	_ = h.SessionHub.StopContext(ctx, sessionID)
+	stopErr := h.SessionHub.StopContext(ctx, sessionID)
+	if interruptErr != nil || stopErr != nil {
+		// 旧实现用 `_ =` 丢弃这两个错误：中断超时 / 停止失败会静默通过，
+		// 用户看到的是“按了 Esc 但回合还在跑、且毫无提示”。至少在会话
+		// debug 日志留下痕迹，便于定位（2026-10-02 的 Esc 失效复盘）。
+		h.logActorInterruptFailure(sessionID, interruptErr, stopErr)
+	}
 	if errors.Is(interruptCtx.Err(), context.DeadlineExceeded) || errors.Is(interruptCtx.Err(), context.Canceled) {
 		return false
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
 		return false
 	}
+	if stopErr != nil && !errors.Is(stopErr, runtimechat.ErrSessionActorStopped) {
+		// 分离出的 actor 未能确认停止：run 可能仍在执行。按失败上报，
+		// 让清理结果保留 Stopping 阶段并提示“可再次按 Esc 重试”。
+		return false
+	}
 	return true
+}
+
+// logActorInterruptFailure records a failed interrupt / actor-stop attempt in
+// the host session's debug log. Routine "already stopped" errors are filtered
+// by the caller's success classification and must not turn into user-visible
+// noise; this helper only makes the silent-failure class diagnosable.
+func (h *localChatRuntimeHost) logActorInterruptFailure(sessionID string, interruptErr, stopErr error) {
+	if h == nil || (interruptErr == nil && stopErr == nil) {
+		return
+	}
+	message := fmt.Sprintf("[interrupt] actor stop incomplete session=%s interrupt_err=%v stop_err=%v", sessionID, interruptErr, stopErr)
+	if h.BaseSession != nil {
+		writeSessionDebugInfo(h.BaseSession, message, false)
+	}
 }
 
 func (h *localChatRuntimeHost) markRuntimeSessionStopped(ctx context.Context, sessionID string) {
