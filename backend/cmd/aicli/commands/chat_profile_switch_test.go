@@ -75,12 +75,23 @@ func writeProfileSwitchFixture(t *testing.T, profilesRoot, name, profileYAML, pr
 func newProfileSwitchTestSession(t *testing.T, profilesRoot string) (*ChatSession, func()) {
 	t.Helper()
 	session, cleanup := newGoalCommandTestSession(t)
+	// SkillDir 必须由 profilesRoot 派生，不能用 t.TempDir()：同一个 t 调两次
+	// newProfileSwitchTestSession 会拿到两个不同目录，而 /profile show 会把
+	// SkillDir 渲染进 [skills] dirs 行，于是"统一出口 vs plain 出口正文逐行一致"
+	// 的断言必然因路径不同而失败。派生路径保证同一 profilesRoot 下多次调用稳定。
+	//
+	// 必须是**兄弟目录**而不是 profilesRoot 的子目录：newProfileLifecycleTestSession
+	// 传进来的 profilesRoot 就是 user 层根（<home>/.aicli/profiles），而
+	// TestProfileCommandImportLifecycleRejectsBadSource 断言失败导入后层根为空。
+	// 建子目录会污染该断言。
+	skillsDir := filepath.Join(filepath.Dir(filepath.Clean(profilesRoot)), "skills-root")
+	mustMkdir(t, skillsDir)
 	session.Config = &config.Config{
 		Profiles: &config.ProfilesConfig{Root: profilesRoot},
 		AICLI: &config.AICLIConfig{
 			MCP: &config.AICLIMCPConfig{ConfigFile: filepath.Join("configs", "mcp.yaml")},
 		},
-		SkillsRuntime: &config.SkillsRuntimeConfig{Enabled: true, SkillDir: t.TempDir()},
+		SkillsRuntime: &config.SkillsRuntimeConfig{Enabled: true, SkillDir: skillsDir},
 	}
 	session.SessionUserID = "tester"
 	return session, cleanup
