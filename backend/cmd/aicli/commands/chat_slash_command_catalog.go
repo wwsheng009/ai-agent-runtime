@@ -767,10 +767,17 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/skills",
-			Usage:       "/skills [query]",
-			Summary:     "列出并选择执行 skill",
+			Usage:       "/skills [query|list|select|enable <name>|disable <name>|reload]",
+			Summary:     "列出/选择/启停/重载 skill（重载会重扫技能目录并热刷新函数面）",
 			Group:       string(chatSlashCommandGroupFunctions),
 			AcceptsArgs: true,
+			Args: []chatSlashCommandArgSpec{
+				{Token: "list", Summary: "列出当前会话加载的 skill（默认）"},
+				{Token: "select", Summary: "打开全屏 skill 选择器并执行"},
+				{Token: "enable", Summary: "启用指定 skill 并热刷新（enable <name>）"},
+				{Token: "disable", Summary: "停用指定 skill 并热刷新（disable <name>）"},
+				{Token: "reload", Summary: "重新扫描技能目录并热刷新函数面"},
+			},
 		},
 		{
 			Name:        "/mcp",

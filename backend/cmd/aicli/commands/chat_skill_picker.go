@@ -286,6 +286,11 @@ func executeStructuredSkillsMenuCommand(session *ChatSession, command string) (C
 		return executeStructuredSkillToggleCommand(session, enable, name, jsonOutput), true
 	}
 
+	// 手工重载：/skills reload（重扫技能目录 + 热刷新函数面）。
+	if parseSkillsReloadQuery(query) {
+		return executeStructuredSkillReloadCommand(session, jsonOutput), true
+	}
+
 	// --json is a finite structured projection: render the JSON payload as one
 	// plain command cell instead of falling back to legacy stdout.
 	if jsonOutput {

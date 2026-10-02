@@ -379,6 +379,10 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 			"select":  rtSpec("/skills", categorySkillsTools, runtimeModeScreen, runtimeEffectRead, rtOutput(chatOutputScreenInteractive)),
 			"enable":  rtSpec("/skills", categorySkillsTools, runtimeModePrompt, runtimeEffectLive, rtConfirm(), rtNotice("热刷新，对后续请求生效")),
 			"disable": rtSpec("/skills", categorySkillsTools, runtimeModePrompt, runtimeEffectLive, rtConfirm(), rtNotice("热刷新，对后续请求生效")),
+			// 重载会重建 registry 与函数面：忙时排队到回合结束后执行，
+			// 避免与进行中的 turn/工具面读取并发（空闲时照常立即执行）。
+			"reload":  rtSpec("/skills", categorySkillsTools, runtimeModeQueue, runtimeEffectLive, rtNotice("已排队，回合结束后重扫技能目录并热刷新函数面")),
+			"refresh": rtSpec("/skills", categorySkillsTools, runtimeModeQueue, runtimeEffectLive, rtNotice("已排队，回合结束后重扫技能目录并热刷新函数面")),
 		},
 	},
 	"/mcp": {

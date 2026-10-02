@@ -211,8 +211,10 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 		// Batch 13 G4：逐段补全（子命令 → 引用位 profile 名 → 旗标/枚举值），
 		// 见 chat_profile_completion.go。
 		return completeProfileSlashArgs(session, argsText, cursor)
-	case "/skill", "/skills":
+	case "/skill":
 		return completeSkillArgs(session, argsText, cursor)
+	case "/skills":
+		return completeSkillsMenuArgs(session, argsText, cursor)
 	case "/mcp":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "list", Summary: "列出全部 MCP 与连接状态", Group: string(chatSlashCommandGroupFunctions)},
@@ -647,6 +649,27 @@ func completeSkillArgs(session *ChatSession, argsText string, cursor int) []chat
 	ctx := parseSlashArgumentContext(argsText, cursor)
 	candidates := skillArgumentCandidates(session)
 	return matchSlashArgumentCandidates(candidates, activeSlashArgumentQuery(ctx))
+}
+
+// completeSkillsMenuArgs 为 /skills 提供二级子命令 + 当前 skill 名（过滤查询）
+// 两类候选：首个 token 既可以是 reload/enable/... ，也可以是名称过滤词。
+func completeSkillsMenuArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {
+	ctx := parseSlashArgumentContext(argsText, cursor)
+	candidates := skillsSubcommandArgumentCandidates()
+	candidates = append(candidates, skillArgumentCandidates(session)...)
+	return matchSlashArgumentCandidates(dedupeSlashArgumentCandidates(candidates), activeSlashArgumentQuery(ctx))
+}
+
+// skillsSubcommandArgumentCandidates 声明 /skills 的二级命令，与运行时注册表
+// 的 variants 保持同源（list/select/enable/disable/reload）。
+func skillsSubcommandArgumentCandidates() []chatSlashCompletionCandidate {
+	return []chatSlashCompletionCandidate{
+		{Command: "list", Summary: "列出当前会话加载的 skill（默认）", Group: string(chatSlashCommandGroupFunctions)},
+		{Command: "select", Summary: "打开全屏 skill 选择器并执行", Group: string(chatSlashCommandGroupFunctions)},
+		{Command: "enable", Summary: "启用指定 skill 并热刷新（enable <name>）", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
+		{Command: "disable", Summary: "停用指定 skill 并热刷新（disable <name>）", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
+		{Command: "reload", Summary: "重新扫描技能目录并热刷新函数面", Group: string(chatSlashCommandGroupFunctions)},
+	}
 }
 
 func (p *chatSlashArgumentCompletionProvider) completeResumeArgs(session *ChatSession, argsText string, cursor int) []chatSlashCompletionCandidate {

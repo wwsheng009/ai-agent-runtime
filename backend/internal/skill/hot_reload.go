@@ -196,10 +196,41 @@ func (h *HotReload) WatchRoots(dirs []string) {
 		if info, err := os.Stat(dir); err == nil && info.IsDir() {
 			if err := h.watchDir(dir); err == nil {
 				_ = h.addSubdirectories(dir)
+				h.mu.Lock()
+				h.adoptSkillDirLocked(dir)
+				h.mu.Unlock()
 			}
 			continue
 		}
 		h.watchPendingRoot(dir)
+	}
+}
+
+// SkillDirs 返回当前参与全量重载的 skill 根快照：启动时的现有根 + 运行中接管的
+// 候选安装位。与 loader 的发现集合不同，这里只描述 Reload() 的扫描面。
+func (h *HotReload) SkillDirs() []string {
+	if h == nil {
+		return nil
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return append([]string(nil), h.skillDirs...)
+}
+
+// adoptSkillDirLocked 把运行中接管/新登记的根并入 skillDirs（调用方持 h.mu）。
+func (h *HotReload) adoptSkillDirLocked(dir string) {
+	dir = filepath.Clean(strings.TrimSpace(dir))
+	if dir == "" {
+		return
+	}
+	for _, existing := range h.skillDirs {
+		if skillWatchPathEqual(existing, dir) {
+			return
+		}
+	}
+	h.skillDirs = append(h.skillDirs, dir)
+	if strings.TrimSpace(h.skillDir) == "" {
+		h.skillDir = dir
 	}
 }
 
@@ -250,6 +281,7 @@ func (h *HotReload) advancePendingRoots(created string) {
 			if err := h.watchDir(target); err == nil {
 				h.mu.Lock()
 				delete(h.pendingRoots, target)
+				h.adoptSkillDirLocked(target)
 				h.mu.Unlock()
 				_ = h.addSubdirectories(target)
 				h.scheduleDirectoryScan(target)

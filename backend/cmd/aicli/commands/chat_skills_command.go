@@ -61,6 +61,21 @@ func handleSkillsMenuCommand(session *ChatSession, command string) bool {
 		return false
 	}
 
+	// 手工重载：/skills reload（重扫技能目录 + 热刷新函数面）。
+	if parseSkillsReloadQuery(query) {
+		report, err := runSkillReloadCommand(session)
+		if err != nil {
+			fmt.Println(formatCommandError(err.Error(), useJSON))
+			return false
+		}
+		if useJSON {
+			fmt.Println(marshalIndentedJSON(report))
+			return false
+		}
+		fmt.Println(report.Text())
+		return false
+	}
+
 	catalog := ensureFunctionCatalog(session)
 	if catalog == nil || catalog.Registry() == nil {
 		fmt.Println(formatCommandError("Function Catalog: 未初始化", useJSON))

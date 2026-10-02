@@ -19,7 +19,7 @@ const ChatCommandLongHelp = `与 AI 模型进行交互式对话。
   - /functions <prompt>
   - /call <function> [args-json]
   - /skill <skill> <prompt>
-  - /skills [query]
+  - /skills [query|list|select|enable|disable|reload]
 
 更完整说明见：
   - docs/aicli/quickstart.md
