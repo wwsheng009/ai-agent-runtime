@@ -16,10 +16,14 @@ import (
 // profileShowResult 是 `profile show` 的结构化输出：一个 profile 解析后的
 // 最终生效面（工具/skills/mcp/prompt/paths）。
 type profileShowResult struct {
-	Reference       string `json:"reference"`
-	ProfileName     string `json:"profile_name,omitempty"`
-	ProfileRoot     string `json:"profile_root"`
-	AgentID         string `json:"agent_id"`
+	Reference   string `json:"reference"`
+	ProfileName string `json:"profile_name,omitempty"`
+	ProfileRoot string `json:"profile_root"`
+	AgentID     string `json:"agent_id"`
+	// AgentSource 是 agent 定义的来源类别（builtin|user|project|profile）。
+	AgentSource string `json:"agent_source,omitempty"`
+	// AgentSourcePath 是胜出的 agent 定义文件（agents/<id>/agent.yaml 等）。
+	AgentSourcePath string `json:"agent_source_path,omitempty"`
 	Provider        string `json:"provider,omitempty"`
 	DefaultProvider string `json:"default_provider,omitempty"`
 	Model           string `json:"model,omitempty"`
@@ -87,6 +91,10 @@ type profileShowPrompts struct {
 	Files          []profileShowPromptFile `json:"files,omitempty"`
 	ComposedBytes  int                     `json:"composed_bytes,omitempty"`
 	ComposedTokens int                     `json:"composed_estimated_tokens,omitempty"`
+	// Suppressed/SuppressionReason 是 D29 扣留标记（未信任工作区）：
+	// 提示词层被显式扣下时必须让用户看见，不能静默少一层生效面。
+	Suppressed        bool   `json:"suppressed,omitempty"`
+	SuppressionReason string `json:"suppression_reason,omitempty"`
 }
 
 func newProfileShowCommand(getConfig func() *config.Config) *cobra.Command {
@@ -131,6 +139,15 @@ func runProfileShowCommand(cfg *config.Config, ref, agent string) (profileShowRe
 	if err != nil {
 		return profileShowResult{}, err
 	}
+	return buildProfileShowResult(cfg, state), nil
+}
+
+// buildProfileShowResult 把一份已解析的 profile 状态投影成只读报告。
+//
+// CLI（`aicli profile show`）与 TUI（`/profile show`）共用这一份投影：两条
+// 命令面看的是同一个生效面，出现第二套拼装逻辑就等于允许两处漂移（历史上
+// TUI 预览只输出 10 行，且把"未声明 allowlist（全量工具）"渲染成"0 个允许"）。
+func buildProfileShowResult(cfg *config.Config, state *chatProfileState) profileShowResult {
 	resolved := state.Resolved
 
 	result := profileShowResult{
@@ -138,6 +155,8 @@ func runProfileShowCommand(cfg *config.Config, ref, agent string) (profileShowRe
 		ProfileName:     resolved.ProfileName,
 		ProfileRoot:     resolved.ProfileRoot,
 		AgentID:         resolved.AgentID,
+		AgentSource:     strings.TrimSpace(state.AgentSource),
+		AgentSourcePath: strings.TrimSpace(state.AgentSourcePath),
 		Provider:        resolved.Provider,
 		DefaultProvider: resolved.DefaultProvider,
 		Model:           resolved.Model,
@@ -154,7 +173,7 @@ func runProfileShowCommand(cfg *config.Config, ref, agent string) (profileShowRe
 	result.Skills = buildProfileShowSkills(cfg, resolved)
 	result.MCP = buildProfileShowMCP(resolved)
 	result.Prompts = buildProfileShowPrompts(state, resolved)
-	return result, nil
+	return result
 }
 
 // profilePermissionModeSourceLabel 标注默认权限模式的来源（D17 可发现性）：
@@ -245,7 +264,11 @@ func buildProfileShowMCP(resolved *profilesys.ResolvedAgent) profileShowMCP {
 }
 
 func buildProfileShowPrompts(state *chatProfileState, resolved *profilesys.ResolvedAgent) profileShowPrompts {
-	prompts := profileShowPrompts{Mode: resolved.PromptMode}
+	prompts := profileShowPrompts{
+		Mode:              resolved.PromptMode,
+		Suppressed:        resolved.PromptSuppressed,
+		SuppressionReason: strings.TrimSpace(resolved.PromptSuppressionReason),
+	}
 	appendFile := func(path string) {
 		path = strings.TrimSpace(path)
 		if path == "" {
@@ -337,92 +360,111 @@ func loadProfileMCPServers(configPath string) ([]string, error) {
 }
 
 func renderProfileShowText(result profileShowResult) {
+	fmt.Fprint(os.Stdout, profileShowText(result))
+}
+
+// profileShowText 渲染只读报告全文（CLI 与 TUI 共用，避免两处文案漂移）。
+func profileShowText(result profileShowResult) string {
+	var b strings.Builder
 	title := result.ProfileName
 	if title == "" {
 		title = result.Reference
 	}
-	fmt.Fprintf(os.Stdout, "profile: %s\n", title)
-	fmt.Fprintf(os.Stdout, "  root:  %s\n", result.ProfileRoot)
-	fmt.Fprintf(os.Stdout, "  agent: %s\n", result.AgentID)
+	fmt.Fprintf(&b, "profile: %s\n", title)
+	if result.Reference != "" && result.Reference != title {
+		fmt.Fprintf(&b, "  引用: %s\n", result.Reference)
+	}
+	fmt.Fprintf(&b, "  root:  %s\n", result.ProfileRoot)
+	fmt.Fprintf(&b, "  agent: %s\n", result.AgentID)
+	if result.AgentSource != "" || result.AgentSourcePath != "" {
+		parts := make([]string, 0, 2)
+		if result.AgentSource != "" {
+			parts = append(parts, result.AgentSource)
+		}
+		if result.AgentSourcePath != "" {
+			parts = append(parts, result.AgentSourcePath)
+		}
+		fmt.Fprintf(&b, "  定义文件: %s\n", strings.Join(parts, " "))
+	}
 	if result.Provider != "" {
 		line := "  provider: " + result.Provider
 		if result.DefaultProvider != "" && result.DefaultProvider != result.Provider {
 			line += fmt.Sprintf("（default_provider: %s）", result.DefaultProvider)
 		}
-		fmt.Fprintln(os.Stdout, line)
+		fmt.Fprintln(&b, line)
 	}
 	if result.Model != "" {
-		fmt.Fprintf(os.Stdout, "  model: %s\n", result.Model)
+		fmt.Fprintf(&b, "  model: %s\n", result.Model)
 	}
 	if result.PermissionMode != "" {
 		line := fmt.Sprintf("  permission_mode: %s（默认值，会话内可被显式选择覆盖）", result.PermissionMode)
 		if result.PermissionModeSource != "" {
 			line += "；来源：" + result.PermissionModeSource
 		}
-		fmt.Fprintln(os.Stdout, line)
+		fmt.Fprintln(&b, line)
 	}
 	if result.RuntimeConfig != "" {
-		fmt.Fprintf(os.Stdout, "  runtime: %s\n", result.RuntimeConfig)
+		fmt.Fprintf(&b, "  runtime: %s\n", result.RuntimeConfig)
 	}
 
-	fmt.Fprintln(os.Stdout, "\n[tools]")
+	fmt.Fprintln(&b, "\n[tools]")
 	tools := result.ToolPolicy
 	if len(tools.Allowlist) == 0 && len(tools.Denylist) == 0 && tools.ReadOnly == nil {
-		fmt.Fprintln(os.Stdout, "  未声明工具策略（全量工具）")
+		fmt.Fprintln(&b, "  未声明工具策略（全量工具）")
 	} else {
 		if len(tools.Allowlist) > 0 {
 			count := tools.EffectiveAllowCount
 			if count < 0 {
 				count = len(tools.Allowlist)
 			}
-			fmt.Fprintf(os.Stdout, "  allowlist（%d 项，生效 %d）：%s\n", len(tools.Allowlist), count, strings.Join(tools.Allowlist, ", "))
+			fmt.Fprintf(&b, "  allowlist（%d 项，生效 %d）：%s\n", len(tools.Allowlist), count, strings.Join(tools.Allowlist, ", "))
 		} else {
-			fmt.Fprintln(os.Stdout, "  allowlist：未声明（全量）")
+			fmt.Fprintln(&b, "  allowlist：未声明（全量工具，不受 allowlist 限制）")
 		}
 		if len(tools.Denylist) > 0 {
-			fmt.Fprintf(os.Stdout, "  denylist：%s\n", strings.Join(tools.Denylist, ", "))
+			fmt.Fprintf(&b, "  denylist：%s\n", strings.Join(tools.Denylist, ", "))
 		}
 		if len(tools.ExcludedByDeny) > 0 {
-			fmt.Fprintf(os.Stdout, "  被 deny 排除：%s\n", strings.Join(tools.ExcludedByDeny, ", "))
+			fmt.Fprintf(&b, "  被 deny 排除：%s\n", strings.Join(tools.ExcludedByDeny, ", "))
 		}
 		if tools.ReadOnly != nil {
-			fmt.Fprintf(os.Stdout, "  read_only：%t\n", *tools.ReadOnly)
+			fmt.Fprintf(&b, "  read_only：%t\n", *tools.ReadOnly)
 		}
 		if len(tools.Sources) > 0 {
-			fmt.Fprintf(os.Stdout, "  sources：%s\n", strings.Join(tools.Sources, ", "))
+			fmt.Fprintf(&b, "  sources：%s\n", strings.Join(tools.Sources, ", "))
 		}
 	}
 
-	fmt.Fprintln(os.Stdout, "\n[skills]")
+	fmt.Fprintln(&b, "\n[skills]")
 	skills := result.Skills
 	if len(skills.Dirs) > 0 {
-		fmt.Fprintf(os.Stdout, "  dirs：%s\n", strings.Join(skills.Dirs, ", "))
+		fmt.Fprintf(&b, "  dirs：%s\n", strings.Join(skills.Dirs, ", "))
 	}
 	if skills.Declared {
-		fmt.Fprintf(os.Stdout, "  声明：allow=%v deny=%v\n", skills.Allowlist, skills.Denylist)
+		fmt.Fprintf(&b, "  声明：allow=%v deny=%v\n", skills.Allowlist, skills.Denylist)
 	} else {
-		fmt.Fprintln(os.Stdout, "  声明：无（全量技能）")
+		fmt.Fprintln(&b, "  声明：无（全量技能）")
 	}
-	fmt.Fprintf(os.Stdout, "  发现 %d 项，生效 %d 项：%s\n", len(skills.Discovered), len(skills.Effective), strings.Join(skills.Effective, ", "))
+	fmt.Fprintf(&b, "  发现 %d 项，生效 %d 项：%s\n", len(skills.Discovered), len(skills.Effective), strings.Join(skills.Effective, ", "))
 	if skills.ExposureMode != "" || skills.ExposureTopK > 0 {
-		fmt.Fprintf(os.Stdout, "  exposure：mode=%s top_k=%d\n", skills.ExposureMode, skills.ExposureTopK)
+		fmt.Fprintf(&b, "  exposure：mode=%s top_k=%d\n", skills.ExposureMode, skills.ExposureTopK)
 	}
 
-	fmt.Fprintln(os.Stdout, "\n[mcp]")
+	fmt.Fprintln(&b, "\n[mcp]")
 	mcp := result.MCP
 	if mcp.ConfigFile == "" {
-		fmt.Fprintln(os.Stdout, "  config：未发现 mcp.yaml")
+		fmt.Fprintln(&b, "  config：未发现 mcp.yaml")
 	} else {
-		fmt.Fprintf(os.Stdout, "  config：%s\n", mcp.ConfigFile)
+		fmt.Fprintf(&b, "  config：%s\n", mcp.ConfigFile)
 	}
 	if mcp.Declared {
-		fmt.Fprintf(os.Stdout, "  声明：use=%v exclude=%v\n", mcp.UseServers, mcp.ExcludeServers)
+		fmt.Fprintf(&b, "  声明：use=%v exclude=%v\n", mcp.UseServers, mcp.ExcludeServers)
 	}
 	if mcp.ConfigError != "" {
-		fmt.Fprintf(os.Stdout, "  ! %s\n", mcp.ConfigError)
+		fmt.Fprintf(&b, "  ! %s\n", mcp.ConfigError)
 	}
 	if len(mcp.Servers) == 0 {
-		fmt.Fprintln(os.Stdout, "  servers：无")
+		fmt.Fprintln(&b, "  servers：无")
 	} else {
 		states := make([]string, 0, len(mcp.Servers))
 		for _, server := range mcp.Servers {
@@ -432,39 +474,48 @@ func renderProfileShowText(result profileShowResult) {
 			}
 			states = append(states, fmt.Sprintf("%s(%s)", server.Name, state))
 		}
-		fmt.Fprintf(os.Stdout, "  servers：%s\n", strings.Join(states, ", "))
+		fmt.Fprintf(&b, "  servers：%s\n", strings.Join(states, ", "))
 	}
 
-	fmt.Fprintln(os.Stdout, "\n[prompts]")
+	fmt.Fprintln(&b, "\n[prompts]")
 	prompts := result.Prompts
 	if prompts.Mode != "" {
-		fmt.Fprintf(os.Stdout, "  mode：%s\n", prompts.Mode)
+		fmt.Fprintf(&b, "  mode：%s\n", prompts.Mode)
+	}
+	// D29：提示词被扣留时必须显式说明原因，不能静默少一层生效面。
+	if prompts.Suppressed {
+		reason := prompts.SuppressionReason
+		if reason == "" {
+			reason = "工作区未信任"
+		}
+		fmt.Fprintf(&b, "  ! 提示词已扣留：%s\n", reason)
 	}
 	if len(prompts.Files) == 0 {
-		fmt.Fprintln(os.Stdout, "  files：无（使用宿主 system prompt）")
+		fmt.Fprintln(&b, "  files：无（使用宿主 system prompt）")
 	}
 	for _, file := range prompts.Files {
 		if file.Exists {
-			fmt.Fprintf(os.Stdout, "  %s（%d B ≈ %d tokens）\n", file.Path, file.Bytes, file.EstimatedTokens)
+			fmt.Fprintf(&b, "  %s（%d B ≈ %d tokens）\n", file.Path, file.Bytes, file.EstimatedTokens)
 		} else {
-			fmt.Fprintf(os.Stdout, "  %s（不存在）\n", file.Path)
+			fmt.Fprintf(&b, "  %s（不存在）\n", file.Path)
 		}
 	}
 	if prompts.ComposedBytes > 0 {
-		fmt.Fprintf(os.Stdout, "  composed：%d B ≈ %d tokens\n", prompts.ComposedBytes, prompts.ComposedTokens)
+		fmt.Fprintf(&b, "  composed：%d B ≈ %d tokens\n", prompts.ComposedBytes, prompts.ComposedTokens)
 	}
 
-	fmt.Fprintln(os.Stdout, "\n[paths]")
+	fmt.Fprintln(&b, "\n[paths]")
 	for _, line := range profileShowPathLines(result.Paths) {
-		fmt.Fprintf(os.Stdout, "  %s\n", line)
+		fmt.Fprintf(&b, "  %s\n", line)
 	}
 
 	if len(result.SandboxWarnings) > 0 {
-		fmt.Fprintln(os.Stdout, "\n[sandbox warnings]")
+		fmt.Fprintln(&b, "\n[sandbox warnings]")
 		for _, warning := range result.SandboxWarnings {
-			fmt.Fprintf(os.Stdout, "  ! %s\n", warning)
+			fmt.Fprintf(&b, "  ! %s\n", warning)
 		}
 	}
+	return b.String()
 }
 
 func profileShowPathLines(paths profilesys.ResolvedPaths) []string {

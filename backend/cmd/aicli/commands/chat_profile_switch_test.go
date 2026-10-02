@@ -12,6 +12,48 @@ import (
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
+// 全量基线不是"零工具"：未启用 allowlist 时工具名单为空，但语义是
+// "除显式 deny 外全部允许"。差集必须按这个口径算，否则"解除收窄"会被
+// 反向报成移除了整份 allowlist。
+func TestProfileToolSurfaceDeltaTreatsFullBaselineAsUnrestricted(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		before       []string
+		beforeNarrow bool // before 启用了 allowlist（收窄）
+		after        []string
+		afterNarrow  bool // after 启用了 allowlist（收窄）
+		wantAdded    []string
+		wantRemoved  []string
+	}{
+		{name: "两侧全量基线=无变化"},
+		{
+			name: "全量→收窄：移出整份新 allowlist", afterNarrow: true,
+			after: []string{"view", "grep"}, wantRemoved: []string{"view", "grep"},
+		},
+		{
+			name: "收窄→全量：解除收窄而非移除", beforeNarrow: true,
+			before: []string{"view", "grep"}, wantAdded: []string{"view", "grep"},
+		},
+		{
+			name: "收窄→收窄：普通差集", beforeNarrow: true, afterNarrow: true,
+			before: []string{"view", "grep"},
+			after:  []string{"view", "ls"}, wantAdded: []string{"ls"}, wantRemoved: []string{"grep"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			added, removed := profileToolSurfaceDelta(tc.before, tc.beforeNarrow, tc.after, tc.afterNarrow)
+			if !reflect.DeepEqual(added, tc.wantAdded) {
+				t.Fatalf("added = %#v, want %#v", added, tc.wantAdded)
+			}
+			if !reflect.DeepEqual(removed, tc.wantRemoved) {
+				t.Fatalf("removed = %#v, want %#v", removed, tc.wantRemoved)
+			}
+		})
+	}
+}
+
 // writeProfileSwitchFixture 生成一个最小可解析的 profile 目录：
 // <root>/<name>/profile.yaml + agents/<agent>/prompts/system.md + tools/policy.yaml。
 func writeProfileSwitchFixture(t *testing.T, profilesRoot, name, profileYAML, promptText, toolPolicyYAML string) {

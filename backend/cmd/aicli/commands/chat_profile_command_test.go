@@ -109,12 +109,46 @@ func TestProfileCommandShowIsReadOnly(t *testing.T) {
 	defer cleanup()
 
 	text, _ := chatProfileCommandText(session, "/profile show coding")
-	if !strings.Contains(text, "只读预览") || !strings.Contains(text, "工具面: 2 个允许") {
-		t.Fatalf("show 应输出只读预览与工具面计数，got: %s", text)
+	// 预览必须给出完整生效面（与 `aicli profile show` 同源）：标题 + 五个分区。
+	for _, want := range []string{"只读预览", "[tools]", "allowlist（2 项，生效 2）", "[skills]", "[mcp]", "[prompts]", "[paths]"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("show 缺少 %q，got: %s", want, text)
+		}
 	}
 	if session.ProfileReference != "" || session.ProfileName != "" || session.ToolPolicy != nil {
 		t.Fatalf("show 不得改动会话状态：ref=%q name=%q policy=%v",
 			session.ProfileReference, session.ProfileName, session.ToolPolicy)
+	}
+}
+
+// 未声明 allowlist = 全量工具基线（coding 模板的真实形态），不得渲染成
+// "0 个允许"——AllowedToolNames 在 AllowlistEnabled=false 时返回 nil，
+// 那表示不受 allowlist 限制，不是空工具面。
+func TestProfileCommandShowFullToolBaselineIsNotReportedAsZero(t *testing.T) {
+	t.Parallel()
+	profilesRoot := t.TempDir()
+	writeProfileCommandFixture(t, profilesRoot, "baseline", "Baseline prompt.", "read_only: false\n")
+	session, cleanup := newProfileSwitchTestSession(t, profilesRoot)
+	defer cleanup()
+
+	text, _ := chatProfileCommandText(session, "/profile show baseline")
+	if strings.Contains(text, "0 个允许") {
+		t.Fatalf("全量工具基线不得报成 0 个允许，got: %s", text)
+	}
+	if !strings.Contains(text, "allowlist：未声明") {
+		t.Fatalf("show 应显式说明 allowlist 未声明，got: %s", text)
+	}
+	if !strings.Contains(text, "read_only：false") {
+		t.Fatalf("show 应显式给出 read_only 声明，got: %s", text)
+	}
+
+	status, _ := chatProfileCommandText(session, "/profile use baseline")
+	if strings.Contains(status, "0 个允许") {
+		t.Fatalf("status 也不得报成 0 个允许，got: %s", status)
+	}
+	statusText, _ := chatProfileCommandText(session, "/profile status")
+	if !strings.Contains(statusText, "全量工具") {
+		t.Fatalf("status 应说明全量工具基线，got: %s", statusText)
 	}
 }
 

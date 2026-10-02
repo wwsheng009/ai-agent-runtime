@@ -82,12 +82,15 @@ type chatProfileSurfaceSnapshot struct {
 	toolNames  []string
 	readOnly   bool
 	hasPolicy  bool
-	skillAllow []string
-	skillDeny  []string
-	mcpUse     []string
-	mcpExclude []string
-	provider   string
-	model      string
+	// allowlistEnabled 区分"声明了收窄 allowlist"与"全量工具基线"。
+	// 缺了它，"窄 allowlist → 全量基线" 会被算成 removed（收窄），方向正好相反。
+	allowlistEnabled bool
+	skillAllow       []string
+	skillDeny        []string
+	mcpUse           []string
+	mcpExclude       []string
+	provider         string
+	model            string
 }
 
 // snapshotChatProfileSurface 读取当前会话的生效面。所有字段都取自会话自身的
@@ -111,6 +114,7 @@ func snapshotChatProfileSurface(session *ChatSession) chatProfileSurfaceSnapshot
 		snapshot.hasPolicy = true
 		snapshot.readOnly = session.ToolPolicy.ReadOnly
 		snapshot.toolNames = session.ToolPolicy.AllowedToolNames()
+		snapshot.allowlistEnabled = session.ToolPolicy.AllowlistEnabled
 	}
 	return snapshot
 }
@@ -141,8 +145,14 @@ func buildProfileSwitchChanged(before chatProfileSurfaceSnapshot, state *chatPro
 	afterPrompt = strings.TrimSpace(state.PromptText)
 	afterPromptMode = strings.TrimSpace(state.Resolved.PromptMode)
 
-	changed.ToolsAdded = stringSetDifference(afterTools, before.toolNames)
-	changed.ToolsRemoved = stringSetDifference(before.toolNames, afterTools)
+	// 工具面差异必须按"收窄方向"判定：全量基线（未启用 allowlist）不是一个
+	// 空集合，而是"除 deny 外全部允许"。两侧都按同一口径比较，避免把
+	// "解除收窄" 报成 "移除了这些工具"。
+	afterAllowlist := state.ToolPolicy != nil && state.ToolPolicy.AllowlistEnabled
+	changed.ToolsAdded, changed.ToolsRemoved = profileToolSurfaceDelta(
+		before.toolNames, before.allowlistEnabled,
+		afterTools, afterAllowlist,
+	)
 	changed.SkillsAdded = mergeStringSets(
 		stringSetDifference(afterSkillAllow, before.skillAllow),
 		stringSetDifference(before.skillDeny, afterSkillDeny),
@@ -165,6 +175,30 @@ func buildProfileSwitchChanged(before chatProfileSurfaceSnapshot, state *chatPro
 	changed.ModelChanged = false
 	changed.PermissionModeChanged = false
 	return changed
+}
+
+// profileToolSurfaceDelta 计算工具面的收窄/放宽差异。
+//
+// 口径：allowlistEnabled=false 表示"全量基线"，此时工具名单为空**不代表**
+// 零工具，而是"除显式 deny 外全部允许"。因此：
+//   - 旧=收窄 / 新=全量  → 解除收窄（放宽），removed 为空；
+//   - 旧=全量 / 新=收窄  → 收窄，added 为空、removed = 旧 allowlist；
+//   - 两侧同为收窄/全量  → 退化为普通名单差集。
+//
+// 两侧都没有策略时视为"无变化"（nil policy 与全量基线对用户等价）。
+func profileToolSurfaceDelta(beforeNames []string, beforeAllowlist bool, afterNames []string, afterAllowlist bool) (added, removed []string) {
+	if !beforeAllowlist && !afterAllowlist {
+		return nil, nil
+	}
+	if !beforeAllowlist {
+		// 全量 → 收窄：只有新 allowlist 里的名字是"仍在放行"，其余被移出工具面。
+		return nil, append([]string(nil), afterNames...)
+	}
+	if !afterAllowlist {
+		// 收窄 → 全量：旧 allowlist 全部重新放行，没有任何工具被移出。
+		return append([]string(nil), beforeNames...), nil
+	}
+	return stringSetDifference(afterNames, beforeNames), stringSetDifference(beforeNames, afterNames)
 }
 
 // applyRuntimeProfileSwitch 是会话内 profile 热切换的唯一执行核心（D19/D21）。

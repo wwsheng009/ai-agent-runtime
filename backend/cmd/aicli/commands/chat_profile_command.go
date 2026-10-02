@@ -372,16 +372,24 @@ func chatProfileToolPolicySummary(session *ChatSession) []string {
 	if session == nil || session.ToolPolicy == nil {
 		return []string{"  工具面: (无策略限制)"}
 	}
-	allowed := session.ToolPolicy.AllowedToolNames()
-	line := fmt.Sprintf("  工具面: %d 个允许", len(allowed))
-	if session.ToolPolicy.ReadOnly {
+	policy := session.ToolPolicy
+	allowed := policy.AllowedToolNames()
+	// AllowedToolNames 在未启用 allowlist 时返回 nil，那意味着"全量工具"，
+	// 不是"0 个允许"——旧渲染把两种语义混为一谈，会把 coding 这类全量
+	// 基线 profile 误报成空工具面。
+	countLine := "全量工具（未声明 allowlist）"
+	if policy.AllowlistEnabled {
+		countLine = fmt.Sprintf("%d 个允许", len(allowed))
+	}
+	line := "  工具面: " + countLine
+	if policy.ReadOnly {
 		line += "（read_only）"
 	}
 	lines := []string{line}
 	if len(allowed) > 0 && len(allowed) <= 12 {
 		lines = append(lines, "    允许: "+strings.Join(allowed, ", "))
 	}
-	if denied := chatProfileDeniedToolNames(session.ToolPolicy); len(denied) > 0 && len(denied) <= 12 {
+	if denied := chatProfileDeniedToolNames(policy); len(denied) > 0 && len(denied) <= 12 {
 		lines = append(lines, "    拒绝: "+strings.Join(denied, ", "))
 	}
 	return lines
@@ -503,62 +511,30 @@ func resolveChatProfilePreviewState(session *ChatSession, ref string) (*chatProf
 }
 
 // chatProfilePreviewText 渲染 `/profile show <name>` 的只读预览（绝不产生失效）。
+//
+// 内容与 CLI `aicli profile show` 同源（buildProfileShowResult + profileShowText）：
+// 预览必须给出完整的最终生效面（tools/skills/mcp/prompts/paths），否则"预览"
+// 无法回答"这个 profile 会带来什么"。历史实现只输出十余行摘要，并把
+// "未声明 allowlist"（= 全量工具）渲染成"0 个允许"，属于误报。
 func chatProfilePreviewText(session *ChatSession, ref string) (string, error) {
 	state, err := resolveChatProfilePreviewState(session, ref)
 	if err != nil {
 		return "", err
 	}
+	report := profileShowText(buildProfileShowResult(session.Config, state))
 	lines := []string{fmt.Sprintf("profile: %s（只读预览，未切换）", state.Resolved.ProfileName)}
-	lines = append(lines, fmt.Sprintf("  引用: %s", state.Reference))
-	if source := strings.TrimSpace(state.AgentSource); source != "" {
-		lines = append(lines, fmt.Sprintf("  来源: %s", source))
+	// 报告正文（引用/root/agent/… 与各生效面）由共享渲染器给出；这里只把
+	// 首行的 profile 名去掉，避免与上面的标题重复。
+	body := strings.SplitN(report, "\n", 2)
+	if len(body) == 2 {
+		lines = append(lines, strings.TrimSuffix(body[1], "\n"))
 	}
-	if root := strings.TrimSpace(state.Resolved.ProfileRoot); root != "" {
-		lines = append(lines, fmt.Sprintf("  根目录: %s", root))
-	}
-	if agent := strings.TrimSpace(state.Resolved.AgentID); agent != "" {
-		lines = append(lines, fmt.Sprintf("  agent: %s", agent))
-	}
-	if path := strings.TrimSpace(state.AgentSourcePath); path != "" {
-		lines = append(lines, fmt.Sprintf("  定义文件: %s", path))
-	}
-	if mode := strings.TrimSpace(state.Resolved.PromptMode); mode != "" {
-		lines = append(lines, fmt.Sprintf("  prompt 模式: %s", mode))
-	}
-	if prompt := strings.TrimSpace(state.PromptText); prompt != "" {
-		lines = append(lines, fmt.Sprintf("  prompt 字节数: %d", len(prompt)))
-	}
-	if state.ToolPolicy != nil {
-		line := fmt.Sprintf("  工具面: %d 个允许", len(state.ToolPolicy.AllowedToolNames()))
-		if state.ToolPolicy.ReadOnly {
-			line += "（read_only）"
-		}
-		lines = append(lines, line)
-	} else {
-		lines = append(lines, "  工具面: (无策略限制)")
-	}
-	if allow := normalizeStringSet(state.Resolved.Skills.Allowlist); len(allow) > 0 {
-		lines = append(lines, "  skills 允许: "+strings.Join(allow, ", "))
-	}
-	if deny := normalizeStringSet(state.Resolved.Skills.Denylist); len(deny) > 0 {
-		lines = append(lines, "  skills 排除: "+strings.Join(deny, ", "))
-	}
-	if use := normalizeStringSet(state.Resolved.MCPSelection.UseServers); len(use) > 0 {
-		lines = append(lines, "  mcp 启用: "+strings.Join(use, ", "))
-	}
-	if exclude := normalizeStringSet(state.Resolved.MCPSelection.ExcludeServers); len(exclude) > 0 {
-		lines = append(lines, "  mcp 排除: "+strings.Join(exclude, ", "))
-	}
+	// 声明型 provider/model 必须带上"需显式应用"提示：profile 声明不等于生效。
 	if declaredProvider := strings.TrimSpace(firstNonEmptyChatValue(state.Resolved.Provider, state.Resolved.DefaultProvider)); declaredProvider != "" {
-		lines = append(lines, fmt.Sprintf("  声明 provider: %s（需显式 /provider 应用）", declaredProvider))
+		lines = append(lines, fmt.Sprintf("  注: 声明 provider %s 需显式 /provider 应用", declaredProvider))
 	}
 	if declaredModel := strings.TrimSpace(state.Resolved.Model); declaredModel != "" {
-		lines = append(lines, fmt.Sprintf("  声明 model: %s（需显式 /model 应用）", declaredModel))
-	}
-	for _, warning := range state.SandboxWarnings {
-		if text := strings.TrimSpace(warning); text != "" {
-			lines = append(lines, "  ! "+text)
-		}
+		lines = append(lines, fmt.Sprintf("  注: 声明 model %s 需显式 /model 应用", declaredModel))
 	}
 	lines = append(lines, "提示: /profile diff "+state.Reference+" 查看与当前会话的差异")
 	return strings.Join(lines, "\n"), nil
