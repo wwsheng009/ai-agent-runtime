@@ -660,6 +660,17 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 	// Folding again here would charge the byte budget twice, emit a duplicate
 	// "middle omitted" marker and contradict the tool's own continuation notice.
 	if toolTruncatedUpstream(envelopeMetadata(envelope)) {
+		// Separate case: this tool already owns its window, so no fold runs here
+		// and a declared reserved tail needs no exemption - the tail is inside
+		// the body the tool published, which is returned untouched below.
+		//
+		// The one thing to know about these tools is that their own window
+		// arithmetic ran BEFORE the inline diagnostics were appended, so a
+		// declared model_visible_budget_bytes no longer bounds the final text
+		// by exactly the appended block. Today that is bash alone (it is the
+		// only mutated_paths reporter that stamps skip_render_truncation); the
+		// inflation is bounded by the LSP block, so it is left as declared
+		// rather than re-folding a window the tool says it owns.
 		return attachOwnedWindowPointer(full, toolErr, envelope, notice)
 	}
 	if strings.TrimSpace(full) == "" {
@@ -687,17 +698,229 @@ func renderToolTextForModelHistory(content interface{}, toolErr string, envelope
 	}
 	// O-1: L4 head-only fold happened at the render layer.
 	observability.RecordToolOutputTruncation(observability.TruncationLayerRender, observability.TruncatedByBytes)
+	// A producer may declare that this text ends with a block the model cannot
+	// get back any other way - the first user being the inline LSP diagnostics
+	// appended to an edit receipt (docs/lsp 03 I1). The head-only fold drops
+	// exactly those bytes, silently, which defeats the point of the fold, so a
+	// declared tail is exempted from the budget and re-attached after the head.
+	declared := toolresult.ReservedTailBytes(envelopeMetadata(envelope))
+	split := reservedTailSplit(full, declared)
+	// The fold counter alone cannot tell "nothing needed protecting" from
+	// "protection was refused", so the outcome is recorded separately. A
+	// rejected declaration is the actionable cell: that window really did drop
+	// the block.
+	switch {
+	case declared == 0:
+		observability.RecordToolOutputReservedTail(observability.ReservedTailUndeclared)
+	case split >= 0:
+		observability.RecordToolOutputReservedTail(observability.ReservedTailPreserved)
+	default:
+		observability.RecordToolOutputReservedTail(observability.ReservedTailRejected)
+	}
 	// Truncation happened: the fold notice itself carries the "first N lines +
 	// next step" contract, so no artifact id is threaded through this path. The
 	// artifact notice (when one exists) is still appended below.
 	if notice == "" {
-		return formatTruncatedToolTextForModel(full, budget)
+		return foldToolTextForModel(full, budget, split)
 	}
 	bodyBudget := budget - len(notice) - len("\n\n")
+	if split >= 0 {
+		bodyBudget -= len(full) - split
+	}
 	if bodyBudget <= 0 {
+		if split >= 0 {
+			// The preserved block alone fills the window and is the model's
+			// only copy of it: keep it verbatim, and give the recovery pointer
+			// the leftover budget instead of the dropped head.
+			tailBytes := len(full) - split
+			return appendToolArtifactNotice(
+				foldToolTextForModel(full, tailBytes, split),
+				safePrefixByBytes(notice, budget-tailBytes),
+			)
+		}
 		return safePrefixByBytes(notice, budget)
 	}
-	return appendToolArtifactNotice(formatTruncatedToolTextForModel(full, bodyBudget), notice)
+	return appendToolArtifactNotice(foldToolTextForModel(full, bodyBudget, split), notice)
+}
+
+// reservedTailTrimSlack is how far the declared size may differ from the block
+// this text actually ends with. RenderFullToolResultContent trims the outermost
+// whitespace before the fold runs, so a size measured at append time is off by
+// exactly the trimmed bytes; anything beyond that is a declaration about a
+// different text.
+const reservedTailTrimSlack = 16
+
+// reservedTailSplit returns the byte offset where the reserved block starts, or
+// -1 when the declaration cannot be honored for this text.
+//
+// The declaration is authoritative about the SIZE, but the text is
+// authoritative about the PLACE: the block is located by its own opening tag,
+// because the body may have been re-rendered on the way here (a mutation
+// summary replaces it, an error is appended after it, whitespace is trimmed)
+// and an offset computed from the declared size alone would then miss it.
+//
+// The structural checks are what keep this safe, and they are deliberately
+// producer-agnostic. The contract requires an appended block to be tag-delimited
+// (closed by </name> or <name/>), which is the shared shape every producer can
+// satisfy without the fold knowing who wrote it. The block must open a line, its
+// size must match the declaration, and it must close at the end of the text. A
+// stale, foreign, or malformed declaration therefore falls back to the plain
+// head-only fold instead of exempting arbitrary bytes.
+//
+// The closing check is scoped to the declared tail, not to the whole result: a
+// tag-shaped line in the body (HTML in a fetch, a diff context line) must not
+// make a genuine tail look unverified.
+func reservedTailSplit(full string, declared int) int {
+	if declared <= 0 {
+		return -1
+	}
+	anchor := lastBlockOpen(full)
+	if anchor < 0 || (anchor > 0 && full[anchor-1] != '\n') {
+		return -1
+	}
+	actual := len(full) - anchor
+	if declared > actual+reservedTailTrimSlack || declared < actual-reservedTailTrimSlack {
+		return -1
+	}
+	if !blockClosesTail(full[anchor:]) {
+		return -1
+	}
+	return anchor
+}
+
+// lastBlockOpen returns the offset of the last line-leading tag in text, or -1
+// when there is none. "Tag" here means a line that starts with '<' followed by a
+// name character, which is the shared shape of every block the runtime appends.
+func lastBlockOpen(text string) int {
+	offset := -1
+	// Offset 0 is a line start too: a result that is nothing but an appended
+	// block is legitimate (the tool produced no output worth showing), and it
+	// must be honored as "the whole window is the tail".
+	if blockOpensAt(text, 0) {
+		offset = 0
+	}
+	for i := 0; i+1 < len(text); i++ {
+		if text[i] == '\n' && blockOpensAt(text, i+1) {
+			offset = i + 1
+		}
+	}
+	return offset
+}
+
+// blockOpensAt reports whether text[offset:] starts a tag: '<' followed by a
+// name character, with no leading whitespace or markup before it on that line.
+func blockOpensAt(text string, offset int) bool {
+	if offset+1 >= len(text) || text[offset] != '<' {
+		return false
+	}
+	c := text[offset+1]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// blockClosesTail reports whether tail is a delimited block that ends closed. It
+// accepts the two shapes a producer can emit: a closing tag (</name>) or a
+// self-closing tag (<name/>). An unterminated block is rejected, so a
+// declaration cannot exempt a truncated fragment.
+func blockClosesTail(tail string) bool {
+	trimmed := strings.TrimRight(tail, " \t\r\n")
+	open := strings.LastIndex(trimmed, "<")
+	if open < 0 {
+		return false
+	}
+	tag := trimmed[open:]
+	if !strings.HasSuffix(tag, ">") {
+		return false
+	}
+	return strings.HasPrefix(tag, "</") || strings.HasSuffix(tag, "/>")
+}
+
+// foldToolTextForModel folds oversized tool text to a head-only window while
+// preserving the reserved block that starts at split. split < 0 folds the whole
+// text, which is the plain head-only contract.
+//
+// The reserved block is exempt from the budget instead of competing with the
+// head for it: it is appended after the tool's own output precisely because it
+// is the newest signal (what this edit just broke), and no head window can ever
+// reach it. The head therefore gets whatever budget the block leaves, and the
+// block is re-attached verbatim - never folded, never summarized, never traded
+// for a recovery hint.
+func foldToolTextForModel(full string, budget int, split int) string {
+	if split < 0 {
+		return formatTruncatedToolTextForModel(full, budget)
+	}
+	body, tail := full[:split], full[split:]
+	bodyBudget := budget - len(tail)
+	if bodyBudget <= 0 {
+		if body == "" {
+			return tail
+		}
+		return preservedTailNotice(len(body)) + tail
+	}
+	folded := formatTruncatedToolTextPreservingTail(body, bodyBudget)
+	if folded == "" {
+		return tail
+	}
+	if !strings.HasSuffix(folded, "\n") {
+		folded += "\n"
+	}
+	return folded + tail
+}
+
+// preservedTailNotice states the arithmetic of the head-only fold when the
+// preserved block alone fills the window: the head is gone entirely, and the
+// model is told so instead of reading a clean-looking window as "that was all
+// of it".
+func preservedTailNotice(omittedBytes int) string {
+	return fmt.Sprintf(
+		"\n\n[output truncated for history safety: omitted %d bytes of the tool output to preserve the trailing LSP diagnostics block]\n\n",
+		omittedBytes,
+	)
+}
+
+// preservedTailWindowNotice is the fold notice for a window whose reserved tail
+// is re-attached immediately after it.
+//
+// It deliberately does not reuse truncationMarker. That notice claims the
+// omitted bytes went "from the end" and tells the model to re-issue a narrower
+// call to reach them. Under tailPreserved both claims are false — the end is
+// right below the notice, and the omitted bytes are the middle of a receipt the
+// tool already wrote, which no re-issue can produce. A notice that contradicts
+// the bytes printed around it costs more than the bytes it saves, so the
+// wording is rebuilt here and recovery points at the file instead.
+func preservedTailWindowNotice(shownLines, totalLines, omittedBytes, partialBytes int) string {
+	if shownLines < 0 {
+		shownLines = 0
+	}
+	if totalLines < shownLines {
+		totalLines = shownLines
+	}
+	if omittedBytes < 0 {
+		omittedBytes = 0
+	}
+	if partialBytes < 0 {
+		partialBytes = 0
+	}
+	shown := fmt.Sprintf("showing the first %d of %d lines", shownLines, totalLines)
+	if partialBytes > 0 {
+		shown += fmt.Sprintf(" plus the first %d bytes of the next line", partialBytes)
+	}
+	head := fmt.Sprintf("\n\n[output truncated for history safety: %s; %d bytes omitted from the middle of this window]\n", shown, omittedBytes)
+	tail := "[the reserved block below this notice is complete; the omitted bytes are the middle of the tool output above, not its end — read the file, or re-run a narrower call, to see them]\n\n"
+	return head + tail
+}
+
+// preservedTailWindowNoticeReserve is the exact byte ceiling this notice can
+// occupy for a window of these totals. Digit-counting the upper bound (both
+// counters and the partial-line count maxed out) makes the reserve exact rather
+// than a guess, so cutting the head can never push the notice past budget.
+func preservedTailWindowNoticeReserve(totalLines, totalBytes int) int {
+	if totalLines < 0 {
+		totalLines = 0
+	}
+	if totalBytes < 0 {
+		totalBytes = 0
+	}
+	return len(preservedTailWindowNotice(totalLines, totalLines, totalBytes, totalBytes))
 }
 
 // attachOwnedWindowPointer decides the raw-output pointer for a payload whose
@@ -913,6 +1136,20 @@ func truncationMarkerPartial(completeLines, partialBytes, omittedBytes int) stri
 	return marker + "\n\n"
 }
 
+// tailPolicy says what became of the omitted end of a folded window. It selects
+// the fold notice, because the notice is the model's only account of what the
+// window lost and how to get it back.
+type tailPolicy int
+
+const (
+	// tailDropped: the omitted end is gone. The notice reports the loss and
+	// points at a narrower re-issue, because a folded tail cannot be paged.
+	tailDropped tailPolicy = iota
+	// tailPreserved: a reserved block is re-attached right after the fold, so
+	// the loss is the middle, not the end. See preservedTailWindowNotice.
+	tailPreserved
+)
+
 // formatTruncatedToolTextForModel folds oversized tool text to a head-only
 // window: the first lines that fit the budget, followed by an explicit notice
 // that reports how many lines were shown and omitted plus how to read the rest
@@ -920,6 +1157,15 @@ func truncationMarkerPartial(completeLines, partialBytes, omittedBytes int) stri
 // middle of the text cannot be paged by the model, while a "first N lines +
 // next step" contract can.
 func formatTruncatedToolTextForModel(content string, budget int) string {
+	return foldToolTextWindow(content, budget, tailDropped)
+}
+
+// formatTruncatedToolTextPreservingTail is the same window under tailPreserved.
+func formatTruncatedToolTextPreservingTail(content string, budget int) string {
+	return foldToolTextWindow(content, budget, tailPreserved)
+}
+
+func foldToolTextWindow(content string, budget int, policy tailPolicy) string {
 	content = strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
 	if content == "" || budget <= 0 || len(content) <= budget {
 		return content
@@ -940,7 +1186,7 @@ func formatTruncatedToolTextForModel(content string, budget int) string {
 	// The budget is a hard ceiling: header + shown head + notice must never
 	// exceed it. Reserve the header and the (exact, upper-bound) notice first,
 	// then spend whatever remains on the head.
-	bodyBudget := budget - len(header) - truncationMarkerReserve(totalLines, totalBytes)
+	bodyBudget := budget - len(header) - foldNoticeReserve(policy, totalLines, totalBytes)
 	if bodyBudget <= 0 {
 		return safePrefixByBytes(content, budget)
 	}
@@ -955,13 +1201,29 @@ func formatTruncatedToolTextForModel(content string, budget int) string {
 	// line-count notice would contradict itself; report the partial line and
 	// the byte-range recovery path instead.
 	if partialBytes := partialLineBytes(head); partialBytes > 0 {
+		if policy == tailPreserved {
+			return header + head + preservedTailWindowNotice(countShownLines(head)-1, totalLines, omittedBytes, partialBytes)
+		}
 		return header + head + truncationMarkerPartial(countShownLines(head)-1, partialBytes, omittedBytes)
 	}
 	shownLines := countShownLines(head)
 	if shownLines > totalLines {
 		shownLines = totalLines
 	}
+	if policy == tailPreserved {
+		return header + head + preservedTailWindowNotice(shownLines, totalLines, omittedBytes, 0)
+	}
 	return header + head + truncationMarker(shownLines, totalLines, omittedBytes)
+}
+
+// foldNoticeReserve is the exact byte ceiling the fold notice for this policy
+// can occupy. It is reserved before the head is cut so the rendered notice can
+// never push the window past the budget.
+func foldNoticeReserve(policy tailPolicy, totalLines, totalBytes int) int {
+	if policy == tailPreserved {
+		return preservedTailWindowNoticeReserve(totalLines, totalBytes)
+	}
+	return truncationMarkerReserve(totalLines, totalBytes)
 }
 
 // headLinesWithinBudget keeps the longest prefix of content that fits maxBytes,

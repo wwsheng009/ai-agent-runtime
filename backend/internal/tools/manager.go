@@ -187,7 +187,9 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 	start := time.Now()
 	output, metadata, err := m.executeWithMeta(ctx, name, args)
 	if err == nil {
-		output = m.appendLSPDiagnostics(ctx, metadata, output)
+		var appended int
+		output, appended = m.appendLSPDiagnostics(ctx, metadata, output)
+		metadata = stampReservedTailBytes(metadata, appended)
 	}
 	return output, withToolDurationFallback(metadata, time.Since(start)), err
 }
@@ -196,16 +198,41 @@ func (m *Manager) ExecuteWithMeta(ctx context.Context, name string, args map[str
 // current diagnostics of every written file to the untouched tool output
 // (docs/lsp 03 invariants I1/I2). It is a no-op unless the LSP pool is
 // enabled and the tool reported `mutated_paths`.
-func (m *Manager) appendLSPDiagnostics(ctx context.Context, metadata map[string]interface{}, output string) string {
+//
+// The second return value is how many bytes the appended block added, which the
+// caller declares as the reserved tail (toolresult.MetadataReservedTailBytesKey)
+// so the render-layer fold keeps the diagnostics instead of dropping them. That
+// declaration is a generic contract, not an LSP one - see the key's doc - so a
+// second producer appending its own block reuses this path rather than adding
+// one.
+func (m *Manager) appendLSPDiagnostics(ctx context.Context, metadata map[string]interface{}, output string) (string, int) {
 	bridge := m.currentLSPBridge()
 	if bridge == nil || !bridge.Enabled() {
-		return output
+		return output, 0
 	}
 	paths := toolresult.MutatedPaths(metadata)
 	if len(paths) == 0 {
-		return output
+		return output, 0
 	}
-	return bridge.AppendToResult(ctx, output, paths)
+	appended := bridge.AppendToResult(ctx, output, paths)
+	// Measured, not estimated: AppendToResult returns the original text plus
+	// the joined blocks plus the separating newline, so the delta is exactly
+	// the block the model will see and cannot drift from it.
+	return appended, len(appended) - len(output)
+}
+
+// stampReservedTailBytes records the appended block's size on the result
+// metadata. A nil map is only materialized when there is something to record,
+// so a call that appended nothing keeps the previous behavior byte for byte.
+func stampReservedTailBytes(metadata map[string]interface{}, appended int) map[string]interface{} {
+	if appended <= 0 {
+		return metadata
+	}
+	if metadata == nil {
+		metadata = make(map[string]interface{}, 1)
+	}
+	metadata[toolresult.MetadataReservedTailBytesKey] = appended
+	return metadata
 }
 
 // lspInlineHintEnabled reports whether the tool's model-facing description

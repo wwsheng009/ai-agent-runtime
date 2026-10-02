@@ -94,6 +94,27 @@ L4（`internal/output/tool_result_content.go` 的 `formatTruncatedToolTextForMod
 
 验证（2026-09-20）：`go vet ./internal/output/ ./internal/toolkit/tools/` 通过；`go build -p 1 ./internal/... ./cmd/...` 通过（`tmp/prune_probe` 为本地未跟踪临时包，编译期 OOM 属环境内存不足）；`go test -count=1 -p 2 ./internal/output/... ./internal/toolkit/tools/ ./internal/agent/ ./internal/toolresult/` 全绿；新增 `TestFormatTruncatedToolTextForModel_PartialLineNoticeReportsByteCut` 以「8 行头 + 40000 字节单行」复现该形状，交叉核对完整行数 / 部分行字节 / 省略字节与渲染字节闭合。
 
+## 0.3 保留尾部：追加块豁免 L4 折叠（2026-10-02 增量）
+
+§0.1 的 head-only 折叠对**追加在尾部**的产物是结构性失效的：任何追加块都正好落在 head 窗口永远够不到的位置，预算越大越够不到。首个用户是内联 LSP 诊断（`docs/lsp` W6，`mutated_paths` → `Bridge.AppendToResult`）：「编辑引入语法错误 + 回执超预算」时，同一次 tool call 内看不到刚引入的错误——I2（闭环发生在同一次调用内）在最需要它的场景失效，而折叠提示还写着「被省略的尾部在 end」，完全不提真正被丢掉的诊断在哪。
+
+**这是通用契约，不是 LSP 特性**。需要豁免的原因是折叠的形状（head-only + 丢尾），与追加块的内容无关；因此键名、结构校验、折叠提示都不绑定任何生产端。首个用户是 LSP 诊断，第二个用户可以是任何别的块。
+
+**契约**：生产端在 metadata 以 `reserved_tail_bytes` 声明追加的字节数，折叠层把该长度豁免出预算，顺序是**先切尾部 → 只折叠头部 → 原样合并尾部**：
+
+- 生产端（`internal/tools/manager.go`）：`appended := bridge.AppendToResult(ctx, output, paths)`，声明 `len(appended) - len(output)`——**实测差值**，不是估算；没追加就不写键，也不凭空造 metadata map。新生产端复用 `stampReservedTailBytes`，不另起一条路径。
+- 读取器（`internal/toolresult/kind.go`）：`ReservedTailBytes(metadata)`，沿用 `ModelVisibleBudgetBytes` 的平铺/嵌套双读写法。
+- 折叠层（`internal/output/tool_result_content.go`）：`reservedTailSplit` 按块的**位置**定位（`lastBlockOpen`）而非纯按声明字节数切，因为 `RenderFullToolResultContent` 在折叠前 `TrimSpace`，声明值与所见文本天然有字节漂移；声明只做 ±16 B 合理性校验，再叠加三条**生产端无关**的结构校验：块须行首（offset 0 亦算行首，「整段都是尾部」是合法形状）、须行首起 `<name` 标签、须以 `</name>` 或 `<name/>` 闭合（`blockClosesTail`）。闭合校验**只作用于声明的那段尾部**，不扫描全文——否则正文里的 HTML 或 diff 上下文行会让真尾部被判为不可信，退回普通折叠，正是本节要修的 bug 复发。陈旧/异源/畸形声明一律退回普通 head-only 折叠。
+- 预算：`bodyBudget = budget - len(tail)`，尾部**豁免**而非与头部争预算；块比预算还大时块全保、头部全丢，并显式说明丢了多少字节。
+
+**折叠提示必须换措辞**（`tailPolicy`）。保留尾部时不能复用 `truncationMarker`：它声称省略发生在「from the end」并建议「re-issue 一个更窄的调用」去看——而尾部就在通知正下方，且对已落盘回执重跑工具产不出新东西。改用 `preservedTailWindowNotice`，说明省略发生在**中间**、下方保留块完整、恢复靠读文件；提示文案是渲染给模型看的，故写作中性的「the reserved block」而非点名 LSP。`preservedTailWindowNoticeReserve` 同样按位数上界精确预留，`header + head + notice ≤ budget` 不变式不变。
+
+**已豁免 L4 的工具不适用此契约**：盖 `skip_render_truncation` 的结果根本不进折叠，尾部随工具自有窗口整体透传，声明对其无意义。§0 表格中同时满足「回报 `mutated_paths`」与「已 stamp」的只有 `bash`（`ownShellOutputWindow`），属此列；其自有窗口算术跑在诊断追加**之前**，故 `model_visible_budget_bytes` 会被追加块顶出一点，增量有界，不二次折叠工具宣称自己拥有的窗口。
+
+**可观测**：`tool_output_reserved_tail_total{kind}`，三格 `preserved` / `undeclared` / `rejected`，并入 `SnapshotToolEfficiency().ArtifactFlow.ReservedTail`。折叠计数器无法区分「没有块要保护」与「声明被拒绝、块真的丢了」，所以必须单列；`rejected` 是唯一该告警的格子。未知 outcome 归一到 `rejected`（保守读法：无法识别的 outcome 可能就是丢了块）。
+
+验证（2026-10-02）：`go test -count=1 ./internal/output/... ./internal/toolresult/... ./internal/tools/... ./internal/lsp/... ./internal/chatcore/... ./internal/observability/... ./internal/compactruntime/...` 全绿。关键测试含**反向对照** `TestUndeclaredTailIsFoldedAway`（无声明时追加块确被折叠掉，否则上一条通过也证明不了豁免起作用）、`TestPreservedTailNoticeDoesNotClaimTheEndWasOmitted`、`TestOwnedWindowToolKeepsTailWithoutExemption`、`TestReservedTailOutcomeIsCounted`，以及三条**通用性守卫**：`TestNonLSPProducerTailIsExemptedToo`（`<tool_receipt_ref>` 这类非 LSP 块同样豁免，且提示文案不点名生产端）、`TestSelfClosingTailIsExempted`（自闭合标签满足分隔契约）、`TestTagShapedBodyLineDoesNotInvalidateAGenuineTail`（正文里的 tag 不连坐真尾部）。`TestReservedTailSplitRejectsImpossibleDeclarations` 的用例标签刻意**不用** `<lsp_...>`，以保证拒绝逻辑是结构性的而非按名字识别。
+
 ---
 
 ## 0.3 shell 输出窗口自持：`bash` / `aicli_exec`（2026-09-20 增量）

@@ -18,6 +18,13 @@ const (
 	MetricToolPointerNoticeTotal     = "tool_pointer_notice_total"
 	MetricToolArtifactDerefTotal     = "tool_artifact_deref_total"
 	MetricToolArtifactDerefMissTotal = "tool_artifact_deref_miss_total"
+	// MetricToolOutputReservedTailTotal counts render-layer windows where a
+	// producer-declared tail (today the inline LSP diagnostics block) was
+	// exempted from the head-only fold. It is the counterfactual for the fold:
+	// without it those bytes are indistinguishable from output that never
+	// existed, so the truncation rate cannot be read as "the fold did not run" -
+	// it reads as "the fold ran and the block survived anyway".
+	MetricToolOutputReservedTailTotal = "tool_output_reserved_tail_total"
 
 	MetricToolOutputOriginalBytes     = "tool_output_original_bytes"
 	MetricToolOutputModelVisibleBytes = "tool_output_model_visible_bytes"
@@ -83,6 +90,35 @@ const (
 	PointerNoticeKindPath      = "path"
 	PointerNoticeKindDerefHint = "deref_hint"
 )
+
+// Reserved-tail outcomes for tool_output_reserved_tail_total.
+const (
+	// ReservedTailPreserved: the fold ran and the block was re-attached whole.
+	ReservedTailPreserved = "preserved"
+	// ReservedTailUndeclared: nothing was appended, so there was no tail to
+	// protect. This cell keeps the counter's denominator meaningful instead of
+	// mixing "nothing to protect" into "protection was refused".
+	ReservedTailUndeclared = "undeclared"
+	// ReservedTailRejected: a declaration arrived but could not be honored
+	// (stale, foreign, or it does not describe this text's actual tail). Those
+	// windows DID fold the block away, so this is the cell to alert on.
+	ReservedTailRejected = "rejected"
+)
+
+// RecordToolOutputReservedTail counts reserved-tail decisions at the render
+// layer. outcome must be one of the ReservedTail* values; anything else
+// collapses to ReservedTailRejected, the conservative reading: an unrecognized
+// outcome may be a window that dropped the block.
+func RecordToolOutputReservedTail(outcome string) {
+	switch outcome {
+	case ReservedTailPreserved, ReservedTailUndeclared:
+	default:
+		outcome = ReservedTailRejected
+	}
+	IncrementCounter(MetricToolOutputReservedTailTotal, map[string]string{
+		LabelKind: outcome,
+	})
+}
 
 // RecordToolOutputArchive counts gateway / shell-disk archive decisions.
 // disposition must be one of the ArchiveDisposition* values; unknown values

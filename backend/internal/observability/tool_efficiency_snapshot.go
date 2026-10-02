@@ -62,6 +62,11 @@ type ArtifactFlowSnapshot struct {
 	Truncations   ArtifactTruncationsSnapshot `json:"truncations"`
 	PointerNotice map[string]float64          `json:"pointer_notice"`
 	Deref         ArtifactDerefSnapshot       `json:"deref"`
+	// ReservedTail is the render layer's reserved-tail outcome split. It is
+	// reported next to the truncation totals because the fold count alone
+	// cannot distinguish "no block to protect" from "a declared block was
+	// dropped", and only the latter is a defect.
+	ReservedTail map[string]float64 `json:"reserved_tail"`
 	// L1L4GapRatio is truncation_total{layer=l4_render} relative to total
 	// truncations — the layer competition signal H-1/P0-1 should eliminate.
 	L1L4GapRatio float64 `json:"l1_l4_gap_ratio"`
@@ -147,6 +152,7 @@ func (r *Registry) SnapshotToolEfficiency() ToolEfficiencySnapshot {
 			Deref: ArtifactDerefSnapshot{
 				MissByReason: map[string]float64{},
 			},
+			ReservedTail: map[string]float64{},
 		},
 		FailCategories:    map[string]float64{},
 		InefficiencyFlags: []string{},
@@ -188,6 +194,7 @@ func aggregateArtifactFlow(grouped map[string][]MetricValue) ArtifactFlowSnapsho
 		Deref: ArtifactDerefSnapshot{
 			MissByReason: map[string]float64{},
 		},
+		ReservedTail: map[string]float64{},
 	}
 	for _, v := range grouped[MetricToolOutputArchiveTotal] {
 		count := v.Value
@@ -220,6 +227,14 @@ func aggregateArtifactFlow(grouped map[string][]MetricValue) ArtifactFlowSnapsho
 	sortLabeledCounts(out.Truncations.Series)
 	if out.Truncations.Total > 0 {
 		out.L1L4GapRatio = out.Truncations.ByLayer[TruncationLayerRender] / out.Truncations.Total
+	}
+
+	for _, v := range grouped[MetricToolOutputReservedTailTotal] {
+		count := v.Value
+		if count == 0 {
+			continue
+		}
+		out.ReservedTail[labelOr(cloneLabels(v.Labels), LabelKind, "other")] += count
 	}
 
 	for _, v := range grouped[MetricToolPointerNoticeTotal] {

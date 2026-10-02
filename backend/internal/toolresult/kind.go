@@ -201,6 +201,52 @@ func metadataIntValue(value interface{}) int {
 	}
 }
 
+// MetadataReservedTailBytesKey declares how many trailing bytes of a tool
+// result text were appended AFTER the tool produced its own output, and so must
+// survive the render layer's head-only fold.
+//
+// The contract is generic: any producer that appends a block at the end of a
+// result may declare it. The first user is the inline LSP diagnostics block
+// (docs/lsp 03 I1: append-only, appended at the tail of an edit receipt), but
+// nothing in the fold's behavior or in this key's semantics is specific to
+// diagnostics.
+//
+// The need is structural, not diagnostic-specific. The fold keeps a head window
+// and deliberately drops the tail, so anything appended at the end lands exactly
+// where the fold cannot reach - the larger the budget, the further away. For the
+// first user that meant a mutation whose receipt plus diagnostics exceeded the
+// model-visible budget silently lost every diagnostic, i.e. lost the very signal
+// it was meant to carry. Declaring the size lets the fold exempt those bytes: it
+// keeps the head window and re-attaches the declared block verbatim, instead of
+// inventing a middle hole.
+//
+// The value is the block's byte length, measured where it was appended (the
+// difference between the post-append and pre-append text), so the declaration
+// cannot drift from the bytes it describes. Consumers must still verify the
+// text actually ends with such a block before honoring it.
+//
+// The key may be set flat on the result metadata or nested inside
+// "tool_metadata".
+const MetadataReservedTailBytesKey = "reserved_tail_bytes"
+
+// ReservedTailBytes returns the declared reserved-tail byte length, or 0 when the
+// producer declared none. Both a flat key and the nested tool_metadata map are
+// honored.
+func ReservedTailBytes(metadata map[string]interface{}) int {
+	if len(metadata) == 0 {
+		return 0
+	}
+	if reserved := metadataIntValue(metadata[MetadataReservedTailBytesKey]); reserved > 0 {
+		return reserved
+	}
+	if nested, ok := metadata["tool_metadata"].(map[string]interface{}); ok {
+		if reserved := metadataIntValue(nested[MetadataReservedTailBytesKey]); reserved > 0 {
+			return reserved
+		}
+	}
+	return 0
+}
+
 func truthyMetadataFlag(metadata map[string]interface{}, key string) bool {
 	if metadata == nil {
 		return false
