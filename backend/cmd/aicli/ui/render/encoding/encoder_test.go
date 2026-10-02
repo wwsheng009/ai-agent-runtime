@@ -964,6 +964,31 @@ func TestEncodeToolCallDisplayHeadRestoresLegacyDetails(t *testing.T) {
 	})
 }
 
+// TestEncodeToolOutputTreeSurvivesMarkdownLookalikeText 是回归用例：普通工具
+// 结果里出现反引号 / "# " 行 / 列表行时，assistant 侧的 LooksLikeMarkdown 会
+// 为真，但事件没有声明 render_output_format=markdown，输出仍必须带树形标记。
+func TestEncodeToolOutputTreeSurvivesMarkdownLookalikeText(t *testing.T) {
+	e := NewEventEncoder()
+	e.Encode(event("tool.requested", map[string]interface{}{
+		"tool_call_id": "markdown-lookalike", "tool_name": "grep", "arg_preview": "pattern=foo",
+	}))
+	e.Encode(event("tool.completed", map[string]interface{}{
+		"tool_call_id": "markdown-lookalike",
+		"tool_name":    "grep",
+		"output":       "a.go:1: `foo` check\n# doc heading\n- list item",
+	}))
+	var got string
+	for _, item := range e.Snapshot().Items {
+		if item.Kind == KindToolOutput {
+			got = item.Head
+		}
+	}
+	want := "  │  a.go:1: `foo` check\n  │  # doc heading\n  └  - list item"
+	if got != want {
+		t.Fatalf("tool output tree = %q\nwant %q", got, want)
+	}
+}
+
 func TestEncodeLegacyToolStartWithoutIdentityFallsBackToSystem(t *testing.T) {
 	for name, payload := range map[string]map[string]interface{}{
 		"missing call id":   {"tool_name": "shell"},

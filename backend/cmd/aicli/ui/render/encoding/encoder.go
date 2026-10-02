@@ -10,6 +10,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/markdown"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/tooloutline"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimeevents "github.com/wwsheng009/ai-agent-runtime/internal/events"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
@@ -2436,10 +2437,13 @@ func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) 
 	}
 	seen[output] = struct{}{}
 	// 普通文本工具输出树形化（中间行竖线 "│"、末行收尾符号 "└"），
-	// 与 legacy 工具块结果形态一致；diff 与 markdown 输出保留自身结构。
+	// 与 legacy 工具块结果形态一致；diff 与显式声明 markdown 的渲染输出
+	// 保留自身结构。这里不能用 markdown.LooksLikeMarkdown 做内容嗅探：
+	// 普通工具结果里的反引号、行首 "# "/"- "/"|" 会命中 assistant 侧的
+	// 散文启发式，使 view/grep/shell 输出整块丢掉树形标记。
 	treeText := output
-	if !looksLikeDiffPresentation(output) && !markdown.LooksLikeMarkdown(output) {
-		treeText = indentToolOutputTree(output)
+	if !looksLikeDiffPresentation(output) && !toolOutputDeclaresMarkdownPresentation(ev) {
+		treeText = tooloutline.TreeIndentText(output)
 	}
 	out := e.appendItem(KindToolOutput, cause, treeText)
 	if looksLikeDiffPresentation(output) {
@@ -2486,54 +2490,13 @@ func (e *EventEncoder) applyToolReceipt(ev runtimeevents.Event, cs *ChangeSet) {
 	e.applyToolFinished(ev, cs)
 }
 
-// indentToolOutputTree 把工具输出文本行树形化：从第一行到倒数第二行用竖线
-// "│" 前缀、最后一行用收尾符号 "└"（对齐 legacy 工具块树形结果块与期望的
-// "● Read(...) / └ 27 lines" 形态）。单行输出保持原样。
-func indentToolOutputTree(output string) string {
-	lines := strings.Split(output, "\n")
-	if len(lines) <= 1 {
-		return output
-	}
-	var b strings.Builder
-	b.Grow(len(output) + 6*len(lines))
-	for i, line := range lines {
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		marker := "│"
-		if i == len(lines)-1 {
-			marker = "└"
-		}
-		b.WriteString("  ")
-		b.WriteString(marker)
-		b.WriteString("  ")
-		b.WriteString(line)
-	}
-	return b.String()
-}
-
 // looksLikeDiffPresentation recognizes the canonical textual formats accepted
 // by ui/diff.RenderText. It deliberately records only semantic intent; width,
-// syntax theme and terminal color depth are resolved later by layout.
+// syntax theme and terminal color depth are resolved later by layout. The
+// canonical sniff lives in tooloutline so the legacy compact renderer and the
+// encoder cannot drift apart.
 func looksLikeDiffPresentation(text string) bool {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return false
-	}
-	for _, line := range strings.Split(trimmed, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "• Edited ") || strings.HasPrefix(line, "• Diff ") {
-			return true
-		}
-	}
-	if strings.HasPrefix(trimmed, "diff --git ") || strings.Contains(trimmed, "\ndiff --git ") {
-		return true
-	}
-	return strings.Contains("\n"+trimmed, "\n--- ") &&
-		strings.Contains("\n"+trimmed, "\n+++ ") &&
-		strings.Contains("\n"+trimmed, "\n@@ ")
+	return tooloutline.LooksLikeDiffText(text)
 }
 
 // diffPresentationLabel returns the header verb the layout layer must use
@@ -2903,6 +2866,18 @@ func toolFinishedText(ev runtimeevents.Event) string {
 	default:
 		return ""
 	}
+}
+
+// toolOutputDeclaresMarkdownPresentation reports whether the completed event
+// explicitly declares its rendered output as markdown (render_output_format
+// = "markdown", set by the agent runtime for editing tools). The tree-indent
+// decision keys off that declared format instead of markdown.LooksLikeMarkdown,
+// whose assistant-prose heuristics also match ordinary tool text (backticks,
+// "# " headings, list/table rows) and used to strip tree markers from plain
+// view/grep/shell results. Legacy renderCompactToolCompletedWithPayload keeps a
+// result's own structure only for diff presentation as well.
+func toolOutputDeclaresMarkdownPresentation(ev runtimeevents.Event) bool {
+	return tooloutline.DeclaredMarkdown(payloadString(ev.Payload["render_output_format"], ""))
 }
 
 // toolCallDisplayHead 构建工具调用期间（Running/调用前）tool cell 的可读
