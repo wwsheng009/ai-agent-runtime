@@ -21,6 +21,7 @@ type ToolTaxonomy struct {
 // CapabilityResolver prefers this over name heuristics when present.
 var knownToolTaxonomy = map[string]ToolTaxonomy{
 	"view":                    {Name: "view", Kind: types.ToolKindRead, ReadOnly: true},
+	"read":                    {Name: "read", Kind: types.ToolKindRead, ReadOnly: true},
 	"grep":                    {Name: "grep", Kind: types.ToolKindSearch, ReadOnly: true},
 	"rg":                      {Name: "rg", Kind: types.ToolKindSearch, ReadOnly: true},
 	"glob":                    {Name: "glob", Kind: types.ToolKindSearch, ReadOnly: true},

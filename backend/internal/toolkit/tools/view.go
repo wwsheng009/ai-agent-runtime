@@ -83,6 +83,25 @@ type ViewTool struct {
 
 // NewViewTool 创建 View 工具
 func NewViewTool() *ViewTool {
+	return newViewTool("view")
+}
+
+// NewReadTool 创建 `read` 兼容别名工具。
+//
+// 别名与 view 共享同一参数 schema 与同一执行实现，只是把模型/IDE 习惯名
+// `read` 注册成可直接调用的工具，使模型以 `read` 发起调用时落到 view，
+// 而不是得到 "tool not found: read"。模型可见工具面仍以 view 为规范名：
+// agent.optimizeModelToolSurface 会折叠掉这个别名。
+func NewReadTool() *ViewTool {
+	return newViewTool("read")
+}
+
+func newViewTool(name string) *ViewTool {
+	description := "查看一个或多个文件。用 files 批量读取独立文件或区间；单文件用 file_path。输出包含稳定行号和截断元数据。" +
+		"已知符号名但不知道行号时可传 symbol（索引可用时按符号范围读取；索引不可用时退化为 file_path 行范围或提示改用 grep）。"
+	if name == "read" {
+		description = "`read` 是 view 的兼容别名（同一 schema、同一执行实现）；新调用请优先使用 view。"
+	}
 	parameters := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -126,9 +145,8 @@ func NewViewTool() *ViewTool {
 
 	return &ViewTool{
 		BaseTool: toolkit.NewBaseTool(
-			"view",
-			"查看一个或多个文件。用 files 批量读取独立文件或区间；单文件用 file_path。输出包含稳定行号和截断元数据。"+
-				"已知符号名但不知道行号时可传 symbol（索引可用时按符号范围读取；索引不可用时退化为 file_path 行范围或提示改用 grep）。",
+			name,
+			description,
 			"1.1.0",
 			parameters,
 			true,

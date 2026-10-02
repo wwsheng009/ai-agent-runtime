@@ -47,6 +47,16 @@ var toolkitArgAliases = map[string]ToolkitArgAliases{
 			"files": {toolkitFileArgPair},
 		},
 	},
+	// `read` is the registered view alias (see tools.NewReadTool). It must
+	// declare the same argument names as view: the executor promotes the same
+	// aliases before execution, and the policy inspects the same set as
+	// runtime paths instead of falling back to the unknown-tool default.
+	"read": {
+		Args: []ToolkitArgAliasPair{toolkitFileArgPair},
+		ListFields: map[string][]ToolkitArgAliasPair{
+			"files": {toolkitFileArgPair},
+		},
+	},
 	"edit": {
 		Args: []ToolkitArgAliasPair{toolkitFileArgPair, toolkitOldStringArgPair, toolkitNewStringArgPair},
 	},

@@ -62,6 +62,7 @@ var localToolkitPriorityTools = map[string]struct{}{
 	"grep": {},
 	"rg":   {},
 	"view": {},
+	"read": {},
 }
 
 // NewDefaultManager registers the built-in toolkit tools and merges MCP tools.
@@ -535,6 +536,10 @@ func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexe
 	register(tools.NewAICLIExecTool())
 	register(tools.NewApplyPatchTool())
 	register(tools.NewViewTool())
+	// read 是 view 的兼容别名（同一 schema/执行实现）：注册它让偏好 `read`
+	// 这个习惯名的模型调用落到 view，而不是 "tool not found"。模型面仍只列出
+	// view（见 agent.optimizeModelToolSurface 的读取面折叠）。
+	register(tools.NewReadTool())
 	register(tools.NewEditTool())
 	register(tools.NewWriteTool())
 	register(tools.NewAppendWriteTool())

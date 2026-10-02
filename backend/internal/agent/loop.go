@@ -4381,6 +4381,22 @@ func grepToolSurfaceRank(name string) int {
 	}
 }
 
+// readToolSurfaceRank ranks file-reading tool aliases for model surface
+// compaction. Higher rank wins; zero means not a read surface alias.
+// The registered `read` alias stays executable through the tool registry, but
+// the model-facing wire advertises only the canonical `view` name so the model
+// does not face two identical schemas.
+func readToolSurfaceRank(name string) int {
+	switch name {
+	case "view":
+		return 2
+	case "read":
+		return 1
+	default:
+		return 0
+	}
+}
+
 func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefinition {
 	if len(tools) == 0 {
 		return nil
@@ -4391,6 +4407,8 @@ func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefiniti
 	preferredShellRank := 0
 	preferredSearchName := ""
 	preferredSearchRank := 0
+	preferredReadName := ""
+	preferredReadRank := 0
 	for _, definition := range tools {
 		name := strings.ToLower(strings.TrimSpace(definition.Name))
 		if rank := shellToolSurfaceRank(name); rank > preferredShellRank {
@@ -4401,6 +4419,10 @@ func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefiniti
 			preferredSearchRank = rank
 			preferredSearchName = name
 		}
+		if rank := readToolSurfaceRank(name); rank > preferredReadRank {
+			preferredReadRank = rank
+			preferredReadName = name
+		}
 	}
 
 	optimized := make([]types.ToolDefinition, 0, len(tools))
@@ -4410,6 +4432,9 @@ func optimizeModelToolSurface(tools []types.ToolDefinition) []types.ToolDefiniti
 			continue
 		}
 		if preferredSearchName != "" && grepToolSurfaceRank(name) > 0 && name != preferredSearchName {
+			continue
+		}
+		if preferredReadName != "" && readToolSurfaceRank(name) > 0 && name != preferredReadName {
 			continue
 		}
 		item := types.ToolDefinition{
