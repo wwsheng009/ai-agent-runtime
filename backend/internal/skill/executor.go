@@ -434,6 +434,17 @@ func (e *Executor) executeDefault(ctx context.Context, skill *Skill, req *types.
 		tools = e.buildToolDefinitions(ctx, e.runtimeToolNames())
 	}
 
+	// 当工具循环被启用但没有可用工具面时，提前返回清晰的错误，避免模型
+	// 发起无法执行的工具调用（例如 grep）后才发现问题。
+	if skillToolLoopRequested(req) && len(tools) == 0 {
+		return &ExecuteResult{
+			SkillName: skill.Name,
+			Success:   false,
+			Output:    "",
+			Error:     "skill tool loop is enabled but no tools are available in the current execution path; please ensure tools are loaded (e.g., remove --disable-tools) or declare tools for this skill",
+		}, nil
+	}
+
 	// 调用 LLM
 	llmRequest := &llm.LLMRequest{
 		Model:           e.defaultModel,

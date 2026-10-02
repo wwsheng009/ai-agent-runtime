@@ -1214,6 +1214,26 @@ func TestExecutor_ExecuteDefault_ToolMarkupWithoutToolsReportsError(t *testing.T
 	require.NotContains(t, result.Output, dsmlMarker)
 }
 
+func TestExecutor_ExecuteDefault_ToolLoopEnabledButNoToolsReturnsEarlyError(t *testing.T) {
+	provider := &scriptedLLMProvider{responses: []llm.LLMResponse{{Content: "should not be called", Model: "scripted-loop"}}}
+	executor := newToolLoopExecutor(t, &toolLoopMCPManager{outputs: map[string]string{}}, provider)
+
+	req := types.NewRequest("do something")
+	req.Options = map[string]interface{}{"tool_loop": true}
+	result, err := executor.Execute(context.Background(), &Skill{
+		Name:         "no-tools-skills",
+		SystemPrompt: "no tools",
+		UserPrompt:   "no tools",
+	}, req)
+
+	require.NoError(t, err)
+	require.False(t, result.Success)
+	require.Contains(t, result.Error, "no tools are available")
+	require.Contains(t, result.Error, "skill tool loop is enabled")
+	// LLM should not be called since we detect the issue early
+	require.Equal(t, 0, provider.requestCount())
+}
+
 func TestExecutor_ExecuteDefault_ToolLoopStopsAtStepLimit(t *testing.T) {
 	mcp := &toolLoopMCPManager{outputs: map[string]string{"shell": "still running"}}
 	provider := &scriptedLLMProvider{responses: []llm.LLMResponse{
