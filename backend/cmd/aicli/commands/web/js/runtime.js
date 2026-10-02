@@ -15,6 +15,8 @@ var CFG_GENERIC_REASONING = ["minimal", "low", "medium", "high", "max", "xhigh"]
 function cfgEls() {
   return {
     provider: document.getElementById("cfg-provider"),
+    providerToggle: document.getElementById("cfg-provider-toggle"),
+    providerPopup: document.getElementById("cfg-provider-popup"),
     model: document.getElementById("cfg-model"),
     modelOpts: document.getElementById("cfg-model-options"),
     modelToggle: document.getElementById("cfg-model-toggle"),
@@ -24,6 +26,112 @@ function cfgEls() {
     toggleValue: document.getElementById("cfg-toggle-value"),
     status: document.getElementById("cfg-status")
   };
+}
+
+// ---- provider / model 弹出列表的搜索过滤（共用一套语义）----
+// 过滤框固定在列表上方；命中项按 data-filter-value 显隐而不是重建列表，
+// 这样输入框焦点不会在每次按键后丢失。计数显示「命中 / 总数」或「N 项」，
+// 零命中时给出替代路径提示（自定义模型名 / 换个关键词）。
+function popupFilterRowHTML(kind, placeholder) {
+  return '<div class="cfg-popup-filter">' +
+    '<input type="text" data-popup-filter="' + esc(kind) + '" placeholder="' + esc(placeholder) +
+    '" aria-label="' + esc(placeholder) + '" title="按名称子串筛选（不区分大小写）" autocomplete="off">' +
+    '<span class="cfg-popup-count" data-popup-count></span>' +
+    "</div>";
+}
+
+function popupFilterInput(popup) {
+  return popup ? popup.querySelector("[data-popup-filter]") : null;
+}
+
+function popupFilterKeyword(popup) {
+  var input = popupFilterInput(popup);
+  return input ? String(input.value || "").trim().toLowerCase() : "";
+}
+
+// 返回可见项数；无查询串时计数显示总数，有查询串时显示「命中 / 总数」。
+function applyPopupFilter(popup) {
+  if (!popup) { return 0; }
+  var keyword = popupFilterKeyword(popup);
+  var items = popup.querySelectorAll("[data-filter-value]");
+  var visible = 0;
+  for (var i = 0; i < items.length; i++) {
+    var value = String(items[i].getAttribute("data-filter-value") || "").toLowerCase();
+    var hit = !keyword || value.indexOf(keyword) >= 0;
+    items[i].style.display = hit ? "" : "none";
+    if (hit) { visible++; }
+  }
+  var empty = popup.querySelector(".cfg-popup-no-match");
+  if (empty) { empty.style.display = keyword && visible === 0 ? "block" : "none"; }
+  var count = popup.querySelector("[data-popup-count]");
+  if (count) {
+    count.textContent = items.length === 0 ? "" :
+      (keyword ? visible + " / " + items.length : items.length + " 项");
+  }
+  return visible;
+}
+
+function clearPopupFilter(popup) {
+  var input = popupFilterInput(popup);
+  if (input) { input.value = ""; }
+  applyPopupFilter(popup);
+}
+
+function focusPopupFilter(popup) {
+  var input = popupFilterInput(popup);
+  if (input) { input.focus(); }
+}
+
+function firstVisiblePopupItem(popup) {
+  if (!popup) { return null; }
+  var items = popup.querySelectorAll("[data-filter-value]");
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].style.display !== "none") { return items[i]; }
+  }
+  return null;
+}
+
+// 方向键在可见项之间移动焦点（过滤后跳过的隐藏项不参与）。
+function movePopupFocus(popup, step) {
+  var items = popup.querySelectorAll("[data-filter-value]");
+  var visible = [];
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].style.display !== "none") { visible.push(items[i]); }
+  }
+  if (visible.length === 0) { return; }
+  var current = visible.indexOf(document.activeElement);
+  var next = current < 0
+    ? (step > 0 ? 0 : visible.length - 1)
+    : (current + step + visible.length) % visible.length;
+  visible[next].focus();
+}
+
+// 弹出列表键盘契约（provider / model 共用）：
+// - 检索框里 Enter = 选中首个可见项，↑/↓ = 在可见项间移动焦点；
+// - Esc 关闭并把焦点还给触发控件（由调用方的 onDismiss 决定）。
+function handlePopupKeydown(event, valueAttr, onSelect, onDismiss) {
+  var popup = event.currentTarget;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    onDismiss();
+    return;
+  }
+  if (event.key === "Enter") {
+    var input = popupFilterInput(popup);
+    if (input && event.target === input) {
+      var first = firstVisiblePopupItem(popup);
+      var value = first ? first.getAttribute(valueAttr) : "";
+      if (value) {
+        event.preventDefault();
+        onSelect(value);
+      }
+    }
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    movePopupFocus(popup, event.key === "ArrowDown" ? 1 : -1);
+  }
 }
 
 function findRuntimeProvider(meta, name) {
@@ -95,7 +203,7 @@ function renderModelDatalist(els, provider) {
     els.modelCount.title = models.length > 0 ? ("可选模型: " + models.join(", ")) : "该 provider 暂无预置模型，可直接输入";
   }
   if (els.model) {
-    els.model.title = "切换模型（/model --model）：可直接输入自定义模型名，或点 ▼ 弹出列表选择" +
+    els.model.title = "切换模型（/model --model）：可直接输入自定义模型名，或点 ▼ 弹出可搜索列表" +
       (models.length > 0 ? "（共 " + models.length + " 个： " + models.slice(0, 8).join(", ") + (models.length > 8 ? "…" : "") + "）" : "");
   }
   renderModelPopup(els, provider, models);
@@ -104,29 +212,42 @@ function renderModelDatalist(els, provider) {
 
 // 自定义弹出列表：解决 <input list=datalist> 无下拉箭头、点击不弹出、
 // 各浏览器表现不一致的问题。popup 与 datalist 同数据源，点选即切换。
+// 列表顶部提供检索框：按子串过滤（不区分大小写），重渲染时保留在途查询串。
 function renderModelPopup(els, provider, models) {
   var popup = els.modelPopup;
   if (!popup) { return; }
   models = models || (provider ? (provider.models || []) : []);
   var curVal = (els.model && els.model.value) || "";
+  var keyword = popupFilterKeyword(popup);
+  var filterHadFocus = document.activeElement === popupFilterInput(popup);
   if (!models || models.length === 0) {
     popup.innerHTML = '<div class="cfg-model-empty">暂无预置模型，可直接输入自定义模型名</div>';
     return;
   }
   var def = provider ? (provider.default_model || "") : "";
-  var html = "";
+  var html = popupFilterRowHTML("model", "筛选模型…");
+  html += '<div class="cfg-popup-list">';
   models.forEach(function (m) {
     var cls = "cfg-model-item" + (m === curVal ? " current" : "");
     var tag = m === def ? '<span class="tag">默认</span>' : (m === curVal ? '<span class="tag">当前</span>' : "");
-    html += '<button type="button" class="' + cls + '" data-model="' + esc(m) + '" title="' + esc(m) + '">' +
+    html += '<button type="button" class="' + cls + '" data-model="' + esc(m) + '" data-filter-value="' + esc(m) + '" title="' + esc(m) + '">' +
       esc(m) + tag + "</button>";
   });
+  html += "</div>";
+  html += '<div class="cfg-popup-no-match" style="display:none">没有匹配的模型，可直接输入自定义模型名</div>';
   popup.innerHTML = html;
+  var filter = popupFilterInput(popup);
+  if (filter && keyword) { filter.value = keyword; }
+  applyPopupFilter(popup);
+  // 元数据轮询可能在用户打字时重渲染列表：把焦点还给检索框，输入不中断。
+  if (filter && filterHadFocus) { filter.focus(); }
 }
 
 function closeModelPopup() {
   var els = cfgEls();
-  if (els.modelPopup) { els.modelPopup.style.display = "none"; }
+  if (!els.modelPopup) { return; }
+  clearPopupFilter(els.modelPopup);
+  els.modelPopup.style.display = "none";
 }
 
 function toggleModelPopup() {
@@ -140,8 +261,12 @@ function toggleModelPopup() {
   if (runtimeMetaCache) {
     var selProvider = els.provider ? (els.provider.value || cfg.provider) : cfg.provider;
     renderModelDatalist(els, findRuntimeProvider(runtimeMetaCache, selProvider));
+  } else if (!els.modelPopup.innerHTML) {
+    els.modelPopup.innerHTML = '<div class="cfg-model-empty">加载中…</div>';
   }
   els.modelPopup.style.display = "block";
+  // 打开即聚焦检索框：直接打字过滤，而不是先滚动长列表。
+  focusPopupFilter(els.modelPopup);
 }
 
 function selectModelFromPopup(modelName) {
@@ -153,19 +278,91 @@ function selectModelFromPopup(modelName) {
   closeModelPopup();
   previewModelChange(modelName);
   applyRuntimeConfig();
+  els.model.focus();
 }
 
-function renderProviderSelect(els, providers, selected) {
-  var html = "";
-  var hasCurrent = false;
-  providers.forEach(function (p) {
-    if (p.name === selected) { hasCurrent = true; }
-    html += '<option value="' + esc(p.name) + '"' + (p.name === selected ? " selected" : "") + ">" + esc(p.name) + "</option>";
-  });
-  if (selected && !hasCurrent) {
-    html = '<option value="' + esc(selected) + '" selected>' + esc(selected) + "</option>" + html;
+// ---- provider 选择器（可搜索 combo）----
+// 原生 <select> 的选项由浏览器绘制，脚本无法在其上叠加检索框；改为只读输入框
+// 显示当前值 + 自定义 popup（顶部检索框）。输入框只读 = provider 必须来自列表，
+// 不存在把半截查询串当 provider 提交的状态；选择后走与旧 change 相同的提交路径。
+function renderProviderPopup(els, providers, selected) {
+  var popup = els.providerPopup;
+  if (!popup) { return; }
+  providers = providers || [];
+  var keyword = popupFilterKeyword(popup);
+  var filterHadFocus = document.activeElement === popupFilterInput(popup);
+  if (providers.length === 0) {
+    popup.innerHTML = '<div class="cfg-model-empty">暂无可用 provider</div>';
+    return;
   }
-  els.provider.innerHTML = html;
+  var html = popupFilterRowHTML("provider", "筛选 provider…");
+  html += '<div class="cfg-popup-list">';
+  providers.forEach(function (p) {
+    var cls = "cfg-model-item" + (p.name === selected ? " current" : "");
+    var tag = p.name === selected ? '<span class="tag">当前</span>' : "";
+    html += '<button type="button" class="' + cls + '" data-provider="' + esc(p.name) + '" data-filter-value="' + esc(p.name) + '" title="' + esc(p.name) + '">' +
+      esc(p.name) + tag + "</button>";
+  });
+  html += "</div>";
+  html += '<div class="cfg-popup-no-match" style="display:none">没有匹配的 provider</div>';
+  popup.innerHTML = html;
+  var filter = popupFilterInput(popup);
+  if (filter && keyword) { filter.value = keyword; }
+  applyPopupFilter(popup);
+  if (filter && filterHadFocus) { filter.focus(); }
+}
+
+function renderProviderCombo(els, providers, selected) {
+  if (els.provider) {
+    els.provider.value = selected || "";
+    els.provider.title = "切换 provider（/model --provider）：点击或按 ▼ 打开可搜索列表" +
+      (providers.length > 0 ? "（共 " + providers.length + " 个）" : "");
+  }
+  renderProviderPopup(els, providers, selected);
+}
+
+function closeProviderPopup() {
+  var els = cfgEls();
+  if (!els.providerPopup) { return; }
+  clearPopupFilter(els.providerPopup);
+  els.providerPopup.style.display = "none";
+  if (els.provider) { els.provider.setAttribute("aria-expanded", "false"); }
+}
+
+function openProviderPopup() {
+  var els = cfgEls();
+  if (!els.providerPopup || !els.provider) { return; }
+  // 以最新缓存重渲染：运行时候选可能在面板关闭期间变化。
+  if (runtimeMetaCache) {
+    renderProviderCombo(els, runtimeMetaCache.providers || [], els.provider.value || cfg.provider);
+  } else if (!els.providerPopup.innerHTML) {
+    els.providerPopup.innerHTML = '<div class="cfg-model-empty">加载中…</div>';
+  }
+  els.providerPopup.style.display = "block";
+  els.provider.setAttribute("aria-expanded", "true");
+  focusPopupFilter(els.providerPopup);
+}
+
+function toggleProviderPopup() {
+  var els = cfgEls();
+  if (!els.providerPopup || !els.provider) { return; }
+  if (els.providerPopup.style.display !== "none" && els.providerPopup.innerHTML) {
+    closeProviderPopup();
+    return;
+  }
+  openProviderPopup();
+}
+
+function selectProviderFromPopup(providerName) {
+  var els = cfgEls();
+  if (!els.provider) { return; }
+  providerName = (providerName || "").trim();
+  if (!providerName) { return; }
+  els.provider.value = providerName;
+  closeProviderPopup();
+  previewProviderChange(providerName);
+  applyRuntimeConfig();
+  els.provider.focus();
 }
 
 // provider 本地预览：切 provider 后立即刷新 model 列表与 reasoning 选项，
@@ -224,7 +421,7 @@ export function loadRuntimeMeta() {
         cfg.provider = cur.provider || "";
         cfg.model = cur.model || "";
         cfg.reasoning = cur.reasoning_effort || "";
-        renderProviderSelect(els, providers, cfg.provider);
+        renderProviderCombo(els, providers, cfg.provider);
         var curProvider = findRuntimeProvider(meta, cfg.provider);
         renderModelDatalist(els, curProvider);
         els.model.value = cfg.model;
@@ -245,7 +442,7 @@ export function loadRuntimeMeta() {
         var selProvider = els.provider.value || cfg.provider;
         var selModelVal = (els.model.value || "").trim();
         var keepReasoning = els.reasoning.value || "";
-        renderProviderSelect(els, providers, selProvider);
+        renderProviderCombo(els, providers, selProvider);
         els.provider.value = selProvider;
         var selP = findRuntimeProvider(meta, selProvider);
         renderModelDatalist(els, selP);
@@ -388,10 +585,10 @@ function pollRuntimeMeta(expect, attempts) {
     });
 }
 
-// Escape 关闭 model popup(与 provider-editor 的协议 popup 各自独立监听)。
+// Escape 关闭 model / provider popup(与 provider-editor 的协议 popup 各自独立监听)。
 export function initGlobalModelPopupDismiss() {
   document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") { closeModelPopup(); }
+    if (e.key === "Escape") { closeModelPopup(); closeProviderPopup(); }
   });
 }
 
@@ -404,9 +601,18 @@ export function initRuntimeBar() {
   var cfgReasoningEl = document.getElementById("cfg-reasoning");
   var cfgBarEl = document.getElementById("cfg-bar");
   if (cfgProviderEl) {
-    cfgProviderEl.addEventListener("change", function () {
-      previewProviderChange(cfgProviderEl.value || "");
-      applyRuntimeConfig();
+    // 只读输入框：点击/Enter/Space/↓ 打开可搜索列表；provider 值只由列表项选择提交，
+    // 不存在把半截检索词当 provider 送出去的路径。
+    cfgProviderEl.addEventListener("click", function () {
+      toggleProviderPopup();
+    });
+    cfgProviderEl.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " " || e.key === "ArrowDown") {
+        e.preventDefault();
+        openProviderPopup();
+      } else if (e.key === "Escape") {
+        closeProviderPopup();
+      }
     });
   }
   if (cfgReasoningEl) {
@@ -415,11 +621,14 @@ export function initRuntimeBar() {
   if (cfgModelEl) {
     cfgModelEl.addEventListener("input", function () {
       previewModelChange(cfgModelEl.value || "");
-      // 输入时同步 popup 高亮（popup 打开时）。
+      // popup 打开时输入框同时充当检索词：同步过滤列表（显隐已有节点，不重渲染）。
       var els = cfgEls();
-      if (els.modelPopup && els.modelPopup.style.display !== "none" && runtimeMetaCache) {
-        var selProvider = cfgProviderEl ? (cfgProviderEl.value || cfg.provider) : cfg.provider;
-        renderModelPopup(els, findRuntimeProvider(runtimeMetaCache, selProvider));
+      if (els.modelPopup && els.modelPopup.style.display !== "none") {
+        var filter = popupFilterInput(els.modelPopup);
+        if (filter) {
+          filter.value = cfgModelEl.value || "";
+          applyPopupFilter(els.modelPopup);
+        }
       }
     });
     cfgModelEl.addEventListener("change", function () {
@@ -441,14 +650,6 @@ export function initRuntimeBar() {
         toggleModelPopup();
       }
     });
-    // 聚焦时尝试原生下拉（部分浏览器双击才出 datalist，单击无反馈）。
-    cfgModelEl.addEventListener("focus", function () {
-      var els = cfgEls();
-      if (els.modelPopup && els.modelPopup.style.display !== "none" && runtimeMetaCache) {
-        var selProvider = cfgProviderEl ? (cfgProviderEl.value || cfg.provider) : cfg.provider;
-        renderModelPopup(els, findRuntimeProvider(runtimeMetaCache, selProvider));
-      }
-    });
   }
   var cfgModelToggleEl = document.getElementById("cfg-model-toggle");
   if (cfgModelToggleEl) {
@@ -456,7 +657,6 @@ export function initRuntimeBar() {
       e.preventDefault();
       e.stopPropagation();
       toggleModelPopup();
-      if (cfgModelEl) { cfgModelEl.focus(); }
     });
   }
   var cfgModelPopupEl = document.getElementById("cfg-model-popup");
@@ -469,16 +669,59 @@ export function initRuntimeBar() {
       e.stopPropagation();
       selectModelFromPopup(btn.getAttribute("data-model") || "");
     });
+    // 检索框输入：只切换列表项显隐（保持焦点 / 不重渲染）。
+    cfgModelPopupEl.addEventListener("input", function () {
+      applyPopupFilter(cfgModelPopupEl);
+    });
+    cfgModelPopupEl.addEventListener("keydown", function (e) {
+      handlePopupKeydown(e, "data-model", selectModelFromPopup, function () {
+        closeModelPopup();
+        if (cfgModelEl) { cfgModelEl.focus(); }
+      });
+    });
   }
   // 点击外部关闭 popup（与审批弹窗/快捷键帮助一致的轻量模式）。
   document.addEventListener("click", function (e) {
     var els = cfgEls();
-    if (!els.modelPopup || els.modelPopup.style.display === "none") { return; }
-    var wrap = els.model && els.model.parentNode ? els.model.parentNode : null;
-    if (wrap && wrap.contains(e.target)) { return; }
-    if (els.modelToggle && (e.target === els.modelToggle || (els.modelToggle.contains && els.modelToggle.contains(e.target)))) { return; }
-    closeModelPopup();
+    [[els.providerPopup, els.provider, els.providerToggle, closeProviderPopup],
+      [els.modelPopup, els.model, els.modelToggle, closeModelPopup]].forEach(function (row) {
+      var popup = row[0];
+      if (!popup || popup.style.display === "none") { return; }
+      var wrap = row[1] && row[1].parentNode ? row[1].parentNode : null;
+      if (wrap && wrap.contains(e.target)) { return; }
+      var toggle = row[2];
+      if (toggle && (e.target === toggle || (toggle.contains && toggle.contains(e.target)))) { return; }
+      row[3]();
+    });
   });
+  var cfgProviderToggleEl = document.getElementById("cfg-provider-toggle");
+  if (cfgProviderToggleEl) {
+    cfgProviderToggleEl.addEventListener("click", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleProviderPopup();
+    });
+  }
+  var cfgProviderPopupEl = document.getElementById("cfg-provider-popup");
+  if (cfgProviderPopupEl) {
+    // 事件委托：popup 内容每次重渲染，无需重复绑定。
+    cfgProviderPopupEl.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest("[data-provider]") : null;
+      if (!btn) { return; }
+      e.preventDefault();
+      e.stopPropagation();
+      selectProviderFromPopup(btn.getAttribute("data-provider") || "");
+    });
+    cfgProviderPopupEl.addEventListener("input", function () {
+      applyPopupFilter(cfgProviderPopupEl);
+    });
+    cfgProviderPopupEl.addEventListener("keydown", function (e) {
+      handlePopupKeydown(e, "data-provider", selectProviderFromPopup, function () {
+        closeProviderPopup();
+        if (cfgProviderEl) { cfgProviderEl.focus(); }
+      });
+    });
+  }
   // 窄屏折叠面板：触发按钮切换 .cfg-open（桌面该按钮 display:none，这段逻辑空转）。
   var cfgToggleEl = document.getElementById("cfg-toggle");
   function closeCfgPanel() {
@@ -491,7 +734,7 @@ export function initRuntimeBar() {
       e.preventDefault();
       var open = cfgBarEl.classList.toggle("cfg-open");
       cfgToggleEl.setAttribute("aria-expanded", open ? "true" : "false");
-      if (!open) { closeModelPopup(); }
+      if (!open) { closeModelPopup(); closeProviderPopup(); }
     });
     // 点面板外部或按 Esc 收起（与 model popup 一致的轻量模式）。
     document.addEventListener("click", function (e) {

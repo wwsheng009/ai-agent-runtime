@@ -193,6 +193,14 @@ aicli chat --pprof
 - [ ] Model 字段：直接输入自定义模型名可生效；点 ▼ 弹出全量模型列表，**向上展开**（`bottom: calc(100% + 4px)`），当前模型高亮 + "当前"徽标、默认模型带"默认"徽标；徽标显示"共 N 个"。
 - [ ] Model 输入框聚焦/输入时**不应**出现原生 datalist 下拉（`list` 属性已移除，避免与自定义 popup 叠成双层）。
 - [ ] 点击 popup 外部或按 `Esc` 关闭 popup；点选后立即应用并关闭。
+- [ ] **provider / model 选择器搜索过滤（2026-10）**：Provider 不再用原生 `<select>`（选项由浏览器
+      绘制、脚本无法在其上叠加检索框），改为只读输入框 + `▼` + popup（`#cfg-provider-popup`），
+      provider 值只由列表选择产生（不存在把半截输入当 provider 提交的路径）；Provider 与 Model
+      弹层顶部都有检索框，按子串过滤（不区分大小写），计数显示「命中 / 总数」、零命中显示
+      「没有匹配的 …」而不是空白；`↑/↓` 在可见项间移动焦点、检索框 `Enter` 选中首个可见项、
+      `Esc` 关闭并把焦点还给输入框；popup 打开时在 model 主输入框打字同样过滤列表。选择 provider
+      后 model 列表与默认模型跟随（提交路径与旧 `change` 语义一致，仍带 `--direct`）。
+      回归：`node backend/scripts/verify-micro-web-composer-selector.mjs`。
 - [ ] **web↔TUI 切换契约**：底部栏切换注入的 `/model ...` 命令必须带 `--direct`
       （见 `js/runtime.js` 的 `applyRuntimeConfig`）。回归方法：web 端切换
       provider/model 时，观察同会话的 aicli chat TUI——应只打印切换结果，
@@ -629,6 +637,7 @@ node scripts/verify-micro-web-question-answer.mjs # 提问回答写入：建议�
 node scripts/verify-micro-web-pane-split.mjs   # 左右分栏助手（文件 / GIT 页签共用）：折叠 class 只在大屏生效、宽度写 CSS 变量并夹进可用范围（容器变窄时上限自己降）、端点空操作不抹记忆值、←→/Home/End 与落盘、拖拽（pane-resizing / 松手才落盘 / 折叠与非主键不起拖 / 失焦兜底）、双击复位、跨断点 onApply 与 onBreakpoint、记忆恢复与隐私模式降级、matchMedia 缺失按窄屏降级、元素缺失静默降级
 node scripts/verify-micro-web-git-diff.mjs     # GIT 页签 diff 行渲染（单列行号）：每行只有一个行号格（回归：曾把老/新行号拼成「老 新」两列）、add→新侧 / del→老侧 / context→新侧 / nonewline→空、两侧不同时只出现该侧数字、null 缺字段不补 0（0 是合法行号保留）、文本转义、renderDiff 复用同一行构造器、style.css 行号列宽度按单列给
 node scripts/verify-micro-web-composer.mjs     # 底部 composer 面板：面板是 #tab-main 内、排在 #conversation 之后的常规流一行（祖先链 html/body/.layout/#main-col/#tab-main）、**首行合并**（#dynamic-status 在 #composer-header 内；原「输入」标题与 #composer-summary 配置摘要已移除）、必需元素与既有 cfg-* id 全保留、菜单与 Ctrl+J 折叠入口接线（无第二份折叠逻辑）、style.css 几何（停靠 relative + flex:0 0 auto + margin:0 auto 居中且底部不留外边距 / 自由位置改 fixed 且清 margin / z-index 低于模态框 / 折叠只收正文、动态状态随首行保留、折叠态不缩卡片内边距、折叠态聊天区间距 8px→2px（:has() 随面板 class））、**让位靠 flex**（#conversation 是 flex:1+min-height:0+overflow:auto；没有 --composer-reserve、body 不为面板留白、#footer 规则无 composer 耦合）、「最新」按钮按信息流下沿锚定且 ResizeObserver 观察 #conversation、模式切换不搬 DOM、行为（拖动跟随与夹取、键盘微调与 Home 复位、**全程不写页面级 CSS 变量**、Ctrl+J、localStorage 回放）
+node backend/scripts/verify-micro-web-composer-selector.mjs # composer provider/model 选择器搜索过滤（jsdom 行为 + 静态契约）：provider 只读 input+▼+popup 结构、列表子串过滤（大小写不敏感）/「命中 / 总数」计数/零命中提示、点选提交 /model --provider 并跟随新默认模型、model 检索过滤与检索框 Enter 选中首个可见项、重开重置检索词、Esc 关闭回焦、popup 打开时主输入框打字同步过滤
 node scripts/verify-micro-web-todos.mjs        # 任务列表浮层（贴在 composer 上沿）：结构（#todo-panel 在 #composer-panel 内且在标题行之前）与样式不变量（bottom:calc(100% + 1px) 衔接、[hidden] 不占位、折叠只收 .todo-body、进行中加粗 / 已完成删除线）；接线（sse.js 在 switch 前分流 tool_end / 会话边界、chat.js 应用 screen 回放、app.js 初始化、后端 web_schema.go 与 chat_debug_screen_http.go 两个字段名）；纯函数（解析裁剪：坏条目丢弃 / 整组不可用 → null、计数与进度、当前项、快照合并：runtime 按 seq 单调 / history 只兜底）；面板行为（无快照隐藏、回放恢复计数与逐项状态、实时旧序号不回退、会话切换清空、折叠与 localStorage 记忆、面板缺失静默降级）
 node scripts/verify-micro-web-attachments.mjs  # 图片附件输入面：三入口（「📎」+ 隐藏 file input / #prompt 粘贴 / composer 面板内拖放）共用同一条 multipart 上传（POST /web/api/attachments、字段 file 可多份、≤8）、轨道只显示服务端回执的文件名 / 尺寸 / 字节数 / 说明（**不放缩略图**、不内联本地路径）、发送 payload 带 image_paths（无附件与 interrupt 等非 prompt 类型都不带该字段）、queued 后清空轨道、移除条目后发送不再带该路径、skipped / HTTP / 网络错误如实写进 #send-status 且不产生可用条目、index.html + style.css + app.js 静态不变量
 ```

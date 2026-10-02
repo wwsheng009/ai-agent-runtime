@@ -896,12 +896,14 @@ button:hover { background: var(--hoverBg2); }
 #cfg-bar .cfg-model input { min-width: 120px; }
 #cfg-bar .cfg-model-wrap { position: relative; display: inline-flex; align-items: center; gap: 0; }
 #cfg-bar .cfg-model-wrap input { border-top-right-radius: 0; border-bottom-right-radius: 0; border-right: none; }
-#cfg-model-toggle {
+/* provider 组合框的输入框只读：职责是显示当前值 + 打开列表，不允许手输半截值。 */
+#cfg-bar .cfg-model-wrap input[readonly] { cursor: pointer; }
+#cfg-model-toggle, #cfg-provider-toggle {
   padding: 3px 7px; font-size: 11px; line-height: 1.4; cursor: pointer;
   background: var(--bg3); color: var(--fg3);
   border: 1px solid var(--border2); border-radius: 0 5px 5px 0;
 }
-#cfg-model-toggle:hover { color: var(--fg); background: var(--hoverBg2); }
+#cfg-model-toggle:hover, #cfg-provider-toggle:hover { color: var(--fg); background: var(--hoverBg2); }
 #cfg-bar .cfg-model-count { font-size: 10px; color: var(--fg4); margin-left: 4px; white-space: nowrap; }
 /* 弹出列表公共外观：底部 model（.cfg-model-popup，向上展开）与
    Provider 编辑弹窗协议（.cfg-combo-popup，向下展开）共用。 */
@@ -926,6 +928,23 @@ button:hover { background: var(--hoverBg2); }
   border: 1px solid var(--border2); border-radius: 4px; padding: 0 4px; flex-shrink: 0;
 }
 .cfg-model-popup .cfg-model-empty, .cfg-combo-popup .cfg-combo-empty { padding: 8px; font-size: 11px; color: var(--fg4); }
+/* 弹出列表的检索过滤：检索框吸附在列表顶部（不随长列表滚走），
+   右侧计数在过滤时显示「命中 / 总数」；零命中由 .cfg-popup-no-match 兜底。 */
+.cfg-model-popup .cfg-popup-filter {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 2px; padding: 3px 4px 5px;
+  background: var(--bg3); border-bottom: 1px solid var(--border2);
+}
+.cfg-model-popup .cfg-popup-filter input {
+  flex: 1 1 auto; min-width: 0; width: 100%;
+  padding: 3px 6px; font-family: inherit; font-size: 12px;
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border2); border-radius: 5px;
+}
+.cfg-model-popup .cfg-popup-count { flex: 0 0 auto; font-size: 10px; color: var(--fg4); white-space: nowrap; }
+.cfg-model-popup .cfg-popup-list { display: flex; flex-direction: column; gap: 0.5px; }
+.cfg-model-popup .cfg-popup-no-match { padding: 8px; font-size: 11px; color: var(--fg4); }
 /* Provider 编辑弹窗协议字段：input + ▼ + 自定义 popup（同底部 model 方案） */
 .cfg-combo-wrap { position: relative; display: flex; align-items: center; width: 100%; }
 .config-form-grid .cfg-combo-wrap input { flex: 1; min-width: 0; border-top-right-radius: 0; border-bottom-right-radius: 0; border-right: none; }
@@ -1589,11 +1608,15 @@ body.sidebar-collapsed #sidebar {
   #cfg-bar .cfg-model-wrap { flex: 1 1 auto; min-width: 0; }
   /* 面板里模型名最需要宽度：解除桌面 150px 上限，输入框吃满该行剩余空间 */
   #cfg-bar .cfg-model input { flex: 1 1 auto; min-width: 0; width: auto; max-width: none; }
+  /* provider 只读输入框同理：窄屏面板里占满该行剩余空间（解除桌面 150px 上限） */
+  #cfg-bar input[readonly] { flex: 1 1 auto; min-width: 0; width: auto; max-width: none; }
   #cfg-bar .cfg-status { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #cfg-bar .cfg-status:empty { display: none; }
-  #cfg-model-toggle { padding: 8px 12px; font-size: 13px; }
+  #cfg-model-toggle, #cfg-provider-toggle { padding: 8px 12px; font-size: 13px; }
   /* 面板里向上展开的模型列表：矮视口限高，避免顶部越出视口 */
   #cfg-bar.cfg-open .cfg-model-popup { max-height: min(240px, 40vh); }
+  /* 检索框会被程序聚焦：字号必须 ≥16px，否则 iOS 聚焦时放大整页 */
+  #cfg-bar .cfg-model-popup .cfg-popup-filter input { font-size: 16px; }
   /* 六个页签（对话/日志/配置/缓存/调试/关于）在窄屏等分会被压得过窄，允许换行 */
   .tabs { flex-wrap: wrap; }
   .tab-btn { flex: 1 1 auto; min-width: 64px; padding: 7px 10px; }
