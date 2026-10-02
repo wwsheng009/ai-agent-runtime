@@ -96,7 +96,7 @@ func TestChatLSPSemanticHintExplainsSharedInstance(t *testing.T) {
 	// 共享进程退出时的降级原因必须指向宿主重启，而不是让用户以为语义通道崩了。
 	hint := chatLSPSemanticHint(knowledge.SemanticChannelStatus{
 		State: "degraded", Shared: true, Reason: "shared language server exited (host restarting?)",
-})
+	})
 	if !strings.Contains(hint, "restart") && !strings.Contains(hint, "重启") {
 		t.Fatalf("共享态降级提示应指向 /lsp restart: %q", hint)
 	}

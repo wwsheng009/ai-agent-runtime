@@ -156,7 +156,9 @@ func chatWebLSPBaselineBodyForDays(days int) chatWebLSPBaselineBody {
 		opts.Since = now.AddDate(0, 0, -days)
 		body.Since = opts.Since.Format(time.RFC3339)
 	}
-	stats, err := lspbaseline.Analyze(opts)
+	// 事实源：分析库（不再回扫 chat-logs）。这正是最初定位到的那个消费方——若它
+	// 继续扫日志，"日志随保留策略退化"与"冷启动指标已冻结"就会在面板上原样留存。
+	stats, err := lspBaselineFromStore(opts.Since)
 	if err != nil {
 		body.Available = false
 		body.Reason = chatWebLSPBaselineFailedCode

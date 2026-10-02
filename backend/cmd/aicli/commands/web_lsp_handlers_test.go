@@ -127,18 +127,18 @@ func withChatWebLSPBaselineRoot(t *testing.T, roots []string) {
 
 func writeChatWebLSPBaselineFixture(t *testing.T, root string) {
 	t.Helper()
-	dir := filepath.Join(root, "2026", "09", "29", "sess_a", "events")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
 	body := strings.Join([]string{
 		`{"type":"lsp.request.finished","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"trigger":"inline","outcome":"injected","duration_ms":10,"diag_count":2,"appended_bytes":100,"server":"gopls"}}`,
-		`{"type":"tool.completed","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"logical_tool":"apply_patch","output_model_visible_bytes":1000}}`,
+		// tool_call_id 不是可选的：它是 usage_tool_calls 的主键，ingest 遇到缺它的
+		// tool.completed 会整条丢弃，于是覆盖率的**分母**就没有这条调用。
+		// 实测线上最近 120 个会话日志里 1299 条 tool.completed 全部带该字段
+		// （覆盖率 100%），所以这是 fixture 必须写实，而不是库路径的缺口。
+		`{"type":"tool.completed","session_id":"s1","timestamp":"2026-09-29T10:00:00Z","payload":{"tool_call_id":"tc1","logical_tool":"apply_patch","output_model_visible_bytes":1000}}`,
 		"",
 	}, "\n")
-	if err := os.WriteFile(filepath.Join(dir, "runtime-events.jsonl"), []byte(body), 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
+	// 事实源是分析库：灌库而不是写 JSONL。root 参数已无意义，保留仅为不改签名。
+	seedLSPBaselineTestDB(t, body)
+	_ = root
 }
 
 func chatWebLSPBaselineGet(t *testing.T, query string) (int, map[string]interface{}) {
@@ -174,7 +174,8 @@ func TestChatWebLSPBaselineFixtureRows(t *testing.T) {
 		t.Fatalf("first row = %v", first)
 	}
 	scan, _ := body["scan"].(map[string]interface{})
-	if scan["files"] != float64(1) {
+	// 扫描量恒为 0：数据面读分析库，不扫日志。这是"这条路不扫日志"，不是故障。
+	if scan["files"] != float64(0) || scan["malformed"] != float64(0) {
 		t.Fatalf("scan = %v", scan)
 	}
 	cachedAt, _ := body["cached_at"].(string)

@@ -76,12 +76,14 @@ func chatLSPBaselineText(args []string) string {
 	}
 
 	started := time.Now()
-	stats, err := lspbaseline.Analyze(opts)
+	// 事实源：分析库（不再回扫 chat-logs）。口径未变——两条源共用
+	// baseline.Aggregate，equivalence_test.go 钉住逐字段一致。
+	stats, err := lspBaselineFromStore(opts.Since)
 	if err != nil {
 		return fmt.Sprintf("错误: 基线归因失败: %v", err)
 	}
 	report := lspbaseline.RenderMarkdown(stats)
-	return fmt.Sprintf("%s\n（扫描根: %s；窗口: %s；整文件跳过 %d 个，按时间跳过 %d 行，耗时 %s）",
-		report, strings.Join(roots, ", "), windowText, stats.Scan.SkippedFiles, stats.Scan.SkippedOld,
-		time.Since(started).Round(time.Millisecond))
+	// 扫描量已移出数据面（那条路径不再被数据面使用），这里如实说明数据源。
+	return fmt.Sprintf("%s\n（数据源: 分析库；窗口: %s；耗时 %s）",
+		report, windowText, time.Since(started).Round(time.Millisecond))
 }
