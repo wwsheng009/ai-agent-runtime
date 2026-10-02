@@ -477,9 +477,27 @@ func chatHistoryToolReplayEvent(
 // chatHistoryToolDisplay 返回持久化工具消息在实时链路上等价的 compact
 // 显示文本；无可用信息时返回空串，调用方回退到原始输出。
 func chatHistoryToolDisplay(message runtimetypes.Message, toolName string, callArgs map[string]interface{}) string {
+	display, _ := persistedHistoryToolSeed(message, toolName, callArgs)
+	return display
+}
+
+// persistedHistoryToolSeed 返回持久化工具消息的 compact 显示文本，并在渲染
+// 结果与显示文本逐字一致（无两端空白归一差异）时返回结构化块。Scene 种子
+// 导入优先使用结构化块（SubmitToolResultBlock），空白归一差异时回退不透明
+// display，保证匹配/去重语义与旧路径逐字一致。
+func persistedHistoryToolSeed(message runtimetypes.Message, toolName string, callArgs map[string]interface{}) (string, compactToolCompletedBlock) {
 	output, toolErr := splitChatHistoryToolResult(message)
 	event := chatHistoryToolReplayEvent(message, toolName, callArgs, output, toolErr)
-	return strings.TrimSpace(renderSharedChatToolEvent(event))
+	block, ok := compactToolCompletedBlockForEvent(event)
+	if !ok {
+		return "", compactToolCompletedBlock{}
+	}
+	rendered := block.render()
+	display := strings.TrimSpace(rendered)
+	if display == "" || rendered != display {
+		return display, compactToolCompletedBlock{}
+	}
+	return display, block
 }
 
 // chatHistoryToolAttemptedArgs 从元数据的 tool_invocation.attempted_args

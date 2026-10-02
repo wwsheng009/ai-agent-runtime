@@ -8,6 +8,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
+	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
 )
 
 // Compile-time proof that userMessageCell satisfies the historyCell contract.
@@ -129,6 +130,34 @@ func TestToolChainCell_DisplayLinesDenseRunningAndCompleted(t *testing.T) {
 	// Dense: no blank row between header and result.
 	if len(completed) > 1 && completed[1] == "" {
 		t.Fatalf("Completed should be dense (no blank after header): %#v", completed)
+	}
+}
+
+// TestToolChainCell_RenderedEventMatchesStructuredBlock pins S4：协调器把一次
+// 结构化装配结果交给 legacy cell，DisplayLines 与 renderSharedChatToolEvent
+// 逐字一致；withCompleted 作废构造缓存并回到懒渲染。
+func TestToolChainCell_RenderedEventMatchesStructuredBlock(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	event := runtimechatcore.ChatEvent{
+		Type: runtimechatcore.EventTool, Stage: "tool_result",
+		ToolName: "edit", ToolCallID: "call-cell-md", Output: "# title\ntext", Success: true,
+	}
+	block, ok := compactToolCompletedBlockForEvent(event)
+	if !ok {
+		t.Fatal("fixture produced no structured block")
+	}
+	rendered := block.render()
+	want := widthAwareDisplayLines(ui.FormatAssistantSupplementBlock(renderSharedChatToolEvent(event)), 80)
+	cell := newToolChainCellFromRenderedEvent(event, rendered)
+	if got := cell.DisplayLines(80); !reflect.DeepEqual(got, want) {
+		t.Fatalf("rendered cell mismatch\n got %#v\nwant %#v", got, want)
+	}
+
+	// withCompleted 必须作废构造缓存，按新结果懒渲染。
+	completed := cell.withCompleted("new output", nil)
+	joined := strings.Join(completed.DisplayLines(80), "\n")
+	if !strings.Contains(joined, "new output") || strings.Contains(joined, "# title") {
+		t.Fatalf("withCompleted reused a stale render: %q", joined)
 	}
 }
 

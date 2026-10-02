@@ -1181,6 +1181,43 @@ P4  明确 renderengine 与 ui.TerminalSession 的最终包边界
 P5  清理旧 Scene presenter/parity feature flag，只保留必要审计能力
 ```
 
+### 16.2 工具输出统一（2026-10-02）
+
+工具结果的树形装配已收敛到共享实现，两条投影路径不再各自演化：
+
+- **单一 formatter**：`cmd/aicli/ui/render/tooloutline` 提供 `TreeIndentLines`
+  （head + 内容行）与 `TreeIndentText`（独立文本）、`DeclaredMarkdown` 与
+  `LooksLikeDiffText`；legacy compact 渲染与统一编码器都调用它。
+- **单一内容装配**：`buildCompactToolCompletedBlock`（commands）装配标题、上下文、
+  markdown/summary 与 diff 自有结构；legacy 投影与结构化注入共用同一份结果。
+- **结构化注入**：direct tool 的 live 请求/结果注入（`submitToolRequestedBlock` /
+  `submitToolResultBlock`）与历史种子导入（`SubmitToolResultBlock`）只传语义
+  head + 未渲染的续行/内容行，由编码器经共享装配与 formatter 重建；事件日志不再
+  冻结渲染后的树形字节，Scene 运行 head 与 ActiveBand 文本同源。
+- **兼容解码**：旧事件日志只有整块 `display_head` 时按不透明块解码；历史种子在
+  渲染结果与 display 存在空白归一差异时回退 `SubmitToolResultDisplay`。
+
+剩余 legacy 消费面（均不再是 live Scene 的权威来源）：
+
+- `toolChainCell.DisplayLines`（S4）：协调器一次装配后把文本交给 cell，cell 不再
+  独立渲染；`chat_transcript_renderer` 的无 coordinator 回退打印对 tool_result
+  直接消费结构化块，缺块时保留懒渲染回退。
+- 运行态（S5）：`compactToolRequestedBlock`（head + legacy 续行）同时供给
+  ActiveBand 文本与 Scene `tool.requested`（`SubmitToolCallRunning` 落账
+  `display_running_head/lines`），运行 head 与 legacy 投影逐字一致。
+- `renderSharedChatToolEvent` 退化为纯 decode / 投影入口：历史解码
+  （`chatHistoryToolDisplay`）、batch_* 兜底、无事件时的 cell 懒渲染回退。
+  新代码不应再以它为权威装配。
+
+上述白名单由 `TestToolRenderStringAPICallSitesFrozen`（源码级调用点扫描）冻结：
+新增 `renderSharedChatToolEvent` / `SubmitToolResultDisplay` 或 bridge 兼容包装的
+生产调用点会让测试失败，必须先在评审中证明它属于 decode/兼容路径。
+
+补充事实（调研结论）：`commitHistoryCellLocked` 在统一模式已 early-return
+（只做 `markBlockCommittedLocked` 边界记账，historyWindow 由 HistoryEffectQueue
+独占），因此 legacy tool cell 的完整渲染在统一模式下只服务可见性判定 gate；
+字符串 cell 渲染实际只被非统一模式消费，无需再"退役"统一模式内的提交路径。
+
 ---
 
 ## 17. 关键代码导航

@@ -40,6 +40,11 @@ type persistedHistorySeedUnit struct {
 	// 头部：既用于与实时/日志重放建立的 item 匹配（避免 resume 后又追加
 	// 一个原文单元格），也用于把历史种子渲染成与 live 相同的摘要形态。
 	toolDisplay string
+	// toolBlock 是 toolDisplay 的结构化形态（head + 标记前内容行）。非零时
+	// 种子导入走 SubmitToolResultBlock，由编码器经共享 formatter 重建；仅在
+	// 渲染结果与 toolDisplay 逐字一致时设置，否则回退 toolDisplay 的不透明
+	// 导入（见 persistedHistoryToolSeed），匹配/去重语义不变。
+	toolBlock compactToolCompletedBlock
 
 	// resolvedToolHead 缓存 toolHead() 的结果。匹配是「unit × item」的二次方
 	// 扫描，而 toolHead() 要拼接整段工具输出：若每个候选 item 都重建一次，
@@ -568,15 +573,20 @@ func buildPersistedHistorySeedUnitsScoped(messages []runtimetypes.Message, scope
 				}
 				continue
 			}
-			appendUnit(persistedHistorySeedUnit{
+			display, block := persistedHistoryToolSeed(message, name, call.Args)
+			unit := persistedHistorySeedUnit{
 				kind:        persistedHistorySeedTool,
 				toolCallID:  callID,
 				toolName:    name,
 				toolOutput:  output,
 				toolError:   toolErr,
 				success:     strings.TrimSpace(toolErr) == "",
-				toolDisplay: chatHistoryToolDisplay(message, name, call.Args),
-			})
+				toolDisplay: display,
+			}
+			if block.head != "" || block.ownStructure != "" {
+				unit.toolBlock = block
+			}
+			appendUnit(unit)
 		case "system":
 			if strings.TrimSpace(content) != "" {
 				appendUnit(persistedHistorySeedUnit{kind: persistedHistorySeedSupplement, content: content})
@@ -804,10 +814,17 @@ func (u persistedHistorySeedUnit) apply(b *chatRuntimeEventBridge) {
 		// row. Establish the stable call identity before the result so the
 		// encoder maps both mutations to one committed tool-chain Scene cell.
 		b.applyChangeSet(b.renderEncoder.SubmitToolCall(u.toolCallID, u.toolName, nil))
+		if u.toolBlock.head != "" || u.toolBlock.ownStructure != "" {
+			// 与实时/日志链路同源：结构化块经共享 formatter 重建，历史种子
+			// 不再注入整块预渲染字符串。
+			b.applyChangeSet(b.renderEncoder.SubmitToolResultBlock(
+				u.toolCallID, u.toolBlock.head, u.toolBlock.content, u.toolBlock.ownStructure,
+			))
+			return
+		}
 		if strings.TrimSpace(u.toolDisplay) != "" {
-			// 与实时链路同源：live 通过 SubmitToolResultDisplay 注入
-			// compact 摘要，历史种子必须复用同一入口，否则 resume 会把
-			// 原文当作工具输出再渲染一份未摘要单元格。
+			// 回退路径：空白归一差异或缺少结构化块时，沿用整块不透明 display
+			// （与旧日志解码同源），避免 resume 追加一份未摘要单元格。
 			b.applyChangeSet(b.renderEncoder.SubmitToolResultDisplay(u.toolCallID, u.toolDisplay))
 			return
 		}
@@ -860,6 +877,12 @@ func (u persistedHistorySeedUnit) applyBefore(b *chatRuntimeEventBridge, anchorI
 		itemID := applyChangeSetItemID(b, b.renderEncoder.SubmitPersistedHistoryToolCallBefore(
 			u.toolCallID, u.toolName, anchorItemID,
 		))
+		if u.toolBlock.head != "" || u.toolBlock.ownStructure != "" {
+			b.applyChangeSet(b.renderEncoder.SubmitToolResultBlock(
+				u.toolCallID, u.toolBlock.head, u.toolBlock.content, u.toolBlock.ownStructure,
+			))
+			return itemID
+		}
 		if strings.TrimSpace(u.toolDisplay) != "" {
 			b.applyChangeSet(b.renderEncoder.SubmitToolResultDisplay(u.toolCallID, u.toolDisplay))
 			return itemID

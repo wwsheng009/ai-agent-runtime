@@ -35,16 +35,28 @@ var sharedChatToolPreviewKeys = []string{
 	"content",
 }
 
+// renderSharedChatToolEvent 是工具渲染的 legacy 字符串投影入口，只服务历史
+// 解码、batch_* 兜底与无 coordinator 的兼容回退；权威装配是
+// compactToolRequestedBlock / compactToolCompletedBlock 与结构化注入 API
+// （SubmitToolCallRunning / SubmitToolResultBlock）。调用点白名单由
+// TestToolRenderStringAPICallSitesFrozen 冻结，语义见架构文档 §16.2。
 func renderSharedChatToolEvent(event runtimechatcore.ChatEvent) string {
 	payload := sharedChatToolPayload(event)
-	toolSource := payloadStringValue(payload[toolresult.SourceKey])
 	switch event.Stage {
 	case "batch_start":
 		return ""
 	case "tool_requested":
-		return appendCompactToolDirectory(renderCompactToolRequestedWithSource(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource), payload)
+		block, ok := compactToolRequestedBlockForPayload(event, payload)
+		if !ok {
+			return ""
+		}
+		return block.render()
 	case "tool_result":
-		return renderCompactToolCompletedWithPayload(event.ToolName, payloadStringValue(event.Arguments["command"]), payloadStringValue(payload["command_text"]), payloadStringValue(payload["arg_preview"]), toolSource, chatToolSummaryLines(payload), payload)
+		block, ok := compactToolCompletedBlockForPayload(event, payload)
+		if !ok {
+			return ""
+		}
+		return block.render()
 	case "batch_end":
 		return ""
 	default:
@@ -394,6 +406,50 @@ func renderCompactToolRequestedWithSource(toolName, commandArg, commandText, arg
 	return "• Running " + display
 }
 
+// compactToolRequestedBlock 是工具运行态的语义形态：head 为
+// "• Running <display>"，lines 是已带 legacy "  " 前缀的上下文/目录续行
+// （原样参与投影，不叠加树形标记）。
+type compactToolRequestedBlock struct {
+	head  string
+	lines []string
+}
+
+func (b compactToolRequestedBlock) render() string {
+	if b.head == "" {
+		return ""
+	}
+	if len(b.lines) == 0 {
+		return b.head
+	}
+	return b.head + "\n" + strings.Join(b.lines, "\n")
+}
+
+// buildCompactToolRequestedBlock 与 renderSharedChatToolEvent 的 tool_requested
+// 投影共用同一装配：coordinator 的 ActiveBand 文本与 Scene 运行态 head 都取自
+// 这里，避免两处各自拼装 Running 行。
+func buildCompactToolRequestedBlock(toolName, commandArg, commandText, argPreview, toolSource string, payload map[string]interface{}) (compactToolRequestedBlock, bool) {
+	head := renderCompactToolRequestedWithSource(toolName, commandArg, commandText, argPreview, toolSource)
+	if head == "" {
+		return compactToolRequestedBlock{}, false
+	}
+	return compactToolRequestedBlock{head: head, lines: compactToolContextLines(payload)}, true
+}
+
+func compactToolRequestedBlockForEvent(event runtimechatcore.ChatEvent) (compactToolRequestedBlock, bool) {
+	return compactToolRequestedBlockForPayload(event, sharedChatToolPayload(event))
+}
+
+func compactToolRequestedBlockForPayload(event runtimechatcore.ChatEvent, payload map[string]interface{}) (compactToolRequestedBlock, bool) {
+	return buildCompactToolRequestedBlock(
+		event.ToolName,
+		payloadStringValue(event.Arguments["command"]),
+		payloadStringValue(payload["command_text"]),
+		payloadStringValue(payload["arg_preview"]),
+		payloadStringValue(payload[toolresult.SourceKey]),
+		payload,
+	)
+}
+
 func renderCompactToolCompleted(toolName, commandArg, commandText, argPreview string, summaryLines []string) string {
 	return renderCompactToolCompletedWithSource(toolName, commandArg, commandText, argPreview, "", summaryLines)
 }
@@ -402,28 +458,81 @@ func renderCompactToolCompletedWithSource(toolName, commandArg, commandText, arg
 	return renderCompactToolCompletedWithPayload(toolName, commandArg, commandText, argPreview, toolSource, summaryLines, nil)
 }
 
-func renderCompactToolCompletedWithPayload(toolName, commandArg, commandText, argPreview, toolSource string, summaryLines []string, payload map[string]interface{}) string {
-	display := compactToolDisplayTextWithSource(toolName, commandArg, commandText, argPreview, toolSource)
-	if display == "" {
+// compactToolCompletedBlock 是已完成工具块的语义形态：head 是标题行，
+// content 是尚未加树形标记的内容行；ownStructure 非空时表示该块自带呈现
+// 结构（diff / markdown 的渲染结果），不再叠加树形标记。
+//
+// 交互注入（bridge）只持久化 head / content，由编码器用共享 formatter 重建
+// 与 legacy 投影逐字一致的文本；ownStructure 块保持整块字符串语义。
+type compactToolCompletedBlock struct {
+	head         string
+	content      []string
+	ownStructure string
+}
+
+// render 用共享的 tooloutline formatter 把语义块投影为 transcript 文本。
+func (b compactToolCompletedBlock) render() string {
+	if b.ownStructure != "" {
+		return b.ownStructure
+	}
+	if b.head == "" {
 		return ""
 	}
-	if rendered := renderStructuredDiffToolOutput(payload); rendered != "" {
-		return rendered
+	return strings.Join(tooloutline.TreeIndentLines(append([]string{b.head}, b.content...)), "\n")
+}
+
+func renderCompactToolCompletedWithPayload(toolName, commandArg, commandText, argPreview, toolSource string, summaryLines []string, payload map[string]interface{}) string {
+	block, ok := buildCompactToolCompletedBlock(toolName, commandArg, commandText, argPreview, toolSource, summaryLines, payload)
+	if !ok {
+		return ""
 	}
-	lines := []string{compactToolCompletionTitle(payload, display)}
-	lines = append(lines, compactToolContextLines(payload)...)
+	return block.render()
+}
+
+// buildCompactToolCompletedBlock 组装已完成工具块的语义形态。内容装配逻辑
+// （标题、上下文行、markdown / summary 分支、diff 自有结构）只有这一份，
+// legacy 投影与交互注入共用，避免两条路径各自演化。
+func buildCompactToolCompletedBlock(toolName, commandArg, commandText, argPreview, toolSource string, summaryLines []string, payload map[string]interface{}) (compactToolCompletedBlock, bool) {
+	display := compactToolDisplayTextWithSource(toolName, commandArg, commandText, argPreview, toolSource)
+	if display == "" {
+		return compactToolCompletedBlock{}, false
+	}
+	if rendered := renderStructuredDiffToolOutput(payload); rendered != "" {
+		return compactToolCompletedBlock{ownStructure: rendered}, true
+	}
+	block := compactToolCompletedBlock{head: compactToolCompletionTitle(payload, display)}
+	block.content = append(block.content, compactToolContextLines(payload)...)
 	if renderedLines := renderMarkdownToolOutputLines(payload); len(renderedLines) > 0 {
-		lines = append(lines, renderedLines...)
-		return strings.Join(tooloutline.TreeIndentLines(lines), "\n")
+		block.content = append(block.content, renderedLines...)
+		return block, true
 	}
 	outputLines := compactToolOutputLines(summaryLines)
 	if len(outputLines) == 0 {
 		outputLines = []string{"(no output)"}
 	}
 	for _, line := range outputLines {
-		lines = append(lines, line)
+		block.content = append(block.content, line)
 	}
-	return strings.Join(tooloutline.TreeIndentLines(lines), "\n")
+	return block, true
+}
+
+// compactToolCompletedBlockForEvent 是 tool_result 事件的结构化形态：同一份
+// payload 装配，供交互注入与 legacy 投影共用，保证两者永远投影同一组
+// head / content。
+func compactToolCompletedBlockForEvent(event runtimechatcore.ChatEvent) (compactToolCompletedBlock, bool) {
+	return compactToolCompletedBlockForPayload(event, sharedChatToolPayload(event))
+}
+
+func compactToolCompletedBlockForPayload(event runtimechatcore.ChatEvent, payload map[string]interface{}) (compactToolCompletedBlock, bool) {
+	return buildCompactToolCompletedBlock(
+		event.ToolName,
+		payloadStringValue(event.Arguments["command"]),
+		payloadStringValue(payload["command_text"]),
+		payloadStringValue(payload["arg_preview"]),
+		payloadStringValue(payload[toolresult.SourceKey]),
+		chatToolSummaryLines(payload),
+		payload,
+	)
 }
 
 func renderMarkdownToolOutput(payload map[string]interface{}) string {

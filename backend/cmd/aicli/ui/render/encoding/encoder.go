@@ -572,10 +572,22 @@ func (e *EventEncoder) SubmitPriorityPromptTranscript(eventType, requestKey, tex
 // 该 helper 与 Encode(runtimeevents.Event{Type:"tool.requested"}) 完全同义，
 // 只是把 direct producer 的语义约束收口在编码器 API 内。
 func (e *EventEncoder) SubmitToolCall(toolCallID, toolName string, args map[string]interface{}) *ChangeSet {
+	return e.submitToolCall(toolCallID, toolName, args, "", nil)
+}
+
+// SubmitToolCallRunning 提交带结构化运行态文本的工具请求：runningHead /
+// runningLines 由共享装配产出（"• Running <display>" + legacy 上下文续行），
+// Scene 运行 head 与 ActiveBand 文本逐字一致；空值退回 payload 推导路径，
+// 老日志与旧调用方语义不变。
+func (e *EventEncoder) SubmitToolCallRunning(toolCallID, toolName string, args map[string]interface{}, runningHead string, runningLines []string) *ChangeSet {
+	return e.submitToolCall(toolCallID, toolName, args, runningHead, runningLines)
+}
+
+func (e *EventEncoder) submitToolCall(toolCallID, toolName string, args map[string]interface{}, runningHead string, runningLines []string) *ChangeSet {
 	if e == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(toolName) == "" {
 		return nil
 	}
-	payload := make(map[string]interface{}, len(args)+2)
+	payload := make(map[string]interface{}, len(args)+4)
 	for key, value := range args {
 		if strings.TrimSpace(key) == "" {
 			continue
@@ -587,6 +599,12 @@ func (e *EventEncoder) SubmitToolCall(toolCallID, toolName string, args map[stri
 	// the same tool result to different chains.
 	payload["tool_call_id"] = strings.TrimSpace(toolCallID)
 	payload["tool_name"] = strings.TrimSpace(toolName)
+	if strings.TrimSpace(runningHead) != "" {
+		payload["display_running_head"] = runningHead
+	}
+	if len(runningLines) > 0 {
+		payload["display_running_lines"] = append([]string(nil), runningLines...)
+	}
 	return e.Encode(runtimeevents.Event{Type: "tool.requested", ToolName: toolName, Payload: payload})
 }
 
@@ -655,6 +673,9 @@ func (e *EventEncoder) SubmitToolResult(toolCallID, toolName, output, toolErr st
 // display block rather than a structured raw result. Keeping that one display
 // head on the tool-call item preserves exact Scene/legacy/replay parity without
 // pretending that it is a separate supplement cell.
+//
+// 兼容入口：新代码应使用 SubmitToolResultBlock；生产调用点白名单由
+// commands.TestToolRenderStringAPICallSitesFrozen 冻结。
 func (e *EventEncoder) SubmitToolResultDisplay(toolCallID, display string) *ChangeSet {
 	if e == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(display) == "" {
 		return nil
@@ -666,6 +687,31 @@ func (e *EventEncoder) SubmitToolResultDisplay(toolCallID, display string) *Chan
 			"display_head": display,
 		},
 	})
+}
+
+// SubmitToolResultBlock finalizes a direct tool chain from its structured
+// compact block (title line + pre-marker content lines) instead of a
+// pre-rendered opaque string. The encoder rebuilds the transcript text through
+// the shared tooloutline formatter, so persisted event logs stay semantic and
+// replay does not freeze today's marker bytes. An own-structure block
+// (diff/markdown render result) keeps the legacy whole-block representation.
+func (e *EventEncoder) SubmitToolResultBlock(toolCallID, head string, content []string, ownStructure string) *ChangeSet {
+	if e == nil || strings.TrimSpace(toolCallID) == "" {
+		return nil
+	}
+	payload := map[string]interface{}{"tool_call_id": strings.TrimSpace(toolCallID)}
+	if strings.TrimSpace(ownStructure) != "" {
+		payload["display_head"] = ownStructure
+	} else {
+		if strings.TrimSpace(head) == "" {
+			return nil
+		}
+		payload["display_head"] = head
+		if len(content) > 0 {
+			payload["display_lines"] = append([]string(nil), content...)
+		}
+	}
+	return e.Encode(runtimeevents.Event{Type: "tool.completed", Payload: payload})
 }
 
 // SubmitUserInteraction 把 /debug、/model 等用户交互输出提交为终态
@@ -2291,6 +2337,10 @@ func (e *EventEncoder) applyToolStarted(ev runtimeevents.Event, cs *ChangeSet) {
 		}
 	}
 	head := toolCallDisplayHead(ev)
+	if custom := payloadString(ev.Payload["display_running_head"], ""); custom != "" {
+		// direct tool：运行态文本由共享装配产出，与 ActiveBand 逐字同源。
+		head = custom
+	}
 	if head == "" {
 		head = name
 	}
@@ -2299,6 +2349,10 @@ func (e *EventEncoder) applyToolStarted(ev runtimeevents.Event, cs *ChangeSet) {
 	// applyToolFinished 替换首行为 "• Completed/Failed ..."。
 	if !strings.HasPrefix(head, "• ") {
 		head = "• Running " + head
+	}
+	if lines := payloadDisplayLines(ev.Payload["display_running_lines"]); len(lines) > 0 {
+		// legacy 续行已自带 "  " 前缀，原样拼接（不叠加树形标记）。
+		head = head + "\n" + strings.Join(lines, "\n")
 	}
 	it := e.appendItem(KindToolCall, "", head)
 	if callID != "" {
@@ -2383,13 +2437,22 @@ func (e *EventEncoder) applyToolFinished(ev runtimeevents.Event, cs *ChangeSet) 
 		return
 	}
 	displayHead := payloadString(ev.Payload["display_head"], "")
+	displayText := displayHead
+	if displayHead != "" {
+		if displayLines := payloadDisplayLines(ev.Payload["display_lines"]); len(displayLines) > 0 {
+			// 结构化 direct-tool 块：以语义 head + 标记前内容行经共享 formatter
+			// 重建，与 legacy renderSharedChatToolEvent 的树形投影逐字一致；
+			// 老日志只有整块 display_head 时走不透明路径（displayText 原样）。
+			displayText = strings.Join(tooloutline.TreeIndentLines(append([]string{displayHead}, displayLines...)), "\n")
+		}
+	}
 	if it != nil {
 		u, changed := e.upsertItem(it.ID, KindToolCall, func(t *Item) bool {
 			if t.Status.Terminal() {
 				return false
 			}
 			if displayHead != "" {
-				t.Head = displayHead
+				t.Head = displayText
 			} else if title := toolCallCompletedTitle(ev, t.Head); title != "" {
 				// 无 display_head（direct legacy 投影）时恢复旧渲染的调用后
 				// 标题（• Completed/Failed <display>[ via <backend>][ in <dur>]），
@@ -3066,6 +3129,26 @@ func payloadStringSlice(value interface{}) []string {
 		result := make([]string, 0, len(values))
 		for _, item := range values {
 			if text := payloadString(item, ""); text != "" {
+				result = append(result, text)
+			}
+		}
+		return result
+	default:
+		return nil
+	}
+}
+
+// payloadDisplayLines decodes structured display_lines while preserving empty
+// entries: replay must reproduce the exact pre-marker line slice, and
+// payloadStringSlice drops empty strings on the []interface{} (JSON) path.
+func payloadDisplayLines(value interface{}) []string {
+	switch values := value.(type) {
+	case []string:
+		return append([]string(nil), values...)
+	case []interface{}:
+		result := make([]string, 0, len(values))
+		for _, item := range values {
+			if text, ok := item.(string); ok {
 				result = append(result, text)
 			}
 		}

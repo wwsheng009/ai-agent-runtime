@@ -137,7 +137,16 @@ func (r *aicliTranscriptRenderer) RenderToolEvent(event runtimechatcore.ChatEven
 		}
 		return r.session.Interaction.RenderToolChainEvent(event)
 	}
-	rendered := renderSharedChatToolEvent(event)
+	// S4: tool_result 直接消费结构化块（与 Scene / 历史种子同源）；其余
+	// stage（tool_requested / batch_*）仍走 legacy 字符串投影。
+	rendered := ""
+	if strings.TrimSpace(event.Stage) == "tool_result" {
+		if block, ok := compactToolCompletedBlockForEvent(event); ok {
+			rendered = block.render()
+		}
+	} else {
+		rendered = renderSharedChatToolEvent(event)
+	}
 	if strings.TrimSpace(rendered) == "" {
 		return false
 	}

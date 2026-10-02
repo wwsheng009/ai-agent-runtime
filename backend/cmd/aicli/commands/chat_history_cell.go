@@ -245,6 +245,10 @@ func (c commandResultCell) DisplayLines(width int) []string {
 type toolChainCell struct {
 	cellIdentity
 	event runtimechatcore.ChatEvent
+	// rendered 是完成块经共享装配一次后的 compact 文本。非空时 DisplayLines
+	// 直接使用它（与 renderSharedChatToolEvent 逐字一致）；空时回退事件懒渲染，
+	// 供 newToolChainCell / withCompleted 等旧构造路径使用。
+	rendered string
 }
 
 func newToolChainCell(name string, args map[string]interface{}, _ time.Time) toolChainCell {
@@ -263,12 +267,22 @@ func newToolChainCellFromEvent(event runtimechatcore.ChatEvent) toolChainCell {
 	return toolChainCell{cellIdentity: newCellIdentity("").withStatus(encoding.StatusRunning), event: event}
 }
 
+// newToolChainCellFromRenderedEvent 用已装配的 compact 文本构造 cell：协调器
+// 的结构化注入与 legacy cell 共用同一份装配结果，避免同一事件重复渲染。
+func newToolChainCellFromRenderedEvent(event runtimechatcore.ChatEvent, rendered string) toolChainCell {
+	cell := newToolChainCellFromEvent(event)
+	cell.rendered = rendered
+	return cell
+}
+
 func (c toolChainCell) withCompleted(result string, metadata map[string]interface{}) toolChainCell {
 	c.event.Stage = "tool_result"
 	c.event.Output = result
 	if metadata != nil {
 		c.event.Metadata = metadata
 	}
+	// 终态内容变化：作废构造时缓存的渲染，保持懒渲染语义。
+	c.rendered = ""
 	c.status = encoding.StatusCompleted
 	return c
 }
@@ -276,7 +290,10 @@ func (c toolChainCell) withCompleted(result string, metadata map[string]interfac
 func (toolChainCell) Kind() historyCellKind { return historyCellTool }
 
 func (c toolChainCell) DisplayLines(width int) []string {
-	line := renderSharedChatToolEvent(c.event)
+	line := c.rendered
+	if strings.TrimSpace(line) == "" {
+		line = renderSharedChatToolEvent(c.event)
+	}
 	if strings.TrimSpace(line) == "" {
 		return nil
 	}

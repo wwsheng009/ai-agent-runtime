@@ -4567,7 +4567,12 @@ func (c *chatInteractionCoordinator) renderToolChainEvent(event runtimechatcore.
 		// Running stays in viewport (ActiveBand via SetToolAgentStage /
 		// activeStream). Do NOT commit to history — only commit on final
 		// tool_result so scrollback never contains a Running row.
-		rendered := renderSharedChatToolEvent(event)
+		// S5: 运行态也走结构化块，Scene 运行 head 与 ActiveBand 文本同源。
+		block, ok := compactToolRequestedBlockForEvent(event)
+		if !ok {
+			return false
+		}
+		rendered := block.render()
 		if strings.TrimSpace(rendered) == "" {
 			return false
 		}
@@ -4583,7 +4588,7 @@ func (c *chatInteractionCoordinator) renderToolChainEvent(event runtimechatcore.
 			// Commit the semantic chain before the complete legacy block is
 			// emitted. This keeps the existing Scene text-parity probe from
 			// observing a direct tool result one cell behind.
-			bridge.submitToolRequested(event.ToolCallID, event.ToolName, event.Arguments)
+			bridge.submitToolRequestedBlock(event.ToolCallID, event.ToolName, event.Arguments, block)
 		}
 		c.setToolAgentStageLocked(event.ToolCallID, event.ToolName, rendered)
 		c.mu.Unlock()
@@ -4592,10 +4597,17 @@ func (c *chatInteractionCoordinator) renderToolChainEvent(event runtimechatcore.
 		}
 		return true
 	case "tool_result":
-		cell := newToolChainCellFromEvent(event)
-		if len(cell.DisplayLines(0)) == 0 {
+		// S4: 完成块只装配一次 —— 可见性判定、legacy cell 与结构化注入
+		// 共用同一份 head/content 结果。
+		block, ok := compactToolCompletedBlockForEvent(event)
+		if !ok {
 			return false
 		}
+		rendered := block.render()
+		if strings.TrimSpace(rendered) == "" {
+			return false
+		}
+		cell := newToolChainCellFromRenderedEvent(event, rendered)
 		c.mu.Lock()
 		if !c.beginMessageLocked() {
 			c.mu.Unlock()
@@ -4604,13 +4616,15 @@ func (c *chatInteractionCoordinator) renderToolChainEvent(event runtimechatcore.
 		if inject && bridge != nil {
 			// See tool_requested above: Scene must lead the legacy completed
 			// write so the shadow text probe consumes the same final chain.
-			bridge.submitToolResultDisplay(
+			bridge.submitToolResultBlock(
 				event.ToolCallID,
 				event.ToolName,
 				event.Output,
 				event.Error,
 				event.Success,
-				renderSharedChatToolEvent(event),
+				block.head,
+				block.content,
+				block.ownStructure,
 			)
 		}
 		c.finishToolAgentStageLocked(event.ToolCallID, event.ToolName)

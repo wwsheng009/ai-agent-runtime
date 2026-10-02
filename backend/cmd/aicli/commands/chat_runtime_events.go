@@ -3167,6 +3167,9 @@ func (b *chatRuntimeEventBridge) clearPriorityTranscriptTarget(target chatRuntim
 // submitToolRequested 将 chat-core 的 direct tool 请求接入统一编码器。
 // 与 runtime event 一样，编码器负责稳定 call identity 与 mutable chain
 // 生命周期；调用方不得再为同一请求调用 submitSupplement。
+//
+// 兼容入口：生产调用方已迁移到 submitToolRequestedBlock（结构化运行态文本）；
+// 本方法仅为测试与旧路径保留。
 func (b *chatRuntimeEventBridge) submitToolRequested(toolCallID, toolName string, args map[string]interface{}) {
 	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(toolName) == "" {
 		return
@@ -3178,6 +3181,30 @@ func (b *chatRuntimeEventBridge) submitToolRequested(toolCallID, toolName string
 	payload["tool_name"] = strings.TrimSpace(toolName)
 	event := runtimeevents.Event{Type: "tool.requested", ToolName: toolName, Payload: payload}
 	b.applyChangeSet(b.renderEncoder.SubmitToolCall(toolCallID, toolName, args))
+	b.appendEventLog(event)
+}
+
+// submitToolRequestedBlock 是 submitToolRequested 的结构化形态：运行态 head
+// 与上下文续行随 tool.requested 事件一起落账，Scene 运行 head 与 ActiveBand
+// 文本取自同一装配（见 compactToolRequestedBlock）；老日志没有这两个字段时
+// 仍由 payload 细节推导，语义不变。
+func (b *chatRuntimeEventBridge) submitToolRequestedBlock(toolCallID, toolName string, args map[string]interface{}, block compactToolRequestedBlock) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(toolName) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	payload := cloneRuntimeEventLogPayload(args)
+	payload["tool_call_id"] = strings.TrimSpace(toolCallID)
+	payload["tool_name"] = strings.TrimSpace(toolName)
+	if strings.TrimSpace(block.head) != "" {
+		payload["display_running_head"] = block.head
+	}
+	if len(block.lines) > 0 {
+		payload["display_running_lines"] = append([]string(nil), block.lines...)
+	}
+	event := runtimeevents.Event{Type: "tool.requested", ToolName: toolName, Payload: payload}
+	b.applyChangeSet(b.renderEncoder.SubmitToolCallRunning(toolCallID, toolName, args, block.head, block.lines))
 	b.appendEventLog(event)
 }
 
@@ -3230,6 +3257,9 @@ func (b *chatRuntimeEventBridge) submitToolResult(toolCallID, toolName, output, 
 // normalized transcript block. The raw result remains in the event log for
 // diagnostics, while display_head is the authoritative transcript source used
 // by both live Scene mapping and replay.
+//
+// 兼容入口：生产调用方已迁移到 submitToolResultBlock；本方法仅为测试与旧路径
+// 保留。
 func (b *chatRuntimeEventBridge) submitToolResultDisplay(toolCallID, toolName, output, toolErr string, success bool, display string) {
 	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" || strings.TrimSpace(display) == "" {
 		return
@@ -3254,6 +3284,48 @@ func (b *chatRuntimeEventBridge) submitToolResultDisplay(toolCallID, toolName, o
 	}
 	event := runtimeevents.Event{Type: typeName, ToolName: toolName, Payload: payload}
 	b.applyChangeSet(b.renderEncoder.SubmitToolResultDisplay(toolCallID, display))
+	b.appendEventLog(event)
+}
+
+// submitToolResultBlock 是 submitToolResultDisplay 的结构化形态：direct tool
+// 的 compact 块以 head + 标记前内容行注入并落事件日志，回放时由编码器用同一
+// 共享 formatter 重建完整文本（不再把渲染结果冻结进日志）。ownStructure
+// 非空（diff / markdown 渲染块）时保持整块字符串语义；老日志里只有整块
+// display_head 的事件仍按不透明块解码（见 encoder.applyToolFinished）。
+func (b *chatRuntimeEventBridge) submitToolResultBlock(toolCallID, toolName, output, toolErr string, success bool, head string, content []string, ownStructure string) {
+	if b == nil || b.renderEncoder == nil || strings.TrimSpace(toolCallID) == "" {
+		return
+	}
+	if strings.TrimSpace(head) == "" && strings.TrimSpace(ownStructure) == "" {
+		return
+	}
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	payload := map[string]interface{}{
+		"tool_call_id": strings.TrimSpace(toolCallID),
+		"tool_name":    strings.TrimSpace(toolName),
+		"success":      success,
+	}
+	if strings.TrimSpace(ownStructure) != "" {
+		payload["display_head"] = ownStructure
+	} else {
+		payload["display_head"] = head
+		if len(content) > 0 {
+			payload["display_lines"] = append([]string(nil), content...)
+		}
+	}
+	if strings.TrimSpace(output) != "" {
+		payload["output"] = output
+	}
+	if strings.TrimSpace(toolErr) != "" {
+		payload["error"] = toolErr
+	}
+	typeName := "tool.completed"
+	if !success {
+		typeName = "tool.failed"
+	}
+	event := runtimeevents.Event{Type: typeName, ToolName: toolName, Payload: payload}
+	b.applyChangeSet(b.renderEncoder.SubmitToolResultBlock(toolCallID, head, content, ownStructure))
 	b.appendEventLog(event)
 }
 
@@ -10053,18 +10125,6 @@ func chatToolArgPreview(payload map[string]interface{}) string {
 		return ""
 	}
 	return truncateChatRuntimeText(payloadStringValue(payload["arg_preview"]), 72)
-}
-
-func appendCompactToolDirectory(line string, payload map[string]interface{}) string {
-	line = strings.TrimRight(line, "\n")
-	if line == "" || payload == nil {
-		return line
-	}
-	extras := compactToolContextLines(payload)
-	if len(extras) == 0 {
-		return line
-	}
-	return line + "\n" + strings.Join(extras, "\n")
 }
 
 func compactToolContextLines(payload map[string]interface{}) []string {

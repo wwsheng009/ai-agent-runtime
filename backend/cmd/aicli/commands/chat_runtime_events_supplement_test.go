@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render/tooloutline"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	runtimechatcore "github.com/wwsheng009/ai-agent-runtime/internal/chatcore"
@@ -448,6 +449,11 @@ func TestChatInteractionCoordinator_DirectToolLifecycleProjectsOneSceneCell(t *t
 		ToolName: "read_file", ToolCallID: "call-direct",
 		Arguments: map[string]interface{}{"path": "a.go"},
 	}
+	// S5: Scene 运行 head 与 legacy/ActiveBand 文本同源（含参数预览）。
+	wantRequested := renderSharedChatToolEvent(requested)
+	if !strings.Contains(wantRequested, "path=a.go") {
+		t.Fatalf("requested fixture must carry an arg preview: %q", wantRequested)
+	}
 	if !coordinator.RenderToolChainEvent(requested) {
 		t.Fatal("direct tool request was not rendered")
 	}
@@ -455,8 +461,8 @@ func TestChatInteractionCoordinator_DirectToolLifecycleProjectsOneSceneCell(t *t
 	if requestedSnapshot == nil || len(requestedSnapshot.Cells) != 1 {
 		t.Fatalf("requested Scene=%+v want one mutable chain", requestedSnapshot)
 	}
-	if cell := requestedSnapshot.Cells[0]; cell.Kind != scene.KindToolChain || cell.Phase != scene.CellMutable || cell.Source != "• Running read_file" {
-		t.Fatalf("requested cell=%+v want mutable read_file chain", cell)
+	if cell := requestedSnapshot.Cells[0]; cell.Kind != scene.KindToolChain || cell.Phase != scene.CellMutable || cell.Source != wantRequested {
+		t.Fatalf("requested cell=%+v want mutable read_file chain %q", cell, wantRequested)
 	}
 
 	result := requested
@@ -532,5 +538,83 @@ func TestChatRuntimeEventBridge_ReplayRestoresDirectToolChain(t *testing.T) {
 	cell := snapshot.Cells[0]
 	if cell.Kind != scene.KindToolChain || cell.Phase != scene.CellCommitted || cell.Source != wantDisplay {
 		t.Fatalf("replayed tool cell=%+v", cell)
+	}
+}
+
+// TestChatRuntimeEventBridge_ReplayRestoresStructuredToolBlock 固化 S2 契约：
+// direct tool 的 compact 块以 head + display_lines 落日志（不再冻结树形标记
+// 字节），live 与 replay 都经共享 formatter 重建出同一文本。
+func TestChatRuntimeEventBridge_ReplayRestoresStructuredToolBlock(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "runtime-events.jsonl")
+	bridge1 := newChatRuntimeEventBridge(&ChatSession{})
+	bridge1.eventLogPathOverride = logPath
+	bridge1.submitToolRequested("call-structured", "shell", map[string]interface{}{"command": "echo hi"})
+	const head = "• Completed shell echo hi"
+	content := []string{"workdir: E:/projects/ai", "hi"}
+	want := strings.Join(tooloutline.TreeIndentLines(append([]string{head}, content...)), "\n")
+	bridge1.submitToolResultBlock("call-structured", "shell", "hi", "", true, head, content, "")
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read event log: %v", err)
+	}
+	if !strings.Contains(string(raw), `"display_head":"• Completed shell echo hi"`) {
+		t.Fatalf("structured log must keep the semantic head: %q", string(raw))
+	}
+	if !strings.Contains(string(raw), `"display_lines":["workdir: E:/projects/ai","hi"]`) {
+		t.Fatalf("structured log must persist pre-marker content lines: %q", string(raw))
+	}
+	if strings.Contains(string(raw), "│") || strings.Contains(string(raw), "└") {
+		t.Fatalf("structured log must not freeze rendered tree markers: %q", string(raw))
+	}
+
+	bridge2 := newChatRuntimeEventBridge(&ChatSession{})
+	bridge2.eventLogPathOverride = logPath
+	if replayed, err := bridge2.replayEventLog(); err != nil || replayed != 2 {
+		t.Fatalf("replayEventLog=%d, %v want 2, nil", replayed, err)
+	}
+	snapshot := bridge2.sceneSnapshot()
+	if snapshot == nil || len(snapshot.Cells) != 1 {
+		t.Fatalf("replayed Scene=%+v want one tool chain", snapshot)
+	}
+	if cell := snapshot.Cells[0]; cell.Kind != scene.KindToolChain || cell.Phase != scene.CellCommitted || cell.Source != want {
+		t.Fatalf("replayed structured tool cell=%+v want source %q", cell, want)
+	}
+}
+
+// TestChatRuntimeEventBridge_ReplayRestoresStructuredRunningBlock 固化 S5：
+// direct tool 的运行态文本（head + legacy 上下文续行）随 tool.requested 落账，
+// 回放经同一装配重建；老日志没有该字段时仍按 payload 推导，语义不变。
+func TestChatRuntimeEventBridge_ReplayRestoresStructuredRunningBlock(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "runtime-events.jsonl")
+	bridge1 := newChatRuntimeEventBridge(&ChatSession{})
+	bridge1.eventLogPathOverride = logPath
+	block := compactToolRequestedBlock{
+		head:  "• Running shell echo hi",
+		lines: []string{"  workdir: E:/projects/ai"},
+	}
+	bridge1.submitToolRequestedBlock("call-running", "shell", map[string]interface{}{"command": "echo hi"}, block)
+	want := block.render()
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read event log: %v", err)
+	}
+	if !strings.Contains(string(raw), `"display_running_head":"• Running shell echo hi"`) ||
+		!strings.Contains(string(raw), `"display_running_lines":["  workdir: E:/projects/ai"]`) {
+		t.Fatalf("running log must persist the structured block: %q", string(raw))
+	}
+
+	bridge2 := newChatRuntimeEventBridge(&ChatSession{})
+	bridge2.eventLogPathOverride = logPath
+	if replayed, err := bridge2.replayEventLog(); err != nil || replayed != 1 {
+		t.Fatalf("replayEventLog=%d, %v want 1, nil", replayed, err)
+	}
+	snapshot := bridge2.sceneSnapshot()
+	if snapshot == nil || len(snapshot.Cells) != 1 {
+		t.Fatalf("replayed Scene=%+v want one running chain", snapshot)
+	}
+	if cell := snapshot.Cells[0]; cell.Kind != scene.KindToolChain || cell.Phase != scene.CellMutable || cell.Source != want {
+		t.Fatalf("replayed running cell=%+v want source %q", cell, want)
 	}
 }
