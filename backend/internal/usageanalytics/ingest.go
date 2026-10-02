@@ -119,6 +119,12 @@ func (c *collector) subscribe(bus *runtimeevents.Bus) {
 		runtimeevents.EventMainAgentRouteCostGuardTripped,
 		// 渲染围栏丢弃诊断（P1-1b）：CLI 在 EndRun 上报增量计数。
 		runtimeevents.EventRenderFenceDropped,
+		// LSP 观测（§4.3 基线的事实源）。刻意包含 lsp.server.state —— 它在
+		// contract.go 里是 ChannelLiveOnly（不落盘），但基线需要它的首发布延迟，
+		// 而"不落盘"是**每会话 JSONL 体积**的约束，与"进分析库"无关：collector
+		// 订阅的是实时总线。落盘面保持不变，事实却因此可复算。
+		runtimeevents.EventLSPRequestFinished,
+		runtimeevents.EventLSPServerState,
 	} {
 		c.unsubs = append(c.unsubs, bus.SubscribeCancelable(eventType, c.handleEvent))
 	}
@@ -174,6 +180,10 @@ func (c *collector) handleEvent(event runtimeevents.Event) {
 		}
 	case runtimeevents.EventRenderFenceDropped:
 		c.onRenderFenceDropped(event)
+	case runtimeevents.EventLSPRequestFinished:
+		c.onLSPRequestFinished(event)
+	case runtimeevents.EventLSPServerState:
+		c.onLSPServerState(event)
 	}
 }
 

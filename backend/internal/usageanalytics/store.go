@@ -470,6 +470,64 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   PRIMARY KEY (session_id, turn_id, dropped_class)
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_render_fence_drops_time ON usage_render_fence_drops(last_at_unix_nano DESC)`,
+		// ---- LSP 后写请求（§4.3 基线的事实源，从此不再回扫 chat-logs）----
+		//
+		// 为什么入库而不继续读 runtime-events.jsonl：那份日志有保留策略，会清理
+		// 老会话（docs/analysis/nondb-error-deep-analysis-and-optimization-20260927.md
+		// 记录 184 个采样会话里 146 个文件已被清理）。以日志为事实源意味着基线
+		// 数字会随轮转无声退化，而 UI 不会提示覆盖率不足。
+		//
+		// 幂等 DDL：老库打开时自动补表（与 v2 三表 / usage_routes / fence 同策略）。
+		// 复合主键是"一次后写请求"的自然标识：(会话, 文件指纹, 池成员, 时刻)。
+		// 同一文件同一纳秒被写两次不是真实场景，故该键足以保证重复投递不重复计数。
+		`CREATE TABLE IF NOT EXISTS usage_lsp_requests (
+  session_id            TEXT NOT NULL DEFAULT '',
+  path_fingerprint      TEXT NOT NULL DEFAULT '',
+  server                TEXT NOT NULL DEFAULT '',
+  started_unix_nano     INTEGER NOT NULL DEFAULT 0,
+  trigger               TEXT NOT NULL DEFAULT '',
+  outcome               TEXT NOT NULL DEFAULT '',
+  duration_ms           INTEGER NOT NULL DEFAULT 0,
+  diag_count            INTEGER NOT NULL DEFAULT 0,
+  total_diag_count      INTEGER NOT NULL DEFAULT 0,
+  new_diag_count        INTEGER NOT NULL DEFAULT 0,
+  appended_bytes        INTEGER NOT NULL DEFAULT 0,
+  appended_diag_bytes   INTEGER NOT NULL DEFAULT 0,
+  appended_note_bytes   INTEGER NOT NULL DEFAULT 0,
+  appended_empty_bytes  INTEGER NOT NULL DEFAULT 0,
+  omitted_items         INTEGER NOT NULL DEFAULT 0,
+  omitted_by_chars      INTEGER NOT NULL DEFAULT 0,
+  attempted_members     INTEGER NOT NULL DEFAULT 0,
+  cold_probe_classified INTEGER NOT NULL DEFAULT 0,
+  cold_fast_fail        INTEGER NOT NULL DEFAULT 0,
+  tool_call_id          TEXT NOT NULL DEFAULT '',
+  turn_id               TEXT NOT NULL DEFAULT '',
+  reason_category       TEXT NOT NULL DEFAULT '',
+  diag_fingerprint      TEXT NOT NULL DEFAULT '',
+  record_json           BLOB,
+  PRIMARY KEY (session_id, path_fingerprint, server, started_unix_nano)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_lsp_requests_time ON usage_lsp_requests(started_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_lsp_requests_session ON usage_lsp_requests(session_id, started_unix_nano DESC)`,
+		// ---- LSP 冷启动首发布延迟 ----
+		//
+		// 这个指标过去依赖 lsp.server.state，而该类型被 contract.go 声明为
+		// ChannelLiveOnly（"不落盘，刷新即丢"）。契约确实被强制执行：实测今天的
+		// 事件文件里该类型为 0 条，磁盘上仅存的 282 条全是历史残留。也就是说
+		// 基线的 cold_first_publish 早已冻结在一个永不更新的历史样本上，却仍以
+		// 确定的口吻展示。
+		//
+		// 修法不是把它改成落盘（那会让每会话 JSONL 体积随池生命周期增长），
+		// 而是让分析库采集：collector 订阅的是**实时总线**，与事件是否落盘无关。
+		// 通道仍是 live-only，体积约束不变，但事实进了库。
+		`CREATE TABLE IF NOT EXISTS usage_lsp_first_publish (
+  session_id         TEXT NOT NULL DEFAULT '',
+  server             TEXT NOT NULL DEFAULT '',
+  first_publish_ms   INTEGER NOT NULL DEFAULT 0,
+  observed_unix_nano INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (session_id, server)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_lsp_first_publish_time ON usage_lsp_first_publish(observed_unix_nano DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.Exec(statement); err != nil {
