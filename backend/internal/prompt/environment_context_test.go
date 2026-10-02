@@ -5,14 +5,18 @@ import (
 	"testing"
 )
 
-func TestRenderShellExecutionGuidance_PrefersDedicatedSearchTools(t *testing.T) {
+func TestRenderShellExecutionGuidance_DescribesShellVsToolkitWithoutSteering(t *testing.T) {
 	got := RenderShellExecutionGuidance()
 
 	if !strings.Contains(got, "Shell guidance:") {
 		t.Fatalf("expected guidance heading, got:\n%s", got)
 	}
-	if !strings.Contains(got, "Prefer toolkit `grep`") {
-		t.Fatalf("expected dedicated grep guidance, got:\n%s", got)
+	// 内置 guidance 不再指定"代码搜索首选哪个工具"（选择权交给 profile/skill 层）。
+	if strings.Contains(got, "Prefer toolkit") {
+		t.Fatalf("built-in guidance must not steer tool preference, got:\n%s", got)
+	}
+	if !strings.Contains(got, "toolkit search tools take structured arguments") {
+		t.Fatalf("expected factual shell-vs-toolkit search note, got:\n%s", got)
 	}
 	if !strings.Contains(got, "Never invoke toolkit tool names as shell commands") {
 		t.Fatalf("expected shell-vs-toolkit misuse guidance, got:\n%s", got)

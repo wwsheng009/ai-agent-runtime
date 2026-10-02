@@ -23,7 +23,7 @@ func NewShellTool() *ShellTool {
 	// Prefer the full bash schema (including commands batching) under the
 	// clearer "shell" name. Description emphasizes detected user shell and
 	// content-success for non-zero process exits.
-	description := "通过检测到的用户 shell（Windows: pwsh/powershell/cmd；Unix: $SHELL/zsh/bash/sh）执行一条命令，或用 commands 批量执行并一次返回全部结果。进程非零退出码会作为内容结果返回（含 Exit code/Output），不是工具崩溃；仅未启动/超时/取消/权限拒绝等才是硬失败。代码搜索优先用 toolkit `grep`；文件系统查看优先 ls/glob/view。Windows 默认 PowerShell，没有 head 时用 Select-Object；不要使用 bash heredoc（<<EOF）。兼容别名: bash、execute_shell_command。"
+	description := "通过检测到的用户 shell（Windows: pwsh/powershell/cmd；Unix: $SHELL/zsh/bash/sh）执行一条命令，或用 commands 批量执行并一次返回全部结果。进程非零退出码会作为内容结果返回（含 Exit code/Output），不是工具崩溃；仅未启动/超时/取消/权限拒绝等才是硬失败。Windows 默认 PowerShell，没有 head 时用 Select-Object；不要使用 bash heredoc（<<EOF）。兼容别名: bash、execute_shell_command。"
 	return &ShellTool{
 		BashTool:    base,
 		description: description,

@@ -599,7 +599,7 @@ func renderEnvironmentCapabilityGuidanceFromReport(report EnvironmentCapabilityR
 	}
 	if len(available) > 0 {
 		lines = append(lines, fmt.Sprintf("- Available: %s.", strings.Join(available, ", ")))
-		lines = append(lines, "- Prefer these shell tools only when a dedicated toolkit tool is not a better fit (builds/tests/package managers/git stay on shell; code search prefers toolkit `grep`/`glob`/`ls`/`view`).")
+		lines = append(lines, "- Shell is for processes (builds/tests/package managers/git); toolkit tools are for structured file/search operations. Use whichever fits.")
 	} else {
 		lines = append(lines, "- Available: none of the common developer tools were found healthy on PATH.")
 	}
@@ -613,7 +613,7 @@ func renderEnvironmentCapabilityGuidanceFromReport(report EnvironmentCapabilityR
 		lines = append(lines, "- git is available: use `git status`/`git diff`/`git log` for repo inspection. If a path is gitignored, use `git check-ignore -v <path>` or `git add -f` only when force-adding is intentional; do not retry the same ignored path unchanged.")
 	}
 	if containsString(available, "rg") {
-		lines = append(lines, "- rg is available in shell, but toolkit `grep` remains preferred for code search (structured args, empty-result contract, fewer quoting pitfalls).")
+		lines = append(lines, "- rg is available in shell; toolkit `grep` runs the same engine via structured args (empty-result contract, fewer quoting pitfalls). Either can serve a code search.")
 	}
 	if containsString(available, "python") {
 		lines = append(lines, "- python is available: prefer `python -c` for short checks; avoid bash heredoc on Windows PowerShell/cmd.")

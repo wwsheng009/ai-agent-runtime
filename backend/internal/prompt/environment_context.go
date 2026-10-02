@@ -114,8 +114,8 @@ func RenderShellExecutionGuidanceWithCapability(capabilityGuidance string) strin
 	lines := []string{
 		fmt.Sprintf("Detected operating system: %s.", runtime.GOOS),
 		fmt.Sprintf("Detected user shell: %s.", detectedShellName(shell)),
-		"Prefer toolkit `grep` for code search instead of shell `rg`/`grep` (rg in shell uses exit 1 for no matches and is easy to break with quotes/regex escapes).",
-		"Prefer toolkit `ls`/`glob`/`view` for filesystem inspection; use shell for builds, tests, git, and package managers.",
+		"Search: shell `rg`/`grep` uses exit 1 for no matches and is easy to break with quotes/regex escapes; toolkit search tools take structured arguments and are unaffected. Choose whichever fits the task.",
+		"Filesystem inspection can be done with toolkit `ls`/`glob`/`view`; builds, tests, git, and package managers run in the shell.",
 		"Never invoke toolkit tool names as shell commands (for example `view -path ...` or `grep -pattern ...` inside bash). Call those tools directly with structured args.",
 		"When using shell for multiple independent checks, prefer `commands` batching so one tool call returns all results.",
 		"When several inspections do not depend on each other, batch them in one turn: `view.files`, `grep` with patterns/paths, and shell `commands`.",

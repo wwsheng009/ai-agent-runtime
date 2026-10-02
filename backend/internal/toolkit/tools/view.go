@@ -128,8 +128,7 @@ func NewViewTool() *ViewTool {
 		BaseTool: toolkit.NewBaseTool(
 			"view",
 			"查看一个或多个文件。用 files 批量读取独立文件或区间；单文件用 file_path。输出包含稳定行号和截断元数据。"+
-				"已知符号名但不知道行号时可传 symbol（索引可用时按符号范围读取；索引不可用时退化为 file_path 行范围或提示改用 grep）。"+
-				"符号级读取优先用 code_inspect（可用时；本工具的 symbol 参数为兼容入口）。",
+				"已知符号名但不知道行号时可传 symbol（索引可用时按符号范围读取；索引不可用时退化为 file_path 行范围或提示改用 grep）。",
 			"1.1.0",
 			parameters,
 			true,

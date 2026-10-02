@@ -991,8 +991,12 @@ func TestGrepTool_DescriptionRgAvailable(t *testing.T) {
 	if !strings.Contains(desc, "内置扫描") || !strings.Contains(desc, "工具定义保持静态") {
 		t.Fatalf("expected stable description to mention builtin fallback and static tool definition, got %q", desc)
 	}
-	if !strings.Contains(desc, "优先于 shell") {
-		t.Fatalf("expected description to prefer toolkit grep over shell search, got %q", desc)
+	// 工具描述只描述功能与参数，不做"优先于 shell"之类的选择引导；
+	// 工具选择策略下沉到 profile/skill 层。
+	for _, unwanted := range []string{"优先于 shell", "首选工具", "分工"} {
+		if strings.Contains(desc, unwanted) {
+			t.Fatalf("grep description must not steer tool preference (%q), got %q", unwanted, desc)
+		}
 	}
 }
 

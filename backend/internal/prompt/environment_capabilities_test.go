@@ -57,7 +57,7 @@ func TestDetectEnvironmentCapabilities_UsesInjectedProbe(t *testing.T) {
 		"Available: git, go, rg",
 		"Not found or unhealthy on PATH: cargo, docker, gh, node, python",
 		"gh is not available",
-		"rg is available in shell, but toolkit `grep` remains preferred",
+		"rg is available in shell; toolkit `grep` runs the same engine",
 		"git is available",
 		"python is not usable",
 	} {
