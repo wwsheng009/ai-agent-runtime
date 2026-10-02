@@ -252,6 +252,16 @@ var (
 
 var fileSystemIdentityFn = fileSystemIdentity
 
+// scalarListUsageNote is appended to every string|array property description.
+//
+// The provider-facing schema advertises only the collapsed scalar branch (see
+// toolschema.ScalarizeUnions), so a model reading the schema cannot tell that
+// the array spelling also works — and guessing produces wrappers such as an
+// item-keyed object that preflight used to reject without explanation. Stating
+// the accepted spellings in prose costs a few tokens and removes the guesswork;
+// the runtime really does accept both.
+const scalarListUsageNote = "多个值可直接传字符串数组（如 [\"a\",\"b\"]），也可合并成一个字符串；不要包成对象。"
+
 func stringOrStringArraySchema(description string) map[string]interface{} {
 	return map[string]interface{}{
 		"anyOf": []map[string]interface{}{
@@ -265,7 +275,7 @@ func stringOrStringArraySchema(description string) map[string]interface{} {
 				},
 			},
 		},
-		"description": description,
+		"description": description + scalarListUsageNote,
 	}
 }
 

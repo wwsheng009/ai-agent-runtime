@@ -687,10 +687,31 @@ func invalidSchemaArgs(schema map[string]interface{}, args map[string]interface{
 	return issues
 }
 
+// isScalarListUnion reports whether the declared set is exactly the string|array
+// ergonomics union that provider-facing schemas collapse to one scalar branch
+// (toolschema.ScalarizeUnions, applied for every non-codex protocol because
+// Gemini-family providers reject anyOf carrying sibling keys). The live failure
+// this message fixes: the model was shown `patterns: {type: string}` and then
+// rejected against `expected string|array`, so it retried the identical call.
+// Revealing the full accepted set is safe here — unlike in the request payload,
+// this text is produced after the request was already sent, so it cannot cause
+// the provider 400 the collapse exists to avoid.
+func isScalarListUnion(declared []string) bool {
+	return len(declared) == 2 &&
+		containsSchemaType(declared, "string") &&
+		containsSchemaType(declared, "array")
+}
+
 func describeSchemaValueIssue(name string, prop map[string]interface{}, value interface{}) string {
 	expectedTypes := schemaDeclaredTypes(prop)
 	got := jsonSchemaValueKind(value)
 	if len(expectedTypes) > 0 && !valueMatchesSchemaTypes(value, expectedTypes) {
+		if isScalarListUnion(expectedTypes) {
+			return fmt.Sprintf(
+				"%s must be a string or an array of strings (pass multiple values as a bare array such as [\"a\",\"b\"], or as one combined string; do not wrap them in an object), got %s",
+				name, got,
+			)
+		}
 		return fmt.Sprintf("%s expected %s, got %s", name, strings.Join(expectedTypes, "|"), got)
 	}
 	if enums := schemaEnumValues(prop); len(enums) > 0 && !valueInEnum(value, enums) {
@@ -1143,6 +1164,9 @@ func isEmptyArgValue(value interface{}) bool {
 //   - declared "array", got string → JSON array text parsed when valid,
 //     otherwise wrapped as a single-item array (models send commands as one
 //     command string; parseBashCommandBatch already accepts that shape)
+//   - declared "string"/"array" but never "object", got a single-key object
+//     wrapping the real value → the wrapped value (see
+//     unwrapSingleKeyObjectValue)
 func normalizeCoercibleSchemaArgs(schema, args map[string]interface{}) bool {
 	if len(schema) == 0 || len(args) == 0 {
 		return false
@@ -1186,9 +1210,50 @@ func normalizeCoercibleSchemaArgs(schema, args map[string]interface{}) bool {
 				args[name] = []interface{}{text}
 			}
 			changed = true
+		case got == "object" && !containsSchemaType(declared, "object"):
+			if unwrapped, ok := unwrapSingleKeyObjectValue(declared, value); ok {
+				args[name] = unwrapped
+				changed = true
+			}
 		}
 	}
 	return changed
+}
+
+// unwrapSingleKeyObjectValue repairs the single-key object that wraps the real
+// value, a shape models fall into for batch parameters. Live residual
+// (2026-10-02): grep patterns={"item":["a","b"]} was rejected verbatim twice
+// with `patterns expected string|array, got object`, because the provider-facing
+// schema advertises only the collapsed scalar branch (toolschema.ScalarizeUnions
+// keeps the union internal) while the runtime still accepts the array.
+//
+// It only fires when the property does not declare "object". An object is then
+// invalid by construction, and a one-key object whose only value is a string or
+// an array has exactly one sensible reading, so the rewrite cannot discard
+// something the caller legitimately meant. Properties that do declare "object"
+// keep the caller's object untouched.
+func unwrapSingleKeyObjectValue(declared []string, value interface{}) (interface{}, bool) {
+	obj := asObjectMap(value)
+	if len(obj) != 1 {
+		return nil, false
+	}
+	var inner interface{}
+	for _, only := range obj {
+		inner = only
+	}
+	switch typed := inner.(type) {
+	case []interface{}, []string:
+		if !containsSchemaType(declared, "array") {
+			return nil, false
+		}
+		return asInterfaceSlice(typed), true
+	case string:
+		if strings.TrimSpace(typed) == "" || !containsSchemaType(declared, "string") {
+			return nil, false
+		}
+		return typed, true
+	}
+	return nil, false
 }
 
 // numericArgString formats a numeric JSON value without scientific notation

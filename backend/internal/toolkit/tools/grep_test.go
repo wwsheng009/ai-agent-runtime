@@ -1841,6 +1841,38 @@ func TestGrepTool_ParametersAreOpenAiCompatible(t *testing.T) {
 	}
 }
 
+// TestGrepTool_ScalarListParamsDocumentBothSpellings pins the description half
+// of the 2026-10-02 fix. Provider-facing schemas collapse every string|array
+// property to a single scalar branch (toolschema.ScalarizeUnions), so a model
+// reading the schema alone cannot tell the array spelling works and guesses a
+// wrapper object instead — which preflight used to deny without explanation.
+// Each batch property must therefore state both spellings in prose.
+func TestGrepTool_ScalarListParamsDocumentBothSpellings(t *testing.T) {
+	tool := NewGrepTool()
+	props, ok := tool.Parameters()["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected properties in schema")
+	}
+
+	batchProps := []string{"patterns", "pattern_files", "paths", "include", "exclude", "glob"}
+	for _, name := range batchProps {
+		prop, ok := props[name].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected %s schema in properties, got %#v", name, props[name])
+		}
+		if _, exists := prop["anyOf"]; !exists {
+			t.Fatalf("%s must keep the internal string|array union, got %#v", name, prop)
+		}
+		description, _ := prop["description"].(string)
+		if !strings.Contains(description, "字符串数组") {
+			t.Fatalf("%s description must document the array spelling, got %q", name, description)
+		}
+		if !strings.Contains(description, "不要包成对象") {
+			t.Fatalf("%s description must warn against the object wrapper, got %q", name, description)
+		}
+	}
+}
+
 func TestGrepTool_MultiplePatternsBuiltin(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tmpDir, "a.txt"), []byte("foo\n"), 0o644); err != nil {
