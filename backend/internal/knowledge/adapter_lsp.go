@@ -54,6 +54,24 @@ func (a *lspSemanticAdapter) Available() bool {
 	return a != nil && a.manager != nil && a.manager.Available()
 }
 
+// SemanticStatus 实现 SemanticStatusAdapter：把底层 Manager 的观测快照
+// 转成跨层形状。manager 为 nil 时返回 unavailable 而非 panic。
+func (a *lspSemanticAdapter) SemanticStatus() SemanticChannelStatus {
+	if a == nil || a.manager == nil {
+		return SemanticChannelStatus{State: "unavailable", Reason: "no semantic channel"}
+	}
+	st := a.manager.Status()
+	return SemanticChannelStatus{
+		Server:   st.Server,
+		Root:     st.Root,
+		State:    st.State,
+		PID:      st.PID,
+		Reason:   st.Reason,
+		LockPath: st.LockPath,
+		Shared:   st.Shared,
+	}
+}
+
 // Close 关闭底层语义通道（释放锁文件与子进程）；未启动时是空操作。
 // 不在 SemanticAdapter 接口里：语义查询面不需要生命周期方法，持有者
 // （进程级缓存 / 组装层）通过类型断言调用。
@@ -77,6 +95,93 @@ func (a *lspSemanticAdapter) References(ctx context.Context, file string, line, 
 	return a.query(ctx, "textDocument/references", file, line, col)
 }
 
+// DocumentSymbols 实现 DocumentSymbolAdapter（LSP textDocument/documentSymbol）。
+//
+// 返回形状有两种：SymbolInformation[]（扁平）与 DocumentSymbol[]（层级，含
+// children）。两种都接受，层级形状按深度优先展平并把父符号名拼进 Container——
+// 展平而不是只取顶层，否则结构体/接口里的成员会整片丢失。
+func (a *lspSemanticAdapter) DocumentSymbols(ctx context.Context, file string) ([]SemanticSymbol, error) {
+	client, abs, content, err := a.prepare(ctx, file)
+	if err != nil {
+		return nil, err
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, a.manager.RequestTimeout())
+	defer cancel()
+	raw, err := client.Call(reqCtx, "textDocument/documentSymbol", map[string]any{
+		"textDocument": map[string]any{"uri": baselsp.PathToURI(abs)},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return a.decodeSymbols(raw, client.Encoding(), content, abs)
+}
+
+// WorkspaceSymbols 实现 WorkspaceSymbolAdapter（LSP workspace/symbol）。
+//
+// 注意 LSP 的语义：空 query 返回全部符号（可能是巨量），因此工具侧必须给出
+// limit；这里 limit<=0 时用 internalDefaultSymbolLimit 兜底而不是放行全量。
+func (a *lspSemanticAdapter) WorkspaceSymbols(ctx context.Context, query string, limit int) ([]SemanticSymbol, error) {
+	client, _, _, err := a.prepare(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > internalMaxSymbolLimit {
+		limit = internalDefaultSymbolLimit
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, a.manager.RequestTimeout())
+	defer cancel()
+	raw, err := client.Call(reqCtx, "workspace/symbol", map[string]any{"query": query})
+	if err != nil {
+		return nil, err
+	}
+	return a.decodeSymbols(raw, client.Encoding(), nil, "")
+}
+
+// prepare 完成「确保进程可用 → 解析绝对路径 → 读文件 → didOpen」这段公共前置。
+// file 为空时跳过读文件与 didOpen（workspace/symbol 不需要文档镜像）。
+func (a *lspSemanticAdapter) prepare(ctx context.Context, file string) (*baselsp.Client, string, []byte, error) {
+	if !a.Available() {
+		// 首次查询惰性启动（受 startup_timeout 约束）；失败即降级。
+		if a == nil || a.manager == nil {
+			return nil, "", nil, ErrSemanticUnavailable
+		}
+		// 已降级（崩溃 / 启动失败 / 锁被占）：立即返回，不再尝试重启——
+		// 验收门槛要求崩溃后查询"立即降级不阻断"，且逐查询重启会造成重启风暴。
+		// 重建由显式 Ensure（生命周期钩子）负责。
+		//
+		// 例外：共享模式下"借不到"通常是宿主还在启动或刚重启，宿主会自行恢复
+		// ——把这种瞬时失败当永久降级，等于让一次 /lsp restart 永久废掉语义通道。
+		// 自建模式的崩溃/启动失败仍不可重试（重启风暴）。
+		if reason := strings.TrimSpace(a.manager.DegradeReason()); reason != "" && !a.manager.RetryableDegrade() {
+			return nil, "", nil, fmt.Errorf("%w: %s", ErrSemanticUnavailable, reason)
+		}
+		if err := a.manager.Ensure(ctx); err != nil {
+			return nil, "", nil, fmt.Errorf("%w: %v", ErrSemanticUnavailable, err)
+		}
+	}
+	client := a.manager.Client()
+	if client == nil {
+		return nil, "", nil, ErrSemanticUnavailable
+	}
+	if strings.TrimSpace(file) == "" {
+		return client, "", nil, nil
+	}
+	abs := file
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(a.root, filepath.FromSlash(file))
+	}
+	content, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, a.manager.RequestTimeout())
+	defer cancel()
+	if _, err := client.OpenOrUpdate(reqCtx, abs, content); err != nil {
+		return nil, "", nil, err
+	}
+	return client, abs, content, nil
+}
+
 func (a *lspSemanticAdapter) query(ctx context.Context, method, file string, line, col int) ([]SemanticLocation, error) {
 	if !a.Available() {
 		// 首次查询惰性启动（受 startup_timeout 约束）；失败即降级。
@@ -86,7 +191,7 @@ func (a *lspSemanticAdapter) query(ctx context.Context, method, file string, lin
 		// 已降级（崩溃 / 启动失败 / 锁被占）：立即返回，不再尝试重启——
 		// 验收门槛要求崩溃后查询"立即降级不阻断"，且逐查询重启会造成重启风暴。
 		// 重建由显式 Ensure（生命周期钩子）负责。
-		if reason := strings.TrimSpace(a.manager.DegradeReason()); reason != "" {
+		if reason := strings.TrimSpace(a.manager.DegradeReason()); reason != "" && !a.manager.RetryableDegrade() {
 			return nil, fmt.Errorf("%w: %s", ErrSemanticUnavailable, reason)
 		}
 		if err := a.manager.Ensure(ctx); err != nil {

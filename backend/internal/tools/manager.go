@@ -78,18 +78,21 @@ func NewDefaultManagerWithRuntimeConfig(mcp manager.Manager, config *runtimecfg.
 		sandbox = runtimeexecutor.NewSandbox(&config.Sandbox)
 		workspaceRoot = strings.TrimSpace(config.Workspace.Root)
 	}
-	codeGate := registerBuiltinToolkitTools(registry, sandbox, workspaceRoot, config)
 	manager := &Manager{
 		toolkit:       registry,
 		mcp:           mcp,
 		sandbox:       sandbox,
 		runtimeConfig: config,
-		codeGate:      codeGate,
 		lspObserver:   &lspObserverHub{},
 	}
 	manager.lspBridge = newLSPBridgeWith(config, workspaceRoot, nil, manager.lspObserver.emit)
+	// 工具注册在桥之后：code.* 的解析器需要 manager.sharedLanguageClient 这个
+	// 借用缝（单实例——语义通道复用诊断池的进程）。绑定的是方法值而不是当时的
+	// 桥指针，因此后续宿主后置 attach 池（async 项目扫描 → late enable）也照样生效。
+	manager.codeGate = registerBuiltinToolkitTools(registry, sandbox, workspaceRoot, config, manager.sharedLanguageClient)
 	if manager.lspBridge != nil && manager.lspBridge.Enabled() {
 		registerLSPTooling(registry, manager.lspBridge, config)
+		registerSemanticChannelStatus(registry, manager.SemanticChannelStatus)
 	}
 	return manager
 }
@@ -485,14 +488,18 @@ func canonicalManagedToolName(name string) string {
 	return strings.TrimSpace(name)
 }
 
-func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexecutor.Sandbox, workspaceRoot string, runtimeConfig *runtimecfg.RuntimeConfig) *codeToolGate {
+// registerBuiltinToolkitTools 注册内置 toolkit 工具。
+//
+// sharedLanguageClient 是语义通道的进程借用缝（单实例）；nil = 语义通道自建
+// 自己的语言服务器进程（诊断池未启用时的既有行为）。
+func registerBuiltinToolkitTools(registry *toolkit.Registry, sandbox *runtimeexecutor.Sandbox, workspaceRoot string, runtimeConfig *runtimecfg.RuntimeConfig, sharedLanguageClient func(context.Context, string) *lsp.Client) *codeToolGate {
 	// Phase 3（06 §4 Phase 3）：code.* 工具面（默认 off；knowledge.code_tools=on
 	// 才注册，回滚即关闭）。索引不可用时工具自身按降级协议 fallback 到 grep/view。
 	// ADR-0004 §4.4 全局硬闸：mode=off 时无论 code_tools 如何都不得注册 code.*
 	// （工具面必须回到纯 grep/view 基线）。
 	var codeResolver tools.CodeIndexResolver
 	if runtimeConfig != nil && runtimeConfig.Knowledge.CodeToolsEnabled() && runtimeConfig.Knowledge.Enabled() {
-		codeResolver = newCodeIndexResolver(runtimeConfig.Knowledge, workspaceRoot)
+		codeResolver = newCodeIndexResolverWithShared(runtimeConfig.Knowledge, workspaceRoot, sharedLanguageClient)
 	}
 	configure := func(tool toolkit.Tool) {
 		if configurable, ok := tool.(interface {

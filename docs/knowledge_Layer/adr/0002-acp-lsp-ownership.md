@@ -174,6 +174,34 @@ default: off
 > 这解决的是"同一台机器上两个 aicli ACP 会话"（例如 editor 里开了两个 workspace 窗口指向同一项目），
 > 而不是"editor 的 gopls vs 我们的 gopls"——后者在 v1 无法探测（证据 1），由默认 `off` 规避。
 
+#### 4.4.1 进程内单实例（2026-10-01 补，收口轮十一）
+
+§4.4 的锁只覆盖**跨进程**重复。本进程内还有一条此前无人负责的重复路径：
+诊断池（`lsp.*`，服务编辑工具内联诊断）与语义通道（`knowledge.lsp.*`，服务
+`code_*` 的 definition/references/symbols）是两条独立链路，各自 spawn —— 同
+一个 aicli 进程里会同时存在**两个 gopls**。
+
+判据不是洁癖，是内存：本仓库实测 gopls 单实例常驻数百 MB，且历史崩溃根因
+（gopls 异常退出）的直接诱因是整机内存耗尽；双实例把内存压力直接翻倍。
+
+**决定**：同一种语言在一个进程里只允许一个 server 进程。宿主（诊断池）持有
+进程时，语义通道只**借用**：不取锁、不 spawn、不关停；借不到就降级，**绝不
+退化成自建**。诊断池关闭（`lsp.enabled=false`）且 `knowledge.lsp.enabled=true`
+时，语义通道自建并持锁，行为与本节原设计一致。
+
+根锚定差异（诊断池锚 workspace 根、语义通道锚模块根）经实测**不影响精度**：
+同一文件在两种锚点下 `textDocument/diagnostic` 返回完全相同的 10 条 type-check
+级诊断（收口轮十一的 `TestLiveRootAnchoringExperiment`）。因此不要求两侧对齐
+锚点，而是让语义通道直接使用池的进程——改池的锚点会动到诊断链路，收益为零、
+风险未知。
+
+可观测性：`/lsp semantic` 与 `lsp_servers` 显示 `shared=诊断池` 与池相同的
+pid；借用失效时给出可行动提示（`/lsp start gopls` / `/lsp restart gopls`），
+而不是让用户以为语义通道崩溃。
+
+代价（明示接受）：`/lsp restart gopls` 会同时影响两条链路——这正是"同一个
+进程"的必然结果，也是本决定想要的语义。
+
 ### 4.5 无 workspace root 时
 
 `session/new` 未携带 roots/cwd → knowledge 整体 `mode=off`（不只是 LSP），

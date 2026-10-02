@@ -21,7 +21,7 @@ func TestRegisterBuiltinToolkitToolsGatesCodeTools(t *testing.T) {
 	registry := toolkit.NewRegistry()
 	cfg := runtimecfg.DefaultRuntimeConfig()
 	cfg.Workspace.Root = root
-	registerBuiltinToolkitTools(registry, nil, root, cfg)
+	registerBuiltinToolkitTools(registry, nil, root, cfg, nil)
 	if _, ok := registry.Get("code_search"); ok {
 		t.Fatal("code_search 不得在 code_tools=off（默认）时注册")
 	}
@@ -31,14 +31,14 @@ func TestRegisterBuiltinToolkitToolsGatesCodeTools(t *testing.T) {
 
 	registry = toolkit.NewRegistry()
 	cfg.Knowledge.CodeTools = knowledge.CodeToolsOn
-	registerBuiltinToolkitTools(registry, nil, root, cfg)
+	registerBuiltinToolkitTools(registry, nil, root, cfg, nil)
 	if _, ok := registry.Get("code_search"); ok {
 		t.Fatal("mode=off 时 code_search 不得注册（ADR-0004 §4.4 全局硬闸）")
 	}
 
 	registry = toolkit.NewRegistry()
 	cfg.Knowledge.Mode = knowledge.ModeOn
-	registerBuiltinToolkitTools(registry, nil, root, cfg)
+	registerBuiltinToolkitTools(registry, nil, root, cfg, nil)
 	for _, name := range []string{"code_search", "code_inspect", "code_navigate", "code_references", "code_callers"} {
 		if _, ok := registry.Get(name); !ok {
 			t.Fatalf("%s 未在 mode=on + code_tools=on 时注册", name)
@@ -108,3 +108,4 @@ func TestCodeIndexResolverUsesContextWorkspace(t *testing.T) {
 		t.Fatalf("handle = %+v ok=%v, want ctx workspace resolution", handle, ok)
 	}
 }
+

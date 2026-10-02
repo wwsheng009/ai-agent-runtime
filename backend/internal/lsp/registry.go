@@ -115,12 +115,7 @@ func (e *registryEntry) resetAvailability() {
 // (W3: routing decides who is needed), so creating a Registry is cheap.
 func NewRegistry(cfg Config, root string, opts RegistryOptions) *Registry {
 	cfg = cfg.Normalize()
-	if strings.TrimSpace(root) == "" {
-		root = "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		root = abs
-	}
+	root = normalizeRoot(root)
 	registry := &Registry{
 		cfg:     cfg,
 		root:    root,
@@ -139,6 +134,19 @@ func NewRegistry(cfg Config, root string, opts RegistryOptions) *Registry {
 		registry.order = append(registry.order, spec.Name)
 	}
 	return registry
+}
+
+// normalizeRoot 是 root 的唯一归一化入口：空 → 当前目录，随后转绝对路径。
+// 共享键与 Registry 必须用同一个结果，否则"两个会话看着是同一个目录"却算出
+// 两个键（或反过来），前者浪费内存、后者错误合并。
+func normalizeRoot(root string) string {
+	if strings.TrimSpace(root) == "" {
+		root = "."
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		return abs
+	}
+	return root
 }
 
 // Root is the workspace root every client is bound to.
@@ -185,6 +193,64 @@ func (r *Registry) Servers() []*Server {
 		}
 	}
 	return servers
+}
+
+// ServerByName returns the member with the given name (case-insensitive), or nil.
+//
+// Why a name lookup instead of path routing: the knowledge semantic channel
+// needs the process that serves its language, not the process that owns one
+// particular file — workspace/symbol has no file to route with at all.
+func (r *Registry) ServerByName(name string) *Server {
+	if r == nil {
+		return nil
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return nil
+	}
+	for _, server := range r.Servers() {
+		if strings.ToLower(server.Name()) == name {
+			return server
+		}
+	}
+	return nil
+}
+
+// SharedClient hands out a live member's client by server name so other
+// in-process links (the knowledge semantic channel) reuse this pool's process
+// instead of spawning a second server for the same language. It never takes
+// ownership: the caller must not shut the returned client down.
+//
+// ("", false) means "this pool cannot serve that server right now". Once the
+// pool owns a member for that language, spawning a second one is exactly the
+// duplicate instance this seam exists to prevent, so callers must degrade
+// rather than fall back.
+func (r *Registry) SharedClient(ctx context.Context, serverName string) (*Client, bool) {
+	if r == nil {
+		return nil, false
+	}
+	server := r.ServerByName(serverName)
+	if server == nil {
+		return nil, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// A borrower's own deadline wins over the pool's budget: a semantic query
+	// must not outlast the caller's patience just because the pool is slow.
+	cfg := r.DiagnosticsConfig()
+	budget := time.Duration(cfg.StartWaitMS) * time.Millisecond
+	if budget <= 0 {
+		budget = time.Duration(cfg.WaitMS) * time.Millisecond
+	}
+	deadline := time.Now().Add(budget)
+	if callerDeadline, ok := ctx.Deadline(); ok && callerDeadline.Before(deadline) {
+		deadline = callerDeadline
+	}
+	if client := waitReadyClient(ctx, server, deadline, budget); client != nil {
+		return client, true
+	}
+	return nil, false
 }
 
 // ServersForPath is W3 routing: it returns exactly the members whose W1
@@ -337,6 +403,8 @@ func (s *Server) Status() ServerStatus {
 			status.Language = strings.Join(entry.spec.Languages, ",")
 		}
 		status.Restarts += restarts
+		// 共享态读数：两个会话看到同一个 pid 时，这行是唯一的解释来源。
+		status.ProcessSharedInProc = SharedSessionCount(entry.parent)
 		// 崩溃且（自动）恢复已被拒绝：结构化原因优先，同时保留崩溃原文（live:
 		// "exit status 0xffffffff"），供分类、状态页与排查共用。
 		if status.State == StateCrashed && lastErr != "" {

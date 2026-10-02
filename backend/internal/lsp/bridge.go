@@ -39,6 +39,17 @@ type Bridge struct {
 	// can take tens of seconds to publish its first diagnostics).
 	prewarmMu  sync.Mutex
 	prewarming map[string]struct{}
+	// releasePool 归还共享池的引用（私有池为 nil）。最后一个 release 会关停
+	// 进程，所以"关停池"从此不再是 Bridge.Stop 的无条件动作。
+	releasePool func()
+	// detachObserver 退订本 Bridge 在共享 hub 上的观测者。
+	detachObserver func()
+	// sharedPool 记录本 Bridge 用的是共享池（状态面据此显示"进程内共享 N 个
+	// 会话"，而不是让用户以为每个会话都有一份）。
+	sharedPool bool
+	// stopOnce 保证 Stop 幂等：共享模式下一次 Stop 只能减一次引用计数，
+	// 重复 Stop 会把别人在用的池减到 0 并提前关停。
+	stopOnce sync.Once
 }
 
 // Outcome is the result of one diagnostics pass for one file.
@@ -113,10 +124,16 @@ func NewBridge(cfg Config, root string, logger Logger, dial DialFunc) *Bridge {
 func NewBridgeWithOptions(cfg Config, root string, opts BridgeOptions) *Bridge {
 	cfg = cfg.Normalize()
 	logger := LoggerOrNop(opts.Logger)
-	observer := composeObservers(opts.Observer, logObserver(logger))
-	return &Bridge{
+	registry, hub, release, shared := AcquireSharedRegistry(cfg, root, RegistryOptions{
+		Dial:     opts.Dial,
+		Logger:   opts.Logger,
+		Observer: composeObservers(opts.Observer, logObserver(logger)),
+		Now:      opts.Now,
+		LookPath: opts.LookPath,
+	})
+	bridge := &Bridge{
 		cfg:                   cfg,
-		registry:              NewRegistry(cfg, root, RegistryOptions{Dial: opts.Dial, Logger: opts.Logger, Observer: observer, Now: opts.Now, LookPath: opts.LookPath}),
+		registry:              registry,
 		logger:                logger,
 		observer:              opts.Observer,
 		metrics:               NewMetrics(),
@@ -124,7 +141,16 @@ func NewBridgeWithOptions(cfg Config, root string, opts BridgeOptions) *Bridge {
 		toolCallIDFromContext: opts.ToolCallIDFromContext,
 		turnIDFromContext:     opts.TurnIDFromContext,
 		hinted:                map[string]struct{}{},
+		releasePool:           release,
+		sharedPool:            shared,
 	}
+	if hub != nil {
+		// 共享池的 client 只在构造时拿到一个 Observer 函数，所以事件必须经
+		// hub 扇出到每一个借用方。退订与归还引用走同一条路径：否则会话关闭后
+		// hub 里还留着一个指向已死会话的观测者。
+		bridge.detachObserver = hub.Subscribe(opts.Observer)
+	}
+	return bridge
 }
 
 // Enabled reports whether the pool has any usable member.
@@ -169,7 +195,19 @@ func (b *Bridge) Stop(ctx context.Context) {
 	if b == nil {
 		return
 	}
-	b.registry.Stop(ctx)
+	// 共享池的所有权在这里第一次变得有条件：私有池由本 Bridge 关停，共享池
+	// 只是归还一次引用，最后一个归还者才真正关停进程。stopOnce 保证重复
+	// Stop 不会多减一次引用——那会把别人还在用的池提前杀掉。
+	b.stopOnce.Do(func() {
+		if b.detachObserver != nil {
+			b.detachObserver()
+		}
+		if b.releasePool != nil {
+			b.releasePool()
+			return
+		}
+		b.registry.Stop(ctx)
+	})
 }
 
 // Restart is the recovery entry point (L2).
@@ -187,6 +225,22 @@ func (b *Bridge) StartServer(ctx context.Context, name string) error {
 		return nil
 	}
 	return b.registry.StartServer(ctx, name)
+}
+
+// SharedClient hands out a live member client by server name so other in-process
+// links (the knowledge semantic channel) can reuse this pool's process instead
+// of spawning a second server for the same language. It never takes ownership:
+// the caller must not shut the returned client down.
+//
+// ("", false) means "this pool cannot serve that server right now" — the caller
+// decides between degrading and spawning its own process. Only the first is safe
+// once this pool owns a member for that language, so the knowledge adapter
+// degrades instead of duplicating (see knowledge/lsp Manager.Ensure).
+func (b *Bridge) SharedClient(ctx context.Context, serverName string) (*Client, bool) {
+	if b == nil {
+		return nil, false
+	}
+	return b.registry.SharedClient(ctx, serverName)
 }
 
 // Handles reports whether any server claims the file (W1).
@@ -634,6 +688,19 @@ func (b *Bridge) MetricsSnapshot() MetricsSnapshot {
 // start degrades quickly instead of burning the full diagnostics budget; the
 // background start keeps going for the next edit.
 func (b *Bridge) readyClient(ctx context.Context, server *Server, deadline time.Time, startWait time.Duration) (*Client, string) {
+	client, reason := waitReadyClientDetailed(ctx, server, deadline, startWait)
+	return client, reason
+}
+
+// waitReadyClient is the reason-free form of waitReadyClientDetailed, used by
+// the single-instance borrow seam (Registry.SharedClient) where the reason is
+// not surfaced to the model.
+func waitReadyClient(ctx context.Context, server *Server, deadline time.Time, startWait time.Duration) *Client {
+	client, _ := waitReadyClientDetailed(ctx, server, deadline, startWait)
+	return client
+}
+
+func waitReadyClientDetailed(ctx context.Context, server *Server, deadline time.Time, startWait time.Duration) (*Client, string) {
 	status := server.Status()
 	var startDeadline time.Time
 	for {

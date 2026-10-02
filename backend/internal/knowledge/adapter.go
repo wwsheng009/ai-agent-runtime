@@ -174,5 +174,65 @@ type SemanticAdapter interface {
 	References(ctx context.Context, file string, line, col int) ([]SemanticLocation, error)
 }
 
+// DocumentSymbols 是 SemanticAdapter 的可选扩展面：单文件内的符号表。
+//
+// 定义成独立接口而不是加进 SemanticAdapter，是为了让「只需要位置查询」的旧实现
+// 不必为不用的能力写方法；工具侧用类型断言探测，未实现即静默走索引通道
+//（Degrade-Not-Fail）。对应 LSP textDocument/documentSymbol。
+type DocumentSymbolAdapter interface {
+	// DocumentSymbols 返回文件内定义的符号（无位置锚点要求）。
+	DocumentSymbols(ctx context.Context, file string) ([]SemanticSymbol, error)
+}
+
+// WorkspaceSymbolAdapter 是 SemanticAdapter 的可选扩展面：按查询串检索工作区
+// 符号。对应 LSP workspace/symbol。
+//
+// 为什么需要它：code_search 这类「按名字找同名符号」的问题没有位置锚点，
+// definition/references 两条语义通道都无从下手；索引的 FTS 匹配又分不清同名
+// 与子串。workspace/symbol 是编译器侧唯一能直接回答的通道。
+type WorkspaceSymbolAdapter interface {
+	// WorkspaceSymbols 按查询串返回工作区符号；limit<=0 表示不限制。
+	WorkspaceSymbols(ctx context.Context, query string, limit int) ([]SemanticSymbol, error)
+}
+
+// SemanticSymbol 是语义通道的符号条目（documentSymbol / workspace/symbol）。
+//
+// 位置与 SemanticLocation 同口径：canonical 0-based 行 + 行内 UTF-8 字节列
+//（ADR-0006 §4.1），Path 是 workspace 相对路径。
+type SemanticSymbol struct {
+	Name      string
+	Kind      SymbolKind
+	Detail    string
+	Container string
+	Path      string
+	Line      int
+	Col       int
+	EndLine   int
+	EndCol    int
+}
+
+// SemanticChannelStatus 是语义通道的观测快照（跨层传递用，避免宿主直接
+// 依赖 knowledge/lsp 的具体类型）。
+type SemanticChannelStatus struct {
+	Server   string
+	Root     string
+	State    string
+	PID      int
+	Reason   string
+	LockPath string
+	// Shared 标记该进程由宿主（诊断池）持有，语义通道只借用——单实例约束的
+	// 观测出口：pid 与诊断池一致时，这一项解释了"为什么语义通道没有自己的 pid"。
+	Shared bool
+}
+
+// SemanticStatusAdapter 是 SemanticAdapter 的可选观测面：把通道的进程/降级
+// 状态暴露给宿主（/lsp、lsp_servers、web 状态页）。
+//
+// 单列一个接口而不是加进 SemanticAdapter，是为了让查询面与观测面解耦——
+// 观测是纯读旁路，永远不该让实现方觉得"必须实现它才能用语义查询"。
+type SemanticStatusAdapter interface {
+	SemanticStatus() SemanticChannelStatus
+}
+
 // strconvQuote 避免为一处错误信息引入 strconv 依赖。
 func strconvQuote(s string) string { return "\"" + s + "\"" }

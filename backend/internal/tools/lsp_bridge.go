@@ -9,6 +9,7 @@ import (
 	"time"
 
 	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	"github.com/wwsheng009/ai-agent-runtime/internal/lsp"
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
@@ -235,6 +236,7 @@ func (m *Manager) EnableLSPFromConfig(config *runtimecfg.RuntimeConfig) bool {
 	// already contain lsp_servers/lsp_diagnostics at that point.
 	if m.toolkit != nil {
 		registerLSPTooling(m.toolkit, bridge, config)
+		registerSemanticChannelStatus(m.toolkit, m.SemanticChannelStatus)
 	}
 	m.lspBridge = bridge
 	return true
@@ -272,6 +274,24 @@ func registerLSPTooling(registry *toolkit.Registry, bridge *lsp.Bridge, config *
 	}
 }
 
+// registerSemanticChannelStatus 把语义通道状态回调注入已注册的 lsp_servers。
+//
+// 为什么用「事后注入」而不是构造期传入：registerLSPTooling 有两个调用点
+// （构造期与 EnableLSPFromConfig 的晚挂载），两处都没有 Manager 自身；而
+// lsp_servers 的语义节是纯只读增强，缺失不影响主功能。
+func registerSemanticChannelStatus(registry *toolkit.Registry, fn func() (knowledge.SemanticChannelStatus, bool)) {
+	if registry == nil || fn == nil {
+		return
+	}
+tool, ok := registry.Get(LSPServersToolName)
+	if !ok {
+		return
+	}
+	if servers, ok := tool.(*lspServersTool); ok {
+		servers.semanticStatus = fn
+	}
+}
+
 // Close releases the language-server pool owned by this manager (L2). The
 // host calls it on shutdown; a nil bridge is a no-op.
 func (m *Manager) Close() error {
@@ -299,6 +319,10 @@ func (a *AgentAdapter) Close() error {
 type lspServersTool struct {
 	*toolkit.BaseTool
 	bridge *lsp.Bridge
+	// semanticStatus 是语义通道（knowledge.lsp）状态的只读回调，nil 表示宿主
+	// 未接线（例如没有 runtime 配置）。它是可注入函数而非接口实现，让本工具
+	// 保持对 Manager 的零依赖，测试也不必构造完整工具管理器。
+	semanticStatus func() (knowledge.SemanticChannelStatus, bool)
 }
 
 func newLSPServersTool(bridge *lsp.Bridge) *lspServersTool {
@@ -344,6 +368,14 @@ func (t *lspServersTool) Execute(_ context.Context, _ map[string]interface{}) (*
 	for _, status := range statuses {
 		lines = append(lines, formatLSPServerStatus(status))
 	}
+	// 语义通道（code_* 工具的 definition/references/symbols）是与诊断池独立的
+	// 另一条链路，各自 spawn 进程。分节展示，避免"诊断池 ready 但语义通道
+	// degraded"被读成"LSP 正常"。
+	if t.semanticStatus != nil {
+		if status, ok := t.semanticStatus(); ok {
+			lines = append(lines, formatSemanticChannelStatus(status))
+		}
+	}
 	return &toolkit.ToolResult{
 		Success:    true,
 		OutputKind: toolresult.KindText,
@@ -352,6 +384,33 @@ func (t *lspServersTool) Execute(_ context.Context, _ map[string]interface{}) (*
 			"lsp_servers": len(statuses),
 		},
 	}, nil
+}
+
+// formatSemanticChannelStatus 渲染语义通道一行。字段与诊断池的
+// formatLSPServerStatus 对齐（name:state + pid + reason），便于肉眼比对。
+func formatSemanticChannelStatus(status knowledge.SemanticChannelStatus) string {
+	var builder strings.Builder
+	builder.WriteString("- semantic channel (code_* definition/references/symbols): ")
+	builder.WriteString(strings.TrimSpace(status.Server))
+	builder.WriteString(": ")
+	builder.WriteString(strings.TrimSpace(status.State))
+	if status.PID > 0 {
+		builder.WriteString(fmt.Sprintf(" pid=%d", status.PID))
+	}
+	if status.Shared {
+		// 单实例口径：pid 与诊断池那个 server 相同。看到同一 pid 出现在两行里
+		// 会让人以为重复起了进程，必须写明"这是同一个"。
+		builder.WriteString(" shared=diagnostics-pool")
+	}
+	if root := strings.TrimSpace(status.Root); root != "" {
+		builder.WriteString(" module_root=")
+		builder.WriteString(root)
+	}
+	if reason := strings.TrimSpace(status.Reason); reason != "" {
+		builder.WriteString(" reason=")
+		builder.WriteString(reason)
+	}
+	return builder.String()
 }
 
 func formatLSPServerStatus(status lsp.ServerStatus) string {
@@ -366,6 +425,12 @@ func formatLSPServerStatus(status lsp.ServerStatus) string {
 	}
 	if status.PID > 0 {
 		builder.WriteString(fmt.Sprintf(" pid=%d", status.PID))
+	}
+	if status.ProcessSharedInProc > 1 {
+		// 进程内共享：同一 root 的多个会话共用这一个进程。写明，否则第二个会话
+		// 看到与第一个会话相同的 pid 会被读成"重复起了实例"。
+		builder.WriteString(fmt.Sprintf(" in_proc_sessions=%d（同一进程，未额外起 %s）",
+			status.ProcessSharedInProc, status.Name))
 	}
 	if status.Restarts > 0 {
 		builder.WriteString(fmt.Sprintf(" restarts=%d", status.Restarts))

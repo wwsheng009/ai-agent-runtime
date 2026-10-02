@@ -6,6 +6,187 @@
 
 ---
 
+## 2026-10-01 — 收口轮（十一）：语义通道与诊断池合并为**单实例**
+
+> 触发：收口轮十登记的遗留③——两条链路各自 spawn，一个 aicli 进程里同时存在
+> 两个 gopls。本轮按 ADR-0002 §4.4.1 消除它。
+
+### Fixed
+
+- **双 gopls 实例**：诊断池（`lsp.*`）与语义通道（`knowledge.lsp.*`）此前各自
+  spawn，同一进程里会常驻两个 gopls。判据不是洁癖而是内存——实测 gopls 单实例
+  常驻数百 MB，而历史崩溃根因（gopls 异常退出）的直接诱因正是整机内存耗尽。
+  现在同一种语言在一个进程里只有一个 server 进程：宿主持有进程时语义通道
+  **只借用**（不取锁 / 不 spawn / 不关停），借不到就降级且**绝不退化成自建**
+  （自建就是那个要消除的第二个实例）。
+- **降级分工修正**：共享进程退出（宿主 `/lsp restart`）原先会走自建路径的
+  "钉死降级原因"逻辑——宿主重启一次，语义通道在整个进程生命周期里就永久不可用。
+  现在共享模式下进程退出视为可恢复：清原因、下次查询重新借，且复用旧 client
+  的窗口被消除（每次 `Ensure` 都重新借）。
+- **瞬时借用失败不得钉死**：共享模式下"借不到"往往只是宿主还在启动或刚重启。
+  新增 `Manager.RetryableDegrade()`（判据是"是否配置了共享模式"，不是"此刻是否
+  借到"——借用失败那一刻恰恰最需要允许重试），适配器的降级短路只在**自建模式**
+  生效，自建模式的启动失败/崩溃仍不可逐查询重试（重启风暴的既定取舍不变）。
+- **`Close` 越权**：共享模式下 `Close` 原本会 `Shutdown` 借来的 client（连带打断
+  诊断池）并 `releaseLock()` 删除自己从未持有的锁文件。现在按所有权分流。
+- **借用等待预算**：借用等待以**调用方 deadline** 为上限、池的启动预算为兜底
+  ——语义查询不得因为池慢而超出自己的时限。
+
+### Changed
+
+- **工具注册顺序**：`registerBuiltinToolkitTools` 现在在诊断池桥创建**之后**调用，
+  以便把借用缝（`Manager.sharedLanguageClient` 方法值）接到 `code.*` 的索引解析器
+  上。绑定方法值而非当时的桥指针，因此宿主后置 attach 池（async 项目扫描 →
+  late enable）仍然生效。
+- **适配器缓存键**加入 `shared=true|false`：两种模式的生命周期与降级语义不同，
+  共用缓存会让一个模式悄悄服务另一个模式的调用方。
+- **观测面**：`/lsp semantic` 与 `lsp_servers` 显式标注 `shared=诊断池`（pid 与池
+  相同）；不写明会被读成重复实例。新增两条可行动提示：`shared server unavailable`
+  → 查池状态 / `/lsp start gopls`；`shared language server exited` → 下次查询会
+  重新借用 / `/lsp restart gopls`。共享态不显示锁路径（我们从未持锁）。
+
+### Verified
+
+- **根锚定决策实验**（`-tags=live_semantic`，`TestLiveRootAnchoringExperiment`）：
+  同一文件在 workspace 根锚定与模块根锚定下 `textDocument/diagnostic` 返回**完全
+  相同的 10 条** type-check 级诊断（unused const/func、interface{} 可替换为 any）。
+  据此**不改**诊断池的锚点——收益为零、风险未知；改为让语义通道复用池的进程。
+- **单实例真机判据**（`TestLiveSharedInstanceIsSingleProcess`）：池起 gopls
+  （pid=33888）→ 语义通道借用同一进程 → definition/references/documentSymbol/
+  workspace-symbol 四类查询全部走通 → `status.PID == 池 pid`、`Shared=true`、
+  无锁文件、宿主进程仍存活。判据选"PID 相等"而非"数进程"：确定性（机器上可能有
+  别的会话），且有鉴别力——`TestLiveSelfModePIDDiffers` 证明自建模式下 PID 必然
+  不同（实测 23320 vs 33888），因此相等断言不是恒真的。
+- `go build ./...` 通过；`internal/knowledge`(32.8s)、`internal/knowledge/lsp`(0.9s)、
+  `internal/lsp`(25.9s)、`internal/tools`(2.5s)、`internal/toolkit/tools`(31.3s) 全绿；
+  `cmd/aicli/commands` 的 LSP/语义用例全绿。
+- 新增用例：宿主侧借用口（未知 server / 未启用 / 重复借用同一 client / 调用方
+  deadline 优先 / server 名大小写与空白）；语义通道侧（共享模式 3 次 Ensure
+  零 spawn / 借不到即降级零 spawn / Close 不关停宿主进程 / 宿主重启后可重新借用 /
+  瞬时借用失败可重试 / 自建模式仍 spawn 且持锁 / 自建启动失败不可重试）；
+  工具侧（共享标记渲染、借用缝确实传达到适配器、两种模式不共用缓存适配器）。
+
+### Notes
+
+- 行为变更（明示接受）：`lsp.enabled=true` 且 `knowledge.lsp.enabled=true` 时，
+  语义通道不再有自己的 pid/锁，`/lsp restart gopls` 会同时影响两条链路。这是
+  "同一个进程"的必然语义。`lsp.enabled=false` 时语义通道照旧自建 + 持锁，
+  与收口轮十之前逐字节一致。
+- 诊断池未启用时 `sharedLanguageClient` 返回 nil → 自建模式。若用户配置了
+  `knowledge.lsp` 但 `lsp.servers` 里没有 gopls，语义通道会降级并提示，而不是
+  自建一个池管不到的进程（那等于把单实例约束又破一次，且两个链路互相看不见）。
+- 跨进程仍是 ADR-0002 §4.4 的锁：两个 aicli 各自持有自己的池 gopls，第二条的
+  语义通道会因锁而降级到索引。这与"诊断池本就按会话各起各的"一致，不在本轮范围。
+
+---
+
+## 2026-10-01 — 收口轮（十）：语义通道可用性修复 + 符号面扩展 + 观测面
+
+> 触发：现场审计发现 `knowledge.lsp` 在本仓库「配了也不生效」，且 5 个 `code_*`
+> 工具里只有 3 类查询吃到 LSP、语义能力面只用了 definition/references 两个方法。
+> 根因与修复逐条如下。
+
+### Fixed
+
+- **模块根识别（拦路虎）**：`SemanticWorkspaceLanguage` 只认 `<workspace>/go.mod`，
+  而本仓库 workspace 根是 repo 根、`go.mod` 在 `backend/`，于是语义通道恒定拿到
+  `no_supported_language`——**配置写对了也不生效**，且原因被丢弃、不可观测。
+  改为新增 `SemanticModuleRoot`：优先 `<workspace>/go.mod`，否则按深度受限（3 层）
+  的广度优先向下探测，返回**最浅**模块根。跳过隐藏目录、`node_modules/vendor/dist/
+  build/out/target/.aicli/.cache/worktrees` 以及任何含 `.git` 条目的独立 checkout
+  （worktree / 子模块是副本，不是本 workspace 的模块根）；目录遍历按名字排序保证
+  结果确定。同深度出现多个模块根时返回空串（单通道只锚一个根，猜一个必然让半数
+  查询的相对路径对不上索引，降级更诚实）。
+- **两个根的分工显式化**：adapter 的 `root` 仍是 workspace 根（结果路径相对化的
+  锚点，必须与索引 `FilePaths` 同源），Manager 的 `Root` 改为模块根（gopls 类型
+  信息锚点 + ADR-0002 §4.4 锁的位置按模块粒度去重）。原实现两者混用 workspace 根，
+  修正后 monorepo 下路径口径才自洽。
+- **观测盲区**：语义通道的装配失败原因与进程状态此前完全不可见——模型侧只看到
+  `source=index`，用户侧看到「诊断池 gopls ready」却无法判断降级发生在哪一侧。
+  新增 `knowledge/lsp.Manager.Status()` → `knowledge.SemanticStatusAdapter` →
+  `tools.Manager.SemanticChannelStatus()`，并接到 `lsp_servers` 工具与 `/lsp`。
+
+### Added
+
+- **符号面能力扩展**（LSP `textDocument/documentSymbol` + `workspace/symbol`）：
+  新增 `knowledge.DocumentSymbolAdapter` / `WorkspaceSymbolAdapter` 两个**可选**扩展
+  接口（不塞进 `SemanticAdapter`，让只需位置查询的实现不必写不用的方法；工具侧
+  类型断言探测，未实现即静默降级）、`knowledge.SemanticSymbol` 结果形状、以及
+  `knowledge/lsp` 层的符号解码（`adapter_lsp_symbols.go`）。
+- **`code_navigate direction=members` 接语义面**：这是唯一不需要位置锚点的语义查询，
+  索引侧在文件被改到一半或未入库时会漏成员，documentSymbol 始终按当前磁盘内容回答。
+  放在两道新鲜度守卫**之后**（不绕过 ADR-0004 已定的「陈旧即降级」显式契约），
+  守卫放行时把精度从索引提到语义。
+- **`code_search` 接语义面**（同名消歧）：`workspace/symbol` 是唯一能回答「有哪些
+  精确同名符号」的通道——`definition`/`references` 需要位置锚点，这里没有，而 FTS
+  分不清同名与子串。**只做补充不做替换**：语义命中追加在索引结果之后，
+  `source=index+lsp`（新增口径，`codeEnvelopeSemantics` 已同步），因此延迟有界、
+  失败不影响主路径。子串命中一律过滤（放进来只会比 FTS 更噪）。
+- **`/lsp semantic` 子命令** + `/lsp status` 的语义通道分节：渲染 state/pid/
+  module_root/lock/reason，并把每个稳定 reason token 翻译成可行动的一步
+  （`disabled` → 去配 `knowledge.lsp`；`no_supported_language` → 确认 go.mod；
+  `lock held` → 确认那个持锁进程；`idle` → 说明是惰性启动而非故障）。
+  `chatLSPPoolEnabled` 也相应放开：诊断池关着不代表语义通道关着（两处独立开关）。
+- **live 真机验证套件**（`-tags=live_semantic`）：此前 definition/references 只有
+  单测覆盖，符号面与整条装配链路（含嵌套模块根）**没有任何真机验证**。新增两条：
+  完整链路（模块根探测 → 惰性 Ensure → 握手 → didOpen → 四个方法 → canonical 位置
+  → 状态快照）与锁落点。绑显式 tag 而非 `-short`，避免默认 `go test ./...` 触碰
+  （CHANGELOG 记录过 live 测量遗留 gopls 进程拖垮编译期 OOM）。
+
+### Verified
+
+- `go build ./...` 通过；`internal/knowledge`(35.4s)、`internal/toolkit/tools`(33.4s)、
+  `internal/tools`(1.9s)、`internal/lsp`(45.8s)、`internal/config`(1.0s) 全绿；
+  `cmd/aicli/commands` 的 LSP 用例全绿。
+- live 真机（gopls v0.23.0，临时模块 workspace 根 ≠ 模块根）：definition 跨文件
+  命中 `target.go` 第 3 行（canonical 2）、references 含调用点、documentSymbol 列出
+  `Target`、workspace/symbol 精确命中且路径为 workspace 相对、状态 `ready` 且
+  `module_root` 为模块根、锁文件落在模块根 `.aicli/knowledge/lsp/` 下。
+- 新增用例：模块根探测（嵌套/自身优先/最浅/同深度歧义降级/跳过噪声与独立
+  checkout）、符号解码（层级展平含 Container 链、扁平形状、selectionRange 缺失
+  退 range、空/单对象、深度上限、不可读目标跳过）、members 语义优先与三种降级
+  （错误/空/旧实现）、code_search 语义补充与四种不可用、状态渲染与全部 reason
+  提示覆盖。
+
+### Notes
+
+- 行为变更：`members` 与 `code_search` 在语义通道可用时 `source` 可能变为 `lsp` /
+  `index+lsp`。这是新增口径，消费方需按 `codeEnvelopeSemantics` 处理（模型侧靠工具
+  描述获知）。
+- 登记（仍未修）：① `code_navigate definition` 按**名字**查定义仍只走索引——这是
+  Phase 4 的有意取舍（索引 definition 实测 P=1.0000），本轮未改变；② hover /
+  completion / rename / implementation / typeDefinition 仍未接入语义通道；
+  ③ ~~诊断池与语义通道各自 spawn 进程、跨链路无互斥~~ → **已在收口轮（十一）收口**
+  （语义通道改为借用诊断池进程，单实例；决策与代价见 ADR-0002 §4.4.1）。
+- `semanticSymbolKind` 对未覆盖的 LSP SymbolKind 归 `unknown`，不臆测分类。
+
+---
+
+## 2026-10-01 — 收口轮（九）：`code.*` 工具面文件级新鲜度守卫（静默漏报修复）
+
+### Fixed
+
+- **全局 tier 挡不住文件级陈旧**：`CodeTierForSnapshot` 的 `staleness_seconds` 取自"最近一次成功写事务"，索引持续给别的文件写入时它会一直停在 `all` 档，而本次查询涉及的文件可能几小时没被重新索引（ADR-0004 §4.1/§5 D1 的失效模式）。实测 `code_callers(symbol=planLookupQuery)` 在 `planner.go` 新增第二个调用点后仍只返回旧的 1 条，且 `source=index` / `degraded=false` / `truncated=false`——**返回的内容看起来完全正常，漏报无法被察觉**。
+- 新增 `toolkit/tools/code_freshness.go`：`FileStamp`（`files` 表 mtime/size/content_hash）+ `verdictOf` 判定（无指纹/无根目录→unknown；size 不符→陈旧；mtime 一致→新鲜；否则读盘算 sha256，上限 `codeFreshnessMaxReads=32`）。sha256 口径与 `knowledge/indexer.go` 一致，checkout / touch 这类内容未变的改写**不误降级**。
+- `runCodeRefsQuery`（`code_references` / `code_callers` / `code_navigate refs`）：覆盖符号定义文件 + 各引用所在文件，任一陈旧即降级为实时 grep，新增 fallback reason `stale_file`。
+- **定义类同源缺口**：`code_inspect` / `code_navigate definition` / `code_navigate members` 的行号范围同样来自索引快照，文件改写后会返回**看起来合理但是错的**正文或行号（比关系类更危险）。三处均加文件级守卫：`code_inspect` 降级为整文件实时 view（行号不可信时整文件比 grep 更有用），`navigate definition` 降级为 grep，`navigate members` 降级为 view；降级结果不再输出不可信的 `range`。
+- `code_common.go`：`codeRefHit.FromSymbol` 注释此前仍在描述已失效的 v1 行为（"给的是 hex 稳定键""同名多点会被折叠成一条"），改为描述当前契约，并明确 `s_` 开头的 hex 表示**归属名缺失**，不得当函数名用。
+- 可观测性：成功路径 explanation 原先只写"命中 N 条"，现追加文件级新鲜度结论；无指纹句柄如实声明"未做文件级新鲜度校验"，超出读盘预算的文件计入"未参与校验"——不得默认为新鲜。
+
+### Verified
+
+- `internal/toolkit/tools`（33.3s）、`internal/tools`（2.4s）全绿；`go build ./...` 通过。
+- 新增用例：未改动走索引且自陈已校验 / 改写后 `code_callers` 降级为 grep 且 fallback 输出含磁盘新增内容 / `code_inspect` 改写后不输出不可信 range 且返回含 `Gamma` 的实时正文 / `navigate definition`+`members` 改写后降级 / mtime 变但内容未变不误降级 / 无指纹如实声明未校验 / 40 文件触发读盘预算时 `unverified=8` 且说明披露 / `fileFresh` 覆盖未知 file_id、nil 句柄、文件消失、无根目录。
+- 现场根因定位：工具返回的 `from_symbol`（`s_3963934e…`）与磁盘库中的外层符号 id（`s_215d2f48…`）不一致，证明确有**另一份更早的索引构建**在服务进程侧（符号 id 非内容哈希，重建即变）。
+
+### Notes
+
+- 登记（未修）：服务进程读取的索引构建与 `.aicli/knowledge/knowledge.db` 不是同一份，根因在 resolver / 进程侧，本次改动未覆盖。重启后若 `from_symbol` 仍为 `s_` 开头的 hex，即说明快照仍不一致，需单独排查。
+- 有意不守卫 `code_search`：命中列表是发现/排序工具，降级代价大于陈旧命中风险；其命中项真正被读取时已由 `code_inspect` / `code_navigate` 的定义类守卫兜住。
+- 行为 tradeoff：活跃编辑期间，只要被查询符号的定义文件或调用方文件内容变了，上述五个入口会降级到实时 grep/view。这是 ADR-0004 D1 选的"安全一侧"。
+
+---
+
 ## 2026-10-01 — 收口轮（八）：on-mode A/B 首跑（n=8 配对）+ 测量链路三处修复
 
 ### Added

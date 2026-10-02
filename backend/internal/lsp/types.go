@@ -156,6 +156,12 @@ type ServerStatus struct {
 	// non-empty publish for the same version contradicted (false cleans). It
 	// guards the empty early-accept fast path.
 	EmptyAcceptSuperseded int64 `json:"empty_accept_superseded,omitempty"`
+	// ProcessSharedInProc reports that this process is shared by N in-process
+	// sessions (the process-level pool, 2026-10-01). 0 = not shared / private
+	// pool. It exists so two sessions showing the same pid are self-explanatory
+	// instead of looking like a duplicate-instance bug: the second session's
+	// /lsp status would otherwise show an identical pid with no explanation.
+	ProcessSharedInProc int `json:"process_shared_in_proc,omitempty"`
 }
 
 // ---- protocol wire types (only this package may use them) ----

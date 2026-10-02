@@ -68,11 +68,15 @@ func TestObserverSeesLifecycleAndDiagnostics(t *testing.T) {
 	}) {
 		t.Fatalf("ready event must carry the process facts, got %+v", recorder.snapshot())
 	}
-	if !recorder.has(EventDiagnostics, func(e Event) bool {
-		return strings.EqualFold(e.Path, path) && e.Count == 1
-	}) {
-		t.Fatalf("diagnostics event must carry path and count, got %+v", recorder.snapshot())
-	}
+	// 必须等而不是立即断言：client 在 c.mu 下写入快照、**之后**才 emit
+	// （client.go handlePublishDiagnostics），WaitDiagnostics 看到快照就返回，
+	// 于是 AppendToResult 可能早于 emit 落地。并行跑多个包时这个窗口会被拉宽
+	// ——症状是偶发地"诊断拿到了但 diagnostics 事件没到"。
+	waitFor(t, "diagnostics event", func() bool {
+		return recorder.has(EventDiagnostics, func(e Event) bool {
+			return strings.EqualFold(e.Path, path) && e.Count == 1
+		})
+	})
 	if status := bridge.Statuses()[0]; status.LastActive.IsZero() {
 		t.Fatalf("lsp_servers must expose last_active after a document operation: %+v", status)
 	}

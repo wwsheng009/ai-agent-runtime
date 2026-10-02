@@ -37,6 +37,11 @@ var ErrProcessLimit = errors.New("knowledge/lsp: process limit reached")
 // ErrMemoryLimit 表示进程内存超过配置上限。
 var ErrMemoryLimit = errors.New("knowledge/lsp: memory limit exceeded")
 
+// ErrSharedClientUnavailable 表示共享模式下宿主没能给出可用的语言服务器进程。
+// 它与 ErrLockHeld 同级：调用方必须降级，不得改走自建路径——那正是本轮要消除
+// 的第二个实例。
+var ErrSharedClientUnavailable = errors.New("knowledge/lsp: shared server unavailable")
+
 // LockRecord 是 ADR-0002 §4.4 定义的锁文件内容。
 type LockRecord struct {
 	PID       int    `json:"pid"`
@@ -61,6 +66,17 @@ type Options struct {
 	RequestTimeout time.Duration
 	// Dial 是启动注入缝；nil 时使用 baselsp.SpawnProcess（已接进程树守卫）。
 	Dial baselsp.DialFunc
+	// SharedClient 让本通道复用宿主已持有的语言服务器进程（诊断池），nil = 自建。
+	//
+	// 单实例约束（ADR-0002 §4.4 的延伸）：同一个语言在一个进程里只允许一个
+	// server 进程。两条链路（诊断池 / 语义通道）都需要 gopls，各自 spawn 会得到
+	// 两个进程——实测 gopls 常驻数百 MB，双实例会把内存压力直接转成崩溃（历史
+	// 崩溃根因是整机内存耗尽）。因此宿主持有进程时本通道**只借用**：
+	//   - 不取锁、不 spawn、不关停（进程归宿主）；
+	//   - 借不到就降级，绝不自建（自建就是第二个实例）；
+	//   - 宿主重启（/lsp restart）会让借来的 client 失效，每次 Ensure 重新借，
+	//     缓存的旧 client 不复用。
+	SharedClient func(ctx context.Context, serverName string) *baselsp.Client
 	// Logger 透传给 internal/lsp。
 	Logger baselsp.Logger
 	// Now 是时钟注入缝（测试用）。
@@ -104,6 +120,10 @@ type Manager struct {
 	client *baselsp.Client
 	reason string
 	closed bool
+	// shared 标记当前 client 是从宿主借来的：关停与解锁都不归本通道，
+	// 且"进程已退出"是可恢复事件（宿主可能正在重启它），不能像自建进程
+	// 那样把降级原因钉死。
+	shared bool
 }
 
 // NewManager 构造通道管理器（不启动进程；Ensure 才启动）。
@@ -123,11 +143,115 @@ func (m *Manager) LanguageServerName() string {
 	return name
 }
 
+// Status 是语义通道的观测快照（供 /lsp 与 lsp_servers 渲染诊断信息）。
+//
+// 与 internal/lsp 的 ServerStatus 是两套东西：那套描述诊断池（编辑工具内联
+// 诊断用），这套描述 knowledge.lsp 语义通道（code_* 工具的 definition/
+// references/symbols 用）。两条链路各自 spawn 进程，因此必须分别可见——否则
+// 用户看到"gopls ready"却拿到 source=index，完全无从判断降级发生在哪一侧。
+type Status struct {
+	// Server 是语言服务器名（gopls）。
+	Server string
+	// Root 是通道锚定的模块根（gopls 的类型信息与锁都以此为锚）。
+	Root string
+	// State 是生命周期状态，取值与 internal/lsp 的 ServerState 同名，便于
+	// 两个状态面用同一套渲染口径。
+	State string
+	// PID 是已启动进程号；0 = 未启动（惰性启动，不预热）。
+	PID int
+	// Reason 是降级原因（空串 = 无降级）。
+	Reason string
+	// LockPath 是 ADR-0002 §4.4 的锁文件位置（可观测/诊断用）。
+	LockPath string
+	// Shared 标记该进程由宿主（诊断池）持有，本通道只借用。
+	// 用户看到 pid 与诊断池一致时，这一项解释了"为什么语义通道没有自己的 pid"。
+	Shared bool
+	// StartedAt 是最近一次 Ensure 的时刻（零值 = 从未启动）。
+	StartedAt time.Time
+}
+
+// Status 返回当前观测快照。它不启动进程、不加锁，只读既有状态。
+func (m *Manager) Status() Status {
+	if m == nil {
+		return Status{State: "unavailable", Reason: "manager is nil"}
+	}
+	m.mu.Lock()
+	client := m.client
+	closed := m.closed
+	reason := m.reason
+	shared := m.shared
+	m.mu.Unlock()
+
+	st := Status{
+		Server:   m.LanguageServerName(),
+		Root:     m.opts.Root,
+		Reason:   strings.TrimSpace(reason),
+		LockPath: m.LockPath(),
+		Shared:   shared,
+	}
+	switch {
+	case closed:
+		st.State = "stopped"
+		if st.Reason == "" {
+			st.Reason = "channel closed"
+		}
+	case client == nil:
+		// 语义通道是惰性启动的：从未 Ensure 是正常状态，不是故障。
+		st.State = "idle"
+		if st.Reason == "" {
+			if shared {
+				st.Reason = "not borrowed yet (lazy; reuses the diagnostics pool process)"
+			} else {
+				st.Reason = "not started (lazy; starts on first semantic query)"
+			}
+		}
+	default:
+		select {
+		case <-client.Done():
+			if shared {
+				// 宿主重启/关停了这个进程：不是本通道的崩溃，等下一次查询
+				// 重新借即可，如实说成"共享进程已退出"。
+				st.State = "degraded"
+				st.Reason = "shared language server exited (host restarting?)"
+			} else {
+				st.State = "crashed"
+				st.Reason = "language server exited"
+			}
+		default:
+			st.State = "ready"
+			st.PID = client.PID()
+			if shared {
+				// 借来的进程不持锁：显示锁路径会让用户去找一个我们从未创建的文件。
+				st.LockPath = ""
+			}
+		}
+	}
+	return st
+}
+
 // DegradeReason 返回最近一次降级原因（空串表示无降级）。
 func (m *Manager) DegradeReason() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.reason
+}
+
+// RetryableDegrade 报告当前降级是否值得下次查询重试。
+//
+// 自建模式返回 false：进程崩溃/启动失败后逐查询重试会造成重启风暴（ADR-0002
+// 的既定取舍），重建交给显式 Ensure。
+//
+// 共享模式返回 true：进程归宿主所有，"借不到"往往只是宿主还在启动或刚重启，
+// 宿主随时会恢复。把这种瞬时失败钉死会让语义通道在整个会话里永久不可用——
+// 这正是上一版借用实现的缺陷。自建模式（含"尚未启动"）一律 false：没启动时
+// 根本没有降级原因，调用方本来就会走 Ensure；启动失败后则按既定取舍不重试。
+func (m *Manager) RetryableDegrade() bool {
+	if m == nil {
+		return false
+	}
+	// 判据是"是否配置了共享模式"，不是"此刻是否借到"：借用失败的那一刻
+	// shared 还是 false，而那恰恰是最需要允许重试的时刻。
+	return m.opts.SharedClient != nil
 }
 
 // Client 返回已启动的客户端；未启动或已关闭时返回 nil。
@@ -142,13 +266,26 @@ func (m *Manager) Available() bool {
 	m.mu.Lock()
 	client := m.client
 	closed := m.closed
+	shared := m.shared
 	m.mu.Unlock()
 	if closed || client == nil {
 		return false
 	}
 	select {
 	case <-client.Done():
-		// 进程已退出（崩溃或被杀）：标记降级，等待下次 Ensure 重建。
+		// 自建进程退出 = 崩溃/被杀，钉住降级原因等显式重建（逐查询重启会
+		// 造成重启风暴）；共享进程退出通常只是宿主重启了它，下一次 Ensure
+		// 会重新借到——此时钉死原因会让整条语义通道永久不可用。
+		if shared {
+			m.mu.Lock()
+			if m.shared {
+				m.client = nil
+				m.shared = false
+				m.reason = ""
+			}
+			m.mu.Unlock()
+			return false
+		}
 		m.setReason("language server exited")
 		return false
 	default:
@@ -177,6 +314,12 @@ func (m *Manager) Ensure(ctx context.Context) error {
 		m.mu.Unlock()
 		return errors.New("knowledge/lsp: manager closed")
 	}
+	if m.shared {
+		// 借来的 client：宿主可能已经重启过它（/lsp restart），每次 Ensure
+		// 重新借一次，绝不复用缓存的旧 client。
+		m.client = nil
+		m.shared = false
+	}
 	if m.client != nil {
 		client := m.client
 		m.mu.Unlock()
@@ -191,6 +334,11 @@ func (m *Manager) Ensure(ctx context.Context) error {
 		}
 	} else {
 		m.mu.Unlock()
+	}
+
+	// 单实例优先：宿主持有该语言的进程时只借用，不 spawn、不取锁。
+	if m.opts.SharedClient != nil {
+		return m.ensureShared(ctx)
 	}
 
 	// ADR-0002 §4.4：锁新鲜（持有者存活）→ 不 spawn，降级。
@@ -250,18 +398,47 @@ func (m *Manager) Ensure(ctx context.Context) error {
 	return nil
 }
 
+// ensureShared 走借用路径。借到即用；借不到就降级并给出稳定原因，绝不自建
+// （自建就是本轮要消除的第二个实例）。
+func (m *Manager) ensureShared(ctx context.Context) error {
+	client := m.opts.SharedClient(ctx, m.LanguageServerName())
+	if client == nil {
+	err := fmt.Errorf("%w: host pool has no live %s process", ErrSharedClientUnavailable, m.LanguageServerName())
+	m.setReason(err.Error())
+	return err
+	}
+	select {
+	case <-client.Done():
+		err := fmt.Errorf("%w: shared %s process already exited", ErrSharedClientUnavailable, m.LanguageServerName())
+		m.setReason(err.Error())
+		return err
+	default:
+	}
+	m.mu.Lock()
+	m.client = client
+	m.shared = true
+	m.reason = ""
+	m.mu.Unlock()
+	return nil
+}
+
 // Close 关闭通道：优雅关停 → 进程树守卫收尾 → 释放锁。
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
 	m.closed = true
 	client := m.client
+	shared := m.shared
 	m.client = nil
+	m.shared = false
 	m.mu.Unlock()
 
-	if client != nil {
+	// 借来的进程归宿主所有：关停它会连带打断诊断池，且解锁会删掉我们从未持有的锁。
+	if client != nil && !shared {
 		client.Shutdown(ctx)
 	}
-	m.releaseLock()
+	if !shared {
+		m.releaseLock()
+	}
 	return nil
 }
 

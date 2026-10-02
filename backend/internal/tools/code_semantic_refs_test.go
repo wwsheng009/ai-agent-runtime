@@ -278,14 +278,14 @@ func TestSemanticAdapterForRespectsGating(t *testing.T) {
 
 	// 未启用 → nil（工具面照旧走索引）。
 	cfg := knowledge.DefaultConfig().WithWorkspace(root)
-	if adapter := semanticAdapterFor(cfg, root); adapter != nil {
+	if adapter := semanticAdapterFor(cfg, root, nil); adapter != nil {
 		t.Fatalf("disabled: adapter=%v, want nil", adapter)
 	}
 
 	// 启用但 workspace 不是 Go 模块 → nil（v1 仅 Go）。
 	cfg.LSP.Enabled = true
 	cfg.LSP.Mode = "self"
-	if adapter := semanticAdapterFor(cfg, root); adapter != nil {
+	if adapter := semanticAdapterFor(cfg, root, nil); adapter != nil {
 		t.Fatalf("non-go workspace: adapter=%v, want nil", adapter)
 	}
 
@@ -293,7 +293,7 @@ func TestSemanticAdapterForRespectsGating(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module demo\n"), 0o644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
 	}
-	adapter := semanticAdapterFor(cfg, root)
+	adapter := semanticAdapterFor(cfg, root, nil)
 	if adapter == nil {
 		t.Fatal("go workspace: adapter=nil, want constructed")
 	}
@@ -301,7 +301,8 @@ func TestSemanticAdapterForRespectsGating(t *testing.T) {
 		t.Fatal("构造阶段不得启动进程")
 	}
 	// 缓存命中：同一 key 返回同一实例。
-	if again := semanticAdapterFor(cfg, root); again != adapter {
+	if again := semanticAdapterFor(cfg, root, nil); again != adapter {
 		t.Fatal("缓存未命中：同一 key 应返回同一适配器实例")
 	}
 }
+

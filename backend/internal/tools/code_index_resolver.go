@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
+	baselsp "github.com/wwsheng009/ai-agent-runtime/internal/lsp"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolctx"
 	"github.com/wwsheng009/ai-agent-runtime/internal/toolkit/tools"
 )
@@ -42,6 +43,13 @@ var codeIndexCacheGlobal = &codeIndexCache{entries: map[string]*codeIndexEntry{}
 // workspace 解析顺序：ctx 的 workspace root（会话级绑定，优先）→ 管理器配置
 // 的 workspace root（进程级）。两者都没有时视为不可用（fail closed）。
 func newCodeIndexResolver(cfg knowledge.Config, workspaceRoot string) tools.CodeIndexResolver {
+	return newCodeIndexResolverWithShared(cfg, workspaceRoot, nil)
+}
+
+// newCodeIndexResolverWithShared 是带宿主语言服务器借用缝的解析器构造。
+//
+// shared != nil 时语义通道只借用诊断池的进程（单实例），不再自己 spawn。
+func newCodeIndexResolverWithShared(cfg knowledge.Config, workspaceRoot string, shared func(context.Context, string) *baselsp.Client) tools.CodeIndexResolver {
 	base := cfg.Normalize()
 	root := strings.TrimSpace(workspaceRoot)
 	return func(ctx context.Context) (*tools.CodeIndexHandle, bool) {
@@ -73,16 +81,28 @@ func newCodeIndexResolver(cfg knowledge.Config, workspaceRoot string) tools.Code
 			return nil, false
 		}
 		filePaths := map[string]string{}
+		// 文件指纹与 filePaths 取自同一次 ListActiveFiles，无额外查询成本。
+		// 关系类工具据此做文件级新鲜度校验（全局 staleness_seconds 挡不住
+		// "索引一直在写别的文件、本次查询的文件却几小时没更新"这一失效模式）。
+		fileStamps := map[string]tools.FileStamp{}
+		fileIDsByPath := map[string]string{}
 		if files, err := store.ListActiveFiles(ctx, wsID); err == nil {
 			for _, file := range files {
 				if file.DeletedAt != 0 || strings.TrimSpace(file.ID) == "" {
 					continue
 				}
 				filePaths[file.ID] = file.Path
+				fileIDsByPath[file.Path] = file.ID
+				fileStamps[file.ID] = tools.FileStamp{
+					MTimeNS:     file.MTimeNS,
+					Size:        file.Size,
+					ContentHash: file.ContentHash,
+				}
 			}
 		}
-		// ADR-0004 §4.1/§4.2：快照元数据来自索引最近一次成功写事务
-		// （Stats.IndexedAt，与 status.go 同源）。writer 判定复用 knowledge
+		// ADR-0004 §4.1/§4.2：快照元数据来自索引最近一次**成功全工作区对账**
+		// （Stats.IndexedAt = 成功 light 索引的 finished_at，与 status.go 同源；
+		// incremental 与预算截断的运行都不续期）。writer 判定复用 knowledge
 		// 写锁仲裁：锁持有者是本进程即 writer（本地索引即最新，S=0）。
 		stats, err := store.Stats(ctx, wsID)
 		if err != nil {
@@ -103,8 +123,10 @@ func newCodeIndexResolver(cfg knowledge.Config, workspaceRoot string) tools.Code
 			Mode:             base.Mode,
 			WorkspaceID:      wsID,
 			Root:             wsRoot,
-			Semantic:         semanticAdapterFor(base, wsRoot),
+			Semantic:         semanticAdapterFor(base, wsRoot, shared),
 			FilePaths:        filePaths,
+			FileStamps:       fileStamps,
+			FileIDsByPath:     fileIDsByPath,
 			SnapshotTS:       snapshotTS,
 			StalenessSeconds: stalenessSeconds,
 			Writer:           writer,
@@ -126,12 +148,15 @@ var semanticAdapterCache = struct {
 }{entries: map[string]knowledge.SemanticAdapter{}}
 
 // semanticAdapterFor 返回（必要时构造）workspace 的语义适配器；nil = 不可用。
-func semanticAdapterFor(cfg knowledge.Config, root string) knowledge.SemanticAdapter {
+func semanticAdapterFor(cfg knowledge.Config, root string, shared func(context.Context, string) *baselsp.Client) knowledge.SemanticAdapter {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return nil
 	}
-	key := root + "|" + strconv.FormatBool(cfg.LSP.Enabled) + "|" + strings.ToLower(strings.TrimSpace(cfg.LSP.Mode))
+	// 缓存键必须区分单实例/自建两种模式：借来的适配器与自建的适配器生命周期
+	// 与降级语义完全不同，共用缓存会让一个模式悄悄服务另一个模式的调用方。
+	key := root + "|" + strconv.FormatBool(cfg.LSP.Enabled) + "|" + strings.ToLower(strings.TrimSpace(cfg.LSP.Mode)) +
+		"|shared=" + strconv.FormatBool(shared != nil)
 	semanticAdapterCache.mu.Lock()
 	if adapter, ok := semanticAdapterCache.entries[key]; ok {
 		semanticAdapterCache.mu.Unlock()
@@ -139,13 +164,72 @@ func semanticAdapterFor(cfg knowledge.Config, root string) knowledge.SemanticAda
 	}
 	semanticAdapterCache.mu.Unlock()
 
-	adapter, _ := knowledge.NewSemanticAdapterForWorkspace(cfg, root)
+	adapter, _ := knowledge.NewSemanticAdapterForWorkspaceWithOptions(cfg, root, knowledge.SemanticAdapterOptions{
+		SharedClient: shared,
+	})
 	if adapter != nil {
 		semanticAdapterCache.mu.Lock()
 		semanticAdapterCache.entries[key] = adapter
 		semanticAdapterCache.mu.Unlock()
 	}
 	return adapter
+}
+
+// SemanticChannelStatus 返回 workspace 的语义通道观测快照，供宿主状态面
+// （/lsp、lsp_servers）渲染。
+//
+// 为什么必须有这个出口：语义通道的装配失败原因（lsp_disabled /
+// no_supported_language / lock held / …）原先在构造时被丢弃，模型侧只能看到
+// source=index，用户侧完全无从判断"为什么 code_* 没吃到语义精度"。这是可观测性
+// 盲区，补在这里。
+//
+// 构造成功但尚未 Ensure 时返回 state=idle——语义通道是惰性启动的，那是正常态
+// 而不是故障（与诊断池的"starting"同义不同源）。
+func (m *Manager) SemanticChannelStatus() (knowledge.SemanticChannelStatus, bool) {
+	if m == nil || m.runtimeConfig == nil {
+		return knowledge.SemanticChannelStatus{}, false
+	}
+	root := strings.TrimSpace(m.runtimeConfig.Workspace.Root)
+	shared := m.sharedLanguageClient
+	adapter := semanticAdapterFor(m.runtimeConfig.Knowledge, root, shared)
+	if adapter == nil {
+		// 复用工厂的稳定 reason token，而不是自己猜原因。
+		_, reason := knowledge.NewSemanticAdapterForWorkspaceWithOptions(
+			m.runtimeConfig.Knowledge, root, knowledge.SemanticAdapterOptions{SharedClient: shared})
+		state := "disabled"
+		// lsp_disabled（设计意图）与"配了但装配不上"（配置/环境问题）对用户的
+		// 行动含义不同：前者不该改，后者该查。因此不合并成同一个词。
+		if reason != knowledge.SemanticReasonDisabled {
+			state = "degraded"
+		}
+		return knowledge.SemanticChannelStatus{
+			Server: "gopls",
+			Root:   root,
+			State:  state,
+			Reason: reason,
+		}, true
+	}
+	if reporter, ok := adapter.(knowledge.SemanticStatusAdapter); ok {
+		return reporter.SemanticStatus(), true
+	}
+	return knowledge.SemanticChannelStatus{Server: "gopls", Root: root, State: "ready"}, true
+}
+
+// sharedLanguageClient 是诊断池的进程借用缝（单实例）。
+//
+// 诊断池启用时返回非 nil 的借用函数：语义通道因此不再 spawn 自己的 gopls，
+// 而是复用池里那个进程——同一种语言在一个进程里只有一个 server 实例。
+// 诊断池未启用时返回 nil，语义通道按 ADR-0002 §4.4 自建（并持锁），行为不变。
+func (m *Manager) sharedLanguageClient(ctx context.Context, serverName string) *baselsp.Client {
+	bridge := m.currentLSPBridge()
+	if bridge == nil || !bridge.Enabled() {
+		return nil
+	}
+	client, ok := bridge.SharedClient(ctx, serverName)
+	if !ok {
+		return nil
+	}
+	return client
 }
 
 // closeSemanticAdapters 关闭并清空语义适配器缓存（释放锁文件；测试路径用）。

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/knowledge"
 	runtimelsp "github.com/wwsheng009/ai-agent-runtime/internal/lsp"
 	runtimetools "github.com/wwsheng009/ai-agent-runtime/internal/tools"
 )
@@ -28,8 +29,9 @@ import (
 
 const chatLSPCommandUsage = `用法:
   /lsp                      显示 LSP 状态（等价 /lsp status）
-  /lsp status               显示 LSP 池状态：开关、工作区、server 生命周期与诊断配置
+  /lsp status               显示 LSP 状态：诊断池 + 语义通道（code_* 的 definition/references/symbols）
   /lsp list | servers       同 /lsp status
+  /lsp semantic             只看语义通道状态（code_* 工具的语义精度来源）
   /lsp diagnostics <file>   读取指定文件当前诊断（只读；有界等待后按降级语义返回）
   /lsp baseline [--days N]  归因会话日志出 §4.3 基线报告（默认最近 14 天；--since/--root 可选）
   /lsp restart [name]       重启指定 server；缺省重启全部已配置 server
@@ -75,6 +77,8 @@ func chatLSPReadOnlyScreenIdentity(command string) (string, string, bool) {
 	switch strings.ToLower(args[0]) {
 	case "status", "list", "ls", "servers", "show":
 		return "lsp.status", "LSP 服务器状态", true
+	case "semantic", "code", "channel":
+		return "lsp.semantic", "LSP 语义通道状态", true
 	case "diagnostics", "diag", "check":
 		return "lsp.diagnostics", "LSP 诊断", true
 	case "baseline":
@@ -88,7 +92,18 @@ func chatLSPReadOnlyScreenIdentity(command string) (string, string, bool) {
 // 输出是短提示卡（A11），不占用副屏。
 func chatLSPPoolEnabled(session *ChatSession) bool {
 	manager := chatLSPManager(session)
-	return manager != nil && manager.LSPEnabled()
+	if manager == nil {
+		return false
+	}
+	if manager.LSPEnabled() {
+		return true
+	}
+	// 诊断池关着不代表语义通道也关着（两处独立开关）。/lsp semantic 在
+	// 只有 knowledge.lsp 开启时仍有内容，因此这里不能只看诊断池。
+	if status, ok := manager.SemanticChannelStatus(); ok {
+		return strings.TrimSpace(status.State) != "" && strings.TrimSpace(status.State) != "disabled"
+	}
+	return false
 }
 
 // chatLSPCommandText 解析并执行 /lsp 子命令，返回纯文本结果。
@@ -102,6 +117,8 @@ func chatLSPCommandText(session *ChatSession, command string) string {
 		return chatLSPCommandUsage
 	case "status", "list", "ls", "servers", "show":
 		return chatLSPStatusText(session)
+	case "semantic", "code", "channel":
+		return chatLSPSemanticText(session)
 	case "diagnostics", "diag", "check":
 		if len(args) < 2 {
 			return "错误: 需要指定文件路径\n用法: /lsp diagnostics <file>"
@@ -115,6 +132,110 @@ func chatLSPCommandText(session *ChatSession, command string) string {
 		return chatLSPStartText(session, args[1:])
 	default:
 		return fmt.Sprintf("错误: 未知子命令 %q\n%s", args[0], chatLSPCommandUsage)
+	}
+}
+
+// chatLSPSemanticText 单独渲染语义通道状态。
+//
+// 为什么单独给一个子命令：诊断池服务编辑工具内联诊断，语义通道服务 code_* 的
+// definition/references/symbols，两者的可用性互相独立（诊断池关闭时语义通道会
+// 自建进程并持锁；诊断池开启时它复用同一个 gopls 进程，单实例约束）。诊断
+// "正常"完全不代表 code_* 吃到了语义精度——以前两者在界面上不可区分，用户
+// 看到 gopls ready 却拿到 source=index 时，无从判断降级发生在哪一侧。
+func chatLSPSemanticText(session *ChatSession) string {
+	manager := chatLSPManager(session)
+	if manager == nil {
+		return chatLSPDisabledText(session)
+	}
+	status, ok := manager.SemanticChannelStatus()
+	if !ok {
+		return "语义通道: 不可用\n当前会话没有可用的 runtime 配置，无法判定语义通道状态。"
+	}
+	lines := []string{"语义通道（code_* 的 definition/references/symbols）"}
+	lines = append(lines, chatLSPSemanticStatusLine(status))
+	if status.Shared {
+		// 单实例口径：两条链路共用一个 gopls。写在这里而不是只写在状态行里，
+		// 是因为"同一个 pid 出现在两行"只有配上这句才不会被读成重复实例。
+		lines = append(lines, "说明: 本通道复用诊断池的 gopls 进程（同一种语言只允许一个实例），"+
+			"因此 /lsp restart 会同时影响两条链路；诊断池关闭时本通道才会自建进程并持锁。")
+	}
+	if hint := chatLSPSemanticHint(status); hint != "" {
+		lines = append(lines, hint)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func chatLSPSemanticStatusLine(status knowledge.SemanticChannelStatus) string {
+	parts := []string{chatLSPSemanticStateMarker(status.State), "gopls", status.State}
+	if status.PID > 0 {
+		parts = append(parts, fmt.Sprintf("pid=%d", status.PID))
+	}
+	if status.Shared {
+		// 单实例：与诊断池同一个 gopls 进程。写明，否则两行相同 pid 会被读成重复实例。
+		parts = append(parts, "shared=诊断池（同一进程，未额外起 gopls）")
+	}
+	if root := strings.TrimSpace(status.Root); root != "" {
+		parts = append(parts, "module_root="+root)
+	}
+	// 锁路径只在降级时展示：正常态它只是个噪声路径。
+	if path := strings.TrimSpace(status.LockPath); path != "" && status.State == "degraded" {
+		parts = append(parts, "lock="+path)
+	}
+	line := strings.Join(parts, " ")
+	if reason := strings.TrimSpace(status.Reason); reason != "" {
+		line += " reason=" + reason
+	}
+	return line
+}
+
+// chatLSPSemanticHint 把降级原因翻译成可行动的一步——这是本命令存在的意义：
+// reason token 只保证机器可读，用户要的是"那我改什么"。
+func chatLSPSemanticHint(status knowledge.SemanticChannelStatus) string {
+	switch strings.TrimSpace(status.Reason) {
+	case knowledge.SemanticReasonDisabled:
+		return "提示: 语义通道未开启。在 runtime 配置的 knowledge.lsp 段设置 enabled: true 且 mode: self（与诊断链路的 lsp.enabled 是两处独立开关）。"
+	case knowledge.SemanticReasonModeNotSelf:
+		return "提示: knowledge.lsp.mode 只接受 self（v1 不支持 external）。"
+	case knowledge.SemanticReasonNoLanguage:
+		return "提示: 未在工作区找到 Go 模块根（v1 仅 Go）。确认工作区内存在 go.mod；本版本支持从工作区根向下最多 3 层探测。"
+	case knowledge.SemanticReasonWorkspace:
+		return "提示: 会话没有绑定 workspace 根，语义通道需要它作为路径与模块锚点。"
+	case knowledge.SemanticReasonServerSpecMiss:
+		return "提示: 内置 server 规格缺失（gopls 预设未找到），属于环境异常，请检查 aicli 构建。"
+	}
+	if strings.Contains(status.Reason, "lock held") {
+		return "提示: 同一模块已有活进程持有语义通道锁（ADR-0002 §4.4 防重复实例）。确认那个进程是否还需要，再决定是否终止它。"
+	}
+	if strings.Contains(status.Reason, "shared server unavailable") {
+		return "提示: 语义通道复用诊断池的 gopls 进程（单实例约束），但宿主没能给出可用进程。" +
+			"确认诊断链路已启用且包含 gopls（/lsp status 看池状态），必要时用 /lsp start gopls；" +
+			"它不会自行再起一个 gopls——那会变成第二个实例。"
+	}
+	if strings.Contains(status.Reason, "shared language server exited") {
+		return "提示: 共用的 gopls 进程已退出（通常是诊断池刚重启过它）。下一次 code_* 语义查询会重新借用；" +
+			"也可以用 /lsp restart gopls 立刻重建。"
+	}
+	switch status.State {
+	case "idle":
+		if status.Shared {
+			return "提示: 已装配但尚未借用（惰性）。第一次 code_* 语义查询会复用诊断池的 gopls 进程，无需手动预热。"
+		}
+		return "提示: 通道已装配但尚未启动（惰性启动）。第一次 code_* 语义查询会拉起 gopls，无需手动预热。"
+	case "crashed":
+		return "提示: 语言服务器已退出。code_* 会静默退回索引通道（source=index）；确认内存压力后再重开会话即可重建。"
+	}
+	return ""
+}
+
+// chatLSPSemanticStateMarker 给语义通道状态一个与诊断池同风格的视觉标记。
+func chatLSPSemanticStateMarker(state string) string {
+	switch state {
+	case "ready":
+		return "●"
+	case "degraded", "crashed":
+		return "✗"
+	default:
+		return "○"
 	}
 }
 
@@ -148,6 +269,16 @@ func chatLSPStatusText(session *ChatSession) string {
 	}
 	if hint := chatLSPRecoveryHint(statuses); hint != "" {
 		lines = append(lines, hint)
+	}
+	// 语义通道分节：诊断池健康 ≠ code_* 有语义精度。两条链路独立 spawn 进程，
+	// 合成一行会让"gopls ready 但 source=index"这类问题彻底不可判读。
+	if semStatus, ok := manager.SemanticChannelStatus(); ok {
+		lines = append(lines, "")
+		lines = append(lines, "语义通道（code_* 的 definition/references/symbols）")
+		lines = append(lines, "  "+chatLSPSemanticStatusLine(semStatus))
+		if hint := chatLSPSemanticHint(semStatus); hint != "" {
+			lines = append(lines, "  "+hint)
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -335,6 +466,12 @@ func chatLSPServerStatusLine(status runtimelsp.ServerStatus) string {
 	parts = append(parts, string(status.State))
 	if status.PID > 0 {
 		parts = append(parts, fmt.Sprintf("pid=%d", status.PID))
+	}
+	if status.ProcessSharedInProc > 1 {
+		// 进程内共享：同一 root 的多个会话共用这一个进程。必须写明，否则第二个
+		// 会话看到与第一个会话相同的 pid 会被读成重复实例。
+		parts = append(parts, fmt.Sprintf("in_proc_sessions=%d（同一进程，未额外起 %s）",
+			status.ProcessSharedInProc, name))
 	}
 	if status.Restarts > 0 {
 		parts = append(parts, fmt.Sprintf("restarts=%d", status.Restarts))

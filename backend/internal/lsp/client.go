@@ -94,6 +94,16 @@ type Client struct {
 	dialRes *DialResult
 	tr      *transport
 
+	// waitOnce 保证底层 *exec.Cmd.Wait 只被调用一次。watchExit（监控崩溃）与
+	// Shutdown（等进程收尾）都会等同一个进程退出，并发调用 os/exec.(*Cmd).Wait
+	// 是未定义行为：race detector 会在 Cmd.ProcessState / awaitGoroutines 上报
+	// 数据竞争，且两处可能拿到互相矛盾的退出状态。共享池让 Shutdown 可由另一个
+	// 会话的归还路径触发，这条并发路径比之前更容易被走到。
+	// 这里把唯一一次 Wait 的结果广播给所有等待者。
+	waitOnce sync.Once
+	waitDone chan struct{}
+	waitErr  error
+
 	mu       sync.Mutex
 	status   ServerStatus
 	enc      PositionEncoding
@@ -177,6 +187,7 @@ func NewClient(opts ClientOptions) (*Client, error) {
 		nonEmptyVersions: map[string]int{},
 		emptyAccepted:    map[string]acceptedEmpty{},
 		done:             make(chan struct{}),
+		waitDone:         make(chan struct{}),
 	}
 	c.maxDocs = opts.MaxTrackedDocs
 	if c.maxDocs <= 0 {
@@ -299,7 +310,7 @@ func (c *Client) watchExit() {
 		return
 	}
 	go func() {
-		err := c.dialRes.Wait()
+		err := c.waitProcess()
 		if c.exiting.Load() {
 			return
 		}
@@ -321,6 +332,22 @@ func (c *Client) watchExit() {
 		c.broadcastAll()
 		c.closeDone()
 	}()
+}
+
+// waitProcess 等进程退出并返回退出错误。底层 *exec.Cmd.Wait 只会被调用一次：
+// watchExit 与 Shutdown 都要等同一个进程退出，两者并发调用会触发
+// os/exec.Cmd 内部的数据竞争（见 Client.waitOnce）。后续调用者阻塞到第一次
+// Wait 完成再取同一个结果，不会重复等待。
+func (c *Client) waitProcess() error {
+	if c == nil || c.dialRes == nil || c.dialRes.Wait == nil {
+		return nil
+	}
+	c.waitOnce.Do(func() {
+		c.waitErr = c.dialRes.Wait()
+		close(c.waitDone)
+	})
+	<-c.waitDone
+	return c.waitErr
 }
 
 func (c *Client) closeDone() {
@@ -1054,7 +1081,7 @@ func (c *Client) Shutdown(ctx context.Context) {
 		if c.dialRes.Wait != nil {
 			waited := make(chan struct{})
 			go func() {
-				_ = c.dialRes.Wait()
+				_ = c.waitProcess()
 				close(waited)
 			}()
 			select {

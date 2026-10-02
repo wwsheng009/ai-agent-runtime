@@ -416,6 +416,27 @@ func (t *CodeNavigateTool) navigateMembers(ctx context.Context, filePath string,
 		return codeResult(env)
 	}
 
+	// 文件级新鲜度守卫（定义类）：members 是"文件内符号 + 行号"的清单，文件
+	// 在索引之后被改写时两者都不可信（可能少符号、也可能行号全偏）。
+	if fileID := handle.FileIDForPath(normalized); fileID != "" {
+		if known, fresh := fileFresh(handle, fileID); known && !fresh {
+			result, _ := t.runView(ctx, map[string]interface{}{"file_path": normalized, "limit": 200})
+			env := staleFileEnvelope("code_navigate", handle, "view", result, []string{normalized})
+			env.Truncated = env.Truncated || clamped
+			return codeResult(env)
+		}
+	}
+
+	// 语义通道（编译器级符号表）：放在两道新鲜度守卫之后。
+	//
+	// 为什么放在守卫之后：守卫的语义是"索引快照不可信就别给行号"，而语义通道
+	// 读的是实时磁盘、不依赖索引快照，因此守卫命中时它反而是最可信的答案。
+	// 但为了不推翻 ADR-0004 已定的降级口径（陈旧即降级是显式契约），这里选择
+	// 保守：不绕过守卫，只在守卫放行后把精度从索引提到语义。
+	if env, ok := semanticMembers(ctx, handle, normalized, limit, clamped); ok {
+		return codeResult(*env)
+	}
+
 	// PathPrefix 是前缀语义（可能带出子目录文件）：先放大候选窗口，过滤出
 	// 目标文件本身后再按调用方 limit 截断，避免前缀噪音挤掉目标文件成员。
 	queryLimit := limit

@@ -47,7 +47,8 @@ func NewCodeSearchTool() *CodeSearchTool {
 		"code_search",
 		"符号级代码检索（索引增强，设计文档中的 `code.search`）。"+
 			"做符号级问题（“X 定义在哪”“有哪些同名符号”）时优先使用；文本/配置/日志检索用 grep。"+
-			"索引不可用时自动降级为 grep，返回结构不变（source=fallback）。",
+			"索引不可用时自动降级为 grep，返回结构不变（source=fallback）。"+
+			codeEnvelopeSemantics,
 		"1.0.0",
 		parameters,
 		true,
@@ -169,6 +170,20 @@ func (t *CodeSearchTool) Execute(ctx context.Context, params map[string]interfac
 				env.Truncated = true
 			}
 		}
+	}
+	// 语义消歧补充：workspace/symbol 是唯一能回答"有哪些精确同名符号"的通道
+	//（definition/references 需要位置锚点，这里没有）。它只做补充——命中追加
+	// 在索引结果之后，不替换主结果集，因此延迟有界、失败不影响主路径。
+	if semEnv, ok := trySemanticWorkspaceSymbols(ctx, handle, query, limit); ok {
+		// env.Results 是 interface{}（不同工具的结果形状不同），这里显式收回
+	// 本工具已知的 []codeSymbolHit 再合并，避免依赖类型断言的静默失败。
+		base, _ := env.Results.([]codeSymbolHit)
+		extra, _ := semEnv.Results.([]codeSymbolHit)
+		env.Results = append(base, extra...)
+		if env.Source == codeSourceIndex {
+			env.Source = codeSourceIndexSemantic
+		}
+		env.Explanation += semEnv.Explanation
 	}
 	return codeResult(env), nil
 }
