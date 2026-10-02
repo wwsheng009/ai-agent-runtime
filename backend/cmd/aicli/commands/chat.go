@@ -272,6 +272,12 @@ type ChatSession struct {
 	resumeTeamNotice string
 	actorWarmupMu    sync.Mutex
 	actorWarmup      *chatActorWarmup
+	// capabilitiesLoad 是「首帧之后后台装载能力面」的门控句柄（见
+	// chat_capabilities_async.go）。装载 goroutine 负责安装它，turn 路径在
+	// ensureChatExecutor 处 await；未安装（同步 / runtime-server / 测试路径）
+	// 时门控是 no-op，行为与改造前一致。
+	capabilitiesMu   sync.Mutex
+	capabilitiesLoad *chatCapabilityLoad
 	// runtimeCtxMu guards the runtime-context fields that the event bridge
 	// reads while the actor/executor restores them from a runtime session:
 	// DebugMode, PermissionMode, ApprovalReuseMode, SelectedAgentTarget,
@@ -759,13 +765,21 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	}
 	startupTiming.mark("runtime_state")
 
-	session, cleanupSession, err := bootstrapChatSession(cfg, opts, profileState, persistenceState, runtimeState)
+	// 只构建到「可以被首帧渲染」为止：能力面走 prepareChatCapabilitiesAsync
+	// 在首帧之后后台装载（见 bootstrapChatSessionShell 的说明）。
+	session, cleanupSession, err := bootstrapChatSessionShell(cfg, opts, profileState, persistenceState, runtimeState)
 	if err != nil {
 		exitCommandError("chat", opts.OutputFormat, err, nil)
 	}
 	startupTiming.mark("bootstrap")
+	// 能力面（工具 / skills / runtime host / supervision）不再挡在首帧之前：
+	// 实测这三段发现型调用占首帧前 ~98% 的时间，而产物只在真正发起 turn 时才被
+	// 需要。这里只**安装门控**（首帧后立刻提交也能被 await 捕获），真正启动在
+	// presentChatStartupSession 之后；第一个 turn 由 ensureChatExecutor 等待，
+	// 因此「工具面一定先于模型请求就绪」这条不变式仍然成立。
+	startCapabilities, cleanupCapabilities := prepareChatCapabilitiesAsync(cfg, opts, session, cleanupSession)
 	persistChatStartupPreferences(cfg, opts, persistenceState.loadedRuntimeSession, runtimeState)
-	finalCleanup := buildChatFinalCleanup(session, cleanupSession)
+	finalCleanup := buildChatFinalCleanup(session, cleanupCapabilities)
 	registerExitCleanup(finalCleanup)
 	// Phase 1 交付 6：workspace 解析之后接入知识层（supplement/05 §2.2）。
 	// mode=off（默认）时本调用不碰磁盘、不建锁文件；激活失败只降级不改行为。
@@ -786,6 +800,15 @@ func HandleChat(cmd *cobra.Command, cfg *config.Config) {
 	// replay so `aicli resume <id>` / `aicli chat --session` match in-chat
 	// `/resume` visibility even when interactive TUI is enabled.
 	presentChatStartupSession(session, opts, persistenceState.loadedRuntimeSession)
+	// 主界面优先：presentChatStartupSession 只在「有历史 / 有恢复句柄」时绘制
+	// composer（chat.go:1490 的 hasHistory 分支），全新会话在那里什么都不画，
+	// 首帧要等到 runChatLoop 才出现。这里显式补一次 composer 落地，让「先渲染
+	// UI」对所有会话形态都成立。PrintPrompt 幂等——composer 已可见时直接返回，
+	// 因此与上面历史分支里的重复调用不会二次绘制或移光标。
+	presentStartupInteractiveComposer(session)
+	startupTiming.mark("first_frame")
+	// 首帧已落地：此刻才启动后台能力面装载，并让动态栏接管显示阶段与秒表。
+	startCapabilities()
 	// 上一进程遗留的 pending 提问/审批：启动首帧之后显式投影到输入面
 	// （事件日志重放本身不产生交互副作用，见 chat_restored_pending.go）。
 	ensureRestoredPendingInteractivePrompt(session)

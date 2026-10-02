@@ -1475,3 +1475,28 @@ func configureRuntimeServerChatExecutor(ctx context.Context, opts *chatCommandOp
 	session.LocalRuntimeHost = nil
 	return true, nil
 }
+
+// runtimeServerChatExecutorConfigured 只做「是否由 runtime-server 接管」的判定，
+// **不写 session**。
+//
+// configureRuntimeServerChatExecutor 会顺手把 executor 挂到 session 上，因此只能
+// 留在主 goroutine；而本地能力面的发现阶段需要先知道「要不要发现」，否则
+// runtime-server 模式会白扫一遍技能目录。两者用同一套判定条件，避免两条路径
+// 对「什么算 configured」产生分歧。
+func runtimeServerChatExecutorConfigured(ctx context.Context, opts *chatCommandOptions, session *ChatSession) (bool, error) {
+	if opts == nil || session == nil || opts.RuntimeMode == aicliRuntimeModeLocal {
+		return false, nil
+	}
+	serverURL := strings.TrimSpace(opts.RuntimeServerURL)
+	if serverURL == "" {
+		return false, nil
+	}
+	if err := runtimeServerHealthCheck(ctx, serverURL); err != nil {
+		if opts.RuntimeMode == aicliRuntimeModeAuto {
+			fmt.Fprintf(os.Stderr, "Warning: runtime-server 不可用，已回退本地模式: %v\n", err)
+			return false, nil
+		}
+		return false, fmt.Errorf("runtime-server 不可用: %w", err)
+	}
+	return true, nil
+}

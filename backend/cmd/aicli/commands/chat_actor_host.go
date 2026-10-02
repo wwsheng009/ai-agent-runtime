@@ -1274,12 +1274,14 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	if err != nil {
 		return nil, err
 	}
+	markChatStartup("host_bootstrap_manager")
 	if err := ensureLocalRuntimeProvider(bootstrapManager.LLMRuntime(), session); err != nil {
 		_ = bootstrapManager.Stop()
 		return nil, err
 	}
 
 	runtimeStore, eventStore := buildLocalChatRuntimeStores(session, runtimeConfig)
+	markChatStartup("host_runtime_stores")
 	receiptStore, _ := runtimeStore.(runtimechat.ToolReceiptStore)
 	batchStore, err := subagentbatch.NewSQLiteBatchStore(&subagentbatch.StoreConfig{
 		Path: resolveLocalChatSubagentBatchStorePath(session, runtimeConfig),
@@ -1289,6 +1291,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		closeLocalRuntimeStores(runtimeStore, eventStore)
 		return nil, fmt.Errorf("initialize subagent batch store: %w", err)
 	}
+	markChatStartup("host_batch_store")
 	agentControlRegistry := buildLocalChatAgentControlRegistryService(runtimeConfig)
 	// background 事件回调需要 host 上的 supervision 控制面，而 host 在 manager
 	// 之后装配：用 relay 延迟绑定，避免为了回调改 background 包的构造顺序。
@@ -1328,6 +1331,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		}
 		return nil, fmt.Errorf("initialize supervision control plane: %w", err)
 	}
+	markChatStartup("host_supervision_plane")
 	configureLocalChatMailboxWriteThrough(globalMailboxStore, runtimeStore, bootstrapManager.TeamStore())
 	eventBus := runtimeevents.NewBusWithRetention(2048)
 	host := &localChatRuntimeHost{

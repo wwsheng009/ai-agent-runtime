@@ -115,6 +115,14 @@ func ensureChatExecutor(session *ChatSession) (aicliChatExecutor, error) {
 	if session == nil {
 		return nil, fmt.Errorf("chat session is nil")
 	}
+	// 「先渲染 UI、再异步装载能力面」的门控点：ChatExecutor 由后台装载 goroutine
+	// 在 initializeChatCapabilities 里建立，而它要等工具面/skills/runtime host 就绪
+	// （实测数秒到十几秒）。这里 await 而不是直接报 "not initialized"，保证第一个
+	// turn 一定拿到完整工具面——只是首帧不再被它挡住。
+	// 未安装后台装载的路径（同步构建 / runtime-server / 测试）直接返回 nil。
+	if err := awaitChatCapabilitiesForTurn(context.Background(), session); err != nil {
+		return nil, err
+	}
 	if session.ChatExecutor == nil {
 		if session.ActorFirstReady && session.LocalRuntimeHost != nil {
 			session.ChatExecutor = newAICLIActorChatExecutor()

@@ -19,6 +19,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/style"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	runtimebootstrap "github.com/wwsheng009/ai-agent-runtime/internal/bootstrap"
+	runtimecfg "github.com/wwsheng009/ai-agent-runtime/internal/config"
 	runtimeexecution "github.com/wwsheng009/ai-agent-runtime/internal/execution"
 	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
@@ -390,22 +391,54 @@ func restoreChatPersistenceState(session *ChatSession, persistenceState *chatPer
 }
 
 func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, session *ChatSession) (*skillsRuntimeBinding, func(), error) {
-	if session == nil || opts == nil {
-		return nil, nil, nil
-	}
-	if !session.DisableTools {
-		registerGoalFunctions(session)
-	}
-	if configured, err := configureRuntimeServerChatExecutor(context.Background(), opts, session); err != nil {
+	discovery, err := discoverChatCapabilities(cfg, opts, session)
+	if err != nil {
 		return nil, nil, err
-	} else if configured {
-		return nil, nil, nil
 	}
+	return attachChatCapabilities(cfg, opts, session, discovery)
+}
 
-	var (
-		skillsBinding *skillsRuntimeBinding
-		toolManager   *runtimetools.Manager
-	)
+// chatCapabilityDiscovery 承载「发现阶段」的产物。
+//
+// 发现阶段只读 session、不写 session，因此可以安全地放到后台 goroutine 跑；
+// 挂载阶段（attachChatCapabilities）是唯一写 session 能力字段的地方，必须留在
+// 主 goroutine 上——首帧之后主 goroutine 仍在读这些字段（状态行、descriptor、
+// 工具可用性），让后台去写就是数据竞争。
+type chatCapabilityDiscovery struct {
+	// toolsEnabled 为 false 表示 --no-tools：发现阶段整段跳过。
+	toolsEnabled bool
+	// runtimeServerConfigured 为 true 表示远端 runtime-server 执行器已接管，
+	// 挂载阶段不需要本地能力面。
+	runtimeServerConfigured bool
+	runtimeServerURL        string
+
+	useLocalMCP      bool
+	sessionMCP       *acpSessionMCP
+	globalMCP        mcpmanager.Manager
+	runtimeToolCfg   *runtimecfg.RuntimeConfig
+	runtimeCfgPath   string
+	toolManager      *runtimetools.Manager
+	toolDescs        []runtimetools.ToolDescriptor
+	localRuntimeHost *localChatRuntimeHost
+}
+
+// discoverChatCapabilities 跑耗时的发现/建连：MCP 装配、工具管理器构造与工具
+// 枚举、local runtime host（含技能目录扫描与多个 SQLite 打开）。
+//
+// 实测这几段占首帧前 ~98% 的时间（见 chat_capabilities_async.go 顶部的实测表），
+// 且产物全部是局部值，因此放到首帧之后的后台 goroutine 执行。
+func discoverChatCapabilities(cfg *config.Config, opts *chatCommandOptions, session *ChatSession) (*chatCapabilityDiscovery, error) {
+	discovery := &chatCapabilityDiscovery{}
+	if session == nil || opts == nil {
+		return discovery, nil
+	}
+	if configured, err := runtimeServerChatExecutorConfigured(context.Background(), opts, session); err != nil {
+		return nil, err
+	} else if configured {
+		discovery.runtimeServerConfigured = true
+		discovery.runtimeServerURL = strings.TrimSpace(opts.RuntimeServerURL)
+		return discovery, nil
+	}
 
 	if session.DisableTools {
 		logpkg.Info("AICLI chat tools exposure disabled by flag")
@@ -423,28 +456,87 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 			logpkg.Infof("AICLI local MCP config chain disabled (acp-mcp=%s)", mcpMode)
 		}
 		markChatStartup("capabilities_mcp")
+		discovery.toolsEnabled = true
+		discovery.useLocalMCP = useLocalMCP
 
-		var globalMCP mcpmanager.Manager
 		if useLocalMCP {
-			globalMCP = MCPManagerInstance
+			discovery.globalMCP = MCPManagerInstance
 		}
+		globalMCP := discovery.globalMCP
 		// 会话级 MCP（ACP 客户端下发）优先于进程级配置链：同名工具在合并管理器
 		// 里去重时保留会话级实现。
 		sessionMCP := buildACPSessionMCP(context.Background(), acpMCPSessionLabel(session), session, mcpMode, opts.ACPMCPClientPlan, opts.ACPMCPCapabilities)
+		discovery.sessionMCP = sessionMCP
 		mcpForTools := globalMCP
 		if sessionMCP != nil {
 			mcpForTools = mcpmanager.NewMergedManager(sessionMCP.manager, globalMCP)
 		}
 
 		runtimeToolConfig := loadRuntimeToolConfig(cfg, session)
-		toolManager = runtimetools.NewDefaultManagerWithRuntimeConfig(mcpForTools, runtimeToolConfig)
+		discovery.runtimeToolCfg = runtimeToolConfig
+		discovery.runtimeCfgPath = resolveRuntimeToolConfigPath(cfg, session)
+		discovery.toolManager = runtimetools.NewDefaultManagerWithRuntimeConfig(mcpForTools, runtimeToolConfig)
+		markChatStartup("tools_manager_ctor")
+		discovery.toolDescs = discovery.toolManager.ListTools()
+		markChatStartup("tools_list")
+		// 工具面枚举完成，接下来是耗时最长的技能目录扫描
+		//（host bootstrap，实测 ~10s）：切到「加载 Skills」阶段，
+		// 让动态栏显示进度在走，而不是十几秒一直停在「加载工具」。
+		// 仅在异步装载路径生效——同步路径没有启动进度可推进
+		//（见 advanceChatStartupProgress）。
+		advanceChatStartupProgress(session, chatStartupProgressPhaseSkills)
+	}
+
+	host, err := initializeLocalChatRuntimeHost(cfg, session, discovery.toolManager)
+	if err != nil {
+		return nil, err
+	}
+	discovery.localRuntimeHost = host
+	markChatStartup("host_discovery")
+	return discovery, nil
+}
+
+// attachChatCapabilities 把发现阶段的产物挂到 session 上。
+//
+// 必须与所有其它 session 读写同处一个 goroutine（主 goroutine）：它在首帧之后
+// 才被调用（经 ensureChatExecutor 门控），而主 goroutine 在门控之前就已经在读
+// 这些字段做状态行/descriptor 判断。
+func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, session *ChatSession, discovery *chatCapabilityDiscovery) (*skillsRuntimeBinding, func(), error) {
+	if session == nil || opts == nil || discovery == nil {
+		return nil, nil, nil
+	}
+	if !session.DisableTools {
+		registerGoalFunctions(session)
+	}
+	if discovery.runtimeServerConfigured {
+		// 判定已在发现阶段完成（runtimeServerChatExecutorConfigured），这里只把
+		// executor 挂到 session 上——这一步必须留在主 goroutine。
+		session.ChatExecutor = newAICLIRuntimeServerChatExecutor(discovery.runtimeServerURL)
+		session.ActorFirstReady = true
+		session.LocalRuntimeHost = nil
+		return nil, nil, nil
+	}
+
+	var (
+		skillsBinding *skillsRuntimeBinding
+		toolManager   *runtimetools.Manager
+	)
+	localRuntimeHost := discovery.localRuntimeHost
+	toolDescs := discovery.toolDescs
+
+	if session.DisableTools {
+		logpkg.Info("AICLI chat tools exposure disabled by flag")
+	} else {
+		toolManager = discovery.toolManager
+		sessionMCP := discovery.sessionMCP
+		useLocalMCP := discovery.useLocalMCP
+		globalMCP := discovery.globalMCP
 		// /lsp 命令族需要会话级工具管理器读取 LSP 池（状态/诊断/手动重启）。
 		session.ChatToolManager = toolManager
-		toolDescs := toolManager.ListTools()
 		for _, desc := range toolDescs {
 			session.FunctionCatalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(toolManager, desc), desc)
 		}
-
+		markChatStartup("tools_register")
 		// 工具面刷新器：会话私有与本地配置链两条来源都是异步建连，迟到的工具
 		// 只能在 turn 边界增量登记（§4.7 R1 / D5）。非 ACP 入口不装，保持既有行为。
 		refresher := sessionMCP
@@ -467,7 +559,8 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 		// 启动期 LSP 自动装配（异步）：轻量扫描项目类型 → 写工作区
 		// .aicli/runtime.yaml → 挂载 LSP 池；新工具在下一个 turn 边界登记。
 		// 不阻塞启动关键路径（见 chat_lsp_bootstrap.go）。
-		startChatLSPBootstrap(session, toolManager, runtimeToolConfig, resolveRuntimeToolConfigPath(cfg, session))
+		startChatLSPBootstrap(session, toolManager, discovery.runtimeToolCfg, discovery.runtimeCfgPath)
+		markChatStartup("tools_lsp_bootstrap")
 		if MCPManagerInstance != nil {
 			session.MCPStatus = Status()
 			session.MCPEnabled = session.MCPStatus.Enabled
@@ -485,12 +578,8 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 		markChatStartup("capabilities_tools")
 	}
 
-	// Build the local runtime host first so skills can reuse its DiscoverOnly
-	// bootstrap manager instead of scanning skill directories a second time.
-	localRuntimeHost, hostErr := initializeLocalChatRuntimeHost(cfg, session, toolManager)
-	if hostErr != nil {
-		return nil, nil, fmt.Errorf("初始化 actor runtime host 失败: %w", hostErr)
-	}
+	// local runtime host 已在发现阶段建好（含 DiscoverOnly bootstrap manager，
+	// skills 直接复用，不再二次扫描技能目录）。这里只做挂载。
 	if localRuntimeHost == nil {
 		return nil, nil, fmt.Errorf("初始化 actor runtime host 失败: runtime host is nil")
 	}
@@ -499,8 +588,11 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 	// LSP 观测接线：池事件 → 会话 EventBus（lsp.*，live-only）。runtime host
 	// 在工具管理器构造之后才建立，因此走可后置注入的 SetLSPObserver；构造期
 	// 已挂载的池也会从这一刻起把后续事件转发出去（方案 §3.2）。
-	toolManager.SetLSPObserver(chatLSPRuntimeObserver(session))
+	if toolManager != nil {
+		toolManager.SetLSPObserver(chatLSPRuntimeObserver(session))
+	}
 	restoreLocalRuntimeHostTeamState(session)
+	markChatStartup("host_attach")
 	session.ChatExecutor = newAICLIActorChatExecutor()
 	startChatActorWarmup(session)
 	markChatStartup("capabilities_runtime_host")
@@ -552,6 +644,37 @@ func initializeChatCapabilities(cfg *config.Config, opts *chatCommandOptions, se
 }
 
 func bootstrapChatSession(cfg *config.Config, opts *chatCommandOptions, profileState *chatProfileState, persistenceState *chatPersistenceState, runtimeState *chatRuntimeState) (*ChatSession, func(), error) {
+	session, cleanupSession, err := bootstrapChatSessionShell(cfg, opts, profileState, persistenceState, runtimeState)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	_, cleanupCapabilities, err := initializeChatCapabilities(cfg, opts, session)
+	if err != nil {
+		buildChatFinalCleanup(session, cleanupSession)()
+		return nil, nil, err
+	}
+
+	return session, func() {
+		if cleanupCapabilities != nil {
+			cleanupCapabilities()
+		}
+		if cleanupSession != nil {
+			cleanupSession()
+		}
+	}, nil
+}
+
+// bootstrapChatSessionShell 只构建到「会话可以被首帧渲染」为止，不初始化能力面
+// （工具面 / skills / runtime host / supervision 平面）。
+//
+// 这段能力面在首帧前实测占 ~98% 的启动时间（见 chat_capabilities_async.go 顶部
+// 的实测表），而产物只在真正发起 turn 时才被需要，因此 TUI 启动走本函数 +
+// prepareChatCapabilitiesAsync：先渲染，再在后台装载，第一个 turn 由
+// ensureChatExecutor 门控等待。
+//
+// 非 TUI / 测试 / 工具路径继续用 bootstrapChatSession（同步装载，行为不变）。
+func bootstrapChatSessionShell(cfg *config.Config, opts *chatCommandOptions, profileState *chatProfileState, persistenceState *chatPersistenceState, runtimeState *chatRuntimeState) (*ChatSession, func(), error) {
 	session, cleanupSession, err := buildChatSession(cfg, opts, profileState, persistenceState, runtimeState)
 	if err != nil {
 		return nil, nil, err
@@ -570,23 +693,82 @@ func bootstrapChatSession(cfg *config.Config, opts *chatCommandOptions, profileS
 	if session.Interaction != nil {
 		session.Interaction.RefreshStatus("")
 	}
+	return session, cleanupSession, nil
+}
 
-	_, cleanupCapabilities, err := initializeChatCapabilities(cfg, opts, session)
-	if err != nil {
-		buildChatFinalCleanup(session, cleanupSession)()
-		return nil, nil, err
+// prepareChatCapabilitiesAsync 准备「首帧之后后台装载能力面」的启动器。
+//
+// 返回两个函数：
+//   - start：真正拉起后台装载。必须在首帧落地之后调用，否则又退回「先装载后渲染」；
+//   - cleanup：接进会话收尾，释放能力面与会话其余资源。
+//
+// 与 bootstrapChatSession 拆开是为了让「首帧」真正发生在能力面之前：
+// 实测这三段发现型调用占首帧前 ~98% 的时间（见 chat_capabilities_async.go 顶部
+// 的实测表），而它们的产物只在真正发起 turn 时才被需要。
+func prepareChatCapabilitiesAsync(cfg *config.Config, opts *chatCommandOptions, session *ChatSession, cleanupSession func()) (start func(), cleanup func()) {
+	if session == nil {
+		return func() {}, cleanupSession
 	}
 
-	cleanup := func() {
-		if cleanupCapabilities != nil {
+	// 能力面清理要挂在会话收尾上，但只有装载成功之后才有 cleanup 可调。装载
+	// goroutine 写、退出路径读，两条路径都可能先到：互斥量取出后立即置 nil，
+	// 因此重复调用是幂等的（真正释放只发生一次），无需额外 Once 配对。
+	var (
+		capabilitiesCleanupMu sync.Mutex
+		capabilitiesCleanup   func()
+	)
+	cleanupCapabilities := func() {
+		capabilitiesCleanupMu.Lock()
+		fn := capabilitiesCleanup
+		capabilitiesCleanup = nil
+		capabilitiesCleanupMu.Unlock()
+		if fn == nil {
+			return
+		}
+		fn()
+	}
+	// 会话可能在能力面装载完成之前就退出（例如用户在首帧后立刻 /exit）。此时
+	// 装载 goroutine 仍在跑，cleanup 要等它落地才能调用；cleanupAll 保证
+	// 「退出」与「装载完成」无论谁先到都只释放一次。
+	var cleanupAllOnce sync.Once
+	cleanupAll := func() {
+		cleanupAllOnce.Do(func() {
+			load := currentChatCapabilityLoad(session)
+			if load != nil {
+				// 有界等待：发现阶段（后台）+ 挂载阶段（此处，主 goroutine）都跑完
+				// 才能释放 store，否则会与仍在写的挂载阶段抢同一批句柄。若真挂起，
+				// 到点后照样释放会话其余资源，不把退出卡死在后台扫描上。
+				ctx, cancel := context.WithTimeout(context.Background(), chatCapabilitiesWaitLimit)
+				_ = awaitChatCapabilities(ctx, session)
+				cancel()
+			}
 			cleanupCapabilities()
-		}
-		if cleanupSession != nil {
-			cleanupSession()
-		}
+			if cleanupSession != nil {
+				cleanupSession()
+			}
+		})
 	}
 
-	return session, cleanup, nil
+	// 门控句柄必须在首帧之前安装：否则「首帧后立刻提交」这条极短窗口里，
+	// ensureChatExecutor 看不到 handle，会绕过 await 直接报 "not initialized"。
+	// 安装与「是否已开始装载」是两件事，因此这里先 install、start 时再 complete。
+	installChatCapabilitiesGate(session, func() (*chatCapabilityDiscovery, error) {
+		return discoverChatCapabilities(cfg, opts, session)
+	}, func(discovery *chatCapabilityDiscovery) (func(), error) {
+		// 挂载阶段写 session，只能在主 goroutine 上跑（await 之后）。
+		_, cleanup, err := attachChatCapabilities(cfg, opts, session, discovery)
+		if err != nil {
+			return nil, err
+		}
+		capabilitiesCleanupMu.Lock()
+		capabilitiesCleanup = cleanup
+		capabilitiesCleanupMu.Unlock()
+		return cleanup, nil
+	})
+	start = func() {
+		go runChatCapabilitiesLoad(session)
+	}
+	return start, cleanupAll
 }
 
 // materializeChatSessionSandbox re-applies named sandbox profiles once the

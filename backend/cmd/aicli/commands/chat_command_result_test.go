@@ -1142,6 +1142,10 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_retry_command.go", Func: "handleRetryCommand", Kind: "fmt.Print", Count: 9},
 		{File: "chat_runtime_events.go", Func: "newChatRuntimeEventBridge", Kind: "fmt.Print", Count: 6},
 		{File: "chat_runtime_server.go", Func: "configureRuntimeServerChatExecutor", Kind: "fmt.Fprint(os.Std*)", Count: 1},
+		// 1 = runtime-server 健康检查失败时的 auto 回退告警。与
+		// configureRuntimeServerChatExecutor 共用同一套判定（只读探针 vs 挂载），
+		// 因此两处各有一条，不是新增的直写点。
+		{File: "chat_runtime_server.go", Func: "runtimeServerChatExecutorConfigured", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_runtime_server.go", Func: "prepareRuntimeServerChatPersistence", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_selection_output.go", Func: "printChatSelectionBlankLine", Kind: "ui.WriteTerminal*", Count: 1},
 		{File: "chat_selection_output.go", Func: "printChatSelectionLine", Kind: "ui.WriteTerminal*", Count: 1},
@@ -1153,9 +1157,13 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_setup.go", Func: "buildChatSession", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_setup.go", Func: "emitChatSandboxWarning", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_setup.go", Func: "finalizeChatSessionWithError", Kind: "fmt.Fprint(os.Std*)", Count: 1},
-		// 4 = MCP/Skills 初始化告警 + cleanup 的 Skills/LSP 停止告警
-		// （chat_setup.go:419/510/533/540）。
-		{File: "chat_setup.go", Func: "initializeChatCapabilities", Kind: "fmt.Fprint(os.Std*)", Count: 4},
+		// 能力面按「发现（后台）/ 挂载（主 goroutine）」拆成两个函数后，原
+		// initializeChatCapabilities 的 4 条直写按职责重新归属，总数不变——
+		// 本围栏拦的是「新增直写点」，不是函数名。
+		// 1 = MCP 初始化告警（发现阶段，chat_setup.go:452）。
+		{File: "chat_setup.go", Func: "discoverChatCapabilities", Kind: "fmt.Fprint(os.Std*)", Count: 1},
+		// 3 = Skills 初始化告警 + cleanup 的 Skills/LSP 停止告警。
+		{File: "chat_setup.go", Func: "attachChatCapabilities", Kind: "fmt.Fprint(os.Std*)", Count: 3},
 		{File: "chat_setup.go", Func: "printChatExitResumeHint", Kind: "fmt.Print", Count: 1},
 		{File: "chat_setup.go", Func: "printChatSessionPreamble", Kind: "fmt.Fprint(os.Std*)", Count: 2},
 		// 11 = 迁移前基线 10 + per-skill 启停（/skills disable|enable）在 legacy

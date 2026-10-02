@@ -222,6 +222,12 @@ type chatInteractionCoordinator struct {
 	// 动态栏上的进度行：单行、临时、结束即清除，绝不进入 transcript。前台
 	// 活动存在时让位（见 applyResumeProgressLocked）。
 	resumeProgress *chatResumeProgressState
+	// startupProgress 是「进入会话之前」的后台能力装载（工具面 / skills /
+	// runtime host / supervision 平面）在动态栏上的进度行：单行、临时、结束即
+	// 清除，绝不进入 transcript。前台活动存在时让位（见
+	// applyStartupProgressLocked）。与 resumeProgress 分开，避免把「启动装载」
+	// 误标成「恢复历史」。
+	startupProgress *chatStartupProgressState
 	// internalRunSeq 记录内部轮次（supervision auto-wake 等不经过
 	// sendMessage/StartWaiting 协议的 run）的启动次数；waitingInternalRunSeq
 	// 在 StartWaiting 时快照。CompleteWaiting 只有在两者相等时才允许冻结
@@ -1293,13 +1299,14 @@ func (c *chatInteractionCoordinator) dynamicStatusElapsedLocked(now time.Time) t
 }
 
 func (c *chatInteractionCoordinator) scheduleDynamicStatusTickLocked(now time.Time) {
-	if c == nil || c.shutdown || (c.dynamicStatusStarted.IsZero() && !c.resumeProgressActiveLocked()) || !c.surfaceOutputActiveLocked() || !c.surface.DynamicStatusTicksEnabled() || c.renderIntentPending(renderengine.FrameKeyDynamicStatus) {
+	if c == nil || c.shutdown || (c.dynamicStatusStarted.IsZero() && !c.resumeProgressActiveLocked() && !c.startupProgressActiveLocked()) || !c.surfaceOutputActiveLocked() || !c.surface.DynamicStatusTicksEnabled() || c.renderIntentPending(renderengine.FrameKeyDynamicStatus) {
 		return
 	}
 	elapsed := c.dynamicStatusElapsedLocked(now)
 	delay := time.Second - elapsed%time.Second
 	if c.dynamicStatusStarted.IsZero() {
-		// 只有恢复进度在展示（没有真实 run 时钟）：按整秒推进进度行秒表。
+		// 只有恢复进度/启动装载进度在展示（没有真实 run 时钟）：按整秒推进
+		// 进度行秒表。
 		delay = time.Second
 	}
 	if delay < 10*time.Millisecond {
@@ -1322,7 +1329,7 @@ func (c *chatInteractionCoordinator) refreshDynamicStatusTick(sequence uint64) {
 	if sequence != c.dynamicStatusTimerSeq {
 		return
 	}
-	if c.shutdown || (c.dynamicStatusStarted.IsZero() && !c.resumeProgressActiveLocked()) || !c.surfaceOutputActiveLocked() {
+	if c.shutdown || (c.dynamicStatusStarted.IsZero() && !c.resumeProgressActiveLocked() && !c.startupProgressActiveLocked()) || !c.surfaceOutputActiveLocked() {
 		return
 	}
 	now := time.Now()
@@ -1375,6 +1382,10 @@ func (c *chatInteractionCoordinator) appendStatusHintsLocked(model *style.Status
 	// 恢复进度先于其它附加提示：进度行是整行替换，先落地才能让事件降级 /
 	// turn 预算等尾部提示追加在同一行上，而不是被替换掉。
 	model = c.applyResumeProgressLocked(model)
+	// 启动装载进度同样整行替换，且比恢复进度更早发生（首帧之后的工具/skills/
+	// runtime host 装载）。放在 resumeProgress 之后：两者不会同时存在（恢复
+	// 开始前启动装载必定已完成），真并存时让恢复进度优先展示。
+	model = c.applyStartupProgressLocked(model)
 	model = c.appendEventDegradationHintLocked(model)
 	model = c.appendTurnBudgetHintLocked(model)
 	return c.applyDiagnosticNoticeLocked(model)
