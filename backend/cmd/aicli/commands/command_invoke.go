@@ -196,6 +196,15 @@ func splitCommandNameAndRemainder(payload string) (string, string) {
 }
 
 func resolveDirectCallableFunctionName(session *ChatSession, requestedName string, preferSkill bool) (string, bool, error) {
+	// 斜杠命令不经过 turn 入口的 ensureChatExecutor：新会话的能力面由后台
+	// goroutine 发现、挂载要等 await。首帧后就敲 /skill、/call 时，技能函数面
+	// 可能还没挂上，直接解析会把「仍在装载」误报成「未找到 skill/function」。
+	// 这里与 /skills 清单同源，先补齐挂载再解析；runAttach 幂等，未安装门控的
+	// 同步 / runtime-server / 测试路径是 no-op。
+	if err := awaitChatCapabilitiesForTurn(context.Background(), session); err != nil {
+		return "", false, err
+	}
+
 	catalog := ensureFunctionCatalog(session)
 	if catalog == nil || catalog.Registry() == nil {
 		return "", false, fmt.Errorf("function catalog 未初始化")

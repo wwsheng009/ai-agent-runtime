@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -84,6 +85,69 @@ func TestExecuteStructuredSkillCommandUnknownSkillReportsError(t *testing.T) {
 	text := strings.TrimSpace(ui.RenderDocumentPlain(result.Document()))
 	if !strings.Contains(text, "错误:") {
 		t.Fatalf("unknown skill must report an error, got:\n%s", text)
+	}
+}
+
+// 新会话首帧后立刻敲 /skill 时，能力面（含 skill 函数面）可能仍在后台装载。
+// 解析必须先 await 挂载，而不是把「还在装载」误报成「未找到 skill」。
+func TestExecuteStructuredSkillCommandAwaitsPendingCapabilitiesAttach(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{}
+	attached := false
+	installChatCapabilitiesGate(session,
+		func() (*chatCapabilityDiscovery, error) { return &chatCapabilityDiscovery{}, nil },
+		func(*chatCapabilityDiscovery) (func(), error) {
+			attached = true
+			// 模拟 attachChatCapabilities 产出的技能函数面。
+			registry := functions.NewFunctionRegistry()
+			catalog := newAICLIFunctionCatalog("openai", registry)
+			catalog.RegisterSkillFunction(&SkillFunction{
+				functionName: "skill__imagegen",
+				skill: &runtimeskill.Skill{
+					Name:        "imagegen",
+					Description: "Generate images from a prompt",
+				},
+			})
+			session.FunctionCatalog = catalog
+			session.FunctionRegistry = registry
+			return nil, nil
+		},
+	)
+	runChatCapabilitiesLoad(session)
+
+	result, handled := executeStructuredSkillCommand(session, "/skill imagegen a cat")
+	if !handled {
+		t.Fatal("/skill was not handled by the structured executor")
+	}
+	if !attached {
+		t.Fatal("resolver must await capability attach before resolving a skill name")
+	}
+	if result.SendSkillTurn == nil || result.SendSkillTurn.SkillName != "skill__imagegen" {
+		t.Fatalf("pending attach must resolve into a skill turn, got %#v", result)
+	}
+}
+
+// 挂载失败要如实回传初始化错误，而不是把它伪装成「未找到 skill」。
+func TestExecuteStructuredSkillCommandSurfacesCapabilityInitError(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &ChatSession{}
+	boom := errors.New("boom")
+	installChatCapabilitiesGate(session,
+		func() (*chatCapabilityDiscovery, error) { return nil, boom },
+		func(*chatCapabilityDiscovery) (func(), error) {
+			t.Error("发现失败时不得执行挂载")
+			return nil, nil
+		},
+	)
+	runChatCapabilitiesLoad(session)
+
+	result, handled := executeStructuredSkillCommand(session, "/skill imagegen a cat")
+	if !handled {
+		t.Fatal("/skill was not handled by the structured executor")
+	}
+	text := ui.RenderDocumentPlain(result.Document())
+	if !strings.Contains(text, "能力面初始化失败") || !strings.Contains(text, "boom") {
+		t.Fatalf("capability init error must surface verbatim, got:\n%s", text)
 	}
 }
 
