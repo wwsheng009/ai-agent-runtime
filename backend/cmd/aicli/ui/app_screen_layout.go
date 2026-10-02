@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/cell"
@@ -712,7 +713,8 @@ func wrapVTAppScreenText(text string, width int) []string {
 	// physical-row expansion rule. Size by display columns rather than source
 	// rune count so a long ordinary line does not allocate width*runeCount
 	// cells.
-	screen := vt.NewScreen(width, appScreenScratchHeight(text, width))
+	screen := acquireScratchScreen(width, appScreenScratchHeight(text, width))
+	defer releaseScratchScreen(screen)
 	screen.Feed(text)
 	screen.Feed("\r\n")
 	end := screen.CursorRow() - 1
@@ -720,6 +722,30 @@ func wrapVTAppScreenText(text string, width int) []string {
 		return nil
 	}
 	return screen.Lines(1, end)
+}
+
+// scratchScreenPool 复用 wrapVTAppScreenText 的临时 VT 屏：该函数每次布局
+// pass 都会按文本尺寸重建 width×height 单元矩阵，生产 pprof 显示
+// vt.NewScreen 的 blankRow 占全部分配的 13%（12 分钟 2.9GB）。ResetSize 复用
+// 行缓冲，池只回收中小屏（超过 maxPooledScratchRows 的巨大屏交给 GC，避免
+// 池长期钉住大块内存）。
+var scratchScreenPool = sync.Pool{
+	New: func() any { return vt.NewScreen(1, 1) },
+}
+
+const maxPooledScratchRows = 512
+
+func acquireScratchScreen(width, height int) *vt.Screen {
+	screen := scratchScreenPool.Get().(*vt.Screen)
+	screen.ResetSize(width, height)
+	return screen
+}
+
+func releaseScratchScreen(screen *vt.Screen) {
+	if screen == nil || screen.Height() > maxPooledScratchRows {
+		return
+	}
+	scratchScreenPool.Put(screen)
 }
 
 func appScreenScratchHeight(text string, width int) int {

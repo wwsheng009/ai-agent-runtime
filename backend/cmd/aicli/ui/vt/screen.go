@@ -87,6 +87,48 @@ func (s *Screen) Reset() {
 	s.hasSaved = false
 }
 
+// ResetSize reconfigures the screen to width×height and clears all state,
+// reusing the existing row slice and row buffers whenever their capacity
+// allows. It is Reset plus a resize, for callers that replay many
+// variable-sized streams (e.g. scratch wrapping) and would otherwise allocate
+// a fresh width×height cell matrix per call — production pprof attributed
+// 2.9GB/13% of all allocations to NewScreen's blank rows on such a path.
+func (s *Screen) ResetSize(width, height int) {
+	if s == nil {
+		return
+	}
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	s.width, s.height = width, height
+	if cap(s.rows) < height {
+		s.rows = make([][]Cell, height)
+	} else {
+		s.rows = s.rows[:height]
+	}
+	for i := range s.rows {
+		row := s.rows[i]
+		if cap(row) < width {
+			s.rows[i] = make([]Cell, width)
+			continue
+		}
+		row = row[:width]
+		for j := range row {
+			row[j] = Cell{}
+		}
+		s.rows[i] = row
+	}
+	s.scrollback = s.scrollback[:0]
+	s.row, s.col = 1, 1
+	s.top, s.bottom = 1, height
+	s.sgr = s.sgr[:0]
+	s.savedRow, s.savedCol = 0, 0
+	s.hasSaved = false
+}
+
 // Width reports the screen width in cells.
 func (s *Screen) Width() int { return s.width }
 
