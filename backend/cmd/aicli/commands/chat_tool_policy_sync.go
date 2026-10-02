@@ -46,6 +46,10 @@ func syncLocalChatToolPolicyAllowlist(
 	if surface != nil {
 		candidates = append(candidates, runtimeToolNames(surface.ListTools())...)
 	}
+	// skill 函数不进常驻工具面（见 wrapSkillToolSurface），但会在运行中随热加载
+	// 增删：turn 边界的同步必须把它们补进同一份策略，否则新装的 skill 在
+	// /skill 回合里会被 AllowToolInfo 直接拒绝。
+	candidates = append(candidates, sessionSkillFunctionNames(session)...)
 	if broker != nil {
 		candidates = append(candidates, brokerToolNames(broker.Definitions())...)
 	}

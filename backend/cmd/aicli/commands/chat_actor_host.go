@@ -1258,6 +1258,10 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 		runtimeMCP = runtimetools.NewAgentAdapter(toolManager)
 	}
 	runtimeMCP = wrapGoalToolSurface(session, runtimeMCP)
+	// skill 函数不在工具管理器目录里（它们由函数目录管理/暴露），但模型工具
+	// 调用的预检走 ToolSurface.FindTool：这里补一层按需解析与执行转发，避免
+	// /skill 回合里 skill__* 被判 TOOL_NOT_FOUND。
+	runtimeMCP = wrapSkillToolSurface(session, runtimeMCP)
 
 	bootstrapManager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
 		Config:       runtimeConfig,
@@ -2696,6 +2700,9 @@ func buildLocalChatToolPolicy(session *ChatSession, toolSurface runtimeskill.MCP
 			if toolSurface != nil {
 				allowedTools = runtimeToolNames(toolSurface.ListTools())
 			}
+			// skill 函数不进常驻工具面（ListTools），但必须进入合成 allowlist：
+			// 它们由函数目录按 exposure/pin 决定是否暴露，授权面只需覆盖执行。
+			allowedTools = append(allowedTools, sessionSkillFunctionNames(session)...)
 			allowedTools = append(allowedTools, brokerToolNames(broker.Definitions())...)
 			// The scheduler contributes a runtime-owned tool outside the MCP and
 			// broker catalogs, so include it in the synthesized default policy.
