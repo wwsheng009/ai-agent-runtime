@@ -65,13 +65,21 @@ type SubagentStatsQuery struct {
 
 // SubagentStat 是单个子代理完成记录。
 type SubagentStat struct {
-	SubagentID       string `json:"subagent_id"`
-	ParentSessionID  string `json:"parent_session_id"`
-	ChildSessionID   string `json:"child_session_id,omitempty"`
-	Role             string `json:"role,omitempty"`
-	TaskType         string `json:"task_type,omitempty"`
-	TaskSubject      string `json:"task_subject,omitempty"`
-	Source           string `json:"source,omitempty"`
+	SubagentID      string `json:"subagent_id"`
+	ParentSessionID string `json:"parent_session_id"`
+	// BatchID 区分同一父会话下的多次 spawn_subagents 调用（subagent_id 在模型
+	// 省略 id 时按批次内序号合成，会跨批次复用）。历史行与无批次上下文的旧载荷
+	// 为空串。
+	BatchID        string `json:"batch_id,omitempty"`
+	ChildSessionID string `json:"child_session_id,omitempty"`
+	Role           string `json:"role,omitempty"`
+	TaskType       string `json:"task_type,omitempty"`
+	TaskSubject    string `json:"task_subject,omitempty"`
+	Source         string `json:"source,omitempty"`
+	// ReadOnly 来自子代理任务的只读边界。注意该列 NOT NULL DEFAULT 0，
+	// "未声明" 与 "声明为可写" 在库中不可区分（ingest 侧已知偏差），因此它
+	// 只能回答"这次运行是否被当作只读记账"，不能反推模型是否显式传了该字段。
+	ReadOnly         bool   `json:"read_only"`
 	Success          *bool  `json:"success"`
 	CompletionReason string `json:"completion_reason"`
 	FailureCategory  string `json:"failure_category,omitempty"`
@@ -400,14 +408,16 @@ func (s *Store) SubagentStats(q SubagentStatsQuery) (SubagentStatsResult, error)
 	// （与 usage_routes 的 routeColumnExpr 同策略），而不是让整个 stats 查询报错。
 	taskTypeExpr := s.columnExpr("usage_subagents", "task_type")
 	taskSubjectExpr := s.columnExpr("usage_subagents", "task_subject")
+	// batch_id 同理是 v8 增量列：只读旧库缺列时退化为空串常量。
+	batchIDExpr := s.columnExpr("usage_subagents", "batch_id")
 	rows, ok, err := s.query(fmt.Sprintf(`
-SELECT subagent_id, parent_session_id, child_session_id, role, %s, %s, source, success, completion_reason,
+SELECT subagent_id, parent_session_id, %s, child_session_id, role, %s, %s, source, read_only, success, completion_reason,
        failure_category, error_code, attempt, max_attempts, retry_reason, duration_ms,
        usage_total_tokens, budget_tokens, conflict_count, completed_at_unix_nano
 FROM usage_subagents
 WHERE %s
-ORDER BY completed_at_unix_nano DESC, subagent_id ASC
-LIMIT ?`, taskTypeExpr, taskSubjectExpr, where), append(args, normalizeLimit(q.Limit, maxSubagentStatsRows, maxSubagentStatsRows))...)
+ORDER BY completed_at_unix_nano DESC, subagent_id ASC, batch_id ASC
+LIMIT ?`, batchIDExpr, taskTypeExpr, taskSubjectExpr, where), append(args, normalizeLimit(q.Limit, maxSubagentStatsRows, maxSubagentStatsRows))...)
 	if err != nil {
 		return result, fmt.Errorf("query subagent stats: %w", err)
 	}
@@ -422,7 +432,7 @@ LIMIT ?`, taskTypeExpr, taskSubjectExpr, where), append(args, normalizeLimit(q.L
 			completedNano int64
 		)
 		if err := rows.Scan(
-			&stat.SubagentID, &stat.ParentSessionID, &stat.ChildSessionID, &stat.Role, &stat.TaskType, &stat.TaskSubject, &stat.Source,
+			&stat.SubagentID, &stat.ParentSessionID, &stat.BatchID, &stat.ChildSessionID, &stat.Role, &stat.TaskType, &stat.TaskSubject, &stat.Source, &stat.ReadOnly,
 			&successFlag, &stat.CompletionReason, &stat.FailureCategory, &stat.ErrorCode,
 			&stat.Attempt, &stat.MaxAttempts, &stat.RetryReason, &stat.DurationMS,
 			&stat.UsageTotalTokens, &stat.BudgetTokens, &stat.ConflictCount, &completedNano,

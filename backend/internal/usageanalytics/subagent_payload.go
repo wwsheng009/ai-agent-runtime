@@ -31,6 +31,12 @@ type SubagentCompletion struct {
 	SubagentID      string
 	ParentSessionID string
 	ChildSessionID  string
+	// BatchID 是 durable 批次 id。它是 usage_subagents 主键的组成部分：
+	// subagent_id 由模型省略时按批次内序号合成（subagent_1/subagent_2…），
+	// 同一父会话的第二个 spawn_subagents 批次会复用同一批 id，主键若不含
+	// batch_id 就会把两次独立运行并成一行（token 取 MAX 而非 SUM、
+	// read_only 被后到者覆盖）。历史载荷缺该字段时留空串。
+	BatchID         string
 	Role            string
 	// TaskType/TaskSubject（schema v7 增量列）：子代理分类轴与短说明，
 	// 由生产方在 subagent.completed / subagent.route.resolved 等事件载荷上附带；
@@ -64,6 +70,7 @@ func NormalizeSubagentCompletion(event runtimeevents.Event) (SubagentCompletion,
 		SubagentID:      firstPayloadString(payload, "subagent_id", "agent_id", "id"),
 		ParentSessionID: firstPayloadString(payload, "parent_session_id", "root_session_id"),
 		ChildSessionID:  firstPayloadString(payload, "child_session_id", "session_id", "agent_id"),
+		BatchID:         firstPayloadString(payload, "batch_id"),
 		Role:            firstPayloadString(payload, "role", "agent_type", "target_role"),
 		TaskType:        firstPayloadString(payload, "task_type"),
 		TaskSubject:     firstPayloadString(payload, "task_subject"),

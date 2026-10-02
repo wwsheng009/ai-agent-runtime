@@ -365,6 +365,7 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 		`CREATE TABLE IF NOT EXISTS usage_subagents (
   subagent_id             TEXT NOT NULL DEFAULT '',
   parent_session_id       TEXT NOT NULL DEFAULT '',
+  batch_id                TEXT NOT NULL DEFAULT '',
   child_session_id        TEXT NOT NULL DEFAULT '',
   role                    TEXT NOT NULL DEFAULT '',
   task_type               TEXT NOT NULL DEFAULT '',
@@ -386,7 +387,7 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   source                  TEXT NOT NULL DEFAULT '',
   conflict_count          INTEGER NOT NULL DEFAULT 0,
   record_json             BLOB,
-  PRIMARY KEY (subagent_id, parent_session_id)
+  PRIMARY KEY (subagent_id, parent_session_id, batch_id)
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_session ON usage_subagents(parent_session_id, completed_at_unix_nano DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_fail ON usage_subagents(success, failure_category)`,
@@ -570,6 +571,21 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 			}
 		}
 	}
+	// v8 主键迁移：usage_subagents 主键加入 batch_id。SQLite 不能 ALTER 主键，
+	// 只能整表重建（改名 → 建新表 → 搬数据 → 删旧表 → 重建索引）。
+	//
+	// 为什么必须迁移而不只是改 DDL：subagent_id 在模型省略 id 时按批次内序号
+	// 合成（subagent_1…），同一父会话的第二个 spawn_subagents 批次会复用同一批
+	// id。旧主键 (subagent_id, parent_session_id) 会把两次独立运行并成一行，
+	// 于是 usage_total_tokens 取 MAX 而非 SUM、read_only 被后到者覆盖、
+	// duration_ms 卡在 0。真机证据：同一父会话两个批次都叫 subagent_1，
+	// /web/api/analysis/subagents 只返回 1 行。
+	//
+	// 历史行的 batch_id 一律补空串：被旧主键合并掉的那部分数据在库里已不可
+	// 区分，重建无法还原；本次迁移只保证此后不再发生新的合并。
+	if err := s.migrateSubagentsBatchIDKey(); err != nil {
+		return err
+	}
 	// 版本门控迁移：v1/v2 基础表 → v2 版本号 → v3 预聚合列（§6.1）。
 	// 各步骤幂等；v3 迁移失败回滚后库保持 v2 可读。
 	version, err := s.schemaVersion()
@@ -582,6 +598,86 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 		}
 	}
 	return s.migrateStatsV3()
+}
+
+// usageSubagentsAllColumns 是 usage_subagents 的列清单（v8 重建用）。
+// 必须与 DDL 及下面的 INSERT…SELECT 同步；写成子集会让历史行的列静默丢值。
+const usageSubagentsAllColumns = `subagent_id, parent_session_id, child_session_id, role, task_type, task_subject,
+  read_only, success, completion_reason, failure_category, error_code, attempt, max_attempts, retry_reason,
+  id_synthesized, duration_ms, started_at_unix_nano, completed_at_unix_nano, usage_total_tokens, budget_tokens,
+  source, conflict_count, record_json`
+
+// usageSubagentsBatchIDKeyDDL 是带 batch_id 主键的建表语句（v8）。
+// 与 Open 里新库的 CREATE TABLE 保持逐字一致，只差表名不是 IF NOT EXISTS。
+const usageSubagentsBatchIDKeyDDL = `CREATE TABLE usage_subagents (
+  subagent_id             TEXT NOT NULL DEFAULT '',
+  parent_session_id       TEXT NOT NULL DEFAULT '',
+  batch_id                TEXT NOT NULL DEFAULT '',
+  child_session_id        TEXT NOT NULL DEFAULT '',
+  role                    TEXT NOT NULL DEFAULT '',
+  task_type               TEXT NOT NULL DEFAULT '',
+  task_subject            TEXT NOT NULL DEFAULT '',
+  read_only               INTEGER NOT NULL DEFAULT 0,
+  success                 INTEGER,
+  completion_reason       TEXT NOT NULL DEFAULT '',
+  failure_category        TEXT NOT NULL DEFAULT '',
+  error_code              TEXT NOT NULL DEFAULT '',
+  attempt                 INTEGER NOT NULL DEFAULT 1,
+  max_attempts            INTEGER NOT NULL DEFAULT 1,
+  retry_reason            TEXT NOT NULL DEFAULT '',
+  id_synthesized          INTEGER NOT NULL DEFAULT 0,
+  duration_ms             INTEGER NOT NULL DEFAULT 0,
+  started_at_unix_nano    INTEGER NOT NULL DEFAULT 0,
+  completed_at_unix_nano  INTEGER NOT NULL DEFAULT 0,
+  usage_total_tokens      INTEGER NOT NULL DEFAULT 0,
+  budget_tokens           INTEGER NOT NULL DEFAULT 0,
+  source                  TEXT NOT NULL DEFAULT '',
+  conflict_count          INTEGER NOT NULL DEFAULT 0,
+  record_json             BLOB,
+  PRIMARY KEY (subagent_id, parent_session_id, batch_id)
+)`
+
+// migrateSubagentsBatchIDKey 把 usage_subagents 的主键从
+// (subagent_id, parent_session_id) 重建为 (subagent_id, parent_session_id, batch_id)。
+//
+// 整表重建在单事务内完成：中途失败回滚，旧表原样保留，不留下"表没了"的中间态。
+// 列名是包内常量，不接受外部输入。
+func (s *Store) migrateSubagentsBatchIDKey() error {
+	if s == nil || s.readOnly || s.db == nil || s.empty {
+		return nil
+	}
+	hasBatch, err := s.hasColumn("usage_subagents", "batch_id")
+	if err != nil {
+		return fmt.Errorf("migrate usage analytics db: %w", err)
+	}
+	if hasBatch {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("migrate usage analytics db: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 历史行的 batch_id 一律补空串：旧主键合并掉的数据已无法区分，重建不还原。
+	steps := []string{
+		`ALTER TABLE usage_subagents RENAME TO usage_subagents_v7`,
+		usageSubagentsBatchIDKeyDDL,
+		`INSERT INTO usage_subagents (batch_id, ` + usageSubagentsAllColumns + `)
+   SELECT '', ` + usageSubagentsAllColumns + ` FROM usage_subagents_v7`,
+		`DROP TABLE usage_subagents_v7`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_session ON usage_subagents(parent_session_id, completed_at_unix_nano DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_subagents_fail ON usage_subagents(success, failure_category)`,
+	}
+	for _, step := range steps {
+		if _, err := tx.Exec(step); err != nil {
+			return fmt.Errorf("migrate usage analytics db: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migrate usage analytics db: %w", err)
+	}
+	return nil
 }
 
 // query 在只读降级时返回 (nil, false)：调用方给出空结果。

@@ -229,6 +229,7 @@ func (s *SubagentScheduler) emitSubagentAttemptEvent(
 		"source":               "scheduler",
 		"error":                errText,
 		"budget_tokens":        task.BudgetTokens,
+		"batch_id":             options.BatchID,
 		"parent_session_id":    options.ParentSessionID,
 		"parent_tool_call_id":  options.ParentToolCallID,
 		"child_agent_name":     childAgentName,

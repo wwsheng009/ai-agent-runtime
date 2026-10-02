@@ -157,6 +157,39 @@ func TestClassifySubagentFailureMapsTransientCodes(t *testing.T) {
 	}
 }
 
+// TestClassifySubagentFailureToolWhitelistDenial 锁定 2026-10-02 真机事故：
+// 父代理只给子代理发 tools_whitelist:["shell"]，子代理调用 glob/ls/grep 被
+// agent/loop.go 的白名单闸门拒绝。拒绝是确定性的工具侧失败，重试绝不可能
+// 成功——此前它被压成笼统 UPSTREAM_ERROR → provider_error，于是
+// Retryable=true、retry_advice=retry_with_changed_inputs，把父代理引去重试。
+func TestClassifySubagentFailureToolWhitelistDenial(t *testing.T) {
+	// 真实载荷：loop.go 逐条拒绝后由子代理终态拼接（分号分隔）。
+	denied := ClassifySubagentFailure(errors.New(
+		"tool not allowed for this agent: glob; tool not allowed for this agent: ls; tool not allowed for this agent: grep"))
+	if denied.Category != llm.FailureCategoryToolError {
+		t.Fatalf("白名单拒绝应分类为 tool_error，实际 %+v", denied)
+	}
+	if denied.Retryable {
+		t.Fatalf("白名单拒绝是确定性失败，不得标记可重试: %+v", denied)
+	}
+	if advice := SubagentRetryAdvice(denied.Category, true); advice != "complete_locally_or_change_tool" {
+		t.Fatalf("retry_advice 应把父代理引去改工具面，实际 %q", advice)
+	}
+	// 单条拒绝同样覆盖（子代理只踩一个工具时）。
+	single := ClassifySubagentFailure(errors.New("tool not allowed for this agent: write"))
+	if single.Category != llm.FailureCategoryToolError || single.Retryable {
+		t.Fatalf("单条白名单拒绝分类不符: %+v", single)
+	}
+	// 只读任务 + 确定性失败不得进入自动重试链。
+	if shouldAutoRetrySubagentTask(SubagentTask{ID: "t", ReadOnly: true}, denied, 1, 2, nil) {
+		t.Fatal("白名单拒绝不得自动重试（重试仍会被同一闸门拒绝）")
+	}
+	// 真正的上游瞬时故障仍须保持原分类，避免修复过头。
+	if got := ClassifySubagentFailure(errors.New("upstream 503 service unavailable")); got.Category == llm.FailureCategoryToolError {
+		t.Fatalf("上游瞬时故障被误降级为 tool_error: %+v", got)
+	}
+}
+
 // TestSubagentRetryBackoffBounded 指数退避 + jitter 必须有界（封顶 5s）。
 func TestSubagentRetryBackoffBounded(t *testing.T) {
 	for attempt := 1; attempt <= 10; attempt++ {
