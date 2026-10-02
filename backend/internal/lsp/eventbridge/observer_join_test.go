@@ -19,7 +19,7 @@ func TestObserverProjectsJoinKeysFingerprintsAndReasonCategory(t *testing.T) {
 		Trigger: "inline", Outcome: "injected",
 		ToolCallID: "call-1", TurnID: "turn-1",
 		Path: "/tmp/secret.go", PathFingerprint: "fp-path", DiagFingerprint: "fp-diag",
-		ReasonCategory: "wait_timeout",
+		ReasonCategory:    "wait_timeout",
 		AppendedDiagBytes: 120, AppendedNoteBytes: 30,
 		ColdFastFail: true, AttemptedMembers: 2,
 	})
