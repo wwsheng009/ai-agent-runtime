@@ -280,8 +280,8 @@ func TestGlobTool_LimitTruncation(t *testing.T) {
 	if limitHit, ok := result.Metadata["limit_hit"].(bool); !ok || !limitHit {
 		t.Fatalf("expected limit_hit metadata to be true, got: %#v", result.Metadata["limit_hit"])
 	}
-	if !strings.Contains(result.Content, "结果已截断") {
-		t.Fatalf("expected truncation hint in content, got: %s", result.Content)
+	if !strings.Contains(result.Content, "已分页显示前 2 个文件") || !strings.Contains(result.Content, "next_offset=2") {
+		t.Fatalf("expected paging hint with continuation in content, got: %s", result.Content)
 	}
 	if limit, ok := result.Metadata["limit"].(int); !ok || limit != 2 {
 		t.Fatalf("expected limit metadata to be 2, got: %#v", result.Metadata["limit"])

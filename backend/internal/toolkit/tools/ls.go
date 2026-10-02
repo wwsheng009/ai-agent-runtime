@@ -245,7 +245,9 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 
 	output.WriteString(fmt.Sprintf("\n统计: %d 个文件, %d 个目录", fileCount, dirCount))
 	if limitReached || byteBudgetHit {
-		output.WriteString(fmt.Sprintf("\n(已截断，显示前 %d 个条目，共 %d 个)", rendered, len(entries)))
+		// ls 没有 offset/limit 分页参数，恢复路径是缩小 depth / 分目录查看：
+		// 提示必须把这条路线写进模型可见正文，只报条数会被读成数据丢失。
+		output.WriteString(fmt.Sprintf("\n(条目过多，已显示前 %d 个，共 %d 个；next_step: 减小 depth 或分目录查看，不要原样重试)", rendered, len(entries)))
 	}
 
 	// Directory listing with zero entries is a true empty success (empty dir),
@@ -284,5 +286,5 @@ func (l *LsTool) Execute(ctx context.Context, params map[string]interface{}) (*t
 // both, so the reserve is an upper bound rather than a guess.
 func lsTrailerReserve(fileCount, dirCount, total int) int {
 	return len(fmt.Sprintf("\n统计: %d 个文件, %d 个目录", fileCount, dirCount)) +
-		len(fmt.Sprintf("\n(已截断，显示前 %d 个条目，共 %d 个)", total, total))
+		len(fmt.Sprintf("\n(条目过多，已显示前 %d 个，共 %d 个；next_step: 减小 depth 或分目录查看，不要原样重试)", total, total))
 }

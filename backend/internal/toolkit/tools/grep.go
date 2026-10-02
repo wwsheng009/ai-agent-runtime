@@ -5540,7 +5540,14 @@ func grepByteBudgetBytes() int {
 // byte-budget hint. Both print counts bounded by the total match count, so the
 // reserve is an upper bound rather than a guess.
 func grepTruncationNoticeReserve(total, budget int) int {
-	return len(fmt.Sprintf("\n\n(结果已截断，显示前 %d 个匹配)", total)) +
+	// 预留必须覆盖所有互斥的提示形态，且取较长者：默认上限路径给
+	// next_offset 的文案比旧文案长，继续按旧文案预留会让 payload 悄悄
+	// 突破 grepOutputBudgetBytes。显式分页形态与默认形态不会同时出现。
+	paging := len(fmt.Sprintf("\n\n(已分页返回前 %d 个匹配；next_offset=%d 可继续分页读取后续匹配)", total, total))
+	if explicit := len(fmt.Sprintf("\n\n(已分页显示第 %d-%d 个匹配；next_offset=%d 可继续分页)", total, total, total)); explicit > paging {
+		paging = explicit
+	}
+	return paging +
 		len(fmt.Sprintf("\n(输出超过 grep 字节预算 %d 字节，提前停止；next_step: 收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数)", budget))
 }
 
@@ -5618,9 +5625,14 @@ func buildGrepResult(opts *grepOptions, results []string, matchCount int, trunca
 		if truncated && (opts == nil || !opts.jsonOutput) {
 			if opts != nil && (opts.offset > 0 || opts.headLimitSet) {
 				nextOffset := pageStart + len(results)
-				output += fmt.Sprintf("\n\n(结果已截断，显示第 %d-%d 个匹配；next_offset=%d 可继续分页)", pageStart+1, pageStart+len(results), nextOffset)
+				output += fmt.Sprintf("\n\n(已分页显示第 %d-%d 个匹配；next_offset=%d 可继续分页)", pageStart+1, pageStart+len(results), nextOffset)
 			} else {
-				output += fmt.Sprintf("\n\n(结果已截断，显示前 %d 个匹配)", len(results))
+				// 默认内置上限（maxMatches）返回的是**分页窗口**，不是数据丢失：
+				// 提示必须同时给出续读 offset，并且避免使用“截断”这个词——模型
+				// 会把“已截断”原样复述成“输出被截断”，然后换词重搜而不是分页。
+				// （真正被字节预算砍掉的情形另有 next_step 提示，见下。）
+				nextOffset := pageStart + len(results)
+				output += fmt.Sprintf("\n\n(已分页返回前 %d 个匹配；next_offset=%d 可继续分页读取后续匹配)", len(results), nextOffset)
 			}
 			if byteTruncated {
 				output += fmt.Sprintf("\n(输出超过 grep 字节预算 %d 字节，提前停止；next_step: 收窄 pattern、增加 paths/glob 限定，或用 max_count 限制每文件匹配数)", grepByteBudgetBytes())

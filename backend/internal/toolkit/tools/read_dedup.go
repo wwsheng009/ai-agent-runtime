@@ -207,7 +207,7 @@ func viewDedupPeek(ctx context.Context, path string, info os.FileInfo, offset, l
 	continuation := ""
 	if !entry.EOF && entry.LinesRead > 0 {
 		continuation = fmt.Sprintf(
-			" The window is truncated (is_truncated=true); continue with view offset=%d limit<=%d.",
+			" The file continues past this window (is_truncated=true); continue with view offset=%d limit<=%d.",
 			offset+entry.LinesRead, viewDefaultLimit,
 		)
 	}
@@ -215,7 +215,7 @@ func viewDedupPeek(ctx context.Context, path string, info os.FileInfo, offset, l
 		Success:    true,
 		OutputKind: toolresult.KindText,
 		Content: fmt.Sprintf(
-			"unchanged: %s offset %d limit %d (lines_read=%d) was already returned in this session and the file has not changed since. "+
+			"view dedup hit (not an error, not content loss): unchanged: %s offset %d limit %d (lines_read=%d) was already returned in this session and the file has not changed since. "+
 				"The content is still in the conversation; if it is no longer visible (e.g. after context compaction), call view again and the next call returns the full content.%s",
 			path, offset, limit, entry.LinesRead, continuation,
 		),

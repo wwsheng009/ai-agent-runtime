@@ -241,8 +241,12 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 	} else {
 		// 截断提示与文件列表同属 glob 的字节预算：先按最坏情况预留提示长度，
 		// 列表只在剩余额度内写入，payload 才真正不超过 globOutputBudgetBytes。
-		noticeReserve := len(globTruncationNotice(pageStart+len(page))) +
-			len(globPaginationNotice(offset, offset+len(page), offset+len(page)))
+		// 截断提示与分页提示不会同时出现（见下方 emission），预留取两者较大值：
+		// 既不超预算，也不无条件多扣一行列表容量。
+		noticeReserve := len(globTruncationNotice(pageStart+len(page), offset+len(page)))
+		if paginationReserve := len(globPaginationNotice(offset, offset+len(page), offset+len(page))); paginationReserve > noticeReserve {
+			noticeReserve = paginationReserve
+		}
 		listingBudget := globOutputBudgetBytes - noticeReserve
 		if listingBudget < 0 {
 			listingBudget = 0
@@ -263,9 +267,10 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 		}
 		output = strings.Join(rendered, "\n")
 		if truncated {
-			output += globTruncationNotice(pageStart + len(rendered))
-		}
-		if hasMore {
+			// 默认 limit/字节预算截断同样要给出续读入口：只报“显示前 N 个文件”
+			// 会让模型把窗口读成数据丢失，然后换词重搜而不是分页。
+			output += globTruncationNotice(pageStart+len(rendered), offset+len(rendered))
+		} else if hasMore {
 			nextOffset := offset + len(rendered)
 			output += globPaginationNotice(offset, nextOffset, nextOffset)
 		}
@@ -334,11 +339,13 @@ func (g *GlobTool) Execute(ctx context.Context, params map[string]interface{}) (
 }
 
 // globTruncationNotice renders the notice glob appends after a truncated file
-// list. The entry count only grows with its digit count, so the total match
-// count is a valid byte ceiling when reserving room for the notice inside the
-// glob window.
-func globTruncationNotice(total int) string {
-	return fmt.Sprintf("\n\n(结果已截断，显示前 %d 个文件)", total)
+// list. It carries the continuation offset so the default (non-paginated) path
+// is as actionable as an explicit offset call: without it the model reads the
+// window as data loss and re-runs the same search with different wording.
+// The entry count only grows with its digit count, so the page size is a valid
+// byte ceiling when reserving room for the notice inside the glob window.
+func globTruncationNotice(shown, next int) string {
+	return fmt.Sprintf("\n\n(已分页显示前 %d 个文件；next_offset=%d 可继续分页)", shown, next)
 }
 
 // globPaginationNotice 告诉模型当前页在排序后结果中的位置与下一页 offset。

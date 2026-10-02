@@ -236,15 +236,15 @@ func TestGrepTool_ByteBudgetTruncationKeepsLeadingMatches(t *testing.T) {
 	if reason, _ := result.Metadata["truncation_reason"].(string); reason != "byte_budget" {
 		t.Fatalf("expected truncation_reason=byte_budget, got %#v", result.Metadata)
 	}
-	if !strings.Contains(result.Content, "结果已截断") || !strings.Contains(result.Content, "next_step") {
-		t.Fatalf("expected truncation notice with next_step guidance, got tail %q", tailOf(result.Content, 300))
+	if !strings.Contains(result.Content, "next_offset=") || !strings.Contains(result.Content, "next_step") {
+		t.Fatalf("expected paging notice with next_offset and next_step guidance, got tail %q", tailOf(result.Content, 300))
 	}
 	// Leading matches must be intact (no middle cut): first line present.
 	if !strings.HasPrefix(result.Content, "file_0.go:1:") {
 		t.Fatalf("expected first match preserved as prefix, got head %q", headOf(result.Content, 120))
 	}
 	// All kept lines must be complete (no partial line cut).
-	lines := strings.Split(strings.Split(result.Content, "\n\n(结果已截断")[0], "\n")
+	lines := strings.Split(strings.Split(result.Content, "\n\n(")[0], "\n")
 	for i, l := range lines {
 		if !strings.HasPrefix(l, "file_") {
 			t.Fatalf("line %d is not a complete match line: %q", i, l)

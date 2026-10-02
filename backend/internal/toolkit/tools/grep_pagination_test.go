@@ -135,3 +135,27 @@ func TestGrepWalkerPaginationIsConsistent(t *testing.T) {
 		t.Fatalf("page 2 repeated page 1 content: %q", pageTwo[0])
 	}
 }
+
+// TestGrepDefaultCapNoticePublishesNextOffset pins the default-path truncation
+// notice: when the built-in maxMatches cap (100) cuts a search, the notice must
+// publish next_offset like the explicit-pagination path does. Without it the
+// model reads the notice as data loss and keeps re-issuing reworded searches
+// instead of paging with offset/head_limit.
+func TestGrepDefaultCapNoticePublishesNextOffset(t *testing.T) {
+	lines := make([]string, 0, 105)
+	for index := 1; index <= 105; index++ {
+		lines = append(lines, fmt.Sprintf("src/file.txt:%d:needle %d", index, index))
+	}
+	tool := stubGrepToolWithLines(t, lines)
+
+	result, err := tool.Execute(context.Background(), map[string]interface{}{"pattern": "needle"})
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("default grep failed: %v %+v", err, result)
+	}
+	if !strings.Contains(result.Content, "已分页返回前 100 个匹配") || !strings.Contains(result.Content, "next_offset=100") {
+		t.Fatalf("default cap notice lost the paging/continuation contract: %q", result.Content)
+	}
+	if page := grepPayloadLines(t, result.Content); len(page) != 100 {
+		t.Fatalf("expected the first 100 matches in the default window, got %d", len(page))
+	}
+}

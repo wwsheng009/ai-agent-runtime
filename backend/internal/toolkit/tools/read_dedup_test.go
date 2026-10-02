@@ -53,7 +53,8 @@ func TestViewDedupSameWindowReturnsStubThenConsumes(t *testing.T) {
 	if second.Metadata["dedup_hit"] != true || second.Metadata["dedup_consumed"] != true {
 		t.Fatalf("second read must be a consumed dedup stub, got %#v", second.Metadata)
 	}
-	if !strings.Contains(second.Content, "unchanged:") || !strings.Contains(second.Content, "call view again") {
+	if !strings.Contains(second.Content, "unchanged:") || !strings.Contains(second.Content, "call view again") ||
+		!strings.Contains(second.Content, "not an error") {
 		t.Fatalf("stub must carry the recovery route, got %q", second.Content)
 	}
 
