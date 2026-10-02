@@ -237,3 +237,64 @@ eventbridge 仅 >1 时落盘（单成员请求载荷保持现状）；白名单�
 | `lsp_cold_first_probe_ratio` | n/a（0 分类样本） | ≥20 样本后判读：首探针占比高 → 下一轮引入 `cold_probe_ms`（保守默认）；占比低 → 维持现状 | 基线报告新行（Go/Python 同构，旧事件缺字段不计入） |
 | `lsp_diag_new_ratio` | n/a（0 诊断样本） | ≥20 诊断样本后判读：新增占比低（如 <50%）→ 评估把 `diagnostics.scope` 默认切到 `changed`；占比高 → 维持 `all`（A6） | 基线报告新行（Go/Python 同构，仅全量>0 的事件携带） |
 | 新文件首探针命中率 | 真机 1/1 丢失（1.71s 发布 vs 1.0s 预算） | O10 后首探针在宽限预算（2.5s）内命中；重复探针仍 250ms 快失败 | 新文件编辑的 `injected` / `degraded_no_fresh` 计数 |
+
+---
+
+## 8. 下一轮候选（2026-10-02 基线触发；O12 已实施，其余待立项）
+
+> 依据：`docs/analysis/lsp-baseline-check-20261002.md`（全窗口 2115 请求 /
+> 37 会话基线复算与判读）；§4.3 登记表已回填建议阈值（固化待确认，ADR-0003 D4）。
+
+### O12（✅ 已实施 2026-10-02）：引入 `diagnostics.coldProbeMs`（首探针预算，保守默认 1500 ms）
+
+- **触发判据**：`lsp_cold_first_probe_ratio` = 0.9608（first 98 / repeat 4，
+  n=102 ≥20，首探针 96% ≥50%）→ §7.2 既定判据"首探针占比高 → 下一轮引入
+  `cold_probe_ms`（保守默认）"。
+- **现状**（`internal/lsp/bridge.go:394-417`）：首探针（路径无快照 + 本连接
+  未对该路径用过宽限）按 `WaitMS(1000) + ColdStartGraceMS(1500) = 2500 ms`
+  完整预算等待；超时且无快照 → `MarkColdWait(path)`，后续编辑走
+  `ColdRetryMS(250 ms)` 快失败。路径级快失败仅覆盖 4% 的 no_fresh，
+  96% 首探针各付 2500 ms 上限（窗口累计最高 ~245 s）。
+- **设计**：`DiagnosticsConfig.ColdProbeMS`（`coldProbeMs`；0/unset = 1500，
+  负值 = 关闭并恢复完整 2500 ms 预算，三态模式与 `ColdStartGraceMS` 一致）；
+  宽限分支在 `remaining += grace` 后追加封顶 `probe = max(cold_probe_ms,
+  wait_ms)`；`if probe > 0 && remaining > probe { remaining = probe }`；
+  标记/快失败/清除语义与事件字段（`cold_fast_fail` 仅重复探针为 true）
+  全部不变。
+- **实施期修正（重要）**：初版为简单封顶（`remaining = min(remaining, probe)`），
+  被 `TestRealRustAnalyzerRoundTrip`（真实 rust-analyzer 往返，配置
+  `wait_ms=60s` 容忍慢速首分析）回归暴露——简单封顶会把显式调大 `wait_ms`
+  的配置静默截断到 1.5s。故封顶加 `wait_ms` 下限：**封顶不低于基础预算**，
+  显式调大 `wait_ms` 的宿主不受影响（`TestColdProbeFloorRespectsWaitMS` 钉住）。
+- **保守性**：默认 1500 ms = 现宽限值（宽限本为中等冷启动设计；~85 s 极端
+  尾部本就不会在预算内落地）；O10 真机案例首探针 1333 ms 发布仍被覆盖
+  （余量 167 ms）；低于 1500 ms 需 A/B 验证 injected 不回落。
+- **预期收益**：98 次首探针中超时者每次节省 ~1000 ms，窗口累计最高 ~98 s；
+  P95 尾部（冷宽限路径）相应收窄。
+- **验证**（全部通过）：`go test ./internal/lsp/... ./internal/runtimeobserve/...
+  ./internal/tools/... -count=1` 全绿；新增
+  `TestColdProbeCapsFirstProbeBudget` / `TestColdProbeFloorRespectsWaitMS` /
+  `TestColdProbeNegativeRestoresFullBudget` / `TestColdProbeConfigNormalization`；
+  既有 `TestColdGrace*` / `TestColdRetryAfterGraceTimeout` /
+  `TestColdRetryAppliesPerPathOnWarmConnection` 与真实 server 往返
+  （`TestRealRustAnalyzerRoundTrip`）不回归；`cmd/aicli/commands` LSP 测试通过。
+- **改动点**：`internal/lsp/spec.go`（常量/字段/默认/归一化）、
+  `internal/lsp/bridge.go`（宽限分支封顶）、`internal/lsp/{bridge,optimization}_test.go`
+  （4 个新测试）；文档：`docs/lsp/03` §4 配置表 + A10、
+  `docs/analysis/lsp-baseline-check-20261002.md` §4.1。
+- **风险与回滚**：cut 太低丢晚发布诊断（回退 O10 收益）→ 默认 1500 ms +
+  配置可回退（负值）；A/B 后再考虑下调。
+
+### 关联观察项（非本轮立项）
+
+- **gopls 崩溃治理**（P1）：`restart_budget_exhausted` 61 次 = 最大可行动
+  可靠性归因，与整机内存耗尽（`errno=1455`）同源 → ADR-0005 Job Object
+  内存护栏 + 耗尽后可行动文案；fallback 达标 <0.5 的前置条件。
+- **冷启动 P95 14.4 s**（P2）：n=25，P50 7305 ms 改善、P95 持平（模块视图
+  ~85 s 重尾）→ 模块视图懒加载/`-remote=auto` 评估；候选阈值 ≤10 s。
+- **P95 按日恶化**（P2）：1000 → 1000 → 1440 → 1681 ms → "单日 P95 >
+  1500 ms"纳入人工复查清单（不自动告警，ADR-0003 D4）。
+- **绝对覆盖面 31%**（P3）：69% 编辑在非 LSP 会话 → 默认开启评估（需 §4.2
+  内存护栏先行）。
+- **A6 复判**（数据）：`lsp_diag_new_ratio` 0.7798（n=168）→ 维持
+  `scope=all`；新增占比 <50% 时再评估 `changed` 默认。

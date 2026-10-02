@@ -772,6 +772,148 @@ func TestColdRetryAfterGraceTimeout(t *testing.T) {
 	}
 }
 
+// TestColdProbeCapsFirstProbeBudget pins O12: the one-time first-probe
+// wait is bounded by cold_probe_ms instead of the full grace-extended
+// budget (wait_ms + cold_start_grace_ms). The cross-session baseline
+// showed 96% of no_fresh requests are first probes
+// (lsp_cold_first_probe_ratio 0.9608); the per-path cold fast-fail
+// only covers repeats.
+func TestColdProbeCapsFirstProbeBudget(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestFile(t, dir, "main.go", "package main\n")
+	fake := newFakeServer(t)
+	fake.setSuppressPublish(true)
+	cfg := testConfig(t, func(c *Config) {
+		c.Servers[0].EmptyPublishConclusive = boolPtr(true)
+		c.Diagnostics.WaitMS = 200
+		c.Diagnostics.StartWaitMS = 50
+		c.Diagnostics.ColdStartGraceMS = 400
+		c.Diagnostics.ColdRetryMS = 100
+		c.Diagnostics.ColdProbeMS = 300
+		c.Diagnostics.EmptyConfirmMS = 40
+	})
+	recorder := &eventRecorder{}
+	bridge := NewBridgeWithOptions(cfg, dir, BridgeOptions{Dial: fake.dial(), Observer: recorder.observe})
+	ctx := context.Background()
+	t.Cleanup(func() { bridge.Stop(ctx) })
+
+	start := time.Now()
+	first := bridge.AppendToResult(ctx, "e1\n", []string{path})
+	firstElapsed := time.Since(start)
+	if !strings.Contains(first, "LSP diagnostics unavailable") {
+		t.Fatalf("expected a degrade, got:\n%s", first)
+	}
+	// The first probe pays the capped budget (300ms), not the full
+	// grace-extended one (200+400=600ms).
+	if firstElapsed < 280*time.Millisecond {
+		t.Fatalf("first wait = %v, want the capped first-probe budget (~300ms)", firstElapsed)
+	}
+	if firstElapsed > 500*time.Millisecond {
+		t.Fatalf("first wait = %v, want the cold_probe_ms cap (300ms) to bind, not the full 600ms budget", firstElapsed)
+	}
+	// The degrade note must report the actual (capped) budget.
+	if !strings.Contains(first, "within 300ms") {
+		t.Fatalf("first-probe note must report the actual budget, got:\n%s", first)
+	}
+
+	// The path is now known cold: the next edit still fast-fails at
+	// cold_retry_ms (the cap does not change the repeat route).
+	start = time.Now()
+	second := bridge.AppendToResult(ctx, "e2\n", []string{path})
+	secondElapsed := time.Since(start)
+	if secondElapsed > 400*time.Millisecond {
+		t.Fatalf("second wait = %v, want the reduced cold retry (~100ms)", secondElapsed)
+	}
+	if !strings.Contains(second, "within 100ms") {
+		t.Fatalf("cold fast-fail note must report the actual budget, got:\n%s", second)
+	}
+	coldFails := 0
+	for _, event := range recorder.snapshot() {
+		if event.Kind == EventRequest && event.ColdFastFail {
+			coldFails++
+		}
+	}
+	if coldFails != 1 {
+		t.Fatalf("cold_fast_fail events = %d, want exactly the second edit (the first probe is not a fast-fail)", coldFails)
+	}
+}
+
+// TestColdProbeFloorRespectsWaitMS pins that the first-probe cap
+// never goes below the configured base budget: a caller that raises
+// wait_ms explicitly wants the cold path to keep paying it (live
+// evidence: the real-server round-trip test sets wait_ms=60s for
+// rust-analyzer's slow first analysis).
+func TestColdProbeFloorRespectsWaitMS(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestFile(t, dir, "main.go", "package main\n")
+	fake := newFakeServer(t)
+	fake.setSuppressPublish(true)
+	cfg := testConfig(t, func(c *Config) {
+		c.Servers[0].EmptyPublishConclusive = boolPtr(true)
+		c.Diagnostics.WaitMS = 500
+		c.Diagnostics.StartWaitMS = 50
+		c.Diagnostics.ColdStartGraceMS = 200
+		c.Diagnostics.ColdRetryMS = 100
+		c.Diagnostics.ColdProbeMS = 300
+		c.Diagnostics.EmptyConfirmMS = 40
+	})
+	bridge := NewBridgeWithOptions(cfg, dir, BridgeOptions{Dial: fake.dial()})
+	ctx := context.Background()
+	t.Cleanup(func() { bridge.Stop(ctx) })
+
+	start := time.Now()
+	first := bridge.AppendToResult(ctx, "e1\n", []string{path})
+	firstElapsed := time.Since(start)
+	if !strings.Contains(first, "LSP diagnostics unavailable") {
+		t.Fatalf("expected a degrade, got:\n%s", first)
+	}
+	// The cap (300ms) is below wait_ms (500ms): the floor wins and
+	// the first probe pays the base budget, not the cap.
+	if firstElapsed < 480*time.Millisecond {
+		t.Fatalf("first wait = %v, want the wait_ms floor (~500ms), not the 300ms cap", firstElapsed)
+	}
+	if firstElapsed > 650*time.Millisecond {
+		t.Fatalf("first wait = %v, want the floor to bound the grace-extended budget (700ms uncapped)", firstElapsed)
+	}
+	if !strings.Contains(first, "within 500ms") {
+		t.Fatalf("first-probe note must report the floored budget, got:\n%s", first)
+	}
+}
+
+// TestColdProbeNegativeRestoresFullBudget pins the disable switch: a
+// negative cold_probe_ms restores the pre-O12 full grace-extended
+// first-probe budget.
+func TestColdProbeNegativeRestoresFullBudget(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestFile(t, dir, "main.go", "package main\n")
+	fake := newFakeServer(t)
+	fake.setSuppressPublish(true)
+	cfg := testConfig(t, func(c *Config) {
+		c.Servers[0].EmptyPublishConclusive = boolPtr(true)
+		c.Diagnostics.WaitMS = 200
+		c.Diagnostics.StartWaitMS = 50
+		c.Diagnostics.ColdStartGraceMS = 400
+		c.Diagnostics.ColdRetryMS = 100
+		c.Diagnostics.ColdProbeMS = -1
+		c.Diagnostics.EmptyConfirmMS = 40
+	})
+	bridge := NewBridgeWithOptions(cfg, dir, BridgeOptions{Dial: fake.dial()})
+	ctx := context.Background()
+	t.Cleanup(func() { bridge.Stop(ctx) })
+
+	start := time.Now()
+	first := bridge.AppendToResult(ctx, "e1\n", []string{path})
+	firstElapsed := time.Since(start)
+	if !strings.Contains(first, "LSP diagnostics unavailable") {
+		t.Fatalf("expected a degrade, got:\n%s", first)
+	}
+	// Cap disabled: the first probe pays the full wait_ms + grace
+	// (200+400=600ms).
+	if firstElapsed < 550*time.Millisecond {
+		t.Fatalf("first wait = %v, want the full grace-extended budget (~600ms) with the cap disabled", firstElapsed)
+	}
+}
+
 // TestRenderDiagnosticsEmptyStyle pins the clean-result marker: compact drops
 // scope/servers (diagnostics.emptyStyle default), full keeps the legacy
 // attributes for callers that need them.

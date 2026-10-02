@@ -76,6 +76,7 @@
 | `diagnostics.tool_enabled` | 是否注册可选工具 `lsp_diagnostics`（W7） | 默认 `false`：内联闭环是主反馈环，独立工具只作补充路径 |
 | `diagnostics.cold_start_grace_ms` | 冷视图（server 从未发布过任何诊断）时对每个路径**一次**的有界延长（2026-10-01 落地） | 默认 `1500`，负值关闭；每个路径每 server 实例只授予一次，首个发布后不再授予（不拖慢稳态与忽略目录的重复编辑） |
 | `diagnostics.cold_retry_ms` | 已知冷路径的快速失败预算：该路径无快照且本次等待已超过该预算 → 后续编辑只等这个值（2026-10-01 落地，第九轮改为路径级判定） | 默认 `250`，负值关闭（始终等满 `wait_ms`）；该路径**首个发布**即清除"已知冷"标记 |
+| `diagnostics.cold_probe_ms` | 首探针（路径无快照的首次编辑）等待上限：宽限后总预算（`wait_ms` + `cold_start_grace_ms`，默认 2.5s）封顶到该值。跨会话基线显示 96% 的 no_fresh 是首探针（`lsp_cold_first_probe_ratio` 0.9608），路径级快速失败只覆盖重复探针（2026-10-02 落地，O12） | 默认 `1500`（= 宽限值，覆盖中等冷启动；O10 真机 1.33s 首发布仍被覆盖）；**封顶不低于 `wait_ms`**（显式调大 `wait_ms` 的宿主仍要长预算）；负值关闭（恢复完整宽限预算） |
 | `diagnostics.empty_style` | clean 结果的内联标记样式：`compact`（仅自闭合标记） / `full`（附带 scope/servers 属性）（2026-10-01 落地） | 默认 `compact`：空结果只保留"已检查无问题"信号，去掉固定冗余属性；配置可回退 `full` |
 | `servers[].empty_publish_conclusive` | 该 server 的空发布是否具结论性 | 默认 `false`；`gopls` 预设为 `true`，其余保守等待 |
 
@@ -137,13 +138,14 @@
 - **需回流的情形**：该规则实质是对 `lsp_servers` 既有语义的**解释权**问题 → 归规格侧，不在 `docs/lsp` 拍板（`02` §6.2 Q4 原文如此）。
 
 ### A10 · Q5 编辑后等待时延
-- **判定方法**：压测编辑工具调用耗时，含 `diagnostics.wait_ms` 命中与不命中两种情况；冷视图另测三种形态：
-  ① 宽限（`cold_start_grace_ms`，每路径一次）→ ② 已知冷路径的快速失败（`cold_retry_ms`）→ ③ 该路径
-  首个发布后恢复常规路径（含空发布提前采信）。
+- **判定方法**：压测编辑工具调用耗时，含 `diagnostics.wait_ms` 命中与不命中两种情况；冷视图另测四种形态：
+  ① 宽限（`cold_start_grace_ms`，每路径一次）→ ② 首探针预算封顶（`cold_probe_ms`，不低于 `wait_ms`）
+  → ③ 已知冷路径的快速失败（`cold_retry_ms`）→ ④ 该路径首个发布后恢复常规路径（含空发布提前采信）。
 - **通过**：阻塞时长有上限且可观测（日志/指标）；超时走 A8 的降级语义，**不产生无限等待**；
   冷路径第 2 次起编辑不再付满预算，且发布到达后立即恢复常规时延（回归：
   `TestColdGraceLetsLateFirstPublishLand`、`TestColdRetryAfterGraceTimeout`、
-  `TestColdRetryAppliesPerPathOnWarmConnection`）。
+  `TestColdRetryAppliesPerPathOnWarmConnection`、`TestColdProbeCapsFirstProbeBudget`、
+  `TestColdProbeFloorRespectsWaitMS`、`TestColdProbeNegativeRestoresFullBudget`）。
 
 ### A11 · 刻意差异被承认（`02` §6.3）
 - **判定方法**：逐条核对 4 行差异（运行形态、LSP 缺失为常态、同步等待需上限、诊断粒度待定）。

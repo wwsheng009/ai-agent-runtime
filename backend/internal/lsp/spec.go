@@ -73,6 +73,17 @@ const (
 	// Re-waiting the full budget on every edit during a long view load only
 	// adds latency; the first edit after the publish gets the real result.
 	DefaultColdRetryMS = 250
+	// DefaultColdProbeMS bounds the one-time first-probe wait for a path
+	// with no snapshot. The grace extension (wait_ms + cold_start_grace_ms)
+	// reaches 2.5s with the defaults, and the cross-session baseline showed
+	// 96% of no_fresh requests are such first probes
+	// (lsp_cold_first_probe_ratio 0.9608) while the per-path cold fast-fail
+	// covers only the repeats. 1500ms equals the grace value: it still
+	// covers medium cold starts (live evidence: 1.33s first publish on a
+	// warm connection), and the extreme tail (~85s module views) never
+	// landed inside the budget anyway — that is why the path is then
+	// marked known-cold.
+	DefaultColdProbeMS = 1500
 	// DefaultMaxTrackedDocs caps the per-client didOpen document set. Long
 	// sessions touch many files; without a bound the docs map (full content
 	// copies) grows forever and servers keep analyzing closed files.
@@ -138,6 +149,17 @@ type DiagnosticsConfig struct {
 	// from burning the full budget on every edit. 0/unset = DefaultColdRetryMS;
 	// negative disables (always wait the full budget).
 	ColdRetryMS int `yaml:"coldRetryMs,omitempty" json:"coldRetryMs,omitempty"`
+	// ColdProbeMS bounds the one-time first-probe wait: the budget a
+	// path with no snapshot gets on its first edit, after the grace
+	// extension. Without the cap the first probe pays wait_ms +
+	// cold_start_grace_ms (2.5s with the defaults) on every
+	// never-published path; the baseline showed those first probes
+	// are 96% of all no_fresh requests. The cap never goes below
+	// wait_ms: a caller that raises wait_ms explicitly wants the
+	// cold path to keep paying it.
+	// 0/unset = DefaultColdProbeMS; negative disables the cap (first
+	// probe pays the full grace-extended budget, pre-O12 behavior).
+	ColdProbeMS int `yaml:"coldProbeMs,omitempty" json:"coldProbeMs,omitempty"`
 	// EmptyStyle controls the clean-result inline block: "compact" (default)
 	// emits only the self-closing marker, "full" also carries scope/servers.
 	// Only the empty branch changes; diagnostic blocks are untouched.
@@ -165,6 +187,7 @@ func DefaultDiagnosticsConfig() DiagnosticsConfig {
 		EmptyConfirmMS:   DefaultEmptyConfirmMS,
 		ColdStartGraceMS: DefaultColdStartGraceMS,
 		ColdRetryMS:      DefaultColdRetryMS,
+		ColdProbeMS:      DefaultColdProbeMS,
 	}
 }
 
@@ -211,6 +234,15 @@ func (d DiagnosticsConfig) Normalize() DiagnosticsConfig {
 	}
 	if d.ColdRetryMS > 5000 {
 		d.ColdRetryMS = 5000
+	}
+	// Negative stays negative: it is the "cap disabled" sentinel; the
+	// bridge treats probe <= 0 as "no cap" (unlike grace/retry, where
+	// negative means "feature off" and is normalized to 0).
+	if d.ColdProbeMS == 0 {
+		d.ColdProbeMS = DefaultColdProbeMS
+	}
+	if d.ColdProbeMS > 5000 {
+		d.ColdProbeMS = 5000
 	}
 	switch d.DegradeMode {
 	case DegradeNone, DegradeHint, DegradeError:

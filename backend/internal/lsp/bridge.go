@@ -400,6 +400,27 @@ func (b *Bridge) Diagnose(ctx context.Context, path string) Outcome {
 		} else if grace := time.Duration(cfg.ColdStartGraceMS) * time.Millisecond; grace > 0 &&
 			!client.HasSnapshot(path) && client.TakeColdGrace(path) {
 			remaining += grace
+			// O12: bound the one-time first-probe wait. The grace
+			// extension can reach 2.5s with the defaults, and the
+			// cross-session baseline showed 96% of no_fresh requests
+			// are first probes (lsp_cold_first_probe_ratio 0.9608);
+			// the per-path cold fast-fail below only covers repeats.
+			// cold_probe_ms caps the first probe at a conservative
+			// default (1500ms = the grace value, still covering medium
+			// cold starts); negative disables the cap. The cap never
+			// goes below the configured base budget (wait_ms): a caller
+			// that raises wait_ms explicitly wants the cold path to keep
+			// paying it (live evidence: real rust-analyzer first
+			// analysis needs seconds; the e2e round-trip test sets
+			// wait_ms=60s for exactly that).
+			if probe := time.Duration(cfg.ColdProbeMS) * time.Millisecond; probe > 0 {
+				if floor := time.Duration(cfg.WaitMS) * time.Millisecond; probe < floor {
+					probe = floor
+				}
+				if remaining > probe {
+					remaining = probe
+				}
+			}
 		}
 		// 实际等待预算（可能被冷快速失败缩减、或被冷启动宽限延长）：降级
 		// 文案必须报告真实预算，否则"within 1s"会在只等 250ms 时误导模型与日志。

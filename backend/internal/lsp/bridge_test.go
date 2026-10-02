@@ -101,6 +101,28 @@ func TestConfigNormalizeDefaults(t *testing.T) {
 	}
 }
 
+// TestColdProbeConfigNormalization pins the O12 three-state default:
+// 0/unset falls back to DefaultColdProbeMS, an explicit value is kept
+// (capped at 5000), and a negative value passes through as the
+// "cap disabled" sentinel (the bridge treats probe <= 0 as no cap).
+func TestColdProbeConfigNormalization(t *testing.T) {
+	if got := (DiagnosticsConfig{}).Normalize().ColdProbeMS; got != DefaultColdProbeMS {
+		t.Fatalf("unset coldProbeMs = %d, want %d", got, DefaultColdProbeMS)
+	}
+	if got := (DiagnosticsConfig{ColdProbeMS: 900}).Normalize().ColdProbeMS; got != 900 {
+		t.Fatalf("explicit coldProbeMs = %d, want 900", got)
+	}
+	if got := (DiagnosticsConfig{ColdProbeMS: 9000}).Normalize().ColdProbeMS; got != 5000 {
+		t.Fatalf("oversized coldProbeMs = %d, want the 5000 cap", got)
+	}
+	if got := (DiagnosticsConfig{ColdProbeMS: -1}).Normalize().ColdProbeMS; got != -1 {
+		t.Fatalf("negative coldProbeMs = %d, want the disable sentinel preserved", got)
+	}
+	if got := DefaultDiagnosticsConfig().ColdProbeMS; got != DefaultColdProbeMS {
+		t.Fatalf("DefaultDiagnosticsConfig().ColdProbeMS = %d, want %d", got, DefaultColdProbeMS)
+	}
+}
+
 func TestAppendToResultPreservesOutputAndAppendsDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTestFile(t, dir, "main.go", "package main\n\nfunc main() {}\n")

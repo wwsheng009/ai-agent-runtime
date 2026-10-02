@@ -123,24 +123,29 @@
 2. **会话复盘**：`~/.aicli/chat-logs/**/runtime-events.jsonl` 按 session 聚合（脚本 `scripts/`，字段口径同 §3.3），回答"哪个工具/项目/服务器在失败"。
 3. **周期基线**：按天/项目聚合出基线报告，写回 §4.3；阈值只在基线产出后固化（ADR-0003 D4）。
 
-### 4.3 基线登记表（最近回填 2026-10-01T02:54Z，阈值仍待标定）
+### 4.3 基线登记表（最近回填 2026-10-02；本轮给出建议阈值，固化待确认——ADR-0003 D4）
 
 | 指标 | 基线值 | 采样窗口 | 样本量 | 结论/阈值 | 日期 |
 | --- | --- | --- | --- | --- | --- |
-| `lsp_edit_coverage_ratio` | 0.9284 | 09-29T22:50:31Z → 10-01T02:54:01Z | inline 1077 / LSP 活跃会话内 edit 1160（全部 5890） | 待标定 | 2026-10-01 |
-| `lsp_diag_hit_ratio` | 1.0000 | 同上 | hit 41 / injected 41 | 待标定 | 2026-10-01 |
-| `lsp_fallback_ratio` | 0.7321（attempted 分母；与运行时读数统一，历史 requests 口径值为 0.5923） | 同上 | degraded 612 / attempted 836（no_server 242、clean 183） | 待标定；未分类降级 439（旧构建无 `reason`）；新构建原因分布 `{binary_missing 12, no_publish 3, starting 2}` | 2026-10-01 |
-| `lsp_wait_latency_p95` | 1000 ms | 同上 | n=1078（P50 0 ms） | 待标定 | 2026-10-01 |
-| `lsp_append_bytes_ratio` | 0.1828 | 同上 | 追加 141561 B / 活跃会话回执可见 774379 B（全部 3675416 B） | 待标定 | 2026-10-01 |
-| `lsp_closure_ratio` | 0.7500 | 同上 | closed 3 / eligible 4 | 待标定；样本仍少（fingerprint 仅新构建事件携带） | 2026-10-01 |
-| `lsp_cold_first_publish_p95` | **14363 ms**（P50 11349） | 同上 | n=3（按 (session, server) 取首个发布；含 2026-10-01 真机验收会话的 7156ms） | 待标定；冷启动延迟首次可算 | 2026-10-01 |
-| `lsp_cold_first_probe_ratio` | n/a（窗口内无带 `cold_fast_fail` 的 no_fresh 样本） | 同上 | n=0（未采集，非缺失数据；新构建落盘后开始采集） | 待采集（需要 `cold_fast_fail` 事件字段，O4 起落盘；首探针占比高 → 下一轮引入 cold_probe 预算的判据） | 2026-10-01 |
-| `lsp_diag_new_ratio` | n/a（窗口内无带 `total_diag_count` 的诊断样本） | 同上 | n=0（未采集，非缺失数据；新构建落盘后开始采集） | 待采集（需要 `total_diag_count`/`new_diag_count` 事件字段，O9 起落盘；**A6 判据**：新增占比低 → scope=all 在反复重发既有问题，切 changed 收益大） | 2026-10-01 |
+| `lsp_edit_coverage_ratio` | 0.9728 | 09-29T22:50:31Z → 10-02T01:55:30Z | inline 2114 / LSP 活跃会话内 edit 2173（全部 6903） | **达标**（建议 ≥0.95）；残余 59 次为预期缺口（O8 删除路径跳过 / 无匹配 server）；绝对覆盖面 31%（2173/6903）受"默认关闭"限制，是最大收益杠杆 | 2026-10-02 |
+| `lsp_diag_hit_ratio` | 1.0000 | 同上 | hit 119 / injected 119 | **达标**（构造性上限；建议 =1.0，<1.0 即查 server 根目录 / 能力协商）；真实有效性信号：injected/attempted = 7.8% | 2026-10-02 |
+| `lsp_diag_new_ratio` | 0.7798 | 同上 | new 131 / all 168（全量为 scope 过滤前条数） | **A6 判据不触发**：n=168 ≥20 且新增占比 78% ≥50% → 维持 `scope=all`（切 changed 将丢 22% 既有问题可见性） | 2026-10-02 |
+| `lsp_fallback_ratio` | 0.6050（attempted 分母） | 同上 | degraded 925 / attempted 1529（no_server 586、clean 485） | **未达标**（建议 <0.5），较上轮 0.7321 改善 0.127；降级构成：no_fresh 265、gopls 崩溃 61（`restart_budget_exhausted`，与整机内存耗尽同源）、binary_missing 19、starting 12、read/transport 3；未分类 565 为旧构建（无 `reason`，随 14 天窗口滚动出清） | 2026-10-02 |
+| `lsp_wait_latency_p95` | 1097 ms | 同上 | n=2115（P50 0 ms） | 全窗口**达标**（建议 ≤1500 ms），P50=0 健康（半数以上零等待：早接受 / 快速失败）；**但按日恶化 1000→1000→1440→1681 ms**（10-02 仅 107 请求，小样本），尾部由冷宽限（2.5 s）与崩溃重启贡献，需随 fallback / 冷启动修复回落 | 2026-10-02 |
+| `lsp_append_bytes_ratio` | 0.1765 | 同上 | 追加 249368 B / LSP 活跃会话内回执可见 1412773 B（全部 4313810 B）（新构建拆分：诊断 27268 / 提示 22310 / 空块 31169） | **达标**（建议 ≤0.20）；截断仅 1 次（5 字符），max_items/max_chars 预算充足；空块 31 KB 为最大构成（compact 后 ~111 B/次） | 2026-10-02 |
+| `lsp_closure_ratio` | 0.5244 | 同上 | closed 43 / eligible 82（下一次同文件编辑为 clean） | **达标贴线**（建议 ≥0.5；<0.3 才触发工具面改造）；样本 4→82（×20）后回落至上轮 0.7500 的小样本乐观偏差之下；eligible 82 < injected 119（37 次旧构建无 fingerprint，随新构建普及趋近全量） | 2026-10-02 |
+| `lsp_cold_first_publish_p95` | **14363 ms**（P50 7305） | 同上 | n=25（按 (session, server) 取首个发布） | **未达标**（候选 ≤10 s），当前最大单点延迟；P50 较上轮 11349 ms 改善，P95 持平（gopls 模块视图 ~85 s 重尾） | 2026-10-02 |
+| `lsp_cold_first_probe_ratio` | 0.9608 | 同上 | first 98 / repeat 4（repeat 已由路径级快速失败覆盖） | **触发既定判据**（§7.2：n=102 ≥20，首探针 96% ≥50%）→ `cold_probe_ms` 已落地（O12，2026-10-02：保守默认 1500 ms = 现宽限值，封顶不低于 `wait_ms`，覆盖 O10 真机 1333 ms 发布案例；负值关闭）；路径级快失败仅覆盖 4% no_fresh | 2026-10-02 |
 
-> 上一版回填（窗口至 10-01T01:53Z：覆盖率 0.9070 / fallback 0.7215 / closure 0.6667 /
-> cold n/a）保留在 git 历史；两版口径相同，本表为最新（窗口至 10-01T02:54Z）。
+> 上一版回填（窗口至 10-01T02:54Z，n=1078）：coverage 0.9284 / diag_hit 1.0000 /
+> fallback 0.7321 / wait P95 1000 ms / append 0.1828 / closure 0.7500（n=4）/
+> cold P95 14363 ms（n=3）/ cold probe 与 diag new 为 n/a；保留在 git 历史，口径相同。
+> 本轮复算核验：重跑 `scripts/analyze-lsp-baseline.py`（2299 文件 / 734706 行 / 0 损坏）
+> 得 2119 请求 / 38 会话，9 项指标全部吻合（窗口端点差异致 coverage/append 末位差 1）；
+> `--selftest` 通过。完整判读与优化建议：`docs/analysis/lsp-baseline-check-20261002.md`。
 > 收益评估（含成本/闭环/代际对比/数据缺口）：`docs/analysis/lsp-benefit-evaluation-20261001.md`。
-> 指标计数：本表当前为九项（2026-10-01 新增 `lsp_cold_first_probe_ratio`（O7）与 `lsp_diag_new_ratio`（O9，A6 判据））；历史补记中的"七项/八项"为当轮状态。
+> 指标计数：本表为九项（2026-10-01 新增 `lsp_cold_first_probe_ratio`（O7）与
+> `lsp_diag_new_ratio`（O9，A6 判据））；历史补记中的"七项/八项"为当轮状态。
 
 > 反模式（明令禁止）：把"未采集"渲染成 0；把分母含未启用 LSP 的会话算进覆盖率；阈值未标定就写进告警。
 
