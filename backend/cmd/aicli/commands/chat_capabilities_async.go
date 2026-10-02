@@ -240,6 +240,10 @@ func runChatCapabilitiesLoad(session *ChatSession) {
 // 后台发现可能长达十几秒（技能扫描），因此给它一个显式上限：超时返回可读错误，
 // 而不是让界面无限期停在「加载工具 (Ns)」。上限显著大于实测耗时，只用来兜住
 // 真实的卡死/挂起。
+//
+// 区分两种失败并如实回传：到点仍未完成才是「超时」；发现/挂载自身返回错误
+// （例如技能注册失败）必须原样以「初始化失败」呈现，不能被统一贴上超时标签，
+// 否则真实根因会被错误的恢复建议盖掉。
 const chatCapabilitiesWaitLimit = 3 * time.Minute
 
 func awaitChatCapabilitiesForTurn(ctx context.Context, session *ChatSession) error {
@@ -264,6 +268,13 @@ func awaitChatCapabilitiesForTurn(ctx context.Context, session *ChatSession) err
 			session.CapabilitiesInitError = err.Error()
 		}
 		return err
+	}
+	if waitCtx.Err() == nil {
+		message := fmt.Sprintf("能力面初始化失败: %v", err)
+		if session != nil {
+			session.CapabilitiesInitError = message
+		}
+		return fmt.Errorf("能力面初始化失败: %w", err)
 	}
 	if session != nil {
 		session.CapabilitiesInitError = fmt.Sprintf("启动装载工具面超时（%s）: %v", chatCapabilitiesWaitLimit, err)

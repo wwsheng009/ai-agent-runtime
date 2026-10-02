@@ -40,6 +40,55 @@ triggers:
 	assert.Equal(t, "", item.UserPrompt)
 }
 
+// 回归：全量重载（chat/runtime-server 启用热加载后的启动路径）扫描到声明了
+// 当前工具面未注册工具的 skill 时，必须与 loader 的 discovery 软失败路径一致：
+// 登记 unavailable 记录并跳过，而不是让整次 Reload / 能力面初始化失败。
+// 触发场景：未启用 images_generations provider 时的 imagegen/openai_image_generate。
+func TestHotReload_ReloadAllSkills_MissingToolSoftFails(t *testing.T) {
+	mcp := newFakeSkillsMCPManager() // 空工具面：openai_image_generate 未注册
+	loader := NewLoader(mcp)
+	registry := NewRegistry(mcp)
+	hotReload, err := NewHotReload(loader, registry)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = hotReload.Stop() })
+
+	skillDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "skill.yaml"), []byte(`name: imagegen
+description: generate an image
+triggers:
+  - type: keyword
+    values: ["imagegen"]
+    weight: 1
+tools:
+  - openai_image_generate
+`), 0o644))
+
+	require.NoError(t, hotReload.reloadAllSkills([]string{skillDir}),
+		"missing-tool skills must be soft-skipped, not abort the whole reload")
+
+	if _, ok := registry.Get("imagegen"); ok {
+		t.Fatalf("skill with missing tool must not be registered")
+	}
+	unavailable := registry.UnavailableSkills()
+	require.Len(t, unavailable, 1)
+	assert.Equal(t, "imagegen", unavailable[0].Name)
+	assert.Contains(t, unavailable[0].MissingTools, "openai_image_generate")
+}
+
+// 回归：软失败只覆盖「工具缺失」；真实校验错误（缺少名称/描述）仍必须上报，
+// 不能被热重载路径吞掉。
+func TestHotReload_RegisterDiscoveredSkill_RealValidationErrorStillReturns(t *testing.T) {
+	mcp := newFakeSkillsMCPManager("fetch")
+	registry := NewRegistry(mcp)
+	hotReload, err := NewHotReload(NewLoader(mcp), registry)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = hotReload.Stop() })
+
+	if _, err := hotReload.registerDiscoveredSkill(&Skill{Description: "missing name", Tools: []string{"fetch"}}); err == nil {
+		t.Fatalf("expected validation error for skill without name, got nil")
+	}
+}
+
 func TestHotReload_ReloadSkill_RegistersDiscoveryStub(t *testing.T) {
 	loader := NewLoader(nil)
 	registry := NewRegistry(nil)

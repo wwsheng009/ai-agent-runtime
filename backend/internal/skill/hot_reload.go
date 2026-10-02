@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+
+	runtimeerrors "github.com/wwsheng009/ai-agent-runtime/internal/errors"
 )
 
 // ReloadEvent 重载事件
@@ -796,7 +798,8 @@ func (h *HotReload) reloadSkill(filePath string) {
 		h.registry.UnregisterByPath(filePath)
 	}
 
-	if err := h.registry.Register(skill); err != nil {
+	registered, err := h.registerDiscoveredSkill(skill)
+	if err != nil {
 		h.emitEvent(&ReloadEvent{
 			Type:      ReloadEventError,
 			SkillName: skill.Name,
@@ -804,6 +807,14 @@ func (h *HotReload) reloadSkill(filePath string) {
 			Error:     fmt.Sprintf("failed to register skill: %v", err),
 			Timestamp: time.Now(),
 		})
+		return
+	}
+	if !registered {
+		// 工具在当前表面缺失：与 loader 的 discovery 路径一致，记录 unavailable
+		// 后跳过；清掉该路径的旧登记，避免后续删除事件按幽灵技能处理。
+		h.mu.Lock()
+		delete(h.skillFiles, filePath)
+		h.mu.Unlock()
 		return
 	}
 
@@ -915,8 +926,12 @@ func (h *HotReload) reloadAllSkills(skillDirs []string) error {
 	h.registry.Clear()
 	newSkillFiles := make(map[string]string, len(loaded))
 	for _, item := range loaded {
-		if err := h.registry.Register(item.skill); err != nil {
+		registered, err := h.registerDiscoveredSkill(item.skill)
+		if err != nil {
 			return err
+		}
+		if !registered {
+			continue
 		}
 		if stored, ok := h.registry.GetByPath(item.filePath); !ok || stored != item.skill {
 			continue
@@ -928,6 +943,27 @@ func (h *HotReload) reloadAllSkills(skillDirs []string) error {
 	h.skillFiles = newSkillFiles
 	h.mu.Unlock()
 	return nil
+}
+
+// registerDiscoveredSkill 注册 discovery stub，并把「依赖工具未在当前工具面
+// 注册」视为软失败：登记 unavailable 诊断后跳过该 skill，不阻断整次重载。
+//
+// 这与 loader 的 registerSummaryStubs 语义一致（SK-4）：chat/长期宿主启动时的
+// 全量扫描不应因为某个技能依赖的工具未暴露（例如未启用 images_generations
+// provider 时的 imagegen/openai_image_generate）而整体失败。返回 registered=false
+// 表示该 skill 因工具缺失被跳过、但调用方应继续。
+func (h *HotReload) registerDiscoveredSkill(skill *Skill) (bool, error) {
+	if h == nil || h.registry == nil {
+		return false, fmt.Errorf("registry is not configured")
+	}
+	if err := h.registry.Register(skill); err != nil {
+		if runtimeerrors.Is(err, runtimeerrors.ErrToolNotRegistered) {
+			h.registry.RecordUnavailable(unavailableSkillFromSkill(skill, missingToolsFromError(err)))
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (h *HotReload) sourceLayerForFile(path string) string {

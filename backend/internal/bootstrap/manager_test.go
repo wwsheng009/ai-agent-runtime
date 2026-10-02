@@ -47,6 +47,28 @@ func (m *bootstrapMCPManager) ListTools() []skill.ToolInfo {
 	return []skill.ToolInfo{{Name: "echo_tool", Description: "echo", MCPName: "test-mcp", Enabled: true}}
 }
 
+// bootstrapMissingToolMCPManager 暴露指定工具集：未列出的工具一律
+// FindTool 失败，用于模拟当前工具面未注册某工具（如未启用 images provider）。
+type bootstrapMissingToolMCPManager struct {
+	bootstrapMCPManager
+	available map[string]struct{}
+}
+
+func newBootstrapMissingToolMCPManager(available ...string) *bootstrapMissingToolMCPManager {
+	tools := make(map[string]struct{}, len(available))
+	for _, name := range available {
+		tools[name] = struct{}{}
+	}
+	return &bootstrapMissingToolMCPManager{available: tools}
+}
+
+func (m *bootstrapMissingToolMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {
+	if _, ok := m.available[toolName]; !ok {
+		return skill.ToolInfo{}, fmt.Errorf("tool not found: %s", toolName)
+	}
+	return skill.ToolInfo{Name: toolName, Description: toolName, MCPName: "test-mcp", Enabled: true}, nil
+}
+
 type bootstrapTarget struct {
 	runtimeSet   bool
 	sessionSet   bool
@@ -753,4 +775,43 @@ triggers:
 	require.NotNil(t, manager.HotReload())
 	watching, _ := manager.HotReload().GetStats()["watching"].(bool)
 	assert.True(t, watching, "DiscoverOnly + EnableHotReload must actually watch the skill dirs")
+}
+
+// 回归（2026-10-02 chat 启动失败）：DiscoverOnly + EnableHotReload 的启动全量
+// 重载扫描到依赖工具未在当前工具面注册的 skill（典型：未启用 images provider
+// 时的 imagegen/openai_image_generate）时必须软跳过并登记 unavailable，而不是
+// 让 NewManager / chat 能力面初始化整体失败。
+func TestManager_NewManager_HotReloadMissingToolSoftFails(t *testing.T) {
+	mcpManager := newBootstrapMissingToolMCPManager() // 空工具面
+	skillDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "skill.yaml"), []byte(`name: imagegen
+description: generate an image
+triggers:
+  - type: keyword
+    values: ["imagegen"]
+    weight: 1
+tools: ["openai_image_generate"]
+`), 0o644))
+
+	cfg := runtimecfg.DefaultRuntimeConfig()
+	cfg.HotReload.Enabled = true
+
+	manager, err := NewManager(&Options{
+		Config:          cfg,
+		SkillDir:        skillDir,
+		DiscoverOnly:    true,
+		EnableHotReload: true,
+		MCPManager:      mcpManager,
+	})
+	require.NoError(t, err, "missing tool must not abort bootstrap/hot reload")
+	t.Cleanup(func() { _ = manager.Stop() })
+
+	if _, ok := manager.Registry().Get("imagegen"); ok {
+		t.Fatalf("skill with missing tool must not be registered")
+	}
+	unavailable, ok := manager.Registry().LookupUnavailable("imagegen")
+	if !ok {
+		t.Fatalf("skipped skill must be recorded as unavailable for /skills diagnostics")
+	}
+	assert.Contains(t, unavailable.MissingTools, "openai_image_generate")
 }

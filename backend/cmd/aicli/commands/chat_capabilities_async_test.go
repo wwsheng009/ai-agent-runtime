@@ -103,6 +103,17 @@ func TestRunChatCapabilitiesLoad_ErrorReachesFirstTurn(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("装载错误必须原样交给首个 turn（空工具面比报错更糟），实际 err=%v", err)
 	}
+	// 发现阶段自身失败（不是等满 3 分钟）必须如实呈现为初始化失败：套上
+	// 「超时」标签会把真实根因和恢复建议一起带偏。
+	if strings.Contains(err.Error(), "超时") {
+		t.Fatalf("非超时的发现失败不得被误报为超时，实际 err=%v", err)
+	}
+	if !strings.Contains(err.Error(), "能力面初始化失败") || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("初始化失败文案必须保留真实根因，实际 err=%v", err)
+	}
+	if session.CapabilitiesInitError == "" || !strings.Contains(session.CapabilitiesInitError, "boom") {
+		t.Fatalf("会话诊断字段必须复述真实根因，实际 %q", session.CapabilitiesInitError)
+	}
 }
 
 func TestAwaitChatCapabilitiesForTurn_NoGateIsNoOp(t *testing.T) {
