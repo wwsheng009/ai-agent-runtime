@@ -134,8 +134,11 @@ func (s *sqliteStore) FindRefs(ctx context.Context, q RefQuery) ([]Reference, er
 		SELECT r.id, r.workspace_id, COALESCE(r.from_symbol_id, ''), COALESCE(r.to_symbol_id, ''),
 		       COALESCE(r.to_symbol_name, ''), COALESCE(r.to_symbol_version, 0), r.kind,
 		       r.file_id, f.path, r.line, r.col,
-		       COALESCE(r.snippet, ''), r.confidence, r.source
-		FROM refs r JOIN files f ON f.id = r.file_id
+		       COALESCE(r.snippet, ''), r.confidence, r.source,
+		       COALESCE(fs.qualified_name, '')
+		FROM refs r
+		JOIN files f ON f.id = r.file_id
+		LEFT JOIN symbols fs ON fs.id = r.from_symbol_id
 		`+clause+`
 		ORDER BY f.path, r.line, r.col
 		LIMIT ?`, args...)
@@ -350,8 +353,24 @@ func (s *sqliteStore) Stats(ctx context.Context, workspaceID string) (Stats, err
 			(SELECT COUNT(*) FROM symbols WHERE workspace_id = ? AND deleted_at IS NULL),
 			(SELECT COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id
 			  WHERE r.workspace_id = ? AND f.deleted_at IS NULL),
-			(SELECT COALESCE(MAX(indexed_at), 0) FROM files WHERE workspace_id = ? AND deleted_at IS NULL)
-	`, workspaceID, workspaceID, workspaceID, workspaceID)
+			COALESCE(
+				(SELECT MAX(j.finished_at) FROM index_jobs j
+				  WHERE j.workspace_id = ? AND j.kind = 'light'
+				    AND j.status = 'done' AND j.finished_at > 0
+				    -- 预算截断的 light 运行**不算**对账：collectIndexableFiles
+				    -- 撞到 maxIndexFiles 就 fs.SkipAll 提前结束遍历，文件总数里
+				    -- 仍有大量文件本次根本没被看过，而 indexer 只按 err==nil 记
+				    -- status='done'（见 indexer.go 的 FinishIndexJob defer），
+				    -- 截断信号 result.Truncated 不落表。这类运行若被当成完整对账，
+				    -- 就会把未校验文件的陈旧度清零——和 incremental 那条同源的 fail-open。
+				    -- 截断时 files_total 恰好等于 maxIndexFiles；文件数正好等于
+				    -- 上限的边界情形也落到"不算对账"这一侧（fail-closed，可接受）。
+				    AND j.files_total < ?),
+				(SELECT COALESCE(MAX(indexed_at), 0) FROM files
+				  WHERE workspace_id = ? AND deleted_at IS NULL)
+			)
+	`, workspaceID, workspaceID, workspaceID, workspaceID, maxIndexFiles, workspaceID)
+
 	if err := row.Scan(&stats.Files, &stats.Symbols, &stats.Refs, &stats.IndexedAt); err != nil {
 		return stats, fmt.Errorf("knowledge: read stats: %w", err)
 	}
@@ -414,7 +433,7 @@ func scanReference(row rowScanner) (Reference, error) {
 	)
 	if err := row.Scan(&ref.ID, &ref.WorkspaceID, &ref.FromSymbolID, &ref.ToSymbolID,
 		&ref.ToSymbolName, &ref.ToSymbolVersion, &kind, &ref.FileID, &ref.Path, &ref.Line, &ref.Col, &ref.Snippet,
-		&ref.Confidence, &source); err != nil {
+		&ref.Confidence, &source, &ref.FromSymbolName); err != nil {
 		return Reference{}, fmt.Errorf("knowledge: scan ref: %w", err)
 	}
 	ref.Kind = RefKind(kind)

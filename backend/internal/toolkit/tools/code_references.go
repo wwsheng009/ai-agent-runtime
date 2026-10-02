@@ -43,7 +43,9 @@ func NewCodeReferencesTool() *CodeReferencesTool {
 	return &CodeReferencesTool{BaseTool: toolkit.NewBaseTool(
 		"code_references",
 		"符号引用查询（索引增强，设计文档中的 `code.references`）：谁使用了符号 X。"+
-			"按符号身份匹配、比纯文本更精确（引用为索引侧启发式，可能含同名噪音）；索引不可用时自动降级为 grep（source=fallback，按文本近似）。",
+			"按符号身份匹配、比纯文本更精确（引用为索引侧启发式，可能含同名噪音）；索引不可用时自动降级为 grep（source=fallback，按文本近似）。"+
+			"kind 可选 reference|call|import|implement；省略则返回全部种类的引用。"+
+			codeEnvelopeSemantics,
 		"1.0.0",
 		parameters,
 		true,
@@ -152,6 +154,29 @@ func runCodeRefsQuery(ctx context.Context, base *codeToolBase, toolName, symbol,
 		return codeResult(env)
 	}
 
+	// 文件级新鲜度守卫（ADR-0004 §4.1/§5 D1 的粒度补齐）。
+	//
+	// 上面的 relationTierUsable 看的是**全局**快照陈旧度。只要索引还在持续给
+	// 别的文件写入，staleness_seconds 就一直停在新鲜档，而本次查询涉及的这些
+	// 文件可能几小时没有被重新索引——"刚新增的调用者不存在"正是它挡不住的
+	// 失效模式，且漏报完全静默（返回的那几条引用看起来正常）。
+	//
+	// 覆盖两个方向：符号定义文件（决定符号身份/范围是否还成立）与各引用所在
+	// 文件（决定调用集合是否完整）。文件数受 limit 约束，stat/读盘代价有界。
+	fileIDs := make([]string, 0, len(refs)+1)
+	fileIDs = append(fileIDs, sym.FileID)
+	for _, ref := range refs {
+		fileIDs = append(fileIDs, ref.FileID)
+	}
+	stale, unverified := staleRelFiles(handle, fileIDs)
+	if len(stale) > 0 {
+		result, _ := base.runGrep(ctx, grepParams)
+		env := staleFileEnvelope(toolName, handle, "grep", result, stale)
+		env.Truncated = env.Truncated || clamped
+		annotateRefFallback(&env, kind)
+		return codeResult(env)
+	}
+
 	results := make([]codeRefHit, 0, len(refs))
 	for _, ref := range refs {
 		results = append(results, codeRefHitFrom(ref, handle))
@@ -163,8 +188,8 @@ func runCodeRefsQuery(ctx context.Context, base *codeToolBase, toolName, symbol,
 	env.Results = results
 	env.Truncated = clamped || len(refs) >= limit
 	env.Explanation = fmt.Sprintf(
-		"按符号身份命中 %d 条引用（to_symbol_name=%q；引用为索引侧正则启发式，confidence 字段是引用自身置信度）。",
-		len(refs), symbol,
+		"按符号身份命中 %d 条引用（to_symbol_name=%q；引用为索引侧正则启发式，confidence 字段是引用自身置信度）。%s",
+		len(refs), symbol, freshnessNote(handle, unverified),
 	)
 	return codeResult(env)
 }

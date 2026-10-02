@@ -37,7 +37,9 @@ func NewCodeCallersTool() *CodeCallersTool {
 	return &CodeCallersTool{BaseTool: toolkit.NewBaseTool(
 		"code_callers",
 		"调用点查询（索引增强，设计文档中的 `code.callers`）：谁调用了符号 X（kind=call 的引用子集）。"+
-			"影响面分析优先用它；索引不可用时自动降级为 grep（source=fallback）。",
+			"影响面分析优先用它；索引不可用时自动降级为 grep（source=fallback）。"+
+			"它是 code_references 的 kind=call 子集（两者命中相同时用本工具即可）。"+
+			codeEnvelopeSemantics,
 		"1.0.0",
 		parameters,
 		true,

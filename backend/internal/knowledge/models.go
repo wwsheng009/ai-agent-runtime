@@ -133,6 +133,15 @@ type Reference struct {
 	WorkspaceID string `json:"workspace_id"`
 	// FromSymbolID 是引用所在符号；空表示文件级（如 import）。
 	FromSymbolID string `json:"from_symbol_id,omitempty"`
+	// FromSymbolName 是 FromSymbolID 对应的可读名；FindRefs 联表 symbols
+	// 填充（与 Path 同款"读取侧填充"约定）。
+	//
+	// 为什么需要它：refs 表只存 id，而 id 是稳定键（stable_key 派生的
+	// 32 位 hex），对人不可读。调用方要回答"谁调用了 X"时需要**函数名**；
+	// 只给 id 的话消费方仍要回读源文件把行号反查成函数名，等于把
+	// 一次联表能省掉的读摊回给每次调用。名字不落盘、不进 schema，
+	// 纯读取侧 JOIN，故索引重建与旧库都能直接受益。
+	FromSymbolName string `json:"from_symbol_name,omitempty"`
 	// ToSymbolID 是解析到的目标符号；空表示仅凭名字猜测存在同名声明。
 	ToSymbolID string `json:"to_symbol_id,omitempty"`
 	// ToSymbolName 是使用点字面写下的目标名。

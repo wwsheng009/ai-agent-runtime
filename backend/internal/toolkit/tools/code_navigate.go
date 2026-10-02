@@ -55,7 +55,12 @@ func NewCodeNavigateTool() *CodeNavigateTool {
 	return &CodeNavigateTool{BaseTool: toolkit.NewBaseTool(
 		"code_navigate",
 		"代码图遍历（索引增强，设计文档中的 `code.navigate`）：符号定义位置（按名字，或按 file_path+line 查该处引用目标的定义）、文件内符号、一跳引用。"+
-			"文件/目录列举请用 glob/ls；索引不可用时按方向降级到 grep / view（source=fallback）。",
+			"参数映射：direction=definition 需 symbol，或 file_path+line（可选 col，按光标位置反查定义）；"+
+			"direction=members 需 file_path（列出该文件定义的符号，可替代逐个 grep）；"+
+			"direction=refs 需 symbol（一跳引用，等同 code_references 的无 kind 过滤形态）。"+
+			"省略 direction 时按已给参数自动推断（有 symbol→definition，有 file_path→members），两者都没有则报参数错误。"+
+			"文件/目录列举请用 glob/ls；索引不可用时按方向降级到 grep / view（source=fallback）。"+
+			codeEnvelopeSemantics,
 		"1.0.0",
 		parameters,
 		true,
@@ -144,6 +149,14 @@ func (t *CodeNavigateTool) navigateDefinition(ctx context.Context, symbol string
 		return codeResult(env)
 	}
 	path := handle.PathForFile(sym.FileID)
+	// 文件级新鲜度守卫（定义类，见 code_inspect 同处注释）：行号范围来自索引
+	// 快照，文件改写后它可能指向磁盘上完全不同的代码——而"定义在第 N 行"的
+	// 答案看起来总是合理的，正是它最难被发现。
+	if known, fresh := fileFresh(handle, sym.FileID); known && !fresh {
+		result, _ := t.runGrep(ctx, grepParams)
+		env := staleFileEnvelope("code_navigate", handle, "grep", result, []string{path})
+		return codeResult(env)
+	}
 	hit := codeSymbolHitFrom(sym, path)
 	env := newCodeEnvelope("code_navigate")
 	env.Source = codeSourceIndex
@@ -152,8 +165,9 @@ func (t *CodeNavigateTool) navigateDefinition(ctx context.Context, symbol string
 	env.Range = &hit.Range
 	env.Results = []codeSymbolHit{hit}
 	env.Explanation = fmt.Sprintf(
-		"定义位置：%s（%s，第 %d–%d 行）；正文用 code_inspect 或 view 读取。",
+		"定义位置：%s（%s，第 %d–%d 行）；正文用 code_inspect 或 view 读取。%s",
 		sym.Name, path, sym.Range.Start.Line, sym.Range.End.Line,
+		freshnessNote(handle, 0),
 	)
 	return codeResult(env)
 }

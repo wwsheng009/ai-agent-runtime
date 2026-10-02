@@ -114,18 +114,18 @@ func TestCodeToolTiersRegisterByStaleness(t *testing.T) {
 			wantAll: true,
 		},
 		{
-			name:    "reader 新鲜 S≤60s 全开",
+			name:    "reader 新鲜（≤S_fresh）全开",
 			seed:    func(t *testing.T, root string) { seedIndexedStore(t, root, time.Now().Add(-10*time.Second)) },
 			wantAll: true,
 		},
 		{
-			name:            "reader 中等 60<S≤900s 仅定义类",
-			seed:            func(t *testing.T, root string) { seedIndexedStore(t, root, time.Now().Add(-5*time.Minute)) },
+			name:            "reader 中等（S_fresh<S≤S_max）仅定义类",
+			seed:            func(t *testing.T, root string) { seedIndexedStore(t, root, time.Now().Add(-4*time.Hour)) },
 			wantDefinitions: true,
 		},
 		{
-			name: "reader 过旧 S>900s 不注册",
-			seed: func(t *testing.T, root string) { seedIndexedStore(t, root, time.Now().Add(-2*time.Hour)) },
+			name: "reader 过旧 S>S_max 不注册",
+			seed: func(t *testing.T, root string) { seedIndexedStore(t, root, time.Now().Add(-12*time.Hour)) },
 		},
 		{
 			name:    "索引不可用保留降级工具面（全注册）",
@@ -209,7 +209,7 @@ func TestCodeToolEscapeHatches(t *testing.T) {
 
 func TestCodeToolSurfaceSwitchesWithoutRestart(t *testing.T) {
 	root := t.TempDir()
-	seedIndexedStore(t, root, time.Now().Add(-5*time.Minute))
+	seedIndexedStore(t, root, time.Now().Add(-4*time.Hour))
 	m := newStalenessManager(t, root, nil)
 
 	names := listedToolNames(m)
@@ -227,7 +227,7 @@ func TestCodeToolSurfaceSwitchesWithoutRestart(t *testing.T) {
 
 	// 快照再次变旧 → 自动收回到不注册。
 	codeIndexCacheGlobal.closeAll()
-	seedIndexedStore(t, root, time.Now().Add(-2*time.Hour))
+	seedIndexedStore(t, root, time.Now().Add(-12*time.Hour))
 	names = listedToolNames(m)
 	for _, name := range codeSurfaceToolNames {
 		if names[name] {
@@ -238,7 +238,7 @@ func TestCodeToolSurfaceSwitchesWithoutRestart(t *testing.T) {
 
 func TestCodeToolDescriptionVariantAndSchemaConstant(t *testing.T) {
 	root := t.TempDir()
-	seedIndexedStore(t, root, time.Now().Add(-5*time.Minute))
+	seedIndexedStore(t, root, time.Now().Add(-4*time.Hour))
 	m := newStalenessManager(t, root, nil)
 
 	medium := listedDescriptors(m)
@@ -272,7 +272,7 @@ func TestCodeToolDescriptionVariantAndSchemaConstant(t *testing.T) {
 
 func TestCodeToolExecuteRejectsOutOfTier(t *testing.T) {
 	root := t.TempDir()
-	seedIndexedStore(t, root, time.Now().Add(-5*time.Minute))
+	seedIndexedStore(t, root, time.Now().Add(-4*time.Hour))
 	m := newStalenessManager(t, root, nil)
 
 	_, err := m.Execute(context.Background(), "code_references", map[string]interface{}{"symbol": "Alpha"})
@@ -284,7 +284,7 @@ func TestCodeToolExecuteRejectsOutOfTier(t *testing.T) {
 func TestCodeIndexResolverExposesSnapshotAndTier(t *testing.T) {
 	root := t.TempDir()
 	t.Cleanup(codeIndexCacheGlobal.closeAll)
-	indexedAt := time.Now().Add(-120 * time.Second)
+	indexedAt := time.Now().Add(-4 * time.Hour)
 	seedIndexedStore(t, root, indexedAt)
 
 	cfg := knowledge.DefaultConfig().WithWorkspace(root)
@@ -301,8 +301,8 @@ func TestCodeIndexResolverExposesSnapshotAndTier(t *testing.T) {
 	if handle.SnapshotTS != indexedAt.Unix() {
 		t.Fatalf("snapshot_ts = %d, want %d（IndexedAt 秒口径）", handle.SnapshotTS, indexedAt.Unix())
 	}
-	if handle.StalenessSeconds < 120 || handle.StalenessSeconds > 123 {
-		t.Fatalf("staleness_seconds = %d, want ~120", handle.StalenessSeconds)
+	if handle.StalenessSeconds < 14399 || handle.StalenessSeconds > 14402 {
+		t.Fatalf("staleness_seconds = %d, want ~14400", handle.StalenessSeconds)
 	}
 	if handle.Tier != toolkitTools.CodeIndexTierDefinitions {
 		t.Fatalf("tier = %q, want definitions", handle.Tier)

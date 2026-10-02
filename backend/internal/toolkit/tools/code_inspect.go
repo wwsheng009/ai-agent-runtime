@@ -44,7 +44,8 @@ func NewCodeInspectTool() *CodeInspectTool {
 		"code_inspect",
 		"按符号读取实现（索引增强，设计文档中的 `code.inspect`）。"+
 			"知道符号名但不知道行号时优先用它；普通按行读取仍用 view（view 也支持可选 symbol 参数）。"+
-			"索引不可用时自动降级为 grep / view，返回结构不变（source=fallback）。",
+			"索引不可用时自动降级为 grep / view，返回结构不变（source=fallback）。"+
+			codeEnvelopeSemantics,
 		"1.0.0",
 		parameters,
 		true,
@@ -108,6 +109,17 @@ func (t *CodeInspectTool) Execute(ctx context.Context, params map[string]interfa
 	path := handle.PathForFile(sym.FileID)
 	if path == "" {
 		env := t.inspectFallback(ctx, codeFallbackIndexError, confidence, symbol, filePath, offset, limit, handle)
+		return codeResult(env), nil
+	}
+
+	// 文件级新鲜度守卫（ADR-0004 §4.1/§5 D1 的定义类一侧）。
+	//
+	// 上面的 definitionTierUsable 只看全局快照：索引持续给别的文件写入时它
+	// 一直停在新鲜档，而本文件可能几小时没被重新索引。这里的失效模式比关系类
+	// 更危险——sym.Range 的行号来自索引快照，文件改写后它可能指向磁盘上完全
+	// 不同的代码，**返回的正文看起来合理却是错的**，模型会把它当成符号实现。
+	if known, fresh := fileFresh(handle, sym.FileID); known && !fresh {
+		env := t.inspectStaleFile(ctx, path, filePath, offset, limit, handle)
 		return codeResult(env), nil
 	}
 
@@ -179,6 +191,26 @@ func inspectDedupHit(result *toolkit.ToolResult) bool {
 	}
 	hit, _ := result.Metadata["dedup_hit"].(bool)
 	return hit
+}
+
+// inspectStaleFile 处理"符号所在文件在索引之后被改写"的降级：符号的行号范围
+// 不可信，不能按范围取正文（取到的很可能是磁盘上另一段代码）。
+//
+// 降级目标是**实时真值**而不是 grep 命中列表：行号范围失效时，"这个符号在哪个
+// 文件"通常仍成立，整文件读取比按名字 grep 更有用——模型能自己定位到函数。
+func (t *CodeInspectTool) inspectStaleFile(ctx context.Context, indexedPath, filePath string, offset, limit int, handle *CodeIndexHandle) codeEnvelope {
+	var result *toolkit.ToolResult
+	target := filePath
+	if target == "" {
+		target = indexedPath
+		offset, limit = 0, 400
+	}
+	result, _ = t.runView(ctx, map[string]interface{}{
+		"file_path": target, "offset": offset, "limit": limit,
+	})
+	env := staleFileEnvelope("code_inspect", handle, "view", result, []string{indexedPath})
+	env.Truncated = env.Truncated || (target != indexedPath)
+	return env
 }
 
 // inspectFallback 处理符号路径的降级：优先按 file_path 走 view，否则按符号名走 grep。

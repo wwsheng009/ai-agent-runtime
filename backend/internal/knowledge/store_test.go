@@ -362,6 +362,247 @@ func TestFindRefsByName(t *testing.T) {
 	}
 }
 
+func TestFindRefsResolvesFromSymbolName(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	wsID, err := store.EnsureWorkspace(ctx, Workspace{RootPath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("EnsureWorkspace: %v", err)
+	}
+	callerFile, err := store.UpsertFile(ctx, FileRecord{WorkspaceID: wsID, Path: "caller.go", Language: "go", ContentHash: "c"})
+	if err != nil {
+		t.Fatalf("UpsertFile(caller): %v", err)
+	}
+	targetFile, err := store.UpsertFile(ctx, FileRecord{WorkspaceID: wsID, Path: "target.go", Language: "go", ContentHash: "t"})
+	if err != nil {
+		t.Fatalf("UpsertFile(target): %v", err)
+	}
+
+	sigHash := SignatureHash("func Callee()")
+	targetSym := Symbol{
+		ID: SymbolID(wsID, StableKey("go", SymbolFunction, "", "", "Callee", sigHash)), WorkspaceID: wsID,
+		FileID: targetFile, StableKey: StableKey("go", SymbolFunction, "", "", "Callee", sigHash),
+		Name: "Callee", QualifiedName: "Callee", Kind: SymbolFunction, Language: "go",
+		Range: Range{Start: Position{Line: 1}, End: Position{Line: 2}},
+	}
+	// 两个不同函数，各自调用一次 Callee：v1 的 from_symbol 只给 32 位 hex
+	// 稳定键，调用方无法区分这两处归属（真机 remote 测试里就是被折叠成一条）。
+	firstSym := Symbol{
+		ID: "sym-first", WorkspaceID: wsID, FileID: callerFile, StableKey: "k-first",
+		Name: "FirstCaller", QualifiedName: "FirstCaller", Kind: SymbolFunction, Language: "go",
+		Range: Range{Start: Position{Line: 1}, End: Position{Line: 5}},
+	}
+	secondSym := Symbol{
+		ID: "sym-second", WorkspaceID: wsID, FileID: callerFile, StableKey: "k-second",
+		Name: "SecondCaller", QualifiedName: "SecondCaller", Kind: SymbolFunction, Language: "go",
+		Range: Range{Start: Position{Line: 6}, End: Position{Line: 9}},
+	}
+	if err := store.ReplaceSymbols(ctx, callerFile, []Symbol{firstSym, secondSym}); err != nil {
+		t.Fatalf("ReplaceSymbols: %v", err)
+	}
+	if err := store.ReplaceSymbols(ctx, targetFile, []Symbol{targetSym}); err != nil {
+		t.Fatalf("ReplaceSymbols(target): %v", err)
+	}
+
+	refs := []Reference{
+		{WorkspaceID: wsID, FileID: callerFile, FromSymbolID: firstSym.ID, ToSymbolID: targetSym.ID,
+			Kind: RefCall, Line: 3, Col: 2, Snippet: "Callee()", Source: SourceBuiltin},
+		{WorkspaceID: wsID, FileID: callerFile, FromSymbolID: secondSym.ID, ToSymbolID: targetSym.ID,
+			Kind: RefCall, Line: 7, Col: 2, Snippet: "Callee()", Source: SourceBuiltin},
+		// 文件级引用（import 口径，from_symbol_id 为空）：名字应留空而不是回退成别的值。
+		{WorkspaceID: wsID, FileID: callerFile, ToSymbolID: targetSym.ID,
+			Kind: RefImport, Line: 1, Col: 1, Snippet: `import "x"`, Source: SourceBuiltin},
+	}
+	if err := store.ReplaceRefs(ctx, callerFile, refs); err != nil {
+		t.Fatalf("ReplaceRefs: %v", err)
+	}
+
+	byID, err := store.FindRefs(ctx, RefQuery{ToSymbolID: targetSym.ID, Kind: RefCall})
+	if err != nil {
+		t.Fatalf("FindRefs: %v", err)
+	}
+	if len(byID) != 2 {
+		t.Fatalf("FindRefs = %d hits, want 2: %+v", len(byID), byID)
+	}
+	got := map[string]int{}
+	for _, r := range byID {
+		if r.FromSymbolName == "" {
+			t.Fatalf("FromSymbolName empty for line %d: %+v", r.Line, r)
+		}
+		got[r.FromSymbolName] = r.Line
+	}
+	if got["FirstCaller"] != 3 || got["SecondCaller"] != 7 {
+		t.Fatalf("FromSymbolName mapping = %+v, want FirstCaller:3 SecondCaller:7", got)
+	}
+	// 两处调用必须映射到**不同**名字：v1 只给 hex 稳定键时调用方无法区分，
+	// 这正是真机 remote 测试里 7 个 call 点被折叠成 5 个名字的成因。
+	if len(got) != 2 {
+		t.Fatalf("FromSymbolName collapsed distinct callers: %+v", got)
+	}
+}
+
+// TestStatsIndexedAtTracksFullReconciliation 锁定 IndexedAt 的口径：
+// 只认"遍历过整个工作区"的 light 运行，不认 incremental，也不认单文件写入。
+//
+// 为什么这条重要（真机观测）：indexed_at 若取 MAX(files.indexed_at)，
+// 改 5,058 个文件里的任意一个就会把它推到 now，陈旧度归零、分级闸门放行
+// tier=all，关系类查询以 confidence=1.0/completeness=full 作答——而其余
+// 5,057 个文件从未被校验。这正是静默 fail-open。
+func TestStatsIndexedAtTracksFullReconciliation(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	wsID, err := store.EnsureWorkspace(ctx, Workspace{RootPath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("EnsureWorkspace: %v", err)
+	}
+	// 先落一个文件，让"light 之前/之后都有文件"两种口径都能取到非零值——
+	// 这样下面"增量不得推进时钟"的断言才是唯一能区分新旧口径的那一条，
+	// 而不是因为旧口径碰巧返回 0 才失败。
+	if _, err := store.UpsertFile(ctx, FileRecord{WorkspaceID: wsID, Path: "seed.go", Language: "go", ContentHash: "s"}); err != nil {
+		t.Fatalf("UpsertFile(seed): %v", err)
+	}
+
+	// 一次成功的 light 运行 = 一次全工作区对账。
+	lightID, err := store.StartIndexJob(ctx, IndexJob{WorkspaceID: wsID, Kind: IndexJobKindLight})
+	if err != nil {
+		t.Fatalf("StartIndexJob(light): %v", err)
+	}
+	if err := store.FinishIndexJob(ctx, lightID, IndexJobStatusDone, 2, 2, ""); err != nil {
+		t.Fatalf("FinishIndexJob(light): %v", err)
+	}
+	afterLight, err := store.Stats(ctx, wsID)
+	if err != nil {
+		t.Fatalf("Stats(after light): %v", err)
+	}
+	if afterLight.IndexedAt <= 0 {
+		t.Fatalf("IndexedAt after a successful light run = %d, want > 0", afterLight.IndexedAt)
+	}
+
+	// 拉开毫秒时间戳，避免同毫秒写入让断言失去意义。
+	time.Sleep(5 * time.Millisecond)
+
+	// 一次 incremental 运行（IndexPaths 只处理被标记的少数文件）+ 一次文件写入。
+	// 两者都不构成全工作区对账，都不该推进时钟。
+	incID, err := store.StartIndexJob(ctx, IndexJob{WorkspaceID: wsID, Kind: IndexJobKindIncremental})
+	if err != nil {
+		t.Fatalf("StartIndexJob(incremental): %v", err)
+	}
+	if err := store.FinishIndexJob(ctx, incID, IndexJobStatusDone, 1, 1, ""); err != nil {
+		t.Fatalf("FinishIndexJob(incremental): %v", err)
+	}
+	if _, err := store.UpsertFile(ctx, FileRecord{WorkspaceID: wsID, Path: "later.go", Language: "go", ContentHash: "l"}); err != nil {
+		t.Fatalf("UpsertFile(later): %v", err)
+	}
+	afterIncremental, err := store.Stats(ctx, wsID)
+	if err != nil {
+		t.Fatalf("Stats(after incremental): %v", err)
+	}
+	if afterIncremental.IndexedAt != afterLight.IndexedAt {
+		t.Fatalf("IndexedAt moved %d -> %d after an incremental run + a single-file write; "+
+			"only a full light reconciliation may advance it",
+			afterLight.IndexedAt, afterIncremental.IndexedAt)
+	}
+
+	// 失败的 light 运行不算对账：它没能证明索引与磁盘一致。
+	time.Sleep(5 * time.Millisecond)
+	failID, err := store.StartIndexJob(ctx, IndexJob{WorkspaceID: wsID, Kind: IndexJobKindLight})
+	if err != nil {
+		t.Fatalf("StartIndexJob(failed light): %v", err)
+	}
+	if err := store.FinishIndexJob(ctx, failID, IndexJobStatusFailed, 2, 1, "boom"); err != nil {
+		t.Fatalf("FinishIndexJob(failed light): %v", err)
+	}
+	afterFailed, err := store.Stats(ctx, wsID)
+	if err != nil {
+		t.Fatalf("Stats(after failed light): %v", err)
+	}
+	if afterFailed.IndexedAt != afterLight.IndexedAt {
+		t.Fatalf("IndexedAt moved %d -> %d after a FAILED light run; "+
+			"a failed reconciliation proves nothing and must not renew the snapshot",
+			afterLight.IndexedAt, afterFailed.IndexedAt)
+	}
+
+	// 预算截断的 light 运行同样不算对账。
+	//
+	// collectIndexableFiles 撞到 maxIndexFiles 就 fs.SkipAll 提前结束遍历，
+	// 工作区里其余文件本次根本没被看过；但 indexer 只按 err==nil 落库，
+	// 截断信号 result.Truncated 不进 index_jobs，于是这类运行被记成
+	// status='done'。若不额外排除，就会重演 incremental 那条 fail-open：
+	// 一次只看了前 maxIndexFiles 个文件的扫描，把全部未校验文件的陈旧度清零。
+	//
+	// 真机工作区 5,058 文件远低于 maxIndexFiles=20000，所以这条不会在本地触发，
+	// 但大仓库必然触发——正因如此必须有回归锁。
+	time.Sleep(5 * time.Millisecond)
+	truncID, err := store.StartIndexJob(ctx, IndexJob{WorkspaceID: wsID, Kind: IndexJobKindLight})
+	if err != nil {
+		t.Fatalf("StartIndexJob(truncated light): %v", err)
+	}
+	if err := store.FinishIndexJob(ctx, truncID, IndexJobStatusDone, maxIndexFiles, maxIndexFiles, ""); err != nil {
+		t.Fatalf("FinishIndexJob(truncated light): %v", err)
+	}
+	afterTruncated, err := store.Stats(ctx, wsID)
+	if err != nil {
+		t.Fatalf("Stats(after truncated light): %v", err)
+	}
+	if afterTruncated.IndexedAt != afterLight.IndexedAt {
+		t.Fatalf("IndexedAt moved %d -> %d after a budget-truncated light run; "+
+			"a partial scan never proves the unvisited files match disk",
+			afterLight.IndexedAt, afterTruncated.IndexedAt)
+	}
+}
+
+// TestStatsIndexedAtFallsBackWhenNoLightRun 覆盖旧库：从未跑过 light 的
+// workspace（只有 incremental / 手工写入）必须回退到 MAX(files.indexed_at)，
+// 而不是退回 0——0 会被状态面读成"尚未索引"，把可用索引误报成空。
+func TestStatsIndexedAtFallsBackWhenNoLightRun(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	wsID, err := store.EnsureWorkspace(ctx, Workspace{RootPath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("EnsureWorkspace: %v", err)
+	}
+	if _, err := store.UpsertFile(ctx, FileRecord{WorkspaceID: wsID, Path: "a.go", Language: "go", ContentHash: "a"}); err != nil {
+		t.Fatalf("UpsertFile: %v", err)
+	}
+	stats, err := store.Stats(ctx, wsID)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.IndexedAt <= 0 {
+		t.Fatalf("IndexedAt = %d with files present but no light run; "+
+			"the legacy fallback must keep it non-zero", stats.IndexedAt)
+	}
+}
+
+func TestFindRefsFileLevelRefHasNoFromSymbolName(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	wsID, err := store.EnsureWorkspace(ctx, Workspace{RootPath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("EnsureWorkspace: %v", err)
+	}
+	fileID, err := store.UpsertFile(ctx, FileRecord{WorkspaceID: wsID, Path: "a.go", Language: "go", ContentHash: "h"})
+	if err != nil {
+		t.Fatalf("UpsertFile: %v", err)
+	}
+	ref := Reference{WorkspaceID: wsID, FileID: fileID, ToSymbolName: "X", Kind: RefImport,
+		Line: 1, Col: 1, Snippet: `import "x"`, Source: SourceBuiltin}
+	if err := store.ReplaceRefs(ctx, fileID, []Reference{ref}); err != nil {
+		t.Fatalf("ReplaceRefs: %v", err)
+	}
+	hits, err := store.FindRefs(ctx, RefQuery{ToSymbolName: "X"})
+	if err != nil {
+		t.Fatalf("FindRefs: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("FindRefs = %+v, want 1", hits)
+	}
+	// LEFT JOIN 未命中时必须是空串（omitempty 后字段消失），不能是 from_symbol_id。
+	if hits[0].FromSymbolName != "" || hits[0].FromSymbolID != "" {
+		t.Fatalf("file-level ref carries a from symbol: %+v", hits[0])
+	}
+}
+
 func TestDeleteFileCascades(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

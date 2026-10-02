@@ -81,7 +81,20 @@ type Stats struct {
 	Files         int64 `json:"files"`
 	Symbols       int64 `json:"symbols"`
 	Refs          int64 `json:"refs"`
-	// IndexedAt 是最近一次成功写事务的 unix 毫秒；0 表示尚无索引。
+	// IndexedAt 是"索引最近一次与磁盘完成全工作区对账"的 unix 毫秒；0 表示尚无索引。
+	//
+	// 口径（不要退回 MAX(files.indexed_at)）：该值只取自**成功的 light 索引**。
+	// light 通道会遍历整个工作区、以 content_hash 跳过未变文件，因此一次成功的
+	// light 运行才等于一次完整对账。incremental 通道（IndexPaths）只处理被标记
+	// 的少数文件、不遍历工作区，对其余文件证明不了任何事，所以**不能**用来续期。
+	//
+	// 为什么不用 MAX(files.indexed_at)：那是"最近一次写入某个文件"的时刻。
+	// 改 5,058 个文件里的任意一个就会把它推到 now，于是陈旧度归零、分级闸门
+	// 放行 tier=all，关系类查询以 confidence=1.0/completeness=full 作答，而其余
+	// 5,057 个文件从未被校验——静默给出未经验证的高置信度结论。
+	//
+	// 无 light 记录的历史库回退到 MAX(files.indexed_at)，宁可多报陈旧
+	// （fail-closed，关系类降级为实时 grep）也不谎报新鲜。
 	IndexedAt int64 `json:"indexed_at"`
 	// Truncated 表示预算上限提前终止了索引；工具面据此标记结果可能陈旧（ADR-0004）。
 	Truncated bool `json:"truncated"`

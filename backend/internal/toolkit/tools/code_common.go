@@ -36,11 +36,50 @@ const (
 	// codeSourceSemantic 是语义通道（进程外 LSP）结果：编译器级口径，
 	// 精度高于索引启发式（Phase 4 接线；默认关闭，见 knowledge.lsp.enabled）。
 	codeSourceSemantic = "lsp"
+	// codeSourceIndexSemantic 是「索引主结果 + 语义补充」的合并口径：语义命中
+	// 只用于消歧/补漏（FTS 仍是主结果集），因此不标 lsp——标了会让模型误以为
+	// 整份结果都是编译器口径。
+	codeSourceIndexSemantic = "index+lsp"
 
-	// ADR-0004 §4.1 的两档陈旧度边界（初始值：60s / 15min，Phase2-start 校准）。
-	// D7 要求它们是常量而非字面量散布，因此只在此处定义。
-	CodeStaleFreshSeconds int64 = 60
-	CodeStaleMaxSeconds   int64 = 900
+	// ADR-0004 §4.1 的两档陈旧度边界。D7 要求它们是常量而非字面量散布，
+	// 因此只在此处定义。
+	//
+	// 校准（2026-10-01）。原 60s / 900s 是 ADR 里标注的"初始值…Phase2-start
+	// 校准"的占位数，这次校准从未落实。5,058 文件真机工作区实测：
+	//
+	//   - 全工作区对账（light 扫描，content_hash 未变即跳过解析）：
+	//     2.1s / 2.8s / 8.2s / 8.5s，中位 ~2.8s（另见一次 229s 长尾）。
+	//   - 编辑触发的增量重索引：files_done=1~2，亚秒级。
+	//   - 全量对账的真实节奏（由会话启动驱动，非定时）：近 8 次间隔
+	//     91/95/73/17/61/110/316/668 分钟，中位 ~90 分钟。
+	//
+	// 为什么 60s 对源码索引是错的量级：陈旧度衡量的是"距上次**全工作区对账**
+	// 过了多久"，而空闲工作区没有文件变更、对账不会重跑，staleness 于是单调
+	// 增长（实测 18s→196s→337s→375s 只涨不掉）。结果是索引可证明正确的仓库，
+	// 60s 后把关系类永久降级为 grep，15min 后连 code.* 工具整体不再注册
+	// （tier=none，见 tools/manager.go 的 codeToolGate.evaluate）。
+	//
+	// 更关键的是降级方向是倒置的：grep 读实时磁盘，比它替换掉的索引**更新**。
+	// 为一个占位阈值放弃准确性是净亏损，所以这里不改"要不要定时重跑对账"
+	// （那要 3~13% 常驻 CPU），而是修正阈值的量级。
+	//
+	// 取值依据（两项，都指向放宽）：
+	//
+	//  1) 对账节奏。按实测 ~90 分钟的中位间隔，S_fresh 必须覆盖它，否则
+	//     relations 会在绝大部分时间里都被降级——那等于把闸门焊死在关闭位。
+	//     取 2h 留约 1.3× 余量。
+	//  2) 真正的"未索引编辑"暴露窗口不是 2h，而是**下一个 turn 边界**：
+	//     watch=off 时判定点仍会在每个 turn 用 git/stat 校正并增量重索引
+	//     （见 Config.Watch 注释），增量实测亚秒到数秒。也就是说 S_fresh
+	//     只是在代理一个远大于真实风险的量，放宽它不会放大真实风险。
+	//
+	// 因此 S_fresh = 2h、S_max = 8h（保留 6h 的 definitions 档，使三档分级不
+	// 退化）。仍嫌宽的话 `knowledge.tools.stale_reader=off` 是既有的全开逃生舱。
+	//
+	// 消费方仍能自查：信封里 staleness_seconds 始终显式返回，且非精确解析的
+	// confidence 是 0.9/0.8 而非 1.0，工具描述已要求低置信度结论用 grep 复核。
+	CodeStaleFreshSeconds int64 = 7200
+	CodeStaleMaxSeconds   int64 = 28800
 
 	// 分级注册 tier（ADR-0004 §4.1）：
 	//   all         = 全开（writer / reader S ≤ S_fresh）
@@ -85,7 +124,23 @@ const (
 	// codeFallbackStaleIndex 是陈旧度守卫触发的降级原因（ADR-0004 §4.1：
 	// 关系类在中等陈旧 / 定义类在过旧档都不得返回索引结果，只能实时兜底）。
 	codeFallbackStaleIndex = "stale_index"
+	// codeFallbackStaleFile 是**文件级**陈旧守卫触发的降级原因：全局快照够新，
+	// 但本次查询涉及的某个文件在索引之后被改写，其引用集合可能漏掉磁盘上已经
+	// 存在的调用点。属于 ADR-0004 §4.1/§5 D1 的同一类风险，只是粒度更细。
+	codeFallbackStaleFile = "stale_file"
 )
+
+// codeEnvelopeSemantics 是 code.* 工具共用的信封语义说明，追加在每个工具描述末尾：
+// 统一返回结构里 source / confidence / snapshot_ts / staleness_seconds /
+// completeness / truncated 的取值口径（ADR-0004 §4.2）。集中定义为常量而不是
+// 在 5 个工具里散落字面量，避免口径漂移。
+const codeEnvelopeSemantics = " 返回信封口径：source=index（索引命中）|index+grep（索引命中+低相关补量 grep）|" +
+	"index+lsp（索引主结果 + 语义通道精确同名补充，用于同名消歧）|" +
+	"fallback（索引不可用/未命中/陈旧/出错，降级到 grep 或 view）|lsp（进程外语义通道，编译器级）；" +
+	"confidence=1.0（精确符号解析）|0.9（FTS 命中或精确解析的引用集合）|" +
+	"0.8（子串/模糊解析，如按名字兜底查引用）|0.0（无命中或纯 fallback）；" +
+	"confidence<0.9 或 source=fallback 的结果不足以作为结论，关键结论请用 grep 复核。" +
+	"staleness_seconds 是索引快照陈旧度（0 表示索引即最新），completeness=full|partial（可能被截断）|fallback。"
 
 // CodeIndex 是 code.* 与 view --symbol 需要的只读索引句柄（knowledge.Store 的窄子集）。
 type CodeIndex interface {
@@ -107,7 +162,23 @@ type CodeIndexHandle struct {
 	Semantic knowledge.SemanticAdapter
 	// FilePaths 是 file_id → workspace 相对路径的映射（打开索引时构建一次）。
 	FilePaths map[string]string
-	// SnapshotTS 是索引最近成功写事务时间（unix 秒；0 = 无索引快照）。
+	// FileStamps 是 file_id → 文件指纹（打开索引时与 FilePaths 同一次
+	// ListActiveFiles 构建，无额外查询成本）。
+	//
+	// 它回答全局 tier 回答不了的问题："这次查询涉及的这些文件，索引视图是否
+	// 仍与磁盘一致"。nil/空表示本次句柄未提供指纹——是"无法校验"而非"新鲜"，
+	// 关系类结果必须在解释里如实说明，不得默认为已校验。
+	FileStamps map[string]FileStamp
+	// FileIDsByPath 是 FilePaths 的反向索引（workspace 相对路径 → file_id）。
+	// members 这类"按路径定义类查询"需要从路径找到指纹与行号来源文件；没有它
+	// 就只能线性扫 FilePaths。
+	FileIDsByPath map[string]string
+	// SnapshotTS 是索引最近一次**成功全工作区对账**（light 索引）的时间
+	// （unix 秒；0 = 无对账快照）。
+	//
+	// 口径提醒：它**不是**"最近一次写事务"。incremental 运行只重索引调用方点名的
+	// 少数文件、不遍历工作区，预算截断的 light 运行也没看完整个工作区，两者都
+	// 不具备续期资格（见 knowledge.StatusReport.IndexedAt 与 Stats.IndexedAt）。
 	// ADR-0004 §4.2：所有 code.* 结果必须携带它。
 	SnapshotTS int64
 	// StalenessSeconds 是 (now - SnapshotTS) 的实际值（ADR-0004 D3）；
@@ -168,6 +239,14 @@ func (h *CodeIndexHandle) PathForFile(fileID string) string {
 		return ""
 	}
 	return h.FilePaths[strings.TrimSpace(fileID)]
+}
+
+// FileIDForPath 反向查 file_id；未登记时返回空串。
+func (h *CodeIndexHandle) FileIDForPath(path string) string {
+	if h == nil || len(h.FileIDsByPath) == 0 {
+		return ""
+	}
+	return h.FileIDsByPath[strings.TrimSpace(path)]
 }
 
 // CodeIndexResolver 在调用时刻解析当前 workspace 的只读索引；ok=false 表示
@@ -397,6 +476,24 @@ func staleGuardEnvelope(tool string, handle *CodeIndexHandle, fallbackTool strin
 	return env
 }
 
+// staleFileEnvelope 是**文件级**陈旧守卫触发的降级信封。
+//
+// 与 staleGuardEnvelope 同属 ADR-0004 §4.1/§5 D1 的硬约束，但触发原因不同：
+// 全局快照可能完全新鲜（索引一直在给别的文件写入），只是本次查询涉及的
+// 某个文件在索引之后被改写过。它的引用集合因此可能漏掉磁盘上**已经存在**
+// 的调用点，而这种漏报是静默的——返回的那几条引用看起来完全正常。
+func staleFileEnvelope(tool string, handle *CodeIndexHandle, fallbackTool string, result *toolkit.ToolResult, staleFiles []string) codeEnvelope {
+	env := fallbackEnvelope(tool, codeFallbackStaleFile, codeConfidenceNone, fallbackTool, result, handle)
+	if handle != nil {
+		env.Explanation = fmt.Sprintf(
+			"索引中 %s 已在索引之后被改写：其引用集合可能漏掉磁盘上已存在的调用点，"+
+				"本次未返回索引结果，改用 %s 实时输出（ADR-0004 §4.1/§5 D1）。",
+			truncateRelFiles(staleFiles, 3), fallbackTool,
+		)
+	}
+	return env
+}
+
 // staleTierName 把 tier 映射为可读档位名（降级说明用）。
 func staleTierName(tier string) string {
 	switch tier {
@@ -495,15 +592,32 @@ type codeRefHit struct {
 	Snippet    string  `json:"snippet,omitempty"`
 	Confidence float64 `json:"confidence,omitempty"`
 	Source     string  `json:"source,omitempty"`
-	FromSymbol string  `json:"from_symbol,omitempty"`
+	// FromSymbol 是引用所在符号的**可读名**（qualified_name，如
+	// `validateToolNames` / `TestSupervisionToolsHaveTaxonomy`）。取自 refs
+	// 查询本来就联表拿到的值，因此"归属哪个函数"不需要消费方回读源文件反查。
+	//
+	// 同名多点（一个文件里两处调用）各自成行，不会被折叠——折叠发生在数据
+	// 层，不在这里。
+	//
+	// 降级口径：`FromSymbolName` 为空（旧索引库、符号行缺失）时退回
+	// from_symbol_id 的 32 位 hex 稳定键。**见到 s_ 开头的 16 字节 hex 说明
+	// 该引用没有可读归属名**（refs 查询的 LEFT JOIN 未命中），消费方应把它
+	// 当作"归属未知"而不是函数名。
+	//
+	// 语义通道（LSP）无 enclosing 概念，留空。
+	FromSymbol string `json:"from_symbol,omitempty"`
 }
 
-// codeRefHitFrom 把索引行映射为结果形状；from_symbol 以 id 形式给出
-// （名字解析需要额外查询，v1 不展开，保持单次查询的成本边界）。
+// codeRefHitFrom 把索引行映射为结果形状。
 func codeRefHitFrom(ref knowledge.Reference, handle *CodeIndexHandle) codeRefHit {
 	path := ""
 	if handle != nil {
 		path = handle.PathForFile(ref.FileID)
+	}
+	from := ref.FromSymbolName
+	if from == "" {
+		// 旧索引/名字缺失时保留 id 形态，至少是稳定的引用键。
+		from = ref.FromSymbolID
 	}
 	return codeRefHit{
 		Path:       path,
@@ -513,7 +627,7 @@ func codeRefHitFrom(ref knowledge.Reference, handle *CodeIndexHandle) codeRefHit
 		Snippet:    ref.Snippet,
 		Confidence: ref.Confidence,
 		Source:     string(ref.Source),
-		FromSymbol: ref.FromSymbolID,
+		FromSymbol: from,
 	}
 }
 

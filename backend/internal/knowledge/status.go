@@ -70,9 +70,13 @@ type StatusReport struct {
 	Files   int64 `json:"files"`
 	Symbols int64 `json:"symbols"`
 	Refs    int64 `json:"refs"`
-	// IndexedAt 是最近一次成功写事务的 unix 毫秒；0 表示尚无索引。
+	// IndexedAt 是最近一次**全工作区对账**（成功 light 索引）的 unix 毫秒；
+	// 0 表示尚无对账。口径与降级理由见 Stats.IndexedAt：incremental 运行
+	// 不遍历工作区，不具备续期资格。
 	IndexedAt int64 `json:"indexed_at,omitempty"`
-	// StalenessMS 是 (now - IndexedAt)，供状态栏直接展示"索引有多旧"。
+	// StalenessMS 是 (now - IndexedAt)，供状态栏直接展示"距上次对账过了多久"。
+	// 注意它随空闲单调增长：没有新的对账就没有新答案，这是 fail-closed 的
+	// 有意行为（关系类超阈降级为实时 grep，而 grep 读的是磁盘，比索引更新）。
 	StalenessMS int64 `json:"staleness_ms,omitempty"`
 	// IndexRunning 表示本进程的后台首次索引仍在跑（Activation 级事实）。
 	IndexRunning bool `json:"index_running"`
