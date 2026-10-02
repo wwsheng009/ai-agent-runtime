@@ -26,17 +26,26 @@ func Classify(req ClassifyRequest) *Classification {
 	return classifyFetchedModels(req.ProviderName, req.Provider, req.RequestedLoginProtocol, req.GroupingLoginProtocol, req.Models, req.Config)
 }
 
-// ModelMetadata 是单个模型的元数据匹配结果（前端 reasoning 编辑器可直接
-// 回显的字段视图，比 ModelCapabilitySpec 少掉非 reasoning 字段）。
+// ModelMetadata 是单个模型的元数据匹配结果：model_capabilities 条目的
+// 完整字段视图（与 ChatWebConfigModel 同源，fetch-models 的 model_metadata
+// 直接复用它），前端「模型编辑器」面板据此回显 /models 元数据。
 type ModelMetadata struct {
-	ID                     string   `json:"id"`
-	Name                   string   `json:"name"`
-	ReasoningModel         bool     `json:"reasoning_model"`
-	ReasoningEfforts       []string `json:"reasoning_efforts,omitempty"`
-	DefaultReasoningEffort string   `json:"default_reasoning_effort,omitempty"`
-	CompactReasoningEffort string   `json:"compact_reasoning_effort,omitempty"`
-	MaxContextTokens       int      `json:"max_context_tokens,omitempty"`
-	MaxTokens              int      `json:"max_tokens,omitempty"`
+	ID                     string                        `json:"id"`
+	Name                   string                        `json:"name"`
+	ReasoningModel         bool                          `json:"reasoning_model"`
+	ReasoningEfforts       []string                      `json:"reasoning_efforts,omitempty"`
+	ReasoningEffortBudgets map[string]int                `json:"reasoning_effort_budgets,omitempty"`
+	DefaultReasoningEffort string                        `json:"default_reasoning_effort,omitempty"`
+	CompactReasoningEffort string                        `json:"compact_reasoning_effort,omitempty"`
+	MaxContextTokens       int                           `json:"max_context_tokens,omitempty"`
+	MaxTokens              int                           `json:"max_tokens,omitempty"`
+	AutoCompactRatio       float64                       `json:"auto_compact_ratio,omitempty"`
+	AutoCompactTokenLimit  int                           `json:"auto_compact_token_limit,omitempty"`
+	AutoCompactMode        string                        `json:"auto_compact_mode,omitempty"`
+	SupportsRemoteCompact  bool                          `json:"supports_remote_compact,omitempty"`
+	ReplayReasoningContent *bool                         `json:"replay_reasoning_content,omitempty"`
+	InputModalities        []string                      `json:"input_modalities,omitempty"`
+	NativeTools            config.NativeToolCapabilities `json:"native_tools"`
 }
 
 // MetadataRequest 是一次元数据匹配请求（覆盖重匹配语义）。
@@ -87,15 +96,27 @@ func MatchMetadata(req MetadataRequest) map[string]ModelMetadata {
 		if !ok || ModelCapabilityIsEmpty(spec) {
 			continue
 		}
+		// 与 GET /web/api/config 快照共用 ModelCapabilityView 投影：两条入口
+		// 必须给出同一个字段集合，否则 Web 端「获取模型列表」覆盖写入的字段
+		// 会多于快照回显的字段（或反之），造成保存后配置“凭空多出/少掉”。
+		view := ModelCapabilityView(modelID, spec)
 		out[modelID] = ModelMetadata{
-			ID:                     modelID,
-			Name:                   modelID,
-			ReasoningModel:         spec.ReasoningModel,
-			ReasoningEfforts:       append([]string(nil), spec.ReasoningEfforts...),
-			DefaultReasoningEffort: strings.TrimSpace(spec.DefaultReasoningEffort),
-			CompactReasoningEffort: strings.TrimSpace(spec.CompactReasoningEffort),
-			MaxContextTokens:       spec.MaxContextTokens,
-			MaxTokens:              spec.MaxTokens,
+			ID:                     view.Name,
+			Name:                   view.Name,
+			ReasoningModel:         view.ReasoningModel,
+			ReasoningEfforts:       view.ReasoningEfforts,
+			ReasoningEffortBudgets: view.ReasoningEffortBudgets,
+			DefaultReasoningEffort: view.DefaultReasoningEffort,
+			CompactReasoningEffort: view.CompactReasoningEffort,
+			MaxContextTokens:       view.MaxContextTokens,
+			MaxTokens:              view.MaxTokens,
+			AutoCompactRatio:       view.AutoCompactRatio,
+			AutoCompactTokenLimit:  view.AutoCompactTokenLimit,
+			AutoCompactMode:        view.AutoCompactMode,
+			SupportsRemoteCompact:  view.SupportsRemoteCompact,
+			ReplayReasoningContent: view.ReplayReasoningContent,
+			InputModalities:        view.InputModalities,
+			NativeTools:            view.NativeTools,
 		}
 	}
 	return out

@@ -11,6 +11,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
 	httpclient "github.com/wwsheng009/ai-agent-runtime/internal/pkg/httpclient"
+	"github.com/wwsheng009/ai-agent-runtime/internal/providerops"
 )
 
 // ---------------------------------------------------------------------------
@@ -126,12 +127,17 @@ type chatWebProviderWriteRequest struct {
 	// Headers 整体写回 providers.items.<name>.headers：nil=不修改，非 nil
 	// 空 map=清空 headers 节点。保存目标是用户 config.yaml（presets.yaml
 	// 只读）；值可含 {session_id} 等模板占位符。
-	Headers            *map[string]string                     `json:"headers,omitempty"`
-	Enabled            *bool                                  `json:"enabled"`
-	DefaultModel       string                                 `json:"default_model"`
-	SupportedModels    []string                               `json:"supported_models"`
-	SetDefaultProvider bool                                   `json:"set_default_provider"`
-	Reasoning          map[string]chatWebModelReasoningUpdate `json:"reasoning"`
+	Headers            *map[string]string `json:"headers,omitempty"`
+	Enabled            *bool              `json:"enabled"`
+	DefaultModel       string             `json:"default_model"`
+	SupportedModels    []string           `json:"supported_models"`
+	SetDefaultProvider bool               `json:"set_default_provider"`
+	// Reasoning 是「模型编辑器」的 reasoning 子集（旧前端字段名，保留兼容
+	// 旧前端与已登记的事件契约）；ModelCapabilities 是同一模型条目的完整
+	// capability 写回。两者按 model 逐字段合并，ModelCapabilities 后应用，
+	// 因此同时提交时以 ModelCapabilities 为准。
+	Reasoning         map[string]chatWebModelReasoningUpdate  `json:"reasoning"`
+	ModelCapabilities map[string]chatWebModelCapabilityUpdate `json:"model_capabilities"`
 }
 
 // chatWebModelReasoningUpdate 描述单个模型 reasoning 相关字段的更新。
@@ -141,6 +147,52 @@ type chatWebModelReasoningUpdate struct {
 	ReasoningEfforts       *[]string `json:"reasoning_efforts"`
 	DefaultReasoningEffort *string   `json:"default_reasoning_effort"`
 	CompactReasoningEffort *string   `json:"compact_reasoning_effort"`
+}
+
+// asCapabilityUpdate 把 reasoning 子集视图收敛为统一的 capability 更新结构，
+// 使 reasoning 与 model_capabilities 走同一条合并路径（避免两套字段映射
+// 随时间漂移）。
+func (u chatWebModelReasoningUpdate) asCapabilityUpdate() chatWebModelCapabilityUpdate {
+	return chatWebModelCapabilityUpdate{
+		ReasoningModel:         u.ReasoningModel,
+		ReasoningEfforts:       u.ReasoningEfforts,
+		DefaultReasoningEffort: u.DefaultReasoningEffort,
+		CompactReasoningEffort: u.CompactReasoningEffort,
+	}
+}
+
+// chatWebModelCapabilityUpdate 描述单个模型 model_capabilities 条目的整体
+// 更新，覆盖 ModelCapabilitySpec 的全部可编辑字段。
+//
+// 指针字段遵循「nil=不修改」语义；非 nil 零值表示**显式清空**该字段
+// （false / 0 / "" / 空数组 / false 三态指针）。前端「模型编辑器」面板一次
+// 提交面板内的全部字段，所以非 nil 零值是正常的清空意图而不是遗漏。
+type chatWebModelCapabilityUpdate struct {
+	ReasoningModel         *bool           `json:"reasoning_model"`
+	ReasoningEfforts       *[]string       `json:"reasoning_efforts"`
+	ReasoningEffortBudgets *map[string]int `json:"reasoning_effort_budgets"`
+	DefaultReasoningEffort *string         `json:"default_reasoning_effort"`
+	CompactReasoningEffort *string         `json:"compact_reasoning_effort"`
+	// MaxContextTokens 是上下文窗口大小（tokens）；MaxTokens 是单次响应
+	// 最大输出（tokens）。
+	MaxContextTokens *int     `json:"max_context_tokens"`
+	MaxTokens        *int     `json:"max_tokens"`
+	AutoCompactRatio *float64 `json:"auto_compact_ratio"`
+	// AutoCompactTokenLimit 是自动压缩触发阈值（tokens，0=不限制）。
+	AutoCompactTokenLimit *int    `json:"auto_compact_token_limit"`
+	AutoCompactMode       *string `json:"auto_compact_mode"`
+	SupportsRemoteCompact *bool   `json:"supports_remote_compact"`
+	// ReplayReasoningContent 是三态端点契约：nil=未声明（回退名称启发式）、
+	// true=强制回传 reasoning_content、false=禁止注入。
+	ReplayReasoningContent *bool                          `json:"replay_reasoning_content"`
+	InputModalities        *[]string                      `json:"input_modalities"`
+	NativeTools            *chatWebModelNativeToolsUpdate `json:"native_tools"`
+}
+
+// chatWebModelNativeToolsUpdate 是 provider 原生工具能力的按字段更新。
+type chatWebModelNativeToolsUpdate struct {
+	ImageGeneration      *bool `json:"image_generation"`
+	ImagesGenerationsAPI *bool `json:"images_generations_api"`
 }
 
 type chatWebProviderDeleteRequest struct {
@@ -334,9 +386,23 @@ func chatWebInvalidateRuntimeProvider(name string) {
 // capabilities：只改动提交涉及的模型与字段，其余模型/字段原样保留，
 // 避免全量 map 写回时丢失未编辑模型的能力声明。
 func mergeModelCapabilities(current map[string]agentconfig.ModelCapabilitySpec, requested map[string]chatWebModelReasoningUpdate) map[string]agentconfig.ModelCapabilitySpec {
-	merged := make(map[string]agentconfig.ModelCapabilitySpec, len(current)+len(requested))
-	for name, spec := range current {
-		merged[name] = spec
+	if len(requested) == 0 {
+		return cloneModelCapabilities(current)
+	}
+	unified := make(map[string]chatWebModelCapabilityUpdate, len(requested))
+	for name, upd := range requested {
+		unified[name] = upd.asCapabilityUpdate()
+	}
+	return mergeModelCapabilityUpdates(current, unified)
+}
+
+// mergeModelCapabilityUpdates 把「模型编辑器」提交的每模型完整 capability
+// 更新合并进现有 capabilities：nil 字段不修改，非 nil 零值显式清空。
+// 未出现在请求中的模型与字段原样保留。
+func mergeModelCapabilityUpdates(current map[string]agentconfig.ModelCapabilitySpec, requested map[string]chatWebModelCapabilityUpdate) map[string]agentconfig.ModelCapabilitySpec {
+	merged := cloneModelCapabilities(current)
+	if merged == nil {
+		merged = make(map[string]agentconfig.ModelCapabilitySpec, len(requested))
 	}
 	for name, upd := range requested {
 		name = strings.TrimSpace(name)
@@ -348,13 +414,10 @@ func mergeModelCapabilities(current map[string]agentconfig.ModelCapabilitySpec, 
 			spec.ReasoningModel = *upd.ReasoningModel
 		}
 		if upd.ReasoningEfforts != nil {
-			efforts := make([]string, 0, len(*upd.ReasoningEfforts))
-			for _, e := range *upd.ReasoningEfforts {
-				if e = strings.TrimSpace(e); e != "" {
-					efforts = append(efforts, e)
-				}
-			}
-			spec.ReasoningEfforts = efforts
+			spec.ReasoningEfforts = chatWebTrimNames(*upd.ReasoningEfforts)
+		}
+		if upd.ReasoningEffortBudgets != nil {
+			spec.ReasoningEffortBudgets = chatWebTrimEffortBudgets(*upd.ReasoningEffortBudgets)
 		}
 		if upd.DefaultReasoningEffort != nil {
 			spec.DefaultReasoningEffort = strings.TrimSpace(*upd.DefaultReasoningEffort)
@@ -362,9 +425,105 @@ func mergeModelCapabilities(current map[string]agentconfig.ModelCapabilitySpec, 
 		if upd.CompactReasoningEffort != nil {
 			spec.CompactReasoningEffort = strings.TrimSpace(*upd.CompactReasoningEffort)
 		}
+		if upd.MaxContextTokens != nil {
+			spec.MaxContextTokens = webNonNegativeInt(*upd.MaxContextTokens)
+		}
+		if upd.MaxTokens != nil {
+			spec.MaxTokens = webNonNegativeInt(*upd.MaxTokens)
+		}
+		if upd.AutoCompactRatio != nil {
+			spec.AutoCompactRatio = webNonNegativeFloat(*upd.AutoCompactRatio)
+		}
+		if upd.AutoCompactTokenLimit != nil {
+			spec.AutoCompactTokenLimit = webNonNegativeInt(*upd.AutoCompactTokenLimit)
+		}
+		if upd.AutoCompactMode != nil {
+			spec.AutoCompactMode = strings.TrimSpace(*upd.AutoCompactMode)
+		}
+		if upd.SupportsRemoteCompact != nil {
+			spec.SupportsRemoteCompact = *upd.SupportsRemoteCompact
+		}
+		if upd.ReplayReasoningContent != nil {
+			value := *upd.ReplayReasoningContent
+			spec.ReplayReasoningContent = &value
+		}
+		if upd.InputModalities != nil {
+			spec.InputModalities = chatWebTrimNames(*upd.InputModalities)
+		}
+		if upd.NativeTools != nil {
+			if upd.NativeTools.ImageGeneration != nil {
+				spec.NativeTools.ImageGeneration = *upd.NativeTools.ImageGeneration
+			}
+			if upd.NativeTools.ImagesGenerationsAPI != nil {
+				spec.NativeTools.ImagesGenerationsAPI = *upd.NativeTools.ImagesGenerationsAPI
+			}
+		}
 		merged[name] = spec
 	}
 	return merged
+}
+
+// cloneModelCapabilities 深拷贝 capability map（含切片与 map 字段），避免
+// 合并时改到 session 配置里的共享底层数组。
+func cloneModelCapabilities(input map[string]agentconfig.ModelCapabilitySpec) map[string]agentconfig.ModelCapabilitySpec {
+	if input == nil {
+		return nil
+	}
+	out := make(map[string]agentconfig.ModelCapabilitySpec, len(input))
+	for name, spec := range input {
+		if len(spec.InputModalities) > 0 {
+			spec.InputModalities = append([]string(nil), spec.InputModalities...)
+		}
+		if len(spec.ReasoningEfforts) > 0 {
+			spec.ReasoningEfforts = append([]string(nil), spec.ReasoningEfforts...)
+		}
+		if len(spec.ReasoningEffortBudgets) > 0 {
+			budgets := make(map[string]int, len(spec.ReasoningEffortBudgets))
+			for effort, budget := range spec.ReasoningEffortBudgets {
+				budgets[effort] = budget
+			}
+			spec.ReasoningEffortBudgets = budgets
+		}
+		out[name] = spec
+	}
+	return out
+}
+
+// chatWebTrimEffortBudgets 归一 reasoning_effort_budgets：丢弃空 effort 名
+// 与非正数预算（后者等价于未声明，写进 YAML 只会是噪音）。
+func chatWebTrimEffortBudgets(budgets map[string]int) map[string]int {
+	if budgets == nil {
+		return nil
+	}
+	out := make(map[string]int, len(budgets))
+	for effort, budget := range budgets {
+		effort = strings.TrimSpace(effort)
+		if effort == "" || budget <= 0 {
+			continue
+		}
+		out[effort] = budget
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// webNonNegativeInt 把负数输入收敛为 0：负的 token 预算 / 阈值没有语义，
+// 且会被 YAML 持久化成与「未声明」等价的负值，污染配置回显。
+func webNonNegativeInt(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+// webNonNegativeFloat 同 webNonNegativeInt，用于 auto_compact_ratio。
+func webNonNegativeFloat(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func chatWebTrimNames(names []string) []string {
@@ -511,16 +670,9 @@ func HandleChatWebAPIConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		for _, model := range collectRuntimeProviderModels(provider) {
-			m := chatWebConfigModel{Name: model}
-			if spec, ok := provider.ModelCapabilities[model]; ok {
-				m.ReasoningModel = spec.ReasoningModel
-				m.ReasoningEfforts = append([]string(nil), spec.ReasoningEfforts...)
-				m.DefaultReasoningEffort = strings.TrimSpace(spec.DefaultReasoningEffort)
-				m.CompactReasoningEffort = strings.TrimSpace(spec.CompactReasoningEffort)
-				m.MaxContextTokens = spec.MaxContextTokens
-				m.MaxTokens = spec.MaxTokens
-			}
-			entry.Models = append(entry.Models, m)
+			// 与 fetch-models 的 model_metadata 共用 providerops.ModelCapabilityView：
+			// 「模型编辑器」面板的回显字段集合必须与它的写回字段集合一致。
+			entry.Models = append(entry.Models, providerops.ModelCapabilityView(model, provider.ModelCapabilities[model]))
 		}
 		snap.Providers = append(snap.Providers, entry)
 	}
@@ -630,7 +782,10 @@ func HandleChatWebAPIConfigProviders(w http.ResponseWriter, r *http.Request) {
 		update.SupportedModels = &models
 	}
 	update.SetDefaultProvider = req.SetDefaultProvider
-	if len(req.Reasoning) > 0 {
+	// 模型编辑器写回：reasoning（旧前端字段名）与 model_capabilities
+	// （完整字段）按 model 逐字段合并到同一份基底，model_capabilities 后应用
+	// 覆盖 reasoning 的同名字段。
+	if len(req.Reasoning) > 0 || len(req.ModelCapabilities) > 0 {
 		// 以当前 provider 的 capabilities 为基底做按模型合并。
 		base := map[string]agentconfig.ModelCapabilitySpec{}
 		session := chatWebSession()
@@ -643,6 +798,7 @@ func HandleChatWebAPIConfigProviders(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		merged := mergeModelCapabilities(base, req.Reasoning)
+		merged = mergeModelCapabilityUpdates(merged, req.ModelCapabilities)
 		update.ModelCapabilities = &merged
 	}
 

@@ -13,22 +13,74 @@ import (
 // 合并链。login 与 fetch-models（runtime 编辑器）共用同一实现。
 // ---------------------------------------------------------------------------
 
-// ChatWebConfigModel 是单个模型的配置视图：模型名 + 其 capability 中与
-// reasoning 相关的字段（前端 reasoning 编辑器可直接回显）。
+// ChatWebConfigModel 是单个模型的配置视图：模型名 + 其 model_capabilities
+// 条目的**完整字段投影**（前端「模型编辑器」面板可直接回显并整体写回）。
+//
+// 字段与 config.ModelCapabilitySpec 一一对应：视图是 spec 的单向投影，写回
+// 走 POST /web/api/config/providers 的 model_capabilities 字段，不再是只读
+// 子集。新增 capability 字段时必须同步补充这里的投影与写入结构，否则 Web
+// 端编辑该字段会被静默丢弃。
 type ChatWebConfigModel struct {
-	Name                   string   `json:"name"`
-	ReasoningModel         bool     `json:"reasoning_model"`
-	ReasoningEfforts       []string `json:"reasoning_efforts,omitempty"`
-	DefaultReasoningEffort string   `json:"default_reasoning_effort,omitempty"`
-	CompactReasoningEffort string   `json:"compact_reasoning_effort,omitempty"`
-	MaxContextTokens       int      `json:"max_context_tokens,omitempty"`
-	MaxTokens              int      `json:"max_tokens,omitempty"`
+	Name                   string                        `json:"name"`
+	ReasoningModel         bool                          `json:"reasoning_model"`
+	ReasoningEfforts       []string                      `json:"reasoning_efforts,omitempty"`
+	ReasoningEffortBudgets map[string]int                `json:"reasoning_effort_budgets,omitempty"`
+	DefaultReasoningEffort string                        `json:"default_reasoning_effort,omitempty"`
+	CompactReasoningEffort string                        `json:"compact_reasoning_effort,omitempty"`
+	MaxContextTokens       int                           `json:"max_context_tokens,omitempty"`
+	MaxTokens              int                           `json:"max_tokens,omitempty"`
+	AutoCompactRatio       float64                       `json:"auto_compact_ratio,omitempty"`
+	AutoCompactTokenLimit  int                           `json:"auto_compact_token_limit,omitempty"`
+	AutoCompactMode        string                        `json:"auto_compact_mode,omitempty"`
+	SupportsRemoteCompact  bool                          `json:"supports_remote_compact,omitempty"`
+	ReplayReasoningContent *bool                         `json:"replay_reasoning_content,omitempty"`
+	InputModalities        []string                      `json:"input_modalities,omitempty"`
+	NativeTools            config.NativeToolCapabilities `json:"native_tools"`
+}
+
+// ModelCapabilityView 把 model_capabilities 条目投影为前端字段视图。GET
+// /web/api/config 快照与 fetch-models 的 model_metadata 必须是同一次投影的
+// 两个入口，否则「模型编辑器」回显的字段集合会与写回集合不一致。
+func ModelCapabilityView(name string, spec config.ModelCapabilitySpec) ChatWebConfigModel {
+	view := ChatWebConfigModel{
+		Name:                   strings.TrimSpace(name),
+		ReasoningModel:         spec.ReasoningModel,
+		ReasoningEfforts:       append([]string(nil), spec.ReasoningEfforts...),
+		DefaultReasoningEffort: strings.TrimSpace(spec.DefaultReasoningEffort),
+		CompactReasoningEffort: strings.TrimSpace(spec.CompactReasoningEffort),
+		MaxContextTokens:       spec.MaxContextTokens,
+		MaxTokens:              spec.MaxTokens,
+		AutoCompactRatio:       spec.AutoCompactRatio,
+		AutoCompactTokenLimit:  spec.AutoCompactTokenLimit,
+		AutoCompactMode:        strings.TrimSpace(spec.AutoCompactMode),
+		SupportsRemoteCompact:  spec.SupportsRemoteCompact,
+		ReplayReasoningContent: spec.ReplayReasoningContent,
+		InputModalities:        append([]string(nil), spec.InputModalities...),
+		NativeTools:            spec.NativeTools,
+	}
+	if len(spec.ReasoningEffortBudgets) > 0 {
+		budgets := make(map[string]int, len(spec.ReasoningEffortBudgets))
+		for effort, budget := range spec.ReasoningEffortBudgets {
+			if effort = strings.TrimSpace(effort); effort == "" || budget <= 0 {
+				continue
+			}
+			budgets[effort] = budget
+		}
+		if len(budgets) > 0 {
+			view.ReasoningEffortBudgets = budgets
+		}
+	}
+	return view
 }
 
 // chatWebConfigModel 是包内既有点名的内部别名（fetch-models 元数据投影）。
 type chatWebConfigModel = ChatWebConfigModel
 
 // ModelCapabilityIsEmpty 判断 spec 是否不携带任何有效配置。
+//
+// 必须覆盖 ModelCapabilitySpec 的每个字段：漏判会让「只声明了该字段」的
+// spec 在 fetch-models 匹配与 Web 端整体写回后被当作空条目丢弃
+// （replay_reasoning_content 曾长期漏判，导致 Web 端无法保存该契约）。
 func ModelCapabilityIsEmpty(spec config.ModelCapabilitySpec) bool {
 	return len(spec.InputModalities) == 0 &&
 		!spec.NativeTools.ImageGeneration &&
@@ -43,6 +95,7 @@ func ModelCapabilityIsEmpty(spec config.ModelCapabilitySpec) bool {
 		spec.AutoCompactTokenLimit == 0 &&
 		strings.TrimSpace(spec.AutoCompactMode) == "" &&
 		!spec.SupportsRemoteCompact &&
+		spec.ReplayReasoningContent == nil &&
 		strings.TrimSpace(spec.CompactReasoningEffort) == ""
 }
 

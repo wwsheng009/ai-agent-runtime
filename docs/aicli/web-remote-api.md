@@ -327,6 +327,11 @@ HTTP 错误码：`400` body 读取失败 / 空 prompt（非 wait_only）/ `clien
 > 此时写接口返回 `409 no active chat session`。外部脚本应先探测会话就绪
 > （`GET /web/api/sessions` 的 `current_session_id` 非空，或 `GET /web/api/screen` 的
 > `available=true`），或把 409 视为可重试状态。
+>
+> 实测（2026-10-01，`--headless` + `knowledge.mode=on`）：节点端口 ~2.2s 开始监听，
+> chat 会话 ~16.4s 才注册，中间 ~14s 内所有写接口恒 409。该窗口**不是毫秒级**：
+> 只等端口就开始连打的脚本会整批失败（`knowledge.mode=off` 时窗口 <2s）。
+> 就绪探测的重试预算按 ≥30s 取。
 
 > 幂等回放（`duplicate: true`）始终返回首次的 `status` / `assistant` / `screen`，
 > 但其中的 `screen` 是**首次完成时刻**的快照；需要最新界面请调用 `/web/api/screen`。

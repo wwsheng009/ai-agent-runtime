@@ -159,6 +159,11 @@ type MetadataRequest struct {
 // 在返回值中，由调用方决定是否清空旧配置。
 func MatchMetadata(req MetadataRequest) map[string]ModelMetadata
 
+// ModelCapabilityView 把 model_capabilities 条目投影为前端字段视图
+// （ChatWebConfigModel）。GET /web/api/config 快照与 MatchMetadata 必须共用
+// 同一投影：模型编辑器的回显字段集合必须与其写回字段集合一致。
+func ModelCapabilityView(name string, spec agentconfig.ModelCapabilitySpec) ChatWebConfigModel
+
 func ModelCapabilityIsEmpty(spec agentconfig.ModelCapabilitySpec) bool
 
 // BuildModelCapabilities 返回 provider 编辑器可直接写入 config 的

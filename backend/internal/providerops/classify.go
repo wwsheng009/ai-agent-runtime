@@ -263,15 +263,22 @@ func matchFetchedModelMetadata(
 	})
 	out := make(map[string]chatWebConfigModel, len(matched))
 	for id, meta := range matched {
-		out[id] = chatWebConfigModel{
-			Name:                   meta.Name,
+		out[id] = ModelCapabilityView(meta.Name, config.ModelCapabilitySpec{
 			ReasoningModel:         meta.ReasoningModel,
 			ReasoningEfforts:       meta.ReasoningEfforts,
+			ReasoningEffortBudgets: meta.ReasoningEffortBudgets,
 			DefaultReasoningEffort: meta.DefaultReasoningEffort,
 			CompactReasoningEffort: meta.CompactReasoningEffort,
 			MaxContextTokens:       meta.MaxContextTokens,
 			MaxTokens:              meta.MaxTokens,
-		}
+			AutoCompactRatio:       meta.AutoCompactRatio,
+			AutoCompactTokenLimit:  meta.AutoCompactTokenLimit,
+			AutoCompactMode:        meta.AutoCompactMode,
+			SupportsRemoteCompact:  meta.SupportsRemoteCompact,
+			ReplayReasoningContent: meta.ReplayReasoningContent,
+			InputModalities:        meta.InputModalities,
+			NativeTools:            meta.NativeTools,
+		})
 	}
 	return out
 }
