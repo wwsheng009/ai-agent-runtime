@@ -5,7 +5,7 @@
 // 各 store 过去各自为政（有的无 WAL、无 busy_timeout、无连接池限制），
 // 并发打开时表现为启动长时间无响应。本包把统一基线收敛到一处：
 //
-//   - journal_mode=WAL（多读单写，写入不阻塞读）
+//   - journal_mode=WAL（主线）/DELETE（win7compat；绕过旧 VFS 的 -shm）
 //   - busy_timeout（默认 5000ms，写锁冲突时在驱动内等待而非立即失败）
 //   - MaxOpenConns(1)/MaxIdleConns(1)（单写者连接，避免同库多连接自锁）
 //   - 打开前对账 -wal/-shm 附属文件，删除被带外替换/截断所遗留的陈旧 -shm
@@ -120,7 +120,7 @@ func lockRetryWait(retryIndex int) time.Duration {
 
 // OpenFileCtx 打开文件型 SQLite 并施加统一并发基线，受 ctx 约束：
 //
-//   - PRAGMA journal_mode=WAL
+//   - PRAGMA journal_mode=WAL（主线）或 DELETE（win7compat）
 //   - PRAGMA busy_timeout=<DefaultBusyTimeoutMS>
 //   - 连接池限为单连接（单写者）
 //   - 先对账 -wal/-shm，必要时删除陈旧 wal-index（ReconcileOrphanedSidecarsDSN）
@@ -156,8 +156,18 @@ func OpenFileCtx(ctx context.Context, dsn string, failOnLock bool) (*sql.DB, err
 		// drivers can retain the schema lock when this PRAGMA is issued through
 		// Exec, wedging every later handle for the file.
 		var journalMode string
-		if err := db.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+		if err := db.QueryRowContext(ctx, "PRAGMA journal_mode="+FileJournalMode()).Scan(&journalMode); err != nil {
 			return err
+		}
+		if FileJournalUsesWAL() {
+			for _, statement := range []string{
+				"PRAGMA wal_autocheckpoint=256",
+				"PRAGMA journal_size_limit=16777216",
+			} {
+				if _, err := db.ExecContext(ctx, statement); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	}
@@ -175,7 +185,7 @@ func OpenFileCtx(ctx context.Context, dsn string, failOnLock bool) (*sql.DB, err
 
 // OpenFile 打开文件型 SQLite 并施加统一并发基线：
 //
-//   - PRAGMA journal_mode=WAL
+//   - PRAGMA journal_mode=WAL（主线）或 DELETE（win7compat）
 //   - PRAGMA busy_timeout=<DefaultBusyTimeoutMS>
 //   - 连接池限为单连接（单写者）
 //

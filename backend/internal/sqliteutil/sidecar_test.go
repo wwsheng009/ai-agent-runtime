@@ -238,6 +238,9 @@ func copyFile(t *testing.T, src, dst string) {
 // 会采信这份陈旧 wal-index，按并不存在的帧数定位页面，首次写入即撕裂 B 树；
 // 修复后 OpenFile 必须先丢弃陈旧 -shm，再正常打开并保持库健康。
 func TestOpenFileRepairsProductionCorruptionShape(t *testing.T) {
+	if !FileJournalUsesWAL() {
+		t.Skip("win7compat uses rollback journaling and has no WAL sidecars")
+	}
 	dir := t.TempDir()
 
 	// 1) 造一个“上一代”库：WAL 模式 + 足够多的行，让 -shm 记下 mxFrame>0。
