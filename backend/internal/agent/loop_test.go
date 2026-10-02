@@ -4140,6 +4140,56 @@ func TestSubagentScheduler_RunChildren_RoutingDisabledPreservesLegacyModelOnlyOv
 	assert.Equal(t, "disabled", startPayload["route_source"])
 }
 
+// Routing absent/disabled is the default "no explicit configuration" state.
+// The resolver's disabled branch is documented to inherit parent
+// provider/reasoning, but the child loop only reads loop.config.ReasoningEffort
+// (not Config.Options), so the parent effort must survive into LoopReActConfig.
+func TestSubagentScheduler_RunChildren_RoutingDisabledInheritsParentReasoningEffort(t *testing.T) {
+	agent := &Agent{
+		config: &Config{
+			Name:             "test-agent",
+			Provider:         "parent-provider",
+			Model:            "parent-model",
+			MaxSteps:         3,
+			DefaultMaxTokens: 512,
+			SystemPrompt:     "Parent system prompt.",
+			Options: map[string]interface{}{
+				"reasoning_effort": "medium",
+			},
+		},
+		skillRouter: &skill.Router{},
+		skillExec:   &skill.Executor{},
+		mcpManager:  nil,
+	}
+
+	llmRuntime := llm.NewLLMRuntime(&llm.RuntimeConfig{
+		DefaultProvider: "parent-provider",
+		DefaultModel:    "parent-model",
+		MaxRetries:      0,
+	})
+	parentProvider := &SequenceLLMProvider{
+		name: "parent-provider",
+		responses: []*llm.LLMResponse{
+			{Content: "Inherited child summary.", Model: "parent-model"},
+		},
+	}
+	require.NoError(t, llmRuntime.RegisterProvider("parent-provider", parentProvider))
+	agent.llmRuntime = llmRuntime
+
+	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+		MaxConcurrent: 1,
+		MaxDepth:      1,
+	})
+
+	_, err := scheduler.RunChildren(context.Background(), SubagentRunOptions{Depth: 1}, []SubagentTask{
+		{ID: "inherit-child", Goal: "Inspect inherited reasoning behavior.", ReadOnly: true},
+	})
+	require.NoError(t, err)
+	req := firstNonCompactLLMRequest(parentProvider.requests)
+	require.NotNil(t, req, "requests=%d", len(parentProvider.requests))
+	assert.Equal(t, "medium", req.ReasoningEffort)
+}
+
 func TestSubagentScheduler_RunChildren_EmitsInvalidDifficultyWarning(t *testing.T) {
 	agent := &Agent{
 		config: &Config{

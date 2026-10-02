@@ -874,6 +874,85 @@ func TestLocalChatRuntimeHostBuildSessionActorUsesChildRouteContext(t *testing.T
 	}
 }
 
+// With aicli.subagents.routing absent/disabled, spawn_agent deliberately stores
+// no per-child reasoning override (resolveSpawnAgentRoute clears the explicit
+// args). The child actor is still built against the base ChatSession, so it must
+// inherit the base session's reasoning effort through the loop-config fallback
+// instead of silently running without any effort.
+func TestLocalChatRuntimeHostBuildSessionActorInheritsBaseReasoningEffortWhenRoutingDisabled(t *testing.T) {
+	ctx := context.Background()
+	manager, userID, _, err := newChatSessionManager(t.TempDir())
+	if err != nil {
+		t.Fatalf("newChatSessionManager: %v", err)
+	}
+	defer manager.Stop()
+
+	rootSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create root: %v", err)
+	}
+	childSession, err := manager.Create(ctx, userID)
+	if err != nil {
+		t.Fatalf("manager.Create child: %v", err)
+	}
+	childSession.SetContext(toolbroker.AgentSessionContextParentSessionID, rootSession.ID)
+	if err := manager.Update(ctx, childSession); err != nil {
+		t.Fatalf("manager.Update child: %v", err)
+	}
+	if stored := agentcontrol.ContextString(childSession, sessionmeta.ReasoningEffort); stored != "" {
+		t.Fatalf("expected no stored child reasoning override, got %q", stored)
+	}
+
+	baseProvider := &capturingLocalChatProvider{
+		name: "base-provider",
+		responses: []*runtimellm.LLMResponse{
+			{Content: "base ok", Model: "base-model"},
+		},
+	}
+	bootstrapManager, err := runtimebootstrap.NewManager(&runtimebootstrap.Options{
+		Config: runtimecfg.DefaultRuntimeConfig(),
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	defer bootstrapManager.Stop()
+	if err := bootstrapManager.LLMRuntime().RegisterProvider("base-provider", baseProvider); err != nil {
+		t.Fatalf("Register base provider: %v", err)
+	}
+	if err := bootstrapManager.LLMRuntime().RegisterProviderAlias("base-model", "base-provider"); err != nil {
+		t.Fatalf("Register base alias: %v", err)
+	}
+	host := &localChatRuntimeHost{
+		Bootstrap:    bootstrapManager,
+		RuntimeStore: runtimechat.NewInMemoryRuntimeStore(64),
+	}
+	session := &ChatSession{
+		ProviderName:    "base-provider",
+		Model:           "base-model",
+		ReasoningEffort: "medium",
+		RuntimeSession:  rootSession,
+		SessionManager:  manager,
+	}
+
+	actor, err := host.buildSessionActor(childSession.ID, session, manager.GetStorage(), nil, "")
+	if err != nil {
+		t.Fatalf("buildSessionActor: %v", err)
+	}
+	if _, err := actor.SubmitPrompt(ctx, "hello", nil); err != nil {
+		t.Fatalf("SubmitPrompt: %v", err)
+	}
+	if len(baseProvider.requests) != 1 {
+		t.Fatalf("expected one base-provider request, got %d", len(baseProvider.requests))
+	}
+	request := baseProvider.requests[0]
+	if request.Provider != "base-provider" || request.Model != "base-model" {
+		t.Fatalf("unexpected request route: %#v", request)
+	}
+	if request.ReasoningEffort != "medium" {
+		t.Fatalf("expected child to inherit base reasoning effort %q, got %q", "medium", request.ReasoningEffort)
+	}
+}
+
 func TestApplyLocalChildReadOnlyPolicyOverridesBypassPermissions(t *testing.T) {
 	apiAgent := agent.NewAgentWithLLM(&agent.Config{Name: "read-only-child"}, nil, nil)
 	apiAgent.SetToolExecutionPolicy(runtimepolicy.NewToolExecutionPolicy(nil, false))

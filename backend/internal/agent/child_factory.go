@@ -42,10 +42,12 @@ func (f ChildAgentFactory) Build(ctx context.Context, req ChildBuildRequest) (Ch
 		// 因此这里读到的是真实的上游表现，而不是配置里手写的标注。
 		Health: providerhealth.Default(),
 	}
-	parentReasoning := ""
-	if modelrouting.RoutingEnabled(req.Config.Routing) {
-		parentReasoning = types.ResolveReasoningEffort("", parentConfig.Options)
-	}
+	// Parent reasoning effort must be resolved for both routing states: the
+	// disabled branch of the resolver is documented to inherit parent
+	// provider/reasoning, and the child loop request reads its effort solely
+	// from LoopReActConfig (loop.go builds LLMRequest.ReasoningEffort from
+	// loop.config), never from agent Config.Options.
+	parentReasoning := types.ResolveReasoningEffort("", parentConfig.Options)
 	decision, err := resolver.Resolve(modelrouting.ParentDefaults{
 		Provider:        parentConfig.Provider,
 		Model:           parentConfig.Model,

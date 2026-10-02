@@ -364,6 +364,13 @@ func (r *localActorRegistry) resolveSpawnAgentRoute(parentSession *runtimechat.S
 			args.Model = ""
 		}
 		args.Provider = ""
+		// Drop the explicit child override only: without routing there is no
+		// per-child route to store, and the inherited parent effort is applied
+		// later by the child actor's loop-config fallback (buildSessionActor
+		// builds from the base ChatSession). Persisting decision.ReasoningEffort
+		// here would pin the inherited value as a child override, contradicting
+		// the legacy model-only-override contract pinned by
+		// TestLocalActorRegistrySpawnKeepsLegacyModelOverrideWhenRoutingDisabled.
 		args.ReasoningEffort = ""
 		args.ThinkingEffort = ""
 		args.Difficulty = strings.TrimSpace(decision.Difficulty)
