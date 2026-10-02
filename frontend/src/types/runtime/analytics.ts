@@ -306,6 +306,8 @@ export type AnalyticsToolStatsResponse = {
 export type AnalyticsSubagentStat = {
   subagent_id: string;
   parent_session_id: string;
+  /** 区分同一父会话下的多次 spawn_subagents 调用；历史行为空串（后端 omitempty 时缺失）。 */
+  batch_id?: string;
   child_session_id?: string;
   role?: string;
   /** 任务类型（12 类封闭枚举；未记录 task_type 的历史行为空）。 */
@@ -313,6 +315,8 @@ export type AnalyticsSubagentStat = {
   /** 任务主体（发射端截断；未记录的历史行为空）。 */
   task_subject?: string;
   source?: string;
+  /** 该子代理任务是否按只读记账。注意"未声明"与"声明为可写"在账本中不可区分。 */
+  read_only: boolean;
   success: boolean | null;
   completion_reason: string;
   failure_category?: string;
