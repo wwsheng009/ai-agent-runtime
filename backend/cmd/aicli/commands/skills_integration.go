@@ -412,6 +412,9 @@ func (f *SkillFunction) Description() string {
 	if len(tools) > 0 {
 		parts = append(parts, "Backed by tools: "+strings.Join(tools, ", ")+".")
 	}
+	// 引导模型优先通过本函数加载正文：否则模型常先用文件工具读 SKILL.md、
+	// 再调用本函数，同一份正文会在同一回合进入上下文两次（实测 2×2.2KB）。
+	parts = append(parts, "Prefer this function to load the skill's full instructions; do not re-read the skill's SKILL.md with file tools and do not call this function repeatedly in the same turn.")
 
 	return strings.Join(parts, " ")
 }
@@ -1187,31 +1190,20 @@ func buildSkillsRuntimeBindingFromManager(cfg *config.Config, session *ChatSessi
 		}
 		var resolver func() (*runtimeskill.Skill, error)
 		if source := summaryRef.Source; source != nil && sourcePath != "" {
-			sourceDir := strings.TrimSpace(source.Dir)
-			sourceLayer := strings.TrimSpace(source.Layer)
-			promptPath := strings.TrimSpace(source.PromptPath)
-			loader := manager.Loader()
 			resolver = func() (*runtimeskill.Skill, error) {
-				if loader == nil {
-					return skillRef, nil
-				}
-				loaded, err := loader.LoadFileFull(sourcePath)
-				if err != nil {
-					return nil, err
-				}
-				if loaded != nil {
-					loaded.SetSource(sourcePath, sourceDir, sourceLayer)
-					if promptPath != "" {
-						loaded.SetPromptSource(promptPath)
-					}
-					if loaded.Handler == nil && skillRef != nil && skillRef.Handler != nil {
-						loaded.Handler = skillRef.Handler
-					}
-					if len(loaded.Tools) == 0 && skillRef != nil && len(skillRef.Tools) > 0 {
-						loaded.Tools = append([]string(nil), skillRef.Tools...)
-					}
-				}
-				return loaded, nil
+				return skillRef, nil
+			}
+			// 缓存解析结果：pin 解析与函数执行会重复调用 resolver，文件版本
+			// （mtime/size）未变时不再重复读盘 + 解析。
+			if loader := manager.Loader(); loader != nil {
+				resolver = newSkillSourceResolver(
+					loader,
+					skillRef,
+					sourcePath,
+					strings.TrimSpace(source.Dir),
+					strings.TrimSpace(source.Layer),
+					strings.TrimSpace(source.PromptPath),
+				).resolve
 			}
 		}
 		functionName := buildSkillFunctionNameForSummary(summaryRef, skillNameCounts)

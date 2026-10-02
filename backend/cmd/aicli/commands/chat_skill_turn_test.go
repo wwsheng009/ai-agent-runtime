@@ -141,3 +141,18 @@ func skillTurnTestContains(list []string, want string) bool {
 	}
 	return false
 }
+
+// 非文档模式技能的 guide 不含正文：必须显式引导模型用 skill 函数加载指令，
+// 避免它再用文件工具读一遍 SKILL.md（同一正文会在上下文出现两份）。
+func TestSkillInstructionLoadHint(t *testing.T) {
+	hint := skillInstructionLoadHint("skill__brand-guidelines")
+	if !strings.Contains(hint, "skill__brand-guidelines") {
+		t.Fatalf("hint must name the skill function, got %q", hint)
+	}
+	if !strings.Contains(hint, "SKILL.md") {
+		t.Fatalf("hint must discourage re-reading SKILL.md, got %q", hint)
+	}
+	if hint := skillInstructionLoadHint("   "); hint != "" {
+		t.Fatalf("blank function name must not produce a hint, got %q", hint)
+	}
+}

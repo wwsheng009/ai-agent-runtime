@@ -325,6 +325,8 @@ func (e *Executor) workflowConcurrency(workflow *Workflow) int {
 //
 // 与 executeDefault 的区别：不注入宿主已经具备的 environment / shell / file
 // editing 指引与历史消息，也不发起任何 LLM 调用，只做纯文本渲染。
+// 不回显 req.Prompt：请求本身已作为工具调用参数存在于主循环上下文里，
+// 回显只会让同一文本在同一回合的上下文里出现两次。
 func (e *Executor) BuildMainLoopPrompt(skill *Skill, req *types.Request) (string, error) {
 	if skill == nil {
 		return "", fmt.Errorf("skill is required")
@@ -336,13 +338,12 @@ func (e *Executor) BuildMainLoopPrompt(skill *Skill, req *types.Request) (string
 	if resolved != nil {
 		skill = resolved
 	}
-	systemPrompt, userPrompt, err := resolveSkillPrompts(skill)
+	systemPrompt, _, err := resolveSkillPrompts(skill)
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(userPrompt) == "" && req != nil {
-		userPrompt = strings.TrimSpace(req.Prompt)
-	}
+	// req（模型给 skill 函数的 prompt 参数）不参与渲染；模型已经持有该参数。
+	_ = req
 
 	name := strings.TrimSpace(skill.Name)
 	var builder strings.Builder
@@ -353,11 +354,6 @@ func (e *Executor) BuildMainLoopPrompt(skill *Skill, req *types.Request) (string
 	if body := strings.TrimSpace(systemPrompt); body != "" {
 		builder.WriteString("\n## 技能指令\n")
 		builder.WriteString(body)
-		builder.WriteString("\n")
-	}
-	if request := strings.TrimSpace(userPrompt); request != "" {
-		builder.WriteString("\n## 用户请求\n")
-		builder.WriteString(request)
 		builder.WriteString("\n")
 	}
 	return strings.TrimSpace(builder.String()), nil

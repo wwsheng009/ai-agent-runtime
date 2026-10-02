@@ -422,7 +422,10 @@ func TestExecutor_BuildMainLoopPrompt_RendersInstructionsWithoutLLMCall(t *testi
 	require.Contains(t, text, "skill-installer")
 	require.Contains(t, text, "Helps install skills")
 	require.Contains(t, text, "# Skill Installer")
-	require.Contains(t, text, "在 ./aicli 安装 skill")
+	// 用户请求已存在于主循环上下文（用户消息 + 工具调用参数），注入文本不得回显，
+	// 否则同一文本会在同一回合的上下文里出现两次。
+	require.NotContains(t, text, "在 ./aicli 安装 skill")
+	require.NotContains(t, text, "## 用户请求")
 	// 主循环已自带 environment / shell / file 指引，注入文本不应重复这些锅炉板。
 	require.NotContains(t, text, "Environment context")
 	require.NotContains(t, text, "Shell guidance")

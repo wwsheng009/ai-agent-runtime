@@ -495,6 +495,9 @@ func TestSkillFunctionDescription_UsesSummaryWhenSkillStubAbsent(t *testing.T) {
 	if !strings.Contains(description, "Capabilities: object_search.") {
 		t.Fatalf("expected summary-backed capabilities, got %s", description)
 	}
+	if !strings.Contains(description, "SKILL.md") {
+		t.Fatalf("expected load guidance against re-reading SKILL.md, got %s", description)
+	}
 }
 
 func TestSkillFunctionExecute_MergesProfileContext(t *testing.T) {
@@ -586,7 +589,7 @@ func TestSkillFunctionExecutePrefersPlainOutputOnSuccess(t *testing.T) {
 // 技能（无 handler / workflow）经 skill__x 调用时返回技能指令文本，由主循环的
 // 模型用常规工具执行，而不是另起一次技能桥 LLM 交互。
 func TestSkillFunctionExecute_InjectsInstructionsIntoMainLoop(t *testing.T) {
-	injected := "已加载技能「abap_search」的指令；请使用当前对话已有的常规工具完成下面的技能指令与用户请求。\n\n## 技能指令\nSearch ABAP objects\n\n## 用户请求\nsearch z* objects"
+	injected := "已加载技能「abap_search」的指令；请使用当前对话已有的常规工具完成下面的技能指令与用户请求。\n\n## 技能指令\nSearch ABAP objects"
 	executor := &fakeSkillExecutor{
 		mainLoopPrompt: injected,
 		result: &runtimeskill.ExecuteResult{

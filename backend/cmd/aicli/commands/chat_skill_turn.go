@@ -200,6 +200,16 @@ func resolveSkillTurnPin(session *ChatSession, request *SendSkillTurnRequest) (*
 			}
 		} else {
 			guide, _ := runtimeskill.SubstituteSkillText(runtimeskill.ProgramGuide(skillItem), substitutionCtx)
+			// 正文不在 ProgramGuide 里：明确要求模型用 skill 函数加载完整指令，
+			// 避免它再用文件工具读一遍 SKILL.md，让同一正文在上下文出现两份。
+			guide = strings.TrimSpace(guide)
+			if hint := skillInstructionLoadHint(functionName); hint != "" {
+				if guide == "" {
+					guide = hint
+				} else {
+					guide = guide + "\n" + hint
+				}
+			}
 			pin.Guide = guide
 		}
 	}
@@ -254,6 +264,16 @@ func resolveSkillTurnPin(session *ChatSession, request *SendSkillTurnRequest) (*
 	}
 	publishSkillTurnInvocation(session, functionName, skillItem)
 	return pin, nil
+}
+
+// skillInstructionLoadHint 引导模型通过 skill 函数加载技能正文，而不是用文件
+// 工具重复读取 SKILL.md（实测同一正文会因此进入上下文两份）。
+func skillInstructionLoadHint(functionName string) string {
+	name := strings.TrimSpace(functionName)
+	if name == "" {
+		return ""
+	}
+	return "- load: call `" + name + "` to load the full skill instructions; do not re-read the skill's SKILL.md with file tools."
 }
 
 // skillTurnFunctionDescription 依次从 SkillFunction 与函数目录 schema 里取描述，
