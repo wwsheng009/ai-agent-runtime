@@ -4,6 +4,7 @@ var registeredAdapters = []Adapter{
 	openCodeConsoleGoAdapter{},
 	sensenovaOpenAIAdapter{},
 	nvidiaOpenAIAdapter{},
+	deepSeekAnthropicAdapter{},
 	deepSeekOpenAIAdapter{},
 	chatGPTCodexBackendAdapter{},
 	codexPathAdapter{},
