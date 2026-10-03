@@ -52,6 +52,7 @@ func TestChatBusyCommandPolicyDefaultOnRegistryRouting(t *testing.T) {
 		"/history":      chatBusyPolicyScreen,    // 首批 S 档（副屏）
 		"/queue clear":  chatBusyPolicyScreen,    // 首批 prompt 档（确认门）
 		"/model status": chatBusyPolicyScreen,    // 批次 3：只读变体迁副屏并纳入忙时白名单
+		"/agents":       chatBusyPolicyScreen,    // 只读交互列表（A 族）纳入忙时 S 档
 		"/theme":        chatBusyPolicyImmediate, // bare 仍是短内联（inline + read）
 		"/model":        chatBusyPolicyDeferred,  // screen 非首批 → 回合后执行
 		"/clear":        chatBusyPolicyDeferred,  // queue + session

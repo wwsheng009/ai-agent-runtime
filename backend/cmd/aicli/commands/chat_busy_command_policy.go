@@ -89,8 +89,8 @@ func chatRuntimeInteractionRegistryActive() bool {
 }
 
 // chatBusyPolicyFromRuntimeSpec 把注册表声明（经三级开关降级后）映射到 P1 四档：
-// block→R；inline→I；screen→S（仅首批白名单，P2-4b）/其余 screen→D；
-// prompt/queue→D（prompt 载体见后续增量）；未登记→D。
+// block→R；inline→I；screen→S（只读文档白名单或只读交互列表白名单，P2-4b）/
+// 其余 screen→D；prompt/queue→D（prompt 载体见后续增量）；未登记→D。
 func chatBusyPolicyFromRuntimeSpec(text string) chatBusyCommandPolicy {
 	spec, registered := resolveRuntimeCommandSpec(text)
 	if !registered {
@@ -103,7 +103,7 @@ func chatBusyPolicyFromRuntimeSpec(text string) chatBusyCommandPolicy {
 	case runtimeModeInline:
 		return chatBusyPolicyImmediate
 	case runtimeModeScreen:
-		if busyScreenCommandReadOnlyDocument(effective) {
+		if busyScreenCommandReadOnly(effective) {
 			return chatBusyPolicyScreen
 		}
 		return chatBusyPolicyDeferred

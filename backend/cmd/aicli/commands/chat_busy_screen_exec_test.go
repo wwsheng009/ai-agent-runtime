@@ -33,8 +33,11 @@ func TestChatBusyPolicyScreenFirstBatch(t *testing.T) {
 		"/debug display": chatBusyPolicyScreen,
 		"/web endpoints": chatBusyPolicyScreen,
 		"/debug status":  chatBusyPolicyImmediate,
-		"/skills":        chatBusyPolicyScreen,   // 批次 4：只读文档变体纳入白名单
-		"/theme on":      chatBusyPolicyDeferred, // screen+live（写入类，非首批）
+		"/skills":        chatBusyPolicyScreen,    // 批次 4：只读文档变体纳入白名单
+		"/agents":        chatBusyPolicyScreen,    // 只读交互列表白名单（A 族）
+		"/agents status": chatBusyPolicyImmediate, // inline+read 快照
+		"/agents panel":  chatBusyPolicyDeferred,  // screen+live 写入类
+		"/theme on":      chatBusyPolicyDeferred,  // screen+live（写入类，非首批）
 		"/export":        chatBusyPolicyDeferred,
 	}
 	for line, want := range cases {
@@ -80,6 +83,67 @@ func TestRuntimeCommandHostRunsWhitelistedScreen(t *testing.T) {
 
 	if !runtimeCommandHostFor(session).SubmitBusy("/todos") {
 		t.Fatal("/todos（首批 S 档）应在宿主内执行")
+	}
+	if !dispatched {
+		t.Fatal("副屏执行入口未被调用")
+	}
+	if insideBudget != chatBusyScreenWaitBudget {
+		t.Fatalf("执行期间租约预算 = %s，期望 %s", insideBudget, chatBusyScreenWaitBudget)
+	}
+	if got := surface.AlternateScreenWaitBudget(); got != 0 {
+		t.Fatalf("执行后租约预算未复位：%s", got)
+	}
+	if !chatBusyCommandArbitrationAllows(session) {
+		t.Fatal("执行后 modal 登记必须已释放")
+	}
+	if !session.commandMu.TryLock() {
+		t.Fatal("执行后 commandMu 必须已释放")
+	}
+	session.commandMu.Unlock()
+
+	events := store.runtimeInteractions()
+	if len(events) != 1 {
+		t.Fatalf("应产生 1 条审计事件，实际 %d", len(events))
+	}
+	if events[0].Payload["result"] != "executed" || events[0].Payload["mode"] != "screen" {
+		t.Fatalf("审计内容不符：%+v", events[0].Payload)
+	}
+}
+
+// TestRuntimeCommandHostRunsReadOnlyInteractiveScreen 锁定忙时 S 档的只读交互
+// 列表通道：/agents（A 族列表，screen+read+screen-interactive）在白名单内，
+// 运行中必须走副屏执行入口（modal 属主、租约预算、审计 executed/screen），
+// 而不是被降级入队。写变体 /agents panel 仍在降级测试中覆盖。
+func TestRuntimeCommandHostRunsReadOnlyInteractiveScreen(t *testing.T) {
+	t.Setenv(chatBusyCommandEnv, "on")
+	t.Setenv(runtimeInteractionEnv, "auto")
+	session, _, _, store := newRuntimeHostTestSession(t)
+	surface := ui.NewFixedBottomSurface(nil)
+	surface.EnableForTest(80, 24)
+	session.Surface = surface
+	releaseCapture := beginChatInputShadowLevel(session, chatInputOwnerBusyCapture)
+	defer releaseCapture()
+
+	var (
+		dispatched   bool
+		insideBudget time.Duration
+	)
+	withChatBusyScreenTestHooks(t, true, func(s *ChatSession, line string) bool {
+		dispatched = true
+		if line != "/agents" {
+			t.Errorf("dispatch 收到 %q，期望 /agents", line)
+		}
+		if snap, ok := chatInputArbitrationSnapshotOf(s); !ok || snap.Owner != chatInputOwnerModal {
+			t.Errorf("副屏执行期间仲裁属主应为 modal，实际 ok=%v snap=%#v", ok, snap)
+		}
+		if s.Surface != nil {
+			insideBudget = s.Surface.AlternateScreenWaitBudget()
+		}
+		return true
+	})
+
+	if !runtimeCommandHostFor(session).SubmitBusy("/agents") {
+		t.Fatal("/agents（只读交互列表白名单）应在宿主内执行")
 	}
 	if !dispatched {
 		t.Fatal("副屏执行入口未被调用")
@@ -260,6 +324,32 @@ func TestRuntimeCommandRegistryBusyAdmissionAudit(t *testing.T) {
 		spec, ok := resolveRuntimeCommandSpec(line)
 		if !ok || spec.Mode != runtimeModePrompt {
 			t.Errorf("首批 prompt 白名单 %q 未解析为 prompt 档：ok=%v mode=%s", line, ok, spec.Mode)
+		}
+	}
+
+	// 忙时只读交互副屏白名单（A 族列表）必须指向真实注册项，且至少有一个
+	// screen+read+screen-interactive 变体（策略映射据此判 S 档）。
+	for command := range chatBusyScreenInteractiveCommands {
+		entry, ok := runtimeCommandRegistry[command]
+		if !ok {
+			t.Errorf("忙时交互白名单命令 %q 不在注册表中", command)
+			continue
+		}
+		matched := false
+		check := func(spec runtimeCommandSpec) {
+			if spec.Mode == runtimeModeScreen && spec.Effect == runtimeEffectRead &&
+				spec.Output == chatOutputScreenInteractive {
+				matched = true
+			}
+		}
+		if entry.Bare != nil {
+			check(*entry.Bare)
+		}
+		for _, variant := range entry.Variants {
+			check(variant)
+		}
+		if !matched {
+			t.Errorf("忙时交互白名单命令 %q 缺少 screen+read+screen-interactive 声明", command)
 		}
 	}
 }

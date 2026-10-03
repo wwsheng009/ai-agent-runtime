@@ -68,6 +68,41 @@ func busyScreenCommandReadOnlyDocument(spec runtimeCommandSpec) bool {
 	return ok
 }
 
+// chatBusyScreenInteractiveCommands 是忙时 S 档的「只读交互副屏」白名单
+// （A 族列表）：声明 screen+read+screen-interactive，交互只做只读快照与
+// 选择后打开只读视图，不写会话/配置状态、不发消息、不跨回合。
+//
+// 与文档白名单同样 fail-closed：未列入本表的 screen-interactive 命令
+// （picker/确认流、live 写入类）继续按 Deferred 入队。
+//
+// /agents（bare）是本表当前唯一成员：列表数据是 durable registry 快照，
+// 选中后仅打开只读 transcript（/agents view 等价视图）。写变体
+// （panel/pick/approve/deny/send/followup/cleanup）因 Effect≠read 或未列入
+// 本表继续排队；/agents status|list 保持 inline+read（I 档）。
+var chatBusyScreenInteractiveCommands = map[string]struct{}{
+	"/agents": {},
+}
+
+// busyScreenCommandReadOnlyInteractive 判定只读交互副屏（列表）是否可以
+// 走忙时通道：screen 档 + 只读生效域 + screen-interactive 输出类别 + 白名单。
+func busyScreenCommandReadOnlyInteractive(spec runtimeCommandSpec) bool {
+	if spec.Mode != runtimeModeScreen || spec.Effect != runtimeEffectRead {
+		return false
+	}
+	if spec.Output != chatOutputScreenInteractive {
+		return false
+	}
+	_, ok := chatBusyScreenInteractiveCommands[spec.Command]
+	return ok
+}
+
+// busyScreenCommandReadOnly 是忙时只读副屏的统一判据（I7 单一实现）：
+// 只读文档白名单 或 只读交互列表白名单。策略映射（chatBusyPolicyFromRuntimeSpec）
+// 与宿主准入（runtimeCommandHost.submit）都必须经本函数，不得各自维护一份。
+func busyScreenCommandReadOnly(spec runtimeCommandSpec) bool {
+	return busyScreenCommandReadOnlyDocument(spec) || busyScreenCommandReadOnlyInteractive(spec)
+}
+
 // chatBusyScreenCapability 是副屏能力门（fail-closed）。抽成包级变量以便
 // 单测注入；生产实现就是框架的 chatScreenCapability（批次 0：I7 单一实现，
 // 忙时与空闲路径共用同一个 gate，不再各自维护一份）。
