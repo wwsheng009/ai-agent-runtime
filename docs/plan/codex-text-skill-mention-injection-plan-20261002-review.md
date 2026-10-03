@@ -106,15 +106,15 @@
 | 常驻 catalog | developer 片段，会话级，预算 8000/2%，缓存于 extension state | `catalog_resident` 开关 + 稳定前缀 + fingerprint 重建 | ✅ 对齐（注入位置已修正） |
 | `$` 提及语法 | `$name` + 链接式，env 名单过滤 | `$name`（P0），链接式 P2，env 名单 + PowerShell 形态 | ✅ 对齐（链接式延后） |
 | 多提及选择 | 结构化优先、目录顺序、唯一性/禁用/歧义规则、path 去重 | 目录顺序、去重、歧义/禁用、上限 4；绑定 path 优先（P2） | ✅ 对齐（新增上限） |
-| 正文注入 | user 角色 `<skill>` 片段，逐个注入 | **user 角色片段**（Q1 重审后与 Codex 对齐），边界标记，非持久通道 | ✅ 对齐（改判依据见方案 §4.12 协议矩阵） |
+| 正文注入 | user 角色 `<skill>` 片段，逐个注入 | **抽象指令层（scope=turn）→ 适配器契约转换**（Anthropic→user、Codex→developer、Gemini→user、OpenAI→system/user 档位），边界标记，非持久 | ✅ 对齐（两层架构，见方案 §4.12；Gemini 映射随 P0 修复） |
 | 多技能纪律 | 多提及全用、最小集合+顺序、不跨回合、禁子代理转述 | 全量采纳（v1.1 补齐后两条） | ✅ 对齐 |
 | 正文截断 | 仅 agent-plugin 技能截断 + warning | 所有文本类 32KB 截断 + warning | ⚠️ 有意偏差（防上下文爆炸，更严） |
 | 失败降级 | 单技能失败 warning，不阻断 | 同 + 计入 skipped 诊断 | ✅ 对齐 |
-| 依赖联动 | 提及 skill 的 MCP 依赖检查/安装（`turn.rs:988-1006`） | P0 不做（工具面常驻）；Q11 | ⚠️ 待决 |
+| 依赖联动 | 提及 skill 的 MCP 依赖检查/安装（`turn.rs:988-1006`） | P0 不检查/不安装；P1 输出"依赖不可用"提示；自动安装另立方案 | ⚠️ 分期偏差（已拍板 Q11） |
 | 观测 | mentioned/injected + status ok/error | 四元组（v1.1 修订） | ✅ 对齐 |
 | 启停 | `skills_runtime.disabled_skills` 等 | 复用 | ✅ 对齐 |
 | 热更新 | watcher + 快照 | 复用既有 hot reload；fingerprint 触发重建 | ✅ 对齐 |
-| 信任边界 | 无 folder-trust 概念（scope + policy） | 沿用本仓库 folder-trust；Q12 决定是否禁用 | ⚠️ 本仓库特有，待决 |
+| 信任边界 | 无 folder-trust 概念（scope + policy） | P0 沿用现有加载；P1 与 folder-trust 联动（未信任默认禁用，显式 `on` 覆盖） | ⚠️ 本仓库特有（已拍板 Q12） |
 
 ---
 
@@ -155,8 +155,10 @@
 11. §7 +R11-R13；§8 +Q9-Q12；
 12. 顶部状态升级 v1.1 并链接本审查报告。
 13. **Q1 重审（2026-10-02 追加）**：协议适配层复核（Anthropic 非 leading system→user、Gemini system→model、
-    system-role 回退合并 user）后，注入角色由 system 改为 **user**；方案新增 §4.12 协议矩阵、R14 与协议
-    转换测试行，版本升级 v1.3。
+    system-role 回退合并 user）后否定了"注入点自选 user/system"的做法；
+14. **Q1 终审（2026-10-02 追加）**：定为**两层架构**——注入统一产出抽象指令层消息（scope=session/turn），
+    wire 角色由适配器契约统一转换；方案 §4.12 重写为两层架构 + 适配器映射表 + conformance 套件，P0 增加
+    `prompt/layers.go`、`reasoning_helpers.go` 转换入口、Gemini 修复三项改造，版本升级 v1.4。
 
 ---
 
@@ -164,7 +166,7 @@
 
 全部按最佳实践建议采纳（Q11/Q12 小幅加严）；最终决策见方案 §8 决策记录。摘要：
 
-- Q1 **user 注入**（重审修订，依据方案 §4.12 协议矩阵）；Q2 忽略非文本 + 提示；Q9 大小写不敏感；Q10 稳定前缀；
+- Q1 **两层架构**（抽象指令层 + 适配器契约，依据方案 §4.12）；Q2 忽略非文本 + 提示；Q9 大小写不敏感；Q10 稳定前缀；
 - Q4/Q5/Q6/Q7/Q8 同建议；M6 文档落点进入 P0/P2 清单；
 - Q11：P0 不检查/不安装，P1 增"依赖不可用"提示；Q12：P1 与 folder-trust 联动
   （未信任默认禁用，显式 `on` 覆盖）。
@@ -186,3 +188,11 @@
 | Codex 选择规则（绑定优先/唯一性） | `skills/src/selection.rs:62,164-196` |
 | Codex 路径归一化 | `skills/src/mentions.rs:75-77` |
 | 本仓库技能配置字段 | `backend/internal/agentconfig/config.go:880-937` |
+
+---
+
+## 10. 补记：实施前一致性核查（2026-10-03）
+
+实施前对方案 v1.5 与本报告做了逐项一致性扫描：**无决策级分歧**。唯一不一致是本报告 §5 覆盖矩阵中
+Q11/Q12 两行仍标注"待决"（方案 §8 已拍板），已修正为"已拍板（Q11 分期实现 / Q12 folder-trust 联动）"。
+P0 已按方案 §5 执行，实施记录与验收证据见方案 P0 段落「实施记录（2026-10-03）」。

@@ -302,6 +302,72 @@ go run ./cmd/aicli chat --provider nvidia --no-interactive --skills-top-k 1 --sk
 - 模型命中 `skill__run_shell_command`
 - 最终输出 `AICLI_PREFER_OK`
 
+## `$` 技能提及（mention 注入，P3，默认 auto）
+
+`aicli chat` 支持在输入中用 `$<skill-name>` 直接点名技能：被点名的**文本类技能**（无 handler、无 workflow）
+会把 `SKILL.md` 正文作为本回合上下文注入，等价于 Codex 的 skill mention 行为。
+
+- 语法：`$name`，名称字符集 `[A-Za-z0-9_-]`；大小写不敏感；`$HOME`/`$PATH`/`$env:FOO`/`$100` 等环境变量
+  或纯数字不会被当作技能提及。
+- 多提及：一条消息可写多个 `$skill`，默认最多注入 4 个；按技能目录顺序稳定排序，重复提及去重。
+- 注入范围（P3 默认 `auto`）：仅**用户发起**的交互回合，且需通过 folder-trust 门控（见下"信任边界"）；
+  headless/JSON（`--no-interactive`）不注入，显式 `on` 才覆盖。goal continuation、guardian、子代理引导、
+  team 自动唤醒等系统输入始终不解析。
+- 跨回合：注入是 prompt-only 上下文，不写入会话持久历史；下一回合不会自动携带，需要再次提及。
+- 与 `/skill` 的关系：`/skill <name>`（回合 pin + 技能函数/程序）保持现状；`$name` 只注入文本类技能正文，
+  不扩权、不改变工具面；handler/workflow 技能被 `$` 提及会被忽略并记录诊断（仍可用 `/skill` 或 `/call`）。
+- 失败与预算：单技能正文超过 32K 字符截断；整回合注入总量 64K 字符封顶；读取失败跳过并提示，不阻断回合。
+- 协议稳定性：注入内容先进入**抽象指令层**（scope=session/turn），由协议适配器统一转换到
+  OpenAI/Anthropic/Gemini/Codex 的等价形态（见方案 §4.12）。
+
+配置（`skills_runtime`）：
+
+```yaml
+skills_runtime:
+  mention_injection: auto           # off|auto|on；P3 默认 auto（仅交互式且文件夹信任通过；headless/JSON 不注入）
+  mention_multi_limit: 4            # 单回合最多注入的文本技能数
+  mention_inject_max_chars: 32768   # 单技能正文上限
+  mention_inject_total_chars: 65536 # 回合注入总量上限
+  mention_hide_text_skill_functions: true # P3 默认 on：交互请求面隐藏文本类 skill__ 函数；显式 false 回退
+  catalog_resident: false           # P1：常驻技能目录（稳定前导位，灰度后再默认开启）
+```
+
+CLI 覆盖（可选）：`--skills-mention=off|auto|on`。
+
+### P1 行为补充
+
+- **常驻目录（`catalog_resident: true`）**：每回合在**稳定前导位**注入一份技能目录（session-scope
+  抽象指令，source=`skills_catalog`，prompt-only）；fingerprint 不变时逐字节稳定、不随回合尾部漂移，
+  因此不破坏 provider 前缀缓存。`/skill` pin 回合不重复注入目录（pin guide 只保留 ProgramGuide）；
+  预算超限按"截描述→去描述"降级，技能条目永不消失。
+- **信任边界（Q12）**：folder-trust 特性启用时，未信任项目的 `auto` 模式不执行 mention 注入
+  （跳过并记录 `untrusted_project` 诊断）；显式 `mention_injection: on` 可覆盖。folder-trust 未启用时
+  维持原有行为。
+- **依赖提示（Q11）**：若被提及技能声明的工具/依赖当前不可用（包括因缺依赖未加载的技能），本回合会附
+  一条简短提示说明缺失项（不阻断对话、不自动安装）；已加载的技能正文仍会注入。
+
+### P3 行为补充（默认切换与函数面收敛）
+
+- **函数面收敛（Q5，默认开启）**：`mention_hide_text_skill_functions` 为 `true`（默认）时，交互请求面
+  不再向模型暴露文本类（无 handler/workflow）技能的 `skill__<name>` 函数，避免"函数调用"与"`$name`
+  正文注入"双路径并存导致重复正文或选择困惑。目录列表仍可见、`$name` 解析仍生效。
+- **显式函数路径不受影响**：`/call skill__<name>`、`/skill --direct`、API/exec 调用与 handler/workflow
+  技能函数保持原样；需要回退文本类函数暴露时显式配置 `mention_hide_text_skill_functions: false`。
+- **默认口径**：`mention_injection` 未配置/空串/未知值均按 `auto`；`auto` 只在交互式且 folder-trust
+  信任通过时注入，headless/JSON 与系统生成输入零注入。需要完全关闭时显式 `mention_injection: off`。
+
+### 灰度观测与回退（P3）
+
+默认 `auto` 基于方案 §4.7 的四项 Rollout Gates，观测项（数据待生产观测，未达标即回退）：
+
+1. `$mention` 解析零误报（固定语料集，含 env/代码块/标点边界）；
+2. 注入截断率（单技能 32K / 回合 64K 触发比例）；
+3. 上下文与成本增幅（单技能典型场景增量、provider 前缀缓存命中率）；
+4. 模型行为抽样（是否按注入正文执行、是否仍用文件工具重读 SKILL.md）。
+
+回退方式：`mention_injection: off`（关闭提及注入）或 `mention_hide_text_skill_functions: false`
+（恢复文本类函数暴露）；两个开关相互独立，均为显式值优先，无数据迁移、无持久化格式变化。
+
 ## 当前限制
 
 - `aicli` 仍不是统一的 `agent` 前门，而是 skills-as-functions 集成模式

@@ -1,8 +1,8 @@
 # 方案：借鉴 Codex 文本类 Skill 使用方式（`$` mention + 多技能回合注入）
 
-> 状态：**方案 v1.3（已拍板，待实施；Q1 于 2026-10-02 按跨协议稳定性重审修订）**
+> 状态：**方案 v1.8（P0-P3 已实施，2026-10-03；mention_injection 默认 auto、函数面收敛默认 on，灰度数据待生产观测）**
 > 审查报告：`docs/plan/codex-text-skill-mention-injection-plan-20261002-review.md`
-> 决策记录：见 §8（2026-10-02 全部决议；Q1 由 system 改为 user；Q11/Q12 相对建议小幅加严）
+> 决策记录：见 §8（2026-10-02 全部决议；Q1 最终为两层架构；Q11/Q12 相对建议小幅加严）
 > 日期：2026-10-02
 > 作者：主会话（基于 `E:\projects\ai\codex` 代码走查 + 本仓库现状取证）
 > 关联文档：
@@ -46,8 +46,8 @@ Codex 对**文本类 skill**（SKILL.md 说明型，无执行器）的使用方�
    "multiple mentions mean use them all / minimal set + 说明顺序 / 不跨回合携带"的纪律文案，
    上下文成本与选择确定性都更可控。
 4. 本仓库已有可复用的地基：`@` 文件补全、slash 补全弹层、catalog 渲染与预算、异步能力面挂载等待、
-   turn 级消息通道（`TurnSystemMessages` 的 prompt-only 语义）与非持久 system-reminder user 通道
-   （`NewSystemReminderMessage`）——改造是"接线"而非"造轮子"；角色策略见 §4.12。
+   turn 级消息通道（`TurnSystemMessages` 的 prompt-only 语义）与非持久指令通道（`NewSystemReminderMessage`
+   的 prompt-only 元数据约定）——改造是"接线"而非"造轮子"；角色策略见 §4.12。
 
 ### 1.2 目标
 
@@ -179,19 +179,14 @@ buildSkillMentionFragments(session, selection) ([]runtimetypes.Message, diag) //
 </skill>
 ```
 
-- 每个技能一条 **user 角色片段**（Q1 重审修订）：`<skill name="…" path="…">正文</skill>`；pin guide
-  （若有）在前、mention 正文在后，名称稳定排序；实现复用现有非持久 user 通道
-  `NewSystemReminderMessage`（`internal/agent/system_reminder.go:106-114`，注释明确 "Role remains user
-  so providers that only allow system at turn start still accept it"）。
+- 每个技能一条**抽象指令消息**（Q1 两层架构）：`<skill name="…" path="…">正文</skill>`；metadata 标记
+  `instruction_scope=turn` / `instruction_source=skill_instructions` / 非持久（prompt-only）；pin guide
+  （若有）在前、mention 正文在后，名称稳定排序。**注入点不选择 wire 角色**，由 §4.12 的协议转换层落角色。
 - **参数占位（已拍板 Q7）**：mention 路径下 `$ARGUMENTS` 置空；仅当正文包含 `$ARGUMENTS`/`${ARGUMENTS}`
   时，片段头部加一行"（未提供显式参数）"，避免模型臆造参数。
-- **角色选择（Q1 重审修订，跨协议稳定性）**：**回合级内容一律 user 角色**，不再用 system。证据：
-  - Anthropic 适配器把**非 leading** system 改写为 user（`llm/adapter/anthropic.go:140-147`）；
-  - Gemini 适配器把 system 映射为 **model**（`llm/adapter/gemini.go:597-608`），system 注入会变成"模型发言"；
-  - OpenAI 兼容回退把 system 合并进首条 user（`internal/skill/executor.go:1378-1452`）；
-  - Codex/Responses 只把 leading system 提升为 instructions，非 leading system 的角色语义随上游而异
-    （`llm/adapter/codex.go:601-632`）。
-  结论：user 角色在全部协议中**不重写、不重定位**；system 只允许用于"leading 前缀/顶层 instructions"。
+- **角色策略（Q1 两层架构，最终）**：抽象指令层统一产出 canonical 指令消息（scope/source 元数据），
+  **协议角色由适配器统一转换**（§4.12 契约）；注入点、pin guide、reminder 都不再各自决定 user/system。
+  "每次请求都从抽象统一层出发"，新协议只需新增一个转换实现 + conformance 测试。
 - **不注入** ProgramGuide+函数加载提示（文本类没有可执行程序，避免多一跳与重复正文）；
   workflow 步骤信息如需保留，等 P2 评估后再决定是否附加精简列表。
 
@@ -199,8 +194,8 @@ buildSkillMentionFragments(session, selection) ([]runtimetypes.Message, diag) //
 
 | 路径 | 位置 | 变更 |
 |---|---|---|
-| actor（交互主路径） | `chat_actor_executor.go:271-278` | mention fragments 走 user 角色非持久通道（新增 `TurnUserContextMessages`，或复用 system-reminder，kind=`skill_instructions`）；pin guide 保持现状并去重 |
-| 共享 chatcore | `chat_core.go:194-197` | 同一通道 append user 片段进请求历史（与现有 guide 逻辑并列） |
+| actor（交互主路径） | `chat_actor_executor.go:271-278` | mention fragments 生成抽象指令消息（scope=turn）经非持久通道；pin guide 保持现状并去重 |
+| 共享 chatcore | `chat_core.go:194-197` | 同一抽象层通道 append 进请求历史（与现有 guide 逻辑并列） |
 | headless/JSON | 同 chatcore | 默认生效；`/skill` 投影不变 |
 
 **只对用户发起回合注入**：`ContinuationPrompt == ""` 且非系统生成输入（goal continuation、guardian、
@@ -230,10 +225,10 @@ turns unless re-mentioned"）。注意本仓库 turn 级注入（`TurnSystemMess
   （预算默认 min(8000 字符, 上下文 2%)，降级：截描述 → 去描述，条目永不消失）。
 - 新增 `skills_runtime.catalog_resident`（默认 off，P1 灰度）：与 pin 回合的 guide catalog 去重
   （catalog 已常驻时，pin guide 只保留 ProgramGuide）。
-- **注入位置（修订 H2 + Q1 重审）**：常驻 catalog 落在**会话级稳定前缀**——紧跟 leading system 的第一条
-  **user 上下文片段**（`<system-reminder kind="skills_catalog">` 包裹），fingerprint 不变时逐字节稳定；
-  **不使用 leading system 承载 catalog**（Gemini 会映射为 model 角色，造成指令角色反转）；禁止每回合追加
-  到历史尾部（击穿前缀缓存、挤压 preflight）。重建触发条件仅限技能快照 fingerprint 变化或配置变更。
+- **注入位置（修订 H2 + Q1 两层架构）**：常驻 catalog 是 **session-scope 抽象指令**（source=skills_catalog，
+  prompt-only），落在会话级稳定前缀；适配器按 §4.12 映射到协议原生 leading 形态（OpenAI `system`、
+  Anthropic 顶层 `system`、Codex `instructions`、Gemini `systemInstruction`——当前 Gemini 适配器缺失该
+  映射，P0 修复）。fingerprint 不变时逐字节稳定；禁止每回合追加到历史尾部（击穿前缀缓存、挤压 preflight）。
 - **路径与排序稳定性**：条目按规范化名称排序；路径统一 `/`；渲染与 fingerprint 复用
   `internal/skill` 现有实现（已有 `FingerprintStableAcrossPermutation` 测试）。
 - **纪律块**在现有 SK-2 文案上扩展（对齐 Codex `catalog_prompt.rs:8,17`）：
@@ -271,7 +266,7 @@ turns unless re-mentioned"）。注意本仓库 turn 级注入（`TurnSystemMess
 
 ```yaml
 skills_runtime:
-  mention_injection: auto           # off|auto|on；P0 首发 off，通过 Rollout Gates 后默认 auto
+  mention_injection: auto           # off|auto|on；P3 起默认 auto（仅交互+信任；Gates 数据待生产观测）
   mention_multi_limit: 4            # 单回合最多注入的文本技能数
   mention_inject_max_chars: 32768   # 单技能正文上限（超出截断+告警）
   mention_inject_total_chars: 65536 # 回合注入总量上限
@@ -284,8 +279,9 @@ skills_runtime:
   ② 注入不引发 preflight 压缩（§4.11 回归全绿）；③ 上下文增量 P95 ≤ 8KB（单技能典型场景）；
   ④ provider 前缀缓存命中率相对基线下降 ≤ 2%；⑤ `/skill`、headless、JSON 投影零回归。
   `catalog_resident` 默认切换另需：前缀稳定测试全绿 + 固定开销 ≤ 2K tokens。
-- **默认值节奏（已拍板）**：P0 首发 `mention_injection=off`；通过上述 Gates 后默认 `auto`；
-  `catalog_resident` 同节奏。预算先固定 4 / 32KB / 64KB，动态比例（上下文 2%）留 P3 评估。
+- **默认值节奏（已拍板/P3 落地）**：P3 起 `mention_injection` 代码侧默认 `auto`（仅交互+信任；
+  §4.7 Gates 数据待生产观测，未达标时显式 `off` 回退）；`catalog_resident` 维持 `false` 待数据。
+  预算先固定 4 / 32KB / 64KB，动态比例（上下文 2%）留后续评估。
 - 回滚：任一开关置 off → 回到现状（函数 + `/skill` pin），无数据迁移、无持久化格式变化；
   常驻 catalog 只是回合消息，不落盘为会话配置。
 
@@ -346,18 +342,36 @@ skills_runtime:
    视为裁决计算错误，以回归测试覆盖（§6.1）；
 5. 常驻 catalog 不走回合尾部注入（见 §4.5），避免每回合改写前缀与挤压 preflight。
 
-### 4.12 跨协议角色稳定性矩阵（Q1 重审依据，新增）
+### 4.12 两层架构：抽象指令层 + 适配器转换契约（Q1 最终）
 
-| 协议 / 适配器 | leading system | 非 leading system | user |
-|---|---|---|---|
-| OpenAI Chat 兼容 | system | 各家不一（部分仅接受首条） | user（稳定） |
-| Anthropic（`llm/adapter/anthropic.go:118-154`） | → 顶层 `system` | → **user**（重写） | user（稳定） |
-| Gemini（`llm/adapter/gemini.go:597-608`） | → **model** | → **model**（角色反转） | user（稳定） |
-| Codex/Responses（`llm/adapter/codex.go:601-632`） | → 顶层 `instructions` | 留在 input，角色语义随上游 | user/developer（稳定） |
-| system-role 回退（`internal/skill/executor.go:1378-1452`） | 合并进首条 user | 合并进首条 user | user（稳定） |
+**层 1（runtime 抽象指令层）**
 
-**规则**：① 回合级注入（技能正文、reminder、guide 类）一律 **user**；② 只有"会话 leading 前缀"允许
-system/developer，且只承载真正的系统提示；③ 新增内容必须通过协议转换稳定性测试（§6.1）后放行。
+- 所有注入（技能正文、catalog、guide、reminder）统一产出 canonical 指令消息：`types.Message` + metadata
+  `instruction_scope=session|turn`、`instruction_source=<skills_catalog|skill_instructions|program_guide|...>`、
+  非持久标记（prompt-only）。
+- 复用 `internal/prompt` 的逻辑层模型（`prompt/layers.go:10-63` 的 `Fragment/Layer` 与
+  `compiledRoleForLayer`）：`Fragment` 增加 `Scope`，编译产物携带抽象 scope/source，**不以最终 wire 角色为准**。
+- 排序契约：`session` 只允许在 leading 前缀；`turn` 追加在活动历史尾部、名称稳定排序。
+- 注入点（commands/actor/chatcore）只构造抽象消息并声明 scope，不写 `user/system`。
+
+**层 2（协议转换：唯一入口 + 适配器实现）**
+
+- 唯一转换入口：`internal/llm/reasoning_helpers.go:474-507 RuntimeMessagesToProtocolMessages` 扩展为
+  layer-aware：读取 scope/source，按协议规划角色后交给各适配器 `BuildRequest` 落原生顶层字段。
+- 各适配器映射（目标契约）：
+
+  | 适配器 | session 指令（leading） | turn 指令（历史尾部） |
+  |---|---|---|
+  | OpenAI（`adapter/openai.go:86`） | `system`（developer 视 capability） | `system`；兼容档位可降级 `user`（profile 决定） |
+  | Codex/Responses（`adapter/codex.go:601-632`） | 顶层 `instructions` | `developer` 保留在 input |
+  | Anthropic（`adapter/anthropic.go:118-154`） | 顶层 `system` | `user` + 边界标记（现有行为） |
+  | Gemini（`adapter/gemini.go:597-608`） | **`systemInstruction`（P0 修复，当前 system→model）** | **`user` parts（P0 修复，禁止 model）** |
+  | providercompat 链（`providercompat/providercompat.go:210-230`、`opencode_console_go.go:80-114`） | 沿所属协议 | 非 leading 指令→`user`（现有行为，纳入契约） |
+  | system-role 回退（`skill/executor.go:1378-1452`） | 合并进首条 `user` | 合并进首条 `user` |
+
+- 契约硬性要求（conformance 测试断言）：① 内容与顺序保留、不丢失；② turn 指令不得落 `assistant/model`；
+  ③ session 指令固定前缀且 fingerprint 不变时逐字节稳定；④ 边界标记原样保留；⑤ 回退路径同样不丢指令。
+- 扩展成本：新协议只需实现"session→原生顶层 + turn→稳定角色"两项映射并通过 conformance 套件。
 
 
 ---
@@ -372,8 +386,8 @@ turn metadata 与事件；配置键与默认值（`mention_injection=off` 首发
 | # | 文件 | 变更 |
 |---|---|---|
 | 1 | `backend/cmd/aicli/commands/chat_skill_mentions.go`（新增） | `collectSkillMentionNames` / `resolveMentionedTextSkills` / `buildSkillMentionFragments`；复用 `awaitChatCapabilitiesForTurn`（能力面未挂载先 await，参考 `resolveDirectCallableFunctionName` 的修复 `09fc19b2`） |
-| 2 | `backend/cmd/aicli/commands/chat_actor_executor.go` + `internal/agent` | mention fragments 走 **user 角色非持久通道**（新增 `TurnUserContextMessages`，或复用 system-reminder kind=`skill_instructions`）；与 pin guide 去重、稳定排序（§4.12 约束） |
-| 3 | `backend/cmd/aicli/commands/chat_core.go` | 共享 chatcore 路径经同一 user 通道 append 片段进请求历史（与 194-197 现有 guide 逻辑并列） |
+| 2 | `backend/cmd/aicli/commands/chat_actor_executor.go` + `internal/agent` | mention fragments 生成抽象指令消息（scope=turn）经非持久通道；与 pin guide 去重、稳定排序（§4.12 契约） |
+| 3 | `backend/cmd/aicli/commands/chat_core.go` | 共享 chatcore 路径经同一抽象层通道 append 片段进请求历史（与 194-197 现有 guide 逻辑并列） |
 | 4 | `backend/cmd/aicli/commands/skills_integration.go` | 抽出 `IsTextSkillFunction(fn)`（`Handler==nil && !HasWorkflow()`）与读取复用 `resolvedTurnSkill()`；不改变现有注册 |
 | 5 | `backend/internal/agentconfig/config.go` | 新增 `mention_injection` / `mention_multi_limit` / `mention_inject_max_chars` / `mention_inject_total_chars` 字段 + 默认值解析（沿用 `document_mode` 风格） |
 | 6 | `backend/cmd/aicli/commands/chat_skill_mentions_test.go`（新增） | 词法（env var 忽略、未知名忽略、大小写、连字符/下划线）、解析（顺序/去重/歧义/禁用/上限）、注入（正文、截断、总量、失败降级、去重 pin） |
@@ -382,6 +396,9 @@ turn metadata 与事件；配置键与默认值（`mention_injection=off` 首发
 | 9 | `backend/cmd/aicli/commands/chat_skill_mentions.go` | 解析/注入**不得依赖函数曝光面**：直接读 `binding.skillFunctions`，保证 P3 隐藏文本类函数后仍可解析 |
 | 10 | `backend/cmd/aicli/commands/chat_skill_turn.go` + `internal/agent/loop.go`（读契约） | 落地 §4.11：注入预算本地裁决先于 preflight；新增"注入不触发历史压缩"回归测试 |
 | 11 | `backend/cmd/aicli/commands/chat_skill_mentions_test.go` | 补充 fuzz（token 解析）、golden（片段格式/Windows 路径归一化）、subagent/team 系统输入负例（与第 6 行共用文件） |
+| 12 | `backend/internal/prompt/layers.go` | 抽象指令层：`Fragment` 增加 `Scope`；定义 canonical scope/source 常量与编译帮助（不产出 wire 角色） |
+| 13 | `backend/internal/llm/reasoning_helpers.go` | `RuntimeMessagesToProtocolMessages` 扩展为 layer-aware 唯一转换入口（读 scope/source → 规划协议角色） |
+| 14 | `backend/internal/llm/adapter/{gemini,openai,anthropic,codex}.go` + `providercompat` | 按 §4.12 契约落映射：**Gemini 修复 session→`systemInstruction`、turn→user**；新增 conformance 测试（同一 fixture 跑全部适配器） |
 
 **验收**：
 1. flag=off：全量现有测试不变，请求逐字节不新增任何 skill 片段；
@@ -394,6 +411,20 @@ turn metadata 与事件；配置键与默认值（`mention_injection=off` 首发
 
 **回滚**：配置置 off 即回现状；无持久化/协议变更。
 
+**实施记录（2026-10-03，P0 完成）**：
+
+- 抽象指令层：`internal/types/instruction.go`（scope/source 常量 + accessors）、
+  `internal/prompt/layers.go`（`Fragment.Scope/InstructionSource`、`AddScopedFragment`、`NewInstructionMessage`）。
+- 协议层：`internal/llm/reasoning_helpers.go` layer-aware 角色规划；`adapter/gemini.go` leading→
+  `systemInstruction`、非 leading→user（禁止 model）；`instruction_layer_conformance_test.go`（4 适配器 + providercompat）。
+- 注入层：`cmd/aicli/commands/chat_skill_mentions.go`（词法/解析/片段/三级预算降级）+ actor/chat_core 接线 +
+  `agentconfig` 五个配置键（默认 off）。
+- 验收证据：`go build ./...` 通过；`go test ./internal/{types,prompt,agentconfig,llm/...}` 全绿；
+  `cmd/aicli/commands` 全包失败用例经干净 HEAD worktree 对照确认为**预存在**（非本次引入），新增用例全部通过；
+  `internal/skill` 通过。
+- 未做（按方案留待后续）：P1（catalog_resident、依赖提示、folder-trust 联动）、P2（TUI `$` 补全、
+  链接式提及）、P3（默认切换与函数面收敛）；CLI `--skills-mention` 未实现（方案中为可选）。
+
 ### P1 — 常驻 catalog + 多技能纪律 + 预算收敛
 
 **范围**：`catalog_resident` 开关；catalog 注入时机与去重（pin 回合不重复）；纪律块扩展；
@@ -401,7 +432,7 @@ turn metadata 与事件；配置键与默认值（`mention_injection=off` 首发
 
 | # | 文件 | 变更 |
 |---|---|---|
-| 1 | `backend/cmd/aicli/commands/chat_skill_turn.go` | 抽出 `buildResidentSkillCatalogMessage(session)`（复用 `buildSkillCatalogText`；**固定前缀 user 片段**，kind=`skills_catalog`，Durable=false）；pin 时若 catalog 已常驻则 guide 只保留 ProgramGuide |
+| 1 | `backend/cmd/aicli/commands/chat_skill_turn.go` | 抽出 `buildResidentSkillCatalogMessage(session)`（复用 `buildSkillCatalogText`；**session-scope 抽象指令**，source=skills_catalog，prompt-only）；pin 时若 catalog 已常驻则 guide 只保留 ProgramGuide |
 | 2 | `backend/cmd/aicli/commands/chat_skill_mentions.go` | catalog 注入与 mention 注入的排序/去重策略统一（catalog 在前，技能正文在后） |
 | 3 | `backend/internal/skill/catalog_render.go` | 仅当纪律块文案需扩展时新增变量；预算/降级逻辑不改 |
 | 4 | `backend/cmd/aicli/commands/chat_skill_turn_test.go` 等 | 新增：常驻注入一次、fingerprint 不变不重复、pin 去重、预算降级 |
@@ -412,6 +443,24 @@ turn metadata 与事件；配置键与默认值（`mention_injection=off` 首发
 **验收**：常驻 catalog 打开后，无 mention 的普通回合上下文仅 +1 条稳定片段（fingerprint 稳定、
 不随发现顺序抖动）；**连续 N 个回合的请求前缀逐字节不变**（catalog 位于稳定前缀，不随回合尾部漂移）；
 pin 回合无重复 catalog；预算超限按"截描述→去描述"降级且技能条目不消失。
+
+**实施记录（2026-10-03，P1 完成）**：
+
+- 常驻 catalog：`internal/agent/loop.go` 新增 `composeInitialHistory`（从持久历史与回合消息中提取
+  session-scope 指令，重定位到 leading system 前缀之后；无 session 指令时与旧装配逐字节等价，routing/prompt
+  顺序不变）；`chat_skill_turn.go` 新增 `buildResidentSkillCatalogMessage`（scope=session、source=skills_catalog，
+  prompt-only）+ pin 去重（resident 开启时 pin guide 不再前附 catalog）；actor/chat_core 双路径接线；
+  `catalog_resident` 默认 false（灰度）。
+- 纪律块：`catalog_render.go` 两个 How-to-use 常量新增 "Injected bodies" 一行（已注入正文不再重读 SKILL.md）。
+- Q11：提及因依赖不可用而未加载的技能（`registry.UnavailableSkills`）→ 跳过正文、诊断
+  `dependency_unavailable`、输出聚合依赖提示（scope=turn、source=skill_dependencies；不阻断、不安装）；
+  已加载技能用 `mcpRuntime.FindTool` 校验声明 Tools，缺失时正文照常注入并附提示。
+- Q12：folder-trust feature 启用且未信任时 `auto` 不注入（诊断 `untrusted_project`）；显式 `on` 覆盖；
+  feature 未启用时维持原行为。
+- 验收证据：`gofmt` 干净；`go build -p 1 ./...` ✅；`go test ./internal/agent/ ./internal/skill/
+  ./internal/agentconfig/` 全绿 ✅；commands 相关用例（Resident/SkillTurn/SkillMention，共 18 项）全绿 ✅；
+  装配前缀稳定性 6 项专门测试（含历史增长时逐字节稳定）。commands 全包失败集与本次改动无关
+  （既有 TUI/团队时序问题 + 并行工作区新增 `/agents` 副屏导致的 /help 标注用例）。
 
 ### P2 — TUI `$` 补全
 
@@ -429,6 +478,26 @@ pin 回合无重复 catalog；预算超限按"截描述→去描述"降级且技
 **验收**：TUI 中 `$` 弹层与 slash 弹层互斥不冲突；选中后文本为 `$name `；禁用技能不出现在候选；
 busy turn / 全屏选择器 lease 期间不弹层；无 TUI 场景解析路径不受影响。
 
+**实施记录（2026-10-03，P2 完成）**：
+
+- 新增 `chat_skill_mention_completion.go`：光标左侧 `$name` token 词法（名称字符集 `[A-Za-z0-9_-]`、
+  env/纯数字排除、`a$b`/`$$` 拒绝、行内/围栏代码豁免）；候选枚举复用 `binding.skillFunctions`
+  （文本类 / disabled / 同名多路径过滤、catalog 排序、上限 10）；唯一命中 Tab/Enter 插入 `$name `
+  并写会话级 name→path 绑定，`skillMentionKnownNames` 绑定优先（复用 P0 path 优先解析，解析路径零改动）；
+  多命中公共前缀延伸后接受选中；0 命中消费 Tab 不改文本。
+- 弹层并入 completion 控制器文件（复用 `showOwnedPopupBelowPrompt`，owner=`skill_mention_completion`，
+  与 slash 弹层独立互斥；paste/InputQueue 草稿阻塞、签名去重；未单独新增 popup 文件）。
+- `chat_composer.go`：`$` 分支在 `@` 之后、slash/plan-mode 判断之前接管 Tab；onChange 双控制器驱动；
+  onNavigate/onSubmit/onCancelPopup 先 slash 后 `$`；Close 双清理；门控不满足（off / auto 非交互 /
+  auto 未信任 / 无 fixed surface）时不创建控制器。
+- `docs/aicli/interactive-mode.md` 新增 §4.3 `$` 技能提及补全（触发、候选、唯一/多命中、门控、示例）。
+- 验收证据：`gofmt` 干净；`go build -p 1 ./...` ✅；补全专项 14 个顶层测试（含 17 个子测试）全绿
+  （token 词法、候选过滤与排序、上限、唯一绑定、多候选前缀、0 命中、Navigate/Cancel、弹层渲染快照、
+  paste/draft 阻塞、门控 off/auto+未信任/on）；composer 集成用例
+  `TestChatComposerControllerSkillMentionCompletionTabAndFallbacks` 覆盖互斥与门控；P0/P1 回归集全绿。
+- 说明：busy turn 与全屏 selector 由输入所有权结构性保证（busy capture 不挂 OnComplete、selector
+  期间主 composer 不读取输入），未单独实现 lease 探测。
+
 ### P3 — 默认切换与函数面收敛
 
 **范围**：`mention_injection` 默认 auto/on；交互式请求面对**文本类**技能不再暴露 `skill__` 函数
@@ -444,6 +513,60 @@ busy turn / 全屏选择器 lease 期间不弹层；无 TUI 场景解析路径�
 
 **验收**：文本类技能的交互 prompt 不再出现 `skill__*` 调用；`/call skill__x` 仍可用；
 handler/workflow 技能零回归；无 mention 的旧会话行为与现状一致（除常驻 catalog 的稳定前缀）。
+
+**实施记录（2026-10-03，P3 完成；灰度数据待生产观测）**：
+
+- 默认切换：`MentionInjectionMode()` 未配置/空串/未知值 → `auto`（显式 off/on 保持）；`auto`
+  仍受交互式 + folder-trust(Q12) 门控，headless/JSON 与系统生成输入零注入。`catalog_resident`
+  维持 false（待数据再切）。
+- 函数面收敛（Q5）：新增 `mention_hide_text_skill_functions`（*bool，默认 on，显式 false 回退）。
+  交互回合三层收敛：`SelectRequestFunctions` 过滤文本类 skill（SkillFunctions/FinalFunctionNames/
+  Schemas 三者一致）、`SelectStableSessionFunctions` 同步过滤、`AnalyzeSkillExposure` 的 addFunction
+  剪枝（路由候选 / explicit-mention / 历史回补均无法重新暴露；ExplicitMentions/Candidates 保留原始
+  词法命中用于诊断）。handler/workflow 技能、`/call skill__x`、`/skill --direct`、API/exec 与
+  headless/JSON 零回归。
+- 文档：`aicli_skills_usage.md` 新增 `$` 提及、默认口径、函数面收敛与"灰度观测与回退"；`/skills`
+  Help 补充 `$name` 提示。
+- 验收证据：`go build -p 1 ./...` ✅；`internal/agentconfig`、`internal/skill` 全绿 ✅；新增用例
+  （交互隐藏 / headless 与 hide=false 保留 / handler 保留 / auto 模式）全绿 ✅；mention/composer/
+  turn 回归集全绿 ✅；commands 全包失败集与基线一致（5 项无关：TUI/团队时序 + `/agents` 副屏
+  /help 标注）。
+- 遗留：① P3 表行 3 的"已注入幂等桩"未实现——函数面收敛后模型不再获得文本类 `skill__` 函数，
+  双路径前提已消除，如需防旧缓存/手工调用再评估；② §4.7 四项 Rollout Gates 需真实会话数据观测
+  （文档已列观测项与回退：`mention_injection: off` / `mention_hide_text_skill_functions: false`）。
+
+### P4 — 远程实测缺口修复（2026-10-03，v1.8 补丁）
+
+首轮远程会话实测（session_20261003135031_WqX69uRm，`/web/api/*`）确认 P0-P3 功能链全绿，同时暴露并修复
+以下工程缺口（不改注入/收敛语义）：
+
+| # | 缺口（实测） | 修复 |
+|---|---|---|
+| 1 | 冷启动首个 `/web/api/invoke` 等待满 240s 报 timeout，但回合 1s 内成功（`llm_observed=false`）：能力面懒装载，handler 订阅时 `LocalRuntimeHost==nil`，订阅退化为 no-op 且不重试 | 订阅生命周期收进 watch：`ensureSubscribed/closeSubscription`，等待循环每拍补订阅；completed 判定新增 `FreshAssistant` 兜底（`Finishes>0 ∥ 新回复`）。新增 `ColdStartFreshAssistantCompletes`、`EnsureSubscribedAfterHostAttach` 用例 |
+| 2 | `/web/api/turn` 对冷启动首回合永远 `found=false`：`session_start` 早于记录器订阅建立 | `finish` 在无既有记录时按 `session_end` 载荷合成最小记录（duration/usage/steps），新增 `SynthesizesMissingStart` 用例 |
+| 3 | `/web/api/skills` 冷启动返回 `count:0`，无法区分"未装载"与"没有技能" | 列表为空且门控未完成时返回 `mounting:true` + `mount_phase=discovering|attach_pending|error`（不在 HTTP goroutine 触发 attach，遵守单写者约束） |
+| 4 | `$skill_runtime_smoke`（prompt-only）被诊断成 `read_error`，与"可重试的读取失败"混淆 | 根因：resolver 失败回退到 stub（非空、无正文）→ 解析阶段误判"可注入"，直到构建片段的空正文兜底才报 `read_error`。修复：解析阶段即判定空正文并按摘要分类——非 document 模式 → `disabled`（not an injectable instruction document）；文档模式空正文 → `disabled`（no injectable instruction body）；workflow / handler 仍按非文本忽略；仅文档技能解析失败保留 `read_error`。聚合 debug 行附 detail（≤60 rune） |
+
+验收：`gofmt` 干净；`go build -p 1 ./...` ✅；定向用例（invoke/turn/skills/mention，含 4 个新用例）全绿；
+commands 全包失败集与基线一致（5 项无关：TUI/团队时序 + `/agents` 副屏 /help 标注）。
+
+**实测复验（2026-10-03 16:31，session_20261003163051_BcHtl35k，含 P4 修复构建）**：
+首个动作即 `/web/api/invoke`，4.05s 返回 `completed`（修复前同场景 240s timeout），`llm_observed=true`、
+assistant=OK；`/web/api/turn` 首回合立即可查（duration=2547ms、usage、assistant_preview=OK，`?id=` 同样命中）；
+`/web/api/skills` 装载前 `mounting=true, mount_phase=attach_pending`，装载后 `count=11` 且不再带 mounting；
+`$brand-guidelines` 注入 2051 字符正文（path 正确）且请求工具面 83 项零 `skill__*`（prompt 含字面函数名亦未复现）；
+`$HOME` 零注入零诊断。诊断细分（非 document 技能 → not-an-injectable-document）在下一构建生效。
+
+**终验（2026-10-03 16:38，session_20261003163802_UqMITarl，含空正文分类修复）**：同一构建内四项全绿——
+冷启动首个 invoke 4.05s `completed`（llm_observed=true）；首回合 turn 记录与 `?id=` 命中；skills 装载前
+`mount_phase=attach_pending`、装载后 count=11；`$brand-guidelines` 注入 path 正确且 83 工具零 `skill__*`；
+`$HOME` 零注入；`$skill_runtime_smoke` →
+`reasons=skill_runtime_smoke:disabled(skill is not an injectable instruction document)`（空正文按解析阶段归类，
+不再误报 read_error）。P4 缺口全部关闭。
+
+已知未修（记录备查）：① 同名技能多安装根在目录中重复（mention 走绑定路径可确定解析，属展示层观察项）；
+② `wait_only` 下 FreshAssistant 文本兜底偏松（既有 assistant 文本即可满足，必要时可只取条数增长判据）；
+③ EventBus 中途整体热替换不迁移旧订阅（会话切换已有 abort 路径兜底）。
 
 ---
 
@@ -473,7 +596,7 @@ handler/workflow 技能零回归；无 mention 的旧会话行为与现状一致
 | 常驻 catalog 前缀稳定 | 连续 N 回合请求前缀逐字节不变（fingerprint 未变时）；变化仅在下一次重建 |
 | 子代理/team 系统输入负例 | 不解析 mention（goal continuation/guardian/subagent 引导） |
 | 函数面隐藏后的前向兼容（P3 预埋） | 文本类 `skill__` 被过滤后，`$name` 解析/注入链仍生效 |
-| 协议转换稳定性（§4.12） | Anthropic 非 leading system→user、Gemini system→model 等路径下，user 片段内容/顺序保留；回合级注入不得使用 system |
+| 适配器契约一致性（conformance，§4.12） | 同一 canonical fixture 跑 OpenAI/Codex/Anthropic/Gemini/providercompat/回退：内容与顺序保留、turn 不落 model、session 前缀稳定、标记原样、回退不丢指令 |
 
 ### 6.2 集成测试（请求级）
 
@@ -509,7 +632,7 @@ handler/workflow 技能零回归；无 mention 的旧会话行为与现状一致
 | R11 | 未信任项目的技能内容经 mention 注入 | 内容信任边界 | 沿用既有加载/信任策略（未加载则不注入）；评审 Q12 决定是否在未信任项目禁用 |
 | R12 | 注入把请求推过 preflight 预算 | 触发压缩/preflight 失败 | §4.11 顺序契约 + 回归测试；超预算只降级注入，不压缩历史 |
 | R13 | 回合装配同步读取 N 个技能文件 | 主循环卡顿 | 复用 `resolvedTurnSkill()` 解析缓存；N≤4；warm 装配目标 ≤20ms，超限按序降级 |
-| R14 | 用 system 角色承载回合级注入 | Anthropic→user、Gemini→model 角色反转，指令语义漂移 | §4.12 规则：回合级一律 user；协议矩阵测试纳入 P0 验收 |
+| R14 | 适配器未遵循抽象层契约（如 Gemini 把指令映射为 model、scope 元数据在转换中丢失） | 指令角色反转/内容漂移 | §4.12 契约 + conformance 套件纳入 P0 验收；转换入口单点实现 |
 
 ---
 
@@ -517,7 +640,7 @@ handler/workflow 技能零回归；无 mention 的旧会话行为与现状一致
 
 | # | 问题 | 已拍板决策 |
 |---|---|---|
-| Q1 | 注入消息角色：system vs user（Codex 原文） | **user 角色（2026-10-02 重审修订）：回合级片段走 user 非持久通道；catalog 走固定前缀 user 片段；只有 leading 前缀用 system/developer。依据 §4.12 协议矩阵** |
+| Q1 | 注入消息角色：system vs user | **两层架构（2026-10-02 最终）：注入统一产出抽象指令层消息（scope=session/turn）；wire 角色由适配器按 §4.12 契约转换；注入点不选角色。Gemini 映射缺陷随 P0 修复** |
 | Q2 | 非文本类技能被 `$` 提及：忽略（本方案）还是自动转 pin | 忽略 + 提示；P3 再评估自动 pin |
 | Q3 | 是否支持链接式提及 `[$name](skill://path)` | P2 可选；P0 只支持 `$name` |
 | Q4 | 常驻 catalog 注入时机：会话首回合一次 / 每回合 fingerprint 变化才注入 / resume 重放 | 首回合 + fingerprint 变化时刷新；resume 重放一次 |

@@ -8,7 +8,7 @@
 
 | 层 | 内容 | 是否可重映射 |
 |---|---|---|
-| 固定键 | `enter` 提交、`esc` 中断/回退、`ctrl+c` 中断、`ctrl+d` 退出、`ctrl+j`/`ctrl+o` 换行、`tab`（slash 补全 / `@` 路径补全 / plan 模式）、方向键导航 | 否 |
+| 固定键 | `enter` 提交、`esc` 中断/回退、`ctrl+c` 中断、`ctrl+d` 退出、`ctrl+j`/`ctrl+o` 换行、`tab`（slash 补全 / `@` 路径补全 / `$` 技能补全 / plan 模式）、方向键导航 | 否 |
 | 动作键 | `app.permission.cycle`（默认 `shift+tab`、`alt+m`）、`app.transcript.pager`（默认 `ctrl+t`）、`app.attach.clipboard_image`（默认 `alt+v`） | 是 |
 | 行编辑器内部键 | Emacs 风格移动/删除（`ctrl+a`、`ctrl+e`、`ctrl+w`、`ctrl+k`、`ctrl+t` 未认领时的 transpose 等） | 否 |
 
@@ -130,6 +130,25 @@ aicli:
   - **语义是路径引用**：提交时原样发送 `@相对路径`，由模型自行 `view`/`grep` 读取；当前**不做内容注入**，也不做 AGENTS.md 片段注入。
   - 扫描根是进程工作目录（chat 的工作区），跳过 `.git`/`node_modules`/`vendor`/`dist`/`build` 等目录；单次最多扫描 6000 项、返回 40 个候选。
   - `@` 前必须是行首、空白或左括号，因此 `a@b` 这类邮箱不会被当作引用。
+
+### 4.3 `$` 技能提及补全
+
+输入 `$` 会弹出技能补全（owner 与 slash 补全相互独立，不会互相抢占）：
+
+```
+> $alpha — Alpha skill 的简要说明
+  $alpine
+↑↓ 选择 · Tab 补全 · Enter 确认 · Esc 关闭
+```
+
+- **触发**：光标左侧的 `$name` token，名称字符集为 `[A-Za-z0-9_-]`，`$` 前必须是行首、空白、标点或 `(` 等非名称字符。`a$b`、`$$`、`$HOME` 这类环境变量名、`$100` 纯数字，以及行内代码 / 围栏代码块里的 `$` 不触发（不会弹层，也不会消费 `Tab`）。
+- **候选**：只列可注入正文的文本类技能；`skills_runtime.disabled_skills` 禁用的技能、handler/workflow 技能不出现；同名多路径（无法唯一绑定）跳过；查询为空显示全部，否则按名称前缀（大小写不敏感）过滤，最多显示 10 条。
+- **唯一命中**：按 `Tab`（或 `Enter`）直接补全为 `$name `（含尾随空格），并记录本次选择的技能路径；同名多技能时，后续 `$name` 注入按该绑定解析，不会被目录顺序覆盖。
+- **多命中**：`Tab` 先补到公共前缀；前缀不再加深时接受当前选中（默认第一条），插入 `$name `。`↑`/`↓` 循环选择，`Enter` 确认当前选中，`Esc` 关闭弹层。
+- **无命中**：消费 `Tab`、不改动文本，弹层提示「未找到匹配技能: $query」——不会误触发 `Tab` 的 plan mode 切换。
+- **门控**：由 `skills_runtime.mention_injection` 控制——`off` 不弹；`auto` 仅在交互式且项目已信任（folder-trust）时弹；`on` 显式开启（未信任项目也生效）。非交互会话、没有固定底部输入面（fixed surface）以及 agent busy / 粘贴进行中不弹层。注入行为本身见 `docs/plan/codex-text-skill-mention-injection-plan-20261002.md`。
+
+示例：输入 `用 $alp` → `Tab` 补到公共前缀 `$alp` → 再按 `Tab`（或 `↓` 选中后 `Enter`）得到 `$alpha `；继续输入其余内容后提交，alpha 的技能正文按纪律注入本回合。
 
 ## 5. 输入所有权与中断
 
