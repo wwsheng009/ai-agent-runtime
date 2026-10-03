@@ -1083,6 +1083,18 @@ func (s *SQLiteSessionStorage) canonicalAppendStartTx(ctx context.Context, tx *s
 	}
 	start, anchored := identityAlignedAppendStart(history, tail)
 	if !anchored {
+		// First-turn healing: the durable transcript produced by a run is
+		// system-stripped, so a fresh session whose canonical transcript holds
+		// only the instruction seed shares no identity with the incoming
+		// history. The legacy arithmetic then skips the leading user message
+		// (or the whole history) and the prompt projection accepts messages
+		// that session_messages never stores — /history readers (the web
+		// console) permanently lose the user prompt. When absence is provable
+		// (canonical fully covered by the tail) and the incoming window is a
+		// dialogue continuation (opens at a user turn), append it in full.
+		if healed, ok := unanchoredContinuationAppendStart(history, tail, canonicalCount, legacyStart); ok {
+			return healed, nil
+		}
 		if !prefixMatches && canonicalCount > 0 && legacyStart >= len(history) {
 			// The caller's window shares no message with the stored transcript
 			// tail and no heuristic dares to append: either a deliberate
@@ -1097,6 +1109,33 @@ func (s *SQLiteSessionStorage) canonicalAppendStartTx(ctx context.Context, tx *s
 		return legacyStart, nil
 	}
 	return start, nil
+}
+
+// unanchoredContinuationAppendStart heals the first-turn shape: the agent loop
+// persists a run without its leading instruction messages, so the incoming
+// history opens at the user turn while the canonical transcript may hold only
+// the instruction seed written before the request. identityAlignedAppendStart
+// cannot anchor such a history, and the legacy heuristics then start behind the
+// user message (declaredDelta / prompt-projection prefix), so the user prompt is
+// silently skipped and only visible in the prompt projection.
+//
+// The heal appends the whole incoming history, but only when its absence from
+// canonical is provable: the tail must cover the entire canonical transcript
+// (otherwise "no anchor" could mean a match older than the bounded tail) and the
+// incoming window must open at a user turn (a dialogue continuation).
+// Deliberate replacements (compaction summaries, rewinds) either anchor on a
+// retained prefix or do not open at a user turn, so they keep the legacy path.
+func unanchoredContinuationAppendStart(history, tail []types.Message, canonicalCount, legacyStart int) (int, bool) {
+	if canonicalCount <= 0 || len(tail) < canonicalCount {
+		return 0, false
+	}
+	if len(history) == 0 || !isUserTurnMessage(history[0]) {
+		return 0, false
+	}
+	if legacyStart <= 0 {
+		return 0, false
+	}
+	return 0, true
 }
 
 // legacyCanonicalAppendStart preserves the pre-alignment heuristics for the
