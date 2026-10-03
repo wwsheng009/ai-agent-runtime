@@ -93,10 +93,17 @@ func handleChatWebSkillsGet(w http.ResponseWriter, r *http.Request) {
 	}
 	if name == "" {
 		items := buildChatWebSkillSummaries(session, report)
-		writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
+		body := map[string]interface{}{
 			"count":  len(items),
 			"skills": items,
-		})
+		}
+		// 冷启动懒装载反馈：目录为空时区分"正在发现 / 等待首回合挂载"，
+		// 避免调用方把"还没装载"误读成"没有技能"。
+		if pending, phase := chatCapabilitiesMountingState(session, len(items) > 0); pending {
+			body["mounting"] = true
+			body["mount_phase"] = phase
+		}
+		writeWebAPIJSON(w, http.StatusOK, body)
 		return
 	}
 

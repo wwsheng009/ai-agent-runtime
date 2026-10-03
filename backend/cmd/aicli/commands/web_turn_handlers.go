@@ -214,6 +214,23 @@ func (r *chatWebTurnRecorder) finish(turnID, sessionID, status, errText string, 
 	if turnID == "" || record == nil || record.Status != "running" {
 		record = r.latestRunningLocked(sessionID)
 	}
+	if record == nil && turnID != "" {
+		// 冷启动首回合兜底：能力面（含 EventBus）在 turn 进行中才懒装载，
+		// session_start 早于记录器订阅建立。此时只能从 session_end 反推一条
+		// 最小记录（耗时取载荷 duration），否则 /web/api/turn 对首回合永远
+		// 查不到（实测 invoke 冷启动场景）。
+		record = &chatWebTurnRecord{
+			TurnID:    turnID,
+			SessionID: sessionID,
+			Status:    "running",
+		}
+		if duration := chatWebPayloadInt(payload["duration"]); duration > 0 {
+			record.DurationMs = int64(duration)
+		}
+		r.records[turnID] = record
+		r.order = append(r.order, turnID)
+		r.pruneLocked()
+	}
 	if record == nil || record.Status != "running" {
 		return
 	}

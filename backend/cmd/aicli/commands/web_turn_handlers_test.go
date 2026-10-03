@@ -405,3 +405,34 @@ func TestChatWebTurnRecorder_UsageFromEventPayload(t *testing.T) {
 		}
 	}
 }
+
+// TestChatWebTurnRecorderSynthesizesMissingStart 锁定冷启动首回合兜底：
+// session_start 早于记录器订阅建立（能力面懒装载）时，session_end 仍须
+// 落一条可查询记录，而不是静默丢弃。
+func TestChatWebTurnRecorderSynthesizesMissingStart(t *testing.T) {
+	session := &ChatSession{}
+	recorder := &chatWebTurnRecorder{session: session, records: map[string]*chatWebTurnRecord{}}
+	recorder.observe(runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd, SessionID: "session_cold",
+		Payload: map[string]interface{}{
+			"turn_id": "turn_cold", "success": true, "steps": 2,
+			"duration":            int64(1500),
+			"usage_prompt_tokens": 100, "usage_completion_tokens": 20,
+			"usage_total_tokens": 120, "usage_source": "provider_reported",
+		},
+	})
+	recent := recorder.recent(1)
+	if len(recent) != 1 {
+		t.Fatalf("recent = %+v, want one synthesized record", recent)
+	}
+	got := recent[0]
+	if got.TurnID != "turn_cold" || got.Status != "completed" || got.DurationMs != 1500 || got.Steps != 2 {
+		t.Fatalf("record = %+v", got)
+	}
+	if got.Usage == nil || got.Usage.InputTokens != 100 || got.Usage.OutputTokens != 20 || got.Usage.TotalTokens != 120 {
+		t.Fatalf("usage = %+v, want payload usage", got.Usage)
+	}
+	if got.UsageScope != chatWebTurnUsageScopeTurn || got.UsageSource != "provider_reported" {
+		t.Fatalf("usage scope/source = %q/%q", got.UsageScope, got.UsageSource)
+	}
+}

@@ -288,3 +288,45 @@ func TestHandleChatWebAPISkills_ToggleWritesConfigAndRefreshesList(t *testing.T)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "invalid_request")
 }
+
+// TestHandleChatWebAPISkills_ListReportsMountingPhase 锁定冷启动反馈：
+// 能力面未挂载时列表为空，但响应必须能区分 discovering / attach_pending，
+// 避免调用方把"还没装载"误读成"没有技能"。
+func TestHandleChatWebAPISkills_ListReportsMountingPhase(t *testing.T) {
+	type mountPayload struct {
+		Count      int    `json:"count"`
+		Mounting   bool   `json:"mounting"`
+		MountPhase string `json:"mount_phase"`
+	}
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+	session := &ChatSession{FunctionCatalog: catalog, FunctionRegistry: registry}
+	installChatCapabilitiesGate(session, func() (*chatCapabilityDiscovery, error) {
+		return &chatCapabilityDiscovery{}, nil
+	}, nil)
+	withWebTestSession(t, session)
+
+	decode := func() mountPayload {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		HandleChatWebAPISkills(rec, httptest.NewRequest(http.MethodGet, ChatWebAPISkillsPath, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		var payload mountPayload
+		decodeSkillsBody(t, rec, &payload)
+		return payload
+	}
+
+	discovering := decode()
+	if discovering.Count != 0 || !discovering.Mounting || discovering.MountPhase != "discovering" {
+		t.Fatalf("discovering payload = %+v", discovering)
+	}
+	load := currentChatCapabilityLoad(session)
+	require.NotNil(t, load)
+	load.completeDiscovery(&chatCapabilityDiscovery{}, nil)
+	pendingAttach := decode()
+	if !pendingAttach.Mounting || pendingAttach.MountPhase != "attach_pending" {
+		t.Fatalf("attach_pending payload = %+v", pendingAttach)
+	}
+}

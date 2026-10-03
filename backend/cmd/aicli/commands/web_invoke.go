@@ -324,8 +324,10 @@ func HandleChatWebAPIInvoke(w http.ResponseWriter, r *http.Request) {
 		}()
 		watch.onStream = stream.writeEvent
 	}
-	unsubscribe := subscribeChatWebInvokeWatch(session, watch)
-	defer unsubscribe()
+	// 会话能力面（host/bus）可能是本回合之后才懒装载完成的：这里先尝试订阅，
+	// 失败也不致命——等待循环每拍会用 watch.ensureSubscribed 自动补订阅。
+	watch.ensureSubscribed(session)
+	defer watch.closeSubscription()
 
 	if req.WaitOnly && chatWebInvokeIdle(session) {
 		// 空闲短路：wait_only 时若本来就没有在跑的 turn（也无待审批/待提问/排队
@@ -465,6 +467,9 @@ type chatWebInvokeWatch struct {
 	// onStream 是流式 invoke 的事件转发回调（非空时按需转发 delta/tool 事件）；
 	// 回调实现必须非阻塞（writeEvent 只做入队）。
 	onStream func(event string, data map[string]interface{}, sourceEvent string)
+	// unsubscribe 记录已安装的 EventBus 订阅（nil 表示尚未订阅）：由
+	// ensureSubscribed / closeSubscription 在 mu 保护下读写。
+	unsubscribe runtimeevents.Unsubscribe
 }
 
 func newChatWebInvokeWatch() *chatWebInvokeWatch {
@@ -554,15 +559,42 @@ func (w *chatWebInvokeWatch) snapshot() chatWebInvokeWatchState {
 	}
 }
 
-// subscribeChatWebInvokeWatch 订阅会话 host 级 EventBus（与 SSE 端点同源）。
-// 无 host / 无 bus（测试或降级形态）时返回空 Unsubscribe，等待循环仍可通过
-// 运行时状态轮询完成判定。
-func subscribeChatWebInvokeWatch(session *ChatSession, watch *chatWebInvokeWatch) runtimeevents.Unsubscribe {
-	if session == nil || session.LocalRuntimeHost == nil || session.LocalRuntimeHost.EventBus == nil || watch == nil {
-		return func() {}
+// ensureSubscribed 幂等安装会话 host 级 EventBus 订阅（与 SSE 端点同源）。
+//
+// 会话能力面是懒装载的：首个 invoke 注入前 session.LocalRuntimeHost 可能还是
+// nil，此时订阅必须退化为 no-op 并由等待循环每拍重试——否则整轮事件流
+// （turn 生命周期 / LLM 请求完成 / assistant 消息）全部丢失，判定只能等到
+// timeout（实测事故：回合 1s 内 completed，invoke 却等满 240s 返回 timeout）。
+// host/bus 非空且尚未订阅时安装订阅；已订阅或无 bus（测试/降级形态）时 no-op。
+// 并发安全。
+func (w *chatWebInvokeWatch) ensureSubscribed(session *ChatSession) {
+	if w == nil || session == nil {
+		return
 	}
-	watch.sessionID = currentRuntimeSessionID(session)
-	return session.LocalRuntimeHost.EventBus.SubscribeCancelable("", watch.observe)
+	if session.LocalRuntimeHost == nil || session.LocalRuntimeHost.EventBus == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.unsubscribe != nil {
+		return
+	}
+	w.sessionID = currentRuntimeSessionID(session)
+	w.unsubscribe = session.LocalRuntimeHost.EventBus.SubscribeCancelable("", w.observe)
+}
+
+// closeSubscription 取消已安装的 EventBus 订阅；未订阅或重复调用时安全 no-op。
+func (w *chatWebInvokeWatch) closeSubscription() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	unsubscribe := w.unsubscribe
+	w.unsubscribe = nil
+	w.mu.Unlock()
+	if unsubscribe != nil {
+		unsubscribe()
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -578,20 +610,28 @@ type chatWebInvokeSample struct {
 	BusyAfterConsume bool // 消费后至少采样到一次 busy
 	Starts           int
 	Finishes         int
-	Interrupted      bool
-	PendingApproval  bool
-	PendingQuestion  bool
-	AttentionStable  bool // 审批/提问状态连续命中 chatWebInvokeAttentionTicks 拍
-	SinceActivity    time.Duration
-	SinceConsumed    time.Duration
-	Quiet            time.Duration
-	NoLLMGrace       time.Duration
+	// FreshAssistant 表示本轮已观察到新回复（assistant 消息条数超过 invoke
+	// 起点基线，或最后一条正文不同于基线）。冷启动晚订阅导致 llm 完成事件
+	// 丢失（Finishes 恒为 0）时，靠它兜底判定 turn 已结束。
+	FreshAssistant  bool
+	Interrupted     bool
+	PendingApproval bool
+	PendingQuestion bool
+	AttentionStable bool // 审批/提问状态连续命中 chatWebInvokeAttentionTicks 拍
+	SinceActivity   time.Duration
+	SinceConsumed   time.Duration
+	Quiet           time.Duration
+	NoLLMGrace      time.Duration
 }
 
 // chatWebInvokeDecide 根据一拍采样判定等待是否结束。
 // 返回 (status, done)；done=false 表示继续等待。
 //
-//	completed  —— 观察到 turn 忙碌且 LLM 请求完成、会话空闲、队列为空且事件静默；
+//	completed  —— 消费后观察到 turn 忙碌、会话空闲、队列为空且事件静默，并且
+//	              观察到 LLM 请求完成（Finishes>0）或本轮新回复（FreshAssistant）；
+//	              FreshAssistant 是事件丢失（冷启动晚订阅）时的兜底：首个 invoke
+//	              注入前 host/bus 可能尚未挂载，订阅补齐后 llm 完成事件已错过，
+//	              但会话里的新 assistant 回复足以证明 turn 已结束；
 //	settled    —— 输入已被消费但未观察到 LLM turn（斜杠命令等），宽限期后按就绪返回；
 //	interrupted—— 会话被中断且已空闲；
 //	requires_approval / requires_answer —— 会话停在审批/提问等待，需要调用方决策。
@@ -605,7 +645,8 @@ func chatWebInvokeDecide(s chatWebInvokeSample) (string, bool) {
 	if s.PendingQuestion && s.AttentionStable {
 		return "requires_answer", true
 	}
-	if s.BusyAfterConsume && s.Finishes > 0 && !s.Busy && s.Pending == 0 && s.SinceActivity >= s.Quiet {
+	if s.BusyAfterConsume && !s.Busy && s.Pending == 0 && s.SinceActivity >= s.Quiet &&
+		(s.Finishes > 0 || s.FreshAssistant) {
 		return "completed", true
 	}
 	if s.Consumed && !s.BusyAfterConsume && !s.Busy && s.Pending == 0 &&
@@ -649,6 +690,12 @@ func chatWebInvokeWait(ctx context.Context, session *ChatSession, watch *chatWeb
 			return chatWebInvokeFinalize(resp, current, watch, baselineAssistant,
 				"error", "session switched while waiting for turn to finish")
 		}
+		// 懒装载补齐：host/bus 与 turn 记录器都可能在本轮注入之后才挂载。
+		// 每拍重试安装（两者均幂等、并发安全）：订阅装上后，本轮剩余事件
+		// （assistant 消息 / llm 完成）即可被观察；若整轮事件都已错过，
+		// FreshAssistant 采样仍能凭会话里的新回复完成判定。
+		watch.ensureSubscribed(current)
+		ensureChatWebTurnRecorder(current)
 		_, _, busy, approval, question := chatWebInvokeProbeFn(current)
 		pending := 0
 		if current.InputQueue != nil {
@@ -674,6 +721,7 @@ func chatWebInvokeWait(ctx context.Context, session *ChatSession, watch *chatWeb
 			BusyAfterConsume: busyAfterConsume,
 			Starts:           ws.Starts,
 			Finishes:         ws.Finishes,
+			FreshAssistant:   chatWebInvokeSampleFreshAssistant(current, watch, baselineAssistant),
 			Interrupted:      ws.Interrupted,
 			PendingApproval:  approval != nil,
 			PendingQuestion:  question != nil,
@@ -810,6 +858,21 @@ func chatWebInvokeFreshAssistant(session *ChatSession, watch *chatWebInvokeWatch
 	}
 	// baselineAssistantCount 只在等待开始前写入，finalize 是等待之后的单线程读取。
 	return chatWebInvokeAssistantMessageCount(session) > watch.baselineAssistantCount
+}
+
+// chatWebInvokeSampleFreshAssistant 是等待循环每拍使用的"本轮是否已有新回复"
+// 判据：assistant 消息条数相比 invoke 起点增长，或最后一条正文不同于基线。
+// 与 chatWebInvokeFreshAssistant 同口径（终态回填时再做一次完整判定）；
+// 事件订阅丢失（冷启动晚订阅）时，等待循环凭它兜底结束等待。
+func chatWebInvokeSampleFreshAssistant(session *ChatSession, watch *chatWebInvokeWatch, baselineAssistant string) bool {
+	if session == nil || watch == nil {
+		return false
+	}
+	if chatWebInvokeAssistantMessageCount(session) > watch.baselineAssistantCount {
+		return true
+	}
+	current := chatWebInvokeAssistantContent(session)
+	return current != "" && current != baselineAssistant
 }
 
 // chatWebInvokeAssistantMessageCount 统计会话中正文非空的 assistant 消息条数。

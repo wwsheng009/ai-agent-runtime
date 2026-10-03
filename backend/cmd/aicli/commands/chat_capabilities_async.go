@@ -185,6 +185,29 @@ func sessionCapabilitiesLoadView(session *ChatSession) string {
 	return "load=discovering(err=nil)"
 }
 
+// chatCapabilitiesMountingState 报告技能面尚不可用时的真实阶段，供
+// /web/api/skills 在列表为空时给出可区分反馈（冷启动懒装载：discovering →
+// attach_pending → 可用）。skillsReady=true（目录已非空）时恒 false；
+// 未安装门控（同步/非交互/runtime-server 路径）返回 false，不做虚假承诺。
+func chatCapabilitiesMountingState(session *ChatSession, skillsReady bool) (bool, string) {
+	if skillsReady {
+		return false, ""
+	}
+	load := currentChatCapabilityLoad(session)
+	if load == nil {
+		return false, ""
+	}
+	select {
+	case <-load.done:
+		if err := load.currentErr(); err != nil {
+			return true, "error"
+		}
+		return true, "attach_pending"
+	default:
+		return true, "discovering"
+	}
+}
+
 // awaitChatCapabilities 在真正需要 turn 执行器之前阻塞到能力面就绪，并在主
 // goroutine 上完成挂载。未安装（同步路径 / 非交互 / runtime-server 路径）时 no-op。
 func awaitChatCapabilities(ctx context.Context, session *ChatSession) error {

@@ -93,7 +93,16 @@ func TestChatWebInvokeDecide(t *testing.T) {
 		{"busy still running", func(s *chatWebInvokeSample) { s.Busy = true }, "", false},
 		{"pending input", func(s *chatWebInvokeSample) { s.Pending = 1 }, "", false},
 		{"quiet window not reached", func(s *chatWebInvokeSample) { s.SinceActivity = 100 * time.Millisecond }, "", false},
-		{"finish not observed", func(s *chatWebInvokeSample) { s.Finishes = 0 }, "", false},
+		{"finish not observed and no fresh assistant", func(s *chatWebInvokeSample) {
+			s.Finishes = 0
+			s.FreshAssistant = false
+		}, "", false},
+		// 冷启动晚订阅：llm_request_finished 事件丢失（finishes=0），但本轮新
+		// assistant 回复已经落进会话——凭 FreshAssistant 兜底完成，不再空等 timeout。
+		{"completed via fresh assistant fallback", func(s *chatWebInvokeSample) {
+			s.Finishes = 0
+			s.FreshAssistant = true
+		}, "completed", true},
 		{"settled no-llm path", func(s *chatWebInvokeSample) {
 			s.BusyAfterConsume = false
 			s.Starts = 0
@@ -323,8 +332,8 @@ func TestChatWebInvokeWait_CompletedAfterTurnEvents(t *testing.T) {
 	}()
 
 	watch := newChatWebInvokeWatch()
-	unsubscribe := subscribeChatWebInvokeWatch(session, watch)
-	defer unsubscribe()
+	watch.ensureSubscribed(session)
+	defer watch.closeSubscription()
 
 	resp := chatWebInvokeWait(context.Background(), session, watch, "", time.Now().Add(5*time.Second))
 	if resp.Status != "completed" {
@@ -341,6 +350,60 @@ func TestChatWebInvokeWait_CompletedAfterTurnEvents(t *testing.T) {
 	}
 	if resp.SessionID != "session_test" {
 		t.Fatalf("session_id = %q, want session_test", resp.SessionID)
+	}
+}
+
+// TestChatWebInvokeWait_ColdStartFreshAssistantCompletes 覆盖事故主场景：
+// host 始终未挂载（冷启动懒装载未完成），EventBus 事件一个都收不到
+// （starts=finishes=0），但 turn 已消费输入并产出新 assistant 回复——
+// 等待循环必须凭 FreshAssistant 兜底判定 completed，而不是空等满 timeout。
+// 相位完全由探测调用序号驱动（不依赖真实时钟），避免抖动。
+func TestChatWebInvokeWait_ColdStartFreshAssistantCompletes(t *testing.T) {
+	queue := newChatInputQueue(nil)
+	if result := queue.routeInputText("hello"); !result.queued() {
+		t.Fatal("route input failed")
+	}
+	session := &ChatSession{InputQueue: queue} // 冷启动：LocalRuntimeHost == nil
+	withWebTestSession(t, session)
+
+	var appendOnce sync.Once
+	busySamples := 0
+	withStubbedInvokeProbe(t, func(s *ChatSession) (string, string, bool, map[string]interface{}, map[string]interface{}) {
+		if queue.queuedSubmissionCount() > 0 {
+			return "session_cold", "turn_cold", false, nil, nil
+		}
+		// 消费后先给两拍 busy（保证 BusyAfterConsume），再落新回复并转空闲。
+		if busySamples < 2 {
+			busySamples++
+			return "session_cold", "turn_cold", true, nil, nil
+		}
+		appendOnce.Do(func() {
+			s.Messages = append(s.Messages, runtimetypes.Message{Role: "assistant", Content: "冷启动回复"})
+		})
+		return "session_cold", "turn_cold", false, nil, nil
+	})
+
+	// 模拟主循环消费注入的 prompt：队列计数回到 0；全程无任何 EventBus 事件。
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-queue.lines:
+		default:
+		}
+	}()
+
+	watch := newChatWebInvokeWatch()
+	watch.baselineAssistantCount = chatWebInvokeAssistantMessageCount(session) // 0
+
+	resp := chatWebInvokeWait(context.Background(), session, watch, "", time.Now().Add(5*time.Second))
+	if resp.Status != "completed" {
+		t.Fatalf("status = %q, want completed via fresh-assistant fallback (resp=%+v)", resp.Status, resp)
+	}
+	if resp.LLMObserved {
+		t.Fatalf("冷启动无事件可观察，llm_observed 应为 false，实际 %+v", resp)
+	}
+	if resp.Assistant == nil || resp.Assistant.Content != "冷启动回复" {
+		t.Fatalf("assistant = %+v, want 冷启动回复", resp.Assistant)
 	}
 }
 
@@ -417,8 +480,8 @@ func TestSubscribeChatWebInvokeWatch_FiltersOtherSessions(t *testing.T) {
 		LocalRuntimeHost: &localChatRuntimeHost{EventBus: bus},
 	}
 	watch := newChatWebInvokeWatch()
-	unsubscribe := subscribeChatWebInvokeWatch(session, watch)
-	defer unsubscribe()
+	watch.ensureSubscribed(session)
+	defer watch.closeSubscription()
 
 	bus.Publish(runtimeevents.Event{Type: runtimechat.EventLLMRequestStarted, SessionID: "session_b"})
 	bus.Publish(runtimeevents.Event{Type: runtimechat.EventLLMRequestStarted, SessionID: "session_a"})
@@ -436,6 +499,64 @@ func TestSubscribeChatWebInvokeWatch_FiltersOtherSessions(t *testing.T) {
 	}
 }
 
+// TestChatWebInvokeWatch_EnsureSubscribedAfterHostAttach 覆盖冷启动订阅缺口：
+// 首个 invoke 注入前会话能力面尚未懒装载（LocalRuntimeHost == nil），
+// ensureSubscribed 必须退化为 no-op 而不是 panic/永久失联；host/bus 挂载后
+// 同一 watch 再次 ensureSubscribed 才安装订阅并开始接收事件，且安装与取消
+// 都必须是幂等的（重复调用不得重复订阅/重复计数）。
+func TestChatWebInvokeWatch_EnsureSubscribedAfterHostAttach(t *testing.T) {
+	session := &ChatSession{
+		RuntimeSession: &runtimechat.Session{ID: "session_cold"},
+	}
+	watch := newChatWebInvokeWatch()
+
+	// host == nil（冷启动）：no-op。
+	watch.ensureSubscribed(session)
+	watch.ensureSubscribed(session)
+	if ws := watch.snapshot(); ws.Starts != 0 || ws.Finishes != 0 {
+		t.Fatalf("nil host must not observe events: %+v", ws)
+	}
+
+	// host 已建但 bus 仍为 nil：同样 no-op。
+	session.LocalRuntimeHost = &localChatRuntimeHost{}
+	watch.ensureSubscribed(session)
+
+	// 模拟懒装载完成：host + EventBus 挂载后补订阅。
+	bus := runtimeevents.NewBus()
+	session.LocalRuntimeHost = &localChatRuntimeHost{EventBus: bus}
+	watch.ensureSubscribed(session)
+
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventSessionEnd, SessionID: "session_cold",
+		Payload: map[string]interface{}{"turn_id": "turn_cold_1"},
+	})
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventLLMRequestStarted, SessionID: "session_cold",
+	})
+	bus.Publish(runtimeevents.Event{
+		Type: runtimechat.EventLLMRequestFinished, SessionID: "session_cold",
+	})
+	ws := watch.snapshot()
+	if ws.TurnID != "turn_cold_1" || ws.Starts != 1 || ws.Finishes != 1 {
+		t.Fatalf("late subscription missed events: %+v", ws)
+	}
+
+	// 幂等：重复 ensureSubscribed 不得重复订阅（否则同一事件被计两次）。
+	watch.ensureSubscribed(session)
+	bus.Publish(runtimeevents.Event{Type: runtimechat.EventLLMRequestFinished, SessionID: "session_cold"})
+	if got := watch.snapshot().Finishes; got != 2 {
+		t.Fatalf("duplicate subscription detected: finishes = %d, want 2", got)
+	}
+
+	// closeSubscription 取消订阅，且可重复调用。
+	watch.closeSubscription()
+	watch.closeSubscription()
+	bus.Publish(runtimeevents.Event{Type: runtimechat.EventLLMRequestFinished, SessionID: "session_cold"})
+	if got := watch.snapshot().Finishes; got != 2 {
+		t.Fatalf("subscription not closed: finishes = %d, want 2", got)
+	}
+}
+
 // TestChatWebInvokeWatch_TurnIDBackfilledOnFinalize 锁定终态 turn 身份回填：
 // actor 在 turn 收尾后清空 state.CurrentTurnID，invoke 响应必须改用观察器从
 // session_start/session_end 事件记录的 turn 身份，调用方才能直接凭响应里的
@@ -447,8 +568,8 @@ func TestChatWebInvokeWatch_TurnIDBackfilledOnFinalize(t *testing.T) {
 		LocalRuntimeHost: &localChatRuntimeHost{EventBus: bus},
 	}
 	watch := newChatWebInvokeWatch()
-	unsubscribe := subscribeChatWebInvokeWatch(session, watch)
-	defer unsubscribe()
+	watch.ensureSubscribed(session)
+	defer watch.closeSubscription()
 
 	// 其他会话的生命周期事件不得污染 turn 身份。
 	bus.Publish(runtimeevents.Event{
@@ -675,8 +796,8 @@ func TestChatWebInvokeWatchStreamsDeltas(t *testing.T) {
 		got = append(got, event+"="+payloadStringValue(data["delta"])+payloadStringValue(data["name"]))
 		mu.Unlock()
 	}
-	unsubscribe := subscribeChatWebInvokeWatch(session, watch)
-	defer unsubscribe()
+	watch.ensureSubscribed(session)
+	defer watch.closeSubscription()
 
 	bus.Publish(runtimeevents.Event{Type: runtimechat.EventAssistantDelta, SessionID: "s1",
 		Payload: map[string]interface{}{"delta": "he"}})
