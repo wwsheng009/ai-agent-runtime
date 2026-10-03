@@ -146,7 +146,9 @@ describe("runtime 事件契约（前端消费路径覆盖）", () => {
     // lib/trajectory/recovery.ts）。注册表扩容后需同步本清单：2026-09-22 `071f128e`
     // 补齐 46 个已登记类型（main_agent.route_* / llm.* / subagent.batch.* 等）后，
     // 本名单由 13 → 28 条——锁的语义是「每次扩容都被显式复核」，不是「永远等于
-    // Batch 2 当天的字面量」。
+    // Batch 2 当天的字面量」。2026-09-29 `559fd687`（LSP 观测域）登记
+    // `lsp.request.finished`（A 通道 session_store 事件，前端观测面板已消费）后
+    // 为 31 条。
     expect(sorted([...RUNTIME_EVENT_TYPES])).toEqual([
       "agent.reclaimed",
       "approval_requested",
@@ -155,6 +157,7 @@ describe("runtime 事件契约（前端消费路径覆盖）", () => {
       "context_reconciled",
       "llm.prompt_cache.breaker_tripped",
       "llm.provider.health_opened",
+      "lsp.request.finished",
       "main_agent.route_applied",
       "main_agent.route_cleared",
       "main_agent.route_cost_guard_tripped",
