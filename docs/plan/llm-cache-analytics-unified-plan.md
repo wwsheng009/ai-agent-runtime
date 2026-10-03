@@ -80,11 +80,15 @@ provider 响应
    │  (OpenAI/Anthropic/DeepSeek/Gemini 原生 usage)
    ▼
 internal/llm/usage_normalizer.go        ── 归一化为 types.TokenUsage
+   │  流式：同一响应内多个 usage 事件（Anthropic message_start/message_delta、
+   │  Codex response.usage.updated、Gemini 逐 chunk 累计 usageMetadata）按字段
+   │  取最大合并后一次归一化，避免末尾事件覆盖输入侧字段
    │
    ▼
 internal/agent/loop.go (ReAct 循环)
    │  request_finished 载荷: usage_prompt_tokens / usage_completion_tokens /
    │  usage_cached_tokens / usage_cache_read_tokens / usage_cache_creation_tokens /
+   │  usage_uncached_input_tokens（未缓存输入） / usage_input_total_tokens（输入总量）/ 
    │  usage_cache_read_reported / usage_cache_hit_ratio / usage_cache_status
    │  metadata: prompt_cache_epoch / prompt_cache_key（缓存代际）
    ▼
@@ -214,6 +218,10 @@ backend/internal/cacheanalytics/
     "cached_tokens": 8000,
     "cache_read_tokens": 8000,
     "cache_creation_tokens": 1200,
+    "uncached_input_tokens": 2000,          // 未缓存输入 = 输入总量 − 包含式缓存命中；
+                                            // Anthropic 不含式口径下等于 input_tokens
+    "input_total_tokens": 10000,            // 输入总量（比率分母）：包含式 = prompt，
+                                            // Anthropic 不含式 = prompt+read+creation
     "cache_read_reported": true,
     "cache_creation_reported": true,
     "reasoning_tokens": 0
@@ -269,9 +277,9 @@ backend/internal/cacheanalytics/
 
 | 指标 | 公式 | 说明 |
 |------|------|------|
-| 缓存命中率（单请求） | `cache_read_tokens / prompt_tokens` | 分母是归一化后的 prompt_tokens。Anthropic 的 `cache_read_input_tokens` 已计入 `input_tokens`，OpenAI 的 `cached_tokens` 已计入 `prompt_tokens`——usage_normalizer 已保证该口径（见 `internal/llm/usage_normalizer.go:215-281` 的 firstPositiveInt/取大逻辑） |
-| 缓存命中率（总览） | `Σcache_read / Σprompt`（仅对 `cache_read_reported=true` 的请求求和） | 未上报请求不进分子分母，避免把"未知"当"0 命中"稀释比率 |
-| 缓存写入率 | `Σcache_creation / Σprompt`（仅 `cache_creation_reported=true`） | 写入发生在冷启动/缓存代际切换，是成本而非收益 |
+| 缓存命中率（单请求） | `cache_read_tokens / input_total_tokens` | 输入总量：包含式口径（OpenAI `cached_tokens` / Responses `input_tokens_details.cached_tokens` / DeepSeek `prompt_cache_hit_tokens` / Gemini `cachedContentTokenCount`）即 `prompt_tokens`；不含式口径（Anthropic）为 `prompt + cache_read + cache_creation`。直接用 prompt 当分母会在 Anthropic/DeepSeek-Anthropic 上算出 >100%（如 34432/155=22214%） |
+| 缓存命中率（总览） | `Σcache_read / Σinput_total`（仅对 `cache_read_reported=true` 的请求求和） | 未上报请求不进分子分母，避免把"未知"当"0 命中"稀释比率；旧记录缺 `input_total_tokens` 时按 `uncached + cache_read` 推导 |
+| 缓存写入率 | `Σcache_creation / Σinput_total`（仅 `cache_creation_reported=true`） | 写入发生在冷启动/缓存代际切换，是成本而非收益 |
 | 缓存状态 | `hit`（read>0）/ `write`（creation>0 且 read=0）/ `reported_zero`（显式上报但为 0）/ `not_reported`（provider 未给字段）/ `error` | 与 `internal/agent/loop.go:1856-1865` 现有 `usage_cache_status` 语义对齐，扩展 `write` 一档 |
 
 ### 4.3 MessageTrace（按消息 id 追溯）
@@ -653,7 +661,7 @@ sqlite 持久化回放、离线 `LogFileSource`（chataloganalytics 集成）、
 | llm_request_id | observe Correlation 同源；事件载荷 request id |
 | trace_id / turn_id / step | `llm.request.started/finished` 载荷（turn 字段名为 `logical_turn_id`，见 §5.1 命名勘误） |
 | provider / model / stream | 请求开始事件 |
-| usage.* | 载荷 `usage_prompt_tokens` / `usage_completion_tokens` / `usage_cached_tokens` / `usage_cache_read_tokens` / `usage_cache_creation_tokens` / `usage_cache_read_reported`（`internal/agent/loop.go:1838-1853`、`internal/chat/actor.go:4680-4706`） |
+| usage.* | 载荷 `usage_prompt_tokens` / `usage_completion_tokens` / `usage_cached_tokens` / `usage_cache_read_tokens` / `usage_cache_creation_tokens` / `usage_uncached_input_tokens` / `usage_cache_read_reported`（`internal/agent/loop.go:1838-1853`、`internal/chat/actor.go:4680-4706`） |
 | cache_hit_ratio / cache_status | Collector 统一计算（语义对齐 `loop.go:1854-1865`，扩展 write 档） |
 | cache_epoch / prompt_cache_key | 载荷 `prompt_cache_epoch` / `prompt_cache_key`（`loop.go:1393-1394`） |
 | prompt_fingerprint | 载荷 `prompt_fingerprint`（`loop.go:1685-1692`，started 与 finished 均携带） |

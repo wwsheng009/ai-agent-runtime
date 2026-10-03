@@ -343,6 +343,8 @@ func buildUsage(payload map[string]interface{}) *CacheUsage {
 		usage.CacheReadTokens = usage.CachedTokens
 	}
 	usage.CacheCreationTokens = payloadInt64OrZero(payload, "usage_cache_creation_tokens")
+	usage.UncachedInputTokens = payloadInt64OrZero(payload, "usage_uncached_input_tokens")
+	usage.InputTotalTokens = payloadInt64OrZero(payload, "usage_input_total_tokens")
 	usage.CacheReadReported = payloadBool(payload, "usage_cache_read_reported")
 	// 载荷无 creation_reported 字段：tokens>0 即视为已上报（零值省略语义）。
 	usage.CacheCreationReported = usage.CacheCreationTokens > 0

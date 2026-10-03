@@ -57,6 +57,28 @@ function fmtAverageLatency(avg, samples) {
   return fmtMillis(avg) + " · " + fmtInt(samples) + " 次";
 }
 
+// uncachedInputTokens 未缓存输入（输入总量中未命中缓存、真机处理的部分）：
+// 后端新记录直接给 uncached_input_tokens；旧记录/旧库该字段缺失或为 0 时按
+// 可用字段降级推导——
+//   - 未上报缓存（cache_read_reported=false）时输入全部视为未缓存；
+//   - cache_read > prompt 说明是不含式口径（Anthropic 的 input 不含 cache read），
+//     此时输入本身即未缓存；
+//   - 其余按包含式口径（OpenAI/DeepSeek/Gemini）做 prompt - cache_read。
+// 旧记录里不含式口径且 cache_read < prompt 的极少数场景会低估（仅历史数据）。
+function uncachedInputTokens(usage, cacheReportedOverride) {
+  if (!usage) { return null; }
+  if (usage.uncached_input_tokens !== undefined && usage.uncached_input_tokens !== null && usage.uncached_input_tokens > 0) {
+    return usage.uncached_input_tokens;
+  }
+  var prompt = usage.prompt_tokens || 0;
+  if (prompt <= 0) { return null; }
+  var reported = cacheReportedOverride !== undefined ? cacheReportedOverride : !!usage.cache_read_reported;
+  if (!reported) { return prompt; }
+  var cached = usage.cache_read_tokens || 0;
+  if (cached > prompt) { return prompt; }
+  return Math.max(0, prompt - cached);
+}
+
 function fmtTime(iso) {
   if (!iso) { return "-"; }
   try {
@@ -197,6 +219,7 @@ function renderOverviewCards(overview) {
   cards.push(card("缓存读取 tokens", fmtInt(tokens.cache_read_tokens)));
   cards.push(card("缓存写入 tokens", fmtInt(tokens.cache_creation_tokens)));
   cards.push(card("prompt tokens", fmtInt(tokens.prompt_tokens)));
+  cards.push(card("未缓存输入 tokens", fmtInt(uncachedInputTokens(tokens, (overview.requests_cache_reported || 0) > 0))));
   cards.push(card("输出 tokens", fmtInt(tokens.completion_tokens)));
   cards.push(card("合计 tokens", fmtInt(tokens.total_tokens)));
   cards.push(card("推理 tokens", fmtInt(tokens.reasoning_tokens)));
@@ -256,13 +279,14 @@ function renderRequestsTable(requests) {
       + "<td>" + esc(fmtLatency(r.duration_ms)) + "</td>"
       + "<td>" + esc(fmtLatency(r.first_token_ms)) + "</td>"
       + "<td>" + esc(fmtInt(usage.prompt_tokens)) + "</td>"
+      + "<td>" + esc(fmtInt(uncachedInputTokens(usage))) + "</td>"
       + "<td>" + esc(fmtInt(usage.completion_tokens)) + "</td>"
       + "<td>" + esc(fmtInt(usage.cache_read_tokens)) + "</td>"
       + "<td>" + esc(fmtInt(usage.cache_creation_tokens)) + "</td>"
       + "</tr>";
   }
   return '<table class="cache-table"><thead><tr>'
-    + "<th>时间</th><th>provider/model</th><th>step</th><th>状态</th><th>缓存</th><th>命中率</th><th>耗时</th><th>首字</th><th>prompt</th><th>输出</th><th>读缓存</th><th>写缓存</th>"
+    + "<th>时间</th><th>provider/model</th><th>step</th><th>状态</th><th>缓存</th><th>命中率</th><th>耗时</th><th>首字</th><th>prompt</th><th>未缓存输入</th><th>输出</th><th>读缓存</th><th>写缓存</th>"
     + "</tr></thead><tbody>" + rows + "</tbody></table>"
     + '<div class="cache-hint">点击行查看请求详情与消息追溯（trace_id / turn_id / 关联消息）</div>'
     + '<div class="cache-hint">首字/耗时显示"未采集"表示该请求没有观测到（非流式请求、历史记录或首个增量前失败），不代表 0ms。</div>'
@@ -307,6 +331,7 @@ function renderRequestDetail(record) {
   lines.push(kv("总耗时", fmtLatency(record.duration_ms)));
   lines.push(kv("首字时间（TTFT）", fmtLatency(record.first_token_ms)));
   lines.push(kv("prompt tokens", fmtInt(usage.prompt_tokens)));
+  lines.push(kv("未缓存输入 tokens", fmtInt(uncachedInputTokens(usage))));
   lines.push(kv("completion tokens", fmtInt(usage.completion_tokens)));
   lines.push(kv("total tokens", fmtInt(usage.total_tokens)));
   lines.push(kv("缓存读取", fmtInt(usage.cache_read_tokens) + (usage.cache_read_reported ? " (已上报)" : " (未上报，未知)")));
@@ -384,6 +409,7 @@ function renderMessageTrace(trace) {
 function usageSummary(usage) {
   if (!usage) { return "-"; }
   return "prompt " + fmtInt(usage.prompt_tokens)
+    + " · 未缓存输入 " + fmtInt(uncachedInputTokens(usage))
     + " · 输出 " + fmtInt(usage.completion_tokens)
     + " · 读缓存 " + fmtInt(usage.cache_read_tokens)
     + " · 写缓存 " + fmtInt(usage.cache_creation_tokens);

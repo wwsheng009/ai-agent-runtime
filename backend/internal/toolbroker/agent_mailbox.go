@@ -124,6 +124,8 @@ func BuildSubagentCompletionMailboxMessage(parentSessionID, childSessionID, chil
 			"usage_cached_tokens",
 			"usage_cache_read_tokens",
 			"usage_cache_creation_tokens",
+			"usage_uncached_input_tokens",
+			"usage_input_total_tokens",
 			"usage_cache_read_reported",
 			"usage_cache_status",
 			"usage_reasoning_tokens",

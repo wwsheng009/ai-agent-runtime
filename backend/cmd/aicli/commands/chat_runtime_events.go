@@ -10381,9 +10381,14 @@ func formatRuntimeLLMRequestFinishedDebugInfo(event runtimeevents.Event) string 
 	}
 	if ratio, ok := payloadFloatValue(event.Payload, "usage_cache_hit_ratio"); ok {
 		parts = append(parts, fmt.Sprintf("usage_cache_hit_ratio=%.4f", ratio))
-	} else if promptTokens := intPayloadValue(event.Payload, "usage_prompt_tokens"); promptTokens > 0 {
-		if cachedTokens := firstPositivePayloadInt(event.Payload, "usage_cache_read_tokens", "usage_cached_tokens"); cachedTokens > 0 {
-			parts = append(parts, fmt.Sprintf("usage_cache_hit_ratio=%.4f", float64(cachedTokens)/float64(promptTokens)))
+	} else if cachedTokens := firstPositivePayloadInt(event.Payload, "usage_cache_read_tokens", "usage_cached_tokens"); cachedTokens > 0 {
+		// 分母是完整输入总量；旧载荷无该字段时退化为 prompt（包含式口径等价）。
+		inputTotal := intPayloadValue(event.Payload, "usage_input_total_tokens")
+		if inputTotal <= 0 {
+			inputTotal = intPayloadValue(event.Payload, "usage_prompt_tokens")
+		}
+		if inputTotal > 0 {
+			parts = append(parts, fmt.Sprintf("usage_cache_hit_ratio=%.4f", float64(cachedTokens)/float64(inputTotal)))
 		}
 	}
 	if status := strings.TrimSpace(payloadStringValue(event.Payload["usage_cache_status"])); status != "" {

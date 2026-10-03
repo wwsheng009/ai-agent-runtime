@@ -97,10 +97,11 @@ func TestCollectorPublishesCacheRequestFinished(t *testing.T) {
 
 	publishStarted(bus, "s1", "req-sse", nil)
 	publishFinished(bus, "s1", "req-sse", true, map[string]interface{}{
-		"usage_prompt_tokens":       1000,
-		"usage_completion_tokens":   50,
-		"usage_cache_read_tokens":   800,
-		"usage_cache_read_reported": true,
+		"usage_prompt_tokens":         1000,
+		"usage_completion_tokens":     50,
+		"usage_cache_read_tokens":     800,
+		"usage_cache_read_reported":   true,
+		"usage_uncached_input_tokens": 200,
 	})
 
 	select {
@@ -126,6 +127,9 @@ func TestCollectorPublishesCacheRequestFinished(t *testing.T) {
 		}
 		if got, _ := usage["cache_read_tokens"].(float64); got != 800 {
 			t.Fatalf("usage.cache_read_tokens = %v, want 800", usage["cache_read_tokens"])
+		}
+		if got, _ := usage["uncached_input_tokens"].(float64); got != 200 {
+			t.Fatalf("usage.uncached_input_tokens = %v, want 200", usage["uncached_input_tokens"])
 		}
 	case <-time.After(time.Second):
 		t.Fatal("cache_request_finished event not published")

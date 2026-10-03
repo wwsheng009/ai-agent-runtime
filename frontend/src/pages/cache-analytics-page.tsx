@@ -27,6 +27,7 @@ import {
   formatCacheNumber,
   formatCacheRatio,
   formatCacheTime,
+  formatCacheUncachedInput,
 } from "./cache-analytics/format";
 import { RequestsTable } from "./cache-analytics/requests-table";
 import { TraceSidebar } from "./cache-analytics/trace-sidebar";
@@ -142,6 +143,11 @@ export function CacheAnalyticsPanel({ sessionId }: { sessionId: string }) {
             <CacheMetric label={t("cache.metrics.requests")} value={formatCacheNumber(overview?.requests_total ?? 0)} detail={t("cache.metrics.withUsage", { count: overview?.requests_with_usage ?? 0 })} />
             <CacheMetric label={t("cache.metrics.hitRatio")} value={formatCacheRatio(overview?.cache_hit_ratio)} detail={t("cache.metrics.writeRatio", { value: formatCacheRatio(overview?.cache_write_ratio) })} />
             <CacheMetric label={t("cache.metrics.cacheRead")} value={formatCacheNumber(overview?.tokens.cache_read_tokens ?? 0)} detail={t("cache.metrics.cacheWrite", { value: formatCacheNumber(overview?.tokens.cache_creation_tokens ?? 0) })} />
+            <CacheMetric
+              label={t("cache.metrics.uncachedInput")}
+              value={formatCacheUncachedInput(overview?.tokens, (overview?.requests_cache_reported ?? 0) > 0)}
+              detail={t("cache.metrics.uncachedInputDetail", { prompt: formatCacheNumber(overview?.tokens.prompt_tokens ?? 0) })}
+            />
             <CacheMetric label={t("cache.metrics.tokens")} value={formatCacheNumber(overview?.tokens.total_tokens ?? 0)} detail={t("cache.metrics.tokenBreakdown", { prompt: formatCacheNumber(overview?.tokens.prompt_tokens ?? 0), completion: formatCacheNumber(overview?.tokens.completion_tokens ?? 0) })} />
             <CacheMetric label={t("cache.metrics.reasoning")} value={formatCacheNumber(overview?.tokens.reasoning_tokens ?? 0)} detail={t("cache.metrics.cacheReported", { count: overview?.requests_cache_reported ?? 0 })} />
             <CacheMetric label={t("cache.metrics.duration")} value={formatCacheLatency(overview?.average_duration_ms, t("cache.metrics.notCollected"))} detail={t("cache.metrics.samples", { count: overview?.duration_samples ?? 0 })} />

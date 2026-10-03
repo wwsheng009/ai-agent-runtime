@@ -126,12 +126,14 @@ type MessageDelta struct {
 
 // Usage 使用情况
 type Usage struct {
-	PromptTokens          int  `json:"prompt_tokens"`
-	CompletionTokens      int  `json:"completion_tokens"`
-	TotalTokens           int  `json:"total_tokens"`
-	CachedTokens          int  `json:"cached_tokens,omitempty"`
-	CacheReadTokens       int  `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens   int  `json:"cache_creation_tokens,omitempty"`
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	CachedTokens        int `json:"cached_tokens,omitempty"`
+	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+	// UncachedInputTokens 未命中缓存的输入 token（见 types.TokenUsage 同名注释）。
+	UncachedInputTokens   int  `json:"uncached_input_tokens,omitempty"`
 	CacheReadReported     bool `json:"cache_read_reported,omitempty"`
 	CacheCreationReported bool `json:"cache_creation_reported,omitempty"`
 	ReasoningTokens       int  `json:"reasoning_tokens,omitempty"`

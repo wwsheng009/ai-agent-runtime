@@ -78,16 +78,40 @@ var (
 
 // CacheUsage 归一化后的 token 用量（字段与 internal/types/token.go 对齐）。
 type CacheUsage struct {
-	UsageSource           string `json:"usage_source,omitempty"`
-	PromptTokens          int64  `json:"prompt_tokens"`
-	CompletionTokens      int64  `json:"completion_tokens"`
-	TotalTokens           int64  `json:"total_tokens"`
-	CachedTokens          int64  `json:"cached_tokens"`
-	CacheReadTokens       int64  `json:"cache_read_tokens"`
-	CacheCreationTokens   int64  `json:"cache_creation_tokens"`
-	CacheReadReported     bool   `json:"cache_read_reported"`
-	CacheCreationReported bool   `json:"cache_creation_reported"`
-	ReasoningTokens       int64  `json:"reasoning_tokens"`
+	UsageSource         string `json:"usage_source,omitempty"`
+	PromptTokens        int64  `json:"prompt_tokens"`
+	CompletionTokens    int64  `json:"completion_tokens"`
+	TotalTokens         int64  `json:"total_tokens"`
+	CachedTokens        int64  `json:"cached_tokens"`
+	CacheReadTokens     int64  `json:"cache_read_tokens"`
+	CacheCreationTokens int64  `json:"cache_creation_tokens"`
+	// UncachedInputTokens 未命中缓存的输入 token（= 输入总量 - 包含式缓存命中；
+	// Anthropic 的 input 口径本身不含缓存；DeepSeek 直接上报 miss）。0 表示未观测。
+	UncachedInputTokens int64 `json:"uncached_input_tokens,omitempty"`
+	// InputTotalTokens 完整输入总量（含缓存命中/写入），比率分母。包含式口径
+	// 等于 prompt_tokens；不含式口径（Anthropic）等于 prompt+cache_read+
+	// cache_creation。0 表示旧记录，读取方退化为 PromptTokens（见 InputTotal）。
+	InputTotalTokens      int64 `json:"input_total_tokens,omitempty"`
+	CacheReadReported     bool  `json:"cache_read_reported"`
+	CacheCreationReported bool  `json:"cache_creation_reported"`
+	ReasoningTokens       int64 `json:"reasoning_tokens"`
+}
+
+// InputTotal 返回输入总量（含缓存读写的完整口径），用于命中率等比率分母。
+// 旧记录无 InputTotalTokens 时用 uncached + cache_read 推导（包含式口径下
+// 恰好等于 PromptTokens；不含式口径下输入本身即未缓存，可得到正确的输入总量；
+// 唯一低估场景是旧的不含式记录同时有 cache_creation，仅影响历史数据）。
+func (u *CacheUsage) InputTotal() int64 {
+	if u == nil {
+		return 0
+	}
+	if u.InputTotalTokens > 0 {
+		return u.InputTotalTokens
+	}
+	if derived := u.UncachedInputTokens + u.CacheReadTokens; derived > u.PromptTokens {
+		return derived
+	}
+	return u.PromptTokens
 }
 
 // CacheRequestRecord 每条 LLM 请求一行（§4.1）。
@@ -193,6 +217,7 @@ type CacheOverviewTokens struct {
 	TotalTokens         int64 `json:"total_tokens"`
 	CacheReadTokens     int64 `json:"cache_read_tokens"`
 	CacheCreationTokens int64 `json:"cache_creation_tokens"`
+	UncachedInputTokens int64 `json:"uncached_input_tokens"`
 	ReasoningTokens     int64 `json:"reasoning_tokens"`
 }
 

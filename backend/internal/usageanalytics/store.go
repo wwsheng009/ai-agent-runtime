@@ -307,6 +307,8 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
   completion_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read_tokens INTEGER NOT NULL DEFAULT 0,
   cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  uncached_input_tokens INTEGER NOT NULL DEFAULT 0,
+  input_total_tokens INTEGER NOT NULL DEFAULT 0,
   reasoning_tokens INTEGER NOT NULL DEFAULT 0,
   total_tokens INTEGER NOT NULL DEFAULT 0,
   usage_available INTEGER NOT NULL DEFAULT 0,
@@ -542,6 +544,30 @@ func (s *Store) migrate(busyTimeout time.Duration) error {
 			return err
 		} else if !hasFirstToken {
 			if _, err := s.db.Exec("ALTER TABLE usage_requests ADD COLUMN first_token_ms INTEGER NOT NULL DEFAULT 0"); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
+		}
+	}
+	// 增量列：usage_requests.uncached_input_tokens（未命中缓存的输入 token，
+	// 由解析端按协议口径归一化后下发；旧记录缺列/缺值时前端按可用字段降级推导）。
+	// 旧库缺列时补齐；只读库不改库，读路径按列存在性退化（见 cachesource.go）。
+	if !s.readOnly {
+		if hasUncached, err := s.hasColumn("usage_requests", "uncached_input_tokens"); err != nil {
+			return err
+		} else if !hasUncached {
+			if _, err := s.db.Exec("ALTER TABLE usage_requests ADD COLUMN uncached_input_tokens INTEGER NOT NULL DEFAULT 0"); err != nil {
+				return fmt.Errorf("migrate usage analytics db: %w", err)
+			}
+		}
+	}
+	// 增量列：usage_requests.input_total_tokens（完整输入总量，含缓存读写；
+	// 命中率/写入率的分母。不含式口径 Anthropic 下 = prompt+read+creation）。
+	// 旧库缺列时补齐；只读库不改库，读路径按列存在性退化（见 cachesource.go）。
+	if !s.readOnly {
+		if hasInputTotal, err := s.hasColumn("usage_requests", "input_total_tokens"); err != nil {
+			return err
+		} else if !hasInputTotal {
+			if _, err := s.db.Exec("ALTER TABLE usage_requests ADD COLUMN input_total_tokens INTEGER NOT NULL DEFAULT 0"); err != nil {
 				return fmt.Errorf("migrate usage analytics db: %w", err)
 			}
 		}

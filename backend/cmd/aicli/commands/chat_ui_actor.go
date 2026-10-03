@@ -280,7 +280,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 		c.unifiedRenderer = false
 		c.mu.Unlock()
 		if chatDebugFlagEnabled() {
-			aicliDiagln("[aicli-diag] enableUnifiedRendererWithWriter: actor.Post failed -> unified renderer OFF")
+			aicliDiagRawln("[aicli-diag] enableUnifiedRendererWithWriter: actor.Post failed -> unified renderer OFF")
 		}
 		return false
 	}
@@ -288,7 +288,7 @@ func (c *chatInteractionCoordinator) enableUnifiedRendererWithWriter(writer io.W
 	presenter := ui.NewTerminalSessionPresenter(actor, writer, c.primaryTerminalGeometry)
 	if c.SetPrimaryPresenter(presenter) {
 		if chatDebugFlagEnabled() {
-			aicliDiagln("[aicli-diag] enableUnifiedRendererWithWriter: presenter attached -> unified renderer ON")
+			aicliDiagRawln("[aicli-diag] enableUnifiedRendererWithWriter: presenter attached -> unified renderer ON")
 		}
 		return true
 	}
@@ -1307,7 +1307,7 @@ func (c *chatInteractionCoordinator) paintScheduledPromptFrame(seq uint64) {
 	defer c.mu.Unlock()
 	if c.shutdown || !c.isReadyLocked() {
 		if chatDebugFlagEnabled() {
-			aicliDiagf("[aicli-diag] paintScheduledPromptFrame: skipped (shutdown=%v ready=%v)\n",
+			aicliDiagRawf("[aicli-diag] paintScheduledPromptFrame: skipped (shutdown=%v ready=%v)\n",
 				c.shutdown, c.isReadyLocked())
 		}
 		return
@@ -1322,7 +1322,7 @@ func (c *chatInteractionCoordinator) paintScheduledPromptFrame(seq uint64) {
 	draft := c.promptInputSnapshotState()
 	if c.writer == os.Stdout && c.surface != nil && c.surface.ShowPrompt(prompt) {
 		if chatDebugFlagEnabled() {
-			aicliDiagln("[aicli-diag] prompt painted on surface (surface!=nil showPrompt=ok)")
+			aicliDiagRawln("[aicli-diag] prompt painted on surface (surface!=nil showPrompt=ok)")
 		}
 		c.promptVisible = true
 		c.promptRenderedOnSurface = true
@@ -1336,7 +1336,7 @@ func (c *chatInteractionCoordinator) paintScheduledPromptFrame(seq uint64) {
 	}
 	c.promptRenderedOnSurface = false
 	if chatDebugFlagEnabled() {
-		aicliDiagln("[aicli-diag] prompt NOT painted: surface prompt path unavailable -> physical prompt write")
+		aicliDiagRawln("[aicli-diag] prompt NOT painted: surface prompt path unavailable -> physical prompt write")
 	}
 	c.preparePromptGapLocked(true)
 	// Same fail-closed contract as PrintPrompt: unified production content is

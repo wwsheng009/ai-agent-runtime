@@ -84,6 +84,20 @@ func (s *CacheSource) Overview(sessionID string) (cacheanalytics.CacheOverview, 
 		firstTokenAvgExpr = "COALESCE(CAST(AVG(NULLIF(first_token_ms, 0)) AS INTEGER), 0)"
 		firstTokenSampleExpr = "COALESCE(SUM(CASE WHEN first_token_ms <> 0 THEN 1 ELSE 0 END), 0)"
 	}
+	// 未缓存输入列是增量列：旧库缺列时退化为 0（前端按可用字段降级推导），
+	// 而不是让整个总览查询报错。
+	uncachedInputExpr := "0"
+	if hasUncached, err := s.store.hasColumn("usage_requests", "uncached_input_tokens"); err == nil && hasUncached {
+		uncachedInputExpr = "COALESCE(SUM(uncached_input_tokens), 0)"
+	}
+	// 输入总量列是增量列：命中率/写入率的分母。旧库缺列（或旧记录为 0）时
+	// 退化为 prompt_tokens（包含式口径下两者等价）。
+	inputTotalExpr := "COALESCE(SUM(CASE WHEN usage_available = 1 THEN prompt_tokens ELSE 0 END), 0)"
+	if hasInputTotal, err := s.store.hasColumn("usage_requests", "input_total_tokens"); err == nil && hasInputTotal {
+		inputTotalExpr = "COALESCE(SUM(CASE WHEN usage_available = 1 THEN (CASE WHEN input_total_tokens > 0 THEN input_total_tokens " +
+			"WHEN uncached_input_tokens + cache_read_tokens > prompt_tokens THEN uncached_input_tokens + cache_read_tokens " +
+			"ELSE prompt_tokens END) ELSE 0 END), 0)"
+	}
 	query := `SELECT
   COUNT(*),
   COALESCE(SUM(usage_available), 0),
@@ -93,6 +107,8 @@ func (s *CacheSource) Overview(sessionID string) (cacheanalytics.CacheOverview, 
   COALESCE(SUM(total_tokens), 0),
   COALESCE(SUM(cache_read_tokens), 0),
   COALESCE(SUM(cache_creation_tokens), 0),
+  ` + uncachedInputExpr + `,
+  ` + inputTotalExpr + `,
   COALESCE(SUM(reasoning_tokens), 0),
   COALESCE(MIN(NULLIF(started_at_unix_nano, 0)), 0),
   COALESCE(MAX(started_at_unix_nano), 0),
@@ -101,7 +117,7 @@ func (s *CacheSource) Overview(sessionID string) (cacheanalytics.CacheOverview, 
   COALESCE(SUM(CASE WHEN cache_status = 'reported_zero' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN cache_status = 'not_reported' THEN 1 ELSE 0 END), 0),
   COALESCE(SUM(CASE WHEN cache_status = 'error' THEN 1 ELSE 0 END), 0),
-  COALESCE(SUM(cache_read_tokens), 0) * 1.0 / NULLIF(SUM(CASE WHEN usage_available = 1 THEN prompt_tokens ELSE 0 END), 0),
+  COALESCE(SUM(cache_read_tokens), 0) * 1.0 / NULLIF(` + inputTotalExpr + `, 0),
   COALESCE(CAST(AVG(NULLIF(duration_ms, 0)) AS INTEGER), 0),
   COALESCE(SUM(CASE WHEN duration_ms <> 0 THEN 1 ELSE 0 END), 0),
   ` + firstTokenAvgExpr + `,
@@ -123,21 +139,23 @@ FROM usage_requests WHERE session_id = ?`
 		return overview, nil
 	}
 	var (
-		total, withUsage, cacheReported               int
-		prompt, completion, totalTokens               int64
-		cacheRead, cacheCreation, reasoning           int64
-		windowFrom, windowTo                          int64
-		hit, write, reportedZero, notReported, errCnt int
-		hitRatio                                      sql.NullFloat64
-		avgDurationMS                                 int64
-		durationSamples                               int
-		avgFirstTokenMS                               int64
-		firstTokenSamples                             int
+		total, withUsage, cacheReported                    int
+		prompt, completion, totalTokens                    int64
+		cacheRead, cacheCreation, uncachedInput, reasoning int64
+		inputTotalSum                                      int64
+		windowFrom, windowTo                               int64
+		hit, write, reportedZero, notReported, errCnt      int
+		hitRatio                                           sql.NullFloat64
+		avgDurationMS                                      int64
+		durationSamples                                    int
+		avgFirstTokenMS                                    int64
+		firstTokenSamples                                  int
 	)
 	if err := rows.Scan(
 		&total, &withUsage, &cacheReported,
 		&prompt, &completion, &totalTokens,
-		&cacheRead, &cacheCreation, &reasoning,
+		&cacheRead, &cacheCreation, &uncachedInput, &reasoning,
+		&inputTotalSum,
 		&windowFrom, &windowTo,
 		&hit, &write, &reportedZero, &notReported, &errCnt,
 		&hitRatio,
@@ -159,6 +177,7 @@ FROM usage_requests WHERE session_id = ?`
 		TotalTokens:         totalTokens,
 		CacheReadTokens:     cacheRead,
 		CacheCreationTokens: cacheCreation,
+		UncachedInputTokens: uncachedInput,
 		ReasoningTokens:     reasoning,
 	}
 	if from := timeFromUnixNano(windowFrom); !from.IsZero() {
@@ -171,8 +190,8 @@ FROM usage_requests WHERE session_id = ?`
 		ratio := hitRatio.Float64
 		overview.CacheHitRatio = &ratio
 	}
-	if prompt > 0 && cacheCreation > 0 {
-		ratio := float64(cacheCreation) / float64(prompt)
+	if inputTotalSum > 0 && cacheCreation > 0 {
+		ratio := float64(cacheCreation) / float64(inputTotalSum)
 		overview.CacheWriteRatio = &ratio
 	}
 	overview.CacheStatusDistribution = cacheanalytics.CacheStatusDistribution{

@@ -17,6 +17,7 @@ import {
   formatCacheRatio,
   formatCacheReportedNumber,
   formatCacheTime,
+  formatCacheUncachedInput,
 } from "./format";
 
 // 结果列口径与原「LLM 请求明细」步骤表一致：success → 成功；interrupted → 已取消；
@@ -73,6 +74,7 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
               <th className="px-2 py-2 font-medium">{t("cache.columns.providerModel")}</th>
               <th className="px-2 py-2 font-medium">{t("cache.columns.message")}</th>
               <th className="px-2 py-2 text-right font-medium">{t("cache.columns.tokens")}</th>
+              <th className="px-2 py-2 text-right font-medium">{t("cache.columns.uncachedInput")}</th>
               <th className="px-2 py-2 text-right font-medium">{t("cache.columns.cacheRead")}</th>
               <th className="px-2 py-2 text-right font-medium">{t("cache.columns.cacheWrite")}</th>
               <th className="px-2 py-2 text-right font-medium">{t("cache.columns.hitRatio")}</th>
@@ -85,7 +87,7 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
           <tbody>
             {requests.length === 0 && !loading ? (
               <tr>
-                <td colSpan={12} className="px-2 py-8 text-center text-sm text-muted-foreground">
+                <td colSpan={13} className="px-2 py-8 text-center text-sm text-muted-foreground">
                   {t("cache.emptyRequests")}
                 </td>
               </tr>
@@ -133,6 +135,7 @@ export function RequestsTable({ requests, total, offset, pageSize, loading, onPa
                   <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">
                     {formatCacheNumber(record.usage?.prompt_tokens ?? 0)} / {formatCacheNumber(record.usage?.completion_tokens ?? 0)}
                   </td>
+                  <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">{formatCacheUncachedInput(record.usage)}</td>
                   <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">{formatCacheReportedNumber(record.usage?.cache_read_tokens, record.usage?.cache_read_reported)}</td>
                   <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">{formatCacheReportedNumber(record.usage?.cache_creation_tokens, record.usage?.cache_creation_reported)}</td>
                   <td className="whitespace-nowrap px-2 py-2.5 text-right tabular-nums">{formatCacheRatio(record.cache_hit_ratio)}</td>

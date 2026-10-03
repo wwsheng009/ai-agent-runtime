@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/types"
@@ -57,6 +58,12 @@ func TokenUsageToMap(usage *types.TokenUsage) map[string]interface{} {
 	}
 	if usage.CacheCreationTokens > 0 {
 		result["cache_creation_input_tokens"] = usage.CacheCreationTokens
+	}
+	if usage.UncachedInputTokens > 0 {
+		result["uncached_input_tokens"] = usage.UncachedInputTokens
+	}
+	if usage.InputTotalTokens > 0 {
+		result["input_total_tokens"] = usage.InputTotalTokens
 	}
 	if usage.CacheReadReported {
 		result["cache_read_reported"] = true
@@ -130,7 +137,12 @@ func extractUsageFromSSEPayload(body []byte) *types.TokenUsage {
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 20*1024*1024)
 
-	var last *types.TokenUsage
+	// 跨事件合并原始 usage 后一次性归一化。不能逐事件归一化再取最后一个事件：
+	// Anthropic 流式把 input_tokens/cache_* 放在 message_start、把累计
+	// output_tokens 放在 message_delta，最后覆盖会丢掉输入侧全部字段
+	// （OpenAI 只在末尾 chunk 给全量 usage，Gemini 每 chunk 给累计值，
+	// 合并语义对这三者都成立）。
+	var merged map[string]interface{}
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if !strings.HasPrefix(line, "data:") {
@@ -145,11 +157,144 @@ func extractUsageFromSSEPayload(body []byte) *types.TokenUsage {
 		if err := json.Unmarshal([]byte(data), &payload); err != nil {
 			continue
 		}
-		if usage := normalizeUsageValue(payload); usage != nil {
-			last = usage
+		rawUsage := selectRawUsageMap(payload)
+		if rawUsage == nil {
+			continue
+		}
+		merged = mergeRawUsageMaps(merged, rawUsage)
+	}
+	if merged == nil {
+		return nil
+	}
+	return tokenUsageFromKnownFields(merged)
+}
+
+// selectRawUsageMap 返回 value 中会被 tokenUsageFromKnownFields 识别的原始 usage
+// 映射，查找顺序与 normalizeUsageValue 一致（先自身，再 usage/usageMetadata/
+// response，最后任意嵌套值）；嵌套遍历按 key 排序保证确定性。
+func selectRawUsageMap(value interface{}) map[string]interface{} {
+	switch raw := value.(type) {
+	case map[string]interface{}:
+		if len(raw) == 0 {
+			return nil
+		}
+		if tokenUsageFromKnownFields(raw) != nil {
+			return raw
+		}
+		for _, key := range []string{"usage", "usageMetadata", "response"} {
+			if nested := selectRawUsageMap(raw[key]); nested != nil {
+				return nested
+			}
+		}
+		keys := make([]string, 0, len(raw))
+		for key := range raw {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if nested := selectRawUsageMap(raw[key]); nested != nil {
+				return nested
+			}
+		}
+	case map[string]int64:
+		converted := make(map[string]interface{}, len(raw))
+		for key, entry := range raw {
+			converted[key] = entry
+		}
+		return selectRawUsageMap(converted)
+	case map[string]int:
+		converted := make(map[string]interface{}, len(raw))
+		for key, entry := range raw {
+			converted[key] = entry
+		}
+		return selectRawUsageMap(converted)
+	case []interface{}:
+		for _, entry := range raw {
+			if nested := selectRawUsageMap(entry); nested != nil {
+				return nested
+			}
 		}
 	}
-	return last
+	return nil
+}
+
+// mergeRawUsageMaps 合并同一响应内多个事件的原始 usage：数值逐字段取最大
+// （事件里的 usage 要么是累计总量，要么只携带分片字段），嵌套明细递归合并，
+// 布尔取或。0 值事件不会覆盖先前已上报的字段。
+func mergeRawUsageMaps(base, next map[string]interface{}) map[string]interface{} {
+	if base == nil {
+		return cloneRawUsageMap(next)
+	}
+	if next == nil {
+		return base
+	}
+	merged := cloneRawUsageMap(base)
+	for key, value := range next {
+		existing, ok := merged[key]
+		if !ok || existing == nil {
+			merged[key] = value
+			continue
+		}
+		merged[key] = mergeRawUsageValue(existing, value)
+	}
+	return merged
+}
+
+func mergeRawUsageValue(existing, value interface{}) interface{} {
+	if value == nil {
+		// 后续事件显式 null 不覆盖已上报字段（见 usage_normalizer 合并语义）。
+		return existing
+	}
+	switch next := value.(type) {
+	case map[string]interface{}:
+		if prev, ok := existing.(map[string]interface{}); ok {
+			return mergeRawUsageMaps(prev, next)
+		}
+	case bool:
+		if prev, ok := existing.(bool); ok {
+			return prev || next
+		}
+	default:
+		if prevNumber, ok := rawUsageNumber(existing); ok {
+			if nextNumber, ok := rawUsageNumber(value); ok {
+				if nextNumber > prevNumber {
+					return value
+				}
+				return existing
+			}
+		}
+	}
+	return value
+}
+
+func cloneRawUsageMap(input map[string]interface{}) map[string]interface{} {
+	if input == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		out[key] = value
+	}
+	return out
+}
+
+func rawUsageNumber(value interface{}) (float64, bool) {
+	switch number := value.(type) {
+	case float64:
+		return number, true
+	case float32:
+		return float64(number), true
+	case int:
+		return float64(number), true
+	case int32:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	case json.Number:
+		parsed, err := number.Float64()
+		return parsed, err == nil
+	}
+	return 0, false
 }
 
 func normalizeUsageValue(value interface{}) *types.TokenUsage {
@@ -216,9 +361,22 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 		raw["cached_tokens"],
 		raw["cache_tokens"],
 		raw["prompt_cached_tokens"],
+		// DeepSeek: prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens，
+		// hit 是输入总量里命中缓存的子集（等价 prompt_tokens_details.cached_tokens）。
+		raw["prompt_cache_hit_tokens"],
+		// Gemini usageMetadata: cachedContentTokenCount 是 promptTokenCount 的
+		// 缓存命中子集（promptTokenCount 仍为含缓存的输入总量）。
+		raw["cachedContentTokenCount"],
 		promptDetails["cached_tokens"],
 		promptDetails["cache_tokens"],
 		promptDetails["prompt_cached_tokens"],
+		promptDetails["prompt_cache_hit_tokens"],
+		promptDetails["cachedContentTokenCount"],
+	)
+	// DeepSeek 显式上报未缓存输入（prompt_cache_miss_tokens），无需做减法。
+	explicitUncachedInputTokens := firstPositiveInt(
+		raw["prompt_cache_miss_tokens"],
+		promptDetails["prompt_cache_miss_tokens"],
 	)
 	cacheReadInputTokens := firstPositiveInt(
 		raw["cache_read_input_tokens"],
@@ -232,14 +390,15 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 		promptDetails["cache_creation_input_tokens"],
 		promptDetails["cacheCreationInputTokens"],
 	)
-	cacheReadReported := hasAnyMapKey(raw, "cached_tokens", "cache_tokens", "prompt_cached_tokens", "cache_read_input_tokens", "cacheReadInputTokens") ||
-		hasAnyMapKey(promptDetails, "cached_tokens", "cache_tokens", "prompt_cached_tokens", "cache_read_input_tokens", "cacheReadInputTokens")
+	cacheReadReported := hasAnyMapKey(raw, "cached_tokens", "cache_tokens", "prompt_cached_tokens", "cache_read_input_tokens", "cacheReadInputTokens", "prompt_cache_hit_tokens", "cachedContentTokenCount") ||
+		hasAnyMapKey(promptDetails, "cached_tokens", "cache_tokens", "prompt_cached_tokens", "cache_read_input_tokens", "cacheReadInputTokens", "prompt_cache_hit_tokens", "cachedContentTokenCount")
 	cacheCreationReported := hasAnyMapKey(raw, "cache_creation_input_tokens", "cacheCreationInputTokens") ||
 		hasAnyMapKey(promptDetails, "cache_creation_input_tokens", "cacheCreationInputTokens")
 	if cacheReadInputTokens < promptCachedTokens {
 		cacheReadInputTokens = promptCachedTokens
 	}
 	cachedTokens := cacheReadInputTokens
+	uncachedInputTokens := resolveUncachedInputTokens(promptTokens, promptCachedTokens, explicitUncachedInputTokens)
 	reasoningTokens := firstPositiveInt(
 		raw["reasoning_tokens"],
 		raw["reasoningTokenCount"],
@@ -256,12 +415,18 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 	if promptTokens == 0 && completionTokens == 0 && totalTokens == 0 && cachedTokens == 0 && cacheCreationInputTokens == 0 && reasoningTokens == 0 {
 		return nil
 	}
+	// 不含式口径判定：Anthropic 系（含 DeepSeek-Anthropic 兼容端点）用
+	// input_tokens 表示"新增输入"，且从不回报 total；OpenAI/Responses/Gemini
+	// 都会同时回报 total（包含式口径），故以「有 input_tokens 但没有 total」
+	// 作为不含式的判据，并与 total 的补算规则保持同一条件。
+	_, hasInputTokens := raw["input_tokens"]
+	exclusiveCacheInput := hasInputTokens && totalTokens == 0 && (cacheReadReported || cacheCreationReported)
 	if totalTokens == 0 {
 		totalTokens = promptTokens + completionTokens
 		// OpenAI prompt_tokens already includes cached input; Anthropic's
 		// input_tokens excludes cache read/creation input. Only add the latter
 		// when the provider used input_tokens-style accounting.
-		if _, hasInputTokens := raw["input_tokens"]; hasInputTokens {
+		if exclusiveCacheInput {
 			totalTokens += cacheReadInputTokens + cacheCreationInputTokens
 		}
 	}
@@ -271,6 +436,12 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 	if completionTokens == 0 && totalTokens > promptTokens {
 		completionTokens = totalTokens - promptTokens
 	}
+	// 输入总量（比率分母）：包含式即 prompt；不含式的 prompt 只是新增输入，
+	// 完整输入 = prompt + cache_read + cache_creation。
+	inputTotalTokens := promptTokens
+	if exclusiveCacheInput {
+		inputTotalTokens = promptTokens + cacheReadInputTokens + cacheCreationInputTokens
+	}
 
 	return &types.TokenUsage{
 		PromptTokens:          promptTokens,
@@ -279,10 +450,38 @@ func tokenUsageFromKnownFields(raw map[string]interface{}) *types.TokenUsage {
 		CachedTokens:          cachedTokens,
 		CacheReadTokens:       cacheReadInputTokens,
 		CacheCreationTokens:   cacheCreationInputTokens,
+		UncachedInputTokens:   uncachedInputTokens,
+		InputTotalTokens:      inputTotalTokens,
 		CacheReadReported:     cacheReadReported,
 		CacheCreationReported: cacheCreationReported,
 		ReasoningTokens:       reasoningTokens,
 	}
+}
+
+// resolveUncachedInputTokens 统一「未缓存输入」口径（跨协议语义见 types.TokenUsage）：
+//   - DeepSeek 等显式上报 miss 的协议直接采用；
+//   - 报告了包含式缓存命中量（OpenAI prompt_tokens_details.cached_tokens /
+//     Responses input_tokens_details.cached_tokens / Gemini cachedContentTokenCount）
+//     时，未缓存输入 = 输入总量 - 命中量；
+//   - 其余情况输入总量本身即未缓存输入：OpenAI 未上报任何缓存字段，或
+//     Anthropic 的 input_tokens 本就不含 cache read/creation。
+//
+// 注意：不能用 raw["cache_read_input_tokens"] 参与减法——该字段是 Anthropic
+// 的独立(不含式)口径，减它会得到负数或错误值。
+func resolveUncachedInputTokens(promptTokens, inclusiveCachedTokens, explicitUncachedTokens int) int {
+	if explicitUncachedTokens > 0 {
+		return explicitUncachedTokens
+	}
+	if promptTokens <= 0 {
+		return 0
+	}
+	if inclusiveCachedTokens > 0 {
+		if promptTokens <= inclusiveCachedTokens {
+			return 0
+		}
+		return promptTokens - inclusiveCachedTokens
+	}
+	return promptTokens
 }
 
 func firstMapValue(raw map[string]interface{}, keys ...string) map[string]interface{} {
@@ -352,6 +551,7 @@ func chatUsageFromTokenUsage(usage *types.TokenUsage) Usage {
 		CachedTokens:          usage.CachedTokens,
 		CacheReadTokens:       usage.CacheReadTokens,
 		CacheCreationTokens:   usage.CacheCreationTokens,
+		UncachedInputTokens:   usage.UncachedInputTokens,
 		CacheReadReported:     usage.CacheReadReported,
 		CacheCreationReported: usage.CacheCreationReported,
 		ReasoningTokens:       usage.ReasoningTokens,

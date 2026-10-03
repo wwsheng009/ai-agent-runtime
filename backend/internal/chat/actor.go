@@ -5931,6 +5931,12 @@ func appendSessionActorUsagePayload(payload map[string]interface{}, usage *runti
 	if usage.CacheCreationTokens > 0 {
 		payload["usage_cache_creation_tokens"] = usage.CacheCreationTokens
 	}
+	if usage.UncachedInputTokens > 0 {
+		payload["usage_uncached_input_tokens"] = usage.UncachedInputTokens
+	}
+	if usage.InputTotalTokens > 0 {
+		payload["usage_input_total_tokens"] = usage.InputTotalTokens
+	}
 	payload["usage_cache_read_reported"] = usage.CacheReadReported || usage.CachedTokens > 0
 	if usage.ReasoningTokens > 0 {
 		payload["usage_reasoning_tokens"] = usage.ReasoningTokens

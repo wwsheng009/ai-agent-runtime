@@ -2740,6 +2740,12 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 			if discarded.ReasoningTokens > 0 {
 				finishedPayload["usage_reasoning_tokens"] = discarded.ReasoningTokens
 			}
+			if discarded.UncachedInputTokens > 0 {
+				finishedPayload["usage_uncached_input_tokens"] = discarded.UncachedInputTokens
+			}
+			if discarded.InputTotalTokens > 0 {
+				finishedPayload["usage_input_total_tokens"] = discarded.InputTotalTokens
+			}
 			finishedPayload["usage_discarded_attempts"] = discardedUsage.Attempts()
 			finishedPayload["usage_scope"] = "discarded_attempts"
 			finishedPayload["usage_source"] = "provider_reported"
@@ -2851,10 +2857,18 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 		if response.Usage.CacheCreationTokens > 0 {
 			finishedPayload["usage_cache_creation_tokens"] = response.Usage.CacheCreationTokens
 		}
+		if response.Usage.UncachedInputTokens > 0 {
+			finishedPayload["usage_uncached_input_tokens"] = response.Usage.UncachedInputTokens
+		}
+		if response.Usage.InputTotalTokens > 0 {
+			finishedPayload["usage_input_total_tokens"] = response.Usage.InputTotalTokens
+		}
 		cacheReadReported := response.Usage.CacheReadReported || response.Usage.CachedTokens > 0
 		finishedPayload["usage_cache_read_reported"] = cacheReadReported
-		if cacheReadReported && response.Usage.PromptTokens > 0 {
-			ratio := float64(response.Usage.CachedTokens) / float64(response.Usage.PromptTokens)
+		// 命中率分母是完整输入总量：Anthropic 不含式口径下 prompt 只是新增输入，
+		// 用 prompt 作分母会得到 >100% 的命中率（如 34432/155 = 22214%）。
+		if inputTotal := response.Usage.InputTotal(); cacheReadReported && inputTotal > 0 {
+			ratio := float64(cacheReadTokens) / float64(inputTotal)
 			finishedPayload["usage_cache_hit_ratio"] = ratio
 		}
 		switch {
@@ -6110,6 +6124,12 @@ func (loop *ReActLoop) trySessionCompactionRecovery(ctx context.Context, session
 		if result.Usage.CacheCreationTokens > 0 {
 			completedPayload["usage_cache_creation_tokens"] = result.Usage.CacheCreationTokens
 		}
+		if result.Usage.UncachedInputTokens > 0 {
+			completedPayload["usage_uncached_input_tokens"] = result.Usage.UncachedInputTokens
+		}
+		if result.Usage.InputTotalTokens > 0 {
+			completedPayload["usage_input_total_tokens"] = result.Usage.InputTotalTokens
+		}
 		completedPayload["usage_cache_read_reported"] = result.Usage.CacheReadReported || result.Usage.CachedTokens > 0
 		if result.Usage.ReasoningTokens > 0 {
 			completedPayload["usage_reasoning_tokens"] = result.Usage.ReasoningTokens
@@ -6267,6 +6287,12 @@ func (loop *ReActLoop) tryActiveTurnSemanticCompaction(ctx context.Context, sess
 		completedPayload["usage_prompt_tokens"] = result.Usage.PromptTokens
 		completedPayload["usage_completion_tokens"] = result.Usage.CompletionTokens
 		completedPayload["usage_total_tokens"] = result.Usage.TotalTokens
+		if result.Usage.UncachedInputTokens > 0 {
+			completedPayload["usage_uncached_input_tokens"] = result.Usage.UncachedInputTokens
+		}
+		if result.Usage.InputTotalTokens > 0 {
+			completedPayload["usage_input_total_tokens"] = result.Usage.InputTotalTokens
+		}
 	}
 	loop.emitRuntimeEvent(eventPrefix+".completed", sessionID, "", completedPayload)
 	loop.agent.dispatchPostCompactHook(ctx, completedPayload)

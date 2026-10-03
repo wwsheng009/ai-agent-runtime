@@ -11,6 +11,10 @@ export type CacheUsage = {
   cached_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  /** 未命中缓存的输入 token（= 输入总量 − 包含式缓存命中）。缺失/0 表示旧记录。 */
+  uncached_input_tokens?: number;
+  /** 完整输入总量（比率分母；不含式口径 = prompt + cache_read + cache_creation）。 */
+  input_total_tokens?: number;
   cache_read_reported: boolean;
   cache_creation_reported: boolean;
   reasoning_tokens: number;
@@ -71,6 +75,8 @@ export type CacheOverviewTokens = {
   total_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  /** 本会话未缓存输入合计（旧库缺列时为 0，展示层按可用字段降级推导）。 */
+  uncached_input_tokens?: number;
   reasoning_tokens: number;
 };
 

@@ -57,6 +57,7 @@ func (t *AttemptUsageTracker) Record(usage *types.TokenUsage) {
 	t.usage.CachedTokens += usage.CachedTokens
 	t.usage.CacheReadTokens += usage.CacheReadTokens
 	t.usage.CacheCreationTokens += usage.CacheCreationTokens
+	t.usage.UncachedInputTokens += usage.UncachedInputTokens
 	t.usage.ReasoningTokens += usage.ReasoningTokens
 	t.usage.CacheReadReported = t.usage.CacheReadReported || usage.CacheReadReported
 	t.usage.CacheCreationReported = t.usage.CacheCreationReported || usage.CacheCreationReported
@@ -128,6 +129,7 @@ func RecordDiscardedChatUsage(ctx context.Context, resp *ChatResponse) bool {
 		CachedTokens:          wire.CachedTokens,
 		CacheReadTokens:       wire.CacheReadTokens,
 		CacheCreationTokens:   wire.CacheCreationTokens,
+		UncachedInputTokens:   wire.UncachedInputTokens,
 		CacheReadReported:     wire.CacheReadReported,
 		CacheCreationReported: wire.CacheCreationReported,
 		ReasoningTokens:       wire.ReasoningTokens,

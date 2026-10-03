@@ -96,14 +96,18 @@ func BuildTerminalRecord(in TerminalRecordInput) CacheRequestRecord {
 	}
 	record.Usage = usage
 	record.CacheStatus = classifyCacheStatus(usage, payloadString(payload, "usage_source"))
-	if ratio, ok := payloadFloat(payload, "usage_cache_hit_ratio"); ok && usage.CacheReadReported && usage.PromptTokens > 0 {
+	// 比率分母用完整输入总量（不含式口径下 prompt 只是新增输入，用它会得到
+	// >100% 的命中率）。载荷里的 usage_cache_hit_ratio 可能来自旧进程的
+	// prompt 口径，故只要输入明细可用就本地重算，仅在缺失时退回载荷值。
+	inputTotal := usage.InputTotal()
+	if usage.CacheReadReported && inputTotal > 0 {
+		ratio := float64(usage.CacheReadTokens) / float64(inputTotal)
 		record.CacheHitRatio = &ratio
-	} else if usage.CacheReadReported && usage.PromptTokens > 0 {
-		ratio := float64(usage.CacheReadTokens) / float64(usage.PromptTokens)
+	} else if ratio, ok := payloadFloat(payload, "usage_cache_hit_ratio"); ok && usage.CacheReadReported {
 		record.CacheHitRatio = &ratio
 	}
-	if usage.CacheCreationReported && usage.PromptTokens > 0 {
-		ratio := float64(usage.CacheCreationTokens) / float64(usage.PromptTokens)
+	if usage.CacheCreationReported && inputTotal > 0 {
+		ratio := float64(usage.CacheCreationTokens) / float64(inputTotal)
 		record.CacheWriteRatio = &ratio
 	}
 	return record

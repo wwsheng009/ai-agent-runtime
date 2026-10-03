@@ -114,6 +114,48 @@ func TestNotifyChatDiagnosticRoutesToDynamicStatusRow(t *testing.T) {
 	}
 }
 
+func TestAICLIDiaglnRoutesToDynamicStatusRow(t *testing.T) {
+	previous := chatDiagnosticSink.Swap(nil)
+	t.Cleanup(func() { chatDiagnosticSink.Store(previous) })
+
+	session := &ChatSession{}
+	bridge := newChatRuntimeEventBridge(session)
+	session.RuntimeEventBridge = bridge
+	coordinator := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coordinator
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(160, 12)
+	coordinator.SetSurface(surface)
+	session.Surface = surface
+	chatDiagnosticSink.Store(coordinator)
+
+	const line = "[aicli-diag] input path: interactive line editor (TUI composer)"
+	_, stderr := captureStdoutStderr(t, func() {
+		writeAICLIDiagln(line)
+		writeAICLIDiagf("%s\n", line)
+		coordinator.waitUIActorIdle()
+	})
+	if strings.TrimSpace(stderr) != "" {
+		t.Fatalf("single-line aicli diagnostic leaked to stderr: %q", stderr)
+	}
+	if row := chatDynamicStatusRowText(coordinator, 160); !strings.Contains(row, "input path: interactive line editor") {
+		t.Fatalf("aicli diagnostic missing from dynamic status row: %q", row)
+	}
+}
+
+func TestAICLIDiagfKeepsMultilineDiagnosticsOnStderr(t *testing.T) {
+	previous := chatDiagnosticSink.Swap(nil)
+	t.Cleanup(func() { chatDiagnosticSink.Store(previous) })
+	chatDiagnosticSink.Store(&chatInteractionCoordinator{session: &ChatSession{}})
+
+	_, stderr := captureStdoutStderr(t, func() {
+		writeAICLIDiagf("[aicli-diag] goroutine dump:\n%s", "goroutine 1 [running]")
+	})
+	if !strings.Contains(stderr, "goroutine dump:\n") || !strings.Contains(stderr, "goroutine 1 [running]") {
+		t.Fatalf("multiline diagnostic was not preserved on stderr: %q", stderr)
+	}
+}
+
 func TestFormatChatDiagnosticNoticeLineCollapsesMultilineWarning(t *testing.T) {
 	// 真实的 mesh 告警是跨行的：Go 的 http 错误在 "connectex:" 处换行。
 	raw := "Warning: mesh: peer node-14460 stream lost: read tcp 127.0.0.1:57235->127.0.0.1:49952:\n" +

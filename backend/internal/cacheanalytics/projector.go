@@ -16,13 +16,15 @@ type projectorAggregates struct {
 	sumTotal         int64
 	sumCacheRead     int64
 	sumCacheCreation int64
+	sumUncachedInput int64
 	sumReasoning     int64
 	// 命中/写入比率的分母各自只统计对应 reported 请求（§4.2：not_reported 不污染比率）。
-	sumPromptReadReported     int64
-	sumCacheReadReported      int64
-	sumPromptCreationReported int64
-	sumCacheCreationReported  int64
-	dist                      CacheStatusDistribution
+	// 分母是完整输入总量 InputTotal（不含式口径下 prompt 只是新增输入）。
+	sumInputTotalReadReported     int64
+	sumCacheReadReported          int64
+	sumInputTotalCreationReported int64
+	sumCacheCreationReported      int64
+	dist                          CacheStatusDistribution
 }
 
 func (a *projectorAggregates) add(record *CacheRequestRecord) {
@@ -38,14 +40,15 @@ func (a *projectorAggregates) add(record *CacheRequestRecord) {
 	a.sumTotal += usage.TotalTokens
 	a.sumCacheRead += usage.CacheReadTokens
 	a.sumCacheCreation += usage.CacheCreationTokens
+	a.sumUncachedInput += usage.UncachedInputTokens
 	a.sumReasoning += usage.ReasoningTokens
 	if usage.CacheReadReported {
 		a.cacheReported++
-		a.sumPromptReadReported += usage.PromptTokens
+		a.sumInputTotalReadReported += usage.InputTotal()
 		a.sumCacheReadReported += usage.CacheReadTokens
 	}
 	if usage.CacheCreationReported {
-		a.sumPromptCreationReported += usage.PromptTokens
+		a.sumInputTotalCreationReported += usage.InputTotal()
 		a.sumCacheCreationReported += usage.CacheCreationTokens
 	}
 }
@@ -67,16 +70,17 @@ func (a *projectorAggregates) remove(record *CacheRequestRecord) {
 	a.sumTotal -= usage.TotalTokens
 	a.sumCacheRead -= usage.CacheReadTokens
 	a.sumCacheCreation -= usage.CacheCreationTokens
+	a.sumUncachedInput -= usage.UncachedInputTokens
 	a.sumReasoning -= usage.ReasoningTokens
 	if usage.CacheReadReported {
 		if a.cacheReported > 0 {
 			a.cacheReported--
 		}
-		a.sumPromptReadReported -= usage.PromptTokens
+		a.sumInputTotalReadReported -= usage.InputTotal()
 		a.sumCacheReadReported -= usage.CacheReadTokens
 	}
 	if usage.CacheCreationReported {
-		a.sumPromptCreationReported -= usage.PromptTokens
+		a.sumInputTotalCreationReported -= usage.InputTotal()
 		a.sumCacheCreationReported -= usage.CacheCreationTokens
 	}
 }
@@ -243,14 +247,15 @@ func (p *Projector) overview(sessionID string) CacheOverview {
 		TotalTokens:         agg.sumTotal,
 		CacheReadTokens:     agg.sumCacheRead,
 		CacheCreationTokens: agg.sumCacheCreation,
+		UncachedInputTokens: agg.sumUncachedInput,
 		ReasoningTokens:     agg.sumReasoning,
 	}
-	if agg.sumPromptReadReported > 0 {
-		ratio := float64(agg.sumCacheReadReported) / float64(agg.sumPromptReadReported)
+	if agg.sumInputTotalReadReported > 0 {
+		ratio := float64(agg.sumCacheReadReported) / float64(agg.sumInputTotalReadReported)
 		overview.CacheHitRatio = &ratio
 	}
-	if agg.sumPromptCreationReported > 0 {
-		ratio := float64(agg.sumCacheCreationReported) / float64(agg.sumPromptCreationReported)
+	if agg.sumInputTotalCreationReported > 0 {
+		ratio := float64(agg.sumCacheCreationReported) / float64(agg.sumInputTotalCreationReported)
 		overview.CacheWriteRatio = &ratio
 	}
 	overview.CacheStatusDistribution = agg.dist
