@@ -997,3 +997,23 @@ cards:
       auto_compact_token_limit: 900000
       input_modalities:
         - text
+  # Laguna S 2.1（poolside/laguna-s-2.1-free、poolside/laguna-s-2.1）：
+  # text-only 的 openai 兼容端点，上下文窗口 1M（1048576）；auto_compact 取
+  # 窗口的 90%，与本目录其它百万级卡片（Space Bunny 900000）同一口径。
+  - id: poolside.laguna-s-2.1.openai
+    title: Laguna S 2.1
+    priority: 90
+    provider_template: openai.chat
+    match:
+      model_ids:
+        - poolside/laguna-s-2.1-free
+        - poolside/laguna-s-2.1
+      model_patterns:
+        - laguna-s-2.1*
+      protocols:
+        - openai
+    capability:
+      max_context_tokens: 1048576
+      auto_compact_token_limit: 900000
+      input_modalities:
+        - text
