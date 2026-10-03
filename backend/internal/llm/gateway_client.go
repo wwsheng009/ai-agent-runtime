@@ -680,6 +680,21 @@ func (c *GatewayClient) callProvider(ctx context.Context, selected *SelectedReso
 				Metadata: chunkMetadata,
 			})
 		},
+		OnToolCall: func() {
+			if !req.Stream {
+				return
+			}
+			// 纯 tool-call 轮次的"首字"信号：文本/思考/图片增量之外，工具调用
+			// 参数开始流出同样意味着模型已开始产出（供首字时间打点）。
+			reportStreamChunk(ctx, StreamChunk{
+				Type: EventTypeToolCall,
+				Metadata: map[string]interface{}{
+					"provider": selected.Provider.Name,
+					"protocol": protocol,
+					"model":    adapterRequest.Model,
+				},
+			})
+		},
 	}
 
 	assistantMsg, err := adpt.HandleResponse(req.Stream, bytes.NewReader(body), callbacks)
@@ -909,6 +924,17 @@ func (c *GatewayClient) callProviderStreamingAggregate(ctx context.Context, sele
 			reportStreamChunk(ctx, StreamChunk{
 				Type:     EventTypeImage,
 				Metadata: chunkMetadata,
+			})
+		},
+		OnToolCall: func() {
+			emissionState.markText("tool")
+			reportStreamChunk(ctx, StreamChunk{
+				Type: EventTypeToolCall,
+				Metadata: map[string]interface{}{
+					"provider": selected.Provider.Name,
+					"protocol": protocol,
+					"model":    adapterRequest.Model,
+				},
 			})
 		},
 	}
@@ -1203,6 +1229,16 @@ func (c *GatewayClient) streamProvider(ctx context.Context, selected *SelectedRe
 				ch <- StreamChunk{
 					Type:     EventTypeImage,
 					Metadata: chunkMetadata,
+				}
+			},
+			OnToolCall: func() {
+				ch <- StreamChunk{
+					Type: EventTypeToolCall,
+					Metadata: map[string]interface{}{
+						"provider": selected.Provider.Name,
+						"protocol": protocol,
+						"model":    adapterRequest.Model,
+					},
 				}
 			},
 		}

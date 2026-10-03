@@ -2161,16 +2161,16 @@ func TestCodexStreamState_SortsOutOfOrderToolCalls(t *testing.T) {
 	// 模拟并行工具调用:delta 事件乱序到达(index 1 先到,index 0 后到)。
 	a.handleFunctionCallArgumentsDelta(state, map[string]interface{}{
 		"index": 1, "delta": `{"query":"b"`,
-	})
+	}, StreamCallbacks{})
 	a.handleFunctionCallArgumentsDelta(state, map[string]interface{}{
 		"index": 0, "delta": `{"query":"a"`,
-	})
+	}, StreamCallbacks{})
 	a.handleFunctionCallArgumentsDelta(state, map[string]interface{}{
 		"index": 1, "delta": "}",
-	})
+	}, StreamCallbacks{})
 	a.handleFunctionCallArgumentsDelta(state, map[string]interface{}{
 		"index": 0, "delta": "}",
-	})
+	}, StreamCallbacks{})
 
 	result := state.ToMap()
 	toolCalls, ok := result["tool_calls"].([]map[string]interface{})

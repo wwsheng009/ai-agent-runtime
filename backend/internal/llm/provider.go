@@ -741,6 +741,19 @@ func (p *ProviderWrapper) Chat(ctx context.Context, request ChatRequest) (*ChatR
 				Metadata: chunkMetadata,
 			})
 		},
+		OnToolCall: func() {
+			if !request.Stream {
+				return
+			}
+			// 纯 tool-call 轮次的首字信号（见 adapter.StreamCallbacks.OnToolCall）。
+			reportStreamChunk(ctx, StreamChunk{
+				Type: EventTypeToolCall,
+				Metadata: map[string]interface{}{
+					"provider": p.config.Type,
+					"model":    adapterRequest.Model,
+				},
+			})
+		},
 	}
 	assistantMsg, err := p.adapter.HandleResponse(request.Stream, bytes.NewReader(body), callbacks)
 	if err != nil {
@@ -1671,6 +1684,17 @@ func (p *ProviderWrapper) callStreamingAggregate(ctx context.Context, req *LLMRe
 				reportStreamChunk(attemptCtx, StreamChunk{
 					Type:     EventTypeImage,
 					Metadata: chunkMetadata,
+				})
+			},
+			OnToolCall: func() {
+				// 纯 tool-call 轮次的首字信号（见 adapter.StreamCallbacks.OnToolCall）。
+				emissionState.markText("tool")
+				reportStreamChunk(attemptCtx, StreamChunk{
+					Type: EventTypeToolCall,
+					Metadata: map[string]interface{}{
+						"provider": p.config.Type,
+						"model":    adapterRequest.Model,
+					},
 				})
 			},
 		}

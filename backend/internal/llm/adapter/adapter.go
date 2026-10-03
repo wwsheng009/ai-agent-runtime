@@ -41,6 +41,10 @@ type StreamCallbacks struct {
 	OnText      func(string)
 	OnReasoning func(string)
 	OnImage     func(map[string]interface{})
+	// OnToolCall 在模型开始流式输出工具调用参数时触发（首个参数增量/条目到达）。
+	// 只承载"模型已开始产出"的时序信号（首字时间打点），内容仍由适配器累积在
+	// 最终消息里；纯 tool-call 轮次没有文本/思考增量，缺了它首字时间就没法观测。
+	OnToolCall func()
 }
 
 // EmitText 发出正文增量。
@@ -65,6 +69,14 @@ func (c StreamCallbacks) EmitImage(metadata map[string]interface{}) {
 		return
 	}
 	c.OnImage(metadata)
+}
+
+// EmitToolCall 发出工具调用开始（参数增量）信号。
+func (c StreamCallbacks) EmitToolCall() {
+	if c.OnToolCall == nil {
+		return
+	}
+	c.OnToolCall()
 }
 
 // ProtocolAdapter 协议适配器接口

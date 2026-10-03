@@ -486,7 +486,7 @@ func (a *GeminiAdapter) parseGeminiChunk(state *GeminiStreamState, chunk map[str
 		a.parseGeminiText(state, part, callbacks)
 
 		// 解析 Function Call（完整的，不需要拼接）
-		a.parseGeminiFunctionCall(state, part)
+		a.parseGeminiFunctionCall(state, part, callbacks)
 	}
 }
 
@@ -513,12 +513,15 @@ func (a *GeminiAdapter) parseGeminiText(state *GeminiStreamState, part map[strin
 
 // parseGeminiFunctionCall 解析 Gemini parts 中的 functionCall
 // Gemini 的 functionCall 是完整的，不需要流式拼接
-func (a *GeminiAdapter) parseGeminiFunctionCall(state *GeminiStreamState, part map[string]interface{}) {
+func (a *GeminiAdapter) parseGeminiFunctionCall(state *GeminiStreamState, part map[string]interface{}, callbacks StreamCallbacks) {
 	functionCall, ok := part["functionCall"].(map[string]interface{})
 	if !ok {
 		return
 	}
 
+	// functionCall 整块到达 = 模型已开始产出工具调用（纯 tool-call 回复没有
+	// 文本增量），用于首字时间打点。
+	callbacks.EmitToolCall()
 	// 直接追加完整的 functionCall
 	state.ToolCalls = append(state.ToolCalls, functionCall)
 }

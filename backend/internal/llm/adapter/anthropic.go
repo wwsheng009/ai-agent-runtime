@@ -595,7 +595,7 @@ func (a *AnthropicAdapter) handleStreamResponse(respBody io.Reader, callbacks St
 func (a *AnthropicAdapter) handleAnthropicEvent(state *AnthropicStreamState, event string, payload map[string]interface{}, callbacks StreamCallbacks) {
 	switch event {
 	case "content_block_start":
-		a.handleContentBlockStart(state, payload)
+		a.handleContentBlockStart(state, payload, callbacks)
 	case "content_block_delta":
 		a.handleContentBlockDelta(state, payload, callbacks)
 	case "message_delta":
@@ -605,7 +605,7 @@ func (a *AnthropicAdapter) handleAnthropicEvent(state *AnthropicStreamState, eve
 
 // handleContentBlockStart 处理 content_block_start 事件
 // 初始化 tool_use block
-func (a *AnthropicAdapter) handleContentBlockStart(state *AnthropicStreamState, payload map[string]interface{}) {
+func (a *AnthropicAdapter) handleContentBlockStart(state *AnthropicStreamState, payload map[string]interface{}, callbacks StreamCallbacks) {
 	indexFloat, ok := payload["index"].(float64)
 	if !ok {
 		return
@@ -633,6 +633,9 @@ func (a *AnthropicAdapter) handleContentBlockStart(state *AnthropicStreamState, 
 
 	state.blocks[index] = tc
 	state.ToolCalls = append(state.ToolCalls, tc)
+	// tool_use 块开始 = 模型已开始产出工具调用（纯 tool-call 轮次无文本/思考
+	// 增量，该信号用于首字时间打点）。
+	callbacks.EmitToolCall()
 }
 
 // handleContentBlockDelta 处理 content_block_delta 事件
@@ -665,6 +668,9 @@ func (a *AnthropicAdapter) handleContentBlockDelta(state *AnthropicStreamState, 
 			return
 		}
 		part, _ := delta["partial_json"].(string)
+		if tc.Args.Len() == 0 && part != "" {
+			callbacks.EmitToolCall()
+		}
 		tc.Args.WriteString(part)
 	case "thinking_delta":
 		if thinking := anthropicThinkingText(delta); thinking != "" {

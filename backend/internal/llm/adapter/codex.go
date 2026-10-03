@@ -1217,12 +1217,12 @@ func (a *CodexAdapter) processCodexEvent(state *CodexStreamState, eventType stri
 		a.handleRefusalDone(state, event, callbacks)
 
 	case "response.function_call_arguments.delta":
-		a.handleFunctionCallArgumentsDelta(state, event)
+		a.handleFunctionCallArgumentsDelta(state, event, callbacks)
 	case "response.function_call_arguments.done":
 		a.handleFunctionCallArgumentsDone(state, event)
 
 	case "response.custom_tool_call_input.delta":
-		a.handleCustomToolCallInputDelta(state, event)
+		a.handleCustomToolCallInputDelta(state, event, callbacks)
 	case "response.custom_tool_call_input.done":
 		a.handleCustomToolCallInputDone(state, event)
 
@@ -1466,6 +1466,9 @@ func (a *CodexAdapter) handleOutputItemAdded(state *CodexStreamState, event map[
 
 	// 如果是 function_call，初始化 ToolCall
 	if itemType == "function_call" || itemType == "custom_tool_call" {
+		// 工具条目开始即"模型已开始产出"：纯 tool-call 轮次没有文本/思考增量，
+		// 该信号用于首字时间打点（内容仍走 ToolCalls 累积）。
+		callbacks.EmitToolCall()
 		tc, exists := state.ToolCalls[index]
 		if !exists {
 			tc = &CodexToolCall{Kind: itemType}
@@ -1633,7 +1636,7 @@ func (a *CodexAdapter) handleRefusalDone(state *CodexStreamState, event map[stri
 }
 
 // handleFunctionCallArgumentsDelta 处理 response.function_call_arguments.delta 事件
-func (a *CodexAdapter) handleFunctionCallArgumentsDelta(state *CodexStreamState, event map[string]interface{}) {
+func (a *CodexAdapter) handleFunctionCallArgumentsDelta(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
 	index := resolveCodexToolIndex(state, event)
 	if index == -1 {
 		return
@@ -1648,6 +1651,9 @@ func (a *CodexAdapter) handleFunctionCallArgumentsDelta(state *CodexStreamState,
 	if !exists {
 		tc = &CodexToolCall{}
 		state.ToolCalls[index] = tc
+	}
+	if tc.Arguments.Len() == 0 {
+		callbacks.EmitToolCall()
 	}
 	tc.Arguments.WriteString(delta)
 }
@@ -1680,7 +1686,7 @@ func (a *CodexAdapter) handleFunctionCallArgumentsDone(state *CodexStreamState, 
 	appendMissingCodexText(&tc.Arguments, asCodexString(event["arguments"]), nil)
 }
 
-func (a *CodexAdapter) handleCustomToolCallInputDelta(state *CodexStreamState, event map[string]interface{}) {
+func (a *CodexAdapter) handleCustomToolCallInputDelta(state *CodexStreamState, event map[string]interface{}, callbacks StreamCallbacks) {
 	key := codexToolItemKeyFromEvent(event)
 	if key == "" {
 		return
@@ -1707,6 +1713,9 @@ func (a *CodexAdapter) handleCustomToolCallInputDelta(state *CodexStreamState, e
 	}
 	if tc.Kind == "" {
 		tc.Kind = "custom_tool_call"
+	}
+	if tc.Arguments.Len() == 0 {
+		callbacks.EmitToolCall()
 	}
 	tc.Arguments.WriteString(delta)
 }

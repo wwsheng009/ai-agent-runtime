@@ -2416,6 +2416,11 @@ func (loop *ReActLoop) think(ctx context.Context, traceID, sessionID string, ste
 				}
 				loop.emitRuntimeEvent("assistant.image_progress", sessionID, "", imagePayload)
 				reportSink(chunk, sequence)
+			case llm.EventTypeToolCall, llm.EventTypeToolStart, llm.EventTypeToolEnd:
+				// 工具调用也是模型的首个输出：纯 tool-call 轮次（首个输出就是
+				// 函数调用参数，没有文本/思考/图片增量）若不在此打点，整轮首字
+				// 时间都观测不到，前端只能显示"未采集"。
+				markFirstToken()
 			}
 		})
 	}

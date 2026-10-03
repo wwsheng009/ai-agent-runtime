@@ -903,8 +903,8 @@ func parseChunk(state *StreamState, chunk map[string]interface{}, callbacks Stre
 		return
 	}
 	parseContent(state, delta, callbacks)
-	parseToolCalls(state, delta)
-	parseLegacyFunctionCall(state, delta)
+	parseToolCalls(state, delta, callbacks)
+	parseLegacyFunctionCall(state, delta, callbacks)
 }
 
 // hasOpenAIToolCallDelta 判断 delta 是否携带有效的现代 tool_calls 载荷
@@ -1074,7 +1074,7 @@ func parseReasoning(state *StreamState, delta map[string]interface{}, callbacks 
 }
 
 // parseToolCalls 解析 delta 中的 tool_calls
-func parseToolCalls(state *StreamState, delta map[string]interface{}) {
+func parseToolCalls(state *StreamState, delta map[string]interface{}, callbacks StreamCallbacks) {
 	raw, ok := delta["tool_calls"]
 	if !ok {
 		return
@@ -1097,6 +1097,11 @@ func parseToolCalls(state *StreamState, delta map[string]interface{}) {
 		tcMap, ok := item.(map[string]interface{})
 		if !ok {
 			continue
+		}
+		if hasOpenAIToolCallFields(tcMap) {
+			// 工具调用参数开始流出 = 模型已开始产出（纯 tool-call 回复没有
+			// 文本增量），用于首字时间打点；内容仍走 ToolCalls 累积。
+			callbacks.EmitToolCall()
 		}
 
 		index, err := resolveOpenAIToolCallIndex(state, tcMap)
@@ -1193,7 +1198,7 @@ func resolveOpenAIToolCallIndex(state *StreamState, tcMap map[string]interface{}
 	}
 }
 
-func parseLegacyFunctionCall(state *StreamState, delta map[string]interface{}) {
+func parseLegacyFunctionCall(state *StreamState, delta map[string]interface{}, callbacks StreamCallbacks) {
 	functionCall, ok := delta["function_call"].(map[string]interface{})
 	if !ok {
 		return
@@ -1213,6 +1218,7 @@ func parseLegacyFunctionCall(state *StreamState, delta map[string]interface{}) {
 		return
 	}
 	state.SawLegacyFunctionCall = true
+	callbacks.EmitToolCall()
 	tc := state.getToolCall(0)
 	if tc.ID == "" {
 		tc.ID = "legacy_function_call_1"
