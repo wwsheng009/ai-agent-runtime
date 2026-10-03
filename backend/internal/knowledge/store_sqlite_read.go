@@ -339,20 +339,29 @@ func (s *sqliteStore) RecordInvalidation(ctx context.Context, ev InvalidationEve
 	})
 }
 
-// Stats 返回行数汇总与最近索引时间。
-func (s *sqliteStore) Stats(ctx context.Context, workspaceID string) (Stats, error) {
-	var stats Stats
-	version, err := s.SchemaVersion(ctx)
-	if err != nil {
-		return stats, err
-	}
-	stats.SchemaVersion = version
-	row := s.db.QueryRowContext(ctx, `
-		SELECT
-			(SELECT COUNT(*) FROM files   WHERE workspace_id = ? AND deleted_at IS NULL),
-			(SELECT COUNT(*) FROM symbols WHERE workspace_id = ? AND deleted_at IS NULL),
-			(SELECT COUNT(*) FROM refs r JOIN files f ON f.id = r.file_id
-			  WHERE r.workspace_id = ? AND f.deleted_at IS NULL),
+// statsRefsSQL 统计「本 workspace 中、其文件仍未被软删」的引用行数。
+//
+// 用 CROSS JOIN 是为了把 join 顺序钉成 files → refs。SQLite 自己选的是
+// refs → files（SEARCH r USING INDEX idx_refs_from，再逐行回探 files 主键），
+// 在 50 万行 refs 的库上实测 ~1.5s；反过来用几千个文件做外层循环、内层走
+// idx_refs_file 探测只要 ~0.5s（约 3 倍）。CROSS JOIN 是 SQLite 中禁止优化器
+// 重排两侧的写法，语义与
+// `refs r JOIN files f ON f.id = r.file_id WHERE r.workspace_id = ? AND f.deleted_at IS NULL`
+// 完全等价：同样是「非软删文件 × 本工作区的 refs」，一行不多一行不少。
+//
+// 注意 files 侧刻意不带 workspace_id 过滤：refs.workspace_id 与 files.workspace_id
+// 在正确数据下一致，但这里按原始谓词逐字等价地写（只筛 deleted_at），
+// 避免把"refs 指向另一个 workspace 的文件"这类脏数据从计数里悄悄漏掉。
+const statsRefsSQL = `
+			(SELECT COUNT(*) FROM (SELECT id FROM files WHERE deleted_at IS NULL) f
+			   CROSS JOIN refs r
+			  WHERE r.file_id = f.id AND r.workspace_id = ?)`
+
+// statsIndexedAtSQL 取「最近一次成功全工作区对账」的时间戳。
+//
+// Stats.IndexedAt 与 IndexedAt 共用本片段，保证两处口径只有一份实现。
+// 占位符顺序：workspace_id、maxIndexFiles、workspace_id。
+const statsIndexedAtSQL = `
 			COALESCE(
 				(SELECT MAX(j.finished_at) FROM index_jobs j
 				  WHERE j.workspace_id = ? AND j.kind = 'light'
@@ -368,13 +377,51 @@ func (s *sqliteStore) Stats(ctx context.Context, workspaceID string) (Stats, err
 				    AND j.files_total < ?),
 				(SELECT COALESCE(MAX(indexed_at), 0) FROM files
 				  WHERE workspace_id = ? AND deleted_at IS NULL)
-			)
+			)`
+
+// Stats 返回行数汇总与最近索引时间。
+//
+// 这是状态面（`aicli knowledge status` / /api/runtime/knowledge/status）的取数；
+// 热路径（工具面档位判定）不要用它——那个场景只缺 IndexedAt，见 IndexedAt。
+func (s *sqliteStore) Stats(ctx context.Context, workspaceID string) (Stats, error) {
+	var stats Stats
+	version, err := s.SchemaVersion(ctx)
+	if err != nil {
+		return stats, err
+	}
+	stats.SchemaVersion = version
+	row := s.db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM files   WHERE workspace_id = ? AND deleted_at IS NULL),
+			(SELECT COUNT(*) FROM symbols WHERE workspace_id = ? AND deleted_at IS NULL),
+			`+statsRefsSQL+`,
+			`+statsIndexedAtSQL+`
 	`, workspaceID, workspaceID, workspaceID, workspaceID, maxIndexFiles, workspaceID)
 
 	if err := row.Scan(&stats.Files, &stats.Symbols, &stats.Refs, &stats.IndexedAt); err != nil {
 		return stats, fmt.Errorf("knowledge: read stats: %w", err)
 	}
 	return stats, nil
+}
+
+// IndexedAt 只取「最近一次成功全工作区对账」的时间戳，不计算三张表的行数。
+//
+// 为什么需要这个专用出口：代码工具面的档位判定（staleness → tier）只需要
+// Stats.IndexedAt 这一个标量，而 Stats 的三个 COUNT 聚合在数十万行上是重活
+// （实测 355 MiB 库上单次 ~2.5s）。解析器每次解析都要问一次，用本方法把这次
+// 询问从「四个聚合」降成「一次 MAX 查询」（实测 ~5ms），口径与 Stats.IndexedAt
+// 完全一致（共用 statsIndexedAtSQL）。
+//
+// 本方法刻意不加入 Store 接口：它是纯性能快路径，不是契约的一部分。调用方按
+// 结构化接口识别（见 internal/tools/code_index_resolver.go 的 indexedAtReader），
+// 识别不到时回退到 Stats，行为不变。
+func (s *sqliteStore) IndexedAt(ctx context.Context, workspaceID string) (int64, error) {
+	var indexedAt int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT `+statsIndexedAtSQL, workspaceID, maxIndexFiles, workspaceID).Scan(&indexedAt); err != nil {
+		return 0, fmt.Errorf("knowledge: read indexed_at: %w", err)
+	}
+	return indexedAt, nil
 }
 
 // scanFile 把一行 files 记录读成 FileRecord。

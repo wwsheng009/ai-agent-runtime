@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 )
 
 // skillToolSurfaceMCPName 是会话 skill 函数在工具面上的逻辑来源名。
@@ -68,6 +69,36 @@ func (s *skillToolSurface) CallTool(ctx interface{}, mcpName, toolName string, a
 		return nil, fmt.Errorf("tool surface is not configured: %s", toolName)
 	}
 	return s.next.CallTool(ctx, mcpName, toolName, args)
+}
+
+// ResolveToolSource 报告工具的来源分类（broker/mcp/toolkit/meta），供 agent 的
+// 工具来源归类使用。
+//
+// 这条方法是**性能关键路径**，不是可选的锦上添花：agent 每轮构建工具面时会对
+// 每个工具问一次来源（resolveToolSourceForRequest），而那个函数只在 surface
+// 实现了本方法时才走便宜路径；否则退化成 FindTool —— 为了"找一个工具"重建
+// 整张工具表，每次都要重跑知识层 Stats。实测该退化的代价是单个工具 ~2.4s，
+// 85 个工具的工具面就是分钟级卡顿（前端表现为"网络很快但 TUI 迟迟没有输出"）。
+//
+// 分类口径与本 surface 的 FindTool 保持一致：
+//   - 内层 surface 认得的名字（CapabilityMCPManager/AgentAdapter 等）转发给它；
+//   - skill 函数按 skillToolSurfaceMCPName 这个逻辑 MCP 面报 mcp（与
+//     skillFunctionToolInfo 填的 MCPName 同源）；
+//   - 都不认得时返回空串，调用方自行决定是否回退。
+func (s *skillToolSurface) ResolveToolSource(toolName string) string {
+	name := strings.TrimSpace(toolName)
+	if name == "" {
+		return ""
+	}
+	if next, ok := s.next.(interface{ ResolveToolSource(string) string }); ok {
+		if source := toolresult.NormalizeSource(next.ResolveToolSource(name)); source != "" {
+			return source
+		}
+	}
+	if s.skillFunction(name) != nil {
+		return toolresult.SourceMCP
+	}
+	return ""
 }
 
 // CallToolWithMeta 走 richToolCaller 路径时保留函数目录返回的 metadata。

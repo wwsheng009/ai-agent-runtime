@@ -1,0 +1,14 @@
+-- 0005_stats_covering_index.sql — Stats() 行数汇总的窄覆盖索引
+--
+-- 动机（2026-10-03 实测，355 MiB 库 / 5,277 files / 56,855 symbols / 507,557 refs）：
+--
+--   Stats 的 symbols COUNT 原本落在 idx_symbols_qualified(workspace_id, qualified_name)
+--   上：它虽然是 workspace 前导索引，但索引项带着 qualified_name 文本，一页装不下
+--   几条，扫描 5.6 万条要跨大量数据页，实测 ~265ms。换成 (workspace_id, deleted_at)
+--   这个只含两个整型列的窄覆盖索引后，同样的 COUNT 降到 ~11ms（约 24 倍）。
+--
+--   files 侧的同类索引 0002 已经建好（idx_files_ws_deleted），这里补齐 symbols 侧。
+--
+-- 该索引同时服务 Stats 与 status.go 的同一口径查询；纯派生数据表，加索引不影响
+-- 任何写路径语义（symbols 的 deleted_at 由 MarkFilesDeleted/ReplaceSymbols 维护）。
+CREATE INDEX idx_symbols_ws_deleted ON symbols(workspace_id, deleted_at);

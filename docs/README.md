@@ -33,6 +33,7 @@ Main sections:
 - `multi-agents/` - multi-agent design, profile, team, and rollout plans
 - `design/` - design baseline documents (checkpoint / restore-point design, planned architecture notes)
 - `working/` - point-in-time debugging notes and implementation snapshots
+- `performance/` - 性能专题：实测驱动的诊断与优化记录（现象口径、根因代码路径、改动前后同一口径的数字、以及被否决方案的留档），入口见 `performance/README.md`
 - Provider config field notes live under `backend/docs/config/` (for example `enable_image_generation`)
 
 Recommended starting points:

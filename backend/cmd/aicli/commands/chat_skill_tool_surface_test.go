@@ -9,6 +9,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	runtimepolicy "github.com/wwsheng009/ai-agent-runtime/internal/policy"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
+	"github.com/wwsheng009/ai-agent-runtime/internal/toolresult"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
 
@@ -100,6 +101,61 @@ func TestSkillToolSurfaceKeepsListToolsUnchanged(t *testing.T) {
 
 	_, err = surface.FindTool("skill__missing")
 	require.Error(t, err)
+}
+
+// sourceResolvingLocalSurface 在 stub 之上实现 ResolveToolSource，并统计昂贵
+// 回退（FindTool）被走了几次。
+type sourceResolvingLocalSurface struct {
+	stubLocalChatToolSurface
+	source    string
+	findCalls int
+}
+
+func (s *sourceResolvingLocalSurface) ResolveToolSource(toolName string) string {
+	for _, tool := range s.tools {
+		if tool.Name == toolName {
+			return s.source
+		}
+	}
+	return ""
+}
+
+func (s *sourceResolvingLocalSurface) FindTool(toolName string) (runtimeskill.ToolInfo, error) {
+	s.findCalls++
+	return s.stubLocalChatToolSurface.FindTool(toolName)
+}
+
+// 回归（性能）：来源归类必须走便宜路径，不得退化成 FindTool。
+//
+// 背景：agent 每轮对每个工具问一次来源（resolveToolSourceForRequest），只有
+// surface 实现了 ResolveToolSource 时那条函数才走便宜路径。本 surface 此前没有
+// 实现它，于是 85 个工具逐个回落 FindTool —— 每次都要重建整张工具表并重跑
+// 知识层取数（实测单个工具 ~2.4s），表现为"网络很快但 TUI 几分钟没有输出"。
+func TestSkillToolSurfaceResolveToolSourceUsesCheapPath(t *testing.T) {
+	session, fn := newSkillSurfaceTestSession(t)
+	next := &sourceResolvingLocalSurface{
+		stubLocalChatToolSurface: stubLocalChatToolSurface{
+			tools: []runtimeskill.ToolInfo{{Name: "view", MCPName: "toolkit", Enabled: true}},
+		},
+		source: toolresult.SourceToolkit,
+	}
+	surface := wrapSkillToolSurface(session, next)
+
+	resolver, ok := surface.(interface{ ResolveToolSource(string) string })
+	require.True(t, ok, "skillToolSurface 必须实现 ResolveToolSource：缺它即退化成 FindTool")
+
+	// 内层认得的名字：转发内层结论。
+	require.Equal(t, toolresult.SourceToolkit, resolver.ResolveToolSource("view"))
+	require.Zero(t, next.findCalls, "便宜路径不得回落到 FindTool")
+
+	// skill 函数：按逻辑 MCP 面报 mcp，与 FindTool 返回的 MCPName 同源。
+	require.Equal(t, toolresult.SourceMCP, resolver.ResolveToolSource(fn.Name()))
+	require.Zero(t, next.findCalls)
+
+	// 都不认得：返回空串交调用方决定，不得乱报来源。
+	require.Equal(t, "", resolver.ResolveToolSource("skill__missing"))
+	require.Equal(t, "", resolver.ResolveToolSource("   "))
+	require.Zero(t, next.findCalls)
 }
 
 // 未配置执行器的 skill 条目（目录可读但不可执行）不得被工具面认领。
