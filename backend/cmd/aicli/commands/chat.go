@@ -180,6 +180,10 @@ type ChatSession struct {
 	SkillsBinding   *skillsRuntimeBinding // Skills 运行时绑定
 	SkillsMode      string                // Skills 暴露模式
 	SkillsDebug     bool                  // Skills 调试输出
+	// skillMentionBindings 记录 `$name` 补全时用户点选的技能路径（name→path）。
+	// 只用于 skillMentionKnownNames 的绑定优先级（同名多技能时不被目录顺序覆盖），
+	// 不参与注入解析本身。
+	skillMentionBindings chatSkillMentionBindings
 	// skillsRefreshMu / skillsRefreshTimer 把 skill 目录热加载事件合并成一次
 	// 防抖刷新；skillsBindingMu 串行化刷新本身，避免与 /skills 启停命令交错。
 	skillsRefreshMu    sync.Mutex

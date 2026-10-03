@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
+	geminitypes "github.com/wwsheng009/ai-agent-runtime/internal/types/gemini"
 )
 
 // GeminiAdapter Gemini 协议适配器
@@ -23,6 +24,11 @@ func (a *GeminiAdapter) Name() string {
 func (a *GeminiAdapter) BuildRequest(config RequestConfig) map[string]interface{} {
 	// 将 OpenAI 格式的 messages 转换为 Gemini 格式的 contents
 	contents := make([]map[string]interface{}, 0, len(config.Messages))
+	// 抽象指令层契约（plan §4.12）：leading system/developer 前缀折叠进
+	// 顶层 systemInstruction；活动历史中的残余指令保持为 user parts，
+	// 绝不进入 contents 的 model 角色。
+	systemParts := make([]string, 0, 2)
+	inLeadingInstructions := true
 
 	for _, msg := range config.Messages {
 		// 类型断言
@@ -30,7 +36,26 @@ func (a *GeminiAdapter) BuildRequest(config RequestConfig) map[string]interface{
 		if !ok {
 			continue
 		}
-		role := a.convertRole(roleVal)
+		normalizedRole := strings.ToLower(strings.TrimSpace(roleVal))
+		if normalizedRole == "system" || normalizedRole == "developer" {
+			text := geminiInstructionText(msg)
+			if inLeadingInstructions {
+				if text != "" {
+					systemParts = append(systemParts, text)
+				}
+				continue
+			}
+			if text == "" {
+				continue
+			}
+			contents = append(contents, map[string]interface{}{
+				"role":  "user",
+				"parts": []map[string]interface{}{{"text": text}},
+			})
+			continue
+		}
+		inLeadingInstructions = false
+		role := a.convertRole(normalizedRole)
 
 		content := msg["content"]
 
@@ -78,6 +103,9 @@ func (a *GeminiAdapter) BuildRequest(config RequestConfig) map[string]interface{
 
 	request := map[string]interface{}{
 		"contents": contents,
+	}
+	if systemInstruction := buildGeminiSystemInstruction(systemParts); systemInstruction != nil {
+		request["systemInstruction"] = *systemInstruction
 	}
 
 	// 添加 generationConfig（可选参数）
@@ -594,14 +622,64 @@ func (a *GeminiAdapter) GetAPIPath() string {
 	return ""
 }
 
-// convertRole 转换角色名称（从 OpenAI 格式到 Gemini 格式）
+// buildGeminiSystemInstruction folds the leading abstract-instruction prefix
+// into Gemini's native top-level systemInstruction (Content shape). Multiple
+// fragments are joined with a blank line so the merged text stays byte-stable
+// for a stable fragment prefix (plan §4.12).
+func buildGeminiSystemInstruction(systemParts []string) *geminitypes.Content {
+	joined := strings.TrimSpace(strings.Join(systemParts, "\n\n"))
+	if joined == "" {
+		return nil
+	}
+	return &geminitypes.Content{
+		Parts: []geminitypes.Part{{Text: joined}},
+	}
+}
+
+// geminiInstructionText extracts the plain text carried by one instruction
+// message, accepting both the OpenAI-shaped string content and an already
+// converted parts list (or content-block list).
+func geminiInstructionText(msg map[string]interface{}) string {
+	if len(msg) == 0 {
+		return ""
+	}
+	if parts, ok := msg["parts"].([]map[string]interface{}); ok {
+		texts := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if text, ok := part["text"].(string); ok && strings.TrimSpace(text) != "" {
+				texts = append(texts, strings.TrimSpace(text))
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	switch typed := msg["content"].(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []interface{}:
+		texts := make([]string, 0, len(typed))
+		for _, raw := range typed {
+			part, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if text, ok := part["text"].(string); ok && strings.TrimSpace(text) != "" {
+				texts = append(texts, strings.TrimSpace(text))
+			}
+		}
+		return strings.Join(texts, "\n")
+	default:
+		return ""
+	}
+}
+
+// convertRole 转换角色名称（从 OpenAI 格式到 Gemini 格式）。
+// Gemini 只有 user/model 两种对话角色；system/developer 指令由 BuildRequest
+// 折叠进 systemInstruction 或投影为 user parts（plan §4.12），绝不落 model。
 func (a *GeminiAdapter) convertRole(role string) string {
 	// OpenAI: user/assistant/system
 	// Gemini: user/model
-	switch strings.ToLower(role) {
-	case "user":
-		return "user"
-	case "assistant", "system":
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "assistant", "model":
 		return "model"
 	default:
 		return "user"

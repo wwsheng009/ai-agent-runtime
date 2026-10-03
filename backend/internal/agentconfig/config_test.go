@@ -594,3 +594,166 @@ func TestInitGlobalConfigIncludesOpenAIImageProviderForImageGenerations(t *testi
 		t.Fatalf("expected shared CODEX_04 API key, got %q", got)
 	}
 }
+
+// P3 mention 注入配置（plan §4.7 / §5 P3）：默认 auto、预算默认 4/32768/65536，
+// 0/负数回退默认；auto 仅交互式回合生效（headless/JSON 不注入）。
+func TestSkillsRuntimeMentionInjectionDefaults(t *testing.T) {
+	cfg := &SkillsRuntimeConfig{}
+	if got := cfg.MentionInjectionMode(); got != SkillMentionInjectionAuto {
+		t.Fatalf("default mode = %q, want auto", got)
+	}
+	if !cfg.MentionInjectionEnabled(true) {
+		t.Fatal("default auto must enable interactive mention injection")
+	}
+	if cfg.MentionInjectionEnabled(false) {
+		t.Fatal("default auto must not enable headless mention injection")
+	}
+	if got := cfg.MentionMultiLimitValue(); got != DefaultSkillMentionMultiLimit {
+		t.Fatalf("default multi limit = %d, want %d", got, DefaultSkillMentionMultiLimit)
+	}
+	if got := cfg.MentionInjectMaxCharsValue(); got != DefaultSkillMentionInjectMaxChars {
+		t.Fatalf("default per-skill chars = %d, want %d", got, DefaultSkillMentionInjectMaxChars)
+	}
+	if got := cfg.MentionInjectTotalCharsValue(); got != DefaultSkillMentionInjectTotalChars {
+		t.Fatalf("default total chars = %d, want %d", got, DefaultSkillMentionInjectTotalChars)
+	}
+	if cfg.CatalogResident {
+		t.Fatal("catalog_resident must default to false (P1 gray release)")
+	}
+}
+
+func TestSkillsRuntimeMentionInjectionModeParsing(t *testing.T) {
+	cases := []struct {
+		raw                 string
+		wantMode            string
+		wantEnabledInteract bool
+		wantEnabledHeadless bool
+	}{
+		{raw: "", wantMode: SkillMentionInjectionAuto, wantEnabledInteract: true},
+		{raw: "off", wantMode: SkillMentionInjectionOff},
+		{raw: " OFF ", wantMode: SkillMentionInjectionOff},
+		{raw: "unknown", wantMode: SkillMentionInjectionAuto, wantEnabledInteract: true},
+		{raw: "auto", wantMode: SkillMentionInjectionAuto, wantEnabledInteract: true},
+		{raw: "Auto", wantMode: SkillMentionInjectionAuto, wantEnabledInteract: true},
+		{raw: "on", wantMode: SkillMentionInjectionOn, wantEnabledInteract: true, wantEnabledHeadless: true},
+		{raw: "ON", wantMode: SkillMentionInjectionOn, wantEnabledInteract: true, wantEnabledHeadless: true},
+	}
+	for _, tc := range cases {
+		cfg := &SkillsRuntimeConfig{MentionInjection: tc.raw}
+		if got := cfg.MentionInjectionMode(); got != tc.wantMode {
+			t.Fatalf("mode(%q) = %q, want %q", tc.raw, got, tc.wantMode)
+		}
+		if got := cfg.MentionInjectionEnabled(true); got != tc.wantEnabledInteract {
+			t.Fatalf("enabled(interactive) for %q = %v, want %v", tc.raw, got, tc.wantEnabledInteract)
+		}
+		if got := cfg.MentionInjectionEnabled(false); got != tc.wantEnabledHeadless {
+			t.Fatalf("enabled(headless) for %q = %v, want %v", tc.raw, got, tc.wantEnabledHeadless)
+		}
+	}
+	var nilCfg *SkillsRuntimeConfig
+	if got := nilCfg.MentionInjectionMode(); got != SkillMentionInjectionAuto {
+		t.Fatalf("nil mode = %q, want auto", got)
+	}
+	if !nilCfg.MentionInjectionEnabled(true) {
+		t.Fatal("nil config must default to auto for interactive turns")
+	}
+	if nilCfg.MentionInjectionEnabled(false) {
+		t.Fatal("nil config must not enable mention injection for headless turns")
+	}
+}
+
+func TestSkillsRuntimeMentionInjectionBudgetClamping(t *testing.T) {
+	zero := &SkillsRuntimeConfig{MentionMultiLimit: 0, MentionInjectMaxChars: -1, MentionInjectTotalChars: 0}
+	if got := zero.MentionMultiLimitValue(); got != DefaultSkillMentionMultiLimit {
+		t.Fatalf("zero multi limit = %d, want default", got)
+	}
+	if got := zero.MentionInjectMaxCharsValue(); got != DefaultSkillMentionInjectMaxChars {
+		t.Fatalf("negative per-skill chars = %d, want default", got)
+	}
+	if got := zero.MentionInjectTotalCharsValue(); got != DefaultSkillMentionInjectTotalChars {
+		t.Fatalf("zero total chars = %d, want default", got)
+	}
+
+	explicit := &SkillsRuntimeConfig{MentionMultiLimit: 2, MentionInjectMaxChars: 1024, MentionInjectTotalChars: 4096}
+	if got := explicit.MentionMultiLimitValue(); got != 2 {
+		t.Fatalf("explicit multi limit = %d, want 2", got)
+	}
+	if got := explicit.MentionInjectMaxCharsValue(); got != 1024 {
+		t.Fatalf("explicit per-skill chars = %d, want 1024", got)
+	}
+	if got := explicit.MentionInjectTotalCharsValue(); got != 4096 {
+		t.Fatalf("explicit total chars = %d, want 4096", got)
+	}
+}
+
+// P3 函数面收敛（plan §5 P3 / §8 Q5）：文本类 skill 函数默认隐藏，
+// nil/true 开启（隐藏），显式 false 回退暴露。
+func TestSkillsRuntimeMentionHideTextSkillFunctionsEnabled(t *testing.T) {
+	if !(*SkillsRuntimeConfig)(nil).MentionHideTextSkillFunctionsEnabled() {
+		t.Fatal("nil config must default to hiding text skill functions")
+	}
+	if !(&SkillsRuntimeConfig{}).MentionHideTextSkillFunctionsEnabled() {
+		t.Fatal("nil field must default to hiding text skill functions")
+	}
+	enabled := true
+	falseValue := false
+	if !(&SkillsRuntimeConfig{MentionHideTextSkillFunctions: &enabled}).MentionHideTextSkillFunctionsEnabled() {
+		t.Fatal("explicit true must keep text skill functions hidden")
+	}
+	if (&SkillsRuntimeConfig{MentionHideTextSkillFunctions: &falseValue}).MentionHideTextSkillFunctionsEnabled() {
+		t.Fatal("explicit false must re-expose text skill functions")
+	}
+}
+
+// P1 常驻 catalog（plan §4.5/§4.7）：默认 false，显式 true 生效，nil 安全。
+func TestSkillsRuntimeCatalogResidentEnabled(t *testing.T) {
+	if (*SkillsRuntimeConfig)(nil).CatalogResidentEnabled() {
+		t.Fatal("nil config must not enable resident catalog")
+	}
+	if (&SkillsRuntimeConfig{}).CatalogResidentEnabled() {
+		t.Fatal("default catalog_resident must be off")
+	}
+	if !(&SkillsRuntimeConfig{CatalogResident: true}).CatalogResidentEnabled() {
+		t.Fatal("explicit catalog_resident=true must enable resident catalog")
+	}
+}
+
+func TestInitGlobalConfigLoadsMentionInjection(t *testing.T) {
+	path := writeSkillsEnabledConfig(t, `skills_runtime:
+  mention_injection: auto
+  mention_multi_limit: 2
+  mention_inject_max_chars: 1024
+  mention_inject_total_chars: 4096
+  mention_hide_text_skill_functions: false
+  catalog_resident: true
+`)
+	cfg, err := InitGlobalConfig(path)
+	if err != nil {
+		t.Fatalf("InitGlobalConfig: %v", err)
+	}
+	if cfg.SkillsRuntime == nil {
+		t.Fatal("skills_runtime section must be present")
+	}
+	runtimeCfg := cfg.SkillsRuntime
+	if got := runtimeCfg.MentionInjectionMode(); got != SkillMentionInjectionAuto {
+		t.Fatalf("mention_injection = %q, want auto", got)
+	}
+	if !runtimeCfg.MentionInjectionEnabled(true) || runtimeCfg.MentionInjectionEnabled(false) {
+		t.Fatal("auto must enable interactive turns only")
+	}
+	if got := runtimeCfg.MentionMultiLimitValue(); got != 2 {
+		t.Fatalf("mention_multi_limit = %d, want 2", got)
+	}
+	if got := runtimeCfg.MentionInjectMaxCharsValue(); got != 1024 {
+		t.Fatalf("mention_inject_max_chars = %d, want 1024", got)
+	}
+	if got := runtimeCfg.MentionInjectTotalCharsValue(); got != 4096 {
+		t.Fatalf("mention_inject_total_chars = %d, want 4096", got)
+	}
+	if runtimeCfg.MentionHideTextSkillFunctionsEnabled() {
+		t.Fatal("mention_hide_text_skill_functions = false must re-expose text skill functions")
+	}
+	if !runtimeCfg.CatalogResident {
+		t.Fatal("catalog_resident = false, want true")
+	}
+}

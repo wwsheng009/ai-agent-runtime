@@ -332,6 +332,7 @@ const SKILLS_INTRO_WITH_ALIASES = "A skill is a set of local instructions to fol
 const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS = `
 - Discovery: The list above is the skills available in this session (name + description + source locator).
 - Trigger rules: If the user names a skill (with /skill <name> or a mention) OR the task clearly matches a skill's description shown above, you must use that skill for this turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
+- Injected bodies: if a mentioned skill's instructions were injected into this turn's context, use them directly; do not re-read its SKILL.md with file tools.
 - Missing/blocked: If a named skill isn't in the list or its source can't be read, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
   1) After deciding to use a skill, read its instructions completely before taking task actions. For a file locator, open the listed path (the SKILL.md body or the skill.yaml + prompt.md manifest). If a read is truncated or paginated, continue until EOF.
@@ -348,6 +349,7 @@ const SKILLS_HOW_TO_USE_WITH_ABSOLUTE_PATHS = `
 const SKILLS_HOW_TO_USE_WITH_ALIASES = `
 - Discovery: The list above is the skills available in this session (name + description + short path). Skill bodies live on disk at the listed paths after expanding the matching alias from the skill roots table below.
 - Trigger rules: If the user names a skill (with /skill <name> or a mention) OR the task clearly matches a skill's description shown above, you must use that skill for this turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
+- Injected bodies: if a mentioned skill's instructions were injected into this turn's context, use them directly; do not re-read its SKILL.md with file tools.
 - Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
 - How to use a skill (progressive disclosure):
   1) After deciding to use a skill, expand the listed short path with the matching alias from the skill roots table, then open and read its instructions completely before taking task actions. If a read is truncated or paginated, continue until EOF.

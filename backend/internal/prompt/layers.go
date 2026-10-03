@@ -14,6 +14,19 @@ const (
 	LayerBase      = "base"
 	LayerDeveloper = "developer"
 	LayerUser      = "user"
+
+	// 抽象指令层常量（canonical 定义在 internal/types）。注入点声明 scope/source，
+	// wire 角色由协议适配器按契约转换（plan §4.12）。
+	MetaInstructionScope  = types.MetaInstructionScope
+	MetaInstructionSource = types.MetaInstructionSource
+
+	InstructionScopeSession = types.InstructionScopeSession
+	InstructionScopeTurn    = types.InstructionScopeTurn
+
+	InstructionSourceSkillsCatalog     = types.InstructionSourceSkillsCatalog
+	InstructionSourceSkillInstructions = types.InstructionSourceSkillInstructions
+	InstructionSourceProgramGuide      = types.InstructionSourceProgramGuide
+	InstructionSourceSkillDependencies = types.InstructionSourceSkillDependencies
 )
 
 // Fragment describes one prompt section together with its intended instruction layer.
@@ -23,6 +36,12 @@ type Fragment struct {
 	Title  string `json:"title,omitempty"`
 	Body   string `json:"body,omitempty"`
 	Source string `json:"source,omitempty"`
+	// Scope carries the abstract instruction scope ("session" | "turn").
+	// Protocol adapters pick the final wire role from it (plan §4.12).
+	Scope string `json:"scope,omitempty"`
+	// InstructionSource labels the instruction producer
+	// (skills_catalog / skill_instructions / program_guide / ...).
+	InstructionSource string `json:"instruction_source,omitempty"`
 }
 
 // Layers stores structured prompt fragments before they are compiled into messages.
@@ -62,13 +81,44 @@ func (l *Layers) AddLayer(layer, title, body, source string) {
 	})
 }
 
+// AddScopedFragment appends a fragment carrying abstract instruction scope and
+// source metadata. Compiled messages keep scope/source only; protocol adapters
+// choose the final wire role (plan §4.12).
+func (l *Layers) AddScopedFragment(layer, scope, instructionSource, title, body, source string) {
+	if l == nil {
+		return
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return
+	}
+	normalizedLayer := normalizeInstructionLayer(layer)
+	if normalizedLayer == "" {
+		normalizedLayer = LayerBase
+	}
+	l.Fragments = append(l.Fragments, Fragment{
+		Layer:             normalizedLayer,
+		Role:              compiledRoleForLayer(normalizedLayer, ""),
+		Title:             strings.TrimSpace(title),
+		Body:              body,
+		Source:            strings.TrimSpace(source),
+		Scope:             types.NormalizeInstructionScope(scope),
+		InstructionSource: strings.TrimSpace(instructionSource),
+	})
+}
+
 // Append merges another layer collection into the receiver.
 func (l *Layers) Append(other *Layers) {
 	if l == nil || other == nil || len(other.Fragments) == 0 {
 		return
 	}
 	for _, fragment := range other.Fragments {
-		l.AddLayer(firstNonEmptyLayer(fragment.Layer, layerFromRole(fragment.Role)), fragment.Title, fragment.Body, fragment.Source)
+		layer := firstNonEmptyLayer(fragment.Layer, layerFromRole(fragment.Role))
+		if fragment.Scope != "" || fragment.InstructionSource != "" {
+			l.AddScopedFragment(layer, fragment.Scope, fragment.InstructionSource, fragment.Title, fragment.Body, fragment.Source)
+			continue
+		}
+		l.AddLayer(layer, fragment.Title, fragment.Body, fragment.Source)
 	}
 }
 
@@ -255,6 +305,22 @@ func attachCompiledInstructionMetadata(message *types.Message, layer string, fra
 		layer = LayerBase
 	}
 	message.Metadata["prompt_layer"] = layer
+	scope := ""
+	instructionSource := ""
+	for _, fragment := range fragments {
+		if scope == "" {
+			scope = types.NormalizeInstructionScope(fragment.Scope)
+		}
+		if instructionSource == "" {
+			instructionSource = strings.TrimSpace(fragment.InstructionSource)
+		}
+	}
+	if scope != "" {
+		message.Metadata[types.MetaInstructionScope] = scope
+	}
+	if instructionSource != "" {
+		message.Metadata[types.MetaInstructionSource] = instructionSource
+	}
 	if len(fragments) == 1 {
 		if title := strings.TrimSpace(fragments[0].Title); title != "" {
 			message.Metadata["prompt_title"] = title
@@ -280,6 +346,26 @@ func attachCompiledInstructionMetadata(message *types.Message, layer string, fra
 	if len(sources) > 0 {
 		message.Metadata["prompt_sources"] = sources
 	}
+}
+
+// NewInstructionMessage builds one canonical abstract instruction message.
+// The role is an internal pipeline placeholder (system); protocol adapters pick
+// the final wire role from scope/source (plan §4.12).
+func NewInstructionMessage(scope, instructionSource, body string) *types.Message {
+	scope = types.NormalizeInstructionScope(scope)
+	body = strings.TrimSpace(body)
+	if scope == "" || body == "" {
+		return nil
+	}
+	message := types.NewSystemMessage(body)
+	if message.Metadata == nil {
+		message.Metadata = types.NewMetadata()
+	}
+	message.Metadata.Set(types.MetaInstructionScope, scope)
+	if instructionSource = strings.TrimSpace(instructionSource); instructionSource != "" {
+		message.Metadata.Set(types.MetaInstructionSource, instructionSource)
+	}
+	return message
 }
 
 func renderFragment(fragment Fragment) string {

@@ -270,11 +270,36 @@ func (e *aicliActorChatExecutor) Execute(ctx context.Context, session *ChatSessi
 	}
 	// `/skill` 默认路径的一次性 pin：消费即焚，只随本回合的 SubmitPromptOption
 	// 跨包传递（guide → 回合 system 消息；pinnedTools → 稳定工具面冻结后叠加）。
-	if skillPin := consumeSkillTurnPin(session); skillPin != nil {
+	skillPin := consumeSkillTurnPin(session)
+	var turnMessages []runtimetypes.Message
+	// P1 常驻 catalog（§4.5/§5 P1 行 1）：session-scope 抽象指令置于 turn 消息
+	// 首位；没有 pin/mention 时也单独生效。loop 的 composeInitialHistory 会按
+	// scope 把它重定位到 leading 稳定前缀，落盘前剥离（prompt-only）。
+	if resident := buildResidentSkillCatalogMessage(session); resident != nil {
+		turnMessages = append(turnMessages, *resident)
+	}
+	if skillPin != nil {
 		if guide := strings.TrimSpace(skillPin.Guide); guide != "" {
-			submitOption.TurnSystemMessages = []runtimetypes.Message{*runtimetypes.NewSystemMessage(guide)}
+			turnMessages = append(turnMessages, *runtimetypes.NewSystemMessage(guide))
 		}
 		submitOption.TurnPinnedTools = skillPin.PinnedTools
+	}
+	// P0 mention 注入：仅用户发起回合；guide 在前、mention 片段在后（§4.4 注入点）。
+	// §4.11：本地预算裁决先于 preflight，超限只降级注入，不触发历史压缩。
+	if skillMentionTurnEligible(session, prompt, chatSkillMentionInteractiveTurn(session)) {
+		if mentionFragments, _ := buildSkillMentionTurnMessages(ctx, session, skillMentionTurnInput{
+			Prompt:          prompt,
+			Interactive:     chatSkillMentionInteractiveTurn(session),
+			SystemGenerated: chatSkillMentionSystemGeneratedPrompt(prompt),
+			Pin:             skillPin,
+			UsedTokens:      countSharedChatMessagesTokens(session.Messages) + skillMentionGuideTokens(skillPin),
+			BudgetTokens:    resolveSharedChatPromptBudget(session).ActiveTurnMaxTokens,
+		}); len(mentionFragments) > 0 {
+			turnMessages = append(turnMessages, mentionFragments...)
+		}
+	}
+	if len(turnMessages) > 0 {
+		submitOption.TurnSystemMessages = turnMessages
 	}
 	result, err := submitAICLIActorPrompt(withLivePermissionModeSource(ctx, session), actor, prompt, currentRunMetaForSession(session), submitOption)
 	if err != nil {

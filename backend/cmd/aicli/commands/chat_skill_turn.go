@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	logpkg "github.com/wwsheng009/ai-agent-runtime/internal/pkg/logger"
+	"github.com/wwsheng009/ai-agent-runtime/internal/prompt"
 	runtimeskill "github.com/wwsheng009/ai-agent-runtime/internal/skill"
 	runtimetypes "github.com/wwsheng009/ai-agent-runtime/internal/types"
 )
@@ -221,11 +222,15 @@ func resolveSkillTurnPin(session *ChatSession, request *SendSkillTurnRequest) (*
 		}
 	}
 	// SK-1/SK-2：前附全量 catalog（所有可用技能）+ 纪律块，镜像 Codex 常驻 directory。
-	if catalogBlock := buildSkillCatalogText(session, catalog); catalogBlock != "" {
-		if pin.Guide != "" {
-			pin.Guide = catalogBlock + "\n\n" + pin.Guide
-		} else {
-			pin.Guide = catalogBlock
+	// P1：catalog_resident 开启时 catalog 已由 buildResidentSkillCatalogMessage 常驻
+	// 在会话稳定前缀，pin guide 不再重复注入，只保留 ProgramGuide/降级描述。
+	if cfg := skillRuntimeConfig(session.Config); cfg == nil || !cfg.CatalogResidentEnabled() {
+		if catalogBlock := buildSkillCatalogText(session, catalog); catalogBlock != "" {
+			if pin.Guide != "" {
+				pin.Guide = catalogBlock + "\n\n" + pin.Guide
+			} else {
+				pin.Guide = catalogBlock
+			}
 		}
 	}
 
@@ -460,4 +465,27 @@ func buildSkillCatalogText(session *ChatSession, catalog *aicliFunctionCatalog) 
 		return ""
 	}
 	return body
+}
+
+// buildResidentSkillCatalogMessage 构建会话常驻技能目录的抽象指令消息
+// （plan §4.5/§5 P1 行 1）：scope=session、source=skills_catalog、prompt-only。
+// loop 的 composeInitialHistory 会按 scope 把它重定位到 leading 稳定前缀，
+// 落盘时由 stripSystemMessages 剥离；catalog_resident 关闭或目录为空时返回 nil。
+func buildResidentSkillCatalogMessage(session *ChatSession) *runtimetypes.Message {
+	if session == nil {
+		return nil
+	}
+	cfg := skillRuntimeConfig(session.Config)
+	if cfg == nil || !cfg.CatalogResidentEnabled() {
+		return nil
+	}
+	body := buildSkillCatalogText(session, ensureFunctionCatalog(session))
+	if strings.TrimSpace(body) == "" {
+		return nil
+	}
+	return prompt.NewInstructionMessage(
+		runtimetypes.InstructionScopeSession,
+		runtimetypes.InstructionSourceSkillsCatalog,
+		body,
+	)
 }

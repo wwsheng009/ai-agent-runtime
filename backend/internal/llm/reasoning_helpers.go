@@ -468,7 +468,32 @@ func decodeMapAny(raw interface{}) map[string]interface{} {
 func runtimeMessageToAdapterMessage(msg types.Message, protocol string, providerHint string, modelHints ...string) map[string]interface{} {
 	reasoning := reasoningFromMessageMetadata(msg.Metadata)
 	toolCalls := EncodeRuntimeToolCalls(msg.ToolCalls)
-	return buildProtocolMessageMap(msg.Role, msg.Content, msg.ContentParts, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, firstNonEmptyHint(modelHints), mapFromMetadata(msg.Metadata))
+	role := instructionLayerWireRole(msg, protocol)
+	return buildProtocolMessageMap(role, msg.Content, msg.ContentParts, toolCalls, msg.ToolCallID, reasoning, protocol, providerHint, firstNonEmptyHint(modelHints), mapFromMetadata(msg.Metadata))
+}
+
+// instructionLayerWireRole resolves the wire role of an abstract instruction
+// message (plan §4.12). Session-scope instructions keep the role planned by the
+// injection point (leading system/developer prefix). Turn-scope instructions are
+// projected to the protocol-native append-only role so they can never replay as
+// an assistant/model turn:
+//
+//	anthropic/gemini -> "user", codex -> "developer", openai/default -> "system".
+//
+// The scope/source metadata is consumed here and deliberately not copied onto
+// the protocol map, so internal instruction-layer keys never reach the wire.
+func instructionLayerWireRole(msg types.Message, protocol string) string {
+	if !types.IsInstructionMessage(msg) || types.InstructionScopeOf(msg) != types.InstructionScopeTurn {
+		return msg.Role
+	}
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "anthropic", "gemini":
+		return "user"
+	case "codex":
+		return "developer"
+	default:
+		return "system"
+	}
 }
 
 // RuntimeMessagesToProtocolMessages converts normalized runtime messages into

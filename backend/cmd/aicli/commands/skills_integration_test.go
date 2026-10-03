@@ -1816,3 +1816,58 @@ func TestResolveConfiguredSkillDirs_ConfigFileExecutableFallbackDoesNotLeakSkill
 		}
 	}
 }
+
+func TestAnalyzeSkillExposure_HidesTextSkillFunctionsInInteractiveTurn(t *testing.T) {
+	session := skillMentionHideTestSession(t, nil, false)
+	exposed, details := session.SkillsBinding.AnalyzeSkillExposure(session, "please use skill__alpha skill__bravo to handle this request")
+	if exposed == nil {
+		t.Fatal("expected exposure map")
+	}
+	if _, ok := exposed["skill__alpha"]; ok {
+		t.Fatalf("expected text skill pruned from exposure, got %v", exposed)
+	}
+	if _, ok := exposed["skill__bravo"]; !ok {
+		t.Fatalf("expected handler skill exposed, got %v", exposed)
+	}
+	if details == nil {
+		t.Fatal("expected exposure details")
+	}
+	// ExplicitMentions 保留原始词法命中用于诊断；ExposedFunctions 取过滤后的 map。
+	if !stringSliceContains(details.ExplicitMentions, "skill__alpha") {
+		t.Fatalf("expected lexical explicit mention retained for diagnostics, got %v", details.ExplicitMentions)
+	}
+	if stringSliceContains(details.ExposedFunctions, "skill__alpha") {
+		t.Fatalf("expected ExposedFunctions pruned of text skill, got %v", details.ExposedFunctions)
+	}
+	if !stringSliceContains(details.ExposedFunctions, "skill__bravo") {
+		t.Fatalf("expected handler skill in ExposedFunctions, got %v", details.ExposedFunctions)
+	}
+}
+
+func TestAnalyzeSkillExposure_KeepsTextSkillFunctionWhenHideDisabledOrHeadless(t *testing.T) {
+	disabled := false
+	cases := []struct {
+		name          string
+		hideText      *bool
+		noInteractive bool
+		jsonOutput    bool
+	}{
+		{name: "explicit disable", hideText: &disabled},
+		{name: "headless", noInteractive: true},
+		{name: "json output", jsonOutput: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			session := skillMentionHideTestSession(t, tc.hideText, tc.noInteractive)
+			session.JSONOutput = tc.jsonOutput
+
+			exposed, details := session.SkillsBinding.AnalyzeSkillExposure(session, "please use skill__alpha to handle this request")
+			if _, ok := exposed["skill__alpha"]; !ok {
+				t.Fatalf("expected text skill exposed when hide gate is off, got %v", exposed)
+			}
+			if details == nil || !stringSliceContains(details.ExposedFunctions, "skill__alpha") {
+				t.Fatalf("expected text skill in ExposedFunctions when hide gate is off, got %+v", details)
+			}
+		})
+	}
+}

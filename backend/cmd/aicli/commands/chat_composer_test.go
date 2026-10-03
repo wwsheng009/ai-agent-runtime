@@ -550,3 +550,156 @@ func TestNormalizeChatAgentPanelComposerReadErrorClosesPanelWithoutInterruptingS
 		t.Fatalf("expected agent panel exit request to reset prompt state, got %#v", snapshot)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// P2 `$` 技能补全：composer 集成
+
+func TestChatComposerControllerSkillMentionCompletionTabAndFallbacks(t *testing.T) {
+	session, _ := mentionTestSession(t, nil,
+		mentionTestSkill("alpha", "alpha body", `C:\skills\alpha\SKILL.md`),
+		mentionTestSkill("alpine", "alpine body", `C:\skills\alpine\SKILL.md`),
+	)
+	surface, _ := skillMentionCompletionTestSurface(t)
+	session.Surface = surface
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+
+	composer := newChatComposerController(session)
+	if composer.completion == nil {
+		t.Fatal("slash completion must still be created for the fixed surface")
+	}
+	if composer.skillCompletion == nil {
+		t.Fatal("expected $ skill completion controller when the gate is enabled")
+	}
+	hooks := composer.hooks()
+
+	// 唯一候选：Tab 替换为 `$name `。
+	replacement, ok := hooks.OnComplete(ui.LineEditorSnapshot{Text: "$alp", Cursor: 4})
+	if !ok || replacement.Text != "$alpha " || replacement.Cursor != len([]rune("$alpha ")) {
+		t.Fatalf("unique $ completion = %#v ok=%v, want $alpha /7", replacement, ok)
+	}
+	if chatPlanModeActive(session) {
+		t.Fatal("$ completion Tab must not toggle plan mode")
+	}
+
+	// 多候选：query 能加深公共前缀时只延伸前缀（不插空格）。
+	replacement, ok = hooks.OnComplete(ui.LineEditorSnapshot{Text: "$al", Cursor: 3})
+	if !ok || replacement.Text != "$alp" || replacement.Cursor != 4 {
+		t.Fatalf("multi-candidate prefix extension = %#v ok=%v, want $alp/4", replacement, ok)
+	}
+
+	// 0 候选：消费 Tab、不改文本、不落 plan mode。
+	replacement, ok = hooks.OnComplete(ui.LineEditorSnapshot{Text: "$zzz", Cursor: 4})
+	if !ok {
+		t.Fatal("zero-candidate $ query must consume Tab")
+	}
+	if replacement.Text != "" || replacement.Cursor != 0 {
+		t.Fatalf("zero-candidate $ query changed the draft: %#v", replacement)
+	}
+	if chatPlanModeActive(session) {
+		t.Fatal("zero-candidate $ query must not toggle plan mode")
+	}
+}
+
+func TestChatComposerControllerSkillMentionNoTokenStillTogglesPlanMode(t *testing.T) {
+	session := newPlanCommandSession("")
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+	composer := &chatComposerController{
+		session:         session,
+		prompt:          formatSessionUserPrompt(session),
+		skillCompletion: newChatSkillMentionCompletionController(session),
+	}
+	hooks := composer.hooks()
+
+	replacement, ok := hooks.OnComplete(ui.LineEditorSnapshot{Text: "draft", Cursor: len([]rune("draft"))})
+	if !ok {
+		t.Fatal("plain text Tab with a $ controller present must still toggle plan mode")
+	}
+	if replacement.Text != "draft" || replacement.Cursor != len([]rune("draft")) {
+		t.Fatalf("plan-mode toggle must preserve the draft, got %#v", replacement)
+	}
+	if !chatPlanModeActive(session) {
+		t.Fatal("expected plan mode to be active after plain text Tab")
+	}
+}
+
+func TestChatComposerControllerSkillMentionGateSkipsController(t *testing.T) {
+	newComposer := func(mode string, trusted bool) *chatComposerController {
+		session, _ := mentionTestSession(t, nil,
+			mentionTestSkill("alpha", "alpha body", `C:\skills\alpha\SKILL.md`),
+		)
+		surface, _ := skillMentionCompletionTestSurface(t)
+		session.Surface = surface
+		session.Config.SkillsRuntime.MentionInjection = mode
+		session.FolderTrust.Trusted = trusted
+		return newChatComposerController(session)
+	}
+
+	if composer := newComposer("off", true); composer.skillCompletion != nil {
+		t.Fatal("mode off must not create the $ completion controller")
+	}
+	if composer := newComposer("auto", false); composer.skillCompletion != nil {
+		t.Fatal("auto + untrusted must not create the $ completion controller")
+	}
+	if composer := newComposer("on", false); composer.skillCompletion == nil {
+		t.Fatal("explicit on must create the controller even when untrusted")
+	}
+}
+
+func TestChatComposerControllerSkillAndSlashCompletionCoexist(t *testing.T) {
+	session, _ := mentionTestSession(t, nil,
+		mentionTestSkill("alpha", "alpha body", `C:\skills\alpha\SKILL.md`),
+		mentionTestSkill("alpine", "alpine body", `C:\skills\alpine\SKILL.md`),
+	)
+	surface, _ := skillMentionCompletionTestSurface(t)
+	session.Surface = surface
+	coord := newTestChatInteractionCoordinator(t, session)
+	session.Interaction = coord
+	composer := newChatComposerController(session)
+	if composer.completion == nil || composer.skillCompletion == nil {
+		t.Fatal("expected both completion controllers")
+	}
+	hooks := composer.hooks()
+
+	// slash 行为不因 `$` 控制器回归：/sh 仍由 slash 补全接管并选 /shell。
+	replacement, ok := hooks.OnComplete(ui.LineEditorSnapshot{Text: "/sh", Cursor: 3})
+	if !ok || replacement.Text != "/shell " {
+		t.Fatalf("slash completion regression: %#v ok=%v", replacement, ok)
+	}
+
+	if slashCompletionPopupOwner == skillMentionCompletionPopupOwner {
+		t.Fatal("slash and skill popups must use distinct owners")
+	}
+
+	// 互斥：slash 弹层 active 时 `$` 不 active；输入 `$` 后 slash 自行清理。
+	composer.onChange(ui.LineEditorSnapshot{Text: "/m", Cursor: 2})
+	if !composer.completion.state.Active {
+		t.Fatalf("expected slash popup active for /m, got %+v", composer.completion.state)
+	}
+	if composer.skillCompletion.state.Active {
+		t.Fatalf("$ popup must stay inactive for slash text, got %+v", composer.skillCompletion.state)
+	}
+
+	composer.onChange(ui.LineEditorSnapshot{Text: "$a", Cursor: 2})
+	if composer.completion.state.Active {
+		t.Fatalf("slash popup must clear for `$` text, got %+v", composer.completion.state)
+	}
+	if !composer.skillCompletion.state.Active {
+		t.Fatalf("expected $ popup active for $a, got %+v", composer.skillCompletion.state)
+	}
+
+	// onNavigate/onCancelPopup 双控制器分发：`$` 弹层先由 skill 控制器消费。
+	if !composer.onNavigate(ui.LineEditorSnapshot{Text: "$a", Cursor: 2}, 1) {
+		t.Fatal("navigate must be consumed by the active $ popup")
+	}
+	if composer.skillCompletion.state.Selected != 1 {
+		t.Fatalf("expected $ selection to advance, got %+v", composer.skillCompletion.state)
+	}
+	if !composer.onCancelPopup(ui.LineEditorSnapshot{}) {
+		t.Fatal("cancel must close the active $ popup")
+	}
+	if composer.skillCompletion.state.Active || composer.completion.state.Active {
+		t.Fatal("cancel must reset the $ popup and leave slash inactive")
+	}
+}

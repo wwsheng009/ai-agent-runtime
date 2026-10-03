@@ -542,3 +542,155 @@ func TestAICLIFunctionCatalog_ResolvesRelativePathsAgainstWorkspaceRoot(t *testi
 		t.Fatalf("expected the tool to run after the policy allowed it, got %q", output)
 	}
 }
+
+// skillMentionHideTestSession 构造 P3 函数面收敛用例的会话：技能面含文本类
+// （alpha）、handler（bravo）、workflow（charlie）三种形态，配置开关与交互形态
+// 由调用方指定（hideText=nil 表示默认 on）。
+func skillMentionHideTestSession(t *testing.T, hideText *bool, noInteractive bool) *ChatSession {
+	t.Helper()
+	registry := functions.NewFunctionRegistry()
+	catalog := newAICLIFunctionCatalog("openai", registry)
+
+	register := func(name string, skillDef *runtimeskill.Skill) *SkillFunction {
+		fn := &SkillFunction{
+			functionName: name,
+			skill:        skillDef,
+			schema: map[string]interface{}{
+				"name":        name,
+				"description": name + " skill",
+				"parameters":  map[string]interface{}{"type": "object"},
+			},
+		}
+		catalog.RegisterSkillFunction(fn)
+		return fn
+	}
+	textFn := register("skill__alpha", &runtimeskill.Skill{Name: "alpha"})
+	handlerFn := register("skill__bravo", &runtimeskill.Skill{
+		Name:    "bravo",
+		Handler: runtimeskill.SkillHandlerFunc(nil),
+	})
+	workflowFn := register("skill__charlie", &runtimeskill.Skill{
+		Name:     "charlie",
+		Workflow: &runtimeskill.Workflow{Steps: []runtimeskill.WorkflowStep{{ID: "step-1", Name: "step"}}},
+	})
+
+	binding := &skillsRuntimeBinding{
+		exposureMode: skillExposurePrefer,
+		catalog:      catalog,
+		skillFunctions: map[string]*SkillFunction{
+			"skill__alpha":   textFn,
+			"skill__bravo":   handlerFn,
+			"skill__charlie": workflowFn,
+		},
+	}
+	catalog.SetSkillsBinding(binding)
+	return &ChatSession{
+		FunctionCatalog:  catalog,
+		FunctionRegistry: registry,
+		SkillsBinding:    binding,
+		SkillsMode:       skillExposurePrefer,
+		Config: &config.Config{
+			SkillsRuntime: &config.SkillsRuntimeConfig{MentionHideTextSkillFunctions: hideText},
+		},
+		NoInteractive: noInteractive,
+	}
+}
+
+func TestAICLIFunctionCatalog_SelectRequestFunctions_HidesTextSkillFunctionsInInteractiveTurn(t *testing.T) {
+	session := skillMentionHideTestSession(t, nil, false)
+	catalog := session.FunctionCatalog
+
+	selection, details := catalog.SelectRequestFunctions(session, "please use skill__alpha skill__bravo skill__charlie to handle this request")
+	if selection == nil {
+		t.Fatal("expected function selection")
+	}
+	if selectionContainsFunction(selection, "skill__alpha") {
+		t.Fatalf("expected text skill hidden from interactive request surface, got %v", selection.FinalFunctionNames)
+	}
+	if !selectionContainsFunction(selection, "skill__bravo") || !selectionContainsFunction(selection, "skill__charlie") {
+		t.Fatalf("expected handler/workflow skills to stay exposed, got %v", selection.FinalFunctionNames)
+	}
+	for _, name := range selection.SkillFunctions {
+		if name == "skill__alpha" {
+			t.Fatalf("SkillFunctions must stay consistent with hidden text skill, got %v", selection.SkillFunctions)
+		}
+	}
+	for _, schema := range selection.Schemas {
+		if schema["name"] == "skill__alpha" {
+			t.Fatalf("Schemas must stay consistent with hidden text skill, got %v", selection.Schemas)
+		}
+	}
+	if details == nil || !stringSliceContains(details.ExplicitMentions, "skill__alpha") {
+		t.Fatalf("expected lexical explicit mention retained for diagnostics, got %+v", details)
+	}
+	// /call 与 /skill --direct 走注册表而非请求选择面：隐藏后函数仍须可解析。
+	if catalog.SkillSchema("skill__alpha") == nil {
+		t.Fatal("hidden text skill must stay registered for /call and /skill --direct")
+	}
+
+	stable := catalog.SelectStableSessionFunctions(session)
+	if stable == nil {
+		t.Fatal("expected stable function selection")
+	}
+	if selectionContainsFunction(stable, "skill__alpha") {
+		t.Fatalf("expected text skill hidden from stable surface, got %v", stable.FinalFunctionNames)
+	}
+	if !selectionContainsFunction(stable, "skill__bravo") || !selectionContainsFunction(stable, "skill__charlie") {
+		t.Fatalf("expected handler/workflow skills in stable surface, got %v", stable.FinalFunctionNames)
+	}
+}
+
+func TestAICLIFunctionCatalog_SelectRequestFunctions_KeepsTextSkillFunctionWhenHideDisabledOrHeadless(t *testing.T) {
+	disabled := false
+	cases := []struct {
+		name          string
+		hideText      *bool
+		noInteractive bool
+		jsonOutput    bool
+	}{
+		{name: "explicit disable", hideText: &disabled},
+		{name: "headless", noInteractive: true},
+		{name: "json output", jsonOutput: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			session := skillMentionHideTestSession(t, tc.hideText, tc.noInteractive)
+			session.JSONOutput = tc.jsonOutput
+
+			selection, _ := session.FunctionCatalog.SelectRequestFunctions(session, "please use skill__alpha to handle this request")
+			if selection == nil {
+				t.Fatal("expected function selection")
+			}
+			if !selectionContainsFunction(selection, "skill__alpha") {
+				t.Fatalf("expected text skill exposed when hide gate is off, got %v", selection.FinalFunctionNames)
+			}
+			stable := session.FunctionCatalog.SelectStableSessionFunctions(session)
+			if stable == nil {
+				t.Fatal("expected stable function selection")
+			}
+			if !selectionContainsFunction(stable, "skill__alpha") {
+				t.Fatalf("expected text skill exposed in stable surface when hide gate is off, got %v", stable.FinalFunctionNames)
+			}
+		})
+	}
+}
+
+func TestAICLIFunctionCatalog_SelectRequestFunctions_HidesTextSkillFunctionInAutoMode(t *testing.T) {
+	session := skillMentionHideTestSession(t, nil, false)
+	// 生产默认走 auto：显式提及先经 AnalyzeSkillExposure 剪枝，再由选择面兜底。
+	session.SkillsBinding.exposureMode = skillExposureAuto
+
+	selection, details := session.FunctionCatalog.SelectRequestFunctions(session, "please use skill__alpha to handle this request")
+	if selection == nil {
+		t.Fatal("expected function selection")
+	}
+	if selectionContainsFunction(selection, "skill__alpha") {
+		t.Fatalf("expected text skill hidden in auto mode, got %v", selection.FinalFunctionNames)
+	}
+	if details == nil || !stringSliceContains(details.ExplicitMentions, "skill__alpha") {
+		t.Fatalf("expected lexical explicit mention retained for diagnostics, got %+v", details)
+	}
+	if details != nil && stringSliceContains(details.ExposedFunctions, "skill__alpha") {
+		t.Fatalf("expected exposure analysis pruned of text skill, got %v", details.ExposedFunctions)
+	}
+}

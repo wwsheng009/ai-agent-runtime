@@ -928,6 +928,32 @@ type SkillsRuntimeConfig struct {
 	// Agent Skills 占位符替换（$ARGUMENTS、$name、${SKILL_DIR} 等）。
 	// 默认开启；显式 "off"/"false"/"0" 关闭。
 	ArgumentSubstitution string `yaml:"argument_substitution" mapstructure:"argument_substitution" env:"SKILLS_RUNTIME_ARGUMENT_SUBSTITUTION"`
+	// MentionInjection 控制 Codex 风格的 `$skill-name` 提及注入路径
+	// （docs/plan/codex-text-skill-mention-injection-plan-20261002.md §4.7 / §5 P3）：
+	//   - "off"：不解析、不注入（显式回退开关）；
+	//   - "auto"（P3 起默认）：仅交互式用户回合注入，且需通过 folder-trust 门控（Q12）；
+	//   - "on"：所有用户发起回合注入（含 headless/JSON；系统生成输入仍不解析）。
+	// 未配置（nil/空串）或未知值统一按 "auto" 处理；headless/JSON 投影不注入，
+	// 需要彻底关闭时显式写 "off"。
+	MentionInjection string `yaml:"mention_injection" mapstructure:"mention_injection" env:"SKILLS_RUNTIME_MENTION_INJECTION"`
+	// MentionMultiLimit 是单回合最多注入的文本技能数；默认 4，0/负数回退默认。
+	MentionMultiLimit int `yaml:"mention_multi_limit" mapstructure:"mention_multi_limit" env:"SKILLS_RUNTIME_MENTION_MULTI_LIMIT"`
+	// MentionInjectMaxChars 是单技能注入正文的字符上限（超出截断+标记）；
+	// 默认 32768，0/负数回退默认。
+	MentionInjectMaxChars int `yaml:"mention_inject_max_chars" mapstructure:"mention_inject_max_chars" env:"SKILLS_RUNTIME_MENTION_INJECT_MAX_CHARS"`
+	// MentionInjectTotalChars 是单回合注入正文总量的字符上限（按序保留）；
+	// 默认 65536，0/负数回退默认。
+	MentionInjectTotalChars int `yaml:"mention_inject_total_chars" mapstructure:"mention_inject_total_chars" env:"SKILLS_RUNTIME_MENTION_INJECT_TOTAL_CHARS"`
+	// MentionHideTextSkillFunctions 控制 P3 函数面收敛：开启后，交互式请求面
+	// 不再向模型暴露文本类（无 handler/workflow）技能的 `skill__<name>` 函数，
+	// 避免与 `$name` 正文注入形成双路径。显式函数路径不受影响：
+	// `/call skill__<name>`、`/skill --direct`、API/exec 调用仍可用；
+	// handler/workflow 技能函数不受影响。nil/true 默认开启，显式 false 回退。
+	MentionHideTextSkillFunctions *bool `yaml:"mention_hide_text_skill_functions" mapstructure:"mention_hide_text_skill_functions" env:"SKILLS_RUNTIME_MENTION_HIDE_TEXT_SKILL_FUNCTIONS"`
+	// CatalogResident 是 P1 常驻技能目录开关：开启后每回合请求都把 catalog
+	// 作为 session-scope 抽象指令放在稳定前缀（plan §4.5/§5 P1）。
+	// 默认 false；pin 回合的 guide catalog 在开启时自动去重。
+	CatalogResident bool `yaml:"catalog_resident" mapstructure:"catalog_resident" env:"SKILLS_RUNTIME_CATALOG_RESIDENT"`
 	// DisabledSkills 是 SK-6 的 per-skill 启停名单：列出的 skill 名不再注册到
 	// registry（loader 过滤器权威点），但目录与诊断仍保留。
 	// 与 profile 的 skill 允许/拒绝名单取交集：deny 优先（disabled 覆盖 allow）。
@@ -1002,6 +1028,91 @@ func (c *SkillsRuntimeConfig) CatalogBudget() int {
 		return 8000
 	}
 	return c.CatalogBudgetChars
+}
+
+// CatalogResidentEnabled 报告常驻技能目录（session-scope catalog 抽象指令）
+// 是否开启。nil 安全；默认 false（P1 灰度，plan §4.5/§4.7）。
+func (c *SkillsRuntimeConfig) CatalogResidentEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.CatalogResident
+}
+
+// Skill mention injection 的 canonical 模式值与默认预算（plan §4.7 / §5 P0）。
+const (
+	SkillMentionInjectionOff  = "off"
+	SkillMentionInjectionAuto = "auto"
+	SkillMentionInjectionOn   = "on"
+
+	DefaultSkillMentionMultiLimit       = 4
+	DefaultSkillMentionInjectMaxChars   = 32768
+	DefaultSkillMentionInjectTotalChars = 65536
+)
+
+// MentionInjectionMode 返回规范化的提及注入模式：off|auto|on。
+// 未配置（nil/空串）或未知值统一按 auto（P3 起默认；解析风格对齐 document_mode）。
+func (c *SkillsRuntimeConfig) MentionInjectionMode() string {
+	if c == nil {
+		return SkillMentionInjectionAuto
+	}
+	switch strings.ToLower(strings.TrimSpace(c.MentionInjection)) {
+	case SkillMentionInjectionOff:
+		return SkillMentionInjectionOff
+	case SkillMentionInjectionAuto:
+		return SkillMentionInjectionAuto
+	case SkillMentionInjectionOn:
+		return SkillMentionInjectionOn
+	default:
+		return SkillMentionInjectionAuto
+	}
+}
+
+// MentionInjectionEnabled 报告给定用户回合形态是否应执行提及注入：
+// on 恒开，auto 仅交互式回合，off/未配置恒关。
+func (c *SkillsRuntimeConfig) MentionInjectionEnabled(interactive bool) bool {
+	switch c.MentionInjectionMode() {
+	case SkillMentionInjectionOn:
+		return true
+	case SkillMentionInjectionAuto:
+		return interactive
+	default:
+		return false
+	}
+}
+
+// MentionMultiLimitValue 返回单回合最多注入的文本技能数；0/负数回退默认 4。
+func (c *SkillsRuntimeConfig) MentionMultiLimitValue() int {
+	if c == nil || c.MentionMultiLimit <= 0 {
+		return DefaultSkillMentionMultiLimit
+	}
+	return c.MentionMultiLimit
+}
+
+// MentionInjectMaxCharsValue 返回单技能正文上限；0/负数回退默认 32768。
+func (c *SkillsRuntimeConfig) MentionInjectMaxCharsValue() int {
+	if c == nil || c.MentionInjectMaxChars <= 0 {
+		return DefaultSkillMentionInjectMaxChars
+	}
+	return c.MentionInjectMaxChars
+}
+
+// MentionInjectTotalCharsValue 返回回合注入总量上限；0/负数回退默认 65536。
+func (c *SkillsRuntimeConfig) MentionInjectTotalCharsValue() int {
+	if c == nil || c.MentionInjectTotalChars <= 0 {
+		return DefaultSkillMentionInjectTotalChars
+	}
+	return c.MentionInjectTotalChars
+}
+
+// MentionHideTextSkillFunctionsEnabled 报告交互式请求面是否隐藏文本类
+// `skill__<name>` 函数（P3 函数面收敛，plan §5 P3 / §8 Q5）。
+// nil 或 *true → 隐藏；显式 false → 回退暴露（显式函数路径始终可用）。
+func (c *SkillsRuntimeConfig) MentionHideTextSkillFunctionsEnabled() bool {
+	if c == nil || c.MentionHideTextSkillFunctions == nil {
+		return true
+	}
+	return *c.MentionHideTextSkillFunctions
 }
 
 // ServerConfig holds basic server info (used by aicli config command).

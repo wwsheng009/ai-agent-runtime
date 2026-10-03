@@ -238,7 +238,28 @@ func (e *aicliSharedChatExecutor) execute(ctx context.Context, session *ChatSess
 			}
 		}
 	}
+	// P1 常驻 catalog（§4.5/§5 P1 行 1）：session-scope 抽象指令放在 auto-compact
+	// 之后追加，不参与历史压缩决策；loop 的 composeInitialHistory 按 scope 把它
+	// 重定位到 leading 稳定前缀，落盘时由 stripSystemMessages 剥离（prompt-only）。
+	if resident := buildResidentSkillCatalogMessage(session); resident != nil {
+		history = append(history, *resident)
+	}
 	promptBudget := resolveSharedChatPromptBudget(session)
+	// P0 mention 注入（§4.4 共享 chatcore 注入点）：放在 auto-compact 之后追加，
+	// 保证注入永远不参与历史压缩决策；追加前用 active-turn 预算做本地裁决
+	// （§4.11），超限只降级注入本身（截断→丢弃→全弃）。
+	if skillMentionTurnEligible(session, prompt, chatSkillMentionInteractiveTurn(session)) {
+		if mentionFragments, _ := buildSkillMentionTurnMessages(ctx, session, skillMentionTurnInput{
+			Prompt:          prompt,
+			Interactive:     chatSkillMentionInteractiveTurn(session),
+			SystemGenerated: isGoalContinuation,
+			Pin:             skillPin,
+			UsedTokens:      countSharedChatMessagesTokens(history) + estimateSharedChatTokenCount(prompt) + 4,
+			BudgetTokens:    promptBudget.ActiveTurnMaxTokens,
+		}); len(mentionFragments) > 0 {
+			history = append(history, mentionFragments...)
+		}
+	}
 	historyCompactor := buildSharedChatPromptPreflightCompactor(session, renderer)
 	if isGoalContinuation {
 		historyCompactor = nil

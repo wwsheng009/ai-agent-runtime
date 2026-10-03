@@ -354,6 +354,9 @@ func (c *aicliFunctionCatalog) SelectRequestFunctions(session *ChatSession, prom
 	} else {
 		selection = filterImageGenerationToolExposure(session, prompt, selection, exposureDetails)
 	}
+	// P3：交互式请求面收敛文本类 skill 函数（mention 注入路径接管其正文）。
+	// 图片工具判定在前，保证既有图片暴露/抑制组合语义不变。
+	selection = c.filterMentionHiddenTextSkillFunctions(session, selection)
 	return c.ensureInvariantGoalFunctionsSelected(selection), exposureDetails
 }
 
@@ -396,12 +399,79 @@ func (c *aicliFunctionCatalog) SelectStableSessionFunctions(session *ChatSession
 		if entry == nil || len(entry.schema) == 0 {
 			continue
 		}
+		// P3：稳定函数面与请求面同一口径，被 mention 隐藏的文本类 skill
+		// 不得从稳定超集重新进入模型可见面。
+		if skillMentionHideTextSkillFunction(session, c.skillFunctionForCatalogName(name)) {
+			continue
+		}
 		selection.SkillFunctions = append(selection.SkillFunctions, name)
 		selection.FinalFunctionNames = append(selection.FinalFunctionNames, name)
 		selection.Schemas = append(selection.Schemas, cloneFunctionSchema(entry.schema))
 	}
 	selection = filterStableImageGenerationToolExposure(session, selection)
 	return c.normalizeFunctionSelection(c.ensureInvariantGoalFunctionsSelected(selection))
+}
+
+// skillMentionHideTextSkillFunction 报告交互式请求面是否应隐藏该文本类
+// （纯说明型）skill 函数：`$mention` 注入路径接管文本技能正文后，函数面不再
+// 暴露 skill__，避免模型绕过注入直接调用（plan §5 P3 / §8 Q5）。
+//
+// 门控三条件：配置开关（mention_hide_text_skill_functions 默认 on，显式 false
+// 可回退）+ 交互式用户回合（headless/JSON 不隐藏）+ 文本类（无 handler/workflow）。
+// handler/workflow 技能必须保留暴露；/call、/skill --direct、API/exec 不经此
+// 选择面，行为不变。
+func skillMentionHideTextSkillFunction(session *ChatSession, fn *SkillFunction) bool {
+	if session == nil || fn == nil {
+		return false
+	}
+	cfg := skillRuntimeConfig(session.Config)
+	if cfg == nil || !cfg.MentionHideTextSkillFunctionsEnabled() {
+		return false
+	}
+	if !chatSkillMentionInteractiveTurn(session) {
+		return false
+	}
+	return skillUsesDefaultExecution(fn.resolvedTurnSkill())
+}
+
+// skillFunctionForCatalogName 解析目录条目对应的 *SkillFunction（仅 skill 条目）；
+// 目录条目缺失时回退到 binding 的技能函数表。非技能名返回 nil。
+func (c *aicliFunctionCatalog) skillFunctionForCatalogName(name string) *SkillFunction {
+	if c == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	if entry := c.entries[name]; entry != nil && entry.isSkill {
+		if fn, ok := entry.fn.(*SkillFunction); ok && fn != nil {
+			return fn
+		}
+	}
+	if c.skillsBinding == nil {
+		return nil
+	}
+	return c.skillsBinding.skillFunctions[name]
+}
+
+// filterMentionHiddenTextSkillFunctions 从请求选择中剔除被 mention 收敛的
+// 文本类 skill 函数，保持 SkillFunctions / FinalFunctionNames / Schemas
+// 三者一致；builtin/goal/图片工具条目不经此路径。
+func (c *aicliFunctionCatalog) filterMentionHiddenTextSkillFunctions(session *ChatSession, selection *aicliFunctionSelection) *aicliFunctionSelection {
+	if c == nil || selection == nil || len(selection.SkillFunctions) == 0 {
+		return selection
+	}
+	var hidden []string
+	for _, name := range selection.SkillFunctions {
+		if skillMentionHideTextSkillFunction(session, c.skillFunctionForCatalogName(name)) {
+			hidden = append(hidden, name)
+		}
+	}
+	if len(hidden) == 0 {
+		return selection
+	}
+	return removeFunctionsFromSelection(selection, hidden...)
 }
 
 func (c *aicliFunctionCatalog) ensureInvariantGoalFunctionsSelected(selection *aicliFunctionSelection) *aicliFunctionSelection {

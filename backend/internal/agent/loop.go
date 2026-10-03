@@ -685,18 +685,20 @@ func (loop *ReActLoop) run(ctx context.Context, prompt string, options loopRunOp
 	// Previously persisted history is immutable until explicit compaction. Runtime
 	// mode changes are represented by appended reminders, never by deleting an old
 	// plan-mode item from the provider prefix.
-	history := cloneMessageHistory(options.History)
 	// 回合级 system 注入（如 /skill 的 ProgramGuide）：只进入本次 run 的请求
 	// 历史，跟随 ctx 生命周期，不被写入会话持久历史。
-	history = append(history, turnSystemMessagesFromContext(ctx)...)
+	turnMessages := turnSystemMessagesFromContext(ctx)
 	// §5.4 / §7.3：主 Agent 路由启用时追加一次性引导片段。它与 /skill 的
 	// ProgramGuide 同属「回合级 system 注入」通道：只进入本次 run 的请求历史，
 	// 落盘前被剥掉（Durable=false），因此不改写任何已发送消息（INV-1）；文本只
 	// 依赖冻结后的 loop 配置，turn 内逐字节稳定（INV-2）。
 	if routingMessage := mainAgentRoutingSystemMessage(loop.mainAgentRouteConfig()); routingMessage != nil {
-		history = append(history, *routingMessage)
+		turnMessages = append(turnMessages, *routingMessage)
 	}
-	history = mergeConfiguredSystemPrompt(history, loop.agent.config.SystemPrompt)
+	// P1 §4.5/§4.12：session-scope 抽象指令（如常驻 catalog）从持久历史与回合
+	// 消息中提取，重定位到 leading 稳定 system 前缀之后；turn-scope 片段保持
+	// 尾部原有顺序。无 session 指令时与旧装配逐字节等价。
+	history := composeInitialHistory(options.History, turnMessages, loop.agent.config.SystemPrompt)
 	if options.IncludePrompt {
 		history = append(history, *types.NewUserMessage(prompt))
 	}
@@ -5272,6 +5274,47 @@ func mergeConfiguredSystemPrompt(history []types.Message, systemPrompt string) [
 	merged = append(merged, *types.NewSystemMessage(desired))
 	merged = append(merged, cloneMessageHistory(history)...)
 	return merged
+}
+
+// composeInitialHistory 为一次 run 装配请求历史（plan §4.5/§4.12）：
+//
+//   - 从持久历史与回合消息中提取 scope=session 的抽象指令消息（Clone），
+//     其余消息按原相对顺序组成 base；
+//   - base 先合并配置 system prompt；
+//   - 提取出的 session 指令插入 base 的 leading 连续 system 前缀之后
+//     （无 leading system 时插入 index 0），保证常驻片段位于稳定前缀，
+//     不随回合尾部漂移；
+//   - turn-scope 片段留在 base 尾部，routing/prompt 的追加顺序不变。
+//
+// 输入切片与其中的消息不会被原地修改。未提取到 session 指令时返回值与旧
+// "append turn messages → mergeConfiguredSystemPrompt" 装配逐字节等价。
+func composeInitialHistory(history []types.Message, turnMessages []types.Message, systemPrompt string) []types.Message {
+	sessionInstructions := make([]types.Message, 0, 2)
+	base := make([]types.Message, 0, len(history)+len(turnMessages))
+	appendBase := func(messages []types.Message) {
+		for _, message := range messages {
+			if types.InstructionScopeOf(message) == types.InstructionScopeSession {
+				sessionInstructions = append(sessionInstructions, *message.Clone())
+				continue
+			}
+			base = append(base, *message.Clone())
+		}
+	}
+	appendBase(history)
+	appendBase(turnMessages)
+	base = mergeConfiguredSystemPrompt(base, systemPrompt)
+	if len(sessionInstructions) == 0 {
+		return base
+	}
+	insertAt := 0
+	for insertAt < len(base) && base[insertAt].Role == "system" {
+		insertAt++
+	}
+	composed := make([]types.Message, 0, len(base)+len(sessionInstructions))
+	composed = append(composed, base[:insertAt]...)
+	composed = append(composed, sessionInstructions...)
+	composed = append(composed, base[insertAt:]...)
+	return composed
 }
 
 func hasSystemPrompt(history []types.Message, systemPrompt string) bool {

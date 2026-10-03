@@ -767,8 +767,8 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:        "/skills",
-			Usage:       "/skills [query|list|select|enable <name>|disable <name>|reload]",
-			Summary:     "列出/选择/启停/重载 skill（重载会重扫技能目录并热刷新函数面）",
+			Usage:       "/skills [query|list|select|enable <name>|disable <name>|reload]（聊天输入 $name 可提及技能）",
+			Summary:     "列出/选择/启停/重载 skill；聊天输入中用 $name 提及文本类技能可直接注入正文（重载会重扫技能目录并热刷新函数面）",
 			Group:       string(chatSlashCommandGroupFunctions),
 			AcceptsArgs: true,
 			Args: []chatSlashCommandArgSpec{

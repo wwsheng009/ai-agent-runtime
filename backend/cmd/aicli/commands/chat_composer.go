@@ -16,6 +16,9 @@ type chatComposerController struct {
 	prompt     string
 	initial    ui.LineEditorSnapshot
 	completion *chatSlashCompletionController
+	// skillCompletion 是 `$` 技能补全控制器；门控不满足（off/未信任/无 surface）
+	// 时保持 nil，composer 不创建、不弹层。
+	skillCompletion *chatSkillMentionCompletionController
 	// mentionRoot 是 @ 路径补全的扫描根；为空时取进程工作目录（测试注入用）。
 	mentionRoot string
 }
@@ -77,6 +80,9 @@ func newChatComposerController(session *ChatSession) *chatComposerController {
 	if shouldEnableSlashCompletion(session) {
 		controller.completion = newChatSlashCompletionController(session)
 	}
+	if shouldEnableSkillMentionCompletion(session) {
+		controller.skillCompletion = newChatSkillMentionCompletionController(session)
+	}
 	return controller
 }
 
@@ -97,6 +103,9 @@ func (c *chatComposerController) Close() {
 	}
 	if c.completion != nil {
 		c.completion.Clear()
+	}
+	if c.skillCompletion != nil {
+		c.skillCompletion.Clear()
 	}
 	if c.session != nil && c.session.Surface != nil {
 		c.session.Surface.SetPromptEditorStatusLine("")
@@ -122,7 +131,7 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
 		SuppressSubmitEcho:    chatComposerUsesFixedSurface(c.session),
 	}
-	if c.completion != nil {
+	if c.completion != nil || c.skillCompletion != nil {
 		hooks.OnNavigate = c.onNavigate
 		hooks.OnSubmit = c.onSubmit
 		hooks.OnCancelPopup = c.onCancelPopup
@@ -154,6 +163,9 @@ func (c *chatComposerController) onChange(snapshot ui.LineEditorSnapshot) {
 	}
 	if c.completion != nil {
 		c.completion.UpdateSnapshot(snapshot)
+	}
+	if c.skillCompletion != nil {
+		c.skillCompletion.UpdateSnapshot(snapshot)
 	}
 	if c.session.Surface != nil {
 		c.session.Surface.SetPromptEditorStatusLine(formatChatComposerEditorStatus(snapshot))
@@ -220,6 +232,16 @@ func (c *chatComposerController) onComplete(snapshot ui.LineEditorSnapshot) (ui.
 		}
 		return ui.LineEditorReplacement{}, true
 	}
+	// `$` 技能补全：在 @ 分支之后、slash/plan-mode 判断之前接管 Tab。
+	// 无有效 token 时返回 false，Tab 继续回落（保持既有语义）。
+	if c.skillCompletion != nil {
+		if nextText, nextCursor, ok := c.skillCompletion.ApplyCompletion(snapshot.Text, snapshot.Cursor); ok {
+			if nextText != snapshot.Text || nextCursor != snapshot.Cursor {
+				return ui.LineEditorReplacement{Text: nextText, Cursor: nextCursor}, true
+			}
+			return ui.LineEditorReplacement{}, true
+		}
+	}
 	// Preserve Tab completion semantics for slash-command drafts. Everywhere
 	// else in the main chat composer, Tab is the plan-mode toggle shortcut.
 	if isSlashCommandInput(snapshot.Text) {
@@ -254,18 +276,30 @@ func (c *chatComposerController) setStatusLine(status string) {
 }
 
 func (c *chatComposerController) onNavigate(_ ui.LineEditorSnapshot, delta int) bool {
-	return c != nil && c.completion != nil && c.completion.Navigate(delta)
+	if c == nil {
+		return false
+	}
+	if c.completion != nil && c.completion.Navigate(delta) {
+		return true
+	}
+	return c.skillCompletion != nil && c.skillCompletion.Navigate(delta)
 }
 
 func (c *chatComposerController) onSubmit(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
-	if c == nil || c.completion == nil {
+	if c == nil || (c.completion == nil && c.skillCompletion == nil) {
 		return ui.LineEditorReplacement{}, false
 	}
 	before := 0
 	if c.session != nil {
 		before = len(c.session.ImagePaths)
 	}
-	nextText, nextCursor, ok := c.completion.ApplySubmission(snapshot.Text, snapshot.Cursor)
+	nextText, nextCursor, ok := snapshot.Text, snapshot.Cursor, false
+	if c.completion != nil {
+		nextText, nextCursor, ok = c.completion.ApplySubmission(snapshot.Text, snapshot.Cursor)
+	}
+	if !ok && c.skillCompletion != nil {
+		nextText, nextCursor, ok = c.skillCompletion.ApplySubmission(snapshot.Text, snapshot.Cursor)
+	}
 	if !ok {
 		// 普通提交：按草稿里存活的 [Image #N] 令牌裁剪附件（删令牌即弃图）。
 		// 只约束由令牌引入的附件，其它来源（ACP/Web/resume）不受影响。
@@ -284,7 +318,13 @@ func (c *chatComposerController) onSubmit(snapshot ui.LineEditorSnapshot) (ui.Li
 }
 
 func (c *chatComposerController) onCancelPopup(ui.LineEditorSnapshot) bool {
-	return c != nil && c.completion != nil && c.completion.Cancel()
+	if c == nil {
+		return false
+	}
+	if c.completion != nil && c.completion.Cancel() {
+		return true
+	}
+	return c.skillCompletion != nil && c.skillCompletion.Cancel()
 }
 
 func (c *chatComposerController) onTranscriptRequested(snapshot ui.LineEditorSnapshot) bool {

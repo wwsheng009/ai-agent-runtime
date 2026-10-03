@@ -152,11 +152,22 @@ func (b *skillsRuntimeBinding) AnalyzeSkillExposure(session *ChatSession, prompt
 		return true
 	}
 	addFunction := func(name string) {
-		if _, ok := b.skillFunctions[name]; ok && modelInvocable(name) {
-			exposed[name] = struct{}{}
+		fn, ok := b.skillFunctions[name]
+		if !ok || fn == nil || !modelInvocable(name) {
+			return
 		}
+		// P3：交互式回合 + 开关开启时，文本类技能由 `$mention` 注入路径接管，
+		// 不再进入模型隐式暴露面（路由候选 / explicit-mention / 历史回补都无法
+		// 重新暴露）。handler/workflow 技能、headless/JSON 与显式 hide=false 不受影响。
+		if skillMentionHideTextSkillFunction(session, fn) {
+			return
+		}
+		exposed[name] = struct{}{}
 	}
 
+	// ExplicitMentions 保留原始词法命中用于诊断：P3 隐藏文本类函数后，该列表
+	// 仍可能包含未进入 exposed 的技能名，便于复盘"用户提到了什么"与"实际暴露
+	// 了什么"的差异（路由候选 Candidates 同理保留）。
 	explicitMentions := b.findExplicitSkillMentions(prompt)
 	details.ExplicitMentions = append(details.ExplicitMentions, explicitMentions...)
 	for _, name := range explicitMentions {
