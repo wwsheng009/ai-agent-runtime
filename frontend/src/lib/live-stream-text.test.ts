@@ -5,6 +5,7 @@ import {
   appendLiveStreamText,
   clearLiveStreamText,
   getLiveStreamEntry,
+  MAX_LIVE_STREAM_ENTRIES,
   resetLiveStreamTextStore,
   setLiveStreamReasoning,
   setLiveStreamText,
@@ -30,6 +31,20 @@ describe("live-stream-text", () => {
     });
     expect(getLiveStreamEntry("m2")).toEqual({ reasoningText: "", text: "other" });
     expect(getLiveStreamEntry("missing")).toBeNull();
+    reset();
+  });
+
+  it("条目数超过兜底上界时淘汰最旧条目（活跃条目保留）", () => {
+    reset();
+    for (let index = 0; index < MAX_LIVE_STREAM_ENTRIES + 3; index += 1) {
+      appendLiveStreamText(`m-${index}`, "x");
+    }
+    expect(getLiveStreamEntry("m-0")).toBeNull();
+    expect(getLiveStreamEntry("m-2")).toBeNull();
+    expect(getLiveStreamEntry("m-3")).not.toBeNull();
+    expect(
+      getLiveStreamEntry(`m-${MAX_LIVE_STREAM_ENTRIES + 2}`),
+    ).not.toBeNull();
     reset();
   });
 

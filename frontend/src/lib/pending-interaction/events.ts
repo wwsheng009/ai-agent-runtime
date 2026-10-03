@@ -264,6 +264,51 @@ export function expirePendingInteractions(
 }
 
 /**
+ * 已决条目裁剪（注册表 entry 专用）：未决（pending / resolving）全保留；已决
+ * （resolved / cancelled / expired / failed）只保留最近 keepRecent 个。
+ *
+ * entry 的生命周期 = 会话在候选列表里保活的时间，长寿命会话的审批/提问历史会
+ * 无界累积（每条含 prompt / reason / suggestions）。已裁决条目对侧栏活动计数与
+ * 「待交互」呈现没有贡献，只保留少量近期条目用于「刚裁决」反馈与排障即可。
+ */
+export function pruneSettledPendingInteractions(
+  state: PendingInteractionState,
+  options?: { keepRecent?: number },
+): PendingInteractionState {
+  const keepRecent = Math.max(0, Math.floor(options?.keepRecent ?? 5));
+  let settledTotal = 0;
+  for (const item of state.items) {
+    if (item.status !== "pending" && item.status !== "resolving") {
+      settledTotal += 1;
+    }
+  }
+  if (settledTotal <= keepRecent) {
+    return state;
+  }
+
+  // 从新到旧：未决全保留；已决只保留最近 keepRecent 个。
+  const kept: PendingInteraction[] = [];
+  let settledKept = 0;
+  for (let index = state.items.length - 1; index >= 0; index -= 1) {
+    const item = state.items[index];
+    if (!item) {
+      continue;
+    }
+    const settled = item.status !== "pending" && item.status !== "resolving";
+    if (!settled) {
+      kept.push(item);
+      continue;
+    }
+    if (settledKept < keepRecent) {
+      kept.push(item);
+      settledKept += 1;
+    }
+  }
+  kept.reverse();
+  return { items: kept };
+}
+
+/**
  * 单事件归约入口：注册 / 回填 / 会话收敛三态。
  *
  * 无身份的结果事件（缺 request_id / question_id）按会话保守清除——同一会话

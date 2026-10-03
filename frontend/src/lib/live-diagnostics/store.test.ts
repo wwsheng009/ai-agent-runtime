@@ -7,6 +7,7 @@ import {
   beginLiveChannel,
   getLiveDiagnosticsSnapshot,
   LIVE_DIAGNOSTICS_NOTIFY_MS,
+  MAX_TRACKED_DIAGNOSTIC_SESSIONS,
   reportBlockedDelta,
   reportRenderGate,
   reportSnapshotRefresh,
@@ -162,6 +163,20 @@ describe("live-diagnostics store", () => {
     // 兜底键不会把孤儿数据挂到任意会话上。
     expect(getLiveDiagnosticsSnapshot(SESSION).chat.events).toBe(0);
     expect(getLiveDiagnosticsSnapshot("").sessionId).toBe("");
+  });
+
+  it("会话状态表按 LRU 封顶：超限淘汰最久未用，活跃会话被 touch 保留", () => {
+    // 装满窗口，并把 s-0 再写一次（touch 到最近使用）。
+    for (let index = 0; index < MAX_TRACKED_DIAGNOSTIC_SESSIONS; index += 1) {
+      beginLiveChannel({ channel: "runtime", sessionId: `s-${index}` }).open();
+    }
+    beginLiveChannel({ channel: "runtime", sessionId: "s-0" }).open();
+
+    // 新建第 N+1 个会话：最久未用的 s-1 被整档淘汰，s-0 保留。
+    beginLiveChannel({ channel: "runtime", sessionId: "s-new" }).open();
+    expect(getLiveDiagnosticsSnapshot("s-1").runtime.opens).toBe(0);
+    expect(getLiveDiagnosticsSnapshot("s-0").runtime.opens).toBe(2);
+    expect(getLiveDiagnosticsSnapshot("s-new").runtime.opens).toBe(1);
   });
 
   it("通知按 250ms 窗口合并：一个窗口内多次写入只通知一次", () => {

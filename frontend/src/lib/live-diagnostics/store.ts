@@ -43,6 +43,14 @@ const snapshots = new Map<string, LiveDiagnosticsSnapshot>();
 const listeners = new Set<() => void>();
 let notifyTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * 会话维度状态表上限：单会话的诊断缓冲本身有界（帧 40 / 流量桶 60），但按
+ * sessionId 建档的表会随「打开过的会话数」无界增长（切换 / 关闭 / 删除都不建
+ * 清理路径）。诊断面板只关心当前会话，这里按最近使用（Map 顺序）保留最近
+ * {@link MAX_TRACKED_DIAGNOSTIC_SESSIONS} 个会话的状态，其余整档淘汰。
+ */
+export const MAX_TRACKED_DIAGNOSTIC_SESSIONS = 32;
+
 /** 消息列 DOM 观测：全局一份（消息列表在全应用内唯一），因此不挂在 SessionState 上。 */
 let domActivity: LiveDomActivity = emptyDomActivity();
 
@@ -106,9 +114,21 @@ function sessionKey(sessionId?: string | null): string {
 function stateFor(sessionId?: string | null): { key: string; state: SessionState } {
   const key = sessionKey(sessionId);
   let state = states.get(key);
-  if (!state) {
-    state = emptyState();
+  if (state) {
+    // LRU touch：Map 顺序 = 最近使用顺序，保证活跃会话不会被后续会话淘汰。
+    states.delete(key);
     states.set(key, state);
+    return { key, state };
+  }
+  state = emptyState();
+  states.set(key, state);
+  while (states.size > MAX_TRACKED_DIAGNOSTIC_SESSIONS) {
+    const oldestKey = states.keys().next().value as string | undefined;
+    if (oldestKey === undefined) {
+      break;
+    }
+    states.delete(oldestKey);
+    snapshots.delete(oldestKey);
   }
   return { key, state };
 }

@@ -40,6 +40,15 @@ export type LiveStreamEntry = {
   reasoningText: string;
 };
 
+/**
+ * 条目兜底上界：正常路径每个回合终态都会 `clearLiveStreamText`（chat 通道见
+ * finalize-turn / streaming-writers，runtime 通道见 use-session-runtime-stream 的
+ * 终态清理）。此上界只对「终态帧缺失 / 页面在流式中切走」等漏清路径封顶，避免
+ * 模块级 Map 随会话数线性增长。Map 插入序 = 创建序，超限淘汰最旧条目；仍在持续
+ * 写入的活跃条目总是最新创建或曾被 clear 后重建，不会被优先命中。
+ */
+export const MAX_LIVE_STREAM_ENTRIES = 64;
+
 const entries = new Map<string, LiveStreamEntry>();
 const listeners = new Set<() => void>();
 
@@ -66,7 +75,19 @@ function writeEntry(
   if (!next.text && !next.reasoningText) {
     entries.delete(id);
   } else {
+    const isNewEntry = !entries.has(id);
     entries.set(id, next);
+    if (isNewEntry && entries.size > MAX_LIVE_STREAM_ENTRIES) {
+      // 插入后再淘汰，保证本次写入的条目一定保留。
+      for (const oldest of entries.keys()) {
+        if (entries.size <= MAX_LIVE_STREAM_ENTRIES) {
+          break;
+        }
+        if (oldest !== id) {
+          entries.delete(oldest);
+        }
+      }
+    }
   }
   emit();
 }

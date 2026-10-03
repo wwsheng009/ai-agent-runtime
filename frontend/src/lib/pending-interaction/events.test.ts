@@ -9,6 +9,7 @@ import {
   failPendingInteractionResolve,
   markPendingInteractionResolving,
   pendingInteractionsFromRuntimeEvents,
+  pruneSettledPendingInteractions,
   settlePendingInteraction,
 } from "./events";
 import { pendingPlanReviewFromPlan } from "./plan-review";
@@ -279,6 +280,38 @@ describe("pending interaction 事件归约", () => {
       "resolved",
     ]);
     expect(selectPendingInteraction(state, "s-1")).toBeNull();
+  });
+
+  it("已决条目裁剪：未决全保留，已决只保留最近 keepRecent 个", () => {
+    const requested = fold(
+      Array.from({ length: 8 }, (_, index) =>
+        runtimeEvent("approval_requested", { request_id: `req-${index}` }),
+      ),
+    );
+    const settled = requested.items.reduce(
+      (state, item) =>
+        settlePendingInteraction(state, item.id, { status: "resolved" }),
+      requested,
+    );
+    expect(
+      pruneSettledPendingInteractions(settled, { keepRecent: 2 }).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual(["req-6", "req-7"]);
+
+    // 未决条目不受裁剪影响。
+    const mixed = fold([
+      runtimeEvent("approval_requested", { request_id: "old-1" }),
+      runtimeEvent("question_asked", { question_id: "q-1", prompt: "?" }),
+    ]);
+    const settledOne = settlePendingInteraction(mixed, "old-1", {
+      status: "resolved",
+    });
+    expect(
+      pruneSettledPendingInteractions(settledOne, { keepRecent: 0 }).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual(["q-1"]);
   });
 });
 

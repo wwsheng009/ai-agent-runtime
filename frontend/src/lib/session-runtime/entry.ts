@@ -20,6 +20,7 @@ import { type ConnectionStatus } from "@/lib/connection-status";
 import {
   applyPendingInteractionEvent,
   emptyPendingInteractionState,
+  pruneSettledPendingInteractions,
 } from "@/lib/pending-interaction";
 import { getRuntimeEventTurnId } from "@/lib/thread-state/events-live";
 import { getRuntimeEventSeq } from "@/lib/thread-state/sessions";
@@ -112,6 +113,11 @@ const TURN_TERMINAL_TYPES = new Set([
   "turn.cancelled",
 ]);
 
+/** 回合终态事件判定（大小写不敏感；供订阅方在终态帧上做收尾清理）。 */
+export function isSessionTurnTerminalEvent(eventType: string): boolean {
+  return TURN_TERMINAL_TYPES.has(eventType.trim().toLowerCase());
+}
+
 const AGENT_STARTED_TYPES = new Set([
   "subagent.started",
   "subagent.batch.started",
@@ -126,6 +132,9 @@ const EMPTY_PENDING_COUNTS: SessionRuntimePendingCounts = {
   questions: 0,
   planPending: false,
 };
+
+/** 已决待交互条目在 entry 内保留的最近数量（其余整档裁剪，见 prune 函数注释）。 */
+const SETTLED_PENDING_KEEP = 5;
 
 function readString(
   payload: Record<string, unknown> | undefined,
@@ -293,7 +302,10 @@ export function createSessionRuntimeEntry(
     if (seq > 0 && seq > current.lastSeq) {
       patch.lastSeq = seq;
     }
-    const nextPending = applyPendingInteractionEvent(pendingState, event);
+    const nextPending = pruneSettledPendingInteractions(
+      applyPendingInteractionEvent(pendingState, event),
+      { keepRecent: SETTLED_PENDING_KEEP },
+    );
     if (nextPending !== pendingState) {
       pendingState = nextPending;
       patch.pending = countPending(nextPending);

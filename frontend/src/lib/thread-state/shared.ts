@@ -58,6 +58,18 @@ export function mergeUniqueStrings(...values: Array<string | undefined | null>) 
   return [...merged];
 }
 
+/**
+ * 单线程产物驻留上限：新→旧保留。
+ *
+ * 每个回合都会追加多个 JSON 产物（tool-events / orchestration / planning /
+ * request…），产物内容是该回合完整 payload 的序列化副本；不设上限时
+ * `thread.artifacts` 随回合数线性增长，且会话切换后仍常驻（线程 store 不做载荷
+ * 淘汰）。保留最近 64 个（约十几回合的完整记录 + 历史/运行事件产物）已足够面板
+ * 与 `@` 引用使用，更早的产物在被引用处按「缺失即忽略」处理（见 message-list /
+ * message-row 的 artifactMap 解析），不会破坏渲染。
+ */
+export const MAX_THREAD_ARTIFACTS = 64;
+
 export function upsertArtifact(artifacts: Artifact[], artifact: Artifact) {
   const nextArtifacts = [...artifacts];
   const existingIndex = nextArtifacts.findIndex((item) => item.id === artifact.id);
@@ -65,7 +77,8 @@ export function upsertArtifact(artifacts: Artifact[], artifact: Artifact) {
     nextArtifacts[existingIndex] = artifact;
     return nextArtifacts;
   }
-  return [artifact, ...nextArtifacts];
+  // 新产物插到最前；超出上限时从尾部（最旧）截断。
+  return [artifact, ...nextArtifacts].slice(0, MAX_THREAD_ARTIFACTS);
 }
 
 export function upsertArtifacts(artifacts: Artifact[], nextItems: Artifact[]) {

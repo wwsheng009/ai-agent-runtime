@@ -129,6 +129,10 @@ export function writeStoredRuntimeSessions(
     // 内容与上次写入完全一致：跳过 186KB 级 setItem。
     return;
   }
+  // 单槽记忆：只保留最近一次写入的序列化串（186KB 级）。跨 userId 时旧条目
+  // 不再常驻（否则随使用过的 userId 数线性累积）；换回旧 userId 的首次写入
+  // 退化为一次重新 setItem，代价可接受。
+  lastWrittenSessions.clear();
   lastWrittenSessions.set(storageKey, { storage, serialized: serializedSessions });
 
   // 字段顺序与 `StoredRuntimeSessionsPayload` 一致，产出与整体 `JSON.stringify` 等价。

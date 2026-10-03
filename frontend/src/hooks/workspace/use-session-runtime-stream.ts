@@ -26,6 +26,12 @@ import {
 } from "@/lib/workspace-thread-state";
 import { createStreamingFrameScheduler } from "./agent-chat-turn/streaming-frame";
 import { admitRuntimeFrame } from "./frame-intake";
+import {
+  clearFinalizedLiveStreamText,
+  collectFinalizedLiveMessageIds,
+  isFinalizedTurnFrame,
+  trimPendingRuntimeCommits,
+} from "./runtime-stream-retention";
 import { createStallGuard, RUNTIME_STREAM_IDLE_TIMEOUT_MS } from "./session-stream-stall";
 
 /** 方案B：重连循环连续失败达到该阈值才把 thread 标记为降级（防瞬断抖动）。 */
@@ -226,6 +232,10 @@ export function useSessionRuntimeStream({
       return;
     }
 
+    // 事件缓冲表是稳定引用（只增删键、不整体替换）；在 effect 体内取一次，
+    // cleanup 里用这个局部引用，避免 react-hooks/exhaustive-deps 对
+    // `ref.current` 在 cleanup 中被替换的误报。
+    const runtimeEventsBySession = runtimeEventsRef.current;
     const controller = new AbortController();
 
     // 运行时通道的**提交合帧**（2026-09-15）。chat 通道早已按最小间隔提交
@@ -478,6 +488,12 @@ export function useSessionRuntimeStream({
                 }
               }
 
+              // 终态帧在事件到达时收集 live 消息 id，提交兑现后清 live 记录
+              // （见 runtime-stream-retention：runtime 通道的 finalize 收尾）。
+              const finalizedLiveMessageIds = isFinalizedTurnFrame(event)
+                ? collectFinalizedLiveMessageIds(selectedThreadRef.current, event)
+                : [];
+
               // 入队 + 合帧提交（见上方 pendingRuntimeCommits 注释）。判定结果
               // （shouldApplyLiveDelta / activeTurn）在事件到达时固化，既保证
               // 「先判定后 claim」的既有语义，又避免把 claim 放进 updater 被重放。
@@ -488,6 +504,8 @@ export function useSessionRuntimeStream({
                 nextEvents,
                 shouldApplyLiveDelta,
               });
+              // 超限（隐藏期间积压）时按 helper 口径淘汰：优先最旧纯增量条目。
+              trimPendingRuntimeCommits(pendingRuntimeCommits);
               // P1-2 发布分级（lib/thread-state/publication.ts）决定提交节奏：
               // - immediate（结算/工具生命周期/回滚等持久事件）：取消挂起帧
               //   立即提交（对齐参考 notifier.notifyNow / assembly.cancelFrame）；
@@ -500,6 +518,11 @@ export function useSessionRuntimeStream({
                 runtimeCommitScheduler.flush();
               } else if (publicationLevel === "animation-frame") {
                 runtimeCommitScheduler.schedule({ pace: "animation-frame" });
+              }
+              if (finalizedLiveMessageIds.length > 0) {
+                // 与 finalize-turn 同口径：先兑现挂起提交，再清 live 记录。
+                runtimeCommitScheduler.flush();
+                clearFinalizedLiveStreamText(finalizedLiveMessageIds);
               }
             },
             onErrorEvent: (payload) => {
@@ -588,6 +611,9 @@ export function useSessionRuntimeStream({
       runtimeCommitScheduler.cancel();
       runtimeCommitScheduler.detachVisibilityListener();
       controller.abort();
+      // 切走会话时释放该会话的事件缓冲（≤100 条事件、payload 可达百 KB 级）；
+      // seq 游标是标量，保留以便切回时不重复消费历史 dump。
+      delete runtimeEventsBySession[sessionId];
     };
     // 依赖里只留会话身份：回调/setter 经上面的 ref 读取（保持最新引用但不参与
     // 依赖），否则任何父级 render 造成的引用抖动都会掐断在途 SSE。

@@ -174,11 +174,15 @@ export function buildRuntimeEventKey(event: SessionRuntimeEvent) {
 }
 
 function buildSessionHistoryArtifact(response: SessionHistoryResponse) {
-  return createJsonArtifact(
+  // 惰性产物：整页历史的序列化副本只在面板/导出真正读取 `content` 时才生成。
+  // 原实现每次同步都急序列化成 indent=2 的大字符串常驻线程（与 messages 中的
+  // 同一批文本构成第二份副本，且缩进/转义再放大体积）；惰性化后未读取不产出
+  // 该字符串，序列化开销也从「每次同步」推迟到「首次读取」。
+  return createLazyJsonArtifact(
     `session-history-${response.session_id}`,
     `session-history-${response.session_id}.json`,
     "Authoritative session history loaded from /api/runtime/sessions/{id}/history.",
-    response,
+    () => response,
   );
 }
 

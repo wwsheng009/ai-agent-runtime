@@ -348,6 +348,28 @@ describe("use-runtime-sessions-data helpers", () => {
     setItemSpy.mockRestore();
   });
 
+  it("keeps a single last-written payload slot (write-skip memory is bounded)", () => {
+    const storage = new MemoryStorage();
+    const sessions = [
+      {
+        createdAt: "2026-05-04T08:00:00Z",
+        id: "session-write-slot",
+        state: "active",
+        updatedAt: "2026-05-04T08:30:00Z",
+      },
+    ];
+    const setItemSpy = vi.spyOn(storage, "setItem");
+
+    writeStoredRuntimeSessions(storage, "user-slot-a", sessions);
+    // 写入另一个 userId 后，旧 userId 的序列化串（186KB 级）被释放。
+    writeStoredRuntimeSessions(storage, "user-slot-b", sessions);
+    writeStoredRuntimeSessions(storage, "user-slot-a", [...sessions]);
+
+    // 单槽记忆下第三次写必须真正落盘（不能命中已释放的旧记忆而跳过）。
+    expect(setItemSpy).toHaveBeenCalledTimes(3);
+    setItemSpy.mockRestore();
+  });
+
   it("uses a capped retry backoff for runtime session reloads", () => {
     expect(resolveRuntimeSessionsRetryDelay(0)).toBe(1200);
     expect(resolveRuntimeSessionsRetryDelay(1)).toBe(2500);

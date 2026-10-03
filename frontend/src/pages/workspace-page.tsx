@@ -23,6 +23,7 @@ import { useWorkspaceLive } from "@/hooks/workspace/use-workspace-live";
 import { useWorkspaceSessionActions } from "@/hooks/workspace/use-workspace-session-actions";
 import { useWorkspaceThreadSelection } from "@/hooks/workspace/use-workspace-thread-selection";
 import { useTrajectoryEarlierEntry } from "@/hooks/workspace/use-trajectory-earlier-entry";
+import { useWorkspaceThreadPayloadRetention } from "@/hooks/workspace/use-workspace-thread-payload-retention";
 import { getErrorMessage } from "@/hooks/workspace/thread-runtime";
 import { withTransportDegradation } from "@/lib/connection-status";
 import {
@@ -310,6 +311,7 @@ export function WorkspacePage() {
     handleOpenRuntimeNoticeSession,
     handleStopRuntimeSession,
     sessionActivity,
+    sessionRuntimeEntries,
     sessionRuntimeNotices,
     threadBySessionId,
   } = useWorkspaceMultiSessionRuntime({
@@ -322,6 +324,14 @@ export function WorkspacePage() {
     stopSelectedSession: handleStopResponding,
     threads,
     trajectoryStorePool,
+  });
+  // 内存治理：会话载荷 LRU 卸载（保护集合 = 本地在途回合 ∪ 注册表活动回合，
+  // 由 hook 汇总；见 lib/thread-state/retention.ts 与 hook 头注释）。
+  useWorkspaceThreadPayloadRetention({
+    selectedThreadId: selectedThread?.id ?? null,
+    activeSessionKeys,
+    sessionRuntimeEntries,
+    setThreads,
   });
   // P1-8：连接状态统一收口。会话运行时流状态是主判据；直连 `/api/agent/chat`
   // 流失败会把线程标记为 transport=error（见 use-workspace-agent-chat-turn），

@@ -38,15 +38,19 @@ export function sleepWithSignal(ms: number, signal: AbortSignal): Promise<void> 
     return Promise.resolve();
   }
   return new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      // 正常超时也必须摘掉 abort 监听器：`{ once: true }` 只在事件触发时自动
+      // 移除，而 entry 循环持有同一个长寿命 signal——每次 sleep 都会挂上一个
+      // 永不触发的闭包（live 重连 2s/次 ≈ 1800 个/小时/会话），浏览器会报
+      // "possible EventTarget memory leak detected"。
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
