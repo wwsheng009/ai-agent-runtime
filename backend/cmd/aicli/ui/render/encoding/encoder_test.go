@@ -964,6 +964,41 @@ func TestEncodeToolCallDisplayHeadRestoresLegacyDetails(t *testing.T) {
 	})
 }
 
+// TestEncodeToolCallRendersDisplayFilePathContextLine 是回归用例：超过
+// pathdisplay.InlineFilePathRunes 的文件路径会被 summarizeToolCallArgs 从
+// arg_preview 移出，仅由 payload.display_file_path 承载；编码器必须把它还原
+// 成 "  file_path: …" 续行（与 legacy compactToolContextLines 同形），否则
+// TUI 的 read 调用只剩工具名/limit/offset，目标文件凭空消失。
+func TestEncodeToolCallRendersDisplayFilePathContextLine(t *testing.T) {
+	longPath := `E:\projects\ai\ai-agent-runtime\backend\cmd\aicli\commands\chat_command.go`
+	e := NewEventEncoder()
+	e.Encode(event("tool.requested", map[string]interface{}{
+		"tool_call_id": "long-path", "tool_name": "read",
+		"arg_preview": "limit=60 offset=150", "display_file_path": longPath,
+	}))
+	wantRunning := "• Running read limit=60 offset=150\n  file_path: " + longPath
+	if got := e.Snapshot().Items[0].Head; got != wantRunning {
+		t.Fatalf("running head = %q, want %q", got, wantRunning)
+	}
+	// completed 事件不回传 display_file_path：续行必须由 started 单元格保留。
+	e.Encode(event("tool.completed", map[string]interface{}{
+		"tool_call_id": "long-path", "logical_tool": "read", "duration_ms": uint64(1),
+	}))
+	wantCompleted := "• Completed read limit=60 offset=150 in 1ms\n  file_path: " + longPath
+	if got := e.Snapshot().Items[0].Head; got != wantCompleted {
+		t.Fatalf("completed head = %q, want %q", got, wantCompleted)
+	}
+
+	// 文件路径是唯一参数时 arg_preview 为空：head 退化为工具名，但路径不能丢。
+	onlyPath := NewEventEncoder()
+	onlyPath.Encode(event("tool.requested", map[string]interface{}{
+		"tool_call_id": "path-only", "tool_name": "read", "display_file_path": longPath,
+	}))
+	if got := onlyPath.Snapshot().Items[0].Head; got != "• Running read\n  file_path: "+longPath {
+		t.Fatalf("path-only head = %q", got)
+	}
+}
+
 // TestEncodeToolOutputTreeSurvivesMarkdownLookalikeText 是回归用例：普通工具
 // 结果里出现反引号 / "# " 行 / 列表行时，assistant 侧的 LooksLikeMarkdown 会
 // 为真，但事件没有声明 render_output_format=markdown，输出仍必须带树形标记。
@@ -986,6 +1021,35 @@ func TestEncodeToolOutputTreeSurvivesMarkdownLookalikeText(t *testing.T) {
 	want := "  │  a.go:1: `foo` check\n  │  # doc heading\n  └  - list item"
 	if got != want {
 		t.Fatalf("tool output tree = %q\nwant %q", got, want)
+	}
+}
+
+// TestEncodeSingleLineToolOutputKeepsTreeMarker 回归：view 的
+// "Note: offset … equals total lines …" 这类单行结果曾经 flush-left 紧贴
+// "• Completed …" 头行，没有缩进也没有树形标记，与其他工具输出形态不一致。
+// 单行输出是头的唯一内容行，必须拿到 closing "└" 标记。
+func TestEncodeSingleLineToolOutputKeepsTreeMarker(t *testing.T) {
+	const note = "Note: offset 296 equals total lines 296; use offset 295 to read the last line."
+	e := NewEventEncoder()
+	e.Encode(event("tool.requested", map[string]interface{}{
+		"tool_call_id": "view-note", "tool_name": "view",
+		"arg_preview": "file_path=.tmp/work.diff limit=100 offset=296",
+	}))
+	e.Encode(event("tool.completed", map[string]interface{}{
+		"tool_call_id": "view-note", "logical_tool": "view",
+		"output": note, "duration_ms": uint64(1753),
+	}))
+	var got string
+	for _, item := range e.Snapshot().Items {
+		if item.Kind == KindToolOutput {
+			got = item.Head
+		}
+	}
+	if want := "  └  " + note; got != want {
+		t.Fatalf("single-line tool output = %q, want %q", got, want)
+	}
+	if head := e.Snapshot().Items[0].Head; !strings.HasPrefix(head, "• Completed view") {
+		t.Fatalf("tool head = %q, want completed view head", head)
 	}
 }
 
@@ -1927,7 +1991,7 @@ func TestSubmitToolLifecycleUsesOneMutableChain(t *testing.T) {
 	if m.Items[0].Kind != KindToolCall || m.Items[0].Status != StatusCompleted {
 		t.Fatalf("call item=%+v want completed tool_call", m.Items[0])
 	}
-	if m.Items[1].Kind != KindToolOutput || m.Items[1].CauseID != m.Items[0].ID || m.Items[1].Head != "file content" {
+	if m.Items[1].Kind != KindToolOutput || m.Items[1].CauseID != m.Items[0].ID || m.Items[1].Head != "  └  file content" {
 		t.Fatalf("output item=%+v want output caused by call", m.Items[1])
 	}
 

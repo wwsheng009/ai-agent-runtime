@@ -2350,7 +2350,13 @@ func (e *EventEncoder) applyToolStarted(ev runtimeevents.Event, cs *ChangeSet) {
 	if !strings.HasPrefix(head, "• ") {
 		head = "• Running " + head
 	}
-	if lines := payloadDisplayLines(ev.Payload["display_running_lines"]); len(lines) > 0 {
+	lines := payloadDisplayLines(ev.Payload["display_running_lines"])
+	if len(lines) == 0 {
+		// runtime 事件没有预构造续行：从 payload 的定位字段补出，避免被
+		// arg_preview 有意移出的超长文件路径在 transcript 中整体丢失。
+		lines = toolCallContextLines(ev.Payload)
+	}
+	if len(lines) > 0 {
 		// legacy 续行已自带 "  " 前缀，原样拼接（不叠加树形标记）。
 		head = head + "\n" + strings.Join(lines, "\n")
 	}
@@ -2974,6 +2980,29 @@ func toolCallDisplayHead(ev runtimeevents.Event) string {
 		}
 	}
 	return display
+}
+
+// toolCallContextLines 从 payload 补出工具单元格的上下文定位行（超长文件路径 /
+// 工作目录），格式与 legacy compactToolContextLines 逐字一致（两空格前缀）。
+//
+// 为什么需要：summarizeToolCallArgs 对超过 pathdisplay.InlineFilePathRunes 的
+// 文件路径会从 arg_preview 中移除，改由 display_file_path 承载；旧投影会把它
+// 渲染成 "  file_path: …" 续行，而统一编码器此前完全不读该字段，于是 TUI 的
+// "• Running/• Completed read …" 里目标文件凭空消失（只剩 limit/offset）。
+func toolCallContextLines(payload map[string]interface{}) []string {
+	if len(payload) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, 2)
+	if filePath := chatToolDisplaySegment(payloadString(payload["display_file_path"], "")); filePath != "" {
+		lines = append(lines, "  file_path: "+filePath)
+	}
+	if workdir := truncateChatToolText(chatToolDisplaySegment(payloadString(payload["workdir"], "")), 160); workdir != "" {
+		lines = append(lines, "  workdir: "+workdir)
+	} else if cwd := truncateChatToolText(chatToolDisplaySegment(payloadString(payload["cwd"], "")), 160); cwd != "" {
+		lines = append(lines, "  cwd: "+cwd)
+	}
+	return lines
 }
 
 // toolCallCompletedTitle 构建工具调用完成后的 tool cell 终态标题（调用后

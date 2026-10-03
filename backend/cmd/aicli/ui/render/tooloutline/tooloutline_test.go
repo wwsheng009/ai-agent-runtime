@@ -38,10 +38,17 @@ func TestTreeIndentTextMarksEveryLine(t *testing.T) {
 	}
 }
 
-func TestTreeIndentTextSingleLineUnchanged(t *testing.T) {
+// TestTreeIndentTextSingleLineGetsClosingMarker 回归：单行输出曾经原样返回，
+// 在 transcript 里紧贴 "• Completed …" 头行且无任何树形标记（view 的
+// "Note: offset …" 单行结果就是这样丢失缩进的）。单行是头的唯一内容行，
+// 必须与 legacy head+content 投影一致地拿到 closing "└" 标记。
+func TestTreeIndentTextSingleLineGetsClosingMarker(t *testing.T) {
 	const output = "24 matches"
-	if got := TreeIndentText(output); got != output {
-		t.Fatalf("TreeIndentText = %q, want %q", got, output)
+	if got, want := TreeIndentText(output), "  └  24 matches"; got != want {
+		t.Fatalf("TreeIndentText = %q, want %q", got, want)
+	}
+	if got := TreeIndentText(""); got != "" {
+		t.Fatalf("TreeIndentText(empty) = %q, want empty", got)
 	}
 }
 
@@ -49,11 +56,17 @@ func TestTreeIndentTextSingleLineUnchanged(t *testing.T) {
 // legacy 的 head+content 形态与统一编码器的独立文本形态，在内容行没有
 // legacy "  " 前缀时，必须产出完全一致的标记列。
 func TestTreeIndentProjectionsShareMarkerGeometry(t *testing.T) {
-	content := []string{"a.go:1: `foo`", "", "统计: 2 个文件, 0 个目录"}
-	legacy := TreeIndentLines(append([]string{"head"}, content...))[1:]
-	standalone := strings.Split(TreeIndentText(strings.Join(content, "\n")), "\n")
-	if !reflect.DeepEqual(legacy, standalone) {
-		t.Fatalf("legacy %q != standalone %q", legacy, standalone)
+	for name, content := range map[string][]string{
+		"multi-line": {"a.go:1: `foo`", "", "统计: 2 个文件, 0 个目录"},
+		"single-line": {"Note: offset 296 equals total lines 296; use offset 295 to read the last line."},
+	} {
+		t.Run(name, func(t *testing.T) {
+			legacy := TreeIndentLines(append([]string{"head"}, content...))[1:]
+			standalone := strings.Split(TreeIndentText(strings.Join(content, "\n")), "\n")
+			if !reflect.DeepEqual(legacy, standalone) {
+				t.Fatalf("legacy %q != standalone %q", legacy, standalone)
+			}
+		})
 	}
 }
 

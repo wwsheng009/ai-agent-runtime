@@ -103,7 +103,9 @@ func TestReActToolRoundsKeepEarlierHistoryVisible(t *testing.T) {
 	for step := 1; step <= 5; step++ {
 		markers = append(markers,
 			boundary.FormatAssistantBlockChrome(fmt.Sprintf("REACT-ROUND-%02d-ASSISTANT", step)),
-			fmt.Sprintf("REACT-ROUND-%02d-TOOL", step),
+			// 单行工具输出是工具头的唯一内容行，语义行带 closing "└" 标记
+			// （与 legacy head+content 投影一致）；此处按物理语义行断言。
+			"└  "+fmt.Sprintf("REACT-ROUND-%02d-TOOL", step),
 		)
 	}
 	markers = append(markers, boundary.FormatAssistantBlockChrome(finalMarker))

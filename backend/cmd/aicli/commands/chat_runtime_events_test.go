@@ -337,7 +337,7 @@ func TestChatRuntimeEventBridge_ToolLifecycleMirrorsSceneActiveCell(t *testing.T
 	if cell.Kind != scene.KindToolChain || cell.Phase != scene.CellCommitted {
 		t.Fatalf("completed cell = %#v, want committed tool chain", cell)
 	}
-	if cell.Source != "• Completed shell\n50% complete\nok" {
+	if cell.Source != "• Completed shell\n50% complete\n  └  ok" {
 		t.Fatalf("completed source = %q, want merged final tool source", cell.Source)
 	}
 	if bridge.renderEncoderStats().DuplicateCount == 0 {

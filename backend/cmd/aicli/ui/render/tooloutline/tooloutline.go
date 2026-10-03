@@ -40,13 +40,16 @@ func TreeIndentLines(lines []string) []string {
 }
 
 // TreeIndentText marks a standalone output blob that has no separate head line:
-// every line gets a marker, the final line the closing "└". Single-line output
-// is returned unchanged.
+// every line gets a marker, the final line the closing "└". The blob lines are
+// content under the caller's tool head, so a single line is still marked (it is
+// that head's closing "└"); the old len==1 exception left one-line outputs
+// flush-left and broke byte-parity with TreeIndentLines' head+content geometry.
+// Empty output is returned unchanged.
 func TreeIndentText(output string) string {
-	lines := strings.Split(output, "\n")
-	if len(lines) <= 1 {
+	if output == "" {
 		return output
 	}
+	lines := strings.Split(output, "\n")
 	var b strings.Builder
 	b.Grow(len(output) + 6*len(lines))
 	for i, line := range lines {
