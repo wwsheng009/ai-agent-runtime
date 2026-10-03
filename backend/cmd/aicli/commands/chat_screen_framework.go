@@ -140,6 +140,11 @@ type chatScreenSpec struct {
 	ID    string
 	Title string
 	Kind  chatScreenKind
+	// Subtitle 是 ScreenList 的副标题（显示在标题下、行列表上），
+	// 用于引导用户操作（如 "选择 agent 查看详情与输出"）。
+	Subtitle string
+	// ConfirmLabel 覆盖 ScreenList 的确认键标签（默认"选择"）。
+	ConfirmLabel string
 	// Doc 是 ScreenDocument 的静态内容。
 	Doc render.Document
 	// Rows 是 ScreenList 的行。
@@ -459,7 +464,7 @@ func chatScreenRun(session *ChatSession, lease ui.ScreenLease, spec chatScreenSp
 		}
 		return chatScreenOutcome{Result: chatScreenClosedEsc, Index: -1}
 	case chatScreenList:
-		index, cancelled, err := chatScreenRunListStage(session, lease, spec.screenTitle(), spec.Rows)
+		index, cancelled, err := chatScreenRunListStage(session, lease, spec.screenTitle(), spec.Subtitle, spec.ConfirmLabel, spec.Rows)
 		if err != nil {
 			chatScreenEmitError(spec, "render", err)
 			chatScreenCounters.errorRender.Add(1)
@@ -479,7 +484,7 @@ func chatScreenRun(session *ChatSession, lease ui.ScreenLease, spec chatScreenSp
 				chatScreenCounters.errorRender.Add(1)
 				return chatScreenOutcome{Result: chatScreenClosedError, Index: -1, StageID: stageID, Err: err}
 			}
-			picked, cancelled, err := chatScreenRunListStage(session, lease, stage.titleOrFallback(spec.Title), stage.Rows)
+			picked, cancelled, err := chatScreenRunListStage(session, lease, stage.titleOrFallback(spec.Title), spec.Subtitle, spec.ConfirmLabel, stage.Rows)
 			if err != nil {
 				chatScreenEmitError(spec, "render", err)
 				chatScreenCounters.errorRender.Add(1)
@@ -496,7 +501,7 @@ func chatScreenRun(session *ChatSession, lease ui.ScreenLease, spec chatScreenSp
 }
 
 // chatScreenRunListStage 是列表阶段 runner：复用 ui 全屏列表原语（不新增渲染路径）。
-func chatScreenRunListStage(session *ChatSession, lease ui.ScreenLease, title string, rows []chatScreenRow) (int, bool, error) {
+func chatScreenRunListStage(session *ChatSession, lease ui.ScreenLease, title, subtitle, confirmLabel string, rows []chatScreenRow) (int, bool, error) {
 	items := make([]ui.FullScreenListItem, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, ui.FullScreenListItem{
@@ -508,10 +513,17 @@ func chatScreenRunListStage(session *ChatSession, lease ui.ScreenLease, title st
 	if len(items) == 0 {
 		return -1, false, fmt.Errorf("没有可选项")
 	}
-	result, err := chatScreenListRunner(session, lease, ui.FullScreenListOptions{
+	opts := ui.FullScreenListOptions{
 		Title: title,
 		Items: items,
-	})
+	}
+	if subtitle != "" {
+		opts.Subtitle = subtitle
+	}
+	if confirmLabel != "" {
+		opts.ConfirmLabel = confirmLabel
+	}
+	result, err := chatScreenListRunner(session, lease, opts)
 	if err != nil {
 		return -1, false, err
 	}

@@ -189,7 +189,13 @@ func chatRouteProfileSummary(profile config.AICLISubagentRouteProfile) string {
 
 func printChatAgents(session *ChatSession) {
 	if unifiedDirectInteractiveOutput(session) {
-		_ = renderChatCommandResult(session, executeStructuredAgentsCommand(session, "/agents"), false)
+		// 与 /timeline、/collab 同款：渲染后统一派发 Screen 效应，
+		// 否则 Screen-only 结果不会打开副屏，也不会走降级内联。
+		result := executeStructuredAgentsCommand(session, "/agents")
+		renderErr := renderChatCommandResult(session, result, false)
+		if renderErr == nil {
+			dispatchChatScreenEffects(session, result)
+		}
 		return
 	}
 	if session == nil {
@@ -204,7 +210,12 @@ func printChatAgents(session *ChatSession) {
 
 func handleChatAgentsCommand(session *ChatSession, command string) {
 	if unifiedDirectInteractiveOutput(session) {
-		_ = renderChatCommandResult(session, executeStructuredAgentsCommand(session, command), false)
+		// 与 printChatAgents 同款：Screen 效应必须统一派发（含降级内联）。
+		result := executeStructuredAgentsCommand(session, command)
+		renderErr := renderChatCommandResult(session, result, false)
+		if renderErr == nil {
+			dispatchChatScreenEffects(session, result)
+		}
 		return
 	}
 	arg := strings.TrimSpace(extractCommandArgument(command))
@@ -280,6 +291,12 @@ func executeStructuredAgentsCommand(session *ChatSession, command string) Comman
 	verb := strings.ToLower(firstChatAgentsArgToken(arg))
 	switch verb {
 	case "":
+		// unified 交互出口：/agents 走副屏列表（可选 agent 查看输出）；
+		// 能力不足/租约忙/嵌套时由框架降级为主屏 "Agent Graph:" 内联文档
+		// （DegradeDoc），不静默、不复活直写。
+		if unifiedDirectInteractiveOutput(session) {
+			return chatScreenDocResult(chatScreenAgentsListSpec(session))
+		}
 		lines := []string{"Agent Graph:"}
 		lines = append(lines, chatAgentGraphLines(session)...)
 		return commandTextResult(strings.Join(lines, "\n"))

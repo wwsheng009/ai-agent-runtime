@@ -455,7 +455,12 @@ var runtimeCommandRegistry = map[string]runtimeCommandEntry{
 		},
 	},
 	"/agents": {
-		Bare: rtBare(rtSpec("/agents", categoryDiagnostics, runtimeModeInline, runtimeEffectRead)),
+		// bare /agents 在 unified 交互出口是 A 族列表副屏（可选 agent 查看输出）；
+		// 能力不足/忙/嵌套时按框架契约降级为主屏内联文档（DegradeDoc 为
+		// 既有 "Agent Graph:" 文本）。Output 为 screen-interactive：忙时经
+		// 只读交互列表白名单（chatBusyScreenInteractiveCommands）走 S 档，
+		// 不再被降级入队。
+		Bare: rtBare(rtSpec("/agents", categoryDiagnostics, runtimeModeScreen, runtimeEffectRead, rtNotice("备用屏不可用时降级为内联文档"), rtOutput(chatOutputScreenInteractive))),
 		Variants: map[string]runtimeCommandSpec{
 			"status":   rtSpec("/agents", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
 			"list":     rtSpec("/agents", categoryDiagnostics, runtimeModeInline, runtimeEffectRead),
