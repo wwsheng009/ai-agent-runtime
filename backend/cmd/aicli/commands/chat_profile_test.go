@@ -282,6 +282,26 @@ func TestResolveGlobalRuntimeConfigPath_PrefersUserLayerOverNothing(t *testing.T
 	}
 }
 
+// runtime.yaml 的 .aicli 层发现不依赖 skills_runtime.config_file：该键缺省
+// （空串）时项目层仍须生效——config_file 只是"显式覆盖"指针，不是发现开关。
+// 回归背景：2026-10-03 前 chat 以非空 config_file 作为发现前置条件，删除指针
+// 会静默放弃整个运行时层（与 runtime-server 的无条件解析不一致）。
+func TestResolveRuntimeToolConfigPathEmptyConfigFileStillFindsProjectLayer(t *testing.T) {
+	home := isolateInitHome(t)
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	repoDir := t.TempDir()
+	projectConfig := filepath.Join(repoDir, ".aicli", aiclipaths.DefaultRuntimeConfigFileName)
+	writeTestFile(t, projectConfig, "agent:\n  defaultModel: project\n")
+	chdirTest(t, repoDir)
+
+	cfg := &config.Config{SkillsRuntime: &config.SkillsRuntimeConfig{Enabled: true}}
+	if got := resolveRuntimeToolConfigPath(cfg, nil); got != projectConfig {
+		t.Fatalf("empty config_file must still resolve the project runtime.yaml layer, got %q want %q", got, projectConfig)
+	}
+}
+
 func TestResolveChatSkillDirs_ResolvesUpwardRelativeSessionAndCLIPaths(t *testing.T) {
 	root := t.TempDir()
 	sessionSkillDir := filepath.Join(root, ".agents", "skills")

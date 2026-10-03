@@ -267,7 +267,7 @@ func ensureStarterConfigAtPathLocked(configPath string) (string, bool, error) {
 }
 
 func defaultStarterConfigYAML() string {
-	return strings.TrimSpace(fmt.Sprintf(`
+	return strings.TrimSpace(`
 # Auto-generated starter config for aicli.
 # Add providers under providers.items, then set providers.default_provider when ready.
 # Add shared upstream request headers under providers.headers when required.
@@ -287,14 +287,18 @@ aicli:
     stream: true
 # skills_runtime.enabled 默认 true（显式写出以便用户发现开关；改成 false 可关闭
 # skills 加载与 chat 的 skill catalog）。
+# 本段只放"技能系统入口与对话行为"开关；运行时执行参数（workspace/agent/工具/
+# 知识层/checkpoint 等）在 runtime.yaml，默认按 ./.aicli/runtime.yaml →
+# ~/.aicli/runtime.yaml 自动发现，不需要在此声明。
+# config_file 是"显式覆盖"指针而非开关；仅需覆盖某个 runtime.yaml 路径时取消注释：
+# config_file: /path/to/runtime.yaml
 skills_runtime:
   enabled: true
-  config_file: %s
 providers:
   default_provider: ""
   headers: {}
   items: {}
-`, aiclipaths.DefaultRuntimeConfigRelativePath)) + "\n"
+`) + "\n"
 }
 
 func normalizeConfigPath(path string) string {

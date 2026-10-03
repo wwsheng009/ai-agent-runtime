@@ -223,7 +223,7 @@ turns unless re-mentioned"）。注意本仓库 turn 级注入（`TurnSystemMess
 
 - 复用 `buildSkillCatalogText`（`chat_skill_turn.go:420-460`）与 `internal/skill.RenderSkillCatalog`
   （预算默认 min(8000 字符, 上下文 2%)，降级：截描述 → 去描述，条目永不消失）。
-- 新增 `skills_runtime.catalog_resident`（默认 off，P1 灰度）：与 pin 回合的 guide catalog 去重
+- 新增 `skills_runtime.catalog_resident`（2026-10-03 起默认 on；显式 false 关闭）：与 pin 回合的 guide catalog 去重
   （catalog 已常驻时，pin guide 只保留 ProgramGuide）。
 - **注入位置（修订 H2 + Q1 两层架构）**：常驻 catalog 是 **session-scope 抽象指令**（source=skills_catalog，
   prompt-only），落在会话级稳定前缀；适配器按 §4.12 映射到协议原生 leading 形态（OpenAI `system`、
@@ -270,7 +270,7 @@ skills_runtime:
   mention_multi_limit: 4            # 单回合最多注入的文本技能数
   mention_inject_max_chars: 32768   # 单技能正文上限（超出截断+告警）
   mention_inject_total_chars: 65536 # 回合注入总量上限
-  catalog_resident: false           # 常驻目录（P1 灰度后再默认开启）
+  catalog_resident: true            # 常驻目录（2026-10-03 起默认 on；显式 false 关闭）
 ```
 
 - 语义对齐现有风格：`off/auto/on` 解析复用 `SkillsRuntimeConfig` 字符串开关惯例（参照 `document_mode`）。
@@ -279,8 +279,9 @@ skills_runtime:
   ② 注入不引发 preflight 压缩（§4.11 回归全绿）；③ 上下文增量 P95 ≤ 8KB（单技能典型场景）；
   ④ provider 前缀缓存命中率相对基线下降 ≤ 2%；⑤ `/skill`、headless、JSON 投影零回归。
   `catalog_resident` 默认切换另需：前缀稳定测试全绿 + 固定开销 ≤ 2K tokens。
-- **默认值节奏（已拍板/P3 落地）**：P3 起 `mention_injection` 代码侧默认 `auto`（仅交互+信任；
-  §4.7 Gates 数据待生产观测，未达标时显式 `off` 回退）；`catalog_resident` 维持 `false` 待数据。
+- **默认值节奏（已拍板/P3 落地，2026-10-03 更新）**：P3 起 `mention_injection` 代码侧默认 `auto`（仅交互+信任；
+  §4.7 Gates 数据待生产观测，未达标时显式 `off` 回退）；`catalog_resident` 实测达标后**翻转为默认 on**
+  （gate：前缀稳定测试全绿 + 固定开销 6075 字符 ≈1.5K tokens ≤2K；远程复验见 P4 终验记录）。
   预算先固定 4 / 32KB / 64KB，动态比例（上下文 2%）留后续评估。
 - 回滚：任一开关置 off → 回到现状（函数 + `/skill` pin），无数据迁移、无持久化格式变化；
   常驻 catalog 只是回合消息，不落盘为会话配置。
@@ -436,7 +437,7 @@ turn metadata 与事件；配置键与默认值（`mention_injection=off` 首发
 | 2 | `backend/cmd/aicli/commands/chat_skill_mentions.go` | catalog 注入与 mention 注入的排序/去重策略统一（catalog 在前，技能正文在后） |
 | 3 | `backend/internal/skill/catalog_render.go` | 仅当纪律块文案需扩展时新增变量；预算/降级逻辑不改 |
 | 4 | `backend/cmd/aicli/commands/chat_skill_turn_test.go` 等 | 新增：常驻注入一次、fingerprint 不变不重复、pin 去重、预算降级 |
-| 5 | 配置 | `catalog_resident` 默认 off → 灰度 auto → 默认 on（按数据） |
+| 5 | 配置 | `catalog_resident` 默认 off → （2026-10-03 实测达标）默认 on；显式 false 关闭 |
 | 6 | `backend/cmd/aicli/commands/chat_skill_mentions.go` | 已拍板 Q11：声明依赖/工具不可用时输出回合提示（不阻断、不安装） |
 | 7 | `backend/cmd/aicli/commands/*`（folder-trust 接线） | 已拍板 Q12：未信任项目默认禁用 mention 注入（显式 on 覆盖），与 folder-trust/profile 状态联动 |
 
@@ -450,7 +451,7 @@ pin 回合无重复 catalog；预算超限按"截描述→去描述"降级且技
   session-scope 指令，重定位到 leading system 前缀之后；无 session 指令时与旧装配逐字节等价，routing/prompt
   顺序不变）；`chat_skill_turn.go` 新增 `buildResidentSkillCatalogMessage`（scope=session、source=skills_catalog，
   prompt-only）+ pin 去重（resident 开启时 pin guide 不再前附 catalog）；actor/chat_core 双路径接线；
-  `catalog_resident` 默认 false（灰度）。
+  `catalog_resident` 默认 false（灰度；2026-10-03 实测达标后翻转为默认 on，见 P4 终验记录）。
 - 纪律块：`catalog_render.go` 两个 How-to-use 常量新增 "Injected bodies" 一行（已注入正文不再重读 SKILL.md）。
 - Q11：提及因依赖不可用而未加载的技能（`registry.UnavailableSkills`）→ 跳过正文、诊断
   `dependency_unavailable`、输出聚合依赖提示（scope=turn、source=skill_dependencies；不阻断、不安装）；
@@ -701,7 +702,7 @@ skills_runtime:
   mention_multi_limit: 4
   mention_inject_max_chars: 32768
   mention_inject_total_chars: 65536
-  catalog_resident: false            # P1 灰度后再默认开启
+  catalog_resident: true             # 2026-10-03 起默认 on；显式 false 关闭
 ```
 
 ## 附录 D：与既有方案的关系

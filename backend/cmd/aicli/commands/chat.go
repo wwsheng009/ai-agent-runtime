@@ -936,7 +936,11 @@ func resolveRuntimeToolConfigPath(cfg *config.Config, session *ChatSession) stri
 		if resolved := resolveExistingPathValue(configPath, false); resolved != "" {
 			configPath = resolved
 		}
-	} else if cfg != nil && cfg.SkillsRuntime != nil && strings.TrimSpace(cfg.SkillsRuntime.ConfigFile) != "" {
+	} else if cfg != nil {
+		// runtime.yaml 的 .aicli 层发现（./.aicli → ~/.aicli）与
+		// skills_runtime.config_file 无关：该键只是"显式覆盖路径"，不是开关。
+		// 此前以非空 config_file 作为发现前置条件，会让删除指针的配置静默
+		// 放弃整个运行时层（与 runtime-server 的无条件解析不一致）。
 		configPath = resolveGlobalRuntimeConfigPath(cfg)
 	}
 	return configPath

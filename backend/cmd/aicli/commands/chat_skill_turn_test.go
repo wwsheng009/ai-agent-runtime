@@ -197,7 +197,8 @@ func newResidentCatalogTurnTestSession(t *testing.T, resident bool, budgetChars 
 		}
 	}
 	catalog.SetSkillsBinding(binding)
-	cfg := &config.SkillsRuntimeConfig{CatalogResident: resident, CatalogBudgetChars: budgetChars}
+	residentFlag := resident
+	cfg := &config.SkillsRuntimeConfig{CatalogResident: &residentFlag, CatalogBudgetChars: budgetChars}
 	return &ChatSession{
 		FunctionCatalog:  catalog,
 		FunctionRegistry: registry,

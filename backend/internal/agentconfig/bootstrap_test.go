@@ -54,8 +54,8 @@ func TestEnsureStarterConfigFileCreatesMinimalConfig(t *testing.T) {
 	if !strings.Contains(content, "headers: {}") {
 		t.Fatalf("starter config missing global provider headers section: %s", content)
 	}
-	if !strings.Contains(content, "config_file: "+aiclipaths.DefaultRuntimeConfigRelativePath) {
-		t.Fatalf("starter config missing build-profile runtime config path: %s", content)
+	if !strings.Contains(content, "# config_file: /path/to/runtime.yaml") {
+		t.Fatalf("starter config missing the optional runtime override hint: %s", content)
 	}
 
 	cfg, err := InitGlobalConfig(path)
@@ -71,8 +71,11 @@ func TestEnsureStarterConfigFileCreatesMinimalConfig(t *testing.T) {
 	if len(cfg.Providers.Items) != 0 {
 		t.Fatalf("expected no providers in starter config, got %d", len(cfg.Providers.Items))
 	}
-	if cfg.SkillsRuntime == nil || cfg.SkillsRuntime.ConfigFile != aiclipaths.DefaultRuntimeConfigRelativePath {
-		t.Fatalf("expected build-profile runtime config default, got %+v", cfg.SkillsRuntime)
+	if cfg.SkillsRuntime == nil || cfg.SkillsRuntime.ConfigFile != "" {
+		t.Fatalf("starter config must not pin a runtime config_file (layers are auto-discovered), got %+v", cfg.SkillsRuntime)
+	}
+	if !cfg.SkillsRuntime.CatalogResidentEnabled() {
+		t.Fatal("starter parse must inherit the default-on resident catalog")
 	}
 }
 

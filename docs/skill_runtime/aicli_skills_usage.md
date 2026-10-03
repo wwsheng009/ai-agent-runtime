@@ -329,17 +329,18 @@ skills_runtime:
   mention_inject_max_chars: 32768   # 单技能正文上限
   mention_inject_total_chars: 65536 # 回合注入总量上限
   mention_hide_text_skill_functions: true # P3 默认 on：交互请求面隐藏文本类 skill__ 函数；显式 false 回退
-  catalog_resident: false           # P1：常驻技能目录（稳定前导位，灰度后再默认开启）
+  catalog_resident: true            # 常驻技能目录（2026-10-03 起默认 on；显式 false 关闭）
 ```
 
 CLI 覆盖（可选）：`--skills-mention=off|auto|on`。
 
 ### P1 行为补充
 
-- **常驻目录（`catalog_resident: true`）**：每回合在**稳定前导位**注入一份技能目录（session-scope
+- **常驻目录（`catalog_resident`，2026-10-03 起默认开启）**：每回合在**稳定前导位**注入一份技能目录（session-scope
   抽象指令，source=`skills_catalog`，prompt-only）；fingerprint 不变时逐字节稳定、不随回合尾部漂移，
   因此不破坏 provider 前缀缓存。`/skill` pin 回合不重复注入目录（pin guide 只保留 ProgramGuide）；
-  预算超限按"截描述→去描述"降级，技能条目永不消失。
+  预算超限按"截描述→去描述"降级，技能条目永不消失。显式 `catalog_resident: false` 关闭；默认翻转依据：
+  前缀稳定测试全绿 + 固定开销实测 ≈1.5K tokens（≤2K gate）。
 - **信任边界（Q12）**：folder-trust 特性启用时，未信任项目的 `auto` 模式不执行 mention 注入
   （跳过并记录 `untrusted_project` 诊断）；显式 `mention_injection: on` 可覆盖。folder-trust 未启用时
   维持原有行为。

@@ -617,8 +617,8 @@ func TestSkillsRuntimeMentionInjectionDefaults(t *testing.T) {
 	if got := cfg.MentionInjectTotalCharsValue(); got != DefaultSkillMentionInjectTotalChars {
 		t.Fatalf("default total chars = %d, want %d", got, DefaultSkillMentionInjectTotalChars)
 	}
-	if cfg.CatalogResident {
-		t.Fatal("catalog_resident must default to false (P1 gray release)")
+	if !cfg.CatalogResidentEnabled() {
+		t.Fatal("catalog_resident must default to true (2026-10-03 flipped; explicit false disables)")
 	}
 }
 
@@ -710,11 +710,30 @@ func TestSkillsRuntimeCatalogResidentEnabled(t *testing.T) {
 	if (*SkillsRuntimeConfig)(nil).CatalogResidentEnabled() {
 		t.Fatal("nil config must not enable resident catalog")
 	}
-	if (&SkillsRuntimeConfig{}).CatalogResidentEnabled() {
-		t.Fatal("default catalog_resident must be off")
+	if !(&SkillsRuntimeConfig{}).CatalogResidentEnabled() {
+		t.Fatal("unset catalog_resident must default to on")
 	}
-	if !(&SkillsRuntimeConfig{CatalogResident: true}).CatalogResidentEnabled() {
+	if (&SkillsRuntimeConfig{CatalogResident: boolPtrForTest(false)}).CatalogResidentEnabled() {
+		t.Fatal("explicit catalog_resident=false must disable resident catalog")
+	}
+	if !(&SkillsRuntimeConfig{CatalogResident: boolPtrForTest(true)}).CatalogResidentEnabled() {
 		t.Fatal("explicit catalog_resident=true must enable resident catalog")
+	}
+}
+
+// config.yaml 里错放 runtime.yaml 专属段（knowledge/workspace/...）时必须能被
+// 探测并告警：这些键被全局加载器忽略，静默分叉会造成"写了但没生效"。
+func TestMisplacedRuntimeKeysDetectsRuntimeYAMLOnlySections(t *testing.T) {
+	raw := []byte("providers:\n  default_provider: p\nknowledge:\n  mode: on\nworkspace:\n  root: /tmp\nskills_runtime:\n  enabled: true\n")
+	got := misplacedRuntimeKeys(raw)
+	if want := []string{"knowledge", "workspace"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("misplaced keys = %v, want %v", got, want)
+	}
+	if keys := misplacedRuntimeKeys([]byte("providers: {}\n")); len(keys) != 0 {
+		t.Fatalf("clean config must report no misplaced keys, got %v", keys)
+	}
+	if keys := misplacedRuntimeKeys(nil); len(keys) != 0 {
+		t.Fatalf("empty config must report no misplaced keys, got %v", keys)
 	}
 }
 
@@ -753,7 +772,7 @@ func TestInitGlobalConfigLoadsMentionInjection(t *testing.T) {
 	if runtimeCfg.MentionHideTextSkillFunctionsEnabled() {
 		t.Fatal("mention_hide_text_skill_functions = false must re-expose text skill functions")
 	}
-	if !runtimeCfg.CatalogResident {
+	if !runtimeCfg.CatalogResidentEnabled() {
 		t.Fatal("catalog_resident = false, want true")
 	}
 }

@@ -952,8 +952,9 @@ type SkillsRuntimeConfig struct {
 	MentionHideTextSkillFunctions *bool `yaml:"mention_hide_text_skill_functions" mapstructure:"mention_hide_text_skill_functions" env:"SKILLS_RUNTIME_MENTION_HIDE_TEXT_SKILL_FUNCTIONS"`
 	// CatalogResident 是 P1 常驻技能目录开关：开启后每回合请求都把 catalog
 	// 作为 session-scope 抽象指令放在稳定前缀（plan §4.5/§5 P1）。
-	// 默认 false；pin 回合的 guide catalog 在开启时自动去重。
-	CatalogResident bool `yaml:"catalog_resident" mapstructure:"catalog_resident" env:"SKILLS_RUNTIME_CATALOG_RESIDENT"`
+	// 自 2026-10-03 起默认开启（灰度 gate：前缀稳定 + 固定开销 ≤2K tokens 已满足）；
+	// *bool 便于显式关闭（catalog_resident: false）。pin 回合 guide catalog 自动去重。
+	CatalogResident *bool `yaml:"catalog_resident" mapstructure:"catalog_resident" env:"SKILLS_RUNTIME_CATALOG_RESIDENT"`
 	// DisabledSkills 是 SK-6 的 per-skill 启停名单：列出的 skill 名不再注册到
 	// registry（loader 过滤器权威点），但目录与诊断仍保留。
 	// 与 profile 的 skill 允许/拒绝名单取交集：deny 优先（disabled 覆盖 allow）。
@@ -1031,12 +1032,13 @@ func (c *SkillsRuntimeConfig) CatalogBudget() int {
 }
 
 // CatalogResidentEnabled 报告常驻技能目录（session-scope catalog 抽象指令）
-// 是否开启。nil 安全；默认 false（P1 灰度，plan §4.5/§4.7）。
+// 是否开启。nil 配置返回 false（技能面未启用）；未显式配置（nil 指针）默认
+// 开启，显式 false 关闭（2026-10-03 灰度 gate 达标后翻转默认值，plan §4.7）。
 func (c *SkillsRuntimeConfig) CatalogResidentEnabled() bool {
 	if c == nil {
 		return false
 	}
-	return c.CatalogResident
+	return c.CatalogResident == nil || *c.CatalogResident
 }
 
 // Skill mention injection 的 canonical 模式值与默认预算（plan §4.7 / §5 P0）。
@@ -1398,6 +1400,9 @@ func InitGlobalConfig(configPath string) (*Config, error) {
 			if err := validateLoadedConfig(cfg); err != nil {
 				return nil, fmt.Errorf("invalid config file %s: %w", configPath, err)
 			}
+			for _, key := range misplacedRuntimeKeys(userYAML) {
+				logger.Warnf("config.yaml: top-level key %q belongs to runtime.yaml (./.aicli/runtime.yaml or ~/.aicli/runtime.yaml); it is ignored by the global config loader", key)
+			}
 		}
 	}
 	presetLayerApplied := false
@@ -1457,6 +1462,57 @@ func yamlMappingHasKey(rawYAML []byte, section, key string) bool {
 	}
 	_, present := nested[key]
 	return present
+}
+
+// runtimeYAMLDomainKeys 是只属于 runtime.yaml（internal/config.RuntimeConfig）
+// 的顶层键：workspace/agent 执行/工具沙箱/知识层/checkpoint/images/lsp 等。
+// 它们出现在 config.yaml 时会被全局加载器静默忽略——用户以为生效、实际零效果，
+// 是 config.yaml 与 runtime.yaml 职责交叉的典型来源。加载时告警来消除静默分叉。
+var runtimeYAMLDomainKeys = map[string]struct{}{
+	"agent":          {},
+	"agents":         {},
+	"agentControl":   {},
+	"router":         {},
+	"embedding":      {},
+	"workspace":      {},
+	"context":        {},
+	"catalog":        {},
+	"sessions":       {},
+	"team":           {},
+	"trace":          {},
+	"hooks":          {},
+	"sessionRuntime": {},
+	"artifact":       {},
+	"checkpoint":     {},
+	"background":     {},
+	"images":         {},
+	"performance":    {},
+	"sandbox":        {},
+	"hotReload":      {},
+	"rollout":        {},
+	"observe":        {},
+	"knowledge":      {},
+	"lsp":            {},
+}
+
+// misplacedRuntimeKeys 返回 config.yaml 中出现的 runtime.yaml 专属顶层键
+// （稳定字典序）。解析失败时返回 nil：此处只用于告警，不应影响加载。
+func misplacedRuntimeKeys(rawYAML []byte) []string {
+	if len(bytes.TrimSpace(rawYAML)) == 0 {
+		return nil
+	}
+	var doc map[string]any
+	if err := unmarshalYAML(rawYAML, &doc); err != nil {
+		return nil
+	}
+	var keys []string
+	for key := range doc {
+		if _, ok := runtimeYAMLDomainKeys[key]; ok {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // applySystemPresetLayer merges matching enabled system presets below the

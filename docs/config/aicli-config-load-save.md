@@ -12,6 +12,24 @@
 | `~/.aicli/workspace/<hash>/`（D5 workspace 层） | 按 cwd 哈希隔离的 chat 偏好 | `chat-prefs.yaml` |
 | `~/.aicli/sessions/`、`chat-logs/`、`cache/`、`data/`、`logs/`、`.backups/` | 运行时数据，非配置 | `session_history.sqlite` 等 |
 
+## 一之补、职责边界：config.yaml vs runtime.yaml（2026-10-03 梳理）
+
+两个文件按"引导/入口层 ↔ 运行时执行层"分工，**同一个键只允许出现在一个文件**：
+
+| 文件 | 职责 | 典型键 | 明确不包含 |
+|---|---|---|---|
+| `~/.aicli/config.yaml`、`./.aicli/config.yaml`（`agentconfig.Config`） | 引导与入口：选谁、连哪、偏好与开关 | `providers` 与凭据、`aicli.chat` 偏好、`profiles`、`supervision`、`log`、`skills_runtime`（技能系统**入口与对话行为**：`enabled`、`skill_dirs`、`mention_*`、`catalog_resident`、`discipline_block`、`argument_substitution`、`disabled_skills`） | 运行时执行参数：workspace、agent 循环、工具与 sandbox、知识层、checkpoint、background、images、performance、hotReload、rollout、observe、lsp |
+| `runtime.yaml` 层栈：`./.aicli/runtime.yaml`（project）→ `~/.aicli/runtime.yaml`（user），`internal/config.RuntimeConfig` | 运行时执行层：进程/引擎怎么跑 | `workspace`、`agent`/`agents`、`router`/`embedding`、`context`（compact/recall）、`tools`/`sandbox`、`knowledge`、`lsp`、`checkpoint`、`background`、`images`、`performance`、`hotReload`、`rollout`、`observe`、`catalog`（技能引擎侧） | providers/凭据、`aicli.chat`、`skills_runtime` 对话行为开关 |
+| `skills_runtime.config_file`（config.yaml 内） | **仅"显式覆盖"指针**，不是开关、不是层栈成员 | `config_file: /abs/path/runtime.yaml` | 约定值（裸 `runtime.yaml`、`configs/runtime.yaml`、`backend/configs/runtime.yaml`、`.`）会被识别并忽略，自动回落到 `.aicli` 层栈；缺省（空串）同样走层栈 |
+
+- **错放即告警**：把 runtime.yaml 专属顶层键写进 config.yaml（历史常见：`knowledge:`）会被全局加载器忽略，
+  并在加载时告警（`config.yaml: top-level key "knowledge" belongs to runtime.yaml ...`）。
+- **发现与指针解耦（2026-10-03 修复）**：chat 解析 `.aicli/runtime.yaml` 层栈不再要求
+  `skills_runtime.config_file` 非空；该键仅保留"显式覆盖"语义（此前删除指针会静默放弃整个运行时层，
+  与 runtime-server 的无条件解析行为不一致）。
+- **开发目录布局**：`configs/runtime.yaml` / `backend/configs/runtime.yaml` **不是配置层**，仅在调用方
+  显式传入时读取（如 `runtime-server --config`）；starter config 不再写入这两个约定值。
+
 ## 二、启动加载：分层合并（decision D3）
 
 ### MergeMode
