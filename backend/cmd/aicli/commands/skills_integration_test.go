@@ -1394,6 +1394,12 @@ triggers:
 }
 
 func TestBuildRequestFunctionSchemas_ImagegenSkillSuppressesOpenAIImageGenerateTool(t *testing.T) {
+	// 本用例传 nil toolManager：skill 的 tools 依赖校验此时只能靠「没有进程级
+	// MCP 面」来放行 imagegen（校验逻辑见 loader.CheckSkill / registry.validate）。
+	// MCPManagerInstance 是包级全局，若被其它用例遗留，本用例会因为「MCP 面里没有
+	// openai_image_generate」把 imagegen 静默跳过——而本用例断言的是 schema 抑制
+	// 逻辑，与进程级 MCP 状态无关，故显式隔离。
+	withoutProcessMCPManager(t)
 	tempDir := t.TempDir()
 	skillDir := filepath.Join(tempDir, "imagegen")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
@@ -1467,6 +1473,10 @@ workflow:
 }
 
 func TestBuildRequestFunctionSchemas_CodexNativeImageSuppressesImagegenSkillAndOpenAIImageTool(t *testing.T) {
+	// 同上：传 nil toolManager，必须隔离进程级 MCP 全局，否则 imagegen 会被
+	// 「MCP 面里没有 openai_image_generate」静默跳过，掩盖本用例真正断言的
+	// Codex 原生镜像抑制语义。
+	withoutProcessMCPManager(t)
 	tempDir := t.TempDir()
 	skillDir := filepath.Join(tempDir, "imagegen")
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
