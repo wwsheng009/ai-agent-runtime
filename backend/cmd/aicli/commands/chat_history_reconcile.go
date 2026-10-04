@@ -449,6 +449,37 @@ func (b *chatRuntimeEventBridge) replaceCanonicalHistoryProjection(messages []ru
 	return true
 }
 
+// replaceResumeCompactHistoryProjection 用「compact 后视图」的可见消息整体替换
+// Scene 投影：先重置渲染数据面，再只 seed compact 之后的上下文。
+//
+// 与 replaceCanonicalHistoryProjection 的区别是**不写历史重置标记**。compact
+// 后视图只是本次恢复的展示口径：canonical 转录（含 compact 前历史）仍然完整，
+// 下一次 `--full` 恢复必须还能重放全部历史，不能因为一次默认恢复就把事件日志
+// 里的较早记录永久截断。runActive 时与其它破坏性替换一致，拒绝并返回 false，
+// 由调用方回退到增量 reconcile。
+func (b *chatRuntimeEventBridge) replaceResumeCompactHistoryProjection(messages []runtimetypes.Message, header string) bool {
+	if b == nil {
+		return false
+	}
+	units := buildPersistedHistorySeedUnits(messages)
+	if len(units) == 0 {
+		return false
+	}
+	b.renderMu.Lock()
+	if b.runActive {
+		b.renderMu.Unlock()
+		return false
+	}
+	b.resetCanonicalHistoryProjectionLocked()
+	b.seedPersistedHistoryLocked(units, header)
+	b.renderMu.Unlock()
+	// 与 replaceCanonicalHistoryProjection 相同的发布语义：replacement snapshot
+	// 同时携带一次性的原生 scrollback 替换授权，compact 后视图才能替换掉
+	// 事件日志重放出来的全量旧 cell。
+	b.sessionInteractionReplacementSnapshot()
+	return true
+}
+
 // resetCanonicalHistoryProjectionLocked clears all derived render state. It
 // intentionally does not infer a suffix from display rows: the caller supplies
 // canonical source and the next seed recreates stable semantic identities.

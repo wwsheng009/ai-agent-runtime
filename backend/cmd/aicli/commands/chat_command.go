@@ -40,11 +40,13 @@ const ChatCommandExampleHelp = `  aicli chat                              # 交�
   aicli chat --resume                     # 恢复当前工作目录的最近会话
   aicli chat --resume --cwd=false         # 跨工作目录恢复最近会话
   aicli chat --session session_xxx        # 加载指定会话
+  aicli chat --session session_xxx --full # 加载指定会话并回放完整历史
   aicli chat --list-sessions              # 列出当前工作目录的会话
   aicli chat --list-sessions --session-provider nvidia --session-query review
   aicli resume                            # 顶层恢复当前工作目录的最近会话
   aicli resume --cwd=false                # 顶层跨工作目录恢复最近会话
   aicli resume session_xxx                # 顶层加载指定会话
+  aicli resume session_xxx --full         # 顶层加载指定会话并回放完整历史
   aicli chat --no-interactive --prompt "Hello"  # 非交互模式
   aicli chat --no-interactive --output json -M "Hello"  # JSON 输出
 
@@ -104,6 +106,7 @@ func registerChatFlags(cmd *cobra.Command) {
 	cmd.Flags().String("runtime-server", "", "runtime-server 地址或模式别名（server|auto|local|http://127.0.0.1:8101）")
 	cmd.Flags().String("session", "", "加载指定 chat 会话 ID")
 	cmd.Flags().Bool("resume", false, "恢复最近一次 chat 会话")
+	cmd.Flags().Bool("full", false, "恢复历史会话时回放完整转录（默认仅回放最近一次 compact 之后的上下文；无 compact 时回放全部）")
 	cmd.Flags().Bool("list-sessions", false, "列出当前用户的 chat 会话并退出")
 	cmd.Flags().String("session-dir", "", "chat 会话持久化目录（默认: ~/.aicli/sessions）")
 	cmd.Flags().String("user", "", "chat 会话用户 ID（优先于 AICLI_SESSION_USER 和 runtime sessions.defaultUserId）")

@@ -221,12 +221,18 @@ func handleCommand(session *ChatSession, command string, noInteractive bool) boo
 		return false
 	}
 	if commandMatches(cmdLower, "/load") {
-		sessionID := extractCommandArgument(command)
-		if strings.TrimSpace(sessionID) == "" {
-			printChatCommandOutput(session, "错误: 需要指定会话 ID\n用法: /load <session-id>")
+		sessionID, fullHistory, parseErr := parseSessionTargetAndFullFlag(extractCommandArgument(command))
+		if parseErr != nil {
+			printfChatCommandOutput(session, "错误: %v\n用法: /load <session-id> [--full]", parseErr)
 			return false
 		}
-		if err := loadRuntimeConversation(session, sessionID); err != nil {
+		if strings.TrimSpace(sessionID) == "" {
+			printChatCommandOutput(session, "错误: 需要指定会话 ID\n用法: /load <session-id> [--full]")
+			return false
+		}
+		if err := session.withResumeFullHistory(fullHistory, func() error {
+			return loadRuntimeConversation(session, sessionID)
+		}); err != nil {
 			printfChatCommandOutput(session, "错误: %v", err)
 			return false
 		}
