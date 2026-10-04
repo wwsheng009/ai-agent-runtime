@@ -1,5 +1,7 @@
 # 交接：UnifiedPrimaryViewport 用例失败（活跃 cell 溢出头部挤掉 history 尾部）
 
+**状态：已修复（`8028dff2`），根因与修法见文末「修复记录」。**
+
 **目标**：让下面这个用例通过，并保证不掩盖真实 bug。
 
 ```powershell
@@ -7,8 +9,9 @@ cd E:\projects\ai\ai-agent-runtime\backend
 go test ./cmd/aicli/commands/ -count=1 -run '^TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsideActiveReasoning$'
 ```
 
-**当前状态**：单独运行即**确定性失败**（不是配对时序问题）。整包
-`go test ./cmd/aicli/commands/ -count=1` 当前仅剩这 1 个失败（172s）。
+**修复前状态**：单独运行即**确定性失败**（不是配对时序问题）。整包
+`go test ./cmd/aicli/commands/ -count=1` 当时仅剩这 1 个失败（172s）。
+修复后整包 0 失败（见文末验证口径）。
 
 ## 一、症状（逐行对照，width=52 height=15，OutputBottomRow=6）
 
@@ -89,3 +92,38 @@ HistoryCommit**。即：**活跃 reasoning cell 的溢出头部被序列化进 t
 - `TestAICLIChatActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled`
   已修（`e5653ae1`，`teammateHold` channel 门控，配对 3/3 PASS）
 - 完整诊断史：`docs/debug/auto-start-team-ambient-run-meta.md`
+
+---
+
+## 七、修复记录（`8028dff2`，2026-10-04）
+
+**根因（git 复现定位，非推断）**：用例在出生提交 `672ccdc2` PASS；`cfa87c71`
+（动态状态行常驻预留）把 primary 历史区 `OutputBottomRow` 从 7 缩到 6 后 FAIL，
+其父提交 `cfa87c71^`（=7）PASS。即溢出头部驻留历史区并非新出现的缺陷——历史上
+一直如此；少 1 行容量后，4 行活跃前缀恰好把 `history user 6` 挤出 6 行窗口。
+「活跃前缀不得挤占 finalized 尾部」是对的方向，但并非「插入位置/容量计算」错误，
+而是活跃前缀根本不应成为历史区的驻留行。
+
+**修法**（`backend/cmd/aicli/ui/terminal_session.go`）：
+
+- `HistoryCommitActive` 批次改走 `terminalActiveHistoryArchiveANSI`：分块画到
+  历史区顶部后随滚动送入原生 scrollback，再按 sticky top-align 语义恢复
+  finalized 尾部；历史区驻留模型不被活跃行污染。`terminalHistoryInsertionANSI`
+  语义不变，仅 finalized/混合批次使用。
+- 新增 `historyStreamTailRows`（已交付流尾，含归档行）作为重放去重依据，修复
+  归档引入的恢复重放重复（`TestTerminalSessionExecutorDrainsFinalResidentTail
+  QueuedDuringBlockedFrameWrite`）。
+- 归档即进入 native scrollback，置位 sticky top-align，避免后续 finalized 插入
+  在 scrollback 与驻留尾之间留下空白断层
+  （`TestSuccessfulRequestBoundaryPreservesFortyLineFinalInNativeHistory`）。
+
+**验证口径（本提交后）**：
+
+```powershell
+go test ./cmd/aicli/commands/ -count=1   # ok，0 失败（原红项转绿，167s）
+go test ./cmd/aicli/ui/ -count=1         # ok（11s）
+go test ./internal/chat/... -count=1     # ok（33s）
+```
+
+新增回归：`cmd/aicli/ui/terminal_session_active_archive_test.go`（2 例：滞留尾部
+不被归档前缀挤占；超长归档按文档序跨 writer 且 sticky top-align）。
