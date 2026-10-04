@@ -13,9 +13,11 @@ const { getAnalyticsSessionUsageMock } = vi.hoisted(() => ({
   getAnalyticsSessionUsageMock: vi.fn(),
 }));
 
-vi.mock("@/lib/runtime-api", () => ({
-  getAnalyticsSessionUsage: getAnalyticsSessionUsageMock,
-}));
+// 只替换取数函数：hook 还会用到同模块的错误判定helper（404 → 空态），故保留其余真实导出。
+vi.mock("@/lib/runtime-api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/runtime-api")>();
+  return { ...actual, getAnalyticsSessionUsage: getAnalyticsSessionUsageMock };
+});
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;

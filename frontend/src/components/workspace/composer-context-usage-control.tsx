@@ -59,6 +59,8 @@ const PANEL_POSITION_OPTIONS: PopoverPositionOptions = {
 
 /** 手动压缩后的覆盖显示：只在「压缩那一刻的用量」还没被新数据替换时生效。 */
 type CompactOverride = {
+  /** 覆盖归属的会话：换会话后旧结论必须失效，不能盖到新会话的环上。 */
+  sessionId: string;
   outcome: SessionCompactOutcome;
   usageAtCompact: AnalyticsSessionUsageDetail | null;
 };
@@ -72,7 +74,7 @@ export function ComposerContextUsageControl({
 }: ComposerContextUsageControlProps) {
   const { t } = useTranslation("workspace");
   const normalizedSessionId = sessionId?.trim() ?? "";
-  const { error, loading, refresh, usage } = useSessionUsage({
+  const { error, loading, refresh, sessionMissing, usage } = useSessionUsage({
     live: isResponding,
     lastRuntimeEventType,
     runtimeEventCount,
@@ -89,8 +91,11 @@ export function ComposerContextUsageControl({
   const liveSnapshot = resolveContextUsage(usage);
   // 覆盖是纯派生：等新用量落库（usage 换了对象引用）就让实时数据接管显示，
   // 因此不需要用 effect 去清状态（effect 里 setState 会触发级联渲染）。
+  // 换会话同样靠派生失效：override 带的 sessionId 一旦对不上就当没有过压缩。
   const compactSnapshot =
-    compactOverride && usage === compactOverride.usageAtCompact
+    compactOverride &&
+    compactOverride.sessionId === normalizedSessionId &&
+    usage === compactOverride.usageAtCompact
       ? resolveContextUsageFromCompact(compactOverride.outcome)
       : null;
   const snapshot = compactSnapshot ?? liveSnapshot;
@@ -163,7 +168,7 @@ export function ComposerContextUsageControl({
   }
 
   function handleCompacted(outcome: SessionCompactOutcome) {
-    setCompactOverride({ outcome, usageAtCompact: usage });
+    setCompactOverride({ outcome, sessionId: normalizedSessionId, usageAtCompact: usage });
     // 压缩已改变历史：让用量面板/环重新拉取落库数据（环同时已被响应覆盖）。
     refresh();
   }
@@ -178,7 +183,9 @@ export function ComposerContextUsageControl({
     ? t("composer.contextUsage.compact.disabledNoSession")
     : isResponding
       ? t("composer.contextUsage.compact.disabledResponding")
-      : null;
+      : sessionMissing
+        ? t("composer.contextUsage.compact.disabledNoSession")
+        : null;
 
   const metrics = snapshot
     ? [

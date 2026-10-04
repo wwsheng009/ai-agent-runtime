@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
     error: null as string | null,
     loading: false,
     refresh: vi.fn(),
+    sessionMissing: false,
     usage: null as unknown,
   },
 }));
@@ -75,6 +76,7 @@ describe("ComposerContextUsageControl", () => {
     mocks.usage.error = null;
     mocks.usage.loading = false;
     mocks.usage.refresh.mockClear();
+    mocks.usage.sessionMissing = false;
     mocks.usage.usage = null;
   });
 
@@ -89,15 +91,21 @@ describe("ComposerContextUsageControl", () => {
     delete (globalThis as ReactActEnvironmentGlobal).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  function renderControl(props: { isResponding?: boolean } = {}) {
+  function renderControl(props: { isResponding?: boolean; sessionId?: string } = {}) {
     root = createRoot(container);
     act(() => {
       root?.render(
         <ComposerContextUsageControl
           isResponding={props.isResponding}
-          sessionId="session-1"
+          sessionId={props.sessionId ?? "session-1"}
         />,
       );
+    });
+  }
+
+  function rerenderControl(sessionId: string) {
+    act(() => {
+      root?.render(<ComposerContextUsageControl sessionId={sessionId} />);
     });
   }
 
@@ -213,5 +221,53 @@ describe("ComposerContextUsageControl", () => {
       "below_threshold",
     );
     expect(query("composer-context-usage-trigger")?.textContent).toBe("30%");
+  });
+
+  it("新会话尚未落库时不显示读失败，且压缩按钮禁用", () => {
+    useSteps([]);
+    mocks.usage.sessionMissing = true;
+    renderControl({ sessionId: "session-new" });
+    click(query("composer-context-usage-trigger"));
+
+    const panel = query("composer-context-usage-panel");
+    expect(panel?.textContent).not.toContain("上下文用量不可用");
+    expect(panel?.textContent).toContain("暂无可用的上下文数据");
+    const action = query("composer-context-compact-action") as HTMLButtonElement;
+    expect(action.disabled).toBe(true);
+    expect(panel?.textContent).toContain("会话尚未落地");
+  });
+
+  it("换会话后旧会话的压缩结论不再覆盖新会话的环", async () => {
+    useSteps([
+      buildStep({ context_prompt_tokens: 80_000, context_window_tokens: 100_000 }),
+    ]);
+    mockCompact.mockResolvedValue({
+      result: {
+        ...compactStatus,
+        checkpointIds: ["ckpt-1"],
+        compactedMessages: 6,
+        tokenAfter: 20_000,
+        usageSource: "provider",
+      },
+      status: compactStatus,
+    });
+    renderControl();
+    click(query("composer-context-usage-trigger"));
+    await act(async () => {
+      query("composer-context-compact-action")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true }),
+      );
+    });
+    expect(query("composer-context-usage-trigger")?.textContent).toBe("20%");
+
+    // 新会话有自己的用量：旧的 token_after 必须让位。
+    mocks.usage.usage = {
+      steps: [
+        buildStep({ context_prompt_tokens: 5_000, context_window_tokens: 100_000 }),
+      ],
+    } as unknown as AnalyticsSessionUsageDetail;
+    rerenderControl("session-2");
+
+    expect(query("composer-context-usage-trigger")?.textContent).toBe("5%");
   });
 });
