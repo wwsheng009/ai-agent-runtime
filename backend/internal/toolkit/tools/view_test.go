@@ -44,6 +44,57 @@ func TestViewTool_DescriptionAndSchemaSupportBatchReads(t *testing.T) {
 	}
 }
 
+// TestViewTool_AcceptsStringNumericParams verifies that the view tool coerces
+// string-typed limit/offset values (e.g. "104" instead of 104) to integers
+// before JSON decoding, instead of failing with "view 参数格式无效".
+// See: model commonly emits numeric params as strings.
+func TestViewTool_AcceptsStringNumericParams(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("one\ntwo\nthree\nfour\nfive\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	tool := NewViewTool()
+	tool.SetBasePath(root)
+
+	// Top-level string limit/offset
+	result, err := tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": "notes.txt",
+		"offset":    "1",
+		"limit":     "2",
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected successful read with string params, result=%#v err=%v", result, err)
+	}
+	if result.Content != "2: two\n3: three" {
+		t.Fatalf("expected lines 2-3, got %q", result.Content)
+	}
+
+	// String limit/offset inside files[] items
+	result, err = tool.Execute(context.Background(), map[string]interface{}{
+		"files": []interface{}{
+			map[string]interface{}{"file_path": "notes.txt", "offset": "2", "limit": "1"},
+		},
+	})
+	if err != nil || !result.Success {
+		t.Fatalf("expected successful batch read with string params, result=%#v err=%v", result, err)
+	}
+	if !strings.Contains(result.Content, "3: three") {
+		t.Fatalf("expected line 3 in batch output, got %q", result.Content)
+	}
+
+	// Invalid numeric string should still fail gracefully (not silently coerce)
+	result, err = tool.Execute(context.Background(), map[string]interface{}{
+		"file_path": "notes.txt",
+		"limit":     "abc",
+	})
+	if err != nil || result.Success {
+		t.Fatalf("expected failure with invalid numeric string, result=%#v err=%v", result, err)
+	}
+	if !strings.Contains(result.Error.Error(), "view 参数格式无效") {
+		t.Fatalf("expected 'view 参数格式无效' error, got %v", result.Error)
+	}
+}
+
 func TestViewTool_OutputPreservesLinesAndAddsLineNumbers(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("one\ntwo\nthree\n"), 0o644); err != nil {

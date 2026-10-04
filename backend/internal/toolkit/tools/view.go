@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -207,8 +208,59 @@ type ViewFileRequest struct {
 	ledgerDefer func(func())
 }
 
+// coerceViewNumericParams converts string values for known integer fields
+// (limit, offset) in the params map to actual integers, so that the strict
+// json.Unmarshal into ViewParams does not reject them as "view 参数格式无效".
+// This mirrors the coercion already present for code tools (codeParamInt).
+// Only top-level and per-item files[] numeric fields are coerced; invalid
+// numeric strings are left unchanged (they will still fail JSON decoding
+// with the existing error, preserving the current behavior for garbage input).
+func coerceViewNumericParams(params map[string]interface{}) {
+	if params == nil {
+		return
+	}
+	coerceIntField(params, "limit")
+	coerceIntField(params, "offset")
+	if files, ok := params["files"].([]interface{}); ok {
+		for _, item := range files {
+			if m, ok := item.(map[string]interface{}); ok {
+				coerceIntField(m, "limit")
+				coerceIntField(m, "offset")
+			}
+		}
+	}
+}
+
+// coerceIntField converts a string value at params[key] to an int when it
+// parses as a clean integer. Non-string values and non-integer strings are
+// left untouched.
+func coerceIntField(params map[string]interface{}, key string) {
+	raw, ok := params[key]
+	if !ok {
+		return
+	}
+	str, ok := raw.(string)
+	if !ok {
+		return
+	}
+	trimmed := strings.TrimSpace(str)
+	if trimmed == "" {
+		return
+	}
+	parsed, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return
+	}
+	params[key] = parsed
+}
+
 // Execute 实现 Tool 接口
 func (v *ViewTool) Execute(ctx context.Context, params map[string]interface{}) (*toolkit.ToolResult, error) {
+	// 模型常把数字参数写成字符串（"104" 而非 104）：在 JSON 解码之前把已知的
+	// 整数字段（limit/offset，包括 files[] 条目中的同名字段）从字符串形式
+	// 强转为整数，避免 json.Unmarshal 因类型不匹配（string→int）直接拒绝为
+	// "view 参数格式无效"。参见 code_common.go:codeParamInt 的同类处理。
+	coerceViewNumericParams(params)
 	var p ViewParams
 	encoded, err := json.Marshal(params)
 	if err != nil || json.Unmarshal(encoded, &p) != nil {
