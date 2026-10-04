@@ -125,6 +125,14 @@ type chatRuntimeEventBridge struct {
 	//（该函数存在重入风险，见其注释）。
 	runState     atomic.Int32
 	activeTurnID string
+	// lastClosedTurnID 记录最近一次 EndRun 关闭的轮身份（activeTurnID，
+	// 空则回退 executorTurnID）。运行时的终稿/收尾事件可能在 executor
+	// 返回、EndRun 结算之后才发布（2026-10-04 现场：EndRun 18:57:03
+	// 结算完成，final assistant_message + session_end 在 18:57:05-06
+	// 才入桥，被 ownership 守卫整批丢弃，页面看不到终稿）。非空时只对
+	// 本轮的终态事件（终稿/会话收尾）放行；BeginRun、收养新轮或收尾边
+	// 被消费后清空。
+	lastClosedTurnID string
 	// adoptedTurnID marks a primary turn that this bridge auto-adopted from
 	// the event stream (session_start opens / session_end closes) because the
 	// submitting side (sidecar/background auto-recovery wake turns) never
@@ -989,6 +997,7 @@ func (b *chatRuntimeEventBridge) BeginRunKind(kind chatRunKind) {
 	b.runEpoch++
 	b.setRunState(chatRunStateRunning)
 	b.activeTurnID = ""
+	b.lastClosedTurnID = ""
 	b.executorTurnID = ""
 	b.activeAssistantStreamID = ""
 	b.assistantStreams = make(map[string]*chatAssistantStreamState)
@@ -1132,6 +1141,15 @@ func (b *chatRuntimeEventBridge) EndRun() {
 		b.retireTurnLocked(b.activeTurnID)
 	}
 	b.runActive = false
+	if turnID != "" {
+		// Keep the just-closed turn as the closing-tail reference: the runtime
+		// may publish this turn's final assistant_message / session_end after
+		// the executor returned and this barrier already closed the run
+		// (2026-10-04 live session_20260930210352_V5o7MDYL: EndRun settled at
+		// 18:57:03, the terminal batch arrived 18:57:05-06 and was dropped as
+		// "event turn does not match active run").
+		b.lastClosedTurnID = turnID
+	}
 	b.markRunClosed()
 	b.renderMu.Unlock()
 	b.finalizeOpenUnifiedStreamsAtRunEnd()
@@ -5283,6 +5301,12 @@ func (b *chatRuntimeEventBridge) handleEvent(event runtimeevents.Event) {
 	if b.shouldEndAdoptedRun(event) {
 		defer b.endAdoptedRun(event)
 	}
+	// A run that EndRun already closed can still receive its own terminal tail
+	// (final assistant_message / session_end published after the executor
+	// returned); close the tail window once the closing edge has been handled.
+	if b.shouldEndClosingTail(event) {
+		defer b.clearClosingTail(event)
+	}
 	// Logging is append-only observability and may retain stale events. All
 	// mutable UI/transcript paths below remain guarded by turn ownership.
 	b.handleStructuredLogEvent(event)
@@ -5649,6 +5673,7 @@ func (b *chatRuntimeEventBridge) adoptPrimaryRunTurnLocked(turnID string) {
 	b.unretireTurnLocked(turnID)
 	b.adoptedTurnID = ""
 	b.adoptedRunEpoch = 0
+	b.lastClosedTurnID = ""
 	b.runStarted = true
 	b.runActive = true
 	b.runEpoch++
@@ -5776,6 +5801,7 @@ func (b *chatRuntimeEventBridge) maybeAdoptResumedPrimaryTurn(event runtimeevent
 	b.runEpoch++
 	b.setRunState(chatRunStateRunning)
 	b.activeTurnID = turnID
+	b.lastClosedTurnID = ""
 	b.adoptedTurnID = turnID
 	b.adoptedRunEpoch = b.runEpoch
 	b.resumeTurnID = ""
@@ -5869,7 +5895,9 @@ func (b *chatRuntimeEventBridge) shouldSuppressMismatchedPrimaryTurnEvent(event 
 		return b.runActive && b.activeTurnID != ""
 	}
 	if !b.runActive {
-		return true
+		// 刚关闭 run 的收尾尾巴（终稿/session_end）仍须放行，否则模型的
+		// 最后一段输出永远进不了渲染管线（2026-10-04 现场）。
+		return !b.isClosingTailEventLocked(event.Type, turnID)
 	}
 	if _, retired := b.retiredTurnIDs[turnID]; retired {
 		return true
@@ -5982,7 +6010,11 @@ func (b *chatRuntimeEventBridge) shouldSuppressLatePrimaryRunEvent(event runtime
 	case runtimechat.EventAssistantDelta:
 		return true
 	case runtimechat.EventAssistantMessage:
-		return true
+		// The final message of the run that EndRun just closed is not late
+		// noise: it may be published by the runtime right after the executor
+		// returned. Accept it so the answer still finalizes; foreign-turn
+		// finals stay dropped.
+		return !b.isClosingTailEvent(event)
 	case runtimechat.EventApprovalRequested:
 		return true
 	case runtimechat.EventQuestionAsked:
@@ -5997,6 +6029,67 @@ func (b *chatRuntimeEventBridge) shouldSuppressLatePrimaryRunEvent(event runtime
 		return true
 	default:
 		return false
+	}
+}
+
+// closingTailEventType 限定 EndRun 之后仍允许渲染的终态事件集合：只放行
+// 会话收尾本身（终稿、session_end/interrupted）。工具行、推理与增量等
+// 中途事件依然被挡下，避免陈旧输出污染已关闭的视口。
+func closingTailEventType(eventType string) bool {
+	switch eventType {
+	case runtimechat.EventAssistantMessage, runtimechat.EventSessionEnd, runtimechat.EventSessionInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+// isClosingTailEventLocked 报告事件是否属于「刚被 EndRun 关闭的 run 的收尾
+// 尾巴」。调用方必须已持有 renderMu：判据是 run 已关闭且没有新 run 接管、
+// 事件身份等于 lastClosedTurnID、事件类型属于终态收尾集合。
+func (b *chatRuntimeEventBridge) isClosingTailEventLocked(eventType, turnID string) bool {
+	if b == nil || b.runActive || b.lastClosedTurnID == "" {
+		return false
+	}
+	return closingTailEventType(eventType) && strings.TrimSpace(turnID) == b.lastClosedTurnID
+}
+
+// isClosingTailEvent 是加锁版本，供不持有 renderMu 的守卫使用。
+func (b *chatRuntimeEventBridge) isClosingTailEvent(event runtimeevents.Event) bool {
+	if b == nil || event.Payload == nil {
+		return false
+	}
+	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	return b.isClosingTailEventLocked(event.Type, turnID)
+}
+
+// shouldEndClosingTail 报告事件是否是收尾窗口的闭合边（session_end /
+// session_interrupted）：处理完该事件后窗口关闭，同轮再来的事件重新被守卫
+// 丢弃，避免收尾事件被重复消费。
+func (b *chatRuntimeEventBridge) shouldEndClosingTail(event runtimeevents.Event) bool {
+	if b == nil || !closingTailEventType(event.Type) {
+		return false
+	}
+	switch event.Type {
+	case runtimechat.EventSessionEnd, runtimechat.EventSessionInterrupted:
+	default:
+		return false
+	}
+	return b.isClosingTailEvent(event)
+}
+
+// clearClosingTail 在收尾边被完整处理之后关闭窗口（handleEvent defer 调用）。
+func (b *chatRuntimeEventBridge) clearClosingTail(event runtimeevents.Event) {
+	if b == nil || event.Payload == nil {
+		return
+	}
+	turnID := strings.TrimSpace(payloadStringValue(event.Payload["turn_id"]))
+	b.renderMu.Lock()
+	defer b.renderMu.Unlock()
+	if b.lastClosedTurnID == turnID {
+		b.lastClosedTurnID = ""
 	}
 }
 
@@ -7055,7 +7148,9 @@ func (b *chatRuntimeEventBridge) acceptAssistantTurnLocked(turnID string) bool {
 		return true
 	}
 	if _, retired := b.retiredTurnIDs[turnID]; retired {
-		return false
+		// EndRun 退役的本轮仍允许收尾终稿通过（见 lastClosedTurnID）；
+		// 新 run 活跃后 runActive=true 会使该豁免自动失效。
+		return b.isClosingTailEventLocked(runtimechat.EventAssistantMessage, turnID)
 	}
 	return b.activeTurnID != "" && b.activeTurnID == turnID
 }
