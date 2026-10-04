@@ -254,6 +254,14 @@ type ExecutionSupervisor struct {
 	// empty. Nil means "always runnable", which degrades to plain wall-clock
 	// measurement.
 	ParentRunnable ParentRunnable
+	// WakeReady, when set, is invoked after a scan projection scheduled a
+	// durable lifecycle wake for a parent, so the host can attempt an
+	// immediate drain (MaybeWakeParent) instead of waiting for a state
+	// transition that may never come: 2026-10-04 a parent sat idle while
+	// progress_stalled / execution_timed_out wakes stayed unclaimed forever.
+	// The scan loop never starts turns itself; hosts must not block here and
+	// should drain asynchronously.
+	WakeReady func(ctx context.Context, rootScopeID, targetParentSessionID, targetParentTeamID string)
 	// Now is injectable for tests. Nil uses time.Now().UTC().
 	Now func() time.Time
 
@@ -1189,7 +1197,7 @@ func (s *ExecutionSupervisor) projectRestartOrphan(ctx context.Context, run *Exe
 	if s == nil || s.StoreFull == nil || run == nil {
 		return
 	}
-	_, _ = ProjectLifecycle(ctx, s.StoreFull, s.Wakes, LifecycleProjection{
+	notification, err := ProjectLifecycle(ctx, s.StoreFull, s.Wakes, LifecycleProjection{
 		RootScopeID:           run.RootSessionID,
 		TargetParentSessionID: run.ParentSessionID,
 		SubjectKind:           SubjectAgentRun,
@@ -1200,6 +1208,9 @@ func (s *ExecutionSupervisor) projectRestartOrphan(ctx context.Context, run *Exe
 		Reason:                reason,
 		RecommendedAction:     "inspect run and decide cancel/retry",
 	})
+	if err == nil {
+		s.notifyWakeScheduled(ctx, notification)
+	}
 }
 
 // watchdogForceTerminal is the I10 fallback (design doc §16.4): a run that is
@@ -1316,6 +1327,22 @@ func (s *ExecutionSupervisor) forceTerminalRun(ctx context.Context, run *Executi
 	return true
 }
 
+// notifyWakeScheduled mirrors the scheduling condition inside ProjectLifecycle
+// (critical + action-required) and hands the parent identity to the host's
+// WakeReady hook, so a scan-produced wake gets an immediate drain attempt.
+func (s *ExecutionSupervisor) notifyWakeScheduled(ctx context.Context, notification Notification) {
+	if s == nil || s.WakeReady == nil || s.Wakes == nil {
+		return
+	}
+	if !LifecycleWakeScheduled(notification) {
+		return
+	}
+	s.WakeReady(ctx,
+		strings.TrimSpace(notification.RootScopeID),
+		strings.TrimSpace(notification.TargetParentSessionID),
+		strings.TrimSpace(notification.TargetParentTeamID))
+}
+
 // projectDecision writes the lifecycle inbox notification for a non-healthy
 // decision (doc 5.5: every non-healthy verdict must be idempotently
 // projected).
@@ -1340,7 +1367,7 @@ func (s *ExecutionSupervisor) projectDecision(ctx context.Context, run *Executio
 	case "cancel_grace_expired":
 		state = SupervisionOrphaned
 	}
-	_, _ = ProjectLifecycle(ctx, s.StoreFull, s.Wakes, LifecycleProjection{
+	notification, err := ProjectLifecycle(ctx, s.StoreFull, s.Wakes, LifecycleProjection{
 		RootScopeID:           run.RootSessionID,
 		TargetParentSessionID: run.ParentSessionID,
 		SubjectKind:           SubjectAgentRun,
@@ -1351,6 +1378,9 @@ func (s *ExecutionSupervisor) projectDecision(ctx context.Context, run *Executio
 		Reason:                decision.Reason,
 		RecommendedAction:     "inspect run and decide cancel/retry",
 	})
+	if err == nil {
+		s.notifyWakeScheduled(ctx, notification)
+	}
 	// §2.5 账本收敛: a newer live condition supersedes the run's older ones
 	// (stalled → timed_out), so the parent inbox keeps exactly one current
 	// condition per run. Informational projections (auto_extended) never
@@ -1384,7 +1414,7 @@ func (s *ExecutionSupervisor) projectTerminal(ctx context.Context, run *Executio
 	if errorCode != "" {
 		reason = "child run completed with error: " + errorCode
 	}
-	_, _ = ProjectLifecycle(ctx, s.StoreFull, s.Wakes, LifecycleProjection{
+	notification, err := ProjectLifecycle(ctx, s.StoreFull, s.Wakes, LifecycleProjection{
 		RootScopeID:           run.RootSessionID,
 		TargetParentSessionID: run.ParentSessionID,
 		SubjectKind:           SubjectAgentRun,
@@ -1394,6 +1424,9 @@ func (s *ExecutionSupervisor) projectTerminal(ctx context.Context, run *Executio
 		SupervisionState:      state,
 		Reason:                reason,
 	})
+	if err == nil {
+		s.notifyWakeScheduled(ctx, notification)
+	}
 	// Plan §4.3: the run reached a terminal state, so the alerts it projected
 	// while live (progress_stalled and friends) are stale by definition. Without
 	// this the parent keeps seeing a critical/action-required row for work that
@@ -1715,7 +1748,7 @@ func (s *ExecutionSupervisor) projectAutoExtension(ctx context.Context, run *Exe
 	reason := "deadline auto-extended (healthy: last progress " +
 		progressAge.Round(time.Second).String() + " ago; 已延长 ×" + strconv.Itoa(run.ExtensionCount) +
 		", +" + run.ExtendedTotal.String() + "): " + source
-	_, _ = ProjectLifecycle(ctx, s.StoreFull, s.Wakes, LifecycleProjection{
+	notification, err := ProjectLifecycle(ctx, s.StoreFull, s.Wakes, LifecycleProjection{
 		RootScopeID:           run.RootSessionID,
 		TargetParentSessionID: run.ParentSessionID,
 		SubjectKind:           SubjectAgentRun,
@@ -1727,6 +1760,9 @@ func (s *ExecutionSupervisor) projectAutoExtension(ctx context.Context, run *Exe
 		Reason:                reason,
 		RecommendedAction:     string(ActionInspect),
 	})
+	if err == nil {
+		s.notifyWakeScheduled(ctx, notification)
+	}
 }
 
 // effectiveDecisionWindow returns the decision window actually used by the

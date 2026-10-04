@@ -22,6 +22,7 @@ func TestLocalExecutionSupervisorWiresDurableRunsAndStops(t *testing.T) {
 	require.True(t, supervisor.Config.Enabled)
 	require.Equal(t, "observe", supervisor.Config.Mode, "CLI default keeps local children running")
 	require.Same(t, supervisor, host.getLocalExecutionSupervisor(), "supervisor is built once")
+	require.NotNil(t, supervisor.WakeReady, "scan-produced wakes must have a drain trigger")
 
 	run, err := supervisor.StartRun(context.Background(), supervision.RunSpec{
 		Kind:            "agent",

@@ -12,6 +12,16 @@ import (
 // rejected so a stale config keeps working while the host logs a warning.
 const MinProgressCheckInterval = 30 * time.Second
 
+// DefaultWakeFallbackInterval / MinWakeFallbackInterval bound the default-on
+// safety net for durable wake delivery. Wake delivery is edge-triggered, so a
+// wake produced by a standalone scan (progress_stalled / execution_timed_out)
+// can wait forever when the parent never reaches another runnable transition
+// (2026-10-04 field gap). Hosts sweep unclaimed parent wakes at this cadence.
+const (
+	DefaultWakeFallbackInterval = time.Minute
+	MinWakeFallbackInterval     = 15 * time.Second
+)
+
 // Config 集中 P2 控制面调参（doc 6.2-6.6）。零值字段在 WithDefaults 中
 // 使用语义默认值，便于 yaml/json 配置部分覆盖。
 type Config struct {
@@ -67,6 +77,14 @@ type Config struct {
 	// 0（默认）不注册任何 ticker，宿主行为与引入该开关前完全一致：progress 只
 	// 在父 turn 的 preflight digest 里被动出现，不存在常驻巡检 goroutine。
 	ProgressCheckInterval time.Duration `json:"progress_check_interval,omitempty" yaml:"progress_check_interval,omitempty"`
+	// WakeFallbackInterval is the default-on bounded safety sweep that delivers
+	// durable wakes to an otherwise idle parent (2026-10-04). 0 (unset) means
+	// DefaultWakeFallbackInterval (60s); a negative value disables the sweep and
+	// falls back to the historical "next natural turn preflight / explicit
+	// /supervision wake" semantics. The host interprets these values in
+	// localWakeFallbackInterval; WithDefaults only passes explicit values
+	// through so existing config goldens stay byte-identical.
+	WakeFallbackInterval time.Duration `json:"wake_fallback_interval,omitempty" yaml:"wake_fallback_interval,omitempty"`
 	// TaskProgressInterval is the P0-1 task-level progress write-back window.
 	// 0 (the default during the gray release) disables the write-back entirely:
 	// hosts behave byte-identically to the pre-P0-1 code. A positive value makes
@@ -234,6 +252,12 @@ func (c Config) WithDefaults() Config {
 		if d.ProgressCheckInterval < MinProgressCheckInterval {
 			d.ProgressCheckInterval = MinProgressCheckInterval
 		}
+	}
+	// WakeFallbackInterval 显式值透传：0 表示"宿主默认兜底开启（60s）"、负值
+	// 表示显式关闭，两者的解释都在宿主层（localWakeFallbackInterval），
+	// WithDefaults 不引入新的默认字段值。
+	if c.WakeFallbackInterval != 0 {
+		d.WakeFallbackInterval = c.WakeFallbackInterval
 	}
 	// TaskProgressInterval 同样是显式 opt-in（灰度期出厂 0=不写）。
 	if c.TaskProgressInterval > 0 {

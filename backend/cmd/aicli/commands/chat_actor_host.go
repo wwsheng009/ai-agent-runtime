@@ -212,6 +212,11 @@ type localChatRuntimeHost struct {
 	// 一样随 lifecycleCtx + asyncWG 停止，见 chat_actor_progress_check.go。
 	progressCheckOnce sync.Once
 	progressCheckStop context.CancelFunc
+	// wakeFallbackOnce / wakeFallbackStop 是默认开启的 wake 兜底扫描
+	//（supervision.wake_fallback_interval，0 取默认 60s、负值关闭）：为
+	// 边沿触发投递补一道保险，见 chat_actor_wake_fallback.go。
+	wakeFallbackOnce sync.Once
+	wakeFallbackStop context.CancelFunc
 	cleanupFns        []func()
 	closeOnce         sync.Once
 	// subagentLimiterMu / subagentLimiter 缓存进程级子代理并发上限
@@ -1432,6 +1437,7 @@ func initializeLocalChatRuntimeHost(cfg *config.Config, session *ChatSession, to
 	// P2-D：opt-in 周期巡查（supervision.progress_check_interval，默认 0
 	// 关闭时该调用是空操作，不注册 ticker、不新增 goroutine）。
 	host.startLocalSupervisionProgressCheck()
+	host.startLocalSupervisionWakeFallback()
 	if host.Orchestrator != nil {
 		mailbox := team.NewMailboxService(host.TeamStore)
 		host.Orchestrator.Mailbox = mailbox

@@ -41,6 +41,13 @@ func (h *localChatRuntimeHost) getLocalExecutionSupervisor() *supervision.Execut
 		if h.ActorRegistry != nil {
 			supervisor.Interrupter = toolbroker.AgentSessionRunInterrupter{Controller: h.ActorRegistry}
 		}
+		// 2026-10-04：扫描产出的 lifecycle wake（progress_stalled /
+		// execution_timed_out 等）此前没有投递触发点，父会话一旦空闲 wake
+		// 即永久滞留。把"新 wake 已排"这一边沿变成一次异步 drain 尝试；
+		// Runnable / 预算门控仍在 MaybeWakeParent 内，忙或超限时保持 durable。
+		supervisor.WakeReady = func(_ context.Context, rootScopeID, parentSessionID, _ string) {
+			h.requestSupervisedWakeDrain(rootScopeID, parentSessionID)
+		}
 		if h.EventStore != nil {
 			mailboxStore := runtimechat.SessionEventMailboxStore{Events: h.EventStore}
 			supervisor.Dispatcher = toolbroker.CompletionDispatchFunc(func(ctx context.Context, entry supervision.CompletionOutboxEntry) (int64, error) {
