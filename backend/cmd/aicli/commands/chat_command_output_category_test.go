@@ -143,40 +143,84 @@ func TestChatCommandOutputCategoryReadOnlyVariantMatrix(t *testing.T) {
 // 主入口为 screen 的可见命令数（防漂移：新增副屏命令漏标即失败）。
 func TestChatSlashHelpMarksScreenCommandsWithEscHint(t *testing.T) {
 	lines := buildChatSlashHelpLines()
-	joined := strings.Join(lines, "\n")
 
-	expected := 0
+	// 期望集合独立构造：不能用「输出里有多少个标注」反推期望，否则标注逻辑与
+	// 断言共用同一个谓词（chat_slash_help.go 里按 chatSlashHelpPrimaryScreen 决定
+	// 是否加标注），断言将恒成立、形同虚设。
+	expected := map[string]bool{}
 	for _, catalog := range chatSlashCommandCatalog() {
 		if catalog.Hidden {
 			continue
 		}
 		if chatSlashHelpPrimaryScreen(catalog.Name) {
-			expected++
+			expected[catalog.Name] = true
 		}
 	}
-	if expected == 0 {
+	if len(expected) == 0 {
 		t.Fatal("目录中没有主入口为 screen 的命令，标注守卫失去意义")
 	}
-	if got := strings.Count(joined, chatSlashHelpScreenMarker); got != expected {
-		t.Fatalf("副屏标注数 = %d，期望 %d（标注=%q）", got, expected, chatSlashHelpScreenMarker)
+
+	// 实际集合按「行首命令名」精确提取：必须逐名比对，否则 /agents 这类以 /agent
+	// 为前缀的兄弟命令会把 /agent 的断言误判为失败（那曾是一个假阳性）。
+	got := map[string]bool{}
+	for _, line := range lines {
+		if !strings.Contains(line, chatSlashHelpScreenMarker) {
+			continue
+		}
+		if name := chatSlashHelpLineCommand(line); name != "" {
+			got[name] = true
+		}
 	}
+	for name := range got {
+		if !expected[name] {
+			t.Fatalf("命令 %s 带了 %q 标注，但主入口并非副屏", name, chatSlashHelpScreenMarker)
+		}
+	}
+	for name := range expected {
+		if !got[name] {
+			t.Fatalf("副屏命令 %s 的帮助行缺少 %q 标注", name, chatSlashHelpScreenMarker)
+		}
+	}
+
+	// 显式点名守卫：副屏命令必须标注，非副屏命令必须不标注。
 	for _, name := range []string{"/todos", "/history", "/help"} {
 		if !chatSlashHelpMarkedLine(lines, name) {
 			t.Fatalf("副屏命令 %s 的帮助行缺少 %q 标注", name, chatSlashHelpScreenMarker)
 		}
 	}
+	// /agents 与 /agent 必须分开断言：前者是副屏（runtimeModeScreen）应标注，
+	// 后者是内联（runtimeModeInline）不应标注，二者仅靠前缀无法区分。
 	for _, name := range []string{"/debug", "/theme", "/profile", "/agent"} {
 		if chatSlashHelpMarkedLine(lines, name) {
 			t.Fatalf("主入口非副屏的命令 %s 不应带 %q 标注", name, chatSlashHelpScreenMarker)
 		}
 	}
+	for _, name := range []string{"/agents"} {
+		if !chatSlashHelpMarkedLine(lines, name) {
+			t.Fatalf("副屏命令 %s 的帮助行缺少 %q 标注", name, chatSlashHelpScreenMarker)
+		}
+	}
 }
 
-// chatSlashHelpMarkedLine 报告帮助行中是否存在以 label 开头且带副屏标注的行。
+// chatSlashHelpLineCommand 从一行帮助里取行首命令名。
+// 标签列可能形如 "/agents, /a"（别名）或 "/model [name]"，故按逗号/空白截断到
+// 第一个命令名。用前缀匹配会把 /agents 误认成 /agent，必须精确相等。
+func chatSlashHelpLineCommand(line string) string {
+	head := strings.TrimSpace(line)
+	if idx := strings.IndexAny(head, ", "); idx >= 0 {
+		head = head[:idx]
+	}
+	if !strings.HasPrefix(head, "/") {
+		return ""
+	}
+	return head
+}
+
+// chatSlashHelpMarkedLine 报告帮助行中是否存在该命令名且带副屏标注的行。
 func chatSlashHelpMarkedLine(lines []string, label string) bool {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, label) && strings.Contains(trimmed, chatSlashHelpScreenMarker) {
+		if chatSlashHelpLineCommand(trimmed) == label && strings.Contains(trimmed, chatSlashHelpScreenMarker) {
 			return true
 		}
 	}
