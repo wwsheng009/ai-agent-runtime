@@ -304,7 +304,11 @@ func (h *Handler) SetWorkspaceMCPSupport(cfg WorkspaceMCPSupportConfig) {
 
 // CloseWorkspaceMCPSupport 停止全部会话级 workspace manager。
 func (h *Handler) CloseWorkspaceMCPSupport() {
-	if h == nil || h.workspaceMCP == nil {
+	if h == nil {
+		return
+	}
+	h.CloseSessionMCPTempRuntimes()
+	if h.workspaceMCP == nil {
 		return
 	}
 	h.workspaceMCP.Close()

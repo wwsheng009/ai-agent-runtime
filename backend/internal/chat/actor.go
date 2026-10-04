@@ -3382,6 +3382,18 @@ func (a *SessionActor) persistSession(ctx context.Context, session *Session) err
 				session.SetContext(planmode.ContextKey, copiedPlan)
 			}
 		}
+		// 会话级 MCP 覆盖（停用/临时启用名单）由 runtime-server 管理接口直接
+		// 写入 store 副本，actor 快照从不修改它们；回合末整行写入前按 store
+		// 最新值合并，否则覆盖会被旧快照抹掉（2026-10-04 实测）。
+		for _, key := range []string{SessionMCPDisabledContextKey, SessionMCPEnabledContextKey} {
+			if value, ok := latest.GetContext(key); ok {
+				copied, err := cloneSessionContextValue(value)
+				if err != nil {
+					return fmt.Errorf("clone session MCP override %s: %w", key, err)
+				}
+				session.SetContext(key, copied)
+			}
+		}
 	}
 	if hasRun && !a.sessionRunOwned(run) {
 		return errSessionRunSuperseded

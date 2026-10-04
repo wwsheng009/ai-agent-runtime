@@ -122,7 +122,9 @@ func decodeSessionMCPList(t *testing.T, rec *httptest.ResponseRecorder) sessionM
 func TestListSessionRuntimeMCPsShowsWorkspaceConfig(t *testing.T) {
 	workspace := t.TempDir()
 	workspaceFile := filepath.Join(workspace, ".aicli", "mcp.yaml")
-	writeWorkspaceYAML(t, workspaceFile, workspaceMCPServerYAML("workspace-demo"))
+	// 配置为启用态（命令用未定义变量触发 EnvError，不真实建连）；
+	// 会话覆盖的 disable 只作用于「配置启用」的 server。
+	writeWorkspaceYAML(t, workspaceFile, "mcpServers:\n  workspace-demo:\n    name: workspace-demo\n    type: stdio\n    command: ${MISSING_AICLI_TEST_BIN}\n    enabled: true\n")
 
 	globalPath := filepath.Join(t.TempDir(), "mcp.yaml")
 	writeWorkspaceYAML(t, globalPath, "mcpServers: {}\n")
@@ -279,5 +281,56 @@ func TestSessionMCPAdminScopeReusesGlobalWhenSameFile(t *testing.T) {
 	}
 	if !sameAbsPath(scope.WritePath, workspaceFile) {
 		t.Fatalf("write path = %q, want global file %q", scope.WritePath, workspaceFile)
+	}
+}
+
+func TestListSessionRuntimeMCPToolsUsesWorkspaceManager(t *testing.T) {
+	workspace := t.TempDir()
+	workspaceFile := filepath.Join(workspace, ".aicli", "mcp.yaml")
+	writeWorkspaceYAML(t, workspaceFile, workspaceMCPServerYAML("workspace-demo"))
+	globalPath := filepath.Join(t.TempDir(), "mcp.yaml")
+	writeWorkspaceYAML(t, globalPath, "mcpServers: {}\n")
+
+	handler, session, router := newWorkspaceMCPAdminHandler(t, workspace, globalPath)
+	rec := doSessionMCPRequest(router, http.MethodGet,
+		"/api/runtime/sessions/"+session.ID+"/runtime/mcps/workspace-demo/tools", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		SessionID string `json:"session_id"`
+		Name      string `json:"name"`
+		Scope     string `json:"scope"`
+		Count     int    `json:"count"`
+		Tools     []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode tools payload: %v (body=%s)", err, rec.Body.String())
+	}
+	if payload.SessionID != session.ID || payload.Name != "workspace-demo" || payload.Scope != "workspace" {
+		t.Fatalf("payload = %+v, want workspace scope for %s", payload, session.ID)
+	}
+	// 停用的 server 未连接：空数组是合法结果（不是错误，也不得回退到全局空配置）。
+	if payload.Count != 0 || len(payload.Tools) != 0 {
+		t.Fatalf("tools = %+v, want empty for a disabled server", payload.Tools)
+	}
+	// 会话级 manager 已被缓存 → 证明取数走了工作区实例，而不是全局 manager。
+	key := workspaceMCPKey(workspaceFile)
+	handler.workspaceMCP.mu.Lock()
+	_, cached := handler.workspaceMCP.entries[key]
+	handler.workspaceMCP.mu.Unlock()
+	if !cached {
+		t.Fatal("session tools listing must acquire the workspace manager")
+	}
+}
+
+func TestListSessionRuntimeMCPToolsRejectsUnknownSession(t *testing.T) {
+	_, _, router := newWorkspaceMCPAdminHandler(t, t.TempDir(), filepath.Join(t.TempDir(), "mcp.yaml"))
+	rec := doSessionMCPRequest(router, http.MethodGet,
+		"/api/runtime/sessions/missing-session/runtime/mcps/foo/tools", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body=%s, want 404", rec.Code, rec.Body.String())
 	}
 }

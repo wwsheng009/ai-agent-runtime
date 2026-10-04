@@ -384,6 +384,59 @@ func TestPersistSessionPreservesBrokerHandleAliasesFromLatestStoredSession(t *te
 	assert.Equal(t, aliases, got)
 }
 
+// TestPersistSessionPreservesRuntimeWrittenMCPOverrides 钉住会话级 MCP 覆盖
+// （停用/临时启用名单）在 chat actor 回合末整行持久化时不被旧快照抹掉：
+// runtime-server 管理接口把覆盖写到 store 副本，而 actor 的快照里没有这些键，
+// persistSession 必须按 store 最新值合并（与 broker 别名同一模式）。
+func TestPersistSessionPreservesRuntimeWrittenMCPOverrides(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStorage()
+	session := NewSession("mcp-override-owner")
+	session.ID = "session-mcp-override"
+	require.NoError(t, store.Save(ctx, session))
+
+	staleActorSession, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+
+	// 回合进行中：管理接口直接写 store 副本（本会话停用 chrome-devtools，
+	// 临时启用 demo-off）。
+	latest, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+	latest.SetContext(SessionMCPDisabledContextKey, []string{"chrome-devtools"})
+	latest.SetContext(SessionMCPEnabledContextKey, []string{"demo-off"})
+	require.NoError(t, store.Update(ctx, latest))
+
+	// actor 持有旧快照做回合末整行写入。
+	actor := &SessionActor{sessionStore: store}
+	require.NoError(t, actor.persistSession(ctx, staleActorSession))
+
+	persisted, err := store.Load(ctx, session.ID)
+	require.NoError(t, err)
+	// storage 往返会把 []string 归一成 []interface{}（与 runtimeapi 读取端兼容）。
+	stringList := func(value interface{}) []string {
+		switch typed := value.(type) {
+		case []string:
+			return typed
+		case []interface{}:
+			out := make([]string, 0, len(typed))
+			for _, item := range typed {
+				if text, ok := item.(string); ok {
+					out = append(out, text)
+				}
+			}
+			return out
+		default:
+			return nil
+		}
+	}
+	disabled, ok := persisted.GetContext(SessionMCPDisabledContextKey)
+	require.True(t, ok, "session MCP disabled override must survive the actor persist")
+	assert.Equal(t, []string{"chrome-devtools"}, stringList(disabled))
+	enabled, ok := persisted.GetContext(SessionMCPEnabledContextKey)
+	require.True(t, ok, "session MCP temp-enabled override must survive the actor persist")
+	assert.Equal(t, []string{"demo-off"}, stringList(enabled))
+}
+
 func TestSessionActorStopAsyncFromOwnRunGoroutineDoesNotDeadlock(t *testing.T) {
 	// Regression for the 25840 deadlock: the close tool executed on the
 	// actor's own run goroutine used to call Stop/StopContext, which waits

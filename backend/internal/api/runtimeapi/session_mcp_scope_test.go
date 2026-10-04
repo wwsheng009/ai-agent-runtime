@@ -145,6 +145,8 @@ func TestSessionRuntimeMCPToggleAPI(t *testing.T) {
 		"chrome-mcp": {Name: "chrome-mcp", Enabled: true},
 		"off-mcp":    {Name: "off-mcp", Enabled: false},
 	}})
+	// 临时连接构建器注入：off-mcp 的「本会话启用」走内存快照（不落盘、不出网）。
+	closes := installFakeSessionMCPTempBuilder(t, &fakeTempMCPAdapter{}, nil)
 	router := mux.NewRouter()
 	handler.RegisterRoutes(router)
 
@@ -189,10 +191,26 @@ func TestSessionRuntimeMCPToggleAPI(t *testing.T) {
 		t.Fatalf("disabled after enable = %#v", names)
 	}
 
-	// 全局停用的 server：会话级启用需要临时连接，当前返回 409。
+	// 全局停用的 server：会话级启用走临时连接（内存快照，不写配置文件）。
 	rec = doMCPAdminRequest(router, http.MethodPost, base+"/off-mcp/enable", "")
-	if rec.Code != http.StatusConflict {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("off-mcp enable status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"session_state":"enabled"`) {
+		t.Fatalf("off-mcp enable body = %s", rec.Body.String())
+	}
+	stored, _ = sessionManager.Get(context.Background(), session.ID)
+	if names := sessionMCPEnabledNames(stored); len(names) != 1 || names[0] != "off-mcp" {
+		t.Fatalf("persisted temp enabled = %#v", names)
+	}
+
+	// 再停用：临时连接被回收。
+	rec = doMCPAdminRequest(router, http.MethodPost, base+"/off-mcp/disable", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("off-mcp disable status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if *closes == 0 {
+		t.Fatal("temp runtime must be closed after session-level disable")
 	}
 
 	// 未知 server：404。

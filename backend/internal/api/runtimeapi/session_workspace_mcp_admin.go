@@ -23,6 +23,7 @@ import (
 	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	mcpadmin "github.com/wwsheng009/ai-agent-runtime/internal/mcp/admin"
+	mcpmanager "github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 )
 
 // sessionMCPAdminScope 会话 MCP 管理目标（读/写分离，只读解析，不建连）。
@@ -225,4 +226,20 @@ func (h *Handler) sessionEffectiveMCPServerState(ctx context.Context, session *c
 		}
 	}
 	return h.runtimeMCPServerState(ctx, name)
+}
+
+// sessionRuntimeMCPRawManager 返回会话工具面实际使用的底层 manager（供工具清单等
+// 只读查询）：工作区锚定且解析命中独立文件时优先工作区实例，否则进程级。
+func (h *Handler) sessionRuntimeMCPRawManager(scope *sessionMCPAdminScope) mcpmanager.Manager {
+	if h == nil {
+		return nil
+	}
+	if scope != nil && scope.WorkspaceScoped && !scope.WorkspaceFallback && h.workspaceMCP != nil {
+		if workspace := strings.TrimSpace(scope.Workspace); workspace != "" {
+			if entry := h.workspaceMCP.acquireEntry(workspace); entry != nil && entry.manager != nil {
+				return entry.manager
+			}
+		}
+	}
+	return h.runtimeMCPManager()
 }

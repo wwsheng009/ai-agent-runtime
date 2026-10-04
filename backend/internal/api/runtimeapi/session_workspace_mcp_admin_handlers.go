@@ -15,6 +15,7 @@ package runtimeapi
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gorilla/mux"
@@ -29,6 +30,8 @@ type sessionMCPItem struct {
 	mcpadmin.Item
 	Source          string `json:"source"` // workspace | global
 	SessionDisabled bool   `json:"session_disabled"`
+	// SessionEnabled 表示该 server 在配置里停用、但被本会话临时启用（内存连接）。
+	SessionEnabled bool `json:"session_enabled"`
 }
 
 // sessionMCPAdminTarget 读取会话并解析管理目标；调用方据返回值分派状态码。
@@ -101,6 +104,8 @@ func (h *Handler) handleSessionWorkspaceMCPToggle(w http.ResponseWriter, r *http
 	eventType := "mcp.disabled"
 	if enabled {
 		eventType = "mcp.enabled"
+		// 配置已启用：回收该 server 若存在的会话级临时连接，避免重复连接。
+		h.dropSessionMCPTempName(r.Context(), sessionID, name)
 	}
 	h.afterRuntimeMCPMutation(r.Context(), eventType, name)
 
@@ -198,6 +203,8 @@ func (h *Handler) RemoveSessionRuntimeMCP(w http.ResponseWriter, r *http.Request
 	}
 	h.invalidateSessionMCPRuntimeSurface(sessionID)
 	h.afterRuntimeMCPMutation(r.Context(), "mcp.removed", name)
+	// 配置条目已删除：回收该 server 若存在的会话级临时连接。
+	h.dropSessionMCPTempName(r.Context(), sessionID, name)
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"session_id": sessionID,
 		"name":       name,
@@ -231,5 +238,54 @@ func (h *Handler) ReloadSessionRuntimeMCP(w http.ResponseWriter, r *http.Request
 		"reloaded":   true,
 		"scope":      sessionMCPAdminScopeName(scope),
 		"path":       scope.WritePath,
+	})
+}
+
+// ListSessionRuntimeMCPTools 返回会话生效 manager 下某个 MCP 的工具清单。
+//
+//	GET /api/runtime/sessions/{id}/runtime/mcps/{name}/tools
+//	→ {"session_id","name","scope","count","tools":[{name,description,enabled,
+//	   configured_enabled,healthy,inputSchema}]}
+//
+// 与全局 /api/runtime/mcps/{name}/tools 的差别：这里读会话实际生效的 manager
+// （工作区锚定时即工作区配置链的实例），工作区私有 server 也能取到清单；
+// 未启用 / 未连接时 tools 为空数组（不是错误）。
+func (h *Handler) ListSessionRuntimeMCPTools(w http.ResponseWriter, r *http.Request) {
+	if err := h.authorizeUsageAdmin(r); err != nil {
+		h.writeError(w, http.StatusForbidden, err)
+		return
+	}
+	sessionID, session, scope := h.sessionMCPAdminTarget(r)
+	if sessionID == "" {
+		h.writeError(w, http.StatusBadRequest, internalerrors.New(internalerrors.ErrValidationFailed, "session id is required"))
+		return
+	}
+	if session == nil {
+		h.writeError(w, http.StatusNotFound, internalerrors.New(internalerrors.ErrValidationFailed, "session not found"))
+		return
+	}
+	name := strings.TrimSpace(mux.Vars(r)["name"])
+	if name == "" {
+		h.writeError(w, http.StatusBadRequest, internalerrors.New(internalerrors.ErrValidationFailed, "MCP 名称不能为空"))
+		return
+	}
+
+	manager := h.sessionRuntimeMCPRawManager(scope)
+	if manager == nil && h.mcpManager == nil {
+		h.writeError(w, http.StatusServiceUnavailable, internalerrors.New(internalerrors.ErrConfigInvalid,
+			"MCP runtime manager not available"))
+		return
+	}
+	tools := h.runtimeMCPTools(name, manager)
+	// 「本会话临时启用」的私有连接不在底层 manager 里，按会话覆盖视图补齐
+	// （与工具面 ListTools 的合并口径一致；配置停用 + 仅本会话可见）。
+	tools = mergeSessionMCPTempToolEntries(tools, h.sessionMCPTempToolEntries(r.Context(), session, name))
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"session_id": sessionID,
+		"name":       name,
+		"scope":      sessionMCPAdminScopeName(scope),
+		"count":      len(tools),
+		"tools":      tools,
 	})
 }

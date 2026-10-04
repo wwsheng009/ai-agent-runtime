@@ -110,7 +110,10 @@ type Handler struct {
 	skillLoader   *skill.Loader
 	mcpManager    skill.MCPManager
 	workspaceMCP  *workspaceMCPManagers
-	mcpAdmin      mcpadmin.AdminService
+	// 会话级 MCP 临时启用（配置停用 server 的会话私有内存连接，见 session_mcp_temp.go）。
+	sessionMCPTempMu sync.Mutex
+	sessionMCPTemp   map[string]*sessionMCPTempEntry
+	mcpAdmin         mcpadmin.AdminService
 	// Phase 1 交付 4：知识层 shadow 拦截观察器（runtime-server 启动时经
 	// SetKnowledgeShadow 注入）；nil 时全部会话保持无知识层行为。
 	knowledgeShadow *knowledge.ShadowObserver
@@ -1051,6 +1054,7 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps/{name}", h.RemoveSessionRuntimeMCP).Methods(http.MethodDelete)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps/{name}/enable", h.EnableSessionRuntimeMCP).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps/{name}/disable", h.DisableSessionRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps/{name}/tools", h.ListSessionRuntimeMCPTools).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/tool-receipts", h.ListSessionToolReceipts).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/stream", h.StreamSessionRuntimeEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/commands", h.SubmitSessionRuntimeCommand).Methods(http.MethodPost)

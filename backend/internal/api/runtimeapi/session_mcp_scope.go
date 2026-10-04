@@ -2,7 +2,6 @@ package runtimeapi
 
 import (
 	"context"
-	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"sort"
@@ -18,66 +17,26 @@ import (
 // `POST /web/api/mcps/{name}/enable|disable?scope=session` 对齐：
 //   - disable：只从"本会话"的工具面/执行面撤销该 server 的工具，不写配置文件、
 //     不影响全局连接与其他会话；
-//   - enable：清除本会话的停用覆盖（恢复全局可见性）。
+//   - enable：对配置启用的 server 清除本会话的停用覆盖（恢复全局可见性）；
+//     对配置停用的 server 走会话私有**临时连接**（内存配置快照，不写配置文件，
+//     见 session_mcp_temp.go；会话结束或本会话停用后回收）。
 //
 // 覆盖存放在会话元数据（Metadata.Context）中随会话持久化；工具列表与工具执行
 // 两条链路统一经 sessionScopedMCPManager 过滤。包装器在每次调用时动态读取覆盖
 // （而不是构造期快照），因此在驻 actor 无需重建即可看到启停变更。
-const sessionMCPDisabledContextKey = "runtime_mcp_session_disabled"
+// 常量宿主在 internal/chat：chat actor 的回合末持久化需要按 store 最新值
+// 合并同名的覆盖键（见 chat.SessionMCPDisabledContextKey 的注释）。
+const sessionMCPDisabledContextKey = chat.SessionMCPDisabledContextKey
 
 var (
 	// errRuntimeSessionMCPNotFound 表示目标 server 不在（全局）配置中。
 	errRuntimeSessionMCPNotFound = stderrors.New("session mcp not found")
-	// errRuntimeSessionMCPTempUnsupported 表示对全局停用的 server 请求会话级启用：
-	// runtime-server 暂不支持会话私有临时连接（CLI 的 ScopedManager 方案）。
-	errRuntimeSessionMCPTempUnsupported = stderrors.New(
-		"runtime-server 暂不支持会话级临时连接：请先启用该 MCP（全局：POST /api/runtime/mcps/{name}/enable；工作区：POST /api/runtime/sessions/{id}/runtime/mcps/{name}/enable?scope=workspace）")
 )
 
 // sessionMCPDisabledNames 读取会话的停用清单（兼容 []string / []interface{} /
 // JSON 字符串三种持久化形态），去重排序后返回；无覆盖时返回 nil。
 func sessionMCPDisabledNames(session *chat.Session) []string {
-	if session == nil {
-		return nil
-	}
-	raw, ok := session.GetContext(sessionMCPDisabledContextKey)
-	if !ok || raw == nil {
-		return nil
-	}
-	names := make([]string, 0, 4)
-	switch value := raw.(type) {
-	case []string:
-		names = append(names, value...)
-	case []interface{}:
-		for _, item := range value {
-			if text, ok := item.(string); ok {
-				names = append(names, text)
-			}
-		}
-	case string:
-		var parsed []string
-		if err := json.Unmarshal([]byte(value), &parsed); err == nil {
-			names = append(names, parsed...)
-		}
-	}
-	cleaned := make([]string, 0, len(names))
-	seen := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		if _, exists := seen[name]; exists {
-			continue
-		}
-		seen[name] = struct{}{}
-		cleaned = append(cleaned, name)
-	}
-	if len(cleaned) == 0 {
-		return nil
-	}
-	sort.Strings(cleaned)
-	return cleaned
+	return sessionMCPContextNames(session, sessionMCPDisabledContextKey)
 }
 
 // setSessionMCPDisabledNames 写回停用清单（空清单写空数组，保持键存在语义简单）。
@@ -172,17 +131,67 @@ func (m *sessionScopedMCPManager) ListTools() []skill.ToolInfo {
 	}
 	infos := m.next.ListTools()
 	disabled := m.disabledSet()
-	if len(disabled) == 0 {
-		return infos
-	}
-	out := make([]skill.ToolInfo, 0, len(infos))
+	out := make([]skill.ToolInfo, 0, len(infos)+2)
 	for _, info := range infos {
 		if sessionMCPNameDisabled(disabled, info.MCPName) {
 			continue
 		}
 		out = append(out, info)
 	}
+	// 合并「本会话临时启用」的私有连接工具（配置停用、仅本会话可见）。
+	if temp := m.tempAdapter(); temp != nil {
+		for _, info := range temp.ListTools() {
+			if sessionMCPNameDisabled(disabled, info.MCPName) {
+				continue
+			}
+			if sessionMCPToolPresent(out, info) {
+				continue
+			}
+			out = append(out, info)
+		}
+	}
 	return out
+}
+
+// sessionMCPToolPresent 按 (MCPName, Name) 去重（大小写不敏感）。
+func sessionMCPToolPresent(infos []skill.ToolInfo, candidate skill.ToolInfo) bool {
+	for _, info := range infos {
+		if strings.EqualFold(strings.TrimSpace(info.MCPName), strings.TrimSpace(candidate.MCPName)) &&
+			strings.EqualFold(strings.TrimSpace(info.Name), strings.TrimSpace(candidate.Name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// tempAdapter 返回本会话的临时连接视图（按当前「临时启用」名单惰性构建/复用）。
+func (m *sessionScopedMCPManager) tempAdapter() skill.MCPManager {
+	if m == nil || m.handler == nil {
+		return nil
+	}
+	session := m.handler.sessionByID(context.Background(), m.sessionID)
+	if session == nil {
+		return nil
+	}
+	names := sessionMCPEnabledNames(session)
+	if len(names) == 0 {
+		return nil
+	}
+	return m.handler.sessionMCPTempAdapter(context.Background(), session, names)
+}
+
+// tempServes 报告 mcpName 是否属于本会话的临时连接（大小写不敏感）。
+func (m *sessionScopedMCPManager) tempServes(name string) bool {
+	if m == nil || m.handler == nil {
+		return false
+	}
+	session := m.handler.sessionByID(context.Background(), m.sessionID)
+	for _, item := range sessionMCPEnabledNames(session) {
+		if strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(name)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *sessionScopedMCPManager) FindTool(toolName string) (skill.ToolInfo, error) {
@@ -190,13 +199,21 @@ func (m *sessionScopedMCPManager) FindTool(toolName string) (skill.ToolInfo, err
 		return skill.ToolInfo{}, fmt.Errorf("MCP manager unavailable")
 	}
 	info, err := m.next.FindTool(toolName)
-	if err != nil {
-		return info, err
+	if err == nil {
+		if sessionMCPNameDisabled(m.disabledSet(), info.MCPName) {
+			return skill.ToolInfo{}, fmt.Errorf("MCP server %q is disabled for this session", strings.TrimSpace(info.MCPName))
+		}
+		return info, nil
 	}
-	if sessionMCPNameDisabled(m.disabledSet(), info.MCPName) {
-		return skill.ToolInfo{}, fmt.Errorf("MCP server %q is disabled for this session", strings.TrimSpace(info.MCPName))
+	if temp := m.tempAdapter(); temp != nil {
+		if tempInfo, tempErr := temp.FindTool(toolName); tempErr == nil {
+			if sessionMCPNameDisabled(m.disabledSet(), tempInfo.MCPName) {
+				return skill.ToolInfo{}, fmt.Errorf("MCP server %q is disabled for this session", strings.TrimSpace(tempInfo.MCPName))
+			}
+			return tempInfo, nil
+		}
 	}
-	return info, nil
+	return info, err
 }
 
 func (m *sessionScopedMCPManager) CallTool(ctx interface{}, mcpName, toolName string, args map[string]interface{}) (interface{}, error) {
@@ -205,6 +222,11 @@ func (m *sessionScopedMCPManager) CallTool(ctx interface{}, mcpName, toolName st
 	}
 	if sessionMCPNameDisabled(m.disabledSet(), mcpName) {
 		return nil, fmt.Errorf("MCP server %q is disabled for this session", strings.TrimSpace(mcpName))
+	}
+	if m.tempServes(mcpName) {
+		if temp := m.tempAdapter(); temp != nil {
+			return temp.CallTool(ctx, mcpName, toolName, args)
+		}
 	}
 	return m.next.CallTool(ctx, mcpName, toolName, args)
 }
@@ -275,46 +297,83 @@ func (h *Handler) applyRuntimeSessionMCPToggle(ctx context.Context, sessionID, n
 		return result, fmt.Errorf("%w: MCP %q", errRuntimeSessionMCPNotFound, name)
 	}
 
-	names := sessionMCPDisabledNames(session)
-	has := false
-	for _, item := range names {
-		if item == name {
-			has = true
-			break
-		}
-	}
+	disabledNames := sessionMCPDisabledNames(session)
+	enabledNames := sessionMCPEnabledNames(session)
+	hasDisabled := sessionMCPNameInList(disabledNames, name)
+	hasTemp := sessionMCPNameInList(enabledNames, name)
 
 	if enabled {
-		if !globallyEnabled {
-			return result, errRuntimeSessionMCPTempUnsupported
-		}
 		result.State = ""
-		if has {
-			kept := make([]string, 0, len(names))
-			for _, item := range names {
-				if item != name {
-					kept = append(kept, item)
+		if globallyEnabled {
+			// 配置已启用：清除会话停用覆盖；顺带清理历史临时项（配置改动后的残留）。
+			nextTemp := removeSessionMCPName(enabledNames, name)
+			if len(nextTemp) != len(enabledNames) {
+				if err := h.refreshSessionMCPTempRuntime(ctx, session, nextTemp); err != nil {
+					return result, err
 				}
+				setSessionMCPEnabledNames(session, nextTemp)
+				result.Changed = true
 			}
-			setSessionMCPDisabledNames(session, kept)
-			result.Changed = true
-			result.Message = fmt.Sprintf("已恢复 MCP %q 的会话级启用", name)
-		} else {
-			result.Message = fmt.Sprintf("MCP %q 全局已启用，本会话无需恢复", name)
+			if hasDisabled {
+				setSessionMCPDisabledNames(session, removeSessionMCPName(disabledNames, name))
+				result.Changed = true
+			}
+			if result.Changed {
+				result.Message = fmt.Sprintf("已恢复 MCP %q 的会话级启用", name)
+			} else {
+				result.Message = fmt.Sprintf("MCP %q 已启用，本会话无需恢复", name)
+			}
+			return h.finishSessionMCPToggle(ctx, session, result)
 		}
-	} else {
-		result.State = "disabled"
-		if has {
-			result.Message = fmt.Sprintf("MCP %q 在当前会话已是停用状态", name)
-		} else {
-			setSessionMCPDisabledNames(session, append(names, name))
-			result.Changed = true
-			result.Message = fmt.Sprintf("已在当前会话停用 MCP %q（全局连接与其他会话不受影响）", name)
+		// 配置停用：本会话临时启用（内存连接，不写配置文件）。
+		if hasTemp {
+			result.State = "enabled"
+			result.Message = fmt.Sprintf("MCP %q 已在本会话临时启用", name)
+			return h.finishSessionMCPToggle(ctx, session, result)
 		}
+		nextTemp := append(append([]string(nil), enabledNames...), name)
+		if err := h.refreshSessionMCPTempRuntime(ctx, session, nextTemp); err != nil {
+			return result, err
+		}
+		setSessionMCPEnabledNames(session, nextTemp)
+		if hasDisabled {
+			setSessionMCPDisabledNames(session, removeSessionMCPName(disabledNames, name))
+		}
+		result.State = "enabled"
+		result.Changed = true
+		result.Message = fmt.Sprintf("已在本会话临时启用 MCP %q（内存连接，不写配置文件；会话结束或本会话停用后回收）", name)
+		return h.finishSessionMCPToggle(ctx, session, result)
 	}
 
+	result.State = "disabled"
+	switch {
+	case hasTemp:
+		nextTemp := removeSessionMCPName(enabledNames, name)
+		if err := h.refreshSessionMCPTempRuntime(ctx, session, nextTemp); err != nil {
+			return result, err
+		}
+		setSessionMCPEnabledNames(session, nextTemp)
+		result.Changed = true
+		result.Message = fmt.Sprintf("已停用 MCP %q 的本会话临时启用（连接已回收）", name)
+	case hasDisabled:
+		result.Message = fmt.Sprintf("MCP %q 在当前会话已是停用状态", name)
+	case !globallyEnabled:
+		result.Message = fmt.Sprintf("MCP %q 当前为停用状态（可在本会话临时启用）", name)
+	default:
+		setSessionMCPDisabledNames(session, append(disabledNames, name))
+		result.Changed = true
+		result.Message = fmt.Sprintf("已在当前会话停用 MCP %q（全局连接与其他会话不受影响）", name)
+	}
+	return h.finishSessionMCPToggle(ctx, session, result)
+}
+
+// finishSessionMCPToggle 持久化变更并失效工具面缓存；未变更直接返回。
+func (h *Handler) finishSessionMCPToggle(ctx context.Context, session *chat.Session, result runtimeSessionMCPToggleResult) (runtimeSessionMCPToggleResult, error) {
 	if !result.Changed {
 		return result, nil
+	}
+	if session == nil {
+		return result, fmt.Errorf("session unavailable")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -324,7 +383,7 @@ func (h *Handler) applyRuntimeSessionMCPToggle(ctx context.Context, sessionID, n
 	if err := h.sessionManager.Update(updateCtx, session); err != nil {
 		return result, err
 	}
-	h.invalidateSessionMCPRuntimeSurface(sessionID)
+	h.invalidateSessionMCPRuntimeSurface(strings.TrimSpace(session.ID))
 	return result, nil
 }
 

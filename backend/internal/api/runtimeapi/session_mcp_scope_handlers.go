@@ -17,9 +17,9 @@ import (
 // ListSessionRuntimeMCPs 返回某会话的 MCP 会话级覆盖 + 会话实际生效的配置面：
 //
 //	GET /api/runtime/sessions/{id}/runtime/mcps
-//	→ {"session_id":"...","disabled":["name"],"count":1,
+//	→ {"session_id":"...","disabled":["name"],"enabled":["temp-name"],"count":1,
 //	   "scope":{"read":{...},"write":{...},"workspace":"...","candidates":[...]},
-//	   "mcps":[{config,status,source,session_disabled}],"summary":{...}}
+//	   "mcps":[{config,status,source,session_disabled,session_enabled}],"summary":{...}}
 //
 // 空覆盖时 disabled 为空数组（不是 null），消费方可据此直接渲染"全部全局面"。
 // mcps 是会话真实加载的条目（工作区锚定注入后来自工作区配置链；工作区还没有
@@ -39,15 +39,24 @@ func (h *Handler) ListSessionRuntimeMCPs(w http.ResponseWriter, r *http.Request)
 	if disabled == nil {
 		disabled = []string{}
 	}
+	enabled := sessionMCPEnabledNames(session)
+	if enabled == nil {
+		enabled = []string{}
+	}
 	disabledSet := make(map[string]struct{}, len(disabled))
 	for _, name := range disabled {
 		disabledSet[name] = struct{}{}
+	}
+	enabledSet := make(map[string]struct{}, len(enabled))
+	for _, name := range enabled {
+		enabledSet[name] = struct{}{}
 	}
 
 	scope := h.sessionMCPAdminScopeFor(session)
 	payload := map[string]interface{}{
 		"session_id": sessionID,
 		"disabled":   disabled,
+		"enabled":    enabled,
 		"count":      len(disabled),
 		"scope":      scope.payload(),
 	}
@@ -76,10 +85,12 @@ func (h *Handler) ListSessionRuntimeMCPs(w http.ResponseWriter, r *http.Request)
 	for _, item := range items {
 		name := strings.TrimSpace(item.Config.Name)
 		_, sessionDisabled := disabledSet[name]
+		_, sessionEnabled := enabledSet[name]
 		entries = append(entries, sessionMCPItem{
 			Item:            item,
 			Source:          source,
 			SessionDisabled: sessionDisabled,
+			SessionEnabled:  sessionEnabled,
 		})
 	}
 	payload["mcps"] = entries
@@ -115,8 +126,8 @@ func (h *Handler) handleSessionRuntimeMCPToggle(w http.ResponseWriter, r *http.R
 	result, err := h.applyRuntimeSessionMCPToggle(r.Context(), sessionID, name, enabled)
 	if err != nil {
 		switch {
-		case stderrors.Is(err, errRuntimeSessionMCPTempUnsupported):
-			h.writeError(w, http.StatusConflict, internalerrors.New(internalerrors.ErrValidationFailed, err.Error()))
+		case stderrors.Is(err, errRuntimeSessionMCPTempFailed):
+			h.writeError(w, http.StatusServiceUnavailable, internalerrors.New(internalerrors.ErrConfigInvalid, err.Error()))
 		case stderrors.Is(err, errRuntimeSessionMCPNotFound):
 			h.writeError(w, http.StatusNotFound, internalerrors.New(internalerrors.ErrValidationFailed, err.Error()))
 		default:

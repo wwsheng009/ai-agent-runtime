@@ -77,48 +77,7 @@ func (h *Handler) ListRuntimeMCPTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type toolEntry struct {
-		Name              string                 `json:"name"`
-		Description       string                 `json:"description,omitempty"`
-		Enabled           bool                   `json:"enabled"`
-		ConfiguredEnabled bool                   `json:"configured_enabled"`
-		Healthy           bool                   `json:"healthy"`
-		InputSchema       map[string]interface{} `json:"inputSchema,omitempty"`
-	}
-
-	tools := make([]toolEntry, 0)
-	if manager != nil {
-		for _, info := range listRuntimeMCPTools(manager, name) {
-			if info == nil || info.Tool == nil {
-				continue
-			}
-			healthy := info.Enabled
-			configured := !info.UserDisabled
-			tools = append(tools, toolEntry{
-				Name:              strings.TrimSpace(info.Tool.Name),
-				Description:       strings.TrimSpace(info.Tool.Description),
-				Enabled:           healthy && configured,
-				ConfiguredEnabled: configured,
-				Healthy:           healthy,
-				InputSchema:       info.Tool.InputSchema,
-			})
-		}
-	} else {
-		// 回退：接口形态的 manager（MCPAdapter 等）暴露的是可调用工具名。
-		for _, info := range h.mcpManager.ListTools() {
-			if !strings.EqualFold(strings.TrimSpace(info.MCPName), name) {
-				continue
-			}
-			tools = append(tools, toolEntry{
-				Name:              strings.TrimSpace(info.Name),
-				Description:       strings.TrimSpace(info.Description),
-				Enabled:           info.Enabled,
-				ConfiguredEnabled: info.Enabled,
-				Healthy:           info.Enabled,
-				InputSchema:       info.InputSchema,
-			})
-		}
-	}
+	tools := h.runtimeMCPTools(name, manager)
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 
 	h.writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -392,6 +351,60 @@ func listRuntimeMCPTools(mgr mcpmanager.Manager, name string) []*mcpregistry.Too
 			continue
 		}
 		tools = append(tools, info)
+	}
+	return tools
+}
+
+// runtimeMCPToolEntry 单个工具条目（全局 / 会话工具清单共用同一 JSON 形态）。
+type runtimeMCPToolEntry struct {
+	Name              string                 `json:"name"`
+	Description       string                 `json:"description,omitempty"`
+	Enabled           bool                   `json:"enabled"`
+	ConfiguredEnabled bool                   `json:"configured_enabled"`
+	Healthy           bool                   `json:"healthy"`
+	InputSchema       map[string]interface{} `json:"inputSchema,omitempty"`
+}
+
+// runtimeMCPTools 汇总指定 manager 下某个 MCP 的工具清单。
+//
+// manager 为 nil 时回退接口形态的 h.mcpManager（MCPAdapter 等，只暴露可调用
+// 工具名）。调用方负责排序与响应封装；全局与会话工具端点共用本函数，
+// 保证两处 JSON 契约一致。
+func (h *Handler) runtimeMCPTools(name string, manager mcpmanager.Manager) []runtimeMCPToolEntry {
+	tools := make([]runtimeMCPToolEntry, 0)
+	if manager != nil {
+		for _, info := range listRuntimeMCPTools(manager, name) {
+			if info == nil || info.Tool == nil {
+				continue
+			}
+			healthy := info.Enabled
+			configured := !info.UserDisabled
+			tools = append(tools, runtimeMCPToolEntry{
+				Name:              strings.TrimSpace(info.Tool.Name),
+				Description:       strings.TrimSpace(info.Tool.Description),
+				Enabled:           healthy && configured,
+				ConfiguredEnabled: configured,
+				Healthy:           healthy,
+				InputSchema:       info.Tool.InputSchema,
+			})
+		}
+		return tools
+	}
+	if h == nil || h.mcpManager == nil {
+		return tools
+	}
+	for _, info := range h.mcpManager.ListTools() {
+		if !strings.EqualFold(strings.TrimSpace(info.MCPName), name) {
+			continue
+		}
+		tools = append(tools, runtimeMCPToolEntry{
+			Name:              strings.TrimSpace(info.Name),
+			Description:       strings.TrimSpace(info.Description),
+			Enabled:           info.Enabled,
+			ConfiguredEnabled: info.Enabled,
+			Healthy:           info.Enabled,
+			InputSchema:       info.InputSchema,
+		})
 	}
 	return tools
 }
