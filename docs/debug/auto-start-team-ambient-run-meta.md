@@ -82,15 +82,40 @@ go test ./cmd/aicli/commands/ -count=1 -run '^(TestAICLIChatActorExecutor_AutoSt
 若重做，**先补一个直接覆盖「actor 保存后 ambient meta 仍在」的单元测试**，
 否则不宜合入。
 
-## 剩余缺口（独立问题，风险更高）
+## 剩余缺口：write 路径与 `LayoutAppScreen` 计划脱节（未修）
 
 `chat_history_reconcile_test.go:568`
-（`TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsideActiveReasoning`，
-报 `primary history viewport is missing "history user 6"`）。
+（`TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsideActiveReasoning`）
 
-定位：presenter 的**计划**正确（`app_screen_layout.go` 的 `bottom.Rows` 含
-`history user 6`），但**实际写屏**的那一份行序不同——是 presenter 与
-`LayoutAppScreen` 计划脱节，不是布局计算错误。建议独立一轮处理。
+**单独运行即确定性失败**（非配对时序问题）。`state` 本身正确：`LayoutAppScreen(state)`
+的计划里 `history user 6` 在位。差异在写屏结果。逐行对照（width=52 height=15，
+`OutputBottomRow=6`）：
+
+```
+计划 rows 1-6  = ["", "history assistant 5", "", "history user 6", "", "history assistant 6"]
+计划 rows 7-12 = band: "active reasoning line 03".."08"
+实际 rows 1-6  = ["", "history assistant 6", "─── reasoning ───", "────", "line 01", "line 02"]
+实际 rows 7-12 = band: "active reasoning line 03".."08"   ← 与计划一致
+```
+
+读法：**rows 7-12 两边一致**，说明 presenter 确实写到了最终帧的那部分；
+分歧在下半区之间的分配——实际给活跃 reasoning 块分了 10 行（8 行正文 + 2 行
+分隔，落在 rows 3-12），计划只给 6 行（rows 7-12）。多占的 4 行正好挤掉了
+`history user 6`（计划 rows 3-4）与 `history assistant 5`（计划 row 2）。
+
+即：**不是布局计算错，是两个来源对同一 state 给出了不同的 band 分配**。
+两条路径都源自 `LayoutAppScreen`（`app_render_frame.go:46` →
+`terminal_session.go:64/138`），所以嫌疑集中在：
+
+- presenter 是否写的是**陈旧帧**（活跃 cell 的 overflow handoff 完成前的分配）——
+  该 handoff 正是引入本用例的提交 `672ccdc2` 的主题
+- 或 presenter 侧重算 band 高度时用了与 `LayoutAppScreen` 不同的活跃 cell 判据
+
+**已验证无效的方向（勿重复）**：在 `TerminalSession.FlushTransaction` 打印
+`plan.Frame.Rows[i].Text` 全是空串——文本在 `RenderRows`（结构化 `render.Line`）
+里，不在 `Rows`。要判定必须改读 `RenderRows`（或在其下游）。
+
+本轮受上下文限制未能判定，未做任何修改。
 
 ## 验证口径
 
