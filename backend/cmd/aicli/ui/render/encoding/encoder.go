@@ -1462,7 +1462,21 @@ func (e *EventEncoder) markReasoningBarrier(key string, assistant *Item, cs *Cha
 		return
 	}
 	e.reasoningBarriers[key] = true
-	assistant.HistoryCommitBlocked = true
+	// blocked=true 必须经 upsert 进 ChangeSet，Scene 的 transcript cell 才会带上该标记；
+	// 直接改 Item 字段只改了编码器内存态，cell.HistoryCommitBlocked 仍是 false，
+	// history planner（history_effect_planner.go:231/945）读到的就是「未阻塞」，
+	// fence 被计算却从未执行 —— 长 assistant 会在迟到的 reasoning 到达前就被
+	// 提交进原生历史，打破 native-history ordering barrier。
+	// 解除路径 removeReasoningBarrier 同样走 upsert 才落地，两侧必须对称。
+	if u, changed := e.upsertItem(assistant.ID, KindAssistant, func(t *Item) bool {
+		if t.HistoryCommitBlocked {
+			return false
+		}
+		t.HistoryCommitBlocked = true
+		return true
+	}); changed {
+		e.change(cs, OpUpsert, u)
+	}
 	// 空 reasoning 占位 cell：native-history ordering fence 的语义位置。
 	// 迟到的 reasoning（assistant.reasoning 事件）经 reasoningBy 命中并
 	// 填充此占位；authoritative final 提交时占位即最终 reasoning 内容。
