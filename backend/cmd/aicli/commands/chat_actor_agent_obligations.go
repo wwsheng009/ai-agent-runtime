@@ -241,9 +241,10 @@ func (h *localChatRuntimeHost) inFlightLocalChildSessions(ctx context.Context, s
 		if record.Depth <= 0 {
 			continue
 		}
-		switch {
-		case strings.EqualFold(strings.TrimSpace(record.AgentType), agentcontrol.AgentTypeRoot),
-			strings.EqualFold(strings.TrimSpace(record.AgentType), agentcontrol.AgentTypeTeamTeammate):
+		// team 判定同样不能只看 AgentType：team 行写进去的是 mate.Profile，
+		// 只有无 profile 才回落成 "team_teammate"（与上面 spawn_agent 同源的
+		// 重载问题）。改用 agentcontrol.IsTeamTeammate() 的结构判据。
+		if record.IsRootAgent() || record.IsTeamTeammate() {
 			continue
 		}
 		if root := strings.TrimSpace(record.RootSessionID); root != "" && !strings.EqualFold(root, sessionID) {
