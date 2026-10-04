@@ -129,6 +129,53 @@ func (t *TurnSuspension) ObligationAgentSessionIDs() []string {
 	return sessionIDs
 }
 
+// TeamObligationPrefix marks an obligation backed by a durable team run
+// (spawn_team with auto_start) instead of a subagent batch or a child session.
+// It follows the same single-string representation as
+// AgentSessionObligationPrefix: one persisted form (obligation_ids_json), no
+// schema migration, and readers that only understand batches must skip
+// prefixed ids.
+const TeamObligationPrefix = "team:"
+
+// TeamObligationID renders the obligation id for one team run.
+func TeamObligationID(teamID string) string {
+	return TeamObligationPrefix + strings.TrimSpace(teamID)
+}
+
+// IsTeamObligation reports whether an obligation id is backed by a team run.
+func IsTeamObligation(obligationID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(obligationID), TeamObligationPrefix)
+}
+
+// TeamIDFromObligation returns the team id encoded in a team obligation id
+// ("" when the id is batch- or child-session-backed).
+func TeamIDFromObligation(obligationID string) string {
+	trimmed := strings.TrimSpace(obligationID)
+	if !strings.HasPrefix(trimmed, TeamObligationPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(trimmed, TeamObligationPrefix))
+}
+
+// ObligationTeamIDs lists the team-run obligations in record order
+// (batch- and child-session-backed ids are ignored).
+func (t *TurnSuspension) ObligationTeamIDs() []string {
+	if t == nil {
+		return nil
+	}
+	obligations := normalizeIDList(t.ObligationIDs)
+	if len(obligations) == 0 {
+		return nil
+	}
+	var teamIDs []string
+	for _, obligation := range obligations {
+		if teamID := TeamIDFromObligation(obligation); teamID != "" {
+			teamIDs = append(teamIDs, teamID)
+		}
+	}
+	return teamIDs
+}
+
 // TurnObligationsSettled reports whether every obligation referenced by the
 // parked-turn record reached a terminal state, i.e. whether the parked turn may
 // end (design §6.12 / EC-E1 "turn 永不结束").
@@ -162,9 +209,9 @@ func (t *TurnSuspension) ObligationBatchIDs() []string {
 		return nil
 	}
 	for _, obligation := range obligations {
-		// Child-session obligations are not batches; the fallback exists for
-		// batch ids written without a resume queue.
-		if IsAgentSessionObligation(obligation) {
+		// Child-session / team-run obligations are not batches; the fallback
+		// exists for batch ids written without a resume queue.
+		if IsAgentSessionObligation(obligation) || IsTeamObligation(obligation) {
 			continue
 		}
 		return []string{obligation}

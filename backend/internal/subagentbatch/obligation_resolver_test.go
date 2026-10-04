@@ -311,3 +311,242 @@ func TestBuildWaitLedgerWithAgentSessionRows(t *testing.T) {
 		}
 	}
 }
+
+// stubTeamResolver maps team id -> terminal. Presence in the map means the
+// durable control plane has a team row (found=true); an absent id models "no
+// durable row" (kept strict: never evidence of completion).
+type stubTeamResolver map[string]bool
+
+func (s stubTeamResolver) TeamTerminal(_ context.Context, teamID string) (bool, bool, error) {
+	terminal, found := s[teamID]
+	return terminal, found, nil
+}
+
+// TestTeamObligationEncoding pins the team: obligation encoding plus the rule
+// that batch readers never mistake a team/child id for a batch id.
+func TestTeamObligationEncoding(t *testing.T) {
+	if got := TeamObligationID("t-1"); got != "team:t-1" {
+		t.Fatalf("TeamObligationID = %q, want team:t-1", got)
+	}
+	if !IsTeamObligation(TeamObligationID("t-1")) || IsTeamObligation(AgentSessionObligationID("c-1")) || IsTeamObligation("batch-1") {
+		t.Fatal("IsTeamObligation must match only team: prefixed ids")
+	}
+	if got := TeamIDFromObligation(TeamObligationID(" t-1 ")); got != "t-1" {
+		t.Fatalf("TeamIDFromObligation = %q, want t-1", got)
+	}
+	if got := TeamIDFromObligation("batch-1"); got != "" {
+		t.Fatalf("TeamIDFromObligation(batch) = %q, want empty", got)
+	}
+
+	record := &TurnSuspension{ObligationIDs: []string{
+		"batch-1",
+		AgentSessionObligationID("c-1"),
+		TeamObligationID("t-1"),
+		TeamObligationID("t-2"),
+	}}
+	if got := record.ObligationTeamIDs(); len(got) != 2 || got[0] != "t-1" || got[1] != "t-2" {
+		t.Fatalf("ObligationTeamIDs = %v, want [t-1 t-2]", got)
+	}
+
+	// Fallback batch resolution must skip both prefixed kinds.
+	fallback := &TurnSuspension{ObligationIDs: []string{AgentSessionObligationID("c-1"), TeamObligationID("t-1")}}
+	if got := fallback.ObligationBatchIDs(); len(got) != 0 {
+		t.Fatalf("ObligationBatchIDs(prefixed-only) = %v, want empty", got)
+	}
+	plain := &TurnSuspension{ObligationIDs: []string{TeamObligationID("t-1"), "batch-9"}}
+	if got := plain.ObligationBatchIDs(); len(got) != 1 || got[0] != "batch-9" {
+		t.Fatalf("ObligationBatchIDs = %v, want [batch-9]", got)
+	}
+}
+
+// TestTurnObligationsSettledWithTeams pins the team half of the settle
+// predicate: a parked turn on one team run may only clear once the team row is
+// durable and terminal; a missing row or unwired resolver keeps it parked.
+func TestTurnObligationsSettledWithTeams(t *testing.T) {
+	ctx := context.Background()
+	store := newAgentSessionTestStore(t)
+	seedSettledBatch(t, store, "batch-done", BatchCompleted)
+	seedSettledBatch(t, store, "batch-running", BatchRunning)
+
+	agent := stubAgentSessionResolver{
+		"child-closed": true,
+		"child-active": false,
+	}
+	teams := stubTeamResolver{
+		"team-done":    true,
+		"team-running": false,
+	}
+
+	cases := []struct {
+		name     string
+		record   *TurnSuspension
+		resolver AgentSessionObligationResolver
+		teams    TeamObligationResolver
+		want     bool
+	}{
+		{
+			name: "terminal team settles the turn",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{TeamObligationID("team-done")},
+			},
+			resolver: agent, teams: teams, want: true,
+		},
+		{
+			name: "running team keeps the turn parked",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{TeamObligationID("team-running")},
+			},
+			resolver: agent, teams: teams, want: false,
+		},
+		{
+			name: "missing team row is not evidence",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{TeamObligationID("team-missing")},
+			},
+			resolver: agent, teams: teams, want: false,
+		},
+		{
+			name: "unwired team resolver keeps the turn parked",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{TeamObligationID("team-done")},
+			},
+			resolver: agent, teams: nil, want: false,
+		},
+		{
+			name: "mixed batch+child+team all terminal settles",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{
+					"batch-done",
+					AgentSessionObligationID("child-closed"),
+					TeamObligationID("team-done"),
+				},
+				ResumeQueue: []string{"batch-done"},
+			},
+			resolver: agent, teams: teams, want: true,
+		},
+		{
+			name: "mixed with a running team keeps the turn parked",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{
+					"batch-done",
+					AgentSessionObligationID("child-closed"),
+					TeamObligationID("team-running"),
+				},
+				ResumeQueue: []string{"batch-done"},
+			},
+			resolver: agent, teams: teams, want: false,
+		},
+		{
+			name: "mixed with a running batch keeps the turn parked even when team is terminal",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{
+					"batch-running",
+					TeamObligationID("team-done"),
+				},
+				ResumeQueue: []string{"batch-running"},
+			},
+			resolver: agent, teams: teams, want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := TurnObligationsSettledWithTeams(ctx, store, tc.record, tc.resolver, tc.teams)
+			if err != nil {
+				t.Fatalf("TurnObligationsSettledWithTeams: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("TurnObligationsSettledWithTeams = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The legacy entry points must stay conservative on team obligations:
+	// clearing a parked turn on a team id with no team resolver is a guess.
+	teamOnly := cases[0].record
+	if settled, err := TurnObligationsSettledWith(ctx, store, teamOnly, agent); err != nil || settled {
+		t.Fatalf("TurnObligationsSettledWith(team-only, nil team resolver) = (%v, %v), want (false, nil)", settled, err)
+	}
+}
+
+// TestTurnObligationsAllTerminalWithTeams pins the strict sibling used by the
+// settlement wake: a missing or non-terminal team row always blocks the resume.
+func TestTurnObligationsAllTerminalWithTeams(t *testing.T) {
+	ctx := context.Background()
+	store := newAgentSessionTestStore(t)
+	seedSettledBatch(t, store, "batch-done", BatchCompleted)
+
+	agent := stubAgentSessionResolver{"child-closed": true}
+	teams := stubTeamResolver{"team-done": true, "team-running": false}
+
+	cases := []struct {
+		name     string
+		record   *TurnSuspension
+		resolver AgentSessionObligationResolver
+		teams    TeamObligationResolver
+		want     bool
+	}{
+		{
+			name: "terminal team resumes",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{TeamObligationID("team-done")},
+			},
+			resolver: agent, teams: teams, want: true,
+		},
+		{
+			name: "missing team row blocks the resume",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{TeamObligationID("team-missing")},
+			},
+			resolver: agent, teams: teams, want: false,
+		},
+		{
+			name: "running team blocks the resume",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{TeamObligationID("team-running")},
+			},
+			resolver: agent, teams: teams, want: false,
+		},
+		{
+			name: "mixed all terminal resumes",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{
+					"batch-done",
+					AgentSessionObligationID("child-closed"),
+					TeamObligationID("team-done"),
+				},
+				ResumeQueue: []string{"batch-done"},
+			},
+			resolver: agent, teams: teams, want: true,
+		},
+		{
+			name: "unwired team resolver blocks the resume",
+			record: &TurnSuspension{
+				TurnID: "t1", SessionID: "s1",
+				ObligationIDs: []string{TeamObligationID("team-done")},
+			},
+			resolver: agent, teams: nil, want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := TurnObligationsAllTerminalWithTeams(ctx, store, tc.record, tc.resolver, tc.teams)
+			if err != nil {
+				t.Fatalf("TurnObligationsAllTerminalWithTeams: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("TurnObligationsAllTerminalWithTeams = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

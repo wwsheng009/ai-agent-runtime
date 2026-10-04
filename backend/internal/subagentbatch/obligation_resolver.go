@@ -16,6 +16,19 @@ type AgentSessionObligationResolver interface {
 	AgentSessionTerminal(ctx context.Context, sessionID string) (terminal bool, found bool, err error)
 }
 
+// TeamObligationResolver answers the durable control-plane state of a team run
+// referenced by a team: obligation (spawn_team with auto_start). Team runs live
+// in the team store (not the batch store), so the settle/ledger predicates must
+// ask the host for their state instead of assuming the batch table is the whole
+// obligation universe.
+//
+// found=false means the control plane has no durable row for the id. Like the
+// child-session rule, that keeps the turn parked: a started team always owns a
+// durable team record, so a missing row is never accepted as completion.
+type TeamObligationResolver interface {
+	TeamTerminal(ctx context.Context, teamID string) (terminal bool, found bool, err error)
+}
+
 // TurnObligationsSettledWith is §6.12 settle predicate extended to child-session
 // obligations. It preserves the batch-only rules (a resolved terminal batch is
 // required; vanished batches are skipped; at least one resolved obligation must
@@ -34,12 +47,27 @@ func TurnObligationsSettledWith(
 	record *TurnSuspension,
 	resolver AgentSessionObligationResolver,
 ) (bool, error) {
+	return TurnObligationsSettledWithTeams(ctx, store, record, resolver, nil)
+}
+
+// TurnObligationsSettledWithTeams is TurnObligationsSettledWith extended to
+// team-run obligations: every team: id must have a durable row and be terminal.
+// A nil team resolver with team obligations keeps the turn parked (never clear
+// on a guess), mirroring the child-session rule above.
+func TurnObligationsSettledWithTeams(
+	ctx context.Context,
+	store BatchStore,
+	record *TurnSuspension,
+	resolver AgentSessionObligationResolver,
+	teamResolver TeamObligationResolver,
+) (bool, error) {
 	if record == nil {
 		return false, nil
 	}
 	batchIDs := record.ObligationBatchIDs()
 	agentSessionIDs := record.ObligationAgentSessionIDs()
-	if len(batchIDs) == 0 && len(agentSessionIDs) == 0 {
+	teamIDs := record.ObligationTeamIDs()
+	if len(batchIDs) == 0 && len(agentSessionIDs) == 0 && len(teamIDs) == 0 {
 		return false, nil
 	}
 
@@ -82,6 +110,26 @@ func TurnObligationsSettledWith(
 			return false, nil
 		}
 	}
+	for _, teamID := range teamIDs {
+		if teamResolver == nil {
+			// The team control plane is not wired; keep the turn parked
+			// instead of guessing that the team is done.
+			return false, nil
+		}
+		terminal, found, err := teamResolver.TeamTerminal(ctx, teamID)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			// No durable team row: the team may simply still be starting.
+			// Never accept that as evidence of completion.
+			return false, nil
+		}
+		resolved++
+		if !terminal {
+			return false, nil
+		}
+	}
 	return resolved > 0, nil
 }
 
@@ -103,12 +151,26 @@ func TurnObligationsAllTerminal(
 	record *TurnSuspension,
 	resolver AgentSessionObligationResolver,
 ) (bool, error) {
+	return TurnObligationsAllTerminalWithTeams(ctx, store, record, resolver, nil)
+}
+
+// TurnObligationsAllTerminalWithTeams is TurnObligationsAllTerminal extended to
+// team-run obligations with the same strict reading: a missing or non-terminal
+// team row always blocks the resume verdict.
+func TurnObligationsAllTerminalWithTeams(
+	ctx context.Context,
+	store BatchStore,
+	record *TurnSuspension,
+	resolver AgentSessionObligationResolver,
+	teamResolver TeamObligationResolver,
+) (bool, error) {
 	if record == nil {
 		return false, nil
 	}
 	batchIDs := record.ObligationBatchIDs()
 	agentSessionIDs := record.ObligationAgentSessionIDs()
-	if len(batchIDs) == 0 && len(agentSessionIDs) == 0 {
+	teamIDs := record.ObligationTeamIDs()
+	if len(batchIDs) == 0 && len(agentSessionIDs) == 0 && len(teamIDs) == 0 {
 		return false, nil
 	}
 
@@ -139,6 +201,23 @@ func TurnObligationsAllTerminal(
 		}
 		if !found {
 			// No durable lifecycle row: the child may simply still be running.
+			return false, nil
+		}
+		known++
+		if !terminal {
+			return false, nil
+		}
+	}
+	for _, teamID := range teamIDs {
+		if teamResolver == nil {
+			return false, nil
+		}
+		terminal, found, err := teamResolver.TeamTerminal(ctx, teamID)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			// No durable team row: the team may simply still be starting.
 			return false, nil
 		}
 		known++
