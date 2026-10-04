@@ -11,13 +11,19 @@ import "sync"
 const foldOmissionMemoVersion = 1
 
 const (
-	// foldOmissionMemoMaxEntries 与 cellRowsCacheMax 对齐：工作集是 transcript
-	// 的 cell 数（一次完整扫描逐个查询），条目低于工作集会让命中率跌向 0。
-	foldOmissionMemoMaxEntries = 8192
+	// foldOmissionMemoMaxEntries 必须覆盖 transcript 的 cell 工作集（一次完整扫描
+	// 逐个查询）：容量低于工作集时命中率跌向 0。条目上限只作防御性兜底，字节
+	// 预算才是最终边界（与 cellRowsCacheMax / cellRowsCacheMaxBytes 同一口径）。
+	foldOmissionMemoMaxEntries = 16384
 	// foldOmissionMemoMaxBytes 限制被缓存 source 的驻留量：key 持有 source 的
 	// string 头（字节与 transcript cell 共享），只有 cell 被释放后才由这里兜底
-	// 持有；8MiB 足够覆盖正常工具输出，又不会把已淘汰 cell 的正文长期钉住。
-	foldOmissionMemoMaxBytes   = 8 * 1024 * 1024
+	// 持有。它必须装得下 transcript 工作集并与 cellRowsCacheMaxBytes（64MiB）对齐：
+	// 2026-10-04 现场（session_20260930210352_V5o7MDYL，8493 cell / 260985 行）
+	// 8MiB 预算被钉满（8374025/8388608），命中率 1.16%、逐出 173 万次，历史规划
+	// 每轮重跑约 3000 个折叠 cell 的 BuildPreview（单轮 5-7s、峰值 60.7s），把 UI
+	// 控制器循环打满、执行器 33 分钟拿不到窗口、投递日志冻结，TUI 假死。字节预算
+	// 不是新增常驻语义：source 本就由 transcript/cellRows 缓存持有。
+	foldOmissionMemoMaxBytes   = 64 * 1024 * 1024
 	foldOmissionMemoFixedBytes = 96
 )
 
