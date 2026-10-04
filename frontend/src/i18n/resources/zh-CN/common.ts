@@ -21,7 +21,6 @@ export const zhCommon = {
     shortName: "AR",
   },
   codeBlock: {
-    fallbackTitle: "代码片段",
     copy: "复制代码",
     showMoreLines: "展开剩余 {{count}} 行",
     collapse: "收起代码",

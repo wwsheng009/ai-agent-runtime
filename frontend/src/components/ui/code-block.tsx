@@ -151,10 +151,20 @@ function CodeBlockSurface({
     >
       <div className="flex items-center justify-between border-b border-border bg-code-block-header-bg px-3 py-2">
         <div className="min-w-0">
-          <div className="truncate app-text-13 font-semibold text-code-block-foreground">
-            {title ?? t("codeBlock.fallbackTitle")}
-          </div>
-          <div className="mt-0.5 app-text-10 uppercase tracking-[0.14em] text-muted-foreground">
+          {/* 只在调用方给出真实标题（如文件路径）时才渲染标题行：markdown 代码块不传
+              title，早前靠 `title ?? fallbackTitle` 兜底，导致每段代码顶部都挂一个
+              加粗的「代码片段」大标题，而它不携带任何信息。无标题时只留语言标签。 */}
+          {title ? (
+            <div className="truncate app-text-13 font-semibold text-code-block-foreground">
+              {title}
+            </div>
+          ) : null}
+          <div
+            className={cn(
+              "app-text-10 uppercase tracking-[0.14em] text-muted-foreground",
+              title && "mt-0.5",
+            )}
+          >
             {language}
           </div>
         </div>

@@ -135,6 +135,26 @@ describe("CodeBlock", () => {
     expect(markup).toContain('data-line-kind="deleted"');
   });
 
+  it("无 title 时不渲染占位大标题，只保留语言标签", () => {
+    const markup = renderToStaticMarkup(
+      <CodeBlock code={"const answer = 42;"} language="ts" />,
+    );
+
+    // markdown 代码块不传 title：不得再出现加粗的「代码片段」占位标题。
+    expect(markup).not.toContain("代码片段");
+    expect(markup).not.toContain("Code snippet");
+    expect(markup).not.toContain("app-text-13");
+    expect(markup).toContain("ts");
+  });
+
+  it("给出真实 title 时照常显示标题行", () => {
+    const markup = renderToStaticMarkup(
+      <CodeBlock code={"const answer = 42;"} language="ts" title="example.ts" />,
+    );
+
+    expect(markup).toContain("example.ts");
+  });
+
   it("collapses long code blocks and expands on demand", () => {
     renderCodeBlock({
       code: Array.from({ length: 18 }, (_, index) => `line ${index + 1}`).join("\n"),

@@ -23,7 +23,6 @@ export const enCommon = {
     shortName: "AR",
   },
   codeBlock: {
-    fallbackTitle: "Code snippet",
     copy: "Copy code",
     showMoreLines: "Show {{count}} more lines",
     collapse: "Collapse code",
