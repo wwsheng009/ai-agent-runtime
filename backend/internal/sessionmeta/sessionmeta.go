@@ -273,6 +273,40 @@ func CopyProfileBinding(dst *map[string]interface{}, src map[string]interface{})
 	return changed
 }
 
+// CopyParentWorkspaceBinding 把父会话绑定的 workspace_path 继承进子会话（§4.3.1
+// 目录绑定「一经绑定不随会话漂移」在父子关系上的延伸）。
+//
+// 为什么单列一个函数而不并入 CopyProfileBinding：profile 与工作目录是两套独立
+// 语义。profile 是「子代理用哪套配置」，工作目录是「子代理在哪个目录读写文件」，
+// 后者直接决定 shell / 读写工具 / allowed_roots 的作用域，误继承的代价远高于前者。
+//
+// 语义：
+//   - 只复制非空值；父会话未绑定目录时 dst 保持不变、不写任何键。
+//   - **dst 已绑定时不覆盖**：子会话自身已绑定的目录优先（例如 isolation=worktree
+//     先建好 worktree 再继承的场景），继承只填补空白。
+//   - 快照而非动态引用：父会话之后切换工作目录不追溯已有子代理。
+//
+// 返回是否发生了写入。
+func CopyParentWorkspaceBinding(dst *map[string]interface{}, src map[string]interface{}) bool {
+	if dst == nil {
+		return false
+	}
+	// 父未绑定 = 没有可继承的事实，保持「不声明 = 零变化」。
+	parentWorkspace := String(src, WorkspacePath)
+	if parentWorkspace == "" {
+		return false
+	}
+	// 子已绑定 = 目录绑定不漂移，不被继承覆盖。
+	if String(*dst, WorkspacePath) != "" {
+		return false
+	}
+	if *dst == nil {
+		*dst = make(map[string]interface{}, 1)
+	}
+	Set(*dst, WorkspacePath, parentWorkspace)
+	return true
+}
+
 func Value(ctx map[string]interface{}, key string) (interface{}, bool) {
 	if ctx == nil {
 		return nil, false

@@ -589,6 +589,24 @@ func (c *sessionAgentController) Spawn(ctx context.Context, parentSessionID stri
 		return nil, err
 	}
 	childSession.SetContext(toolbroker.AgentSessionContextParentSessionID, strings.TrimSpace(parentSessionID))
+	// 子代理身份：创建时铸造唯一 agent id 并落进子会话上下文，使 agent 身份成为
+	// 显式可读的一等字段，而不是靠「agent_id == session_id」的隐式约定反推；
+	// 同时把父代理的 agent 身份带进子会话（父 session id 只标识执行容器，
+	// 子代理需要能直接读回父 agent 身份来自报家门、按 agent 身份归位）。
+	childSession.SetContext(toolbroker.AgentSessionContextAgentID, apiChildAgentID(childSession))
+	childSession.SetContext(toolbroker.AgentSessionContextParentAgentID, apiAgentIDForSession(parentSession, strings.TrimSpace(parentSessionID)))
+	// 工作目录继承：子代理必须落在父代理绑定的工作目录上，否则它会读到
+	// agentChatEffectiveWorkspacePath 的兜底分支（空路径 → server cwd），在错误的
+	// 仓库里读写文件。必须在 applyAPISpawnIsolation 之前继承，worktree 模式才能
+	// 以父目录为 repoRoot 建树；反过来 isolation=worktree 会在继承完成后用
+	// worktree 路径覆盖 workspace_path（applyAPISpawnIsolation），符合
+	//「子已绑定目录优先」的继承语义。
+	if parentSession != nil {
+		// 出处快照：真正生效的是继承后的 workspace_path（可能已被 worktree 覆盖），
+		// 此键保留「从哪继承而来」，两者不可互相替代。
+		childSession.SetContext(toolbroker.AgentSessionContextParentWorkspacePath, sessionmeta.String(parentSession.Metadata.Context, sessionmeta.WorkspacePath))
+		sessionmeta.CopyParentWorkspaceBinding(&childSession.Metadata.Context, parentSession.Metadata.Context)
+	}
 	// 父侧工具调用归位（D）：broker 在 spawn_agent 执行上下文注入
 	// ParentToolCallID，宿主落进子会话上下文，进度镜像据此回填
 	// parent_tool_call_id（见 subscribeAgentCompletion）。
@@ -1524,7 +1542,32 @@ func apiRootAgentRecord(parentSession *chat.Session, parentSessionID string) age
 		AgentPath:     "/root",
 		AgentType:     agentcontrol.AgentTypeRoot,
 		Status:        agentcontrol.AgentStatusActive,
+		WorkspacePath: apiSessionWorkspacePath(parentSession),
 	}
+}
+
+// apiChildAgentID resolves the unique control-plane agent id of a child session.
+// The id is minted once at spawn time and persisted in the session context; the
+// session-id fallback keeps pre-existing child sessions (and callers that only
+// hold a session) addressable under the same value.
+func apiChildAgentID(childSession *chat.Session) string {
+	if childSession == nil {
+		return ""
+	}
+	if agentID := agentcontrol.ContextString(childSession, toolbroker.AgentSessionContextAgentID); agentID != "" {
+		return agentID
+	}
+	return strings.TrimSpace(childSession.ID)
+}
+
+// apiSessionWorkspacePath returns the directory a session is bound to. Sessions
+// without a bound path return "" (they fall back to the server cwd), which keeps
+// the control-plane row honest instead of recording a directory nobody works in.
+func apiSessionWorkspacePath(session *chat.Session) string {
+	if session == nil {
+		return ""
+	}
+	return strings.TrimSpace(sessionmeta.String(session.Metadata.Context, sessionmeta.WorkspacePath))
 }
 
 func apiChildAgentRecord(parentSession *chat.Session, parentSessionID string, childSession *chat.Session, args toolbroker.SpawnAgentArgs, childDepth int) agentcontrol.AgentRecord {
@@ -1535,7 +1578,7 @@ func apiChildAgentRecord(parentSession *chat.Session, parentSessionID string, ch
 	rootSessionID := apiAgentRootSessionID(parentSession, strings.TrimSpace(parentSessionID))
 	agentType := firstNonEmptyString(strings.TrimSpace(args.AgentType), agentcontrol.AgentTypeChild)
 	record := agentcontrol.AgentRecord{
-		AgentID:         childSessionID,
+		AgentID:         apiChildAgentID(childSession),
 		RootSessionID:   rootSessionID,
 		ParentAgentID:   apiAgentIDForSession(parentSession, strings.TrimSpace(parentSessionID)),
 		ParentSessionID: strings.TrimSpace(parentSessionID),
@@ -1545,6 +1588,10 @@ func apiChildAgentRecord(parentSession *chat.Session, parentSessionID string, ch
 		AgentType:       agentType,
 		Workflow:        agentcontrol.WorkflowSpawnAgent,
 		Status:          agentcontrol.AgentStatusActive,
+		// Built after applyAPISpawnIsolation, so this is the directory the child
+		// actually runs in: the inherited parent directory, or the worktree path
+		// when isolation=worktree replaced it.
+		WorkspacePath: apiSessionWorkspacePath(childSession),
 	}
 	toolbroker.ApplySpawnAgentRouteRecord(&record, args)
 	return record
@@ -1555,6 +1602,12 @@ func apiAgentIDForSession(session *chat.Session, sessionID string) string {
 	if session == nil || !isAPIAgentSession(session) {
 		rootSessionID := apiAgentRootSessionID(session, sessionID)
 		return apiRootAgentID(rootSessionID)
+	}
+	// Prefer the agent id minted at this session's own spawn so the
+	// parent_agent_id chain matches AgentRecord.AgentID layer by layer instead of
+	// re-deriving an id from the execution container.
+	if agentID := agentcontrol.ContextString(session, toolbroker.AgentSessionContextAgentID); agentID != "" {
+		return agentID
 	}
 	return sessionID
 }
@@ -1673,6 +1726,8 @@ func (c *sessionAgentController) agentStatusFromRecord(ctx context.Context, reco
 	result.ID = firstNonEmptyString(strings.TrimSpace(result.ID), record.AgentID, sessionID)
 	result.SessionID = firstNonEmptyString(strings.TrimSpace(result.SessionID), sessionID)
 	result.ParentSessionID = firstNonEmptyString(strings.TrimSpace(result.ParentSessionID), record.ParentSessionID)
+	result.ParentAgentID = firstNonEmptyString(strings.TrimSpace(result.ParentAgentID), record.ParentAgentID)
+	result.WorkspacePath = firstNonEmptyString(strings.TrimSpace(result.WorkspacePath), record.WorkspacePath)
 	result.Path = firstNonEmptyString(strings.TrimSpace(result.Path), record.AgentPath)
 	result.Depth = firstNonZeroInt(result.Depth, record.Depth)
 	result.AgentType = firstNonEmptyString(strings.TrimSpace(result.AgentType), record.AgentType)
@@ -3491,6 +3546,8 @@ func (c *sessionAgentController) snapshot(ctx context.Context, sessionID string)
 				result.ParentSessionID = strings.TrimSpace(text)
 			}
 		}
+		result.ParentAgentID = agentcontrol.ContextString(session, toolbroker.AgentSessionContextParentAgentID)
+		result.WorkspacePath = apiSessionWorkspacePath(session)
 		result.Path = apiAgentSessionPath(session)
 		result.Depth = apiAgentSessionDepth(session)
 		if value, ok := session.GetContext(toolbroker.AgentSessionContextAgentType); ok {

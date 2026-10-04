@@ -720,6 +720,23 @@ func (r *localActorRegistry) Spawn(ctx context.Context, parentSessionID string, 
 		return nil, err
 	}
 	childSession.SetContext(toolbroker.AgentSessionContextParentSessionID, parentSessionID)
+	// 子代理身份：创建时铸造唯一 agent id 并落进子会话上下文，使 agent 身份成为
+	// 显式可读的一等字段，而不是靠「agent_id == session_id」的隐式约定反推；
+	// 同时把父代理的 agent 身份带进子会话（父 session id 只标识执行容器，
+	// 子代理需要能直接读回父 agent 身份来自报家门、按 agent 身份归位）。
+	childSession.SetContext(toolbroker.AgentSessionContextAgentID, localChildAgentID(childSession))
+	childSession.SetContext(toolbroker.AgentSessionContextParentAgentID, localAgentIDForSession(parentSession, parentSessionID))
+	// 工作目录继承：子代理必须落在父代理绑定的工作目录上，否则它会落到
+	// runtime 进程的兜底目录，在错误的仓库里读写文件。必须在
+	// applyLocalSpawnIsolation 之前继承，worktree 模式才能以父目录为 repoRoot
+	// 建树；反过来 isolation=worktree 会在继承完成后用 worktree 路径覆盖
+	// workspace_path，符合「子已绑定目录优先」的继承语义。
+	if parentSession != nil {
+		// 出处快照：真正生效的是继承后的 workspace_path（可能已被 worktree 覆盖），
+		// 此键保留「从哪继承而来」，两者不可互相替代。
+		childSession.SetContext(toolbroker.AgentSessionContextParentWorkspacePath, sessionmeta.String(parentSession.Metadata.Context, sessionmeta.WorkspacePath))
+		sessionmeta.CopyParentWorkspaceBinding(&childSession.Metadata.Context, parentSession.Metadata.Context)
+	}
 	// 父侧工具调用归位（D）：broker 在 spawn_agent 执行上下文注入
 	// ParentToolCallID，宿主落进子会话上下文，进度镜像据此回填
 	// parent_tool_call_id（见 subscribeLocalAgentCompletion）。
@@ -1662,7 +1679,33 @@ func localRootAgentRecord(parentSession *runtimechat.Session, parentSessionID st
 		AgentPath:     "/root",
 		AgentType:     agentcontrol.AgentTypeRoot,
 		Status:        agentcontrol.AgentStatusActive,
+		WorkspacePath: localSessionWorkspacePath(parentSession),
 	}
+}
+
+// localChildAgentID resolves the unique control-plane agent id of a child
+// session. The id is minted once at spawn time and persisted in the session
+// context; the session-id fallback keeps pre-existing child sessions (and
+// callers that only hold a session) addressable under the same value.
+func localChildAgentID(childSession *runtimechat.Session) string {
+	if childSession == nil {
+		return ""
+	}
+	if agentID := agentcontrol.ContextString(childSession, toolbroker.AgentSessionContextAgentID); agentID != "" {
+		return agentID
+	}
+	return strings.TrimSpace(childSession.ID)
+}
+
+// localSessionWorkspacePath returns the directory a session is bound to.
+// Sessions without a bound path return "" (they fall back to the runtime
+// process directory), which keeps the control-plane row honest instead of
+// recording a directory nobody works in.
+func localSessionWorkspacePath(session *runtimechat.Session) string {
+	if session == nil {
+		return ""
+	}
+	return strings.TrimSpace(sessionmeta.String(session.Metadata.Context, sessionmeta.WorkspacePath))
 }
 
 func localChildAgentRecord(parentSession *runtimechat.Session, parentSessionID string, childSession *runtimechat.Session, args toolbroker.SpawnAgentArgs, childDepth int) agentcontrol.AgentRecord {
@@ -1673,7 +1716,7 @@ func localChildAgentRecord(parentSession *runtimechat.Session, parentSessionID s
 	rootSessionID := localAgentRootSessionID(parentSession, strings.TrimSpace(parentSessionID))
 	agentType := firstNonEmptyChatValue(strings.TrimSpace(args.AgentType), agentcontrol.AgentTypeChild)
 	record := agentcontrol.AgentRecord{
-		AgentID:         childSessionID,
+		AgentID:         localChildAgentID(childSession),
 		RootSessionID:   rootSessionID,
 		ParentAgentID:   localAgentIDForSession(parentSession, strings.TrimSpace(parentSessionID)),
 		ParentSessionID: strings.TrimSpace(parentSessionID),
@@ -1683,6 +1726,10 @@ func localChildAgentRecord(parentSession *runtimechat.Session, parentSessionID s
 		AgentType:       agentType,
 		Workflow:        agentcontrol.WorkflowSpawnAgent,
 		Status:          agentcontrol.AgentStatusActive,
+		// Built after applyLocalSpawnIsolation, so this is the directory the child
+		// actually runs in: the inherited parent directory, or the worktree path
+		// when isolation=worktree replaced it.
+		WorkspacePath: localSessionWorkspacePath(childSession),
 	}
 	toolbroker.ApplySpawnAgentRouteRecord(&record, args)
 	return record
@@ -1692,6 +1739,12 @@ func localAgentIDForSession(session *runtimechat.Session, sessionID string) stri
 	sessionID = strings.TrimSpace(sessionID)
 	if session == nil || !isLocalAgentSession(session) {
 		return localRootAgentID(localAgentRootSessionID(session, sessionID))
+	}
+	// Prefer the agent id minted at this session's own spawn so the
+	// parent_agent_id chain matches AgentRecord.AgentID layer by layer instead of
+	// re-deriving an id from the execution container.
+	if agentID := agentcontrol.ContextString(session, toolbroker.AgentSessionContextAgentID); agentID != "" {
+		return agentID
 	}
 	return sessionID
 }
@@ -2772,7 +2825,7 @@ func (r *localActorRegistry) parkTriggeredChildObligation(ctx context.Context, c
 	if !strings.EqualFold(strings.TrimSpace(record.ParentSessionID), callerSessionID) {
 		return
 	}
-	if strings.EqualFold(strings.TrimSpace(record.AgentType), agentcontrol.AgentTypeTeamTeammate) {
+	if record.IsTeamTeammate() {
 		return
 	}
 	r.Host.parkLocalAgentChildObligation(ctx, callerSessionID, targetSessionID)

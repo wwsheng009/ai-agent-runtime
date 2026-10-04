@@ -29,6 +29,7 @@ const fullRecord = {
   agent_path: "/root/child-1",
   depth: 1,
   agent_type: "child",
+  workspace_path: "E:/repos/ai-agent-runtime",
   nickname: "researcher",
   workflow: "spawn_agent",
   team_id: "team-a",
@@ -69,6 +70,7 @@ describe("normalizeRuntimeAgent", () => {
       sessionId: "sess-child-1",
       agentPath: "/root/child-1",
       depth: 1,
+      workspacePath: "E:/repos/ai-agent-runtime",
       nickname: "researcher",
       provider: "deepseek",
       model: "deepseek-chat",
@@ -106,6 +108,18 @@ describe("normalizeRuntimeAgent", () => {
     expect(normalizeRuntimeAgent({ nickname: "no-id" })).toBeNull();
     expect(normalizeRuntimeAgent("child-1")).toBeNull();
     expect(normalizeRuntimeAgent(null)).toBeNull();
+  });
+
+  // 会话未绑定目录时后端省略 workspace_path（omitempty）→ null。绝不回退成
+  // 进程 cwd：那会让面板显示一个谁也没在工作的目录，比不显示更糟。
+  it("工作目录缺失时收口为 null（不回退默认目录）", () => {
+    expect(normalizeRuntimeAgent({ agent_id: "a1" })?.workspacePath).toBeNull();
+    expect(
+      normalizeRuntimeAgent({ agent_id: "a1", workspace_path: "   " })?.workspacePath,
+    ).toBeNull();
+    expect(
+      normalizeRuntimeAgent({ agent_id: "a1", workspace_path: " /repo " })?.workspacePath,
+    ).toBe("/repo");
   });
 
   it("状态缺失收口为 unknown，不回退 provider 原始字段", () => {

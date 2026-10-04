@@ -71,6 +71,7 @@ export const enWorkspacePanelsAgents = {
     provider: "Provider {{value}}",
     workflow: "Workflow {{value}}",
     team: "Team {{value}}",
+    workspace: "Dir {{value}}",
     warnings: "{{value}} route warnings",
   },
 } as const;

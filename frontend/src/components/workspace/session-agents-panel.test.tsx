@@ -30,6 +30,7 @@ function agent(partial: Partial<RuntimeAgentRecord> & { agentId: string }): Runt
     agentPath: null,
     depth: null,
     agentType: null,
+    workspacePath: null,
     nickname: null,
     workflow: null,
     teamId: null,

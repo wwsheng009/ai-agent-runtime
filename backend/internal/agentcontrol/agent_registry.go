@@ -29,41 +29,45 @@ const (
 // intentionally separate from chat session state: sessions remain execution
 // containers, while AgentRecord is the durable control-plane identity.
 type AgentRecord struct {
-	Seq                      int64      `json:"seq,omitempty"`
-	AgentID                  string     `json:"agent_id,omitempty"`
-	RootSessionID            string     `json:"root_session_id,omitempty"`
-	ParentAgentID            string     `json:"parent_agent_id,omitempty"`
-	ParentSessionID          string     `json:"parent_session_id,omitempty"`
-	SessionID                string     `json:"session_id,omitempty"`
-	AgentPath                string     `json:"agent_path,omitempty"`
-	Depth                    int        `json:"depth,omitempty"`
-	AgentType                string     `json:"agent_type,omitempty"`
-	Nickname                 string     `json:"nickname,omitempty"`
-	Workflow                 string     `json:"workflow,omitempty"`
-	TeamID                   string     `json:"team_id,omitempty"`
-	TeammateID               string     `json:"teammate_id,omitempty"`
-	Provider                 string     `json:"provider,omitempty"`
-	Model                    string     `json:"model,omitempty"`
-	ReasoningEffort          string     `json:"reasoning_effort,omitempty"`
-	Difficulty               string     `json:"difficulty,omitempty"`
-	DifficultySource         string     `json:"difficulty_source,omitempty"`
-	DifficultyRationale      string     `json:"difficulty_rationale,omitempty"`
-	RouteSource              string     `json:"route_source,omitempty"`
-	RouteWarnings            []string   `json:"route_warnings,omitempty"`
-	FallbackUsed             bool       `json:"fallback_used,omitempty"`
-	FallbackReason           string     `json:"fallback_reason,omitempty"`
-	RequestedProvider        string     `json:"requested_provider,omitempty"`
-	EffectiveProvider        string     `json:"effective_provider,omitempty"`
-	RequestedModel           string     `json:"requested_model,omitempty"`
-	EffectiveModel           string     `json:"effective_model,omitempty"`
-	RequestedReasoningEffort string     `json:"requested_reasoning_effort,omitempty"`
-	EffectiveReasoningEffort string     `json:"effective_reasoning_effort,omitempty"`
-	RequestedPermissionMode  string     `json:"requested_permission_mode,omitempty"`
-	EffectivePermissionMode  string     `json:"effective_permission_mode,omitempty"`
-	Status                   string     `json:"status,omitempty"`
-	CreatedAt                time.Time  `json:"created_at,omitempty"`
-	UpdatedAt                time.Time  `json:"updated_at,omitempty"`
-	ClosedAt                 *time.Time `json:"closed_at,omitempty"`
+	Seq                      int64    `json:"seq,omitempty"`
+	AgentID                  string   `json:"agent_id,omitempty"`
+	RootSessionID            string   `json:"root_session_id,omitempty"`
+	ParentAgentID            string   `json:"parent_agent_id,omitempty"`
+	ParentSessionID          string   `json:"parent_session_id,omitempty"`
+	SessionID                string   `json:"session_id,omitempty"`
+	AgentPath                string   `json:"agent_path,omitempty"`
+	Depth                    int      `json:"depth,omitempty"`
+	AgentType                string   `json:"agent_type,omitempty"`
+	Nickname                 string   `json:"nickname,omitempty"`
+	Workflow                 string   `json:"workflow,omitempty"`
+	TeamID                   string   `json:"team_id,omitempty"`
+	TeammateID               string   `json:"teammate_id,omitempty"`
+	Provider                 string   `json:"provider,omitempty"`
+	Model                    string   `json:"model,omitempty"`
+	ReasoningEffort          string   `json:"reasoning_effort,omitempty"`
+	Difficulty               string   `json:"difficulty,omitempty"`
+	DifficultySource         string   `json:"difficulty_source,omitempty"`
+	DifficultyRationale      string   `json:"difficulty_rationale,omitempty"`
+	RouteSource              string   `json:"route_source,omitempty"`
+	RouteWarnings            []string `json:"route_warnings,omitempty"`
+	FallbackUsed             bool     `json:"fallback_used,omitempty"`
+	FallbackReason           string   `json:"fallback_reason,omitempty"`
+	RequestedProvider        string   `json:"requested_provider,omitempty"`
+	EffectiveProvider        string   `json:"effective_provider,omitempty"`
+	RequestedModel           string   `json:"requested_model,omitempty"`
+	EffectiveModel           string   `json:"effective_model,omitempty"`
+	RequestedReasoningEffort string   `json:"requested_reasoning_effort,omitempty"`
+	EffectiveReasoningEffort string   `json:"effective_reasoning_effort,omitempty"`
+	RequestedPermissionMode  string   `json:"requested_permission_mode,omitempty"`
+	EffectivePermissionMode  string   `json:"effective_permission_mode,omitempty"`
+	Status                   string   `json:"status,omitempty"`
+	// WorkspacePath 是该 agent 绑定的工作目录（子代理创建时从父代理继承，
+	// isolation=worktree 时为 worktree 路径）。落到控制面后，list_agents /
+	// 监督投影无需回读会话 metadata 即可回答「这个子代理在哪个目录工作」。
+	WorkspacePath string     `json:"workspace_path,omitempty"`
+	CreatedAt     time.Time  `json:"created_at,omitempty"`
+	UpdatedAt     time.Time  `json:"updated_at,omitempty"`
+	ClosedAt      *time.Time `json:"closed_at,omitempty"`
 }
 
 // Normalize returns a stable AgentRecord shape for storage and comparison.
@@ -97,6 +101,7 @@ func (r AgentRecord) Normalize() AgentRecord {
 	r.RequestedPermissionMode = strings.TrimSpace(r.RequestedPermissionMode)
 	r.EffectivePermissionMode = strings.TrimSpace(r.EffectivePermissionMode)
 	r.Status = strings.TrimSpace(r.Status)
+	r.WorkspacePath = strings.TrimSpace(r.WorkspacePath)
 	if r.Status == "" {
 		r.Status = AgentStatusActive
 	}
@@ -171,6 +176,7 @@ func agentRecordsShareWakeState(before, after AgentRecord) bool {
 		before.EffectiveReasoningEffort != after.EffectiveReasoningEffort ||
 		before.RequestedPermissionMode != after.RequestedPermissionMode ||
 		before.EffectivePermissionMode != after.EffectivePermissionMode ||
+		before.WorkspacePath != after.WorkspacePath ||
 		before.Status != after.Status {
 		return false
 	}

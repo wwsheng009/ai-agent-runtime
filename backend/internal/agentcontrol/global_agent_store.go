@@ -427,8 +427,8 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
 			fallback_used, fallback_reason, requested_provider, effective_provider, requested_model,
 			effective_model, requested_reasoning_effort, effective_reasoning_effort,
-			requested_permission_mode, effective_permission_mode, status, created_at, updated_at, closed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			requested_permission_mode, effective_permission_mode, status, workspace_path, created_at, updated_at, closed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(agent_id) DO UPDATE SET
 			root_session_id = excluded.root_session_id,
 			parent_agent_id = excluded.parent_agent_id,
@@ -459,6 +459,7 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 			effective_reasoning_effort = excluded.effective_reasoning_effort,
 			requested_permission_mode = excluded.requested_permission_mode,
 			effective_permission_mode = excluded.effective_permission_mode,
+			workspace_path = excluded.workspace_path,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
@@ -494,6 +495,7 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 			effective_reasoning_effort = excluded.effective_reasoning_effort,
 			requested_permission_mode = excluded.requested_permission_mode,
 			effective_permission_mode = excluded.effective_permission_mode,
+			workspace_path = excluded.workspace_path,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
@@ -511,7 +513,7 @@ func (s *SQLiteGlobalAgentRegistryStore) UpsertAgentControlAgent(ctx context.Con
 		nullAgentString(record.RequestedModel), nullAgentString(record.EffectiveModel),
 		nullAgentString(record.RequestedReasoningEffort), nullAgentString(record.EffectiveReasoningEffort),
 		nullAgentString(record.RequestedPermissionMode), nullAgentString(record.EffectivePermissionMode),
-		record.Status, formatAgentTime(record.CreatedAt), formatAgentTime(record.UpdatedAt),
+		record.Status, nullAgentString(record.WorkspacePath), formatAgentTime(record.CreatedAt), formatAgentTime(record.UpdatedAt),
 		nullableAgentTime(record.ClosedAt))
 	if err != nil {
 		return AgentRecord{}, fmt.Errorf("upsert agent control agent: %w", err)
@@ -696,7 +698,7 @@ func (s *SQLiteGlobalAgentRegistryStore) ListAgentControlAgents(ctx context.Cont
 			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
 			fallback_used, fallback_reason, requested_provider, effective_provider, requested_model,
 			effective_model, requested_reasoning_effort, effective_reasoning_effort,
-			requested_permission_mode, effective_permission_mode, status, created_at, updated_at, closed_at
+			requested_permission_mode, effective_permission_mode, status, workspace_path, created_at, updated_at, closed_at
 		FROM agent_control_agents
 	`
 	if len(clauses) > 0 {
@@ -825,8 +827,8 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
 			fallback_used, fallback_reason, requested_provider, effective_provider, requested_model,
 			effective_model, requested_reasoning_effort, effective_reasoning_effort,
-			requested_permission_mode, effective_permission_mode, status, created_at, updated_at, closed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			requested_permission_mode, effective_permission_mode, status, workspace_path, created_at, updated_at, closed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(agent_id) DO UPDATE SET
 			root_session_id = excluded.root_session_id,
 			parent_agent_id = excluded.parent_agent_id,
@@ -857,6 +859,7 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 			effective_reasoning_effort = excluded.effective_reasoning_effort,
 			requested_permission_mode = excluded.requested_permission_mode,
 			effective_permission_mode = excluded.effective_permission_mode,
+			workspace_path = excluded.workspace_path,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
@@ -889,6 +892,7 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 			effective_reasoning_effort = excluded.effective_reasoning_effort,
 			requested_permission_mode = excluded.requested_permission_mode,
 			effective_permission_mode = excluded.effective_permission_mode,
+			workspace_path = excluded.workspace_path,
 			status = excluded.status,
 			updated_at = excluded.updated_at,
 			closed_at = excluded.closed_at
@@ -903,7 +907,7 @@ func upsertAgentControlAgentTx(ctx context.Context, tx *sql.Tx, record AgentReco
 		nullAgentString(record.RequestedModel), nullAgentString(record.EffectiveModel),
 		nullAgentString(record.RequestedReasoningEffort), nullAgentString(record.EffectiveReasoningEffort),
 		nullAgentString(record.RequestedPermissionMode), nullAgentString(record.EffectivePermissionMode),
-		record.Status, formatAgentTime(record.CreatedAt), formatAgentTime(record.UpdatedAt),
+		record.Status, nullAgentString(record.WorkspacePath), formatAgentTime(record.CreatedAt), formatAgentTime(record.UpdatedAt),
 		nullableAgentTime(record.ClosedAt))
 	if err != nil {
 		return AgentRecord{}, fmt.Errorf("upsert agent control agent: %w", err)
@@ -1312,7 +1316,7 @@ func (s *SQLiteGlobalAgentRegistryStore) getAgentControlAgentByID(ctx context.Co
 			difficulty, difficulty_source, difficulty_rationale, route_source, route_warnings_json,
 			fallback_used, fallback_reason, requested_provider, effective_provider, requested_model,
 			effective_model, requested_reasoning_effort, effective_reasoning_effort,
-			requested_permission_mode, effective_permission_mode, status, created_at, updated_at, closed_at
+			requested_permission_mode, effective_permission_mode, status, workspace_path, created_at, updated_at, closed_at
 		FROM agent_control_agents
 		WHERE agent_id = ?
 	`, strings.TrimSpace(agentID))
@@ -1670,6 +1674,7 @@ func (s *SQLiteGlobalAgentRegistryStore) init(ctx context.Context) error {
 			requested_permission_mode TEXT,
 			effective_permission_mode TEXT,
 			status TEXT NOT NULL,
+			workspace_path TEXT,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			closed_at TEXT,
@@ -1769,6 +1774,7 @@ func (s *SQLiteGlobalAgentRegistryStore) ensureAgentControlAgentRouteColumns(ctx
 		{Name: "effective_reasoning_effort", SQL: "ALTER TABLE agent_control_agents ADD COLUMN effective_reasoning_effort TEXT"},
 		{Name: "requested_permission_mode", SQL: "ALTER TABLE agent_control_agents ADD COLUMN requested_permission_mode TEXT"},
 		{Name: "effective_permission_mode", SQL: "ALTER TABLE agent_control_agents ADD COLUMN effective_permission_mode TEXT"},
+		{Name: "workspace_path", SQL: "ALTER TABLE agent_control_agents ADD COLUMN workspace_path TEXT"},
 	}
 	for _, column := range columns {
 		if existing[column.Name] {
@@ -1814,6 +1820,7 @@ func scanAgentRecord(scanner agentRecordScanner) (AgentRecord, error) {
 		effectiveReasoningEffort sql.NullString
 		requestedPermissionMode  sql.NullString
 		effectivePermissionMode  sql.NullString
+		workspacePath            sql.NullString
 		createdRaw               string
 		updatedRaw               string
 		closedRaw                sql.NullString
@@ -1825,7 +1832,7 @@ func scanAgentRecord(scanner agentRecordScanner) (AgentRecord, error) {
 		&requestedProvider, &effectiveProvider, &requestedModel, &effectiveModel,
 		&requestedReasoningEffort, &effectiveReasoningEffort,
 		&requestedPermissionMode, &effectivePermissionMode,
-		&record.Status, &createdRaw, &updatedRaw, &closedRaw); err != nil {
+		&record.Status, &workspacePath, &createdRaw, &updatedRaw, &closedRaw); err != nil {
 		return AgentRecord{}, err
 	}
 	record.ParentAgentID = parentAgentID.String
@@ -1854,6 +1861,7 @@ func scanAgentRecord(scanner agentRecordScanner) (AgentRecord, error) {
 	record.EffectiveReasoningEffort = effectiveReasoningEffort.String
 	record.RequestedPermissionMode = requestedPermissionMode.String
 	record.EffectivePermissionMode = effectivePermissionMode.String
+	record.WorkspacePath = workspacePath.String
 	if createdRaw != "" {
 		record.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdRaw)
 	}

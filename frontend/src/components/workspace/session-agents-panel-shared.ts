@@ -194,7 +194,7 @@ export function agentPathSegments(agentPath: string | null): string[] {
 }
 
 export type AgentMetaFact = {
-  key: "model" | "provider" | "workflow" | "team" | "warnings";
+  key: "model" | "provider" | "workflow" | "team" | "workspace" | "warnings";
   value: string;
 };
 
@@ -215,6 +215,11 @@ export function agentMetaFacts(agent: RuntimeAgentRecord): AgentMetaFact[] {
   }
   if (agent.teamId) {
     facts.push({ key: "team", value: agent.teammateId || agent.teamId });
+  }
+  // 工作目录：只展示后端上报的绑定目录。空值（会话未绑定目录）不渲染该 chip，
+  // 绝不回退成服务进程 cwd —— 那会让人以为子代理在某个谁也没选的目录里工作。
+  if (agent.workspacePath) {
+    facts.push({ key: "workspace", value: agent.workspacePath });
   }
   if (agent.routeWarnings.length > 0) {
     facts.push({ key: "warnings", value: String(agent.routeWarnings.length) });

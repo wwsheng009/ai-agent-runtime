@@ -621,9 +621,15 @@ type AgentMessageArgs struct {
 
 // AgentStatusResult returns the current state of a lightweight child agent session.
 type AgentStatusResult struct {
-	ID                       string   `json:"id"`
-	SessionID                string   `json:"session_id"`
-	ParentSessionID          string   `json:"parent_session_id,omitempty"`
+	ID              string `json:"id"`
+	SessionID       string `json:"session_id"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	// ParentAgentID 是父代理的控制面身份（根代理为 "root:<root_session_id>"）。
+	// 与 ParentSessionID 分开：后者只标识执行容器。
+	ParentAgentID string `json:"parent_agent_id,omitempty"`
+	// WorkspacePath 是该子代理绑定的工作目录（继承自父代理，isolation=worktree
+	// 时为 worktree 路径）。子代理因此能从自己的会话状态直接读回工作目录。
+	WorkspacePath            string   `json:"workspace_path,omitempty"`
 	Path                     string   `json:"path,omitempty"`
 	Depth                    int      `json:"depth,omitempty"`
 	AgentType                string   `json:"agent_type,omitempty"`
@@ -1461,6 +1467,9 @@ const (
 	AgentSessionContextModel                 = "model"
 	AgentSessionContextReasoningEffort       = "reasoning_effort"
 	AgentSessionContextParentSessionID       = agentcontrol.SessionContextParentSessionID
+	AgentSessionContextAgentID               = agentcontrol.SessionContextAgentID
+	AgentSessionContextParentAgentID         = agentcontrol.SessionContextParentAgentID
+	AgentSessionContextParentWorkspacePath   = agentcontrol.SessionContextParentWorkspacePath
 	AgentSessionContextParentToolCallID      = agentcontrol.SessionContextParentToolCallID
 	AgentSessionContextRootSessionID         = agentcontrol.SessionContextRootSessionID
 	AgentSessionContextAgentType             = agentcontrol.SessionContextAgentType

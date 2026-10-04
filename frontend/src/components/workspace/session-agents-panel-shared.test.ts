@@ -34,6 +34,7 @@ function agent(partial: Partial<RuntimeAgentRecord> & { agentId: string }): Runt
     agentPath: null,
     depth: null,
     agentType: null,
+    workspacePath: null,
     nickname: null,
     workflow: null,
     teamId: null,
@@ -309,6 +310,15 @@ describe("agentMetaFacts", () => {
   it("team 缺 teammate 时回退 team_id", () => {
     const facts = agentMetaFacts(agent({ agentId: "a1", teamId: "team-1" }));
     expect(facts).toEqual([{ key: "team", value: "team-1" }]);
+  });
+
+  // 空值静默：回退成进程 cwd 会指向一个谁也没在工作的目录，比不显示更糟。
+  it("上报绑定的工作目录；未绑定时不产出该事实", () => {
+    const ws = "E:/repos/ai-agent-runtime";
+    expect(agentMetaFacts(agent({ agentId: "a1", workspacePath: ws }))).toEqual([
+      { key: "workspace", value: ws },
+    ]);
+    expect(agentMetaFacts(agent({ agentId: "a1", workspacePath: null }))).toEqual([]);
   });
 });
 

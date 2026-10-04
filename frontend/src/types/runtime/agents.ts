@@ -57,6 +57,12 @@ export type RuntimeAgentRecord = {
   agentPath: string | null;
   depth: number | null;
   agentType: string | null;
+  /**
+   * 该子代理绑定的工作目录（继承自父代理；`isolation=worktree` 时为 worktree
+   * 路径）。会话未绑定目录时后端省略该字段 → `null`，**不得回退成服务进程
+   * 的 cwd**（那会显示成一个谁也没在工作的目录）。
+   */
+  workspacePath: string | null;
   nickname: string | null;
   workflow: string | null;
   teamId: string | null;

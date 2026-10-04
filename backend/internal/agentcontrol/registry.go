@@ -6,7 +6,20 @@ import (
 )
 
 const (
+	// SessionContextAgentID 是该子会话在控制面（AgentRecord.AgentID）上的唯一
+	// 标识。创建时即铸造并落进子会话上下文，使 agent 身份成为显式、可读的一等
+	// 字段，而不是由「agent_id == session_id」这一隐式约定反推。
+	SessionContextAgentID         = "agent_id"
 	SessionContextParentSessionID = "agent_parent_session_id"
+	// SessionContextParentAgentID 记录父代理的控制面身份（父 AgentRecord 的
+	// AgentID，根代理为 "root:<root_session_id>"）。父会话 id 已在
+	// SessionContextParentSessionID 中，但那只标识执行容器；子代理需要能在会话
+	// 信息里直接读回父 agent 身份，才能自报家门并按 agent 身份归位。
+	SessionContextParentAgentID = "agent_parent_agent_id"
+	// SessionContextParentWorkspacePath 快照父代理绑定的工作目录。子会话真正执行
+	// 时用的是继承后的 sessionmeta.WorkspacePath（可能被 isolation=worktree 覆盖
+	// 成 worktree 路径），此键保留「从哪继承而来」的原始出处，两者不可互替。
+	SessionContextParentWorkspacePath = "agent_parent_workspace_path"
 	// SessionContextParentToolCallID 记录发起该子会话的父侧 tool_call_id
 	// （spawn_agent 工具调用的 id）：subagent.progress 镜像据此回填
 	// parent_tool_call_id，前端/ACP 能把子代理进度挂到对应的 spawn_agent 行上。

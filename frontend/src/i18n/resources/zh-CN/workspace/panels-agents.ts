@@ -71,6 +71,7 @@ export const zhWorkspacePanelsAgents = {
     provider: "提供方 {{value}}",
     workflow: "工作流 {{value}}",
     team: "团队 {{value}}",
+    workspace: "目录 {{value}}",
     warnings: "{{value}} 条路由告警",
   },
 } as const;

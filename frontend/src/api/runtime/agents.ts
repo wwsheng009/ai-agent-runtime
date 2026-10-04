@@ -121,6 +121,7 @@ export function normalizeRuntimeAgent(raw: unknown): RuntimeAgentRecord | null {
     agentPath: readTrimmed(record.agent_path),
     depth: readDepth(record.depth),
     agentType: readTrimmed(record.agent_type),
+    workspacePath: readTrimmed(record.workspace_path),
     nickname: readTrimmed(record.nickname),
     workflow: readTrimmed(record.workflow),
     teamId: readTrimmed(record.team_id),

@@ -277,6 +277,7 @@ describe("useParkedTurnView", () => {
       agentPath: null,
       depth: null,
       agentType: "child",
+      workspacePath: null,
       nickname: null,
       workflow: null,
       teamId: null,
