@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/registry"
@@ -336,6 +337,26 @@ func (m *mergedManager) LoadConfigEffective(explicitPath string) error {
 		return m.primary.LoadConfig(explicitPath)
 	}
 	return m.secondary.LoadConfig(explicitPath)
+}
+
+// LoadConfigEffectiveFrom 锚定基准目录的分层加载入口（实现 LayeredConfigLoaderFrom）：
+// 优先 primary，primary 不支持该能力时回退 secondary；两者都不支持分层加载时，
+// 把发现链解析成锚定路径再走单文件加载（不做 cwd 回退，避免解析到进程目录）。
+func (m *mergedManager) LoadConfigEffectiveFrom(baseDir string, explicitPath string) error {
+	if loader, ok := m.primary.(LayeredConfigLoaderFrom); ok && loader != nil {
+		return loader.LoadConfigEffectiveFrom(baseDir, explicitPath)
+	}
+	if loader, ok := m.secondary.(LayeredConfigLoaderFrom); ok && loader != nil {
+		return loader.LoadConfigEffectiveFrom(baseDir, explicitPath)
+	}
+	resolution := aiclipaths.ResolveMCPConfigPathDetailedFrom(baseDir, explicitPath)
+	if strings.TrimSpace(resolution.Path) == "" {
+		return config.ErrNoConfigFiles
+	}
+	if m.primary != nil {
+		return m.primary.LoadConfig(resolution.Path)
+	}
+	return m.secondary.LoadConfig(resolution.Path)
 }
 
 // AddLifecycleObserver 订阅两个 manager 的生命周期事件。

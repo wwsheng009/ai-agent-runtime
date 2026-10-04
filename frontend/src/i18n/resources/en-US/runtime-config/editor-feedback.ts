@@ -67,6 +67,8 @@ export const enRuntimeConfigEditorFeedback = {
       "Cleared the global proxy draft; runtime will fall back to environment variables or direct connection.",
     providerCreated: 'Created provider "{{name}}" draft.',
     providerUpdated: 'Updated provider "{{name}}" draft.',
+    providerModelsApplied:
+      'Wrote the model list and capabilities of "{{name}}" into the page draft.',
     relatedProviderGroups: " It is still referenced by {{count}} provider groups.",
     confirmDeleteProvider: 'Delete provider "{{name}}"?{{relatedHint}}',
     providerDeleted: 'Removed provider "{{name}}" from the draft.',

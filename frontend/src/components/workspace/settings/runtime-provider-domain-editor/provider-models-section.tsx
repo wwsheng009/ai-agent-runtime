@@ -1,3 +1,4 @@
+import { type Dispatch, type SetStateAction, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { TFunction } from "i18next";
@@ -12,11 +13,19 @@ import { collectProbeSupportedModels } from "@/api/runtime";
 import {
   canResolveProviderOpsTarget,
   groupProbeResultsByModel,
+  parseSupportedModelsText,
   resolveProbeModels,
   summarizeProbeResults,
 } from "../provider-ops-utils";
 import { type ProviderDraftInput } from "../runtime-provider-domain-form-utils";
 import { SettingsNoticeCard } from "../settings-notice-card";
+
+import {
+  formatProviderModelIDsText,
+  normalizeProviderModelIDs,
+  type ProviderModelDraft,
+} from "./model-capability-draft";
+import { ProviderModelEditor } from "./provider-model-editor";
 
 export type ProviderModelsAction = "auto-import" | "fetch" | "probe" | null;
 
@@ -32,6 +41,7 @@ type ProviderModelsSectionProps = {
   onMergeModels: (modelIDs: string[]) => void;
   onProbeModels: () => void;
   probeResult: ProviderProbeResult | null;
+  setDraft: Dispatch<SetStateAction<ProviderDraftInput>>;
 };
 
 export function ProviderModelsSection({
@@ -46,6 +56,7 @@ export function ProviderModelsSection({
   onMergeModels,
   onProbeModels,
   probeResult,
+  setDraft,
 }: ProviderModelsSectionProps) {
   const { t } = useTranslation("runtimeConfig");
   const probeSummary = summarizeProbeResults(probeResult);
@@ -59,6 +70,27 @@ export function ProviderModelsSection({
     baseUrl: draft.baseUrl,
     providerName: editingProviderName,
   });
+  // 模型列表 = supported_models ∪ default_model（与 micro web client 一致），
+  // 默认模型在列表里固定展示，保证它也能逐模型配置能力。
+  const modelIDs = useMemo(
+    () =>
+      normalizeProviderModelIDs([
+        ...parseSupportedModelsText(draft.supportedModelsText),
+        draft.defaultModel,
+      ]),
+    [draft.supportedModelsText, draft.defaultModel],
+  );
+
+  function handleModelEditorChange(next: {
+    drafts: Record<string, ProviderModelDraft>;
+    models: string[];
+  }) {
+    setDraft((current) => ({
+      ...current,
+      supportedModelsText: formatProviderModelIDsText(next.models),
+      modelCapabilityDrafts: next.drafts,
+    }));
+  }
 
   return (
     <div className="rounded-card border border-border bg-surface-softer p-3">
@@ -109,6 +141,16 @@ export function ProviderModelsSection({
         {editingProviderName
           ? t("editor.providers.models.savedHint", { name: editingProviderName })
           : t("editor.providers.models.draftHint")}
+      </div>
+
+      <div className="mt-3">
+        <ProviderModelEditor
+          defaultModel={draft.defaultModel.trim()}
+          disabled={disabled}
+          drafts={draft.modelCapabilityDrafts}
+          models={modelIDs}
+          onChange={handleModelEditorChange}
+        />
       </div>
 
       {assumedModelIDs.length > 0 ? (

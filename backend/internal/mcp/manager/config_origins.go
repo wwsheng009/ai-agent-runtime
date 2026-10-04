@@ -31,3 +31,13 @@ type LayeredConfigLoader interface {
 	// 约定路径时退化为精确加载该文件。
 	LoadConfigEffective(explicitPath string) error
 }
+
+// LayeredConfigLoaderFrom 暴露「锚定基准目录的分层加载」入口（可选能力）。
+//
+// 会话/工作区级 manager 用它按 workspace 目录解析 local/project/upward 候选；
+// 未实现该能力的实现按普通 LayeredConfigLoader / 单文件加载处理。
+type LayeredConfigLoaderFrom interface {
+	// LoadConfigEffectiveFrom 按 MCP 配置发现链分层加载，链路锚定 baseDir
+	// （空串 = 进程 cwd）；explicitPath 语义与 LoadConfigEffective 相同。
+	LoadConfigEffectiveFrom(baseDir string, explicitPath string) error
+}

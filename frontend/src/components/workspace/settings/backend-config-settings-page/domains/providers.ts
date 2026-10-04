@@ -41,6 +41,48 @@ export function createProvidersDomain(core: ConfigEditorCore) {
     setStatusMessage(t("editor.messages.providerUpdated", { name }));
   }
 
+  /**
+   * 「模型配置」Tab 的覆盖写入口：把模型列表（supported_models）与逐模型能力
+   * 草稿（model_capabilities）合并回当前 provider 节点；能力为空时移除节点，
+   * 避免留下空 `model_capabilities: {}`。
+   */
+  function handleApplyProviderModels(
+    name: string,
+    fields: {
+      model_capabilities: Record<string, unknown>;
+      supported_models: string[];
+    },
+  ) {
+    setDraftParsed((current: unknown) => {
+      const provider = getRuntimeProviderRecord(current, name);
+      if (!provider) {
+        return current;
+      }
+      const nextProvider: Record<string, unknown> = {
+        ...provider,
+        supported_models: fields.supported_models,
+      };
+      if (Object.keys(fields.model_capabilities).length > 0) {
+        nextProvider.model_capabilities = fields.model_capabilities;
+      }
+      const nextValue = setConfigValueAtPath(
+        current,
+        ["providers", "items", name],
+        nextProvider,
+      );
+      return Object.keys(fields.model_capabilities).length > 0
+        ? nextValue
+        : removeConfigValueAtPath(nextValue, [
+            "providers",
+            "items",
+            name,
+            "model_capabilities",
+          ]);
+    });
+    setError(null);
+    setStatusMessage(t("editor.messages.providerModelsApplied", { name }));
+  }
+
   function handleSaveProvider(
     draft: ProviderDraftInput,
     previousName: string | null,
@@ -136,6 +178,7 @@ export function createProvidersDomain(core: ConfigEditorCore) {
   return {
     handleSetDefaultProvider,
     handleApplyProviderAccountFields,
+    handleApplyProviderModels,
     handleSaveProvider,
     handleDeleteProvider,
   };

@@ -26,6 +26,7 @@ export const enWorkspacePanelsGit = {
     clearCommit: "Back to working tree",
   },
   views: {
+    ariaLabel: "Git view switcher",
     changes: "Changes",
     commits: "Commits",
   },

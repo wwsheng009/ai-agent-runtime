@@ -539,6 +539,9 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 		// /lsp 命令族需要会话级工具管理器读取 LSP 池（状态/诊断/手动重启）。
 		session.ChatToolManager = toolManager
 		for _, desc := range toolDescs {
+			if sessionMCPOverrideDisabled(session, mcpNameFromDescriptor(desc)) {
+				continue
+			}
 			session.FunctionCatalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(toolManager, desc), desc)
 		}
 		markChatStartup("tools_register")
@@ -556,6 +559,8 @@ func attachChatCapabilities(cfg *config.Config, opts *chatCommandOptions, sessio
 			// 建连期间已经就绪的工具在这里补登记；迟到的工具在首个 prompt 边界
 			// 由 acpSessionMCP.prepareForPrompt 增量登记。
 			refresher.registered = registeredMCPToolNames(toolDescs)
+			// 会话级覆盖（--session 停用）在增量登记路径同样生效。
+			refresher.skipMCP = func(name string) bool { return sessionMCPOverrideDisabled(session, name) }
 			// 目录变化后必须让本会话的稳定工具面失效，否则新工具进不了模型
 			// 工具面（既有失效通道只覆盖 chatWebSession）。
 			refresher.invalidateSurface = func() int { return invalidateACPSessionToolSurface(session) }
@@ -1162,6 +1167,7 @@ func finalizeChatSessionWithError(session *ChatSession, terminalErr error) {
 		return
 	}
 
+	closeSessionScopedMCP(session)
 	awaitNoInteractiveLocalTeamDrain(session)
 	// 会话关闭：本会话的待投递 wake 义务随之作废（证据仍在 notification/job store，
 	// 由 resume 后首个自然 turn 的 preflight digest 呈现），避免恢复后再补投一轮

@@ -61,6 +61,11 @@ func HandleChatWebAPIMCPs(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		payload["summary"] = mcpadmin.Summarize(items)
+		// 会话级覆盖（/mcp --session 与 MCP 页签「本会话」按钮）随列表返回，
+		// 客户端据此渲染「本会话已停用 / 临时启用」标记。
+		if sessionScope := chatWebMCPSessionPayload(chatWebSession()); sessionScope != nil {
+			payload["session"] = sessionScope
+		}
 		writeWebAPIJSON(w, http.StatusOK, payload)
 	case http.MethodPost:
 		service, err := chatWebMCPAdminServiceFn()
@@ -221,6 +226,12 @@ func HandleChatWebAPIMCP(w http.ResponseWriter, r *http.Request) {
 			writeWebAPIJSON(w, http.StatusNotFound, webMCPErrorBody("mcp_not_found", "unknown MCP action: "+segments[1]))
 			return
 		}
+		// 会话级启停（?scope=session / body {"session":true}）：不写配置文件，
+		// 只影响当前 chat/web 会话工具面（与 TUI `/mcp ... --session` 同一实现）。
+		if webMCPRequestSessionScoped(r) {
+			writeWebMCPSessionToggle(w, name, enabled)
+			return
+		}
 		service, err := chatWebMCPAdminServiceFn()
 		if err != nil {
 			writeWebAPIJSON(w, http.StatusServiceUnavailable, webMCPErrorBody("mcp_unavailable", err.Error()))
@@ -252,7 +263,11 @@ func HandleChatWebAPIMCP(w http.ResponseWriter, r *http.Request) {
 			writeWebAPIJSON(w, http.StatusNotFound, webMCPErrorBody("mcp_not_found", err.Error()))
 			return
 		}
-		writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{"config": mcpCfg})
+		body := map[string]interface{}{"config": mcpCfg}
+		if state := chatWebMCPSessionState(chatWebSession(), name); state != "" {
+			body["session_state"] = state
+		}
+		writeWebAPIJSON(w, http.StatusOK, body)
 	case http.MethodPut:
 		request, err := decodeWebMCPUpsertRequest(r)
 		if err != nil {
@@ -317,10 +332,17 @@ func chatWebMCPAdminService() (mcpadmin.AdminService, error) {
 	return mcpadmin.NewService(configPath, options...), nil
 }
 
-// refreshChatWebMCPTools 把（重连后的）MCP 工具重新注册进当前会话的 FunctionCatalog。
+// refreshChatWebMCPTools 把（重连后的）MCP 工具重新注册进当前会话的 FunctionCatalog，
+// 并应用会话级覆盖（--session 停用的 server 不登记/被撤销；临时连接的迟到工具补登记）。
 func refreshChatWebMCPTools() {
 	session := chatWebSession()
-	if session == nil || session.FunctionCatalog == nil || MCPManagerInstance == nil {
+	if session == nil || session.FunctionCatalog == nil {
+		return
+	}
+	// 会话级覆盖先行：临时连接工具登记 + 被停用 server 的函数撤销。
+	// 即使进程级 manager 缺失（MCP 全关）也要执行——临时连接可能仍活跃。
+	refreshSessionScopedMCP(session)
+	if MCPManagerInstance == nil {
 		return
 	}
 	toolManager := runtimetools.NewDefaultManagerWithRuntimeConfig(
@@ -328,10 +350,114 @@ func refreshChatWebMCPTools() {
 		loadRuntimeToolConfig(agentconfig.GetGlobalConfig(), session),
 	)
 	for _, desc := range toolManager.ListTools() {
+		if sessionMCPOverrideDisabled(session, mcpNameFromDescriptor(desc)) {
+			continue
+		}
 		session.FunctionCatalog.RegisterBuiltinToolFunction(functions.NewRuntimeToolFunction(toolManager, desc), desc)
 	}
 	// 管理面变更（热重载/服务启停/工具启停）后让活跃会话在下个 turn 重建工具面。
 	invalidateChatSessionToolSurfaces()
+}
+
+// chatWebMCPSessionState 返回单个 server 的会话级状态："disabled" / "temp" / ""。
+func chatWebMCPSessionState(session *ChatSession, name string) string {
+	if session == nil {
+		return ""
+	}
+	if temp := session.mcpSessionTemp; temp != nil && temp.hasServer(name) {
+		return "temp"
+	}
+	if sessionMCPOverrideDisabled(session, name) {
+		return "disabled"
+	}
+	return ""
+}
+
+// chatWebMCPSessionPayload 渲染列表端点的会话级覆盖块；无覆盖时返回 nil（字段缺席）。
+func chatWebMCPSessionPayload(session *ChatSession) map[string]interface{} {
+	if session == nil {
+		return nil
+	}
+	disabled := make([]string, 0, len(session.MCPSessionOverrides))
+	for name, enabled := range session.MCPSessionOverrides {
+		if !enabled {
+			disabled = append(disabled, name)
+		}
+	}
+	temp := make([]string, 0, 1)
+	if session.mcpSessionTemp != nil {
+		for name := range session.mcpSessionTemp.servers {
+			temp = append(temp, name)
+		}
+	}
+	if len(disabled) == 0 && len(temp) == 0 {
+		return nil
+	}
+	sort.Strings(disabled)
+	sort.Strings(temp)
+	return map[string]interface{}{
+		"disabled": disabled,
+		"temp":     temp,
+	}
+}
+
+// webMCPRequestSessionScoped 解析会话级开关：?scope=session / ?session=1，
+// 或 JSON body {"session":true} / {"scope":"session"}。空 body 视为非会话级。
+func webMCPRequestSessionScoped(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	query := r.URL.Query()
+	for _, key := range []string{"scope", "session"} {
+		switch strings.ToLower(strings.TrimSpace(query.Get(key))) {
+		case "session", "1", "true", "yes":
+			return true
+		}
+	}
+	if r.Body == nil {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	if err != nil || len(strings.TrimSpace(string(raw))) == 0 {
+		return false
+	}
+	var payload struct {
+		Session *bool  `json:"session"`
+		Scope   string `json:"scope"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false
+	}
+	if payload.Session != nil {
+		return *payload.Session
+	}
+	return strings.EqualFold(strings.TrimSpace(payload.Scope), "session")
+}
+
+// writeWebMCPSessionToggle 执行会话级启停（不写配置文件；全局停用时临时连接），
+// 返回 scope/session_state 与人类可读回执，错误按 400 返回。
+func writeWebMCPSessionToggle(w http.ResponseWriter, name string, enabled bool) {
+	session := chatWebSession()
+	if session == nil {
+		writeWebAPIJSON(w, http.StatusServiceUnavailable, webMCPErrorBody("mcp_session_unavailable", "no active chat session"))
+		return
+	}
+	text, mutated := chatMCPSessionToggleText(session, name, enabled)
+	if strings.HasPrefix(strings.TrimSpace(text), "错误:") {
+		writeWebAPIJSON(w, http.StatusBadRequest, webMCPErrorBody("mcp_session_toggle_failed", text))
+		return
+	}
+	if mutated {
+		// web 会话的工具注册/失效通道（与 TUI refreshChatMCPTools 等价）。
+		refreshChatWebMCPTools()
+	}
+	writeWebAPIJSON(w, http.StatusOK, map[string]interface{}{
+		"name":          name,
+		"enabled":       enabled,
+		"scope":         "session",
+		"session_state": chatWebMCPSessionState(session, name),
+		"message":       text,
+	})
 }
 
 func decodeWebMCPUpsertRequest(r *http.Request) (mcpadmin.UpsertRequest, error) {

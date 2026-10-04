@@ -82,10 +82,10 @@ export function useProviderModelsActions({
       const fetched = normalizeProviderModelIDs(result.model_ids);
       setAssumedModelIDs(assumed);
       setProbeResult(null);
-      // 能力声明的合并基线取 updater 里的最新草稿：避免用闭包里的旧 extraJson
+      // 能力声明的合并基线取 updater 里的最新模型草稿：避免用闭包里的旧值
       // 覆盖用户在这次请求期间的编辑。
       setDraft((current) => {
-        const patch = providerModelsPatch(result, current.extraJson);
+        const patch = providerModelsPatch(result, current.modelCapabilityDrafts);
         return patch ? { ...current, ...patch } : current;
       });
       const warnings = modelsWarningsSuffix(result.warnings);
@@ -127,7 +127,10 @@ export function useProviderModelsActions({
       });
       setDraft((current) => ({
         ...current,
-        ...providerAutoImportPatch(result, current.extraJson),
+        ...providerAutoImportPatch(result, {
+          extraJson: current.extraJson,
+          modelCapabilityDrafts: current.modelCapabilityDrafts,
+        }),
       }));
       const imported = normalizeProviderModelIDs(result.supported_models);
       setAssumedModelIDs(imported);

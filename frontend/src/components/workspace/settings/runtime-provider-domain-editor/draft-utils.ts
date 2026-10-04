@@ -7,6 +7,7 @@ import {
 } from "../runtime-provider-config-utils";
 import { type ProviderDraftInput } from "../runtime-provider-domain-form-utils";
 import { readRuntimeProxyConfig } from "../runtime-proxy-domain-utils";
+import { providerModelDraftsFromRecord } from "./model-capability-draft";
 
 export function providerSearchText(provider: RuntimeProviderSummary): string {
   return [
@@ -40,6 +41,7 @@ export const KNOWN_PROVIDER_KEYS = new Set([
   "timeout",
   "headers",
   "model_mappings",
+  "model_capabilities",
   "proxy",
   "site_type",
   "site_type_confidence",
@@ -92,6 +94,7 @@ export function createProviderDraftInput(
       proxyHttps: "",
       proxyNoProxy: "",
       headersJson: JSON.stringify(defaults.headers ?? {}, null, 2),
+      modelCapabilityDrafts: {},
       modelMappingsJson: JSON.stringify(defaults.model_mappings ?? {}, null, 2),
       extraJson: "{}",
       setAsDefault: defaultProvider === "",
@@ -132,6 +135,9 @@ export function createProviderDraftInput(
       isConfigRecord(provider.raw.headers) ? provider.raw.headers : {},
       null,
       2,
+    ),
+    modelCapabilityDrafts: providerModelDraftsFromRecord(
+      provider.raw.model_capabilities,
     ),
     modelMappingsJson: JSON.stringify(
       isConfigRecord(provider.raw.model_mappings) ? provider.raw.model_mappings : {},

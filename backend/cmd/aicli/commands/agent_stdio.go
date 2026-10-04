@@ -447,6 +447,8 @@ func (h *acpSessionHost) Prompt(ctx context.Context, req acp.PromptRequest, emit
 	if chat.ACPMCPSession != nil {
 		chat.ACPMCPSession.prepareForPrompt(promptCtx)
 	}
+	// 同一 turn 边界：补登记会话级临时连接的迟到 MCP 工具（--session）。
+	refreshSessionScopedMCP(chat)
 	// 同一个 turn 边界：登记启动期项目扫描完成后迟到的 LSP 工具。
 	prepareLateLSPToolSurface(chat)
 
@@ -946,6 +948,10 @@ func (h *acpSessionHost) closeSessionLocked(s *acpHostSession) {
 	// 保证客户端下发的 server 子进程不会泄漏到会话生命周期之外。
 	if s.chat != nil && s.chat.ACPMCPSession != nil {
 		s.chat.ACPMCPSession.close()
+	}
+	// 回收「仅本会话」的临时 MCP 连接（--session 启用的全局停用 server）。
+	if s.chat != nil {
+		closeSessionScopedMCP(s.chat)
 	}
 	// 归还知识层引用：引用归零才真正关 store。mode=off / 未接入时为 no-op。
 	// 句柄同时挂在 chat.Knowledge 上时，finalizeChatSession 已按 ChatSession

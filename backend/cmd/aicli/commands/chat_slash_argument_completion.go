@@ -216,15 +216,9 @@ func (p *chatSlashArgumentCompletionProvider) CompleteSlashArgs(session *ChatSes
 	case "/skills":
 		return completeSkillsMenuArgs(session, argsText, cursor)
 	case "/mcp":
-		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
-			{Command: "list", Summary: "列出全部 MCP 与连接状态", Group: string(chatSlashCommandGroupFunctions)},
-			{Command: "status", Summary: "查看单个 MCP 的配置与运行状态", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
-			{Command: "add", Summary: "新增 MCP（<name> <url> 或 --command <cmd>）", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
-			{Command: "enable", Summary: "启用并热重载", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
-			{Command: "disable", Summary: "停用并热重载", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
-			{Command: "remove", Summary: "删除并热重载", Group: string(chatSlashCommandGroupFunctions), AcceptsArgs: true},
-			{Command: "reload", Summary: "重新加载配置并重连", Group: string(chatSlashCommandGroupFunctions)},
-		})
+		// 逐位补全：二级子命令 → server 名（status/enable/disable/remove/auth 等）
+		// → auth 旗标，见 chat_mcp_completion.go。
+		return completeMCPLineSlashArgs(argsText, cursor)
 	case "/web":
 		return completeStaticSlashArgs(argsText, cursor, []chatSlashCompletionCandidate{
 			{Command: "status", Summary: "显示 Web 服务器状态", Group: string(chatSlashCommandGroupWeb)},

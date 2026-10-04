@@ -242,6 +242,80 @@ func (c *aicliFunctionCatalog) PruneSkillFunctionsExcept(keep map[string]struct{
 	return removed
 }
 
+// RemoveFunction 从 catalog 与 registry 撤销单个函数（运行时热操作，
+// 例如会话级 MCP 停用后撤销该 server 已注册的工具，避免假开关）。
+func (c *aicliFunctionCatalog) RemoveFunction(name string) bool {
+	if c == nil {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	if _, exists := c.entries[name]; !exists {
+		return false
+	}
+	delete(c.entries, name)
+	if c.registry != nil {
+		c.registry.Unregister(name)
+	}
+	if len(c.entryOrder) > 0 {
+		kept := c.entryOrder[:0]
+		for _, item := range c.entryOrder {
+			if item != name {
+				kept = append(kept, item)
+			}
+		}
+		c.entryOrder = kept
+	}
+	return true
+}
+
+// filterSessionHiddenMCPFunctions 按会话级 MCP 覆盖过滤选择结果：被本会话
+// 停用的 server 的 MCP 函数不得进入模型工具面（与注册期撤销构成双保险）。
+func (c *aicliFunctionCatalog) filterSessionHiddenMCPFunctions(session *ChatSession, selection *aicliFunctionSelection) *aicliFunctionSelection {
+	if c == nil || selection == nil || session == nil || len(session.MCPSessionOverrides) == 0 {
+		return selection
+	}
+	hidden := func(name string) bool {
+		entry := c.entries[name]
+		if entry == nil || entry.fn == nil {
+			return false
+		}
+		server := mcpFunctionServer(entry.fn)
+		if server == "" {
+			return false
+		}
+		return sessionMCPOverrideDisabled(session, server)
+	}
+	filtered := &aicliFunctionSelection{Mode: selection.Mode, IncludeBuiltin: selection.IncludeBuiltin}
+	for _, name := range selection.BuiltinFunctions {
+		if hidden(name) {
+			continue
+		}
+		filtered.BuiltinFunctions = append(filtered.BuiltinFunctions, name)
+	}
+	for _, name := range selection.SkillFunctions {
+		if hidden(name) {
+			continue
+		}
+		filtered.SkillFunctions = append(filtered.SkillFunctions, name)
+	}
+	for _, name := range selection.FinalFunctionNames {
+		if hidden(name) {
+			continue
+		}
+		filtered.FinalFunctionNames = append(filtered.FinalFunctionNames, name)
+	}
+	for _, schema := range selection.Schemas {
+		if name, _ := schema["name"].(string); name != "" && hidden(name) {
+			continue
+		}
+		filtered.Schemas = append(filtered.Schemas, schema)
+	}
+	return filtered
+}
+
 func (c *aicliFunctionCatalog) syncFromRegistry() {
 	if c == nil || c.registry == nil {
 		return
@@ -357,6 +431,7 @@ func (c *aicliFunctionCatalog) SelectRequestFunctions(session *ChatSession, prom
 	// P3：交互式请求面收敛文本类 skill 函数（mention 注入路径接管其正文）。
 	// 图片工具判定在前，保证既有图片暴露/抑制组合语义不变。
 	selection = c.filterMentionHiddenTextSkillFunctions(session, selection)
+	selection = c.filterSessionHiddenMCPFunctions(session, selection)
 	return c.ensureInvariantGoalFunctionsSelected(selection), exposureDetails
 }
 
@@ -409,6 +484,7 @@ func (c *aicliFunctionCatalog) SelectStableSessionFunctions(session *ChatSession
 		selection.Schemas = append(selection.Schemas, cloneFunctionSchema(entry.schema))
 	}
 	selection = filterStableImageGenerationToolExposure(session, selection)
+	selection = c.filterSessionHiddenMCPFunctions(session, selection)
 	return c.normalizeFunctionSelection(c.ensureInvariantGoalFunctionsSelected(selection))
 }
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/functions"
 	config "github.com/wwsheng009/ai-agent-runtime/internal/agentconfig"
+	"github.com/wwsheng009/ai-agent-runtime/internal/aiclipaths"
 	"github.com/wwsheng009/ai-agent-runtime/internal/foldertrust"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/manager"
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/protocol"
@@ -23,6 +24,9 @@ var (
 	// mcpManagerSelectionKey 记录当前实例生效的 profile 服务器选择指纹，
 	// 选择变化时必须重建管理器，避免复用未过滤的旧实例。
 	mcpManagerSelectionKey string
+	// mcpManagerLayerBase 记录当前实例分层加载的锚点（会话工作目录；空串 = 进程 cwd）。
+	// 锚点变化同样必须重建管理器，避免"切换会话后仍用上一个工作区的配置链"。
+	mcpManagerLayerBase string
 )
 
 // initMCPManager 初始化 MCP 管理器
@@ -51,16 +55,26 @@ func initMCPManagerWithSelection(configPath string, selection runtimeprofileinpu
 // initMCPManagerWithSelectionOverride 在 initMCPManagerWithSelection 之上接收
 // 「显式覆盖值」：为空时按发现链分层合并加载（用户级基础 + 项目级增量）。
 func initMCPManagerWithSelectionOverride(configPath, explicitOverride string, selection runtimeprofileinput.ResolvedMCPSelection, async bool) error {
+	return initMCPManagerWithSelectionFrom(configPath, explicitOverride, "", selection, async)
+}
+
+// initMCPManagerWithSelectionFrom 同上，并接受分层加载锚点 baseDir（空串 = 进程 cwd）。
+//
+// 会话绑定工作目录时必须传入该目录：configPath 决定 profile 快照与信任门控，
+// baseDir 决定 local/project/upward 候选（与 runtime-server 会话工作区同一内核）。
+func initMCPManagerWithSelectionFrom(configPath, explicitOverride, baseDir string, selection runtimeprofileinput.ResolvedMCPSelection, async bool) error {
 	configPath = strings.TrimSpace(configPath)
+	baseDir = strings.TrimSpace(baseDir)
 	selectionKey := mcpSelectionKey(selection)
 	if MCPManagerInstance != nil {
-		if configPath == "" || (configPath == mcpManagerConfigPath && selectionKey == mcpManagerSelectionKey) {
+		if configPath == "" || (configPath == mcpManagerConfigPath && selectionKey == mcpManagerSelectionKey && baseDir == mcpManagerLayerBase) {
 			return nil
 		}
 		_ = MCPManagerInstance.Stop()
 		MCPManagerInstance = nil
 		mcpManagerConfigPath = ""
 		mcpManagerSelectionKey = ""
+		mcpManagerLayerBase = ""
 	}
 	if MCPManagerInstance != nil {
 		return nil
@@ -77,9 +91,10 @@ func initMCPManagerWithSelectionOverride(configPath, explicitOverride string, se
 	MCPManagerInstance = manager.NewManager()
 	mcpManagerConfigPath = configPath
 	mcpManagerSelectionKey = selectionKey
+	mcpManagerLayerBase = baseDir
 
 	// 加载配置
-	if err := loadMCPConfigForSelection(MCPManagerInstance, configPath, explicitOverride, selection); err != nil {
+	if err := loadMCPConfigForSelectionFrom(MCPManagerInstance, configPath, explicitOverride, baseDir, selection); err != nil {
 		return err
 	}
 
@@ -96,7 +111,22 @@ func initMCPManagerWithSelectionOverride(configPath, explicitOverride string, se
 // loadMCPConfigForSelection 加载 MCP 配置：无 profile 选择时走分层合并加载；
 // 有选择时改为「读文件 → 过滤服务器 → 内存快照」路径。
 func loadMCPConfigForSelection(mgr manager.Manager, configPath, explicitOverride string, selection runtimeprofileinput.ResolvedMCPSelection) error {
+	return loadMCPConfigForSelectionFrom(mgr, configPath, explicitOverride, "", selection)
+}
+
+// loadMCPConfigForSelectionFrom 同上；baseDir 非空且 manager 支持锚定分层加载时，
+// 发现链以 baseDir 为锚点（会话工作区），不再落到进程 cwd。
+func loadMCPConfigForSelectionFrom(mgr manager.Manager, configPath, explicitOverride, baseDir string, selection runtimeprofileinput.ResolvedMCPSelection) error {
 	if mcpSelectionKey(selection) == "" {
+		if strings.TrimSpace(baseDir) != "" {
+			if loader, ok := mgr.(manager.LayeredConfigLoaderFrom); ok && loader != nil {
+				if err := loader.LoadConfigEffectiveFrom(baseDir, explicitOverride); err != nil {
+					return fmt.Errorf("加载 MCP 配置失败: %w", err)
+				}
+				emitMCPConfigWarnings(mgr)
+				return nil
+			}
+		}
 		loader, ok := mgr.(manager.LayeredConfigLoader)
 		if !ok || loader == nil {
 			// 兼容实现（Win7 禁用等）：没有分层能力时保持单文件加载语义。
@@ -207,6 +237,18 @@ func resolveChatMCPConfigPath(cfg *config.Config, session *ChatSession) string {
 	if session != nil && strings.TrimSpace(session.MCPConfigPath) != "" {
 		return strings.TrimSpace(session.MCPConfigPath)
 	}
+	// 会话绑定工作目录时以该目录为锚点（与 runtime-server 会话工作区同一内核
+	// aiclipaths.ResolveMCPConfigPathDetailedFrom）：local/project/upward 候选
+	// 随会话工作区变化；未绑定工作区时保持进程 cwd 的既有语义。
+	if workspace := chatSessionWorkspaceDir(session); workspace != "" {
+		explicit := ""
+		if cfg != nil {
+			explicit = config.EffectiveAICLIMCPConfigFile(cfg)
+		}
+		if resolved := aiclipaths.ResolveMCPConfigPathDetailedFrom(workspace, explicit).Path; resolved != "" {
+			return resolved
+		}
+	}
 	// 与 CLI（aicli mcp *）和 runtime-server 共用同一优先级解析：
 	// ./.aicli/mcp.yaml > ~/.aicli/mcp.yaml > 显式覆盖 > 向上搜索 > configs/mcp.yaml。
 	// 直接返回 cfg 里的字面值会让 chat 会话加载 configs/mcp.yaml，而管理面/服务端
@@ -215,6 +257,22 @@ func resolveChatMCPConfigPath(cfg *config.Config, session *ChatSession) string {
 		return resolved
 	}
 	return findMCPConfigPath()
+}
+
+// chatSessionWorkspaceDir 返回会话绑定的工作目录（FolderTrust.ProjectRoot，与
+// folder-trust/项目级配置同一来源）；空串表示未绑定，调用方保持进程 cwd 语义。
+func chatSessionWorkspaceDir(session *ChatSession) string {
+	if session == nil {
+		return ""
+	}
+	workspace := strings.TrimSpace(session.FolderTrust.ProjectRoot)
+	if workspace == "" {
+		return ""
+	}
+	if absolute, err := filepath.Abs(workspace); err == nil {
+		return absolute
+	}
+	return workspace
 }
 
 func resolveChatMCPStartupConfigPath(cfg *config.Config, session *ChatSession) (string, bool) {
@@ -263,12 +321,15 @@ func prepareChatMCPManager(cfg *config.Config, session *ChatSession) error {
 	if session != nil {
 		selection = session.ProfileMCPSelection
 	}
-	return initMCPManagerWithSelectionOverride(configPath, resolveChatMCPConfigOverride(cfg, session), selection, true)
+	return initMCPManagerWithSelectionFrom(configPath, resolveChatMCPConfigOverride(cfg, session), chatSessionWorkspaceDir(session), selection, true)
 }
 
-// registerMCPTools 注册 MCP 工具到 FunctionRegistry
-func registerMCPTools(registry *functions.FunctionRegistry) error {
-	if MCPManagerInstance == nil {
+// registerMCPTools 注册 MCP 工具到 FunctionRegistry。
+//
+// session 非 nil 时跳过「仅本会话停用」的 server：会话级覆盖只影响本会话
+// 工具面，不动全局连接与配置（见 chat_mcp_session_scope.go）。
+func registerMCPTools(registry *functions.FunctionRegistry, session *ChatSession) error {
+	if MCPManagerInstance == nil || registry == nil {
 		return nil
 	}
 
@@ -277,6 +338,9 @@ func registerMCPTools(registry *functions.FunctionRegistry) error {
 
 	for _, info := range tools {
 		if !info.Enabled {
+			continue
+		}
+		if sessionMCPOverrideDisabled(session, info.MCPName) {
 			continue
 		}
 
@@ -392,6 +456,7 @@ func StopMCPManager() error {
 	err := MCPManagerInstance.Stop()
 	MCPManagerInstance = nil
 	mcpManagerConfigPath = ""
+	mcpManagerLayerBase = ""
 	return err
 }
 

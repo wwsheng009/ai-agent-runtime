@@ -12,6 +12,28 @@ export const enRuntimeConfigMcp = {
     connected: "{{count}} connected",
     tools: "{{count}} tools",
   },
+  diagnostics: {
+    title: "Config source",
+    effectivePath: "Effective file",
+    source: "Source",
+    managerLoaded: "Loaded",
+    managerMissing: "Not loaded",
+    candidates: "Candidates (highest priority first)",
+    exists: "exists",
+    missing: "missing",
+    summary:
+      "{{total}} total · {{enabled}} enabled · {{connected}} connected · {{tools}} tools",
+    sources: {
+      explicit: "Explicit override",
+      local: "Project-local",
+      project: "Project",
+      user: "User",
+      upward: "Upward search",
+      executable: "Executable dir",
+      "user-fallback": "User fallback",
+      default: "Default",
+    },
+  },
   fields: {
     name: "Name",
     type: "Type",

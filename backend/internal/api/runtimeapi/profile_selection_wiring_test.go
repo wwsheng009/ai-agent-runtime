@@ -142,7 +142,7 @@ func TestResolveProfileMCPAdapter_AppliesServerSelection(t *testing.T) {
 	sharedAdapter := runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimeConfig))
 	handler := &Handler{profileGlobalMCPPath: configPath, mcpManager: sharedAdapter}
 
-	adapter, manager, err := handler.resolveProfileMCPAdapter(context.Background(), &profilesys.ResolvedAgent{MCPConfig: configPath}, runtimeConfig)
+	adapter, manager, err := handler.resolveProfileMCPAdapter(context.Background(), &profilesys.ResolvedAgent{MCPConfig: configPath}, runtimeConfig, handler.profileGlobalMCPPath, handler.mcpManager)
 	if err != nil {
 		t.Fatalf("resolveProfileMCPAdapter: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestResolveProfileMCPAdapter_AppliesServerSelection(t *testing.T) {
 		ProfileName:  "demo",
 		MCPConfig:    configPath,
 		MCPSelection: profilesys.ResolvedMCPSelection{UseServers: []string{"filesystem"}},
-	}, runtimeConfig)
+	}, runtimeConfig, handler.profileGlobalMCPPath, handler.mcpManager)
 	if err != nil {
 		t.Fatalf("resolveProfileMCPAdapter (selection): %v", err)
 	}

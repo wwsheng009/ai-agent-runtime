@@ -27,7 +27,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type {
+  RuntimeMcpConfigDiagnostics,
   RuntimeMcpEntry,
+  RuntimeMcpListSummary,
   RuntimeMcpUpsertResponse,
 } from "@/types/runtime";
 
@@ -43,6 +45,7 @@ import {
   type McpDraft,
   type McpValidationError,
 } from "./mcp-form";
+import { McpDiagnosticsCard } from "./mcp-diagnostics-card";
 import { McpToolsDialog } from "./mcp-tools-dialog";
 
 const VALIDATION_MESSAGE_KEYS = {
@@ -101,6 +104,10 @@ function mcpEndpoint(entry: RuntimeMcpEntry) {
 export function McpModeSection() {
   const { t } = useTranslation("runtimeConfig");
   const [entries, setEntries] = useState<RuntimeMcpEntry[]>([]);
+  /** 解析诊断：生效文件 + 候选存在性（解释"为什么某个 server 没加载"）。 */
+  const [diagnostics, setDiagnostics] =
+    useState<RuntimeMcpConfigDiagnostics | null>(null);
+  const [summary, setSummary] = useState<RuntimeMcpListSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -118,6 +125,8 @@ export function McpModeSection() {
     try {
       const result = await listRuntimeMcps();
       setEntries(result.mcps);
+      setDiagnostics(result.config ?? null);
+      setSummary(result.summary ?? null);
     } catch (loadError) {
       setError(formatError(loadError, t("mcp.messages.loadFailed")));
     } finally {
@@ -238,6 +247,8 @@ export function McpModeSection() {
       await reloadRuntimeMcps();
       const result = await listRuntimeMcps();
       setEntries(result.mcps);
+      setDiagnostics(result.config ?? null);
+      setSummary(result.summary ?? null);
       setStatusMessage(t("mcp.messages.reloadSuccess"));
     } catch (reloadError) {
       setError(formatError(reloadError, t("mcp.messages.operationFailed")));
@@ -309,6 +320,10 @@ export function McpModeSection() {
           </div>
         </div>
       </div>
+
+      {diagnostics?.path ? (
+        <McpDiagnosticsCard diagnostics={diagnostics} summary={summary} />
+      ) : null}
 
       {statusMessage ? (
         <SettingsNoticeCard className="mt-0" tone="neutral">

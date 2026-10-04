@@ -11,8 +11,6 @@ export const enRuntimeConfigEditorProviders = {
     create: "New provider",
     createTitle: "New Provider",
     editTitle: "Edit Provider: {{name}}",
-    dialogDescription:
-      "Edit primary fields in the form. Use JSON inputs for `headers`, `model_mappings`, and other extension fields so dedicated config is not lost.",
     saveNote: "After saving, preview the diff before writing back to `config.yaml`.",
     saveButton: "Save provider",
     summary: {
@@ -50,6 +48,18 @@ export const enRuntimeConfigEditorProviders = {
       edit: "Edit {{name}}",
       delete: "Delete {{name}}",
     },
+    pageTabs: {
+      aria: "Provider config views",
+      list: "Providers",
+      models: "Models",
+    },
+    dialogTabs: {
+      aria: "Provider editor sections",
+      basic: "Basics",
+      connection: "Connection & credentials",
+      models: "Models",
+      advanced: "Advanced",
+    },
     fields: {
       name: "Name",
       nameDescription: "Unique provider id used for routing and default selection.",
@@ -75,10 +85,22 @@ export const enRuntimeConfigEditorProviders = {
       supportTypesDescription: "Protocol type list; newlines or commas are allowed.",
       apiKey: "API key",
       apiKeyDescription: "Supports environment variable templates or proxy injection placeholders.",
-      headersJson: "Headers JSON",
-      headersDescription: "Fixed request header object, for example org id or version headers.",
-      modelMappingsJson: "Model mappings JSON",
-      modelMappingsDescription: "Model mapping object; exact or wildcard keys are supported.",
+      headers: "Fixed headers",
+      headersDescription:
+        "Maintain fixed request headers row by row; rows without a name are not written.",
+      modelMappings: "Model mappings",
+      modelMappingsDescription:
+        "Map requested models to targets row by row; the source supports the * wildcard.",
+      keyValue: {
+        add: "Add row",
+        removeRow: "Remove row {{index}}",
+        headerKeyPlaceholder: "Header name",
+        headerValuePlaceholder: "Header value",
+        headersEmpty: "No fixed request headers yet.",
+        mappingKeyPlaceholder: "Model or *",
+        mappingValuePlaceholder: "Target model",
+        mappingsEmpty: "No model mappings yet.",
+      },
       extraJson: "Extra fields JSON",
       extraJsonDescription:
         "Keep fields that are not covered by dedicated form controls after the structured tree was removed.",
@@ -134,9 +156,9 @@ export const enRuntimeConfigEditorProviders = {
       refreshMessage: "{{name}}: {{balanceLine}}{{persisted}}{{warnings}}",
     },
     models: {
-      title: "Model discovery and probing",
+      title: "Model list and capability config",
       description:
-        "Use runtime provider ops to fetch /models, auto-import a provider draft, or run a minimal completion probe per candidate model. These actions only update this form; saving still uses the existing path.",
+        "Maintain the supported model list manually and configure each model in depth: reasoning, context & output, auto-compact, input modalities, native tools, and replay contracts. Fetch / auto-import / probe actions remain one click away; all edits only touch the current draft.",
       fetch: "Fetch models",
       fetching: "Fetching...",
       autoImport: "Auto import",
@@ -172,6 +194,127 @@ export const enRuntimeConfigEditorProviders = {
       verdictOk: "supported",
       verdictUnsupported: "unsupported",
       verdictUnknown: "unknown",
+      editor: {
+        modelCount: "{{visible}} / {{total}} models",
+        modelCountAll: "{{total}} models",
+        filterPlaceholder: "Filter models…",
+        addPlaceholder:
+          "Enter model IDs; press Enter or click Add (multiple IDs can be pasted)",
+        add: "Add",
+        addDuplicate: "Already in the list, skipped: {{models}}",
+        added: "Added {{models}}",
+        addSkipped: "(skipped: {{models}})",
+        removed: "Removed {{model}}{{configured}}",
+        removedConfigured: " (had configured values)",
+        undo: "Undo",
+        undoMissing: "{{model}} is already in the list",
+        restored: "Restored {{model}}",
+        empty: "Add models first, then configure capabilities per model.",
+        emptyFiltered: "No models match \"{{filter}}\"",
+        selectHint: "Click a model on the left to open its capability panel",
+        defaultBadge: "default",
+        unconfiguredBadge: "unconfigured",
+        pinnedHint:
+          "The default model is pinned in the list; switch the default model before removing it.",
+        removeTitle: "Remove {{model}} from the supported model list",
+        panelHint: "Maps to {{key}}; leaving a field empty removes it from config.",
+        singleModelBadge: "Per-model capability",
+        clearFieldHint:
+          "Empty fields are removed from config.yaml on save; unrecognized hand-written fields are preserved as-is.",
+        chipEfforts: "{{count}} levels",
+        chipDefaultEffort: "default {{effort}}",
+        chipCompact: "compact {{tokens}}",
+        chipRemoteCompact: "remote compact",
+        chipReplayOn: "replay reasoning",
+        chipReplayOff: "block reasoning replay",
+        chipImageGeneration: "image generation",
+        chipImagesApi: "images API",
+        sections: {
+          reasoning: "Reasoning",
+          context: "Context & output",
+          compact: "Auto compact",
+          modalities: "Input modalities",
+          nativeTools: "Native tools",
+        },
+        fields: {
+          reasoningModel: "Reasoning model",
+          reasoningModelHint:
+            "Explicitly mark this model as a reasoning / thinking model; the runtime no longer infers it from effort levels.",
+          reasoningModelToggle: "Treat as a reasoning model",
+          replayReasoningContent: "Reasoning replay contract",
+          replayReasoningContentHint:
+            "Whether the endpoint requires assistant reasoning_content to be replayed to the API (thinking-mode contract).",
+          replayInherit: "Undeclared (built-in heuristic)",
+          replayForce: "Force replay",
+          replayBlock: "Block injection",
+          reasoningEfforts: "Reasoning levels",
+          reasoningEffortsHint:
+            "Separated by commas or whitespace, for example low, medium, high.",
+          reasoningEffortsPlaceholder: "low, medium, high",
+          reasoningEffortBudgets: "Level budgets",
+          reasoningEffortBudgetsHint:
+            "One `level: tokens` per line, for example high: 32768.",
+          reasoningEffortBudgetsPlaceholder: "low: 4096\nhigh: 32768",
+          defaultReasoningEffort: "Default level",
+          defaultReasoningEffortPlaceholder: "medium",
+          compactReasoningEffort: "Compact level",
+          compactReasoningEffortHint:
+            "Reasoning level used for auto-compact requests.",
+          compactReasoningEffortPlaceholder: "low",
+          maxContextTokens: "Max context tokens",
+          maxContextTokensHint:
+            "max_context_tokens: model context window size in tokens.",
+          maxTokens: "Max output tokens",
+          maxTokensHint: "max_tokens: output token limit for a single reply.",
+          autoCompactRatio: "Auto compact ratio",
+          autoCompactRatioHint: "auto_compact_ratio: ratio threshold between 0 and 1.",
+          autoCompactTokenLimit: "Auto compact limit",
+          autoCompactTokenLimitHint:
+            "auto_compact_token_limit: token count that triggers auto compact.",
+          autoCompactMode: "Auto compact mode",
+          autoCompactModeHint: "auto_compact_mode, for example local / remote / off.",
+          autoCompactModePlaceholder: "local / remote / off",
+          supportsRemoteCompact: "Remote compact",
+          supportsRemoteCompactHint:
+            "supports_remote_compact: enable when the endpoint supports remote compact.",
+          supportsRemoteCompactToggle: "Supports remote compact",
+          imageGeneration: "Native image generation",
+          imagesGenerationsApi: "Images Generations API",
+        },
+        modality: {
+          honoredHint: "Consumed by the runtime",
+          inertHint: "Written to config only; not consumed by the runtime",
+          unknownHint:
+            "Value outside the vocabulary: saved as-is, click to remove",
+          imageGenWarning:
+            "Native image generation requires both text and image modalities; otherwise it has no effect.",
+          noteInherit:
+            "With no declared input modalities, the runtime infers them from the model name heuristic.",
+          noteHonored:
+            "text / image are consumed by the runtime; audio / video / file are written to config only.",
+          noteInert: "audio / video / file are not consumed by the current runtime.",
+        },
+      },
+      workspace: {
+        noProviders:
+          "No providers yet. Create and save one under the Providers tab before configuring models.",
+        noProviderSelected: "Select a provider.",
+        selectLabel: "Provider",
+        selectAria: "Select the provider whose models to configure",
+        reload: "Reload",
+        applyHint:
+          "Edits land in a working copy first; click Apply changes to write them into the page draft, then save on the page to persist config.yaml.",
+        apply: "Apply changes",
+        applied:
+          "Wrote the model list and capabilities of \"{{name}}\" into the page draft; remember to save at the bottom of the page.",
+        fetch: "Fetch models",
+        fetching: "Fetching...",
+        fetchEmpty: "The endpoint succeeded but returned no usable models.",
+        fetchFailed: "Failed to fetch models",
+        fetchSuccess:
+          "Fetched {{count}} models; configure capabilities per model, then apply.{{warnings}}",
+        supportedModelsPreview: "supported_models: {{models}}",
+      },
     },
     proxy: {
       title: "Provider-level proxy override",

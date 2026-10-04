@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-// 停靠列（§4.6）：模式标识与待交互卡片是同一条宽度轴上的整体——两组用例守住「常驻」与
-// 「同框」两个契约（从 main-section 抽出后最容易回归的两点）。
+// 停靠列（§4.6）：plan/托管状态行与待交互卡片是同一条宽度轴上的整体——两组用例守住
+// 「常驻」与「同框」两个契约（从 main-section 抽出后最容易回归的两点）。
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -61,7 +61,7 @@ describe("SessionInteractionDock", () => {
     });
   }
 
-  it("无待交互时仅常驻模式标识（卡片不为空占位）", () => {
+  it("无待交互时仅顶部状态行（plan 上下文），卡片不为空占位", () => {
     renderDock({
       interaction: null,
       plan: plan({ active: true, permission_mode: "plan", plan_content_available: true }),
@@ -74,7 +74,7 @@ describe("SessionInteractionDock", () => {
     expect(container.textContent).toContain("待评审");
   });
 
-  it("计划评审待裁决：模式标识与裁决条同框，裁决动作仍由卡片回抛", () => {
+  it("计划评审待裁决：状态行与裁决条同框，裁决动作仍由卡片回抛", () => {
     const onPlanDecision = vi.fn();
     renderDock({
       interaction: {

@@ -22,6 +22,9 @@ var mcpsSeq = 0;
 var mcpConfigs = {};
 // 当前编辑对象的原名（空串 = 新增）。
 var mcpEditingName = "";
+// 最近一次列表返回的会话级覆盖（后端 body.session：{disabled:[], temp:[]}；
+// 无覆盖时字段缺席）。「仅本会话」动作只影响当前 chat/web 会话，不写配置文件。
+var mcpSessionScope = null;
 
 function mcpEl(id) { return document.getElementById(id); }
 
@@ -86,6 +89,7 @@ function renderMCPList(body) {
   var count = body && typeof body.count === "number" ? body.count : items.length;
   if (countEl) { countEl.textContent = "共 " + count + " 个"; }
   mcpConfigs = {};
+  mcpSessionScope = (body && body.session) || null;
   if (!listEl) { return; }
   if (!items.length) {
     listEl.innerHTML = '<div class="skills-empty">暂无 MCP 配置，点击「＋ 新增」添加</div>';
@@ -119,6 +123,12 @@ function renderMCPRow(item) {
     '<span class="skill-badge ' + statusClass + '">' + esc(statusText) + "</span>",
     '<span class="skill-badge">工具 ' + toolCount + "</span>"
   ];
+  var sessionState = mcpSessionStateOf(name);
+  if (sessionState === "disabled") {
+    badges.push('<span class="skill-badge mcp-badge-off">本会话已停用</span>');
+  } else if (sessionState === "temp") {
+    badges.push('<span class="skill-badge mcp-badge-on">本会话临时启用</span>');
+  }
   if (trust) { badges.push('<span class="skill-badge">' + esc(trust) + "</span>"); }
 
   var sub = [];
@@ -143,9 +153,17 @@ function renderMCPRow(item) {
     sub.push('<span class="skill-desc mcp-config-source">' + esc(sourceText) + "</span>");
   }
 
+  var sessionToggleEnable = sessionState === "disabled";
+  var sessionToggleLabel = sessionToggleEnable ? "本会话启用" : "本会话停用";
+  var sessionToggleTitle = sessionToggleEnable
+    ? "仅本会话启用（不写配置；全局停用时建立会话私有临时连接）"
+    : "仅本会话停用（不写配置，不影响全局连接）";
   var actions = '<div class="mcp-row-actions">'
     + '<button type="button" data-mcp-action="toggle" data-mcp-name="' + esc(name) + '"'
     + ' title="' + (enabled ? "停用并热重载" : "启用并热重载") + '">' + (enabled ? "停用" : "启用") + "</button>"
+    + '<button type="button" data-mcp-action="toggle-session" data-mcp-name="' + esc(name) + '"'
+    + ' data-mcp-session-enable="' + (sessionToggleEnable ? "true" : "false") + '"'
+    + ' title="' + sessionToggleTitle + '">' + sessionToggleLabel + "</button>"
     + '<button type="button" data-mcp-action="tools" data-mcp-name="' + esc(name) + '"'
     + ' title="查看该 MCP 暴露的工具清单（GET /web/api/mcps/{name}/tools）">工具</button>'
     + '<button type="button" data-mcp-action="edit" data-mcp-name="' + esc(name) + '">编辑</button>'
@@ -174,6 +192,17 @@ function mcpConfigEnabled(cfg) {
   if (!cfg) { return false; }
   if (cfg.disabled) { return false; }
   return !!cfg.enabled;
+}
+
+// 会话级状态："disabled"（本会话已停用）/ "temp"（本会话临时启用）/ ""（无覆盖）。
+function mcpSessionStateOf(name) {
+  var scope = mcpSessionScope;
+  if (!scope || !name) { return ""; }
+  var temp = scope.temp || [];
+  for (var i = 0; i < temp.length; i++) { if (temp[i] === name) { return "temp"; } }
+  var disabled = scope.disabled || [];
+  for (var j = 0; j < disabled.length; j++) { if (disabled[j] === name) { return "disabled"; } }
+  return "";
 }
 
 // ---- 工具清单弹窗 ----
@@ -304,6 +333,22 @@ function toggleMCP(name) {
         return;
       }
       showToast(enable ? "已启用: " + name : "已停用: " + name);
+      refreshMCPs();
+    })
+    .catch(function () { showToast("操作失败（网络错误）", "err"); });
+}
+
+// 会话级启停（?scope=session）：不写配置文件；全局停用时服务端建立会话私有临时连接。
+function toggleMCPSession(name, enable) {
+  mcpAPI("/web/api/mcps/" + encodeURIComponent(name) + "/" + (enable ? "enable" : "disable") + "?scope=session", { method: "POST" })
+    .then(function (result) {
+      if (result.status < 200 || result.status >= 300) {
+        showToast("操作失败: " + mcpErrorText(result, "请求失败"), "err");
+        return;
+      }
+      var message = result.body && result.body.message ? String(result.body.message)
+        : (enable ? "已在本次会话启用: " : "已在本次会话停用: ") + name;
+      showToast(message);
       refreshMCPs();
     })
     .catch(function () { showToast("操作失败（网络错误）", "err"); });
@@ -585,6 +630,7 @@ export function initMCP() {
       var action = button.getAttribute("data-mcp-action") || "";
       if (!name) { return; }
       if (action === "toggle") { toggleMCP(name); }
+      else if (action === "toggle-session") { toggleMCPSession(name, button.getAttribute("data-mcp-session-enable") === "true"); }
       else if (action === "tools") { showMCPTools(name); }
       else if (action === "edit") { editMCP(name); }
       else if (action === "delete") { deleteMCP(name); }

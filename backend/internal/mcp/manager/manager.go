@@ -159,6 +159,7 @@ type manager struct {
 	// 分层配置来源（§4.5 Step 1）：说明每个 server 来自哪个配置文件、覆盖了谁。
 	layered        bool
 	explicitPath   string
+	layerBase      string
 	origins        map[string]config.ServerOrigin
 	originWarnings []string
 }
@@ -1018,7 +1019,7 @@ func (m *manager) ReloadConfig() error {
 
 	// 重新加载配置
 	if m.layered {
-		result, err := config.LoadEffective(m.explicitPath)
+		result, err := config.LoadEffectiveFrom(m.layerBase, m.explicitPath)
 		if err != nil {
 			return err
 		}

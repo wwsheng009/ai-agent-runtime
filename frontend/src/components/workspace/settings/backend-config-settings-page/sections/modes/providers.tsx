@@ -16,6 +16,7 @@ export function ProvidersModeSection({ core, domain }: { core: ConfigEditorCore;
 
   const {
     handleApplyProviderAccountFields,
+    handleApplyProviderModels,
     handleDeleteProvider,
     handleSaveProvider,
     handleSetDefaultProvider,
@@ -32,6 +33,7 @@ export function ProvidersModeSection({ core, domain }: { core: ConfigEditorCore;
       <RuntimeProviderDomainEditor
         defaultProvider={defaultProvider}
         onApplyProviderAccountFields={handleApplyProviderAccountFields}
+        onApplyProviderModels={handleApplyProviderModels}
         onDeleteProvider={handleDeleteProvider}
         onSaveProvider={handleSaveProvider}
         onSetDefaultProvider={handleSetDefaultProvider}

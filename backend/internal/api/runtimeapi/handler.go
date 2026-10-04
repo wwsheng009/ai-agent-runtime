@@ -109,6 +109,7 @@ type Handler struct {
 	skillRegistry *skill.Registry
 	skillLoader   *skill.Loader
 	mcpManager    skill.MCPManager
+	workspaceMCP  *workspaceMCPManagers
 	mcpAdmin      mcpadmin.AdminService
 	// Phase 1 交付 4：知识层 shadow 拦截观察器（runtime-server 启动时经
 	// SetKnowledgeShadow 注入）；nil 时全部会话保持无知识层行为。
@@ -1041,6 +1042,15 @@ func (h *Handler) RegisterRoutes(router *mux.Router) *mux.Router {
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime", h.GetSessionRuntimeState).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/events", h.ListSessionRuntimeEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/tools", h.ListSessionRuntimeTools).Methods(http.MethodGet)
+	// 会话级 MCP 覆盖：仅本会话启停（不写配置文件），与 CLI `--session` / chat web
+	// `?scope=session` 同一语义；工具面在下一个 turn 边界按覆盖重建。
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps", h.ListSessionRuntimeMCPs).Methods(http.MethodGet)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps", h.AddSessionRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps/reload", h.ReloadSessionRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps/{name}", h.UpdateSessionRuntimeMCP).Methods(http.MethodPut)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps/{name}", h.RemoveSessionRuntimeMCP).Methods(http.MethodDelete)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps/{name}/enable", h.EnableSessionRuntimeMCP).Methods(http.MethodPost)
+	runtimeRouter.HandleFunc("/sessions/{id}/runtime/mcps/{name}/disable", h.DisableSessionRuntimeMCP).Methods(http.MethodPost)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/tool-receipts", h.ListSessionToolReceipts).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/stream", h.StreamSessionRuntimeEvents).Methods(http.MethodGet)
 	runtimeRouter.HandleFunc("/sessions/{id}/runtime/commands", h.SubmitSessionRuntimeCommand).Methods(http.MethodPost)
@@ -1524,7 +1534,13 @@ func (h *Handler) ExecuteSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	executor := skill.NewExecutor(h.skillRegistry, h.mcpManager, h.llmRuntime)
+	// 会话级 MCP 覆盖同样作用于 skill 执行链路（execute 端点绑定会话时）；
+	// 基础 manager 按会话工作区锚定（未命中工作区链时回退进程级）。
+	executorMCP := h.sessionBaseMCPManager(ctx, session)
+	if sid := sessionID(session); sid != "" {
+		executorMCP = h.sessionScopedMCPSurface(ctx, sid, executorMCP)
+	}
+	executor := skill.NewExecutor(h.skillRegistry, executorMCP, h.llmRuntime)
 	if skillsInvokedEnabled {
 		executor.SetImplicitInvocationIndex(h.implicitInvocationIndex())
 	}
@@ -2031,7 +2047,8 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 
 	runtimeRegistry := h.skillRegistry
 	runtimeEmbedding := h.embeddingRouter
-	runtimeMCP := h.mcpManager
+	// 基础 manager 按会话工作区锚定；profile adapter（若有）仍按显式声明覆盖。
+	runtimeMCP := h.sessionBaseMCPManager(ctx, session)
 	runtimeLLM := h.llmRuntime
 	if profileState != nil {
 		if profileState.Registry != nil {
@@ -2043,6 +2060,10 @@ func (h *Handler) AgentChat(w http.ResponseWriter, r *http.Request) {
 		if profileState.MCPAdapter != nil {
 			runtimeMCP = profileState.MCPAdapter
 		}
+	}
+	// 会话级 MCP 覆盖：AgentChat 绑定会话时收窄该会话的 MCP 工具面/执行面。
+	if sid := sessionID(session); sid != "" {
+		runtimeMCP = h.sessionScopedMCPSurface(ctx, sid, runtimeMCP)
 	}
 
 	// 创建 Agent 配置
@@ -4418,6 +4439,42 @@ type agentRuntimeComponents struct {
 	llmRuntime      *llm.LLMRuntime
 }
 
+// resolveAgentRequestMaxTokens 为 API 宿主（runtime-server）构造的 agent 配置
+// 解析请求级输出预算（agent.Config.DefaultMaxTokens）。这些宿主过去不设置该
+// 字段，落到 agent.NewAgentWithLLM 的 4096 硬编码兜底；而下游能力解析只对
+// 「未显式设置预算」生效，显式 4096 会短路推理模型的默认预算，导致思维链与
+// 工具参数共用的小预算被推理烧完后截断工具调用（2026-10-04 deepseek-flash
+// `write` 截断事故）。这里按 effective provider/model 复用统一口径：常规模型
+// 保留 8k 槽位预留，推理模型取模型默认（不受 8k cap）。解析不到时返回 0，
+// 保持既有兜底行为不变。
+func resolveAgentRequestMaxTokens(runtime *llm.LLMRuntime, providerName, model string) int {
+	if runtime == nil {
+		return 0
+	}
+	providerName = strings.TrimSpace(providerName)
+	if providerName == "" {
+		providerName = strings.TrimSpace(runtime.DefaultProvider())
+	}
+	if providerName == "" {
+		return 0
+	}
+	provider, err := runtime.GetProvider(providerName)
+	if err != nil || provider == nil {
+		return 0
+	}
+	resolver, ok := provider.(interface {
+		ResolveRequestMaxTokens(model string) (int, bool)
+	})
+	if !ok {
+		return 0
+	}
+	budget, ok := resolver.ResolveRequestMaxTokens(strings.TrimSpace(model))
+	if !ok || budget <= 0 {
+		return 0
+	}
+	return budget
+}
+
 func (h *Handler) newAPIAgentWithRuntime(cfg *agent.Config, runtime *agentRuntimeComponents) *agent.Agent {
 	registry := h.skillRegistry
 	embeddingRouter := h.embeddingRouter
@@ -4437,6 +4494,12 @@ func (h *Handler) newAPIAgentWithRuntime(cfg *agent.Config, runtime *agentRuntim
 		if runtime.llmRuntime != nil {
 			llmRuntime = runtime.llmRuntime
 		}
+	}
+
+	// 显式预算优先：仅在调用方未设置输出预算时按模型能力补齐，避免 reasoning
+	// 模型被 4096 兜底拖入「推理烧完预算→工具参数截断→重试」的循环。
+	if cfg != nil && cfg.DefaultMaxTokens <= 0 && llmRuntime != nil {
+		cfg.DefaultMaxTokens = resolveAgentRequestMaxTokens(llmRuntime, cfg.Provider, cfg.Model)
 	}
 
 	var apiAgent *agent.Agent

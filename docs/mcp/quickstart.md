@@ -57,13 +57,14 @@ chat 内可用的 `/mcp` 命令：
 /mcp auth <name>        发起/继续授权（给出授权链接；浏览器回调已到达时直接完成）
 /mcp auth <name> <回调URL|code>   回调页面打不开时，粘贴完成授权
 /mcp auth <name> --clear          清除该 server 的令牌
-/mcp enable|disable <name>   启停并热重载
+/mcp enable|disable <name> [--session]   启停（默认写配置并热重载；--session 仅本会话，不写配置）
 /mcp remove <name>      删除并热重载
 /mcp reload             重新加载配置并重连
 /mcp help               会话内帮助
 ```
 
 修改配置后不必重启：chat 内用 `/mcp reload`，命令行用 `aicli mcp reload`。
+`--session` 是会话级开关：`/mcp disable <name> --session` 只在当前会话隐藏该 server 的工具（不动连接与配置文件）；`/mcp enable <name> --session` 对全局停用的 server 建立本会话私有临时连接（不落盘，会话结束或 `/new` 时回收）。不带 `--session` 时保持原有持久化语义。
 选择器里同样可以完成授权：选中 OAuth server → 「认证 / 重新认证 / 完成授权」（按当前状态变化），
 需要清除令牌时选「清除授权」（二次确认）。
 
@@ -85,7 +86,7 @@ chat 内可用的 `/mcp` 命令：
 | `tools` | 列出某 server 的工具 | `aicli mcp tools chrome-devtools` |
 | `test` | 真实调用一次工具（端到端验证） | `aicli mcp test chrome-devtools list_pages '{}'` |
 | `test-server` | 只验证连接 | `aicli mcp test-server my-stdio --show-stderr` |
-| `enable` / `disable` | 启停（写在**定义该 server 的文件**上） | `aicli mcp disable chrome-devtools` |
+| `enable` / `disable` | 启停（写在**定义该 server 的文件**上）；chat 内 `/mcp enable\|disable <name> --session` 为仅本会话开关（不落盘） | `aicli mcp disable chrome-devtools` |
 | `remove` | 删除定义并热重载 | `aicli mcp remove chrome-devtools` |
 | `reload` | 重新加载配置并重连 | `aicli mcp reload` |
 | `auth` / `logout` | OAuth 登录、状态、清理 | `aicli mcp auth --status`<br>`aicli mcp auth notion --no-browser`<br>`aicli mcp logout notion` |

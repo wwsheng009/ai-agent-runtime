@@ -338,6 +338,27 @@ func (p *ProviderWrapper) ResolveModelCapability(requestedModel string) (string,
 	return requestedModel, agentconfig.ModelCapabilitySpec{}, false
 }
 
+// ResolveRequestMaxTokens resolves the Claude Code-style request budget for a
+// provider/model pair when the caller has no explicit budget (0). Embedded API
+// hosts (runtime-server) seed agent.Config.DefaultMaxTokens from this instead
+// of the legacy 4096 fallback: a positive explicit budget short-circuits the
+// capability-aware resolution downstream, and a reasoning model (chain of
+// thought shares the completion budget) then burns it before finishing tool
+// arguments (2026-10-04 deepseek-flash `write` truncation incident). The
+// resolved value keeps the 8k slot-reservation cap for regular models and the
+// model default (uncapped) for reasoning models.
+func (p *ProviderWrapper) ResolveRequestMaxTokens(requestedModel string) (int, bool) {
+	if p == nil || p.config == nil {
+		return 0, false
+	}
+	model, capability, hasCapability := p.ResolveModelCapability(requestedModel)
+	resolved := ResolveRequestMaxTokens(p.config.Type, model, 0, capability, hasCapability, 0)
+	if resolved.Default <= 0 {
+		return 0, false
+	}
+	return resolved.Default, true
+}
+
 // RemoteCompact invokes a provider-native remote compaction endpoint when the
 // configured protocol supports it.
 func (p *ProviderWrapper) RemoteCompact(ctx context.Context, req RemoteCompactRequest) (*RemoteCompactResponse, error) {

@@ -57,7 +57,7 @@ func TestChatMCPPickerActionsMapToExistingSubcommands(t *testing.T) {
 		labels = append(labels, action.Label)
 		byLabel[action.Label] = action
 	}
-	want := []string{chatMCPPickerActionStatus, "停用", chatMCPPickerActionReload, chatMCPPickerActionRemove, chatMCPPickerCancelLabel}
+	want := []string{chatMCPPickerActionStatus, "停用", "仅本会话停用", chatMCPPickerActionReload, chatMCPPickerActionRemove, chatMCPPickerCancelLabel}
 	if strings.Join(labels, "|") != strings.Join(want, "|") {
 		t.Fatalf("动作顺序 = %v, want %v", labels, want)
 	}
@@ -66,6 +66,9 @@ func TestChatMCPPickerActionsMapToExistingSubcommands(t *testing.T) {
 	}
 	if got := byLabel["停用"].Command; got != "/mcp disable context7" {
 		t.Fatalf("停用动作 = %q", got)
+	}
+	if got := byLabel["仅本会话停用"].Command; got != "/mcp disable context7 --session" {
+		t.Fatalf("仅本会话停用动作 = %q", got)
 	}
 	if !byLabel[chatMCPPickerActionRemove].Confirm {
 		t.Fatal("移除必须要求二次确认")
@@ -77,9 +80,13 @@ func TestChatMCPPickerActionsMapToExistingSubcommands(t *testing.T) {
 	// 停用的 server：动作变为"启用"。
 	disabled := chatMCPPickerActions("local-fs", false, chatMCPPickerAuthState{})
 	found := ""
+	foundSession := ""
 	for _, action := range disabled {
 		if action.Label == "启用" {
 			found = action.Command
+		}
+		if action.Label == "仅本会话启用" {
+			foundSession = action.Command
 		}
 		if action.Label == "停用" {
 			t.Fatalf("已停用 server 不应再给停用动作: %#v", disabled)
@@ -87,6 +94,9 @@ func TestChatMCPPickerActionsMapToExistingSubcommands(t *testing.T) {
 	}
 	if found != "/mcp enable local-fs" {
 		t.Fatalf("启用动作 = %q", found)
+	}
+	if foundSession != "/mcp enable local-fs --session" {
+		t.Fatalf("仅本会话启用动作 = %q", foundSession)
 	}
 }
 
@@ -117,7 +127,7 @@ func TestBuildChatMCPPickerServerItemsReusesListProjection(t *testing.T) {
 
 func TestBuildChatMCPPickerActionItems(t *testing.T) {
 	rows := buildChatMCPPickerActionItems(chatMCPPickerActions("x", true, chatMCPPickerAuthState{}))
-	if len(rows) != 5 {
+	if len(rows) != 6 {
 		t.Fatalf("动作行数 = %d", len(rows))
 	}
 	for _, row := range rows {

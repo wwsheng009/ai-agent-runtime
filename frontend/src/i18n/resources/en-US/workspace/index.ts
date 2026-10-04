@@ -11,6 +11,7 @@ import { enWorkspacePanelsJobs } from "./panels-jobs";
 import { enWorkspacePanelsMessages } from "./panels-messages";
 import { enWorkspacePanelsPreview } from "./panels-preview";
 import { enWorkspacePanelsSessionDetail } from "./panels-session-detail";
+import { enWorkspacePanelsSessionMcp } from "./panels-session-mcp";
 import { enWorkspaceSessionSearch } from "./panels-session-search";
 import { enWorkspacePanelsShell } from "./panels-shell";
 import { enWorkspacePanelsTeamsDispatch } from "./panels-teams-dispatch";
@@ -30,6 +31,7 @@ export const enWorkspace = {
     messages: enWorkspacePanelsMessages,
     preview: enWorkspacePanelsPreview,
     sessionDetail: enWorkspacePanelsSessionDetail,
+    sessionMcp: enWorkspacePanelsSessionMcp,
     sessionSearch: enWorkspaceSessionSearch,
     shell: enWorkspacePanelsShell,
     teamsDispatch: enWorkspacePanelsTeamsDispatch,

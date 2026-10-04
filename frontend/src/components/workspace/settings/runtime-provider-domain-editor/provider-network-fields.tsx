@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { ConfigFormField } from "../config-form-field";
 import { editorControlClassName } from "../editor-control-class";
 import { type ProviderDraftInput } from "../runtime-provider-domain-form-utils";
+import { ProviderKeyValueRows } from "./provider-key-value-rows";
 
 type ProviderNetworkFieldsProps = {
   draft: ProviderDraftInput;
@@ -19,30 +20,51 @@ export function ProviderNetworkFields({
     <>
           <div className="grid gap-3 xl:grid-cols-2">
             <ConfigFormField
-              label={t("editor.providers.fields.headersJson")}
+              label={t("editor.providers.fields.headers")}
               description={t("editor.providers.fields.headersDescription")}
             >
-              <textarea
-                className={`${editorControlClassName} min-h-40 resize-y font-mono`}
-                value={draft.headersJson}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, headersJson: event.target.value }))
+              <ProviderKeyValueRows
+                addLabel={t("editor.providers.fields.keyValue.add")}
+                emptyHint={t("editor.providers.fields.keyValue.headersEmpty")}
+                json={draft.headersJson}
+                keyPlaceholder={t(
+                  "editor.providers.fields.keyValue.headerKeyPlaceholder",
+                )}
+                onChangeJson={(json) =>
+                  setDraft((current) => ({ ...current, headersJson: json }))
                 }
+                removeLabel={(index) =>
+                  t("editor.providers.fields.keyValue.removeRow", {
+                    index: String(index),
+                  })
+                }
+                valuePlaceholder={t(
+                  "editor.providers.fields.keyValue.headerValuePlaceholder",
+                )}
               />
             </ConfigFormField>
             <ConfigFormField
-              label={t("editor.providers.fields.modelMappingsJson")}
+              label={t("editor.providers.fields.modelMappings")}
               description={t("editor.providers.fields.modelMappingsDescription")}
             >
-              <textarea
-                className={`${editorControlClassName} min-h-40 resize-y font-mono`}
-                value={draft.modelMappingsJson}
-                onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    modelMappingsJson: event.target.value,
-                  }))
+              <ProviderKeyValueRows
+                addLabel={t("editor.providers.fields.keyValue.add")}
+                emptyHint={t("editor.providers.fields.keyValue.mappingsEmpty")}
+                json={draft.modelMappingsJson}
+                keyPlaceholder={t(
+                  "editor.providers.fields.keyValue.mappingKeyPlaceholder",
+                )}
+                onChangeJson={(json) =>
+                  setDraft((current) => ({ ...current, modelMappingsJson: json }))
                 }
+                removeLabel={(index) =>
+                  t("editor.providers.fields.keyValue.removeRow", {
+                    index: String(index),
+                  })
+                }
+                valuePlaceholder={t(
+                  "editor.providers.fields.keyValue.mappingValuePlaceholder",
+                )}
               />
             </ConfigFormField>
           </div>

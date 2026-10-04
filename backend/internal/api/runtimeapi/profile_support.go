@@ -102,10 +102,13 @@ func (h *Handler) resolveProfileRuntimeState(ctx context.Context, profileRef, ag
 	}
 	ref = h.applyProfileFallback(registry, ref, workspacePath)
 
+	// 会话工作区锚定：profile 未自带 mcp.yaml 时，GlobalMCPPath 兜底到该会话的
+	// 工作区解析结果；命中工作区链时复用对应的会话级 manager（避免多份配置）。
+	mcpFallbackPath, mcpFallbackManager := h.sessionMCPFallback(workspacePath)
 	resolved, err := profilesys.ResolveRef(registry, ref, profilesys.ResolveOptions{
 		Agent:             strings.TrimSpace(agentID),
 		GlobalRuntimePath: strings.TrimSpace(h.profileGlobalRuntimePath),
-		GlobalMCPPath:     strings.TrimSpace(h.profileGlobalMCPPath),
+		GlobalMCPPath:     mcpFallbackPath,
 		GlobalSkillDirs:   append([]string(nil), h.profileGlobalSkillDirs...),
 	})
 	if err != nil {
@@ -125,7 +128,7 @@ func (h *Handler) resolveProfileRuntimeState(ctx context.Context, profileRef, ag
 		return nil, nil, err
 	}
 
-	mcpAdapter, mcpManager, err := h.resolveProfileMCPAdapter(ctx, resolved, runtimeCfg)
+	mcpAdapter, mcpManager, err := h.resolveProfileMCPAdapter(ctx, resolved, runtimeCfg, mcpFallbackPath, mcpFallbackManager)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -203,10 +206,11 @@ func (h *Handler) resolveProfileSessionState(profileRef, agentID string, workspa
 	}
 	ref = h.applyProfileFallback(registry, ref, workspacePath)
 
+	mcpFallbackPath, _ := h.sessionMCPFallback(workspacePath)
 	resolved, err := profilesys.ResolveRef(registry, ref, profilesys.ResolveOptions{
 		Agent:             strings.TrimSpace(agentID),
 		GlobalRuntimePath: strings.TrimSpace(h.profileGlobalRuntimePath),
-		GlobalMCPPath:     strings.TrimSpace(h.profileGlobalMCPPath),
+		GlobalMCPPath:     mcpFallbackPath,
 		GlobalSkillDirs:   append([]string(nil), h.profileGlobalSkillDirs...),
 	})
 	if err != nil {
@@ -512,25 +516,34 @@ func samePath(left, right string) bool {
 	return strings.EqualFold(left, right)
 }
 
-func (h *Handler) resolveProfileMCPAdapter(ctx context.Context, resolved *profilesys.ResolvedAgent, runtimeCfg *runtimecfg.RuntimeConfig) (skill.MCPManager, mcpmanager.Manager, error) {
+// fallbackPath / fallbackManager 是「该会话的全局回退」：进程级解析，或会话工作区
+// 锚定解析命中时的会话级 manager（见 sessionMCPFallback）。profile 未声明自带
+// mcp.yaml、或声明的文件与回退路径相同时复用它，避免同一份配置被加载两次。
+func (h *Handler) resolveProfileMCPAdapter(
+	ctx context.Context,
+	resolved *profilesys.ResolvedAgent,
+	runtimeCfg *runtimecfg.RuntimeConfig,
+	fallbackPath string,
+	fallbackManager skill.MCPManager,
+) (skill.MCPManager, mcpmanager.Manager, error) {
 	if resolved == nil {
-		if h.mcpManager == nil {
+		if fallbackManager == nil {
 			return h.wireLSPObservation(runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimeCfg))), nil, nil
 		}
-		return h.mcpManager, nil, nil
+		return fallbackManager, nil, nil
 	}
 	configPath := strings.TrimSpace(resolved.MCPConfig)
 	if configPath == "" {
-		if h.mcpManager == nil {
+		if fallbackManager == nil {
 			return h.wireLSPObservation(runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(nil, runtimeCfg))), nil, nil
 		}
-		return h.mcpManager, nil, nil
+		return fallbackManager, nil, nil
 	}
 	// FR-4 服务器选择：全局 manager 是共享实例，不能被单个 profile 的选择收窄，
 	// 因此仅在选择为空时复用；有选择时必须新建独立 manager 并按选择过滤后再连接。
 	hasSelection := !resolved.MCPSelection.Empty()
-	if !hasSelection && samePath(configPath, h.profileGlobalMCPPath) && h.mcpManager != nil {
-		return h.mcpManager, nil, nil
+	if !hasSelection && samePath(configPath, fallbackPath) && fallbackManager != nil {
+		return fallbackManager, nil, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()

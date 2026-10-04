@@ -65,6 +65,8 @@ export const zhRuntimeConfigEditorFeedback = {
       "已清空全局代理草稿，运行时将回退到环境变量或直连。",
     providerCreated: "已创建 provider \"{{name}}\" 草稿。",
     providerUpdated: "已更新 provider \"{{name}}\" 草稿。",
+    providerModelsApplied:
+      "已把 provider \"{{name}}\" 的模型列表与能力配置写入页面草稿。",
     relatedProviderGroups: " 它仍被 {{count}} 个 provider group 引用。",
     confirmDeleteProvider: "确认删除 provider \"{{name}}\" 吗？{{relatedHint}}",
     providerDeleted: "已从草稿中删除 provider \"{{name}}\"。",

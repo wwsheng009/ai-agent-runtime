@@ -17,8 +17,10 @@ import {
   deleteRuntimeMcp,
   listRuntimeMcps,
   listRuntimeMcpTools,
+  listRuntimeSessionMcps,
   reloadRuntimeMcps,
   setRuntimeMcpEnabled,
+  setRuntimeSessionMcpEnabled,
   updateRuntimeMcp,
 } from "@/api/runtime/mcp";
 import {
@@ -265,5 +267,85 @@ describe("runtime MCP 客户端", () => {
       expect(isRuntimeApiErrorCode(error, item.code)).toBe(true);
       expect((error as RuntimeApiError).message).toBe(item.message);
     }
+  });
+});
+
+describe("runtime 会话级 MCP 覆盖客户端", () => {
+  const originalFetch = globalThis.fetch;
+  const SESSION_ID = "sess 1/2";
+
+  beforeEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("GET 覆盖清单：sessionId 整段编码，disabled 原样返回", async () => {
+    const fetchMock = mockFetch(async (input, init) => {
+      expect(String(input)).toBe(
+        `/api/runtime/sessions/${encodeURIComponent(SESSION_ID)}/runtime/mcps`,
+      );
+      expect((init?.method ?? "GET").toUpperCase()).toBe("GET");
+      return jsonResponse({
+        session_id: SESSION_ID,
+        disabled: ["chrome mcp"],
+        count: 1,
+      });
+    });
+
+    const result = await listRuntimeSessionMcps(SESSION_ID);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.disabled).toEqual(["chrome mcp"]);
+    expect(result.count).toBe(1);
+  });
+
+  it("GET 覆盖清单：disabled 不是数组时抛错（契约回归不能被当成无覆盖）", async () => {
+    mockFetch(async () => jsonResponse({ session_id: SESSION_ID }));
+
+    await expect(listRuntimeSessionMcps(SESSION_ID)).rejects.toThrow(
+      /disabled must be an array/,
+    );
+  });
+
+  it("会话级启停：POST 到 enable|disable，sessionId/name 整段编码", async () => {
+    const calls: string[] = [];
+    const fetchMock = mockFetch(async (input, init) => {
+      calls.push(`${(init?.method ?? "GET").toUpperCase()} ${String(input)}`);
+      return jsonResponse({
+        session_id: SESSION_ID,
+        name: MCP_NAME,
+        enabled: false,
+        scope: "session",
+        session_state: "disabled",
+        changed: true,
+        message: "ok",
+      });
+    });
+
+    await setRuntimeSessionMcpEnabled(SESSION_ID, MCP_NAME, false);
+    await setRuntimeSessionMcpEnabled(SESSION_ID, MCP_NAME, true);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(calls).toEqual([
+      `POST /api/runtime/sessions/${encodeURIComponent(SESSION_ID)}/runtime/mcps/${encodeURIComponent(MCP_NAME)}/disable`,
+      `POST /api/runtime/sessions/${encodeURIComponent(SESSION_ID)}/runtime/mcps/${encodeURIComponent(MCP_NAME)}/enable`,
+    ]);
+  });
+
+  it("409（全局停用 + 会话级启用）保留 RuntimeApiError 供 UI 降级", async () => {
+    mockFetch(async () =>
+      jsonResponse(
+        { error: { code: "validation_failed", message: "temp unsupported" } },
+        409,
+      ),
+    );
+
+    await expect(
+      setRuntimeSessionMcpEnabled(SESSION_ID, "off-mcp", true),
+    ).rejects.toBeInstanceOf(RuntimeApiError);
   });
 });

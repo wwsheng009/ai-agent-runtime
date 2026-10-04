@@ -407,7 +407,7 @@ export function WorkspaceMainSection({
                   sessionId={selectedThread.sessionId}
                   snapshot={selectedThread.todoSnapshot}
                 />
-                {/* 批次 F2 + §4.6：停靠卡 = W − 32px（模式标识 + 待交互卡片，同一条宽度轴）。 */}
+                {/* 批次 F2 + §4.6：停靠卡 = W − 32px（plan/托管状态行 + 待交互卡片，同一条宽度轴）。 */}
                 <SessionInteractionDock
                   interaction={pendingInteraction ?? null}
                   onAnswerQuestion={onAnswerPendingQuestion}

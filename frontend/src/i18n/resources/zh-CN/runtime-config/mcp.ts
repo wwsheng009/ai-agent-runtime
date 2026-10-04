@@ -9,6 +9,29 @@ export const zhRuntimeConfigMcp = {
     connected: "{{count}} 已连接",
     tools: "{{count}} 个工具",
   },
+  diagnostics: {
+    // 会话工作区锚定后，「为什么某个 server 没加载」取决于解析到了哪个文件：
+    // 展示生效路径 + 候选存在性，避免面板与配置文件分叉时无从判断。
+    title: "配置来源",
+    effectivePath: "生效文件",
+    source: "来源",
+    managerLoaded: "已加载",
+    managerMissing: "未加载",
+    candidates: "候选（优先级从高到低）",
+    exists: "存在",
+    missing: "不存在",
+    summary: "共 {{total}} · 启用 {{enabled}} · 连接 {{connected}} · 工具 {{tools}}",
+    sources: {
+      explicit: "显式覆盖",
+      local: "项目私有",
+      project: "项目",
+      user: "用户",
+      upward: "向上搜索",
+      executable: "可执行目录",
+      "user-fallback": "用户级回退",
+      default: "默认",
+    },
+  },
   fields: {
     name: "名称",
     type: "类型",

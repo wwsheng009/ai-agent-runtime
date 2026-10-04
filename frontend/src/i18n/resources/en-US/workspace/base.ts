@@ -436,9 +436,8 @@ export const enWorkspaceBase = {
         cancel: "Cancel",
       },
     },
-    // §4.6 persistent mode indicator (top of the chat area): mode + plan context, no verdict actions.
+    // §4.6 plan context (top-of-chat status row): plan state reading; the permission mode lives in the composer footer control.
     modeBanner: {
-      title: "Mode",
       hint: {
         modelRequested: "The model asked for a verdict — approve or request changes.",
         ready: "The plan is ready to review.",

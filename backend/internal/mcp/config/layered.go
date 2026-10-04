@@ -63,12 +63,25 @@ func (r *LayeredResult) Origin(name string) (ServerOrigin, bool) {
 // explicitPath 为显式覆盖（`--config-file` / `aicli.mcp.config_file`）；非空且不是
 // 约定路径时退化为「精确加载该文件」，与既有脚本语义保持一致。
 func LoadEffective(explicitPath string) (*LayeredResult, error) {
-	return LoadLayered(DiscoverSources(explicitPath))
+	return LoadEffectiveFrom("", explicitPath)
+}
+
+// LoadEffectiveFrom 与 LoadEffective 同语义，但发现链锚定 baseDir（空串 = 进程 cwd）。
+//
+// 会话/工作区级加载必须走这条入口：local/project/upward 候选随 baseDir 变化，
+// user/executable 与显式覆盖保持全局语义。
+func LoadEffectiveFrom(baseDir string, explicitPath string) (*LayeredResult, error) {
+	return LoadLayered(DiscoverSourcesFrom(baseDir, explicitPath))
 }
 
 // DiscoverSources 把发现链解析为「低→高」的候选来源列表（含存在性）。
 func DiscoverSources(explicitPath string) []SourceFile {
-	resolution := aiclipaths.ResolveMCPConfigPathDetailed(explicitPath)
+	return DiscoverSourcesFrom("", explicitPath)
+}
+
+// DiscoverSourcesFrom 与 DiscoverSources 同语义，链路锚定 baseDir。
+func DiscoverSourcesFrom(baseDir string, explicitPath string) []SourceFile {
+	resolution := aiclipaths.ResolveMCPConfigPathDetailedFrom(baseDir, explicitPath)
 	if resolution.Source == "explicit" {
 		// 显式覆盖：只认这一个文件，不参与层级合并。
 		return []SourceFile{{Path: resolution.Path, Source: "explicit", Exists: fileExists(resolution.Path)}}

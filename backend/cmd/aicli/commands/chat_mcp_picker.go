@@ -118,7 +118,7 @@ func openChatMCPPickerWithService(session *ChatSession, service chatMCPService) 
 			}
 		}
 
-		text := chatMCPCommandTextWithService(action.Command, service, func() {
+		text := chatMCPCommandTextWithSessionService(session, action.Command, service, func() {
 			refreshChatMCPTools(session)
 		})
 		_ = renderChatCommandResult(session, commandTextResult(text), false)
@@ -210,6 +210,12 @@ func chatMCPPickerActions(name string, enabled bool, authState chatMCPPickerAuth
 		toggleLabel = "启用"
 		toggleSub = "enable"
 	}
+	sessionToggleLabel := "仅本会话停用"
+	sessionToggleSub := "disable"
+	if !enabled {
+		sessionToggleLabel = "仅本会话启用"
+		sessionToggleSub = "enable"
+	}
 	actions := []mcpPickerAction{
 		{Label: chatMCPPickerActionStatus, Command: "/mcp status " + name, ReopenAt: 0},
 	}
@@ -233,6 +239,7 @@ func chatMCPPickerActions(name string, enabled bool, authState chatMCPPickerAuth
 	}
 	actions = append(actions,
 		mcpPickerAction{Label: toggleLabel, Command: "/mcp " + toggleSub + " " + name, ReopenAt: 0},
+		mcpPickerAction{Label: sessionToggleLabel, Command: "/mcp " + sessionToggleSub + " " + name + " --session", ReopenAt: 0},
 		mcpPickerAction{Label: chatMCPPickerActionReload, Command: "/mcp reload", ReopenAt: -1},
 		mcpPickerAction{Label: chatMCPPickerActionRemove, Command: "/mcp remove " + name, Confirm: true, ReopenAt: 0},
 		mcpPickerAction{Label: chatMCPPickerCancelLabel, Command: "", ReopenAt: -1},

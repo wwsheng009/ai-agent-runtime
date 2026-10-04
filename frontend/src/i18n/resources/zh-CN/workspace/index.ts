@@ -12,6 +12,7 @@ import { zhWorkspacePanelsJobs } from "./panels-jobs";
 import { zhWorkspacePanelsMessages } from "./panels-messages";
 import { zhWorkspacePanelsPreview } from "./panels-preview";
 import { zhWorkspacePanelsSessionDetail } from "./panels-session-detail";
+import { zhWorkspacePanelsSessionMcp } from "./panels-session-mcp";
 import { zhWorkspaceSessionSearch } from "./panels-session-search";
 import { zhWorkspacePanelsShell } from "./panels-shell";
 import { zhWorkspacePanelsTeamsDispatch } from "./panels-teams-dispatch";
@@ -31,6 +32,7 @@ export const zhWorkspace = {
     messages: zhWorkspacePanelsMessages,
     preview: zhWorkspacePanelsPreview,
     sessionDetail: zhWorkspacePanelsSessionDetail,
+    sessionMcp: zhWorkspacePanelsSessionMcp,
     sessionSearch: zhWorkspaceSessionSearch,
     shell: zhWorkspacePanelsShell,
     teamsDispatch: zhWorkspacePanelsTeamsDispatch,

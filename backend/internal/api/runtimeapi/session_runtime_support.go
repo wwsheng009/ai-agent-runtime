@@ -4537,7 +4537,7 @@ func (h *Handler) buildSessionActor(sessionID string) (*chat.SessionActor, error
 
 	// Always construct the request catalog. disable_tools is an execution/choice
 	// decision and must not remove definitions from an existing cache lane.
-	sessionMCPManager := h.runtimeServerToolSurfaceForSession(context.Background(), sessionID, h.mcpManager, true)
+	sessionMCPManager := h.runtimeServerToolSurfaceForSession(context.Background(), sessionID, h.sessionBaseMCPManagerByID(context.Background(), sessionID), true)
 	apiAgent := h.newAPIAgentWithRuntime(agentConfig, &agentRuntimeComponents{
 		registry:        h.skillRegistry,
 		embeddingRouter: h.embeddingRouter,

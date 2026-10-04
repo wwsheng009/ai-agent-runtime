@@ -413,9 +413,8 @@ export const zhWorkspaceBase = {
         cancel: "取消",
       },
     },
-    // §4.6 常驻模式标识（聊天区顶部）：模式名 + plan 上下文，不含裁决动作。
+    // §4.6 plan 上下文（聊天区顶部状态行）：计划状态读法；权限模式由 composer 底部控件承担。
     modeBanner: {
-      title: "模式",
       hint: {
         modelRequested: "模型已请求裁决，待你批准或请求修改。",
         ready: "计划已就绪，可评审。",

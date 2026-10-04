@@ -379,6 +379,9 @@ type acpSessionMCP struct {
 	// invalidateSurface 清除本会话的稳定工具面缓存（MCP 目录变化后调用）。
 	// 只有 ACP 宿主会设置它：既有失效通道只覆盖 chatWebSession()。
 	invalidateSurface func() int
+	// skipMCP 可选：按会话级 MCP 覆盖过滤增量登记（--session 停用的 server
+	// 不得从迟到工具路径重新进入工具面）。
+	skipMCP func(mcpName string) bool
 
 	mu         sync.Mutex
 	registered map[string]struct{}
@@ -473,6 +476,9 @@ func (s *acpSessionMCP) refreshTools() int {
 	for _, desc := range s.toolManager.ListTools() {
 		name := strings.TrimSpace(desc.Name)
 		if name == "" {
+			continue
+		}
+		if s.skipMCP != nil && s.skipMCP(mcpNameFromDescriptor(desc)) {
 			continue
 		}
 		if _, exists := s.registered[name]; exists {

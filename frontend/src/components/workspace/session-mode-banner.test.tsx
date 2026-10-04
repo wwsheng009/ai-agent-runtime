@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-// §4.6 常驻模式标识（渲染层）：常显/隐藏条件、tone 档位、plan 上下文与未知模式回落；
-// §6.8 / gap 3b：托管挂起段与迟到唤醒提示（非阻塞、随数据清除消失）。
+// 停靠状态行（§4.6 plan 上下文 + §6.8 / gap 3b 托管挂起与迟到唤醒）：
+// 权限模式不再在此渲染（composer 底部控件是唯一入口，顶部重复模式已移除）；
+// 这里守住「不占位条件、plan 上下文、托管段、迟到唤醒提示」四组契约。
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -106,34 +107,23 @@ describe("SessionModeBanner", () => {
     return container.querySelector('[data-testid="session-resumed-notice"]')?.textContent ?? null;
   }
 
-  it("没有会话或没有模式快照时不占位", () => {
-    renderBanner({ plan: plan(), sessionId: undefined });
+  it("没有会话或既无 plan 上下文也无挂起态时不占位", () => {
+    renderBanner({ plan: plan({ active: true }), sessionId: undefined });
     expect(banner()).toBeNull();
 
     renderBanner({ plan: null, sessionId: "session-1" });
     expect(banner()).toBeNull();
+  });
+
+  it("不再重复渲染权限模式：仅有模式快照时顶部不占位", () => {
+    renderBanner({ plan: plan({ permission_mode: "accept_edits" }), sessionId: "session-1" });
+    expect(banner()).toBeNull();
+
+    renderBanner({ plan: plan({ permission_mode: "bypass_permissions" }), sessionId: "session-1" });
+    expect(banner()).toBeNull();
 
     renderBanner({ plan: plan({ permission_mode: "  " }), sessionId: "session-1" });
     expect(banner()).toBeNull();
-  });
-
-  it("常显当前模式：默认档中性、plan 档强调、跳权档告警", () => {
-    renderBanner({ plan: plan({ permission_mode: "accept_edits" }), sessionId: "session-1" });
-    expect(banner()?.getAttribute("data-mode")).toBe("accept_edits");
-    expect(banner()?.getAttribute("data-tone")).toBe("neutral");
-
-    renderBanner({ plan: plan({ permission_mode: "plan" }), sessionId: "session-1" });
-    expect(banner()?.getAttribute("data-tone")).toBe("plan");
-
-    renderBanner({ plan: plan({ permission_mode: "bypass_permissions" }), sessionId: "session-1" });
-    expect(banner()?.getAttribute("data-tone")).toBe("danger");
-  });
-
-  it("未知模式回落后端原文，不出现空徽标", () => {
-    renderBanner({ plan: plan({ permission_mode: "future_mode" }), sessionId: "session-1" });
-
-    // Badge 不转发额外 props（共用组件），这里按文案断言：未知值必须原样呈现。
-    expect(banner()?.textContent).toContain("future_mode");
   });
 
   it("plan active：补状态徽标、计划路径与状态读法（模型已请求裁决优先）", () => {
@@ -154,6 +144,8 @@ describe("SessionModeBanner", () => {
     expect(container.querySelector('[data-testid="session-mode-hint"]')?.textContent).toContain(
       "模型已请求裁决",
     );
+    // 模式名不再出现在顶部状态行（由 composer 底部控件承担）。
+    expect(container.textContent).not.toContain("计划模式");
   });
 
   it("plan active 但正文未就绪：提示等待产出，不显示路径", () => {
@@ -169,16 +161,15 @@ describe("SessionModeBanner", () => {
     expect(container.textContent).toContain("进行中");
   });
 
-  it("plan 非 active：不显示计划上下文，只留模式标识", () => {
+  it("plan 非 active：不显示 plan 上下文，顶部不占位", () => {
     renderBanner({
       plan: plan({ active: false, plan_path: "docs/plan.md", permission_mode: "default" }),
       planStatusLabel: "未启用",
       sessionId: "session-1",
     });
 
+    expect(banner()).toBeNull();
     expect(container.querySelector('[data-testid="session-mode-hint"]')).toBeNull();
-    expect(container.textContent).not.toContain("docs/plan.md");
-    expect(container.textContent).not.toContain("未启用");
   });
 
   it("托管挂起：无任务投影时显示等待的义务数", () => {
@@ -222,7 +213,8 @@ describe("SessionModeBanner", () => {
 
     renderBanner({ parkedTurn: null, plan: plan(), sessionId: "session-1" });
     expect(container.querySelector('[data-testid="session-parked-turn"]')).toBeNull();
-    expect(banner()).not.toBeNull();
+    // 无挂起 + 非 plan active：状态行整体不占位。
+    expect(banner()).toBeNull();
   });
 
   it("无会话时不显示托管挂起段", () => {
@@ -259,6 +251,6 @@ describe("SessionModeBanner", () => {
 
     renderBanner({ parkedTurn: null, plan: plan(), sessionId: "session-1" });
     expect(container.querySelector('[data-testid="session-resumed-notice"]')).toBeNull();
-    expect(banner()?.getAttribute("data-resumed")).toBe("false");
+    expect(banner()).toBeNull();
   });
 });

@@ -6,8 +6,11 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { DialogOverlay, DialogPanel } from "@/components/ui/dialog-shell";
 import { useDialogLifecycle } from "@/components/ui/use-dialog-lifecycle";
+import { cn } from "@/lib/utils";
 
 type ConfigDomainDialogProps = {
+  /** 内容区附加类（如 p-0：调用方自管全宽 sticky 头部的内衬）。 */
+  bodyClassName?: string;
   children: ReactNode;
   description?: string;
   footer?: ReactNode;
@@ -18,6 +21,7 @@ type ConfigDomainDialogProps = {
 };
 
 export function ConfigDomainDialog({
+  bodyClassName,
   children,
   description,
   footer,
@@ -60,7 +64,14 @@ export function ConfigDomainDialog({
           </Button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4">{children}</div>
+        <div
+          className={cn(
+            "min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-4",
+            bodyClassName,
+          )}
+        >
+          {children}
+        </div>
 
         {footer ? (
           <div className="border-t border-border px-3 py-3 sm:px-4">{footer}</div>

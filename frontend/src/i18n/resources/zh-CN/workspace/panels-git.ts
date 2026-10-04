@@ -25,6 +25,7 @@ export const zhWorkspacePanelsGit = {
     clearCommit: "返回工作区对比",
   },
   views: {
+    ariaLabel: "Git 视图切换",
     changes: "变更",
     commits: "提交",
   },

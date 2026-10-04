@@ -20,6 +20,7 @@ import {
 import { GitChangeList } from "@/components/workspace/git/change-list";
 import { GitCommitList } from "@/components/workspace/git/commit-list";
 import { GitDiffView, type GitDiffViewProps } from "@/components/workspace/git/diff-view";
+import { TabSwitcher } from "@/components/ui/tab-switcher";
 import { useGitChanges } from "@/hooks/workspace/use-git-changes";
 import { describeError } from "@/lib/errors";
 import { moveGitSelection } from "@/lib/git/change-model";
@@ -33,8 +34,6 @@ import type { GitDiffTarget } from "@/types/runtime/git-browse";
 const CHIP =
   "flex items-center gap-1 rounded-chip border border-border/60 bg-surface/50 px-2 py-0.5 app-text-11 " +
   "text-muted-foreground transition-colors hover:bg-white/6 hover:text-foreground disabled:opacity-40";
-const TAB =
-  "-mb-px border-b-2 border-transparent px-2.5 py-1 app-text-11 text-muted-foreground transition-colors hover:text-foreground";
 const PANE = "min-h-0 overflow-hidden rounded-card border border-border/60 bg-surface/30";
 
 export function GitSurface({
@@ -262,30 +261,18 @@ export function GitSurface({
         ) : null}
       </header>
 
-      <div className="flex items-center gap-1 border-b border-border/60" role="tablist">
-        {(
-          [
-            ["changes", "panels.git.views.changes"],
-            ["commits", "panels.git.views.commits"],
-          ] as const
-        ).map(([value, key]) => (
-          <button
-            aria-selected={view === value}
-            className={cn(
-              TAB,
-              view === value
-                ? "border-foreground/50 text-foreground"
-                : undefined,
-            )}
-            key={value}
-            onClick={() => setView(value)}
-            role="tab"
-            type="button"
-          >
-            {t(key)}
-          </button>
-        ))}
-      </div>
+      <TabSwitcher
+        ariaLabel={t("panels.git.views.ariaLabel")}
+        className="gap-0 border-border/60"
+        items={[
+          { id: "changes", label: t("panels.git.views.changes") },
+          { id: "commits", label: t("panels.git.views.commits") },
+        ]}
+        onChange={setView}
+        size="sm"
+        value={view}
+        variant="underline"
+      />
 
       <div className="grid min-h-0 grid-rows-[minmax(0,40%)_minmax(0,60%)] gap-2">
         {view === "changes" ? (

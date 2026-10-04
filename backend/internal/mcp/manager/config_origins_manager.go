@@ -4,6 +4,7 @@ package manager
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/wwsheng009/ai-agent-runtime/internal/mcp/config"
 )
@@ -31,6 +32,38 @@ func (m *manager) LoadConfigEffective(explicitPath string) error {
 	m.cfg = result.Config
 	m.loader = nil
 	m.layered = true
+	m.layerBase = ""
+	m.explicitPath = explicitPath
+	m.origins = result.Origins
+	m.originWarnings = append([]string(nil), result.Warnings...)
+	return nil
+}
+
+// LoadConfigEffectiveFrom 与 LoadConfigEffective 同语义，但发现链锚定 baseDir。
+//
+// 记录 layerBase 供 ReloadConfig 在同一锚点上重放，保证会话/工作区配置的
+// 生命周期与初始加载一致（不会静默回退到进程 cwd 的链）。
+func (m *manager) LoadConfigEffectiveFrom(baseDir string, explicitPath string) error {
+	if m == nil {
+		return fmt.Errorf("manager 为空")
+	}
+	baseDir = strings.TrimSpace(baseDir)
+	result, err := config.LoadEffectiveFrom(baseDir, explicitPath)
+	if err != nil {
+		return fmt.Errorf("加载配置失败: %w", err)
+	}
+	// 运行时入口才展开环境变量，与 LoadConfig 同一约定。
+	config.ExpandEnv(result.Config)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.started {
+		return fmt.Errorf("管理器已经启动")
+	}
+	m.cfg = result.Config
+	m.loader = nil
+	m.layered = true
+	m.layerBase = baseDir
 	m.explicitPath = explicitPath
 	m.origins = result.Origins
 	m.originWarnings = append([]string(nil), result.Warnings...)

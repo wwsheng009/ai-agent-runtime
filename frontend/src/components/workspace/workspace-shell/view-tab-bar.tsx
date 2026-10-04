@@ -1,9 +1,9 @@
-// 由 workspace-shell/main-section.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
+// 由 workspace-shell/main-section.tsx 机械拆分而来（P0-2）；页签样式与键盘逻辑收敛到 ui/tab-switcher。
 
 import { type TFunction } from "i18next";
 
+import { TabSwitcher, type TabSwitcherItem } from "@/components/ui/tab-switcher";
 import { type WorkspaceViewMode } from "@/components/workspace/workspace-shell/types";
-import { cn } from "@/lib/utils";
 
 type WorkspaceViewTabBarProps = {
   /** 选中新页签（技能 / 轨迹 / 对话）。 */
@@ -20,52 +20,34 @@ export function WorkspaceViewTabBar({
   trajectoryAvailable,
   viewMode,
 }: WorkspaceViewTabBarProps) {
-  const tabClass = (active: boolean) =>
-    cn(
-      "rounded-t-md border border-b-0 px-3 py-1.5 app-text-12 transition",
-      active
-        ? "border-border bg-surface-softer text-foreground"
-        : "border-transparent text-muted-foreground hover:text-foreground",
-    );
+  const items: TabSwitcherItem<WorkspaceViewMode>[] = [
+    {
+      id: "chat",
+      label: t("panels.shell.viewTabs.chat"),
+      testId: "workspace-view-tab-chat",
+    },
+    {
+      id: "skills",
+      label: t("panels.shell.viewTabs.skills"),
+      testId: "workspace-view-tab-skills",
+    },
+  ];
+  if (trajectoryAvailable) {
+    items.push({
+      id: "trajectory",
+      label: t("panels.shell.viewTabs.trajectory"),
+      testId: "workspace-view-tab-trajectory",
+    });
+  }
 
   return (
-    <div
-      aria-label={t("panels.shell.viewTabs.ariaLabel")}
-      className="flex items-center gap-1 border-b border-border px-3 pt-2"
-      role="tablist"
-    >
-      <button
-        aria-selected={viewMode === "chat"}
-        className={tabClass(viewMode === "chat")}
-        data-testid="workspace-view-tab-chat"
-        onClick={() => onSelectViewMode("chat")}
-        role="tab"
-        type="button"
-      >
-        {t("panels.shell.viewTabs.chat")}
-      </button>
-      <button
-        aria-selected={viewMode === "skills"}
-        className={tabClass(viewMode === "skills")}
-        data-testid="workspace-view-tab-skills"
-        onClick={() => onSelectViewMode("skills")}
-        role="tab"
-        type="button"
-      >
-        {t("panels.shell.viewTabs.skills")}
-      </button>
-      {trajectoryAvailable ? (
-        <button
-          aria-selected={viewMode === "trajectory"}
-          className={tabClass(viewMode === "trajectory")}
-          data-testid="workspace-view-tab-trajectory"
-          onClick={() => onSelectViewMode("trajectory")}
-          role="tab"
-          type="button"
-        >
-          {t("panels.shell.viewTabs.trajectory")}
-        </button>
-      ) : null}
-    </div>
+    <TabSwitcher
+      ariaLabel={t("panels.shell.viewTabs.ariaLabel")}
+      className="px-3 pt-2"
+      items={items}
+      onChange={onSelectViewMode}
+      value={viewMode}
+      variant="underline"
+    />
   );
 }

@@ -29,7 +29,13 @@ func mcpConfigOverride() string {
 
 // loadMCPConfigLayered 按发现链分层加载配置（同名高优先级整体覆盖）。
 func loadMCPConfigLayered() (*mcpconfig.LayeredResult, error) {
-	result, err := mcpconfig.LoadEffective(mcpConfigOverride())
+	return loadMCPConfigLayeredFrom("")
+}
+
+// loadMCPConfigLayeredFrom 与 loadMCPConfigLayered 同语义，发现链锚定 baseDir
+// （空串 = 进程 cwd）。会话级覆盖/临时连接用它跟随会话工作目录。
+func loadMCPConfigLayeredFrom(baseDir string) (*mcpconfig.LayeredResult, error) {
+	result, err := mcpconfig.LoadEffectiveFrom(baseDir, mcpConfigOverride())
 	if err != nil {
 		if errors.Is(err, mcpconfig.ErrNoConfigFiles) {
 			return nil, fmt.Errorf("找不到 MCP 配置文件\n请创建配置文件或使用 --config 指定")

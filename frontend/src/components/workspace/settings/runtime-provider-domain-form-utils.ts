@@ -5,6 +5,10 @@ import {
   normalizeStringArrayInput,
 } from "./runtime-provider-config-utils";
 import {
+  buildProviderModelCapabilitiesRecord,
+  type ProviderModelDraft,
+} from "./runtime-provider-domain-editor/model-capability-draft";
+import {
   buildRuntimeProxyRecord,
   hasRuntimeProxyConfig,
   type RuntimeProxyConfigSummary,
@@ -21,6 +25,8 @@ export type ProviderDraftInput = {
   extraJson: string;
   forwardUrl: string;
   headersJson: string;
+  /** 每模型能力草稿（model_capabilities.<model> 的编辑态），保存时按非空字段序列化。 */
+  modelCapabilityDrafts: Record<string, ProviderModelDraft>;
   modelMappingsJson: string;
   name: string;
   protocol: string;
@@ -81,6 +87,9 @@ export function buildProviderRecordFromDraft(
   const siteTypeConfidence = draft.siteTypeConfidence.trim();
   const siteTypeDetectedAt = draft.siteTypeDetectedAt.trim();
   const accountAuthRef = draft.accountAuthRef.trim();
+  const modelCapabilities = buildProviderModelCapabilitiesRecord(
+    draft.modelCapabilityDrafts,
+  );
 
   return {
     error: null,
@@ -101,6 +110,9 @@ export function buildProviderRecordFromDraft(
       truncation_adapter: draft.truncationAdapter.trim(),
       headers: headers.record,
       model_mappings: modelMappings.record,
+      ...(Object.keys(modelCapabilities).length > 0
+        ? { model_capabilities: modelCapabilities }
+        : {}),
       ...(proxyRecord ? { proxy: proxyRecord } : {}),
       ...(siteType ? { site_type: siteType } : {}),
       ...(siteTypeConfidence ? { site_type_confidence: siteTypeConfidence } : {}),

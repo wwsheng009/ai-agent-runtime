@@ -1,6 +1,9 @@
-// 会话常驻状态标识（§4.6 模式 + §6.8 托管挂起）：聊天区顶部常显当前权限模式，
-// plan 模式下补计划上下文；托管挂起期间并列显示「托管中：…」，迟到唤醒（gap 3b）
-// 到达时补一条瞬时「已由监督自动恢复」提示（非阻塞、由归约层 TTL 清除）。
+// 会话上沿停靠列的状态行（plan 上下文 + §6.8 托管挂起）。
+//
+// 权限模式不再在此处常显：composer 底部的 `ComposerPermissionModeControl` 已是模式
+// 展示与切换的唯一入口，顶部再渲染一份「模式」属于重复表达（用户可见的重复控件），
+// 故移除。本组件只保留底部控件不承载的信息：plan 模式下的状态读法 / 计划路径，
+// 以及托管挂起与迟到唤醒提示。
 //
 // 落点理由（§6.8 的可观测表达）：本组件是 composer 上沿停靠列里**始终可见**的
 // 状态行——会话存在即渲染，不依赖弹层或输入态；`composer-status-row` 承载的是
@@ -12,22 +15,11 @@
 // 不承载任何裁决动作——裁决入口仍是 composer 上沿的 pending bar 与右侧计划面板，
 // 避免出现第二套 pending 判定（P1-7 的口径）。
 
-import {
-  HourglassIcon,
-  RotateCcwIcon,
-  ScrollTextIcon,
-  ShieldAlertIcon,
-  ShieldIcon,
-} from "lucide-react";
+import { HourglassIcon, RotateCcwIcon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
-import {
-  sessionModeBannerHintLeaf,
-  sessionModeBannerLabelKey,
-  sessionModeBannerTone,
-  sessionModeBannerToneClass,
-} from "@/components/workspace/session-mode-banner-shared";
+import { sessionModeBannerHintLeaf } from "@/components/workspace/session-mode-banner-shared";
 import type { ParkedTurnView } from "@/lib/parked-turn";
 import type { RuntimeSessionPlanMode } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
@@ -49,23 +41,18 @@ export function SessionModeBanner({
   sessionId,
 }: SessionModeBannerProps) {
   const { t } = useTranslation("workspace");
-  const mode = plan?.permission_mode?.trim() ?? "";
-
-  // 无会话 / 既无模式快照也无挂起态：不占位（模式控件仍在下一条输入卡里）。
-  if (!sessionId || (!mode && !parkedTurn)) {
-    return null;
-  }
-
-  const tone = sessionModeBannerTone(mode);
-  const labelKey = sessionModeBannerLabelKey(mode);
-  const modeLabel = labelKey ? (t(labelKey as never) as string) : mode;
-  const hintLeaf = sessionModeBannerHintLeaf(plan);
   const planActive = Boolean(plan?.active);
-  const TitleIcon = tone === "danger" ? ShieldAlertIcon : tone === "plan" ? ScrollTextIcon : ShieldIcon;
+  const hintLeaf = sessionModeBannerHintLeaf(plan);
 
   const parkedTurnSnapshot = parkedTurn?.turn ?? null;
   const parkedTaskCounts = parkedTurn?.taskCounts ?? null;
   const resumedNotice = parkedTurn?.resumedNotice ?? null;
+
+  // 无会话 / 既无 plan 上下文也无挂起态：不占位（权限模式控件在 composer 底部，不在这里重复）。
+  if (!sessionId || (!planActive && !parkedTurn)) {
+    return null;
+  }
+
   const taskTotal = parkedTaskCounts
     ? parkedTaskCounts.running + parkedTaskCounts.completed + parkedTaskCounts.failed
     : 0;
@@ -98,19 +85,14 @@ export function SessionModeBanner({
         "mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 px-0.5 app-text-10 tracking-[0.08em] text-muted-foreground",
         className,
       )}
-      data-mode={mode}
       data-parked={parkedTurnSnapshot ? "true" : "false"}
       data-resumed={resumedNotice ? "true" : "false"}
       data-testid="session-mode-banner"
-      data-tone={tone}
     >
-      {mode ? (
+      {planActive ? (
         <>
-          <TitleIcon aria-hidden="true" className="size-3.5 shrink-0" />
-          <span className="uppercase">{t("composer.modeBanner.title")}</span>
-          <Badge className={sessionModeBannerToneClass(tone)}>{modeLabel}</Badge>
-          {planActive && planStatusLabel ? <Badge>{planStatusLabel}</Badge> : null}
-          {planActive && plan?.plan_path ? (
+          {planStatusLabel ? <Badge>{planStatusLabel}</Badge> : null}
+          {plan?.plan_path ? (
             <span className="truncate" title={plan.plan_path}>
               {plan.plan_path}
             </span>

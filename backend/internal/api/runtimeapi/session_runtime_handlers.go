@@ -508,12 +508,17 @@ func (h *Handler) ListSessionRuntimeTools(w http.ResponseWriter, r *http.Request
 	if !h.sessionRuntimeToolsDisabled(r.Context(), sessionID) {
 		tools = h.sessionRuntimeToolDefinitions(r.Context(), sessionID)
 	}
-	h.writeJSON(w, http.StatusOK, map[string]interface{}{
+	payload := map[string]interface{}{
 		"session_id": sessionID,
 		"tools":      tools,
 		"count":      len(tools),
 		"source":     "runtime_server",
-	})
+	}
+	// 会话级 MCP 覆盖随工具面回传：前端据此标注"本会话停用"与恢复入口。
+	if disabled := sessionMCPDisabledNames(h.sessionByID(r.Context(), sessionID)); len(disabled) > 0 {
+		payload["mcp_session"] = map[string]interface{}{"disabled": disabled}
+	}
+	h.writeJSON(w, http.StatusOK, payload)
 }
 
 func (h *Handler) sessionRuntimeToolDefinitions(ctx context.Context, sessionID string) []runtimetypes.ToolDefinition {
@@ -525,7 +530,7 @@ func (h *Handler) sessionRuntimeToolDefinitions(ctx context.Context, sessionID s
 			return cloneSessionRuntimeToolDefinitions(state.StableToolSurface)
 		}
 	}
-	surface := h.runtimeServerToolSurfaceForSession(ctx, sessionID, h.mcpManager, true)
+	surface := h.runtimeServerToolSurfaceForSession(ctx, sessionID, h.sessionBaseMCPManagerByID(ctx, sessionID), true)
 	if surface == nil {
 		return []runtimetypes.ToolDefinition{}
 	}

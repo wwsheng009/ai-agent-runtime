@@ -148,6 +148,36 @@ runtime-server serve --pprof
 | `GET/PUT/DELETE` | `/api/runtime/mcps/{name}` | 查看 / 更新 / 删除；删除返回 `{"removed":true}` |
 | `POST` | `/api/runtime/mcps/{name}/enable` \| `/disable` | 启停（持久化 `enabled` 并重连） |
 | `POST` | `/api/runtime/mcps/reload` | 热重载并重连，返回 `{reloaded,trace_id,catalog,runtime,health}` |
+| `GET` | `/api/runtime/sessions/{id}/runtime/mcps` | 会话 MCP 面：`{"session_id","disabled","count"}`（覆盖清单，向后兼容）+ `"scope"`（读写目标/工作区/candidates）+ `"mcps"`（会话实际生效的条目，`source=workspace\|global`）+ `"summary"` |
+| `POST` | `/api/runtime/sessions/{id}/runtime/mcps/{name}/enable` \| `/disable` | 默认**仅本会话**启停（不写配置文件）：`disable` 收窄该会话工具面/执行面；`enable` 清除覆盖（停用时返回 409）。加 `?scope=workspace` 改为**持久化**：写会话生效的配置文件 + 热重载 |
+| `POST` | `/api/runtime/sessions/{id}/runtime/mcps` | 在会话生效的配置文件中新增 MCP（工作区锚定时写工作区 `mcp.yaml`，工作区暂无配置时创建 `<workspace>/.aicli/mcp.yaml`；未绑定工作区写进程级文件） |
+| `PUT` \| `DELETE` | `/api/runtime/sessions/{id}/runtime/mcps/{name}` | 更新 / 删除会话配置文件中的 MCP（写文件 + 热重载） |
+| `POST` | `/api/runtime/sessions/{id}/runtime/mcps/reload` | 重载会话生效的配置文件（工作区 manager 原地重连） |
+
+会话级覆盖与 CLI chat `/mcp disable <name> --session`、chat web `?scope=session`
+同一语义：覆盖随会话元数据持久化，工具列表（`GET /sessions/{id}/runtime/tools`，
+有覆盖时附 `mcp_session: {"disabled":[...]}` 块）与执行面（会话 actor / AgentChat /
+skill execute）在下个 turn 边界按覆盖重建；全局连接、配置文件与其他会话不受影响。
+前端入口：会话页右侧栏「会话 MCP」页签（`sessionMcp` 面）逐行显示全局启用/连接状态
+与本会话覆盖，提供「本会话停用 / 恢复」开关；全局停用的 server 不提供会话级启用
+（暂无临时连接，后端 409）。
+同一面板也是**会话配置面的管理入口（2026-10-04 增强）**：顶部「配置来源」卡展示
+会话实际生效的文件（`scope.read`）与候选；列表行来自 `scope.mcps`（工作区锚定时即
+工作区 `mcp.yaml` 的条目，带 `source` 徽标），提供「启用/停用」（`?scope=workspace`
+持久化 + 热重载）、「新增」与「删除」；「本会话停用 / 恢复」仍是原有覆盖语义，
+两条路径互不影响。新增在工作区还没有配置文件时写入
+`<workspace>/.aicli/mcp.yaml`（`scope.workspace_fallback=true` 时面板会提示）。
+
+**按会话工作区锚定（2026-10-04）**：会话绑定 `workspace_path` 时，runtime-server
+以该目录为锚点重跑同一条发现链（local/project/upward 候选随工作区变化；
+user/executable 与显式 `aicli.mcp.config_file` 保持全局语义）——与 aicli chat 的
+启动锚点同一内核（`aiclipaths.ResolveMCPConfigPathDetailedFrom` /
+`mcpconfig.LoadEffectiveFrom` / `manager.LoadConfigEffectiveFrom`）。解析结果与进程级
+相同时**复用全局 manager**（不产生第二份配置）；不同时按「生效文件」缓存会话级
+manager（LRU=8，淘汰或服务关闭时释放连接与工具适配器/LSP 池）。优先级：
+profile 自带 `mcp.yaml` > 会话工作区链 > 进程级链；会话级 enable/disable 覆盖
+始终叠加在最外层。MCP 设置页顶部展示 `config.path/source/candidates` 与本会话
+开关同源——「面板看到哪个文件」与「会话实际加载哪个文件」不再分叉。
 
 `GET /api/runtime/mcps` 额外返回观测字段（向后兼容，旧字段不变）：
 

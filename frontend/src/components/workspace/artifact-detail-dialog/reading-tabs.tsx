@@ -1,13 +1,10 @@
-// 由 components/workspace/artifact-detail-dialog.tsx 机械拆分而来（P0-2），仅搬迁不改语义。
+// 由 components/workspace/artifact-detail-dialog.tsx 机械拆分而来（P0-2）；
+// 页签交互（roving tabindex + 方向键）收敛到 ui/tab-switcher，保留原 ids/aria-controls 契约。
 
 import { EyeIcon, FileCode2Icon } from "lucide-react";
-import { useRef } from "react";
 import { useTranslation } from "react-i18next";
 
-import {
-  handleHorizontalTabKeyDown,
-  surfaceButtonClass,
-} from "./dialog-helpers";
+import { TabSwitcher, type TabSwitcherItem } from "@/components/ui/tab-switcher";
 import type { ArtifactDetailView } from "./types";
 
 type ArtifactReadingTabsProps = {
@@ -28,65 +25,32 @@ export function ArtifactReadingTabs({
   view,
 }: ArtifactReadingTabsProps) {
   const { t } = useTranslation("workspace");
-  const viewTabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const items: TabSwitcherItem<ArtifactDetailView>[] = [
+    {
+      id: "preview",
+      label: t("panels.artifacts.detail.tabPreview"),
+      icon: <EyeIcon size={14} />,
+      tabId: previewTabId,
+      panelId: previewPanelId,
+    },
+    {
+      id: "source",
+      label: t("panels.artifacts.detail.tabSource"),
+      icon: <FileCode2Icon size={14} />,
+      tabId: sourceTabId,
+      panelId: sourcePanelId,
+    },
+  ];
 
   return (
-    <div
-      aria-label={t("panels.artifacts.detail.tabsLabel")}
-      aria-orientation="horizontal"
-      className="flex flex-wrap gap-2 border-b border-border px-4 py-3"
-      role="tablist"
-    >
-      <button
-        aria-controls={previewPanelId}
-        aria-selected={view === "preview"}
-        id={previewTabId}
-        ref={(node) => {
-          viewTabRefs.current[0] = node;
-        }}
-        role="tab"
-        tabIndex={view === "preview" ? 0 : -1}
-        type="button"
-        onClick={() => onSelectView("preview")}
-        onKeyDown={(event) =>
-          handleHorizontalTabKeyDown(event, {
-            currentIndex: 0,
-            disabledStates: [false, false],
-            onSelectIndex: (index) =>
-              onSelectView(index === 0 ? "preview" : "source"),
-            refs: viewTabRefs.current,
-          })
-        }
-        className={surfaceButtonClass(view === "preview")}
-      >
-        <EyeIcon size={14} />
-        {t("panels.artifacts.detail.tabPreview")}
-      </button>
-      <button
-        aria-controls={sourcePanelId}
-        aria-selected={view === "source"}
-        id={sourceTabId}
-        ref={(node) => {
-          viewTabRefs.current[1] = node;
-        }}
-        role="tab"
-        tabIndex={view === "source" ? 0 : -1}
-        type="button"
-        onClick={() => onSelectView("source")}
-        onKeyDown={(event) =>
-          handleHorizontalTabKeyDown(event, {
-            currentIndex: 1,
-            disabledStates: [false, false],
-            onSelectIndex: (index) =>
-              onSelectView(index === 0 ? "preview" : "source"),
-            refs: viewTabRefs.current,
-          })
-        }
-        className={surfaceButtonClass(view === "source")}
-      >
-        <FileCode2Icon size={14} />
-        {t("panels.artifacts.detail.tabSource")}
-      </button>
+    <div className="border-b border-border px-4 py-3">
+      <TabSwitcher
+        ariaLabel={t("panels.artifacts.detail.tabsLabel")}
+        items={items}
+        onChange={onSelectView}
+        value={view}
+        variant="plain"
+      />
     </div>
   );
 }

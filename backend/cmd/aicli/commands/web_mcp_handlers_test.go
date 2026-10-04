@@ -367,3 +367,124 @@ func TestHandleChatWebAPIMCP_ToolsListIncludesDisabled(t *testing.T) {
 		}
 	}
 }
+
+// installWebMCPTestSession 把 chatWebSession() 指向测试会话（与 TUI 会话共用同一套会话级覆盖实现）。
+func installWebMCPTestSession(t *testing.T, session *ChatSession) {
+	t.Helper()
+	previous := chatDebugDisplaySessionProvider
+	RegisterChatDebugDisplayProvider(func() *ChatSession { return session })
+	t.Cleanup(func() { chatDebugDisplaySessionProvider = previous })
+}
+
+// 会话级启停端点：不写配置文件、不经过持久化 admin 服务；与 TUI `/mcp ... --session` 同源。
+func TestHandleChatWebAPIMCP_SessionScopedToggle(t *testing.T) {
+	withoutProcessMCPManager(t)
+	withSessionMCPConfigLookup(t, &mcpconfig.Config{MCPServers: map[string]mcpconfig.MCPConfig{
+		"local-fs": {Name: "local-fs", Enabled: true},
+	}})
+
+	session := newSessionScopeTestSession()
+	installWebMCPTestSession(t, session)
+	registerSessionTestMCPTool(t, session, "local-fs", "read_file")
+
+	persistedCalls := 0
+	previousService := chatWebMCPAdminServiceFn
+	chatWebMCPAdminServiceFn = func() (mcpadmin.AdminService, error) {
+		persistedCalls++
+		return &fakeWebMCPAdmin{}, nil
+	}
+	t.Cleanup(func() { chatWebMCPAdminServiceFn = previousService })
+
+	// query 形态：仅本会话停用。
+	recorder := doWebMCPRequest(t, HandleChatWebAPIMCP, http.MethodPost, ChatWebAPIMCPsPath+"/local-fs/disable?scope=session", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["scope"] != "session" || body["session_state"] != "disabled" {
+		t.Fatalf("body = %v", body)
+	}
+	if persistedCalls != 0 {
+		t.Fatal("session scope must not touch the persisted admin service")
+	}
+	if !sessionMCPOverrideDisabled(session, "local-fs") {
+		t.Fatal("session override must record disabled")
+	}
+	if _, exists := session.FunctionCatalog.Registry().Get("read_file"); exists {
+		t.Fatal("session disable must prune the registered tool")
+	}
+
+	// body 形态：恢复（全局启用 → 清除覆盖并回到全局面）。
+	recorder = doWebMCPRequest(t, HandleChatWebAPIMCP, http.MethodPost, ChatWebAPIMCPsPath+"/local-fs/enable", `{"session":true}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("enable status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	body = map[string]interface{}{}
+	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+	if got := body["session_state"]; got != nil && got != "" {
+		t.Fatalf("session_state after restore = %v", got)
+	}
+	if _, ok := sessionMCPOverrideLookup(session, "local-fs"); ok {
+		t.Fatal("enable must clear the override for a globally enabled server")
+	}
+	if persistedCalls != 0 {
+		t.Fatal("session scope must not touch the persisted admin service")
+	}
+
+	// 未知 server：400，且不得回落到持久化路径。
+	recorder = doWebMCPRequest(t, HandleChatWebAPIMCP, http.MethodPost, ChatWebAPIMCPsPath+"/ghost/disable?scope=session", "")
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("ghost status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if persistedCalls != 0 {
+		t.Fatal("session scope must not fall back to the persisted admin service")
+	}
+}
+
+// 列表与单配置查询暴露会话级状态（disabled / temp）。
+func TestHandleChatWebAPIMCPs_SessionStateExposed(t *testing.T) {
+	withoutProcessMCPManager(t)
+	session := newSessionScopeTestSession()
+	session.MCPSessionOverrides = map[string]bool{"local-fs": false}
+	installWebMCPTestSession(t, session)
+
+	withFakeWebMCPAdmin(t, &fakeWebMCPAdmin{items: []mcpadmin.Item{{
+		Config: mcpconfig.MCPConfig{Name: "local-fs", Type: "stdio", Enabled: true},
+	}}})
+
+	recorder := doWebMCPRequest(t, HandleChatWebAPIMCPs, http.MethodGet, ChatWebAPIMCPsPath, "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	scope, _ := body["session"].(map[string]interface{})
+	if scope == nil {
+		t.Fatalf("session block missing: %v", body)
+	}
+	disabled, _ := scope["disabled"].([]interface{})
+	found := false
+	for _, name := range disabled {
+		if name == "local-fs" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("session.disabled = %v", scope["disabled"])
+	}
+
+	recorder = doWebMCPRequest(t, HandleChatWebAPIMCP, http.MethodGet, ChatWebAPIMCPsPath+"/local-fs", "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("get status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	body = map[string]interface{}{}
+	_ = json.Unmarshal(recorder.Body.Bytes(), &body)
+	if body["session_state"] != "disabled" {
+		t.Fatalf("session_state = %v", body["session_state"])
+	}
+}

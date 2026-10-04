@@ -15,6 +15,8 @@ import type {
   RuntimeMcpToolToggleResponse,
   RuntimeMcpUpsertRequest,
   RuntimeMcpUpsertResponse,
+  RuntimeSessionMcpScopeResponse,
+  RuntimeSessionMcpToggleResponse,
 } from "@/types/runtime";
 
 import { buildRuntimeUrl, fetchRuntimeJson } from "./shared";
@@ -192,4 +194,142 @@ export async function setRuntimeMcpToolsEnabled(
       body: JSON.stringify({ tools }),
     },
   );
+}
+
+// ---- 会话级覆盖（不写配置文件；与 CLI `--session` / chat web `?scope=session` 同语义） ----
+
+/** 会话级 MCP 覆盖 URL；sessionId 可能含空格/斜杠，必须整段编码。 */
+export function buildRuntimeSessionMcpsUrl(sessionId: string) {
+  return buildRuntimeUrl(
+    `/api/runtime/sessions/${encodeURIComponent(sessionId)}/runtime/mcps`,
+  );
+}
+
+/** 单个 server 的会话级资源 URL；name 与 sessionId 同纪律整段编码。 */
+export function buildRuntimeSessionMcpUrl(sessionId: string, name: string) {
+  return `${buildRuntimeSessionMcpsUrl(sessionId)}/${encodeURIComponent(name)}`;
+}
+
+export function buildRuntimeSessionMcpEnableUrl(
+  sessionId: string,
+  name: string,
+) {
+  return `${buildRuntimeSessionMcpUrl(sessionId, name)}/enable`;
+}
+
+export function buildRuntimeSessionMcpDisableUrl(
+  sessionId: string,
+  name: string,
+) {
+  return `${buildRuntimeSessionMcpUrl(sessionId, name)}/disable`;
+}
+
+/**
+ * 会话级覆盖清单归一化：`disabled` 缺失或不是数组时抛错——
+ * 与全局列表同纪律，契约回归不能被 UI 伪装成「无覆盖」。
+ */
+export async function listRuntimeSessionMcps(sessionId: string) {
+  const payload = await fetchRuntimeJson<RuntimeSessionMcpScopeResponse>(
+    buildRuntimeSessionMcpsUrl(sessionId),
+  );
+  if (!payload || !Array.isArray(payload.disabled)) {
+    throw new Error(
+      "invalid runtime session MCP payload: disabled must be an array",
+    );
+  }
+  const disabled = payload.disabled.filter(
+    (name): name is string => typeof name === "string" && name.trim() !== "",
+  );
+  const mcps = Array.isArray(payload.mcps)
+    ? payload.mcps.filter(
+        (entry): entry is NonNullable<typeof entry> =>
+          Boolean(entry && typeof entry === "object" && entry.config),
+      )
+    : undefined;
+  return {
+    session_id:
+      typeof payload.session_id === "string" ? payload.session_id : sessionId,
+    disabled,
+    count: typeof payload.count === "number" ? payload.count : disabled.length,
+    ...(payload.scope ? { scope: payload.scope } : {}),
+    ...(mcps ? { mcps } : {}),
+    ...(payload.summary ? { summary: payload.summary } : {}),
+  } satisfies RuntimeSessionMcpScopeResponse;
+}
+
+/**
+ * 会话级启停：POST 到 /sessions/{id}/runtime/mcps/{name}/enable|disable，无请求体。
+ *
+ * scope="session"（默认）只影响当前会话；enable 仅清除覆盖（停用的 server 由
+ * 后端返回 409）。scope="workspace" 表示持久化写入会话生效的配置文件并热重载
+ * （工作区锚定时写工作区 mcp.yaml，否则写进程级文件）。
+ */
+export async function setRuntimeSessionMcpEnabled(
+  sessionId: string,
+  name: string,
+  enabled: boolean,
+  scope: "session" | "workspace" = "session",
+) {
+  const base = enabled
+    ? buildRuntimeSessionMcpEnableUrl(sessionId, name)
+    : buildRuntimeSessionMcpDisableUrl(sessionId, name);
+  const url = scope === "workspace" ? `${base}?scope=workspace` : base;
+  return fetchRuntimeJson<RuntimeSessionMcpToggleResponse>(
+    url,
+    { method: "POST" },
+  );
+}
+
+// ---- 会话配置文件管理（写工作区/进程级 mcp.yaml；后端 Add/Update/Remove/Reload） ----
+
+/** 在会话生效的配置文件中新增 MCP。 */
+export async function createRuntimeSessionMcp(
+  sessionId: string,
+  request: RuntimeMcpUpsertRequest,
+) {
+  return fetchRuntimeJson<RuntimeMcpUpsertResponse>(
+    buildRuntimeSessionMcpsUrl(sessionId),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+}
+
+/** 更新会话配置文件中的 MCP。 */
+export async function updateRuntimeSessionMcp(
+  sessionId: string,
+  name: string,
+  request: RuntimeMcpUpsertRequest,
+) {
+  return fetchRuntimeJson<RuntimeMcpUpsertResponse>(
+    buildRuntimeSessionMcpUrl(sessionId, name),
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+  );
+}
+
+/** 删除会话配置文件中的 MCP。 */
+export async function deleteRuntimeSessionMcp(
+  sessionId: string,
+  name: string,
+) {
+  return fetchRuntimeJson<{ name: string; removed: boolean }>(
+    buildRuntimeSessionMcpUrl(sessionId, name),
+    { method: "DELETE" },
+  );
+}
+
+/** 热重载会话生效的配置文件（工作区 manager 原地重连）。 */
+export async function reloadRuntimeSessionMcps(sessionId: string) {
+  return fetchRuntimeJson<{
+    session_id: string;
+    reloaded: boolean;
+    scope: string;
+    path: string;
+  }>(`${buildRuntimeSessionMcpsUrl(sessionId)}/reload`, { method: "POST" });
 }

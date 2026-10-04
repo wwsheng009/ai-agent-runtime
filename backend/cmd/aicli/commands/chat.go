@@ -167,6 +167,13 @@ type ChatSession struct {
 	KeyHandler                      *ui.KeyHandler               // 键盘事件处理器（ESC 键中断）
 	MCPEnabled                      bool                         // 是否启用 MCP
 	MCPStatus                       *MCPStatus                   // MCP 状态
+	// MCPSessionOverrides 是会话级 MCP 启停覆盖（server 名 → 期望启用状态）。
+	// 仅内存、不落盘：只影响本会话工具面（/mcp enable|disable <name> --session）。
+	// nil 表示无覆盖（全部跟随全局/进程态）。
+	MCPSessionOverrides map[string]bool
+	// mcpSessionTemp 持有「全局停用、仅本会话临时启用」的会话私有 MCP 运行时；
+	// 临时连接不写入配置文件，会话结束（或 /new）时回收。
+	mcpSessionTemp *sessionMCPTempRuntime
 	// ACPMCPSession 是 ACP 会话私有的 MCP 运行时（客户端下发来源）。
 	// 非 ACP 会话恒为 nil；会话关闭/删除时负责回收其子进程。
 	ACPMCPSession *acpSessionMCP
@@ -1879,6 +1886,9 @@ func runChatLoop(session *ChatSession, noInteractive bool, initialMessage string
 		// turn 边界：登记后台项目扫描完成后迟到的 LSP 工具（挂池发生在扫描
 		// goroutine，登记只能发生在会话 turn goroutine 上，见 chat_lsp_bootstrap.go）。
 		prepareLateLSPToolSurface(session)
+		// 同一 turn 边界：应用会话级 MCP 覆盖（临时连接的迟到工具登记 +
+		// 被本会话停用 server 的函数撤销；见 chat_mcp_session_scope.go）。
+		refreshSessionScopedMCP(session)
 
 		// 处理 Shell 命令（! 前缀）
 		if strings.HasPrefix(input, "!") {

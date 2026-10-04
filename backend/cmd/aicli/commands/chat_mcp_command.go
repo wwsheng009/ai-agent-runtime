@@ -25,7 +25,10 @@ const chatMCPCommandUsage = `用法:
        --description <text> | --disabled
   /mcp add <name> --command <cmd> [--arg <arg>]...   新增 stdio 传输
   /mcp add-json <name> <JSON|@文件>       用一段 JSON 新增/更新（可粘 Claude/Cursor 片段）
-  /mcp enable <name> | disable <name>     启用/停用并热重载
+  /mcp enable <name> | disable <name> [--session]
+                                          启用/停用（默认写配置并热重载；
+                                          --session 仅本会话生效、不写配置；
+                                          全局停用时可 --session 临时连接）
   /mcp remove <name>                      删除并热重载
   /mcp reload                             重新加载配置并重连
   /mcp auth                               查看各 OAuth server 的授权状态
@@ -56,39 +59,49 @@ func newChatMCPService() chatMCPService {
 	return mcpadmin.NewService(resolveMCPConfigPathForWrite(), options...)
 }
 
-// refreshChatMCPTools 把最新 MCP 工具重新注册进当前会话的 FunctionRegistry；
+// refreshChatMCPTools 把最新 MCP 工具重新注册进当前会话的 FunctionRegistry，
+// 并应用会话级覆盖（临时连接登记 + 已停用 server 的函数撤销）；
 // 失败不阻断命令输出（下一次注册或重启会话会覆盖）。
 func refreshChatMCPTools(session *ChatSession) {
-	if session == nil || session.FunctionRegistry == nil || MCPManagerInstance == nil {
+	if session == nil {
 		return
 	}
-	_ = registerMCPTools(session.FunctionRegistry)
+	if session.FunctionRegistry != nil {
+		_ = registerMCPTools(session.FunctionRegistry, session)
+	}
+	refreshSessionScopedMCP(session)
 }
 
 func chatMCPCommandText(command string) string {
-	return chatMCPCommandTextWithService(command, newChatMCPService(), nil)
+	return chatMCPCommandTextWithSessionService(nil, command, newChatMCPService(), nil)
 }
 
 // chatMCPCommandTextWithService 解析并执行 /mcp 子命令，返回纯文本结果；
 // onMutate 在写操作成功后回调（用于刷新会话工具注册表）。
 func chatMCPCommandTextWithService(command string, service chatMCPService, onMutate func()) string {
+	return chatMCPCommandTextWithSessionService(nil, command, service, onMutate)
+}
+
+// chatMCPCommandTextWithSessionService 与 chatMCPCommandTextWithService 同逻辑，
+// 额外携带当前会话以支持 `--session` 会话级启停与列表标注。
+func chatMCPCommandTextWithSessionService(session *ChatSession, command string, service chatMCPService, onMutate func()) string {
 	args := splitChatCommandFields(extractCommandArgument(command))
 	if len(args) == 0 {
-		return chatMCPListText(service)
+		return chatMCPListTextWithSession(service, session)
 	}
 	switch strings.ToLower(args[0]) {
 	case "help", "-h", "--help":
 		return chatMCPCommandUsage
 	case "list", "ls":
-		return chatMCPListText(service)
+		return chatMCPListTextWithSession(service, session)
 	case "select", "pick", "menu", "choose":
 		// 无可用全屏表面时的降级：回到列表面板（与 bare /mcp 同口径）。
-		return chatMCPListText(service)
+		return chatMCPListTextWithSession(service, session)
 	case "status", "show", "info":
 		if len(args) < 2 {
 			return "错误: 需要指定 MCP 名称\n用法: /mcp status <name>"
 		}
-		return chatMCPStatusText(service, args[1])
+		return chatMCPStatusTextWithSession(service, args[1], session)
 	case "add":
 		return chatMCPAddText(service, args[1:], onMutate)
 	case "add-json":
@@ -103,15 +116,24 @@ func chatMCPCommandTextWithService(command string, service chatMCPService, onMut
 			return service.Remove(ctx, name)
 		})
 	case "enable", "disable":
-		if len(args) < 2 {
-			return "错误: 需要指定 MCP 名称\n用法: /mcp " + strings.ToLower(args[0]) + " <name>"
-		}
 		enabled := strings.ToLower(args[0]) == "enable"
+		name, sessionScoped, errText := parseChatMCPToggleArgs(args[1:], args[0])
+		if errText != "" {
+			return errText
+		}
+		if sessionScoped {
+			// 仅本会话：不写配置文件；全局停用的 server 走会话私有临时连接。
+			text, mutated := chatMCPSessionToggleText(session, name, enabled)
+			if mutated && onMutate != nil {
+				onMutate()
+			}
+			return text
+		}
 		action := "启用"
 		if !enabled {
 			action = "停用"
 		}
-		return chatMCPMutationText(service, onMutate, action, args[1], func(ctx context.Context, name string) error {
+		return chatMCPMutationText(service, onMutate, action, name, func(ctx context.Context, name string) error {
 			_, err := service.SetEnabled(ctx, name, enabled)
 			return err
 		})
@@ -127,6 +149,11 @@ func chatMCPCommandTextWithService(command string, service chatMCPService, onMut
 }
 
 func chatMCPListText(service chatMCPService) string {
+	return chatMCPListTextWithSession(service, nil)
+}
+
+// chatMCPListTextWithSession 渲染 MCP 列表；session 非 nil 时附加会话级覆盖标注。
+func chatMCPListTextWithSession(service chatMCPService, session *ChatSession) string {
 	if service == nil {
 		return "错误: MCP 管理服务不可用"
 	}
@@ -156,6 +183,9 @@ func chatMCPListText(service chatMCPService) string {
 	}
 	for _, item := range items {
 		lines = append(lines, chatMCPItemLines(item)...)
+		if label := sessionMCPStateLabel(session, item.Config.Name); label != "" {
+			lines = append(lines, "    "+label)
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -226,6 +256,11 @@ func chatMCPEndpoint(cfg config.MCPConfig) string {
 }
 
 func chatMCPStatusText(service chatMCPService, name string) string {
+	return chatMCPStatusTextWithSession(service, name, nil)
+}
+
+// chatMCPStatusTextWithSession 渲染单个 MCP 状态；session 非 nil 时附加会话覆盖。
+func chatMCPStatusTextWithSession(service chatMCPService, name string, session *ChatSession) string {
 	if service == nil {
 		return "错误: MCP 管理服务不可用"
 	}
@@ -281,6 +316,9 @@ func chatMCPStatusText(service chatMCPService, name string) string {
 			appendField("最近错误", strings.TrimSpace(item.Status.LastError))
 			break
 		}
+	}
+	if label := sessionMCPStateLabel(session, cfg.Name); label != "" {
+		appendField("会话覆盖", label)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -440,6 +478,25 @@ func parseChatMCPAddOptions(args []string) (chatMCPAddOptions, string) {
 	return opts, ""
 }
 
+// parseChatMCPToggleArgs 解析 enable/disable 的位置参数：<name> 与可选的 --session。
+func parseChatMCPToggleArgs(args []string, subcommand string) (name string, sessionScoped bool, errText string) {
+	for _, token := range args {
+		switch token {
+		case "--session", "-s":
+			sessionScoped = true
+		default:
+			if name != "" {
+				return "", sessionScoped, "错误: 多余的参数 " + token + "\n" + chatMCPCommandUsage
+			}
+			name = strings.TrimSpace(token)
+		}
+	}
+	if name == "" {
+		return "", sessionScoped, "错误: 需要指定 MCP 名称\n用法: /mcp " + strings.ToLower(strings.TrimSpace(subcommand)) + " <name> [--session]"
+	}
+	return name, sessionScoped, ""
+}
+
 func chatMCPResolveTransport(opts chatMCPAddOptions) string {
 	if explicit := strings.TrimSpace(opts.transport); explicit != "" {
 		return mcpadmin.NormalizeTransportType(explicit)
@@ -540,7 +597,7 @@ func executeStructuredMCPCommand(session *ChatSession, command string) CommandRe
 			}),
 		}
 	}
-	text := chatMCPCommandTextWithService(command, newChatMCPService(), func() {
+	text := chatMCPCommandTextWithSessionService(session, command, newChatMCPService(), func() {
 		refreshChatMCPTools(session)
 	})
 	if id, title, ok := chatMCPReadOnlyScreenIdentity(command); ok && unifiedDirectInteractiveOutput(session) {

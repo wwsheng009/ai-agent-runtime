@@ -3,6 +3,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
+import { TabSwitcher } from "@/components/ui/tab-switcher";
 import { getAnalyticsSessionUsage } from "@/lib/runtime-api";
 import { cn } from "@/lib/utils";
 import { CacheAnalyticsPanel } from "@/pages/cache-analytics-page";
@@ -14,7 +15,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { diagnosticDetailKey, diagnosticTitleKey, errorCategoryKey, errorRate, formatDimensionTick, formatDuration, formatFirstToken, formatNumber, formatPercent, formatTimestamp, outcomeKey, outcomeTone, readAdminToken, reconciliationKey, shortID, statusTone, titleSourceKey } from "./format";
 import { ErrorPatternsPanel } from "./error-patterns-panel";
-import { AnalyticsHeader, Metric, QualityBadge, QualityNotice, TabButton } from "./primitives";
+import { AnalyticsHeader, Metric, QualityBadge, QualityNotice } from "./primitives";
 import { SubagentStatsPanel } from "./subagent-stats-panel";
 import { ToolStatsPanel } from "./tool-stats-panel";
 import { RoutingObservabilityPanel } from "./routing-observability-panel";
@@ -229,14 +230,16 @@ export function SessionDetail() {
                   </div>
                   <p className="mt-1 break-all text-xs leading-5 text-muted-foreground">{detail.session.session_id} · {detail.session.provider || "-"} / {detail.session.model || "-"} · {detail.session.project || t("status.unknown")} · {detail.session.directory || "-"} · {formatTimestamp(detail.session.start_time)}</p>
                 </div>
-                <div className="flex items-center gap-1 rounded-[0.75rem] border border-border bg-surface-softer p-1" role="tablist" aria-label={t("detail.tabs.label")}>
-                  <TabButton active={tab === "overview"} onClick={() => selectTab("overview")}>{t("detail.tabs.overview")}</TabButton>
-                  <TabButton active={tab === "tokens"} onClick={() => selectTab("tokens")}>{t("detail.tabs.tokens")}</TabButton>
-                  <TabButton active={tab === "tools"} onClick={() => selectTab("tools")}>{t("detail.tabs.tools")}</TabButton>
-                  <TabButton active={tab === "subagents"} onClick={() => selectTab("subagents")}>{t("detail.tabs.subagents")}</TabButton>
-                  <TabButton active={tab === "routing"} onClick={() => selectTab("routing")}>{t("detail.tabs.routing")}</TabButton>
-                  <TabButton active={tab === "diagnostics"} onClick={() => selectTab("diagnostics")}>{t("detail.tabs.diagnostics")}</TabButton>
-                </div>
+                <TabSwitcher
+                  ariaLabel={t("detail.tabs.label")}
+                  className="shrink-0"
+                  items={sessionTabs.map((item) => ({
+                    id: item,
+                    label: t(`detail.tabs.${item}`),
+                  }))}
+                  onChange={selectTab}
+                  value={tab}
+                />
               </section>
               <QualityNotice coverage={detail.coverage} partial={detail.partial} reasons={detail.partial_reasons} />
               {tab === "overview" ? <SessionOverview detail={detail} /> : null}

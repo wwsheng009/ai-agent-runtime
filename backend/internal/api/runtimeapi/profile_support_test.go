@@ -15,7 +15,7 @@ func TestResolveProfileMCPAdapter_ProvidesLocalToolkitWithoutConfiguredMCP(t *te
 	runtimeConfig := runtimecfg.DefaultRuntimeConfig()
 	runtimeConfig.Workspace.Root = t.TempDir()
 
-	adapter, manager, err := handler.resolveProfileMCPAdapter(context.Background(), nil, runtimeConfig)
+	adapter, manager, err := handler.resolveProfileMCPAdapter(context.Background(), nil, runtimeConfig, handler.profileGlobalMCPPath, handler.mcpManager)
 	if err != nil {
 		t.Fatalf("resolveProfileMCPAdapter failed: %v", err)
 	}

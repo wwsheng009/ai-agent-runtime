@@ -22,6 +22,9 @@ type runtimeServerGoalToolSessionContext struct {
 
 func (h *Handler) runtimeServerToolSurfaceForSession(ctx context.Context, sessionID string, next skill.MCPManager, enabled bool) skill.MCPManager {
 	sessionID = strings.TrimSpace(sessionID)
+	// 会话级 MCP 覆盖（/sessions/{id}/runtime/mcps 启停）叠加在共享 manager 之上：
+	// 工具列表与工具执行都经同一包装器过滤，且包装器动态读取覆盖（构造期快照不固化）。
+	next = h.sessionScopedMCPSurface(ctx, sessionID, next)
 	if !enabled || !h.runtimeServerGoalToolsAvailable(ctx, sessionID) {
 		return next
 	}

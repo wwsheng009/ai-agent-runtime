@@ -246,6 +246,3 @@ export function QualityBadge({ quality, coverage, partial }: { quality: string; 
   );
 }
 
-export function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
-  return <button type="button" role="tab" aria-selected={active} onClick={onClick} className={cn("rounded-[0.6rem] border px-3 py-1.5 text-sm transition", active ? "border-accent-primary-border bg-accent-primary-soft text-foreground" : "border-transparent text-muted-foreground hover:bg-surface-soft hover:text-foreground")}>{children}</button>;
-}

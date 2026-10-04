@@ -26,16 +26,26 @@ import {
   type ProviderImportResultSummary,
 } from "./runtime-provider-domain-editor/provider-import-dialog";
 import { type ProviderModelsAction } from "./runtime-provider-domain-editor/provider-models-section";
+import { ProviderModelWorkspace } from "./runtime-provider-domain-editor/provider-model-workspace";
 import { ProviderTable } from "./runtime-provider-domain-editor/provider-table";
 import { useProviderModelsActions } from "./runtime-provider-domain-editor/use-provider-models-actions";
 import { type ProviderDraftInput } from "./runtime-provider-domain-form-utils";
 import { SettingsNoticeCard } from "./settings-notice-card";
+import { SettingsTabBar } from "./settings-tab-bar";
 
 type RuntimeProviderDomainEditorProps = {
   defaultProvider: string;
   onApplyProviderAccountFields?: (
     name: string,
     fields: Record<string, unknown>,
+  ) => void;
+  /** 「模型配置」Tab 的覆盖写入口：把模型列表与能力草稿写回页面配置草稿。 */
+  onApplyProviderModels: (
+    name: string,
+    fields: {
+      model_capabilities: Record<string, unknown>;
+      supported_models: string[];
+    },
   ) => void;
   onDeleteProvider: (name: string) => void;
   onSaveProvider: (
@@ -49,12 +59,14 @@ type RuntimeProviderDomainEditorProps = {
 export function RuntimeProviderDomainEditor({
   defaultProvider,
   onApplyProviderAccountFields,
+  onApplyProviderModels,
   onDeleteProvider,
   onSaveProvider,
   onSetDefaultProvider,
   providers,
 }: RuntimeProviderDomainEditorProps) {
   const { t } = useTranslation("runtimeConfig");
+  const [activeTab, setActiveTab] = useState<"list" | "models">("list");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [accountBusy, setAccountBusy] = useState<AccountAction>(null);
@@ -386,27 +398,53 @@ export function RuntimeProviderDomainEditor({
           <SettingsNoticeCard tone="warning-soft">{rowNotice}</SettingsNoticeCard>
         </div>
       ) : null}
-      <ProviderTable
-        copiedProviderName={copiedProviderName}
-        defaultProvider={defaultProvider}
-        enabledCount={enabledCount}
-        onCopyProvider={(provider) => void handleCopyProvider(provider)}
-        onCreateProvider={openCreateDialog}
-        onDeleteProvider={onDeleteProvider}
-        onEditProvider={openEditDialog}
-        onImportProvider={() => setImportOpen(true)}
-        onRefreshProviderAccount={(name) => void handleRefreshProviderAccount(name)}
-        onSetDefaultProvider={onSetDefaultProvider}
-        providers={providers}
-        rowBusyName={rowBusyName}
+
+      <SettingsTabBar
+        ariaLabel={t("editor.providers.pageTabs.aria")}
+        className="sticky top-2 z-20 mb-3"
+        items={[
+          {
+            id: "list",
+            label: t("editor.providers.pageTabs.list"),
+            badge: providers.length > 0 ? String(providers.length) : undefined,
+          },
+          { id: "models", label: t("editor.providers.pageTabs.models") },
+        ]}
+        value={activeTab}
+        onChange={setActiveTab}
       />
 
-      <ProviderImportDialog
-        defaultProvider={defaultProvider}
-        onClose={() => setImportOpen(false)}
-        onImport={handleImportedProvider}
-        open={importOpen}
-      />
+      {activeTab === "list" ? (
+        <>
+          <ProviderTable
+            copiedProviderName={copiedProviderName}
+            defaultProvider={defaultProvider}
+            enabledCount={enabledCount}
+            onCopyProvider={(provider) => void handleCopyProvider(provider)}
+            onCreateProvider={openCreateDialog}
+            onDeleteProvider={onDeleteProvider}
+            onEditProvider={openEditDialog}
+            onImportProvider={() => setImportOpen(true)}
+            onRefreshProviderAccount={(name) => void handleRefreshProviderAccount(name)}
+            onSetDefaultProvider={onSetDefaultProvider}
+            providers={providers}
+            rowBusyName={rowBusyName}
+          />
+
+          <ProviderImportDialog
+            defaultProvider={defaultProvider}
+            onClose={() => setImportOpen(false)}
+            onImport={handleImportedProvider}
+            open={importOpen}
+          />
+        </>
+      ) : (
+        <ProviderModelWorkspace
+          defaultProvider={defaultProvider}
+          onApplyProviderModels={onApplyProviderModels}
+          providers={providers}
+        />
+      )}
 
       <ProviderDialog
         accountBusy={accountBusy}

@@ -284,11 +284,40 @@ type MCPConfigResolution struct {
 // ResolveMCPConfigPathDetailed mirrors ResolveMCPConfigPath and additionally
 // reports the winning layer (explicit/project/user/upward/executable/default)
 // plus the candidate list with per-candidate existence checks.
+//
+// The discovery chain is anchored at the process working directory; callers that
+// resolve on behalf of a session/workspace must use ResolveMCPConfigPathDetailedFrom.
 func ResolveMCPConfigPathDetailed(explicitPath string) MCPConfigResolution {
+	return ResolveMCPConfigPathDetailedFrom("", explicitPath)
+}
+
+// ResolveMCPConfigPathDetailedFrom is ResolveMCPConfigPathDetailed anchored at
+// baseDir instead of the process working directory (baseDir == "" keeps the
+// historical os.Getwd() anchor).
+//
+// It is the single shared resolver for every entry point that must follow a
+// session/workspace directory (runtime-server sessions, aicli chat): the
+// local/project/upward/default candidates are re-anchored, while user/executable
+// stay global. A real explicit override still wins for every base.
+func ResolveMCPConfigPathDetailedFrom(baseDir string, explicitPath string) MCPConfigResolution {
 	resolution := MCPConfigResolution{}
 	filename := DefaultMCPConfigFileName
 	portableDefault := DefaultMCPConfigRelativePath
 	searchPaths := []string{DefaultMCPConfigRelativePath}
+
+	base := strings.TrimSpace(baseDir)
+	baseProvided := base != ""
+	if base == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			base = cwd
+		}
+	}
+	if base != "" {
+		if absolute, err := filepath.Abs(base); err == nil {
+			base = absolute
+		}
+		base = filepath.Clean(base)
+	}
 
 	explicit := expandExplicitConfigPath(explicitPath)
 	// Unset aicli.mcp.config_file is discovery mode (see ResolveMCPConfigPath):
@@ -321,30 +350,33 @@ func ResolveMCPConfigPathDetailed(explicitPath string) MCPConfigResolution {
 	// local 层（个人为当前项目追加的私有配置）优先级最高：CommandCode 语义为
 	// local > project > user，且该文件位于用户目录（不随仓库分发、不受 foldertrust
 	// 项目门限制）。只有写入过 --scope local 时才会存在。
-	if cwd, err := os.Getwd(); err == nil {
-		if localPath, err := LocalMCPConfigPath(cwd); err == nil {
+	if base != "" {
+		if localPath, err := LocalMCPConfigPath(base); err == nil {
 			addCandidate(localPath, "local")
 		}
-	}
-	if cwd, err := os.Getwd(); err == nil {
-		addCandidate(filepath.Join(cwd, ".aicli", filename), "project")
+		addCandidate(filepath.Join(base, ".aicli", filename), "project")
 	}
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 		addCandidate(filepath.Join(home, ".aicli", filename), "user")
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		addCandidate(resolveDefaultConfigPathFromBase(cwd, filename, searchPaths), "upward")
+	if base != "" {
+		addCandidate(resolveDefaultConfigPathFromBase(base, filename, searchPaths), "upward")
 	}
 	if executable, err := os.Executable(); err == nil {
 		addCandidate(resolveDefaultConfigPathFromBase(filepath.Dir(executable), filename, searchPaths), "executable")
 	}
-	addCandidate(portableDefault, "default")
+	if baseProvided {
+		// 显式给出基准目录时，default 相对该目录解析（避免相对路径落到进程 cwd）。
+		addCandidate(filepath.Join(base, portableDefault), "default")
+	} else {
+		addCandidate(portableDefault, "default")
+	}
 
 	switch {
 	case realOverride:
 		resolution.Path, resolution.Source = explicit, "explicit"
 	default:
-		if path, source := firstExistingMCPConfigCandidate(filename, searchPaths); path != "" {
+		if path, source := firstExistingMCPConfigCandidateFrom(base, filename, searchPaths); path != "" {
 			resolution.Path, resolution.Source = path, source
 		} else if !discoverOnly {
 			resolution.Path, resolution.Source = explicit, "explicit"
@@ -353,18 +385,17 @@ func ResolveMCPConfigPathDetailed(explicitPath string) MCPConfigResolution {
 	return resolution
 }
 
-// firstExistingMCPConfigCandidate reports the first existing config among the
-// non-explicit priority layers, mirroring ResolveConfigFilePath's ordering.
-func firstExistingMCPConfigCandidate(filename string, searchPaths []string) (string, string) {
-	if cwd, err := os.Getwd(); err == nil {
-		if localPath, err := LocalMCPConfigPath(cwd); err == nil {
+// firstExistingMCPConfigCandidateFrom reports the first existing config among
+// the non-explicit priority layers for the given anchor, mirroring
+// ResolveConfigFilePath's ordering.
+func firstExistingMCPConfigCandidateFrom(base, filename string, searchPaths []string) (string, string) {
+	if base != "" {
+		if localPath, err := LocalMCPConfigPath(base); err == nil {
 			if path := firstExistingConfigFile(localPath); path != "" {
 				return path, "local"
 			}
 		}
-	}
-	if cwd, err := os.Getwd(); err == nil {
-		if path := firstExistingConfigFile(filepath.Join(cwd, ".aicli", filename)); path != "" {
+		if path := firstExistingConfigFile(filepath.Join(base, ".aicli", filename)); path != "" {
 			return path, "project"
 		}
 	}
@@ -373,8 +404,8 @@ func firstExistingMCPConfigCandidate(filename string, searchPaths []string) (str
 			return path, "user"
 		}
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		if path := resolveDefaultConfigPathFromBase(cwd, filename, searchPaths); path != "" {
+	if base != "" {
+		if path := resolveDefaultConfigPathFromBase(base, filename, searchPaths); path != "" {
 			return path, "upward"
 		}
 	}

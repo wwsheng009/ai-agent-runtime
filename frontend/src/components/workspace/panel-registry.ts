@@ -16,6 +16,7 @@ import {
   HistoryIcon,
   IdCardIcon,
   ScrollTextIcon,
+  ServerIcon,
 } from "lucide-react";
 import {
   type WorkspaceThreadRelationKind,
@@ -30,7 +31,8 @@ export type WorkspacePanelSurfaceId =
   | "plans"
   | "files"
   | "git"
-  | "sessionDetail";
+  | "sessionDetail"
+  | "sessionMcp";
 
 /** tone 只决定页签配色；没有专属配色的新面复用 `artifact`。 */
 export type WorkspacePanelSurfaceTone =
@@ -165,6 +167,22 @@ export const WORKSPACE_PANEL_SURFACES: readonly WorkspacePanelSurfaceSpec[] = [
     surface: lazySurface(() =>
       import("@/components/workspace/session-detail-surface").then((module) => ({
         default: module.SessionDetailSurface,
+      })),
+    ),
+  },
+  {
+    // 会话级 MCP 工具面：按会话启停（不写配置），与 CLI `--session` / chat web
+    // `?scope=session`、runtime-server `/sessions/{id}/runtime/mcps` 同一语义。
+    id: "sessionMcp",
+    labelKey: "panels.sessionMcp.tabLabel",
+    icon: ServerIcon,
+    tone: "artifact",
+    requiresSession: true,
+    widthClass: "content",
+    disabledReasonKey: "panels.shell.panelTabs.disabledNoSession",
+    surface: lazySurface(() =>
+      import("@/components/workspace/session-mcp-surface").then((module) => ({
+        default: module.SessionMcpSurface,
       })),
     ),
   },

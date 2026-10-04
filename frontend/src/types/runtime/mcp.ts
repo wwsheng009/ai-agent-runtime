@@ -80,9 +80,43 @@ export type RuntimeMcpEntry = {
   status: RuntimeMcpStatus;
 };
 
+/** 单个候选配置文件（后端按优先级从高到低给出）。 */
+export type RuntimeMcpConfigCandidate = {
+  path: string;
+  source: string;
+  exists: boolean;
+};
+
+/** GET /api/runtime/mcps 附带的解析诊断（等价后端 mcpadmin.ConfigDiagnostics）。 */
+export type RuntimeMcpConfigDiagnostics = {
+  /** 生效的配置文件路径（管理面读写与重载都锚定它）。 */
+  path: string;
+  /** 命中的优先级层（explicit/local/project/user/upward/executable/default/user-fallback）。 */
+  source?: string;
+  exists: boolean;
+  size_bytes?: number;
+  mod_time?: string;
+  /** 运行中的 manager 是否已加载该文件。 */
+  manager_loaded: boolean;
+  candidates?: RuntimeMcpConfigCandidate[];
+};
+
+/** 列表汇总（等价后端 mcpadmin.Summarize）。 */
+export type RuntimeMcpListSummary = {
+  total: number;
+  enabled: number;
+  disabled: number;
+  connected: number;
+  tools: number;
+};
+
 export type RuntimeMcpListResponse = {
   count: number;
   mcps: RuntimeMcpEntry[];
+  /** 配置解析诊断；旧后端省略。 */
+  config?: RuntimeMcpConfigDiagnostics;
+  /** 汇总统计；旧后端省略。 */
+  summary?: RuntimeMcpListSummary;
 };
 
 /**
@@ -161,4 +195,59 @@ export type RuntimeMcpToolsBulkToggleResponse = {
   name: string;
   enabled: boolean;
   tools: string[];
+};
+
+/** 会话 MCP 配置面：读/写目标与工作区锚定信息（GET 会话 MCP 列表附带）。 */
+export type RuntimeSessionMcpScope = {
+  /** 会话绑定的工作区目录；空串 = 未绑定（读写都走进程级）。 */
+  workspace: string;
+  /** 写目标是会话工作区锚定的配置文件。 */
+  workspace_scoped: boolean;
+  /** 当前生效面回退到进程级（工作区还没有配置文件）。 */
+  workspace_fallback: boolean;
+  read: { path: string; source: string; exists: boolean };
+  write: { path: string; source: string; exists: boolean };
+  candidates?: RuntimeMcpConfigCandidate[];
+};
+
+/** 会话 MCP 列表条目：配置/状态 + 来源 + 本会话覆盖标记。 */
+export type RuntimeSessionMcpEntry = RuntimeMcpEntry & {
+  source?: "workspace" | "global";
+  session_disabled?: boolean;
+};
+
+/**
+ * 会话 MCP 列表（GET /api/runtime/sessions/{id}/runtime/mcps）。
+ *
+ * `mcps`/`scope`/`summary` 是 2026-10 增强字段（会话实际生效的工作区配置面）；
+ * 旧后端只返回 disabled/count，前端按「全局面回退」渲染。
+ */
+export type RuntimeSessionMcpScopeResponse = {
+  session_id: string;
+  /** 本会话停用的 MCP server 名；空数组 = 全部全局面。 */
+  disabled: string[];
+  count: number;
+  scope?: RuntimeSessionMcpScope;
+  mcps?: RuntimeSessionMcpEntry[];
+  summary?: RuntimeMcpListSummary;
+};
+
+/**
+ * 会话级启停响应
+ * （POST /api/runtime/sessions/{id}/runtime/mcps/{name}/enable|disable）。
+ *
+ * 不写配置文件；enable 对全局停用的 server 返回 409（暂不支持会话级临时连接）。
+ */
+export type RuntimeSessionMcpToggleResponse = {
+  session_id: string;
+  name: string;
+  enabled: boolean;
+  /** session = 仅本会话覆盖；workspace/global = 持久化写入对应配置文件。 */
+  scope: "session" | "workspace" | "global";
+  /** 仅 scope=session 时返回："disabled" 或 ""（恢复全局面）。 */
+  session_state?: string;
+  changed: boolean;
+  message: string;
+  /** 持久化启停写入的文件（scope=workspace/global 时返回）。 */
+  config_path?: string;
 };

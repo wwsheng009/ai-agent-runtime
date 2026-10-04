@@ -1051,6 +1051,14 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 		Mode:       sessionruntime.ModeServer,
 	})
 
+	// 工作区锚定 MCP 解析所需的两个值必须在 buildSkillsMCPManager 之前捕获：
+	// 该函数会把 cfg.AICLI.MCP.ConfigFile 钉成解析结果，之后就区分不出原始覆盖。
+	mcpExplicitOverride := ""
+	if cfg != nil && cfg.AICLI != nil {
+		mcpExplicitOverride = config.EffectiveAICLIMCPConfigFile(cfg)
+	}
+	mcpResolution := resolveRuntimeMCPConfigResolution(cfg)
+
 	mcpAdapter, manager, err := buildSkillsMCPManager(ctx, cfg, runtimeConfig)
 	if err != nil {
 		return nil, err
@@ -1094,12 +1102,20 @@ func newRuntimeServerApp(ctx context.Context, cfg *config.Config, configPath str
 	}
 
 	handler := runtimeapi.NewHandler(bootstrapManager.Registry(), bootstrapManager.Loader(), mcpAdapter)
+	// 会话工作区锚定：会话带 workspace 时按该目录重跑发现链（与 TUI 同一内核）；
+	// 解析结果与进程级相同则不建第二实例（见 WorkspaceMCPSupportConfig）。
+	handler.SetWorkspaceMCPSupport(runtimeapi.WorkspaceMCPSupportConfig{
+		ExplicitOverride: mcpExplicitOverride,
+		GlobalPath:       mcpResolution.Path,
+		Wrap: func(m mcpmanager.Manager) runtimeskill.MCPManager {
+			return runtimetools.NewAgentAdapter(runtimetools.NewDefaultManagerWithRuntimeConfig(m, runtimeConfig))
+		},
+	})
 	if manager != nil {
-		resolution := resolveRuntimeMCPConfigResolution(cfg)
-		if resolution.Path != "" {
-			handler.SetMCPAdminService(mcpadmin.NewService(resolution.Path,
+		if mcpResolution.Path != "" {
+			handler.SetMCPAdminService(mcpadmin.NewService(mcpResolution.Path,
 				mcpadmin.WithManager(manager),
-				mcpadmin.WithConfigDiagnostics(mcpadmin.ConfigDiagnosticsFromResolution(resolution)),
+				mcpadmin.WithConfigDiagnostics(mcpadmin.ConfigDiagnosticsFromResolution(mcpResolution)),
 			))
 		}
 	}
@@ -1384,6 +1400,10 @@ func (a *runtimeServerApp) configureServiceControl(pidFile, listenAddr, configPa
 func (a *runtimeServerApp) close() {
 	if a == nil {
 		return
+	}
+	// 会话级 workspace manager 先于全局 manager 停止（两者都持有 MCP 客户端连接）。
+	if a.handler != nil {
+		a.handler.CloseWorkspaceMCPSupport()
 	}
 	if a.bootstrap != nil {
 		if err := a.bootstrap.Stop(); err != nil {

@@ -118,7 +118,7 @@ curl.exe -s -X POST http://127.0.0.1:61772/web/api/invoke `
 | POST | `/web/api/git/stage` | GIT 页签：`{"scope","path","action":"stage"\|"unstage","files":[…]}`，响应自带更新后的 status（需写令牌） |
 | GET/POST | `/web/api/mcps` | MCP 列表（`config`+`status`，并附 `config` 解析诊断与 `summary` 计数）/ 新增（写 `mcp.yaml` 并热重载） |
 | GET/PUT/DELETE | `/web/api/mcps/{name}` | 查看 / 更新 / 删除单个 MCP |
-| POST | `/web/api/mcps/{name}/enable\|disable` | 启用/停用（持久化 `enabled` + 重连，刷新会话工具） |
+| POST | `/web/api/mcps/{name}/enable\|disable` | 启用/停用（持久化 `enabled` + 重连，刷新会话工具）；带 `?scope=session`（或 body `{"session":true}`）时为**仅本会话**启停（不写配置；全局停用时临时连接） |
 | GET | `/web/api/mcps/{name}/tools` | 工具清单（含被禁用项；`enabled` 有效暴露位、`configured_enabled` 用户配置位、`healthy` 运行时健康位） |
 | POST | `/web/api/mcps/{name}/tools/{tool}/enable\|disable` | 启停单个工具（持久化 `tools` 段，不重连 MCP 服务） |
 | POST | `/web/api/mcps/{name}/tools/enable\|disable` | 批量启停工具，body `{"tools":[...]}`；缺省/空数组 = 全部 |
@@ -177,6 +177,15 @@ curl.exe -s -OJ 'http://127.0.0.1:61772/web/api/export?format=trace'
 `exists` / `size_bytes` / `mod_time` / `manager_loaded` / `candidates[]`）与
 `summary`（`{total, enabled, disabled, connected, tools}`）；`candidates` 按优先级列出
 全部候选位置及 `exists`，用于定位不同 CWD 启动解析到不同 `mcp.yaml` 的问题。
+
+会话级启停（`?scope=session`，或 POST body `{"session":true}`）：
+`POST /web/api/mcps/{name}/enable|disable` 不改配置文件——`disable` 仅从当前 chat/web
+会话工具面撤销该 server 的已注册函数（全局连接保持不变）；`enable` 对全局停用的 server
+建立**会话私有临时连接**（内存配置快照，不落盘；会话结束或 `/new` 时回收）。响应含
+`scope:"session"`、`session_state`（`disabled` / `temp` / 空）与人类可读 `message`；
+`GET /web/api/mcps` 在有覆盖时附带 `session`（`{disabled:[], temp:[]}`）；
+`GET /web/api/mcps/{name}` 附带 `session_state`。语义与 TUI `/mcp enable|disable <name> --session`
+完全同源（同一 `chatMCPSessionToggleText` 实现），微型 Web 客户端 MCP 页签的「本会话启用/停用」按钮即调用此形态。
 
 `UpsertRequest` 字段：`name`、`type`（`stdio`/`sse`/`websocket`/`streamable`）、
 `command`/`args`（stdio）、`url`（其余传输）、`env`、`headers`、`description`、

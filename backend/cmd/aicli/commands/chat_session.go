@@ -297,6 +297,8 @@ func createNewRuntimeConversation(session *ChatSession, title string) error {
 	clearRestoredPendingPrompt(session)
 	resetRestoredPendingPromptCheck(session)
 	resetStableSharedToolSurface(session)
+	// /new 同时清空「仅本会话」的 MCP 覆盖并回收临时连接：--session 不跨对话延续。
+	resetSessionScopedMCP(session)
 	// 新会话也记录当前 loopback 地址：后续 `aicli resume <id> --pprof/--debug`
 	// 能回到同一端口（mesh/bindings/，S3）。
 	if !session.Ephemeral {

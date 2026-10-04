@@ -1,8 +1,8 @@
-// 停靠列（批次 F2 + §4.6）：composer 上沿的常驻模式标识与待交互卡片。
+// 停靠列（批次 F2 + §4.6）：composer 上沿的 plan/托管状态行与待交互卡片。
 //
-// 抽出来的原因有两个：main-section.tsx 已顶到 500 非空行上限，且「模式标识 + 审批/提问/
+// 抽出来的原因有两个：main-section.tsx 已顶到 500 非空行上限，且「状态行 + 审批/提问/
 // 计划评审条」是同一宽度轴上的一个整体——放在一起才能保证两者不会各说各话
-// （模式标识只读，裁决仍由下方的 pending bar 承担）。
+// （状态行只读，裁决仍由下方的 pending bar 承担；权限模式不在这里重复，见 composer 底部控件）。
 
 import { PendingInteractionBar } from "@/components/workspace/pending-interaction-bar";
 import { SessionModeBanner } from "@/components/workspace/session-mode-banner";

@@ -4,6 +4,7 @@ import {
   buildProviderRecordFromDraft,
   type ProviderDraftInput,
 } from "./runtime-provider-domain-form-utils";
+import { emptyProviderModelDraft } from "./runtime-provider-domain-editor/model-capability-draft";
 
 function createDraft(overrides?: Partial<ProviderDraftInput>): ProviderDraftInput {
   return {
@@ -24,6 +25,7 @@ function createDraft(overrides?: Partial<ProviderDraftInput>): ProviderDraftInpu
     timeout: "300s",
     truncationAdapter: "openai_local",
     headersJson: JSON.stringify({ "x-org": "runtime" }),
+    modelCapabilityDrafts: {},
     modelMappingsJson: JSON.stringify({ "*": "deepseek-chat" }),
     extraJson: JSON.stringify({ retries: 3 }),
     setAsDefault: true,
@@ -141,6 +143,42 @@ describe("runtime-provider-domain-editor", () => {
         currency: "USD",
         wallet_balance: 12.5,
         fetched_at: "2026-07-29T00:01:00Z",
+      },
+    });
+  });
+
+  it("serializes per-model capability drafts into model_capabilities", () => {
+    const result = buildProviderRecordFromDraft(
+      createDraft({
+        modelCapabilityDrafts: {
+          "deepseek-chat": {
+            ...emptyProviderModelDraft(),
+            maxContextTokensText: "128000",
+            inputModalities: ["text", "image"],
+            replayReasoningContent: true,
+          },
+          "deepseek-reasoner": {
+            ...emptyProviderModelDraft(),
+            reasoningModel: true,
+            reasoningEffortsText: "low, high",
+            reasoningEffortBudgetsText: "high: 32768",
+          },
+          unconfigured: emptyProviderModelDraft(),
+        },
+      }),
+    );
+
+    expect(result.error).toBeNull();
+    expect(result.record?.model_capabilities).toEqual({
+      "deepseek-chat": {
+        max_context_tokens: 128000,
+        input_modalities: ["text", "image"],
+        replay_reasoning_content: true,
+      },
+      "deepseek-reasoner": {
+        reasoning_model: true,
+        reasoning_efforts: ["low", "high"],
+        reasoning_effort_budgets: { high: 32768 },
       },
     });
   });

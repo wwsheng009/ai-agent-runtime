@@ -10,7 +10,6 @@
 import { buildProviderOpsRequest } from "@/api/runtime";
 import type {
   ProviderAutoImportResult,
-  ProviderModelMetadata,
   ProviderModelsResult,
   ProviderOpsRequest,
   ProviderProbeResult,
@@ -19,14 +18,18 @@ import type {
 
 import {
   mergeExtraJsonField,
-  mergeModelCapabilitiesIntoExtraJson,
-  type ProviderCapabilityFields,
 } from "./runtime-provider-capability-utils";
 import { isConfigRecord, normalizeStringArrayInput } from "./runtime-provider-config-utils";
 import {
   createProviderDraftInput,
   providerProtocolOptions,
 } from "./runtime-provider-domain-editor/draft-utils";
+import {
+  mergeProviderModelDraftsWithCapabilities,
+  mergeProviderModelDraftsWithMetadata,
+  normalizeProviderModelIDs,
+  type ProviderModelDraft,
+} from "./runtime-provider-domain-editor/model-capability-draft";
 import { type ProviderDraftInput } from "./runtime-provider-domain-form-utils";
 
 /**
@@ -184,31 +187,20 @@ export function parseGoDurationSeconds(value: string): number | undefined {
   return Math.max(1, Math.round(total));
 }
 
-/** 去重（保序）后的模型 ID 列表。 */
-export function normalizeProviderModelIDs(modelIDs: string[] | undefined): string[] {
-  const models: string[] = [];
-  for (const raw of modelIDs ?? []) {
-    const id = String(raw ?? "").trim();
-    if (id && !models.includes(id)) {
-      models.push(id);
-    }
-  }
-  return models;
-}
+export { normalizeProviderModelIDs };
 
 /**
  * fetch-models 的草稿补丁：支持模型列表整体替换为本次拉取结果（覆盖语义，
  * 与 micro web client 一致）；服务端未返回可用模型时返回 null 表示不改动
  * 表单，避免把手填配置误清空。
  *
- * 同时把 `result.metadata`（后端对本次模型列表的元数据重匹配结果）合并进
- * `extraJson.model_capabilities`：micro web client 用同一份 metadata 重建
- * reasoning 编辑行，frontend 没有能力编辑器，丢弃它就等于「重新拉取后能力
- * 声明永不刷新」，保存时也带不上本次匹配结果。
+ * 同时把 `result.metadata`（后端对本次模型列表的元数据重匹配结果）按
+ * 「非空覆盖」合并进每模型能力草稿：micro web client 用同一份 metadata
+ * 重建模型编辑行，这里对齐同一语义，只是落到第一等的模型草稿字段上。
  */
 export function providerModelsPatch(
   result: ProviderModelsResult,
-  extraJson = "",
+  currentDrafts: Record<string, ProviderModelDraft> = {},
 ): Partial<ProviderDraftInput> | null {
   const models = normalizeProviderModelIDs(result.model_ids);
   if (models.length === 0) {
@@ -217,45 +209,28 @@ export function providerModelsPatch(
   const patch: Partial<ProviderDraftInput> = {
     supportedModelsText: models.join("\n"),
   };
-  const capabilities: Record<string, ProviderCapabilityFields> = {};
-  for (const model of models) {
-    const metadata = result.metadata?.[model];
-    if (metadata) {
-      capabilities[model] = metadataCapabilityFields(metadata);
-    }
-  }
-  const mergedExtraJson = mergeModelCapabilitiesIntoExtraJson(
-    extraJson,
-    capabilities,
+  const mergedDrafts = mergeProviderModelDraftsWithMetadata(
+    currentDrafts,
+    result.metadata,
   );
-  if (mergedExtraJson !== undefined) {
-    patch.extraJson = mergedExtraJson;
+  if (mergedDrafts) {
+    patch.modelCapabilityDrafts = mergedDrafts;
   }
   return patch;
 }
 
 /**
- * fetch-models 的元数据匹配结果 → 能力声明字段：`id` / `name` 不是能力字段，
- * 丢弃；其余字段的「非空才覆盖」由合并层统一处理。
- */
-function metadataCapabilityFields(
-  metadata: ProviderModelMetadata,
-): ProviderCapabilityFields {
-  const fields: ProviderCapabilityFields = { ...metadata };
-  delete fields.id;
-  delete fields.name;
-  return fields;
-}
-
-/**
  * auto-import 的草稿补丁：后端返回一份完整的 provider 草稿（协议、地址、
  * 模型、站点信息、模型能力），这里映射可编辑表单字段，并把表单没建模的
- * `model_capabilities` / `max_tokens_limit` 经 `extraJson` 透传保存；
+ * `model_capabilities` 合并进模型草稿、`max_tokens_limit` 经 `extraJson` 透传；
  * api_key 与 NewAPI 密钥属于请求侧秘密，不回填。
  */
 export function providerAutoImportPatch(
   result: ProviderAutoImportResult,
-  extraJson = "",
+  options: {
+    extraJson?: string;
+    modelCapabilityDrafts?: Record<string, ProviderModelDraft>;
+  } = {},
 ): Partial<ProviderDraftInput> {
   const patch: Partial<ProviderDraftInput> = {};
   const protocol = result.protocol?.trim();
@@ -294,21 +269,21 @@ export function providerAutoImportPatch(
   if (result.account) {
     patch.account = result.account;
   }
-  let nextExtraJson = extraJson;
-  const withCapabilities = mergeModelCapabilitiesIntoExtraJson(
-    nextExtraJson,
+  const mergedDrafts = mergeProviderModelDraftsWithCapabilities(
+    options.modelCapabilityDrafts ?? {},
     result.model_capabilities,
   );
-  if (withCapabilities !== undefined) {
-    nextExtraJson = withCapabilities;
+  if (mergedDrafts) {
+    patch.modelCapabilityDrafts = mergedDrafts;
   }
+  let nextExtraJson = options.extraJson ?? "";
   const maxTokensLimit = result.max_tokens_limit;
   if (typeof maxTokensLimit === "number" && maxTokensLimit > 0) {
     nextExtraJson =
       mergeExtraJsonField(nextExtraJson, "max_tokens_limit", maxTokensLimit) ??
       nextExtraJson;
   }
-  if (nextExtraJson !== extraJson) {
+  if (nextExtraJson !== (options.extraJson ?? "")) {
     patch.extraJson = nextExtraJson;
   }
   return patch;
