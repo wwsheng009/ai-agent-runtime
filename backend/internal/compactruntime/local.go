@@ -15,9 +15,13 @@ import (
 )
 
 const (
-	localSummaryCheckpointReason   = "history_window_summary_segment"
-	localSegmentStartKey           = "segment_start"
-	localSegmentEndKey             = "segment_end"
+	localSummaryCheckpointReason = "history_window_summary_segment"
+	localSegmentStartKey         = "segment_start"
+	localSegmentEndKey           = "segment_end"
+	// localReplacementTailKey 记录替换历史中最后一条带 message_id 的消息。
+	// 恢复时的 compact 后视图据此切出 checkpoint 之后新增的展示消息：热上下文
+	// 会为保留最近消息而带回被摘要覆盖的旧消息，仅凭数组顺序无法区分。
+	localReplacementTailKey        = "replacement_tail_message_id"
 	localSummaryTextKey            = "summary_text"
 	localSummaryHeading            = "Compacted context from earlier turns:"
 	localRetainedRecentMaxTokens   = 20000
@@ -111,6 +115,10 @@ func (a *LocalAdapter) Compact(ctx context.Context, req Request, threshold thres
 		retainedRecent = append(cloneMessages(retainedUsers), cloneMessages(retainedDurable)...)
 		retainedRecent = append(retainedRecent, cloneMessages(retainedReplay)...)
 	}
+
+	// 在替换历史（而非构建前的摘要指针）上记录尾部锚点：替换会对摘要做深拷贝，
+	// 之后这份 replacement 才是被持久化的新热上下文。
+	annotateLocalReplacementTail(replacement)
 
 	compactedMessages := len(nonSystemMessages) - len(retainedRecent)
 	if compactedMessages < 0 {
@@ -1472,6 +1480,29 @@ func buildCompactionMessage(summaryText, checkpointID string, segmentStart, segm
 		message.Metadata["checkpoint_id"] = strings.TrimSpace(checkpointID)
 	}
 	return message
+}
+
+// annotateLocalReplacementTail 在替换历史的摘要消息上记录尾部锚点：compact 覆盖
+// 段的最后一条消息 id（pre-turn 替换的尾部是保留的最近消息/durable，mid-turn 的
+// 尾部是摘要本身）。恢复路径在 checkpoint 之后找到该 id 时，其后继消息即 compact
+// 后视图；找不到（锚点被热投影裁剪）时消费者退回 segment_end 计数近似。
+func annotateLocalReplacementTail(replacement []types.Message) {
+	tailID := ""
+	for index := len(replacement) - 1; index >= 0; index-- {
+		if id := strings.TrimSpace(replacement[index].Metadata.GetString("message_id", "")); id != "" {
+			tailID = id
+			break
+		}
+	}
+	if tailID == "" {
+		return
+	}
+	for index := range replacement {
+		if isCompactionMessage(replacement[index]) {
+			replacement[index].Metadata[localReplacementTailKey] = tailID
+			return
+		}
+	}
 }
 
 func (a *LocalAdapter) findReusableSummaryCheckpoint(ctx context.Context, sessionID, phase string, history []types.Message) (*types.Message, string) {

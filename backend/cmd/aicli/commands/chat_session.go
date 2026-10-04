@@ -548,9 +548,10 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 func loadResumeCanonicalHistory(session *ChatSession, sessionID string) {
 	// 默认恢复视图（非 --full 且热上下文带 compact 检查点）：compact 之前的历史
 	// 已被摘要覆盖，不再从 canonical 转录回放，直接以恢复出的热上下文
-	// （session.Messages）作为展示历史。--full 保持原有的 canonical 全量回放。
+	// （session.Messages）切出 checkpoint 之后的新增消息作为展示历史。
+	// --full 保持原有的 canonical 全量回放。
 	if session.resumeHistoryCompactViewPreferred() {
-		session.markResumeHistoryCompactView(true)
+		applyResumeCompactView(session)
 		return
 	}
 	session.markResumeHistoryCompactView(false)
@@ -581,7 +582,7 @@ func loadResumeCanonicalHistoryForStartup(session *ChatSession, sessionID string
 	// 与 loadResumeCanonicalHistory 相同的默认口径：带 compact 检查点的会话走
 	// 「compact 后视图」，避免启动首帧回放全量 canonical 转录；--full 保持原行为。
 	if session.resumeHistoryCompactViewPreferred() {
-		session.markResumeHistoryCompactView(true)
+		applyResumeCompactView(session)
 		return
 	}
 	session.markResumeHistoryCompactView(false)
@@ -642,6 +643,146 @@ func (s *ChatSession) markResumeHistoryCompactView(active bool) {
 // resumeHistoryCompactViewActive 报告当前展示历史是否处于 compact 后视图。
 func (s *ChatSession) resumeHistoryCompactViewActive() bool {
 	return s != nil && s.resumeHistoryCompactView.Load()
+}
+
+// applyResumeCompactView 装载「compact 后视图」的展示历史：只保留最近一次
+// compact 检查点之后新增的消息。热上下文会为保留最近消息而带回被摘要覆盖的旧
+// 消息（见 compactruntime.buildLocalReplacementHistory），必须显式切掉，否则
+// 默认恢复看起来仍像全量回放。全程只读热投影，不加载 canonical，首帧成本不变。
+func applyResumeCompactView(session *ChatSession) {
+	if session == nil {
+		return
+	}
+	messages := resumeCompactViewPostCheckpointMessages(session)
+	session.setResumeHistory(messages)
+	// setResumeHistory 按「canonical 全量就位」语义复位视图标记，这里必须重置回
+	// compact 视图：展示历史是 checkpoint 之后的切片。
+	session.markResumeHistoryCompactView(true)
+}
+
+// resumeCompactViewPostCheckpointMessages 从热上下文里切出最近一次 compact
+// 之后新增的消息，按优先级：
+//  1. 替换尾部锚点（compactruntime 写入的 replacement_tail_message_id）：锚点在
+//     checkpoint 之后时取其后继；锚点是 checkpoint 自身（mid-turn 压缩）或位于
+//     checkpoint 之前时，checkpoint 之后即新增消息；
+//  2. 计数近似：post = canonical 非 system 消息数 - segment_end（被摘要覆盖的
+//     非 system 消息数）。首次 compact 时热上下文与 canonical 等价，对单次
+//     compact 的存量会话精确；多次 compact 的存量会话可能偏保守（多回放少量
+//     已覆盖消息），不会丢 compact 后内容；
+//  3. 两者都不可用时返回整个热投影（维持旧行为）。
+func resumeCompactViewPostCheckpointMessages(session *ChatSession) []runtimetypes.Message {
+	if session == nil || len(session.Messages) == 0 {
+		return nil
+	}
+	messages := session.Messages
+	checkpointIndex := -1
+	for index := len(messages) - 1; index >= 0; index-- {
+		if strings.EqualFold(strings.TrimSpace(messages[index].Metadata.GetString("context_stage", "")), "compaction") {
+			checkpointIndex = index
+			break
+		}
+	}
+	if checkpointIndex < 0 {
+		return cloneResumeDisplayMessages(messages)
+	}
+
+	checkpoint := messages[checkpointIndex]
+	if anchor := strings.TrimSpace(checkpoint.Metadata.GetString("replacement_tail_message_id", "")); anchor != "" {
+		for index := len(messages) - 1; index >= 0; index-- {
+			if strings.TrimSpace(messages[index].Metadata.GetString("message_id", "")) != anchor {
+				continue
+			}
+			if index > checkpointIndex {
+				return cloneResumeDisplayMessages(messages[index+1:])
+			}
+			// 锚点不晚于 checkpoint（mid-turn 压缩的锚点就是 checkpoint 本身，
+			// 或替换里没有可锚定的后继消息）：checkpoint 之后即新增消息。
+			return cloneResumeDisplayMessages(messages[checkpointIndex+1:])
+		}
+	}
+
+	covered := resumeCompactMetadataInt(checkpoint.Metadata, "segment_end")
+	canonicalTotal := 0
+	if session.RuntimeSession != nil {
+		canonicalTotal = session.RuntimeSession.CanonicalMessageCount
+	}
+	if covered <= 0 || canonicalTotal <= 0 {
+		return cloneResumeDisplayMessages(messages)
+	}
+	systemCount := 0
+	for index := range messages {
+		if strings.EqualFold(strings.TrimSpace(messages[index].Role), "system") {
+			systemCount++
+		}
+	}
+	postCount := canonicalTotal - systemCount - covered
+	if postCount <= 0 {
+		// compact 后尚无新增消息：默认视图为空（collectVisibleChatHistory 在
+		// compact 视图下以 ResumeHistory 为准，不再回退整份投影）。
+		return nil
+	}
+	// 从尾部按非 system 计数收集：热投影被裁剪时结论同样成立。
+	collected := make([]runtimetypes.Message, 0, postCount)
+	for index := len(messages) - 1; index > checkpointIndex && len(collected) < postCount; index-- {
+		if strings.EqualFold(strings.TrimSpace(messages[index].Role), "system") {
+			continue
+		}
+		collected = append(collected, *messages[index].Clone())
+	}
+	for left, right := 0, len(collected)-1; left < right; left, right = left+1, right-1 {
+		collected[left], collected[right] = collected[right], collected[left]
+	}
+	return collected
+}
+
+// cloneResumeDisplayMessages 拷贝展示用消息切片，避免展示历史与热上下文共享
+// 可变消息体。空切片归一为 nil，与「无展示历史」语义一致。
+func cloneResumeDisplayMessages(messages []runtimetypes.Message) []runtimetypes.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	cloned := make([]runtimetypes.Message, 0, len(messages))
+	for index := range messages {
+		cloned = append(cloned, *messages[index].Clone())
+	}
+	return cloned
+}
+
+// resumeCompactMetadataInt 读取 checkpoint 元数据里的整数值。消息经 JSON 持久化
+// 读回后数字是 float64（Metadata 是普通 map，没有自定义反序列化），GetInt 只认
+// int，这里必须自行收敛数值类型。
+func resumeCompactMetadataInt(metadata runtimetypes.Metadata, key string) int {
+	if metadata == nil {
+		return 0
+	}
+	switch typed := metadata[key].(type) {
+	case int:
+		return typed
+	case int8:
+		return int(typed)
+	case int16:
+		return int(typed)
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case uint:
+		return int(typed)
+	case uint8:
+		return int(typed)
+	case uint16:
+		return int(typed)
+	case uint32:
+		return int(typed)
+	case uint64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case float64:
+		return int(typed)
+	default:
+		return 0
+	}
 }
 
 // withResumeFullHistory 是会话内 `/resume --full`、`/load --full` 的作用域开关：

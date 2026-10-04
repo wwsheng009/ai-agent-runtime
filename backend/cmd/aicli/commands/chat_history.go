@@ -347,9 +347,10 @@ func collectVisibleChatHistory(session *ChatSession) []runtimetypes.Message {
 		return nil
 	}
 	// 恢复会话后优先回放 canonical 完整转录；未恢复（或后端不支持
-	// canonical 分页）时回退到模型热上下文投影。
+	// canonical 分页）时回退到模型热上下文投影。compact 后视图是显式裁剪的
+	// 切片（可能为空 = compact 后尚无新消息），此时不得回退整份热投影。
 	source := session.Messages
-	if resumeHistory := session.resumeHistorySnapshot(); len(resumeHistory) > 0 {
+	if resumeHistory := session.resumeHistorySnapshot(); len(resumeHistory) > 0 || session.resumeHistoryCompactViewActive() {
 		source = resumeHistory
 	}
 	if len(source) == 0 {
