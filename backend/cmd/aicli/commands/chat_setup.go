@@ -160,6 +160,7 @@ func buildChatSession(cfg *config.Config, opts *chatCommandOptions, profileState
 		FastMode:                 runtimeState.fastMode,
 		BaseURL:                  runtimeState.baseURL,
 		Messages:                 nil,
+		ResumeFullHistory:        opts.FullHistoryFlag,
 		HTTPClient:               httpclient.GetHTTPClientWithProvider(cfg, &runtimeState.provider),
 		cancelCtx:                cancelCtx,
 		cancelFunc:               cancelFunc,

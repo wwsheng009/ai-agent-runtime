@@ -38,6 +38,10 @@ type RenderBlock struct {
 // while it owns a ScreenLease.
 type ResumePickerRequest struct {
 	Filter ChatSessionListFilter
+	// FullHistory 是 /resume --full：选中会话后按 canonical 全量转录回放；
+	// false 时走默认的 compact 后视图口径（带 compact 检查点的会话只回放
+	// compact 之后的上下文）。
+	FullHistory bool
 }
 
 // BacktrackPickerRequest marks the destructive user-turn selection effect.
@@ -592,11 +596,17 @@ func tryExecuteStructuredChatCommand(session *ChatSession, command string) (Comm
 		// 与 /status 带参错误同一设计决策。成功路径结构化：加载副作用在此
 		// 执行，确认文档为原子命令 cell；历史回放（逐消息 cell）由 dispatch
 		// 在提交确认 cell 后通过 ReplayHistory 触发。
-		sessionID := strings.TrimSpace(extractCommandArgument(command))
+		sessionID, fullHistory, parseErr := parseSessionTargetAndFullFlag(extractCommandArgument(command))
+		if parseErr != nil {
+			return CommandResult{}, false, nil
+		}
+		sessionID = strings.TrimSpace(sessionID)
 		if sessionID == "" || session == nil {
 			return CommandResult{}, false, nil
 		}
-		if err := loadRuntimeConversation(session, sessionID); err != nil {
+		if err := session.withResumeFullHistory(fullHistory, func() error {
+			return loadRuntimeConversation(session, sessionID)
+		}); err != nil {
 			return CommandResult{}, false, nil
 		}
 		return CommandResult{

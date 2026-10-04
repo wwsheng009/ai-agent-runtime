@@ -96,6 +96,15 @@ type ChatSession struct {
 	// 模型上下文始终使用 Messages，ResumeHistory 只供用户可见的历史回放
 	// （/resume、启动恢复等），避免把完整长对话塞进模型上下文。
 	ResumeHistory []runtimetypes.Message
+	// ResumeFullHistory 是 `--full`：恢复历史会话时回放 canonical 完整转录
+	// （历史行为）。默认 false 时，若恢复出的热上下文（session.Messages）
+	// 带 compact 检查点，则只在 UI 上回放 compact 之后的上下文，不再加载
+	// canonical 全量转录，避免大会话首帧回放全部历史。
+	ResumeFullHistory bool
+	// resumeHistoryCompactView 记录本次恢复是否以「compact 后视图」呈现
+	// （默认模式命中 compact 检查点）。仅用于恢复提示文案与调试，不参与
+	// 数据面判定；canonical 全量装载会将其复位。
+	resumeHistoryCompactView atomic.Bool
 	// resumeHistoryMu 保护 ResumeHistory 的并发读写：启动恢复的「首屏窗口化」
 	// 会在首帧之后由后台 goroutine 前插更早的页，而主循环与 live 回合仍会
 	// 读取/追加同一字段。

@@ -805,12 +805,15 @@ func TestResumePickerRequestCarriesCwdFilter(t *testing.T) {
 		Query: "keep-query",
 		Limit: 7,
 	}
-	target, filter, err := parseResumeCommandArgument("--cwd", base, &ChatSession{})
+	target, filter, fullHistory, err := parseResumeCommandArgument("--cwd", base, &ChatSession{})
 	if err != nil {
 		t.Fatalf("parse /resume --cwd: %v", err)
 	}
 	if target != "" {
 		t.Fatalf("cwd picker target=%q want empty", target)
+	}
+	if fullHistory {
+		t.Fatal("cwd picker must not request the full transcript by default")
 	}
 	if strings.TrimSpace(filter.Workspace) == "" {
 		t.Fatal("cwd picker did not resolve a workspace filter")
@@ -819,11 +822,11 @@ func TestResumePickerRequestCarriesCwdFilter(t *testing.T) {
 		t.Fatalf("cwd picker lost existing filters: got %#v want query=%q limit=%d", filter, base.Query, base.Limit)
 	}
 
-	result := newResumePickerCommandResult(filter)
+	result := newResumePickerCommandResult(filter, fullHistory)
 	if result.Screen == nil || result.Screen.ID != "resume.picker" {
 		t.Fatalf("/resume --cwd did not produce a typed picker spec: %#v", result)
 	}
-	if got := resumePickerRequest(filter).Filter; got != filter {
+	if got := resumePickerRequest(filter, fullHistory).Filter; got != filter {
 		t.Fatalf("picker request did not preserve parsed filter: got %#v want %#v", got, filter)
 	}
 }

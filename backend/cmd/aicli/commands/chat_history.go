@@ -133,7 +133,20 @@ func printVisibleChatHistory(session *ChatSession, header string) int {
 // generation must reach the terminal owner even when the Scene already
 // reconciled with the replayed runtime event log (seeded=false).
 func printVisibleSessionLoadHistory(session *ChatSession, header string) int {
-	return printVisibleChatHistoryWithLoadGrant(session, header, true)
+	return printVisibleChatHistoryWithLoadGrant(session, resumeHistoryLoadHeader(session, header), true)
+}
+
+// resumeHistoryLoadHeader 在「compact 后视图」生效时给恢复标题补充提示：
+// 当前只回放了最近一次 compact 之后的上下文，完整历史需要 --full。
+func resumeHistoryLoadHeader(session *ChatSession, header string) string {
+	if session == nil || !session.resumeHistoryCompactViewActive() {
+		return header
+	}
+	const hint = "已按最近一次 compact 截断显示；--full 加载完整历史"
+	if strings.TrimSpace(header) == "" {
+		return hint
+	}
+	return strings.TrimSpace(header) + "，" + hint
 }
 
 func printVisibleChatHistoryWithLoadGrant(session *ChatSession, header string, sessionLoad bool) int {
@@ -150,6 +163,16 @@ func printVisibleChatHistoryWithLoadGrant(session *ChatSession, header string, s
 			seedHeader := ""
 			if strings.TrimSpace(header) != "" {
 				seedHeader = fmt.Sprintf("%s (%d 条消息):", strings.TrimSpace(header), len(messages))
+			}
+			// compact 后视图：事件日志重放可能已经把 compact 前历史装进 Scene，
+			// 增量 reconcile 只会「补齐」而不会移除它们，屏幕上仍会回放全部
+			// 历史。这里整体替换（reset + seed）为 compact 之后的可见消息；
+			// 替换不写历史重置标记，canonical 转录与后续 --full 恢复不受影响。
+			if session.resumeHistoryCompactViewActive() &&
+				bridge.replaceResumeCompactHistoryProjection(messages, seedHeader) {
+				markChatStartup("history_seed")
+				session.Interaction.RequestUnifiedFrame()
+				return len(messages)
 			}
 			// Runtime event logs are deliberately best-effort and can cover only a
 			// suffix/subset of a persisted conversation. Reconcile every time

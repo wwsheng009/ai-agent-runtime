@@ -21,6 +21,8 @@ import (
 //   - /resume latest           -> legacy "resume latest" behavior, resolved as the latest resumable session.
 //   - /resume <session-id>     -> load that session by ID (alias of /load).
 //   - /resume [latest] --cwd   -> explicitly keep the default current-working-directory filter.
+//   - /resume [<id>|latest] --full -> replay the canonical full transcript
+//     (default: compact-after view when the restored context has a checkpoint).
 //
 // The function never exits the chat loop, mirroring the rest of the slash commands.
 func handleResumeCommand(session *ChatSession, command string) bool {
@@ -51,7 +53,7 @@ func handleResumeCommand(session *ChatSession, command string) bool {
 		return false
 	}
 
-	arg, filter, err := parseResumeCommandArgument(extractCommandArgument(command), session.SessionFilter, session)
+	arg, filter, fullHistory, err := parseResumeCommandArgument(extractCommandArgument(command), session.SessionFilter, session)
 	if err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return false
@@ -62,16 +64,18 @@ func handleResumeCommand(session *ChatSession, command string) bool {
 
 	switch strings.ToLower(arg) {
 	case "":
-		return resumeInteractiveSelect(session)
+		return resumeInteractiveSelect(session, fullHistory)
 	case "latest", "last", "--latest", "-l":
-		return resumeLatestAndPrint(session)
+		return resumeLatestAndPrint(session, fullHistory)
 	}
 
 	if currentID := currentRuntimeSessionID(session); currentID != "" && strings.EqualFold(currentID, arg) {
 		fmt.Println("当前已经在该会话中，无需恢复")
 		return false
 	}
-	if err := loadRuntimeConversation(session, arg); err != nil {
+	if err := session.withResumeFullHistory(fullHistory, func() error {
+		return loadRuntimeConversation(session, arg)
+	}); err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
@@ -89,14 +93,14 @@ func executeStructuredResumeCommand(session *ChatSession, command string) (Comma
 		if !canOpenChatResumePicker(session) {
 			return CommandResult{}, false
 		}
-		return newResumePickerCommandResult(session.SessionFilter), true
+		return newResumePickerCommandResult(session.SessionFilter, false), true
 	}
 
 	baseFilter := ChatSessionListFilter{}
 	if session != nil {
 		baseFilter = session.SessionFilter
 	}
-	target, filter, err := parseResumeCommandArgument(argument, baseFilter, session)
+	target, filter, fullHistory, err := parseResumeCommandArgument(argument, baseFilter, session)
 	if err != nil {
 		return commandErrorResult(err), true
 	}
@@ -107,7 +111,7 @@ func executeStructuredResumeCommand(session *ChatSession, command string) (Comma
 		if !canOpenChatResumePicker(session) {
 			return CommandResult{}, false
 		}
-		return newResumePickerCommandResult(filter), true
+		return newResumePickerCommandResult(filter, fullHistory), true
 	}
 	if session == nil {
 		return commandErrorResult(fmt.Errorf("当前没有活动会话")), true
@@ -122,16 +126,22 @@ func executeStructuredResumeCommand(session *ChatSession, command string) (Comma
 
 	switch strings.ToLower(target) {
 	case "latest", "last", "--latest", "-l":
-		if err := resumeLatestRuntimeConversation(session); err != nil {
+		err := session.withResumeFullHistory(fullHistory, func() error {
+			if err := resumeLatestRuntimeConversation(session); err != nil {
+				return err
+			}
+			// The direct latest path has the same semantic replay contract as an
+			// explicit /resume <id>. Populate the canonical display history before
+			// returning control to CommandResult dispatch.
+			loadResumeCanonicalHistory(session, currentRuntimeSessionID(session))
+			return nil
+		})
+		if err != nil {
 			if errors.Is(err, runtimechat.ErrSessionNotFound) {
 				return commandTextResult("当前没有其他可恢复的历史会话"), true
 			}
 			return commandErrorResult(err), true
 		}
-		// The direct latest path has the same semantic replay contract as an
-		// explicit /resume <id>. Populate the canonical display history before
-		// returning control to CommandResult dispatch.
-		loadResumeCanonicalHistory(session, currentRuntimeSessionID(session))
 		return CommandResult{
 			Blocks:        []RenderBlock{{Document: buildChatResumeDocument(session)}},
 			Action:        CommandContinue,
@@ -142,7 +152,9 @@ func executeStructuredResumeCommand(session *ChatSession, command string) (Comma
 	if currentID := currentRuntimeSessionID(session); currentID != "" && strings.EqualFold(currentID, target) {
 		return commandTextResult("当前已经在该会话中，无需恢复"), true
 	}
-	if err := loadRuntimeConversation(session, target); err != nil {
+	if err := session.withResumeFullHistory(fullHistory, func() error {
+		return loadRuntimeConversation(session, target)
+	}); err != nil {
 		return commandErrorResult(err), true
 	}
 	return CommandResult{
@@ -152,19 +164,19 @@ func executeStructuredResumeCommand(session *ChatSession, command string) (Comma
 	}, true
 }
 
-func newResumePickerCommandResult(filter ChatSessionListFilter) CommandResult {
+func newResumePickerCommandResult(filter ChatSessionListFilter, fullHistory bool) CommandResult {
 	return CommandResult{
 		Action: CommandContinue,
 		Screen: chatScreenEffectSpec("resume.picker", "恢复历史会话", func(s *ChatSession) {
-			openChatResumePicker(s, ResumePickerRequest{Filter: filter})
+			openChatResumePicker(s, ResumePickerRequest{Filter: filter, FullHistory: fullHistory})
 		}),
 	}
 }
 
 // resumePickerRequest 重建 /resume picker 的请求载荷（批次 5 守卫测试用），
-// 与 newResumePickerCommandResult 内闭包保持同一 Filter 语义。
-func resumePickerRequest(filter ChatSessionListFilter) ResumePickerRequest {
-	return ResumePickerRequest{Filter: filter}
+// 与 newResumePickerCommandResult 内闭包保持同一 Filter/FullHistory 语义。
+func resumePickerRequest(filter ChatSessionListFilter, fullHistory bool) ResumePickerRequest {
+	return ResumePickerRequest{Filter: filter, FullHistory: fullHistory}
 }
 
 // canOpenChatResumePicker keeps bare /resume strictly inside the unified
@@ -247,7 +259,9 @@ func openChatResumePicker(session *ChatSession, request ResumePickerRequest) {
 		_ = renderChatCommandResult(session, commandTextResult("已取消恢复，当前会话保持不变"), false)
 		return
 	}
-	if err := loadRuntimeConversation(session, pickedSession.ID); err != nil {
+	if err := session.withResumeFullHistory(request.FullHistory, func() error {
+		return loadRuntimeConversation(session, pickedSession.ID)
+	}); err != nil {
 		_ = renderChatCommandResult(session, commandErrorResult(err), false)
 		return
 	}
@@ -261,8 +275,12 @@ func openChatResumePicker(session *ChatSession, request ResumePickerRequest) {
 	}
 }
 
-func parseResumeCommandArgument(argument string, filter ChatSessionListFilter, session *ChatSession) (string, ChatSessionListFilter, error) {
+// parseResumeCommandArgument 解析 /resume 的（可选）会话目标与旗标：
+// --cwd 显式声明当前工作目录过滤，--full 要求 canonical 全量回放。
+// 返回的 target 为空表示「打开选择器」；fullHistory 在任一位置出现即生效。
+func parseResumeCommandArgument(argument string, filter ChatSessionListFilter, session *ChatSession) (string, ChatSessionListFilter, bool, error) {
 	var target string
+	fullHistory := false
 	for _, token := range splitChatCommandFields(strings.TrimSpace(argument)) {
 		switch strings.ToLower(strings.TrimSpace(token)) {
 		case "--cwd":
@@ -273,23 +291,55 @@ func parseResumeCommandArgument(argument string, filter ChatSessionListFilter, s
 			if workspace == "" {
 				currentDir, err := os.Getwd()
 				if err != nil {
-					return "", filter, fmt.Errorf("获取当前工作目录失败: %w", err)
+					return "", filter, false, fmt.Errorf("获取当前工作目录失败: %w", err)
 				}
 				workspace = currentDir
 			}
 			filter.Workspace = normalizeChatSessionWorkspace(workspace)
+		case "--full":
+			fullHistory = true
 		default:
 			if target != "" {
-				return "", filter, fmt.Errorf("/resume 最多接受一个会话目标；可选参数为 --cwd")
+				return "", filter, false, fmt.Errorf("/resume 最多接受一个会话目标；可选参数为 --cwd、--full")
 			}
 			target = strings.TrimSpace(token)
 		}
 	}
-	return target, filter, nil
+	return target, filter, fullHistory, nil
 }
 
-func resumeLatestAndPrint(session *ChatSession) bool {
-	if err := resumeLatestRuntimeConversation(session); err != nil {
+// parseSessionTargetAndFullFlag 解析 /load（以及任何「单个会话目标 + 可选
+// --full」）的参数。返回空 target 表示缺少会话 ID，由调用方决定报错路径。
+func parseSessionTargetAndFullFlag(argument string) (string, bool, error) {
+	var target string
+	fullHistory := false
+	for _, token := range splitChatCommandFields(strings.TrimSpace(argument)) {
+		switch strings.ToLower(strings.TrimSpace(token)) {
+		case "--full":
+			fullHistory = true
+		default:
+			if target != "" {
+				return "", false, fmt.Errorf("最多接受一个会话目标；可选参数为 --full")
+			}
+			target = strings.TrimSpace(token)
+		}
+	}
+	return target, fullHistory, nil
+}
+
+func resumeLatestAndPrint(session *ChatSession, fullHistory bool) bool {
+	err := session.withResumeFullHistory(fullHistory, func() error {
+		if err := resumeLatestRuntimeConversation(session); err != nil {
+			return err
+		}
+		// legacy 路径原本不回放 canonical；--full 显式要求完整历史时补一次装载
+		// （与结构化路径的 latest 分支一致）。
+		if fullHistory {
+			loadResumeCanonicalHistory(session, currentRuntimeSessionID(session))
+		}
+		return nil
+	})
+	if err != nil {
 		if errors.Is(err, runtimechat.ErrSessionNotFound) {
 			fmt.Println("当前没有其他可恢复的历史会话")
 			return false
@@ -301,12 +351,12 @@ func resumeLatestAndPrint(session *ChatSession) bool {
 	return false
 }
 
-func resumeInteractiveSelect(session *ChatSession) bool {
+func resumeInteractiveSelect(session *ChatSession, fullHistory bool) bool {
 	// Non-interactive contexts (JSON output, no-interactive mode) keep the
 	// legacy "resume latest" behavior so scripts are unaffected, but the
 	// selection still skips system-only placeholder sessions.
 	if session.NoInteractive || session.JSONOutput {
-		return resumeLatestAndPrint(session)
+		return resumeLatestAndPrint(session, fullHistory)
 	}
 
 	currentID := currentRuntimeSessionID(session)
@@ -340,7 +390,9 @@ func resumeInteractiveSelect(session *ChatSession) bool {
 		}
 		return false
 	}
-	if err := loadRuntimeConversation(session, picked.ID); err != nil {
+	if err := session.withResumeFullHistory(fullHistory, func() error {
+		return loadRuntimeConversation(session, picked.ID)
+	}); err != nil {
 		fmt.Printf("错误: %v\n", err)
 		return false
 	}
@@ -747,6 +799,6 @@ func printResumeSuccess(session *ChatSession) {
 	}
 	if hasVisibleChatHistory(session) {
 		// No raw fmt.Println: history settles layout then owns spacing via header.
-		printVisibleChatHistory(session, "已加载历史会话")
+		printVisibleChatHistory(session, resumeHistoryLoadHeader(session, "已加载历史会话"))
 	}
 }

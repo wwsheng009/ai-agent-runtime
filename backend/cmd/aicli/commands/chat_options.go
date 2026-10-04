@@ -65,6 +65,7 @@ type chatCommandOptions struct {
 	JSONEnvelope             bool
 	SessionIDFlag            string
 	ResumeFlag               bool
+	FullHistoryFlag          bool
 	ListSessionsFlag         bool
 	SessionDirFlag           string
 	SessionUserFlag          string
@@ -209,6 +210,10 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 	outputFlag, _ := cmd.Flags().GetString("output")
 	sessionIDFlag, _ := cmd.Flags().GetString("session")
 	resumeFlag, _ := cmd.Flags().GetBool("resume")
+	fullHistoryFlag := false
+	if cmd.Flags().Lookup("full") != nil {
+		fullHistoryFlag, _ = cmd.Flags().GetBool("full")
+	}
 	listSessionsFlag, _ := cmd.Flags().GetBool("list-sessions")
 	sessionDirFlag, _ := cmd.Flags().GetString("session-dir")
 	sessionUserFlag, _ := cmd.Flags().GetString("user")
@@ -307,6 +312,7 @@ func parseChatCommandOptions(cmd *cobra.Command, cfg *config.Config) (*chatComma
 		JSONEnvelope:           useJSONEnvelope(cmd),
 		SessionIDFlag:          sessionIDFlag,
 		ResumeFlag:             resumeFlag,
+		FullHistoryFlag:        fullHistoryFlag,
 		ListSessionsFlag:       listSessionsFlag,
 		SessionDirFlag:         sessionDirFlag,
 		SessionUserFlag:        sessionUserFlag,

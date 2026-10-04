@@ -420,6 +420,7 @@ aicli chat --no-interactive --prompt "summarize this repo"
 aicli resume                              # 顶层恢复当前工作目录的最近会话（等价 aicli chat --resume）
 aicli resume --cwd=false                  # 跨工作目录恢复最近会话
 aicli resume session_xxx                  # 顶层加载指定会话（等价 aicli chat --session）
+aicli resume session_xxx --full           # 加载指定会话并回放完整历史（默认仅回放最近一次 compact 之后的上下文）
 aicli chat --resume                       # 兼容写法：恢复当前工作目录的最近会话
 aicli chat --session session_xxx          # 兼容写法：加载指定会话
 aicli chat --list-sessions --session-state active --session-provider CODEX_04 --session-query runtime --session-limit 20
@@ -807,8 +808,8 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 | `/mcp [list\|status <name>\|add <name> <url> [options]\|enable\|disable\|remove <name>\|reload\|help]` | 管理 MCP Server（列表/新增/启停/删除/热重载），与 `aicli mcp`、console 与微型 Web 面板共用同一份配置与实现 |
 | `/lsp [status\|list\|servers\|diagnostics <file>\|restart [name]\|start [name]\|help]` | 查看语言服务器（LSP）池状态（开关/工作区/server 生命周期/诊断阈值）、读取指定文件的当前诊断、手动启动或重启 server；只读长文档在统一渲染下进备用屏（可滚动/搜索，超 3 行才开屏，备用屏不可用降级为内联），`restart/start` 回执与 `help` 保持内联；池未启用时按「LSP 未启用」降级提示（编辑工具不受影响） |
 | `/sessions` | 列出或筛选可恢复会话 |
-| `/load <session-id>` | 加载指定会话 |
-| `/resume [latest|<session-id>]` | 恢复最近会话或指定会话；无参数时显示可恢复会话选择器 |
+| `/load <session-id> [--full]` | 加载指定会话；`--full` 回放 canonical 完整转录 |
+| `/resume [latest|<session-id>] [--cwd] [--full]` | 恢复最近会话或指定会话；无参数时显示可恢复会话选择器；`--full` 回放 canonical 完整转录 |
 | `/export [current|latest|<session-id>] [--full|--body|--tools|--trace]` | 导出当前或历史会话；完整 JSON 保留 tool_calls、tool 结果和 metadata，正文模式输出 Markdown，`--tools`/`--trace` 在 Markdown 中附带工具调用（名称+输入参数 / 输入+输出结果） |
 | `/agents [panel|pick|target|view|defs|send|followup|routing|cleanup]` | 查看 agent tree、选择默认 agent target、查看 transcript、浏览便携 agent 定义（`defs`）、投递消息或 follow-up；`/agents routing test` 可 dry-run 子 agent 路由 |
 | `/timeline [team|active] [limit] [filter=<text>]` | 查看 active team 或指定 team 的持久事件时间线 |
@@ -850,6 +851,7 @@ aicli agent stdio --session-dir ~/.aicli/sessions
 - chat 内的 `/sessions` 不显示当前会话和启动占位会话；`aicli chat --list-sessions` / `aicli resume --list-sessions` 的独立完整列表显示最后更新时间、轮次和消息数，并保留 session id、状态、protocol、provider、model 等诊断信息。会话列表和最近会话恢复默认按当前工作目录过滤，传入 `--cwd=false` 才会查看全部目录。CLI 入口上，`aicli resume` 默认恢复当前工作目录最近的可恢复会话，`aicli resume <session-id>` 仍可直接加载指定会话；`aicli --resume` 会经默认 chat 参数改写为 `aicli chat --resume`。
 - 退出交互式 TUI 后，终端会显示 `aicli resume <session-id>`，便于下次继续当前会话；临时会话以及尚未落盘的空会话不会显示无效的恢复命令。
 - 交互式 `aicli resume` / `aicli chat --resume` / 会话内 `/resume` 恢复后**停在等待输入状态**：上一进程遗留的团队执行会被停放为 `paused`（保留可恢复的团队壳，任务标记 cancelled），不会在启动阶段重新拉起 team lifecycle loop 继续执行，也不会在首屏渲染前 drain supervision auto-wake；启动信息行会提示 `Resume:` 停放说明。headless / `--output json` 语义不变，遗留团队仍跑到终态。
+- 交互式恢复默认只回放最近一次 compact 之后的上下文（恢复出的热上下文投影，compact 摘要本身不显示）：会话经过 compact 后不再在首屏回放 compact 前的全部历史，TUI 与 micro web client 的屏幕快照使用同一份裁剪后的转录。需要完整历史时使用 `aicli resume <id> --full`（或 `aicli chat --resume --full` / `aicli chat --session <id> --full`），TUI 内可用 `/resume <id> --full`、`/resume latest --full`、`/load <id> --full`（`/resume --full` 打开选择器后同样按全量回放选中会话）；未经过 compact 的会话不受影响，仍回放全部历史。headless / `--output json` / ACP 会话重放保持 canonical 全量语义。
 - `/export` 无参数时会弹出选择器；`--full` 生成完整 JSON，`--body` 只导出用户/助手正文，`--tools` 在 Markdown 中附带工具调用名称与输入参数，`--trace` 再附带按 `tool_call_id` 配对的输出结果（单个输出超过 32 KB 时截断并标记，完整内容用 `--full`）；可用 `--output <path>` 或 `--dir <dir>` 指定输出位置。
 - `aicli export [current|latest|<session-id>] [--full|--body|--tools|--trace] [--format <fmt>] [--output <path>|--dir <dir>] [--session-dir <dir>] [--user <id>]` 是 `/export` 的顶层等价入口，复用同一套导出实现与格式语义，适合脚本与 CI：目标缺省为 `latest`（顶层命令没有「当前会话」上下文，`current` 也落到 `latest`，实际导出的会话 ID 会打印在摘要里）；格式来源（`--full`/`--body`/`--tools`/`--trace`/`--format`/裸格式词）互相冲突时直接报参数错误，不会静默取最后一个。退出码：`0` 成功、`1` 参数错误、`2` 确定性错误（会话不存在、会话存储不可读、输出发布失败）——chat 内的 `/export` 出错仍返回 `0`，脚本请改用顶层命令判断成败。
 - `aicli import <file> [--session-dir <dir>] [--user <id>] [--new-id] [--dry-run] [--output text|json]` 是 `aicli export --full` 的反向入口：只接受 `--full` 导出的 JSON（`--body`/`--tools`/`--trace` 的 Markdown 投影会被拒绝）。默认沿用文件里的 `session.id` 与 `userId`；同 ID 会话已存在时默认报错且**绝不覆盖**（SQLite 的 Save 对已存在 ID 是 upsert，放过就等于静默覆盖原会话），加 `--new-id` 生成新 ID 并存，`--user <id>` 可改写归属。文件里的 `session.id` 若不可寻址（含路径分隔符、首尾空白或 `<nil>` 占位值，存储层读取时会先做规范化，落库后无法按原样读回、只能手动清理）同样默认按参数错误拒绝，`--new-id` 可改用新 ID 导入。落库语义：`createdAt` 保留、`updatedAt` 刷新为导入时间（导入的会话会排在 resume 列表顶部）、丢弃 `expiresAt`、`headOffset` 归零、缺失的 `message_id`/`turn_id` 补齐，复用的重复 `message_id` 重新铸造（读取路径会折叠相邻同内容消息，重复身份等于静默少消息），工具链身份不完整（`tool_calls` 缺 ID 或 `tool` 消息缺 `tool_call_id`）只告警不拒绝；并在 `metadata.context` 写入 `imported_from`/`imported_at`（改名时另有 `import_original_session_id`），原有 context 键（如 `workspace_path`）保持不变，导入的会话因此仍回到原来的工作目录分组；写入后读回校验 canonical 消息条数与文件一致。退出码与 `export` 对齐：`0` 成功、`1` 参数错误、`2` 确定性错误（文件不可读或格式不支持、会话已存在、写库或读回校验失败）。完整用法、导出文件结构、JSON 摘要字段与排障见 [session-export-import.md](./session-export-import.md)。

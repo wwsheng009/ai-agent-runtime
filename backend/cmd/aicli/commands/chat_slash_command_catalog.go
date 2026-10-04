@@ -302,24 +302,26 @@ func chatSlashCommandCatalog() []chatSlashCommandSpec {
 		},
 		{
 			Name:         "/load",
-			Usage:        "/load <session-id>",
+			Usage:        "/load <session-id> [--full]",
 			Summary:      "加载指定会话",
 			Group:        string(chatSlashCommandGroupSession),
 			AcceptsArgs:  true,
 			RequiresArgs: true,
 			Args: []chatSlashCommandArgSpec{
 				{Token: "<session-id>", Summary: "会话 ID"},
+				{Token: "--full", Summary: "回放 canonical 完整转录（默认仅回放最近一次 compact 之后的上下文）"},
 			},
 		},
 		{
 			Name:        "/resume",
-			Usage:       "/resume [latest|<session-id>] [--cwd]",
+			Usage:       "/resume [latest|<session-id>] [--cwd] [--full]",
 			Summary:     "打开历史会话列表或恢复指定会话",
 			Group:       string(chatSlashCommandGroupSession),
 			AcceptsArgs: true,
 			Args: []chatSlashCommandArgSpec{
 				{Token: "latest", Summary: "直接恢复最近的其他会话"},
 				{Token: "--cwd", Summary: "显式仅显示并恢复当前工作目录的会话（默认行为）"},
+				{Token: "--full", Summary: "回放 canonical 完整转录（默认仅回放最近一次 compact 之后的上下文）"},
 				{Token: "<session-id>", Summary: "恢复指定会话"},
 			},
 		},

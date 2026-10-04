@@ -1094,7 +1094,7 @@ func (p *chatSlashArgumentCompletionProvider) cachedSessionArgumentCandidates(se
 		return nil
 	}
 
-	candidates := make([]chatSlashCompletionCandidate, 0, len(sessions)+2)
+	candidates := make([]chatSlashCompletionCandidate, 0, len(sessions)+3)
 	if includeLatest {
 		candidates = append(candidates, chatSlashCompletionCandidate{
 			Command:     "latest",
@@ -1109,6 +1109,14 @@ func (p *chatSlashArgumentCompletionProvider) cachedSessionArgumentCandidates(se
 			AcceptsArgs: false,
 		})
 	}
+	// --full 对 /resume 与 /load 都生效：默认只回放最近一次 compact 之后的
+	// 上下文，旗标强制 canonical 全量回放。
+	candidates = append(candidates, chatSlashCompletionCandidate{
+		Command:     "--full",
+		Summary:     "回放 canonical 完整转录（默认仅回放最近一次 compact 之后的上下文）",
+		Group:       string(chatSlashCommandGroupSession),
+		AcceptsArgs: false,
+	})
 	now := time.Now()
 	for _, item := range sessions {
 		if item == nil || strings.TrimSpace(item.ID) == "" {

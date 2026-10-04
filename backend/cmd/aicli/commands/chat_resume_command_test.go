@@ -22,12 +22,15 @@ func TestParseResumeCommandArgumentCurrentDirectory(t *testing.T) {
 		t.Fatalf("Getwd: %v", err)
 	}
 
-	target, filter, err := parseResumeCommandArgument("latest --cwd", ChatSessionListFilter{Query: "keep"}, nil)
+	target, filter, fullHistory, err := parseResumeCommandArgument("latest --cwd", ChatSessionListFilter{Query: "keep"}, nil)
 	if err != nil {
 		t.Fatalf("parseResumeCommandArgument: %v", err)
 	}
 	if target != "latest" {
 		t.Fatalf("target = %q, want latest", target)
+	}
+	if fullHistory {
+		t.Fatal("plain --cwd must not request the full transcript")
 	}
 	if !sameChatSessionWorkspace(filter.Workspace, currentDir) {
 		t.Fatalf("workspace = %q, want current dir %q", filter.Workspace, currentDir)
@@ -36,8 +39,41 @@ func TestParseResumeCommandArgumentCurrentDirectory(t *testing.T) {
 		t.Fatalf("query = %q, want existing filter preserved", filter.Query)
 	}
 
-	if _, _, err := parseResumeCommandArgument("one two --cwd", ChatSessionListFilter{}, nil); err == nil {
+	if _, _, _, err := parseResumeCommandArgument("one two --cwd", ChatSessionListFilter{}, nil); err == nil {
 		t.Fatal("expected multiple resume targets to fail")
+	}
+}
+
+func TestParseResumeCommandArgumentFullFlag(t *testing.T) {
+	target, _, fullHistory, err := parseResumeCommandArgument("--full", ChatSessionListFilter{}, nil)
+	if err != nil {
+		t.Fatalf("parse /resume --full: %v", err)
+	}
+	if target != "" || !fullHistory {
+		t.Fatalf("picker payload = (target=%q full=%t), want (empty, true)", target, fullHistory)
+	}
+	if req := resumePickerRequest(ChatSessionListFilter{}, fullHistory); !req.FullHistory {
+		t.Fatal("/resume --full picker request lost the full-history flag")
+	}
+
+	target, _, fullHistory, err = parseResumeCommandArgument("session-1 --full", ChatSessionListFilter{}, nil)
+	if err != nil {
+		t.Fatalf("parse /resume <id> --full: %v", err)
+	}
+	if target != "session-1" || !fullHistory {
+		t.Fatalf("target payload = (target=%q full=%t), want (session-1, true)", target, fullHistory)
+	}
+
+	target, fullHistory, err = parseSessionTargetAndFullFlag("session-2 --full")
+	if err != nil {
+		t.Fatalf("parse /load <id> --full: %v", err)
+	}
+	if target != "session-2" || !fullHistory {
+		t.Fatalf("/load payload = (target=%q full=%t), want (session-2, true)", target, fullHistory)
+	}
+
+	if _, _, err := parseSessionTargetAndFullFlag("one two"); err == nil {
+		t.Fatal("expected multiple /load targets to fail")
 	}
 }
 
@@ -477,7 +513,7 @@ func TestResumeInteractiveSelectShowsCurrentAsNonSelectableAndHistory(t *testing
 		InputReader:    bufio.NewReader(strings.NewReader("q\n")),
 	}
 	output := captureResumeStdout(t, func() {
-		resumeInteractiveSelect(session)
+		resumeInteractiveSelect(session, false)
 	})
 
 	for _, expected := range []string{
@@ -542,7 +578,7 @@ func TestResumeInteractiveSelectShowsCurrentOnlyWhenNoHistory(t *testing.T) {
 		InputReader:    bufio.NewReader(strings.NewReader("q\n")),
 	}
 	output := captureResumeStdout(t, func() {
-		resumeInteractiveSelect(session)
+		resumeInteractiveSelect(session, false)
 	})
 	for _, expected := range []string{
 		"恢复历史会话（最近更新优先，共 0 个可恢复 · 当前会话仅展示）:",
@@ -575,7 +611,7 @@ func TestResumeLatestWithoutOtherHistoryUsesFriendlyMessage(t *testing.T) {
 			SessionManager: manager,
 			SessionUserID:  "tester",
 			RuntimeSession: current,
-		})
+		}, false)
 	})
 	if !strings.Contains(output, "当前没有其他可恢复的历史会话") || strings.Contains(output, "错误:") {
 		t.Fatalf("expected a friendly empty-history message, got %q", output)

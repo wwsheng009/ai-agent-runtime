@@ -546,6 +546,14 @@ func loadRuntimeConversation(session *ChatSession, sessionID string) error {
 // 增量绘制通道（plain / JSON / legacy 输出）时保持原有的一次性同步装载，保证
 // 这些平面的输出顺序与内容完全不变。
 func loadResumeCanonicalHistory(session *ChatSession, sessionID string) {
+	// 默认恢复视图（非 --full 且热上下文带 compact 检查点）：compact 之前的历史
+	// 已被摘要覆盖，不再从 canonical 转录回放，直接以恢复出的热上下文
+	// （session.Messages）作为展示历史。--full 保持原有的 canonical 全量回放。
+	if session.resumeHistoryCompactViewPreferred() {
+		session.markResumeHistoryCompactView(true)
+		return
+	}
+	session.markResumeHistoryCompactView(false)
 	first, ok := loadNewestResumeHistoryPage(session, sessionID)
 	if !ok || !first.HasMore {
 		return
@@ -570,6 +578,13 @@ func loadResumeCanonicalHistory(session *ChatSession, sessionID string) {
 // 更早的页交给首帧之后的 startDeferredResumeHistoryLoad 补齐。
 // 窗口化被 env 关闭时退化为一次性同步装载。
 func loadResumeCanonicalHistoryForStartup(session *ChatSession, sessionID string) {
+	// 与 loadResumeCanonicalHistory 相同的默认口径：带 compact 检查点的会话走
+	// 「compact 后视图」，避免启动首帧回放全量 canonical 转录；--full 保持原行为。
+	if session.resumeHistoryCompactViewPreferred() {
+		session.markResumeHistoryCompactView(true)
+		return
+	}
+	session.markResumeHistoryCompactView(false)
 	first, ok := loadNewestResumeHistoryPage(session, sessionID)
 	if !ok || !first.HasMore {
 		return
@@ -584,6 +599,63 @@ func loadResumeCanonicalHistoryForStartup(session *ChatSession, sessionID string
 		return
 	}
 	session.deferResumeHistoryCompletionWithProgress(sessionID, first.NextBeforeSeq, first.Total, len(first.Messages))
+}
+
+// resumeHistoryHasCompactionCheckpoint 报告一组消息里是否存在最近一次 compact
+// 的检查点（context_stage=compaction）。compact 摘要只存在于热上下文投影里，
+// canonical 转录不保证保留该标记，因此默认视图只依据恢复出的 session.Messages
+// 判断；检测不到时保持原有的 canonical 全量回放。
+func resumeHistoryHasCompactionCheckpoint(messages []runtimetypes.Message) bool {
+	for index := len(messages) - 1; index >= 0; index-- {
+		stage := strings.TrimSpace(messages[index].Metadata.GetString("context_stage", ""))
+		if strings.EqualFold(stage, "compaction") {
+			return true
+		}
+	}
+	return false
+}
+
+// resumeHistoryCompactViewPreferred 报告本次恢复是否应停在「compact 后视图」：
+// 未显式请求 --full，且恢复出的热上下文带 compact 检查点。命中时直接展示
+// session.Messages（compact 摘要被可见性过滤隐藏），不再加载 canonical 全量
+// 转录，避免大会话在 UI 上回放所有历史。
+func (s *ChatSession) resumeHistoryCompactViewPreferred() bool {
+	if s == nil || s.ResumeFullHistory {
+		return false
+	}
+	// 非交互 / JSON 输出不是 UI 回放路径：保持 canonical 全量语义，避免改变
+	// 脚本、导出与 ACP 会话重放（session/load 历史重放）看到的历史。
+	if s.NoInteractive || s.JSONOutput {
+		return false
+	}
+	return resumeHistoryHasCompactionCheckpoint(s.Messages)
+}
+
+// markResumeHistoryCompactView 记录/复位「compact 后视图」状态（提示文案用）。
+func (s *ChatSession) markResumeHistoryCompactView(active bool) {
+	if s == nil {
+		return
+	}
+	s.resumeHistoryCompactView.Store(active)
+}
+
+// resumeHistoryCompactViewActive 报告当前展示历史是否处于 compact 后视图。
+func (s *ChatSession) resumeHistoryCompactViewActive() bool {
+	return s != nil && s.resumeHistoryCompactView.Load()
+}
+
+// withResumeFullHistory 是会话内 `/resume --full`、`/load --full` 的作用域开关：
+// active 时在 fn 执行期间强制 canonical 全量回放，结束后恢复会话启动时的取值
+// （`--full` 启动标志或默认 false）。恢复历史装载只在 fn 内发生，因此不需要
+// 更粗粒度的并发保护。
+func (s *ChatSession) withResumeFullHistory(active bool, fn func() error) error {
+	if s == nil || !active {
+		return fn()
+	}
+	previous := s.ResumeFullHistory
+	s.ResumeFullHistory = true
+	defer func() { s.ResumeFullHistory = previous }()
+	return fn()
 }
 
 // loadNewestResumeHistoryPage 同步装载最新一页 canonical 转录（页内按 seq
@@ -682,6 +754,9 @@ func (s *ChatSession) setResumeHistory(messages []runtimetypes.Message) {
 	}
 	s.resumeHistoryMu.Lock()
 	defer s.resumeHistoryMu.Unlock()
+	// canonical 全量展示历史就位：无论此前是否处于 compact 后视图，都按完整
+	// 转录呈现，提示文案同步复位。
+	s.resumeHistoryCompactView.Store(false)
 	s.ResumeHistory = messages
 	s.resumeHistoryGeneration++
 }
