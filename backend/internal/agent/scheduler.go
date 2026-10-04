@@ -1643,7 +1643,17 @@ func (s *SubagentScheduler) partitionTasks(tasks []SubagentTask) ([]indexedSubag
 			readers = append(readers, indexedSubagentTask{index: index, task: task})
 			continue
 		}
-		writers = append(writers, indexedSubagentTask{index: index, task: task})
+		// A non-read-only task is only a writer when its tool surface can
+		// actually mutate state. If the whitelist has been narrowed to
+		// read-only-only tools (or is empty/unrestricted after prepareTasks),
+		// the task cannot write and is treated as a reader. This lets callers
+		// run multiple read-only-only subagents concurrently with
+		// read_only=false without tripping the single-writer policy.
+		if len(task.ToolsWhitelist) == 0 || containsWriteLikeTool(task.ToolsWhitelist) {
+			writers = append(writers, indexedSubagentTask{index: index, task: task})
+		} else {
+			readers = append(readers, indexedSubagentTask{index: index, task: task})
+		}
 	}
 
 	if s.config.EnforceSingleWriter && len(writers) > 1 {
