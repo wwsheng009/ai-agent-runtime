@@ -25,11 +25,19 @@ import {
   type ComposerReferenceGroup,
 } from "@/lib/composer-menu";
 import {
+  applyComposerSkillMentionInsertion,
   applyComposerTriggerInsertion,
   composerReferenceText,
+  composerSkillMentionText,
   detectComposerTrigger,
   type ComposerTrigger,
 } from "@/lib/composer-trigger";
+import {
+  isSkillMentionCaretEcho,
+  resolveSkillMentionTabExtension,
+} from "@/lib/composer-skill-mentions";
+
+import { useComposerCaretInsertion } from "./use-composer-caret-insertion";
 
 export type ComposerMenuNotice =
   | { kind: "unknown-command"; name: string }
@@ -41,6 +49,8 @@ export type UseComposerMenuOptions = {
   /** 命令定义（hook 内部注册；非法名/冲突在此 fail loudly）。 */
   commands: readonly ComposerCommandDefinition[];
   referenceGroups: readonly ComposerReferenceGroup[];
+  /** `$` 技能提及候选分组（仅 `skills` 模式消费）。 */
+  skillGroups?: readonly ComposerReferenceGroup[];
   hasAttachAction: boolean;
   /** 已本地化的「添加附件」文案（模型层不持文案）。 */
   attachLabel: string;
@@ -119,6 +129,7 @@ export function useComposerMenu({
   value,
   commands,
   referenceGroups,
+  skillGroups,
   hasAttachAction,
   attachLabel,
   onValueChange,
@@ -128,6 +139,8 @@ export function useComposerMenu({
 }: UseComposerMenuOptions): ComposerMenuController {
   const [state, setState] = useState<MenuState>(INITIAL_MENU_STATE);
   const [notice, setNotice] = useState<ComposerMenuNotice | null>(null);
+  // `+`（manual）菜单的插入点：无触发 token 时技能/引用按最近光标落 token。
+  const { rememberCaret, insertAtCaret } = useComposerCaretInsertion({ value, onValueChange });
 
   const registry = useMemo(() => createComposerCommandRegistry(commands), [commands]);
 
@@ -135,7 +148,9 @@ export function useComposerMenu({
     ? "all"
     : state.trigger?.kind === "slash"
       ? "commands"
-      : "references";
+      : state.trigger?.kind === "skill"
+        ? "skills"
+        : "references";
   const query = state.trigger?.query ?? "";
   const open =
     state.manual ||
@@ -167,6 +182,7 @@ export function useComposerMenu({
         query,
         commands: registry.commands,
         referenceGroups,
+        skillGroups,
         commandOptions: commandOptionsSource,
         hasAttachAction,
         attachLabel,
@@ -177,6 +193,7 @@ export function useComposerMenu({
       query,
       registry.commands,
       referenceGroups,
+      skillGroups,
       commandOptionsSource,
       hasAttachAction,
       attachLabel,
@@ -207,6 +224,7 @@ export function useComposerMenu({
   }, []);
 
   const handleValueChange = useCallback((next: string, caret: number) => {
+    rememberCaret(caret);
     onValueChange(next, caret);
     setNotice(null);
     setState((previous) => ({
@@ -215,17 +233,28 @@ export function useComposerMenu({
       level: { kind: "root" },
       activeId: null,
     }));
-  }, [onValueChange]);
+  }, [onValueChange, rememberCaret]);
+
+  // 程序化写入后可能补发携带旧 token 的 select 回声：只在回声形态（同起点 + query 严格回退）时忽略。
+  const pendingStaleCaretGuardRef = useRef<{ tokenStart: number; query: string } | null>(null);
 
   const handleCaretChange = useCallback((caret: number) => {
+    const trigger = detectComposerTrigger(value, caret);
+    const guard = pendingStaleCaretGuardRef.current;
+    if (guard) {
+      pendingStaleCaretGuardRef.current = null;
+      if (isSkillMentionCaretEcho(trigger, guard)) {
+        return;
+      }
+    }
+    rememberCaret(caret);
     setState((previous) => {
-      const trigger = detectComposerTrigger(value, caret);
       if (previous.trigger?.key === trigger?.key) {
         return previous;
       }
       return { ...previous, trigger, level: { kind: "root" }, activeId: null };
     });
-  }, [value]);
+  }, [rememberCaret, value]);
 
   const dispatchCommand = useCallback((
     command: ComposerCommand,
@@ -256,11 +285,33 @@ export function useComposerMenu({
       ...previous,
       manual: keepMenu,
       trigger: null,
-      dismissedKey: null,
+      // 补全后浏览器可能补发一次携带旧 token 的 select/caret 事件：
+      // 把「已完成的 token key」记为 dismissed，防止菜单被旧 token 立刻重新打开。
+      dismissedKey: trigger?.key ?? null,
       level: { kind: "root" },
       activeId: null,
     }));
   }, [onValueChange, state.trigger, value]);
+
+  // 技能提及补全：`$` 路径替换触发 token；`+` 路径无触发 token，按最近光标插入 `$name `。
+  const completeWithSkill = useCallback((skillName: string) => {
+    const trigger = state.trigger;
+    if (trigger && skillName.trim().length > 0) {
+      const next = applyComposerSkillMentionInsertion(value, trigger, skillName);
+      onValueChange(next.value, next.caret);
+    } else if (skillName.trim().length > 0) {
+      insertAtCaret(composerSkillMentionText(skillName), { trailingSpace: true });
+    }
+    setState((previous) => ({
+      ...previous,
+      manual: false,
+      trigger: null,
+      // 同 completeWith：抑制补全后的旧 token 重开（多提及靠用户继续输入新 token）。
+      dismissedKey: trigger?.key ?? null,
+      level: { kind: "root" },
+      activeId: null,
+    }));
+  }, [insertAtCaret, onValueChange, state.trigger, value]);
 
   const selectItem = useCallback((itemId: string | null) => {
     const item = findComposerMenuItem(snapshot.items, itemId ?? activeId);
@@ -283,7 +334,19 @@ export function useComposerMenu({
       return;
     }
     if (item.action.kind === "reference") {
-      completeWith(composerReferenceText(item.action.text), false);
+      const reference = composerReferenceText(item.action.text);
+      if (state.trigger) {
+        completeWith(reference, false);
+      } else {
+        // `+`（manual）路径：无触发 token，按最近光标插入 `@path` 后关闭菜单。
+        insertAtCaret(reference);
+        close();
+      }
+      return;
+    }
+    // `$` 技能提及：补全为 `$name ` 并关闭菜单（多提及 = 重复触发各自补全）。
+    if (item.action.kind === "skill") {
+      completeWithSkill(item.action.name);
       return;
     }
     // 命令专属候选：补全为「命令 + 参数」并立即派发（点选即执行，与命令行提交同语义）。
@@ -319,7 +382,18 @@ export function useComposerMenu({
       return;
     }
     completeWith(`/${command.name}`, command.kind === "popupSelect");
-  }, [activeId, close, completeWith, dispatchCommand, onAttachRequest, registry, snapshot.items]);
+  }, [
+    activeId,
+    close,
+    completeWith,
+    completeWithSkill,
+    dispatchCommand,
+    insertAtCaret,
+    onAttachRequest,
+    registry,
+    snapshot.items,
+    state.trigger,
+  ]);
 
   const handleKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>): boolean => {
     if (!open) {
@@ -340,6 +414,21 @@ export function useComposerMenu({
       return true;
     }
     if (event.key === "Tab") {
+      // `$` 多候选：Tab 先加深公共前缀（不落空格、菜单保持打开），与 TUI 一致
+      // （前缀子集判定在 lib）；唯一候选/不可再加深时回落到通用 pick。
+      if (state.trigger?.kind === "skill") {
+        const extension = resolveSkillMentionTabExtension(value, state.trigger, snapshot.items);
+        if (extension) {
+          event.preventDefault();
+          pendingStaleCaretGuardRef.current = {
+            tokenStart: state.trigger.start,
+            query: extension.trigger.query,
+          };
+          onValueChange(extension.value, extension.caret);
+          setState((previous) => ({ ...previous, trigger: extension.trigger }));
+          return true;
+        }
+      }
       const intent = resolveComposerMenuTab(snapshot.items, activeId);
       if (intent === "pass") {
         return false;
@@ -382,6 +471,8 @@ export function useComposerMenu({
           event.preventDefault();
           return true;
         }
+        // `$` 提及例外：未知技能名是合法普通文本（对齐 TUI/Codex「未命中不报错」），
+        // 空候选时放行提交，绝不把 `$foo` 当成必须修复的引用。
         return false;
       }
       event.preventDefault();
@@ -389,7 +480,7 @@ export function useComposerMenu({
       return true;
     }
     return false;
-  }, [activeId, close, open, query, selectItem, snapshot.items, state.trigger?.kind]);
+  }, [activeId, close, onValueChange, open, query, selectItem, snapshot.items, state.trigger, value]);
 
   const reportBlocked = useCallback((classification: ComposerSubmitClassification) => {
     if (classification.kind === "unknown-command") {

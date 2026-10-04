@@ -29,14 +29,14 @@ import { WorkspaceShellTopbar } from "@/components/workspace/workspace-shell-top
 import { useFilePreview } from "@/hooks/workspace/use-file-preview";
 import { useBackgroundJobs } from "@/hooks/workspace/use-background-jobs";
 import { useComposerFileReferences } from "@/hooks/workspace/composer/use-composer-file-references";
+import { useComposerReferenceGroups } from "@/hooks/workspace/composer/use-composer-reference-groups";
+import { useComposerSkillGroups } from "@/hooks/workspace/composer/use-composer-skill-groups";
 import { type ComposerMenuState } from "@/hooks/workspace/composer/use-composer-menu";
 import { useComposerCommandSurface } from "@/hooks/workspace/composer/use-composer-command-surface";
 import { createComposerSkillTurnRunner } from "@/hooks/workspace/composer/composer-skill-turn";
 import { useRuntimeProfileCatalog } from "@/hooks/workspace/composer/use-runtime-profile-catalog";
 import { useSessionAgents } from "@/hooks/use-session-agents";
 import { useParkedTurnView } from "@/hooks/workspace/use-parked-turns";
-import { type ComposerReferenceGroup } from "@/lib/composer-menu";
-import { artifactReferenceGroup } from "@/lib/composer-references";
 import { imageSubmitNoticeBanner } from "@/hooks/workspace/agent-chat-turn/image-prompt-turn";
 import { cn } from "@/lib/utils";
 
@@ -145,20 +145,12 @@ export function WorkspaceMainSection({
   });
 
   // P1-4 子片 3：`@` 引用候选分组（工作区文件在前，线程交付物在后兜底）。
-  const composerReferenceGroups = useMemo<ComposerReferenceGroup[]>(() => {
-    const groups: ComposerReferenceGroup[] = [];
-    if (fileReferences.group) {
-      groups.push(fileReferences.group);
-    }
-    const files = artifactReferenceGroup(
-      selectedThread.artifacts,
-      t("composer.references.files"),
-    );
-    if (files) {
-      groups.push(files);
-    }
-    return groups;
-  }, [fileReferences.group, selectedThread.artifacts, t]);
+  const composerReferenceGroups = useComposerReferenceGroups(
+    fileReferences.group,
+    selectedThread.artifacts,
+  );
+  // 文本类 skill 的 `$` 提及候选（与 `/skill` 弹窗同源的运行时技能目录）。
+  const composerSkillGroups = useComposerSkillGroups(runtimeSkills, runtimeSkillsError);
 
   // P2-1A / P2-9：后台任务（Jobs）——shell owner 单例加载一次，
   // 顶栏常驻状态条与弹层共用同一份数据（计数天然一致，不做第二次拉取）。
@@ -455,6 +447,7 @@ export function WorkspaceMainSection({
                     reasoningEffortError={reasoningEffortError}
                     reasoningEffortOptions={reasoningEffortOptions}
                     referenceGroups={composerReferenceGroups}
+                    skillGroups={composerSkillGroups}
                     selectedArtifactCount={selectedThread.artifacts.length}
                     onModelChange={onModelChange}
                     onProviderChange={onProviderChange}

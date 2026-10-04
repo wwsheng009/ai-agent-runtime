@@ -80,6 +80,8 @@ type MessageComposerProps = {
   runtimeModelsLoading: boolean;
   /** P1-4 子片 3：`@` 引用候选分组（文件/会话/子代理）。 */
   referenceGroups?: readonly ComposerReferenceGroup[];
+  /** 文本类 skill 的 `$` 提及候选分组（运行时技能目录）。 */
+  skillGroups?: readonly ComposerReferenceGroup[];
   selectedArtifactCount: number;
   selectedModel: string;
   selectedProvider: string;
@@ -123,6 +125,7 @@ export function MessageComposer({
   runtimeModelsError,
   runtimeModelsLoading,
   referenceGroups = NO_REFERENCE_GROUPS,
+  skillGroups = NO_REFERENCE_GROUPS,
   selectedArtifactCount,
   selectedModel,
   selectedProvider,
@@ -167,6 +170,7 @@ export function MessageComposer({
     value: draft,
     commands,
     referenceGroups,
+    skillGroups,
     hasAttachAction: true,
     attachLabel: t("composer.attachments.attach"),
     onValueChange: onDraftChange,

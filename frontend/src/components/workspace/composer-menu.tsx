@@ -164,7 +164,12 @@ function ComposerMenuOption({
               "data-composer-command-option": item.action.name,
               "data-composer-command-option-value": item.action.value,
             }
-          : { "data-composer-reference-option": item.action.text };
+          : item.action.kind === "skill"
+            ? { "data-composer-skill-option": item.action.name }
+            : { "data-composer-reference-option": item.action.text };
+  // `$` 技能行：名称优先完整展示（必要时按字符折行，绝不省略号截断），
+  // 描述降为次级信息并限宽截断，避免长描述把技能名挤没。
+  const isSkill = item.action.kind === "skill";
   return (
     <div
       id={composerMenuItemDomId(item.id)}
@@ -185,13 +190,15 @@ function ComposerMenuOption({
           : "text-muted-foreground hover:bg-surface-soft",
       )}
     >
-      <span className="truncate">{resolveLabel(item.label, item.labelKey)}</span>
+      <span className={cn(isSkill ? "min-w-0 break-all" : "truncate")}>
+        {resolveLabel(item.label, item.labelKey)}
+      </span>
       {item.descriptionKey ? (
-        <span className="truncate app-text-9 text-muted-foreground/70">
+        <span className={cn("truncate app-text-9 text-muted-foreground/70", isSkill && "max-w-[40%]")}>
           {t(item.descriptionKey as never) as string}
         </span>
       ) : item.description ? (
-        <span className="truncate app-text-9 text-muted-foreground/70">
+        <span className={cn("truncate app-text-9 text-muted-foreground/70", isSkill && "max-w-[40%]")}>
           {item.description}
         </span>
       ) : null}

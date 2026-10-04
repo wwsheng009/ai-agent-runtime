@@ -6,10 +6,18 @@ import {
   type ComposerCommandOption,
 } from "@/lib/composer-commands";
 
-export const COMPOSER_MENU_MAX_ITEMS_PER_GROUP = 8;
+import {
+  buildSkillLeafGroup,
+  buildSkillLauncherGroup,
+  rankMatch,
+  sortByRank,
+  COMPOSER_MENU_MAX_ITEMS_PER_GROUP,
+} from "@/lib/composer-menu-skill-groups";
 
-/** `commands` = `/` 触发；`references` = `@` 触发；`all` = `+` 按钮（同源菜单）。 */
-export type ComposerMenuMode = "commands" | "references" | "all";
+export { COMPOSER_MENU_MAX_ITEMS_PER_GROUP };
+
+/** `commands` = `/` 触发；`references` = `@` 触发；`skills` = `$` 触发；`all` = `+` 按钮（同源菜单）。 */
+export type ComposerMenuMode = "commands" | "references" | "skills" | "all";
 
 export type ComposerMenuLevel =
   | { kind: "root" }
@@ -22,6 +30,8 @@ export type ComposerMenuItemAction =
   /** 命令专属候选：`name` 回查命令，`value` 作为参数派发。 */
   | { kind: "command-option"; name: string; value: string }
   | { kind: "reference"; text: string }
+  /** `$` 技能提及：在触发 token 处补全为 `$name `。 */
+  | { kind: "skill"; name: string }
   | { kind: "attach" };
 
 export type ComposerMenuItem = {
@@ -73,6 +83,8 @@ export type ComposerReferenceItem = {
   /** 实际插入草稿的文本（不含 `@`）。 */
   insertText: string;
   description?: string;
+  /** 附加检索词（不展示；如技能分类），仅参与本地过滤命中。 */
+  keywords?: string;
 };
 
 export type ComposerReferenceStatus = "loading" | "ready" | "error";
@@ -109,6 +121,8 @@ export type ComposerMenuSource = {
   query: string;
   commands: readonly ComposerCommand[];
   referenceGroups: readonly ComposerReferenceGroup[];
+  /** `$` 技能提及候选（`skills` 模式与 `all` 模式消费）。 */
+  skillGroups?: readonly ComposerReferenceGroup[];
   /** `level.kind === "command-options"` 时的候选项来源；缺省按无候选处理。 */
   commandOptions?: ComposerCommandOptionsSource | null;
   /** 是否提供「添加附件」动作。 */
@@ -125,26 +139,6 @@ export type ComposerCommandOptionsSource = {
   label: string;
   options: readonly ComposerCommandOption[];
 };
-
-function rankMatch(label: string, extra: string, query: string): number {
-  if (query.length === 0) {
-    return 0;
-  }
-  const haystack = `${label} ${extra}`.toLowerCase();
-  if (!haystack.includes(query)) {
-    return -1;
-  }
-  return label.toLowerCase().startsWith(query) ? 0 : 1;
-}
-
-function sortByRank<T>(
-  entries: readonly { item: T; rank: number }[],
-): T[] {
-  return entries
-    .map((entry, index) => ({ ...entry, index }))
-    .sort((left, right) => left.rank - right.rank || left.index - right.index)
-    .map((entry) => entry.item);
-}
 
 function buildCommandGroup(
   commands: readonly ComposerCommand[],
@@ -360,6 +354,9 @@ export function buildComposerMenu(source: ComposerMenuSource): ComposerMenuSnaps
 
   const allowCommands = source.mode === "commands" || source.mode === "all";
   const allowReferences = source.mode === "references" || source.mode === "all";
+  // `$`（skills）直接给叶子候选；`+`（all）根层给 launcher 下钻（与引用组一致），
+  // 点选后在光标处插入 `$name `（插入点由 composer 具现化），不再是死入口。
+  const allowSkills = source.mode === "skills" || source.mode === "all";
   const drilled = (groupId: string) => drilledGroupId === null || drilledGroupId === groupId;
 
   if (allowCommands && drilled("commands")) {
@@ -373,6 +370,23 @@ export function buildComposerMenu(source: ComposerMenuSource): ComposerMenuSnaps
     const attachGroup = buildAttachGroup(source.hasAttachAction, source.attachLabel, query);
     if (attachGroup) {
       groups.push(attachGroup);
+    }
+  }
+
+  if (allowSkills) {
+    // `$` 模式对齐 TUI：不做 launcher 下钻，空查询也直接给叶子候选。
+    const skillLaunchers =
+      source.mode === "all" && drilledGroupId === null && query.length === 0;
+    for (const skillGroup of source.skillGroups ?? []) {
+      if (!drilled(skillGroup.id)) {
+        continue;
+      }
+      const group = skillLaunchers
+        ? buildSkillLauncherGroup(skillGroup)
+        : buildSkillLeafGroup(skillGroup, query);
+      if (group) {
+        groups.push(group);
+      }
     }
   }
 

@@ -588,6 +588,10 @@ export const zhWorkspaceBase = {
       workspaceFilesEmpty: "未找到匹配文件，可继续输入缩小范围",
       workspaceFilesError: "工作区文件不可用",
       workspaceFilesTruncated: "结果已截断，继续输入以缩小范围",
+      skills: "技能",
+      skillsLoading: "正在加载技能目录…",
+      skillsEmpty: "未找到匹配技能，可继续输入缩小范围",
+      skillsError: "技能目录不可用",
     },
   },
 } as const;

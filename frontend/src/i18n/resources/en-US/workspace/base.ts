@@ -618,6 +618,10 @@ export const enWorkspaceBase = {
       workspaceFilesEmpty: "No files match; keep typing to narrow down",
       workspaceFilesError: "Workspace files unavailable",
       workspaceFilesTruncated: "Results truncated; keep typing to narrow down",
+      skills: "Skills",
+      skillsLoading: "Loading skill catalog…",
+      skillsEmpty: "No skills match; keep typing to narrow down",
+      skillsError: "Skill catalog unavailable",
     },
   },
 } satisfies DeepStringShape<typeof zhWorkspaceBase>;
