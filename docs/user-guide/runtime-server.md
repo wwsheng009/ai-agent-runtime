@@ -148,11 +148,12 @@ runtime-server serve --pprof
 | `GET/PUT/DELETE` | `/api/runtime/mcps/{name}` | 查看 / 更新 / 删除；删除返回 `{"removed":true}` |
 | `POST` | `/api/runtime/mcps/{name}/enable` \| `/disable` | 启停（持久化 `enabled` 并重连） |
 | `POST` | `/api/runtime/mcps/reload` | 热重载并重连，返回 `{reloaded,trace_id,catalog,runtime,health}` |
-| `GET` | `/api/runtime/sessions/{id}/runtime/mcps` | 会话 MCP 面：`{"session_id","disabled","count"}`（覆盖清单，向后兼容）+ `"scope"`（读写目标/工作区/candidates）+ `"mcps"`（会话实际生效的条目，`source=workspace\|global`）+ `"summary"` |
-| `POST` | `/api/runtime/sessions/{id}/runtime/mcps/{name}/enable` \| `/disable` | 默认**仅本会话**启停（不写配置文件）：`disable` 收窄该会话工具面/执行面；`enable` 清除覆盖（停用时返回 409）。加 `?scope=workspace` 改为**持久化**：写会话生效的配置文件 + 热重载 |
+| `GET` | `/api/runtime/sessions/{id}/runtime/mcps` | 会话 MCP 面：`{"session_id","disabled","enabled","count"}`（`disabled`=会话停用覆盖、`enabled`=会话临时启用名单）+ `"scope"`（读写目标/工作区/candidates）+ `"mcps"`（会话实际生效的条目，`source=workspace\|global`、`session_disabled`/`session_enabled`）+ `"summary"` |
+| `POST` | `/api/runtime/sessions/{id}/runtime/mcps/{name}/enable` \| `/disable` | 默认**仅本会话**启停（不写配置文件）：`disable` 收窄该会话工具面/执行面；`enable` 对已启用的 server 清除覆盖，对**配置停用**的 server 建立会话私有临时连接（内存配置快照 `ScopedManager`，后端不可用时 503）。加 `?scope=workspace` 改为**持久化**：写会话生效的配置文件 + 热重载 |
 | `POST` | `/api/runtime/sessions/{id}/runtime/mcps` | 在会话生效的配置文件中新增 MCP（工作区锚定时写工作区 `mcp.yaml`，工作区暂无配置时创建 `<workspace>/.aicli/mcp.yaml`；未绑定工作区写进程级文件） |
 | `PUT` \| `DELETE` | `/api/runtime/sessions/{id}/runtime/mcps/{name}` | 更新 / 删除会话配置文件中的 MCP（写文件 + 热重载） |
 | `POST` | `/api/runtime/sessions/{id}/runtime/mcps/reload` | 重载会话生效的配置文件（工作区 manager 原地重连） |
+| `GET` | `/api/runtime/sessions/{id}/runtime/mcps/{name}/tools` | 会话生效 manager 的工具清单（工作区私有 server 也有；未启用/未连接时 `tools=[]`）；响应与全局 `/api/runtime/mcps/{name}/tools` 同形并附带 `scope` |
 
 会话级覆盖与 CLI chat `/mcp disable <name> --session`、chat web `?scope=session`
 同一语义：覆盖随会话元数据持久化，工具列表（`GET /sessions/{id}/runtime/tools`，
@@ -167,6 +168,12 @@ skill execute）在下个 turn 边界按覆盖重建；全局连接、配置文�
 持久化 + 热重载）、「新增」与「删除」；「本会话停用 / 恢复」仍是原有覆盖语义，
 两条路径互不影响。新增在工作区还没有配置文件时写入
 `<workspace>/.aicli/mcp.yaml`（`scope.workspace_fallback=true` 时面板会提示）。
+
+**本会话启用（临时连接，2026-10-04）**：配置里 `enabled=false` 的 server 在会话面板
+显示「本会话启用」——后端用会话生效配置的内存快照（该 server 强制启用）起一套会话
+私有 manager，只在本会话工具面暴露，**不写配置文件、不建全局连接**；按钮再点一次
+（本会话停用）或会话结束即回收。语义与 CLI `/mcp enable <name> --session` 同源
+（`manager.ScopedManager.LoadConfigFromConfig`），实现见 `session_mcp_temp.go`。
 
 **按会话工作区锚定（2026-10-04）**：会话绑定 `workspace_path` 时，runtime-server
 以该目录为锚点重跑同一条发现链（local/project/upward 候选随工作区变化；
