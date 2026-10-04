@@ -342,12 +342,18 @@ type TerminalSession struct {
 	// critically, excludes unused blank headroom. This is display-only cache:
 	// semantic recovery still comes from AppState/Scene.
 	historyTailRows []string
+	// historyStreamTailRows is the bounded tail of every row that physically
+	// crossed the writer for this session, oldest first, whether it stayed
+	// resident in the history region or was archived into native scrollback by
+	// a still-mutable cell. It is the dedup proof for a replay that re-covers
+	// delivered bytes; the resident model alone cannot see archived rows.
+	historyStreamTailRows []string
 	// historyTailCells records which semantic cells already own at least one
-	// row of the resident history region. It is the provenance half of the
-	// resident-tail proof: a payload may only drop leading rows that re-cover
-	// the tail when its leading commit belongs to a cell this region already
-	// holds. Bare text equality would also drop genuinely new rows whenever a
-	// different cell renders identical lines.
+	// delivered stream row (resident or archived). It is the provenance half of
+	// the tail proof: a payload may only drop leading rows that re-cover the
+	// stream tail when its leading commit belongs to a cell this session
+	// already delivered. Bare text equality would also drop genuinely new rows
+	// whenever a different cell renders identical lines.
 	historyTailCells map[uint64]struct{}
 	// historyTopAligned becomes sticky after this session has moved a semantic
 	// row into native scrollback. From that point the resident tail must begin
@@ -559,6 +565,7 @@ func (s *TerminalSession) EnterAlternateScreen(leaseID uint64) error {
 			}
 			s.viewportBoundaryKnown = false
 			s.historyTailRows = nil
+			s.historyStreamTailRows = nil
 			s.historyTailCells = nil
 			s.historyTopAligned = false
 			s.historyProjectionKnown = false
@@ -641,6 +648,7 @@ func (s *TerminalSession) ExitAlternateScreen(leaseID uint64) error {
 	if write.Err != nil {
 		s.viewportBoundaryKnown = false
 		s.historyTailRows = nil
+		s.historyStreamTailRows = nil
 		s.historyTailCells = nil
 		s.historyTopAligned = false
 		s.historyProjectionKnown = false
@@ -1005,14 +1013,25 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		// identical text rendered by a new cell is written in full instead of
 		// being mistaken for a re-delivery.
 		historyInsertedPayload = terminalHistoryPayloadToWrite(
-			baseHistoryTail, s.historyTailCells, delivered, historyInsertedPayload,
+			terminalRetainHistoryTailRows(s.historyStreamTailRows, frame.OutputBottomRow),
+			s.historyTailCells, delivered, historyInsertedPayload,
 		)
 		historyInsertedRows = len(historyInsertedPayload)
 	}
 	if historyInsertedRows > 0 {
-		historyBytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
-			frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload, nextHistoryTopAligned,
-		)
+		if historyBatchIsActiveOrigin(delivered) {
+			// A still-mutable cell's overflow prefix crosses the physical
+			// writer as an archive, not as a new resident of the primary
+			// history region. The finalized tail the layout projects above the
+			// active band must survive its own cell's streaming overflow.
+			historyBytes, nextHistoryTopAligned = terminalActiveHistoryArchiveANSI(
+				frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload, nextHistoryTopAligned,
+			)
+		} else {
+			historyBytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
+				frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload, nextHistoryTopAligned,
+			)
+		}
 	}
 	// composer band 是本事务的最后一个写入段，而且只要本事务在其上方写过任何字节
 	// （重置 / 边界重排 / 历史插入），band 就必须整段重写：写在上方的字节可能经由
@@ -1057,6 +1076,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 			}
 			if geometryChanged || transitionBytes != "" || historyBytes != "" {
 				s.historyTailRows = nil
+				s.historyStreamTailRows = nil
 				s.historyTailCells = nil
 				s.historyTopAligned = false
 				s.historyProjectionKnown = false
@@ -1101,6 +1121,7 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		s.historyProjectionStarted = true
 		s.historyProjectionKnown = true
 		s.historyTailRows = nil
+		s.historyStreamTailRows = nil
 		s.historyTailCells = nil
 		if plan.TerminalEpoch > s.terminalEpoch {
 			s.terminalEpoch = plan.TerminalEpoch
@@ -1125,8 +1146,16 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 		s.historyTailRows = baseHistoryTail
 		s.historyTopAligned = nextHistoryTopAligned
 		if historyInsertedRows > 0 {
-			s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, historyInsertedPayload, frame.OutputBottomRow)
+			// The stream tail proves every row that physically crossed the
+			// writer, resident or archived. The resident region model only
+			// follows deliveries that keep their rows there.
+			s.historyStreamTailRows = terminalAppendHistoryTailRows(
+				s.historyStreamTailRows, historyInsertedPayload, frame.OutputBottomRow,
+			)
 			s.historyTailCells = terminalAppendHistoryTailCells(s.historyTailCells, delivered)
+			if !historyBatchIsActiveOrigin(delivered) {
+				s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, historyInsertedPayload, frame.OutputBottomRow)
+			}
 		}
 	}
 	s.cursor = cloneTerminalCursor(frame.Cursor)
@@ -1250,9 +1279,18 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 	// The top-anchored region ends immediately above the inline viewport. Since
 	// its top margin is physical row one, overflow becomes native scrollback;
 	// prompt/status rows below outputBottom never participate in the scroll.
-	bytes, nextHistoryTopAligned := terminalHistoryInsertionANSI(
-		s.geometry.Height, s.outputBottom, s.historyTailRows, rows, s.historyTopAligned,
-	)
+	activeArchive := commit.Origin == HistoryCommitActive
+	var bytes string
+	var nextHistoryTopAligned bool
+	if activeArchive {
+		bytes, nextHistoryTopAligned = terminalActiveHistoryArchiveANSI(
+			s.geometry.Height, s.outputBottom, s.historyTailRows, rows, s.historyTopAligned,
+		)
+	} else {
+		bytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
+			s.geometry.Height, s.outputBottom, s.historyTailRows, rows, s.historyTopAligned,
+		)
+	}
 	if bytes == "" {
 		return HistoryCommitResult{Err: ErrInvalidHistoryHandoff}
 	}
@@ -1263,6 +1301,7 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 		if write.MayHavePartiallyWritten {
 			s.viewportBoundaryKnown = false
 			s.historyTailRows = nil
+			s.historyStreamTailRows = nil
 			s.historyTailCells = nil
 			s.historyTopAligned = false
 			s.historyProjectionKnown = false
@@ -1276,8 +1315,11 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 	}
 
 	s.frame++
-	s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, rows, s.outputBottom)
+	s.historyStreamTailRows = terminalAppendHistoryTailRows(s.historyStreamTailRows, rows, s.outputBottom)
 	s.historyTailCells = terminalAppendHistoryTailCells(s.historyTailCells, []HistoryCommit{commit})
+	if !activeArchive {
+		s.historyTailRows = terminalAppendHistoryTailRows(s.historyTailRows, rows, s.outputBottom)
+	}
 	s.historyTopAligned = nextHistoryTopAligned
 	s.preparedHistory = nil
 	return HistoryCommitResult{Frame: s.frame}
@@ -1489,10 +1531,12 @@ func terminalAppendHistoryTailRows(current, inserted []string, capacity int) []s
 }
 
 // terminalHistoryPayloadAfterResident trims the leading rows of a planned
-// payload that the history region already holds. A replay-free settlement
-// re-mints a range whose bytes are still resident when an in-flight delivery
-// lost its ledger proof; emitting them again would duplicate text inside the
-// scroll region and inside native scrollback.
+// payload that the delivered history stream already holds, whether those rows
+// stayed resident in the history region or were archived into native
+// scrollback by a still-mutable cell. A replay-free settlement re-mints a
+// range whose bytes still crossed the writer when an in-flight delivery lost
+// its ledger proof; emitting them again would duplicate text inside the scroll
+// region and inside native scrollback.
 //
 // Only a payload that re-covers the complete retained tail is trimmed, and the
 // caller must additionally prove provenance: the trimming call sites gate on
@@ -1514,9 +1558,10 @@ func terminalHistoryPayloadAfterResident(resident, inserted []string) []string {
 }
 
 // terminalHistoryPayloadToWrite is the only entry point for trimming a planned
-// history payload against the resident tail. It couples the textual overlap
-// proof to the provenance proof so no call site can apply the trim without
-// proving that the payload continues a cell the region already holds.
+// history payload against the delivered stream tail. It couples the textual
+// overlap proof to the provenance proof so no call site can apply the trim
+// without proving that the payload continues a cell this session already
+// delivered.
 func terminalHistoryPayloadToWrite(resident []string, residentCells map[uint64]struct{}, delivered []HistoryCommit, inserted []string) []string {
 	if !terminalHistoryPayloadReclaimsResidentRows(delivered, residentCells) {
 		return inserted
@@ -1526,10 +1571,11 @@ func terminalHistoryPayloadToWrite(resident []string, residentCells map[uint64]s
 
 // terminalHistoryPayloadReclaimsResidentRows reports whether the first commit
 // of a planned payload belongs to a cell that already owns at least one row of
-// the resident history region. Only such a payload can be a re-delivery of
-// resident rows (a settlement that lost its ledger proof mid-flight); a batch
-// that starts with a cell this region has never displayed must be written in
-// full even when its leading bytes equal the retained tail.
+// the delivered history stream (resident or archived). Only such a payload can
+// be a re-delivery of delivered rows (a settlement that lost its ledger proof
+// mid-flight); a batch that starts with a cell this session has never
+// delivered must be written in full even when its leading bytes equal the
+// retained tail.
 func terminalHistoryPayloadReclaimsResidentRows(delivered []HistoryCommit, residentCells map[uint64]struct{}) bool {
 	if len(delivered) == 0 || len(residentCells) == 0 {
 		return false
@@ -1539,11 +1585,11 @@ func terminalHistoryPayloadReclaimsResidentRows(delivered []HistoryCommit, resid
 }
 
 // terminalAppendHistoryTailCells records the semantic owners of rows that were
-// just appended to the resident tail. The recorded set over-approximates exact
-// per-row ownership because rows retired by capacity are not pruned
+// just delivered to the history stream. The recorded set over-approximates
+// exact per-row ownership because rows retired by capacity are not pruned
 // individually; that direction is safe here, since membership only widens for
-// cells whose rows this region has already held, and the set is reset whenever
-// the physical region itself is cleared or invalidated.
+// cells whose rows this session has already delivered, and the set is reset
+// whenever the physical projection is cleared or invalidated.
 func terminalAppendHistoryTailCells(current map[uint64]struct{}, delivered []HistoryCommit) map[uint64]struct{} {
 	if len(delivered) == 0 {
 		return current
@@ -1598,6 +1644,77 @@ func terminalHistoryInsertionANSI(height, capacity int, resident, inserted []str
 		topAligned = true
 	}
 	return output.String(), topAligned
+}
+
+// historyBatchIsActiveOrigin reports whether one planned history delivery
+// contains only commits minted for a still-mutable active cell. An empty or
+// mixed batch keeps the resident insertion semantics: only a delivery that is
+// entirely active overflow may be archived past the retained finalized tail.
+func historyBatchIsActiveOrigin(delivered []HistoryCommit) bool {
+	if len(delivered) == 0 {
+		return false
+	}
+	for _, commit := range delivered {
+		if commit.Origin != HistoryCommitActive {
+			return false
+		}
+	}
+	return true
+}
+
+// terminalActiveHistoryArchiveANSI writes a mutable cell's overflow rows
+// through the primary history region and into native scrollback without ever
+// making them resident there. The retained finalized tail the layout projects
+// above the active band is restored exactly, so streaming overflow can no
+// longer evict finalized rows from the visible primary screen.
+//
+// One chunk at a time:
+//  1. paint the chunk over the region's top rows;
+//  2. scroll the region up by the chunk length, which records exactly those
+//     painted rows into native scrollback (the region top margin is row one).
+//
+// Once every chunk has crossed, the region is repainted from the retained tail
+// model, top-aligned: rows have reached native scrollback, so the resident
+// suffix must begin at physical row one and stay contiguous with the archived
+// stream instead of leaving blank headroom between scrollback and the next
+// delivery. The resident model itself is unchanged: an archive never owns rows
+// of the region, so later capacity or alignment decisions keep seeing the
+// finalized tail and nothing else. The returned alignment is therefore always
+// sticky-top once anything was archived.
+func terminalActiveHistoryArchiveANSI(height, capacity int, resident, inserted []string, topAligned bool) (string, bool) {
+	if height < 1 || capacity < 1 || len(inserted) == 0 {
+		return "", topAligned
+	}
+	if capacity > height {
+		capacity = height
+	}
+	resident = terminalRetainHistoryTailRows(resident, capacity)
+	var output strings.Builder
+	remaining := inserted
+	for len(remaining) > 0 {
+		chunk := remaining
+		if len(chunk) > capacity {
+			chunk = chunk[:capacity]
+		}
+		for index, row := range chunk {
+			fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", index+1)
+			output.WriteString(row)
+		}
+		// The empty handoff plan still emits one CR/LF per row, so the region
+		// scrolls by exactly the archived length and native scrollback records
+		// exactly the rows painted above.
+		output.WriteString(renderengine.NewHandoffPlan(height, capacity, make([]string, len(chunk))).ANSI())
+		remaining = remaining[len(chunk):]
+	}
+	topAligned = true
+	for index, row := range resident {
+		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", index+1)
+		output.WriteString(row)
+	}
+	for row := len(resident) + 1; row <= capacity; row++ {
+		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
+	}
+	return output.String(), true
 }
 
 func terminalHistoryDeleteLinesANSI(capacity, row, count int) string {
