@@ -236,7 +236,8 @@ export function WorkspaceMainSection({
   const composerNotice =
     imageSubmitNoticeBanner(imageSubmitFeedback?.notice, t) ??
     composerCommandSurface.commandResult;
-  const dismissComposerNotice = imageSubmitFeedback
+  // 仅当带图回执真正在显示时才优先它；控制器对象恒存在，不能拿它当「是否在显示」的判据。
+  const dismissComposerNotice = imageSubmitFeedback?.notice
     ? imageSubmitFeedback.dismissNotice
     : composerCommandSurface.onDismissCommandResult;
 
