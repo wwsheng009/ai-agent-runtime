@@ -1,6 +1,7 @@
 # 缺口交接：auto-start team 的 `AmbientRunMeta` 丢失
 
-状态：**成因已确诊（lost update），未修复**。基线 `65a7d19c`，整包 2 个存量失败。
+状态：**两个根因均已确诊；第一个曾有可用修复但已回退（见 §3），第二个未修**。
+基线 `5b5fe77c`，整包 2 个存量失败。
 
 ## 复现（4 秒，勿用整包）
 
@@ -9,101 +10,100 @@ cd backend
 go test ./cmd/aicli/commands/ -count=1 -run '^(TestAICLIChatActorExecutor_AutoStartTeamPublishesSingleTerminalEvents|TestAICLIChatActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled)$'
 ```
 
-单跑目标用例 **PASS**；与前者配对才 **FAIL**。症状只集中在
-`chat_local_orchestration_integration_test.go:1003`：
+单跑目标用例 **PASS**；与前者配对才 **FAIL**。失败断言在
+`chat_local_orchestration_integration_test.go:1003`，唯一失败字段是
+`AmbientRunMeta == nil`（`Status`、`CurrentRunMeta` 均正确）。
+
+## 1. 根因一：actor 整行覆盖抹掉 ambient（真实 bug）
 
 ```
-expected base session runtime state to stay idle with ambient team metadata
-while team is pending, got &{… Status:idle CurrentTurnID: SuspendedTurnID:
-CurrentCheckpointID: CurrentRunMeta:<nil> AmbientRunMeta:<nil> …}
+写者 A — syncAmbientTeamLifecycleState (chat_team_drain.go:333)   ← 全仓唯一生产写入方
+  case pending:              state.AmbientRunMeta = currentRunMetaForSession()  :362
+  case !pending && != nil:   state.AmbientRunMeta = nil                          :366
+
+写者 B — SessionActor.updateState (internal/chat/actor.go:3763, SaveState 在 :3795)
+  next := a.state.Clone()
+  ↑ a.state 由 loadState(:3533) 在**构造时**载入，早于 ambient 绑定写入
+  ⇒ 其 AmbientRunMeta 恒为 nil，每次保存都整行覆盖把它抹掉
 ```
 
-`Status` / `CurrentRunMeta` 都正确，**唯一失败字段是 `AmbientRunMeta == nil`**。
+插桩实测（`InMemoryRuntimeStore.SaveState`，`AA_SAVE`）：40 次落库中
+**6 次 `in=false stored=true`**，调用链 `actor.go:3795 <- :3829 <- :3008`
+与 `actor.go:3795 <- :1092 <- :1005`。
 
-## 确诊过程（每一步都由插桩证伪，非推断）
+### 修法与回退记录
 
-在 `InMemoryRuntimeStore.SaveState` 加临时日志后，一次复现得到 40 次落库，其中
-**6 次是覆盖写**：
+已实现并验证过一个修复：`updateState` 落库前 `LoadState` 取回当前
+`AmbientRunMeta` 保留。实测效果：
+
+- actor 的 6 次误清 **6 → 0**（40 次落库全部来自 drain）
+- `internal/chat` 全量通过
+- `cmd/aicli/commands` 整包失败面不变（仍 2 个）
+- **但不修复目标用例**（见根因二）
+
+**已回退**，理由：收益无法由任何测试验证，代价是三项未验证影响——
+(a) 每次 `updateState` 增加一次 `LoadState`（热路径，SQLite 后端为额外 SELECT）；
+(b) `a.state.AmbientRunMeta` 语义改变，影响 `turn_tool_surface_snapshot.go:126`
+的 permissionMode 回退（无测试覆盖）；(c) 无法证明修复了任何可观测行为。
+
+若重做，建议一并补一个直接覆盖「actor 保存后 ambient 仍在」的单元测试，
+否则不宜合入。
+
+## 2. 根因二：team 在断言前已 settle（目标用例的真正失败原因）
+
+对 `syncAmbientTeamLifecycleState` 的 switch 插桩（`AA_CLEAR`），配对运行实测：
 
 ```
-AA_SAVE in=false stored=true <- actor.go:3795 <- actor.go:3829 <- actor.go:3008
-AA_SAVE in=false stored=true <- actor.go:3795 <- actor.go:1092 <- actor.go:1005
-AA_SAVE in=false stored=true <- chat_team_drain.go:368 <- chat_actor_host.go:3807
+每个 base session:
+  调用 10~13 次, binding 为 nil 0 次, pending=false 1~4 次, hadAmbient=true 9 次
+  会触发清除的 (!pending && hadAmbient) = 恰好 1 次
 ```
 
-`in=false stored=true` 的含义是：**本次写入要把已存储的 ambient meta 抹成 nil**。
+要点：
 
-### 两个写者争同一行
+- **`binding` 从未为 nil** —— 排除了「绑定解析瞬时失败触发清除」的猜测
+- 清除恰好发生 **1 次**，且是该 session 的最后一次落库
+- 即：team 在断言之前就已 settle，drain 执行了**合法**的清除
 
-```
-写者 A — syncAmbientTeamLifecycleState (cmd/aicli/commands/chat_team_drain.go:333)
-  LoadState → case pending: state.AmbientRunMeta = currentRunMetaForSession(…)  :362
-            → case !pending && != nil: state.AmbientRunMeta = nil                :366
-            → SaveState
-  ↑ 全仓唯一一处生产写入 AmbientRunMeta
-
-写者 B — internal/chat Actor.mutateState (backend/internal/chat/actor.go:3791-3795)
-  next := a.state.Clone()   // a.state 自初始化起就没有 AmbientRunMeta
-  mutate(next); a.stateStore.SaveState(ctx, next.Clone())
-  ↑ 整行覆盖 ⇒ 每次都把 ambient 写成 nil
-```
-
-`internal/chat/actor.go` 全文只设 `CurrentRunMeta`、从无 `AmbientRunMeta`。
-actor 的 state 从未装载过该字段，所以它**必然**在每次保存时清空它。
-
-### 已排除的假设（都做过插桩证伪）
+而用例的前提是「`Execute` 返回时 team 仍 pending」。该前提在配对运行中不成立——
+这正是它单跑通过、配对失败的原因。已排除的假设：
 
 | 假设 | 证伪方式 | 结果 |
 |---|---|---|
-| `resolvedInteractiveTeamBinding` 返回 nil | `AA_DIAG` 全程 23 次 | `binding="team-auto"` 始终非 nil |
-| `interactiveTeamPendingByTeamID` 误报 false | 同上 | `pending=true` 全程，仅收尾转 false |
-| `currentRunMetaForSession` 返回 nil | `AA_DIAG2` | **0 行**，从未进入该 return 分支 |
-| `LoadState` 返回内部指针（aliasing） | 读实现 | 返回 `state.Clone()`，深拷贝，无别名 |
-| `cloneRuntimeStateForInMemoryStore` 会合并该字段 | 读实现 | 只对**工具面**做 reuse-or-clone；`AmbientRunMeta` 直接取调用方值 |
+| binding 解析返回 nil | `AA_DIAG` / `AA_CLEAR` | 全程非 nil |
+| `Pending` 误报 false | `AA_DIAG` | pending=true 为主，仅收尾转 false |
+| `currentRunMetaForSession` 返回 nil | `AA_DIAG2` | **0 行**，从未进入 return 分支 |
+| `LoadState` aliasing | 读实现 | 返回 `state.Clone()`，深拷贝 |
+| store 会合并该字段 | 读实现 | 只对工具面 reuse-or-clone，不碰 ambient |
 
-## 为什么只在整包失败
+### 下一步需要判定（未做）
 
-能否通过取决于**最后一次落库是 A 还是 B**。单跑时交错顺序恰好以 A 收尾 → 通过；
-跑过其它 auto-start team 流程后顺序改变，最后一次变成 B → 失败。这也解释了
-「凡是跑过 auto-start team 流程的用例都会触发后续用例失败」。
+需要在 `Execute` 返回点与前述那次清除之间打时间戳，判定：
 
-## 修复方向（需设计决策，非一行补丁）
+- **(a) 测试假设过时**：mock planner 完成太快，配对运行时被预热，
+  team 在 `Execute` 返回前就结束 ⇒ 应修测试（给它一个确定性同步点），
+  但**改测试有掩盖真 bug 的风险，须先确认生产行为正确**
+- **(b) 生产真 bug**：drain 的清除条件 `!pending` 过宽——`Pending()` 在
+  「team 已注册但尚未置为 pending」时也会返回 false，从而误清。
+  若属实，修法是让清除额外要求 team 确为终态
+  （`team.IsTerminalTeamStatus(record.Status)`，同 `shouldPropagateTeamRunMeta`
+  的既有口径），而非仅凭 `!pending`
 
-难点在于**无法区分 nil 的两种语义**：
-- actor 的 nil =「我不知道这个字段」→ 应保留旧值
-- `chat_team_drain.go:366` 的 nil =「请清除」→ 必须生效
-
-所以单纯在 `cloneRuntimeStateForInMemoryStore` 里做「nil 则保留 previous」
-会**破坏 `:366` 的主动清除路径**。需要给清除一个显式信号（哨兵/专用方法），
-或改所有权模型。
-
-### 推荐做法：让 actor 在保存时向提供方取当前值
-
-仓内已有同构先例——`chat_actor_host.go:1811` 的 `TriggerTurnRunMeta` 钩子：
-actor 在写入 run meta 前向宿主询问，而不是持有可能陈旧的值。
-
-按同一模式给 actor 注入一个 `AmbientRunMeta` 提供方，在
-`mutateState` 落库前取值，即可让 actor 永不写入陈旧 nil，`A` 保持为唯一真实来源。
-
-代价：跨 `internal/chat` 与 `cmd/aicli/commands` 的接线改动，
-`actor.go` 有 4 处 `SaveState` 调用点（:3554 / :3557 / :3597 / :3795）需一并核对。
-
-### 修完必须验
-
-```powershell
-go test ./internal/chat/... -count=1
-go test ./cmd/aicli/... -count=1            # 整包，确认存量失败仍是 2 个
-```
-
-另需确认 `chat_team_drain.go:366` 的主动清除在 team 收尾后仍生效
-（`:414` 有依赖 `state.AmbientRunMeta` 的读取方）。
-
-## 同批次另一缺口
+## 3. 同批次另一缺口（未修，风险更高）
 
 `chat_history_reconcile_test.go:568`
-（`UnifiedPrimaryViewportRetainsHistoryTailAlongsideActiveReasoning`，
+（`TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsideActiveReasoning`，
 报 `primary history viewport is missing "history user 6"`）。
 
-定位：presenter 的**计划**正确（`app_screen_layout.go` `bottom.Rows` 含
-`history user 6`），但**实际写屏**的那一份行序不同 —— 是 presenter 与
-`LayoutAppScreen` 计划脱节，不是布局计算错误。风险高于本缺口，建议排在其后。
+定位：presenter 的**计划**正确（`app_screen_layout.go` 的 `bottom.Rows` 含
+`history user 6`），但**实际写屏**的那一份行序不同——是 presenter 与
+`LayoutAppScreen` 计划脱节，不是布局计算错误。建议独立一轮处理。
+
+## 附：本轮验证口径
+
+```powershell
+go test ./internal/chat/... -count=1                 # PASS（32s）
+go test ./cmd/aicli/commands/ -count=1               # 2 个已知失败，174s
+```
+
+整包失败面自 `65a7d19c` 起未扩大：始终是上述两个用例。
