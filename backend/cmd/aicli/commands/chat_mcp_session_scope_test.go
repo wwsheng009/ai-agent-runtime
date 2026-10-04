@@ -35,6 +35,28 @@ func withoutProcessMCPManager(t *testing.T) {
 	t.Cleanup(func() { MCPManagerInstance = previous })
 }
 
+// isolateProcessMCPManager 快照并在用例结束时恢复整组进程级 MCP 全局。
+//
+// 只恢复 MCPManagerInstance 不够：initMCPManagerWithSelectionFrom 会把
+// configPath/selectionKey/layerBase 一起写成「本次生效」的指纹。只回滚实例、
+// 留下指纹，会让后续按指纹早退（mcp_integration.go 的 `configPath == mcpManagerConfigPath`
+// 分支）拿到不一致的组合。任何会经 prepareChatMCPManager 建连的用例都应调用它，
+// 否则进程全局会泄漏给同包后续用例（实例非 nil → skill 侧拿到纯 MCP 工具面 →
+// 依赖 builtin 工具的 skill 被静默跳过）。
+func isolateProcessMCPManager(t *testing.T) {
+	t.Helper()
+	prevInstance := MCPManagerInstance
+	prevConfigPath := mcpManagerConfigPath
+	prevSelectionKey := mcpManagerSelectionKey
+	prevLayerBase := mcpManagerLayerBase
+	t.Cleanup(func() {
+		MCPManagerInstance = prevInstance
+		mcpManagerConfigPath = prevConfigPath
+		mcpManagerSelectionKey = prevSelectionKey
+		mcpManagerLayerBase = prevLayerBase
+	})
+}
+
 func newSessionScopeTestSession() *ChatSession {
 	registry := functions.NewFunctionRegistry()
 	return &ChatSession{

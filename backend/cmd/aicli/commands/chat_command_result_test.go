@@ -1054,6 +1054,12 @@ func chatDirectWriterInventory() []chatDirectWriterInventoryEntry {
 		{File: "chat_backtrack_select.go", Func: "readBacktrackTurnPickPlain", Kind: "fmt.Print", Count: 3},
 		{File: "chat_bootstrap.go", Func: "prepareChatPersistence", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_bootstrap.go", Func: "prepareChatRuntimeState", Kind: "fmt.Fprint(os.Std*)", Count: 3},
+		// 这 1 处不是交互输出，而是 NotifyChatDiagnostic 契约明文规定的 stderr 兜底
+		// （见 chat_diagnostic.go：「返回 false 表示当前没有可接收的交互式会话，
+		// 调用方应回退到 stderr」）：能力面在后台 goroutine 上发现失败时，先投递动态栏，
+		// 未登记交互出口（启动早期 / 非交互 / JSON）才落 stderr。因此不适用「不得为新
+		// 交互功能加基线条目」那条约束。
+		{File: "chat_capabilities_async.go", Func: "runChatCapabilitiesLoad", Kind: "fmt.Fprint(os.Std*)", Count: 1},
 		{File: "chat_core.go", Func: "method Finalize", Kind: "fmt.Print", Count: 5},
 		{File: "chat_core.go", Func: "method Handle", Kind: "fmt.Print", Count: 4},
 		{File: "chat_core.go", Func: "method clearSpinner", Kind: "fmt.Print", Count: 1},

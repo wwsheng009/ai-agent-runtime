@@ -5884,7 +5884,58 @@ func TestSubagentScheduler_ReadOnlyFiltersWriteLikeTools(t *testing.T) {
 	assert.Empty(t, writers)
 }
 
-func TestSubagentScheduler_RejectsDuplicateTaskID(t *testing.T) {
+func TestSubagentScheduler_NonReadOnlyWithoutWriteLikeToolsIsReader(t *testing.T) {
+ 	agent := &Agent{
+ 		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
+ 	}
+ 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+ 		MaxConcurrent:       4,
+ 		MaxDepth:            1,
+ 		EnforceSingleWriter: true,
+ 	})
+ 
+ 	// Two non-read-only subagents whose whitelist contains only read-only
+ 	// tools. Under the old logic both were classified as writers and the
+ 	// single-writer policy rejected the batch. With the fix they are readers
+ 	// and can run concurrently.
+ 	prepared, err := scheduler.prepareTasks([]SubagentTask{
+ 		{ID: "reader-1", Goal: "Inspect files", ReadOnly: false, ToolsWhitelist: []string{"view", "grep", "shell"}},
+ 		{ID: "reader-2", Goal: "Inspect logs", ReadOnly: false, ToolsWhitelist: []string{"view", "grep", "shell"}},
+ 	})
+ 	require.NoError(t, err)
+ 	require.Len(t, prepared, 2)
+ 
+ 	readers, writers, err := scheduler.partitionTasks(prepared)
+ 	require.NoError(t, err)
+ 	assert.Len(t, readers, 2)
+ 	assert.Empty(t, writers)
+ }
+ 
+ func TestSubagentScheduler_NonReadOnlyWithWriteLikeToolIsWriter(t *testing.T) {
+ 	agent := &Agent{
+ 		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
+ 	}
+ 	scheduler := NewSubagentScheduler(agent, SubagentSchedulerConfig{
+ 		MaxConcurrent:       2,
+ 		MaxDepth:            1,
+ 		EnforceSingleWriter: true,
+ 	})
+ 
+ 	// A non-read-only subagent with a write-like tool in its whitelist is
+ 	// still classified as a writer and subject to the single-writer policy.
+ 	prepared, err := scheduler.prepareTasks([]SubagentTask{
+ 		{ID: "writer-1", Goal: "Modify config", ReadOnly: false, ToolsWhitelist: []string{"view", "write", "shell"}},
+ 		{ID: "writer-2", Goal: "Modify code", ReadOnly: false, ToolsWhitelist: []string{"view", "edit", "shell"}},
+ 	})
+ 	require.NoError(t, err)
+ 	require.Len(t, prepared, 2)
+ 
+ 	_, _, err = scheduler.partitionTasks(prepared)
+ 	require.Error(t, err)
+ 	assert.Contains(t, err.Error(), "single-writer policy violation")
+ }
+ 
+ func TestSubagentScheduler_RejectsDuplicateTaskID(t *testing.T) {
 	agent := &Agent{
 		config: &Config{Name: "test-agent", Model: "test-provider", MaxSteps: 2},
 	}

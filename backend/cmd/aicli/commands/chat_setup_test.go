@@ -1122,9 +1122,21 @@ func TestBootstrapChatSession_UsesActorExecutorByDefault(t *testing.T) {
 	home := isolateInitHome(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	// MCP 配置同样必须隔离：本用例走 bootstrapChatSession → discoverChatCapabilities
+	// → prepareChatMCPManager，而 MCP 路径解析会按 cwd 回退到仓库真实的
+	// configs/mcp.yaml。命中后会建连并写进进程全局 MCPManagerInstance，随后泄漏给
+	// 同包后续用例——skill 侧因此拿到「纯 MCP 工具面」，把依赖 builtin 工具的 skill
+	// 静默跳过（这正是 skills 侧 imagegen 类用例在整包运行下失败的根因）。
+	// 指向一份不存在的临时文件：走「配置缺失 → 不初始化 MCP」分支，且不依赖仓库状态。
+	isolateProcessMCPManager(t)
 	configPath := filepath.Join(t.TempDir(), "runtime.json")
 	require.NoError(t, os.WriteFile(configPath, []byte("{}"), 0o600))
-	cfg := &config.Config{SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: configPath}}
+	cfg := &config.Config{
+		SkillsRuntime: &config.SkillsRuntimeConfig{ConfigFile: configPath},
+		AICLI: &config.AICLIConfig{
+			MCP: &config.AICLIMCPConfig{ConfigFile: filepath.Join(t.TempDir(), "absent-mcp.yaml")},
+		},
+	}
 	manager, userID, dir, err := newChatSessionManager(t.TempDir())
 	if err != nil {
 		t.Fatalf("newChatSessionManager: %v", err)

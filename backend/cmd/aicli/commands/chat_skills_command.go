@@ -65,14 +65,14 @@ func handleSkillsMenuCommand(session *ChatSession, command string) bool {
 	if parseSkillsReloadQuery(query) {
 		report, err := runSkillReloadCommand(session)
 		if err != nil {
-			fmt.Println(formatCommandError(err.Error(), useJSON))
+			printChatCommandOutput(session, formatCommandError(err.Error(), useJSON))
 			return false
 		}
 		if useJSON {
-			fmt.Println(marshalIndentedJSON(report))
+			printChatCommandOutput(session, marshalIndentedJSON(report))
 			return false
 		}
-		fmt.Println(report.Text())
+		printChatCommandOutput(session, report.Text())
 		return false
 	}
 

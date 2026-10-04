@@ -1045,14 +1045,34 @@ func initSkillFunctionsWithManager(cfg *config.Config, session *ChatSession, too
 	// mcp=nil 构造它（chat_setup 的 mcpForTools 在本地 MCP 关闭且无会话 MCP 时为
 	// nil）。此时 NewAgentAdapter 返回的是一个空 MCP 面，而旧的 else 分支永远不可达，
 	// 技能于是拿不到 MCP。这里必须探测真实可用性，兜底才有效。
+	//
+	// 两张面何时合并、何时二选一，取决于会话工具管理器是否自带 MCP：
+	//   - 自带 MCP：它已经是「toolkit + 会话/本地 MCP」的合并面。按既有优先级
+	//     契约，进程级 MCP 不得渗入（见 skills_mcp_source_test.go 的
+	//     TestInitSkillFunctions_PrefersToolManagerMCPWhenAvailable）。
+	//   - 不带 MCP：此时若只取进程级 MCP 面，就会丢掉本地 builtin 工具。skill 的
+	//     tools 依赖校验（loader.CheckSkill / registry.validate）把「FindTool
+	//     不到」当作 ErrToolNotRegistered **静默跳过**该 skill，而进程级面里一个
+	//     builtin 工具都没有，于是 imagegen / run_shell_command / fetch_url_content /
+	//     view_file_content 这类「依赖 builtin 工具」的 skill 会被整批丢弃——表现为
+	//     「这些 skill 不见了」，且只在开了本地 MCP 的会话里复现。故此处必须并集。
+	var sessionToolSurface runtimeskill.MCPManager
+	if toolManager != nil {
+		sessionToolSurface = runtimetools.NewAgentAdapter(toolManager)
+	}
 	var mcpRuntime runtimeskill.MCPManager
-	if toolManager.MCPAvailable() {
-		mcpRuntime = runtimetools.NewAgentAdapter(toolManager)
-	} else if MCPManagerInstance != nil {
+	switch {
+	case sessionToolSurface != nil && toolManager.MCPAvailable():
+		mcpRuntime = sessionToolSurface
+	case sessionToolSurface != nil && MCPManagerInstance != nil:
+		mcpRuntime = &mergedSkillToolSurface{
+			primary:   sessionToolSurface,
+			secondary: runtimeskill.NewMCPAdapter(MCPManagerInstance),
+		}
+	case sessionToolSurface != nil:
+		mcpRuntime = sessionToolSurface
+	case MCPManagerInstance != nil:
 		mcpRuntime = runtimeskill.NewMCPAdapter(MCPManagerInstance)
-	} else if toolManager != nil {
-		// 无 MCP 可用时仍保留工具管理器（保留 toolkit 面，便于按需降级而非直接置空）。
-		mcpRuntime = runtimetools.NewAgentAdapter(toolManager)
 	}
 
 	manager := shared

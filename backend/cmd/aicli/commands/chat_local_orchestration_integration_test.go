@@ -961,7 +961,18 @@ func TestAICLIChatActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled
 	}
 	defer teamStore.Close()
 
-	provider := &autoStartLocalOrchestrationProvider{teammateDelay: 120 * time.Millisecond}
+	// 门控 teammate 的完成时机：本用例要在「team 仍 pending」这一确定状态下
+	// 断言 base session 的 ambient 元数据。仅靠 teammateDelay 的 sleep 不足
+	// ——与其它 auto-start team 用例配对运行时 Execute 耗时可能超过该延迟，
+	// team 会先 settle（实测：清除发生在 Execute 返回前 85ms），断言随即落空。
+	releaseTeammate := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseTeammate) }) }
+	defer release()
+	provider := &autoStartLocalOrchestrationProvider{
+		teammateDelay: 120 * time.Millisecond,
+		teammateHold:  releaseTeammate,
+	}
 	llmRuntime := runtimellm.NewLLMRuntime(&runtimellm.RuntimeConfig{
 		DefaultProvider: "test-provider",
 		DefaultModel:    "test-model",
@@ -1002,6 +1013,9 @@ func TestAICLIChatActorExecutor_AutoStartTeamMarksBaseSessionRunningUntilSettled
 	if state == nil || state.Status != runtimechat.SessionIdle || strings.TrimSpace(state.CurrentTurnID) != "" || state.AmbientRunMeta == nil || state.AmbientRunMeta.Team == nil || state.AmbientRunMeta.Team.TeamID != "team-auto" {
 		t.Fatalf("expected base session runtime state to stay idle with ambient team metadata while team is pending, got %+v", state)
 	}
+
+	// 断言已在确定的 pending 窗口内完成，放行 teammate 让其收敛。
+	release()
 
 	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1816,6 +1830,13 @@ func sameToolSnapshot(left, right []string) bool {
 
 type autoStartLocalOrchestrationProvider struct {
 	teammateDelay time.Duration
+	// teammateHold 非 nil 时，teammate 在产出 task 结论前阻塞直到该 channel
+	// 关闭（或 ctx 结束）。用于需要「team 确定性保持 pending」的用例：
+	// 单纯依赖 teammateDelay 的 sleep 是时序假设——当 Execute 耗时超过该
+	// 延迟（例如与其它用例配对运行、调度变慢）时 team 会先 settle，断言
+	// 便落空。channel 门控让测试自己决定释放时机，与
+	// interruptibleAutoStartLocalOrchestrationProvider 的既有做法一致。
+	teammateHold <-chan struct{}
 }
 
 type interruptibleAutoStartLocalOrchestrationProvider struct {
@@ -1986,6 +2007,13 @@ func (p *autoStartLocalOrchestrationProvider) Call(ctx context.Context, req *run
 					},
 				}, nil
 			case strings.Contains(lastUser, "You are teammate"):
+				if p.teammateHold != nil {
+					select {
+					case <-p.teammateHold:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
 				if p.teammateDelay > 0 {
 					time.Sleep(p.teammateDelay)
 				}

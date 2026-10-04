@@ -239,7 +239,14 @@ func runChatCapabilitiesLoad(session *ChatSession) {
 		if session != nil {
 			session.CapabilitiesInitError = err.Error()
 		}
-		fmt.Fprintf(os.Stderr, "Warning: 能力面初始化失败（工具/Skills/运行时宿主不可用）: %v\n", err)
+		// 渲染字节只能由 TerminalSession 产生（§8.5 stderr/stdout 契约）：这段在后台
+		// goroutine 上跑，此时直接写 stderr 会绕过已接管终端的渲染通道。按
+		// NotifyChatDiagnostic 的契约优先投递动态栏；未登记（启动早期 / 非交互 /
+		// JSON）时该函数返回 false，此时才回退 stderr 兜底。
+		capabilitiesWarning := fmt.Sprintf("Warning: 能力面初始化失败（工具/Skills/运行时宿主不可用）: %v", err)
+		if !NotifyChatDiagnostic(capabilitiesWarning) {
+			fmt.Fprintln(os.Stderr, capabilitiesWarning)
+		}
 		clearChatStartupProgress(session)
 		// 这批 mark 落在 ready 那次 flush 之后，补一次才能在 AICLI_STARTUP_TIMING
 		// 里看到后台装载的真实耗时分布。
