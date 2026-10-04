@@ -16,6 +16,7 @@ import type {
   RuntimeMcpUpsertRequest,
   RuntimeMcpUpsertResponse,
   RuntimeSessionMcpScopeResponse,
+  RuntimeSessionMcpToolsResponse,
   RuntimeSessionMcpToggleResponse,
 } from "@/types/runtime";
 
@@ -138,10 +139,10 @@ export async function reloadRuntimeMcps() {
  * 与列表同纪律，缺数据不能被 UI 伪装成「该 MCP 没有工具」。
  * 空数组是合法结果（未启用 / 未连接 / 尚未完成 tools/list 握手）。
  */
-export async function listRuntimeMcpTools(name: string) {
-  const payload = await fetchRuntimeJson<RuntimeMcpToolsResponse>(
-    buildRuntimeMcpToolsUrl(name),
-  );
+function normalizeMcpToolsResponse(
+  payload: RuntimeMcpToolsResponse | null | undefined,
+  fallbackName: string,
+): RuntimeMcpToolsResponse {
   if (!payload || !Array.isArray(payload.tools)) {
     throw new Error("invalid runtime MCP tools payload: tools must be an array");
   }
@@ -150,10 +151,36 @@ export async function listRuntimeMcpTools(name: string) {
       Boolean(tool && typeof tool === "object" && typeof tool.name === "string"),
   );
   return {
-    name: typeof payload.name === "string" ? payload.name : name,
+    name: typeof payload.name === "string" ? payload.name : fallbackName,
     count: typeof payload.count === "number" ? payload.count : tools.length,
     tools,
-  } satisfies RuntimeMcpToolsResponse;
+  };
+}
+
+export async function listRuntimeMcpTools(name: string) {
+  const payload = await fetchRuntimeJson<RuntimeMcpToolsResponse>(
+    buildRuntimeMcpToolsUrl(name),
+  );
+  return normalizeMcpToolsResponse(payload, name);
+}
+
+/**
+ * 会话工具清单：读会话实际生效的 manager（工作区锚定时即工作区配置链实例），
+ * 工作区私有 server 也能取到；未启用 / 未连接时 tools 为空数组。
+ */
+export async function listRuntimeSessionMcpTools(
+  sessionId: string,
+  name: string,
+) {
+  const payload = await fetchRuntimeJson<RuntimeSessionMcpToolsResponse>(
+    buildRuntimeSessionMcpToolsUrl(sessionId, name),
+  );
+  return {
+    ...normalizeMcpToolsResponse(payload, name),
+    session_id:
+      typeof payload?.session_id === "string" ? payload.session_id : sessionId,
+    scope: payload?.scope,
+  } satisfies RuntimeSessionMcpToolsResponse;
 }
 
 /**
@@ -224,6 +251,11 @@ export function buildRuntimeSessionMcpDisableUrl(
   return `${buildRuntimeSessionMcpUrl(sessionId, name)}/disable`;
 }
 
+/** 会话工具清单 URL（会话生效 manager，工作区锚定）。 */
+export function buildRuntimeSessionMcpToolsUrl(sessionId: string, name: string) {
+  return `${buildRuntimeSessionMcpUrl(sessionId, name)}/tools`;
+}
+
 /**
  * 会话级覆盖清单归一化：`disabled` 缺失或不是数组时抛错——
  * 与全局列表同纪律，契约回归不能被 UI 伪装成「无覆盖」。
@@ -240,6 +272,11 @@ export async function listRuntimeSessionMcps(sessionId: string) {
   const disabled = payload.disabled.filter(
     (name): name is string => typeof name === "string" && name.trim() !== "",
   );
+  const enabled = Array.isArray(payload.enabled)
+    ? payload.enabled.filter(
+        (name): name is string => typeof name === "string" && name.trim() !== "",
+      )
+    : undefined;
   const mcps = Array.isArray(payload.mcps)
     ? payload.mcps.filter(
         (entry): entry is NonNullable<typeof entry> =>
@@ -251,6 +288,7 @@ export async function listRuntimeSessionMcps(sessionId: string) {
       typeof payload.session_id === "string" ? payload.session_id : sessionId,
     disabled,
     count: typeof payload.count === "number" ? payload.count : disabled.length,
+    ...(enabled ? { enabled } : {}),
     ...(payload.scope ? { scope: payload.scope } : {}),
     ...(mcps ? { mcps } : {}),
     ...(payload.summary ? { summary: payload.summary } : {}),

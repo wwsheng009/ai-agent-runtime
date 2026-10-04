@@ -177,6 +177,17 @@ export type RuntimeMcpToolsResponse = {
   tools: RuntimeMcpTool[];
 };
 
+/**
+ * 会话工具清单（GET /api/runtime/sessions/{id}/runtime/mcps/{name}/tools）。
+ *
+ * 与全局工具清单同形；scope=workspace 表示清单来自会话工作区配置链的 manager
+ * （工作区私有 server 也能取到）。
+ */
+export type RuntimeSessionMcpToolsResponse = RuntimeMcpToolsResponse & {
+  session_id: string;
+  scope?: "workspace" | "global";
+};
+
 /** 单个工具启用/停用响应（POST /api/runtime/mcps/{name}/tools/{tool}/enable|disable）。 */
 export type RuntimeMcpToolToggleResponse = {
   name: string;
@@ -214,6 +225,8 @@ export type RuntimeSessionMcpScope = {
 export type RuntimeSessionMcpEntry = RuntimeMcpEntry & {
   source?: "workspace" | "global";
   session_disabled?: boolean;
+  /** 配置里停用、但被本会话临时启用（内存连接，不写配置文件）。 */
+  session_enabled?: boolean;
 };
 
 /**
@@ -226,6 +239,8 @@ export type RuntimeSessionMcpScopeResponse = {
   session_id: string;
   /** 本会话停用的 MCP server 名；空数组 = 全部全局面。 */
   disabled: string[];
+  /** 本会话临时启用的 MCP server 名（配置停用 + 会话私有连接）。 */
+  enabled?: string[];
   count: number;
   scope?: RuntimeSessionMcpScope;
   mcps?: RuntimeSessionMcpEntry[];
@@ -244,7 +259,7 @@ export type RuntimeSessionMcpToggleResponse = {
   enabled: boolean;
   /** session = 仅本会话覆盖；workspace/global = 持久化写入对应配置文件。 */
   scope: "session" | "workspace" | "global";
-  /** 仅 scope=session 时返回："disabled" 或 ""（恢复全局面）。 */
+  /** 仅 scope=session 时返回："disabled" / "enabled"（临时连接）/ ""（恢复全局面）。 */
   session_state?: string;
   changed: boolean;
   message: string;

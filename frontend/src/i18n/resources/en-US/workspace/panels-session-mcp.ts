@@ -22,10 +22,16 @@ export const enWorkspacePanelsSessionMcp = {
   enableAction: "Restore",
   disableTitle: "Remove this MCP from this session's tool surface only (global connection and other sessions untouched)",
   enableTitle: "Restore this MCP's visibility in this session",
-  globallyDisabledHint:
-    "A globally disabled MCP cannot be enabled for this session alone (no session-scoped temp connection yet).",
   disableNotice: "Disabled \"{{name}}\" in this session",
   enableNotice: "Restored \"{{name}}\" in this session",
+  sessionTempEnableAction: "Enable for this session",
+  sessionTempBadge: "Temp-enabled in this session",
+  sessionTempHint:
+    "Disabled in the config; you can enable it for this session (in-memory connection, no config write).",
+  sessionTempEnableTitle:
+    "Temporary connection for this session only (no config write; reclaimed on session end or session-level disable)",
+  sessionTempDisableTitle:
+    "Reclaim the temporary connection (back to the configured disabled state)",
   scopeTitle: "Config source",
   scopeWorkspace: "Workspace config",
   scopeGlobal: "Global config",
@@ -56,4 +62,21 @@ export const enWorkspacePanelsSessionMcp = {
   validationMaxParallelCallsInvalid:
     "Max parallel calls must be a positive integer or empty.",
   validationDuplicateKey: "Duplicate keys found; fix them before saving.",
+  toolsAction: "Tool list",
+  toolsAriaLabel: "View tools of {{name}}",
+  toolsTitle: "Tools ({{name}})",
+  toolsLoading: "Loading tool list…",
+  toolsLoadFailed: "Failed to load tools",
+  toolsRetry: "Retry",
+  toolsEmpty:
+    "No tools while the server is disabled or disconnected; enable and connect it first.",
+  toolsClose: "Close",
+  toolsSchema: "Input schema",
+  toolsDisabled: "Disabled",
+  toolsUnhealthy: "Unavailable",
+  toolsNotExposed: "Not exposed",
+  toolsUnhealthyHint:
+    "This tool cannot be called right now (connection unavailable or handshake incomplete).",
+  toolsScopeWorkspace: "Workspace config",
+  toolsScopeGlobal: "Global config",
 } satisfies DeepStringShape<typeof zhWorkspacePanelsSessionMcp>;

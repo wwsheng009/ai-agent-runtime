@@ -11,9 +11,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RuntimeMcpEntry } from "@/types/runtime";
-
 import { SessionMcpSurface } from "./session-mcp-surface";
+import {
+  buildEntry,
+  buildScopedPayload,
+  SESSION_ID,
+} from "./session-mcp-surface-test-helpers";
 
 const {
   listRuntimeMcpsMock,
@@ -21,12 +24,14 @@ const {
   setRuntimeSessionMcpEnabledMock,
   createRuntimeSessionMcpMock,
   deleteRuntimeSessionMcpMock,
+  listRuntimeSessionMcpToolsMock,
 } = vi.hoisted(() => ({
   listRuntimeMcpsMock: vi.fn(),
   listRuntimeSessionMcpsMock: vi.fn(),
   setRuntimeSessionMcpEnabledMock: vi.fn(),
   createRuntimeSessionMcpMock: vi.fn(),
   deleteRuntimeSessionMcpMock: vi.fn(),
+  listRuntimeSessionMcpToolsMock: vi.fn(),
 }));
 
 vi.mock("@/api/runtime/mcp", () => ({
@@ -35,37 +40,12 @@ vi.mock("@/api/runtime/mcp", () => ({
   setRuntimeSessionMcpEnabled: setRuntimeSessionMcpEnabledMock,
   createRuntimeSessionMcp: createRuntimeSessionMcpMock,
   deleteRuntimeSessionMcp: deleteRuntimeSessionMcpMock,
+  listRuntimeSessionMcpTools: listRuntimeSessionMcpToolsMock,
 }));
 
 type ReactActEnvironmentGlobal = typeof globalThis & {
   IS_REACT_ACT_ENVIRONMENT?: boolean;
 };
-
-const SESSION_ID = "session-mcp-1";
-
-function buildEntry(
-  name: string,
-  options: { globalEnabled?: boolean; connected?: boolean; toolCount?: number } = {},
-): RuntimeMcpEntry {
-  const globalEnabled = options.globalEnabled ?? true;
-  return {
-    config: {
-      name,
-      type: "stdio",
-      command: "npx",
-      args: [],
-      enabled: globalEnabled,
-      disabled: !globalEnabled,
-    },
-    status: {
-      name,
-      type: "stdio",
-      enabled: globalEnabled,
-      connected: options.connected ?? globalEnabled,
-      toolCount: options.toolCount ?? 3,
-    },
-  };
-}
 
 describe("SessionMcpSurface", () => {
   let container: HTMLDivElement;
@@ -81,6 +61,7 @@ describe("SessionMcpSurface", () => {
     setRuntimeSessionMcpEnabledMock.mockReset();
     createRuntimeSessionMcpMock.mockReset();
     deleteRuntimeSessionMcpMock.mockReset();
+    listRuntimeSessionMcpToolsMock.mockReset();
   });
 
   afterEach(() => {
@@ -159,8 +140,9 @@ describe("SessionMcpSurface", () => {
     const buttons = toggleButtons();
     expect(buttons[0]?.textContent).toContain("本会话停用");
     expect(buttons[0]?.disabled).toBe(false);
-    // 全局停用：不提供会话级启用入口，避免必然失败的调用。
-    expect(buttons[1]?.disabled).toBe(true);
+    // 配置停用：提供「本会话启用」（内存临时连接，不写配置文件）。
+    expect(buttons[1]?.disabled).toBe(false);
+    expect(buttons[1]?.textContent).toContain("本会话启用");
 
     await act(async () => {
       buttons[0]?.click();
@@ -295,36 +277,6 @@ describe("SessionMcpSurface", () => {
     expect(listRuntimeMcpsMock).toHaveBeenCalledTimes(2);
   });
 
-  function buildScopedPayload(options: {
-    entries?: Array<
-      ReturnType<typeof buildEntry> & { source?: "workspace" | "global" }
-    >;
-    fallback?: boolean;
-  } = {}) {
-    const entries = options.entries ?? [];
-    const workspaceFile = "E:/ws/.aicli/mcp.yaml";
-    return {
-      session_id: SESSION_ID,
-      disabled: [] as string[],
-      count: 0,
-      scope: {
-        workspace: "E:/ws",
-        workspace_scoped: true,
-        workspace_fallback: options.fallback ?? false,
-        read: { path: workspaceFile, source: "project", exists: true },
-        write: { path: workspaceFile, source: "project", exists: true },
-      },
-      mcps: entries,
-      summary: {
-        total: entries.length,
-        enabled: entries.length,
-        disabled: 0,
-        connected: entries.length,
-        tools: entries.length * 3,
-      },
-    };
-  }
-
   it("renders the workspace scope card and workspace-sourced rows", async () => {
     listRuntimeSessionMcpsMock.mockResolvedValue(
       buildScopedPayload({
@@ -444,5 +396,113 @@ describe("SessionMcpSurface", () => {
 
     expect(createRuntimeSessionMcpMock).not.toHaveBeenCalled();
     expect(container.textContent).toContain("名称不能为空");
+  });
+
+  it("opens the session tool list dialog from a row", async () => {
+    listRuntimeSessionMcpsMock.mockResolvedValue(
+      buildScopedPayload({ entries: [buildEntry("chrome-mcp")] }),
+    );
+    listRuntimeSessionMcpToolsMock.mockResolvedValue({
+      session_id: SESSION_ID,
+      name: "chrome-mcp",
+      scope: "workspace",
+      count: 1,
+      tools: [
+        {
+          name: "take_snapshot",
+          description: "snapshot",
+          enabled: true,
+          configured_enabled: true,
+          healthy: true,
+        },
+      ],
+    });
+
+    await renderSurface();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="session-mcp-tools"]')
+        ?.click();
+    });
+    await flush();
+
+    expect(listRuntimeSessionMcpToolsMock).toHaveBeenCalledWith(
+      SESSION_ID,
+      "chrome-mcp",
+    );
+    const dialog = document.body.querySelector(
+      '[data-testid="session-mcp-tools-dialog"]',
+    );
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain("take_snapshot");
+  });
+
+  it("temp-enables a configured-off server for this session only", async () => {
+    listRuntimeSessionMcpsMock.mockResolvedValueOnce(
+      buildScopedPayload({
+        entries: [
+          {
+            ...buildEntry("off-mcp", { globalEnabled: false }),
+            source: "workspace",
+          },
+        ],
+      }),
+    );
+    setRuntimeSessionMcpEnabledMock.mockResolvedValueOnce({
+      session_id: SESSION_ID,
+      name: "off-mcp",
+      enabled: true,
+      scope: "session",
+      session_state: "enabled",
+      changed: true,
+      message:
+        "已在本会话临时启用 MCP off-mcp（内存连接，不写配置文件；会话结束或本会话停用后回收）",
+    });
+    // 刷新（第二次读取）：后端回显临时启用名单与条目标记。
+    listRuntimeSessionMcpsMock.mockResolvedValueOnce(
+      buildScopedPayload({
+        entries: [
+          {
+            ...buildEntry("off-mcp", { globalEnabled: false }),
+            source: "workspace",
+            session_enabled: true,
+          },
+        ],
+        enabled: ["off-mcp"],
+      }),
+    );
+
+    await renderSurface();
+
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="session-mcp-toggle"]',
+    );
+    expect(button?.textContent).toContain("本会话启用");
+    expect(button?.disabled).toBe(false);
+
+    await act(async () => {
+      button?.click();
+    });
+    await flush();
+
+    expect(setRuntimeSessionMcpEnabledMock).toHaveBeenLastCalledWith(
+      SESSION_ID,
+      "off-mcp",
+      true,
+    );
+    expect(container.textContent).toContain("已在本会话临时启用");
+    expect(
+      container.querySelector('[data-testid="session-mcp-row"]')?.getAttribute(
+        "data-session-state",
+      ),
+    ).toBe("temp_enabled");
+    expect(
+      container.querySelector('[data-testid="session-mcp-temp-badge"]')
+        ?.textContent,
+    ).toContain("本会话临时启用");
+    const afterEnable = container.querySelector<HTMLButtonElement>(
+      '[data-testid="session-mcp-toggle"]',
+    );
+    expect(afterEnable?.textContent).toContain("本会话停用");
   });
 });

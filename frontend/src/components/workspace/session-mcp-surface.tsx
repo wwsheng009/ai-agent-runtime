@@ -30,6 +30,7 @@ import {
 import { type WorkspacePanelSurfaceProps } from "@/components/workspace/panel-registry";
 import { SessionMcpRows } from "@/components/workspace/session-mcp-rows";
 import { SessionMcpScopeCard } from "@/components/workspace/session-mcp-scope-card";
+import { SessionMcpToolsDialog } from "@/components/workspace/session-mcp-tools-dialog";
 import {
   SESSION_DETAIL_CARD_CLASS,
 } from "@/components/workspace/session-detail-panel-shared";
@@ -70,6 +71,8 @@ export function SessionMcpSurface({
   const { t } = useTranslation("workspace");
   const [entries, setEntries] = useState<RuntimeSessionMcpEntry[]>([]);
   const [disabledNames, setDisabledNames] = useState<string[]>([]);
+  /** 「本会话临时启用」名单（配置停用 + 会话私有内存连接）。 */
+  const [tempEnabledNames, setTempEnabledNames] = useState<string[]>([]);
   /** 会话生效的配置面（新后端返回；旧后端缺省 → 隐藏持久化管理入口）。 */
   const [scope, setScope] = useState<RuntimeSessionMcpScope | null>(null);
   const [status, setStatus] = useState<LoadStatus>("loading");
@@ -77,14 +80,21 @@ export function SessionMcpSurface({
   const [notice, setNotice] = useState("");
   const [pendingName, setPendingName] = useState("");
   const [draft, setDraft] = useState<McpDraft | null>(null);
+  /** 工具列表弹窗的目标 server；null = 关闭。 */
+  const [toolsFor, setToolsFor] = useState<string | null>(null);
 
   const disabledSet = useMemo(() => new Set(disabledNames), [disabledNames]);
+  const tempEnabledSet = useMemo(
+    () => new Set(tempEnabledNames),
+    [tempEnabledNames],
+  );
 
   const refresh = useCallback(async () => {
     const normalizedSessionId = sessionId.trim();
     if (!normalizedSessionId) {
       setEntries([]);
       setDisabledNames([]);
+      setTempEnabledNames([]);
       setScope(null);
       setStatus("ready");
       return;
@@ -94,6 +104,7 @@ export function SessionMcpSurface({
     try {
       const scoped = await listRuntimeSessionMcps(normalizedSessionId);
       setDisabledNames(scoped.disabled);
+      setTempEnabledNames(scoped.enabled ?? []);
       setScope(scoped.scope ?? null);
       if (scoped.mcps) {
         // 新后端：条目即会话实际生效的配置面（工作区锚定）。
@@ -140,6 +151,14 @@ export function SessionMcpSurface({
         return;
       }
       const currentlyDisabled = disabledSet.has(name);
+      // 同上（rows 注释）：临时启用名单以本地集合为准，避免旧条目值遮蔽。
+      const entryTempEnabled = tempEnabledSet.has(name);
+      const effectiveEnabled =
+        entry.status?.enabled ?? entry.config?.enabled ?? true;
+      // 按钮语义（见 session-mcp-rows）：恢复覆盖 / 回收临时连接 → disable；
+      // 临时启用（配置停用未启用）/ 常规 server → enable。
+      const targetEnabled =
+        currentlyDisabled || (!effectiveEnabled && !entryTempEnabled);
       setPendingName(name);
       setNotice("");
       setError("");
@@ -147,11 +166,18 @@ export function SessionMcpSurface({
         const result = await setRuntimeSessionMcpEnabled(
           sessionId,
           name,
-          currentlyDisabled,
+          targetEnabled,
         );
         const nowDisabled = result.session_state === "disabled";
+        const nowTempEnabled = result.session_state === "enabled";
         setDisabledNames((previous) => {
           if (nowDisabled) {
+            return Array.from(new Set([...previous, name])).sort();
+          }
+          return previous.filter((item) => item !== name);
+        });
+        setTempEnabledNames((previous) => {
+          if (nowTempEnabled) {
             return Array.from(new Set([...previous, name])).sort();
           }
           return previous.filter((item) => item !== name);
@@ -159,7 +185,7 @@ export function SessionMcpSurface({
         setNotice(
           result.message ||
             t(
-              currentlyDisabled
+              targetEnabled
                 ? "panels.sessionMcp.enableNotice"
                 : "panels.sessionMcp.disableNotice",
               { name },
@@ -171,7 +197,7 @@ export function SessionMcpSurface({
         setPendingName("");
       }
     },
-    [disabledSet, sessionId, t],
+    [disabledSet, tempEnabledSet, sessionId, t],
   );
 
   /** 持久化启停：写入会话生效的配置文件并热重载（影响共享该配置的会话）。 */
@@ -425,7 +451,23 @@ export function SessionMcpSurface({
           onToggleSession={(entry) => {
             void handleToggle(entry);
           }}
+          onViewTools={(entry) => {
+            const name =
+              entry.config?.name?.trim() || entry.status?.name?.trim();
+            if (name) {
+              setToolsFor(name);
+            }
+          }}
           pendingName={pendingName}
+          tempEnabledSet={tempEnabledSet}
+        />
+      ) : null}
+
+      {toolsFor && sessionId.trim() ? (
+        <SessionMcpToolsDialog
+          name={toolsFor}
+          onClose={() => setToolsFor(null)}
+          sessionId={sessionId}
         />
       ) : null}
     </section>

@@ -8,7 +8,7 @@
 //       - 恢复：清除覆盖；后端对"停用的 server"返回 409（无临时连接），入口禁用。
 //   * 删除：从会话生效的配置文件移除（写文件 + 热重载）。
 
-import { Trash2Icon } from "lucide-react";
+import { ListIcon, Trash2Icon } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -36,9 +36,12 @@ function connectionLabelKey(
 export type SessionMcpRowsProps = {
   entries: RuntimeSessionMcpEntry[];
   disabledSet: Set<string>;
+  /** 「本会话临时启用」名单（配置停用 + 会话私有连接）。 */
+  tempEnabledSet: Set<string>;
   pendingName: string;
   /** 会话配置面可用（scope 字段存在）时展示持久化启停与删除。 */
   manageEnabled: boolean;
+  onViewTools: (entry: RuntimeSessionMcpEntry) => void;
   onToggleSession: (entry: RuntimeSessionMcpEntry) => void;
   onTogglePersist: (entry: RuntimeSessionMcpEntry) => void;
   onDelete: (entry: RuntimeSessionMcpEntry) => void;
@@ -47,8 +50,10 @@ export type SessionMcpRowsProps = {
 export function SessionMcpRows({
   entries,
   disabledSet,
+  tempEnabledSet,
   pendingName,
   manageEnabled,
+  onViewTools,
   onToggleSession,
   onTogglePersist,
   onDelete,
@@ -63,8 +68,11 @@ export function SessionMcpRows({
           return null;
         }
         const enabled = isEnabled(entry);
-        const sessionDisabled =
-          entry.session_disabled ?? disabledSet.has(name);
+        // 顶层名单是会话覆盖的最新事实（refresh 时与服务端同步、toggle 后就地更新）；
+        // 条目上的 session_disabled/session_enabled 来自上一次 fetch，若参与判定会把
+        // 乐观更新用旧值遮蔽掉（点完按钮文案不变），因此这里只认名单。
+        const sessionDisabled = disabledSet.has(name);
+        const tempEnabled = tempEnabledSet.has(name);
         const pending = pendingName === name;
         const toolCount = entry.status?.toolCount ?? 0;
 
@@ -72,7 +80,13 @@ export function SessionMcpRows({
           <li
             className={cn(SESSION_DETAIL_CARD_CLASS, "grid gap-2")}
             data-global-enabled={enabled}
-            data-session-state={sessionDisabled ? "disabled" : "default"}
+            data-session-state={
+              sessionDisabled
+                ? "disabled"
+                : tempEnabled
+                  ? "temp_enabled"
+                  : "default"
+            }
             data-source={entry.source ?? ""}
             data-testid="session-mcp-row"
             key={name}
@@ -143,9 +157,32 @@ export function SessionMcpRows({
                       {t("panels.sessionMcp.sessionDisabled")}
                     </span>
                   ) : null}
+                  {tempEnabled ? (
+                    <span
+                      className={cn(
+                        SESSION_DETAIL_CHIP_CLASS,
+                        "border-accent-primary/30 bg-accent-primary/10 text-accent-primary",
+                      )}
+                      data-testid="session-mcp-temp-badge"
+                    >
+                      {t("panels.sessionMcp.sessionTempBadge")}
+                    </span>
+                  ) : null}
                 </div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
+                <Button
+                  aria-label={t("panels.sessionMcp.toolsAction")}
+                  className="h-7 w-7 px-0 text-muted-foreground"
+                  data-testid="session-mcp-tools"
+                  disabled={pending}
+                  onClick={() => onViewTools(entry)}
+                  size="sm"
+                  title={t("panels.sessionMcp.toolsAction")}
+                  variant="ghost"
+                >
+                  <ListIcon size={13} />
+                </Button>
                 {manageEnabled ? (
                   <Button
                     className="h-7 px-2 text-xs"
@@ -166,20 +203,26 @@ export function SessionMcpRows({
                 <Button
                   className="h-7 shrink-0 px-2 text-xs"
                   data-testid="session-mcp-toggle"
-                  disabled={pending || !enabled}
+                  disabled={pending}
                   onClick={() => onToggleSession(entry)}
                   size="sm"
                   title={
                     sessionDisabled
                       ? t("panels.sessionMcp.enableTitle")
-                      : t("panels.sessionMcp.disableTitle")
+                      : tempEnabled
+                        ? t("panels.sessionMcp.sessionTempDisableTitle")
+                        : !enabled
+                          ? t("panels.sessionMcp.sessionTempEnableTitle")
+                          : t("panels.sessionMcp.disableTitle")
                   }
                   variant="ghost"
                 >
                   {t(
                     sessionDisabled
                       ? "panels.sessionMcp.enableAction"
-                      : "panels.sessionMcp.disableAction",
+                      : tempEnabled || enabled
+                        ? "panels.sessionMcp.disableAction"
+                        : "panels.sessionMcp.sessionTempEnableAction",
                   )}
                 </Button>
                 {manageEnabled ? (
@@ -198,9 +241,9 @@ export function SessionMcpRows({
                 ) : null}
               </div>
             </div>
-            {!enabled && sessionDisabled ? (
+            {!enabled && !tempEnabled ? (
               <p className="app-text-11 leading-4 text-muted-foreground">
-                {t("panels.sessionMcp.globallyDisabledHint")}
+                {t("panels.sessionMcp.sessionTempHint")}
               </p>
             ) : null}
           </li>
