@@ -1,11 +1,51 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/scene"
 )
+
+// TestFoldOmissionCacheKeepsTranscriptWorkingSetResident 锁定字节预算与
+// transcript 工作集的关系：2026-10-04 现场（8493 cell 会话）8MiB 预算被钉满，
+// 命中率 1.16%、逐出 173 万次，规划器每轮重跑全部折叠 cell 的 BuildPreview
+// （5-7s/轮），把 UI 控制器打满、投递冻结。工作集内的重复扫描必须全部命中，
+// 不得出现逐出/二次 miss。
+func TestFoldOmissionCacheKeepsTranscriptWorkingSetResident(t *testing.T) {
+	cache := newFoldOmissionCache()
+	const n = 2400
+	sources := make([]string, n)
+	for i := range sources {
+		// 每条约 5.4KiB：工作集 ≈ 13MiB，明确大于旧 8MiB 预算、小于新预算。
+		block := fmt.Sprintf("unit-%04d-line-aaaaaaaaaaaaaaaaaaaa\n", i)
+		sources[i] = strings.Repeat(block, 150)
+	}
+	for i, source := range sources {
+		if !cache.omits(source) {
+			t.Fatalf("sources[%d] 应命中折叠显示预算（>4 行）", i)
+		}
+	}
+	if _, misses, _, _, _ := cache.stats(); misses != n {
+		t.Fatalf("首轮 misses=%d，want %d", misses, n)
+	}
+
+	for i, source := range sources {
+		cache.omits(source)
+		_ = i
+	}
+	hits, misses, evictions, _, _ := cache.stats()
+	if misses != n {
+		t.Fatalf("工作集内二次扫描 misses=%d（want 仍为 %d）：字节预算小于工作集，缓存被逐出", misses, n)
+	}
+	if hits < n {
+		t.Fatalf("hits=%d < %d：部分条目已被逐出", hits, n)
+	}
+	if evictions != 0 {
+		t.Fatalf("evictions=%d，want 0（工作集必须常驻）", evictions)
+	}
+}
 
 // TestFoldOmissionCacheMemoizesPerSource 锁定缓存的核心契约：同一 source 只
 // 判定一次；换 source 必须重新判定（内容寻址，无显式失效）。

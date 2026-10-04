@@ -764,6 +764,27 @@ func (e *TerminalSessionExecutor) finishWorker(done chan struct{}) {
 	}
 }
 
+// terminalSessionControllerIdleWait 是执行器等待控制器队列排空的单次上限。
+//
+// 执行器是生产侧循环，而控制器在持续负载下队列可能长期非空（历史规划 pass
+// 与高频事件流叠加）：无界的 UIController.WaitIdle 会把执行器线程永久钉死，
+// 现场表现为投递日志/scrollback 不再推进、TUI 假死（2026-10-04
+// session_20260930210352_V5o7MDYL：publishResult 在 WaitIdle 上阻塞 33 分钟，
+// executor.last_entry 冻结在 seq=831，render_output 冻结在 last_sequence=3233）。
+// 超时后继续前进是安全的：所有调用点在超时路径上都只依赖随后重新读取的快照，
+// 或队列里仍有待办（HasPending）；排队中的 ack/reducer action 会按序应用并
+// 由对应的 reducer 分支自行唤醒执行器。
+const terminalSessionControllerIdleWait = 2 * time.Second
+
+// waitControllerIdle 是有界的 WaitIdle：true 表示控制器已排空，false 表示
+// 等待超时（调用方按"可能仍需再跑一轮"处理，绝不阻塞）。
+func (e *TerminalSessionExecutor) waitControllerIdle() bool {
+	if e == nil || e.controller == nil {
+		return true
+	}
+	return e.controller.WaitIdleTimeout(terminalSessionControllerIdleWait)
+}
+
 // runOne returns true when reducer publication exposes immediate ordered work:
 // either one history token was acknowledged or a successful scrollback reset
 // replanned the canonical transcript under a fresh terminal epoch. Frame-only
@@ -774,7 +795,7 @@ func (e *TerminalSessionExecutor) runOne() bool {
 	if e == nil || e.controller == nil || e.session == nil {
 		return false
 	}
-	e.controller.WaitIdle()
+	e.waitControllerIdle()
 	schedule := e.controller.terminalSessionSchedule()
 	if schedule.recoveryActionable {
 		// Scrollback-reset backoff: a failing writer must not turn the
@@ -818,7 +839,7 @@ func (e *TerminalSessionExecutor) runOne() bool {
 					}) {
 						return false
 					}
-					e.controller.WaitIdle()
+					e.waitControllerIdle()
 					claimedToken := schedule.pendingToken
 					snapshot := e.controller.terminalSessionSnapshot(claimedToken)
 					if snapshot.claimed != nil {
@@ -934,7 +955,7 @@ func (e *TerminalSessionExecutor) runOne() bool {
 		}) {
 			return false
 		}
-		e.controller.WaitIdle()
+		e.waitControllerIdle()
 		claimedToken = schedule.pendingToken
 	}
 
@@ -1073,11 +1094,11 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 
 	if result.Frame.Err != nil {
 		_ = e.controller.Post(HistoryProjectionInvalidated{LayoutGeneration: generation})
-		e.controller.WaitIdle()
+		e.waitControllerIdle()
 		return false
 	}
 	if result.Frame.Deferred {
-		e.controller.WaitIdle()
+		e.waitControllerIdle()
 		return false
 	}
 	// A bottom-viewport repaint is not proof that the independently owned top
@@ -1101,7 +1122,7 @@ func (e *TerminalSessionExecutor) publishResult(generation uint64, claimed *Hist
 			TerminalEpoch:    result.TerminalEpoch,
 		})
 	}
-	e.controller.WaitIdle()
+	e.waitControllerIdle()
 	if result.ScrollbackReset {
 		return e.controller.terminalSessionHasActionableWork()
 	}

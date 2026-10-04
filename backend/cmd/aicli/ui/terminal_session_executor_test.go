@@ -1858,3 +1858,28 @@ func TestExecutorDiagTextSummarySmoke(t *testing.T) {
 		t.Fatal("text summary missing scrollbackResetsInWindow")
 	}
 }
+
+// TestTerminalSessionExecutorControllerIdleWaitIsBounded pins the 2026-10-04
+// deadlock fix: the executor must never block forever on a controller whose
+// queue stays non-empty under sustained load. The bounded wait reports false
+// and lets the worker loop continue instead of pinning the executor thread.
+func TestTerminalSessionExecutorControllerIdleWaitIsBounded(t *testing.T) {
+	controller := NewUIController(UIControllerConfig{}, nil, nil)
+	if !controller.Post(ContinueHistoryPlanAction{}) {
+		t.Fatal("controller.Post rejected the queued fixture action")
+	}
+	executor := &TerminalSessionExecutor{controller: controller}
+
+	started := time.Now()
+	idle := executor.waitControllerIdle()
+	elapsed := time.Since(started)
+	if idle {
+		t.Fatal("waitControllerIdle reported idle with a non-empty queue")
+	}
+	if elapsed < terminalSessionControllerIdleWait/2 {
+		t.Fatalf("waitControllerIdle returned after %s, want >= %s", elapsed, terminalSessionControllerIdleWait/2)
+	}
+	if elapsed > terminalSessionControllerIdleWait*5 {
+		t.Fatalf("waitControllerIdle took %s, want bounded near %s", elapsed, terminalSessionControllerIdleWait)
+	}
+}
