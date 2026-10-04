@@ -82,13 +82,12 @@ go test ./cmd/aicli/commands/ -count=1 -run '^(TestAICLIChatActorExecutor_AutoSt
 若重做，**先补一个直接覆盖「actor 保存后 ambient meta 仍在」的单元测试**，
 否则不宜合入。
 
-## 剩余缺口：write 路径与 `LayoutAppScreen` 计划脱节（未修）
+## 剩余缺口：活跃 cell 溢出内容被插入 viewport，挤掉 history 尾部（未修）
 
 `chat_history_reconcile_test.go:568`
 （`TestPrintVisibleChatHistory_UnifiedPrimaryViewportRetainsHistoryTailAlongsideActiveReasoning`）
 
-**单独运行即确定性失败**（非配对时序问题）。`state` 本身正确：`LayoutAppScreen(state)`
-的计划里 `history user 6` 在位。差异在写屏结果。逐行对照（width=52 height=15，
+**单独运行即确定性失败**（非配对时序问题）。逐行对照（width=52 height=15，
 `OutputBottomRow=6`）：
 
 ```
@@ -98,24 +97,45 @@ go test ./cmd/aicli/commands/ -count=1 -run '^(TestAICLIChatActorExecutor_AutoSt
 实际 rows 7-12 = band: "active reasoning line 03".."08"   ← 与计划一致
 ```
 
-读法：**rows 7-12 两边一致**，说明 presenter 确实写到了最终帧的那部分；
-分歧在下半区之间的分配——实际给活跃 reasoning 块分了 10 行（8 行正文 + 2 行
-分隔，落在 rows 3-12），计划只给 6 行（rows 7-12）。多占的 4 行正好挤掉了
-`history user 6`（计划 rows 3-4）与 `history assistant 5`（计划 row 2）。
+### 机制（已插桩确认）
 
-即：**不是布局计算错，是两个来源对同一 state 给出了不同的 band 分配**。
-两条路径都源自 `LayoutAppScreen`（`app_render_frame.go:46` →
-`terminal_session.go:64/138`），所以嫌疑集中在：
+presenter 热路径**故意清空 transcript 再构图**，viewport 里的 transcript 行
+改由 HistoryCommit 投递填充，不在帧里：
 
-- presenter 是否写的是**陈旧帧**（活跃 cell 的 overflow handoff 完成前的分配）——
-  该 handoff 正是引入本用例的提交 `672ccdc2` 的主题
-- 或 presenter 侧重算 band 高度时用了与 `LayoutAppScreen` 不同的活跃 cell 判据
+```go
+// terminal_session.go:153-161
+// composeTerminalViewportFramePlan omits finalized transcript cells from the
+// mutable primary-frame projection. In unified mode those rows are delivered
+// exclusively by tokenized HistoryCommit effects and retained by the terminal
+// itself; ...
+func composeTerminalViewportFramePlan(state AppState) TerminalFramePlan {
+	state.Transcript = TranscriptState{}
+	return ComposeTerminalFramePlan(state)
+}
+```
 
-**已验证无效的方向（勿重复）**：在 `TerminalSession.FlushTransaction` 打印
-`plan.Frame.Rows[i].Text` 全是空串——文本在 `RenderRows`（结构化 `render.Line`）
-里，不在 `Rows`。要判定必须改读 `RenderRows`（或在其下游）。
+插桩实测（`FlushTransaction` 打印 `Rows[i]` 全字段）：presenter 的**每一帧**
+rows 1-6 都是 `Owner:gap / Text:""`，rows 7-12 为 band —— 与上述设计一致，
+**不是陈旧帧**。
 
-本轮受上下文限制未能判定，未做任何修改。
+所以真正的分歧在**投递侧**：实际屏幕 rows 3-6 装的 `─── reasoning ───` 与
+`line 01/02` 只能来自 HistoryCommit，即**活跃 cell 的溢出头部被序列化进
+transcript 并作为 history 插入 viewport**，占掉 4 行，正好挤掉 `history user 6`
+（计划 rows 3-4）与 `history assistant 5`（计划 row 2）。rows 7-12 由帧的 band
+提供，两边一致。
+
+即：轨迹显示 reasoning 块共占 10 行（rows 3-12），而设计上活跃 cell 在 viewport
+内应只占 band 的 6 行（rows 7-12）。溢出头部应进 scrollback，而不是插入 viewport
+顶部占掉已 finalize 的 history 尾部。嫌疑集中在活跃 cell 的 overflow handoff
+（引入本用例的提交 `672ccdc2` 的主题）在 viewport 模式下的插入位置/容量计算。
+
+### 已验证无效的方向（勿重复）
+
+- 打印 `plan.Frame.Rows[i].Text` 得到全空串——文本在 `RenderRows`（结构化
+  `render.Line`）里，不在 `Rows`。那次"全空"是插桩假象，不是发现。
+- 打印 `Rows[i]` 全字段后确认 rows 1-6 恒为 `gap`：这是设计，不是陈旧帧。
+
+本轮未做代码修改。
 
 ## 验证口径
 
