@@ -1028,6 +1028,12 @@ func (s *TerminalSession) flushTransactionLocked(plan TerminalTransactionPlan, p
 				frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload, nextHistoryTopAligned,
 			)
 		} else {
+			if s.historyInsertionContinuesScrollback(frame.Geometry.Height, frame.OutputBottomRow) {
+				// resident 模型为空，但已有行跨入 native scrollback（active
+				// 归档不拥有 resident 行）：本次插入续写归档流，必须从 row 1
+				// 起，否则会在 scrollback 与可见行之间留下空白空档。
+				nextHistoryTopAligned = true
+			}
 			historyBytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
 				frame.Geometry.Height, frame.OutputBottomRow, baseHistoryTail, historyInsertedPayload, nextHistoryTopAligned,
 			)
@@ -1287,8 +1293,13 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 			s.geometry.Height, s.outputBottom, s.historyTailRows, rows, s.historyTopAligned,
 		)
 	} else {
+		topAligned := s.historyTopAligned
+		if s.historyInsertionContinuesScrollback(s.geometry.Height, s.outputBottom) {
+			// 同上：active 归档留下的 scrollback 行必须由本次插入续接。
+			topAligned = true
+		}
 		bytes, nextHistoryTopAligned = terminalHistoryInsertionANSI(
-			s.geometry.Height, s.outputBottom, s.historyTailRows, rows, s.historyTopAligned,
+			s.geometry.Height, s.outputBottom, s.historyTailRows, rows, topAligned,
 		)
 	}
 	if bytes == "" {
@@ -1323,6 +1334,26 @@ func (s *TerminalSession) commitHistoryRowsLocked(commit HistoryCommit, rows []s
 	s.historyTopAligned = nextHistoryTopAligned
 	s.preparedHistory = nil
 	return HistoryCommitResult{Frame: s.frame}
+}
+
+// historyInsertionContinuesScrollback reports whether a finalized insertion
+// with an empty resident model must start at row one because earlier rows
+// already crossed into native scrollback. Active archives never make their
+// rows resident, so when the resident model is empty and the stream tail is
+// not, the visible suffix must continue the archived stream instead of being
+// bottom-anchored with blank headroom between scrollback and the visible rows
+// (which would break the one-continuous-native-history-stream contract).
+func (s *TerminalSession) historyInsertionContinuesScrollback(height, capacity int) bool {
+	if s == nil || s.historyTopAligned {
+		return false
+	}
+	if capacity > height {
+		capacity = height
+	}
+	if len(terminalRetainHistoryTailRows(s.historyTailRows, capacity)) > 0 {
+		return false
+	}
+	return len(s.historyStreamTailRows) > 0
 }
 
 // terminalHistoryHandoffRows retains the existing rich render IR through the

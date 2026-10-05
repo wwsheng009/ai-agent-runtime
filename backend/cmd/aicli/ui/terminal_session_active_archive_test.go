@@ -174,3 +174,50 @@ func equalTrimmedLines(got, want []string) bool {
 	}
 	return true
 }
+
+// active 归档把 mutable 前缀送入 native scrollback 后，resident 模型为空；
+// 随后 finalized 续写必须从 row 1 起与归档流连续，不得贴底在 scrollback
+// 与可见行之间留下空档（a75d1c89 回归的会话级契约）。
+func TestTerminalSessionInsertionContinuesArchivedScrollback(t *testing.T) {
+	const width, height, outputBottom = 24, 8, 5
+	line := func(text string) render.Line {
+		return render.Line{Spans: []render.Span{{Text: text}}}
+	}
+	var output bytes.Buffer
+	session := NewTerminalSession(&output)
+	plan := terminalSessionPlan(1, width, height, outputBottom, LeaseState{})
+	if result := session.Flush(plan); result.Err != nil {
+		t.Fatalf("initial frame = %#v", result)
+	}
+
+	active := terminalSessionCommit(1,
+		line("act-01"), line("act-02"), line("act-03"), line("act-04"), line("act-05"),
+	)
+	active.Origin = HistoryCommitActive
+	active.Token = 2
+	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &active}); result.History == nil || result.History.Err != nil || result.History.Deferred {
+		t.Fatalf("active archive = %#v", result)
+	}
+
+	next := terminalSessionCommit(1, line("fin-01"), line("fin-02"))
+	next.Token = 3
+	if result := session.FlushTransaction(TerminalTransactionPlan{Frame: plan, History: &next}); result.History == nil || result.History.Err != nil || result.History.Deferred {
+		t.Fatalf("finalized continuation = %#v", result)
+	}
+
+	screen := vt.NewScreen(width, height)
+	screen.Feed(output.String())
+	if got := strings.TrimRight(screen.Line(1), " "); got != "fin-01" {
+		t.Fatalf("row 1 after finalized continuation = %q, want fin-01 (must continue archived scrollback)\n%s", got, screen.Dump())
+	}
+	if got := strings.TrimRight(screen.Line(2), " "); got != "fin-02" {
+		t.Fatalf("row 2 after finalized continuation = %q, want fin-02\n%s", got, screen.Dump())
+	}
+	if got := strings.TrimSpace(screen.Line(3)); got != "" {
+		t.Fatalf("row 3 below the continuation must be blank, got %q\n%s", got, screen.Dump())
+	}
+	sb := strings.Join(screen.ScrollbackLines(), "\n")
+	if !strings.Contains(sb, "act-01") || !strings.Contains(sb, "act-05") {
+		t.Fatalf("archived prefix missing from scrollback: %q\n%s", sb, screen.Dump())
+	}
+}
