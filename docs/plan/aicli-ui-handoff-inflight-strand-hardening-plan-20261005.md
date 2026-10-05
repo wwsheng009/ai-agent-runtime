@@ -198,12 +198,38 @@ P0.2 必须补观测的原因。
      `ContinueHistoryPlanAction` kick 在空闲 resume 会话里可达；同时把
      `HistoryProjectionInvalidated` 加入 recovery 白名单——该 action 自身置
      ProjectionUnknown，此前却没有唤醒出口。
-   - P1.1b（设计修订，待实现）：**不能**简单给 `continueTruncatedHistoryPlan` 加预算。
-     planner 注释（`history_effect_planner.go:877-887`）自证：冷缓存大前缀下每轮有预算的
-     pass 会停在同一样本点，前缀全是缓存命中/已有终态记录 → NextToken 不变 → PlanStalled
-     被永久置位、kick 解除（live 事故：next=1288 / acked=322 / pending=0）。要同时满足
-     "锁持有有界"与"跨轮前进"，需要把布局 walk 的采样位置做成跨续跑 checkpoint（增量规划），
-     或在 memo 中记录已覆盖的 cell 前沿；这是独立设计项。
+   - P1.1b（设计已评审，待实现）：**不能**简单给 `continueTruncatedHistoryPlan` 加预算
+     （planner 注释 `history_effect_planner.go:877-887` 自证：冷缓存大前缀下每轮有预算的
+     pass 会停在同一样本点 → NextToken 不变 → PlanStalled 永久置位）。经独立只读审查
+     （2026-10-05，expert）确定的正确方案是 **"有界前缀推进 + 末尾一次热缓存全量 pass"**：
+     1. `layoutTranscriptScreenRowsWithin` 增加 startRow 变体：预算只允许落在 cell 边界
+        （命中时若当前 cell 已整块 append，则 nextRow 前移到该 cell 语义行末尾；不得跨
+        gap），返回 `(rows, complete, nextRow)`；`startRow>0` 允许返回 0 行且未前进，
+        调用方必须按 stalled 处理，绝不能当"没有历史"。
+     2. 新增 `planEligibleHistoryCommitsWithinFrom(state, deadline, startRow, screenRowsBefore)`：
+        `displayStart=screenRowsBefore`、`firstVisible=screenRowsBefore+len(rows)`
+        （`firstVisible` 当前恒等于 len(rows)，直接沿用后缀长度会跳过全部续跑候选）；
+        `wholeCellHistoryCommit` 调用点的 DisplayRange 必须全局化（否则
+        `historyCommitKey`/presentation 比较错位，产生重复 token）；complete 仅当 walk 到末尾。
+     3. memo miss 时若游标指纹匹配且未被显式 invalidate → 前缀轮（只调
+        `syncHistoryEffectCandidatesPrefix`，更新游标）；walk 到达末尾后做**一次无预算全量
+        pass**（此时布局缓存全热），并用 `syncHistoryEffectCandidates(...,0)` 做 membership
+        踢除，然后清游标 + `recordTranscriptPlanMemo`。**绝不允许 suffix-only 调 membership
+        踢除**：该函数把候选列表当"完整有效集合"（:1099-1127），后缀会误杀全部前缀
+        Pending/InFlight token（`TestSyncHistoryEffectCandidatesPrefixKeepsPendingTail`
+        守护的正是这条）。
+     4. 游标指纹 = memo 全部输入 + memo generation；`invalidateTranscriptPlanMemo` 与
+        reconcile（TerminalEpoch 已在指纹内）必须清游标。**前置缺口**：`activeAckPlanVersion`
+        目前只增无人消费，它变化会让 `skipRows` 变大、候选收缩而指纹不变——需要纳入失效判据；
+        但它每次 active ack 都递增，直接放进 memo 会让交付期每次 ack 都全量重规划，必须先
+        设计"按 finalized cell 作用域"的版本或等价谓词，不能裸加。
+     5. 截断规则（history_effect_planner.go:114-119）必须在 cell 对齐后放开为"cell 完整
+        包含即可使用 whole-cell fallback"，否则**不可映射 plain cell（tab/控制符）在被截断
+        前缀里将永久缺失**（本轮审查发现的正确性缺口，属实现前必须解决的 blocker）。
+     实现测试清单：属性断言"逐轮续跑产出的 identity 并集 == 全量规划 identity 集"（覆盖
+     plain / 结构化 markdown / reasoning / 折叠 tool / 不可映射 plain 五类）、无重复 token、
+     物理行数相等、结构化大 cell（>layoutBudgetCheckRows）中部截断的边界行为、active ack 使
+     游标作废、memo 强制失效清游标、小非零预算下复用 `assertHistoryCoverage` 的端到端覆盖。
 2. 规划移出 `c.mu`（P1.2，未实施）：锁内只取输入快照，锁外 `planEligibleHistoryCommits`，
    锁内只 reconcile；`State()/debug` 改无锁快照（或复用 transcript 不可变快照）。
 3. D5 观测（已实施）：`HistoryEffectQueueSummary` 增加
