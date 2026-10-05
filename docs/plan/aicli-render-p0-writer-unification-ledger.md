@@ -21,6 +21,24 @@
     → session（无 unified 会话时返回 false，回退 raw）。
   - 测试：`TestWriteEditorControlSequence{ClaimsViaHook,FallsBackToRawWriter}`、
     `TestTerminalSessionWritePromptEditorControl`；ui 全量绿。
+- [x] **transient/modal/agent-panel composer 编辑器出口（第一段）**。
+  - modal（priority popup）与 agent-panel（modal popup）的输入行显示权都在 surface popup：
+    编辑器直写=双画。两者改为认领（`OnTerminalWrite`，仅 popup 有效时）+
+    控制序列经 session；agent-panel 新增 `UpdateInput` 把输入折入 popup composer line
+    （否则认领后打字不可见）。
+  - transient line 无 surface 显示属主（`ReadTransientLineWithHooks` 无 prompt/popup）：
+    本段仅接控制序列，text 直写保留 raw，待设计显示属主后再认领。
+  - secret：surface 预览路径已抑制 prompt 直写，平台密码读取无回显，无编辑器直写；
+    仅保留 legacy fallback。
+- [x] **标题/铃控制序列经 session**。
+  - 新增 `TransactionTerminalTitle` kind；`TerminalSession.WriteTerminalControl(kind, sequence)`
+    成为通用控制通道（`WritePromptEditorControl` / `WriteTerminalTitle` / `WriteTerminalBell`
+    委托），全部走 transactionMu 与帧/历史串行化。
+  - commands 侧新增 `chatControlSequenceWriter` 适配器：unified 会话认领时经
+    coordinator → session 提交；否则回退 raw `os.Stdout`（非 unified 字节不变）。
+    `initializeChatTitleNotifier` / `initializeChatSoundNotifier` 装配点接入。
+  - 测试：`TestTerminalSessionWriteTerminalTitleAndBell`（gateway kind 断言）、
+    `TestChatControlSequenceWriter{FallsBackToRawWriter,RoutesThroughUnifiedSession}`。
 
 ## 2. 关键侦察结论（决定迁移顺序）
 
@@ -47,8 +65,11 @@
 
 1. [x] 控制序列旁路 API（`c159a118`）。
 2. [x] `inputbox_editor` 模式序列迁移（`c159a118`）；余下 1 ref/函数是编辑器读循环的 stdin/stdout 绑定。
-3. 迁移 transient/modal/agent-panel composer 的编辑器出口（补 hooks/sink；主/busy/merged/selection 已接线）。
-4. 迁移标题/铃装配到 control sink（commands 侧，审计 §2.2）。
+3. [~] transient/modal/agent-panel composer 编辑器出口：
+   - [x] modal + agent-panel（认领 + popup 折入输入）；
+   - [x] secret（surface 预览下无直写，仅 legacy fallback）；
+   - [ ] transient line：无显示属主，需先设计显示（底部 prompt 行或 popup）再认领 text 直写。
+4. [x] 标题/铃装配到 control sink（`chatControlSequenceWriter`）。
 5. `status.go` 兜底路径与 stderr 收编（交互期统一走动态状态行/日志文件）。
 6. 单写端断言测试（注入计数 writer，断言交互期物理 writer 计数=1）+ 门禁运行说明文档化。
 
