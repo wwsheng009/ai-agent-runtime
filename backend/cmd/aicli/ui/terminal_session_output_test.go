@@ -253,3 +253,30 @@ func batchKinds(batches []outputpkg.RenderBatch) []outputpkg.TransactionKind {
 	}
 	return kinds
 }
+
+// TestTerminalSessionWritePromptEditorControl：编辑器模式序列（bracketed
+// paste / focus change / cursor）以 prompt_editor kind 经 gateway 提交，与
+// 帧写共享同一 transactionMu 串行化路径。
+func TestTerminalSessionWritePromptEditorControl(t *testing.T) {
+	fx := newOutputTestFixture(t)
+	session := NewTerminalSessionWithOutput(fx.Gateway)
+	const sequence = "\x1b[?2004h\x1b[?1004h"
+	if err := session.WritePromptEditorControl(sequence); err != nil {
+		t.Fatalf("WritePromptEditorControl: %v", err)
+	}
+	var found bool
+	for _, batch := range fx.Sink.SnapshotBatches() {
+		if batch.Kind != outputpkg.TransactionPromptEditor {
+			continue
+		}
+		if string(batch.Bytes) == sequence {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("prompt_editor batch not observed: %#v", fx.Sink.SnapshotBatches())
+	}
+	if err := session.WritePromptEditorControl(""); err != nil {
+		t.Fatalf("empty control sequence must be a no-op, got %v", err)
+	}
+}

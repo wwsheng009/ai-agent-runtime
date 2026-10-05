@@ -205,13 +205,13 @@ func (ib *InputBox) readPrompt(prompt string, onChange func(string), keepHistory
 		return line, readErr
 	}
 	defer func() {
-		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence+focusChangeDisableSequence+cursorShowSequence)
+		writeEditorControlSequence(nil, bracketedPasteDisableSequence+focusChangeDisableSequence+cursorShowSequence)
 		_ = term.Restore(fd, state)
 	}()
 	// 启用 bracketed paste 后，终端会给粘贴块加上明确边界，
 	// 这样我们就能把块内换行当作文本而不是 Enter。
 	// 同时启用 focus change reporting，用于 Codex 风格的失焦通知。
-	_, _ = WriteTerminalText(os.Stdout, bracketedPasteEnableSequence+focusChangeEnableSequence)
+	writeEditorControlSequence(nil, bracketedPasteEnableSequence+focusChangeEnableSequence)
 	// 提示符已经由调用方渲染到屏幕上了。
 	// 重绘时使用相对光标移动定位输入区，避免依赖会被滚动失效的
 	// `\x1b[s` / `\x1b[u` 绝对锚点（多行粘贴触发滚动后会把同一段输入
@@ -261,10 +261,10 @@ func (ib *InputBox) readPromptWithHooksContext(ctx context.Context, prompt strin
 		return line, readErr
 	}
 	defer func() {
-		_, _ = WriteTerminalText(os.Stdout, bracketedPasteDisableSequence+focusChangeDisableSequence+cursorShowSequence)
+		writeEditorControlSequence(&hooks, bracketedPasteDisableSequence+focusChangeDisableSequence+cursorShowSequence)
 		_ = term.Restore(fd, state)
 	}()
-	_, _ = WriteTerminalText(os.Stdout, bracketedPasteEnableSequence+focusChangeEnableSequence)
+	writeEditorControlSequence(&hooks, bracketedPasteEnableSequence+focusChangeEnableSequence)
 
 	editorHistory := lineEditorHistory(ib.history, keepHistory)
 	line, readErr := readInteractiveLineWithHooksContext(ctx, os.Stdin, os.Stdout, prompt, editorHistory, nil, &hooks, echoSubmit, holdFirstRune)
@@ -279,6 +279,21 @@ func lineEditorHistory(history []string, enabled bool) []string {
 		return nil
 	}
 	return history
+}
+
+// writeEditorControlSequence delivers one editor-owned terminal mode sequence.
+// Unified hosts claim it via LineEditorHooks.OnTerminalControl so the bytes go
+// through the single terminal writer (TerminalSession); legacy/no-hook callers
+// keep the raw fallback, which stays load-bearing for the non-unified editor
+// path (bracketed paste and focus reporting).
+func writeEditorControlSequence(hooks *LineEditorHooks, sequence string) {
+	if sequence == "" {
+		return
+	}
+	if hooks != nil && hooks.OnTerminalControl != nil && hooks.OnTerminalControl(sequence) {
+		return
+	}
+	_, _ = WriteTerminalText(os.Stdout, sequence)
 }
 
 func readBufferedLine(reader io.Reader) (string, error) {

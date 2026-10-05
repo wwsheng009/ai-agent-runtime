@@ -149,9 +149,10 @@ func (c *chatSelectionComposer) ReadLine() (string, error) {
 
 func (c *chatSelectionComposer) hooks() ui.LineEditorHooks {
 	hooks := ui.LineEditorHooks{
-		OnChange:   c.onChange,
-		OnNavigate: c.onNavigate,
-		OnCancel:   c.onCancel,
+		OnChange:          c.onChange,
+		OnNavigate:        c.onNavigate,
+		OnCancel:          c.onCancel,
+		OnTerminalControl: c.onTerminalControl,
 	}
 	if chatComposerUsesFixedSurface(c.session) {
 		// popup 输入行由 surface 拥有：编辑器不得直写 stdout，必须被消费掉。
@@ -168,6 +169,16 @@ func (c *chatSelectionComposer) hooks() ui.LineEditorHooks {
 // 且 ↑↓ 重画出来的行会与之打架，表现为高亮「切不动」。
 func (c *chatSelectionComposer) onTerminalWrite(_ ui.LineEditorSnapshot, _ ui.LineEditorRenderSnapshot, _ io.Writer, _ string) bool {
 	return chatComposerUsesFixedSurface(c.session)
+}
+
+// onTerminalControl routes mode sequences through the unified session when it
+// owns the terminal; otherwise the editor keeps the raw fallback (non-fixed or
+// legacy surface modes).
+func (c *chatSelectionComposer) onTerminalControl(sequence string) bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.WritePromptEditorControl(sequence)
 }
 
 func (c *chatSelectionComposer) initializePrompt() {

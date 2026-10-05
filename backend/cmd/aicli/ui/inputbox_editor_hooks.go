@@ -57,6 +57,12 @@ type LineEditorHooks struct {
 	OnBeforeRedraw        func(LineEditorSnapshot, LineEditorRenderSnapshot)
 	OnBeforeTerminalWrite func(LineEditorSnapshot, LineEditorRenderSnapshot) string
 	OnTerminalWrite       func(LineEditorSnapshot, LineEditorRenderSnapshot, io.Writer, string) bool
+	// OnTerminalControl offers an editor-owned terminal mode sequence
+	// (bracketed paste / focus change / cursor visibility) to the host before
+	// the editor falls back to its raw writer. Returning true means the host
+	// delivered the sequence through the unified terminal writer; returning
+	// false keeps the legacy raw path (load-bearing for non-unified callers).
+	OnTerminalControl func(sequence string) bool
 	OnComplete            func(LineEditorSnapshot) (LineEditorReplacement, bool)
 	OnNavigate            func(LineEditorSnapshot, int) bool
 	OnMove                func(LineEditorSnapshot, int) bool

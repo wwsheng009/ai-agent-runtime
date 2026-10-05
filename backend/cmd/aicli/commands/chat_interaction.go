@@ -5327,6 +5327,26 @@ func (c *chatInteractionCoordinator) WritePromptEditorText(writer io.Writer, row
 	return c.surface.WritePromptEditorText(writer, rowOffset, col, text)
 }
 
+// WritePromptEditorControl routes editor-owned terminal mode sequences
+// (bracketed paste / focus change / cursor visibility) through the unified
+// terminal session when it is the primary writer. It returns false when no
+// unified session exists, so the editor keeps its raw legacy fallback; when it
+// returns true the bytes were serialized with frame transactions by
+// TerminalSession.WritePromptEditorControl.
+func (c *chatInteractionCoordinator) WritePromptEditorControl(sequence string) bool {
+	if c == nil || sequence == "" {
+		return false
+	}
+	c.mu.Lock()
+	session := c.terminalSession
+	unified := c.unifiedRenderer
+	c.mu.Unlock()
+	if !unified || session == nil {
+		return false
+	}
+	return session.WritePromptEditorControl(sequence) == nil
+}
+
 func (c *chatInteractionCoordinator) DebugSummary() string {
 	if c == nil {
 		return ""

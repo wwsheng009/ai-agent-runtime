@@ -1878,6 +1878,24 @@ func (s *TerminalSession) writeTerminalBytesKindLocked(kind outputpkg.Transactio
 	return result
 }
 
+// WritePromptEditorControl emits editor-owned terminal mode sequences
+// (bracketed paste / focus change / cursor visibility) as one
+// TransactionPromptEditor batch. It takes the same transactionMu as frame and
+// history writes, so control bytes can never interleave the bytes of an
+// in-flight transaction; unified hosts claim the editor's mode switches
+// through LineEditorHooks.OnTerminalControl.
+func (s *TerminalSession) WritePromptEditorControl(sequence string) error {
+	if s == nil || sequence == "" {
+		return nil
+	}
+	s.transactionMu.Lock()
+	defer s.transactionMu.Unlock()
+	s.mu.Lock()
+	result := s.writeTerminalBytesKindLocked(outputpkg.TransactionPromptEditor, sequence, s.geometry)
+	s.mu.Unlock()
+	return result.Err
+}
+
 // submitWithPortLocked 提交一笔 intent 并消费 primary receipt。receipt 到
 // terminalWriteResult 的映射：
 //   - committed → 成功（Err=nil）；

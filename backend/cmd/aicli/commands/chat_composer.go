@@ -120,6 +120,7 @@ func (c *chatComposerController) hooks() ui.LineEditorHooks {
 		OnChange:              c.onChange,
 		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
 		OnTerminalWrite:       c.onTerminalWrite,
+		OnTerminalControl:     c.onTerminalControl,
 		OnComplete:            c.onComplete,
 		OnTranscriptRequested: c.onTranscriptRequested,
 		ActionForChord:        chatComposerActionForChord,
@@ -210,6 +211,13 @@ func (c *chatComposerController) onTerminalWrite(_ ui.LineEditorSnapshot, render
 		return false
 	}
 	return c.session.Interaction.WritePromptEditorText(writer, render.LastCursorRow, render.LastCursorCol, text)
+}
+
+func (c *chatComposerController) onTerminalControl(sequence string) bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.WritePromptEditorControl(sequence)
 }
 
 func (c *chatComposerController) onComplete(snapshot ui.LineEditorSnapshot) (ui.LineEditorReplacement, bool) {
@@ -514,6 +522,7 @@ func (c *chatBusyComposerCapture) hooks() ui.LineEditorHooks {
 		OnChange:              c.onChange,
 		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
 		OnTerminalWrite:       c.onTerminalWrite,
+		OnTerminalControl:     c.onTerminalControl,
 		OnCancel:              c.onCancel,
 		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
 		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
@@ -591,6 +600,13 @@ func (c *chatBusyComposerCapture) onTerminalWrite(_ ui.LineEditorSnapshot, rende
 		return false
 	}
 	return c.session.Interaction.WritePromptEditorText(writer, render.LastCursorRow, render.LastCursorCol, text)
+}
+
+func (c *chatBusyComposerCapture) onTerminalControl(sequence string) bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.WritePromptEditorControl(sequence)
 }
 
 func (c *chatBusyComposerCapture) onCancel(snapshot ui.LineEditorSnapshot) bool {
@@ -791,6 +807,7 @@ func (c *chatMergedPromptComposer) hooks() ui.LineEditorHooks {
 		OnChange:              c.onChange,
 		OnBeforeTerminalWrite: c.onBeforeTerminalWrite,
 		OnTerminalWrite:       c.onTerminalWrite,
+		OnTerminalControl:     c.onTerminalControl,
 		OnCancel:              c.onCancel,
 		MaxVisibleRows:        chatComposerMaxVisibleRows(c.session),
 		ResolveMaxVisibleRows: func() int { return chatComposerMaxVisibleRows(c.session) },
@@ -817,6 +834,13 @@ func (c *chatMergedPromptComposer) onTerminalWrite(_ ui.LineEditorSnapshot, rend
 		return false
 	}
 	return c.session.Interaction.WritePromptEditorText(writer, render.LastCursorRow, render.LastCursorCol, text)
+}
+
+func (c *chatMergedPromptComposer) onTerminalControl(sequence string) bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.WritePromptEditorControl(sequence)
 }
 
 func (c *chatMergedPromptComposer) onCancel(ui.LineEditorSnapshot) bool {
