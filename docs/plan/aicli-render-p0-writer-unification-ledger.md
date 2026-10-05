@@ -65,11 +65,12 @@
       scrollback），即归档后 top-align。
   - 两者对同一"active 归档"给出相反锚位期望：本质是审计 §6 P2 指出的
     "active 归档/replay/settle 整族特例"无法用局部补丁同时满足。
-  - 处理建议（需决策，不在 P0 范围）：
-    1. 快速缓解：按"归档后是否仍有同一 active cell 的 finalized 续写"区分锚位（streaming 中贴底 /
-       finalized 溢出 top-align）——仍需确认两测试各自的实际状态机路径；
-    2. 正解（P2）：finalized-only 进 scrollback，删除 active 归档路径，冲突面直接消失。
-  - 本分支 P0 改动与该失败无因果关系（commands 全量仅此 1 项失败，其余全绿）。
+  - **已修复（`0d5ecda6`）**：判据 = `resident 模型为空 && !topAligned &&
+    historyStreamTailRows 非空`（active 归档只写 stream tail、不拥有 resident 行，即已有行跨入
+    scrollback）→ finalized 插入强制顶锚从 row 1 续接归档流；resident 非空时保持贴底
+    （`a75d1c89` 的现场语义保留）。两个插入调用点同时生效。
+  - 新增单元测试 `TestTerminalSessionInsertionContinuesArchivedScrollback` 钉住该契约；
+    `cmd/aicli/ui` 与 `cmd/aicli/commands` 全量回归均绿。
 
 ## 4. 验收
 
