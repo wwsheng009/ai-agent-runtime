@@ -645,8 +645,10 @@ func (c *chatModalComposerPrompt) ReadLine() (string, error) {
 
 func (c *chatModalComposerPrompt) hooks() ui.LineEditorHooks {
 	return ui.LineEditorHooks{
-		OnChange: c.onChange,
-		OnCancel: c.onCancel,
+		OnChange:          c.onChange,
+		OnCancel:          c.onCancel,
+		OnTerminalWrite:   c.onTerminalWrite,
+		OnTerminalControl: c.onTerminalControl,
 	}
 }
 
@@ -707,6 +709,25 @@ func (c *chatModalComposerPrompt) onCancel(ui.LineEditorSnapshot) bool {
 		c.cancelled = true
 	}
 	return true
+}
+
+// onTerminalWrite claims editor frames when the surface priority popup owns
+// the input line: foldChatPriorityPromptPopupInput publishes prompt+text into
+// the popup composer line, so a raw editor write beside the surface would
+// double-draw. Without a valid popup the editor keeps its raw fallback so the
+// typed text stays visible.
+func (c *chatModalComposerPrompt) onTerminalWrite(_ ui.LineEditorSnapshot, _ ui.LineEditorRenderSnapshot, _ io.Writer, _ string) bool {
+	if c == nil || c.session == nil || c.session.Surface == nil || !c.session.Surface.Enabled() {
+		return false
+	}
+	return c.session.priorityPopupHandle.Valid()
+}
+
+func (c *chatModalComposerPrompt) onTerminalControl(sequence string) bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.WritePromptEditorControl(sequence)
 }
 
 func (c *chatModalComposerPrompt) normalizeReadError(err error) error {
@@ -890,8 +911,22 @@ func (c *chatTransientLineComposer) ReadLine() (string, error) {
 	if c == nil || c.session == nil || c.session.InputBox == nil {
 		return "", io.EOF
 	}
-	line, err := c.session.InputBox.ReadTransientLineWithHooks(ui.LineEditorHooks{})
+	line, err := c.session.InputBox.ReadTransientLineWithHooks(c.hooks())
 	return line, normalizeChatComposerReadError(c.session, err)
+}
+
+// hooks wires only the control channel: the transient line has no visible
+// prompt owner on the surface, so its text frames keep the raw fallback until
+// a display owner exists (tracked in the P0 ledger).
+func (c *chatTransientLineComposer) hooks() ui.LineEditorHooks {
+	return ui.LineEditorHooks{OnTerminalControl: c.onTerminalControl}
+}
+
+func (c *chatTransientLineComposer) onTerminalControl(sequence string) bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.WritePromptEditorControl(sequence)
 }
 
 func newChatSecretComposerPrompt(session *ChatSession, prompt string) *chatSecretComposerPrompt {
@@ -937,11 +972,38 @@ func (c *chatAgentPanelComposer) ReadLine() error {
 
 func (c *chatAgentPanelComposer) hooks() ui.LineEditorHooks {
 	return ui.LineEditorHooks{
-		OnNavigate: c.onNavigate,
-		OnMove:     c.onMove,
-		OnSubmit:   c.onSubmit,
-		OnCancel:   c.onCancel,
+		OnChange:          c.onChange,
+		OnNavigate:        c.onNavigate,
+		OnMove:            c.onMove,
+		OnSubmit:          c.onSubmit,
+		OnCancel:          c.onCancel,
+		OnTerminalWrite:   c.onTerminalWrite,
+		OnTerminalControl: c.onTerminalControl,
 	}
+}
+
+func (c *chatAgentPanelComposer) onChange(snapshot ui.LineEditorSnapshot) {
+	if c == nil || c.controller == nil {
+		return
+	}
+	c.controller.UpdateInput(snapshot.Text)
+}
+
+// onTerminalWrite claims editor frames when the panel popup owns the input
+// line (UpdateInput folds prompt+text into the popup composer line). Without
+// an active popup the editor keeps its raw fallback so typing stays visible.
+func (c *chatAgentPanelComposer) onTerminalWrite(_ ui.LineEditorSnapshot, _ ui.LineEditorRenderSnapshot, _ io.Writer, _ string) bool {
+	if c == nil || c.controller == nil {
+		return false
+	}
+	return c.controller.popupActive()
+}
+
+func (c *chatAgentPanelComposer) onTerminalControl(sequence string) bool {
+	if c == nil || c.session == nil || c.session.Interaction == nil {
+		return false
+	}
+	return c.session.Interaction.WritePromptEditorControl(sequence)
 }
 
 func (c *chatAgentPanelComposer) onNavigate(_ ui.LineEditorSnapshot, delta int) bool {

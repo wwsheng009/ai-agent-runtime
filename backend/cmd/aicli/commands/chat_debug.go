@@ -1795,6 +1795,7 @@ type chatAgentPanelModalController struct {
 	session  *ChatSession
 	state    *chatAgentPanelModalState
 	prompt   string
+	input    string
 	mu       sync.Mutex
 	cancel   context.CancelFunc
 	rendered bool
@@ -1910,9 +1911,12 @@ func (c *chatAgentPanelModalController) renderLocked() {
 		return
 	}
 	lines := chatAgentPanelModalLines(c.session, c.state)
+	// 输入行 = 提示 + 当前输入（单行）：popup 拥有输入行的显示，编辑器
+	// 直写被认领后，输入必须经由这里折入，否则打字不可见。
+	composerLine := c.prompt + c.inputLine()
 	overlay := newChatPromptOverlay(c.session)
 	if !c.rendered {
-		handle, ok := overlay.beginModalPopupInput(lines, c.prompt)
+		handle, ok := overlay.beginModalPopupInput(lines, composerLine)
 		if !ok {
 			return
 		}
@@ -1920,7 +1924,39 @@ func (c *chatAgentPanelModalController) renderLocked() {
 		c.rendered = true
 		return
 	}
-	overlay.updatePopupInput(c.handle, lines, c.prompt, true)
+	overlay.updatePopupInput(c.handle, lines, composerLine, true)
+}
+
+// inputLine returns the first line of the in-progress panel input. The popup
+// composer line is single-line: prompt + first line, cursor follows its end.
+func (c *chatAgentPanelModalController) inputLine() string {
+	if c == nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(c.input, "\n")
+	return line
+}
+
+// UpdateInput folds editor input into the popup composer line so claiming the
+// editor's raw frames cannot make typing invisible.
+func (c *chatAgentPanelModalController) UpdateInput(text string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.input = text
+	c.mu.Unlock()
+	c.Render()
+}
+
+// popupActive reports whether the panel popup currently owns the input line.
+func (c *chatAgentPanelModalController) popupActive() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rendered && c.handle.Valid()
 }
 
 func chatAgentPanelModalLines(session *ChatSession, state *chatAgentPanelModalState) []string {

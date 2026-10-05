@@ -506,6 +506,35 @@ func TestChatAgentPanelComposerHooksDriveController(t *testing.T) {
 	}
 }
 
+// panel popup 拥有输入行显示：编辑器直写必须被认领，且输入要折入 popup
+// composer line（否则认领后打字不可见）。
+func TestChatAgentPanelComposerClaimsWritesAndFoldsInputIntoPopup(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	ui.SetTheme(ui.ThemeAuto)
+
+	surface := ui.NewFixedBottomSurface(ui.NewTerminal())
+	surface.EnableForTest(80, 24)
+	surface.SetPhysicalWritesEnabled(false)
+
+	session := &ChatSession{Surface: surface}
+	state := newChatAgentPanelModalState(3)
+	controller := newChatAgentPanelModalController(session, &state, "Agent Panel> ")
+	controller.Render()
+	if !controller.popupActive() {
+		t.Fatal("expected panel popup to be active")
+	}
+
+	composer := newChatAgentPanelComposer(session, "Agent Panel> ", controller)
+	hooks := composer.hooks()
+	hooks.OnChange(ui.LineEditorSnapshot{Text: "sel"})
+	if frameText := commandResultFrameText(surface); !strings.Contains(frameText, "Agent Panel> sel") {
+		t.Fatalf("expected popup composer line to fold typed text, frame:\n%s", frameText)
+	}
+	if !hooks.OnTerminalWrite(ui.LineEditorSnapshot{}, ui.LineEditorRenderSnapshot{}, nil, "sel") {
+		t.Fatal("expected editor write to be claimed while the panel popup owns the input line")
+	}
+}
+
 func TestParseChatAgentPanelOptionsSupportsExplicitClose(t *testing.T) {
 	for _, argument := range []string{"panel close", "panel hide", "panel off"} {
 		opts := parseChatAgentPanelOptions(argument, 8)

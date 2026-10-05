@@ -195,6 +195,9 @@ func TestChatModalComposerPrompt_SurfacePopupInputFollowsTypedText(t *testing.T)
 	}
 
 	composer := newChatModalComposerPrompt(session, readPrompt)
+	if !composer.onTerminalWrite(ui.LineEditorSnapshot{}, ui.LineEditorRenderSnapshot{}, nil, "2") {
+		t.Fatal("expected editor write to be claimed while the priority popup owns the input line")
+	}
 	composer.onChange(ui.LineEditorSnapshot{Text: "2"})
 
 	// popup 输入行必须进化成“提示 + 输入”，这样 compose/legacy 光标列
@@ -218,6 +221,9 @@ func TestChatModalComposerPrompt_SurfacePopupInputFollowsTypedText(t *testing.T)
 	}
 	if session.priorityPopupLines != nil {
 		t.Fatal("expected priority popup lines to be cleared after cleanup")
+	}
+	if composer.onTerminalWrite(ui.LineEditorSnapshot{}, ui.LineEditorRenderSnapshot{}, nil, "3") {
+		t.Fatal("expected raw fallback without a valid priority popup")
 	}
 	composer.onChange(ui.LineEditorSnapshot{Text: "3"}) // must not panic
 }
