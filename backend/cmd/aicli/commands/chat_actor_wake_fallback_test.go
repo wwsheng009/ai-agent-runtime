@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -202,5 +203,81 @@ func TestMaybeScheduleWaitFeedbackSilentWhenBusyOrUserFirst(t *testing.T) {
 		host.maybeScheduleWaitFeedback(ctx, localProgressCheckTestSession)
 		require.Empty(t, pendingWaitFeedbackWakes(t, host),
 			"a queued user input owns the next episode; the fallback must not race it")
+	})
+}
+
+// failingRuntimeStateStore 只让 LoadState 失败/落空，其余方法委托给嵌入的接口：
+// 用于钉住“运行状态读不到时兜底扫描必须 fail-quiet”的降级路径。
+type failingRuntimeStateStore struct {
+	runtimechat.RuntimeStateStore
+	err error
+}
+
+func (s failingRuntimeStateStore) LoadState(context.Context, string) (*runtimechat.RuntimeState, error) {
+	return nil, s.err
+}
+
+// TestMaybeScheduleWaitFeedbackFailQuiet pins the degradation contract: an
+// unwired host (no batch store / no supervision plane / no wake store) or an
+// unreadable/missing runtime state skips the sweep silently instead of racing a
+// possible active run.
+func TestMaybeScheduleWaitFeedbackFailQuiet(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("no batch store", func(t *testing.T) {
+		host, _ := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+		parkWaitFeedbackFixture(t, host)
+		batches := host.SubagentBatches
+		host.SubagentBatches = nil
+		defer func() { host.SubagentBatches = batches }()
+		host.maybeScheduleWaitFeedback(ctx, localProgressCheckTestSession)
+		require.Empty(t, pendingWaitFeedbackWakes(t, host))
+	})
+
+	t.Run("no supervision plane", func(t *testing.T) {
+		host, _ := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+		parkWaitFeedbackFixture(t, host)
+		plane := host.Supervision
+		store := plane.Store
+		host.Supervision = nil
+		defer func() { host.Supervision = plane }()
+		host.maybeScheduleWaitFeedback(ctx, localProgressCheckTestSession)
+		pending, err := store.ListWakePending(ctx, supervision.WakeFilter{
+			TargetParentSessionID: localProgressCheckTestSession,
+			UnclaimedOnly:         true,
+			Limit:                 16,
+		})
+		require.NoError(t, err)
+		require.Empty(t, pending)
+	})
+
+	t.Run("no wake store", func(t *testing.T) {
+		host, _ := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+		parkWaitFeedbackFixture(t, host)
+		wakes := host.Supervision.Wakes
+		host.Supervision.Wakes = nil
+		defer func() { host.Supervision.Wakes = wakes }()
+		host.maybeScheduleWaitFeedback(ctx, localProgressCheckTestSession)
+		require.Empty(t, pendingWaitFeedbackWakes(t, host))
+	})
+
+	t.Run("runtime state unreadable", func(t *testing.T) {
+		host, _ := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+		parkWaitFeedbackFixture(t, host)
+		original := host.RuntimeStore
+		host.RuntimeStore = failingRuntimeStateStore{err: errors.New("state store down")}
+		defer func() { host.RuntimeStore = original }()
+		host.maybeScheduleWaitFeedback(ctx, localProgressCheckTestSession)
+		require.Empty(t, pendingWaitFeedbackWakes(t, host))
+	})
+
+	t.Run("runtime state missing", func(t *testing.T) {
+		host, _ := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+		parkWaitFeedbackFixture(t, host)
+		original := host.RuntimeStore
+		host.RuntimeStore = failingRuntimeStateStore{}
+		defer func() { host.RuntimeStore = original }()
+		host.maybeScheduleWaitFeedback(ctx, localProgressCheckTestSession)
+		require.Empty(t, pendingWaitFeedbackWakes(t, host))
 	})
 }

@@ -641,9 +641,11 @@ func (s *WakeScheduler) DrainRunnable(ctx context.Context, parentSessionID, pare
 // parent turn for the given claimed wakes. Lifecycle items always qualify. A
 // progress-only digest (P2-D progress check) qualifies too, because the rollup
 // is exactly what that wake exists to surface — but only for wakes that request
-// progress: a stale lifecycle wake whose notification was acknowledged or
-// resolved while the parent was busy must keep its "no content-free turn"
-// guarantee even when the scope happens to have an active batch rollup.
+// progress or for the wait-period feedback sweep (the parked-parent twin of the
+// progress check, whose digest content is the same rollup): a stale lifecycle
+// wake whose notification was acknowledged or resolved while the parent was
+// busy must keep its "no content-free turn" guarantee even when the scope
+// happens to have an active batch rollup.
 //
 // Both the delivery guard (WakeConsumer) and the budget accounting
 // (DrainRunnable) use this predicate so a turn that starts is always a turn
@@ -659,7 +661,8 @@ func digestDeliverable(claimed []WakePending, digest *Digest) bool {
 		return false
 	}
 	for _, wake := range claimed {
-		if WakeReasonIsProgressCheck(wake.WakeReason) {
+		if WakeReasonIsProgressCheck(wake.WakeReason) ||
+			strings.EqualFold(strings.TrimSpace(wake.WakeReason), WakeReasonWaitFeedback) {
 			return true
 		}
 	}

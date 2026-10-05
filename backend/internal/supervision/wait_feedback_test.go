@@ -108,3 +108,64 @@ func TestScheduleWaitFeedbackWakeOnlyWhilePending(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, scheduled, "the terminal edge owns that wake; the fallback must not duplicate it")
 }
+
+// TestWakeConsumer_WaitFeedbackWakeDeliversRollup pins the parked-parent twin of
+// the progress check: a wait_feedback wake has no lifecycle notification, so its
+// digest content is the rollup itself; it must start the observation turn
+// instead of being released silently (which would make the fallback mute).
+func TestWakeConsumer_WaitFeedbackWakeDeliversRollup(t *testing.T) {
+	store, scheduler, consumer, probe := newProgressWakeHarness(t, "wake-consumer-wait-feedback", 1)
+	ctx := context.Background()
+
+	_, err := scheduler.ScheduleWake(ctx, WakeRequest{
+		RootScopeID:           "root-session-1",
+		TargetParentSessionID: "root-session-1",
+		WakeReason:            WakeReasonWaitFeedback,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, consumer.MaybeWakeParent(ctx, "root-session-1", "", "root-session-1"))
+	require.Equal(t, 1, probe.deliveries,
+		"a wait-feedback digest carries the rollup and must start the observation turn")
+	require.NotNil(t, probe.lastDigest)
+	require.NotEmpty(t, probe.lastDigest.Progress, "the wake digest must carry the rollup")
+
+	pending, err := store.ListWakePending(ctx, WakeFilter{
+		RootScopeID:           "root-session-1",
+		TargetParentSessionID: "root-session-1",
+		UnclaimedOnly:         true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, pending, "the delivered feedback wake is consumed, not left dangling")
+
+	other := scheduler.BudgetState(ctx, "root-session-1", WakeBudgetClassOther)
+	require.Equal(t, 1, other.Used, "the observation turn spends the bounded other-class claim")
+}
+
+// TestWakeScheduler_WaitFeedbackWithoutRollupStaysSilent keeps the no-content
+// guarantee: without a rollup projection a wait-feedback wake must stay silent
+// and budget-neutral, exactly like the progress check does.
+func TestWakeScheduler_WaitFeedbackWithoutRollupStaysSilent(t *testing.T) {
+	store := newTestStore(t, "wake-scheduler-wait-feedback-unwired")
+	ctx := context.Background()
+	scheduler := NewWakeScheduler(store, WakeSchedulerConfig{
+		RateWindow:           time.Hour,
+		MaxAutoWakePerWindow: 1,
+	})
+
+	_, err := scheduler.ScheduleWake(ctx, WakeRequest{
+		RootScopeID:           "root-session-1",
+		TargetParentSessionID: "root-session-1",
+		WakeReason:            WakeReasonWaitFeedback,
+	})
+	require.NoError(t, err)
+
+	claimed, digest, err := scheduler.DrainRunnable(ctx, "root-session-1", "", "root-session-1",
+		func(context.Context, string, string, string) bool { return true })
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	require.False(t, digestDeliverable(claimed, digest),
+		"without the rollup a wait-feedback wake has no content and must stay silent")
+	require.True(t, scheduler.AllowAutoWake(ctx, "root-session-1", WakeBudgetClassOther, time.Now().UTC()),
+		"a wake that never became a turn must not spend the window")
+}

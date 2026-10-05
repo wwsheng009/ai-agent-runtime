@@ -51,6 +51,8 @@ func (h *Handler) SetSupervisionActionService(service *supervision.ActionService
 // P2-D：它同时是 opt-in 周期巡查的唯一启动点——ProgressCheckInterval > 0 时
 // 拉起巡检循环，为 0（默认）时不注册 ticker、不新增 goroutine；重复调用先停后起，
 // 因此改小/改大/关回 0 都会立刻生效（见 supervision_progress_check.go）。
+// Step 4 起它同时收敛默认开启的 wait_feedback 独立环（见
+// supervision_wait_feedback_sweep.go）：反馈计时不再依赖巡查开关。
 func (h *Handler) SetSupervisionConfig(cfg supervision.Config) {
 	if h == nil {
 		return
@@ -59,6 +61,7 @@ func (h *Handler) SetSupervisionConfig(cfg supervision.Config) {
 	h.supervisionConfig = cfg
 	h.supervisionStoreMu.Unlock()
 	h.syncSupervisionProgressCheck()
+	h.syncSupervisionWaitFeedbackSweep()
 }
 
 // supervisionTuning returns this host's supervision config with semantic

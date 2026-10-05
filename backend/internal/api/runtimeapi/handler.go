@@ -267,6 +267,13 @@ type Handler struct {
 	waitFeedbackTrackerOnce sync.Once
 	waitFeedbackTracker     *supervision.WaitFeedbackTracker
 
+	// Step 4：等待期兜底反馈的独立默认环（与 progress_check_interval 解耦）。
+	// SetSupervisionConfig 是唯一启动点；默认开启，wake_fallback_interval 负值
+	// 显式关闭（见 supervision_wait_feedback_sweep.go）。
+	supervisionWaitFeedbackMu   sync.Mutex
+	supervisionWaitFeedbackStop context.CancelFunc
+	supervisionWaitFeedbackWG   sync.WaitGroup
+
 	// P0-1c/M7：per-host 长生命周期的 live-only 进度镜像（与 CLI 宿主的
 	// host.subagentProgressMirror 同形）。子会话事件订阅与 progress 投影的
 	// Messages 富化共用同一实例，保证两宿主的 last_message 口径一致。
