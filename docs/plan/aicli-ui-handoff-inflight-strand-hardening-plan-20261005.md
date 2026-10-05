@@ -309,11 +309,15 @@ P0.2 必须补观测的原因。
     `TestExecutorContinuesIncompletePlanWithoutAckTrigger` PASS 19.3s；
     `TestHistory|TestTranscript|TestLayoutTranscript|TestPlanEligible|TestSync|TestTerminalSessionExecutor`
     组 PASS 18.9s。
-- 遗留（既有缺口，未扩大）：`activeAckPlanVersion` 仍无消费方——memo 命中路径下，
-  某个 finalized cell 的 active-origin ack 使 skipRows 变大时，该 cell 的
-  transcript-origin 候选可能到下一次全量 membership pass 才被退休。游标路径每轮重算
-  skipRows、末尾还有全量 membership，故不受影响；修复需要按 finalized cell 作用域的
-  版本/谓词，列为 P1.1c。
+- **P1.1c（已实施，补 P1.1b 留下的缺口）**：`activeAckPlanVersion` 原先无消费方，
+  存在"finalized cell 的 active-origin ack 收缩 skipRows、memo 却仍命中"的路径。
+  实现为**按 finalized cell 作用域的队列侧计数器** `finalizedActiveAckPlanVersion`：
+  reducer 的 ack 处理器在提交 `Origin==Active` 且"不再等于当前活跃可变 cell"时推进
+  （仍活跃的 ack 不计入，否则流式热路径退化为每 ack 全量重规划）；memo 判据与
+  `transcriptPlanInputs` 游标指纹都纳入该版本。新增
+  `TestTranscriptPlanMemoTracksFinalizedActiveAcks` 与
+  `TestNoteFinalizedActiveAckScopesToFinalizedCells`；宽测试组（History/Transcript/
+  Sync/Executor/NativeScrollback）PASS 22.6s。
 - 既有测试观察（A/B 在 HEAD 复现，与 Stage 1/2 无因果）：
   - `TestTruncatedTranscriptPlanContinuesUntilComplete`：60s 内部窗口在负载下必然
     超时（HEAD 复现 62.5s 失败）；Stage 3 起该用例走多轮 0 预算收敛，耐心窗口已提到

@@ -305,6 +305,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		} else if ackErr == nil {
 			if entry, ok := state.HistoryEffects.ledger.Entry(a.Token); ok {
 				advanceActiveCellLedgerOnAck(&state, []HistoryCommit{entry.Commit})
+				noteFinalizedActiveAck(&state, []HistoryCommit{entry.Commit})
 			}
 			// A budget-truncated plan mints only its oldest prefix, and an idle
 			// resumed session produces no later transcript transition to carry
@@ -328,6 +329,7 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 			state.HistoryEffects.ProjectionUnknown = true
 		} else if len(a.Commits) > 0 {
 			advanceActiveCellLedgerOnAck(&state, a.Commits)
+			noteFinalizedActiveAck(&state, a.Commits)
 			// Same continuation rule as the single ack above: the batch may have
 			// been the truncated plan's delivered prefix.
 			continueTruncatedHistoryPlan(&state)
@@ -1064,6 +1066,28 @@ func advanceActiveCellLedgerOnAck(state *UIControllerState, commits []HistoryCom
 		return
 	}
 	state.Active = next
+}
+
+// noteFinalizedActiveAck 推进 finalizedActiveAckPlanVersion：当被 ack 的
+// Active-origin 提交属于一个**已经 finalize**（不再等于当前活跃可变 cell）的 cell
+// 时，该 cell 已交付的前缀又前进了一步，finalized 计划读到的 skipRows 因此变大。
+// 这类变化不进 transcript fence，必须显式让 memo 与续跑游标失效，否则
+// transcript-origin 的重复候选会留在 ledger 里被二次投递。
+//
+// 仍活跃的可变 cell 的 ack 不推进：它的已交付前缀由 memo 命中路径上的
+// syncHistoryEffectsForActiveCell 做 O(viewport) 对账，不需要全量重规划；若把
+// 这类 ack 也计入，流式热路径会退化成每个 ack 一次全量布局（~190% CPU 的旧模式）。
+func noteFinalizedActiveAck(state *UIControllerState, commits []HistoryCommit) {
+	for _, commit := range commits {
+		if commit.Origin != HistoryCommitActive {
+			continue
+		}
+		if state.Active.Phase == ActiveCellMutable && state.Active.CellID == commit.CellID {
+			continue
+		}
+		state.HistoryEffects.finalizedActiveAckPlanVersion++
+		return
+	}
 }
 
 // reconcileTranscriptActiveCell merges a semantic Scene snapshot with the

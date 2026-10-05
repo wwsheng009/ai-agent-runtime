@@ -76,6 +76,15 @@ type HistoryEffectQueueState struct {
 	planResumeRow        int
 	planResumeScreenRows int
 	planResumeInputs     transcriptPlanInputs
+	// finalizedActiveAckPlanVersion 记录"已 finalize 的 cell 的 Active-origin 交付
+	// 又前进"的次数。这类 ack 不改变 transcript/layout/theme 指纹，却会收缩 plan
+	// 读到的 skipRows（activeAckedRenderedPrefixRows），必须让 memo 与续跑游标都
+	// 失效，否则 transcript-origin 的重复候选会留在 ledger 里被二次投递。按
+	// finalized cell 作用域计数：仍活跃的可变 cell 的 ack 不计——那由
+	// syncHistoryEffectsForActiveCell 的 O(viewport) 对账处理，若也计入，流式热
+	// 路径的每个 ack 都会全量重规划（正是 memo 要消除的 ~190% CPU 模式）。由
+	// reducer 的 ack 处理器推进。
+	finalizedActiveAckPlanVersion uint64
 	// claimSkipsStaleAction / claimRejects* keep reducer-side BeginHistoryCommit
 	// refusals observable. A refusal is correct (the queue is ordered and the
 	// gates own recovery) and must stay harmless to state, but it was completely
@@ -112,9 +121,12 @@ type HistoryEffectQueueState struct {
 	// fence (same trust level as transcriptSnapshotAlreadyInstalled),
 	// geometry/layout/theme identity, the semantic-projection flag, and — only
 	// when semantic projection is on, because that is the only mode where the
-	// planner reads Active — the active-cell planner inputs. Ledger-dependent
-	// plan input (the acked Active-origin prefix) is tracked by the ledger's
-	// activeAckPlanVersion plus TerminalEpoch instead of a per-call scan.
+	// planner reads Active — the active-cell planner inputs. The ledger-dependent
+	// plan input (the acked Active-origin prefix of a finalized cell) is tracked by
+	// finalizedActiveAckPlanVersion plus TerminalEpoch instead of a per-call scan;
+	// the ledger's own activeAckPlanVersion counts every active ack and is
+	// deliberately too broad to key the memo on (a live mutable cell's acks are
+	// handled by the O(viewport) active reconcile, not a full replan).
 	lastPlannedTranscriptValid   bool
 	lastPlannedTranscriptSceneID uint64
 	// lastPlannedTranscriptFence fingerprints every finalized transcript cell
@@ -140,6 +152,9 @@ type HistoryEffectQueueState struct {
 	lastPlannedProjection          bool
 	lastPlannedThemeKey            string
 	lastPlannedTerminalEpoch       uint64
+	// lastPlannedFinalizedActiveAckVersion 是 lastPlanned* 组里那个按 finalized
+	// cell 作用域的交付版本（见 finalizedActiveAckPlanVersion）。
+	lastPlannedFinalizedActiveAckVersion uint64
 	// lastPlannedCandidateCount is how many commits the last COMPLETE plan
 	// produced. It exists because the memo fingerprints only plan *inputs*: a
 	// ledger that lost the plan it was reconciled into (reconcileScrollback

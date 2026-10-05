@@ -312,3 +312,70 @@ func TestTranscriptPlanResumeClearedByForcedInvalidation(t *testing.T) {
 		t.Fatal("memo 指纹仍然有效")
 	}
 }
+
+// TestTranscriptPlanMemoTracksFinalizedActiveAcks 锁定 P1.1c：memo 与续跑游标
+// 必须把"已 finalize cell 的 Active-origin 交付"计入判据——它收缩 skipRows，却不
+// 改变 transcript/layout/theme 指纹；不判它，陈旧 transcript-origin 候选会一直
+// 留在 ledger 里被二次投递（重复行）。
+func TestTranscriptPlanMemoTracksFinalizedActiveAcks(t *testing.T) {
+	restoreBudget := historyCommitPlanningBudget
+	defer func() { historyCommitPlanningBudget = restoreBudget }()
+	// 大预算：本用例要的是"完整规划 + 落 memo"，不是截断路径。
+	historyCommitPlanningBudget = 30 * time.Second
+
+	state := reduceUIControllerState(UIControllerState{}, Resize{Width: 90, Height: 40, Generation: 1}, 1)
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: resumeParitySnapshot()}, 2)
+	if state.HistoryEffects.PlanIncomplete || !state.HistoryEffects.lastPlannedTranscriptValid {
+		t.Fatalf("fixture 没有落下完整规划 memo：incomplete=%t memoValid=%t",
+			state.HistoryEffects.PlanIncomplete, state.HistoryEffects.lastPlannedTranscriptValid)
+	}
+	if !transcriptPlanMemoHit(&state) {
+		t.Fatal("基线应命中 memo")
+	}
+	state.HistoryEffects.finalizedActiveAckPlanVersion++
+	if transcriptPlanMemoHit(&state) {
+		t.Fatal("finalized active ack 版本变化必须让 memo 失效")
+	}
+	state.HistoryEffects.finalizedActiveAckPlanVersion--
+	if !transcriptPlanMemoHit(&state) {
+		t.Fatal("版本回到已规划值后 memo 应再次命中（判据是等值）")
+	}
+	inputs := currentTranscriptPlanInputs(&state)
+	state.HistoryEffects.finalizedActiveAckPlanVersion++
+	if currentTranscriptPlanInputs(&state) == inputs {
+		t.Fatal("续跑游标指纹必须包含 finalized active ack 版本")
+	}
+}
+
+// TestNoteFinalizedActiveAckScopesToFinalizedCells 锁定作用域判据本身：只有
+// "不再等于当前活跃可变 cell"的 Active-origin ack 才推进版本。仍活跃的 cell 的
+// ack 必须被忽略，否则流式热路径每个 ack 都会全量重规划。
+func TestNoteFinalizedActiveAckScopesToFinalizedCells(t *testing.T) {
+	state := UIControllerState{}
+	state.Active = ActiveCellState{CellID: 7, Phase: ActiveCellMutable}
+	noteFinalizedActiveAck(&state, []HistoryCommit{{Origin: HistoryCommitActive, CellID: 7}})
+	if state.HistoryEffects.finalizedActiveAckPlanVersion != 0 {
+		t.Fatal("活跃可变 cell 的 ack 不得推进版本（否则流式热路径退化为每 ack 全量重规划）")
+	}
+	noteFinalizedActiveAck(&state, []HistoryCommit{{Origin: HistoryCommitActive, CellID: 8}})
+	if state.HistoryEffects.finalizedActiveAckPlanVersion != 1 {
+		t.Fatal("已 finalize cell 的 active ack 必须推进版本")
+	}
+	noteFinalizedActiveAck(&state, []HistoryCommit{{Origin: HistoryCommitTranscript, CellID: 9}})
+	if state.HistoryEffects.finalizedActiveAckPlanVersion != 1 {
+		t.Fatal("transcript-origin ack 不推进该版本")
+	}
+	noteFinalizedActiveAck(&state, []HistoryCommit{
+		{Origin: HistoryCommitTranscript, CellID: 9},
+		{Origin: HistoryCommitActive, CellID: 8},
+		{Origin: HistoryCommitActive, CellID: 10},
+	})
+	if state.HistoryEffects.finalizedActiveAckPlanVersion != 2 {
+		t.Fatal("批内多枚 finalized active ack 只需整体推进一次")
+	}
+	state.Active = ActiveCellState{}
+	noteFinalizedActiveAck(&state, []HistoryCommit{{Origin: HistoryCommitActive, CellID: 10}})
+	if state.HistoryEffects.finalizedActiveAckPlanVersion != 3 {
+		t.Fatal("无活跃 cell 时到达的 active ack 必须推进版本")
+	}
+}

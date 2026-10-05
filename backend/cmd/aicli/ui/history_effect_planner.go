@@ -1057,19 +1057,23 @@ type transcriptPlanInputs struct {
 	projection    bool
 	themeKey      string
 	terminalEpoch uint64
+	// finalizedAckVersion 是已 finalize cell 的 Active-origin 交付版本：ack 收缩
+	// skipRows 后，游标必须从 0 重新规划（前缀候选集变了）。
+	finalizedAckVersion uint64
 }
 
 func currentTranscriptPlanInputs(state *UIControllerState) transcriptPlanInputs {
 	return transcriptPlanInputs{
-		sceneID:       state.Transcript.SceneID,
-		fence:         transcriptFinalizedPrefixFence(state.Transcript),
-		finalized:     transcriptFinalizedCellCount(state.Transcript),
-		layoutGen:     state.LayoutGeneration,
-		width:         state.Geometry.Width,
-		height:        state.Geometry.Height,
-		projection:    state.SemanticActiveCellProjection,
-		themeKey:      themeFingerprint(state.Theme),
-		terminalEpoch: state.HistoryEffects.TerminalEpoch,
+		sceneID:             state.Transcript.SceneID,
+		fence:               transcriptFinalizedPrefixFence(state.Transcript),
+		finalized:           transcriptFinalizedCellCount(state.Transcript),
+		layoutGen:           state.LayoutGeneration,
+		width:               state.Geometry.Width,
+		height:              state.Geometry.Height,
+		projection:          state.SemanticActiveCellProjection,
+		themeKey:            themeFingerprint(state.Theme),
+		terminalEpoch:       state.HistoryEffects.TerminalEpoch,
+		finalizedAckVersion: state.HistoryEffects.finalizedActiveAckPlanVersion,
 	}
 }
 
@@ -1103,7 +1107,8 @@ func transcriptPlanMemoHit(state *UIControllerState) bool {
 		effects.lastPlannedHeight != state.Geometry.Height ||
 		effects.lastPlannedProjection != state.SemanticActiveCellProjection ||
 		effects.lastPlannedThemeKey != themeFingerprint(state.Theme) ||
-		effects.lastPlannedTerminalEpoch != effects.TerminalEpoch {
+		effects.lastPlannedTerminalEpoch != effects.TerminalEpoch ||
+		effects.lastPlannedFinalizedActiveAckVersion != effects.finalizedActiveAckPlanVersion {
 		return false
 	}
 	// Every input above is unchanged, but the memo only fingerprints plan
@@ -1134,6 +1139,7 @@ func recordTranscriptPlanMemo(state *UIControllerState, candidates int) {
 	effects.lastPlannedProjection = state.SemanticActiveCellProjection
 	effects.lastPlannedThemeKey = themeFingerprint(state.Theme)
 	effects.lastPlannedTerminalEpoch = effects.TerminalEpoch
+	effects.lastPlannedFinalizedActiveAckVersion = effects.finalizedActiveAckPlanVersion
 	effects.lastPlannedCandidateCount = candidates
 }
 
