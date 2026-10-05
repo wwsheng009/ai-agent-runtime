@@ -467,9 +467,24 @@ P0.2 必须补观测的原因。
     resume 窗口收敛 + finalized cell 全覆盖）、`...StaleResultReDispatches`、
     `...EpochInvalidationReDispatches`（A.4 不复活游标）、`...SinkRefusalFallsBackToSync`、
     `TestPlanContinuationPendingSuppressedWhileInFlight`；宽回归 PASS 94.4s。
-- **Stage B2（待实施）**：控制器侧真 worker（请求 channel/goroutine/生命周期） +
-  `ReducerContext` 能力注入 + `WaitIdle`/`WaitPlanWorker` + 真 E2E 与 `-race`；
-  B3 再切生产 wiring。
+- **Stage B2（已实施）**：控制器侧真 worker 与生命周期。
+  - `controller_plan_worker.go`：请求通道（容量 1 + 覆盖语义）、`done` 停止信号、
+    `WaitPlanWorker(timeout)`。sink 的 `Request` **不取 c.mu**——reduce 落在锁内，
+    取锁会重入死锁；只用原子旗标 + channel。worker 用 `Post` 回投结果，Close 后
+    放弃并退出。
+  - `UIControllerConfig.AsyncTranscriptPlan`（默认关）；`Run` 启动 worker；`Close`
+    先撤 enabled 再关 done，**不关闭请求通道**（排空阶段仍可能派发，close 会
+    panic）；锁内 reduce 前把 sink 注入 `c.state.planSink`（controller.go:598），
+    因此无需 App 侧 reducer migration。
+  - `WaitIdle`/`WaitIdleTimeout`：未 Close 时在飞请求计入繁忙；Close 后不再等待
+    （否则既有 teardown 的 `Close(); WaitIdle()` 会挂死）。
+  - `historyCommitWakeNeeded`：结果 action 纳入两个唤醒 case 列表（结果铸出
+    pending token 后必须唤醒 executor）。
+  - 测试：真 worker E2E（0 预算多轮截断 → executor 驱动 → 收敛 + 全覆盖 + seq>0）、
+    WaitIdle 谓词、Close/幂等/worker 退出、默认关闭零变化；`-race` 9/9 PASS、
+    宽回归 66.2s PASS、游标 `-count=4` PASS。
+- **Stage B3（待实施）**：生产 wiring 切换（commands 侧 `UIControllerConfig` 打开
+  `AsyncTranscriptPlan`）+ 现场 soak 与 P16 拆分读数验收。
 
 ### P2（结构性）
 
