@@ -448,8 +448,28 @@ P0.2 必须补观测的原因。
     在 0 预算下可能不提前 break；该路径同受粗刻度影响但无正确性后果，列入观察。
 - 验证：宽测试组（History/Transcript/Plan/Sync/Executor/NativeScrollback/两个 E2E）
   PASS 76.6s；预算 0 生命周期用例 PASS 26.3s；`gofmt -l` 无输出。
-- **Stage B（待实施）**：worker + 请求/结果 action + seq/planInputsEpoch/指纹三重栅栏
-  + kick 门 + WaitIdle/WaitPlanWorker 生命周期（按设计稿执行）。
+- **Stage B1（已实施）**：reducer 侧异步 screening 请求协议（单线程可测，不引入
+  并发）。
+  - 状态：`planRequestSeq`（受理才前进）、`planRequestInFlight`、`planInputsEpoch`
+    （`invalidateTranscriptPlanMemo` 自增；armed replay/no-op 安装的显式失效不进指纹，
+    没它旧结果会复活刚清的游标——审查漏项 A）。
+  - 类型：`transcriptPlanSink` / `transcriptPlanWindowRequest`；worker 侧
+    `transcriptPlanSnapshotForRequest`（byID/mutable/layoutRows 全在 worker 派生）+
+    `screenTranscriptPlanWindowRequest`；`transcriptPlanMintSnapshotFor` 保证结果回收
+    不重做布局前置。
+  - `HistoryPlanWindowReady`（ClassBarrier、不可 coalesce）+ 固定顺序栅栏：seq →
+    epoch/指纹/恢复门 → mint + 共用收尾；stale **立即重派发**（阻断项 6）。
+  - kick 门：`planContinuationPending` 在飞为 false（阻断项 4）；`continueTruncatedHistoryPlan`
+    在飞早退。
+  - `applyTranscriptPlanWindow`：同步/异步共用同一份落账实现（语义逐字一致）；sink
+    拒绝受理 → 回退锁内同步（兼容路径，既有测试与旧 wiring 零变化）。
+  - 测试（fake sink 确定性驱动）：`TestAsyncPlanWindowConvergesLikeSyncPlan`（多轮
+    resume 窗口收敛 + finalized cell 全覆盖）、`...StaleResultReDispatches`、
+    `...EpochInvalidationReDispatches`（A.4 不复活游标）、`...SinkRefusalFallsBackToSync`、
+    `TestPlanContinuationPendingSuppressedWhileInFlight`；宽回归 PASS 94.4s。
+- **Stage B2（待实施）**：控制器侧真 worker（请求 channel/goroutine/生命周期） +
+  `ReducerContext` 能力注入 + `WaitIdle`/`WaitPlanWorker` + 真 E2E 与 `-race`；
+  B3 再切生产 wiring。
 
 ### P2（结构性）
 

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"time"
 
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/render"
 	"github.com/wwsheng009/ai-agent-runtime/cmd/aicli/ui/renderengine"
@@ -566,6 +567,26 @@ type ContinueHistoryPlanAction struct{}
 func (ContinueHistoryPlanAction) isUIAction()         {}
 func (ContinueHistoryPlanAction) Class() ActionClass  { return ClassBarrier }
 func (ContinueHistoryPlanAction) CoalesceKey() string { return "" }
+
+// HistoryPlanWindowReady 是 plan worker 的 screening 结果（P1.2 Stage B）。
+// ClassBarrier：批处理 merge 丢弃它等于让规划永久停摆；CoalesceKey 为空表示不可
+// 合并。字段不导出——只有 ui 包内部（worker/测试）构造它。
+type HistoryPlanWindowReady struct {
+	seq              uint64
+	planInputsEpoch  uint64
+	inputs           transcriptPlanInputs
+	resume           bool
+	startRow         int
+	screenRowsBefore int
+	rows             []AppScreenRow
+	complete         bool
+	nextRow          int
+	screenDuration   time.Duration
+}
+
+func (HistoryPlanWindowReady) isUIAction()         {}
+func (HistoryPlanWindowReady) Class() ActionClass  { return ClassBarrier }
+func (HistoryPlanWindowReady) CoalesceKey() string { return "" }
 
 // TerminalEffectAck is the typed success result for a terminal transaction.
 // It is an alias-shaped action payload rather than an implicit nil error, so

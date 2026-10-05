@@ -76,6 +76,20 @@ type HistoryEffectQueueState struct {
 	planResumeRow        int
 	planResumeScreenRows int
 	planResumeInputs     transcriptPlanInputs
+	// P1.2 Stage B1：异步 screening 的请求协议。装了 planSink 时 transcript 规划
+	// 不再锁内 inline：reducer 派发一个窗口请求（seq 单调），worker 侧完成布局后以
+	// HistoryPlanWindowReady 回到 reducer，用 seq/planInputsEpoch/输入指纹三重栅栏
+	// 判定结果是否仍然可用。
+	//   - planRequestSeq 只在请求被受理（sink 返回 true）时前进；结果 seq 不等于它
+	//     即视为被更新的请求取代，直接丢弃且不清 in-flight（新请求仍有效）。
+	//   - planRequestInFlight 期间 planContinuationPending 为 false：screening 已
+	//     委托，executor 不得再 kick，否则是无 sleep 的热旋转。
+	//   - planInputsEpoch 由 invalidateTranscriptPlanMemo 自增：armed replay /
+	//     no-op 安装这类"显式失效"不进任何指纹，没有它，失效前产生的结果会通过
+	//     指纹比对并复活刚被清掉的游标（P1.2 审查漏项 A）。
+	planRequestSeq      uint64
+	planRequestInFlight bool
+	planInputsEpoch     uint64
 	// finalizedActiveAckPlanVersion 记录"已 finalize 的 cell 的 Active-origin 交付
 	// 又前进"的次数。这类 ack 不改变 transcript/layout/theme 指纹，却会收缩 plan
 	// 读到的 skipRows（activeAckedRenderedPrefixRows），必须让 memo 与续跑游标都
@@ -715,6 +729,9 @@ func (s *HistoryEffectQueueState) invalidateTranscriptPlanMemo() {
 		// 也可能已经不在新 ledger 里（reconcileScrollback 整体替换、no-op 安装
 		// 从未持有该计划），游标必须一起作废。
 		s.clearTranscriptPlanResume()
+		// 显式失效同时作废所有在飞请求：它们的结果按旧 ledger 的前缀铸 commit，
+		// 放行会通过指纹比对并复活刚被清掉的游标（A.4 空屏路径）。
+		s.planInputsEpoch++
 	}
 }
 
