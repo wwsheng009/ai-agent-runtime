@@ -1674,13 +1674,16 @@ func historyBatchIsActiveOrigin(delivered []HistoryCommit) bool {
 //     painted rows into native scrollback (the region top margin is row one).
 //
 // Once every chunk has crossed, the region is repainted from the retained tail
-// model, top-aligned: rows have reached native scrollback, so the resident
-// suffix must begin at physical row one and stay contiguous with the archived
-// stream instead of leaving blank headroom between scrollback and the next
-// delivery. The resident model itself is unchanged: an archive never owns rows
-// of the region, so later capacity or alignment decisions keep seeing the
-// finalized tail and nothing else. The returned alignment is therefore always
-// sticky-top once anything was archived.
+// model at its current anchor: only a finalized-stream overflow flips the
+// region to sticky-top, because only then does the resident suffix continue the
+// rows that reached native scrollback. An active archive is fire-and-forget
+// (those rows are the mutable cell's streamed prefix, later superseded by the
+// finalized delivery), so flipping the finalized tail from its bottom anchor to
+// row one would make every later live message land mid-screen with blank space
+// below it instead of appending at the bottom above the band. The resident
+// model itself is unchanged: an archive never owns rows of the region, so later
+// capacity or alignment decisions keep seeing the finalized tail and nothing
+// else. The returned alignment is therefore unchanged by an archive.
 func terminalActiveHistoryArchiveANSI(height, capacity int, resident, inserted []string, topAligned bool) (string, bool) {
 	if height < 1 || capacity < 1 || len(inserted) == 0 {
 		return "", topAligned
@@ -1706,15 +1709,36 @@ func terminalActiveHistoryArchiveANSI(height, capacity int, resident, inserted [
 		output.WriteString(renderengine.NewHandoffPlan(height, capacity, make([]string, len(chunk))).ANSI())
 		remaining = remaining[len(chunk):]
 	}
-	topAligned = true
-	for index, row := range resident {
-		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", index+1)
-		output.WriteString(row)
+	if topAligned {
+		// finalized 流已经溢出到 native scrollback：resident 后缀必须紧接
+		// 归档行，从第一行开始连续。
+		for index, row := range resident {
+			fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", index+1)
+			output.WriteString(row)
+		}
+		for row := len(resident) + 1; row <= capacity; row++ {
+			fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
+		}
+		return output.String(), true
 	}
-	for row := len(resident) + 1; row <= capacity; row++ {
+	// 尚无 finalized 溢出：保持贴底锚定（新行经既有 compress 语义追加在
+	// resident 下方、始终落在可见区底部），空白留在顶部。
+	start := capacity - len(resident) + 1
+	if start < 1 {
+		start = 1
+	}
+	for row := 1; row < start; row++ {
 		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", row)
 	}
-	return output.String(), true
+	for index, row := range resident {
+		position := start + index
+		if position > capacity {
+			break
+		}
+		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[0m\x1b[K", position)
+		output.WriteString(row)
+	}
+	return output.String(), false
 }
 
 func terminalHistoryDeleteLinesANSI(capacity, row, count int) string {

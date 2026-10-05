@@ -18,6 +18,8 @@
 
 > **补充根因与永久约束（2026-08-06）**：D1-D9/N1-N6 的设计还需要两个实现级不变量才能真正闭合。其一，每个需要交接的 display row（包括内部空行和尾随空行）必须具有非空、可比较的 source/fragment identity，否则 `Acked` prefix 后的 finalized suffix 可能被整体漏交；plain source 现以 newline byte range 和 fragment ID 表达这些空行。其二，一旦已有语义 history 进入 native scrollback，resident tail 必须 sticky top-aligned；capacity 变化不能重新 bottom-align，否则会在 scrollback 与主屏 tail 之间制造非语义空白。resize rebuild、partial/zero write 和 alternate-screen 往返分别有明确的 alignment/projection 状态转换与测试。
 
+> **active 归档对齐修正（2026-10-05）**：上述 sticky top-align 的触发条件是"**语义** history 进入 native scrollback"。`HistoryCommitActive` 的溢出前缀是 fire-and-forget 的 mutable 内容（随后由 finalized 交付取代），不构成语义 history；`terminalActiveHistoryArchiveANSI` 无条件置位 top-align 会把 finalized 尾部从贴底锚位搬到 row 1，之后所有实时消息只能插到屏幕中部往下填（用户现场："消息插在屏幕中间而不是贴底追加"）。修正：active 归档按当前锚位恢复（`topAligned == false` 时贴底、空白留顶；`true` 时维持原 sticky-top），只有 finalized 流真正溢出（`HandoffPlan`/正常插入）才翻转对齐。整包 `cmd/aicli/ui` 与 `-race` 回归通过；新增 `TestTerminalSessionActiveArchiveKeepsBottomAnchorForLaterMessages` 钉住"归档后 finalized 尾部不跳顶、后续消息贴底追加"。
+
 > **成功终态的事件顺序（2026-08-06）**：`llm.request.finished` 是 transport boundary，不是 assistant semantic final。成功请求必须保持 active stream，直到 authoritative `assistant_message` 完成 Scene finalization 和未 Ack tail 的 history handoff；失败 request、interrupt、session end 与 run-end fallback 才可提前关闭。禁止再以 request-finished 替代最终消息，否则最后一段 coalesced assistant 内容可能留在 active viewport 而没有进入 native history。
 
 ## 0. 文档定位与结论
