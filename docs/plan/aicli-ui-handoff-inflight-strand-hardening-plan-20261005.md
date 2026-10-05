@@ -524,8 +524,23 @@ P0.2 必须补观测的原因。
 另（既有 bug，A/B 证实在 HEAD 上未打任何补丁即可复现，非本轮引入）：
 `TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameWrite` 约
 1/4 概率出现 finalized resident tail 双写（终态 scrollback + 可见屏各一份；现场物理
-转储 `E:\tmp\async-final-dupe.txt`，ledger 转储显示 transcript 移交全部 acked 而 resident
-帧仍保留同一批行）。已作为独立有界任务在隔离工作区定位修复中。
+转储 `E:\tmp\async-final-dupe.txt`）。定点调查（独立子代理）结论与处置：
+
+- 机制：blocked frame write 期间 finalize，被阻塞批次以失败/隔离收尾；finalized 计划
+  只按 Acked 证明计算 skipRows，未把"可能已落盘但无法证明"的 Active 投递
+  （Failed / Abandoned / 部分写入 Invalidated）计入前缀 → 从 row 0 重铸 transcript
+  提交，已写出的行被重放。
+- 尝试修复（WIP 快照 `E:\tmp\resident-tail-wip.patch` 与
+  `E:\tmp\resident-tail-wip-worktree.patch`，未入库）：(i) 前缀证明覆盖 unproven
+  Active 投递；(ii) Active 在飞失效/部分写失败时作废同 cell 未交付的 transcript
+  重叠提交。**验证被拒**：`-count=40` 下重复消失但出现丢行（count=0）——Pending
+  transcript 提交的字节从未落盘，作废它们必然丢内容；no-replay 语义下 ledger/规划层
+  无法区分"已落盘/未落盘"，因此不能在 ledger/规划层决定是否发射。已回退到 P2-1
+  提交 a8746e81，工作区干净。
+- 下一步方向（**在 executor 帧/移交边界，而非 ledger**）：让"被阻塞的 resident 帧写"
+  的结果确定化——写成功则帧与移交互斥（移交后不得再把同一批行留在可见区）；写失败/
+  中止则走 source-backed 恢复重绘，保证同一行恰好一次；ledger 只记录已证明的事实的
+  身份。验收闸门：该用例 `-count≥40` 全绿 + `-race` + ui 宽回归。
 
 ## 6. 验证
 
