@@ -541,6 +541,21 @@ P0.2 必须补观测的原因。
   的结果确定化——写成功则帧与移交互斥（移交后不得再把同一批行留在可见区）；写失败/
   中止则走 source-backed 恢复重绘，保证同一行恰好一次；ledger 只记录已证明的事实的
   身份。验收闸门：该用例 `-count≥40` 全绿 + `-race` + ui 宽回归。
+- **已实施（1cace024，executor 帧/移交边界，2026-10-05）**：Active 批次物理写在途
+  （head InFlight、成员 Pending 等待同一次写证明）期间，finalize/全会话 reconcile 不再
+  逐出批次成员——推迟所有权移交，续跑交给 ack/fail 结果：写成功整批 ack，
+  `activeAckedRenderedPrefixRows` 参与 skipRows，只补铸未确认后缀；写失败/中止保持既有
+  unresolved→settle/recovery。同步规划、async worker 结果应用、resume 收尾三个入口同一
+  门槛（`hasInFlightActiveOriginDelivery`）。先红后绿：修复前 `-count=40` 约 3/4 复现
+  marker count=2（SB 01..23 与重放 01..20 双份），修复后 `-count=40` 与
+  `-count=40 -race` 全绿；物理终态 SB=01..32 + 屏幕=33..40，ledger 无
+  invalidated/unresolved。新增 reducer 级回归
+  `TestFinalizeDefersTranscriptPlanWhileActiveBatchInFlight`（基线上失败：batch head
+  被 invalidated）。宽回归仅剩两处 **A/B 于 1cace024 前后同现的既有失败**（非本修复
+  引入，待独立跟进）：`TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation`
+  稳定失败（~80-95s，missing 1100/1200，`acked=4096` 恰为 P2-1 压缩高水位，符合交接
+  文档 §八.1 的 `compactResolvedIfLarge←ackBatch` 疑点）；`TestTruncatedTranscriptPlanContinuesUntilComplete`
+  间歇失败（converged 387/900）。其余宽组与 commands 生产装配子集 PASS。
 
 ## 6. 验证
 
