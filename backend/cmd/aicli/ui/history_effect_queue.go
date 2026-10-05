@@ -66,7 +66,18 @@ type HistoryEffectQueueState struct {
 	// allows a fresh attempt, so a stalled epoch heals as soon as it can make
 	// progress again.
 	PlanStalled bool
-	ledger      *HistoryCommitLedger
+	// claimSkipsStaleAction / claimRejects* keep reducer-side BeginHistoryCommit
+	// refusals observable. A refusal is correct (the queue is ordered and the
+	// gates own recovery) and must stay harmless to state, but it was completely
+	// silent: a rejected claim and a claim that never arrived produced identical
+	// diagnostics. That is how the 2026-10-05 stranded-InFlight incident stayed
+	// invisible while the ordering guard rejected every later claim.
+	claimSkipsStaleAction  uint64 // action generation != state generation; the reducer never attempts markInFlight
+	claimRejectsOutOfOrder uint64 // an older Pending/InFlight token fences this claim
+	claimRejectsGate       uint64 // frozen / projection unknown / unresolved terminal delivery
+	claimRejectsStale      uint64 // token entry missing, or its commit generation no longer matches
+	claimRejectsInvalid    uint64 // anything else (not pending, invalid commit)
+	ledger                 *HistoryCommitLedger
 	// lastPlanned* memoize the active-cell inputs from the most recent
 	// syncHistoryEffectsForActiveCell pass. Append-only stream updates that
 	// do not move any source boundary (Stable/Enqueued/Acked), resize, or
@@ -252,6 +263,27 @@ func (s *HistoryEffectQueueState) recordTranscriptPlanTiming(duration time.Durat
 	}
 }
 
+// recordClaimRefusal classifies one refused BeginHistoryCommit claim. It is a
+// pure counter update: the refusal must never raise recovery here (see the
+// reducer's BeginHistoryCommit comment), but it must remain observable.
+func (s *HistoryEffectQueueState) recordClaimRefusal(err error) {
+	if s == nil || err == nil {
+		return
+	}
+	switch {
+	case errors.Is(err, ErrHistoryCommitOutOfOrder):
+		s.claimRejectsOutOfOrder++
+	case errors.Is(err, ErrHistoryCommitFrozen),
+		errors.Is(err, ErrHistoryProjectionUnknown),
+		errors.Is(err, ErrHistoryCommitRecoveryPending):
+		s.claimRejectsGate++
+	case errors.Is(err, ErrStaleLayoutGeneration):
+		s.claimRejectsStale++
+	default:
+		s.claimRejectsInvalid++
+	}
+}
+
 // HistoryEffectQueueSummary is a payload-free projection of the queue's
 // delivery lifecycle for diagnostics.
 type HistoryEffectQueueSummary struct {
@@ -281,6 +313,14 @@ type HistoryEffectQueueSummary struct {
 	PlanCount  uint64
 	LastPlanMs int64
 	MaxPlanMs  int64
+	// Claim-refusal counters mirror the same reducer-side events as the private
+	// fields above; they are queue scalars, not ledger-derived (copied like the
+	// plan timing in Summary).
+	ClaimSkipsStaleAction  uint64
+	ClaimRejectsOutOfOrder uint64
+	ClaimRejectsGate       uint64
+	ClaimRejectsStale      uint64
+	ClaimRejectsInvalid    uint64
 }
 
 // Summary scans the ledger once and allocates nothing. It replaces the
@@ -291,6 +331,11 @@ func (s HistoryEffectQueueState) Summary() HistoryEffectQueueSummary {
 	summary.PlanCount = s.PlanCount
 	summary.LastPlanMs = s.LastPlanDuration.Milliseconds()
 	summary.MaxPlanMs = s.MaxPlanDuration.Milliseconds()
+	summary.ClaimSkipsStaleAction = s.claimSkipsStaleAction
+	summary.ClaimRejectsOutOfOrder = s.claimRejectsOutOfOrder
+	summary.ClaimRejectsGate = s.claimRejectsGate
+	summary.ClaimRejectsStale = s.claimRejectsStale
+	summary.ClaimRejectsInvalid = s.claimRejectsInvalid
 	if s.ledger == nil {
 		return summary
 	}

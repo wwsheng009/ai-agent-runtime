@@ -1829,3 +1829,53 @@ func TestHistoryCommitWakeNeededForTruncatedPlanContinuation(t *testing.T) {
 		t.Fatal("HistoryProjectionInvalidated did not wake the recovery owner it just armed")
 	}
 }
+
+func TestBeginHistoryCommitRefusalsAreObservable(t *testing.T) {
+	controller := historyDiagnosticFixture(t, 6)
+	base := controller.State()
+	entries := base.HistoryEffects.Entries()
+	if len(entries) < 2 {
+		t.Fatalf("fixture minted %d history commits, need at least 2", len(entries))
+	}
+	first := entries[0].Commit.Token
+	second := entries[1].Commit.Token
+	generation := entries[0].Commit.LayoutGeneration
+	if generation != base.LayoutGeneration {
+		t.Fatalf("fixture generation mismatch: commit=%d state=%d", generation, base.LayoutGeneration)
+	}
+
+	// 1) 动作 generation 已过期：reducer 直接跳过认领（不改变状态），但必须留痕。
+	stale := reduceUIControllerState(base, BeginHistoryCommit{Token: first, LayoutGeneration: generation + 7}, base.Revision+1)
+	if stale.HistoryEffects.claimSkipsStaleAction != 1 {
+		t.Fatalf("stale-action claim skip = %d, want 1", stale.HistoryEffects.claimSkipsStaleAction)
+	}
+	if stale.HistoryEffects.ProjectionUnknown {
+		t.Fatal("a skipped claim must not raise projection recovery")
+	}
+
+	// 2) 越过更老的 pending 认领：排序护栏拒绝，必须留痕且不改变 token 状态。
+	outOfOrder := reduceUIControllerState(base, BeginHistoryCommit{Token: second, LayoutGeneration: generation}, base.Revision+1)
+	if outOfOrder.HistoryEffects.claimRejectsOutOfOrder != 1 {
+		t.Fatalf("out-of-order claim rejections = %d, want 1", outOfOrder.HistoryEffects.claimRejectsOutOfOrder)
+	}
+	if entry, ok := outOfOrder.HistoryEffects.ledger.Entry(second); !ok || entry.State != HistoryCommitPending {
+		t.Fatalf("rejected claim changed token state: %#v", entry)
+	}
+	if summary := outOfOrder.HistoryEffects.Summary(); summary.ClaimRejectsOutOfOrder != 1 {
+		t.Fatalf("Summary lost the out-of-order refusal: %#v", summary)
+	}
+
+	// 3) 冻结门：reducer 归类为 gate 拒绝。
+	frozen := base
+	frozen.HistoryEffects.Frozen = true
+	gated := reduceUIControllerState(frozen, BeginHistoryCommit{Token: first, LayoutGeneration: generation}, base.Revision+1)
+	if gated.HistoryEffects.claimRejectsGate != 1 {
+		t.Fatalf("gate claim rejections = %d, want 1", gated.HistoryEffects.claimRejectsGate)
+	}
+
+	// 4) 不存在/代际不符的 token：归类为 stale 拒绝。
+	missing := reduceUIControllerState(base, BeginHistoryCommit{Token: first + 100000, LayoutGeneration: generation}, base.Revision+1)
+	if missing.HistoryEffects.claimRejectsStale != 1 {
+		t.Fatalf("stale claim rejections = %d, want 1", missing.HistoryEffects.claimRejectsStale)
+	}
+}

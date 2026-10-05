@@ -283,9 +283,14 @@ func reduceUIControllerState(state UIControllerState, action UIAction, revision 
 		// would create an endless recovery/reclaim loop for the same stale token.
 		if a.LayoutGeneration == state.LayoutGeneration {
 			if err := state.HistoryEffects.markInFlight(a.Token, a.LayoutGeneration); err != nil {
-				// A stale claim miss is intentionally ignored; see the comment
-				// above for why marking ProjectionUnknown here would loop.
+				// A stale claim miss is intentionally ignored — see the comment
+				// above for why marking ProjectionUnknown here would loop — but it
+				// must stay observable, or a rejected claim is indistinguishable
+				// from one that never arrived.
+				state.HistoryEffects.recordClaimRefusal(err)
 			}
+		} else {
+			state.HistoryEffects.claimSkipsStaleAction++
 		}
 	case HistoryCommitAcknowledged:
 		// A terminal success is proof for the exact token generation the writer

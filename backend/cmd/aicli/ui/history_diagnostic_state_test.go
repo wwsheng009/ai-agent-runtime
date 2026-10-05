@@ -118,6 +118,12 @@ func assertSummaryMatchesEntryWalk(t *testing.T, state UIControllerState) {
 	want.PlanCount = state.HistoryEffects.PlanCount
 	want.LastPlanMs = state.HistoryEffects.LastPlanDuration.Milliseconds()
 	want.MaxPlanMs = state.HistoryEffects.MaxPlanDuration.Milliseconds()
+	// claim-refusal counters（观测）与规划耗时一样不是 ledger 遍历结果，按原值搬运。
+	want.ClaimSkipsStaleAction = state.HistoryEffects.claimSkipsStaleAction
+	want.ClaimRejectsOutOfOrder = state.HistoryEffects.claimRejectsOutOfOrder
+	want.ClaimRejectsGate = state.HistoryEffects.claimRejectsGate
+	want.ClaimRejectsStale = state.HistoryEffects.claimRejectsStale
+	want.ClaimRejectsInvalid = state.HistoryEffects.claimRejectsInvalid
 	for _, entry := range entries {
 		switch entry.State {
 		case HistoryCommitPending:

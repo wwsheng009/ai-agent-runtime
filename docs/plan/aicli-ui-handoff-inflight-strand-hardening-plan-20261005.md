@@ -209,7 +209,11 @@ P0.2 必须补观测的原因。
 3. D5 观测（已实施）：`HistoryEffectQueueSummary` 增加
    `OldestInFlightToken/OldestInFlightGeneration`，`/debug` 摘要输出
    `oldest-inflight-token/gen`，使 "in-flight generation 落后于 layout generation" 的
-   stranded 签名可被直接读出（此前只有计数，无法与健康写入区分）。
+   stranded 签名可被直接读出（此前只有计数，无法与健康写入区分）。reducer 侧
+   `BeginHistoryCommit` 的拒绝/跳过也全部留痕：`ClaimSkipsStaleAction`（动作 generation
+   过期，未尝试认领）与 `ClaimRejectsOutOfOrder/Gate/Stale/Invalid`，经 Summary 输出到
+   `/debug`（`claim-skips-stale-action=… claim-rejects-*=…`）。此前这些拒绝完全静默——
+   stranded InFlight 事故中排序护栏拒绝了每一次后续认领，却没有任何痕迹。
 
 ### P1 实施记录（2026-10-05）
 
@@ -223,10 +227,17 @@ P0.2 必须补观测的原因。
     invalidated→唤醒 recovery）。
   - `backend/cmd/aicli/ui/history_effect_queue.go`、`history_diagnostic_state_test.go`：
     Summary 增加 oldest in-flight token/generation，并同步逐条遍历等价性断言。
+  - `backend/cmd/aicli/ui/history_effect_queue.go`、`controller_state.go`：新增
+    claim 拒绝/跳过计数与 `recordClaimRefusal` 分类（out-of-order / gate / stale /
+    invalid / stale-action），`Summary()` 暴露 5 个计数。
+  - `backend/cmd/aicli/ui/controller_test.go`：新增
+    `TestBeginHistoryCommitRefusalsAreObservable`（4 类拒绝/跳过路径 + Summary 断言；
+    并锁定"拒绝不改变 token 状态、不触发 ProjectionUnknown"）。
   - `backend/cmd/aicli/commands/chat_debug_document.go`：debug 摘要追加
-    `oldest-inflight-token/oldest-inflight-gen`。
+    `oldest-inflight-token/oldest-inflight-gen` 与 5 个 claim 拒绝计数。
 - 验证：
   - `go test ./cmd/aicli/ui/ -run 'TestHistoryCommitWakeNeeded|TestTerminalSessionExecutor' -count=1` → ok；
+  - `go test ./cmd/aicli/ui/ -run 'TestBeginHistoryCommitRefusalsAreObservable|TestHistoryEffectQueueSummary|TestHistoryCommitWakeNeeded|TestTerminalSessionExecutor' -count=1` → ok；
   - `go test ./cmd/aicli/ui/ -run 'TestHistoryEffectQueueSummary|TestHistoryDiagnostic|TestHistoryCommitWakeNeeded' -count=1` → ok；
   - `go test ./cmd/aicli/commands/ -run 'TestHistoryEffectDiagnosticsExposeScrollbackReplayGrant' -count=1` → ok；
   - 涉及文件 `gofmt -l` 均无输出。
