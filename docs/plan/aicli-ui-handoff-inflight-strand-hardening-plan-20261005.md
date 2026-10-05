@@ -268,6 +268,25 @@ P0.2 必须补观测的原因。
   - `go test ./cmd/aicli/commands/ -run 'TestHistoryEffectDiagnosticsExposeScrollbackReplayGrant' -count=1` → ok；
   - 涉及文件 `gofmt -l` 均无输出。
 
+### P1.1b 实施进展（2026-10-05）
+
+- **Stage 1（已实施）**：`backend/cmd/aicli/ui/app_screen_layout.go` 新增
+  `layoutTranscriptScreenRowsFrom`（startRow 续跑，返回 `(rows, complete, nextRow)`）与
+  `layoutResumeRow`（截断点对齐 cell 边界：结构化/折叠 cell 已整块 append 时前移游标、
+  不跨 gap）；`layoutTranscriptScreenRowsWithin` 退化为 startRow=0 的代理，输出逐字节
+  不变。新增 `TestLayoutTranscriptScreenRowsFromResumesAtCellBoundaries`：过期 deadline 下
+  逐轮续跑的行序列与一次性全量布局逐行一致（多轮、游标严格前进、游标恒在 cell 边界）。
+  验证：`go test ./cmd/aicli/ui/ -run 'TestLayoutTranscriptScreenRowsFromResumesAtCellBoundaries|TestLayoutTranscriptTailScreenRowsMatchesFullLayout|TestHistory|TestTerminalSessionExecutor' -count=1` → ok。
+- **Stage 2（待实施）**：`planEligibleHistoryCommitsWithinFrom`（全局 displayStart/
+  firstVisible、wholeCell DisplayRange 全局化）+ 并集/去重属性测试。Stage 2 必须同时落地
+  §5 P1.1b 第 5 条的 whole-cell fallback 判据修正（cell 边界截断后"完整包含即可"，
+  替代 `complete` 条件），否则不可映射 plain cell 在续跑前缀永久缺失。
+- **Stage 3（待实施）**：游标生命周期接入 `syncHistoryEffectsForTranscriptWithin` /
+  `continueTruncatedHistoryPlan`（末尾热缓存全量 membership pass + 清游标 + record memo）、
+  `invalidateTranscriptPlanMemo` 清游标、`activeAckPlanVersion` 作用域设计。
+- 既有观察（未定位，与本改动无因果关系证据）：`TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameWrite`
+  在一次大测试组运行中偶发 `marker count=2`，单跑与整组复跑均通过；先记录，后续排查。
+
 ### P2（结构性）
 
 1. ledger 终态压缩（按 epoch 剪枝/聚合 acked 条目，保留 source 身份去重的最小集）。

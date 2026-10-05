@@ -206,16 +206,40 @@ const layoutBudgetCheckRows = 4096
 // reduce 会重试。这条路径让 historyCommitPlanningBudget 真正覆盖布局本身 ——
 // 此前预算只在 commit 循环里建立，昂贵的布局在预算建立之前就已经跑完了。
 func layoutTranscriptScreenRowsWithin(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, deadline time.Time, theme style.ThemeContext) ([]AppScreenRow, bool) {
-	if len(rows) == 0 {
-		return nil, true
+	result, complete, _ := layoutTranscriptScreenRowsFrom(rows, cells, mutable, width, deadline, theme, 0)
+	return result, complete
+}
+
+// layoutTranscriptScreenRowsFrom 是 layoutTranscriptScreenRowsWithin 的续跑
+// 形式：从语义行 startRow 开始布局，返回本轮结果、是否走到末尾，以及下一轮
+// 续跑应使用的语义行下标 nextRow。startRow 必须落在 cell 边界（gap 行，或某个
+// cell 非 gap 连续段的第一行），由调用方（规划游标）保证——与
+// alignTranscriptCellStart 的约束同源：布局缓存按 cell 内容寻址，从 cell 中部
+// 开始会把残缺行集合写进该 cell 的缓存条目。
+//
+// 截断点必须对齐到 cell 边界：结构化/折叠 cell 在其首行一次性 append 整块结果
+// （renderedStructured），而 walk 下标仍逐行前进，预算采样可能命中在该 cell 的
+// 中部；此时结果里已含整块 cell，nextRow 必须前移到该 cell 语义行的末尾，否则
+// 下一轮会重复 append 同一 cell。plain cell 由内层循环整段消费，外层采样天然
+// 只在其起点命中；gap 行自身即边界，不得跨过（它携带后继 cell 的分组）。
+//
+// startRow 越界视为已经走到末尾（续跑方可能带着覆盖全部行的游标进来），返回
+// complete=true。nextRow == startRow 只可能来自非法输入（startRow 落在 cell
+// 中部），调用方应将其视为 stalled，绝不能当作"没有历史"。
+func layoutTranscriptScreenRowsFrom(rows []scene.LayoutRow, cells map[scene.CellID]scene.TranscriptCell, mutable map[scene.CellID]struct{}, width int, deadline time.Time, theme style.ThemeContext, startRow int) ([]AppScreenRow, bool, int) {
+	if startRow < 0 {
+		startRow = 0
 	}
-	result := make([]AppScreenRow, 0, len(rows))
+	if len(rows) == 0 || startRow >= len(rows) {
+		return nil, true, len(rows)
+	}
+	result := make([]AppScreenRow, 0, len(rows)-startRow)
 	renderedStructured := make(map[scene.CellID]struct{})
 	fp := themeFingerprint(theme)
 	cache := sharedCellRows
 	// 最近一次折叠：首屏只有它带 Ctrl+T 提示，pager 初始帧也只有它展开。
 	foldTarget := toolFoldTargetRows(rows, cells, mutable)
-	for index := 0; index < len(rows); index++ {
+	for index := startRow; index < len(rows); index++ {
 		// 预算绝不能把结果截断成**空前缀**：规划器把「行集为空」当作「没有可交付
 		// 历史」（planEligibleHistoryCommits 在 len(rows)==0 时直接返回），而 resume
 		// 会话里 LayoutTranscript + fold target 这两段前置工作本身就可能吃掉整个
@@ -225,7 +249,7 @@ func layoutTranscriptScreenRowsWithin(rows []scene.LayoutRow, cells map[scene.Ce
 		// 与「没有历史」可区分，也才能让重试严格前进。
 		if !deadline.IsZero() && len(result) > 0 &&
 			index%layoutBudgetCheckRows == 0 && time.Now().After(deadline) {
-			return result, false
+			return result, false, layoutResumeRow(rows, index, renderedStructured)
 		}
 		row := rows[index]
 		if _, excluded := mutable[row.CellID]; excluded {
@@ -297,7 +321,22 @@ func layoutTranscriptScreenRowsWithin(rows []scene.LayoutRow, cells map[scene.Ce
 		result = appendCachedCellRows(result, row.CellID, cellRows)
 		index-- // 补偿 for 步进：index 已指向下一个不同 cell 或末尾
 	}
-	return result, true
+	return result, true, len(rows)
+}
+
+// layoutResumeRow 把截断采样点对齐到 cell 边界。当前行所属 cell 已经整块 append
+// 过（结构化/折叠路径）时跳过其剩余非 gap 语义行；否则该 cell 尚未开始，原样
+// 返回。gap 行永远原样返回：它属于后继 cell，跨过它会丢失后继 cell 的起始语义。
+func layoutResumeRow(rows []scene.LayoutRow, index int, renderedStructured map[scene.CellID]struct{}) int {
+	cellID := rows[index].CellID
+	if _, rendered := renderedStructured[cellID]; !rendered {
+		return index
+	}
+	next := index
+	for next < len(rows) && rows[next].CellID == cellID && rows[next].Gap == 0 {
+		next++
+	}
+	return next
 }
 
 // layoutTranscriptTailScreenRows 只布局 transcript 的尾部，返回结果与「全量布局
