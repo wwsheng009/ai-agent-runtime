@@ -5690,6 +5690,14 @@ func (h *Handler) getExecutionSupervisor() *supervision.ExecutionSupervisor {
 			return seq, err
 		})
 	}
+	// 2026-10-04 现场缺口（CLI 同源修复）：扫描产出的 lifecycle wake
+	//（progress_stalled / execution_timed_out 等）没有状态转换点可依赖，父会话
+	// 一旦空闲 wake 即滞留。把"新 wake 已排"这一边沿变成一次异步 drain 尝试；
+	// Runnable / 预算门控仍在 MaybeWakeParent 内，忙或超限时保持 durable。
+	// 必须在 RunLoop 启动前装配，避免扫描与赋值的数据竞争。
+	supervisor.WakeReady = func(_ context.Context, rootScopeID, parentSessionID, _ string) {
+		h.requestSupervisedWakeDrain(rootScopeID, parentSessionID)
+	}
 	h.executionSupervisor = supervisor
 	ctx, cancel := context.WithCancel(context.Background())
 	h.executionSupervisorStop = cancel
