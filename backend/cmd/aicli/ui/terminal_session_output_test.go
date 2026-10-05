@@ -280,3 +280,29 @@ func TestTerminalSessionWritePromptEditorControl(t *testing.T) {
 		t.Fatalf("empty control sequence must be a no-op, got %v", err)
 	}
 }
+
+// TestTerminalSessionWriteTerminalTitleAndBell：标题/铃控制序列以
+// terminal_title / bell kind 经 gateway 提交，与帧写共享串行化通道。
+func TestTerminalSessionWriteTerminalTitleAndBell(t *testing.T) {
+	fx := newOutputTestFixture(t)
+	session := NewTerminalSessionWithOutput(fx.Gateway)
+	const title = "\x1b]0;unified-title\x07"
+	if err := session.WriteTerminalTitle(title); err != nil {
+		t.Fatalf("WriteTerminalTitle: %v", err)
+	}
+	if err := session.WriteTerminalBell("\a"); err != nil {
+		t.Fatalf("WriteTerminalBell: %v", err)
+	}
+	var sawTitle, sawBell bool
+	for _, batch := range fx.Sink.SnapshotBatches() {
+		switch batch.Kind {
+		case outputpkg.TransactionTerminalTitle:
+			sawTitle = string(batch.Bytes) == title
+		case outputpkg.TransactionBell:
+			sawBell = string(batch.Bytes) == "\a"
+		}
+	}
+	if !sawTitle || !sawBell {
+		t.Fatalf("control batches not observed: title=%t bell=%t %#v", sawTitle, sawBell, fx.Sink.SnapshotBatches())
+	}
+}

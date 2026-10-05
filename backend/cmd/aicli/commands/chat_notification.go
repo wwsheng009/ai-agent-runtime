@@ -608,7 +608,13 @@ func initializeChatTitleNotifier(session *ChatSession) {
 		return
 	}
 	options := resolveChatTitleOptions(session.Config)
-	output := ui.NewTerminalTitleWriter(terminal, os.Stdout)
+	output := ui.NewTerminalTitleWriter(terminal, chatControlSequenceWriter{
+		session: session,
+		raw:     os.Stdout,
+		submit: func(coordinator *chatInteractionCoordinator, sequence string) bool {
+			return coordinator.WriteTerminalTitle(sequence)
+		},
+	})
 	session.TitleNotifier = newChatTitleNotifier(output, options, session)
 }
 

@@ -5347,6 +5347,39 @@ func (c *chatInteractionCoordinator) WritePromptEditorControl(sequence string) b
 	return session.WritePromptEditorControl(sequence) == nil
 }
 
+// WriteTerminalTitle routes one OSC terminal-title sequence through the
+// unified terminal session when it is the primary writer. It returns false
+// when no unified session exists so the caller keeps its raw legacy fallback.
+func (c *chatInteractionCoordinator) WriteTerminalTitle(sequence string) bool {
+	if c == nil || sequence == "" {
+		return false
+	}
+	c.mu.Lock()
+	session := c.terminalSession
+	unified := c.unifiedRenderer
+	c.mu.Unlock()
+	if !unified || session == nil {
+		return false
+	}
+	return session.WriteTerminalTitle(sequence) == nil
+}
+
+// WriteTerminalBell routes the terminal bell through the unified terminal
+// session when it is the primary writer; false = raw legacy fallback.
+func (c *chatInteractionCoordinator) WriteTerminalBell(sequence string) bool {
+	if c == nil || sequence == "" {
+		return false
+	}
+	c.mu.Lock()
+	session := c.terminalSession
+	unified := c.unifiedRenderer
+	c.mu.Unlock()
+	if !unified || session == nil {
+		return false
+	}
+	return session.WriteTerminalBell(sequence) == nil
+}
+
 func (c *chatInteractionCoordinator) DebugSummary() string {
 	if c == nil {
 		return ""

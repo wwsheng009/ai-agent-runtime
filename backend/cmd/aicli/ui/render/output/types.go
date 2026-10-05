@@ -28,6 +28,7 @@ const (
 	TransactionAlternateExit   TransactionKind = "alternate_exit"
 	TransactionPromptEditor    TransactionKind = "prompt_editor"
 	TransactionBell            TransactionKind = "bell"
+	TransactionTerminalTitle   TransactionKind = "terminal_title"
 	TransactionContextBarrier  TransactionKind = "terminal_context"
 	TransactionShutdownCleanup TransactionKind = "shutdown_cleanup"
 )
@@ -53,6 +54,7 @@ func validTransactionKind(k TransactionKind) bool {
 		TransactionAlternateExit,
 		TransactionPromptEditor,
 		TransactionBell,
+		TransactionTerminalTitle,
 		TransactionContextBarrier,
 		TransactionShutdownCleanup:
 		return true

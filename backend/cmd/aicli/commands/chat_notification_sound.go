@@ -165,7 +165,13 @@ func initializeChatSoundNotifier(session *ChatSession) {
 	if terminal == nil {
 		return
 	}
-	output := ui.NewTerminalBellWriter(terminal, os.Stdout)
+	output := ui.NewTerminalBellWriter(terminal, chatControlSequenceWriter{
+		session: session,
+		raw:     os.Stdout,
+		submit: func(coordinator *chatInteractionCoordinator, sequence string) bool {
+			return coordinator.WriteTerminalBell(sequence)
+		},
+	})
 	session.SoundNotifier = newChatSoundNotifier(output, resolveChatSoundOptions(session.Config))
 }
 

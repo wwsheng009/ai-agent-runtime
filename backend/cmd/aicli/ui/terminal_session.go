@@ -1909,22 +1909,39 @@ func (s *TerminalSession) writeTerminalBytesKindLocked(kind outputpkg.Transactio
 	return result
 }
 
-// WritePromptEditorControl emits editor-owned terminal mode sequences
-// (bracketed paste / focus change / cursor visibility) as one
-// TransactionPromptEditor batch. It takes the same transactionMu as frame and
-// history writes, so control bytes can never interleave the bytes of an
-// in-flight transaction; unified hosts claim the editor's mode switches
-// through LineEditorHooks.OnTerminalControl.
-func (s *TerminalSession) WritePromptEditorControl(sequence string) error {
+// WriteTerminalControl emits one non-frame control sequence (prompt-editor
+// modes / terminal title / bell) as a single transaction of the given kind.
+// It takes the same transactionMu as frame and history writes, so control
+// bytes can never interleave the bytes of an in-flight transaction.
+func (s *TerminalSession) WriteTerminalControl(kind outputpkg.TransactionKind, sequence string) error {
 	if s == nil || sequence == "" {
 		return nil
 	}
 	s.transactionMu.Lock()
 	defer s.transactionMu.Unlock()
 	s.mu.Lock()
-	result := s.writeTerminalBytesKindLocked(outputpkg.TransactionPromptEditor, sequence, s.geometry)
+	result := s.writeTerminalBytesKindLocked(kind, sequence, s.geometry)
 	s.mu.Unlock()
 	return result.Err
+}
+
+// WritePromptEditorControl emits editor-owned terminal mode sequences
+// (bracketed paste / focus change / cursor visibility); unified hosts claim
+// the editor's mode switches through LineEditorHooks.OnTerminalControl.
+func (s *TerminalSession) WritePromptEditorControl(sequence string) error {
+	return s.WriteTerminalControl(outputpkg.TransactionPromptEditor, sequence)
+}
+
+// WriteTerminalTitle emits one OSC terminal-title sequence through the same
+// serialized control channel.
+func (s *TerminalSession) WriteTerminalTitle(sequence string) error {
+	return s.WriteTerminalControl(outputpkg.TransactionTerminalTitle, sequence)
+}
+
+// WriteTerminalBell emits the terminal bell through the same serialized
+// control channel.
+func (s *TerminalSession) WriteTerminalBell(sequence string) error {
+	return s.WriteTerminalControl(outputpkg.TransactionBell, sequence)
 }
 
 // submitWithPortLocked 提交一笔 intent 并消费 primary receipt。receipt 到
