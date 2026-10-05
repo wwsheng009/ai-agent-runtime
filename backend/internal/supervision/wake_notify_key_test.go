@@ -28,6 +28,24 @@ func TestDeriveNotifyKeyIsStableAndIdentityScoped(t *testing.T) {
 		require.NotEqual(t, base, other, "%s must change the key", name)
 	}
 
+	// Family separation (2026-10-05 field regression): the parked-parent
+	// feedback sweep and the settlement wake for the same turn must not share
+	// an identity, or the delivered feedback key silently suppresses the
+	// settlement wake; successive deltas and the no-progress escalation each
+	// need their own identity too.
+	require.NotEqual(t,
+		DeriveNotifyKey("turn-1", "", WakeEventLifecycle, 0),
+		DeriveNotifyKey("turn-1", "", WakeEventWaitFeedback, 0),
+		"feedback and settlement must be different families")
+	require.NotEqual(t,
+		DeriveNotifyKey("turn-1", "", WakeEventWaitFeedback, 1),
+		DeriveNotifyKey("turn-1", "", WakeEventWaitFeedback, 2),
+		"successive feedback deltas must stay deliverable")
+	require.NotEqual(t,
+		DeriveNotifyKey("turn-1", "", WakeEventWaitFeedback, 1),
+		DeriveNotifyKey("turn-1", "", WakeEventWaitFeedbackSilence, 1),
+		"the no-progress escalation is its own episode family")
+
 	// A missing kind degrades to the lifecycle family instead of collapsing
 	// all untyped events onto one key.
 	require.Equal(t,

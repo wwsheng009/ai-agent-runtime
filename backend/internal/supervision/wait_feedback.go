@@ -133,6 +133,27 @@ func (t *WaitFeedbackTracker) Mark(key string, progress int, now time.Time) {
 	entry.lastAt = now
 }
 
+// LastTerminal returns the terminal count recorded by the last Mark for key
+// (0 when the tracker has no entry). The scheduled wake keeps its identity
+// stable across replays of one decision while a later delta or the no-progress
+// escalation gets a fresh identity.
+func (t *WaitFeedbackTracker) LastTerminal(key string) int {
+	if t == nil {
+		return 0
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	entry := t.entries[key]
+	if entry == nil {
+		return 0
+	}
+	return entry.lastTerminal
+}
+
 // Reset clears the cadence for one key (turn settled, interrupted, or the
 // session started a new turn).
 func (t *WaitFeedbackTracker) Reset(key string) {
@@ -203,12 +224,22 @@ func ScheduleWaitFeedbackWake(
 		if tracker != nil && !tracker.Due(key, progress.Terminal, record.ParkedAt, now) {
 			continue
 		}
+		// 事件身份：反馈家族必须与结算/lifecycle 家族可区分，否则同一个 turn 上
+		// 先投递的反馈 wake 会把后到的结算 wake 按"事件重放"静默抑制
+		//（2026-10-05 真机回归：5 分钟子代理完成时父会话正在反馈 episode 里，
+		// 完成结果再也没有被汇报）。EventSeq 取 terminal count，使连续 delta
+		// 各自可投递；重放同一判定仍是同一 key，保持幂等。
+		eventKind := WakeEventWaitFeedback
+		if lastTerminal := tracker.LastTerminal(key); progress.Terminal <= lastTerminal {
+			eventKind = WakeEventWaitFeedbackSilence
+		}
 		if _, err := scheduler.ScheduleWake(ctx, WakeRequest{
 			RootScopeID:           rootScopeID,
 			TargetParentSessionID: parentSessionID,
 			WakeReason:            WakeReasonWaitFeedback,
 			TurnID:                record.TurnID,
-			EventKind:             WakeEventLifecycle,
+			EventKind:             eventKind,
+			EventSeq:              int64(progress.Terminal),
 		}); err != nil {
 			return false, err
 		}

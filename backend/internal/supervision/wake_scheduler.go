@@ -55,6 +55,20 @@ const (
 	// WakeEventApproval marks an approval request that gates a child; it is
 	// not bounded by the progress budget (doc 6.14 / EC-A4).
 	WakeEventApproval = "approval"
+	// WakeEventWaitFeedback marks a parked-parent feedback delta (the parent is
+	// still waiting and new terminal progress arrived). Like every family it is
+	// part of notify_key: sharing the lifecycle identity with the settlement
+	// wake of the same turn made the later settlement wake look like an event
+	// replay and it was silently suppressed (2026-10-05 field regression — a
+	// 5-minute child finished while the parent was inside the feedback episode
+	// and its completion was never reported). EventSeq carries the terminal
+	// count so successive deltas stay deliverable while a replayed decision
+	// keeps the same key.
+	WakeEventWaitFeedback = "wait_feedback"
+	// WakeEventWaitFeedbackSilence marks the no-progress escalation of the same
+	// sweep (one per plateau): a separate family so it can follow a delivered
+	// delta that carried the same terminal count.
+	WakeEventWaitFeedbackSilence = "wait_feedback_silence"
 	// WakeEventLifecycle is the legacy lifecycle family (coalesced by dedup
 	// key). Wakes that carry no structured identity keep this classification
 	// implicitly by leaving EventKind empty.

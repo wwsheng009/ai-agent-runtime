@@ -107,6 +107,35 @@ func TestScheduleWaitFeedbackWakeOnlyWhilePending(t *testing.T) {
 	scheduled, err = ScheduleWaitFeedbackWake(ctx, batches, nil, teams, scheduler, tracker, "parent-1", "parent-1")
 	require.NoError(t, err)
 	require.False(t, scheduled, "the terminal edge owns that wake; the fallback must not duplicate it")
+
+	// 2026-10-05 真机回归：反馈 wake 投递后，同一个 turn 的结算 wake 曾被
+	// lifecycle 家族身份当成"事件重放"静默抑制，长任务完成再也没有被汇报。
+	// 反馈 wake 必须携带自己的事件家族；投递后结算 wake 仍要能排入。
+	require.Equal(t, WakeEventWaitFeedbackSilence, wakes[0].EventKind,
+		"a no-progress first decision carries the feedback family, not lifecycle")
+	require.EqualValues(t, 0, wakes[0].EventSeq)
+	require.NoError(t, store.MarkWakeDelivered(ctx, WakeDelivered{
+		NotifyKey:             wakes[0].NotifyKey,
+		RootScopeID:           "parent-1",
+		TargetParentSessionID: "parent-1",
+		WakeID:                wakes[0].WakeID,
+		TurnID:                wakes[0].TurnID,
+		EventKind:             wakes[0].EventKind,
+		EventSeq:              wakes[0].EventSeq,
+		DeliveredBy:           "test",
+	}))
+	settle, err := scheduler.ScheduleWake(ctx, WakeRequest{
+		RootScopeID:           "parent-1",
+		TargetParentSessionID: "parent-1",
+		WakeReason:            WakeReasonObligationSettled,
+		TurnID:                "turn-wait",
+		EventKind:             WakeEventLifecycle,
+	})
+	require.NoError(t, err)
+	require.False(t, settle.Suppressed,
+		"the settlement wake must survive a delivered feedback wake on the same turn")
+	require.NotEmpty(t, settle.NotifyKey)
+	require.NotEqual(t, wakes[0].NotifyKey, settle.NotifyKey)
 }
 
 // TestWakeConsumer_WaitFeedbackWakeDeliversRollup pins the parked-parent twin of
