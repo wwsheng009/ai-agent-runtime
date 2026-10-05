@@ -25,10 +25,10 @@ func newClassifyTestBridge(t *testing.T, sessionID string, mode chatEventClassif
 // deferredQueueSlotTypes snapshots the overflow queue's event types in FIFO
 // order.
 func deferredQueueSlotTypes(bridge *chatRuntimeEventBridge) []string {
-	bridge.deferredMu.Lock()
-	defer bridge.deferredMu.Unlock()
-	types := make([]string, 0, len(bridge.deferredQueue))
-	for _, slot := range bridge.deferredQueue {
+	bridge.streamMu.Lock()
+	defer bridge.streamMu.Unlock()
+	types := make([]string, 0, len(bridge.backlog))
+	for _, slot := range bridge.backlog {
 		if slot == nil {
 			continue
 		}
@@ -158,21 +158,16 @@ func TestChatRuntimeEvents_CoalescesUsageAndStatusInDeferredQueue(t *testing.T) 
 		}, 1), "dynamic status %d", i)
 	}
 
-	bridge.deferredMu.Lock()
-	slots := append([]*chatRuntimeQueuedEvent(nil), bridge.deferredQueue...)
-	merged := bridge.deferredMerged
-	indexSize := len(bridge.deferredIndex)
+	bridge.streamMu.Lock()
+	slots := append([]*chatRuntimeQueuedEvent(nil), bridge.backlog...)
+	merged := bridge.backlogMerged
+	indexSize := len(bridge.backlogIndex)
 	newest := make([]runtimeevents.Event, 0, len(slots))
 	for _, slot := range slots {
-		// 在途槽位把"投递中"窗口里到达的最新值挂在 pending 上（§6.1.3），
-		// 断言必须同时覆盖两者，避免依赖 worker 的调度时机。
-		if slot.hasPending {
-			newest = append(newest, slot.pendingEvent)
-			continue
-		}
+		// 单一有序车道：投递在 streamMu 内原子完成，槽位永远携带最新值。
 		newest = append(newest, slot.event)
 	}
-	bridge.deferredMu.Unlock()
+	bridge.streamMu.Unlock()
 
 	require.Len(t, slots, 2, "usage + dynamic status must each hold exactly one slot")
 	require.Equal(t, uint64(3), merged, "3 of the 5 events must have been merged in place")
@@ -190,43 +185,36 @@ func TestChatRuntimeEvents_CoalescesUsageAndStatusInDeferredQueue(t *testing.T) 
 	require.Zero(t, dropped)
 }
 
-// TestChatRuntimeEvents_InFlightSlotPromotesPendingValue pins the window the
-// race fix (§8.1) introduced: while the deferred worker delivers the head, the
-// slot stays indexed, so a newer same-key value is parked as pending instead of
-// being written into the slot the worker reads outside the lock. The newest
-// value must still be delivered, in order, without opening a second slot.
-func TestChatRuntimeEvents_InFlightSlotPromotesPendingValue(t *testing.T) {
+// TestChatRuntimeEvents_LatestWinsSlotReplacesInPlace covers §6.1.4 under the
+// single ordered backlog: a coalescible family keeps exactly one slot per key
+// (the slot keeps its queue position) and the slot carries the newest value.
+// Delivery reads the slot under streamMu only, so the superseded snapshot is
+// intentionally replaced — never delivered out of order, never a second slot.
+func TestChatRuntimeEvents_LatestWinsSlotReplacesInPlace(t *testing.T) {
 	const sessionID = "classify-in-flight"
 	bridge := newClassifyTestBridge(t, sessionID, chatEventClassifyEnforce)
 
 	require.True(t, bridge.deferRuntimeEvent(usageUpdatedEvent(sessionID, 0), 1))
-	waitForBridgeCondition(t, "the head slot to enter flight", 2*time.Second, func() bool {
-		bridge.deferredMu.Lock()
-		defer bridge.deferredMu.Unlock()
-		return len(bridge.deferredQueue) == 1 && bridge.deferredQueue[0].inFlight
-	})
-
 	require.True(t, bridge.deferRuntimeEvent(usageUpdatedEvent(sessionID, 1), 1),
-		"the newer value must be accepted while the head is in flight")
-	bridge.deferredMu.Lock()
-	require.True(t, bridge.deferredQueue[0].hasPending,
-		"the newer value must be parked, not written into the in-flight slot")
-	require.Equal(t, 1, bridge.deferredQueue[0].pendingEvent.Payload["seq"])
-	require.Len(t, bridge.deferredQueue, 1,
-		"latest-wins must not open a second slot while the head is in flight")
-	bridge.deferredMu.Unlock()
+		"the newer value must merge into the existing slot")
+	bridge.streamMu.Lock()
+	slotCount := len(bridge.backlog)
+	currentSeq := 0
+	if slotCount == 1 {
+		currentSeq, _ = bridge.backlog[0].event.Payload["seq"].(int)
+	}
+	bridge.streamMu.Unlock()
+	require.Equal(t, 1, slotCount, "latest-wins must keep one slot per key")
+	require.Equal(t, 1, currentSeq, "the slot must carry the newest value")
 
-	// Free the consumer slot: the in-flight value goes out first, then the worker
-	// promotes the pending value in place and delivers it.
+	// Free the consumer slot: the merged slot delivers the latest value once.
 	<-bridge.eventQueue
-	for want := 0; want < 2; want++ {
-		select {
-		case queued := <-bridge.eventQueue:
-			require.Equal(t, runtimeobserve.EventUsageUpdated, queued.event.Type)
-			require.Equal(t, want, queued.event.Payload["seq"], "delivery %d", want)
-		case <-time.After(5 * time.Second):
-			t.Fatalf("delivery %d never reached the bounded queue", want)
-		}
+	select {
+	case queued := <-bridge.eventQueue:
+		require.Equal(t, runtimeobserve.EventUsageUpdated, queued.event.Type)
+		require.Equal(t, 1, queued.event.Payload["seq"], "the latest value is delivered")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the merged value never reached the bounded queue")
 	}
 	waitForBridgeCondition(t, "the overflow queue to drain", 2*time.Second, func() bool {
 		return len(deferredQueueSlotTypes(bridge)) == 0
@@ -234,7 +222,7 @@ func TestChatRuntimeEvents_InFlightSlotPromotesPendingValue(t *testing.T) {
 
 	stats := bridge.deferredQueueClassStats()
 	require.Equal(t, uint64(1), stats.Merged, "the newest value must count as a merge")
-	require.Equal(t, 1, stats.PeakPending, "the pending value must reuse the in-flight slot")
+	require.Equal(t, 1, stats.PeakPending, "latest-wins must not open a second slot")
 }
 
 // TestChatRuntimeEvents_EvictsCoalescibleBeforeDroppingOrdered covers §6.1.7
@@ -320,8 +308,9 @@ func TestChatRuntimeEvents_DeferredStatsExposeClassCounters(t *testing.T) {
 	}
 	require.False(t, dropBridge.deferRuntimeEvent(ordered(), 1))
 
-	// A critical event never enters the queue; while the consumer is stalled it
-	// waits in the retry channel and must be accounted for at shutdown.
+	// A critical event is never dropped; with the single ordered backlog it is
+	// retained (beyond the soft cap) behind everything that arrived earlier and
+	// must be accounted for at shutdown.
 	dropBridge.Handle(runtimeevents.Event{
 		Type:      runtimechat.EventToolFinished,
 		SessionID: sessionID + "-drop",
@@ -333,17 +322,23 @@ func TestChatRuntimeEvents_DeferredStatsExposeClassCounters(t *testing.T) {
 	require.Equal(t, uint64(1), stats.DroppedByClass["ordered"])
 	require.Equal(t, uint64(1), stats.DroppedByType["checkpoint_created"])
 	require.Zero(t, stats.DroppedByClass["critical"], "critical events never take the drop path")
-	require.Equal(t, chatRuntimeDeferredEventLimit, stats.PeakPending)
+	require.Equal(t, chatRuntimeDeferredEventLimit+1, stats.PeakPending,
+		"critical events are admitted beyond the soft cap instead of overtaking the backlog")
 	require.EqualValues(t, 1, stats.CriticalPeakPending)
+	require.EqualValues(t, 1, stats.CriticalPending, "the critical event stays retained until delivered")
 
 	require.True(t, dropBridge.recordCriticalShutdownIfPending())
 	stats = dropBridge.deferredQueueClassStats()
 	require.EqualValues(t, 1, stats.CriticalAtShutdown)
 	require.True(t, stats.Degraded, "a shutdown with critical events in flight must mark the bridge degraded")
 
+	retainedCritical := 0
 	for _, typ := range deferredQueueSlotTypes(dropBridge) {
-		require.NotEqual(t, runtimechat.EventToolFinished, typ, "a critical event must not sit in the overflow queue")
+		if typ == runtimechat.EventToolFinished {
+			retainedCritical++
+		}
 	}
+	require.Equal(t, 1, retainedCritical, "the critical event waits in the ordered backlog (no overtake, no loss)")
 }
 
 // TestChatRuntimeEvents_CriticalEventsNeverDropUnderOverflow covers §6.1.7 item
@@ -363,10 +358,10 @@ func TestChatRuntimeEvents_CriticalEventsNeverDropUnderOverflow(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() {
-		bridge.deferredMu.Lock()
-		bridge.deferredQueue = nil
-		bridge.deferredBytes = 0
-		bridge.deferredMu.Unlock()
+		bridge.streamMu.Lock()
+		bridge.backlog = nil
+		bridge.backlogBytes = 0
+		bridge.streamMu.Unlock()
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
 			select {
@@ -374,9 +369,9 @@ func TestChatRuntimeEvents_CriticalEventsNeverDropUnderOverflow(t *testing.T) {
 				continue
 			default:
 			}
-			bridge.deferredMu.Lock()
-			running := bridge.deferredWorkerRunning
-			bridge.deferredMu.Unlock()
+			bridge.streamMu.Lock()
+			running := bridge.streamWorkerRunning
+			bridge.streamMu.Unlock()
 			if !running {
 				return
 			}
@@ -425,9 +420,13 @@ func TestChatRuntimeEvents_CriticalEventsNeverDropUnderOverflow(t *testing.T) {
 	stats := bridge.deferredQueueClassStats()
 	require.Zero(t, stats.DroppedByClass["critical"], "critical events must never be attributed to the drop path")
 	require.EqualValues(t, injectedCritical, stats.CriticalPeakPending)
+	retainedCritical := 0
 	for _, typ := range deferredQueueSlotTypes(bridge) {
-		require.NotEqual(t, eventClassCritical, classifyChatRuntimeEvent(typ), "critical %q must not sit in the overflow queue", typ)
+		if classifyChatRuntimeEvent(typ) == eventClassCritical {
+			retainedCritical++
+		}
 	}
+	require.Positive(t, retainedCritical, "critical events are retained in order, never bypassing the backlog")
 
 	// Release the consumer: every injected critical event must arrive.
 	observedCritical := 0
@@ -439,7 +438,7 @@ func TestChatRuntimeEvents_CriticalEventsNeverDropUnderOverflow(t *testing.T) {
 			}
 		}
 	})
-	waitForBridgeCondition(t, "critical retry channel to drain", 10*time.Second, func() bool {
+	waitForBridgeCondition(t, "critical retention to drain", 10*time.Second, func() bool {
 		return bridge.deferredQueueClassStats().CriticalPending == 0
 	})
 	require.Zero(t, bridge.deferredQueueClassStats().DroppedByClass["critical"])
@@ -458,16 +457,21 @@ func TestChatRuntimeEvents_AssistantTerminalNotDroppedAfterDeltaPurge(t *testing
 		SessionID: sessionID,
 		Payload:   map[string]interface{}{"turn_id": "turn-1", "stream_id": "stream-1", "sequence": 1, "text": "partial text"},
 	}, 1)
-	require.Len(t, bridge.pendingStreams, 1, "the stalled consumer must hold the delta as coalesced backlog")
+	require.Len(t, bridge.backlog, 1, "the stalled consumer must hold the delta as coalesced backlog")
 
 	bridge.Handle(runtimeevents.Event{
 		Type:      runtimechat.EventAssistantMessage,
 		SessionID: sessionID,
 		Payload:   map[string]interface{}{"turn_id": "turn-1", "stream_id": "stream-1", "sequence": 2, "text": "full final text"},
 	})
-	require.Empty(t, bridge.pendingStreams, "the terminal snapshot supersedes the coalesced deltas")
+	// 终态只在道内保留：被它取代的文本 delta 已清理，终态本体排在其后（绝不
+	// 越队到已积压事件之前）。
+	require.Len(t, bridge.backlog, 1, "only the retained terminal remains in the ordered backlog")
+	if bridge.backlog[0] == nil || bridge.backlog[0].event.Type != runtimechat.EventAssistantMessage {
+		t.Fatalf("backlog[0] = %#v, want the retained assistant_message", bridge.backlog[0])
+	}
 
-	// The terminal is waiting in the retry channel; freeing the consumer must
+	// The terminal is retained in the ordered backlog; freeing the consumer must
 	// deliver it (payload intact) instead of losing the turn's text.
 	<-bridge.eventQueue
 	delivered := 0
@@ -493,12 +497,11 @@ func usageUpdatedEvent(sessionID string, seq int) runtimeevents.Event {
 	}
 }
 
-// TestChatRuntimeEvents_CriticalRetryDoesNotEnterDeferredQueue covers §6.1.7
-// item 6 and §6.1.5: a critical event must bypass the overflow FIFO entirely
-// (retry channel instead), the ordered family must keep its relative order
-// while the critical retry overtakes it, and the in-flight counter must fall
-// back to zero once the consumer catches up.
-func TestChatRuntimeEvents_CriticalRetryDoesNotEnterDeferredQueue(t *testing.T) {
+// TestChatRuntimeEvents_CriticalEventsWaitInOrderedBacklog covers §6.1.7 item 6
+// under the single ordered backlog: critical events are never dropped and never
+// overtake earlier retained events. They are admitted beyond the soft cap and
+// delivered strictly after everything that arrived before them.
+func TestChatRuntimeEvents_CriticalEventsWaitInOrderedBacklog(t *testing.T) {
 	const sessionID = "classify-retry"
 	bridge := newClassifyTestBridge(t, sessionID, chatEventClassifyEnforce)
 
@@ -510,8 +513,8 @@ func TestChatRuntimeEvents_CriticalRetryDoesNotEnterDeferredQueue(t *testing.T) 
 		}, 1), "ordered fill %d", i)
 	}
 
-	// Defensive path (deferRuntimeEvent must reroute) and the ordinary Handle
-	// path must both keep the critical event out of the FIFO.
+	// 两条 critical 事件：一条走 deferRuntimeEvent（防御路径），一条走 Handle
+	// 常规路径。二者都必须排到既有积压之后，且不得丢弃。
 	require.True(t, bridge.deferRuntimeEvent(runtimeevents.Event{
 		Type:      runtimechat.EventToolFinished,
 		SessionID: sessionID,
@@ -519,21 +522,25 @@ func TestChatRuntimeEvents_CriticalRetryDoesNotEnterDeferredQueue(t *testing.T) 
 	}, 1))
 	bridge.Handle(runtimeevents.Event{Type: runtimechat.EventSessionEnd, SessionID: sessionID})
 
-	require.Len(t, deferredQueueSlotTypes(bridge), chatRuntimeDeferredEventLimit,
-		"critical events must not grow the deferred queue")
-	for _, typ := range deferredQueueSlotTypes(bridge) {
-		require.NotEqual(t, eventClassCritical, classifyChatRuntimeEvent(typ), "critical %q leaked into the overflow queue", typ)
-	}
+	slots := deferredQueueSlotTypes(bridge)
+	require.Len(t, slots, chatRuntimeDeferredEventLimit+2,
+		"critical events are retained beyond the soft cap (never dropped, never bypassing)")
+	require.Equal(t, runtimechat.EventToolFinished, slots[len(slots)-2])
+	require.Equal(t, runtimechat.EventSessionEnd, slots[len(slots)-1])
 	require.EqualValues(t, 2, bridge.deferredQueueClassStats().CriticalPending,
-		"both critical events must be waiting in the retry channel while the consumer is stalled")
+		"both critical events must be retained in the backlog while the consumer is stalled")
 
 	orderedSeqs := make([]int, 0, chatRuntimeDeferredEventLimit)
 	criticalSeen := 0
+	criticalBeforeOrdered := false
 	drainRuntimeEvents(t, bridge, 30*time.Second, func() bool {
 		return criticalSeen >= 2 && len(orderedSeqs) >= chatRuntimeDeferredEventLimit
 	}, func(queued chatRuntimeQueuedEvent) {
 		switch queued.event.Type {
 		case runtimechat.EventToolFinished, runtimechat.EventSessionEnd:
+			if len(orderedSeqs) < chatRuntimeDeferredEventLimit {
+				criticalBeforeOrdered = true
+			}
 			criticalSeen++
 		case "checkpoint_created":
 			if seq, ok := queued.event.Payload["seq"].(int); ok {
@@ -542,10 +549,11 @@ func TestChatRuntimeEvents_CriticalRetryDoesNotEnterDeferredQueue(t *testing.T) 
 		}
 	})
 
+	require.False(t, criticalBeforeOrdered, "critical events must not overtake earlier retained events")
 	for index, seq := range orderedSeqs {
 		require.Equal(t, index, seq, "ordered events must keep FIFO order (index %d)", index)
 	}
-	waitForBridgeCondition(t, "critical retry channel to drain", 10*time.Second, func() bool {
+	waitForBridgeCondition(t, "critical retention to drain", 10*time.Second, func() bool {
 		return bridge.deferredQueueClassStats().CriticalPending == 0
 	})
 }

@@ -18,15 +18,15 @@ func newDeferredQueueTestBridge(t *testing.T, sessionID string) *chatRuntimeEven
 	bridge.eventQueueByteLimit = 0
 	bridge.eventQueue <- chatRuntimeQueuedEvent{event: runtimeevents.Event{Type: "fill", SessionID: sessionID}, size: 1}
 	t.Cleanup(func() {
-		bridge.deferredMu.Lock()
-		bridge.deferredQueue = nil
-		bridge.deferredBytes = 0
-		bridge.deferredMu.Unlock()
+		bridge.streamMu.Lock()
+		bridge.backlog = nil
+		bridge.backlogBytes = 0
+		bridge.streamMu.Unlock()
 		deadline := time.Now().Add(time.Second)
 		for time.Now().Before(deadline) {
-			bridge.deferredMu.Lock()
-			running := bridge.deferredWorkerRunning
-			bridge.deferredMu.Unlock()
+			bridge.streamMu.Lock()
+			running := bridge.streamWorkerRunning
+			bridge.streamMu.Unlock()
 			if !running {
 				return
 			}
@@ -132,10 +132,10 @@ func TestDeferredRuntimeEventBacklogIsBounded(t *testing.T) {
 	if bridge.deferRuntimeEvent(runtimeevents.Event{Type: runtimechat.EventCheckpointCreated, SessionID: sessionID}, 1) {
 		t.Fatal("deferred backlog accepted an event past its limit")
 	}
-	bridge.deferredMu.Lock()
-	dropped := bridge.deferredDropped
-	backlog := len(bridge.deferredQueue)
-	bridge.deferredMu.Unlock()
+	bridge.streamMu.Lock()
+	dropped := bridge.backlogDropped
+	backlog := len(bridge.backlog)
+	bridge.streamMu.Unlock()
 	if dropped == 0 {
 		t.Fatal("dropping past the deferred backlog limit was not counted")
 	}

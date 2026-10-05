@@ -28,22 +28,24 @@ func TestFlushPendingStreamBoundedRetainsAssistantBacklog(t *testing.T) {
 	bridge.eventQueue <- chatRuntimeQueuedEvent{event: runtimeevents.Event{Type: "fill"}, size: 1}
 	t.Cleanup(func() {
 		bridge.streamMu.Lock()
-		bridge.pendingStreams = nil
-		bridge.pendingStreamsBytes = 0
+		bridge.backlog = nil
+		bridge.backlogBytes = 0
 		bridge.streamMu.Unlock()
 	})
 
 	bridge.streamMu.Lock()
-	bridge.pendingStreams = []chatRuntimeQueuedEvent{{
+	bridge.backlog = []*chatRuntimeQueuedEvent{{
 		event: runtimeevents.Event{
 			Type:    runtimechat.EventAssistantDelta,
 			Payload: map[string]interface{}{"delta": "tail"},
 		},
 		size: 8,
 	}}
-	bridge.pendingStreamsBytes = 8
-	bridge.flushPendingStreamBoundedLocked(time.Nanosecond)
-	remaining := len(bridge.pendingStreams)
+	bridge.backlogBytes = 8
+	bridge.streamMu.Unlock()
+	bridge.flushBacklogBounded(time.Nanosecond)
+	bridge.streamMu.Lock()
+	remaining := len(bridge.backlog)
 	bridge.streamMu.Unlock()
 	if remaining != 1 {
 		t.Fatalf("pending backlog = %d, want 1 retained (assistant text must never be dropped)", remaining)

@@ -63,8 +63,8 @@ func TestChatRuntimeEvents_StreamCoalescingConcurrentWithBeginRun(t *testing.T) 
 	}
 	// Leave the bridge clean: drop any coalesced events (no consumer runs).
 	bridge.streamMu.Lock()
-	bridge.pendingStreams = nil
-	bridge.pendingStreamsBytes = 0
+	bridge.backlog = nil
+	bridge.backlogBytes = 0
 	bridge.streamMu.Unlock()
 }
 
@@ -100,8 +100,8 @@ func TestEnqueueStreamEventKeepsAssistantDeltasOverPendingBudget(t *testing.T) {
 	bridge.eventQueue <- chatRuntimeQueuedEvent{event: runtimeevents.Event{Type: "fill"}, size: 1}
 	t.Cleanup(func() {
 		bridge.streamMu.Lock()
-		bridge.pendingStreams = nil
-		bridge.pendingStreamsBytes = 0
+		bridge.backlog = nil
+		bridge.backlogBytes = 0
 		bridge.streamMu.Unlock()
 	})
 
@@ -113,8 +113,8 @@ func TestEnqueueStreamEventKeepsAssistantDeltasOverPendingBudget(t *testing.T) {
 		})
 	}
 	bridge.streamMu.Lock()
-	count := len(bridge.pendingStreams)
-	bytes := bridge.pendingStreamsBytes
+	count := len(bridge.backlog)
+	bytes := bridge.backlogBytes
 	// assistant 文本增量超限必须保留：丢弃一个 delta 会让中间步骤（无 run 级
 	// 终稿）永久截断。软预算不再是硬丢弃边界。
 	if count != chatStreamCoalescePendingLimit+20 {
@@ -147,7 +147,7 @@ func TestEnqueueStreamEventKeepsAssistantDeltasOverPendingBudget(t *testing.T) {
 		Payload: map[string]interface{}{"reasoning": map[string]interface{}{"summary": "late"}},
 	})
 	bridge.streamMu.Lock()
-	countAfterReasoning := len(bridge.pendingStreams)
+	countAfterReasoning := len(bridge.backlog)
 	bridge.streamMu.Unlock()
 	if countAfterReasoning != count {
 		t.Fatalf("reasoning pending count = %d, want %d (non-text still dropped at budget)", countAfterReasoning, count)
@@ -167,8 +167,8 @@ func TestEnqueueStreamEventCoalescesContiguousSequenceIntoOnePendingEntry(t *tes
 	bridge.eventQueue <- chatRuntimeQueuedEvent{event: runtimeevents.Event{Type: "fill"}, size: 1}
 	t.Cleanup(func() {
 		bridge.streamMu.Lock()
-		bridge.pendingStreams = nil
-		bridge.pendingStreamsBytes = 0
+		bridge.backlog = nil
+		bridge.backlogBytes = 0
 		bridge.streamMu.Unlock()
 	})
 
@@ -188,15 +188,15 @@ func TestEnqueueStreamEventCoalescesContiguousSequenceIntoOnePendingEntry(t *tes
 	}
 
 	bridge.streamMu.Lock()
-	count := len(bridge.pendingStreams)
+	count := len(bridge.backlog)
 	var text string
 	var sequence uint64
 	hasSequence := false
 	if count > 0 {
-		text = streamEventText(bridge.pendingStreams[0].event)
-		sequence, hasSequence = assistantEventSequence(bridge.pendingStreams[0].event)
+		text = streamEventText(bridge.backlog[0].event)
+		sequence, hasSequence = assistantEventSequence(bridge.backlog[0].event)
 	}
-	bytes := bridge.pendingStreamsBytes
+	bytes := bridge.backlogBytes
 	bridge.streamMu.Unlock()
 
 	if count != 1 {
@@ -205,7 +205,7 @@ func TestEnqueueStreamEventCoalescesContiguousSequenceIntoOnePendingEntry(t *tes
 	if !hasSequence || sequence != total {
 		t.Fatalf("merged sequence = (%d,%v), want %d", sequence, hasSequence, total)
 	}
-	if from, ok := streamCoalescedFrom(bridge.pendingStreams[0].event); !ok || from != 1 {
+	if from, ok := streamCoalescedFrom(bridge.backlog[0].event); !ok || from != 1 {
 		t.Fatalf("merged interval start = (%d,%v), want (1,true)", from, ok)
 	}
 	if text != want.String() {
@@ -226,7 +226,7 @@ func TestEnqueueStreamEventCoalescesContiguousSequenceIntoOnePendingEntry(t *tes
 		},
 	})
 	bridge.streamMu.Lock()
-	count = len(bridge.pendingStreams)
+	count = len(bridge.backlog)
 	bridge.streamMu.Unlock()
 	if count != 2 {
 		t.Fatalf("pending count after sequence gap = %d, want 2", count)
@@ -412,8 +412,8 @@ func TestEnqueueStreamEventCoalescesNestedReasoningPreservesText(t *testing.T) {
 	bridge.eventQueue <- chatRuntimeQueuedEvent{event: runtimeevents.Event{Type: "fill"}, size: 1}
 	t.Cleanup(func() {
 		bridge.streamMu.Lock()
-		bridge.pendingStreams = nil
-		bridge.pendingStreamsBytes = 0
+		bridge.backlog = nil
+		bridge.backlogBytes = 0
 		bridge.streamMu.Unlock()
 	})
 
@@ -434,10 +434,10 @@ func TestEnqueueStreamEventCoalescesNestedReasoningPreservesText(t *testing.T) {
 	bridge.Handle(reasoningEvent("****"))
 
 	bridge.streamMu.Lock()
-	count := len(bridge.pendingStreams)
+	count := len(bridge.backlog)
 	var text string
 	if count > 0 {
-		text = streamEventText(bridge.pendingStreams[0].event)
+		text = streamEventText(bridge.backlog[0].event)
 	}
 	bridge.streamMu.Unlock()
 
@@ -448,10 +448,10 @@ func TestEnqueueStreamEventCoalescesNestedReasoningPreservesText(t *testing.T) {
 	if text != want {
 		t.Fatalf("nested reasoning deltas not preserved verbatim\n got: %q\nwant: %q", text, want)
 	}
-	if _, ok := bridge.pendingStreams[0].event.Payload["reasoning"]; ok {
+	if _, ok := bridge.backlog[0].event.Payload["reasoning"]; ok {
 		t.Fatal("merged event still carries stale nested reasoning block")
 	}
-	if got := bridge.pendingStreams[0].event.Payload["text"]; got != want {
+	if got := bridge.backlog[0].event.Payload["text"]; got != want {
 		t.Fatalf("merged event text payload = %q, want %q", got, want)
 	}
 }
@@ -561,8 +561,8 @@ func TestEnqueueStreamEventKeepsAssistantDeltasOverByteBudget(t *testing.T) {
 	bridge.eventQueue <- chatRuntimeQueuedEvent{event: runtimeevents.Event{Type: "fill"}, size: 1}
 	t.Cleanup(func() {
 		bridge.streamMu.Lock()
-		bridge.pendingStreams = nil
-		bridge.pendingStreamsBytes = 0
+		bridge.backlog = nil
+		bridge.backlogBytes = 0
 		bridge.streamMu.Unlock()
 	})
 
@@ -576,11 +576,11 @@ func TestEnqueueStreamEventKeepsAssistantDeltasOverByteBudget(t *testing.T) {
 	})
 
 	bridge.streamMu.Lock()
-	bytes := bridge.pendingStreamsBytes
-	count := len(bridge.pendingStreams)
+	bytes := bridge.backlogBytes
+	count := len(bridge.backlog)
 	var lastText string
 	if count > 0 {
-		lastText = streamEventText(bridge.pendingStreams[count-1].event)
+		lastText = streamEventText(bridge.backlog[count-1].event)
 	}
 	bridge.streamMu.Unlock()
 	if count != 2 {
@@ -600,7 +600,7 @@ func TestEnqueueStreamEventKeepsAssistantDeltasOverByteBudget(t *testing.T) {
 		Payload: map[string]interface{}{"reasoning": map[string]interface{}{"summary": "late"}},
 	})
 	bridge.streamMu.Lock()
-	countAfterReasoning := len(bridge.pendingStreams)
+	countAfterReasoning := len(bridge.backlog)
 	bridge.streamMu.Unlock()
 	if countAfterReasoning != count {
 		t.Fatalf("reasoning pending count = %d, want %d (non-text still dropped at byte budget)", countAfterReasoning, count)
@@ -615,8 +615,8 @@ func TestAssistantTerminalDropsStalePendingAndEnqueues(t *testing.T) {
 	bridge.eventQueue <- chatRuntimeQueuedEvent{event: runtimeevents.Event{Type: "fill"}, size: 1}
 	t.Cleanup(func() {
 		bridge.streamMu.Lock()
-		bridge.pendingStreams = nil
-		bridge.pendingStreamsBytes = 0
+		bridge.backlog = nil
+		bridge.backlogBytes = 0
 		bridge.streamMu.Unlock()
 	})
 
@@ -631,28 +631,47 @@ func TestAssistantTerminalDropsStalePendingAndEnqueues(t *testing.T) {
 	bridge.Handle(delta("turn-1", "stream-2"))
 
 	<-bridge.eventQueue
+	// 等 worker 把 stream-1 的合并 delta 交到有界队列（容量 1），后续断言
+	// 只依赖顺序语义而不依赖 worker 时序。
+	waitForBridgeCondition(t, "stream-1 delta delivered to the bounded queue", 5*time.Second, func() bool {
+		return len(bridge.eventQueue) == 1
+	})
 	bridge.Handle(runtimeevents.Event{
 		Type: runtimechat.EventAssistantMessage, TraceID: "trace-turn-1",
 		Payload: map[string]interface{}{"turn_id": "turn-1", "stream_id": "stream-1", "content": "final"},
 	})
 
 	bridge.streamMu.Lock()
-	count := len(bridge.pendingStreams)
-	var remaining string
-	if count > 0 {
-		remaining = streamEventText(bridge.pendingStreams[0].event)
+	count := len(bridge.backlog)
+	kinds := make([]string, 0, count)
+	var first string
+	for index, slot := range bridge.backlog {
+		if slot == nil {
+			continue
+		}
+		if index == 0 {
+			first = streamEventText(slot.event)
+		}
+		kinds = append(kinds, slot.event.Type)
 	}
 	bridge.streamMu.Unlock()
-	if count != 1 || !strings.Contains(remaining, "stream-2") {
-		t.Fatalf("pending after terminal = count %d remaining %q, want only stream-2", count, remaining)
+	if count != 2 || !strings.Contains(first, "stream-2") || kinds[1] != runtimechat.EventAssistantMessage {
+		t.Fatalf("backlog after terminal = count %d first %q kinds %v, want [stream-2 delta, assistant_message] (single ordered lane)", count, first, kinds)
 	}
-	select {
-	case queued := <-bridge.eventQueue:
-		if queued.event.Type != runtimechat.EventAssistantMessage {
-			t.Fatalf("queued type = %q, want assistant_message", queued.event.Type)
+
+	// 消费顺序：stream-1/stream-2 的文本 delta 按流内顺序先出，终态最后。
+	var order []string
+	drainRuntimeEvents(t, bridge, 5*time.Second, func() bool { return len(order) >= 3 }, func(queued chatRuntimeQueuedEvent) {
+		order = append(order, queued.event.Type)
+	})
+	wantOrder := []string{runtimechat.EventAssistantDelta, runtimechat.EventAssistantDelta, runtimechat.EventAssistantMessage}
+	if len(order) != len(wantOrder) {
+		t.Fatalf("delivery order = %v, want %v", order, wantOrder)
+	}
+	for index := range wantOrder {
+		if order[index] != wantOrder[index] {
+			t.Fatalf("delivery order = %v, want %v", order, wantOrder)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("terminal event was not enqueued")
 	}
 }
 
@@ -730,10 +749,10 @@ func TestChatRuntimeEvents_AssistantTerminalKeepsLateReasoningDeltas(t *testing.
 		},
 	})
 	bridge.streamMu.Lock()
-	pending := len(bridge.pendingStreams)
+	pending := len(bridge.backlog)
 	coalesced := ""
 	if pending == 3 {
-		coalesced = streamEventText(bridge.pendingStreams[1].event)
+		coalesced = streamEventText(bridge.backlog[1].event)
 	}
 	bridge.streamMu.Unlock()
 	if pending != 3 {
@@ -743,9 +762,14 @@ func TestChatRuntimeEvents_AssistantTerminalKeepsLateReasoningDeltas(t *testing.
 		t.Fatalf("coalesced reasoning text = %q, want %q (bus alias must be normalized)", coalesced, reasoningText)
 	}
 
-	// 终态前腾出一个槽位：队列仍满时保留的推理尾部会按既有的有界降级丢弃，
-	// 那是 stall 语义，不在本用例范围内。
+	// 终态前腾出一个槽位，并等队首文本 delta 投递完毕：后续断言只依赖顺序
+	// 语义，不依赖 worker 时序。
 	<-bridge.eventQueue
+	waitForBridgeCondition(t, "head text delta delivered", 5*time.Second, func() bool {
+		bridge.streamMu.Lock()
+		defer bridge.streamMu.Unlock()
+		return len(bridge.backlog) == 2
+	})
 
 	bridge.Handle(runtimeevents.Event{
 		Type:      runtimechat.EventAssistantMessage,
@@ -756,32 +780,40 @@ func TestChatRuntimeEvents_AssistantTerminalKeepsLateReasoningDeltas(t *testing.
 	})
 
 	bridge.streamMu.Lock()
-	remaining := len(bridge.pendingStreams)
-	otherStream := ""
-	if remaining == 1 {
-		otherStream = streamEventText(bridge.pendingStreams[0].event)
+	remaining := len(bridge.backlog)
+	kinds := make([]string, 0, remaining)
+	for _, slot := range bridge.backlog {
+		if slot != nil {
+			kinds = append(kinds, slot.event.Type)
+		}
 	}
 	bridge.streamMu.Unlock()
-	if remaining != 1 || otherStream != "other stream reasoning" {
-		t.Fatalf("pending coalesced streams after terminal = %d (%q), want only the other stream's reasoning", remaining, otherStream)
+	// 单一有序车道：同流 reasoning 与他流 reasoning 都保留在终态之前，只有
+	// 被终态取代的文本 delta 被清理（此处它已经投递出去）。
+	wantKinds := []string{"assistant.reasoning", "assistant.reasoning", runtimechat.EventAssistantMessage}
+	if remaining != len(wantKinds) {
+		t.Fatalf("backlog after terminal = %d %v, want %v", remaining, kinds, wantKinds)
+	}
+	for index := range wantKinds {
+		if kinds[index] != wantKinds[index] {
+			t.Fatalf("backlog after terminal = %v, want %v", kinds, wantKinds)
+		}
 	}
 
-	order := make([]string, 0, 2)
-	texts := make(map[string]string)
-	drainRuntimeEvents(t, bridge, 10*time.Second, func() bool { return len(order) >= 2 }, func(queued chatRuntimeQueuedEvent) {
-		switch queued.event.Type {
-		case "assistant.reasoning", runtimechat.EventAssistantMessage:
-			order = append(order, queued.event.Type)
-			texts[queued.event.Type] = streamEventText(queued.event)
-		}
+	order := make([]string, 0, 4)
+	texts := make([]string, 0, 4)
+	drainRuntimeEvents(t, bridge, 10*time.Second, func() bool { return len(order) >= 4 }, func(queued chatRuntimeQueuedEvent) {
+		order = append(order, queued.event.Type)
+		texts = append(texts, streamEventText(queued.event))
 	})
-	if len(order) != 2 || order[0] != "assistant.reasoning" || order[1] != runtimechat.EventAssistantMessage {
-		t.Fatalf("delivery order = %v, want [assistant.reasoning assistant_message]", order)
+	wantOrder := []string{runtimechat.EventAssistantDelta, "assistant.reasoning", "assistant.reasoning", runtimechat.EventAssistantMessage}
+	wantTexts := []string{"partial answer", reasoningText, "other stream reasoning", ""}
+	if len(order) != len(wantOrder) {
+		t.Fatalf("delivery order = %v, want %v", order, wantOrder)
 	}
-	if got := texts["assistant.reasoning"]; got != reasoningText {
-		t.Fatalf("delivered reasoning text = %q, want %q", got, reasoningText)
-	}
-	if got := texts[runtimechat.EventAssistantMessage]; got != "" {
-		t.Fatalf("terminal assistant text = %q, want empty (not a stream event)", got)
+	for index := range wantOrder {
+		if order[index] != wantOrder[index] || texts[index] != wantTexts[index] {
+			t.Fatalf("delivery[%d] = %s(%q), want %s(%q); order=%v", index, order[index], texts[index], wantOrder[index], wantTexts[index], order)
+		}
 	}
 }

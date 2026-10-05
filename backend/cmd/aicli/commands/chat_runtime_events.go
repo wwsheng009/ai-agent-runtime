@@ -40,12 +40,12 @@ import (
 )
 
 type chatRuntimeEventBridge struct {
-	session             *ChatSession
+	session *ChatSession
 	// parkedEscapeMu / parkedEscapeStop hold the §6.12 parked-window ESC
 	// consumer: armed on turn.suspended, released on turn.resumed or interrupt
 	// cleanup, so ESC can abandon a parked turn that has no run to interrupt.
-	parkedEscapeMu   sync.Mutex
-	parkedEscapeStop func()
+	parkedEscapeMu      sync.Mutex
+	parkedEscapeStop    func()
 	primarySessionMu    sync.RWMutex
 	primarySessionID    string
 	startOnce           sync.Once
@@ -59,15 +59,27 @@ type chatRuntimeEventBridge struct {
 	// admission. Zero falls back to uiActionPostBudget; tests may shorten it
 	// to exercise the stall path without sleeping for the full budget.
 	uiActionPostTimeout time.Duration
-	// streamMu + pendingStreams coalesce streaming deltas (reasoning /
-	// assistant text) while the consumer is behind, so a slow UI consumer
-	// can never block the LLM stream callback. Merged events are emitted
-	// non-blockingly as soon as the consumer catches up; ordering is
-	// preserved by flushing pending streams before any non-streaming event
-	// is enqueued.
+	// streamMu guards the single ordered backlog shared by every event family:
+	// streaming deltas, coalescible latest-wins events and ordered/critical
+	// events all retain FIFO order here, and nothing may bypass a non-empty
+	// backlog into eventQueue. A slow UI consumer therefore degrades to
+	// bounded, in-order backlog growth instead of blocking the LLM stream
+	// callback or reordering the live display (回放正确不能替代实时正确).
 	streamMu                    sync.Mutex
-	pendingStreams              []chatRuntimeQueuedEvent
-	pendingStreamsBytes         int64
+	backlog                     []*chatRuntimeQueuedEvent
+	backlogBytes                int64
+	backlogIndex                map[string]*chatRuntimeQueuedEvent // coalescible latest-wins 槽位
+	streamWorkerRunning         bool
+	backlogMerged               uint64
+	backlogEvicted              uint64
+	backlogDropped              uint64
+	backlogDroppedByClass       map[chatEventClass]uint64
+	backlogDroppedByType        map[string]uint64
+	backlogEvictedByType        map[string]uint64
+	backlogPeakPending          int
+	backlogPeakBytes            int64
+	backlogCriticalRetained     uint64
+	backlogCriticalPeak         uint64
 	streamRetainedEvents        uint64
 	streamRetainedBytes         uint64
 	streamDroppedEvents         uint64
@@ -164,33 +176,13 @@ type chatRuntimeEventBridge struct {
 	toolSummaryLogged           bool
 	enqueuedEvents              uint64
 	processedEvents             uint64
-	criticalPending             uint64
-	// deferredMu guards the ordered overflow queue used when the bounded
-	// eventQueue did not admit a non-streaming event within its caller budget.
-	// A single worker drains it FIFO as the consumer catches up, so ordering is
-	// preserved without ever blocking the publisher (provider stream callback,
-	// tool loop, agent act) beyond chatRuntimeNonStreamEnqueueBudget.
-	deferredMu             sync.Mutex
-	deferredQueue          []*chatRuntimeQueuedEvent
-	deferredIndex          map[string]*chatRuntimeQueuedEvent // 合并键 -> 槽位（O(1) latest-wins）
-	deferredBytes          int64
-	deferredPending        uint64
-	deferredDropped        uint64
-	deferredMerged         uint64
-	deferredEvicted        uint64
-	deferredDroppedByClass map[chatEventClass]uint64
-	deferredDroppedByType  map[string]uint64
-	deferredEvictedByType  map[string]uint64
-	deferredPeakPending    int
-	deferredPeakBytes      int64
-	deferredWorkerRunning  bool
 	// classifyMode selects the event-classification behaviour
 	// (AICLI_EVENT_BRIDGE_CLASSIFY=off|observe|enforce); see
 	// chatEventBridgeClassifyModeFromEnv.
 	classifyMode chatEventClassifyMode
-	// criticalPeakPending / criticalAtShutdown / eventBridgeDegraded are
-	// guarded by progressMu (the same lock as criticalPending).
-	criticalPeakPending uint64
+	// criticalAtShutdown / eventBridgeDegraded are guarded by progressMu:
+	// they summarize a run that ended while critical events were still
+	// retained in the ordered backlog (never silently lost).
 	criticalAtShutdown  uint64
 	eventBridgeDegraded bool
 	// resumeTurnID 由 renderMu 保护：提问回答发生在已终结的 run 之后时，
@@ -289,25 +281,20 @@ type chatRuntimeQueuedEvent struct {
 	event runtimeevents.Event
 	size  int64
 	epoch uint64
-	// queuedAt is set when a stream event first enters pendingStreams. It is
+	// queuedAt is set when an event first enters the ordered backlog. It is
 	// retained across coalescing so diagnostics can report the oldest pending
 	// age without consulting the event payload.
 	queuedAt time.Time
 	// key is the latest-wins identity of a coalescible event (empty for
 	// events that must keep their own slot). Set when the event is deferred
-	// into the overflow queue; it is what makes in-place merging possible.
+	// into the ordered backlog; it is what makes in-place merging possible.
 	key string
-	// inFlight marks the head slot the deferred worker is currently trying to
-	// deliver: its event/size are read outside deferredMu and must therefore not
-	// be rewritten by publishers. A latest-wins update that lands in this window
-	// is parked in pending* (written under deferredMu) and promoted in place once
-	// the current value has been delivered, so one key still owns one slot.
-	inFlight bool
-	// pendingEvent/pendingSize/hasPending hold the newest value of a coalescible
-	// family that arrived while inFlight was set.
-	pendingEvent runtimeevents.Event
-	pendingSize  int64
-	hasPending   bool
+	// stampAtAdmission marks non-streaming entries whose epoch must be stamped
+	// when the entry actually reaches the bounded queue: backlog delivery may
+	// legitimately cross a run boundary (terminal/control events)。流式 delta
+	// 保持 ingress 时刻的 epoch——旧 run 的残留 delta 必须在消费端被拒绝，
+	// 不能被延迟投递"漂白"进新 run。
+	stampAtAdmission bool
 }
 
 type chatAssistantStreamState struct {
@@ -651,7 +638,7 @@ func newChatRuntimeEventBridge(session *ChatSession) *chatRuntimeEventBridge {
 		renderMapper:       scene.NewChangeSetMapper(renderScene),
 		scenePresenterMode: scenePresenterModeFromEnv(),
 		classifyMode:       chatEventBridgeClassifyModeFromEnv(),
-		deferredIndex:      make(map[string]*chatRuntimeQueuedEvent),
+		backlogIndex:       make(map[string]*chatRuntimeQueuedEvent),
 		writeLine: func(line string) {
 			if strings.TrimSpace(line) == "" {
 				return
@@ -971,16 +958,27 @@ func (b *chatRuntimeEventBridge) BeginRunKind(kind chatRunKind) {
 	b.turnBudget.Store(nil)
 	// Drop any coalesced streaming events left over from the previous run
 	// epoch; their text was never enqueued and must not bleed into the new
-	// run. Taken BEFORE renderMu (streamMu → renderMu, the same order the
-	// coalescing path uses): clearing inside the renderMu section would
-	// deadlock, and clearing after it leaves a window where a new-run event
-	// can be appended just before the clear and then dropped. An event
-	// appended in that window still carries the OLD epoch, so it is rejected
-	// by the epoch check at consume time either way — clearing first makes
-	// that deterministic.
+	// run. Non-streaming entries stay queued: terminal/control events may
+	// legitimately cross a run boundary and are epoch-stamped at admission.
+	// Taken BEFORE renderMu (streamMu → renderMu, the same order the ingress
+	// path uses): clearing inside the renderMu section would deadlock.
 	b.streamMu.Lock()
-	b.pendingStreams = nil
-	b.pendingStreamsBytes = 0
+	kept := b.backlog[:0]
+	removed := int64(0)
+	for _, slot := range b.backlog {
+		if slot != nil && isMergeableStreamEvent(slot.event.Type) {
+			removed += slot.size
+			continue
+		}
+		kept = append(kept, slot)
+	}
+	b.backlog = kept
+	if removed > 0 {
+		b.backlogBytes -= removed
+		if b.backlogBytes < 0 {
+			b.backlogBytes = 0
+		}
+	}
 	b.streamMu.Unlock()
 	b.renderMu.Lock()
 	b.rendered = make(map[string]struct{})
@@ -1077,8 +1075,10 @@ func (b *chatRuntimeEventBridge) drainSnapshot() chatRuntimeEventDrainSnapshot {
 	b.progressMu.Lock()
 	snapshot.Enqueued = b.enqueuedEvents
 	snapshot.Processed = b.processedEvents
-	snapshot.CriticalPending = b.criticalPending
 	b.progressMu.Unlock()
+	b.streamMu.Lock()
+	snapshot.CriticalPending = b.backlogCriticalRetained
+	b.streamMu.Unlock()
 	snapshot.DeferredBacklog = b.deferredBacklogSize()
 	return snapshot
 }
@@ -1097,15 +1097,15 @@ func (b *chatRuntimeEventBridge) EndRun() {
 	if b == nil {
 		return
 	}
-	b.flushPendingStreamEventBounded(chatStreamFlushBudget)
-	// Events that overflowed the bounded queue are delivered by the deferred
+	b.flushBacklogBounded(chatStreamFlushBudget)
+	// Events that overflowed the bounded queue are delivered by the backlog
 	// worker. Give it a bounded window to reach the queue before the drain
 	// barrier runs; otherwise the turn's terminal events would land after the
 	// barrier and could be dropped as stale while the UI is behind.
 	if !b.waitDeferredDrain(b.deferredDrainTimeout()) && b.session != nil {
 		writeSessionDebugInfo(
 			b.session,
-			"[runtime-event] deferred queue did not drain before run end; remaining events will be delivered asynchronously",
+			"[runtime-event] ordered backlog did not drain before run end; remaining events will be delivered asynchronously",
 			false,
 		)
 	}
@@ -1423,60 +1423,27 @@ func (b *chatRuntimeEventBridge) Handle(event runtimeevents.Event) {
 	}
 	if isMergeableStreamEvent(event.Type) {
 		// Streaming deltas must never block the LLM callback chain. While the
-		// bounded queue is full they are coalesced into one pending event and
-		// flushed the moment a slot frees; a UI stall therefore degrades to
-		// fewer, larger redraws instead of a dead turn.
+		// bounded queue is full they are coalesced into the ordered backlog and
+		// delivered head-first the moment a slot frees; a UI stall therefore
+		// degrades to fewer, larger redraws instead of a dead turn.
 		b.enqueueStreamEvent(event, size)
 		return
 	}
-	if b.eventIsCritical(event.Type) {
-		// Critical events do not wait behind coalesced assistant deltas and are
-		// never handed to the overflow queue (§6.1.5): the bounded queue reserves
-		// capacity for them, and if even that reserve is temporarily exhausted
-		// they retry asynchronously until admitted, because losing one means
-		// losing control-plane state (or a final message whose coalesced deltas
-		// were already dropped). EndRun's drain barrier accounts for the
-		// in-flight retries.
-		if isAssistantStreamTerminalEvent(event) {
-			// The final message supersedes this turn's coalesced deltas; drop
-			// them only now that the terminal event is on the critical path
-			// instead of dropping them before a queue admission that may fail
-			// (§4.1).
-			b.dropPendingStreamsForTerminal(event)
-		} else if !isCriticalSubagentLifecycleEvent(event.Type) {
-			// Newly promoted critical events (tool boundaries, approval/question
-			// terminals) still flush the pending stream tail first so the
-			// "deltas before boundary" order is preserved; subagent lifecycle
-			// terminals keep their existing semantics (control-plane events may
-			// overtake a coalesced backlog).
-			b.flushPendingStreamEventBounded(chatStreamFlushBudget)
-		}
-		if !b.enqueueNonStreamEvent(event, size, 0) {
-			b.enqueueCriticalRuntimeEventEventually(event, size)
-		}
-		return
-	}
-	// Non-streaming events (finals, approvals, tool boundaries) are ordered
-	// behind any coalesced streaming event, then enqueue with a bounded wait:
-	// they are rare and semantically should arrive, but a stalled UI must not
-	// wedge the LLM callback forever. An assistant_message supersedes the
-	// coalesced deltas for its turn, so stale pending text is dropped first.
+	// Every non-streaming event shares the single ordered backlog with the
+	// streaming family. A terminal assistant_message still supersedes its own
+	// turn/stream's coalesced text first (reasoning of the same stream stays
+	// queued ahead of the terminal; other streams are untouched), but nothing
+	// may bypass a non-empty backlog: later tool/llm events are retained
+	// behind earlier reasoning instead of overtaking it. Critical events keep
+	// their never-drop guarantee by being admitted beyond the soft caps.
 	if isAssistantStreamTerminalEvent(event) {
 		b.dropPendingStreamsForTerminal(event)
-	} else {
-		// Flush the coalesced tail with the same short budget EndRun uses. The
-		// pending stream backlog is separately byte-bounded, so a slow consumer
-		// keeps ordering without letting one non-streaming event stall this
-		// callback for seconds.
-		b.flushPendingStreamEventBounded(chatStreamFlushBudget)
 	}
-	if b.deferredBacklogPending() || !b.enqueueNonStreamEvent(event, size, chatRuntimeNonStreamEnqueueBudget) {
-		// The queue is full (or something is already waiting): hand the event to
-		// the ordered deferred worker so this publisher (provider stream
-		// callback) returns immediately instead of waiting up to
-		// uiActionPostBudget for UI capacity. Joining the FIFO whenever it is
-		// non-empty keeps the non-streaming event family in order even when a
-		// slow consumer lets some events overtake others.
+	budget := chatRuntimeNonStreamEnqueueBudget
+	if b.eventIsCritical(event.Type) {
+		budget = 0
+	}
+	if !b.enqueueNonStreamEvent(event, size, budget) {
 		b.deferRuntimeEvent(event, size)
 	}
 }
@@ -1529,33 +1496,6 @@ func (b *chatRuntimeEventBridge) eventIsCritical(eventType string) bool {
 	return isCriticalSubagentLifecycleEvent(eventType)
 }
 
-func (b *chatRuntimeEventBridge) enqueueCriticalRuntimeEventEventually(event runtimeevents.Event, size int64) {
-	if b == nil {
-		return
-	}
-	b.progressMu.Lock()
-	b.criticalPending++
-	if b.criticalPending > b.criticalPeakPending {
-		b.criticalPeakPending = b.criticalPending
-	}
-	b.progressMu.Unlock()
-	go func() {
-		defer func() {
-			b.progressMu.Lock()
-			if b.criticalPending > 0 {
-				b.criticalPending--
-			}
-			b.progressMu.Unlock()
-		}()
-		for !b.enqueueNonStreamEvent(event, size, 250*time.Millisecond) {
-			// A terminal event is bounded in size and frequency. Retrying here is
-			// safer than blocking the runtime publisher or losing the event; app
-			// shutdown still terminates the process/goroutine naturally.
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
-}
-
 // chatRuntimeDeferredDropLogInterval collapses the per-drop debug lines emitted
 // while the deferred backlog is full into one line per interval. The first drop
 // is always logged so the degraded state is never silent.
@@ -1565,26 +1505,25 @@ func shouldLogDeferredDrop(dropped uint64) bool {
 	return dropped == 1 || dropped%chatRuntimeDeferredDropLogInterval == 0
 }
 
-// deferRuntimeEvent appends a non-streaming event to the ordered overflow
-// queue. It is used when the bounded queue did not accept the event within
-// chatRuntimeNonStreamEnqueueBudget: the publisher returns immediately and
-// delivery is completed by runDeferredQueue as soon as the consumer frees
-// capacity. Ordering is preserved (one FIFO, one worker) and the backlog is
-// bounded, so a permanently stalled UI degrades to logged drops instead of
-// unbounded memory or a wedged LLM callback. The ordering guarantee covers the
-// non-streaming family: coalesced streaming deltas may still overtake a deferred
-// event, but they are merged per turn and superseded by that turn's terminal
-// message.
+// deferRuntimeEvent appends an event to the single ordered backlog. It is the
+// only retention path: streaming deltas, coalescible latest-wins events and
+// ordered/critical events all queue here, and no family may bypass a non-empty
+// backlog into the bounded queue. The publisher returns immediately and
+// runBacklogWorker delivers the head FIFO as soon as the consumer frees
+// capacity; a permanently stalled UI degrades to bounded, attributed drops for
+// non-critical families instead of unbounded memory.
+//
+// critical events are never dropped: they are admitted beyond the soft caps
+// (control-plane event rate keeps this bounded in practice) and EndRun's drain
+// barrier accounts for them at shutdown. 之前的实现允许 critical/stream 两个
+// 家族互相越队（"critical retry overtakes" / "stream overtakes deferred"），
+// 实时渲染因此出现顺序错乱——回放正确、实时错乱。单一车道让跨家族顺序由
+// 构造保证。
 //
 // Dropping runs on the publisher's goroutine, so the per-drop debug write is
 // throttled (one line per chatRuntimeDeferredDropLogInterval drops; the first
 // drop is always logged). Every drop is still forwarded to the exec event
 // bridge.
-//
-// With classification enforced (§6.1.3/§6.1.4) the queue additionally performs
-// in-place latest-wins merging and may evict the oldest coalescible slot to
-// admit a newer event; only ordered/coalescible events reach this function,
-// because critical events are routed to the reserve + retry channel instead.
 func (b *chatRuntimeEventBridge) deferRuntimeEvent(event runtimeevents.Event, size int64) bool {
 	if b == nil {
 		return false
@@ -1592,109 +1531,194 @@ func (b *chatRuntimeEventBridge) deferRuntimeEvent(event runtimeevents.Event, si
 	if size < 1 {
 		size = 1
 	}
-	class := classifyChatRuntimeEvent(event.Type)
-	if b.classifyMode == chatEventClassifyEnforce && class == eventClassCritical {
-		// Defensive: Handle already routes critical events, but the deferred
-		// worker and other callers must never leak one into the drop path.
-		b.enqueueCriticalRuntimeEventEventually(event, size)
-		return true
+	q := &chatRuntimeQueuedEvent{
+		event:            event,
+		size:             size,
+		queuedAt:         time.Now(),
+		stampAtAdmission: true,
 	}
-	key := ""
-	if class == eventClassCoalescible {
-		key = chatEventCoalesceKey(event)
-		if key == "" {
-			// §6.1.2: no stable identity → degrade to ordered instead of
-			// merging unrelated events under one slot.
-			class = eventClassOrdered
+	b.streamMu.Lock()
+	ok := b.appendBacklogSlotLocked(q, b.backlogClass(event))
+	b.streamMu.Unlock()
+	if ok {
+		b.ensureBacklogWorker()
+	}
+	return ok
+}
+
+// backlogClass resolves the delivery class under the active classification
+// mode. In off/observe modes classification-based merging/eviction stays off
+// (the env switch remains the rollback for those policies), but the single
+// ordered backlog itself stays in force in every mode: ordering is not a
+// policy.
+func (b *chatRuntimeEventBridge) backlogClass(event runtimeevents.Event) chatEventClass {
+	if isMergeableStreamEvent(event.Type) {
+		return eventClassStream
+	}
+	if b != nil && b.classifyMode != chatEventClassifyOff {
+		// observe 模式“只计数不改变策略”：合并/驱逐被禁用，但丢弃仍按类归因。
+		return classifyChatRuntimeEvent(event.Type)
+	}
+	if b != nil && b.eventIsCritical(event.Type) {
+		return eventClassCritical
+	}
+	return eventClassOrdered
+}
+
+// appendBacklogSlotLocked admits one event into the ordered backlog under
+// streamMu. It merges only in order-preserving ways: streaming deltas fold
+// into the tail slot of the same stream (or a contiguous sequence), and a
+// coalescible event replaces its own existing slot in place. Everything else
+// appends; budget arbitration never reorders survivors.
+func (b *chatRuntimeEventBridge) appendBacklogSlotLocked(q *chatRuntimeQueuedEvent, class chatEventClass) bool {
+	if q == nil {
+		return false
+	}
+	if q.size < 1 {
+		q.size = 1
+	}
+	if class == eventClassStream {
+		if n := len(b.backlog); n > 0 {
+			last := b.backlog[n-1]
+			if last != nil && isMergeableStreamEvent(last.event.Type) &&
+				(streamMergeKey(last.event) == streamMergeKey(q.event) || contiguousStreamEvent(last.event, q.event)) {
+				return b.mergeStreamSlotLocked(last, q)
+			}
+		}
+		return b.pushBacklogSlotLocked(q, class)
+	}
+	if class == eventClassCoalescible && b.classifyMode == chatEventClassifyEnforce {
+		if key := chatEventCoalesceKey(q.event); key != "" {
+			q.key = key
+			if slot := b.backlogIndex[key]; slot != nil {
+				b.mergeLatestWinsSlotLocked(slot, q)
+				return true
+			}
 		}
 	}
-	b.deferredMu.Lock()
-	if b.classifyMode == chatEventClassifyEnforce && key != "" {
-		if slot, ok := b.deferredIndex[key]; ok {
-			if slot.inFlight {
-				// 在途槽位的 event/size 正被 worker 在锁外读取：最新值只能挂到
-				// pending（锁内写入），由 worker 在当前值投递成功后原位续投。
-				if slot.hasPending {
-					if delta := size - slot.pendingSize; delta != 0 {
-						b.deferredBytes += delta
-					}
-				} else {
-					b.deferredBytes += size
-				}
-				slot.pendingEvent = event
-				slot.pendingSize = size
-				slot.hasPending = true
-			} else {
-				// In-place latest-wins: the slot keeps its queue position but
-				// carries the newest value, so the queue does not grow while a
-				// high-frequency family (progress/status/usage) is bursting.
-				if delta := size - slot.size; delta != 0 {
-					b.deferredBytes += delta
-				}
-				slot.event = event
-				slot.size = size
+	return b.pushBacklogSlotLocked(q, class)
+}
+
+// pushBacklogSlotLocked appends a new slot, applying the bounded-backlog
+// policy: evict the oldest coalescible slot when the soft caps are hit, then
+// drop (with attribution) non-critical overflow; critical events are admitted
+// beyond the caps and counted as retained-critical until delivered.
+func (b *chatRuntimeEventBridge) pushBacklogSlotLocked(q *chatRuntimeQueuedEvent, class chatEventClass) bool {
+	if class == eventClassStream {
+		// 流家族沿用既有软预算：assistant 文本增量超限保留（中间步骤没有
+		// run 级终稿可复原），其它流家族超限丢弃并计数。
+		if len(b.backlog) >= chatStreamCoalescePendingLimit ||
+			b.backlogBytes+q.size > chatStreamCoalescePendingByteLimit {
+			if !assistantStreamDeltaMustNotDrop(q.event) {
+				b.recordStreamDropLocked(q.event, q.size)
+				b.logStreamOverflow(q.event, "coalesced stream pending budget exceeded; delta dropped")
+				return false
 			}
-			if b.deferredBytes < 0 {
-				b.deferredBytes = 0
-			}
-			b.deferredMerged++
-			b.recordDeferredPeaksLocked()
-			b.publishEventDegradationLocked(false)
-			b.deferredMu.Unlock()
-			return true
+			b.recordStreamRetentionLocked(q.event, q.size)
+			b.logStreamOverflow(q.event, "coalesced stream pending budget exceeded; assistant delta retained")
 		}
 	}
-	if b.deferredQueueFullLocked(size) && b.classifyMode == chatEventClassifyEnforce {
-		// 腾挪：驱逐最旧的 coalescible 槽位，为更高优先级（或更新的
-		// latest-wins 值）腾出空间；ordered/critical 永不参与驱逐。
+	critical := class == eventClassCritical
+	if b.backlogFullLocked(q.size) && b.classifyMode == chatEventClassifyEnforce {
 		if evicted := b.evictOldestCoalescibleLocked(); evicted != nil {
-			b.deferredEvicted++
+			b.backlogEvicted++
 			b.recordEvictedTypeLocked(evicted.event.Type)
 			b.publishEventDegradationLocked(true)
 		}
 	}
-	if b.deferredQueueFullLocked(size) {
-		b.deferredDropped++
-		if b.classifyMode != chatEventClassifyOff {
-			b.recordDeferredDropLocked(class, event.Type)
+	if b.backlogFullLocked(q.size) && !critical {
+		if !assistantStreamDeltaMustNotDrop(q.event) {
+			b.backlogDropped++
+			if b.classifyMode != chatEventClassifyOff {
+				b.recordBacklogDropLocked(class, q.event.Type)
+			}
+			b.publishEventDegradationLocked(true)
+			dropped := b.backlogDropped
+			if shouldLogDeferredDrop(dropped) {
+				b.logLateRuntimeEvent(q.event, fmt.Sprintf("ordered backlog full; event dropped (dropped_total=%d class=%s type=%s)", dropped, class, q.event.Type))
+			} else {
+				b.forwardLateRuntimeEvent(q.event)
+			}
+			return false
 		}
-		b.publishEventDegradationLocked(true)
-		dropped := b.deferredDropped
-		b.deferredMu.Unlock()
-		if shouldLogDeferredDrop(dropped) {
-			b.logLateRuntimeEvent(event, fmt.Sprintf("runtime event deferred queue full; event dropped (dropped_total=%d class=%s type=%s)", dropped, class, event.Type))
-		} else {
-			b.forwardLateRuntimeEvent(event)
+	}
+	b.backlog = append(b.backlog, q)
+	b.backlogBytes += q.size
+	if q.key != "" {
+		if b.backlogIndex == nil {
+			b.backlogIndex = make(map[string]*chatRuntimeQueuedEvent)
 		}
-		return false
+		b.backlogIndex[q.key] = q
 	}
-	slot := &chatRuntimeQueuedEvent{event: event, size: size, key: key}
-	b.deferredQueue = append(b.deferredQueue, slot)
-	if key != "" {
-		if b.deferredIndex == nil {
-			b.deferredIndex = make(map[string]*chatRuntimeQueuedEvent)
+	if critical {
+		b.backlogCriticalRetained++
+		if b.backlogCriticalRetained > b.backlogCriticalPeak {
+			b.backlogCriticalPeak = b.backlogCriticalRetained
 		}
-		b.deferredIndex[key] = slot
 	}
-	b.deferredBytes += size
-	b.deferredPending++
-	b.recordDeferredPeaksLocked()
-	startWorker := !b.deferredWorkerRunning
-	if startWorker {
-		b.deferredWorkerRunning = true
-	}
-	b.deferredMu.Unlock()
-	if startWorker {
-		go b.runDeferredQueue()
-	}
+	b.recordBacklogPeaksLocked()
 	return true
 }
 
-// deferredQueueFullLocked reports whether admitting size more bytes would
-// exceed either overflow-queue cap. Callers must hold deferredMu.
-func (b *chatRuntimeEventBridge) deferredQueueFullLocked(size int64) bool {
-	return len(b.deferredQueue) >= chatRuntimeDeferredEventLimit ||
-		b.deferredBytes+size > chatRuntimeDeferredEventByteLimit
+// mergeStreamSlotLocked folds an adjacent same-stream delta into the tail slot
+// and preserves the contiguous-interval bookkeeping (visible sequence = tail,
+// coalesced_from = interval start). Assistant text is retained past the soft
+// byte budget; other stream families degrade by dropping (and counting) the
+// overflow, mirroring the pre-existing stream policy.
+func (b *chatRuntimeEventBridge) mergeStreamSlotLocked(last *chatRuntimeQueuedEvent, q *chatRuntimeQueuedEvent) bool {
+	if last.size+q.size > chatStreamCoalesceEventByteLimit ||
+		b.backlogBytes+q.size > chatStreamCoalescePendingByteLimit {
+		if !assistantStreamDeltaMustNotDrop(q.event) {
+			b.recordStreamDropLocked(q.event, q.size)
+			b.logStreamOverflow(q.event, "coalesced stream payload exceeded byte limit; delta dropped")
+			return false
+		}
+		b.recordStreamRetentionLocked(q.event, q.size)
+		b.logStreamOverflow(q.event, "coalesced stream payload exceeded byte limit; assistant delta retained")
+	}
+	from, hasFrom := streamCoalescedFrom(last.event)
+	if !hasFrom {
+		if seq, ok := assistantEventSequence(last.event); ok && seq > 0 {
+			from, hasFrom = seq, true
+		}
+	}
+	last.event = mergeStreamEvents(last.event, q.event)
+	if seq, ok := assistantEventSequence(q.event); ok {
+		last.event.Payload["sequence"] = seq
+	}
+	if hasFrom {
+		last.event.Payload[streamCoalescedFromKey] = from
+	}
+	last.size += q.size
+	if last.size < 1 {
+		last.size = 1
+	}
+	b.backlogBytes += q.size
+	b.recordBacklogPeaksLocked()
+	return true
+}
+
+// mergeLatestWinsSlotLocked keeps one slot per coalescible key: the slot keeps
+// its queue position (order untouched) and carries the newest value. Delivery
+// reads the slot under streamMu only, so an in-place update is always safe and
+// the superseded snapshot value is intentionally replaced.
+func (b *chatRuntimeEventBridge) mergeLatestWinsSlotLocked(slot *chatRuntimeQueuedEvent, q *chatRuntimeQueuedEvent) {
+	b.backlogBytes += q.size - slot.size
+	slot.event = q.event
+	slot.size = q.size
+	if b.backlogBytes < 0 {
+		b.backlogBytes = 0
+	}
+	b.backlogMerged++
+	b.recordBacklogPeaksLocked()
+	b.publishEventDegradationLocked(false)
+}
+
+// backlogFullLocked reports whether admitting size more bytes would exceed
+// either ordered-backlog cap. Callers must hold streamMu.
+func (b *chatRuntimeEventBridge) backlogFullLocked(size int64) bool {
+	return len(b.backlog) >= chatRuntimeDeferredEventLimit ||
+		b.backlogBytes+size > chatRuntimeDeferredEventByteLimit
 }
 
 // evictOldestCoalescibleLocked removes the oldest coalescible slot (scanning
@@ -1702,7 +1726,7 @@ func (b *chatRuntimeEventBridge) deferredQueueFullLocked(size int64) bool {
 // events are never evicted: they keep FIFO relative order and are only dropped
 // — with accounting — when nothing coalescible can make room.
 func (b *chatRuntimeEventBridge) evictOldestCoalescibleLocked() *chatRuntimeQueuedEvent {
-	for index, slot := range b.deferredQueue {
+	for index, slot := range b.backlog {
 		if slot == nil {
 			continue
 		}
@@ -1713,31 +1737,25 @@ func (b *chatRuntimeEventBridge) evictOldestCoalescibleLocked() *chatRuntimeQueu
 		// 槽位，若跳过它，腾挪将永不生效，ordered 事件只能被丢弃。worker 用
 		// "队首仍是自己"的判据放弃后续弹出，该槽位的 pending 最新值随之降级——
 		// 这正是 §6.1.4 允许的 "coalescible 丢弃优先于 ordered"。
-		b.deferredQueue = append(b.deferredQueue[:index], b.deferredQueue[index+1:]...)
-		b.deferredBytes -= slot.size
-		if slot.hasPending {
-			b.deferredBytes -= slot.pendingSize
+		b.backlog = append(b.backlog[:index], b.backlog[index+1:]...)
+		b.backlogBytes -= slot.size
+		if b.backlogBytes < 0 {
+			b.backlogBytes = 0
 		}
-		if b.deferredBytes < 0 {
-			b.deferredBytes = 0
-		}
-		if b.deferredPending > 0 {
-			b.deferredPending--
-		}
-		if slot.key != "" {
-			delete(b.deferredIndex, slot.key)
+		if slot.key != "" && b.backlogIndex[slot.key] == slot {
+			delete(b.backlogIndex, slot.key)
 		}
 		return slot
 	}
 	return nil
 }
 
-func (b *chatRuntimeEventBridge) recordDeferredPeaksLocked() {
-	if len(b.deferredQueue) > b.deferredPeakPending {
-		b.deferredPeakPending = len(b.deferredQueue)
+func (b *chatRuntimeEventBridge) recordBacklogPeaksLocked() {
+	if len(b.backlog) > b.backlogPeakPending {
+		b.backlogPeakPending = len(b.backlog)
 	}
-	if b.deferredBytes > b.deferredPeakBytes {
-		b.deferredPeakBytes = b.deferredBytes
+	if b.backlogBytes > b.backlogPeakBytes {
+		b.backlogPeakBytes = b.backlogBytes
 	}
 }
 
@@ -1745,16 +1763,16 @@ func (b *chatRuntimeEventBridge) recordDeferredPeaksLocked() {
 // pathological stream of distinct event types cannot grow them without bound.
 const chatRuntimeDroppedByTypeLimit = 16
 
-func (b *chatRuntimeEventBridge) recordDeferredDropLocked(class chatEventClass, eventType string) {
-	if b.deferredDroppedByClass == nil {
-		b.deferredDroppedByClass = make(map[chatEventClass]uint64)
+func (b *chatRuntimeEventBridge) recordBacklogDropLocked(class chatEventClass, eventType string) {
+	if b.backlogDroppedByClass == nil {
+		b.backlogDroppedByClass = make(map[chatEventClass]uint64)
 	}
-	b.deferredDroppedByClass[class]++
-	b.deferredDroppedByType = recordChatEventTypeCount(b.deferredDroppedByType, eventType)
+	b.backlogDroppedByClass[class]++
+	b.backlogDroppedByType = recordChatEventTypeCount(b.backlogDroppedByType, eventType)
 }
 
 func (b *chatRuntimeEventBridge) recordEvictedTypeLocked(eventType string) {
-	b.deferredEvictedByType = recordChatEventTypeCount(b.deferredEvictedByType, eventType)
+	b.backlogEvictedByType = recordChatEventTypeCount(b.backlogEvictedByType, eventType)
 }
 
 // recordChatEventTypeCount bumps the (bounded) per-type counter, folding new
@@ -1774,73 +1792,177 @@ func recordChatEventTypeCount(counts map[string]uint64, eventType string) map[st
 	return counts
 }
 
-// runDeferredQueue delivers deferred events in FIFO order, retrying the head
-// until the bounded queue has room. The run epoch is stamped when the event
-// actually enters the queue (same policy as
-// enqueueCriticalRuntimeEventEventually), so a deferred terminal event is still
-// delivered across a run boundary instead of being dropped as stale.
-func (b *chatRuntimeEventBridge) runDeferredQueue() {
-	for {
-		b.deferredMu.Lock()
-		if len(b.deferredQueue) == 0 {
-			b.deferredWorkerRunning = false
-			b.deferredMu.Unlock()
-			return
-		}
-		head := b.deferredQueue[0]
-		if !head.inFlight {
-			// 进入在途态：worker 接下来在锁外读取 event/size，因此发布者的
-			// latest-wins 只能改写 pending（见 deferRuntimeEvent）。索引保留，
-			// 同一个键始终只占一个槽位。
-			head.inFlight = true
-		}
-		b.deferredMu.Unlock()
-
-		if !b.enqueueNonStreamEvent(head.event, head.size, chatRuntimeDeferredRetryInterval) {
-			// The consumer is still behind. Keep the head in place: dropping it
-			// here would silently lose a tool boundary or final message, and the
-			// backlog is already bounded by deferRuntimeEvent.
-			time.Sleep(chatRuntimeDeferredRetryInterval)
-			continue
-		}
-
-		b.deferredMu.Lock()
-		if len(b.deferredQueue) > 0 && b.deferredQueue[0] == head {
-			if head.hasPending {
-				// 原位续投最新值：槽位保持队首和索引不变，避免"投递中"窗口里
-				// 到达的最新值另开槽位或被丢弃。
-				delivered := head.size
-				head.event = head.pendingEvent
-				head.size = head.pendingSize
-				head.pendingEvent = runtimeevents.Event{}
-				head.pendingSize = 0
-				head.hasPending = false
-				b.deferredBytes -= delivered
-				if b.deferredBytes < 0 {
-					b.deferredBytes = 0
-				}
-			} else {
-				b.deferredQueue = b.deferredQueue[1:]
-				if head.key != "" && b.deferredIndex[head.key] == head {
-					// The slot left the queue: drop its merge index so a later
-					// event with the same key starts a fresh slot instead of
-					// merging into a detached one.
-					delete(b.deferredIndex, head.key)
-				}
-				b.deferredBytes -= head.size
-				if b.deferredBytes < 0 {
-					b.deferredBytes = 0
-				}
-				if b.deferredPending > 0 {
-					b.deferredPending--
-				}
-			}
-		}
-		b.deferredMu.Unlock()
+// ensureBacklogWorker starts the single delivery worker when the backlog is
+// non-empty and no worker is running. Started by every retention path so the
+// consumer never has to wait for the next ingress call to make progress.
+func (b *chatRuntimeEventBridge) ensureBacklogWorker() {
+	if b == nil {
+		return
+	}
+	b.streamMu.Lock()
+	start := len(b.backlog) > 0 && !b.streamWorkerRunning
+	if start {
+		b.streamWorkerRunning = true
+	}
+	b.streamMu.Unlock()
+	if start {
+		go b.runBacklogWorker()
 	}
 }
 
-// waitDeferredDrain waits (bounded) until the deferred backlog has been handed
+// runBacklogWorker delivers the ordered backlog head-first as the consumer
+// frees capacity; it exits when the backlog is empty. It is the only retry
+// loop, so stream/non-stream families cannot reorder against each other.
+func (b *chatRuntimeEventBridge) runBacklogWorker() {
+	for {
+		b.streamMu.Lock()
+		empty := len(b.backlog) == 0
+		delivered := false
+		if !empty {
+			delivered = b.tryDeliverBacklogHeadLocked()
+		}
+		if empty {
+			b.streamWorkerRunning = false
+		}
+		b.streamMu.Unlock()
+		if empty {
+			return
+		}
+		if !delivered {
+			time.Sleep(chatRuntimeDeferredRetryInterval)
+		}
+	}
+}
+
+// tryDeliverBacklogHead attempts one atomic delivery of the backlog head.
+func (b *chatRuntimeEventBridge) tryDeliverBacklogHead() bool {
+	if b == nil {
+		return false
+	}
+	b.streamMu.Lock()
+	defer b.streamMu.Unlock()
+	return b.tryDeliverBacklogHeadLocked()
+}
+
+// tryDeliverBacklogHeadLocked implements the single non-blocking delivery
+// attempt. Delivery and queue mutation share streamMu, so publishers may merge
+// or replace the head while it waits without lost or duplicated text: there is
+// no separate "in flight" window. Stream slots keep their ingress epoch
+// (stale-run deltas are rejected at consume time); non-stream slots are stamped
+// with the current epoch at admission, so terminal/control events may cross a
+// run boundary. Caller holds streamMu.
+func (b *chatRuntimeEventBridge) tryDeliverBacklogHeadLocked() bool {
+	if len(b.backlog) == 0 {
+		return false
+	}
+	head := b.backlog[0]
+	if head == nil {
+		b.backlog = b.backlog[1:]
+		return true
+	}
+	ok := false
+	if head.stampAtAdmission {
+		b.renderMu.Lock()
+		epoch := b.runEpoch
+		b.renderMu.Unlock()
+		q := chatRuntimeQueuedEvent{
+			event:            head.event,
+			size:             head.size,
+			epoch:            epoch,
+			queuedAt:         head.queuedAt,
+			stampAtAdmission: true,
+		}
+		ok = b.trySendQueuedToBoundedQueue(&q)
+	} else {
+		q := chatRuntimeQueuedEvent{
+			event:    head.event,
+			size:     head.size,
+			epoch:    head.epoch,
+			queuedAt: head.queuedAt,
+		}
+		ok = b.trySendStreamEvent(&q)
+	}
+	if !ok {
+		return false
+	}
+	b.popBacklogHeadLocked(head)
+	return true
+}
+
+// popBacklogHeadLocked removes a delivered head slot and releases its index
+// and critical-retention accounting. Caller holds streamMu.
+func (b *chatRuntimeEventBridge) popBacklogHeadLocked(head *chatRuntimeQueuedEvent) {
+	b.backlog = b.backlog[1:]
+	b.backlogBytes -= head.size
+	if b.backlogBytes < 0 {
+		b.backlogBytes = 0
+	}
+	if head.key != "" && b.backlogIndex[head.key] == head {
+		// The slot left the queue: drop its merge index so a later event with
+		// the same key starts a fresh slot instead of merging into a detached
+		// one.
+		delete(b.backlogIndex, head.key)
+	}
+	if b.eventIsCritical(head.event.Type) && b.backlogCriticalRetained > 0 {
+		b.backlogCriticalRetained--
+	}
+}
+
+// trySendQueuedToBoundedQueue admits one non-stream slot to the bounded queue
+// under the existing reserve/byte-accounting rules (critical events bypass the
+// normal capacity reserve). Single attempt: callers retry.
+func (b *chatRuntimeEventBridge) trySendQueuedToBoundedQueue(q *chatRuntimeQueuedEvent) bool {
+	if q == nil || q.size < 1 {
+		return false
+	}
+	critical := b.eventIsCritical(q.event.Type)
+	if !b.tryReserveEventQueueBytes(q.size, critical) {
+		return false
+	}
+	select {
+	case b.eventQueue <- *q:
+		b.progressMu.Lock()
+		b.enqueuedEvents++
+		b.progressMu.Unlock()
+		return true
+	default:
+		b.releaseEventQueueBytes(q.size)
+		return false
+	}
+}
+
+// flushBacklogBounded delivers backlog entries head-first for at most budget.
+// Entries that cannot be admitted within the budget stay in the backlog (never
+// dropped here): terminal/final snapshots own content convergence, not the
+// drain path.
+func (b *chatRuntimeEventBridge) flushBacklogBounded(budget time.Duration) {
+	if b == nil || budget <= 0 {
+		return
+	}
+	deadline := time.Now().Add(budget)
+	for {
+		b.streamMu.Lock()
+		empty := len(b.backlog) == 0
+		var next runtimeevents.Event
+		if !empty && b.backlog[0] != nil {
+			next = b.backlog[0].event
+		}
+		b.streamMu.Unlock()
+		if empty {
+			return
+		}
+		if b.tryDeliverBacklogHead() {
+			continue
+		}
+		if time.Now().After(deadline) {
+			b.logLateRuntimeEvent(next, fmt.Sprintf("ordered backlog flush budget exceeded; remaining entries retained (pending=%d)", b.deferredBacklogSize()))
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// waitDeferredDrain waits (bounded) until the ordered backlog has been handed
 // to the bounded queue. EndRun calls it before the ordinary drain barrier so
 // end-of-run events that overflowed the queue are not lost.
 func (b *chatRuntimeEventBridge) waitDeferredDrain(timeout time.Duration) bool {
@@ -1849,9 +1971,9 @@ func (b *chatRuntimeEventBridge) waitDeferredDrain(timeout time.Duration) bool {
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		b.deferredMu.Lock()
-		pending := len(b.deferredQueue)
-		b.deferredMu.Unlock()
+		b.streamMu.Lock()
+		pending := len(b.backlog)
+		b.streamMu.Unlock()
 		if pending == 0 {
 			return true
 		}
@@ -1862,36 +1984,29 @@ func (b *chatRuntimeEventBridge) waitDeferredDrain(timeout time.Duration) bool {
 	}
 }
 
-// deferredBacklogSize reports how many non-streaming events are still waiting in
-// the ordered overflow queue. They were accepted by the bridge but have not
-// reached the bounded render queue, so the enqueued/processed counters cannot
-// account for them.
+// deferredBacklogSize reports how many events are still waiting in the single
+// ordered backlog. They were accepted by the bridge but have not reached the
+// bounded render queue, so the enqueued/processed counters cannot account for
+// them.
 func (b *chatRuntimeEventBridge) deferredBacklogSize() int {
 	if b == nil {
 		return 0
 	}
-	b.deferredMu.Lock()
-	defer b.deferredMu.Unlock()
-	return len(b.deferredQueue)
+	b.streamMu.Lock()
+	defer b.streamMu.Unlock()
+	return len(b.backlog)
 }
 
-// deferredBacklogPending reports whether the ordered overflow queue is
-// non-empty. Handle consults it before a direct enqueue so the non-streaming
-// event family keeps strict FIFO order once anything has been deferred.
-func (b *chatRuntimeEventBridge) deferredBacklogPending() bool {
-	return b.deferredBacklogSize() > 0
-}
-
-// deferredQueueStats reports the ordered overflow queue for diagnostics:
-// pending/bytes are the current backlog, dropped counts non-streaming events
-// discarded after a stalled consumer exceeded the backlog caps (/debug).
+// deferredQueueStats reports the ordered backlog for diagnostics: pending/bytes
+// are the current backlog, dropped counts non-critical events discarded after a
+// stalled consumer exceeded the backlog caps (/debug).
 func (b *chatRuntimeEventBridge) deferredQueueStats() (pending int, queuedBytes int64, dropped uint64) {
 	if b == nil {
 		return 0, 0, 0
 	}
-	b.deferredMu.Lock()
-	defer b.deferredMu.Unlock()
-	return len(b.deferredQueue), b.deferredBytes, b.deferredDropped
+	b.streamMu.Lock()
+	defer b.streamMu.Unlock()
+	return len(b.backlog), b.backlogBytes, b.backlogDropped
 }
 
 // chatDeferredQueueClassStats is the classification-aware view of the event
@@ -1942,13 +2057,13 @@ type chatEventBridgeDegradation struct {
 // 避免每个事件都分配一次快照；丢弃/驱逐路径强制立即发布。
 const eventDegradationPublishInterval = time.Second
 
-// publishEventDegradationLocked 在持有 deferredMu 时刷新无锁降级摘要。
+// publishEventDegradationLocked 在持有 streamMu 时刷新无锁降级摘要。
 // force=true 用于丢弃/驱逐这种必须立刻可见的降级。
 func (b *chatRuntimeEventBridge) publishEventDegradationLocked(force bool) {
 	if b == nil {
 		return
 	}
-	if b.deferredDropped == 0 && b.deferredEvicted == 0 && b.deferredMerged == 0 {
+	if b.backlogDropped == 0 && b.backlogEvicted == 0 && b.backlogMerged == 0 {
 		return
 	}
 	if !force {
@@ -1960,9 +2075,9 @@ func (b *chatRuntimeEventBridge) publishEventDegradationLocked(force bool) {
 	}
 	b.degradationPublishedAt.Store(time.Now().UnixNano())
 	b.degradation.Store(&chatEventBridgeDegradation{
-		Merged:  b.deferredMerged,
-		Evicted: b.deferredEvicted,
-		Dropped: b.deferredDropped,
+		Merged:  b.backlogMerged,
+		Evicted: b.backlogEvicted,
+		Dropped: b.backlogDropped,
 	})
 }
 
@@ -2043,18 +2158,18 @@ func (b *chatRuntimeEventBridge) deferredQueueClassStats() chatDeferredQueueClas
 		return stats
 	}
 	stats.Mode = b.classifyMode.String()
-	b.deferredMu.Lock()
-	stats.Merged = b.deferredMerged
-	stats.Evicted = b.deferredEvicted
-	stats.PeakPending = b.deferredPeakPending
-	stats.PeakBytes = b.deferredPeakBytes
-	stats.DroppedByClass = formatChatEventClassCounts(b.deferredDroppedByClass)
-	stats.DroppedByType = cloneChatEventTypeCounts(b.deferredDroppedByType)
-	stats.EvictedByType = cloneChatEventTypeCounts(b.deferredEvictedByType)
-	b.deferredMu.Unlock()
+	b.streamMu.Lock()
+	stats.Merged = b.backlogMerged
+	stats.Evicted = b.backlogEvicted
+	stats.PeakPending = b.backlogPeakPending
+	stats.PeakBytes = b.backlogPeakBytes
+	stats.DroppedByClass = formatChatEventClassCounts(b.backlogDroppedByClass)
+	stats.DroppedByType = cloneChatEventTypeCounts(b.backlogDroppedByType)
+	stats.EvictedByType = cloneChatEventTypeCounts(b.backlogEvictedByType)
+	stats.CriticalPending = b.backlogCriticalRetained
+	stats.CriticalPeakPending = b.backlogCriticalPeak
+	b.streamMu.Unlock()
 	b.progressMu.Lock()
-	stats.CriticalPending = b.criticalPending
-	stats.CriticalPeakPending = b.criticalPeakPending
 	stats.CriticalAtShutdown = b.criticalAtShutdown
 	stats.Degraded = b.eventBridgeDegraded
 	b.progressMu.Unlock()
@@ -2070,12 +2185,12 @@ func (b *chatRuntimeEventBridge) streamQueueStats() chatStreamQueueStats {
 		return stats
 	}
 	b.streamMu.Lock()
-	stats.Pending = len(b.pendingStreams)
-	stats.Bytes = b.pendingStreamsBytes
+	stats.Pending = len(b.backlog)
+	stats.Bytes = b.backlogBytes
 	if stats.Pending > 0 {
-		oldest := b.pendingStreams[0].queuedAt
+		oldest := b.backlog[0].queuedAt
 		if oldest.IsZero() {
-			oldest = b.pendingStreams[0].event.Timestamp
+			oldest = b.backlog[0].event.Timestamp
 		}
 		if !oldest.IsZero() {
 			stats.OldestPendingAge = time.Since(oldest)
@@ -2139,26 +2254,28 @@ func cloneChatEventTypeCounts(counts map[string]uint64) map[string]uint64 {
 }
 
 // recordCriticalShutdownIfPending marks a run that ended while critical events
-// were still waiting in the retry channel. It never blocks (the bounded drain
-// barrier already ran); the alternative to counting here is a silent loss
-// (§6.1.5 EndRun). Returns true when something was recorded.
+// were still retained in the ordered backlog. It never blocks (the bounded
+// drain barrier already ran); the alternative to counting here is a silent
+// loss (§6.1.5 EndRun). Returns true when something was recorded.
 func (b *chatRuntimeEventBridge) recordCriticalShutdownIfPending() bool {
 	if b == nil || b.classifyMode != chatEventClassifyEnforce {
 		return false
 	}
-	b.progressMu.Lock()
-	pending := b.criticalPending
+	b.streamMu.Lock()
+	pending := b.backlogCriticalRetained
+	b.streamMu.Unlock()
 	if pending > 0 {
+		b.progressMu.Lock()
 		b.criticalAtShutdown += pending
 		b.eventBridgeDegraded = true
-	}
-	b.progressMu.Unlock()
-	if pending > 0 && b.session != nil {
-		writeSessionDebugInfo(
-			b.session,
-			fmt.Sprintf("[runtime-event] EndRun left %d critical event(s) in the retry channel; recorded as critical_at_shutdown (degraded)", pending),
-			false,
-		)
+		b.progressMu.Unlock()
+		if b.session != nil {
+			writeSessionDebugInfo(
+				b.session,
+				fmt.Sprintf("[runtime-event] EndRun left %d critical event(s) retained in the ordered backlog; recorded as critical_at_shutdown (degraded)", pending),
+				false,
+			)
+		}
 	}
 	return pending > 0
 }
@@ -2236,100 +2353,56 @@ func streamMergeKey(event runtimeevents.Event) string {
 	return key
 }
 
-// enqueueStreamEvent coalesces streaming deltas while the consumer is
-// behind, emitting them non-blockingly as soon as the consumer catches up
-// (run() flushes after each consumed event). It never blocks the caller (the
-// LLM stream callback).
+// enqueueStreamEvent admits one streaming delta without ever blocking the
+// caller (the LLM stream callback). It goes straight to the bounded queue only
+// when the ordered backlog is empty and no worker is delivering; otherwise it
+// folds into the backlog tail (same stream or contiguous sequence) or appends
+// a new slot. Once anything is retained, nothing may bypass it, so a slow
+// consumer degrades to larger merged redraws instead of reordering the live
+// display.
 func (b *chatRuntimeEventBridge) enqueueStreamEvent(event runtimeevents.Event, size int64) {
+	if b == nil {
+		return
+	}
+	if size < 1 {
+		size = 1
+	}
 	b.streamMu.Lock()
-	defer b.streamMu.Unlock()
 	// The epoch is captured NOW (streamMu → renderMu, consistent with the
-	// rest of the coalescing path) and stamped on the queued event: a delta
-	// that arrives after EndRun belongs to the old run and must be rejected
-	// by the consume-time epoch check, never "whitened" into the new run by
-	// a later flush.
+	// rest of the bridge) and stamped on the queued event: a delta that
+	// arrives after EndRun belongs to the old run and must be rejected by the
+	// consume-time epoch check, never "whitened" into the new run by a later
+	// delivery.
 	b.renderMu.Lock()
 	epoch := b.runEpoch
 	b.renderMu.Unlock()
-	q := chatRuntimeQueuedEvent{event: event, size: size, epoch: epoch, queuedAt: time.Now()}
-	// Once any delta is waiting in pendingStreams, every later delta must
-	// append to the same FIFO. The bounded queue can momentarily have room
-	// while run() flushes between consumed events; sending directly then
-	// would let a newer delta overtake older pending ones and corrupt
-	// sequence-ordered assistant text.
-	if n := len(b.pendingStreams); n > 0 {
-		last := &b.pendingStreams[n-1]
-		if streamMergeKey(last.event) == streamMergeKey(event) {
-			// Bound the coalesced payload: a permanently stalled consumer
-			// must not accumulate unbounded text. Past the byte limit the
-			// new delta is dropped (logged) rather than blocking the
-			// stream callback.
-			if last.size+size > chatStreamCoalesceEventByteLimit ||
-				b.pendingStreamsBytes+size > chatStreamCoalescePendingByteLimit {
-				if !assistantStreamDeltaMustNotDrop(event) {
-					b.recordStreamDropLocked(event, size)
-					b.logStreamOverflow(event, "coalesced stream payload exceeded byte limit; delta dropped")
-					return
-				}
-				// assistant 文本增量不允许丢弃：中间步骤没有 run 级终稿可复原，
-				// 丢弃一个 delta 就会在 sequence 有序拼接里形成永久空洞。
-				b.recordStreamRetentionLocked(event, size)
-				b.logStreamOverflow(event, "coalesced stream payload exceeded byte limit; assistant delta retained")
-			}
-			last.event = mergeStreamEvents(last.event, event)
-			last.size += size
-			if last.size < 1 {
-				last.size = 1
-			}
-			b.pendingStreamsBytes += size
-			return
-		}
-		// Contiguous sequence deltas of the same stream can be folded into
-		// the last pending entry even though their merge keys differ by
-		// sequence. Without this, a long stream behind a stalled consumer
-		// exhausts the pending count budget with one entry per delta and the
-		// tail is dropped, which then poisons sequence-ordered assembly.
-		if contiguousStreamEvent(last.event, event) {
-			if last.size+size > chatStreamCoalesceEventByteLimit ||
-				b.pendingStreamsBytes+size > chatStreamCoalescePendingByteLimit {
-				if !assistantStreamDeltaMustNotDrop(event) {
-					b.recordStreamDropLocked(event, size)
-					b.logStreamOverflow(event, "coalesced stream payload exceeded byte limit; delta dropped")
-					return
-				}
-				b.recordStreamRetentionLocked(event, size)
-				b.logStreamOverflow(event, "coalesced stream payload exceeded byte limit; assistant delta retained")
-			}
-			lastFrom, hasLastFrom := streamCoalescedFrom(last.event)
-			if !hasLastFrom {
-				if lastSeq, ok := assistantEventSequence(last.event); ok && lastSeq > 0 {
-					lastFrom = lastSeq
-					hasLastFrom = true
-				}
-			}
-			last.event = mergeStreamEvents(last.event, event)
-			if seq, ok := assistantEventSequence(event); ok {
-				last.event.Payload["sequence"] = seq
-			}
-			if hasLastFrom {
-				last.event.Payload[streamCoalescedFromKey] = lastFrom
-			}
-			last.size += size
-			if last.size < 1 {
-				last.size = 1
-			}
-			b.pendingStreamsBytes += size
-			return
-		}
-		b.appendPendingStreamLocked(q)
+	q := &chatRuntimeQueuedEvent{event: event, size: size, epoch: epoch, queuedAt: time.Now()}
+	if len(b.backlog) > 0 || b.streamWorkerRunning || b.streamQueueBusy() {
+		// 消费者仍然落后（队列里还有未处理事件，或正在处理上一条）：此时
+		// 逐条直投会让一次卡顿裂成多次小重绘，必须合并进单一有序车道。
+		b.appendBacklogSlotLocked(q, eventClassStream)
+		b.streamMu.Unlock()
+		b.ensureBacklogWorker()
 		return
 	}
-	// Consumer idle and queue has room: send straight through; fall back to
-	// the pending queue if a slot races away.
-	if !b.streamQueueBusy() && b.trySendStreamEvent(&q) {
+	if b.trySendStreamEvent(q) {
+		b.streamMu.Unlock()
 		return
 	}
-	b.appendPendingStreamLocked(q)
+	b.appendBacklogSlotLocked(q, eventClassStream)
+	b.streamMu.Unlock()
+	b.ensureBacklogWorker()
+}
+
+// streamQueueBusy reports whether the bounded queue or the in-flight consumer
+// still holds unprocessed work, i.e. whether the UI is behind. While behind,
+// streaming deltas coalesce in the ordered backlog instead of being admitted
+// one by one, so a slow consumer degrades to fewer, larger redraws.
+func (b *chatRuntimeEventBridge) streamQueueBusy() bool {
+	b.eventQueueMu.Lock()
+	busy := len(b.eventQueue) > 0 || b.eventQueueBytes > 0
+	b.eventQueueMu.Unlock()
+	return busy
 }
 
 // contiguousStreamEvent reports whether incoming directly extends the pending
@@ -2355,26 +2428,6 @@ func contiguousStreamEvent(last, incoming runtimeevents.Event) bool {
 		return false
 	}
 	return incomingSeq > lastSeq && incomingSeq == lastSeq+1
-}
-
-// appendPendingStreamLocked bounds the coalesced backlog. Caller holds
-// streamMu. Dropping under a stalled consumer is bounded degradation: the
-// terminal assistant_message carries the authoritative snapshot.
-func (b *chatRuntimeEventBridge) appendPendingStreamLocked(q chatRuntimeQueuedEvent) {
-	if len(b.pendingStreams) >= chatStreamCoalescePendingLimit ||
-		b.pendingStreamsBytes+q.size > chatStreamCoalescePendingByteLimit {
-		if !assistantStreamDeltaMustNotDrop(q.event) {
-			b.recordStreamDropLocked(q.event, q.size)
-			b.logStreamOverflow(q.event, "coalesced stream pending budget exceeded; delta dropped")
-			return
-		}
-		// assistant 文本增量超出软预算也保留：消费端恢复后会排空积压，而丢弃
-		// 会在请求边界前形成 sequence 空洞（中间步骤没有终稿可复原）。
-		b.recordStreamRetentionLocked(q.event, q.size)
-		b.logStreamOverflow(q.event, "coalesced stream pending budget exceeded; assistant delta retained")
-	}
-	b.pendingStreams = append(b.pendingStreams, q)
-	b.pendingStreamsBytes += q.size
 }
 
 func (b *chatRuntimeEventBridge) recordStreamRetentionLocked(event runtimeevents.Event, size int64) {
@@ -2436,145 +2489,52 @@ func assistantStreamDeltaMustNotDrop(event runtimeevents.Event) bool {
 	return isAssistantTextStreamEvent(event.Type)
 }
 
-// streamQueueBusy reports whether the bounded queue or the in-flight
-// consumer still holds retained events, i.e. whether the UI is behind.
-func (b *chatRuntimeEventBridge) streamQueueBusy() bool {
-	b.eventQueueMu.Lock()
-	busy := len(b.eventQueue) > 0 || b.eventQueueBytes > 0
-	b.eventQueueMu.Unlock()
-	return busy
-}
-
-// flushPendingStreamEventBounded orders any coalesced streaming event before
-// the next non-streaming event. It only waits a short budget: a stalled UI
-// must not wedge the LLM callback behind the coalesced backlog, so remaining
-// pending events are dropped (and logged) rather than blocking forever.
-func (b *chatRuntimeEventBridge) flushPendingStreamEventBounded(budget time.Duration) {
-	if b == nil {
-		return
-	}
-	b.streamMu.Lock()
-	defer b.streamMu.Unlock()
-	b.flushPendingStreamBoundedLocked(budget)
-}
-
-// flushPendingStreamBoundedLocked drains the pending queue head while the
-// bounded queue accepts events, stopping at the deadline. Caller holds
-// streamMu.
-func (b *chatRuntimeEventBridge) flushPendingStreamBoundedLocked(budget time.Duration) {
-	if budget <= 0 {
-		return
-	}
-	deadline := time.Now().Add(budget)
-	for len(b.pendingStreams) > 0 {
-		q := b.pendingStreams[0]
-		if b.trySendStreamEvent(&q) {
-			b.pendingStreams = b.pendingStreams[1:]
-			b.pendingStreamsBytes -= q.size
-			if b.pendingStreamsBytes < 0 {
-				b.pendingStreamsBytes = 0
-			}
-			continue
-		}
-		if time.Now().After(deadline) {
-			// 不整段丢弃积压：丢弃 assistant 文本增量会造成永久截断，保留的
-			// 积压会在消费端追赶后自动排空；随后到达的权威快照负责收敛。
-			b.logLateRuntimeEvent(
-				b.pendingStreams[0].event,
-				fmt.Sprintf("coalesced stream flush budget exceeded; %d pending event(s) retained", len(b.pendingStreams)),
-			)
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
-// tryFlushPendingLocked non-blockingly drains the pending queue head while
-// the bounded queue accepts events. Caller holds streamMu.
-func (b *chatRuntimeEventBridge) tryFlushPendingLocked() {
-	for len(b.pendingStreams) > 0 {
-		q := b.pendingStreams[0]
-		if !b.trySendStreamEvent(&q) {
-			return
-		}
-		b.pendingStreams = b.pendingStreams[1:]
-		b.pendingStreamsBytes -= q.size
-		if b.pendingStreamsBytes < 0 {
-			b.pendingStreamsBytes = 0
-		}
-	}
-}
-
 // dropPendingStreamsForTerminal drops coalesced assistant *text* deltas
 // superseded by an assistant_message. The terminal snapshot carries the full
 // answer, so a stalled UI must not wait behind deltas that would only be
 // thrown away. Reasoning deltas of the same turn/stream are a separate content
-// block and are NOT superseded: they are flushed (bounded) ahead of the
-// terminal instead, so late reasoning (arriving after llm.request.finished)
-// still renders its cell before the assistant cell. Pending deltas of *other*
-// turns/streams keep their previous semantics: they stay queued for their own
-// terminal rather than being force-flushed by this one.
+// block and are NOT superseded: the single ordered backlog already keeps them
+// ahead of the terminal (which is appended after this purge), so no forced
+// flush is needed. Pending deltas of *other* turns/streams keep their previous
+// semantics: they stay queued for their own terminal.
 func (b *chatRuntimeEventBridge) dropPendingStreamsForTerminal(event runtimeevents.Event) {
 	b.streamMu.Lock()
 	defer b.streamMu.Unlock()
 	turnID, streamID := assistantEventIdentity(event)
 	unidentified := turnID == "" && streamID == ""
-	kept := b.pendingStreams[:0]
-	var reasoningTail []chatRuntimeQueuedEvent
+	kept := b.backlog[:0]
 	dropped := int64(0)
-	for _, q := range b.pendingStreams {
-		pTurnID, pStreamID := assistantEventIdentity(q.event)
+	for _, slot := range b.backlog {
+		if slot == nil {
+			continue
+		}
+		// 在途文本 delta 同样被取代：worker 以“队首仍是自己”的判据放弃后续
+		// 结算，已发出的 partial 仍按流内顺序出现在终态之前，不会乱序。
+		pTurnID, pStreamID := assistantEventIdentity(slot.event)
 		sameStream := unidentified || (pTurnID == turnID && (streamID == "" || pStreamID == streamID))
-		switch {
-		case sameStream && isAssistantTextStreamEvent(q.event.Type):
-			b.logLateRuntimeEvent(q.event, "assistant terminal superseded stale coalesced stream")
-			dropped += q.size
-		case sameStream && isReasoningStreamEvent(q.event.Type):
-			// 终稿快照取代的是自己的文本流；reasoning 属于另一个内容块，
-			// 必须先于终态送达渲染层（顺序断言见 late-reasoning 用例）。
-			reasoningTail = append(reasoningTail, q)
-		default:
-			kept = append(kept, q)
+		if sameStream && isAssistantTextStreamEvent(slot.event.Type) {
+			b.logLateRuntimeEvent(slot.event, "assistant terminal superseded stale coalesced stream")
+			dropped += slot.size
+			continue
 		}
+		kept = append(kept, slot)
 	}
-	b.pendingStreams = kept
+	b.backlog = kept
 	if dropped > 0 {
-		b.pendingStreamsBytes -= dropped
-		if b.pendingStreamsBytes < 0 {
-			b.pendingStreamsBytes = 0
-		}
-	}
-	if len(reasoningTail) > 0 {
-		b.flushStreamTailBoundedLocked(reasoningTail, chatStreamFlushBudget)
-	}
-}
-
-// flushStreamTailBoundedLocked delivers the given coalesced entries in order,
-// waiting at most budget for bounded-queue capacity. Entries that do not fit
-// before the deadline are dropped (and logged): the caller keeps the rest of
-// pendingStreams untouched, so a stalled UI never loses another turn's backlog
-// to this flush. Caller holds streamMu.
-func (b *chatRuntimeEventBridge) flushStreamTailBoundedLocked(entries []chatRuntimeQueuedEvent, budget time.Duration) {
-	if budget <= 0 {
-		return
-	}
-	deadline := time.Now().Add(budget)
-	for i := range entries {
-		for !b.trySendStreamEvent(&entries[i]) {
-			if time.Now().After(deadline) {
-				b.recordStreamDropLocked(entries[i].event, entries[i].size)
-				b.logStreamOverflow(entries[i].event, "coalesced stream tail flush budget exceeded; delta dropped")
-				return
-			}
-			time.Sleep(time.Millisecond)
+		b.backlogBytes -= dropped
+		if b.backlogBytes < 0 {
+			b.backlogBytes = 0
 		}
 	}
 }
 
-// enqueueNonStreamEvent enqueues a non-streaming event with a bounded wait.
-// Streaming events are already non-blocking; this last-resort backpressure
-// keeps rare terminal/control events reliable without allowing a stalled UI
-// to wedge the LLM callback forever.
+// enqueueNonStreamEvent tries to admit a non-streaming event directly to the
+// bounded queue with a bounded wait. It refuses (returns false) whenever the
+// ordered backlog is non-empty or the delivery worker is in flight: the caller
+// must retain the event behind the backlog (deferRuntimeEvent) so no family can
+// overtake earlier retained events. Streaming events are already non-blocking;
+// this last-resort backpressure keeps rare terminal/control events reliable
+// without allowing a stalled UI to wedge the LLM callback forever.
 func (b *chatRuntimeEventBridge) enqueueNonStreamEvent(event runtimeevents.Event, size int64, wait time.Duration) bool {
 	if b == nil {
 		return false
@@ -2582,9 +2542,18 @@ func (b *chatRuntimeEventBridge) enqueueNonStreamEvent(event runtimeevents.Event
 	if size < 1 {
 		size = 1
 	}
+	critical := b.eventIsCritical(event.Type)
 	deadline := time.Now().Add(wait)
 	for {
-		if b.tryReserveEventQueueBytes(size, b.eventIsCritical(event.Type)) {
+		// The backlog check and the direct send share streamMu so an event can
+		// never be admitted directly while an earlier event is being retained.
+		b.streamMu.Lock()
+		if len(b.backlog) > 0 || b.streamWorkerRunning {
+			b.streamMu.Unlock()
+			return false
+		}
+		admitted := false
+		if b.tryReserveEventQueueBytes(size, critical) {
 			b.renderMu.Lock()
 			epoch := b.runEpoch
 			b.renderMu.Unlock()
@@ -2593,10 +2562,14 @@ func (b *chatRuntimeEventBridge) enqueueNonStreamEvent(event runtimeevents.Event
 				b.progressMu.Lock()
 				b.enqueuedEvents++
 				b.progressMu.Unlock()
-				return true
+				admitted = true
 			default:
 				b.releaseEventQueueBytes(size)
 			}
+		}
+		b.streamMu.Unlock()
+		if admitted {
+			return true
 		}
 		if time.Now().After(deadline) {
 			return false
@@ -2780,19 +2753,21 @@ func (b *chatRuntimeEventBridge) run() {
 		b.progressMu.Unlock()
 		queued.event = runtimeevents.Event{}
 		b.releaseEventQueueBytes(queued.size)
-		// The queue just freed a slot: opportunistically flush any coalesced
-		// streaming event so a stall ends as soon as the consumer catches up,
-		// without waiting for the next Handle call.
-		b.flushPendingStreamEventIfAble()
+		// The queue just freed a slot: drive the ordered backlog so a stall
+		// ends as soon as the consumer catches up, without waiting for the
+		// next Handle call.
+		b.pumpBacklog()
 	}
 }
 
-// flushPendingStreamEventIfAble non-blockingly enqueues coalesced streaming
-// events once the consumer has freed a slot.
-func (b *chatRuntimeEventBridge) flushPendingStreamEventIfAble() {
-	b.streamMu.Lock()
-	defer b.streamMu.Unlock()
-	b.tryFlushPendingLocked()
+// pumpBacklog opportunistically delivers the ordered backlog head and makes
+// sure the worker keeps draining; called after each consumed event.
+func (b *chatRuntimeEventBridge) pumpBacklog() {
+	if b == nil {
+		return
+	}
+	b.tryDeliverBacklogHead()
+	b.ensureBacklogWorker()
 }
 
 func (b *chatRuntimeEventBridge) handleQueuedEvent(queued chatRuntimeQueuedEvent) {
@@ -4737,14 +4712,16 @@ func (b *chatRuntimeEventBridge) WaitForCurrentEvents(timeout time.Duration) boo
 	stableSince := time.Time{}
 	lastSeenEnqueued := uint64(0)
 	for {
-		// Keep draining coalesced streams while the queue frees slots so the
+		// Keep draining the ordered backlog while the queue frees slots so the
 		// drain window reflects the full ingress, not just already-queued work.
-		b.flushPendingStreamEventIfAble()
+		b.pumpBacklog()
 		b.progressMu.Lock()
 		enqueued := b.enqueuedEvents
 		processed := b.processedEvents
-		criticalPending := b.criticalPending
 		b.progressMu.Unlock()
+		b.streamMu.Lock()
+		criticalPending := b.backlogCriticalRetained
+		b.streamMu.Unlock()
 		// Deferred events are accepted by the bridge but not yet in the bounded
 		// queue, so the counters above cannot see them. Reporting "settled"
 		// while a backlog is pending would let callers read (and return) a
