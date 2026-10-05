@@ -550,3 +550,65 @@ func TestTurnObligationsAllTerminalWithTeams(t *testing.T) {
 		})
 	}
 }
+
+// TestCountObligationProgressStrictness pins the feedback-sweep counter: missing
+// rows and unwired resolvers count as pending, so a sweep can only ever
+// under-report progress — it must never claim more finished than reality.
+func TestCountObligationProgressStrictness(t *testing.T) {
+	ctx := context.Background()
+	store := newAgentSessionTestStore(t)
+	seedSettledBatch(t, store, "batch-done", BatchCompleted)
+	seedSettledBatch(t, store, "batch-running", BatchRunning)
+
+	agent := stubAgentSessionResolver{"child-closed": true, "child-running": false}
+	teams := stubTeamResolver{"team-done": true, "team-running": false}
+
+	record := &TurnSuspension{ObligationIDs: []string{
+		"batch-done", "batch-running",
+		AgentSessionObligationID("child-closed"), AgentSessionObligationID("child-running"),
+		TeamObligationID("team-done"), TeamObligationID("team-running"),
+	}, ResumeQueue: []string{"batch-done", "batch-running"}}
+	progress, err := CountObligationProgress(ctx, store, record, agent, teams)
+	if err != nil {
+		t.Fatalf("CountObligationProgress: %v", err)
+	}
+	if progress.Total != 6 || progress.Terminal != 3 {
+		t.Fatalf("progress = %+v, want total=6 terminal=3", progress)
+	}
+	if progress.AllTerminal() {
+		t.Fatal("a mixed cohort with running obligations must not read as all-terminal")
+	}
+
+	missing := &TurnSuspension{ObligationIDs: []string{
+		"batch-missing", AgentSessionObligationID("child-missing"), TeamObligationID("team-missing"),
+	}}
+	progress, err = CountObligationProgress(ctx, store, missing, agent, teams)
+	if err != nil {
+		t.Fatalf("CountObligationProgress(missing): %v", err)
+	}
+	if progress.Total != 3 || progress.Terminal != 0 {
+		t.Fatalf("missing rows must count as pending, got %+v", progress)
+	}
+
+	unwired := &TurnSuspension{ObligationIDs: []string{
+		AgentSessionObligationID("child-closed"), TeamObligationID("team-done"),
+	}}
+	progress, err = CountObligationProgress(ctx, store, unwired, nil, nil)
+	if err != nil {
+		t.Fatalf("CountObligationProgress(unwired): %v", err)
+	}
+	if progress.Total != 2 || progress.Terminal != 0 {
+		t.Fatalf("unwired resolvers must count as pending, got %+v", progress)
+	}
+
+	all := &TurnSuspension{ObligationIDs: []string{
+		"batch-done", AgentSessionObligationID("child-closed"), TeamObligationID("team-done"),
+	}}
+	progress, err = CountObligationProgress(ctx, store, all, agent, teams)
+	if err != nil {
+		t.Fatalf("CountObligationProgress(all): %v", err)
+	}
+	if progress.Total != 3 || progress.Terminal != 3 || !progress.AllTerminal() {
+		t.Fatalf("all-terminal cohort mis-read: %+v", progress)
+	}
+}

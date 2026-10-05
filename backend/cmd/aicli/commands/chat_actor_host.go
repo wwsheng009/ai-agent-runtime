@@ -217,6 +217,11 @@ type localChatRuntimeHost struct {
 	// 边沿触发投递补一道保险，见 chat_actor_wake_fallback.go。
 	wakeFallbackOnce sync.Once
 	wakeFallbackStop context.CancelFunc
+	// waitFeedbackTrackerOnce / waitFeedbackTracker 是等待期兜底反馈的节拍器
+	//（delta 即时 + 长静默升级一次，无变化不重复心跳；见
+	// chat_actor_wait_feedback.go）。内存态：重启后重新计时即可。
+	waitFeedbackTrackerOnce sync.Once
+	waitFeedbackTracker     *supervision.WaitFeedbackTracker
 	cleanupFns        []func()
 	closeOnce         sync.Once
 	// subagentLimiterMu / subagentLimiter 缓存进程级子代理并发上限

@@ -227,3 +227,77 @@ func TurnObligationsAllTerminalWithTeams(
 	}
 	return known > 0, nil
 }
+
+// ObligationProgress summarizes how many obligations of one parked record are
+// known terminal. It powers the wait-feedback sweep (progress deltas and the
+// single long-silence escalation) without settling or resuming anything.
+type ObligationProgress struct {
+	Total    int
+	Terminal int
+}
+
+// AllTerminal reports whether at least one obligation exists and every listed
+// obligation is known terminal.
+func (p ObligationProgress) AllTerminal() bool {
+	return p.Total > 0 && p.Terminal >= p.Total
+}
+
+// CountObligationProgress counts obligations with the strict AllTerminal
+// reading: a missing row, an unreadable row, or an unwired resolver counts as
+// pending (never as completion), so a feedback sweep can only under-report
+// progress — it must never tell the parent that more finished than really did.
+func CountObligationProgress(
+	ctx context.Context,
+	store BatchStore,
+	record *TurnSuspension,
+	resolver AgentSessionObligationResolver,
+	teamResolver TeamObligationResolver,
+) (ObligationProgress, error) {
+	if record == nil {
+		return ObligationProgress{}, nil
+	}
+	var progress ObligationProgress
+	for _, batchID := range record.ObligationBatchIDs() {
+		progress.Total++
+		if store == nil {
+			continue
+		}
+		batch, err := store.GetBatch(ctx, batchID)
+		if err != nil {
+			return progress, err
+		}
+		if batch == nil {
+			continue // missing row = pending
+		}
+		if batch.Status.Terminal() {
+			progress.Terminal++
+		}
+	}
+	for _, sessionID := range record.ObligationAgentSessionIDs() {
+		progress.Total++
+		if resolver == nil {
+			continue
+		}
+		terminal, found, err := resolver.AgentSessionTerminal(ctx, sessionID)
+		if err != nil {
+			return progress, err
+		}
+		if found && terminal {
+			progress.Terminal++
+		}
+	}
+	for _, teamID := range record.ObligationTeamIDs() {
+		progress.Total++
+		if teamResolver == nil {
+			continue
+		}
+		terminal, found, err := teamResolver.TeamTerminal(ctx, teamID)
+		if err != nil {
+			return progress, err
+		}
+		if found && terminal {
+			progress.Terminal++
+		}
+	}
+	return progress, nil
+}

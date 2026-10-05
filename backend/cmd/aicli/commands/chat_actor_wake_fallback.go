@@ -136,6 +136,11 @@ func (h *localChatRuntimeHost) runLocalSupervisionWakeFallbackOnce(ctx context.C
 	if parentSessionID == "" {
 		return false, nil
 	}
+	// 等待期兜底反馈：先按节拍判断是否需要排一次 wait_feedback wake（delta
+	// 即时 / 长静默升级一次），再走既有的 pending-wake 排空——同一 tick 里
+	// 新排出的 wake 就能被投递。活跃 run、活动等待窗口、排队用户输入与已有
+	// 未投递 wake 都会让这一步静默（见 chat_actor_wait_feedback.go）。
+	h.maybeScheduleWaitFeedback(ctx, parentSessionID)
 	// Bounded probe: any unclaimed wake aimed at this parent (session scope or
 	// team-lead scope) is enough to justify a drain attempt.
 	pending, err := h.Supervision.Store.ListWakePending(ctx, supervision.WakeFilter{

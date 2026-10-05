@@ -7,8 +7,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	runtimechat "github.com/wwsheng009/ai-agent-runtime/internal/chat"
 	"github.com/wwsheng009/ai-agent-runtime/internal/subagentbatch"
 	"github.com/wwsheng009/ai-agent-runtime/internal/supervision"
+	"github.com/wwsheng009/ai-agent-runtime/internal/team"
 )
 
 // projectScanWake 复刻扫描侧的真实产物：critical + action_required 的生命周期
@@ -119,5 +121,86 @@ func TestLocalWakeFallbackLifecycleGated(t *testing.T) {
 
 		host.startLocalSupervisionWakeFallback()
 		require.Nil(t, host.wakeFallbackStop, "a negative interval must not register a loop")
+	})
+}
+
+// parkWaitFeedbackFixture seeds one parked turn with a running team obligation
+// (the shape spawn_team produces) so the fallback feedback gates can be
+// exercised in isolation.
+func parkWaitFeedbackFixture(t *testing.T, host *localChatRuntimeHost) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	_, err := host.TeamStore.CreateTeam(ctx, team.Team{
+		ID:        "team-wait",
+		Status:    team.TeamStatusActive,
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	require.NoError(t, err)
+	require.NoError(t, host.SubagentBatches.ParkTurnSuspension(ctx, &subagentbatch.TurnSuspension{
+		TurnID:        "turn-wait",
+		SessionID:     localProgressCheckTestSession,
+		RootScopeID:   localProgressCheckTestSession,
+		ObligationIDs: []string{subagentbatch.TeamObligationID("team-wait")},
+		ParkedAt:      now.Add(-time.Hour),
+	}))
+}
+
+func pendingWaitFeedbackWakes(t *testing.T, host *localChatRuntimeHost) []supervision.WakePending {
+	t.Helper()
+	pending, err := host.Supervision.Store.ListWakePending(context.Background(), supervision.WakeFilter{
+		TargetParentSessionID: localProgressCheckTestSession,
+		UnclaimedOnly:         true,
+		Limit:                 16,
+	})
+	require.NoError(t, err)
+	return pending
+}
+
+// TestMaybeScheduleWaitFeedbackSchedulesOnceWhilePending pins the sweep edge: a
+// parked turn with pending obligations gets one bounded feedback wake, and a
+// no-change plateau does not repeat it (no heartbeat spam).
+func TestMaybeScheduleWaitFeedbackSchedulesOnceWhilePending(t *testing.T) {
+	host, _ := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+	ctx := context.Background()
+	parkWaitFeedbackFixture(t, host)
+
+	host.maybeScheduleWaitFeedback(ctx, localProgressCheckTestSession)
+	pending := pendingWaitFeedbackWakes(t, host)
+	require.Len(t, pending, 1)
+	require.Equal(t, supervision.WakeReasonWaitFeedback, pending[0].WakeReason)
+	require.Equal(t, "turn-wait", pending[0].TurnID)
+
+	host.maybeScheduleWaitFeedback(ctx, localProgressCheckTestSession)
+	require.Len(t, pendingWaitFeedbackWakes(t, host), 1,
+		"no-change plateaus must not send repeated heartbeats")
+}
+
+// TestMaybeScheduleWaitFeedbackSilentWhenBusyOrUserFirst pins the two
+// anti-race gates: an active run (wait_agent lives inside the run) and a
+// queued user input both keep the fallback fully silent.
+func TestMaybeScheduleWaitFeedbackSilentWhenBusyOrUserFirst(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("active run stays silent", func(t *testing.T) {
+		host, _ := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+		parkWaitFeedbackFixture(t, host)
+		require.NoError(t, host.RuntimeStore.SaveState(ctx, &runtimechat.RuntimeState{
+			SessionID: localProgressCheckTestSession,
+			Status:    runtimechat.SessionRunning,
+		}))
+		host.maybeScheduleWaitFeedback(ctx, localProgressCheckTestSession)
+		require.Empty(t, pendingWaitFeedbackWakes(t, host),
+			"an active run (or an in-flight wait_agent window) must keep the fallback silent")
+	})
+
+	t.Run("queued user input wins", func(t *testing.T) {
+		host, _ := newLocalProgressCheckHost(t, subagentbatch.BatchRunning)
+		parkWaitFeedbackFixture(t, host)
+		host.BaseSession.setQueuedInputDrainActive(true)
+		host.maybeScheduleWaitFeedback(ctx, localProgressCheckTestSession)
+		require.Empty(t, pendingWaitFeedbackWakes(t, host),
+			"a queued user input owns the next episode; the fallback must not race it")
 	})
 }
