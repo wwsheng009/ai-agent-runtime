@@ -288,13 +288,36 @@ P0.2 必须补观测的原因。
   - 验证：`go test ./cmd/aicli/ui/ -run 'TestLayoutTranscript|TestPlanEligibleHistoryCommitsResumeUnionMatchesFullPlan|TestHistory|TestSync|TestTranscript|TestTerminalSessionExecutor' -count=1`
     → 除下述既有间歇测试外全部通过；`TestTruncatedTranscriptPlanContinuesUntilComplete`
     单跑（含新身份语义断言）56.2s 通过。
-- **Stage 3（待实施）**：游标生命周期接入 `syncHistoryEffectsForTranscriptWithin` /
-  `continueTruncatedHistoryPlan`（末尾热缓存全量 membership pass + 清游标 + record memo）、
-  `invalidateTranscriptPlanMemo` 清游标、`activeAckPlanVersion` 作用域设计。
+- **Stage 3（已实施）**：
+  - `history_effect_queue.go`：`HistoryEffectQueueState` 新增 `planResume*` 游标
+    （row / screenRows / `transcriptPlanInputs` 指纹）与 `store/clearTranscriptPlanResume`；
+    `invalidateTranscriptPlanMemo` 同步清游标（armed replay / no-op install 后 ledger
+    可能整体被替换，旧游标会漏掉前缀——审查 A.4 的空屏路径）。
+  - `history_effect_planner.go`：`syncHistoryEffectsForTranscriptWithin` 返回
+    `(completed, advanced)`；指纹匹配时从游标续跑（一个预算的前缀轮），游标走到末尾
+    时由 `finishResumedTranscriptPlan` 做**一次无预算全量 pass** 完成 membership 踢除、
+    清游标、落 memo；指纹不匹配/无游标则从 0 重规划。`transcriptPlanMemoHit` 在
+    `PlanIncomplete` 时直接失效（取代原先截断路径的显式 `invalidateTranscriptPlanMemo`
+    ——后者现在会连游标一起清掉）。`continueTruncatedHistoryPlan` 改为**有预算**的游标
+    推进（每轮一个 `historyCommitPlanningBudget`），仅当"未完成且游标未前进"才置
+    `PlanStalled`（新 token 数不再是进展判据：新窗口可能整体落在已有终态记录的区域）。
+  - 新增 `TestTranscriptPlanResumeCursorAdvancesUntilComplete`（预算 0 下 reducer 级多轮
+    收敛：游标严格前进、每轮有界、最终覆盖全部 finalized cell）与
+    `TestTranscriptPlanResumeClearedByForcedInvalidation`（显式失效清游标）。
+  - 验证：预算 0 单元测试单跑 54.4s PASS（耐心窗口 60→150s，注释说明多轮收敛成本）；
+    `TestArmedResumeDeliversWholeTranscriptAcrossBudgetTruncation` PASS 81.4s；
+    `TestExecutorContinuesIncompletePlanWithoutAckTrigger` PASS 19.3s；
+    `TestHistory|TestTranscript|TestLayoutTranscript|TestPlanEligible|TestSync|TestTerminalSessionExecutor`
+    组 PASS 18.9s。
+- 遗留（既有缺口，未扩大）：`activeAckPlanVersion` 仍无消费方——memo 命中路径下，
+  某个 finalized cell 的 active-origin ack 使 skipRows 变大时，该 cell 的
+  transcript-origin 候选可能到下一次全量 membership pass 才被退休。游标路径每轮重算
+  skipRows、末尾还有全量 membership，故不受影响；修复需要按 finalized cell 作用域的
+  版本/谓词，列为 P1.1c。
 - 既有测试观察（A/B 在 HEAD 复现，与 Stage 1/2 无因果）：
-  - `TestTruncatedTranscriptPlanContinuesUntilComplete`：内部 60s deadline 对负载敏感
-    （单跑 ~56s；组跑/高负载下超时失败）。`next=12600`（reconcile 前 6300 + 前缀 3585 +
-    续跑后缀）为既有 token 语义，非本次引入。
+  - `TestTruncatedTranscriptPlanContinuesUntilComplete`：60s 内部窗口在负载下必然
+    超时（HEAD 复现 62.5s 失败）；Stage 3 起该用例走多轮 0 预算收敛，耐心窗口已提到
+    150s。`next=12600`（reconcile 前 6300 + 前缀 3585 + 续跑后缀）为既有 token 语义。
   - `TestKeyHandlerStart_DoesNotPollSessionInputWhileSuspended`：在 HEAD 同样稳定失败
     （该文件最近由 79eb8c9a / a95a98ea 触碰，非本线改动）。
   - `TestTerminalSessionExecutorDrainsFinalResidentTailQueuedDuringBlockedFrameWrite`：

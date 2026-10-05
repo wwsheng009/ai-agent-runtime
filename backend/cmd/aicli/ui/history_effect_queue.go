@@ -66,6 +66,16 @@ type HistoryEffectQueueState struct {
 	// allows a fresh attempt, so a stalled epoch heals as soon as it can make
 	// progress again.
 	PlanStalled bool
+	// planResume* 是 P1.1b 的截断续跑游标：被预算截断的 transcript 规划记录
+	// "布局 walk 走到哪一语义行、此前已产出多少物理行、当时的输入指纹"。下一次
+	// pass 在指纹仍匹配时从游标继续，而不是从 0 重走已规划前缀（那正是锁内无界
+	// 重复布局的根因）。指纹与 transcriptPlanMemoHit 的输入一一对应；显式 memo
+	// 失效（armed replay / no-op install）同时清游标 —— ledger 可能已被整体替换，
+	// 前缀永远不会再被规划（销毁式重放后空屏的成因）。
+	planResumeValid      bool
+	planResumeRow        int
+	planResumeScreenRows int
+	planResumeInputs     transcriptPlanInputs
 	// claimSkipsStaleAction / claimRejects* keep reducer-side BeginHistoryCommit
 	// refusals observable. A refusal is correct (the queue is ordered and the
 	// gates own recovery) and must stay harmless to state, but it was completely
@@ -261,6 +271,29 @@ func (s *HistoryEffectQueueState) recordTranscriptPlanTiming(duration time.Durat
 	if duration > s.MaxPlanDuration {
 		s.MaxPlanDuration = duration
 	}
+}
+
+// storeTranscriptPlanResume 记录一次被预算截断的 pass 留下的续跑游标。
+func (s *HistoryEffectQueueState) storeTranscriptPlanResume(row, screenRows int, inputs transcriptPlanInputs) {
+	if s == nil {
+		return
+	}
+	s.planResumeValid = true
+	s.planResumeRow = row
+	s.planResumeScreenRows = screenRows
+	s.planResumeInputs = inputs
+}
+
+// clearTranscriptPlanResume 丢弃截断续跑游标：计划完成、输入被显式作废，或
+// ledger 被整体替换（前缀永远不会再被规划）时调用。
+func (s *HistoryEffectQueueState) clearTranscriptPlanResume() {
+	if s == nil {
+		return
+	}
+	s.planResumeValid = false
+	s.planResumeRow = 0
+	s.planResumeScreenRows = 0
+	s.planResumeInputs = transcriptPlanInputs{}
 }
 
 // recordClaimRefusal classifies one refused BeginHistoryCommit claim. It is a
@@ -663,6 +696,10 @@ func (s *HistoryEffectQueueState) armScrollbackReplay() {
 func (s *HistoryEffectQueueState) invalidateTranscriptPlanMemo() {
 	if s != nil {
 		s.lastPlannedTranscriptValid = false
+		// memo 与游标共享同一组输入：显式失效意味着"从源重证明"，被截断的前缀
+		// 也可能已经不在新 ledger 里（reconcileScrollback 整体替换、no-op 安装
+		// 从未持有该计划），游标必须一起作废。
+		s.clearTranscriptPlanResume()
 	}
 }
 

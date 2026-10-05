@@ -73,17 +73,17 @@ func TestTruncatedPlanPrefixDoesNotRequeueDeliveredSources(t *testing.T) {
 // 原因是截断路径把续跑寄托在「下一次 reduce」上，但 resume 后的空闲会话没有任何
 // transcript 迁移，ack 处理器当时也不重规划 —— 前缀排空就是这条计划的终点。
 //
-// 这里固化修复后的契约：截断留下 PlanIncomplete，前缀真正交付完（ack 归零）后由
-// ack 处理器续跑，直到完整规划覆盖到 transcript 的最后一个 cell。
+// 这里固化修复后的契约：截断留下 PlanIncomplete 与续跑游标；前缀真正交付完
+// （ack 归零）后由 ack 处理器/执行器 kick 继续，游标每轮从上次截断处前进，直到
+// 完整规划覆盖到 transcript 的最后一个 cell 并落下 memo。
 //
 // 第二轮 live 事故（同一会话，端口 49296 的进程）：续跑接上之后仍然停住 ——
-// next=1288 / acked=322 / pending=0 / plan_incomplete=true / plan_stalled=true，
-// 注入 /status（cells 6647→6649，transcript 真的变了）之后 60s 内 next 与
-// cell_rows_misses 一动不动。成因是续跑那一轮**仍然吃预算**：极小预算（或冷缓存的
-// 大前缀）下每一轮都在第一个采样点截断，返回同一个前缀 —— 前缀全是缓存命中
-// （没有新的 cell_rows miss），前缀里的 cell 也早已有终态记录（没有新的 token），
-// 于是 NextToken 不变、PlanStalled 被永久置位、执行器的续跑 kick 被解除。
-// 契约因此收紧为：续跑用**无预算**的一轮走到尾部，交付阶段保持 0 预算也必须收敛。
+// next=1288 / acked=322 / pending=0 / plan_incomplete=true / plan_stalled=true。
+// 成因是续跑那一轮**每轮从 0 重来**：极小预算（或冷缓存的大前缀）下每一轮都在
+// 同一个采样点截断，返回同一个前缀，NextToken 不变、PlanStalled 被永久置位。
+// P1.1b 的修复不是"无预算走完"（那会把数秒持锁带回锁内），而是**游标**：每轮只做
+// 一个预算的锁内工作，但一定从上次截断处继续，因此交付阶段保持 0 预算也能多轮
+// 收敛；走到末尾的那一轮再做一次热缓存全量 pass 完成 membership 踢除。
 func TestTruncatedTranscriptPlanContinuesUntilComplete(t *testing.T) {
 	// 物理行数必须越过 layoutBudgetCheckRows（4096）才可能被预算切断：600 cell
 	// × 6 行 + cell 边界 gap 行才 4200 行，margin 太薄，这里取 900。
@@ -146,17 +146,18 @@ func TestTruncatedTranscriptPlanContinuesUntilComplete(t *testing.T) {
 		t.Fatalf("continuation while pending minted tokens: next=%d before=%d", state.HistoryEffects.NextToken, before)
 	}
 
-	// 交付阶段**保持 0 预算**：0 预算下每一轮有预算的规划都必然停在第一个采样点
-	// （index=layoutBudgetCheckRows），缓存再热也一样 —— 这正是 live 冻结前缀的
-	// 成因。续跑必须不依赖预算：它不在流式热路径上（队列已经排空，且每个截断计划
-	// 最多走到这里一次），所以用无预算的一轮把剩余部分一次走完。续跑若也吃预算，
-	// 下面就会永远停在同一个前缀上：没有新 miss、没有新 token、PlanStalled 永久
-	// 置位，覆盖度断言必然失败。
+	// 交付阶段**保持 0 预算**：0 预算下每一轮有预算的规划都必然在采样点截断，
+	// 缓存再热也一样 —— 这正是 live 冻结前缀的成因。P1.1b 的续跑同样吃预算，但靠
+	// 游标从上次截断处继续，因此 0 预算下只是收敛得更慢（多轮），而不会停在同一个
+	// 前缀上。下面每次 ack 都会尝试续跑；只有 pending 归零的那一次真的规划一轮。
 	_ = restoreBudget
 
 	// 交付前缀：每次 ack 都会尝试续跑，只有 pending 归零的那一次真的续规划。
 	revision := uint64(3)
-	deadline := time.Now().Add(60 * time.Second)
+	// 0 预算 + 游标续跑意味着收敛要走多轮（每轮一个采样块），外加一次热缓存全量
+	// membership pass；单轮 ack 的 Pending() 又是 O(ledger)。这里给足耐心窗口，
+	// 断言的是"是否收敛/是否覆盖"，不是速度（速度由 planner 预算管住）。
+	deadline := time.Now().Add(150 * time.Second)
 	for {
 		commits := state.HistoryEffects.Pending()
 		if len(commits) == 0 {

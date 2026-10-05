@@ -19,10 +19,19 @@ const resumeUnmappableSource = "制表符\t开头的行\n第二行\n"
 //   - cell 1 是 3000 行纯文本（plain 路径整段消费，采样只在 cell 起点命中）；
 //   - cell 2 是结构化 markdown（renderedStructured 整块 append）；
 //   - cell 3 是不可逐行映射的 plain cell（tab），走 whole-cell fallback；
-//   - cell 4 是 6000 行折叠工具链，其语义行跨度必然覆盖多个采样点，使截断
-//     命中在该 cell 中部——这是 layoutResumeRow 必须前移游标的场景；
+//   - cell 4 是 6000 行折叠工具链，其语义行跨度必然覆盖多个采样点，使预算
+//     命中在该 cell 内部——这是"补完当前 cell 再返回"截断语义的场景；
 //   - 末尾 cell 保持 mutable，作为 frontier 屏障（布局豁免）。
 func resumeParityFixtureState() AppState {
+	return AppState{
+		Revision:         4,
+		LayoutGeneration: 1,
+		Geometry:         GeometryState{Width: 90, Height: 40, Generation: 1},
+		Transcript:       NewTranscriptState(resumeParitySnapshot()),
+	}
+}
+
+func resumeParitySnapshot() *scene.Snapshot {
 	cells := []scene.TranscriptCell{
 		{
 			ID: 1, Revision: 1, Sequence: 1, Kind: scene.KindUser,
@@ -49,12 +58,7 @@ func resumeParityFixtureState() AppState {
 	for index := range cells {
 		refs = append(refs, &cells[index])
 	}
-	return AppState{
-		Revision:         4,
-		LayoutGeneration: 1,
-		Geometry:         GeometryState{Width: 90, Height: 40, Generation: 1},
-		Transcript:       NewTranscriptState(&scene.Snapshot{Cells: refs}),
-	}
+	return &scene.Snapshot{SceneID: 7, Revision: 4, Cells: refs}
 }
 
 // TestLayoutTranscriptScreenRowsFromResumesAtCellBoundaries 锁定续跑布局的
@@ -212,5 +216,99 @@ func assertHistoryCommitMultisetEqual(t *testing.T, want, got []HistoryCommit) {
 		if _, ok := wantCounts[identity]; !ok {
 			t.Fatalf("续跑并集出现全量规划不存在的身份：%s", identity)
 		}
+	}
+}
+
+// TestTranscriptPlanResumeCursorAdvancesUntilComplete 走 reducer 级生命周期：
+// 预算 0 下装载 → 截断并留下游标；随后反复"交付前缀 + 续跑"，断言游标严格前进、
+// 每轮只做一个锁内有界的 pass，最终 PlanIncomplete 清除且所有 finalized cell 被
+// 覆盖。这条测试锁定的就是 live 事故（next 不变 / PlanStalled 永久置位）的修复
+// 路径：续跑吃预算也必须能多轮收敛。
+func TestTranscriptPlanResumeCursorAdvancesUntilComplete(t *testing.T) {
+	restoreBudget := historyCommitPlanningBudget
+	defer func() { historyCommitPlanningBudget = restoreBudget }()
+	historyCommitPlanningBudget = 0
+
+	state := reduceUIControllerState(UIControllerState{}, Resize{Width: 90, Height: 40, Generation: 1}, 1)
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: resumeParitySnapshot()}, 2)
+	if !state.HistoryEffects.PlanIncomplete || !state.HistoryEffects.planResumeValid {
+		t.Fatalf("装载没有产生截断游标：incomplete=%t resumeValid=%t pending=%d",
+			state.HistoryEffects.PlanIncomplete, state.HistoryEffects.planResumeValid,
+			historyPendingCount(state))
+	}
+	lastRow := state.HistoryEffects.planResumeRow
+	if lastRow <= 0 {
+		t.Fatalf("首次游标没有前进：row=%d", lastRow)
+	}
+
+	for round := 0; round < 32; round++ {
+		// 交付当前前缀（等价于 executor 的 claim→write→ack）；per round 的锁内
+		// 工作 = 一个 historyCommitPlanningBudget（这里是最坏情形 0）。
+		for _, commit := range state.HistoryEffects.Pending() {
+			if err := state.HistoryEffects.markInFlight(commit.Token, commit.LayoutGeneration); err != nil {
+				t.Fatalf("claim token %d: %v", commit.Token, err)
+			}
+			if err := state.HistoryEffects.ack(commit.Token, 1, commit.LayoutGeneration); err != nil {
+				t.Fatalf("ack token %d: %v", commit.Token, err)
+			}
+		}
+		if !state.HistoryEffects.PlanIncomplete {
+			break
+		}
+		if !continueTruncatedHistoryPlan(&state) {
+			t.Fatalf("round %d: 续跑没有运行（pending=%d）", round, historyPendingCount(state))
+		}
+		if state.HistoryEffects.PlanIncomplete {
+			if !state.HistoryEffects.planResumeValid {
+				t.Fatalf("round %d: 未完成却没有游标", round)
+			}
+			if state.HistoryEffects.planResumeRow <= lastRow {
+				t.Fatalf("round %d: 游标没有前进 %d → %d", round, lastRow, state.HistoryEffects.planResumeRow)
+			}
+			lastRow = state.HistoryEffects.planResumeRow
+		}
+	}
+	if state.HistoryEffects.PlanIncomplete {
+		t.Fatal("预算 0 下多轮续跑仍未完成整份规划")
+	}
+	covered := make(map[scene.CellID]struct{})
+	for _, entry := range state.HistoryEffects.Entries() {
+		if entry.State == HistoryCommitInvalidated || entry.State == HistoryCommitAbandoned {
+			continue
+		}
+		covered[entry.Commit.CellID] = struct{}{}
+	}
+	for _, cell := range state.Transcript.Cells {
+		if !cellIsFinalizedForHistory(cell) || cell.Source == "" {
+			continue
+		}
+		if _, ok := covered[cell.ID]; !ok {
+			t.Fatalf("cell %d 没有被覆盖（plan incomplete=%t resume=%t row=%d）",
+				cell.ID, state.HistoryEffects.PlanIncomplete,
+				state.HistoryEffects.planResumeValid, state.HistoryEffects.planResumeRow)
+		}
+	}
+}
+
+// TestTranscriptPlanResumeClearedByForcedInvalidation 锁定审查 A.4 的修复：
+// 显式 memo 失效（armed replay / no-op install 走的 invalidateTranscriptPlanMemo）
+// 必须同时清掉续跑游标——ledger 可能已被整体替换，从旧游标继续会把已被退休的
+// 前缀永久漏掉（销毁式重放后的空屏路径）。
+func TestTranscriptPlanResumeClearedByForcedInvalidation(t *testing.T) {
+	restoreBudget := historyCommitPlanningBudget
+	defer func() { historyCommitPlanningBudget = restoreBudget }()
+	historyCommitPlanningBudget = 0
+
+	state := reduceUIControllerState(UIControllerState{}, Resize{Width: 90, Height: 40, Generation: 1}, 1)
+	state = reduceUIControllerState(state, ReplaceTranscriptAction{Snapshot: resumeParitySnapshot()}, 2)
+	if !state.HistoryEffects.planResumeValid {
+		t.Fatal("装载没有留下续跑游标")
+	}
+	state.HistoryEffects.invalidateTranscriptPlanMemo()
+	if state.HistoryEffects.planResumeValid {
+		t.Fatal("显式 memo 失效后游标仍然有效：ledger 被替换时会漏掉前缀")
+	}
+	if state.HistoryEffects.lastPlannedTranscriptValid {
+		t.Fatal("memo 指纹仍然有效")
 	}
 }
